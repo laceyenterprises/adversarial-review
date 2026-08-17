@@ -104,6 +104,9 @@ new PR
             │         └─ eligible retry: normal dispatch gates + stmtMarkAttemptStarted
             │              └─ reviewing
             │
+            ├─ lease-released same-head terminal failure exhausts retry cap
+            │    └─ failed
+            │
             ├─ watcher restart while reviewing
             │    ├─ confirmed dead + no late review after bounded overdue recovery
             │    │    └─ failed
@@ -152,8 +155,11 @@ new PR
   posted after the failed attempt started. If one exists, the watcher marks the
   row `posted`; if the proof cannot be performed, the row remains `failed`
   rather than retrying. Once the counter reaches the cap, the row stays `failed`
-  for operator inspection. The counter resets after a successful posted review or
-  an intentional re-review re-arm. `forbidden-fallback`, `failed-orphan`,
+  for operator inspection. Lease-released same-head terminal failures that are
+  still `pending` when their cap is exhausted are finalized to `failed` without
+  incrementing the attempt counter, so the evidence is visible and the row stops
+  being selected as pending work. The counter resets after a successful posted
+  review or an intentional re-review re-arm. `forbidden-fallback`, `failed-orphan`,
   `malformed`, inactive repos, closed/merged PRs, undiscovered PRs, active
   watcher drain, and active follow-up jobs are not auto-recovered by this path.
 - The poll-time reviewer-pass timeout sweep is a recovery path for aged

@@ -90,7 +90,9 @@ Introduce `reviewRowInTerminalFailureState(row, currentHeadSha)` and use it in
 place of the four `review_status === 'failed'` checks. A row is in a terminal
 failure state when it is `'failed'`, **or** when it is `'pending'` with
 `failed_at` set, `review_attempts > 0`, and `reviewer_head_sha` still equal to the
-head being considered.
+head being considered. When such a lease-released pending row exhausts its retry
+cap, finalize it to `failed` without incrementing attempts so the evidence is
+visible and the row stops polling as pending work.
 
 The head comparison is what keeps this narrow, and it is the property most worth
 preserving: **a lease-released row whose head has moved is a legitimate fresh
@@ -114,8 +116,8 @@ Note the contrast worth chasing there: on `#5468`/`#5470` the watcher *detected*
 catches the oversize case did not fire on this path.
 
 This RCA bounds the blast radius — a crash-looping reviewer now stops after 3
-attempts and leaves evidence intact — rather than making the underlying crash go
-away.
+attempts, finalizes the row as failed, and leaves evidence intact — rather than
+making the underlying crash go away.
 
 ## Evidence
 

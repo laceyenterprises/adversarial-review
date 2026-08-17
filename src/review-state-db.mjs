@@ -326,6 +326,17 @@ export const stmtMarkReviewerCommandFailedRecoveredPosted = db.prepare(
 export const stmtMarkFailed = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, quota_reset_at_utc = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
 );
+export const stmtFinalizePendingTerminalFailure = db.prepare(
+  `UPDATE reviewed_prs
+      SET review_status = 'failed',
+          reviewer_lease_expires_at = NULL
+    WHERE repo = ?
+      AND pr_number = ?
+      AND review_status = 'pending'
+      AND failed_at = ?
+      AND ((failure_message IS NULL AND ? IS NULL) OR failure_message = ?)
+      AND reviewer_head_sha = ?`
+);
 export const stmtReleaseReviewLease = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, quota_reset_at_utc = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
 );

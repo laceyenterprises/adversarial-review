@@ -99,6 +99,7 @@ import {
   db,
   stmtCreateFastMergeSkippedReviewRow,
   stmtCreateReviewRow,
+  stmtFinalizePendingTerminalFailure,
   stmtGetReviewRow,
   stmtMarkAttemptStarted,
   stmtMarkClosed,
@@ -203,6 +204,22 @@ export function reviewRowInTerminalFailureState(row, currentHeadSha) {
   const rowHead = row.reviewer_head_sha || null;
   if (!rowHead || !currentHeadSha) return false;
   return String(rowHead) === String(currentHeadSha);
+}
+
+export function finalizePendingTerminalFailureState(row, {
+  markTerminalPendingFailure = stmtFinalizePendingTerminalFailure,
+} = {}) {
+  if (!row || row.review_status !== 'pending') return 0;
+  if (!row.repo || row.pr_number === undefined || row.pr_number === null) return 0;
+  if (!row.failed_at || !row.reviewer_head_sha) return 0;
+  return markTerminalPendingFailure.run(
+    row.repo,
+    row.pr_number,
+    row.failed_at,
+    row.failure_message ?? null,
+    row.failure_message ?? null,
+    row.reviewer_head_sha,
+  ).changes;
 }
 
 
@@ -1095,6 +1112,7 @@ export async function processReviewSubject(entry, ctx) {
       );
       if (inTerminalFailure && !infraRecoveryClass && !unknownFailureRetryable && !reviewPopulationRetryable) {
         if (unknownFailureClass) {
+          finalizePendingTerminalFailureState(current);
           console.log(
             `[watcher] Unknown reviewer failure retry cap exhausted for ${repoPath}#${prNumber}: ` +
               `attempts=${unknownFailureAttempts}/${REVIEW_UNKNOWN_FAILURE_MAX_RETRIES}; ` +
@@ -1103,6 +1121,7 @@ export async function processReviewSubject(entry, ctx) {
           return;
         }
         if (populationRetry.matched && populationRetry.action === 'exhausted') {
+          finalizePendingTerminalFailureState(current);
           console.log(
             `[watcher] Review-population retry cap exhausted for ${repoPath}#${prNumber}: ` +
               `class=${populationRetry.failureClass} attempts=${populationRetry.attempts}/${populationRetry.maxAttempts}; ` +
@@ -1110,6 +1129,7 @@ export async function processReviewSubject(entry, ctx) {
           );
           return;
         }
+        finalizePendingTerminalFailureState(current);
         console.log(
           `[watcher] Skipping failed review ${repoPath}#${prNumber}: ` +
             `failure is not infrastructure-recoverable; leaving evidence intact`

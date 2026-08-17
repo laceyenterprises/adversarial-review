@@ -26,7 +26,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { reviewRowInTerminalFailureState } from '../src/pollonce-phases.mjs';
+import {
+  finalizePendingTerminalFailureState,
+  reviewRowInTerminalFailureState,
+} from '../src/pollonce-phases.mjs';
 
 const HEAD = 'dbc9e5b3b1bf';
 const OTHER_HEAD = 'a1b2c3d4e5f6';
@@ -86,4 +89,57 @@ test('other statuses and nullish rows are not failure states', () => {
   assert.equal(reviewRowInTerminalFailureState(row({ review_status: 'reviewed' }), HEAD), false);
   assert.equal(reviewRowInTerminalFailureState(null, HEAD), false);
   assert.equal(reviewRowInTerminalFailureState(undefined, HEAD), false);
+});
+
+test('cap exhaustion finalizes a lease-released pending failure without burning another attempt', () => {
+  const calls = [];
+  const markTerminalPendingFailure = {
+    run(...args) {
+      calls.push(args);
+      return { changes: 1 };
+    },
+  };
+
+  assert.equal(
+    finalizePendingTerminalFailureState(row({
+      repo: 'laceyenterprises/adversarial-review',
+      pr_number: 851,
+      review_attempts: 3,
+    }), { markTerminalPendingFailure }),
+    1
+  );
+  assert.deepEqual(calls, [[
+    'laceyenterprises/adversarial-review',
+    851,
+    '2026-08-17T14:00:00Z',
+    '[unknown] reviewer died',
+    '[unknown] reviewer died',
+    HEAD,
+  ]]);
+});
+
+test('cap exhaustion finalization ignores already-failed and unproven rows', () => {
+  const markTerminalPendingFailure = {
+    run() {
+      assert.fail('finalization statement should not run');
+    },
+  };
+
+  assert.equal(
+    finalizePendingTerminalFailureState(row({
+      repo: 'laceyenterprises/adversarial-review',
+      pr_number: 851,
+      review_status: 'failed',
+    }), { markTerminalPendingFailure }),
+    0
+  );
+  assert.equal(
+    finalizePendingTerminalFailureState(row({
+      repo: 'laceyenterprises/adversarial-review',
+      pr_number: 851,
+      reviewer_head_sha: null,
+    }), { markTerminalPendingFailure }),
+    0
+  );
+  assert.equal(finalizePendingTerminalFailureState(null, { markTerminalPendingFailure }), 0);
 });

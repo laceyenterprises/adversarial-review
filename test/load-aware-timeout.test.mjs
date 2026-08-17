@@ -65,6 +65,10 @@ test('DEFAULT_MAX_TIMEOUT_SECONDS is the fallback clamp', () => {
   assert.equal(out, DEFAULT_MAX_TIMEOUT_SECONDS); // 2000*6=12000 clamped to 3600
 });
 
+test('default maxSeconds does not shrink a nominal timeout above the cap', () => {
+  assert.equal(loadAwareTimeoutSeconds(7200, { loadAvg1m: 0, cpuCount: 8 }), 7200);
+});
+
 test('throws on a non-positive or unparseable base', () => {
   assert.throws(() => loadAwareTimeoutSeconds(0), /positive number/);
   assert.throws(() => loadAwareTimeoutSeconds(-1), /positive number/);

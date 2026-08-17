@@ -1495,9 +1495,12 @@ hard-blocker report, and do not re-dispatch.
   floated current main instead of creating a gitlink-only PR.
 - No merging a superproject PR that is still blocked on an unmerged submodule
   fix PR.
-- No merging a branch that is `BEHIND` / not rebased onto the latest `main`; the
-  rebase must be re-validated (required checks + changed-surface tests green)
-  before merge.
+- No merging a branch that is `BEHIND` without first rebasing onto a recent
+  `main` and re-validating that head (required checks + changed-surface tests
+  green). The only exception is the narrow no-strict up-to-date lane above:
+  after at least one recent rebase and validation, a `BEHIND` head may merge
+  only when the base has no strict required-status-checks rule, the PR remains
+  `MERGEABLE`, and the newer base has no changed-file overlap with this PR.
 - No hammer merge without holding the merge lease for `(<<REPO>>, base, PR <<PR_NUMBER>>)`
   and saving its `leaseId`; no cleanup path may release without
   `--lease-id "$HAM_MERGE_LEASE_ID"`.

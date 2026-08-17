@@ -69,6 +69,9 @@ export function loadAwareTimeoutSeconds(baseSeconds, opts = {}) {
   const load = Number.isFinite(loadAvg1m) ? loadAvg1m : (os.loadavg()?.[0] ?? 0);
   const loadPerCore = load / cores;
   const effective = Math.ceil(base * loadAwareMultiplier(loadPerCore));
-  // Never below the nominal; never above the absolute clamp.
-  return Math.min(maxSeconds, Math.max(Math.ceil(base), effective));
+  // Never below the nominal. The max cap limits load inflation, not the
+  // caller's explicit nominal timeout.
+  const nominal = Math.ceil(base);
+  const cap = Math.max(nominal, maxSeconds);
+  return Math.min(cap, Math.max(nominal, effective));
 }

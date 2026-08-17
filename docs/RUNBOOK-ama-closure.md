@@ -487,10 +487,19 @@ prompt-driven worker behavior, not predicate gates — the audit comment and the
    triaged and documented in the closing comment rather than blocking an
    otherwise clean close. Test fixes remain the one sanctioned exception to
    "scope only to the findings"; net-new feature scope stays out.
-2. **Rebase onto latest `main` and confirm it holds.** The hammer always rebases
-   the branch to the current base (not merely on `BEHIND`) and re-validates the
+2. **Rebase onto a recent `main` and confirm the merge guards.** The hammer
+   always rebases at least once onto the current base and re-validates the
    rebased head — required checks plus the changed-surface test bar above —
-   before merging.
+   before merging. After that validation, a target branch with an explicit
+   `required_status_checks.strict=false` rule, or no required-status-checks rule
+   at all, does not force the hammer to chase a moving base when the PR becomes
+   `BEHIND` only because unrelated PRs landed. In that narrow lane the hammer may
+   merge the still-`BEHIND` head only when GitHub reports `MERGEABLE`, the newer
+   base has no changed-file overlap with this PR (`ham_base_touches_pr_files`),
+   and the head already completed the one recent rebase plus validation. A
+   strict up-to-date rule, an undetermined branch-protection read, a non-
+   `MERGEABLE`/conflicting PR, or any base/PR changed-file overlap still fails
+   closed into the normal rebase-and-revalidate path.
 3. **Keep canonical docs current.** Doc-currency is part of the terminal
    remediation scope, not net-new feature work. When the diff changes an
    in-repo persistent store shape and `docs/data-model/` exists, the hammer

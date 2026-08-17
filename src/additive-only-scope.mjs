@@ -202,12 +202,69 @@ function commitFileEntry(filesByCommit = {}, commit = {}) {
   return { files: Array.isArray(commit.files) ? commit.files : [], truncated: false };
 }
 
+// Enforcement must apply the SAME carve-out as derivation, and must resolve the
+// forcing relationship across the whole PR rather than one commit.
+//
+// The defect this fixes: `changedFilesWithinAdditiveOnlyAllowlist` (derivation)
+// honours the registry/baseline exceptions, so a build pack's initial commit
+// derives as additive-only and the reviewer BACKFILLS the label. Enforcement then
+// scanned with the bare `additiveOnlyPathAllowed`, whose allowlist contains
+// neither file -- so the pack was labeled *because* of the carve-out and then
+// violated by a rule that ignored it. Every build pack tripped this.
+//
+// PR-wide forcing matters because the two land in different commits by nature:
+// the post-merge YAML is written first, and the ratchet number is only knowable
+// after running the audit against it, so the baseline bump is a later commit.
+// Requiring the YAML in the same commit made the exception unreachable in the
+// normal workflow.
+//
+// Still narrow: the registry must be deletions-free IN THE COMMIT THAT TOUCHES IT
+// (never un-register someone else's hardcode), and the baseline is licensed only
+// when a forcing post-merge action exists somewhere in the PR.
+function fileViolatesAdditiveOnly(file, { prForcedByPostMergeAction = false } = {}) {
+  const pathname = normalizeChangedPath(file);
+  if (!pathname) return false;
+  if (pathname === OSS_READINESS_REGISTRY_PATH) {
+    return !registryChangeIsPurelyAdditive(file);
+  }
+  if (pathname === OSS_READINESS_BASELINE_PATH) {
+    const status = String(file?.status || '').trim().toLowerCase();
+    if (status === 'removed' || status === 'deleted') return true;
+    return !prForcedByPostMergeAction;
+  }
+  return !additiveOnlyPathAllowed(pathname);
+}
+
 function collectFilesForCommits(commits = [], filesByCommit = {}) {
   const files = [];
   for (const commit of commits) {
     files.push(...commitFileEntry(filesByCommit, commit).files);
   }
   return files;
+}
+
+function collectFinalFilesForCommits(commits = [], filesByCommit = {}) {
+  const filesByPath = new Map();
+  for (const commit of commits) {
+    for (const file of commitFileEntry(filesByCommit, commit).files) {
+      const pathname = normalizeChangedPath(file);
+      if (!pathname) continue;
+
+      const status = String(file?.status || '').trim().toLowerCase();
+      const previousPathname = String(file?.previous_filename || '').trim();
+      if (status === 'renamed' && previousPathname && previousPathname !== pathname) {
+        filesByPath.delete(previousPathname);
+      }
+      if (status === 'removed' || status === 'deleted') {
+        filesByPath.delete(pathname);
+        continue;
+      }
+      filesByPath.set(pathname, file);
+    }
+  }
+  // The values are the latest commit file objects for paths still present in
+  // the PR, not cumulative net-diff objects across the whole PR.
+  return [...filesByPath.values()];
 }
 
 function commitsHaveTruncatedFileCoverage(commits = [], filesByCommit = {}) {
@@ -416,12 +473,16 @@ function evaluateAdditiveOnlyScope({
     };
   }
 
+  // Forcing is a property of the final PR state, not of one historical commit.
+  const prForced = forcedByPostMergeAction(collectFinalFilesForCommits(commits, filesByCommit));
   const commitsToScan = labeledAdditiveOnly ? commits : laterCommits;
   for (const commit of commitsToScan) {
     const sha = normalizeSha(commit?.sha);
     const fileEntry = commitFileEntry(filesByCommit, commit);
-    const files = fileEntry.files.map(normalizeChangedPath).filter(Boolean);
-    const violatingFiles = files.filter((file) => !additiveOnlyPathAllowed(file));
+    const violatingFiles = fileEntry.files
+      .filter((file) => fileViolatesAdditiveOnly(file, { prForcedByPostMergeAction: prForced }))
+      .map(normalizeChangedPath)
+      .filter(Boolean);
     if (violatingFiles.length > 0 || fileEntry.truncated) {
       return {
         additiveOnly: true,

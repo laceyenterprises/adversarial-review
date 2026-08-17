@@ -907,13 +907,21 @@ function listFollowUpJobsInDir(rootDir, key) {
   const dir = getFollowUpJobDir(rootDir, key);
   if (!existsSync(dir)) return [];
 
-  return readdirSync(dir)
+  const jobs = [];
+  for (const name of readdirSync(dir)
     .filter((name) => name.endsWith('.json'))
-    .sort()
-    .map((name) => ({
-      job: readFollowUpJob(join(dir, name)),
-      jobPath: join(dir, name),
-    }));
+    .sort()) {
+    const jobPath = join(dir, name);
+    try {
+      jobs.push({
+        job: readFollowUpJob(jobPath),
+        jobPath,
+      });
+    } catch (err) {
+      if (err?.code !== 'ENOENT') throw err;
+    }
+  }
+  return jobs;
 }
 
 function relatedJobEntryNames(entryNames, jobFileName) {

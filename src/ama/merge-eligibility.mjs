@@ -69,7 +69,25 @@ export const MERGE_ELIGIBILITY_REASONS = Object.freeze([
  *                                      GitHub `mergeable` enum (`MERGEABLE`) or a
  *                                      boolean. Non-`MERGEABLE`/false → `pr-not-mergeable`.
  * @property {string=}  mergeStateStatus GitHub `mergeStateStatus`. `BEHIND` (branch not
- *                                      rebased onto base) → `pr-not-mergeable`.
+ *                                      rebased onto base) → `pr-not-mergeable`
+ *                                      ONLY when `requiresUpToDateBranch` is not
+ *                                      resolved to `false` (see that field).
+ * @property {boolean=} requiresUpToDateBranch
+ *                                      Whether the target branch's protection
+ *                                      requires the PR to be up to date before
+ *                                      merge (GitHub
+ *                                      `required_status_checks.strict`). Fail
+ *                                      closed: `undefined`/`true` treats a
+ *                                      `BEHIND` head as a merge blocker (the
+ *                                      branch must be rebased). Only when the
+ *                                      caller has resolved branch protection and
+ *                                      found NO strict up-to-date rule may it
+ *                                      pass `false` — then a `BEHIND`-but-
+ *                                      `MERGEABLE` PR is not blocked here, since
+ *                                      GitHub merges it with a merge commit and
+ *                                      repeatedly rebasing to chase a moving
+ *                                      base just re-runs required CI on identical
+ *                                      code.
  * @property {string=}  prState         GitHub PR `state`. When supplied it must be
  *                                      `OPEN`; a closed/merged PR → `pr-not-mergeable`.
  *                                      Omit to skip the open check.
@@ -151,8 +169,18 @@ function prMergeable(state) {
     : String(mergeable ?? '').toUpperCase() === 'MERGEABLE';
   if (!mergeableOk) return false;
   // A missing/unknown mergeStateStatus is permitted (the MERGEABLE flag already
-  // cleared); only an explicit BEHIND blocks — the branch must be rebased.
-  if (String(state?.mergeStateStatus ?? '').toUpperCase() === 'BEHIND') return false;
+  // cleared). An explicit BEHIND (the base advanced under the PR) blocks ONLY
+  // when the target branch's protection requires the PR to be up to date first
+  // (`required_status_checks.strict`). Absent that rule GitHub merges a
+  // BEHIND-but-MERGEABLE PR with a merge commit, so chasing a moving base with
+  // repeated rebases just re-runs required CI on identical code. Fail closed: an
+  // unresolved flag (undefined) is treated as "required", preserving the
+  // historical block; only an explicit `false` (caller checked branch
+  // protection and found no strict rule) lets a BEHIND head through.
+  const requiresUpToDate = state?.requiresUpToDateBranch !== false;
+  if (requiresUpToDate && String(state?.mergeStateStatus ?? '').toUpperCase() === 'BEHIND') {
+    return false;
+  }
   return true;
 }
 

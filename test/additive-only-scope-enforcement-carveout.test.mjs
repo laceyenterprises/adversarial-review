@@ -132,6 +132,17 @@ test('baseline bump is not licensed when the post-merge action is renamed away',
   assert.deepEqual(result.finding.violating_files, [BASELINE]);
 });
 
+test('baseline deletion is a violation even when forced by a post-merge action', () => {
+  const result = scope({
+    commits: {
+      '222222222222': [file(PACK_YAML, { status: 'added' })],
+      '333333333333': [file(BASELINE, { status: 'removed', additions: 0, deletions: 20 })],
+    },
+  });
+  assert.ok(result.finding, 'forcing must not license deleting the ratchet baseline file');
+  assert.deepEqual(result.finding.violating_files, [BASELINE]);
+});
+
 test('pure-additive registry-only commit does not violate labeled additive-only enforcement', () => {
   const result = scope({
     commits: {

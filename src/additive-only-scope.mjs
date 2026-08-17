@@ -228,6 +228,8 @@ function fileViolatesAdditiveOnly(file, { prForcedByPostMergeAction = false } = 
     return !registryChangeIsPurelyAdditive(file);
   }
   if (pathname === OSS_READINESS_BASELINE_PATH) {
+    const status = String(file?.status || '').trim().toLowerCase();
+    if (status === 'removed' || status === 'deleted') return true;
     return !prForcedByPostMergeAction;
   }
   return !additiveOnlyPathAllowed(pathname);
@@ -260,6 +262,8 @@ function collectFinalFilesForCommits(commits = [], filesByCommit = {}) {
       filesByPath.set(pathname, file);
     }
   }
+  // The values are the latest commit file objects for paths still present in
+  // the PR, not cumulative net-diff objects across the whole PR.
   return [...filesByPath.values()];
 }
 

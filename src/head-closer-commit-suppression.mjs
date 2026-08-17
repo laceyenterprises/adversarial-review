@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { existsSync, statSync } from 'node:fs';
+import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
@@ -17,24 +17,24 @@ const execFileAsync = promisify(execFile);
 // `${HQ_ROOT}/repos/<name>`, so resolve there. Returns null when no local
 // checkout exists (the caller falls back to gh) — this is the quiet, expected
 // case, not the noisy "read failed" error.
-function resolveLocalRepoCheckout(repoPath, hqRoot) {
+async function resolveLocalRepoCheckout(repoPath, hqRoot) {
   const raw = String(repoPath || '').trim();
   if (!raw) return null;
-  const isDir = (p) => {
+  const isDir = async (p) => {
     try {
-      return existsSync(p) && statSync(p).isDirectory();
+      return (await stat(p)).isDirectory();
     } catch {
       return false;
     }
   };
   // Already an existing local directory (a worktree / real checkout path).
-  if (isDir(raw)) return raw;
+  if (await isDir(raw)) return raw;
   // A GitHub slug (`owner/name` or bare `name`) → the daemon clone.
   const name = raw.split('/').filter(Boolean).pop();
   const root = String(hqRoot || '').trim();
   if (root && name) {
     const candidate = join(root, 'repos', name);
-    if (isDir(candidate)) return candidate;
+    if (await isDir(candidate)) return candidate;
   }
   return null;
 }
@@ -102,7 +102,7 @@ export async function fetchVerifiedCommitFromLocalGit({
 } = {}) {
   const sha = String(headSha || '').trim();
   if (!repoPath || !sha) return null;
-  const checkoutDir = resolveLocalRepoCheckout(repoPath, hqRoot);
+  const checkoutDir = await resolveLocalRepoCheckout(repoPath, hqRoot);
   if (!checkoutDir) {
     // No local checkout for this repo (the daemon does not clone it, or hqRoot
     // is unset) — the caller falls back to gh. Debug-only: this is the expected

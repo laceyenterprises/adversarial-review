@@ -1,6 +1,6 @@
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -16,11 +16,25 @@ import {
 // directly is the bug this file guards against. Give it real temp checkouts so
 // the slug-based calls below resolve to an existing directory (git is mocked, so
 // the dir only needs to exist).
+const originalHqRoot = process.env.HQ_ROOT;
+const tempRoots = [];
 const TEST_HQ_ROOT = mkdtempSync(join(tmpdir(), 'closer-hqroot-'));
+tempRoots.push(TEST_HQ_ROOT);
 for (const name of ['agent-os', 'finch', 'adversarial-review']) {
   mkdirSync(join(TEST_HQ_ROOT, 'repos', name), { recursive: true });
 }
 process.env.HQ_ROOT = TEST_HQ_ROOT;
+
+after(() => {
+  if (originalHqRoot === undefined) {
+    delete process.env.HQ_ROOT;
+  } else {
+    process.env.HQ_ROOT = originalHqRoot;
+  }
+  for (const root of tempRoots) {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 const HAMMER_MESSAGE = [
   'HAM remediate final adversarial findings',
@@ -334,6 +348,7 @@ test('a repo with NO local checkout returns null WITHOUT invoking git (quiet fal
 
 test('explicit hqRoot override resolves the slug (production defaults to process.env.HQ_ROOT)', async () => {
   const otherRoot = mkdtempSync(join(tmpdir(), 'closer-other-root-'));
+  tempRoots.push(otherRoot);
   mkdirSync(join(otherRoot, 'repos', 'agent-os'), { recursive: true });
   const git = makeFakeGit();
   await fetchVerifiedCommitFromLocalGit({

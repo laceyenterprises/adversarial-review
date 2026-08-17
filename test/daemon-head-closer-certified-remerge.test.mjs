@@ -125,6 +125,137 @@ test('daemon lands the closer own-commit head over a non-blocking-only settled-s
   }
 });
 
+// ── Clobber guard: content preservation for the closer-commit MOVED head ────────
+// The closer-commit self-cert above trusts a moved head on committer IDENTITY
+// alone. The clobber guard adds a content check: a rebase that dropped a reviewed
+// commit is DECLINED (falls through to the capped hammer that re-runs the exact-head
+// battery), never merged on the content-blind lane. The HAM lane is exempt — an
+// entitled hammer already validated that head against the battery.
+
+test('clobber guard DECLINES a dropped-content closer head (falls to hammer) and audits it', async () => {
+  const rootDir = tempRoot();
+  try {
+    let attemptCalled = false;
+    let auditArgs = null;
+    const result = await runDaemonCleanMergeAttempt(
+      nonBlockingReviewArgs(rootDir, {
+        resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed: true }),
+        evaluateMovedHeadClobberGuardImpl: async ({ reviewedHead, liveHead, configOptions }) => {
+          assert.equal(reviewedHead, REVIEWED_HEAD);
+          assert.equal(liveHead, CLOSER_HEAD);
+          assert.deepEqual(configOptions, { topPath: rootDir });
+          return {
+            status: 'clobber',
+            reason: 'reviewed-content-dropped-on-rebase',
+            dropped: ['patch-fix'],
+            droppedCount: 1,
+          };
+        },
+        appendAmaAuditAttemptImpl: async (args) => {
+          await new Promise((resolve) => { setImmediate(resolve); });
+          auditArgs = args;
+        },
+        clobberGuardNowImpl: () => '2026-08-16T00:00:00.000Z',
+        attemptDaemonCleanMergeImpl: async () => {
+          attemptCalled = true;
+          return { disposition: DAEMON_MERGE_DISPOSITION.MERGED };
+        },
+      }),
+    );
+
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.NOT_TAKEN);
+    assert.equal(result.reason, 'reviewed-content-dropped-on-rebase');
+    assert.equal(attemptCalled, false, 'a dropped-content head must never merge on the content-blind lane');
+    assert.ok(auditArgs, 'a fail-closed audit must be written');
+    assert.equal(auditArgs.headSha, CLOSER_HEAD);
+    assert.equal(auditArgs.attempt.outcome, 'failed-without-merge');
+    assert.equal(auditArgs.attempt.permanent, false);
+    assert.equal(auditArgs.attempt.clobberGuard.status, 'clobber');
+    assert.equal(auditArgs.attempt.clobberGuard.droppedCount, 1);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('clobber guard still MERGES a content-preserving closer head (guard ok)', async () => {
+  const rootDir = tempRoot();
+  try {
+    let captured = null;
+    const result = await runDaemonCleanMergeAttempt(
+      nonBlockingReviewArgs(rootDir, {
+        resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed: true }),
+        evaluateMovedHeadClobberGuardImpl: async () => ({ status: 'ok', reason: 'reviewed-content-preserved' }),
+        attemptDaemonCleanMergeImpl: async (args) => {
+          captured = args;
+          return { disposition: DAEMON_MERGE_DISPOSITION.MERGED, merged: true, attempts: 1 };
+        },
+      }),
+    );
+
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+    assert.ok(captured, 'a content-preserving head merges normally');
+    assert.equal(captured.allowHeadCloserCertifiedNonBlocking, true);
+    assert.equal(captured.validatedHead, CLOSER_HEAD);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('clobber guard DECLINES an unverifiable (gh-failure) closer head — fail closed', async () => {
+  const rootDir = tempRoot();
+  try {
+    let attemptCalled = false;
+    const result = await runDaemonCleanMergeAttempt(
+      nonBlockingReviewArgs(rootDir, {
+        resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed: true }),
+        evaluateMovedHeadClobberGuardImpl: async () => ({
+          status: 'unverifiable',
+          reason: 'clobber-guard-verification-error',
+        }),
+        appendAmaAuditAttemptImpl: () => {},
+        attemptDaemonCleanMergeImpl: async () => {
+          attemptCalled = true;
+          return { disposition: DAEMON_MERGE_DISPOSITION.MERGED };
+        },
+      }),
+    );
+
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.NOT_TAKEN);
+    assert.equal(result.reason, 'clobber-guard-verification-error');
+    assert.equal(attemptCalled, false, 'an unverifiable head must not merge content-blind');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('clobber guard is EXEMPT on the HAM terminal-remediation lane (already battery-validated)', async () => {
+  const rootDir = tempRoot();
+  try {
+    let guardCalled = false;
+    const result = await runDaemonCleanMergeAttempt(
+      nonBlockingReviewArgs(rootDir, {
+        // The hammer already validated this exact head against the local battery.
+        hamTerminalRemediationValidated: true,
+        resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed: false }),
+        evaluateMovedHeadClobberGuardImpl: async () => {
+          guardCalled = true;
+          return { status: 'clobber', reason: 'reviewed-content-dropped-on-rebase' };
+        },
+        attemptDaemonCleanMergeImpl: async () => ({
+          disposition: DAEMON_MERGE_DISPOSITION.MERGED,
+          merged: true,
+          attempts: 1,
+        }),
+      }),
+    );
+
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+    assert.equal(guardCalled, false, 'the HAM lane must not re-run the content guard (hammer already validated)');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('daemon DECLINES a non-blocking review whose head is an EXTERNAL push (not the closer) — safety invariant', async () => {
   const rootDir = tempRoot();
   try {

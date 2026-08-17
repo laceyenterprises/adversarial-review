@@ -11,7 +11,8 @@ import {
   resolveDaemonMergeUncleanReason,
 } from './ama/daemon-merge.mjs';
 import { SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
-import { readAmaAuditEntry } from './ama/audit.mjs';
+import { appendAmaAuditAttempt, readAmaAuditEntry } from './ama/audit.mjs';
+import { clobberGuardBlocks, evaluateMovedHeadClobberGuard } from './ama/clobber-guard.mjs';
 import { getHeadCloserCommitSuppression } from './head-closer-commit-suppression.mjs';
 import { acquireMergeLease, releaseMergeLease } from './ama/merge-lease.mjs';
 import { readBuildCompletionSignalForPr } from './session-ledger-read-adapter.mjs';
@@ -326,6 +327,9 @@ export async function runDaemonCleanMergeAttempt({
   authoritativeReviewerLogins = [],
   dismissStaleRequestChangesOnResolved = true,
   hamTerminalRemediationValidated = false,
+  evaluateMovedHeadClobberGuardImpl = evaluateMovedHeadClobberGuard,
+  appendAmaAuditAttemptImpl = appendAmaAuditAttempt,
+  clobberGuardNowImpl = () => new Date().toISOString(),
 } = {}) {
   const base = candidate?.baseBranch;
   const validatedHead = gateSnapshot?.reviewedHeadSha || reviewState?.headSha || null;
@@ -524,6 +528,75 @@ export async function runDaemonCleanMergeAttempt({
     suppression: cleanCloserCommitSuppression,
     workerIdentityReason: workerIdentity.reason || 'worker-identity-unresolved',
   });
+  // Clobber guard — content preservation for a MOVED head. The closer-commit
+  // certifications above authorize a live head that differs from the reviewed head
+  // purely on committer IDENTITY (the live head is the closer's own commit). A
+  // rebase/force-push that silently dropped a reviewed commit still carries the
+  // closer's identity, so identity alone would land a head missing reviewed work
+  // (the #5455-class clobber). Before taking that content-blind shortcut, verify no
+  // reviewed patch-id was dropped between the reviewed head and the live head. The
+  // HAM terminal-remediation lane is intentionally EXEMPT: an entitled hammer
+  // already ran the exact-head battery, so its content change is test-validated and
+  // a patch-id-drop check there would only false-positive legitimate remediation.
+  const closerCommitMovedHeadCertification =
+    !hamTerminalRemediationHead &&
+    (headCloserCertifiedNonBlocking || Boolean(cleanCloserCommitAccountability)) &&
+    Boolean(String(validatedHead || '').trim()) &&
+    String(validatedHead || '').trim() !== liveHead;
+  if (closerCommitMovedHeadCertification) {
+    const clobberGuard = await evaluateMovedHeadClobberGuardImpl({
+      repo: repoPath,
+      reviewedHead: validatedHead,
+      liveHead,
+      env,
+      configOptions: { topPath: hqRoot },
+      logger,
+      execGh: ({ args, timeoutMs }) =>
+        execGhWithRetryImpl({ execFileImpl, args, env, timeoutMs }),
+    });
+    if (clobberGuardBlocks(clobberGuard)) {
+      // Fail closed: decline the content-blind lane and fall through to the capped
+      // hammer, which re-runs the exact-head battery (the authoritative validator).
+      // This is never a hard merge-block; it just refuses the shortcut. A durable
+      // audit records WHY, so an operator — and `priorDaemonPermanentFailure` — can
+      // see the dropped-content signal.
+      try {
+        await appendAmaAuditAttemptImpl({
+          hqRoot,
+          repo: repoPath,
+          prNumber,
+          headSha: liveHead,
+          attempt: {
+            outcome: 'failed-without-merge',
+            reason: clobberGuard.reason,
+            permanent: false,
+            clobberGuard: {
+              status: clobberGuard.status,
+              reviewedHead: validatedHead,
+              liveHead,
+              dropped: clobberGuard.dropped || [],
+              droppedCount: clobberGuard.droppedCount || 0,
+            },
+            validatedHead,
+          },
+          now: clobberGuardNowImpl(),
+        });
+      } catch (auditErr) {
+        logger?.warn?.(
+          `[watcher] AMA daemon clobber-guard audit write failed for ${repoPath}#${prNumber}: ` +
+            `${auditErr?.message || auditErr}`,
+        );
+      }
+      logger?.warn?.(
+        `[watcher] AMA daemon clobber-guard DECLINED content-blind closer-commit certification for ` +
+          `${repoPath}#${prNumber}@${String(liveHead).slice(0, 12)} ` +
+          `(reviewed ${String(validatedHead || '').slice(0, 12)}): ${clobberGuard.reason}` +
+          `${clobberGuard.droppedCount ? ` dropped=${clobberGuard.droppedCount}` : ''}; ` +
+          `falling through to capped hammer`,
+      );
+      return NOT_TAKEN(clobberGuard.reason);
+    }
+  }
   // Deliverable 1 — operator-approval auto-close lane. When no hq-dispatched
   // worker identity resolves (un-attributed operator/agent infra-fix PRs), an
   // explicit, head-scoped operator label IS the accountability that stands in

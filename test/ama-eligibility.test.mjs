@@ -1777,6 +1777,7 @@ function hamGroundTruth({
 }
 
 test('ham terminal remediation: exhausted HAM-authored live head over reviewed parent is eligible and records marker', () => {
+  const warnings = [];
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: {
       verdict: 'request-changes',
@@ -1803,9 +1804,13 @@ test('ham terminal remediation: exhausted HAM-authored live head over reviewed p
       },
     },
     hamTerminalRemediationGroundTruth: hamGroundTruth(),
+    logger: { warn: (message) => warnings.push(message) },
   });
   assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
   assert.equal(result.trace.hamTerminalRemediation.marker, 'ham_terminal_remediation_validated');
+  assert.equal(result.trace.hamTerminalRemediation.safetyCoreOk, true);
+  assert.deepEqual(result.trace.hamTerminalRemediation.advisoryShortfall, []);
+  assert.deepEqual(warnings, []);
   assert.equal(result.trace.hamTerminalRemediation.auditComment.author, 'hammer-worker');
   assert.deepEqual(result.trace.hamTerminalRemediation.verifiedCommit.changedFiles, ['src/auth.js']);
   assert.equal(result.trace.headMatch.hamTerminalRemediation, true);
@@ -1843,7 +1848,7 @@ test('ham terminal remediation: pre-exhaustion validated .ok blocking remediatio
   assert.ok(result.trace.hamTerminalRemediation.waived.includes('blocking-findings-present'));
 });
 
-test('ham terminal remediation: leaked build-time HAM-02 ticket is not valid provenance', () => {
+test('ham terminal remediation: leaked build-time HAM-02 ticket is advisory bookkeeping only', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: {
       verdict: 'request-changes',
@@ -1858,9 +1863,108 @@ test('ham terminal remediation: leaked build-time HAM-02 ticket is not valid pro
     hamTerminalRemediationGroundTruth: hamGroundTruth({ workerTicket: 'HAM-02' }),
   });
 
-  assert.equal(result.eligible, false);
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
   assert.equal(result.trace.hamTerminalRemediation.checks.ticket, false);
-  assert.equal(result.trace.hamTerminalRemediation.ok, false);
+  assert.equal(result.trace.hamTerminalRemediation.safetyCoreOk, true);
+  assert.equal(result.trace.hamTerminalRemediation.ok, true);
+  assert.deepEqual(result.trace.hamTerminalRemediation.advisoryShortfall, ['ticket']);
+});
+
+test('ham terminal remediation: safety-core pass self-certifies with all bookkeeping checks failing and warns', () => {
+  const warnings = [];
+  const reviewedHead = 'abc12345';
+  const currentHead = 'def67890';
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      headSha: reviewedHead,
+      verdict: 'request-changes',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+    },
+    prMetadata: { headSha: currentHead },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence({
+      headSha: currentHead,
+      parentSha: reviewedHead,
+      workerTicket: 'HAM-02',
+      remediatedFindings: 'not parseable',
+      auditBody: 'local stale audit body',
+      docCurrency: {
+        status: 'updated',
+        changedFiles: ['src/auth.js'],
+        docsUpdated: ['README.md'],
+      },
+      findings: [{ title: 'different finding', blocking: false, file: 'README.md', addressed: false }],
+    }),
+    hamTerminalRemediationGroundTruth: hamGroundTruth({
+      headSha: currentHead,
+      parentSha: reviewedHead,
+      workerTicket: 'HAM-02',
+      closedBy: 'hammer-closer',
+      remediatedFindings: 'also not parseable',
+      auditAuthor: 'codex-worker-bot',
+      auditBody: 'verified audit body drifted',
+      changedFiles: ['src/auth.js'],
+    }),
+    logger: { warn: (message) => warnings.push(message) },
+  });
+
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.hamTerminalRemediation.marker, 'ham_terminal_remediation_validated');
+  assert.equal(result.trace.hamTerminalRemediation.safetyCoreOk, true);
+  assert.equal(result.trace.hamTerminalRemediation.activeAuthorized, true);
+  assert.deepEqual(
+    result.trace.hamTerminalRemediation.advisoryShortfall,
+    ['ticket', 'auditComment', 'auditCommentAuthor', 'docCurrency', 'closedBy', 'remediatedFindings'],
+  );
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /self-certified on safety-core/);
+  assert.match(warnings[0], /ticket,auditComment,auditCommentAuthor,docCurrency,closedBy,remediatedFindings/);
+  assert.ok(!result.reasons.includes('stale-review-head'));
+  assert.ok(!result.reasons.includes('blocking-findings-present'));
+});
+
+test('ham terminal remediation: COMMENTED review with bookkeeping drift self-certifies instead of stale-review-head deadlock', () => {
+  const reviewedHead = 'abc12345';
+  const currentHead = 'def67890';
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      headSha: reviewedHead,
+      verdict: 'comment-only',
+      blockingFindingCount: 0,
+      blockingFindingState: 'known',
+      nonBlockingFindingCount: 0,
+      nonBlockingFindingState: 'known',
+      remediationPending: false,
+    },
+    prMetadata: { headSha: currentHead },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence({
+      headSha: currentHead,
+      parentSha: reviewedHead,
+      workerTicket: 'HAM-02',
+      remediatedFindings: '0 addressed (0 blocking, 1 non-blocking)',
+      auditBody: 'stale copied audit body',
+      findings: [],
+    }),
+    hamTerminalRemediationGroundTruth: hamGroundTruth({
+      headSha: currentHead,
+      parentSha: reviewedHead,
+      workerTicket: 'HAM-02',
+      remediatedFindings: '0 addressed (0 blocking, 1 non-blocking)',
+      auditBody: 'verified audit body changed after force-push',
+    }),
+  });
+
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.hamTerminalRemediation.marker, 'ham_terminal_remediation_validated');
+  assert.equal(result.trace.hamTerminalRemediation.safetyCoreOk, true);
+  assert.ok(result.trace.hamTerminalRemediation.advisoryShortfall.length > 0);
+  assert.ok(!result.reasons.includes('stale-review-head'));
 });
 
 for (const auditAuthor of ['clio-airlock', 'the-hammer-lacey[bot]']) {
@@ -2051,9 +2155,11 @@ test('ham terminal remediation: non-blocking waiver REFUSED when HAM covers only
   });
   assert.equal(
     result.trace.hamTerminalRemediation.ok,
-    false,
+    true,
     JSON.stringify(result.trace.hamTerminalRemediation, null, 2),
   );
+  assert.equal(result.trace.hamTerminalRemediation.safetyCoreOk, true);
+  assert.deepEqual(result.trace.hamTerminalRemediation.advisoryShortfall, ['remediatedFindings']);
   assert.equal(result.trace.hamTerminalRemediation.activeAuthorized, true);
   assert.equal(result.trace.hamTerminalRemediation.nonBlockingCoverage.ok, false);
   assert.equal(result.eligible, false, JSON.stringify(result, null, 2));
@@ -2156,9 +2262,11 @@ test('ham terminal remediation: non-blocking waiver GRANTED when HAM covers ever
   });
   assert.equal(
     result.trace.hamTerminalRemediation.ok,
-    false,
+    true,
     JSON.stringify(result.trace.hamTerminalRemediation, null, 2),
   );
+  assert.equal(result.trace.hamTerminalRemediation.safetyCoreOk, true);
+  assert.deepEqual(result.trace.hamTerminalRemediation.advisoryShortfall, ['remediatedFindings']);
   assert.equal(result.trace.hamTerminalRemediation.activeAuthorized, true);
   assert.equal(result.trace.hamTerminalRemediation.nonBlockingCoverage.ok, true);
   assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
@@ -2399,8 +2507,10 @@ test('ham terminal remediation: claimed doc updates must be in the verified diff
       changedFiles: ['migrations/001-add-profile.sql'],
     }),
   });
-  assert.equal(result.eligible, false);
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
   assert.equal(result.trace.hamTerminalRemediation.checks.docCurrency, false);
+  assert.equal(result.trace.hamTerminalRemediation.safetyCoreOk, true);
+  assert.deepEqual(result.trace.hamTerminalRemediation.advisoryShortfall, ['docCurrency']);
   assert.equal(result.trace.hamTerminalRemediation.docCurrency.docsUpdatedInCommit, false);
 });
 
@@ -2419,7 +2529,43 @@ test('ham terminal remediation: later non-HAM live head is rejected', () => {
     hamTerminalRemediationGroundTruth: hamGroundTruth({ headSha: 'def67890' }),
   });
   assert.equal(result.eligible, false);
+  assert.equal(result.trace.hamTerminalRemediation.safetyCoreOk, false);
   assert.equal(result.trace.hamTerminalRemediation.ok, false);
+  assert.equal(result.trace.hamTerminalRemediation.marker, null);
+  assert.equal(result.trace.hamTerminalRemediation.checks.head, false);
+  assert.ok(result.reasons.includes('stale-review-head'));
+});
+
+test('ham terminal remediation: parent not reviewed head is rejected', () => {
+  const reviewedHead = 'abc12345';
+  const currentHead = 'def67890';
+  const slippedParent = 'feedbeef';
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      headSha: reviewedHead,
+      verdict: 'request-changes',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+    },
+    prMetadata: { headSha: currentHead },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence({
+      headSha: currentHead,
+      parentSha: slippedParent,
+      reviewedHead: slippedParent,
+    }),
+    hamTerminalRemediationGroundTruth: hamGroundTruth({
+      headSha: currentHead,
+      parentSha: slippedParent,
+      reviewedHead: slippedParent,
+    }),
+  });
+
+  assert.equal(result.eligible, false);
+  assert.equal(result.trace.hamTerminalRemediation.safetyCoreOk, false);
+  assert.equal(result.trace.hamTerminalRemediation.checks.parent, false);
   assert.equal(result.trace.hamTerminalRemediation.marker, null);
   assert.ok(result.reasons.includes('stale-review-head'));
 });
@@ -2542,6 +2688,7 @@ test('ham terminal remediation: external committer cannot self-certify a stale h
   });
 
   assert.equal(result.eligible, false);
+  assert.equal(result.trace.hamTerminalRemediation.safetyCoreOk, false);
   assert.equal(result.trace.hamTerminalRemediation.ok, false);
   assert.equal(result.trace.hamTerminalRemediation.checks.commitIdentity, false);
   assert.ok(result.reasons.includes('stale-review-head') || result.reasons.includes('blocking-findings-present'));
@@ -2599,6 +2746,7 @@ test('ham terminal remediation: no verified commit identity fails closed', () =>
   });
 
   assert.equal(result.eligible, false);
+  assert.equal(result.trace.hamTerminalRemediation.safetyCoreOk, false);
   assert.equal(result.trace.hamTerminalRemediation.ok, false);
   assert.equal(result.trace.hamTerminalRemediation.checks.commitIdentity, false);
 });
@@ -2682,7 +2830,7 @@ test('ham terminal remediation: doc-currency validation ignores global status ph
   assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
 });
 
-test('ham terminal remediation: forged audit author, loose closed-by, bad counts, or empty diff are rejected', () => {
+test('ham terminal remediation: forged audit author, loose closed-by, or bad counts are advisory; empty diff is rejected', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: {
       verdict: 'request-changes',
@@ -2711,24 +2859,27 @@ test('ham terminal remediation: forged audit author, loose closed-by, bad counts
     hamTerminalRemediation: validEvidence,
     hamTerminalRemediationGroundTruth: hamGroundTruth({ auditAuthor: 'codex-worker-bot' }),
   });
-  assert.equal(forgedAuthor.eligible, false);
+  assert.equal(forgedAuthor.eligible, true, JSON.stringify(forgedAuthor, null, 2));
   assert.equal(forgedAuthor.trace.hamTerminalRemediation.checks.auditCommentAuthor, false);
+  assert.deepEqual(forgedAuthor.trace.hamTerminalRemediation.advisoryShortfall, ['auditCommentAuthor']);
 
   const looseClosedBy = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
     env: ENV,
     hamTerminalRemediation: validEvidence,
     hamTerminalRemediationGroundTruth: hamGroundTruth({ closedBy: 'hammer-closer (adversarial-pipe-mode)' }),
   });
-  assert.equal(looseClosedBy.eligible, false);
+  assert.equal(looseClosedBy.eligible, true, JSON.stringify(looseClosedBy, null, 2));
   assert.equal(looseClosedBy.trace.hamTerminalRemediation.checks.closedBy, false);
+  assert.deepEqual(looseClosedBy.trace.hamTerminalRemediation.advisoryShortfall, ['closedBy']);
 
   const mismatchedCounts = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
     env: ENV,
     hamTerminalRemediation: validEvidence,
     hamTerminalRemediationGroundTruth: hamGroundTruth({ remediatedFindings: '2 addressed (0 blocking, 2 non-blocking)' }),
   });
-  assert.equal(mismatchedCounts.eligible, false);
+  assert.equal(mismatchedCounts.eligible, true, JSON.stringify(mismatchedCounts, null, 2));
   assert.equal(mismatchedCounts.trace.hamTerminalRemediation.checks.remediatedFindings, false);
+  assert.deepEqual(mismatchedCounts.trace.hamTerminalRemediation.advisoryShortfall, ['remediatedFindings']);
 
   const emptyDiff = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
     env: ENV,
@@ -2736,6 +2887,7 @@ test('ham terminal remediation: forged audit author, loose closed-by, bad counts
     hamTerminalRemediationGroundTruth: hamGroundTruth({ changedFiles: [] }),
   });
   assert.equal(emptyDiff.eligible, false);
+  assert.equal(emptyDiff.trace.hamTerminalRemediation.safetyCoreOk, false);
   assert.equal(emptyDiff.trace.hamTerminalRemediation.checks.nonEmptyCommit, false);
 });
 

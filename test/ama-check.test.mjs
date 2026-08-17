@@ -645,8 +645,9 @@ test('ama-check validates HAM terminal remediation only with HAM head provenance
     });
     assert.equal(forgedAuthor.status, 0, forgedAuthor.stderr);
     const forgedAuthorVerdict = JSON.parse(forgedAuthor.stdout);
-    assert.equal(forgedAuthorVerdict.eligible, false);
+    assert.equal(forgedAuthorVerdict.eligible, true, JSON.stringify(forgedAuthorVerdict, null, 2));
     assert.equal(forgedAuthorVerdict.trace.hamTerminalRemediation.checks.auditCommentAuthor, false);
+    assert.deepEqual(forgedAuthorVerdict.trace.hamTerminalRemediation.advisoryShortfall, ['auditCommentAuthor']);
 
     const unresolvedCommitIdentity = runAmaCheck(tmp, {
       branchProtectionRequired: true,
@@ -686,8 +687,9 @@ test('ama-check validates HAM terminal remediation only with HAM head provenance
     });
     assert.equal(looseClosedBy.status, 0, looseClosedBy.stderr);
     const looseClosedByVerdict = JSON.parse(looseClosedBy.stdout);
-    assert.equal(looseClosedByVerdict.eligible, false);
+    assert.equal(looseClosedByVerdict.eligible, true, JSON.stringify(looseClosedByVerdict, null, 2));
     assert.equal(looseClosedByVerdict.trace.hamTerminalRemediation.checks.closedBy, false);
+    assert.deepEqual(looseClosedByVerdict.trace.hamTerminalRemediation.advisoryShortfall, ['closedBy']);
 
     const mismatchedCounts = runAmaCheck(tmp, {
       branchProtectionRequired: true,
@@ -707,8 +709,12 @@ test('ama-check validates HAM terminal remediation only with HAM head provenance
     });
     assert.equal(mismatchedCounts.status, 0, mismatchedCounts.stderr);
     const mismatchedCountsVerdict = JSON.parse(mismatchedCounts.stdout);
-    assert.equal(mismatchedCountsVerdict.eligible, false);
+    assert.equal(mismatchedCountsVerdict.eligible, true, JSON.stringify(mismatchedCountsVerdict, null, 2));
     assert.equal(mismatchedCountsVerdict.trace.hamTerminalRemediation.checks.remediatedFindings, false);
+    assert.deepEqual(
+      mismatchedCountsVerdict.trace.hamTerminalRemediation.advisoryShortfall,
+      ['remediatedFindings'],
+    );
 
     const missingDocCurrency = runAmaCheck(tmp, {
       branchProtectionRequired: true,
@@ -730,8 +736,12 @@ test('ama-check validates HAM terminal remediation only with HAM head provenance
     });
     assert.equal(missingDocCurrency.status, 0, missingDocCurrency.stderr);
     const missingDocCurrencyVerdict = JSON.parse(missingDocCurrency.stdout);
-    assert.equal(missingDocCurrencyVerdict.eligible, false);
+    assert.equal(missingDocCurrencyVerdict.eligible, true, JSON.stringify(missingDocCurrencyVerdict, null, 2));
     assert.equal(missingDocCurrencyVerdict.trace.hamTerminalRemediation.checks.docCurrency, false);
+    assert.deepEqual(
+      missingDocCurrencyVerdict.trace.hamTerminalRemediation.advisoryShortfall,
+      ['docCurrency'],
+    );
 
     const selfAttestedDocUpdate = runAmaCheck(tmp, {
       branchProtectionRequired: true,
@@ -760,8 +770,12 @@ test('ama-check validates HAM terminal remediation only with HAM head provenance
     });
     assert.equal(selfAttestedDocUpdate.status, 0, selfAttestedDocUpdate.stderr);
     const selfAttestedDocUpdateVerdict = JSON.parse(selfAttestedDocUpdate.stdout);
-    assert.equal(selfAttestedDocUpdateVerdict.eligible, false);
+    assert.equal(selfAttestedDocUpdateVerdict.eligible, true, JSON.stringify(selfAttestedDocUpdateVerdict, null, 2));
     assert.equal(selfAttestedDocUpdateVerdict.trace.hamTerminalRemediation.checks.docCurrency, false);
+    assert.deepEqual(
+      selfAttestedDocUpdateVerdict.trace.hamTerminalRemediation.advisoryShortfall,
+      ['docCurrency'],
+    );
     assert.equal(
       selfAttestedDocUpdateVerdict.trace.hamTerminalRemediation.docCurrency.docsUpdatedInCommit,
       false,

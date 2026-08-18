@@ -93,22 +93,22 @@ export const stmtMarkInfraAutoRecoveryAttemptStarted = db.prepare(
      )
      AND COALESCE(infra_auto_recover_attempts, 0) < ?
      AND (
-       (? = 'cascade' AND (
+       (?11 = 'cascade' AND (
          lower(COALESCE(failure_message, '')) LIKE '[cascade]%' OR
          lower(COALESCE(failure_message, '')) LIKE '%litellm/upstream cascade%' OR
          lower(COALESCE(failure_message, '')) LIKE '%watcher backoff engaged%'
        )) OR
-       (? = 'provider-overloaded' AND lower(COALESCE(failure_message, '')) LIKE '[provider-overloaded]%') OR
-       (? = 'reviewer-timeout' AND lower(COALESCE(failure_message, '')) LIKE '[reviewer-timeout]%') OR
-       (? = 'reviewer-output' AND lower(COALESCE(failure_message, '')) LIKE '[reviewer-output]%') OR
-       (? = 'launchctl-bootstrap' AND (
+       (?11 = 'provider-overloaded' AND lower(COALESCE(failure_message, '')) LIKE '[provider-overloaded]%') OR
+       (?11 = 'reviewer-timeout' AND lower(COALESCE(failure_message, '')) LIKE '[reviewer-timeout]%') OR
+       (?11 = 'reviewer-output' AND lower(COALESCE(failure_message, '')) LIKE '[reviewer-output]%') OR
+       (?11 = 'launchctl-bootstrap' AND (
          lower(COALESCE(failure_message, '')) LIKE '[launchctl-bootstrap]%' OR
          lower(COALESCE(failure_message, '')) LIKE '%claude launchctl session bootstrap failed%' OR
          lower(COALESCE(failure_message, '')) LIKE '%launchctlsessionerror%'
        )) OR
-       (? = 'oauth-broken' AND lower(COALESCE(failure_message, '')) LIKE '%[oauth-broken]%') OR
-       (? = 'quota-exhausted' AND lower(COALESCE(failure_message, '')) LIKE '[quota-exhausted]%') OR
-       (? = 'reviewer-command-failed' AND (
+       (?11 = 'oauth-broken' AND lower(COALESCE(failure_message, '')) LIKE '%[oauth-broken]%') OR
+       (?11 = 'quota-exhausted' AND lower(COALESCE(failure_message, '')) LIKE '[quota-exhausted]%') OR
+       (?11 = 'reviewer-command-failed' AND (
          (
            lower(COALESCE(failure_message, '')) LIKE '[unknown] command failed%' AND
            lower(COALESCE(failure_message, '')) NOT LIKE '[unknown] command failed with code %'

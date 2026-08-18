@@ -100,6 +100,7 @@ export const stmtMarkInfraAutoRecoveryAttemptStarted = db.prepare(
        )) OR
        (? = 'provider-overloaded' AND lower(COALESCE(failure_message, '')) LIKE '[provider-overloaded]%') OR
        (? = 'reviewer-timeout' AND lower(COALESCE(failure_message, '')) LIKE '[reviewer-timeout]%') OR
+       (? = 'reviewer-output' AND lower(COALESCE(failure_message, '')) LIKE '[reviewer-output]%') OR
        (? = 'launchctl-bootstrap' AND (
          lower(COALESCE(failure_message, '')) LIKE '[launchctl-bootstrap]%' OR
          lower(COALESCE(failure_message, '')) LIKE '%claude launchctl session bootstrap failed%' OR

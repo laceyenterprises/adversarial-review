@@ -36,7 +36,7 @@ function reviewerFailureClassFromStoredRow(reviewRow) {
   const rawMessage = storedRowFailureSignal(reviewRow);
   const message = rawMessage.toLowerCase();
   const tagMatch = message.match(
-    /^\[(reviewer-timeout|launchctl-bootstrap|cascade|quota-exhausted|provider-overloaded|reviewer-empty-output|oauth-broken|dispatch-failed|adapter_spawn_timeout)\]/
+    /^\[(reviewer-timeout|launchctl-bootstrap|cascade|quota-exhausted|provider-overloaded|reviewer-empty-output|reviewer-output|oauth-broken|dispatch-failed|adapter_spawn_timeout)\]/
   );
   if (tagMatch) return tagMatch[1];
   const legacyClass = classifyReviewerFailure(rawMessage, null);

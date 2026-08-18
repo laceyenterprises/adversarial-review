@@ -1490,6 +1490,7 @@ export async function processReviewSubject(entry, ctx) {
                 infraRecoveryClass,
                 infraRecoveryClass,
                 infraRecoveryClass,
+                infraRecoveryClass,
                 infraRecoveryClass
               )
               : reviewPopulationRetryable

@@ -1409,6 +1409,58 @@ test('settleReviewerAttempt records reviewer empty output without burning attemp
   }
 });
 
+test('settleReviewerAttempt retries malformed reviewer artifacts without burning attempts', () => {
+  const { rootDir, db } = setupFixture();
+  try {
+    const repo = 'laceyenterprises/adversarial-review';
+    const prNumber = 195;
+    const warnings = [];
+    const statements = {
+      markPosted: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
+      ),
+      markFailed: stmtMarkBugFailed(db),
+      releaseReviewLease: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
+      ),
+      markCascadeFailed: stmtMarkCascadeFailed(db),
+      markPendingUpstream: stmtMarkPendingUpstream(db),
+      getReviewRow: db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'),
+    };
+
+    settleReviewerAttempt({
+      rootDir,
+      repoPath: repo,
+      prNumber,
+      result: {
+        ok: false,
+        error: 'review artifact missing recognized Verdict value',
+        failureClass: 'reviewer-output',
+      },
+      failureAt: '2026-08-17T20:10:18.541Z',
+      maxRemediationRounds: 1,
+      statements,
+      log: { warn: (line) => warnings.push(line) },
+    });
+
+    const row = db.prepare(
+      'SELECT review_status, review_attempts, failure_message, infra_auto_recover_attempts FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get(repo, prNumber);
+    const state = readCascadeState(rootDir, { repo, prNumber });
+
+    assert.equal(row.review_status, 'pending-upstream');
+    assert.equal(row.review_attempts, 0);
+    assert.equal(row.infra_auto_recover_attempts, 1);
+    assert.match(row.failure_message, /^\[reviewer-output\] review artifact missing recognized Verdict value/);
+    assert.equal(state.lastFailureClass, 'reviewer-output');
+    assert.deepEqual(state.transientFailureBreakdown, { 'reviewer-output': 1 });
+    assert.match(warnings.join('\n'), /Reviewer reviewer-output failure/);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('settleReviewerAttempt routes reviewer-timeout failures to pending-upstream when lease recovery is enabled', () => {
   const { rootDir, db } = setupFixture();
   try {

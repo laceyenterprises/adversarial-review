@@ -29,10 +29,15 @@ function canonicalReviewSectionHeading(value) {
 }
 
 function promoteCanonicalReviewSectionHeadings(text) {
-  return String(text ?? '').replace(
-    /^#{1,4}[ \t]+(summary|blocking issues|non-blocking issues|suggested fixes|verdict)[ \t]*:?[ \t]*\r?$/gim,
-    (_, heading) => `## ${canonicalReviewSectionHeading(heading)}`,
-  );
+  return String(text ?? '')
+    .replace(
+      /^#{1,4}[ \t]+(summary|blocking issues|non-blocking issues|suggested fixes|verdict)[ \t]*:[ \t]*(\S.*)$/gim,
+      (_, heading, inlineBody) => `## ${canonicalReviewSectionHeading(heading)}\n${String(inlineBody).trim()}`,
+    )
+    .replace(
+      /^#{1,4}[ \t]+(summary|blocking issues|non-blocking issues|suggested fixes|verdict)[ \t]*:?[ \t]*\r?$/gim,
+      (_, heading) => `## ${canonicalReviewSectionHeading(heading)}`,
+    );
 }
 
 const CANONICAL_REVIEW_SECTION_PATTERN = /^##[ \t]+(Summary|Blocking issues|Non-blocking issues|Suggested fixes|Verdict)[ \t]*$/gim;

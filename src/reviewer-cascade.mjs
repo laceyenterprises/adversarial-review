@@ -111,6 +111,7 @@ function normalizeTransientFailureClass(failureClass) {
     value === 'broker-unavailable' ||
     value === 'github-unavailable' ||
     value === 'deploy-wedge' ||
+    value === 'reviewer-output' ||
     value === REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS ||
     value === PROVIDER_OVERLOADED_FAILURE_CLASS
   ) {

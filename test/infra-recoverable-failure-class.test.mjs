@@ -59,6 +59,10 @@ test('cascade / reviewer-timeout / launchctl-bootstrap / provider degradation re
     infraRecoverableFailureClass({ failure_message: '[reviewer-empty-output] Gemini returned empty output.' }),
     REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS
   );
+  assert.equal(
+    infraRecoverableFailureClass({ failure_message: '[reviewer-output] review artifact missing recognized Verdict value' }),
+    'reviewer-output'
+  );
 });
 
 test('forbidden-fallback is NOT infra-recoverable (security must stay terminal)', () => {

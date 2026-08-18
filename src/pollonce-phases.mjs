@@ -1484,12 +1484,6 @@ export async function processReviewSubject(entry, ctx) {
                 current?.failed_at || null,
                 current?.reviewer_head_sha || null,
                 INFRA_AUTO_RECOVER_CAP,
-                infraRecoveryClass,
-                infraRecoveryClass,
-                infraRecoveryClass,
-                infraRecoveryClass,
-                infraRecoveryClass,
-                infraRecoveryClass,
                 infraRecoveryClass
               )
               : reviewPopulationRetryable

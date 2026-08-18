@@ -188,6 +188,24 @@ test('sanitizeReviewPayloadBestEffort promotes trailing-space verdict headings',
   assert.equal(extractReviewVerdict(sanitized), 'Comment only');
 });
 
+test('kernel sanitizer accepts compact inline verdict headings from low-risk dependency reviews', () => {
+  const compactDependabotReview = [
+    '## Summary',
+    'Dependency-only bump; package manifest and lockfile changes are consistent.',
+    '',
+    '## Blocking issues: - None.',
+    '',
+    '## Verdict: Comment only',
+  ].join('\n');
+
+  const sanitized = sanitizeCodexReviewPayload(compactDependabotReview);
+
+  assert.match(sanitized, /^## Blocking issues\n- None\.$/m);
+  assert.match(sanitized, /^## Verdict\nComment only$/m);
+  assert.equal(extractReviewVerdict(sanitized), 'Comment only');
+  assert.equal(normalizeEffectiveReviewVerdict(sanitized), 'comment-only');
+});
+
 test('kernel verdict parser accepts explanatory prose before final verdict line', () => {
   const review = [
     '## Summary',

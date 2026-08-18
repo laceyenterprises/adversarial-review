@@ -233,11 +233,11 @@ test('describeStaleDispatch — rejects malformed launchRequestId (path-traversa
   }
 });
 
-test('describeStaleDispatch — live-state probe overrides refusal history', () => {
+test('describeStaleDispatch — active live-state probe overrides refusal history', () => {
   // Round-1 reviewer's "Refusal history mislabels live dispatches"
   // finding: historical refusal events in the audit log remain
   // forever. If a dispatch was refused 3 times early then successfully
-  // admitted + completed, the helper should NOT report it as stuck.
+  // admitted and is still running/parked, the helper should NOT report it as stuck.
   // The probe callback returns the live HQ status, which the helper
   // consults before falling back to refusal-count classification.
   const hqRoot = tmpHqRoot();
@@ -249,9 +249,8 @@ test('describeStaleDispatch — live-state probe overrides refusal history', () 
       refusal('2026-05-18T02:03:00Z'),
     ]);
     for (const liveStatus of [
-      'succeeded', 'failed', 'cancelled', 'canceled', 'superseded',
       'running', 'starting', 'blocked', 'stalled',
-      'SUCCEEDED',  // case-insensitive
+      'RUNNING',  // case-insensitive
     ]) {
       const detail = describeStaleDispatch(
         { dispatchedAt: '2026-05-18T02:00:00Z', launchRequestId: LRQ },
@@ -262,6 +261,35 @@ test('describeStaleDispatch — live-state probe overrides refusal history', () 
         },
       );
       assert.equal(detail, null, `live status ${liveStatus} should suppress stuck detail`);
+    }
+  } finally {
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('describeStaleDispatch — terminal live-state probe falls through to stuck classification', () => {
+  const hqRoot = tmpHqRoot();
+  try {
+    writeAuditEvents(hqRoot, LRQ, '2026-05-18', [
+      refusal('2026-05-18T02:00:00Z'),
+      refusal('2026-05-18T02:01:00Z'),
+      refusal('2026-05-18T02:02:00Z'),
+      refusal('2026-05-18T02:03:00Z'),
+    ]);
+    for (const terminalStatus of [
+      'succeeded', 'failed', 'cancelled', 'canceled', 'superseded',
+      'SUCCEEDED',  // case-insensitive
+    ]) {
+      const detail = describeStaleDispatch(
+        { dispatchedAt: '2026-05-18T02:00:00Z', launchRequestId: LRQ },
+        {
+          hqRoot,
+          now: NOW,
+          dispatchStateProbe: () => ({ status: terminalStatus }),
+        },
+      );
+      assert.notEqual(detail, null, `terminal status ${terminalStatus} should remain actionable`);
+      assert.equal(detail.refusalCount, 4);
     }
   } finally {
     rmSync(hqRoot, { recursive: true, force: true });

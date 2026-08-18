@@ -770,19 +770,9 @@ function _utcDateString(timestampMs) {
  * Pure-ish: optional `fsImpl` / `now` make this fully testable without
  * touching the real filesystem or clock.
  */
-// Authoritative HQ status tokens that mean the dispatch has reached a
-// terminal state OR is actively running. If the dispatch reports any
-// of these, refusal history is irrelevant — the LRQ was admitted at
-// some point, refusals are just earlier-in-history attempts. Without
-// this check the helper would mislabel healthy in-flight dispatches
-// as BLOCKED forever once historical refusals exist in the audit log.
+// Active/parked statuses suppress refusal-history stuck detection. Terminal
+// statuses do not: finished dispatch != PR merged.
 const _NON_STUCK_DISPATCH_STATUSES = new Set([
-  // terminal — request finished one way or the other
-  'succeeded',
-  'failed',
-  'cancelled',
-  'canceled',
-  'superseded',
   // actively progressing — admission already happened
   'running',
   'starting',
@@ -791,6 +781,7 @@ const _NON_STUCK_DISPATCH_STATUSES = new Set([
   'stalled',
 ]);
 const _REQUESTED_RETRYABLE_DISPATCH_STATUSES = new Set([
+  'succeeded',
   'failed',
   'cancelled',
   'canceled',
@@ -803,7 +794,10 @@ const _REQUESTED_RETRYABLE_DISPATCH_STATUSES = new Set([
   'not-found',
 ]);
 const _WATCHER_AUTONOMOUS_RETRYABLE_DISPATCH_STATUSES = new Set([
+  'succeeded',
   'failed',
+  'cancelled',
+  'canceled',
   'superseded',
   'not-found',
 ]);
@@ -940,6 +934,14 @@ function isWatcherAutonomousRetryableRecordedDispatchStatus(status) {
   return _WATCHER_AUTONOMOUS_RETRYABLE_DISPATCH_STATUSES.has(String(status || '').trim().toLowerCase());
 }
 
+function isRecordedDispatchAtLeastStuckMinAge(recordedDispatch, now, minAgeMinutes = STUCK_DISPATCH_MIN_AGE_MINUTES) {
+  const dispatchedAtMs = Date.parse(String(recordedDispatch?.dispatchedAt || ''));
+  if (!Number.isFinite(dispatchedAtMs)) return false;
+  const nowMs = Date.parse(String(now || ''));
+  const effectiveNowMs = Number.isFinite(nowMs) ? nowMs : Date.now();
+  return (effectiveNowMs - dispatchedAtMs) / 60_000 >= minAgeMinutes;
+}
+
 // True once a terminal-failed dispatch has been left orphaned (marker cleared,
 // no recovery established) longer than the phantom-handoff grace window. The
 // grace starts when the watcher first durably observes the handoff gap for this
@@ -995,11 +997,9 @@ function describeStaleDispatch(recordedDispatch, {
   minRefusals = STUCK_DISPATCH_MIN_REFUSALS,
   // Optional caller-supplied probe of current dispatch state. When
   // provided AND the returned status is in _NON_STUCK_DISPATCH_STATUSES,
-  // we return null (the request was admitted at some point — refusal
-  // history is just earlier attempts). When omitted, we fall back to
-  // refusal-count-only classification (safe for OSS standalone where
-  // no probe is available, but in agent-os contexts callers SHOULD
-  // pass the probe to avoid false-positive BLOCKED on healthy dispatches).
+  // we return null (the request is still admitted/running/parked). Terminal
+  // statuses fall through: finished dispatch != PR merged. When omitted, we
+  // fall back to refusal-count-only classification (safe for OSS standalone).
   dispatchStateProbe = null,
 } = {}) {
   if (!recordedDispatch || !recordedDispatch.dispatchedAt) return null;
@@ -2304,6 +2304,7 @@ async function dispatchMergeAgentForPR({
     // own (recovery owns it, or operator-stuck) — recovery-first means do NOT
     // re-dispatch over that.
     const diedWithoutHandoff = labelNames.includes(MERGE_AGENT_DISPATCHED_LABEL) || hasPendingLabelAddCleanup;
+    const oldEnoughForWatcherRecovery = isRecordedDispatchAtLeastStuckMinAge(latestRecordedDispatch, now);
     const priorReDispatches = Number(latestRecordedDispatch.watcherReDispatchCount || 0);
     if (scopedMergeAgentRetryRequested) {
       // Operator escape-hatch: force a re-dispatch regardless of the bound.
@@ -2323,6 +2324,7 @@ async function dispatchMergeAgentForPR({
     } else if (
       diedWithoutHandoff
       && isWatcherAutonomousRetryableRecordedDispatchStatus(recordedDispatchStatus?.status)
+      && oldEnoughForWatcherRecovery
       && priorReDispatches < _WATCHER_REDISPATCH_BOUND
     ) {
       // Auto-own the retry, bounded per head SHA.
@@ -2333,12 +2335,17 @@ async function dispatchMergeAgentForPR({
         prNumber,
         launchRequestId: latestRecordedDispatch.launchRequestId,
         previousStatus: recordedDispatchStatus.status,
+        stuckReason: 'terminal-without-merge',
         previousTrigger: latestRecordedDispatch.trigger || null,
         reDispatchCount: priorReDispatches + 1,
         bound: _WATCHER_REDISPATCH_BOUND,
         at: now,
       });
-    } else if (diedWithoutHandoff && isWatcherAutonomousRetryableRecordedDispatchStatus(recordedDispatchStatus?.status)) {
+    } else if (
+      diedWithoutHandoff
+      && isWatcherAutonomousRetryableRecordedDispatchStatus(recordedDispatchStatus?.status)
+      && oldEnoughForWatcherRecovery
+    ) {
       // Bound exhausted, still no clean handoff: hand the PR to the operator
       // with a durable terminal marker instead of looping. Best-effort — if the
       // label add fails the dispatch simply stays in skip-already-dispatched
@@ -2348,6 +2355,7 @@ async function dispatchMergeAgentForPR({
         prNumber,
         launchRequestId: latestRecordedDispatch.launchRequestId,
         previousStatus: recordedDispatchStatus.status,
+        stuckReason: 'terminal-without-merge',
         reDispatchCount: priorReDispatches,
         bound: _WATCHER_REDISPATCH_BOUND,
         at: now,

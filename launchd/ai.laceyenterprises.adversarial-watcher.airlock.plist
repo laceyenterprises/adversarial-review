@@ -36,6 +36,9 @@
     <key>Label</key>
     <string>ai.laceyenterprises.adversarial-watcher.airlock</string>
 
+    <key>UserName</key>
+    <string>airlock</string>
+
     <key>ProgramArguments</key>
     <array>
         <string>/bin/zsh</string>

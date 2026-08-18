@@ -63,6 +63,15 @@ function isTransientLocalGitError(err) {
   return /timed?\s*out|timeout|input\/output error|i\/o error|resource temporarily unavailable|temporarily unavailable|try again|too many open files|cannot allocate memory|connection reset|early eof|remote end hung up/.test(detail);
 }
 
+function isMissingLocalGitObjectError(err) {
+  const detail = [
+    err?.message,
+    err?.stderr,
+    err?.stdout,
+  ].map((part) => String(part || '').toLowerCase()).filter(Boolean).join('\n');
+  return /bad object|unknown revision|ambiguous argument|not a valid object name|needed a single revision|invalid object name|object .* not found|could not parse/.test(detail);
+}
+
 function extractIdentityHashes(identityOutput, expectedSha) {
   const hashes = String(identityOutput || '').match(FULL_SHA_RE) || [];
   if (hashes.length === 0) {
@@ -77,6 +86,23 @@ function cleanGitCommitMessageOutput(output) {
     lines.shift();
   }
   return lines.join('\n');
+}
+
+async function canMutateLocalCheckout(checkoutDir, { getuidImpl = process.getuid, statImpl = stat } = {}) {
+  if (typeof getuidImpl !== 'function') return false;
+  let callerUid;
+  try {
+    callerUid = getuidImpl();
+  } catch {
+    return false;
+  }
+  if (!Number.isInteger(callerUid)) return false;
+  try {
+    const checkoutStat = await statImpl(checkoutDir);
+    return checkoutStat.uid === callerUid;
+  } catch {
+    return false;
+  }
 }
 
 // Read the head commit from the LOCAL checkout instead of `gh api commits/<sha>`.
@@ -99,6 +125,8 @@ export async function fetchVerifiedCommitFromLocalGit({
   logger = console,
   retryBackoffMs = HEAD_CLOSER_SUPPRESSION_RETRY_BACKOFF_MS,
   sleepImpl = sleepMs,
+  getuidImpl = process.getuid,
+  statImpl = stat,
 } = {}) {
   const sha = String(headSha || '').trim();
   if (!repoPath || !sha) return null;
@@ -164,12 +192,81 @@ export async function fetchVerifiedCommitFromLocalGit({
       files: files.map((filename) => ({ filename })),
     };
   };
+  const fetchMissingCommit = async () => {
+    if (!await canMutateLocalCheckout(checkoutDir, { getuidImpl, statImpl })) {
+      logger?.debug?.(
+        `[watcher] local closer-commit fetch skipped for ${repoPath}#${prNumber} ` +
+          `head=${sha.slice(0, 12)}; checkout ownership does not match caller`
+      );
+      return false;
+    }
+    try {
+      await runGit(['fetch', '--quiet', '--no-tags', 'origin', sha]);
+      return true;
+    } catch (shaFetchErr) {
+      if (isTransientLocalGitError(shaFetchErr)) {
+        logger?.debug?.(
+          `[watcher] local closer-commit sha fetch exhausted transient retries for ${repoPath}#${prNumber} ` +
+            `head=${sha.slice(0, 12)}; deferring to gh: ${shaFetchErr?.message || shaFetchErr}`
+        );
+        return false;
+      }
+      logger?.debug?.(
+        `[watcher] local closer-commit sha fetch failed for ${repoPath}#${prNumber} ` +
+          `head=${sha.slice(0, 12)}; trying pull ref: ${shaFetchErr?.message || shaFetchErr}`
+      );
+      const pr = String(prNumber || '').trim();
+      if (!pr) return false;
+      try {
+        await runGit([
+          'fetch',
+          '--quiet',
+          '--no-tags',
+          'origin',
+          `+refs/pull/${pr}/head:refs/remotes/origin/pr/${pr}`,
+        ]);
+        return true;
+      } catch (pullRefFetchErr) {
+        if (isTransientLocalGitError(pullRefFetchErr)) {
+          logger?.debug?.(
+            `[watcher] local closer-commit pull-ref fetch exhausted transient retries for ${repoPath}#${prNumber} ` +
+              `head=${sha.slice(0, 12)}; deferring to gh: ${pullRefFetchErr?.message || pullRefFetchErr}`
+          );
+          return false;
+        }
+        logger?.debug?.(
+          `[watcher] local closer-commit pull-ref fetch failed for ${repoPath}#${prNumber} ` +
+            `head=${sha.slice(0, 12)}: ${pullRefFetchErr?.message || pullRefFetchErr}`
+        );
+        return false;
+      }
+    }
+  };
   try {
     return await readCommit();
   } catch (err) {
+    if (isMissingLocalGitObjectError(err)) {
+      const fetched = await fetchMissingCommit();
+      if (fetched) {
+        try {
+          return await readCommit();
+        } catch (retryErr) {
+          logger?.debug?.(
+            `[watcher] local closer-commit still unreadable after fetch for ${repoPath}#${prNumber} ` +
+              `head=${sha.slice(0, 12)}; deferring to gh: ${retryErr?.message || retryErr}`
+          );
+          return null;
+        }
+      }
+      logger?.debug?.(
+        `[watcher] local closer-commit fetch unavailable for ${repoPath}#${prNumber} ` +
+          `head=${sha.slice(0, 12)}; deferring to gh: ${err?.message || err}`
+      );
+      return null;
+    }
     logger?.debug?.(
-      `[watcher] local closer-commit read failed for ${repoPath}#${prNumber} ` +
-        `head=${sha.slice(0, 12)}: ${err?.message || err}`
+      `[watcher] local closer-commit unavailable for ${repoPath}#${prNumber} ` +
+        `head=${sha.slice(0, 12)}; deferring to gh: ${err?.message || err}`
     );
     return null;
   }
@@ -275,6 +372,8 @@ export async function fetchHeadCloserVerifiedCommit({
   logger = console,
   retryBackoffMs = [250, 1000],
   sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  getuidImpl = process.getuid,
+  statImpl = stat,
 } = {}) {
   const sha = String(headSha || '').trim();
   if (!repoPath || !sha) return null;
@@ -289,6 +388,10 @@ export async function fetchHeadCloserVerifiedCommit({
     hqRoot,
     execFileImpl,
     logger,
+    retryBackoffMs,
+    sleepImpl,
+    getuidImpl,
+    statImpl,
   });
   if (localCommit) {
     const localIdentity = isTerminalCloserCommitIdentity(localCommit);
@@ -328,6 +431,8 @@ export async function getHeadCloserCommitSuppression({
   logger = console,
   retryBackoffMs = [250, 1000],
   sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  getuidImpl = process.getuid,
+  statImpl = stat,
 } = {}) {
   const sha = String(headSha || '').trim();
   if (!repoPath || !sha) return { suppressed: false, reason: null };
@@ -342,6 +447,10 @@ export async function getHeadCloserCommitSuppression({
     hqRoot,
     execFileImpl,
     logger,
+    retryBackoffMs,
+    sleepImpl,
+    getuidImpl,
+    statImpl,
   });
   if (localCommit) {
     const localIdentity = isTerminalCloserCommitIdentity(localCommit);

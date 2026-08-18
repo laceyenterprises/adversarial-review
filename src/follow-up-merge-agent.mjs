@@ -770,9 +770,19 @@ function _utcDateString(timestampMs) {
  * Pure-ish: optional `fsImpl` / `now` make this fully testable without
  * touching the real filesystem or clock.
  */
-// Active/parked statuses suppress refusal-history stuck detection. Terminal
-// statuses do not: finished dispatch != PR merged.
+// Authoritative HQ status tokens that mean the dispatch has reached a
+// terminal state OR is actively running. If the dispatch reports any
+// of these, refusal history is irrelevant — the LRQ was admitted at
+// some point, refusals are just earlier-in-history attempts. Without
+// this check the helper would mislabel admitted dispatches as
+// pre-spawn BLOCKED forever once historical refusals exist in the audit log.
 const _NON_STUCK_DISPATCH_STATUSES = new Set([
+  // terminal — request finished one way or the other
+  'succeeded',
+  'failed',
+  'cancelled',
+  'canceled',
+  'superseded',
   // actively progressing — admission already happened
   'running',
   'starting',
@@ -997,9 +1007,11 @@ function describeStaleDispatch(recordedDispatch, {
   minRefusals = STUCK_DISPATCH_MIN_REFUSALS,
   // Optional caller-supplied probe of current dispatch state. When
   // provided AND the returned status is in _NON_STUCK_DISPATCH_STATUSES,
-  // we return null (the request is still admitted/running/parked). Terminal
-  // statuses fall through: finished dispatch != PR merged. When omitted, we
-  // fall back to refusal-count-only classification (safe for OSS standalone).
+  // we return null (the request was admitted at some point — refusal
+  // history is just earlier attempts). When omitted, we fall back to
+  // refusal-count-only classification (safe for OSS standalone where
+  // no probe is available, but in agent-os contexts callers SHOULD
+  // pass the probe to avoid false-positive BLOCKED on admitted dispatches).
   dispatchStateProbe = null,
 } = {}) {
   if (!recordedDispatch || !recordedDispatch.dispatchedAt) return null;

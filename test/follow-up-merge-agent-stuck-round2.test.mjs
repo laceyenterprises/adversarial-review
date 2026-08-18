@@ -16,7 +16,7 @@
 //
 // (2) The dispatchStateProbe must be wired so historical refusal
 //     audit rows are NOT promoted to BLOCKED when the same LRQ is
-//     now `running`. Round-1 already implemented the
+//     now `running` / `succeeded`. Round-1 already implemented the
 //     probe in describeStaleDispatch; round-2 fix is that the
 //     production caller passes one. Test: when the probe returns a
 //     non-stuck status, describeStaleDispatch returns null EVEN
@@ -122,7 +122,7 @@ test('round2: dispatchStateProbe returning "running" suppresses stuck classifica
   }
 });
 
-test('round2: dispatchStateProbe returning "succeeded" no longer suppresses stuck classification', () => {
+test('round2: dispatchStateProbe returning "succeeded" suppresses stuck classification', () => {
   const hqRoot = tmpHqRoot();
   try {
     writeRefusalAudit(hqRoot, LRQ, '2026-05-18', 5);
@@ -133,9 +133,8 @@ test('round2: dispatchStateProbe returning "succeeded" no longer suppresses stuc
       { hqRoot, now: NOW, dispatchStateProbe: probe },
     );
 
-    assert.notStrictEqual(detail, null,
-      'Terminal "succeeded" only proves the dispatch finished, not that the PR merged.');
-    assert.strictEqual(detail.refusalCount, 5);
+    assert.strictEqual(detail, null,
+      'Live "succeeded" status must suppress the stuck classification (round-2 #2).');
   } finally {
     rmSync(hqRoot, { recursive: true, force: true });
   }

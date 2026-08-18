@@ -88,6 +88,23 @@ function cleanGitCommitMessageOutput(output) {
   return lines.join('\n');
 }
 
+async function canMutateLocalCheckout(checkoutDir, { getuidImpl = process.getuid, statImpl = stat } = {}) {
+  if (typeof getuidImpl !== 'function') return false;
+  let callerUid;
+  try {
+    callerUid = getuidImpl();
+  } catch {
+    return false;
+  }
+  if (!Number.isInteger(callerUid)) return false;
+  try {
+    const checkoutStat = await statImpl(checkoutDir);
+    return checkoutStat.uid === callerUid;
+  } catch {
+    return false;
+  }
+}
+
 // Read the head commit from the LOCAL checkout instead of `gh api commits/<sha>`.
 //
 // The terminal-remediation closer commit carries its identity in the commit message
@@ -108,6 +125,8 @@ export async function fetchVerifiedCommitFromLocalGit({
   logger = console,
   retryBackoffMs = HEAD_CLOSER_SUPPRESSION_RETRY_BACKOFF_MS,
   sleepImpl = sleepMs,
+  getuidImpl = process.getuid,
+  statImpl = stat,
 } = {}) {
   const sha = String(headSha || '').trim();
   if (!repoPath || !sha) return null;
@@ -174,6 +193,13 @@ export async function fetchVerifiedCommitFromLocalGit({
     };
   };
   const fetchMissingCommit = async () => {
+    if (!await canMutateLocalCheckout(checkoutDir, { getuidImpl, statImpl })) {
+      logger?.debug?.(
+        `[watcher] local closer-commit fetch skipped for ${repoPath}#${prNumber} ` +
+          `head=${sha.slice(0, 12)}; checkout ownership does not match caller`
+      );
+      return false;
+    }
     try {
       await runGit(['fetch', '--quiet', '--no-tags', 'origin', sha]);
       return true;

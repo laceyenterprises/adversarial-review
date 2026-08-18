@@ -234,6 +234,24 @@ test('fetchVerifiedCommitFromLocalGit falls back to pull-ref fetch when bare sha
   );
 });
 
+test('fetchVerifiedCommitFromLocalGit does not fetch missing commits from daemon-owned checkouts', async () => {
+  const git = makeFakeGit({ missingUntilFetch: true });
+  const commit = await fetchVerifiedCommitFromLocalGit({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 5348,
+    headSha: HEAD_SHA,
+    execFileImpl: git,
+    getuidImpl: () => Number.MAX_SAFE_INTEGER,
+    logger: { warn() {}, debug() {} },
+  });
+  assert.equal(commit, null);
+  assert.equal(
+    git.calls.some((call) => call.includes('fetch --quiet --no-tags origin')),
+    false,
+    'cross-user local checkout reads must not mutate daemon-owned git state',
+  );
+});
+
 test('regression: getHeadCloserCommitSuppression recognizes the closer identity from LOCAL git even when gh throws (daemon failure)', async () => {
   const git = makeFakeGit();
   const result = await getHeadCloserCommitSuppression({

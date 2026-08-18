@@ -119,6 +119,7 @@ import {
   sleep, execHqDispatchCancel, detectAgentOsPresence,
 } from './merge-agent-hq-exec.mjs';
 import { collectStuckMergeAgentCandidateHeads } from './merge-agent-stuck-scan-candidates.mjs';
+import { isRecordedDispatchAtLeastStuckMinAge } from './merge-agent-stuck-age.mjs';
 
 const execFileAsync = promisify(execFile);
 const MERGE_AGENT_DISPATCH_SCHEMA_VERSION = 1;
@@ -944,13 +945,6 @@ function isWatcherAutonomousRetryableRecordedDispatchStatus(status) {
   return _WATCHER_AUTONOMOUS_RETRYABLE_DISPATCH_STATUSES.has(String(status || '').trim().toLowerCase());
 }
 
-function isRecordedDispatchAtLeastStuckMinAge(recordedDispatch, now, minAgeMinutes = STUCK_DISPATCH_MIN_AGE_MINUTES) {
-  const dispatchedAtMs = Date.parse(String(recordedDispatch?.dispatchedAt || ''));
-  if (!Number.isFinite(dispatchedAtMs)) return false;
-  const nowMs = Date.parse(String(now || ''));
-  const effectiveNowMs = Number.isFinite(nowMs) ? nowMs : Date.now();
-  return (effectiveNowMs - dispatchedAtMs) / 60_000 >= minAgeMinutes;
-}
 
 // True once a terminal-failed dispatch has been left orphaned (marker cleared,
 // no recovery established) longer than the phantom-handoff grace window. The
@@ -2316,7 +2310,7 @@ async function dispatchMergeAgentForPR({
     // own (recovery owns it, or operator-stuck) — recovery-first means do NOT
     // re-dispatch over that.
     const diedWithoutHandoff = labelNames.includes(MERGE_AGENT_DISPATCHED_LABEL) || hasPendingLabelAddCleanup;
-    const oldEnoughForWatcherRecovery = isRecordedDispatchAtLeastStuckMinAge(latestRecordedDispatch, now);
+    const oldEnoughForWatcherRecovery = isRecordedDispatchAtLeastStuckMinAge(latestRecordedDispatch, now, STUCK_DISPATCH_MIN_AGE_MINUTES);
     const priorReDispatches = Number(latestRecordedDispatch.watcherReDispatchCount || 0);
     if (scopedMergeAgentRetryRequested) {
       // Operator escape-hatch: force a re-dispatch regardless of the bound.

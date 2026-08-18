@@ -59,14 +59,30 @@ function makeFakeGit({
   missingUntilFetch = false,
   failShaFetch = false,
   failPullRefFetch = false,
+  transientShaFetchFailures = 0,
+  transientPullRefFetchFailures = 0,
 } = {}) {
   const calls = [];
   let fetched = false;
+  let shaFetchAttempts = 0;
+  let pullRefFetchAttempts = 0;
   const impl = async (file, args) => {
     calls.push(args.join(' '));
     assert.equal(file, 'git');
     const joined = args.join(' ');
     if (joined.includes('fetch --quiet --no-tags origin')) {
+      if (joined.includes(`origin ${HEAD_SHA}`)) {
+        shaFetchAttempts += 1;
+        if (shaFetchAttempts <= transientShaFetchFailures) {
+          throw Object.assign(new Error('TLS handshake timeout'), { code: 'ETIMEDOUT' });
+        }
+      }
+      if (joined.includes('+refs/pull/')) {
+        pullRefFetchAttempts += 1;
+        if (pullRefFetchAttempts <= transientPullRefFetchFailures) {
+          throw Object.assign(new Error('remote end hung up unexpectedly'), { code: 'ECONNRESET' });
+        }
+      }
       if (joined.includes(`origin ${HEAD_SHA}`) && failShaFetch) {
         throw new Error(`fatal: couldn't find remote ref ${HEAD_SHA}`);
       }
@@ -218,6 +234,56 @@ test('fetchVerifiedCommitFromLocalGit fetches a missing commit by sha, then read
   );
 });
 
+test('fetchVerifiedCommitFromLocalGit retries transient sha fetch failures before reading identity', async () => {
+  const git = makeFakeGit({ missingUntilFetch: true, transientShaFetchFailures: 1 });
+  const sleeps = [];
+  const commit = await fetchVerifiedCommitFromLocalGit({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 5348,
+    headSha: HEAD_SHA,
+    execFileImpl: git,
+    retryBackoffMs: [3, 7],
+    sleepImpl: async (ms) => { sleeps.push(ms); },
+    logger: { warn() {}, debug() {} },
+  });
+  assert.equal(commit.sha, HEAD_SHA);
+  assert.deepEqual(sleeps, [3]);
+  assert.equal(
+    git.calls.filter((call) => call.includes(`fetch --quiet --no-tags origin ${HEAD_SHA}`)).length,
+    2,
+  );
+  assert.equal(
+    git.calls.some((call) => call.includes('+refs/pull/5348/head')),
+    false,
+    'transient sha fetch recovery should not fall through to pull-ref fetch',
+  );
+});
+
+test('fetchVerifiedCommitFromLocalGit does not treat exhausted transient sha fetch as bare-sha rejection', async () => {
+  const git = makeFakeGit({ missingUntilFetch: true, transientShaFetchFailures: 3 });
+  const sleeps = [];
+  const commit = await fetchVerifiedCommitFromLocalGit({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 5348,
+    headSha: HEAD_SHA,
+    execFileImpl: git,
+    retryBackoffMs: [3, 7],
+    sleepImpl: async (ms) => { sleeps.push(ms); },
+    logger: { warn() {}, debug() {} },
+  });
+  assert.equal(commit, null);
+  assert.deepEqual(sleeps, [3, 7]);
+  assert.equal(
+    git.calls.filter((call) => call.includes(`fetch --quiet --no-tags origin ${HEAD_SHA}`)).length,
+    3,
+  );
+  assert.equal(
+    git.calls.some((call) => call.includes('+refs/pull/5348/head')),
+    false,
+    'exhausted transient sha fetch must not be reclassified as an unresolvable sha',
+  );
+});
+
 test('fetchVerifiedCommitFromLocalGit falls back to pull-ref fetch when bare sha fetch is rejected', async () => {
   const git = makeFakeGit({ missingUntilFetch: true, failShaFetch: true });
   const commit = await fetchVerifiedCommitFromLocalGit({
@@ -231,6 +297,30 @@ test('fetchVerifiedCommitFromLocalGit falls back to pull-ref fetch when bare sha
   assert.ok(
     git.calls.some((call) => call.includes('fetch --quiet --no-tags origin +refs/pull/5348/head:refs/remotes/origin/pr/5348')),
     'bare sha rejection should fall back to the PR head ref',
+  );
+});
+
+test('fetchVerifiedCommitFromLocalGit retries transient pull-ref fetch after permanent bare-sha rejection', async () => {
+  const git = makeFakeGit({
+    missingUntilFetch: true,
+    failShaFetch: true,
+    transientPullRefFetchFailures: 1,
+  });
+  const sleeps = [];
+  const commit = await fetchVerifiedCommitFromLocalGit({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 5348,
+    headSha: HEAD_SHA,
+    execFileImpl: git,
+    retryBackoffMs: [5, 9],
+    sleepImpl: async (ms) => { sleeps.push(ms); },
+    logger: { warn() {}, debug() {} },
+  });
+  assert.equal(commit.sha, HEAD_SHA);
+  assert.deepEqual(sleeps, [5]);
+  assert.equal(
+    git.calls.filter((call) => call.includes('fetch --quiet --no-tags origin +refs/pull/5348/head:refs/remotes/origin/pr/5348')).length,
+    2,
   );
 });
 
@@ -250,6 +340,63 @@ test('fetchVerifiedCommitFromLocalGit does not fetch missing commits from daemon
     false,
     'cross-user local checkout reads must not mutate daemon-owned git state',
   );
+});
+
+test('fetchHeadCloserVerifiedCommit forwards local checkout ownership injections', async () => {
+  const sentinels = {
+    getuidImpl: () => Number.MAX_SAFE_INTEGER,
+    statImpl: async () => ({ uid: Number.MAX_SAFE_INTEGER }),
+  };
+  let forwarded;
+  await fetchHeadCloserVerifiedCommit({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 5348,
+    headSha: HEAD_SHA,
+    fetchVerifiedCommitFromLocalGitImpl: async (options) => {
+      forwarded = options;
+      return null;
+    },
+    execGhWithRetryImpl: async () => ({
+      stdout: JSON.stringify({
+        sha: HEAD_SHA,
+        commit: { message: 'remote verified closer by login' },
+        committer: { login: 'merge-agent-lacey' },
+        parents: [{ sha: PARENT_SHA }],
+      }),
+    }),
+    ...sentinels,
+    logger: { warn() {}, debug() {} },
+  });
+  assert.equal(forwarded.getuidImpl, sentinels.getuidImpl);
+  assert.equal(forwarded.statImpl, sentinels.statImpl);
+});
+
+test('getHeadCloserCommitSuppression forwards local checkout ownership injections', async () => {
+  const sentinels = {
+    getuidImpl: () => Number.MAX_SAFE_INTEGER,
+    statImpl: async () => ({ uid: Number.MAX_SAFE_INTEGER }),
+  };
+  let forwarded;
+  await getHeadCloserCommitSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 5348,
+    headSha: HEAD_SHA,
+    fetchVerifiedCommitFromLocalGitImpl: async (options) => {
+      forwarded = options;
+      return null;
+    },
+    execGhWithRetryImpl: async () => ({
+      stdout: JSON.stringify({
+        sha: HEAD_SHA,
+        message: 'external',
+        committerLogin: 'some-human',
+      }),
+    }),
+    ...sentinels,
+    logger: { warn() {}, debug() {} },
+  });
+  assert.equal(forwarded.getuidImpl, sentinels.getuidImpl);
+  assert.equal(forwarded.statImpl, sentinels.statImpl);
 });
 
 test('regression: getHeadCloserCommitSuppression recognizes the closer identity from LOCAL git even when gh throws (daemon failure)', async () => {

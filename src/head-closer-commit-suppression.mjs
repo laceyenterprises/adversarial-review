@@ -204,6 +204,13 @@ export async function fetchVerifiedCommitFromLocalGit({
       await runGit(['fetch', '--quiet', '--no-tags', 'origin', sha]);
       return true;
     } catch (shaFetchErr) {
+      if (isTransientLocalGitError(shaFetchErr)) {
+        logger?.debug?.(
+          `[watcher] local closer-commit sha fetch exhausted transient retries for ${repoPath}#${prNumber} ` +
+            `head=${sha.slice(0, 12)}; deferring to gh: ${shaFetchErr?.message || shaFetchErr}`
+        );
+        return false;
+      }
       logger?.debug?.(
         `[watcher] local closer-commit sha fetch failed for ${repoPath}#${prNumber} ` +
           `head=${sha.slice(0, 12)}; trying pull ref: ${shaFetchErr?.message || shaFetchErr}`
@@ -220,6 +227,13 @@ export async function fetchVerifiedCommitFromLocalGit({
         ]);
         return true;
       } catch (pullRefFetchErr) {
+        if (isTransientLocalGitError(pullRefFetchErr)) {
+          logger?.debug?.(
+            `[watcher] local closer-commit pull-ref fetch exhausted transient retries for ${repoPath}#${prNumber} ` +
+              `head=${sha.slice(0, 12)}; deferring to gh: ${pullRefFetchErr?.message || pullRefFetchErr}`
+          );
+          return false;
+        }
         logger?.debug?.(
           `[watcher] local closer-commit pull-ref fetch failed for ${repoPath}#${prNumber} ` +
             `head=${sha.slice(0, 12)}: ${pullRefFetchErr?.message || pullRefFetchErr}`
@@ -358,6 +372,8 @@ export async function fetchHeadCloserVerifiedCommit({
   logger = console,
   retryBackoffMs = [250, 1000],
   sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  getuidImpl = process.getuid,
+  statImpl = stat,
 } = {}) {
   const sha = String(headSha || '').trim();
   if (!repoPath || !sha) return null;
@@ -374,6 +390,8 @@ export async function fetchHeadCloserVerifiedCommit({
     logger,
     retryBackoffMs,
     sleepImpl,
+    getuidImpl,
+    statImpl,
   });
   if (localCommit) {
     const localIdentity = isTerminalCloserCommitIdentity(localCommit);
@@ -413,6 +431,8 @@ export async function getHeadCloserCommitSuppression({
   logger = console,
   retryBackoffMs = [250, 1000],
   sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  getuidImpl = process.getuid,
+  statImpl = stat,
 } = {}) {
   const sha = String(headSha || '').trim();
   if (!repoPath || !sha) return { suppressed: false, reason: null };
@@ -429,6 +449,8 @@ export async function getHeadCloserCommitSuppression({
     logger,
     retryBackoffMs,
     sleepImpl,
+    getuidImpl,
+    statImpl,
   });
   if (localCommit) {
     const localIdentity = isTerminalCloserCommitIdentity(localCommit);

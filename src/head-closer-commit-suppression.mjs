@@ -63,6 +63,15 @@ function isTransientLocalGitError(err) {
   return /timed?\s*out|timeout|input\/output error|i\/o error|resource temporarily unavailable|temporarily unavailable|try again|too many open files|cannot allocate memory|connection reset|early eof|remote end hung up/.test(detail);
 }
 
+function isMissingLocalGitObjectError(err) {
+  const detail = [
+    err?.message,
+    err?.stderr,
+    err?.stdout,
+  ].map((part) => String(part || '').toLowerCase()).filter(Boolean).join('\n');
+  return /bad object|unknown revision|ambiguous argument|not a valid object name|needed a single revision|invalid object name|object .* not found|could not parse/.test(detail);
+}
+
 function extractIdentityHashes(identityOutput, expectedSha) {
   const hashes = String(identityOutput || '').match(FULL_SHA_RE) || [];
   if (hashes.length === 0) {
@@ -164,12 +173,60 @@ export async function fetchVerifiedCommitFromLocalGit({
       files: files.map((filename) => ({ filename })),
     };
   };
+  const fetchMissingCommit = async () => {
+    try {
+      await runGit(['fetch', '--quiet', '--no-tags', 'origin', sha]);
+      return true;
+    } catch (shaFetchErr) {
+      logger?.debug?.(
+        `[watcher] local closer-commit sha fetch failed for ${repoPath}#${prNumber} ` +
+          `head=${sha.slice(0, 12)}; trying pull ref: ${shaFetchErr?.message || shaFetchErr}`
+      );
+      const pr = String(prNumber || '').trim();
+      if (!pr) return false;
+      try {
+        await runGit([
+          'fetch',
+          '--quiet',
+          '--no-tags',
+          'origin',
+          `+refs/pull/${pr}/head:refs/remotes/origin/pr/${pr}`,
+        ]);
+        return true;
+      } catch (pullRefFetchErr) {
+        logger?.debug?.(
+          `[watcher] local closer-commit pull-ref fetch failed for ${repoPath}#${prNumber} ` +
+            `head=${sha.slice(0, 12)}: ${pullRefFetchErr?.message || pullRefFetchErr}`
+        );
+        return false;
+      }
+    }
+  };
   try {
     return await readCommit();
   } catch (err) {
+    if (isMissingLocalGitObjectError(err)) {
+      const fetched = await fetchMissingCommit();
+      if (fetched) {
+        try {
+          return await readCommit();
+        } catch (retryErr) {
+          logger?.debug?.(
+            `[watcher] local closer-commit still unreadable after fetch for ${repoPath}#${prNumber} ` +
+              `head=${sha.slice(0, 12)}; deferring to gh: ${retryErr?.message || retryErr}`
+          );
+          return null;
+        }
+      }
+      logger?.debug?.(
+        `[watcher] local closer-commit fetch unavailable for ${repoPath}#${prNumber} ` +
+          `head=${sha.slice(0, 12)}; deferring to gh: ${err?.message || err}`
+      );
+      return null;
+    }
     logger?.debug?.(
-      `[watcher] local closer-commit read failed for ${repoPath}#${prNumber} ` +
-        `head=${sha.slice(0, 12)}: ${err?.message || err}`
+      `[watcher] local closer-commit unavailable for ${repoPath}#${prNumber} ` +
+        `head=${sha.slice(0, 12)}; deferring to gh: ${err?.message || err}`
     );
     return null;
   }
@@ -289,6 +346,8 @@ export async function fetchHeadCloserVerifiedCommit({
     hqRoot,
     execFileImpl,
     logger,
+    retryBackoffMs,
+    sleepImpl,
   });
   if (localCommit) {
     const localIdentity = isTerminalCloserCommitIdentity(localCommit);
@@ -342,6 +401,8 @@ export async function getHeadCloserCommitSuppression({
     hqRoot,
     execFileImpl,
     logger,
+    retryBackoffMs,
+    sleepImpl,
   });
   if (localCommit) {
     const localIdentity = isTerminalCloserCommitIdentity(localCommit);

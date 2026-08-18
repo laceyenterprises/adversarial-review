@@ -51,20 +51,39 @@ const PARENT_SHA = '7097a3c3a0000000000000000000000000000000';
 const SECOND_PARENT_SHA = '8097a3c3a0000000000000000000000000000000';
 
 // A fake `git` execFileImpl that answers the exact commands the local reader issues.
-function makeFakeGit({ message = HAMMER_MESSAGE, parent = PARENT_SHA, files = ['modules/worker-pool/lib/hq-drs.sh'], failObjectRead = false } = {}) {
+function makeFakeGit({
+  message = HAMMER_MESSAGE,
+  parent = PARENT_SHA,
+  files = ['modules/worker-pool/lib/hq-drs.sh'],
+  failObjectRead = false,
+  missingUntilFetch = false,
+  failShaFetch = false,
+  failPullRefFetch = false,
+} = {}) {
   const calls = [];
+  let fetched = false;
   const impl = async (file, args) => {
     calls.push(args.join(' '));
     assert.equal(file, 'git');
     const joined = args.join(' ');
-    if (failObjectRead && (joined.includes('show') || joined.includes('diff-tree'))) {
+    if (joined.includes('fetch --quiet --no-tags origin')) {
+      if (joined.includes(`origin ${HEAD_SHA}`) && failShaFetch) {
+        throw new Error(`fatal: couldn't find remote ref ${HEAD_SHA}`);
+      }
+      if (joined.includes('+refs/pull/') && failPullRefFetch) {
+        throw new Error('fatal: couldn\'t find remote ref refs/pull/5348/head');
+      }
+      fetched = true;
+      return { stdout: '' };
+    }
+    if ((failObjectRead || (missingUntilFetch && !fetched)) && (joined.includes('show') || joined.includes('diff-tree'))) {
       const err = new Error(`fatal: bad object ${HEAD_SHA}`);
+      err.stderr = `fatal: bad object ${HEAD_SHA}`;
       throw err;
     }
     if (joined.includes('--format=%H %P')) return { stdout: `${HEAD_SHA} ${parent}\n` };
     if (joined.includes('--format=%B')) return { stdout: `${message}\n` };
     if (joined.includes('diff-tree')) return { stdout: `${files.join('\n')}\n` };
-    if (joined.includes('fetch')) return { stdout: '' };
     throw new Error(`unexpected git args: ${joined}`);
   };
   impl.calls = calls;
@@ -182,8 +201,8 @@ test('fetchVerifiedCommitFromLocalGit: retries transient local git subprocess fa
   assert.deepEqual(sleeps, [1, 1]);
 });
 
-test('fetchVerifiedCommitFromLocalGit does not fetch missing commits from daemon-owned checkouts', async () => {
-  const git = makeFakeGit({ failObjectRead: true });
+test('fetchVerifiedCommitFromLocalGit fetches a missing commit by sha, then reads identity', async () => {
+  const git = makeFakeGit({ missingUntilFetch: true });
   const commit = await fetchVerifiedCommitFromLocalGit({
     repoPath: 'laceyenterprises/agent-os',
     prNumber: 5348,
@@ -191,8 +210,28 @@ test('fetchVerifiedCommitFromLocalGit does not fetch missing commits from daemon
     execFileImpl: git,
     logger: { warn() {}, debug() {} },
   });
-  assert.equal(commit, null);
-  assert.equal(git.calls.some((call) => call.includes(' fetch ')), false);
+  assert.equal(commit.sha, HEAD_SHA);
+  assert.equal(isTerminalCloserCommitIdentity(commit).suppressed, true);
+  assert.ok(
+    git.calls.some((call) => call.includes(`fetch --quiet --no-tags origin ${HEAD_SHA}`)),
+    'missing local object should be fetched directly by sha',
+  );
+});
+
+test('fetchVerifiedCommitFromLocalGit falls back to pull-ref fetch when bare sha fetch is rejected', async () => {
+  const git = makeFakeGit({ missingUntilFetch: true, failShaFetch: true });
+  const commit = await fetchVerifiedCommitFromLocalGit({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 5348,
+    headSha: HEAD_SHA,
+    execFileImpl: git,
+    logger: { warn() {}, debug() {} },
+  });
+  assert.equal(commit.sha, HEAD_SHA);
+  assert.ok(
+    git.calls.some((call) => call.includes('fetch --quiet --no-tags origin +refs/pull/5348/head:refs/remotes/origin/pr/5348')),
+    'bare sha rejection should fall back to the PR head ref',
+  );
 });
 
 test('regression: getHeadCloserCommitSuppression recognizes the closer identity from LOCAL git even when gh throws (daemon failure)', async () => {
@@ -253,9 +292,10 @@ test('fetchHeadCloserVerifiedCommit falls back to gh when local git has no close
   assert.deepEqual(commit.changedFiles, ['src/changed.mjs']);
 });
 
-test('fallback: when the commit is absent locally, getHeadCloserCommitSuppression falls back to the gh probe', async () => {
-  const git = makeFakeGit({ failObjectRead: true });
+test('fallback: when local fetch cannot make the commit readable, getHeadCloserCommitSuppression falls back to gh without noisy local-read error', async () => {
+  const git = makeFakeGit({ failObjectRead: true, failShaFetch: true, failPullRefFetch: true });
   let ghCalled = false;
+  const debugMessages = [];
   const gh = async ({ args }) => {
     ghCalled = true;
     assert.ok(args.includes('--jq'));
@@ -273,10 +313,14 @@ test('fallback: when the commit is absent locally, getHeadCloserCommitSuppressio
     headSha: HEAD_SHA,
     execFileImpl: git,
     execGhWithRetryImpl: gh,
-    logger: { warn() {}, debug() {} },
+    logger: { warn() {}, debug(message) { debugMessages.push(message); } },
   });
   assert.equal(ghCalled, true);
   assert.equal(result.suppressed, true);
+  assert.equal(
+    debugMessages.some((message) => String(message).includes('local closer-commit read failed')),
+    false,
+  );
 });
 
 test('safety: an external (non-closer) commit at a local head is NOT suppressed, and still consults gh for a committer.login-only identity', async () => {

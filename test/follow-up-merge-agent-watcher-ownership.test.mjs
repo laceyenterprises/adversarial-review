@@ -137,6 +137,50 @@ test('watcher owns outcome: re-dispatches a died-without-handoff failed worker a
   assert.equal(records[0].hqOwnerUser, 'airlock', 'dispatch records must preserve the resolved HQ owner for later cleanup probes');
 });
 
+test('phantom completion: re-dispatches a terminal succeeded worker when PR is still open with marker', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = makeHqRoot('airlock');
+  seedRecord(rootDir, { watcherReDispatchCount: 0 });
+  const dispatchCalls = [];
+  const ghCalls = [];
+  const lifecycleEvents = [];
+
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    prepareOriginalWorkerImpl: PROCEED_ORIGINAL_WORKER,
+    rootDir,
+    ...makeJob({ labels: [{ name: 'merge-agent-dispatched' }] }),
+    env: baseEnv(hqRoot),
+    execFileImpl: async (cmd, args) => {
+      if (args[0] === 'dispatch' && args[1] === 'status') {
+        return { stdout: JSON.stringify({ status: 'succeeded' }) };
+      }
+      dispatchCalls.push(args);
+      return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
+    },
+    ghExecFileImpl: adapterAwareGhExecFile({ calls: ghCalls }),
+    logger: {
+      info: (line) => lifecycleEvents.push(JSON.parse(line)),
+      warn: () => {},
+      error: () => {},
+    },
+    now: '2026-05-24T04:00:00.000Z',
+  });
+
+  assert.equal(result.decision, 'dispatch', 'terminal succeeded without merge must not strand behind skip-already-dispatched');
+  assert.equal(dispatchCalls.length, 1, 'phantom completion should re-action through the bounded re-dispatch path');
+  assert.ok(didWriteLabel(ghCalls, 'add', 'merge-agent-dispatched'), 'new dispatch should carry the marker label');
+  assert.ok(
+    lifecycleEvents.some((event) => (
+      event.event === 'merge_agent.watcher_owned_redispatch'
+      && event.previousStatus === 'succeeded'
+      && event.stuckReason === 'terminal-without-merge'
+    )),
+    'phantom completion should be logged with a distinct stuck reason'
+  );
+  assert.equal(listMergeAgentDispatches(rootDir)[0].watcherReDispatchCount, 1);
+});
+
 test('does NOT dispatch a merge agent for an already merged/closed PR (skip-pr-not-open)', async () => {
   // Merge-agent hygiene: a PR that merged/closed while a review tick was in
   // flight must never draw a merge-agent dispatch — it burns a worker and feeds
@@ -194,6 +238,60 @@ test('does NOT dispatch a merge agent for an already merged/closed PR (skip-pr-n
     lifecycleEvents.some((event) => event.event === 'merge_agent.dispatch_skipped_pr_not_open'),
     'the closed-PR guard must log through the injected logger without a ReferenceError'
   );
+});
+
+test('terminal succeeded dispatch younger than stuck threshold is not re-actioned yet', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = makeHqRoot('airlock');
+  seedRecord(rootDir, { watcherReDispatchCount: 0 });
+  const dispatchCalls = [];
+
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    prepareOriginalWorkerImpl: PROCEED_ORIGINAL_WORKER,
+    rootDir,
+    ...makeJob({ labels: [{ name: 'merge-agent-dispatched' }] }),
+    env: baseEnv(hqRoot),
+    execFileImpl: async (cmd, args) => {
+      if (args[0] === 'dispatch' && args[1] === 'status') {
+        return { stdout: JSON.stringify({ status: 'succeeded' }) };
+      }
+      dispatchCalls.push(args);
+      return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
+    },
+    ghExecFileImpl: adapterAwareGhExecFile(),
+    now: '2026-05-24T00:05:00.000Z',
+  });
+
+  assert.equal(result.decision, 'skip-already-dispatched');
+  assert.equal(dispatchCalls.length, 0, 'terminal dispatches under the stuck threshold should not be recycled immediately');
+});
+
+test('non-terminal running dispatch with marker is not re-actioned', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = makeHqRoot('airlock');
+  seedRecord(rootDir, { watcherReDispatchCount: 0 });
+  const dispatchCalls = [];
+
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    prepareOriginalWorkerImpl: PROCEED_ORIGINAL_WORKER,
+    rootDir,
+    ...makeJob({ labels: [{ name: 'merge-agent-dispatched' }] }),
+    env: baseEnv(hqRoot),
+    execFileImpl: async (cmd, args) => {
+      if (args[0] === 'dispatch' && args[1] === 'status') {
+        return { stdout: JSON.stringify({ status: 'running' }) };
+      }
+      dispatchCalls.push(args);
+      return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
+    },
+    ghExecFileImpl: adapterAwareGhExecFile(),
+    now: '2026-05-24T04:00:00.000Z',
+  });
+
+  assert.equal(result.decision, 'skip-already-dispatched');
+  assert.equal(dispatchCalls.length, 0, 'a genuinely running/admitted dispatch must keep duplicate-dispatch protection active');
 });
 
 test('recovery-first within grace: does NOT re-dispatch or escalate while the handoff window is open', async () => {

@@ -114,6 +114,10 @@ import { validateStartupDeliveryIdentity } from './adapters/comms/github-pr-comm
 import { applyPreSpawnLifecycleGate } from './follow-up-stuck-claim-sweep.mjs';
 import { detectQuotaExhaustion, parseQuotaResetAt } from './quota-exhaustion.mjs';
 import {
+  resolveRemediationWorkerClassWithFallback,
+  remediationWorkerClassFallback,
+} from './remediation-worker-class-fallback.mjs';
+import {
   DEFAULT_REPLIES_ROOT,
   HQ_REMEDIATION_DISPATCH_TRIGGER,
   digestWorkerFinalMessage,
@@ -3292,7 +3296,26 @@ async function consumeNextFollowUpJob({
   const jobEnv = { ...process.env };
 
   try {
-    workerClass = pickRemediationWorkerClass(claimed.job);
+    const routedWorkerClass = pickRemediationWorkerClass(claimed.job);
+    // Cap-aware fallback: when the routed remediator harness's provider is
+    // authoritatively quota-grounded (e.g. a [claude-code] PR routes to codex
+    // but codex is exhausted), fall back to claude-code instead of quota-holding
+    // the PR un-remediated. Auto-reverts to the routed harness on recovery.
+    const workerClassFallback = await resolveRemediationWorkerClassWithFallback({
+      primary: routedWorkerClass,
+      fallbackWorkerClasses: remediationWorkerClassFallback(jobEnv),
+      env: jobEnv,
+      execFileImpl,
+    });
+    workerClass = workerClassFallback.workerClass;
+    if (workerClassFallback.fellBack) {
+      log.warn?.(
+        `[follow-up-remediation] remediation-worker-class cap-fallback: ` +
+          `routed=${routedWorkerClass} -> ${workerClass} ` +
+          `(primary provider grounded: ${workerClassFallback.primaryState}); ` +
+          `auto-reverts when the routed harness recovers`
+      );
+    }
     const remediationMode = resolveRemediationRuntimeMode(claimed.job, {
       healthRouter,
       env: jobEnv,

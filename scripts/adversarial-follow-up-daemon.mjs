@@ -46,6 +46,7 @@ import {
   resolveRemediationMaxConcurrentJobs,
 } from '../src/follow-up-remediation.mjs';
 import { reconcileInProgressFollowUpJobs } from '../src/follow-up-reconcile.mjs';
+import { resolveRemediationWorkerClassWithFallback } from '../src/remediation-worker-class-fallback.mjs';
 import { retryFailedCommentDeliveries } from '../src/adapters/comms/github-pr-comments/comment-delivery.mjs';
 import {
   refreshFollowUpGithubToken,
@@ -540,6 +541,7 @@ async function runFollowUpDaemonIteration({
     await runStep('consume', async () => {
       const result = await consumeFollowUpJobsUntilCapacityImpl({
         maxConcurrent: MAX_CONCURRENT_REMEDIATION_JOBS,
+        resolveRemediationWorkerClassImpl: resolveRemediationWorkerClassWithFallback,
         shouldStop,
       });
       logTick(

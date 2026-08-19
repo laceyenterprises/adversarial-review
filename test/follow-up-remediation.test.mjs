@@ -3820,6 +3820,53 @@ test('prepareClaudeCodeRemediationStartupEnv keeps OAuth and git audit evidence 
   }
 });
 
+// The remediation worker executes LLM-generated payloads. The broker shared
+// secret mints OAuth tokens for every provider the loopback broker serves, so it
+// must reach the worker ONLY through the deliberate `applyMergeAgentBrokerEnv`
+// grant — never ambiently via `{ ...sourceEnv }` inheritance.
+test('prepareClaudeCodeRemediationStartupEnv withholds the broker shared secret when broker push is off', () => {
+  const { env, startupEvidence } = prepareClaudeCodeRemediationStartupEnv({
+    sourceEnv: {
+      PATH: '/usr/bin',
+      OAUTH_BROKER_SHARED_SECRET: 'inline-sekret',
+      OAUTH_BROKER_SHARED_SECRET_FILE: '/run/secrets/broker',
+    },
+  });
+  assert.equal(env.OAUTH_BROKER_SHARED_SECRET, undefined);
+  assert.equal(env.OAUTH_BROKER_SHARED_SECRET_FILE, undefined);
+  assert.deepEqual(
+    startupEvidence.sanitizedEnv.brokerSharedSecretWithheld,
+    ['OAUTH_BROKER_SHARED_SECRET', 'OAUTH_BROKER_SHARED_SECRET_FILE'],
+  );
+  assert.deepEqual(startupEvidence.sanitizedEnv.brokerSharedSecretGranted, []);
+});
+
+test('prepareClaudeCodeRemediationStartupEnv grants only the secret FILE when broker push is on', () => {
+  const { env, startupEvidence } = prepareClaudeCodeRemediationStartupEnv({
+    sourceEnv: {
+      PATH: '/usr/bin',
+      MERGE_AGENT_AUTH_VIA_BROKER: 'true',
+      OAUTH_BROKER_SHARED_SECRET: 'inline-sekret',
+      OAUTH_BROKER_SHARED_SECRET_FILE: '/run/secrets/broker',
+    },
+  });
+  // The FILE reference is what the broker-backed push legitimately needs.
+  assert.equal(env.OAUTH_BROKER_SHARED_SECRET_FILE, '/run/secrets/broker');
+  // The INLINE secret is never part of that grant, so it stays withheld.
+  assert.equal(env.OAUTH_BROKER_SHARED_SECRET, undefined);
+  assert.deepEqual(
+    startupEvidence.sanitizedEnv.brokerSharedSecretWithheld,
+    ['OAUTH_BROKER_SHARED_SECRET'],
+  );
+  assert.deepEqual(
+    startupEvidence.sanitizedEnv.brokerSharedSecretGranted,
+    ['OAUTH_BROKER_SHARED_SECRET_FILE'],
+  );
+  // Audit evidence must not claim a key is stripped while it sits in the env.
+  assert.ok(!startupEvidence.resolvedStartup.strippedEnv.includes('OAUTH_BROKER_SHARED_SECRET_FILE'));
+  assert.ok(startupEvidence.resolvedStartup.strippedEnv.includes('OAUTH_BROKER_SHARED_SECRET'));
+});
+
 test('resolveClaudeCodeCliPath honors CLAUDE_CODE_CLI_PATH override', () => {
   const prev = process.env.CLAUDE_CODE_CLI_PATH;
   process.env.CLAUDE_CODE_CLI_PATH = '/custom/path/to/claude';
@@ -4070,13 +4117,18 @@ const READYZ_CLAUDE_SERVING = {
   },
 };
 
-test('resolveClaudeCodeOAuthTransport defaults to broker and honors the config key', () => {
-  assert.equal(resolveClaudeCodeOAuthTransport({}), 'broker');
+test('resolveClaudeCodeOAuthTransport auto-detects (keychain when no broker secret) and honors the config key', () => {
+  // No explicit override + no broker secret configured -> keychain, so a
+  // standalone install keeps working with its login-keychain claude-code OAuth.
+  assert.equal(resolveClaudeCodeOAuthTransport({}), 'keychain');
+  // No explicit override + a broker secret configured -> broker (fleet posture).
+  assert.equal(resolveClaudeCodeOAuthTransport({ OAUTH_BROKER_SHARED_SECRET_FILE: '/x/secret' }), 'broker');
+  // Explicit overrides win regardless of secret presence.
   assert.equal(resolveClaudeCodeOAuthTransport({ ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT: 'broker' }), 'broker');
-  assert.equal(resolveClaudeCodeOAuthTransport({ ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT: 'keychain' }), 'keychain');
+  assert.equal(resolveClaudeCodeOAuthTransport({ ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT: 'keychain', OAUTH_BROKER_SHARED_SECRET_FILE: '/x/secret' }), 'keychain');
   assert.equal(resolveClaudeCodeOAuthTransport({ ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT: 'KEYCHAIN' }), 'keychain');
-  // Unknown value falls back to the fleet default rather than failing open.
-  assert.equal(resolveClaudeCodeOAuthTransport({ ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT: 'garbage' }), 'broker');
+  // Unknown value falls through to auto-detect (no secret -> keychain).
+  assert.equal(resolveClaudeCodeOAuthTransport({ ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT: 'garbage' }), 'keychain');
 });
 
 test('assertClaudeCodeOAuth (broker) PASSES when keychain is dead but the broker serves claude-code', async () => {
@@ -4104,17 +4156,36 @@ test('assertClaudeCodeOAuth (broker) PASSES when keychain is dead but the broker
   assert.equal(result, undefined);
 });
 
-test('assertClaudeCodeOAuth (default transport, no config) uses the broker, not the keychain', async () => {
+test('assertClaudeCodeOAuth (default transport, broker secret configured) uses the broker, not the keychain', async () => {
+  resetOAuthPreflightCache();
   let execCalls = 0;
   let fetched = false;
   await assertClaudeCodeOAuth({
-    // no `transport`, env has no override -> resolves to broker by default
-    env: {},
+    // no `transport` override; a broker secret is configured -> auto-resolves to broker
+    env: { OAUTH_BROKER_SHARED_SECRET_FILE: '/x/secret' },
     execFileImpl: async () => { execCalls += 1; throw new Error('should not be called'); },
     fetchImpl: fakeBrokerReadyzFetch(() => { fetched = true; return { status: 200, body: READYZ_CLAUDE_SERVING }; }),
   });
-  assert.ok(fetched, 'default transport must probe the broker');
+  assert.ok(fetched, 'default transport with a broker secret must probe the broker');
   assert.equal(execCalls, 0);
+});
+
+test('assertClaudeCodeOAuth (default transport, no broker secret) uses the keychain (standalone/vanilla)', async () => {
+  resetOAuthPreflightCache();
+  let fetched = false;
+  let probedArgs;
+  await assertClaudeCodeOAuth({
+    // no `transport` override and no broker secret -> auto-resolves to keychain,
+    // so a standalone adversarial-review install is never forced onto a broker.
+    env: {},
+    execFileImpl: async (cmd, args) => {
+      probedArgs = args;
+      return fakeClaudeAuthStatus({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' })(cmd, args);
+    },
+    fetchImpl: fakeBrokerReadyzFetch(() => { fetched = true; return { status: 200, body: READYZ_CLAUDE_SERVING }; }),
+  });
+  assert.equal(fetched, false, 'standalone must NOT probe the broker');
+  assert.deepEqual(probedArgs, ['auth', 'status', '--json']);
 });
 
 test('assertClaudeCodeOAuth returns no payload, so a cache hit cannot break a caller', async () => {

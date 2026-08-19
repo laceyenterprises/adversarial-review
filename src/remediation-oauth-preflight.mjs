@@ -16,6 +16,7 @@
 // primitives) keeps that spawn path completely untouched.
 import { execFile } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -191,20 +192,37 @@ const CLAUDE_CODE_REQUIRED_API_PROVIDER = 'firstParty';
 // serviceable.
 //
 // Transport is config-driven via ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT
-// ('broker' | 'keychain'), defaulting to 'broker' to match the fleet posture.
-// 'keychain' is the explicit opt-out for a direct-CLI dev/local host that logs
-// in via `claude auth login` and runs no broker.
+// ('broker' | 'keychain'). With no explicit override it AUTO-DETECTS: 'broker'
+// when this host is wired to an OS OAuth broker (a broker shared secret is
+// configured), else 'keychain' so a STANDALONE install -- a dev/local host that
+// ran `claude auth login` and runs no broker -- keeps working with its
+// keychain-stored claude-code OAuth. Set 'keychain' explicitly to force the
+// direct-CLI path, or 'broker' to force the fleet posture before the secret is
+// provisioned.
 const CLAUDE_CODE_BROKER_PROVIDER = 'claude-code';
 const DEFAULT_OAUTH_BROKER_URL = 'http://127.0.0.1:4099';
 const DEFAULT_OAUTH_BROKER_STANDBY_URL = 'http://127.0.0.1:4097';
 const BROKER_READYZ_TIMEOUT_MS = 2_500;
 
+// True when this host is wired to an OS OAuth broker -- i.e. a broker shared
+// secret is configured (inline or via file). This is the STATIC 'is a broker
+// available here' signal used to pick the default transport; it does not read
+// or validate the secret (that happens at mint time).
+function brokerSharedSecretConfigured(env = process.env) {
+  return Boolean(
+    (env.OAUTH_BROKER_SHARED_SECRET && String(env.OAUTH_BROKER_SHARED_SECRET).trim()) ||
+      (env.OAUTH_BROKER_SHARED_SECRET_FILE && String(env.OAUTH_BROKER_SHARED_SECRET_FILE).trim())
+  );
+}
+
 function resolveClaudeCodeOAuthTransport(env = process.env) {
   const raw = String(env.ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT || '').trim().toLowerCase();
   if (raw === 'keychain') return 'keychain';
   if (raw === 'broker') return 'broker';
-  // Fleet default: the claude-code worker authenticates via broker OAuth.
-  return 'broker';
+  // Auto: prefer broker injection when an OS OAuth broker is configured for
+  // this host; otherwise fall back to keychain so a standalone install keeps
+  // working with no broker (vanilla `claude auth login`).
+  return brokerSharedSecretConfigured(env) ? 'broker' : 'keychain';
 }
 
 function resolveBrokerReadyzUrls(env = process.env) {
@@ -288,6 +306,253 @@ async function assertClaudeCodeBrokerOAuth({
   throw new OAuthError(
     'claude-code',
     `broker OAuth unavailable for claude-code (${failures.join('; ')})`
+  );
+}
+
+// The `/readyz` probe above proves the broker CAN vend a claude-code token; a
+// BARE remediation spawn additionally needs the token ITSELF. os-mode (hq
+// dispatch) workers get it from the fleet adapter (`adapter-broker-token.sh`),
+// but the local spawn path only PRESERVES an already-present
+// `ANTHROPIC_AUTH_TOKEN` (see `prepareClaudeCodeRemediationStartupEnv`) -- it
+// mints nothing. Without a mint a bare claude-code remediation authenticates
+// against neither the keychain (a launchd daemon has none) nor the broker, and
+// the CLI dies "Not logged in" (#5546). This helper performs the SAME
+// authenticated fetch the fleet adapter does -- `GET {broker}/token?provider=
+// claude-code` (primary :4099 -> :4097 standby), `Authorization: Bearer
+// <OAUTH_BROKER_SHARED_SECRET[_FILE]>` -- and returns the vended token for the
+// caller to inject as `ANTHROPIC_AUTH_TOKEN`. That is bearer OAuth (a
+// broker-vended access token), NOT the forbidden api-key/bedrock/vertex
+// fallback the startup contract scrubs. Remediators do not need remote control,
+// so API-mode injection is acceptable here.
+const BROKER_TOKEN_TIMEOUT_MS = 8_000;
+
+// Bounded per-endpoint retry ladder for TRANSIENT broker faults. The loopback
+// OAuth broker is a system service: a launchd bounce, a config reload, or a
+// momentary overload makes one `GET /token` fail with ECONNREFUSED or a 503
+// even though the broker is perfectly healthy a few hundred milliseconds later.
+// Failing the mint on that first error turns a seconds-long local bounce into a
+// PERMANENT failure of an already-claimed remediation job. Mirrors the ladder
+// `remediation-workflow-push-capability.mjs` already uses for the merge-agent
+// broker mint, so both broker mints behave identically under a bounce.
+// Injectable (`retryDelaysMs`) so unit tests exercise the classifier without
+// burning real wall-clock in timers.
+const BROKER_TOKEN_RETRY_DELAYS_MS = [250, 1000];
+
+// Statuses where the broker is reachable but momentarily unable to serve
+// (restarting, saturated, or behind a proxy that is). Everything else 4xx --
+// 401/403 (bad shared secret), 404 (unknown provider) -- is a REAL fault that
+// retrying cannot fix, so those fail over to the standby immediately instead of
+// spending the ladder on a guaranteed-identical answer.
+const TRANSIENT_BROKER_TOKEN_HTTP_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+
+function sleep(ms) {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+}
+
+// Classify a thrown `fetch` error as transient. Node's fetch (undici) reports
+// connection faults through `err.cause.code` rather than `err.code`, and
+// surfaces a generic "fetch failed" message, so check both levels plus the
+// AbortError our own timeout raises (a broker that did not answer within
+// `timeoutMs` is transient by construction).
+function isTransientBrokerTokenFetchError(err) {
+  const code = String(err?.code || err?.cause?.code || '').toUpperCase();
+  if (code && /^(?:ECONNREFUSED|ECONNRESET|ECONNABORTED|ETIMEDOUT|EPIPE|ENETUNREACH|ENETDOWN|EHOSTUNREACH|EAI_AGAIN|UND_ERR_(?:CONNECT_TIMEOUT|HEADERS_TIMEOUT|BODY_TIMEOUT|SOCKET))$/.test(code)) {
+    return true;
+  }
+  const name = String(err?.name || '');
+  if (name === 'AbortError' || name === 'TimeoutError') return true;
+  const detail = `${err?.message || ''} ${err?.cause?.message || ''}`.toLowerCase().trim();
+  if (!detail) return false;
+  return /timed?\s*out|timeout|abort(?:ed|error)|socket hang up|fetch failed|network|econnrefused|econnreset|etimedout|eai_again|temporarily unavailable|try again/.test(detail);
+}
+
+// Release an unread response body back to undici's connection pool. On Node 18+
+// `fetch`, a response whose body is never consumed or cancelled keeps its socket
+// checked out; with the retry ladder above, a wedged broker could otherwise leak
+// one socket per failed attempt for the daemon's lifetime.
+async function discardResponseBody(res) {
+  try {
+    await res?.body?.cancel?.();
+  } catch {
+    // Best-effort: an already-consumed or errored body throws on cancel, and in
+    // that case there is no socket left to release anyway.
+  }
+}
+
+// Async by construction: the only caller (`mintClaudeCodeRemediationBrokerToken`)
+// runs on the remediation dispatch hot path, where a synchronous `readFileSync`
+// would block the daemon's event loop for the duration of the disk read. The
+// file is tiny, but the loop is shared with every other concurrently-draining
+// job, so the read is kept off it entirely.
+async function resolveBrokerSharedSecret(env = process.env) {
+  const inline = env.OAUTH_BROKER_SHARED_SECRET;
+  if (inline && String(inline).trim()) return String(inline).trim();
+  const file = env.OAUTH_BROKER_SHARED_SECRET_FILE;
+  if (file && String(file).trim()) {
+    // readFile rejects on an unreadable/missing file; the caller converts that
+    // into an OAuthError so the already-claimed job fails closed.
+    // `.trim()` already strips the trailing newline a secret file conventionally
+    // carries, along with any other surrounding whitespace.
+    return String(await readFile(String(file).trim(), 'utf8')).trim();
+  }
+  return '';
+}
+
+function usableBrokerAccessToken(body) {
+  if (!body || typeof body !== 'object') return null;
+  const token = body.access_token;
+  if (typeof token !== 'string' || token.length === 0 || token === 'null') return null;
+  // Provider guard: the broker echoes the provider it minted for. Accept an
+  // absent provider (older broker builds) or an exact claude-code match.
+  if (body.provider != null && body.provider !== CLAUDE_CODE_BROKER_PROVIDER) return null;
+  return token;
+}
+
+// One `GET {base}/token` attempt. Returns `{ ok: true, token, expiresAt }` on a
+// usable mint, else `{ ok: false, reason, transient }` where `transient` tells
+// the caller whether retrying this same endpoint could plausibly succeed. Never
+// throws: the fetch rejection is classified and returned so the retry ladder and
+// the primary->standby failover both read one uniform shape.
+async function attemptBrokerClaudeCodeTokenFetch({ base, secret, model, fetchImpl, timeoutMs }) {
+  let url = `${base}/token?provider=${CLAUDE_CODE_BROKER_PROVIDER}`;
+  if (model) url += `&model=${encodeURIComponent(model)}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetchImpl(url, {
+      headers: { Authorization: `Bearer ${secret}`, Accept: 'application/json' },
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      await discardResponseBody(res);
+      return {
+        ok: false,
+        reason: `${base}/token http ${res.status}`,
+        transient: TRANSIENT_BROKER_TOKEN_HTTP_STATUSES.has(Number(res.status)),
+      };
+    }
+    let body;
+    try {
+      body = await res.json();
+    } catch (err) {
+      // A 200 whose body will not parse is the signature of a response truncated
+      // mid-restart, so it is worth the (bounded) ladder rather than an instant
+      // fail-closed.
+      return { ok: false, reason: `${base}/token body not JSON: ${err.message}`, transient: true };
+    }
+    const token = usableBrokerAccessToken(body);
+    if (!token) {
+      // The broker answered cleanly and declined: a wrong-provider echo or an
+      // absent access_token is a real fault (`/readyz` already asserted
+      // serviceability), not a bounce. Fail over rather than retry.
+      return {
+        ok: false,
+        reason: `${base}/token returned no usable claude-code access_token`,
+        transient: false,
+      };
+    }
+    return { ok: true, token, expiresAt: body.expires_at || null };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `${base}/token unreachable: ${err.message}`,
+      transient: isTransientBrokerTokenFetchError(err),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Mint a claude-code bearer token from the loopback OAuth broker for a bare
+// remediation spawn. Returns `{ injected: false, reason }` when the transport is
+// keychain or a token is already present (leave the env untouched); returns
+// `{ injected: true, token, brokerUrl, expiresAt }` on success; throws an
+// `OAuthError` on a hard fault (no secret, or neither broker endpoint vends a
+// usable token) so the already-claimed job fails closed instead of spawning an
+// unauthenticated worker. The returned object carries the secret token -- callers
+// MUST NOT log it; log only `brokerUrl`/`expiresAt`.
+//
+// Each endpoint gets a bounded transient-retry ladder before failover, so a
+// momentary broker bounce does not permanently fail an already-claimed job. The
+// whole call stays bounded: (endpoints) x (1 + retries) attempts, each capped by
+// `timeoutMs`, so a wedged broker can never hang the remediation drain.
+async function mintClaudeCodeRemediationBrokerToken({
+  env = process.env,
+  fetchImpl = globalThis.fetch,
+  timeoutMs = BROKER_TOKEN_TIMEOUT_MS,
+  retryDelaysMs = BROKER_TOKEN_RETRY_DELAYS_MS,
+  log = null,
+} = {}) {
+  // Only the broker transport mints. A keychain-configured host authenticates
+  // the direct CLI itself, so leave its env untouched.
+  if (resolveClaudeCodeOAuthTransport(env) !== 'broker') {
+    return { injected: false, reason: 'transport-not-broker' };
+  }
+  // Respect an already-present token (an os-mode seed or an operator override):
+  // never clobber a credential the caller deliberately supplied.
+  if (env.ANTHROPIC_AUTH_TOKEN && String(env.ANTHROPIC_AUTH_TOKEN).trim()) {
+    return { injected: false, reason: 'token-already-present' };
+  }
+  if (typeof fetchImpl !== 'function') {
+    throw new OAuthError('claude-code', 'no fetch implementation available to mint the OAuth broker token');
+  }
+  let secret;
+  try {
+    secret = await resolveBrokerSharedSecret(env);
+  } catch (err) {
+    // A configured-but-unreadable secret file (readFile ENOENT/EACCES):
+    // convert the raw fs error into an OAuthError so the already-claimed job
+    // fails closed with the correct auth classification instead of an
+    // unclassified error bubbling to the consumer.
+    throw new OAuthError(
+      'claude-code',
+      `broker shared secret file unreadable: ${err?.message || err}`
+    );
+  }
+  if (!secret) {
+    throw new OAuthError(
+      'claude-code',
+      'OAUTH_BROKER_SHARED_SECRET(_FILE) is not configured; cannot mint a broker claude-code token'
+    );
+  }
+  const model = String(env.CLAUDE_MODEL_ID || env.CLAUDE_CODE_MODEL_ID || '').trim();
+  const delays = Array.isArray(retryDelaysMs) ? retryDelaysMs : BROKER_TOKEN_RETRY_DELAYS_MS;
+  const failures = [];
+  for (const base of resolveBrokerReadyzUrls(env)) {
+    for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+      const result = await attemptBrokerClaudeCodeTokenFetch({ base, secret, model, fetchImpl, timeoutMs });
+      if (result.ok) {
+        return {
+          injected: true,
+          token: result.token,
+          brokerUrl: base,
+          provider: CLAUDE_CODE_BROKER_PROVIDER,
+          expiresAt: result.expiresAt,
+        };
+      }
+      const exhausted = attempt >= delays.length;
+      if (!result.transient || exhausted) {
+        // Terminal for this endpoint: record it once and fail over to the
+        // standby. Only the final attempt is recorded so a retried bounce does
+        // not spam the operator-visible failure list with N copies.
+        failures.push(result.reason);
+        break;
+      }
+      const delayMs = Number(delays[attempt] || 0);
+      log?.warn?.(
+        `[follow-up-remediation] claude-code broker token mint transient failure ` +
+        `(attempt ${attempt + 1}/${delays.length + 1}); retrying in ${delayMs}ms: ${result.reason}`
+      );
+      if (delayMs > 0) await sleep(delayMs);
+    }
+  }
+  // Fail closed: every endpoint exhausted its transient-retry ladder without
+  // vending a token, so this is a real fault rather than a bounce. Throwing moves
+  // the already-claimed job to failed/ rather than spawning a doomed,
+  // unauthenticated worker.
+  throw new OAuthError(
+    'claude-code',
+    `broker claude-code token mint failed (${failures.join('; ')})`
   );
 }
 
@@ -480,6 +745,7 @@ export {
   OAuthError,
   resetOAuthPreflightCache,
   resolveClaudeCodeOAuthTransport,
+  mintClaudeCodeRemediationBrokerToken,
   assertCodexOAuth,
   assertClaudeCodeOAuth,
   assertClaudeCodeBrokerOAuth,

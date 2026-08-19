@@ -565,6 +565,39 @@ before dispatch. The remediation prompt still carries
 `WORKER_CLASS=gemini-remediation` so the broker-backed worker stamps the same
 provenance trailer as the direct path.
 
+Claude Code remediation resolves its model credential by transport. With no
+explicit override the transport AUTO-DETECTS: `broker` when this host is wired
+to an OS OAuth broker (a broker shared secret is configured inline or by file),
+otherwise `keychain`, so a standalone install that ran `claude auth login` and
+runs no broker keeps working unchanged.
+`ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT=broker|keychain` forces either
+posture. The keychain transport probes `claude auth status --json` and requires
+`authMethod=claude.ai` with `apiProvider=firstParty`. The broker transport
+probes the broker's public `/readyz` for a `can_serve` claude-code provider and
+never touches the login keychain, because a launchd daemon has none.
+
+In HQ dispatch the worker-pool adapter seeds the token. In BARE (local) dispatch
+the daemon mints it: `GET {broker}/token?provider=claude-code` (primary `:4099`,
+`:4097` standby) authenticated with `Authorization: Bearer
+<OAUTH_BROKER_SHARED_SECRET[_FILE]>`, injected as `ANTHROPIC_AUTH_TOKEN`. That
+is bearer OAuth, not the api-key/Bedrock/Vertex fallback the startup contract
+scrubs. An already-present `ANTHROPIC_AUTH_TOKEN` is never clobbered, and the
+keychain transport mints nothing. Each broker endpoint gets a bounded
+transient-retry ladder (connection-refused/reset, request timeout, HTTP
+408/429/5xx) before failover, so a momentary broker bounce does not permanently
+fail an already-claimed job; a non-transient fault (bad shared secret, unknown
+provider, wrong-provider echo) fails over immediately without burning the
+ladder. When every endpoint is exhausted the mint fails closed rather than
+spawning an unauthenticated worker.
+
+The broker shared secret is a fleet-wide credential and the remediation worker
+executes model-generated payloads, so the claude-code spawn env withholds both
+`OAUTH_BROKER_SHARED_SECRET` and `OAUTH_BROKER_SHARED_SECRET_FILE` by default.
+Only the deliberate merge-agent broker grant re-adds the `_FILE` reference, and
+only when a broker-backed push is enabled; the inline secret is never granted.
+Startup evidence records which broker secret keys were withheld and which were
+granted.
+
 Invalid non-empty override values are configuration errors. The runtime must
 not silently fall back from an invalid value because that can route work to an
 expensive, unavailable, or intentionally locked-out agent.

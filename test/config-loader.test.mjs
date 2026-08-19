@@ -4104,6 +4104,47 @@ test('validateSchema tolerates unknown nested op keys in local files and keeps m
   assert.equal(out.op?.vault, 'LocalOpsVault');
 });
 
+test('validateSchema drops the Python-owned email_archive root from a local file', () => {
+  // agent-os#5556 (EAR-02). The root is declared in the Python schema authority
+  // and consumed only by modules/email-archive; this reader has no use for it.
+  // Without the FOREIGN_TOP_LEVEL_SECTIONS entry it raises `unknown key` and
+  // crash-loops the adversarial-watcher — the config-schema.multi-loader-parity
+  // failure mode.
+  const out = validateSchema(
+    {
+      version: 1,
+      email_archive: {
+        dsn: 'postgresql://airlock@localhost:6432/agent_os_email',
+        database_name: 'agent_os_email',
+      },
+    },
+    {
+      source: '/tmp/config.local.yaml',
+      tolerateForeignTopLevelSections: true,
+    },
+  );
+  assert.equal(out.version, 1);
+  assert.equal(out.email_archive, undefined, 'foreign root dropped, not adopted');
+});
+
+test('validateSchema keeps the canonical config.yaml strict about email_archive', () => {
+  // Foreign-root tolerance is scoped to Layer-4 multi-reader local siblings. The
+  // checked-in Layer-3 file stays strict so this reader cannot silently diverge
+  // from its sibling CFG loaders, and EAR-02 keeps the root out of that file.
+  assert.throws(
+    () => validateSchema(
+      { version: 1, email_archive: { dsn: 'postgresql://localhost/agent_os_email' } },
+      { source: '/tmp/config.yaml', tolerateForeignTopLevelSections: true },
+    ),
+    (err) => {
+      assert.ok(err instanceof AgentOSConfigError);
+      assert.match(err.message, /email_archive/);
+      assert.match(err.message, /unknown key/);
+      return true;
+    },
+  );
+});
+
 test('validateSchema rejects arbitrary unknown top-level keys as typos', () => {
   assert.throws(
     () => validateSchema(

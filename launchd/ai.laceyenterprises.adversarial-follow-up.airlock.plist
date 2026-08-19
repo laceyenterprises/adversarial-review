@@ -124,6 +124,31 @@
         <string>3978009</string>
         <key>OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID</key>
         <string>138360282</string>
+        <!-- REMEDIATION WORKER PUSH IDENTITY (task #23, 2026-08-19).
+             FOLLOW_UP_GH_AUTH_VIA_BROKER above governs the daemon's OWN token
+             (merge-agent). This flag governs the per-harness push identity a
+             remediation WORKER runs under: applyMergeAgentBrokerEnv resolves the
+             worker's own App (github-app-<harness>-agent) and injects it so the
+             worker's git push authenticates as lacey-<harness>-agent[bot] rather
+             than falling through to the ambient clio-airlock operator token
+             (observed source=ambient-gh on #5537-#5540). Pinned per harness to
+             the app/installation the broker vends (verified mintable 2026-08-19),
+             matching the reviewer/merge-agent pinning convention so a broker
+             misconfiguration cannot silently vend a different push identity. -->
+        <key>MERGE_AGENT_AUTH_VIA_BROKER</key>
+        <string>true</string>
+        <key>OAUTH_BROKER_REMEDIATION_CLAUDE_CODE_EXPECTED_APP_ID</key>
+        <string>3977993</string>
+        <key>OAUTH_BROKER_REMEDIATION_CLAUDE_CODE_EXPECTED_INSTALLATION_ID</key>
+        <string>138360332</string>
+        <key>OAUTH_BROKER_REMEDIATION_CODEX_EXPECTED_APP_ID</key>
+        <string>3977955</string>
+        <key>OAUTH_BROKER_REMEDIATION_CODEX_EXPECTED_INSTALLATION_ID</key>
+        <string>138360400</string>
+        <key>OAUTH_BROKER_REMEDIATION_GEMINI_EXPECTED_APP_ID</key>
+        <string>3978217</string>
+        <key>OAUTH_BROKER_REMEDIATION_GEMINI_EXPECTED_INSTALLATION_ID</key>
+        <string>138363607</string>
         <key>OAUTH_BROKER_SHARED_SECRET_FILE</key>
         <string>/Users/airlock/agent-os/.secrets/local/oauth-broker-shared-secret</string>
         <key>OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_APP_ID</key>

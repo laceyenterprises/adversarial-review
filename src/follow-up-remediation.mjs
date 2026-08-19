@@ -3161,6 +3161,7 @@ async function consumeNextFollowUpJob({
   onDelayedPendingJob = null,
   quotaHoldRevalidator = null,
   resolveRemediationWorkerClassImpl = null,
+  mintClaudeCodeRemediationTokenImpl = null,
   deliverAlertImpl = deliverAlert,
   healthRouter = null,
   log = console,
@@ -3405,6 +3406,27 @@ async function consumeNextFollowUpJob({
     // the direct CLI path.
     if (!(hqDispatchEnabled && workerClass === 'gemini')) {
       await assertRemediationWorkerOAuth(workerClass, { execFileImpl });
+    }
+
+    // Bare-mode claude-code remediators authenticate with a broker-vended
+    // ANTHROPIC_AUTH_TOKEN (bearer OAuth, NOT the api-key/bedrock/vertex mode
+    // the startup contract scrubs) -- the same source os-mode uses via
+    // adapter-broker-token.sh. The bare spawn env-prep only PRESERVES a token;
+    // it mints nothing, so without this a local claude-code remediation spawns
+    // with no model auth and dies "Not logged in" (#5546). Gated behind an
+    // injectable impl (null in the heavily-spied consume unit tests; wired to
+    // mintClaudeCodeRemediationBrokerToken only at the production daemon) so the
+    // consume hot path stays network-free under test. Keychain transport or an
+    // already-present token is left untouched by the mint helper.
+    if (!hqDispatchEnabled && workerClass === 'claude-code' && mintClaudeCodeRemediationTokenImpl) {
+      const brokerToken = await mintClaudeCodeRemediationTokenImpl({ env: jobEnv });
+      if (brokerToken?.injected && brokerToken.token) {
+        jobEnv.ANTHROPIC_AUTH_TOKEN = brokerToken.token;
+        log.info?.(
+          `[follow-up-remediation] claude-code bare remediation: injected broker-vended ` +
+            `ANTHROPIC_AUTH_TOKEN (url=${brokerToken.brokerUrl}, expiresAt=${brokerToken.expiresAt || 'n/a'})`
+        );
+      }
     }
     const shouldApplyOssReadinessBeforeSpawn = jobHasOssReadinessAuditFailure(claimed.job);
     const workspaceRootDir = resolveRemediationWorkspaceRoot({ rootDir, env: jobEnv });
@@ -3800,6 +3822,7 @@ async function consumeFollowUpJobsUntilCapacity({
   shouldStop = () => false,
   quotaHoldRevalidator = defaultQuotaHoldRevalidator,
   resolveRemediationWorkerClassImpl = null,
+  mintClaudeCodeRemediationTokenImpl = null,
   deliverAlertImpl = deliverAlert,
   healthRouter = null,
   log = console,
@@ -3842,6 +3865,7 @@ async function consumeFollowUpJobsUntilCapacity({
         },
         quotaHoldRevalidator,
         resolveRemediationWorkerClassImpl,
+        mintClaudeCodeRemediationTokenImpl,
         deliverAlertImpl,
         log,
       });

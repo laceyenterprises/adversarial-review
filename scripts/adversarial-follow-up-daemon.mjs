@@ -47,6 +47,7 @@ import {
 } from '../src/follow-up-remediation.mjs';
 import { reconcileInProgressFollowUpJobs } from '../src/follow-up-reconcile.mjs';
 import { resolveRemediationWorkerClassWithFallback } from '../src/remediation-worker-class-fallback.mjs';
+import { mintClaudeCodeRemediationBrokerToken } from '../src/remediation-oauth-preflight.mjs';
 import { retryFailedCommentDeliveries } from '../src/adapters/comms/github-pr-comments/comment-delivery.mjs';
 import {
   refreshFollowUpGithubToken,
@@ -542,6 +543,7 @@ async function runFollowUpDaemonIteration({
       const result = await consumeFollowUpJobsUntilCapacityImpl({
         maxConcurrent: MAX_CONCURRENT_REMEDIATION_JOBS,
         resolveRemediationWorkerClassImpl: resolveRemediationWorkerClassWithFallback,
+        mintClaudeCodeRemediationTokenImpl: mintClaudeCodeRemediationBrokerToken,
         shouldStop,
       });
       logTick(

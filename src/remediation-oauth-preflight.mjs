@@ -191,20 +191,37 @@ const CLAUDE_CODE_REQUIRED_API_PROVIDER = 'firstParty';
 // serviceable.
 //
 // Transport is config-driven via ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT
-// ('broker' | 'keychain'), defaulting to 'broker' to match the fleet posture.
-// 'keychain' is the explicit opt-out for a direct-CLI dev/local host that logs
-// in via `claude auth login` and runs no broker.
+// ('broker' | 'keychain'). With no explicit override it AUTO-DETECTS: 'broker'
+// when this host is wired to an OS OAuth broker (a broker shared secret is
+// configured), else 'keychain' so a STANDALONE install -- a dev/local host that
+// ran `claude auth login` and runs no broker -- keeps working with its
+// keychain-stored claude-code OAuth. Set 'keychain' explicitly to force the
+// direct-CLI path, or 'broker' to force the fleet posture before the secret is
+// provisioned.
 const CLAUDE_CODE_BROKER_PROVIDER = 'claude-code';
 const DEFAULT_OAUTH_BROKER_URL = 'http://127.0.0.1:4099';
 const DEFAULT_OAUTH_BROKER_STANDBY_URL = 'http://127.0.0.1:4097';
 const BROKER_READYZ_TIMEOUT_MS = 2_500;
 
+// True when this host is wired to an OS OAuth broker -- i.e. a broker shared
+// secret is configured (inline or via file). This is the STATIC 'is a broker
+// available here' signal used to pick the default transport; it does not read
+// or validate the secret (that happens at mint time).
+function brokerSharedSecretConfigured(env = process.env) {
+  return Boolean(
+    (env.OAUTH_BROKER_SHARED_SECRET && String(env.OAUTH_BROKER_SHARED_SECRET).trim()) ||
+      (env.OAUTH_BROKER_SHARED_SECRET_FILE && String(env.OAUTH_BROKER_SHARED_SECRET_FILE).trim())
+  );
+}
+
 function resolveClaudeCodeOAuthTransport(env = process.env) {
   const raw = String(env.ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT || '').trim().toLowerCase();
   if (raw === 'keychain') return 'keychain';
   if (raw === 'broker') return 'broker';
-  // Fleet default: the claude-code worker authenticates via broker OAuth.
-  return 'broker';
+  // Auto: prefer broker injection when an OS OAuth broker is configured for
+  // this host; otherwise fall back to keychain so a standalone install keeps
+  // working with no broker (vanilla `claude auth login`).
+  return brokerSharedSecretConfigured(env) ? 'broker' : 'keychain';
 }
 
 function resolveBrokerReadyzUrls(env = process.env) {
@@ -288,6 +305,140 @@ async function assertClaudeCodeBrokerOAuth({
   throw new OAuthError(
     'claude-code',
     `broker OAuth unavailable for claude-code (${failures.join('; ')})`
+  );
+}
+
+// The `/readyz` probe above proves the broker CAN vend a claude-code token; a
+// BARE remediation spawn additionally needs the token ITSELF. os-mode (hq
+// dispatch) workers get it from the fleet adapter (`adapter-broker-token.sh`),
+// but the local spawn path only PRESERVES an already-present
+// `ANTHROPIC_AUTH_TOKEN` (see `prepareClaudeCodeRemediationStartupEnv`) -- it
+// mints nothing. Without a mint a bare claude-code remediation authenticates
+// against neither the keychain (a launchd daemon has none) nor the broker, and
+// the CLI dies "Not logged in" (#5546). This helper performs the SAME
+// authenticated fetch the fleet adapter does -- `GET {broker}/token?provider=
+// claude-code` (primary :4099 -> :4097 standby), `Authorization: Bearer
+// <OAUTH_BROKER_SHARED_SECRET[_FILE]>` -- and returns the vended token for the
+// caller to inject as `ANTHROPIC_AUTH_TOKEN`. That is bearer OAuth (a
+// broker-vended access token), NOT the forbidden api-key/bedrock/vertex
+// fallback the startup contract scrubs. Remediators do not need remote control,
+// so API-mode injection is acceptable here.
+const BROKER_TOKEN_TIMEOUT_MS = 8_000;
+
+function resolveBrokerSharedSecret(env = process.env) {
+  const inline = env.OAUTH_BROKER_SHARED_SECRET;
+  if (inline && String(inline).trim()) return String(inline).trim();
+  const file = env.OAUTH_BROKER_SHARED_SECRET_FILE;
+  if (file && String(file).trim()) {
+    // readFileSync throws on an unreadable/missing file; the caller converts
+    // that into an OAuthError so the already-claimed job fails closed.
+    return String(readFileSync(String(file).trim(), 'utf8')).replace(/[\r\n]+$/g, '').trim();
+  }
+  return '';
+}
+
+function usableBrokerAccessToken(body) {
+  if (!body || typeof body !== 'object') return null;
+  const token = body.access_token;
+  if (typeof token !== 'string' || token.length === 0 || token === 'null') return null;
+  // Provider guard: the broker echoes the provider it minted for. Accept an
+  // absent provider (older broker builds) or an exact claude-code match.
+  if (body.provider != null && body.provider !== CLAUDE_CODE_BROKER_PROVIDER) return null;
+  return token;
+}
+
+// Mint a claude-code bearer token from the loopback OAuth broker for a bare
+// remediation spawn. Returns `{ injected: false, reason }` when the transport is
+// keychain or a token is already present (leave the env untouched); returns
+// `{ injected: true, token, brokerUrl, expiresAt }` on success; throws an
+// `OAuthError` on a hard fault (no secret, or neither broker endpoint vends a
+// usable token) so the already-claimed job fails closed instead of spawning an
+// unauthenticated worker. The returned object carries the secret token -- callers
+// MUST NOT log it; log only `brokerUrl`/`expiresAt`.
+async function mintClaudeCodeRemediationBrokerToken({
+  env = process.env,
+  fetchImpl = globalThis.fetch,
+  timeoutMs = BROKER_TOKEN_TIMEOUT_MS,
+} = {}) {
+  // Only the broker transport mints. A keychain-configured host authenticates
+  // the direct CLI itself, so leave its env untouched.
+  if (resolveClaudeCodeOAuthTransport(env) !== 'broker') {
+    return { injected: false, reason: 'transport-not-broker' };
+  }
+  // Respect an already-present token (an os-mode seed or an operator override):
+  // never clobber a credential the caller deliberately supplied.
+  if (env.ANTHROPIC_AUTH_TOKEN && String(env.ANTHROPIC_AUTH_TOKEN).trim()) {
+    return { injected: false, reason: 'token-already-present' };
+  }
+  if (typeof fetchImpl !== 'function') {
+    throw new OAuthError('claude-code', 'no fetch implementation available to mint the OAuth broker token');
+  }
+  let secret;
+  try {
+    secret = resolveBrokerSharedSecret(env);
+  } catch (err) {
+    // A configured-but-unreadable secret file (readFileSync ENOENT/EACCES):
+    // convert the raw fs error into an OAuthError so the already-claimed job
+    // fails closed with the correct auth classification instead of an
+    // unclassified error bubbling to the consumer.
+    throw new OAuthError(
+      'claude-code',
+      `broker shared secret file unreadable: ${err?.message || err}`
+    );
+  }
+  if (!secret) {
+    throw new OAuthError(
+      'claude-code',
+      'OAUTH_BROKER_SHARED_SECRET(_FILE) is not configured; cannot mint a broker claude-code token'
+    );
+  }
+  const model = String(env.CLAUDE_MODEL_ID || env.CLAUDE_CODE_MODEL_ID || '').trim();
+  const failures = [];
+  for (const base of resolveBrokerReadyzUrls(env)) {
+    let url = `${base}/token?provider=${CLAUDE_CODE_BROKER_PROVIDER}`;
+    if (model) url += `&model=${encodeURIComponent(model)}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetchImpl(url, {
+        headers: { Authorization: `Bearer ${secret}`, Accept: 'application/json' },
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        failures.push(`${base}/token http ${res.status}`);
+        continue;
+      }
+      let body;
+      try {
+        body = await res.json();
+      } catch (err) {
+        failures.push(`${base}/token body not JSON: ${err.message}`);
+        continue;
+      }
+      const token = usableBrokerAccessToken(body);
+      if (!token) {
+        failures.push(`${base}/token returned no usable claude-code access_token`);
+        continue;
+      }
+      return {
+        injected: true,
+        token,
+        brokerUrl: base,
+        provider: CLAUDE_CODE_BROKER_PROVIDER,
+        expiresAt: body.expires_at || null,
+      };
+    } catch (err) {
+      failures.push(`${base}/token unreachable: ${err.message}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  // Fail closed: the /readyz preflight already asserted serviceability, so a
+  // mint failure here is a real fault. Throwing moves the already-claimed job to
+  // failed/ rather than spawning a doomed, unauthenticated worker.
+  throw new OAuthError(
+    'claude-code',
+    `broker claude-code token mint failed (${failures.join('; ')})`
   );
 }
 
@@ -480,6 +631,7 @@ export {
   OAuthError,
   resetOAuthPreflightCache,
   resolveClaudeCodeOAuthTransport,
+  mintClaudeCodeRemediationBrokerToken,
   assertCodexOAuth,
   assertClaudeCodeOAuth,
   assertClaudeCodeBrokerOAuth,

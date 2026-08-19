@@ -3419,7 +3419,9 @@ async function consumeNextFollowUpJob({
     // consume hot path stays network-free under test. Keychain transport or an
     // already-present token is left untouched by the mint helper.
     if (!hqDispatchEnabled && workerClass === 'claude-code' && mintClaudeCodeRemediationTokenImpl) {
-      const brokerToken = await mintClaudeCodeRemediationTokenImpl({ env: jobEnv });
+      // Pass `log` so the mint's bounded transient-retry ladder surfaces a
+      // broker bounce in the daemon log instead of retrying silently.
+      const brokerToken = await mintClaudeCodeRemediationTokenImpl({ env: jobEnv, log });
       if (brokerToken?.injected && brokerToken.token) {
         jobEnv.ANTHROPIC_AUTH_TOKEN = brokerToken.token;
         log.info?.(

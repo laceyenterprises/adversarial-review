@@ -332,6 +332,32 @@ function scrubGeminiOAuthFallbackEnv(sourceEnv = process.env) {
   return { env, stripped };
 }
 
+// The broker shared secret mints OAuth tokens for EVERY provider the loopback
+// broker serves, so it is the highest-value credential in the daemon env. The
+// remediation worker executes LLM-generated payloads, so it must receive that
+// secret only when it genuinely needs one -- i.e. when
+// `applyMergeAgentBrokerEnv` deliberately grants the `_FILE` reference for a
+// broker-backed push. Before this scrub the secret reached the worker AMBIENTLY
+// via the `{ ...sourceEnv }` inheritance in `scrubOAuthFallbackEnv`, which
+// bypassed that gate entirely: it arrived even with the merge-agent broker off,
+// and the INLINE form arrived even though the grant only ever propagates the
+// `_FILE` form. Strip both here and let the gate re-add what it means to.
+const BROKER_SHARED_SECRET_ENV_STRIP_LIST = Object.freeze([
+  'OAUTH_BROKER_SHARED_SECRET',
+  'OAUTH_BROKER_SHARED_SECRET_FILE',
+]);
+
+function stripBrokerSharedSecretEnv(env) {
+  const stripped = [];
+  for (const key of BROKER_SHARED_SECRET_ENV_STRIP_LIST) {
+    if (env[key] !== undefined) {
+      delete env[key];
+      stripped.push(key);
+    }
+  }
+  return stripped;
+}
+
 function prepareClaudeCodeRemediationStartupEnv({
   gitIdentity = null,
   workerClass = 'claude-code',
@@ -340,6 +366,10 @@ function prepareClaudeCodeRemediationStartupEnv({
 } = {}) {
   const { env, stripped } = scrubOAuthFallbackEnv(sourceEnv);
   env.PATH = buildInheritedPath(env.PATH);
+  // Ordering is load-bearing: strip BEFORE `applyMergeAgentBrokerEnv` below, so
+  // the only broker secret the worker can see is the one that gate explicitly
+  // re-grants for a push it is authorized to make.
+  const strippedBrokerSecrets = stripBrokerSharedSecretEnv(env);
 
   // Stamp the physical-harness git identity so a claude-code remediation commits
   // (and, with the broker on, pushes) as the claude harness — not under whatever
@@ -361,6 +391,13 @@ function prepareClaudeCodeRemediationStartupEnv({
 
   const mergeAgentBroker = applyMergeAgentBrokerEnv(env, sourceEnv, { workerClass, requiresWorkflowPush });
 
+  // Report only the broker secrets that STAYED stripped. `applyMergeAgentBrokerEnv`
+  // re-grants `OAUTH_BROKER_SHARED_SECRET_FILE` when a broker-backed push is
+  // enabled, and listing a key as stripped while it sits in the spawn env would
+  // make the audit trail lie about what the worker can actually read.
+  const brokerSecretsWithheld = strippedBrokerSecrets.filter((key) => env[key] === undefined);
+  stripped.push(...brokerSecretsWithheld);
+
   return {
     env,
     startupEvidence: {
@@ -377,6 +414,8 @@ function prepareClaudeCodeRemediationStartupEnv({
       sanitizedEnv: {
         stripped,
         gitIdentityOverrides: overriddenGitEnv,
+        brokerSharedSecretWithheld: brokerSecretsWithheld,
+        brokerSharedSecretGranted: strippedBrokerSecrets.filter((key) => env[key] !== undefined),
       },
       gitIdentity: gitIdentity ? { name: gitIdentity.name, email: gitIdentity.email } : null,
       mergeAgentBroker,

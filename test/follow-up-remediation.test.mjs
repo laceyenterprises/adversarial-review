@@ -3820,6 +3820,53 @@ test('prepareClaudeCodeRemediationStartupEnv keeps OAuth and git audit evidence 
   }
 });
 
+// The remediation worker executes LLM-generated payloads. The broker shared
+// secret mints OAuth tokens for every provider the loopback broker serves, so it
+// must reach the worker ONLY through the deliberate `applyMergeAgentBrokerEnv`
+// grant — never ambiently via `{ ...sourceEnv }` inheritance.
+test('prepareClaudeCodeRemediationStartupEnv withholds the broker shared secret when broker push is off', () => {
+  const { env, startupEvidence } = prepareClaudeCodeRemediationStartupEnv({
+    sourceEnv: {
+      PATH: '/usr/bin',
+      OAUTH_BROKER_SHARED_SECRET: 'inline-sekret',
+      OAUTH_BROKER_SHARED_SECRET_FILE: '/run/secrets/broker',
+    },
+  });
+  assert.equal(env.OAUTH_BROKER_SHARED_SECRET, undefined);
+  assert.equal(env.OAUTH_BROKER_SHARED_SECRET_FILE, undefined);
+  assert.deepEqual(
+    startupEvidence.sanitizedEnv.brokerSharedSecretWithheld,
+    ['OAUTH_BROKER_SHARED_SECRET', 'OAUTH_BROKER_SHARED_SECRET_FILE'],
+  );
+  assert.deepEqual(startupEvidence.sanitizedEnv.brokerSharedSecretGranted, []);
+});
+
+test('prepareClaudeCodeRemediationStartupEnv grants only the secret FILE when broker push is on', () => {
+  const { env, startupEvidence } = prepareClaudeCodeRemediationStartupEnv({
+    sourceEnv: {
+      PATH: '/usr/bin',
+      MERGE_AGENT_AUTH_VIA_BROKER: 'true',
+      OAUTH_BROKER_SHARED_SECRET: 'inline-sekret',
+      OAUTH_BROKER_SHARED_SECRET_FILE: '/run/secrets/broker',
+    },
+  });
+  // The FILE reference is what the broker-backed push legitimately needs.
+  assert.equal(env.OAUTH_BROKER_SHARED_SECRET_FILE, '/run/secrets/broker');
+  // The INLINE secret is never part of that grant, so it stays withheld.
+  assert.equal(env.OAUTH_BROKER_SHARED_SECRET, undefined);
+  assert.deepEqual(
+    startupEvidence.sanitizedEnv.brokerSharedSecretWithheld,
+    ['OAUTH_BROKER_SHARED_SECRET'],
+  );
+  assert.deepEqual(
+    startupEvidence.sanitizedEnv.brokerSharedSecretGranted,
+    ['OAUTH_BROKER_SHARED_SECRET_FILE'],
+  );
+  // Audit evidence must not claim a key is stripped while it sits in the env.
+  assert.ok(!startupEvidence.resolvedStartup.strippedEnv.includes('OAUTH_BROKER_SHARED_SECRET_FILE'));
+  assert.ok(startupEvidence.resolvedStartup.strippedEnv.includes('OAUTH_BROKER_SHARED_SECRET'));
+});
+
 test('resolveClaudeCodeCliPath honors CLAUDE_CODE_CLI_PATH override', () => {
   const prev = process.env.CLAUDE_CODE_CLI_PATH;
   process.env.CLAUDE_CODE_CLI_PATH = '/custom/path/to/claude';

@@ -160,6 +160,23 @@ const FOREIGN_TOP_LEVEL_SECTIONS = new Set([
   // its other keys are still Python-owned and are tolerated-dropped per-key in
   // config.local.yaml via the nested-unknown drop. Re-add a root here only if a
   // whole top-level section is genuinely owned by another reader and unmirrored.
+  //
+  // `email_archive` (agent-os#5556, EAR-02) qualifies on both counts. Its two
+  // keys — `dsn` and `database_name` — are declared in the Python schema
+  // authority (`agent_os_config/schema_v1/email_archive.py`), are consumed only
+  // by `modules/email-archive`, and have no meaning to this reader: nothing in
+  // adversarial-review connects to the email archive. Mirroring the block here
+  // would create a second place to keep a Python-owned schema in step; ignoring
+  // the root is the honest description of this reader's relationship to it.
+  //
+  // Without this entry the root is not foreign, so it falls through to the
+  // strict schema and raises `email_archive: unknown key` — under
+  // loadConfigRuntime as well as loadConfig — which crash-loops the
+  // adversarial-watcher. That is the 2026-06-13 fleet-wide outage and the
+  // `config-schema.multi-loader-parity` failure mode. EAR-02 shipped with
+  // env (`AGENT_OS_EMAIL_ARCHIVE_DSN`) as the only supported operator surface
+  // precisely because this entry did not exist yet.
+  'email_archive',
 ]);
 // Keep this per-role fallback surface in lockstep with the Python
 // agent_os_config schema. The child dicts are intentionally strict so a

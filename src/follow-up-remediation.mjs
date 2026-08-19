@@ -3321,6 +3321,10 @@ async function consumeNextFollowUpJob({
     const remediationMode = resolveRemediationRuntimeMode(claimed.job, {
       healthRouter,
       env: jobEnv,
+      // Pin os-mode for a claude-code remediator (may have been resolved by the
+      // cap-fallback above): the claude CLI only authenticates on the hq-dispatch
+      // broker path.
+      workerClass,
     });
     const remediationDispatchPath = remediationMode === 'os' ? 'hq' : 'bare';
     claimed.job = persistRemediationDispatchPath({

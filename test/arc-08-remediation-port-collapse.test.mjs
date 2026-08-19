@@ -178,3 +178,19 @@ test('pickRemediationWorkerClass: builder-tag domain override beats the registry
     'gemini',
   );
 });
+
+test('resolveRemediationRuntimeMode pins os-mode for a claude-code remediator (bare cannot auth the claude CLI, #5546)', () => {
+  // A claude-code remediation only authenticates via the os/hq-dispatch broker
+  // path; bare/local leaves the claude CLI "Not logged in". So os-mode is forced
+  // for claude-code even when the health router is local or the job is sticky-bare.
+  assert.equal(
+    resolveRemediationRuntimeMode({}, { workerClass: 'claude-code', healthRouter: { getMode: () => 'local' } }),
+    'os',
+  );
+  assert.equal(resolveRemediationRuntimeMode({}, { workerClass: 'claude-code' }), 'os');
+  // codex is unaffected -- it spawns fine in bare mode via its native ~/.codex auth.
+  assert.equal(
+    resolveRemediationRuntimeMode({}, { workerClass: 'codex', healthRouter: { getMode: () => 'local' } }),
+    'local',
+  );
+});

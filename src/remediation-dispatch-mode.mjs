@@ -129,7 +129,17 @@ function resolveRemediationDispatchPathForJob(job, env = process.env) {
 // spawn locally during an app-contract outage. With no router injected the
 // selection falls back to the config-derived path, preserving pre-router
 // dispatch-path (and thus round/budget) parity with v1.
-function resolveRemediationRuntimeMode(job, { healthRouter = null, env = process.env } = {}) {
+function resolveRemediationRuntimeMode(job, { healthRouter = null, env = process.env, workerClass = null } = {}) {
+  // claude-code remediation can only authenticate its CLI via the os (hq
+  // dispatch) broker-OAuth path; bare/local mode leaves it "Not logged in".
+  // This overrides sticky/health-router selection because the claude harness
+  // fundamentally cannot spawn in bare mode (observed 2026-08-19 on #5546 after
+  // the codex-cap worker-class fallback routed the remediation to claude-code).
+  // Scoped to claude-code only: codex spawns fine in bare via its native
+  // ~/.codex auth.json, so its dispatch-path selection is unchanged.
+  if (String(workerClass || '').trim().toLowerCase() === 'claude-code') {
+    return 'os';
+  }
   const sticky = stickyRemediationDispatchPath(job);
   if (sticky) return sticky === 'hq' ? 'os' : 'local';
   if (healthRouter && typeof healthRouter.getMode === 'function') {

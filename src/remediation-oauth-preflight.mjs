@@ -16,6 +16,7 @@
 // primitives) keeps that spawn path completely untouched.
 import { execFile } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -378,16 +379,21 @@ async function discardResponseBody(res) {
   }
 }
 
-function resolveBrokerSharedSecret(env = process.env) {
+// Async by construction: the only caller (`mintClaudeCodeRemediationBrokerToken`)
+// runs on the remediation dispatch hot path, where a synchronous `readFileSync`
+// would block the daemon's event loop for the duration of the disk read. The
+// file is tiny, but the loop is shared with every other concurrently-draining
+// job, so the read is kept off it entirely.
+async function resolveBrokerSharedSecret(env = process.env) {
   const inline = env.OAUTH_BROKER_SHARED_SECRET;
   if (inline && String(inline).trim()) return String(inline).trim();
   const file = env.OAUTH_BROKER_SHARED_SECRET_FILE;
   if (file && String(file).trim()) {
-    // readFileSync throws on an unreadable/missing file; the caller converts
-    // that into an OAuthError so the already-claimed job fails closed.
+    // readFile rejects on an unreadable/missing file; the caller converts that
+    // into an OAuthError so the already-claimed job fails closed.
     // `.trim()` already strips the trailing newline a secret file conventionally
     // carries, along with any other surrounding whitespace.
-    return String(readFileSync(String(file).trim(), 'utf8')).trim();
+    return String(await readFile(String(file).trim(), 'utf8')).trim();
   }
   return '';
 }
@@ -492,9 +498,9 @@ async function mintClaudeCodeRemediationBrokerToken({
   }
   let secret;
   try {
-    secret = resolveBrokerSharedSecret(env);
+    secret = await resolveBrokerSharedSecret(env);
   } catch (err) {
-    // A configured-but-unreadable secret file (readFileSync ENOENT/EACCES):
+    // A configured-but-unreadable secret file (readFile ENOENT/EACCES):
     // convert the raw fs error into an OAuthError so the already-claimed job
     // fails closed with the correct auth classification instead of an
     // unclassified error bubbling to the consumer.

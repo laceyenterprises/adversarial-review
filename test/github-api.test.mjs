@@ -167,6 +167,90 @@ test('pull-request-review adapter args bind reviewer login to matching token env
   ]);
 });
 
+test('reviewer comment write falls back to broker mint when the reviewer env-token is absent (task #23 remediation-reply delivery)', async () => {
+  const mod = await importGithubAdapterClientFresh();
+
+  // A codex remediation reply in a gemini-reviewed pipeline: no
+  // GH_CODEX_REVIEWER_TOKEN in env, but the codex reviewer broker is
+  // configured. The write must mint a fresh App installation token via the
+  // broker instead of hard-failing on the missing env-token (the 0-delivery
+  // root cause). It must NOT fall through to ambient gh auth.
+  assert.deepEqual(mod.__test__.makeAdapterWriteArgs('pull-request-review', {
+    repo: FIXTURE_REPO,
+    prNumber: FIXTURE_PR,
+    body: 'remediation reply',
+    reviewerLogin: 'codex-reviewer-lacey',
+  }, {
+    CODEX_REVIEWER_AUTH_VIA_BROKER: 'true',
+    OAUTH_BROKER_CODEX_REVIEWER_EXPECTED_APP_ID: '3994060',
+    OAUTH_BROKER_CODEX_REVIEWER_EXPECTED_INSTALLATION_ID: '138771486',
+  }), [
+    'write',
+    '--kind',
+    'pull-request-review',
+    '--json',
+    '--repo',
+    FIXTURE_REPO,
+    '--pr-number',
+    String(FIXTURE_PR),
+    '--body',
+    'remediation reply',
+    '--reviewer-login',
+    'codex-reviewer-lacey',
+    '--auth',
+    'codex-reviewer',
+    '--auth-mode',
+    'broker',
+    '--broker-provider',
+    'github-app-codex-reviewer',
+    '--expected-app-id',
+    '3994060',
+    '--expected-installation-id',
+    '138771486',
+    '--expected-login',
+    'codex-reviewer-lacey',
+  ]);
+});
+
+test('reviewer comment write prefers the resolved env-token over the broker when it is present', async () => {
+  const mod = await importGithubAdapterClientFresh();
+
+  // Active reviewer class: the reviewer env-token is resolved into env, so keep
+  // the optimized env-token path even when the broker is also configured.
+  assert.deepEqual(mod.__test__.makeAdapterWriteArgs('pull-request-review', {
+    repo: FIXTURE_REPO,
+    prNumber: FIXTURE_PR,
+    body: 'review body',
+    reviewerLogin: 'codex-reviewer-lacey',
+  }, {
+    GH_CODEX_REVIEWER_TOKEN: 'reviewer-token-present-fixture',
+    CODEX_REVIEWER_AUTH_VIA_BROKER: 'true',
+    OAUTH_BROKER_CODEX_REVIEWER_EXPECTED_APP_ID: '3994060',
+    OAUTH_BROKER_CODEX_REVIEWER_EXPECTED_INSTALLATION_ID: '138771486',
+  }), [
+    'write',
+    '--kind',
+    'pull-request-review',
+    '--json',
+    '--repo',
+    FIXTURE_REPO,
+    '--pr-number',
+    String(FIXTURE_PR),
+    '--body',
+    'review body',
+    '--reviewer-login',
+    'codex-reviewer-lacey',
+    '--auth',
+    'codex-reviewer',
+    '--auth-mode',
+    'env-token',
+    '--pat-env',
+    'GH_CODEX_REVIEWER_TOKEN',
+    '--expected-login',
+    'codex-reviewer-lacey',
+  ]);
+});
+
 test('service-owned label write binds merge-agent env-token auth under the watcher broker signal', async () => {
   const mod = await importGithubAdapterClientFresh();
 

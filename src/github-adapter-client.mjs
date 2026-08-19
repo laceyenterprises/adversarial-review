@@ -215,6 +215,23 @@ function buildAdapterEnv(env = process.env) {
     'GH_CLAUDE_REVIEWER_TOKEN_BROKER_PROVIDER',
     'GH_CODEX_REVIEWER_TOKEN_BROKER_PROVIDER',
     'GH_GEMINI_REVIEWER_TOKEN_BROKER_PROVIDER',
+    // Broker mint inputs: allow --auth-mode broker to resolve a fresh
+    // per-role App installation token when a reviewer env-token is absent
+    // (a remediation reply from a non-active-reviewer worker class).
+    'OAUTH_BROKER_URL',
+    'OAUTH_BROKER_SHARED_SECRET_FILE',
+    'CLAUDE_REVIEWER_AUTH_VIA_BROKER',
+    'CODEX_REVIEWER_AUTH_VIA_BROKER',
+    'GEMINI_REVIEWER_AUTH_VIA_BROKER',
+    'OAUTH_BROKER_CLAUDE_REVIEWER_PROVIDER',
+    'OAUTH_BROKER_CODEX_REVIEWER_PROVIDER',
+    'OAUTH_BROKER_GEMINI_REVIEWER_PROVIDER',
+    'OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_APP_ID',
+    'OAUTH_BROKER_CODEX_REVIEWER_EXPECTED_APP_ID',
+    'OAUTH_BROKER_GEMINI_REVIEWER_EXPECTED_APP_ID',
+    'OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_INSTALLATION_ID',
+    'OAUTH_BROKER_CODEX_REVIEWER_EXPECTED_INSTALLATION_ID',
+    'OAUTH_BROKER_GEMINI_REVIEWER_EXPECTED_INSTALLATION_ID',
     'GH_CONFIG_DIR',
     'GH_HOST',
     'GITHUB_HOST',
@@ -262,10 +279,68 @@ function makeAdapterArgs(kind, params = {}) {
   return args;
 }
 
-function appendReviewerAuthAdapterArgs(args, reviewerLogin) {
+// 'codex-reviewer' -> 'CODEX_REVIEWER' (broker env-var prefix).
+function reviewerRoleEnvPrefix(role) {
+  return String(role || '').toUpperCase().replace(/-/g, '_');
+}
+
+// Build --auth-mode broker adapter args for a reviewer role when the broker
+// is configured (flag on + expected App/installation ids present). Returns
+// null when the broker is not configured for the role so the caller can keep
+// the env-token path. The adapter mints a fresh App installation token from
+// the OAuth broker, so this does NOT depend on a reviewer env-token being
+// pre-resolved into the process env.
+function reviewerBrokerAuthArgs(role, profile, login, env = {}) {
+  const prefix = reviewerRoleEnvPrefix(role);
+  if (String(env?.[`${prefix}_AUTH_VIA_BROKER`] || '').trim().toLowerCase() !== 'true') {
+    return null;
+  }
+  const appId = String(env?.[`OAUTH_BROKER_${prefix}_EXPECTED_APP_ID`] || '').trim();
+  const installationId = String(
+    env?.[`OAUTH_BROKER_${prefix}_EXPECTED_INSTALLATION_ID`] || ''
+  ).trim();
+  if (!appId || !installationId) return null;
+  const provider =
+    String(env?.[`OAUTH_BROKER_${prefix}_PROVIDER`] || '').trim() || `github-app-${role}`;
+  return [
+    '--auth',
+    profile.selector,
+    '--auth-mode',
+    'broker',
+    '--broker-provider',
+    provider,
+    '--expected-app-id',
+    appId,
+    '--expected-installation-id',
+    installationId,
+    '--expected-login',
+    login,
+  ];
+}
+
+function appendReviewerAuthAdapterArgs(args, reviewerLogin, env = {}) {
   const normalized = String(reviewerLogin || '').trim().toLowerCase();
-  const profile = REVIEWER_ADAPTER_AUTH_BY_ROLE[reviewerRoleFromLogin(normalized)];
+  const role = reviewerRoleFromLogin(normalized);
+  const profile = REVIEWER_ADAPTER_AUTH_BY_ROLE[role];
   if (!profile) return args;
+  // Prefer the already-resolved reviewer env-token (the ACTIVE reviewer
+  // class' token, refreshed into env by reviewer-token-refresh). But a
+  // remediation reply worker may be a class that is NOT the active reviewer
+  // (e.g. a codex remediation worker in a gemini-reviewed pipeline), so its
+  // reviewer token is never resolved into env and env-token auth hard-fails
+  // -> the comment is never posted (0 deliveries; task #23). When the
+  // env-token is absent but the reviewer broker is configured, mint a fresh
+  // per-role App installation token via the broker instead. Either way this
+  // binds an explicit --auth selector, so the write never falls through to
+  // ambient gh auth (the clio-airlock operator identity).
+  const envTokenPresent = Boolean(String(env?.[profile.tokenEnv] || '').trim());
+  if (!envTokenPresent) {
+    const brokerArgs = reviewerBrokerAuthArgs(role, profile, normalized, env);
+    if (brokerArgs) {
+      args.push(...brokerArgs);
+      return args;
+    }
+  }
   args.push(
     '--auth',
     profile.selector,
@@ -321,7 +396,7 @@ function makeAdapterWriteArgs(kind, params = {}, env = {}) {
   if (params.description !== undefined) args.push('--description', String(params.description));
   if (params.action !== undefined) args.push('--action', String(params.action));
   if (params.reviewerLogin) args.push('--reviewer-login', String(params.reviewerLogin));
-  appendReviewerAuthAdapterArgs(args, params.reviewerLogin);
+  appendReviewerAuthAdapterArgs(args, params.reviewerLogin, env);
   if (params.matchHeadCommit !== undefined) args.push('--match-head-commit', String(params.matchHeadCommit));
   if (params.mergeMethod !== undefined) args.push('--merge-method', String(params.mergeMethod));
   if (params.deleteBranch !== undefined) args.push(params.deleteBranch ? '--delete-branch' : '--no-delete-branch');

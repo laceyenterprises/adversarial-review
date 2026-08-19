@@ -4534,7 +4534,12 @@ export class AgentOSConfig {
       ),
       workerClassFallback: [...this.get(
         'roles.adversarial.merge_authority.worker_class_fallback',
-        ['claude-code'],
+        // Merge-capable default matching the schema default and HHR design
+        // intent: hammer-claude is the codex-quota fallback MERGE class (it
+        // supports task-kind `merge`). claude-code does NOT support `merge`, so
+        // defaulting to it made every codex-exhausted hammer close fail with
+        // 'worker class claude-code does not support task kind merge'.
+        ['hammer-claude'],
       )],
       mergeMethod: this.get(
         'roles.adversarial.merge_authority.merge_method',

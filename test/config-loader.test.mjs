@@ -4892,6 +4892,25 @@ test('AMA merge_authority worker_class_fallback defaults to [hammer-claude] (HHR
   }
 });
 
+test('AMA merge_authority worker_class_fallback RUNTIME-loader default is merge-capable [hammer-claude], not claude-code (HHR)', () => {
+  // The daemon loads via loadConfigRuntime (tolerateCheckedInUnknown), which
+  // resolves this value through the this.get() CODE default rather than the
+  // strict schema default the loadConfig test above exercises. Regression: that
+  // code default was ['claude-code'], which does NOT support task-kind `merge`,
+  // so every codex-exhausted hammer close failed 'worker class claude-code does
+  // not support task kind merge'. It must be the merge-capable ['hammer-claude']
+  // (the HHR 'codex-quota fallback merge class').
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\n');
+    const cfg = loadConfigRuntime({ topPath: top, env: {} });
+    assert.deepEqual(cfg.getMergeAuthorityConfig().workerClassFallback, ['hammer-claude']);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('AMA merge_authority worker_class_fallback is operator-overridable and disablable (HHR)', () => {
   const tmp = freshTmp();
   try {

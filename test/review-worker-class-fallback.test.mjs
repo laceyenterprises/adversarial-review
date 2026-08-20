@@ -196,6 +196,7 @@ test('retries execFile subprocess failures whose transient diagnostic is only in
 test('retries execFile subprocess failures whose transient diagnostic is only in stdout', async () => {
   const warnings = [];
   const errors = [];
+  const sleeps = [];
   let calls = 0;
   const subprocessFailure = new Error('Command failed: hq fleet quota status --json');
   subprocessFailure.code = 1;
@@ -207,7 +208,7 @@ test('retries execFile subprocess failures whose transient diagnostic is only in
     primary: 'codex',
     fallbackWorkerClasses: ['claude-code'],
     retryDelaysMs: [5],
-    sleepImpl: async () => {},
+    sleepImpl: async (ms) => sleeps.push(ms),
     logger: {
       warn: (message) => warnings.push(String(message)),
       error: (message) => errors.push(String(message)),
@@ -220,6 +221,7 @@ test('retries execFile subprocess failures whose transient diagnostic is only in
   });
 
   assert.equal(calls, 2);
+  assert.deepEqual(sleeps, [5]);
   assert.equal(errors.length, 0);
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /HTTP 503 service unavailable/);

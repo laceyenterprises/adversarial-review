@@ -64,31 +64,40 @@ function fleetQuotaStatusErrorMessage(error) {
   return `${message}${code}${signal}${killed}`;
 }
 
+function errorTextPart(value) {
+  if (value === undefined || value === null) return '';
+  if (Buffer.isBuffer(value)) return value.toString('utf8');
+  return String(value);
+}
+
 function isTransientFleetQuotaStatusError(error) {
   const code = String(error?.code || '').toUpperCase();
   if (['EIO', 'ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'EPIPE'].includes(code)) return true;
   if (error?.killed === true) return true;
+  const text = [
+    errorTextPart(error?.message),
+    errorTextPart(error?.stderr),
+    errorTextPart(error?.stdout),
+  ].join('\n').toLowerCase();
+  if (
+    /\b(eio|etimedout|econnreset|econnrefused|epipe|eai_again)\b/.test(text) ||
+    /timed?\s*out|timeout|tls handshake|connection reset|connection refused/.test(text) ||
+    /resource temporarily unavailable|temporarily unavailable|try again/.test(text) ||
+    /socket hang up|remote end hung up/.test(text)
+  ) {
+    return true;
+  }
   return false;
 }
 
-async function readFleetQuotaStatusWithRetry({
+async function executeFleetQuotaStatusWithRetry({
   env,
   hqPath,
   execFileImpl,
   logger,
   sleepImpl,
   retryDelaysMs,
-  cache,
-  cacheTtlMs,
-  nowMs,
 }) {
-  const cacheKey = fleetQuotaStatusCacheKey({ hqPath });
-  const now = nowMs();
-  const cached = cache?.get(cacheKey);
-  if (cached && now - cached.readAtMs <= cacheTtlMs) {
-    return { stdout: cached.stdout, source: 'cache' };
-  }
-
   const attempts = retryDelaysMs.length + 1;
   let lastError = null;
   for (let attemptIndex = 0; attemptIndex < attempts; attemptIndex += 1) {
@@ -100,7 +109,6 @@ async function readFleetQuotaStatusWithRetry({
         timeout: FLEET_QUOTA_STATUS_TIMEOUT_MS,
       });
       const stdout = typeof result === 'string' ? result : String(result?.stdout || '');
-      cache?.set(cacheKey, { stdout, readAtMs: nowMs() });
       return { stdout, source: attemptIndex === 0 ? 'exec' : 'exec-retry' };
     } catch (err) {
       lastError = err;
@@ -129,6 +137,43 @@ async function readFleetQuotaStatusWithRetry({
     `attempts=${attempts}/${attempts}; failing open: ${message}`
   );
   return { error: lastError, errorMessage: message };
+}
+
+async function readFleetQuotaStatusWithRetry({
+  env,
+  hqPath,
+  execFileImpl,
+  logger,
+  sleepImpl,
+  retryDelaysMs,
+  cache,
+  cacheTtlMs,
+  nowMs,
+}) {
+  const cacheKey = fleetQuotaStatusCacheKey({ hqPath });
+  const now = nowMs();
+  const cached = cache?.get(cacheKey);
+  if (cached && now - cached.readAtMs <= cacheTtlMs) {
+    if (cached.promise) return cached.promise;
+    if (typeof cached.stdout === 'string') return { stdout: cached.stdout, source: 'cache' };
+  }
+
+  const promise = executeFleetQuotaStatusWithRetry({
+    env,
+    hqPath,
+    execFileImpl,
+    logger,
+    sleepImpl,
+    retryDelaysMs,
+  });
+  cache?.set(cacheKey, { promise, readAtMs: now });
+  const result = await promise;
+  if (result.error) {
+    cache?.delete(cacheKey);
+  } else {
+    cache?.set(cacheKey, { stdout: result.stdout, readAtMs: nowMs() });
+  }
+  return result;
 }
 
 export function applyReviewerWorkerClassFallbackToRoute({

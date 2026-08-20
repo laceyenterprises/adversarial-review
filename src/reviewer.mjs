@@ -1766,6 +1766,7 @@ async function postGitHubReviewWithCapture({
   attemptNumber,
   reviewerModel,
   reviewerHeadSha = null,
+  currentHeadSha = null,
   reviewBody,
   botTokenEnv,
   passKind,
@@ -1784,7 +1785,21 @@ async function postGitHubReviewWithCapture({
   packLockhash = null,
   emitReviewedAttestationImpl = emitReviewedAttestation,
 } = {}) {
-  const normalizedHeadSha = String(reviewerHeadSha || '').trim();
+  const normalizedHeadSha = String(reviewerHeadSha || '').trim().toLowerCase();
+  const normalizedCurrentHeadSha = String(currentHeadSha || '').trim().toLowerCase();
+  if (
+    normalizedHeadSha &&
+    normalizedCurrentHeadSha &&
+    normalizedHeadSha !== normalizedCurrentHeadSha
+  ) {
+    const err = new Error(
+      `[stale-review-head] reviewer output for ${repo}#${prNumber} targeted stale head ` +
+      `${normalizedHeadSha.slice(0, 12)}; current head is ${normalizedCurrentHeadSha.slice(0, 12)}; ` +
+      'refusing GitHub review post'
+    );
+    err.failureClass = 'stale-review-head';
+    throw err;
+  }
   let capturedReviewBody = null;
   try {
     capturedReviewBody = findCapturedReviewerBody(rootDir, {
@@ -2341,6 +2356,7 @@ async function main() {
         reviewerMetadata.reviewerIdentity
       ),
       packLockhash: reviewedPackLockhash,
+      currentHeadSha: verdictModeResolution.currentHeadSha || null,
       execFileImpl: execFileAsync,
       log: console,
     });

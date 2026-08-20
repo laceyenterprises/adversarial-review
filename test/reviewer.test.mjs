@@ -315,6 +315,50 @@ test('postGitHubReviewWithCapture refuses stale reviewed heads before any GitHub
   }
 });
 
+test('postGitHubReviewWithCapture accepts matching reviewed heads regardless of SHA case', async () => {
+  const calls = [];
+  const attestations = [];
+  const rootDir = mkdtempSync(join(tmpdir(), 'review-capture-head-case-'));
+  mkdirSync(join(rootDir, 'data'), { recursive: true });
+  try {
+    await withEnvAsync({
+      GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
+    }, () => postGitHubReviewWithCapture({
+      rootDir,
+      repo: 'laceyenterprises/demo',
+      prNumber: 42,
+      attemptNumber: 8,
+      reviewerModel: 'codex',
+      reviewerHeadSha: 'ABCDEF1234567890',
+      currentHeadSha: 'abcdef1234567890',
+      reviewBody: '## Summary\nClean.\n\n## Verdict\nComment only',
+      botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+      passKind: 'rereview',
+      execFileImpl: async (command, args, options = {}) => {
+        calls.push({ command, args, options });
+        assert.equal(command, 'gh');
+        return {
+          stdout: JSON.stringify({
+            id: 4242,
+            commit_id: 'abcdef1234567890',
+          }),
+        };
+      },
+      prepareReviewWrite: async () => {},
+      emitReviewedAttestationImpl: async (attestation) => {
+        attestations.push(attestation);
+      },
+    }));
+
+    const postCalls = calls.filter((call) => call.options?.input);
+    assert.equal(postCalls.length, 1);
+    assert.equal(JSON.parse(postCalls[0].options.input).commit_id, 'abcdef1234567890');
+    assert.equal(attestations[0].headSha, 'abcdef1234567890');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('postGitHubReviewWithCapture dismisses prior request-changes after clean exact-head re-review', async () => {
   const calls = [];
   const rootDir = mkdtempSync(join(tmpdir(), 'review-clean-dismissal-'));

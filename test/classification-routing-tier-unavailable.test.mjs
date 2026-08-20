@@ -25,6 +25,13 @@ test('reviewer stale-head pre-write refusal classifies as stale-review-head', ()
   );
 });
 
+test('generic current-head stderr does not classify as stale-review-head', () => {
+  assert.equal(
+    classifyReviewerFailure('fatal: cannot merge: current head is detached', 1),
+    'unknown'
+  );
+});
+
 test('claude CLI "Unable to connect to API (ConnectionRefused)" stays unknown without local-routing context', () => {
   // Verbatim shape of the failure observed in the 2026-06-04 watcher log.
   const stderr = `[reviewer] DEBUG: starting claude review...

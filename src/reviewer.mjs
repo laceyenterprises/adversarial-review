@@ -1785,8 +1785,8 @@ async function postGitHubReviewWithCapture({
   packLockhash = null,
   emitReviewedAttestationImpl = emitReviewedAttestation,
 } = {}) {
-  const normalizedHeadSha = String(reviewerHeadSha || '').trim();
-  const normalizedCurrentHeadSha = String(currentHeadSha || '').trim();
+  const normalizedHeadSha = String(reviewerHeadSha || '').trim().toLowerCase();
+  const normalizedCurrentHeadSha = String(currentHeadSha || '').trim().toLowerCase();
   if (
     normalizedHeadSha &&
     normalizedCurrentHeadSha &&

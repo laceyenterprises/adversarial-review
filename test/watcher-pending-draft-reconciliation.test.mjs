@@ -182,13 +182,19 @@ test('watcher runs pending-draft reconciliation after claim and freshness re-che
   const claimIndex = source.indexOf(': stmtMarkAttemptStarted.run(');
   const infraClaimIndex = source.indexOf('? stmtMarkInfraAutoRecoveryAttemptStarted.run(');
   const freshnessIndex = source.indexOf('Freshness re-check (2026-05-18)');
+  const staleHeadIndex = source.indexOf('releasing claim and skipping stale reviewer spawn');
   const reconcileIndex = source.indexOf('const preSpawnReconciliation = await reconcilePendingDraftsBeforeSpawn({');
-  const releaseIndex = source.indexOf('stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);');
+  const releaseIndex = source.indexOf(
+    'stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);',
+    reconcileIndex
+  );
 
   assert.ok(claimIndex > 0, 'claim site should exist');
   assert.ok(infraClaimIndex > 0, 'infra-recovery claim site should exist');
   assert.ok(infraClaimIndex < claimIndex, 'infra-recovery claim should be checked before the generic claim');
   assert.ok(freshnessIndex > claimIndex, 'freshness re-check should happen after claim');
+  assert.ok(staleHeadIndex > freshnessIndex, 'stale-head release should happen inside the freshness re-check');
+  assert.ok(reconcileIndex > staleHeadIndex, 'pending-draft reconciliation should only run after stale-head release has a chance to skip');
   assert.ok(reconcileIndex > freshnessIndex, 'reconciliation should happen after freshness re-check');
   assert.ok(releaseIndex > reconcileIndex, 'skip-spawn path should release the claim');
 });

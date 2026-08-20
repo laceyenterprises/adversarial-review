@@ -67,7 +67,9 @@ import {
   stmtMarkCascadeFailed,
   stmtMarkPendingUpstream,
   stmtGetReviewRow,
+  stmtReleaseReviewerClaim,
 } from './review-state-db.mjs';
+import { fetchPullRequestHeadAndState } from './github-api.mjs';
 import { resolveReviewCycleCapConfig } from './review-cycle-cap.mjs';
 import { loadConfigCached } from './config-loader.mjs';
 import { recordSuccessfulReviewCycleVerdict } from './review-cycle-cap-actions.mjs';
@@ -418,6 +420,7 @@ async function spawnReviewer({
   readReviewerQuotaDecisionImpl = readReviewerQuotaDecision,
   beginReviewerPassImpl = beginReviewerPass,
   completeReviewerPassImpl = completeReviewerPass,
+  fetchPullRequestHeadAndStateImpl = fetchPullRequestHeadAndState,
 }) {
   const activeReviewerRuntimeAdapter = reviewerRuntimeAdapterOverride || reviewerRuntimeState.adapter;
   const normalizedReviewerClass = normalizeReviewerClass(reviewerModel);
@@ -578,24 +581,54 @@ async function spawnReviewer({
       result.reviewBody.trim()
     ) {
       try {
-        const captureAttemptNumber = Number.isFinite(Number(reviewDbAttemptNumber))
-          ? Number(reviewDbAttemptNumber)
-          : Number(reviewAttemptNumber);
-        await postGitHubReviewWithCaptureImpl({
-          rootDir: ROOT,
-          repo,
-          prNumber,
-          attemptNumber: captureAttemptNumber,
-          reviewerModel,
-          reviewerHeadSha: reviewerHeadSha || null,
-          reviewBody: result.reviewBody,
-          botTokenEnv,
-          passKind,
-          reviewerSpawnToken,
-          reviewerIdentity,
-          log: console,
-        });
-        console.log(`[reviewer] Review posted to ${repo}#${prNumber}`);
+        let staleReviewOutput = false;
+        if (reviewerHeadSha) {
+          try {
+            const freshPR = await fetchPullRequestHeadAndStateImpl(repo, prNumber);
+            const freshHeadSha = freshPR?.headRefOid || null;
+            if (freshHeadSha && String(freshHeadSha) !== String(reviewerHeadSha)) {
+              const staleMessage =
+                `reviewer output for ${repo}#${prNumber} targeted stale head ` +
+                `${String(reviewerHeadSha).slice(0, 12)}; current head is ${String(freshHeadSha).slice(0, 12)}`;
+              console.warn(`[watcher] ${staleMessage}; discarding review before GitHub post`);
+              result = {
+                ...result,
+                ok: false,
+                failureClass: 'stale-review-head',
+                error: staleMessage,
+                reviewerSessionUuid,
+                stdout: result.stdout || result.stdoutTail || null,
+                stderr: result.stderr || result.stderrTail || null,
+              };
+              staleReviewOutput = true;
+            }
+          } catch (err) {
+            console.warn(
+              `[watcher] reviewer post freshness check failed for ${repo}#${prNumber}; proceeding with post: ` +
+              `${err?.message || err}`
+            );
+          }
+        }
+        if (!staleReviewOutput) {
+          const captureAttemptNumber = Number.isFinite(Number(reviewDbAttemptNumber))
+            ? Number(reviewDbAttemptNumber)
+            : Number(reviewAttemptNumber);
+          await postGitHubReviewWithCaptureImpl({
+            rootDir: ROOT,
+            repo,
+            prNumber,
+            attemptNumber: captureAttemptNumber,
+            reviewerModel,
+            reviewerHeadSha: reviewerHeadSha || null,
+            reviewBody: result.reviewBody,
+            botTokenEnv,
+            passKind,
+            reviewerSpawnToken,
+            reviewerIdentity,
+            log: console,
+          });
+          console.log(`[reviewer] Review posted to ${repo}#${prNumber}`);
+        }
       } catch (err) {
         console.error(`[reviewer] GITHUB POST FAILED for ${repo}#${prNumber}:`, err?.message || err);
         result = resultWithGitHubPostFailure(result, err);
@@ -892,6 +925,7 @@ function settleReviewerAttempt({
   statements = {
     markPosted: stmtMarkPosted,
     markFailed: stmtMarkFailed,
+    releaseReviewerClaim: stmtReleaseReviewerClaim,
     releaseReviewLease: stmtReleaseReviewLease,
     markFailedQuota: stmtMarkFailedQuota,
     releaseReviewLeaseQuota: stmtReleaseReviewLeaseQuota,
@@ -938,6 +972,17 @@ function settleReviewerAttempt({
   }
 
   const failureClass = result.failureClass || 'unknown';
+
+  if (failureClass === 'stale-review-head') {
+    const releaseResult = typeof statements.releaseReviewerClaim?.run === 'function'
+      ? statements.releaseReviewerClaim.run(result.reviewerSessionUuid || null, repoPath, prNumber)
+      : { changes: 0 };
+    log.warn(
+      `[watcher] Reviewer output for ${repoPath}#${prNumber} was stale; ` +
+      `released claim=${releaseResult.changes === 1 ? 'yes' : 'no'} for current-head re-review`
+    );
+    return;
+  }
 
   // LAC-545: every reviewer failure now logs its captured stderr/stdout
   // with the failure class. Previously these were swallowed by the

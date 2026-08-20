@@ -245,7 +245,7 @@ export async function load(url, context, nextLoad) {
     'fixture:stale-drift': "export function shouldSkipReviewerForStaleDrift() { return null; }",
     'fixture:watcher-fail-loud': "export async function signalMalformedTitleFailure() { throw new Error('unexpected malformed-title path'); }",
     'fixture:watcher-memory-pressure': "export async function checkReviewerMemoryAdmission() { return { admit: true, reason: null, sample: { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }, projectedHeadroomMb: 999999, availableMb: 999999, swapUsedPct: 0, estimatedReviewerRssMb: 0, reservedMb: 0 }; } export function peakReviewerMemoryMbFor() { return 0; } export async function readMemoryPressureSample() { return { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }; }",
-    'fixture:github-api': "export async function fetchPullRequestRollup() { throw new Error('unexpected github rollup call'); } export async function fetchPullRequestHeadAndState() { return { state: 'open', mergedAt: null, closedAt: null, headRefOid: 'fixture-head', labels: [] }; } export async function fetchPullRequestMergeability() { return { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }; } export async function fetchReviewBodiesForHead() { return []; } export async function fetchSubmittedReviewsForHead() { return []; } export async function dismissStandingChangesRequestedReviewsForHead() { return { attempted: 0, dismissed: [], standing: [] }; } export async function fetchPullRequestCommitSubjects() { return []; }",
+    'fixture:github-api': "export async function fetchPullRequestRollup() { throw new Error('unexpected github rollup call'); } export async function fetchPullRequestHeadAndState(_repo, prNumber) { const overrides = globalThis.__watcherClaimLoopFreshHeads || {}; const headRefOid = Object.prototype.hasOwnProperty.call(overrides, String(prNumber)) ? overrides[String(prNumber)] : ('sha-happy-' + prNumber); return { state: 'open', mergedAt: null, closedAt: null, headRefOid, labels: [] }; } export async function fetchPullRequestMergeability() { return { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }; } export async function fetchReviewBodiesForHead() { return []; } export async function fetchSubmittedReviewsForHead() { return []; } export async function dismissStandingChangesRequestedReviewsForHead() { return { attempted: 0, dismissed: [], standing: [] }; } export async function fetchPullRequestCommitSubjects() { return []; }",
     'fixture:health-probe': "export function createWatcherHealthProbe() { return { beginTick() { return {}; }, recordOpenPending() {}, recordSpawn() {}, async finishTick() {} }; }",
     'fixture:gh-cli': "export const GH_LOOKUP_MAX_BUFFER = 26214400; export const GH_LOOKUP_TIMEOUT_MS = 30000; export function buildAllowlistedGhEnv(env = process.env) { return { ...env }; } export async function execGhWithRetry({ execFileImpl, args } = {}) { return execFileImpl('gh', args); } export function isTransientGhError() { return false; } export function parseDate(value) { return value ? new Date(value) : null; } export function parseJsonLines(stdout) { return String(stdout || '').split('\\\\n').filter(Boolean).map((line) => JSON.parse(line)); }",
     'fixture:ama-ham-provenance': "export const HAM_AUDIT_COMMENT_AUTHOR_LOGINS = new Set(); export function hamAuditCommentAuthorMatches() { return false; } export function parseCommitTrailers() { return {}; } export function parseRemediatedFindingsTrailer() { return null; }",
@@ -267,7 +267,7 @@ register(${JSON.stringify(pathToFileURL(loaderPath).href)}, import.meta.url);
 `;
 }
 
-function buildRunnerSource({ expectPollError = false } = {}) {
+function buildRunnerSource({ expectPollError = false, freshHeads = {} } = {}) {
   const watcherUrl = fileUrl('src', 'watcher.mjs');
   return `
 import assert from 'node:assert/strict';
@@ -276,6 +276,7 @@ const githubCalls = [];
 const githubWrites = [];
 const fetchCalls = [];
 const claims = [];
+globalThis.__watcherClaimLoopFreshHeads = ${JSON.stringify(freshHeads)};
 globalThis.fetch = async (...args) => {
   fetchCalls.push(args.map(String));
   throw new Error('unexpected fetch call from watcher claim-loop test');
@@ -891,6 +892,58 @@ test('watcher pollOnce claim loop records subject-state head SHAs and drives the
     assert.ok(
       summary.reviewerPassRows.every((row) => row.workspace_path === REPO_ROOT),
       'reviewer pass rows should retain the tool root so transcript token fallback can match Claude sessions on disk'
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('watcher releases claim and skips reviewer spawn when fresh head moved after claim', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-stale-head-claim-'));
+  const loaderPath = path.join(tmp, 'fixture-loader.mjs');
+  const registerPath = path.join(tmp, 'fixture-register.mjs');
+  const runnerPath = path.join(tmp, 'fixture-runner.mjs');
+  try {
+    writeFileSync(loaderPath, buildLoaderSource());
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({
+      freshHeads: { 101: 'sha-new-101' },
+    }));
+
+    const result = spawnSync(
+      process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        env: fixtureEnv(installGhFixture(tmp)),
+      }
+    );
+
+    const output = `${result.stdout || ''}${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+    const summaryLine = result.stdout
+      .split(/\r?\n/)
+      .find((line) => line.startsWith(SUMMARY_MARKER));
+    assert.ok(summaryLine, output);
+    const summary = JSON.parse(summaryLine.slice(SUMMARY_MARKER.length));
+
+    assert.deepEqual(
+      summary.claims
+        .filter((claim) => claim.prNumber === 101)
+        .map((claim) => claim.reviewerHeadSha),
+      ['sha-happy-101']
+    );
+    assert.equal(summary.rows['101'].review_status, 'pending');
+    assert.equal(summary.rows['101'].reviewer_head_sha, null);
+    assert.deepEqual(
+      summary.reviewerSpawns
+        .filter((spawn) => spawn?.subjectContext?.prNumber === 101),
+      []
+    );
+    assert.ok(
+      summary.reviewerSpawns.some((spawn) => spawn?.subjectContext?.prNumber === 102),
+      'other eligible PRs should keep moving'
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });

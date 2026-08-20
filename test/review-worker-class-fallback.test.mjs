@@ -73,6 +73,7 @@ test('no fallback configured -> keeps the primary', async () => {
 });
 
 test('fail-open: an unreadable fleet-quota status keeps the primary (never guesses a cap)', async () => {
+  const errors = [];
   const result = await resolveReviewerWorkerClassWithFallback({
     authorClass: 'gemini',
     primary: 'codex',
@@ -80,10 +81,14 @@ test('fail-open: an unreadable fleet-quota status keeps the primary (never guess
     execFileImpl: async () => {
       throw new Error('hq unavailable');
     },
+    logger: { error: (message) => errors.push(String(message)) },
   });
   assert.equal(result.workerClass, 'codex');
   assert.equal(result.fellBack, false);
   assert.equal(result.reason, 'fleet-quota-status-unavailable');
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /quota-status unavailable/);
+  assert.match(errors[0], /failing open/);
 });
 
 test('rejects a fallback candidate equal to the PR author class (diversity preserved)', async () => {
@@ -96,6 +101,104 @@ test('rejects a fallback candidate equal to the PR author class (diversity prese
   assert.equal(result.workerClass, 'codex');
   assert.equal(result.fellBack, false);
   assert.equal(result.reason, 'no-available-fallback');
+});
+
+test('retries transient fleet quota status failures with bounded backoff before falling back', async () => {
+  const warnings = [];
+  const errors = [];
+  const sleeps = [];
+  let calls = 0;
+  const transient = new Error('temporary EIO');
+  transient.code = 'EIO';
+
+  const result = await resolveReviewerWorkerClassWithFallback({
+    authorClass: 'gemini',
+    primary: 'codex',
+    fallbackWorkerClasses: ['claude-code'],
+    retryDelaysMs: [5, 10],
+    sleepImpl: async (ms) => sleeps.push(ms),
+    logger: {
+      warn: (message) => warnings.push(String(message)),
+      error: (message) => errors.push(String(message)),
+    },
+    execFileImpl: async () => {
+      calls += 1;
+      if (calls === 1) throw transient;
+      return { stdout: JSON.stringify({ providerStatuses: CODEX_EXHAUSTED_CLAUDE_OK }) };
+    },
+  });
+
+  assert.equal(calls, 2);
+  assert.deepEqual(sleeps, [5]);
+  assert.equal(errors.length, 0);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /transient failure/);
+  assert.equal(result.workerClass, 'claude-code');
+  assert.equal(result.fellBack, true);
+});
+
+test('does not retry non-transient fleet quota status failures but logs the fail-open state', async () => {
+  const errors = [];
+  const sleeps = [];
+  let calls = 0;
+  const missingBinary = new Error('spawn hq ENOENT');
+  missingBinary.code = 'ENOENT';
+
+  const result = await resolveReviewerWorkerClassWithFallback({
+    authorClass: 'gemini',
+    primary: 'codex',
+    fallbackWorkerClasses: ['claude-code'],
+    retryDelaysMs: [5, 10],
+    sleepImpl: async (ms) => sleeps.push(ms),
+    logger: { error: (message) => errors.push(String(message)) },
+    execFileImpl: async () => {
+      calls += 1;
+      throw missingBinary;
+    },
+  });
+
+  assert.equal(calls, 1);
+  assert.deepEqual(sleeps, []);
+  assert.equal(result.workerClass, 'codex');
+  assert.equal(result.fellBack, false);
+  assert.equal(result.reason, 'fleet-quota-status-unavailable');
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /ENOENT/);
+  assert.match(errors[0], /failing open/);
+});
+
+test('shares one successful fleet quota status read across nearby subjects', async () => {
+  const cache = new Map();
+  let calls = 0;
+  let now = 1_000;
+  const execFileImpl = async () => {
+    calls += 1;
+    return { stdout: JSON.stringify({ providerStatuses: CODEX_EXHAUSTED_CLAUDE_OK }) };
+  };
+
+  const first = await resolveReviewerWorkerClassWithFallback({
+    authorClass: 'gemini',
+    primary: 'codex',
+    fallbackWorkerClasses: ['claude-code'],
+    execFileImpl,
+    fleetQuotaStatusCache: cache,
+    fleetQuotaStatusCacheTtlMs: 10_000,
+    nowMs: () => now,
+  });
+  now += 500;
+  const second = await resolveReviewerWorkerClassWithFallback({
+    authorClass: 'gemini',
+    primary: 'codex',
+    fallbackWorkerClasses: ['claude-code'],
+    execFileImpl,
+    fleetQuotaStatusCache: cache,
+    fleetQuotaStatusCacheTtlMs: 10_000,
+    nowMs: () => now,
+  });
+
+  assert.equal(calls, 1);
+  assert.equal(first.workerClass, 'claude-code');
+  assert.equal(second.workerClass, 'claude-code');
 });
 
 test('does not read fleet quota status when no configured fallback is a viable alternate', async () => {

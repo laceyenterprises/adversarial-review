@@ -9,6 +9,9 @@ import {
 
 const execFileAsync = promisify(execFileCb);
 const FLEET_QUOTA_STATUS_TIMEOUT_MS = 20_000;
+const FLEET_QUOTA_STATUS_RETRY_DELAYS_MS = Object.freeze([250, 1000]);
+const FLEET_QUOTA_STATUS_CACHE_TTL_MS = 10_000;
+const FLEET_QUOTA_STATUS_CACHE_BY_EXEC = new WeakMap();
 
 const DEFAULT_REVIEWER_WORKER_CLASS_FALLBACK = Object.freeze(['claude-code']);
 const REVIEWER_MODEL_BY_WORKER_CLASS = Object.freeze({
@@ -33,6 +36,99 @@ function resolveHqPath(env = process.env) {
 
 function reviewerModelForWorkerClass(workerClass) {
   return REVIEWER_MODEL_BY_WORKER_CLASS[String(workerClass || '').trim().toLowerCase()] || null;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function fleetQuotaStatusCacheFor(execFileImpl) {
+  if (typeof execFileImpl !== 'function') return new Map();
+  let cache = FLEET_QUOTA_STATUS_CACHE_BY_EXEC.get(execFileImpl);
+  if (!cache) {
+    cache = new Map();
+    FLEET_QUOTA_STATUS_CACHE_BY_EXEC.set(execFileImpl, cache);
+  }
+  return cache;
+}
+
+function fleetQuotaStatusCacheKey({ hqPath }) {
+  return JSON.stringify({ hqPath: String(hqPath || '') });
+}
+
+function fleetQuotaStatusErrorMessage(error) {
+  const code = error?.code ? ` code=${error.code}` : '';
+  const signal = error?.signal ? ` signal=${error.signal}` : '';
+  const killed = error?.killed === true ? ' killed=true' : '';
+  const message = String(error?.message || error || 'unknown error');
+  return `${message}${code}${signal}${killed}`;
+}
+
+function isTransientFleetQuotaStatusError(error) {
+  const code = String(error?.code || '').toUpperCase();
+  if (['EIO', 'ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'EPIPE'].includes(code)) return true;
+  if (error?.killed === true) return true;
+  return false;
+}
+
+async function readFleetQuotaStatusWithRetry({
+  env,
+  hqPath,
+  execFileImpl,
+  logger,
+  sleepImpl,
+  retryDelaysMs,
+  cache,
+  cacheTtlMs,
+  nowMs,
+}) {
+  const cacheKey = fleetQuotaStatusCacheKey({ hqPath });
+  const now = nowMs();
+  const cached = cache?.get(cacheKey);
+  if (cached && now - cached.readAtMs <= cacheTtlMs) {
+    return { stdout: cached.stdout, source: 'cache' };
+  }
+
+  const attempts = retryDelaysMs.length + 1;
+  let lastError = null;
+  for (let attemptIndex = 0; attemptIndex < attempts; attemptIndex += 1) {
+    try {
+      const result = await execFileImpl(hqPath, ['fleet', 'quota', 'status', '--json'], {
+        env,
+        encoding: 'utf8',
+        maxBuffer: 5 * 1024 * 1024,
+        timeout: FLEET_QUOTA_STATUS_TIMEOUT_MS,
+      });
+      const stdout = typeof result === 'string' ? result : String(result?.stdout || '');
+      cache?.set(cacheKey, { stdout, readAtMs: nowMs() });
+      return { stdout, source: attemptIndex === 0 ? 'exec' : 'exec-retry' };
+    } catch (err) {
+      lastError = err;
+      const message = fleetQuotaStatusErrorMessage(err);
+      const retryDelayMs = retryDelaysMs[attemptIndex];
+      if (isTransientFleetQuotaStatusError(err) && retryDelayMs !== undefined) {
+        logger?.warn?.(
+          `[watcher] review-worker-class-fallback quota-status transient failure ` +
+          `attempt=${attemptIndex + 1}/${attempts}; retrying in ${retryDelayMs}ms: ${message}`
+        );
+        if (retryDelayMs > 0) await sleepImpl(retryDelayMs);
+        continue;
+      }
+
+      logger?.error?.(
+        `[watcher] review-worker-class-fallback quota-status unavailable ` +
+        `attempts=${attemptIndex + 1}/${attempts}; failing open: ${message}`
+      );
+      return { error: lastError, errorMessage: message };
+    }
+  }
+
+  const message = fleetQuotaStatusErrorMessage(lastError);
+  logger?.error?.(
+    `[watcher] review-worker-class-fallback quota-status unavailable ` +
+    `attempts=${attempts}/${attempts}; failing open: ${message}`
+  );
+  return { error: lastError, errorMessage: message };
 }
 
 export function applyReviewerWorkerClassFallbackToRoute({
@@ -73,6 +169,12 @@ export function applyReviewerWorkerClassFallbackToRoute({
  * @param {Object=} args.env
  * @param {string=} args.hqPath
  * @param {Function=} args.execFileImpl — DI for `hq fleet quota status --json`.
+ * @param {Object=} args.logger — warning/error sink for fail-open degradation.
+ * @param {Function=} args.sleepImpl — DI for bounded retry sleeps.
+ * @param {number[]=} args.retryDelaysMs — transient retry delays.
+ * @param {Map=} args.fleetQuotaStatusCache — short-lived stdout cache.
+ * @param {number=} args.fleetQuotaStatusCacheTtlMs — cache TTL.
+ * @param {Function=} args.nowMs — DI for cache timestamps.
  * @returns {Promise<{ workerClass: string, fellBack: boolean, reason: string,
  *   from?: string, to?: string, primaryState?: string, error?: string }>}
  */
@@ -83,6 +185,12 @@ export async function resolveReviewerWorkerClassWithFallback({
   env = process.env,
   hqPath = resolveHqPath(env),
   execFileImpl = execFileAsync,
+  logger = console,
+  sleepImpl = sleep,
+  retryDelaysMs = FLEET_QUOTA_STATUS_RETRY_DELAYS_MS,
+  fleetQuotaStatusCache = fleetQuotaStatusCacheFor(execFileImpl),
+  fleetQuotaStatusCacheTtlMs = FLEET_QUOTA_STATUS_CACHE_TTL_MS,
+  nowMs = () => Date.now(),
 } = {}) {
   const author = String(authorClass || '').trim().toLowerCase();
   const primaryClass = String(primary || '').trim().toLowerCase();
@@ -106,19 +214,22 @@ export async function resolveReviewerWorkerClassWithFallback({
     return { ...base, reason: 'no-available-fallback' };
   }
 
-  let stdout;
-  try {
-    const result = await execFileImpl(hqPath, ['fleet', 'quota', 'status', '--json'], {
-      env,
-      encoding: 'utf8',
-      maxBuffer: 5 * 1024 * 1024,
-      timeout: FLEET_QUOTA_STATUS_TIMEOUT_MS,
-    });
-    stdout = typeof result === 'string' ? result : String(result?.stdout || '');
-  } catch (err) {
-    return { ...base, reason: 'fleet-quota-status-unavailable', error: String(err?.message || err) };
+  const quotaStatus = await readFleetQuotaStatusWithRetry({
+    env,
+    hqPath,
+    execFileImpl,
+    logger,
+    sleepImpl,
+    retryDelaysMs: Array.isArray(retryDelaysMs) ? retryDelaysMs : [],
+    cache: fleetQuotaStatusCache,
+    cacheTtlMs: Number.isFinite(fleetQuotaStatusCacheTtlMs) ? fleetQuotaStatusCacheTtlMs : 0,
+    nowMs,
+  });
+  if (quotaStatus.error) {
+    return { ...base, reason: 'fleet-quota-status-unavailable', error: quotaStatus.errorMessage };
   }
 
+  const stdout = quotaStatus.stdout;
   const primaryAvail = quotaAvailableFromFleetStatus(stdout, { harness: primaryClass });
   if (!isGroundedProviderState(primaryAvail.state)) {
     return {

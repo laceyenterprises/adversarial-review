@@ -12,6 +12,10 @@ import {
 } from '../src/reviewer-pass-tokens.mjs';
 import { createSessionLedgerDb } from './helpers/session-ledger-fixtures.mjs';
 
+function currentHead(headRefOid) {
+  return async () => ({ state: 'open', mergedAt: null, closedAt: null, headRefOid });
+}
+
 test('spawnReviewer posts successful adapter-produced review bodies through GitHub capture', async () => {
   const posted = [];
   const result = await spawnReviewer({
@@ -43,6 +47,7 @@ test('spawnReviewer posts successful adapter-produced review bodies through GitH
     postGitHubReviewWithCaptureImpl: async (payload) => {
       posted.push(payload);
     },
+    fetchPullRequestHeadAndStateImpl: currentHead('abc123'),
   });
 
   assert.equal(result.ok, true);
@@ -56,6 +61,130 @@ test('spawnReviewer posts successful adapter-produced review bodies through GitH
   assert.equal(posted[0].passKind, 'first-pass');
   assert.equal(posted[0].reviewerIdentity, 'gemini-reviewer-lacey');
   assert.match(posted[0].reviewBody, /^## Verdict\nComment only/m);
+});
+
+test('spawnReviewer discards adapter review body when current PR head moved before post', async () => {
+  const posted = [];
+  const result = await spawnReviewer({
+    repo: 'laceyenterprises/demo',
+    prNumber: 140,
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+    linearTicketId: 'LAC-566',
+    labels: [],
+    builderTag: 'codex',
+    reviewerHeadSha: 'old-head',
+    reviewAttemptNumber: 1,
+    reviewDbAttemptNumber: 5,
+    completedRemediationRounds: 0,
+    passKind: 'first-pass',
+    maxRemediationRounds: 2,
+    reviewerSessionUuid: 'spawn-settle-stale-head',
+    reviewerRuntimeAdapterOverride: {
+      async spawnReviewer() {
+        return {
+          ok: true,
+          reviewBody: '## Summary\nStale finding.\n\n## Verdict\nRequest changes',
+          reviewBodyDelivery: 'caller-post',
+          spawnedAt: '2026-07-27T03:00:00.000Z',
+        };
+      },
+    },
+    postGitHubReviewWithCaptureImpl: async (payload) => {
+      posted.push(payload);
+    },
+    fetchPullRequestHeadAndStateImpl: currentHead('new-head'),
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.failureClass, 'stale-review-head');
+  assert.deepEqual(posted, []);
+  assert.match(result.error, /targeted stale head old-head; current head is new-head/);
+});
+
+test('spawnReviewer retries transient freshness probes before discarding stale adapter output', async () => {
+  const posted = [];
+  const sleeps = [];
+  let fetchAttempts = 0;
+  const result = await spawnReviewer({
+    repo: 'laceyenterprises/demo',
+    prNumber: 141,
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+    linearTicketId: 'LAC-566',
+    labels: [],
+    builderTag: 'codex',
+    reviewerHeadSha: 'old-head',
+    reviewAttemptNumber: 1,
+    reviewDbAttemptNumber: 6,
+    completedRemediationRounds: 0,
+    passKind: 'first-pass',
+    maxRemediationRounds: 2,
+    reviewerSessionUuid: 'spawn-settle-stale-head-retry',
+    reviewerRuntimeAdapterOverride: {
+      async spawnReviewer() {
+        return {
+          ok: true,
+          reviewBody: '## Summary\nStale finding after retry.\n\n## Verdict\nRequest changes',
+          reviewBodyDelivery: 'caller-post',
+          spawnedAt: '2026-07-27T03:00:00.000Z',
+        };
+      },
+    },
+    postGitHubReviewWithCaptureImpl: async (payload) => {
+      posted.push(payload);
+    },
+    fetchPullRequestHeadAndStateImpl: async () => {
+      fetchAttempts += 1;
+      if (fetchAttempts === 1) {
+        const err = new Error('TLS handshake timeout');
+        err.stderr = 'TLS handshake timeout';
+        throw err;
+      }
+      return { headRefOid: 'new-head', state: 'open' };
+    },
+    freshnessCheckSleepImpl: async (ms) => {
+      sleeps.push(ms);
+    },
+  });
+
+  assert.equal(fetchAttempts, 2);
+  assert.deepEqual(sleeps, [100]);
+  assert.equal(result.ok, false);
+  assert.equal(result.failureClass, 'stale-review-head');
+  assert.deepEqual(posted, []);
+});
+
+test('settleReviewerAttempt releases stale-head reviewer claims without consuming review budget', async () => {
+  const released = [];
+  const leaseReleased = [];
+  const markedPosted = [];
+  const { settleReviewerAttempt } = await import('../src/reviewer-spawn-settle.mjs');
+
+  settleReviewerAttempt({
+    repoPath: 'laceyenterprises/demo',
+    prNumber: 140,
+    result: {
+      ok: false,
+      failureClass: 'stale-review-head',
+      reviewerSessionUuid: 'stale-session',
+      error: 'reviewer output targeted stale head',
+    },
+    statements: {
+      markPosted: { run: (...args) => markedPosted.push(args) },
+      releaseReviewerClaim: { run: (...args) => { released.push(args); return { changes: 1 }; } },
+      releaseReviewLease: { run: (...args) => { leaseReleased.push(args); return { changes: 0 }; } },
+    },
+    log: { warn() {} },
+  });
+
+  assert.deepEqual(markedPosted, []);
+  assert.deepEqual(released, [['stale-session', 'laceyenterprises/demo', 140]]);
+  assert.equal(leaseReleased.length, 1);
+  assert.match(leaseReleased[0][0], /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(leaseReleased[0][1], 'reviewer output targeted stale head');
+  assert.equal(leaseReleased[0][2], 'laceyenterprises/demo');
+  assert.equal(leaseReleased[0][3], 140);
 });
 
 test('spawnReviewer does not post unmarked adapter review bodies', async () => {
@@ -127,6 +256,7 @@ test('spawnReviewer resolves worker_run_id from os-dispatch launch_request_id wh
       },
     },
     postGitHubReviewWithCaptureImpl: async () => {},
+    fetchPullRequestHeadAndStateImpl: currentHead('sha21'),
     readBestReviewerEvidenceTokenUsageImpl: (args) => {
       readBestArgs = args;
       // Mimic the ledger resolving a worker_runs row from launch_request_id:
@@ -195,6 +325,7 @@ test('spawnReviewer enriches adapter token usage with ledger worker_run_id witho
       },
     },
     postGitHubReviewWithCaptureImpl: async () => {},
+    fetchPullRequestHeadAndStateImpl: currentHead('sha24'),
     readBestReviewerEvidenceTokenUsageImpl: () => ({
       workerRunId: 'wr_sdk_24',
       input: 1,
@@ -262,6 +393,7 @@ test('spawnReviewer retries transient ledger contention and preserves adapter co
         },
       },
       postGitHubReviewWithCaptureImpl: async () => {},
+      fetchPullRequestHeadAndStateImpl: currentHead('sha25'),
       readBestReviewerEvidenceTokenUsageImpl: () => {
         lookupCalls += 1;
         if (lookupCalls < 3) throw new Error('SQLITE_BUSY');
@@ -337,6 +469,7 @@ test('spawnReviewer keeps retrying token-only evidence until worker attribution 
       },
     },
     postGitHubReviewWithCaptureImpl: async () => {},
+    fetchPullRequestHeadAndStateImpl: currentHead('sha251'),
     readBestReviewerEvidenceTokenUsageImpl: () => {
       lookupCalls += 1;
       if (lookupCalls < 3) {
@@ -499,6 +632,7 @@ test('spawnReviewer persists worker_run_id onto reviewer_passes for SDK-dispatch
         },
       },
       postGitHubReviewWithCaptureImpl: async () => {},
+      fetchPullRequestHeadAndStateImpl: currentHead('sha121'),
       readBestReviewerEvidenceTokenUsageImpl: (args) => readBestReviewerEvidenceTokenUsage({
         ...args,
         ledgerTarget: { backend: 'sqlite', path: ledgerDb },
@@ -549,6 +683,7 @@ test('spawnReviewer settles worker_run_id null when no worker run resolves (cli-
       },
     },
     postGitHubReviewWithCaptureImpl: async () => {},
+    fetchPullRequestHeadAndStateImpl: currentHead('sha22'),
     readBestReviewerEvidenceTokenUsageImpl: ({ launchRequestId }) => {
       lookupLaunchRequestId = launchRequestId;
       // A request-shaped reattach token may collide with a real worker launch.

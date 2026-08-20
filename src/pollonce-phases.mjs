@@ -1600,6 +1600,20 @@ export async function processReviewSubject(entry, ctx) {
                 stmtMarkClosed.run(new Date().toISOString(), repoPath, prNumber);
                 return;
               }
+              const freshHeadSha = freshPR.headRefOid || null;
+              if (
+                reviewerHeadSha &&
+                freshHeadSha &&
+                String(freshHeadSha) !== String(reviewerHeadSha)
+              ) {
+                console.log(
+                  `[watcher] PR ${repoPath}#${prNumber} head moved since reviewer claim ` +
+                  `${String(reviewerHeadSha).slice(0, 12)} → ${String(freshHeadSha).slice(0, 12)} — ` +
+                  'releasing claim and skipping stale reviewer spawn'
+                );
+                stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
+                return;
+              }
             } catch (err) {
               // Non-fatal — proceed with spawn rather than block. A failed
               // freshness check is no worse than not having one at all.

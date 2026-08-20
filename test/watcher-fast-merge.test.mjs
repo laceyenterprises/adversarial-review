@@ -273,7 +273,7 @@ console.log(${JSON.stringify(SUMMARY_MARKER)} + JSON.stringify({
 `;
 }
 
-function subject(prNumber, { title = '[codex] fast merge test', headSha = `sha-subject-${prNumber}`, labels = [] } = {}) {
+function subject(prNumber, { title = '[codex] fast merge test', headSha = `sha-live-${prNumber}`, labels = [] } = {}) {
   return {
     ref: { domainId: 'code-pr', subjectExternalId: `${REPO}#${prNumber}`, revisionRef: headSha },
     lifecycle: 'pending-review',
@@ -630,7 +630,7 @@ test('fast-merge watcher: veto added after skip requeues through pending and the
   }, { skipEnabled: true });
   assert.equal(summary.rows[0].pr_state, 'open');
   assert.equal(summary.rows[0].review_status, 'posted');
-  assert.equal(summary.rows[0].reviewer_head_sha, 'sha-subject-807');
+  assert.equal(summary.rows[0].reviewer_head_sha, 'sha-live-807');
   assert.equal(summary.spawns.length, 1);
   assert.equal(summary.auditEntries[0].action, 'veto-requeued');
   assert.equal(summary.auditEntries[0].requeue_result.status, 'pending');

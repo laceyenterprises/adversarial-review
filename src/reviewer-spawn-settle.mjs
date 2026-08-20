@@ -67,7 +67,10 @@ import {
   stmtMarkCascadeFailed,
   stmtMarkPendingUpstream,
   stmtGetReviewRow,
+  stmtReleaseReviewerClaim,
 } from './review-state-db.mjs';
+import { fetchPullRequestHeadAndState } from './github-api.mjs';
+import { isTransientGhError } from './gh-cli.mjs';
 import { resolveReviewCycleCapConfig } from './review-cycle-cap.mjs';
 import { loadConfigCached } from './config-loader.mjs';
 import { recordSuccessfulReviewCycleVerdict } from './review-cycle-cap-actions.mjs';
@@ -101,6 +104,7 @@ const REVIEWER_LEASE_RECOVERY_ENABLED = resolveReviewerLeaseRecoveryEnabled({
 });
 const INFRA_AUTO_RECOVER_CAP = DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS;
 const REVIEWER_LEDGER_LOOKUP_DELAYS_MS = Object.freeze([25, 75]);
+const REVIEW_POST_FRESHNESS_RETRY_DELAYS_MS = Object.freeze([100, 250]);
 
 // ARC-18: resolveReviewerIdentity + its identity map stay in watcher (still used
 // there and exported); re-derived here as a byte-identical copy for spawnReviewer.
@@ -231,6 +235,26 @@ async function readReviewerLedgerEvidenceWithRetry({
     if (attempt < delaysMs.length) await sleepImpl(delaysMs[attempt]);
   }
   return { usage: lastUsage, attempts, lastError };
+}
+
+async function fetchReviewerPostFreshnessWithRetry({
+  fetchImpl,
+  repo,
+  prNumber,
+  sleepImpl = sleepMs,
+  delaysMs = REVIEW_POST_FRESHNESS_RETRY_DELAYS_MS,
+} = {}) {
+  let lastError = null;
+  for (let attempt = 0; attempt <= delaysMs.length; attempt += 1) {
+    try {
+      return await fetchImpl(repo, prNumber);
+    } catch (err) {
+      lastError = err;
+      if (!isTransientGhError(err) || attempt >= delaysMs.length) throw err;
+      await sleepImpl(delaysMs[attempt]);
+    }
+  }
+  throw lastError;
 }
 
 async function defaultPostGitHubReviewWithCapture(args) {
@@ -418,6 +442,8 @@ async function spawnReviewer({
   readReviewerQuotaDecisionImpl = readReviewerQuotaDecision,
   beginReviewerPassImpl = beginReviewerPass,
   completeReviewerPassImpl = completeReviewerPass,
+  fetchPullRequestHeadAndStateImpl = fetchPullRequestHeadAndState,
+  freshnessCheckSleepImpl = sleepMs,
 }) {
   const activeReviewerRuntimeAdapter = reviewerRuntimeAdapterOverride || reviewerRuntimeState.adapter;
   const normalizedReviewerClass = normalizeReviewerClass(reviewerModel);
@@ -578,24 +604,59 @@ async function spawnReviewer({
       result.reviewBody.trim()
     ) {
       try {
-        const captureAttemptNumber = Number.isFinite(Number(reviewDbAttemptNumber))
-          ? Number(reviewDbAttemptNumber)
-          : Number(reviewAttemptNumber);
-        await postGitHubReviewWithCaptureImpl({
-          rootDir: ROOT,
-          repo,
-          prNumber,
-          attemptNumber: captureAttemptNumber,
-          reviewerModel,
-          reviewerHeadSha: reviewerHeadSha || null,
-          reviewBody: result.reviewBody,
-          botTokenEnv,
-          passKind,
-          reviewerSpawnToken,
-          reviewerIdentity,
-          log: console,
-        });
-        console.log(`[reviewer] Review posted to ${repo}#${prNumber}`);
+        let staleReviewOutput = false;
+        if (reviewerHeadSha) {
+          try {
+            const freshPR = await fetchReviewerPostFreshnessWithRetry({
+              fetchImpl: fetchPullRequestHeadAndStateImpl,
+              repo,
+              prNumber,
+              sleepImpl: freshnessCheckSleepImpl,
+            });
+            const freshHeadSha = freshPR?.headRefOid || null;
+            if (freshHeadSha && String(freshHeadSha) !== String(reviewerHeadSha)) {
+              const staleMessage =
+                `reviewer output for ${repo}#${prNumber} targeted stale head ` +
+                `${String(reviewerHeadSha).slice(0, 12)}; current head is ${String(freshHeadSha).slice(0, 12)}`;
+              console.warn(`[watcher] ${staleMessage}; discarding review before GitHub post`);
+              result = {
+                ...result,
+                ok: false,
+                failureClass: 'stale-review-head',
+                error: staleMessage,
+                reviewerSessionUuid,
+                stdout: result.stdout || result.stdoutTail || null,
+                stderr: result.stderr || result.stderrTail || null,
+              };
+              staleReviewOutput = true;
+            }
+          } catch (err) {
+            console.warn(
+              `[watcher] reviewer post freshness check failed for ${repo}#${prNumber}; proceeding with post: ` +
+              `${err?.message || err}`
+            );
+          }
+        }
+        if (!staleReviewOutput) {
+          const captureAttemptNumber = Number.isFinite(Number(reviewDbAttemptNumber))
+            ? Number(reviewDbAttemptNumber)
+            : Number(reviewAttemptNumber);
+          await postGitHubReviewWithCaptureImpl({
+            rootDir: ROOT,
+            repo,
+            prNumber,
+            attemptNumber: captureAttemptNumber,
+            reviewerModel,
+            reviewerHeadSha: reviewerHeadSha || null,
+            reviewBody: result.reviewBody,
+            botTokenEnv,
+            passKind,
+            reviewerSpawnToken,
+            reviewerIdentity,
+            log: console,
+          });
+          console.log(`[reviewer] Review posted to ${repo}#${prNumber}`);
+        }
       } catch (err) {
         console.error(`[reviewer] GITHUB POST FAILED for ${repo}#${prNumber}:`, err?.message || err);
         result = resultWithGitHubPostFailure(result, err);
@@ -892,6 +953,7 @@ function settleReviewerAttempt({
   statements = {
     markPosted: stmtMarkPosted,
     markFailed: stmtMarkFailed,
+    releaseReviewerClaim: stmtReleaseReviewerClaim,
     releaseReviewLease: stmtReleaseReviewLease,
     markFailedQuota: stmtMarkFailedQuota,
     releaseReviewLeaseQuota: stmtReleaseReviewLeaseQuota,
@@ -938,6 +1000,30 @@ function settleReviewerAttempt({
   }
 
   const failureClass = result.failureClass || 'unknown';
+
+  if (failureClass === 'stale-review-head') {
+    // Clear the session-bound claim first. The default releaseReviewLease
+    // statement is status-gated to review_status='reviewing', so after this
+    // no-budget release it records a 0-change cleanup check instead of charging
+    // review_attempts for ordinary head churn.
+    const releaseResult = typeof statements.releaseReviewerClaim?.run === 'function'
+      ? statements.releaseReviewerClaim.run(result.reviewerSessionUuid || null, repoPath, prNumber)
+      : { changes: 0 };
+    const leaseReleaseResult = typeof statements.releaseReviewLease?.run === 'function'
+      ? statements.releaseReviewLease.run(
+        failureAt,
+        result.error || 'Reviewer output targeted a stale PR head; requeued for current-head review.',
+        repoPath,
+        prNumber
+      )
+      : { changes: 0 };
+    log.warn(
+      `[watcher] Reviewer output for ${repoPath}#${prNumber} was stale; ` +
+      `released claim=${releaseResult.changes === 1 ? 'yes' : 'no'} ` +
+      `lease=${leaseReleaseResult.changes === 1 ? 'yes' : 'no'} for current-head re-review`
+    );
+    return;
+  }
 
   // LAC-545: every reviewer failure now logs its captured stderr/stdout
   // with the failure class. Previously these were swallowed by the

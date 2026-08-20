@@ -278,6 +278,43 @@ test('postGitHubReview binds a known reviewed snapshot to GitHub commit_id', asy
   assert.equal(calls[0].options.env.GH_TOKEN, 'ghp_codex_reviewer_pat');
 });
 
+test('postGitHubReviewWithCapture refuses stale reviewed heads before any GitHub write', async () => {
+  const calls = [];
+  const rootDir = mkdtempSync(join(tmpdir(), 'review-capture-stale-head-'));
+  try {
+    await assert.rejects(
+      () => postGitHubReviewWithCapture({
+        rootDir,
+        repo: 'laceyenterprises/demo',
+        prNumber: 42,
+        attemptNumber: 7,
+        reviewerModel: 'gemini',
+        reviewerHeadSha: 'old-reviewed-head',
+        currentHeadSha: 'new-live-head',
+        reviewBody: '## Summary\nStale finding.\n\n## Verdict\nRequest changes',
+        botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+        passKind: 'rereview',
+        execFileImpl: async (...args) => {
+          calls.push(args);
+          throw new Error('GitHub write must not be reached');
+        },
+        prepareReviewWrite: async () => {
+          throw new Error('pre-write cleanup must not be reached');
+        },
+      }),
+      (err) => {
+        assert.equal(err.failureClass, 'stale-review-head');
+        assert.match(err.message, /targeted stale head old-reviewed/);
+        assert.match(err.message, /current head is new-live-hea/);
+        return true;
+      }
+    );
+    assert.deepEqual(calls, []);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('postGitHubReviewWithCapture dismisses prior request-changes after clean exact-head re-review', async () => {
   const calls = [];
   const rootDir = mkdtempSync(join(tmpdir(), 'review-clean-dismissal-'));

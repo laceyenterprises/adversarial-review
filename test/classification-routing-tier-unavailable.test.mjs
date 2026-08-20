@@ -15,6 +15,16 @@ import {
 } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { reviewerSignalAwareFailureClass } from '../src/adapters/reviewer-runtime/cli-direct/index.mjs';
 
+test('reviewer stale-head pre-write refusal classifies as stale-review-head', () => {
+  assert.equal(
+    classifyReviewerFailure(
+      '[stale-review-head] reviewer output for laceyenterprises/agent-os#5593 targeted stale head 15c3b637ddb3; current head is 1660187c3f72; refusing GitHub review post',
+      1
+    ),
+    'stale-review-head'
+  );
+});
+
 test('claude CLI "Unable to connect to API (ConnectionRefused)" stays unknown without local-routing context', () => {
   // Verbatim shape of the failure observed in the 2026-06-04 watcher log.
   const stderr = `[reviewer] DEBUG: starting claude review...

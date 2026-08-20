@@ -157,6 +157,10 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     return 'launchctl-bootstrap';
   }
 
+  if (/\[stale-review-head\]|targeted stale head|current head is/.test(lower)) {
+    return 'stale-review-head';
+  }
+
   if (/forbidden fallback|env-strip violation|oauth strip.*violation|api[-_ ]?key fallback/.test(lower)) {
     return 'forbidden-fallback';
   }

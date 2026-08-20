@@ -169,6 +169,7 @@ test('retries execFile subprocess failures whose transient diagnostic is only in
   assert.equal(errors.length, 0);
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /transient failure/);
+  assert.match(warnings[0], /TLS handshake timeout/);
   assert.equal(result.workerClass, 'claude-code');
   assert.equal(result.fellBack, true);
 });

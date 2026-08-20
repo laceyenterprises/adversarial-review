@@ -61,7 +61,12 @@ function fleetQuotaStatusErrorMessage(error) {
   const signal = error?.signal ? ` signal=${error.signal}` : '';
   const killed = error?.killed === true ? ' killed=true' : '';
   const message = String(error?.message || error || 'unknown error');
-  return `${message}${code}${signal}${killed}`;
+  const streamText = fleetQuotaStatusErrorText(error)
+    .replace(message, '')
+    .replace(/\s+/gu, ' ')
+    .trim();
+  const streamPreview = streamText ? ` detail=${streamText.slice(0, 500)}` : '';
+  return `${message}${code}${signal}${killed}${streamPreview}`;
 }
 
 function errorTextPart(value) {
@@ -70,18 +75,32 @@ function errorTextPart(value) {
   return String(value);
 }
 
+function fleetQuotaStatusErrorText(error, seen = new Set()) {
+  if (!error) return '';
+  if (typeof error !== 'object') return errorTextPart(error);
+  if (seen.has(error)) return '';
+  seen.add(error);
+  const parts = [
+    errorTextPart(error.message),
+    errorTextPart(error.stderr),
+    errorTextPart(error.stdout),
+    errorTextPart(error.code),
+    errorTextPart(error.errno),
+    errorTextPart(error.syscall),
+    errorTextPart(error.signal),
+    fleetQuotaStatusErrorText(error.cause, seen),
+  ];
+  return parts.filter(Boolean).join('\n');
+}
+
 function isTransientFleetQuotaStatusError(error) {
   const code = String(error?.code || '').toUpperCase();
   if (['EIO', 'ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'EPIPE'].includes(code)) return true;
   if (error?.killed === true) return true;
-  const text = [
-    errorTextPart(error?.message),
-    errorTextPart(error?.stderr),
-    errorTextPart(error?.stdout),
-  ].join('\n').toLowerCase();
+  const text = fleetQuotaStatusErrorText(error).toLowerCase();
   if (
-    /\b(eio|etimedout|econnreset|econnrefused|epipe|eai_again)\b/.test(text) ||
-    /timed?\s*out|timeout|tls handshake|connection reset|connection refused/.test(text) ||
+    /\b(eio|etimedout|econnreset|econnrefused|epipe|eagain|eai_again|enotfound)\b/u.test(text) ||
+    /timed?\s*out|timeout|tls handshake|connection reset|connection refused/u.test(text) ||
     /resource temporarily unavailable|temporarily unavailable|try again/.test(text) ||
     /socket hang up|remote end hung up/.test(text)
   ) {

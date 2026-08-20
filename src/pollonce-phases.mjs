@@ -34,6 +34,8 @@ import {
 import {
   applyEffectiveReviewerRoute,
   describeCrossModelReviewWaiver,
+  REVIEWER_ROUTE_BY_MODEL,
+
   routeSubject,
 } from './adapters/subject/github-pr/routing.mjs';
 import { projectAdversarialGateStatus } from './adversarial-gate-status.mjs';
@@ -45,6 +47,7 @@ import {
   markFastMergeAuditWritten,
 } from './fast-merge-audit-recovery.mjs';
 import { maybeInlineFinalHammerAfterReview } from './final-to-hammer-handoff.mjs';
+import { resolveReviewerWorkerClassWithFallback, reviewWorkerClassFallback } from './review-worker-class-fallback.mjs';
 import {
   fetchReviewsForHeadForDedup,
   getStalePostedReviewBudgetSuppression,
@@ -816,7 +819,7 @@ export async function processReviewSubject(entry, ctx) {
             `keeping reviewer=${geminiBaseRoute.reviewerModel} (auto-reverts on provider recovery)`
         );
       }
-      const route = selectReviewerRouteForAttempt({
+      let route = selectReviewerRouteForAttempt({
         subject,
         baseRoute: afhBaseRoute,
         rootDir: ROOT,
@@ -826,6 +829,34 @@ export async function processReviewSubject(entry, ctx) {
         headSha: subject.headSha || subject.ref.revisionRef || null,
         afhGrounding,
       });
+
+      // RWF-01: review-dispatch worker-class fallback
+      const rwfDecision = await resolveReviewerWorkerClassWithFallback({
+        authorClass: subject.builderClass || route.builderClass,
+        primary: route.reviewerModel,
+        fallbackWorkerClasses: reviewWorkerClassFallback(process.env),
+      });
+
+      if (rwfDecision.fellBack) {
+        console.warn(
+          `[watcher] review-worker-class-fallback repo=${repoPath} pr=${prNumber} ` +
+          `from=${rwfDecision.from} to=${rwfDecision.to} reason=${rwfDecision.reason} ` +
+          `primaryState=${rwfDecision.primaryState}`
+        );
+        const target = REVIEWER_ROUTE_BY_MODEL[rwfDecision.workerClass];
+        if (target) {
+          route = {
+            ...route,
+            reviewerModel: target.reviewerModel,
+            botTokenEnv: target.botTokenEnv,
+            reviewWorkerClassFallback: {
+              fromReviewerModel: rwfDecision.from,
+              toReviewerModel: rwfDecision.to,
+              reason: rwfDecision.reason,
+            }
+          };
+        }
+      }
 
       if (route.reviewerModelFallback) {
         console.warn(

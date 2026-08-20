@@ -345,6 +345,7 @@ exit 1
           GITHUB_TOKEN: 'fixture-token',
           FML_WATCHER_SKIP_ENABLED: skipEnabled ? 'true' : 'false',
           PATH: `${tmp}${path.delimiter}${process.env.PATH || ''}`,
+          AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'false',
           WATCHER_ROUTING_TIER_READINESS_PROBE_DISABLED: '1',
         },
       }

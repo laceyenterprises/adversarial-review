@@ -34,6 +34,8 @@ import {
 import {
   applyEffectiveReviewerRoute,
   describeCrossModelReviewWaiver,
+  REVIEWER_ROUTE_BY_MODEL,
+
   routeSubject,
 } from './adapters/subject/github-pr/routing.mjs';
 import { projectAdversarialGateStatus } from './adversarial-gate-status.mjs';
@@ -45,6 +47,11 @@ import {
   markFastMergeAuditWritten,
 } from './fast-merge-audit-recovery.mjs';
 import { maybeInlineFinalHammerAfterReview } from './final-to-hammer-handoff.mjs';
+import {
+  applyReviewerWorkerClassFallbackToRoute,
+  resolveReviewerWorkerClassWithFallback,
+  reviewWorkerClassFallback,
+} from './review-worker-class-fallback.mjs';
 import {
   fetchReviewsForHeadForDedup,
   getStalePostedReviewBudgetSuppression,
@@ -219,6 +226,20 @@ export function finalizePendingTerminalFailureState(row, {
     row.failure_message ?? null,
     row.reviewer_head_sha,
   ).changes;
+}
+
+const REVIEWER_WORKER_CLASS_BY_MODEL = Object.freeze({
+  claude: 'claude-code',
+  'claude-code': 'claude-code',
+  codex: 'codex',
+  gemini: 'gemini',
+});
+
+function reviewerWorkerClassForRoute(route) {
+  const explicit = String(route?.reviewerWorkerClass || route?.workerClass || '').trim().toLowerCase();
+  if (explicit) return explicit;
+  const reviewerModel = String(route?.reviewerModel || '').trim().toLowerCase();
+  return REVIEWER_WORKER_CLASS_BY_MODEL[reviewerModel] || reviewerModel;
 }
 
 
@@ -816,7 +837,7 @@ export async function processReviewSubject(entry, ctx) {
             `keeping reviewer=${geminiBaseRoute.reviewerModel} (auto-reverts on provider recovery)`
         );
       }
-      const route = selectReviewerRouteForAttempt({
+      let route = selectReviewerRouteForAttempt({
         subject,
         baseRoute: afhBaseRoute,
         rootDir: ROOT,
@@ -826,6 +847,36 @@ export async function processReviewSubject(entry, ctx) {
         headSha: subject.headSha || subject.ref.revisionRef || null,
         afhGrounding,
       });
+
+      // RWF-01: review-dispatch worker-class fallback
+      const primaryReviewerWorkerClass = reviewerWorkerClassForRoute(route);
+      const rwfDecision = await resolveReviewerWorkerClassWithFallback({
+        authorClass: subject.builderClass || route.builderClass,
+        primary: primaryReviewerWorkerClass,
+        fallbackWorkerClasses: reviewWorkerClassFallback(process.env),
+        execFileImpl: execFileAsync,
+      });
+
+      if (rwfDecision.fellBack) {
+        const appliedFallback = applyReviewerWorkerClassFallbackToRoute({
+          route,
+          decision: rwfDecision,
+          reviewerRouteByModel: REVIEWER_ROUTE_BY_MODEL,
+        });
+        if (appliedFallback.applied) {
+          route = appliedFallback.route;
+          console.warn(
+            `[watcher] review-worker-class-fallback repo=${repoPath} pr=${prNumber} ` +
+            `from=${rwfDecision.from} to=${rwfDecision.to} reason=${rwfDecision.reason} ` +
+            `primaryState=${rwfDecision.primaryState}`
+          );
+        } else {
+          console.warn(
+            `[watcher] review-worker-class-fallback-skipped repo=${repoPath} pr=${prNumber} ` +
+            `workerClass=${rwfDecision.workerClass} reason=${appliedFallback.reason}`
+          );
+        }
+      }
 
       if (route.reviewerModelFallback) {
         console.warn(

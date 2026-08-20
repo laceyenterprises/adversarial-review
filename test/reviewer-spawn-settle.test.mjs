@@ -102,6 +102,59 @@ test('spawnReviewer discards adapter review body when current PR head moved befo
   assert.match(result.error, /targeted stale head old-head; current head is new-head/);
 });
 
+test('spawnReviewer retries transient freshness probes before discarding stale adapter output', async () => {
+  const posted = [];
+  const sleeps = [];
+  let fetchAttempts = 0;
+  const result = await spawnReviewer({
+    repo: 'laceyenterprises/demo',
+    prNumber: 141,
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+    linearTicketId: 'LAC-566',
+    labels: [],
+    builderTag: 'codex',
+    reviewerHeadSha: 'old-head',
+    reviewAttemptNumber: 1,
+    reviewDbAttemptNumber: 6,
+    completedRemediationRounds: 0,
+    passKind: 'first-pass',
+    maxRemediationRounds: 2,
+    reviewerSessionUuid: 'spawn-settle-stale-head-retry',
+    reviewerRuntimeAdapterOverride: {
+      async spawnReviewer() {
+        return {
+          ok: true,
+          reviewBody: '## Summary\nStale finding after retry.\n\n## Verdict\nRequest changes',
+          reviewBodyDelivery: 'caller-post',
+          spawnedAt: '2026-07-27T03:00:00.000Z',
+        };
+      },
+    },
+    postGitHubReviewWithCaptureImpl: async (payload) => {
+      posted.push(payload);
+    },
+    fetchPullRequestHeadAndStateImpl: async () => {
+      fetchAttempts += 1;
+      if (fetchAttempts === 1) {
+        const err = new Error('TLS handshake timeout');
+        err.stderr = 'TLS handshake timeout';
+        throw err;
+      }
+      return { headRefOid: 'new-head', state: 'open' };
+    },
+    freshnessCheckSleepImpl: async (ms) => {
+      sleeps.push(ms);
+    },
+  });
+
+  assert.equal(fetchAttempts, 2);
+  assert.deepEqual(sleeps, [100]);
+  assert.equal(result.ok, false);
+  assert.equal(result.failureClass, 'stale-review-head');
+  assert.deepEqual(posted, []);
+});
+
 test('settleReviewerAttempt releases stale-head reviewer claims without consuming review budget', async () => {
   const released = [];
   const leaseReleased = [];

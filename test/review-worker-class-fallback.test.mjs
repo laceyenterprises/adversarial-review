@@ -91,6 +91,25 @@ test('fail-open: an unreadable fleet-quota status keeps the primary (never guess
   assert.match(errors[0], /failing open/);
 });
 
+test('fail-open: malformed fleet-quota status stdout keeps the primary', async () => {
+  const errors = [];
+  const result = await resolveReviewerWorkerClassWithFallback({
+    authorClass: 'gemini',
+    primary: 'codex',
+    fallbackWorkerClasses: ['claude-code'],
+    execFileImpl: async () => ({ stdout: 'not json and no object' }),
+    logger: { error: (message) => errors.push(String(message)) },
+  });
+
+  assert.equal(result.workerClass, 'codex');
+  assert.equal(result.fellBack, false);
+  assert.equal(result.reason, 'fleet-quota-status-parse-error');
+  assert.match(result.error, /did not return JSON|Unexpected/);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /parse failed/);
+  assert.match(errors[0], /failing open/);
+});
+
 test('rejects a fallback candidate equal to the PR author class (diversity preserved)', async () => {
   const result = await resolveReviewerWorkerClassWithFallback({
     authorClass: 'claude-code',
@@ -420,6 +439,7 @@ test('applies fallback route with explicit worker-class precedence and model-key
       botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
       reviewerWorkerClass: 'codex',
       workerClass: 'codex',
+      baseUrl: 'https://openai.invalid',
     },
     decision: {
       fellBack: true,
@@ -432,6 +452,8 @@ test('applies fallback route with explicit worker-class precedence and model-key
       claude: {
         reviewerModel: 'claude',
         botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+        baseUrl: 'https://anthropic.invalid',
+        timeoutMs: 12345,
       },
     },
   });
@@ -441,6 +463,8 @@ test('applies fallback route with explicit worker-class precedence and model-key
   assert.equal(result.route.reviewerWorkerClass, 'claude-code');
   assert.equal(result.route.reviewerModel, 'claude');
   assert.equal(result.route.botTokenEnv, 'GH_CLAUDE_REVIEWER_TOKEN');
+  assert.equal(result.route.baseUrl, 'https://anthropic.invalid');
+  assert.equal(result.route.timeoutMs, 12345);
   assert.deepEqual(result.route.reviewWorkerClassFallback, {
     fromWorkerClass: 'codex',
     toWorkerClass: 'claude-code',

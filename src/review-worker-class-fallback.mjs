@@ -212,10 +212,9 @@ export function applyReviewerWorkerClassFallbackToRoute({
     applied: true,
     route: {
       ...route,
+      ...target,
       workerClass: undefined,
       reviewerWorkerClass: workerClass,
-      reviewerModel: target.reviewerModel,
-      botTokenEnv: target.botTokenEnv,
       reviewWorkerClassFallback: {
         fromWorkerClass: decision.from,
         toWorkerClass: decision.to,
@@ -294,27 +293,36 @@ export async function resolveReviewerWorkerClassWithFallback({
   }
 
   const stdout = quotaStatus.stdout;
-  const primaryAvail = quotaAvailableFromFleetStatus(stdout, { harness: primaryClass });
-  if (!isGroundedProviderState(primaryAvail.state)) {
-    return {
-      ...base,
-      reason: primaryAvail.available ? 'primary-available' : 'primary-not-grounded',
-      primaryState: primaryAvail.state,
-    };
-  }
-
-  for (const candidate of viableFallbacks) {
-    const candidateAvail = quotaAvailableFromFleetStatus(stdout, { harness: candidate });
-    if (candidateAvail.available) {
+  let primaryAvail;
+  try {
+    primaryAvail = quotaAvailableFromFleetStatus(stdout, { harness: primaryClass });
+    if (!isGroundedProviderState(primaryAvail.state)) {
       return {
-        workerClass: candidate,
-        fellBack: true,
-        from: primaryClass,
-        to: candidate,
-        reason: 'primary-grounded-fallback',
+        ...base,
+        reason: primaryAvail.available ? 'primary-available' : 'primary-not-grounded',
         primaryState: primaryAvail.state,
       };
     }
+
+    for (const candidate of viableFallbacks) {
+      const candidateAvail = quotaAvailableFromFleetStatus(stdout, { harness: candidate });
+      if (candidateAvail.available) {
+        return {
+          workerClass: candidate,
+          fellBack: true,
+          from: primaryClass,
+          to: candidate,
+          reason: 'primary-grounded-fallback',
+          primaryState: primaryAvail.state,
+        };
+      }
+    }
+  } catch (err) {
+    const message = fleetQuotaStatusErrorMessage(err);
+    logger?.error?.(
+      `[watcher] review-worker-class-fallback quota-status parse failed; failing open: ${message}`
+    );
+    return { ...base, reason: 'fleet-quota-status-parse-error', error: message };
   }
 
   return { ...base, reason: 'no-available-fallback', primaryState: primaryAvail.state };

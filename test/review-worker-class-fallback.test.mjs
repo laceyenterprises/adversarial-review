@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 
 import {
+  applyReviewerWorkerClassFallbackToRoute,
   resolveReviewerWorkerClassWithFallback,
   reviewWorkerClassFallback,
 } from '../src/review-worker-class-fallback.mjs';
@@ -121,22 +121,56 @@ test('reviewWorkerClassFallback defaults to [claude-code] and honors the env ove
   assert.deepEqual(reviewWorkerClassFallback({ ADVERSARIAL_REVIEW_REVIEWER_WORKER_CLASS_FALLBACK: '' }), []);
 });
 
-test('watcher passes reviewer worker classes to quota fallback and records worker-class breadcrumbs', () => {
-  const source = readFileSync(new URL('../src/pollonce-phases.mjs', import.meta.url), 'utf8');
-  const fallbackStart = source.indexOf('const primaryReviewerWorkerClass = reviewerWorkerClassForRoute(route);');
-  const fallbackEnd = source.indexOf('if (rwfDecision.fellBack) {', fallbackStart);
-  assert.notEqual(fallbackStart, -1);
-  assert.notEqual(fallbackEnd, -1);
-  const fallbackBlock = source.slice(fallbackStart, fallbackEnd);
-  assert.match(fallbackBlock, /primary:\s*primaryReviewerWorkerClass/);
-  assert.doesNotMatch(fallbackBlock, /primary:\s*route\.reviewerModel/);
+test('applies fallback route with explicit worker-class precedence and model-key lookup', () => {
+  const result = applyReviewerWorkerClassFallbackToRoute({
+    route: {
+      reviewerModel: 'codex',
+      botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+      reviewerWorkerClass: 'codex',
+      workerClass: 'codex',
+    },
+    decision: {
+      fellBack: true,
+      workerClass: 'claude-code',
+      from: 'codex',
+      to: 'claude-code',
+      reason: 'primary-grounded-fallback',
+    },
+    reviewerRouteByModel: {
+      claude: {
+        reviewerModel: 'claude',
+        botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+      },
+    },
+  });
 
-  const breadcrumbStart = source.indexOf('reviewWorkerClassFallback: {', fallbackEnd);
-  const breadcrumbEnd = source.indexOf('reason: rwfDecision.reason', breadcrumbStart);
-  assert.notEqual(breadcrumbStart, -1);
-  assert.notEqual(breadcrumbEnd, -1);
-  const breadcrumbBlock = source.slice(breadcrumbStart, breadcrumbEnd);
-  assert.match(breadcrumbBlock, /fromWorkerClass:\s*rwfDecision\.from/);
-  assert.match(breadcrumbBlock, /toWorkerClass:\s*rwfDecision\.to/);
-  assert.doesNotMatch(breadcrumbBlock, /fromReviewerModel|toReviewerModel/);
+  assert.equal(result.applied, true);
+  assert.equal(result.route.workerClass, undefined);
+  assert.equal(result.route.reviewerWorkerClass, 'claude-code');
+  assert.equal(result.route.reviewerModel, 'claude');
+  assert.equal(result.route.botTokenEnv, 'GH_CLAUDE_REVIEWER_TOKEN');
+  assert.deepEqual(result.route.reviewWorkerClassFallback, {
+    fromWorkerClass: 'codex',
+    toWorkerClass: 'claude-code',
+    reason: 'primary-grounded-fallback',
+  });
+});
+
+test('does not apply or claim fallback success when the worker class has no model route', () => {
+  const route = { reviewerModel: 'codex', botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN' };
+  const result = applyReviewerWorkerClassFallbackToRoute({
+    route,
+    decision: {
+      fellBack: true,
+      workerClass: 'unknown-worker',
+      from: 'codex',
+      to: 'unknown-worker',
+      reason: 'primary-grounded-fallback',
+    },
+    reviewerRouteByModel: {},
+  });
+
+  assert.equal(result.applied, false);
+  assert.equal(result.reason, 'fallback-route-unavailable');
+  assert.equal(result.route, route);
 });

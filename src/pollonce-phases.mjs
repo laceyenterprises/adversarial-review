@@ -47,7 +47,11 @@ import {
   markFastMergeAuditWritten,
 } from './fast-merge-audit-recovery.mjs';
 import { maybeInlineFinalHammerAfterReview } from './final-to-hammer-handoff.mjs';
-import { resolveReviewerWorkerClassWithFallback, reviewWorkerClassFallback } from './review-worker-class-fallback.mjs';
+import {
+  applyReviewerWorkerClassFallbackToRoute,
+  resolveReviewerWorkerClassWithFallback,
+  reviewWorkerClassFallback,
+} from './review-worker-class-fallback.mjs';
 import {
   fetchReviewsForHeadForDedup,
   getStalePostedReviewBudgetSuppression,
@@ -853,23 +857,23 @@ export async function processReviewSubject(entry, ctx) {
       });
 
       if (rwfDecision.fellBack) {
-        console.warn(
-          `[watcher] review-worker-class-fallback repo=${repoPath} pr=${prNumber} ` +
-          `from=${rwfDecision.from} to=${rwfDecision.to} reason=${rwfDecision.reason} ` +
-          `primaryState=${rwfDecision.primaryState}`
-        );
-        const target = REVIEWER_ROUTE_BY_MODEL[rwfDecision.workerClass];
-        if (target) {
-          route = {
-            ...route,
-            reviewerModel: target.reviewerModel,
-            botTokenEnv: target.botTokenEnv,
-            reviewWorkerClassFallback: {
-              fromWorkerClass: rwfDecision.from,
-              toWorkerClass: rwfDecision.to,
-              reason: rwfDecision.reason,
-            }
-          };
+        const appliedFallback = applyReviewerWorkerClassFallbackToRoute({
+          route,
+          decision: rwfDecision,
+          reviewerRouteByModel: REVIEWER_ROUTE_BY_MODEL,
+        });
+        if (appliedFallback.applied) {
+          route = appliedFallback.route;
+          console.warn(
+            `[watcher] review-worker-class-fallback repo=${repoPath} pr=${prNumber} ` +
+            `from=${rwfDecision.from} to=${rwfDecision.to} reason=${rwfDecision.reason} ` +
+            `primaryState=${rwfDecision.primaryState}`
+          );
+        } else {
+          console.warn(
+            `[watcher] review-worker-class-fallback-skipped repo=${repoPath} pr=${prNumber} ` +
+            `workerClass=${rwfDecision.workerClass} reason=${appliedFallback.reason}`
+          );
         }
       }
 

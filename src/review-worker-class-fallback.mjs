@@ -11,6 +11,12 @@ const execFileAsync = promisify(execFileCb);
 const FLEET_QUOTA_STATUS_TIMEOUT_MS = 20_000;
 
 const DEFAULT_REVIEWER_WORKER_CLASS_FALLBACK = Object.freeze(['claude-code']);
+const REVIEWER_MODEL_BY_WORKER_CLASS = Object.freeze({
+  claude: 'claude',
+  'claude-code': 'claude',
+  codex: 'codex',
+  gemini: 'gemini',
+});
 
 export function reviewWorkerClassFallback(env = process.env) {
   const raw = env?.ADVERSARIAL_REVIEW_REVIEWER_WORKER_CLASS_FALLBACK;
@@ -23,6 +29,40 @@ export function reviewWorkerClassFallback(env = process.env) {
 
 function resolveHqPath(env = process.env) {
   return String(env?.AGENT_OS_HQ_BIN || env?.HQ_BIN || 'hq').trim() || 'hq';
+}
+
+function reviewerModelForWorkerClass(workerClass) {
+  return REVIEWER_MODEL_BY_WORKER_CLASS[String(workerClass || '').trim().toLowerCase()] || null;
+}
+
+export function applyReviewerWorkerClassFallbackToRoute({
+  route,
+  decision,
+  reviewerRouteByModel,
+} = {}) {
+  if (!decision?.fellBack) return { applied: false, route, reason: 'no-fallback' };
+  const workerClass = String(decision.workerClass || '').trim().toLowerCase();
+  const reviewerModel = reviewerModelForWorkerClass(workerClass);
+  const target = reviewerModel ? reviewerRouteByModel?.[reviewerModel] : null;
+  if (!target) {
+    return { applied: false, route, reason: 'fallback-route-unavailable' };
+  }
+
+  return {
+    applied: true,
+    route: {
+      ...route,
+      workerClass: undefined,
+      reviewerWorkerClass: workerClass,
+      reviewerModel: target.reviewerModel,
+      botTokenEnv: target.botTokenEnv,
+      reviewWorkerClassFallback: {
+        fromWorkerClass: decision.from,
+        toWorkerClass: decision.to,
+        reason: decision.reason,
+      },
+    },
+  };
 }
 
 /**

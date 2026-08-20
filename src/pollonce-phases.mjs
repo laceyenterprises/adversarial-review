@@ -224,6 +224,20 @@ export function finalizePendingTerminalFailureState(row, {
   ).changes;
 }
 
+const REVIEWER_WORKER_CLASS_BY_MODEL = Object.freeze({
+  claude: 'claude-code',
+  'claude-code': 'claude-code',
+  codex: 'codex',
+  gemini: 'gemini',
+});
+
+function reviewerWorkerClassForRoute(route) {
+  const explicit = String(route?.reviewerWorkerClass || route?.workerClass || '').trim().toLowerCase();
+  if (explicit) return explicit;
+  const reviewerModel = String(route?.reviewerModel || '').trim().toLowerCase();
+  return REVIEWER_WORKER_CLASS_BY_MODEL[reviewerModel] || reviewerModel;
+}
+
 
 export async function processReviewSubject(entry, ctx) {
   const { subject, prNumber, current: cachedCurrent } = entry;
@@ -831,9 +845,10 @@ export async function processReviewSubject(entry, ctx) {
       });
 
       // RWF-01: review-dispatch worker-class fallback
+      const primaryReviewerWorkerClass = reviewerWorkerClassForRoute(route);
       const rwfDecision = await resolveReviewerWorkerClassWithFallback({
         authorClass: subject.builderClass || route.builderClass,
-        primary: route.reviewerModel,
+        primary: primaryReviewerWorkerClass,
         fallbackWorkerClasses: reviewWorkerClassFallback(process.env),
       });
 
@@ -850,8 +865,8 @@ export async function processReviewSubject(entry, ctx) {
             reviewerModel: target.reviewerModel,
             botTokenEnv: target.botTokenEnv,
             reviewWorkerClassFallback: {
-              fromReviewerModel: rwfDecision.from,
-              toReviewerModel: rwfDecision.to,
+              fromWorkerClass: rwfDecision.from,
+              toWorkerClass: rwfDecision.to,
               reason: rwfDecision.reason,
             }
           };

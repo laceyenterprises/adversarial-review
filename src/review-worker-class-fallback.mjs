@@ -57,6 +57,14 @@ export async function resolveReviewerWorkerClassWithFallback({
   if (!providerForQuotaHarness(primaryClass)) {
     return { ...base, reason: 'primary-provider-untracked' };
   }
+  const viableFallbacks = fallbacks.filter((candidate) => (
+    candidate !== primaryClass &&
+    candidate !== author &&
+    providerForQuotaHarness(candidate)
+  ));
+  if (viableFallbacks.length === 0) {
+    return { ...base, reason: 'no-available-fallback' };
+  }
 
   let stdout;
   try {
@@ -80,11 +88,7 @@ export async function resolveReviewerWorkerClassWithFallback({
     };
   }
 
-  for (const candidate of fallbacks) {
-    if (candidate === primaryClass) continue;
-    if (candidate === author) continue; // Diversity preserved
-    if (!providerForQuotaHarness(candidate)) continue;
-    
+  for (const candidate of viableFallbacks) {
     const candidateAvail = quotaAvailableFromFleetStatus(stdout, { harness: candidate });
     if (candidateAvail.available) {
       return {

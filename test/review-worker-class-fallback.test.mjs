@@ -272,6 +272,57 @@ test('shares one in-flight fleet quota status read across concurrent subjects', 
   assert.equal(secondResult.workerClass, 'claude-code');
 });
 
+test('does not let an expired in-flight status read clobber a newer cache result', async () => {
+  const cache = new Map();
+  let calls = 0;
+  let now = 1_000;
+  let releaseFirst;
+  let releaseSecond;
+  const firstReady = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  const secondReady = new Promise((resolve) => {
+    releaseSecond = resolve;
+  });
+  const execFileImpl = async () => {
+    calls += 1;
+    if (calls === 1) {
+      await firstReady;
+      return { stdout: JSON.stringify({ providerStatuses: CODEX_EXHAUSTED_CLAUDE_OK }) };
+    }
+    await secondReady;
+    return { stdout: JSON.stringify({ providerStatuses: CODEX_OK }) };
+  };
+  const args = {
+    authorClass: 'gemini',
+    primary: 'codex',
+    fallbackWorkerClasses: ['claude-code'],
+    execFileImpl,
+    fleetQuotaStatusCache: cache,
+    fleetQuotaStatusCacheTtlMs: 5,
+    nowMs: () => now,
+  };
+
+  const first = resolveReviewerWorkerClassWithFallback(args);
+  assert.equal(calls, 1);
+  now += 10;
+  const second = resolveReviewerWorkerClassWithFallback(args);
+  assert.equal(calls, 2);
+
+  releaseSecond();
+  const secondResult = await second;
+  assert.equal(secondResult.workerClass, 'codex');
+
+  releaseFirst();
+  const firstResult = await first;
+  assert.equal(firstResult.workerClass, 'claude-code');
+
+  now += 1;
+  const thirdResult = await resolveReviewerWorkerClassWithFallback(args);
+  assert.equal(calls, 2);
+  assert.equal(thirdResult.workerClass, 'codex');
+});
+
 test('does not read fleet quota status when no configured fallback is a viable alternate', async () => {
   const result = await resolveReviewerWorkerClassWithFallback({
     authorClass: 'codex',

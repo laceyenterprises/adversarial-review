@@ -119,6 +119,7 @@ async function executeFleetQuotaStatusWithRetry({
 }) {
   const attempts = retryDelaysMs.length + 1;
   let lastError = null;
+  let attemptsMade = 0;
   for (let attemptIndex = 0; attemptIndex < attempts; attemptIndex += 1) {
     try {
       const result = await execFileImpl(hqPath, ['fleet', 'quota', 'status', '--json'], {
@@ -131,9 +132,10 @@ async function executeFleetQuotaStatusWithRetry({
       return { stdout, source: attemptIndex === 0 ? 'exec' : 'exec-retry' };
     } catch (err) {
       lastError = err;
+      attemptsMade = attemptIndex + 1;
       const message = fleetQuotaStatusErrorMessage(err);
       const retryDelayMs = retryDelaysMs[attemptIndex];
-      if (isTransientFleetQuotaStatusError(err) && retryDelayMs !== undefined) {
+      if (isTransientFleetQuotaStatusError(err) && attemptIndex < attempts - 1) {
         logger?.warn?.(
           `[watcher] review-worker-class-fallback quota-status transient failure ` +
           `attempt=${attemptIndex + 1}/${attempts}; retrying in ${retryDelayMs}ms: ${message}`
@@ -141,19 +143,14 @@ async function executeFleetQuotaStatusWithRetry({
         if (retryDelayMs > 0) await sleepImpl(retryDelayMs);
         continue;
       }
-
-      logger?.error?.(
-        `[watcher] review-worker-class-fallback quota-status unavailable ` +
-        `attempts=${attemptIndex + 1}/${attempts}; failing open: ${message}`
-      );
-      return { error: lastError, errorMessage: message };
+      break;
     }
   }
 
   const message = fleetQuotaStatusErrorMessage(lastError);
   logger?.error?.(
     `[watcher] review-worker-class-fallback quota-status unavailable ` +
-    `attempts=${attempts}/${attempts}; failing open: ${message}`
+    `attempts=${attemptsMade}/${attempts}; failing open: ${message}`
   );
   return { error: lastError, errorMessage: message };
 }
@@ -187,10 +184,12 @@ async function readFleetQuotaStatusWithRetry({
   });
   cache?.set(cacheKey, { promise, readAtMs: now });
   const result = await promise;
-  if (result.error) {
-    cache?.delete(cacheKey);
-  } else {
-    cache?.set(cacheKey, { stdout: result.stdout, readAtMs: nowMs() });
+  if (!cache || cache.get(cacheKey)?.promise === promise) {
+    if (result.error) {
+      cache?.delete(cacheKey);
+    } else {
+      cache?.set(cacheKey, { stdout: result.stdout, readAtMs: nowMs() });
+    }
   }
   return result;
 }

@@ -102,6 +102,7 @@ function isTransientFleetQuotaStatusError(error) {
     /\b(eio|etimedout|econnreset|econnrefused|epipe|eagain|eai_again|enotfound)\b/u.test(text) ||
     /timed?\s*out|timeout|tls handshake|connection reset|connection refused/u.test(text) ||
     /resource temporarily unavailable|temporarily unavailable|try again/.test(text) ||
+    /service unavailable|bad gateway|gateway timeout|http\s*5\d\d/.test(text) ||
     /socket hang up|remote end hung up/.test(text)
   ) {
     return true;

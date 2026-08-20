@@ -174,6 +174,40 @@ test('retries execFile subprocess failures whose transient diagnostic is only in
   assert.equal(result.fellBack, true);
 });
 
+test('retries execFile subprocess failures whose transient diagnostic is only in stdout', async () => {
+  const warnings = [];
+  const errors = [];
+  let calls = 0;
+  const subprocessFailure = new Error('Command failed: hq fleet quota status --json');
+  subprocessFailure.code = 1;
+  subprocessFailure.stderr = '';
+  subprocessFailure.stdout = 'HTTP 503 service unavailable from fleet quota status';
+
+  const result = await resolveReviewerWorkerClassWithFallback({
+    authorClass: 'gemini',
+    primary: 'codex',
+    fallbackWorkerClasses: ['claude-code'],
+    retryDelaysMs: [5],
+    sleepImpl: async () => {},
+    logger: {
+      warn: (message) => warnings.push(String(message)),
+      error: (message) => errors.push(String(message)),
+    },
+    execFileImpl: async () => {
+      calls += 1;
+      if (calls === 1) throw subprocessFailure;
+      return { stdout: JSON.stringify({ providerStatuses: CODEX_EXHAUSTED_CLAUDE_OK }) };
+    },
+  });
+
+  assert.equal(calls, 2);
+  assert.equal(errors.length, 0);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /HTTP 503 service unavailable/);
+  assert.equal(result.workerClass, 'claude-code');
+  assert.equal(result.fellBack, true);
+});
+
 test('does not retry non-transient fleet quota status failures but logs the fail-open state', async () => {
   const errors = [];
   const sleeps = [];
@@ -293,6 +327,7 @@ test('does not let an expired in-flight status read clobber a newer cache result
     await secondReady;
     return { stdout: JSON.stringify({ providerStatuses: CODEX_OK }) };
   };
+
   const args = {
     authorClass: 'gemini',
     primary: 'codex',
@@ -321,6 +356,38 @@ test('does not let an expired in-flight status read clobber a newer cache result
   const thirdResult = await resolveReviewerWorkerClassWithFallback(args);
   assert.equal(calls, 2);
   assert.equal(thirdResult.workerClass, 'codex');
+});
+
+test('does not retain an unavailable in-flight fleet quota status result in cache', async () => {
+  const cache = new Map();
+  let calls = 0;
+  const errors = [];
+  const execFileImpl = async () => {
+    calls += 1;
+    throw new Error('permanent quota status failure');
+  };
+
+  const args = {
+    authorClass: 'gemini',
+    primary: 'codex',
+    fallbackWorkerClasses: ['claude-code'],
+    execFileImpl,
+    fleetQuotaStatusCache: cache,
+    fleetQuotaStatusCacheTtlMs: 10_000,
+    retryDelaysMs: [],
+    logger: { error: (message) => errors.push(String(message)) },
+    nowMs: () => 1_000,
+  };
+
+  await Promise.all([
+    resolveReviewerWorkerClassWithFallback(args),
+    resolveReviewerWorkerClassWithFallback(args),
+  ]);
+  await resolveReviewerWorkerClassWithFallback(args);
+
+  assert.equal(calls, 2);
+  assert.equal(cache.size, 0);
+  assert.equal(errors.length, 2);
 });
 
 test('does not read fleet quota status when no configured fallback is a viable alternate', async () => {

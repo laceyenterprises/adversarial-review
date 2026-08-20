@@ -854,6 +854,7 @@ export async function processReviewSubject(entry, ctx) {
         authorClass: subject.builderClass || route.builderClass,
         primary: primaryReviewerWorkerClass,
         fallbackWorkerClasses: reviewWorkerClassFallback(process.env),
+        execFileImpl: execFileAsync,
       });
 
       if (rwfDecision.fellBack) {

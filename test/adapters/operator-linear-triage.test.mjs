@@ -406,3 +406,39 @@ test('buildCriticalFlagComment distinguishes verdict and parser-failure triggers
   });
   assert.match(parserBody, /Issues detected: blocking section missing or unparseable/);
 });
+
+// The adapter tests above drive Linear through `makeLinearFixture`, a duck-typed
+// stub. That stub keeps satisfying the old shape forever, so a breaking change in
+// a `@linear/sdk` major bump would never surface here — it would surface at
+// runtime, the next time a triage path is exercised against the live API. This
+// contract test pins the real installed SDK surface those call sites depend on so
+// a major bump that drops or renames one of them fails CI instead.
+test('installed @linear/sdk still exposes the surface the triage adapter drives', async () => {
+  const { LinearClient, Issue, Team } = await import('@linear/sdk');
+
+  // `defaultLinearClientProvider` constructs the client from an API key alone.
+  assert.equal(typeof LinearClient, 'function');
+  const client = new LinearClient({ apiKey: 'contract-test-key' });
+
+  // Client call sites in `setLinearState` and `recordReviewCompleted`.
+  for (const method of ['issue', 'updateIssue', 'createComment']) {
+    assert.equal(
+      typeof client[method],
+      'function',
+      `LinearClient#${method} is missing`
+    );
+  }
+
+  // `await issue.team` and `await issue.state` are lazy fetch accessors on the
+  // prototype, not data fields, so they are visible without instantiating an
+  // Issue from a full GraphQL fragment.
+  for (const accessor of ['team', 'state']) {
+    assert.ok(
+      Object.getOwnPropertyDescriptor(Issue.prototype, accessor),
+      `Issue#${accessor} accessor is missing`
+    );
+  }
+
+  // `await team.states()` supplies the workflow states the adapter matches by name.
+  assert.equal(typeof Team.prototype.states, 'function');
+});

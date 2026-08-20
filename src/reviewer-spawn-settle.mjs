@@ -977,9 +977,18 @@ function settleReviewerAttempt({
     const releaseResult = typeof statements.releaseReviewerClaim?.run === 'function'
       ? statements.releaseReviewerClaim.run(result.reviewerSessionUuid || null, repoPath, prNumber)
       : { changes: 0 };
+    const leaseReleaseResult = typeof statements.releaseReviewLease?.run === 'function'
+      ? statements.releaseReviewLease.run(
+        failureAt,
+        result.error || 'Reviewer output targeted a stale PR head; requeued for current-head review.',
+        repoPath,
+        prNumber
+      )
+      : { changes: 0 };
     log.warn(
       `[watcher] Reviewer output for ${repoPath}#${prNumber} was stale; ` +
-      `released claim=${releaseResult.changes === 1 ? 'yes' : 'no'} for current-head re-review`
+      `released claim=${releaseResult.changes === 1 ? 'yes' : 'no'} ` +
+      `lease=${leaseReleaseResult.changes === 1 ? 'yes' : 'no'} for current-head re-review`
     );
     return;
   }

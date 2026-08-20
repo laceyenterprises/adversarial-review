@@ -104,6 +104,7 @@ test('spawnReviewer discards adapter review body when current PR head moved befo
 
 test('settleReviewerAttempt releases stale-head reviewer claims without consuming review budget', async () => {
   const released = [];
+  const leaseReleased = [];
   const markedPosted = [];
   const { settleReviewerAttempt } = await import('../src/reviewer-spawn-settle.mjs');
 
@@ -119,12 +120,18 @@ test('settleReviewerAttempt releases stale-head reviewer claims without consumin
     statements: {
       markPosted: { run: (...args) => markedPosted.push(args) },
       releaseReviewerClaim: { run: (...args) => { released.push(args); return { changes: 1 }; } },
+      releaseReviewLease: { run: (...args) => { leaseReleased.push(args); return { changes: 0 }; } },
     },
     log: { warn() {} },
   });
 
   assert.deepEqual(markedPosted, []);
   assert.deepEqual(released, [['stale-session', 'laceyenterprises/demo', 140]]);
+  assert.equal(leaseReleased.length, 1);
+  assert.match(leaseReleased[0][0], /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(leaseReleased[0][1], 'reviewer output targeted stale head');
+  assert.equal(leaseReleased[0][2], 'laceyenterprises/demo');
+  assert.equal(leaseReleased[0][3], 140);
 });
 
 test('spawnReviewer does not post unmarked adapter review bodies', async () => {

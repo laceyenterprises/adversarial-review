@@ -1111,13 +1111,11 @@ test('watcher classifies a new head after the post-budget final review as owed f
   });
 });
 
-test('watcher suppresses a hammer-moved head once the PR spent its post-budget final review (#81)', () => {
-  // Runaway-hammer close-model. After the remediation budget is exhausted, the
-  // per-head owed-review re-armed a gating review on EVERY hammer remediation
-  // push (each new head reads 0 per-head rounds), so an exhausted PR re-opened
-  // findings forever and the hammer never closed (#3817 had to be hand-merged).
-  // Once a completed rereview started after budget exhaustion, a further
-  // hammer-moved head is suppressed even if intermediate pushes were coalesced.
+test('watcher re-arms a moved non-closer head after the PR spent its post-budget final review', () => {
+  // The stale-posted-review budget helper cannot certify a moved head on an old
+  // post-budget final review. Terminal HAM/AMA closer commits are handled by the
+  // separate head-closer classifier before this helper; ordinary remediation
+  // pushes must still get an exact-head review.
   const suppression = resolveFirstPassReviewBudgetSuppression({
     repoPath: 'laceyenterprises/agent-os',
     prNumber: 3817,
@@ -1140,15 +1138,15 @@ test('watcher suppresses a hammer-moved head once the PR spent its post-budget f
   });
 
   assert.deepEqual(suppression, {
-    suppressed: true,
-    reason: 'post-budget-final-review-completed-for-pr',
+    suppressed: false,
+    reason: 'owed-post-budget-final-review',
     completedRoundsForPR: 2,
     roundBudget: 2,
     riskClass: 'medium',
   });
 });
 
-test('watcher suppresses a zero-budget PR after its single owed final review', () => {
+test('watcher re-arms a zero-budget moved non-closer head after its owed final review', () => {
   const suppression = resolveFirstPassReviewBudgetSuppression({
     repoPath: 'laceyenterprises/agent-os',
     prNumber: 3818,
@@ -1170,8 +1168,8 @@ test('watcher suppresses a zero-budget PR after its single owed final review', (
   });
 
   assert.deepEqual(suppression, {
-    suppressed: true,
-    reason: 'post-budget-final-review-completed-for-pr',
+    suppressed: false,
+    reason: 'owed-post-budget-final-review',
     completedRoundsForPR: 0,
     roundBudget: 0,
     riskClass: 'low',

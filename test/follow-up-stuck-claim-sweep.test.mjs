@@ -193,6 +193,70 @@ test('sweepStuckInProgressClaims: exhausted stale retry budget stops and posts o
   assert.match(posts[0].body, /round 2 of \d+/);
 });
 
+test('sweepStuckInProgressClaims: terminal comment delivery throw leaves stale claim recoverable', async () => {
+  const rootDir = makeRoot();
+  const { jobPath } = seedInProgressJob(rootDir, {
+    lastHeartbeatAt: '2026-06-01T05:00:00.000Z',
+    plan: { currentRound: 2, maxRounds: undefined, transientRetries: 1 },
+  });
+  const nowMs = Date.parse('2026-06-01T05:35:00.000Z');
+  const warnings = [];
+  const result = await sweepStuckInProgressClaims({
+    rootDir,
+    nowMs,
+    maxTransientRetries: 1,
+    log: { warn: (msg) => warnings.push(msg) },
+    sendWorkerSignalImpl: successfulStaleSignal,
+    recordInitialCommentDeliveryImpl: async () => {
+      throw new Error('transient GitHub outage');
+    },
+  });
+
+  assert.equal(result.scanned, 1);
+  assert.equal(result.reclaimed, 0);
+  assert.equal(result.requeued, 0);
+  assert.equal(result.terminalStopped, 0);
+  assert.equal(result.skipped, 1);
+  assert.equal(existsSync(jobPath), true, 'in-progress file remains for retry');
+  assert.equal(existsSync(stoppedPathFor(rootDir, jobPath)), false, 'file not moved to stopped/');
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /stale-claim-terminal-comment-failed/);
+  assert.match(warnings[0], /transient GitHub outage/);
+});
+
+test('sweepStuckInProgressClaims: failed terminal comment delivery leaves stale claim recoverable', async () => {
+  const rootDir = makeRoot();
+  const { jobPath } = seedInProgressJob(rootDir, {
+    lastHeartbeatAt: '2026-06-01T05:00:00.000Z',
+    plan: { currentRound: 2, maxRounds: undefined, transientRetries: 1 },
+  });
+  const nowMs = Date.parse('2026-06-01T05:35:00.000Z');
+  const warnings = [];
+  const result = await sweepStuckInProgressClaims({
+    rootDir,
+    nowMs,
+    maxTransientRetries: 1,
+    log: { warn: (msg) => warnings.push(msg) },
+    sendWorkerSignalImpl: successfulStaleSignal,
+    recordInitialCommentDeliveryImpl: async () => ({
+      posted: false,
+      reason: 'gh-cli-failure',
+      body: 'owed stale-heartbeat comment',
+    }),
+  });
+
+  assert.equal(result.scanned, 1);
+  assert.equal(result.reclaimed, 0);
+  assert.equal(result.requeued, 0);
+  assert.equal(result.terminalStopped, 0);
+  assert.equal(result.skipped, 1);
+  assert.equal(existsSync(jobPath), true, 'in-progress file remains for retry');
+  assert.equal(existsSync(stoppedPathFor(rootDir, jobPath)), false, 'file not moved to stopped/');
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /stale-claim-terminal-comment-deferred/);
+  assert.match(warnings[0], /deliveryReason=gh-cli-failure/);
+});
+
 test('sweepStuckInProgressClaims: failed stale-worker signal leaves claim in progress', async () => {
   const rootDir = makeRoot();
   const { jobPath } = seedInProgressJob(rootDir, {

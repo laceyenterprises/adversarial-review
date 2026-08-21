@@ -21,10 +21,11 @@
 //      baseline.
 //   2. Sweep: after the daemon's live-worker heartbeat pass, any
 //      in-progress claim whose `lastHeartbeatAt` is
-//      older than the stuck threshold (default 10m) is moved to
-//      stopped/ with stopCode='stale-heartbeat'. Records with no
-//      `lastHeartbeatAt` fall back to file mtime so legacy
-//      pre-heartbeat claims still get reclaimed.
+//      older than the stuck threshold (default 10m) is requeued while
+//      stale retry budget remains, then stopped with
+//      stopCode='stale-heartbeat' only after the owed terminal comment
+//      posts. Records with no `lastHeartbeatAt` fall back to file mtime
+//      so legacy pre-heartbeat claims still get reclaimed.
 //   3. Pre-spawn lifecycle recheck: just before spawning a worker, the
 //      daemon reruns the canonical lifecycle resolver/decision path. If
 //      the PR merged/closed, the head changed, or an operator applied a
@@ -841,7 +842,66 @@ async function stopStaleClaimWithComment({
   recordInitialCommentDeliveryImpl,
   log,
 }) {
-  const stopped = markFollowUpJobStopped({
+  const { body, workerClass } = buildStaleTerminalCommentDelivery({
+    job: {
+      ...job,
+      status: 'stopped',
+      stoppedAt,
+      remediationWorker,
+      remediationPlan: {
+        ...(job?.remediationPlan || {}),
+        stop: {
+          ...(job?.remediationPlan?.stop || {}),
+          code: STALE_HEARTBEAT_STOP_CODE,
+          reason: stopReason,
+          stoppedAt,
+          sourceStatus: 'in_progress',
+        },
+      },
+    },
+  });
+  let commentDelivery = null;
+  try {
+    commentDelivery = await recordInitialCommentDeliveryImpl({
+      rootDir,
+      jobPath,
+      body,
+      repo: job?.repo,
+      prNumber: job?.prNumber,
+      workerClass,
+      revisionRef: job?.revisionRef || null,
+      round: job?.remediationPlan?.currentRound || null,
+      kind: 'remediation-reply',
+      postCommentImpl: (args) => postCommentImpl({ rootDir, ...args, log }),
+      postCommentArgs: {
+        repo: job?.repo,
+        prNumber: job?.prNumber,
+        workerClass,
+        body,
+        log,
+      },
+      now: () => stoppedAt,
+      log,
+    });
+  } catch (err) {
+    log.warn?.(
+      `[follow-up-tick ${stoppedAt}] stale-claim-terminal-comment-failed ` +
+      `jobId=${job?.jobId || basename(jobPath)} reason=${STALE_HEARTBEAT_STOP_CODE} ` +
+      `error=${err?.message || String(err)}`
+    );
+    return null;
+  }
+
+  if (!commentDelivery?.posted) {
+    log.warn?.(
+      `[follow-up-tick ${stoppedAt}] stale-claim-terminal-comment-deferred ` +
+      `jobId=${job?.jobId || basename(jobPath)} reason=${STALE_HEARTBEAT_STOP_CODE} ` +
+      `deliveryReason=${commentDelivery?.reason || 'unknown'}`
+    );
+    return null;
+  }
+
+  return markFollowUpJobStopped({
     rootDir,
     jobPath,
     stoppedAt,
@@ -849,32 +909,8 @@ async function stopStaleClaimWithComment({
     stopReason,
     sourceStatus: 'in_progress',
     remediationWorker,
+    commentDelivery,
   });
-  const { body, workerClass } = buildStaleTerminalCommentDelivery({
-    job: stopped.job,
-  });
-  await recordInitialCommentDeliveryImpl({
-    rootDir,
-    jobPath: stopped.jobPath,
-    body,
-    repo: job?.repo,
-    prNumber: job?.prNumber,
-    workerClass,
-    revisionRef: job?.revisionRef || null,
-    round: job?.remediationPlan?.currentRound || null,
-    kind: 'remediation-reply',
-    postCommentImpl: (args) => postCommentImpl({ rootDir, ...args, log }),
-    postCommentArgs: {
-      repo: job?.repo,
-      prNumber: job?.prNumber,
-      workerClass,
-      body,
-      log,
-    },
-    now: () => stoppedAt,
-    log,
-  });
-  return stopped;
 }
 
 async function sweepStuckInProgressClaims({
@@ -989,7 +1025,7 @@ async function sweepStuckInProgressClaims({
     const terminalStopReason =
       `${reasonText} Exhausted stale heartbeat retry budget ` +
       `(${priorTransientRetries}/${normalizedMaxTransientRetries}).`;
-    await stopStaleClaimWithComment({
+    const stopped = await stopStaleClaimWithComment({
       rootDir,
       job,
       jobPath,
@@ -1000,6 +1036,10 @@ async function sweepStuckInProgressClaims({
       recordInitialCommentDeliveryImpl,
       log,
     });
+    if (!stopped) {
+      skipped += 1;
+      continue;
+    }
     terminalStopped += 1;
     reclaimed += 1;
     log.log?.(

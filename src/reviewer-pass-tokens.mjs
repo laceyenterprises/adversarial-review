@@ -120,6 +120,8 @@ function assertReviewerPassReusable(existing, key, normalizedHeadSha) {
   }
   const existingHeadSha = normalizeStoredHeadSha(existing.head_sha);
   if (existingHeadSha && normalizedHeadSha && existingHeadSha !== normalizedHeadSha) {
+    // The unique pass key does not include head_sha; overwriting it would let a
+    // stale reviewer pass certify a different PR revision.
     throw new Error(
       `refusing to reuse running reviewer_passes row for ${passKeyDescription(key)} ` +
       `existing_head=${existingHeadSha} requested_head=${normalizedHeadSha}`

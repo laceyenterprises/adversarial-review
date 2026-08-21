@@ -153,10 +153,12 @@ export function resolveFirstPassReviewBudgetSuppression({
     typeof reviewRow?.reviewer_head_sha === 'string' && reviewRow.reviewer_head_sha.length > 0
       ? reviewRow.reviewer_head_sha
       : null;
+  // Auto-refresh can reset the row to pending before the owed final review
+  // spawns. A missing reviewer_head_sha is therefore not evidence that the PR's
+  // earlier post-budget review covered the current head.
   const currentHeadDiffersFromReviewedHead =
     suppliedCurrentHeadSha !== null &&
-    reviewedHeadSha !== null &&
-    reviewedHeadSha !== suppliedCurrentHeadSha;
+    (reviewedHeadSha === null || reviewedHeadSha !== suppliedCurrentHeadSha);
   // `reviewer_head_sha` is set when the reviewer STARTS a head and survives a
   // failed attempt: the failure paths (stmtReleaseReviewLease / stmtMarkFailed)
   // record failed_at + failure_message but leave reviewer_head_sha intact. Keyed

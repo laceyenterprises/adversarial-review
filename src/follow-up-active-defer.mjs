@@ -4,6 +4,7 @@ import { basename, dirname, join } from 'node:path';
 
 import * as followUpJobs from './follow-up-jobs.mjs';
 import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
+import { currentProcessGroupId, isPgidAlive } from './process-group-identity.mjs';
 
 const IN_PROGRESS_STUCK_THRESHOLD_MS_ENV = 'ADVERSARIAL_FOLLOW_UP_IN_PROGRESS_STUCK_THRESHOLD_MS';
 const DEFAULT_IN_PROGRESS_STUCK_THRESHOLD_MS = 10 * 60 * 1000;
@@ -129,6 +130,81 @@ function resolveFollowUpStuckThresholdMs() {
   return DEFAULT_IN_PROGRESS_STUCK_THRESHOLD_MS;
 }
 
+function positiveInteger(value) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function unsafeProcessGroupSignalReason(processGroupId, currentPgid) {
+  if (!processGroupId) return null;
+  if (processGroupId === 1) return 'unsafe-process-group-broadcast-refused';
+  if (processGroupId === process.pid) return 'refusing-to-signal-current-process-group';
+  if (currentPgid === null || currentPgid === undefined) return 'unknown-current-process-group';
+  if (currentPgid && processGroupId === currentPgid) {
+    return 'refusing-to-signal-current-process-group';
+  }
+  return null;
+}
+
+function unsafeProcessSignalReason(processId) {
+  if (!processId) return null;
+  if (processId === process.pid) return 'refusing-to-signal-current-process';
+  return null;
+}
+
+function signalStaleFollowUpWorker({
+  job,
+  signal = 'SIGTERM',
+  processKill = process.kill,
+  currentPgid = currentProcessGroupId(),
+} = {}) {
+  const worker = job?.worker || job?.remediationWorker || {};
+  const processGroupId = positiveInteger(worker.processGroupId);
+  const processId = positiveInteger(worker.processId);
+  const unsafeProcessReason = unsafeProcessSignalReason(processId);
+  const unsafeGroupReason = unsafeProcessGroupSignalReason(processGroupId, currentPgid);
+  if (unsafeProcessReason) {
+    return {
+      signalled: false,
+      skipped: true,
+      target: { kind: 'process', id: processId },
+      error: unsafeProcessReason,
+    };
+  }
+  const useProcessGroup = Boolean(processGroupId && !unsafeGroupReason);
+  const useDirectProcess = Boolean(!useProcessGroup && processId);
+  if (!useProcessGroup && !useDirectProcess) {
+    return {
+      signalled: false,
+      skipped: true,
+      target: processGroupId ? { kind: 'process-group', id: processGroupId } : null,
+      error: unsafeGroupReason || 'missing-worker-process-handle',
+    };
+  }
+
+  const target = {
+    kind: useProcessGroup ? 'process-group' : 'process',
+    id: useProcessGroup ? processGroupId : processId,
+  };
+  try {
+    if (useProcessGroup) {
+      if (!isPgidAlive(processGroupId, processKill)) {
+        return { signalled: false, skipped: true, target, error: 'process-group-not-found' };
+      }
+      processKill(-processGroupId, signal);
+      return { signalled: true, skipped: false, target, error: null };
+    }
+    processKill(processId, 0);
+    processKill(processId, signal);
+    return { signalled: true, skipped: false, target, error: null };
+  } catch (err) {
+    if (err?.code === 'ESRCH') {
+      return { signalled: false, skipped: true, target, error: 'process-not-found' };
+    }
+    return { signalled: false, skipped: false, target, error: err?.message || String(err) };
+  }
+}
+
 function resolveLatestFollowUpObservedAtMs(latest) {
   const job = latest?.job;
   const worker = job?.worker || job?.remediationWorker || {};
@@ -161,6 +237,8 @@ function stopStaleInProgressFollowUpJob({
   nowMs = Date.now(),
   thresholdMs = resolveFollowUpStuckThresholdMs(),
   markStoppedImpl = followUpJobs.markFollowUpJobStopped,
+  signalWorkerImpl = signalStaleFollowUpWorker,
+  log = console,
 }) {
   const job = latest?.job;
   if (!['in_progress', 'inProgress', 'in-progress'].includes(String(job?.status || ''))) {
@@ -183,6 +261,16 @@ function stopStaleInProgressFollowUpJob({
   const stopReason =
     `Reclaimed orphaned in-progress claim ${jobId}: ${source} is ` +
     `${Math.round(ageMs / 1000)}s old (threshold=${Math.round(thresholdMs / 1000)}s).`;
+  const staleReclaimSignal = typeof signalWorkerImpl === 'function'
+    ? signalWorkerImpl({ job, requestedAt: stoppedAt })
+    : { signalled: false, skipped: true, target: null, error: 'signal-worker-disabled' };
+  if (!staleReclaimSignal?.signalled && !staleReclaimSignal?.skipped) {
+    log?.warn?.(
+      `[watcher] Keeping stale follow-up job ${jobId} in progress after worker signal failure: ` +
+      `worker signal failed: ${staleReclaimSignal?.error || 'unknown'}`
+    );
+    return null;
+  }
 
   return markStoppedImpl({
     rootDir,
@@ -198,6 +286,7 @@ function stopStaleInProgressFollowUpJob({
       reclaimReason: STALE_HEARTBEAT_STOP_CODE,
       reclaimAgeMs: ageMs,
       reclaimSource: source,
+      staleReclaimSignal,
     },
   });
 }
@@ -214,6 +303,7 @@ function shouldDeferReviewForActiveFollowUp({
   currentRevisionRef = null,
   nowMs = Date.now(),
   log = console,
+  staleSignalImpl = signalStaleFollowUpWorker,
 }) {
   let latest = latestJobFinder(rootDir, { repo, prNumber });
   const budgetStopped = typeof budgetSweepImpl === 'function' ? budgetSweepImpl({
@@ -258,7 +348,14 @@ function shouldDeferReviewForActiveFollowUp({
   }
 
   if (typeof staleClaimSweepImpl === 'function') {
-    const staleStopped = staleClaimSweepImpl({ rootDir, latest, nowMs });
+    const staleStopped = staleClaimSweepImpl({
+      rootDir,
+      latest,
+      nowMs,
+      markStoppedImpl,
+      signalWorkerImpl: staleSignalImpl,
+      log,
+    });
     if (staleStopped) {
       latest = latestJobFinder(rootDir, { repo, prNumber });
     }
@@ -287,4 +384,5 @@ export {
   stopBudgetExhaustedPendingFollowUpJob,
   stopTerminalPendingFollowUpJob,
   stopStaleInProgressFollowUpJob,
+  signalStaleFollowUpWorker,
 };

@@ -302,6 +302,7 @@ export async function maybeDispatchAmaClosureFor({
   let reviewCycleExhausted = false;
   let completedRemediationRoundsForPR = null;
   let completedRereviewRoundsForPR = null;
+  let completedRemediationRevisionRefsForPR = [];
   // Resolve the PR's risk class from the remediation ledger (which defaults to
   // DEFAULT_RISK_CLASS) so AMA eligibility uses the SAME risk class the
   // round-budget path below already computes. Without this, the eligibility
@@ -320,6 +321,9 @@ export async function maybeDispatchAmaClosureFor({
       }) || {};
       reviewCycleExhausted = resolved.reviewCycleExhausted === true;
       ledgerRiskClass = resolved.ledgerRiskClass || resolved.riskClass || null;
+      completedRemediationRevisionRefsForPR = Array.isArray(resolved.completedRemediationRevisionRefs)
+        ? resolved.completedRemediationRevisionRefs
+        : [];
     } else {
       const remLedger = summarizePRRemediationLedger(rootDir, { repo: repoPath, prNumber });
       ledgerRiskClass = remLedger?.latestRiskClass || null;
@@ -340,6 +344,9 @@ export async function maybeDispatchAmaClosureFor({
       completedRemediationRoundsForPR = normalizeCompletedRoundCount(
         remLedger.completedRoundsForPR,
       );
+      completedRemediationRevisionRefsForPR = Array.isArray(remLedger.completedRemediationRevisionRefs)
+        ? remLedger.completedRemediationRevisionRefs
+        : [];
       completedRereviewRoundsForPR = 0;
       try {
         completedRereviewRoundsForPR = normalizeCompletedRoundCount(
@@ -486,6 +493,7 @@ export async function maybeDispatchAmaClosureFor({
     completedRereviewRounds: Number.isFinite(completedRereviewRoundsForPR)
       ? completedRereviewRoundsForPR
       : null,
+    completedRemediationRevisionRefs: completedRemediationRevisionRefsForPR,
     // Blocking/non-blocking findings classification MUST come from the same
     // authoritative current-head body that `gateSnapshot.settledReview` resolved
     // the verdict from (live head body when reconciled, else the stored job/row

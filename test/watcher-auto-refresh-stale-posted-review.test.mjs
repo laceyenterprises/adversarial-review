@@ -1084,6 +1084,37 @@ test('watcher allows a re-armed current head with no recorded reviewer_head_sha 
   });
 });
 
+test('watcher owes final review when auto-refresh reset erased the stale reviewed head', () => {
+  const suppression = resolveFirstPassReviewBudgetSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 5605,
+    reviewRow: {
+      review_status: 'pending',
+      rereview_requested_at: '2026-08-21T11:47:13.714Z',
+      rereview_reason: 'auto-refresh: posted review on stale head 1011784fd641; current head is 153f605af61c',
+      reviewer_head_sha: null,
+    },
+    currentHeadSha: '153f605af61ceba4785e7836469a43f2c2eb8866',
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 2,
+      latestRiskClass: 'medium',
+      latestMaxRounds: 2,
+      completedRoundTimestamps: [{ round: 2, terminalAt: '2026-08-21T11:29:47.405Z' }],
+    }),
+    countCompletedReviewerRereviewRoundsImpl: () => 0,
+    hasCompletedReviewerRereviewAfterImpl: () => true,
+    resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
+  });
+
+  assert.deepEqual(suppression, {
+    suppressed: false,
+    reason: 'owed-post-budget-final-review',
+    completedRoundsForPR: 2,
+    roundBudget: 2,
+    riskClass: 'medium',
+  });
+});
+
 test('watcher classifies a new head after the post-budget final review as owed final review', () => {
   const suppression = resolveFirstPassReviewBudgetSuppression({
     repoPath: 'laceyenterprises/agent-os',

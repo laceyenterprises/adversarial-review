@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -7,6 +7,9 @@ const execFileAsync = promisify(execFile);
 // comparing it to the persisted ISO timestamp.
 const PGID_IDENTITY_TOLERANCE_MS = 5_000;
 const PROCESS_PROBE_FORBIDDEN_RE = /\b(?:EPERM|operation not permitted)\b/i;
+let cachedCurrentProcessGroupId = null;
+let cachedCurrentProcessGroupIdResolved = false;
+let cachedCurrentProcessGroupIdPid = null;
 
 function isPgidAlive(pgid, processKillImpl = process.kill) {
   if (!Number.isInteger(pgid) || pgid <= 0) return false;
@@ -18,6 +21,34 @@ function isPgidAlive(pgid, processKillImpl = process.kill) {
     if (err?.code === 'EPERM') return true;
     throw err;
   }
+}
+
+function currentProcessGroupId({
+  pid = process.pid,
+  execFileSyncImpl = execFileSync,
+  useCache = pid === process.pid && execFileSyncImpl === execFileSync,
+} = {}) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  if (useCache && cachedCurrentProcessGroupIdResolved && cachedCurrentProcessGroupIdPid === pid) {
+    return cachedCurrentProcessGroupId;
+  }
+  let resolved = null;
+  try {
+    const stdout = execFileSyncImpl('ps', ['-o', 'pgid=', '-p', String(pid)], {
+      encoding: 'utf8',
+      timeout: 5_000,
+    });
+    const parsed = Number(String(stdout || '').trim());
+    resolved = Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  } catch {
+    resolved = null;
+  }
+  if (useCache && resolved !== null) {
+    cachedCurrentProcessGroupId = resolved;
+    cachedCurrentProcessGroupIdResolved = true;
+    cachedCurrentProcessGroupIdPid = pid;
+  }
+  return resolved;
 }
 
 async function verifyPgidIdentity(pgid, expectedSpawnedAt, {
@@ -66,6 +97,7 @@ async function verifyPgidIdentity(pgid, expectedSpawnedAt, {
 }
 
 export {
+  currentProcessGroupId,
   isPgidAlive,
   verifyPgidIdentity,
 };

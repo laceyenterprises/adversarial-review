@@ -97,6 +97,7 @@ test('summarizePRRemediationLedger returns zero counts for a PR with no follow-u
     latestRiskClass: 'medium',
     latestJobId: null,
     completedRoundTimestamps: [],
+    completedRemediationRevisionRefs: [],
   });
 });
 
@@ -155,6 +156,7 @@ test('summarizePRRemediationLedger only counts terminal jobs and isolates by (do
   createFollowUpJob(makeJobInput(rootDir, {
     prNumber: 7,
     reviewPostedAt: '2026-04-21T08:00:00.000Z',
+    revisionRef: 'reviewed-head-1',
   }));
 
   const ledgerWithPending = summarizePRRemediationLedger(rootDir, {
@@ -172,6 +174,7 @@ test('summarizePRRemediationLedger only counts terminal jobs and isolates by (do
   });
   assert.equal(ledgerAfterOne.completedRoundsForPR, 1);
   assert.equal(ledgerAfterOne.latestMaxRounds, DEFAULT_MAX_REMEDIATION_ROUNDS);
+  assert.deepEqual(ledgerAfterOne.completedRemediationRevisionRefs, ['reviewed-head-1']);
 
   const secondaryDomainLedger = summarizePRRemediationLedger(rootDir, {
     domainId: 'secondary-code-pr',

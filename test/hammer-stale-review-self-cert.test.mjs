@@ -4,7 +4,10 @@ import assert from 'node:assert/strict';
 import {
   isTerminalCloserCommitIdentity,
 } from '../src/head-closer-commit-suppression.mjs';
-import { isHammerRemediableEligibilityMiss } from '../src/ama/dispatch-closer.mjs';
+import {
+  isHammerRemediableEligibilityMiss,
+  terminalHammerReviewCycleExhausted,
+} from '../src/ama/dispatch-closer.mjs';
 import { maybeDispatchAmaClosureFor } from '../src/watcher.mjs';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -206,6 +209,39 @@ test('isHammerRemediableEligibilityMiss: #5093 fix preserves every neighboring i
       allowStaleReviewHeadHammerResume: true,
     }),
     false,
+  );
+});
+
+test('terminal Hammer exhaustion requires Codex remediation on the reviewed request-changes head', () => {
+  assert.equal(
+    terminalHammerReviewCycleExhausted({
+      reviewCycleExhausted: true,
+      verdict: 'request-changes',
+      headSha: 'fresh-reviewed-head',
+      completedRemediationRounds: 2,
+      completedRemediationRevisionRefs: ['older-reviewed-head'],
+    }),
+    false,
+  );
+  assert.equal(
+    terminalHammerReviewCycleExhausted({
+      reviewCycleExhausted: true,
+      verdict: 'request-changes',
+      headSha: 'fresh-reviewed-head',
+      completedRemediationRounds: 2,
+      completedRemediationRevisionRefs: ['fresh-reviewed-head'],
+    }),
+    true,
+  );
+  assert.equal(
+    terminalHammerReviewCycleExhausted({
+      reviewCycleExhausted: true,
+      verdict: 'comment-only',
+      headSha: 'clean-reviewed-head',
+      completedRemediationRounds: 0,
+      completedRemediationRevisionRefs: [],
+    }),
+    true,
   );
 });
 

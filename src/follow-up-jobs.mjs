@@ -1479,6 +1479,7 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
 
   let completedRoundsForPR = 0;
   const completedRoundTimestamps = [];
+  const completedRemediationRevisionRefs = new Set();
   let latestJob = null;
   let latestTimestamp = '';
 
@@ -1555,6 +1556,8 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
           const terminalAt = job?.completedAt || job?.failedAt || job?.stoppedAt || null;
           if (Number.isFinite(cur) && cur >= 0 && terminalAt) {
             completedRoundTimestamps.push({ round: cur, terminalAt });
+            const revisionRef = String(job?.revisionRef || '').trim();
+            if (revisionRef) completedRemediationRevisionRefs.add(revisionRef);
           }
           if (Number.isFinite(cur) && cur > completedRoundsForPR) {
             completedRoundsForPR = cur;
@@ -1595,6 +1598,9 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
     // Consumers can identify events relative to budget exhaustion without
     // comparing reviewer counts to author-remediation counts.
     completedRoundTimestamps,
+    // Terminal Hammer may only become first-class owner of reviewer findings
+    // after a remediation worker completed against the exact reviewed head.
+    completedRemediationRevisionRefs: Array.from(completedRemediationRevisionRefs).sort(),
   };
 }
 

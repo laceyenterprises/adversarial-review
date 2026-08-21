@@ -43,7 +43,7 @@ function currentProcessGroupId({
   } catch {
     resolved = null;
   }
-  if (useCache) {
+  if (useCache && resolved !== null) {
     cachedCurrentProcessGroupId = resolved;
     cachedCurrentProcessGroupIdResolved = true;
     cachedCurrentProcessGroupIdPid = pid;

@@ -1313,6 +1313,34 @@ test('current process group lookup caches the process-scope ps result', () => {
   assert.equal(calls, 1);
 });
 
+test('current process group lookup retries after a transient ps failure', () => {
+  let calls = 0;
+  function execFileSyncImpl() {
+    calls += 1;
+    if (calls === 1) {
+      const err = new Error('resource temporarily unavailable');
+      err.code = 'EAGAIN';
+      throw err;
+    }
+    return ' 51515\n';
+  }
+
+  const first = currentProcessGroupId({
+    pid: 5151,
+    useCache: true,
+    execFileSyncImpl,
+  });
+  const second = currentProcessGroupId({
+    pid: 5151,
+    useCache: true,
+    execFileSyncImpl,
+  });
+
+  assert.equal(first, null);
+  assert.equal(second, 51515);
+  assert.equal(calls, 2);
+});
+
 test('stale follow-up signal skips reused watcher pid metadata', () => {
   const calls = [];
   const result = signalStaleFollowUpWorker({

@@ -21,6 +21,7 @@ import { join } from 'node:path';
 
 import {
   AFH_REVIEWER_MODEL_PROVIDER,
+  AFH_FLEET_QUOTA_STATUS_RETRY_TIMEOUT_FRACTION,
   afhGroundingSnapshotFromStdout,
   afhReviewerFallbackDecision,
   applyAfhReviewerFallback,
@@ -428,6 +429,7 @@ test('AFH-04: a real missing `hq` binary degrades instead of rejecting', async (
 });
 
 test('AFH-04: transient hq quota-status failures retry before failing open', async () => {
+  assert.equal(AFH_FLEET_QUOTA_STATUS_RETRY_TIMEOUT_FRACTION, 0.25);
   let calls = 0;
   const timeouts = [];
   const grounding = await readAfhReviewerGrounding({

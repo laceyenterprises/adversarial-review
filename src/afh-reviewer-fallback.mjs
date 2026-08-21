@@ -69,10 +69,10 @@ const execFileAsync = promisify(execFile);
 
 export const AFH_FLEET_QUOTA_STATUS_TIMEOUT_MS = 10_000;
 export const AFH_FLEET_QUOTA_STATUS_RETRY_DELAYS_MS = Object.freeze([250, 1000]);
+export const AFH_FLEET_QUOTA_STATUS_RETRY_TIMEOUT_FRACTION = 0.25;
 export const DEFAULT_AFH_GROUNDING_TTL_MS = 60_000;
 export const DEFAULT_AFH_STALE_IF_ERROR_MS = 10 * 60_000;
 export const AFH_LAST_RESORT_REVIEWER_MODEL = 'claude';
-const AFH_FLEET_QUOTA_STATUS_RETRY_TIMEOUT_FRACTION = 0.25;
 
 // Reviewer model → the provider whose OAuth quota gates whether that reviewer
 // can spawn at all. Kept in sync with QUOTA_HARNESS_PROVIDER
@@ -146,7 +146,10 @@ function afhReviewerFallbackDisabled(env = process.env) {
 }
 
 function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    if (typeof timer?.unref === 'function') timer.unref();
+  });
 }
 
 function errorTextPart(value) {

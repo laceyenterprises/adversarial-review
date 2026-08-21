@@ -11,6 +11,8 @@ import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import { deriveReviewerTokenCost, loadReviewerPricingTable } from './reviewer-token-pricing.mjs';
 
 const PASS_KINDS = new Set(['first-pass', 'remediation', 'rereview', 'closer']);
+const HOUR_MS = 60 * 60 * 1000;
+const DEFAULT_STALE_RUNNING_REVIEWER_PASS_MS = 6 * HOUR_MS;
 
 // Module-level lazily-loaded pricing table for cost-USD derivation. Loaded once
 // from process.env (ADVERSARIAL_REVIEW_MODEL_PRICING_FILE / AGENT_OS_MODEL_PRICING_FILE
@@ -109,6 +111,36 @@ function normalizeStoredHeadSha(value) {
   return typeof value === 'string' && value.trim() !== '' ? value.trim() : null;
 }
 
+function normalizeStoredWorkerRunId(value) {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : null;
+}
+
+function parseTimestampMs(value) {
+  if (!value) return null;
+  const ms = Date.parse(String(value));
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function resolveStaleRunningReviewerPassMs(env = process.env) {
+  const raw = env.ADVERSARIAL_STALE_RUNNING_REVIEWER_PASS_MS;
+  if (raw == null || String(raw).trim() === '') return DEFAULT_STALE_RUNNING_REVIEWER_PASS_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0
+    ? Math.floor(parsed)
+    : DEFAULT_STALE_RUNNING_REVIEWER_PASS_MS;
+}
+
+function isStaleRunningReviewerPassOwner(existing, {
+  now = new Date().toISOString(),
+  thresholdMs = resolveStaleRunningReviewerPassMs(),
+} = {}) {
+  if (String(existing?.status || '') !== 'running') return false;
+  const nowMs = parseTimestampMs(now) ?? (now instanceof Date ? now.getTime() : Number(now));
+  const startedMs = parseTimestampMs(existing?.started_at);
+  if (!Number.isFinite(nowMs) || startedMs == null) return false;
+  return nowMs - startedMs >= Number(thresholdMs);
+}
+
 function assertReviewerPassReusable(existing, key, normalizedHeadSha) {
   if (!existing) {
     throw new Error(`reviewer_passes insert was ignored but no row exists for ${passKeyDescription(key)}`);
@@ -154,6 +186,8 @@ function beginReviewerPass(rootDir, {
   startedAt = new Date().toISOString(),
   headSha = null,
   metadata = {},
+  now = new Date().toISOString(),
+  staleRunningReviewerPassMs = resolveStaleRunningReviewerPassMs(),
 } = {}) {
   const key = passKey({ repo, prNumber, attemptNumber, passKind });
   const model = normalizeReviewerModel(reviewerModel || reviewerClass);
@@ -186,7 +220,7 @@ function beginReviewerPass(rootDir, {
       metadataJson(metadata)
     );
     const existing = db.prepare(
-      `SELECT pass_id, status, head_sha, metadata_json FROM reviewer_passes
+      `SELECT pass_id, status, head_sha, worker_run_id, started_at, metadata_json FROM reviewer_passes
         WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?`
     ).get(key.repo, key.prNumber, key.attemptNumber, key.passKind);
     if (!existing) {
@@ -199,26 +233,47 @@ function beginReviewerPass(rootDir, {
       ...parseMetadataJson(existing?.metadata_json),
       ...metadata,
     };
+    const requestedWorkerRunId = workerRunId || null;
+    const existingWorkerRunId = normalizeStoredWorkerRunId(existing.worker_run_id);
+    const allowStaleOwnerSteal = Boolean(
+      existingWorkerRunId &&
+      requestedWorkerRunId &&
+      existingWorkerRunId !== requestedWorkerRunId &&
+      isStaleRunningReviewerPassOwner(existing, {
+        now,
+        thresholdMs: staleRunningReviewerPassMs,
+      })
+    );
     const updateResult = db.prepare(
       `UPDATE reviewer_passes
           SET reviewer_class = COALESCE(?, reviewer_class),
               reviewer_model = COALESCE(?, reviewer_model),
               worker_run_id = COALESCE(?, worker_run_id),
               workspace_path = COALESCE(?, workspace_path),
+              started_at = CASE WHEN ? THEN ? ELSE started_at END,
               head_sha = COALESCE(?, head_sha),
               metadata_json = ?
         WHERE pass_id = ?
           AND status = 'running'
-          AND (worker_run_id IS NULL OR worker_run_id = ?)`
+          AND (
+            worker_run_id IS NULL
+            OR worker_run_id = ?
+            OR (? AND worker_run_id = ? AND started_at = ?)
+          )`
     ).run(
       reviewerClassNormalized,
       model,
-      workerRunId || null,
+      requestedWorkerRunId,
       workspacePath || null,
+      allowStaleOwnerSteal ? 1 : 0,
+      startedAt,
       normalizedHeadSha,
       metadataJson(mergedMetadata),
       existing.pass_id,
-      workerRunId || null
+      requestedWorkerRunId,
+      allowStaleOwnerSteal ? 1 : 0,
+      existingWorkerRunId,
+      existing.started_at
     );
     if (updateResult.changes !== 1) {
       throw new Error(`failed to claim running reviewer_passes row for ${passKeyDescription(key)}`);

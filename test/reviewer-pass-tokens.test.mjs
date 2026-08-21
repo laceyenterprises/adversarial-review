@@ -266,6 +266,8 @@ test('reviewer pass writer refuses to steal a running row from another worker', 
       startedAt: '2026-05-18T00:01:00.000Z',
       headSha: 'head-a',
       metadata: { second: true },
+      now: '2026-05-18T00:01:00.000Z',
+      staleRunningReviewerPassMs: 60 * 60 * 1000,
     }),
     /failed to claim running reviewer_passes row/
   );
@@ -279,6 +281,51 @@ test('reviewer pass writer refuses to steal a running row from another worker', 
     assert.equal(row.workspace_path, '/tmp/review-a');
     assert.equal(metadata.first, true);
     assert.equal(metadata.second, undefined);
+  } finally {
+    db.close();
+  }
+});
+
+test('reviewer pass writer can recover a stale running row from another worker', () => {
+  const rootDir = tempRoot();
+  beginReviewerPass(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 49,
+    attemptNumber: 2,
+    reviewerClass: 'gemini',
+    passKind: 'rereview',
+    workerRunId: 'worker-run-a',
+    workspacePath: '/tmp/review-a',
+    startedAt: '2026-05-18T00:00:00.000Z',
+    headSha: 'head-a',
+    metadata: { first: true },
+  });
+
+  beginReviewerPass(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 49,
+    attemptNumber: 2,
+    reviewerClass: 'gemini',
+    passKind: 'rereview',
+    workerRunId: 'worker-run-b',
+    workspacePath: '/tmp/review-b',
+    startedAt: '2026-05-18T07:00:00.000Z',
+    headSha: 'head-a',
+    metadata: { second: true },
+    now: '2026-05-18T07:00:00.000Z',
+    staleRunningReviewerPassMs: 60 * 60 * 1000,
+  });
+
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const row = db.prepare('SELECT worker_run_id, workspace_path, started_at, metadata_json FROM reviewer_passes WHERE pr_number = 49').get();
+    const metadata = JSON.parse(row.metadata_json);
+    assert.equal(row.worker_run_id, 'worker-run-b');
+    assert.equal(row.workspace_path, '/tmp/review-b');
+    assert.equal(row.started_at, '2026-05-18T07:00:00.000Z');
+    assert.equal(metadata.first, true);
+    assert.equal(metadata.second, true);
   } finally {
     db.close();
   }
@@ -789,6 +836,7 @@ test('backfill is idempotent for historical follow-up workspaces', () => {
     const row = db.prepare('SELECT * FROM reviewer_passes WHERE pr_number = 43').get();
     assert.equal(row.pass_kind, 'remediation');
     assert.equal(row.worker_run_id, 'wr_1');
+    assert.equal(row.reviewer_model, 'codex');
     assert.equal(row.token_input, 120);
     assert.equal(row.token_cache_read, 11);
   } finally {

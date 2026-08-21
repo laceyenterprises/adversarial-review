@@ -1496,7 +1496,8 @@ function backfillReviewerPasses(rootDir, {
       || 1
     );
     uniquePassKeys.add(`${repo}#${prNumber}#${attemptNumber}#remediation`);
-    const startedAt = worker.spawnedAt || job.claimedAt || job.createdAt || now();
+    const observedNow = typeof now === 'function' ? now() : now;
+    const startedAt = worker.spawnedAt || job.claimedAt || job.createdAt || observedNow;
     const endedAt = job.completedAt || job.failedAt || job.stoppedAt || worker.reconciledAt || null;
     const status = job.status === 'completed'
       ? 'completed'
@@ -1551,6 +1552,7 @@ function backfillReviewerPasses(rootDir, {
           workerRunId: usage?.workerRunId || worker.workerRunId || worker.runId || null,
           workspacePath,
           startedAt,
+          now: observedNow,
           metadata: {
             backfill: true,
             jobPath,

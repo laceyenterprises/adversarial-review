@@ -153,6 +153,10 @@ export function resolveFirstPassReviewBudgetSuppression({
     typeof reviewRow?.reviewer_head_sha === 'string' && reviewRow.reviewer_head_sha.length > 0
       ? reviewRow.reviewer_head_sha
       : null;
+  const currentHeadDiffersFromReviewedHead =
+    suppliedCurrentHeadSha !== null &&
+    reviewedHeadSha !== null &&
+    reviewedHeadSha !== suppliedCurrentHeadSha;
   // `reviewer_head_sha` is set when the reviewer STARTS a head and survives a
   // failed attempt: the failure paths (stmtReleaseReviewLease / stmtMarkFailed)
   // record failed_at + failure_message but leave reviewer_head_sha intact. Keyed
@@ -231,7 +235,7 @@ export function resolveFirstPassReviewBudgetSuppression({
     suppliedCurrentHeadSha !== null &&
     !currentHeadAlreadyReviewed &&
     remediationBudgetConsumed &&
-    !postBudgetFinalReviewCompletedForPR;
+    (!postBudgetFinalReviewCompletedForPR || currentHeadDiffersFromReviewedHead);
   if (currentHeadOwesPostBudgetFinalReview) {
     return {
       suppressed: false,
@@ -241,12 +245,12 @@ export function resolveFirstPassReviewBudgetSuppression({
       riskClass: resolution.riskClass,
     };
   }
-  // #81: the PR already spent its post-budget final review and a hammer moved the
-  // head again — suppress the re-review so the exhausted PR closes via the AMA
-  // exhaustion->merge path (hammer terminal remediation) instead of re-opening
-  // findings on every remediation push. This is the operator AMA policy: the
-  // hammer closes on exhaustion, no gating re-review.
-  if (postBudgetFinalReviewCompletedForPR) {
+  // #81: the PR already spent its post-budget final review on this head. A later
+  // moved head is not covered by that stale review: terminal HAM/AMA closer
+  // commits are suppressed by the head-closer classifier before this helper,
+  // while ordinary Codex/operator remediation pushes still owe an exact-head
+  // review so they cannot self-certify on stale review state.
+  if (postBudgetFinalReviewCompletedForPR && !currentHeadDiffersFromReviewedHead) {
     return {
       suppressed: true,
       reason: 'post-budget-final-review-completed-for-pr',

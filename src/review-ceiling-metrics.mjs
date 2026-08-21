@@ -248,8 +248,8 @@ export function countReviewCeilingAttempts({
  * A review cycle is exhausted when EITHER round budget is spent:
  * remediation rounds (a review produced blocking findings and a remediation
  * worker ran) OR re-review rounds (reviewers ran to their budget). A
- * comment-only review — no blocking findings, so no remediation worker spawns —
- * only ever advances the re-review counter, so keying exhaustion solely on
+ * comment-only review -- no blocking findings, so no remediation worker spawns
+ * -- only ever advances the re-review counter, so keying exhaustion solely on
  * remediation rounds parks CI-green/CLEAN PRs forever. Pure so it is unit
  * testable without a ledger/DB fixture.
  */

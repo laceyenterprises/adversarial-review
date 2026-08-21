@@ -36,9 +36,10 @@
 //
 // FAIL OPEN, ALWAYS. Every failure mode of the `hq` read — command missing,
 // non-zero exit, timeout, unparseable JSON, no `providerStatuses`, absent
-// `afhGrounding` verdict — degrades to "no AFH signal", which means the
-// configured primary/gemini behavior, unchanged. This module never throws at its
-// public boundary; routing must not be able to crash the watcher daemon.
+// `afhGrounding` verdict — either retries/stale-serves a recent good quota
+// snapshot or degrades to "no AFH signal", which means the configured
+// primary/gemini behavior, unchanged. This module never throws at its public
+// boundary; routing must not be able to crash the watcher daemon.
 //
 // Gemini availability deliberately means *enabled AND not grounded*: with
 // `reviewer.gemini.mode: off` the operator has told us gemini is not a usable
@@ -67,7 +68,10 @@ import {
 const execFileAsync = promisify(execFile);
 
 export const AFH_FLEET_QUOTA_STATUS_TIMEOUT_MS = 10_000;
+export const AFH_FLEET_QUOTA_STATUS_RETRY_DELAYS_MS = Object.freeze([250, 1000]);
+export const AFH_FLEET_QUOTA_STATUS_RETRY_TIMEOUT_FRACTION = 0.25;
 export const DEFAULT_AFH_GROUNDING_TTL_MS = 60_000;
+export const DEFAULT_AFH_STALE_IF_ERROR_MS = 10 * 60_000;
 export const AFH_LAST_RESORT_REVIEWER_MODEL = 'claude';
 
 // Reviewer model → the provider whose OAuth quota gates whether that reviewer
@@ -141,18 +145,103 @@ function afhReviewerFallbackDisabled(env = process.env) {
   return /^(0|false|no|off)$/i.test(String(env?.ADVERSARIAL_AFH_REVIEWER_FALLBACK ?? '').trim());
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    if (typeof timer?.unref === 'function') timer.unref();
+  });
+}
+
+function errorTextPart(value) {
+  if (value === undefined || value === null) return '';
+  if (Buffer.isBuffer(value)) return value.toString('utf8');
+  return String(value);
+}
+
+function fleetQuotaStatusErrorText(error, seen = new Set()) {
+  if (!error) return '';
+  if (typeof error !== 'object') return errorTextPart(error);
+  if (seen.has(error)) return '';
+  seen.add(error);
+  const parts = [
+    errorTextPart(error.message),
+    errorTextPart(error.stderr),
+    errorTextPart(error.stdout),
+    errorTextPart(error.code),
+    errorTextPart(error.errno),
+    errorTextPart(error.syscall),
+    errorTextPart(error.signal),
+    fleetQuotaStatusErrorText(error.cause, seen),
+  ];
+  return parts.filter(Boolean).join('\n');
+}
+
+function isTransientFleetQuotaStatusError(error) {
+  const code = String(error?.code || '').toUpperCase();
+  if (['EIO', 'ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'EPIPE'].includes(code)) return true;
+  if (error?.killed === true) return true;
+  const text = fleetQuotaStatusErrorText(error).toLowerCase();
+  return (
+    /\b(eio|etimedout|econnreset|econnrefused|epipe|eagain|eai_again|enotfound)\b/u.test(text) ||
+    /timed?\s*out|timeout|tls handshake|connection reset|connection refused/u.test(text) ||
+    /resource temporarily unavailable|temporarily unavailable|try again/u.test(text) ||
+    /service unavailable|bad gateway|gateway timeout|http\s*5\d\d/u.test(text) ||
+    /socket hang up|remote end hung up/u.test(text)
+  );
+}
+
+function timeoutMsForFleetQuotaStatusAttempt(timeoutMs, attemptIndex) {
+  const parsed = Number(timeoutMs);
+  if (!Number.isFinite(parsed) || parsed <= 0) return timeoutMs;
+  if (attemptIndex <= 0) return parsed;
+  return Math.max(1, Math.ceil(parsed * AFH_FLEET_QUOTA_STATUS_RETRY_TIMEOUT_FRACTION));
+}
+
+async function readFleetQuotaStatusStdoutWithRetry({
+  resolvedHqPath,
+  execFileImpl,
+  env,
+  timeoutMs,
+  retryDelaysMs,
+  sleepImpl,
+}) {
+  const delays = Array.isArray(retryDelaysMs) ? retryDelaysMs : [];
+  const pause = typeof sleepImpl === 'function' ? sleepImpl : sleep;
+  const attempts = delays.length + 1;
+  let lastError = null;
+  for (let attemptIndex = 0; attemptIndex < attempts; attemptIndex += 1) {
+    try {
+      const result = await execFileImpl(resolvedHqPath, ['fleet', 'quota', 'status', '--json'], {
+        env,
+        encoding: 'utf8',
+        maxBuffer: 5 * 1024 * 1024,
+        timeout: timeoutMsForFleetQuotaStatusAttempt(timeoutMs, attemptIndex),
+      });
+      return typeof result === 'string' ? result : (result?.stdout || '');
+    } catch (err) {
+      lastError = err;
+      if (!isTransientFleetQuotaStatusError(err) || attemptIndex >= attempts - 1) break;
+      const delayMs = delays[attemptIndex] || 0;
+      if (delayMs > 0) await pause(delayMs);
+    }
+  }
+  throw lastError;
+}
+
 /**
  * Read AFH-02's per-provider grounding verdict via `hq fleet quota status
- * --json`. Bounded (execFile `timeout`), and fail-open on EVERY failure mode:
- * this returns an "unavailable" snapshot instead of throwing, so a broken or
- * missing `hq` degrades reviewer routing to its configured behavior rather than
- * crashing the watcher tick.
+ * --json`. Bounded (execFile `timeout`) with tiny transient retries; every
+ * remaining failure mode returns an "unavailable" snapshot instead of throwing,
+ * so a broken or missing `hq` degrades reviewer routing to its configured
+ * behavior rather than crashing the watcher tick.
  */
 export async function readAfhReviewerGrounding({
   hqPath = null,
   execFileImpl = execFileAsync,
   env = process.env,
   timeoutMs = AFH_FLEET_QUOTA_STATUS_TIMEOUT_MS,
+  retryDelaysMs = AFH_FLEET_QUOTA_STATUS_RETRY_DELAYS_MS,
+  sleepImpl = sleep,
 } = {}) {
   if (afhReviewerFallbackDisabled(env)) {
     return unavailableGrounding('afh-reviewer-fallback-disabled');
@@ -160,13 +249,14 @@ export async function readAfhReviewerGrounding({
   const resolvedHqPath = hqPath || env?.HQ_BIN || 'hq';
   let stdout;
   try {
-    const result = await execFileImpl(resolvedHqPath, ['fleet', 'quota', 'status', '--json'], {
+    stdout = await readFleetQuotaStatusStdoutWithRetry({
+      resolvedHqPath,
+      execFileImpl,
       env,
-      encoding: 'utf8',
-      maxBuffer: 5 * 1024 * 1024,
-      timeout: timeoutMs,
+      timeoutMs,
+      retryDelaysMs,
+      sleepImpl,
     });
-    stdout = typeof result === 'string' ? result : (result?.stdout || '');
   } catch (err) {
     // Missing binary, non-zero exit, and the execFile timeout kill all land here.
     return unavailableGrounding('fleet-quota-status-unavailable', err);
@@ -192,6 +282,7 @@ export function createAfhReviewerGroundingCache({
   logger = console,
 } = {}) {
   let cached = null;
+  let lastGood = null;
   let inFlight = null;
 
   return async function getAfhReviewerGrounding() {
@@ -207,6 +298,22 @@ export function createAfhReviewerGroundingCache({
           // an injected reader that rejects.
           snapshot = unavailableGrounding('fleet-quota-status-unavailable', err);
         }
+        const afterRead = nowFn();
+        if (snapshot?.available) {
+          if (!snapshot.staleIfError) lastGood = { snapshot, readAt: afterRead };
+        } else if (
+          lastGood?.snapshot &&
+          afterRead - lastGood.readAt <= DEFAULT_AFH_STALE_IF_ERROR_MS
+        ) {
+          snapshot = Object.freeze({
+            ...lastGood.snapshot,
+            staleIfError: Object.freeze({
+              reason: snapshot?.reason || 'fleet-quota-status-unavailable',
+              error: snapshot?.error || null,
+              lastGoodAtMs: lastGood.readAt,
+            }),
+          });
+        }
         cached = { snapshot, expiresAt: nowFn() + ttlMs };
         // Degraded-read breadcrumb, once per refresh window rather than once per
         // PR: a watcher without `hq` on PATH would otherwise log this per subject
@@ -216,6 +323,13 @@ export function createAfhReviewerGroundingCache({
             `[watcher] afh-reviewer-grounding degraded (${snapshot.reason}` +
               `${snapshot.error ? `: ${snapshot.error}` : ''}) — reviewer routing keeps the ` +
               'configured primary/gemini behavior until the next read'
+          );
+        } else if (snapshot.staleIfError) {
+          logger?.warn?.(
+            `[watcher] afh-reviewer-grounding stale-if-error ` +
+              `(${snapshot.staleIfError.reason}` +
+              `${snapshot.staleIfError.error ? `: ${snapshot.staleIfError.error}` : ''}) — ` +
+              'using recent good quota snapshot for this refresh window'
           );
         }
         return snapshot;

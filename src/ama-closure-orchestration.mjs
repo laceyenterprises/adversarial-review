@@ -66,6 +66,11 @@ const {
   namedAmaNoDispatchReason,
 } = amaDispatchCloser;
 
+export function normalizeCompletedRoundCount(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
 // Transient mergeability sampling window (GitHub returns mergeable=UNKNOWN right
 // after a push / base move while it recomputes). Re-sample so we don't park an
 // otherwise-eligible PR as `pr-not-mergeable`. Env-overridable.
@@ -295,6 +300,8 @@ export async function maybeDispatchAmaClosureFor({
   // Mirrors evaluateRoundBudgetForReview's budget resolution. Fail-safe: any
   // error leaves the signal false (AMA keeps its normal strict gates).
   let reviewCycleExhausted = false;
+  let completedRemediationRoundsForPR = null;
+  let completedRereviewRoundsForPR = null;
   // Resolve the PR's risk class from the remediation ledger (which defaults to
   // DEFAULT_RISK_CLASS) so AMA eligibility uses the SAME risk class the
   // round-budget path below already computes. Without this, the eligibility
@@ -325,20 +332,17 @@ export async function maybeDispatchAmaClosureFor({
         Number.isInteger(latestMaxRounds) && latestMaxRounds > rbResolution.roundBudget
           ? latestMaxRounds
           : rbResolution.roundBudget;
-      // A review cycle also exhausts when the REVIEW round budget is spent, not
-      // only the remediation round budget. A comment-only review (no blocking
-      // findings, so no remediation worker spawns) never increments
-      // completedRoundsForPR — so without this, a CI-green/CLEAN PR reviewed to
-      // its budget parks forever: the daemon clean-path declines on any
-      // non-blocking/unknown finding, and the final-hammer waivers (which
-      // require reviewCycleExhausted) never arm because remediation rounds stay
-      // 0. Count re-review rounds with the same helper evaluateRoundBudgetForReview
-      // uses to STOP re-reviews, so "reviewers won't run again" and "AMA cycle
-      // exhausted" agree. The final hammer still remediates-then-closes, so this
-      // never bypasses review — it only lets a budget-spent clean cycle finalize.
-      let completedRereviewRoundsForPR = 0;
+      // Re-review rounds count toward the shared "cycle exhausted" signal so
+      // comment-only clean PRs do not park after reviewers hit budget. The
+      // closer also receives the raw remediation/rereview counters below so its
+      // terminal Hammer arming gate can require evidence that Codex/remediator
+      // had a turn.
+      completedRemediationRoundsForPR = normalizeCompletedRoundCount(
+        remLedger.completedRoundsForPR,
+      );
+      completedRereviewRoundsForPR = 0;
       try {
-        completedRereviewRoundsForPR = Number(
+        completedRereviewRoundsForPR = normalizeCompletedRoundCount(
           countCompletedReviewerRereviewRounds({ rootDir, repoPath, prNumber }),
         );
       } catch (rereviewErr) {
@@ -349,7 +353,7 @@ export async function maybeDispatchAmaClosureFor({
       }
       reviewCycleExhausted = reviewCycleExhaustedFromRounds({
         effectiveRoundBudget,
-        completedRemediationRounds: remLedger.completedRoundsForPR,
+        completedRemediationRounds: completedRemediationRoundsForPR,
         completedRereviewRounds: completedRereviewRoundsForPR,
       });
     }
@@ -476,6 +480,12 @@ export async function maybeDispatchAmaClosureFor({
     riskClass: String(candidate?.riskClass || reviewStateRow?.risk_class || ledgerRiskClass || 'unknown').toLowerCase(),
     remediationPending: gateSnapshot.settledReview?.remediationPending,
     reviewCycleExhausted,
+    completedRemediationRounds: Number.isFinite(completedRemediationRoundsForPR)
+      ? completedRemediationRoundsForPR
+      : null,
+    completedRereviewRounds: Number.isFinite(completedRereviewRoundsForPR)
+      ? completedRereviewRoundsForPR
+      : null,
     // Blocking/non-blocking findings classification MUST come from the same
     // authoritative current-head body that `gateSnapshot.settledReview` resolved
     // the verdict from (live head body when reconciled, else the stored job/row

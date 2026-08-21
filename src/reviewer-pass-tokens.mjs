@@ -206,7 +206,8 @@ function beginReviewerPass(rootDir, {
               head_sha = COALESCE(?, head_sha),
               metadata_json = ?
         WHERE pass_id = ?
-          AND status = 'running'`
+          AND status = 'running'
+          AND (worker_run_id IS NULL OR worker_run_id = ?)`
     ).run(
       reviewerClassNormalized,
       model,
@@ -214,7 +215,8 @@ function beginReviewerPass(rootDir, {
       workspacePath || null,
       normalizedHeadSha,
       metadataJson(mergedMetadata),
-      existing.pass_id
+      existing.pass_id,
+      workerRunId || null
     );
     if (updateResult.changes !== 1) {
       throw new Error(`failed to claim running reviewer_passes row for ${passKeyDescription(key)}`);

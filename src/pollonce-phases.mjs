@@ -368,14 +368,14 @@ export async function processReviewSubject(entry, ctx) {
         }
       }
 
-	      if (
-	        existing?.pr_state === 'merged' &&
-	        (
-	          existing.review_status === 'pending' ||
-	          existing.review_status === 'pending-upstream' ||
-	          existing.review_status === 'reviewing'
-	        )
-	      ) {
+      if (
+        existing?.pr_state === 'merged' &&
+        (
+          existing.review_status === 'pending' ||
+          existing.review_status === 'pending-upstream' ||
+          existing.review_status === 'reviewing'
+        )
+      ) {
         const settledAt = existing.merged_at || new Date().toISOString();
         const result = stmtMarkMergedPendingReviewSkipped.run(
           'Skipped reviewer spawn because PR is already merged.',

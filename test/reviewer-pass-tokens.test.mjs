@@ -239,6 +239,51 @@ test('reviewer pass writer refuses to reuse a running row for a different head',
   }
 });
 
+test('reviewer pass writer refuses to steal a running row from another worker', () => {
+  const rootDir = tempRoot();
+  beginReviewerPass(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 48,
+    attemptNumber: 2,
+    reviewerClass: 'gemini',
+    passKind: 'rereview',
+    workerRunId: 'worker-run-a',
+    workspacePath: '/tmp/review-a',
+    startedAt: '2026-05-18T00:00:00.000Z',
+    headSha: 'head-a',
+    metadata: { first: true },
+  });
+
+  assert.throws(
+    () => beginReviewerPass(rootDir, {
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 48,
+      attemptNumber: 2,
+      reviewerClass: 'gemini',
+      passKind: 'rereview',
+      workerRunId: 'worker-run-b',
+      workspacePath: '/tmp/review-b',
+      startedAt: '2026-05-18T00:01:00.000Z',
+      headSha: 'head-a',
+      metadata: { second: true },
+    }),
+    /failed to claim running reviewer_passes row/
+  );
+
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const row = db.prepare('SELECT worker_run_id, workspace_path, metadata_json FROM reviewer_passes WHERE pr_number = 48').get();
+    const metadata = JSON.parse(row.metadata_json);
+    assert.equal(row.worker_run_id, 'worker-run-a');
+    assert.equal(row.workspace_path, '/tmp/review-a');
+    assert.equal(metadata.first, true);
+    assert.equal(metadata.second, undefined);
+  } finally {
+    db.close();
+  }
+});
+
 test('gemini reviewer exact usage writes local artifact and owner fold-in without opening ledger sqlite', () => {
   const rootDir = tempRoot();
   const workspace = path.join(rootDir, 'workspace');

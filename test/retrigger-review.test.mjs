@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import {
+  fetchCurrentPrHeadSha,
   main,
   normalizeOperatorRetriggerReason,
   parseArgs,
@@ -24,6 +25,10 @@ function makeCaptureStream() {
     write(chunk) { chunks.push(String(chunk)); return true; },
     text() { return chunks.join(''); },
   };
+}
+
+async function fakeCurrentHeadSha() {
+  return 'head-current-238';
 }
 
 test('reviewer exit wait probes through the injected process-kill seam', async () => {
@@ -48,6 +53,44 @@ test('reviewer exit wait probes through the injected process-kill seam', async (
 
   assert.deepEqual(probes, [[-8123, 0], [-8123, 0]]);
   assert.deepEqual(result, { checked: true, exited: true, pgid: 8123 });
+});
+
+test('fetchCurrentPrHeadSha retries transient gh lookup failures', async () => {
+  const calls = [];
+  const sleeps = [];
+  const headSha = await fetchCurrentPrHeadSha({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 238,
+    retries: 2,
+    backoffMs: 5,
+    sleepImpl: async (ms) => { sleeps.push(ms); },
+    execFileImpl: async (cmd, args) => {
+      calls.push([cmd, args]);
+      if (calls.length < 3) {
+        const err = new Error('TLS handshake timeout');
+        err.code = 'ETIMEDOUT';
+        err.stderr = 'TLS handshake timeout';
+        throw err;
+      }
+      return { stdout: 'head-current-238\n' };
+    },
+  });
+
+  assert.equal(headSha, 'head-current-238');
+  assert.equal(calls.length, 3);
+  assert.deepEqual(sleeps, [5, 10]);
+  assert.equal(calls[0][0], 'gh');
+  assert.deepEqual(calls[0][1], [
+    'pr',
+    'view',
+    '238',
+    '--repo',
+    'laceyenterprises/agent-os',
+    '--json',
+    'headRefOid',
+    '--jq',
+    '.headRefOid',
+  ]);
 });
 
 function insertReviewRow(rootDir, overrides = {}) {
@@ -260,7 +303,7 @@ test('retrigger-review treats pending review rows as already-pending success and
     '--pr', '238',
     '--reason', 'retry',
     '--root-dir', rootDir,
-  ], { stdout: out, stderr: makeCaptureStream() });
+  ], { stdout: out, stderr: makeCaptureStream(), fetchCurrentHeadShaImpl: fakeCurrentHeadSha });
 
   assert.equal(rc, 0);
   assert.equal(JSON.parse(out.text()).outcome, 'already-pending+bumped');
@@ -339,7 +382,7 @@ test('retrigger-review bumps the terminal job budget and resets review status', 
     '--reason', 'substantially rewritten',
     '--root-dir', rootDir,
     '--audit-root-dir', rootDir,
-  ], { stdout: out, stderr: makeCaptureStream() });
+  ], { stdout: out, stderr: makeCaptureStream(), fetchCurrentHeadShaImpl: fakeCurrentHeadSha });
 
   assert.equal(rc, 0);
   const db = openReviewStateDb(rootDir);
@@ -372,7 +415,7 @@ test('retrigger-review exact-head-now leaves the explicit operator marker used f
     '--exact-head-now',
     '--no-bump-budget',
     '--root-dir', rootDir,
-  ], { stdout: out, stderr: makeCaptureStream() });
+  ], { stdout: out, stderr: makeCaptureStream(), fetchCurrentHeadShaImpl: fakeCurrentHeadSha });
 
   assert.equal(rc, 0);
   const auditRow = JSON.parse(out.text());
@@ -438,7 +481,7 @@ test('retrigger-review exact-head-now re-arms pending-upstream review', async ()
     '--exact-head-now',
     '--no-bump-budget',
     '--root-dir', rootDir,
-  ], { stdout: out, stderr: makeCaptureStream() });
+  ], { stdout: out, stderr: makeCaptureStream(), fetchCurrentHeadShaImpl: fakeCurrentHeadSha });
 
   assert.equal(rc, 0);
   const auditRow = JSON.parse(out.text());
@@ -472,7 +515,7 @@ test('retrigger-review refuses active follow-up jobs when bumping is enabled', a
     '--reason', 'retry',
     '--root-dir', rootDir,
     '--audit-root-dir', rootDir,
-  ], { stdout: makeCaptureStream(), stderr: err });
+  ], { stdout: makeCaptureStream(), stderr: err, fetchCurrentHeadShaImpl: fakeCurrentHeadSha });
 
   assert.equal(rc, 1);
   assert.match(err.text(), /refused:job-active/);
@@ -625,6 +668,7 @@ test('retrigger-review exact-head-now can cancel and reset an active reviewer', 
   ], {
     stdout: out,
     stderr: makeCaptureStream(),
+    fetchCurrentHeadShaImpl: fakeCurrentHeadSha,
     cancelActiveReviewImpl: async () => ({
       signalled: true,
       target: { kind: 'process-group', id: 8123 },
@@ -671,6 +715,7 @@ test('retrigger-review exact-head-now reports active-review cancellation refusal
   ], {
     stdout: makeCaptureStream(),
     stderr: err,
+    fetchCurrentHeadShaImpl: fakeCurrentHeadSha,
     cancelActiveReviewImpl: async () => ({
       signalled: false,
       target: { kind: 'process-group', id: 8123 },
@@ -701,6 +746,7 @@ test('retrigger-review exact-head-now refuses when cancelled reviewer remains al
   ], {
     stdout: makeCaptureStream(),
     stderr: err,
+    fetchCurrentHeadShaImpl: fakeCurrentHeadSha,
     cancelActiveReviewImpl: async () => ({
       signalled: true,
       target: { kind: 'process-group', id: 8123 },
@@ -732,6 +778,7 @@ test('retrigger-review keeps wait failures inside the runtime exit-code contract
   ], {
     stdout: makeCaptureStream(),
     stderr: err,
+    fetchCurrentHeadShaImpl: fakeCurrentHeadSha,
     cancelActiveReviewImpl: async () => ({
       signalled: true,
       target: { kind: 'process-group', id: 8123 },
@@ -764,6 +811,7 @@ test('retrigger-review allow-active-review-reset refuses a live process group', 
   ], {
     stdout: makeCaptureStream(),
     stderr: err,
+    fetchCurrentHeadShaImpl: fakeCurrentHeadSha,
     isPgidAliveImpl: () => true,
   });
 
@@ -791,6 +839,7 @@ test('retrigger-review allow-active-review-reset resets a dead process group', a
   ], {
     stdout: out,
     stderr: makeCaptureStream(),
+    fetchCurrentHeadShaImpl: fakeCurrentHeadSha,
     isPgidAliveImpl: () => false,
   });
 
@@ -829,6 +878,7 @@ test('retrigger-review allow-active-review-reset preserves a null pgid guard', a
   ], {
     stdout: out,
     stderr: makeCaptureStream(),
+    fetchCurrentHeadShaImpl: fakeCurrentHeadSha,
     isPgidAliveImpl: () => { throw new Error('null pgid must not be probed'); },
   });
 
@@ -863,6 +913,7 @@ test('retrigger-review cancel recovery tolerates watcher reconciliation to faile
   ], {
     stdout: out,
     stderr: makeCaptureStream(),
+    fetchCurrentHeadShaImpl: fakeCurrentHeadSha,
     readReviewRow: () => {
       readCalls += 1;
       return {
@@ -925,6 +976,7 @@ test('retrigger-review cancel recovery resets a real failed-orphan row with a nu
   ], {
     stdout: out,
     stderr: makeCaptureStream(),
+    fetchCurrentHeadShaImpl: fakeCurrentHeadSha,
     cancelActiveReviewImpl: async () => ({
       signalled: true,
       target: { kind: 'process-group', id: 8123 },
@@ -997,6 +1049,7 @@ test('retrigger-review exact-head-now stops a stale active follow-up before re-a
   ], {
     stdout: out,
     stderr: makeCaptureStream(),
+    fetchCurrentHeadShaImpl: fakeCurrentHeadSha,
     readReviewRow: () => ({
       repo: 'laceyenterprises/agent-os',
       pr_number: 238,
@@ -1032,6 +1085,76 @@ test('retrigger-review exact-head-now stops a stale active follow-up before re-a
   assert.match(stopped[0].reason, /Superseded by operator exact-head re-review request/);
 });
 
+test('retrigger-review exact-head recovery binds a posted row to the requested head', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: 'posted',
+    revisionRef: 'head-stale-237',
+  });
+
+  const out = makeCaptureStream();
+  const rc = await main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'review this exact pushed head',
+    '--exact-head-now',
+    '--head-sha', 'head-current-238',
+    '--no-bump-budget',
+    '--root-dir', rootDir,
+  ], {
+    stdout: out,
+    stderr: makeCaptureStream(),
+  });
+
+  assert.equal(rc, 0);
+  assert.equal(JSON.parse(out.text()).revisionRef, 'head-current-238');
+  const db = openReviewStateDb(rootDir);
+  try {
+    const row = db.prepare(
+      'SELECT review_status, revision_ref FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get('laceyenterprises/agent-os', 238);
+    assert.equal(row.review_status, 'pending');
+    assert.equal(row.revision_ref, 'head-current-238');
+  } finally {
+    db.close();
+  }
+});
+
+test('retrigger-review exact-head recovery refreshes an already-pending row revision_ref', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: 'pending',
+    revisionRef: 'head-stale-237',
+  });
+
+  const out = makeCaptureStream();
+  const rc = await main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'review this exact pushed head',
+    '--exact-head-now',
+    '--head-sha', 'head-current-238',
+    '--no-bump-budget',
+    '--root-dir', rootDir,
+  ], {
+    stdout: out,
+    stderr: makeCaptureStream(),
+  });
+
+  assert.equal(rc, 0);
+  assert.equal(JSON.parse(out.text()).revisionRef, 'head-current-238');
+  const db = openReviewStateDb(rootDir);
+  try {
+    const row = db.prepare(
+      'SELECT review_status, revision_ref FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get('laceyenterprises/agent-os', 238);
+    assert.equal(row.review_status, 'pending');
+    assert.equal(row.revision_ref, 'head-current-238');
+  } finally {
+    db.close();
+  }
+});
+
 test('retrigger-review refuses when a stale active follow-up survives the stop operation', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
   const staleJob = {
@@ -1055,6 +1178,7 @@ test('retrigger-review refuses when a stale active follow-up survives the stop o
   ], {
     stdout: makeCaptureStream(),
     stderr: err,
+    fetchCurrentHeadShaImpl: fakeCurrentHeadSha,
     findAuditRow: () => null,
     appendAuditRow: (_auditRoot, row) => audits.push(row),
     readReviewRow: () => ({

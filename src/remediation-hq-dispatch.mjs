@@ -217,14 +217,16 @@ async function resolveHqWorkerWorkspace({
 }
 
 function isHqCancelRetryable(err) {
-  const detail = [err?.message, err?.stdout, err?.stderr].filter(Boolean).join('\n');
-  return /(?:^|[\s:])(EIO)(?:$|[\s:])|timed out|timeout/i.test(detail);
+  const detail = [err?.code, err?.message, err?.stdout, err?.stderr].filter(Boolean).join('\n');
+  return /(?:^|[\s:])(EIO|ETIMEDOUT)(?:$|[\s:])|timed out|timeout/i.test(detail);
 }
 
 async function cancelHqDispatch({
   worker,
   execFileImpl = execFileAsync,
   env = process.env,
+  retryDelaysMs = HQ_CANCEL_RETRY_DELAYS_MS,
+  sleepImpl = sleep,
 } = {}) {
   const dispatchId = String(worker?.dispatchId || '').trim();
   const hqRoot = worker?.hqRoot || resolveHqRoot(env, { requireExists: false });
@@ -238,13 +240,15 @@ async function cancelHqDispatch({
   }
 
   const hqBin = resolveHqBin(env);
-  const retryDelaysMs = [0, ...HQ_CANCEL_RETRY_DELAYS_MS];
+  const retryScheduleMs = [0, ...retryDelaysMs];
   let lastError = null;
-  for (let attempt = 0; attempt < retryDelaysMs.length; attempt += 1) {
-    if (retryDelaysMs[attempt] > 0) {
-      await sleep(retryDelaysMs[attempt]);
+  let attemptsMade = 0;
+  for (let attempt = 0; attempt < retryScheduleMs.length; attempt += 1) {
+    if (retryScheduleMs[attempt] > 0) {
+      await sleepImpl(retryScheduleMs[attempt]);
     }
     try {
+      attemptsMade += 1;
       const result = await execFileImpl(hqBin, ['dispatch', 'cancel', dispatchId, '--root', hqRoot], {
         env: {
           ...env,
@@ -261,7 +265,7 @@ async function cancelHqDispatch({
       };
     } catch (err) {
       lastError = err;
-      if (!isHqCancelRetryable(err) || attempt === retryDelaysMs.length - 1) {
+      if (!isHqCancelRetryable(err) || attempt === retryScheduleMs.length - 1) {
         break;
       }
     }
@@ -269,7 +273,7 @@ async function cancelHqDispatch({
 
   return {
     cancelled: false,
-    attempts: retryDelaysMs.length,
+    attempts: attemptsMade,
     exitCode: Number.isInteger(lastError?.code) ? lastError.code : null,
     stdout: String(lastError?.stdout || '').trim() || null,
     stderr: String(lastError?.stderr || '').trim() || null,

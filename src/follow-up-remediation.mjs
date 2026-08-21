@@ -1864,26 +1864,39 @@ async function reconcileFollowUpJob({
     const { commentDelivery: manualInspectionDelivery } = buildReconcileCommentDelivery({
       job, worker, action: 'failed', failure: manualInspectionFailure, now,
     });
+    const workerState = {
+      ...worker,
+      state: 'manual_inspection_required',
+      reconciledAt: completedAt,
+    };
+    const failureMetadata = {
+      manualInspectionRequired: true,
+      inspectionReason: liveness.reason,
+      workerRuntimeMs: liveness.ageMs,
+      finalMessagePath: worker.outputPath || null,
+      logPath: worker.logPath || null,
+    };
+    if (isHqWorker) {
+      const cancellation = await cancelHqDispatch({
+        worker,
+        execFileImpl,
+      });
+      workerState.cancellation = cancellation;
+      failureMetadata.hqDispatchCancel = cancellation;
+    }
+    const workerHandle = isHqWorker
+      ? `HQ dispatch ${worker.dispatchId}`
+      : `PID ${worker.processId}`;
     const failed = markFollowUpJobFailed({
       rootDir,
       jobPath,
       failedAt: completedAt,
       failureCode: 'manual-inspection-required',
       error: new Error(
-        `Remediation worker PID ${worker.processId} still appears active beyond the reconciliation runtime cap. Manual inspection required before trusting the PID association.`
+        `Remediation worker ${workerHandle} still appears active beyond the reconciliation runtime cap. Manual inspection required before trusting the worker association.`
       ),
-      remediationWorker: {
-        ...worker,
-        state: 'manual_inspection_required',
-        reconciledAt: completedAt,
-      },
-      failure: {
-        manualInspectionRequired: true,
-        inspectionReason: liveness.reason,
-        workerRuntimeMs: liveness.ageMs,
-        finalMessagePath: worker.outputPath || null,
-        logPath: worker.logPath || null,
-      },
+      remediationWorker: workerState,
+      failure: failureMetadata,
       commentDelivery: manualInspectionDelivery,
     });
 

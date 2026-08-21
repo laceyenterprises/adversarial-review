@@ -949,10 +949,12 @@ function requestReviewRereview({
   prNumber,
   requestedAt = new Date().toISOString(),
   reason,
+  targetRevisionRef = null,
   allowFastMergeSkipped = false,
   db: dbOverride = null,
 }) {
   const db = dbOverride || openReviewStateDb(rootDir);
+  const normalizedTargetRevisionRef = String(targetRevisionRef || '').trim() || null;
 
   try {
     if (!dbOverride) {
@@ -985,9 +987,21 @@ function requestReviewRereview({
     const allowedPrStatePredicate = allowFastMergeSkipped
       ? "pr_state IN ('open', 'fast_merge_skipped')"
       : "pr_state = 'open'";
+    const resetParams = [];
+    if (normalizedTargetRevisionRef) {
+      resetParams.push(normalizedTargetRevisionRef);
+    }
+    resetParams.push(
+      requestedAt,
+      reason || 'Re-review requested from remediation reply.',
+      repo,
+      prNumber
+    );
+
     const updateResult = db.prepare(
       `UPDATE reviewed_prs
          SET pr_state = 'open',
+             ${normalizedTargetRevisionRef ? 'revision_ref = ?,' : ''}
              ${buildReviewStateResetAssignments({
                overrides: {
                  review_attempts: 'review_attempts',
@@ -1000,12 +1014,7 @@ function requestReviewRereview({
          AND pr_number = ?
          AND ${allowedPrStatePredicate}
          AND review_status NOT IN ('reviewing', 'malformed', 'pending')`
-    ).run(
-      requestedAt,
-      reason || 'Re-review requested from remediation reply.',
-      repo,
-      prNumber
-    );
+    ).run(...resetParams);
 
     if (updateResult.changes === 1) {
       return {
@@ -1038,20 +1047,26 @@ function requestReviewRereview({
       const normalizedReason = reason || 'Re-review requested from remediation reply.';
       const explicitOperatorRetrigger = isExplicitOperatorRetriggerReason(normalizedReason);
       if (explicitOperatorRetrigger) {
-        db.prepare(
-          `UPDATE reviewed_prs
-              SET rereview_requested_at = ?,
-                  rereview_reason = ?
-            WHERE repo = ?
-              AND pr_number = ?
-              AND pr_state = 'open'
-              AND review_status = 'pending'`
-        ).run(
+        const pendingParams = [];
+        if (normalizedTargetRevisionRef) {
+          pendingParams.push(normalizedTargetRevisionRef);
+        }
+        pendingParams.push(
           requestedAt,
           normalizedReason,
           repo,
           prNumber
         );
+        db.prepare(
+          `UPDATE reviewed_prs
+              SET ${normalizedTargetRevisionRef ? 'revision_ref = ?,' : ''}
+                  rereview_requested_at = ?,
+                  rereview_reason = ?
+            WHERE repo = ?
+              AND pr_number = ?
+              AND pr_state = 'open'
+              AND review_status = 'pending'`
+        ).run(...pendingParams);
         reviewRow = getReviewRow(db, { repo, prNumber });
       }
       return {

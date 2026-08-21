@@ -1063,6 +1063,76 @@ test('watcher stale follow-up release uses the newest liveness timestamp before 
   assert.equal(existsSync(spawned.jobPath), true, 'fresh job must not be moved to stopped/');
 });
 
+test('watcher stale follow-up release signals the local remediator before unblocking review', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-stale-signal-'));
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 5605,
+    reviewerModel: 'gemini',
+    linearTicketId: null,
+    reviewBody: '## Summary\nStale remediator fixture.\n\n## Verdict\nRequest changes',
+    reviewPostedAt: '2026-08-21T11:01:54.000Z',
+    critical: false,
+    maxRemediationRounds: 2,
+  });
+  const claimed = claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-08-21T11:02:55.599Z',
+  });
+  const spawned = markFollowUpJobSpawned({
+    rootDir,
+    jobPath: claimed.jobPath,
+    worker: {
+      model: 'codex',
+      state: 'spawned',
+      processId: 13600,
+      processGroupId: 13600,
+      workspaceDir: '/tmp/stale-remediator-workspace',
+    },
+    spawnedAt: '2026-08-21T11:03:16.461Z',
+  });
+  writeFollowUpJob(spawned.jobPath, {
+    ...spawned.job,
+    lastHeartbeatAt: '2026-08-21T11:03:16.461Z',
+  });
+
+  const signalCalls = [];
+  const decision = shouldDeferReviewForActiveFollowUpDirect({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 5605,
+    nowMs: Date.parse('2026-08-21T11:13:55.830Z'),
+    staleSignalImpl(args) {
+      signalCalls.push(args);
+      return {
+        signalled: true,
+        skipped: false,
+        target: { kind: 'process-group', id: 13600 },
+        error: null,
+      };
+    },
+  });
+
+  assert.equal(decision.defer, false, 'stale local worker should not keep blocking review');
+  assert.equal(decision.latestJobStatus, 'stopped');
+  assert.equal(decision.releaseReason, 'stale-heartbeat');
+  assert.equal(signalCalls.length, 1, 'stale local worker must be signalled before release');
+  assert.equal(signalCalls[0].job.remediationWorker.processGroupId, 13600);
+  assert.equal(existsSync(spawned.jobPath), false, 'in-progress claim must be moved');
+  const stoppedPath = path.join(
+    getFollowUpJobDir(rootDir, 'stopped'),
+    path.basename(spawned.jobPath),
+  );
+  const stoppedJob = readFollowUpJob(stoppedPath);
+  assert.equal(stoppedJob.remediationWorker?.state, 'reclaimed-stale-heartbeat');
+  assert.equal(stoppedJob.remediationWorker?.staleReclaimSignal?.signalled, true);
+  assert.deepEqual(stoppedJob.remediationWorker?.staleReclaimSignal?.target, {
+    kind: 'process-group',
+    id: 13600,
+  });
+});
+
 test('watcher active follow-up defer defaults to the repository root, not process cwd', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-default-root-'));
   const previousCwd = process.cwd();

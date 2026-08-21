@@ -1,4 +1,5 @@
-import { parseArgs as nodeParseArgs } from 'node:util';
+import { execFile } from 'node:child_process';
+import { parseArgs as nodeParseArgs, promisify } from 'node:util';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,6 +26,7 @@ import { normalizeOperatorRetriggerReason } from './retrigger-review-reason.mjs'
 import { stopFollowUpJobWithWorkerCancel } from './follow-up-stop.mjs';
 import { cancelActiveReview, reviewerCancelHandle } from './review-cancel.mjs';
 import { isPgidAlive } from './process-group-identity.mjs';
+import { execGhWithRetry } from './gh-cli.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT_DIR = resolve(__dirname, '..');
@@ -34,6 +36,10 @@ const EXIT_REASON_INPUT = 3;
 const EXIT_RUNTIME = 4;
 const ACTIVE_REVIEW_CANCEL_WAIT_MS = 5_000;
 const ACTIVE_REVIEW_CANCEL_POLL_MS = 250;
+const CURRENT_HEAD_LOOKUP_TIMEOUT_MS = 30_000;
+const CURRENT_HEAD_LOOKUP_RETRIES = 2;
+const CURRENT_HEAD_LOOKUP_BACKOFF_MS = 500;
+const execFileAsync = promisify(execFile);
 
 const USAGE = `\
 Usage:
@@ -54,6 +60,7 @@ Optional:
   --idempotency-key <key>        Stable replay key for retry-safe operator calls
   --allow-failed-reset           Permit manual reset of failed / failed-orphan review rows
   --exact-head-now               Safe operator recovery for "review this exact head now"
+  --head-sha <sha>               Explicit head to bind for --exact-head-now (tests/recovery)
   --cancel-active-review         In --exact-head-now mode, cancel an active reviewer before reset
   --allow-active-review-reset    In --exact-head-now mode, force-reset an active reviewer row without cancellation
   --root-dir <path>              Tool root containing data/reviews.db
@@ -90,6 +97,7 @@ function parseArgs(argv) {
         'hq-root': { type: 'string' },
         'allow-failed-reset': { type: 'boolean', default: false },
         'exact-head-now': { type: 'boolean', default: false },
+        'head-sha': { type: 'string' },
         'cancel-active-review': { type: 'boolean', default: false },
         'allow-active-review-reset': { type: 'boolean', default: false },
         quiet: { type: 'boolean', default: false },
@@ -115,6 +123,9 @@ function parseArgs(argv) {
   ) {
     throw new UsageError('--cancel-active-review and --allow-active-review-reset require --exact-head-now');
   }
+  if (parsed.values['head-sha'] && !parsed.values['exact-head-now']) {
+    throw new UsageError('--head-sha requires --exact-head-now');
+  }
 
   const pr = Number.parseInt(parsed.values.pr, 10);
   if (!Number.isInteger(pr) || pr <= 0) {
@@ -130,6 +141,9 @@ function parseArgs(argv) {
 
   if (parsed.values['no-bump-budget'] && parsed.values['bump-budget'] !== undefined) {
     throw new UsageError('--bump-budget and --no-bump-budget are mutually exclusive');
+  }
+  if (parsed.values['head-sha'] !== undefined) {
+    parsed.values['head-sha'] = normalizeTargetRevisionRef(parsed.values['head-sha'], '--head-sha');
   }
 
   // --exact-head-now is an operator recovery/refresh of the CURRENT head, not a
@@ -178,6 +192,48 @@ function readReviewRowSafely({ rootDir, repo, prNumber }) {
   } finally {
     db.close();
   }
+}
+
+function normalizeTargetRevisionRef(value, label = 'target revision') {
+  const normalized = String(value || '').trim();
+  if (!normalized) return null;
+  if (/\s/.test(normalized)) {
+    throw new UsageError(`${label} must not contain whitespace`);
+  }
+  return normalized;
+}
+
+async function fetchCurrentPrHeadSha({
+  repo,
+  prNumber,
+  execFileImpl = execFileAsync,
+  sleepImpl,
+  retries = CURRENT_HEAD_LOOKUP_RETRIES,
+  backoffMs = CURRENT_HEAD_LOOKUP_BACKOFF_MS,
+} = {}) {
+  const { stdout } = await execGhWithRetry({
+    execFileImpl,
+    args: [
+      'pr',
+      'view',
+      String(prNumber),
+      '--repo',
+      repo,
+      '--json',
+      'headRefOid',
+      '--jq',
+      '.headRefOid',
+    ],
+    timeoutMs: CURRENT_HEAD_LOOKUP_TIMEOUT_MS,
+    retries,
+    backoffMs,
+    sleep: sleepImpl,
+  });
+  const headSha = normalizeTargetRevisionRef(stdout, 'GitHub PR headRefOid');
+  if (!headSha) {
+    throw new Error(`GitHub PR headRefOid lookup returned empty output for ${repo}#${prNumber}`);
+  }
+  return headSha;
 }
 
 function normalizeExpectedReviewerPgid(value) {
@@ -231,10 +287,15 @@ function makeAuditRow({
   idempotencyKey,
   outcome,
   exactHeadNow = false,
+  targetRevisionRef = null,
   staleFollowUpStopped = false,
   activeReviewReset = null,
 }) {
-  const subjectIdentity = buildCodePrSubjectIdentity({ repo, prNumber: pr });
+  const subjectIdentity = buildCodePrSubjectIdentity({
+    repo,
+    prNumber: pr,
+    revisionRef: targetRevisionRef || null,
+  });
   return {
     ts,
     verb: 'hq.adversarial.retrigger-review',
@@ -359,6 +420,7 @@ async function main(argv, {
   cancelActiveReviewImpl = cancelActiveReview,
   waitForReviewerExitImpl = waitForReviewerExit,
   isPgidAliveImpl = isPgidAlive,
+  fetchCurrentHeadShaImpl = fetchCurrentPrHeadSha,
 } = {}) {
   let parsed;
   try {
@@ -398,14 +460,29 @@ async function main(argv, {
 
   const ts = new Date().toISOString();
   const operator = process.env.HQ_OPERATOR || process.env.USER || 'unknown';
-  const baseAudit = {
-    ts,
-    repo: values.repo,
+	let targetRevisionRef = values['head-sha'] || null;
+	const resolveExactHeadTargetRevisionRef = async () => {
+		if (!values['exact-head-now'] || targetRevisionRef) return targetRevisionRef;
+		try {
+			targetRevisionRef = await fetchCurrentHeadShaImpl({
+				repo: values.repo,
+				prNumber: values.pr,
+			});
+		} catch (err) {
+			throw new Error(`could not resolve current PR head for exact-head review: ${err.message}`);
+		}
+		baseAudit.targetRevisionRef = targetRevisionRef;
+		return targetRevisionRef;
+	};
+	const baseAudit = {
+		ts,
+		repo: values.repo,
     pr: values.pr,
     reason,
     operator,
     jobKey: null,
     idempotencyKey: null,
+    targetRevisionRef,
   };
   const { requestFingerprint, idempotencyKey } = resolveIdempotencyKey({
     verb: 'hq.adversarial.retrigger-review',
@@ -450,19 +527,56 @@ async function main(argv, {
     return EXIT_RUNTIME;
   }
 
-  let latestJob = latestJobFinder(rootDir, { repo: values.repo, prNumber: values.pr });
-  baseAudit.jobKey = latestJob?.job?.jobId || null;
-  let staleFollowUpStopped = false;
-  let activeReviewReset = null;
+	let latestJob = latestJobFinder(rootDir, { repo: values.repo, prNumber: values.pr });
+	baseAudit.jobKey = latestJob?.job?.jobId || null;
+	let staleFollowUpStopped = false;
+	let activeReviewReset = null;
+	const recordReviewRefusal = (refusalReason) => {
+		const row = makeAuditRow({
+			...baseAudit,
+			priorMaxRounds: latestJob?.job?.remediationPlan?.maxRounds ?? null,
+			newMaxRounds: latestJob?.job?.remediationPlan?.maxRounds ?? null,
+			outcome: 'refused:not-eligible',
+			exactHeadNow: values['exact-head-now'],
+			staleFollowUpStopped,
+			activeReviewReset,
+		});
+		if (!appendTerminalAuditRow({ appendAuditRow, auditRootDir, row, stderr })) {
+			return EXIT_RUNTIME;
+		}
+		writeReviewRefusal(stderr, { repo: values.repo, pr: values.pr, refusalReason });
+		return EXIT_BLOCKED;
+	};
 
-  if (values['exact-head-now'] && isStaleActiveFollowUpJob(latestJob, resolveReviewHead(reviewRow))) {
+	const activeReviewRecoveryRequested = values['exact-head-now']
+		&& reviewRow?.review_status === 'reviewing'
+		&& (values['cancel-active-review'] || values['allow-active-review-reset']);
+	const preflightRefusalReason = refuseReasonForReviewRow(reviewRow, {
+		allowFailedReset: values['allow-failed-reset'],
+		exactHeadNow: values['exact-head-now'],
+	});
+	if (preflightRefusalReason && !activeReviewRecoveryRequested) {
+		return recordReviewRefusal(preflightRefusalReason);
+	}
+
+	if (values['exact-head-now']) {
+		try {
+			await resolveExactHeadTargetRevisionRef();
+		} catch (err) {
+			stderr.write(`error: ${err.message}\n`);
+			return EXIT_RUNTIME;
+		}
+	}
+
+	const exactHeadReviewRef = targetRevisionRef || resolveReviewHead(reviewRow);
+	if (values['exact-head-now'] && isStaleActiveFollowUpJob(latestJob, exactHeadReviewRef)) {
     try {
       await stopFollowUpJobImpl({
         rootDir,
         jobPath: latestJob.jobPath,
         requestedAt: ts,
         requestedBy: operator,
-        reason: `Superseded by operator exact-head re-review request for ${resolveReviewHead(reviewRow)}.`,
+        reason: `Superseded by operator exact-head re-review request for ${exactHeadReviewRef}.`,
         cancelWorker: latestJob.job.status === 'in_progress',
       });
     } catch (err) {
@@ -472,7 +586,7 @@ async function main(argv, {
     staleFollowUpStopped = true;
     latestJob = latestJobFinder(rootDir, { repo: values.repo, prNumber: values.pr });
     baseAudit.jobKey = latestJob?.job?.jobId || null;
-    if (isStaleActiveFollowUpJob(latestJob, resolveReviewHead(reviewRow))) {
+    if (isStaleActiveFollowUpJob(latestJob, exactHeadReviewRef)) {
       const row = makeAuditRow({
         ...baseAudit,
         priorMaxRounds: latestJob?.job?.remediationPlan?.maxRounds ?? null,
@@ -638,26 +752,13 @@ async function main(argv, {
     }
   }
 
-  const refusalReason = refuseReasonForReviewRow(reviewRow, {
-    allowFailedReset: values['allow-failed-reset'],
-    exactHeadNow: values['exact-head-now'],
-  });
-  if (refusalReason) {
-    const row = makeAuditRow({
-      ...baseAudit,
-      priorMaxRounds: latestJob?.job?.remediationPlan?.maxRounds ?? null,
-      newMaxRounds: latestJob?.job?.remediationPlan?.maxRounds ?? null,
-      outcome: 'refused:not-eligible',
-      exactHeadNow: values['exact-head-now'],
-      staleFollowUpStopped,
-      activeReviewReset,
-    });
-    if (!appendTerminalAuditRow({ appendAuditRow, auditRootDir, row, stderr })) {
-      return EXIT_RUNTIME;
-    }
-    writeReviewRefusal(stderr, { repo: values.repo, pr: values.pr, refusalReason });
-    return EXIT_BLOCKED;
-  }
+	const refusalReason = refuseReasonForReviewRow(reviewRow, {
+		allowFailedReset: values['allow-failed-reset'],
+		exactHeadNow: values['exact-head-now'],
+	});
+	if (refusalReason) {
+		return recordReviewRefusal(refusalReason);
+	}
 
   let budgetResult = null;
   if (!values['no-bump-budget'] && latestJob) {
@@ -706,6 +807,7 @@ async function main(argv, {
       repo: values.repo,
       prNumber: values.pr,
       reason,
+      targetRevisionRef,
     });
   } catch (err) {
     stderr.write(`error: rereview failed: ${err.message}\n`);
@@ -762,6 +864,8 @@ export {
   resolveReviewHead,
   isStaleActiveFollowUpJob,
   waitForReviewerExit,
+  fetchCurrentPrHeadSha,
+  normalizeTargetRevisionRef,
 };
 
 if (import.meta.url === `file://${process.argv[1]}`) {

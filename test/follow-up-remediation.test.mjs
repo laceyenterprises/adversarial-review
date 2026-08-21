@@ -6706,6 +6706,66 @@ test('reconcileFollowUpJob flags suspicious live PIDs for manual inspection inst
   assert.equal(result.job.failure.manualInspectionRequired, true);
 });
 
+test('reconcileFollowUpJob reaps over-cap HQ remediators when dispatch status is unavailable', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = path.join(rootDir, 'hq');
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 12, reviewPostedAt: '2026-04-21T08:09:00.000Z' });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'codex',
+      dispatchMode: 'hq',
+      dispatchId: 'dispatch-hq-stale-12',
+      launchRequestId: 'lrq_hq_stale_12',
+      hqRoot,
+      state: 'spawned',
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, path.join(artifactDir, 'codex-last-message.md')),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+    },
+  });
+
+  const calls = [];
+  const result = await reconcileFollowUpJob({
+    rootDir,
+    job: spawned.job,
+    jobPath: spawned.jobPath,
+    now: () => '2026-04-21T16:30:01.000Z',
+    resolvePRLifecycleImpl: async () => null,
+    execFileImpl: async (_cmd, args) => {
+      calls.push(args);
+      if (args[1] === 'status') {
+        const err = new Error('hq dispatch status unavailable');
+        err.stderr = 'launch daemon down';
+        throw err;
+      }
+      if (args[1] === 'cancel') {
+        return { stdout: 'cancelled', stderr: '' };
+      }
+      throw new Error(`unexpected hq call: ${args.join(' ')}`);
+    },
+  });
+
+  assert.equal(result.action, 'failed');
+  assert.equal(result.reason, 'hq-dispatch-status-unavailable-beyond-runtime-cap');
+  assert.equal(result.job.status, 'failed');
+  assert.equal(result.job.remediationWorker.state, 'manual_inspection_required');
+  assert.equal(result.job.failure.manualInspectionRequired, true);
+  assert.equal(result.job.failure.hqDispatchCancel.cancelled, true);
+  assert.deepEqual(
+    calls.map((args) => args.slice(0, 3)),
+    [
+      ['dispatch', 'status', 'dispatch-hq-stale-12'],
+      ['dispatch', 'cancel', 'dispatch-hq-stale-12'],
+    ]
+  );
+});
+
 // ── consumeNextFollowUpJob end-to-end regression ────────────────────────────
 
 test('consumeNextFollowUpJob threads claimed jobId through to the spawned worker without ReferenceError', async () => {

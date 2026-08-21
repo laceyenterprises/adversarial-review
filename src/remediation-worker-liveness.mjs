@@ -72,6 +72,10 @@ function parseIsoTime(value) {
   return Number.isFinite(timestamp) ? timestamp : null;
 }
 
+function exceedsReconciliationActiveCap(ageMs) {
+  return ageMs !== null && ageMs > RECONCILIATION_MAX_ACTIVE_MS;
+}
+
 function assessWorkerLiveness(job, { now = () => new Date().toISOString(), isWorkerRunning = isWorkerProcessRunning } = {}) {
   const worker = job?.remediationWorker || {};
   const nowAt = parseIsoTime(now());
@@ -80,7 +84,7 @@ function assessWorkerLiveness(job, { now = () => new Date().toISOString(), isWor
   const processRunning = isWorkerRunning(worker.processId);
 
   if (processRunning) {
-    if (ageMs !== null && ageMs > RECONCILIATION_MAX_ACTIVE_MS) {
+    if (exceedsReconciliationActiveCap(ageMs)) {
       return { state: 'manual-inspection', reason: 'pid-active-beyond-runtime-cap', ageMs };
     }
     return { state: 'active', reason: 'worker-still-running', ageMs };
@@ -147,6 +151,14 @@ async function assessWorkerLivenessDetailed(job, {
         dispatchStatus: statusPayload,
       };
     }
+    if (exceedsReconciliationActiveCap(ageMs)) {
+      return {
+        state: 'manual-inspection',
+        reason: `hq-dispatch-${statusPayload.status}-beyond-runtime-cap`,
+        ageMs,
+        dispatchStatus: statusPayload,
+      };
+    }
     return {
       state: 'active',
       reason: `hq-dispatch-${statusPayload.status}`,
@@ -163,6 +175,17 @@ async function assessWorkerLivenessDetailed(job, {
         dispatchStatus: {
           status: 'not-found',
           failureDetail: detail,
+        },
+      };
+    }
+    if (exceedsReconciliationActiveCap(ageMs)) {
+      return {
+        state: 'manual-inspection',
+        reason: 'hq-dispatch-status-unavailable-beyond-runtime-cap',
+        ageMs,
+        dispatchStatus: {
+          status: 'unknown',
+          failureDetail: detail || err?.message || 'status probe failed',
         },
       };
     }

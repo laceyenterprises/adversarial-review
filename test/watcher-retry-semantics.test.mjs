@@ -28,6 +28,7 @@ import {
 } from '../src/watcher.mjs';
 import {
   shouldDeferReviewForActiveFollowUp as shouldDeferReviewForActiveFollowUpDirect,
+  signalStaleFollowUpWorker,
 } from '../src/follow-up-active-defer.mjs';
 import {
   MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION,
@@ -1131,6 +1132,31 @@ test('watcher stale follow-up release signals the local remediator before unbloc
     kind: 'process-group',
     id: 13600,
   });
+});
+
+test('stale follow-up signal falls back to a single process when no process group is persisted', () => {
+  const calls = [];
+  const result = signalStaleFollowUpWorker({
+    job: {
+      remediationWorker: {
+        processId: 4242,
+      },
+    },
+    processKill(pid, signal) {
+      calls.push([pid, signal]);
+    },
+  });
+
+  assert.deepEqual(result, {
+    signalled: true,
+    skipped: false,
+    target: { kind: 'process', id: 4242 },
+    error: null,
+  });
+  assert.deepEqual(calls, [
+    [4242, 0],
+    [4242, 'SIGTERM'],
+  ]);
 });
 
 test('watcher active follow-up defer defaults to the repository root, not process cwd', () => {

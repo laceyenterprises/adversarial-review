@@ -141,7 +141,7 @@ function signalStaleFollowUpWorker({
   processKill = process.kill,
 } = {}) {
   const worker = job?.worker || job?.remediationWorker || {};
-  const processGroupId = positiveInteger(worker.processGroupId ?? worker.processId);
+  const processGroupId = positiveInteger(worker.processGroupId);
   const processId = positiveInteger(worker.processId);
   if (!processGroupId && !processId) {
     return { signalled: false, skipped: true, target: null, error: 'missing-worker-process-handle' };

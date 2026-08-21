@@ -145,7 +145,8 @@ function isReviewerPassClaimConflictError(err) {
   const message = String(err?.message || err || '');
   return (
     message.includes('failed to claim running reviewer_passes row') ||
-    message.includes('refusing to reuse running reviewer_passes row')
+    message.includes('refusing to reuse running reviewer_passes row') ||
+    message.includes('refusing to reuse terminal reviewer_passes row')
   );
 }
 
@@ -237,10 +238,6 @@ function beginReviewerPass(rootDir, {
     if (insertResult.changes === 0) {
       assertReviewerPassReusable(existing, key, normalizedHeadSha);
     }
-    const mergedMetadata = {
-      ...parseMetadataJson(existing?.metadata_json),
-      ...metadata,
-    };
     const requestedWorkerRunId = workerRunId || null;
     const existingWorkerRunId = normalizeStoredWorkerRunId(existing.worker_run_id);
     const allowStaleOwnerSteal = Boolean(
@@ -252,6 +249,17 @@ function beginReviewerPass(rootDir, {
         thresholdMs: staleRunningReviewerPassMs,
       })
     );
+    const takingOwnership = Boolean(
+      requestedWorkerRunId &&
+      existingWorkerRunId !== requestedWorkerRunId &&
+      (!existingWorkerRunId || allowStaleOwnerSteal)
+    );
+    const mergedMetadata = allowStaleOwnerSteal
+      ? { ...metadata }
+      : {
+        ...parseMetadataJson(existing?.metadata_json),
+        ...metadata,
+      };
     const updateResult = db.prepare(
       `UPDATE reviewer_passes
           SET reviewer_class = COALESCE(?, reviewer_class),
@@ -272,10 +280,10 @@ function beginReviewerPass(rootDir, {
       reviewerClassNormalized,
       model,
       requestedWorkerRunId,
-      allowStaleOwnerSteal ? 1 : 0,
+      takingOwnership ? 1 : 0,
       workspacePath || null,
       workspacePath || null,
-      allowStaleOwnerSteal ? 1 : 0,
+      takingOwnership ? 1 : 0,
       startedAt,
       normalizedHeadSha,
       metadataJson(mergedMetadata),

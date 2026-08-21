@@ -323,6 +323,48 @@ test('reviewer pass writer can recover a stale running row from another worker',
     assert.equal(row.worker_run_id, 'worker-run-b');
     assert.equal(row.workspace_path, null);
     assert.equal(row.started_at, '2026-05-18T07:00:00.000Z');
+    assert.equal(metadata.first, undefined);
+    assert.equal(metadata.second, true);
+  } finally {
+    db.close();
+  }
+});
+
+test('reviewer pass writer resets timer when claiming a null-owned row', () => {
+  const rootDir = tempRoot();
+  beginReviewerPass(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 51,
+    attemptNumber: 2,
+    reviewerClass: 'gemini',
+    passKind: 'rereview',
+    workspacePath: '/tmp/unowned-old',
+    startedAt: '2026-05-18T00:00:00.000Z',
+    headSha: 'head-a',
+    metadata: { first: true },
+  });
+
+  beginReviewerPass(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 51,
+    attemptNumber: 2,
+    reviewerClass: 'gemini',
+    passKind: 'rereview',
+    workerRunId: 'worker-run-a',
+    startedAt: '2026-05-18T00:01:00.000Z',
+    headSha: 'head-a',
+    metadata: { second: true },
+    now: '2026-05-18T00:01:00.000Z',
+  });
+
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const row = db.prepare('SELECT worker_run_id, workspace_path, started_at, metadata_json FROM reviewer_passes WHERE pr_number = 51').get();
+    const metadata = JSON.parse(row.metadata_json);
+    assert.equal(row.worker_run_id, 'worker-run-a');
+    assert.equal(row.workspace_path, null);
+    assert.equal(row.started_at, '2026-05-18T00:01:00.000Z');
     assert.equal(metadata.first, true);
     assert.equal(metadata.second, true);
   } finally {

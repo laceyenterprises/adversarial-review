@@ -69,6 +69,25 @@ function baseHammerArgs(rootDir, overrides = {}) {
   };
 }
 
+function mechanicalHammerArgs(rootDir, overrides = {}) {
+  return baseHammerArgs(rootDir, {
+    ...overrides,
+    reviewState: {
+      verdict: 'comment-only',
+      remediationPending: false,
+      blockingFindingState: 'known',
+      blockingFindingCount: 0,
+      nonBlockingFindingState: 'known',
+      nonBlockingFindingCount: 0,
+      ...(overrides.reviewState || {}),
+    },
+    prMetadata: {
+      mergeableState: 'DIRTY',
+      ...(overrides.prMetadata || {}),
+    },
+  });
+}
+
 function testDeps({ execDelay = null } = {}) {
   const calls = [];
   let releaseExec;
@@ -94,7 +113,7 @@ function testDeps({ execDelay = null } = {}) {
   };
 }
 
-test('MSM-04: settled review with findings dispatches exactly one hammer', async (t) => {
+test('MSM-04: review findings do not dispatch hammer before remediation exhaustion', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'msm-04-findings-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const deps = testDeps();
@@ -103,11 +122,10 @@ test('MSM-04: settled review with findings dispatches exactly one hammer', async
     ...deps,
   });
 
-  assert.equal(result.dispatched, true);
-  assert.equal(result.workerClass, 'hammer');
-  assert.equal(deps.calls.length, 1);
-  assert.equal(deps.calls[0].args[deps.calls[0].args.indexOf('--worker-class') + 1], 'hammer');
-  assert.equal(deps.calls[0].args[deps.calls[0].args.indexOf('--task-kind') + 1], 'merge');
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'not-eligible');
+  assert.ok(result.reasons.includes('blocking-findings-present'));
+  assert.equal(deps.calls.length, 0);
 });
 
 test('DCR-02: merged PR does not dispatch hammer merge task', async (t) => {
@@ -116,7 +134,7 @@ test('DCR-02: merged PR does not dispatch hammer merge task', async (t) => {
   const deps = testDeps();
 
   const result = await maybeDispatchAmaCloser({
-    ...baseHammerArgs(rootDir, {
+    ...mechanicalHammerArgs(rootDir, {
       dispatchContext: {
         livePrProbeImpl: async () => ({ state: 'MERGED', headBranchExists: false }),
       },
@@ -137,7 +155,7 @@ test('DCR-02: pruned head branch does not dispatch hammer merge task', async (t)
   const deps = testDeps();
 
   const result = await maybeDispatchAmaCloser({
-    ...baseHammerArgs(rootDir, {
+    ...mechanicalHammerArgs(rootDir, {
       dispatchContext: {
         livePrProbeImpl: async () => ({ state: 'OPEN', headBranchExists: false, headRefName: 'codex/pruned' }),
       },
@@ -158,7 +176,7 @@ test('DCR-02: default live probe treats git ls-remote exit 2 as pruned branch', 
   const calls = [];
 
   const result = await maybeDispatchAmaCloser({
-    ...baseHammerArgs(rootDir, {
+    ...mechanicalHammerArgs(rootDir, {
       dispatchContext: {
         livePrProbeImpl: null,
       },
@@ -502,7 +520,7 @@ test('MSM-04: concurrent settle ticks for one job/head launch at most one hammer
   const rootDir = mkdtempSync(join(tmpdir(), 'msm-04-idempotency-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const deps = testDeps({ execDelay: true });
-  const args = baseHammerArgs(rootDir);
+  const args = mechanicalHammerArgs(rootDir);
   const first = maybeDispatchAmaCloser({ ...args, ...deps });
   const second = maybeDispatchAmaCloser({ ...args, ...deps });
   await new Promise((resolve) => setImmediate(resolve));

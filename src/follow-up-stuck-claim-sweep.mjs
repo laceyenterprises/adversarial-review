@@ -835,6 +835,11 @@ async function sweepStuckInProgressClaims({
       signalSkipped += 1;
     } else {
       signalFailed += 1;
+      log.warn?.(
+        `[follow-up-tick ${reclaimedAtIso}] stale-claim-signal-failed jobId=${jobId} ageMs=${ageMs} ` +
+        `source=${source} reason=${STALE_HEARTBEAT_STOP_CODE} error=${staleReclaimSignal.error || 'unknown'}`
+      );
+      continue;
     }
 
     markFollowUpJobStopped({

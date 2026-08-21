@@ -214,6 +214,11 @@ test('services.hcp loads through strict Node schema', () => {
           confirmation_token_keep_minutes: 61
           comms_jobs_keep_days: 34
           rotation_cadence_days: 45
+          console_capability_enforcement:
+            default: enforce
+          principal_capability_enforcement:
+            email:
+              finch: enforce
           persistent_agent_principals:
             - argus
             - custom-agent
@@ -235,6 +240,8 @@ test('services.hcp loads through strict Node schema', () => {
     assert.equal(cfg.get('services.hcp.confirmation_token_keep_minutes'), 61);
     assert.equal(cfg.get('services.hcp.comms_jobs_keep_days'), 34);
     assert.equal(cfg.get('services.hcp.rotation_cadence_days'), 45);
+    assert.equal(cfg.get('services.hcp.console_capability_enforcement.default'), 'enforce');
+    assert.equal(cfg.get('services.hcp.principal_capability_enforcement.email.finch'), 'enforce');
     assert.deepEqual(cfg.get('services.hcp.persistent_agent_principals'), ['argus', 'custom-agent']);
     assert.deepEqual(cfg.get('services.hcp.persistent_agent_default_capabilities.argus'), [
       'dispatch.read',

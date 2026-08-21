@@ -85,6 +85,14 @@ function readJobAtPath(jobPath) {
   return JSON.parse(readFileSync(jobPath, 'utf8'));
 }
 
+async function successfulStaleSignal() {
+  return {
+    signalled: true,
+    target: { kind: 'process-group', id: 99999 },
+    error: null,
+  };
+}
+
 test('sweepStuckInProgressClaims: stale lastHeartbeatAt moves claim to stopped/', async () => {
   const rootDir = makeRoot();
   const { jobPath } = seedInProgressJob(rootDir, {
@@ -96,11 +104,7 @@ test('sweepStuckInProgressClaims: stale lastHeartbeatAt moves claim to stopped/'
     rootDir,
     nowMs,
     log: { log: (msg) => logs.push(msg) },
-    sendWorkerSignalImpl: async () => ({
-      signalled: true,
-      target: { kind: 'process-group', id: 99999 },
-      error: null,
-    }),
+    sendWorkerSignalImpl: successfulStaleSignal,
   });
 
   assert.equal(result.scanned, 1);
@@ -127,6 +131,34 @@ test('sweepStuckInProgressClaims: stale lastHeartbeatAt moves claim to stopped/'
   assert.match(logs[0], /stale-claim-reclaimed/);
   assert.match(logs[0], /source=lastHeartbeatAt/);
   assert.match(logs[0], /signalled=true/);
+});
+
+test('sweepStuckInProgressClaims: failed stale-worker signal leaves claim in progress', async () => {
+  const rootDir = makeRoot();
+  const { jobPath } = seedInProgressJob(rootDir, {
+    lastHeartbeatAt: '2026-06-01T05:00:00.000Z',
+  });
+  const nowMs = Date.parse('2026-06-01T05:35:00.000Z');
+  const warnings = [];
+  const result = await sweepStuckInProgressClaims({
+    rootDir,
+    nowMs,
+    log: { warn: (msg) => warnings.push(msg) },
+    sendWorkerSignalImpl: async () => {
+      throw new Error('launchctl EIO');
+    },
+  });
+
+  assert.equal(result.scanned, 1);
+  assert.equal(result.reclaimed, 0);
+  assert.equal(result.signalFailed, 1);
+  assert.equal(result.signalled, 0);
+  assert.equal(existsSync(jobPath), true, 'in-progress file remains for retry');
+  const stoppedDir = getFollowUpJobDir(rootDir, 'stopped');
+  assert.equal(existsSync(stoppedDir) ? readdirSync(stoppedDir).length : 0, 0);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /stale-claim-signal-failed/);
+  assert.match(warnings[0], /launchctl EIO/);
 });
 
 test('sweepStuckInProgressClaims: fresh lastHeartbeatAt leaves claim in place', async () => {
@@ -162,7 +194,11 @@ test('sweepStuckInProgressClaims: HQ-dispatched jobs are exempt from stale recla
   });
 
   const nowMs = Date.parse('2026-06-01T05:35:00.000Z');
-  const result = await sweepStuckInProgressClaims({ rootDir, nowMs });
+  const result = await sweepStuckInProgressClaims({
+    rootDir,
+    nowMs,
+    sendWorkerSignalImpl: successfulStaleSignal,
+  });
 
   assert.equal(result.scanned, 1);
   assert.equal(result.reclaimed, 0);
@@ -190,7 +226,11 @@ test('sweepStuckInProgressClaims: missing lastHeartbeatAt falls back to file mti
   utimesSync(jobPath, mtime, mtime);
 
   const nowMs = Date.parse('2026-06-01T05:35:00.000Z');
-  const result = await sweepStuckInProgressClaims({ rootDir, nowMs });
+  const result = await sweepStuckInProgressClaims({
+    rootDir,
+    nowMs,
+    sendWorkerSignalImpl: successfulStaleSignal,
+  });
 
   assert.equal(result.reclaimed, 1);
   const stoppedPath = path.join(getFollowUpJobDir(rootDir, 'stopped'), path.basename(jobPath));
@@ -259,6 +299,7 @@ test('emitHeartbeatsForActiveJobs does not refresh a silent alive worker with em
   const sweepResult = await sweepStuckInProgressClaims({
     rootDir,
     nowMs: Date.parse('2026-06-01T05:35:00.000Z'),
+    sendWorkerSignalImpl: successfulStaleSignal,
   });
 
   assert.equal(heartbeatResult.touched, 0);
@@ -284,6 +325,7 @@ test('sweepStuckInProgressClaims prefers artifact progress over synthetic heartb
   const result = await sweepStuckInProgressClaims({
     rootDir,
     nowMs: Date.parse('2026-06-01T05:35:00.000Z'),
+    sendWorkerSignalImpl: successfulStaleSignal,
   });
 
   assert.equal(result.reclaimed, 1);
@@ -340,7 +382,12 @@ test('sweepStuckInProgressClaims: env var threshold is honored', async () => {
   try {
     const thresholdMs = resolveInProgressStuckThresholdMs(process.env);
     assert.equal(thresholdMs, 1000);
-    const result = await sweepStuckInProgressClaims({ rootDir, nowMs, thresholdMs });
+    const result = await sweepStuckInProgressClaims({
+      rootDir,
+      nowMs,
+      thresholdMs,
+      sendWorkerSignalImpl: successfulStaleSignal,
+    });
     assert.equal(result.reclaimed, 1);
   } finally {
     if (previous === undefined) {

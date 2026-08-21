@@ -63,12 +63,12 @@ function testDeps() {
 function closerArgs(rootDir, repo) {
   return {
     reviewState: {
-      verdict: 'request changes',
+      verdict: 'comment-only',
       headSha: HEAD,
       riskClass: 'low',
       remediationPending: false,
       blockingFindingState: 'known',
-      blockingFindingCount: 1,
+      blockingFindingCount: 0,
       nonBlockingFindingState: 'known',
       nonBlockingFindingCount: 0,
       operatorApprovedEvidence: null,
@@ -83,6 +83,7 @@ function closerArgs(rootDir, repo) {
       labels: [],
       statusCheckRollup: [
         { __typename: 'CheckRun', name: REQUIRED_GATE, conclusion: 'SUCCESS' },
+        { __typename: 'CheckRun', name: 'integration', conclusion: 'FAILURE' },
       ],
       branchProtection: { requiredContexts: [REQUIRED_GATE] },
       author: 'builder',

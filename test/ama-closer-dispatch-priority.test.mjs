@@ -213,6 +213,31 @@ test('LCR: rereview-only exhaustion does not dispatch hammer before Codex remedi
   assert.equal(deps.calls.length, 0, 'no hq hammer dispatch');
 });
 
+test('LCR: comment-only exhaustion can dispatch terminal hammer without a remediation round', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'lcr-comment-only-exhaustion-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const deps = testDeps();
+
+  const result = await maybeDispatchAmaCloser({
+    ...baseArgs(rootDir, {
+      reviewState: {
+        verdict: 'comment-only',
+        blockingFindingState: 'known',
+        blockingFindingCount: 0,
+        nonBlockingFindingState: 'known',
+        nonBlockingFindingCount: 1,
+        reviewCycleExhausted: true,
+        completedRemediationRounds: 0,
+        completedRereviewRounds: 2,
+      },
+    }),
+    ...deps,
+  });
+
+  assert.equal(result.dispatched, true, 'comment-only cycles do not spawn Codex remediators');
+  assert.equal(deps.calls.length, 1, 'terminal hammer remains available after rereview budget exhaustion');
+});
+
 test('LCR: clean mechanical-gate closer dispatches with --priority critical', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'lcr-priority-clean-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

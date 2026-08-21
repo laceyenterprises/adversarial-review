@@ -429,10 +429,12 @@ test('AFH-04: a real missing `hq` binary degrades instead of rejecting', async (
 
 test('AFH-04: transient hq quota-status failures retry before failing open', async () => {
   let calls = 0;
+  const timeouts = [];
   const grounding = await readAfhReviewerGrounding({
     hqPath: 'hq',
-    execFileImpl: async () => {
+    execFileImpl: async (_cmd, _args, options) => {
       calls += 1;
+      timeouts.push(options.timeout);
       if (calls === 1) {
         const err = new Error('TLS handshake timeout while reading fleet quota status');
         err.code = 'ETIMEDOUT';
@@ -445,6 +447,7 @@ test('AFH-04: transient hq quota-status failures retry before failing open', asy
     sleepImpl: async () => {},
   });
   assert.equal(calls, 2, 'the transient failure was retried once');
+  assert.deepEqual(timeouts, [10_000, 2_500], 'retry attempts use a shorter child timeout');
   assert.equal(grounding.available, true);
   assert.equal(grounding.reason, 'ok');
 });

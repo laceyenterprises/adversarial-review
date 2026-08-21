@@ -313,6 +313,11 @@ function isHammerRouteStructurallyBlocked(reasons) {
 
 function terminalHammerReviewCycleExhausted(reviewState) {
   if (reviewState?.reviewCycleExhausted !== true) return false;
+  const verdict = String(reviewState?.verdict || '')
+    .trim()
+    .toLowerCase()
+    .replaceAll('_', '-');
+  if (verdict !== 'request changes' && verdict !== 'request-changes') return true;
   const hasRemediationRoundEvidence = Object.prototype.hasOwnProperty.call(
     reviewState || {},
     'completedRemediationRounds',

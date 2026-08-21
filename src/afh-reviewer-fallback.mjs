@@ -72,6 +72,7 @@ export const AFH_FLEET_QUOTA_STATUS_RETRY_DELAYS_MS = Object.freeze([250, 1000])
 export const DEFAULT_AFH_GROUNDING_TTL_MS = 60_000;
 export const DEFAULT_AFH_STALE_IF_ERROR_MS = 10 * 60_000;
 export const AFH_LAST_RESORT_REVIEWER_MODEL = 'claude';
+const AFH_FLEET_QUOTA_STATUS_RETRY_TIMEOUT_FRACTION = 0.25;
 
 // Reviewer model → the provider whose OAuth quota gates whether that reviewer
 // can spawn at all. Kept in sync with QUOTA_HARNESS_PROVIDER
@@ -186,6 +187,13 @@ function isTransientFleetQuotaStatusError(error) {
   );
 }
 
+function timeoutMsForFleetQuotaStatusAttempt(timeoutMs, attemptIndex) {
+  const parsed = Number(timeoutMs);
+  if (!Number.isFinite(parsed) || parsed <= 0) return timeoutMs;
+  if (attemptIndex <= 0) return parsed;
+  return Math.max(1, Math.ceil(parsed * AFH_FLEET_QUOTA_STATUS_RETRY_TIMEOUT_FRACTION));
+}
+
 async function readFleetQuotaStatusStdoutWithRetry({
   resolvedHqPath,
   execFileImpl,
@@ -204,7 +212,7 @@ async function readFleetQuotaStatusStdoutWithRetry({
         env,
         encoding: 'utf8',
         maxBuffer: 5 * 1024 * 1024,
-        timeout: timeoutMs,
+        timeout: timeoutMsForFleetQuotaStatusAttempt(timeoutMs, attemptIndex),
       });
       return typeof result === 'string' ? result : (result?.stdout || '');
     } catch (err) {

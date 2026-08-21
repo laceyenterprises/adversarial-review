@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { normalizeCompletedRoundCount } from '../src/ama-closure-orchestration.mjs';
 import { reviewCycleExhaustedFromRounds } from '../src/watcher.mjs';
 
 // Regression for the "comment-only cycle never exhausts" park bug (2026-07-10):
@@ -84,4 +85,12 @@ test('tolerates non-finite round counters without throwing (probe-failure fallba
     }),
     false,
   );
+});
+
+test('orchestration boundary normalizes missing completed round counts to zero', () => {
+  for (const value of [undefined, null, '', NaN, -1]) {
+    assert.equal(normalizeCompletedRoundCount(value), 0, `value=${String(value)}`);
+  }
+  assert.equal(normalizeCompletedRoundCount(2), 2);
+  assert.equal(normalizeCompletedRoundCount('3'), 3);
 });

@@ -66,6 +66,11 @@ const {
   namedAmaNoDispatchReason,
 } = amaDispatchCloser;
 
+export function normalizeCompletedRoundCount(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
 // Transient mergeability sampling window (GitHub returns mergeable=UNKNOWN right
 // after a push / base move while it recomputes). Re-sample so we don't park an
 // otherwise-eligible PR as `pr-not-mergeable`. Env-overridable.
@@ -332,10 +337,12 @@ export async function maybeDispatchAmaClosureFor({
       // closer also receives the raw remediation/rereview counters below so its
       // terminal Hammer arming gate can require evidence that Codex/remediator
       // had a turn.
-      completedRemediationRoundsForPR = Number(remLedger.completedRoundsForPR);
+      completedRemediationRoundsForPR = normalizeCompletedRoundCount(
+        remLedger.completedRoundsForPR,
+      );
       completedRereviewRoundsForPR = 0;
       try {
-        completedRereviewRoundsForPR = Number(
+        completedRereviewRoundsForPR = normalizeCompletedRoundCount(
           countCompletedReviewerRereviewRounds({ rootDir, repoPath, prNumber }),
         );
       } catch (rereviewErr) {

@@ -249,6 +249,34 @@ test('SEV1: merged PR stuck at pending is terminalized before future claim attem
     'row becomes terminal for reviewer dispatch',
   );
 
+  const mergedReviewing = setupDb();
+  seedReviewRow(mergedReviewing, { reviewStatus: 'reviewing', prState: 'merged' });
+  mergedReviewing.prepare(
+    `UPDATE reviewed_prs
+        SET reviewer_session_uuid = ?,
+            reviewer_head_sha = ?,
+            reviewer_timeout_ms = ?,
+            reviewer_lease_expires_at = ?
+      WHERE repo = ? AND pr_number = ?`
+  ).run(
+    'stale-reviewer-session',
+    'stale-head',
+    20 * 60 * 1000,
+    '2026-07-19T18:30:00.000Z',
+    REPO,
+    PR,
+  );
+  assert.equal(
+    markMergedPendingReviewSkipped(mergedReviewing).changes, 1,
+    'a merged reviewing row must also be terminalized after a daemon outage',
+  );
+  const terminalized = readRow(mergedReviewing);
+  assert.equal(terminalized.review_status, 'skipped');
+  assert.equal(terminalized.reviewer_session_uuid, null);
+  assert.equal(terminalized.reviewer_head_sha, null);
+  assert.equal(terminalized.reviewer_timeout_ms, null);
+  assert.equal(terminalized.reviewer_lease_expires_at, null);
+
   // Control: an open PR stuck pending still claims normally.
   const open = setupDb();
   seedReviewRow(open, { reviewStatus: 'pending', prState: 'open' });

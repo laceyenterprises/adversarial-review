@@ -101,6 +101,45 @@ function passKey({ repo, prNumber, attemptNumber, passKind }) {
   };
 }
 
+function passKeyDescription(key) {
+  return `${key.repo}#${key.prNumber} attempt=${key.attemptNumber} pass_kind=${key.passKind}`;
+}
+
+function normalizeStoredHeadSha(value) {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : null;
+}
+
+function assertReviewerPassReusable(existing, key, normalizedHeadSha) {
+  if (!existing) {
+    throw new Error(`reviewer_passes insert was ignored but no row exists for ${passKeyDescription(key)}`);
+  }
+  if (existing.status !== 'running') {
+    throw new Error(
+      `refusing to reuse terminal reviewer_passes row for ${passKeyDescription(key)} status=${existing.status}`
+    );
+  }
+  const existingHeadSha = normalizeStoredHeadSha(existing.head_sha);
+  if (existingHeadSha && normalizedHeadSha && existingHeadSha !== normalizedHeadSha) {
+    throw new Error(
+      `refusing to reuse running reviewer_passes row for ${passKeyDescription(key)} ` +
+      `existing_head=${existingHeadSha} requested_head=${normalizedHeadSha}`
+    );
+  }
+}
+
+function getReviewerPassByKey(rootDir, key) {
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    return db.prepare(
+      `SELECT * FROM reviewer_passes
+        WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?`
+    ).get(key.repo, key.prNumber, key.attemptNumber, key.passKind) || null;
+  } finally {
+    closeOwnedReviewDb(db);
+  }
+}
+
 function beginReviewerPass(rootDir, {
   repo,
   prNumber,
@@ -125,7 +164,8 @@ function beginReviewerPass(rootDir, {
   const db = openReviewStateDb(rootDir);
   try {
     ensureReviewStateSchema(db);
-    db.prepare(
+    const reviewerClassNormalized = normalizeReviewerClass(model || reviewerClass);
+    const insertResult = db.prepare(
       `INSERT OR IGNORE INTO reviewer_passes (
          repo, pr_number, attempt_number, reviewer_class, reviewer_model, pass_kind,
          worker_run_id, workspace_path, started_at, status, head_sha, metadata_json
@@ -134,7 +174,7 @@ function beginReviewerPass(rootDir, {
       key.repo,
       key.prNumber,
       key.attemptNumber,
-      normalizeReviewerClass(model || reviewerClass),
+      reviewerClassNormalized,
       model,
       key.passKind,
       workerRunId || null,
@@ -144,14 +184,17 @@ function beginReviewerPass(rootDir, {
       metadataJson(metadata)
     );
     const existing = db.prepare(
-      `SELECT metadata_json FROM reviewer_passes
+      `SELECT pass_id, status, head_sha, metadata_json FROM reviewer_passes
         WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?`
     ).get(key.repo, key.prNumber, key.attemptNumber, key.passKind);
+    if (insertResult.changes === 0) {
+      assertReviewerPassReusable(existing, key, normalizedHeadSha);
+    }
     const mergedMetadata = {
       ...parseMetadataJson(existing?.metadata_json),
       ...metadata,
     };
-    db.prepare(
+    const updateResult = db.prepare(
       `UPDATE reviewer_passes
           SET reviewer_class = COALESCE(?, reviewer_class),
               reviewer_model = COALESCE(?, reviewer_model),
@@ -159,19 +202,20 @@ function beginReviewerPass(rootDir, {
               workspace_path = COALESCE(?, workspace_path),
               head_sha = COALESCE(?, head_sha),
               metadata_json = ?
-        WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?`
+        WHERE pass_id = ?
+          AND status = 'running'`
     ).run(
-      normalizeReviewerClass(model || reviewerClass),
+      reviewerClassNormalized,
       model,
       workerRunId || null,
       workspacePath || null,
       normalizedHeadSha,
       metadataJson(mergedMetadata),
-      key.repo,
-      key.prNumber,
-      key.attemptNumber,
-      key.passKind
+      existing.pass_id
     );
+    if (updateResult.changes !== 1) {
+      throw new Error(`failed to claim running reviewer_passes row for ${passKeyDescription(key)}`);
+    }
     return db.prepare(
       `SELECT * FROM reviewer_passes
         WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?`
@@ -1421,26 +1465,33 @@ function backfillReviewerPasses(rootDir, {
     wouldInsertOrUpdate += 1;
     if (dryRun) continue;
 
-    beginReviewerPass(rootDir, {
-      repo,
-      prNumber,
-      attemptNumber,
-      reviewerClass: worker.workerClass || worker.model || 'codex',
-      reviewerModel: worker.model || worker.workerClass || 'codex',
-      passKind: 'remediation',
-      workerRunId: usage?.workerRunId || worker.workerRunId || worker.runId || null,
-      workspacePath,
-      startedAt,
-      metadata: {
-        backfill: true,
-        jobPath,
-        jobId: job.jobId || null,
-        launchRequestId,
-        transcriptPath: usage?.transcriptPath || null,
-        transcriptSessionId: usage?.adapterSessionKey || null,
-        workerLogPath: usage?.source === 'codex-worker-log' ? usage.transcriptPath : null,
-      },
-    });
+    const key = passKey({ repo, prNumber, attemptNumber, passKind: 'remediation' });
+    const existingPass = getReviewerPassByKey(rootDir, key);
+    if (!existingPass || existingPass.status === 'running') {
+      beginReviewerPass(rootDir, {
+        repo,
+        prNumber,
+        attemptNumber,
+        reviewerClass: worker.workerClass || worker.model || 'codex',
+        reviewerModel: worker.model || worker.workerClass || 'codex',
+        passKind: 'remediation',
+        workerRunId: usage?.workerRunId || worker.workerRunId || worker.runId || null,
+        workspacePath,
+        startedAt,
+        metadata: {
+          backfill: true,
+          jobPath,
+          jobId: job.jobId || null,
+          launchRequestId,
+          transcriptPath: usage?.transcriptPath || null,
+          transcriptSessionId: usage?.adapterSessionKey || null,
+          workerLogPath: usage?.source === 'codex-worker-log' ? usage.transcriptPath : null,
+        },
+      });
+    } else if (!parseMetadataJson(existingPass.metadata_json).backfill) {
+      skipped += 1;
+      continue;
+    }
     completeReviewerPass(rootDir, {
       repo,
       prNumber,

@@ -81,8 +81,8 @@ export const MARK_MERGED_PENDING_REVIEW_SKIPPED_SQL = `UPDATE reviewed_prs
           merged_at = COALESCE(merged_at, ?)
     WHERE repo = ?
       AND pr_number = ?
-      AND pr_state = 'merged'
-      AND review_status IN ('pending', 'pending-upstream')`;
+	     AND pr_state = 'merged'
+	     AND review_status IN ('pending', 'pending-upstream', 'reviewing')`;
 
 export function prepareMarkAttemptStarted(db) {
   return db.prepare(MARK_ATTEMPT_STARTED_SQL);

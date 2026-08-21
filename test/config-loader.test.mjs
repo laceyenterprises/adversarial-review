@@ -254,6 +254,45 @@ test('services.hcp loads through strict Node schema', () => {
   }
 });
 
+test('sharedOwners loads through strict Node schema and rejects invalid values', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      sharedOwners:
+        - airlock
+        - main
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.deepEqual(cfg.get('sharedOwners'), ['airlock', 'main']);
+
+    const badScalar = join(tmp, 'bad-scalar.yaml');
+    writeFile(badScalar, `
+      version: 1
+      sharedOwners: airlock
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: badScalar, env: {} }),
+      /sharedOwners.*expected list/,
+    );
+
+    const badItem = join(tmp, 'bad-item.yaml');
+    writeFile(badItem, `
+      version: 1
+      sharedOwners:
+        - airlock
+        - 7
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: badItem, env: {} }),
+      /sharedOwners\[1\].*expected string/,
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('update channel loads through strict Node schema and env override', () => {
   const tmp = freshTmp();
   try {

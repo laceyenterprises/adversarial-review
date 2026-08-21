@@ -169,13 +169,13 @@ test('isHammerRemediableEligibilityMiss: #5093 fix preserves every neighboring i
     }),
     true,
   );
-  // not-exhausted + plain actionable finding, no resume -> eligible via the
-  // hasActionable path (unchanged).
+  // not-exhausted + plain standing finding -> park for the Codex remediation
+  // lane. Hammer is not the first responder to reviewer findings.
   assert.equal(
     isHammerRemediableEligibilityMiss(['non-blocking-findings-present'], {
       reviewCycleExhausted: false,
     }),
-    true,
+    false,
   );
   // #5053's "no purposeless hammer": a bare closer-commit stale head with NOTHING
   // else to act on still parks even with the resume flag armed (unchanged).

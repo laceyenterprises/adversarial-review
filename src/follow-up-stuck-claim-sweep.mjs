@@ -51,6 +51,7 @@ import {
   writeFollowUpJob,
 } from './follow-up-jobs.mjs';
 import { lifecycleStopDecision, resolveJobPRLifecycleSafe } from './follow-up-lifecycle.mjs';
+import { sendWorkerSignal, workerCancelHandle } from './follow-up-worker-cancel.mjs';
 import { resolvePRLifecycle } from './review-state.mjs';
 
 const IN_PROGRESS_STUCK_THRESHOLD_MS_ENV = 'ADVERSARIAL_FOLLOW_UP_IN_PROGRESS_STUCK_THRESHOLD_MS';
@@ -734,15 +735,70 @@ function resolveLastObservedAtMs(job, jobPath) {
   }
 }
 
-function sweepStuckInProgressClaims({
+async function signalStaleClaimWorker({
+  job,
+  requestedAt,
+  signal = 'SIGTERM',
+  sendWorkerSignalImpl = sendWorkerSignal,
+  processKill = process.kill,
+  execFileImpl,
+} = {}) {
+  const handle = workerCancelHandle(job);
+  if (!handle.processGroupId && !handle.processId) {
+    return {
+      requestedAt,
+      signal,
+      signalled: false,
+      skipped: true,
+      target: null,
+      error: 'missing-worker-process-handle',
+    };
+  }
+  try {
+    const result = await sendWorkerSignalImpl({
+      processGroupId: handle.processGroupId,
+      processId: handle.processId,
+      spawnedAt: handle.spawnedAt,
+      signal,
+      processKill,
+      execFileImpl,
+    });
+    return {
+      requestedAt,
+      signal,
+      signalled: Boolean(result?.signalled),
+      skipped: false,
+      target: result?.target || null,
+      error: result?.error || null,
+      identity: result?.identity || null,
+    };
+  } catch (err) {
+    return {
+      requestedAt,
+      signal,
+      signalled: false,
+      skipped: false,
+      target: null,
+      error: err?.message || String(err),
+    };
+  }
+}
+
+async function sweepStuckInProgressClaims({
   rootDir,
   nowMs = Date.now(),
   thresholdMs = resolveInProgressStuckThresholdMs(),
   log = console,
+  sendWorkerSignalImpl = sendWorkerSignal,
+  processKill = process.kill,
+  execFileImpl,
 } = {}) {
   let scanned = 0;
   let reclaimed = 0;
   let skipped = 0;
+  let signalled = 0;
+  let signalFailed = 0;
+  let signalSkipped = 0;
   const reclaimedAtIso = new Date(nowMs).toISOString();
 
   for (const { job, jobPath } of listInProgressFollowUpJobs(rootDir)) {
@@ -766,6 +822,20 @@ function sweepStuckInProgressClaims({
     const reasonText =
       `Reclaimed orphaned in-progress claim ${jobId}: ${source} is ` +
       `${Math.round(ageMs / 1000)}s old (threshold=${Math.round(thresholdMs / 1000)}s).`;
+    const staleReclaimSignal = await signalStaleClaimWorker({
+      job,
+      requestedAt: reclaimedAtIso,
+      sendWorkerSignalImpl,
+      processKill,
+      execFileImpl,
+    });
+    if (staleReclaimSignal.signalled) {
+      signalled += 1;
+    } else if (staleReclaimSignal.skipped) {
+      signalSkipped += 1;
+    } else {
+      signalFailed += 1;
+    }
 
     markFollowUpJobStopped({
       rootDir,
@@ -781,16 +851,17 @@ function sweepStuckInProgressClaims({
         reclaimReason: STALE_HEARTBEAT_STOP_CODE,
         reclaimAgeMs: ageMs,
         reclaimSource: source,
+        staleReclaimSignal,
       },
     });
     reclaimed += 1;
     log.log?.(
       `[follow-up-tick ${reclaimedAtIso}] stale-claim-reclaimed jobId=${jobId} ageMs=${ageMs} ` +
-      `source=${source} reason=${STALE_HEARTBEAT_STOP_CODE}`
+      `source=${source} reason=${STALE_HEARTBEAT_STOP_CODE} signalled=${staleReclaimSignal.signalled}`
     );
   }
 
-  return { scanned, reclaimed, skipped, thresholdMs };
+  return { scanned, reclaimed, skipped, thresholdMs, signalled, signalFailed, signalSkipped };
 }
 
 // Emit a heartbeat (`lastHeartbeatAt = now`) on every in-progress job

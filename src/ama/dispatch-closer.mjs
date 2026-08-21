@@ -186,8 +186,10 @@ const FINAL_HAMMER_TERMINAL_REMEDIATION_WAIVER_REASONS = new Set([
 ]);
 
 // Auto-hammer (2026-06-19): before the remediation cycle is exhausted, route
-// only the eligibility-miss reasons that a hammer TERMINAL remediation pass can
-// clear on its own — strict non-blocking churn, mergeability repair, or red CI.
+// only mechanical eligibility-miss reasons that a hammer can clear without
+// becoming the first responder to a reviewer findings round. Standing blocking
+// or non-blocking findings belong to the normal Codex remediation lane until the
+// bounded review cycle is exhausted.
 //
 // Once the bounded remediation cycle IS exhausted, the contract changes: the
 // hammer is the terminal rescue lane. It gets dispatched for any eligibility
@@ -198,9 +200,6 @@ const FINAL_HAMMER_TERMINAL_REMEDIATION_WAIVER_REASONS = new Set([
 // authority; no fresh settled-success verdict or operator-approved override is
 // required for the adversarial verdict gate.
 const HAMMER_AUTO_REMEDIABLE_MISS_REASONS = new Set([
-  'non-blocking-findings-present',
-  'blocking-findings-present',
-  'verdict-not-settled-success', // strict mode emits this alongside the above
   'pr-not-mergeable', // hammer rebases onto main / resolves the conflict, then merges
   'ci-not-green', // hammer fixes the failing required checks (green-main bar), then merges
 ]);
@@ -250,9 +249,11 @@ export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
     }
     return true;
   }
-  // The hammer must have something it can actually act on: non-blocking findings
-  // to remediate, a not-mergeable state (conflict / behind) to rebase+resolve, or
-  // red CI to fix.
+  // The hammer must have something it can actually act on before the final
+  // rescue lane: a not-mergeable state (conflict / behind) to rebase+resolve, red
+  // CI to fix, or the narrow self-certified closer-commit stale-head resume.
+  // Standing reviewer findings deliberately do NOT count here; a request-changes
+  // review must be remediated by the Codex follow-up lane first.
   //
   // FIX (#5093, follow-on to #5053): a fully-clean / settled review whose head the
   // closer's own commit advanced fails the settled-success verdict gate purely
@@ -266,15 +267,16 @@ export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
   // verdict/finding/CI reason) still parks -- #5053's "no purposeless hammer" --
   // and an external (non-closer) stale head never arms the flag.
   const hasActionable =
-    effectiveReasons.includes('non-blocking-findings-present') ||
-    effectiveReasons.includes('blocking-findings-present') ||
     effectiveReasons.includes('pr-not-mergeable') ||
     effectiveReasons.includes('ci-not-green') ||
     (closerStaleHeadResume && effectiveReasons.includes('verdict-not-settled-success'));
   if (!hasActionable) return false;
   // And EVERY reason must be hammer-remediable — a co-occurring blocking finding,
   // stale head, etc. means NOT auto-hammer (those go through rounds / operator).
-  return effectiveReasons.every((reason) => HAMMER_AUTO_REMEDIABLE_MISS_REASONS.has(reason));
+  return effectiveReasons.every((reason) => (
+    HAMMER_AUTO_REMEDIABLE_MISS_REASONS.has(reason) ||
+    (closerStaleHeadResume && reason === 'verdict-not-settled-success')
+  ));
 }
 
 function hammerRouteReasonsFromTrace(verdict) {

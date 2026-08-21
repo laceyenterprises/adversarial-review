@@ -15,9 +15,9 @@ import { maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
 //
 //   - a no-terminal-remediation validate-gate-and-click / mechanical-gate close
 //     resolves to `critical` (lane-eligible);
-//   - a terminal-remediation hammer (blocking/non-blocking findings, forced red
-//     CI, or mergeability repair) stays `normal` so it cannot hog the single
-//     reserved slot for the minutes it spends remediating;
+//   - a terminal-remediation hammer (post-exhaustion blocking/non-blocking
+//     findings, forced red CI, or mergeability repair) stays `normal` so it
+//     cannot hog the single reserved slot for the minutes it spends remediating;
 //   - the `--priority` flag actually carries the resolved value on the dispatch;
 //   - an older/forked `hq` without `--priority` degrades cleanly (retry once
 //     without the flag) instead of failing the dispatch.
@@ -108,10 +108,16 @@ function baseArgs(rootDir, overrides = {}) {
   };
 }
 
-// A settled review WITH blocking findings — the hammer is dispatched to
-// terminal-remediate them in code (standing findings present).
+// An exhausted review cycle WITH blocking findings — the hammer is dispatched to
+// terminal-remediate them in code as the final rescue lane.
 function findingsRemediationArgs(rootDir, overrides = {}) {
-  return baseArgs(rootDir, overrides);
+  return baseArgs(rootDir, {
+    reviewState: {
+      reviewCycleExhausted: true,
+      ...overrides.reviewState,
+    },
+    ...overrides,
+  });
 }
 
 // A CLEAN review (zero findings) that still reaches the closer dispatch surface
@@ -162,6 +168,20 @@ test('LCR: findings-remediation hammer dispatches with --priority normal', async
     'normal',
     'findings-remediation hammer must NOT take the reserved critical lane',
   );
+});
+
+test('LCR: non-exhausted request-changes findings do not dispatch hammer before Codex remediation', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'lcr-request-changes-codex-first-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const deps = testDeps();
+
+  const result = await maybeDispatchAmaCloser({ ...baseArgs(rootDir), ...deps });
+
+  assert.equal(result.dispatched, false, 'hammer must not answer first on a request-changes findings head');
+  assert.equal(result.reason, 'not-eligible');
+  assert.ok(result.reasons.includes('blocking-findings-present'), JSON.stringify(result.reasons));
+  assert.ok(result.reasons.includes('verdict-not-settled-success'), JSON.stringify(result.reasons));
+  assert.equal(deps.calls.length, 0, 'no hq hammer dispatch');
 });
 
 test('LCR: clean mechanical-gate closer dispatches with --priority critical', async (t) => {

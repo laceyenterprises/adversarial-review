@@ -67,22 +67,24 @@ export const FINALIZE_PENDING_TERMINAL_FAILURE_SQL =
       AND failure_message IS ?
       AND reviewer_head_sha = ?`;
 
+// This also matches review_status='reviewing', so every reviewer_* lease field
+// must be cleared when the merged PR is terminalized to skipped.
 export const MARK_MERGED_PENDING_REVIEW_SKIPPED_SQL = `UPDATE reviewed_prs
       SET review_status = 'skipped',
           failed_at = NULL,
           failure_message = ?,
           quota_reset_at_utc = NULL,
           reviewer_session_uuid = NULL,
-          reviewer_started_at = NULL,
           reviewer_head_sha = NULL,
           reviewer_timeout_ms = NULL,
           reviewer_lease_expires_at = NULL,
+          reviewer_started_at = NULL,
           reviewer_pgid = NULL,
           merged_at = COALESCE(merged_at, ?)
     WHERE repo = ?
       AND pr_number = ?
       AND pr_state = 'merged'
-      AND review_status IN ('pending', 'pending-upstream')`;
+      AND review_status IN ('pending', 'pending-upstream', 'reviewing')`;
 
 export function prepareMarkAttemptStarted(db) {
   return db.prepare(MARK_ATTEMPT_STARTED_SQL);

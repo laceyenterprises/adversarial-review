@@ -146,6 +146,232 @@ test('reviewer pass writer inserts running row, completes it, and unique key pre
   assert.equal(row.reviewer_model, 'claude-sonnet');
 });
 
+test('reviewer pass writer refuses to reuse terminal rows', () => {
+  const rootDir = tempRoot();
+  beginReviewerPass(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 46,
+    attemptNumber: 1,
+    reviewerClass: 'gemini',
+    passKind: 'rereview',
+    startedAt: '2026-05-18T00:00:00.000Z',
+    headSha: 'old-head',
+    metadata: { original: true },
+  });
+  completeReviewerPass(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 46,
+    attemptNumber: 1,
+    passKind: 'rereview',
+    status: 'failed',
+    endedAt: '2026-05-18T00:01:00.000Z',
+    metadata: { failureClass: 'spawn_failed' },
+  });
+
+  assert.throws(
+    () => beginReviewerPass(rootDir, {
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 46,
+      attemptNumber: 1,
+      reviewerClass: 'codex',
+      passKind: 'rereview',
+      startedAt: '2026-05-18T00:02:00.000Z',
+      headSha: 'new-head',
+      metadata: { replacement: true },
+    }),
+    /refusing to reuse terminal reviewer_passes row/
+  );
+
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const row = db.prepare('SELECT status, head_sha, reviewer_class, metadata_json FROM reviewer_passes WHERE pr_number = 46').get();
+    const metadata = JSON.parse(row.metadata_json);
+    assert.equal(row.status, 'failed');
+    assert.equal(row.head_sha, 'old-head');
+    assert.equal(row.reviewer_class, 'gemini');
+    assert.equal(metadata.original, true);
+    assert.equal(metadata.failureClass, 'spawn_failed');
+    assert.equal(metadata.replacement, undefined);
+  } finally {
+    db.close();
+  }
+});
+
+test('reviewer pass writer refuses to reuse a running row for a different head', () => {
+  const rootDir = tempRoot();
+  beginReviewerPass(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 47,
+    attemptNumber: 2,
+    reviewerClass: 'gemini',
+    passKind: 'rereview',
+    startedAt: '2026-05-18T00:00:00.000Z',
+    headSha: 'head-a',
+    metadata: { first: true },
+  });
+
+  assert.throws(
+    () => beginReviewerPass(rootDir, {
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 47,
+      attemptNumber: 2,
+      reviewerClass: 'gemini',
+      passKind: 'rereview',
+      startedAt: '2026-05-18T00:01:00.000Z',
+      headSha: 'head-b',
+      metadata: { second: true },
+    }),
+    /refusing to reuse running reviewer_passes row/
+  );
+
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const row = db.prepare('SELECT status, head_sha, metadata_json FROM reviewer_passes WHERE pr_number = 47').get();
+    const metadata = JSON.parse(row.metadata_json);
+    assert.equal(row.status, 'running');
+    assert.equal(row.head_sha, 'head-a');
+    assert.equal(metadata.first, true);
+    assert.equal(metadata.second, undefined);
+  } finally {
+    db.close();
+  }
+});
+
+test('reviewer pass writer refuses to steal a running row from another worker', () => {
+  const rootDir = tempRoot();
+  beginReviewerPass(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 48,
+    attemptNumber: 2,
+    reviewerClass: 'gemini',
+    passKind: 'rereview',
+    workerRunId: 'worker-run-a',
+    workspacePath: '/tmp/review-a',
+    startedAt: '2026-05-18T00:00:00.000Z',
+    headSha: 'head-a',
+    metadata: { first: true },
+  });
+
+  assert.throws(
+    () => beginReviewerPass(rootDir, {
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 48,
+      attemptNumber: 2,
+      reviewerClass: 'gemini',
+      passKind: 'rereview',
+      workerRunId: 'worker-run-b',
+      workspacePath: '/tmp/review-b',
+      startedAt: '2026-05-18T00:01:00.000Z',
+      headSha: 'head-a',
+      metadata: { second: true },
+      now: '2026-05-18T00:01:00.000Z',
+      staleRunningReviewerPassMs: 60 * 60 * 1000,
+    }),
+    /failed to claim running reviewer_passes row/
+  );
+
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const row = db.prepare('SELECT worker_run_id, workspace_path, metadata_json FROM reviewer_passes WHERE pr_number = 48').get();
+    const metadata = JSON.parse(row.metadata_json);
+    assert.equal(row.worker_run_id, 'worker-run-a');
+    assert.equal(row.workspace_path, '/tmp/review-a');
+    assert.equal(metadata.first, true);
+    assert.equal(metadata.second, undefined);
+  } finally {
+    db.close();
+  }
+});
+
+test('reviewer pass writer can recover a stale running row from another worker', () => {
+  const rootDir = tempRoot();
+  beginReviewerPass(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 49,
+    attemptNumber: 2,
+    reviewerClass: 'gemini',
+    passKind: 'rereview',
+    workerRunId: 'worker-run-a',
+    workspacePath: '/tmp/review-a',
+    startedAt: '2026-05-18T00:00:00.000Z',
+    headSha: 'head-a',
+    metadata: { first: true },
+  });
+
+  beginReviewerPass(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 49,
+    attemptNumber: 2,
+    reviewerClass: 'gemini',
+    passKind: 'rereview',
+    workerRunId: 'worker-run-b',
+    startedAt: '2026-05-18T07:00:00.000Z',
+    headSha: 'head-a',
+    metadata: { second: true },
+    now: '2026-05-18T07:00:00.000Z',
+    staleRunningReviewerPassMs: 60 * 60 * 1000,
+  });
+
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const row = db.prepare('SELECT worker_run_id, workspace_path, started_at, metadata_json FROM reviewer_passes WHERE pr_number = 49').get();
+    const metadata = JSON.parse(row.metadata_json);
+    assert.equal(row.worker_run_id, 'worker-run-b');
+    assert.equal(row.workspace_path, null);
+    assert.equal(row.started_at, '2026-05-18T07:00:00.000Z');
+    assert.equal(metadata.first, undefined);
+    assert.equal(metadata.second, true);
+  } finally {
+    db.close();
+  }
+});
+
+test('reviewer pass writer resets timer when claiming a null-owned row', () => {
+  const rootDir = tempRoot();
+  beginReviewerPass(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 51,
+    attemptNumber: 2,
+    reviewerClass: 'gemini',
+    passKind: 'rereview',
+    workspacePath: '/tmp/unowned-old',
+    startedAt: '2026-05-18T00:00:00.000Z',
+    headSha: 'head-a',
+    metadata: { first: true },
+  });
+
+  beginReviewerPass(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 51,
+    attemptNumber: 2,
+    reviewerClass: 'gemini',
+    passKind: 'rereview',
+    workerRunId: 'worker-run-a',
+    startedAt: '2026-05-18T00:01:00.000Z',
+    headSha: 'head-a',
+    metadata: { second: true },
+    now: '2026-05-18T00:01:00.000Z',
+  });
+
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const row = db.prepare('SELECT worker_run_id, workspace_path, started_at, metadata_json FROM reviewer_passes WHERE pr_number = 51').get();
+    const metadata = JSON.parse(row.metadata_json);
+    assert.equal(row.worker_run_id, 'worker-run-a');
+    assert.equal(row.workspace_path, null);
+    assert.equal(row.started_at, '2026-05-18T00:01:00.000Z');
+    assert.equal(metadata.first, true);
+    assert.equal(metadata.second, true);
+  } finally {
+    db.close();
+  }
+});
+
 test('gemini reviewer exact usage writes local artifact and owner fold-in without opening ledger sqlite', () => {
   const rootDir = tempRoot();
   const workspace = path.join(rootDir, 'workspace');
@@ -651,8 +877,133 @@ test('backfill is idempotent for historical follow-up workspaces', () => {
     const row = db.prepare('SELECT * FROM reviewer_passes WHERE pr_number = 43').get();
     assert.equal(row.pass_kind, 'remediation');
     assert.equal(row.worker_run_id, 'wr_1');
+    assert.equal(row.reviewer_model, 'codex');
     assert.equal(row.token_input, 120);
     assert.equal(row.token_cache_read, 11);
+  } finally {
+    db.close();
+  }
+});
+
+test('backfill refuses to overwrite non-backfill terminal remediation rows', () => {
+  const rootDir = tempRoot();
+  const ledgerDb = path.join(rootDir, 'ledger.db');
+  createSessionLedgerDb(ledgerDb);
+  beginReviewerPass(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 45,
+    attemptNumber: 1,
+    reviewerClass: 'codex',
+    passKind: 'remediation',
+    workerRunId: 'manual-run',
+    workspacePath: '/tmp/manual-remediation',
+    startedAt: '2026-05-18T00:30:00.000Z',
+    metadata: { manual: true },
+  });
+  completeReviewerPass(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 45,
+    attemptNumber: 1,
+    passKind: 'remediation',
+    status: 'completed',
+    endedAt: '2026-05-18T00:45:00.000Z',
+    workerRunId: 'manual-run',
+    tokenUsage: { input: 9, output: 3, source: 'manual' },
+  });
+  const completedDir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(completedDir, { recursive: true });
+  writeFileSync(path.join(completedDir, 'job-2.json'), JSON.stringify({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 45,
+    jobId: 'job-2',
+    status: 'completed',
+    completedAt: '2026-05-18T01:02:00.000Z',
+    workspaceDir: '/tmp/review-workspace',
+    remediationPlan: { currentRound: 1 },
+    remediationWorker: {
+      model: 'codex',
+      state: 'completed',
+      spawnedAt: '2026-05-18T01:00:00.000Z',
+      workerRunId: 'wr_1',
+      workspaceDir: '/tmp/review-workspace',
+    },
+  }), 'utf8');
+
+  const result = backfillReviewerPasses(rootDir, {
+    ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+    env: HERMETIC_CONFIG_ENV,
+  });
+
+  assert.equal(result.considered, 1);
+  assert.equal(result.insertedOrUpdated, 0);
+  assert.equal(result.skipped, 1);
+  assert.equal(countReviewerPasses(rootDir), 1);
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const row = db.prepare('SELECT * FROM reviewer_passes WHERE pr_number = 45').get();
+    const metadata = JSON.parse(row.metadata_json);
+    assert.equal(row.worker_run_id, 'manual-run');
+    assert.equal(row.token_input, 9);
+    assert.equal(metadata.manual, true);
+    assert.equal(metadata.backfill, undefined);
+  } finally {
+    db.close();
+  }
+});
+
+test('backfill skips live running remediation rows owned by another worker', () => {
+  const rootDir = tempRoot();
+  const ledgerDb = path.join(rootDir, 'ledger.db');
+  createSessionLedgerDb(ledgerDb);
+  beginReviewerPass(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 50,
+    attemptNumber: 1,
+    reviewerClass: 'codex',
+    passKind: 'remediation',
+    workerRunId: 'live-run',
+    workspacePath: '/tmp/live-remediation',
+    startedAt: '2026-08-21T14:00:00.000Z',
+    metadata: { live: true },
+  });
+  const completedDir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(completedDir, { recursive: true });
+  writeFileSync(path.join(completedDir, 'job-live-conflict.json'), JSON.stringify({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 50,
+    jobId: 'job-live-conflict',
+    status: 'completed',
+    completedAt: '2026-08-21T14:02:00.000Z',
+    workspaceDir: '/tmp/historical-remediation',
+    remediationPlan: { currentRound: 1 },
+    remediationWorker: {
+      model: 'codex',
+      state: 'completed',
+      spawnedAt: '2026-08-21T14:01:00.000Z',
+      workerRunId: 'historical-run',
+      workspaceDir: '/tmp/historical-remediation',
+    },
+  }), 'utf8');
+
+  const result = backfillReviewerPasses(rootDir, {
+    ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+    env: HERMETIC_CONFIG_ENV,
+    now: () => '2026-08-21T14:02:00.000Z',
+  });
+
+  assert.equal(result.considered, 1);
+  assert.equal(result.insertedOrUpdated, 0);
+  assert.equal(result.skipped, 1);
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const row = db.prepare('SELECT worker_run_id, workspace_path, metadata_json FROM reviewer_passes WHERE pr_number = 50').get();
+    const metadata = JSON.parse(row.metadata_json);
+    assert.equal(row.worker_run_id, 'live-run');
+    assert.equal(row.workspace_path, '/tmp/live-remediation');
+    assert.equal(metadata.live, true);
+    assert.equal(metadata.backfill, undefined);
   } finally {
     db.close();
   }

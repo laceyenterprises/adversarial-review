@@ -311,6 +311,17 @@ function isHammerRouteStructurallyBlocked(reasons) {
   ));
 }
 
+function terminalHammerReviewCycleExhausted(reviewState) {
+  if (reviewState?.reviewCycleExhausted !== true) return false;
+  const hasRemediationRoundEvidence = Object.prototype.hasOwnProperty.call(
+    reviewState || {},
+    'completedRemediationRounds',
+  );
+  if (!hasRemediationRoundEvidence) return true;
+  const completedRemediationRounds = Number(reviewState?.completedRemediationRounds);
+  return Number.isFinite(completedRemediationRounds) && completedRemediationRounds > 0;
+}
+
 function isPendingCiMechanicalGateMiss(verdict, reasons) {
   if (!Array.isArray(reasons) || reasons.length !== 1 || reasons[0] !== 'ci-not-green') {
     return false;
@@ -3048,9 +3059,10 @@ export async function maybeDispatchAmaCloser({
     // pending required CI remains a mechanical validate-gate-and-click close, not
     // terminal remediation. Structural hard-stops still block.
     const workerClassForMiss = String(cfg?.workerClass || 'hammer');
-    const reviewCycleExhausted =
-      reviewState?.reviewCycleExhausted === true ||
-      verdict?.trace?.finalHammer?.active === true;
+    // Codex-first guard: live orchestration reports completedRemediationRounds.
+    // That evidence must prove Codex/remediator had a turn before terminal
+    // Hammer authority can arm; rereview-only exhaustion is not enough.
+    const reviewCycleExhausted = terminalHammerReviewCycleExhausted(reviewState);
     const routeReasons = verdict.eligible ? eligibleHammerRouteReasons : verdict.reasons;
     if (isHammerRouteStructurallyBlocked(routeReasons)) {
       return noAmaDispatch({
@@ -3215,7 +3227,7 @@ export async function maybeDispatchAmaCloser({
     // Forward the dispatch-time final-hammer observation only as context; the
     // closer's ama-check invocation recomputes exhaustion from the current
     // follow-up ledger before it honors any waiver.
-    reviewCycleExhausted: reviewState?.reviewCycleExhausted === true,
+    reviewCycleExhausted: terminalHammerReviewCycleExhausted(reviewState),
   });
 
   const existingDispatchIdentity = { repo, prNumber, headSha: dispatchRecordHeadSha };

@@ -8,8 +8,9 @@
 //      gemini is available;
 //   3. all providers ok → the configured primary, no fallback;
 //   4. every failure mode of the `hq fleet quota status --json` read (throw,
-//      non-zero exit, timeout, malformed JSON, missing `afhGrounding`) fails
-//      open to the configured route with no uncaught exception;
+//      non-zero exit, timeout, malformed JSON, missing `afhGrounding`) either
+//      retries/stale-serves a recent good snapshot or fails open to the
+//      configured route with no uncaught exception;
 //   5. when the provider un-grounds, the next attempt returns to the primary.
 
 import test from 'node:test';
@@ -391,6 +392,7 @@ test('AFH-04: every hq failure mode fails open with no uncaught exception', asyn
       hqPath: 'hq',
       execFileImpl: mode.execFileImpl,
       env: {},
+      retryDelaysMs: [],
     });
     assert.equal(grounding.available, false, `${mode.label}: snapshot marked unavailable`);
     assert.equal(grounding.reason, mode.reason, `${mode.label}: reason recorded for the audit trail`);
@@ -423,6 +425,28 @@ test('AFH-04: a real missing `hq` binary degrades instead of rejecting', async (
   assert.equal(grounding.available, false);
   assert.equal(grounding.reason, 'fleet-quota-status-unavailable');
   assert.match(String(grounding.error), /ENOENT|not found/i);
+});
+
+test('AFH-04: transient hq quota-status failures retry before failing open', async () => {
+  let calls = 0;
+  const grounding = await readAfhReviewerGrounding({
+    hqPath: 'hq',
+    execFileImpl: async () => {
+      calls += 1;
+      if (calls === 1) {
+        const err = new Error('TLS handshake timeout while reading fleet quota status');
+        err.code = 'ETIMEDOUT';
+        throw err;
+      }
+      return { stdout: fleetStatusJson({ openai: OK, anthropic: OK, google: OK }) };
+    },
+    env: {},
+    retryDelaysMs: [0],
+    sleepImpl: async () => {},
+  });
+  assert.equal(calls, 2, 'the transient failure was retried once');
+  assert.equal(grounding.available, true);
+  assert.equal(grounding.reason, 'ok');
 });
 
 test('AFH-04: a provider row with NO afhGrounding verdict yields no soft signal', () => {
@@ -567,6 +591,42 @@ test('AFH-04: the per-tick cache reads hq once per TTL and never rejects', async
   await throwing();
   assert.equal(warnings.length, 1, 'the degraded breadcrumb is once per refresh window, not per PR');
   assert.match(warnings[0], /afh-reviewer-grounding degraded/);
+});
+
+test('AFH-04: the per-tick cache stale-serves a recent good grounding after a refresh failure', async () => {
+  let reads = 0;
+  let now = 10_000;
+  const warnings = [];
+  const getGrounding = createAfhReviewerGroundingCache({
+    ttlMs: 100,
+    nowFn: () => now,
+    logger: { warn: (message) => warnings.push(message) },
+    readImpl: async () => {
+      reads += 1;
+      if (reads === 1) {
+        return CODEX_SOFT_GROUNDED();
+      }
+      return {
+        available: false,
+        reason: 'fleet-quota-status-unavailable',
+        error: 'temporary hq status hiccup',
+        verdictPresent: false,
+        providers: Object.freeze({}),
+      };
+    },
+  });
+
+  const first = await getGrounding();
+  assert.equal(first.available, true);
+  assert.equal(reviewerModelGrounding(first, 'codex').grounded, true);
+
+  now += 101;
+  const stale = await getGrounding();
+  assert.equal(reads, 2, 'the cache attempted to refresh after TTL expiry');
+  assert.equal(stale.available, true, 'a recent good quota snapshot is used');
+  assert.equal(stale.staleIfError.reason, 'fleet-quota-status-unavailable');
+  assert.equal(reviewerModelGrounding(stale, 'codex').grounded, true);
+  assert.match(warnings.at(-1), /stale-if-error/);
 });
 
 // ── 5. auto-revert ─────────────────────────────────────────────────────────

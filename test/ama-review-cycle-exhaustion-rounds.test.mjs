@@ -5,8 +5,7 @@ import { reviewCycleExhaustedFromRounds } from '../src/watcher.mjs';
 // Regression for the "comment-only cycle never exhausts" park bug (2026-07-10):
 // a comment-only review produces no blocking findings, so no remediation worker
 // spawns, so remediation rounds stay 0 forever. Exhaustion must ALSO trip on
-// re-review rounds so a CI-green/CLEAN PR reviewed to its budget can finalize
-// via the final hammer (which still remediates-then-closes — no review bypass).
+// re-review rounds so a CI-green/CLEAN PR reviewed to its budget can finalize.
 
 test('exhausts on remediation rounds reaching budget (original path preserved)', () => {
   assert.equal(
@@ -19,7 +18,7 @@ test('exhausts on remediation rounds reaching budget (original path preserved)',
   );
 });
 
-test('THE BUG: comment-only cycle — 0 remediation rounds, budget re-review rounds — now exhausts', () => {
+test('THE BUG: comment-only cycle -- 0 remediation rounds, budget re-review rounds -- now exhausts', () => {
   assert.equal(
     reviewCycleExhaustedFromRounds({
       effectiveRoundBudget: 2,

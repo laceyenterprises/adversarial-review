@@ -184,6 +184,35 @@ test('LCR: non-exhausted request-changes findings do not dispatch hammer before 
   assert.equal(deps.calls.length, 0, 'no hq hammer dispatch');
 });
 
+test('LCR: rereview-only exhaustion does not dispatch hammer before Codex remediation', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'lcr-rereview-only-codex-first-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const deps = testDeps();
+
+  const result = await maybeDispatchAmaCloser({
+    ...baseArgs(rootDir, {
+      reviewState: {
+        verdict: 'request changes',
+        remediationPending: false,
+        blockingFindingState: 'unknown',
+        blockingFindingCount: 0,
+        nonBlockingFindingState: 'known',
+        nonBlockingFindingCount: 0,
+        reviewCycleExhausted: true,
+        completedRemediationRounds: 0,
+        completedRereviewRounds: 3,
+      },
+    }),
+    ...deps,
+  });
+
+  assert.equal(result.dispatched, false, 'rereview-only exhaustion must not mint a terminal hammer');
+  assert.equal(result.reason, 'not-eligible');
+  assert.ok(result.reasons.includes('blocking-findings-unknown'), JSON.stringify(result.reasons));
+  assert.ok(result.reasons.includes('verdict-not-settled-success'), JSON.stringify(result.reasons));
+  assert.equal(deps.calls.length, 0, 'no hq hammer dispatch');
+});
+
 test('LCR: clean mechanical-gate closer dispatches with --priority critical', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'lcr-priority-clean-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

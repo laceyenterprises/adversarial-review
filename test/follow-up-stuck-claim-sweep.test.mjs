@@ -161,6 +161,59 @@ test('sweepStuckInProgressClaims: failed stale-worker signal leaves claim in pro
   assert.match(warnings[0], /launchctl EIO/);
 });
 
+test('sweepStuckInProgressClaims: already-dead stale worker still reclaims claim', async () => {
+  const rootDir = makeRoot();
+  const { jobPath } = seedInProgressJob(rootDir, {
+    lastHeartbeatAt: '2026-06-01T05:00:00.000Z',
+  });
+  const nowMs = Date.parse('2026-06-01T05:35:00.000Z');
+  const logs = [];
+  const result = await sweepStuckInProgressClaims({
+    rootDir,
+    nowMs,
+    log: { log: (msg) => logs.push(msg) },
+    sendWorkerSignalImpl: async () => ({
+      signalled: false,
+      target: { kind: 'process-group', id: 99999 },
+      error: 'process-group-not-found',
+    }),
+  });
+
+  assert.equal(result.scanned, 1);
+  assert.equal(result.reclaimed, 1);
+  assert.equal(result.signalFailed, 0);
+  assert.equal(result.signalSkipped, 1);
+  assert.equal(existsSync(jobPath), false, 'in-progress file removed');
+  const stoppedPath = path.join(getFollowUpJobDir(rootDir, 'stopped'), path.basename(jobPath));
+  const stoppedJob = readJobAtPath(stoppedPath);
+  assert.equal(stoppedJob.remediationWorker?.staleReclaimSignal?.skipped, true);
+  assert.equal(stoppedJob.remediationWorker?.staleReclaimSignal?.error, 'process-group-not-found');
+  assert.match(logs[0], /stale-claim-reclaimed/);
+});
+
+test('sweepStuckInProgressClaims: ESRCH stale-worker signal still reclaims claim', async () => {
+  const rootDir = makeRoot();
+  const { jobPath } = seedInProgressJob(rootDir, {
+    lastHeartbeatAt: '2026-06-01T05:00:00.000Z',
+  });
+  const nowMs = Date.parse('2026-06-01T05:35:00.000Z');
+  const result = await sweepStuckInProgressClaims({
+    rootDir,
+    nowMs,
+    sendWorkerSignalImpl: async () => {
+      const err = new Error('kill ESRCH: No such process');
+      err.code = 'ESRCH';
+      throw err;
+    },
+  });
+
+  assert.equal(result.scanned, 1);
+  assert.equal(result.reclaimed, 1);
+  assert.equal(result.signalFailed, 0);
+  assert.equal(result.signalSkipped, 1);
+  assert.equal(existsSync(jobPath), false, 'in-progress file removed');
+});
+
 test('sweepStuckInProgressClaims: fresh lastHeartbeatAt leaves claim in place', async () => {
   const rootDir = makeRoot();
   const { jobPath } = seedInProgressJob(rootDir, {

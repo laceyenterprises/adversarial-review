@@ -763,25 +763,41 @@ async function signalStaleClaimWorker({
       processKill,
       execFileImpl,
     });
+    const alreadyDead = isAlreadyDeadSignalResult(result);
     return {
       requestedAt,
       signal,
       signalled: Boolean(result?.signalled),
-      skipped: false,
+      skipped: alreadyDead,
       target: result?.target || null,
       error: result?.error || null,
       identity: result?.identity || null,
     };
   } catch (err) {
+    const alreadyDead = isAlreadyDeadSignalError(err);
     return {
       requestedAt,
       signal,
       signalled: false,
-      skipped: false,
+      skipped: alreadyDead,
       target: null,
       error: err?.message || String(err),
     };
   }
+}
+
+function isAlreadyDeadSignalResult(result) {
+  if (result?.signalled) return false;
+  return isAlreadyDeadSignalText(result?.error);
+}
+
+function isAlreadyDeadSignalError(err) {
+  return err?.code === 'ESRCH' || isAlreadyDeadSignalText(err?.message || String(err));
+}
+
+function isAlreadyDeadSignalText(value) {
+  const text = String(value || '').toLowerCase();
+  return text.includes('esrch') || text.includes('no such process') || text.includes('process-group-not-found');
 }
 
 async function sweepStuckInProgressClaims({

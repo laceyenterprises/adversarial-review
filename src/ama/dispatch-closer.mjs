@@ -271,10 +271,14 @@ export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
     effectiveReasons.includes('ci-not-green') ||
     (closerStaleHeadResume && effectiveReasons.includes('verdict-not-settled-success'));
   if (!hasActionable) return false;
+  const hasMechanicalMiss =
+    effectiveReasons.includes('pr-not-mergeable') ||
+    effectiveReasons.includes('ci-not-green');
   // And EVERY reason must be hammer-remediable — a co-occurring blocking finding,
   // stale head, etc. means NOT auto-hammer (those go through rounds / operator).
   return effectiveReasons.every((reason) => (
     HAMMER_AUTO_REMEDIABLE_MISS_REASONS.has(reason) ||
+    (hasMechanicalMiss && reason === 'verdict-not-settled-success') ||
     (closerStaleHeadResume && reason === 'verdict-not-settled-success')
   ));
 }

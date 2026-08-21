@@ -170,17 +170,11 @@ function assertReviewerPassReusable(existing, key, normalizedHeadSha) {
   }
 }
 
-function getReviewerPassByKey(rootDir, key) {
-  const db = openReviewStateDb(rootDir);
-  try {
-    ensureReviewStateSchema(db);
-    return db.prepare(
-      `SELECT * FROM reviewer_passes
-        WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?`
-    ).get(key.repo, key.prNumber, key.attemptNumber, key.passKind) || null;
-  } finally {
-    closeOwnedReviewDb(db);
-  }
+function selectReviewerPassByKey(db, key) {
+  return db.prepare(
+    `SELECT * FROM reviewer_passes
+      WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?`
+  ).get(key.repo, key.prNumber, key.attemptNumber, key.passKind) || null;
 }
 
 function beginReviewerPass(rootDir, {
@@ -1485,120 +1479,126 @@ function backfillReviewerPasses(rootDir, {
   const codexTranscriptPathCache = new Map();
   const claudeTranscriptSummaryCache = new Map();
   const claudeTranscriptPathCache = new Map();
-  for (const { job, jobPath } of jobs) {
-    const worker = historicalWorkerForJob(job);
-    const repo = job?.repo;
-    const prNumber = Number(job?.prNumber);
-    const workspacePath = worker.workspaceDir || job?.workspaceDir || null;
-    if (!repo || !Number.isInteger(prNumber) || !workspacePath) {
-      skipped += 1;
-      continue;
-    }
-    considered += 1;
-    const round = latestRemediationRound(job);
-    const attemptNumber = normalizeAttemptNumber(
-      round?.round
-      || round?.attemptNumber
-      || job?.remediationPlan?.currentRound
-      || job?.currentRound
-      || 1
-    );
-    uniquePassKeys.add(`${repo}#${prNumber}#${attemptNumber}#remediation`);
-    const observedNow = typeof now === 'function' ? now() : now;
-    const startedAt = worker.spawnedAt || job.claimedAt || job.createdAt || observedNow;
-    const endedAt = job.completedAt || job.failedAt || job.stoppedAt || worker.reconciledAt || null;
-    const status = job.status === 'completed'
-      ? 'completed'
-      : (job.status === 'failed' ? 'failed' : 'cancelled');
-    const launchRequestId = worker.launchRequestId || worker.launchRequestID || job.replyStorageKey || null;
-    const usage = readWorkerRunTokenUsage({
-      workerRunId: worker.workerRunId || worker.runId || null,
-      launchRequestId,
-      ledgerTarget: selectedLedgerTarget,
-      env,
-      rootDir,
-    }) || readReviewerSessionTokenUsage({
-      workspacePath,
-      startedAt,
-      endedAt,
-      ledgerTarget: selectedLedgerTarget,
-      env,
-      rootDir,
-    }) || (transcriptFallback ? readTranscriptTokenUsageForModel({
-      reviewerModel: worker.model || worker.workerClass,
-      workspacePath,
-      startedAt,
-      endedAt,
-      codexSessionRoots,
-      claudeSessionRoots,
-      codexTranscriptSummaryCache,
-      codexTranscriptPathCache,
-      claudeTranscriptSummaryCache,
-      claudeTranscriptPathCache,
-      rootDir,
-    }) : null) || readCodexWorkerLogTokenUsage(worker.logPath);
-    if (usage) {
-      tokenMatched += 1;
-      if (usage.source === 'codex-worker-log') workerLogMatched += 1;
-      if (usage.source === 'codex-transcript') transcriptMatched += 1;
-      if (usage.source === 'claude-transcript') claudeTranscriptMatched += 1;
-    }
-    wouldInsertOrUpdate += 1;
-    if (dryRun) continue;
-
-    const key = passKey({ repo, prNumber, attemptNumber, passKind: 'remediation' });
-    const existingPass = getReviewerPassByKey(rootDir, key);
-    if (!existingPass || existingPass.status === 'running') {
-      try {
-        beginReviewerPass(rootDir, {
-          repo,
-          prNumber,
-          attemptNumber,
-          reviewerClass: worker.workerClass || worker.model || 'codex',
-          reviewerModel: worker.model || worker.workerClass || 'codex',
-          passKind: 'remediation',
-          workerRunId: usage?.workerRunId || worker.workerRunId || worker.runId || null,
-          workspacePath,
-          startedAt,
-          now: observedNow,
-          metadata: {
-            backfill: true,
-            jobPath,
-            jobId: job.jobId || null,
-            launchRequestId,
-            transcriptPath: usage?.transcriptPath || null,
-            transcriptSessionId: usage?.adapterSessionKey || null,
-            workerLogPath: usage?.source === 'codex-worker-log' ? usage.transcriptPath : null,
-          },
-        });
-      } catch (err) {
-        if (!isReviewerPassClaimConflictError(err)) throw err;
+  const reviewerPassLookupDb = dryRun ? null : openReviewStateDb(rootDir);
+  try {
+    if (reviewerPassLookupDb) ensureReviewStateSchema(reviewerPassLookupDb);
+    for (const { job, jobPath } of jobs) {
+      const worker = historicalWorkerForJob(job);
+      const repo = job?.repo;
+      const prNumber = Number(job?.prNumber);
+      const workspacePath = worker.workspaceDir || job?.workspaceDir || null;
+      if (!repo || !Number.isInteger(prNumber) || !workspacePath) {
         skipped += 1;
         continue;
       }
-    } else if (!parseMetadataJson(existingPass.metadata_json).backfill) {
-      skipped += 1;
-      continue;
+      considered += 1;
+      const round = latestRemediationRound(job);
+      const attemptNumber = normalizeAttemptNumber(
+        round?.round
+        || round?.attemptNumber
+        || job?.remediationPlan?.currentRound
+        || job?.currentRound
+        || 1
+      );
+      uniquePassKeys.add(`${repo}#${prNumber}#${attemptNumber}#remediation`);
+      const observedNow = typeof now === 'function' ? now() : now;
+      const startedAt = worker.spawnedAt || job.claimedAt || job.createdAt || observedNow;
+      const endedAt = job.completedAt || job.failedAt || job.stoppedAt || worker.reconciledAt || null;
+      const status = job.status === 'completed'
+        ? 'completed'
+        : (job.status === 'failed' ? 'failed' : 'cancelled');
+      const launchRequestId = worker.launchRequestId || worker.launchRequestID || job.replyStorageKey || null;
+      const usage = readWorkerRunTokenUsage({
+        workerRunId: worker.workerRunId || worker.runId || null,
+        launchRequestId,
+        ledgerTarget: selectedLedgerTarget,
+        env,
+        rootDir,
+      }) || readReviewerSessionTokenUsage({
+        workspacePath,
+        startedAt,
+        endedAt,
+        ledgerTarget: selectedLedgerTarget,
+        env,
+        rootDir,
+      }) || (transcriptFallback ? readTranscriptTokenUsageForModel({
+        reviewerModel: worker.model || worker.workerClass,
+        workspacePath,
+        startedAt,
+        endedAt,
+        codexSessionRoots,
+        claudeSessionRoots,
+        codexTranscriptSummaryCache,
+        codexTranscriptPathCache,
+        claudeTranscriptSummaryCache,
+        claudeTranscriptPathCache,
+        rootDir,
+      }) : null) || readCodexWorkerLogTokenUsage(worker.logPath);
+      if (usage) {
+        tokenMatched += 1;
+        if (usage.source === 'codex-worker-log') workerLogMatched += 1;
+        if (usage.source === 'codex-transcript') transcriptMatched += 1;
+        if (usage.source === 'claude-transcript') claudeTranscriptMatched += 1;
+      }
+      wouldInsertOrUpdate += 1;
+      if (dryRun) continue;
+
+      const key = passKey({ repo, prNumber, attemptNumber, passKind: 'remediation' });
+      const existingPass = reviewerPassLookupDb ? selectReviewerPassByKey(reviewerPassLookupDb, key) : null;
+      if (!existingPass || existingPass.status === 'running') {
+        try {
+          beginReviewerPass(rootDir, {
+            repo,
+            prNumber,
+            attemptNumber,
+            reviewerClass: worker.workerClass || worker.model || 'codex',
+            reviewerModel: worker.model || worker.workerClass || 'codex',
+            passKind: 'remediation',
+            workerRunId: usage?.workerRunId || worker.workerRunId || worker.runId || null,
+            workspacePath,
+            startedAt,
+            now: observedNow,
+            metadata: {
+              backfill: true,
+              jobPath,
+              jobId: job.jobId || null,
+              launchRequestId,
+              transcriptPath: usage?.transcriptPath || null,
+              transcriptSessionId: usage?.adapterSessionKey || null,
+              workerLogPath: usage?.source === 'codex-worker-log' ? usage.transcriptPath : null,
+            },
+          });
+        } catch (err) {
+          if (!isReviewerPassClaimConflictError(err)) throw err;
+          skipped += 1;
+          continue;
+        }
+      } else if (!parseMetadataJson(existingPass.metadata_json).backfill) {
+        skipped += 1;
+        continue;
+      }
+      completeReviewerPass(rootDir, {
+        repo,
+        prNumber,
+        attemptNumber,
+        passKind: 'remediation',
+        status,
+        endedAt: endedAt || startedAt,
+        workerRunId: usage?.workerRunId || worker.workerRunId || worker.runId || null,
+        tokenUsage: usage,
+        tokenSource: usage?.source || (usage ? 'session-ledger' : 'unknown'),
+        metadata: {
+          backfill: true,
+          jobPath,
+          transcriptPath: usage?.transcriptPath || null,
+          transcriptSessionId: usage?.adapterSessionKey || null,
+          workerLogPath: usage?.source === 'codex-worker-log' ? usage.transcriptPath : null,
+        },
+      });
+      insertedOrUpdated += 1;
     }
-    completeReviewerPass(rootDir, {
-      repo,
-      prNumber,
-      attemptNumber,
-      passKind: 'remediation',
-      status,
-      endedAt: endedAt || startedAt,
-      workerRunId: usage?.workerRunId || worker.workerRunId || worker.runId || null,
-      tokenUsage: usage,
-      tokenSource: usage?.source || (usage ? 'session-ledger' : 'unknown'),
-      metadata: {
-        backfill: true,
-        jobPath,
-        transcriptPath: usage?.transcriptPath || null,
-        transcriptSessionId: usage?.adapterSessionKey || null,
-        workerLogPath: usage?.source === 'codex-worker-log' ? usage.transcriptPath : null,
-      },
-    });
-    insertedOrUpdated += 1;
+  } finally {
+    if (reviewerPassLookupDb) closeOwnedReviewDb(reviewerPassLookupDb);
   }
   return {
     considered,

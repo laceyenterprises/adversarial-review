@@ -156,7 +156,7 @@ test('sweepStuckInProgressClaims: exhausted stale retry budget stops and posts o
   const rootDir = makeRoot();
   const { jobPath } = seedInProgressJob(rootDir, {
     lastHeartbeatAt: '2026-06-01T05:00:00.000Z',
-    plan: { transientRetries: 1 },
+    plan: { currentRound: 2, maxRounds: undefined, transientRetries: 1 },
   });
   const nowMs = Date.parse('2026-06-01T05:35:00.000Z');
   const posts = [];
@@ -182,11 +182,15 @@ test('sweepStuckInProgressClaims: exhausted stale retry budget stops and posts o
   assert.equal(stoppedJob.status, 'stopped');
   assert.equal(stoppedJob.remediationPlan?.stop?.code, STALE_HEARTBEAT_STOP_CODE);
   assert.match(stoppedJob.remediationPlan?.stop?.reason, /Exhausted stale heartbeat retry budget/);
+  assert.equal(stoppedJob.remediationPlan?.stop?.sourceStatus, 'in_progress');
+  assert.ok(stoppedJob.remediationPlan?.stop?.maxRounds > 0);
   assert.equal(stoppedJob.commentDelivery?.posted, true);
   assert.equal(stoppedJob.commentDelivery?.reason, null);
   assert.match(stoppedJob.commentDelivery?.body, /stale-heartbeat/);
+  assert.match(stoppedJob.commentDelivery?.body, /round 2 of \d+/);
   assert.equal(posts.length, 1);
   assert.match(posts[0].body, /stale-heartbeat/);
+  assert.match(posts[0].body, /round 2 of \d+/);
 });
 
 test('sweepStuckInProgressClaims: failed stale-worker signal leaves claim in progress', async () => {

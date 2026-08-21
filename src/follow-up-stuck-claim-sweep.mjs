@@ -59,7 +59,6 @@ import {
   postRemediationOutcomeComment,
 } from './adapters/comms/github-pr-comments/pr-comments.mjs';
 import {
-  buildOwedDelivery,
   recordInitialCommentDelivery,
 } from './adapters/comms/github-pr-comments/comment-delivery.mjs';
 
@@ -818,52 +817,16 @@ function staleRetryWorkerClass(job) {
 
 function buildStaleTerminalCommentDelivery({
   job,
-  worker,
-  stoppedAt,
-  stopCode,
-  stopReason,
 }) {
-  const workerClass = staleRetryWorkerClass({ ...job, remediationWorker: worker });
-  const currentRound = Number(job?.remediationPlan?.currentRound || 0) || null;
-  const maxRounds = Number(job?.remediationPlan?.maxRounds || 0) || null;
-  const commentJob = {
-    ...job,
-    status: 'stopped',
-    stoppedAt,
-    remediationWorker: worker,
-    remediationPlan: {
-      ...(job?.remediationPlan || {}),
-      stopReason,
-      stop: {
-        code: stopCode,
-        reason: stopReason,
-        stoppedAt,
-        stoppedBy: null,
-        sourceStatus: 'in_progress',
-        currentRound,
-        maxRounds,
-      },
-      nextAction: null,
-    },
-  };
+  const workerClass = staleRetryWorkerClass(job);
   const body = buildRemediationOutcomeCommentBody({
     workerClass,
     action: 'stopped',
-    job: commentJob,
+    job,
   });
   return {
     body,
     workerClass,
-    commentDelivery: buildOwedDelivery({
-      body,
-      repo: job?.repo,
-      prNumber: job?.prNumber,
-      workerClass,
-      owedAt: stoppedAt,
-      revisionRef: job?.revisionRef || null,
-      round: currentRound,
-      kind: 'remediation-reply',
-    }),
   };
 }
 
@@ -878,13 +841,6 @@ async function stopStaleClaimWithComment({
   recordInitialCommentDeliveryImpl,
   log,
 }) {
-  const { body, workerClass, commentDelivery } = buildStaleTerminalCommentDelivery({
-    job,
-    worker: remediationWorker,
-    stoppedAt,
-    stopCode: STALE_HEARTBEAT_STOP_CODE,
-    stopReason,
-  });
   const stopped = markFollowUpJobStopped({
     rootDir,
     jobPath,
@@ -893,7 +849,9 @@ async function stopStaleClaimWithComment({
     stopReason,
     sourceStatus: 'in_progress',
     remediationWorker,
-    commentDelivery,
+  });
+  const { body, workerClass } = buildStaleTerminalCommentDelivery({
+    job: stopped.job,
   });
   await recordInitialCommentDeliveryImpl({
     rootDir,

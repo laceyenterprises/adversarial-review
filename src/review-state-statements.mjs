@@ -67,6 +67,8 @@ export const FINALIZE_PENDING_TERMINAL_FAILURE_SQL =
       AND failure_message IS ?
       AND reviewer_head_sha = ?`;
 
+// This also matches review_status='reviewing', so every reviewer_* lease field
+// must be cleared when the merged PR is terminalized to skipped.
 export const MARK_MERGED_PENDING_REVIEW_SKIPPED_SQL = `UPDATE reviewed_prs
       SET review_status = 'skipped',
           failed_at = NULL,

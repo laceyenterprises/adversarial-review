@@ -308,7 +308,6 @@ test('reviewer pass writer can recover a stale running row from another worker',
     reviewerClass: 'gemini',
     passKind: 'rereview',
     workerRunId: 'worker-run-b',
-    workspacePath: '/tmp/review-b',
     startedAt: '2026-05-18T07:00:00.000Z',
     headSha: 'head-a',
     metadata: { second: true },
@@ -322,7 +321,7 @@ test('reviewer pass writer can recover a stale running row from another worker',
     const row = db.prepare('SELECT worker_run_id, workspace_path, started_at, metadata_json FROM reviewer_passes WHERE pr_number = 49').get();
     const metadata = JSON.parse(row.metadata_json);
     assert.equal(row.worker_run_id, 'worker-run-b');
-    assert.equal(row.workspace_path, '/tmp/review-b');
+    assert.equal(row.workspace_path, null);
     assert.equal(row.started_at, '2026-05-18T07:00:00.000Z');
     assert.equal(metadata.first, true);
     assert.equal(metadata.second, true);
@@ -905,6 +904,63 @@ test('backfill refuses to overwrite non-backfill terminal remediation rows', () 
     assert.equal(row.worker_run_id, 'manual-run');
     assert.equal(row.token_input, 9);
     assert.equal(metadata.manual, true);
+    assert.equal(metadata.backfill, undefined);
+  } finally {
+    db.close();
+  }
+});
+
+test('backfill skips live running remediation rows owned by another worker', () => {
+  const rootDir = tempRoot();
+  const ledgerDb = path.join(rootDir, 'ledger.db');
+  createSessionLedgerDb(ledgerDb);
+  beginReviewerPass(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 50,
+    attemptNumber: 1,
+    reviewerClass: 'codex',
+    passKind: 'remediation',
+    workerRunId: 'live-run',
+    workspacePath: '/tmp/live-remediation',
+    startedAt: '2026-08-21T14:00:00.000Z',
+    metadata: { live: true },
+  });
+  const completedDir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(completedDir, { recursive: true });
+  writeFileSync(path.join(completedDir, 'job-live-conflict.json'), JSON.stringify({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 50,
+    jobId: 'job-live-conflict',
+    status: 'completed',
+    completedAt: '2026-08-21T14:02:00.000Z',
+    workspaceDir: '/tmp/historical-remediation',
+    remediationPlan: { currentRound: 1 },
+    remediationWorker: {
+      model: 'codex',
+      state: 'completed',
+      spawnedAt: '2026-08-21T14:01:00.000Z',
+      workerRunId: 'historical-run',
+      workspaceDir: '/tmp/historical-remediation',
+    },
+  }), 'utf8');
+
+  const result = backfillReviewerPasses(rootDir, {
+    ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+    env: HERMETIC_CONFIG_ENV,
+    now: () => '2026-08-21T14:02:00.000Z',
+  });
+
+  assert.equal(result.considered, 1);
+  assert.equal(result.insertedOrUpdated, 0);
+  assert.equal(result.skipped, 1);
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const row = db.prepare('SELECT worker_run_id, workspace_path, metadata_json FROM reviewer_passes WHERE pr_number = 50').get();
+    const metadata = JSON.parse(row.metadata_json);
+    assert.equal(row.worker_run_id, 'live-run');
+    assert.equal(row.workspace_path, '/tmp/live-remediation');
+    assert.equal(metadata.live, true);
     assert.equal(metadata.backfill, undefined);
   } finally {
     db.close();

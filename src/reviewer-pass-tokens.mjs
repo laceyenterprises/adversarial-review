@@ -141,6 +141,14 @@ function isStaleRunningReviewerPassOwner(existing, {
   return nowMs - startedMs >= Number(thresholdMs);
 }
 
+function isReviewerPassClaimConflictError(err) {
+  const message = String(err?.message || err || '');
+  return (
+    message.includes('failed to claim running reviewer_passes row') ||
+    message.includes('refusing to reuse running reviewer_passes row')
+  );
+}
+
 function assertReviewerPassReusable(existing, key, normalizedHeadSha) {
   if (!existing) {
     throw new Error(`reviewer_passes insert was ignored but no row exists for ${passKeyDescription(key)}`);
@@ -249,7 +257,7 @@ function beginReviewerPass(rootDir, {
           SET reviewer_class = COALESCE(?, reviewer_class),
               reviewer_model = COALESCE(?, reviewer_model),
               worker_run_id = COALESCE(?, worker_run_id),
-              workspace_path = COALESCE(?, workspace_path),
+              workspace_path = CASE WHEN ? THEN ? ELSE COALESCE(?, workspace_path) END,
               started_at = CASE WHEN ? THEN ? ELSE started_at END,
               head_sha = COALESCE(?, head_sha),
               metadata_json = ?
@@ -264,6 +272,8 @@ function beginReviewerPass(rootDir, {
       reviewerClassNormalized,
       model,
       requestedWorkerRunId,
+      allowStaleOwnerSteal ? 1 : 0,
+      workspacePath || null,
       workspacePath || null,
       allowStaleOwnerSteal ? 1 : 0,
       startedAt,
@@ -1530,26 +1540,32 @@ function backfillReviewerPasses(rootDir, {
     const key = passKey({ repo, prNumber, attemptNumber, passKind: 'remediation' });
     const existingPass = getReviewerPassByKey(rootDir, key);
     if (!existingPass || existingPass.status === 'running') {
-      beginReviewerPass(rootDir, {
-        repo,
-        prNumber,
-        attemptNumber,
-        reviewerClass: worker.workerClass || worker.model || 'codex',
-        reviewerModel: worker.model || worker.workerClass || 'codex',
-        passKind: 'remediation',
-        workerRunId: usage?.workerRunId || worker.workerRunId || worker.runId || null,
-        workspacePath,
-        startedAt,
-        metadata: {
-          backfill: true,
-          jobPath,
-          jobId: job.jobId || null,
-          launchRequestId,
-          transcriptPath: usage?.transcriptPath || null,
-          transcriptSessionId: usage?.adapterSessionKey || null,
-          workerLogPath: usage?.source === 'codex-worker-log' ? usage.transcriptPath : null,
-        },
-      });
+      try {
+        beginReviewerPass(rootDir, {
+          repo,
+          prNumber,
+          attemptNumber,
+          reviewerClass: worker.workerClass || worker.model || 'codex',
+          reviewerModel: worker.model || worker.workerClass || 'codex',
+          passKind: 'remediation',
+          workerRunId: usage?.workerRunId || worker.workerRunId || worker.runId || null,
+          workspacePath,
+          startedAt,
+          metadata: {
+            backfill: true,
+            jobPath,
+            jobId: job.jobId || null,
+            launchRequestId,
+            transcriptPath: usage?.transcriptPath || null,
+            transcriptSessionId: usage?.adapterSessionKey || null,
+            workerLogPath: usage?.source === 'codex-worker-log' ? usage.transcriptPath : null,
+          },
+        });
+      } catch (err) {
+        if (!isReviewerPassClaimConflictError(err)) throw err;
+        skipped += 1;
+        continue;
+      }
     } else if (!parseMetadataJson(existingPass.metadata_json).backfill) {
       skipped += 1;
       continue;

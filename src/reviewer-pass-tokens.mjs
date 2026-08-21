@@ -187,6 +187,9 @@ function beginReviewerPass(rootDir, {
       `SELECT pass_id, status, head_sha, metadata_json FROM reviewer_passes
         WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?`
     ).get(key.repo, key.prNumber, key.attemptNumber, key.passKind);
+    if (!existing) {
+      throw new Error(`reviewer_passes row disappeared before claim for ${passKeyDescription(key)}`);
+    }
     if (insertResult.changes === 0) {
       assertReviewerPassReusable(existing, key, normalizedHeadSha);
     }

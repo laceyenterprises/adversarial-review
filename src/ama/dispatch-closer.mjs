@@ -311,13 +311,26 @@ function isHammerRouteStructurallyBlocked(reasons) {
   ));
 }
 
-function terminalHammerReviewCycleExhausted(reviewState) {
+export function terminalHammerReviewCycleExhausted(reviewState) {
   if (reviewState?.reviewCycleExhausted !== true) return false;
   const verdict = String(reviewState?.verdict || '')
     .trim()
     .toLowerCase()
     .replaceAll('_', '-');
   if (verdict !== 'request changes' && verdict !== 'request-changes') return true;
+  const hasRevisionRefEvidence = Object.prototype.hasOwnProperty.call(
+    reviewState || {},
+    'completedRemediationRevisionRefs',
+  );
+  if (hasRevisionRefEvidence) {
+    const reviewedHead = String(reviewState?.headSha || '').trim();
+    const remediatedHeads = Array.isArray(reviewState?.completedRemediationRevisionRefs)
+      ? reviewState.completedRemediationRevisionRefs.map((value) => String(value || '').trim())
+      : [];
+    if (!reviewedHead || !remediatedHeads.includes(reviewedHead)) {
+      return false;
+    }
+  }
   const hasRemediationRoundEvidence = Object.prototype.hasOwnProperty.call(
     reviewState || {},
     'completedRemediationRounds',

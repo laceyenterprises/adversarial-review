@@ -4,7 +4,7 @@ import { basename, dirname, join } from 'node:path';
 
 import * as followUpJobs from './follow-up-jobs.mjs';
 import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
-import { isPgidAlive } from './process-group-identity.mjs';
+import { currentProcessGroupId, isPgidAlive } from './process-group-identity.mjs';
 
 const IN_PROGRESS_STUCK_THRESHOLD_MS_ENV = 'ADVERSARIAL_FOLLOW_UP_IN_PROGRESS_STUCK_THRESHOLD_MS';
 const DEFAULT_IN_PROGRESS_STUCK_THRESHOLD_MS = 10 * 60 * 1000;
@@ -139,6 +139,7 @@ function signalStaleFollowUpWorker({
   job,
   signal = 'SIGTERM',
   processKill = process.kill,
+  currentPgid = currentProcessGroupId(),
 } = {}) {
   const worker = job?.worker || job?.remediationWorker || {};
   const processGroupId = positiveInteger(worker.processGroupId);
@@ -154,7 +155,7 @@ function signalStaleFollowUpWorker({
         : 'missing-worker-process-handle',
     };
   }
-  if (processGroupId === process.pid || processId === process.pid) {
+  if (processGroupId === process.pid || processGroupId === currentPgid || processId === process.pid) {
     return { signalled: false, skipped: false, target: null, error: 'refusing-to-signal-current-process' };
   }
 
@@ -242,9 +243,10 @@ function stopStaleInProgressFollowUpJob({
     : { signalled: false, skipped: true, target: null, error: 'signal-worker-disabled' };
   if (!staleReclaimSignal?.signalled && !staleReclaimSignal?.skipped) {
     log?.warn?.(
-      `[watcher] Releasing stale follow-up job ${jobId} despite worker signal failure: ` +
+      `[watcher] Keeping stale follow-up job ${jobId} in progress after worker signal failure: ` +
       `worker signal failed: ${staleReclaimSignal?.error || 'unknown'}`
     );
+    return null;
   }
 
   return markStoppedImpl({

@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -17,6 +17,23 @@ function isPgidAlive(pgid, processKillImpl = process.kill) {
     if (err?.code === 'ESRCH') return false;
     if (err?.code === 'EPERM') return true;
     throw err;
+  }
+}
+
+function currentProcessGroupId({
+  pid = process.pid,
+  execFileSyncImpl = execFileSync,
+} = {}) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    const stdout = execFileSyncImpl('ps', ['-o', 'pgid=', '-p', String(pid)], {
+      encoding: 'utf8',
+      timeout: 5_000,
+    });
+    const parsed = Number(String(stdout || '').trim());
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  } catch {
+    return null;
   }
 }
 
@@ -66,6 +83,7 @@ async function verifyPgidIdentity(pgid, expectedSpawnedAt, {
 }
 
 export {
+  currentProcessGroupId,
   isPgidAlive,
   verifyPgidIdentity,
 };

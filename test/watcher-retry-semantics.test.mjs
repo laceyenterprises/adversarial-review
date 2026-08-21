@@ -1127,6 +1127,9 @@ test('watcher stale follow-up release signals the local remediator before unbloc
   );
   const stoppedJob = readFollowUpJob(stoppedPath);
   assert.equal(stoppedJob.remediationWorker?.state, 'reclaimed-stale-heartbeat');
+  assert.equal(stoppedJob.remediationWorker?.processId, 13600);
+  assert.equal(stoppedJob.remediationWorker?.processGroupId, 13600);
+  assert.equal(stoppedJob.remediationWorker?.workspaceDir, '/tmp/stale-remediator-workspace');
   assert.equal(stoppedJob.remediationWorker?.staleReclaimSignal?.signalled, true);
   assert.deepEqual(stoppedJob.remediationWorker?.staleReclaimSignal?.target, {
     kind: 'process-group',
@@ -1208,7 +1211,31 @@ test('stale follow-up signal skips process group 1 without a direct process id',
   assert.deepEqual(calls, []);
 });
 
-test('watcher stale follow-up release proceeds when worker signal fails', () => {
+test('stale follow-up signal refuses to target the watcher process group', () => {
+  const calls = [];
+  const result = signalStaleFollowUpWorker({
+    job: {
+      remediationWorker: {
+        processId: 4242,
+        processGroupId: 31337,
+      },
+    },
+    currentPgid: 31337,
+    processKill(pid, signal) {
+      calls.push([pid, signal]);
+    },
+  });
+
+  assert.deepEqual(result, {
+    signalled: false,
+    skipped: false,
+    target: null,
+    error: 'refusing-to-signal-current-process',
+  });
+  assert.deepEqual(calls, []);
+});
+
+test('watcher stale follow-up release defers when a live worker cannot be signalled', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-stale-signal-fail-'));
   createFollowUpJob({
     rootDir,
@@ -1259,21 +1286,13 @@ test('watcher stale follow-up release proceeds when worker signal fails', () => 
     log: { warn: (message) => warnings.push(message) },
   });
 
-  assert.equal(decision.defer, false, 'signal failure must not keep blocking review');
-  assert.equal(decision.latestJobStatus, 'stopped');
-  assert.equal(decision.releaseReason, 'stale-heartbeat');
+  assert.equal(decision.defer, true, 'live unkillable worker must keep the exclusive lock');
+  assert.equal(decision.latestJobStatus, 'in_progress');
+  assert.equal(decision.releaseReason, undefined);
   assert.equal(warnings.length, 1);
-  assert.match(warnings[0], /despite worker signal failure/);
+  assert.match(warnings[0], /Keeping stale follow-up job .* in progress after worker signal failure/);
   assert.match(warnings[0], /EPERM/);
-  assert.equal(existsSync(spawned.jobPath), false, 'in-progress claim must be moved');
-  const stoppedPath = path.join(
-    getFollowUpJobDir(rootDir, 'stopped'),
-    path.basename(spawned.jobPath),
-  );
-  const stoppedJob = readFollowUpJob(stoppedPath);
-  assert.equal(stoppedJob.remediationWorker?.state, 'reclaimed-stale-heartbeat');
-  assert.equal(stoppedJob.remediationWorker?.staleReclaimSignal?.signalled, false);
-  assert.equal(stoppedJob.remediationWorker?.staleReclaimSignal?.error, 'EPERM');
+  assert.equal(existsSync(spawned.jobPath), true, 'in-progress claim must stay held');
 });
 
 test('watcher active follow-up defer defaults to the repository root, not process cwd', () => {

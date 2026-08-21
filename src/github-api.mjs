@@ -1099,6 +1099,49 @@ async function fetchSubmittedReviewsForHead(execFileImpl, repo, prNumber, headSh
   return reviews.filter(matchesHead).sort(sortNewestSubmittedFirst);
 }
 
+async function fetchSubmittedReviewsForPr(execFileImpl, repo, prNumber, {
+  authoritativeReviewerLogins = null,
+  authoritativeReviewerLogin = null,
+} = {}) {
+  const reviewerLoginCandidates = authoritativeReviewerLogins != null
+    ? authoritativeReviewerLogins
+    : authoritativeReviewerLogin == null
+      ? null
+      : [authoritativeReviewerLogin];
+  const loginList = Array.isArray(reviewerLoginCandidates)
+    ? reviewerLoginCandidates.map(normalizeLogin).filter(Boolean)
+    : [];
+  const expectedReviewerLoginSet = loginList.length ? new Set(loginList) : null;
+  if (reviewerLoginCandidates != null && !expectedReviewerLoginSet) return [];
+  const normalizedPrNumber = normalizePrNumber(prNumber);
+  const matchesReview = (review) => {
+    if (!review.id || !review.submittedAt) {
+      return false;
+    }
+    if (!SUBMITTED_REVIEW_STATES.has(String(review.state || '').toUpperCase())) {
+      return false;
+    }
+    if (expectedReviewerLoginSet && !expectedReviewerLoginSet.has(normalizeLogin(review.author?.login))) {
+      return false;
+    }
+    return true;
+  };
+  const sortNewestSubmittedFirst = (a, b) => String(b.submittedAt).localeCompare(String(a.submittedAt));
+  const reviews = await paginateRest(
+    execFileImpl,
+    `repos/${repo}/pulls/${normalizedPrNumber}/reviews`,
+    (data) => (Array.isArray(data) ? data : []).map((review) => ({
+      id: review?.id == null ? null : String(review.id),
+      author: normalizeAuthor(review?.user),
+      body: String(review?.body || ''),
+      state: review?.state || null,
+      submittedAt: review?.submitted_at || null,
+      commitId: review?.commit_id || null,
+    })),
+  );
+  return reviews.filter(matchesReview).sort(sortNewestSubmittedFirst);
+}
+
 function hasNewerApprovalFromSameAuthor(review, reviews) {
   const author = normalizeLogin(review.author?.login);
   if (!author) return false;
@@ -1128,7 +1171,11 @@ async function dismissStandingChangesRequestedReviewsForHead(execFileImpl, repo,
   recordApiCallImpl = recordApiCall,
 } = {}) {
   const normalizedPrNumber = normalizePrNumber(prNumber);
-  const reviews = await fetchSubmittedReviewsForHead(execFileImpl, repo, normalizedPrNumber, headSha, {
+  if (!headSha) return { dismissed: [], standing: [], attempted: 0 };
+  // A clean exact-head COMMENTED review is our authority to clear stale reviewer
+  // blocks, but GitHub's merge decision still counts older-head Request changes
+  // until they are explicitly dismissed.
+  const reviews = await fetchSubmittedReviewsForPr(execFileImpl, repo, normalizedPrNumber, {
     authoritativeReviewerLogins,
     authoritativeReviewerLogin,
   });

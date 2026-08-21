@@ -135,6 +135,22 @@ function positiveInteger(value) {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
+function unsafeProcessGroupSignalReason(processGroupId, currentPgid) {
+  if (!processGroupId) return null;
+  if (processGroupId === 1) return 'unsafe-process-group-broadcast-refused';
+  if (processGroupId === process.pid) return 'refusing-to-signal-current-process-group';
+  if (currentPgid && processGroupId === currentPgid) {
+    return 'refusing-to-signal-current-process-group';
+  }
+  return null;
+}
+
+function unsafeProcessSignalReason(processId) {
+  if (!processId) return null;
+  if (processId === process.pid) return 'refusing-to-signal-current-process';
+  return null;
+}
+
 function signalStaleFollowUpWorker({
   job,
   signal = 'SIGTERM',
@@ -144,19 +160,25 @@ function signalStaleFollowUpWorker({
   const worker = job?.worker || job?.remediationWorker || {};
   const processGroupId = positiveInteger(worker.processGroupId);
   const processId = positiveInteger(worker.processId);
-  const useProcessGroup = Boolean(processGroupId && processGroupId !== 1);
-  if (!useProcessGroup && !processId) {
+  const unsafeProcessReason = unsafeProcessSignalReason(processId);
+  const unsafeGroupReason = unsafeProcessGroupSignalReason(processGroupId, currentPgid);
+  if (unsafeProcessReason) {
     return {
       signalled: false,
       skipped: true,
-      target: processGroupId === 1 ? { kind: 'process-group', id: 1 } : null,
-      error: processGroupId === 1
-        ? 'unsafe-process-group-broadcast-refused'
-        : 'missing-worker-process-handle',
+      target: { kind: 'process', id: processId },
+      error: unsafeProcessReason,
     };
   }
-  if (processGroupId === process.pid || processGroupId === currentPgid || processId === process.pid) {
-    return { signalled: false, skipped: false, target: null, error: 'refusing-to-signal-current-process' };
+  const useProcessGroup = Boolean(processGroupId && !unsafeGroupReason);
+  const useDirectProcess = Boolean(!useProcessGroup && processId);
+  if (!useProcessGroup && !useDirectProcess) {
+    return {
+      signalled: false,
+      skipped: true,
+      target: processGroupId ? { kind: 'process-group', id: processGroupId } : null,
+      error: unsafeGroupReason || 'missing-worker-process-handle',
+    };
   }
 
   const target = {

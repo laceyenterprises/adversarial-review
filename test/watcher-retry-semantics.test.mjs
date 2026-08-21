@@ -1211,7 +1211,7 @@ test('stale follow-up signal skips process group 1 without a direct process id',
   assert.deepEqual(calls, []);
 });
 
-test('stale follow-up signal refuses to target the watcher process group', () => {
+test('stale follow-up signal falls back to direct pid for the watcher process group', () => {
   const calls = [];
   const result = signalStaleFollowUpWorker({
     job: {
@@ -1227,9 +1227,36 @@ test('stale follow-up signal refuses to target the watcher process group', () =>
   });
 
   assert.deepEqual(result, {
-    signalled: false,
+    signalled: true,
     skipped: false,
-    target: null,
+    target: { kind: 'process', id: 4242 },
+    error: null,
+  });
+  assert.deepEqual(calls, [
+    [4242, 0],
+    [4242, 'SIGTERM'],
+  ]);
+});
+
+test('stale follow-up signal skips reused watcher pid metadata', () => {
+  const calls = [];
+  const result = signalStaleFollowUpWorker({
+    job: {
+      remediationWorker: {
+        processId: process.pid,
+        processGroupId: 31337,
+      },
+    },
+    currentPgid: 31337,
+    processKill(pid, signal) {
+      calls.push([pid, signal]);
+    },
+  });
+
+  assert.deepEqual(result, {
+    signalled: false,
+    skipped: true,
+    target: { kind: 'process', id: process.pid },
     error: 'refusing-to-signal-current-process',
   });
   assert.deepEqual(calls, []);

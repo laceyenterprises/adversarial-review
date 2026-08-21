@@ -30,6 +30,7 @@ import {
   shouldDeferReviewForActiveFollowUp as shouldDeferReviewForActiveFollowUpDirect,
   signalStaleFollowUpWorker,
 } from '../src/follow-up-active-defer.mjs';
+import { currentProcessGroupId } from '../src/process-group-identity.mjs';
 import {
   MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION,
   listMergeAgentLifecycleCleanups,
@@ -1236,6 +1237,80 @@ test('stale follow-up signal falls back to direct pid for the watcher process gr
     [4242, 0],
     [4242, 'SIGTERM'],
   ]);
+});
+
+test('stale follow-up signal falls back to direct pid when watcher process group is unknown', () => {
+  const calls = [];
+  const result = signalStaleFollowUpWorker({
+    job: {
+      remediationWorker: {
+        processId: 4242,
+        processGroupId: 31337,
+      },
+    },
+    currentPgid: null,
+    processKill(pid, signal) {
+      calls.push([pid, signal]);
+    },
+  });
+
+  assert.deepEqual(result, {
+    signalled: true,
+    skipped: false,
+    target: { kind: 'process', id: 4242 },
+    error: null,
+  });
+  assert.deepEqual(calls, [
+    [4242, 0],
+    [4242, 'SIGTERM'],
+  ]);
+});
+
+test('stale follow-up signal skips process group when watcher process group is unknown and no pid exists', () => {
+  const calls = [];
+  const result = signalStaleFollowUpWorker({
+    job: {
+      remediationWorker: {
+        processGroupId: 31337,
+      },
+    },
+    currentPgid: null,
+    processKill(pid, signal) {
+      calls.push([pid, signal]);
+    },
+  });
+
+  assert.deepEqual(result, {
+    signalled: false,
+    skipped: true,
+    target: { kind: 'process-group', id: 31337 },
+    error: 'unknown-current-process-group',
+  });
+  assert.deepEqual(calls, []);
+});
+
+test('current process group lookup caches the process-scope ps result', () => {
+  let calls = 0;
+  const first = currentProcessGroupId({
+    pid: 4242,
+    useCache: true,
+    execFileSyncImpl() {
+      calls += 1;
+      return ' 31337\n';
+    },
+  });
+  const second = currentProcessGroupId({
+    pid: 4242,
+    useCache: true,
+    execFileSyncImpl() {
+      calls += 1;
+      return ' 41414\n';
+    },
+  });
+
+  assert.equal(first, 31337);
+  assert.equal(second, 31337);
+  assert.equal(calls, 1);
 });
 
 test('stale follow-up signal skips reused watcher pid metadata', () => {

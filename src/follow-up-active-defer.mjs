@@ -139,6 +139,7 @@ function unsafeProcessGroupSignalReason(processGroupId, currentPgid) {
   if (!processGroupId) return null;
   if (processGroupId === 1) return 'unsafe-process-group-broadcast-refused';
   if (processGroupId === process.pid) return 'refusing-to-signal-current-process-group';
+  if (currentPgid === null || currentPgid === undefined) return 'unknown-current-process-group';
   if (currentPgid && processGroupId === currentPgid) {
     return 'refusing-to-signal-current-process-group';
   }

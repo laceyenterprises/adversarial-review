@@ -143,20 +143,27 @@ function signalStaleFollowUpWorker({
   const worker = job?.worker || job?.remediationWorker || {};
   const processGroupId = positiveInteger(worker.processGroupId);
   const processId = positiveInteger(worker.processId);
-  if (!processGroupId && !processId) {
-    return { signalled: false, skipped: true, target: null, error: 'missing-worker-process-handle' };
+  const useProcessGroup = Boolean(processGroupId && processGroupId !== 1);
+  if (!useProcessGroup && !processId) {
+    return {
+      signalled: false,
+      skipped: true,
+      target: processGroupId === 1 ? { kind: 'process-group', id: 1 } : null,
+      error: processGroupId === 1
+        ? 'unsafe-process-group-broadcast-refused'
+        : 'missing-worker-process-handle',
+    };
   }
   if (processGroupId === process.pid || processId === process.pid) {
     return { signalled: false, skipped: false, target: null, error: 'refusing-to-signal-current-process' };
   }
 
-  const targetId = processGroupId || processId;
   const target = {
-    kind: processGroupId ? 'process-group' : 'process',
-    id: targetId,
+    kind: useProcessGroup ? 'process-group' : 'process',
+    id: useProcessGroup ? processGroupId : processId,
   };
   try {
-    if (processGroupId) {
+    if (useProcessGroup) {
       if (!isPgidAlive(processGroupId, processKill)) {
         return { signalled: false, skipped: true, target, error: 'process-group-not-found' };
       }
@@ -235,10 +242,9 @@ function stopStaleInProgressFollowUpJob({
     : { signalled: false, skipped: true, target: null, error: 'signal-worker-disabled' };
   if (!staleReclaimSignal?.signalled && !staleReclaimSignal?.skipped) {
     log?.warn?.(
-      `[watcher] Refusing to release stale follow-up job ${jobId}: ` +
+      `[watcher] Releasing stale follow-up job ${jobId} despite worker signal failure: ` +
       `worker signal failed: ${staleReclaimSignal?.error || 'unknown'}`
     );
-    return null;
   }
 
   return markStoppedImpl({

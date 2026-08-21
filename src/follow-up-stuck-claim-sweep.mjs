@@ -51,8 +51,17 @@ import {
   writeFollowUpJob,
 } from './follow-up-jobs.mjs';
 import { lifecycleStopDecision, resolveJobPRLifecycleSafe } from './follow-up-lifecycle.mjs';
+import { resolveMaxTransientRemediationRetries } from './remediation-admission.mjs';
 import { sendWorkerSignal, workerCancelHandle } from './follow-up-worker-cancel.mjs';
 import { resolvePRLifecycle } from './review-state.mjs';
+import {
+  buildRemediationOutcomeCommentBody,
+  postRemediationOutcomeComment,
+} from './adapters/comms/github-pr-comments/pr-comments.mjs';
+import {
+  buildOwedDelivery,
+  recordInitialCommentDelivery,
+} from './adapters/comms/github-pr-comments/comment-delivery.mjs';
 
 const IN_PROGRESS_STUCK_THRESHOLD_MS_ENV = 'ADVERSARIAL_FOLLOW_UP_IN_PROGRESS_STUCK_THRESHOLD_MS';
 const DEFAULT_IN_PROGRESS_STUCK_THRESHOLD_MS = 10 * 60 * 1000;
@@ -800,6 +809,116 @@ function isAlreadyDeadSignalText(value) {
   return text.includes('esrch') || text.includes('no such process') || text.includes('process-group-not-found');
 }
 
+function staleRetryWorkerClass(job) {
+  const workerClass = String(job?.remediationWorker?.model || job?.claimedBy?.workerType || 'codex').trim();
+  if (workerClass === 'codex-remediation') return 'codex';
+  if (workerClass === 'claude-code-remediation') return 'claude-code';
+  return workerClass || 'codex';
+}
+
+function buildStaleTerminalCommentDelivery({
+  job,
+  worker,
+  stoppedAt,
+  stopCode,
+  stopReason,
+}) {
+  const workerClass = staleRetryWorkerClass({ ...job, remediationWorker: worker });
+  const currentRound = Number(job?.remediationPlan?.currentRound || 0) || null;
+  const maxRounds = Number(job?.remediationPlan?.maxRounds || 0) || null;
+  const commentJob = {
+    ...job,
+    status: 'stopped',
+    stoppedAt,
+    remediationWorker: worker,
+    remediationPlan: {
+      ...(job?.remediationPlan || {}),
+      stopReason,
+      stop: {
+        code: stopCode,
+        reason: stopReason,
+        stoppedAt,
+        stoppedBy: null,
+        sourceStatus: 'in_progress',
+        currentRound,
+        maxRounds,
+      },
+      nextAction: null,
+    },
+  };
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass,
+    action: 'stopped',
+    job: commentJob,
+  });
+  return {
+    body,
+    workerClass,
+    commentDelivery: buildOwedDelivery({
+      body,
+      repo: job?.repo,
+      prNumber: job?.prNumber,
+      workerClass,
+      owedAt: stoppedAt,
+      revisionRef: job?.revisionRef || null,
+      round: currentRound,
+      kind: 'remediation-reply',
+    }),
+  };
+}
+
+async function stopStaleClaimWithComment({
+  rootDir,
+  job,
+  jobPath,
+  stoppedAt,
+  stopReason,
+  remediationWorker,
+  postCommentImpl,
+  recordInitialCommentDeliveryImpl,
+  log,
+}) {
+  const { body, workerClass, commentDelivery } = buildStaleTerminalCommentDelivery({
+    job,
+    worker: remediationWorker,
+    stoppedAt,
+    stopCode: STALE_HEARTBEAT_STOP_CODE,
+    stopReason,
+  });
+  const stopped = markFollowUpJobStopped({
+    rootDir,
+    jobPath,
+    stoppedAt,
+    stopCode: STALE_HEARTBEAT_STOP_CODE,
+    stopReason,
+    sourceStatus: 'in_progress',
+    remediationWorker,
+    commentDelivery,
+  });
+  await recordInitialCommentDeliveryImpl({
+    rootDir,
+    jobPath: stopped.jobPath,
+    body,
+    repo: job?.repo,
+    prNumber: job?.prNumber,
+    workerClass,
+    revisionRef: job?.revisionRef || null,
+    round: job?.remediationPlan?.currentRound || null,
+    kind: 'remediation-reply',
+    postCommentImpl: (args) => postCommentImpl({ rootDir, ...args, log }),
+    postCommentArgs: {
+      repo: job?.repo,
+      prNumber: job?.prNumber,
+      workerClass,
+      body,
+      log,
+    },
+    now: () => stoppedAt,
+    log,
+  });
+  return stopped;
+}
+
 async function sweepStuckInProgressClaims({
   rootDir,
   nowMs = Date.now(),
@@ -808,9 +927,14 @@ async function sweepStuckInProgressClaims({
   sendWorkerSignalImpl = sendWorkerSignal,
   processKill = process.kill,
   execFileImpl,
+  maxTransientRetries = resolveMaxTransientRemediationRetries(),
+  postCommentImpl = postRemediationOutcomeComment,
+  recordInitialCommentDeliveryImpl = recordInitialCommentDelivery,
 } = {}) {
   let scanned = 0;
   let reclaimed = 0;
+  let requeued = 0;
+  let terminalStopped = 0;
   let skipped = 0;
   let signalled = 0;
   let signalFailed = 0;
@@ -858,23 +982,67 @@ async function sweepStuckInProgressClaims({
       continue;
     }
 
-    markFollowUpJobStopped({
+    const staleWorker = {
+      ...(job?.remediationWorker || {}),
+      state: 'reclaimed-stale-heartbeat',
+      reclaimedAt: reclaimedAtIso,
+      reclaimReason: STALE_HEARTBEAT_STOP_CODE,
+      reclaimAgeMs: ageMs,
+      reclaimSource: source,
+      staleReclaimSignal,
+    };
+    const priorTransientRetries = Number(job?.remediationPlan?.transientRetries || 0);
+    const nextTransientRetry = priorTransientRetries + 1;
+    const normalizedMaxTransientRetries = Number.isFinite(Number(maxTransientRetries))
+      ? Math.max(0, Number(maxTransientRetries))
+      : 0;
+    if (nextTransientRetry <= normalizedMaxTransientRetries) {
+      const retryAfter = new Date(nowMs + 60_000).toISOString();
+      requeueInProgressFollowUpJobForRetry({
+        rootDir,
+        jobPath,
+        requeuedAt: reclaimedAtIso,
+        retryReason:
+          `${reasonText} Requeueing stale remediator claim ` +
+          `(retry ${nextTransientRetry}/${normalizedMaxTransientRetries}).`,
+        remediationWorker: null,
+        allowDirectWorkerRetry: true,
+        retryAfterOverride: retryAfter,
+        retryMetadata: {
+          code: STALE_HEARTBEAT_STOP_CODE,
+          recoverable: true,
+          reclaimAgeMs: ageMs,
+          reclaimSource: source,
+          retry: nextTransientRetry,
+          maxRetries: normalizedMaxTransientRetries,
+          staleReclaimSignal,
+        },
+      });
+      requeued += 1;
+      reclaimed += 1;
+      log.log?.(
+        `[follow-up-tick ${reclaimedAtIso}] stale-claim-requeued jobId=${jobId} ageMs=${ageMs} ` +
+        `source=${source} retry=${nextTransientRetry}/${normalizedMaxTransientRetries} ` +
+        `retryAfter=${retryAfter} signalled=${staleReclaimSignal.signalled}`
+      );
+      continue;
+    }
+
+    const terminalStopReason =
+      `${reasonText} Exhausted stale heartbeat retry budget ` +
+      `(${priorTransientRetries}/${normalizedMaxTransientRetries}).`;
+    await stopStaleClaimWithComment({
       rootDir,
+      job,
       jobPath,
       stoppedAt: reclaimedAtIso,
-      stopCode: STALE_HEARTBEAT_STOP_CODE,
-      stopReason: reasonText,
-      sourceStatus: 'in_progress',
-      remediationWorker: {
-        ...(job?.remediationWorker || {}),
-        state: 'reclaimed-stale-heartbeat',
-        reclaimedAt: reclaimedAtIso,
-        reclaimReason: STALE_HEARTBEAT_STOP_CODE,
-        reclaimAgeMs: ageMs,
-        reclaimSource: source,
-        staleReclaimSignal,
-      },
+      stopReason: terminalStopReason,
+      remediationWorker: staleWorker,
+      postCommentImpl,
+      recordInitialCommentDeliveryImpl,
+      log,
     });
+    terminalStopped += 1;
     reclaimed += 1;
     log.log?.(
       `[follow-up-tick ${reclaimedAtIso}] stale-claim-reclaimed jobId=${jobId} ageMs=${ageMs} ` +
@@ -882,7 +1050,17 @@ async function sweepStuckInProgressClaims({
     );
   }
 
-  return { scanned, reclaimed, skipped, thresholdMs, signalled, signalFailed, signalSkipped };
+  return {
+    scanned,
+    reclaimed,
+    requeued,
+    terminalStopped,
+    skipped,
+    thresholdMs,
+    signalled,
+    signalFailed,
+    signalSkipped,
+  };
 }
 
 // Emit a heartbeat (`lastHeartbeatAt = now`) on every in-progress job

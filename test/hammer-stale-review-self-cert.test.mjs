@@ -169,13 +169,34 @@ test('isHammerRemediableEligibilityMiss: #5093 fix preserves every neighboring i
     }),
     true,
   );
-  // not-exhausted + plain actionable finding, no resume -> eligible via the
-  // hasActionable path (unchanged).
+  // not-exhausted + clean mechanical miss + unsettled verdict -> hammer can fix
+  // the mechanical blocker. The unsettled verdict is a companion gate, not a
+  // reviewer-finding remediation request.
+  assert.equal(
+    isHammerRemediableEligibilityMiss(['verdict-not-settled-success', 'ci-not-green'], {
+      reviewCycleExhausted: false,
+    }),
+    true,
+  );
+  assert.equal(
+    isHammerRemediableEligibilityMiss(['verdict-not-settled-success', 'pr-not-mergeable'], {
+      reviewCycleExhausted: false,
+    }),
+    true,
+  );
+  // not-exhausted + plain standing finding -> park for the Codex remediation
+  // lane. Hammer is not the first responder to reviewer findings.
   assert.equal(
     isHammerRemediableEligibilityMiss(['non-blocking-findings-present'], {
       reviewCycleExhausted: false,
     }),
-    true,
+    false,
+  );
+  assert.equal(
+    isHammerRemediableEligibilityMiss(['blocking-findings-present', 'verdict-not-settled-success', 'ci-not-green'], {
+      reviewCycleExhausted: false,
+    }),
+    false,
   );
   // #5053's "no purposeless hammer": a bare closer-commit stale head with NOTHING
   // else to act on still parks even with the resume flag armed (unchanged).

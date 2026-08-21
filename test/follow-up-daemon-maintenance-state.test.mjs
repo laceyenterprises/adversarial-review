@@ -413,7 +413,15 @@ test('follow-up daemon iteration preserves reconcile and closer reaper on wake-d
     },
     sweepStuckInProgressClaimsImpl: () => {
       calls.push('stale-claim-sweep');
-      return { scanned: 0, reclaimed: 0, skipped: 0, thresholdMs: 1 };
+      return {
+        scanned: 0,
+        reclaimed: 0,
+        skipped: 0,
+        thresholdMs: 1,
+        signalled: 0,
+        signalFailed: 0,
+        signalSkipped: 0,
+      };
     },
     consumeFollowUpJobsUntilCapacityImpl: async () => {
       calls.push('consume');

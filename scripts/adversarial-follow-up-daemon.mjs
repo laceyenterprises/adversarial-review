@@ -490,13 +490,14 @@ async function runFollowUpDaemonIteration({
     );
   });
   if (shouldStop()) return;
-  await runStep('stale-claim-sweep', () => {
+  await runStep('stale-claim-sweep', async () => {
     const thresholdMs = resolveInProgressStuckThresholdMs(env);
-    const result = sweepStuckInProgressClaimsImpl({ rootDir: ROOT, thresholdMs });
+    const result = await sweepStuckInProgressClaimsImpl({ rootDir: ROOT, thresholdMs });
     logTick(
       'stale-claim-sweep',
       `scanned=${result.scanned} reclaimed=${result.reclaimed} skipped=${result.skipped} ` +
-      `thresholdMs=${result.thresholdMs}`
+      `thresholdMs=${result.thresholdMs} signalled=${result.signalled} ` +
+      `signalFailed=${result.signalFailed} signalSkipped=${result.signalSkipped}`
     );
   });
   if (shouldStop()) return;

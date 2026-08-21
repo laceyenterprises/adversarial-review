@@ -981,6 +981,27 @@ function schemaV1() {
               confirmation_token_keep_minutes: { __type: TYPE_INT, __default: 60, __min: 0 },
               comms_jobs_keep_days: { __type: TYPE_INT, __default: 30, __min: 0 },
               rotation_cadence_days: { __type: TYPE_INT, __default: 90, __min: 1 },
+              console_capability_enforcement: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  default: { __type: TYPE_STRING, __default: 'shadow', __enum: ['off', 'shadow', 'enforce'] },
+                },
+              },
+              principal_capability_enforcement: {
+                __type: TYPE_DICT,
+                __strict: false,
+                __keys: {},
+                __extra_keys_schema: {
+                  __type: TYPE_DICT,
+                  __strict: false,
+                  __keys: {},
+                  __extra_keys_schema: {
+                    __type: TYPE_STRING,
+                    __enum: ['off', 'shadow', 'enforce'],
+                  },
+                },
+              },
               persistent_agent_principals: {
                 __type: TYPE_LIST,
                 __item: { __type: TYPE_STRING },
@@ -3186,6 +3207,10 @@ export const ENV_ALIASES = {
   },
   'services.hcp.rotation_cadence_days': {
     canonical: 'AGENT_OS_SERVICES_HCP_ROTATION_CADENCE_DAYS',
+    aliases: [],
+  },
+  'services.hcp.console_capability_enforcement.default': {
+    canonical: 'AGENT_OS_SERVICES_HCP_CONSOLE_CAPABILITY_ENFORCEMENT_DEFAULT',
     aliases: [],
   },
   'services.hcp.persistent_agent_principals': {

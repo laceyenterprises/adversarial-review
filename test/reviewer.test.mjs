@@ -401,6 +401,9 @@ test('postGitHubReviewWithCapture dismisses prior request-changes after clean ex
         if (joined.includes('/reviews/9001/dismissals')) {
           return { stdout: '{}' };
         }
+        if (joined.includes('/reviews/9004/dismissals')) {
+          return { stdout: '{}' };
+        }
         if (joined.includes('/pulls/42/reviews?')) {
           return {
             stdout:
@@ -430,6 +433,14 @@ test('postGitHubReviewWithCapture dismisses prior request-changes after clean ex
                   submitted_at: '2026-08-09T10:06:00Z',
                   commit_id: 'reviewed-head-sha',
                 },
+                {
+                  id: 9004,
+                  user: { login: 'lacey-codex-reviewer[bot]' },
+                  body: 'old head block',
+                  state: 'CHANGES_REQUESTED',
+                  submitted_at: '2026-08-09T10:07:00Z',
+                  commit_id: 'old-reviewed-head-sha',
+                },
               ]),
           };
         }
@@ -442,7 +453,8 @@ test('postGitHubReviewWithCapture dismisses prior request-changes after clean ex
     assert.ok(dismissalCall);
     assert.ok(!dismissalCall.args.includes('event=DISMISS'));
     assert.equal(dismissalCall.options.env.GH_TOKEN, 'ghp_codex_reviewer_pat');
-    assert.equal(calls.filter((call) => call.args.join(' ').includes('/dismissals')).length, 1);
+    assert.equal(calls.filter((call) => call.args.join(' ').includes('/dismissals')).length, 2);
+    assert.ok(calls.some((call) => call.args.join(' ').includes('/reviews/9004/dismissals')));
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

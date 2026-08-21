@@ -230,12 +230,12 @@ test('isGithubRateLimitOrBrokerThrottle does NOT match unrelated bare 429 text',
 function eligibleInputs(rootDir) {
   const headSha = 'abc12345abc12345abc12345abc12345abc12345';
   const reviewState = {
-    verdict: 'request changes',
+    verdict: 'comment-only',
     headSha,
     riskClass: 'low',
     remediationPending: false,
     blockingFindingState: 'known',
-    blockingFindingCount: 1,
+    blockingFindingCount: 0,
     nonBlockingFindingState: 'known',
     nonBlockingFindingCount: 0,
     operatorApprovedEvidence: null,
@@ -250,8 +250,9 @@ function eligibleInputs(rootDir) {
     mergeableState: 'MERGEABLE',
     labels: [],
     statusCheckRollup: [
-      { __typename: 'CheckRun', name: 'lint', conclusion: 'SUCCESS' },
+      { __typename: 'CheckRun', name: 'agent-os/adversarial-gate', conclusion: 'SUCCESS' },
       { __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' },
+      { __typename: 'CheckRun', name: 'integration', conclusion: 'FAILURE' },
     ],
     branchProtection: { requiredContexts: ['agent-os/adversarial-gate'] },
     author: 'codex-worker-bot',

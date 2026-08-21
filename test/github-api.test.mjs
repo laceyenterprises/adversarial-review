@@ -1756,10 +1756,12 @@ test('dismissStandingChangesRequestedReviewsForHead dismisses only authoritative
   );
 
   const dismissCalls = calls.filter((call) => call.args.includes('-X'));
-  assert.equal(result.attempted, 1);
-  assert.deepEqual(result.dismissed.map((review) => review.id), ['101']);
-  assert.equal(dismissCalls.length, 1);
-  assert.match(dismissCalls[0].args.join(' '), /reviews\/101\/dismissals/);
+  assert.equal(result.attempted, 2);
+  assert.deepEqual(result.dismissed.map((review) => review.id).sort(), ['101', '104']);
+  assert.equal(dismissCalls.length, 2);
+  const dismissalArgs = dismissCalls.map((call) => call.args.join(' ')).join('\n');
+  assert.match(dismissalArgs, /reviews\/101\/dismissals/);
+  assert.match(dismissalArgs, /reviews\/104\/dismissals/);
   assert.ok(dismissCalls[0].args.includes('message=resolved by remediation abc123'));
   assert.ok(!dismissCalls[0].args.includes('event=DISMISS'));
 });

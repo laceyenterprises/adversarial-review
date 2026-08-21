@@ -45,12 +45,12 @@ const CURRENT_USER = userInfo().username || process.env.USER || process.env.LOGN
 function hammerDispatchArgs(rootDir, overrides = {}) {
   return {
     reviewState: {
-      verdict: 'request changes',
+      verdict: 'comment-only',
       headSha: REVIEWED_HEAD,
       riskClass: 'low',
       remediationPending: false,
       blockingFindingState: 'known',
-      blockingFindingCount: 1,
+      blockingFindingCount: 0,
       nonBlockingFindingState: 'known',
       nonBlockingFindingCount: 0,
       operatorApprovedEvidence: null,
@@ -64,7 +64,9 @@ function hammerDispatchArgs(rootDir, overrides = {}) {
       isDraft: false,
       mergeableState: 'MERGEABLE',
       labels: [],
-      statusCheckRollup: [],
+      statusCheckRollup: [
+        { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'FAILURE' },
+      ],
       branchProtection: { requiredContexts: [] },
       author: 'builder',
       ...overrides.prMetadata,

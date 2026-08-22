@@ -12,13 +12,27 @@
 // (#883) landed — the fix corrects future classifications, but jobs already on
 // disk need a requeue to pick it up.
 
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { requeueFollowUpJobForNextRound } from '../src/follow-up-jobs.mjs';
+
+const tempRoots = [];
+
+after(() => {
+  for (const root of tempRoots) {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function createTempRoot() {
+  const root = mkdtempSync(path.join(tmpdir(), 'requeue-'));
+  tempRoots.push(root);
+  return root;
+}
 
 function seedStoppedJob(rootDir, { stopCode, prNumber = 5673 }) {
   const dir = path.join(rootDir, 'data', 'follow-up-jobs', 'stopped');
@@ -63,7 +77,7 @@ function seedStoppedJob(rootDir, { stopCode, prNumber = 5673 }) {
 }
 
 test('a stopped:review-settled job can be requeued', () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'requeue-'));
+  const root = createTempRoot();
   const jobPath = seedStoppedJob(root, { stopCode: 'review-settled' });
   const result = requeueFollowUpJobForNextRound({ rootDir: root, jobPath, requestedBy: 'operator' });
   assert.ok(result, 'requeue returned no result');
@@ -71,7 +85,7 @@ test('a stopped:review-settled job can be requeued', () => {
 });
 
 test('a stopped job with a non-retriggerable code is still refused', () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'requeue-'));
+  const root = createTempRoot();
   const jobPath = seedStoppedJob(root, { stopCode: 'abandoned' });
   assert.throws(
     () => requeueFollowUpJobForNextRound({ rootDir: root, jobPath, requestedBy: 'operator' }),

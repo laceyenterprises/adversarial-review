@@ -91,11 +91,9 @@ test('an unparseable non-blocking section is not settled clean', () => {
   // owe a round rather than short-circuit closure.
   const body = `## Adversarial Review\n\n## Blocking issues\n- None.\n\n## Verdict\nComment only\n`;
   const c = classifyFollowUpCriticality(body);
-  if (c.nonBlockingFindingState !== 'known') {
-    assert.equal(isSettledCleanClassification(c), false);
-  } else {
-    assert.equal(c.nonBlockingFindingCount, 0);
-  }
+  assert.equal(c.nonBlockingFindingState, 'unknown');
+  assert.equal(c.nonBlockingFindingCount, 0);
+  assert.equal(isSettledCleanClassification(c), false);
 });
 
 test('request-changes is never settled clean regardless of non-blocking state', () => {

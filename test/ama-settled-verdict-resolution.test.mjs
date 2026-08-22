@@ -314,9 +314,11 @@ test('omitting liveHeadReview preserves the legacy body-derived behavior (back-c
 // closer deferred without merging. The classification must instead come from
 // the SAME authoritative current-head body the verdict is resolved from.
 
-const REVIEW_BODY = (verdict, blockingSection = null) =>
-  `## Summary\nLooks fine.\n\n## Verdict\n\n${verdict}` +
-  (blockingSection === null ? '' : `\n\n## Blocking Issues\n\n${blockingSection}`);
+const REVIEW_BODY = (verdict, blockingSection = null, nonBlockingSection = '- None.') =>
+  '## Summary\nLooks fine.' +
+  (blockingSection === null ? '' : `\n\n## Blocking Issues\n\n${blockingSection}`) +
+  (nonBlockingSection === null ? '' : `\n\n## Non-blocking Issues\n\n${nonBlockingSection}`) +
+  `\n\n## Verdict\n\n${verdict}`;
 
 test('comment-only + empty `- None.` Blocking Issues section resolves to known: 0 (live head)', () => {
   const res = resolveSettledReviewVerdict('/root', {

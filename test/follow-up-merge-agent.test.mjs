@@ -211,6 +211,12 @@ test('classifyNonBlockingFindings fails closed on blank or non-settled sectionle
     { count: 0, state: 'unknown' },
   );
   assert.deepEqual(
+    classifyNonBlockingFindings('## Summary\nClean.\n## Blocking Issues\n- None.\n## Verdict\nComment only', {
+      lastVerdict: 'comment-only',
+    }),
+    { count: 0, state: 'unknown' },
+  );
+  assert.deepEqual(
     classifyNonBlockingFindings('## Summary\nNeeds work.\n## Verdict\nRequest changes', {
       lastVerdict: 'request-changes',
     }),
@@ -2485,7 +2491,7 @@ test('buildMergeAgentDispatchJob ignores stale active remediation on an older he
     reviewerModel: 'codex',
     linearTicketId: null,
     revisionRef: 'new-head',
-    reviewBody: '## Summary\nx\n\n## Blocking issues\n- None.\n\n## Verdict\n\nComment only',
+    reviewBody: '## Summary\nx\n\n## Blocking issues\n- None.\n\n## Non-blocking issues\n- None.\n\n## Verdict\n\nComment only',
     reviewPostedAt: '2026-05-02T10:00:00.000Z',
     critical: false,
   });

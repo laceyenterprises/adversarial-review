@@ -215,6 +215,9 @@ test('buildFollowUpJob derives clean priority even when a legacy caller says cri
       '## Blocking issues',
       '- None.',
       '',
+      '## Non-blocking issues',
+      '- None.',
+      '',
       '## Verdict',
       'Comment only',
     ].join('\n'),
@@ -1238,6 +1241,9 @@ test('readFollowUpJob replaces stale historical critical priority with structure
       '## Blocking issues',
       '- None.',
       '',
+      '## Non-blocking issues',
+      '- None.',
+      '',
       '## Verdict',
       'Comment only',
     ].join('\n'),
@@ -1558,6 +1564,9 @@ test('claimNextFollowUpJob honors explicit operator requeues for settled reviews
       '## Blocking issues',
       '- None.',
       '',
+      '## Non-blocking issues',
+      '- None.',
+      '',
       '## Verdict',
       '',
       'Comment only',
@@ -1600,7 +1609,7 @@ test('claimNextFollowUpJob logs and retries settled jobs when stopped-marking fa
   const settled = createFollowUpJob({
     ...makeJobInput(rootDir),
     critical: false,
-    reviewBody: '## Summary\nClean.\n\n## Blocking issues\n- None.\n\n## Verdict\nComment only',
+    reviewBody: '## Summary\nClean.\n\n## Blocking issues\n- None.\n\n## Non-blocking issues\n- None.\n\n## Verdict\nComment only',
   });
   createFollowUpJob({
     ...makeJobInput(rootDir),

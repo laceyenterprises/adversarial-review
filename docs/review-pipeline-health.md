@@ -106,7 +106,7 @@ Its action headline is `Reviews stalled — restore reviewer dispatch`.
 | `review:terminal_but_unmerged` | settled/clean PR remains open and unmerged past the terminal threshold | ticket | the PR merges/closes or no longer has a settled clean terminal signature |
 | `review:ama_closer_lease_stale` | AMA closer lease is `pending`/`dispatched`, `terminalOutcome=null`, and older than 30m | ticket | the lease reaches terminal state or falls below the age threshold |
 | `review:reviewer_pass_zombie` | `reviewer_passes.status='running'` row is older than 30m | ticket | no running reviewer pass exceeds the age threshold; the watcher timeout sweep should settle parseably aged rows as `failed` / `reviewer-timeout` |
-| `review:stuck_retry_loop` | one or more open PRs remain `review_status='failed'` after infra auto-recovery exhausted its attempt cap (`infra_auto_recover_attempts` at/over the cap, default 3) | ticket | no open PR remains failed at/over the infra auto-recovery cap (the review reposts/succeeds or the PR merges/closes) |
+| `review:stuck_retry_loop` | one or more open PRs remain `review_status='failed'` after infra auto-recovery exhausted its attempt cap (`infra_auto_recover_attempts` at/over the cap, default 3); when the dominant `failure_class` is `diff-too-large`, the failure is deterministic because GitHub refused to serve the PR diff | ticket | no open PR remains failed at/over the infra auto-recovery cap (the review reposts/succeeds, the oversized PR is split or otherwise reviewable by file list, or the PR merges/closes) |
 | `review:round_budget_anomaly` | remediation round count exceeds the risk-class budget, or a final-pass job remains `awaiting-rereview` after budget exhaustion | ticket | no follow-up job violates the risk-class round budget |
 | `review:daemon_liveness` | required local pipeline LaunchAgent is not loaded | ticket | adversarial watcher, adversarial follow-up, and dispatch daemon labels are loaded |
 | `review:daemon_probe_failure` | required local pipeline LaunchAgent loaded state cannot be determined | ticket | launchctl probes can determine loaded state for adversarial watcher, adversarial follow-up, dispatch daemon, and dag-autowalk labels |
@@ -114,6 +114,22 @@ Its action headline is `Reviews stalled — restore reviewer dispatch`.
 | `review:dag_autowalk_launchd_unhealthy` | dag-autowalk is unloaded, last exit is non-zero, or logs are stale for >2h | ticket | dag-autowalk is loaded with a zero/unknown last exit and fresh logs |
 
 ## Configuration
+
+### Stuck retry-loop failure classes
+
+The stuck retry-loop finding includes `details.dominantFailureClass`,
+`details.byFailureClass`, and per-PR `failureClass` evidence. Operators should
+branch on that class before retriggering reviews:
+
+- `diff-too-large` means the reviewer could not fetch the PR diff because it
+  exceeded GitHub's diff API cap. This is not reviewer auth, quota, or
+  infrastructure degradation, and retriggering the same reviewer lane will fail
+  the same way. Split the PR, make the changed file list reviewable, close the
+  PR, or otherwise resolve the oversized diff condition. The finding clears once
+  the affected open PRs no longer remain failed at/over the auto-recovery cap.
+- Other dominant failure classes keep the generic exhausted-auto-recovery
+  contract: investigate the reviewer lane for the dominant auth, quota, command,
+  timeout, or upstream failure before retriggering the affected reviews.
 
 All thresholds are configurable through environment variables:
 

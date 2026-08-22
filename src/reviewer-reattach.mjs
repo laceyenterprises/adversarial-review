@@ -2,6 +2,11 @@ import { execFileSync } from 'node:child_process';
 
 import { readReviewerRunRecord } from './adapters/reviewer-runtime/run-state.mjs';
 import {
+  loginsMatch,
+  resolveReviewerBotLogin,
+  resolveReviewerBotLoginAliases,
+} from './review-body-capture.mjs';
+import {
   DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS,
   resolveReviewerLeaseRecoveryEnabled,
 } from './reviewer-lease.mjs';
@@ -35,25 +40,24 @@ const OVERDUE_RECOVERY_FAILURE_MESSAGE =
 const LEASE_RECOVERY_CAP_FAILURE_MESSAGE =
   'Reviewer lease recovery cap exhausted; leaving the review failed for operator inspection.';
 
-const REVIEWER_BOT_LOGINS = new Map([
-  ['claude', 'claude-reviewer-lacey'],
-  ['codex', 'codex-reviewer-lacey'],
-  ['gemini', 'gemini-reviewer-lacey'],
-  ['pi', 'codex-reviewer-lacey'],
-  // opencode defaults to Anthropic Claude; keep the reviewer cross-model.
-  ['opencode', 'codex-reviewer-lacey'],
-  ['hermes', 'codex-reviewer-lacey'],
-]);
+
 
 function splitRepoPath(repoPath) {
   const [owner, repo] = String(repoPath || '').split('/');
   return { owner, repo };
 }
 
+// The canonical reviewer-login table lives in `./review-body-capture.mjs`.
+// This module used to keep its own copy holding ONLY the legacy PAT login
+// (`<model>-reviewer-lacey`). Reviewers post via GitHub Apps now, so the real
+// author is `lacey-<model>-reviewer[bot]` and the exact-equality probe below
+// could never match a posted review. A reviewer that died AFTER posting was
+// therefore recorded `dead-no-review`, its pass never settled, and the PR sat
+// with a posted clean review that nothing would merge (observed 2026-08-22 on
+// #5709, #5710, #5711). Resolve through the shared table instead of mirroring
+// it, and match any known alias.
 function reviewerBotLogin(reviewer) {
-  const value = String(reviewer || '').trim();
-  const lower = value.toLowerCase();
-  return REVIEWER_BOT_LOGINS.get(lower) || null;
+  return resolveReviewerBotLogin(reviewer);
 }
 
 function parseTime(value) {
@@ -173,10 +177,13 @@ function makeReviewPostedProbe(octokit) {
       cache.set(key, Array.isArray(reviews) ? reviews : []);
     }
 
-    const expectedLogin = reviewerBotLogin(row.reviewer);
-    if (!expectedLogin) return null;
+    // Match against every known alias for this reviewer (App login AND legacy
+    // PAT login), tolerant of the `[bot]` suffix and case. Exact equality
+    // against a single login is what stranded posted reviews before.
+    const expectedLogins = resolveReviewerBotLoginAliases(row.reviewer);
+    if (!expectedLogins.length) return null;
     return cache.get(key)
-      .filter((review) => review?.user?.login === expectedLogin)
+      .filter((review) => expectedLogins.some((login) => loginsMatch(review?.user?.login, login)))
       .filter((review) => {
         const submittedAtMs = parseTime(review?.submitted_at);
         return submittedAtMs !== null && (startedAtMs === null || submittedAtMs >= startedAtMs);

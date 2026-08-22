@@ -56,8 +56,34 @@ function splitRepoPath(repoPath) {
 // with a posted clean review that nothing would merge (observed 2026-08-22 on
 // #5709, #5710, #5711). Resolve through the shared table instead of mirroring
 // it, and match any known alias.
+// Reviewer MODEL values this module reconciles. Deliberately narrower than the
+// canonical alias table, which also keys on builder worker classes
+// (`claude-code`) and token-env names (`GH_*_REVIEWER_TOKEN`) for body capture.
+// `reviewed_prs.reviewer` holds a reviewer model; anything else is a corrupt row
+// that must become a sticky failed-orphan rather than silently resolving to some
+// bot. Only the LOGIN STRINGS come from the shared table -- that is what drifted.
+const RECONCILABLE_REVIEWER_MODELS = new Set([
+  'claude',
+  'codex',
+  'gemini',
+  'pi',
+  // opencode defaults to Anthropic Claude; keep the reviewer cross-model.
+  'opencode',
+  'hermes',
+]);
+
+function isReconcilableReviewer(reviewer) {
+  return RECONCILABLE_REVIEWER_MODELS.has(String(reviewer || '').trim().toLowerCase());
+}
+
 function reviewerBotLogin(reviewer) {
-  return resolveReviewerBotLogin(reviewer);
+  if (!isReconcilableReviewer(reviewer)) return null;
+  return resolveReviewerBotLogin(String(reviewer).trim().toLowerCase());
+}
+
+function reviewerBotLoginAliases(reviewer) {
+  if (!isReconcilableReviewer(reviewer)) return [];
+  return resolveReviewerBotLoginAliases(String(reviewer).trim().toLowerCase());
 }
 
 function parseTime(value) {
@@ -180,7 +206,7 @@ function makeReviewPostedProbe(octokit) {
     // Match against every known alias for this reviewer (App login AND legacy
     // PAT login), tolerant of the `[bot]` suffix and case. Exact equality
     // against a single login is what stranded posted reviews before.
-    const expectedLogins = resolveReviewerBotLoginAliases(row.reviewer);
+    const expectedLogins = reviewerBotLoginAliases(row.reviewer);
     if (!expectedLogins.length) return null;
     return cache.get(key)
       .filter((review) => expectedLogins.some((login) => loginsMatch(review?.user?.login, login)))

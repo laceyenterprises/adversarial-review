@@ -366,14 +366,17 @@ export function resolveGeminiReviewerModeWithSource({
     loaderImpl,
     contextKey: 'reviewer.gemini.mode',
   });
-  const trace = cfg.resolutionTrace('reviewer.gemini.mode');
+  const mode = cfg.get('reviewer.gemini.mode', 'off') || 'off';
+  const trace = typeof cfg.resolutionTrace === 'function'
+    ? cfg.resolutionTrace('reviewer.gemini.mode')
+    : [];
   const winning = trace[trace.length - 1] || {
     source: 'code-default',
-    value: cfg.get('reviewer.gemini.mode', 'off'),
+    value: mode,
     path: null,
   };
   return {
-    mode: cfg.get('reviewer.gemini.mode', 'off'),
+    mode,
     source: sourceKind(winning.source),
     sourceDetail: winning.source,
     rawValue: winning.value,

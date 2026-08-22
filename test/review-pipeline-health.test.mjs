@@ -1862,6 +1862,7 @@ test('a routine OAuth banner in the tail does not classify a failure as auth', (
   assert.equal(finding.details.dominantFailureClass, 'diff-too-large');
   assert.notEqual(finding.details.dominantFailureClass, 'auth');
   // The advice must not send an operator after credentials for a diff-size problem.
+  assert.equal(typeof finding.recommended_action, 'string');
   assert.match(finding.recommended_action, /NOT a reviewer auth\/infra problem/);
   assert.match(finding.recommended_action, /do not retrigger/);
 });

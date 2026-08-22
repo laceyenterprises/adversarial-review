@@ -17,6 +17,7 @@ function fixtureEnv(overrides = {}) {
     GH_CODEX_REVIEWER_TOKEN: '',
     GH_GEMINI_REVIEWER_TOKEN: '',
     AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'false',
+    ADVERSARIAL_AFH_REVIEWER_FALLBACK: 'false',
     WATCHER_ROUTING_TIER_READINESS_PROBE_DISABLED: '1',
     ...overrides,
   };

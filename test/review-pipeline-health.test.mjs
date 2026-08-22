@@ -550,6 +550,7 @@ test('queue starvation distinguishes a FAILED reviewer from an unstarted one', (
   assert.match(finding.recommended_action, /reviewer-runtime, not capacity/);
   assert.equal(finding.details.reviewerFailed, true);
   assert.equal(finding.details.reviewAttempts, 1);
+  assert.equal(finding.details.failedCount, 1);
   // Depth belongs in the subject so the pile-up size is visible at a glance.
   assert.match(finding.subject, /1 PR\(s\) awaiting first-pass review/);
 });

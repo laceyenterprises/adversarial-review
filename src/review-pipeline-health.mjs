@@ -1687,6 +1687,7 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
         ...oldest,
         thresholdMs: config.queueStarvationMaxAgeMs,
         depth: snapshot.firstPassQueue.depth,
+        failedCount: snapshot.firstPassQueue.failedCount,
       },
     }));
   }

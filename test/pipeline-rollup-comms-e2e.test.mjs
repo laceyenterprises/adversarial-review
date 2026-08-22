@@ -23,7 +23,7 @@ const REGISTRY = {
 
 const CONFIG = {
   id: 'code-pr',
-  riskClasses: { low: { maxRemediationRounds: 1 }, medium: { maxRemediationRounds: 2 }, high: { maxRemediationRounds: 3 }, critical: { maxRemediationRounds: 4 } },
+  riskClasses: { low: { maxRemediationRounds: 1 }, medium: { maxRemediationRounds: 3 }, high: { maxRemediationRounds: 3 }, critical: { maxRemediationRounds: 4 } },
   pipeline: {
     enabled: true,
     stages: [

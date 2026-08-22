@@ -106,6 +106,8 @@ test('too-large PR diff falls back to files API and raw added-file patches', asy
   const headSha = '923df3f3182297bea7157ed6df2e887416396ccc';
   const recordedCategories = [];
   const calls = [];
+  let activeRawBlobFetches = 0;
+  let maxActiveRawBlobFetches = 0;
   try {
     const diff = await fetchPRDiff(repo, prNumber, headSha, {
       execFileImpl: async (command, args, options) => {
@@ -150,6 +152,11 @@ test('too-large PR diff falls back to files API and raw added-file patches', asy
                   status: 'added',
                   sha: '3333333333333333333333333333333333333333',
                 },
+                {
+                  filename: 'src/empty.txt',
+                  status: 'added',
+                  sha: '4444444444444444444444444444444444444444',
+                },
               ]),
             ].join('\n')),
             stderr: Buffer.alloc(0),
@@ -158,12 +165,14 @@ test('too-large PR diff falls back to files API and raw added-file patches', asy
         if (args[0] === 'api' && args[3]?.startsWith(`repos/${repo}/git/blobs/`)) {
           assert.equal(options.maxBuffer, 100 * 1024 * 1024);
           assert.deepEqual(args.slice(4), ['-H', 'Accept: application/vnd.github.raw']);
-          if (args[3] === `repos/${repo}/git/blobs/2222222222222222222222222222222222222222`) {
-            return { stdout: Buffer.from('one\ntwo\n'), stderr: Buffer.alloc(0) };
-          }
-          if (args[3] === `repos/${repo}/git/blobs/3333333333333333333333333333333333333333`) {
-            return { stdout: Buffer.from('\n'), stderr: Buffer.alloc(0) };
-          }
+          activeRawBlobFetches += 1;
+          maxActiveRawBlobFetches = Math.max(maxActiveRawBlobFetches, activeRawBlobFetches);
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          activeRawBlobFetches -= 1;
+          const blobPath = args[3];
+          if (blobPath === `repos/${repo}/git/blobs/2222222222222222222222222222222222222222`) return { stdout: Buffer.from('one\ntwo\n'), stderr: Buffer.alloc(0) };
+          if (blobPath === `repos/${repo}/git/blobs/3333333333333333333333333333333333333333`) return { stdout: Buffer.from('\n'), stderr: Buffer.alloc(0) };
+          if (blobPath === `repos/${repo}/git/blobs/4444444444444444444444444444444444444444`) return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
         }
         throw new Error(`unexpected gh call: ${args.join(' ')}`);
       },
@@ -184,10 +193,21 @@ test('too-large PR diff falls back to files API and raw added-file patches', asy
     assert.match(diffText, /@@ -0,0 \+1,2 @@\n\+one\n\+two/);
     assert.match(diffText, /diff --git a\/src\/newline\.txt b\/src\/newline\.txt/);
     assert.match(diffText, /@@ -0,0 \+1,1 @@\n\+\n/);
-    assert.deepEqual(calls.map((args) => args[0]), ['pr', 'api', 'api', 'api']);
+    assert.match(diffText, /diff --git a\/src\/empty\.txt b\/src\/empty\.txt\nnew file mode 100644\nindex 0000000\.\.4444444\n(?!@@ -0,0 \+1,0 @@)/);
+    assert.ok(
+      diffText.indexOf('diff --git a/src/too big.js b/src/too big.js')
+        < diffText.indexOf('diff --git a/src/newline.txt b/src/newline.txt')
+    );
+    assert.ok(
+      diffText.indexOf('diff --git a/src/newline.txt b/src/newline.txt')
+        < diffText.indexOf('diff --git a/src/empty.txt b/src/empty.txt')
+    );
+    assert.equal(maxActiveRawBlobFetches, 3);
+    assert.deepEqual(calls.map((args) => args[0]), ['pr', 'api', 'api', 'api', 'api']);
     assert.deepEqual(recordedCategories, [
       { category: 'diff_fetch', status: 'error' },
       { category: 'diff_fetch_files_api', status: 200 },
+      { category: 'diff_fetch_raw_file', status: 200 },
       { category: 'diff_fetch_raw_file', status: 200 },
       { category: 'diff_fetch_raw_file', status: 200 },
     ]);

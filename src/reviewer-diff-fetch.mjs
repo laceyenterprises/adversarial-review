@@ -8,6 +8,7 @@ import { buildGhErrorDetail } from './reviewer-util.mjs';
 
 const execFileAsync = promisify(execFile);
 const GITHUB_BLOB_MAX_BUFFER_BYTES = 100 * 1024 * 1024;
+const RAW_ADDED_FILE_FETCH_CONCURRENCY = 12;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -77,6 +78,21 @@ function isLikelyBinaryBuffer(buffer) {
   return sample.includes(0);
 }
 
+async function runWithConcurrency(tasks, concurrency) {
+  if (!tasks.length) return;
+  let nextIndex = 0;
+  const workerCount = Math.min(tasks.length, Math.max(1, Number(concurrency) || 1));
+  async function worker() {
+    for (;;) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= tasks.length) return;
+      await tasks[index]();
+    }
+  }
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+}
+
 function diffHeaderForFile(file) {
   const filename = String(file?.filename || '').trim();
   const previous = String(file?.previous_filename || '').trim();
@@ -108,6 +124,9 @@ function synthesizeAddedFilePatch(file, content) {
   const body = hasTrailingNewline ? text.slice(0, -1) : text;
   const lines = text.length === 0 ? [] : body.split('\n');
   const hunkSpan = lines.length;
+  if (hunkSpan === 0) {
+    return `${header.slice(0, 3).join('\n')}\n`;
+  }
   const patchLines = [
     ...header,
     `@@ -0,0 +1,${hunkSpan} @@`,
@@ -214,29 +233,34 @@ async function fetchPRDiffFromFilesApi(repo, prNumber, headSha, {
     throw err;
   }
 
-  const patches = [];
-  for (const file of files) {
+  const patches = new Array(files.length).fill(null);
+  const rawFetchTasks = [];
+  for (let index = 0; index < files.length; index += 1) {
+    const file = files[index];
     const filename = String(file?.filename || '').trim();
     if (!filename) continue;
     if (typeof file.patch === 'string' && file.patch.trim()) {
-      patches.push(`${diffHeaderForFile(file).join('\n')}\n${file.patch}\n`);
+      patches[index] = `${diffHeaderForFile(file).join('\n')}\n${file.patch}\n`;
       continue;
     }
     if (file.status === 'added') {
-      const raw = await fetchRawAddedFileForDiff(repo, prNumber, file, {
-        execFileImpl,
-        execGhWithRetryImpl,
-        recordApiCallImpl,
-        apiStatusFromErrorImpl,
-        ghRetrySleepImpl,
+      rawFetchTasks.push(async () => {
+        const raw = await fetchRawAddedFileForDiff(repo, prNumber, file, {
+          execFileImpl,
+          execGhWithRetryImpl,
+          recordApiCallImpl,
+          apiStatusFromErrorImpl,
+          ghRetrySleepImpl,
+        });
+        patches[index] = synthesizeAddedFilePatch(file, raw);
       });
-      patches.push(synthesizeAddedFilePatch(file, raw));
       continue;
     }
     log.warn?.(`[reviewer] WARN: PR files API omitted patch for ${repo}#${prNumber} ${filename} status=${file.status || 'unknown'}; adding metadata-only diff entry`);
-    patches.push(`${diffHeaderForFile(file).join('\n')}\n`);
+    patches[index] = `${diffHeaderForFile(file).join('\n')}\n`;
   }
-  return Buffer.from(patches.join('\n'));
+  await runWithConcurrency(rawFetchTasks, RAW_ADDED_FILE_FETCH_CONCURRENCY);
+  return Buffer.from(patches.filter(Boolean).join('\n'));
 }
 
 async function fetchPRDiff(repo, prNumber, headSha, {

@@ -127,7 +127,7 @@ import {
   buildAgyReviewerPromptPrefix,
   isFinalReviewRound,
 } from './reviewer-prompt.mjs';
-import { withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
+import { isSqliteBusyError, withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
 
 const CRITICAL_WORDS = ['critical', 'vulnerability', 'security', 'injection'];
 
@@ -1783,6 +1783,8 @@ async function postGitHubReviewWithCapture({
   reviewerTokenFetchTimeoutMs = undefined,
   lookupRetryBackoffMs = undefined,
   sleepImpl = undefined,
+  sqliteBusyRetryDelaysMs = undefined,
+  sqliteBusySleepImpl = undefined,
   findCapturedReviewerBodyImpl = findCapturedReviewerBody,
   findPendingReviewerBodyCaptureImpl = findPendingReviewerBodyCapture,
   captureReviewerBodyAfterPostImpl = captureReviewerBodyAfterPost,
@@ -1806,15 +1808,24 @@ async function postGitHubReviewWithCapture({
   }
   let capturedReviewBody = null;
   try {
-    capturedReviewBody = findCapturedReviewerBodyImpl(rootDir, {
-      repo,
-      prNumber,
-      attemptNumber: Number(attemptNumber),
-      passKind,
-      headSha: normalizedHeadSha || null,
-      reviewerModel,
-    });
+    capturedReviewBody = withSqliteBusyRetrySync(
+      () => findCapturedReviewerBodyImpl(rootDir, {
+        repo,
+        prNumber,
+        attemptNumber: Number(attemptNumber),
+        passKind,
+        headSha: normalizedHeadSha || null,
+        reviewerModel,
+      }),
+      {
+        label: `captured-review-body-lookup ${repo}#${prNumber}`,
+        delaysMs: sqliteBusyRetryDelaysMs,
+        sleepImpl: sqliteBusySleepImpl,
+        log,
+      }
+    );
   } catch (err) {
+    if (isSqliteBusyError(err)) throw err;
     log.warn?.(
       `[reviewer] captured review lookup failed for ${repo}#${prNumber}; ` +
       `continuing to post review: ${err?.message || err}`
@@ -1831,7 +1842,12 @@ async function postGitHubReviewWithCapture({
         headSha: normalizedHeadSha,
         reviewerModel,
       }),
-      { label: `pending-review-body-capture ${repo}#${prNumber}`, log },
+      {
+        label: `pending-review-body-capture ${repo}#${prNumber}`,
+        delaysMs: sqliteBusyRetryDelaysMs,
+        sleepImpl: sqliteBusySleepImpl,
+        log,
+      }
     );
   }
   const alreadyCaptured = capturedReviewBody !== null;

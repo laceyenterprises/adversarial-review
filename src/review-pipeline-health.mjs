@@ -1517,17 +1517,31 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
   const findings = [];
   const { config } = snapshot;
 
-  if (
-    snapshot.reviewStateLedger?.exists === true
-    && snapshot.reviewStateLedger?.readable !== true
-  ) {
+  // An ABSENT ledger is reported alongside an unreadable one. Previously this
+  // required `exists === true`, so a collector pointed at a root with no
+  // reviews.db emitted zero findings over an all-zero snapshot — a false CLEAN
+  // that is indistinguishable from a healthy idle pipeline. That is how the
+  // 2026-08-22 terminal-Hammer Sev-1 read as green on the operator surface
+  // (see the `--root` default note in review-pipeline-health-cli.mjs).
+  //
+  // There is no legitimate steady state in which this collector runs against a
+  // root that has no ledger: the watcher creates data/reviews.db on first poll.
+  // Missing therefore means misrouted or destroyed, and both are findings.
+  if (snapshot.reviewStateLedger?.readable !== true) {
+    const exists = snapshot.reviewStateLedger?.exists === true;
     findings.push(buildFinding({
       code: 'review:review_state_ledger_unreadable',
       tier: 'page',
-      subject: 'Review-state ledger exists but pipeline-health cannot open it',
-      message: `reviews.db at ${snapshot.reviewStateLedger.path} is unreadable: ${snapshot.reviewStateLedger.error || 'open-failed'}.`,
-      evidence: [snapshot.reviewStateLedger.path],
-      recommendedAction: 'Confirm data/reviews.db is a regular file with read access for the collector identity; inspect details.error for sqlite-side corruption before retrying.',
+      subject: exists
+        ? 'Review-state ledger exists but pipeline-health cannot open it'
+        : 'Review-state ledger is missing at the resolved root',
+      message: exists
+        ? `reviews.db at ${snapshot.reviewStateLedger.path} is unreadable: ${snapshot.reviewStateLedger.error || 'open-failed'}.`
+        : `reviews.db is missing at ${snapshot.reviewStateLedger?.path || '(unresolved)'}; every queue/reviewer metric in this snapshot is zero because there is no ledger to read, NOT because the pipeline is idle.`,
+      evidence: [snapshot.reviewStateLedger?.path || '(unresolved)'],
+      recommendedAction: exists
+        ? 'Confirm data/reviews.db is a regular file with read access for the collector identity; inspect details.error for sqlite-side corruption before retrying.'
+        : 'Confirm --root points at the adversarial-review tool root (the directory containing data/reviews.db). Treat this snapshot as unusable, not as a clean pipeline.',
       observedAt,
       details: {
         ...snapshot.reviewStateLedger,

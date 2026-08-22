@@ -21,7 +21,22 @@ const DEFAULT_REVIEW_UNKNOWN_RATE_WINDOW_MINUTES = 15;
 const DEFAULT_REVIEW_UNKNOWN_RATE_SAMPLE_FLOOR = 5;
 const MIN_REVIEW_UNKNOWN_RATE_SAMPLE_FLOOR = 3;
 const DEFAULT_REVIEW_UNKNOWN_RATE_DISTINCT_PR_FLOOR = 2;
-const DEFAULT_QUEUE_STARVATION_MAX_AGE_MS = 30 * 60 * 1000;
+// How long a PR may sit WAITING for its first-pass review before that is a
+// finding.
+//
+// This measures wait, not work: `summarizeFirstPassQueue` selects only
+// `review_status = 'pending'`, so a review that is actually running
+// (`reviewing`) is NOT counted. A long review therefore cannot trip this; only a
+// PR nothing has picked up, or one whose reviewer failed and left the row
+// pending, can.
+//
+// Lowered from 30m to 10m (2026-08-22). At 30m the alarm was useless in
+// practice: the operator noticed a visible pile-up — 11 open PRs, first-pass
+// queue depth 4, oldest pending 19.4m after its reviewer exited 1 — while
+// pipeline-health stayed silent because nothing had crossed the half-hour bar
+// yet. A first-review SLA measured in tens of minutes does not describe a fleet
+// that reviews within ~3 minutes when healthy.
+const DEFAULT_QUEUE_STARVATION_MAX_AGE_MS = 10 * 60 * 1000;
 const DEFAULT_REMEDIATION_BACKLOG_THRESHOLD = 5;
 const DEFAULT_MERGE_STALLED_MAX_TICKS = 3;
 const DEFAULT_PIPELINE_TICK_INTERVAL_MS = 5 * 60 * 1000;
@@ -801,27 +816,43 @@ function summarizeReviewerDegradation(rootDir, db, { nowMs }) {
 function summarizeFirstPassQueue(db, { nowMs }) {
   const rows = safeAll(
     db,
-    `SELECT repo, pr_number, reviewed_at, rereview_requested_at, last_attempted_at
+    `SELECT repo, pr_number, reviewed_at, rereview_requested_at, last_attempted_at,
+            failed_at, failure_message, review_attempts
        FROM reviewed_prs
       WHERE pr_state = 'open'
         AND review_status = 'pending'`
   );
   let oldest = null;
+  let failedCount = 0;
   for (const row of rows) {
     const pendingSince = row.rereview_requested_at || row.reviewed_at || row.last_attempted_at;
     const pendingAgeMs = ageMs(nowMs, pendingSince);
     if (pendingAgeMs === null) continue;
+    // A row can be pending for two very different reasons, and the operator
+    // response differs: nothing ever picked it up (watcher/capacity problem), or
+    // a reviewer RAN and exited non-zero, leaving the row pending for retry
+    // (reviewer-runtime problem). Carry the distinction into the finding instead
+    // of reporting an undifferentiated "pending".
+    const reviewerFailed = Boolean(row.failed_at);
+    if (reviewerFailed) failedCount += 1;
     if (!oldest || pendingAgeMs > oldest.ageMs) {
       oldest = {
         repo: row.repo,
         prNumber: row.pr_number,
         pendingSince,
         ageMs: pendingAgeMs,
+        reviewerFailed,
+        failedAt: row.failed_at || null,
+        reviewAttempts: Number(row.review_attempts || 0),
+        failureMessage: reviewerFailed
+          ? String(row.failure_message || '').slice(0, 300) || null
+          : null,
       };
     }
   }
   return {
     depth: rows.length,
+    failedCount,
     oldest,
   };
 }
@@ -1634,15 +1665,29 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     findings.push(buildFinding({
       code: 'review:queue_starvation',
       tier: 'page',
-      subject: `Oldest pending first-pass review is ${Math.round(oldest.ageMs / 1000)}s old`,
-      message: `${oldest.repo}#${oldest.prNumber} has been pending since ${oldest.pendingSince}.`,
+      subject:
+        `${snapshot.firstPassQueue.depth} PR(s) awaiting first-pass review; oldest is `
+        + `${Math.round(oldest.ageMs / 60000)}m old`,
+      message: oldest.reviewerFailed
+        ? `${oldest.repo}#${oldest.prNumber} has been pending since ${oldest.pendingSince}; its `
+          + `reviewer FAILED at ${oldest.failedAt} after ${oldest.reviewAttempts} attempt(s): `
+          + `${oldest.failureMessage || 'no failure message recorded'}`
+        : `${oldest.repo}#${oldest.prNumber} has been pending since ${oldest.pendingSince} and no `
+          + 'reviewer has picked it up.',
       evidence: [`reviews.db reviewed_prs ${oldest.repo}#${oldest.prNumber}`],
-      recommendedAction: 'Check adversarial-watcher health and reviewer runtime capacity; retrigger or bounce only after preserving failure evidence.',
+      recommendedAction: oldest.reviewerFailed
+        ? 'A reviewer ran and exited non-zero — this is reviewer-runtime, not capacity. Read the '
+          + 'failure message and the reviewer log before retriggering; a blind retrigger will '
+          + 'reproduce the same exit.'
+        : 'Nothing picked this up — check adversarial-watcher liveness and reviewer capacity '
+          + '(hq harness health, reviewer degradation). Retrigger or bounce only after preserving '
+          + 'failure evidence.',
       observedAt,
       details: {
         ...oldest,
         thresholdMs: config.queueStarvationMaxAgeMs,
         depth: snapshot.firstPassQueue.depth,
+        failedCount: snapshot.firstPassQueue.failedCount,
       },
     }));
   }

@@ -491,6 +491,100 @@ test('queue starvation finding fires on an old pending first-pass row and clears
   assert.ok(!findingCodes(cleared).includes('review:queue_starvation'));
 });
 
+test('queue starvation default threshold is 10m, not 30m', () => {
+  // At the old 30m default the alarm was silent through a visible pile-up: 11
+  // open PRs, first-pass depth 4, oldest pending 19.4m after its reviewer exited
+  // 1. A first-review SLA in tens of minutes does not describe a fleet that
+  // reviews within ~3 minutes when healthy.
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 947,
+    reviewStatus: 'pending',
+    // 20 minutes before NOW: over a 10m bar, under a 30m one.
+    reviewedAt: new Date(Date.parse(NOW) - 20 * 60 * 1000).toISOString(),
+  });
+
+  // Default config — no explicit threshold passed.
+  const withDefault = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  assert.ok(
+    findingCodes(withDefault).includes('review:queue_starvation'),
+    'a 20m-old pending first-pass review must fire on the DEFAULT threshold',
+  );
+
+  const atOldThreshold = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    config: { queueStarvationMaxAgeMs: 30 * 60 * 1000 },
+  });
+  assert.ok(
+    !findingCodes(atOldThreshold).includes('review:queue_starvation'),
+    'sanity: the same row is silent at the old 30m threshold',
+  );
+});
+
+test('queue starvation distinguishes a FAILED reviewer from an unstarted one', () => {
+  // The two cases need different operator responses: a reviewer that ran and
+  // exited non-zero is a runtime problem (a blind retrigger reproduces it),
+  // whereas a row nothing picked up is a watcher/capacity problem.
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 948,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T17:00:00.000Z',
+  });
+  const db = openDb(rootDir);
+  try {
+    db.prepare(
+      'UPDATE reviewed_prs SET failed_at = ?, failure_message = ?, review_attempts = ? '
+      + 'WHERE pr_number = ?',
+    ).run('2026-05-25T17:02:00.000Z', 'Command failed with code 1', 1, 948);
+  } finally {
+    db.close();
+  }
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  const finding = snapshot.findings.find((item) => item.code === 'review:queue_starvation');
+  assert.ok(finding, 'expected the starvation finding');
+  assert.match(finding.message, /reviewer FAILED/);
+  assert.match(finding.message, /Command failed with code 1/);
+  assert.match(finding.recommended_action, /reviewer-runtime, not capacity/);
+  assert.equal(finding.details.reviewerFailed, true);
+  assert.equal(finding.details.reviewAttempts, 1);
+  assert.equal(finding.details.failedCount, 1);
+  // Depth belongs in the subject so the pile-up size is visible at a glance.
+  assert.match(finding.subject, /1 PR\(s\) awaiting first-pass review/);
+});
+
+test('queue starvation reports an unstarted row as capacity, not reviewer failure', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 949,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T17:00:00.000Z',
+  });
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  const finding = snapshot.findings.find((item) => item.code === 'review:queue_starvation');
+  assert.ok(finding);
+  assert.match(finding.message, /no reviewer has picked it up/);
+  assert.match(finding.recommended_action, /Nothing picked this up/);
+  assert.equal(finding.details.reviewerFailed, false);
+});
+
+test('an in-flight review does not count as starvation', () => {
+  // `summarizeFirstPassQueue` selects only review_status='pending'. A review that
+  // is actually RUNNING must never trip the alarm, or a 10m bar would page on
+  // every slow-but-healthy review.
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 950,
+    reviewStatus: 'reviewing',
+    reviewedAt: '2026-05-25T16:00:00.000Z',
+  });
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  assert.ok(!findingCodes(snapshot).includes('review:queue_starvation'));
+  assert.equal(snapshot.firstPassQueue.depth, 0);
+});
+
 test('remediation backlog finding fires on pending jobs and clears when the backlog drains', () => {
   const rootDir = tempRoot();
   insertReviewRow(rootDir, { prNumber: 10, reviewStatus: 'posted', postedAt: '2026-05-25T17:00:00.000Z' });

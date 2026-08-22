@@ -26,11 +26,20 @@ import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
+import {
+  DEFAULT_RISK_CLASS,
+  DEFAULT_ROUND_BUDGET_BY_RISK,
+  HAMMER_SERIES_RETRIES,
+  HAMMER_SERIES_TOTAL_DISPATCHES,
+  hammerLifetimeDispatchesFor,
+} from '../kernel/convergence-budget.mjs';
 
 // One retry: initial hammer + 1 re-dispatch. The cap is expressed as a total
 // number of hammer dispatches allowed for a logical PR before suppression.
-export const HAMMER_RETRY_CAP_RETRIES = 1;
-export const HAMMER_RETRY_CAP_TOTAL_DISPATCHES = HAMMER_RETRY_CAP_RETRIES + 1; // 2
+// Owned by `../kernel/convergence-budget.mjs` so the lifetime ceiling below can be
+// floored against it without an import cycle.
+export const HAMMER_RETRY_CAP_RETRIES = HAMMER_SERIES_RETRIES;
+export const HAMMER_RETRY_CAP_TOTAL_DISPATCHES = HAMMER_SERIES_TOTAL_DISPATCHES; // 2
 
 // The suppression state stamped on the ledger when the cap is exhausted. It is
 // PR-scoped (anchored to the stable job key, not the churning head) so head churn
@@ -50,7 +59,14 @@ export const HAMMER_RETRY_CAP_EXHAUSTED_REASON = 'hammer-retry-cap-exhausted';
 // for the PR across ALL series and NEVER resets on a jobKey change, so the loop
 // is bounded regardless of review-head churn. Set above the per-series cap so a
 // legitimate fresh-review-then-remediate cycle still has room before it trips.
-export const HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES = 6;
+// DERIVED: one full budget of retries on top of one full budget of rounds. At
+// the default table this is 6 — the value this constant used to hardcode — and
+// it rises automatically when an operator raises the round budget, so the
+// "set above the per-series cap" intent above stays true instead of silently
+// becoming false the moment the budget moves.
+export const HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES = hammerLifetimeDispatchesFor(
+  DEFAULT_ROUND_BUDGET_BY_RISK[DEFAULT_RISK_CLASS],
+);
 export const HAMMER_RETRY_CAP_LIFETIME_SUPPRESSION_STATE = 'hammer-lifetime-ceiling-reached-needs-operator';
 export const HAMMER_RETRY_CAP_LIFETIME_EXHAUSTED_REASON = 'hammer-lifetime-ceiling-reached';
 

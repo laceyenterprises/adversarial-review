@@ -20,7 +20,18 @@
  * @typedef {import('./contracts.js').SubjectState} SubjectState
  */
 
-export const RISK_CLASSES = Object.freeze(['low', 'medium', 'high', 'critical']);
+import {
+  DEFAULT_RISK_CLASS,
+  DEFAULT_ROUND_BUDGET_BY_RISK,
+  RISK_CLASSES,
+  remediationCeilingCapFor,
+} from './convergence-budget.mjs';
+
+// Re-exported so existing kernel consumers keep importing these from here. The
+// values are OWNED by `./convergence-budget.mjs` (a zero-import leaf, so the
+// "imports nothing heavy" constraint above still holds) and must not be
+// redeclared here — see that module for why the mirror was removed.
+export { DEFAULT_ROUND_BUDGET_BY_RISK, RISK_CLASSES };
 
 export const AGGREGATION_POLICY_KINDS = Object.freeze([
   'unanimous-clean',
@@ -29,26 +40,18 @@ export const AGGREGATION_POLICY_KINDS = Object.freeze([
   'weighted',
 ]);
 
-const DEFAULT_RISK_CLASS = 'medium';
 
-// Mirrors the v1 convergence budgets (`ROUND_BUDGET_BY_RISK_CLASS` in
-// follow-up-jobs.mjs): higher-risk subjects get more remediation rounds before
-// operator escalation. Used only as a defensive fallback when a stage omits or
-// malforms a per-risk budget; well-formed `Stage.roundBudgetByRisk` supplies
-// all four keys.
-export const DEFAULT_ROUND_BUDGET_BY_RISK = Object.freeze({
-  low: 1,
-  medium: 3,
-  high: 3,
-  critical: 4,
-});
 
 // Subject-level remediation ceiling cap (§4.1): the default ceiling is the sum
 // of per-stage budgets, capped here so a many-stage pipeline cannot multiply
-// hammer cycles without bound. 8 admits two critical stages (4 + 4) at full
-// budget while capping deeper pipelines; operators raise it per-subject via the
-// `override` seam, not by editing this constant.
-export const DEFAULT_REMEDIATION_CEILING_CAP = 8;
+// hammer cycles without bound. DERIVED so it admits two full-budget stages at
+// the widest declared risk class — at the default table that is two critical
+// stages (4 + 4) = 8, exactly the value this constant used to hardcode.
+// Operators raise it by raising the round budget, or per-subject via the
+// `override` seam; never by editing a literal here.
+export const DEFAULT_REMEDIATION_CEILING_CAP = remediationCeilingCapFor(
+  DEFAULT_ROUND_BUDGET_BY_RISK,
+);
 
 /**
  * @param {unknown} value

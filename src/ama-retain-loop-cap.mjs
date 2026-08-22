@@ -25,12 +25,25 @@ import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { writeFileAtomic } from './atomic-write.mjs';
+import {
+  DEFAULT_RISK_CLASS,
+  DEFAULT_ROUND_BUDGET_BY_RISK,
+  amaRetainLoopCapFor,
+} from './kernel/convergence-budget.mjs';
 
 // Default ceiling: 3 `not-eligible` retains on one head are tolerated; the (K+1)th
 // retain on that same head escalates. Small on purpose — a head that cannot resume
 // in a few ticks is not going to resume without operator action, so we surface it
 // loudly instead of burning poll ticks.
-export const AMA_RETAIN_LOOP_CAP = 3;
+// DERIVED from the remediation round budget, not pinned. A PR that cannot
+// self-resolve within its own remediation budget will not resolve with more
+// retains on a frozen head, so the retain cap tracks the budget exactly. At the
+// default table this is 3 — the value this constant used to hardcode. Call
+// sites that know the subject's risk class should pass a per-job `cap` from
+// `convergenceBudgetForRiskClass()` instead of relying on this default.
+export const AMA_RETAIN_LOOP_CAP = amaRetainLoopCapFor(
+  DEFAULT_ROUND_BUDGET_BY_RISK[DEFAULT_RISK_CLASS],
+);
 
 const AMA_RETAIN_LOOP_CAP_SCHEMA_VERSION = 1;
 

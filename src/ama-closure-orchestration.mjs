@@ -26,6 +26,7 @@ import * as amaDispatchCloser from './ama/dispatch-closer.mjs';
 import { isEligibleForAmaClosure, SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
 import { evaluateMergeEligibility } from './ama/merge-eligibility.mjs';
 import { recordAmaRetain } from './ama-retain-loop-cap.mjs';
+import { amaRetainLoopCapFor } from './kernel/convergence-budget.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
 import { loadConfigCached } from './config-loader.mjs';
 import { loadDomainConfig } from './domain-config.mjs';
@@ -953,8 +954,15 @@ export async function resolveMergeAgentCoexistenceForWatcher({
     // legitimately progressing PR is never falsely escalated.
     if (amaClosureResult?.reason === 'not-eligible') {
       const retainHead = currentRevisionRef || candidate?.headSha || dispatchJob?.headSha || null;
+      // Cap this series against THIS job's resolved remediation budget rather
+      // than the module default, so an operator who raises (or lowers) the round
+      // budget moves the retain cap with it. `remediationPlan.maxRounds` is the
+      // already-resolved effective budget for the job; when it is absent the
+      // derivation falls back to the medium default, which is the value this
+      // call site used before the budget was coupled.
       const retain = recordAmaRetain(rootDir, { repo: repoPath, prNumber }, {
         headSha: retainHead,
+        cap: amaRetainLoopCapFor(dispatchJob?.remediationPlan?.maxRounds),
         now: new Date().toISOString(),
         logger,
       });

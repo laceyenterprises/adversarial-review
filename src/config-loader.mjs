@@ -2521,6 +2521,83 @@ function schemaV1() {
           },
         },
       },
+      // CFG-01 Python-owned visibility mirror for adversarial-review watcher
+      // knobs. The watcher consumes the module-local `reviewer.*` leaves, but
+      // checked-in host config may carry the top-level `adversarial.*` mirror
+      // for `agent-os config doctor`; this Node loader must parse it so lagging
+      // watcher daemons do not crash-loop during rolling config expansion.
+      adversarial: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          reviewer_pool: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              max_concurrent_reviewers: {
+                __type: TYPE_INT,
+                __default: 6,
+                __nullable: true,
+                __min: 1,
+              },
+            },
+          },
+          reviewer: {
+            __type: TYPE_DICT,
+            __strict: false,
+            __keys: {
+              memory: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  pressure: {
+                    __type: TYPE_DICT,
+                    __strict: true,
+                    __keys: {
+                      projected_headroom_floor_mb: {
+                        __type: TYPE_INT,
+                        __default: 1024,
+                        __min: 0,
+                        __max: 65536,
+                      },
+                      elevated_available_mb: {
+                        __type: TYPE_INT,
+                        __default: 2048,
+                        __min: 0,
+                        __max: 131072,
+                      },
+                      critical_available_mb: {
+                        __type: TYPE_INT,
+                        __default: 1024,
+                        __min: 0,
+                        __max: 131072,
+                      },
+                      elevated_swap_used_pct: {
+                        __type: TYPE_FLOAT,
+                        __default: 85.0,
+                        __min: 0.0,
+                        __max: 100.0,
+                      },
+                      critical_swap_used_pct: {
+                        __type: TYPE_FLOAT,
+                        __default: 95.0,
+                        __min: 0.0,
+                        __max: 100.0,
+                      },
+                      swap_pressure_available_mb: {
+                        __type: TYPE_INT,
+                        __default: 8192,
+                        __min: 0,
+                        __max: 131072,
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
       watcher: {
         __type: TYPE_DICT,
         __strict: true,

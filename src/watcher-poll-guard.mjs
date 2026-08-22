@@ -1,3 +1,5 @@
+import { withSqliteBusyRetry } from './sqlite-busy-retry.mjs';
+
 // Bounded watchdog around pollOnce.
 //
 // Background: the previous design (PR #24, before review feedback)
@@ -90,6 +92,8 @@ function buildSafePollOnce({
   log = console,
   deadlineMs = DEFAULT_POLL_DEADLINE_MS,
   onTimeout,
+  sqliteBusyRetryDelaysMs,
+  sqliteBusySleepImpl,
 } = {}) {
   if (typeof pollOnceImpl !== 'function') {
     throw new TypeError('buildSafePollOnce requires a pollOnceImpl function');
@@ -122,7 +126,15 @@ function buildSafePollOnce({
     });
 
     const work = Promise.resolve()
-      .then(() => pollOnceImpl(octokit))
+      .then(() => withSqliteBusyRetry(
+        () => pollOnceImpl(octokit),
+        {
+          label: `watcher ${source}`,
+          ...(sqliteBusyRetryDelaysMs ? { delaysMs: sqliteBusyRetryDelaysMs } : {}),
+          ...(sqliteBusySleepImpl ? { sleepImpl: sqliteBusySleepImpl } : {}),
+          log,
+        }
+      ))
       .then(() => ({ ok: true, skipped: false, timedOut: false }))
       .catch((err) => ({ ok: false, skipped: false, error: err, timedOut: false }));
 

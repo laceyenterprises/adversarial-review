@@ -87,6 +87,34 @@ test('safePollOnce returns ok=false with the error when pollOnceImpl rejects', a
   assert.deepEqual(seen, [{ msg: 'boom', source: 'startup pollOnce' }]);
 });
 
+test('safePollOnce retries SQLITE_BUSY poll failures before dropping the tick', async () => {
+  let calls = 0;
+  const seen = [];
+  const sleeps = [];
+  const busy = new Error('database is locked');
+  busy.code = 'SQLITE_BUSY';
+  const pollOnceImpl = async () => {
+    calls += 1;
+    if (calls === 1) throw busy;
+  };
+
+  const safePollOnce = buildSafePollOnce({
+    pollOnceImpl,
+    octokit: 'stub',
+    errorHandler: (err, source) => seen.push({ msg: err.message, source }),
+    sqliteBusyRetryDelaysMs: [25],
+    sqliteBusySleepImpl: async (ms) => sleeps.push(ms),
+    log: { log: () => {}, warn: () => {}, error: () => {} },
+  });
+
+  const result = await safePollOnce('scheduled pollOnce');
+
+  assert.deepEqual(result, { ok: true, skipped: false, timedOut: false });
+  assert.equal(calls, 2);
+  assert.deepEqual(sleeps, [25]);
+  assert.deepEqual(seen, []);
+});
+
 test('safePollOnce passes the source label per call so startup vs scheduled failures are distinguishable', async () => {
   const pollOnceImpl = async () => { throw new Error('x'); };
   const seen = [];

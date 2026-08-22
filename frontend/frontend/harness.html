@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ARF · Standup › Add harness</title>
+    <link rel="stylesheet" href="./arf.css" />
+  </head>
+  <body>
+    <!--
+      Screen C, harness half (SPEC §1). The identity half lives at `/`; this
+      page renders the harness panel on its own so both halves can ship without
+      one HTML shell pretending to own the other.
+
+      No framework, no build step: the whole app is three files served straight
+      off disk, which is what keeps ARF at zero npm dependencies.
+    -->
+    <header class="topbar">
+      <h1>ARF · Standup <span class="crumb">› Add harness</span></h1>
+      <p class="subtitle" id="context">loading…</p>
+    </header>
+
+    <main>
+      <section class="panel" aria-labelledby="form-heading">
+        <h2 id="form-heading">Harness</h2>
+        <form id="harness-form" autocomplete="off">
+          <div class="row">
+            <label for="template">start from</label>
+            <select id="template" name="template"></select>
+          </div>
+
+          <div class="row">
+            <label for="class">class</label>
+            <input id="class" name="class" required placeholder="claude-reviewer" />
+          </div>
+
+          <div class="row">
+            <label for="kind">kind</label>
+            <select id="kind" name="kind">
+              <option value="reviewer">reviewer</option>
+              <option value="remediator">remediator</option>
+              <option value="worker">worker</option>
+              <option value="scanner">scanner</option>
+            </select>
+          </div>
+
+          <div class="row">
+            <label for="entitlement">entitlement</label>
+            <input id="entitlement" name="entitlement" required placeholder="claude-reviewer-worker" />
+          </div>
+
+          <div class="row">
+            <label for="allowedModels">allowed models</label>
+            <input id="allowedModels" name="allowedModels" required placeholder="model-a, model-b" />
+          </div>
+
+          <div class="row">
+            <label for="defaultModel">default model</label>
+            <input id="defaultModel" name="defaultModel" placeholder="must be one of the above" />
+          </div>
+
+          <div class="row">
+            <label for="botLogin">bot login</label>
+            <input id="botLogin" name="botLogin" required placeholder="claude-reviewer" />
+            <select id="identityKind" name="identityKind" aria-label="identity kind">
+              <option value="github_app">GitHub App</option>
+              <option value="github_user">user account</option>
+            </select>
+          </div>
+
+          <div class="row">
+            <label for="aliases">login aliases</label>
+            <input id="aliases" name="aliases" placeholder="other spellings this account posts under" />
+          </div>
+
+          <div class="row">
+            <label for="modelAuthMode">model-auth</label>
+            <select id="modelAuthMode" name="modelAuthMode">
+              <option value="broker-oauth">broker-OAuth (in-OS)</option>
+              <option value="standalone-token">standalone token</option>
+            </select>
+          </div>
+
+          <div class="row" id="broker-role-row">
+            <label for="brokerRole">broker role</label>
+            <select id="brokerRole" name="brokerRole"></select>
+          </div>
+
+          <div class="row hidden" id="token-ref-row">
+            <label for="tokenRef">token ref</label>
+            <input id="tokenRef" name="tokenRef" placeholder="op://… | file:///… | env:NAME" />
+          </div>
+
+          <div class="row">
+            <label for="runtimeCommand">runtime</label>
+            <input id="runtimeCommand" name="runtimeCommand" placeholder="claude" list="runtime-commands" />
+            <datalist id="runtime-commands"></datalist>
+          </div>
+
+          <div class="row">
+            <label for="allowlistEnabled">reviewer allowlist</label>
+            <label class="checkbox">
+              <input id="allowlistEnabled" name="allowlistEnabled" type="checkbox" checked />
+              add the bot login so its posts count as reviews
+            </label>
+          </div>
+
+          <div class="actions">
+            <label class="checkbox">
+              <input id="dryRun" name="dryRun" type="checkbox" />
+              dry run (write nothing)
+            </label>
+            <button type="submit" id="run">Run</button>
+          </div>
+        </form>
+        <p class="error hidden" id="form-error" role="alert"></p>
+      </section>
+
+      <section class="panel" aria-labelledby="steps-heading">
+        <h2 id="steps-heading">Steps</h2>
+        <ol class="steps" id="steps">
+          <li data-step="register-class"><span class="mark">○</span> Register class + entitlement</li>
+          <li data-step="provision-model-auth"><span class="mark">○</span> Provision model-auth</li>
+          <li data-step="verify-runtime"><span class="mark">○</span> Install / verify runtime</li>
+          <li data-step="wire-allowlist"><span class="mark">○</span> Wire reviewer allowlist</li>
+          <li data-step="verify-allowlist"><span class="mark">○</span> Verify allowlist entry</li>
+        </ol>
+        <p class="run-status" id="run-status">idle</p>
+      </section>
+
+      <section class="panel" aria-labelledby="state-heading">
+        <h2 id="state-heading">Registered harnesses</h2>
+        <table class="state" id="harnesses">
+          <thead>
+            <tr>
+              <th>class</th><th>entitlement</th><th>model-auth</th>
+              <th>runtime</th><th>allowlist</th><th>status</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <h3>Reviewer allowlist</h3>
+        <ul class="allowlist" id="allowlist"></ul>
+      </section>
+    </main>
+
+    <script type="module" src="./harness-panel.mjs"></script>
+  </body>
+</html>

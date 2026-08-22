@@ -1,0 +1,153 @@
+/*
+ * ARF frontend styling. One stylesheet, no build step, no framework.
+ *
+ * The palette is deliberately terminal-adjacent — ARF's mockups in SPEC §1 are
+ * drawn as box-art panels, and an operator moving between `hq` output and this
+ * page should not have to change register. Status colour is used for exactly one
+ * thing: whether a step passed, was skipped, or failed.
+ */
+
+:root {
+  color-scheme: light dark;
+  --bg: #12141a;
+  --panel: #1a1d25;
+  --line: #2c313d;
+  --text: #dfe3ea;
+  --muted: #8b93a3;
+  --ok: #56c271;
+  --failed: #e2565c;
+  --skipped: #b6893c;
+  --accent: #6da8f0;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 0 0 3rem;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+.topbar {
+  border-bottom: 1px solid var(--line);
+  padding: 1rem 1.5rem;
+}
+
+.topbar h1 { font-size: 1rem; font-weight: 600; margin: 0; }
+.crumb { color: var(--muted); font-weight: 400; }
+.subtitle { color: var(--muted); margin: 0.35rem 0 0; font-size: 0.8rem; word-break: break-all; }
+
+main {
+  display: grid;
+  gap: 1rem;
+  padding: 1.5rem;
+  grid-template-columns: minmax(340px, 1fr) minmax(340px, 1fr);
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 1rem 1.25rem 1.25rem;
+}
+
+.panel:last-of-type { grid-column: 1 / -1; }
+.panel h2 { font-size: 0.85rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin: 0 0 0.9rem; }
+.panel h3 { font-size: 0.8rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin: 1.25rem 0 0.5rem; }
+
+.row {
+  display: grid;
+  grid-template-columns: 8.5rem 1fr auto;
+  gap: 0.5rem;
+  align-items: center;
+  margin-bottom: 0.6rem;
+}
+
+.row > label:first-child { color: var(--muted); }
+.row.hidden { display: none; }
+
+input[type="text"], input:not([type]), select {
+  background: #0d0f14;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text);
+  font: inherit;
+  padding: 0.35rem 0.5rem;
+  min-width: 0;
+}
+
+input:focus, select:focus, button:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.checkbox { display: inline-flex; align-items: center; gap: 0.4rem; color: var(--muted); }
+
+.actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 1rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--line);
+}
+
+button {
+  background: var(--accent);
+  border: none;
+  border-radius: 4px;
+  color: #0d0f14;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+  padding: 0.4rem 1.4rem;
+}
+
+button:disabled { opacity: 0.5; cursor: progress; }
+
+.steps { list-style: none; margin: 0; padding: 0; }
+
+.steps li {
+  border-bottom: 1px dotted var(--line);
+  padding: 0.45rem 0;
+  color: var(--muted);
+}
+
+.steps li[data-status="ok"] { color: var(--text); }
+.steps li[data-status="ok"] .mark { color: var(--ok); }
+.steps li[data-status="failed"] { color: var(--failed); }
+.steps li[data-status="failed"] .mark { color: var(--failed); }
+.steps li[data-status="skipped"] .mark { color: var(--skipped); }
+.steps li[data-status="running"] .mark { color: var(--accent); }
+.mark { display: inline-block; width: 1.25rem; }
+.detail { color: var(--muted); }
+/* A failed step carries the runtime's own multi-line output. Default white-space
+   would collapse it onto one line, which is the truncation this avoids in the
+   probe — so the lines are kept, wrapped, and left to grow the row. */
+.steps li[data-status="failed"] .detail {
+  color: var(--failed);
+  display: block;
+  margin-left: 1.25rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.run-status { margin: 1rem 0 0; color: var(--muted); }
+.run-status[data-status="ready"] { color: var(--ok); }
+.run-status[data-status="failed"] { color: var(--failed); }
+
+.error { color: var(--failed); margin: 0.9rem 0 0; }
+.hidden { display: none; }
+
+table.state { border-collapse: collapse; width: 100%; }
+table.state th, table.state td { border-bottom: 1px solid var(--line); padding: 0.4rem 0.6rem 0.4rem 0; text-align: left; }
+table.state th { color: var(--muted); font-weight: 500; font-size: 0.8rem; }
+table.state tr[data-status="ready"] td:last-child { color: var(--ok); }
+table.state tr[data-status="incomplete"] td:last-child { color: var(--failed); }
+
+ul.allowlist { list-style: none; margin: 0; padding: 0; color: var(--muted); }
+ul.allowlist li { padding: 0.25rem 0; }
+
+@media (max-width: 900px) {
+  main { grid-template-columns: 1fr; }
+}

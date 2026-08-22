@@ -1,0 +1,19 @@
+{
+  "name": "@arf/supervisor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "ARF process manager + the `arf` CLI: supervises the ARF server (and, standalone, the pipeline daemons) with no launchd, no session-ledger, and no broker",
+  "engines": {
+    "node": ">=23.4"
+  },
+  "bin": {
+    "arf": "bin/arf"
+  },
+  "scripts": {
+    "start": "node bin/arf up",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

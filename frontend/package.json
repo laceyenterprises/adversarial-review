@@ -1,0 +1,20 @@
+{
+  "name": "@arf/app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "ARF — Adversarial Review Frontend. A standalone app: its own API, store, frontend screens, process manager, state root, and config, with zero agent-os runtime dependency.",
+  "engines": {
+    "node": ">=23.4"
+  },
+  "bin": {
+    "arf": "supervisor/bin/arf"
+  },
+  "scripts": {
+    "start": "node supervisor/bin/arf up",
+    "gate": "node supervisor/bin/arf gate",
+    "test": "node --test server/test/*.test.mjs supervisor/test/*.test.mjs && npm --prefix frontend test"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

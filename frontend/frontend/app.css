@@ -1,0 +1,215 @@
+/*
+ * ARF frontend styling.
+ *
+ * Plain CSS, no build step, no framework — the same zero-dependency boundary the
+ * server keeps (SPEC §9). Colours come from custom properties so the later
+ * screens (ARF-03/04) inherit one palette rather than each picking their own.
+ *
+ * The step statuses are the part that carries meaning rather than decoration:
+ * `ok`, `running`, `failed`, and `pending` are the four the contract names, and
+ * each is distinguishable by its glyph and its text as well as by hue — a
+ * standup is exactly the kind of screen someone reads over a shoulder, and
+ * red-versus-green alone excludes a good number of readers.
+ */
+
+:root {
+  color-scheme: light dark;
+  --bg: #0d1117;
+  --panel: #161b22;
+  --line: #30363d;
+  --ink: #e6edf3;
+  --dim: #8b949e;
+  --accent: #58a6ff;
+  --ok: #3fb950;
+  --run: #d29922;
+  --fail: #f85149;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #ffffff;
+    --panel: #f6f8fa;
+    --line: #d0d7de;
+    --ink: #1f2328;
+    --dim: #656d76;
+    --accent: #0969da;
+    --ok: #1a7f37;
+    --run: #9a6700;
+    --fail: #cf222e;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.masthead {
+  display: flex;
+  align-items: baseline;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.masthead h1 { font-size: 1.05rem; margin: 0; font-weight: 600; }
+.dim { color: var(--dim); font-weight: 400; }
+
+.screens { display: flex; gap: .5rem; margin-left: auto; }
+
+.screen-tab {
+  padding: .2rem .7rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: .8rem;
+  color: var(--dim);
+}
+
+.screen-tab[data-state="active"] {
+  color: var(--ink);
+  border-color: var(--accent);
+}
+
+main { padding: 1.5rem; max-width: 60rem; margin: 0 auto; }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 1.25rem 1.5rem 1.5rem;
+}
+
+.panel h2 { margin: 0 0 .35rem; font-size: 1rem; }
+.lede { margin: 0 0 1rem; color: var(--dim); max-width: 62ch; }
+
+.broker-state {
+  margin-bottom: 1rem;
+  padding: .55rem .8rem;
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: 4px;
+  font-size: .85rem;
+}
+
+.broker-state[data-ok="false"] { border-left-color: var(--run); }
+.broker-state[data-ok="true"] { border-left-color: var(--ok); }
+
+fieldset {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: .75rem 1rem 1rem;
+  margin: 0 0 1rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: .75rem 1rem;
+}
+
+legend { color: var(--dim); font-size: .8rem; text-transform: lowercase; padding: 0 .35rem; }
+
+.field { display: flex; flex-direction: column; gap: .25rem; flex: 1 1 14rem; }
+.field.wide { flex-basis: 100%; }
+.field > span { font-size: .8rem; color: var(--dim); }
+.field small { opacity: .75; }
+
+input[type="text"] {
+  font: 13px/1.4 var(--mono);
+  padding: .4rem .55rem;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+input[type="text"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.note { flex-basis: 100%; margin: 0; font-size: .8rem; color: var(--dim); }
+.note code { font-family: var(--mono); font-size: .95em; }
+
+.roles { display: flex; flex-wrap: wrap; gap: .4rem; flex-basis: 100%; }
+
+.role-chip {
+  font: 12px/1 var(--mono);
+  padding: .35rem .6rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.role-chip[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+.role-chip .unmapped { color: var(--run); }
+
+.actions { display: flex; align-items: center; gap: .75rem; }
+
+button {
+  font: 13px/1 system-ui, sans-serif;
+  padding: .5rem 1.1rem;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+#run-button { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+button:disabled { opacity: .5; cursor: default; }
+
+.live { font: 12px var(--mono); color: var(--dim); }
+
+.steps { list-style: none; margin: 1.25rem 0 0; padding: 0; }
+
+.step {
+  display: grid;
+  grid-template-columns: 1.6rem 1fr auto;
+  gap: .1rem .6rem;
+  align-items: baseline;
+  padding: .5rem 0;
+  border-top: 1px dotted var(--line);
+}
+
+.step-glyph { font: 13px var(--mono); text-align: center; }
+.step-label { font-size: .9rem; }
+.step-status { font: 11px var(--mono); text-transform: uppercase; letter-spacing: .04em; color: var(--dim); }
+.step-detail { grid-column: 2 / -1; font: 12px var(--mono); color: var(--dim); overflow-wrap: anywhere; }
+
+.step[data-status="pending"] .step-glyph { color: var(--dim); }
+.step[data-status="running"] .step-glyph,
+.step[data-status="running"] .step-status { color: var(--run); }
+.step[data-status="ok"] .step-glyph,
+.step[data-status="ok"] .step-status { color: var(--ok); }
+.step[data-status="failed"] .step-glyph,
+.step[data-status="failed"] .step-status { color: var(--fail); }
+
+/* A resumed step is visibly a replay, not a fresh proof. */
+.step[data-resumed="true"] .step-label { color: var(--dim); }
+
+.outcome { margin-top: 1rem; font-size: .9rem; }
+.outcome:empty { display: none; }
+
+.outcome-box {
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: 4px;
+  padding: .7rem .9rem;
+}
+
+.outcome-box[data-kind="ok"] { border-left-color: var(--ok); }
+.outcome-box[data-kind="failed"] { border-left-color: var(--fail); }
+.outcome-box[data-kind="waiting"] { border-left-color: var(--run); }
+
+.outcome-box h3 { margin: 0 0 .35rem; font-size: .9rem; }
+.outcome-box p { margin: .3rem 0; }
+.outcome-code { font: 11px var(--mono); color: var(--dim); }
+.outcome-box a { color: var(--accent); }
+
+.next-action { margin-top: .5rem; padding-top: .5rem; border-top: 1px dotted var(--line); }
+.next-action dl { display: grid; grid-template-columns: max-content 1fr; gap: .1rem .6rem; margin: .35rem 0 0; }
+.next-action dt { font: 11px var(--mono); color: var(--dim); }
+.next-action dd { margin: 0; font: 12px var(--mono); overflow-wrap: anywhere; }

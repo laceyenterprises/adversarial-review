@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 
 const DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS = Object.freeze([100, 250, 500, 1000, 2000, 5000]);
-const TRANSIENT_SLEEP_SPAWN_ERROR_CODES = new Set(['EAGAIN', 'ENOMEM', 'EMFILE', 'ENFILE']);
+const TRANSIENT_SLEEP_SPAWN_ERROR_CODES = new Set(['EAGAIN', 'ENOMEM', 'EMFILE', 'ENFILE', 'EIO']);
 
 function isSqliteBusyError(err) {
   const text = `${String(err?.code || '')}\n${String(err?.message || err || '')}`.toLowerCase();
@@ -13,9 +13,17 @@ function isSqliteBusyError(err) {
   );
 }
 
+function busyWaitUntilSync(end) {
+  while (Date.now() < end) {
+    // Intentional synchronous fallback when the OS cannot provide a blocking sleep.
+  }
+}
+
 function sleepSync(ms, { spawnSyncImpl = spawnSync } = {}) {
   if (!Number.isFinite(ms) || ms <= 0) return;
   const delayMs = Math.floor(ms);
+  const startedAt = Date.now();
+  const endAt = startedAt + delayMs;
   const result = spawnSyncImpl(
     process.execPath,
     ['-e', `setTimeout(() => {}, ${JSON.stringify(delayMs)})`],
@@ -26,14 +34,12 @@ function sleepSync(ms, { spawnSyncImpl = spawnSync } = {}) {
   );
   if (result?.error && result.error.code !== 'ETIMEDOUT') {
     if (TRANSIENT_SLEEP_SPAWN_ERROR_CODES.has(result.error.code)) {
-      const end = Date.now() + delayMs;
-      while (Date.now() < end) {
-        // Intentional synchronous fallback when the OS temporarily refuses to fork.
-      }
+      busyWaitUntilSync(endAt);
       return;
     }
     throw result.error;
   }
+  busyWaitUntilSync(endAt);
 }
 
 function sleepAsync(ms) {

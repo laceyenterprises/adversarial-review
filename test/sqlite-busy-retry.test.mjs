@@ -43,6 +43,31 @@ test('sync sleep falls back to busy wait on transient spawn resource errors', ()
   }));
 });
 
+test('sync sleep treats EIO as a transient spawn resource error', () => {
+  const err = new Error('spawn EIO');
+  err.code = 'EIO';
+
+  assert.doesNotThrow(() => sleepSync(1, {
+    spawnSyncImpl: () => ({ error: err }),
+  }));
+});
+
+test('sync sleep completes remaining delay after premature subprocess exit', () => {
+  const originalNow = Date.now;
+  const ticks = [1000, 1000, 1003, 1005];
+  let calls = 0;
+  Date.now = () => ticks[Math.min(calls++, ticks.length - 1)];
+  try {
+    sleepSync(5, {
+      spawnSyncImpl: () => ({ status: 1 }),
+    });
+  } finally {
+    Date.now = originalNow;
+  }
+
+  assert.equal(calls, 4);
+});
+
 test('sync sleep still throws unexpected spawn errors', () => {
   const err = new Error('spawn EACCES');
   err.code = 'EACCES';

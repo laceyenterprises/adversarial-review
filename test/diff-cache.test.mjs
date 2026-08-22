@@ -119,6 +119,7 @@ test('too-large PR diff falls back to files API and raw added-file patches', asy
           throw err;
         }
         if (args[0] === 'api' && args.includes('--paginate')) {
+          assert.equal(options.maxBuffer, 100 * 1024 * 1024);
           assert.deepEqual(args, [
             'api',
             '--method',
@@ -144,15 +145,25 @@ test('too-large PR diff falls back to files API and raw added-file patches', asy
                   status: 'added',
                   sha: '2222222222222222222222222222222222222222',
                 },
+                {
+                  filename: 'src/newline.txt',
+                  status: 'added',
+                  sha: '3333333333333333333333333333333333333333',
+                },
               ]),
             ].join('\n')),
             stderr: Buffer.alloc(0),
           };
         }
-        if (args[0] === 'api' && args[3]?.startsWith(`repos/${repo}/contents/`)) {
-          assert.equal(args[3], `repos/${repo}/contents/src/too%20big.js?ref=${headSha}`);
+        if (args[0] === 'api' && args[3]?.startsWith(`repos/${repo}/git/blobs/`)) {
+          assert.equal(options.maxBuffer, 100 * 1024 * 1024);
           assert.deepEqual(args.slice(4), ['-H', 'Accept: application/vnd.github.raw']);
-          return { stdout: Buffer.from('one\ntwo\n'), stderr: Buffer.alloc(0) };
+          if (args[3] === `repos/${repo}/git/blobs/2222222222222222222222222222222222222222`) {
+            return { stdout: Buffer.from('one\ntwo\n'), stderr: Buffer.alloc(0) };
+          }
+          if (args[3] === `repos/${repo}/git/blobs/3333333333333333333333333333333333333333`) {
+            return { stdout: Buffer.from('\n'), stderr: Buffer.alloc(0) };
+          }
         }
         throw new Error(`unexpected gh call: ${args.join(' ')}`);
       },
@@ -171,10 +182,13 @@ test('too-large PR diff falls back to files API and raw added-file patches', asy
     assert.match(diffText, /@@ -0,0 \+1 @@\n\+small/);
     assert.match(diffText, /diff --git a\/src\/too big\.js b\/src\/too big\.js/);
     assert.match(diffText, /@@ -0,0 \+1,2 @@\n\+one\n\+two/);
-    assert.deepEqual(calls.map((args) => args[0]), ['pr', 'api', 'api']);
+    assert.match(diffText, /diff --git a\/src\/newline\.txt b\/src\/newline\.txt/);
+    assert.match(diffText, /@@ -0,0 \+1,1 @@\n\+\n/);
+    assert.deepEqual(calls.map((args) => args[0]), ['pr', 'api', 'api', 'api']);
     assert.deepEqual(recordedCategories, [
       { category: 'diff_fetch', status: 'error' },
       { category: 'diff_fetch_files_api', status: 200 },
+      { category: 'diff_fetch_raw_file', status: 200 },
       { category: 'diff_fetch_raw_file', status: 200 },
     ]);
     assert.equal(existsSync(getDiffCachePaths(rootDir, repo, prNumber, headSha).patchPath), true);

@@ -7,6 +7,7 @@ import { GH_LOOKUP_TIMEOUT_MS, execGhWithRetry } from './gh-cli.mjs';
 import { buildGhErrorDetail } from './reviewer-util.mjs';
 
 const execFileAsync = promisify(execFile);
+const GITHUB_BLOB_MAX_BUFFER_BYTES = 100 * 1024 * 1024;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -70,13 +71,6 @@ function parseGhApiArrayPages(stdout) {
   return pages;
 }
 
-function encodeGitHubContentPath(path) {
-  return String(path || '')
-    .split('/')
-    .map((part) => encodeURIComponent(part))
-    .join('/');
-}
-
 function isLikelyBinaryBuffer(buffer) {
   if (!Buffer.isBuffer(buffer)) return false;
   const sample = buffer.subarray(0, Math.min(buffer.length, 8192));
@@ -94,7 +88,11 @@ function diffHeaderForFile(file) {
   const lines = [`diff --git a/${diffOld} b/${diffNew}`];
   if (file?.status === 'added') lines.push('new file mode 100644');
   if (file?.status === 'removed') lines.push('deleted file mode 100644');
-  lines.push(`index 0000000..${sha}`);
+  if (file?.status === 'added') {
+    lines.push(`index 0000000..${sha}`);
+  } else if (file?.status === 'removed') {
+    lines.push(`index ${sha}..0000000`);
+  }
   lines.push(`--- ${oldPath}`);
   lines.push(`+++ ${newPath}`);
   return lines;
@@ -108,7 +106,7 @@ function synthesizeAddedFilePatch(file, content) {
   const text = content.toString('utf8');
   const hasTrailingNewline = text.endsWith('\n');
   const body = hasTrailingNewline ? text.slice(0, -1) : text;
-  const lines = body.length ? body.split('\n') : [];
+  const lines = text.length === 0 ? [] : body.split('\n');
   const hunkSpan = lines.length;
   const patchLines = [
     ...header,
@@ -121,7 +119,7 @@ function synthesizeAddedFilePatch(file, content) {
   return `${patchLines.join('\n')}\n`;
 }
 
-async function fetchRawAddedFileForDiff(repo, prNumber, headSha, file, {
+async function fetchRawAddedFileForDiff(repo, prNumber, file, {
   execFileImpl,
   execGhWithRetryImpl,
   recordApiCallImpl,
@@ -129,20 +127,19 @@ async function fetchRawAddedFileForDiff(repo, prNumber, headSha, file, {
   ghRetrySleepImpl,
 }) {
   const startedAt = Date.now();
-  const path = encodeGitHubContentPath(file.filename);
-  const ref = encodeURIComponent(headSha);
+  const blobSha = String(file?.sha || '').trim();
   try {
     const { stdout } = await execGhWithRetryImpl({
       execFileImpl: async (command, args, options) => execFileImpl(
         command,
         args,
-        { ...options, encoding: 'buffer', maxBuffer: 25 * 1024 * 1024 }
+        { ...options, encoding: 'buffer', maxBuffer: GITHUB_BLOB_MAX_BUFFER_BYTES }
       ),
       args: [
         'api',
         '--method',
         'GET',
-        `repos/${repo}/contents/${path}?ref=${ref}`,
+        `repos/${repo}/git/blobs/${blobSha}`,
         '-H',
         'Accept: application/vnd.github.raw',
       ],
@@ -184,7 +181,7 @@ async function fetchPRDiffFromFilesApi(repo, prNumber, headSha, {
       execFileImpl: async (command, args, options) => execFileImpl(
         command,
         args,
-        { ...options, encoding: 'buffer', maxBuffer: 25 * 1024 * 1024 }
+        { ...options, encoding: 'buffer', maxBuffer: GITHUB_BLOB_MAX_BUFFER_BYTES }
       ),
       args: [
         'api',
@@ -226,7 +223,7 @@ async function fetchPRDiffFromFilesApi(repo, prNumber, headSha, {
       continue;
     }
     if (file.status === 'added') {
-      const raw = await fetchRawAddedFileForDiff(repo, prNumber, headSha, file, {
+      const raw = await fetchRawAddedFileForDiff(repo, prNumber, file, {
         execFileImpl,
         execGhWithRetryImpl,
         recordApiCallImpl,

@@ -1888,8 +1888,8 @@ function schemaV1() {
       // worker_pool.dispatch.op_hammer_alerts.*,
       // worker_pool.dispatch.substrate.*,
       // worker_pool.hardening_ledger.*,
-      // worker_pool.memory.dynamic.*, worker_pool.secrets.op_read_cache.*,
-      // worker_pool.secrets_bus.*, and worker_pool.shr.* —
+      // worker_pool.memory.dynamic.*, worker_pool.memory_retention.*,
+      // worker_pool.secrets.op_read_cache.*, worker_pool.secrets_bus.*, and worker_pool.shr.* —
       // Python-owned (canonical schema at platform/agent-os-config).
       // PARTIAL mirror, same rationale as the
       // sentinel block below: this Node reader does not consume the values, but
@@ -2106,6 +2106,14 @@ function schemaV1() {
                   require_pressure_normal: { __type: TYPE_BOOL, __default: true },
                 },
               },
+            },
+          },
+          memory_retention: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              enabled: { __type: TYPE_BOOL, __default: false },
+              shadow_only: { __type: TYPE_BOOL, __default: true },
             },
           },
           shr: {
@@ -2863,6 +2871,14 @@ export const ENV_ALIASES = {
   'worker_pool.memory.dynamic.require_pressure_normal': {
     canonical: 'AGENT_OS_WORKER_POOL_MEMORY_DYNAMIC_REQUIRE_PRESSURE_NORMAL',
     aliases: [['HQ_MEMORY_DYNAMIC_REQUIRE_PRESSURE_NORMAL', identity]],
+  },
+  'worker_pool.memory_retention.enabled': {
+    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_RETENTION_ENABLED',
+    aliases: [['HQ_MEMORY_RETENTION_ENABLED', identity]],
+  },
+  'worker_pool.memory_retention.shadow_only': {
+    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_RETENTION_SHADOW_ONLY',
+    aliases: [['HQ_MEMORY_RETENTION_SHADOW_ONLY', identity]],
   },
   'worker_pool.dispatch.codex_exec_mode': {
     canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_CODEX_EXEC_MODE',

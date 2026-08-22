@@ -1525,14 +1525,14 @@ let geminiSignalReleaseSleepImpl = sleep;
 let geminiSignalReleaseKillImpl = (pid, signal) => process.kill(pid, signal);
 
 function geminiSignalCheckoutKey(checkout) {
-  return checkout?.checkoutId || checkout?.credentialId || null;
+  return checkout?.checkoutId || checkout?.credentialId || checkout?.lockDir || null;
 }
 
-function armGeminiCheckoutSignalRelease({ log = console } = {}) {
+function armGeminiCheckoutSignalRelease() {
   for (const signal of GEMINI_SIGNAL_RELEASE_SIGNALS) {
     if (geminiSignalReleaseHandlers.has(signal)) continue;
     const handler = () => {
-      void releaseActiveGeminiCheckoutsForSignal(signal, { log });
+      void releaseActiveGeminiCheckoutsForSignal(signal);
     };
     geminiSignalReleaseHandlers.set(signal, handler);
     process.on(signal, handler);
@@ -1550,8 +1550,26 @@ function disarmGeminiCheckoutSignalRelease() {
 function trackGeminiCheckoutForSignalRelease(checkout, { env = process.env, log = console } = {}) {
   const key = geminiSignalCheckoutKey(checkout);
   if (!key) return () => {};
-  armGeminiCheckoutSignalRelease({ log });
-  activeGeminiSignalCheckouts.set(key, { checkout, env });
+  armGeminiCheckoutSignalRelease();
+  activeGeminiSignalCheckouts.set(key, { checkout, env, log });
+  return () => {
+    activeGeminiSignalCheckouts.delete(key);
+    disarmGeminiCheckoutSignalRelease();
+  };
+}
+
+function trackGeminiFallbackLockForSignalRelease(fallbackLock, { log = console } = {}) {
+  const key = geminiSignalCheckoutKey(fallbackLock);
+  if (!key || typeof fallbackLock?.release !== 'function') return () => {};
+  armGeminiCheckoutSignalRelease();
+  activeGeminiSignalCheckouts.set(key, {
+    checkout: fallbackLock,
+    log,
+    releaseImpl: async ({ checkout }) => {
+      checkout.release();
+    },
+    releaseLabel: 'Gemini fallback lock',
+  });
   return () => {
     activeGeminiSignalCheckouts.delete(key);
     disarmGeminiCheckoutSignalRelease();
@@ -1561,20 +1579,25 @@ function trackGeminiCheckoutForSignalRelease(checkout, { env = process.env, log 
 async function releaseActiveGeminiCheckoutsForSignal(signal, { log = console } = {}) {
   const entries = [...activeGeminiSignalCheckouts.entries()];
   const releases = entries.map(async ([key, state]) => {
+    const stateLog = state.log || log;
+    const releaseLabel = state.releaseLabel || 'Gemini checkout';
     try {
-      await geminiSignalReleaseReleaseImpl({
+      const releaseImpl = state.releaseImpl || geminiSignalReleaseReleaseImpl;
+      await releaseImpl({
         checkout: state.checkout,
         quotaSignal: false,
         env: state.env || process.env,
-        log,
+        log: stateLog,
+        signal,
       });
-      activeGeminiSignalCheckouts.delete(key);
-      log.warn?.(
-        `[reviewWithGemini] ${signal} received; released Gemini checkout `
+      stateLog.warn?.(
+        `[reviewWithGemini] ${signal} received; released ${releaseLabel} `
         + `${state.checkout.checkoutId || '(unknown)'} before exit`,
       );
     } catch {
       // Never let cleanup failure alter termination behavior.
+    } finally {
+      activeGeminiSignalCheckouts.delete(key);
     }
   });
 
@@ -2032,6 +2055,7 @@ async function reviewWithGemini(diff, extraContext = '', {
   let checkout = null;
   let checkoutSession = null;
   let untrackSignalCheckout = null;
+  let untrackSignalFallbackLock = null;
   let fallbackLock = null;
   let quotaSignal = false;
   let spendReported = false;
@@ -2062,9 +2086,11 @@ async function reviewWithGemini(diff, extraContext = '', {
           });
         } finally {
           untrackSignalCheckout?.();
+          untrackSignalFallbackLock?.();
           checkout = null;
           checkoutSession = null;
           untrackSignalCheckout = null;
+          untrackSignalFallbackLock = null;
           fallbackLock = null;
         }
         throw err;
@@ -2077,6 +2103,7 @@ async function reviewWithGemini(diff, extraContext = '', {
       }
       log.warn?.(`[reviewWithGemini] WARN: ${err.message}; using serialized legacy Gemini credential fallback`);
       fallbackLock = await acquireGeminiFallbackLockImpl({ env, sleepImpl });
+      untrackSignalFallbackLock = trackGeminiFallbackLockForSignalRelease(fallbackLock, { log });
       reviewEnv = env;
     }
   }
@@ -2187,9 +2214,11 @@ async function reviewWithGemini(diff, extraContext = '', {
         });
       } finally {
         untrackSignalCheckout?.();
+        untrackSignalFallbackLock?.();
         checkout = null;
         checkoutSession = null;
         untrackSignalCheckout = null;
+        untrackSignalFallbackLock = null;
         fallbackLock = null;
       }
     }

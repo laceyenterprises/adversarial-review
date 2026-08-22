@@ -150,3 +150,61 @@ test('a terminating signal releases all active checkouts before re-raising', asy
   assert.deepEqual(killed, [{ pid: process.pid, signal: 'SIGTERM' }]);
   assert.equal(process.listenerCount('SIGTERM'), sigtermListenersBefore);
 });
+
+test('signal release uses each checkout logger instead of the first armed logger', async (t) => {
+  reviewerHarness.resetGeminiSignalReleaseForTest();
+  t.after(() => {
+    reviewerHarness.resetGeminiSignalReleaseForTest();
+  });
+
+  const seen = [];
+  reviewerHarness.configureGeminiSignalReleaseForTest({
+    releaseImpl: async ({ checkout, log }) => {
+      seen.push({ checkoutId: checkout.checkoutId, logger: log.name });
+    },
+    sleepImpl: async () => {},
+    killImpl: () => {},
+  });
+
+  reviewerHarness.trackGeminiCheckoutForSignalRelease(
+    { checkoutId: 'lease-1', credentialId: 'cred-1' },
+    { env: { NAME: 'first' }, log: { name: 'log-1', warn() {} } },
+  );
+  reviewerHarness.trackGeminiCheckoutForSignalRelease(
+    { checkoutId: 'lease-2', credentialId: 'cred-2' },
+    { env: { NAME: 'second' }, log: { name: 'log-2', warn() {} } },
+  );
+
+  await reviewerHarness.releaseActiveGeminiCheckoutsForSignal('SIGTERM');
+
+  assert.deepEqual(seen, [
+    { checkoutId: 'lease-1', logger: 'log-1' },
+    { checkoutId: 'lease-2', logger: 'log-2' },
+  ]);
+});
+
+test('signal release clears tracking even when broker release fails', async (t) => {
+  reviewerHarness.resetGeminiSignalReleaseForTest();
+  t.after(() => {
+    reviewerHarness.resetGeminiSignalReleaseForTest();
+  });
+  const sigintListenersBefore = process.listenerCount('SIGINT');
+  const sigtermListenersBefore = process.listenerCount('SIGTERM');
+
+  reviewerHarness.configureGeminiSignalReleaseForTest({
+    releaseImpl: async () => {
+      throw new Error('release failed');
+    },
+    sleepImpl: async () => {},
+    killImpl: () => {},
+  });
+  reviewerHarness.trackGeminiCheckoutForSignalRelease(
+    { checkoutId: 'lease-fail', credentialId: 'cred-fail' },
+    { env: { NAME: 'failing' }, log: { warn() {} } },
+  );
+
+  await reviewerHarness.releaseActiveGeminiCheckoutsForSignal('SIGTERM');
+
+  assert.equal(process.listenerCount('SIGTERM'), sigtermListenersBefore);
+  assert.equal(process.listenerCount('SIGINT'), sigintListenersBefore);
+});

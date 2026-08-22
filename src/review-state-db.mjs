@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import {
   prepareFinalizePendingTerminalFailure,
+  prepareMarkInfraAutoRecoveryAttemptStarted,
   prepareMarkAttemptStarted,
   prepareMarkMergedPendingReviewSkipped,
   prepareMarkReviewerCommandFailedRecoveredPosted,
@@ -67,56 +68,7 @@ export const stmtGetPendingFastMergeAudits = db.prepare(
   "SELECT * FROM reviewed_prs WHERE fast_merge_audit_status = 'pending' AND fast_merge_audit_payload_json IS NOT NULL ORDER BY reviewed_at ASC, id ASC LIMIT ?"
 );
 
-export const stmtMarkInfraAutoRecoveryAttemptStarted = db.prepare(
-  `UPDATE reviewed_prs
-     SET review_status = 'reviewing',
-         last_attempted_at = ?,
-         reviewer_session_uuid = ?,
-         reviewer_started_at = NULL,
-         reviewer_head_sha = ?,
-         reviewer_timeout_ms = ?,
-         reviewer_lease_expires_at = ?,
-         reviewer_pgid = NULL,
-         failed_at = NULL,
-         failure_message = NULL,
-         quota_reset_at_utc = NULL,
-         infra_auto_recover_attempts = COALESCE(infra_auto_recover_attempts, 0) + 1
-   WHERE repo = ?
-     AND pr_number = ?
-     AND (
-       review_status = 'failed' OR
-       (
-         review_status = 'pending' AND
-         failed_at = ? AND
-         reviewer_head_sha = ?
-       )
-     )
-     AND COALESCE(infra_auto_recover_attempts, 0) < ?
-     AND (
-       (?11 = 'cascade' AND (
-         lower(COALESCE(failure_message, '')) LIKE '[cascade]%' OR
-         lower(COALESCE(failure_message, '')) LIKE '%litellm/upstream cascade%' OR
-         lower(COALESCE(failure_message, '')) LIKE '%watcher backoff engaged%'
-       )) OR
-       (?11 = 'provider-overloaded' AND lower(COALESCE(failure_message, '')) LIKE '[provider-overloaded]%') OR
-       (?11 = 'reviewer-timeout' AND lower(COALESCE(failure_message, '')) LIKE '[reviewer-timeout]%') OR
-       (?11 = 'reviewer-output' AND lower(COALESCE(failure_message, '')) LIKE '[reviewer-output]%') OR
-       (?11 = 'launchctl-bootstrap' AND (
-         lower(COALESCE(failure_message, '')) LIKE '[launchctl-bootstrap]%' OR
-         lower(COALESCE(failure_message, '')) LIKE '%claude launchctl session bootstrap failed%' OR
-         lower(COALESCE(failure_message, '')) LIKE '%launchctlsessionerror%'
-       )) OR
-       (?11 = 'oauth-broken' AND lower(COALESCE(failure_message, '')) LIKE '%[oauth-broken]%') OR
-       (?11 = 'quota-exhausted' AND lower(COALESCE(failure_message, '')) LIKE '[quota-exhausted]%') OR
-       (?11 = 'reviewer-command-failed' AND (
-         (
-           lower(COALESCE(failure_message, '')) LIKE '[unknown] command failed%' AND
-           lower(COALESCE(failure_message, '')) NOT LIKE '[unknown] command failed with code %'
-         ) OR
-         lower(COALESCE(failure_message, '')) LIKE '[unknown] command failed with code %'
-       ))
-     )`
-);
+export const stmtMarkInfraAutoRecoveryAttemptStarted = prepareMarkInfraAutoRecoveryAttemptStarted(db);
 export const stmtMarkReviewPopulationRetryAttemptStarted = db.prepare(
   `UPDATE reviewed_prs
      SET review_status = 'reviewing',

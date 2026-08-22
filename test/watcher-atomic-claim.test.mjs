@@ -4,6 +4,7 @@ import Database from 'better-sqlite3';
 
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import {
+  prepareMarkInfraAutoRecoveryAttemptStarted,
   prepareMarkAttemptStarted,
   prepareMarkMergedPendingReviewSkipped,
 } from '../src/review-state-statements.mjs';
@@ -13,53 +14,6 @@ const RELEASE_TO_PENDING_SQL =
   "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'";
 const MARK_POSTED_SQL =
   "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL, infra_auto_recover_attempts = 0 WHERE repo = ? AND pr_number = ?";
-const INFRA_RECOVERY_CLAIM_SQL = `UPDATE reviewed_prs
-     SET review_status = 'reviewing',
-         last_attempted_at = ?,
-         reviewer_session_uuid = ?,
-         reviewer_started_at = NULL,
-         reviewer_head_sha = ?,
-         reviewer_timeout_ms = ?,
-         reviewer_lease_expires_at = ?,
-         reviewer_pgid = NULL,
-         failed_at = NULL,
-         failure_message = NULL,
-         quota_reset_at_utc = NULL,
-         infra_auto_recover_attempts = COALESCE(infra_auto_recover_attempts, 0) + 1
-   WHERE repo = ?
-     AND pr_number = ?
-     AND (
-       review_status = 'failed' OR
-       (
-         review_status = 'pending' AND
-         failed_at = ? AND
-         reviewer_head_sha = ?
-       )
-     )
-     AND COALESCE(infra_auto_recover_attempts, 0) < ?
-     AND (
-       (? = 'cascade' AND (
-         lower(COALESCE(failure_message, '')) LIKE '[cascade]%' OR
-         lower(COALESCE(failure_message, '')) LIKE '%litellm/upstream cascade%' OR
-         lower(COALESCE(failure_message, '')) LIKE '%watcher backoff engaged%'
-       )) OR
-       (? = 'provider-overloaded' AND lower(COALESCE(failure_message, '')) LIKE '[provider-overloaded]%') OR
-       (? = 'reviewer-timeout' AND lower(COALESCE(failure_message, '')) LIKE '[reviewer-timeout]%') OR
-       (? = 'launchctl-bootstrap' AND (
-         lower(COALESCE(failure_message, '')) LIKE '[launchctl-bootstrap]%' OR
-         lower(COALESCE(failure_message, '')) LIKE '%claude launchctl session bootstrap failed%' OR
-         lower(COALESCE(failure_message, '')) LIKE '%launchctlsessionerror%'
-       )) OR
-       (? = 'oauth-broken' AND lower(COALESCE(failure_message, '')) LIKE '%[oauth-broken]%') OR
-       (? = 'quota-exhausted' AND lower(COALESCE(failure_message, '')) LIKE '[quota-exhausted]%') OR
-       (? = 'reviewer-command-failed' AND (
-         (
-           lower(COALESCE(failure_message, '')) LIKE '[unknown] command failed%' AND
-           lower(COALESCE(failure_message, '')) NOT LIKE '[unknown] command failed with code %'
-         ) OR
-         lower(COALESCE(failure_message, '')) LIKE '[unknown] command failed with code %'
-       ))
-     )`;
 const UNKNOWN_FAILURE_RETRY_CLAIM_SQL = `UPDATE reviewed_prs
      SET review_status = 'reviewing',
          last_attempted_at = ?,
@@ -125,7 +79,7 @@ function runInfraRecoveryClaim(db, attemptedAt, infraClass = 'oauth-broken', rep
   reviewerTimeoutMs = 20 * 60 * 1000,
   cap = 3,
 } = {}) {
-  return db.prepare(INFRA_RECOVERY_CLAIM_SQL).run(
+  return prepareMarkInfraAutoRecoveryAttemptStarted(db).run(
     attemptedAt,
     sessionUuid,
     headSha,
@@ -136,12 +90,6 @@ function runInfraRecoveryClaim(db, attemptedAt, infraClass = 'oauth-broken', rep
     observedFailedAt,
     observedReviewerHeadSha,
     cap,
-    infraClass,
-    infraClass,
-    infraClass,
-    infraClass,
-    infraClass,
-    infraClass,
     infraClass
   );
 }
@@ -338,6 +286,24 @@ test('infra auto-recovery claim handles reviewer command-failed no-code rows wit
   });
 
   const claim = runInfraRecoveryClaim(db, '2026-05-02T18:10:00.000Z', 'reviewer-command-failed');
+
+  assert.equal(claim.changes, 1);
+  const row = readRow(db);
+  assert.equal(row.review_status, 'reviewing');
+  assert.equal(row.reviewer_session_uuid, 'session-999');
+  assert.equal(row.failed_at, null);
+  assert.equal(row.failure_message, null);
+  assert.equal(row.infra_auto_recover_attempts, 1);
+});
+
+test('infra auto-recovery claim handles reviewer-output rows with one classifier bind', () => {
+  const db = setupDb();
+  seedReviewRow(db, {
+    reviewStatus: 'failed',
+    failureMessage: '[reviewer-output] reviewer returned empty output',
+  });
+
+  const claim = runInfraRecoveryClaim(db, '2026-05-02T18:10:00.000Z', 'reviewer-output');
 
   assert.equal(claim.changes, 1);
   const row = readRow(db);

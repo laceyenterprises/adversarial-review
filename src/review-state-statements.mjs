@@ -39,6 +39,57 @@ export const MARK_ATTEMPT_STARTED_SQL = `UPDATE reviewed_prs
      -- COALESCE treats a NULL pr_state as open so a legitimate PR is never skipped.
      AND COALESCE(pr_state, 'open') != 'merged'`;
 
+export const MARK_INFRA_AUTO_RECOVERY_ATTEMPT_STARTED_SQL =
+  `UPDATE reviewed_prs
+     SET review_status = 'reviewing',
+         last_attempted_at = ?,
+         reviewer_session_uuid = ?,
+         reviewer_started_at = NULL,
+         reviewer_head_sha = ?,
+         reviewer_timeout_ms = ?,
+         reviewer_lease_expires_at = ?,
+         reviewer_pgid = NULL,
+         failed_at = NULL,
+         failure_message = NULL,
+         quota_reset_at_utc = NULL,
+         infra_auto_recover_attempts = COALESCE(infra_auto_recover_attempts, 0) + 1
+   WHERE repo = ?
+     AND pr_number = ?
+     AND (
+       review_status = 'failed' OR
+       (
+         review_status = 'pending' AND
+         failed_at = ? AND
+         reviewer_head_sha = ?
+       )
+     )
+     AND COALESCE(infra_auto_recover_attempts, 0) < ?
+     AND CASE ?
+       WHEN 'cascade' THEN (
+         lower(COALESCE(failure_message, '')) LIKE '[cascade]%' OR
+         lower(COALESCE(failure_message, '')) LIKE '%litellm/upstream cascade%' OR
+         lower(COALESCE(failure_message, '')) LIKE '%watcher backoff engaged%'
+       )
+       WHEN 'provider-overloaded' THEN lower(COALESCE(failure_message, '')) LIKE '[provider-overloaded]%'
+       WHEN 'reviewer-timeout' THEN lower(COALESCE(failure_message, '')) LIKE '[reviewer-timeout]%'
+       WHEN 'reviewer-output' THEN lower(COALESCE(failure_message, '')) LIKE '[reviewer-output]%'
+       WHEN 'launchctl-bootstrap' THEN (
+         lower(COALESCE(failure_message, '')) LIKE '[launchctl-bootstrap]%' OR
+         lower(COALESCE(failure_message, '')) LIKE '%claude launchctl session bootstrap failed%' OR
+         lower(COALESCE(failure_message, '')) LIKE '%launchctlsessionerror%'
+       )
+       WHEN 'oauth-broken' THEN lower(COALESCE(failure_message, '')) LIKE '%[oauth-broken]%'
+       WHEN 'quota-exhausted' THEN lower(COALESCE(failure_message, '')) LIKE '[quota-exhausted]%'
+       WHEN 'reviewer-command-failed' THEN (
+         (
+           lower(COALESCE(failure_message, '')) LIKE '[unknown] command failed%' AND
+           lower(COALESCE(failure_message, '')) NOT LIKE '[unknown] command failed with code %'
+         ) OR
+         lower(COALESCE(failure_message, '')) LIKE '[unknown] command failed with code %'
+       )
+       ELSE 0
+     END`;
+
 export const MARK_REVIEWER_COMMAND_FAILED_RECOVERED_POSTED_SQL =
   `UPDATE reviewed_prs
       SET review_status = 'posted',
@@ -88,6 +139,10 @@ export const MARK_MERGED_PENDING_REVIEW_SKIPPED_SQL = `UPDATE reviewed_prs
 
 export function prepareMarkAttemptStarted(db) {
   return db.prepare(MARK_ATTEMPT_STARTED_SQL);
+}
+
+export function prepareMarkInfraAutoRecoveryAttemptStarted(db) {
+  return db.prepare(MARK_INFRA_AUTO_RECOVERY_ATTEMPT_STARTED_SQL);
 }
 
 export function prepareMarkReviewerCommandFailedRecoveredPosted(db) {

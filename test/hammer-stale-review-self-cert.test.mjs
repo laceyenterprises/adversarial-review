@@ -212,34 +212,82 @@ test('isHammerRemediableEligibilityMiss: #5093 fix preserves every neighboring i
   );
 });
 
-test('terminal Hammer exhaustion requires Codex remediation on the reviewed request-changes head', () => {
+test('terminal Hammer exhaustion requires a completed Codex round and no ACTIVE remediation claim', () => {
+  // Codex still actively owns the reviewed head (job pending/in-progress) —
+  // the terminal Hammer must not preempt it. This is the #868/#869/#871 contract.
   assert.equal(
     terminalHammerReviewCycleExhausted({
       reviewCycleExhausted: true,
       verdict: 'request-changes',
       headSha: 'fresh-reviewed-head',
+      remediationPending: true,
       completedRemediationRounds: 2,
-      completedRemediationRevisionRefs: ['older-reviewed-head'],
     }),
     false,
   );
+  // Rereview-only exhaustion with ZERO completed Codex rounds must not arm the
+  // terminal Hammer (#869 — Hammer is never the first responder).
   assert.equal(
     terminalHammerReviewCycleExhausted({
       reviewCycleExhausted: true,
       verdict: 'request-changes',
       headSha: 'fresh-reviewed-head',
-      completedRemediationRounds: 2,
-      completedRemediationRevisionRefs: ['fresh-reviewed-head'],
+      remediationPending: false,
+      completedRemediationRounds: 0,
     }),
-    true,
+    false,
   );
+  // Comment-only/clean exhaustion still finishes; those reviews never spawn a
+  // Codex remediator, so there is no ownership to preempt.
   assert.equal(
     terminalHammerReviewCycleExhausted({
       reviewCycleExhausted: true,
       verdict: 'comment-only',
       headSha: 'clean-reviewed-head',
       completedRemediationRounds: 0,
-      completedRemediationRevisionRefs: [],
+    }),
+    true,
+  );
+});
+
+// REGRESSION (2026-08-22): #871 gated terminal Hammer authority on the reviewed
+// head appearing in `completedRemediationRevisionRefs`. A follow-up job's
+// `revisionRef` is the head it was created AGAINST, and a completed remediation
+// round pushes a NEW head which is what gets reviewed next — so the terminal
+// reviewed head is never in that set. With the round budget already spent
+// (`reviewCycleExhausted === true`), no further remediation job for that head can
+// ever be claimed, making the condition unsatisfiable and parking every
+// `request-changes` PR in AWAIT_OPERATOR_ACTION forever.
+test('terminal Hammer arms at the budget boundary after Codex releases the reviewed head', () => {
+  // The exact live shape of agent-os#5669 / adversarial-review#879: budget spent
+  // (3/3 rounds), terminal verdict request-changes on the head that round 3
+  // produced, that head's own remediation job stopped pre-spawn by the budget
+  // gate, so it never entered the completed-revision-ref set.
+  assert.equal(
+    terminalHammerReviewCycleExhausted({
+      reviewCycleExhausted: true,
+      verdict: 'request changes',
+      headSha: '713d2e0443bdfd9afa594fe00fdcbb53578f16dc',
+      remediationPending: false,
+      completedRemediationRounds: 3,
+      completedRemediationRevisionRefs: [
+        '1fd964d4c7ac19658af07aa1c4bb86f33433ab73',
+        '938116c9523c88618e917a34d5e0e05d8f18b8c0',
+        '3221652e2b07bfb3c11afbbab3a19deec4c6e95f',
+      ],
+    }),
+    true,
+  );
+  // A stale `completedRemediationRevisionRefs` payload must no longer be able to
+  // veto terminal Hammer authority on its own.
+  assert.equal(
+    terminalHammerReviewCycleExhausted({
+      reviewCycleExhausted: true,
+      verdict: 'request-changes',
+      headSha: 'fresh-reviewed-head',
+      remediationPending: false,
+      completedRemediationRounds: 1,
+      completedRemediationRevisionRefs: ['older-reviewed-head'],
     }),
     true,
   );

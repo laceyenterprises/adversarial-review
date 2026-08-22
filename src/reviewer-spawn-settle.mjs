@@ -975,8 +975,12 @@ function settleReviewerAttempt({
     const postedAt = new Date().toISOString();
     withSqliteBusyRetrySync(() => {
       statements.markPosted.run(postedAt, repoPath, prNumber);
+    }, { label: `reviewer-settle-posted:${repoPath}#${prNumber}`, log });
+    withSqliteBusyRetrySync(() => {
       markReviewHeartbeat({ repo: repoPath, pr_number: prNumber, posted_at: postedAt });
-      try {
+    }, { label: `reviewer-settle-posted-heartbeat:${repoPath}#${prNumber}`, log });
+    try {
+      withSqliteBusyRetrySync(() => {
         const currentRow = typeof statements.getReviewRow?.get === 'function'
           ? statements.getReviewRow.get(repoPath, prNumber)
           : null;
@@ -994,12 +998,12 @@ function settleReviewerAttempt({
           windowHours,
           logger: log,
         });
-      } catch (err) {
-        log?.warn?.(
-          `[watcher] review-cycle-count bookkeeping skipped for ${repoPath}#${prNumber}: ${err?.message || err}`
-        );
-      }
-    }, { label: `reviewer-settle-posted:${repoPath}#${prNumber}`, log });
+      }, { label: `reviewer-settle-cycle-count:${repoPath}#${prNumber}`, log });
+    } catch (err) {
+      log?.warn?.(
+        `[watcher] review-cycle-count bookkeeping skipped for ${repoPath}#${prNumber}: ${err?.message || err}`
+      );
+    }
     clearCascadeState(rootDir, { repo: repoPath, prNumber });
     return;
   }

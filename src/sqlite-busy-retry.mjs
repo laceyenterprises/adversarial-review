@@ -1,3 +1,5 @@
+import { spawnSync } from 'node:child_process';
+
 const DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS = Object.freeze([100, 250, 500, 1000, 2000, 5000]);
 
 function isSqliteBusyError(err) {
@@ -10,11 +12,61 @@ function isSqliteBusyError(err) {
   );
 }
 
-function sleepSync(ms) {
+function isTransientSleepSpawnError(err) {
+  const text = `${String(err?.code || '')}\n${String(err?.message || err || '')}`.toLowerCase();
+  return (
+    text.includes('eagain') ||
+    text.includes('eio') ||
+    text.includes('emfile') ||
+    text.includes('enfile') ||
+    text.includes('resource temporarily unavailable')
+  );
+}
+
+function busyWaitSync(ms) {
+  const end = Date.now() + Math.max(0, Math.floor(ms) || 0);
+  while (Date.now() < end) {
+    // Intentionally empty: this is the last-resort synchronous delay path when
+    // the process cannot spawn the lightweight sleep helper under load.
+  }
+}
+
+function sleepSync(ms, {
+  atomicsWaitImpl = globalThis.Atomics?.wait,
+  sharedArrayBufferImpl = globalThis.SharedArrayBuffer,
+  int32ArrayImpl = Int32Array,
+  spawnSyncImpl = spawnSync,
+  busyWaitImpl = busyWaitSync,
+} = {}) {
   if (!Number.isFinite(ms) || ms <= 0) return;
-  const buffer = new SharedArrayBuffer(4);
-  const view = new Int32Array(buffer);
-  Atomics.wait(view, 0, 0, Math.floor(ms));
+  const delayMs = Math.floor(ms);
+  if (
+    typeof atomicsWaitImpl === 'function' &&
+    typeof sharedArrayBufferImpl === 'function' &&
+    typeof int32ArrayImpl === 'function'
+  ) {
+    const buffer = new sharedArrayBufferImpl(4);
+    const view = new int32ArrayImpl(buffer);
+    atomicsWaitImpl(view, 0, 0, delayMs);
+    return;
+  }
+  const result = spawnSyncImpl('sleep', [(delayMs / 1000).toString()], {
+    stdio: 'ignore',
+    timeout: delayMs + 1000,
+  });
+  if (result?.error) {
+    if (isTransientSleepSpawnError(result.error)) {
+      busyWaitImpl(delayMs);
+      return;
+    }
+    throw result.error;
+  }
+  if (result?.signal) {
+    throw new Error(`sleep exited from signal ${result.signal}`);
+  }
+  if (typeof result?.status === 'number' && result.status !== 0) {
+    throw new Error(`sleep exited with status ${result.status}`);
+  }
 }
 
 function sleepAsync(ms) {
@@ -72,6 +124,7 @@ async function withSqliteBusyRetry(fn, {
 export {
   DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS,
   isSqliteBusyError,
+  sleepSync,
   withSqliteBusyRetry,
   withSqliteBusyRetrySync,
 };

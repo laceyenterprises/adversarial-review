@@ -99,6 +99,287 @@ test('miss spawns gh, returns its output, and writes a cache entry', async () =>
   }
 });
 
+test('too-large PR diff falls back to files API and raw added-file patches', async () => {
+  const rootDir = makeRootDir();
+  const repo = 'laceyenterprises/adversarial-review';
+  const prNumber = 886;
+  const headSha = '923df3f3182297bea7157ed6df2e887416396ccc';
+  const recordedCategories = [];
+  const calls = [];
+  const throttleCalls = [];
+  const warnings = [];
+  let activeRawBlobFetches = 0;
+  let maxActiveRawBlobFetches = 0;
+  try {
+    const diff = await fetchPRDiff(repo, prNumber, headSha, {
+      execFileImpl: async (command, args, options) => {
+        calls.push(args);
+        assert.equal(command, 'gh');
+        assert.equal(options.encoding, 'buffer');
+        if (args[0] === 'pr') {
+          assert.deepEqual(args, ['pr', 'diff', String(prNumber), '--repo', repo]);
+          const err = new Error(`Command failed: gh pr diff ${prNumber} --repo ${repo}`);
+          err.stderr = 'HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)\nPullRequest.diff too_large';
+          throw err;
+        }
+        if (args[0] === 'api' && args.includes('--paginate')) {
+          assert.equal(options.maxBuffer, 100 * 1024 * 1024);
+          assert.deepEqual(args, [
+            'api',
+            '--method',
+            'GET',
+            '--paginate',
+            `repos/${repo}/pulls/${prNumber}/files`,
+            '-f',
+            'per_page=100',
+          ]);
+          return {
+            stdout: Buffer.from([
+              JSON.stringify([
+                {
+                  filename: 'src/small.js',
+                  status: 'added',
+                  sha: '1111111111111111111111111111111111111111',
+                  patch: '@@ -0,0 +1 @@\n+small',
+                },
+                {
+                  filename: 'src/new-name.js',
+                  previous_filename: 'src/old-name.js',
+                  status: 'renamed',
+                  sha: '7777777777777777777777777777777777777777',
+                  patch: '@@ -1 +1 @@\n-old\n+new',
+                },
+                {
+                  filename: ' src/spaced-name.js ',
+                  status: 'modified',
+                  sha: '8888888888888888888888888888888888888888',
+                  patch: '@@ -1 +1 @@\n-old\n+new',
+                },
+              ]),
+              JSON.stringify([
+                {
+                  filename: 'src/too big.js',
+                  status: 'added',
+                  sha: '2222222222222222222222222222222222222222',
+                },
+                {
+                  filename: 'src/newline.txt',
+                  status: 'added',
+                  sha: '3333333333333333333333333333333333333333',
+                },
+                {
+                  filename: 'src/empty.txt',
+                  status: 'added',
+                  sha: '4444444444444444444444444444444444444444',
+                },
+                {
+                  filename: 'src/latin1.txt',
+                  status: 'added',
+                  sha: '5555555555555555555555555555555555555555',
+                },
+                {
+                  filename: 'src/missing-blob.txt',
+                  status: 'added',
+                  sha: '6666666666666666666666666666666666666666',
+                },
+              ]),
+            ].join('\n')),
+            stderr: Buffer.alloc(0),
+          };
+        }
+        if (args[0] === 'api' && args[3]?.startsWith(`repos/${repo}/git/blobs/`)) {
+          assert.equal(options.maxBuffer, 100 * 1024 * 1024);
+          assert.deepEqual(args.slice(4), ['-H', 'Accept: application/vnd.github.raw']);
+          activeRawBlobFetches += 1;
+          maxActiveRawBlobFetches = Math.max(maxActiveRawBlobFetches, activeRawBlobFetches);
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          activeRawBlobFetches -= 1;
+          const blobPath = args[3];
+          if (blobPath === `repos/${repo}/git/blobs/2222222222222222222222222222222222222222`) return { stdout: Buffer.from('one\ntwo\n'), stderr: Buffer.alloc(0) };
+          if (blobPath === `repos/${repo}/git/blobs/3333333333333333333333333333333333333333`) return { stdout: Buffer.from('\n'), stderr: Buffer.alloc(0) };
+          if (blobPath === `repos/${repo}/git/blobs/4444444444444444444444444444444444444444`) return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+          if (blobPath === `repos/${repo}/git/blobs/5555555555555555555555555555555555555555`) return { stdout: Buffer.from([0x66, 0xf1, 0x6f, 0x0a]), stderr: Buffer.alloc(0) };
+          if (blobPath === `repos/${repo}/git/blobs/6666666666666666666666666666666666666666`) {
+            const err = new Error('GitHub blob missing');
+            err.status = 404;
+            throw err;
+          }
+        }
+        throw new Error(`unexpected gh call: ${args.join(' ')}`);
+      },
+      getCachedDiffImpl: (cacheRepo, cachePrNumber, cacheHeadSha) => getCachedDiff(cacheRepo, cachePrNumber, cacheHeadSha, { rootDir }),
+      putCachedDiffImpl: (cacheRepo, cachePrNumber, cacheHeadSha, bytes) => putCachedDiff(cacheRepo, cachePrNumber, cacheHeadSha, bytes, { rootDir }),
+      recordApiCallImpl: ({ category, status }) => {
+        recordedCategories.push({ category, status });
+        return null;
+      },
+      ghRetrySleepImpl: async () => {},
+      awaitThrottleIfNeededImpl: async (resource) => {
+        throttleCalls.push(resource);
+      },
+      log: { warn: (message) => warnings.push(message) },
+    });
+
+    const diffText = diff.toString('utf8');
+    assert.equal(diffText.includes('+small\n\ndiff --git'), false);
+    assert.equal(diffText.includes('+small\ndiff --git'), true);
+    assert.match(diffText, /diff --git a\/src\/small\.js b\/src\/small\.js/);
+    assert.match(diffText, /@@ -0,0 \+1 @@\n\+small/);
+    assert.match(diffText, /diff --git a\/src\/old-name\.js b\/src\/new-name\.js\nrename from src\/old-name\.js\nrename to src\/new-name\.js\nindex 0000000\.\.7777777\n--- a\/src\/old-name\.js\n\+\+\+ b\/src\/new-name\.js\n@@ -1 \+1 @@\n-old\n\+new\n/);
+    assert.match(diffText, /diff --git a\/ src\/spaced-name\.js  b\/ src\/spaced-name\.js \nindex 0000000\.\.8888888\n--- a\/ src\/spaced-name\.js \n\+\+\+ b\/ src\/spaced-name\.js \n@@ -1 \+1 @@\n-old\n\+new\n/);
+    assert.match(diffText, /diff --git a\/src\/too big\.js b\/src\/too big\.js/);
+    assert.match(diffText, /@@ -0,0 \+1,2 @@\n\+one\n\+two/);
+    assert.match(diffText, /diff --git a\/src\/newline\.txt b\/src\/newline\.txt/);
+    assert.match(diffText, /@@ -0,0 \+1,1 @@\n\+\n/);
+    assert.match(diffText, /diff --git a\/src\/empty\.txt b\/src\/empty\.txt\nnew file mode 100644\nindex 0000000\.\.4444444\n(?!@@ -0,0 \+1,0 @@)/);
+    assert.match(diffText, /diff --git a\/src\/missing-blob\.txt b\/src\/missing-blob\.txt\nnew file mode 100644\nindex 0000000\.\.6666666\n--- \/dev\/null\n\+\+\+ b\/src\/missing-blob\.txt\n/);
+    assert.doesNotMatch(diffText, /missing-blob\.txt[\s\S]*@@ -0,0/);
+    assert.notEqual(diff.indexOf(Buffer.concat([
+      Buffer.from('diff --git a/src/latin1.txt b/src/latin1.txt\nnew file mode 100644\nindex 0000000..5555555\n--- /dev/null\n+++ b/src/latin1.txt\n@@ -0,0 +1,1 @@\n+f'),
+      Buffer.from([0xf1]),
+      Buffer.from('o\n'),
+    ])), -1);
+    assert.ok(
+      diffText.indexOf('diff --git a/src/too big.js b/src/too big.js')
+        < diffText.indexOf('diff --git a/src/newline.txt b/src/newline.txt')
+    );
+    assert.ok(
+      diffText.indexOf('diff --git a/src/newline.txt b/src/newline.txt')
+        < diffText.indexOf('diff --git a/src/empty.txt b/src/empty.txt')
+    );
+    assert.equal(maxActiveRawBlobFetches, 3);
+    assert.deepEqual(throttleCalls, ['core', 'core', 'core', 'core', 'core']);
+    assert.deepEqual(calls.map((args) => args[0]), ['pr', 'api', 'api', 'api', 'api', 'api', 'api']);
+    assert.deepEqual(recordedCategories, [
+      { category: 'diff_fetch', status: 'error' },
+      { category: 'diff_fetch_files_api', status: 200 },
+      { category: 'diff_fetch_raw_file', status: 200 },
+      { category: 'diff_fetch_raw_file', status: 200 },
+      { category: 'diff_fetch_raw_file', status: 200 },
+      { category: 'diff_fetch_raw_file', status: 200 },
+      { category: 'diff_fetch_raw_file', status: 404 },
+    ]);
+    assert.equal(warnings.some((message) => message.includes('raw blob fetch failed') && message.includes('src/missing-blob.txt')), true);
+    assert.equal(existsSync(getDiffCachePaths(rootDir, repo, prNumber, headSha).patchPath), true);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('too-large PR diff falls back to files API without a cache head SHA', async () => {
+  const repo = 'laceyenterprises/adversarial-review';
+  const prNumber = 887;
+  const recordedCategories = [];
+  const diff = await fetchPRDiff(repo, prNumber, '', {
+    execFileImpl: async (command, args, options) => {
+      assert.equal(command, 'gh');
+      assert.equal(options.encoding, 'buffer');
+      if (args[0] === 'pr') {
+        const err = new Error(`Command failed: gh pr diff ${prNumber} --repo ${repo}`);
+        err.stderr = 'PullRequest.diff too_large';
+        throw err;
+      }
+      if (args[0] === 'api' && args.includes('--paginate')) {
+        return {
+          stdout: Buffer.from(JSON.stringify([
+            {
+              filename: 'src/fallback.js',
+              status: 'modified',
+              sha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+              patch: '@@ -1 +1 @@\n-old\n+new',
+            },
+          ])),
+          stderr: Buffer.alloc(0),
+        };
+      }
+      throw new Error(`unexpected gh call: ${args.join(' ')}`);
+    },
+    getCachedDiffImpl: () => null,
+    putCachedDiffImpl: () => {
+      throw new Error('headless fallback must not write cache');
+    },
+    recordApiCallImpl: ({ category, status }) => {
+      recordedCategories.push({ category, status });
+    },
+    ghRetrySleepImpl: async () => {},
+    log: { warn() {} },
+  });
+
+  assert.equal(diff.toString('utf8'), [
+    'diff --git a/src/fallback.js b/src/fallback.js',
+    'index 0000000..aaaaaaa',
+    '--- a/src/fallback.js',
+    '+++ b/src/fallback.js',
+    '@@ -1 +1 @@',
+    '-old',
+    '+new',
+    '',
+  ].join('\n'));
+  assert.deepEqual(recordedCategories, [
+    { category: 'diff_fetch', status: 'error' },
+    { category: 'diff_fetch_files_api', status: 200 },
+  ]);
+});
+
+test('local maxBuffer exhaustion falls back to files API instead of failing the review', async () => {
+  const rootDir = makeRootDir();
+  const repo = 'laceyenterprises/adversarial-review';
+  const prNumber = 887;
+  const headSha = 'buffered923df3f3182297bea7157ed6df2e887416396ccc';
+  const recordedCategories = [];
+  try {
+    const diff = await fetchPRDiff(repo, prNumber, headSha, {
+      execFileImpl: async (command, args, options) => {
+        assert.equal(command, 'gh');
+        assert.equal(options.encoding, 'buffer');
+        if (args[0] === 'pr') {
+          const err = new RangeError('stdout maxBuffer length exceeded');
+          err.code = 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
+          throw err;
+        }
+        if (args[0] === 'api' && args.includes('--paginate')) {
+          return {
+            stdout: Buffer.from(JSON.stringify([
+              {
+                filename: 'src/fallback.js',
+                status: 'modified',
+                sha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                patch: '@@ -1 +1 @@\n-old\n+new',
+              },
+            ])),
+            stderr: Buffer.alloc(0),
+          };
+        }
+        throw new Error(`unexpected gh call: ${args.join(' ')}`);
+      },
+      getCachedDiffImpl: (cacheRepo, cachePrNumber, cacheHeadSha) => getCachedDiff(cacheRepo, cachePrNumber, cacheHeadSha, { rootDir }),
+      putCachedDiffImpl: (cacheRepo, cachePrNumber, cacheHeadSha, bytes) => putCachedDiff(cacheRepo, cachePrNumber, cacheHeadSha, bytes, { rootDir }),
+      recordApiCallImpl: ({ category, status }) => {
+        recordedCategories.push({ category, status });
+      },
+      ghRetrySleepImpl: async () => {},
+      log: { warn() {} },
+    });
+
+    assert.equal(diff.toString('utf8'), [
+      'diff --git a/src/fallback.js b/src/fallback.js',
+      'index 0000000..aaaaaaa',
+      '--- a/src/fallback.js',
+      '+++ b/src/fallback.js',
+      '@@ -1 +1 @@',
+      '-old',
+      '+new',
+      '',
+    ].join('\n'));
+    assert.deepEqual(recordedCategories, [
+      { category: 'diff_fetch', status: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' },
+      { category: 'diff_fetch_files_api', status: 200 },
+    ]);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('miss retries transient gh diff fetch failures before failing the review', async () => {
   const rootDir = makeRootDir();
   const repo = 'laceyenterprises/agent-os';
@@ -132,7 +413,7 @@ test('miss retries transient gh diff fetch failures before failing the review', 
 
     assert.equal(execCalls, 2);
     assert.deepEqual(diff, expected);
-    assert.deepEqual(recordedCategories, ['diff_fetch', 'diff_fetch']);
+    assert.deepEqual(recordedCategories, ['diff_fetch']);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

@@ -587,6 +587,7 @@ async function spawnReviewer({
         reviewAttemptNumber,
         reviewDbAttemptNumber,
         completedRemediationRounds,
+        passKind,
         maxRemediationRounds,
         advisoryFindings,
         reviewerSessionUuid,

@@ -137,6 +137,7 @@ import {
   infraRecoverableFailureClass,
   unknownReviewerCommandFailureClass,
 } from './reviewer-failure-classification.mjs';
+import { nextReviewerPassAttemptNumber } from './reviewer-pass-tokens.mjs';
 import { computeReviewerLeaseExpiryAt } from './reviewer-lease.mjs';
 import {
   persistReviewerPgid,
@@ -1719,7 +1720,6 @@ export async function processReviewSubject(entry, ctx) {
             }, { rootDir: ROOT });
             const latestMaxRounds = Number(ledger.latestMaxRounds);
             const reviewAttemptNumber = ledger.completedRoundsForPR + 1;
-            const reviewDbAttemptNumber = Number(current?.review_attempts || 0) + 1;
             const maxRemediationRounds = Number.isInteger(latestMaxRounds) && latestMaxRounds > roundBudget.roundBudget
               ? latestMaxRounds
               : roundBudget.roundBudget;
@@ -1729,6 +1729,12 @@ export async function processReviewSubject(entry, ctx) {
             const passKind = reviewAttemptNumber > 1 || current?.rereview_requested_at
               ? 'rereview'
               : 'first-pass';
+            const reviewDbAttemptNumber = nextReviewerPassAttemptNumber(ROOT, {
+              repo: repoPath,
+              prNumber,
+              passKind,
+              fallbackReviewAttempts: current?.review_attempts || 0,
+            });
             const vocabularyFatigueFinding = passKind === 'rereview'
               ? await computeVocabularyFatigueFindingForPR({
                 repoPath,

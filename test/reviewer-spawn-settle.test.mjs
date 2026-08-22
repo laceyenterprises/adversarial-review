@@ -18,6 +18,7 @@ function currentHead(headRefOid) {
 
 test('spawnReviewer posts successful adapter-produced review bodies through GitHub capture', async () => {
   const posted = [];
+  const spawnRequests = [];
   const result = await spawnReviewer({
     rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
     repo: 'laceyenterprises/demo',
@@ -35,7 +36,8 @@ test('spawnReviewer posts successful adapter-produced review bodies through GitH
     maxRemediationRounds: 2,
     reviewerSessionUuid: 'spawn-settle-posts-adapter-body',
     reviewerRuntimeAdapterOverride: {
-      async spawnReviewer() {
+      async spawnReviewer(request) {
+        spawnRequests.push(request);
         return {
           ok: true,
           reviewBody: '## Summary\nLooks good.\n\n## Verdict\nComment only',
@@ -62,6 +64,8 @@ test('spawnReviewer posts successful adapter-produced review bodies through GitH
   assert.equal(posted[0].passKind, 'first-pass');
   assert.equal(posted[0].reviewerIdentity, 'gemini-reviewer-lacey');
   assert.match(posted[0].reviewBody, /^## Verdict\nComment only/m);
+  assert.equal(spawnRequests[0]?.subjectContext?.reviewDbAttemptNumber, 3);
+  assert.equal(spawnRequests[0]?.subjectContext?.passKind, 'first-pass');
 });
 
 test('spawnReviewer discards adapter review body when current PR head moved before post', async () => {

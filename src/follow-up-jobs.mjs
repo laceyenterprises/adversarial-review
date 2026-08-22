@@ -306,6 +306,7 @@ function resolveRoundBudgetForJob(job, { rootDir, preferPersisted = true } = {})
     job?.remediationPlan?.maxRounds
       || job?.recommendedFollowUpAction?.maxRounds
   );
+
   // Persisted state is authoritative within a single follow-up job.
   // Fresh jobs normally re-derive the cap from the PR's current
   // riskClass; callers may intentionally pass an elevated prior cap

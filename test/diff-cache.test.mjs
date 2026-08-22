@@ -107,6 +107,7 @@ test('too-large PR diff falls back to files API and raw added-file patches', asy
   const recordedCategories = [];
   const calls = [];
   const throttleCalls = [];
+  const warnings = [];
   let activeRawBlobFetches = 0;
   let maxActiveRawBlobFetches = 0;
   try {
@@ -163,6 +164,11 @@ test('too-large PR diff falls back to files API and raw added-file patches', asy
                   status: 'added',
                   sha: '5555555555555555555555555555555555555555',
                 },
+                {
+                  filename: 'src/missing-blob.txt',
+                  status: 'added',
+                  sha: '6666666666666666666666666666666666666666',
+                },
               ]),
             ].join('\n')),
             stderr: Buffer.alloc(0),
@@ -180,6 +186,11 @@ test('too-large PR diff falls back to files API and raw added-file patches', asy
           if (blobPath === `repos/${repo}/git/blobs/3333333333333333333333333333333333333333`) return { stdout: Buffer.from('\n'), stderr: Buffer.alloc(0) };
           if (blobPath === `repos/${repo}/git/blobs/4444444444444444444444444444444444444444`) return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
           if (blobPath === `repos/${repo}/git/blobs/5555555555555555555555555555555555555555`) return { stdout: Buffer.from([0x66, 0xf1, 0x6f, 0x0a]), stderr: Buffer.alloc(0) };
+          if (blobPath === `repos/${repo}/git/blobs/6666666666666666666666666666666666666666`) {
+            const err = new Error('GitHub blob missing');
+            err.status = 404;
+            throw err;
+          }
         }
         throw new Error(`unexpected gh call: ${args.join(' ')}`);
       },
@@ -193,7 +204,7 @@ test('too-large PR diff falls back to files API and raw added-file patches', asy
       awaitThrottleIfNeededImpl: async (resource) => {
         throttleCalls.push(resource);
       },
-      log: { warn() {} },
+      log: { warn: (message) => warnings.push(message) },
     });
 
     const diffText = diff.toString('utf8');
@@ -206,6 +217,8 @@ test('too-large PR diff falls back to files API and raw added-file patches', asy
     assert.match(diffText, /diff --git a\/src\/newline\.txt b\/src\/newline\.txt/);
     assert.match(diffText, /@@ -0,0 \+1,1 @@\n\+\n/);
     assert.match(diffText, /diff --git a\/src\/empty\.txt b\/src\/empty\.txt\nnew file mode 100644\nindex 0000000\.\.4444444\n(?!@@ -0,0 \+1,0 @@)/);
+    assert.match(diffText, /diff --git a\/src\/missing-blob\.txt b\/src\/missing-blob\.txt\nnew file mode 100644\nindex 0000000\.\.6666666\n--- \/dev\/null\n\+\+\+ b\/src\/missing-blob\.txt\n/);
+    assert.doesNotMatch(diffText, /missing-blob\.txt[\s\S]*@@ -0,0/);
     assert.notEqual(diff.indexOf(Buffer.concat([
       Buffer.from('diff --git a/src/latin1.txt b/src/latin1.txt\nnew file mode 100644\nindex 0000000..5555555\n--- /dev/null\n+++ b/src/latin1.txt\n@@ -0,0 +1,1 @@\n+f'),
       Buffer.from([0xf1]),
@@ -220,8 +233,8 @@ test('too-large PR diff falls back to files API and raw added-file patches', asy
         < diffText.indexOf('diff --git a/src/empty.txt b/src/empty.txt')
     );
     assert.equal(maxActiveRawBlobFetches, 3);
-    assert.deepEqual(throttleCalls, ['core', 'core', 'core', 'core']);
-    assert.deepEqual(calls.map((args) => args[0]), ['pr', 'api', 'api', 'api', 'api', 'api']);
+    assert.deepEqual(throttleCalls, ['core', 'core', 'core', 'core', 'core']);
+    assert.deepEqual(calls.map((args) => args[0]), ['pr', 'api', 'api', 'api', 'api', 'api', 'api']);
     assert.deepEqual(recordedCategories, [
       { category: 'diff_fetch', status: 'error' },
       { category: 'diff_fetch_files_api', status: 200 },
@@ -229,7 +242,9 @@ test('too-large PR diff falls back to files API and raw added-file patches', asy
       { category: 'diff_fetch_raw_file', status: 200 },
       { category: 'diff_fetch_raw_file', status: 200 },
       { category: 'diff_fetch_raw_file', status: 200 },
+      { category: 'diff_fetch_raw_file', status: 404 },
     ]);
+    assert.equal(warnings.some((message) => message.includes('raw blob fetch failed') && message.includes('src/missing-blob.txt')), true);
     assert.equal(existsSync(getDiffCachePaths(rootDir, repo, prNumber, headSha).patchPath), true);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

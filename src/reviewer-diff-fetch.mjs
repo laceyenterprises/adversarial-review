@@ -19,7 +19,7 @@ function isPullRequestDiffTooLargeError(err) {
   const detail = buildGhErrorDetail(err);
   return (
     /pullrequest\.diff too_large/.test(detail) ||
-    /maxbuffer length exceeded/.test(detail) ||
+    /maxbuffer length exceeded/i.test(detail) ||
     (/http\s+406/.test(detail) && /diff exceeded|maximum number of lines|too_large/.test(detail))
   );
 }
@@ -108,6 +108,7 @@ function diffHeaderForFile(file) {
   const diffNew = filename;
   const sha = String(file?.sha || '').slice(0, 7) || '0000000';
   const lines = [`diff --git a/${diffOld} b/${diffNew}`];
+  // The PR files API does not expose file modes, so added/removed modes are synthetic.
   if (file?.status === 'added') lines.push('new file mode 100644');
   if (file?.status === 'removed') lines.push('deleted file mode 100644');
   if (file?.status === 'added') {
@@ -269,15 +270,20 @@ async function fetchPRDiffFromFilesApi(repo, prNumber, headSha, {
     }
     if (file.status === 'added') {
       rawFetchTasks.push(async () => {
-        const raw = await fetchRawAddedFileForDiff(repo, prNumber, file, {
-          execFileImpl,
-          execGhWithRetryImpl,
-          recordApiCallImpl,
-          apiStatusFromErrorImpl,
-          ghRetrySleepImpl,
-          awaitThrottleIfNeededImpl,
-        });
-        patches[index] = synthesizeAddedFilePatch(file, raw);
+        try {
+          const raw = await fetchRawAddedFileForDiff(repo, prNumber, file, {
+            execFileImpl,
+            execGhWithRetryImpl,
+            recordApiCallImpl,
+            apiStatusFromErrorImpl,
+            ghRetrySleepImpl,
+            awaitThrottleIfNeededImpl,
+          });
+          patches[index] = synthesizeAddedFilePatch(file, raw);
+        } catch (err) {
+          log.warn?.(`[reviewer] WARN: PR files API raw blob fetch failed for ${repo}#${prNumber} ${filename}: ${err?.message || err}; adding metadata-only diff entry`);
+          patches[index] = `${diffHeaderForFile(file).join('\n')}\n`;
+        }
       });
       continue;
     }

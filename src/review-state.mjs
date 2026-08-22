@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import { CODE_PR_DOMAIN_ID, makeCodePrSubjectExternalId } from './identity-shapes.mjs';
 import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
 import { ensureReviewCycleCapSchema } from './review-cycle-cap.mjs';
+import { withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
 import { isExplicitOperatorRetriggerReason } from './retrigger-review-reason.mjs';
 import { ensureTtmTrackerSchema } from './ttm-tracker.mjs';
 
@@ -639,18 +640,20 @@ function pickExistingColumn(db, tableName, candidates) {
 }
 
 function backfillReviewedPRSubjectIdentity(db) {
-  const headShaColumn = pickExistingColumn(db, 'reviewed_prs', REVIEWED_PRS_HEAD_SHA_COLUMNS);
-  const revisionExpr = headShaColumn ? `"${headShaColumn}"` : 'NULL';
+  withSqliteBusyRetrySync(() => {
+    const headShaColumn = pickExistingColumn(db, 'reviewed_prs', REVIEWED_PRS_HEAD_SHA_COLUMNS);
+    const revisionExpr = headShaColumn ? `"${headShaColumn}"` : 'NULL';
 
-  db.prepare(
-    `UPDATE reviewed_prs
-        SET domain_id = ?,
-            subject_external_id = repo || '#' || pr_number,
-            revision_ref = ${revisionExpr}
-      WHERE domain_id IS NULL
-        AND repo IS NOT NULL
-        AND pr_number IS NOT NULL`
-  ).run(CODE_PR_DOMAIN_ID);
+    db.prepare(
+      `UPDATE reviewed_prs
+          SET domain_id = ?,
+              subject_external_id = repo || '#' || pr_number,
+              revision_ref = ${revisionExpr}
+        WHERE domain_id IS NULL
+          AND repo IS NOT NULL
+          AND pr_number IS NOT NULL`
+    ).run(CODE_PR_DOMAIN_ID);
+  }, { label: 'review-state-subject-identity-backfill' });
 }
 
 function normalizeSubjectIdentity({ domainId, domain_id, subjectExternalId, subject_external_id, revisionRef, revision_ref } = {}) {

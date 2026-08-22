@@ -46,7 +46,9 @@ import { buildHardeningReviewContext } from './hardening-ledger-context.mjs';
 import {
   captureReviewerBodyAfterPost,
   findCapturedReviewerBody,
+  findCapturedReviewerBodyForPost,
   findPendingReviewerBodyCapture,
+  findPendingReviewerBodyCaptureForPost,
 } from './review-body-capture.mjs';
 import { emitReviewedAttestation } from './reviewed-attestation.mjs';
 import { isPackLockhashInputError, resolveReviewedPackLockhash } from './pack-lockhash.mjs';
@@ -127,7 +129,6 @@ import {
   buildAgyReviewerPromptPrefix,
   isFinalReviewRound,
 } from './reviewer-prompt.mjs';
-import { isSqliteBusyError, withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
 
 const CRITICAL_WORDS = ['critical', 'vulnerability', 'security', 'injection'];
 
@@ -1806,48 +1807,29 @@ async function postGitHubReviewWithCapture({
     err.failureClass = 'stale-review-head';
     throw err;
   }
-  let capturedReviewBody = null;
-  try {
-    capturedReviewBody = withSqliteBusyRetrySync(
-      () => findCapturedReviewerBodyImpl(rootDir, {
-        repo,
-        prNumber,
-        attemptNumber: Number(attemptNumber),
-        passKind,
-        headSha: normalizedHeadSha || null,
-        reviewerModel,
-      }),
-      {
-        label: `captured-review-body-lookup ${repo}#${prNumber}`,
-        delaysMs: sqliteBusyRetryDelaysMs,
-        sleepImpl: sqliteBusySleepImpl,
-        log,
-      }
-    );
-  } catch (err) {
-    if (isSqliteBusyError(err)) throw err;
-    log.warn?.(
-      `[reviewer] captured review lookup failed for ${repo}#${prNumber}; ` +
-      `continuing to post review: ${err?.message || err}`
-    );
-  }
+  const lookupRetry = {
+    delaysMs: sqliteBusyRetryDelaysMs,
+    sleepImpl: sqliteBusySleepImpl,
+    log,
+  };
+  const lookupArgs = {
+    repo,
+    prNumber,
+    attemptNumber: Number(attemptNumber),
+    passKind,
+    reviewerModel,
+  };
+  const capturedReviewBody = findCapturedReviewerBodyForPost(
+    rootDir,
+    { ...lookupArgs, headSha: normalizedHeadSha || null },
+    { ...lookupRetry, findImpl: findCapturedReviewerBodyImpl },
+  );
   let pendingCapture = null;
   if (!capturedReviewBody && normalizedHeadSha) {
-    pendingCapture = withSqliteBusyRetrySync(
-      () => findPendingReviewerBodyCaptureImpl(rootDir, {
-        repo,
-        prNumber,
-        attemptNumber: Number(attemptNumber),
-        passKind,
-        headSha: normalizedHeadSha,
-        reviewerModel,
-      }),
-      {
-        label: `pending-review-body-capture ${repo}#${prNumber}`,
-        delaysMs: sqliteBusyRetryDelaysMs,
-        sleepImpl: sqliteBusySleepImpl,
-        log,
-      }
+    pendingCapture = findPendingReviewerBodyCaptureForPost(
+      rootDir,
+      { ...lookupArgs, headSha: normalizedHeadSha },
+      { ...lookupRetry, findImpl: findPendingReviewerBodyCaptureImpl },
     );
   }
   const alreadyCaptured = capturedReviewBody !== null;

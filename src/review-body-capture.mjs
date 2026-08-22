@@ -4,7 +4,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 import { openReviewStateDb, ensureReviewStateSchema } from './review-state.mjs';
 import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
-import { withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
+import { isSqliteBusyError, withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
 
 const execFileAsync = promisify(execFile);
 const REVIEW_CAPTURE_LOOKBACK_MS = 2 * 60 * 1000;
@@ -413,6 +413,39 @@ function findPendingReviewerBodyCapture(rootDir, {
   }
 }
 
+function findCapturedReviewerBodyForPost(rootDir, lookupArgs = {}, {
+  findImpl = findCapturedReviewerBody,
+  delaysMs = undefined,
+  sleepImpl = undefined,
+  log = console,
+} = {}) {
+  try {
+    return withSqliteBusyRetrySync(
+      () => findImpl(rootDir, lookupArgs),
+      { label: `captured-review-body-lookup ${lookupArgs.repo}#${lookupArgs.prNumber}`, delaysMs, sleepImpl, log },
+    );
+  } catch (err) {
+    if (isSqliteBusyError(err)) throw err;
+    log.warn?.(
+      `[reviewer] captured review lookup failed for ${lookupArgs.repo}#${lookupArgs.prNumber}; ` +
+      `continuing to post review: ${err?.message || err}`,
+    );
+    return null;
+  }
+}
+
+function findPendingReviewerBodyCaptureForPost(rootDir, lookupArgs = {}, {
+  findImpl = findPendingReviewerBodyCapture,
+  delaysMs = undefined,
+  sleepImpl = undefined,
+  log = console,
+} = {}) {
+  return withSqliteBusyRetrySync(
+    () => findImpl(rootDir, lookupArgs),
+    { label: `pending-review-body-capture ${lookupArgs.repo}#${lookupArgs.prNumber}`, delaysMs, sleepImpl, log },
+  );
+}
+
 // Build the env override used for the lookup gh subprocess. If a token is
 // resolved (preferred reviewer-bot token, then inherited GH_TOKEN), set it
 // on the lookup env. If neither is present, omit GH_TOKEN entirely — the
@@ -657,7 +690,9 @@ export {
   captureRemediationBodyAfterPost,
   captureReviewerBodyAfterPost,
   findCapturedReviewerBody,
+  findCapturedReviewerBodyForPost,
   findPendingReviewerBodyCapture,
+  findPendingReviewerBodyCaptureForPost,
   isTransientReviewArtifactLookupError,
   lookupRecentReviewArtifact,
   resolveReviewerBotLogin,

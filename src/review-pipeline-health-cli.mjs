@@ -12,9 +12,22 @@ Usage:
   node src/review-pipeline-health-cli.mjs [--root <dir>] [--hq-root <dir>] [--json | --prometheus | --sentinel] [--now <iso>]
 `;
 
+// The tool root (parent of src/), where this package's `data/reviews.db` lives.
+//
+// This used to default to `process.cwd()`, which made the health surface report
+// a false CLEAN whenever it was invoked from anywhere else. `hq adversarial
+// pipeline-health` execs this CLI without `--root`, so running it from the repo
+// root resolved the ledger to `<repo>/data/reviews.db`, found nothing, and
+// printed an all-zero snapshot with no findings and exit 0 — indistinguishable
+// from a healthy idle pipeline. During the 2026-08-22 terminal-Hammer Sev-1 that
+// is exactly what an operator saw while two PRs sat 8x over their TTM budget.
+// Defaulting to the module's own root makes the common invocation correct;
+// `--root` still overrides for callers that vendor the data elsewhere.
+const TOOL_ROOT = fileURLToPath(new URL('..', import.meta.url));
+
 function parseArgs(argv) {
   const options = {
-    rootDir: process.cwd(),
+    rootDir: TOOL_ROOT,
     hqRoot: process.env.HQ_ROOT || null,
     format: 'json',
     now: null,

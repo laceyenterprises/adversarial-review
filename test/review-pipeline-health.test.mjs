@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -344,11 +345,51 @@ test('collector emits a down signal when the review-state ledger is missing', ()
   const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
   assert.equal(snapshot.reviewStateLedger.exists, false);
   assert.equal(snapshot.reviewStateLedger.readable, false);
-  assert.ok(!findingCodes(snapshot).includes('review:review_state_ledger_unreadable'));
 
   const output = renderReviewPipelinePrometheus(snapshot);
   assert.match(output, /^# TYPE review_pipeline_health_collector_up gauge$/m);
   assert.match(output, /^review_pipeline_health_collector_up 0$/m);
+});
+
+// BEHAVIOR CHANGE (2026-08-22): a missing ledger now also raises a finding.
+//
+// The Prometheus `collector_up 0` gauge asserted above was the ONLY down signal
+// for this case. The findings/`--sentinel` stream — the surface Sentinel and
+// `hq adversarial pipeline-health` actually consume — stayed completely silent
+// and shipped an all-zero snapshot, which reads as a healthy idle pipeline.
+// Combined with the CLI's old `process.cwd()` root default, that produced a
+// confident false CLEAN from the wrong directory. See the terminal-Hammer Sev-1
+// (agent-os docs/postmortems/INCIDENT-SEV1-terminal-hammer-revision-ref-deadlock-2026-08-22.md).
+test('collector emits a finding when the review-state ledger is missing entirely', () => {
+  const rootDir = tempRoot();
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+
+  assert.ok(findingCodes(snapshot).includes('review:review_state_ledger_unreadable'));
+  const finding = snapshot.findings.find(
+    (item) => item.code === 'review:review_state_ledger_unreadable',
+  );
+  assert.equal(finding.tier, 'ticket');
+  assert.match(finding.subject, /missing at the resolved root/);
+  // The message must say why the zeros are untrustworthy, not merely that a file
+  // is absent — the zeros are the part that misleads.
+  assert.match(finding.message, /NOT because the pipeline is idle/);
+  assert.match(finding.recommended_action, /Treat this snapshot as unusable/);
+});
+
+test('parseArgs defaults rootDir to the tool root, not the caller cwd', () => {
+  // `hq adversarial pipeline-health` execs this CLI without `--root`. Defaulting
+  // to process.cwd() resolved the ledger relative to wherever the operator
+  // happened to be standing and reported a false CLEAN.
+  const options = parseArgs([]);
+  // Assert structurally, not by directory name: the default must be the package
+  // root that owns this CLI, wherever the checkout happens to live.
+  assert.ok(
+    existsSync(path.join(options.rootDir, 'src', 'review-pipeline-health-cli.mjs')),
+    `expected the tool root that owns the CLI, got ${options.rootDir}`,
+  );
+  assert.ok(existsSync(path.join(options.rootDir, 'package.json')));
+  // An explicit --root still wins.
+  assert.equal(parseArgs(['--root', '/tmp/elsewhere']).rootDir, '/tmp/elsewhere');
 });
 
 test('collector emits a page finding when an existing review-state ledger cannot be opened', () => {

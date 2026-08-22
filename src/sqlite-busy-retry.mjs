@@ -12,11 +12,31 @@ function isSqliteBusyError(err) {
   );
 }
 
+function isTransientSleepSpawnError(err) {
+  const text = `${String(err?.code || '')}\n${String(err?.message || err || '')}`.toLowerCase();
+  return (
+    text.includes('eagain') ||
+    text.includes('eio') ||
+    text.includes('emfile') ||
+    text.includes('enfile') ||
+    text.includes('resource temporarily unavailable')
+  );
+}
+
+function busyWaitSync(ms) {
+  const end = Date.now() + Math.max(0, Math.floor(ms) || 0);
+  while (Date.now() < end) {
+    // Intentionally empty: this is the last-resort synchronous delay path when
+    // the process cannot spawn the lightweight sleep helper under load.
+  }
+}
+
 function sleepSync(ms, {
   atomicsWaitImpl = globalThis.Atomics?.wait,
   sharedArrayBufferImpl = globalThis.SharedArrayBuffer,
   int32ArrayImpl = Int32Array,
   spawnSyncImpl = spawnSync,
+  busyWaitImpl = busyWaitSync,
 } = {}) {
   if (!Number.isFinite(ms) || ms <= 0) return;
   const delayMs = Math.floor(ms);
@@ -34,7 +54,13 @@ function sleepSync(ms, {
     stdio: 'ignore',
     timeout: delayMs + 1000,
   });
-  if (result?.error) throw result.error;
+  if (result?.error) {
+    if (isTransientSleepSpawnError(result.error)) {
+      busyWaitImpl(delayMs);
+      return;
+    }
+    throw result.error;
+  }
   if (result?.signal) {
     throw new Error(`sleep exited from signal ${result.signal}`);
   }

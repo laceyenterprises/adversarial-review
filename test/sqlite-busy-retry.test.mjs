@@ -81,26 +81,48 @@ test('sync sleep falls back to lightweight sleep binary when Atomics is unavaila
   ]]);
 });
 
-test('sync sleep throws transient fallback resource errors instead of busy waiting', () => {
+test('sync sleep busy-waits after transient fallback resource errors', () => {
   const err = new Error('spawn EAGAIN');
   err.code = 'EAGAIN';
+  const busyWaits = [];
 
-  assert.throws(() => sleepSync(1, {
+  sleepSync(1, {
     atomicsWaitImpl: null,
     sharedArrayBufferImpl: null,
     spawnSyncImpl: () => ({ error: err }),
-  }), /spawn EAGAIN/);
+    busyWaitImpl: (ms) => busyWaits.push(ms),
+  });
+
+  assert.deepEqual(busyWaits, [1]);
 });
 
-test('sync sleep throws EIO fallback errors instead of busy waiting', () => {
+test('sync sleep busy-waits after EIO fallback errors', () => {
   const err = new Error('spawn EIO');
   err.code = 'EIO';
+  const busyWaits = [];
 
-  assert.throws(() => sleepSync(1, {
+  sleepSync(1, {
     atomicsWaitImpl: null,
     sharedArrayBufferImpl: null,
     spawnSyncImpl: () => ({ error: err }),
-  }), /spawn EIO/);
+    busyWaitImpl: (ms) => busyWaits.push(ms),
+  });
+
+  assert.deepEqual(busyWaits, [1]);
+});
+
+test('sync sleep busy-waits after resource temporarily unavailable spawn errors', () => {
+  const err = new Error('spawn failed: resource temporarily unavailable');
+  const busyWaits = [];
+
+  sleepSync(1, {
+    atomicsWaitImpl: null,
+    sharedArrayBufferImpl: null,
+    spawnSyncImpl: () => ({ error: err }),
+    busyWaitImpl: (ms) => busyWaits.push(ms),
+  });
+
+  assert.deepEqual(busyWaits, [1]);
 });
 
 test('sync sleep throws on premature fallback subprocess exit instead of busy waiting', () => {

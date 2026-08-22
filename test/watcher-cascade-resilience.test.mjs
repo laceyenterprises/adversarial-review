@@ -1047,6 +1047,69 @@ test('settleReviewerAttempt marks success posted before optional cycle-cap bookk
   }
 });
 
+test('settleReviewerAttempt does not retry markPosted when heartbeat hits SQLITE_BUSY', () => {
+  const { rootDir, db } = setupFixture();
+  try {
+    const repo = 'laceyenterprises/adversarial-review';
+    const prNumber = 195;
+    let markPostedCalls = 0;
+    let heartbeatCalls = 0;
+    const markPostedStmt = db.prepare(
+      "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
+    );
+    db.prepare(
+      "UPDATE reviewed_prs SET review_status = 'reviewing', reviewer_head_sha = ? WHERE repo = ? AND pr_number = ?"
+    ).run('head-heartbeat', repo, prNumber);
+
+    settleReviewerAttempt({
+      rootDir,
+      repoPath: repo,
+      prNumber,
+      result: { ok: true },
+      statements: {
+        markPosted: {
+          run(...args) {
+            markPostedCalls += 1;
+            return markPostedStmt.run(...args);
+          },
+        },
+        markFailed: stmtMarkBugFailed(db),
+        releaseReviewLease: db.prepare(
+          "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
+        ),
+        markCascadeFailed: stmtMarkCascadeFailed(db),
+        markPendingUpstream: stmtMarkPendingUpstream(db),
+        getReviewRow: {
+          get() {
+            return { reviewer_head_sha: 'head-heartbeat' };
+          },
+        },
+      },
+      markReviewHeartbeat() {
+        heartbeatCalls += 1;
+        if (heartbeatCalls === 1) {
+          const err = new Error('database is locked');
+          err.code = 'SQLITE_BUSY';
+          throw err;
+        }
+      },
+      log: { warn() {}, log() {} },
+    });
+
+    const row = db.prepare(
+      'SELECT review_status, review_attempts, failure_message FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get(repo, prNumber);
+    assert.equal(row.review_status, 'posted');
+    assert.equal(row.review_attempts, 1);
+    assert.equal(row.failure_message, null);
+    assert.equal(markPostedCalls, 1);
+    assert.equal(heartbeatCalls, 2);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('recordSuccessfulReviewCycleVerdict skips settled reviews with no standing blockers', () => {
   const { rootDir, db } = setupFixture();
   try {

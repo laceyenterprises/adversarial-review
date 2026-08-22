@@ -1,7 +1,6 @@
 import { spawnSync } from 'node:child_process';
 
 const DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS = Object.freeze([100, 250, 500, 1000, 2000, 5000]);
-const TRANSIENT_SLEEP_SPAWN_ERROR_CODES = new Set(['EAGAIN', 'ENOMEM', 'EMFILE', 'ENFILE', 'EIO']);
 
 function isSqliteBusyError(err) {
   const text = `${String(err?.code || '')}\n${String(err?.message || err || '')}`.toLowerCase();
@@ -13,33 +12,35 @@ function isSqliteBusyError(err) {
   );
 }
 
-function busyWaitUntilSync(end) {
-  while (Date.now() < end) {
-    // Intentional synchronous fallback when the OS cannot provide a blocking sleep.
-  }
-}
-
-function sleepSync(ms, { spawnSyncImpl = spawnSync } = {}) {
+function sleepSync(ms, {
+  atomicsWaitImpl = globalThis.Atomics?.wait,
+  sharedArrayBufferImpl = globalThis.SharedArrayBuffer,
+  int32ArrayImpl = Int32Array,
+  spawnSyncImpl = spawnSync,
+} = {}) {
   if (!Number.isFinite(ms) || ms <= 0) return;
   const delayMs = Math.floor(ms);
-  const startedAt = Date.now();
-  const endAt = startedAt + delayMs;
-  const result = spawnSyncImpl(
-    process.execPath,
-    ['-e', `setTimeout(() => {}, ${JSON.stringify(delayMs)})`],
-    {
-      stdio: 'ignore',
-      timeout: delayMs + 1000,
-    }
-  );
-  if (result?.error && result.error.code !== 'ETIMEDOUT') {
-    if (TRANSIENT_SLEEP_SPAWN_ERROR_CODES.has(result.error.code)) {
-      busyWaitUntilSync(endAt);
-      return;
-    }
-    throw result.error;
+  if (
+    typeof atomicsWaitImpl === 'function' &&
+    typeof sharedArrayBufferImpl === 'function' &&
+    typeof int32ArrayImpl === 'function'
+  ) {
+    const buffer = new sharedArrayBufferImpl(4);
+    const view = new int32ArrayImpl(buffer);
+    atomicsWaitImpl(view, 0, 0, delayMs);
+    return;
   }
-  busyWaitUntilSync(endAt);
+  const result = spawnSyncImpl('sleep', [(delayMs / 1000).toString()], {
+    stdio: 'ignore',
+    timeout: delayMs + 1000,
+  });
+  if (result?.error) throw result.error;
+  if (result?.signal) {
+    throw new Error(`sleep exited from signal ${result.signal}`);
+  }
+  if (typeof result?.status === 'number' && result.status !== 0) {
+    throw new Error(`sleep exited with status ${result.status}`);
+  }
 }
 
 function sleepAsync(ms) {

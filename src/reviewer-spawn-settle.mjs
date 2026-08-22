@@ -975,8 +975,10 @@ function settleReviewerAttempt({
     const postedAt = new Date().toISOString();
     withSqliteBusyRetrySync(() => {
       statements.markPosted.run(postedAt, repoPath, prNumber);
-      markReviewHeartbeat({ repo: repoPath, pr_number: prNumber, posted_at: postedAt });
     }, { label: `reviewer-settle-posted:${repoPath}#${prNumber}`, log });
+    withSqliteBusyRetrySync(() => {
+      markReviewHeartbeat({ repo: repoPath, pr_number: prNumber, posted_at: postedAt });
+    }, { label: `reviewer-settle-posted-heartbeat:${repoPath}#${prNumber}`, log });
     try {
       withSqliteBusyRetrySync(() => {
         const currentRow = typeof statements.getReviewRow?.get === 'function'

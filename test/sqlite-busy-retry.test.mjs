@@ -4,9 +4,10 @@ import test from 'node:test';
 
 import { sleepSync, withSqliteBusyRetrySync } from '../src/sqlite-busy-retry.mjs';
 
-test('sync sqlite busy retry no longer depends on Atomics.wait', () => {
+test('sync sqlite busy retry does not spawn a Node.js subprocess for sleeping', () => {
   const source = readFileSync(new URL('../src/sqlite-busy-retry.mjs', import.meta.url), 'utf8');
-  assert.doesNotMatch(source, /Atomics\.wait/);
+  assert.doesNotMatch(source, /process\.execPath/);
+  assert.doesNotMatch(source, /setTimeout\(\(\) => \{\}/);
 });
 
 test('sync sqlite busy retry retries busy failures before succeeding', () => {
@@ -34,38 +35,80 @@ test('sync sqlite busy retry retries busy failures before succeeding', () => {
   assert.deepEqual(sleeps, [5]);
 });
 
-test('sync sleep falls back to busy wait on transient spawn resource errors', () => {
+test('sync sleep uses Atomics.wait when available', () => {
+  const calls = [];
+
+  sleepSync(5, {
+    atomicsWaitImpl: (view, index, value, timeout) => calls.push({
+      view,
+      index,
+      value,
+      timeout,
+    }),
+    sharedArrayBufferImpl: SharedArrayBuffer,
+    int32ArrayImpl: Int32Array,
+    spawnSyncImpl: () => {
+      throw new Error('spawn should not be called');
+    },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].view instanceof Int32Array);
+  assert.equal(calls[0].index, 0);
+  assert.equal(calls[0].value, 0);
+  assert.equal(calls[0].timeout, 5);
+});
+
+test('sync sleep falls back to lightweight sleep binary when Atomics is unavailable', () => {
+  const calls = [];
+
+  sleepSync(250, {
+    atomicsWaitImpl: null,
+    sharedArrayBufferImpl: null,
+    spawnSyncImpl: (...args) => {
+      calls.push(args);
+      return { status: 0 };
+    },
+  });
+
+  assert.deepEqual(calls, [[
+    'sleep',
+    ['0.25'],
+    {
+      stdio: 'ignore',
+      timeout: 1250,
+    },
+  ]]);
+});
+
+test('sync sleep throws transient fallback resource errors instead of busy waiting', () => {
   const err = new Error('spawn EAGAIN');
   err.code = 'EAGAIN';
 
-  assert.doesNotThrow(() => sleepSync(1, {
+  assert.throws(() => sleepSync(1, {
+    atomicsWaitImpl: null,
+    sharedArrayBufferImpl: null,
     spawnSyncImpl: () => ({ error: err }),
-  }));
+  }), /spawn EAGAIN/);
 });
 
-test('sync sleep treats EIO as a transient spawn resource error', () => {
+test('sync sleep throws EIO fallback errors instead of busy waiting', () => {
   const err = new Error('spawn EIO');
   err.code = 'EIO';
 
-  assert.doesNotThrow(() => sleepSync(1, {
+  assert.throws(() => sleepSync(1, {
+    atomicsWaitImpl: null,
+    sharedArrayBufferImpl: null,
     spawnSyncImpl: () => ({ error: err }),
-  }));
+  }), /spawn EIO/);
 });
 
-test('sync sleep completes remaining delay after premature subprocess exit', () => {
-  const originalNow = Date.now;
-  const ticks = [1000, 1000, 1003, 1005];
-  let calls = 0;
-  Date.now = () => ticks[Math.min(calls++, ticks.length - 1)];
-  try {
-    sleepSync(5, {
-      spawnSyncImpl: () => ({ status: 1 }),
-    });
-  } finally {
-    Date.now = originalNow;
-  }
-
-  assert.equal(calls, 4);
+test('sync sleep throws on premature fallback subprocess exit instead of busy waiting', () => {
+  assert.throws(() => sleepSync(5, {
+    atomicsWaitImpl: null,
+    sharedArrayBufferImpl: null,
+    spawnSyncImpl: () => ({ status: 1 }),
+  }), /sleep exited with status 1/);
 });
 
 test('sync sleep still throws unexpected spawn errors', () => {
@@ -74,6 +117,8 @@ test('sync sleep still throws unexpected spawn errors', () => {
 
   assert.throws(
     () => sleepSync(1, {
+      atomicsWaitImpl: null,
+      sharedArrayBufferImpl: null,
       spawnSyncImpl: () => ({ error: err }),
     }),
     /spawn EACCES/

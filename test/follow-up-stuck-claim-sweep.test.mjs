@@ -44,6 +44,8 @@ function seedInProgressJob(rootDir, {
   spawnedAt,
   mtimeIso,
   worker = {},
+  plan = {},
+  jobUpdates = {},
 } = {}) {
   const inProgressDir = getFollowUpJobDir(rootDir, 'inProgress');
   mkdirSync(inProgressDir, { recursive: true });
@@ -69,6 +71,11 @@ function seedInProgressJob(rootDir, {
       processId: 99999,
       ...worker,
     },
+    remediationPlan: {
+      ...(baseJob.remediationPlan || {}),
+      ...plan,
+    },
+    ...jobUpdates,
   };
   if (lastHeartbeatAt !== undefined) {
     job.lastHeartbeatAt = lastHeartbeatAt;
@@ -85,6 +92,28 @@ function readJobAtPath(jobPath) {
   return JSON.parse(readFileSync(jobPath, 'utf8'));
 }
 
+function pendingPathFor(rootDir, jobPath) {
+  return path.join(getFollowUpJobDir(rootDir, 'pending'), path.basename(jobPath));
+}
+
+function stoppedPathFor(rootDir, jobPath) {
+  return path.join(getFollowUpJobDir(rootDir, 'stopped'), path.basename(jobPath));
+}
+
+function assertStaleJobRequeued(rootDir, jobPath, { source = 'lastHeartbeatAt' } = {}) {
+  assert.equal(existsSync(jobPath), false, 'in-progress file removed');
+  const pendingPath = pendingPathFor(rootDir, jobPath);
+  assert.equal(existsSync(pendingPath), true, 'file moved back to pending/');
+  assert.equal(existsSync(stoppedPathFor(rootDir, jobPath)), false, 'file not moved to stopped/');
+  const pendingJob = readJobAtPath(pendingPath);
+  assert.equal(pendingJob.status, 'pending');
+  assert.equal(pendingJob.remediationWorker, null);
+  assert.equal(pendingJob.remediationPlan?.transientRetries, 1);
+  assert.equal(pendingJob.remediationPlan?.retryHistory?.at(-1)?.retryMetadata?.code, STALE_HEARTBEAT_STOP_CODE);
+  assert.equal(pendingJob.remediationPlan?.retryHistory?.at(-1)?.retryMetadata?.reclaimSource, source);
+  return pendingJob;
+}
+
 async function successfulStaleSignal() {
   return {
     signalled: true,
@@ -93,7 +122,7 @@ async function successfulStaleSignal() {
   };
 }
 
-test('sweepStuckInProgressClaims: stale lastHeartbeatAt moves claim to stopped/', async () => {
+test('sweepStuckInProgressClaims: stale lastHeartbeatAt requeues direct remediator before terminal stop', async () => {
   const rootDir = makeRoot();
   const { jobPath } = seedInProgressJob(rootDir, {
     lastHeartbeatAt: '2026-06-01T05:00:00.000Z',
@@ -109,28 +138,165 @@ test('sweepStuckInProgressClaims: stale lastHeartbeatAt moves claim to stopped/'
 
   assert.equal(result.scanned, 1);
   assert.equal(result.reclaimed, 1);
+  assert.equal(result.requeued, 1);
+  assert.equal(result.terminalStopped, 0);
   assert.equal(result.skipped, 0);
+  const pendingJob = assertStaleJobRequeued(rootDir, jobPath);
+  const retryWorker = pendingJob.remediationPlan.retryHistory.at(-1).worker;
+  assert.equal(retryWorker?.state, 'spawned');
+  assert.deepEqual(pendingJob.remediationPlan?.retryHistory?.at(-1)?.retryMetadata?.staleReclaimSignal?.target, {
+    kind: 'process-group',
+    id: 99999,
+  });
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /stale-claim-requeued/);
+  assert.match(logs[0], /source=lastHeartbeatAt/);
+  assert.match(logs[0], /signalled=true/);
+});
+
+test('sweepStuckInProgressClaims: exhausted stale retry budget stops and posts owed comment', async () => {
+  const rootDir = makeRoot();
+  const { jobPath } = seedInProgressJob(rootDir, {
+    lastHeartbeatAt: '2026-06-01T05:00:00.000Z',
+    plan: { currentRound: 2, maxRounds: undefined, transientRetries: 1 },
+  });
+  const nowMs = Date.parse('2026-06-01T05:35:00.000Z');
+  const posts = [];
+  const result = await sweepStuckInProgressClaims({
+    rootDir,
+    nowMs,
+    maxTransientRetries: 1,
+    sendWorkerSignalImpl: successfulStaleSignal,
+    postCommentImpl: async (args) => {
+      posts.push(args);
+      return { posted: true, url: 'https://github.test/comment/1' };
+    },
+  });
+
+  assert.equal(result.scanned, 1);
+  assert.equal(result.reclaimed, 1);
+  assert.equal(result.requeued, 0);
+  assert.equal(result.terminalStopped, 1);
   assert.equal(existsSync(jobPath), false, 'in-progress file removed');
-  const stoppedPath = path.join(getFollowUpJobDir(rootDir, 'stopped'), path.basename(jobPath));
+  const stoppedPath = stoppedPathFor(rootDir, jobPath);
   assert.equal(existsSync(stoppedPath), true, 'file moved to stopped/');
   const stoppedJob = readJobAtPath(stoppedPath);
   assert.equal(stoppedJob.status, 'stopped');
   assert.equal(stoppedJob.remediationPlan?.stop?.code, STALE_HEARTBEAT_STOP_CODE);
-  assert.equal(stoppedJob.remediationWorker?.state, 'reclaimed-stale-heartbeat');
-  assert.equal(stoppedJob.remediationWorker?.reclaimReason, STALE_HEARTBEAT_STOP_CODE);
-  assert.equal(stoppedJob.remediationWorker?.reclaimSource, 'lastHeartbeatAt');
-  assert.equal(stoppedJob.remediationWorker?.staleReclaimSignal?.signalled, true);
-  assert.deepEqual(stoppedJob.remediationWorker?.staleReclaimSignal?.target, {
-    kind: 'process-group',
-    id: 99999,
+  assert.match(stoppedJob.remediationPlan?.stop?.reason, /Exhausted stale heartbeat retry budget/);
+  assert.equal(stoppedJob.remediationPlan?.stop?.sourceStatus, 'in_progress');
+  assert.ok(stoppedJob.remediationPlan?.stop?.maxRounds > 0);
+  assert.equal(stoppedJob.commentDelivery?.posted, true);
+  assert.equal(stoppedJob.commentDelivery?.reason, null);
+  assert.match(stoppedJob.commentDelivery?.body, /stale-heartbeat/);
+  assert.match(stoppedJob.commentDelivery?.body, /round 2 of 3/);
+  assert.equal(posts.length, 1);
+  assert.match(posts[0].body, /stale-heartbeat/);
+  assert.match(posts[0].body, /round 2 of 3/);
+});
+
+test('sweepStuckInProgressClaims: posted in-progress delivery is not posted again', async () => {
+  const rootDir = makeRoot();
+  const { jobPath } = seedInProgressJob(rootDir, {
+    lastHeartbeatAt: '2026-06-01T05:00:00.000Z',
+    plan: { currentRound: 2, maxRounds: undefined, transientRetries: 1 },
+    jobUpdates: {
+      commentDelivery: {
+        posted: true,
+        attempts: 1,
+        body: 'already posted stale-heartbeat comment',
+        repo: 'laceyenterprises/agent-os',
+        prNumber: 1226,
+        workerClass: 'codex',
+        reason: null,
+      },
+    },
   });
-  assert.equal(typeof stoppedJob.remediationWorker?.reclaimedAt, 'string');
-  assert.equal(typeof stoppedJob.remediationWorker?.reclaimAgeMs, 'number');
-  assert.ok(stoppedJob.remediationWorker.reclaimAgeMs >= 35 * 60 * 1000);
-  assert.equal(logs.length, 1);
-  assert.match(logs[0], /stale-claim-reclaimed/);
-  assert.match(logs[0], /source=lastHeartbeatAt/);
-  assert.match(logs[0], /signalled=true/);
+  const nowMs = Date.parse('2026-06-01T05:35:00.000Z');
+  const result = await sweepStuckInProgressClaims({
+    rootDir,
+    nowMs,
+    maxTransientRetries: 1,
+    sendWorkerSignalImpl: successfulStaleSignal,
+    recordInitialCommentDeliveryImpl: async () => {
+      throw new Error('must not repost an already posted terminal comment');
+    },
+  });
+
+  assert.equal(result.scanned, 1);
+  assert.equal(result.reclaimed, 1);
+  assert.equal(result.requeued, 0);
+  assert.equal(result.terminalStopped, 1);
+  assert.equal(existsSync(jobPath), false, 'in-progress file removed');
+  const stoppedJob = readJobAtPath(stoppedPathFor(rootDir, jobPath));
+  assert.equal(stoppedJob.status, 'stopped');
+  assert.equal(stoppedJob.commentDelivery?.posted, true);
+  assert.equal(stoppedJob.commentDelivery?.body, 'already posted stale-heartbeat comment');
+  assert.equal(stoppedJob.remediationPlan?.stop?.maxRounds, 3);
+});
+
+test('sweepStuckInProgressClaims: terminal comment delivery throw leaves stale claim recoverable', async () => {
+  const rootDir = makeRoot();
+  const { jobPath } = seedInProgressJob(rootDir, {
+    lastHeartbeatAt: '2026-06-01T05:00:00.000Z',
+    plan: { currentRound: 2, maxRounds: undefined, transientRetries: 1 },
+  });
+  const nowMs = Date.parse('2026-06-01T05:35:00.000Z');
+  const warnings = [];
+  const result = await sweepStuckInProgressClaims({
+    rootDir,
+    nowMs,
+    maxTransientRetries: 1,
+    log: { warn: (msg) => warnings.push(msg) },
+    sendWorkerSignalImpl: successfulStaleSignal,
+    recordInitialCommentDeliveryImpl: async () => {
+      throw new Error('transient GitHub outage');
+    },
+  });
+
+  assert.equal(result.scanned, 1);
+  assert.equal(result.reclaimed, 0);
+  assert.equal(result.requeued, 0);
+  assert.equal(result.terminalStopped, 0);
+  assert.equal(result.skipped, 1);
+  assert.equal(existsSync(jobPath), true, 'in-progress file remains for retry');
+  assert.equal(existsSync(stoppedPathFor(rootDir, jobPath)), false, 'file not moved to stopped/');
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /stale-claim-terminal-comment-failed/);
+  assert.match(warnings[0], /transient GitHub outage/);
+});
+
+test('sweepStuckInProgressClaims: failed terminal comment delivery leaves stale claim recoverable', async () => {
+  const rootDir = makeRoot();
+  const { jobPath } = seedInProgressJob(rootDir, {
+    lastHeartbeatAt: '2026-06-01T05:00:00.000Z',
+    plan: { currentRound: 2, maxRounds: undefined, transientRetries: 1 },
+  });
+  const nowMs = Date.parse('2026-06-01T05:35:00.000Z');
+  const warnings = [];
+  const result = await sweepStuckInProgressClaims({
+    rootDir,
+    nowMs,
+    maxTransientRetries: 1,
+    log: { warn: (msg) => warnings.push(msg) },
+    sendWorkerSignalImpl: successfulStaleSignal,
+    recordInitialCommentDeliveryImpl: async () => ({
+      posted: false,
+      reason: 'gh-cli-failure',
+      body: 'owed stale-heartbeat comment',
+    }),
+  });
+
+  assert.equal(result.scanned, 1);
+  assert.equal(result.reclaimed, 0);
+  assert.equal(result.requeued, 0);
+  assert.equal(result.terminalStopped, 0);
+  assert.equal(result.skipped, 1);
+  assert.equal(existsSync(jobPath), true, 'in-progress file remains for retry');
+  assert.equal(existsSync(stoppedPathFor(rootDir, jobPath)), false, 'file not moved to stopped/');
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /stale-claim-terminal-comment-deferred/);
+  assert.match(warnings[0], /deliveryReason=gh-cli-failure/);
 });
 
 test('sweepStuckInProgressClaims: failed stale-worker signal leaves claim in progress', async () => {
@@ -181,14 +347,14 @@ test('sweepStuckInProgressClaims: already-dead stale worker still reclaims claim
 
   assert.equal(result.scanned, 1);
   assert.equal(result.reclaimed, 1);
+  assert.equal(result.requeued, 1);
   assert.equal(result.signalFailed, 0);
   assert.equal(result.signalSkipped, 1);
-  assert.equal(existsSync(jobPath), false, 'in-progress file removed');
-  const stoppedPath = path.join(getFollowUpJobDir(rootDir, 'stopped'), path.basename(jobPath));
-  const stoppedJob = readJobAtPath(stoppedPath);
-  assert.equal(stoppedJob.remediationWorker?.staleReclaimSignal?.skipped, true);
-  assert.equal(stoppedJob.remediationWorker?.staleReclaimSignal?.error, 'process-group-not-found');
-  assert.match(logs[0], /stale-claim-reclaimed/);
+  const pendingJob = assertStaleJobRequeued(rootDir, jobPath);
+  const retryMetadata = pendingJob.remediationPlan.retryHistory.at(-1).retryMetadata;
+  assert.equal(retryMetadata?.staleReclaimSignal?.skipped, true);
+  assert.equal(retryMetadata?.staleReclaimSignal?.error, 'process-group-not-found');
+  assert.match(logs[0], /stale-claim-requeued/);
 });
 
 test('sweepStuckInProgressClaims: ESRCH stale-worker signal still reclaims claim', async () => {
@@ -209,9 +375,10 @@ test('sweepStuckInProgressClaims: ESRCH stale-worker signal still reclaims claim
 
   assert.equal(result.scanned, 1);
   assert.equal(result.reclaimed, 1);
+  assert.equal(result.requeued, 1);
   assert.equal(result.signalFailed, 0);
   assert.equal(result.signalSkipped, 1);
-  assert.equal(existsSync(jobPath), false, 'in-progress file removed');
+  assertStaleJobRequeued(rootDir, jobPath);
 });
 
 test('sweepStuckInProgressClaims: fresh lastHeartbeatAt leaves claim in place', async () => {
@@ -286,9 +453,8 @@ test('sweepStuckInProgressClaims: missing lastHeartbeatAt falls back to file mti
   });
 
   assert.equal(result.reclaimed, 1);
-  const stoppedPath = path.join(getFollowUpJobDir(rootDir, 'stopped'), path.basename(jobPath));
-  const stoppedJob = readJobAtPath(stoppedPath);
-  assert.equal(stoppedJob.remediationWorker?.reclaimSource, 'mtime');
+  assert.equal(result.requeued, 1);
+  assertStaleJobRequeued(rootDir, jobPath, { source: 'mtime' });
 });
 
 test('emitHeartbeatsForActiveJobs before sweep preserves a live detached worker after daemon downtime', async () => {
@@ -357,9 +523,8 @@ test('emitHeartbeatsForActiveJobs does not refresh a silent alive worker with em
 
   assert.equal(heartbeatResult.touched, 0);
   assert.equal(sweepResult.reclaimed, 1);
-  const stoppedPath = path.join(getFollowUpJobDir(rootDir, 'stopped'), path.basename(jobPath));
-  const stoppedJob = readJobAtPath(stoppedPath);
-  assert.equal(stoppedJob.remediationWorker?.reclaimSource, 'lastHeartbeatAt');
+  assert.equal(sweepResult.requeued, 1);
+  assertStaleJobRequeued(rootDir, jobPath, { source: 'lastHeartbeatAt' });
 });
 
 test('sweepStuckInProgressClaims prefers artifact progress over synthetic heartbeat freshness', async () => {
@@ -382,9 +547,8 @@ test('sweepStuckInProgressClaims prefers artifact progress over synthetic heartb
   });
 
   assert.equal(result.reclaimed, 1);
-  const stoppedPath = path.join(getFollowUpJobDir(rootDir, 'stopped'), path.basename(jobPath));
-  const stoppedJob = readJobAtPath(stoppedPath);
-  assert.equal(stoppedJob.remediationWorker?.reclaimSource, 'lastWorkerArtifactProgressAt');
+  assert.equal(result.requeued, 1);
+  assertStaleJobRequeued(rootDir, jobPath, { source: 'lastWorkerArtifactProgressAt' });
 });
 
 test('resolveWorkerArtifactProgressMs ignores empty artifacts', () => {

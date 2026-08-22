@@ -2541,6 +2541,70 @@ function markFollowUpJobCompleted({
   });
 }
 
+function computeFollowUpJobStoppedState({
+  currentJob,
+  stoppedAt = new Date().toISOString(),
+  stopReason,
+  stopCode = 'stopped',
+  stoppedBy = null,
+  sourceStatus = null,
+  remediationWorker,
+  remediationReply,
+  reReview,
+  completion,
+  failure,
+  commentDelivery = null,
+}) {
+  const currentRound = Number(currentJob?.remediationPlan?.currentRound || 0);
+  const maxRounds = Number(currentJob?.remediationPlan?.maxRounds || DEFAULT_MAX_REMEDIATION_ROUNDS);
+  const stop = buildStopMetadata({
+    code: stopCode,
+    reason: stopReason,
+    stoppedAt,
+    stoppedBy,
+    sourceStatus: sourceStatus || currentJob.status || null,
+    currentRound,
+    maxRounds,
+  });
+
+  let nextJob = {
+    ...currentJob,
+    status: 'stopped',
+    stoppedAt,
+    remediationWorker: remediationWorker ?? currentJob.remediationWorker ?? null,
+    remediationReply: remediationReply ?? currentJob.remediationReply,
+    reReview: reReview ?? currentJob.reReview ?? null,
+    completion: completion ?? currentJob.completion ?? null,
+    failure: failure ?? currentJob.failure ?? null,
+    remediationPlan: {
+      ...(currentJob.remediationPlan || buildRemediationRoundPlan()),
+      stopReason: stop.reason,
+      stop,
+      nextAction: null,
+    },
+  };
+
+  if (currentRound > 0 && getCurrentRound(nextJob)) {
+    nextJob = updateCurrentRound(nextJob, (round) => ({
+      ...round,
+      state: 'stopped',
+      finishedAt: stoppedAt,
+      worker: remediationWorker ?? round.worker ?? currentJob.remediationWorker ?? null,
+      remediationReply: remediationReply ?? round.remediationReply ?? currentJob.remediationReply ?? null,
+      reReview: reReview ?? round.reReview ?? currentJob.reReview ?? null,
+      completion: completion ?? round.completion ?? currentJob.completion ?? null,
+      failure: failure ?? round.failure ?? currentJob.failure ?? null,
+      stop,
+    }));
+  }
+
+  if (commentDelivery) {
+    nextJob.commentDelivery = commentDelivery;
+  }
+
+  return nextJob;
+}
+
 // Intentionally synchronous today: stopped/ failed/ completed queue
 // transitions use rename + writeFileSync so callers can treat the on-disk
 // terminal record as durable immediately after return.
@@ -2564,52 +2628,20 @@ function markFollowUpJobStopped({
     jobPath,
     destinationKey: 'stopped',
     buildNextJob: (currentJob) => {
-      const currentRound = Number(currentJob?.remediationPlan?.currentRound || 0);
-      const maxRounds = Number(currentJob?.remediationPlan?.maxRounds || DEFAULT_MAX_REMEDIATION_ROUNDS);
-      const stop = buildStopMetadata({
-        code: stopCode,
-        reason: stopReason,
+      const nextJob = computeFollowUpJobStoppedState({
+        currentJob,
         stoppedAt,
+        stopReason,
+        stopCode,
         stoppedBy,
-        sourceStatus: sourceStatus || currentJob.status || null,
-        currentRound,
-        maxRounds,
+        sourceStatus,
+        remediationWorker,
+        remediationReply,
+        reReview,
+        completion,
+        failure,
+        commentDelivery,
       });
-
-      let nextJob = {
-        ...currentJob,
-        status: 'stopped',
-        stoppedAt,
-        remediationWorker: remediationWorker ?? currentJob.remediationWorker ?? null,
-        remediationReply: remediationReply ?? currentJob.remediationReply,
-        reReview: reReview ?? currentJob.reReview ?? null,
-        completion: completion ?? currentJob.completion ?? null,
-        failure: failure ?? currentJob.failure ?? null,
-        remediationPlan: {
-          ...(currentJob.remediationPlan || buildRemediationRoundPlan()),
-          stopReason: stop.reason,
-          stop,
-          nextAction: null,
-        },
-      };
-
-      if (currentRound > 0 && getCurrentRound(nextJob)) {
-        nextJob = updateCurrentRound(nextJob, (round) => ({
-          ...round,
-          state: 'stopped',
-          finishedAt: stoppedAt,
-          worker: remediationWorker ?? round.worker ?? currentJob.remediationWorker ?? null,
-          remediationReply: remediationReply ?? round.remediationReply ?? currentJob.remediationReply ?? null,
-          reReview: reReview ?? round.reReview ?? currentJob.reReview ?? null,
-          completion: completion ?? round.completion ?? currentJob.completion ?? null,
-          failure: failure ?? round.failure ?? currentJob.failure ?? null,
-          stop,
-        }));
-      }
-
-      if (commentDelivery) {
-        nextJob.commentDelivery = commentDelivery;
-      }
 
       recordRemediationPassTerminalSafe({
         rootDir,
@@ -2793,6 +2825,7 @@ export {
   buildFollowUpJob,
   classifyFollowUpCriticality,
   buildStopMetadata,
+  computeFollowUpJobStoppedState,
   buildRemediationReply,
   buildRemediationReplyArtifact,
   archiveStoppedFollowUpJobs,

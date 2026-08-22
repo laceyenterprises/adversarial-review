@@ -794,7 +794,7 @@ async function dispatchRemediationViaHq({
             : {}),
           repo: normalizeHqDispatchRepo(repo),
           pr_number: prNumber,
-          ...(requiresWorkflowPush ? {
+          ...(workflowPushBrokerEvidence?.enabled ? {
             push_provider: 'github-app-merge-agent',
             requires_workflow_push: true,
           } : {}),

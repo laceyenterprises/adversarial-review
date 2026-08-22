@@ -8862,6 +8862,7 @@ test('dispatchRemediationViaHq omits workflow push provider requirement when esc
       HQ_ROOT: hqRoot,
       HQ_PARENT_SESSION: 'sess_parent_123',
       HQ_PROJECT: 'adversarial-review',
+      MERGE_AGENT_AUTH_VIA_BROKER: 'false',
       ADVERSARIAL_REMEDIATION_WORKFLOW_PUSH_ESCALATE_TO_MERGE_AGENT: 'false',
       OAUTH_BROKER_URL: 'http://broker.primary.invalid',
       OAUTH_BROKER_SHARED_SECRET_FILE: '/tmp/broker-secret',

@@ -4,11 +4,12 @@ import { promisify } from 'node:util';
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
 import { getCachedDiff, putCachedDiff } from './diff-cache.mjs';
 import { GH_LOOKUP_TIMEOUT_MS, execGhWithRetry } from './gh-cli.mjs';
+import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
 import { buildGhErrorDetail } from './reviewer-util.mjs';
 
 const execFileAsync = promisify(execFile);
 const GITHUB_BLOB_MAX_BUFFER_BYTES = 100 * 1024 * 1024;
-const RAW_ADDED_FILE_FETCH_CONCURRENCY = 12;
+const RAW_ADDED_FILE_FETCH_CONCURRENCY = 3;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -18,6 +19,7 @@ function isPullRequestDiffTooLargeError(err) {
   const detail = buildGhErrorDetail(err);
   return (
     /pullrequest\.diff too_large/.test(detail) ||
+    /maxbuffer length exceeded/.test(detail) ||
     (/http\s+406/.test(detail) && /diff exceeded|maximum number of lines|too_large/.test(detail))
   );
 }
@@ -78,6 +80,10 @@ function isLikelyBinaryBuffer(buffer) {
   return sample.includes(0);
 }
 
+function concatPatchParts(parts) {
+  return Buffer.concat(parts.map((part) => Buffer.isBuffer(part) ? part : Buffer.from(String(part))));
+}
+
 async function runWithConcurrency(tasks, concurrency) {
   if (!tasks.length) return;
   let nextIndex = 0;
@@ -119,23 +125,38 @@ function synthesizeAddedFilePatch(file, content) {
   if (isLikelyBinaryBuffer(content)) {
     return `${header.slice(0, 3).join('\n')}\nBinary files /dev/null and b/${file.filename} differ\n`;
   }
-  const text = content.toString('utf8');
-  const hasTrailingNewline = text.endsWith('\n');
-  const body = hasTrailingNewline ? text.slice(0, -1) : text;
-  const lines = text.length === 0 ? [] : body.split('\n');
+  const bytes = Buffer.isBuffer(content) ? content : Buffer.from(String(content));
+  const hasTrailingNewline = bytes.at(-1) === 0x0a;
+  const bodyEnd = hasTrailingNewline ? bytes.length - 1 : bytes.length;
+  const lines = [];
+  if (bytes.length > 0) {
+    let lineStart = 0;
+    for (;;) {
+      const newlineIndex = bytes.indexOf(0x0a, lineStart);
+      if (newlineIndex === -1 || newlineIndex >= bodyEnd) {
+        lines.push(bytes.subarray(lineStart, bodyEnd));
+        break;
+      }
+      lines.push(bytes.subarray(lineStart, newlineIndex));
+      lineStart = newlineIndex + 1;
+    }
+  }
   const hunkSpan = lines.length;
   if (hunkSpan === 0) {
     return `${header.slice(0, 3).join('\n')}\n`;
   }
-  const patchLines = [
-    ...header,
-    `@@ -0,0 +1,${hunkSpan} @@`,
-    ...lines.map((line) => `+${line}`),
+  const patchParts = [
+    Buffer.from(`${header.join('\n')}\n@@ -0,0 +1,${hunkSpan} @@\n`),
   ];
-  if (!hasTrailingNewline && text.length > 0) {
-    patchLines.push('\\ No newline at end of file');
+  for (const line of lines) {
+    patchParts.push(Buffer.from('+'));
+    patchParts.push(line);
+    patchParts.push(Buffer.from('\n'));
   }
-  return `${patchLines.join('\n')}\n`;
+  if (!hasTrailingNewline && bytes.length > 0) {
+    patchParts.push(Buffer.from('\\ No newline at end of file\n'));
+  }
+  return concatPatchParts(patchParts);
 }
 
 async function fetchRawAddedFileForDiff(repo, prNumber, file, {
@@ -144,10 +165,12 @@ async function fetchRawAddedFileForDiff(repo, prNumber, file, {
   recordApiCallImpl,
   apiStatusFromErrorImpl,
   ghRetrySleepImpl,
+  awaitThrottleIfNeededImpl,
 }) {
   const startedAt = Date.now();
   const blobSha = String(file?.sha || '').trim();
   try {
+    await awaitThrottleIfNeededImpl('core');
     const { stdout } = await execGhWithRetryImpl({
       execFileImpl: async (command, args, options) => execFileImpl(
         command,
@@ -191,6 +214,7 @@ async function fetchPRDiffFromFilesApi(repo, prNumber, headSha, {
   recordApiCallImpl,
   apiStatusFromErrorImpl,
   ghRetrySleepImpl,
+  awaitThrottleIfNeededImpl = awaitThrottleIfNeeded,
   log,
 }) {
   const startedAt = Date.now();
@@ -251,6 +275,7 @@ async function fetchPRDiffFromFilesApi(repo, prNumber, headSha, {
           recordApiCallImpl,
           apiStatusFromErrorImpl,
           ghRetrySleepImpl,
+          awaitThrottleIfNeededImpl,
         });
         patches[index] = synthesizeAddedFilePatch(file, raw);
       });
@@ -260,7 +285,7 @@ async function fetchPRDiffFromFilesApi(repo, prNumber, headSha, {
     patches[index] = `${diffHeaderForFile(file).join('\n')}\n`;
   }
   await runWithConcurrency(rawFetchTasks, RAW_ADDED_FILE_FETCH_CONCURRENCY);
-  return Buffer.from(patches.filter(Boolean).join('\n'));
+  return concatPatchParts(patches.filter(Boolean));
 }
 
 async function fetchPRDiff(repo, prNumber, headSha, {
@@ -271,6 +296,7 @@ async function fetchPRDiff(repo, prNumber, headSha, {
   recordApiCallImpl = recordApiCall,
   apiStatusFromErrorImpl = apiStatusFromError,
   ghRetrySleepImpl = sleep,
+  awaitThrottleIfNeededImpl = awaitThrottleIfNeeded,
   log = console,
 } = {}) {
   const cacheLookupStartedAt = Date.now();
@@ -329,6 +355,7 @@ async function fetchPRDiff(repo, prNumber, headSha, {
       recordApiCallImpl,
       apiStatusFromErrorImpl,
       ghRetrySleepImpl,
+      awaitThrottleIfNeededImpl,
       log,
     });
   }

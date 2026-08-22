@@ -6,22 +6,26 @@ import { parseArgs, resolveTerminalJobPath } from '../src/follow-up-requeue.mjs'
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-test('resolveTerminalJobPath accepts completed and failed follow-up job records under the repo root', () => {
+test('resolveTerminalJobPath accepts completed, failed and stopped follow-up job records under the repo root', () => {
   const completedPath = resolveTerminalJobPath(ROOT, 'data/follow-up-jobs/completed/job.json');
   const failedPath = resolveTerminalJobPath(ROOT, 'data/follow-up-jobs/failed/job.json');
+  // `stopped` is admitted because the library, not this guard, decides which
+  // stop codes may be requeued (RETRIGGERABLE_STOP_CODES).
+  const stoppedPath = resolveTerminalJobPath(ROOT, 'data/follow-up-jobs/stopped/job.json');
 
   assert.match(completedPath, /data\/follow-up-jobs\/completed\/job\.json$/);
   assert.match(failedPath, /data\/follow-up-jobs\/failed\/job\.json$/);
+  assert.match(stoppedPath, /data\/follow-up-jobs\/stopped\/job\.json$/);
 });
 
 test('resolveTerminalJobPath rejects paths outside allowed terminal job directories', () => {
   assert.throws(
     () => resolveTerminalJobPath(ROOT, 'data/follow-up-jobs/pending/job.json'),
-    /Job path must point to a completed or failed follow-up job JSON/
+    /Job path must point to a completed, failed, or stopped follow-up job JSON/
   );
   assert.throws(
     () => resolveTerminalJobPath(ROOT, '../outside.json'),
-    /Job path must point to a completed or failed follow-up job JSON/
+    /Job path must point to a completed, failed, or stopped follow-up job JSON/
   );
 });
 

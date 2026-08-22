@@ -431,6 +431,7 @@ async function spawnReviewer({
   reviewerSessionUuid,
   reviewerTimeoutMs = resolveReviewerTimeoutMs(),
   workspacePath = null,
+  rootDir = ROOT,
   crossModelReviewWaived = false,
   crossModelReviewWaiverReason = null,
   onReviewerPgid = () => {},
@@ -486,19 +487,19 @@ async function spawnReviewer({
       quotaProvider: quotaDecision.provider,
       failureClass: QUOTA_EXHAUSTED_FAILURE_CLASS,
     };
-    beginReviewerPassImpl(ROOT, {
+    beginReviewerPassImpl(rootDir, {
       repo,
       prNumber,
       attemptNumber,
       reviewerClass: normalizedReviewerClass,
       reviewerModel,
       passKind,
-      workspacePath: workspacePath || ROOT,
+      workspacePath: workspacePath || rootDir,
       startedAt,
       headSha: reviewerHeadSha || null,
       metadata,
     });
-    await withSqliteBusyRetry(() => completeReviewerPassImpl(ROOT, {
+    await withSqliteBusyRetry(() => completeReviewerPassImpl(rootDir, {
       repo,
       prNumber,
       attemptNumber,
@@ -537,14 +538,14 @@ async function spawnReviewer({
     upsertSpawnRecord(ADVERSARIAL_REVIEW_STATE_DIR, spawnRecord);
     inFlightReviewerSessions.add(reviewerSessionUuid);
     const startedAt = new Date().toISOString();
-    beginReviewerPassImpl(ROOT, {
+    beginReviewerPassImpl(rootDir, {
       repo,
       prNumber,
       attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0,
       reviewerClass: normalizedReviewerClass,
       reviewerModel,
       passKind,
-      workspacePath: workspacePath || ROOT,
+      workspacePath: workspacePath || rootDir,
       startedAt,
       // LAC-1559: record the head this pass reviewed so the completed-rereview
       // budget counter keys per (repo, pr, head) — a head move re-arms review.
@@ -643,7 +644,7 @@ async function spawnReviewer({
             ? Number(reviewDbAttemptNumber)
             : Number(reviewAttemptNumber);
           await postGitHubReviewWithCaptureImpl({
-            rootDir: ROOT,
+            rootDir,
             repo,
             prNumber,
             attemptNumber: captureAttemptNumber,
@@ -701,11 +702,11 @@ async function spawnReviewer({
                 result.reattachToken,
                 result.sessionUuid,
               ].filter(Boolean),
-              workspacePath: workspacePath || ROOT,
+              workspacePath: workspacePath || rootDir,
               startedAt,
               endedAt,
               reviewerModel,
-              rootDir: ROOT,
+              rootDir,
             },
           });
           const ledgerTokenUsage = ledgerLookup.usage;
@@ -757,7 +758,7 @@ async function spawnReviewer({
         tokenUsage = tagTokenUsage(rawTokenUsage, 'guardrail');
         if (tokenUsage) {
           reviewerTokenUsageArtifact = writeReviewerTokenUsageArtifactBestEffort({
-            workspacePath: workspacePath || ROOT,
+            workspacePath: workspacePath || rootDir,
             repo,
             prNumber,
             attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0,
@@ -788,7 +789,7 @@ async function spawnReviewer({
         // counts) the run_id is already valid — discarding it would lose WCW
         // attribution for no reason. If the read itself threw, it stays null.
       }
-      await withSqliteBusyRetry(() => completeReviewerPassImpl(ROOT, {
+      await withSqliteBusyRetry(() => completeReviewerPassImpl(rootDir, {
         repo,
         prNumber,
         attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0,
@@ -834,7 +835,7 @@ async function spawnReviewer({
       } catch (tagErr) {
         tokenUsage = null;
       }
-      await withSqliteBusyRetry(() => completeReviewerPassImpl(ROOT, {
+      await withSqliteBusyRetry(() => completeReviewerPassImpl(rootDir, {
         repo,
         prNumber,
         attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0,

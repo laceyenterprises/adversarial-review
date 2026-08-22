@@ -38,7 +38,7 @@ const DEFAULT_RISK_CLASS = 'medium';
 // all four keys.
 export const DEFAULT_ROUND_BUDGET_BY_RISK = Object.freeze({
   low: 1,
-  medium: 2,
+  medium: 3,
   high: 3,
   critical: 4,
 });

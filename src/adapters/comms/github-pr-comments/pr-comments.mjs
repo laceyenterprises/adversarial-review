@@ -1062,6 +1062,12 @@ async function postRemediationOutcomeComment({
   for (const key of ADAPTER_SUBPROCESS_ENV_KEYS) {
     if (env[key] !== undefined) allowlistedEnv[key] = env[key];
   }
+  if (
+    allowlistedEnv.AGENT_OS_GITHUB_ADAPTER_AUTO_DISCOVERY === undefined &&
+    process.env.AGENT_OS_GITHUB_ADAPTER_AUTO_DISCOVERY !== undefined
+  ) {
+    allowlistedEnv.AGENT_OS_GITHUB_ADAPTER_AUTO_DISCOVERY = process.env.AGENT_OS_GITHUB_ADAPTER_AUTO_DISCOVERY;
+  }
   for (const suffix of ['_SOURCE', '_BROKER_PROVIDER']) {
     const key = `${tokenEnvName}${suffix}`;
     if (env[key] !== undefined) allowlistedEnv[key] = env[key];

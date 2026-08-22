@@ -1295,9 +1295,9 @@ test('resolveRoundBudgetForJob falls back to medium for spec-less jobs', () => {
   }, { rootDir, preferPersisted: false });
 
   assert.equal(resolution.riskClass, 'medium');
-  // Convergence loop default (post-2026-05-06): medium = 2 rounds —
-  // initial remediation + one auto-retry. Higher classes get more.
-  assert.equal(resolution.roundBudget, 2);
+  // Convergence loop default (post-2026-08-21): medium = 3 rounds —
+  // initial remediation + two auto-retries.
+  assert.equal(resolution.roundBudget, 3);
 });
 
 test('resolveRoundBudgetForJob resolves risk class from plan mapping sidecars', () => {
@@ -1337,7 +1337,7 @@ test('resolveRoundBudgetForJob falls back to medium when the linked plan file is
   }, { rootDir, preferPersisted: false });
 
   assert.equal(resolution.riskClass, 'medium');
-  assert.equal(resolution.roundBudget, 2);
+  assert.equal(resolution.roundBudget, 3);
 });
 
 test('summarizePRRemediationLedger excludes terminal jobs without a spawned remediation worker', () => {

@@ -1758,8 +1758,8 @@ test('evaluateRoundBudgetForReview always allows rereview after a completed reme
   // remediation strands converged work behind a stale verdict.
   assert.equal(decision.skip, false);
   assert.equal(decision.reason, undefined);
-  // medium risk class now uniformly caps at 2 rounds (was 1).
-  assert.equal(decision.roundBudget, 2);
+  // medium risk class now caps at 3 rounds.
+  assert.equal(decision.roundBudget, 3);
   assert.equal(decision.riskClass, 'medium');
   // No "skipping rereview" log line should fire — the gate is gone.
   assert.equal(logLines.length, 0);

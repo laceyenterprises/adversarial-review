@@ -1786,6 +1786,7 @@ async function postGitHubReviewWithCapture({
   sleepImpl = undefined,
   sqliteBusyRetryDelaysMs = undefined,
   sqliteBusySleepImpl = undefined,
+  sqliteBusyRetrySleepImpl = undefined,
   findCapturedReviewerBodyImpl = findCapturedReviewerBody,
   findPendingReviewerBodyCaptureImpl = findPendingReviewerBodyCapture,
   captureReviewerBodyAfterPostImpl = captureReviewerBodyAfterPost,
@@ -1809,7 +1810,7 @@ async function postGitHubReviewWithCapture({
   }
   const lookupRetry = {
     delaysMs: sqliteBusyRetryDelaysMs,
-    sleepImpl: sqliteBusySleepImpl,
+    sleepImpl: sqliteBusySleepImpl ?? sqliteBusyRetrySleepImpl,
     log,
   };
   const lookupArgs = {
@@ -1858,16 +1859,11 @@ async function postGitHubReviewWithCapture({
     }
   }
 
-  // Capture postedAt AFTER the gh post returns so the candidate window
-  // bounds the artifact's GitHub-assigned timestamp, which is set during
-  // post handling — not before the request leaves.
+  // Capture postedAt after gh post returns so the candidate window bounds GitHub's assigned timestamp.
   const effectivePostedAt = postedAt || pendingCapture?.postedAt || new Date().toISOString();
 
-  // Normalize 'unknown' to null so the reviewer_passes.verdict CHECK
-  // constraint (approved / comment-only / request-changes / dismissed / NULL)
-  // does not abort the body-capture UPDATE when a reviewer goes off-script.
-  // Losing the parsed-verdict shortcut is preferable to losing body capture
-  // entirely; downstream consumers already treat NULL as "verdict unknown".
+  // Normalize 'unknown' to null so the reviewer_passes.verdict CHECK does not
+  // abort body capture when a reviewer goes off-script.
   const normalizedVerdict = normalizeEffectiveReviewVerdict(effectiveReviewBody, {
     log,
     context: `${repo}#${prNumber} attempt=${attemptNumber} reviewer=${reviewerModel}`,
@@ -1898,9 +1894,7 @@ async function postGitHubReviewWithCapture({
   }
 
   if (!normalizedHeadSha) {
-    log.warn?.(
-      `[reviewer] reviewed attestation skipped for ${repo}#${prNumber}: reviewerHeadSha is unavailable`
-    );
+    log.warn?.(`[reviewer] reviewed attestation skipped for ${repo}#${prNumber}: reviewerHeadSha is unavailable`);
     return;
   }
 
@@ -1908,10 +1902,7 @@ async function postGitHubReviewWithCapture({
     repo,
     prNumber,
     headSha: normalizedHeadSha,
-    reviewerIdentity: resolveReviewerIdentityForBotTokenEnv(
-      botTokenEnv,
-      reviewerIdentity || reviewerModel
-    ),
+    reviewerIdentity: resolveReviewerIdentityForBotTokenEnv(botTokenEnv, reviewerIdentity || reviewerModel),
     verdict: normalizedVerdict,
     reviewBody: effectiveReviewBody,
     packLockhash,

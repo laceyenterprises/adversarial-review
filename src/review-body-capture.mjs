@@ -440,10 +440,19 @@ function findPendingReviewerBodyCaptureForPost(rootDir, lookupArgs = {}, {
   sleepImpl = undefined,
   log = console,
 } = {}) {
-  return withSqliteBusyRetrySync(
-    () => findImpl(rootDir, lookupArgs),
-    { label: `pending-review-body-capture ${lookupArgs.repo}#${lookupArgs.prNumber}`, delaysMs, sleepImpl, log },
-  );
+  try {
+    return withSqliteBusyRetrySync(
+      () => findImpl(rootDir, lookupArgs),
+      { label: `pending-review-body-capture ${lookupArgs.repo}#${lookupArgs.prNumber}`, delaysMs, sleepImpl, log },
+    );
+  } catch (err) {
+    if (isSqliteBusyError(err)) throw err;
+    log.warn?.(
+      `[reviewer] pending review capture lookup failed for ${lookupArgs.repo}#${lookupArgs.prNumber}; ` +
+      `continuing to post review: ${err?.message || err}`,
+    );
+    return null;
+  }
 }
 
 // Build the env override used for the lookup gh subprocess. If a token is

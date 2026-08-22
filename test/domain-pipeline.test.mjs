@@ -29,7 +29,7 @@ const REVIEWER_ROLES = registry({
 
 const ENABLED_CONFIG = {
   id: 'code-pr',
-  riskClasses: { low: { maxRemediationRounds: 1 }, medium: { maxRemediationRounds: 2 }, high: { maxRemediationRounds: 3 }, critical: { maxRemediationRounds: 4 } },
+  riskClasses: { low: { maxRemediationRounds: 1 }, medium: { maxRemediationRounds: 3 }, high: { maxRemediationRounds: 3 }, critical: { maxRemediationRounds: 4 } },
   pipeline: {
     enabled: true,
     stages: [
@@ -76,8 +76,8 @@ test('enabled pipeline compiles stages, panels, and worker-class model hints', (
 
 test('per-stage round budget derives from the domain risk classes by default', () => {
   const resolved = resolveDomainPipeline(ENABLED_CONFIG, { roleRegistry: REVIEWER_ROLES });
-  assert.deepEqual(resolved.pipeline[0].roundBudgetByRisk, { low: 1, medium: 2, high: 3, critical: 4 });
-  assert.deepEqual(resolved.pipeline[1].roundBudgetByRisk, { low: 1, medium: 2, high: 3, critical: 4 });
+  assert.deepEqual(resolved.pipeline[0].roundBudgetByRisk, { low: 1, medium: 3, high: 3, critical: 4 });
+  assert.deepEqual(resolved.pipeline[1].roundBudgetByRisk, { low: 1, medium: 3, high: 3, critical: 4 });
 });
 
 test('a stage may override its round budget per risk class', () => {
@@ -94,7 +94,7 @@ test('a stage may override its round budget per risk class', () => {
   const resolved = resolveDomainPipeline(config, { roleRegistry: REVIEWER_ROLES });
   assert.deepEqual(resolved.pipeline[0].roundBudgetByRisk, { low: 1, medium: 1, high: 2, critical: 2 });
   // The un-overridden stage still derives from the domain risk classes.
-  assert.deepEqual(resolved.pipeline[1].roundBudgetByRisk, { low: 1, medium: 2, high: 3, critical: 4 });
+  assert.deepEqual(resolved.pipeline[1].roundBudgetByRisk, { low: 1, medium: 3, high: 3, critical: 4 });
 });
 
 test('domainRoundBudgetByRisk falls back to kernel defaults for missing classes', () => {

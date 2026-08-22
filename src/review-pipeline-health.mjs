@@ -42,7 +42,19 @@ const DEFAULT_MERGE_STALLED_MAX_TICKS = 3;
 const DEFAULT_PIPELINE_TICK_INTERVAL_MS = 5 * 60 * 1000;
 const DEFAULT_REMEDIATION_THROUGHPUT_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_AMA_CLOSER_LEASE_MAX_AGE_MS = 30 * 60 * 1000;
-const DEFAULT_RUNNING_REVIEWER_PASS_MAX_AGE_MS = 30 * 60 * 1000;
+// Must stay ABOVE reviewer-pass-reaper's DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS
+// (3600s). That reaper is what actually ends a hung pass; this finding exists to
+// catch a reaper that is NOT doing its job. At the previous 30 minutes the
+// ticket fired a full 30 minutes before the owning remediation was even allowed
+// to act, so every hung pass produced a half-hour of alarm an operator could do
+// nothing about -- observed 2026-08-22 with three gemini passes ticketed at
+// 48-50m that the reaper would have closed on its own at 60m. 90 minutes is the
+// reaper timeout plus 50% grace: past that, the reaper genuinely has failed and
+// the ticket is actionable.
+const REVIEWER_PASS_REAPER_TIMEOUT_MS = 3600 * 1000;
+const DEFAULT_RUNNING_REVIEWER_PASS_MAX_AGE_MS = Math.round(
+  REVIEWER_PASS_REAPER_TIMEOUT_MS * 1.5
+);
 const DEFAULT_DAG_AUTOWALK_MAX_LOG_AGE_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_DISPATCH_SPAWN_FAILURE_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_LAUNCHD_TIMEOUT_MS = 2_000;

@@ -20,6 +20,7 @@ import {
   REVIEW_PIPELINE_HEALTH_METRICS,
   collectReviewPipelineHealth,
   renderReviewPipelinePrometheus,
+  resolveReviewPipelineHealthConfig,
 } from '../src/review-pipeline-health.mjs';
 import { PROVIDER_OVERLOADED_FAILURE_CLASS } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS } from '../src/quota-exhaustion.mjs';
@@ -1821,4 +1822,21 @@ test('launchd liveness probe preserves stderr diagnostics when stdout is present
   assert.equal(sawSystemFallback, true);
   assert.equal(dispatchService.loaded, true);
   assert.equal(dispatchService.raw, 'state = running\n');
+});
+
+test('reviewer_pass_zombie threshold stays above the reaper timeout', () => {
+  // The reviewer-pass-reaper ends a hung pass at
+  // DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS (3600s). This finding exists to catch a
+  // reaper that is NOT doing its job, so alarming earlier than the reaper can act
+  // is guaranteed noise: the operator has no lever, and the condition resolves
+  // itself. It previously defaulted to 30 minutes -- half the reaper timeout --
+  // so every hung pass produced 30 minutes of unactionable ticket (observed
+  // 2026-08-22: three gemini passes ticketed at 48-50m, reaper due at 60m).
+  const reaperTimeoutMs = 3600 * 1000;
+  const config = resolveReviewPipelineHealthConfig({});
+  assert.ok(
+    config.runningReviewerPassMaxAgeMs > reaperTimeoutMs,
+    `zombie threshold ${config.runningReviewerPassMaxAgeMs}ms must exceed the ` +
+      `reaper timeout ${reaperTimeoutMs}ms`
+  );
 });

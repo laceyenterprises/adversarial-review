@@ -252,6 +252,119 @@ test('headed reviewer retry after capture does not post or recapture before atte
   assert.equal(attestations[0].reviewBody, reviewBody);
 });
 
+test('headed reviewer post ignores sqlite-busy pending capture lookup and still posts', async () => {
+  const rootDir = makeRootDir();
+  const pass = seedPass(rootDir, {
+    passKind: 'first-pass',
+    reviewerClass: 'codex',
+    headSha: 'reviewed-head-sha',
+  });
+  const reviewBody = '## Verdict\n\nComment only\n\nPost despite a busy local pending-capture lookup';
+  const log = makeLog();
+  const attestations = [];
+  let postCalls = 0;
+  let captureCalls = 0;
+
+  await withEnv({ GH_CODEX_REVIEWER_TOKEN: 'token' }, () => postGitHubReviewWithCapture({
+    rootDir,
+    repo: pass.repo,
+    prNumber: pass.prNumber,
+    attemptNumber: pass.attemptNumber,
+    reviewerModel: 'codex',
+    reviewerHeadSha: 'reviewed-head-sha',
+    reviewBody,
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+    passKind: 'first-pass',
+    log,
+    findCapturedReviewerBodyImpl: () => null,
+    findPendingReviewerBodyCaptureImpl: () => {
+      const err = new Error('database is locked');
+      err.code = 'SQLITE_BUSY';
+      throw err;
+    },
+    captureReviewerBodyAfterPostImpl: async () => {
+      captureCalls += 1;
+    },
+    emitReviewedAttestationImpl: async (payload) => { attestations.push(payload); },
+    execFileImpl: async (_command, args) => {
+      if (args[0] === 'api' && args[1] === '--method') {
+        postCalls += 1;
+        return {
+          stdout: `${JSON.stringify({
+            id: 507,
+            login: 'lacey-codex-reviewer[bot]',
+            commit_id: 'reviewed-head-sha',
+            created_at: '2026-05-29T12:01:02.000Z',
+            body: reviewBody,
+          })}\n`,
+          stderr: '',
+        };
+      }
+      throw new Error(`unexpected command: ${args.join(' ')}`);
+    },
+  }));
+
+  assert.equal(postCalls, 1);
+  assert.equal(captureCalls, 1);
+  assert.equal(attestations.length, 1);
+  assert.match(log.warnings.join('\n'), /pending review capture lookup failed/);
+});
+
+test('headed reviewer post treats sqlite-busy capture after verified post as non-fatal', async () => {
+  const rootDir = makeRootDir();
+  const pass = seedPass(rootDir, {
+    passKind: 'first-pass',
+    reviewerClass: 'codex',
+    headSha: 'reviewed-head-sha',
+  });
+  const reviewBody = '## Verdict\n\nRequest changes\n\nVerified post should still queue follow-up';
+  const log = makeLog();
+  const attestations = [];
+  let postCalls = 0;
+
+  await withEnv({ GH_CODEX_REVIEWER_TOKEN: 'token' }, () => postGitHubReviewWithCapture({
+    rootDir,
+    repo: pass.repo,
+    prNumber: pass.prNumber,
+    attemptNumber: pass.attemptNumber,
+    reviewerModel: 'codex',
+    reviewerHeadSha: 'reviewed-head-sha',
+    reviewBody,
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+    passKind: 'first-pass',
+    log,
+    findCapturedReviewerBodyImpl: () => null,
+    findPendingReviewerBodyCaptureImpl: () => null,
+    captureReviewerBodyAfterPostImpl: async () => {
+      const err = new Error('database is locked');
+      err.code = 'SQLITE_BUSY';
+      throw err;
+    },
+    emitReviewedAttestationImpl: async (payload) => { attestations.push(payload); },
+    execFileImpl: async (_command, args) => {
+      if (args[0] === 'api' && args[1] === '--method') {
+        postCalls += 1;
+        return {
+          stdout: `${JSON.stringify({
+            id: 508,
+            login: 'lacey-codex-reviewer[bot]',
+            commit_id: 'reviewed-head-sha',
+            created_at: '2026-05-29T12:02:02.000Z',
+            body: reviewBody,
+          })}\n`,
+          stderr: '',
+        };
+      }
+      throw new Error(`unexpected command: ${args.join(' ')}`);
+    },
+  }));
+
+  assert.equal(postCalls, 1);
+  assert.equal(attestations.length, 1);
+  assert.equal(attestations[0].reviewBody, reviewBody);
+  assert.match(log.warnings.join('\n'), /local review capture failed after verified GitHub post/);
+});
+
 test('unheaded reviewer retry reuses captured body without double-posting', async () => {
   const rootDir = makeRootDir();
   const pass = seedPass(rootDir, { passKind: 'first-pass', reviewerClass: 'codex' });

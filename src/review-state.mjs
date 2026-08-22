@@ -64,7 +64,7 @@ import { ensureTtmTrackerSchema } from './ttm-tracker.mjs';
  * row. Pinned by test/watcher-atomic-claim.test.mjs,
  * test/watcher-claim-loop.test.mjs, and test/review-state*.test.mjs.
  */
-const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
+const DEFAULT_BUSY_TIMEOUT_MS = 30_000;
 const DEFAULT_LIVE_PR_LOOKUP_TIMEOUT_MS = 15_000;
 const REVIEW_STATE_SCHEMA_VERSION = 10;
 const REVIEW_STATE_MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'migrations');

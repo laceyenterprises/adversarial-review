@@ -4,6 +4,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 import { openReviewStateDb, ensureReviewStateSchema } from './review-state.mjs';
 import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
+import { withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
 
 const execFileAsync = promisify(execFile);
 const REVIEW_CAPTURE_LOOKBACK_MS = 2 * 60 * 1000;
@@ -275,69 +276,71 @@ function updateReviewerPassBodyCapture(rootDir, {
   allowExistingBodyUpdate = false,
   log = console,
 } = {}) {
-  if (!repo || !Number.isInteger(Number(prNumber)) || !Number.isInteger(Number(attemptNumber)) || !bodyMd) {
-    throw new TypeError('Missing required reviewer-pass capture fields');
-  }
-  const kind = typeof passKind === 'string' ? passKind.trim() : '';
-  if (!kind) throw new TypeError('passKind is required');
-  if (!REVIEWER_PASS_KINDS.has(kind)) throw new TypeError(`Invalid reviewer pass_kind: ${passKind}`);
-  const db = openReviewStateDb(rootDir);
-  try {
-    ensureReviewStateSchema(db);
-    const row = db.prepare(
-      `SELECT pass_id, body_md, metadata_json
-         FROM reviewer_passes
-        WHERE repo = ?
-          AND pr_number = ?
-          AND attempt_number = ?
-          AND pass_kind = ?`
-    ).get(repo, Number(prNumber), Number(attemptNumber), kind);
-    let result = { changes: 0 };
-    if (row && (
-      row.body_md === null ||
-      row.body_md === undefined ||
-      (
-        allowExistingBodyUpdate &&
-        normalizeBodyForMatch(row.body_md) === normalizeBodyForMatch(bodyMd)
-      )
-    )) {
-      const metadata = metadataPatch
-        ? mergeCaptureMetadata(parseMetadataJson(row.metadata_json), metadataPatch)
-        : parseMetadataJson(row.metadata_json);
-      result = db.prepare(
-        `UPDATE reviewer_passes
-            SET verdict = ?,
-                body_md = ?,
-                gh_comment_id = ?,
-                body_captured_at = ?,
-                metadata_json = ?
-          WHERE pass_id = ?`
-      ).run(
-        verdict,
-        bodyMd,
-        ghCommentId === null || ghCommentId === undefined ? null : String(ghCommentId),
-        capturedAt,
-        stringifyMetadataJson(metadata),
-        row.pass_id,
-      );
+  return withSqliteBusyRetrySync(() => {
+    if (!repo || !Number.isInteger(Number(prNumber)) || !Number.isInteger(Number(attemptNumber)) || !bodyMd) {
+      throw new TypeError('Missing required reviewer-pass capture fields');
     }
-    // Surface silent misses: a 0-row UPDATE means the row we expected to
-    // stamp (created by beginReviewerPass / recordRemediationPassStartedSafe)
-    // does not exist for this (repo, pr, attempt, pass_kind). The GitHub
-    // comment is real and posted; the local mirror has no row to link it
-    // to. Without this warn, attempt-number / passKind drift between the
-    // row creator and the capture call is invisible.
-    if (result?.changes === 0) {
-      log.warn?.(
-        `[review-body-capture] capture matched 0 rows for ${repo}#${prNumber} ` +
-        `attempt=${Number(attemptNumber)} pass_kind=${kind}; ` +
-        `body and gh_comment_id were NOT linked to any reviewer_passes row`
-      );
+    const kind = typeof passKind === 'string' ? passKind.trim() : '';
+    if (!kind) throw new TypeError('passKind is required');
+    if (!REVIEWER_PASS_KINDS.has(kind)) throw new TypeError(`Invalid reviewer pass_kind: ${passKind}`);
+    const db = openReviewStateDb(rootDir);
+    try {
+      ensureReviewStateSchema(db);
+      const row = db.prepare(
+        `SELECT pass_id, body_md, metadata_json
+           FROM reviewer_passes
+          WHERE repo = ?
+            AND pr_number = ?
+            AND attempt_number = ?
+            AND pass_kind = ?`
+      ).get(repo, Number(prNumber), Number(attemptNumber), kind);
+      let result = { changes: 0 };
+      if (row && (
+        row.body_md === null ||
+        row.body_md === undefined ||
+        (
+          allowExistingBodyUpdate &&
+          normalizeBodyForMatch(row.body_md) === normalizeBodyForMatch(bodyMd)
+        )
+      )) {
+        const metadata = metadataPatch
+          ? mergeCaptureMetadata(parseMetadataJson(row.metadata_json), metadataPatch)
+          : parseMetadataJson(row.metadata_json);
+        result = db.prepare(
+          `UPDATE reviewer_passes
+              SET verdict = ?,
+                  body_md = ?,
+                  gh_comment_id = ?,
+                  body_captured_at = ?,
+                  metadata_json = ?
+            WHERE pass_id = ?`
+        ).run(
+          verdict,
+          bodyMd,
+          ghCommentId === null || ghCommentId === undefined ? null : String(ghCommentId),
+          capturedAt,
+          stringifyMetadataJson(metadata),
+          row.pass_id,
+        );
+      }
+      // Surface silent misses: a 0-row UPDATE means the row we expected to
+      // stamp (created by beginReviewerPass / recordRemediationPassStartedSafe)
+      // does not exist for this (repo, pr, attempt, pass_kind). The GitHub
+      // comment is real and posted; the local mirror has no row to link it
+      // to. Without this warn, attempt-number / passKind drift between the
+      // row creator and the capture call is invisible.
+      if (result?.changes === 0) {
+        log.warn?.(
+          `[review-body-capture] capture matched 0 rows for ${repo}#${prNumber} ` +
+          `attempt=${Number(attemptNumber)} pass_kind=${kind}; ` +
+          `body and gh_comment_id were NOT linked to any reviewer_passes row`
+        );
+      }
+      return result;
+    } finally {
+      db.close();
     }
-    return result;
-  } finally {
-    db.close();
-  }
+  }, { label: `review-body-capture:${repo}#${prNumber}`, log });
 }
 
 function findCapturedReviewerBody(rootDir, {

@@ -127,6 +127,7 @@ import {
   buildAgyReviewerPromptPrefix,
   isFinalReviewRound,
 } from './reviewer-prompt.mjs';
+import { isSqliteBusyError } from './sqlite-busy-retry.mjs';
 
 const CRITICAL_WORDS = ['critical', 'vulnerability', 'security', 'injection'];
 
@@ -1782,6 +1783,9 @@ async function postGitHubReviewWithCapture({
   reviewerTokenFetchTimeoutMs = undefined,
   lookupRetryBackoffMs = undefined,
   sleepImpl = undefined,
+  findCapturedReviewerBodyImpl = findCapturedReviewerBody,
+  findPendingReviewerBodyCaptureImpl = findPendingReviewerBodyCapture,
+  captureReviewerBodyAfterPostImpl = captureReviewerBodyAfterPost,
   packLockhash = null,
   emitReviewedAttestationImpl = emitReviewedAttestation,
 } = {}) {
@@ -1802,7 +1806,7 @@ async function postGitHubReviewWithCapture({
   }
   let capturedReviewBody = null;
   try {
-    capturedReviewBody = findCapturedReviewerBody(rootDir, {
+    capturedReviewBody = findCapturedReviewerBodyImpl(rootDir, {
       repo,
       prNumber,
       attemptNumber: Number(attemptNumber),
@@ -1816,16 +1820,24 @@ async function postGitHubReviewWithCapture({
       `continuing to post review: ${err?.message || err}`
     );
   }
-  const pendingCapture = !capturedReviewBody && normalizedHeadSha
-    ? findPendingReviewerBodyCapture(rootDir, {
-      repo,
-      prNumber,
-      attemptNumber: Number(attemptNumber),
-      passKind,
-      headSha: normalizedHeadSha,
-      reviewerModel,
-    })
-    : null;
+  let pendingCapture = null;
+  if (!capturedReviewBody && normalizedHeadSha) {
+    try {
+      pendingCapture = findPendingReviewerBodyCaptureImpl(rootDir, {
+        repo,
+        prNumber,
+        attemptNumber: Number(attemptNumber),
+        passKind,
+        headSha: normalizedHeadSha,
+        reviewerModel,
+      });
+    } catch (err) {
+      log.warn?.(
+        `[reviewer] pending review capture lookup failed for ${repo}#${prNumber}; ` +
+        `continuing to post review: ${err?.message || err}`
+      );
+    }
+  }
   const alreadyCaptured = capturedReviewBody !== null;
   const recoveringPendingCapture = pendingCapture !== null;
   const effectiveReviewBody = capturedReviewBody ?? pendingCapture?.bodyMd ?? reviewBody;
@@ -1868,26 +1880,36 @@ async function postGitHubReviewWithCapture({
   });
   const persistedVerdict = normalizedVerdict === 'unknown' ? null : normalizedVerdict;
 
-  if (!alreadyCaptured) await captureReviewerBodyAfterPost(rootDir, {
-    repo,
-    prNumber,
-    attemptNumber: Number(attemptNumber),
-    reviewerModel,
-    reviewerHeadSha: normalizedHeadSha,
-    botTokenEnv,
-    reviewBody: effectiveReviewBody,
-    verdict: persistedVerdict,
-    passKind,
-    postedAt: effectivePostedAt,
-    execFileImpl,
-    env: { ...process.env, [botTokenEnv]: process.env[botTokenEnv] || initialToken },
-    requireGitHubArtifact: Boolean(normalizedHeadSha),
-    knownGitHubArtifact: postedReviewArtifact,
-    lookupRetryBackoffMs,
-    sleepImpl,
-    allowExistingBodyUpdate: recoveringPendingCapture,
-    log,
-  });
+  if (!alreadyCaptured) {
+    try {
+      await captureReviewerBodyAfterPostImpl(rootDir, {
+        repo,
+        prNumber,
+        attemptNumber: Number(attemptNumber),
+        reviewerModel,
+        reviewerHeadSha: normalizedHeadSha,
+        botTokenEnv,
+        reviewBody: effectiveReviewBody,
+        verdict: persistedVerdict,
+        passKind,
+        postedAt: effectivePostedAt,
+        execFileImpl,
+        env: { ...process.env, [botTokenEnv]: process.env[botTokenEnv] || initialToken },
+        requireGitHubArtifact: Boolean(normalizedHeadSha),
+        knownGitHubArtifact: postedReviewArtifact,
+        lookupRetryBackoffMs,
+        sleepImpl,
+        allowExistingBodyUpdate: recoveringPendingCapture,
+        log,
+      });
+    } catch (err) {
+      if (!postedReviewArtifact || !isSqliteBusyError(err)) throw err;
+      log.warn?.(
+        `[reviewer] local review capture failed after verified GitHub post for ${repo}#${prNumber}; ` +
+        `continuing so follow-up can be queued: ${err?.message || err}`
+      );
+    }
+  }
 
   if (!normalizedHeadSha) {
     log.warn?.(

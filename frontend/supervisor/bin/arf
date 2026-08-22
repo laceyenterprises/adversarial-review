@@ -1,0 +1,20 @@
+#!/usr/bin/env node
+/**
+ * `arf` entrypoint (ARF-08).
+ *
+ * A thin shim so `run()` stays importable and testable without a subprocess.
+ * The exit code is set rather than passed to `process.exit()` so that whatever
+ * the command wrote to stdout is flushed before the process goes away — a
+ * `process.exit()` here would truncate `arf gate check --json` on a pipe.
+ */
+
+import { run } from '../src/cli.mjs';
+
+run(process.argv.slice(2))
+  .then((code) => {
+    process.exitCode = code;
+  })
+  .catch((err) => {
+    process.stderr.write(`arf: ${err?.stack ?? err}\n`);
+    process.exitCode = 2;
+  });

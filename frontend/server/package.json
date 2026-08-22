@@ -1,0 +1,18 @@
+{
+  "name": "@arf/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "ARF backend: review-state store adapter + read-only GitHub mirror + health/version API (zero agent-os runtime dependencies)",
+  "engines": {
+    "node": ">=23.4"
+  },
+  "main": "src/main.mjs",
+  "scripts": {
+    "start": "node src/main.mjs",
+    "test": "node --test test/*.test.mjs",
+    "fixture:build": "node test/fixtures/build-reviews-fixture.mjs"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

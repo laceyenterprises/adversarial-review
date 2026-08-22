@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ARF · Adversarial Review</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header class="masthead">
+  <h1>ARF <span class="dim">· Adversarial Review Frontend</span></h1>
+  <nav class="screens" aria-label="Screens">
+    <button class="screen-tab" data-target="dashboard-panel" aria-current="page">Review dashboard</button>
+    <button class="screen-tab" data-target="pipeline-panel" disabled title="Lands in ARF-04">Pipeline</button>
+    <button class="screen-tab" data-target="identity-panel">Standup</button>
+  </nav>
+</header>
+
+<main>
+  <section class="panel" id="dashboard-panel" aria-labelledby="dashboard-heading">
+    <div id="dashboard-root"></div>
+  </section>
+
+  <section class="panel" id="identity-panel" aria-labelledby="identity-heading" hidden>
+    <h2 id="identity-heading">Standup <span class="dim">›</span> Add remediator identity</h2>
+    <p class="lede">
+      Drives a role's GitHub-App lifecycle end to end and streams each step as it
+      happens. A re-run resumes from the last completed step, so a run that stops
+      for something only you can do — creating the App, storing the key, approving
+      the installation — is picked up where it left off.
+    </p>
+
+    <div class="broker-state" id="broker-state" role="status"></div>
+
+    <form id="standup-form" autocomplete="off">
+      <fieldset>
+        <legend>role</legend>
+        <div class="roles" id="role-choices"></div>
+        <label class="field">
+          <span>role name</span>
+          <input type="text" name="role" id="role-input" required
+                 placeholder="the-hammer" pattern="[A-Za-z0-9][A-Za-z0-9._-]*">
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>GitHub App</legend>
+        <label class="field">
+          <span>app id</span>
+          <input type="text" name="appId" inputmode="numeric" placeholder="4197249">
+        </label>
+        <label class="field">
+          <span>org <small>(for the create link)</small></span>
+          <input type="text" name="org" placeholder="laceyenterprises">
+        </label>
+        <label class="field wide">
+          <span>repositories <small>(comma or space separated)</small></span>
+          <input type="text" name="repos" placeholder="laceyenterprises/agent-os">
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>secret references</legend>
+        <!--
+          "reference" is stated in the field itself, not just in help text. ARF
+          refuses a raw secret with a 400, and a field that invited one and then
+          rejected it would be teaching the wrong habit at the exact moment
+          someone has a private key on their clipboard.
+        -->
+        <label class="field wide">
+          <span>private key ref</span>
+          <input type="text" name="privateKeyRef"
+                 placeholder="op://Cliovault/the-hammer.private-key/private key">
+        </label>
+        <label class="field wide">
+          <span>PAT fallback ref <small>(optional)</small></span>
+          <input type="text" name="patFallbackRef"
+                 placeholder="op://Cliovault/Hammer GH PAT/credential">
+        </label>
+        <p class="note">
+          References only — <code>op://…</code>, <code>file:///…</code>, or
+          <code>env:NAME</code>. ARF never takes a secret value; a raw key pasted
+          here is refused before the run starts.
+        </p>
+      </fieldset>
+
+      <fieldset>
+        <legend>verification</legend>
+        <label class="field">
+          <span>repository</span>
+          <input type="text" name="verifyRepo" placeholder="laceyenterprises/agent-os">
+        </label>
+        <label class="field">
+          <span>issue or PR number</span>
+          <input type="text" name="verifyIssue" inputmode="numeric" placeholder="5543">
+        </label>
+        <p class="note">
+          The last step posts a comment and reads back who GitHub says wrote it.
+          That attribution is the proof the identity acts as itself.
+        </p>
+      </fieldset>
+
+      <div class="actions">
+        <button type="submit" id="run-button">Run</button>
+        <button type="button" id="cancel-button" hidden>Cancel</button>
+        <span class="live" id="live-indicator" role="status" aria-live="polite"></span>
+      </div>
+    </form>
+
+    <ol class="steps" id="steps"></ol>
+    <div class="outcome" id="outcome" role="status" aria-live="polite"></div>
+  </section>
+</main>
+
+<script type="module" src="/app.mjs"></script>
+<script type="module" src="/standup-panel.mjs"></script>
+<script type="module" src="/dashboard.mjs"></script>
+</body>
+</html>

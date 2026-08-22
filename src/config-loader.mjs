@@ -798,6 +798,10 @@ function schemaV1() {
                 __type: TYPE_BOOL,
                 __default: false,
               },
+              provider: {
+                __type: TYPE_STRING,
+                __default: '',
+              },
               expected_app_id: {
                 __type: TYPE_STRING,
                 __default: '',

@@ -5976,11 +5976,13 @@ test('oauth_broker.merge_agent strict mirror: valid keys parse; unknown nested k
       oauth_broker:
         merge_agent:
           broker_auth_enabled: true
+          provider: github-app-merge-agent
           expected_app_id: "3978009"
           expected_installation_id: "138360282"
     `);
     const cfg = loadConfig({ topPath: ok, env: {} });
     assert.equal(cfg.get('oauth_broker.merge_agent.broker_auth_enabled'), true);
+    assert.equal(cfg.get('oauth_broker.merge_agent.provider'), 'github-app-merge-agent');
     assert.equal(cfg.get('oauth_broker.merge_agent.expected_app_id'), '3978009');
     assert.equal(
       cfg.get('oauth_broker.merge_agent.expected_installation_id'),

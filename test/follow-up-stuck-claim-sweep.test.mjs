@@ -45,6 +45,7 @@ function seedInProgressJob(rootDir, {
   mtimeIso,
   worker = {},
   plan = {},
+  jobUpdates = {},
 } = {}) {
   const inProgressDir = getFollowUpJobDir(rootDir, 'inProgress');
   mkdirSync(inProgressDir, { recursive: true });
@@ -74,6 +75,7 @@ function seedInProgressJob(rootDir, {
       ...(baseJob.remediationPlan || {}),
       ...plan,
     },
+    ...jobUpdates,
   };
   if (lastHeartbeatAt !== undefined) {
     job.lastHeartbeatAt = lastHeartbeatAt;
@@ -187,10 +189,50 @@ test('sweepStuckInProgressClaims: exhausted stale retry budget stops and posts o
   assert.equal(stoppedJob.commentDelivery?.posted, true);
   assert.equal(stoppedJob.commentDelivery?.reason, null);
   assert.match(stoppedJob.commentDelivery?.body, /stale-heartbeat/);
-  assert.match(stoppedJob.commentDelivery?.body, /round 2 of \d+/);
+  assert.match(stoppedJob.commentDelivery?.body, /round 2 of 3/);
   assert.equal(posts.length, 1);
   assert.match(posts[0].body, /stale-heartbeat/);
-  assert.match(posts[0].body, /round 2 of \d+/);
+  assert.match(posts[0].body, /round 2 of 3/);
+});
+
+test('sweepStuckInProgressClaims: posted in-progress delivery is not posted again', async () => {
+  const rootDir = makeRoot();
+  const { jobPath } = seedInProgressJob(rootDir, {
+    lastHeartbeatAt: '2026-06-01T05:00:00.000Z',
+    plan: { currentRound: 2, maxRounds: undefined, transientRetries: 1 },
+    jobUpdates: {
+      commentDelivery: {
+        posted: true,
+        attempts: 1,
+        body: 'already posted stale-heartbeat comment',
+        repo: 'laceyenterprises/agent-os',
+        prNumber: 1226,
+        workerClass: 'codex',
+        reason: null,
+      },
+    },
+  });
+  const nowMs = Date.parse('2026-06-01T05:35:00.000Z');
+  const result = await sweepStuckInProgressClaims({
+    rootDir,
+    nowMs,
+    maxTransientRetries: 1,
+    sendWorkerSignalImpl: successfulStaleSignal,
+    recordInitialCommentDeliveryImpl: async () => {
+      throw new Error('must not repost an already posted terminal comment');
+    },
+  });
+
+  assert.equal(result.scanned, 1);
+  assert.equal(result.reclaimed, 1);
+  assert.equal(result.requeued, 0);
+  assert.equal(result.terminalStopped, 1);
+  assert.equal(existsSync(jobPath), false, 'in-progress file removed');
+  const stoppedJob = readJobAtPath(stoppedPathFor(rootDir, jobPath));
+  assert.equal(stoppedJob.status, 'stopped');
+  assert.equal(stoppedJob.commentDelivery?.posted, true);
+  assert.equal(stoppedJob.commentDelivery?.body, 'already posted stale-heartbeat comment');
+  assert.equal(stoppedJob.remediationPlan?.stop?.maxRounds, 3);
 });
 
 test('sweepStuckInProgressClaims: terminal comment delivery throw leaves stale claim recoverable', async () => {

@@ -45,6 +45,7 @@ import { existsSync, mkdtempSync, promises as fsPromises, readFileSync, readdirS
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
+  computeFollowUpJobStoppedState,
   listFollowUpJobsInDir,
   listInProgressFollowUpJobs,
   markFollowUpJobStopped,
@@ -842,23 +843,29 @@ async function stopStaleClaimWithComment({
   recordInitialCommentDeliveryImpl,
   log,
 }) {
-  const { body, workerClass } = buildStaleTerminalCommentDelivery({
-    job: {
-      ...job,
-      status: 'stopped',
+  const stoppedJob = computeFollowUpJobStoppedState({
+    currentJob: job,
+    stoppedAt,
+    stopCode: STALE_HEARTBEAT_STOP_CODE,
+    stopReason,
+    sourceStatus: 'in_progress',
+    remediationWorker,
+  });
+  if (stoppedJob?.commentDelivery?.posted) {
+    return markFollowUpJobStopped({
+      rootDir,
+      jobPath,
       stoppedAt,
+      stopCode: STALE_HEARTBEAT_STOP_CODE,
+      stopReason,
+      sourceStatus: 'in_progress',
       remediationWorker,
-      remediationPlan: {
-        ...(job?.remediationPlan || {}),
-        stop: {
-          ...(job?.remediationPlan?.stop || {}),
-          code: STALE_HEARTBEAT_STOP_CODE,
-          reason: stopReason,
-          stoppedAt,
-          sourceStatus: 'in_progress',
-        },
-      },
-    },
+      commentDelivery: stoppedJob.commentDelivery,
+    });
+  }
+
+  const { body, workerClass } = buildStaleTerminalCommentDelivery({
+    job: stoppedJob,
   });
   let commentDelivery = null;
   try {

@@ -15,6 +15,7 @@ import {
   classifyFollowUpCriticality,
   buildRemediationReply,
   buildStopMetadata,
+  computeFollowUpJobStoppedState,
   claimNextFollowUpJob,
   createFollowUpJob,
   extractReviewSummary,
@@ -4402,6 +4403,34 @@ test('requeueFollowUpJobForNextRound accepts stopped:max-rounds-reached jobs aft
   });
 
   assert.equal(requeued.job.status, 'pending');
+});
+
+test('computeFollowUpJobStoppedState applies the same stop defaults as markFollowUpJobStopped', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob({
+    ...makeJobInput(rootDir),
+    maxRemediationRounds: undefined,
+  });
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+  const currentJob = readFollowUpJob(claimed.jobPath);
+  const projected = computeFollowUpJobStoppedState({
+    currentJob,
+    stoppedAt: '2026-04-21T10:05:00.000Z',
+    stopCode: 'stale-heartbeat',
+    sourceStatus: 'in_progress',
+    stopReason: 'cap reached',
+  });
+  const stopped = markFollowUpJobStopped({
+    rootDir,
+    jobPath: claimed.jobPath,
+    stoppedAt: '2026-04-21T10:05:00.000Z',
+    stopCode: 'stale-heartbeat',
+    sourceStatus: 'in_progress',
+    stopReason: 'cap reached',
+  });
+
+  assert.deepEqual(projected.remediationPlan.stop, stopped.job.remediationPlan.stop);
+  assert.equal(projected.remediationPlan.stop.maxRounds, DEFAULT_MAX_REMEDIATION_ROUNDS);
 });
 
 test('requeueFollowUpJobForNextRound accepts stopped:round-budget-exhausted jobs after a budget bump', () => {

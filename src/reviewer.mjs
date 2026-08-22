@@ -46,7 +46,9 @@ import { buildHardeningReviewContext } from './hardening-ledger-context.mjs';
 import {
   captureReviewerBodyAfterPost,
   findCapturedReviewerBody,
+  findCapturedReviewerBodyForPost,
   findPendingReviewerBodyCapture,
+  findPendingReviewerBodyCaptureForPost,
 } from './review-body-capture.mjs';
 import { emitReviewedAttestation } from './reviewed-attestation.mjs';
 import { isPackLockhashInputError, resolveReviewedPackLockhash } from './pack-lockhash.mjs';
@@ -1782,6 +1784,11 @@ async function postGitHubReviewWithCapture({
   reviewerTokenFetchTimeoutMs = undefined,
   lookupRetryBackoffMs = undefined,
   sleepImpl = undefined,
+  sqliteBusyRetryDelaysMs = undefined,
+  sqliteBusySleepImpl = undefined,
+  findCapturedReviewerBodyImpl = findCapturedReviewerBody,
+  findPendingReviewerBodyCaptureImpl = findPendingReviewerBodyCapture,
+  captureReviewerBodyAfterPostImpl = captureReviewerBodyAfterPost,
   packLockhash = null,
   emitReviewedAttestationImpl = emitReviewedAttestation,
 } = {}) {
@@ -1800,32 +1807,31 @@ async function postGitHubReviewWithCapture({
     err.failureClass = 'stale-review-head';
     throw err;
   }
-  let capturedReviewBody = null;
-  try {
-    capturedReviewBody = findCapturedReviewerBody(rootDir, {
-      repo,
-      prNumber,
-      attemptNumber: Number(attemptNumber),
-      passKind,
-      headSha: normalizedHeadSha || null,
-      reviewerModel,
-    });
-  } catch (err) {
-    log.warn?.(
-      `[reviewer] captured review lookup failed for ${repo}#${prNumber}; ` +
-      `continuing to post review: ${err?.message || err}`
+  const lookupRetry = {
+    delaysMs: sqliteBusyRetryDelaysMs,
+    sleepImpl: sqliteBusySleepImpl,
+    log,
+  };
+  const lookupArgs = {
+    repo,
+    prNumber,
+    attemptNumber: Number(attemptNumber),
+    passKind,
+    reviewerModel,
+  };
+  const capturedReviewBody = findCapturedReviewerBodyForPost(
+    rootDir,
+    { ...lookupArgs, headSha: normalizedHeadSha || null },
+    { ...lookupRetry, findImpl: findCapturedReviewerBodyImpl },
+  );
+  let pendingCapture = null;
+  if (!capturedReviewBody && normalizedHeadSha) {
+    pendingCapture = findPendingReviewerBodyCaptureForPost(
+      rootDir,
+      { ...lookupArgs, headSha: normalizedHeadSha },
+      { ...lookupRetry, findImpl: findPendingReviewerBodyCaptureImpl },
     );
   }
-  const pendingCapture = !capturedReviewBody && normalizedHeadSha
-    ? findPendingReviewerBodyCapture(rootDir, {
-      repo,
-      prNumber,
-      attemptNumber: Number(attemptNumber),
-      passKind,
-      headSha: normalizedHeadSha,
-      reviewerModel,
-    })
-    : null;
   const alreadyCaptured = capturedReviewBody !== null;
   const recoveringPendingCapture = pendingCapture !== null;
   const effectiveReviewBody = capturedReviewBody ?? pendingCapture?.bodyMd ?? reviewBody;
@@ -1868,26 +1874,28 @@ async function postGitHubReviewWithCapture({
   });
   const persistedVerdict = normalizedVerdict === 'unknown' ? null : normalizedVerdict;
 
-  if (!alreadyCaptured) await captureReviewerBodyAfterPost(rootDir, {
-    repo,
-    prNumber,
-    attemptNumber: Number(attemptNumber),
-    reviewerModel,
-    reviewerHeadSha: normalizedHeadSha,
-    botTokenEnv,
-    reviewBody: effectiveReviewBody,
-    verdict: persistedVerdict,
-    passKind,
-    postedAt: effectivePostedAt,
-    execFileImpl,
-    env: { ...process.env, [botTokenEnv]: process.env[botTokenEnv] || initialToken },
-    requireGitHubArtifact: Boolean(normalizedHeadSha),
-    knownGitHubArtifact: postedReviewArtifact,
-    lookupRetryBackoffMs,
-    sleepImpl,
-    allowExistingBodyUpdate: recoveringPendingCapture,
-    log,
-  });
+  if (!alreadyCaptured) {
+    await captureReviewerBodyAfterPostImpl(rootDir, {
+      repo,
+      prNumber,
+      attemptNumber: Number(attemptNumber),
+      reviewerModel,
+      reviewerHeadSha: normalizedHeadSha,
+      botTokenEnv,
+      reviewBody: effectiveReviewBody,
+      verdict: persistedVerdict,
+      passKind,
+      postedAt: effectivePostedAt,
+      execFileImpl,
+      env: { ...process.env, [botTokenEnv]: process.env[botTokenEnv] || initialToken },
+      requireGitHubArtifact: Boolean(normalizedHeadSha),
+      knownGitHubArtifact: postedReviewArtifact,
+      lookupRetryBackoffMs,
+      sleepImpl,
+      allowExistingBodyUpdate: recoveringPendingCapture,
+      log,
+    });
+  }
 
   if (!normalizedHeadSha) {
     log.warn?.(

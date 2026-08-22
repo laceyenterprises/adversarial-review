@@ -74,6 +74,7 @@ import { isTransientGhError } from './gh-cli.mjs';
 import { resolveReviewCycleCapConfig } from './review-cycle-cap.mjs';
 import { loadConfigCached } from './config-loader.mjs';
 import { recordSuccessfulReviewCycleVerdict } from './review-cycle-cap-actions.mjs';
+import { withSqliteBusyRetry, withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
 import {
   clearCascadeState,
   formatTransientFailureBreakdown,
@@ -497,7 +498,7 @@ async function spawnReviewer({
       headSha: reviewerHeadSha || null,
       metadata,
     });
-    await completeReviewerPassImpl(ROOT, {
+    await withSqliteBusyRetry(() => completeReviewerPassImpl(ROOT, {
       repo,
       prNumber,
       attemptNumber,
@@ -505,7 +506,7 @@ async function spawnReviewer({
       status: 'skipped',
       endedAt: new Date().toISOString(),
       metadata,
-    });
+    }), { label: `reviewer-pass-skip:${repo}#${prNumber}`, log: console });
     console.log(
       `[watcher] reviewer spawn skipped for ${repo}#${prNumber} ` +
       `(model: ${reviewerModel}, provider: ${quotaDecision.provider}, state: ${quotaDecision.state})`,
@@ -787,7 +788,7 @@ async function spawnReviewer({
         // counts) the run_id is already valid — discarding it would lose WCW
         // attribution for no reason. If the read itself threw, it stays null.
       }
-      completeReviewerPassImpl(ROOT, {
+      await withSqliteBusyRetry(() => completeReviewerPassImpl(ROOT, {
         repo,
         prNumber,
         attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0,
@@ -810,7 +811,7 @@ async function spawnReviewer({
           tokenUsageNoUsageReason: result.tokenUsageNoUsageReason || null,
           reviewerTokenUsageArtifact,
         },
-      });
+      }), { label: `reviewer-pass-settle:${repo}#${prNumber}`, log: console });
     } catch (err) {
       console.warn(
         `[watcher] reviewer_pass_token_update_failed repo=${repo} pr=${prNumber} ` +
@@ -833,7 +834,7 @@ async function spawnReviewer({
       } catch (tagErr) {
         tokenUsage = null;
       }
-      completeReviewerPassImpl(ROOT, {
+      await withSqliteBusyRetry(() => completeReviewerPassImpl(ROOT, {
         repo,
         prNumber,
         attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0,
@@ -853,7 +854,7 @@ async function spawnReviewer({
             : (err?.tokenUsageNoUsageReason || null),
           error: err?.message || String(err),
         },
-      });
+      }), { label: `reviewer-pass-settle:${repo}#${prNumber}`, log: console });
     } catch (settleErr) {
       console.warn(
         `[watcher] reviewer_pass_token_update_failed repo=${repo} pr=${prNumber} ` +
@@ -970,31 +971,33 @@ function settleReviewerAttempt({
 }) {
   if (result.ok) {
     const postedAt = new Date().toISOString();
-    statements.markPosted.run(postedAt, repoPath, prNumber);
-    markReviewHeartbeat({ repo: repoPath, pr_number: prNumber, posted_at: postedAt });
-    try {
-      const currentRow = typeof statements.getReviewRow?.get === 'function'
-        ? statements.getReviewRow.get(repoPath, prNumber)
-        : null;
-      const { windowHours } = resolveReviewCycleCapConfig({
-        loadConfigImpl: loadConfigCached,
-        logger: log,
-      });
-      recordSuccessfulReviewCycleVerdict({
-        db,
-        repoPath,
-        prNumber,
-        headSha: currentRow?.reviewer_head_sha || null,
-        postedAt,
-        result,
-        windowHours,
-        logger: log,
-      });
-    } catch (err) {
-      log?.warn?.(
-        `[watcher] review-cycle-count bookkeeping skipped for ${repoPath}#${prNumber}: ${err?.message || err}`
-      );
-    }
+    withSqliteBusyRetrySync(() => {
+      statements.markPosted.run(postedAt, repoPath, prNumber);
+      markReviewHeartbeat({ repo: repoPath, pr_number: prNumber, posted_at: postedAt });
+      try {
+        const currentRow = typeof statements.getReviewRow?.get === 'function'
+          ? statements.getReviewRow.get(repoPath, prNumber)
+          : null;
+        const { windowHours } = resolveReviewCycleCapConfig({
+          loadConfigImpl: loadConfigCached,
+          logger: log,
+        });
+        recordSuccessfulReviewCycleVerdict({
+          db,
+          repoPath,
+          prNumber,
+          headSha: currentRow?.reviewer_head_sha || null,
+          postedAt,
+          result,
+          windowHours,
+          logger: log,
+        });
+      } catch (err) {
+        log?.warn?.(
+          `[watcher] review-cycle-count bookkeeping skipped for ${repoPath}#${prNumber}: ${err?.message || err}`
+        );
+      }
+    }, { label: `reviewer-settle-posted:${repoPath}#${prNumber}`, log });
     clearCascadeState(rootDir, { repo: repoPath, prNumber });
     return;
   }
@@ -1007,14 +1010,20 @@ function settleReviewerAttempt({
     // no-budget release it records a 0-change cleanup check instead of charging
     // review_attempts for ordinary head churn.
     const releaseResult = typeof statements.releaseReviewerClaim?.run === 'function'
-      ? statements.releaseReviewerClaim.run(result.reviewerSessionUuid || null, repoPath, prNumber)
+      ? withSqliteBusyRetrySync(
+        () => statements.releaseReviewerClaim.run(result.reviewerSessionUuid || null, repoPath, prNumber),
+        { label: `reviewer-settle-release-claim:${repoPath}#${prNumber}`, log }
+      )
       : { changes: 0 };
     const leaseReleaseResult = typeof statements.releaseReviewLease?.run === 'function'
-      ? statements.releaseReviewLease.run(
-        failureAt,
-        result.error || 'Reviewer output targeted a stale PR head; requeued for current-head review.',
-        repoPath,
-        prNumber
+      ? withSqliteBusyRetrySync(
+        () => statements.releaseReviewLease.run(
+          failureAt,
+          result.error || 'Reviewer output targeted a stale PR head; requeued for current-head review.',
+          repoPath,
+          prNumber
+        ),
+        { label: `reviewer-settle-release-lease:${repoPath}#${prNumber}`, log }
       )
       : { changes: 0 };
     log.warn(
@@ -1082,11 +1091,14 @@ function settleReviewerAttempt({
       failureClass,
     });
     if (infraRecoverAttempts >= INFRA_AUTO_RECOVER_CAP) {
-      statements.markCascadeFailed.run(
-        failureAt,
-        `${classifiedMessage}; infra auto-recovery cap exhausted (${infraRecoverAttempts}/${INFRA_AUTO_RECOVER_CAP}).`,
-        repoPath,
-        prNumber
+      withSqliteBusyRetrySync(
+        () => statements.markCascadeFailed.run(
+          failureAt,
+          `${classifiedMessage}; infra auto-recovery cap exhausted (${infraRecoverAttempts}/${INFRA_AUTO_RECOVER_CAP}).`,
+          repoPath,
+          prNumber
+        ),
+        { label: `reviewer-settle-cascade-failed:${repoPath}#${prNumber}`, log }
       );
       log.warn(
         `[watcher] Reviewer ${failureClass} failure on #${prNumber} exhausted infra auto-recovery cap ` +
@@ -1094,7 +1106,10 @@ function settleReviewerAttempt({
       );
       return;
     }
-    statements.markPendingUpstream.run(failureAt, classifiedMessage, repoPath, prNumber);
+    withSqliteBusyRetrySync(
+      () => statements.markPendingUpstream.run(failureAt, classifiedMessage, repoPath, prNumber),
+      { label: `reviewer-settle-pending-upstream:${repoPath}#${prNumber}`, log }
+    );
     const breakdown = formatTransientFailureBreakdown(cascadeState.transientFailureBreakdown);
     log.warn(
       `[watcher] PR #${prNumber} marked pending-upstream after ${cascadeState.consecutiveTransientFailures} transient reviewer failures (${breakdown}); ` +
@@ -1135,12 +1150,15 @@ function settleReviewerAttempt({
       failureClass: outageSignal.failureClass || outageSignal.reason,
       nextRetryAfter: outageSignal.retryAfter,
     });
-    statements.markOutageTransient.run(
-      failureAt,
-      `[outage-transient:${outageSignal.reason}] ${classifiedMessage}`,
-      quotaResetIso,
-      repoPath,
-      prNumber
+    withSqliteBusyRetrySync(
+      () => statements.markOutageTransient.run(
+        failureAt,
+        `[outage-transient:${outageSignal.reason}] ${classifiedMessage}`,
+        quotaResetIso,
+        repoPath,
+        prNumber
+      ),
+      { label: `reviewer-settle-outage-transient:${repoPath}#${prNumber}`, log }
     );
     const updatedOutageRow = statements.getReviewRow.get(repoPath, prNumber);
     log.warn(
@@ -1154,7 +1172,10 @@ function settleReviewerAttempt({
   const terminalFailureStatement = leaseRecoveryEnabled
     ? statements.releaseReviewLease
     : statements.markFailed;
-  terminalFailureStatement.run(failureAt, classifiedMessage, repoPath, prNumber);
+  withSqliteBusyRetrySync(
+    () => terminalFailureStatement.run(failureAt, classifiedMessage, repoPath, prNumber),
+    { label: `reviewer-settle-terminal:${repoPath}#${prNumber}`, log }
+  );
   const updatedRow = statements.getReviewRow.get(repoPath, prNumber);
   if (failureClass === 'bug') {
     log.warn(

@@ -52,7 +52,7 @@ test('openReviewStateDb applies a busy timeout and shared schema adds reviewer h
 
   try {
     ensureReviewStateSchema(db);
-    assert.equal(db.pragma('busy_timeout', { simple: true }), 5000);
+    assert.equal(db.pragma('busy_timeout', { simple: true }), 100);
 
     const columns = db.prepare('PRAGMA table_info(reviewed_prs)').all().map((column) => column.name);
     assert.ok(columns.includes('rereview_requested_at'));

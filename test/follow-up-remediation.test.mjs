@@ -5991,7 +5991,7 @@ test('consumeFollowUpJobsUntilCapacity does not charge claim-time terminal trans
   createPendingRemediationJob(rootDir, {
     prNumber: 6,
     critical: false,
-    reviewBody: '## Summary\nClean.\n\n## Blocking Issues\n- None.\n\n## Verdict\nComment only',
+    reviewBody: '## Summary\nClean.\n\n## Blocking Issues\n- None.\n\n## Non-blocking Issues\n- None.\n\n## Verdict\nComment only',
     reviewPostedAt: '2026-04-21T07:59:00.000Z',
   });
   createPendingRemediationJob(rootDir, { prNumber: 7, reviewPostedAt: '2026-04-21T08:00:00.000Z' });

@@ -41,7 +41,7 @@ function classifyNonBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
     ? String(lastVerdict || '').trim().toLowerCase()
     : normalizedVerdict;
   if (parsed.nonBlocking.missing) {
-    return verdictKey === 'approved' || verdictKey === 'comment-only'
+    return verdictKey === 'approved'
       ? { count: 0, state: 'known' }
       : { count: 0, state: 'unknown' };
   }

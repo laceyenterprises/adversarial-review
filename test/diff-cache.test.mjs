@@ -142,6 +142,13 @@ test('too-large PR diff falls back to files API and raw added-file patches', asy
                   sha: '1111111111111111111111111111111111111111',
                   patch: '@@ -0,0 +1 @@\n+small',
                 },
+                {
+                  filename: 'src/new-name.js',
+                  previous_filename: 'src/old-name.js',
+                  status: 'renamed',
+                  sha: '7777777777777777777777777777777777777777',
+                  patch: '@@ -1 +1 @@\n-old\n+new',
+                },
               ]),
               JSON.stringify([
                 {
@@ -212,6 +219,7 @@ test('too-large PR diff falls back to files API and raw added-file patches', asy
     assert.equal(diffText.includes('+small\ndiff --git'), true);
     assert.match(diffText, /diff --git a\/src\/small\.js b\/src\/small\.js/);
     assert.match(diffText, /@@ -0,0 \+1 @@\n\+small/);
+    assert.match(diffText, /diff --git a\/src\/old-name\.js b\/src\/new-name\.js\nrename from src\/old-name\.js\nrename to src\/new-name\.js\n--- a\/src\/old-name\.js\n\+\+\+ b\/src\/new-name\.js\n@@ -1 \+1 @@\n-old\n\+new\n/);
     assert.match(diffText, /diff --git a\/src\/too big\.js b\/src\/too big\.js/);
     assert.match(diffText, /@@ -0,0 \+1,2 @@\n\+one\n\+two/);
     assert.match(diffText, /diff --git a\/src\/newline\.txt b\/src\/newline\.txt/);

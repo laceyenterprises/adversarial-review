@@ -111,6 +111,10 @@ function diffHeaderForFile(file) {
   // The PR files API does not expose file modes, so added/removed modes are synthetic.
   if (file?.status === 'added') lines.push('new file mode 100644');
   if (file?.status === 'removed') lines.push('deleted file mode 100644');
+  if (file?.status === 'renamed' && previous && previous !== filename) {
+    lines.push(`rename from ${previous}`);
+    lines.push(`rename to ${filename}`);
+  }
   if (file?.status === 'added') {
     lines.push(`index 0000000..${sha}`);
   } else if (file?.status === 'removed') {

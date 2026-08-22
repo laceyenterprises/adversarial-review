@@ -3329,6 +3329,35 @@ test('reviewer memory pressure thresholds load from YAML and env aliases', () =>
   }
 });
 
+test('top-level adversarial reviewer mirror tolerates future direct keys', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      adversarial:
+        reviewer_pool:
+          max_concurrent_reviewers: 4
+        reviewer:
+          future_rollout_knob:
+            enabled: true
+          memory:
+            pressure:
+              projected_headroom_floor_mb: 3072
+    `);
+
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('adversarial.reviewer_pool.max_concurrent_reviewers'), 4);
+    assert.equal(cfg.get('adversarial.reviewer.memory.pressure.projected_headroom_floor_mb'), 3072);
+    assert.deepEqual(
+      cfg.get('adversarial.reviewer.future_rollout_knob'),
+      { enabled: true },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('canonical + alias same value ok', () => {
   const tmp = freshTmp();
   try {

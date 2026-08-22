@@ -1286,28 +1286,6 @@ test('resolveRoundBudgetForJob preserves bump-elevated persisted budgets above t
   assert.equal(resolution.roundBudget, 12);
 });
 
-test('resolveRoundBudgetForJob lifts stale persisted budgets to the current risk policy floor', () => {
-  const resolution = resolveRoundBudgetForJob({
-    riskClass: 'medium',
-    remediationPlan: { maxRounds: 2 },
-  }, { rootDir: '/tmp', preferPersisted: true });
-
-  assert.equal(resolution.riskClass, 'medium');
-  assert.equal(resolution.roundBudget, 3);
-  assert.equal(resolution.source, 'job-persisted-maxRounds-policy-floor');
-});
-
-test('resolveRoundBudgetForJob preserves explicit lower caps outside the stale medium policy value', () => {
-  const resolution = resolveRoundBudgetForJob({
-    riskClass: 'medium',
-    remediationPlan: { maxRounds: 1 },
-  }, { rootDir: '/tmp', preferPersisted: true });
-
-  assert.equal(resolution.riskClass, 'medium');
-  assert.equal(resolution.roundBudget, 1);
-  assert.equal(resolution.source, 'job-persisted-maxRounds');
-});
-
 test('resolveRoundBudgetForJob falls back to medium for spec-less jobs', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const resolution = resolveRoundBudgetForJob({
@@ -1317,9 +1295,9 @@ test('resolveRoundBudgetForJob falls back to medium for spec-less jobs', () => {
   }, { rootDir, preferPersisted: false });
 
   assert.equal(resolution.riskClass, 'medium');
-  // Convergence loop default (post-2026-08-21): medium = 3 rounds —
-  // initial remediation + two auto-retries before operator escalation.
-  assert.equal(resolution.roundBudget, 3);
+  // Convergence loop default (post-2026-05-06): medium = 2 rounds —
+  // initial remediation + one auto-retry. Higher classes get more.
+  assert.equal(resolution.roundBudget, 2);
 });
 
 test('resolveRoundBudgetForJob resolves risk class from plan mapping sidecars', () => {
@@ -1359,7 +1337,7 @@ test('resolveRoundBudgetForJob falls back to medium when the linked plan file is
   }, { rootDir, preferPersisted: false });
 
   assert.equal(resolution.riskClass, 'medium');
-  assert.equal(resolution.roundBudget, 3);
+  assert.equal(resolution.roundBudget, 2);
 });
 
 test('summarizePRRemediationLedger excludes terminal jobs without a spawned remediation worker', () => {
@@ -1695,49 +1673,6 @@ test('claimNextFollowUpJob skips exhausted pending jobs after moving them to sto
     existsSync(path.join(getFollowUpJobDir(rootDir, 'stopped'), `${exhausted.job.jobId}.json`)),
     true
   );
-});
-
-test('claimNextFollowUpJob lifts stale medium pending jobs before applying the exhausted-round gate', () => {
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  const pending = createFollowUpJob({
-    ...makeJobInput(rootDir),
-    prNumber: 9,
-    reviewPostedAt: '2026-04-21T08:00:00.000Z',
-  });
-
-  writeFollowUpJob(pending.jobPath, {
-    ...pending.job,
-    riskClass: 'medium',
-    recommendedFollowUpAction: {
-      ...pending.job.recommendedFollowUpAction,
-      maxRounds: 2,
-    },
-    remediationPlan: {
-      ...pending.job.remediationPlan,
-      maxRounds: 2,
-      currentRound: 2,
-      rounds: [
-        { round: 1, state: 'completed' },
-        { round: 2, state: 'completed' },
-      ],
-      nextAction: {
-        type: 'consume-pending-round',
-        round: 3,
-        operatorVisibility: 'explicit',
-      },
-    },
-  });
-
-  const claimed = claimNextFollowUpJob({
-    rootDir,
-    claimedAt: '2026-04-21T10:00:00.000Z',
-    launcherPid: 4242,
-  });
-
-  assert.ok(claimed);
-  assert.equal(claimed.job.prNumber, 9);
-  assert.equal(claimed.job.remediationPlan.maxRounds, 3);
-  assert.equal(claimed.job.remediationPlan.currentRound, 3);
 });
 
 test('claimNextFollowUpJob continues past an exhausted job when stopped-marking fails', () => {

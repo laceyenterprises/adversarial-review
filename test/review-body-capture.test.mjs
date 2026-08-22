@@ -252,7 +252,7 @@ test('headed reviewer retry after capture does not post or recapture before atte
   assert.equal(attestations[0].reviewBody, reviewBody);
 });
 
-test('headed reviewer post ignores sqlite-busy pending capture lookup and still posts', async () => {
+test('headed reviewer post retries sqlite-busy pending capture lookup before posting', async () => {
   const rootDir = makeRootDir();
   const pass = seedPass(rootDir, {
     passKind: 'first-pass',
@@ -264,6 +264,7 @@ test('headed reviewer post ignores sqlite-busy pending capture lookup and still 
   const attestations = [];
   let postCalls = 0;
   let captureCalls = 0;
+  let pendingLookups = 0;
 
   await withEnv({ GH_CODEX_REVIEWER_TOKEN: 'token' }, () => postGitHubReviewWithCapture({
     rootDir,
@@ -278,6 +279,8 @@ test('headed reviewer post ignores sqlite-busy pending capture lookup and still 
     log,
     findCapturedReviewerBodyImpl: () => null,
     findPendingReviewerBodyCaptureImpl: () => {
+      pendingLookups += 1;
+      if (pendingLookups > 1) return null;
       const err = new Error('database is locked');
       err.code = 'SQLITE_BUSY';
       throw err;
@@ -307,10 +310,11 @@ test('headed reviewer post ignores sqlite-busy pending capture lookup and still 
   assert.equal(postCalls, 1);
   assert.equal(captureCalls, 1);
   assert.equal(attestations.length, 1);
-  assert.match(log.warnings.join('\n'), /pending review capture lookup failed/);
+  assert.equal(pendingLookups, 2);
+  assert.match(log.warnings.join('\n'), /pending-review-body-capture/);
 });
 
-test('headed reviewer post treats sqlite-busy capture after verified post as non-fatal', async () => {
+test('headed reviewer post propagates sqlite-busy capture failure after verified post', async () => {
   const rootDir = makeRootDir();
   const pass = seedPass(rootDir, {
     passKind: 'first-pass',
@@ -322,47 +326,48 @@ test('headed reviewer post treats sqlite-busy capture after verified post as non
   const attestations = [];
   let postCalls = 0;
 
-  await withEnv({ GH_CODEX_REVIEWER_TOKEN: 'token' }, () => postGitHubReviewWithCapture({
-    rootDir,
-    repo: pass.repo,
-    prNumber: pass.prNumber,
-    attemptNumber: pass.attemptNumber,
-    reviewerModel: 'codex',
-    reviewerHeadSha: 'reviewed-head-sha',
-    reviewBody,
-    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
-    passKind: 'first-pass',
-    log,
-    findCapturedReviewerBodyImpl: () => null,
-    findPendingReviewerBodyCaptureImpl: () => null,
-    captureReviewerBodyAfterPostImpl: async () => {
-      const err = new Error('database is locked');
-      err.code = 'SQLITE_BUSY';
-      throw err;
-    },
-    emitReviewedAttestationImpl: async (payload) => { attestations.push(payload); },
-    execFileImpl: async (_command, args) => {
-      if (args[0] === 'api' && args[1] === '--method') {
-        postCalls += 1;
-        return {
-          stdout: `${JSON.stringify({
-            id: 508,
-            login: 'lacey-codex-reviewer[bot]',
-            commit_id: 'reviewed-head-sha',
-            created_at: '2026-05-29T12:02:02.000Z',
-            body: reviewBody,
-          })}\n`,
-          stderr: '',
-        };
-      }
-      throw new Error(`unexpected command: ${args.join(' ')}`);
-    },
-  }));
+  await assert.rejects(
+    withEnv({ GH_CODEX_REVIEWER_TOKEN: 'token' }, () => postGitHubReviewWithCapture({
+      rootDir,
+      repo: pass.repo,
+      prNumber: pass.prNumber,
+      attemptNumber: pass.attemptNumber,
+      reviewerModel: 'codex',
+      reviewerHeadSha: 'reviewed-head-sha',
+      reviewBody,
+      botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+      passKind: 'first-pass',
+      log,
+      findCapturedReviewerBodyImpl: () => null,
+      findPendingReviewerBodyCaptureImpl: () => null,
+      captureReviewerBodyAfterPostImpl: async () => {
+        const err = new Error('database is locked');
+        err.code = 'SQLITE_BUSY';
+        throw err;
+      },
+      emitReviewedAttestationImpl: async (payload) => { attestations.push(payload); },
+      execFileImpl: async (_command, args) => {
+        if (args[0] === 'api' && args[1] === '--method') {
+          postCalls += 1;
+          return {
+            stdout: `${JSON.stringify({
+              id: 508,
+              login: 'lacey-codex-reviewer[bot]',
+              commit_id: 'reviewed-head-sha',
+              created_at: '2026-05-29T12:02:02.000Z',
+              body: reviewBody,
+            })}\n`,
+            stderr: '',
+          };
+        }
+        throw new Error(`unexpected command: ${args.join(' ')}`);
+      },
+    })),
+    /database is locked/
+  );
 
   assert.equal(postCalls, 1);
-  assert.equal(attestations.length, 1);
-  assert.equal(attestations[0].reviewBody, reviewBody);
-  assert.match(log.warnings.join('\n'), /local review capture failed after verified GitHub post/);
+  assert.equal(attestations.length, 0);
 });
 
 test('unheaded reviewer retry reuses captured body without double-posting', async () => {

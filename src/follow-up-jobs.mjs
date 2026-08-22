@@ -37,7 +37,7 @@ const FOLLOW_UP_JOB_SCHEMA_VERSION = 2;
 // Bounded remediation cap. This was uniformly 6 in PR #18's era,
 // dropped to a uniform 3 after observing diminishing returns past
 // round 3, then became risk-tiered. Post-2026-05-06 defaults are
-// low=1, medium=3, high=3, critical=4. Pairs with a lenient final-round
+// low=1, medium=2, high=3, critical=4. Pairs with a lenient final-round
 // verdict threshold in the
 // reviewer prompt (the final-round review only blocks on data
 // corruption / secret leakage / security regression / broken
@@ -49,12 +49,12 @@ const FOLLOW_UP_JOB_SCHEMA_VERSION = 2;
 // only NEW jobs derive their budget from this table.
 const LEGACY_DEFAULT_MAX_REMEDIATION_ROUNDS = 6;
 const DEFAULT_RISK_CLASS = 'medium';
-// Convergence loop budgets, post-2026-08-21:
+// Convergence loop budgets, post-2026-05-06:
 // Higher-risk PRs get more bot rounds before operator escalation,
 // because that's where you most want the bot to converge before
-// pulling the operator in. Default (medium) = 3: the initial
-// remediation triggered by the first `Request changes`, plus two
-// auto-queued follow-ups if rereviews are still `Request changes`.
+// pulling the operator in. Default (medium) = 2: the initial
+// remediation triggered by the first `Request changes`, plus one
+// auto-queued follow-up if the rereview is still `Request changes`.
 // Below that, low = 1 (simpler PRs aren't worth multiple rounds).
 // Above that, high = 3 and critical = 4 (more iterations to absorb
 // tougher reviewer feedback before halting).
@@ -71,7 +71,7 @@ const DEFAULT_RISK_CLASS = 'medium';
 // even if review/remediation state is still pending or noisy.
 const ROUND_BUDGET_BY_RISK_CLASS = Object.freeze({
   low: 1,
-  medium: 3,
+  medium: 2,
   high: 3,
   critical: 4,
 });
@@ -220,12 +220,6 @@ function buildRoundBudgetResolution({
   };
 }
 
-function shouldLiftPersistedBudgetToPolicyFloor({ riskClass, persistedRoundBudget, policyRoundBudget }) {
-  return riskClass === 'medium'
-    && persistedRoundBudget === 2
-    && policyRoundBudget > persistedRoundBudget;
-}
-
 function getProjectsDir(rootDir) {
   const candidates = [
     join(rootDir, 'projects'),
@@ -312,23 +306,15 @@ function resolveRoundBudgetForJob(job, { rootDir, preferPersisted = true } = {})
     job?.remediationPlan?.maxRounds
       || job?.recommendedFollowUpAction?.maxRounds
   );
-  const riskClass = persistedRiskClass || DEFAULT_RISK_CLASS;
-  const policyRoundBudget = ROUND_BUDGET_BY_RISK_CLASS[riskClass];
-
   // Persisted state is authoritative within a single follow-up job.
   // Fresh jobs normally re-derive the cap from the PR's current
   // riskClass; callers may intentionally pass an elevated prior cap
   // when preserving an in-flight legacy/operator budget is required.
   if (preferPersisted && Number.isInteger(persistedRoundBudget) && persistedRoundBudget > 0) {
-    const liftToPolicyFloor = shouldLiftPersistedBudgetToPolicyFloor({
-      riskClass,
-      persistedRoundBudget,
-      policyRoundBudget,
-    });
     return buildRoundBudgetResolution({
-      riskClass,
-      roundBudget: liftToPolicyFloor ? policyRoundBudget : persistedRoundBudget,
-      source: liftToPolicyFloor ? 'job-persisted-maxRounds-policy-floor' : 'job-persisted-maxRounds',
+      riskClass: persistedRiskClass || DEFAULT_RISK_CLASS,
+      roundBudget: persistedRoundBudget,
+      source: 'job-persisted-maxRounds',
     });
   }
 
@@ -2034,18 +2020,6 @@ function claimNextFollowUpJob({
     }
 
     const job = pendingJob;
-    const budgetResolution = resolveRoundBudgetForJob(job, { rootDir, preferPersisted: true });
-    if (Number(job?.remediationPlan?.maxRounds) < budgetResolution.roundBudget) {
-      job.riskClass = budgetResolution.riskClass;
-      job.recommendedFollowUpAction = {
-        ...job.recommendedFollowUpAction,
-        maxRounds: budgetResolution.roundBudget,
-      };
-      job.remediationPlan = {
-        ...job.remediationPlan,
-        maxRounds: budgetResolution.roundBudget,
-      };
-    }
 
     if (isSettledReviewJob(job)) {
       let stopped = null;

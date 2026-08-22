@@ -1249,7 +1249,24 @@ async function checkoutGeminiCredentialFromBrokerOnce({
         provider: 'gemini',
         consumer: 'adversarial-reviewer',
         pid: process.pid,
-        ttl_seconds: 30 * 60,
+        // A first-pass Gemini review takes ~2 minutes. A 30-minute lease meant
+        // any reviewer that died without releasing blocked the ENTIRE pool for
+        // 28 more minutes — and the pool is a single credential (`default`), so
+        // one orphan stalls every review on the fleet.
+        //
+        // Release lives in a `finally`, which does NOT run on SIGKILL, and the
+        // watcher does signal reviewer process groups (stale-claim sweep, pool
+        // eviction). So orphaned leases are not an edge case, they are the
+        // expected outcome of a normal kill, and the TTL is the only bound.
+        //
+        // Live on 2026-08-22: lease 7e6a131f acquired 17:36Z, holder gone by
+        // 17:38Z, still blocking until 18:06Z. 2012 `checkout unavailable`
+        // fallbacks that day, each one degrading to the SERIALIZED legacy
+        // credential lock, which is what collapsed review throughput.
+        //
+        // 10 minutes keeps 5x headroom over a normal review while cutting the
+        // worst-case stall from 28 minutes to 8.
+        ttl_seconds: 10 * 60,
       }),
     }, timeoutMs);
   } catch (err) {
@@ -1486,6 +1503,50 @@ function materializeGeminiCheckoutSession({
       rmSyncImpl(sessionDir, { recursive: true, force: true });
     },
   };
+}
+
+// Release the checkout on a TERMINATING SIGNAL, not just on the `finally` path.
+//
+// `finally` does not run when the process is signalled, and the watcher DOES
+// signal reviewer process groups (stale-claim sweep, reviewer-pool eviction).
+// With a single-credential pool, one signalled reviewer strands every other
+// review until the lease TTL expires. SIGKILL is still unstoppable — that is
+// what the shortened TTL bounds — but SIGTERM/SIGINT are catchable and are the
+// signals the watcher actually sends first.
+//
+// Registered once, idempotent, and deliberately best-effort: a failed release
+// here must never change the exit code or mask the original termination.
+let geminiSignalReleaseArmed = false;
+function armGeminiCheckoutSignalRelease(getState, { log = console } = {}) {
+  if (geminiSignalReleaseArmed) return;
+  geminiSignalReleaseArmed = true;
+  for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+    process.once(signal, () => {
+      const state = (() => {
+        try { return getState(); } catch { return null; }
+      })();
+      if (state?.checkout) {
+        // Fire-and-forget: the process is going away, so we cannot await. The
+        // request is dispatched before re-raising so it at least leaves the
+        // socket. The TTL remains the guarantee; this is the fast path.
+        try {
+          releaseGeminiCredentialCheckout({
+            checkout: state.checkout,
+            quotaSignal: false,
+            env: state.env || process.env,
+          }).catch(() => {});
+          log.warn?.(
+            `[reviewWithGemini] ${signal} received; released Gemini checkout `
+            + `${state.checkout.checkoutId || '(unknown)'} before exit`,
+          );
+        } catch {
+          // Never let cleanup failure alter termination behavior.
+        }
+      }
+      process.removeAllListeners(signal);
+      process.kill(process.pid, signal);
+    });
+  }
 }
 
 async function cleanupGeminiAntigravityResources({
@@ -1915,6 +1976,9 @@ async function reviewWithGemini(diff, extraContext = '', {
     }
     try {
       checkout = await checkoutGeminiCredentialImpl({ env });
+      // Arm signal-release as soon as we HOLD the lease, so a SIGTERM between
+      // here and the `finally` cannot strand the single-credential pool.
+      armGeminiCheckoutSignalRelease(() => ({ checkout, env }), { log });
       checkoutSession = materializeGeminiCheckoutSessionImpl({ checkout, env });
       reviewEnv = checkoutSession.env;
     } catch (err) {

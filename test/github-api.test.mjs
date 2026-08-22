@@ -1294,7 +1294,7 @@ test('adapter-missing rollup path uses existing GraphQL implementation', async (
   const { calls, execFileImpl } = makeGraphqlExecStub(expected);
 
   const result = await fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
-    env: {},
+    env: { AGENT_OS_GITHUB_ADAPTER_AUTO_DISCOVERY: '0' },
     execFileImpl,
     recordApiCallImpl: () => {},
   });
@@ -3432,7 +3432,7 @@ test('mergeability sampling retries transient gh subprocess timeouts', async () 
     });
 
     const result = await fetchPullRequestMergeability(FIXTURE_REPO, FIXTURE_PR, {
-      env: {},
+      env: { AGENT_OS_GITHUB_ADAPTER_AUTO_DISCOVERY: '0' },
       recordApiCallImpl: () => {},
       execFileImpl: async (command, args, options) => {
         calls.push({ command, args: [...args], options });

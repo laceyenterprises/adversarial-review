@@ -656,8 +656,8 @@ test('round-budget selector detects over-budget and awaiting-rereview final-pass
     riskClass: 'medium',
     status: 'awaiting-rereview',
     remediationPlan: {
-      currentRound: 2,
-      rounds: [{ round: 1, state: 'completed' }, { round: 2, state: 'completed' }],
+      currentRound: 3,
+      rounds: [{ round: 1, state: 'completed' }, { round: 2, state: 'completed' }, { round: 3, state: 'completed' }],
     },
   });
 

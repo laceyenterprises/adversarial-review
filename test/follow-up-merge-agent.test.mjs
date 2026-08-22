@@ -1918,8 +1918,8 @@ test('buildMergeAgentDispatchJob carries verdict and remediation state from the 
   assert.equal(dispatchJob.lastVerdict, 'Comment only');
   assert.equal(dispatchJob.latestFollowUpJobStatus, 'pending');
   assert.equal(dispatchJob.remediationCurrentRound, 0);
-  // Spec-less jobs fall back to medium risk, which has a 2-round cap.
-  assert.equal(dispatchJob.remediationMaxRounds, 2);
+  // Spec-less jobs fall back to medium risk, which has a 3-round cap.
+  assert.equal(dispatchJob.remediationMaxRounds, 3);
   // An explicit clean blocking section permits final-pass auto-merge (this
   // clean body would not even reach that branch).
   assert.equal(dispatchJob.blockingFindingCount, 0);

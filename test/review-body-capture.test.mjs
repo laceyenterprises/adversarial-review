@@ -373,6 +373,7 @@ test('headed reviewer post propagates sqlite-busy pending capture lookup exhaust
     reviewerClass: 'codex',
     headSha: 'reviewed-head-sha',
   });
+  let lookupCalls = 0;
   let postCalls = 0;
 
   await withEnv({ GH_CODEX_REVIEWER_TOKEN: 'token' }, async () => {
@@ -389,6 +390,7 @@ test('headed reviewer post propagates sqlite-busy pending capture lookup exhaust
         passKind: 'first-pass',
         findCapturedReviewerBodyImpl: () => null,
         findPendingReviewerBodyCaptureImpl: () => {
+          lookupCalls += 1;
           const err = new Error('database is locked');
           err.code = 'SQLITE_BUSY';
           throw err;
@@ -410,6 +412,7 @@ test('headed reviewer post propagates sqlite-busy pending capture lookup exhaust
     );
   });
 
+  assert.equal(lookupCalls, 3);
   assert.equal(postCalls, 0);
 });
 
@@ -1161,32 +1164,38 @@ test('reviewer lookup paginates through busy PR history and still finds the matc
   assert.ok(apiArgs[0].includes('--paginate'));
 });
 
-test('sqlite write failure does not block gh review posting', async () => {
+test('headed sqlite write failure posts the review but fails the pass for retry', async () => {
   const tempDir = makeRootDir();
   const bogusRoot = path.join(tempDir, 'not-a-dir');
   writeFileSync(bogusRoot, 'x', 'utf8');
-  const log = makeLog();
   const calls = [];
 
-  await withEnv({ GH_CODEX_REVIEWER_TOKEN: 'token' }, () => postGitHubReviewWithCapture({
-    rootDir: bogusRoot,
-    repo: 'laceyenterprises/adversarial-review',
-    prNumber: 42,
-    attemptNumber: 1,
-    reviewerModel: 'codex',
-    reviewBody: '## Verdict\n\nComment only',
-    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
-    postedAt: '2026-05-29T12:01:00.000Z',
-    log,
-    execFileImpl: async (command, args) => {
-      calls.push([command, ...args]);
-      return { stdout: '', stderr: '' };
-    },
-  }));
+  await withEnv({ GH_CODEX_REVIEWER_TOKEN: 'token' }, async () => {
+    await assert.rejects(
+      postGitHubReviewWithCapture({
+        rootDir: bogusRoot,
+        repo: 'laceyenterprises/adversarial-review',
+        prNumber: 42,
+        attemptNumber: 1,
+        reviewerModel: 'codex',
+        reviewerHeadSha: 'reviewed-head-sha',
+        reviewBody: '## Verdict\n\nComment only',
+        botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+        postedAt: '2026-05-29T12:01:00.000Z',
+        execFileImpl: async (command, args) => {
+          calls.push([command, ...args]);
+          return {
+            stdout: JSON.stringify({ id: 509, commit_id: 'reviewed-head-sha' }),
+            stderr: '',
+          };
+        },
+      }),
+      /ENOTDIR|not a directory|Unable to open database/
+    );
+  });
 
   assert.equal(calls.length >= 1, true);
-  assert.equal(calls[0][1], 'pr');
-  assert.match(log.warnings.join('\n'), /review body capture failed/);
+  assert.equal(calls[0][1], 'api');
 });
 
 test('reviewer capture absorbs slow GH propagation past the legacy 15s forward bound', async () => {

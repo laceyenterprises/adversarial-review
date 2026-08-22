@@ -993,6 +993,17 @@ function schemaV1() {
                   default: { __type: TYPE_STRING, __default: 'shadow', __enum: ['off', 'shadow', 'enforce'] },
                 },
               },
+              destructive_capability_enforcement: {
+                __type: TYPE_DICT,
+                __strict: false,
+                __keys: {
+                  default: { __type: TYPE_STRING, __default: 'shadow', __enum: ['off', 'shadow', 'enforce'] },
+                },
+                __extra_keys_schema: {
+                  __type: TYPE_STRING,
+                  __enum: ['off', 'shadow', 'enforce'],
+                },
+              },
               principal_capability_enforcement: {
                 __type: TYPE_DICT,
                 __strict: false,
@@ -3216,6 +3227,10 @@ export const ENV_ALIASES = {
   },
   'services.hcp.console_capability_enforcement.default': {
     canonical: 'AGENT_OS_SERVICES_HCP_CONSOLE_CAPABILITY_ENFORCEMENT_DEFAULT',
+    aliases: [],
+  },
+  'services.hcp.destructive_capability_enforcement.default': {
+    canonical: 'AGENT_OS_SERVICES_HCP_DESTRUCTIVE_CAPABILITY_ENFORCEMENT_DEFAULT',
     aliases: [],
   },
   'services.hcp.persistent_agent_principals': {

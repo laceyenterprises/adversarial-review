@@ -173,13 +173,13 @@ test('bumpRemediationBudget bumps terminal job budgets atomically', () => {
     auditEntry: makeAuditEntry('idem:bump'),
   });
   assert.equal(result.bumped, true);
-  assert.equal(result.priorMaxRounds, 2);
-  assert.equal(result.newMaxRounds, 4);
+  assert.equal(result.priorMaxRounds, 3);
+  assert.equal(result.newMaxRounds, 5);
   const persisted = JSON.parse(readFileSync(jobPath, 'utf8'));
-  assert.equal(persisted.remediationPlan.maxRounds, 4);
+  assert.equal(persisted.remediationPlan.maxRounds, 5);
   assert.equal(
     persisted.recommendedFollowUpAction?.maxRounds,
-    2,
+    3,
     'original recommendation should remain as created'
   );
 });

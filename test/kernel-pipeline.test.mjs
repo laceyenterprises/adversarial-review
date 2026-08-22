@@ -39,7 +39,7 @@ function stage(id, aggregation, panel, roundBudgetByRisk) {
     id,
     panel: panel.map((roleId) => ({ id: roleId })),
     aggregation,
-    roundBudgetByRisk: roundBudgetByRisk ?? { low: 1, medium: 2, high: 3, critical: 4 },
+    roundBudgetByRisk: roundBudgetByRisk ?? { low: 1, medium: 3, high: 3, critical: 4 },
   };
 }
 

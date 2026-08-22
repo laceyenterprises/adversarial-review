@@ -19,6 +19,7 @@ function currentHead(headRefOid) {
 test('spawnReviewer posts successful adapter-produced review bodies through GitHub capture', async () => {
   const posted = [];
   const result = await spawnReviewer({
+    rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
     repo: 'laceyenterprises/demo',
     prNumber: 14,
     reviewerModel: 'gemini',
@@ -66,6 +67,7 @@ test('spawnReviewer posts successful adapter-produced review bodies through GitH
 test('spawnReviewer discards adapter review body when current PR head moved before post', async () => {
   const posted = [];
   const result = await spawnReviewer({
+    rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
     repo: 'laceyenterprises/demo',
     prNumber: 140,
     reviewerModel: 'gemini',
@@ -107,6 +109,7 @@ test('spawnReviewer retries transient freshness probes before discarding stale a
   const sleeps = [];
   let fetchAttempts = 0;
   const result = await spawnReviewer({
+    rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
     repo: 'laceyenterprises/demo',
     prNumber: 141,
     reviewerModel: 'gemini',
@@ -190,6 +193,7 @@ test('settleReviewerAttempt releases stale-head reviewer claims without consumin
 test('spawnReviewer does not post unmarked adapter review bodies', async () => {
   const posted = [];
   const result = await spawnReviewer({
+    rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
     repo: 'laceyenterprises/demo',
     prNumber: 15,
     reviewerModel: 'gemini',
@@ -227,6 +231,7 @@ test('spawnReviewer resolves worker_run_id from os-dispatch launch_request_id wh
   let readBestArgs = null;
   const settled = [];
   const result = await spawnReviewer({
+    rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
     repo: 'laceyenterprises/demo',
     prNumber: 21,
     reviewerModel: 'gemini',
@@ -287,6 +292,7 @@ test('spawnReviewer resolves worker_run_id from os-dispatch launch_request_id wh
 test('spawnReviewer enriches adapter token usage with ledger worker_run_id without replacing counters', async () => {
   const settled = [];
   const result = await spawnReviewer({
+    rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
     repo: 'laceyenterprises/demo',
     prNumber: 24,
     reviewerModel: 'gemini',
@@ -365,6 +371,7 @@ test('spawnReviewer retries transient ledger contention and preserves adapter co
   console.warn = (message) => warnings.push(String(message));
   try {
     const result = await spawnReviewer({
+      rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
       repo: 'laceyenterprises/demo',
       prNumber: 25,
       reviewerModel: 'gemini',
@@ -442,6 +449,7 @@ test('spawnReviewer keeps retrying token-only evidence until worker attribution 
   const settled = [];
   let lookupCalls = 0;
   await spawnReviewer({
+    rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
     repo: 'laceyenterprises/demo',
     prNumber: 251,
     reviewerModel: 'gemini',
@@ -507,6 +515,7 @@ test('spawnReviewer leaves repairable attribution after bounded transient ledger
   console.warn = (message) => warnings.push(String(message));
   try {
     await spawnReviewer({
+      rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
       repo: 'laceyenterprises/demo',
       prNumber: 26,
       reviewerModel: 'gemini',
@@ -604,6 +613,7 @@ test('spawnReviewer persists worker_run_id onto reviewer_passes for SDK-dispatch
     });
 
     await spawnReviewer({
+      rootDir,
       repo: 'laceyenterprises/demo',
       prNumber: 121,
       reviewerModel: 'gemini',
@@ -657,6 +667,7 @@ test('spawnReviewer settles worker_run_id null when no worker run resolves (cli-
   const settled = [];
   let lookupLaunchRequestId = null;
   const result = await spawnReviewer({
+    rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
     repo: 'laceyenterprises/demo',
     prNumber: 22,
     reviewerModel: 'gemini',
@@ -721,6 +732,7 @@ test('spawnReviewer preserves worker run_id when the adapter throws (error-path 
   // surfaced on err.tokenUsage must survive onto the settled pass.
   await assert.rejects(
     spawnReviewer({
+      rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
       repo: 'laceyenterprises/demo',
       prNumber: 23,
       reviewerModel: 'gemini',

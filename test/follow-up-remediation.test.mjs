@@ -6142,15 +6142,14 @@ test('resolveRemediationMaxConcurrentJobs clamps runaway env values', () => {
   assert.deepEqual(clampEvents, [{ requested: 1000, clamped: 8 }]);
 });
 
-test('consumeNextFollowUpJob honors persisted maxRounds=2 on a medium-risk legacy job (riskClass downgrade is suppressed)', async () => {
+test('consumeNextFollowUpJob lifts stale medium maxRounds=2 jobs to the current policy floor', async () => {
   // Reviewer blocking finding: `resolveRoundBudgetForJob` used to give
   // `riskClass` precedence over the persisted `remediationPlan.maxRounds`.
   // For a legacy job carried forward with `riskClass='medium'` and
-  // `maxRounds=2`, the consume gate would collapse the budget back to
-  // the medium-tier 1 round, refuse to spawn round 2, and stop the
-  // PR with `round-budget-exhausted` despite a persisted budget that
-  // explicitly allowed round 2. Persisted state must now win — the
-  // legacy job runs round 2 as originally budgeted.
+  // `maxRounds=2`, the consume gate must now lift it to the current
+  // medium-tier 3 round budget. That keeps already-created jobs aligned
+  // with the three-round convergence policy without downgrading explicit
+  // higher operator budgets.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const projectsDir = path.join(rootDir, 'projects', 'fixture-project');
   mkdirSync(projectsDir, { recursive: true });
@@ -6217,10 +6216,10 @@ test('consumeNextFollowUpJob honors persisted maxRounds=2 on a medium-risk legac
     promptTemplate: 'You are a remediation worker.',
   }));
 
-  assert.equal(result.consumed, true, 'persisted maxRounds=2 must let round 2 spawn');
+  assert.equal(result.consumed, true, 'stale medium maxRounds=2 must let round 2 spawn');
   assert.equal(result.job.status, 'in_progress');
   assert.equal(result.job.riskClass, 'medium', 'riskClass must be preserved on the record');
-  assert.equal(result.job.remediationPlan.maxRounds, 2, 'persisted maxRounds must not be downgraded');
+  assert.equal(result.job.remediationPlan.maxRounds, 3, 'stale medium cap should lift to current policy');
   assert.equal(result.job.remediationPlan.currentRound, 2);
   assert.equal(spawnCalls.length, 1);
 });
@@ -6387,7 +6386,7 @@ test('consumeNextFollowUpJob logs a structured deny decision when a remediation 
     reviewBody: '## Summary\nBudget test.\n\n## Verdict\nRequest changes',
     reviewPostedAt: '2026-05-09T01:00:00.000Z',
     critical: false,
-    priorCompletedRounds: 2,
+    priorCompletedRounds: 3,
   });
 
   const result = await consumeNextFollowUpJob({
@@ -6405,7 +6404,7 @@ test('consumeNextFollowUpJob logs a structured deny decision when a remediation 
   assert.equal(result.reason, 'max-rounds-reached');
   assert.match(
     logs.find((line) => line.includes('"event":"remediation-round-budget"')) || '',
-    /"riskClass":"medium".*"runsCompleted":2.*"cap":2.*"decision":"deny"/,
+    /"riskClass":"medium".*"runsCompleted":3.*"cap":3.*"decision":"deny"/,
   );
 });
 

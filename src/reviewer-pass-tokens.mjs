@@ -299,6 +299,33 @@ function beginReviewerPass(rootDir, {
   }
 }
 
+function nextReviewerPassAttemptNumber(rootDir, {
+  repo,
+  prNumber,
+  passKind,
+  fallbackReviewAttempts = 0,
+} = {}) {
+  const normalizedRepo = String(repo || '');
+  const normalizedPrNumber = Number(prNumber);
+  const normalizedPassKind = normalizePassKind(passKind);
+  const fallbackAttempt = coerceNonNegativeInt(fallbackReviewAttempts) || 0;
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const row = db.prepare(
+      `SELECT MAX(attempt_number) AS max_attempt
+         FROM reviewer_passes
+        WHERE repo = ?
+          AND pr_number = ?
+          AND pass_kind = ?`
+    ).get(normalizedRepo, normalizedPrNumber, normalizedPassKind);
+    const maxPassAttempt = coerceNonNegativeInt(row?.max_attempt) || 0;
+    return Math.max(fallbackAttempt, maxPassAttempt) + 1;
+  } finally {
+    closeOwnedReviewDb(db);
+  }
+}
+
 function completeReviewerPass(rootDir, {
   repo,
   prNumber,
@@ -1908,6 +1935,7 @@ export {
   beginReviewerPass,
   completeReviewerPass,
   foldReviewerTokenUsageArtifact,
+  nextReviewerPassAttemptNumber,
   tagTokenUsage,
   normalizeReviewerClass,
   normalizeTokenUsage,

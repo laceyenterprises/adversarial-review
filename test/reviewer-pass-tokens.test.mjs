@@ -19,6 +19,7 @@ import {
   beginReviewerPass,
   completeReviewerPass,
   foldReviewerTokenUsageArtifact,
+  nextReviewerPassAttemptNumber,
   readBestReviewerEvidenceTokenUsage,
   readClaudeTranscriptTokenUsage,
   readCodexTranscriptTokenUsage,
@@ -196,6 +197,71 @@ test('reviewer pass writer refuses to reuse terminal rows', () => {
   } finally {
     db.close();
   }
+});
+
+test('reviewer pass attempt resolver skips terminal same-kind rows', () => {
+  const rootDir = tempRoot();
+  beginReviewerPass(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 5664,
+    attemptNumber: 2,
+    reviewerClass: 'gemini',
+    passKind: 'rereview',
+    startedAt: '2026-08-22T03:38:32.716Z',
+    headSha: 'old-remediation-head',
+    metadata: { original: true },
+  });
+  completeReviewerPass(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 5664,
+    attemptNumber: 2,
+    passKind: 'rereview',
+    status: 'failed',
+    endedAt: '2026-08-22T03:59:13.357Z',
+    metadata: { failureClass: 'bug' },
+  });
+
+  assert.equal(
+    nextReviewerPassAttemptNumber(rootDir, {
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 5664,
+      passKind: 'rereview',
+      fallbackReviewAttempts: 1,
+    }),
+    3
+  );
+});
+
+test('reviewer pass attempt resolver scopes history by pass kind', () => {
+  const rootDir = tempRoot();
+  beginReviewerPass(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 5665,
+    attemptNumber: 7,
+    reviewerClass: 'gemini',
+    passKind: 'first-pass',
+    startedAt: '2026-08-22T03:38:32.716Z',
+    headSha: 'first-pass-head',
+  });
+  completeReviewerPass(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 5665,
+    attemptNumber: 7,
+    passKind: 'first-pass',
+    status: 'failed',
+    endedAt: '2026-08-22T03:59:13.357Z',
+    metadata: { failureClass: 'bug' },
+  });
+
+  assert.equal(
+    nextReviewerPassAttemptNumber(rootDir, {
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 5665,
+      passKind: 'rereview',
+      fallbackReviewAttempts: 1,
+    }),
+    2
+  );
 });
 
 test('reviewer pass writer refuses to reuse a running row for a different head', () => {

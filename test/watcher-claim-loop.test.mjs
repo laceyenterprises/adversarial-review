@@ -268,7 +268,11 @@ register(${JSON.stringify(pathToFileURL(loaderPath).href)}, import.meta.url);
 `;
 }
 
-function buildRunnerSource({ expectPollError = false, freshHeads = {} } = {}) {
+function buildRunnerSource({
+  expectPollError = false,
+  freshHeads = {},
+  prePollSetup = '',
+} = {}) {
   const watcherUrl = fileUrl('src', 'watcher.mjs');
   return `
 import assert from 'node:assert/strict';
@@ -299,6 +303,7 @@ try {
   const { pollOnce } = await import(${JSON.stringify(watcherUrl)});
   const db = globalThis.__watcherClaimLoopDb;
   assert.ok(db, 'watcher should have opened the synthetic in-memory DB');
+  ${prePollSetup}
   const insert = db.prepare(
     \`INSERT INTO reviewed_prs
        (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts)
@@ -893,6 +898,88 @@ test('watcher pollOnce claim loop records subject-state head SHAs and drives the
     assert.ok(
       summary.reviewerPassRows.every((row) => row.workspace_path === REPO_ROOT),
       'reviewer pass rows should retain the tool root so transcript token fallback can match Claude sessions on disk'
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('watcher pollOnce skips stale terminal rereview pass keys', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-rereview-attempt-key-'));
+  const loaderPath = path.join(tmp, 'fixture-loader.mjs');
+  const registerPath = path.join(tmp, 'fixture-register.mjs');
+  const runnerPath = path.join(tmp, 'fixture-rereview-attempt-key-runner.mjs');
+  try {
+    writeFileSync(loaderPath, buildLoaderSource());
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({
+      prePollSetup: `
+        db.prepare(
+          \`INSERT INTO reviewed_prs
+             (repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+              review_attempts, rereview_requested_at, rereview_reason)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)\`
+        ).run(
+          'laceyenterprises/adversarial-review',
+          101,
+          '2026-08-22T03:31:55.675Z',
+          'gemini',
+          'open',
+          'pending',
+          1,
+          '2026-08-22T03:47:46.523Z',
+          'operator recovery: current head needs re-review'
+        );
+        db.prepare(
+          \`INSERT INTO reviewer_passes
+             (repo, pr_number, attempt_number, reviewer_class, reviewer_model,
+              pass_kind, started_at, ended_at, status, head_sha, metadata_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\`
+        ).run(
+          'laceyenterprises/adversarial-review',
+          101,
+          2,
+          'gemini',
+          'gemini',
+          'rereview',
+          '2026-08-22T03:38:32.716Z',
+          '2026-08-22T03:59:13.357Z',
+          'failed',
+          'old-remediation-head',
+          JSON.stringify({ error: 'refusing to reuse terminal reviewer_passes row' })
+        );
+      `,
+    }));
+
+    const result = spawnSync(
+      process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        env: fixtureEnv(installGhFixture(tmp)),
+      }
+    );
+
+    const output = `${result.stdout || ''}${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+    const summaryLine = result.stdout
+      .split(/\r?\n/)
+      .find((line) => line.startsWith(SUMMARY_MARKER));
+    assert.ok(summaryLine, output);
+    const summary = JSON.parse(summaryLine.slice(SUMMARY_MARKER.length));
+    const spawn101 = summary.reviewerSpawns.find((spawn) => spawn?.subjectContext?.prNumber === 101);
+    assert.ok(spawn101, JSON.stringify(summary, null, 2));
+    assert.equal(spawn101?.subjectContext?.passKind, 'rereview');
+    assert.equal(spawn101?.subjectContext?.reviewDbAttemptNumber, 3);
+    assert.deepEqual(
+      summary.reviewerPassRows
+        .filter((row) => row.pr_number === 101)
+        .map((row) => [row.attempt_number, row.pass_kind, row.status]),
+      [
+        [2, 'rereview', 'failed'],
+        [3, 'rereview', 'completed'],
+      ]
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });

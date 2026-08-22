@@ -346,6 +346,7 @@ exit 1
           FML_WATCHER_SKIP_ENABLED: skipEnabled ? 'true' : 'false',
           PATH: `${tmp}${path.delimiter}${process.env.PATH || ''}`,
           AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'false',
+          ADVERSARIAL_AFH_REVIEWER_FALLBACK: 'false',
           WATCHER_ROUTING_TIER_READINESS_PROBE_DISABLED: '1',
         },
       }

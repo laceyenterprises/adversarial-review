@@ -1822,3 +1822,47 @@ test('launchd liveness probe preserves stderr diagnostics when stdout is present
   assert.equal(dispatchService.loaded, true);
   assert.equal(dispatchService.raw, 'state = running\n');
 });
+
+// ── Failure-class banner poisoning (2026-08-22) ──────────────────────────────
+//
+// adversarial-review#886 failed with `PullRequest.diff too_large` (a 33,168-line
+// diff over GitHub's 20,000-line API cap). pipeline-health reported
+// `dominantFailureClass: auth` and told the operator to investigate reviewer
+// credentials, because the captured stdout tail contains the routine banner
+// `(OAuth-only mode; prompt stage=first)` and the classifier matched a bare
+// `includes('oauth')`. The banner prints on EVERY gemini review, so this
+// poisoned the `auth` class for that whole reviewer.
+test('a routine OAuth banner in the tail does not classify a failure as auth', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 960,
+    reviewStatus: 'failed',
+    reviewedAt: '2026-05-25T17:00:00.000Z',
+  });
+  const db = openDb(rootDir);
+  try {
+    db.prepare(
+      'UPDATE reviewed_prs SET failure_message = ?, infra_auto_recover_attempts = ? WHERE pr_number = ?',
+    ).run(
+      '[unknown] Command failed with code 1\nstdout tail:\n'
+      + '[reviewer] Starting review: laceyenterprises/adversarial-review#886 '
+      + 'model=gemini (OAuth-only mode; prompt stage=first)\n'
+      + 'could not find pull request diff: HTTP 406: Sorry, the diff exceeded the '
+      + 'maximum number of lines (20000)\nPullRequest.diff too_large',
+      3,
+      960,
+    );
+  } finally {
+    db.close();
+  }
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  const finding = snapshot.findings.find((item) => item.code === 'review:stuck_retry_loop');
+  assert.ok(finding, 'expected the stuck-retry-loop finding');
+  assert.equal(finding.details.dominantFailureClass, 'diff-too-large');
+  assert.notEqual(finding.details.dominantFailureClass, 'auth');
+  // The advice must not send an operator after credentials for a diff-size problem.
+  assert.equal(typeof finding.recommended_action, 'string');
+  assert.match(finding.recommended_action, /NOT a reviewer auth\/infra problem/);
+  assert.match(finding.recommended_action, /do not retrigger/);
+});

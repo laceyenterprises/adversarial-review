@@ -149,6 +149,12 @@ test('too-large PR diff falls back to files API and raw added-file patches', asy
                   sha: '7777777777777777777777777777777777777777',
                   patch: '@@ -1 +1 @@\n-old\n+new',
                 },
+                {
+                  filename: ' src/spaced-name.js ',
+                  status: 'modified',
+                  sha: '8888888888888888888888888888888888888888',
+                  patch: '@@ -1 +1 @@\n-old\n+new',
+                },
               ]),
               JSON.stringify([
                 {
@@ -219,7 +225,8 @@ test('too-large PR diff falls back to files API and raw added-file patches', asy
     assert.equal(diffText.includes('+small\ndiff --git'), true);
     assert.match(diffText, /diff --git a\/src\/small\.js b\/src\/small\.js/);
     assert.match(diffText, /@@ -0,0 \+1 @@\n\+small/);
-    assert.match(diffText, /diff --git a\/src\/old-name\.js b\/src\/new-name\.js\nrename from src\/old-name\.js\nrename to src\/new-name\.js\n--- a\/src\/old-name\.js\n\+\+\+ b\/src\/new-name\.js\n@@ -1 \+1 @@\n-old\n\+new\n/);
+    assert.match(diffText, /diff --git a\/src\/old-name\.js b\/src\/new-name\.js\nrename from src\/old-name\.js\nrename to src\/new-name\.js\nindex 0000000\.\.7777777\n--- a\/src\/old-name\.js\n\+\+\+ b\/src\/new-name\.js\n@@ -1 \+1 @@\n-old\n\+new\n/);
+    assert.match(diffText, /diff --git a\/ src\/spaced-name\.js  b\/ src\/spaced-name\.js \nindex 0000000\.\.8888888\n--- a\/ src\/spaced-name\.js \n\+\+\+ b\/ src\/spaced-name\.js \n@@ -1 \+1 @@\n-old\n\+new\n/);
     assert.match(diffText, /diff --git a\/src\/too big\.js b\/src\/too big\.js/);
     assert.match(diffText, /@@ -0,0 \+1,2 @@\n\+one\n\+two/);
     assert.match(diffText, /diff --git a\/src\/newline\.txt b\/src\/newline\.txt/);
@@ -257,6 +264,61 @@ test('too-large PR diff falls back to files API and raw added-file patches', asy
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+test('too-large PR diff falls back to files API without a cache head SHA', async () => {
+  const repo = 'laceyenterprises/adversarial-review';
+  const prNumber = 887;
+  const recordedCategories = [];
+  const diff = await fetchPRDiff(repo, prNumber, '', {
+    execFileImpl: async (command, args, options) => {
+      assert.equal(command, 'gh');
+      assert.equal(options.encoding, 'buffer');
+      if (args[0] === 'pr') {
+        const err = new Error(`Command failed: gh pr diff ${prNumber} --repo ${repo}`);
+        err.stderr = 'PullRequest.diff too_large';
+        throw err;
+      }
+      if (args[0] === 'api' && args.includes('--paginate')) {
+        return {
+          stdout: Buffer.from(JSON.stringify([
+            {
+              filename: 'src/fallback.js',
+              status: 'modified',
+              sha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+              patch: '@@ -1 +1 @@\n-old\n+new',
+            },
+          ])),
+          stderr: Buffer.alloc(0),
+        };
+      }
+      throw new Error(`unexpected gh call: ${args.join(' ')}`);
+    },
+    getCachedDiffImpl: () => null,
+    putCachedDiffImpl: () => {
+      throw new Error('headless fallback must not write cache');
+    },
+    recordApiCallImpl: ({ category, status }) => {
+      recordedCategories.push({ category, status });
+    },
+    ghRetrySleepImpl: async () => {},
+    log: { warn() {} },
+  });
+
+  assert.equal(diff.toString('utf8'), [
+    'diff --git a/src/fallback.js b/src/fallback.js',
+    'index 0000000..aaaaaaa',
+    '--- a/src/fallback.js',
+    '+++ b/src/fallback.js',
+    '@@ -1 +1 @@',
+    '-old',
+    '+new',
+    '',
+  ].join('\n'));
+  assert.deepEqual(recordedCategories, [
+    { category: 'diff_fetch', status: 'error' },
+    { category: 'diff_fetch_files_api', status: 200 },
+  ]);
 });
 
 test('local maxBuffer exhaustion falls back to files API instead of failing the review', async () => {
@@ -301,6 +363,7 @@ test('local maxBuffer exhaustion falls back to files API instead of failing the 
 
     assert.equal(diff.toString('utf8'), [
       'diff --git a/src/fallback.js b/src/fallback.js',
+      'index 0000000..aaaaaaa',
       '--- a/src/fallback.js',
       '+++ b/src/fallback.js',
       '@@ -1 +1 @@',
@@ -350,7 +413,7 @@ test('miss retries transient gh diff fetch failures before failing the review', 
 
     assert.equal(execCalls, 2);
     assert.deepEqual(diff, expected);
-    assert.deepEqual(recordedCategories, ['diff_fetch', 'diff_fetch']);
+    assert.deepEqual(recordedCategories, ['diff_fetch']);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

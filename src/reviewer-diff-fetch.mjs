@@ -100,8 +100,8 @@ async function runWithConcurrency(tasks, concurrency) {
 }
 
 function diffHeaderForFile(file) {
-  const filename = String(file?.filename || '').trim();
-  const previous = String(file?.previous_filename || '').trim();
+  const filename = String(file?.filename ?? '');
+  const previous = String(file?.previous_filename ?? '');
   const oldPath = file?.status === 'added' ? '/dev/null' : `a/${previous || filename}`;
   const newPath = file?.status === 'removed' ? '/dev/null' : `b/${filename}`;
   const diffOld = previous || filename;
@@ -119,6 +119,8 @@ function diffHeaderForFile(file) {
     lines.push(`index 0000000..${sha}`);
   } else if (file?.status === 'removed') {
     lines.push(`index ${sha}..0000000`);
+  } else {
+    lines.push(`index 0000000..${sha}`);
   }
   lines.push(`--- ${oldPath}`);
   lines.push(`+++ ${newPath}`);
@@ -266,7 +268,7 @@ async function fetchPRDiffFromFilesApi(repo, prNumber, headSha, {
   const rawFetchTasks = [];
   for (let index = 0; index < files.length; index += 1) {
     const file = files[index];
-    const filename = String(file?.filename || '').trim();
+    const filename = String(file?.filename ?? '');
     if (!filename) continue;
     if (typeof file.patch === 'string' && file.patch.trim()) {
       patches[index] = `${diffHeaderForFile(file).join('\n')}\n${file.patch}\n`;
@@ -323,41 +325,34 @@ async function fetchPRDiff(repo, prNumber, headSha, {
   }
 
   let stdout;
+  const diffFetchStartedAt = Date.now();
   try {
     ({ stdout } = await execGhWithRetryImpl({
-      execFileImpl: async (command, args, options) => {
-        const attemptStartedAt = Date.now();
-        try {
-          const result = await execFileImpl(
-            command,
-            args,
-            { ...options, encoding: 'buffer', maxBuffer: 10 * 1024 * 1024 }
-          );
-          recordApiCallImpl({
-            category: 'diff_fetch',
-            repo,
-            prNumber,
-            status: 200,
-            durationMs: Date.now() - attemptStartedAt,
-          });
-          return result;
-        } catch (err) {
-          recordApiCallImpl({
-            category: 'diff_fetch',
-            repo,
-            prNumber,
-            status: apiStatusFromErrorImpl(err),
-            durationMs: Date.now() - attemptStartedAt,
-          });
-          throw err;
-        }
-      },
+      execFileImpl: async (command, args, options) => execFileImpl(
+        command,
+        args,
+        { ...options, encoding: 'buffer', maxBuffer: 10 * 1024 * 1024 }
+      ),
       args: ['pr', 'diff', String(prNumber), '--repo', repo],
       timeoutMs: Math.max(GH_LOOKUP_TIMEOUT_MS, 60_000),
       sleep: ghRetrySleepImpl,
     }));
+    recordApiCallImpl({
+      category: 'diff_fetch',
+      repo,
+      prNumber,
+      status: 200,
+      durationMs: Date.now() - diffFetchStartedAt,
+    });
   } catch (err) {
-    if (!headSha || !isPullRequestDiffTooLargeError(err)) throw err;
+    recordApiCallImpl({
+      category: 'diff_fetch',
+      repo,
+      prNumber,
+      status: apiStatusFromErrorImpl(err),
+      durationMs: Date.now() - diffFetchStartedAt,
+    });
+    if (!isPullRequestDiffTooLargeError(err)) throw err;
     log.warn?.(`[reviewer] WARN: gh pr diff too large for ${repo}#${prNumber}; falling back to PR files API`);
     stdout = await fetchPRDiffFromFilesApi(repo, prNumber, headSha, {
       execFileImpl,

@@ -51,6 +51,9 @@ const {
   resolveGeminiReviewerSessionParent,
   purgeStaleGeminiReviewerSessionDirs,
   resetGeminiReviewerSessionPreflightForTest,
+  resetGeminiSignalReleaseForTest,
+  configureGeminiSignalReleaseForTest,
+  releaseActiveGeminiCheckoutsForSignal,
   checkoutGeminiCredentialFromBroker,
   geminiSpendReportsForUsage,
   reportGeminiCredentialSpend,
@@ -4260,6 +4263,45 @@ test('reviewWithGemini broker unavailable uses serialized legacy fallback lock',
     await withEnvAsync({ HOME: root }, () => Promise.all([runOne(), runOne()]));
     assert.equal(maxActive, 1);
     assert.equal(existsSync(join(root, '.gemini', 'reviewer-sessions', 'legacy-fallback.lock')), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('reviewWithGemini tracks the legacy fallback lock for signal release', async (t) => {
+  resetGeminiReviewerSessionPreflightForTest();
+  resetGeminiSignalReleaseForTest();
+  t.after(() => {
+    resetGeminiSignalReleaseForTest();
+  });
+  const root = mkdtempSync(join(tmpdir(), 'gemini-cqp-fallback-signal-'));
+  const killed = [];
+  configureGeminiSignalReleaseForTest({
+    sleepImpl: async () => {},
+    killImpl: (pid, signal) => {
+      killed.push({ pid, signal });
+    },
+  });
+  try {
+    const lockDir = join(root, '.gemini', 'reviewer-sessions', 'legacy-fallback.lock');
+    let releasedDuringSignal = false;
+    await withEnvAsync({ HOME: root }, () => reviewWithGemini('+diff\n', '', {
+      resolveGeminiRuntimeImpl: () => 'antigravity',
+      checkoutGeminiCredentialImpl: async () => {
+        throw new GeminiCredentialPoolUnavailableError('broker returned HTTP 500');
+      },
+      assertAgyAuthImpl: async () => {},
+      spawnAgyReviewImpl: async () => {
+        assert.equal(existsSync(lockDir), true);
+        await releaseActiveGeminiCheckoutsForSignal('SIGTERM');
+        releasedDuringSignal = !existsSync(lockDir);
+        return { stdout: '## Adversarial Review — Gemini (gemini-reviewer-lacey)\n\n## Verdict\nComment only', stderr: '' };
+      },
+    }));
+
+    assert.equal(releasedDuringSignal, true);
+    assert.deepEqual(killed, [{ pid: process.pid, signal: 'SIGTERM' }]);
+    assert.equal(existsSync(lockDir), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

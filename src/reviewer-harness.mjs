@@ -1249,7 +1249,24 @@ async function checkoutGeminiCredentialFromBrokerOnce({
         provider: 'gemini',
         consumer: 'adversarial-reviewer',
         pid: process.pid,
-        ttl_seconds: 30 * 60,
+        // A first-pass Gemini review takes ~2 minutes. A 30-minute lease meant
+        // any reviewer that died without releasing blocked the ENTIRE pool for
+        // 28 more minutes — and the pool is a single credential (`default`), so
+        // one orphan stalls every review on the fleet.
+        //
+        // Release lives in a `finally`, which does NOT run on SIGKILL, and the
+        // watcher does signal reviewer process groups (stale-claim sweep, pool
+        // eviction). So orphaned leases are not an edge case, they are the
+        // expected outcome of a normal kill, and the TTL is the only bound.
+        //
+        // Live on 2026-08-22: lease 7e6a131f acquired 17:36Z, holder gone by
+        // 17:38Z, still blocking until 18:06Z. 2012 `checkout unavailable`
+        // fallbacks that day, each one degrading to the SERIALIZED legacy
+        // credential lock, which is what collapsed review throughput.
+        //
+        // 10 minutes keeps 5x headroom over a normal review while cutting the
+        // worst-case stall from 28 minutes to 8.
+        ttl_seconds: 10 * 60,
       }),
     }, timeoutMs);
   } catch (err) {
@@ -1486,6 +1503,139 @@ function materializeGeminiCheckoutSession({
       rmSyncImpl(sessionDir, { recursive: true, force: true });
     },
   };
+}
+
+// Release the checkout on a TERMINATING SIGNAL, not just on the `finally` path.
+//
+// `finally` does not run when the process is signalled, and the watcher DOES
+// signal reviewer process groups (stale-claim sweep, reviewer-pool eviction).
+// With a single-credential pool, one signalled reviewer strands every other
+// review until the lease TTL expires. SIGKILL is still unstoppable — that is
+// what the shortened TTL bounds — but SIGTERM/SIGINT are catchable and are the
+// signals the watcher actually sends first.
+//
+// Registered once, idempotent, and deliberately best-effort: a failed release
+// here must never change the exit code or mask the original termination.
+const GEMINI_SIGNAL_RELEASE_SIGNALS = ['SIGTERM', 'SIGINT', 'SIGHUP'];
+const GEMINI_SIGNAL_RELEASE_GRACE_MS = 1000;
+const activeGeminiSignalCheckouts = new Map();
+const geminiSignalReleaseHandlers = new Map();
+let geminiSignalReleaseReleaseImpl = releaseGeminiCredentialCheckout;
+let geminiSignalReleaseSleepImpl = sleep;
+let geminiSignalReleaseKillImpl = (pid, signal) => process.kill(pid, signal);
+
+function geminiSignalCheckoutKey(checkout) {
+  return checkout?.checkoutId || checkout?.credentialId || checkout?.lockDir || null;
+}
+
+function armGeminiCheckoutSignalRelease() {
+  for (const signal of GEMINI_SIGNAL_RELEASE_SIGNALS) {
+    if (geminiSignalReleaseHandlers.has(signal)) continue;
+    const handler = () => {
+      void releaseActiveGeminiCheckoutsForSignal(signal);
+    };
+    geminiSignalReleaseHandlers.set(signal, handler);
+    process.on(signal, handler);
+  }
+}
+
+function disarmGeminiCheckoutSignalRelease() {
+  if (activeGeminiSignalCheckouts.size > 0) return;
+  for (const [signal, handler] of geminiSignalReleaseHandlers.entries()) {
+    process.removeListener(signal, handler);
+    geminiSignalReleaseHandlers.delete(signal);
+  }
+}
+
+function trackGeminiCheckoutForSignalRelease(checkout, { env = process.env, log = console } = {}) {
+  const key = geminiSignalCheckoutKey(checkout);
+  if (!key) return () => {};
+  armGeminiCheckoutSignalRelease();
+  activeGeminiSignalCheckouts.set(key, { checkout, env, log });
+  return () => {
+    activeGeminiSignalCheckouts.delete(key);
+    disarmGeminiCheckoutSignalRelease();
+  };
+}
+
+function trackGeminiFallbackLockForSignalRelease(fallbackLock, { log = console } = {}) {
+  const key = geminiSignalCheckoutKey(fallbackLock);
+  if (!key || typeof fallbackLock?.release !== 'function') return () => {};
+  armGeminiCheckoutSignalRelease();
+  activeGeminiSignalCheckouts.set(key, {
+    checkout: fallbackLock,
+    log,
+    releaseImpl: async ({ checkout }) => {
+      checkout.release();
+    },
+    releaseLabel: 'Gemini fallback lock',
+  });
+  return () => {
+    activeGeminiSignalCheckouts.delete(key);
+    disarmGeminiCheckoutSignalRelease();
+  };
+}
+
+async function releaseActiveGeminiCheckoutsForSignal(signal, { log = console } = {}) {
+  const entries = [...activeGeminiSignalCheckouts.entries()];
+  const releases = entries.map(async ([key, state]) => {
+    const stateLog = state.log || log;
+    const releaseLabel = state.releaseLabel || 'Gemini checkout';
+    try {
+      const releaseImpl = state.releaseImpl || geminiSignalReleaseReleaseImpl;
+      await releaseImpl({
+        checkout: state.checkout,
+        quotaSignal: false,
+        env: state.env || process.env,
+        log: stateLog,
+        signal,
+      });
+      stateLog.warn?.(
+        `[reviewWithGemini] ${signal} received; released ${releaseLabel} `
+        + `${state.checkout.checkoutId || '(unknown)'} before exit`,
+      );
+    } catch {
+      // Never let cleanup failure alter termination behavior.
+    } finally {
+      activeGeminiSignalCheckouts.delete(key);
+    }
+  });
+
+  try {
+    await Promise.race([
+      Promise.allSettled(releases),
+      geminiSignalReleaseSleepImpl(GEMINI_SIGNAL_RELEASE_GRACE_MS),
+    ]);
+  } finally {
+    const handler = geminiSignalReleaseHandlers.get(signal);
+    if (handler) {
+      process.removeListener(signal, handler);
+      geminiSignalReleaseHandlers.delete(signal);
+    }
+    disarmGeminiCheckoutSignalRelease();
+    geminiSignalReleaseKillImpl(process.pid, signal);
+  }
+}
+
+function resetGeminiSignalReleaseForTest() {
+  for (const [signal, handler] of geminiSignalReleaseHandlers.entries()) {
+    process.removeListener(signal, handler);
+  }
+  geminiSignalReleaseHandlers.clear();
+  activeGeminiSignalCheckouts.clear();
+  geminiSignalReleaseReleaseImpl = releaseGeminiCredentialCheckout;
+  geminiSignalReleaseSleepImpl = sleep;
+  geminiSignalReleaseKillImpl = (pid, signal) => process.kill(pid, signal);
+}
+
+function configureGeminiSignalReleaseForTest({
+  releaseImpl = releaseGeminiCredentialCheckout,
+  sleepImpl = sleep,
+  killImpl = (pid, signal) => process.kill(pid, signal),
+} = {}) {
+  geminiSignalReleaseReleaseImpl = releaseImpl;
+  geminiSignalReleaseSleepImpl = sleepImpl;
+  geminiSignalReleaseKillImpl = killImpl;
 }
 
 async function cleanupGeminiAntigravityResources({
@@ -1904,6 +2054,8 @@ async function reviewWithGemini(diff, extraContext = '', {
   let reviewEnv = env;
   let checkout = null;
   let checkoutSession = null;
+  let untrackSignalCheckout = null;
+  let untrackSignalFallbackLock = null;
   let fallbackLock = null;
   let quotaSignal = false;
   let spendReported = false;
@@ -1915,22 +2067,32 @@ async function reviewWithGemini(diff, extraContext = '', {
     }
     try {
       checkout = await checkoutGeminiCredentialImpl({ env });
+      // Arm signal-release as soon as we HOLD the lease, so a SIGTERM between
+      // here and the `finally` cannot strand the single-credential pool.
+      untrackSignalCheckout = trackGeminiCheckoutForSignalRelease(checkout, { env, log });
       checkoutSession = materializeGeminiCheckoutSessionImpl({ checkout, env });
       reviewEnv = checkoutSession.env;
     } catch (err) {
       if (checkout) {
-        await cleanupGeminiAntigravityResources({
-          checkout,
-          checkoutSession,
-          fallbackLock,
-          quotaSignal: false,
-          env,
-          log,
-          releaseGeminiCredentialCheckoutImpl,
-        });
-        checkout = null;
-        checkoutSession = null;
-        fallbackLock = null;
+        try {
+          await cleanupGeminiAntigravityResources({
+            checkout,
+            checkoutSession,
+            fallbackLock,
+            quotaSignal: false,
+            env,
+            log,
+            releaseGeminiCredentialCheckoutImpl,
+          });
+        } finally {
+          untrackSignalCheckout?.();
+          untrackSignalFallbackLock?.();
+          checkout = null;
+          checkoutSession = null;
+          untrackSignalCheckout = null;
+          untrackSignalFallbackLock = null;
+          fallbackLock = null;
+        }
         throw err;
       }
       if (err?.isGeminiCredentialPoolNoCredit) {
@@ -1941,6 +2103,7 @@ async function reviewWithGemini(diff, extraContext = '', {
       }
       log.warn?.(`[reviewWithGemini] WARN: ${err.message}; using serialized legacy Gemini credential fallback`);
       fallbackLock = await acquireGeminiFallbackLockImpl({ env, sleepImpl });
+      untrackSignalFallbackLock = trackGeminiFallbackLockForSignalRelease(fallbackLock, { log });
       reviewEnv = env;
     }
   }
@@ -2039,18 +2202,25 @@ async function reviewWithGemini(diff, extraContext = '', {
           log.warn?.(`[reviewWithGemini] WARN: failed to report Gemini credential spend ${checkout.credentialId}: ${err.message}`);
         }
       }
-      await cleanupGeminiAntigravityResources({
-        checkout,
-        checkoutSession,
-        fallbackLock,
-        quotaSignal,
-        env,
-        log,
-        releaseGeminiCredentialCheckoutImpl,
-      });
-      checkout = null;
-      checkoutSession = null;
-      fallbackLock = null;
+      try {
+        await cleanupGeminiAntigravityResources({
+          checkout,
+          checkoutSession,
+          fallbackLock,
+          quotaSignal,
+          env,
+          log,
+          releaseGeminiCredentialCheckoutImpl,
+        });
+      } finally {
+        untrackSignalCheckout?.();
+        untrackSignalFallbackLock?.();
+        checkout = null;
+        checkoutSession = null;
+        untrackSignalCheckout = null;
+        untrackSignalFallbackLock = null;
+        fallbackLock = null;
+      }
     }
   }
 
@@ -2548,6 +2718,7 @@ const __test__ = {
   REVIEWER_METADATA_BY_MODEL,
   REVIEWER_ROUTE_BY_MODEL,
   acquireGeminiFallbackLock,
+  armGeminiCheckoutSignalRelease,
   agyOversizedChunkContextBudgetSuffix,
   agyOversizedChunkContextSuffix,
   agyPromptBytes,
@@ -2568,6 +2739,7 @@ const __test__ = {
   checkoutGeminiCredentialFromBrokerOnce,
   chooseAgyOversizedCrossModelRoute,
   cleanupGeminiAntigravityResources,
+  configureGeminiSignalReleaseForTest,
   createGeminiReviewerSessionDir,
   currentGeminiReviewerHostname,
   dispatchReviewerModel,
@@ -2612,9 +2784,11 @@ const __test__ = {
   readGeminiReviewerOwner,
   readJsonResponse,
   releaseGeminiCredentialCheckout,
+  releaseActiveGeminiCheckoutsForSignal,
   reportGeminiCredentialSpend,
   resetGeminiReviewerSessionPreflightForTest,
   resetGeminiCredentialCheckoutQueueForTest,
+  resetGeminiSignalReleaseForTest,
   resolveAcpxCliPath,
   resolveAgyArgvMaxBytes,
   resolveAgyAuthProbeTimeoutMs,
@@ -2660,6 +2834,7 @@ const __test__ = {
   stringifyGeminiBrokerReason,
   stripCodexRuntimeNoise,
   stripTomlInlineComment,
+  trackGeminiCheckoutForSignalRelease,
   withGeminiSubprocessRetry,
 };
 

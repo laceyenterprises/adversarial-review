@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import { __test__ as reviewerHarness } from '../src/reviewer-harness.mjs';
 
@@ -84,4 +85,126 @@ test('Gemini broker checkout serializes concurrent callers in-process', async ()
   const results = await Promise.all([first, second]);
   assert.deepEqual(results.map((result) => result.checkoutId), ['lease-1', 'lease-2']);
   assert.equal(maxActive, 1);
+});
+
+// ── Orphaned-lease hardening (2026-08-22) ────────────────────────────────────
+//
+// The Gemini credential pool is a SINGLE credential (`default`). A reviewer that
+// dies without releasing strands every other review until the lease TTL expires.
+// Live that day: lease 7e6a131f acquired 17:36Z, holder gone by 17:38Z, still
+// blocking until 18:06Z — and 2012 `checkout unavailable` fallbacks, each one
+// degrading to the SERIALIZED legacy credential lock.
+test('checkout lease TTL is short enough that an orphan self-heals quickly', async () => {
+  const source = readFileSync(
+    new URL('../src/reviewer-harness.mjs', import.meta.url),
+    'utf8',
+  );
+  const match = source.match(/ttl_seconds:\s*(\d+)\s*\*\s*60/);
+  assert.ok(match, 'checkout ttl_seconds must be expressed in minutes');
+  const minutes = Number(match[1]);
+  // A first-pass review takes ~2 minutes; keep real headroom but bound the
+  // worst-case stall. 30 minutes was the live outage.
+  assert.ok(
+    minutes <= 10,
+    `checkout lease TTL is ${minutes}m; an orphaned lease strands the whole `
+    + 'single-credential pool for that long',
+  );
+  assert.ok(minutes >= 5, `checkout lease TTL ${minutes}m leaves too little headroom for a review`);
+});
+
+test('a terminating signal releases all active checkouts before re-raising', async (t) => {
+  reviewerHarness.resetGeminiSignalReleaseForTest();
+  t.after(() => {
+    reviewerHarness.resetGeminiSignalReleaseForTest();
+  });
+  const sigtermListenersBefore = process.listenerCount('SIGTERM');
+
+  const released = [];
+  const killed = [];
+  reviewerHarness.configureGeminiSignalReleaseForTest({
+    releaseImpl: async ({ checkout, env }) => {
+      released.push({ checkoutId: checkout.checkoutId, envName: env.NAME });
+    },
+    sleepImpl: async () => {},
+    killImpl: (pid, signal) => {
+      killed.push({ pid, signal });
+    },
+  });
+
+  const removeFirst = reviewerHarness.trackGeminiCheckoutForSignalRelease(
+    { checkoutId: 'lease-1', credentialId: 'cred-1' },
+    { env: { NAME: 'first' }, log: { warn() {} } },
+  );
+  reviewerHarness.trackGeminiCheckoutForSignalRelease(
+    { checkoutId: 'lease-2', credentialId: 'cred-2' },
+    { env: { NAME: 'second' }, log: { warn() {} } },
+  );
+
+  removeFirst();
+  assert.equal(process.listenerCount('SIGTERM'), sigtermListenersBefore + 1);
+  await reviewerHarness.releaseActiveGeminiCheckoutsForSignal('SIGTERM', {
+    log: { warn() {} },
+  });
+
+  assert.deepEqual(released, [{ checkoutId: 'lease-2', envName: 'second' }]);
+  assert.deepEqual(killed, [{ pid: process.pid, signal: 'SIGTERM' }]);
+  assert.equal(process.listenerCount('SIGTERM'), sigtermListenersBefore);
+});
+
+test('signal release uses each checkout logger instead of the first armed logger', async (t) => {
+  reviewerHarness.resetGeminiSignalReleaseForTest();
+  t.after(() => {
+    reviewerHarness.resetGeminiSignalReleaseForTest();
+  });
+
+  const seen = [];
+  reviewerHarness.configureGeminiSignalReleaseForTest({
+    releaseImpl: async ({ checkout, log }) => {
+      seen.push({ checkoutId: checkout.checkoutId, logger: log.name });
+    },
+    sleepImpl: async () => {},
+    killImpl: () => {},
+  });
+
+  reviewerHarness.trackGeminiCheckoutForSignalRelease(
+    { checkoutId: 'lease-1', credentialId: 'cred-1' },
+    { env: { NAME: 'first' }, log: { name: 'log-1', warn() {} } },
+  );
+  reviewerHarness.trackGeminiCheckoutForSignalRelease(
+    { checkoutId: 'lease-2', credentialId: 'cred-2' },
+    { env: { NAME: 'second' }, log: { name: 'log-2', warn() {} } },
+  );
+
+  await reviewerHarness.releaseActiveGeminiCheckoutsForSignal('SIGTERM');
+
+  assert.deepEqual(seen, [
+    { checkoutId: 'lease-1', logger: 'log-1' },
+    { checkoutId: 'lease-2', logger: 'log-2' },
+  ]);
+});
+
+test('signal release clears tracking even when broker release fails', async (t) => {
+  reviewerHarness.resetGeminiSignalReleaseForTest();
+  t.after(() => {
+    reviewerHarness.resetGeminiSignalReleaseForTest();
+  });
+  const sigintListenersBefore = process.listenerCount('SIGINT');
+  const sigtermListenersBefore = process.listenerCount('SIGTERM');
+
+  reviewerHarness.configureGeminiSignalReleaseForTest({
+    releaseImpl: async () => {
+      throw new Error('release failed');
+    },
+    sleepImpl: async () => {},
+    killImpl: () => {},
+  });
+  reviewerHarness.trackGeminiCheckoutForSignalRelease(
+    { checkoutId: 'lease-fail', credentialId: 'cred-fail' },
+    { env: { NAME: 'failing' }, log: { warn() {} } },
+  );
+
+  await reviewerHarness.releaseActiveGeminiCheckoutsForSignal('SIGTERM');
+
+  assert.equal(process.listenerCount('SIGTERM'), sigtermListenersBefore);
+  assert.equal(process.listenerCount('SIGINT'), sigintListenersBefore);
 });

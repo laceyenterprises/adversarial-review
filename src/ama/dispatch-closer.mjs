@@ -318,19 +318,26 @@ export function terminalHammerReviewCycleExhausted(reviewState) {
     .toLowerCase()
     .replaceAll('_', '-');
   if (verdict !== 'request changes' && verdict !== 'request-changes') return true;
-  const hasRevisionRefEvidence = Object.prototype.hasOwnProperty.call(
-    reviewState || {},
-    'completedRemediationRevisionRefs',
-  );
-  if (hasRevisionRefEvidence) {
-    const reviewedHead = String(reviewState?.headSha || '').trim();
-    const remediatedHeads = Array.isArray(reviewState?.completedRemediationRevisionRefs)
-      ? reviewState.completedRemediationRevisionRefs.map((value) => String(value || '').trim())
-      : [];
-    if (!reviewedHead || !remediatedHeads.includes(reviewedHead)) {
-      return false;
-    }
-  }
+  // Codex-first ownership (#868/#869/#871): the terminal Hammer must never
+  // preempt a remediator that still owns the reviewed head. The correct signal
+  // for "Codex still owns it" is `remediationPending`, which the gate projection
+  // sets ONLY while a follow-up job for this PR is `pending`/`in-progress`. A
+  // terminal job (`completed`/`failed`/`stopped`) releases ownership, which is
+  // exactly when the terminal rescue lane is supposed to take over.
+  //
+  // DEADLOCK FIX (2026-08-22, this is the regression #871 introduced): #871
+  // instead required the reviewed head itself to appear in
+  // `completedRemediationRevisionRefs`. A follow-up job's `revisionRef` is the
+  // head the job was created AGAINST, and a completed remediation round pushes a
+  // NEW head which is what the next round reviews. So the terminal reviewed head
+  // is, by construction, never in the completed set. Combined with the
+  // `reviewCycleExhausted === true` precondition above — the round budget is
+  // spent, so no further remediation job for the reviewed head can ever be
+  // claimed — that made the condition UNSATISFIABLE exactly when terminal Hammer
+  // authority is needed. Every PR whose terminal verdict was `request-changes`
+  // parked in AWAIT_OPERATOR_ACTION and spun the AMA retain-loop cap forever.
+  // See agent-os docs/postmortems/INCIDENT-SEV1-terminal-hammer-revision-ref-deadlock-2026-08-22.md
+  if (reviewState?.remediationPending === true) return false;
   const hasRemediationRoundEvidence = Object.prototype.hasOwnProperty.call(
     reviewState || {},
     'completedRemediationRounds',

@@ -1,3 +1,5 @@
+import { spawnSync } from 'node:child_process';
+
 const DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS = Object.freeze([100, 250, 500, 1000, 2000, 5000]);
 
 function isSqliteBusyError(err) {
@@ -10,11 +12,20 @@ function isSqliteBusyError(err) {
   );
 }
 
-function sleepSync(ms) {
+function sleepSync(ms, { spawnSyncImpl = spawnSync } = {}) {
   if (!Number.isFinite(ms) || ms <= 0) return;
-  const buffer = new SharedArrayBuffer(4);
-  const view = new Int32Array(buffer);
-  Atomics.wait(view, 0, 0, Math.floor(ms));
+  const delayMs = Math.floor(ms);
+  const result = spawnSyncImpl(
+    process.execPath,
+    ['-e', `setTimeout(() => {}, ${JSON.stringify(delayMs)})`],
+    {
+      stdio: 'ignore',
+      timeout: delayMs + 1000,
+    }
+  );
+  if (result?.error && result.error.code !== 'ETIMEDOUT') {
+    throw result.error;
+  }
 }
 
 function sleepAsync(ms) {

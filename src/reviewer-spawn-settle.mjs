@@ -74,7 +74,7 @@ import { isTransientGhError } from './gh-cli.mjs';
 import { resolveReviewCycleCapConfig } from './review-cycle-cap.mjs';
 import { loadConfigCached } from './config-loader.mjs';
 import { recordSuccessfulReviewCycleVerdict } from './review-cycle-cap-actions.mjs';
-import { withSqliteBusyRetry, withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
+import { isSqliteBusyError, withSqliteBusyRetry, withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
 import {
   clearCascadeState,
   formatTransientFailureBreakdown,
@@ -995,6 +995,9 @@ function settleReviewerAttempt({
           logger: log,
         });
       } catch (err) {
+        if (isSqliteBusyError(err)) {
+          throw err;
+        }
         log?.warn?.(
           `[watcher] review-cycle-count bookkeeping skipped for ${repoPath}#${prNumber}: ${err?.message || err}`
         );

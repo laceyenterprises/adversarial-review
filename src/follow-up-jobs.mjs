@@ -29,7 +29,10 @@ import {
   normalizeReviewVerdict,
   sanitizeReviewPayloadBestEffort,
 } from './kernel/verdict.mjs';
-import { classifyBlockingFindings } from './merge-agent-review-classification.mjs';
+import {
+  classifyBlockingFindings,
+  classifyNonBlockingFindings,
+} from './merge-agent-review-classification.mjs';
 
 const MAX_CREATE_ATTEMPTS = 100;
 
@@ -384,6 +387,7 @@ function classifyFollowUpCriticality(reviewBody) {
   const verdict = normalizeEffectiveReviewVerdict(canonicalReviewBody);
   const statedVerdict = normalizeReviewVerdict(extractReviewVerdict(canonicalReviewBody));
   const blocking = classifyBlockingFindings(canonicalReviewBody, { lastVerdict: verdict });
+  const nonBlocking = classifyNonBlockingFindings(canonicalReviewBody, { lastVerdict: verdict });
   const criticalityReason = statedVerdict === 'request-changes'
     ? 'request-changes-verdict'
     : blocking.state !== 'known'
@@ -396,18 +400,60 @@ function classifyFollowUpCriticality(reviewBody) {
     criticalityReason,
     blockingFindingCount: blocking.count,
     blockingFindingState: blocking.state,
+    nonBlockingFindingCount: nonBlocking.count,
+    nonBlockingFindingState: nonBlocking.state,
     statedVerdict,
     verdict,
   };
 }
 
-function resolveDurableFollowUpClassification(reviewBody, _fallbackCritical) {
+/**
+ * Whether a classified review counts as "settled clean" — i.e. no remediation
+ * round is owed.
+ *
+ * This MUST agree with `isEligibleForAmaClosure`'s `settledSuccess` in
+ * `src/ama/eligibility.mjs`. When it did not, the two components deadlocked: a
+ * comment-only review carrying non-blocking findings was classified here as
+ * settled-clean (so the follow-up job stopped with "no remediation coding
+ * session is required"), while eligibility refused closure with
+ * `non-blocking-findings-present`. Nothing remediated, nothing merged, and
+ * nothing escalated — agent-os#5671/#5672/#5673 sat 90-140 minutes with no
+ * closer lease ever acquired.
+ *
+ * `docs/SPEC-merge-authority-v2.md` is explicit that this is not allowed:
+ * strict_mode (default on) means non-blocking findings "route to `remediate`",
+ * and "Exhaustion always closes by landing, never by abandoning… never an
+ * indefinite `wait`".
+ *
+ * @param {{critical: boolean, verdict: string|null, nonBlockingFindingCount: number,
+ *          nonBlockingFindingState: string}} classification
+ * @param {{strictNonBlockingRemediation?: boolean}} [options]
+ */
+function isSettledCleanClassification(classification, options = {}) {
+  // `!== false` mirrors the config idiom used by eligibility.mjs and
+  // ama-closure-orchestration.mjs: strict is the default, absence means on.
+  const strictNonBlockingRemediation = options?.strictNonBlockingRemediation !== false;
+  if (classification?.critical !== false) return false;
+  if (classification?.verdict !== 'comment-only' && classification?.verdict !== 'approved') {
+    return false;
+  }
+  if (!strictNonBlockingRemediation) return true;
+  // Unknown is not clean: an unparseable non-blocking section must owe a round
+  // rather than silently short-circuit closure, matching eligibility's
+  // `non-blocking-findings-unknown` refusal.
+  return classification?.nonBlockingFindingState === 'known'
+    && classification?.nonBlockingFindingCount === 0;
+}
+
+function resolveDurableFollowUpClassification(reviewBody, _fallbackCritical, options = {}) {
   if (!String(reviewBody || '').trim()) {
     return {
       critical: true,
       criticalityReason: 'blocking-section-unparseable',
       blockingFindingCount: 0,
       blockingFindingState: 'unknown',
+      nonBlockingFindingCount: 0,
+      nonBlockingFindingState: 'unknown',
       statedVerdict: null,
       verdict: null,
       settledClean: false,
@@ -416,21 +462,18 @@ function resolveDurableFollowUpClassification(reviewBody, _fallbackCritical) {
   const classification = classifyFollowUpCriticality(reviewBody);
   return {
     ...classification,
-    settledClean: classification.critical === false
-      && (classification.verdict === 'comment-only' || classification.verdict === 'approved'),
+    settledClean: isSettledCleanClassification(classification, options),
   };
 }
 
-function isSettledReviewJob(job) {
+function isSettledReviewJob(job, options = {}) {
   const nextAction = job?.remediationPlan?.nextAction;
   // An explicit operator retrigger requeues a settled job back to pending
   // with a durable one-shot override. Allow exactly that next claim to
   // proceed even if the stored review body is still Comment-only.
   if (nextAction?.operatorOverride === true) return false;
 
-  const classification = classifyFollowUpCriticality(job?.reviewBody);
-  return classification.critical === false
-    && (classification.verdict === 'comment-only' || classification.verdict === 'approved');
+  return isSettledCleanClassification(classifyFollowUpCriticality(job?.reviewBody), options);
 }
 
 function handleClaimedStopFailure({ pendingPath, inProgressPath, stopCode, err }) {
@@ -2839,6 +2882,8 @@ export {
   getFollowUpJobDir,
   isActiveFollowUpJobStatus,
   isRetriggerableStoppedFollowUpJob,
+  isSettledCleanClassification,
+  isSettledReviewJob,
   listFollowUpJobsInDir,
   listInProgressFollowUpJobPaths,
   listInProgressFollowUpJobs,

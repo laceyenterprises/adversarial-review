@@ -99,6 +99,90 @@ test('miss spawns gh, returns its output, and writes a cache entry', async () =>
   }
 });
 
+test('too-large PR diff falls back to files API and raw added-file patches', async () => {
+  const rootDir = makeRootDir();
+  const repo = 'laceyenterprises/adversarial-review';
+  const prNumber = 886;
+  const headSha = '923df3f3182297bea7157ed6df2e887416396ccc';
+  const recordedCategories = [];
+  const calls = [];
+  try {
+    const diff = await fetchPRDiff(repo, prNumber, headSha, {
+      execFileImpl: async (command, args, options) => {
+        calls.push(args);
+        assert.equal(command, 'gh');
+        assert.equal(options.encoding, 'buffer');
+        if (args[0] === 'pr') {
+          assert.deepEqual(args, ['pr', 'diff', String(prNumber), '--repo', repo]);
+          const err = new Error(`Command failed: gh pr diff ${prNumber} --repo ${repo}`);
+          err.stderr = 'HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)\nPullRequest.diff too_large';
+          throw err;
+        }
+        if (args[0] === 'api' && args.includes('--paginate')) {
+          assert.deepEqual(args, [
+            'api',
+            '--method',
+            'GET',
+            '--paginate',
+            `repos/${repo}/pulls/${prNumber}/files`,
+            '-f',
+            'per_page=100',
+          ]);
+          return {
+            stdout: Buffer.from([
+              JSON.stringify([
+                {
+                  filename: 'src/small.js',
+                  status: 'added',
+                  sha: '1111111111111111111111111111111111111111',
+                  patch: '@@ -0,0 +1 @@\n+small',
+                },
+              ]),
+              JSON.stringify([
+                {
+                  filename: 'src/too big.js',
+                  status: 'added',
+                  sha: '2222222222222222222222222222222222222222',
+                },
+              ]),
+            ].join('\n')),
+            stderr: Buffer.alloc(0),
+          };
+        }
+        if (args[0] === 'api' && args[3]?.startsWith(`repos/${repo}/contents/`)) {
+          assert.equal(args[3], `repos/${repo}/contents/src/too%20big.js?ref=${headSha}`);
+          assert.deepEqual(args.slice(4), ['-H', 'Accept: application/vnd.github.raw']);
+          return { stdout: Buffer.from('one\ntwo\n'), stderr: Buffer.alloc(0) };
+        }
+        throw new Error(`unexpected gh call: ${args.join(' ')}`);
+      },
+      getCachedDiffImpl: (cacheRepo, cachePrNumber, cacheHeadSha) => getCachedDiff(cacheRepo, cachePrNumber, cacheHeadSha, { rootDir }),
+      putCachedDiffImpl: (cacheRepo, cachePrNumber, cacheHeadSha, bytes) => putCachedDiff(cacheRepo, cachePrNumber, cacheHeadSha, bytes, { rootDir }),
+      recordApiCallImpl: ({ category, status }) => {
+        recordedCategories.push({ category, status });
+        return null;
+      },
+      ghRetrySleepImpl: async () => {},
+      log: { warn() {} },
+    });
+
+    const diffText = diff.toString('utf8');
+    assert.match(diffText, /diff --git a\/src\/small\.js b\/src\/small\.js/);
+    assert.match(diffText, /@@ -0,0 \+1 @@\n\+small/);
+    assert.match(diffText, /diff --git a\/src\/too big\.js b\/src\/too big\.js/);
+    assert.match(diffText, /@@ -0,0 \+1,2 @@\n\+one\n\+two/);
+    assert.deepEqual(calls.map((args) => args[0]), ['pr', 'api', 'api']);
+    assert.deepEqual(recordedCategories, [
+      { category: 'diff_fetch', status: 'error' },
+      { category: 'diff_fetch_files_api', status: 200 },
+      { category: 'diff_fetch_raw_file', status: 200 },
+    ]);
+    assert.equal(existsSync(getDiffCachePaths(rootDir, repo, prNumber, headSha).patchPath), true);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('miss retries transient gh diff fetch failures before failing the review', async () => {
   const rootDir = makeRootDir();
   const repo = 'laceyenterprises/agent-os';

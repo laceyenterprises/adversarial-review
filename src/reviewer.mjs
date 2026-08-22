@@ -34,7 +34,6 @@ import { promisify } from 'node:util';
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
 import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
 import { resolveGitHubAppBotLogin } from './github-app-identity.mjs';
-import { getCachedDiff, putCachedDiff } from './diff-cache.mjs';
 import {
   classifyFollowUpCriticality,
   createFollowUpJob,
@@ -81,7 +80,6 @@ import {
 } from './github-adapter-client.mjs';
 import { parseExactHeadReviewArtifactOrNull, postExactHeadReview } from './reviewer-exact-head-post.mjs';
 import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
-import { GH_LOOKUP_TIMEOUT_MS, execGhWithRetry } from './gh-cli.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 import {
@@ -101,6 +99,7 @@ import {
   parseDiffFiles,
   buildGhErrorDetail,
 } from './reviewer-util.mjs';
+import { fetchPRDiff, fetchPRDiffFromFilesApi } from './reviewer-diff-fetch.mjs';
 import {
   dispatchReviewerModel,
   reviewAgyOversizedInChunks,
@@ -1412,73 +1411,6 @@ function queueFollowUpForPostedReview({
   return { queued: true, jobPath, verdictMode: normalizedVerdictMode, handoffWake };
 }
 
-// ── PR diff fetch ────────────────────────────────────────────────────────────
-
-async function fetchPRDiff(repo, prNumber, headSha, {
-  execFileImpl = execFileAsync,
-  execGhWithRetryImpl = execGhWithRetry,
-  getCachedDiffImpl = getCachedDiff,
-  putCachedDiffImpl = putCachedDiff,
-  recordApiCallImpl = recordApiCall,
-  apiStatusFromErrorImpl = apiStatusFromError,
-  ghRetrySleepImpl = sleep,
-  log = console,
-} = {}) {
-  const cacheLookupStartedAt = Date.now();
-  const cached = headSha ? getCachedDiffImpl(repo, prNumber, headSha) : null;
-  if (cached) {
-    recordApiCallImpl({
-      category: 'cache_hit_diff_fetch',
-      repo,
-      prNumber,
-      status: 'hit',
-      durationMs: Date.now() - cacheLookupStartedAt,
-    });
-    return cached.bytes;
-  }
-
-  const { stdout } = await execGhWithRetryImpl({
-    execFileImpl: async (command, args, options) => {
-      const attemptStartedAt = Date.now();
-      try {
-        const result = await execFileImpl(
-          command,
-          args,
-          { ...options, encoding: 'buffer', maxBuffer: 10 * 1024 * 1024 }
-        );
-        recordApiCallImpl({
-          category: 'diff_fetch',
-          repo,
-          prNumber,
-          status: 200,
-          durationMs: Date.now() - attemptStartedAt,
-        });
-        return result;
-      } catch (err) {
-        recordApiCallImpl({
-          category: 'diff_fetch',
-          repo,
-          prNumber,
-          status: apiStatusFromErrorImpl(err),
-          durationMs: Date.now() - attemptStartedAt,
-        });
-        throw err;
-      }
-    },
-    args: ['pr', 'diff', String(prNumber), '--repo', repo],
-    timeoutMs: Math.max(GH_LOOKUP_TIMEOUT_MS, 60_000),
-    sleep: ghRetrySleepImpl,
-  });
-  if (headSha) {
-    try {
-      putCachedDiffImpl(repo, prNumber, headSha, stdout);
-    } catch (err) {
-      log.warn?.(`[reviewer] WARN: failed to write diff cache for ${repo}#${prNumber}@${headSha}: ${err?.message || err}`);
-    }
-  }
-  return stdout;
-}
-
 async function fetchPRContext(repo, prNumber) {
   return fetchPullRequestReviewContext(repo, prNumber, {
     execFileImpl: execFileAsync,
@@ -2479,6 +2411,7 @@ const __test__ = {
   evaluateLocalReviewShadowEligibility,
   fetchCurrentHeadVerdictMode,
   fetchPRDiff,
+  fetchPRDiffFromFilesApi,
   formatAdvisoryFindingsContext,
   formatLocalReviewShadowArtifact,
   hasLocalReviewShadowLabel,

@@ -112,18 +112,41 @@ test('checkout lease TTL is short enough that an orphan self-heals quickly', asy
   assert.ok(minutes >= 5, `checkout lease TTL ${minutes}m leaves too little headroom for a review`);
 });
 
-test('a terminating signal releases the checkout instead of stranding the pool', () => {
-  const source = readFileSync(
-    new URL('../src/reviewer-harness.mjs', import.meta.url),
-    'utf8',
+test('a terminating signal releases all active checkouts before re-raising', async (t) => {
+  reviewerHarness.resetGeminiSignalReleaseForTest();
+  t.after(() => {
+    reviewerHarness.resetGeminiSignalReleaseForTest();
+  });
+  const sigtermListenersBefore = process.listenerCount('SIGTERM');
+
+  const released = [];
+  const killed = [];
+  reviewerHarness.configureGeminiSignalReleaseForTest({
+    releaseImpl: async ({ checkout, env }) => {
+      released.push({ checkoutId: checkout.checkoutId, envName: env.NAME });
+    },
+    sleepImpl: async () => {},
+    killImpl: (pid, signal) => {
+      killed.push({ pid, signal });
+    },
+  });
+
+  const removeFirst = reviewerHarness.trackGeminiCheckoutForSignalRelease(
+    { checkoutId: 'lease-1', credentialId: 'cred-1' },
+    { env: { NAME: 'first' }, log: { warn() {} } },
   );
-  // `finally` does not run on a signal, and the watcher signals reviewer process
-  // groups, so signal-release is the only non-TTL defense for SIGTERM.
-  assert.match(source, /armGeminiCheckoutSignalRelease/);
-  assert.match(source, /'SIGTERM',\s*'SIGINT',\s*'SIGHUP'/);
-  // It must be armed at ACQUISITION, not at cleanup — a signal between acquire
-  // and the finally block is exactly the leak window.
-  const armIdx = source.indexOf('armGeminiCheckoutSignalRelease(() =>');
-  const acquireIdx = source.indexOf('checkout = await checkoutGeminiCredentialImpl');
-  assert.ok(acquireIdx !== -1 && armIdx > acquireIdx, 'signal release must arm right after acquisition');
+  reviewerHarness.trackGeminiCheckoutForSignalRelease(
+    { checkoutId: 'lease-2', credentialId: 'cred-2' },
+    { env: { NAME: 'second' }, log: { warn() {} } },
+  );
+
+  removeFirst();
+  assert.equal(process.listenerCount('SIGTERM'), sigtermListenersBefore + 1);
+  await reviewerHarness.releaseActiveGeminiCheckoutsForSignal('SIGTERM', {
+    log: { warn() {} },
+  });
+
+  assert.deepEqual(released, [{ checkoutId: 'lease-2', envName: 'second' }]);
+  assert.deepEqual(killed, [{ pid: process.pid, signal: 'SIGTERM' }]);
+  assert.equal(process.listenerCount('SIGTERM'), sigtermListenersBefore);
 });

@@ -44,6 +44,7 @@ test('keeps waiting past the old attempt cap while the window is open', async ()
     },
     sleepImpl: async (ms) => { clock += ms; },
     nowImpl: () => clock,
+    log: { warn() {} },
   });
 
   assert.equal(result.checkoutId, 'lease-late');
@@ -65,6 +66,7 @@ test('gives up once the wall-clock window is exhausted', async () => {
       fetchImpl: async () => conflict(),
       sleepImpl: async (ms) => { clock += ms; },
       nowImpl: () => clock,
+      log: { warn() {} },
     }),
     (err) => err?.isGeminiCredentialPoolUnavailable === true,
   );
@@ -91,9 +93,34 @@ test('backoff is capped so late attempts stay responsive', async () => {
     },
     sleepImpl: async (ms) => { sleeps.push(ms); clock += ms; },
     nowImpl: () => clock,
+    log: { warn() {} },
   });
   assert.ok(sleeps.length > 0);
   assert.ok(Math.max(...sleeps) <= 5000, `backoff must stay capped, saw ${Math.max(...sleeps)}ms`);
+});
+
+test('explicit retry-only configuration preserves the legacy attempt-count bound', async () => {
+  reviewerHarness.resetGeminiCredentialCheckoutQueueForTest();
+  let calls = 0;
+  let clock = 0;
+  await assert.rejects(
+    reviewerHarness.checkoutGeminiCredentialFromBroker({
+      env: {
+        CQP_BROKER_URL: 'http://broker.test',
+        AGENT_OS_GEMINI_CHECKOUT_409_RETRIES: '2',
+        AGENT_OS_GEMINI_CHECKOUT_409_BACKOFF_MS: '1',
+      },
+      fetchImpl: async () => { calls += 1; return conflict(); },
+      sleepImpl: async (ms) => { clock += ms; },
+      nowImpl: () => clock,
+      log: { warn() {} },
+    }),
+    (err) => err?.isGeminiCredentialPoolUnavailable === true,
+  );
+  assert.equal(reviewerHarness.resolveGeminiCheckoutConflictWindowMs({
+    AGENT_OS_GEMINI_CHECKOUT_409_RETRIES: '2',
+  }), 0);
+  assert.equal(calls, 3, 'explicit retries without a window should not inherit the 5-minute default');
 });
 
 test('window=0 preserves the legacy attempt-count bound', async () => {
@@ -112,10 +139,38 @@ test('window=0 preserves the legacy attempt-count bound', async () => {
       fetchImpl: async () => { calls += 1; return conflict(); },
       sleepImpl: async (ms) => { clock += ms; },
       nowImpl: () => clock,
+      log: { warn() {} },
     }),
     (err) => err?.isGeminiCredentialPoolUnavailable === true,
   );
   assert.equal(calls, 3, 'retries=2 means 3 total attempts');
+});
+
+test('zero backoff still sleeps while the wall-clock window is active', async () => {
+  reviewerHarness.resetGeminiCredentialCheckoutQueueForTest();
+  const sleeps = [];
+  let clock = 0;
+  let calls = 0;
+  const warnings = [];
+  const result = await reviewerHarness.checkoutGeminiCredentialFromBroker({
+    env: {
+      CQP_BROKER_URL: 'http://broker.test',
+      AGENT_OS_GEMINI_CHECKOUT_409_BACKOFF_MS: '0',
+      AGENT_OS_GEMINI_CHECKOUT_409_WINDOW_MS: '1000',
+    },
+    fetchImpl: async () => {
+      calls += 1;
+      return calls <= 3 ? conflict() : successfulCheckout('after-zero-backoff');
+    },
+    sleepImpl: async (ms) => { sleeps.push(ms); clock += ms; },
+    nowImpl: () => clock,
+    log: { warn(message) { warnings.push(message); } },
+  });
+
+  assert.equal(result.checkoutId, 'lease-after-zero-backoff');
+  assert.deepEqual(sleeps, [50, 50, 50]);
+  assert.equal(warnings.length, 1, 'the wait-window diagnostic should be logged once');
+  assert.match(warnings[0], /Gemini credential checkout conflict/);
 });
 
 test('a non-409 failure still throws immediately', async () => {

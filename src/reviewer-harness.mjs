@@ -954,6 +954,7 @@ const DEFAULT_GEMINI_CQP_CHECKOUT_CONFLICT_BACKOFF_MS = 250;
 // still expires into the fallback rather than blocking forever.
 const DEFAULT_GEMINI_CQP_CHECKOUT_CONFLICT_WINDOW_MS = 5 * 60 * 1000;
 const DEFAULT_GEMINI_CQP_CHECKOUT_CONFLICT_BACKOFF_CAP_MS = 5_000;
+const MIN_GEMINI_CQP_CHECKOUT_CONFLICT_WINDOW_SLEEP_MS = 50;
 const GEMINI_REVIEWER_SESSION_STALE_AGE_MS = 12 * 60 * 60 * 1000;
 let geminiReviewerSessionPreflightDone = false;
 let geminiCredentialCheckoutQueue = Promise.resolve();
@@ -1243,7 +1244,12 @@ function resolveGeminiCheckoutConflictRetries(env = process.env) {
 function resolveGeminiCheckoutConflictWindowMs(env = process.env) {
   const raw = env.AGENT_OS_GEMINI_CHECKOUT_409_WINDOW_MS
     ?? env.GEMINI_CQP_CHECKOUT_409_WINDOW_MS;
+  const retryRaw = env.AGENT_OS_GEMINI_CHECKOUT_409_RETRIES
+    ?? env.GEMINI_CQP_CHECKOUT_409_RETRIES;
   if (raw === undefined || raw === null || raw === '') {
+    if (retryRaw !== undefined && retryRaw !== null && retryRaw !== '') {
+      return 0;
+    }
     return DEFAULT_GEMINI_CQP_CHECKOUT_CONFLICT_WINDOW_MS;
   }
   const parsed = Number(raw);
@@ -1347,8 +1353,10 @@ async function checkoutGeminiCredentialFromBrokerSerialized(options = {}) {
   const backoffMs = resolveGeminiCheckoutConflictBackoffMs(env);
   const windowMs = resolveGeminiCheckoutConflictWindowMs(env);
   const nowMs = options.nowImpl ?? (() => Date.now());
+  const log = options.log ?? console;
   const startedAt = nowMs();
   let lastError = null;
+  let loggedConflictWait = false;
   // Bounded by WALL CLOCK, not attempt count. A 409 means another reviewer
   // holds the single shared credential and will release it in ~2 minutes;
   // giving up after a fixed handful of attempts is what sent callers into the
@@ -1369,14 +1377,19 @@ async function checkoutGeminiCredentialFromBrokerSerialized(options = {}) {
       // Honour whichever bound the operator actually configured: when the
       // window is disabled (0) the legacy attempt-count behaviour stands.
       if (windowMs <= 0 ? attemptsExhausted : windowExhausted) break;
-      if (backoffMs > 0) {
-        const wait = Math.min(
-          backoffMs * (attempt + 1),
-          DEFAULT_GEMINI_CQP_CHECKOUT_CONFLICT_BACKOFF_CAP_MS,
-        );
-        const remaining = windowMs > 0 ? Math.max(0, windowMs - elapsed) : wait;
-        await sleepImpl(Math.max(0, Math.min(wait, remaining)));
+      if (!loggedConflictWait && windowMs > 0 && typeof log?.warn === 'function') {
+        log.warn(`Gemini credential checkout conflict; waiting up to ${windowMs}ms for shared credential release`);
+        loggedConflictWait = true;
       }
+      const wait = Math.min(
+        backoffMs * (attempt + 1),
+        DEFAULT_GEMINI_CQP_CHECKOUT_CONFLICT_BACKOFF_CAP_MS,
+      );
+      const remaining = windowMs > 0 ? Math.max(0, windowMs - elapsed) : wait;
+      const sleepMs = windowMs > 0
+        ? Math.max(MIN_GEMINI_CQP_CHECKOUT_CONFLICT_WINDOW_SLEEP_MS, Math.min(wait, remaining))
+        : Math.max(0, Math.min(wait, remaining));
+      await sleepImpl(sleepMs);
     }
   }
   throw lastError;

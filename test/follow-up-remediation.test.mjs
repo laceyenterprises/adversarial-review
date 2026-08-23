@@ -5024,6 +5024,9 @@ test('prepareCodexRemediationStartupEnv records per-harness push provider broker
   process.env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID = '12345';
   process.env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID = '67890';
   process.env.OAUTH_BROKER_SHARED_SECRET_FILE = '/tmp/broker-secret';
+  delete process.env.OAUTH_BROKER_REMEDIATION_CODEX_PROVIDER;
+  delete process.env.OAUTH_BROKER_REMEDIATION_CODEX_EXPECTED_APP_ID;
+  delete process.env.OAUTH_BROKER_REMEDIATION_CODEX_EXPECTED_INSTALLATION_ID;
 
   try {
     const { env, startupEvidence } = prepareCodexRemediationStartupEnv();

@@ -1,19 +1,16 @@
 import { execFileSync } from 'node:child_process';
 
 import { readReviewerRunRecord } from './adapters/reviewer-runtime/run-state.mjs';
-import * as reviewBodyCapture from './review-body-capture.mjs';
+import {
+  loginsMatch,
+  resolveReviewerBotLogin,
+  resolveReviewerBotLoginAliases,
+} from './review-body-capture.mjs';
 import {
   DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS,
   resolveReviewerLeaseRecoveryEnabled,
 } from './reviewer-lease.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
-
-const loginsMatch = reviewBodyCapture.loginsMatch || (() => false);
-const resolveReviewerBotLogin = reviewBodyCapture.resolveReviewerBotLogin || (() => null);
-const resolveReviewerBotLoginAliases = reviewBodyCapture.resolveReviewerBotLoginAliases || ((value) => {
-  const login = resolveReviewerBotLogin(value);
-  return login ? [login] : [];
-});
 
 const LEGACY_ORPHAN_FAILURE_MESSAGE =
   'Watcher restarted while review subprocess was in flight. ' +

@@ -412,9 +412,47 @@ function parseJson(raw, fallback = {}) {
   }
 }
 
+// Routine banner lines that the reviewer prints on EVERY run and that end up in
+// the captured stdout/stderr tail of a failure message. They describe normal
+// operation, not the failure, but they contain words the classifier keys on —
+// so matching them mislabels the cause.
+//
+// Live on 2026-08-22: adversarial-review#886 failed with
+// `PullRequest.diff too_large` (a 33,168-line diff over GitHub's 20,000-line API
+// cap). The captured tail included the startup banner
+// `(OAuth-only mode; prompt stage=first)`, the bare `text.includes('oauth')`
+// test matched it, and pipeline-health reported `dominantFailureClass: auth`
+// with a recommended action to "investigate reviewer auth/infra and spawn an
+// SRE". That sends an operator after credentials for a diff-size problem.
+//
+// Because the banner is printed on every gemini review, this poisoned the
+// `auth` class for that entire reviewer, not just one PR.
+const NON_DIAGNOSTIC_BANNER_PATTERNS = Object.freeze([
+  /\(oauth-only mode[^)]*\)/g,
+  /oauth ok/g,
+]);
+
+function stripNonDiagnosticBanners(text) {
+  let stripped = text;
+  for (const pattern of NON_DIAGNOSTIC_BANNER_PATTERNS) {
+    stripped = stripped.replace(pattern, ' ');
+  }
+  return stripped;
+}
+
 function classifyFailure(value) {
-  const text = String(value || '').toLowerCase();
+  const raw = String(value || '').toLowerCase();
+  const text = stripNonDiagnosticBanners(raw);
   if (!text.trim()) return 'unknown';
+  // A diff GitHub refuses to serve is DETERMINISTIC — it fails identically on
+  // every retry — so it must be classified before the generic infra buckets and
+  // must not read as a transient auth/upstream problem worth re-attempting.
+  if (
+    text.includes('too_large')
+    || text.includes('diff too large')
+    || text.includes('exceeded the maximum number of lines')
+    || (/\b406\b/.test(text) && text.includes('diff'))
+  ) return 'diff-too-large';
   if (
     text.includes(QUOTA_EXHAUSTED_FAILURE_CLASS) ||
     text.includes('usage cap') ||
@@ -1820,7 +1858,17 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
       evidence: stuck.prs.map((pr) => (
         `reviews.db reviewed_prs ${pr.repo}#${pr.prNumber} attempts=${pr.infraAutoRecoverAttempts} class=${pr.failureClass}`
       )),
-      recommendedAction: 'Adversarial review auto-recovery exhausted — investigate reviewer auth/infra for the dominant failure class and spawn an SRE; retrigger the affected reviews only after the reviewer lane is restored.',
+      // A deterministic failure class cannot be retried into success, so the
+      // generic "restore the reviewer lane then retrigger" advice is actively
+      // misleading for it — no amount of lane health makes a 33k-line diff fit
+      // GitHub's 20,000-line cap.
+      recommendedAction: dominant === 'diff-too-large'
+        ? 'These PRs exceed GitHub\'s 20,000-line diff API cap, so the reviewer '
+          + 'cannot fetch a diff to review and every retry fails identically. This is '
+          + 'NOT a reviewer auth/infra problem — do not retrigger. Split the PR, or '
+          + 'review it by file list; auto-recovery attempts were spent on a '
+          + 'deterministic failure and should be treated as exhausted by design.'
+        : 'Adversarial review auto-recovery exhausted — investigate reviewer auth/infra for the dominant failure class and spawn an SRE; retrigger the affected reviews only after the reviewer lane is restored.',
       observedAt,
       details: {
         cap: stuck.cap,

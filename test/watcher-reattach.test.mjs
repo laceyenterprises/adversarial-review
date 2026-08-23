@@ -740,7 +740,7 @@ test('marks a dead reviewer without a GitHub review as retryable failed', async 
     settled.map(({ state, reason }) => ({ state, reason })),
     [{ state: 'failed', reason: 'dead-no-review' }]
   );
-  assert.match(row.failure_message, /no GitHub review was found from claude-reviewer-lacey/);
+  assert.match(row.failure_message, /no GitHub review was found from lacey-claude-reviewer\[bot\]/);
   assert.match(log.lines.join('\n'), /reviewer_reattach_dead/);
 });
 
@@ -773,7 +773,7 @@ test('requeues a dead reviewer without a GitHub review when lease recovery is en
     settled.map(({ state, reason }) => ({ state, reason })),
     [{ state: 'cancelled', reason: 'dead-no-review' }]
   );
-  assert.match(row.failure_message, /no GitHub review was found from claude-reviewer-lacey/);
+  assert.match(row.failure_message, /no GitHub review was found from lacey-claude-reviewer\[bot\]/);
   assert.match(log.lines.join('\n'), /reviewer_reattach_requeued/);
 });
 

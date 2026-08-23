@@ -704,6 +704,8 @@ export {
   findPendingReviewerBodyCaptureForPost,
   isTransientReviewArtifactLookupError,
   lookupRecentReviewArtifact,
+  loginsMatch,
   resolveReviewerBotLogin,
+  resolveReviewerBotLoginAliases,
   updateReviewerPassBodyCapture,
 };

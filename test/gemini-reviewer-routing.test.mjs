@@ -273,18 +273,20 @@ test('GMW-02 identity: a gemini REVIEW captures against the GitHub App bot login
   // review-body-capture: reviewer-model key and the reviewer token-env key.
   assert.equal(resolveReviewerBotLogin('gemini'), 'lacey-gemini-reviewer[bot]');
   assert.equal(resolveReviewerBotLogin('GH_GEMINI_REVIEWER_TOKEN'), 'lacey-gemini-reviewer[bot]');
-  // reviewer-reattach: reviewer-model key.
-  assert.equal(reviewerBotLogin('gemini'), 'gemini-reviewer-lacey');
+  // reviewer-reattach: resolves through the SAME canonical table. This used to
+  // assert the legacy PAT login, encoding a divergence that made the dead-session
+  // recovery probe unable to match a review the App had actually posted.
+  assert.equal(reviewerBotLogin('gemini'), 'lacey-gemini-reviewer[bot]');
 });
 
-test('GMW-02 identity: builder-side reviewer of a [gemini] PR stays codex-reviewer-lacey', () => {
+test('GMW-02 identity: builder-side reviewer of a [gemini] PR stays the codex reviewer', () => {
   // A gemini-built PR routes to the codex reviewer (cross-model). End-to-end
-  // that reviewer identity must remain codex-reviewer-lacey — the existing
+  // that reviewer identity must remain the codex reviewer — the existing
   // "who reviews a gemini-built PR" mapping is preserved.
   const route = baseRouteFor('gemini');
   assert.equal(route.reviewerModel, 'codex');
   assert.equal(resolveReviewerBotLogin(route.botTokenEnv), 'lacey-codex-reviewer[bot]');
-  assert.equal(reviewerBotLogin('codex'), 'codex-reviewer-lacey');
+  assert.equal(reviewerBotLogin('codex'), 'lacey-codex-reviewer[bot]');
 });
 
 // ── reviewer-roster surface (SPEC §1 mockup) ───────────────────────────────

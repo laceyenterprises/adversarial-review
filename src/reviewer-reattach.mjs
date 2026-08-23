@@ -2,6 +2,11 @@ import { execFileSync } from 'node:child_process';
 
 import { readReviewerRunRecord } from './adapters/reviewer-runtime/run-state.mjs';
 import {
+  loginsMatch,
+  resolveReviewerBotLogin,
+  resolveReviewerBotLoginAliases,
+} from './review-body-capture.mjs';
+import {
   DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS,
   resolveReviewerLeaseRecoveryEnabled,
 } from './reviewer-lease.mjs';
@@ -35,25 +40,50 @@ const OVERDUE_RECOVERY_FAILURE_MESSAGE =
 const LEASE_RECOVERY_CAP_FAILURE_MESSAGE =
   'Reviewer lease recovery cap exhausted; leaving the review failed for operator inspection.';
 
-const REVIEWER_BOT_LOGINS = new Map([
-  ['claude', 'claude-reviewer-lacey'],
-  ['codex', 'codex-reviewer-lacey'],
-  ['gemini', 'gemini-reviewer-lacey'],
-  ['pi', 'codex-reviewer-lacey'],
-  // opencode defaults to Anthropic Claude; keep the reviewer cross-model.
-  ['opencode', 'codex-reviewer-lacey'],
-  ['hermes', 'codex-reviewer-lacey'],
-]);
+
 
 function splitRepoPath(repoPath) {
   const [owner, repo] = String(repoPath || '').split('/');
   return { owner, repo };
 }
 
+// The canonical reviewer-login table lives in `./review-body-capture.mjs`.
+// This module used to keep its own copy holding ONLY the legacy PAT login
+// (`<model>-reviewer-lacey`). Reviewers post via GitHub Apps now, so the real
+// author is `lacey-<model>-reviewer[bot]` and the exact-equality probe below
+// could never match a posted review. A reviewer that died AFTER posting was
+// therefore recorded `dead-no-review`, its pass never settled, and the PR sat
+// with a posted clean review that nothing would merge (observed 2026-08-22 on
+// #5709, #5710, #5711). Resolve through the shared table instead of mirroring
+// it, and match any known alias.
+// Reviewer MODEL values this module reconciles. Deliberately narrower than the
+// canonical alias table, which also keys on builder worker classes
+// (`claude-code`) and token-env names (`GH_*_REVIEWER_TOKEN`) for body capture.
+// `reviewed_prs.reviewer` holds a reviewer model; anything else is a corrupt row
+// that must become a sticky failed-orphan rather than silently resolving to some
+// bot. Only the LOGIN STRINGS come from the shared table -- that is what drifted.
+const RECONCILABLE_REVIEWER_MODELS = new Set([
+  'claude',
+  'codex',
+  'gemini',
+  'pi',
+  // opencode defaults to Anthropic Claude; keep the reviewer cross-model.
+  'opencode',
+  'hermes',
+]);
+
+function isReconcilableReviewer(reviewer) {
+  return RECONCILABLE_REVIEWER_MODELS.has(String(reviewer || '').trim().toLowerCase());
+}
+
 function reviewerBotLogin(reviewer) {
-  const value = String(reviewer || '').trim();
-  const lower = value.toLowerCase();
-  return REVIEWER_BOT_LOGINS.get(lower) || null;
+  if (!isReconcilableReviewer(reviewer)) return null;
+  return resolveReviewerBotLogin(String(reviewer).trim().toLowerCase());
+}
+
+function reviewerBotLoginAliases(reviewer) {
+  if (!isReconcilableReviewer(reviewer)) return [];
+  return resolveReviewerBotLoginAliases(String(reviewer).trim().toLowerCase());
 }
 
 function parseTime(value) {
@@ -173,10 +203,13 @@ function makeReviewPostedProbe(octokit) {
       cache.set(key, Array.isArray(reviews) ? reviews : []);
     }
 
-    const expectedLogin = reviewerBotLogin(row.reviewer);
-    if (!expectedLogin) return null;
+    // Match against every known alias for this reviewer (App login AND legacy
+    // PAT login), tolerant of the `[bot]` suffix and case. Exact equality
+    // against a single login is what stranded posted reviews before.
+    const expectedLogins = reviewerBotLoginAliases(row.reviewer);
+    if (!expectedLogins.length) return null;
     return cache.get(key)
-      .filter((review) => review?.user?.login === expectedLogin)
+      .filter((review) => expectedLogins.some((login) => loginsMatch(review?.user?.login, login)))
       .filter((review) => {
         const submittedAtMs = parseTime(review?.submitted_at);
         return submittedAtMs !== null && (startedAtMs === null || submittedAtMs >= startedAtMs);

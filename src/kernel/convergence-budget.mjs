@@ -121,12 +121,10 @@ export function hammerLifetimeDispatchesFor(maxRounds) {
  * @returns {number}
  */
 export function remediationCeilingCapFor(budgetByRisk = DEFAULT_ROUND_BUDGET_BY_RISK) {
-  const values = RISK_CLASSES
-    .map((risk) => Number(budgetByRisk?.[risk]))
-    .filter((value) => isPositiveInt(value));
-  const widest = values.length
-    ? Math.max(...values)
-    : DEFAULT_ROUND_BUDGET_BY_RISK.critical;
+  const values = RISK_CLASSES.map(
+    (risk) => convergenceBudgetForRiskClass(risk, budgetByRisk).remediationRounds,
+  );
+  const widest = Math.max(...values);
   return widest * REMEDIATION_CEILING_BUDGET_MULTIPLE;
 }
 

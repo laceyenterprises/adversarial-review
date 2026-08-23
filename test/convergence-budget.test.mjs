@@ -67,6 +67,10 @@ test('lowering the round budget also moves the derived bounds', () => {
   assert.equal(remediationCeilingCapFor({ low: 1, medium: 1, high: 1, critical: 1 }), 2);
 });
 
+test('a partially-declared budget does not lower the remediation ceiling', () => {
+  assert.equal(remediationCeilingCapFor({ low: 2 }), 8);
+});
+
 test('the hammer lifetime ceiling always stays above the per-series cap', () => {
   // The per-series cap is what the lifetime ceiling must not collide with; the
   // comment on the lifetime constant asserts this and it used to be true only

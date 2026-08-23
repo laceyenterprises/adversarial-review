@@ -791,7 +791,7 @@ function buildRemediationOutcomeCommentBody({
     const pushback = formatPushbackList(reply.pushback, '');
     if (pushback) {
       lines.push('');
-      lines.push('## Pushback (deliberately not changed)');
+      lines.push("## Pushback (won't fix)");
       lines.push('');
       lines.push(pushback);
     }

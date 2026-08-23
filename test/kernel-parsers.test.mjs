@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
@@ -1394,7 +1395,6 @@ test('remediator prompts state addressed/pushback/blockers are BLOCKING-ONLY', a
   // it lands. The prompts are model-agnostic (codex is the default
   // cross-model remediator; claude only remediates same-model) so the
   // assertion is not tied to a specific reviewer model.
-  const { readFile } = await import('node:fs/promises');
   const promptRoot = join(dirname(fileURLToPath(import.meta.url)), '..', 'prompts', 'code-pr');
   const files = ['remediator.first.md', 'remediator.middle.md', 'remediator.last.md'];
 
@@ -1415,5 +1415,28 @@ test('remediator prompts state addressed/pushback/blockers are BLOCKING-ONLY', a
       /you may include those fixes in[\s\n]+`addressed\[\]` too/i,
       `${file} still permits non-blocking findings inside addressed[] — LAC-893 fix regressed`,
     );
+  }
+});
+
+test('remediator prompts keep nonBlocking[] hardening guidance top-level', async () => {
+  const promptsRoot = join(dirname(fileURLToPath(import.meta.url)), '..', 'prompts');
+  const promptDirs = ['code-pr', 'code-pr-security', 'research-finding'];
+  const files = ['remediator.first.md', 'remediator.middle.md', 'remediator.last.md'];
+
+  for (const promptDir of promptDirs) {
+    for (const file of files) {
+      const promptPath = join(promptDir, file);
+      const body = await readFile(join(promptsRoot, promptPath), 'utf8');
+      assert.match(
+        body,
+        /^## Hardening what you find along the way$/m,
+        `${promptPath} must give nonBlocking[] hardening a top-level section`,
+      );
+      assert.doesNotMatch(
+        body,
+        /^  - You may also harden a real, related defect/m,
+        `${promptPath} nests nonBlocking[] hardening under another list item`,
+      );
+    }
   }
 });

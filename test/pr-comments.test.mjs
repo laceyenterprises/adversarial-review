@@ -1601,7 +1601,7 @@ test('buildRemediationOutcomeCommentBody renders validator-accepted untitled per
   });
 
   assert.match(body, /## Addressed findings/);
-  assert.match(body, /## Pushback \(deliberately not changed\)/);
+  assert.match(body, /## Pushback \(won't fix\)/);
   assert.match(body, /## Blockers/);
   // Three untitled entries all fall back to the bold-title `**Finding**`
   // top bullet.
@@ -1692,7 +1692,7 @@ test('buildRemediationOutcomeCommentBody omits malformed per-finding sections in
   });
 
   assert.doesNotMatch(body, /\*\*Addressed findings\*\*/);
-  assert.doesNotMatch(body, /\*\*Pushback \(deliberately not changed\)\*\*/);
+  assert.doesNotMatch(body, /\*\*Pushback \(won't fix\)\*\*/);
   assert.doesNotMatch(body, /raw worker dump/);
   assert.doesNotMatch(body, /tool_call/);
 });
@@ -1719,7 +1719,7 @@ test('buildRemediationOutcomeCommentBody renders pushback[] entries with finding
     reReview: { requested: true, triggered: true, status: 'pending', reason: 'pushback recorded' },
   });
 
-  assert.match(body, /## Pushback \(deliberately not changed\)/);
+  assert.match(body, /## Pushback \(won't fix\)/);
   assert.match(body, /^- \*\*Over-broad dispatch refactor\*\*$/m);
   assert.match(body, /^ {2}- \*\*Finding:\*\* Reviewer asked to refactor the entire dispatch module\.$/m);
   assert.match(body, /^ {2}- \*\*Reasoning:\*\* Out of scope for this PR; tracked as separate ticket LAC-99\.$/m);
@@ -1761,7 +1761,7 @@ test('buildRemediationOutcomeCommentBody indents multiline nested-bullet content
   });
 
   const addressedSection = body
-    .match(/## Addressed findings\n\n([\s\S]*?)\n\n## Pushback \(deliberately not changed\)/)?.[1];
+    .match(/## Addressed findings\n\n([\s\S]*?)\n\n## Pushback \(won't fix\)/)?.[1];
   assert.equal(
     addressedSection,
     [
@@ -1775,7 +1775,7 @@ test('buildRemediationOutcomeCommentBody indents multiline nested-bullet content
   );
 
   const pushbackSection = body
-    .match(/## Pushback \(deliberately not changed\)\n\n([\s\S]*?)\n\n## Blockers/)?.[1];
+    .match(/## Pushback \(won't fix\)\n\n([\s\S]*?)\n\n## Blockers/)?.[1];
   assert.equal(
     pushbackSection,
     [
@@ -1879,7 +1879,7 @@ test('buildRemediationOutcomeCommentBody redacts host-local paths smuggled into 
   // Sanity: section headers still render so the operator can tell the
   // sections existed even after redaction.
   assert.match(body, /## Addressed findings/);
-  assert.match(body, /## Pushback \(deliberately not changed\)/);
+  assert.match(body, /## Pushback \(won't fix\)/);
 });
 
 test('buildRemediationOutcomeCommentBody renders all accountability and operational sections when populated', () => {
@@ -1924,7 +1924,7 @@ test('buildRemediationOutcomeCommentBody renders all accountability and operatio
 
   assert.match(body, /## Summary/);
   assert.match(body, /## Addressed findings/);
-  assert.match(body, /## Pushback \(deliberately not changed\)/);
+  assert.match(body, /## Pushback \(won't fix\)/);
   assert.match(body, /## Blockers/);
   assert.match(body, /## Operational blockers/);
   // Structured blocker carries the originating review finding and a
@@ -2121,7 +2121,7 @@ test('buildRemediationOutcomeCommentBody renders nonBlocking[] last, after Addre
   });
 
   assert.match(body, /## Addressed findings/);
-  assert.match(body, /## Pushback \(deliberately not changed\)/);
+  assert.match(body, /## Pushback \(won't fix\)/);
   assert.match(body, /## Non-blocking improvements/);
   // Locked section order:
   //   Addressed → Pushback → Blockers → Operational blockers → Non-blocking

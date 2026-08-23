@@ -214,11 +214,35 @@ top-level `summary` field; do **not** put them in `addressed[]`.
 - `pushback[]` → you read the finding, deliberately decided **not** to
   change the code, and want to record the reasoning. Use this when the
   reviewer is wrong, the finding is out of scope for this PR, or the
-  fix would cost more than the bug. Each entry needs:
+  fix would cost more than the bug.
+
+  **Pushback is a first-class outcome, not a failure.** A reviewer's
+  finding is an argument, not an order. You are expected to evaluate it
+  on the evidence and say so plainly when it does not hold up — a
+  remediation that silently "fixes" a finding the reviewer got wrong is
+  worse than one that pushes back, because it bakes the reviewer's error
+  into the code and hides the disagreement from the operator.
+
+  Push back with **evidence**, not assertion. What makes a pushback
+  entry land:
+  - Quote the code, config, or doc that contradicts the finding, with
+    the file and the line or symbol name.
+  - Name the precedent when the codebase already settled this question a
+    different way (an existing class, contract, or prior decision).
+  - State what you actually checked. "I ran the resolver against live
+    state and it returned X" beats "this appears to be handled."
+  - Say which of the reviewer's claims you accept, if any. Partial
+    agreement is a normal, useful answer.
+  If you cannot produce that evidence, the honest move is to fix the
+  finding or record a blocker — not to push back on a hunch.
+
+  Each entry needs:
   - `title`: copy the review finding's top-level bold bullet label, H3
     card heading, or legacy `Title:` value exactly when supplied.
   - `finding`: the finding you are pushing back on.
-  - `reasoning`: why you disagreed (one sentence, sharp).
+  - `reasoning`: why you disagreed — sharp, and grounded in the evidence
+    above (what you checked, what it showed, what contradicts the
+    finding). One tight paragraph is fine; unsupported assertion is not.
 
   Shape:
 
@@ -357,6 +381,29 @@ In every other case — and that is the vast majority of "contract changed witho
 Why the default leans this direction: code is the source of truth for *what runs*; specs are the source of truth for *what the operator can rely on*. When they disagree, the operator is the one who has to decide which is canonical — and the operator's stated policy is "the implementation moved on; bring the docs along." Silent reverts undo work the operator already wanted, while doc updates are cheap to review and trivially reversible if the operator disagrees.
 
 If you genuinely believe the code is wrong and should be reverted, that is a `pushback[]` entry with explicit reasoning citing one of the narrow cases above — NOT a silent revert wrapped in an `addressed[]` entry. The reviewer's job is to flag the divergence; deciding which side of the divergence wins is a substance call that you must make explicitly and defensibly.
+
+## Hardening what you find along the way
+
+Remediation is the one time a worker reads a subsystem closely with the
+authority to change it. If that reading turns up a real, related defect the
+reviewer did not flag — a neighbouring branch with the same bug you were sent
+to fix, a missing guard on the path you just touched, a test that would not
+have caught the finding — you may fix it in the same round.
+
+The bar is *related and evidenced*, not *anything you noticed*:
+- It shares a root cause, a code path, or a failure mode with a finding you
+  were sent to address.
+- You can state the defect concretely, the way a finding is stated.
+- The fix stays inside the smallest-durable-patch discipline; it does not
+  become the speculative refactor this prompt otherwise forbids.
+
+Record each one in `nonBlocking[]` with the same shape as `addressed[]`, and
+say in the `action` that you found it during remediation rather than in the
+review. That keeps the public PR comment honest about where the work came
+from, and it does not touch the blocking-coverage count.
+
+If the related defect is too large to fix safely in this round, do not
+half-fix it. Describe it in the `summary` so the operator can schedule it.
 
 ## Convergence rule (load-bearing)
 

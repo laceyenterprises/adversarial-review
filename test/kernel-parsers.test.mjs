@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
@@ -1394,7 +1395,6 @@ test('remediator prompts state addressed/pushback/blockers are BLOCKING-ONLY', a
   // it lands. The prompts are model-agnostic (codex is the default
   // cross-model remediator; claude only remediates same-model) so the
   // assertion is not tied to a specific reviewer model.
-  const { readFile } = await import('node:fs/promises');
   const promptRoot = join(dirname(fileURLToPath(import.meta.url)), '..', 'prompts', 'code-pr');
   const files = ['remediator.first.md', 'remediator.middle.md', 'remediator.last.md'];
 
@@ -1419,7 +1419,6 @@ test('remediator prompts state addressed/pushback/blockers are BLOCKING-ONLY', a
 });
 
 test('remediator prompts keep nonBlocking[] hardening guidance top-level', async () => {
-  const { readFile } = await import('node:fs/promises');
   const promptsRoot = join(dirname(fileURLToPath(import.meta.url)), '..', 'prompts');
   const promptDirs = ['code-pr', 'code-pr-security', 'research-finding'];
   const files = ['remediator.first.md', 'remediator.middle.md', 'remediator.last.md'];

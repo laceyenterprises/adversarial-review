@@ -89,6 +89,33 @@ cd frontend/server
 npm start                 # or: node src/main.mjs
 ```
 
+## Verify the standup
+
+One command that boots the app the way an operator would and asserts every
+surface — health, both screens, the pipeline paths, the gate CLI, and the
+end-to-end smoke:
+
+```bash
+cd frontend
+npm run standup:verify            # or: node scripts/standup-verify.mjs [--json]
+```
+
+It runs in a temp state root of its own with `HOME` redirected into it, so it
+can never attach to a live pipeline's `reviews.db` or pick up `~/.arf/config.json`,
+and it binds port 0 so it does not collide with a running ARF. It stops the
+supervisor and removes the sandbox on every exit path, including Ctrl-C, and it
+asserts that teardown rather than assuming it. Exit 0 when every check passes, 1
+when any fails, 130 when interrupted.
+
+This is the standup verification for the move out of agent-os's `apps/arf`
+(AMV-03) — its `pipeline-root-rerooted` check is what proves ARF resolves
+`config.yaml` and the daemon heartbeats against this repo's root rather than
+through the old `tools/adversarial-review/` prefix. See
+[`docs/NOTE-arf-standup-from-adversarial-review.md`](../docs/NOTE-arf-standup-from-adversarial-review.md).
+
+It is not part of CI: this repo's workflow matrix is Node 20/22, and ARF requires
+Node >= 23.4.
+
 ## Test it
 
 ```bash
@@ -1402,6 +1429,8 @@ a disarm and the other not.
 frontend/
   README.md
   package.json                      the app manifest; `npm test` runs every suite
+  scripts/
+    standup-verify.mjs              boots the app and asserts every surface (AMV-03)
   frontend/
     package.json                    zero dependencies
     index.html                      identity standup shell (`/`)

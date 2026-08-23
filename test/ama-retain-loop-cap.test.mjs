@@ -48,6 +48,24 @@ test('recordAmaRetain: caps after K on the same head; a new head resets', () => 
   }
 });
 
+test('recordAmaRetain: explicit cap option overrides the default retain threshold', () => {
+  const rootDir = tempRoot();
+  try {
+    const id = { repo: 'acme/repo', prNumber: 5054 };
+    const first = recordAmaRetain(rootDir, id, { headSha: HEAD_A, cap: 1 });
+    const second = recordAmaRetain(rootDir, id, { headSha: HEAD_A, cap: 1 });
+
+    assert.equal(first.cap, 1);
+    assert.equal(first.retainCount, 1);
+    assert.equal(first.capExceeded, false);
+    assert.equal(second.cap, 1);
+    assert.equal(second.retainCount, 2);
+    assert.equal(second.capExceeded, true, 'the explicit cap controls escalation');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 function coexistenceArgs(rootDir, headSha, amaResult) {
   return {
     rootDir,

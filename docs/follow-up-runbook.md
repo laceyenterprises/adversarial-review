@@ -769,10 +769,11 @@ This is the normal way to convert spawned work into a durable terminal state.
 
 ### Request another bounded remediation round
 
-Only `completed/` and `failed/` jobs are accepted:
+`completed/`, `failed/`, and retriggerable `stopped/` jobs are accepted:
 
 ```bash
 npm run follow-up:requeue -- data/follow-up-jobs/completed/<jobId>.json "Need one more bounded remediation pass"
+npm run follow-up:requeue -- data/follow-up-jobs/stopped/<jobId>.json "Explicit operator pass after review-settled"
 ```
 
 Requeue behavior:
@@ -786,6 +787,14 @@ Guardrails:
 
 - if the current round count already hit `maxRounds`, requeue stops the job with `max-rounds-reached`
 - if the source job is `completed/` but `reReview.requested` is not `true`, requeue stops the job with `no-progress`
+- if the source job is `stopped/`, only retriggerable stop codes are accepted:
+  `max-rounds-reached`, `round-budget-exhausted`, `daemon-bounce-safety`,
+  `review-settled`, `no-progress`, `stale-review-head`, and
+  `stale-heartbeat`
+- `stopped:review-settled` is accepted for an explicit operator pass over
+  remaining non-blocking findings; `operator-stop`, `rereview-blocked`,
+  `stale-drift`, `operator-merged-pr`, `operator-closed-pr`, and other
+  non-retriggerable stopped jobs are refused
 - this is why there is no hidden infinite loop
 
 ### Stop a job

@@ -11,6 +11,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
+import { withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
 import {
   prepareFinalizePendingTerminalFailure,
   prepareMarkInfraAutoRecoveryAttemptStarted,
@@ -22,7 +23,16 @@ import {
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 export const db = openReviewStateDb(ROOT);
-ensureReviewStateSchema(db);
+// The schema bootstrap is the first write this process makes, and it runs at
+// module-import time — before any caller can catch it. An unretried SQLITE_BUSY
+// here kills the importing process outright with a bare SqliteError: no fatal
+// config banner, no recovery, just a dead watcher. Any concurrent holder of
+// data/reviews.db (another watcher, a CLI, a sibling test process) can win the
+// lock for longer than the connection's busy_timeout, so retry on busy exactly
+// as every other write path in this repo already does.
+withSqliteBusyRetrySync(() => ensureReviewStateSchema(db), {
+  label: 'review-state-schema-bootstrap',
+});
 
 export const stmtGetReviewRow = db.prepare(
   'SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'

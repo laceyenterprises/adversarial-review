@@ -10,6 +10,10 @@ import {
 import { userInfo } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
+import {
+  DEFAULT_RISK_CLASS,
+  DEFAULT_ROUND_BUDGET_BY_RISK,
+} from './kernel/convergence-budget.mjs';
 import { buildCodePrSubjectIdentity, buildDeliveryKey } from './identity-shapes.mjs';
 import {
   beginReviewerPass,
@@ -51,7 +55,6 @@ const FOLLOW_UP_JOB_SCHEMA_VERSION = 2;
 // persisted value via the per-job `remediationPlan.maxRounds` field;
 // only NEW jobs derive their budget from this table.
 const LEGACY_DEFAULT_MAX_REMEDIATION_ROUNDS = 6;
-const DEFAULT_RISK_CLASS = 'medium';
 // Convergence loop budgets, post-2026-08-21:
 // Higher-risk PRs get more bot rounds before operator escalation,
 // because that's where you most want the bot to converge before
@@ -72,12 +75,12 @@ const DEFAULT_RISK_CLASS = 'medium';
 // Operator override (`operator-approved` label) is the escape valve
 // when the operator has decided the current PR head is mergeable now,
 // even if review/remediation state is still pending or noisy.
-const ROUND_BUDGET_BY_RISK_CLASS = Object.freeze({
-  low: 1,
-  medium: 3,
-  high: 3,
-  critical: 4,
-});
+// The v1 alias for the shared convergence budget. This table used to be
+// declared here AND mirrored in `kernel/pipeline.mjs`; both now read the single
+// definition in `./kernel/convergence-budget.mjs` so raising a risk class moves the
+// remediation rounds, the AMA retain-loop cap, the hammer lifetime ceiling, and
+// the subject remediation ceiling together.
+const ROUND_BUDGET_BY_RISK_CLASS = DEFAULT_ROUND_BUDGET_BY_RISK;
 const DEFAULT_MAX_REMEDIATION_ROUNDS = ROUND_BUDGET_BY_RISK_CLASS[DEFAULT_RISK_CLASS];
 const DEFAULT_MAX_TRANSIENT_RETRIES = 3;
 const DEFAULT_TRANSIENT_RETRY_BACKOFF_MS = 5 * 60 * 1000;

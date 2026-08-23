@@ -5912,7 +5912,13 @@ test('consumeFollowUpJobsUntilCapacity defers a pending job for a PR with an act
     state: 'dispatched',
     launchRequestId: 'lrq_hammer_active',
     lastObservedStatus: 'starting',
-    dispatchedAt: '2026-04-21T10:20:00.000Z',
+    // Must be RECENT. This fixture asserts that an *active* closer defers the
+    // job. `dispatched` records now age out (isActiveAmaCloserDispatchRecord
+    // gained the staleness escape the `dispatching` branch always had), so a
+    // hardcoded four-month-old dispatchedAt no longer describes an active
+    // closer -- it describes exactly the dead-worker record that escape exists
+    // to release.
+    dispatchedAt: new Date().toISOString(),
   }));
   createPendingRemediationJob(rootDir, { prNumber: 7, reviewPostedAt: '2026-04-21T08:01:00.000Z' });
   createPendingRemediationJob(rootDir, { prNumber: 8, reviewPostedAt: '2026-04-21T08:02:00.000Z' });

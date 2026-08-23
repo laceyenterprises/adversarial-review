@@ -1304,18 +1304,48 @@ export function readAmaCloserDispatchRecord(rootDir, identity) {
   return readJsonFile(amaCloserDispatchFilePath(rootDir, identity));
 }
 
-function isStaleDispatchingAmaCloserRecord(record, { now = null } = {}) {
-  const lastTouchedAtMs = parseTimeMs(
-    record?.lastAttemptedAt
-    || record?.dispatchedAt
-    || record?.lastObservedAt
-    || record?.createdAt
-  );
+// Epoch ms of the most recent moment this dispatch record was touched, or
+// null when no field carries a parseable timestamp.
+//
+// Every candidate is parsed and the LATEST one wins. An `a || b || c` chain
+// returns the first *truthy* field instead, which is wrong here: `dispatchedAt`
+// and `lastAttemptedAt` are stamped once at launch and never refreshed, while
+// `lastObservedAt` is re-stamped on every tick that observes a live worker (see
+// the `existing-dispatch-${status}` refresh below). A launch timestamp would
+// therefore permanently shadow the freshest evidence, and a genuinely running
+// closer would be judged stale the moment its ORIGINAL launch aged past the
+// reclaim window -- exactly the premature-reclaim the age escape must not cause.
+function mostRecentAmaCloserTouchMs(record) {
+  let latestMs = null;
+  for (const value of [
+    record?.lastObservedAt,
+    record?.lastAttemptedAt,
+    record?.dispatchedAt,
+    record?.createdAt,
+  ]) {
+    const parsedMs = parseTimeMs(value);
+    if (parsedMs === null) continue;
+    if (latestMs === null || parsedMs > latestMs) latestMs = parsedMs;
+  }
+  return latestMs;
+}
+
+// Age of the record against `now`, or null when either side is unparseable.
+function amaCloserRecordAgeMs(record, { now = null } = {}) {
+  const lastTouchedAtMs = mostRecentAmaCloserTouchMs(record);
   const nowMs = parseTimeMs(now || new Date().toISOString());
-  if (lastTouchedAtMs === null) return true;
-  return lastTouchedAtMs !== null
-    && nowMs !== null
-    && nowMs - lastTouchedAtMs >= AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS;
+  if (lastTouchedAtMs === null || nowMs === null) return null;
+  return nowMs - lastTouchedAtMs;
+}
+
+function isStaleDispatchingAmaCloserRecord(record, { now = null } = {}) {
+  // A `dispatching` record with no parseable timestamp at all is stale by
+  // definition, so a corrupt launch record cannot hold its PR forever. The
+  // `dispatched` branch below deliberately takes the opposite view of that
+  // launch-only case, which is why the two do not share one predicate.
+  if (mostRecentAmaCloserTouchMs(record) === null) return true;
+  const ageMs = amaCloserRecordAgeMs(record, { now });
+  return ageMs !== null && ageMs >= AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS;
 }
 
 export function isActiveAmaCloserDispatchRecord(record, options = {}) {
@@ -1325,6 +1355,37 @@ export function isActiveAmaCloserDispatchRecord(record, options = {}) {
     return !isStaleDispatchingAmaCloserRecord(record, options);
   }
   if (state !== 'dispatched') return false;
+
+  // A `dispatched` record whose worker died without ever writing a terminal
+  // ledger status keeps a non-terminal `lastObservedStatus` forever. Without an
+  // age escape it stays "active" indefinitely, and its repoPrKey wedges the
+  // consume loop's blockedRepoPrKeys -- the follow-up daemon then reports
+  // `deferredSamePR=N` with `activeAtStart=0` and full capacity, and those PRs
+  // never get remediated again.
+  //
+  // Observed 2026-08-23: agent-os#5703 (status=starting, 7.0h),
+  // agent-os#5715 (running, 5.7h) and adversarial-review#893 (unknown, 4.6h)
+  // were wedged for hours while 8 slots sat idle, freezing the merge backlog.
+  // agent-os#3114/#3116 had been wedged the same way for 1180 hours -- 49 days.
+  // The `dispatching` branch above already has exactly this escape; `dispatched`
+  // was simply missing it.
+  //
+  // Staleness is evaluated against the same reclaim age the dispatching branch
+  // uses, and against the record's MOST RECENT timestamp, so a live closer is
+  // never raced: a worker that is genuinely running has its `lastObservedAt`
+  // refreshed on every observing tick, well inside that window, even though its
+  // `dispatchedAt`/`lastAttemptedAt` launch stamps keep aging.
+  //
+  // `amaCloserRecordAgeMs` returns null when the record carries NO parseable
+  // timestamp, and that case stays active on purpose: see ama-hammer-retry-cap,
+  // where a launch-only record (lastObservedStatus 'unknown', no timestamps)
+  // must stay held. The `dispatching` branch takes the opposite view of its own
+  // launch-only case, so the two states are checked separately rather than
+  // sharing one predicate.
+  const ageMs = amaCloserRecordAgeMs(record, options);
+  if (ageMs !== null && ageMs >= AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS) {
+    return false;
+  }
 
   const status = normalizeWorkerRunStatus(record.lastObservedStatus);
   if (AMA_CLOSER_ACTIVE_STATUSES.has(status)) return true;

@@ -20,6 +20,7 @@ import {
   REVIEW_PIPELINE_HEALTH_METRICS,
   collectReviewPipelineHealth,
   renderReviewPipelinePrometheus,
+  summarizeRoundBudgetAnomalies,
   resolveReviewPipelineHealthConfig,
 } from '../src/review-pipeline-health.mjs';
 import { PROVIDER_OVERLOADED_FAILURE_CLASS } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
@@ -1900,4 +1901,33 @@ test('reviewer_pass_zombie default tracks the reaper timeout it is derived from'
     config.runningReviewerPassMaxAgeMs,
     Math.round(DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS * 1000 * 1.5)
   );
+});
+
+test('a completed job that overran its round budget is history, not a ticket', () => {
+  // Regression for 2026-08-23. `summarizeRoundBudgetAnomalies` counted bare
+  // budget overruns on COMPLETED job records. Those records are immutable and
+  // never reaped, so the finding could only ever grow: it sat pinned at exactly
+  // 34 for a whole operator shift -- 34/34 `completed`, 29 of them from May,
+  // and ZERO in the awaiting-rereview state the finding's own recommended
+  // action says to inspect. A ticket that cannot clear trains its reader to
+  // skip the surface.
+  const job = {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 4242,
+    jobId: 'j1',
+    riskClass: 'medium', // budget 3
+    remediationPlan: { rounds: [{ round: 1 }, { round: 2 }, { round: 3 }, { round: 4 }] },
+  };
+
+  const completed = summarizeRoundBudgetAnomalies([{ state: 'completed', job }]);
+  assert.equal(
+    completed.anomalies.length,
+    0,
+    'a completed overrun must not raise a ticket that can never clear'
+  );
+
+  // Still live -> still actionable.
+  const inProgress = summarizeRoundBudgetAnomalies([{ state: 'in-progress', job }]);
+  assert.equal(inProgress.anomalies.length, 1);
+  assert.ok(inProgress.anomalies[0].codes.includes('round-count-exceeds-risk-budget'));
 });

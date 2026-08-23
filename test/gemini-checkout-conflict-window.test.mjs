@@ -99,6 +99,35 @@ test('backoff is capped so late attempts stay responsive', async () => {
   assert.ok(Math.max(...sleeps) <= 5000, `backoff must stay capped, saw ${Math.max(...sleeps)}ms`);
 });
 
+test('default elapsed-time clock is monotonic and does not depend on Date.now', async (t) => {
+  reviewerHarness.resetGeminiCredentialCheckoutQueueForTest();
+  const originalDateNow = Date.now;
+  Date.now = () => {
+    throw new Error('Date.now should not be used for Gemini checkout elapsed time');
+  };
+  t.after(() => {
+    Date.now = originalDateNow;
+  });
+
+  let calls = 0;
+  const result = await reviewerHarness.checkoutGeminiCredentialFromBroker({
+    env: {
+      CQP_BROKER_URL: 'http://broker.test',
+      AGENT_OS_GEMINI_CHECKOUT_409_BACKOFF_MS: '1',
+      AGENT_OS_GEMINI_CHECKOUT_409_WINDOW_MS: '1000',
+    },
+    fetchImpl: async () => {
+      calls += 1;
+      return calls <= 2 ? conflict() : successfulCheckout('monotonic-default');
+    },
+    sleepImpl: async () => {},
+    log: { info() {} },
+  });
+
+  assert.equal(result.checkoutId, 'lease-monotonic-default');
+  assert.equal(calls, 3);
+});
+
 test('explicit retry-only configuration preserves the legacy attempt-count bound', async () => {
   reviewerHarness.resetGeminiCredentialCheckoutQueueForTest();
   let calls = 0;
@@ -151,6 +180,7 @@ test('zero backoff still sleeps while the wall-clock window is active', async ()
   const sleeps = [];
   let clock = 0;
   let calls = 0;
+  const infos = [];
   const warnings = [];
   const result = await reviewerHarness.checkoutGeminiCredentialFromBroker({
     env: {
@@ -164,13 +194,17 @@ test('zero backoff still sleeps while the wall-clock window is active', async ()
     },
     sleepImpl: async (ms) => { sleeps.push(ms); clock += ms; },
     nowImpl: () => clock,
-    log: { warn(message) { warnings.push(message); } },
+    log: {
+      info(message) { infos.push(message); },
+      warn(message) { warnings.push(message); },
+    },
   });
 
   assert.equal(result.checkoutId, 'lease-after-zero-backoff');
   assert.deepEqual(sleeps, [50, 50, 50]);
-  assert.equal(warnings.length, 1, 'the wait-window diagnostic should be logged once');
-  assert.match(warnings[0], /Gemini credential checkout conflict/);
+  assert.equal(infos.length, 1, 'the wait-window diagnostic should be logged once at info');
+  assert.match(infos[0], /Gemini credential checkout conflict/);
+  assert.deepEqual(warnings, [], 'normal checkout queueing must not emit warn-level logs');
 });
 
 test('a non-409 failure still throws immediately', async () => {

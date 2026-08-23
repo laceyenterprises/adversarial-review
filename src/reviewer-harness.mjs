@@ -26,6 +26,7 @@ import {
 } from 'node:fs';
 import { hostname, homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { promisify } from 'node:util';
 import { materializePerWorkerCodexAuth } from './codex-per-worker-auth.mjs';
 import { reviewWithCodexOAuthResponses } from './codex-oauth-responses.mjs';
@@ -1352,7 +1353,7 @@ async function checkoutGeminiCredentialFromBrokerSerialized(options = {}) {
   const retries = resolveGeminiCheckoutConflictRetries(env);
   const backoffMs = resolveGeminiCheckoutConflictBackoffMs(env);
   const windowMs = resolveGeminiCheckoutConflictWindowMs(env);
-  const nowMs = options.nowImpl ?? (() => Date.now());
+  const nowMs = options.nowImpl ?? (() => performance.now());
   const log = options.log ?? console;
   const startedAt = nowMs();
   let lastError = null;
@@ -1360,9 +1361,8 @@ async function checkoutGeminiCredentialFromBrokerSerialized(options = {}) {
   // Bounded by WALL CLOCK, not attempt count. A 409 means another reviewer
   // holds the single shared credential and will release it in ~2 minutes;
   // giving up after a fixed handful of attempts is what sent callers into the
-  // 30-minute legacy lock. Attempts still cap as a runaway guard, but the
-  // window is the real bound and backoff is capped so late attempts stay
-  // responsive instead of sleeping through the release.
+  // 30-minute legacy lock. Backoff is capped so late attempts stay responsive
+  // instead of sleeping through the release.
   for (let attempt = 0; ; attempt += 1) {
     try {
       return await checkoutGeminiCredentialFromBrokerOnce(options);
@@ -1377,8 +1377,8 @@ async function checkoutGeminiCredentialFromBrokerSerialized(options = {}) {
       // Honour whichever bound the operator actually configured: when the
       // window is disabled (0) the legacy attempt-count behaviour stands.
       if (windowMs <= 0 ? attemptsExhausted : windowExhausted) break;
-      if (!loggedConflictWait && windowMs > 0 && typeof log?.warn === 'function') {
-        log.warn(`Gemini credential checkout conflict; waiting up to ${windowMs}ms for shared credential release`);
+      if (!loggedConflictWait && windowMs > 0 && typeof log?.info === 'function') {
+        log.info(`Gemini credential checkout conflict; waiting up to ${windowMs}ms for shared credential release`);
         loggedConflictWait = true;
       }
       const wait = Math.min(

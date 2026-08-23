@@ -1234,8 +1234,10 @@ async function fetchWithTimeout(fetchImpl, url, options, timeoutMs) {
 }
 
 function resolveGeminiCheckoutConflictRetries(env = process.env) {
-  const raw = env.AGENT_OS_GEMINI_CHECKOUT_409_RETRIES
-    ?? env.GEMINI_CQP_CHECKOUT_409_RETRIES;
+  const raw = firstNonEmptyEnv(
+    env.AGENT_OS_GEMINI_CHECKOUT_409_RETRIES,
+    env.GEMINI_CQP_CHECKOUT_409_RETRIES,
+  );
   if (raw === undefined || raw === null || raw === '') return DEFAULT_GEMINI_CQP_CHECKOUT_CONFLICT_RETRIES;
   const parsed = Number(raw);
   if (!Number.isInteger(parsed) || parsed < 0) return DEFAULT_GEMINI_CQP_CHECKOUT_CONFLICT_RETRIES;
@@ -1243,10 +1245,14 @@ function resolveGeminiCheckoutConflictRetries(env = process.env) {
 }
 
 function resolveGeminiCheckoutConflictWindowMs(env = process.env) {
-  const raw = env.AGENT_OS_GEMINI_CHECKOUT_409_WINDOW_MS
-    ?? env.GEMINI_CQP_CHECKOUT_409_WINDOW_MS;
-  const retryRaw = env.AGENT_OS_GEMINI_CHECKOUT_409_RETRIES
-    ?? env.GEMINI_CQP_CHECKOUT_409_RETRIES;
+  const raw = firstNonEmptyEnv(
+    env.AGENT_OS_GEMINI_CHECKOUT_409_WINDOW_MS,
+    env.GEMINI_CQP_CHECKOUT_409_WINDOW_MS,
+  );
+  const retryRaw = firstNonEmptyEnv(
+    env.AGENT_OS_GEMINI_CHECKOUT_409_RETRIES,
+    env.GEMINI_CQP_CHECKOUT_409_RETRIES,
+  );
   if (raw === undefined || raw === null || raw === '') {
     if (retryRaw !== undefined && retryRaw !== null && retryRaw !== '') {
       return 0;
@@ -1261,12 +1267,18 @@ function resolveGeminiCheckoutConflictWindowMs(env = process.env) {
 }
 
 function resolveGeminiCheckoutConflictBackoffMs(env = process.env) {
-  const raw = env.AGENT_OS_GEMINI_CHECKOUT_409_BACKOFF_MS
-    ?? env.GEMINI_CQP_CHECKOUT_409_BACKOFF_MS;
+  const raw = firstNonEmptyEnv(
+    env.AGENT_OS_GEMINI_CHECKOUT_409_BACKOFF_MS,
+    env.GEMINI_CQP_CHECKOUT_409_BACKOFF_MS,
+  );
   if (raw === undefined || raw === null || raw === '') return DEFAULT_GEMINI_CQP_CHECKOUT_CONFLICT_BACKOFF_MS;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_GEMINI_CQP_CHECKOUT_CONFLICT_BACKOFF_MS;
   return Math.floor(parsed);
+}
+
+function firstNonEmptyEnv(...values) {
+  return values.find((value) => value !== undefined && value !== null && value !== '');
 }
 
 async function checkoutGeminiCredentialFromBrokerOnce({

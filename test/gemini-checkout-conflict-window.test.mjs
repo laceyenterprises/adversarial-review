@@ -152,6 +152,31 @@ test('explicit retry-only configuration preserves the legacy attempt-count bound
   assert.equal(calls, 3, 'explicit retries without a window should not inherit the 5-minute default');
 });
 
+test('empty primary window env falls back to legacy checkout window env', () => {
+  assert.equal(reviewerHarness.resolveGeminiCheckoutConflictWindowMs({
+    AGENT_OS_GEMINI_CHECKOUT_409_WINDOW_MS: '',
+    GEMINI_CQP_CHECKOUT_409_WINDOW_MS: '1234',
+  }), 1234);
+});
+
+test('empty primary retries env still honors legacy retry-only checkout bound', () => {
+  assert.equal(reviewerHarness.resolveGeminiCheckoutConflictWindowMs({
+    AGENT_OS_GEMINI_CHECKOUT_409_RETRIES: '',
+    GEMINI_CQP_CHECKOUT_409_RETRIES: '2',
+  }), 0);
+  assert.equal(reviewerHarness.resolveGeminiCheckoutConflictRetries({
+    AGENT_OS_GEMINI_CHECKOUT_409_RETRIES: '',
+    GEMINI_CQP_CHECKOUT_409_RETRIES: '2',
+  }), 2);
+});
+
+test('empty primary backoff env falls back to legacy checkout backoff env', () => {
+  assert.equal(reviewerHarness.resolveGeminiCheckoutConflictBackoffMs({
+    AGENT_OS_GEMINI_CHECKOUT_409_BACKOFF_MS: '',
+    GEMINI_CQP_CHECKOUT_409_BACKOFF_MS: '7',
+  }), 7);
+});
+
 test('window=0 preserves the legacy attempt-count bound', async () => {
   reviewerHarness.resetGeminiCredentialCheckoutQueueForTest();
   // Operators who pinned the old behaviour keep it.

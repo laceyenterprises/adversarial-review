@@ -6,6 +6,7 @@ import {
 
 const BUG_ERROR_CODES = new Set(['ENOENT', 'EACCES', 'EPERM']);
 const CASCADE_ERROR_CODES = new Set(['ETIMEDOUT']);
+const DIFF_TOO_LARGE_FAILURE_CLASS = 'diff-too-large';
 const PROVIDER_OVERLOADED_FAILURE_CLASS = 'provider-overloaded';
 const REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS = 'reviewer-empty-output';
 const REVIEWER_TIMEOUT_MESSAGE_RE = /command timed out after \d+ms/;
@@ -229,10 +230,35 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     return 'pending-review-leak';
   }
 
+  // GitHub's diff API refuses any PR whose diff exceeds 20,000 lines:
+  //   HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)
+  //   PullRequest.diff too_large
+  // No retry can ever succeed -- the diff size is a property of the PR, not a
+  // transient condition -- so leaving this in `unknown` spends the entire
+  // review budget on an operation that cannot complete, and leaves an operator
+  // reading "[unknown] Command failed with code 1" with nothing to act on.
+  //
+  // Observed 2026-08-23 on agent-os#5707 (+57 -33224 across 145 files, ~33k
+  // lines): four first-pass attempts, gemini x3 and claude x1, every one
+  // failing at 0 minutes with this exact text and recorded as `unknown`. No
+  // verdict was ever produced and the PR had to be closed by operator review.
+  // Same shape as the LiteLLM routing-tier case documented above -- an
+  // unclassified failure silently burning attempts.
+  //
+  // pipeline-health already reports this class; this makes the reviewer path
+  // that consumes the budget agree with it.
+  if (
+    /pullrequest\.diff too_large/.test(lower)
+    || (/http\s*406/.test(lower) && /diff exceeded|maximum number of lines|too_large/.test(lower))
+  ) {
+    return DIFF_TOO_LARGE_FAILURE_CLASS;
+  }
+
   return 'unknown';
 }
 
 export {
+  DIFF_TOO_LARGE_FAILURE_CLASS,
   PROVIDER_OVERLOADED_FAILURE_CLASS,
   REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS,
   classifyReviewerFailure,

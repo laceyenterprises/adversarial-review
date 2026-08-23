@@ -588,6 +588,26 @@ test('an in-flight review does not count as starvation', () => {
   assert.equal(snapshot.firstPassQueue.depth, 0);
 });
 
+test('malformed PR title finding fires for open malformed review rows', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 5738,
+    reviewStatus: 'malformed',
+    reviewedAt: '2026-05-25T17:45:00.000Z',
+    failedAt: '2026-05-25T17:46:00.000Z',
+    failureMessage: 'missing required reviewer tag prefix',
+  });
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  assert.ok(findingCodes(snapshot).includes('review:malformed_pr_title'));
+  const finding = snapshot.findings.find((item) => item.code === 'review:malformed_pr_title');
+  assert.equal(finding.tier, 'ticket');
+  assert.match(finding.message, /review_status='malformed'/);
+  assert.match(finding.message, /creation-time worker prefix/);
+  assert.ok(finding.evidence.some((line) => line.includes(`${REPO}#5738`)));
+  assert.equal(finding.details.count, 1);
+});
+
 test('remediation backlog finding fires on pending jobs and clears when the backlog drains', () => {
   const rootDir = tempRoot();
   insertReviewRow(rootDir, { prNumber: 10, reviewStatus: 'posted', postedAt: '2026-05-25T17:00:00.000Z' });

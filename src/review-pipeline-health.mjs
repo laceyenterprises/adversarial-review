@@ -188,6 +188,14 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     defaultThreshold: DEFAULT_QUEUE_STARVATION_MAX_AGE_MS,
   },
   {
+    code: 'review:malformed_pr_title',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: null,
+    defaultThreshold: null,
+    thresholdDescription: 'one or more open PRs are recorded malformed and will not receive adversarial review',
+  },
+  {
     code: 'review:remediation_backlog',
     tier: 'ticket',
     category: 'review-pipeline',
@@ -912,6 +920,29 @@ function summarizeFirstPassQueue(db, { nowMs }) {
     depth: rows.length,
     failedCount,
     oldest,
+  };
+}
+
+function summarizeMalformedPrTitles(db) {
+  const rows = safeAll(
+    db,
+    `SELECT repo, pr_number, reviewed_at, failed_at, failure_message, review_attempts
+       FROM reviewed_prs
+      WHERE COALESCE(pr_state, 'open') = 'open'
+        AND review_status = 'malformed'
+      ORDER BY COALESCE(failed_at, reviewed_at, '') ASC,
+               repo ASC,
+               pr_number ASC`
+  );
+  return {
+    count: rows.length,
+    prs: rows.map((row) => ({
+      repo: row.repo,
+      prNumber: row.pr_number,
+      recordedAt: row.failed_at || row.reviewed_at || null,
+      reviewAttempts: Number(row.review_attempts || 0),
+      failureMessage: row.failure_message || null,
+    })),
   };
 }
 
@@ -1768,6 +1799,22 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }));
   }
 
+  if (snapshot.malformedPrTitles.count > 0) {
+    const sample = snapshot.malformedPrTitles.prs[0];
+    findings.push(buildFinding({
+      code: 'review:malformed_pr_title',
+      tier: 'ticket',
+      subject: `${snapshot.malformedPrTitles.count} open PR(s) are recorded malformed and will not be reviewed`,
+      message: `${sample.repo}#${sample.prNumber} is review_status='malformed'; adversarial review did not trigger because the PR title lacked a recognized creation-time worker prefix.`,
+      evidence: snapshot.malformedPrTitles.prs.map((pr) => (
+        `reviews.db reviewed_prs ${pr.repo}#${pr.prNumber} status=malformed recordedAt=${pr.recordedAt || 'unknown'}`
+      )),
+      recommendedAction: 'Fix the PR title through the sanctioned hq pr open path for new worker PRs. For already-open malformed PRs, preserve the row/comment evidence and recreate or explicitly retrigger only through a documented recovery path.',
+      observedAt,
+      details: snapshot.malformedPrTitles,
+    }));
+  }
+
   const pendingRemediation = snapshot.followUpQueues.states.pending || 0;
   if (pendingRemediation > config.remediationBacklogThreshold) {
     findings.push(buildFinding({
@@ -2038,6 +2085,9 @@ function collectReviewPipelineHealth({
     const firstPassQueue = db
       ? summarizeFirstPassQueue(db, { nowMs })
       : { depth: 0, oldest: null };
+    const malformedPrTitles = db
+      ? summarizeMalformedPrTitles(db)
+      : { count: 0, prs: [] };
     const followUpQueues = summarizeFollowUpQueues(rootDir, { nowMs, config });
     const reviewerDegradation = summarizeReviewerDegradation(rootDir, db, { nowMs });
     const outage = db
@@ -2107,6 +2157,7 @@ function collectReviewPipelineHealth({
       reviewerDegradation,
       outage,
       firstPassQueue,
+      malformedPrTitles,
       followUpQueues: {
         states: followUpQueues.states,
         throughput: followUpQueues.throughput,

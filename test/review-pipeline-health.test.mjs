@@ -26,6 +26,7 @@ import { PROVIDER_OVERLOADED_FAILURE_CLASS } from '../src/adapters/reviewer-runt
 import { QUOTA_EXHAUSTED_FAILURE_CLASS } from '../src/quota-exhaustion.mjs';
 import { parseArgs } from '../src/review-pipeline-health-cli.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
+import { DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS } from '../src/reviewer-pass-reaper.mjs';
 
 const NOW = '2026-05-25T18:00:00.000Z';
 const REPO = 'laceyenterprises/adversarial-review';
@@ -1870,17 +1871,33 @@ test('a routine OAuth banner in the tail does not classify a failure as auth', (
 
 test('reviewer_pass_zombie threshold stays above the reaper timeout', () => {
   // The reviewer-pass-reaper ends a hung pass at
-  // DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS (3600s). This finding exists to catch a
-  // reaper that is NOT doing its job, so alarming earlier than the reaper can act
-  // is guaranteed noise: the operator has no lever, and the condition resolves
+  // DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS. This finding exists to catch a reaper
+  // that is NOT doing its job, so alarming earlier than the reaper can act is
+  // guaranteed noise: the operator has no lever, and the condition resolves
   // itself. It previously defaulted to 30 minutes -- half the reaper timeout --
   // so every hung pass produced 30 minutes of unactionable ticket (observed
   // 2026-08-22: three gemini passes ticketed at 48-50m, reaper due at 60m).
-  const reaperTimeoutMs = 3600 * 1000;
+  //
+  // The reaper timeout is imported, not restated, so retuning the reaper is
+  // caught here instead of passing against a stale duplicate constant.
+  const reaperTimeoutMs = DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS * 1000;
   const config = resolveReviewPipelineHealthConfig({});
   assert.ok(
     config.runningReviewerPassMaxAgeMs > reaperTimeoutMs,
     `zombie threshold ${config.runningReviewerPassMaxAgeMs}ms must exceed the ` +
       `reaper timeout ${reaperTimeoutMs}ms`
+  );
+});
+
+test('reviewer_pass_zombie default tracks the reaper timeout it is derived from', () => {
+  // Guards the coupling itself: if the derivation is ever re-hardcoded, a future
+  // change to DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS would leave this default
+  // pinned at 90 minutes and silently re-invert the alarm against its
+  // remediation. Pipeline-health config overrides are unaffected -- only the
+  // default is coupled.
+  const config = resolveReviewPipelineHealthConfig({});
+  assert.equal(
+    config.runningReviewerPassMaxAgeMs,
+    Math.round(DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS * 1000 * 1.5)
   );
 });

@@ -149,6 +149,29 @@ new PR
   `provider-overloaded` preserves HTTP 529/backend capacity failures separately
   from generic `cascade` so pipeline health can report provider instability
   without burning the normal review attempt budget.
+  The file-backed cascade hold in `data/cascade-state/*.json`
+  (`nextRetryAfter`) is ALWAYS the PR-level exponential backoff
+  (`1, 2, 4, 8, 15` minutes, clamped at `CASCADE_FAILURE_CAP`) measured from the
+  failure timestamp. A provider-reported reset (a quota reset window, an outage
+  signal's suggested retry) never sets that hold in either direction: a long one
+  would strand the PR against *every* eligible reviewer even when an uncapped
+  one is idle, and a short one would let the PR tight-loop below its own
+  backoff. The provider's estimate is mirrored into the same file as
+  `providerRetryAfter` for diagnosis only — recorded whenever the failure
+  carried a provider hint, including when it coincides with the computed hold,
+  so the key's absence means exactly one thing: the failure reported no
+  provider reset. It is never inherited across failures (each write replaces
+  the whole file), so a stale quota window can never be attributed to a later,
+  unrelated failure class. The failure timestamp that anchors the hold is
+  accepted either as an ISO-8601 string or as epoch milliseconds; an unusable
+  one (unparseable, `null`, or outside the representable `Date` range) anchors
+  on `now` rather than throwing inside the failure-settle path, and
+  `lastFailureAt` is always written as a parseable ISO-8601 string because
+  `review-pipeline-health` republishes it verbatim as `since`.
+  Provider-scoped suspension keeps its
+  own gates — `reviewed_prs.quota_reset_at_utc` for the `quota-exhausted` hold
+  above, and the `hq fleet quota status` provider gate — which block just the
+  capped classes.
   `deploy-wedge` rows are recorded as `pending-upstream` when main-catchup is
   frozen or its outage state file is unreadable; malformed JSON in
   `main-catchup/.state.json` is treated as `state-unreadable` and pauses reviews

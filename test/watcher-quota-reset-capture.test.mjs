@@ -127,7 +127,14 @@ test('quota-exhausted outage failure preserves attempt budget and requeues after
       'utf8'
     ));
     assert.equal(state.lastFailureClass, QUOTA_EXHAUSTED_FAILURE_CLASS);
-    assert.equal(state.nextRetryAfter, '2026-06-18T00:39:00.000Z');
+    // The reviewer-agnostic cascade hold is the PR-level backoff, NOT the
+    // provider's multi-hour reset -- otherwise one capped provider parks the
+    // PR against every other reviewer too. The provider reset stays durable on
+    // the row (quota_reset_at_utc) where the provider gate reads it, and is
+    // mirrored into the cascade state for diagnosis only.
+    assert.equal(state.backoffMinutes, 1);
+    assert.equal(state.nextRetryAfter, '2026-06-17T17:31:00.000Z');
+    assert.equal(state.providerRetryAfter, '2026-06-18T00:39:00.000Z');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -230,7 +237,11 @@ test('hold-until-reset honors the stored reset and does NOT burn a review attemp
       path.join(rootDir, 'data', 'cascade-state', `${encodeURIComponent(REPO)}__${PR}.json`),
       'utf8'
     ));
-    assert.equal(state.nextRetryAfter, '2026-06-18T00:39:00.000Z');
+    // The provider reset that the hold-until-reset gate consults is the durable
+    // row column; the cascade file only carries the PR-level backoff.
+    assert.equal(row.quota_reset_at_utc, '2026-06-18T00:39:00.000Z');
+    assert.equal(state.nextRetryAfter, '2026-06-17T17:31:00.000Z');
+    assert.equal(state.providerRetryAfter, '2026-06-18T00:39:00.000Z');
     assert.equal(getRow(db).infra_auto_recover_attempts, 0);
     assert.equal(getRow(db).review_attempts, 0);
   } finally {
@@ -309,7 +320,10 @@ test('quota failure with NO parseable reset leaves quota_reset_at_utc NULL (fall
       path.join(rootDir, 'data', 'cascade-state', `${encodeURIComponent(REPO)}__${PR}.json`),
       'utf8'
     ));
-    assert.equal(state.nextRetryAfter, '2026-06-17T17:45:00.000Z');
+    // The 15m default provider window is recorded as a diagnostic; the hold
+    // the watcher actually waits on is the PR-level backoff.
+    assert.equal(state.nextRetryAfter, '2026-06-17T17:31:00.000Z');
+    assert.equal(state.providerRetryAfter, '2026-06-17T17:45:00.000Z');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -379,7 +393,11 @@ test('broker outage preserves existing cascade history while recording retry', (
       'broker-unavailable': 1,
     });
     assert.equal(state.lastFailureClass, 'broker-unavailable');
-    assert.equal(state.nextRetryAfter, '2026-06-17T17:35:00.000Z');
+    // Second consecutive transient failure -> 2m backoff, not the outage
+    // signal's own 5m suggestion.
+    assert.equal(state.backoffMinutes, 2);
+    assert.equal(state.nextRetryAfter, '2026-06-17T17:32:00.000Z');
+    assert.equal(state.providerRetryAfter, '2026-06-17T17:35:00.000Z');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

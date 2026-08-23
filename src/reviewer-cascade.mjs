@@ -149,32 +149,36 @@ function recordCascadeFailure(rootDir, {
   );
   const consecutiveTransientFailures = Math.min(previousCount + 1, CASCADE_FAILURE_CAP);
   const backoffMinutes = resolveCascadeBackoffMinutes(consecutiveTransientFailures);
-  const failedAtMs = Date.parse(failedAt);
-  // A caller-supplied `nextRetryAfter` (a provider quota reset) must not gate
-  // the PR beyond the PR-level backoff. This state is reviewer-AGNOSTIC: it
-  // holds the PR against EVERY eligible reviewer, so pinning it to one
-  // provider's reset strands the PR even when an uncapped reviewer is free.
-  // Provider outages already have their own, correct gate -- the provider
+  const parsedFailedAtMs = Date.parse(failedAt);
+  // Anchor on `now` when the caller hands us an unparseable timestamp: this
+  // value feeds a `new Date(...).toISOString()` that would otherwise throw
+  // RangeError inside the watcher's failure-settle path -- i.e. a bad
+  // timestamp would crash the very code trying to record a failure.
+  const failedAtMs = Number.isFinite(parsedFailedAtMs) ? parsedFailedAtMs : Date.now();
+  // The PR-level hold is ALWAYS the backoff this function just computed. A
+  // caller-supplied `nextRetryAfter` (a provider quota reset) is a hint about
+  // one PROVIDER; this state is reviewer-AGNOSTIC and holds the PR against
+  // EVERY eligible reviewer, so letting it set the hold is wrong in both
+  // directions:
+  //
+  //   too long  -- observed 2026-08-23: the codex weekly cap wrote
+  //                nextRetryAfter=2026-08-27T04:38Z onto agent-os#5715 and
+  //                adversarial-review#892 while backoffMinutes was 2. Both PRs
+  //                were held for FOUR DAYS against gemini, which was uncapped
+  //                and idle; the review lane went silent and the merge backlog
+  //                froze.
+  //   too short -- a provider that reports a near-immediate reset (or a stale
+  //                one already in the past) would drop the hold below the
+  //                exponential schedule, so `consecutiveTransientFailures`
+  //                would climb while the PR tight-loops against the reviewer
+  //                network -- exactly what the backoff exists to prevent.
+  //
+  // Provider outages already have their own, correct gate: the provider
   // suspension surfaced by `hq fleet quota status`, which blocks only the
-  // capped classes.
-  //
-  // Observed 2026-08-23: the codex weekly cap wrote
-  // nextRetryAfter=2026-08-27T04:38Z onto agent-os#5715 and
-  // adversarial-review#892 while backoffMinutes was 2. Both PRs were held for
-  // FOUR DAYS against gemini, which was uncapped and idle; the review lane went
-  // completely silent and the merge backlog froze.
-  //
-  // Clamp to the computed backoff so the schedule this function just derived is
-  // the one that applies. A longer provider-reset hint is still recorded as
-  // `providerRetryAfter` for diagnosis, and the provider gate remains
-  // authoritative for the capped classes.
-  const backoffRetryAfter = new Date(failedAtMs + (backoffMinutes * 60_000)).toISOString();
-  const providerRetryAfterMs = nextRetryAfter ? Date.parse(nextRetryAfter) : NaN;
-  const retryAfter =
-    Number.isNaN(providerRetryAfterMs) ||
-    providerRetryAfterMs > Date.parse(backoffRetryAfter)
-      ? backoffRetryAfter
-      : nextRetryAfter;
+  // capped classes and leaves the rest serving. The provider's own estimate is
+  // kept as `providerRetryAfter` for diagnosis and never gates.
+  const backoffRetryAfterMs = failedAtMs + (backoffMinutes * 60_000);
+  const retryAfter = new Date(backoffRetryAfterMs).toISOString();
   const normalizedFailureClass = normalizeTransientFailureClass(failureClass);
   const transientFailureBreakdown = previous?.transientFailureBreakdown
     ? { ...previous.transientFailureBreakdown }

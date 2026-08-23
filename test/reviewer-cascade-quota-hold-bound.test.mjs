@@ -50,9 +50,14 @@ test('a provider quota reset cannot hold a PR past its own backoff', () => {
   }
 });
 
-test('a provider reset SHORTER than the backoff is still honoured', () => {
-  // Clamping must only ever shorten a hold, never extend one: if the provider
-  // says it recovers before our backoff elapses, retry then.
+test('a provider reset SHORTER than the backoff cannot bypass the backoff floor', () => {
+  // The clamp is symmetric: the PR-level hold is the computed backoff in BOTH
+  // directions. A provider that reports a near-immediate reset (or a stale one
+  // already in the past) must not drop the hold below the exponential
+  // schedule -- otherwise `consecutiveTransientFailures` climbs while the PR
+  // tight-loops against the whole reviewer network, which is precisely what
+  // the backoff exists to prevent. Provider-specific recovery is the provider
+  // gate's job (`hq fleet quota status`), not this reviewer-agnostic state's.
   const root = mkdtempSync(path.join(tmpdir(), 'cascade-bound-'));
   try {
     const failedAt = '2026-08-23T01:15:25.567Z';
@@ -65,7 +70,34 @@ test('a provider reset SHORTER than the backoff is still honoured', () => {
       nextRetryAfter: soon,
     });
     const state = readCascadeState(root, { repo: REPO, prNumber: 4242 });
-    assert.equal(state.nextRetryAfter, soon);
+    const failedMs = Date.parse(failedAt);
+    assert.equal(
+      state.nextRetryAfter,
+      new Date(failedMs + state.backoffMinutes * 60_000).toISOString()
+    );
+    assert.ok(Date.parse(state.nextRetryAfter) > Date.parse(soon));
+    // The provider's own estimate is still recorded, for diagnosis only.
+    assert.equal(state.providerRetryAfter, soon);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('an unparseable failedAt still records a hold instead of throwing', () => {
+  // recordCascadeFailure runs inside the watcher's failure-settle path; a
+  // malformed timestamp must not crash the code that is recording a failure.
+  const root = mkdtempSync(path.join(tmpdir(), 'cascade-bound-'));
+  try {
+    recordCascadeFailure(root, {
+      repo: REPO,
+      prNumber: 909,
+      failedAt: 'not-a-date',
+      failureClass: 'cascade',
+      nextRetryAfter: '2026-08-27T04:38:00.000Z',
+    });
+    const state = readCascadeState(root, { repo: REPO, prNumber: 909 });
+    assert.ok(Number.isFinite(Date.parse(state.nextRetryAfter)));
+    assert.equal(state.backoffMinutes, 1);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

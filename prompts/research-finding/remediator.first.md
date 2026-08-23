@@ -27,10 +27,27 @@ For each blocking issue in the review, add exactly one entry to one of:
     codebase already settled this differently, and state what you actually
     checked. If you cannot produce that evidence, fix the finding or record a
     blocker instead.
-  - You may also harden a real, related defect you find while remediating — one
-    that shares a root cause, code path, or failure mode with a finding you were
-    sent to fix, and that you can state concretely. Record it in `nonBlocking[]`
-    and say in the `action` that you found it during remediation, not in the
-    review. Keep it inside the smallest-durable-patch discipline; if it is too
-    large to fix safely, describe it in `summary` instead of half-fixing it.
 - `blockers[]` when human input is required.
+
+## Hardening what you find along the way
+
+Remediation is the one time a worker reads a subject closely with the authority
+to change it. If that reading turns up a real, related defect the reviewer did
+not flag — a neighbouring claim with the same evidence problem you were sent to
+fix, a missing source check on the path you just touched, a validation gap that
+would not have caught the finding — you may fix it in the same round.
+
+The bar is *related and evidenced*, not *anything you noticed*:
+- It shares a root cause, a claim path, or a failure mode with a finding you
+  were sent to address.
+- You can state the defect concretely, the way a finding is stated.
+- The fix stays inside the smallest-durable-edit discipline; it does not become
+  the speculative rewrite this prompt otherwise forbids.
+
+Record each one in `nonBlocking[]` with the same shape as `addressed[]`, and
+say in the `action` that you found it during remediation rather than in the
+review. That keeps the public comment honest about where the work came from,
+and it does not touch the blocking-coverage count.
+
+If the related defect is too large to fix safely in this round, do not
+half-fix it. Describe it in the `summary` so the operator can schedule it.

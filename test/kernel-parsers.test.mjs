@@ -1417,3 +1417,27 @@ test('remediator prompts state addressed/pushback/blockers are BLOCKING-ONLY', a
     );
   }
 });
+
+test('remediator prompts keep nonBlocking[] hardening guidance top-level', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const promptsRoot = join(dirname(fileURLToPath(import.meta.url)), '..', 'prompts');
+  const promptDirs = ['code-pr', 'code-pr-security', 'research-finding'];
+  const files = ['remediator.first.md', 'remediator.middle.md', 'remediator.last.md'];
+
+  for (const promptDir of promptDirs) {
+    for (const file of files) {
+      const promptPath = join(promptDir, file);
+      const body = await readFile(join(promptsRoot, promptPath), 'utf8');
+      assert.match(
+        body,
+        /^## Hardening what you find along the way$/m,
+        `${promptPath} must give nonBlocking[] hardening a top-level section`,
+      );
+      assert.doesNotMatch(
+        body,
+        /^  - You may also harden a real, related defect/m,
+        `${promptPath} nests nonBlocking[] hardening under another list item`,
+      );
+    }
+  }
+});

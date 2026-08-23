@@ -150,7 +150,31 @@ function recordCascadeFailure(rootDir, {
   const consecutiveTransientFailures = Math.min(previousCount + 1, CASCADE_FAILURE_CAP);
   const backoffMinutes = resolveCascadeBackoffMinutes(consecutiveTransientFailures);
   const failedAtMs = Date.parse(failedAt);
-  const retryAfter = nextRetryAfter || new Date(failedAtMs + (backoffMinutes * 60_000)).toISOString();
+  // A caller-supplied `nextRetryAfter` (a provider quota reset) must not gate
+  // the PR beyond the PR-level backoff. This state is reviewer-AGNOSTIC: it
+  // holds the PR against EVERY eligible reviewer, so pinning it to one
+  // provider's reset strands the PR even when an uncapped reviewer is free.
+  // Provider outages already have their own, correct gate -- the provider
+  // suspension surfaced by `hq fleet quota status`, which blocks only the
+  // capped classes.
+  //
+  // Observed 2026-08-23: the codex weekly cap wrote
+  // nextRetryAfter=2026-08-27T04:38Z onto agent-os#5715 and
+  // adversarial-review#892 while backoffMinutes was 2. Both PRs were held for
+  // FOUR DAYS against gemini, which was uncapped and idle; the review lane went
+  // completely silent and the merge backlog froze.
+  //
+  // Clamp to the computed backoff so the schedule this function just derived is
+  // the one that applies. A longer provider-reset hint is still recorded as
+  // `providerRetryAfter` for diagnosis, and the provider gate remains
+  // authoritative for the capped classes.
+  const backoffRetryAfter = new Date(failedAtMs + (backoffMinutes * 60_000)).toISOString();
+  const providerRetryAfterMs = nextRetryAfter ? Date.parse(nextRetryAfter) : NaN;
+  const retryAfter =
+    Number.isNaN(providerRetryAfterMs) ||
+    providerRetryAfterMs > Date.parse(backoffRetryAfter)
+      ? backoffRetryAfter
+      : nextRetryAfter;
   const normalizedFailureClass = normalizeTransientFailureClass(failureClass);
   const transientFailureBreakdown = previous?.transientFailureBreakdown
     ? { ...previous.transientFailureBreakdown }
@@ -171,6 +195,11 @@ function recordCascadeFailure(rootDir, {
     lastFailureClass: normalizedFailureClass,
     lastFailureAt: failedAt,
     nextRetryAfter: retryAfter,
+    // Diagnostic only -- never gates. Preserved so an operator can still see
+    // when the provider itself said it would recover.
+    ...(nextRetryAfter && nextRetryAfter !== retryAfter
+      ? { providerRetryAfter: nextRetryAfter }
+      : {}),
     backoffMinutes,
   });
 }

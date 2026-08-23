@@ -444,6 +444,13 @@ adversarial-review/
 │   ├── follow-up-*.mjs         ← remediation queue + reconciler
 │   └── *.mjs                   ← supporting modules
 │
+├── frontend/                   ← ARF: the review frontend, a standalone app
+│   ├── server/                 ← its own API, store, and governance reads
+│   ├── frontend/               ← Screens A/B/C; no build step
+│   ├── gate/                   ← the load-independent arm/disarm gate contract
+│   ├── supervisor/             ← `arf up` / `arf status` / `arf gate …`
+│   └── scripts/                ← standup-verify.mjs: boots it, asserts every surface
+│
 ├── domains/                    ← wiring configs
 ├── prompts/                    ← staged reviewer + remediator prompts
 │   ├── code-pr/                ← production prompt set
@@ -462,6 +469,7 @@ adversarial-review/
 │   ├── STATE-MACHINE.md
 │   ├── follow-up-runbook.md
 │   ├── MACOS-TCC.md
+│   ├── NOTE-arf-standup-from-adversarial-review.md
 │   ├── INCIDENT-*.md
 │   └── internal/               ← historical specs (safe to skip)
 │

@@ -13,7 +13,8 @@
   "scripts": {
     "start": "node supervisor/bin/arf up",
     "gate": "node supervisor/bin/arf gate",
-    "test": "node --test server/test/*.test.mjs supervisor/test/*.test.mjs && npm --prefix frontend test"
+    "test": "node --test server/test/*.test.mjs supervisor/test/*.test.mjs && npm --prefix frontend test",
+    "standup:verify": "node scripts/standup-verify.mjs"
   },
   "dependencies": {},
   "devDependencies": {}

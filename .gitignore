@@ -27,3 +27,9 @@ data/
 # Compatibility scar for the ARC-32 cutover probe that previously landed in
 # src/ and held main-catchup behind an untracked-file refusal.
 /src/sdk-cutover-test.mjs
+
+# Python bytecode. `frontend/gate/arf_gate.py` is imported by ARF's gate-parity
+# and no-bounce suites, and CPython drops a `__pycache__` beside it — so simply
+# running ARF's tests in the deployed checkout would leave untracked files, which
+# is the exact condition main-catchup refuses on.
+__pycache__/

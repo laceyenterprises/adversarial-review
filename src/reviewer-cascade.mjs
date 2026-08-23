@@ -100,6 +100,14 @@ function resolveCascadeBackoffMinutes(consecutiveCascadeFailures) {
   return CASCADE_BACKOFF_MINUTES[index];
 }
 
+// `new Date(ms)` is Invalid Date -- and `.toISOString()` on it throws
+// RangeError -- outside +/-8.64e15 ms of the epoch.
+const MAX_REPRESENTABLE_INSTANT_MS = 8_640_000_000_000_000;
+
+function isRepresentableInstant(ms) {
+  return Number.isFinite(ms) && Math.abs(ms) <= MAX_REPRESENTABLE_INSTANT_MS;
+}
+
 function normalizeTransientFailureClass(failureClass) {
   const value = String(failureClass || '').trim();
   if (
@@ -149,12 +157,26 @@ function recordCascadeFailure(rootDir, {
   );
   const consecutiveTransientFailures = Math.min(previousCount + 1, CASCADE_FAILURE_CAP);
   const backoffMinutes = resolveCascadeBackoffMinutes(consecutiveTransientFailures);
-  const parsedFailedAtMs = Date.parse(failedAt);
-  // Anchor on `now` when the caller hands us an unparseable timestamp: this
-  // value feeds a `new Date(...).toISOString()` that would otherwise throw
-  // RangeError inside the watcher's failure-settle path -- i.e. a bad
-  // timestamp would crash the very code trying to record a failure.
-  const failedAtMs = Number.isFinite(parsedFailedAtMs) ? parsedFailedAtMs : Date.now();
+  // Accept BOTH shapes of failure timestamp. Callers in this repo pass a
+  // canonical ISO string, but epoch milliseconds is the conventional JS
+  // timestamp, and `Date.parse(1755000000000)` stringifies its argument first
+  // and returns NaN -- so a future caller handing us `Date.now()` directly
+  // would have its explicit timestamp silently discarded and the backoff
+  // re-anchored to processing time.
+  const parsedFailedAtMs = typeof failedAt === 'number' ? failedAt : Date.parse(failedAt);
+  const backoffWindowMs = backoffMinutes * 60_000;
+  // Anchor on `now` when the caller hands us a timestamp we cannot turn into a
+  // hold: both this value and the hold derived from it feed a
+  // `new Date(...).toISOString()` that would otherwise throw RangeError inside
+  // the watcher's failure-settle path -- i.e. a bad timestamp would crash the
+  // very code trying to record a failure. `Date.parse` already rejects
+  // out-of-range date STRINGS, but a numeric caller can hand us a finite value
+  // past the +/-8.64e15ms Date range (or one that only overflows once the
+  // backoff is added), so both instants are range-checked here.
+  const failedAtUsable =
+    isRepresentableInstant(parsedFailedAtMs)
+    && isRepresentableInstant(parsedFailedAtMs + backoffWindowMs);
+  const failedAtMs = failedAtUsable ? parsedFailedAtMs : Date.now();
   // The PR-level hold is ALWAYS the backoff this function just computed. A
   // caller-supplied `nextRetryAfter` (a provider quota reset) is a hint about
   // one PROVIDER; this state is reviewer-AGNOSTIC and holds the PR against
@@ -177,7 +199,7 @@ function recordCascadeFailure(rootDir, {
   // suspension surfaced by `hq fleet quota status`, which blocks only the
   // capped classes and leaves the rest serving. The provider's own estimate is
   // kept as `providerRetryAfter` for diagnosis and never gates.
-  const backoffRetryAfterMs = failedAtMs + (backoffMinutes * 60_000);
+  const backoffRetryAfterMs = failedAtMs + backoffWindowMs;
   const retryAfter = new Date(backoffRetryAfterMs).toISOString();
   const normalizedFailureClass = normalizeTransientFailureClass(failureClass);
   const transientFailureBreakdown = previous?.transientFailureBreakdown
@@ -198,12 +220,16 @@ function recordCascadeFailure(rootDir, {
     transientFailureBreakdown,
     lastFailureClass: normalizedFailureClass,
     // Normalized against the SAME anchor `retryAfter` was derived from. When
-    // the caller hands us an unparseable (or null) timestamp we already fall
-    // back to `Date.now()` above; writing the raw value here instead would put
-    // a non-ISO string -- or drop the key entirely -- into durable state that
+    // the caller hands us an unusable (or null) timestamp we already fall back
+    // to `Date.now()` above; writing the raw value here instead would put a
+    // non-ISO string -- or drop the key entirely -- into durable state that
     // `review-pipeline-health` republishes verbatim as the `since` field, and
     // would make `since` disagree with the `retryAfter` computed beside it.
-    lastFailureAt: Number.isFinite(parsedFailedAtMs)
+    // A usable numeric timestamp is honored for the hold but still rendered as
+    // ISO here, for the same reason: `since` must stay a parseable timestamp
+    // STRING for those consumers. Only a usable string is passed through
+    // byte-for-byte, so good input is never rewritten.
+    lastFailureAt: failedAtUsable && typeof failedAt === 'string'
       ? failedAt
       : new Date(failedAtMs).toISOString(),
     nextRetryAfter: retryAfter,
@@ -215,9 +241,14 @@ function recordCascadeFailure(rootDir, {
     // over `previous` -- that would attribute a stale quota reset to an
     // unrelated failure class. Only the fields explicitly carried forward
     // above (the counters and breakdown) survive across failures.
-    ...(nextRetryAfter && nextRetryAfter !== retryAfter
-      ? { providerRetryAfter: nextRetryAfter }
-      : {}),
+    //
+    // Recorded whenever the caller supplied a hint, INCLUDING when it happens
+    // to equal the computed hold. Suppressing the redundant case saved a few
+    // bytes but made the key's absence ambiguous: an operator checking
+    // `providerRetryAfter` to confirm the provider reported a reset would find
+    // it mysteriously missing on the one failure where the two clocks agreed.
+    // Absence means exactly one thing -- the caller passed no provider hint.
+    ...(nextRetryAfter ? { providerRetryAfter: nextRetryAfter } : {}),
     backoffMinutes,
   });
 }

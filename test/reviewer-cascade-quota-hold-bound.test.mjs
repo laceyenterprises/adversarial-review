@@ -205,3 +205,108 @@ test('a later failure without a provider hint does not inherit the old providerR
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('a numeric epoch-ms failedAt anchors the backoff instead of being discarded', () => {
+  // Adversarial review 2026-08-23 (non-blocking): the guard against malformed
+  // timestamps used `Date.parse(failedAt)`, which stringifies its argument, so
+  // epoch milliseconds -- the conventional JS timestamp -- parsed as NaN and
+  // was silently replaced by `Date.now()`. A caller passing `Date.now()`
+  // directly would have re-anchored the hold to processing time.
+  const root = mkdtempSync(path.join(tmpdir(), 'cascade-bound-'));
+  try {
+    const failedAtIso = '2026-08-23T01:15:25.567Z';
+    const failedAtMs = Date.parse(failedAtIso);
+    recordCascadeFailure(root, {
+      repo: REPO,
+      prNumber: 914,
+      failedAt: failedAtMs,
+      failureClass: 'cascade',
+    });
+
+    const state = readCascadeState(root, { repo: REPO, prNumber: 914 });
+    // The hold is anchored on the CALLER's instant, not on `Date.now()`.
+    assert.equal(
+      state.nextRetryAfter,
+      new Date(failedAtMs + state.backoffMinutes * 60_000).toISOString()
+    );
+    // `lastFailureAt` is republished verbatim as `since`, so a numeric input is
+    // still rendered as a canonical ISO string rather than leaking a number.
+    assert.equal(state.lastFailureAt, failedAtIso);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a numeric failedAt outside the representable Date range falls back to now', () => {
+  // `new Date(ms).toISOString()` throws RangeError beyond +/-8.64e15ms.
+  // `Date.parse` already rejects out-of-range date STRINGS, but the numeric
+  // path above accepts finite values, so an overflowing epoch -- including one
+  // that only overflows once the backoff window is added -- must land on the
+  // same `Date.now()` fallback the malformed-string path uses instead of
+  // crashing the watcher's failure-settle path.
+  const root = mkdtempSync(path.join(tmpdir(), 'cascade-bound-'));
+  try {
+    const overflowing = [
+      [915, 8.64e15 + 1],
+      [916, -8.64e15 - 1],
+      // Representable on its own; overflows only after `+ backoffMinutes`.
+      [917, 8.64e15],
+      [918, Number.NaN],
+      [919, Number.POSITIVE_INFINITY],
+    ];
+    for (const [prNumber, failedAt] of overflowing) {
+      const beforeMs = Date.now();
+      recordCascadeFailure(root, {
+        repo: REPO,
+        prNumber,
+        failedAt,
+        failureClass: 'cascade',
+      });
+      const afterMs = Date.now();
+      const state = readCascadeState(root, { repo: REPO, prNumber });
+      const sinceMs = Date.parse(state.lastFailureAt);
+      assert.ok(
+        Number.isFinite(sinceMs),
+        `lastFailureAt ${JSON.stringify(state.lastFailureAt)} must parse for failedAt=${failedAt}`
+      );
+      assert.equal(new Date(sinceMs).toISOString(), state.lastFailureAt);
+      assert.ok(sinceMs >= beforeMs && sinceMs <= afterMs);
+      // The hold still agrees with the anchor written beside it.
+      assert.equal(
+        Date.parse(state.nextRetryAfter) - sinceMs,
+        state.backoffMinutes * 60_000
+      );
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('providerRetryAfter is recorded even when it equals the computed hold', () => {
+  // Adversarial review 2026-08-23 (non-blocking): the diagnostic spread was
+  // conditioned on `nextRetryAfter !== retryAfter`, so on the (improbable, but
+  // reachable) failure where the provider's reset matched the exponential
+  // backoff to the millisecond, the key vanished. Absence of the key must mean
+  // exactly one thing -- the caller supplied no provider hint -- otherwise an
+  // operator verifying provider status reads a missing field as "no reset
+  // reported" when one was.
+  const root = mkdtempSync(path.join(tmpdir(), 'cascade-bound-'));
+  try {
+    const failedAt = '2026-08-23T01:15:25.567Z';
+    // First failure -> backoffMinutes 1, so the hold is failedAt + 60_000ms.
+    const collidingReset = new Date(Date.parse(failedAt) + 60_000).toISOString();
+    recordCascadeFailure(root, {
+      repo: REPO,
+      prNumber: 920,
+      failedAt,
+      failureClass: 'quota-exhausted',
+      nextRetryAfter: collidingReset,
+    });
+
+    const state = readCascadeState(root, { repo: REPO, prNumber: 920 });
+    assert.equal(state.nextRetryAfter, collidingReset);
+    assert.equal(state.providerRetryAfter, collidingReset);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

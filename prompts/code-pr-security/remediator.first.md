@@ -24,4 +24,19 @@ When you finish:
 For each blocking issue in the review, add exactly one entry to one of:
 - `addressed[]` when you fixed it.
 - `pushback[]` when you deliberately disagree (explain why it is not exploitable).
+- Pushback is a first-class outcome, not a failure. A finding is an argument,
+  not an order: evaluate it and say so plainly when it does not hold up.
+  Silently "fixing" a finding the reviewer got wrong bakes their error into the
+  code and hides the disagreement from the operator.
+- Push back with evidence, not assertion: quote the code, config, or doc that
+  contradicts the finding (file + line or symbol), name the precedent if the
+  codebase already settled this differently, and state what you actually
+  checked. If you cannot produce that evidence, fix the finding or record a
+  blocker instead.
+- You may also harden a real, related defect you find while remediating — one
+  that shares a root cause, code path, or failure mode with a finding you were
+  sent to fix, and that you can state concretely. Record it in `nonBlocking[]`
+  and say in the `action` that you found it during remediation, not in the
+  review. Keep it inside the smallest-durable-patch discipline; if it is too
+  large to fix safely, describe it in `summary` instead of half-fixing it.
 - `blockers[]` when human input or a decision is required.

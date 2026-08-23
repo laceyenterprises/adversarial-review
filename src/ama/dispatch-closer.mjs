@@ -1343,7 +1343,21 @@ export function isActiveAmaCloserDispatchRecord(record, options = {}) {
   // Staleness is evaluated against the same reclaim age the dispatching branch
   // uses, so a live closer is never raced: a worker that is genuinely running
   // refreshes `lastObservedAt` well inside that window.
-  if (isStaleDispatchingAmaCloserRecord(record, options)) return false;
+  // Only age out a record that actually carries a timestamp. A `dispatched`
+  // record with NO parseable timestamp is deliberately treated as active (see
+  // ama-hammer-retry-cap: a launch-only record with lastObservedStatus
+  // 'unknown' and no timestamps must stay held); the `dispatching` branch takes
+  // the opposite view for its own launch-only case, so the two must not share
+  // a predicate blindly.
+  const lastTouchedAtMs = parseTimeMs(
+    record?.lastAttemptedAt
+    || record?.dispatchedAt
+    || record?.lastObservedAt
+    || record?.createdAt
+  );
+  if (lastTouchedAtMs !== null && isStaleDispatchingAmaCloserRecord(record, options)) {
+    return false;
+  }
 
   const status = normalizeWorkerRunStatus(record.lastObservedStatus);
   if (AMA_CLOSER_ACTIVE_STATUSES.has(status)) return true;

@@ -103,6 +103,63 @@ test('an unparseable failedAt still records a hold instead of throwing', () => {
   }
 });
 
+test('a malformed failedAt is normalized before it reaches durable state', () => {
+  // `lastFailureAt` is republished verbatim by `review-pipeline-health` as the
+  // `since` field of a transient-backoff entry, so writing the caller's raw
+  // value would leak a non-ISO string (or, for null, drop the key) into a
+  // surface whose consumers parse it as a timestamp. Normalize on the same
+  // `Date.now()` anchor `nextRetryAfter` already uses, so the two agree.
+  const root = mkdtempSync(path.join(tmpdir(), 'cascade-bound-'));
+  try {
+    for (const [prNumber, failedAt] of [[911, 'not-a-date'], [912, null]]) {
+      recordCascadeFailure(root, {
+        repo: REPO,
+        prNumber,
+        failedAt,
+        failureClass: 'cascade',
+      });
+      const state = readCascadeState(root, { repo: REPO, prNumber });
+      assert.equal(typeof state.lastFailureAt, 'string');
+      const sinceMs = Date.parse(state.lastFailureAt);
+      assert.ok(
+        Number.isFinite(sinceMs),
+        `lastFailureAt ${JSON.stringify(state.lastFailureAt)} must parse as a timestamp`
+      );
+      // Round-trips as canonical ISO-8601, not merely as something Date.parse
+      // happens to accept.
+      assert.equal(new Date(sinceMs).toISOString(), state.lastFailureAt);
+      // Same anchor as the hold computed beside it: the two must not disagree.
+      assert.equal(
+        Date.parse(state.nextRetryAfter) - sinceMs,
+        state.backoffMinutes * 60_000
+      );
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a parseable failedAt is still stored byte-for-byte as the caller gave it', () => {
+  // The normalization above must not rewrite good input -- cascade state is a
+  // durable artifact and callers already pass canonical ISO strings.
+  const root = mkdtempSync(path.join(tmpdir(), 'cascade-bound-'));
+  try {
+    const failedAt = '2026-08-23T01:15:25.567Z';
+    recordCascadeFailure(root, {
+      repo: REPO,
+      prNumber: 913,
+      failedAt,
+      failureClass: 'cascade',
+    });
+    assert.equal(
+      readCascadeState(root, { repo: REPO, prNumber: 913 }).lastFailureAt,
+      failedAt
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('a later failure without a provider hint does not inherit the old providerRetryAfter', () => {
   // Guards the diagnostic field against the leak an adversarial review raised
   // on 2026-08-23: if a quota-exhausted failure records a providerRetryAfter

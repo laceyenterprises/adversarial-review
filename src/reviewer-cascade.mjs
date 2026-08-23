@@ -197,7 +197,15 @@ function recordCascadeFailure(rootDir, {
     consecutiveTransientFailures,
     transientFailureBreakdown,
     lastFailureClass: normalizedFailureClass,
-    lastFailureAt: failedAt,
+    // Normalized against the SAME anchor `retryAfter` was derived from. When
+    // the caller hands us an unparseable (or null) timestamp we already fall
+    // back to `Date.now()` above; writing the raw value here instead would put
+    // a non-ISO string -- or drop the key entirely -- into durable state that
+    // `review-pipeline-health` republishes verbatim as the `since` field, and
+    // would make `since` disagree with the `retryAfter` computed beside it.
+    lastFailureAt: Number.isFinite(parsedFailedAtMs)
+      ? failedAt
+      : new Date(failedAtMs).toISOString(),
     nextRetryAfter: retryAfter,
     // Diagnostic only -- never gates. Preserved so an operator can still see
     // when the provider itself said it would recover. Omitting the key CLEARS

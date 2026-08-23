@@ -102,3 +102,49 @@ test('an unparseable failedAt still records a hold instead of throwing', () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('a later failure without a provider hint does not inherit the old providerRetryAfter', () => {
+  // Guards the diagnostic field against the leak an adversarial review raised
+  // on 2026-08-23: if a quota-exhausted failure records a providerRetryAfter
+  // and the NEXT failure is a generic class with no provider hint, the newer
+  // state must not still carry the stale provider window -- an operator
+  // reading it would attribute a codex quota reset to a launchctl-bootstrap
+  // failure. `recordCascadeFailure` builds a fresh object and
+  // `writeCascadeState` replaces the whole file (tmp+fsync+rename), so no
+  // field survives implicitly; this test keeps it that way if either ever
+  // grows a merge against the previous state.
+  const root = mkdtempSync(path.join(tmpdir(), 'cascade-bound-'));
+  try {
+    recordCascadeFailure(root, {
+      repo: REPO,
+      prNumber: 896,
+      failedAt: '2026-08-23T01:15:25.567Z',
+      failureClass: 'quota-exhausted',
+      nextRetryAfter: '2026-08-27T04:38:00.000Z',
+    });
+    assert.equal(
+      readCascadeState(root, { repo: REPO, prNumber: 896 }).providerRetryAfter,
+      '2026-08-27T04:38:00.000Z'
+    );
+
+    recordCascadeFailure(root, {
+      repo: REPO,
+      prNumber: 896,
+      failedAt: '2026-08-23T01:25:25.567Z',
+      failureClass: 'launchctl-bootstrap',
+    });
+
+    const state = readCascadeState(root, { repo: REPO, prNumber: 896 });
+    assert.equal(state.lastFailureClass, 'launchctl-bootstrap');
+    assert.equal(state.providerRetryAfter, undefined);
+    assert.ok(!Object.hasOwn(state, 'providerRetryAfter'));
+    // The counters that ARE meant to carry forward still do.
+    assert.equal(state.consecutiveTransientFailures, 2);
+    assert.deepEqual(state.transientFailureBreakdown, {
+      'quota-exhausted': 1,
+      'launchctl-bootstrap': 1,
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

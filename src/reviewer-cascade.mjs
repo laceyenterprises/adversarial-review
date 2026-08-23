@@ -200,7 +200,13 @@ function recordCascadeFailure(rootDir, {
     lastFailureAt: failedAt,
     nextRetryAfter: retryAfter,
     // Diagnostic only -- never gates. Preserved so an operator can still see
-    // when the provider itself said it would recover.
+    // when the provider itself said it would recover. Omitting the key CLEARS
+    // it: this object is the complete next state and `writeCascadeState`
+    // replaces the whole file, so a later failure with no provider hint cannot
+    // inherit an earlier failure's window. Do not turn this write into a merge
+    // over `previous` -- that would attribute a stale quota reset to an
+    // unrelated failure class. Only the fields explicitly carried forward
+    // above (the counters and breakdown) survive across failures.
     ...(nextRetryAfter && nextRetryAfter !== retryAfter
       ? { providerRetryAfter: nextRetryAfter }
       : {}),

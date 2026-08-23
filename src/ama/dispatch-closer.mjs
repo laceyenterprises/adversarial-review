@@ -1326,6 +1326,25 @@ export function isActiveAmaCloserDispatchRecord(record, options = {}) {
   }
   if (state !== 'dispatched') return false;
 
+  // A `dispatched` record whose worker died without ever writing a terminal
+  // ledger status keeps a non-terminal `lastObservedStatus` forever. Without an
+  // age escape it stays "active" indefinitely, and its repoPrKey wedges the
+  // consume loop's blockedRepoPrKeys -- the follow-up daemon then reports
+  // `deferredSamePR=N` with `activeAtStart=0` and full capacity, and those PRs
+  // never get remediated again.
+  //
+  // Observed 2026-08-23: agent-os#5703 (status=starting, 7.0h),
+  // agent-os#5715 (running, 5.7h) and adversarial-review#893 (unknown, 4.6h)
+  // were wedged for hours while 8 slots sat idle, freezing the merge backlog.
+  // agent-os#3114/#3116 had been wedged the same way for 1180 hours -- 49 days.
+  // The `dispatching` branch above already has exactly this escape; `dispatched`
+  // was simply missing it.
+  //
+  // Staleness is evaluated against the same reclaim age the dispatching branch
+  // uses, so a live closer is never raced: a worker that is genuinely running
+  // refreshes `lastObservedAt` well inside that window.
+  if (isStaleDispatchingAmaCloserRecord(record, options)) return false;
+
   const status = normalizeWorkerRunStatus(record.lastObservedStatus);
   if (AMA_CLOSER_ACTIVE_STATUSES.has(status)) return true;
   return !AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES.has(status);

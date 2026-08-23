@@ -1236,7 +1236,25 @@ function summarizeRoundBudgetAnomalies(followUpJobs) {
     const consumedRounds = rounds.length;
     const awaitingRereview = isAwaitingRereviewJob(job);
     const codes = [];
-    if (highestRound > budget || consumedRounds > budget) codes.push('round-count-exceeds-risk-budget');
+    // A bare budget overrun on a COMPLETED job is history, not a work item.
+    // The job finished; there is nothing to requeue and nothing for an operator
+    // to do. Because `completed/` records are immutable and never reaped,
+    // counting them made this a ticket that could only ever grow: it sat pinned
+    // at exactly 34 for an entire operator shift on 2026-08-23 -- 34/34
+    // `completed`, 29 of them from May, and ZERO in the awaiting-rereview state
+    // this finding's own recommended action tells you to inspect. A ticket that
+    // cannot clear trains its reader to skip the whole surface, which is the
+    // failure this pipeline-health module exists to prevent elsewhere.
+    //
+    // The awaiting-rereview code below is the actionable bug class and stays
+    // unconditional -- a final pass stuck awaiting rereview is a live defect
+    // whatever state its job record landed in.
+    if (
+      entry.state !== 'completed'
+      && (highestRound > budget || consumedRounds > budget)
+    ) {
+      codes.push('round-count-exceeds-risk-budget');
+    }
     if (awaitingRereview && highestRound >= budget) codes.push('awaiting-rereview-on-budget-exhausted-final-pass');
     if (!codes.length) continue;
     anomalies.push({

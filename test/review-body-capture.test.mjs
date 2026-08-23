@@ -14,6 +14,7 @@ import {
   captureRemediationBodyAfterPost,
   findCapturedReviewerBody,
   resolveReviewerBotLogin,
+  resolveReviewerBotLoginAliases,
 } from '../src/review-body-capture.mjs';
 
 const { postGitHubReviewWithCapture } = reviewerTest;
@@ -121,6 +122,15 @@ test('resolveReviewerBotLogin maps MHX-09 reviewer classes onto existing reviewe
   assert.equal(resolveReviewerBotLogin('pi'), 'lacey-codex-reviewer[bot]');
   assert.equal(resolveReviewerBotLogin('opencode'), 'lacey-codex-reviewer[bot]');
   assert.equal(resolveReviewerBotLogin('hermes'), 'lacey-codex-reviewer[bot]');
+});
+
+test('resolveReviewerBotLoginAliases keeps cross-model reviewer aliases on codex', () => {
+  for (const reviewer of ['pi', 'opencode', 'hermes']) {
+    assert.deepEqual(resolveReviewerBotLoginAliases(reviewer), [
+      'lacey-codex-reviewer[bot]',
+      'codex-reviewer-lacey',
+    ]);
+  }
 });
 
 test('captured reviewer body lookup propagates database open errors', () => {

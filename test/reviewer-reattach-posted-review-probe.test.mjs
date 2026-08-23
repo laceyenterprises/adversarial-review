@@ -98,3 +98,17 @@ test('every reviewer resolves to its GitHub App login, not the legacy PAT login'
   // hunting for an account that never posts.
   assert.ok(!String(reviewerBotLogin('gemini')).startsWith('gemini-reviewer'));
 });
+
+test('cross-model reviewer names find reviews posted by the codex bot aliases', async () => {
+  for (const reviewer of ['pi', 'opencode', 'hermes']) {
+    for (const login of ['lacey-codex-reviewer[bot]', 'codex-reviewer-lacey']) {
+      const probe = makeReviewPostedProbe(octokitReturning([
+        { user: { login }, submitted_at: POSTED_AT },
+      ]));
+      assert.ok(
+        await probe(row({ reviewer })),
+        `${reviewer} should recover reviews posted by ${login}`
+      );
+    }
+  }
+});

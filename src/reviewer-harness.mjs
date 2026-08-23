@@ -935,6 +935,25 @@ const GEMINI_CQP_CHECKOUT_TIMEOUT_MS = 5_000;
 const GEMINI_CQP_FALLBACK_LOCK_WAIT_MS = 30 * 60 * 1000;
 const DEFAULT_GEMINI_CQP_CHECKOUT_CONFLICT_RETRIES = 4;
 const DEFAULT_GEMINI_CQP_CHECKOUT_CONFLICT_BACKOFF_MS = 250;
+// How long to keep waiting for the shared Gemini credential before degrading to
+// the serialized legacy lock.
+//
+// The pool holds exactly ONE credential (`default`) because `agy` is
+// single-process, so a 409 on checkout is the NORMAL state whenever another
+// reviewer holds it — not an error. The old bound was 4 retries at 250ms
+// linear backoff: 250+500+750+1000 = 2.5 seconds. A first-pass Gemini review
+// takes ~2 minutes and the lease TTL is 10 minutes, so the client gave up
+// roughly 50x too early and fell through to
+// GEMINI_CQP_FALLBACK_LOCK_WAIT_MS — a THIRTY MINUTE serialized lock.
+//
+// That inversion is what collapsed review throughput: 2055 `checkout
+// unavailable` fallbacks in a single log, and reviewer dispatch drains of
+// 442s / 487s / 587s / 858s / 1551s against 7 candidates. Waiting a couple of
+// minutes for a 2-minute review is strictly better than taking a 30-minute
+// lock, and the window stays under the lease TTL so a genuinely orphaned lease
+// still expires into the fallback rather than blocking forever.
+const DEFAULT_GEMINI_CQP_CHECKOUT_CONFLICT_WINDOW_MS = 5 * 60 * 1000;
+const DEFAULT_GEMINI_CQP_CHECKOUT_CONFLICT_BACKOFF_CAP_MS = 5_000;
 const GEMINI_REVIEWER_SESSION_STALE_AGE_MS = 12 * 60 * 60 * 1000;
 let geminiReviewerSessionPreflightDone = false;
 let geminiCredentialCheckoutQueue = Promise.resolve();
@@ -1221,6 +1240,19 @@ function resolveGeminiCheckoutConflictRetries(env = process.env) {
   return parsed;
 }
 
+function resolveGeminiCheckoutConflictWindowMs(env = process.env) {
+  const raw = env.AGENT_OS_GEMINI_CHECKOUT_409_WINDOW_MS
+    ?? env.GEMINI_CQP_CHECKOUT_409_WINDOW_MS;
+  if (raw === undefined || raw === null || raw === '') {
+    return DEFAULT_GEMINI_CQP_CHECKOUT_CONFLICT_WINDOW_MS;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return DEFAULT_GEMINI_CQP_CHECKOUT_CONFLICT_WINDOW_MS;
+  }
+  return Math.floor(parsed);
+}
+
 function resolveGeminiCheckoutConflictBackoffMs(env = process.env) {
   const raw = env.AGENT_OS_GEMINI_CHECKOUT_409_BACKOFF_MS
     ?? env.GEMINI_CQP_CHECKOUT_409_BACKOFF_MS;
@@ -1313,8 +1345,17 @@ async function checkoutGeminiCredentialFromBrokerSerialized(options = {}) {
   } = options;
   const retries = resolveGeminiCheckoutConflictRetries(env);
   const backoffMs = resolveGeminiCheckoutConflictBackoffMs(env);
+  const windowMs = resolveGeminiCheckoutConflictWindowMs(env);
+  const nowMs = options.nowImpl ?? (() => Date.now());
+  const startedAt = nowMs();
   let lastError = null;
-  for (let attempt = 0; attempt <= retries; attempt += 1) {
+  // Bounded by WALL CLOCK, not attempt count. A 409 means another reviewer
+  // holds the single shared credential and will release it in ~2 minutes;
+  // giving up after a fixed handful of attempts is what sent callers into the
+  // 30-minute legacy lock. Attempts still cap as a runaway guard, but the
+  // window is the real bound and backoff is capped so late attempts stay
+  // responsive instead of sleeping through the release.
+  for (let attempt = 0; ; attempt += 1) {
     try {
       return await checkoutGeminiCredentialFromBrokerOnce(options);
     } catch (err) {
@@ -1322,8 +1363,20 @@ async function checkoutGeminiCredentialFromBrokerSerialized(options = {}) {
       if (!err?.isGeminiCredentialPoolUnavailable || !/broker returned HTTP 409\b/.test(err.message)) {
         throw err;
       }
-      if (attempt >= retries) break;
-      if (backoffMs > 0) await sleepImpl(backoffMs * (attempt + 1));
+      const elapsed = nowMs() - startedAt;
+      const attemptsExhausted = attempt >= retries;
+      const windowExhausted = elapsed >= windowMs;
+      // Honour whichever bound the operator actually configured: when the
+      // window is disabled (0) the legacy attempt-count behaviour stands.
+      if (windowMs <= 0 ? attemptsExhausted : windowExhausted) break;
+      if (backoffMs > 0) {
+        const wait = Math.min(
+          backoffMs * (attempt + 1),
+          DEFAULT_GEMINI_CQP_CHECKOUT_CONFLICT_BACKOFF_CAP_MS,
+        );
+        const remaining = windowMs > 0 ? Math.max(0, windowMs - elapsed) : wait;
+        await sleepImpl(Math.max(0, Math.min(wait, remaining)));
+      }
     }
   }
   throw lastError;
@@ -2806,6 +2859,7 @@ const __test__ = {
   resolveGeminiAntigravityModel,
   resolveGeminiCheckoutConflictBackoffMs,
   resolveGeminiCheckoutConflictRetries,
+  resolveGeminiCheckoutConflictWindowMs,
   resolveGeminiCliPath,
   resolveGeminiOAuthCredsPath,
   resolveGeminiReviewerModel,

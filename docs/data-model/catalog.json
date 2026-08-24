@@ -53,6 +53,14 @@
       "owner": "adversarial-review alert delivery"
     },
     {
+      "id": "daemon-merge-parks",
+      "title": "Daemon Merge Parks",
+      "path": "docs/data-model/daemon-merge-parks.md",
+      "store": "data/daemon-merge-parks/",
+      "schemaSurface": "src/daemon-merge-park-log.mjs",
+      "owner": "AMA daemon clean-merge diagnostics"
+    },
+    {
       "id": "runtime-settle-smoke",
       "title": "Agent Runtime Settle Smoke",
       "path": "docs/data-model/runtime-settle-smoke.md",

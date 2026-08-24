@@ -434,3 +434,35 @@ test('a park below the observation threshold does not ticket', () => {
     );
   });
 });
+
+test('daemon merge park finding honors the configured observation threshold', () => {
+  withRoot((rootDir) => {
+    insertReviewRow(rootDir, {
+      repo: 'laceyenterprises/foundry',
+      prNumber: 35,
+    });
+
+    for (const at of ['17:00', '17:05']) {
+      recordDaemonMergePark({
+        rootDir,
+        repo: 'laceyenterprises/foundry',
+        prNumber: 35,
+        reason: 'worker-identity-unresolved',
+        observedAt: `2026-08-23T${at}:00.000Z`,
+      });
+    }
+
+    const snapshot = collectReviewPipelineHealth({
+      rootDir,
+      now: () => new Date('2026-08-23T17:09:00Z'),
+      config: {
+        daemonMergeParkMinObservations: 2,
+      },
+    });
+    const findings = snapshot.findings.filter((f) => f.code === 'review:daemon_merge_parked');
+
+    assert.equal(findings.length, 1);
+    assert.equal(findings[0].details.minObservations, 2);
+    assert.match(findings[0].message, /2 consecutive time\(s\)/);
+  });
+});

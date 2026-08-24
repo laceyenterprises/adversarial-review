@@ -380,6 +380,11 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_MERGE_STALLED_MAX_TICKS,
       DEFAULT_MERGE_STALLED_MAX_TICKS
     ),
+    daemonMergeParkMinObservations: parsePositiveInteger(
+      overrides.daemonMergeParkMinObservations
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DAEMON_MERGE_PARK_MIN_OBSERVATIONS,
+      DEFAULT_DAEMON_MERGE_PARK_MIN_OBSERVATIONS
+    ),
     pipelineTickIntervalMs: parsePositiveInteger(
       overrides.pipelineTickIntervalMs
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_TICK_INTERVAL_MS,
@@ -1909,8 +1914,10 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
   // A standing daemon park is the highest-signal stall we have: the daemon named
   // the exact reason it declined, so the ticket can name the lever instead of
   // listing candidates. Grouped by reason so one ticket per distinct cause.
+  const daemonMergeParkMinObservations = config.daemonMergeParkMinObservations
+    || DEFAULT_DAEMON_MERGE_PARK_MIN_OBSERVATIONS;
   const parks = (snapshot.daemonMergeParks || []).filter(
-    (park) => Number(park.observationCount || 0) >= DEFAULT_DAEMON_MERGE_PARK_MIN_OBSERVATIONS,
+    (park) => Number(park.observationCount || 0) >= daemonMergeParkMinObservations,
   );
   if (parks.length > 0) {
     const byReason = new Map();
@@ -1941,7 +1948,7 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
         observedAt,
         details: {
           reason,
-          minObservations: DEFAULT_DAEMON_MERGE_PARK_MIN_OBSERVATIONS,
+          minObservations: daemonMergeParkMinObservations,
           parks: group,
         },
       }));

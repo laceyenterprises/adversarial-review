@@ -1046,7 +1046,7 @@ function requestReviewRereview({
        WHERE repo = ?
          AND pr_number = ?
          AND ${allowedPrStatePredicate}
-         AND review_status NOT IN ('reviewing', 'malformed', 'pending')`
+         AND review_status NOT IN ('reviewing', 'malformed', 'unroutable-bot-author', 'pending')`
     ).run(...resetParams);
 
     if (updateResult.changes === 1) {
@@ -1069,6 +1069,9 @@ function requestReviewRereview({
     }
     if (reviewRow.review_status === 'malformed') {
       return buildBlockedRereviewResult('malformed-title-terminal', reviewRow);
+    }
+    if (reviewRow.review_status === 'unroutable-bot-author') {
+      return buildBlockedRereviewResult('unroutable-bot-terminal', reviewRow);
     }
     if (reviewRow.review_status === 'reviewing') {
       return buildBlockedRereviewResult('review-in-flight', reviewRow);

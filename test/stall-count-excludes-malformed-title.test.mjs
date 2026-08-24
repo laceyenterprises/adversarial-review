@@ -3,9 +3,10 @@
  * The "Reviews stalled — restore reviewer dispatch" pager fires when no review
  * has posted for a threshold while `countOpenPrsAwaitingFirstPassReview() > 0`.
  * That count included PRs whose title does not route to a worker class. Those
- * rows are marked `review_status='malformed'`, which is TERMINAL: the dispatch
- * loop hits `existing?.review_status === 'malformed'` and returns, so the PR can
- * never receive a first pass.
+ * rows are marked with terminal refused statuses: `malformed` for human/fleet
+ * worker titles and `unroutable-bot-author` for known bot-authored PRs. The
+ * dispatch loop returns early on both, so those PRs can never receive a first
+ * pass.
  *
  * The effect was a pager that could not be cleared by a healthy reviewer -- it
  * named open PRs "awaiting first pass" that the pipeline had already refused,
@@ -13,9 +14,9 @@
  *
  * Excluding them is not the same as trusting `review_status='posted'`. The
  * count deliberately keys SUCCESS off `reviewer_passes.gh_comment_id` so a stale
- * success claim cannot mask a genuine gap. A malformed row is the opposite: an
- * explicit refusal, which is evidence about that PR rather than about reviewer
- * health.
+ * success claim cannot mask a genuine gap. A refused row is the opposite: an
+ * explicit terminal decision, which is evidence about that PR rather than about
+ * reviewer health.
  */
 
 import test from 'node:test';
@@ -57,6 +58,16 @@ test('a malformed-title PR does not count as awaiting first pass', () => {
   );
 });
 
+test('an unroutable bot-authored PR does not count as awaiting first pass', () => {
+  const db = freshDb();
+  addPr(db, { pr: 1, status: 'unroutable-bot-author' });
+  assert.equal(
+    countOpenPrsAwaitingFirstPassReview(db),
+    0,
+    'a terminal bot-authored refusal can never clear the pager',
+  );
+});
+
 test('a genuinely pending PR still counts', () => {
   // The pager must keep working: this is the regression that would matter most.
   const db = freshDb();
@@ -65,9 +76,9 @@ test('a genuinely pending PR still counts', () => {
 });
 
 test('a NULL review_status still counts', () => {
-  // SQLite's `IS NOT` is null-safe here: it excludes malformed terminal rows
-  // without dropping rows that have no status yet -- exactly the rows most
-  // likely to be genuinely awaiting a first pass.
+  // The query must exclude terminal refused rows without dropping rows that have
+  // no status yet -- exactly the rows most likely to be genuinely awaiting a
+  // first pass.
   const db = freshDb();
   addPr(db, { pr: 1, status: null });
   assert.equal(countOpenPrsAwaitingFirstPassReview(db), 1);
@@ -76,10 +87,11 @@ test('a NULL review_status still counts', () => {
 test('mixed set counts only the real ones', () => {
   const db = freshDb();
   addPr(db, { pr: 1, status: 'malformed' });   // refused
-  addPr(db, { pr: 2, status: 'pending' });     // awaiting
-  addPr(db, { pr: 3, status: null });          // awaiting
-  addPr(db, { pr: 4, status: 'pending', commentId: 'IC_1' }); // already reviewed
-  addPr(db, { pr: 5, status: 'pending', state: 'closed' });   // not open
+  addPr(db, { pr: 2, status: 'unroutable-bot-author' }); // refused
+  addPr(db, { pr: 3, status: 'pending' });     // awaiting
+  addPr(db, { pr: 4, status: null });          // awaiting
+  addPr(db, { pr: 5, status: 'pending', commentId: 'IC_1' }); // already reviewed
+  addPr(db, { pr: 6, status: 'pending', state: 'closed' });   // not open
   assert.equal(countOpenPrsAwaitingFirstPassReview(db), 2);
 });
 

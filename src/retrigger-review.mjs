@@ -269,6 +269,7 @@ function refuseReasonForReviewRow(reviewRow, {
       return allowFailedReset ? null : 'failed-orphan';
     case 'reviewing':
     case 'malformed':
+    case 'unroutable-bot-author':
       return reviewRow.review_status;
     default:
       return `unknown-status:${reviewRow.review_status ?? 'missing'}`;

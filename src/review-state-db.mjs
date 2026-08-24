@@ -154,6 +154,13 @@ export const stmtMarkFastMergeAuditError = db.prepare(
 export const stmtMarkMalformed = db.prepare(
   "UPDATE reviewed_prs SET reviewer = 'malformed-title', review_status = 'malformed', failure_message = ?, failed_at = ?, last_attempted_at = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
 );
+// MAL-01: a bot-authored PR carries no worker prefix by construction, so it is
+// unroutable rather than malformed. Recording it under a distinct terminal status
+// keeps the row (and its evidence) while stopping `review:malformed_pr_title`
+// from asserting a defect no author can fix. Dependabot owns its own titles.
+export const stmtMarkUnroutableBot = db.prepare(
+  "UPDATE reviewed_prs SET reviewer = 'unroutable-bot-author', review_status = 'unroutable-bot-author' WHERE repo = ? AND pr_number = ?"
+);
 // 'reviewing' is the durable in-progress claim: set BEFORE spawning
 // the reviewer subprocess, replaced with 'posted' / 'failed' once the
 // spawn resolves. If the watcher exits between these two updates

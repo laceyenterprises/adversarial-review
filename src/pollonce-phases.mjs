@@ -112,6 +112,7 @@ import {
   stmtMarkClosed,
   stmtMarkInfraAutoRecoveryAttemptStarted,
   stmtMarkMalformed,
+  stmtMarkUnroutableBot,
   stmtMarkMerged,
   stmtMarkMergedPendingReviewSkipped,
   stmtMarkReviewCycleCapPaused,
@@ -171,6 +172,48 @@ import { getStalePostedReviewAutoRereviewSuppression } from './stale-posted-revi
 import { computeVocabularyFatigueFindingForPR } from './vocabulary-fatigue.mjs';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import { reserveReviewerMemoryAdmission } from './watcher-reviewer-pool.mjs';
+
+// MAL-01: a PR that carries no worker prefix is not necessarily MALFORMED.
+//
+// `routeSubject` returns no route when the title has no creation-time worker
+// prefix, and every such PR was then recorded `review_status='malformed'` with
+// the message "Malformed PR title: <title>". For a fleet worker that skipped
+// `hq pr open`, that is accurate and actionable: fix the title.
+//
+// For a bot it is a category error. Dependabot owns its own titles
+// (`chore(deps): bump X from A to B`) and can never carry a worker prefix, so
+// the finding is unfixable by construction, and retitling would break
+// Dependabot's own update flow.
+//
+// Measured 2026-08-24: of 51 malformed rows in reviews.db, 33 (65%) were
+// `chore(deps...` bot PRs. Every Dependabot PR is silently excluded from review
+// AND generates a permanent `review:malformed_pr_title` ticket that no operator
+// action can clear.
+//
+// This records them under a distinct status so they stop asserting a defect that
+// does not exist. It deliberately does NOT decide what SHOULD review a
+// dependency PR — supply-chain drift is Argus's remit, and routing them there is
+// a separate policy change.
+const UNROUTABLE_BOT_AUTHORS = new Set([
+  'dependabot[bot]',
+  'dependabot-preview[bot]',
+  'renovate[bot]',
+  'github-actions[bot]',
+]);
+
+export function isUnroutableBotAuthor(authorRef) {
+  const login = String(authorRef || '').trim().toLowerCase();
+  if (!login) return false;
+  if (UNROUTABLE_BOT_AUTHORS.has(login)) return true;
+  // `app/<name>` is how some surfaces (e.g. `gh pr view --json author`) render a
+  // GitHub App author for the same account the REST API returns as `<name>[bot]`.
+  // The `[bot]` suffix is synthesised ONLY for that prefixed form: a bare
+  // `dependabot` is a perfectly ordinary account name and must NOT be silently
+  // classified as the app.
+  if (!login.startsWith('app/')) return false;
+  return UNROUTABLE_BOT_AUTHORS.has(`${login.slice('app/'.length)}[bot]`);
+}
+
 
 // AFH-04 — one bounded `hq fleet quota status --json` read per TTL window (not
 // one per PR) feeding the ordered reviewer fallback. Constructing the cache is
@@ -740,13 +783,21 @@ export async function processReviewSubject(entry, ctx) {
 
         // Malformed titles are terminal in watcher state to avoid ambiguous retitle retries.
         const failureAt = new Date().toISOString();
+        const unroutableBot = isUnroutableBotAuthor(subject.authorRef);
         stmtMarkMalformed.run(
-          `Malformed PR title: ${prTitle}`,
+          unroutableBot
+            ? `Unroutable bot-authored PR (no worker prefix is possible): ${prTitle}`
+            : `Malformed PR title: ${prTitle}`,
           failureAt,
           failureAt,
           repoPath,
           prNumber
         );
+        if (unroutableBot) {
+          // Distinct terminal status so `review:malformed_pr_title` stops
+          // ticketing a defect the author cannot fix.
+          stmtMarkUnroutableBot.run(repoPath, prNumber);
+        }
         // Store normalized label names in reviewed_prs.labels_json. Readers
         // still accept the older GitHub label-object shape for historical rows.
         stmtUpdateReviewLabels.run(JSON.stringify(Array.isArray(subject.labels) ? subject.labels : []), repoPath, prNumber);

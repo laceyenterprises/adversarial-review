@@ -40,6 +40,10 @@ import {
   clearDaemonMergePark,
   recordDaemonMergePark,
 } from './daemon-merge-park-log.mjs';
+import {
+  findLiveAmaCloserLease,
+  rekeyAmaCloserLease,
+} from './ama/closer-lease.mjs';
 import { resolveRoundBudgetForJob, summarizePRRemediationLedger } from './follow-up-jobs.mjs';
 import { isTransientGhError } from './gh-cli.mjs';
 import { fetchPullRequestMergeability, fetchReviewBodiesForHead } from './github-api.mjs';
@@ -481,6 +485,55 @@ export async function maybeDispatchAmaClosureFor({
     });
   }
   const currentPrHeadSha = candidate?.headSha || currentRevisionRef || null;
+
+  // CLR-01 — carry a live closer lease forward when the head it is keyed to is no
+  // longer the PR head.
+  //
+  // The lease is keyed by `(repo, prNumber, headSha)`, so a head advanced by the
+  // closer that owns the lease orphans that lease: the file remains under a SHA no
+  // longer on the branch, nothing can finalize it, and `selectReleasableCloserLeases`
+  // refuses to reap it while its `watcherPid` is the LIVE watcher — which it always
+  // is, because the live watcher is what acquired it. The lease becomes immortal and
+  // the PR spins `review-queued -> skip-re-review (terminal closer commit) -> release
+  // claim` forever with CI green and the review clean.
+  //
+  // `rekeyAmaCloserLease` was written for exactly this on 2026-08-12 (#828, after
+  // #825) and shipped with tests — but nothing ever called it. On 2026-08-23
+  // laceyenterprises/foundry#35 reproduced the identical deadlock: the hammer
+  // succeeded at 02:23:45Z, its lease stayed `dispatched` on the pre-remediation
+  // head, and the PR sat unmergeable. This is the missing call site.
+  //
+  // Safety lives in the helper: it refuses when the source lease is absent, when an
+  // UNRELATED lease already holds the destination head, and when the lease is already
+  // terminal. It preserves `acquiredAt`/`lrqId`/`watcherPid`, so ownership stays one
+  // continuous audited chain, and stamps `rekeyedFromHeadSha`/`supersededHeads`.
+  if (currentPrHeadSha) {
+    try {
+      const liveLease = findLiveAmaCloserLease(rootDir, { repo: repoPath, prNumber });
+      if (liveLease && liveLease.headSha && liveLease.headSha !== currentPrHeadSha) {
+        const rekey = rekeyAmaCloserLease({
+          rootDir,
+          repo: repoPath,
+          prNumber,
+          fromHeadSha: liveLease.headSha,
+          toHeadSha: currentPrHeadSha,
+          now: new Date().toISOString(),
+        });
+        logger?.log?.(
+          `[watcher] AMA closer lease ${rekey.rekeyed ? 'rekeyed' : 'rekey declined'} for `
+            + `${repoPath}#${prNumber}: ${String(liveLease.headSha).slice(0, 12)} -> `
+            + `${String(currentPrHeadSha).slice(0, 12)}`
+            + (rekey.rekeyed ? '' : ` (${rekey.reason})`),
+        );
+      }
+    } catch (err) {
+      // Lease reconciliation is a repair, not a gate: a failure here must never
+      // stop the closure evaluation that follows.
+      logger?.warn?.(
+        `[watcher] AMA closer lease rekey failed for ${repoPath}#${prNumber}: ${err?.message || err}`,
+      );
+    }
+  }
 
   const reviewState = {
     verdict: gateSnapshot.settledReview?.verdict || '',

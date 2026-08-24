@@ -314,3 +314,45 @@ test('findLiveAmaCloserLease rejects missing PR identity', () => {
   assert.throws(() => findLiveAmaCloserLease(rootDir), /identity\.repo is required/);
   assert.throws(() => findLiveAmaCloserLease(rootDir, { repo: ID.repo }), /identity\.prNumber must be numeric/);
 });
+
+// CLR-01 — the capability guard.
+//
+// `rekeyAmaCloserLease` and `findLiveAmaCloserLease` shipped on 2026-08-12 (#828)
+// with the tests above, went green in CI, and were never called from production
+// code. Twelve days later laceyenterprises/foundry#35 reproduced the exact
+// deadlock #828 was written to prevent: the hammer succeeded, its lease stayed
+// `dispatched` on the pre-remediation head, `selectReleasableCloserLeases` refused
+// to reap it because its `watcherPid` was the live watcher, and the PR spun
+// unmergeable with CI green and the review clean.
+//
+// Unit tests could not catch that, because the defect was the ABSENCE of a caller.
+// This asserts the capability is actually reachable in production.
+test('the closer-lease rekey capability has a production call site', async () => {
+  const { readdirSync, readFileSync: read } = await import('node:fs');
+  const srcDir = new URL('../src/', import.meta.url);
+
+  const callers = [];
+  const walk = (dirUrl, relative = '') => {
+    for (const entry of readdirSync(dirUrl, { withFileTypes: true })) {
+      if (entry.name === 'vendor' || entry.name === 'node_modules') continue;
+      const childRel = relative ? `${relative}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        walk(new URL(`${entry.name}/`, dirUrl), childRel);
+        continue;
+      }
+      if (!entry.name.endsWith('.mjs')) continue;
+      // The definition site is not a caller.
+      if (childRel === 'ama/closer-lease.mjs') continue;
+      const text = read(new URL(entry.name, dirUrl), 'utf8');
+      if (text.includes('rekeyAmaCloserLease(')) callers.push(childRel);
+    }
+  };
+  walk(srcDir);
+
+  assert.ok(
+    callers.length > 0,
+    'rekeyAmaCloserLease has no production call site — the closer lease can orphan '
+      + 'on a head the closer advanced, and the live-pid guard makes it unreapable '
+      + '(the foundry#35 / #825 deadlock). Wire it, do not delete this test.',
+  );
+});

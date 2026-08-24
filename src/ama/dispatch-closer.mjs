@@ -203,9 +203,14 @@ const HAMMER_AUTO_REMEDIABLE_MISS_REASONS = new Set([
   'pr-not-mergeable', // hammer rebases onto main / resolves the conflict, then merges
   'ci-not-green', // hammer fixes the failing required checks (green-main bar), then merges
 ]);
+const STRICT_NON_BLOCKING_REFUSAL_REASONS = new Set([
+  'non-blocking-findings-present',
+  'non-blocking-findings-unknown',
+]);
 const HAMMER_ROUTE_ACTION_REASONS = new Set([
   'blocking-findings-present',
   'non-blocking-findings-present',
+  'non-blocking-findings-unknown',
   'verdict-not-settled-success',
   'pr-not-mergeable',
   'ci-not-green',
@@ -225,6 +230,10 @@ const AMA_CLOSER_MERGE_BACKOFF_BASE_MS = 250;
 // reach the hammer. Mirrors the TTM tracker's `terminalUnmergedMinutes` (10m),
 // which is the same threshold `review:terminal_but_unmerged` already tickets on.
 export const DEFAULT_COMMENT_ONLY_HAMMER_TERMINAL_MS = 10 * 60 * 1000;
+
+function hasStrictNonBlockingRefusalReason(reasons = []) {
+  return reasons.some((reason) => STRICT_NON_BLOCKING_REFUSAL_REASONS.has(reason));
+}
 
 export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
   if (!Array.isArray(reasons) || reasons.length === 0) return false;
@@ -273,7 +282,7 @@ export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
   // and an external (non-closer) stale head never arms the flag.
   // HMR-01 — a settled comment-only PR could never reach the hammer at all.
   //
-  // Its only miss is `non-blocking-findings-present`, which is NOT in
+  // Its only miss is a strict non-blocking refusal, which is NOT in
   // HAMMER_AUTO_REMEDIABLE_MISS_REASONS (that set is `pr-not-mergeable` and
   // `ci-not-green` only). The exhaustion branch above cannot rescue it either:
   // `reviewCycleExhaustedFromRounds` requires completed remediation or re-review
@@ -300,7 +309,7 @@ export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
   const commentOnlyTerminalResume =
     Number.isFinite(commentOnlyTerminalMs) &&
     commentOnlyTerminalMs >= commentOnlyTerminalGraceMs &&
-    effectiveReasons.includes('non-blocking-findings-present');
+    hasStrictNonBlockingRefusalReason(effectiveReasons);
 
   const hasActionable =
     effectiveReasons.includes('pr-not-mergeable') ||
@@ -317,12 +326,12 @@ export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
     HAMMER_AUTO_REMEDIABLE_MISS_REASONS.has(reason) ||
     (hasMechanicalMiss && reason === 'verdict-not-settled-success') ||
     (closerStaleHeadResume && reason === 'verdict-not-settled-success') ||
-    // HMR-01: the settled comment-only resume covers exactly the two reasons a
-    // clean-but-non-blocking PR presents with. A co-occurring BLOCKING finding is
-    // still not covered here, so it continues to fail this `every` and park --
-    // that is the safety invariant, unchanged.
+    // HMR-01: the settled comment-only resume covers exactly the strict
+    // non-blocking refusal plus its paired verdict reason. A co-occurring
+    // BLOCKING finding is still not covered here, so it continues to fail this
+    // `every` and park -- that is the safety invariant, unchanged.
     (commentOnlyTerminalResume && (
-      reason === 'non-blocking-findings-present' ||
+      STRICT_NON_BLOCKING_REFUSAL_REASONS.has(reason) ||
       reason === 'verdict-not-settled-success'
     ))
   ));
@@ -3221,7 +3230,7 @@ export async function maybeDispatchAmaCloser({
     const commentOnlyTerminalAdmit =
       Number.isFinite(settledCommentOnlyTerminalMs) &&
       settledCommentOnlyTerminalMs >= commentOnlyTerminalGraceMs &&
-      routeReasons.includes('non-blocking-findings-present');
+      hasStrictNonBlockingRefusalReason(routeReasons);
     const autoHammer =
       !pendingCiMechanicalGateMiss &&
       (isHammerWorkerClass(workerClassForMiss) || reviewCycleExhausted || commentOnlyTerminalAdmit)

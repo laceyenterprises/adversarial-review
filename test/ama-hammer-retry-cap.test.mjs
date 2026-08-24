@@ -403,6 +403,37 @@ test('maybeDispatchAmaCloser records confirmed hammer launches in the retry-cap 
   assert.deepEqual(ledger.dispatchHeads, [REVIEWED_HEAD]);
 });
 
+test('maybeDispatchAmaCloser dispatches comment-only terminal unknown non-blocking findings after grace', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-cap-comment-only-unknown-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const deps = hammerDispatchDeps();
+
+  const result = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir, {
+      reviewState: {
+        nonBlockingFindingState: 'unknown',
+        nonBlockingFindingCount: null,
+      },
+      prMetadata: {
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
+        ],
+      },
+      dispatchContext: {
+        settledCommentOnlyTerminalMs: 60_000,
+        commentOnlyTerminalGraceMs: 1_000,
+      },
+    }),
+    ...deps,
+  });
+
+  assert.equal(result.dispatched, true);
+  assert.equal(deps.execCalls.length, 1);
+  const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
+  assert.equal(ledger.jobKey, REVIEWED_HEAD);
+  assert.equal(ledger.attemptCount, 1);
+});
+
 test('per-head redispatch budget resets on new head before lifetime ceiling', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'hammer-cap-per-head-reset-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

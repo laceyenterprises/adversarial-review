@@ -7,7 +7,7 @@ import {
 } from '../src/ama/dispatch-closer.mjs';
 
 // HMR-01. A settled comment-only PR could never reach the hammer at all:
-//   - its only miss is `non-blocking-findings-present`, which is NOT in
+//   - its only miss is a strict non-blocking refusal, which is NOT in
 //     HAMMER_AUTO_REMEDIABLE_MISS_REASONS (that set is pr-not-mergeable /
 //     ci-not-green only);
 //   - the exhaustion branch cannot rescue it, because
@@ -21,6 +21,7 @@ import {
 
 const GRACE = DEFAULT_COMMENT_ONLY_HAMMER_TERMINAL_MS;
 const NB = ['non-blocking-findings-present'];
+const NB_UNKNOWN = ['non-blocking-findings-unknown', 'verdict-not-settled-success'];
 
 test('the pre-existing behaviour is unchanged when no duration is supplied', () => {
   // Every existing caller passes no duration; they must be unaffected.
@@ -47,6 +48,13 @@ test('a comment-only PR terminal past the grace becomes hammer-eligible', () => 
   );
   assert.equal(
     isHammerRemediableEligibilityMiss(NB, { settledCommentOnlyTerminalMs: GRACE * 7 }),
+    true,
+  );
+});
+
+test('a comment-only PR with unknown non-blocking state past the grace becomes hammer-eligible', () => {
+  assert.equal(
+    isHammerRemediableEligibilityMiss(NB_UNKNOWN, { settledCommentOnlyTerminalMs: GRACE }),
     true,
   );
 });

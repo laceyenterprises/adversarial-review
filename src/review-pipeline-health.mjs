@@ -13,6 +13,7 @@ import {
   evaluateTtmFromDb,
   resolveTtmTrackerConfig,
 } from './ttm-tracker.mjs';
+import { readDaemonMergeParks } from './daemon-merge-park-log.mjs';
 
 const DEFAULT_REVIEWER_DEATH_RATE_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_REVIEWER_DEATH_RATE_THRESHOLD = 0.5;
@@ -39,6 +40,10 @@ const DEFAULT_REVIEW_UNKNOWN_RATE_DISTINCT_PR_FLOOR = 2;
 // that reviews within ~3 minutes when healthy.
 const DEFAULT_QUEUE_STARVATION_MAX_AGE_MS = 10 * 60 * 1000;
 const DEFAULT_REMEDIATION_BACKLOG_THRESHOLD = 5;
+// A single park is normal: the daemon evaluates every tick and a PR can be
+// legitimately mid-flight. Ticketing starts once the SAME reason repeats, which
+// means the park is standing rather than transient.
+const DEFAULT_DAEMON_MERGE_PARK_MIN_OBSERVATIONS = 3;
 const DEFAULT_MERGE_STALLED_MAX_TICKS = 3;
 const DEFAULT_PIPELINE_TICK_INTERVAL_MS = 5 * 60 * 1000;
 const DEFAULT_REMEDIATION_THROUGHPUT_WINDOW_MS = 60 * 60 * 1000;
@@ -226,6 +231,14 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     thresholdDescription: 'a settled/clean PR remains open and unmerged past the terminal threshold',
   },
   {
+    code: 'review:daemon_merge_parked',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: 'daemonMergeParkMinObservations',
+    defaultThreshold: DEFAULT_DAEMON_MERGE_PARK_MIN_OBSERVATIONS,
+    thresholdDescription: 'the daemon clean-merge declined the same PR for the same reason this many consecutive ticks',
+  },
+  {
     code: 'review:ama_closer_lease_stale',
     tier: 'ticket',
     category: 'review-pipeline',
@@ -366,6 +379,11 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
       overrides.mergeStalledMaxTicks
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_MERGE_STALLED_MAX_TICKS,
       DEFAULT_MERGE_STALLED_MAX_TICKS
+    ),
+    daemonMergeParkMinObservations: parsePositiveInteger(
+      overrides.daemonMergeParkMinObservations
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DAEMON_MERGE_PARK_MIN_OBSERVATIONS,
+      DEFAULT_DAEMON_MERGE_PARK_MIN_OBSERVATIONS
     ),
     pipelineTickIntervalMs: parsePositiveInteger(
       overrides.pipelineTickIntervalMs
@@ -1893,6 +1911,50 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }));
   }
 
+  // A standing daemon park is the highest-signal stall we have: the daemon named
+  // the exact reason it declined, so the ticket can name the lever instead of
+  // listing candidates. Grouped by reason so one ticket per distinct cause.
+  const daemonMergeParkMinObservations = config.daemonMergeParkMinObservations
+    || DEFAULT_DAEMON_MERGE_PARK_MIN_OBSERVATIONS;
+  const parks = (snapshot.daemonMergeParks || []).filter(
+    (park) => Number(park.observationCount || 0) >= daemonMergeParkMinObservations,
+  );
+  if (parks.length > 0) {
+    const byReason = new Map();
+    for (const park of parks) {
+      if (!byReason.has(park.reason)) byReason.set(park.reason, []);
+      byReason.get(park.reason).push(park);
+    }
+    for (const [reason, group] of byReason) {
+      const sample = group[0];
+      const stuckMinutes = Math.round(
+        (Date.parse(observedAt) - Date.parse(sample.firstObservedAt || observedAt)) / 60000,
+      );
+      findings.push(buildFinding({
+        code: 'review:daemon_merge_parked',
+        tier: 'ticket',
+        subject: `${group.length} PR(s) parked by the daemon clean-merge on '${reason}'`,
+        message: `${sample.repo}#${sample.prNumber} has been declined by the AMA daemon clean-merge `
+          + `${sample.observationCount} consecutive time(s) for '${reason}'`
+          + (Number.isFinite(stuckMinutes) ? `, first seen ${stuckMinutes}m ago.` : '.'),
+        evidence: group.map((park) => (
+          `data/daemon-merge-parks ${park.repo}#${park.prNumber} reason=${park.reason} `
+          + `observations=${park.observationCount} head=${String(park.headSha || 'unknown').slice(0, 12)} `
+          + `since=${park.firstObservedAt}`
+        )),
+        recommendedAction: sample.remedy
+          || `The daemon clean-merge declined these PRs for '${reason}'. Inspect the daemon merge path `
+            + 'and resolve the named gate; do not relax the gate to force a merge.',
+        observedAt,
+        details: {
+          reason,
+          minObservations: daemonMergeParkMinObservations,
+          parks: group,
+        },
+      }));
+    }
+  }
+
   if (snapshot.amaCloserLeases.stale.length > 0) {
     const sample = snapshot.amaCloserLeases.stale[0];
     findings.push(buildFinding({
@@ -2109,6 +2171,12 @@ function collectReviewPipelineHealth({
       config,
     });
     const amaCloserLeases = readAmaCloserLeases(rootDir, { nowMs, config, reviewRows });
+    const daemonMergeParks = readDaemonMergeParks({
+      rootDir,
+      activeReviewRows: db ? reviewRows : null,
+      nowMs,
+      staleAfterMs: config.pipelineTickIntervalMs * 2,
+    });
     const zombieReviewerPasses = db
       ? summarizeZombieReviewerPasses(db, { nowMs, config })
       : { thresholdMs: config.runningReviewerPassMaxAgeMs, rows: [] };
@@ -2167,6 +2235,7 @@ function collectReviewPipelineHealth({
       mergeOutcomes,
       mergeStalls,
       amaCloserLeases,
+      daemonMergeParks,
       zombieReviewerPasses,
       stuckReviewLoops,
       roundBudget,

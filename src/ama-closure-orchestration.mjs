@@ -36,6 +36,10 @@ import {
   fetchLatestHeadReviewBodiesWithRetry,
   runDaemonCleanMergeAttempt,
 } from './daemon-clean-merge.mjs';
+import {
+  clearDaemonMergePark,
+  recordDaemonMergePark,
+} from './daemon-merge-park-log.mjs';
 import { resolveRoundBudgetForJob, summarizePRRemediationLedger } from './follow-up-jobs.mjs';
 import { isTransientGhError } from './gh-cli.mjs';
 import { fetchPullRequestMergeability, fetchReviewBodiesForHead } from './github-api.mjs';
@@ -736,6 +740,23 @@ export async function maybeDispatchAmaClosureFor({
         `@${daemonHeadShort}: ${daemonCleanMerge.reason}` +
         (daemonCleanMerge.attempts ? ` (attempts=${daemonCleanMerge.attempts})` : ''),
     );
+
+    // Persist the park reason so `review-pipeline-health` can name it. Without
+    // this the reason lives only in watcher stdout, and a parked PR surfaces as
+    // a generic `terminal_but_unmerged` that lists candidate causes instead of
+    // the one that applied (foundry#35, 8.8h on `worker-identity-unresolved`).
+    // Diagnostics only — nothing reads these records to decide a merge.
+    if (daemonCleanMerge.disposition === DAEMON_MERGE_DISPOSITION.MERGED) {
+      clearDaemonMergePark({ rootDir, repo: repoPath, prNumber });
+    } else {
+      recordDaemonMergePark({
+        rootDir,
+        repo: repoPath,
+        prNumber,
+        headSha: gateSnapshot?.reviewedHeadSha || null,
+        reason: daemonCleanMerge.reason || 'failed-closed',
+      });
+    }
     // Deliverable 2 — daemon-fail-closed hammer fallback. When the daemon
     // clean-path fails closed on a REMEDIABLE gate (ci-not-green, pr-not-mergeable
     // conflict, or stale-head) for an attributed fleet-worker PR, DO NOT park:

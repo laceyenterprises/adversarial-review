@@ -698,6 +698,45 @@ test('alert_delivery gateway token ref loads through tolerant Node mirror', () =
   }
 });
 
+test('comms ingress mode loads through strict top-level Node mirror', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      comms:
+        ingressMode: long-poll
+    `);
+
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('comms.ingressMode'), 'long-poll');
+
+    const envCfg = loadConfig({
+      topPath: top,
+      env: { AGENT_OS_COMMS_INGRESS_MODE: 'tailscale-funnel' },
+    });
+    assert.equal(envCfg.get('comms.ingressMode'), 'tailscale-funnel');
+
+    const bad = join(tmp, 'bad-comms-ingress.yaml');
+    writeFile(bad, `
+      version: 1
+      comms:
+        ingressMode: webhook
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: bad, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'comms.ingressMode');
+        assert.match(err.message, /not in allowlist/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('agent_gateway alert bus URL loads through strict Node schema and env aliases', () => {
   const tmp = freshTmp();
   try {

@@ -325,6 +325,20 @@ function schemaV1() {
           },
         },
       },
+      // Agent gateway owns the canonical ingress selector; the adversarial
+      // watcher does not consume it, but strict top-level config.yaml parity
+      // requires every checked-in root to be accepted by this Node loader.
+      comms: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          ingressMode: {
+            __type: TYPE_STRING,
+            __default: 'tailscale-funnel',
+            __enum: ['long-poll', 'tailscale-funnel'],
+          },
+        },
+      },
       review_cycle_cap: { __type: TYPE_INT, __default: 5, __min: 1 },
       review_cycle_window_hours: { __type: TYPE_INT, __default: 24, __min: 1 },
       update: {
@@ -2765,6 +2779,10 @@ function postgresRuntimeAlias(value) {
 const identity = (v) => v;
 
 export const ENV_ALIASES = {
+  'comms.ingressMode': {
+    canonical: 'AGENT_OS_COMMS_INGRESS_MODE',
+    aliases: [['COMMS_INGRESS_MODE', identity]],
+  },
   'update.channel': {
     canonical: 'AGENT_OS_UPDATE_CHANNEL',
     aliases: [],

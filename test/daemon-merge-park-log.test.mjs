@@ -160,10 +160,23 @@ test('a corrupt record is skipped instead of blinding the whole read', () => {
       '{ this is not json',
       'utf8',
     );
+    writeFileSync(
+      path.join(rootDir, 'data', 'daemon-merge-parks', 'malformed__pr-2.json'),
+      '{"repo":"laceyenterprises/foundry"}\n',
+      'utf8',
+    );
 
     const parks = readDaemonMergeParks({ rootDir });
     assert.equal(parks.length, 1);
     assert.equal(parks[0].prNumber, 35);
+    assert.equal(
+      existsSync(path.join(rootDir, 'data', 'daemon-merge-parks', 'corrupt__pr-1.json')),
+      false,
+    );
+    assert.equal(
+      existsSync(path.join(rootDir, 'data', 'daemon-merge-parks', 'malformed__pr-2.json')),
+      false,
+    );
   });
 });
 
@@ -188,6 +201,28 @@ test('a write failure never propagates out of the merge path', () => {
     // Diagnostics are best-effort: the daemon that observed the park must not
     // fail because recording it failed.
     assert.equal(record, null);
+  });
+});
+
+test('an async atomic-write rejection is observed instead of becoming unhandled', () => {
+  withRoot((rootDir) => {
+    let catchAttached = false;
+    const record = recordDaemonMergePark({
+      rootDir,
+      repo: 'laceyenterprises/foundry',
+      prNumber: 35,
+      reason: 'worker-identity-unresolved',
+      observedAt: '2026-08-23T17:00:00.000Z',
+      writeFileAtomicImpl: () => ({
+        catch(onRejected) {
+          catchAttached = true;
+          onRejected(new Error('disk full'));
+        },
+      }),
+    });
+
+    assert.equal(record.prNumber, 35);
+    assert.equal(catchAttached, true);
   });
 });
 
@@ -270,6 +305,33 @@ test('health collection prunes park records for PRs no longer active', () => {
       [],
     );
     assert.equal(existsSync(parkRecordPath(rootDir, 'laceyenterprises/foundry', 35)), false);
+  });
+});
+
+test('health collection accepts iterable active rows when pruning park records', () => {
+  withRoot((rootDir) => {
+    recordDaemonMergePark({
+      rootDir,
+      repo: 'laceyenterprises/foundry',
+      prNumber: 35,
+      reason: 'worker-identity-unresolved',
+      observedAt: '2026-08-23T17:00:00.000Z',
+    });
+
+    const parks = readDaemonMergeParks({
+      rootDir,
+      activeReviewRows: new Set([
+        {
+          repo: 'laceyenterprises/foundry',
+          prNumber: 35,
+          prState: 'open',
+        },
+      ]),
+    });
+
+    assert.equal(parks.length, 1);
+    assert.equal(parks[0].prNumber, 35);
+    assert.equal(existsSync(parkRecordPath(rootDir, 'laceyenterprises/foundry', 35)), true);
   });
 });
 

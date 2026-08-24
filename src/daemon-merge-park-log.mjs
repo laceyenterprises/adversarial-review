@@ -79,7 +79,9 @@ function activeParkKeySet(activeReviewRows) {
     ? activeReviewRows.values()
     : Array.isArray(activeReviewRows)
       ? activeReviewRows
-      : [];
+      : typeof Object(activeReviewRows)[Symbol.iterator] === 'function'
+        ? activeReviewRows
+        : [];
   const keys = new Set();
   for (const row of rows) {
     const repo = row?.repo;
@@ -89,6 +91,22 @@ function activeParkKeySet(activeReviewRows) {
     keys.add(`${repo}#${prNumber}`);
   }
   return keys;
+}
+
+function ignoreAsyncDiagnosticWriteFailure(writeResult) {
+  if (!writeResult || typeof writeResult.catch !== 'function') return;
+  writeResult.catch(() => {
+    // Diagnostics must never break the merge path they observe.
+  });
+}
+
+function removeDiagnosticFile(filePath, rmSyncImpl) {
+  try {
+    rmSyncImpl(filePath, { force: true });
+  } catch {
+    // Diagnostics stay best-effort. A failed cleanup must not blind later
+    // records or break the health surface.
+  }
 }
 
 /**
@@ -130,7 +148,8 @@ function recordDaemonMergePark({
 
   try {
     mkdirSyncImpl(parkDir(rootDir), { recursive: true });
-    writeFileAtomicImpl(filePath, `${JSON.stringify(record, null, 2)}\n`);
+    const writeResult = writeFileAtomicImpl(filePath, `${JSON.stringify(record, null, 2)}\n`);
+    ignoreAsyncDiagnosticWriteFailure(writeResult);
   } catch {
     // Diagnostics must never break the merge path they observe.
     return null;
@@ -181,17 +200,18 @@ function readDaemonMergeParks({
     if (!String(entry).endsWith('.json')) continue;
     const filePath = join(parkDir(rootDir), entry);
     const record = readRecord(filePath, readFileSyncImpl);
+    if (!record) {
+      removeDiagnosticFile(filePath, rmSyncImpl);
+      continue;
+    }
     if (record?.repo && Number.isFinite(Number(record.prNumber)) && record.reason) {
       if (activeKeys && !activeKeys.has(`${record.repo}#${Number(record.prNumber)}`)) {
-        try {
-          rmSyncImpl(filePath, { force: true });
-        } catch {
-          // Diagnostics stay best-effort. Even if deletion fails, do not emit a
-          // ticket for a PR that the active review ledger says is gone.
-        }
+        removeDiagnosticFile(filePath, rmSyncImpl);
         continue;
       }
       parks.push(record);
+    } else {
+      removeDiagnosticFile(filePath, rmSyncImpl);
     }
   }
   parks.sort((a, b) => String(a.firstObservedAt || '').localeCompare(String(b.firstObservedAt || '')));

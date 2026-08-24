@@ -22,6 +22,7 @@ import {
 const GRACE = DEFAULT_COMMENT_ONLY_HAMMER_TERMINAL_MS;
 const NB = ['non-blocking-findings-present'];
 const NB_UNKNOWN = ['non-blocking-findings-unknown', 'verdict-not-settled-success'];
+const ZERO_FINDINGS = ['verdict-not-settled-success'];
 
 test('the pre-existing behaviour is unchanged when no duration is supplied', () => {
   // Every existing caller passes no duration; they must be unaffected.
@@ -59,6 +60,17 @@ test('a comment-only PR with unknown non-blocking state past the grace becomes h
   );
 });
 
+test('a clean zero-finding comment-only PR terminal past the grace becomes hammer-eligible', () => {
+  assert.equal(
+    isHammerRemediableEligibilityMiss(ZERO_FINDINGS, { settledCommentOnlyTerminalMs: GRACE - 1 }),
+    false,
+  );
+  assert.equal(
+    isHammerRemediableEligibilityMiss(ZERO_FINDINGS, { settledCommentOnlyTerminalMs: GRACE }),
+    true,
+  );
+});
+
 test('a co-occurring BLOCKING finding still parks — the safety invariant', () => {
   // This is the line that must not move: blocking findings go through the
   // Codex remediation lane, never straight to an auto-hammer.
@@ -91,12 +103,14 @@ test('the grace is overridable', () => {
   );
 });
 
-test('a non-comment-only miss is unaffected by the duration', () => {
-  // Supplying a duration must not make an unrelated reason eligible.
+test('a bare verdict miss is inert without a measured comment-only terminal duration', () => {
+  // Upstream supplies a duration only for settled comment-only verdicts.
   assert.equal(
-    isHammerRemediableEligibilityMiss(['verdict-not-settled-success'], {
-      settledCommentOnlyTerminalMs: GRACE * 10,
-    }),
+    isHammerRemediableEligibilityMiss(ZERO_FINDINGS, {}),
+    false,
+  );
+  assert.equal(
+    isHammerRemediableEligibilityMiss(ZERO_FINDINGS, { settledCommentOnlyTerminalMs: null }),
     false,
   );
 });
@@ -109,7 +123,10 @@ test('mechanical misses keep working exactly as before', () => {
 test('a non-finite duration is inert', () => {
   for (const v of [null, undefined, NaN, 'soon']) {
     assert.equal(
-      isHammerRemediableEligibilityMiss(NB, { settledCommentOnlyTerminalMs: v }),
+      isHammerRemediableEligibilityMiss(NB, {
+        settledCommentOnlyTerminalMs: v,
+        commentOnlyTerminalGraceMs: 0,
+      }),
       false,
       `duration ${String(v)} must not admit`,
     );

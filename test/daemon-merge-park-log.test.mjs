@@ -75,6 +75,11 @@ test('records a park with observationCount 1 and the reason-specific remedy', ()
   });
 });
 
+test('park remedies are a null-prototype dictionary', () => {
+  assert.equal(Object.getPrototypeOf(PARK_REMEDIES), null);
+  assert.equal(PARK_REMEDIES.toString, undefined);
+});
+
 test('a repeat park with the same reason increments and preserves firstObservedAt', () => {
   withRoot((rootDir) => {
     const args = {
@@ -204,7 +209,7 @@ test('a write failure never propagates out of the merge path', () => {
   });
 });
 
-test('an async atomic-write rejection is observed instead of becoming unhandled', () => {
+test('an async atomic-write rejection is observed but rejected as a writer contract', () => {
   withRoot((rootDir) => {
     let catchAttached = false;
     const record = recordDaemonMergePark({
@@ -221,7 +226,7 @@ test('an async atomic-write rejection is observed instead of becoming unhandled'
       }),
     });
 
-    assert.equal(record.prNumber, 35);
+    assert.equal(record, null);
     assert.equal(catchAttached, true);
   });
 });
@@ -235,6 +240,23 @@ test('records are ignored when required identity fields are missing', () => {
     );
     assert.equal(recordDaemonMergePark({ rootDir, repo: 'a/b', prNumber: 1, reason: '' }), null);
     assert.deepEqual(readDaemonMergeParks({ rootDir }), []);
+  });
+});
+
+test('records are ignored when PR numbers coerce from invalid values', () => {
+  withRoot((rootDir) => {
+    for (const prNumber of [null, false, '', [], 0, -1, 1.5, Number.POSITIVE_INFINITY]) {
+      assert.equal(
+        recordDaemonMergePark({ rootDir, repo: 'a/b', prNumber, reason: 'x' }),
+        null,
+      );
+      assert.equal(clearDaemonMergePark({ rootDir, repo: 'a/b', prNumber }), false);
+    }
+
+    assert.equal(
+      recordDaemonMergePark({ rootDir, repo: 'a/b', prNumber: '42', reason: 'x' }).prNumber,
+      42,
+    );
   });
 });
 

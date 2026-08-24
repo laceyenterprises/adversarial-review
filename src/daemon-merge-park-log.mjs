@@ -33,7 +33,7 @@ const SCHEMA_VERSION = 1;
 
 // Parks the operator can clear directly, mapped to the specific lever. Reasons
 // absent from this map still record — they just carry the generic remedy.
-const PARK_REMEDIES = Object.freeze({
+const PARK_REMEDIES = Object.freeze(Object.assign(Object.create(null), {
   'worker-identity-unresolved':
     'The PR has no `pr_opened` build-completion identity row, so both merge routes '
     + 'fail closed by design. If an interactive session opened this PR outside '
@@ -48,7 +48,7 @@ const PARK_REMEDIES = Object.freeze({
   'lease-not-held':
     'The daemon could not take the shared merge lease. Check for a stale or orphaned '
     + 'lease under data/merge-leases and the ama-closer lease reaper.',
-});
+}));
 
 function repoSlug(repo) {
   return String(repo || '').replace(/[^A-Za-z0-9._-]+/g, '__');
@@ -60,6 +60,14 @@ function parkDir(rootDir) {
 
 function parkRecordPath(rootDir, repo, prNumber) {
   return join(parkDir(rootDir), `${repoSlug(repo)}__pr-${Number(prNumber)}.json`);
+}
+
+function normalizePrNumber(prNumber) {
+  if (prNumber === null || prNumber === undefined) return null;
+  if (typeof prNumber === 'boolean') return null;
+  if (typeof prNumber === 'string' && prNumber.trim() === '') return null;
+  const normalized = Number(prNumber);
+  return Number.isInteger(normalized) && normalized > 0 ? normalized : null;
 }
 
 function readRecord(filePath, readFileSyncImpl) {
@@ -93,11 +101,12 @@ function activeParkKeySet(activeReviewRows) {
   return keys;
 }
 
-function ignoreAsyncDiagnosticWriteFailure(writeResult) {
+function assertSynchronousDiagnosticWrite(writeResult) {
   if (!writeResult || typeof writeResult.catch !== 'function') return;
   writeResult.catch(() => {
     // Diagnostics must never break the merge path they observe.
   });
+  throw new TypeError('daemon merge park writer must be synchronous');
 }
 
 function removeDiagnosticFile(filePath, rmSyncImpl) {
@@ -137,16 +146,17 @@ function recordDaemonMergePark({
   readFileSyncImpl = readFileSync,
   writeFileAtomicImpl = writeFileAtomic,
 } = {}) {
-  if (!rootDir || !repo || !Number.isFinite(Number(prNumber)) || !reason) return null;
+  const normalizedPrNumber = normalizePrNumber(prNumber);
+  if (!rootDir || !repo || normalizedPrNumber === null || !reason) return null;
   const at = observedAt || new Date().toISOString();
-  const filePath = parkRecordPath(rootDir, repo, prNumber);
+  const filePath = parkRecordPath(rootDir, repo, normalizedPrNumber);
   const prior = readRecord(filePath, readFileSyncImpl);
   const continuing = prior?.reason === reason;
 
   const record = {
     schemaVersion: SCHEMA_VERSION,
     repo: String(repo),
-    prNumber: Number(prNumber),
+    prNumber: normalizedPrNumber,
     headSha: headSha ? String(headSha) : null,
     reason: String(reason),
     firstObservedAt: continuing ? (prior.firstObservedAt || at) : at,
@@ -158,7 +168,7 @@ function recordDaemonMergePark({
   try {
     mkdirSyncImpl(parkDir(rootDir), { recursive: true });
     const writeResult = writeFileAtomicImpl(filePath, `${JSON.stringify(record, null, 2)}\n`);
-    ignoreAsyncDiagnosticWriteFailure(writeResult);
+    assertSynchronousDiagnosticWrite(writeResult);
   } catch {
     // Diagnostics must never break the merge path they observe.
     return null;
@@ -176,9 +186,10 @@ function clearDaemonMergePark({
   prNumber,
   rmSyncImpl = rmSync,
 } = {}) {
-  if (!rootDir || !repo || !Number.isFinite(Number(prNumber))) return false;
+  const normalizedPrNumber = normalizePrNumber(prNumber);
+  if (!rootDir || !repo || normalizedPrNumber === null) return false;
   try {
-    rmSyncImpl(parkRecordPath(rootDir, repo, prNumber), { force: true });
+    rmSyncImpl(parkRecordPath(rootDir, repo, normalizedPrNumber), { force: true });
     return true;
   } catch {
     return false;

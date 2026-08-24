@@ -73,6 +73,24 @@ function readRecord(filePath, readFileSyncImpl) {
   }
 }
 
+function activeParkKeySet(activeReviewRows) {
+  if (!activeReviewRows) return null;
+  const rows = activeReviewRows instanceof Map
+    ? activeReviewRows.values()
+    : Array.isArray(activeReviewRows)
+      ? activeReviewRows
+      : [];
+  const keys = new Set();
+  for (const row of rows) {
+    const repo = row?.repo;
+    const prNumber = Number(row?.pr_number ?? row?.prNumber);
+    if (!repo || !Number.isFinite(prNumber)) continue;
+    if (String(row?.pr_state ?? row?.prState ?? 'open') !== 'open') continue;
+    keys.add(`${repo}#${prNumber}`);
+  }
+  return keys;
+}
+
 /**
  * Record (or refresh) a park for `repo#prNumber`.
  *
@@ -145,8 +163,10 @@ function clearDaemonMergePark({
  */
 function readDaemonMergeParks({
   rootDir,
+  activeReviewRows = null,
   readdirSyncImpl = readdirSync,
   readFileSyncImpl = readFileSync,
+  rmSyncImpl = rmSync,
 } = {}) {
   if (!rootDir) return [];
   let entries;
@@ -156,10 +176,21 @@ function readDaemonMergeParks({
     return [];
   }
   const parks = [];
+  const activeKeys = activeParkKeySet(activeReviewRows);
   for (const entry of entries) {
     if (!String(entry).endsWith('.json')) continue;
-    const record = readRecord(join(parkDir(rootDir), entry), readFileSyncImpl);
+    const filePath = join(parkDir(rootDir), entry);
+    const record = readRecord(filePath, readFileSyncImpl);
     if (record?.repo && Number.isFinite(Number(record.prNumber)) && record.reason) {
+      if (activeKeys && !activeKeys.has(`${record.repo}#${Number(record.prNumber)}`)) {
+        try {
+          rmSyncImpl(filePath, { force: true });
+        } catch {
+          // Diagnostics stay best-effort. Even if deletion fails, do not emit a
+          // ticket for a PR that the active review ledger says is gone.
+        }
+        continue;
+      }
       parks.push(record);
     }
   }

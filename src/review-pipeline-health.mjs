@@ -2164,7 +2164,7 @@ function collectReviewPipelineHealth({
       config,
     });
     const amaCloserLeases = readAmaCloserLeases(rootDir, { nowMs, config, reviewRows });
-    const daemonMergeParks = readDaemonMergeParks({ rootDir });
+    const daemonMergeParks = readDaemonMergeParks({ rootDir, activeReviewRows: reviewRows });
     const zombieReviewerPasses = db
       ? summarizeZombieReviewerPasses(db, { nowMs, config })
       : { thresholdMs: config.runningReviewerPassMaxAgeMs, rows: [] };

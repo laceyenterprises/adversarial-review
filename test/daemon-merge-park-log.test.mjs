@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -12,6 +12,7 @@ import {
   recordDaemonMergePark,
 } from '../src/daemon-merge-park-log.mjs';
 import { collectReviewPipelineHealth } from '../src/review-pipeline-health.mjs';
+import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 
 function withRoot(fn) {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'daemon-merge-park-'));
@@ -19,6 +20,33 @@ function withRoot(fn) {
     return fn(rootDir);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
+function insertReviewRow(rootDir, { repo, prNumber, prState = 'open' }) {
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    db.prepare(
+      `INSERT INTO reviewed_prs
+         (repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+          review_attempts, last_attempted_at, posted_at, failed_at, failure_message)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      repo,
+      prNumber,
+      '2026-08-23T17:00:00.000Z',
+      'gemini',
+      prState,
+      'posted',
+      1,
+      '2026-08-23T17:00:00.000Z',
+      '2026-08-23T17:01:00.000Z',
+      null,
+      null,
+    );
+  } finally {
+    db.close();
   }
 }
 
@@ -177,6 +205,11 @@ test('records are ignored when required identity fields are missing', () => {
 
 test('a standing park surfaces as a health finding that names the reason and the lever', () => {
   withRoot((rootDir) => {
+    insertReviewRow(rootDir, {
+      repo: 'laceyenterprises/foundry',
+      prNumber: 35,
+    });
+
     // Replays laceyenterprises/foundry#35 (2026-08-23): the daemon declined it
     // every tick on `worker-identity-unresolved` while the review sat settled
     // clean. Before this finding existed the only symptom was a generic
@@ -208,8 +241,45 @@ test('a standing park surfaces as a health finding that names the reason and the
   });
 });
 
+test('health collection prunes park records for PRs no longer active', () => {
+  withRoot((rootDir) => {
+    insertReviewRow(rootDir, {
+      repo: 'laceyenterprises/foundry',
+      prNumber: 35,
+      prState: 'closed',
+    });
+    for (const at of ['17:00', '17:07', '17:14']) {
+      recordDaemonMergePark({
+        rootDir,
+        repo: 'laceyenterprises/foundry',
+        prNumber: 35,
+        headSha: '1f457cfcb6b74ddb57a2c0f781406feacaa79df4',
+        reason: 'worker-identity-unresolved',
+        observedAt: `2026-08-23T${at}:00.000Z`,
+      });
+    }
+
+    const snapshot = collectReviewPipelineHealth({
+      rootDir,
+      now: () => new Date('2026-08-24T01:50:00Z'),
+    });
+
+    assert.deepEqual(snapshot.daemonMergeParks, []);
+    assert.deepEqual(
+      snapshot.findings.filter((f) => f.code === 'review:daemon_merge_parked'),
+      [],
+    );
+    assert.equal(existsSync(parkRecordPath(rootDir, 'laceyenterprises/foundry', 35)), false);
+  });
+});
+
 test('a park below the observation threshold does not ticket', () => {
   withRoot((rootDir) => {
+    insertReviewRow(rootDir, {
+      repo: 'laceyenterprises/foundry',
+      prNumber: 35,
+    });
+
     recordDaemonMergePark({
       rootDir,
       repo: 'laceyenterprises/foundry',

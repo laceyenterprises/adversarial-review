@@ -827,6 +827,27 @@ test("requestReviewRereview returns malformed-title-terminal for malformed rows"
   assert.equal(result.reason, 'malformed-title-terminal');
 });
 
+test("requestReviewRereview returns unroutable-bot-terminal for unroutable bot rows", () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: 'unroutable-bot-author',
+    reviewer: 'unroutable-bot-author',
+    postedAt: null,
+  });
+
+  const result = requestReviewRereview({
+    rootDir,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 10,
+    requestedAt: '2026-04-24T12:10:00.000Z',
+    reason: 'should be refused',
+  });
+
+  assert.equal(result.triggered, false);
+  assert.equal(result.status, 'blocked');
+  assert.equal(result.reason, 'unroutable-bot-terminal');
+});
+
 test("requestReviewRereview returns pr-not-open for closed PRs", () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   insertReviewRow(rootDir, {

@@ -1067,11 +1067,11 @@ function requestReviewRereview({
     if (!reviewRow) {
       return buildBlockedRereviewResult('review-row-missing');
     }
-    if (
-      reviewRow.review_status === 'malformed' ||
-      reviewRow.review_status === 'unroutable-bot-author'
-    ) {
+    if (reviewRow.review_status === 'malformed') {
       return buildBlockedRereviewResult('malformed-title-terminal', reviewRow);
+    }
+    if (reviewRow.review_status === 'unroutable-bot-author') {
+      return buildBlockedRereviewResult('unroutable-bot-terminal', reviewRow);
     }
     if (reviewRow.review_status === 'reviewing') {
       return buildBlockedRereviewResult('review-in-flight', reviewRow);

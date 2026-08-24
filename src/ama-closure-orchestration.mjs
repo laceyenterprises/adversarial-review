@@ -895,7 +895,27 @@ export async function maybeDispatchAmaClosureFor({
   }
 
   const [owner, name] = repoPath.split('/');
+  // HMR-01: how long has this PR been TERMINAL and still unmerged?
+  //
+  // A settled comment-only verdict spawns no remediation rounds, so
+  // `reviewCycleExhausted` can never flip for it and the hammer is structurally
+  // unreachable (see isHammerRemediableEligibilityMiss). The operator contract is
+  // Codex-first / Hammer-last, so the hammer must not fire on a FRESH comment-only
+  // verdict -- only once the PR has sat terminal past the same grace that
+  // `review:terminal_but_unmerged` already tickets on.
+  //
+  // `posted_at` is when the settled review landed. Null/unparseable yields null,
+  // which leaves the downstream branch inert and behaviour exactly as before.
+  const settledCommentOnlyTerminalMs = (() => {
+    const verdict = String(gateSnapshot?.settledReview?.verdict || '').trim();
+    if (verdict !== 'comment-only') return null;
+    const postedAt = Date.parse(String(reviewStateRow?.posted_at || ''));
+    if (!Number.isFinite(postedAt)) return null;
+    return Math.max(0, Date.now() - postedAt);
+  })();
+
   const dispatchContext = {
+    settledCommentOnlyTerminalMs,
     rootDir,
     repo: repoPath,
     prUrl: `https://github.com/${owner}/${name}/pull/${prNumber}`,

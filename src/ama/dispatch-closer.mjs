@@ -203,9 +203,14 @@ const HAMMER_AUTO_REMEDIABLE_MISS_REASONS = new Set([
   'pr-not-mergeable', // hammer rebases onto main / resolves the conflict, then merges
   'ci-not-green', // hammer fixes the failing required checks (green-main bar), then merges
 ]);
+const STRICT_NON_BLOCKING_REFUSAL_REASONS = new Set([
+  'non-blocking-findings-present',
+  'non-blocking-findings-unknown',
+]);
 const HAMMER_ROUTE_ACTION_REASONS = new Set([
   'blocking-findings-present',
   'non-blocking-findings-present',
+  'non-blocking-findings-unknown',
   'verdict-not-settled-success',
   'pr-not-mergeable',
   'ci-not-green',
@@ -220,6 +225,24 @@ const HAMMER_ROUTE_STRUCTURAL_BLOCK_REASONS = new Set([
 ]);
 const AMA_CLOSER_MERGE_RETRY_CAP = DAEMON_MERGE_DEFAULTS.retryCap;
 const AMA_CLOSER_MERGE_BACKOFF_BASE_MS = 250;
+
+// HMR-01: default terminal-unmerged grace before a settled comment-only PR may
+// reach the hammer. Mirrors the TTM tracker's `terminalUnmergedMinutes` (10m),
+// which is the same threshold `review:terminal_but_unmerged` already tickets on.
+export const DEFAULT_COMMENT_ONLY_HAMMER_TERMINAL_MS = 10 * 60 * 1000;
+
+function hasStrictNonBlockingRefusalReason(reasons = []) {
+  return reasons.some((reason) => STRICT_NON_BLOCKING_REFUSAL_REASONS.has(reason));
+}
+
+function finiteNumberOrNull(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function hasCommentOnlyTerminalResumeReason(reasons = []) {
+  return hasStrictNonBlockingRefusalReason(reasons) ||
+    (reasons.length === 1 && reasons[0] === 'verdict-not-settled-success');
+}
 
 export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
   if (!Array.isArray(reasons) || reasons.length === 0) return false;
@@ -266,9 +289,42 @@ export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
   // ONLY (`closerStaleHeadResume`); a bare `['stale-review-head']` (no
   // verdict/finding/CI reason) still parks -- #5053's "no purposeless hammer" --
   // and an external (non-closer) stale head never arms the flag.
+  // HMR-01 — a settled comment-only PR could never reach the hammer at all.
+  //
+  // Its only miss is either a strict non-blocking refusal or the zero-finding
+  // settled-success reason. Neither is in HAMMER_AUTO_REMEDIABLE_MISS_REASONS
+  // (that set is `pr-not-mergeable` and `ci-not-green` only). The exhaustion
+  // branch above cannot rescue it either: `reviewCycleExhaustedFromRounds`
+  // requires completed remediation or re-review rounds to reach the budget, and
+  // a comment-only verdict spawns NO remediation rounds -- there are no blocking
+  // findings to remediate. So the counter stays at 0 forever,
+  // `reviewCycleExhausted` never flips, and the PR parks: terminal, clean,
+  // green, mergeable, and structurally unable to earn a hammer.
+  //
+  // Observed 2026-08-24: five PRs simultaneously `terminal_but_unmerged` with
+  // `verdict=comment-only` (#5845 #5846 #5847 #5851 #5854), rounds 0-3, ages
+  // 14-69m and climbing, every one logging `AMA hammer route retained ownership:
+  // not-eligible`.
+  //
+  // The operator contract is Codex-first, Hammer-last: the hammer is the
+  // remediator of LAST resort. So this does not fire on a fresh comment-only
+  // verdict -- only once the PR has been terminal-but-unmerged past the same
+  // grace `review:terminal_but_unmerged` already tickets on. The caller supplies
+  // the measured duration; when it is absent this branch is inert and behaviour
+  // is exactly as before.
+  const commentOnlyTerminalMs = finiteNumberOrNull(options?.settledCommentOnlyTerminalMs);
+  const commentOnlyTerminalGraceMs = Number.isFinite(Number(options?.commentOnlyTerminalGraceMs))
+    ? Number(options.commentOnlyTerminalGraceMs)
+    : DEFAULT_COMMENT_ONLY_HAMMER_TERMINAL_MS;
+  const commentOnlyTerminalResume =
+    commentOnlyTerminalMs !== null &&
+    commentOnlyTerminalMs >= commentOnlyTerminalGraceMs &&
+    hasCommentOnlyTerminalResumeReason(effectiveReasons);
+
   const hasActionable =
     effectiveReasons.includes('pr-not-mergeable') ||
     effectiveReasons.includes('ci-not-green') ||
+    commentOnlyTerminalResume ||
     (closerStaleHeadResume && effectiveReasons.includes('verdict-not-settled-success'));
   if (!hasActionable) return false;
   const hasMechanicalMiss =
@@ -279,7 +335,16 @@ export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
   return effectiveReasons.every((reason) => (
     HAMMER_AUTO_REMEDIABLE_MISS_REASONS.has(reason) ||
     (hasMechanicalMiss && reason === 'verdict-not-settled-success') ||
-    (closerStaleHeadResume && reason === 'verdict-not-settled-success')
+    (closerStaleHeadResume && reason === 'verdict-not-settled-success') ||
+    // HMR-01: the settled comment-only resume covers exactly the strict
+    // non-blocking refusal plus its paired verdict reason, or the zero-finding
+    // bare verdict reason after the measured terminal-unmerged grace. A
+    // co-occurring BLOCKING finding is still not covered here, so it continues
+    // to fail this `every` and park -- that is the safety invariant, unchanged.
+    (commentOnlyTerminalResume && (
+      STRICT_NON_BLOCKING_REFUSAL_REASONS.has(reason) ||
+      reason === 'verdict-not-settled-success'
+    ))
   ));
 }
 
@@ -3159,18 +3224,39 @@ export async function maybeDispatchAmaCloser({
       });
     }
     const pendingCiMechanicalGateMiss = isPendingCiMechanicalGateMiss(verdict, routeReasons);
+    // HMR-01: a settled comment-only PR accrues no remediation rounds, so
+    // `reviewCycleExhausted` never flips and `workerClassForMiss` is `unknown`.
+    // Both of the existing entry conditions below are therefore permanently
+    // false for it. Admit it on the same measured terminal-unmerged grace the
+    // eligibility check uses, so "hammer as remediator of last resort" is
+    // reachable for the clean-but-non-blocking class at all.
+    const settledCommentOnlyTerminalMs = finiteNumberOrNull(
+      dispatchContext?.settledCommentOnlyTerminalMs,
+    );
+    const commentOnlyTerminalGraceMs = Number.isFinite(
+      Number(dispatchContext?.commentOnlyTerminalGraceMs),
+    )
+      ? Number(dispatchContext.commentOnlyTerminalGraceMs)
+      : DEFAULT_COMMENT_ONLY_HAMMER_TERMINAL_MS;
+    const commentOnlyTerminalAdmit =
+      settledCommentOnlyTerminalMs !== null &&
+      settledCommentOnlyTerminalMs >= commentOnlyTerminalGraceMs &&
+      hasCommentOnlyTerminalResumeReason(routeReasons);
     const autoHammer =
       !pendingCiMechanicalGateMiss &&
-      (isHammerWorkerClass(workerClassForMiss) || reviewCycleExhausted)
+      (isHammerWorkerClass(workerClassForMiss) || reviewCycleExhausted || commentOnlyTerminalAdmit)
       && (
         eligibleHammerRouteReasons.length > 0 ||
         routeReasons.some((reason) => HAMMER_ROUTE_ACTION_REASONS.has(reason)) ||
-        reviewCycleExhausted
+        reviewCycleExhausted ||
+        commentOnlyTerminalAdmit
       )
       && isHammerRemediableEligibilityMiss(routeReasons, {
         reviewCycleExhausted,
         allowStaleReviewHeadHammerResume:
           dispatchContext?.allowStaleReviewHeadHammerResume === true,
+        settledCommentOnlyTerminalMs,
+        commentOnlyTerminalGraceMs,
       });
     if (!autoHammer) {
       if (pendingCiMechanicalGateMiss) {

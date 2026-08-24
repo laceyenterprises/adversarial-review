@@ -654,16 +654,19 @@ one of:
    non-blocking findings on the PR branch. For a settled-success-family verdict
    where the only remaining HAM-waived reasons are
    `non-blocking-findings-present` or `non-blocking-findings-unknown` plus the
-   accompanying `verdict-not-settled-success`, the closer may waive those reasons
-   on an active HAM session only after the predicate verifies current-head HAM
-   authority from trusted inputs: HAM worker trailers, reviewed-parent/current-head
-   match, non-empty verified diff, allowlisted audit-comment author, matching
-   audit-comment body, and doc-currency evidence. This active trust is
+   accompanying `verdict-not-settled-success`, or for a zero-finding `Comment
+   only` verdict whose sole remaining refusal reason is
+   `verdict-not-settled-success`, the closer may waive those reasons on an
+   active HAM session only after the predicate verifies current-head HAM authority
+   from trusted inputs: HAM worker trailers, reviewed-parent/current-head match,
+   non-empty verified diff, allowlisted audit-comment author, matching
+   audit-comment body, and doc-currency evidence. The zero-finding path is
+   admitted only after the caller supplies a finite measured terminal-unmerged
+   duration that meets the comment-only grace threshold. This active trust is
    intentionally narrower than strict `.ok`: it does not require the finding-count
-   trailer to match the current non-blocking set, but a bare
-   `verdict-not-settled-success`, `Request changes`, blocking findings, stale
-   review heads, and unknown/pending remediation state still require strict `.ok`
-   validation or a current-head operator override.
+   trailer to match the current non-blocking set, but `Request changes`, blocking
+   findings, stale review heads, and unknown/pending remediation state still
+   require strict `.ok` validation or a current-head operator override.
 2. **Current-head `operator-approved`** — the operator accepts the standing
    non-blocking findings as-is.
 

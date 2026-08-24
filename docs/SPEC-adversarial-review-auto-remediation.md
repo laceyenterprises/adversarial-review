@@ -22,11 +22,13 @@ diff, allowlisted audit-comment author, matching audit-comment body, and
 doc-currency evidence. That active lane is limited to strict non-blocking
 remediation: a settled-success-family verdict whose remaining refusal reasons are
 `non-blocking-findings-present` or `non-blocking-findings-unknown`, plus the
-accompanying `verdict-not-settled-success`. A bare
-`verdict-not-settled-success`, a `Request changes` verdict, blocking-finding
-reasons, stale-head reasons, and remediation-state reasons still require
-validated HAM evidence (`ham_terminal_remediation_validated`) or a current-head
-operator override.
+accompanying `verdict-not-settled-success`. The HMR-01 terminal-unmerged rescue
+may also dispatch HAM for a settled `Comment only` PR whose sole remaining
+refusal reason is bare `verdict-not-settled-success`, but only after the caller
+supplies a finite measured comment-only terminal duration that meets the grace
+threshold. A `Request changes` verdict, blocking-finding reasons, stale-head
+reasons, and remediation-state reasons still require validated HAM evidence
+(`ham_terminal_remediation_validated`) or a current-head operator override.
 
 AMA closer dispatch must also declare the workspace repo set required by the
 closer prompt. The PR repository is always passed as the primary `--repo`. When
@@ -1870,12 +1872,14 @@ state instead of ignoring a failed worker run. In the narrow
 strict-non-blocking lane, the eligibility predicate may also accept an active HAM
 closer session when the only HAM-waived reasons are
 `non-blocking-findings-present` or `non-blocking-findings-unknown` and the paired
-`verdict-not-settled-success`, but the active state is authoritative only after
-the predicate verifies the live HAM commit, reviewed-parent/current-head match,
-non-empty diff, HAM worker trailers, allowlisted audit-comment author, matching
-audit-comment body, and doc-currency evidence from trusted inputs. That trust
-does not extend to `Request changes`, bare verdict failures, blocking findings,
-stale review heads, or unknown/pending remediation state. Commit
+`verdict-not-settled-success`, or the grace-gated zero-finding comment-only case
+whose only remaining reason is `verdict-not-settled-success`, but the active
+state is authoritative only after the predicate verifies the live HAM commit,
+reviewed-parent/current-head match, non-empty diff, HAM worker trailers,
+allowlisted audit-comment author, matching audit-comment body, and doc-currency
+evidence from trusted inputs. That trust does not extend to `Request changes`,
+blocking findings, stale review heads, or unknown/pending remediation state.
+Commit
 trailers and PR comments are attacker-controlled corroborating evidence, not
 sufficient authority. If `HQ_ROOT` is unset, the audit record is absent,
 untrusted, not keyed to the live head, missing its matching closer lease, the

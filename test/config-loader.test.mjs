@@ -134,6 +134,9 @@ test('missing file returns defaults', () => {
     assert.equal(cfg.get('roots.hq'), null);
     assert.equal(cfg.get('host.name'), null);
     assert.equal(cfg.get('host.tailscale_hostname'), null);
+    assert.equal(cfg.get('frc.offlan_transport.enabled'), false);
+    assert.equal(cfg.get('frc.offlan_transport.port'), 18794);
+    assert.equal(cfg.get('frc.offlan_transport.kill_switch_path'), null);
     assert.equal(cfg.get('tailscale.workstation_ip'), null);
     assert.equal(cfg.get('tailscale.workstation_dns_name'), null);
     assert.equal(cfg.get('tailscale.daily_driver_ip'), null);
@@ -4260,6 +4263,68 @@ test('validateSchema keeps the canonical config.yaml strict about resident', () 
       return true;
     },
   );
+});
+
+test('top-level config.yaml accepts mirrored frc off-LAN transport keys', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      frc:
+        offlan_transport:
+          enabled: true
+          port: 18894
+          kill_switch_path: /tmp/frc-offlan.kill
+    `);
+    const cfg = loadConfig({ topPath: top, modulePaths: [], env: {} });
+    assert.equal(cfg.get('frc.offlan_transport.enabled'), true);
+    assert.equal(cfg.get('frc.offlan_transport.port'), 18894);
+    assert.equal(cfg.get('frc.offlan_transport.kill_switch_path'), '/tmp/frc-offlan.kill');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('frc off-LAN transport env aliases override file layers and validate range', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      frc:
+        offlan_transport:
+          enabled: false
+          port: 18894
+    `);
+    const cfg = loadConfig({
+      topPath: top,
+      modulePaths: [],
+      env: {
+        AGENT_OS_FRC_OFFLAN_TRANSPORT_ENABLED: 'true',
+        AGENT_OS_FRC_OFFLAN_TRANSPORT_PORT: '18895',
+        AGENT_OS_FRC_OFFLAN_TRANSPORT_KILL_SWITCH_PATH: '/tmp/break-glass',
+      },
+    });
+    assert.equal(cfg.get('frc.offlan_transport.enabled'), true);
+    assert.equal(cfg.get('frc.offlan_transport.port'), 18895);
+    assert.equal(cfg.get('frc.offlan_transport.kill_switch_path'), '/tmp/break-glass');
+
+    assert.throws(
+      () => loadConfig({
+        topPath: top,
+        modulePaths: [],
+        env: { AGENT_OS_FRC_OFFLAN_TRANSPORT_PORT: '443' },
+      }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.match(err.message, /frc\.offlan_transport\.port/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test('validateSchema rejects arbitrary unknown top-level keys as typos', () => {

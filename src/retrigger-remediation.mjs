@@ -41,6 +41,9 @@ Required:
 
 Optional:
   --bump-budget <N>              Increase follow-up maxRounds before requeueing (default: 1)
+  --head-sha <sha>               Current PR head. When given, the requeue is refused if the
+                                 eligible job is pinned to a different head, instead of
+                                 spending a round on a requeue that cannot run.
   --idempotency-key <key>        Stable replay key for retry-safe operator calls
   --root-dir <path>              Tool root containing data/follow-up-jobs/
   --audit-root-dir <path>        Root that owns data/operator-mutations/
@@ -69,6 +72,7 @@ function parseArgs(argv) {
         'reason-file': { type: 'string' },
         'reason-stdin': { type: 'boolean', default: false },
         'bump-budget': { type: 'string' },
+        'head-sha': { type: 'string' },
         'idempotency-key': { type: 'string' },
         'root-dir': { type: 'string' },
         'audit-root-dir': { type: 'string' },
@@ -102,11 +106,13 @@ function parseArgs(argv) {
   if (!Number.isInteger(bumpBudget) || bumpBudget <= 0) {
     throw new UsageError(`--bump-budget must be a positive integer (got: ${bumpBudgetRaw})`);
   }
+  const headSha = String(parsed.values['head-sha'] ?? '').trim();
   return {
     values: {
       ...parsed.values,
       pr,
       bumpBudget,
+      headSha: headSha || null,
     },
     reasonSource: reasonSources[0],
   };
@@ -122,7 +128,25 @@ function readStdinSync() {
   return readFileSync(0, 'utf8');
 }
 
-function remediationEligibility(job) {
+// RTR-01: an eligible job pinned to a head the PR has moved past cannot do any
+// work. `claimNextFollowUpJob` stops it immediately with `stale-review-head`,
+// but only AFTER the budget bump and requeue have already mutated state — so the
+// operator spends a remediation round, and a maxRounds bump, on a round that
+// never runs.
+//
+// Observed 2026-08-24 on agent-os#5808 and #5813, both stuck ~9h. Each was
+// requeued by an operator, each advanced its round counter (2/3 -> 3/4 and
+// 1/3 -> 2/4), and each stopped instantly:
+//
+//   Review follow-up for laceyenterprises/agent-os#5808 was created for head
+//   e420de95f... (live head at the time: 268649826...)
+//
+// The lever is therefore a no-op that costs budget in exactly the case it exists
+// to serve: a PR stuck long enough for its head to advance.
+//
+// `currentHeadSha` is optional so existing callers are unaffected. When supplied
+// and it disagrees with the job's pin, refuse BEFORE any state is mutated.
+function remediationEligibility(job, { currentHeadSha = null } = {}) {
   if (!job) return { ok: false, outcome: 'refused:no-job', detail: 'no-job' };
   if (isActiveFollowUpJobStatus(job.status)) {
     return { ok: false, outcome: 'refused:job-active', detail: job.status };
@@ -136,6 +160,16 @@ function remediationEligibility(job) {
   }
   if (!['completed', 'failed', 'stopped'].includes(job.status)) {
     return { ok: false, outcome: 'refused:not-eligible', detail: job.status };
+  }
+  const pinned = String(job.revisionRef || '').trim();
+  const live = String(currentHeadSha || '').trim();
+  if (live && pinned && pinned !== live) {
+    return {
+      ok: false,
+      outcome: 'refused:stale-head',
+      detail: `job pinned to ${pinned.slice(0, 12)}, PR head is ${live.slice(0, 12)}`
+        + ' — re-review at the current head before remediating',
+    };
   }
   return { ok: true, outcome: 'bumped', detail: job.status };
 }
@@ -362,7 +396,9 @@ function main(argv, {
     return EXIT_BLOCKED;
   }
 
-  const eligibility = remediationEligibility(latest?.job || null);
+  const eligibility = remediationEligibility(latest?.job || null, {
+    currentHeadSha: values.headSha,
+  });
   if (!eligibility.ok) {
     const row = makeAuditRow({
       ...baseAudit,

@@ -524,3 +524,100 @@ test('retrigger-remediation records requeue failures after a successful budget b
   assert.equal(rows.at(-1)?.priorMaxRounds, 1);
   assert.equal(rows.at(-1)?.newMaxRounds, 2);
 });
+
+// RTR-01 — a requeue that cannot run must not spend a round.
+//
+// agent-os#5808 and #5813 (2026-08-24) were each requeued by an operator after
+// ~9h stuck. Both advanced their round counter and bumped maxRounds, and both
+// stopped instantly on `stale-review-head` because the eligible job was pinned
+// to a head the PR had moved past. The recovery lever cost budget and did no
+// work, in exactly the case it exists to serve.
+test('retrigger-remediation refuses a job pinned to a head the PR moved past', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-remediation-'));
+  makeJob(rootDir, {
+    status: 'stopped',
+    stoppedAt: '2026-05-05T04:05:00.000Z',
+    remediationPlan: {
+      maxRounds: 1,
+      currentRound: 1,
+      stop: { code: 'max-rounds-reached', reason: 'cap' },
+      nextAction: null,
+    },
+    revisionRef: 'e420de95f0b95b68e0000000000000000000000',
+  });
+  const err = makeCaptureStream();
+  const rc = main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'extra round',
+    '--head-sha', '2686498260000000000000000000000000000000',
+    '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
+  ], { stdout: makeCaptureStream(), stderr: err });
+
+  assert.equal(rc, 1);
+  assert.match(err.text(), /refused:stale-head/);
+  // The message must name both heads and the corrective step, so the operator is
+  // not left guessing why an "eligible" job was declined.
+  assert.match(err.text(), /e420de95f0b9/);
+  assert.match(err.text(), /268649826000/);
+  assert.match(err.text(), /re-review at the current head/);
+});
+
+test('retrigger-remediation proceeds when the head still matches', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-remediation-'));
+  const head = '2686498260000000000000000000000000000000';
+  makeJob(rootDir, {
+    status: 'stopped',
+    stoppedAt: '2026-05-05T04:05:00.000Z',
+    remediationPlan: {
+      maxRounds: 1,
+      currentRound: 1,
+      stop: { code: 'max-rounds-reached', reason: 'cap' },
+      nextAction: null,
+    },
+    revisionRef: head,
+  });
+  const out = makeCaptureStream();
+  const err = makeCaptureStream();
+  const rc = main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'extra round',
+    '--head-sha', head,
+    '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
+  ], { stdout: out, stderr: err });
+
+  assert.equal(rc, 0, err.text());
+  assert.match(out.text(), /"outcome":"bumped"/);
+});
+
+test('retrigger-remediation is unchanged when --head-sha is omitted', () => {
+  // Backward compatibility: existing callers pass no head and must behave
+  // exactly as before, stale pin or not.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-remediation-'));
+  makeJob(rootDir, {
+    status: 'stopped',
+    stoppedAt: '2026-05-05T04:05:00.000Z',
+    remediationPlan: {
+      maxRounds: 1,
+      currentRound: 1,
+      stop: { code: 'max-rounds-reached', reason: 'cap' },
+      nextAction: null,
+    },
+    revisionRef: 'e420de95f0b95b68e0000000000000000000000',
+  });
+  const out = makeCaptureStream();
+  const err = makeCaptureStream();
+  const rc = main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'extra round',
+    '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
+  ], { stdout: out, stderr: err });
+
+  assert.equal(rc, 0, err.text());
+  assert.match(out.text(), /"outcome":"bumped"/);
+});

@@ -640,6 +640,36 @@ function pickExistingColumn(db, tableName, candidates) {
 }
 
 function backfillReviewedPRSubjectIdentity(db) {
+  // RSB-01: probe before writing.
+  //
+  // This runs from schema init, i.e. on EVERY review-state DB open, and the
+  // UPDATE below is a write. SQLite takes a RESERVED/EXCLUSIVE lock for a write
+  // even when it matches zero rows, and this DB is not in WAL mode, so that lock
+  // blocks readers outright. Once the backfill has actually completed — which is
+  // the steady state forever after the migration — every one of those opens was
+  // paying for a write lock that could not change a single row.
+  //
+  // Measured on the live watcher DB on 2026-08-24: 0 of 4561 `reviewed_prs` rows
+  // still needed the backfill, yet `review-state-subject-identity-backfill` was
+  // the ONLY operation hitting SQLITE_BUSY in the watcher log — 528 events, with
+  // the retry ladder (250ms doubling) reaching 6/7 sixty times. Summing the
+  // ladder, the watcher spent roughly 20 minutes asleep on lock retries, which
+  // showed up as reviewer-dispatch drains of 400-900s and a watcher heartbeat
+  // breach (1036s > 900s SLA).
+  //
+  // A SELECT does not take a write lock, so the read-only probe is cheap in the
+  // steady state and the write is still performed, unchanged and under the same
+  // retry wrapper, whenever there is genuinely something to backfill.
+  const needsBackfill = withSqliteBusyRetrySync(() => db.prepare(
+    `SELECT 1
+       FROM reviewed_prs
+      WHERE domain_id IS NULL
+        AND repo IS NOT NULL
+        AND pr_number IS NOT NULL
+      LIMIT 1`
+  ).get(), { label: 'review-state-subject-identity-backfill-probe' });
+  if (!needsBackfill) return;
+
   withSqliteBusyRetrySync(() => {
     const headShaColumn = pickExistingColumn(db, 'reviewed_prs', REVIEWED_PRS_HEAD_SHA_COLUMNS);
     const revisionExpr = headShaColumn ? `"${headShaColumn}"` : 'NULL';

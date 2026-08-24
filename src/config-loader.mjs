@@ -177,6 +177,21 @@ const FOREIGN_TOP_LEVEL_SECTIONS = new Set([
   // env (`AGENT_OS_EMAIL_ARCHIVE_DSN`) as the only supported operator surface
   // precisely because this entry did not exist yet.
   'email_archive',
+  //
+  // `resident` (agent-os#5813, RTR-00) qualifies on the same two counts. The
+  // root is declared in the Python schema authority
+  // (`agent_os_config/schema_v1/misc.py`) and the shell loader, is consumed by
+  // the resident supervisor, and has no meaning to this reader: nothing in
+  // adversarial-review reads resident token state.
+  //
+  // Without this entry an operator who sets `resident.token_refresh.enabled` in
+  // config.local.yaml — the documented way to enforce that flag — takes the
+  // watcher down the `email_archive` path above: not foreign, falls through to
+  // the strict schema, `resident: unknown key`, crash-loop. Registering it as
+  // foreign is the honest description and costs nothing to keep in step,
+  // whereas mirroring the block would create a second copy of a Python-owned
+  // schema.
+  'resident',
 ]);
 // Keep this per-role fallback surface in lockstep with the Python
 // agent_os_config schema. The child dicts are intentionally strict so a

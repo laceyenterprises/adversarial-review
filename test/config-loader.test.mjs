@@ -4220,6 +4220,48 @@ test('validateSchema keeps the canonical config.yaml strict about email_archive'
   );
 });
 
+test('validateSchema drops the Python-owned resident root from a local file', () => {
+  // agent-os#5813 (RTR-00). `resident` is declared in the Python schema
+  // authority (agent_os_config/schema_v1/misc.py) and the shell loader, and is
+  // consumed by the resident supervisor; nothing in adversarial-review reads
+  // resident token state. Without the FOREIGN_TOP_LEVEL_SECTIONS entry an
+  // operator setting `resident.token_refresh.enabled` — the documented way to
+  // enforce that flag — takes the watcher down the email_archive path: not
+  // foreign, strict schema, `unknown key`, crash-loop.
+  const out = validateSchema(
+    {
+      version: 1,
+      resident: {
+        token_refresh: { enabled: true },
+      },
+    },
+    {
+      source: '/tmp/config.local.yaml',
+      tolerateForeignTopLevelSections: true,
+      tolerateNestedUnknownLocalKeys: true,
+    },
+  );
+  assert.equal(out.version, 1);
+  assert.equal(out.resident, undefined, 'foreign root dropped, not adopted');
+});
+
+test('validateSchema keeps the canonical config.yaml strict about resident', () => {
+  // Same scoping as email_archive: tolerance is for Layer-4 local siblings only,
+  // so this reader cannot silently diverge from its sibling CFG loaders.
+  assert.throws(
+    () => validateSchema(
+      { version: 1, resident: { token_refresh: { enabled: true } } },
+      { source: '/tmp/config.yaml', tolerateForeignTopLevelSections: true },
+    ),
+    (err) => {
+      assert.ok(err instanceof AgentOSConfigError);
+      assert.match(err.message, /resident/);
+      assert.match(err.message, /unknown key/);
+      return true;
+    },
+  );
+});
+
 test('validateSchema rejects arbitrary unknown top-level keys as typos', () => {
   assert.throws(
     () => validateSchema(

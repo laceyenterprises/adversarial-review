@@ -109,6 +109,15 @@ function removeDiagnosticFile(filePath, rmSyncImpl) {
   }
 }
 
+function isStaleParkRecord(record, { nowMs, staleAfterMs }) {
+  if (!Number.isFinite(nowMs) || !Number.isFinite(staleAfterMs) || staleAfterMs <= 0) {
+    return false;
+  }
+  const lastObservedMs = Date.parse(record?.lastObservedAt || '');
+  if (!Number.isFinite(lastObservedMs)) return true;
+  return nowMs - lastObservedMs > staleAfterMs;
+}
+
 /**
  * Record (or refresh) a park for `repo#prNumber`.
  *
@@ -183,6 +192,8 @@ function clearDaemonMergePark({
 function readDaemonMergeParks({
   rootDir,
   activeReviewRows = null,
+  nowMs = null,
+  staleAfterMs = null,
   readdirSyncImpl = readdirSync,
   readFileSyncImpl = readFileSync,
   rmSyncImpl = rmSync,
@@ -205,6 +216,10 @@ function readDaemonMergeParks({
       continue;
     }
     if (record?.repo && Number.isFinite(Number(record.prNumber)) && record.reason) {
+      if (isStaleParkRecord(record, { nowMs, staleAfterMs })) {
+        removeDiagnosticFile(filePath, rmSyncImpl);
+        continue;
+      }
       if (activeKeys && !activeKeys.has(`${record.repo}#${Number(record.prNumber)}`)) {
         removeDiagnosticFile(filePath, rmSyncImpl);
         continue;

@@ -262,7 +262,7 @@ test('a standing park surfaces as a health finding that names the reason and the
 
     const snapshot = collectReviewPipelineHealth({
       rootDir,
-      now: () => new Date('2026-08-24T01:50:00Z'),
+      now: () => new Date('2026-08-23T17:20:00Z'),
     });
     const findings = snapshot.findings.filter((f) => f.code === 'review:daemon_merge_parked');
 
@@ -273,6 +273,37 @@ test('a standing park surfaces as a health finding that names the reason and the
     // The whole point: the ticket names the lever instead of listing candidates.
     assert.match(findings[0].recommended_action, /hq pr sign/);
     assert.equal(findings[0].details.parks.length, 1);
+  });
+});
+
+test('health collection expires stale park records for PRs no longer evaluated', () => {
+  withRoot((rootDir) => {
+    insertReviewRow(rootDir, {
+      repo: 'laceyenterprises/foundry',
+      prNumber: 35,
+    });
+    for (const at of ['17:00', '17:07', '17:14']) {
+      recordDaemonMergePark({
+        rootDir,
+        repo: 'laceyenterprises/foundry',
+        prNumber: 35,
+        headSha: '1f457cfcb6b74ddb57a2c0f781406feacaa79df4',
+        reason: 'worker-identity-unresolved',
+        observedAt: `2026-08-23T${at}:00.000Z`,
+      });
+    }
+
+    const snapshot = collectReviewPipelineHealth({
+      rootDir,
+      now: () => new Date('2026-08-23T17:30:01Z'),
+    });
+
+    assert.deepEqual(snapshot.daemonMergeParks, []);
+    assert.deepEqual(
+      snapshot.findings.filter((f) => f.code === 'review:daemon_merge_parked'),
+      [],
+    );
+    assert.equal(existsSync(parkRecordPath(rootDir, 'laceyenterprises/foundry', 35)), false);
   });
 });
 
@@ -305,6 +336,27 @@ test('health collection prunes park records for PRs no longer active', () => {
       [],
     );
     assert.equal(existsSync(parkRecordPath(rootDir, 'laceyenterprises/foundry', 35)), false);
+  });
+});
+
+test('health collection preserves park records when the review DB is unavailable', () => {
+  withRoot((rootDir) => {
+    recordDaemonMergePark({
+      rootDir,
+      repo: 'laceyenterprises/foundry',
+      prNumber: 35,
+      reason: 'worker-identity-unresolved',
+      observedAt: '2026-08-23T17:00:00.000Z',
+    });
+
+    const snapshot = collectReviewPipelineHealth({
+      rootDir,
+      now: () => new Date('2026-08-23T17:05:00Z'),
+    });
+
+    assert.equal(snapshot.daemonMergeParks.length, 1);
+    assert.equal(snapshot.daemonMergeParks[0].prNumber, 35);
+    assert.equal(existsSync(parkRecordPath(rootDir, 'laceyenterprises/foundry', 35)), true);
   });
 });
 

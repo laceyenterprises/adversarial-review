@@ -80,6 +80,7 @@ data/reviews.db
 | `failed` | review attempt failed; eligible rows are auto-retried by the normal dispatch path on a later poll |
 | `failed-orphan` | watcher restarted while a `reviewing` row was in flight and safe automatic recovery could not be proven — sticky, requires operator verification + `npm run retrigger-review` |
 | `malformed` | title guardrail failure; terminal by design |
+| `unroutable-bot-author` | bot-authored PR lacks a worker prefix by construction; terminal by design and excluded from malformed-title ticketing |
 
 ### Transitions
 
@@ -87,7 +88,8 @@ data/reviews.db
 new PR
   │
   ├─ malformed title
-  │    └─ malformed
+  │    ├─ human/fleet-worker author ── malformed
+  │    └─ known bot author ─────────── unroutable-bot-author
   │
   └─ valid tagged PR
        └─ pending

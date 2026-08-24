@@ -214,6 +214,35 @@ export function isUnroutableBotAuthor(authorRef) {
   return UNROUTABLE_BOT_AUTHORS.has(`${login.slice('app/'.length)}[bot]`);
 }
 
+export function markMalformedTitleTerminalState({
+  prTitle,
+  failureAt,
+  repoPath,
+  prNumber,
+  unroutableBot = false,
+  markMalformedStatement = stmtMarkMalformed,
+  markUnroutableBotStatement = stmtMarkUnroutableBot,
+} = {}) {
+  if (unroutableBot) {
+    markUnroutableBotStatement.run(
+      `Unroutable bot-authored PR (no worker prefix is possible): ${prTitle}`,
+      failureAt,
+      failureAt,
+      repoPath,
+      prNumber
+    );
+    return 'unroutable-bot-author';
+  }
+  markMalformedStatement.run(
+    `Malformed PR title: ${prTitle}`,
+    failureAt,
+    failureAt,
+    repoPath,
+    prNumber
+  );
+  return 'malformed';
+}
+
 
 // AFH-04 — one bounded `hq fleet quota status --json` read per TTL window (not
 // one per PR) feeding the ordered reviewer fallback. Constructing the cache is
@@ -446,6 +475,7 @@ export async function processReviewSubject(entry, ctx) {
       // still skip any failed-orphan row that reaches this point.
       if (
         existing?.review_status === 'malformed' ||
+        existing?.review_status === 'unroutable-bot-author' ||
         existing?.review_status === 'failed-orphan'
       ) {
         await projectGateStatusSafe(existing);
@@ -784,20 +814,13 @@ export async function processReviewSubject(entry, ctx) {
         // Malformed titles are terminal in watcher state to avoid ambiguous retitle retries.
         const failureAt = new Date().toISOString();
         const unroutableBot = isUnroutableBotAuthor(subject.authorRef);
-        stmtMarkMalformed.run(
-          unroutableBot
-            ? `Unroutable bot-authored PR (no worker prefix is possible): ${prTitle}`
-            : `Malformed PR title: ${prTitle}`,
-          failureAt,
+        markMalformedTitleTerminalState({
+          prTitle,
           failureAt,
           repoPath,
-          prNumber
-        );
-        if (unroutableBot) {
-          // Distinct terminal status so `review:malformed_pr_title` stops
-          // ticketing a defect the author cannot fix.
-          stmtMarkUnroutableBot.run(repoPath, prNumber);
-        }
+          prNumber,
+          unroutableBot,
+        });
         // Store normalized label names in reviewed_prs.labels_json. Readers
         // still accept the older GitHub label-object shape for historical rows.
         stmtUpdateReviewLabels.run(JSON.stringify(Array.isArray(subject.labels) ? subject.labels : []), repoPath, prNumber);

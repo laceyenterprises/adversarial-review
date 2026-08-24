@@ -100,7 +100,7 @@ Its action headline is `Reviews stalled — restore reviewer dispatch`.
 | `review:unknown_failure_rate_high` | unknown-classified failures are >30% of failures over 15m, with at least 5 failures and at least 2 distinct PRs contributing unknown failures | ticket | the failure window falls back to threshold or below, the sample floor is no longer met, or unknown failures collapse to fewer than 2 PRs |
 | `review:reviewer_degradation_active` | at least one PR is currently held by `provider-overloaded` transient backoff or `quota-exhausted` quota hold | ticket | no active provider-overload backoff or quota hold remains |
 | `review:queue_starvation` | oldest pending first-pass row is >10m old | ticket | no pending row exceeds the age threshold |
-| `review:malformed_pr_title` | one or more open PRs are recorded `review_status='malformed'` | ticket | malformed rows are recreated, explicitly recovered, or no longer open |
+| `review:malformed_pr_title` | one or more open PRs are recorded `review_status='malformed'` | ticket | malformed rows are recreated, explicitly recovered, or no longer open; known bot-authored prefixless PRs use `review_status='unroutable-bot-author'` and do not trigger this alert |
 | `review:remediation_backlog` | `follow-up-jobs/pending` has >5 jobs | ticket | pending job count returns to threshold or below |
 | `review:merge_stalled` | a `stopped:review-settled` job remains open for >3 watcher ticks | ticket | the PR is merged/closed or the settled job is no longer past threshold |
 | `review:ttm_budget_breach` | open PR age exceeds `base + review_rounds * per_round` minutes | ticket | the PR merges/closes or falls back under the rounds-aware budget |

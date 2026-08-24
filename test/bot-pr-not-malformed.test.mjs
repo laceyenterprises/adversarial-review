@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isUnroutableBotAuthor } from '../src/pollonce-phases.mjs';
+import {
+  isUnroutableBotAuthor,
+  markMalformedTitleTerminalState,
+} from '../src/pollonce-phases.mjs';
 
 // MAL-01. A PR with no worker prefix was always recorded
 // `review_status='malformed'` with "Malformed PR title: <title>". For a fleet
@@ -46,4 +49,62 @@ test('a lookalike name is not silently treated as a bot', () => {
   // Guard against the prefix-strip accidentally matching a real account.
   assert.equal(isUnroutableBotAuthor('dependabot'), false);
   assert.equal(isUnroutableBotAuthor('not-dependabot[bot]'), false);
+});
+
+test('unroutable bot terminal marking is a single full-row update', () => {
+  const calls = [];
+  const status = markMalformedTitleTerminalState({
+    prTitle: 'chore(deps): bump sqlite',
+    failureAt: '2026-08-24T19:30:00.000Z',
+    repoPath: 'laceyenterprises/adversarial-review',
+    prNumber: 911,
+    unroutableBot: true,
+    markMalformedStatement: {
+      run: (...args) => calls.push(['malformed', args]),
+    },
+    markUnroutableBotStatement: {
+      run: (...args) => calls.push(['unroutable', args]),
+    },
+  });
+
+  assert.equal(status, 'unroutable-bot-author');
+  assert.deepEqual(calls, [[
+    'unroutable',
+    [
+      'Unroutable bot-authored PR (no worker prefix is possible): chore(deps): bump sqlite',
+      '2026-08-24T19:30:00.000Z',
+      '2026-08-24T19:30:00.000Z',
+      'laceyenterprises/adversarial-review',
+      911,
+    ],
+  ]]);
+});
+
+test('human malformed title terminal marking does not touch the bot status', () => {
+  const calls = [];
+  const status = markMalformedTitleTerminalState({
+    prTitle: 'fix typo',
+    failureAt: '2026-08-24T19:31:00.000Z',
+    repoPath: 'laceyenterprises/adversarial-review',
+    prNumber: 912,
+    unroutableBot: false,
+    markMalformedStatement: {
+      run: (...args) => calls.push(['malformed', args]),
+    },
+    markUnroutableBotStatement: {
+      run: (...args) => calls.push(['unroutable', args]),
+    },
+  });
+
+  assert.equal(status, 'malformed');
+  assert.deepEqual(calls, [[
+    'malformed',
+    [
+      'Malformed PR title: fix typo',
+      '2026-08-24T19:31:00.000Z',
+      '2026-08-24T19:31:00.000Z',
+      'laceyenterprises/adversarial-review',
+      912,
+    ],
+  ]]);
 });

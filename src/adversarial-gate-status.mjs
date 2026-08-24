@@ -416,6 +416,13 @@ function pickAdversarialGateStatus({
   if (reviewStatus === 'malformed') {
     return decide('failure', 'Adversarial review ledger is malformed.', 'review-malformed');
   }
+  if (reviewStatus === 'unroutable-bot-author') {
+    return decide(
+      'failure',
+      'Adversarial review cannot route a bot-authored PR without a worker prefix.',
+      'review-unroutable-bot-author'
+    );
+  }
 
   // Stale-review-head guard. Stored review rows can intentionally publish a
   // green, operator-decides gate even when the reviewer never posted a clean

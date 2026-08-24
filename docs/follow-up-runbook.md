@@ -890,6 +890,7 @@ Interpretation:
 - `review_status = 'pending'` means the watcher can pick the PR up again
 - `review_status = 'posted'` means the previous review is terminal unless requeued by reconciliation or manual DB recovery
 - `review_status = 'malformed'` is terminal by design for malformed-title cases
+- `review_status = 'unroutable-bot-author'` is terminal by design for known bot-authored PRs whose titles cannot carry a worker prefix
 
 ---
 

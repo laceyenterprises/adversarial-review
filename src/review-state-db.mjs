@@ -159,7 +159,7 @@ export const stmtMarkMalformed = db.prepare(
 // keeps the row (and its evidence) while stopping `review:malformed_pr_title`
 // from asserting a defect no author can fix. Dependabot owns its own titles.
 export const stmtMarkUnroutableBot = db.prepare(
-  "UPDATE reviewed_prs SET reviewer = 'unroutable-bot-author', review_status = 'unroutable-bot-author' WHERE repo = ? AND pr_number = ?"
+  "UPDATE reviewed_prs SET reviewer = 'unroutable-bot-author', review_status = 'unroutable-bot-author', failure_message = ?, failed_at = ?, last_attempted_at = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
 );
 // 'reviewing' is the durable in-progress claim: set BEFORE spawning
 // the reviewer subprocess, replaced with 'posted' / 'failed' once the
@@ -422,18 +422,18 @@ export const stmtLatestGenuinePostedReviewAt = db.prepare(
 const SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW =
   "SELECT COUNT(*) AS n FROM reviewed_prs " +
   "WHERE pr_state = 'open' " +
-  // A malformed-title PR is REFUSED, not pending: the dispatch loop returns
-  // early on review_status='malformed' (a terminal status), so it can never
-  // receive a first pass. Counting it kept the "Reviews stalled" pager above
+  // Malformed-title and unroutable-bot PRs are REFUSED, not pending: the
+  // dispatch loop returns early on either terminal status, so they can never
+  // receive a first pass. Counting them kept the "Reviews stalled" pager above
   // zero forever and produced pages naming PRs the reviewer will never touch.
   // This is not the same as trusting review_status='posted' -- the comment
   // above deliberately keys success off gh_comment_id so a stale success claim
   // cannot mask a real gap. Here we exclude work the pipeline has explicitly
   // refused, which is evidence about the PR, not about reviewer health.
-  // SQLite's `IS NOT` is null-safe here: it excludes the terminal malformed
-  // state while still counting rows with no status yet -- the exact rows most
-  // likely to be genuinely awaiting a first pass.
-  "AND review_status IS NOT 'malformed' " +
+  // SQLite's `NOT IN` drops NULL, so keep the null-safe shape explicit: exclude
+  // terminal refused states while still counting rows with no status yet -- the
+  // exact rows most likely to be genuinely awaiting a first pass.
+  "AND (review_status IS NULL OR review_status NOT IN ('malformed', 'unroutable-bot-author')) " +
   "AND NOT EXISTS ( " +
   "  SELECT 1 FROM reviewer_passes " +
   "  WHERE reviewer_passes.repo = reviewed_prs.repo " +

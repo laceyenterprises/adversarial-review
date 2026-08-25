@@ -504,6 +504,24 @@ function schemaV1() {
           },
         },
       },
+      // FRC-02 — mirror the Python `frc.offlan_transport` shard so strict
+      // Node daemons keep accepting shared local config as the operator rolls
+      // out the authenticated off-LAN console transport.
+      frc: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          offlan_transport: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              enabled: { __type: TYPE_BOOL, __default: false },
+              port: { __type: TYPE_INT, __default: 18794, __min: 1024, __max: 65535 },
+              kill_switch_path: { __type: TYPE_STRING, __default: null, __nullable: true },
+            },
+          },
+        },
+      },
       openclaw: {
         __type: TYPE_DICT,
         __strict: true,
@@ -2786,6 +2804,18 @@ export const ENV_ALIASES = {
   },
   'ci.hosting.mode': {
     canonical: 'AGENT_OS_CI_HOSTING_MODE',
+    aliases: [],
+  },
+  'frc.offlan_transport.enabled': {
+    canonical: 'AGENT_OS_FRC_OFFLAN_TRANSPORT_ENABLED',
+    aliases: [],
+  },
+  'frc.offlan_transport.port': {
+    canonical: 'AGENT_OS_FRC_OFFLAN_TRANSPORT_PORT',
+    aliases: [],
+  },
+  'frc.offlan_transport.kill_switch_path': {
+    canonical: 'AGENT_OS_FRC_OFFLAN_TRANSPORT_KILL_SWITCH_PATH',
     aliases: [],
   },
   'roles.reviewer': {

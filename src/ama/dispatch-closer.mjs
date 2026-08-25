@@ -1150,6 +1150,19 @@ export function amaClosureNeedsTerminalRemediation(verdict) {
 
 const AMA_CLOSER_DISPATCH_SCHEMA_VERSION = 1;
 const AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS = [1_000, 5_000];
+// `git worktree remove` refuses a registration whose directory is already gone.
+// `--force` does not cover it: --force overrides dirty/locked, not missing. The
+// branch stays pinned by the leftover metadata until something prunes it.
+export function isStaleWorktreeRegistrationError(detail) {
+  const text = String(detail || '').toLowerCase();
+  if (!text) return false;
+  return (
+    text.includes('is not a working tree') ||
+    text.includes('no such file or directory') ||
+    text.includes('not a valid working tree')
+  );
+}
+
 const AMA_CLOSER_TEARDOWN_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000];
 const AMA_CLOSER_HQ_DISPATCH_LAUNCH_WINDOW_MS = 90_000;
 const AMA_CLOSER_HQ_DISPATCH_MAX_ATTEMPTS = AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.length + 1;
@@ -2302,13 +2315,56 @@ async function teardownSamePrHammerHolder({
         ok: true,
       });
     } catch (removeErr) {
+      const removeDetail = String(removeErr?.stderr || removeErr?.message || removeErr);
       attempts.push({
         worktreePath,
         action: 'git-worktree-remove',
         ok: false,
-        error: String(removeErr?.stderr || removeErr?.message || removeErr),
+        error: removeDetail,
       });
-      continue;
+      // A STALE REGISTRATION is not a removable worktree. When the holder
+      // directory is already gone, git keeps the branch pinned via leftover
+      // administrative metadata and `worktree remove` refuses with "is not a
+      // working tree" -- `--force` does not help, because --force overrides
+      // dirty/locked, not missing. `prune` is the command for exactly this.
+      //
+      // Without this branch the hammer can never dispatch: every attempt fails
+      // ProvisionError "branch is already checked out by another worker
+      // worktree", the closer prompt is rewritten each tick, and the PR strands
+      // with no hammer and no cap record. Observed on agent-os#5889, whose
+      // holder worker had already SUCCEEDED and whose directory no longer
+      // existed -- 5 closer prompts, zero dispatches.
+      if (!isStaleWorktreeRegistrationError(removeDetail)) {
+        continue;
+      }
+      try {
+        await execFileImpl('git', [
+          '-C',
+          join(hqRoot, 'repos', AGENT_OS_TOOLING_REPO),
+          'worktree',
+          'prune',
+        ], {
+          env,
+          maxBuffer: 1024 * 1024,
+          timeout: 60_000,
+          killSignal: 'SIGTERM',
+        });
+        attempts.push({
+          worktreePath,
+          action: 'git-worktree-prune',
+          ok: true,
+          recoveredFrom: 'stale-registration',
+        });
+      } catch (pruneErr) {
+        attempts.push({
+          worktreePath,
+          action: 'git-worktree-prune',
+          ok: false,
+          recoveredFrom: 'stale-registration',
+          error: String(pruneErr?.stderr || pruneErr?.message || pruneErr),
+        });
+        continue;
+      }
     }
 
     const tearDownArgs = ['worker', 'tear-down', workerId, '--force', '--root', hqRoot];

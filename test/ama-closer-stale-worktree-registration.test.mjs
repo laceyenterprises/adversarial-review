@@ -99,10 +99,18 @@ test('a stale worktree registration is pruned so the branch is released', async 
     sleepImpl: async () => {},
   });
 
+  assert.equal(result.ok, true, 'successful prune plus worker teardown must let the caller retry dispatch');
+
   const pruned = calls.some(c => c.includes('worktree prune'));
   assert.equal(pruned, true, 'expected `git worktree prune` after a stale-registration remove failure');
 
   const attempts = result?.attempts || [];
+  const removeAttempt = attempts.find(a => a.action === 'git-worktree-remove');
+  assert.ok(removeAttempt, 'the stale remove failure must remain in attempts for audit');
+  assert.equal(removeAttempt.ok, false);
+  assert.equal(removeAttempt.recovered, true);
+  assert.equal(removeAttempt.recoveredBy, 'git-worktree-prune');
+
   const pruneAttempt = attempts.find(a => a.action === 'git-worktree-prune');
   assert.ok(pruneAttempt, 'prune recovery must be recorded in attempts for audit');
   assert.equal(pruneAttempt.ok, true);

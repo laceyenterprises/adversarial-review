@@ -2337,6 +2337,7 @@ async function teardownSamePrHammerHolder({
       if (!isStaleWorktreeRegistrationError(removeDetail)) {
         continue;
       }
+      const staleRemoveAttempt = attempts.at(-1);
       try {
         await execFileImpl('git', [
           '-C',
@@ -2349,6 +2350,14 @@ async function teardownSamePrHammerHolder({
           timeout: 60_000,
           killSignal: 'SIGTERM',
         });
+        if (
+          staleRemoveAttempt
+          && staleRemoveAttempt.worktreePath === worktreePath
+          && staleRemoveAttempt.action === 'git-worktree-remove'
+        ) {
+          staleRemoveAttempt.recovered = true;
+          staleRemoveAttempt.recoveredBy = 'git-worktree-prune';
+        }
         attempts.push({
           worktreePath,
           action: 'git-worktree-prune',
@@ -2437,7 +2446,7 @@ async function teardownSamePrHammerHolder({
     }
   }
 
-  const ok = attempts.every(attempt => attempt.ok);
+  const ok = attempts.every(attempt => attempt.ok || attempt.recovered);
   logger?.warn?.(JSON.stringify({
     event: 'ama_closer.same_pr_hammer_holder_teardown',
     prNumber,

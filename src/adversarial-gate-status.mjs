@@ -416,6 +416,32 @@ function pickAdversarialGateStatus({
   if (reviewStatus === 'malformed') {
     return decide('failure', 'Adversarial review ledger is malformed.', 'review-malformed');
   }
+  // ASR-04. `argus-security-queued` is what a bot-authored (or otherwise
+  // security-surfaced, unroutable) PR carries now: Argus owns it, and no verdict
+  // has come back yet.
+  //
+  // `pending`, not `failure`, and not `success`. The old `failure` was a red
+  // check asserting a defect — there is none; the PR is simply not this lane's
+  // to review. `success` would be worse: it would publish "the adversarial gate
+  // is satisfied" for a tree no reviewer has read, which is exactly the approval
+  // an unanswered security question must never become (SEN-02 blind-vs-ok).
+  // `pending` is the honest third answer and still holds the merge, so this
+  // loosens nothing while it waits. ASR-06 replaces it with the verdict: `high`
+  // blocks, medium/low are advisory.
+  if (reviewStatus === 'argus-security-queued') {
+    return decide(
+      'pending',
+      'Argus security review is queued for this PR.',
+      'argus-security-review-queued'
+    );
+  }
+  // Legacy, and legacy-only. ASR-04 stopped writing this status; rows that still
+  // carry it are pre-ASR-04 strandings the backfill has not reached yet, rows a
+  // reopened PR carried back into the open set, or rows written while the
+  // ADVERSARIAL_ARGUS_SECURITY_ROUTE kill switch was off. Left mapped rather than
+  // deleted because a status that still EXISTS on disk and no longer matches any
+  // branch would fall through to the generic unknown-verdict `failure` at the
+  // bottom of this function, which says something false about why.
   if (reviewStatus === 'unroutable-bot-author') {
     return decide(
       'failure',

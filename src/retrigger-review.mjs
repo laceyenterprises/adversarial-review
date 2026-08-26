@@ -269,6 +269,11 @@ function refuseReasonForReviewRow(reviewRow, {
       return allowFailedReset ? null : 'failed-orphan';
     case 'reviewing':
     case 'malformed':
+    // ASR-04: Argus owns this PR; the adversarial lane still cannot resolve a
+    // reviewer for it, so a retrigger is refused here exactly as the legacy
+    // status below is. The blocked reason is the status itself, so the operator
+    // reads `argus-security-queued` and not a stale "unroutable" claim.
+    case 'argus-security-queued':
     case 'unroutable-bot-author':
       return reviewRow.review_status;
     default:

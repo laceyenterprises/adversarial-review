@@ -890,7 +890,8 @@ Interpretation:
 - `review_status = 'pending'` means the watcher can pick the PR up again
 - `review_status = 'posted'` means the previous review is terminal unless requeued by reconciliation or manual DB recovery
 - `review_status = 'malformed'` is terminal by design for malformed-title cases
-- `review_status = 'unroutable-bot-author'` is terminal by design for known bot-authored PRs whose titles cannot carry a worker prefix
+- `review_status = 'argus-security-queued'` means a bot-authored (or otherwise unroutable) PR was routed to the Argus security queue (ASR-04). It is **not** terminal: the watcher revisits the row every tick so a new head re-enqueues, and the adversarial gate stays `pending` until Argus answers. Inspect the job with `ls data/argus-security-jobs/*/` — the filename is `<repo>-pr-<n>-<headSha>.json`
+- `review_status = 'unroutable-bot-author'` is the pre-ASR-04 terminal status for the same PRs, and the reason `#909`/`#910` sat unreviewed for 14 hours. It is only written now when `ADVERSARIAL_ARGUS_SECURITY_ROUTE` is off. An open row still carrying it self-heals on the next watcher tick; to recover every stranding immediately, run `npm run argus:backfill` (add `-- --dry-run` to preview)
 
 ---
 

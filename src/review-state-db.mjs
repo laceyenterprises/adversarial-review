@@ -13,6 +13,10 @@ import { fileURLToPath } from 'node:url';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import { withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
 import {
+  BACKFILL_UNROUTABLE_BOT_TO_ARGUS_QUEUED_SQL,
+  MARK_ARGUS_SECURITY_QUEUED_SQL,
+  RECORD_ARGUS_CLASSIFIED_HEAD_SQL,
+  SELECT_OPEN_UNROUTABLE_BOT_ROWS_SQL,
   prepareFinalizePendingTerminalFailure,
   prepareMarkInfraAutoRecoveryAttemptStarted,
   prepareMarkAttemptStarted,
@@ -160,6 +164,21 @@ export const stmtMarkMalformed = db.prepare(
 // from asserting a defect no author can fix. Dependabot owns its own titles.
 export const stmtMarkUnroutableBot = db.prepare(
   "UPDATE reviewed_prs SET reviewer = 'unroutable-bot-author', review_status = 'unroutable-bot-author', failure_message = ?, failed_at = ?, last_attempted_at = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
+);
+// ASR-04: the disposition that replaces the terminal write above.
+//
+// `unroutable-bot-author` was accurate about the lane and wrong about the PR:
+// the lane could not route it, so the PR was recorded as finished. It was not
+// finished, it was dropped (#909, #910 — 14 hours, no reviewer, no retry, no
+// escalation). These rows say what is actually true: another reviewer owns it.
+//
+// The SQL itself lives in review-state-statements.mjs so tests bind to the
+// production strings rather than to a re-typed copy.
+export const stmtMarkArgusSecurityQueued = db.prepare(MARK_ARGUS_SECURITY_QUEUED_SQL);
+export const stmtRecordArgusClassifiedHead = db.prepare(RECORD_ARGUS_CLASSIFIED_HEAD_SQL);
+export const stmtSelectOpenUnroutableBotRows = db.prepare(SELECT_OPEN_UNROUTABLE_BOT_ROWS_SQL);
+export const stmtBackfillUnroutableBotToArgusQueued = db.prepare(
+  BACKFILL_UNROUTABLE_BOT_TO_ARGUS_QUEUED_SQL
 );
 // 'reviewing' is the durable in-progress claim: set BEFORE spawning
 // the reviewer subprocess, replaced with 'posted' / 'failed' once the
@@ -422,10 +441,19 @@ export const stmtLatestGenuinePostedReviewAt = db.prepare(
 const SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW =
   "SELECT COUNT(*) AS n FROM reviewed_prs " +
   "WHERE pr_state = 'open' " +
-  // Malformed-title and unroutable-bot PRs are REFUSED, not pending: the
-  // dispatch loop returns early on either terminal status, so they can never
-  // receive a first pass. Counting them kept the "Reviews stalled" pager above
+  // Malformed-title, legacy unroutable-bot, and Argus-routed PRs are not
+  // awaiting a first pass: the dispatch loop returns early on all three, so
+  // none can receive one. Counting them kept the "Reviews stalled" pager above
   // zero forever and produced pages naming PRs the reviewer will never touch.
+  //
+  // ASR-04 replaced the terminal `unroutable-bot-author` disposition with
+  // `argus-security-queued`, which is NOT terminal — the row stays live so a new
+  // head re-enqueues. It is excluded here anyway, and for the same reason: the
+  // adversarial lane is not the thing it is waiting for. Argus queue depth and
+  // `oldestPendingAgeMs` are where a stuck security review surfaces; an
+  // adversarial stall pager that also fires on them would report the wrong
+  // outage on the wrong dashboard. The legacy status stays in the list because
+  // reopened PRs and kill-switch rows can still carry it.
   // This is not the same as trusting review_status='posted' -- the comment
   // above deliberately keys success off gh_comment_id so a stale success claim
   // cannot mask a real gap. Here we exclude work the pipeline has explicitly
@@ -433,7 +461,7 @@ const SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW =
   // SQLite's `NOT IN` drops NULL, so keep the null-safe shape explicit: exclude
   // terminal refused states while still counting rows with no status yet -- the
   // exact rows most likely to be genuinely awaiting a first pass.
-  "AND (review_status IS NULL OR review_status NOT IN ('malformed', 'unroutable-bot-author')) " +
+  "AND (review_status IS NULL OR review_status NOT IN ('malformed', 'unroutable-bot-author', 'argus-security-queued')) " +
   "AND NOT EXISTS ( " +
   "  SELECT 1 FROM reviewer_passes " +
   "  WHERE reviewer_passes.repo = reviewed_prs.repo " +

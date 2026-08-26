@@ -20,6 +20,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -486,6 +487,61 @@ test('claim does not overwrite an existing in-progress record with the same job 
   assert.equal(readArgusJob(inProgressPath).status, 'in_progress');
 });
 
+test('claim resumes a partial hard-link claim instead of deadlocking it', () => {
+  const rootDir = makeRoot();
+  const created = enqueue(rootDir);
+  const inProgressPath = path.join(
+    getArgusJobDir(rootDir, 'inProgress'),
+    path.basename(created.jobPath)
+  );
+  mkdirSync(getArgusJobDir(rootDir, 'inProgress'), { recursive: true });
+  linkSync(created.jobPath, inProgressPath);
+
+  const claimed = claimNextArgusJob({ rootDir, claimedAt: '2026-08-25T02:10:00.000Z' });
+  assert.equal(claimed.jobPath, inProgressPath);
+  assert.equal(claimed.job.status, 'in_progress');
+  assert.equal(claimed.job.claimedAt, '2026-08-25T02:10:00.000Z');
+  assert.equal(existsSync(created.jobPath), false);
+  assert.equal(bucketNames(rootDir, 'pending').length, 0);
+  assert.equal(bucketNames(rootDir, 'inProgress').length, 1);
+});
+
+test('claim moves corrupt pending records to failed and continues draining', () => {
+  const rootDir = makeRoot();
+  const corrupt = enqueue(rootDir, { headSha: HEAD_A });
+  const valid = enqueue(rootDir, { headSha: HEAD_B });
+  writeFileSync(corrupt.jobPath, '{ not json', 'utf8');
+  const corruptSeconds = Date.parse('2026-08-25T00:00:00.000Z') / 1000;
+  const validSeconds = Date.parse('2026-08-25T01:00:00.000Z') / 1000;
+  utimesSync(corrupt.jobPath, corruptSeconds, corruptSeconds);
+  utimesSync(valid.jobPath, validSeconds, validSeconds);
+
+  const claimed = claimNextArgusJob({ rootDir, claimedAt: '2026-08-25T02:15:00.000Z' });
+  assert.equal(claimed.job.headSha, HEAD_B);
+  assert.equal(bucketNames(rootDir, 'pending').length, 0);
+  assert.equal(bucketNames(rootDir, 'inProgress').length, 1);
+  assert.equal(bucketNames(rootDir, 'failed').length, 1);
+
+  const failed = readArgusJob(path.join(getArgusJobDir(rootDir, 'failed'), path.basename(corrupt.jobPath)));
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.failedAt, '2026-08-25T02:15:00.000Z');
+  assert.match(failed.error, /corrupt pending argus job/u);
+});
+
+test('list cap counts successfully read records, not corrupt directory entries', () => {
+  const rootDir = makeRoot();
+  const newestCorrupt = enqueue(rootDir, { headSha: HEAD_A });
+  const middleValid = enqueue(rootDir, { headSha: HEAD_B });
+  const oldestValid = enqueue(rootDir, { headSha: HEAD_C });
+  writeFileSync(newestCorrupt.jobPath, '{ not json', 'utf8');
+  utimesSync(newestCorrupt.jobPath, 3000, 3000);
+  utimesSync(middleValid.jobPath, 2000, 2000);
+  utimesSync(oldestValid.jobPath, 1000, 1000);
+
+  const listed = listArgusJobs(rootDir, { bucket: 'pending', limit: 2 });
+  assert.deepEqual(listed.map((entry) => entry.job.headSha), [HEAD_B, HEAD_C]);
+});
+
 test('terminal transitions move the record and stamp the outcome', () => {
   const rootDir = makeRoot();
   enqueue(rootDir, { headSha: HEAD_A });
@@ -516,6 +572,25 @@ test('terminal transitions move the record and stamp the outcome', () => {
   // The head each verdict is bound to survives the move.
   assert.equal(completed.job.headSha, HEAD_A);
   assert.equal(failed.job.headSha, HEAD_B);
+});
+
+test('terminal transitions can use the in-memory claimed job after file corruption', () => {
+  const rootDir = makeRoot();
+  enqueue(rootDir);
+  const claimed = claimNextArgusJob({ rootDir });
+  writeFileSync(claimed.jobPath, '{ not json', 'utf8');
+
+  const completed = completeArgusJob({
+    rootDir,
+    jobPath: claimed.jobPath,
+    job: claimed.job,
+    completedAt: '2026-08-25T03:30:00.000Z',
+    result: { verdict: 'pass' },
+  });
+  assert.equal(completed.job.status, 'completed');
+  assert.equal(completed.job.headSha, HEAD_A);
+  assert.deepEqual(completed.job.result, { verdict: 'pass' });
+  assert.equal(path.dirname(completed.jobPath), getArgusJobDir(rootDir, 'completed'));
 });
 
 test('findArgusJob reports which bucket an existing job sits in', () => {

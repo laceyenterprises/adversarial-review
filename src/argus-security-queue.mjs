@@ -271,6 +271,19 @@ function assertSameSubject({ existing, repo, prNumber, headSha }) {
   );
 }
 
+function pathsShareInode(leftPath, rightPath) {
+  let left;
+  let right;
+  try {
+    left = statSync(leftPath);
+    right = statSync(rightPath);
+  } catch (err) {
+    if (err?.code === 'ENOENT') return false;
+    throw err;
+  }
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
 /**
  * Close the check-then-create window.
  *
@@ -401,11 +414,12 @@ function countBucketRecords(rootDir, bucket) {
  */
 export function listArgusJobs(rootDir, { bucket = 'pending', limit = DEFAULT_ARGUS_JOB_READ_CAP } = {}) {
   const entries = listBucketEntries(rootDir, bucket)
-    .sort((a, b) => b.mtimeMs - a.mtimeMs)
-    .slice(0, Math.max(0, limit));
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
 
   const jobs = [];
+  const readLimit = Math.max(0, limit);
   for (const entry of entries) {
+    if (jobs.length >= readLimit) break;
     try {
       jobs.push({ bucket: entry.bucket, jobPath: entry.jobPath, job: readArgusJob(entry.jobPath) });
     } catch (err) {
@@ -413,6 +427,38 @@ export function listArgusJobs(rootDir, { bucket = 'pending', limit = DEFAULT_ARG
     }
   }
   return jobs;
+}
+
+function moveCorruptPendingArgusJob({ rootDir, jobPath, failedAt, error }) {
+  const failedDir = getArgusJobDir(rootDir, 'failed');
+  mkdirSync(failedDir, { recursive: true });
+  const targetPath = join(failedDir, basename(jobPath));
+
+  try {
+    renameSync(jobPath, targetPath);
+  } catch (err) {
+    if (err?.code === 'ENOENT') return null;
+    throw err;
+  }
+
+  const failed = {
+    schemaVersion: ARGUS_JOB_SCHEMA_VERSION,
+    kind: ARGUS_JOB_KIND,
+    status: 'failed',
+    jobId: basename(jobPath, '.json'),
+    repo: null,
+    prNumber: null,
+    headSha: null,
+    reasons: [],
+    enqueuedAt: null,
+    source: null,
+    claimedAt: null,
+    completedAt: null,
+    failedAt,
+    error: `corrupt pending argus job: ${error?.message || error}`,
+  };
+  writeArgusJob(targetPath, failed);
+  return { job: failed, jobPath: targetPath };
 }
 
 /**
@@ -489,9 +535,11 @@ export function readArgusQueueDepth(rootDir, { nowMs = Date.now() } = {}) {
 /**
  * Claim the oldest pending job into `in-progress`.
  *
- * The rename IS the CAS: two consumers racing the same job means exactly one
- * rename succeeds and the loser sees ENOENT and moves on. Oldest-first so the
- * queue drains FIFO and no job can be starved by a steady arrival rate.
+ * The hard link IS the CAS: two consumers racing the same job means exactly
+ * one creates the in-progress name, while a crashed predecessor that already
+ * created the same inode can be completed by removing the stale pending name.
+ * Oldest-first so the queue drains FIFO and no job can be starved by a steady
+ * arrival rate.
  *
  * @returns {{job: object, jobPath: string}|null}
  */
@@ -508,7 +556,8 @@ export function claimNextArgusJob({
     try {
       job = readArgusJob(entry.jobPath);
     } catch (err) {
-      console.error(`[argus-queue] skipping unreadable pending job ${entry.jobPath}: ${err?.message || err}`);
+      console.error(`[argus-queue] moving unreadable pending job ${entry.jobPath} to failed: ${err?.message || err}`);
+      moveCorruptPendingArgusJob({ rootDir, jobPath: entry.jobPath, failedAt: claimedAt, error: err });
       continue;
     }
 
@@ -518,18 +567,25 @@ export function claimNextArgusJob({
       linkSync(entry.jobPath, inProgressPath);
     } catch (err) {
       if (err?.code === 'ENOENT') continue;
-      if (err?.code === 'EEXIST') continue;
-      throw err;
+      if (err?.code === 'EEXIST') {
+        if (!pathsShareInode(entry.jobPath, inProgressPath)) continue;
+      } else {
+        throw err;
+      }
     }
 
     try {
       unlinkSync(entry.jobPath);
     } catch (err) {
-      try {
-        unlinkSync(inProgressPath);
-      } catch {}
-      if (err?.code === 'ENOENT') continue;
-      throw err;
+      if (err?.code === 'ENOENT') {
+        // The hard link was already acquired; a concurrent cleanup of the
+        // pending name must not roll back the in-progress claim.
+      } else {
+        try {
+          unlinkSync(inProgressPath);
+        } catch {}
+        throw err;
+      }
     }
 
     const claimed = { ...job, status: 'in_progress', claimedAt };
@@ -555,8 +611,8 @@ export function claimNextArgusJob({
   return null;
 }
 
-function moveArgusJobToTerminalBucket({ rootDir, jobPath, bucket, patch }) {
-  const job = readArgusJob(jobPath);
+function moveArgusJobToTerminalBucket({ rootDir, jobPath, bucket, patch, job = null }) {
+  const current = job ?? readArgusJob(jobPath);
   const targetDir = getArgusJobDir(rootDir, bucket);
   mkdirSync(targetDir, { recursive: true });
   const targetPath = join(targetDir, basename(jobPath));
@@ -565,25 +621,27 @@ function moveArgusJobToTerminalBucket({ rootDir, jobPath, bucket, patch }) {
   // between the two steps leaves the job in its terminal bucket with a stale
   // status rather than leaving a finished job claimable again.
   renameSync(jobPath, targetPath);
-  const terminal = { ...job, ...patch };
+  const terminal = { ...current, ...patch };
   writeArgusJob(targetPath, terminal);
   return { job: terminal, jobPath: targetPath };
 }
 
-export function completeArgusJob({ rootDir, jobPath, completedAt = new Date().toISOString(), result = null }) {
+export function completeArgusJob({ rootDir, jobPath, completedAt = new Date().toISOString(), result = null, job = null }) {
   return moveArgusJobToTerminalBucket({
     rootDir,
     jobPath,
     bucket: 'completed',
     patch: { status: 'completed', completedAt, result: result ?? null },
+    job,
   });
 }
 
-export function failArgusJob({ rootDir, jobPath, failedAt = new Date().toISOString(), error = null }) {
+export function failArgusJob({ rootDir, jobPath, failedAt = new Date().toISOString(), error = null, job = null }) {
   return moveArgusJobToTerminalBucket({
     rootDir,
     jobPath,
     bucket: 'failed',
     patch: { status: 'failed', failedAt, error: error ? String(error) : null },
+    job,
   });
 }

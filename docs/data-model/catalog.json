@@ -67,6 +67,14 @@
       "store": "data/runtime-settle-smoke/agent-runtime.json",
       "schemaSurface": "src/adapters/agent-runtime/settle-smoke.mjs",
       "owner": "agent-runtime cutover readiness"
+    },
+    {
+      "id": "argus-security-jobs",
+      "title": "Argus Security Review Jobs",
+      "path": "docs/data-model/argus-security-jobs.md",
+      "store": "data/argus-security-jobs/",
+      "schemaSurface": "src/argus-security-queue.mjs",
+      "owner": "ASR-03 Argus security review queue"
     }
   ]
 }

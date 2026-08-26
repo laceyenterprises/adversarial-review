@@ -356,6 +356,42 @@ test('stall watchdog does not fire while a poll is in flight', () => {
   assert.equal(watchdog.check(), true);
 });
 
+test('stall watchdog parses positive config values and falls back for blanks', () => {
+  const heartbeat = createWatcherHeartbeat({
+    filePath: join(tempRoot(), 'heartbeat.json'),
+    now: () => new Date('2026-07-04T10:00:00.000Z'),
+    writeFile() {},
+    readFile() {
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    },
+    logger: { warn() {} },
+  });
+  heartbeat.markPoll();
+
+  let now = 1_000;
+  const stalls = [];
+  assert.doesNotThrow(() => createWatcherStallWatchdog({
+    heartbeat,
+    stallMs: '500',
+    checkIntervalMs: '',
+    nowMs: () => now,
+    onStall: (event) => stalls.push(event),
+    logger: { error() {} },
+  }));
+
+  const watchdog = createWatcherStallWatchdog({
+    heartbeat,
+    stallMs: '500',
+    checkIntervalMs: '',
+    nowMs: () => now,
+    onStall: (event) => stalls.push(event),
+    logger: { error() {} },
+  });
+  now = 1_500;
+  assert.equal(watchdog.check(), true);
+  assert.equal(stalls.length, 1);
+});
+
 test('resolveWatcherHeartbeatPath honours the explicit env override first', () => {
   const path = resolveWatcherHeartbeatPath({
     env: {

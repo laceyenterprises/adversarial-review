@@ -226,6 +226,47 @@ test('a job past the stall deadline goes red rather than pending forever', () =>
   assert.equal(verdict.satisfiesGate, false);
 }));
 
+test('an in-flight job with no valid enqueue timestamp fails closed', () => withRoot((root) => {
+  for (const { bucket, enqueuedAt } of [
+    { bucket: 'pending', enqueuedAt: null },
+    { bucket: 'pending', enqueuedAt: '' },
+    { bucket: 'inProgress', enqueuedAt: 'not-a-date' },
+  ]) {
+    const verdict = resolve(root, {
+      findJob: () => ({
+        bucket,
+        jobPath: '/unused/job.json',
+        job: { status: bucket === 'inProgress' ? 'in_progress' : 'pending', enqueuedAt },
+      }),
+    });
+
+    assert.equal(verdict.state, ARGUS_VERDICT_STATES.MALFORMED, `${bucket}/${String(enqueuedAt)}`);
+    assert.equal(verdict.blocks, true);
+    assert.equal(verdict.satisfiesGate, false);
+    assert.match(verdict.summary, /missing a valid enqueuedAt timestamp/u);
+  }
+}));
+
+test('epoch-millisecond enqueue strings still drive stall detection', () => withRoot((root) => {
+  const enqueuedAtMs = Date.UTC(2026, 0, 1);
+  const findJob = () => ({
+    bucket: 'pending',
+    jobPath: '/unused/job.json',
+    job: { status: 'pending', enqueuedAt: String(enqueuedAtMs) },
+  });
+
+  const inside = resolve(root, { findJob, nowMs: enqueuedAtMs + 60_000 });
+  assert.equal(inside.state, ARGUS_VERDICT_STATES.QUEUED);
+  assert.equal(inside.waitedMs, 60_000);
+
+  const stalled = resolve(root, {
+    findJob,
+    nowMs: enqueuedAtMs + ARGUS_REVIEW_STALL_DEADLINE_MS + 1000,
+  });
+  assert.equal(stalled.state, ARGUS_VERDICT_STATES.STALLED);
+  assert.equal(stalled.blocks, true);
+}));
+
 test('the stall clock runs from enqueue, not from claim', () => withRoot((root) => {
   // A job nothing ever claims is precisely the stall this watches for. A
   // claim-anchored clock would never fire for it.

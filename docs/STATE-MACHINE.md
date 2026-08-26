@@ -100,6 +100,8 @@ new PR
   │  enqueued to Argus additively: its normal adversarial review still runs, but
   │  Argus still holds the merge gate pending while queued/in progress/needs
   │  verification, and fails it red for blocked/stalled/failed/malformed jobs.
+  │  Missing or unparseable enqueue timestamps on in-flight Argus jobs are
+  │  malformed, not pending, so a corrupt record cannot suppress stall detection.
   │
   └─ valid tagged PR
        └─ pending

@@ -119,8 +119,12 @@ export function argusVerdictBlocksGate(state) {
 }
 
 function normalizeTimestampMs(value) {
-  if (!value) return null;
-  const parsed = Date.parse(String(value));
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  if (!text) return null;
+  const numeric = Number(text);
+  if (Number.isFinite(numeric)) return numeric;
+  const parsed = Date.parse(text);
   return Number.isFinite(parsed) ? parsed : null;
 }
 
@@ -334,7 +338,15 @@ export function resolveArgusSecurityVerdict({
   // stall this is watching for, and a claim-anchored clock would never fire for
   // it.
   const startedMs = normalizeTimestampMs(job.enqueuedAt);
-  const waitedMs = startedMs === null ? null : Math.max(0, nowMs - startedMs);
+  if (startedMs === null) {
+    return finalize({
+      state: ARGUS_VERDICT_STATES.MALFORMED,
+      bucket,
+      jobPath,
+      summary: 'Argus security job record is missing a valid enqueuedAt timestamp.',
+    });
+  }
+  const waitedMs = Math.max(0, nowMs - startedMs);
   const inProgress = bucket === 'inProgress';
 
   if (waitedMs !== null && waitedMs > stallDeadlineMs) {

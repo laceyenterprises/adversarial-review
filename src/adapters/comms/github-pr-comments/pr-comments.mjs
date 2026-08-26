@@ -729,6 +729,7 @@ function buildRemediationOutcomeCommentBody({
           || reply.addressed?.length
           || reply.pushback?.length
           || reply.nonBlocking?.length
+          || reply.hardening?.length
           || reply.blockers?.length
           || reply.operationalBlockers?.length)
     );
@@ -846,6 +847,42 @@ function buildRemediationOutcomeCommentBody({
         lines.push('## Non-blocking improvements');
         lines.push('');
         lines.push(nonBlocking);
+      }
+    }
+  }
+
+  // Related defects the worker found ITSELF while remediating, which the
+  // reviewer never raised. Rendered as its own section rather than folded
+  // into nonBlocking[] because provenance is the point: an operator
+  // reading the comment should be able to tell work the review asked for
+  // from work the review never saw. Before HRD-01 this was routed into
+  // nonBlocking[] with a prose marker in `action`, which made it invisible
+  // in practice -- 3 of 202 entries ever carried the marker.
+  // Same dedup defence as nonBlocking[]: an entry whose normalized title
+  // already appears in addressed[] or nonBlocking[] is dropped so a
+  // hedging worker cannot double-print the same finding.
+  if (reply?.hardening?.length) {
+    const claimedTitleKeys = new Set(
+      [
+        ...(Array.isArray(reply.addressed) ? reply.addressed : []),
+        ...(Array.isArray(reply.nonBlocking) ? reply.nonBlocking : []),
+      ]
+        .map((entry) => normalizeRenderTitleKey(entry?.title))
+        .filter(Boolean)
+    );
+    const dedupedHardening = reply.hardening.filter((entry) => {
+      const key = normalizeRenderTitleKey(entry?.title);
+      return !(key && claimedTitleKeys.has(key));
+    });
+    if (dedupedHardening.length) {
+      const hardening = formatAddressedList(dedupedHardening, '', {
+        untitledFallback: 'Additional hardening',
+      });
+      if (hardening) {
+        lines.push('');
+        lines.push('## Additional hardening (found while remediating)');
+        lines.push('');
+        lines.push(hardening);
       }
     }
   }

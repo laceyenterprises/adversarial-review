@@ -41,12 +41,14 @@
 
 import {
   existsSync,
+  linkSync,
   mkdirSync,
   readFileSync,
   readdirSync,
   renameSync,
   rmSync,
   statSync,
+  unlinkSync,
 } from 'node:fs';
 import { basename, join } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
@@ -368,7 +370,8 @@ function listBucketEntries(rootDir, bucket) {
     let stat;
     try {
       stat = statSync(jobPath);
-    } catch {
+    } catch (err) {
+      if (err?.code !== 'ENOENT') throw err;
       // Raced away between readdir and stat (a concurrent claim). Skip.
       continue;
     }
@@ -492,7 +495,11 @@ export function readArgusQueueDepth(rootDir, { nowMs = Date.now() } = {}) {
  *
  * @returns {{job: object, jobPath: string}|null}
  */
-export function claimNextArgusJob({ rootDir, claimedAt = new Date().toISOString() } = {}) {
+export function claimNextArgusJob({
+  rootDir,
+  claimedAt = new Date().toISOString(),
+  writeJob = writeArgusJob,
+} = {}) {
   const entries = listBucketEntries(rootDir, 'pending').sort((a, b) => a.mtimeMs - b.mtimeMs);
   const inProgressDir = getArgusJobDir(rootDir, 'inProgress');
 
@@ -508,14 +515,40 @@ export function claimNextArgusJob({ rootDir, claimedAt = new Date().toISOString(
     mkdirSync(inProgressDir, { recursive: true });
     const inProgressPath = join(inProgressDir, basename(entry.jobPath));
     try {
-      renameSync(entry.jobPath, inProgressPath);
+      linkSync(entry.jobPath, inProgressPath);
     } catch (err) {
+      if (err?.code === 'ENOENT') continue;
+      if (err?.code === 'EEXIST') continue;
+      throw err;
+    }
+
+    try {
+      unlinkSync(entry.jobPath);
+    } catch (err) {
+      try {
+        unlinkSync(inProgressPath);
+      } catch {}
       if (err?.code === 'ENOENT') continue;
       throw err;
     }
 
     const claimed = { ...job, status: 'in_progress', claimedAt };
-    writeArgusJob(inProgressPath, claimed);
+    try {
+      writeJob(inProgressPath, claimed);
+    } catch (err) {
+      // The link/unlink pair above acquired the claim without overwriting an
+      // active worker. If persisting the claimed status fails, restore the
+      // original pending path so a later consumer can retry the job.
+      try {
+        renameSync(inProgressPath, entry.jobPath);
+      } catch (rollbackErr) {
+        console.error(
+          `[argus-queue] failed to roll back claim ${inProgressPath} -> ${entry.jobPath}: `
+            + `${rollbackErr?.message || rollbackErr}`
+        );
+      }
+      throw err;
+    }
     return { job: claimed, jobPath: inProgressPath };
   }
 

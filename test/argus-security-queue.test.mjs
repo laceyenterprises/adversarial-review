@@ -400,6 +400,16 @@ test('queue depth counts non-pending buckets without statting each record', () =
   assert.equal(listArgusJobs(rootDir, { bucket: 'completed' }).length, 0);
 });
 
+test('pending list surfaces non-race stat failures instead of silently hiding jobs', () => {
+  const rootDir = makeRoot();
+  const pendingDir = getArgusJobDir(rootDir, 'pending');
+  mkdirSync(pendingDir, { recursive: true });
+  symlinkSync('loop.json', path.join(pendingDir, 'loop.json'));
+
+  assert.throws(() => listArgusJobs(rootDir, { bucket: 'pending' }), /ELOOP/u);
+  assert.throws(() => readArgusQueueDepth(rootDir), /ELOOP/u);
+});
+
 test('queue depth surfaces the oldest pending job as the stuck-queue signal', () => {
   const rootDir = makeRoot();
   const old = enqueue(rootDir, { headSha: HEAD_A, enqueuedAt: '2026-08-25T00:00:00.000Z' });
@@ -433,6 +443,47 @@ test('claim drains oldest-first and is a one-winner CAS', () => {
 
   assert.equal(claimNextArgusJob({ rootDir }).job.headSha, HEAD_B);
   assert.equal(claimNextArgusJob({ rootDir }), null);
+});
+
+test('claim rolls back to pending when persisting the claimed record fails', () => {
+  const rootDir = makeRoot();
+  const created = enqueue(rootDir);
+
+  assert.throws(
+    () => claimNextArgusJob({
+      rootDir,
+      claimedAt: '2026-08-25T02:00:00.000Z',
+      writeJob: () => {
+        throw new Error('disk full');
+      },
+    }),
+    /disk full/u
+  );
+
+  assert.equal(existsSync(created.jobPath), true);
+  assert.equal(bucketNames(rootDir, 'inProgress').length, 0);
+  assert.equal(readArgusJob(created.jobPath).status, 'pending');
+
+  const claimed = claimNextArgusJob({ rootDir, claimedAt: '2026-08-25T02:05:00.000Z' });
+  assert.equal(claimed.job.headSha, HEAD_A);
+  assert.equal(claimed.job.status, 'in_progress');
+  assert.equal(claimed.job.claimedAt, '2026-08-25T02:05:00.000Z');
+});
+
+test('claim does not overwrite an existing in-progress record with the same job name', () => {
+  const rootDir = makeRoot();
+  const created = enqueue(rootDir);
+  const inProgressPath = path.join(
+    getArgusJobDir(rootDir, 'inProgress'),
+    path.basename(created.jobPath)
+  );
+  mkdirSync(getArgusJobDir(rootDir, 'inProgress'), { recursive: true });
+  writeFileSync(inProgressPath, `${JSON.stringify({ ...created.job, status: 'in_progress', claimedAt: 'first' })}\n`);
+
+  assert.equal(claimNextArgusJob({ rootDir }), null);
+  assert.equal(existsSync(created.jobPath), true);
+  assert.equal(readArgusJob(inProgressPath).claimedAt, 'first');
+  assert.equal(readArgusJob(inProgressPath).status, 'in_progress');
 });
 
 test('terminal transitions move the record and stamp the outcome', () => {

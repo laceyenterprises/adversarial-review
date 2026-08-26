@@ -40,6 +40,7 @@ import {
 } from './adapters/subject/github-pr/routing.mjs';
 import { projectAdversarialGateStatus } from './adversarial-gate-status.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
+import { isUnroutableBotAuthor } from './bot-author.mjs';
 import { loadConfigCached } from './config-loader.mjs';
 import { isPipelineEnabled } from './domain-pipeline.mjs';
 import {
@@ -194,25 +195,12 @@ import { reserveReviewerMemoryAdmission } from './watcher-reviewer-pool.mjs';
 // does not exist. It deliberately does NOT decide what SHOULD review a
 // dependency PR — supply-chain drift is Argus's remit, and routing them there is
 // a separate policy change.
-const UNROUTABLE_BOT_AUTHORS = new Set([
-  'dependabot[bot]',
-  'dependabot-preview[bot]',
-  'renovate[bot]',
-  'github-actions[bot]',
-]);
-
-export function isUnroutableBotAuthor(authorRef) {
-  const login = String(authorRef || '').trim().toLowerCase();
-  if (!login) return false;
-  if (UNROUTABLE_BOT_AUTHORS.has(login)) return true;
-  // `app/<name>` is how some surfaces (e.g. `gh pr view --json author`) render a
-  // GitHub App author for the same account the REST API returns as `<name>[bot]`.
-  // The `[bot]` suffix is synthesised ONLY for that prefixed form: a bare
-  // `dependabot` is a perfectly ordinary account name and must NOT be silently
-  // classified as the app.
-  if (!login.startsWith('app/')) return false;
-  return UNROUTABLE_BOT_AUTHORS.has(`${login.slice('app/'.length)}[bot]`);
-}
+// The predicate itself moved to the pure leaf `bot-author.mjs` (ASR-02) so the
+// security-surface classifier can share this exact login set without importing
+// this module, which opens `reviews.db` at module scope. Re-exported here
+// because the semantics remain part of this module's malformed-vs-bot decision
+// and callers/tests already import it from here.
+export { isUnroutableBotAuthor };
 
 export function markMalformedTitleTerminalState({
   prTitle,

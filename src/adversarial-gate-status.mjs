@@ -21,6 +21,11 @@ import {
   openReviewStateDb,
 } from './review-state.mjs';
 import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
+import {
+  ARGUS_GATE_REASONS,
+  ARGUS_VERDICT_STATES,
+  resolveArgusSecurityVerdict,
+} from './argus-security-verdict.mjs';
 import { normalizeGithubMergeability } from './github-mergeability.mjs';
 import { extractNonBlockingFindingIdentities } from './kernel/remediation-reply.mjs';
 import {
@@ -355,6 +360,7 @@ function pickAdversarialGateStatus({
   operatorApproval = null,
   labels = [],
   headSha = null,
+  argusVerdict = null,
   env = process.env,
 } = {}) {
   const context = resolveGateStatusContext(env);
@@ -374,6 +380,35 @@ function pickAdversarialGateStatus({
       'success',
       'Scoped operator override approves the current head.',
       'operator-approved'
+    );
+  }
+
+  // ASR-06 — blocking authority, and it runs BEFORE the review-row branches.
+  //
+  // Placed here because an Argus block must not depend on what the adversarial
+  // lane concluded. The additive case is the reason: a human PR that adds a
+  // dependency gets its normal code review, that review goes clean because it
+  // was reading the diff and not the lockfile, and without this the gate would
+  // publish `success` over a `high` install-script finding. Argus is the only
+  // thing that looked; its answer has to outrank a clean review from something
+  // that was looking elsewhere.
+  //
+  // `stalled` and `failed` are here too, and that is the fail-closed half: they
+  // are the states where the security question was ASKED (a trigger fired, a job
+  // exists) and never answered. An unanswered question resolves red, not green.
+  // Only states with a real job behind them can reach this branch — a PR that
+  // fired no trigger resolves `missing`, which never blocks, so this cannot
+  // gate the PRs Argus was never asked about.
+  //
+  // Below the operator override deliberately: a scoped, head-pinned operator
+  // approval remains the documented escape hatch, and a security finding an
+  // operator has explicitly looked at and accepted is a decision, not a bypass.
+  if (argusVerdict?.blocks === true) {
+    return decide(
+      'failure',
+      argusVerdict.summary,
+      ARGUS_GATE_REASONS[argusVerdict.state] || 'argus-security-blocked',
+      { operatorDecisionRequired: argusVerdict.state !== ARGUS_VERDICT_STATES.BLOCKED }
     );
   }
 
@@ -416,24 +451,47 @@ function pickAdversarialGateStatus({
   if (reviewStatus === 'malformed') {
     return decide('failure', 'Adversarial review ledger is malformed.', 'review-malformed');
   }
-  // ASR-04. `argus-security-queued` is what a bot-authored (or otherwise
-  // security-surfaced, unroutable) PR carries now: Argus owns it, and no verdict
-  // has come back yet.
+  // `argus-security-queued` is what a bot-authored (or otherwise
+  // security-surfaced, unroutable) PR carries: Argus owns the row.
   //
-  // `pending`, not `failure`, and not `success`. The old `failure` was a red
-  // check asserting a defect — there is none; the PR is simply not this lane's
-  // to review. `success` would be worse: it would publish "the adversarial gate
-  // is satisfied" for a tree no reviewer has read, which is exactly the approval
-  // an unanswered security question must never become (SEN-02 blind-vs-ok).
-  // `pending` is the honest third answer and still holds the merge, so this
-  // loosens nothing while it waits. ASR-06 replaces it with the verdict: `high`
-  // blocks, medium/low are advisory.
+  // ASR-04 parked this at an unconditional `pending` because there was no
+  // verdict to read yet. ASR-06 supplies one, so the branch now resolves against
+  // the job for THIS head. The property ASR-04 established is unchanged and is
+  // still the reason the default is `pending`: a tree no reviewer has read must
+  // never publish "the adversarial gate is satisfied" (SEN-02 blind-vs-ok).
+  // What changed is that a review which HAS returned is no longer ignored.
   if (reviewStatus === 'argus-security-queued') {
-    return decide(
-      'pending',
-      'Argus security review is queued for this PR.',
-      'argus-security-review-queued'
-    );
+    // Argus OWNS this row. A bot PR carries no worker-class prefix, so no
+    // adversarial reviewer will ever be resolved for it — the Argus verdict is
+    // not one input among several, it is the whole review. That is what makes
+    // `approved` green here and only here: for a routable PR the same verdict
+    // is additive and falls through to the normal flow below.
+    //
+    // The blocking states never reach this branch; they returned above.
+    const state = argusVerdict?.state ?? ARGUS_VERDICT_STATES.MISSING;
+    const reason = ARGUS_GATE_REASONS[state] || 'argus-security-review-queued';
+
+    if (state === ARGUS_VERDICT_STATES.APPROVED) {
+      return decide('success', argusVerdict.summary, reason);
+    }
+
+    // Everything else holds at `pending`: queued, in progress, needs
+    // verification, a record we cannot read, or no job yet for this head.
+    //
+    // `needs_verification` sits here rather than in the blocking set on
+    // purpose. It is not a `high` finding, and the operator's rule is that only
+    // `high` blocks — but SPEC.md is equally explicit that it is not an
+    // approval. It reports missing or stale EVIDENCE, so it belongs with the
+    // unanswered questions: it holds the merge without asserting a defect, and
+    // supplying the verification clears it.
+    //
+    // `missing` reaching this branch means the row says Argus owns the PR but no
+    // job exists for THIS head — an enqueue that has not confirmed yet, or a head
+    // that just advanced past the reviewed one. Both are "not yet", never "fine".
+    const description = state === ARGUS_VERDICT_STATES.MISSING
+      ? 'Argus security review is queued for this PR.'
+      : argusVerdict.summary;
+    return decide('pending', description, reason);
   }
   // Legacy, and legacy-only. ASR-04 stopped writing this status; rows that still
   // carry it are pre-ASR-04 strandings the backfill has not reached yet, rows a
@@ -594,6 +652,14 @@ async function buildAdversarialGateSnapshot(rootDir, {
 } = {}) {
   const resolvedRow = reviewRow || await readReviewRowForGate(rootDir, { repo, prNumber });
   const latestJob = findLatestFollowUpJobForPR(rootDir, { repo, prNumber });
+  // ASR-06. Resolved for EVERY gated head, not only for rows Argus owns,
+  // because a `high` finding blocks a routable PR too: a human PR that touches a
+  // dependency manifest gets its normal adversarial review AND an Argus review,
+  // and the normal review going clean must not merge over an install-script
+  // finding the normal review was never looking for.
+  const argusVerdict = headSha
+    ? resolveArgusSecurityVerdict({ rootDir, repo, prNumber, headSha })
+    : null;
   const settledReview = includeSettledReview
     ? resolveSettledReviewVerdict(rootDir, {
       repo,
@@ -632,6 +698,7 @@ async function buildAdversarialGateSnapshot(rootDir, {
     headSha,
     settledReview,
     reviewedHeadSha,
+    argusVerdict,
     mergeableState: includeSettledReview ? normalizeGithubMergeability(mergeability || {}) : '',
   };
 }

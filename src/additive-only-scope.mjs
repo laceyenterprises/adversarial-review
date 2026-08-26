@@ -425,6 +425,28 @@ async function backfillAdditiveOnlyLabel({ repo, prNumber, execFileImpl = execFi
   }
 }
 
+// Backfill is a BRAND, and a brand outlives the evidence that produced it.
+//
+// The label is not advisory once written. `commitsToScan` below widens from
+// `laterCommits` to the WHOLE commit list the moment `labeledAdditiveOnly` is
+// true, and `additiveOnly` short-circuits on the label without consulting
+// derivation at all. So a backfilled label is self-proving: the next evaluation
+// no longer asks whether the class still derives, it just enforces. Nothing the
+// PR subsequently does -- rebase, squash, drop the offending commit -- can clear
+// it, because the initial commit is now in scope too.
+//
+// That is survivable only while the brand is applied to PRs that are actually in
+// scope. Applying it to a PR the SAME evaluation has just found violating (or has
+// failed to read conclusively, or has waved through on an operator override it
+// did not scan) hands that PR a contract it has already been proven unable to
+// meet, permanently. agent-os#5879, #5883 and #5906 each stopped dead this way on
+// 2026-08-25 and each needed a manual `operator-approved: scope-expand`.
+//
+// So: derive freely, enforce freely -- but only brand on a completed, clean scan.
+// Enforcement does not weaken. Derivation re-runs against live PR state every
+// tick, which is what CRG-07N's "bind the decision to the current reviewed head"
+// asked for in the first place; the finding re-emits for as long as the condition
+// holds, and correctly stops when it no longer does.
 function evaluateAdditiveOnlyScope({
   repo,
   prNumber,
@@ -467,8 +489,11 @@ function evaluateAdditiveOnlyScope({
       derivedAdditiveOnly,
       labeledAdditiveOnly,
       initialHeadSha,
+      // The override short-circuits the scan, so scope is unknown here, and the
+      // override itself is bound to the current head while the label is not.
+      // Branding now would outlive the approval that licensed it.
+      backfillNeeded: false,
       finding: null,
-      backfillNeeded: derivedAdditiveOnly && !labeledAdditiveOnly,
       overrideActive: true,
     };
   }
@@ -498,7 +523,9 @@ function evaluateAdditiveOnlyScope({
           violatingFiles,
           fileListTruncated: fileEntry.truncated,
         }),
-        backfillNeeded: derivedAdditiveOnly && !labeledAdditiveOnly,
+        // Violating, or unreadable (`fileEntry.truncated`). Either way this PR
+        // has not been shown to satisfy the label, so it does not get branded.
+        backfillNeeded: false,
       };
     }
   }

@@ -91,15 +91,24 @@ test('labeled additive-only PR scans initial commit violations too', () => {
   assert.deepEqual(result.finding?.violating_files, ['src/initial-escape.mjs']);
 });
 
-test('unlabeled PR derives additive-only from initial diff and requests label backfill', () => {
+test('unlabeled PR derives additive-only from initial diff and is enforced without being branded', () => {
+  // This used to assert `backfillNeeded === true` alongside the finding. That
+  // pairing is the agent-os#5879 trap: the label is self-proving once written, so
+  // stamping it on a violating PR made the violation permanent. Derivation and
+  // enforcement are unchanged; only the brand is withheld. See
+  // additive-only-scope-backfill-on-violation.test.mjs.
   const result = evaluate();
 
   assert.equal(result.derivedAdditiveOnly, true);
-  assert.equal(result.backfillNeeded, true);
   assert.equal(result.finding?.kind, 'scope-violation');
+  assert.equal(result.backfillNeeded, false);
 });
 
 test('resolver attempts additive-only label backfill without depending on delivery success', async () => {
+  // The snapshot below is clean, so the resolver reaches the backfill. Delivery
+  // failure must still not stop enforcement. (A snapshot carrying a violation
+  // never reaches the backfill at all -- see
+  // additive-only-scope-backfill-on-violation.test.mjs.)
   const calls = [];
   const result = await resolveAdditiveOnlyScopeReview({
     repo: 'laceyenterprises/adversarial-review',
@@ -114,7 +123,7 @@ test('resolver attempts additive-only label backfill without depending on delive
       ],
       filesByCommit: {
         initial: [{ filename: 'projects/codex-runaway-guardrails/plan.json' }],
-        later: [{ filename: 'modules/sentinel/lib/scope.mjs' }],
+        later: [{ filename: 'projects/codex-runaway-guardrails/SPEC.md' }],
       },
       timeline: [],
     },
@@ -124,7 +133,7 @@ test('resolver attempts additive-only label backfill without depending on delive
     },
   });
 
-  assert.equal(result.finding?.kind, 'scope-violation');
+  assert.equal(result.finding, null);
   assert.deepEqual(result.backfill, { attempted: true, added: false, error: 'missing label provisioning' });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].repo, 'laceyenterprises/adversarial-review');

@@ -163,7 +163,7 @@ import {
   reviewCycleExhaustedFromRounds,
 } from './review-ceiling-metrics.mjs';
 import { scrapeMergeCloseout } from './closeout-scraper.mjs';
-import { runStartupStaleStateReaper } from './recovery-reaper.mjs';
+import { startWatcherStaleStateReaper } from './watcher-stale-state-reaper.mjs';
 import {
   assertReviewDbWritesRoundTrip,
   isSqliteOrphanError,
@@ -1699,12 +1699,9 @@ async function main() {
   // `pending|dispatched`/`terminalOutcome=null`. Age-gated reaping releases
   // both so PRs re-review and closers re-dispatch instead of wedging until a
   // manual rescue. Never throws — a reaper failure must not block polling.
-  await runStartupStaleStateReaper({
-    rootDir: ROOT,
-    db,
-    env: process.env,
-    logger: console,
-    isProcessAlive,
+  // CLR-02: startup sweep + the ticker that repeats it from the poll loop.
+  const staleStateReaperTicker = await startWatcherStaleStateReaper({
+    rootDir: ROOT, db, env: process.env, logger: console, isProcessAlive,
   });
 
   // Workload-aware deadline: the previous fixed 10m watchdog tripped
@@ -1823,6 +1820,9 @@ async function main() {
       } catch (error) {
         console.error(`[watcher] alert delivery sink health unavailable: ${error?.message || error}`);
       }
+      // Recovery, not polling work: a no-op until its interval elapses, and it
+      // never throws, so it cannot delay or fail a poll.
+      await staleStateReaperTicker.tick();
       return await safePollOnce(source);
     } finally {
       stallWatchdog.endPoll();

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
@@ -304,6 +304,58 @@ test('updateAmaCloserLease throws when no lease exists yet', () => {
       }),
       /no lease at .* — call acquireAmaCloserLease first/,
     );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// CLR-02 — the lease records the acquiring HOST alongside the pid.
+//
+// Recovery is allowed to reclaim a lease early only when its holder is provably
+// dead, and `watcherPid` alone cannot support that claim: a pid probed on host B
+// says nothing about a process on host A. Without `holderHost` the reaper has to
+// fall back to the 6h floor for every lease, which is the state that let 11 of 11
+// dead-held leases sit unreclaimed (SEV 2026-08-26).
+// ---------------------------------------------------------------------------
+
+test('acquire records the holder host so recovery can trust a local liveness probe', () => {
+  const rootDir = freshRoot();
+  try {
+    const r = acquireAmaCloserLease({
+      rootDir,
+      ...IDENTITY,
+      watcherPid: 4242,
+      now: '2026-08-26T22:00:00Z',
+    });
+    assert.equal(r.lease.holderHost, hostname(), 'defaults to this host');
+    assert.equal(readAmaCloserLease(rootDir, IDENTITY).holderHost, hostname(), 'and is durable');
+
+    // Preserved across every state transition — a lease that loses its holder
+    // identity mid-flight would silently drop back to the 6h floor.
+    updateAmaCloserLease({
+      rootDir, ...IDENTITY, status: AMA_CLOSER_LEASE_STATUS.DISPATCHED, lrqId: 'lrq_1',
+      now: '2026-08-26T22:01:00Z',
+    });
+    assert.equal(readAmaCloserLease(rootDir, IDENTITY).holderHost, hostname());
+    updateAmaCloserLease({
+      rootDir, ...IDENTITY, status: AMA_CLOSER_LEASE_STATUS.TERMINAL, terminalOutcome: 'succeeded',
+      now: '2026-08-26T22:02:00Z',
+    });
+    assert.equal(readAmaCloserLease(rootDir, IDENTITY).holderHost, hostname());
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('acquire accepts an explicit holder host so cross-host tests stay deterministic', () => {
+  const rootDir = freshRoot();
+  try {
+    const r = acquireAmaCloserLease({
+      rootDir, ...IDENTITY, watcherPid: 4242, host: 'some-other-host',
+      now: '2026-08-26T22:00:00Z',
+    });
+    assert.equal(r.lease.holderHost, 'some-other-host');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

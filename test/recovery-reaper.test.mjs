@@ -1,27 +1,36 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, promises as fsPromises, readFileSync, rmSync, utimesSync, writeFileSync, existsSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, mkdirSync, mkdtempSync, promises as fsPromises, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync, existsSync } from 'node:fs';
+import { hostname, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 import {
+  createStaleStateReaperTicker,
   DEFAULT_CLOSER_LEASE_ENTRY_SCAN_LIMIT,
   DEFAULT_CLOSER_LEASE_READ_LIMIT,
+  DEFAULT_DEAD_HOLDER_CLOSER_LEASE_MS,
   DEFAULT_STALE_CLOSER_LEASE_MS,
   DEFAULT_STALE_RUNNING_REVIEWER_PASS_MS,
+  DEFAULT_STALE_STATE_REAPER_INTERVAL_MS,
+  DEFAULT_TERMINAL_CLOSER_LEASE_PRUNE_MS,
   reapStaleCloserLeases,
   reapStaleRunningReviewerPasses,
   resolveCloserLeaseEntryScanLimit,
   resolveCloserLeaseReadLimit,
+  resolveDeadHolderCloserLeaseMs,
   resolveStaleCloserLeaseMs,
   resolveStaleRunningReviewerPassMs,
+  resolveStaleStateReaperIntervalMs,
+  resolveTerminalCloserLeasePruneMs,
   runStartupStaleStateReaper,
+  selectPrunableCloserLeases,
   selectReleasableCloserLeases,
   selectStaleRunningReviewerPasses,
 } from '../src/recovery-reaper.mjs';
 import { beginReviewerPass, completeReviewerPass } from '../src/reviewer-pass-tokens.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 import { amaCloserDispatchFilePath } from '../src/ama/dispatch-closer.mjs';
+import { startWatcherStaleStateReaper } from '../src/watcher-stale-state-reaper.mjs';
 
 function tempRoot() {
   return mkdtempSync(join(tmpdir(), 'reaper-'));
@@ -30,6 +39,23 @@ function tempRoot() {
 const NOW = '2026-06-29T12:00:00Z';
 function hoursAgo(n) {
   return new Date(Date.parse(NOW) - n * 60 * 60 * 1000).toISOString();
+}
+function minutesAgo(n) {
+  return new Date(Date.parse(NOW) - n * 60 * 1000).toISOString();
+}
+function daysAgo(n) {
+  return new Date(Date.parse(NOW) - n * 24 * 60 * 60 * 1000).toISOString();
+}
+const THIS_HOST = hostname();
+const DEAD_PID = 999_001;
+const pidIsDead = () => false;
+const pidIsAlive = () => true;
+function leaseDirFileCount(rootDir) {
+  try {
+    return readdirSync(join(rootDir, 'data', 'ama-closer-leases')).length;
+  } catch {
+    return 0;
+  }
 }
 
 function writeLease(rootDir, lease) {
@@ -798,4 +824,471 @@ test('runStartupStaleStateReaper is fail-safe and returns a summary', async (t) 
   const out = await runStartupStaleStateReaper({ rootDir, db, env: {}, now: NOW, logger: { warn() {}, error() {}, log() {} } });
   assert.equal(out.reviewerPasses.reaped, 0);
   assert.equal(out.closerLeases.released, 0);
+});
+
+// ---------------------------------------------------------------------------
+// CLR-02 — dead-holder tier, terminal-lease pruning, periodic reclamation
+//
+// SEV `closer-lease-reaper-runs-only-at-watcher-startup` (2026-08-26): 11 of 11
+// non-terminal closer leases stale, every holder pid dead, 0 reclaimed, because
+// the sweep only ever ran at watcher startup and the bounded scan was being
+// spent on 563 finished records.
+// ---------------------------------------------------------------------------
+
+test('CLR-02 thresholds: dead-holder tier matches the 30m health surface; prune age is days', () => {
+  assert.equal(DEFAULT_DEAD_HOLDER_CLOSER_LEASE_MS, 30 * 60 * 1000);
+  assert.equal(DEFAULT_STALE_CLOSER_LEASE_MS, 6 * 60 * 60 * 1000, '6h floor is NOT lowered');
+  assert.ok(
+    DEFAULT_DEAD_HOLDER_CLOSER_LEASE_MS < DEFAULT_STALE_CLOSER_LEASE_MS,
+    'the dead-holder tier is a shortcut past the floor, never a replacement for it',
+  );
+  assert.equal(DEFAULT_TERMINAL_CLOSER_LEASE_PRUNE_MS, 7 * 24 * 60 * 60 * 1000);
+  assert.ok(
+    DEFAULT_TERMINAL_CLOSER_LEASE_PRUNE_MS > DEFAULT_STALE_CLOSER_LEASE_MS * 10,
+    'prune age is an order of magnitude beyond any reclaim threshold',
+  );
+  assert.equal(resolveDeadHolderCloserLeaseMs({}), DEFAULT_DEAD_HOLDER_CLOSER_LEASE_MS);
+  assert.equal(resolveTerminalCloserLeasePruneMs({}), DEFAULT_TERMINAL_CLOSER_LEASE_PRUNE_MS);
+  assert.equal(resolveStaleStateReaperIntervalMs({}), DEFAULT_STALE_STATE_REAPER_INTERVAL_MS);
+  assert.equal(
+    resolveDeadHolderCloserLeaseMs({ ADVERSARIAL_DEAD_HOLDER_CLOSER_LEASE_MS: '60000' }),
+    60_000,
+  );
+  assert.equal(
+    resolveTerminalCloserLeasePruneMs({ ADVERSARIAL_TERMINAL_CLOSER_LEASE_PRUNE_MS: 'off' }),
+    0,
+    'pruning deletes live-host state, so operators get an explicit kill switch',
+  );
+  assert.equal(
+    resolveTerminalCloserLeasePruneMs({ ADVERSARIAL_TERMINAL_CLOSER_LEASE_PRUNE_MS: '0' }),
+    0,
+  );
+});
+
+test('selectReleasableCloserLeases: a provably-dead same-host holder releases at the short tier', () => {
+  const lease = {
+    repo: 'a/x', prNumber: 1, headSha: 'h1', status: 'dispatched', terminalOutcome: null,
+    updatedAt: minutesAgo(45), watcherPid: DEAD_PID, holderHost: THIS_HOST, _path: 'p1',
+  };
+  const releasable = selectReleasableCloserLeases([lease], {
+    now: NOW,
+    thresholdMs: DEFAULT_STALE_CLOSER_LEASE_MS,
+    deadHolderThresholdMs: DEFAULT_DEAD_HOLDER_CLOSER_LEASE_MS,
+    isProcessAlive: pidIsDead,
+  });
+  assert.deepEqual(releasable.map((l) => l._path), ['p1'], '45m old + dead holder -> reclaimed');
+});
+
+test('selectReleasableCloserLeases: a LIVE same-host holder is never released at the short tier', () => {
+  const lease = {
+    repo: 'a/x', prNumber: 1, headSha: 'h1', status: 'dispatched', terminalOutcome: null,
+    updatedAt: minutesAgo(45), watcherPid: DEAD_PID, holderHost: THIS_HOST, _path: 'p1',
+  };
+  const releasable = selectReleasableCloserLeases([lease], {
+    now: NOW,
+    thresholdMs: DEFAULT_STALE_CLOSER_LEASE_MS,
+    deadHolderThresholdMs: DEFAULT_DEAD_HOLDER_CLOSER_LEASE_MS,
+    isProcessAlive: pidIsAlive,
+  });
+  assert.deepEqual(releasable, [], 'live holder -> the 6h floor is the only gate');
+
+  // A liveness probe that throws must read as "alive", never as "dead".
+  const throwing = selectReleasableCloserLeases([lease], {
+    now: NOW,
+    thresholdMs: DEFAULT_STALE_CLOSER_LEASE_MS,
+    deadHolderThresholdMs: DEFAULT_DEAD_HOLDER_CLOSER_LEASE_MS,
+    isProcessAlive: () => { throw new Error('EPERM'); },
+  });
+  assert.deepEqual(throwing, [], 'an unanswerable liveness probe fails closed');
+});
+
+test('selectReleasableCloserLeases: a lease younger than the dead-holder tier is never released', () => {
+  const lease = {
+    repo: 'a/x', prNumber: 1, headSha: 'h1', status: 'dispatched', terminalOutcome: null,
+    updatedAt: minutesAgo(5), watcherPid: DEAD_PID, holderHost: THIS_HOST, _path: 'p1',
+  };
+  const releasable = selectReleasableCloserLeases([lease], {
+    now: NOW,
+    thresholdMs: DEFAULT_STALE_CLOSER_LEASE_MS,
+    deadHolderThresholdMs: DEFAULT_DEAD_HOLDER_CLOSER_LEASE_MS,
+    isProcessAlive: pidIsDead,
+  });
+  assert.deepEqual(releasable, [], '5m old -> below both tiers even with a dead holder');
+});
+
+test('selectReleasableCloserLeases: a dead pid on another host still waits the full floor', () => {
+  const base = {
+    repo: 'a/x', prNumber: 1, headSha: 'h1', status: 'dispatched', terminalOutcome: null,
+    watcherPid: DEAD_PID, _path: 'p1',
+  };
+  const opts = {
+    now: NOW,
+    thresholdMs: DEFAULT_STALE_CLOSER_LEASE_MS,
+    deadHolderThresholdMs: DEFAULT_DEAD_HOLDER_CLOSER_LEASE_MS,
+    isProcessAlive: pidIsDead,
+  };
+  assert.deepEqual(
+    selectReleasableCloserLeases([{ ...base, updatedAt: minutesAgo(45), holderHost: 'some-other-host' }], opts),
+    [],
+    'a pid read here says nothing about a process there',
+  );
+  assert.deepEqual(
+    selectReleasableCloserLeases([{ ...base, updatedAt: minutesAgo(45) }], opts),
+    [],
+    'a pre-CLR-02 lease with no holderHost gets the floor, not the short tier',
+  );
+  assert.equal(
+    selectReleasableCloserLeases([{ ...base, updatedAt: hoursAgo(20), holderHost: 'some-other-host' }], opts).length,
+    1,
+    'the 6h floor still reclaims it, exactly as before',
+  );
+});
+
+test('selectReleasableCloserLeases: livePid guard is scoped to local or legacy leases', () => {
+  const base = {
+    repo: 'a/x', prNumber: 1, headSha: 'h1', status: 'dispatched', terminalOutcome: null,
+    updatedAt: hoursAgo(20), watcherPid: process.pid,
+  };
+  const opts = {
+    now: NOW,
+    thresholdMs: DEFAULT_STALE_CLOSER_LEASE_MS,
+    deadHolderThresholdMs: DEFAULT_DEAD_HOLDER_CLOSER_LEASE_MS,
+    livePid: process.pid,
+    host: THIS_HOST,
+  };
+  assert.deepEqual(
+    selectReleasableCloserLeases([{ ...base, holderHost: THIS_HOST, _path: 'local-live' }], opts),
+    [],
+    'same-host livePid still protects the current watcher lease',
+  );
+  assert.deepEqual(
+    selectReleasableCloserLeases([{ ...base, _path: 'legacy-live' }], opts),
+    [],
+    'hostless pre-CLR-02 livePid leases stay protected because their host is ambiguous',
+  );
+  assert.deepEqual(
+    selectReleasableCloserLeases([{ ...base, holderHost: 'some-other-host', _path: 'remote-collision' }], opts)
+      .map((l) => l._path),
+    ['remote-collision'],
+    'a same-PID lease from another host is reclaimed after the 6h floor',
+  );
+});
+
+test('selectPrunableCloserLeases: retires resolved-terminal leases past the prune age and nothing else', () => {
+  const leases = [
+    { status: 'terminal', terminalOutcome: 'succeeded', updatedAt: daysAgo(30), _path: 'old-succeeded' },
+    { status: 'terminal', terminalOutcome: 'failed-without-merge', completedAt: daysAgo(9), updatedAt: daysAgo(2), _path: 'old-failed' },
+    { status: 'terminal', terminalOutcome: 'succeeded', updatedAt: daysAgo(2), _path: 'recent-terminal' },
+    { status: 'terminal', terminalOutcome: null, updatedAt: daysAgo(30), _path: 'terminal-no-outcome' },
+    { status: 'dispatched', terminalOutcome: null, updatedAt: daysAgo(30), _path: 'dispatched' },
+    { status: 'pending', terminalOutcome: null, updatedAt: daysAgo(30), _path: 'pending' },
+    { status: 'corrupt', terminalOutcome: null, _isCorrupt: true, mtimeMs: Date.parse(daysAgo(30)), _path: 'corrupt' },
+    { status: 'terminal', terminalOutcome: 'succeeded', updatedAt: 'not-a-date', _path: 'unageable' },
+  ];
+  const prunable = selectPrunableCloserLeases(leases, {
+    now: NOW, pruneAfterMs: DEFAULT_TERMINAL_CLOSER_LEASE_PRUNE_MS,
+  });
+  assert.deepEqual(prunable.map((l) => l._path), ['old-succeeded', 'old-failed']);
+  assert.deepEqual(
+    selectPrunableCloserLeases(leases, { now: NOW, pruneAfterMs: 0 }),
+    [],
+    'pruneAfterMs=0 disables pruning entirely',
+  );
+});
+
+test('reapStaleCloserLeases prunes finished leases and never a non-terminal one', async (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const prunable = [];
+  for (let index = 0; index < 8; index += 1) {
+    prunable.push(writeLease(rootDir, {
+      repo: `acme/finished-${index}`, prNumber: 100 + index, headSha: `fin${index}`,
+      status: 'terminal', terminalOutcome: 'succeeded',
+      acquiredAt: daysAgo(30), updatedAt: daysAgo(30), watcherPid: DEAD_PID, holderHost: THIS_HOST,
+    }));
+  }
+  // Everything below must survive: still live, too recent, or terminal without a
+  // resolved outcome (an unfinished reconciliation, not finished work).
+  const keepDispatched = writeLease(rootDir, {
+    repo: 'acme/keep-dispatched', prNumber: 200, headSha: 'keepd',
+    status: 'dispatched', terminalOutcome: null,
+    acquiredAt: daysAgo(30), updatedAt: minutesAgo(2), watcherPid: process.pid, holderHost: THIS_HOST,
+  });
+  const keepPending = writeLease(rootDir, {
+    repo: 'acme/keep-pending', prNumber: 201, headSha: 'keepp',
+    status: 'pending', terminalOutcome: null,
+    acquiredAt: minutesAgo(2), updatedAt: minutesAgo(2), watcherPid: process.pid, holderHost: THIS_HOST,
+  });
+  const keepRecentTerminal = writeLease(rootDir, {
+    repo: 'acme/keep-recent', prNumber: 202, headSha: 'keepr',
+    status: 'terminal', terminalOutcome: 'succeeded',
+    acquiredAt: daysAgo(2), updatedAt: daysAgo(2), watcherPid: DEAD_PID, holderHost: THIS_HOST,
+  });
+  const keepOutcomeless = writeLease(rootDir, {
+    repo: 'acme/keep-outcomeless', prNumber: 203, headSha: 'keepo',
+    status: 'terminal', terminalOutcome: null,
+    acquiredAt: daysAgo(30), updatedAt: daysAgo(30), watcherPid: DEAD_PID, holderHost: THIS_HOST,
+  });
+
+  const before = leaseDirFileCount(rootDir);
+  assert.equal(before, 12);
+
+  const result = await reapStaleCloserLeases({
+    rootDir, now: NOW, isProcessAlive: pidIsDead, logger: { warn() {}, error() {}, log() {} },
+  });
+
+  const after = leaseDirFileCount(rootDir);
+  assert.equal(result.pruned, 8, 'every resolved-terminal lease past the prune age is retired');
+  assert.equal(result.released, 0);
+  assert.equal(after, 4, `lease dir bounded: ${before} -> ${after}`);
+  assert.ok(prunable.every((path) => !existsSync(path)));
+  for (const path of [keepDispatched, keepPending, keepRecentTerminal, keepOutcomeless]) {
+    assert.equal(existsSync(path), true, `retained: ${path}`);
+  }
+});
+
+test('reapStaleCloserLeases: dead same-host holder is reclaimed at 45m, live holder is not', async (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const deadHolder = writeLease(rootDir, {
+    repo: 'acme/dead-holder', prNumber: 5910, headSha: 'aaa',
+    status: 'dispatched', terminalOutcome: null,
+    acquiredAt: minutesAgo(45), updatedAt: minutesAgo(45),
+    watcherPid: DEAD_PID, holderHost: THIS_HOST,
+  });
+  const liveHolder = writeLease(rootDir, {
+    repo: 'acme/live-holder', prNumber: 5911, headSha: 'bbb',
+    status: 'dispatched', terminalOutcome: null,
+    acquiredAt: minutesAgo(45), updatedAt: minutesAgo(45),
+    watcherPid: DEAD_PID + 1, holderHost: THIS_HOST,
+  });
+
+  const result = await reapStaleCloserLeases({
+    rootDir,
+    now: NOW,
+    isProcessAlive: (pid) => pid !== DEAD_PID,
+    logger: { warn() {}, error() {}, log() {} },
+  });
+
+  assert.equal(result.released, 1);
+  assert.equal(existsSync(deadHolder), false, 'dead holder -> closer re-dispatch unblocked at 45m');
+  assert.equal(existsSync(liveHolder), true, 'live holder -> lease is load-bearing, keep it');
+
+  // Without a liveness probe the short tier cannot fire at all: same lease, no
+  // isProcessAlive, and the 6h floor is the only gate.
+  const noProbeRoot = tempRoot();
+  t.after(() => rmSync(noProbeRoot, { recursive: true, force: true }));
+  const unproven = writeLease(noProbeRoot, {
+    repo: 'acme/unproven', prNumber: 5912, headSha: 'ccc',
+    status: 'dispatched', terminalOutcome: null,
+    acquiredAt: minutesAgo(45), updatedAt: minutesAgo(45),
+    watcherPid: DEAD_PID, holderHost: THIS_HOST,
+  });
+  const unprovenResult = await reapStaleCloserLeases({
+    rootDir: noProbeRoot, now: NOW, logger: { warn() {}, error() {}, log() {} },
+  });
+  assert.equal(unprovenResult.released, 0);
+  assert.equal(existsSync(unproven), true);
+});
+
+// ---------------------------------------------------------------------------
+// The defect itself: reclamation must happen on a poll tick, not only at startup
+// ---------------------------------------------------------------------------
+
+test('createStaleStateReaperTicker reclaims a lease orphaned AFTER startup, on a poll tick', async (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const startupMs = Date.parse(NOW);
+  const env = {};
+  const logger = { warn() {}, error() {}, log() {} };
+
+  // 1. Startup sweep: the directory is empty, so it reclaims nothing. This is
+  //    the ONLY sweep the pre-CLR-02 watcher ever ran.
+  const startup = await runStartupStaleStateReaper({
+    rootDir, db: null, env, now: new Date(startupMs).toISOString(), logger, isProcessAlive: pidIsDead,
+  });
+  assert.equal(startup.closerLeases.released, 0);
+
+  const ticker = createStaleStateReaperTicker({
+    rootDir, db: null, env, logger, isProcessAlive: pidIsDead, lastRunAtMs: startupMs,
+  });
+  assert.equal(ticker.intervalMs, DEFAULT_STALE_STATE_REAPER_INTERVAL_MS);
+
+  // 2. A closer is dispatched after startup and its holder dies.
+  const orphanedMs = startupMs + 60_000;
+  const orphaned = writeLease(rootDir, {
+    repo: 'acme/orphaned-after-startup', prNumber: 5931, headSha: 'ddd',
+    status: 'dispatched', terminalOutcome: null,
+    acquiredAt: new Date(orphanedMs).toISOString(),
+    updatedAt: new Date(orphanedMs).toISOString(),
+    watcherPid: DEAD_PID, holderHost: THIS_HOST,
+  });
+
+  // 3. Polls before the tick interval elapses must not sweep.
+  const early = await ticker.tick({ nowMs: startupMs + (ticker.intervalMs / 2) });
+  assert.equal(early.ran, false);
+  assert.equal(early.reason, 'interval-not-elapsed');
+  assert.equal(existsSync(orphaned), true);
+
+  // 4. A later poll — still hours short of the 6h floor, and with no restart in
+  //    between — reclaims it.
+  const sweepMs = orphanedMs + (45 * 60 * 1000);
+  assert.ok(
+    sweepMs - orphanedMs < DEFAULT_STALE_CLOSER_LEASE_MS,
+    'the reclaim happens well inside the 6h floor, on dead-holder evidence',
+  );
+  const swept = await ticker.tick({ nowMs: sweepMs });
+  assert.equal(swept.ran, true, 'reclamation runs from the poll loop, not just at startup');
+  assert.equal(swept.result.closerLeases.released, 1);
+  assert.equal(existsSync(orphaned), false, 'closer re-dispatch unblocked without a watcher restart');
+});
+
+test('createStaleStateReaperTicker prunes finished leases on a poll tick', async (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const startupMs = Date.parse(NOW);
+  for (let index = 0; index < 5; index += 1) {
+    writeLease(rootDir, {
+      repo: `acme/finished-${index}`, prNumber: 300 + index, headSha: `tick${index}`,
+      status: 'terminal', terminalOutcome: 'succeeded',
+      acquiredAt: daysAgo(30), updatedAt: daysAgo(30), watcherPid: DEAD_PID, holderHost: THIS_HOST,
+    });
+  }
+  const before = leaseDirFileCount(rootDir);
+
+  const ticker = createStaleStateReaperTicker({
+    rootDir, db: null, env: {}, logger: { warn() {}, error() {}, log() {} },
+    isProcessAlive: pidIsDead, lastRunAtMs: startupMs,
+  });
+  const swept = await ticker.tick({ nowMs: startupMs + ticker.intervalMs });
+
+  assert.equal(swept.ran, true);
+  assert.equal(swept.result.closerLeases.pruned, 5);
+  assert.equal(before, 5);
+  assert.equal(leaseDirFileCount(rootDir), 0, 'lease dir bounded from the poll loop');
+});
+
+test('createStaleStateReaperTicker never throws and never blocks a poll', async (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const startupMs = Date.parse(NOW);
+  const errors = [];
+  const exploding = {
+    prepare() { throw new Error('sqlite exploded'); },
+  };
+  // A real lease so the exploding liveness probe is actually reached.
+  const lease = writeLease(rootDir, {
+    repo: 'acme/probe-explodes', prNumber: 400, headSha: 'boom',
+    status: 'dispatched', terminalOutcome: null,
+    acquiredAt: minutesAgo(45), updatedAt: minutesAgo(45),
+    watcherPid: DEAD_PID, holderHost: THIS_HOST,
+  });
+  const ticker = createStaleStateReaperTicker({
+    rootDir,
+    db: exploding,
+    env: {},
+    logger: { warn() {}, error(message) { errors.push(String(message)); }, log() {} },
+    isProcessAlive: () => { throw new Error('kill(2) exploded'); },
+    lastRunAtMs: startupMs,
+  });
+
+  const swept = await ticker.tick({ nowMs: startupMs + ticker.intervalMs });
+  assert.equal(swept.ran, true, 'a failing sub-sweep is contained, not propagated');
+  assert.equal(swept.result.reviewerPasses.reaped, 0);
+  assert.ok(errors.some((line) => line.includes('reviewer-pass sweep failed')));
+  assert.equal(swept.result.closerLeases.released, 0);
+  assert.equal(existsSync(lease), true, 'an unanswerable liveness probe keeps the lease');
+
+  // And the failure advances the clock, so a broken filesystem cannot turn into
+  // a per-poll retry storm.
+  const immediate = await ticker.tick({ nowMs: startupMs + ticker.intervalMs + 1 });
+  assert.equal(immediate.ran, false);
+  assert.equal(immediate.reason, 'interval-not-elapsed');
+});
+
+// ---------------------------------------------------------------------------
+// The wiring itself. Every test above proves the ticker works; this one proves
+// the watcher actually uses it. The pre-CLR-02 defect was not a broken
+// reclaimer — the reclaimer worked and logged
+// `[reaper] startup stale-state sweep: ... released 18 closer lease(s)`. It was
+// a working reclaimer with exactly one call site, above the poll loop. A guard
+// on the call site is therefore the regression test for the actual bug.
+// ---------------------------------------------------------------------------
+
+function sourceWithoutComments(relativePath) {
+  return readFileSync(new URL(relativePath, import.meta.url), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('//'))
+    .join('\n');
+}
+
+function extractFunctionBody(source, signature) {
+  const start = source.indexOf(signature);
+  assert.notEqual(start, -1, `watcher.mjs no longer contains ${signature}`);
+  let index = source.indexOf('{', start);
+  let depth = 0;
+  const bodyStart = index;
+  for (; index < source.length; index += 1) {
+    if (source[index] === '{') depth += 1;
+    else if (source[index] === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(bodyStart, index + 1);
+    }
+  }
+  throw new Error(`unbalanced braces while extracting ${signature}`);
+}
+
+test('watcher drives the stale-state reaper from the poll path, not only from startup', () => {
+  const watcher = sourceWithoutComments('../src/watcher.mjs');
+
+  const pollBody = extractFunctionBody(watcher, 'async function runHeartbeatPoll(');
+  assert.match(
+    pollBody,
+    /staleStateReaperTicker\.tick\(/,
+    'the reclaim step must run from the poll loop. With a startup-only call site '
+      + 'a watcher that stays up for a day reclaims nothing for a day — the exact '
+      + 'defect in SEV closer-lease-reaper-runs-only-at-watcher-startup (2026-08-26).',
+  );
+  assert.match(
+    watcher,
+    /const staleStateReaperTicker = await startWatcherStaleStateReaper\(/,
+    'the ticker the poll loop calls must be the one the startup path returns',
+  );
+});
+
+test('startWatcherStaleStateReaper runs the startup sweep AND returns a poll-loop ticker', async (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  // Both triggers are load-bearing and not interchangeable: startup cannot wait
+  // a tick interval after an outage, and a long-lived watcher must not stop
+  // reclaiming once it is past startup.
+  const scheduling = sourceWithoutComments('../src/watcher-stale-state-reaper.mjs');
+  assert.match(scheduling, /await runStartupStaleStateReaper\(/);
+  assert.match(
+    scheduling,
+    /createStaleStateReaperTicker\([\s\S]{0,200}?isProcessAlive[\s,}]/,
+    'the ticker must be built with the liveness probe; without it the '
+      + 'dead-holder tier silently degrades to the 6h floor',
+  );
+
+  const startupOrphan = writeLease(rootDir, {
+    repo: 'acme/startup-orphan', prNumber: 5910, headSha: 'eee',
+    status: 'dispatched', terminalOutcome: null,
+    acquiredAt: minutesAgo(45), updatedAt: minutesAgo(45),
+    watcherPid: DEAD_PID, holderHost: THIS_HOST,
+  });
+  const ticker = await startWatcherStaleStateReaper({
+    rootDir, db: null, env: {}, logger: { warn() {}, error() {}, log() {} },
+    isProcessAlive: pidIsDead,
+  });
+  assert.equal(existsSync(startupOrphan), false, 'startup still sweeps');
+  assert.equal(typeof ticker.tick, 'function', 'and hands back the poll-loop trigger');
+  assert.equal(ticker.intervalMs, DEFAULT_STALE_STATE_REAPER_INTERVAL_MS);
 });

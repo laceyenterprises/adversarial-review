@@ -1162,16 +1162,43 @@ function standingChangesRequestedReviews(reviews) {
   ));
 }
 
+/**
+ * Partition standing `CHANGES_REQUESTED` reviews by whether the head they judged
+ * is STRICTLY SUPERSEDED by `currentHeadSha`.
+ *
+ * SVD-02 safety primitive. A verdict whose `commit_id` EQUALS the current head is
+ * a LIVE finding against the code that is about to merge — it is never stale and
+ * must never be dismissed on supersession grounds. A verdict with no resolvable
+ * `commit_id` cannot be PROVEN superseded, so it is retained too (fail closed).
+ * Only a verdict judged at a different, concrete commit is superseded.
+ *
+ * @param {Array<object>} standing  Standing CHANGES_REQUESTED reviews.
+ * @param {string} currentHeadSha   The live head the PR would merge at.
+ * @returns {{superseded: Array<object>, retainedAtHead: Array<object>}}
+ */
+function partitionStandingReviewsBySupersededHead(standing, currentHeadSha) {
+  const head = String(currentHeadSha || '').trim();
+  const superseded = [];
+  const retainedAtHead = [];
+  for (const review of Array.isArray(standing) ? standing : []) {
+    const judgedHead = String(review?.commitId || '').trim();
+    if (judgedHead && head && judgedHead !== head) superseded.push(review);
+    else retainedAtHead.push(review);
+  }
+  return { superseded, retainedAtHead };
+}
+
 async function dismissStandingChangesRequestedReviewsForHead(execFileImpl, repo, prNumber, headSha, {
   authoritativeReviewerLogins = null,
   authoritativeReviewerLogin = null,
   message,
+  requireSupersededCommitId = null,
   env = process.env,
   execGhWithRetryImpl = execGhWithRetry,
   recordApiCallImpl = recordApiCall,
 } = {}) {
   const normalizedPrNumber = normalizePrNumber(prNumber);
-  if (!headSha) return { dismissed: [], standing: [], attempted: 0 };
+  if (!headSha) return { dismissed: [], standing: [], attempted: 0, retainedAtHead: [] };
   // A clean exact-head COMMENTED review is our authority to clear stale reviewer
   // blocks, but GitHub's merge decision still counts older-head Request changes
   // until they are explicitly dismissed.
@@ -1179,9 +1206,21 @@ async function dismissStandingChangesRequestedReviewsForHead(execFileImpl, repo,
     authoritativeReviewerLogins,
     authoritativeReviewerLogin,
   });
-  const standing = standingChangesRequestedReviews(reviews);
-  const dismissalMessage = String(message || '').trim()
-    || 'Dismissed by AMA merge authority: reviewer findings were remediated/resolved for this head.';
+  const allStanding = standingChangesRequestedReviews(reviews);
+  // SVD-02 — when the caller's authority is "this head carries a validated HAM
+  // terminal remediation", it may only clear verdicts judged at a STRICTLY
+  // SUPERSEDED commit. Anything at (or unprovable against) the current head is a
+  // live finding and stays.
+  const supersededOnly = String(requireSupersededCommitId || '').trim();
+  const { superseded, retainedAtHead } = supersededOnly
+    ? partitionStandingReviewsBySupersededHead(allStanding, supersededOnly)
+    : { superseded: allStanding, retainedAtHead: [] };
+  const standing = superseded;
+  const resolveDismissalMessage = typeof message === 'function'
+    ? (review) => String(message(review) || '').trim()
+      || 'Dismissed by AMA merge authority: reviewer findings were remediated/resolved for this head.'
+    : () => String(message || '').trim()
+      || 'Dismissed by AMA merge authority: reviewer findings were remediated/resolved for this head.';
   const dismissed = [];
   const dismissalEnv = buildGhEnv(env);
   if (dismissalEnv.GH_TOKEN) {
@@ -1198,7 +1237,7 @@ async function dismissStandingChangesRequestedReviewsForHead(execFileImpl, repo,
           'PUT',
           `repos/${repo}/pulls/${normalizedPrNumber}/reviews/${review.id}/dismissals`,
           '-f',
-          `message=${dismissalMessage}`,
+          `message=${resolveDismissalMessage(review)}`,
         ],
         env: dismissalEnv,
       });
@@ -1221,6 +1260,7 @@ async function dismissStandingChangesRequestedReviewsForHead(execFileImpl, repo,
       err.review = review;
       err.dismissed = dismissed;
       err.standing = standing;
+      err.retainedAtHead = retainedAtHead;
       throw err;
     }
   }
@@ -1228,6 +1268,7 @@ async function dismissStandingChangesRequestedReviewsForHead(execFileImpl, repo,
     dismissed,
     standing,
     attempted: standing.length,
+    retainedAtHead,
   };
 }
 
@@ -2089,6 +2130,7 @@ const __test__ = {
   fetchLegacyReviewContextWithTelemetry,
   fetchLegacyReviews,
   dismissStandingChangesRequestedReviewsForHead,
+  partitionStandingReviewsBySupersededHead,
   fetchPullRequestMergeability,
   fetchReviewBodiesForHead,
   standingChangesRequestedReviews,

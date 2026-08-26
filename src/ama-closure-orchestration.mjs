@@ -51,6 +51,7 @@ import { normalizeGithubMergeability, resolveMergeabilityWithSampling } from './
 import { getHeadCloserCommitSuppression } from './head-closer-commit-suppression.mjs';
 import { isDismissStaleRequestChangesOnResolvedEnabled } from './merge-agent-dispatch-decision.mjs';
 import { resolveOrchestrationMode } from './pr-lifecycle-sync.mjs';
+import { dismissSupersededBlockingVerdictAtRemediatedHead } from './superseded-blocking-verdict-dismissal.mjs';
 import {
   countCompletedReviewerRereviewRounds,
   reviewCycleExhaustedFromRounds,
@@ -262,6 +263,8 @@ export async function maybeDispatchAmaClosureFor({
   resolveHeadCloserCommitSuppressionImpl = null,
   resolveHamTerminalRemediationEvidenceImpl =
     amaDispatchCloser.resolveHamTerminalRemediationEvidence || null,
+  dismissSupersededBlockingVerdictAtRemediatedHeadImpl =
+    dismissSupersededBlockingVerdictAtRemediatedHead,
   writeAutonomousMergeDisabledAuditImpl = writeAutonomousMergeDisabledAudit,
   env = process.env,
 }) {
@@ -734,6 +737,40 @@ export async function maybeDispatchAmaClosureFor({
     }
   }
 
+  // SVD-02 — THIRD stale-verdict dismissal trigger (SEV
+  // `docs/postmortems/SEV-stale-blocking-verdict-is-structurally-undismissable-2026-08-26.md`).
+  //
+  // The other two dismissal paths are both gated on a state that a standing
+  // blocking verdict itself prevents: the reviewer-side one needs a NEW clean
+  // `comment-only` review (policy says the final HAM remediation is FINAL — none
+  // follows), and the daemon-owned one lives INSIDE the clean-merge attempt below,
+  // past its live eligibility gate. So a PR whose final remediation resolved the
+  // blocking finding parked at `CHANGES_REQUESTED` against a head no reviewer ever
+  // judged, until an operator dismissed it by hand (#5918: 4.5h at MERGEABLE/CLEAN
+  // with every required check green; #5811 earlier).
+  //
+  // This fires BEFORE the daemon clean path, on the one signal present in exactly
+  // that case: a VALIDATED HAM terminal remediation at the current head, proven by
+  // the same already-trusted primitives the merge path uses
+  // (`resolveHamTerminalRemediationEvidence` ground truth above, or the durable
+  // per-head `ham_terminal_remediation_validated` AMA audit marker). It grants NO
+  // merge authority — the daemon attempt below still enforces every one of its own
+  // gates. It only clears an obsolete verdict so that existing authority can act.
+  //
+  // HARD INVARIANT: a verdict whose `commit_id` EQUALS `currentPrHeadSha` is a LIVE
+  // finding and is NEVER dismissed. Only a STRICTLY superseded head qualifies.
+  const dismissStaleRequestChangesOnResolved =
+    isDismissStaleRequestChangesOnResolvedEnabled({ env, logger });
+  await dismissSupersededBlockingVerdictAtRemediatedHeadImpl({
+    repo: repoPath,
+    prNumber,
+    currentHeadSha: currentPrHeadSha || candidate?.headSha || null,
+    hamTerminalRemediationValidated,
+    authoritativeReviewerLogins,
+    env,
+    logger,
+  });
+
   // CI-SETTLEMENT MODEL — read this before hunting for a wait loop; there is
   // no blocking wait for CI anywhere in this tick, by design. When required
   // checks are PENDING (or not yet registered) on the candidate head:
@@ -783,7 +820,7 @@ export async function maybeDispatchAmaClosureFor({
     logger,
     env,
     authoritativeReviewerLogins,
-    dismissStaleRequestChangesOnResolved: isDismissStaleRequestChangesOnResolvedEnabled({ env, logger }),
+    dismissStaleRequestChangesOnResolved,
     hamTerminalRemediationValidated,
   });
   if (daemonCleanMerge?.disposition && daemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) {

@@ -377,6 +377,18 @@ function listBucketEntries(rootDir, bucket) {
   return entries;
 }
 
+function countBucketRecords(rootDir, bucket) {
+  const dir = getArgusJobDir(rootDir, bucket);
+  try {
+    return readdirSync(dir).filter((name) => name.endsWith('.json')).length;
+  } catch (err) {
+    if (err?.code !== 'ENOENT') {
+      console.error(`[argus-queue] failed to count ${bucket} directory: ${err?.message || err}`);
+    }
+    return 0;
+  }
+}
+
 /**
  * Job records from one bucket, newest-first, capped at `limit`.
  *
@@ -421,12 +433,19 @@ export function readArgusQueueDepth(rootDir, { nowMs = Date.now() } = {}) {
   let oldestPendingEntry = null;
 
   for (const bucket of ARGUS_JOB_BUCKETS) {
+    if (bucket !== 'pending') {
+      const count = countBucketRecords(rootDir, bucket);
+      depth[bucket] = count;
+      total += count;
+      if (ACTIVE_ARGUS_JOB_BUCKETS.includes(bucket)) active += count;
+      continue;
+    }
+
     const entries = listBucketEntries(rootDir, bucket);
     depth[bucket] = entries.length;
     total += entries.length;
-    if (ACTIVE_ARGUS_JOB_BUCKETS.includes(bucket)) active += entries.length;
+    active += entries.length;
 
-    if (bucket !== 'pending') continue;
     for (const entry of entries) {
       if (!oldestPendingEntry || entry.mtimeMs < oldestPendingEntry.mtimeMs) {
         oldestPendingEntry = entry;

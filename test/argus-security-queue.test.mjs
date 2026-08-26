@@ -23,6 +23,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -380,6 +381,23 @@ test('queue depth is not truncated by the newest-N record read cap', () => {
   // Record READS stay capped — a debugging list must not parse the whole bucket.
   assert.equal(listArgusJobs(rootDir, { bucket: 'pending' }).length, 200);
   assert.equal(listArgusJobs(rootDir, { bucket: 'pending', limit: 5 }).length, 5);
+});
+
+test('queue depth counts non-pending buckets without statting each record', () => {
+  const rootDir = makeRoot();
+  const completedDir = getArgusJobDir(rootDir, 'completed');
+  const failedDir = getArgusJobDir(rootDir, 'failed');
+  mkdirSync(completedDir, { recursive: true });
+  mkdirSync(failedDir, { recursive: true });
+
+  symlinkSync(path.join(rootDir, 'missing-completed-job.json'), path.join(completedDir, 'completed.json'));
+  writeFileSync(path.join(failedDir, 'failed.json'), '{}', 'utf8');
+
+  const depth = readArgusQueueDepth(rootDir);
+  assert.equal(depth.depth.completed, 1);
+  assert.equal(depth.depth.failed, 1);
+  assert.equal(depth.total, 2);
+  assert.equal(listArgusJobs(rootDir, { bucket: 'completed' }).length, 0);
 });
 
 test('queue depth surfaces the oldest pending job as the stuck-queue signal', () => {

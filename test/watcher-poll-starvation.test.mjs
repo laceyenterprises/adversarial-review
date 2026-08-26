@@ -41,6 +41,7 @@ import {
   createPollStarvationHandler,
   resolvePollStarvationConfig,
 } from '../src/watcher-poll-starvation-signal.mjs';
+import { processReviewSubject } from '../src/pollonce-phases.mjs';
 
 const HEAD_A = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const HEAD_B = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
@@ -282,6 +283,50 @@ test('WPS-01: terminal PR cleanup removes no-progress lane ledger', () => {
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+test('WPS-01: processReviewSubject queues posted-review handler with entry head SHA', async () => {
+  const rootDir = tempRoot();
+  const postedReviewHandlers = [];
+  const subject = {
+    title: '[codex] WPS fixture',
+    labels: [],
+    ref: { revisionRef: HEAD_A },
+  };
+  const row = {
+    review_status: 'posted',
+    pr_state: 'open',
+    reviewer_head_sha: HEAD_A,
+    review_attempts: 1,
+    posted_at: '2026-08-25T10:00:00.000Z',
+    failed_at: null,
+    merged_at: null,
+  };
+
+  try {
+    await processReviewSubject({
+      subject,
+      prNumber: 5908,
+      headSha: HEAD_A,
+      current: row,
+    }, {
+      operatorSurface: { extractLinearTicketId: () => null },
+      watcherDrain: { active: false },
+      postedReviewHandlers,
+      domainId: 'github-pr',
+      repoPath: REPO,
+      currentRepoPRs: [],
+      activeMergeAgentPRs: [],
+      ROOT: rootDir,
+      execFileAsync: async () => ({ stdout: '', stderr: '' }),
+      WATCHER_PRIMARY_DOMAIN_ID: 'github-pr',
+    });
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+
+  assert.equal(postedReviewHandlers.length, 1);
+  assert.equal(postedReviewHandlers[0].headSha, HEAD_A);
 });
 
 // ── Discovery-first ordering ─────────────────────────────────────────────────

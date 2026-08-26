@@ -412,6 +412,22 @@ function pickAdversarialGateStatus({
     );
   }
 
+  // Additive Argus jobs also hold routable PRs. A human PR can have a clean
+  // ordinary review while Argus is still answering a dependency-surface
+  // question; that is pending, not approval. `missing` remains inert because
+  // the gate runs for every PR, including PRs Argus was never asked to review.
+  if (
+    argusVerdict
+    && argusVerdict.satisfiesGate !== true
+    && argusVerdict.state !== ARGUS_VERDICT_STATES.MISSING
+  ) {
+    return decide(
+      'pending',
+      argusVerdict.summary,
+      ARGUS_GATE_REASONS[argusVerdict.state] || 'argus-security-review-pending'
+    );
+  }
+
   if (!reviewRow) {
     return decide('pending', 'Adversarial review has not posted yet.', 'review-not-posted');
   }

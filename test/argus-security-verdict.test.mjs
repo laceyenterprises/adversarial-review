@@ -186,6 +186,7 @@ test('a completed job with no result document is not an approval', () => withRoo
 
   const verdict = resolve(root);
   assert.equal(verdict.state, ARGUS_VERDICT_STATES.MALFORMED);
+  assert.equal(verdict.blocks, true);
   assert.equal(verdict.satisfiesGate, false);
 }));
 
@@ -195,6 +196,7 @@ test('an unrecognised verdict string is not an approval', () => withRoot((root) 
 
   const verdict = resolve(root);
   assert.equal(verdict.state, ARGUS_VERDICT_STATES.MALFORMED);
+  assert.equal(verdict.blocks, true);
   assert.equal(verdict.satisfiesGate, false);
 }));
 

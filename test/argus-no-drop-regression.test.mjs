@@ -388,6 +388,67 @@ test('a high finding blocks a routable PR whose own review came back clean', () 
   assert.equal(decision.reason, 'argus-security-blocked');
 }));
 
+test('a queued additive Argus job holds a human PR whose own review came back clean', () => withRoot((root) => {
+  // The additive case must hold before Argus reaches a finding. A human review
+  // can approve the diff while Argus is still reading the dependency surface;
+  // that in-flight security question is not a clean gate.
+  const repo = 'laceyenterprises/adversarial-review';
+  const headSha = 'd'.repeat(40);
+  enqueueArgusSecurityReview({
+    rootDir: root,
+    repo,
+    prNumber: 1235,
+    headSha,
+    reasons: [{ trigger: 'dependency-manifest' }],
+  });
+
+  const verdict = resolveArgusSecurityVerdict({ rootDir: root, repo, prNumber: 1235, headSha });
+  const decision = pickAdversarialGateStatus({
+    reviewRow: {
+      review_status: 'reviewed',
+      reviewer: 'claude-code',
+      reviewer_head_sha: headSha,
+      review_verdict: 'Comment only',
+    },
+    headSha,
+    argusVerdict: verdict,
+  });
+
+  assert.equal(verdict.state, 'queued');
+  assert.equal(decision.state, 'pending');
+  assert.equal(decision.reason, 'argus-security-review-queued');
+}));
+
+test('a malformed additive Argus job fails closed instead of hanging or falling through', () => {
+  const headSha = 'e'.repeat(40);
+  const verdict = resolveArgusSecurityVerdict({
+    rootDir: '/unused',
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 1236,
+    headSha,
+    findJob: () => ({
+      bucket: 'completed',
+      jobPath: '/unused/job.json',
+      job: { result: null },
+    }),
+  });
+  const decision = pickAdversarialGateStatus({
+    reviewRow: {
+      review_status: 'reviewed',
+      reviewer: 'claude-code',
+      reviewer_head_sha: headSha,
+      review_verdict: 'Comment only',
+    },
+    headSha,
+    argusVerdict: verdict,
+  });
+
+  assert.equal(verdict.state, 'malformed');
+  assert.equal(verdict.blocks, true);
+  assert.equal(decision.state, 'failure');
+  assert.equal(decision.reason, 'argus-security-review-malformed');
+});
+
 test('a PR Argus never reviewed is unaffected by the verdict wiring', () => withRoot((root) => {
   // The regression that would matter most in production: the gate runs for
   // every PR, and the overwhelming majority fired no security trigger.

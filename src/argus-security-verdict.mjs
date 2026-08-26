@@ -114,7 +114,8 @@ export function argusVerdictSatisfiesGate(state) {
 export function argusVerdictBlocksGate(state) {
   return state === ARGUS_VERDICT_STATES.BLOCKED
     || state === ARGUS_VERDICT_STATES.STALLED
-    || state === ARGUS_VERDICT_STATES.FAILED;
+    || state === ARGUS_VERDICT_STATES.FAILED
+    || state === ARGUS_VERDICT_STATES.MALFORMED;
 }
 
 function normalizeTimestampMs(value) {

@@ -104,8 +104,29 @@ test('pickAdversarialGateStatus reports an Argus-routed PR as pending, never suc
   // none -- the PR is simply not this lane's to review. And not `success`, which
   // would publish "the adversarial gate is satisfied" for a tree no reviewer has
   // read. An unanswered security question is not an approval.
+  //
+  // ASR-06 refined the REASON without touching that invariant. With no verdict
+  // resolved for the head, the honest reason is `missing`, not `queued`: ASR-04
+  // only writes this row when a job for that head is in the queue, so a routed
+  // row with no job means the head has since advanced. Reporting "queued" there
+  // would claim work is in flight for a tree nothing is reviewing.
   const decision = pickAdversarialGateStatus({
     reviewRow: { review_status: 'argus-security-queued', reviewer: 'argus-security' },
+  });
+
+  assert.equal(decision.state, 'pending');
+  assert.equal(decision.reason, 'argus-security-review-missing');
+});
+
+test('pickAdversarialGateStatus reports a genuinely queued Argus job as queued', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: { review_status: 'argus-security-queued', reviewer: 'argus-security' },
+    argusVerdict: {
+      state: 'queued',
+      blocks: false,
+      satisfiesGate: false,
+      summary: 'Argus security review is queued for this head.',
+    },
   });
 
   assert.equal(decision.state, 'pending');

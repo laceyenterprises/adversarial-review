@@ -68,6 +68,21 @@ test('an unroutable bot-authored PR does not count as awaiting first pass', () =
   );
 });
 
+test('an Argus-routed PR does not count as awaiting first pass', () => {
+  // ASR-04. `argus-security-queued` is NOT terminal -- the row stays live so a
+  // new head re-enqueues -- but it is not waiting on the ADVERSARIAL lane, which
+  // is the only thing this pager measures. A stuck security review surfaces on
+  // the Argus queue depth and `oldestPendingAgeMs`, not here; firing this pager
+  // for it would report the wrong outage on the wrong dashboard.
+  const db = freshDb();
+  addPr(db, { pr: 1, status: 'argus-security-queued' });
+  assert.equal(
+    countOpenPrsAwaitingFirstPassReview(db),
+    0,
+    'a PR Argus owns is not awaiting an adversarial first pass',
+  );
+});
+
 test('a genuinely pending PR still counts', () => {
   // The pager must keep working: this is the regression that would matter most.
   const db = freshDb();
@@ -87,7 +102,8 @@ test('a NULL review_status still counts', () => {
 test('mixed set counts only the real ones', () => {
   const db = freshDb();
   addPr(db, { pr: 1, status: 'malformed' });   // refused
-  addPr(db, { pr: 2, status: 'unroutable-bot-author' }); // refused
+  addPr(db, { pr: 2, status: 'unroutable-bot-author' }); // refused (legacy)
+  addPr(db, { pr: 7, status: 'argus-security-queued' }); // routed to Argus
   addPr(db, { pr: 3, status: 'pending' });     // awaiting
   addPr(db, { pr: 4, status: null });          // awaiting
   addPr(db, { pr: 5, status: 'pending', commentId: 'IC_1' }); // already reviewed

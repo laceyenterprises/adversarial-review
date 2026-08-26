@@ -848,6 +848,33 @@ test("requestReviewRereview returns unroutable-bot-terminal for unroutable bot r
   assert.equal(result.reason, 'unroutable-bot-terminal');
 });
 
+test("requestReviewRereview returns argus-security-queued for Argus-routed rows", () => {
+  // ASR-04. A re-review request asks for the ADVERSARIAL reviewer to run again,
+  // and this row is exactly the row no adversarial reviewer can be resolved for:
+  // the title carries no worker prefix and never will. The refusal is unchanged;
+  // only the reason is, so an operator can tell "Argus owns this" from "this was
+  // dropped". Re-running the SECURITY review is a different verb -- a new head
+  // re-enqueues it automatically.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: 'argus-security-queued',
+    reviewer: 'argus-security',
+    postedAt: null,
+  });
+
+  const result = requestReviewRereview({
+    rootDir,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 10,
+    requestedAt: '2026-04-24T12:10:00.000Z',
+    reason: 'should be refused',
+  });
+
+  assert.equal(result.triggered, false);
+  assert.equal(result.status, 'blocked');
+  assert.equal(result.reason, 'argus-security-queued');
+});
+
 test("requestReviewRereview returns pr-not-open for closed PRs", () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   insertReviewRow(rootDir, {

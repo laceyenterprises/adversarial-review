@@ -137,6 +137,64 @@ export const MARK_MERGED_PENDING_REVIEW_SKIPPED_SQL = `UPDATE reviewed_prs
       AND pr_state = 'merged'
       AND review_status IN ('pending', 'pending-upstream', 'reviewing')`;
 
+// ASR-04 — the disposition that replaces the terminal `unroutable-bot-author`
+// write, plus the backfill that recovers the rows it already produced.
+//
+// The SQL lives here rather than inline in review-state-db.mjs so the tests can
+// import the EXACT string production runs. A test that re-types the query proves
+// only that the test's copy works; the pipeline has already paid for that lesson
+// once, on the merged-PR claim CAS.
+
+// Deliberately NOT terminal, and each field says so. `failed_at` is cleared
+// because nothing failed. `review_attempts` is left alone because no adversarial
+// attempt was made, and burning the retry budget on a PR the lane never
+// dispatched would be double-counting. `failure_message` carries the routing
+// note, mirroring MARK_MERGED_PENDING_REVIEW_SKIPPED_SQL's use of the same
+// column for a non-failure explanation — it is the only operator-visible
+// free-text field on the row, and leaving it empty would leave "why is this not
+// being reviewed?" unanswered.
+export const MARK_ARGUS_SECURITY_QUEUED_SQL = `UPDATE reviewed_prs
+      SET reviewer = 'argus-security',
+          review_status = 'argus-security-queued',
+          failed_at = NULL,
+          failure_message = ?,
+          last_attempted_at = ?
+    WHERE repo = ?
+      AND pr_number = ?`;
+
+// The memo of the head whose security surface has already been classified. A
+// cache, never an authority: a new head leaves it stale and re-classifies, so
+// losing it costs GitHub calls and can never cost a review.
+export const RECORD_ARGUS_CLASSIFIED_HEAD_SQL =
+  'UPDATE reviewed_prs SET argus_classified_head_sha = ? WHERE repo = ? AND pr_number = ?';
+
+// Scoped to OPEN PRs on purpose. A merged or closed row carrying the old status
+// is history, not a stranding, and rewriting it would churn state no gate reads
+// on the exact class of already-terminal PR this pipeline has been burned by
+// acting on before.
+export const SELECT_OPEN_UNROUTABLE_BOT_ROWS_SQL = `SELECT repo, pr_number, revision_ref, reviewed_at, failure_message
+     FROM reviewed_prs
+    WHERE pr_state = 'open'
+      AND review_status = 'unroutable-bot-author'
+    ORDER BY repo ASC, pr_number ASC`;
+
+// Guarded on the old status so a concurrent watcher tick that already recovered
+// the row wins instead of being overwritten, and so a re-run is a no-op rather
+// than a second rewrite. `argus_classified_head_sha` is CLEARED, not set: the
+// backfill deliberately does not fabricate a queue entry for a head it never
+// read, so it leaves the row in the exact state the live route treats as
+// "classify and enqueue this on the next tick".
+export const BACKFILL_UNROUTABLE_BOT_TO_ARGUS_QUEUED_SQL = `UPDATE reviewed_prs
+      SET reviewer = 'argus-security',
+          review_status = 'argus-security-queued',
+          failed_at = NULL,
+          failure_message = ?,
+          argus_classified_head_sha = NULL
+    WHERE repo = ?
+      AND pr_number = ?
+      AND pr_state = 'open'
+      AND review_status = 'unroutable-bot-author'`;
+
 export function prepareMarkAttemptStarted(db) {
   return db.prepare(MARK_ATTEMPT_STARTED_SQL);
 }

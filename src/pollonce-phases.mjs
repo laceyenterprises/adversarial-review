@@ -40,6 +40,12 @@ import {
 } from './adapters/subject/github-pr/routing.mjs';
 import { projectAdversarialGateStatus } from './adversarial-gate-status.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
+import {
+  ARGUS_SECURITY_QUEUED_STATUS,
+  LEGACY_UNROUTABLE_BOT_STATUS,
+  isArgusSecurityRouteEnabled,
+  routeSecuritySurfaceToArgus,
+} from './argus-security-route.mjs';
 import { isUnroutableBotAuthor } from './bot-author.mjs';
 import { loadConfigCached } from './config-loader.mjs';
 import { isPipelineEnabled } from './domain-pipeline.mjs';
@@ -112,8 +118,10 @@ import {
   stmtMarkAttemptStarted,
   stmtMarkClosed,
   stmtMarkInfraAutoRecoveryAttemptStarted,
+  stmtMarkArgusSecurityQueued,
   stmtMarkMalformed,
   stmtMarkUnroutableBot,
+  stmtRecordArgusClassifiedHead,
   stmtMarkMerged,
   stmtMarkMergedPendingReviewSkipped,
   stmtMarkReviewCycleCapPaused,
@@ -192,9 +200,8 @@ import { reserveReviewerMemoryAdmission } from './watcher-reviewer-pool.mjs';
 // action can clear.
 //
 // This records them under a distinct status so they stop asserting a defect that
-// does not exist. It deliberately does NOT decide what SHOULD review a
-// dependency PR — supply-chain drift is Argus's remit, and routing them there is
-// a separate policy change.
+// does not exist. It deliberately did NOT decide what SHOULD review a dependency
+// PR — that is ASR-04, below.
 // The predicate itself moved to the pure leaf `bot-author.mjs` (ASR-02) so the
 // security-surface classifier can share this exact login set without importing
 // this module, which opens `reviews.db` at module scope. Re-exported here
@@ -202,24 +209,94 @@ import { reserveReviewerMemoryAdmission } from './watcher-reviewer-pool.mjs';
 // and callers/tests already import it from here.
 export { isUnroutableBotAuthor };
 
-export function markMalformedTitleTerminalState({
+/**
+ * ASR-04 — record that Argus owns this PR.
+ *
+ * Shared by the two writers (first classification in the unroutable branch, and
+ * recovery of a legacy row in the dispatch loop) so the row shape cannot drift
+ * between them.
+ */
+export function markArgusSecurityQueuedRow({
+  repoPath,
+  prNumber,
+  reasonSummary = '',
+  at = new Date().toISOString(),
+  statement = stmtMarkArgusSecurityQueued,
+} = {}) {
+  statement.run(
+    `Routed to the Argus security queue (${reasonSummary || 'no trigger'}).`,
+    at,
+    repoPath,
+    prNumber
+  );
+  return ARGUS_SECURITY_QUEUED_STATUS;
+}
+
+// ASR-04 — the disposition for a PR whose title carries no worker prefix.
+//
+// Renamed from `markMalformedTitleTerminalState`, because it no longer always
+// writes terminal state and a name that says it does would hide the exact
+// property this ticket exists to establish: a bot PR is now ROUTED, and routed
+// rows stay live.
+//
+// Three outcomes, and the boundary between them is the whole ticket:
+//
+//   malformed              A HUMAN PR with a bad title prefix. Unchanged, and
+//                          deliberately so — that finding is accurate and
+//                          actionable ("fix your title"), and blurring it into
+//                          the bot branch would destroy the distinction the bot
+//                          branch was created to make.
+//   argus-security-queued  A bot PR whose security review is ON THE QUEUE. Not
+//                          terminal.
+//   deferred               A bot PR the enqueue could not confirm this tick (no
+//                          head yet, or the queue write failed). Writes NOTHING.
+//                          Writing terminal here is the bug: the row keeps its
+//                          non-terminal status and the next tick retries. A PR
+//                          the route could not process is a PR the route has not
+//                          finished with, not a PR it has refused.
+//
+// The `unroutableBot && !argusRouteEnabled` case is the kill switch, and it is
+// the ONLY remaining writer of the terminal bot status. It logs every time.
+export function markUnroutableTitleDisposition({
   prTitle,
   failureAt,
   repoPath,
   prNumber,
   unroutableBot = false,
+  argusRouteEnabled = true,
+  argusSecurityQueued = false,
+  argusReasonSummary = '',
   markMalformedStatement = stmtMarkMalformed,
   markUnroutableBotStatement = stmtMarkUnroutableBot,
+  markArgusSecurityQueuedStatement = stmtMarkArgusSecurityQueued,
+  logger = console,
 } = {}) {
   if (unroutableBot) {
-    markUnroutableBotStatement.run(
-      `Unroutable bot-authored PR (no worker prefix is possible): ${prTitle}`,
-      failureAt,
-      failureAt,
-      repoPath,
-      prNumber
-    );
-    return 'unroutable-bot-author';
+    if (argusSecurityQueued) {
+      return markArgusSecurityQueuedRow({
+        repoPath,
+        prNumber,
+        reasonSummary: argusReasonSummary,
+        at: failureAt,
+        statement: markArgusSecurityQueuedStatement,
+      });
+    }
+    if (!argusRouteEnabled) {
+      logger.warn?.(
+        `[watcher] ARGUS_ROUTE_DISABLED ${repoPath}#${prNumber}: ` +
+          'ADVERSARIAL_ARGUS_SECURITY_ROUTE is off, so this bot-authored PR is going ' +
+          'terminal `unroutable-bot-author` and no security review will be queued for it'
+      );
+      markUnroutableBotStatement.run(
+        `Unroutable bot-authored PR (no worker prefix is possible): ${prTitle}`,
+        failureAt,
+        failureAt,
+        repoPath,
+        prNumber
+      );
+      return LEGACY_UNROUTABLE_BOT_STATUS;
+    }
+    return 'deferred';
   }
   markMalformedStatement.run(
     `Malformed PR title: ${prTitle}`,
@@ -457,10 +534,103 @@ export async function processReviewSubject(entry, ctx) {
         return;
       }
 
+      // ASR-04 — classify this head's security surface and enqueue an Argus
+      // review if any trigger fires. Never throws, never changes control flow,
+      // never writes a terminal row.
+      //
+      // The drain and terminal guards live here rather than at the call sites so
+      // both callers get them: a draining watcher starts no new work, and a
+      // merged/closed PR is not work at all (the pipeline has been burned before
+      // by daemons acting on already-terminal PRs).
+      const argusRouteEnabled = isArgusSecurityRouteEnabled(process.env);
+      async function routeSecuritySurfaceSafe(reviewRow) {
+        if (!argusRouteEnabled) return null;
+        if (subject.terminal || watcherDrain.active) return null;
+        if (reviewRow?.pr_state === 'merged' || reviewRow?.pr_state === 'closed') return null;
+        try {
+          const routed = await routeSecuritySurfaceToArgus({
+            rootDir: ROOT,
+            repoPath,
+            prNumber,
+            headSha: subject.headSha || subject.ref?.revisionRef || null,
+            authorRef: subject.authorRef || null,
+            lastClassifiedHeadSha: reviewRow?.argus_classified_head_sha || null,
+            // A `null` return means the fetch FAILED; the route keeps that
+            // distinct from an empty diff. The adapter's own warning is
+            // suppressed because its text names the fast-merge path, which is
+            // not why we are reading the file list here.
+            fetchChangedFiles: () => fetchFastMergeChangedFiles(octokit, {
+              owner,
+              repo,
+              prNumber,
+              withApiTelemetry,
+              logger: { warn: () => {} },
+            }),
+          });
+          // The memo only sticks if the row exists yet. When it does not (first
+          // tick of a brand-new PR), this is a no-op and the next tick
+          // re-classifies — one extra file-list read, never a skipped review.
+          if (routed.recordClassifiedHead && routed.headSha) {
+            stmtRecordArgusClassifiedHead.run(routed.headSha, repoPath, prNumber);
+          }
+          return routed;
+        } catch (err) {
+          // Belt and braces on top of the route's own internal handling: an
+          // additive security hop must not be able to abort the review tick.
+          console.error(
+            `[watcher] argus security route threw for ${repoPath}#${prNumber}: ${err?.message || err}`
+          );
+          return null;
+        }
+      }
+
+      // ASR-04 — a PR the Argus security route owns.
+      //
+      // This is NOT the terminal early-return below it. The row is live, and its
+      // per-tick job is to keep the queue bound to the CURRENT head: a security
+      // review is a statement about the exact tree it read, so a new head has to
+      // re-enqueue. The dispatch loop still has nothing to do — no worker prefix
+      // still means no adversarial reviewer — so it projects the gate and returns
+      // exactly as the terminal statuses do.
+      //
+      // The legacy status is folded into the same branch on purpose: that fold IS
+      // the recovery. #909 and #910 are rows stuck in it, and self-healing them
+      // here means the fix reaches every stranding on the next tick after deploy —
+      // including one a reopened PR drags back into the open set months from now,
+      // which a one-shot backfill would miss. `npm run argus:backfill` is the
+      // immediate operator lever; this branch is the durable guarantee.
+      if (
+        existing?.review_status === ARGUS_SECURITY_QUEUED_STATUS ||
+        (argusRouteEnabled && existing?.review_status === LEGACY_UNROUTABLE_BOT_STATUS)
+      ) {
+        const routed = await routeSecuritySurfaceSafe(existing);
+        // Re-stamp the row when it is still carrying the legacy status, and when
+        // a genuinely new job was created so `last_attempted_at` and the note
+        // describe the head actually queued. A duplicate on an unchanged head
+        // writes nothing.
+        if (
+          routed?.queued
+          && (existing.review_status !== ARGUS_SECURITY_QUEUED_STATUS || routed.outcome === 'enqueued')
+        ) {
+          markArgusSecurityQueuedRow({
+            repoPath,
+            prNumber,
+            reasonSummary: routed.summary,
+          });
+          existing = stmtGetReviewRow.get(repoPath, prNumber);
+        }
+        await projectGateStatusSafe(existing);
+        return;
+      }
+
       // 'failed-orphan' is only eligible through the guarded auto-reclaim pass
       // at the top of the tick (expired lease + no live reviewer process) or
       // the explicit operator reset path. The generic PR dispatch loop must
       // still skip any failed-orphan row that reaches this point.
+      //
+      // `unroutable-bot-author` stays listed for the kill-switch case only: with
+      // ADVERSARIAL_ARGUS_SECURITY_ROUTE off, the branch above declines the row
+      // and it must keep the pre-ASR-04 terminal behaviour it was written under.
       if (
         existing?.review_status === 'malformed' ||
         existing?.review_status === 'unroutable-bot-author' ||
@@ -473,6 +643,22 @@ export async function processReviewSubject(entry, ctx) {
       if (subject.terminal) {
         return;
       }
+
+      // ASR-04 — ADDITIVE, and this is the half of the ticket that is easiest to
+      // lose. A HUMAN PR that bumps a dependency carries the same supply-chain
+      // risk as a bot one, so the manifest trigger routes on the FILE, not the
+      // author: this runs for every open, routable PR too.
+      //
+      // The result is deliberately unused except by the unroutable branch far
+      // below. Argus reviews the dependency surface; it does not divert or
+      // replace the code review, and a manifest-touching human PR gets BOTH.
+      //
+      // Placed here — before the label-control and posted-review hops, each of
+      // which can return early — so no PR loses its security classification to a
+      // branch taken for an unrelated reason. Cost is one file-list read per new
+      // head, memoized in `argus_classified_head_sha`; a steady-state tick spends
+      // no GitHub calls here at all.
+      const argusOutcome = await routeSecuritySurfaceSafe(existing);
 
       // PR-side `retrigger-remediation` label (post-2026-05-06):
       // mobile-friendly operator surface that mirrors
@@ -804,26 +990,54 @@ export async function processReviewSubject(entry, ctx) {
           );
         }
 
-        await signalMalformedTitleFailure(octokit, {
-          repoPath,
-          owner,
-          repo,
-          prNumber,
-          prTitle,
-          revisionRef: subject.ref.revisionRef,
-          rootDir: ROOT,
-        });
-
-        // Malformed titles are terminal in watcher state to avoid ambiguous retitle retries.
-        const failureAt = new Date().toISOString();
         const unroutableBot = isUnroutableBotAuthor(subject.authorRef);
-        markMalformedTitleTerminalState({
+
+        // ASR-04: the "fix your title" notice is for an author who CAN fix it.
+        // Dependabot owns its own titles and retitling would break its update
+        // flow, so posting the notice — and raising the MALFORMED_PR_TITLE
+        // signal behind it — asserts a defect that does not exist and pages on
+        // it. That was already the category error MAL-01 named; now that the bot
+        // PR has somewhere real to go, the false alarm goes with it.
+        //
+        // Kill-switch case excepted: with the route off, a bot PR really is
+        // stuck, and suppressing the only signal that says so would make the
+        // rollback lever silent.
+        if (!unroutableBot || !argusRouteEnabled) {
+          await signalMalformedTitleFailure(octokit, {
+            repoPath,
+            owner,
+            repo,
+            prNumber,
+            prTitle,
+            revisionRef: subject.ref.revisionRef,
+            rootDir: ROOT,
+          });
+        }
+
+        // Malformed titles are terminal in watcher state to avoid ambiguous
+        // retitle retries. A bot PR is NOT: `argusOutcome.queued` means a
+        // security review for this exact head is on the queue, so the row is
+        // recorded as routed, not as finished. When the enqueue could not be
+        // confirmed this tick the disposition writes nothing at all and the row
+        // stays live for the next one — never terminal, which is the bug.
+        const failureAt = new Date().toISOString();
+        const disposition = markUnroutableTitleDisposition({
           prTitle,
           failureAt,
           repoPath,
           prNumber,
           unroutableBot,
+          argusRouteEnabled,
+          argusSecurityQueued: argusOutcome?.queued === true,
+          argusReasonSummary: argusOutcome?.summary || '',
         });
+        if (disposition === 'deferred') {
+          console.warn(
+            `[watcher] argus security route has not confirmed a queued review for ` +
+              `${repoPath}#${prNumber} (${argusOutcome?.outcome || 'no-result'}); ` +
+              'leaving the row non-terminal and retrying on the next tick'
+          );
+        }
         // Store normalized label names in reviewed_prs.labels_json. Readers
         // still accept the older GitHub label-object shape for historical rows.
         stmtUpdateReviewLabels.run(JSON.stringify(Array.isArray(subject.labels) ? subject.labels : []), repoPath, prNumber);

@@ -98,6 +98,33 @@ test('pickAdversarialGateStatus returns success for a settled non-blocking revie
   assert.equal(decision.reason, 'review-settled');
 });
 
+// ASR-04 — the gate vocabulary for a PR Argus owns.
+test('pickAdversarialGateStatus reports an Argus-routed PR as pending, never success', () => {
+  // `pending`, not `failure`: the old red check asserted a defect, and there is
+  // none -- the PR is simply not this lane's to review. And not `success`, which
+  // would publish "the adversarial gate is satisfied" for a tree no reviewer has
+  // read. An unanswered security question is not an approval.
+  const decision = pickAdversarialGateStatus({
+    reviewRow: { review_status: 'argus-security-queued', reviewer: 'argus-security' },
+  });
+
+  assert.equal(decision.state, 'pending');
+  assert.equal(decision.reason, 'argus-security-review-queued');
+});
+
+test('pickAdversarialGateStatus still explains the legacy unroutable-bot status', () => {
+  // ASR-04 stopped writing it, but rows on disk still carry it -- pre-backfill
+  // strandings, reopened PRs, and rows written while the kill switch was off.
+  // Deleting the branch would drop them through to the generic unknown-verdict
+  // failure at the bottom, which says something false about why.
+  const decision = pickAdversarialGateStatus({
+    reviewRow: { review_status: 'unroutable-bot-author', reviewer: 'unroutable-bot-author' },
+  });
+
+  assert.equal(decision.state, 'failure');
+  assert.equal(decision.reason, 'review-unroutable-bot-author');
+});
+
 test('pickAdversarialGateStatus fails closed for unparseable verdicts', () => {
   const decision = pickAdversarialGateStatus({
     reviewRow: makeReviewRow(),

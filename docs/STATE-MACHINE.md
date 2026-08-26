@@ -80,16 +80,24 @@ data/reviews.db
 | `failed` | review attempt failed; eligible rows are auto-retried by the normal dispatch path on a later poll |
 | `failed-orphan` | watcher restarted while a `reviewing` row was in flight and safe automatic recovery could not be proven — sticky, requires operator verification + `npm run retrigger-review` |
 | `malformed` | title guardrail failure; terminal by design |
-| `unroutable-bot-author` | bot-authored PR lacks a worker prefix by construction; terminal by design and excluded from malformed-title ticketing |
+| `argus-security-queued` | bot-authored PR routed to the Argus security queue (ASR-04). **Not terminal** — the dispatch loop keeps visiting the row so a new head re-enqueues, and the adversarial gate reports `pending` (never `success`) until Argus answers. Excluded from malformed-title ticketing and from the adversarial stall count; a stuck security review surfaces on the Argus queue depth instead |
+| `unroutable-bot-author` | **Legacy (pre-ASR-04).** Bot-authored PR recorded terminal because nothing could route it — that terminal write is what stranded `#909`/`#910` for 14 hours. No longer written unless `ADVERSARIAL_ARGUS_SECURITY_ROUTE` is off; open rows still carrying it self-heal to `argus-security-queued` on the next watcher tick, and `npm run argus:backfill` recovers them immediately |
 
 ### Transitions
 
 ```text
 new PR
   │
-  ├─ malformed title
-  │    ├─ human/fleet-worker author ── malformed
-  │    └─ known bot author ─────────── unroutable-bot-author
+  ├─ no worker prefix in the title
+  │    ├─ human/fleet-worker author ── malformed          (terminal; the author can fix the title)
+  │    └─ known bot author ─────────── argus-security-queued
+  │         │                            (ASR-04: enqueued to data/argus-security-jobs/pending
+  │         │                             per (repo, prNumber, headSha); a NEW head re-enqueues)
+  │         └─ route disabled ───────── unroutable-bot-author   (kill switch only; logs ARGUS_ROUTE_DISABLED)
+  │
+  │  Any open PR, routable or not, is ALSO classified by the ASR-02 security-surface
+  │  classifier once per head. A manifest- or sensitive-path-triggered HUMAN PR is
+  │  enqueued to Argus additively: its normal adversarial review still runs.
   │
   └─ valid tagged PR
        └─ pending

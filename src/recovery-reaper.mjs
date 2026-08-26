@@ -1,5 +1,5 @@
 /**
- * Startup / periodic stale-state reaper — offline-period & quota-outage
+ * Startup + periodic stale-state reaper — offline-period & quota-outage
  * resilience for the adversarial-review pipeline.
  *
  * Two recovery gaps surface after a host outage (macOS upgrade + os-restart,
@@ -22,6 +22,23 @@
  * in-flight review or closer. The decision functions are pure so the gating
  * is unit-testable without a DB or filesystem.
  *
+ * CLR-02 closed three compounding gaps that made this reclaimer a no-op in
+ * practice (SEV `closer-lease-reaper-runs-only-at-watcher-startup`, 2026-08-26;
+ * 11 of 11 non-terminal leases stale, every holder pid dead, 0 reclaimed):
+ *
+ *   a. The sweep only ever ran at watcher startup, so between restarts nothing
+ *      reclaimed an orphaned lease. `createStaleStateReaperTicker` now drives
+ *      the same sweep from the poll loop on a low-frequency tick.
+ *
+ *   b. The 6h floor was the only tier, so a lease whose holder was *provably*
+ *      dead still waited six hours. `holderHost` + `isProcessAlive` now give a
+ *      dead-holder-on-this-host tier at the same 30m the health surface pages
+ *      at. The 6h floor is unchanged for every lease we cannot prove dead.
+ *
+ *   c. Terminal leases were never retired, so a 250-entry/50-read bounded scan
+ *      was spent on 50-day-old finished records instead of live ones.
+ *      `selectPrunableCloserLeases` retires them behind a conservative age gate.
+ *
  * @module recovery-reaper
  */
 
@@ -37,6 +54,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
+import { hostname } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 
 import {
@@ -52,6 +70,22 @@ const HOUR_MS = 60 * 60 * 1000;
 // recovers same-day after an outage.
 export const DEFAULT_STALE_RUNNING_REVIEWER_PASS_MS = 6 * HOUR_MS;
 export const DEFAULT_STALE_CLOSER_LEASE_MS = 6 * HOUR_MS;
+// Dead-holder tier. Deliberately equal to the health surface's
+// `amaCloserLeaseMaxAgeMs` (30m) and to `AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS`
+// in ama/dispatch-closer.mjs, so detection and remediation stop disagreeing by
+// 12x. It applies ONLY when the lease names this host in `holderHost` AND the
+// recorded pid is dead here — strictly more evidence than the dispatch path
+// already acts on at the same age, and never a substitute for the 6h floor.
+export const DEFAULT_DEAD_HOLDER_CLOSER_LEASE_MS = 30 * 60 * 1000;
+// Terminal-lease retirement. 7d is the smallest age that restores full-coverage
+// scanning on the observed host directory: 575 leases, 560 of them terminal with
+// a resolved outcome, oldest 50.4d. Pruning at 7d retires 452 and leaves ~123 —
+// back under DEFAULT_CLOSER_LEASE_ENTRY_SCAN_LIMIT, so one pass sees the whole
+// directory again. 14d would leave 279 and keep the scan a sampling problem.
+export const DEFAULT_TERMINAL_CLOSER_LEASE_PRUNE_MS = 7 * 24 * HOUR_MS;
+// Poll-loop cadence for the periodic sweep. Long relative to a poll interval:
+// the sweep is recovery, not a hot path, and its own thresholds are 30m+.
+export const DEFAULT_STALE_STATE_REAPER_INTERVAL_MS = 15 * 60 * 1000;
 export const DEFAULT_CLOSER_LEASE_ENTRY_SCAN_LIMIT = 250;
 export const DEFAULT_CLOSER_LEASE_READ_LIMIT = 50;
 
@@ -86,6 +120,44 @@ export function resolveStaleCloserLeaseMs(env = process.env) {
   return resolvePositiveMs(
     env.ADVERSARIAL_STALE_CLOSER_LEASE_MS,
     DEFAULT_STALE_CLOSER_LEASE_MS,
+  );
+}
+
+/**
+ * Threshold (ms) past which a non-terminal AMA closer lease whose holder is
+ * *provably dead on this host* is released, without waiting for the full
+ * `resolveStaleCloserLeaseMs` floor. Env alias:
+ * `ADVERSARIAL_DEAD_HOLDER_CLOSER_LEASE_MS`.
+ */
+export function resolveDeadHolderCloserLeaseMs(env = process.env) {
+  return resolvePositiveMs(
+    env.ADVERSARIAL_DEAD_HOLDER_CLOSER_LEASE_MS,
+    DEFAULT_DEAD_HOLDER_CLOSER_LEASE_MS,
+  );
+}
+
+/**
+ * Age (ms) past which a finished (`status='terminal'` with a resolved
+ * `terminalOutcome`) closer lease is deleted so the bounded scan is spent on
+ * live records. `0` / `off` disables pruning entirely — this is deletion of
+ * live-host state, so operators get an explicit kill switch. Env alias:
+ * `ADVERSARIAL_TERMINAL_CLOSER_LEASE_PRUNE_MS`.
+ */
+export function resolveTerminalCloserLeasePruneMs(env = process.env) {
+  const raw = env.ADVERSARIAL_TERMINAL_CLOSER_LEASE_PRUNE_MS;
+  const normalized = raw == null ? '' : String(raw).trim().toLowerCase();
+  if (normalized === '0' || normalized === 'off' || normalized === 'false') return 0;
+  return resolvePositiveMs(raw, DEFAULT_TERMINAL_CLOSER_LEASE_PRUNE_MS);
+}
+
+/**
+ * Minimum spacing (ms) between periodic stale-state sweeps driven from the
+ * watcher poll loop. Env alias: `ADVERSARIAL_STALE_STATE_REAPER_INTERVAL_MS`.
+ */
+export function resolveStaleStateReaperIntervalMs(env = process.env) {
+  return resolvePositiveMs(
+    env.ADVERSARIAL_STALE_STATE_REAPER_INTERVAL_MS,
+    DEFAULT_STALE_STATE_REAPER_INTERVAL_MS,
   );
 }
 
@@ -132,6 +204,33 @@ export function selectStaleRunningReviewerPasses(rows, { now, thresholdMs } = {}
 }
 
 /**
+ * Pure — is this lease's holder provably dead *on this host*?
+ *
+ * Three things must all hold, and any one of them being unknown answers `false`
+ * (keep the lease). This is the only reason the reaper is allowed to act before
+ * the multi-hour floor, so it fails closed on every ambiguity:
+ *
+ *   1. The lease names a host and it is this host. A pid read here says nothing
+ *      about a process on another host, and pid namespaces collide — which is
+ *      why leases written before CLR-02 (no `holderHost`) get the 6h floor.
+ *   2. `watcherPid` is a usable pid.
+ *   3. `isProcessAlive(pid)` returns exactly `false`. A throw, or any non-false
+ *      answer, is read as "still alive".
+ */
+function holderIsProvablyDeadHere(lease, { isProcessAlive, host }) {
+  if (typeof isProcessAlive !== 'function') return false;
+  const leaseHost = lease?.holderHost;
+  if (!leaseHost || String(leaseHost) !== String(host)) return false;
+  const pid = Number(lease?.watcherPid);
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    return isProcessAlive(pid) === false;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Pure — given closer-lease records, return the subset to release: not yet
  * `terminal`, `terminalOutcome` still null, and older than `thresholdMs`. A
  * lease still owned by the live watcher process (`watcherPid === livePid`) is
@@ -139,20 +238,36 @@ export function selectStaleRunningReviewerPasses(rows, { now, thresholdMs } = {}
  * concurrent non-atomic writer is given time to finish before recovery unlinks
  * the lease.
  *
+ * Two-tier ageing (CLR-02). `thresholdMs` is the floor for a lease whose holder
+ * we cannot prove dead — unknown host, unknown pid, or a pid that answers alive.
+ * When `deadHolderThresholdMs` is supplied AND the lease is provably dead here
+ * (see `holderIsProvablyDeadHere`), the shorter threshold applies instead. The
+ * floor is never bypassed on a guess; it is bypassed only on positive evidence
+ * that nothing is holding the lease.
+ *
  * @param {Array<object>} leases  each `{ ...lease, _path }`
- * @param {{ now:any, thresholdMs:number, livePid?:number }} opts
+ * @param {{ now:any, thresholdMs:number, livePid?:number,
+ *          deadHolderThresholdMs?:number, isProcessAlive?:function, host?:string }} opts
  * @returns {Array<object>}
  */
 export function selectReleasableCloserLeases(leases, {
   now,
   thresholdMs,
   livePid = null,
+  deadHolderThresholdMs = null,
+  isProcessAlive = null,
+  host = null,
 } = {}) {
   const nowMs = parseTimestampMs(now) ?? (now instanceof Date ? now.getTime() : Number(now));
   if (!Number.isFinite(nowMs) || !Number.isFinite(Number(thresholdMs))) return [];
+  const localHost = host ?? hostname();
+  const deadHolderMs = Number(deadHolderThresholdMs);
+  const deadHolderTierEnabled = Number.isFinite(deadHolderMs) && deadHolderMs > 0;
   return (Array.isArray(leases) ? leases : []).filter((lease) => {
     if (!lease) return false;
     if (lease._isCorrupt === true) {
+      // A file we could not parse carries no holder identity, so the dead-holder
+      // tier can never apply to it; the mtime floor stays its only gate.
       const mtimeMs = Number(lease.mtimeMs);
       return Number.isFinite(mtimeMs) && nowMs - mtimeMs >= Number(thresholdMs);
     }
@@ -161,7 +276,49 @@ export function selectReleasableCloserLeases(leases, {
     if (livePid != null && Number(lease.watcherPid) === Number(livePid)) return false;
     const stampMs = parseTimestampMs(lease.updatedAt) ?? parseTimestampMs(lease.acquiredAt);
     if (stampMs == null) return false;
-    return nowMs - stampMs >= Number(thresholdMs);
+    const ageMs = nowMs - stampMs;
+    if (ageMs >= Number(thresholdMs)) return true;
+    if (!deadHolderTierEnabled) return false;
+    if (!holderIsProvablyDeadHere(lease, { isProcessAlive, host: localHost })) return false;
+    return ageMs >= deadHolderMs;
+  });
+}
+
+/**
+ * Pure — given closer-lease records, return the subset to retire.
+ *
+ * A lease is duplicate-dispatch protection for one `(repo, pr, head)`. Once it
+ * is `terminal` with a resolved `terminalOutcome` that job is over and the file
+ * is pure cleanup debt — but the bounded scan still pays to read it, which is
+ * how a 574-file directory that is 98% finished records starved reclamation of
+ * the live ones.
+ *
+ * This deletes live-host state, so every gate fails closed:
+ *   - never a lease that is not `terminal` (the reaper must not race a closer);
+ *   - never a lease whose `terminalOutcome` is still null — `terminal` without
+ *     an outcome is an unfinished reconciliation, not finished work;
+ *   - never a corrupt record (we cannot know what it was);
+ *   - never a record we cannot age;
+ *   - and only past `pruneAfterMs`, which is days, not the reclaim thresholds.
+ *
+ * @param {Array<object>} leases  each `{ ...lease, _path }`
+ * @param {{ now:any, pruneAfterMs:number }} opts
+ * @returns {Array<object>}
+ */
+export function selectPrunableCloserLeases(leases, { now, pruneAfterMs } = {}) {
+  const nowMs = parseTimestampMs(now) ?? (now instanceof Date ? now.getTime() : Number(now));
+  const pruneMs = Number(pruneAfterMs);
+  if (!Number.isFinite(nowMs) || !Number.isFinite(pruneMs) || pruneMs <= 0) return [];
+  return (Array.isArray(leases) ? leases : []).filter((lease) => {
+    if (!lease) return false;
+    if (lease._isCorrupt === true) return false;
+    if (String(lease.status || '') !== 'terminal') return false;
+    if (lease.terminalOutcome == null) return false;
+    const stampMs = parseTimestampMs(lease.completedAt)
+      ?? parseTimestampMs(lease.updatedAt)
+      ?? parseTimestampMs(lease.acquiredAt);
+    if (stampMs == null) return false;
+    return nowMs - stampMs >= pruneMs;
   });
 }
 
@@ -518,16 +675,24 @@ function resetTransientExhaustedCloserBudget(rootDir, lease, logger) {
 
 /**
  * FS driver — release stale/dead AMA closer leases so the closer can
- * re-dispatch the merge for that head, and reset any redispatch budget that a
- * transient outage exhausted.
+ * re-dispatch the merge for that head, reset any redispatch budget that a
+ * transient outage exhausted, and retire finished leases so the bounded scan
+ * keeps covering live ones.
  *
- * @returns {{ released: number, budgetsReset: number, leases: Array<object>, scannedEntries: number, readRecords: number }}
+ * Release and prune share one read budget by construction: both decide from the
+ * same already-read page, so bounding the directory costs no extra I/O.
+ *
+ * @returns {{ released: number, pruned: number, budgetsReset: number, leases: Array<object>, prunedLeases: Array<object>, scannedEntries: number, readRecords: number }}
  */
 export async function reapStaleCloserLeases({
   rootDir,
   now = new Date().toISOString(),
   thresholdMs = DEFAULT_STALE_CLOSER_LEASE_MS,
+  deadHolderThresholdMs = DEFAULT_DEAD_HOLDER_CLOSER_LEASE_MS,
+  pruneAfterMs = DEFAULT_TERMINAL_CLOSER_LEASE_PRUNE_MS,
   livePid = (typeof process !== 'undefined' ? process.pid : null),
+  isProcessAlive = null,
+  host = null,
   entryScanLimit = DEFAULT_CLOSER_LEASE_ENTRY_SCAN_LIMIT,
   readLimit = DEFAULT_CLOSER_LEASE_READ_LIMIT,
   readConcurrency = 8,
@@ -536,7 +701,12 @@ export async function reapStaleCloserLeases({
   statImpl = fsPromises.stat,
   logger = console,
 } = {}) {
-  if (!rootDir) return { released: 0, budgetsReset: 0, leases: [], scannedEntries: 0, readRecords: 0 };
+  if (!rootDir) {
+    return {
+      released: 0, pruned: 0, budgetsReset: 0, leases: [], prunedLeases: [],
+      scannedEntries: 0, readRecords: 0,
+    };
+  }
   const discovery = await readLeaseRecords(rootDir, {
     logger,
     entryScanLimit,
@@ -547,7 +717,7 @@ export async function reapStaleCloserLeases({
     statImpl,
   });
   const releasable = selectReleasableCloserLeases(discovery.records, {
-    now, thresholdMs, livePid,
+    now, thresholdMs, livePid, deadHolderThresholdMs, isProcessAlive, host,
   });
   let released = 0;
   let budgetsReset = 0;
@@ -579,6 +749,29 @@ export async function reapStaleCloserLeases({
       logger?.error?.(`[reaper] failed to release lease ${lease._path}: ${err?.message || err}`);
     }
   }
+  const prunable = selectPrunableCloserLeases(discovery.records, { now, pruneAfterMs });
+  let pruned = 0;
+  const prunedLeases = [];
+  for (const lease of prunable) {
+    try {
+      rmSync(lease._path, { force: true });
+      pruned += 1;
+      prunedLeases.push(lease);
+    } catch (err) {
+      logger?.error?.(`[reaper] failed to prune terminal lease ${lease._path}: ${err?.message || err}`);
+    }
+  }
+  if (pruned > 0) {
+    // One aggregate line, not one per file: a first sweep of a long-unpruned
+    // directory retires tens of leases per pass and per-file logging would bury
+    // the release warnings that an operator actually needs to see.
+    const sample = prunedLeases[prunedLeases.length - 1];
+    logger?.log?.(
+      `[reaper] pruned ${pruned} finished closer lease(s) older than `
+      + `${Math.floor(Number(pruneAfterMs) / HOUR_MS)}h `
+      + `(e.g. repo=${sample?.repo} pr=${sample?.prNumber} outcome=${sample?.terminalOutcome})`,
+    );
+  }
   const cursorPersisted = discovery.cursorCanAdvance
     ? persistCloserLeaseCursor(rootDir, {
       lastEntryName: discovery.lastEntryName,
@@ -587,8 +780,10 @@ export async function reapStaleCloserLeases({
     : false;
   return {
     released,
+    pruned,
     budgetsReset,
     leases: releasable,
+    prunedLeases,
     scannedEntries: discovery.scannedEntries,
     skippedEntries: discovery.skippedEntries,
     directoryReads: discovery.directoryReads,
@@ -599,22 +794,32 @@ export async function reapStaleCloserLeases({
 }
 
 /**
- * Orchestrator — run both reapers once. Called from the watcher startup
- * reconciliation block (and safe to call on a periodic tick). Never throws:
- * a reaper failure must not prevent the watcher from starting to poll.
+ * Orchestrator — run both reapers once. Never throws: a reaper failure must not
+ * prevent the watcher from starting to poll, nor stall a poll once it has.
  *
+ * `phase` only labels the summary line; startup and periodic sweeps are the
+ * same work against the same thresholds. Sharing one implementation is the
+ * point — a periodic tick that drifted from the startup path would recreate the
+ * exact class of bug CLR-02 fixes.
+ *
+ * @param {{ phase?: 'startup'|'periodic' }} args
  * @returns {{ reviewerPasses: object, closerLeases: object }}
  */
-export async function runStartupStaleStateReaper({
+export async function runStaleStateReaper({
   rootDir,
   db,
   env = process.env,
   now = new Date().toISOString(),
   logger = console,
+  isProcessAlive = null,
+  phase = 'periodic',
 } = {}) {
   const out = {
     reviewerPasses: { reaped: 0, passes: [] },
-    closerLeases: { released: 0, budgetsReset: 0, leases: [], scannedEntries: 0, readRecords: 0 },
+    closerLeases: {
+      released: 0, pruned: 0, budgetsReset: 0, leases: [], prunedLeases: [],
+      scannedEntries: 0, readRecords: 0,
+    },
   };
   try {
     out.reviewerPasses = reapStaleRunningReviewerPasses({
@@ -631,6 +836,9 @@ export async function runStartupStaleStateReaper({
       rootDir,
       now,
       thresholdMs: resolveStaleCloserLeaseMs(env),
+      deadHolderThresholdMs: resolveDeadHolderCloserLeaseMs(env),
+      pruneAfterMs: resolveTerminalCloserLeasePruneMs(env),
+      isProcessAlive,
       entryScanLimit: resolveCloserLeaseEntryScanLimit(env),
       readLimit: resolveCloserLeaseReadLimit(env),
       logger,
@@ -638,12 +846,92 @@ export async function runStartupStaleStateReaper({
   } catch (err) {
     logger?.error?.(`[reaper] closer-lease sweep failed: ${err?.message || err}`);
   }
-  if (out.reviewerPasses.reaped > 0 || out.closerLeases.released > 0) {
+  if (
+    out.reviewerPasses.reaped > 0
+    || out.closerLeases.released > 0
+    || out.closerLeases.pruned > 0
+  ) {
     logger?.log?.(
-      `[reaper] startup stale-state sweep: reaped ${out.reviewerPasses.reaped} running reviewer pass(es), `
+      `[reaper] ${phase} stale-state sweep: reaped ${out.reviewerPasses.reaped} running reviewer pass(es), `
       + `released ${out.closerLeases.released} closer lease(s), `
+      + `pruned ${out.closerLeases.pruned} finished closer lease(s), `
       + `reset ${out.closerLeases.budgetsReset} transient-exhausted budget(s)`,
     );
   }
   return out;
+}
+
+/**
+ * Orchestrator — the startup sweep. Kept as its own export so the watcher's
+ * startup reconciliation block and the `[reaper] startup stale-state sweep:`
+ * log line operators already grep for both stay exactly as they were.
+ */
+export async function runStartupStaleStateReaper(args = {}) {
+  return runStaleStateReaper({ ...args, phase: 'startup' });
+}
+
+/**
+ * Drive the stale-state sweep from the watcher poll loop.
+ *
+ * The bug this exists for: `runStartupStaleStateReaper` had exactly one call
+ * site, above the poll loop, so a reclaimer that demonstrably works
+ * (`released 18 closer lease(s)` in the live log) ran once per process lifetime
+ * and never again. A watcher that stays up for a day reclaims nothing for a day.
+ *
+ * Contract:
+ *   - `tick()` is a no-op until `intervalMs` has elapsed since the last run, so
+ *     it is safe to call unconditionally from every poll;
+ *   - the clock starts at construction, because the caller has just run the
+ *     startup sweep — the first periodic sweep is one interval later, not
+ *     immediately;
+ *   - a sweep already in flight is never re-entered (a poll can outrun one);
+ *   - it never throws and never rejects. `runStaleStateReaper` already swallows
+ *     per-sweep failures; this catch covers the scaffolding itself, because the
+ *     one thing recovery must never do is stop the watcher from polling.
+ *
+ * @returns {{ intervalMs: number, tick: (opts?: {nowMs?: number}) => Promise<{ran: boolean, reason?: string, result?: object, error?: Error}> }}
+ */
+export function createStaleStateReaperTicker({
+  rootDir,
+  db,
+  env = process.env,
+  logger = console,
+  isProcessAlive = null,
+  intervalMs = null,
+  nowMsImpl = Date.now,
+  lastRunAtMs = null,
+} = {}) {
+  const tickIntervalMs = Number.isFinite(Number(intervalMs)) && Number(intervalMs) > 0
+    ? Math.floor(Number(intervalMs))
+    : resolveStaleStateReaperIntervalMs(env);
+  let lastRunMs = Number.isFinite(Number(lastRunAtMs)) ? Number(lastRunAtMs) : nowMsImpl();
+  let inFlight = false;
+  return {
+    intervalMs: tickIntervalMs,
+    async tick({ nowMs = nowMsImpl() } = {}) {
+      if (inFlight) return { ran: false, reason: 'in-flight' };
+      if (nowMs - lastRunMs < tickIntervalMs) return { ran: false, reason: 'interval-not-elapsed' };
+      inFlight = true;
+      try {
+        const result = await runStaleStateReaper({
+          rootDir,
+          db,
+          env,
+          now: new Date(nowMs).toISOString(),
+          logger,
+          isProcessAlive,
+          phase: 'periodic',
+        });
+        return { ran: true, result };
+      } catch (err) {
+        logger?.error?.(`[reaper] periodic stale-state sweep failed: ${err?.message || err}`);
+        return { ran: false, reason: 'error', error: err };
+      } finally {
+        // Advance on failure too: a sweep that throws every time must not turn
+        // into a per-poll retry storm against the same broken filesystem.
+        lastRunMs = nowMs;
+        inFlight = false;
+      }
+    },
+  };
 }

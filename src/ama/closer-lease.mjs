@@ -32,6 +32,7 @@
  */
 
 import { readdirSync, readFileSync, rmSync } from 'node:fs';
+import { hostname } from 'node:os';
 import { basename, join } from 'node:path';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
@@ -326,6 +327,8 @@ export function findLiveAmaCloserLease(rootDir, { repo, prNumber } = {}) {
  * @param {number} args.prNumber
  * @param {string} args.headSha
  * @param {number} args.watcherPid     For audit; recorded on the lease.
+ * @param {string=} args.host          Host that owns `watcherPid`. Defaults to `hostname()`;
+ *                                     caller-provided so tests stay deterministic.
  * @param {string=} args.now           ISO 8601 UTC for `acquiredAt`. Caller-provided so tests stay deterministic.
  * @returns {{ acquired: boolean, leasePath: string, lease: object, existingLease?: object }}
  */
@@ -335,6 +338,7 @@ export function acquireAmaCloserLease({
   prNumber,
   headSha,
   watcherPid,
+  host,
   now,
 } = {}) {
   const leasePath = amaCloserLeaseFilePath(rootDir, { repo, prNumber, headSha });
@@ -353,6 +357,12 @@ export function acquireAmaCloserLease({
     headSha,
     acquiredAt: now || new Date().toISOString(),
     watcherPid: Number.isFinite(Number(watcherPid)) ? Number(watcherPid) : null,
+    // CLR-02 — `watcherPid` alone is not a usable liveness signal: a pid read on
+    // host B says nothing about a process on host A, and pid namespaces collide.
+    // Recording the acquiring host lets recovery ask "is this pid dead *here*?"
+    // and refuse the question everywhere else. Mirrors `ama/merge-lease.mjs`,
+    // which already gates its reclaim on `holderHost === hostname()`.
+    holderHost: host || hostname(),
     lrqId: null,
     status: PENDING,
     terminalOutcome: null,

@@ -944,6 +944,36 @@ test('selectReleasableCloserLeases: a dead pid on another host still waits the f
   );
 });
 
+test('selectReleasableCloserLeases: livePid guard is scoped to local or legacy leases', () => {
+  const base = {
+    repo: 'a/x', prNumber: 1, headSha: 'h1', status: 'dispatched', terminalOutcome: null,
+    updatedAt: hoursAgo(20), watcherPid: process.pid,
+  };
+  const opts = {
+    now: NOW,
+    thresholdMs: DEFAULT_STALE_CLOSER_LEASE_MS,
+    deadHolderThresholdMs: DEFAULT_DEAD_HOLDER_CLOSER_LEASE_MS,
+    livePid: process.pid,
+    host: THIS_HOST,
+  };
+  assert.deepEqual(
+    selectReleasableCloserLeases([{ ...base, holderHost: THIS_HOST, _path: 'local-live' }], opts),
+    [],
+    'same-host livePid still protects the current watcher lease',
+  );
+  assert.deepEqual(
+    selectReleasableCloserLeases([{ ...base, _path: 'legacy-live' }], opts),
+    [],
+    'hostless pre-CLR-02 livePid leases stay protected because their host is ambiguous',
+  );
+  assert.deepEqual(
+    selectReleasableCloserLeases([{ ...base, holderHost: 'some-other-host', _path: 'remote-collision' }], opts)
+      .map((l) => l._path),
+    ['remote-collision'],
+    'a same-PID lease from another host is reclaimed after the 6h floor',
+  );
+});
+
 test('selectPrunableCloserLeases: retires resolved-terminal leases past the prune age and nothing else', () => {
   const leases = [
     { status: 'terminal', terminalOutcome: 'succeeded', updatedAt: daysAgo(30), _path: 'old-succeeded' },

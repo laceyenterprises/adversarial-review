@@ -233,10 +233,10 @@ function holderIsProvablyDeadHere(lease, { isProcessAlive, host }) {
 /**
  * Pure — given closer-lease records, return the subset to release: not yet
  * `terminal`, `terminalOutcome` still null, and older than `thresholdMs`. A
- * lease still owned by the live watcher process (`watcherPid === livePid`) is
- * never released. Corrupt lease files are also age-gated by file mtime so a
- * concurrent non-atomic writer is given time to finish before recovery unlinks
- * the lease.
+ * lease still owned by this host's live watcher process (`watcherPid ===
+ * livePid` and missing/same `holderHost`) is never released. Corrupt lease
+ * files are also age-gated by file mtime so a concurrent non-atomic writer is
+ * given time to finish before recovery unlinks the lease.
  *
  * Two-tier ageing (CLR-02). `thresholdMs` is the floor for a lease whose holder
  * we cannot prove dead — unknown host, unknown pid, or a pid that answers alive.
@@ -273,7 +273,11 @@ export function selectReleasableCloserLeases(leases, {
     }
     if (String(lease.status || '') === 'terminal') return false;
     if (lease.terminalOutcome != null) return false;
-    if (livePid != null && Number(lease.watcherPid) === Number(livePid)) return false;
+    if (
+      livePid != null
+      && Number(lease.watcherPid) === Number(livePid)
+      && (!lease.holderHost || String(lease.holderHost) === String(localHost))
+    ) return false;
     const stampMs = parseTimestampMs(lease.updatedAt) ?? parseTimestampMs(lease.acquiredAt);
     if (stampMs == null) return false;
     const ageMs = nowMs - stampMs;

@@ -169,6 +169,7 @@ function ensureReviewStateSchema(db) {
       review_population_retry_last_at TEXT,
       review_population_retry_head_sha TEXT,
       pipeline_stage_states_json TEXT,
+      argus_classified_head_sha TEXT,
       UNIQUE(repo, pr_number)
     )
   `);
@@ -212,6 +213,15 @@ function ensureReviewStateSchema(db) {
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN subject_external_id TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN revision_ref TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN pipeline_stage_states_json TEXT`);
+  // ASR-04: the head SHA whose security surface has already been classified.
+  // The classifier needs the PR's changed-file list, which is a GitHub call; the
+  // memo turns that into one call per HEAD instead of one per tick. It is a
+  // cache, never an authority — a new head leaves it stale and re-classifies, so
+  // losing the column costs API calls and never costs a review. Kept in the
+  // ensure-schema backstop rather than a migration file for the same reason the
+  // fast_merge_audit_* columns are: this repo has no migration runner, and the
+  // idempotent convergence path is the only one every live DB takes.
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN argus_classified_head_sha TEXT`);
 
   backfillReviewedPRSubjectIdentity(db);
 
@@ -1046,7 +1056,7 @@ function requestReviewRereview({
        WHERE repo = ?
          AND pr_number = ?
          AND ${allowedPrStatePredicate}
-         AND review_status NOT IN ('reviewing', 'malformed', 'unroutable-bot-author', 'pending')`
+         AND review_status NOT IN ('reviewing', 'malformed', 'unroutable-bot-author', 'argus-security-queued', 'pending')`
     ).run(...resetParams);
 
     if (updateResult.changes === 1) {
@@ -1069,6 +1079,16 @@ function requestReviewRereview({
     }
     if (reviewRow.review_status === 'malformed') {
       return buildBlockedRereviewResult('malformed-title-terminal', reviewRow);
+    }
+    // ASR-04: a re-review request is a request to run the ADVERSARIAL reviewer
+    // again, and these two rows are exactly the rows no adversarial reviewer can
+    // be resolved for — the title carries no worker prefix and never will. The
+    // reset is refused for the same reason it always was; only the reason string
+    // changes, so a caller can tell "Argus owns this" from "this was dropped".
+    // Re-running the SECURITY review is a different verb: a new head re-enqueues
+    // it automatically, which is the whole head-scoped contract in ASR-03.
+    if (reviewRow.review_status === 'argus-security-queued') {
+      return buildBlockedRereviewResult('argus-security-queued', reviewRow);
     }
     if (reviewRow.review_status === 'unroutable-bot-author') {
       return buildBlockedRereviewResult('unroutable-bot-terminal', reviewRow);

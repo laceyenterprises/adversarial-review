@@ -219,6 +219,34 @@ output that lacks a `## Verdict` section throws, not warns. The
 philosophy is that the cost of a missed quality gate is higher than the
 cost of an explicit, recoverable failure.
 
+**7a. But refusing is not the same as dropping.** The reviewer is resolved
+from the worker-class prefix in the PR title, and a dependency bot cannot
+produce one — so for a while those PRs were written to a *terminal*
+`unroutable-bot-author` row: no reviewer, no retry, no escalation.
+`adversarial-review#909` and `#910` sat that way for 14 hours, and `#909` was a
+major bump of the native driver behind `reviews.db` itself. Nothing had failed;
+nothing could route them. They were not rejected, they were dropped.
+
+ASR-04 changed the disposition: a PR that the security-surface classifier
+(`src/security-surface-classifier.mjs`) flags is **enqueued** to the Argus
+security queue (`data/argus-security-jobs/`) instead. The row carries
+`review_status='argus-security-queued'`, which is deliberately *not* terminal —
+the watcher revisits it every tick so a new head re-enqueues, and the adversarial
+gate reports `pending` rather than `success`, because an unanswered security
+question is not an approval. Two boundaries hold that in place:
+
+- a **human** PR with a bad title prefix is still terminal-`malformed`; that
+  finding is accurate and the author can act on it, and blurring it into the bot
+  branch would destroy the distinction the bot branch exists to make;
+- a **manifest-touching human** PR is enqueued *additively* — the manifest
+  trigger routes on the file, not the author, and the normal adversarial code
+  review still runs alongside the security review.
+
+`ADVERSARIAL_ARGUS_SECURITY_ROUTE=0` rolls the whole route back to the
+pre-ASR-04 terminal behaviour (loudly — every such write logs
+`ARGUS_ROUTE_DISABLED`). `npm run argus:backfill` recovers rows already stranded
+in the old status; open rows also self-heal on the next watcher tick.
+
 For the seam diagram and the kernel/adapter contract details, read
 [`docs/ARCH-adversarial-review-adapter-architecture.md`](docs/ARCH-adversarial-review-adapter-architecture.md).
 

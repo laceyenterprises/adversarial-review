@@ -4,6 +4,8 @@
 **Store:** `data/argus-security-jobs/`
 **Source of truth:** `src/argus-security-queue.mjs`
 **Runtime surface:** `src/argus-security-queue.mjs`
+**Producer:** `src/argus-security-route.mjs`, called from `processReviewSubject`
+(`src/pollonce-phases.mjs`) once per PR head (ASR-04)
 
 ## Purpose
 
@@ -15,6 +17,26 @@ reviews cannot starve normal follow-up remediation.
 Each job is bound to one exact `(repo, prNumber, headSha)` identity. A re-poll
 of the same PR head is idempotent, while a new head SHA creates a new job
 because the prior security review only speaks for the tree it inspected.
+
+Jobs are produced by the watcher (ASR-04). Every open, non-terminal PR is
+classified once per head by the ASR-02 security-surface classifier, and any
+trigger enqueues here. Two dispositions follow from that:
+
+- A **bot-authored PR** (no worker prefix is possible) carries
+  `review_status='argus-security-queued'` in `reviews.db` for as long as the PR
+  is open. That status is not terminal — it is what replaced the terminal
+  `unroutable-bot-author` row that stranded `adversarial-review#909` and `#910`
+  for 14 hours.
+- A **routable PR** that touches a manifest or a security-sensitive path is
+  enqueued here **additively**. Its normal adversarial code review is unaffected;
+  Argus reviews the dependency surface and never diverts or replaces the code
+  review.
+
+The memo of which head has already been classified lives in
+`reviewed_prs.argus_classified_head_sha`. It is a cache, never an authority: a new
+head leaves it stale and re-classifies, so losing it costs GitHub calls and can
+never cost a review. `ADVERSARIAL_ARGUS_SECURITY_ROUTE=0` disables the producer
+and restores the pre-ASR-04 terminal disposition.
 
 ## Directories
 

@@ -1365,7 +1365,11 @@ async function pollOnce(
     subjectEntries = orderSubjectEntriesDiscoveryFirst(subjectEntries, {
       repoPath,
       logger: console,
-      hasReviewRow: (entry) => Boolean(entry.current ?? (entry.current = stmtGetReviewRow.get(repoPath, entry.prNumber))),
+      hasReviewRow: (entry) => Boolean(
+        'current' in entry
+          ? entry.current
+          : (entry.current = stmtGetReviewRow.get(repoPath, entry.prNumber)),
+      ),
     });
 
     for (const subjectEntry of subjectEntries) {

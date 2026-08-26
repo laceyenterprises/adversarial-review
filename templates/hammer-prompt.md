@@ -154,7 +154,8 @@ scans.
    another repo/submodule, open the subrepo PR for that parity fix (or stop with
    the exact owed change) and map the red parity check to that PR/report in the
    audit comment.
-3. Commit the remediation. The commit must have provenance trailers including:
+3. Commit the remediation. The commit must have provenance trailers in ONE
+   contiguous block (no blank lines between them) including:
 
    ```text
    Worker-Class: hammer
@@ -268,12 +269,19 @@ Commit the remediation:
 ```bash
 git status --short
 git add <changed files>
-git commit -m "HAM remediate final adversarial findings" \
-  -m "Worker-Class: hammer" \
-  -m "Worker-Ticket: HAM" \
-  -m "Reviewed-Head: <<REVIEWED_SHA>>" \
-  -m "Closed-By: hammer (adversarial-pipe-mode)" \
-  -m "Remediated-Findings: <n> addressed (<b> blocking, <nb> non-blocking)"
+# HSC-01: pass the trailers as ONE `-m`, not one `-m` each. Git renders every
+# `-m` as its own paragraph, so `-m A -m B` produces blank-line-separated
+# trailers -- which is NOT a git trailer block. The closer's provenance verifier
+# then recovers only the last trailer and the head can never self-certify
+# (agent-os#5908 parked on `stale-review-head` for hours). The parser now
+# tolerates the old shape, but emit the correct one.
+git commit -m "HAM remediate final adversarial findings" -m "Worker-Class: hammer
+Worker-Ticket: HAM
+Reviewed-Head: <<REVIEWED_SHA>>
+Closed-By: hammer (adversarial-pipe-mode)
+Remediated-Findings: <n> addressed (<b> blocking, <nb> non-blocking)"
+# Verify the block is contiguous before moving on:
+git log -1 --format=%B | tail -n 6
 ```
 
 Refresh and validate the live head:
@@ -717,6 +725,10 @@ if ! ham_audit_is_nonnegative_int "$HAM_AUDIT_REMEDIATED_TOTAL" ||
 fi
 # When filling in the comment body below, optionally add one bullet each for
 # applicable test evidence and doc currency, using the same bulleted style.
+# HSC-01: the findings bullets are MACHINE-PARSED (the closer matches each
+# finding title against the review's standing findings to decide whether the
+# non-blocking waiver holds). Keep one bullet per finding on ONE line, and use
+# the finding's title VERBATIM from the review so the identity match lands.
 HAM_AUDIT_COMMENT_DETAILS="$(cat <<'EOF'
 ## 🔨 Hammer remediation audit
 

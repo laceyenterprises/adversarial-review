@@ -3055,7 +3055,18 @@ function parseHamAuditFindingsFromBody(body, changedFiles) {
     ? changedFiles.map(String).filter(Boolean).sort((left, right) => right.length - left.length)
     : [];
   const findings = [];
-  const linePattern = /^\s*-\s+\*\*(.+?)\*\*\s+\((blocking|non-blocking)\)\s+[-\u2013\u2014]\s+(.+)$/gim;
+  // HSC-01: the audit body is prose the hammer AGENT fills in, so it drifts from
+  // the exact template bullet (`- **Title** (blocking) — detail`). The live
+  // agent-os#5908 audit used `- Title (blocking): detail`; the strict pattern
+  // matched zero bullets, `parseHamAuditFindingsFromBody` returned null, and the
+  // non-blocking identity-coverage gate then refused to waive
+  // `non-blocking-findings-present` even though the hammer had addressed every
+  // one. Tolerate the natural variants -- optional `**` emphasis, `-`/`*` bullet
+  // markers, and `-`/`–`/`—`/`:` as the title/detail separator. This only widens
+  // what can be READ; every parsed finding is still cross-checked against the
+  // current review's identities and the `Remediated-Findings` trailer counts.
+  const linePattern =
+    /^[ \t]*[-*][ \t]+(?:\*\*)?(.+?)(?:\*\*)?[ \t]*\((blocking|non-blocking)\)[ \t]*[-\u2013\u2014:][ \t]*(.+)$/gim;
   let match;
   while ((match = linePattern.exec(text)) !== null) {
     const title = String(match[1] || '').trim();

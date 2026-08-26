@@ -17,25 +17,42 @@ const HAM_AUDIT_COMMENT_AUTHOR_LOGINS = new Set([
   // MERGE_AGENT_GH_TOKEN comments from the dedicated hammer app resolve to
   // this GitHub App bot login in PR timelines.
   'the-hammer-lacey[bot]',
+  // HSC-01: the SAME GitHub App, without the `[bot]` suffix. REST renders the
+  // suffixed form but GraphQL (`gh pr view --json comments`) renders the bare
+  // app slug, and the closer reads the rollup through the GraphQL path -- so the
+  // suffixed entry alone left `checks.auditCommentAuthor` false on every real
+  // hammer audit comment (observed on agent-os#5908). The slug is reserved by
+  // the App, so this is the same identity and not a new one.
+  'the-hammer-lacey',
 ]);
 
 function normalizeHamLogin(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+// HSC-01: blank lines BETWEEN trailer lines must not truncate the scan. The
+// hammer commits its provenance with one `git commit -m` per trailer
+// (templates/hammer-prompt.md), and git renders every `-m` as its OWN paragraph
+// -- so the live message is `subject\n\nWorker-Class: hammer\n\nWorker-Ticket:
+// HAM\n\nReviewed-Head: <sha>\n\n...`. The old scan stopped at the first blank
+// line after entering the trailer block, so it only ever recovered the LAST
+// trailer and dropped `Worker-Class` / `Reviewed-Head` / `Closed-By`. That made
+// `checks.workerClass` false for EVERY hammer terminal-remediation commit, so
+// the closer's ground-truth self-certification could never pass its safety core
+// and remediated PRs parked on `stale-review-head` forever
+// (laceyenterprises/agent-os#5908).
+//
+// The scan still terminates at the first non-trailer line, so prose can never be
+// absorbed, and line 0 (the subject) is never consumed even when it happens to
+// look like `Word: text`.
 export function parseCommitTrailers(message) {
   const lines = String(message || '').replace(/\r\n/g, '\n').split('\n');
   const trailers = {};
-  let inTrailerBlock = false;
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
+  for (let index = lines.length - 1; index >= 1; index -= 1) {
     const line = lines[index].trim();
-    if (!line) {
-      if (inTrailerBlock) break;
-      continue;
-    }
+    if (!line) continue;
     const match = /^([A-Za-z][A-Za-z0-9-]*):[ \t]*(.+)$/.exec(line);
     if (!match) break;
-    inTrailerBlock = true;
     trailers[match[1].trim().toLowerCase()] = match[2].trim();
   }
   return trailers;

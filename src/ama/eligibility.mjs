@@ -705,11 +705,32 @@ function validateHamTerminalRemediationEvidence(
     verifiedParentSha !== ''
     && verifiedParentSha === String(reviewedHead || '')
     && shaClaimMatches(parentSha, verifiedParentSha);
+  // HSC-01: the rebase-coverage branch must stay satisfiable for BOTH claim
+  // shapes, or it is dead code that re-creates the SEV1 "guard encoded an
+  // unsatisfiable condition" deadlock.
+  //
+  // Two callers build the claim:
+  //   1. the hammer worker, which reports `commit.parentSha = <REVIEWED_SHA>`
+  //      per templates/hammer-prompt.md ("if the mandatory rebase rewrites the
+  //      commit parent, the verified Reviewed-Head trailer must still match"), and
+  //   2. `buildHamTerminalRemediationEvidenceFromGroundTruth`, the closer's
+  //      reconstruction, which necessarily reports the commit's ACTUAL parent
+  //      because it rebuilds the claim FROM the verified commit.
+  //
+  // Requiring only `parentSha === reviewedHead` collapsed shape 2 back into
+  // `directReviewedParent`, so a hammer head with commits between it and the
+  // reviewed head could never self-certify. Accept either honest claim: the
+  // reviewed-head binding comes from the trailer (attested by a verified hammer
+  // committer via `checks.commitIdentity`), and the claim must still agree with
+  // ground truth about the parent it names.
+  const parentClaimHonest =
+    shaClaimMatches(parentSha, String(reviewedHead || ''))
+    || (verifiedParentSha !== '' && shaClaimMatches(parentSha, verifiedParentSha));
   const reviewedHeadTrailerCoversRebase =
     String(reviewedHead || '') !== ''
     && verifiedReviewedHeadSha !== ''
     && shaClaimMatches(verifiedReviewedHeadSha, String(reviewedHead || ''))
-    && shaClaimMatches(parentSha, String(reviewedHead || ''));
+    && parentClaimHonest;
   const checks = {
     workerClass: verifiedTrailers['worker-class'] === 'hammer',
     ticket: /^(HAM|AMA-PR-\d+)$/i.test(ticket),

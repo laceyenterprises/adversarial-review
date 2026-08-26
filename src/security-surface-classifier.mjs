@@ -86,6 +86,10 @@ const MANIFEST_BASENAME_PATTERNS = Object.freeze([
 // Full-path patterns, for manifests defined by WHERE they are rather than what
 // they are called.
 const MANIFEST_PATH_PATTERNS = Object.freeze([
+  // Python projects commonly split dependencies into `requirements/base.txt`,
+  // `requirements/prod.txt`, etc.; the basename-only `requirements*.txt`
+  // pattern cannot see that directory convention.
+  { pattern: /^(?:.*\/)?requirements\/[^/]+\.txt$/, ecosystem: 'python' },
   // Third-party action pins are a live supply-chain vector (SPEC.md). GitHub
   // honours BOTH `.yml` and `.yaml` here, so matching only `.yml` — the
   // extension SPEC.md happens to write — would leave a real hole: a
@@ -177,6 +181,7 @@ const SENSITIVE_EXTENSIONS = Object.freeze(new Map(Object.entries({
 
 // Whole basenames that carry credentials without a sensitive token in them.
 const SENSITIVE_BASENAMES = Object.freeze(new Map(Object.entries({
+  '.keystore': 'secrets',
   '.npmrc': 'secrets',
   '.netrc': 'secrets',
   '.pypirc': 'secrets',

@@ -353,6 +353,35 @@ test('runPostedReviewHandlersFairly defers the tail when the budget runs out and
   assert.deepEqual(second.deferred.sort(), [`${REPO}#1`, `${REPO}#2`]);
 });
 
+test('runPostedReviewHandlersFairly preserves deferred order across more than two budgeted ticks', async () => {
+  const state = createPostedReviewFairnessState();
+  let clock = 0;
+  const ran = [];
+  const handlers = [1, 2, 3].map((prNumber) => ({
+    repoPath: REPO,
+    prNumber,
+    headSha: HEAD_A,
+    run: async () => {
+      ran.push(prNumber);
+      clock += 60;
+    },
+  }));
+
+  for (const expected of [1, 2, 3, 1, 2, 3]) {
+    clock = 0;
+    ran.length = 0;
+    const summary = await runPostedReviewHandlersFairly({
+      handlers,
+      state,
+      budgetMs: 50,
+      nowMs: () => clock,
+      logger: silentLogger,
+    });
+    assert.deepEqual(ran, [expected]);
+    assert.equal(summary.deferredByBudget, 2);
+  }
+});
+
 test('runPostedReviewHandlersFairly bounds a single never-settling handler', async () => {
   const ran = [];
   const summary = await runPostedReviewHandlersFairly({

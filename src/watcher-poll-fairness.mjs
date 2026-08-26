@@ -143,12 +143,29 @@ export function createPostedReviewFairnessState() {
 function orderDeferredFirst(handlers, state) {
   const deferred = state?.deferredKeys;
   if (!deferred || deferred.size === 0) return handlers;
-  const promoted = [];
-  const rest = [];
+  const handlersByKey = new Map();
   for (const handler of handlers) {
-    (deferred.has(postedReviewHandlerKey(handler)) ? promoted : rest).push(handler);
+    const key = postedReviewHandlerKey(handler);
+    const bucket = handlersByKey.get(key);
+    if (bucket) {
+      bucket.push(handler);
+    } else {
+      handlersByKey.set(key, [handler]);
+    }
+  }
+  const promoted = [];
+  const promotedKeys = new Set();
+  for (const key of deferred) {
+    const bucket = handlersByKey.get(key);
+    if (!bucket) continue;
+    promoted.push(...bucket);
+    promotedKeys.add(key);
   }
   if (promoted.length === 0) return handlers;
+  const rest = [];
+  for (const handler of handlers) {
+    if (!promotedKeys.has(postedReviewHandlerKey(handler))) rest.push(handler);
+  }
   return [...promoted, ...rest];
 }
 

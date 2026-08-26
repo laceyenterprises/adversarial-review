@@ -314,6 +314,27 @@ test('a GitHub dismissal failure never throws out of the tick', async () => {
   assert.match(String(result.error?.message || ''), /403/);
 });
 
+test('a HAM audit evidence read failure never throws out of the tick', async () => {
+  const result = await dismissSupersededBlockingVerdictAtRemediatedHead({
+    repo: REPO,
+    prNumber: PR,
+    currentHeadSha: REMEDIATING_HEAD,
+    hamTerminalRemediationValidated: false,
+    authoritativeReviewerLogins: [REVIEWER_LOGIN],
+    env: { DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED: 'true' },
+    logger: SILENT_LOGGER,
+    headHasValidatedHamTerminalRemediationImpl: async () => {
+      throw new Error('EACCES: permission denied, open ama audit');
+    },
+    dismissStandingChangesRequestedReviewsForHeadImpl: async () => {
+      throw new Error('must not reach GitHub dismissal without HAM evidence');
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(String(result.error?.message || ''), /EACCES/);
+});
+
 // ── The supersession primitive, isolated. ────────────────────────────────────
 test('partitionStandingReviewsBySupersededHead: strictly-superseded only, everything else retained', () => {
   const { partitionStandingReviewsBySupersededHead } = githubApiTestables;

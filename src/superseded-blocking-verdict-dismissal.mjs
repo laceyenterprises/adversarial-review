@@ -118,33 +118,33 @@ export async function dismissSupersededBlockingVerdictAtRemediatedHead({
     return { skipped: 'disabled' };
   }
 
-  // Condition 1 — a validated HAM terminal remediation AT THIS HEAD.
-  const resolvedHqRoot =
-    hqRoot || env?.HQ_ROOT || env?.AGENT_OS_HQ_ROOT || join(homedir(), 'agent-os-hq');
-  const hamValidated = hamTerminalRemediationValidated === true ||
-    await headHasValidatedHamTerminalRemediationImpl({
-      hqRoot: resolvedHqRoot,
-      repo,
-      prNumber,
-      headSha: head,
-      readAmaAuditEntryImpl,
-    }) === true;
-  if (!hamValidated) return { skipped: 'no-validated-ham-terminal-remediation' };
-
-  // Without a resolved authoritative reviewer login set we cannot tell an
-  // authoritative reviewer's verdict from a third party's, so we never dismiss.
-  const reviewerLogins = Array.isArray(authoritativeReviewerLogins)
-    ? authoritativeReviewerLogins.filter(Boolean)
-    : [];
-  if (reviewerLogins.length === 0) {
-    logger?.warn?.(
-      `[watcher] superseded blocking-verdict dismissal skipped for ${repo}#${prNumber}` +
-        `@${head.slice(0, 12)}: authoritative reviewer login set unresolved`,
-    );
-    return { skipped: 'authoritative-reviewer-logins-unresolved' };
-  }
-
   try {
+    // Condition 1 — a validated HAM terminal remediation AT THIS HEAD.
+    const resolvedHqRoot =
+      hqRoot || env?.HQ_ROOT || env?.AGENT_OS_HQ_ROOT || join(homedir(), 'agent-os-hq');
+    const hamValidated = hamTerminalRemediationValidated === true ||
+      await headHasValidatedHamTerminalRemediationImpl({
+        hqRoot: resolvedHqRoot,
+        repo,
+        prNumber,
+        headSha: head,
+        readAmaAuditEntryImpl,
+      }) === true;
+    if (!hamValidated) return { skipped: 'no-validated-ham-terminal-remediation' };
+
+    // Without a resolved authoritative reviewer login set we cannot tell an
+    // authoritative reviewer's verdict from a third party's, so we never dismiss.
+    const reviewerLogins = Array.isArray(authoritativeReviewerLogins)
+      ? authoritativeReviewerLogins.filter(Boolean)
+      : [];
+    if (reviewerLogins.length === 0) {
+      logger?.warn?.(
+        `[watcher] superseded blocking-verdict dismissal skipped for ${repo}#${prNumber}` +
+          `@${head.slice(0, 12)}: authoritative reviewer login set unresolved`,
+      );
+      return { skipped: 'authoritative-reviewer-logins-unresolved' };
+    }
+
     // Condition 2 lives here: `requireSupersededCommitId` retains every standing
     // verdict whose `commit_id` equals `head` (a LIVE finding) or is unresolvable.
     const dismissal = await dismissStandingChangesRequestedReviewsForHeadImpl(

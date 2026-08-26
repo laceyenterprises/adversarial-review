@@ -46,7 +46,11 @@ test('watcher drains queued reviewer dispatches before merge-side handoffs', () 
   const drainBeforeMaintenance = phase.indexOf(
     "await drainReviewerDispatchCandidates('posted-review handoffs and watcher maintenance');",
   );
-  const postedDrain = phase.indexOf('for (const postedReviewHandler of postedReviewHandlers)');
+  // WPS-01: the unbounded `for (const postedReviewHandler of postedReviewHandlers)`
+  // loop became a budgeted, lane-gated scheduler call. The ORDERING contract this
+  // test guards is unchanged — reviewers still drain before posted-review
+  // handoffs, which still run before lifecycle cleanup — so only the anchor moves.
+  const postedDrain = phase.indexOf('await runPostedReviewHandlersFairly({');
   const lifecycleCleanup = phase.indexOf('await retryPendingMergeAgentLifecycleCleanupsImpl();');
   const dagAutowalk = phase.indexOf('await retryPendingDagAutowalkOnMergeImpl();');
 

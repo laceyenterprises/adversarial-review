@@ -41,8 +41,21 @@ import { retryPendingMergeAgentLifecycleCleanups } from './merge-agent-lifecycle
 import { retryPendingDagAutowalkOnMerge } from './dag-autowalk-on-merge.mjs';
 import { retryPendingRetriggerAckComments } from './follow-up-retrigger-label.mjs';
 import { retryPendingRetriggerReviewAckComments } from './follow-up-retrigger-review-label.mjs';
-import { db, stmtGetLatestPostedReviewBody } from './review-state-db.mjs';
+import { db, stmtGetLatestPostedReviewBody, stmtGetReviewRow } from './review-state-db.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
+import {
+  evaluateNoProgressLane,
+  readNoProgressLane,
+  recordNoProgressLaneRun,
+  recordNoProgressLaneSkip,
+  subjectProgressFingerprint,
+} from './watcher-no-progress-lane.mjs';
+import {
+  createPostedReviewFairnessState,
+  resolvePostedReviewHandlerTimeoutMs,
+  resolvePostedReviewPhaseBudgetMs,
+  runPostedReviewHandlersFairly,
+} from './watcher-poll-fairness.mjs';
 
 const execFileAsync = promisify(execFile);
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -363,6 +376,85 @@ export async function handlePostedReviewRow({
 
 // ── Poll loop: once-per-tick post-review adoption + maintenance phase ─────────
 
+// WPS-01: cross-tick fairness state for the posted-review phase. Process-scoped
+// so a handler the per-tick budget cut off is promoted to the front of the NEXT
+// tick instead of being cut off in the same position forever.
+const postedReviewFairnessState = createPostedReviewFairnessState();
+
+/**
+ * Bind the no-progress lane to real review-state rows.
+ *
+ * `evaluate` decides whether a queued posted-review handler runs this tick;
+ * `record` compares the post-run state fingerprint with the previous tick's to
+ * decide whether the tick achieved anything for that PR. Both are kept here (and
+ * out of the scheduler) so `runPostedReviewHandlersFairly` stays a pure,
+ * SQLite-free ordering/budget decision.
+ *
+ * A handler that TIMED OUT is recorded as no-progress on purpose: an abandoned
+ * handler is the strongest possible evidence that this PR cannot be advanced by
+ * re-walking it, and it is the single most expensive thing the tick can carry.
+ */
+export function createNoProgressLaneGate({
+  rootDir = ROOT,
+  readReviewRow = (repo, prNumber) => stmtGetReviewRow.get(repo, prNumber),
+  now = () => new Date().toISOString(),
+  logger = console,
+} = {}) {
+  return {
+    evaluate(handler) {
+      const identity = { repo: handler.repoPath, prNumber: handler.prNumber };
+      const ledger = readNoProgressLane(rootDir, identity, { logger });
+      const decision = evaluateNoProgressLane(ledger, { headSha: handler.headSha || null });
+      if (!decision.due) {
+        recordNoProgressLaneSkip(rootDir, identity, {
+          headSha: handler.headSha || null,
+          now: now(),
+          logger,
+        });
+      }
+      return { run: decision.due, ...decision };
+    },
+    record(handler, { timedOut = false } = {}) {
+      // Without a head there is no series to key on; skip the row read too.
+      if (!handler.headSha) return null;
+      const identity = { repo: handler.repoPath, prNumber: handler.prNumber };
+      let row = null;
+      if (!timedOut) {
+        try {
+          row = readReviewRow(handler.repoPath, handler.prNumber) || null;
+        } catch (err) {
+          logger?.warn?.(
+            `[watcher] no-progress lane: review-row read failed for ` +
+              `${handler.repoPath}#${handler.prNumber} (${err?.message || err})`,
+          );
+          // Unknown post-state is not evidence of no progress; leave the series
+          // alone rather than demoting on a read fault.
+          return null;
+        }
+      }
+      const fingerprint = timedOut
+        ? 'timed-out'
+        : subjectProgressFingerprint(row, { headSha: handler.headSha || null });
+      const outcome = recordNoProgressLaneRun(rootDir, identity, {
+        headSha: handler.headSha || null,
+        fingerprint,
+        now: now(),
+        logger,
+      });
+      if (outcome?.demoted) {
+        logger?.warn?.(
+          `[watcher] no-progress lane: ${handler.repoPath}#${handler.prNumber} demoted to the ` +
+            `slow lane after ${outcome.noProgressTicks} consecutive ticks with no state change ` +
+            `on head ${(handler.headSha || 'unknown').slice(0, 12)}; it will now be re-walked ` +
+            `every ${outcome.backoffTicks} tick(s) instead of every tick. It is NOT dropped — ` +
+            'nothing about its eligibility, findings, or merge gating has changed.',
+        );
+      }
+      return outcome;
+    },
+  };
+}
+
 export async function runQueuedReviewAdoptionPhase({
   drainReviewerDispatchCandidates,
   postedReviewHandlers = [],
@@ -383,22 +475,33 @@ export async function runQueuedReviewAdoptionPhase({
   rootDir = ROOT,
   execFileImpl = execFileAsync,
   logger = console,
+  // WPS-01 seams. Defaults reproduce production wiring; tests override them to
+  // drive the budget/lane without a clock or a database.
+  postedReviewFairness = postedReviewFairnessState,
+  postedReviewPhaseBudgetMs = resolvePostedReviewPhaseBudgetMs(),
+  postedReviewHandlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs(),
+  noProgressLaneGate = createNoProgressLaneGate({ rootDir, logger }),
 } = {}) {
   if (typeof drainReviewerDispatchCandidates !== 'function') {
     throw new TypeError('runQueuedReviewAdoptionPhase requires drainReviewerDispatchCandidates');
   }
 
   await drainReviewerDispatchCandidates('posted-review handoffs and watcher maintenance');
-  for (const postedReviewHandler of postedReviewHandlers) {
-    try {
-      await postedReviewHandler.run();
-    } catch (err) {
-      logger.error(
-        `[watcher] posted-review handler failed for ${postedReviewHandler.repoPath}#${postedReviewHandler.prNumber}:`,
-        err?.message || err
-      );
-    }
-  }
+  // WPS-01: this loop used to be unbounded — every queued handler, to
+  // completion, every tick. When the queue filled with PRs that could not
+  // advance, the tick stopped finishing and pollOnce never returned to phase 1,
+  // so brand-new PRs were never discovered at all. The scheduler bounds the
+  // phase (wall-clock budget + per-handler deadline) and consults the
+  // no-progress lane, which is what stops the same unadvanceable set from
+  // re-consuming the budget on every tick.
+  await runPostedReviewHandlersFairly({
+    handlers: postedReviewHandlers,
+    state: postedReviewFairness,
+    budgetMs: postedReviewPhaseBudgetMs,
+    handlerTimeoutMs: postedReviewHandlerTimeoutMs,
+    laneGate: noProgressLaneGate,
+    logger,
+  });
 
   await retryPendingMergeAgentLifecycleCleanupsImpl();
 

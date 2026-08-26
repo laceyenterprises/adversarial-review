@@ -341,6 +341,8 @@ import {
   DEFAULT_WATCHER_STALL_EXIT_CODE,
   DEFAULT_WATCHER_STALL_WATCHDOG_MS,
 } from './watcher-heartbeat.mjs';
+import { orderSubjectEntriesDiscoveryFirst } from './watcher-poll-fairness.mjs';
+import { createPollStarvationHandler, resolvePollStarvationConfig } from './watcher-poll-starvation-signal.mjs';
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
 import {
   awaitThrottleIfNeeded,
@@ -1357,6 +1359,15 @@ async function pollOnce(
         }));
     }
 
+    // WPS-01: a PR that has never been reviewed goes to the front of the tick —
+    // note the pool-disabled sort just above orders oldest-created FIRST, which
+    // puts a brand-new PR dead last. Rationale in watcher-poll-fairness.mjs.
+    subjectEntries = orderSubjectEntriesDiscoveryFirst(subjectEntries, {
+      repoPath,
+      logger: console,
+      hasReviewRow: (entry) => Boolean(entry.current ?? stmtGetReviewRow.get(repoPath, entry.prNumber)),
+    });
+
     for (const subjectEntry of subjectEntries) {
       await processReviewSubject(subjectEntry, {
         octokit,
@@ -1650,6 +1661,9 @@ async function main() {
   const stallWatchdogMs = Number.isFinite(configuredStallMs) && configuredStallMs > 0
     ? configuredStallMs
     : Math.max(DEFAULT_WATCHER_STALL_WATCHDOG_MS, intervalMs * 3);
+  // WPS-01: how long ONE poll may stay in flight with a frozen poll_counter
+  // before the watcher pages itself. See watcher-poll-starvation-signal.mjs.
+  const pollStarvation = resolvePollStarvationConfig({ env: process.env, intervalMs });
   const configuredStallCheckMs = Number(process.env.ADVERSARIAL_WATCHER_STALL_CHECK_INTERVAL_MS);
   const stallWatchdogCheckMs = Number.isFinite(configuredStallCheckMs) && configuredStallCheckMs > 0
     ? configuredStallCheckMs
@@ -1719,8 +1733,8 @@ async function main() {
     : `workload-aware (default floor ${DEFAULT_POLL_DEADLINE_FLOOR_MS / 1000}s)`;
   console.log(
     `[watcher] Starting — ${watchMode} | poll interval: ${intervalMs / 1000}s | ` +
-    `poll deadline: ${deadlineLabel} | stall watchdog: ${stallWatchdogMs / 1000}s`
-  );
+    `poll deadline: ${deadlineLabel} | stall watchdog: ${stallWatchdogMs / 1000}s | ` +
+    `poll-starvation signal: ${pollStarvation.starvationMs / 1000}s × ${pollStarvation.checksRequired} checks`);
 
   watcherHeartbeat = createWatcherHeartbeat({
     rootDir: ROOT,
@@ -1733,8 +1747,17 @@ async function main() {
     heartbeat: watcherHeartbeat,
     stallMs: stallWatchdogMs,
     checkIntervalMs: stallWatchdogCheckMs,
+    starvationMs: pollStarvation.starvationMs,
+    starvationChecksRequired: pollStarvation.checksRequired,
     exitCode: DEFAULT_WATCHER_STALL_EXIT_CODE,
     logger: console,
+    // WPS-01: page on a STARVED poll (live process, one tick in flight past its SLA,
+    // poll_counter frozen) — the state every liveness surface read as healthy.
+    onStarvation: createPollStarvationHandler({
+      getHeartbeat: () => watcherHeartbeat,
+      deliverAlertFn: defaultDeliverAlert,
+      logger: console,
+    }),
     onStall: ({ exitCode, stalledForMs, heartbeat }) => {
       exitAfterReviewerCleanup({
         code: exitCode,

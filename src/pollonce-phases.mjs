@@ -739,6 +739,10 @@ export async function processReviewSubject(entry, ctx) {
         postedReviewHandlers.push({
           repoPath,
           prNumber,
+          // WPS-01: the head this handoff was queued against. The no-progress
+          // lane keys its series on (repo, pr, head) so a new push always resets
+          // the series and a PR that starts moving is never held back.
+          headSha: subject.headSha || null,
           run: runPostedReviewHandler,
         });
         return;

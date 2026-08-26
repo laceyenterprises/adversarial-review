@@ -7,6 +7,30 @@ import { writeFileAtomic } from './atomic-write.mjs';
 const DEFAULT_WATCHER_STALL_EXIT_CODE = 75;
 const DEFAULT_WATCHER_STALL_WATCHDOG_MS = 10 * 60 * 1000;
 const DEFAULT_WATCHER_STALL_CHECK_INTERVAL_MS = 30 * 1000;
+
+// WPS-01 — poll STARVATION, as distinct from poll ABSENCE.
+//
+// The stall watchdog below answers "is the watcher failing to start polls while
+// idle?" and deliberately returns early whenever `pollInFlight` is true: a poll
+// that is running is, for its purposes, healthy. That blind spot is the entire
+// failure mode of this incident. A live watcher spent 40+ minutes inside ONE
+// tick — 0% CPU, sleeping, no child processes, `poll_counter` frozen, heartbeat
+// long past its 900s SLA — and every liveness surface reported healthy, because
+// the process existed and a poll was technically "in flight". The outer
+// `safePollOnce` deadline could not catch it either: it is workload-aware and
+// resolves to roughly 12.5 hours for a single repo.
+//
+// So this adds the missing signal on exactly that state: a poll in flight for
+// longer than the heartbeat SLA with no `poll_counter` advance, observed across
+// several consecutive checks so a single slow-but-productive tick is not paged.
+//
+// It SIGNALS, it does not exit. Killing a long tick would abort in-flight
+// reviewer work that may be legitimately slow, and the existing
+// POLL_DEADLINE_EXCEEDED path already owns the kill decision. What was missing
+// was somebody being told — this fills that gap and leaves recovery policy where
+// it already lives.
+const DEFAULT_WATCHER_POLL_STARVATION_MS = 15 * 60 * 1000;
+const DEFAULT_WATCHER_POLL_STARVATION_CHECKS = 3;
 const WRONG_OWNED_HEARTBEAT_MESSAGE = 'refusing write to non-canonical-owned watcher heartbeat file';
 
 function watcherHeartbeatPath(rootDir) {
@@ -205,6 +229,9 @@ function createWatcherStallWatchdog({
   setIntervalFn = setInterval,
   clearIntervalFn = clearInterval,
   onStall,
+  starvationMs = DEFAULT_WATCHER_POLL_STARVATION_MS,
+  starvationChecksRequired = DEFAULT_WATCHER_POLL_STARVATION_CHECKS,
+  onStarvation,
   exitCode = DEFAULT_WATCHER_STALL_EXIT_CODE,
   logger = console,
 } = {}) {
@@ -216,11 +243,20 @@ function createWatcherStallWatchdog({
     checkIntervalMs,
     Math.min(DEFAULT_WATCHER_STALL_CHECK_INTERVAL_MS, effectiveStallMs),
   );
+  const effectiveStarvationMs = parsePositiveMs(starvationMs, DEFAULT_WATCHER_POLL_STARVATION_MS);
+  const effectiveStarvationChecks = Math.max(
+    1,
+    Math.trunc(parsePositiveMs(starvationChecksRequired, DEFAULT_WATCHER_POLL_STARVATION_CHECKS)),
+  );
   let lastCounter = normalizeCounter(heartbeat.snapshot().poll_counter);
   let lastProgressMs = nowMs();
   let pollInFlight = false;
   let tripped = false;
   let timer = null;
+  let pollStartedMs = null;
+  let pollStartCounter = null;
+  let starvationChecks = 0;
+  let starvationSignalled = false;
 
   function noteProgress() {
     const currentCounter = normalizeCounter(heartbeat.snapshot().poll_counter);
@@ -232,17 +268,67 @@ function createWatcherStallWatchdog({
 
   function beginPoll() {
     pollInFlight = true;
+    pollStartedMs = nowMs();
+    pollStartCounter = normalizeCounter(heartbeat.snapshot().poll_counter);
+    starvationChecks = 0;
+    starvationSignalled = false;
     noteProgress();
   }
 
   function endPoll() {
     pollInFlight = false;
+    pollStartedMs = null;
+    pollStartCounter = null;
+    starvationChecks = 0;
+    starvationSignalled = false;
     lastProgressMs = nowMs();
     noteProgress();
   }
 
+  // Runs only while a poll is in flight — the window the stall watchdog skips.
+  // Returns true on the tick it signals, so callers/tests can observe the edge.
+  function checkStarvation() {
+    if (pollStartedMs === null) return false;
+    const inFlightMs = nowMs() - pollStartedMs;
+    if (inFlightMs < effectiveStarvationMs) {
+      starvationChecks = 0;
+      return false;
+    }
+    const snapshot = heartbeat.snapshot();
+    if (normalizeCounter(snapshot.poll_counter) !== pollStartCounter) {
+      // The counter advanced under us (a re-entrant or externally-driven poll):
+      // whatever this is, it is not a frozen loop.
+      starvationChecks = 0;
+      return false;
+    }
+    starvationChecks += 1;
+    if (starvationChecks < effectiveStarvationChecks) return false;
+    // One signal per poll. Re-arming per check would page on a loop; the
+    // condition is durable, so the first observation is the one that matters and
+    // the heartbeat file keeps the state readable until the poll ends.
+    if (starvationSignalled) return false;
+    starvationSignalled = true;
+    logger?.error?.(
+      `[watcher] poll starvation: one poll has been in flight for ${Math.round(inFlightMs)}ms ` +
+      `with no poll_counter advance across ${starvationChecks} consecutive checks ` +
+      `(poll_counter=${snapshot.poll_counter}, last_poll_at=${snapshot.last_poll_at || 'null'}); ` +
+      'new PRs cannot be discovered until this tick returns',
+    );
+    onStarvation?.({
+      inFlightMs,
+      starvationMs: effectiveStarvationMs,
+      checks: starvationChecks,
+      checksRequired: effectiveStarvationChecks,
+      heartbeat: snapshot,
+    });
+    return true;
+  }
+
   function check() {
     noteProgress();
+    if (pollInFlight && !tripped) {
+      checkStarvation();
+    }
     if (tripped || pollInFlight) return false;
     const stalledForMs = nowMs() - lastProgressMs;
     if (stalledForMs < effectiveStallMs) return false;
@@ -278,6 +364,7 @@ function createWatcherStallWatchdog({
     beginPoll,
     endPoll,
     check,
+    checkStarvation,
     start,
     stop,
     getState: () => ({
@@ -287,6 +374,11 @@ function createWatcherStallWatchdog({
       lastProgressMs,
       stallMs: effectiveStallMs,
       checkIntervalMs: effectiveCheckIntervalMs,
+      starvationMs: effectiveStarvationMs,
+      starvationChecksRequired: effectiveStarvationChecks,
+      starvationChecks,
+      starvationSignalled,
+      pollInFlightMs: pollStartedMs === null ? null : nowMs() - pollStartedMs,
     }),
   };
 }
@@ -300,4 +392,6 @@ export {
   DEFAULT_WATCHER_STALL_EXIT_CODE,
   DEFAULT_WATCHER_STALL_WATCHDOG_MS,
   DEFAULT_WATCHER_STALL_CHECK_INTERVAL_MS,
+  DEFAULT_WATCHER_POLL_STARVATION_MS,
+  DEFAULT_WATCHER_POLL_STARVATION_CHECKS,
 };

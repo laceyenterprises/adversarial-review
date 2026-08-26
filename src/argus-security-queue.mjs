@@ -177,7 +177,7 @@ export function ensureArgusJobDirs(rootDir) {
  * a filesystem property rather than a scan.
  */
 export function buildArgusJobId({ repo, prNumber, headSha }) {
-  return `${sanitizeRepo(normalizeRepo(repo))}-pr-${normalizePrNumber(prNumber)}-${normalizeHeadSha(headSha)}`;
+  return `${sanitizeRepo(normalizeRepo(repo).toLowerCase())}-pr-${normalizePrNumber(prNumber)}-${normalizeHeadSha(headSha)}`;
 }
 
 // Case-insensitive on repo (GitHub treats `Org/Repo` and `org/repo` as one)
@@ -256,6 +256,12 @@ export function findArgusJob(rootDir, { repo, prNumber, headSha }) {
 
 function assertSameSubject({ existing, repo, prNumber, headSha }) {
   if (!existing?.job) return;
+  if (
+    existing.job.status === 'failed'
+    && existing.job.repo === null
+    && existing.job.prNumber === null
+    && existing.job.headSha === null
+  ) return;
 
   const wanted = argusJobIdentityKey({ repo, prNumber, headSha });
   const found = argusJobIdentityKey(existing.job);
@@ -511,8 +517,11 @@ export function readArgusQueueDepth(rootDir, { nowMs = Date.now() } = {}) {
     try {
       job = readArgusJob(oldestPendingEntry.jobPath);
     } catch {}
-    const enqueuedAt = normalizeIsoTimestamp(job?.enqueuedAt, { fallback: null })
-      || new Date(oldestPendingEntry.mtimeMs).toISOString();
+    let enqueuedAt = null;
+    try {
+      enqueuedAt = normalizeIsoTimestamp(job?.enqueuedAt, { fallback: null });
+    } catch {}
+    enqueuedAt ||= new Date(oldestPendingEntry.mtimeMs).toISOString();
     oldestPending = {
       jobId: job?.jobId || basename(oldestPendingEntry.jobPath, '.json'),
       repo: job?.repo || null,

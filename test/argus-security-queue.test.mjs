@@ -528,6 +528,21 @@ test('claim moves corrupt pending records to failed and continues draining', () 
   assert.match(failed.error, /corrupt pending argus job/u);
 });
 
+test('synthetic corrupt failed records dedupe future polls for the same filename', () => {
+  const rootDir = makeRoot();
+  const corrupt = enqueue(rootDir, { headSha: HEAD_A });
+  writeFileSync(corrupt.jobPath, '{ not json', 'utf8');
+
+  claimNextArgusJob({ rootDir, claimedAt: '2026-08-25T02:15:00.000Z' });
+  const duplicate = enqueue(rootDir, { headSha: HEAD_A });
+
+  assert.equal(duplicate.enqueued, false);
+  assert.equal(duplicate.outcome, 'duplicate');
+  assert.equal(duplicate.bucket, 'failed');
+  assert.equal(duplicate.job.repo, null);
+  assert.equal(allJsonFileCount(rootDir), 1);
+});
+
 test('list cap counts successfully read records, not corrupt directory entries', () => {
   const rootDir = makeRoot();
   const newestCorrupt = enqueue(rootDir, { headSha: HEAD_A });
@@ -591,6 +606,19 @@ test('terminal transitions can use the in-memory claimed job after file corrupti
   assert.equal(completed.job.headSha, HEAD_A);
   assert.deepEqual(completed.job.result, { verdict: 'pass' });
   assert.equal(path.dirname(completed.jobPath), getArgusJobDir(rootDir, 'completed'));
+});
+
+test('depth falls back to file mtime when oldest pending enqueuedAt is invalid', () => {
+  const rootDir = makeRoot();
+  const created = enqueue(rootDir, { enqueuedAt: '2026-08-25T01:00:00.000Z' });
+  writeFileSync(created.jobPath, `${JSON.stringify({ ...created.job, enqueuedAt: 'not-a-date' })}\n`);
+  const mtimeSeconds = Date.parse('2026-08-25T00:00:00.000Z') / 1000;
+  utimesSync(created.jobPath, mtimeSeconds, mtimeSeconds);
+
+  const depth = readArgusQueueDepth(rootDir, { nowMs: Date.parse('2026-08-25T00:10:00.000Z') });
+
+  assert.equal(depth.oldestPending.enqueuedAt, '2026-08-25T00:00:00.000Z');
+  assert.equal(depth.oldestPendingAgeMs, 10 * 60 * 1000);
 });
 
 test('findArgusJob reports which bucket an existing job sits in', () => {

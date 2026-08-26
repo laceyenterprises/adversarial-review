@@ -285,12 +285,19 @@ test('WPS-01: terminal PR cleanup removes no-progress lane ledger', () => {
   }
 });
 
-test('WPS-01: processReviewSubject queues posted-review handler with entry head SHA', async () => {
+// Retargeted: this asserted the handler picked up a top-level `entry.headSha`,
+// and its fixture supplied one. Real subjectEntries (watcher.mjs) are
+// `{ subjectRef, subject, prNumber }` and have no such field, so the assertion
+// could only ever pass against a fixture that did not resemble production --
+// which is how a null head reached `recordNoProgressLaneRun` unnoticed.
+test('WPS-01: processReviewSubject queues posted-review handler with the SUBJECT head SHA', async () => {
   const rootDir = tempRoot();
   const postedReviewHandlers = [];
+  // Production shape: the head lives on `subject`, and the entry has none.
   const subject = {
     title: '[codex] WPS fixture',
     labels: [],
+    headSha: HEAD_A,
     ref: { revisionRef: HEAD_A },
   };
   const row = {
@@ -305,9 +312,11 @@ test('WPS-01: processReviewSubject queues posted-review handler with entry head 
 
   try {
     await processReviewSubject({
+      // No top-level `headSha`: watcher.mjs builds
+      // `{ subjectRef, subject, prNumber }`, so supplying one here would let a
+      // wrong property name pass the test while nulling the head in production.
       subject,
       prNumber: 5908,
-      headSha: HEAD_A,
       current: row,
     }, {
       operatorSurface: { extractLinearTicketId: () => null },
@@ -841,4 +850,48 @@ test('poll-starvation handler swallows an alert-delivery rejection', async () =>
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(errors.length, 1);
   assert.match(errors[0], /alert delivery failed/);
+});
+
+// WPS-01 follow-up. The no-progress lane keys on (repo, pr, head), and
+// `recordNoProgressLaneRun` SKIPS the ledger write when the head is null. So a
+// null head does not degrade the lane, it disables it: every unadvanceable PR is
+// re-walked at full speed and the starvation this ticket removes comes straight
+// back, silently and with all tests green.
+//
+// The head must come from `subject`, not `entry`. `entry` is the subjectEntry
+// built in watcher.mjs as `{ subjectRef, subject, prNumber }` (+ a later
+// `current`); it has no `headSha`. The tests above construct their handler list
+// by hand, so they cannot catch a wrong property name in the production
+// queueing path -- which is how `entry.headSha` shipped. This is a source guard
+// rather than a behavioural test, deliberately: it pins the one fact that makes
+// the bug invisible, that `entry` has no head to read.
+test('the queued posted-review handler reads the head from subject, not entry', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const { dirname, join } = await import('node:path');
+
+  const here = dirname(fileURLToPath(import.meta.url));
+  const phasesRaw = readFileSync(join(here, '..', 'src', 'pollonce-phases.mjs'), 'utf8');
+  // Strip comments: the fix's own explanatory comment names `entry.headSha`,
+  // and a guard that trips on prose describing the bug is worthless.
+  const phases = phasesRaw
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('//'))
+    .join('\n');
+  const watcher = readFileSync(join(here, '..', 'src', 'watcher.mjs'), 'utf8');
+
+  assert.equal(
+    /\bentry\.headSha\b/.test(phases),
+    false,
+    'pollonce-phases must not read entry.headSha: the subjectEntry carries no head, '
+      + 'so it silently resolves to null and disables the no-progress lane',
+  );
+
+  // And the reason it carries no head: the literal that builds it.
+  assert.match(
+    watcher,
+    /return\s*\{\s*subjectRef,\s*subject,\s*prNumber\s*\}/,
+    'subjectEntry shape changed; re-check which object owns headSha before trusting this guard',
+  );
 });

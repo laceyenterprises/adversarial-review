@@ -46,6 +46,7 @@ import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import {
   evaluateNoProgressLane,
   readNoProgressLane,
+  clearNoProgressLane,
   recordNoProgressLaneRun,
   recordNoProgressLaneSkip,
   subjectProgressFingerprint,
@@ -198,6 +199,7 @@ export async function handlePostedReviewRow({
         `[watcher] AMA/merge-agent skipped for ${repoPath}#${prNumber}: PR already ` +
         `${coexistenceDecision.terminalReason} — dropping ownership`
       );
+      clearNoProgressLane(rootDir, { repo: repoPath, prNumber }, { logger });
       return { handled: true, dispatchJob, prTerminal: true };
     }
     if (coexistenceDecision.outcome === 'ama-dispatched') {

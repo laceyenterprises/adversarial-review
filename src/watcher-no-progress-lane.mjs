@@ -30,9 +30,11 @@
 //      blocking-findings hard stop, and `closer-commit-identity` auto-refresh
 //      suppression all still run, verbatim, whenever the PR is due.
 //   2. Nothing is dropped. The backoff is capped at `maxBackoffTicks`, so a
-//      demoted PR is still re-walked on a bounded cadence forever. There is no
-//      terminal "give up" state, and every skip writes an operator-visible log
-//      line plus a ledger file under `data/watcher-no-progress-lane/`.
+//      demoted PR is still re-walked on a bounded cadence while it remains open.
+//      There is no terminal "give up" state, and every skip writes an
+//      operator-visible log line plus a ledger file under
+//      `data/watcher-no-progress-lane/`; merge/close cleanup removes that
+//      per-PR ledger once no future walk is possible.
 //   3. Progress always wins. Any observable change — a new head, a status
 //      transition, a new attempt, a merge — resets the series to `active`
 //      immediately, so a PR that starts moving is never held back a single tick.
@@ -44,7 +46,7 @@
 // is that truth: if it is byte-identical to the previous tick's, the tick did
 // nothing for this PR.
 
-import { mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { writeFileAtomic } from './atomic-write.mjs';
@@ -148,6 +150,20 @@ export function readNoProgressLane(rootDir, identity, { logger = console } = {})
         `(${err?.message || 'parse error'}); treating as a fresh series`,
     );
     return null;
+  }
+}
+
+export function clearNoProgressLane(rootDir, identity, { logger = console } = {}) {
+  const filePath = noProgressLaneFilePath(rootDir, identity);
+  try {
+    rmSync(filePath, { force: true });
+    return true;
+  } catch (err) {
+    logger?.warn?.(
+      `[watcher] no-progress lane: failed to remove ledger ${filePath} ` +
+        `(${err?.code || err?.message || 'unknown'})`,
+    );
+    return false;
   }
 }
 

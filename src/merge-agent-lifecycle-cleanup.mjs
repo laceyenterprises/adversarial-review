@@ -13,6 +13,7 @@ import {
   upsertMergeAgentLifecycleCleanup,
 } from './follow-up-merge-agent.mjs';
 import { MERGE_AGENT_DISPATCHED_LABEL } from './adapters/operator/github-pr-label-controls/index.mjs';
+import { clearNoProgressLane } from './watcher-no-progress-lane.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -48,6 +49,7 @@ async function attemptMergeAgentLifecycleCleanup({
       attemptedAt: cancelResult.attemptedAt,
     });
     if (cancelResult.cleanupComplete) {
+      clearNoProgressLane(rootDir, { repo, prNumber });
       clearMergeAgentLifecycleCleanup(rootDir, { repo, prNumber });
     }
     console.log(
@@ -119,6 +121,7 @@ async function attemptMergeAgentDispatchedLabelAddCleanup({
       attemptedAt: cleanupResult.attemptedAt,
     });
     if (cleanupResult.cleanupComplete) {
+      clearNoProgressLane(rootDir, { repo, prNumber });
       clearMergeAgentLifecycleCleanup(rootDir, { repo, prNumber });
     }
     console.log(

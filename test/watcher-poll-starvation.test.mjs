@@ -11,7 +11,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -24,7 +24,9 @@ import {
   LANE_ACTIVE,
   LANE_SLOW,
   backoffTicksFor,
+  clearNoProgressLane,
   evaluateNoProgressLane,
+  noProgressLaneFilePath,
   readNoProgressLane,
   recordNoProgressLaneRun,
   recordNoProgressLaneSkip,
@@ -263,6 +265,25 @@ test('WPS-01: unadvanceable PRs back off to the slow lane while the new PR keeps
   }
 });
 
+test('WPS-01: terminal PR cleanup removes no-progress lane ledger', () => {
+  const rootDir = tempRoot();
+  try {
+    const identity = { repo: REPO, prNumber: 5908 };
+    recordNoProgressLaneRun(rootDir, identity, {
+      headSha: HEAD_A,
+      fingerprint: 'same-state',
+      now: 'tick-1',
+      logger: silentLogger,
+    });
+    assert.equal(existsSync(noProgressLaneFilePath(rootDir, identity)), true);
+
+    assert.equal(clearNoProgressLane(rootDir, identity, { logger: silentLogger }), true);
+    assert.equal(readNoProgressLane(rootDir, identity, { logger: silentLogger }), null);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 // ── Discovery-first ordering ─────────────────────────────────────────────────
 
 test('orderSubjectEntriesDiscoveryFirst promotes never-reviewed PRs and is otherwise stable', () => {
@@ -310,6 +331,24 @@ test('orderSubjectEntriesDiscoveryFirst fails toward already-discovered when the
     [2, 1],
     'a lookup fault must not let a bad probe reshuffle the whole tick',
   );
+});
+
+test('discovery-first review-row callback caches the fetched row on the entry', () => {
+  const row = { review_status: 'posted' };
+  const entry = { prNumber: 42 };
+  let reads = 0;
+
+  const ordered = orderSubjectEntriesDiscoveryFirst([entry], {
+    hasReviewRow: (candidate) => Boolean(candidate.current ?? (candidate.current = (() => {
+      reads += 1;
+      return row;
+    })())),
+    logger: silentLogger,
+  });
+
+  assert.equal(ordered[0], entry);
+  assert.equal(reads, 1);
+  assert.equal(entry.current, row);
 });
 
 // ── Posted-review phase budget + per-handler deadline ────────────────────────

@@ -37,6 +37,10 @@ import {
   upsertMergeAgentLifecycleCleanup,
 } from '../src/follow-up-merge-agent.mjs';
 import { LEGACY_ORPHAN_FAILURE_MESSAGE } from '../src/reviewer-reattach.mjs';
+import {
+  readNoProgressLane,
+  recordNoProgressLaneRun,
+} from '../src/watcher-no-progress-lane.mjs';
 
 function setupDb() {
   const db = new Database(':memory:');
@@ -340,6 +344,14 @@ test('pending merge-agent lifecycle cleanup retries after the PR leaves the open
     headSha: 'sha-cleanup-133',
     queuedAt: '2026-05-18T15:00:00.000Z',
   });
+  recordNoProgressLaneRun(rootDir, {
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 133,
+  }, {
+    headSha: 'sha-cleanup-133',
+    fingerprint: 'stale-terminal-ledger',
+    now: '2026-05-18T15:00:30.000Z',
+  });
 
   const calls = [];
   await retryPendingMergeAgentLifecycleCleanups({
@@ -366,6 +378,13 @@ test('pending merge-agent lifecycle cleanup retries after the PR leaves the open
   assert.equal(calls[0].repo, 'laceyenterprises/adversarial-review');
   assert.equal(calls[0].prNumber, 133);
   assert.deepEqual(listMergeAgentLifecycleCleanups(rootDir), []);
+  assert.equal(
+    readNoProgressLane(rootDir, {
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 133,
+    }),
+    null,
+  );
 });
 
 test('pending merge-agent dispatched-label add cleanup retries and clears on success', async () => {

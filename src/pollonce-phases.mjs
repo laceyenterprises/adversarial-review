@@ -925,6 +925,21 @@ export async function processReviewSubject(entry, ctx) {
         postedReviewHandlers.push({
           repoPath,
           prNumber,
+          // WPS-01: the head this handoff was queued against. The no-progress
+          // lane keys its series on (repo, pr, head) so a new push always resets
+          // the series and a PR that starts moving is never held back.
+          //
+          // `subject.headSha`, NOT `entry.headSha`. `entry` is the subjectEntry
+          // built in watcher.mjs as `{ subjectRef, subject, prNumber }` (+ a
+          // later `current`) -- it carries no `headSha`, so `entry.headSha` is
+          // always undefined and this collapses to `null`. That is not inert:
+          // `recordNoProgressLaneRun` skips the ledger write on a null head, so
+          // the whole no-progress lane silently stops demoting anything and
+          // every unadvanceable PR is re-walked at full speed -- the exact
+          // starvation this ticket exists to remove. The file uses
+          // `subject.headSha` in 29 other places, including the adjacent
+          // handoff-context blocks.
+          headSha: subject.headSha || null,
           run: runPostedReviewHandler,
         });
         return;

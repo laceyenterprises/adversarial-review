@@ -1,0 +1,65 @@
+# ASR stand-up proof.
+#
+# The failure this pack exists to fix was silent: adversarial-review#909 and
+# #910 sat 14h unreviewed because nothing could route them, and nothing
+# reported that. A merged route that is not actually dispatchable reproduces
+# exactly that failure one layer up -- so the stand-up asserts the observable
+# capability, not the merge.
+#
+# Two things must be true after deploy: the argus-reviewer worker class is
+# live and dispatchable, and it is a DISTINCT class from the argus host
+# watchdog rather than the watchdog with its permissions widened.
+actions:
+  - kind: shell
+    description: Stand up the Argus security route by asserting the argus-reviewer worker class is dispatchable
+    user: airlock  # cfg-allowlist(account-airlock): production-host-doc - post-merge-action runs as user: airlock on the production host
+    timeout_s: 300
+    idempotent: true
+    command: |
+      set -euo pipefail
+      RUNTIME_HOME="${AGENT_OS_RUNTIME_HOME:-$(cd ~ && pwd)}"
+      AGENT_OS_ROOT="${AGENT_OS_ROOT:-$RUNTIME_HOME/agent-os}"
+      AGENT_OS_HQ_ROOT="${AGENT_OS_HQ_ROOT:-$RUNTIME_HOME/agent-os-hq}"
+      health_json="$(mktemp)"
+      trap 'rm -f "$health_json"' EXIT
+      for attempt in 1 2 3 4 5 6; do
+        if "$AGENT_OS_ROOT/modules/worker-pool/bin/hq" harness health --root "$AGENT_OS_HQ_ROOT" --json >"$health_json"; then
+          if /usr/bin/python3 -c 'import sys,json; rows=json.load(sys.stdin); by={r.get("class"): r for r in rows if isinstance(r,dict)}; r=by.get("argus-reviewer"); print("argus-reviewer present:", bool(r)); print("cutoverReady:", (r or {}).get("cutoverReady"), "reason:", (r or {}).get("cutoverReason")); sys.exit(0 if r and r.get("cutoverReady") is True else 1)' <"$health_json"; then
+            exit 0
+          fi
+        fi
+        if [ "$attempt" -eq 6 ]; then
+          echo "hq harness health or argus-reviewer cutoverReady check failed after $attempt attempts" >&2
+          exit 1
+        fi
+        echo "hq harness health or argus-reviewer cutoverReady attempt $attempt failed; retrying" >&2
+        sleep 5
+      done
+  - kind: smoke
+    description: Verify argus-reviewer is a separate class and the argus host watchdog was not widened
+    expected_match: 'violations: \[\]'
+    user: airlock  # cfg-allowlist(account-airlock): production-host-doc - post-merge-action runs as user: airlock on the production host
+    timeout_s: 180
+    idempotent: true
+    command: |
+      set -euo pipefail
+      RUNTIME_HOME="${AGENT_OS_RUNTIME_HOME:-$(cd ~ && pwd)}"
+      AGENT_OS_ROOT="${AGENT_OS_ROOT:-$RUNTIME_HOME/agent-os}"
+      /usr/bin/python3 -c 'import json,sys;
+      p=sys.argv[1];
+      d=json.load(open(p));
+      c=d if isinstance(d,dict) else {};
+      argus=c.get("argus") or {};
+      rev=c.get("argus-reviewer") or {};
+      at=set(argus.get("defaultTools") or []);
+      rt=set(rev.get("defaultTools") or []);
+      print("argus tools:", sorted(at));
+      print("argus-reviewer tools:", sorted(rt));
+      print("entitlements:", argus.get("entitlement"), rev.get("entitlement"));
+      bad=[];
+      bad += ["argus-reviewer missing"] if not rev else [];
+      bad += ["argus watchdog was widened with github review/write"] if any(t in {"github:review","github:write"} for t in at) else [];
+      bad += ["argus-reviewer lacks github:review"] if "github:review" not in rt else [];
+      bad += ["entitlement reused"] if argus.get("entitlement")==rev.get("entitlement") else [];
+      print("violations:", bad);
+      sys.exit(1 if bad else 0)' "$AGENT_OS_ROOT/modules/worker-pool/worker-classes.json"

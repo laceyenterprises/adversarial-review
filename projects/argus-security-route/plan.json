@@ -1,0 +1,145 @@
+{
+  "planSchemaVersion": 2,
+  "planId": "argus-security-route-v1",
+  "specRef": "argus-security-route@fd7678909997",
+  "parentTicket": null,
+  "linearTeam": "Laceyenterprises",
+  "tracking": "linear",
+  "ownerUser": "airlock",
+  "linearProject": "Argus Security Route (ASR)",
+  "callSign": "ASR",
+  "defaults": {
+    "changeKind": "feat",
+    "workerSpec": {
+      "workerClass": "claude-code",
+      "tools": [
+        "read",
+        "write",
+        "bash:git-safe"
+      ],
+      "commsAllowance": "none",
+      "budgetEnforcement": "best-effort",
+      "retryPolicy": {
+        "backoffSeconds": 0
+      }
+    }
+  },
+  "activationAssertions": [
+    {
+      "id": "asr-argus-reviewer-class-dispatchable",
+      "kind": "probe",
+      "command": "hq harness health --json",
+      "expected_match": "argus-reviewer",
+      "surface": "argus-security-route",
+      "timeout_seconds": 60
+    }
+  ],
+  "tickets": [
+    {
+      "id": "ASR-01",
+      "title": "Add the argus-reviewer worker class with review capability",
+      "scope": "Add an `argus-reviewer` entry to modules/worker-pool/worker-classes.json. It MUST be distinct from the existing `argus` class, which is the host watchdog and intentionally holds only [read, hq:dispatch] with entitlement `argus-worker` -- do NOT widen that class. The new class mirrors the reviewer shape: defaultTools [read, github:review], entitlement `argus-reviewer-worker`, and an allowedModels list with a validated defaultModel per the fail-closed allowlist contract in CLAUDE.md. Do NOT run `hq worker-class register` for this class in this ticket: registering a class before its defining PR has deployed breaks `hq` fleet-wide (see the worker-class registration ordering scar). Definition lands here; live registration is ASR-06's activation step. Add a test asserting the class exists, carries github:review, and does not reuse the argus-worker entitlement.",
+      "targetRepo": "agent-os",
+      "targetBranch": "claude-code/asr-01",
+      "expectedCompletionShape": "pr",
+      "dependencies": [],
+      "expectedDurationHours": 1,
+      "taskKind": "coding",
+      "changeKind": "feat",
+      "promptPath": "projects/argus-security-route/prompts/asr-01-prompt.md",
+      "landPredicate": "github-merge"
+    },
+    {
+      "id": "ASR-02",
+      "title": "Security-surface classifier: bot author, sensitive paths, manifest changes",
+      "scope": "Build a pure, dependency-free classifier that answers `does this PR need a security review, and why`. Three independent triggers, unioned, each reported as its own reason so the review prompt can specialise: (1) bot/dependency author -- reuse the existing UNROUTABLE_BOT_AUTHORS set and isUnroutableBotAuthor() semantics from pollonce-phases.mjs, INCLUDING the `app/<name>` prefixed form, and preserve the rule that a bare `dependabot` is an ordinary account and must NOT match; (2) security-sensitive paths (auth, secrets, sandbox profiles, entitlements, worker-class definitions, sudoers, launchd); (3) any dependency manifest or lockfile, per the ecosystem table in SPEC.md -- npm, Python, Go, Rust, container, .github/workflows action pins, and .gitmodules. The classifier returns triggers, never verdicts. Pure functions only, no I/O, exhaustive unit tests including the bare-`dependabot` negative case.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "claude-code/asr-02",
+      "expectedCompletionShape": "pr",
+      "dependencies": [],
+      "expectedDurationHours": 2,
+      "taskKind": "coding",
+      "changeKind": "feat",
+      "promptPath": "projects/argus-security-route/prompts/asr-02-prompt.md",
+      "landPredicate": "github-merge"
+    },
+    {
+      "id": "ASR-03",
+      "title": "Argus security review queue, distinct from the adversarial follow-up queue",
+      "scope": "Add a dedicated queue for Argus security review work, separate from data/follow-up-jobs/ so security work is never starved by, and never starves, code-review follow-ups. Follow the existing follow-up-jobs directory conventions (pending/in-progress/completed/failed buckets, JSON job records, newest-N read caps) rather than inventing a new persistence shape. Record per job: repo, prNumber, headSha, trigger reasons from ASR-02, and enqueue time. Enqueue must be idempotent per (repo, prNumber, headSha) so a re-poll does not duplicate work, and re-enqueue on a NEW head is required, not optional -- a security review is bound to the exact tree it read. Include a queue-depth read for Sentinel.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "claude-code/asr-03",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "ASR-02"
+      ],
+      "expectedDurationHours": 2,
+      "taskKind": "coding",
+      "changeKind": "feat",
+      "promptPath": "projects/argus-security-route/prompts/asr-03-prompt.md",
+      "landPredicate": "github-merge"
+    },
+    {
+      "id": "ASR-04",
+      "title": "Route instead of terminating: stop dropping bot PRs on the floor",
+      "scope": "Change the disposition in markMalformedTitleTerminalState / pollonce-phases.mjs so a PR classified by ASR-02 is ENQUEUED to the Argus queue instead of written to a terminal `unroutable-bot-author` row. Preserve the genuinely-malformed path unchanged: a human PR with a bad title prefix is still terminal-malformed, and that distinction must not blur. For manifest-triggered human PRs the Argus enqueue is ADDITIVE -- the normal adversarial review still runs; do not divert it. Backfill the rows currently stuck terminal (adversarial-review#909 and #910 are the live examples) so existing strandings are recovered rather than left behind. Update stmtMarkUnroutableBot's callers and the review_status vocabulary consumers, including adversarial-gate-status.mjs, which currently maps that status to a gate reason.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "claude-code/asr-04",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "ASR-03"
+      ],
+      "expectedDurationHours": 3,
+      "taskKind": "coding",
+      "changeKind": "feat",
+      "promptPath": "projects/argus-security-route/prompts/asr-04-prompt.md",
+      "landPredicate": "github-merge"
+    },
+    {
+      "id": "ASR-05",
+      "title": "The security review rubric and severity taxonomy",
+      "scope": "Encode the review that ASR exists to produce. The rubric is specified in SPEC.md under `What a good security review looks like` and was executed by hand against adversarial-review#909 and #910 before this pack was written -- read those two review comments as the reference output, and treat them as fixtures the automated route must be able to reproduce. Cover all eight rubric axes, and implement the two properties that are easy to lose: PROPORTIONALITY (a dev-only lockfile-only minor gets a fast pass; a major production-driver bump gets empirical verification) and RISK-REDUCTION (the rubric must be able to conclude a bump LOWERS risk and approve it -- #909 removes an install script and ~28 transitive packages, and a naive `major = risky` rubric inverts that). Define the severity taxonomy: `high` is reserved for install-time code execution, unpinned or non-registry sources, missing integrity, typosquat-shaped names, and credential/secret surfaces. Everything else is medium or low. Only `high` blocks.",
+      "targetRepo": "agent-os",
+      "targetBranch": "claude-code/asr-05",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "ASR-01"
+      ],
+      "expectedDurationHours": 3,
+      "taskKind": "coding",
+      "changeKind": "feat",
+      "promptPath": "projects/argus-security-route/prompts/asr-05-prompt.md",
+      "landPredicate": "github-merge"
+    },
+    {
+      "id": "ASR-06",
+      "title": "Blocking authority on high severity, activation, and the no-drop regression guard",
+      "scope": "Wire the verdict to the gate and stand the route up. A `high` finding blocks merge; medium and low post as advisory and never block, per the operator authority decision. Fail CLOSED on an Argus review that errors or never returns for a high-risk trigger -- an unanswered security question is not an approval, mirroring the SEN-02 blind-vs-ok contract. Then ACTIVATE: register the argus-reviewer worker class live (safe only now that ASR-01 has deployed), register the project with a call-sign so autowalk can own it, and confirm dispatchability. Add the regression guard: assert no bot-authored PR can reach terminal `unroutable-bot-author` while the route is enabled, and assert #909/#910 replay to the dispositions the manual pass reached. This ticket is what stops ASR from becoming another merged-but-never-activated pack.",
+      "targetRepo": "agent-os",
+      "targetBranch": "claude-code/asr-06",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "ASR-01",
+        "ASR-02",
+        "ASR-03",
+        "ASR-04",
+        "ASR-05"
+      ],
+      "expectedDurationHours": 3,
+      "taskKind": "coding",
+      "changeKind": "feat",
+      "promptPath": "projects/argus-security-route/prompts/asr-06-prompt.md",
+      "landPredicate": "github-merge"
+    }
+  ],
+  "postMergeActions": {
+    "planPath": "modules/worker-pool/post-merge-actions/argus-security-route-standup.yaml",
+    "standUpCoverage": {
+      "provisionsService": false
+    },
+    "dispatchGate": {
+      "kind": "official-record-bump",
+      "completedSpecRef": "argus-security-route@fd7678909997"
+    }
+  }
+}

@@ -188,6 +188,16 @@ function validateNonBlockingField(items, options = {}) {
   validateAddressedShapeField(items, 'nonBlocking', options);
 }
 
+// hardening[] entries share the addressed[] shape but cover related
+// defects the worker found ITSELF while remediating -- findings the
+// reviewer never raised. Like nonBlocking[], the blocking-coverage check
+// ignores them entirely. They are a separate array rather than a flavour
+// of nonBlocking[] because provenance is the whole point: nonBlocking[]
+// is work the review asked for, hardening[] is work the review never saw.
+function validateHardeningField(items, options = {}) {
+  validateAddressedShapeField(items, 'hardening', options);
+}
+
 // pushback[] entries are { title?, finding, reasoning }. Finding and
 // reasoning are required and non-empty. This is the slot for "I read
 // the finding, decided not to change the code, here's why." Distinct
@@ -635,6 +645,7 @@ function usesPerFindingReplyContract(reply) {
     reply.addressed !== undefined
     || reply.pushback !== undefined
     || reply.nonBlocking !== undefined
+    || reply.hardening !== undefined
     || reply.operationalBlockers !== undefined
   ) {
     return true;
@@ -860,6 +871,9 @@ function validateRemediationReply(reply, { expectedJob = null, publicCommentLabe
   }
   if (reply.nonBlocking !== undefined) {
     validateNonBlockingField(reply.nonBlocking, publicReplyOptions);
+  }
+  if (reply.hardening !== undefined) {
+    validateHardeningField(reply.hardening, publicReplyOptions);
   }
 
   if (!reply.reReview || typeof reply.reReview !== 'object' || Array.isArray(reply.reReview)) {

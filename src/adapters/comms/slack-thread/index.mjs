@@ -299,6 +299,7 @@ function normalizeRemediationReplyForDelivery(reply) {
     validation: reply?.validation,
     addressed: reply?.addressed,
     nonBlocking: reply?.nonBlocking,
+    hardening: reply?.hardening,
     pushback: reply?.pushback,
     blockers: reply?.blockers,
     operationalBlockers: reply?.operationalBlockers,

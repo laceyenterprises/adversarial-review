@@ -65,6 +65,13 @@ export interface RemediationReplyNonBlocking {
   files?: readonly string[];
 }
 
+export interface RemediationReplyHardening {
+  title?: string;
+  finding: string;
+  action: string;
+  files?: readonly string[];
+}
+
 export interface RemediationReplyPushback {
   title?: string;
   finding: string;
@@ -98,6 +105,14 @@ export interface RemediationReply {
   // round. Same per-entry shape as addressed[] but NOT counted toward
   // the blocking-coverage check; rendered in its own PR-comment section.
   nonBlocking?: readonly RemediationReplyNonBlocking[];
+  // Related defects the worker found ITSELF while remediating -- never
+  // raised by the reviewer. Same per-entry shape as addressed[], NOT
+  // counted toward blocking coverage, and rendered in its own PR-comment
+  // section so the comment stays honest about provenance: nonBlocking[]
+  // is work the review asked for, hardening[] is work the review never
+  // saw. Folding the two together (the pre-HRD-01 behaviour) made
+  // self-found work indistinguishable from reviewer-requested work.
+  hardening?: readonly RemediationReplyHardening[];
   // Legacy string blockers remain valid under schemaVersion 1 so older
   // persisted replies still parse during reconciliation. New producer
   // code should prefer structured RemediationReplyBlocker objects.

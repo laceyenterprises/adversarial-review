@@ -2257,3 +2257,111 @@ test('buildRemediationOutcomeCommentBody omits Non-blocking improvements section
   });
   assert.doesNotMatch(bodyEmpty, /## Non-blocking improvements/);
 });
+
+// HRD-01: hardening[] renders as its own section so an operator can tell
+// work the review ASKED FOR (nonBlocking[]) from work the review NEVER
+// SAW (hardening[]). Before HRD-01 both were routed into nonBlocking[]
+// distinguished only by a prose note in `action`; 3 of 202 real entries
+// ever carried that note, so self-found work was effectively invisible.
+test('buildRemediationOutcomeCommentBody renders hardening[] in its own section, after nonBlocking[]', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Fixed the blocker, cleaned a non-blocking note, hardened a neighbour.',
+      validation: ['npm test'],
+      addressed: [
+        { title: 'Primary bug', finding: 'Primary bug needed the fix.', action: 'Applied the fix.' },
+      ],
+      pushback: [],
+      blockers: [],
+      nonBlocking: [
+        { title: 'Stale doc paragraph', finding: 'Stale runbook sentence.', action: 'Rewrote it.' },
+      ],
+      hardening: [
+        {
+          title: 'Sibling branch missing the same guard',
+          finding: 'The adjacent retry branch omitted the same nil check, one branch over from the finding.',
+          action: 'Added the identical guard plus a covering case.',
+          files: ['src/x.mjs'],
+        },
+      ],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'Ready.' },
+  });
+
+  assert.match(body, /## Additional hardening \(found while remediating\)/);
+  // Locked order: Addressed → Pushback → Blockers → Operational → Non-blocking → Hardening.
+  // Hardening is last because it is the most optional surface; an edit that
+  // hoists it above Non-blocking (or above Addressed) trips this.
+  const idxAddressed = body.indexOf('## Addressed findings');
+  const idxNonBlocking = body.indexOf('## Non-blocking improvements');
+  const idxHardening = body.indexOf('## Additional hardening');
+  assert.ok(idxAddressed >= 0 && idxNonBlocking >= 0 && idxHardening >= 0, 'expected three section headers');
+  assert.ok(idxAddressed < idxNonBlocking, 'addressed renders before non-blocking');
+  assert.ok(idxNonBlocking < idxHardening, 'non-blocking renders before hardening');
+  // Same nested-bullet card shape as addressed[] entries.
+  assert.match(body, /^- \*\*Sibling branch missing the same guard\*\*$/m);
+  assert.match(body, /^ {2}- \*\*Action:\*\* Added the identical guard plus a covering case\.$/m);
+  assert.match(body, /^ {2}- \*\*Files:\*\* `src\/x\.mjs`$/m);
+});
+
+test('buildRemediationOutcomeCommentBody dedupes hardening[] entries sharing a title with addressed[] or nonBlocking[]', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Hedging worker listed the same items twice.',
+      validation: ['npm test'],
+      addressed: [
+        { title: 'Primary bug', finding: 'Primary bug needed the fix.', action: 'Applied the fix.' },
+      ],
+      pushback: [],
+      blockers: [],
+      nonBlocking: [
+        { title: 'Stale doc paragraph', finding: 'Stale runbook sentence.', action: 'Rewrote it.' },
+      ],
+      hardening: [
+        // Duplicates addressed[] — must be dropped.
+        { title: 'Primary bug', finding: 'Primary bug needed the fix.', action: 'Applied the fix.' },
+        // Duplicates nonBlocking[] — must be dropped.
+        { title: 'Stale doc paragraph', finding: 'Stale runbook sentence.', action: 'Rewrote it.' },
+        // Genuinely new — must survive.
+        { title: 'Untested regression path', finding: 'The test would not have caught this.', action: 'Strengthened the assertion.' },
+      ],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'Ready.' },
+  });
+
+  assert.match(body, /## Additional hardening \(found while remediating\)/);
+  const hardeningSection = body.slice(body.indexOf('## Additional hardening'));
+  assert.match(hardeningSection, /Untested regression path/);
+  assert.doesNotMatch(hardeningSection, /Primary bug/);
+  assert.doesNotMatch(hardeningSection, /Stale doc paragraph/);
+});
+
+test('buildRemediationOutcomeCommentBody omits the hardening section when hardening[] is absent', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Pre-HRD-01 shaped reply with no hardening[] at all.',
+      validation: ['npm test'],
+      addressed: [
+        { title: 'Primary bug', finding: 'Primary bug needed the fix.', action: 'Applied the fix.' },
+      ],
+      pushback: [],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'Ready.' },
+  });
+
+  assert.match(body, /## Addressed findings/);
+  assert.doesNotMatch(body, /## Additional hardening/);
+});

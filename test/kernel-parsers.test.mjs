@@ -1418,7 +1418,7 @@ test('remediator prompts state addressed/pushback/blockers are BLOCKING-ONLY', a
   }
 });
 
-test('remediator prompts keep nonBlocking[] hardening guidance top-level', async () => {
+test('remediator prompts keep hardening[] guidance top-level and route self-found work to hardening[], not nonBlocking[]', async () => {
   const promptsRoot = join(dirname(fileURLToPath(import.meta.url)), '..', 'prompts');
   const promptDirs = ['code-pr', 'code-pr-security', 'research-finding'];
   const files = ['remediator.first.md', 'remediator.middle.md', 'remediator.last.md'];
@@ -1430,13 +1430,134 @@ test('remediator prompts keep nonBlocking[] hardening guidance top-level', async
       assert.match(
         body,
         /^## Hardening what you find along the way$/m,
-        `${promptPath} must give nonBlocking[] hardening a top-level section`,
+        `${promptPath} must give hardening[] a top-level section`,
       );
       assert.doesNotMatch(
         body,
         /^  - You may also harden a real, related defect/m,
-        `${promptPath} nests nonBlocking[] hardening under another list item`,
+        `${promptPath} nests hardening[] guidance under another list item`,
+      );
+      // HRD-01 routing invariant. Self-found work must be recorded in
+      // hardening[], never folded back into nonBlocking[] -- that
+      // conflation is exactly what made it invisible before HRD-01.
+      assert.match(
+        body,
+        /Record each one in `hardening\[\]`/,
+        `${promptPath} must route self-found defects to hardening[]`,
+      );
+      assert.doesNotMatch(
+        body,
+        /Record each one in `nonBlocking\[\]`/,
+        `${promptPath} must not route self-found defects back into nonBlocking[]`,
       );
     }
   }
+});
+
+// HRD-01: hardening[] is the structured exit for related defects the
+// worker found ITSELF while remediating -- findings the reviewer never
+// raised. It shares the addressed[] shape but, like nonBlocking[], must
+// be invisible to the blocking-coverage check. The distinguishing
+// property these tests pin: a hardening entry corresponds to NO finding
+// in the review body at all (not a blocking one, not a non-blocking
+// one), so a coverage check that counted it would over-count and reject
+// an otherwise-correct reply.
+test('validateRemediationReply accepts hardening[] for findings absent from the review entirely', () => {
+  const reviewBody = [
+    '## Summary',
+    'One blocking issue.',
+    '',
+    '## Blocking Issues',
+    '- **Primary bug**',
+    '  - **File:** `src/x.mjs`',
+    '  - **Lines:** 5-7',
+    '  - **Problem:** Primary bug needs the fix.',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n');
+  const expectedJob = { jobId: 'hrd-01__hardening', reviewBody };
+  const reply = {
+    kind: 'adversarial-review-remediation-reply',
+    schemaVersion: 1,
+    jobId: 'hrd-01__hardening',
+    outcome: 'completed',
+    summary: 'Fixed the blocker; hardened two neighbouring paths found while reading.',
+    validation: ['npm test'],
+    addressed: [
+      { title: 'Primary bug', finding: 'Primary bug needs the fix.', action: 'Applied the fix.' },
+    ],
+    pushback: [],
+    blockers: [],
+    hardening: [
+      {
+        title: 'Sibling branch had the same missing guard',
+        finding: 'The adjacent retry branch omitted the same nil check the reviewer flagged one branch over.',
+        action: 'Added the identical guard and a case covering it.',
+        files: ['src/x.mjs'],
+      },
+      {
+        finding: 'The regression test would not have caught the reported finding.',
+        action: 'Strengthened the assertion so it fails without the fix.',
+      },
+    ],
+    reReview: { requested: true, reason: 'Ready for re-review.' },
+  };
+
+  // Exactly one blocking finding and exactly one addressed[] entry: the
+  // two hardening[] entries must not inflate that sum.
+  assert.deepEqual(validateRemediationReply(reply, { expectedJob }), reply);
+});
+
+test('validateRemediationReply rejects hardening[] entries with empty finding or action', () => {
+  const reviewBody = [
+    '## Summary',
+    'One blocker.',
+    '',
+    '## Blocking Issues',
+    '- **Only blocker**',
+    '  - **File:** `src/x.mjs`',
+    '  - **Lines:** 1',
+    '  - **Problem:** Needs a fix.',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n');
+  const expectedJob = { jobId: 'hrd-01__bad-hardening', reviewBody };
+  const base = {
+    kind: 'adversarial-review-remediation-reply',
+    schemaVersion: 1,
+    jobId: 'hrd-01__bad-hardening',
+    outcome: 'completed',
+    summary: 'Fixed it.',
+    validation: ['npm test'],
+    addressed: [
+      { title: 'Only blocker', finding: 'Needs a fix.', action: 'Fixed it.' },
+    ],
+    pushback: [],
+    blockers: [],
+    reReview: { requested: true, reason: 'Ready.' },
+  };
+
+  assert.throws(
+    () => validateRemediationReply(
+      { ...base, hardening: [{ finding: '', action: 'Did a thing.' }] },
+      { expectedJob }
+    ),
+    /hardening\[0\]\.finding/
+  );
+  assert.throws(
+    () => validateRemediationReply(
+      { ...base, hardening: [{ finding: 'Found a real thing.', action: '   ' }] },
+      { expectedJob }
+    ),
+    /hardening\[0\]\.action/
+  );
+  assert.throws(
+    () => validateRemediationReply(
+      { ...base, hardening: 'not-an-array' },
+      { expectedJob }
+    ),
+    /hardening/
+  );
 });

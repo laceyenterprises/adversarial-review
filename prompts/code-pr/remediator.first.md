@@ -397,10 +397,17 @@ The bar is *related and evidenced*, not *anything you noticed*:
 - The fix stays inside the smallest-durable-patch discipline; it does not
   become the speculative refactor this prompt otherwise forbids.
 
-Record each one in `nonBlocking[]` with the same shape as `addressed[]`, and
-say in the `action` that you found it during remediation rather than in the
-review. That keeps the public PR comment honest about where the work came
-from, and it does not touch the blocking-coverage count.
+Record each one in `hardening[]` with the same shape as `addressed[]`. That
+array exists specifically for work the review never asked for: it renders as
+its own **Additional hardening (found while remediating)** section in the
+public PR comment, and it does not touch the blocking-coverage count.
+
+Do NOT put these in `nonBlocking[]`. That array is for non-blocking findings
+the *reviewer* raised. Keeping the two apart is the whole point — it is what
+lets an operator tell work the review asked for from work the review never
+saw. (Before HRD-01 both went into `nonBlocking[]` distinguished only by a
+prose note in `action`; 3 of 202 entries ever carried that note, so self-found
+work was effectively invisible.)
 
 If the related defect is too large to fix safely in this round, do not
 half-fix it. Describe it in the `summary` so the operator can schedule it.

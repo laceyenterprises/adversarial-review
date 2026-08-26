@@ -1181,7 +1181,7 @@ function partitionStandingReviewsBySupersededHead(standing, currentHeadSha) {
   const superseded = [];
   const retainedAtHead = [];
   for (const review of Array.isArray(standing) ? standing : []) {
-    const judgedHead = String(review?.commitId || '').trim();
+    const judgedHead = String(review?.commitId || review?.commit_id || '').trim();
     if (judgedHead && head && judgedHead !== head) superseded.push(review);
     else retainedAtHead.push(review);
   }

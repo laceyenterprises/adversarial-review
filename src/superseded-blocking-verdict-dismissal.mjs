@@ -121,9 +121,8 @@ export async function dismissSupersededBlockingVerdictAtRemediatedHead({
   // Condition 1 — a validated HAM terminal remediation AT THIS HEAD.
   const resolvedHqRoot =
     hqRoot || env?.HQ_ROOT || env?.AGENT_OS_HQ_ROOT || join(homedir(), 'agent-os-hq');
-  const hamValidated =
-    hamTerminalRemediationValidated === true ||
-    headHasValidatedHamTerminalRemediationImpl({
+  const hamValidated = hamTerminalRemediationValidated === true ||
+    await headHasValidatedHamTerminalRemediationImpl({
       hqRoot: resolvedHqRoot,
       repo,
       prNumber,
@@ -158,7 +157,7 @@ export async function dismissSupersededBlockingVerdictAtRemediatedHead({
         requireSupersededCommitId: head,
         message: (review) =>
           buildSupersededBlockingVerdictDismissalMessage({
-            judgedHead: review?.commitId,
+            judgedHead: review?.commitId || review?.commit_id,
             remediatingHead: head,
           }),
         env,
@@ -175,7 +174,7 @@ export async function dismissSupersededBlockingVerdictAtRemediatedHead({
       pr: prNumber,
       remediatingHead: head,
       judgedHeads: Array.isArray(dismissal?.dismissed)
-        ? dismissal.dismissed.map((review) => review.commitId || null)
+        ? dismissal.dismissed.map((review) => review.commitId || review.commit_id || null)
         : [],
       attempted: Number(dismissal?.attempted || 0),
       dismissed: dismissedIds,

@@ -109,7 +109,7 @@ function runTrigger({
     logger: SILENT_LOGGER,
     execFileImpl: fixture.execFileImpl,
     // The durable per-head AMA audit marker path, isolated from the real filesystem.
-    headHasValidatedHamTerminalRemediationImpl: () => auditHasMarker,
+    headHasValidatedHamTerminalRemediationImpl: async () => auditHasMarker,
     dismissStandingChangesRequestedReviewsForHeadImpl: fixture.dismissImpl,
   }).then((result) => ({ result, dismissalPuts: fixture.dismissalPuts }));
 }
@@ -218,6 +218,20 @@ test('(c2) the durable per-head AMA audit marker alone satisfies the remediation
   assert.equal(dismissalPuts.length, 1);
 });
 
+test('(c3) an async durable per-head AMA audit marker is awaited before dismissal', async () => {
+  const { result, dismissalPuts } = await runTrigger({
+    reviews: [
+      changesRequested({ id: 5918012, commitId: JUDGED_HEAD, submittedAt: '2026-08-26T08:25:29Z' }),
+    ],
+    hamTerminalRemediationValidated: false,
+    auditHasMarker: true,
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.dismissal.dismissed.map((review) => review.id), ['5918012']);
+  assert.equal(dismissalPuts.length, 1);
+});
+
 // ── (d) the feature flag disabled → NOT dismissed. ───────────────────────────
 test('(d) the trigger respects AGENT_OS_FEATURE_FLAGS_DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED=false', async () => {
   const { result, dismissalPuts } = await runTrigger({
@@ -306,13 +320,15 @@ test('partitionStandingReviewsBySupersededHead: strictly-superseded only, everyt
   const atHead = { id: '1', commitId: REMEDIATING_HEAD };
   const superseded = { id: '2', commitId: JUDGED_HEAD };
   const unknownHead = { id: '3', commitId: null };
+  const rawSuperseded = { id: '4', commit_id: JUDGED_HEAD };
+  const rawAtHead = { id: '5', commit_id: REMEDIATING_HEAD };
 
   const result = partitionStandingReviewsBySupersededHead(
-    [atHead, superseded, unknownHead],
+    [atHead, superseded, unknownHead, rawSuperseded, rawAtHead],
     REMEDIATING_HEAD,
   );
-  assert.deepEqual(result.superseded.map((review) => review.id), ['2']);
-  assert.deepEqual(result.retainedAtHead.map((review) => review.id), ['1', '3']);
+  assert.deepEqual(result.superseded.map((review) => review.id), ['2', '4']);
+  assert.deepEqual(result.retainedAtHead.map((review) => review.id), ['1', '3', '5']);
 
   // With no current head to compare against, NOTHING is superseded.
   const noHead = partitionStandingReviewsBySupersededHead([superseded], '');
@@ -342,7 +358,10 @@ test('orchestration: the third trigger runs at the current head BEFORE the daemo
       pr_number: PR,
       pr_state: 'open',
       review_status: 'posted',
-      review_body: '## Summary\nBlocking on the old head.\n## Verdict\nRequest changes',
+      review_body:
+        '## Summary\nBlocking on the old head.\n\n' +
+        '## Blocking issues\n- **Fixture blocker**\n  - Finding.\n\n' +
+        '## Verdict\nRequest changes',
       reviewer_head_sha: JUDGED_HEAD,
       reviewer_login: 'claude-reviewer-lacey',
     },
@@ -402,4 +421,71 @@ test('orchestration: the third trigger runs at the current head BEFORE the daemo
   assert.equal(calls[0].prNumber, PR);
   // The CURRENT head, not the judged head — the trigger's whole premise.
   assert.equal(calls[0].currentHeadSha, REMEDIATING_HEAD);
+});
+
+test('orchestration: the third trigger is skipped when no standing blocking findings exist', async () => {
+  const calls = [];
+  const order = [];
+  await maybeDispatchAmaClosureFor({
+    reviewStateRow: {
+      repo: REPO,
+      pr_number: PR,
+      pr_state: 'open',
+      review_status: 'posted',
+      review_body: '## Summary\nClean.\n## Blocking issues\n- None.\n## Verdict\nComment only',
+      reviewer_head_sha: REMEDIATING_HEAD,
+      reviewer_login: 'claude-reviewer-lacey',
+    },
+    dispatchJob: { blockingFindingCount: 0, blockingFindingState: 'known' },
+    candidate: {
+      headSha: REMEDIATING_HEAD,
+      riskClass: 'low',
+      prAuthor: 'codex-worker-bot',
+      prState: 'open',
+      mergeable: 'MERGEABLE',
+      mergeStateStatus: 'CLEAN',
+      statusCheckRollup: [],
+      branchProtection: { requiredContexts: [] },
+      isDraft: false,
+    },
+    labelNames: [],
+    operatorApprovalEvent: null,
+    adversarialMergeRequestedEvent: null,
+    repoPath: REPO,
+    prNumber: PR,
+    currentRevisionRef: REMEDIATING_HEAD,
+    logger: SILENT_LOGGER,
+    fetchLatestHeadReviewBodiesImpl: async () => {
+      throw new Error('no live head review in fixture');
+    },
+    loadConfigImpl: () => ({
+      getMergeAuthorityConfig() {
+        return {
+          enabled: true,
+          eligibility: {
+            riskClasses: ['low', 'medium', 'high', 'critical'],
+            highRiskRequiresTwoKey: false,
+          },
+          branchProtection: { required: false },
+        };
+      },
+      getOrchestrationMode() {
+        return 'native';
+      },
+    }),
+    resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed: true }),
+    dismissSupersededBlockingVerdictAtRemediatedHeadImpl: async (args) => {
+      calls.push(args);
+      order.push('dismiss');
+      return { skipped: 'fixture' };
+    },
+    runDaemonCleanMergeAttemptImpl: async () => {
+      order.push('daemon');
+      return { disposition: 'not-taken', reason: 'fixture' };
+    },
+    maybeDispatchAmaCloserImpl: async () => ({ dispatched: false, reason: 'fixture' }),
+  });
+
+  assert.deepEqual(order, ['daemon'], 'no dismissal fetch should run when the review is already clean');
+  assert.equal(calls.length, 0);
 });

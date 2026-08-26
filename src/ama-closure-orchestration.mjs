@@ -761,15 +761,23 @@ export async function maybeDispatchAmaClosureFor({
   // finding and is NEVER dismissed. Only a STRICTLY superseded head qualifies.
   const dismissStaleRequestChangesOnResolved =
     isDismissStaleRequestChangesOnResolvedEnabled({ env, logger });
-  await dismissSupersededBlockingVerdictAtRemediatedHeadImpl({
-    repo: repoPath,
-    prNumber,
-    currentHeadSha: currentPrHeadSha || candidate?.headSha || null,
-    hamTerminalRemediationValidated,
-    authoritativeReviewerLogins,
-    env,
-    logger,
-  });
+  const standingBlockingFindingCount = Number(
+    dispatchJob?.blockingFindingCount ?? reviewState.blockingFindingCount,
+  ) || 0;
+  if (
+    dismissStaleRequestChangesOnResolved &&
+    standingBlockingFindingCount > 0
+  ) {
+    await dismissSupersededBlockingVerdictAtRemediatedHeadImpl({
+      repo: repoPath,
+      prNumber,
+      currentHeadSha: currentPrHeadSha || candidate?.headSha || null,
+      hamTerminalRemediationValidated,
+      authoritativeReviewerLogins,
+      env,
+      logger,
+    });
+  }
 
   // CI-SETTLEMENT MODEL — read this before hunting for a wait loop; there is
   // no blocking wait for CI anywhere in this tick, by design. When required

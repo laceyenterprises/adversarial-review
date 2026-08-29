@@ -1165,6 +1165,38 @@ test('top-level config.yaml accepts mirrored worker_pool.memory.dynamic keys', (
   }
 });
 
+test('config.local.yaml accepts mirrored worker_pool.memory_injection keys', () => {
+  // MEM-INJECT-01 is consumed by worker-pool dispatch, but operators tune it in
+  // shared config.local.yaml; the watcher strict schema must parse it.
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    const local = join(tmp, 'config.local.yaml');
+    writeFile(top, `
+      version: 1
+      roots:
+        hq: /from-top
+    `);
+    writeFile(local, `
+      worker_pool:
+        memory_injection:
+          enabled: false
+          max_entries: 4
+          max_chars: 2048
+          max_per_contract: 2
+          min_term_matches: 3
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('worker_pool.memory_injection.enabled'), false);
+    assert.equal(cfg.get('worker_pool.memory_injection.max_entries'), 4);
+    assert.equal(cfg.get('worker_pool.memory_injection.max_chars'), 2048);
+    assert.equal(cfg.get('worker_pool.memory_injection.max_per_contract'), 2);
+    assert.equal(cfg.get('worker_pool.memory_injection.min_term_matches'), 3);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('top-level config.yaml accepts mirrored worker_pool.shr keys', () => {
   // SHR probe tuning is Python-owned, but checked-in keys may live in shared
   // config.yaml and must parse under the watcher strict schema.
@@ -1662,6 +1694,35 @@ test('worker_pool.dispatch.goal_lineage rejects spec excerpt larger than max byt
         assert.match(err.message, /expected <= worker_pool\.dispatch\.goal_lineage\.max_bytes \(300\)/);
         return true;
       },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('worker_pool.memory_injection canonical env aliases resolve through Node schema', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\n');
+    const cfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_WORKER_POOL_MEMORY_INJECTION_ENABLED: 'false',
+        AGENT_OS_WORKER_POOL_MEMORY_INJECTION_MAX_ENTRIES: '4',
+        AGENT_OS_WORKER_POOL_MEMORY_INJECTION_MAX_CHARS: '2048',
+        AGENT_OS_WORKER_POOL_MEMORY_INJECTION_MAX_PER_CONTRACT: '2',
+        AGENT_OS_WORKER_POOL_MEMORY_INJECTION_MIN_TERM_MATCHES: '3',
+      },
+    });
+    assert.equal(cfg.get('worker_pool.memory_injection.enabled'), false);
+    assert.equal(cfg.get('worker_pool.memory_injection.max_entries'), 4);
+    assert.equal(cfg.get('worker_pool.memory_injection.max_chars'), 2048);
+    assert.equal(cfg.get('worker_pool.memory_injection.max_per_contract'), 2);
+    assert.equal(cfg.get('worker_pool.memory_injection.min_term_matches'), 3);
+    assert.equal(
+      cfg.resolutionTrace('worker_pool.memory_injection.enabled').at(-1).source,
+      'env:AGENT_OS_WORKER_POOL_MEMORY_INJECTION_ENABLED',
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });

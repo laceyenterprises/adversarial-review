@@ -1925,8 +1925,9 @@ function schemaV1() {
       // worker_pool.dispatch.op_hammer_alerts.*,
       // worker_pool.dispatch.substrate.*,
       // worker_pool.hardening_ledger.*,
-      // worker_pool.memory.dynamic.*, worker_pool.memory_retention.*,
-      // worker_pool.secrets.op_read_cache.*, worker_pool.secrets_bus.*, and worker_pool.shr.* —
+      // worker_pool.memory.dynamic.*, worker_pool.memory_injection.*,
+      // worker_pool.memory_retention.*, worker_pool.secrets.op_read_cache.*,
+      // worker_pool.secrets_bus.*, and worker_pool.shr.* —
       // Python-owned (canonical schema at platform/agent-os-config).
       // PARTIAL mirror, same rationale as the
       // sentinel block below: this Node reader does not consume the values, but
@@ -2151,6 +2152,37 @@ function schemaV1() {
             __keys: {
               enabled: { __type: TYPE_BOOL, __default: false },
               shadow_only: { __type: TYPE_BOOL, __default: true },
+            },
+          },
+          memory_injection: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              enabled: { __type: TYPE_BOOL, __default: true },
+              max_entries: {
+                __type: TYPE_INT,
+                __default: 3,
+                __min: 0,
+                __max: 12,
+              },
+              max_chars: {
+                __type: TYPE_INT,
+                __default: 3000,
+                __min: 0,
+                __max: 12000,
+              },
+              max_per_contract: {
+                __type: TYPE_INT,
+                __default: 1,
+                __min: 1,
+                __max: 12,
+              },
+              min_term_matches: {
+                __type: TYPE_INT,
+                __default: 2,
+                __min: 1,
+                __max: 12,
+              },
             },
           },
           shr: {
@@ -2920,6 +2952,26 @@ export const ENV_ALIASES = {
   'worker_pool.memory.dynamic.require_pressure_normal': {
     canonical: 'AGENT_OS_WORKER_POOL_MEMORY_DYNAMIC_REQUIRE_PRESSURE_NORMAL',
     aliases: [['HQ_MEMORY_DYNAMIC_REQUIRE_PRESSURE_NORMAL', identity]],
+  },
+  'worker_pool.memory_injection.enabled': {
+    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_INJECTION_ENABLED',
+    aliases: [],
+  },
+  'worker_pool.memory_injection.max_entries': {
+    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_INJECTION_MAX_ENTRIES',
+    aliases: [],
+  },
+  'worker_pool.memory_injection.max_chars': {
+    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_INJECTION_MAX_CHARS',
+    aliases: [],
+  },
+  'worker_pool.memory_injection.max_per_contract': {
+    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_INJECTION_MAX_PER_CONTRACT',
+    aliases: [],
+  },
+  'worker_pool.memory_injection.min_term_matches': {
+    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_INJECTION_MIN_TERM_MATCHES',
+    aliases: [],
   },
   'worker_pool.memory_retention.enabled': {
     canonical: 'AGENT_OS_WORKER_POOL_MEMORY_RETENTION_ENABLED',

@@ -63,6 +63,7 @@ const {
   GeminiCredentialPoolUnavailableError,
   GeminiCredentialPoolNoCreditError,
   resolveReviewerMetadata,
+  resolveReviewerSubprocessCwd,
   buildGeminiReviewArgs,
   buildAgyReviewArgs,
   DEFAULT_AGY_ARGV_MAX_BYTES,
@@ -3697,6 +3698,58 @@ test('reviewWithGemini antigravity runtime uses agy print, stdin prompt, env scr
   assert.equal(spawnCalls[0].env.GOOGLE_API_KEY, undefined);
   assert.equal(spawnCalls[0].env.GEMINI_OAUTH_ACCESS_TOKEN, undefined);
   assert.equal(spawnCalls[0].env.GEMINI_ANTIGRAVITY_ACCOUNT, undefined);
+});
+
+test('reviewWithGemini antigravity scopes reviewer subprocess cwd to the repo checkout', async () => {
+  const homeRoot = mkdtempSync(join(tmpdir(), 'agy-home-cwd-'));
+  const repoRoot = join(homeRoot, 'agent-os');
+  mkdirSync(repoRoot, { recursive: true });
+  const originalCwd = process.cwd();
+  const spawnCalls = [];
+  const validAgyReview = '## Adversarial Review — Gemini (gemini-reviewer-lacey)\n\n## Summary\nClean.\n\n## Verdict\nComment only';
+
+  try {
+    process.chdir(homeRoot);
+    const result = await withEnvAsync({
+      HOME: homeRoot,
+      PWD: homeRoot,
+    }, () => reviewWithGemini('+diff\n', '', {
+      promptStage: 'first',
+      reviewerSubprocessCwd: repoRoot,
+      resolveGeminiRuntimeImpl: () => 'antigravity',
+      checkoutGeminiCredentialImpl: async () => ({ checkoutId: 'co_1', credentialId: 'cred_1', oauthCreds: { access_token: 'token-1' } }),
+      materializeGeminiCheckoutSessionImpl: ({ env }) => ({ env, cleanup() {} }),
+      releaseGeminiCredentialCheckoutImpl: async () => {},
+      assertAgyAuthImpl: async () => {},
+      spawnAgyReviewImpl: async ({ cwd, env }) => {
+        spawnCalls.push({ cwd, pwd: env.PWD, home: env.HOME });
+        return { stdout: validAgyReview, stderr: '' };
+      },
+    }));
+
+    assert.equal(result.reviewText, validAgyReview);
+    assert.deepEqual(spawnCalls, [{ cwd: repoRoot, pwd: repoRoot, home: homeRoot }]);
+  } finally {
+    process.chdir(originalCwd);
+    rmSync(homeRoot, { recursive: true, force: true });
+  }
+});
+
+test('resolveReviewerSubprocessCwd selects the owning checkout instead of ambient HOME', () => {
+  assert.equal(
+    resolveReviewerSubprocessCwd({
+      repo: 'laceyenterprises/agent-os',
+      rootDir: '/Users/airlock/agent-os/tools/adversarial-review',
+    }),
+    '/Users/airlock/agent-os'
+  );
+  assert.equal(
+    resolveReviewerSubprocessCwd({
+      repo: 'laceyenterprises/adversarial-review',
+      rootDir: '/Users/airlock/agent-os/tools/adversarial-review',
+    }),
+    '/Users/airlock/agent-os/tools/adversarial-review'
+  );
 });
 
 test('materializeGeminiCheckoutSession writes isolated 0700 session dir and 0600 oauth_creds.json, then cleans up', () => {

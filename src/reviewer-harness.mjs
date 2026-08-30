@@ -74,6 +74,11 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function withReviewerSubprocessCwdEnv(env, cwd) {
+  if (!cwd || !env || typeof env !== 'object') return env;
+  return { ...env, PWD: cwd };
+}
+
 async function spawnWithInput(command, args, {
   env,
   cwd,
@@ -520,7 +525,7 @@ function isClaudeLoggedOutStatus(text) {
  * the broker/Keychain path used by the live stack.
  */
 async function reviewWithClaude(diff, extraContext = '', {
-  promptStage = 'first', assertClaudeOAuthImpl = assertClaudeOAuth,
+  promptStage = 'first', reviewerSubprocessCwd = process.cwd(), assertClaudeOAuthImpl = assertClaudeOAuth,
   spawnClaudeImpl = spawnClaude, launchctlRetryDelaysMs, sleepImpl,
 } = {}) {
   await assertClaudeOAuthImpl();
@@ -530,13 +535,15 @@ async function reviewWithClaude(diff, extraContext = '', {
 
   // Strip API key from env — Claude CLI falls back to OAuth when it's absent
   const { env } = scrubOAuthFallbackEnv(process.env);
+  const subprocessEnv = withReviewerSubprocessCwdEnv(env, reviewerSubprocessCwd);
 
   let stdout, stderr;
   try {
     ({ stdout, stderr } = await withClaudeLaunchctlRetry(
       () => spawnClaudeImpl(buildClaudeReviewArgs(prompt), {
-        env,
-        timeout: resolveReviewerTimeoutMs(env),
+        env: subprocessEnv,
+        cwd: reviewerSubprocessCwd,
+        timeout: resolveReviewerTimeoutMs(subprocessEnv),
         maxBuffer: 10 * 1024 * 1024,
       }),
       { retryDelaysMs: launchctlRetryDelaysMs, sleepImpl },
@@ -787,7 +794,10 @@ async function spawnCodexReview({
  * (see runbooks/INCIDENT-2026-04-21-ACPX-codex-exec-regression.md).
  * Using native Codex CLI instead, which is stable and produces quality reviews.
  */
-async function reviewWithCodex(diff, extraContext = '', { promptStage = 'first' } = {}) {
+async function reviewWithCodex(diff, extraContext = '', {
+  promptStage = 'first',
+  reviewerSubprocessCwd = process.cwd(),
+} = {}) {
   console.error('[reviewWithCodex] asserting OAuth...');
   await assertCodexOAuth();
   console.error('[reviewWithCodex] OAuth OK');
@@ -817,6 +827,7 @@ async function reviewWithCodex(diff, extraContext = '', { promptStage = 'first' 
     CODEX_AUTH_PATH: effectiveAuthPath,
     HOME: process.env.HOME || homedir(),
   });
+  const subprocessEnv = withReviewerSubprocessCwdEnv(env, reviewerSubprocessCwd);
 
   try {
     let stdout = '';
@@ -830,9 +841,9 @@ async function reviewWithCodex(diff, extraContext = '', { promptStage = 'first' 
         model: codexExecOverrides.model,
         modelProvider: codexExecOverrides.modelProvider,
         configOverrides: codexExecOverrides.configOverrides,
-        env,
-        cwd: process.cwd(),
-        timeout: resolveReviewerTimeoutMs(env),
+        env: subprocessEnv,
+        cwd: reviewerSubprocessCwd,
+        timeout: resolveReviewerTimeoutMs(subprocessEnv),
         maxBuffer: 10 * 1024 * 1024,
       });
       stdout = result.stdout || '';
@@ -2104,6 +2115,7 @@ async function spawnAgyReview({
  */
 async function reviewWithGemini(diff, extraContext = '', {
   promptStage = 'first',
+  reviewerSubprocessCwd = process.cwd(),
   assertOAuthImpl = assertGeminiOAuth,
   spawnGeminiReviewImpl = spawnGeminiReview,
   assertAgyAuthImpl = assertAgyReviewerAuth,
@@ -2190,6 +2202,7 @@ async function reviewWithGemini(diff, extraContext = '', {
   let stderr = '';
   let subprocessStarted = false;
   try {
+    reviewEnv = withReviewerSubprocessCwdEnv(reviewEnv, reviewerSubprocessCwd);
     if (runtime === 'antigravity') {
       await assertAgyAuthImpl({ agyCli: AGY_CLI, env: reviewEnv });
     } else {
@@ -2220,7 +2233,7 @@ async function reviewWithGemini(diff, extraContext = '', {
           prompt,
           model,
           env: reviewEnv,
-          cwd: process.cwd(),
+          cwd: reviewerSubprocessCwd,
           timeout: resolveReviewerTimeoutMs(reviewEnv),
           maxBuffer: 10 * 1024 * 1024,
         }),
@@ -2232,7 +2245,7 @@ async function reviewWithGemini(diff, extraContext = '', {
           prompt,
           model,
           env: reviewEnv,
-          cwd: process.cwd(),
+          cwd: reviewerSubprocessCwd,
           timeout: resolveReviewerTimeoutMs(reviewEnv),
           maxBuffer: 10 * 1024 * 1024,
         }),
@@ -2681,12 +2694,13 @@ function mergeChunkedAgyReviews(chunkReviews, { truncated = false, promptBytes =
  */
 async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
   promptStage = 'first',
+  reviewerSubprocessCwd = process.cwd(),
   reviewWithClaudeImpl = reviewWithClaude,
   reviewWithCodexImpl = reviewWithCodex,
   reviewWithGeminiImpl = reviewWithGemini,
 } = {}) {
   if (effectiveModel === 'claude') {
-    const claudeResult = await reviewWithClaudeImpl(diff, extraContext, { promptStage });
+    const claudeResult = await reviewWithClaudeImpl(diff, extraContext, { promptStage, reviewerSubprocessCwd });
     // reviewWithClaude now returns { reviewText, tokenUsage } (from --output-format
     // json). Tolerate a bare string too (legacy / mocked impls) so callers and
     // tests that predate the json capture keep working.
@@ -2699,7 +2713,7 @@ async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
     return { rawReviewText: text, reviewText: sanitizeReviewPayloadBestEffort(text), tokenUsage, needsSanitize: false };
   }
   if (effectiveModel === 'gemini') {
-    const result = await reviewWithGeminiImpl(diff, extraContext, { promptStage });
+    const result = await reviewWithGeminiImpl(diff, extraContext, { promptStage, reviewerSubprocessCwd });
     return {
       rawReviewText: result.reviewText,
       reviewText: sanitizeReviewPayloadBestEffort(result.reviewText),
@@ -2707,7 +2721,7 @@ async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
       needsSanitize: false,
     };
   }
-  const codexResult = await reviewWithCodexImpl(diff, extraContext, { promptStage });
+  const codexResult = await reviewWithCodexImpl(diff, extraContext, { promptStage, reviewerSubprocessCwd });
   return {
     rawReviewText: codexResult.reviewText,
     reviewText: null,
@@ -2718,6 +2732,7 @@ async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
 
 async function reviewAgyOversizedInChunks(diff, extraContext, {
   promptStage = 'first',
+  reviewerSubprocessCwd = process.cwd(),
   promptBytes = null,
   maxBytes = resolveAgyArgvMaxBytes(),
   reviewWithGeminiImpl = reviewWithGemini,
@@ -2740,7 +2755,7 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
   for (let index = 0; index < split.chunks.length; index += 1) {
     const chunk = split.chunks[index];
     const chunkContext = `${extraContext}${agyOversizedChunkContextSuffix(index + 1, split.chunks.length)}`;
-    const result = await reviewWithGeminiImpl(chunk.diff, chunkContext, { promptStage });
+    const result = await reviewWithGeminiImpl(chunk.diff, chunkContext, { promptStage, reviewerSubprocessCwd });
     chunkReviews.push({
       index: index + 1,
       promptBytes: chunk.promptBytes,

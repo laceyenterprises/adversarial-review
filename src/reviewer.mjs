@@ -1214,6 +1214,20 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const ROOT = join(__dirname, '..');
 
+function resolveReviewerSubprocessCwd({
+  repo,
+  rootDir = ROOT,
+} = {}) {
+  const normalizedRepo = String(repo || '').trim().toLowerCase();
+  // Agent OS PRs need narrowly targeted lookups to resolve paths like
+  // platform/oauth-broker/... from the repo checkout, while adversarial-review
+  // PRs need the submodule root. In both cases the reviewer subprocess gets a
+  // structural cwd that is independent of the daemon's ambient cwd/HOME.
+  return normalizedRepo.endsWith('/adversarial-review')
+    ? rootDir
+    : join(rootDir, '..', '..');
+}
+
 function deriveSpecTouchProject(path) {
   const normalizedPath = String(path ?? '');
   let match = normalizedPath.match(/^(?:projects|modules|tools)\/([^/]+)\/SPEC\.md$/);
@@ -2059,6 +2073,7 @@ async function main() {
     oversizedAgyPromptBytes: oversizedAgyRoute?.oversized ? oversizedAgyRoute.promptBytes : null,
     oversizedAgyBudgetBytes: oversizedAgyRoute?.oversized ? oversizedAgyRoute.maxBytes : null,
   });
+  const reviewerSubprocessCwd = resolveReviewerSubprocessCwd({ repo, rootDir: ROOT });
 
   let reviewText;
   let rawReviewText;
@@ -2072,11 +2087,13 @@ async function main() {
       dispatch = useAgyChunkFallback
         ? await reviewAgyOversizedInChunks(diff, extraContext, {
             promptStage: reviewerPromptStage,
+            reviewerSubprocessCwd,
             promptBytes: oversizedAgyRoute?.promptBytes,
             maxBytes: oversizedAgyRoute?.maxBytes,
           })
         : await dispatchReviewerModel(effectiveModel, diff, extraContext, {
             promptStage: reviewerPromptStage,
+            reviewerSubprocessCwd,
           });
     } catch (firstErr) {
       if (!oversizedAgyRoute?.oversized || useAgyChunkFallback) throw firstErr;
@@ -2088,6 +2105,7 @@ async function main() {
       effectiveBotTokenEnv = 'GH_GEMINI_REVIEWER_TOKEN';
       dispatch = await reviewAgyOversizedInChunks(diff, extraContext, {
         promptStage: reviewerPromptStage,
+        reviewerSubprocessCwd,
         promptBytes: oversizedAgyRoute.promptBytes,
         maxBytes: oversizedAgyRoute.maxBytes,
       });
@@ -2431,6 +2449,7 @@ const __test__ = {
   reconcileLocalReviewShadow,
   resolveReviewedPackLockhash,
   resolveReviewerIdentityForBotTokenEnv,
+  resolveReviewerSubprocessCwd,
   resolveVerdictModeForHead,
   shouldQueueFollowUpForReview,
   startLocalReviewShadowCompletion,
@@ -2453,6 +2472,7 @@ export {
   isFinalReviewRound,
   detectSpecTouchViolations,
   pinReviewerGhIdentity,
+  resolveReviewerSubprocessCwd,
   clearPendingReviewsForSelf,
   postGitHubReviewWithCapture,
   ADVERSARIAL_PROMPT,

@@ -144,6 +144,7 @@ const ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS = ['codex', 'claude-code'];
 export const ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE = ['native', 'agentos'];
 const ENUM_ROLES_ADVERSARIAL_MERGE_AUTHORITY_RISK_CLASS = ['low', 'medium', 'high', 'critical'];
 const ENUM_ROLES_FALLBACK_PATH = ['none', 'litellm-vk', 'litellm-vk-then-deferral'];
+const ENUM_SENTINEL_RCA_WORKER_CLASS = ['sre', 'sre-responder', 'sre-claude'];
 // GMW-02 — gemini always-on-third-reviewer selection mode. Module-scoped knob
 // (`reviewer.gemini.mode`); see the routing layer in
 // adapters/subject/github-pr/routing.mjs.
@@ -2383,6 +2384,26 @@ function schemaV1() {
               },
             },
           },
+          pipeline_stability: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              rca_dispatch: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  enabled: { __type: TYPE_BOOL, __default: false },
+                  cooldown_seconds: { __type: TYPE_INT, __default: 3600, __min: 0 },
+                  authority_check: { __type: TYPE_STRING, __default: 'sag-enabled' },
+                  worker_class: {
+                    __type: TYPE_STRING,
+                    __default: 'sre',
+                    __enum: ENUM_SENTINEL_RCA_WORKER_CLASS,
+                  },
+                },
+              },
+            },
+          },
           disk_headroom: {
             __type: TYPE_DICT,
             __strict: true,
@@ -3338,6 +3359,10 @@ export const ENV_ALIASES = {
   'sentinel.convergence_stall.observed_worker_classes': {
     canonical: 'AGENT_OS_SENTINEL_CONVERGENCE_STALL_OBSERVED_WORKER_CLASSES',
     aliases: [['HQ_SENTINEL_CONVERGENCE_STALL_OBSERVED_WORKER_CLASSES', identity]],
+  },
+  'sentinel.pipeline_stability.rca_dispatch.worker_class': {
+    canonical: 'AGENT_OS_SENTINEL_PIPELINE_STABILITY_RCA_DISPATCH_WORKER_CLASS',
+    aliases: [['HQ_SENTINEL_PIPELINE_STABILITY_RCA_DISPATCH_WORKER_CLASS', identity]],
   },
   'sentinel.detectors.litellm_routing_tier_outage.enabled': {
     canonical: 'AGENT_OS_SENTINEL_DETECTORS_LITELLM_ROUTING_TIER_OUTAGE_ENABLED',

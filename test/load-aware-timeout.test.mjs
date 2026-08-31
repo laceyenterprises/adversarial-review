@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 
 import {
+  CPU_BUSY_THRESHOLD_PERCENT,
   loadAwareMultiplier,
   loadAwareTimeoutSeconds,
   MIN_MULTIPLIER,
@@ -41,17 +42,42 @@ test('idle host keeps the nominal timeout (1x)', () => {
 
 test('contended host inflates the timeout so the first run has headroom', () => {
   // loadPerCore = 16/8 = 2 → 3.5x → ceil(360*3.5) = 1260
-  assert.equal(loadAwareTimeoutSeconds(360, { loadAvg1m: 16, cpuCount: 8 }), 1260);
+  assert.equal(
+    loadAwareTimeoutSeconds(360, { loadAvg1m: 16, cpuCount: 8, cpuBusyPercent: 95 }),
+    1260,
+  );
 });
 
 test('heavy contention caps at MAX_MULTIPLIER, not unbounded', () => {
   // loadPerCore = 48/8 = 6 → 6x → 2160
-  assert.equal(loadAwareTimeoutSeconds(360, { loadAvg1m: 48, cpuCount: 8 }), 2160);
+  assert.equal(
+    loadAwareTimeoutSeconds(360, { loadAvg1m: 48, cpuCount: 8, cpuBusyPercent: 95 }),
+    2160,
+  );
+});
+
+test('high loadavg with low real CPU stays at the nominal timeout', () => {
+  assert.equal(
+    loadAwareTimeoutSeconds(360, { loadAvg1m: 80, cpuCount: 18, cpuBusyPercent: 37 }),
+    360,
+  );
+});
+
+test('high loadavg with inconclusive CPU signal stays at the nominal timeout', () => {
+  assert.equal(
+    loadAwareTimeoutSeconds(360, { loadAvg1m: 80, cpuCount: 18, cpuBusyPercent: null }),
+    360,
+  );
 });
 
 test('effective timeout is clamped to maxSeconds', () => {
   assert.equal(
-    loadAwareTimeoutSeconds(1000, { loadAvg1m: 48, cpuCount: 8, maxSeconds: 1500 }),
+    loadAwareTimeoutSeconds(1000, {
+      loadAvg1m: 48,
+      cpuCount: 8,
+      cpuBusyPercent: CPU_BUSY_THRESHOLD_PERCENT,
+      maxSeconds: 1500,
+    }),
     1500,
   );
 });
@@ -62,7 +88,11 @@ test('never returns below the nominal even with a fractional base', () => {
 });
 
 test('DEFAULT_MAX_TIMEOUT_SECONDS is the fallback clamp', () => {
-  const out = loadAwareTimeoutSeconds(2000, { loadAvg1m: 48, cpuCount: 8 });
+  const out = loadAwareTimeoutSeconds(2000, {
+    loadAvg1m: 48,
+    cpuCount: 8,
+    cpuBusyPercent: 95,
+  });
   assert.equal(out, DEFAULT_MAX_TIMEOUT_SECONDS); // 2000*6=12000 clamped to 3600
 });
 
@@ -94,7 +124,7 @@ test('CLI prints usage context for missing and help arguments while staying boun
 });
 
 test('is pure given inputs — same args, same output, no clock/randomness', () => {
-  const a = loadAwareTimeoutSeconds(300, { loadAvg1m: 12, cpuCount: 6 });
-  const b = loadAwareTimeoutSeconds(300, { loadAvg1m: 12, cpuCount: 6 });
+  const a = loadAwareTimeoutSeconds(300, { loadAvg1m: 12, cpuCount: 6, cpuBusyPercent: 95 });
+  const b = loadAwareTimeoutSeconds(300, { loadAvg1m: 12, cpuCount: 6, cpuBusyPercent: 95 });
   assert.equal(a, b);
 });

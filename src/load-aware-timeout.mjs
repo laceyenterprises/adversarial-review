@@ -14,6 +14,7 @@
  * The curve mirrors agent-os's fleet-pressure multiplier
  * (`cwp_dispatch/timeout_policy.py`), host-load subset:
  *   loadPerCore = loadAvg1m / cpuCount
+ *   cpuBusy    >= 85%
  *   factor      = max(0, (loadPerCore - 1) / 2)   // 0 at load<=1, 1.0 at load=3
  *   multiplier  = clamp(1 + factor * 5, 1, 6)     // 1x idle, 6x at load>=3
  *
@@ -24,6 +25,7 @@
  * @module load-aware-timeout
  */
 import os from 'node:os';
+import { execFileSync } from 'node:child_process';
 
 /** Multiplier floor — never shrink a nominal timeout. */
 export const MIN_MULTIPLIER = 1;
@@ -31,6 +33,33 @@ export const MIN_MULTIPLIER = 1;
 export const MAX_MULTIPLIER = 6;
 /** Absolute clamp so a wild loadavg can never produce an unbounded alarm. */
 export const DEFAULT_MAX_TIMEOUT_SECONDS = 3600;
+/** Corroborating CPU-busy threshold required before loadavg can inflate a timeout. */
+export const CPU_BUSY_THRESHOLD_PERCENT = 85;
+
+export function hostCpuBusyPercent() {
+  try {
+    const out = execFileSync('/bin/ps', ['-A', '-o', '%cpu='], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 1000,
+    });
+    let total = 0;
+    let seen = false;
+    for (const line of out.split(/\r?\n/)) {
+      const raw = line.trim().replace(',', '.');
+      if (!raw) continue;
+      const value = Number(raw);
+      if (!Number.isFinite(value)) return null;
+      total += value;
+      seen = true;
+    }
+    if (!seen) return null;
+    const cores = os.cpus()?.length || 1;
+    return Math.max(0, Math.min(100, total / cores));
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Host-load → patience multiplier in `[MIN_MULTIPLIER, MAX_MULTIPLIER]`.
@@ -51,12 +80,18 @@ export function loadAwareMultiplier(loadPerCore) {
  * @param {Object} [opts]
  * @param {number} [opts.loadAvg1m]   Override 1m loadavg (else os.loadavg()[0]).
  * @param {number} [opts.cpuCount]    Override CPU count (else os.cpus().length).
+ * @param {number} [opts.cpuBusyPercent] Override CPU busy percent (else sampled from ps).
  * @param {number} [opts.maxSeconds]  Absolute clamp (default 3600).
  * @returns {number} Effective timeout in whole seconds, never below the nominal.
  * @throws {Error} when baseSeconds is not a positive finite number.
  */
 export function loadAwareTimeoutSeconds(baseSeconds, opts = {}) {
-  const { loadAvg1m, cpuCount, maxSeconds = DEFAULT_MAX_TIMEOUT_SECONDS } = opts;
+  const {
+    loadAvg1m,
+    cpuCount,
+    cpuBusyPercent,
+    maxSeconds = DEFAULT_MAX_TIMEOUT_SECONDS,
+  } = opts;
   const base = Number(baseSeconds);
   if (!Number.isFinite(base) || base <= 0) {
     throw new Error(
@@ -67,8 +102,13 @@ export function loadAwareTimeoutSeconds(baseSeconds, opts = {}) {
     ? cpuCount
     : (os.cpus()?.length || 1);
   const load = Number.isFinite(loadAvg1m) ? loadAvg1m : (os.loadavg()?.[0] ?? 0);
+  const hasBusyOverride = Object.prototype.hasOwnProperty.call(opts, 'cpuBusyPercent');
+  const busy = hasBusyOverride ? cpuBusyPercent : hostCpuBusyPercent();
   const loadPerCore = load / cores;
-  const effective = Math.ceil(base * loadAwareMultiplier(loadPerCore));
+  const saturationConfirmed = Number.isFinite(busy) && busy >= CPU_BUSY_THRESHOLD_PERCENT;
+  const effective = Math.ceil(
+    base * (saturationConfirmed ? loadAwareMultiplier(loadPerCore) : MIN_MULTIPLIER),
+  );
   // Never below the nominal. The max cap limits load inflation, not the
   // caller's explicit nominal timeout.
   const nominal = Math.ceil(base);

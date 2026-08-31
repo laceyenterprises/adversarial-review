@@ -2649,6 +2649,7 @@ test('checked-in top-level sentinel detector config loads through strict Node sc
   assert.equal(cfg.get('sentinel.deploy_checkout.repo_path'), '/Users/airlock/agent-os');
   assert.equal(cfg.get('sentinel.deploy_checkout.worker_identity_emails'), null);
   assert.equal(cfg.get('sentinel.codex_compaction.rate_alarm_per_hour'), 3);
+  assert.equal(cfg.get('sentinel.pipeline_stability.rca_dispatch.worker_class'), 'sre');
   assert.deepEqual(cfg.get('sentinel.convergence_stall.observed_worker_classes'), [
     'codex',
     'claude-code',
@@ -2659,9 +2660,22 @@ test('checked-in top-level sentinel detector config loads through strict Node sc
     topPath: top,
     env: {
       HQ_SENTINEL_CODEX_COMPACTION_RATE_ALARM_PER_HOUR: '6',
+      AGENT_OS_SENTINEL_PIPELINE_STABILITY_RCA_DISPATCH_WORKER_CLASS: 'sre-responder',
     },
   });
   assert.equal(envCfg.get('sentinel.codex_compaction.rate_alarm_per_hour'), 6);
+  assert.equal(envCfg.get('sentinel.pipeline_stability.rca_dispatch.worker_class'), 'sre-responder');
+
+  assert.throws(
+    () =>
+      loadConfig({
+        topPath: top,
+        env: {
+          AGENT_OS_SENTINEL_PIPELINE_STABILITY_RCA_DISPATCH_WORKER_CLASS: 'codex',
+        },
+      }),
+    /sentinel\.pipeline_stability\.rca_dispatch\.worker_class/,
+  );
 
   const legacyEnvCfg = loadConfig({
     topPath: top,

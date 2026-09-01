@@ -32,6 +32,7 @@ import {
   evaluateNoProgressLane,
   maybeFireOperatorDecisionRequiredAlert,
   noProgressLaneFilePath,
+  operatorDecisionAlertStateDir,
   readNoProgressLane,
   recordNoProgressLaneRun,
   recordNoProgressLaneSkip,
@@ -771,6 +772,46 @@ test('no-progress gate classifies operator decision required and pages once', as
 
     await gate.record(handler, { value });
     assert.equal(alerts.length, 1, 'operator decision alert does not repeat every tick');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('operator decision alert delivery failure does not persist debounce state', async () => {
+  const rootDir = tempRoot();
+  try {
+    const identity = { repo: REPO, prNumber: 6028 };
+    await assert.rejects(
+      maybeFireOperatorDecisionRequiredAlert({
+        rootDir,
+        identity,
+        headSha: HEAD_A,
+        noProgressTicks: DEFAULT_OPERATOR_BLOCKED_ALERT_NO_PROGRESS_TICKS,
+        firstNoProgressAt: '2026-08-31T12:00:00.000Z',
+        deliverAlertFn: async () => { throw new Error('alert bus unavailable'); },
+        logger: silentLogger,
+        now: Date.parse('2026-08-31T13:00:00.000Z'),
+      }),
+      /alert bus unavailable/,
+    );
+    assert.equal(
+      existsSync(operatorDecisionAlertStateDir(rootDir)),
+      false,
+      'a failed delivery must not create a durable debounce marker',
+    );
+
+    const alerts = [];
+    assert.equal(await maybeFireOperatorDecisionRequiredAlert({
+      rootDir,
+      identity,
+      headSha: HEAD_A,
+      noProgressTicks: DEFAULT_OPERATOR_BLOCKED_ALERT_NO_PROGRESS_TICKS,
+      firstNoProgressAt: '2026-08-31T12:00:00.000Z',
+      deliverAlertFn: async (text, meta) => { alerts.push({ text, meta }); },
+      logger: silentLogger,
+      now: Date.parse('2026-08-31T13:05:00.000Z'),
+    }), true);
+    assert.equal(alerts.length, 1, 'the next tick can retry after the alert bus recovers');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

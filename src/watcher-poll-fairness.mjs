@@ -180,7 +180,7 @@ function runWithDeadline(run, {
   });
   const work = Promise.resolve()
     .then(() => run())
-    .then(() => ({ timedOut: false }), (error) => ({ timedOut: false, error }));
+    .then((value) => ({ timedOut: false, value }), (error) => ({ timedOut: false, error }));
   return Promise.race([work, deadline]).finally(() => {
     if (timer !== null) clearTimeoutFn(timer);
   });
@@ -305,7 +305,11 @@ export async function runPostedReviewHandlersFairly({
 
     if (laneGate && typeof laneGate.record === 'function') {
       try {
-        laneGate.record(handler, { timedOut: outcome.timedOut, error: outcome.error || null });
+        await laneGate.record(handler, {
+          timedOut: outcome.timedOut,
+          error: outcome.error || null,
+          value: outcome.value,
+        });
       } catch (err) {
         logger?.warn?.(
           `[watcher] no-progress lane record failed for ${key} (${err?.message || err})`,

@@ -21,11 +21,16 @@ import {
 } from '../src/watcher-heartbeat.mjs';
 import {
   DEFAULT_NO_PROGRESS_LANE_CAP,
+  DEFAULT_OPERATOR_BLOCKED_ALERT_NO_PROGRESS_TICKS,
+  DEFAULT_OPERATOR_BLOCKED_REWALK_TICKS,
   LANE_ACTIVE,
+  LANE_OPERATOR_BLOCKED,
   LANE_SLOW,
+  PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED,
   backoffTicksFor,
   clearNoProgressLane,
   evaluateNoProgressLane,
+  maybeFireOperatorDecisionRequiredAlert,
   noProgressLaneFilePath,
   readNoProgressLane,
   recordNoProgressLaneRun,
@@ -37,6 +42,7 @@ import {
   orderSubjectEntriesDiscoveryFirst,
   runPostedReviewHandlersFairly,
 } from '../src/watcher-poll-fairness.mjs';
+import { createNoProgressLaneGate } from '../src/posted-review-row.mjs';
 import {
   createPollStarvationHandler,
   resolvePollStarvationConfig,
@@ -635,6 +641,136 @@ test('no-progress lane skips walk a demoted PR back toward due', () => {
       { headSha: HEAD_A },
     );
     assert.equal(due.due, true, 'the backoff always expires — the PR is deferred, never dropped');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('operator-blocked lane keeps a flat re-walk cadence instead of escalating backoff', () => {
+  const rootDir = tempRoot();
+  try {
+    const identity = { repo: REPO, prNumber: 6028 };
+    for (let i = 0; i < DEFAULT_NO_PROGRESS_LANE_CAP + 20; i += 1) {
+      const outcome = recordNoProgressLaneRun(rootDir, identity, {
+        headSha: HEAD_A,
+        fingerprint: 'operator-parked',
+        progressClass: PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED,
+        now: `t${i}`,
+        logger: silentLogger,
+      });
+      assert.equal(outcome.lane, LANE_OPERATOR_BLOCKED);
+      assert.equal(outcome.backoffTicks, DEFAULT_OPERATOR_BLOCKED_REWALK_TICKS);
+    }
+
+    const decision = evaluateNoProgressLane(
+      readNoProgressLane(rootDir, identity, { logger: silentLogger }),
+      { headSha: HEAD_A },
+    );
+    assert.equal(decision.lane, LANE_OPERATOR_BLOCKED);
+    assert.equal(decision.due, false);
+    assert.equal(decision.backoffTicks, DEFAULT_OPERATOR_BLOCKED_REWALK_TICKS);
+
+    for (let i = 0; i < DEFAULT_OPERATOR_BLOCKED_REWALK_TICKS; i += 1) {
+      recordNoProgressLaneSkip(rootDir, identity, { headSha: HEAD_A, now: `s${i}`, logger: silentLogger });
+    }
+    assert.equal(
+      evaluateNoProgressLane(
+        readNoProgressLane(rootDir, identity, { logger: silentLogger }),
+        { headSha: HEAD_A },
+      ).due,
+      true,
+      'operator-blocked PRs stay on a fixed re-walk interval',
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('operator-decision alert fires once after threshold, not every tick', async () => {
+  const rootDir = tempRoot();
+  try {
+    const identity = { repo: REPO, prNumber: 6028 };
+    const alerts = [];
+    const deliverAlertFn = async (text, meta) => { alerts.push({ text, meta }); };
+
+    assert.equal(await maybeFireOperatorDecisionRequiredAlert({
+      rootDir,
+      identity,
+      headSha: HEAD_A,
+      noProgressTicks: DEFAULT_OPERATOR_BLOCKED_ALERT_NO_PROGRESS_TICKS - 1,
+      deliverAlertFn,
+      logger: silentLogger,
+    }), false);
+    assert.equal(alerts.length, 0);
+
+    assert.equal(await maybeFireOperatorDecisionRequiredAlert({
+      rootDir,
+      identity,
+      headSha: HEAD_A,
+      noProgressTicks: DEFAULT_OPERATOR_BLOCKED_ALERT_NO_PROGRESS_TICKS,
+      firstNoProgressAt: '2026-08-31T12:00:00.000Z',
+      deliverAlertFn,
+      logger: silentLogger,
+      now: Date.parse('2026-08-31T13:00:00.000Z'),
+    }), true);
+    assert.equal(alerts.length, 1);
+    assert.equal(alerts[0].meta.event, 'adversarial_review.operator_decision_required');
+    assert.equal(alerts[0].meta.payload.prNumber, 6028);
+    assert.match(alerts[0].text, /parked awaiting operator decision/);
+
+    assert.equal(await maybeFireOperatorDecisionRequiredAlert({
+      rootDir,
+      identity,
+      headSha: HEAD_A,
+      noProgressTicks: DEFAULT_OPERATOR_BLOCKED_ALERT_NO_PROGRESS_TICKS + 50,
+      deliverAlertFn,
+      logger: silentLogger,
+    }), false);
+    assert.equal(alerts.length, 1, 'debounce state suppresses same PR/head repeats');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('no-progress gate classifies operator decision required and pages once', async () => {
+  const rootDir = tempRoot();
+  try {
+    const identity = { repo: REPO, prNumber: 6028 };
+    const alerts = [];
+    const gate = createNoProgressLaneGate({
+      rootDir,
+      readReviewRow: () => ({
+        review_status: 'posted',
+        pr_state: 'open',
+        reviewer_head_sha: HEAD_A,
+        review_attempts: 1,
+        posted_at: '2026-08-31T07:00:00.000Z',
+        failed_at: null,
+        merged_at: null,
+      }),
+      now: () => '2026-08-31T13:00:00.000Z',
+      deliverAlertFn: async (text, meta) => { alerts.push({ text, meta }); },
+      logger: silentLogger,
+    });
+    const handler = { repoPath: identity.repo, prNumber: identity.prNumber, headSha: HEAD_A };
+    const value = {
+      gateDecision: {
+        state: 'success',
+        reason: 'remediation-stopped',
+        operatorDecisionRequired: true,
+      },
+    };
+
+    for (let i = 0; i < DEFAULT_OPERATOR_BLOCKED_ALERT_NO_PROGRESS_TICKS + 2; i += 1) {
+      await gate.record(handler, { value });
+    }
+    const ledger = readNoProgressLane(rootDir, identity, { logger: silentLogger });
+    assert.equal(ledger.lane, LANE_OPERATOR_BLOCKED);
+    assert.equal(ledger.progressClass, PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED);
+    assert.equal(alerts.length, 1);
+
+    await gate.record(handler, { value });
+    assert.equal(alerts.length, 1, 'operator decision alert does not repeat every tick');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

@@ -46,7 +46,7 @@
 // is that truth: if it is byte-identical to the previous tick's, the tick did
 // nothing for this PR.
 
-import { mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { writeFileAtomic } from './atomic-write.mjs';
@@ -64,11 +64,17 @@ export const DEFAULT_NO_PROGRESS_LANE_CAP = 3;
 // the PR is guaranteed to be re-walked at least hourly no matter how long it has
 // been stuck.
 export const DEFAULT_NO_PROGRESS_MAX_BACKOFF_TICKS = 12;
+export const DEFAULT_OPERATOR_BLOCKED_REWALK_TICKS = 3;
+export const DEFAULT_OPERATOR_BLOCKED_ALERT_NO_PROGRESS_TICKS = 6;
 
 const NO_PROGRESS_LANE_SCHEMA_VERSION = 1;
 
 export const LANE_ACTIVE = 'active';
 export const LANE_SLOW = 'slow';
+export const LANE_OPERATOR_BLOCKED = 'operator-blocked';
+
+export const PROGRESS_CLASS_SELF_RESOLVING = 'self-resolving';
+export const PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED = 'operator-decision-required';
 
 function noProgressLaneDir(rootDir) {
   return join(rootDir, 'data', 'watcher-no-progress-lane');
@@ -99,6 +105,16 @@ function normalizeCount(value) {
 function positiveIntOr(value, fallback) {
   const numeric = Number(value);
   return Number.isFinite(numeric) && numeric > 0 ? Math.trunc(numeric) : fallback;
+}
+
+function normalizeProgressClass(value) {
+  return value === PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED
+    ? PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED
+    : PROGRESS_CLASS_SELF_RESOLVING;
+}
+
+function operatorBlockedRewalkTicks(value) {
+  return positiveIntOr(value, DEFAULT_OPERATOR_BLOCKED_REWALK_TICKS);
 }
 
 /**
@@ -205,6 +221,7 @@ export function evaluateNoProgressLane(ledger, {
   headSha = null,
   cap = DEFAULT_NO_PROGRESS_LANE_CAP,
   maxBackoffTicks = DEFAULT_NO_PROGRESS_MAX_BACKOFF_TICKS,
+  operatorBlockedRewalkTicks: operatorRewalkTicks = DEFAULT_OPERATOR_BLOCKED_REWALK_TICKS,
 } = {}) {
   const head = normalizeHead(headSha);
   const ledgerHead = normalizeHead(ledger?.headSha);
@@ -221,6 +238,21 @@ export function evaluateNoProgressLane(ledger, {
     return { ...base, reason: 'head-changed' };
   }
   const noProgressTicks = normalizeCount(ledger.noProgressTicks);
+  const progressClass = normalizeProgressClass(ledger.progressClass);
+  if (progressClass === PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED) {
+    const backoffTicks = operatorBlockedRewalkTicks(operatorRewalkTicks);
+    const skippedTicks = normalizeCount(ledger.skippedTicks);
+    const due = skippedTicks >= backoffTicks;
+    return {
+      lane: LANE_OPERATOR_BLOCKED,
+      due,
+      noProgressTicks,
+      skippedTicks,
+      backoffTicks,
+      headSha: head,
+      reason: due ? 'operator-blocked-due' : 'operator-blocked-flat-wait',
+    };
+  }
   const backoffTicks = backoffTicksFor(noProgressTicks, { cap, maxBackoffTicks });
   if (backoffTicks <= 0) {
     return { ...base, noProgressTicks, reason: 'under-cap' };
@@ -276,8 +308,10 @@ export function recordNoProgressLaneSkip(rootDir, identity, {
 export function recordNoProgressLaneRun(rootDir, identity, {
   headSha,
   fingerprint,
+  progressClass = PROGRESS_CLASS_SELF_RESOLVING,
   cap = DEFAULT_NO_PROGRESS_LANE_CAP,
   maxBackoffTicks = DEFAULT_NO_PROGRESS_MAX_BACKOFF_TICKS,
+  operatorBlockedRewalkTicks: operatorRewalkTicks = DEFAULT_OPERATOR_BLOCKED_REWALK_TICKS,
   now = null,
   logger = console,
 } = {}) {
@@ -294,8 +328,13 @@ export function recordNoProgressLaneRun(rootDir, identity, {
     && existing.fingerprint === fingerprint;
   const priorNoProgress = sameHead ? normalizeCount(existing?.noProgressTicks) : 0;
   const noProgressTicks = sameFingerprint ? priorNoProgress + 1 : 0;
-  const backoffTicks = backoffTicksFor(noProgressTicks, { cap, maxBackoffTicks });
-  const lane = backoffTicks > 0 ? LANE_SLOW : LANE_ACTIVE;
+  const normalizedProgressClass = normalizeProgressClass(progressClass);
+  const backoffTicks = normalizedProgressClass === PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED
+    ? operatorBlockedRewalkTicks(operatorRewalkTicks)
+    : backoffTicksFor(noProgressTicks, { cap, maxBackoffTicks });
+  const lane = normalizedProgressClass === PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED
+    ? LANE_OPERATOR_BLOCKED
+    : (backoffTicks > 0 ? LANE_SLOW : LANE_ACTIVE);
   const priorLane = sameHead ? (existing?.lane || LANE_ACTIVE) : LANE_ACTIVE;
   writeLedger(rootDir, identity, {
     schemaVersion: NO_PROGRESS_LANE_SCHEMA_VERSION,
@@ -303,6 +342,7 @@ export function recordNoProgressLaneRun(rootDir, identity, {
     prNumber: Number(identity?.prNumber),
     headSha: head,
     fingerprint: typeof fingerprint === 'string' ? fingerprint : null,
+    progressClass: normalizedProgressClass,
     noProgressTicks,
     // A walked PR starts its next backoff window from zero regardless of outcome.
     skippedTicks: 0,
@@ -312,10 +352,87 @@ export function recordNoProgressLaneRun(rootDir, identity, {
   });
   return {
     lane,
+    progressClass: normalizedProgressClass,
     progressed: !sameFingerprint,
     noProgressTicks,
     backoffTicks,
     demoted: lane === LANE_SLOW && priorLane !== LANE_SLOW,
     headSha: head,
   };
+}
+
+export function operatorDecisionAlertStateDir(rootDir) {
+  return join(rootDir, 'data', 'watcher-no-progress-lane', 'operator-decision-alerts');
+}
+
+function operatorDecisionAlertStatePath(rootDir, identity, headSha) {
+  const safeRepo = sanitizePathSegment(String(identity?.repo ?? '').replace(/\//g, '__'));
+  const safeHead = sanitizePathSegment(headSha || 'no-sha');
+  return join(
+    operatorDecisionAlertStateDir(rootDir),
+    `${safeRepo}-pr-${Number(identity?.prNumber)}-${safeHead}.json`,
+  );
+}
+
+export async function maybeFireOperatorDecisionRequiredAlert({
+  rootDir,
+  identity,
+  headSha,
+  noProgressTicks,
+  firstNoProgressAt = null,
+  thresholdTicks = DEFAULT_OPERATOR_BLOCKED_ALERT_NO_PROGRESS_TICKS,
+  deliverAlertFn,
+  logger = console,
+  now = Date.now(),
+  fsImpl = { existsSync, mkdirSync, readFileSync, writeFileSync },
+} = {}) {
+  if (typeof deliverAlertFn !== 'function') return false;
+  const threshold = positiveIntOr(thresholdTicks, DEFAULT_OPERATOR_BLOCKED_ALERT_NO_PROGRESS_TICKS);
+  if (normalizeCount(noProgressTicks) < threshold) return false;
+
+  const statePath = operatorDecisionAlertStatePath(rootDir, identity, normalizeHead(headSha));
+  try {
+    if (fsImpl.existsSync(statePath)) return false;
+  } catch {
+    // Read faults fail toward one alert; the write below still debounces future ticks.
+  }
+
+  const repo = identity?.repo ?? 'unknown-repo';
+  const prNumber = Number(identity?.prNumber);
+  const text = (
+    `Adversarial-watcher: ${repo}#${prNumber} is parked awaiting operator decision. ` +
+    `Remediation stopped or failed with findings unresolved; AMA is not eligible while blocking findings remain. ` +
+    `No-progress observations=${normalizeCount(noProgressTicks)} on head ${(normalizeHead(headSha) || 'unknown').slice(0, 12)}. ` +
+    `Review the PR thread and either remediate, approve the risk, or close the PR.`
+  );
+  await deliverAlertFn(text, {
+    event: 'adversarial_review.operator_decision_required',
+    payload: {
+      repo,
+      prNumber,
+      headSha: normalizeHead(headSha),
+      noProgressTicks: normalizeCount(noProgressTicks),
+      firstNoProgressAt,
+      thresholdTicks: threshold,
+      reason: 'remediation-terminal-findings-unresolved',
+    },
+  });
+
+  try {
+    fsImpl.mkdirSync(operatorDecisionAlertStateDir(rootDir), { recursive: true });
+    fsImpl.writeFileSync(statePath, `${JSON.stringify({
+      repo,
+      prNumber,
+      headSha: normalizeHead(headSha),
+      alertedAt: new Date(now).toISOString(),
+      noProgressTicks: normalizeCount(noProgressTicks),
+      thresholdTicks: threshold,
+    }, null, 2)}\n`);
+  } catch (err) {
+    logger?.warn?.(
+      `[watcher] no-progress lane: failed to persist operator-decision alert debounce ` +
+        `state (${err?.message || err})`,
+    );
+  }
+  return true;
 }

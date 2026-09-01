@@ -865,6 +865,19 @@ test('operator-decision alert cleanup removes every head and fingerprint debounc
   }
 });
 
+test('no-progress gate can use the production alert delivery fallback', () => {
+  const rootDir = tempRoot();
+  try {
+    assert.doesNotThrow(() => createNoProgressLaneGate({
+      rootDir,
+      readReviewRow: () => null,
+      logger: silentLogger,
+    }));
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('no-progress gate classifies operator decision required and pages once', async () => {
   const rootDir = tempRoot();
   try {

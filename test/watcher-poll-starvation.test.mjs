@@ -11,7 +11,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -914,6 +914,13 @@ test('no-progress gate classifies operator decision required and pages once', as
     assert.equal(ledger.lane, LANE_OPERATOR_BLOCKED);
     assert.equal(ledger.progressClass, PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED);
     assert.equal(alerts.length, 1);
+    assert.equal(alerts[0].meta.payload.firstNoProgressAt, '2026-08-31T13:00:00.000Z');
+    const alertStateFile = readdirSync(operatorDecisionAlertStateDir(rootDir))[0];
+    const alertState = JSON.parse(readFileSync(
+      join(operatorDecisionAlertStateDir(rootDir), alertStateFile),
+      'utf8',
+    ));
+    assert.equal(alertState.alertedAt, '2026-08-31T13:00:00.000Z');
 
     await gate.record(handler, { value });
     assert.equal(alerts.length, 1, 'operator decision alert does not repeat every tick');

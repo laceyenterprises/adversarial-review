@@ -449,11 +449,12 @@ export function createNoProgressLaneGate({
       const progressClass = value?.gateDecision?.operatorDecisionRequired === true
         ? PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED
         : PROGRESS_CLASS_SELF_RESOLVING;
+      const observedAt = now();
       const outcome = recordNoProgressLaneRun(rootDir, identity, {
         headSha: handler.headSha || null,
         fingerprint,
         progressClass,
-        now: now(),
+        now: observedAt,
         logger,
       });
       if (outcome?.demoted) {
@@ -474,9 +475,9 @@ export function createNoProgressLaneGate({
             fingerprint,
             noProgressTicks: outcome.noProgressTicks,
             firstNoProgressAt: outcome.firstNoProgressAt || null,
-            now: Date.parse(now()),
             deliverAlertFn,
             logger,
+            now: Date.parse(observedAt),
           });
           if (alerted) {
             logger?.warn?.(

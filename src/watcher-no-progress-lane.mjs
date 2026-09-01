@@ -376,6 +376,7 @@ export function recordNoProgressLaneRun(rootDir, identity, {
     progressClass: normalizedProgressClass,
     progressed: !sameFingerprint,
     noProgressTicks,
+    firstNoProgressAt,
     backoffTicks,
     demoted: lane === LANE_SLOW && priorLane !== LANE_SLOW,
     headSha: head,

@@ -46,7 +46,8 @@
 // is that truth: if it is byte-identical to the previous tick's, the tick did
 // nothing for this PR.
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { writeFileAtomic } from './atomic-write.mjs';
@@ -113,6 +114,10 @@ function normalizeProgressClass(value) {
     : PROGRESS_CLASS_SELF_RESOLVING;
 }
 
+function hasOwn(obj, key) {
+  return Object.prototype.hasOwnProperty.call(Object(obj), key);
+}
+
 function operatorBlockedRewalkTicks(value) {
   return positiveIntOr(value, DEFAULT_OPERATOR_BLOCKED_REWALK_TICKS);
 }
@@ -171,6 +176,7 @@ export function readNoProgressLane(rootDir, identity, { logger = console } = {})
 
 export function clearNoProgressLane(rootDir, identity, { logger = console } = {}) {
   const filePath = noProgressLaneFilePath(rootDir, identity);
+  clearOperatorDecisionAlertState(rootDir, identity, { logger });
   try {
     rmSync(filePath, { force: true });
     return true;
@@ -238,6 +244,17 @@ export function evaluateNoProgressLane(ledger, {
     return { ...base, reason: 'head-changed' };
   }
   const noProgressTicks = normalizeCount(ledger.noProgressTicks);
+  if (!hasOwn(ledger, 'progressClass')) {
+    return {
+      lane: LANE_OPERATOR_BLOCKED,
+      due: true,
+      noProgressTicks,
+      skippedTicks: 0,
+      backoffTicks: 0,
+      headSha: head,
+      reason: 'legacy-progress-class-missing',
+    };
+  }
   const progressClass = normalizeProgressClass(ledger.progressClass);
   if (progressClass === PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED) {
     const backoffTicks = operatorBlockedRewalkTicks(operatorRewalkTicks);
@@ -365,19 +382,60 @@ export function operatorDecisionAlertStateDir(rootDir) {
   return join(rootDir, 'data', 'watcher-no-progress-lane', 'operator-decision-alerts');
 }
 
-function operatorDecisionAlertStatePath(rootDir, identity, headSha) {
+function operatorDecisionAlertFilePrefix(identity) {
   const safeRepo = sanitizePathSegment(String(identity?.repo ?? '').replace(/\//g, '__'));
+  return `${safeRepo}-pr-${Number(identity?.prNumber)}-`;
+}
+
+function fingerprintKey(value) {
+  const normalized = typeof value === 'string' && value.length > 0 ? value : 'no-fingerprint';
+  return createHash('sha256').update(normalized).digest('hex').slice(0, 16);
+}
+
+function operatorDecisionAlertStatePath(rootDir, identity, headSha, fingerprint) {
   const safeHead = sanitizePathSegment(headSha || 'no-sha');
   return join(
     operatorDecisionAlertStateDir(rootDir),
-    `${safeRepo}-pr-${Number(identity?.prNumber)}-${safeHead}.json`,
+    `${operatorDecisionAlertFilePrefix(identity)}${safeHead}-${fingerprintKey(fingerprint)}.json`,
   );
+}
+
+export function clearOperatorDecisionAlertState(rootDir, identity, { logger = console } = {}) {
+  const dir = operatorDecisionAlertStateDir(rootDir);
+  const prefix = operatorDecisionAlertFilePrefix(identity);
+  let entries = [];
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch (err) {
+    if (err?.code === 'ENOENT') return true;
+    logger?.warn?.(
+      `[watcher] no-progress lane: failed to list operator-decision alert debounce dir ${dir} ` +
+        `(${err?.code || err?.message || 'unknown'})`,
+    );
+    return false;
+  }
+  let ok = true;
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.startsWith(prefix) || !entry.name.endsWith('.json')) continue;
+    const filePath = join(dir, entry.name);
+    try {
+      rmSync(filePath, { force: true });
+    } catch (err) {
+      ok = false;
+      logger?.warn?.(
+        `[watcher] no-progress lane: failed to remove operator-decision alert debounce ${filePath} ` +
+          `(${err?.code || err?.message || 'unknown'})`,
+      );
+    }
+  }
+  return ok;
 }
 
 export async function maybeFireOperatorDecisionRequiredAlert({
   rootDir,
   identity,
   headSha,
+  fingerprint = null,
   noProgressTicks,
   firstNoProgressAt = null,
   thresholdTicks = DEFAULT_OPERATOR_BLOCKED_ALERT_NO_PROGRESS_TICKS,
@@ -390,7 +448,7 @@ export async function maybeFireOperatorDecisionRequiredAlert({
   const threshold = positiveIntOr(thresholdTicks, DEFAULT_OPERATOR_BLOCKED_ALERT_NO_PROGRESS_TICKS);
   if (normalizeCount(noProgressTicks) < threshold) return false;
 
-  const statePath = operatorDecisionAlertStatePath(rootDir, identity, normalizeHead(headSha));
+  const statePath = operatorDecisionAlertStatePath(rootDir, identity, normalizeHead(headSha), fingerprint);
   try {
     if (fsImpl.existsSync(statePath)) return false;
   } catch {
@@ -411,6 +469,8 @@ export async function maybeFireOperatorDecisionRequiredAlert({
       repo,
       prNumber,
       headSha: normalizeHead(headSha),
+      fingerprint: typeof fingerprint === 'string' ? fingerprint : null,
+      fingerprintKey: fingerprintKey(fingerprint),
       noProgressTicks: normalizeCount(noProgressTicks),
       firstNoProgressAt,
       thresholdTicks: threshold,
@@ -424,6 +484,8 @@ export async function maybeFireOperatorDecisionRequiredAlert({
       repo,
       prNumber,
       headSha: normalizeHead(headSha),
+      fingerprint: typeof fingerprint === 'string' ? fingerprint : null,
+      fingerprintKey: fingerprintKey(fingerprint),
       alertedAt: new Date(now).toISOString(),
       noProgressTicks: normalizeCount(noProgressTicks),
       thresholdTicks: threshold,

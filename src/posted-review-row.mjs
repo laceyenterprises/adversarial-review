@@ -471,6 +471,7 @@ export function createNoProgressLaneGate({
             rootDir,
             identity,
             headSha: handler.headSha || null,
+            fingerprint,
             noProgressTicks: outcome.noProgressTicks,
             firstNoProgressAt: readNoProgressLane(rootDir, identity, { logger })?.firstNoProgressAt || null,
             deliverAlertFn,

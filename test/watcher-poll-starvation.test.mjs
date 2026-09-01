@@ -11,7 +11,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -29,6 +29,7 @@ import {
   PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED,
   backoffTicksFor,
   clearNoProgressLane,
+  clearOperatorDecisionAlertState,
   evaluateNoProgressLane,
   maybeFireOperatorDecisionRequiredAlert,
   noProgressLaneFilePath,
@@ -273,7 +274,7 @@ test('WPS-01: unadvanceable PRs back off to the slow lane while the new PR keeps
   }
 });
 
-test('WPS-01: terminal PR cleanup removes no-progress lane ledger', () => {
+test('WPS-01: terminal PR cleanup removes no-progress lane ledger and alert debounce files', async () => {
   const rootDir = tempRoot();
   try {
     const identity = { repo: REPO, prNumber: 5908 };
@@ -283,10 +284,21 @@ test('WPS-01: terminal PR cleanup removes no-progress lane ledger', () => {
       now: 'tick-1',
       logger: silentLogger,
     });
+    await maybeFireOperatorDecisionRequiredAlert({
+      rootDir,
+      identity,
+      headSha: HEAD_A,
+      fingerprint: 'same-state',
+      noProgressTicks: DEFAULT_OPERATOR_BLOCKED_ALERT_NO_PROGRESS_TICKS,
+      deliverAlertFn: async () => {},
+      logger: silentLogger,
+    });
     assert.equal(existsSync(noProgressLaneFilePath(rootDir, identity)), true);
+    assert.equal(readdirSync(operatorDecisionAlertStateDir(rootDir)).length, 1);
 
     assert.equal(clearNoProgressLane(rootDir, identity, { logger: silentLogger }), true);
     assert.equal(readNoProgressLane(rootDir, identity, { logger: silentLogger }), null);
+    assert.equal(readdirSync(operatorDecisionAlertStateDir(rootDir)).length, 0);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -687,6 +699,36 @@ test('operator-blocked lane keeps a flat re-walk cadence instead of escalating b
   }
 });
 
+test('legacy no-progress ledgers without progressClass are due immediately for reclassification', () => {
+  const rootDir = tempRoot();
+  try {
+    const identity = { repo: REPO, prNumber: 6028 };
+    for (let i = 0; i < DEFAULT_NO_PROGRESS_LANE_CAP + 6; i += 1) {
+      recordNoProgressLaneRun(rootDir, identity, {
+        headSha: HEAD_A,
+        fingerprint: 'legacy-self-resolving',
+        now: `t${i}`,
+        logger: silentLogger,
+      });
+    }
+    const legacy = readNoProgressLane(rootDir, identity, { logger: silentLogger });
+    assert.equal(legacy.progressClass, 'self-resolving');
+    delete legacy.progressClass;
+    delete legacy.lane;
+    writeFileSync(noProgressLaneFilePath(rootDir, identity), `${JSON.stringify(legacy, null, 2)}\n`);
+
+    const decision = evaluateNoProgressLane(
+      readNoProgressLane(rootDir, identity, { logger: silentLogger }),
+      { headSha: HEAD_A },
+    );
+    assert.equal(decision.due, true);
+    assert.equal(decision.lane, LANE_OPERATOR_BLOCKED);
+    assert.equal(decision.reason, 'legacy-progress-class-missing');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('operator-decision alert fires once after threshold, not every tick', async () => {
   const rootDir = tempRoot();
   try {
@@ -728,6 +770,96 @@ test('operator-decision alert fires once after threshold, not every tick', async
       logger: silentLogger,
     }), false);
     assert.equal(alerts.length, 1, 'debounce state suppresses same PR/head repeats');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('operator-decision alert debounce key includes fingerprint for same-head retries', async () => {
+  const rootDir = tempRoot();
+  try {
+    const identity = { repo: REPO, prNumber: 6028 };
+    const alerts = [];
+    const deliverAlertFn = async (text, meta) => { alerts.push({ text, meta }); };
+
+    assert.equal(await maybeFireOperatorDecisionRequiredAlert({
+      rootDir,
+      identity,
+      headSha: HEAD_A,
+      fingerprint: 'retry-attempt-1',
+      noProgressTicks: DEFAULT_OPERATOR_BLOCKED_ALERT_NO_PROGRESS_TICKS,
+      deliverAlertFn,
+      logger: silentLogger,
+    }), true);
+    assert.equal(await maybeFireOperatorDecisionRequiredAlert({
+      rootDir,
+      identity,
+      headSha: HEAD_A,
+      fingerprint: 'retry-attempt-1',
+      noProgressTicks: DEFAULT_OPERATOR_BLOCKED_ALERT_NO_PROGRESS_TICKS + 1,
+      deliverAlertFn,
+      logger: silentLogger,
+    }), false);
+
+    assert.equal(await maybeFireOperatorDecisionRequiredAlert({
+      rootDir,
+      identity,
+      headSha: HEAD_A,
+      fingerprint: 'retry-attempt-2',
+      noProgressTicks: DEFAULT_OPERATOR_BLOCKED_ALERT_NO_PROGRESS_TICKS,
+      deliverAlertFn,
+      logger: silentLogger,
+    }), true);
+    assert.equal(alerts.length, 2, 'same-head material state changes get a fresh operator page');
+    assert.notEqual(
+      alerts[0].meta.payload.fingerprintKey,
+      alerts[1].meta.payload.fingerprintKey,
+      'alert payload exposes the debounce key that distinguished the retries',
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('operator-decision alert cleanup removes every head and fingerprint debounce for a PR', async () => {
+  const rootDir = tempRoot();
+  try {
+    const identity = { repo: REPO, prNumber: 6028 };
+    const other = { repo: REPO, prNumber: 6029 };
+    const deliverAlertFn = async () => {};
+    await maybeFireOperatorDecisionRequiredAlert({
+      rootDir,
+      identity,
+      headSha: HEAD_A,
+      fingerprint: 'attempt-a',
+      noProgressTicks: DEFAULT_OPERATOR_BLOCKED_ALERT_NO_PROGRESS_TICKS,
+      deliverAlertFn,
+      logger: silentLogger,
+    });
+    await maybeFireOperatorDecisionRequiredAlert({
+      rootDir,
+      identity,
+      headSha: HEAD_B,
+      fingerprint: 'attempt-b',
+      noProgressTicks: DEFAULT_OPERATOR_BLOCKED_ALERT_NO_PROGRESS_TICKS,
+      deliverAlertFn,
+      logger: silentLogger,
+    });
+    await maybeFireOperatorDecisionRequiredAlert({
+      rootDir,
+      identity: other,
+      headSha: HEAD_A,
+      fingerprint: 'attempt-other',
+      noProgressTicks: DEFAULT_OPERATOR_BLOCKED_ALERT_NO_PROGRESS_TICKS,
+      deliverAlertFn,
+      logger: silentLogger,
+    });
+
+    assert.equal(readdirSync(operatorDecisionAlertStateDir(rootDir)).length, 3);
+    assert.equal(clearOperatorDecisionAlertState(rootDir, identity, { logger: silentLogger }), true);
+    const remaining = readdirSync(operatorDecisionAlertStateDir(rootDir));
+    assert.equal(remaining.length, 1);
+    assert.match(remaining[0], /-pr-6029-/);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

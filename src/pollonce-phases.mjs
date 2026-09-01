@@ -463,7 +463,7 @@ export async function processReviewSubject(entry, ctx) {
         return;
       }
       async function projectGateStatusSafe(reviewRow) {
-        if (!subject.headSha) return;
+        if (!subject.headSha) return null;
         try {
           const operatorApproval = prLabelNames.includes(OPERATOR_APPROVED_LABEL)
             ? await operatorSurface.observeOperatorApproved(
@@ -498,11 +498,13 @@ export async function processReviewSubject(entry, ctx) {
                 ? ' — NOT CONVERGED: findings unresolved, operator decision required'
                 : '')
           );
+          return projected;
         } catch (err) {
           console.error(
             `[watcher] adversarial gate projection failed for ${repoPath}#${prNumber}:`,
             err?.message || err
           );
+          return null;
         }
       }
 

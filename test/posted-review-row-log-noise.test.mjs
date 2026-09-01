@@ -154,3 +154,23 @@ test('handlePostedReviewRow: retained-ownership logs suppressed poll count on tr
 
   assert.match(retained(b.logs)[0], /after 2 suppressed identical polls/);
 });
+
+test('handlePostedReviewRow: await-operator returns the AMA closure result', async () => {
+  const amaClosureResult = {
+    reason: 'not-eligible',
+    namedReason: 'not-eligible:blocking-findings-present',
+    reasons: ['blocking-findings-present'],
+  };
+  const { args, logs } = baseArgs({
+    resolveMergeAgentCoexistenceForWatcherImpl: async () => ({
+      outcome: 'await-operator',
+      amaClosureResult,
+    }),
+  });
+
+  const result = await handlePostedReviewRow(args);
+
+  assert.equal(result.outcome, 'await-operator');
+  assert.equal(result.amaClosureResult, amaClosureResult);
+  assert.match(logs.at(-1), /not-eligible:blocking-findings-present/);
+});

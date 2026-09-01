@@ -45,8 +45,11 @@ import { db, stmtGetLatestPostedReviewBody, stmtGetReviewRow } from './review-st
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import {
   evaluateNoProgressLane,
+  maybeFireOperatorDecisionRequiredAlert,
   readNoProgressLane,
   clearNoProgressLane,
+  PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED,
+  PROGRESS_CLASS_SELF_RESOLVING,
   recordNoProgressLaneRun,
   recordNoProgressLaneSkip,
   subjectProgressFingerprint,
@@ -111,7 +114,7 @@ export async function handlePostedReviewRow({
   logGate = postedReviewRowLogGate,
   logger = console,
 } = {}) {
-  await projectGateStatusSafe(existing);
+  const gateProjection = await projectGateStatusSafe(existing);
 
   try {
     const latestPostedReviewBody = latestPostedReviewBodyFinder(rootDir, { repo: repoPath, prNumber });
@@ -125,7 +128,7 @@ export async function handlePostedReviewRow({
       logger.log(
         `[watcher] automated dispatch suppressed for ${repoPath}#${prNumber}: scope-violation finding present`
       );
-      return;
+      return { handled: true, outcome: 'scope-violation', gateDecision: gateProjection?.decision || null };
     }
 
     let operatorApprovalEvent;
@@ -200,7 +203,7 @@ export async function handlePostedReviewRow({
         `${coexistenceDecision.terminalReason} — dropping ownership`
       );
       clearNoProgressLane(rootDir, { repo: repoPath, prNumber }, { logger });
-      return { handled: true, dispatchJob, prTerminal: true };
+      return { handled: true, dispatchJob, prTerminal: true, gateDecision: gateProjection?.decision || null };
     }
     if (coexistenceDecision.outcome === 'ama-dispatched') {
       const { amaClosureResult } = coexistenceDecision;
@@ -208,7 +211,7 @@ export async function handlePostedReviewRow({
         `[watcher] AMA hammer dispatched for ${repoPath}#${prNumber}: ` +
         `lrq=${amaClosureResult.dispatchId || 'unknown'} workerClass=${amaClosureResult.workerClass}`
       );
-      return;
+      return { handled: true, outcome: 'ama-dispatched', gateDecision: gateProjection?.decision || null };
     }
     if (coexistenceDecision.outcome === 'ama-pending') {
       const { amaClosureResult } = coexistenceDecision;
@@ -232,7 +235,7 @@ export async function handlePostedReviewRow({
           `workerClass=${amaClosureResult.workerClass || 'unknown'}${suppressedNote}`
         );
       }
-      return;
+      return { handled: true, outcome: 'ama-pending', gateDecision: gateProjection?.decision || null };
     }
 
     // AMA-06N — coexistence decision per SPEC §4.8. When AMA is
@@ -265,7 +268,12 @@ export async function handlePostedReviewRow({
         `(apply 'operator-approved'/'adversarial-merge-requested' to make AMA-eligible ` +
         `OR 'merge-agent-requested' for the operator-fallback lane)`
       );
-      return;
+      return {
+        handled: true,
+        outcome: 'await-operator',
+        gateDecision: gateProjection?.decision || null,
+        amaClosureResult,
+      };
     }
 
     const orchestrationMode = resolveOrchestrationMode({
@@ -400,6 +408,7 @@ export function createNoProgressLaneGate({
   rootDir = ROOT,
   readReviewRow = (repo, prNumber) => stmtGetReviewRow.get(repo, prNumber),
   now = () => new Date().toISOString(),
+  deliverAlertFn = defaultDeliverAlert,
   logger = console,
 } = {}) {
   return {
@@ -416,7 +425,7 @@ export function createNoProgressLaneGate({
       }
       return { run: decision.due, ...decision };
     },
-    record(handler, { timedOut = false } = {}) {
+    async record(handler, { timedOut = false, value = null } = {}) {
       // Without a head there is no series to key on; skip the row read too.
       if (!handler.headSha) return null;
       const identity = { repo: handler.repoPath, prNumber: handler.prNumber };
@@ -437,10 +446,15 @@ export function createNoProgressLaneGate({
       const fingerprint = timedOut
         ? 'timed-out'
         : subjectProgressFingerprint(row, { headSha: handler.headSha || null });
+      const progressClass = value?.gateDecision?.operatorDecisionRequired === true
+        ? PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED
+        : PROGRESS_CLASS_SELF_RESOLVING;
+      const observedAt = now();
       const outcome = recordNoProgressLaneRun(rootDir, identity, {
         headSha: handler.headSha || null,
         fingerprint,
-        now: now(),
+        progressClass,
+        now: observedAt,
         logger,
       });
       if (outcome?.demoted) {
@@ -451,6 +465,33 @@ export function createNoProgressLaneGate({
             `every ${outcome.backoffTicks} tick(s) instead of every tick. It is NOT dropped — ` +
             'nothing about its eligibility, findings, or merge gating has changed.',
         );
+      }
+      if (outcome?.progressClass === PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED) {
+        try {
+          const alerted = await maybeFireOperatorDecisionRequiredAlert({
+            rootDir,
+            identity,
+            headSha: handler.headSha || null,
+            fingerprint,
+            noProgressTicks: outcome.noProgressTicks,
+            firstNoProgressAt: outcome.firstNoProgressAt || null,
+            deliverAlertFn,
+            logger,
+            now: Date.parse(observedAt),
+          });
+          if (alerted) {
+            logger?.warn?.(
+              `[watcher] no-progress lane: operator decision alert fired for ` +
+                `${handler.repoPath}#${handler.prNumber} after ${outcome.noProgressTicks} ` +
+                `unchanged tick(s) on head ${(handler.headSha || 'unknown').slice(0, 12)}`,
+            );
+          }
+        } catch (err) {
+          logger?.error?.(
+            `[watcher] no-progress lane: operator decision alert delivery failed for ` +
+              `${handler.repoPath}#${handler.prNumber} (${err?.message || err})`,
+          );
+        }
       }
       return outcome;
     },

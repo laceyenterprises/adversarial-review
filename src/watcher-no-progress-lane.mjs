@@ -320,7 +320,8 @@ export function recordNoProgressLaneSkip(rootDir, identity, {
  * is what decides progress.
  *
  * @returns {{ lane:string, progressed:boolean, noProgressTicks:number,
- *             backoffTicks:number, demoted:boolean, headSha:(string|null) }}
+ *             backoffTicks:number, demoted:boolean, headSha:(string|null),
+ *             firstNoProgressAt:(string|null) }}
  */
 export function recordNoProgressLaneRun(rootDir, identity, {
   headSha,
@@ -353,6 +354,9 @@ export function recordNoProgressLaneRun(rootDir, identity, {
     ? LANE_OPERATOR_BLOCKED
     : (backoffTicks > 0 ? LANE_SLOW : LANE_ACTIVE);
   const priorLane = sameHead ? (existing?.lane || LANE_ACTIVE) : LANE_ACTIVE;
+  const firstNoProgressAt = (sameFingerprint ? existing?.firstNoProgressAt : null)
+    || (noProgressTicks > 0 ? now : null)
+    || null;
   writeLedger(rootDir, identity, {
     schemaVersion: NO_PROGRESS_LANE_SCHEMA_VERSION,
     repo: identity?.repo ?? null,
@@ -364,7 +368,7 @@ export function recordNoProgressLaneRun(rootDir, identity, {
     // A walked PR starts its next backoff window from zero regardless of outcome.
     skippedTicks: 0,
     lane,
-    firstNoProgressAt: (sameFingerprint ? existing?.firstNoProgressAt : null) || (noProgressTicks > 0 ? now : null) || null,
+    firstNoProgressAt,
     updatedAt: now || null,
   });
   return {
@@ -375,6 +379,7 @@ export function recordNoProgressLaneRun(rootDir, identity, {
     backoffTicks,
     demoted: lane === LANE_SLOW && priorLane !== LANE_SLOW,
     headSha: head,
+    firstNoProgressAt,
   };
 }
 

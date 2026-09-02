@@ -307,6 +307,12 @@ export async function handlePostedReviewRow({
     const dispatched = await dispatchMergeAgentForPRImpl({
       rootDir,
       ...dispatchJob,
+      // AMA validated the hammer's terminal remediation from ground truth but
+      // could not dispatch its own closer. Hand that proof to the merge-agent so it
+      // can close on the certification instead of waiting for a verdict that
+      // closer-commit suppression guarantees will never be posted.
+      hamTerminalRemediationValidated:
+        coexistenceDecision?.amaClosureResult?.hamTerminalRemediationValidated === true,
       orchestrationMode,
       ...(dispatchEnv ? { env: { ...process.env, ...dispatchEnv } } : {}),
       ...(operatorFallbackTriggerOverride ? { triggerOverride: operatorFallbackTriggerOverride } : {}),

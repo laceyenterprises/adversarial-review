@@ -115,8 +115,18 @@ function createWatcherHeartbeat({
 
   const prior = readPriorHeartbeat(filePath, readFile);
   let pollCounter = normalizeCounter(prior?.poll_counter);
+  let completedPollCounter = normalizeCounter(prior?.completed_poll_counter);
   let lastPollAt = typeof prior?.last_poll_at === 'string' ? prior.last_poll_at : null;
+  let lastCompletedPollAt = typeof prior?.last_completed_poll_at === 'string'
+    ? prior.last_completed_poll_at
+    : null;
   let lastReviewAt = typeof prior?.last_review_at === 'string' ? prior.last_review_at : null;
+  let lastSpawnDecisionAt = typeof prior?.last_spawn_decision_at === 'string'
+    ? prior.last_spawn_decision_at
+    : null;
+  let lastSpawnDecision = prior?.last_spawn_decision && typeof prior.last_spawn_decision === 'object'
+    ? prior.last_spawn_decision
+    : null;
   let pendingReviewHeartbeat = null;
   let reviewPersistScheduled = false;
   let reviewPersistChain = Promise.resolve();
@@ -176,8 +186,12 @@ function createWatcherHeartbeat({
       watcher_pid: pid,
       updated_at: at,
       last_poll_at: lastPollAt,
+      last_completed_poll_at: lastCompletedPollAt,
       last_review_at: lastReviewAt,
+      last_spawn_decision_at: lastSpawnDecisionAt,
+      last_spawn_decision: lastSpawnDecision,
       poll_counter: pollCounter,
+      completed_poll_counter: completedPollCounter,
       event,
       ...extra,
     };
@@ -204,12 +218,33 @@ function createWatcherHeartbeat({
     return heartbeat;
   }
 
+  function markPollCompleted(extra = {}) {
+    const at = now().toISOString();
+    completedPollCounter += 1;
+    lastCompletedPollAt = at;
+    return persist('poll-completed', extra, at);
+  }
+
+  function markSpawnDecision(extra = {}) {
+    const at = now().toISOString();
+    lastSpawnDecisionAt = at;
+    lastSpawnDecision = {
+      ...extra,
+      decided_at: at,
+    };
+    return persist('spawn-decision', {}, at);
+  }
+
   function snapshot() {
     return {
       filePath,
       last_poll_at: lastPollAt,
+      last_completed_poll_at: lastCompletedPollAt,
       last_review_at: lastReviewAt,
+      last_spawn_decision_at: lastSpawnDecisionAt,
+      last_spawn_decision: lastSpawnDecision,
       poll_counter: pollCounter,
+      completed_poll_counter: completedPollCounter,
     };
   }
 
@@ -218,7 +253,7 @@ function createWatcherHeartbeat({
     await reviewPersistChain;
   }
 
-  return { filePath, markPoll, markReview, persist, snapshot, flush };
+  return { filePath, markPoll, markPollCompleted, markReview, markSpawnDecision, persist, snapshot, flush };
 }
 
 function createWatcherStallWatchdog({

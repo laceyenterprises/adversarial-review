@@ -141,7 +141,11 @@ import {
   resolveAlreadyReviewedHeadDedup,
   restorePendingReviewedHeadDedupRow,
 } from './reviewed-head-dispatch-gate.mjs';
-import { shouldBackoffReviewerSpawn } from './reviewer-cascade.mjs';
+import {
+  markCascadeCapExhaustedAlerted,
+  recordCascadeFailure,
+  shouldBackoffReviewerSpawn,
+} from './reviewer-cascade.mjs';
 import { reconcileReviewerCommandFailedBeforeRetry } from './reviewer-command-failed-recovery.mjs';
 import {
   infraRecoverableFailureClass,
@@ -417,6 +421,8 @@ export async function processReviewSubject(entry, ctx) {
     withApiTelemetry,
     handlePollError,
     markWatcherReviewHeartbeat,
+    markWatcherSpawnDecision = () => {},
+    deliverAlertFn,
     resolveHardReviewCeiling,
     resolveHardReviewAttemptCeiling,
     reconcilePendingDraftsBeforeSpawn,
@@ -1408,8 +1414,16 @@ export async function processReviewSubject(entry, ctx) {
         prNumber,
       });
       if (cascadeGate.shouldBackoff) {
+        markWatcherSpawnDecision({
+          repo: repoPath,
+          pr_number: prNumber,
+          decision: 'cascade-backoff-hold',
+          failure_class: cascadeGate.state?.lastFailureClass || null,
+          next_retry_after: cascadeGate.state?.nextRetryAfter || null,
+        });
         return;
       }
+      const cascadeRetryDue = Boolean(cascadeGate.state?.nextRetryAfter);
       const timeoutExhaustionHandoff = await maybeDispatchReviewerTimeoutExhaustedMergeAgent({
         rootDir: ROOT,
         repoPath,
@@ -1542,20 +1556,91 @@ export async function processReviewSubject(entry, ctx) {
       }
       const infraRecoveryAttempts = Number(current?.infra_auto_recover_attempts || 0);
       if (infraRecoveryClass && infraRecoveryAttempts >= INFRA_AUTO_RECOVER_CAP) {
-        finalizePendingTerminalFailureState(current);
-        console.log(
+        const alertedAt = new Date().toISOString();
+        const alertMark = markCascadeCapExhaustedAlerted(ROOT, {
+          repo: repoPath,
+          prNumber,
+          alertedAt,
+          failureClass: infraRecoveryClass,
+          attempts: infraRecoveryAttempts,
+          cap: INFRA_AUTO_RECOVER_CAP,
+          reason: current?.failure_message || cascadeGate.state?.lastFailureReason || null,
+        });
+        if (alertMark.marked && typeof deliverAlertFn === 'function') {
+          try {
+            await deliverAlertFn(
+              `Adversarial reviewer infra auto-recovery cap exhausted for ` +
+              `${repoPath}#${prNumber}: class=${infraRecoveryClass} ` +
+              `attempts=${infraRecoveryAttempts}/${INFRA_AUTO_RECOVER_CAP}. ` +
+              `Retry backoff remains active; inspect cascade-state for the persisted reason.`,
+              {
+                event: 'adversarial_review.cascade_cap_exhausted',
+                payload: {
+                  repo: repoPath,
+                  pr_number: prNumber,
+                  failure_class: infraRecoveryClass,
+                  attempts: infraRecoveryAttempts,
+                  cap: INFRA_AUTO_RECOVER_CAP,
+                  next_retry_after: cascadeGate.state?.nextRetryAfter || null,
+                  last_failure_reason: cascadeGate.state?.lastFailureReason || current?.failure_message || null,
+                },
+              },
+            );
+          } catch (err) {
+            console.error(
+              `[watcher] cascade-cap alert delivery failed for ${repoPath}#${prNumber}: ` +
+                `${err?.message || err}`
+            );
+          }
+        }
+        if (!cascadeRetryDue) {
+          finalizePendingTerminalFailureState(current);
+          markWatcherSpawnDecision({
+            repo: repoPath,
+            pr_number: prNumber,
+            decision: 'infra-cap-exhausted',
+            failure_class: infraRecoveryClass,
+            attempts: infraRecoveryAttempts,
+            cap: INFRA_AUTO_RECOVER_CAP,
+          });
+          console.log(
+            `[watcher] Infra auto-recovery cap exhausted for ${repoPath}#${prNumber}: ` +
+              `class=${infraRecoveryClass} attempts=${infraRecoveryAttempts}/${INFRA_AUTO_RECOVER_CAP}; ` +
+              `leaving failure evidence for operator inspection`
+          );
+          return;
+        }
+        console.warn(
           `[watcher] Infra auto-recovery cap exhausted for ${repoPath}#${prNumber}: ` +
             `class=${infraRecoveryClass} attempts=${infraRecoveryAttempts}/${INFRA_AUTO_RECOVER_CAP}; ` +
-            `leaving failure evidence for operator inspection`
+            `scheduled cascade retry is due, so retrying instead of parking`
         );
-        return;
       }
       if (infraRecoveryClass) {
         const infraRecoveryReadiness = await getRoutingTierReadinessForTick();
         if (!infraRecoveryReadiness.ready) {
+          const failedAt = new Date().toISOString();
+          const failureMessage = infraRecoveryReadiness.failureMessage
+            || `Routing-tier readiness probe reported ${infraRecoveryReadiness.reason}.`;
+          const cascadeState = recordCascadeFailure(ROOT, {
+            repo: repoPath,
+            prNumber,
+            failedAt,
+            failureClass: infraRecoveryReadiness.failureClass || infraRecoveryClass,
+            failureReason: failureMessage,
+          });
+          markWatcherSpawnDecision({
+            repo: repoPath,
+            pr_number: prNumber,
+            decision: 'infra-retry-routing-tier-not-ready',
+            failure_class: cascadeState.lastFailureClass,
+            next_retry_after: cascadeState.nextRetryAfter,
+            reason: cascadeState.lastFailureReason,
+          });
           console.log(
             `[watcher] Skipping infra auto-recovery for ${repoPath}#${prNumber}: ` +
               `routing tier not ready (${infraRecoveryReadiness.reason}); ` +
+              `advanced transient backoff to ${cascadeState.nextRetryAfter}; ` +
               `leaving review_status='failed' evidence intact`
           );
           return;
@@ -1830,6 +1915,7 @@ export async function processReviewSubject(entry, ctx) {
                 current?.failed_at || null,
                 current?.reviewer_head_sha || null,
                 INFRA_AUTO_RECOVER_CAP,
+                cascadeRetryDue ? 1 : 0,
                 infraRecoveryClass
               )
               : reviewPopulationRetryable
@@ -1882,6 +1968,14 @@ export async function processReviewSubject(entry, ctx) {
             if (existing) {
               stmtUpdateReviewRouting.run(route.reviewerModel, linearTicketId, repoPath, prNumber);
             }
+            markWatcherSpawnDecision({
+              repo: repoPath,
+              pr_number: prNumber,
+              decision: 'claimed',
+              reviewer_model: route.reviewerModel,
+              failure_class: infraRecoveryClass || populationRetry.failureClass || unknownFailureClass || null,
+              previous_status: current?.review_status || existing?.review_status || null,
+            });
             if (infraRecoveryClass) {
               console.log(
                 `[watcher] Claimed infra-failed review ${repoPath}#${prNumber} ` +

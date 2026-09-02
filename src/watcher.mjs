@@ -1402,6 +1402,8 @@ async function pollOnce(
         withApiTelemetry,
         handlePollError,
         markWatcherReviewHeartbeat,
+        markWatcherSpawnDecision: (extra) => watcherHeartbeat?.markSpawnDecision?.(extra),
+        deliverAlertFn: defaultDeliverAlert,
         resolveHardReviewCeiling,
         resolveHardReviewAttemptCeiling,
         reconcilePendingDraftsBeforeSpawn,
@@ -1823,7 +1825,14 @@ async function main() {
       // Recovery, not polling work: a no-op until its interval elapses, and it
       // never throws, so it cannot delay or fail a poll.
       await staleStateReaperTicker.tick();
-      return await safePollOnce(source);
+      const result = await safePollOnce(source);
+      watcherHeartbeat.markPollCompleted({
+        source,
+        ok: Boolean(result?.ok),
+        timed_out: Boolean(result?.timedOut),
+        error: result?.error ? String(result.error?.message || result.error) : null,
+      });
+      return result;
     } finally {
       stallWatchdog.endPoll();
     }

@@ -63,7 +63,7 @@ export const MARK_INFRA_AUTO_RECOVERY_ATTEMPT_STARTED_SQL =
          reviewer_head_sha = ?
        )
      )
-     AND COALESCE(infra_auto_recover_attempts, 0) < ?
+     AND (COALESCE(infra_auto_recover_attempts, 0) < ? OR ? = 1)
      AND CASE ?
        WHEN 'cascade' THEN (
          lower(COALESCE(failure_message, '')) LIKE '[cascade]%' OR

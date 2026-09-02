@@ -141,6 +141,7 @@ function recordCascadeFailure(rootDir, {
   prNumber,
   failedAt = new Date().toISOString(),
   failureClass = 'cascade',
+  failureReason = null,
   nextRetryAfter = null,
 } = {}) {
   const previous = readCascadeState(rootDir, { repo, prNumber });
@@ -219,6 +220,9 @@ function recordCascadeFailure(rootDir, {
     consecutiveTransientFailures,
     transientFailureBreakdown,
     lastFailureClass: normalizedFailureClass,
+    lastFailureReason: typeof failureReason === 'string' && failureReason.trim()
+      ? failureReason.trim()
+      : null,
     // Normalized against the SAME anchor `retryAfter` was derived from. When
     // the caller hands us an unusable (or null) timestamp we already fall back
     // to `Date.now()` above; writing the raw value here instead would put a
@@ -253,6 +257,32 @@ function recordCascadeFailure(rootDir, {
   });
 }
 
+function markCascadeCapExhaustedAlerted(rootDir, {
+  repo,
+  prNumber,
+  alertedAt = new Date().toISOString(),
+  failureClass = null,
+  attempts = null,
+  cap = null,
+  reason = null,
+} = {}) {
+  const previous = readCascadeState(rootDir, { repo, prNumber }) || {};
+  if (previous.capExhaustedAlertedAt) {
+    return { marked: false, state: previous };
+  }
+  const state = {
+    ...previous,
+    capExhaustedAlertedAt: alertedAt,
+    capExhaustedAlert: {
+      failureClass: failureClass || previous.lastFailureClass || null,
+      attempts: Number.isFinite(Number(attempts)) ? Number(attempts) : null,
+      cap: Number.isFinite(Number(cap)) ? Number(cap) : null,
+      reason: reason || previous.lastFailureReason || null,
+    },
+  };
+  return { marked: true, state: writeCascadeState(rootDir, { repo, prNumber }, state) };
+}
+
 function shouldBackoffReviewerSpawn(rootDir, { repo, prNumber, now = new Date().toISOString() }) {
   const state = readCascadeState(rootDir, { repo, prNumber });
   if (!state?.nextRetryAfter) {
@@ -280,6 +310,7 @@ export {
   clearCascadeState,
   formatTransientFailureBreakdown,
   getCascadeStatePath,
+  markCascadeCapExhaustedAlerted,
   isReviewerSubprocessTimeout,
   readCascadeState,
   recordCascadeFailure,

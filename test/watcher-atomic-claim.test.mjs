@@ -78,6 +78,7 @@ function runInfraRecoveryClaim(db, attemptedAt, infraClass = 'oauth-broken', rep
   observedReviewerHeadSha = null,
   reviewerTimeoutMs = 20 * 60 * 1000,
   cap = 3,
+  bypassCap = 0,
 } = {}) {
   return prepareMarkInfraAutoRecoveryAttemptStarted(db).run(
     attemptedAt,
@@ -90,6 +91,7 @@ function runInfraRecoveryClaim(db, attemptedAt, infraClass = 'oauth-broken', rep
     observedFailedAt,
     observedReviewerHeadSha,
     cap,
+    bypassCap,
     infraClass
   );
 }

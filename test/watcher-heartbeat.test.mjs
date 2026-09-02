@@ -31,6 +31,8 @@ test('watcher heartbeat persists poll counter and review timestamps', async () =
     const times = [
       new Date('2026-07-04T10:00:00.000Z'),
       new Date('2026-07-04T10:00:05.000Z'),
+      new Date('2026-07-04T10:00:06.000Z'),
+      new Date('2026-07-04T10:00:07.000Z'),
     ];
     const heartbeat = createWatcherHeartbeat({
       rootDir,
@@ -45,21 +47,45 @@ test('watcher heartbeat persists poll counter and review timestamps', async () =
     assert.equal(persisted.watcher_pid, 4242);
     assert.equal(persisted.event, 'poll');
     assert.equal(persisted.last_poll_at, '2026-07-04T10:00:00.000Z');
+    assert.equal(persisted.last_completed_poll_at, null);
     assert.equal(persisted.last_review_at, null);
     assert.equal(persisted.poll_counter, 1);
+    assert.equal(persisted.completed_poll_counter, 0);
     assert.equal(persisted.source, 'startup pollOnce');
+
+    heartbeat.markPollCompleted({ source: 'startup pollOnce', ok: true });
+    persisted = readJson(watcherHeartbeatPath(rootDir));
+    assert.equal(persisted.event, 'poll-completed');
+    assert.equal(persisted.last_completed_poll_at, '2026-07-04T10:00:05.000Z');
+    assert.equal(persisted.completed_poll_counter, 1);
+    assert.equal(persisted.ok, true);
+
+    heartbeat.markSpawnDecision({
+      repo: 'laceyenterprises/adversarial-review',
+      pr_number: 3046,
+      decision: 'cascade-backoff-hold',
+      next_retry_after: '2026-07-04T10:05:00.000Z',
+    });
+    persisted = readJson(watcherHeartbeatPath(rootDir));
+    assert.equal(persisted.event, 'spawn-decision');
+    assert.equal(persisted.last_spawn_decision_at, '2026-07-04T10:00:06.000Z');
+    assert.equal(persisted.last_spawn_decision.decision, 'cascade-backoff-hold');
+    assert.equal(persisted.last_spawn_decision.pr_number, 3046);
 
     heartbeat.markReview({
       repo: 'laceyenterprises/adversarial-review',
       pr_number: 3046,
-      posted_at: '2026-07-04T10:00:05.000Z',
+      posted_at: '2026-07-04T10:00:07.000Z',
     });
     await heartbeat.flush();
     persisted = readJson(watcherHeartbeatPath(rootDir));
     assert.equal(persisted.event, 'review');
     assert.equal(persisted.last_poll_at, '2026-07-04T10:00:00.000Z');
-    assert.equal(persisted.last_review_at, '2026-07-04T10:00:05.000Z');
+    assert.equal(persisted.last_completed_poll_at, '2026-07-04T10:00:05.000Z');
+    assert.equal(persisted.last_review_at, '2026-07-04T10:00:07.000Z');
+    assert.equal(persisted.last_spawn_decision.decision, 'cascade-backoff-hold');
     assert.equal(persisted.poll_counter, 1);
+    assert.equal(persisted.completed_poll_counter, 1);
     assert.equal(persisted.repo, 'laceyenterprises/adversarial-review');
     assert.equal(persisted.pr_number, 3046);
   } finally {

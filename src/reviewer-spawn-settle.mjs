@@ -1095,6 +1095,7 @@ function settleReviewerAttempt({
       prNumber,
       failedAt: failureAt,
       failureClass,
+      failureReason: failureMessage,
     });
     if (infraRecoverAttempts >= INFRA_AUTO_RECOVER_CAP) {
       withSqliteBusyRetrySync(
@@ -1154,6 +1155,7 @@ function settleReviewerAttempt({
       prNumber,
       failedAt: failureAt,
       failureClass: outageSignal.failureClass || outageSignal.reason,
+      failureReason: failureMessage,
       nextRetryAfter: outageSignal.retryAfter,
     });
     withSqliteBusyRetrySync(

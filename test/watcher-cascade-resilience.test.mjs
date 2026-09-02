@@ -15,10 +15,12 @@ import {
   clearCascadeState,
   getCascadeStatePath,
   isReviewerSubprocessTimeout,
+  markCascadeCapExhaustedAlerted,
   readCascadeState,
   recordCascadeFailure,
   shouldBackoffReviewerSpawn,
 } from '../src/reviewer-cascade.mjs';
+import { prepareMarkInfraAutoRecoveryAttemptStarted } from '../src/review-state-statements.mjs';
 import {
   probeRoutingTierReadiness,
   recordSuccessfulReviewCycleVerdict,
@@ -197,6 +199,7 @@ test('routing-tier probe failures settle through cascade backoff without burning
       prNumber: 195,
     });
     assert.equal(cascadeState?.consecutiveTransientFailures, 1);
+    assert.equal(cascadeState?.lastFailureReason, 'Routing-tier readiness probe returned HTTP 503.');
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });
@@ -872,6 +875,114 @@ test('pending-upstream engages after five consecutive cascades and further retri
     assert.equal(capped.backoffMinutes, 15);
   } finally {
     db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('elapsed cascade nextRetryAfter allows infra retry after auto-recovery cap', () => {
+  const { rootDir, db } = setupFixture();
+  try {
+    const repo = 'laceyenterprises/adversarial-review';
+    const prNumber = 195;
+    for (let i = 0; i < 4; i += 1) {
+      recordCascadeFailure(rootDir, {
+        repo,
+        prNumber,
+        failedAt: `2026-05-04T07:1${i}:00.000Z`,
+        failureClass: 'cascade',
+        failureReason: 'routing tier (LiteLLM proxy) not ready (readiness_http_503)',
+      });
+    }
+    db.prepare(
+      `UPDATE reviewed_prs
+          SET review_status = 'failed',
+              failed_at = ?,
+              failure_message = ?,
+              reviewer_head_sha = ?,
+              infra_auto_recover_attempts = ?
+        WHERE repo = ? AND pr_number = ?`
+    ).run(
+      '2026-05-04T07:13:00.000Z',
+      '[cascade] routing tier (LiteLLM proxy) not ready (readiness_http_503); infra auto-recovery cap exhausted (3/3).',
+      'head-cascade',
+      3,
+      repo,
+      prNumber,
+    );
+
+    const gate = shouldBackoffReviewerSpawn(rootDir, {
+      repo,
+      prNumber,
+      now: '2026-05-04T07:22:00.000Z',
+    });
+    assert.equal(gate.shouldBackoff, false);
+    assert.equal(gate.state.lastFailureReason, 'routing tier (LiteLLM proxy) not ready (readiness_http_503)');
+
+    const stmt = prepareMarkInfraAutoRecoveryAttemptStarted(db);
+    const claim = stmt.run(
+      '2026-05-04T07:22:00.000Z',
+      'session-cascade-retry',
+      'head-cascade',
+      20 * 60 * 1000,
+      '2026-05-04T07:42:00.000Z',
+      repo,
+      prNumber,
+      '2026-05-04T07:13:00.000Z',
+      'head-cascade',
+      3,
+      1,
+      'cascade',
+    );
+
+    assert.equal(claim.changes, 1);
+    const row = db.prepare(
+      'SELECT review_status, infra_auto_recover_attempts FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get(repo, prNumber);
+    assert.equal(row.review_status, 'reviewing');
+    assert.equal(row.infra_auto_recover_attempts, 4);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('cascade cap exhaustion alert marker persists once', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'watcher-cascade-alert-'));
+  try {
+    const repo = 'laceyenterprises/adversarial-review';
+    const prNumber = 195;
+    recordCascadeFailure(rootDir, {
+      repo,
+      prNumber,
+      failedAt: '2026-05-04T07:10:00.000Z',
+      failureClass: 'cascade',
+      failureReason: 'routing tier (LiteLLM proxy) not ready (readiness_http_503)',
+    });
+
+    const first = markCascadeCapExhaustedAlerted(rootDir, {
+      repo,
+      prNumber,
+      alertedAt: '2026-05-04T07:11:00.000Z',
+      failureClass: 'cascade',
+      attempts: 3,
+      cap: 3,
+    });
+    const second = markCascadeCapExhaustedAlerted(rootDir, {
+      repo,
+      prNumber,
+      alertedAt: '2026-05-04T07:12:00.000Z',
+      failureClass: 'cascade',
+      attempts: 3,
+      cap: 3,
+    });
+
+    assert.equal(first.marked, true);
+    assert.equal(second.marked, false);
+    const state = readCascadeState(rootDir, { repo, prNumber });
+    assert.equal(state.capExhaustedAlertedAt, '2026-05-04T07:11:00.000Z');
+    assert.equal(state.capExhaustedAlert.failureClass, 'cascade');
+    assert.equal(state.capExhaustedAlert.reason, 'routing tier (LiteLLM proxy) not ready (readiness_http_503)');
+  } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
 });

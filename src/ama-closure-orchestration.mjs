@@ -48,7 +48,11 @@ import { resolveRoundBudgetForJob, summarizePRRemediationLedger } from './follow
 import { isTransientGhError } from './gh-cli.mjs';
 import { fetchPullRequestMergeability, fetchReviewBodiesForHead } from './github-api.mjs';
 import { normalizeGithubMergeability, resolveMergeabilityWithSampling } from './github-mergeability.mjs';
-import { getHeadCloserCommitSuppression } from './head-closer-commit-suppression.mjs';
+import {
+  buildNonReviewableHeadDeltaEvidence,
+  fetchHeadCloserVerifiedCommit,
+  getHeadCloserCommitSuppression,
+} from './head-closer-commit-suppression.mjs';
 import { isDismissStaleRequestChangesOnResolvedEnabled } from './merge-agent-dispatch-decision.mjs';
 import { resolveOrchestrationMode } from './pr-lifecycle-sync.mjs';
 import { dismissSupersededBlockingVerdictAtRemediatedHead } from './superseded-blocking-verdict-dismissal.mjs';
@@ -666,6 +670,7 @@ export async function maybeDispatchAmaClosureFor({
   let allowStaleReviewHeadHammerResume = false;
   let hamTerminalRemediationEvidenceOptions = null;
   let hamTerminalRemediationValidated = false;
+  let nonReviewableHeadDeltaEvidence = null;
   const reviewedHeadIsStale = Boolean(
     reviewState.headSha &&
       currentPrHeadSha &&
@@ -697,6 +702,24 @@ export async function maybeDispatchAmaClosureFor({
             logger,
           });
       allowStaleReviewHeadHammerResume = closerCommitSuppression?.suppressed === true;
+      if (
+        allowStaleReviewHeadHammerResume &&
+        closerCommitSuppression?.reason === 'closer-commit-trailer'
+      ) {
+        const verifiedCommit = await fetchHeadCloserVerifiedCommit({
+          repoPath,
+          prNumber,
+          headSha: currentPrHeadSha,
+          execFileImpl: execFileAsync,
+          logger,
+        });
+        nonReviewableHeadDeltaEvidence = buildNonReviewableHeadDeltaEvidence({
+          reviewedHead: reviewState.headSha,
+          currentHead: currentPrHeadSha,
+          verifiedCommit,
+          suppression: closerCommitSuppression,
+        });
+      }
       if (
         allowStaleReviewHeadHammerResume &&
         typeof resolveHamTerminalRemediationEvidenceImpl === 'function'
@@ -989,6 +1012,9 @@ export async function maybeDispatchAmaClosureFor({
       cfg,
       options: {
         env: process.env,
+        ...(nonReviewableHeadDeltaEvidence
+          ? { nonReviewableHeadDelta: nonReviewableHeadDeltaEvidence }
+          : {}),
         ...(hamTerminalRemediationEvidenceOptions || {}),
         adversarialMergeRequested: adversarialMergeRequestedEvent
           ? {

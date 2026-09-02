@@ -254,6 +254,110 @@ test('not eligible: rebase coverage ignores legacy enabled and marker aliases', 
   assert.equal(result.trace.headMatch.rebaseReviewCoverage.checks.marker, false);
 });
 
+test('eligible: watcher-recorded trailer-only head delta clears stale-review-head', () => {
+  const reviewedHead = '11111111';
+  const currentHead = '22222222';
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { headSha: reviewedHead },
+    prMetadata: { headSha: currentHead },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    nonReviewableHeadDelta: {
+      active: true,
+      evidence: 'non_reviewable_head_delta',
+      reviewedHead,
+      currentHead,
+      reason: 'closer-commit-trailer',
+      suppression: {
+        suppressed: true,
+        reason: 'closer-commit-trailer',
+        matched: 'Closed-By',
+      },
+      commit: {
+        sha: currentHead,
+        parentSha: reviewedHead,
+        changedFiles: [],
+      },
+    },
+  });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.ok(!result.reasons.includes('stale-review-head'));
+  assert.equal(result.trace.headMatch.nonReviewableHeadDelta.marker, 'non_reviewable_head_delta');
+  assert.equal(result.trace.headMatch.nonReviewableHeadDelta.checks.emptyDiff, true);
+});
+
+test('not eligible: trailer-marked head with a real code delta keeps stale-review-head', () => {
+  const reviewedHead = '11111111';
+  const currentHead = '22222222';
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { headSha: reviewedHead },
+    prMetadata: { headSha: currentHead },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    nonReviewableHeadDelta: {
+      active: true,
+      evidence: 'non_reviewable_head_delta',
+      reviewedHead,
+      currentHead,
+      reason: 'closer-commit-trailer',
+      suppression: {
+        suppressed: true,
+        reason: 'closer-commit-trailer',
+        matched: 'Closed-By',
+      },
+      commit: {
+        sha: currentHead,
+        parentSha: reviewedHead,
+        changedFiles: ['runtime/agent.js'],
+      },
+    },
+  });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('stale-review-head'));
+  assert.equal(result.trace.headMatch.nonReviewableHeadDelta.checks.emptyDiff, false);
+});
+
+test('not eligible: blocking findings still refuse despite trailer-only head delta', () => {
+  const reviewedHead = '11111111';
+  const currentHead = '22222222';
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      headSha: reviewedHead,
+      verdict: 'request-changes',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+    },
+    prMetadata: { headSha: currentHead },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    nonReviewableHeadDelta: {
+      active: true,
+      evidence: 'non_reviewable_head_delta',
+      reviewedHead,
+      currentHead,
+      reason: 'closer-commit-trailer',
+      suppression: {
+        suppressed: true,
+        reason: 'closer-commit-trailer',
+        matched: 'Closed-By',
+      },
+      commit: {
+        sha: currentHead,
+        parentSha: reviewedHead,
+        changedFiles: [],
+      },
+    },
+  });
+  assert.equal(result.eligible, false);
+  assert.ok(!result.reasons.includes('stale-review-head'));
+  assert.ok(result.reasons.includes('blocking-findings-present'));
+  assert.ok(result.reasons.includes('verdict-not-settled-success'));
+  assert.equal(result.trace.headMatch.ok, true);
+});
+
 test('eligible: current-head HAM terminal remediation clears stale reviewed head', () => {
   const reviewedHead = 'abc12345';
   const currentHead = 'def67890';

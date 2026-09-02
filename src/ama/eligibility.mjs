@@ -162,6 +162,10 @@ export const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
  * Unlike `operator-approved` / `adversarial-merge-requested`, AMA-05 §C explicitly permits PR-author
  * self-application of `adversarial-merge-blocked` (blocking your own PR is fine) so no author check
  * is applied to this evidence.
+ * @property {Object=} nonReviewableHeadDelta Optional watcher-recorded proof that the
+ * reviewed-head → current-head delta consists only of a non-reviewable bookkeeping
+ * commit. Eligibility validates this evidence as exact-head, empty-diff, and
+ * closer-trailer scoped; it never shells out or re-derives the classification.
  */
 
 /**
@@ -536,6 +540,62 @@ function validateRebaseReviewCoverageEvidence(
   };
 }
 
+function validateNonReviewableHeadDeltaEvidence(
+  evidence,
+  {
+    reviewedHead,
+    currentHead,
+  } = {},
+) {
+  const active = evidence?.active === true;
+  const coveredReviewedHead = String(evidence?.reviewedHead || '').trim();
+  const coveredCurrentHead = String(evidence?.currentHead || '').trim();
+  const marker = String(evidence?.evidence || evidence?.marker || '').trim();
+  const reason = String(evidence?.reason || evidence?.suppression?.reason || '').trim();
+  const commit = evidence?.commit || {};
+  const commitSha = String(commit?.sha || evidence?.headSha || '').trim();
+  const parentSha = String(commit?.parentSha || evidence?.parentSha || '').trim();
+  const changedFiles = Array.isArray(commit?.changedFiles)
+    ? commit.changedFiles
+    : Array.isArray(evidence?.changedFiles)
+      ? evidence.changedFiles
+      : null;
+  const checks = {
+    active,
+    reviewedHead:
+      coveredReviewedHead !== ''
+      && coveredReviewedHead === String(reviewedHead || '').trim(),
+    currentHead:
+      coveredCurrentHead !== ''
+      && coveredCurrentHead === String(currentHead || '').trim(),
+    marker: marker === 'non_reviewable_head_delta',
+    suppression: evidence?.suppression?.suppressed === true,
+    reason: reason === 'closer-commit-trailer',
+    commitSha:
+      commitSha !== ''
+      && commitSha === String(currentHead || '').trim(),
+    parentSha:
+      parentSha !== ''
+      && parentSha === String(reviewedHead || '').trim(),
+    emptyDiff: Array.isArray(changedFiles) && changedFiles.length === 0,
+  };
+  const ok = Object.values(checks).every(Boolean);
+  return {
+    active,
+    ok,
+    checks,
+    reviewedHead: coveredReviewedHead || null,
+    currentHead: coveredCurrentHead || null,
+    reason: reason || null,
+    marker: ok ? 'non_reviewable_head_delta' : null,
+    commit: {
+      sha: commitSha || null,
+      parentSha: parentSha || null,
+      changedFiles,
+    },
+  };
+}
+
 function validateHamFindingMap(findings) {
   if (!Array.isArray(findings)) {
     return { ok: false, count: 0, blocking: 0, nonBlocking: 0, nonBlockingTitles: [] };
@@ -886,11 +946,16 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     options?.rebaseReviewCoverage || null,
     { reviewedHead, currentHead },
   );
+  const nonReviewableHeadDelta = validateNonReviewableHeadDeltaEvidence(
+    options?.nonReviewableHeadDelta || null,
+    { reviewedHead, currentHead },
+  );
   const headMatchOk =
     operatorOverride
     || (reviewedHead && reviewedHead === currentHead)
     || hamTerminalRemediation.ok === true
-    || rebaseReviewCoverage.ok;
+    || rebaseReviewCoverage.ok
+    || nonReviewableHeadDelta.ok;
   if (!headMatchOk) reasons.push('stale-review-head');
 
   const remediationStateKnown = typeof reviewState?.remediationPending === 'boolean';
@@ -1282,6 +1347,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
       ok: headMatchOk,
       hamTerminalRemediation: hamTerminalRemediation.ok === true,
       rebaseReviewCoverage,
+      nonReviewableHeadDelta,
     },
     remediation: { pending: remediationPending, known: remediationStateKnown },
     config: { enabled: amaEnabled },

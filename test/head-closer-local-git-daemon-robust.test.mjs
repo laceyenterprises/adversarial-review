@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  buildNonReviewableHeadDeltaEvidence,
   fetchVerifiedCommitFromLocalGit,
   getHeadCloserCommitSuppression,
   fetchHeadCloserVerifiedCommit,
@@ -427,6 +428,38 @@ test('fetchHeadCloserVerifiedCommit prefers local git (returns the closer commit
   assert.equal(ghCalled, false);
   assert.equal(commit.sha, HEAD_SHA);
   assert.match(commit.message, /Closed-By: hammer/);
+});
+
+test('buildNonReviewableHeadDeltaEvidence records watcher closer-trailer empty-diff proof', async () => {
+  const git = makeFakeGit({ files: [] });
+  const commit = await fetchHeadCloserVerifiedCommit({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 5348,
+    headSha: HEAD_SHA,
+    execFileImpl: git,
+    execGhWithRetryImpl: throwingGh,
+    logger: { warn() {}, debug() {} },
+  });
+  const evidence = buildNonReviewableHeadDeltaEvidence({
+    reviewedHead: PARENT_SHA,
+    currentHead: HEAD_SHA,
+    verifiedCommit: commit,
+    suppression: {
+      suppressed: true,
+      reason: 'closer-commit-trailer',
+      matched: 'Closed-By',
+    },
+  });
+
+  assert.equal(evidence.evidence, 'non_reviewable_head_delta');
+  assert.equal(evidence.reviewedHead, PARENT_SHA);
+  assert.equal(evidence.currentHead, HEAD_SHA);
+  assert.equal(evidence.reason, 'closer-commit-trailer');
+  assert.equal(evidence.suppression.suppressed, true);
+  assert.equal(evidence.commit.sha, HEAD_SHA);
+  assert.equal(evidence.commit.parentSha, PARENT_SHA);
+  assert.deepEqual(evidence.commit.changedFiles, []);
+  assert.equal(evidence.nonReviewableReason, true);
 });
 
 test('fetchHeadCloserVerifiedCommit falls back to gh when local git has no closer identity', async () => {

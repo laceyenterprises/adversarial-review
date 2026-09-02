@@ -281,6 +281,9 @@ const TERMINAL_CLOSER_BOT_IDENTITIES = new Set([
   'merge-agent-lacey',
   'the-hammer-lacey[bot]',
 ]);
+const NON_REVIEWABLE_HEAD_DELTA_REASONS = new Set([
+  'closer-commit-trailer',
+]);
 
 function normalizeTrailerIdentity(value) {
   return normalizeIdentityPart(value).replace(/\s+\(.*$/, '');
@@ -358,6 +361,38 @@ export function normalizeVerifiedCloserCommit(commitJson = {}) {
     author: commitJson?.author?.login || commitJson?.commit?.author?.login || null,
     committer: commitJson?.committer?.login || commitJson?.commit?.committer?.login || null,
     changedFiles,
+  };
+}
+
+export function buildNonReviewableHeadDeltaEvidence({
+  reviewedHead,
+  currentHead,
+  verifiedCommit,
+  suppression,
+  source = 'watcher-head-closer-suppression',
+} = {}) {
+  const normalizedCommit = normalizeVerifiedCloserCommit(verifiedCommit || {});
+  const reason = String(suppression?.reason || '').trim();
+  const identity = isTerminalCloserCommitIdentity(verifiedCommit || {});
+  return {
+    active: true,
+    evidence: 'non_reviewable_head_delta',
+    source,
+    reviewedHead: String(reviewedHead || '').trim(),
+    currentHead: String(currentHead || '').trim(),
+    reason,
+    suppression: {
+      suppressed: suppression?.suppressed === true,
+      reason,
+      matched: suppression?.matched || identity?.matched || null,
+    },
+    commit: {
+      sha: normalizedCommit.sha,
+      parentSha: normalizedCommit.parentSha,
+      changedFiles: normalizedCommit.changedFiles,
+      trailers: normalizedCommit.trailers,
+    },
+    nonReviewableReason: NON_REVIEWABLE_HEAD_DELTA_REASONS.has(reason),
   };
 }
 

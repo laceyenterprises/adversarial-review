@@ -39,7 +39,7 @@
   },
   "dependencies": {
     "@agent-os/app-sdk": "file:agent-os-app-sdk-0.2.0.tgz",
-    "@linear/sdk": "^90.0.0",
+    "@linear/sdk": "^92.0.0",
     "@octokit/rest": "^22.0.1",
     "better-sqlite3": "^12.10.0",
     "fs-ext": "^2.1.1",

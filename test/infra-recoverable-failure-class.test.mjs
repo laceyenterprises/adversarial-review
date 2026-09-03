@@ -110,3 +110,65 @@ test('terminal tagged failures are not reclassified as retryable unknown failure
     null
   );
 });
+
+test('an expired reviewer GitHub token classifies as oauth-broken, not unknown', () => {
+  // The 2026-09-03 review outage. The reviewer's bot token is a broker-minted
+  // GitHub App INSTALLATION token (1h lifetime); a watcher outliving its mint
+  // keeps using the stale value and every `gh` call 401s. The reviewer still
+  // runs and still generates a verdict -- it just cannot post it.
+  //
+  // This text is verbatim from the incident, and it carries NO tag: it used to
+  // fall through to 'unknown' and be charged to the reviewer attempt budget
+  // ("Reviewer unknown-class failure on #6117; counting against attempt budget
+  // (1/4)") instead of the bounded oauth-broken auto-recovery path that exists
+  // for exactly this. 8 of 12 open PRs went unreviewed for ~1.5h while the
+  // liveness probe still reported the pipeline healthy.
+  const row = {
+    failure_message:
+      'Command failed: gh api repos/laceyenterprises/agent-os/pulls/6117\ngh: Bad credentials (HTTP 401)\n',
+  };
+  assert.equal(reviewerFailureClassFromStoredRow(row), 'oauth-broken');
+  // And it must reach the bounded auto-recovery path, not the attempt budget.
+  assert.equal(infraRecoverableFailureClass(row), 'oauth-broken');
+  assert.equal(unknownReviewerCommandFailureClass(row), null);
+});
+
+test('other GitHub auth-rejection phrasings also classify as oauth-broken', () => {
+  for (const text of [
+    'gh: Bad credentials (HTTP 401)',
+    'HTTP 401: Unauthorized (https://api.github.com/graphql)',
+    'Status 401: Unauthorized (https://api.github.com/graphql)',
+    '401: Unauthorized (https://api.github.com/graphql)',
+    'gh: Requires authentication (HTTP 401)',
+  ]) {
+    assert.equal(
+      reviewerFailureClassFromStoredRow({ failure_message: text }),
+      'oauth-broken',
+      `expected oauth-broken for: ${text}`,
+    );
+  }
+});
+
+test('incidental auth phrases embedded in unrelated failures do not classify as oauth-broken', () => {
+  for (const text of [
+    'Command failed with code 124\nstderr tail:\nTimed out while reviewing PR title: fix bad credentials',
+    'Command failed with code 124\nstderr tail:\nTimed out while reviewing branch topic/status 401: unauthorized',
+    'Command failed with code 124\nstderr tail:\nTimed out while rendering body: requires authentication docs',
+  ]) {
+    assert.notEqual(
+      reviewerFailureClassFromStoredRow({ failure_message: text }),
+      'oauth-broken',
+      `did not expect oauth-broken for: ${text}`,
+    );
+  }
+});
+
+test('a 403 rate-limit is NOT reclassified as oauth-broken', () => {
+  // Guard the blast radius: only credential REJECTION is oauth-broken. A 403
+  // rate-limit is a different failure with a different remedy, and folding it
+  // into oauth-broken would send it down the re-mint path pointlessly.
+  const row = {
+    failure_message: 'gh: API rate limit exceeded (HTTP 403)',
+  };
+  assert.notEqual(reviewerFailureClassFromStoredRow(row), 'oauth-broken');
+});

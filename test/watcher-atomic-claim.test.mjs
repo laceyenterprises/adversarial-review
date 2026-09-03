@@ -262,6 +262,25 @@ test('infra auto-recovery claim atomically promotes and increments the failed ro
   assert.equal(row.infra_auto_recover_attempts, 1);
 });
 
+test('infra auto-recovery claim accepts untagged GitHub bad-credentials oauth failures', () => {
+  const db = setupDb();
+  seedReviewRow(db, {
+    reviewStatus: 'failed',
+    failureMessage: 'Command failed: gh api repos/laceyenterprises/agent-os/pulls/6117\ngh: Bad credentials (HTTP 401)\n',
+  });
+
+  assert.equal(infraRecoverableFailureClass(readRow(db)), 'oauth-broken');
+  const claim = runInfraRecoveryClaim(db, '2026-05-02T18:10:00.000Z', 'oauth-broken');
+
+  assert.equal(claim.changes, 1);
+  const row = readRow(db);
+  assert.equal(row.review_status, 'reviewing');
+  assert.equal(row.reviewer_session_uuid, 'session-999');
+  assert.equal(row.failed_at, null);
+  assert.equal(row.failure_message, null);
+  assert.equal(row.infra_auto_recover_attempts, 1);
+});
+
 test('infra auto-recovery claim handles reviewer command-failed unknown rows', () => {
   const db = setupDb();
   seedReviewRow(db, {

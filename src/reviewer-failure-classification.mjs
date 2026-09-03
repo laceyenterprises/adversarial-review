@@ -52,6 +52,32 @@ function reviewerFailureClassFromStoredRow(reviewRow) {
     return legacyClass;
   }
   if (message.includes('[oauth-broken]')) return 'oauth-broken';
+  // A rejected GitHub credential is oauth-broken even when nothing tagged it as
+  // such. The reviewer's bot token is a broker-minted GitHub App INSTALLATION
+  // token, which expires after one hour; a watcher process that outlives its
+  // mint keeps using the stale value and every `gh` call returns 401. The
+  // reviewer still runs and still generates a verdict -- it just cannot post it.
+  //
+  // Without this branch that failure carried no recognizable tag, fell through
+  // to 'unknown', and was charged to the reviewer attempt budget instead of the
+  // bounded oauth-broken auto-recovery path that exists precisely for it. So the
+  // pipeline went dark and burned retries rather than re-minting or alerting.
+  //
+  // Observed 2026-09-03: gemini-reviewer posted normally at 15:07:34Z, then every
+  // subsequent post failed `gh: Bad credentials (HTTP 401)`; 8 of 12 open PRs sat
+  // unreviewed for ~1.5h while `adversarial-pipeline-liveness` still reported
+  // "daemons and reviewer output healthy". Restarting the watcher re-minted all
+  // four tokens and cleared it -- an auto-recovery the classifier should have
+  // reached on its own. Same archetype as the #5250 dead-PAT incident, one layer
+  // down: there the credential was wrong, here it is expired, and both times the
+  // failure did not say "auth".
+  if (
+    /(?:^|\n)\s*(?:gh:\s*)?bad credentials\b/i.test(rawMessage)
+    || /(?:^|\n)\s*(?:(?:gh:\s*)?(?:http|status)\s*)?401:?\s*unauthorized\b/i.test(rawMessage)
+    || /(?:^|\n)\s*(?:gh:\s*)?requires authentication\b/i.test(rawMessage)
+  ) {
+    return 'oauth-broken';
+  }
   if (message.includes('claude launchctl session bootstrap failed') || message.includes('launchctlsessionerror')) {
     return 'launchctl-bootstrap';
   }

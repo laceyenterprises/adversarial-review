@@ -78,7 +78,12 @@ export const MARK_INFRA_AUTO_RECOVERY_ATTEMPT_STARTED_SQL =
          lower(COALESCE(failure_message, '')) LIKE '%claude launchctl session bootstrap failed%' OR
          lower(COALESCE(failure_message, '')) LIKE '%launchctlsessionerror%'
        )
-       WHEN 'oauth-broken' THEN lower(COALESCE(failure_message, '')) LIKE '%[oauth-broken]%'
+      WHEN 'oauth-broken' THEN (
+        lower(COALESCE(failure_message, '')) LIKE '%[oauth-broken]%' OR
+        lower(COALESCE(failure_message, '')) LIKE '%bad credentials%' OR
+        lower(COALESCE(failure_message, '')) LIKE '%401%unauthorized%' OR
+        lower(COALESCE(failure_message, '')) LIKE '%requires authentication%'
+      )
        WHEN 'quota-exhausted' THEN lower(COALESCE(failure_message, '')) LIKE '[quota-exhausted]%'
        WHEN 'reviewer-command-failed' THEN (
          (

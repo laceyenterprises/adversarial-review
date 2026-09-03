@@ -948,6 +948,17 @@ export async function processReviewSubject(entry, ctx) {
           // `subject.headSha` in 29 other places, including the adjacent
           // handoff-context blocks.
           headSha: subject.headSha || null,
+          ...(stalePostedReviewCloserSuppression.suppressed
+            ? {
+                stalledProducerHints: {
+                  'verdict-not-settled-success': {
+                    exists: false,
+                    reason: `auto-refresh-suppressed:${stalePostedReviewCloserSuppression.reason}`,
+                    source: 'head-closer-commit-suppression',
+                  },
+                },
+              }
+            : {}),
           run: runPostedReviewHandler,
         });
         return;

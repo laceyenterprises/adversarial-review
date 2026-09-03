@@ -58,6 +58,7 @@ import { writeFileAtomic } from './atomic-write.mjs';
 // on its own?") and an operator reading two different numbers for the same
 // judgement would reasonably assume one of them was wrong.
 export const DEFAULT_NO_PROGRESS_LANE_CAP = 3;
+export const DEFAULT_NO_PROGRESS_STALLED_EVENT_TICKS = DEFAULT_NO_PROGRESS_LANE_CAP;
 
 // Ceiling on the backoff, in ticks. At the production 5m poll interval, 12 ticks
 // is one hour — the longest a genuinely-wedged PR can go unlooked-at. The cap is
@@ -69,6 +70,7 @@ export const DEFAULT_OPERATOR_BLOCKED_REWALK_TICKS = 3;
 export const DEFAULT_OPERATOR_BLOCKED_ALERT_NO_PROGRESS_TICKS = 6;
 
 const NO_PROGRESS_LANE_SCHEMA_VERSION = 1;
+const STALLED_EVENT_SCHEMA_VERSION = 1;
 
 export const LANE_ACTIVE = 'active';
 export const LANE_SLOW = 'slow';
@@ -120,6 +122,95 @@ function hasOwn(obj, key) {
 
 function operatorBlockedRewalkTicks(value) {
   return positiveIntOr(value, DEFAULT_OPERATOR_BLOCKED_REWALK_TICKS);
+}
+
+function normalizeReasonList(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((reason) => String(reason || '').trim())
+    .filter(Boolean);
+}
+
+const MISSING_INPUT_REASON_PRIORITY = Object.freeze([
+  'verdict-not-settled-success',
+  'blocking-findings-unknown',
+  'non-blocking-findings-unknown',
+  'remediation-state-unknown',
+  'remediation-pending',
+  'blocking-findings-present',
+  'non-blocking-findings-present',
+  'stale-review-head',
+  'ci-not-green',
+  'pr-not-mergeable',
+  'branch-protection-missing-gate',
+  'risk-class-not-permitted',
+]);
+
+export function chooseNoProgressMissingInput({
+  reasons = [],
+  value = null,
+  fallback = 'review-state-unchanged',
+} = {}) {
+  const candidates = [
+    ...normalizeReasonList(reasons),
+    ...normalizeReasonList(value?.amaClosureResult?.reasons),
+    ...normalizeReasonList(value?.gateDecision?.reasons),
+  ];
+  for (const preferred of MISSING_INPUT_REASON_PRIORITY) {
+    if (candidates.includes(preferred)) return preferred;
+  }
+  return candidates[0] || fallback;
+}
+
+export function resolveNoProgressProducerState({
+  missingInput,
+  producerHints = null,
+} = {}) {
+  const hint = producerHints && typeof producerHints === 'object'
+    ? producerHints[missingInput]
+    : null;
+  if (hint && typeof hint === 'object') {
+    return {
+      exists: hint.exists === false ? false : hint.exists === true ? true : null,
+      reason: String(hint.reason || '').trim() || null,
+      source: String(hint.source || '').trim() || null,
+    };
+  }
+  if (missingInput === 'verdict-not-settled-success') {
+    return {
+      exists: true,
+      reason: 'reviewer-auto-refresh-or-rereview-can-produce-verdict',
+      source: 'default-verdict-producer',
+    };
+  }
+  return { exists: null, reason: null, source: null };
+}
+
+export function buildNoProgressStalledEvent({
+  identity,
+  headSha,
+  noProgressTicks,
+  firstNoProgressAt = null,
+  missingInput,
+  producer,
+  observedAt = null,
+} = {}) {
+  return {
+    schemaVersion: STALLED_EVENT_SCHEMA_VERSION,
+    event: 'adversarial_review.no_progress_stalled',
+    repo: identity?.repo ?? null,
+    pr: Number(identity?.prNumber),
+    headSha: normalizeHead(headSha),
+    noProgressTicks: normalizeCount(noProgressTicks),
+    firstNoProgressAt: firstNoProgressAt || null,
+    missingInput: String(missingInput || 'review-state-unchanged'),
+    producer: {
+      exists: producer?.exists === true ? true : producer?.exists === false ? false : null,
+      reason: producer?.reason || null,
+      source: producer?.source || null,
+    },
+    observedAt: observedAt || null,
+  };
 }
 
 /**
@@ -357,6 +448,9 @@ export function recordNoProgressLaneRun(rootDir, identity, {
   const firstNoProgressAt = (sameFingerprint ? existing?.firstNoProgressAt : null)
     || (noProgressTicks > 0 ? now : null)
     || null;
+  const priorStalledEvent = sameFingerprint && existing?.stalledEvent?.emitted === true
+    ? existing.stalledEvent
+    : null;
   writeLedger(rootDir, identity, {
     schemaVersion: NO_PROGRESS_LANE_SCHEMA_VERSION,
     repo: identity?.repo ?? null,
@@ -369,6 +463,7 @@ export function recordNoProgressLaneRun(rootDir, identity, {
     skippedTicks: 0,
     lane,
     firstNoProgressAt,
+    ...(priorStalledEvent ? { stalledEvent: priorStalledEvent } : {}),
     updatedAt: now || null,
   });
   return {
@@ -382,6 +477,49 @@ export function recordNoProgressLaneRun(rootDir, identity, {
     headSha: head,
     firstNoProgressAt,
   };
+}
+
+export function maybeMarkNoProgressStalledEvent(rootDir, identity, {
+  headSha,
+  fingerprint,
+  noProgressTicks,
+  firstNoProgressAt = null,
+  missingInput = 'review-state-unchanged',
+  producer = null,
+  thresholdTicks = DEFAULT_NO_PROGRESS_STALLED_EVENT_TICKS,
+  now = null,
+  logger = console,
+} = {}) {
+  const threshold = positiveIntOr(thresholdTicks, DEFAULT_NO_PROGRESS_STALLED_EVENT_TICKS);
+  if (normalizeCount(noProgressTicks) < threshold) return null;
+  const head = normalizeHead(headSha);
+  const existing = readNoProgressLane(rootDir, identity, { logger });
+  if (!existing || normalizeHead(existing.headSha) !== head) return null;
+  if (typeof existing.fingerprint === 'string' && existing.fingerprint !== fingerprint) return null;
+  if (existing?.stalledEvent?.emitted === true) return null;
+
+  const event = buildNoProgressStalledEvent({
+    identity,
+    headSha: head,
+    noProgressTicks,
+    firstNoProgressAt,
+    missingInput,
+    producer,
+    observedAt: now,
+  });
+  writeLedger(rootDir, identity, {
+    ...existing,
+    schemaVersion: NO_PROGRESS_LANE_SCHEMA_VERSION,
+    stalledEvent: {
+      emitted: true,
+      emittedAt: now || null,
+      missingInput: event.missingInput,
+      producer: event.producer,
+      noProgressTicks: event.noProgressTicks,
+    },
+    updatedAt: now || existing.updatedAt || null,
+  });
+  return event;
 }
 
 export function operatorDecisionAlertStateDir(rootDir) {

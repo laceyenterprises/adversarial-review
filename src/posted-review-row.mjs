@@ -46,12 +46,15 @@ import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import {
   evaluateNoProgressLane,
   maybeFireOperatorDecisionRequiredAlert,
+  maybeMarkNoProgressStalledEvent,
   readNoProgressLane,
   clearNoProgressLane,
   PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED,
   PROGRESS_CLASS_SELF_RESOLVING,
+  chooseNoProgressMissingInput,
   recordNoProgressLaneRun,
   recordNoProgressLaneSkip,
+  resolveNoProgressProducerState,
   subjectProgressFingerprint,
 } from './watcher-no-progress-lane.mjs';
 import {
@@ -91,6 +94,12 @@ function findLatestPostedReviewBody(rootDir = ROOT, { repo, prNumber } = {}) {
 }
 
 const postedReviewRowLogGate = createLogChangeGate();
+
+function isTerminalReviewRow(row) {
+  const prState = String(row?.pr_state || row?.prState || '').trim().toLowerCase();
+  if (['merged', 'closed'].includes(prState)) return true;
+  return Boolean(row?.merged_at || row?.mergedAt || row?.closed_at || row?.closedAt);
+}
 
 export async function handlePostedReviewRow({
   rootDir = ROOT,
@@ -415,6 +424,7 @@ export function createNoProgressLaneGate({
   readReviewRow = (repo, prNumber) => stmtGetReviewRow.get(repo, prNumber),
   now = () => new Date().toISOString(),
   deliverAlertFn = defaultDeliverAlert,
+  emitStalledEventFn = null,
   logger = console,
 } = {}) {
   return {
@@ -471,6 +481,38 @@ export function createNoProgressLaneGate({
             `every ${outcome.backoffTicks} tick(s) instead of every tick. It is NOT dropped — ` +
             'nothing about its eligibility, findings, or merge gating has changed.',
         );
+      }
+      if (outcome?.progressed === false && !isTerminalReviewRow(row)) {
+        const missingInput = chooseNoProgressMissingInput({
+          value,
+        });
+        const producer = resolveNoProgressProducerState({
+          missingInput,
+          producerHints: handler.stalledProducerHints || null,
+        });
+        const stalledEvent = maybeMarkNoProgressStalledEvent(rootDir, identity, {
+          headSha: handler.headSha || null,
+          fingerprint,
+          noProgressTicks: outcome.noProgressTicks,
+          firstNoProgressAt: outcome.firstNoProgressAt || null,
+          missingInput,
+          producer,
+          now: observedAt,
+          logger,
+        });
+        if (stalledEvent) {
+          logger?.warn?.(
+            `[watcher] STALLED ${handler.repoPath}#${handler.prNumber} for ` +
+              `${stalledEvent.noProgressTicks} ticks: needs ${stalledEvent.missingInput} ` +
+              `at head ${(handler.headSha || 'unknown').slice(0, 12)}. ` +
+              `Producer exists: ${stalledEvent.producer.exists === true ? 'yes' : stalledEvent.producer.exists === false ? 'no' : 'unknown'}` +
+              (stalledEvent.producer.reason ? ` (${stalledEvent.producer.reason})` : ''),
+          );
+          logger?.log?.(JSON.stringify(stalledEvent));
+          if (typeof emitStalledEventFn === 'function') {
+            await emitStalledEventFn(stalledEvent);
+          }
+        }
       }
       if (outcome?.progressClass === PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED) {
         try {

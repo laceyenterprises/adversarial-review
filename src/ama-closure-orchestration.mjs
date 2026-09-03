@@ -265,6 +265,7 @@ export async function maybeDispatchAmaClosureFor({
   resolveReviewCycleExhaustionImpl = null,
   runDaemonCleanMergeAttemptImpl = runDaemonCleanMergeAttempt,
   resolveHeadCloserCommitSuppressionImpl = null,
+  fetchHeadCloserVerifiedCommitImpl = fetchHeadCloserVerifiedCommit,
   resolveHamTerminalRemediationEvidenceImpl =
     amaDispatchCloser.resolveHamTerminalRemediationEvidence || null,
   dismissSupersededBlockingVerdictAtRemediatedHeadImpl =
@@ -706,7 +707,7 @@ export async function maybeDispatchAmaClosureFor({
         allowStaleReviewHeadHammerResume &&
         closerCommitSuppression?.reason === 'closer-commit-trailer'
       ) {
-        const verifiedCommit = await fetchHeadCloserVerifiedCommit({
+        const verifiedCommit = await fetchHeadCloserVerifiedCommitImpl({
           repoPath,
           prNumber,
           headSha: currentPrHeadSha,

@@ -148,7 +148,8 @@ new PR
   not pass through the `failed` compare-and-swap recovery claim. Legacy or
   explicitly terminal infrastructure-class `failed` rows (`cascade`,
   `provider-overloaded`, `reviewer-timeout`, `launchctl-bootstrap`,
-  reviewer-spawn `oauth-broken`, `quota-exhausted`, and
+  reviewer-spawn `oauth-broken` including untagged GitHub credential-rejection
+  messages such as `gh: Bad credentials (HTTP 401)`, `quota-exhausted`, and
   `reviewer-command-failed` stored as `[unknown] Command failed...`) use the
   dedicated claim path that atomically promotes the row to `reviewing` and
   increments `infra_auto_recover_attempts` only if the row is still the same

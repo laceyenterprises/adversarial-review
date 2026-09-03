@@ -1020,8 +1020,9 @@ gate above must report healthy before an infrastructure failed row is claimed.
 Eligible infrastructure classes are routing-tier `cascade`, exhausted
 GitHub diff-fetch transients tagged as `cascade`, explicit HTTP 529/backend
 capacity failures tagged as `provider-overloaded`, `reviewer-timeout`,
-`launchctl-bootstrap`, reviewer-spawn `oauth-broken`, and hard provider usage
-caps recorded as `quota-exhausted`. Reviewer subprocess exits recorded as
+`launchctl-bootstrap`, reviewer-spawn `oauth-broken` including untagged GitHub
+credential-rejection messages such as `gh: Bad credentials (HTTP 401)`, and
+hard provider usage caps recorded as `quota-exhausted`. Reviewer subprocess exits recorded as
 `[unknown] Command failed` (including stored stdout/stderr tails) or
 `[unknown] Command failed with code <n>` before any verdict exists are also
 eligible as `reviewer-command-failed`. Before retrying that class, the watcher
@@ -1035,9 +1036,10 @@ bounded claim and cap semantics as the other infrastructure classes.
 `forbidden-fallback`,
 `failed-orphan`, `malformed`, inactive repos, closed or merged PRs,
 undiscovered PRs, drain-skipped rows, and rows blocked by active follow-up jobs
-are not recovered by this path. `oauth-broken` is included only for spawn
-failures recorded in the watcher row, because those failures can represent
-local OAuth/runtime launch breakage before any reviewer verdict exists.
+are not recovered by this path. `oauth-broken` is included only for spawn or
+post-review credential failures recorded in the watcher row, because those
+failures can represent local OAuth/runtime launch breakage or an expired
+reviewer posting credential before any reviewer verdict is durably recorded.
 Exhausted GitHub diff-fetch transients intentionally share the same routing-tier
 readiness gate as other `cascade` rows because recovery immediately dispatches a
 full reviewer after the diff is fetched; if the local model route is still down,

@@ -171,6 +171,75 @@ test('daemon merges the clean tick → skips closer dispatch (no agent spawn)', 
   }
 });
 
+test('AMA closure passes watcher-recorded trailer-only head evidence to eligibility', async () => {
+  const rootDir = tempRoot();
+  try {
+    const reviewedHead = 'reviewed-trailer-head';
+    const currentHead = 'current-trailer-head';
+    let seenOptions = null;
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      reviewStateRow: {
+        ...baseArgs(rootDir).reviewStateRow,
+        reviewer_head_sha: reviewedHead,
+      },
+      dispatchJob: {
+        blockingFindingCount: 0,
+        blockingFindingState: 'known',
+        nonBlockingFindingCount: 0,
+        nonBlockingFindingState: 'known',
+      },
+      candidate: {
+        ...baseArgs(rootDir).candidate,
+        headSha: currentHead,
+      },
+      currentRevisionRef: currentHead,
+      runDaemonCleanMergeAttemptImpl: async () => ({
+        disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN,
+        reason: 'covered-by-closer-test',
+      }),
+      resolveHeadCloserCommitSuppressionImpl: async ({ headSha }) => {
+        assert.equal(headSha, currentHead);
+        return {
+          suppressed: true,
+          reason: 'closer-commit-trailer',
+          matched: 'Closed-By',
+        };
+      },
+      fetchHeadCloserVerifiedCommitImpl: async ({ headSha }) => {
+        assert.equal(headSha, currentHead);
+        return {
+          sha: currentHead,
+          parentSha: reviewedHead,
+          message: [
+            'HAM bookkeeping closeout',
+            '',
+            'Closed-By: hammer (adversarial-pipe-mode)',
+            '',
+          ].join('\n'),
+          trailers: { 'closed-by': 'hammer (adversarial-pipe-mode)' },
+          committer: 'the-hammer-lacey[bot]',
+          changedFiles: [],
+        };
+      },
+      maybeDispatchAmaCloserImpl: async ({ options }) => {
+        seenOptions = options;
+        return { dispatched: false, reason: 'not-eligible', reasons: [] };
+      },
+    });
+
+    assert.equal(result.reason, 'not-eligible');
+    assert.equal(seenOptions?.nonReviewableHeadDelta?.evidence, 'non_reviewable_head_delta');
+    assert.equal(seenOptions.nonReviewableHeadDelta.reviewedHead, reviewedHead);
+    assert.equal(seenOptions.nonReviewableHeadDelta.currentHead, currentHead);
+    assert.equal(seenOptions.nonReviewableHeadDelta.reason, 'closer-commit-trailer');
+    assert.equal(seenOptions.nonReviewableHeadDelta.suppression.suppressed, true);
+    assert.deepEqual(seenOptions.nonReviewableHeadDelta.commit.changedFiles, []);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('daemon loads merge-authority config with the adversarial config.yaml module (not shell-env-only)', async () => {
   // Regression for the 2026-07-16 outage: the shell agent_os_config_export
   // mis-resolves nested lha.consume_attestations (emits true even when

@@ -1005,6 +1005,70 @@ test('CLZ-03: unchanged non-terminal subject emits exactly one stalled event wit
   }
 });
 
+test('CLZ-03: stalled event emission failure remains retryable until acknowledged', async () => {
+  const rootDir = tempRoot();
+  try {
+    const identity = { repo: REPO, prNumber: 6059 };
+    const stalledEvents = [];
+    let emitAttempts = 0;
+    const gate = createNoProgressLaneGate({
+      rootDir,
+      readReviewRow: () => ({
+        review_status: 'posted',
+        pr_state: 'open',
+        reviewer_head_sha: HEAD_A,
+        review_attempts: 1,
+        posted_at: '2026-08-31T07:00:00.000Z',
+        failed_at: null,
+        merged_at: null,
+      }),
+      now: () => '2026-08-31T13:00:00.000Z',
+      emitStalledEventFn: async (event) => {
+        emitAttempts += 1;
+        if (emitAttempts === 1) throw new Error('event bus unavailable');
+        stalledEvents.push(event);
+      },
+      logger: silentLogger,
+    });
+    const handler = { repoPath: REPO, prNumber: 6059, headSha: HEAD_A };
+
+    for (let i = 0; i < DEFAULT_NO_PROGRESS_STALLED_EVENT_TICKS; i += 1) {
+      await gate.record(handler, {
+        value: { amaClosureResult: { reasons: ['blocking-findings-unknown'] } },
+      });
+    }
+    await assert.rejects(
+      gate.record(handler, {
+        value: { amaClosureResult: { reasons: ['blocking-findings-unknown'] } },
+      }),
+      /event bus unavailable/,
+    );
+    assert.equal(
+      readNoProgressLane(rootDir, identity, { logger: silentLogger }).stalledEvent.emitted,
+      false,
+      'failed delivery is recorded as pending, not emitted',
+    );
+
+    await gate.record(handler, {
+      value: { amaClosureResult: { reasons: ['blocking-findings-unknown'] } },
+    });
+    await gate.record(handler, {
+      value: { amaClosureResult: { reasons: ['blocking-findings-unknown'] } },
+    });
+
+    assert.equal(emitAttempts, 2);
+    assert.equal(stalledEvents.length, 1);
+    assert.equal(stalledEvents[0].missingInput, 'blocking-findings-unknown');
+    assert.equal(
+      readNoProgressLane(rootDir, identity, { logger: silentLogger }).stalledEvent.emitted,
+      true,
+      'successful retry acknowledges the stalled event',
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('CLZ-03: stalled verdict event records no producer when auto-refresh is suppressed', async () => {
   const rootDir = tempRoot();
   try {

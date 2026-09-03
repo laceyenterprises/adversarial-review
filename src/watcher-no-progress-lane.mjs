@@ -511,8 +511,9 @@ export function maybeMarkNoProgressStalledEvent(rootDir, identity, {
     ...existing,
     schemaVersion: NO_PROGRESS_LANE_SCHEMA_VERSION,
     stalledEvent: {
-      emitted: true,
-      emittedAt: now || null,
+      emitted: false,
+      pendingSince: now || null,
+      emittedAt: null,
       missingInput: event.missingInput,
       producer: event.producer,
       noProgressTicks: event.noProgressTicks,
@@ -520,6 +521,30 @@ export function maybeMarkNoProgressStalledEvent(rootDir, identity, {
     updatedAt: now || existing.updatedAt || null,
   });
   return event;
+}
+
+export function markNoProgressStalledEventEmitted(rootDir, identity, event, {
+  emittedAt = null,
+  fingerprint = null,
+  logger = console,
+} = {}) {
+  const existing = readNoProgressLane(rootDir, identity, { logger });
+  if (!existing || normalizeHead(existing.headSha) !== normalizeHead(event?.headSha)) return false;
+  if (fingerprint !== null && existing.fingerprint !== fingerprint) return false;
+  const existingEvent = existing.stalledEvent;
+  if (!existingEvent || existingEvent.emitted === true) return existingEvent?.emitted === true;
+  if (existingEvent.missingInput !== event?.missingInput) return false;
+  writeLedger(rootDir, identity, {
+    ...existing,
+    schemaVersion: NO_PROGRESS_LANE_SCHEMA_VERSION,
+    stalledEvent: {
+      ...existingEvent,
+      emitted: true,
+      emittedAt: emittedAt || null,
+    },
+    updatedAt: emittedAt || existing.updatedAt || null,
+  });
+  return true;
 }
 
 export function operatorDecisionAlertStateDir(rootDir) {

@@ -45,6 +45,7 @@ import { db, stmtGetLatestPostedReviewBody, stmtGetReviewRow } from './review-st
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import {
   evaluateNoProgressLane,
+  markNoProgressStalledEventEmitted,
   maybeFireOperatorDecisionRequiredAlert,
   maybeMarkNoProgressStalledEvent,
   readNoProgressLane,
@@ -512,6 +513,11 @@ export function createNoProgressLaneGate({
           if (typeof emitStalledEventFn === 'function') {
             await emitStalledEventFn(stalledEvent);
           }
+          markNoProgressStalledEventEmitted(rootDir, identity, stalledEvent, {
+            emittedAt: now(),
+            fingerprint,
+            logger,
+          });
         }
       }
       if (outcome?.progressClass === PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED) {

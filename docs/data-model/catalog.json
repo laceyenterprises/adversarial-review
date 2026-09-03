@@ -45,6 +45,14 @@
       "owner": "review-freshness liveness alert"
     },
     {
+      "id": "watcher-no-progress-lane",
+      "title": "Watcher No-progress Lane",
+      "path": "docs/data-model/watcher-no-progress-lane.md",
+      "store": "data/watcher-no-progress-lane/",
+      "schemaSurface": "src/watcher-no-progress-lane.mjs",
+      "owner": "watcher posted-review dispatch fairness"
+    },
+    {
       "id": "alert-delivery-state",
       "title": "Alert Delivery State",
       "path": "docs/data-model/alert-delivery-state.md",

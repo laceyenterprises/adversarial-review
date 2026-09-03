@@ -60,6 +60,10 @@ import {
   resolvePostedReviewPhaseBudgetMs,
   runPostedReviewHandlersFairly,
 } from './watcher-poll-fairness.mjs';
+import {
+  maybeEmitStalledSignal,
+  resolveStalledSignalTicks,
+} from './watcher-stalled-signal.mjs';
 
 const execFileAsync = promisify(execFile);
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -415,6 +419,10 @@ export function createNoProgressLaneGate({
   readReviewRow = (repo, prNumber) => stmtGetReviewRow.get(repo, prNumber),
   now = () => new Date().toISOString(),
   deliverAlertFn = defaultDeliverAlert,
+  // CLZ-03 seams. `stalledSignalTicks` is K; `emitStalledSignalImpl` is the sink.
+  // Both default to production wiring; tests drive them without a clock.
+  stalledSignalTicks = resolveStalledSignalTicks(),
+  emitStalledSignalImpl = maybeEmitStalledSignal,
   logger = console,
 } = {}) {
   return {
@@ -471,6 +479,40 @@ export function createNoProgressLaneGate({
             `every ${outcome.backoffTicks} tick(s) instead of every tick. It is NOT dropped — ` +
             'nothing about its eligibility, findings, or merge gating has changed.',
         );
+      }
+      // CLZ-03: the lane has just decided whether this tick moved anything. If
+      // it did not, and the subject is non-terminal, and the series has reached
+      // K, say WHAT is missing and whether anything can produce it. This reads
+      // the counters `recordNoProgressLaneRun` just wrote; it changes none of
+      // them, and it cannot change whether the handler runs next tick.
+      //
+      // Skipped on a timed-out handler on purpose: the post-walk row is not read
+      // in that path, so no missing input can be named honestly — and an
+      // abandoned handler already logs at error level, which is nothing like the
+      // idle-looking line this signal exists to replace.
+      if (outcome && !timedOut) {
+        try {
+          emitStalledSignalImpl({
+            rootDir,
+            identity,
+            headSha: handler.headSha || null,
+            fingerprint,
+            noProgressTicks: outcome.noProgressTicks,
+            firstNoProgressAt: outcome.firstNoProgressAt || null,
+            reviewRow: row,
+            handlerValue: value,
+            autoRefreshSuppression: handler.autoRefreshSuppression || null,
+            thresholdTicks: stalledSignalTicks,
+            now: observedAt,
+            logger,
+          });
+        } catch (err) {
+          // A signal must never be able to break the tick it describes.
+          logger?.warn?.(
+            `[watcher] stalled signal: emit failed for ` +
+              `${handler.repoPath}#${handler.prNumber} (${err?.message || err})`,
+          );
+        }
       }
       if (outcome?.progressClass === PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED) {
         try {

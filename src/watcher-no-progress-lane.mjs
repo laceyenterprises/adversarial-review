@@ -51,6 +51,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import { join } from 'node:path';
 
 import { writeFileAtomic } from './atomic-write.mjs';
+import { clearStalledSignalState } from './watcher-stalled-signal.mjs';
 
 // Consecutive no-progress ticks tolerated before a PR is demoted to the slow
 // lane. Matches `AMA_RETAIN_LOOP_CAP`'s default of 3 on purpose: both answer the
@@ -177,6 +178,10 @@ export function readNoProgressLane(rootDir, identity, { logger = console } = {})
 export function clearNoProgressLane(rootDir, identity, { logger = console } = {}) {
   const filePath = noProgressLaneFilePath(rootDir, identity);
   clearOperatorDecisionAlertState(rootDir, identity, { logger });
+  // CLZ-03: the stall debounce is keyed on the same (repo, pr) series, so it
+  // dies with the ledger. A terminal PR leaves nothing behind, and a reopened
+  // one that stalls again can say so.
+  clearStalledSignalState(rootDir, identity, { logger });
   try {
     rmSync(filePath, { force: true });
     return true;

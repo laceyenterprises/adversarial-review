@@ -890,7 +890,33 @@ export async function processReviewSubject(entry, ctx) {
             `because ${stalePostedReviewBudgetSuppression.reason}${budgetDetail}; ` +
             `leaving posted review intact and routing exhausted close through AMA/HAM`
         );
-      } else if (postedReviewHeadMoved) {
+      }
+      // CLZ-03: the producer-existence half of the `stalled` signal. When the
+      // head has moved off the posted review and auto-refresh is suppressed,
+      // NOTHING will request a re-review for this head — so "needs a settled
+      // verdict at head X" has no producer. That fact is only derivable here,
+      // where the three suppression probes ran; the posted-review handler and
+      // the no-progress lane never see it. Carried on the queued handler so the
+      // lane can state it instead of emitting a line that reads as idle.
+      const autoRefreshSuppression = postedReviewHeadMoved
+        ? {
+          headMoved: true,
+          reviewerHeadSha: existing?.reviewer_head_sha || null,
+          suppressed: Boolean(
+            stalePostedReviewSuppression.suppressed
+            || stalePostedReviewCloserSuppression.suppressed
+            || stalePostedReviewBudgetSuppression.suppressed,
+          ),
+          reason: stalePostedReviewSuppression.suppressed
+            ? stalePostedReviewSuppression.reason
+            : stalePostedReviewCloserSuppression.suppressed
+              ? stalePostedReviewCloserSuppression.reason
+              : stalePostedReviewBudgetSuppression.suppressed
+                ? stalePostedReviewBudgetSuppression.reason
+                : null,
+        }
+        : { headMoved: false, reviewerHeadSha: existing?.reviewer_head_sha || null, suppressed: false, reason: null };
+      if (postedReviewHeadMoved && !autoRefreshSuppression.suppressed) {
         try {
           const refreshResult = requestReviewRereview({
             rootDir: ROOT,
@@ -948,6 +974,10 @@ export async function processReviewSubject(entry, ctx) {
           // `subject.headSha` in 29 other places, including the adjacent
           // handoff-context blocks.
           headSha: subject.headSha || null,
+          // CLZ-03: this tick's auto-refresh suppression finding, carried so the
+          // no-progress lane can answer "does a producer exist for the missing
+          // input?" instead of guessing.
+          autoRefreshSuppression,
           run: runPostedReviewHandler,
         });
         return;

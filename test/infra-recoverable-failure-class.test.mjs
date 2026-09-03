@@ -137,12 +137,28 @@ test('other GitHub auth-rejection phrasings also classify as oauth-broken', () =
   for (const text of [
     'gh: Bad credentials (HTTP 401)',
     'HTTP 401: Unauthorized (https://api.github.com/graphql)',
+    'Status 401: Unauthorized (https://api.github.com/graphql)',
+    '401: Unauthorized (https://api.github.com/graphql)',
     'gh: Requires authentication (HTTP 401)',
   ]) {
     assert.equal(
       reviewerFailureClassFromStoredRow({ failure_message: text }),
       'oauth-broken',
       `expected oauth-broken for: ${text}`,
+    );
+  }
+});
+
+test('incidental auth phrases embedded in unrelated failures do not classify as oauth-broken', () => {
+  for (const text of [
+    'Command failed with code 124\nstderr tail:\nTimed out while reviewing PR title: fix bad credentials',
+    'Command failed with code 124\nstderr tail:\nTimed out while reviewing branch topic/status 401: unauthorized',
+    'Command failed with code 124\nstderr tail:\nTimed out while rendering body: requires authentication docs',
+  ]) {
+    assert.notEqual(
+      reviewerFailureClassFromStoredRow({ failure_message: text }),
+      'oauth-broken',
+      `did not expect oauth-broken for: ${text}`,
     );
   }
 });

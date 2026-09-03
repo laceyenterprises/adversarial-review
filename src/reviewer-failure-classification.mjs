@@ -72,10 +72,9 @@ function reviewerFailureClassFromStoredRow(reviewRow) {
   // down: there the credential was wrong, here it is expired, and both times the
   // failure did not say "auth".
   if (
-    /\bbad credentials\b/.test(message)
-    || /\bhttp 401\b/.test(message)
-    || /\b401 unauthorized\b/.test(message)
-    || /\brequires authentication\b/.test(message)
+    /(?:^|\n)\s*(?:gh:\s*)?bad credentials\b/i.test(rawMessage)
+    || /(?:^|\n)\s*(?:(?:gh:\s*)?(?:http|status)\s*)?401:?\s*unauthorized\b/i.test(rawMessage)
+    || /(?:^|\n)\s*(?:gh:\s*)?requires authentication\b/i.test(rawMessage)
   ) {
     return 'oauth-broken';
   }

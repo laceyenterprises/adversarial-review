@@ -1011,6 +1011,7 @@ test('CLZ-03: stalled event emission failure remains retryable until acknowledge
     const identity = { repo: REPO, prNumber: 6059 };
     const stalledEvents = [];
     let emitAttempts = 0;
+    let observedAt = '2026-08-31T13:00:00.000Z';
     const gate = createNoProgressLaneGate({
       rootDir,
       readReviewRow: () => ({
@@ -1022,7 +1023,7 @@ test('CLZ-03: stalled event emission failure remains retryable until acknowledge
         failed_at: null,
         merged_at: null,
       }),
-      now: () => '2026-08-31T13:00:00.000Z',
+      now: () => observedAt,
       emitStalledEventFn: async (event) => {
         emitAttempts += 1;
         if (emitAttempts === 1) throw new Error('event bus unavailable');
@@ -1037,18 +1038,19 @@ test('CLZ-03: stalled event emission failure remains retryable until acknowledge
         value: { amaClosureResult: { reasons: ['blocking-findings-unknown'] } },
       });
     }
-    await assert.rejects(
-      gate.record(handler, {
-        value: { amaClosureResult: { reasons: ['blocking-findings-unknown'] } },
-      }),
-      /event bus unavailable/,
-    );
+    await gate.record(handler, {
+      value: { amaClosureResult: { reasons: ['blocking-findings-unknown'] } },
+    });
+    const pending = readNoProgressLane(rootDir, identity, { logger: silentLogger }).stalledEvent;
+    assert.equal(emitAttempts, 1);
+    assert.equal(pending.pendingSince, '2026-08-31T13:00:00.000Z');
     assert.equal(
-      readNoProgressLane(rootDir, identity, { logger: silentLogger }).stalledEvent.emitted,
+      pending.emitted,
       false,
       'failed delivery is recorded as pending, not emitted',
     );
 
+    observedAt = '2026-08-31T13:05:00.000Z';
     await gate.record(handler, {
       value: { amaClosureResult: { reasons: ['blocking-findings-unknown'] } },
     });
@@ -1059,11 +1061,47 @@ test('CLZ-03: stalled event emission failure remains retryable until acknowledge
     assert.equal(emitAttempts, 2);
     assert.equal(stalledEvents.length, 1);
     assert.equal(stalledEvents[0].missingInput, 'blocking-findings-unknown');
-    assert.equal(
-      readNoProgressLane(rootDir, identity, { logger: silentLogger }).stalledEvent.emitted,
-      true,
-      'successful retry acknowledges the stalled event',
-    );
+    const emitted = readNoProgressLane(rootDir, identity, { logger: silentLogger }).stalledEvent;
+    assert.equal(emitted.emitted, true, 'successful retry acknowledges the stalled event');
+    assert.equal(emitted.pendingSince, '2026-08-31T13:00:00.000Z');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('CLZ-03: stalled event delivery failure does not abort operator alerts', async () => {
+  const rootDir = tempRoot();
+  try {
+    const alerts = [];
+    const gate = createNoProgressLaneGate({
+      rootDir,
+      readReviewRow: () => ({
+        review_status: 'posted',
+        pr_state: 'open',
+        reviewer_head_sha: HEAD_A,
+        review_attempts: 1,
+        posted_at: '2026-08-31T07:00:00.000Z',
+        failed_at: null,
+        merged_at: null,
+      }),
+      now: () => '2026-08-31T13:00:00.000Z',
+      emitStalledEventFn: async () => { throw new Error('event bus unavailable'); },
+      deliverAlertFn: async (text, meta) => { alerts.push({ text, meta }); },
+      logger: silentLogger,
+    });
+    const handler = { repoPath: REPO, prNumber: 6059, headSha: HEAD_A };
+
+    for (let i = 0; i <= DEFAULT_OPERATOR_BLOCKED_ALERT_NO_PROGRESS_TICKS; i += 1) {
+      await gate.record(handler, {
+        value: {
+          amaClosureResult: { reasons: ['blocking-findings-unknown'] },
+          gateDecision: { operatorDecisionRequired: true },
+        },
+      });
+    }
+
+    assert.equal(alerts.length, 1);
+    assert.equal(alerts[0].meta.event, 'adversarial_review.operator_decision_required');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

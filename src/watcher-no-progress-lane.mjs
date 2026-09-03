@@ -448,7 +448,7 @@ export function recordNoProgressLaneRun(rootDir, identity, {
   const firstNoProgressAt = (sameFingerprint ? existing?.firstNoProgressAt : null)
     || (noProgressTicks > 0 ? now : null)
     || null;
-  const priorStalledEvent = sameFingerprint && existing?.stalledEvent?.emitted === true
+  const priorStalledEvent = sameFingerprint && existing?.stalledEvent
     ? existing.stalledEvent
     : null;
   writeLedger(rootDir, identity, {
@@ -512,7 +512,7 @@ export function maybeMarkNoProgressStalledEvent(rootDir, identity, {
     schemaVersion: NO_PROGRESS_LANE_SCHEMA_VERSION,
     stalledEvent: {
       emitted: false,
-      pendingSince: now || null,
+      pendingSince: existing?.stalledEvent?.pendingSince || now || null,
       emittedAt: null,
       missingInput: event.missingInput,
       producer: event.producer,

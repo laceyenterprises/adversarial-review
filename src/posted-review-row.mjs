@@ -510,14 +510,21 @@ export function createNoProgressLaneGate({
               (stalledEvent.producer.reason ? ` (${stalledEvent.producer.reason})` : ''),
           );
           logger?.log?.(JSON.stringify(stalledEvent));
-          if (typeof emitStalledEventFn === 'function') {
-            await emitStalledEventFn(stalledEvent);
+          try {
+            if (typeof emitStalledEventFn === 'function') {
+              await emitStalledEventFn(stalledEvent);
+            }
+            markNoProgressStalledEventEmitted(rootDir, identity, stalledEvent, {
+              emittedAt: now(),
+              fingerprint,
+              logger,
+            });
+          } catch (err) {
+            logger?.warn?.(
+              `[watcher] no-progress lane: stalled-event delivery failed for ` +
+                `${handler.repoPath}#${handler.prNumber} (${err?.message || err})`,
+            );
           }
-          markNoProgressStalledEventEmitted(rootDir, identity, stalledEvent, {
-            emittedAt: now(),
-            fingerprint,
-            logger,
-          });
         }
       }
       if (outcome?.progressClass === PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED) {

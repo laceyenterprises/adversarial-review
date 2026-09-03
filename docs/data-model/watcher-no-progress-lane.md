@@ -64,7 +64,8 @@ Optional `stalledEvent` field:
   `stalledEvent.emitted=false` before calling the event sink, but it flips the
   value to `true` only after the sink resolves successfully. A transient sink
   failure or process exit during delivery therefore retries on a later eligible
-  walk instead of permanently suppressing the operator signal.
+  walk without resetting `pendingSince`; the sink failure is logged locally and
+  must not suppress operator-decision alert evaluation in the same watcher tick.
 - Once `stalledEvent.emitted=true` is recorded for the same head and
   fingerprint, later unchanged ticks do not re-emit the stalled event.
 - Merge and close cleanup removes the per-PR ledger once no future walk is

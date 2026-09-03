@@ -24,7 +24,9 @@ import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from '../src/config-loader.
 import { extractNonBlockingFindingIdentities } from '../src/kernel/remediation-reply.mjs';
 import {
   isDismissStaleRequestChangesOnResolvedEnabled,
+  shouldUseHamTerminalRemediationMergeGate,
 } from '../src/merge-agent-dispatch-decision.mjs';
+import { HAM_TERMINAL_REMEDIATION_CERTIFIED_TRIGGER } from '../src/merge-agent-prompt.mjs';
 import {
   FINAL_PASS_BLOCKER_REMEDIATION_TRIGGER,
   FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER,
@@ -7343,4 +7345,82 @@ test('cancelMergeAgentDispatchOnMerge normalizes dynamic label-removal request i
   );
   assert.equal(removeFailures.length, 1);
   assert.match(removeFailures[0], /req_1/);
+});
+
+
+// --- HAM terminal-remediation self-certification -----------------------------
+// agent-os#6059 sat 12.7h with every required check green after the hammer landed
+// a correct, fully-certified remediation. AMA validated it, then failed to
+// dispatch its own closer ("refusing to reuse terminal reviewer_passes row
+// (closer, failed)") and fell back to the merge-agent -- which returned
+// skip-no-verdict, because auto-refresh is suppressed for a closer-authored head
+// move and therefore NO verdict can ever exist at the current head. The loop
+// cannot produce what it requires, so the only exit was an operator.
+
+test('HAM self-cert gate fires only when the remediation validated', () => {
+  assert.equal(shouldUseHamTerminalRemediationMergeGate(makeJob()), false);
+  assert.equal(
+    shouldUseHamTerminalRemediationMergeGate(makeJob({ hamTerminalRemediationValidated: true })),
+    true,
+  );
+  // Fail closed on anything that is not an explicit true.
+  for (const value of ['true', 1, {}, null, undefined]) {
+    assert.equal(
+      shouldUseHamTerminalRemediationMergeGate(makeJob({ hamTerminalRemediationValidated: value })),
+      false,
+      `non-boolean ${JSON.stringify(value)} must not authorize a merge`,
+    );
+  }
+});
+
+test('a validated HAM remediation dispatches where skip-no-verdict previously stalled', () => {
+  const job = makeJob({
+    lastVerdict: null,
+    hamTerminalRemediationValidated: true,
+  });
+  // Without the certification this is the #6059 stall.
+  const stalled = pickMergeAgentDispatchDetail(makeJob({ lastVerdict: null }));
+  assert.equal(stalled.decision, 'skip-no-verdict');
+
+  const detail = pickMergeAgentDispatchDetail(job);
+  assert.equal(detail.decision, 'dispatch');
+  assert.equal(detail.trigger, HAM_TERMINAL_REMEDIATION_CERTIFIED_TRIGGER);
+});
+
+test('a validated HAM remediation merges over the pre-remediation blocking findings', () => {
+  // The standing request-changes verdict and its blocking count describe the head
+  // the hammer remediated. Re-gating on them is the deadlock itself: the
+  // certification is the proof those findings were addressed, verified against the
+  // closer commit's parent and its audit comment.
+  const detail = pickMergeAgentDispatchDetail(makeJob({
+    lastVerdict: 'Request changes',
+    blockingFindingCount: 1,
+    blockingFindingState: 'known',
+    hamTerminalRemediationValidated: true,
+  }));
+  assert.equal(detail.decision, 'dispatch');
+  assert.equal(detail.trigger, HAM_TERMINAL_REMEDIATION_CERTIFIED_TRIGGER);
+});
+
+test('a certification is not a licence to merge red, pending or conflicted', () => {
+  const red = pickMergeAgentDispatchDetail(makeJob({
+    lastVerdict: null,
+    checksConclusion: 'FAILURE',
+    hamTerminalRemediationValidated: true,
+  }));
+  assert.equal(red.decision, 'skip-checks-failed');
+
+  const pending = pickMergeAgentDispatchDetail(makeJob({
+    lastVerdict: null,
+    checksConclusion: 'PENDING',
+    hamTerminalRemediationValidated: true,
+  }));
+  assert.equal(pending.decision, 'skip-checks-pending');
+
+  const conflicted = pickMergeAgentDispatchDetail(makeJob({
+    lastVerdict: null,
+    mergeable: 'CONFLICTING',
+    hamTerminalRemediationValidated: true,
+  }));
+  assert.equal(conflicted.decision, 'skip-not-mergeable');
 });

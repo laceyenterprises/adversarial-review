@@ -26,6 +26,7 @@ import {
   FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER,
   FINAL_PASS_BLOCKER_REMEDIATION_TRIGGER,
   REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER,
+  HAM_TERMINAL_REMEDIATION_CERTIFIED_TRIGGER,
 } from './merge-agent-prompt.mjs';
 
 
@@ -398,6 +399,48 @@ function pickReviewerTimeoutExhaustedMergeGate(job, { operatorApproved = false }
   return { decision: 'dispatch', trigger: REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER };
 }
 
+function shouldUseHamTerminalRemediationMergeGate(job) {
+  return job?.hamTerminalRemediationValidated === true;
+}
+
+/**
+ * The hammer's terminal remediation is its own authorization.
+ *
+ * `hamTerminalRemediationValidated` is set ONLY when the ground-truth proof
+ * validates: the closer commit is parented on the exact reviewed head, carries
+ * `Closed-By` + `Reviewed-Head` trailers, and its audit comment enumerates every
+ * reviewed finding as addressed with the blocking count matching the review's.
+ *
+ * That is why this gate does NOT re-apply the blocking-findings checks. The
+ * standing `request-changes` verdict and its blocking count describe the
+ * PRE-remediation head; re-gating on them is precisely the deadlock this exists
+ * to break — auto-refresh is suppressed for a closer-authored head move, so no
+ * verdict will ever be posted at the current head and `skip-no-verdict` is
+ * permanent (agent-os#6059 sat 12.7h on exactly this).
+ *
+ * CI and mergeability remain hard requirements. A certification authorizes
+ * merging work a reviewer already asked for; it is not a licence to merge red,
+ * pending, or conflicted.
+ */
+function pickHamTerminalRemediationMergeGate(job) {
+  if (String(job?.mergeable ?? '').trim().toUpperCase() !== 'MERGEABLE') {
+    return { decision: 'skip-not-mergeable', trigger: HAM_TERMINAL_REMEDIATION_CERTIFIED_TRIGGER };
+  }
+  const checksConclusion = job?.checksConclusion == null
+    ? null
+    : String(job.checksConclusion).trim().toUpperCase();
+  if (checksConclusion === null) {
+    return { decision: 'skip-checks-unknown', trigger: HAM_TERMINAL_REMEDIATION_CERTIFIED_TRIGGER };
+  }
+  if (checksConclusion === 'PENDING') {
+    return { decision: 'skip-checks-pending', trigger: HAM_TERMINAL_REMEDIATION_CERTIFIED_TRIGGER };
+  }
+  if (checksConclusion !== 'SUCCESS') {
+    return { decision: 'skip-checks-failed', trigger: HAM_TERMINAL_REMEDIATION_CERTIFIED_TRIGGER };
+  }
+  return { decision: 'dispatch', trigger: HAM_TERMINAL_REMEDIATION_CERTIFIED_TRIGGER };
+}
+
 function shouldUseReviewerTimeoutExhaustedMergeGate(job) {
   return (
     job?.reviewFailureClass === 'reviewer-timeout'
@@ -418,6 +461,10 @@ function pickNormalMergeAgentDispatchDetail({
 }) {
   if (shouldUseReviewerTimeoutExhaustedMergeGate(job)) {
     return pickReviewerTimeoutExhaustedMergeGate(job, { operatorApproved });
+  }
+
+  if (shouldUseHamTerminalRemediationMergeGate(job)) {
+    return pickHamTerminalRemediationMergeGate(job);
   }
 
   if (normalizedVerdict === null) {
@@ -646,6 +693,7 @@ export {
   pickMergeAgentDispatch,
   pickMergeAgentDispatchDetail,
   shouldUseReviewerTimeoutExhaustedMergeGate,
+  shouldUseHamTerminalRemediationMergeGate,
   isScopedOperatorApproval,
   isScopedMergeAgentRequest,
   buildScopedOperatorApproval,

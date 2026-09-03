@@ -12,6 +12,13 @@
 const FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER = 'final-pass-on-budget-exhausted';
 const FINAL_PASS_BLOCKER_REMEDIATION_TRIGGER = 'final-pass-blocker-remediation';
 const REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER = 'reviewer-timeout-exhausted';
+// The hammer's terminal remediation is its own authorization: the closer commit
+// carries `Closed-By` + `Reviewed-Head` (parented on the exact reviewed head) and
+// its audit comment enumerates every reviewed finding as addressed, with the
+// blocking count matching the review's. When AMA validates that ground truth but
+// cannot dispatch its own closer, the merge-agent runs on this trigger instead of
+// stalling on a verdict that suppression guarantees will never be posted.
+const HAM_TERMINAL_REMEDIATION_CERTIFIED_TRIGGER = 'ham-terminal-remediation-certified';
 
 function shellSingleQuote(value) {
   return `'${String(value ?? '').replaceAll("'", "'\\''")}'`;
@@ -376,5 +383,6 @@ export {
   FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER,
   FINAL_PASS_BLOCKER_REMEDIATION_TRIGGER,
   REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER,
+  HAM_TERMINAL_REMEDIATION_CERTIFIED_TRIGGER,
   buildMergeAgentPrompt,
 };

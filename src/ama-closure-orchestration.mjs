@@ -1040,8 +1040,22 @@ export async function maybeDispatchAmaClosureFor({
     });
   } catch (err) {
     logger?.warn?.(`[watcher] AMA dispatch failed: ${err?.message || err}`);
+    // Carry the ground-truth HAM proof into the failure result. AMA can fail to
+    // dispatch its own closer for reasons unrelated to the remediation's validity
+    // -- agent-os#6059 died on `refusing to reuse terminal reviewer_passes row
+    // (closer, failed)` AFTER the hammer had landed a correct, fully-certified
+    // remediation. Without this the merge-agent fallback sees no verdict
+    // (auto-refresh is suppressed for a closer-authored head move), returns
+    // `skip-no-verdict`, and the PR stalls until an operator hand-merges: 12.7h
+    // on #6059.
     return withAmaDispatchMetadata(
-      { dispatched: false, reason: 'ama-dispatch-failed' },
+      {
+        dispatched: false,
+        reason: 'ama-dispatch-failed',
+        // Only present when the proof validated, so every existing result-shape
+        // assertion keeps its exact object.
+        ...(hamTerminalRemediationValidated ? { hamTerminalRemediationValidated: true } : {}),
+      },
       { amaEnabled: Boolean(cfg?.enabled) },
     );
   }
@@ -1049,7 +1063,13 @@ export async function maybeDispatchAmaClosureFor({
   // decision (downstream of this helper) can branch on it. The
   // upstream code paths (`cfg-load-failed`, `ama-disabled`) already
   // include the flag; this wraps the maybeDispatchAmaCloser return.
-  return withAmaDispatchMetadata(result, { amaEnabled: true });
+  return withAmaDispatchMetadata(
+    {
+      ...result,
+      ...(hamTerminalRemediationValidated ? { hamTerminalRemediationValidated: true } : {}),
+    },
+    { amaEnabled: true },
+  );
 }
 
 export async function resolveMergeAgentCoexistenceForWatcher({

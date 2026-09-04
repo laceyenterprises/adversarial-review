@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { processReviewSubject } from '../src/pollonce-phases.mjs';
 import { getFollowUpJobDir, writeFollowUpJob } from '../src/follow-up-jobs.mjs';
 import {
+  hasOperatorDecisionRequiredAlerted,
   markOperatorDecisionRequiredAlerted,
   readCascadeState,
 } from '../src/reviewer-cascade.mjs';
@@ -112,6 +113,20 @@ test('a new head re-arms the alert', () => {
     // A push is a fresh chance to converge, so the operator is told again.
     assert.equal(markOperatorDecisionRequiredAlerted(root, { ...base, headSha: 'bbb' }).marked, true,
       'a new head must re-arm; otherwise one alert covers the PR forever');
+  });
+});
+
+test('missing head sha is a valid dedupe key', () => {
+  withRoot((root) => {
+    const base = { repo: 'o/r', prNumber: 1, reason: 'remediation-stopped' };
+    assert.equal(hasOperatorDecisionRequiredAlerted(root, base), false);
+    assert.equal(markOperatorDecisionRequiredAlerted(root, base).marked, true);
+    assert.equal(readCascadeState(root, { repo: 'o/r', prNumber: 1 }).operatorDecisionAlertedHeadSha, null);
+    assert.equal(hasOperatorDecisionRequiredAlerted(root, base), true);
+    assert.equal(markOperatorDecisionRequiredAlerted(root, base).marked, false,
+      'repeat polls without a head sha must not re-page');
+    assert.equal(markOperatorDecisionRequiredAlerted(root, { ...base, headSha: 'bbb' }).marked, true,
+      'a later observed head still re-arms the alert');
   });
 });
 

@@ -295,12 +295,13 @@ function markOperatorDecisionRequiredAlerted(rootDir, {
   // alert for the lifetime of the PR no matter how many times it is revised;
   // with no dedupe at all the watcher pages on every poll.
   const previous = readCascadeState(rootDir, { repo, prNumber }) || {};
-  if (headSha && previous.operatorDecisionAlertedHeadSha === headSha) {
+  const targetHead = headSha || null;
+  if (previous.operatorDecisionAlertedHeadSha === targetHead) {
     return { marked: false, state: previous };
   }
   const state = {
     ...previous,
-    operatorDecisionAlertedHeadSha: headSha || null,
+    operatorDecisionAlertedHeadSha: targetHead,
     operatorDecisionAlertedAt: alertedAt,
     operatorDecisionAlert: { reason: reason || null },
   };
@@ -313,7 +314,7 @@ function hasOperatorDecisionRequiredAlerted(rootDir, {
   headSha,
 } = {}) {
   const state = readCascadeState(rootDir, { repo, prNumber }) || {};
-  return Boolean(headSha && state.operatorDecisionAlertedHeadSha === headSha);
+  return state.operatorDecisionAlertedHeadSha === (headSha || null);
 }
 
 function shouldBackoffReviewerSpawn(rootDir, { repo, prNumber, now = new Date().toISOString() }) {

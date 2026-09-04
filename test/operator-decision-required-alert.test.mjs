@@ -170,6 +170,8 @@ test('the watcher wires the alert to the gate decision', async () => {
 
     assert.equal(alerts.length, 1);
     assert.match(alerts[0].text, /operator decision/);
+    assert.match(alerts[0].text, /success \(remediation-stopped\)/);
+    assert.doesNotMatch(alerts[0].text, /undefined/);
     assert.equal(alerts[0].meta.event, 'adversarial_review.operator_decision_required');
     assert.equal(alerts[0].meta.payload.head_sha, HEAD);
     assert.equal(

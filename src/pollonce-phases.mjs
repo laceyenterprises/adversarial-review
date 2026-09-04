@@ -526,10 +526,12 @@ export async function processReviewSubject(entry, ctx) {
               headSha: subject.headSha,
             })) {
               try {
+                const gateStateText = projected.decision.state || 'unknown state';
+                const gateReasonText = projected.decision.reason || 'no reason provided';
                 await deliverAlertFn(
                   `Adversarial review needs an operator decision for ` +
-                    `${repoPath}#${prNumber}: ${projected.decision.state} ` +
-                    `(${projected.decision.reason}). Findings are unresolved and ` +
+                    `${repoPath}#${prNumber}: ${gateStateText} ` +
+                    `(${gateReasonText}). Findings are unresolved and ` +
                     `remediation will not run again on this head. The PR will not merge ` +
                     `until someone remediates or explicitly approves.`,
                   {

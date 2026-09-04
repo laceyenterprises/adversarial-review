@@ -531,24 +531,38 @@ function schemaV1() {
       imm: {
         __type: TYPE_DICT,
         __strict: true,
-        __keys: Object.fromEntries(
-          ['ownership', 'sqlSubstrate', 'zeroCostTokens', 'progressHealth', 'convergence'].map(
-            (check) => [
-              check,
-              {
-                __type: TYPE_DICT,
-                __strict: true,
-                __keys: {
-                  mode: {
-                    __type: TYPE_STRING,
-                    __default: 'observe',
-                    __enum: ENUM_IMM_MODE,
+        __keys: {
+          ...Object.fromEntries(
+            ['ownership', 'sqlSubstrate', 'zeroCostTokens', 'convergence'].map(
+              (check) => [
+                check,
+                {
+                  __type: TYPE_DICT,
+                  __strict: true,
+                  __keys: {
+                    mode: {
+                      __type: TYPE_STRING,
+                      __default: 'observe',
+                      __enum: ENUM_IMM_MODE,
+                    },
                   },
                 },
-              },
-            ],
+              ],
+            ),
           ),
-        ),
+          progressHealth: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              mode: {
+                __type: TYPE_STRING,
+                __default: 'observe',
+                __enum: ENUM_IMM_MODE,
+              },
+              staleThresholdSeconds: { __type: TYPE_INT, __default: 10800 },
+            },
+          },
+        },
       },
       openclaw: {
         __type: TYPE_DICT,

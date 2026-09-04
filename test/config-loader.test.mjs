@@ -214,6 +214,7 @@ test('imm observe-first modes load through strict Node schema', () => {
           mode: observe
         progressHealth:
           mode: observe
+          staleThresholdSeconds: 7200
         convergence:
           mode: observe
     `);
@@ -222,10 +223,12 @@ test('imm observe-first modes load through strict Node schema', () => {
     assert.equal(cfg.get('imm.sqlSubstrate.mode'), 'observe');
     assert.equal(cfg.get('imm.zeroCostTokens.mode'), 'observe');
     assert.equal(cfg.get('imm.progressHealth.mode'), 'observe');
+    assert.equal(cfg.get('imm.progressHealth.staleThresholdSeconds'), 7200);
     assert.equal(cfg.get('imm.convergence.mode'), 'observe');
 
     const defaultCfg = loadConfig({ topPath: join(tmp, 'missing.yaml'), env: {} });
     assert.equal(defaultCfg.get('imm.ownership.mode'), 'observe');
+    assert.equal(defaultCfg.get('imm.progressHealth.staleThresholdSeconds'), 10800);
 
     const badMode = join(tmp, 'imm-bad-mode.yaml');
     writeFile(badMode, `

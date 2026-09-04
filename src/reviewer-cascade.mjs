@@ -307,6 +307,15 @@ function markOperatorDecisionRequiredAlerted(rootDir, {
   return { marked: true, state: writeCascadeState(rootDir, { repo, prNumber }, state) };
 }
 
+function hasOperatorDecisionRequiredAlerted(rootDir, {
+  repo,
+  prNumber,
+  headSha,
+} = {}) {
+  const state = readCascadeState(rootDir, { repo, prNumber }) || {};
+  return Boolean(headSha && state.operatorDecisionAlertedHeadSha === headSha);
+}
+
 function shouldBackoffReviewerSpawn(rootDir, { repo, prNumber, now = new Date().toISOString() }) {
   const state = readCascadeState(rootDir, { repo, prNumber });
   if (!state?.nextRetryAfter) {
@@ -334,6 +343,7 @@ export {
   clearCascadeState,
   formatTransientFailureBreakdown,
   getCascadeStatePath,
+  hasOperatorDecisionRequiredAlerted,
   markCascadeCapExhaustedAlerted,
   markOperatorDecisionRequiredAlerted,
   isReviewerSubprocessTimeout,

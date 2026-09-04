@@ -142,6 +142,7 @@ import {
   restorePendingReviewedHeadDedupRow,
 } from './reviewed-head-dispatch-gate.mjs';
 import {
+  hasOperatorDecisionRequiredAlerted,
   markCascadeCapExhaustedAlerted,
   markOperatorDecisionRequiredAlerted,
   recordCascadeFailure,
@@ -513,15 +514,15 @@ export async function processReviewSubject(entry, ctx) {
           // stuck from 10:30Z until an operator asked hours later.
           //
           // Fail-soft on purpose: a delivery error must never break the poll cycle,
-          // exactly as the cascade-cap alert does.
+          // exactly as the cascade-cap alert does. The durable debounce marker is
+          // committed only after delivery succeeds so a transient alert-bus outage is
+          // retried on a later poll instead of being recorded as delivered.
           if (projected?.decision?.operatorDecisionRequired) {
-            const operatorAlertMark = markOperatorDecisionRequiredAlerted(ROOT, {
+            if (!hasOperatorDecisionRequiredAlerted(ROOT, {
               repo: repoPath,
               prNumber,
               headSha: subject.headSha,
-              reason: projected.decision.reason || null,
-            });
-            if (operatorAlertMark.marked && typeof deliverAlertFn === 'function') {
+            })) {
               try {
                 await deliverAlertFn(
                   `Adversarial review needs an operator decision for ` +
@@ -540,6 +541,12 @@ export async function processReviewSubject(entry, ctx) {
                     },
                   },
                 );
+                markOperatorDecisionRequiredAlerted(ROOT, {
+                  repo: repoPath,
+                  prNumber,
+                  headSha: subject.headSha,
+                  reason: projected.decision.reason || null,
+                });
               } catch (err) {
                 console.error(
                   `[watcher] operator-decision alert delivery failed for ` +

@@ -6,15 +6,91 @@
 // Observed on agent-os#6156, stuck from 10:30Z until an operator asked.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { markOperatorDecisionRequiredAlerted } from '../src/reviewer-cascade.mjs';
+import { processReviewSubject } from '../src/pollonce-phases.mjs';
+import { getFollowUpJobDir, writeFollowUpJob } from '../src/follow-up-jobs.mjs';
+import {
+  markOperatorDecisionRequiredAlerted,
+  readCascadeState,
+} from '../src/reviewer-cascade.mjs';
 
 function withRoot(fn) {
   const root = mkdtempSync(join(tmpdir(), 'odr-'));
   try { return fn(root); } finally { rmSync(root, { recursive: true, force: true }); }
+}
+
+async function withRootAsync(fn) {
+  const root = mkdtempSync(join(tmpdir(), 'odr-'));
+  try { return await fn(root); } finally { rmSync(root, { recursive: true, force: true }); }
+}
+
+const HEAD = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const REPO = 'o/r';
+
+function writeStoppedRequestChangesJob(root) {
+  const dir = getFollowUpJobDir(root, 'stopped');
+  mkdirSync(dir, { recursive: true });
+  writeFollowUpJob(join(dir, 'o-r-pr-1.json'), {
+    schemaVersion: 1,
+    kind: 'adversarial-review-follow-up',
+    status: 'stopped',
+    jobId: 'o-r-pr-1',
+    createdAt: '2026-09-04T12:00:00.000Z',
+    stoppedAt: '2026-09-04T12:10:00.000Z',
+    repo: REPO,
+    prNumber: 1,
+    domainId: 'github-pr',
+    subjectExternalId: `${REPO}#1`,
+    revisionRef: HEAD,
+    reviewerModel: 'gemini',
+    reviewBody: '## Summary\nStill blocked.\n\n## Verdict\nRequest changes',
+    remediationPlan: {
+      currentRound: 3,
+      maxRounds: 3,
+      stop: { code: 'max-rounds-reached' },
+    },
+    remediationWorker: { state: 'completed' },
+  });
+}
+
+async function runMergedPostedSubject(root, { deliverAlertFn, errors = [] } = {}) {
+  writeStoppedRequestChangesJob(root);
+  await processReviewSubject({
+    subject: {
+      title: '[codex] operator decision fixture',
+      labels: [],
+      headSha: HEAD,
+      ref: { revisionRef: HEAD, subjectExternalId: `${REPO}#1` },
+    },
+    prNumber: 1,
+    current: {
+      review_status: 'posted',
+      pr_state: 'merged',
+      reviewer_head_sha: HEAD,
+      review_attempts: 1,
+      posted_at: '2026-09-04T12:00:00.000Z',
+      failed_at: null,
+      merged_at: '2026-09-04T12:15:00.000Z',
+    },
+  }, {
+    operatorSurface: { extractLinearTicketId: () => null },
+    watcherDrain: { active: false },
+    postedReviewHandlers: [],
+    domainId: 'github-pr',
+    repoPath: REPO,
+    currentRepoPRs: [],
+    activeMergeAgentPRs: [],
+    ROOT: root,
+    execFileAsync: async () => ({ stdout: '', stderr: '' }),
+    WATCHER_PRIMARY_DOMAIN_ID: 'github-pr',
+    deliverAlertFn,
+    shouldDeferReviewForActiveFollowUp: () => ({ defer: false }),
+    handlePollError: () => {},
+  });
+  return errors;
 }
 
 test('alerts once for a given head', () => {
@@ -61,11 +137,42 @@ test('the mark records why, for the operator reading state later', () => {
 });
 
 test('the watcher wires the alert to the gate decision', async () => {
-  // Guard the wiring, not just the helper: a helper that exists while nothing
-  // calls it is precisely the failure this change removes.
-  const { readFileSync } = await import('node:fs');
-  const src = readFileSync(new URL('../src/pollonce-phases.mjs', import.meta.url), 'utf8');
-  assert.match(src, /operatorDecisionRequired/, 'gate flag must be read');
-  assert.match(src, /markOperatorDecisionRequiredAlerted\(/, 'mark must be called');
-  assert.match(src, /adversarial_review\.operator_decision_required/, 'alert event must be emitted');
+  await withRootAsync(async (root) => {
+    const alerts = [];
+    await runMergedPostedSubject(root, {
+      deliverAlertFn: async (text, meta) => { alerts.push({ text, meta }); },
+    });
+
+    assert.equal(alerts.length, 1);
+    assert.match(alerts[0].text, /operator decision/);
+    assert.equal(alerts[0].meta.event, 'adversarial_review.operator_decision_required');
+    assert.equal(alerts[0].meta.payload.head_sha, HEAD);
+    assert.equal(
+      readCascadeState(root, { repo: REPO, prNumber: 1 }).operatorDecisionAlertedHeadSha,
+      HEAD,
+    );
+  });
+});
+
+test('watcher retries operator-decision alert after delivery failure', async () => {
+  await withRootAsync(async (root) => {
+    await runMergedPostedSubject(root, {
+      deliverAlertFn: async () => { throw new Error('alert bus unavailable'); },
+    });
+    assert.equal(
+      readCascadeState(root, { repo: REPO, prNumber: 1 })?.operatorDecisionAlertedHeadSha,
+      undefined,
+      'failed delivery must not be recorded as delivered',
+    );
+
+    const alerts = [];
+    await runMergedPostedSubject(root, {
+      deliverAlertFn: async (text, meta) => { alerts.push({ text, meta }); },
+    });
+    assert.equal(alerts.length, 1, 'the next poll can retry after the alert bus recovers');
+    assert.equal(
+      readCascadeState(root, { repo: REPO, prNumber: 1 }).operatorDecisionAlertedHeadSha,
+      HEAD,
+    );
+  });
 });

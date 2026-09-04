@@ -230,6 +230,16 @@ test('imm observe-first modes load through strict Node schema', () => {
     assert.equal(defaultCfg.get('imm.ownership.mode'), 'observe');
     assert.equal(defaultCfg.get('imm.progressHealth.staleThresholdSeconds'), 10800);
 
+    const zeroThreshold = join(tmp, 'imm-zero-threshold.yaml');
+    writeFile(zeroThreshold, `
+      version: 1
+      imm:
+        progressHealth:
+          staleThresholdSeconds: 0
+    `);
+    const zeroCfg = loadConfig({ topPath: zeroThreshold, env: {} });
+    assert.equal(zeroCfg.get('imm.progressHealth.staleThresholdSeconds'), 0);
+
     const badMode = join(tmp, 'imm-bad-mode.yaml');
     writeFile(badMode, `
       version: 1

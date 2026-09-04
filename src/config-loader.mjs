@@ -559,7 +559,7 @@ function schemaV1() {
                 __default: 'observe',
                 __enum: ENUM_IMM_MODE,
               },
-              staleThresholdSeconds: { __type: TYPE_INT, __default: 10800, __min: 1 },
+              staleThresholdSeconds: { __type: TYPE_INT, __default: 10800 },
             },
           },
         },

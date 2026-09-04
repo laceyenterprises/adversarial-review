@@ -143,6 +143,7 @@ import {
 } from './reviewed-head-dispatch-gate.mjs';
 import {
   markCascadeCapExhaustedAlerted,
+  markOperatorDecisionRequiredAlerted,
   recordCascadeFailure,
   shouldBackoffReviewerSpawn,
 } from './reviewer-cascade.mjs';
@@ -504,6 +505,49 @@ export async function processReviewSubject(entry, ctx) {
                 ? ' — NOT CONVERGED: findings unresolved, operator decision required'
                 : '')
           );
+          // "operator decision required" was a log line and nothing else. A PR that
+          // exhausts its remediation budget lands in `success (remediation-stopped)`
+          // and stops moving: AMA refuses it (correctly -- findings still stand), no
+          // further remediation runs (correctly -- the budget is spent), and nobody is
+          // told. It sits until a human happens to look. Observed on agent-os#6156,
+          // stuck from 10:30Z until an operator asked hours later.
+          //
+          // Fail-soft on purpose: a delivery error must never break the poll cycle,
+          // exactly as the cascade-cap alert does.
+          if (projected?.decision?.operatorDecisionRequired) {
+            const operatorAlertMark = markOperatorDecisionRequiredAlerted(ROOT, {
+              repo: repoPath,
+              prNumber,
+              headSha: subject.headSha,
+              reason: projected.decision.reason || null,
+            });
+            if (operatorAlertMark.marked && typeof deliverAlertFn === 'function') {
+              try {
+                await deliverAlertFn(
+                  `Adversarial review needs an operator decision for ` +
+                    `${repoPath}#${prNumber}: ${projected.decision.state} ` +
+                    `(${projected.decision.reason}). Findings are unresolved and ` +
+                    `remediation will not run again on this head. The PR will not merge ` +
+                    `until someone remediates or explicitly approves.`,
+                  {
+                    event: 'adversarial_review.operator_decision_required',
+                    payload: {
+                      repo: repoPath,
+                      pr_number: prNumber,
+                      head_sha: subject.headSha || null,
+                      gate_state: projected.decision.state || null,
+                      gate_reason: projected.decision.reason || null,
+                    },
+                  },
+                );
+              } catch (err) {
+                console.error(
+                  `[watcher] operator-decision alert delivery failed for ` +
+                    `${repoPath}#${prNumber}: ${err?.message || err}`
+                );
+              }
+            }
+          }
           return projected;
         } catch (err) {
           console.error(

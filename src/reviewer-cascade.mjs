@@ -283,6 +283,30 @@ function markCascadeCapExhaustedAlerted(rootDir, {
   return { marked: true, state: writeCascadeState(rootDir, { repo, prNumber }, state) };
 }
 
+function markOperatorDecisionRequiredAlerted(rootDir, {
+  repo,
+  prNumber,
+  headSha,
+  alertedAt = new Date().toISOString(),
+  reason = null,
+} = {}) {
+  // Keyed on head sha: a PR that lands in `remediation-stopped` alerts ONCE per
+  // head, and a fresh push re-arms it. Without the key an operator gets one
+  // alert for the lifetime of the PR no matter how many times it is revised;
+  // with no dedupe at all the watcher pages on every poll.
+  const previous = readCascadeState(rootDir, { repo, prNumber }) || {};
+  if (headSha && previous.operatorDecisionAlertedHeadSha === headSha) {
+    return { marked: false, state: previous };
+  }
+  const state = {
+    ...previous,
+    operatorDecisionAlertedHeadSha: headSha || null,
+    operatorDecisionAlertedAt: alertedAt,
+    operatorDecisionAlert: { reason: reason || null },
+  };
+  return { marked: true, state: writeCascadeState(rootDir, { repo, prNumber }, state) };
+}
+
 function shouldBackoffReviewerSpawn(rootDir, { repo, prNumber, now = new Date().toISOString() }) {
   const state = readCascadeState(rootDir, { repo, prNumber });
   if (!state?.nextRetryAfter) {
@@ -311,6 +335,7 @@ export {
   formatTransientFailureBreakdown,
   getCascadeStatePath,
   markCascadeCapExhaustedAlerted,
+  markOperatorDecisionRequiredAlerted,
   isReviewerSubprocessTimeout,
   readCascadeState,
   recordCascadeFailure,

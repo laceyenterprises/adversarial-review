@@ -88,6 +88,16 @@ async function runMergedPostedSubject(root, { deliverAlertFn, errors = [] } = {}
     execFileAsync: async () => ({ stdout: '', stderr: '' }),
     WATCHER_PRIMARY_DOMAIN_ID: 'github-pr',
     deliverAlertFn,
+    adversarialGateProvider: {
+      async gate(_subject, revisionRef, decision) {
+        return {
+          gated: true,
+          providerId: 'fixture-gate',
+          revisionRef,
+          publish: { posted: true, reason: 'fixture', decision },
+        };
+      },
+    },
     shouldDeferReviewForActiveFollowUp: () => ({ defer: false }),
     handlePollError: () => {},
   });

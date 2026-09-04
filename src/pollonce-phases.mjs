@@ -425,6 +425,7 @@ export async function processReviewSubject(entry, ctx) {
     markWatcherReviewHeartbeat,
     markWatcherSpawnDecision = () => {},
     deliverAlertFn,
+    adversarialGateProvider = null,
     resolveHardReviewCeiling,
     resolveHardReviewAttemptCeiling,
     reconcilePendingDraftsBeforeSpawn,
@@ -494,6 +495,7 @@ export async function processReviewSubject(entry, ctx) {
             execFileImpl: execFileAsync,
             operatorApprovalEvent,
             domainId,
+            gateProvider: adversarialGateProvider,
           });
           // The suffix is load-bearing, not decoration. `success (remediation-stopped)`
           // reads as convergence in a log skim, but it means the pipeline gave up with

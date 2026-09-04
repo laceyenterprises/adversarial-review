@@ -145,6 +145,7 @@ export const ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE = ['native', 'agentos'];
 const ENUM_ROLES_ADVERSARIAL_MERGE_AUTHORITY_RISK_CLASS = ['low', 'medium', 'high', 'critical'];
 const ENUM_ROLES_FALLBACK_PATH = ['none', 'litellm-vk', 'litellm-vk-then-deferral'];
 const ENUM_SENTINEL_RCA_WORKER_CLASS = ['sre', 'sre-responder', 'sre-claude'];
+const ENUM_IMM_MODE = ['observe', 'enforce'];
 // GMW-02 — gemini always-on-third-reviewer selection mode. Module-scoped knob
 // (`reviewer.gemini.mode`); see the routing layer in
 // adapters/subject/github-pr/routing.mjs.
@@ -522,6 +523,32 @@ function schemaV1() {
             },
           },
         },
+      },
+      // IMM-00 observe-first rollout controls. The adversarial-review watcher
+      // does not consume these values, but strict CFG parity means checked-in
+      // config and operator locals must parse here before any IMM check can
+      // gain enforcement teeth.
+      imm: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: Object.fromEntries(
+          ['ownership', 'sqlSubstrate', 'zeroCostTokens', 'progressHealth', 'convergence'].map(
+            (check) => [
+              check,
+              {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  mode: {
+                    __type: TYPE_STRING,
+                    __default: 'observe',
+                    __enum: ENUM_IMM_MODE,
+                  },
+                },
+              },
+            ],
+          ),
+        ),
       },
       openclaw: {
         __type: TYPE_DICT,

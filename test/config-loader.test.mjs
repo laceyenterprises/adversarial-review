@@ -199,6 +199,73 @@ test('missing file returns defaults', () => {
   }
 });
 
+test('imm observe-first modes load through strict Node schema', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'imm.yaml');
+    writeFile(top, `
+      version: 1
+      imm:
+        ownership:
+          mode: enforce
+        sqlSubstrate:
+          mode: observe
+        zeroCostTokens:
+          mode: observe
+        progressHealth:
+          mode: observe
+        convergence:
+          mode: observe
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('imm.ownership.mode'), 'enforce');
+    assert.equal(cfg.get('imm.sqlSubstrate.mode'), 'observe');
+    assert.equal(cfg.get('imm.zeroCostTokens.mode'), 'observe');
+    assert.equal(cfg.get('imm.progressHealth.mode'), 'observe');
+    assert.equal(cfg.get('imm.convergence.mode'), 'observe');
+
+    const defaultCfg = loadConfig({ topPath: join(tmp, 'missing.yaml'), env: {} });
+    assert.equal(defaultCfg.get('imm.ownership.mode'), 'observe');
+
+    const badMode = join(tmp, 'imm-bad-mode.yaml');
+    writeFile(badMode, `
+      version: 1
+      imm:
+        ownership:
+          mode: shadow
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: badMode, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'imm.ownership.mode');
+        assert.match(String(err.expected), /observe/);
+        assert.match(String(err.expected), /enforce/);
+        return true;
+      },
+    );
+
+    const badKey = join(tmp, 'imm-bad-key.yaml');
+    writeFile(badKey, `
+      version: 1
+      imm:
+        ownership:
+          report_only: true
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: badKey, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'imm.ownership.report_only');
+        assert.match(err.message, /unknown key/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('services.hcp loads through strict Node schema', () => {
   const tmp = freshTmp();
   try {

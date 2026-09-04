@@ -136,6 +136,53 @@ test('reviewer dispatch candidates sort oldest pending PR first', () => {
   assert.deepEqual(sorted.map((item) => item.prNumber), [10, 15, 20]);
 });
 
+test('reviewer dispatch puts never-reviewed PRs ahead of re-reviews', () => {
+  // The starvation this guards against, measured 2026-09-04: 14 open PRs, a
+  // 6-slot pool, median time-to-first-review 36.1 minutes, and the three newest
+  // PRs had no review at all while two of the oldest had 8 attempts each.
+  // Ordering by createdAt alone puts a brand-new PR at the BACK of the queue,
+  // behind every older PR that is merely being re-reviewed again.
+  const posted = { posted_at: '2026-05-01T00:00:00.000Z' };
+  const sorted = sortReviewerDispatchCandidates([
+    // oldest, but already reviewed -- must not win a slot over unreviewed work
+    candidate(10, async () => {}, '2026-05-01T00:00:00.000Z', { current: posted }),
+    candidate(11, async () => {}, '2026-05-02T00:00:00.000Z', { current: posted }),
+    // newest, never reviewed -- this is the latency-sensitive work
+    candidate(90, async () => {}, '2026-05-09T00:00:00.000Z'),
+    candidate(91, async () => {}, '2026-05-10T00:00:00.000Z'),
+  ]);
+
+  assert.deepEqual(sorted.map((item) => item.prNumber), [90, 91, 10, 11]);
+});
+
+test('reviewer dispatch keeps oldest-first fairness inside each tier', () => {
+  // The priority change must not disturb ordering among peers.
+  const posted = { posted_at: '2026-05-01T00:00:00.000Z' };
+  const sorted = sortReviewerDispatchCandidates([
+    candidate(21, async () => {}, '2026-05-04T00:00:00.000Z', { current: posted }),
+    candidate(20, async () => {}, '2026-05-03T00:00:00.000Z', { current: posted }),
+    candidate(31, async () => {}, '2026-05-06T00:00:00.000Z'),
+    candidate(30, async () => {}, '2026-05-05T00:00:00.000Z'),
+  ]);
+
+  assert.deepEqual(sorted.map((item) => item.prNumber), [30, 31, 20, 21]);
+});
+
+test('a claimed-but-unposted review row still counts as first pass', () => {
+  // reviewed_prs rows exist before anything is posted (claimed, retrying,
+  // failed). Only `posted_at` means a review actually reached the PR, so a row
+  // without it must not demote the PR into the re-review tier and strand it.
+  const claimedNotPosted = { review_status: 'claimed', review_attempts: 2, posted_at: null };
+  const sorted = sortReviewerDispatchCandidates([
+    candidate(10, async () => {}, '2026-05-01T00:00:00.000Z', {
+      current: { posted_at: '2026-05-01T00:00:00.000Z' },
+    }),
+    candidate(80, async () => {}, '2026-05-08T00:00:00.000Z', { current: claimedNotPosted }),
+  ]);
+
+  assert.deepEqual(sorted.map((item) => item.prNumber), [80, 10]);
+});
+
 test('reviewer dispatch tie-breaks equal ages by repo path before PR number', () => {
   const createdAt = '2026-05-01T00:00:00.000Z';
   const sorted = sortReviewerDispatchCandidates([

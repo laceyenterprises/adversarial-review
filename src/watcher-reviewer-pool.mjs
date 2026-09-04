@@ -222,7 +222,38 @@ function reviewerDispatchSortTimeMs(candidate) {
   return parseSortTimeMs(candidate?.subject?.createdAt) ?? Number.MAX_SAFE_INTEGER;
 }
 
+// A PR that has never had a review posted outranks one that already has.
+//
+// The queue was previously ordered by PR createdAt alone. With a bounded pool
+// (6 slots) and re-reviews re-entering the queue every poll, the oldest PRs win
+// every cycle -- and the oldest PRs are exactly the ones already carrying the
+// most review attempts. A newly opened PR sorts to the BACK by construction and
+// waits for every older PR to be serviced first.
+//
+// Measured on 2026-09-04 with 14 open PRs: median time-to-first-review 36.1
+// minutes, max 51.5, and the three newest PRs had no review at all while two
+// older PRs had accumulated 8 review attempts each. That is starvation, not
+// load: first-pass work is the scarce, latency-sensitive product, and re-review
+// churn was crowding it out.
+//
+// Ordering first-pass ahead of re-review is strictly a priority change: nothing
+// is dropped, and within each tier the previous oldest-first fairness is
+// preserved exactly.
+function reviewerDispatchIsFirstPass(candidate) {
+  const current = candidate?.current;
+  if (!current) return true;
+  // A row can exist before anything is posted (claimed, retrying, failed).
+  // `posted_at` is what marks a review actually delivered to the PR.
+  return !current.posted_at;
+}
+
+function reviewerDispatchTierRank(candidate) {
+  return reviewerDispatchIsFirstPass(candidate) ? 0 : 1;
+}
+
 function compareReviewerDispatchCandidates(a, b) {
+  const tierDelta = reviewerDispatchTierRank(a) - reviewerDispatchTierRank(b);
+  if (tierDelta !== 0) return tierDelta;
   const timeDelta = reviewerDispatchSortTimeMs(a) - reviewerDispatchSortTimeMs(b);
   if (timeDelta !== 0) return timeDelta;
   const repoDelta = String(a?.repoPath || '').localeCompare(String(b?.repoPath || ''));
@@ -525,4 +556,5 @@ export {
   resolveFirstPassReviewerPoolConfig,
   runBoundedReviewerDispatchQueue,
   sortReviewerDispatchCandidates,
+  reviewerDispatchIsFirstPass,
 };

@@ -214,7 +214,8 @@ test('imm observe-first modes load through strict Node schema', () => {
           mode: observe
         progressHealth:
           mode: observe
-          staleThresholdSeconds: 7200
+          staleSeconds: 7200
+          bootStaleSeconds: 1200
         convergence:
           mode: observe
     `);
@@ -223,22 +224,26 @@ test('imm observe-first modes load through strict Node schema', () => {
     assert.equal(cfg.get('imm.sqlSubstrate.mode'), 'observe');
     assert.equal(cfg.get('imm.zeroCostTokens.mode'), 'observe');
     assert.equal(cfg.get('imm.progressHealth.mode'), 'observe');
-    assert.equal(cfg.get('imm.progressHealth.staleThresholdSeconds'), 7200);
+    assert.equal(cfg.get('imm.progressHealth.staleSeconds'), 7200);
+    assert.equal(cfg.get('imm.progressHealth.bootStaleSeconds'), 1200);
     assert.equal(cfg.get('imm.convergence.mode'), 'observe');
 
     const defaultCfg = loadConfig({ topPath: join(tmp, 'missing.yaml'), env: {} });
     assert.equal(defaultCfg.get('imm.ownership.mode'), 'observe');
-    assert.equal(defaultCfg.get('imm.progressHealth.staleThresholdSeconds'), 10800);
+    assert.equal(defaultCfg.get('imm.progressHealth.staleSeconds'), 1800);
+    assert.equal(defaultCfg.get('imm.progressHealth.bootStaleSeconds'), 900);
 
     const zeroThreshold = join(tmp, 'imm-zero-threshold.yaml');
     writeFile(zeroThreshold, `
       version: 1
       imm:
         progressHealth:
-          staleThresholdSeconds: 0
+          staleSeconds: 0
+          bootStaleSeconds: 0
     `);
     const zeroCfg = loadConfig({ topPath: zeroThreshold, env: {} });
-    assert.equal(zeroCfg.get('imm.progressHealth.staleThresholdSeconds'), 0);
+    assert.equal(zeroCfg.get('imm.progressHealth.staleSeconds'), 0);
+    assert.equal(zeroCfg.get('imm.progressHealth.bootStaleSeconds'), 0);
 
     const badMode = join(tmp, 'imm-bad-mode.yaml');
     writeFile(badMode, `

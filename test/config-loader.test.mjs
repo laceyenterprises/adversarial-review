@@ -5034,6 +5034,9 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
             lha:
               consume_attestations: false
             hammer_lifetime_ceiling: 3
+            required_check_contexts:
+              - ci/test
+              - ci/lint
             worker_class: codex
             merge_method: squash
             strict_non_blocking_remediation: false
@@ -5063,6 +5066,7 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
     assert.equal(cfg.getMergeAuthorityConfig().strictMode, false);
     assert.equal(cfg.getMergeAuthorityConfig().lha.consumeAttestations, false);
     assert.equal(cfg.getMergeAuthorityConfig().hammerLifetimeDispatchCeiling, 3);
+    assert.deepEqual(cfg.getMergeAuthorityConfig().requiredCheckContexts, ['ci/test', 'ci/lint']);
     assert.equal(cfg.getMergeAuthorityConfig().strictNonBlockingRemediation, false);
     assert.deepEqual(cfg.get('roles.adversarial.merge_authority.eligibility.risk_classes'), ['low']);
     assert.deepEqual(
@@ -5144,6 +5148,17 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
       2,
     );
     assert.equal(envAliasCeilingCfg.getMergeAuthorityConfig().hammerLifetimeDispatchCeiling, 2);
+
+    const envRequiredContextsCfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_REQUIRED_CHECK_CONTEXTS: 'repo-guards,shellcheck',
+      },
+    });
+    assert.deepEqual(
+      envRequiredContextsCfg.getMergeAuthorityConfig().requiredCheckContexts,
+      ['repo-guards', 'shellcheck'],
+    );
 
     const legacyTop = join(tmp, 'legacy-config.yaml');
     writeFile(legacyTop, `
@@ -5482,6 +5497,7 @@ test('AMA getMergeAuthorityConfig returns the camelCased subtree with defaults i
     );
     assert.equal(ma.branchProtection.required, true);
     assert.equal(ma.autoHammerOnEligibilityMiss, false);
+    assert.deepEqual(ma.requiredCheckContexts, []);
     assert.equal(ma.dispatchTimeoutMs, 300000);
   } finally {
     rmSync(tmp, { recursive: true, force: true });

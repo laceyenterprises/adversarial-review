@@ -336,14 +336,15 @@ function presentHardStopLabels(reviewState, prMetadata, recoveryEvidence, advers
  * adversarial-review pipeline's own status context.
  *
  * FAIL-CLOSED (LAC-1559): that classifier maps an explicit EMPTY rollup to
- * `null` (unknown), so this eligibility gate reads NOT green on a repo with no
- * external CI — and on a rollup fetched before GitHub registered the head's
- * checks. This now CONVERGES with the MSM merge predicate (`requiredChecksGreen`
- * in `merge-eligibility.mjs`), which already fails closed on an empty rollup at
- * the actual merge decision. A zero-external-check PR accrues `ci-not-green`
- * here rather than auto-closing; the daemon clean-park path emits an
- * operator-visible "manual close required" signal so a genuinely no-CI clean PR
- * is observable rather than silently held (LAC-1559 Fix 2). The merge-time
+ * `null` (unknown), or `PENDING` when explicit required contexts are configured,
+ * so this eligibility gate reads NOT green on a repo with no external CI — and
+ * on a rollup fetched before GitHub registered the head's checks. This now
+ * CONVERGES with the MSM merge predicate (`requiredChecksGreen` in
+ * `merge-eligibility.mjs`), which already fails closed on an empty rollup at the
+ * actual merge decision. A zero-external-check PR accrues `ci-not-green` here
+ * rather than auto-closing; the daemon clean-park path emits an operator-visible
+ * "manual close required" signal so a genuinely no-CI clean PR is observable
+ * rather than silently held (LAC-1559 Fix 2). The merge-time
  * `--match-head-commit <reviewedSha>` pin remains the head-move backstop.
  *
  * @param {PrMetadata} prMetadata

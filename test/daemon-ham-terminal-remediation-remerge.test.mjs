@@ -62,6 +62,7 @@ function findingsReviewArgs(rootDir, overrides = {}) {
       autonomousMergeExecutionEnabled: true,
       strictMode: true,
       lha: { consumeAttestations: false },
+      requiredCheckContexts: ['ci/lint', 'ci/test'],
     },
     repoPath: 'acme/repo',
     prNumber: 4987,
@@ -223,9 +224,40 @@ test('daemon re-merges a HAM-validated remediated head under the ham terminal-re
     assert.ok(captured, 'attemptDaemonCleanMerge must be invoked for the HAM-validated head');
     assert.equal(captured.allowHamTerminalRemediation, true);
     assert.equal(captured.verdict, 'ham_terminal_remediation_validated');
+    assert.deepEqual(captured.requiredCheckContexts, ['ci/lint', 'ci/test']);
     // Validated head is the CURRENT (remediation) head, not the stale reviewed head.
     assert.equal(captured.validatedHead, HAM_HEAD);
     assert.equal(captured.auditMetadata.closureAuthority, 'daemon-ham-terminal-remediation');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('daemon resolves required check contexts from AgentOSConfig merge-authority subtree', async () => {
+  const rootDir = tempRoot();
+  try {
+    let captured = null;
+    const result = await runDaemonCleanMergeAttempt(
+      findingsReviewArgs(rootDir, {
+        cfg: {
+          mergeMethod: 'squash',
+          autonomousMergeExecutionEnabled: true,
+          strictMode: true,
+          lha: { consumeAttestations: false },
+          getMergeAuthorityConfig() {
+            return { requiredCheckContexts: ['ci/lint', 'ci/test'] };
+          },
+        },
+        readAmaAuditEntryImpl: () => hamValidatedAuditEntry(HAM_HEAD),
+        attemptDaemonCleanMergeImpl: async (args) => {
+          captured = args;
+          return { disposition: DAEMON_MERGE_DISPOSITION.MERGED, merged: true, attempts: 1 };
+        },
+      }),
+    );
+
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+    assert.deepEqual(captured.requiredCheckContexts, ['ci/lint', 'ci/test']);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

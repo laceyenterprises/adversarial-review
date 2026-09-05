@@ -336,6 +336,7 @@ export async function attemptDaemonCleanMerge({
   branchProtectionRequired = true,
   requiredGateContext = '',
   branchProtectionRequiredContexts = [],
+  requiredCheckContexts = [],
   mergeMethod = 'squash',
   hqRoot,
   auditMetadata = {},
@@ -408,6 +409,7 @@ export async function attemptDaemonCleanMerge({
       preLease.branchProtectionRequiredContexts?.length > 0
         ? preLease.branchProtectionRequiredContexts
         : branchProtectionRequiredContexts,
+    requiredCheckContexts,
     candidateHead: preLease.candidateHead,
     validatedHead,
   });
@@ -575,6 +577,7 @@ export async function attemptDaemonCleanMerge({
         live.branchProtectionRequiredContexts?.length > 0
           ? live.branchProtectionRequiredContexts
           : branchProtectionRequiredContexts,
+      requiredCheckContexts,
       candidateHead: live.candidateHead,
       validatedHead,
     });

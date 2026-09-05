@@ -61,6 +61,24 @@ function loadAmaEnabledAutonomousDisabledConfig() {
   };
 }
 
+function loadAmaEnabledRequiredContextsConfig() {
+  return {
+    getMergeAuthorityConfig() {
+      return {
+        enabled: true,
+        mergeMethod: 'squash',
+        autonomousMergeExecutionEnabled: true,
+        strictMode: true,
+        lha: { consumeAttestations: false },
+        requiredCheckContexts: ['ci/lint', 'ci/test'],
+      };
+    },
+    getOrchestrationMode() {
+      return 'native';
+    },
+  };
+}
+
 const CLEAN_COMMENT_ONLY_REVIEW_BODY = [
   '## Blocking Issues',
   '',
@@ -137,6 +155,47 @@ test('AMA closure loads merge-authority policy for the supplied domain id', asyn
       amaEnabled: false,
       namedReason: 'ama-disabled',
     });
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('AMA disabled audit eligibility reads required check contexts from merge-authority config', async () => {
+  const rootDir = tempRoot();
+  try {
+    let auditArgs = null;
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      candidate: {
+        ...baseArgs(rootDir).candidate,
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'ci/lint', status: 'COMPLETED', conclusion: 'SUCCESS' },
+        ],
+      },
+      runDaemonCleanMergeAttemptImpl: async () => ({
+        disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN,
+        reason: 'not-eligible',
+      }),
+      writeAutonomousMergeDisabledAuditImpl: (args) => {
+        auditArgs = args;
+        return { written: true, path: '/tmp/audit.json' };
+      },
+      loadConfigImpl: () => {
+        const loaded = loadAmaEnabledRequiredContextsConfig();
+        return {
+          ...loaded,
+          getMergeAuthorityConfig() {
+            return {
+              ...loaded.getMergeAuthorityConfig(),
+              autonomousMergeExecutionEnabled: false,
+            };
+          },
+        };
+      },
+    });
+
+    assert.equal(result.reason, 'autonomous-merge-execution-disabled');
+    assert.deepEqual(auditArgs?.eligibilityReasons, ['ci-not-green']);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

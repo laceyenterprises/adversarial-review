@@ -30,6 +30,7 @@ import {
   OPERATOR_APPROVED_LABEL,
 } from './adapters/operator/github-pr-label-controls/index.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
+import { resolveRequiredCheckContextsFromCfg } from './ama/required-check-contexts.mjs';
 
 const execFileAsync = promisify(execFile);
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -703,6 +704,7 @@ export async function runDaemonCleanMergeAttempt({
     branchProtectionRequired,
     requiredGateContext,
     branchProtectionRequiredContexts,
+    requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
     // Initial (pre-lease) GitHub gate snapshot from the live fetch this tick.
     liveGate: {
       candidateHead: liveHead,

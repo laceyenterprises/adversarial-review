@@ -1480,6 +1480,10 @@ test('summarizeChecksConclusion fails closed on missing AND empty status check r
   assert.equal(summarizeChecksConclusion(undefined), null);
   assert.equal(summarizeChecksConclusion({}), null);
   assert.equal(summarizeChecksConclusion([]), null);
+  assert.equal(
+    summarizeChecksConclusion([], { cfg: { requiredCheckContexts: ['ci/test'] } }),
+    'PENDING'
+  );
 });
 
 test('summarizeChecksConclusion ignores the adversarial-review pipeline\'s own gate check', () => {
@@ -7239,6 +7243,76 @@ test('CFG-02 resolveMergeAgentWorkerClass: canonical AGENT_OS_ROLES_MERGE_AGENT_
   );
 });
 
+test('summarizeChecksConclusion enforces required check contexts when specified', () => {
+  const cfg = {
+    getMergeAuthorityConfig: () => ({ requiredCheckContexts: ['ci/test', 'ci/lint'] }),
+  };
+
+  assert.equal(
+    summarizeChecksConclusion(
+      [
+        { __typename: 'StatusContext', context: 'ci/test', state: 'SUCCESS' },
+        { __typename: 'StatusContext', context: 'ci/lint', state: 'SUCCESS' },
+      ],
+      { cfg }
+    ),
+    'SUCCESS'
+  );
+
+  assert.equal(
+    summarizeChecksConclusion(
+      [
+        { __typename: 'StatusContext', context: 'ci/test', state: 'SUCCESS' },
+        { __typename: 'CheckRun', name: 'ci/lint', status: 'COMPLETED', conclusion: 'SUCCESS' },
+      ],
+      { cfg }
+    ),
+    'SUCCESS'
+  );
+
+  assert.equal(
+    summarizeChecksConclusion(
+      [
+        { __typename: 'StatusContext', context: 'ci/test', state: 'SUCCESS' },
+      ],
+      { cfg }
+    ),
+    'PENDING'
+  );
+
+  assert.equal(
+    summarizeChecksConclusion(
+      [
+        { __typename: 'StatusContext', context: 'ci/test', state: 'SUCCESS' },
+        { __typename: 'StatusContext', context: 'ci/lint', state: 'FAILURE' },
+      ],
+      { cfg }
+    ),
+    'FAILURE'
+  );
+
+  assert.equal(
+    summarizeChecksConclusion(
+      [
+        { __typename: 'StatusContext', context: 'ci/test', state: 'SUCCESS' },
+        { __typename: 'StatusContext', context: 'ci/lint', state: 'SUCCESS' },
+        { __typename: 'StatusContext', context: 'agent-os/adversarial-gate', state: 'FAILURE' },
+      ],
+      { cfg }
+    ),
+    'SUCCESS'
+  );
+
+  assert.equal(
+    summarizeChecksConclusion(
+      [
+        { __typename: 'StatusContext', context: 'ci/test', state: 'SUCCESS' },
+      ],
+      { cfg: { requiredCheckContexts: ['ci/test', 'ci/lint'] } }
+    ),
+    'PENDING'
+  );
+});
 
 test('cancelMergeAgentDispatchOnMerge dedupes the label-removal-failure warning per (repo, pr, error)', async () => {
   const { cancelMergeAgentDispatchOnMerge, recordMergeAgentDispatch } = await import('../src/follow-up-merge-agent.mjs');

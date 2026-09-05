@@ -134,15 +134,33 @@ function verdictEligible(verdict) {
  * fetched before GitHub registers the head's checks would otherwise authorize a
  * premature merge. As of LAC-1559, `summarizeChecksConclusion()`
  * (`src/checks-summary.mjs`) also fails closed on an empty rollup (returns
- * `null`), so this predicate and that classifier now AGREE on the empty case —
- * a zero-external-check PR classifies green on neither surface.
+ * `null`, or `PENDING` when explicit required contexts are configured), so this
+ * predicate and that classifier now AGREE on the empty case — a zero-external-
+ * check PR classifies green on neither surface.
  *
  * @param {Array|boolean|undefined} requiredChecks
  * @returns {boolean}
  */
-function requiredChecksGreen(requiredChecks) {
+function requiredChecksGreen(requiredChecks, requiredCheckContexts = []) {
   if (typeof requiredChecks === 'boolean') return requiredChecks;
   if (!Array.isArray(requiredChecks) || requiredChecks.length === 0) return false;
+
+  const reportedContexts = new Set(
+    requiredChecks
+      .map(check => String(check?.context || check?.name || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+
+  const normalizedRequiredCheckContexts = (requiredCheckContexts || [])
+    .map(ctx => String(ctx).trim().toLowerCase())
+    .filter(Boolean);
+
+  for (const ctx of normalizedRequiredCheckContexts) {
+    if (!reportedContexts.has(ctx)) {
+      return false;
+    }
+  }
+
   const badChecks = requiredChecks.filter((check) => {
     const status = String(check?.status || check?.state || '').toUpperCase();
     const conclusion = String(check?.conclusion || '').toUpperCase();
@@ -228,7 +246,7 @@ export function evaluateMergeEligibility(state = {}) {
   const reasons = [];
 
   if (!verdictEligible(state?.verdict)) reasons.push('verdict-not-eligible');
-  if (!requiredChecksGreen(state?.requiredChecks)) reasons.push('ci-not-green');
+  if (!requiredChecksGreen(state?.requiredChecks, state?.requiredCheckContexts)) reasons.push('ci-not-green');
   if (!prMergeable(state)) reasons.push('pr-not-mergeable');
   if (!branchProtectionRequiresGate(state)) reasons.push('branch-protection-missing-gate');
   if (!headMatches(state)) reasons.push('stale-head');

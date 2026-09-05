@@ -28,6 +28,7 @@ import { evaluateMergeEligibility } from './ama/merge-eligibility.mjs';
 import { recordAmaRetain } from './ama-retain-loop-cap.mjs';
 import { amaRetainLoopCapFor } from './kernel/convergence-budget.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
+import { resolveRequiredCheckContextsFromCfg } from './ama/required-check-contexts.mjs';
 import { loadConfigCached } from './config-loader.mjs';
 import { loadDomainConfig } from './domain-config.mjs';
 import { resolveMergeAuthorityConfigFromDomain } from './domain-policy.mjs';
@@ -629,6 +630,7 @@ export async function maybeDispatchAmaClosureFor({
     branchProtectionRequired,
     requiredGateContext,
     branchProtectionRequiredContexts,
+    requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
     candidateHead: currentPrHeadSha || candidate?.headSha || '',
     validatedHead: reviewState.headSha,
   });

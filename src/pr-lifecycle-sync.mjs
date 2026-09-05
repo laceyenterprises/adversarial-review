@@ -265,36 +265,14 @@ export async function syncPRLifecycle(octokit, operatorSurface, primaryDomainId 
       // secondary domain's tracking ticket is finalized too, not just code-pr's.
       const mergedRowDomainId =
         stmtGetReviewRow.get(repo, prNumber)?.domain_id || primaryDomainId;
-      // Linear is a REMOTE surface and must not gate local lifecycle truth.
-      //
-      // GitHub has already told us this PR merged; that fact is settled. When
-      // this call threw, the whole merged branch aborted before
-      // `stmtMarkMerged`, the row stayed `pr_state='open'`, and every later
-      // tick re-fetched the PR and re-attempted the same failing remote call.
-      // Observed in production as 8x `leaving lifecycle row open for retry:
-      // database is locked`, and it is the same defect class as agent-os#6211
-      // (durable local state written after slow, failure-prone work).
-      //
-      // The owed-work ordering above is deliberate and unchanged: the
-      // merge-agent cleanup and dag-autowalk still persist BEFORE the mark, so
-      // a local write failure still leaves the row eligible for retry. Only the
-      // remote triage sync is isolated, so its failure degrades Linear
-      // freshness instead of stalling the lifecycle row forever.
-      try {
-        await operatorSurface.syncTriageStatus(
-          subjectRefWithLinearTicket({
-            domainId: mergedRowDomainId,
-            subjectExternalId: `${repo}#${prNumber}`,
-            revisionRef: pr.headRefOid || null,
-          }, linearTicketId, labelNames),
-          'finalized'
-        );
-      } catch (triageErr) {
-        console.error(
-          `[watcher] merged-PR triage sync failed for ${repo}#${prNumber}; recording the merge anyway (Linear may be stale):`,
-          triageErr?.message || triageErr
-        );
-      }
+      await operatorSurface.syncTriageStatus(
+        subjectRefWithLinearTicket({
+          domainId: mergedRowDomainId,
+          subjectExternalId: `${repo}#${prNumber}`,
+          revisionRef: pr.headRefOid || null,
+        }, linearTicketId, labelNames),
+        'finalized'
+      );
       stmtMarkMerged.run(pr.mergedAt, repo, prNumber);
       } catch (err) {
         console.error(
@@ -312,23 +290,14 @@ export async function syncPRLifecycle(octokit, operatorSurface, primaryDomainId 
       deleteGateRecordsForPR(ROOT, { repo, prNumber });
       const closedRowDomainId =
         stmtGetReviewRow.get(repo, prNumber)?.domain_id || primaryDomainId;
-      // Same isolation as the merged branch above: a remote triage failure
-      // must not prevent recording a close GitHub has already confirmed.
-      try {
-        await operatorSurface.syncTriageStatus(
-          subjectRefWithLinearTicket({
-            domainId: closedRowDomainId,
-            subjectExternalId: `${repo}#${prNumber}`,
-            revisionRef: pr.headRefOid || null,
-          }, linearTicketId, labelNames),
-          'halted'
-        );
-      } catch (triageErr) {
-        console.error(
-          `[watcher] closed-PR triage sync failed for ${repo}#${prNumber}; recording the close anyway (Linear may be stale):`,
-          triageErr?.message || triageErr
-        );
-      }
+      await operatorSurface.syncTriageStatus(
+        subjectRefWithLinearTicket({
+          domainId: closedRowDomainId,
+          subjectExternalId: `${repo}#${prNumber}`,
+          revisionRef: pr.headRefOid || null,
+        }, linearTicketId, labelNames),
+        'halted'
+      );
       stmtMarkClosed.run(pr.closedAt ?? new Date().toISOString(), repo, prNumber);
       } catch (err) {
         console.error(

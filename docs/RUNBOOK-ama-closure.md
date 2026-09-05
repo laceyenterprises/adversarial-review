@@ -641,6 +641,46 @@ reasons:
 | `pr-not-mergeable` | GitHub's `mergeableState` is not `MERGEABLE` — usually a conflict. |
 | `remediation-pending` | Adversarial-review remediation work is owed before AMA can close. |
 
+### FSR-06B: fleet-self-repair re-review requests for a trailer-only head move
+
+`stale-review-head` on a head that moved by **trailer-only commits** (an empty
+branch diff after the reviewed head — agent-os#6059's residual class) is
+cleared by automation, not by a `retrigger-review` label: the agent-os
+`modules/fleet-self-repair` hourly sweep (`review-head-trailer-only`) flips the
+watcher's `posted` row to `pending` with
+
+```
+rereview_reason = "FSR-06B: trailer-only head move detected; request fresh adversarial review. reviewed=<sha> live=<sha>"
+```
+
+The watcher (`src/fleet-self-repair-rereview.mjs`, consumed in
+`pollonce-phases.mjs`) treats that row as a *request*, never as operator
+authority:
+
+- It **re-verifies the premise from the daemon clone** — `reviewed` is an
+  ancestor of `live`, `git diff --quiet reviewed live` is empty, and `live` is
+  the head the tick is processing. Any git error, missing checkout, or missing
+  object is "not verified" (a failed diff read is never an empty diff).
+- A **verified** request spawns the re-review past the remediation-round budget
+  suppression and the hard review / attempt ceilings (log lines
+  `FSR-06B re-review request … verified`, `reviewer spawn ALLOWED … past …`).
+  It never lifts the review-cycle cap and never re-reviews a terminal closer
+  head (a trailer-only closer head is already merge-covered by
+  `non_reviewable_head_delta`).
+- A request the watcher will not spawn is **declined** (log
+  `FSR-06B re-review request DECLINED … <reason>`): the row is restored to
+  `posted` with `rereview_reason = "FSR-06B declined: <reason>; reviewed=<sha>
+  live=<sha>"`, so merge authority keeps the existing verdict and the next
+  sweep escalates the PR to an operator instead of re-requesting every hour.
+  A `pending` FSR-06B row is therefore always either spawned or declined within
+  the tick that reads it.
+- A request whose `live` head is no longer the PR head is stale: ordinary
+  policy applies and the row is left as it is (a moved head owes its own
+  review).
+
+Operator recovery for a declined PR is unchanged: `retrigger-review
+--exact-head-now` or a current-head `operator-approved` label.
+
 ### Strict non-blocking remediation — throughput note
 
 `roles.adversarial.merge_authority.strict_non_blocking_remediation` is **on by

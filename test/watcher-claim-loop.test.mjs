@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -43,7 +43,11 @@ function fileUrl(...parts) {
   return pathToFileURL(path.join(REPO_ROOT, ...parts)).href;
 }
 
+const DEFAULT_FOLLOW_UP_JOBS_SOURCE = "export const FOLLOW_UP_JOB_DIRS = { pending: 'pending', inProgress: 'in-progress', completed: 'completed', failed: 'failed', stopped: 'stopped', workspaces: 'workspaces', stoppedArchived: 'stopped-archived' }; export function classifyFollowUpCriticality() { return { critical: false, blockingFindingCount: 0, blockingFindingState: 'known', verdict: 'comment-only' }; } export function listFollowUpJobsInDir() { return []; } export function listInProgressFollowUpJobs() { return []; } export function resolveRoundBudgetForJob() { return { roundBudget: 1, riskClass: 'medium' }; } export function summarizePRRemediationLedger() { return { completedRoundsForPR: 0, latestRiskClass: 'medium', latestMaxRounds: 1 }; } export const PUBLIC_REPLY_MAX_CHARS = 1200; export function detectPublicReplyNoiseSignal() { return null; } export function isActiveFollowUpJobStatus(status) { return ['pending','inProgress','in-progress','in_progress'].includes(status); } export function markFollowUpJobStopped() { return { status: 'stopped' }; } export function requeueFollowUpJobForNextRound() { return { requeued: false }; } export function requeueInProgressFollowUpJobForRetry() { return { requeued: false }; } export function writeFollowUpJob() {}";
+
 function buildLoaderSource({
+  subjectHeads = {},
+  followUpJobsSource = DEFAULT_FOLLOW_UP_JOBS_SOURCE,
   reviewerRuntimeSource = "globalThis.__watcherClaimLoopReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__watcherClaimLoopReviewerSpawns.push(payload); return { ok: true, stdout: '', stderr: '' }; }, cancel: async () => {}, reattach: async () => ({}) }; } export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); } export function loadDomainConfig() { return {}; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",
   followUpMergeAgentSource = "export const MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION = 'dispatched-label-add'; export function classifyBlockingFindings() { return { count: 0, state: 'known' }; } export async function addMergeAgentDispatchedLabel() { return { added: true }; } export function buildMergeAgentDispatchJob() { return null; } export async function dispatchMergeAgentForPR() { return { dispatched: false }; } export function fetchMergeAgentCandidate() { return null; } export async function cancelMergeAgentDispatchOnMerge() { return { attempted: false, cancelled: false, labelRemoved: false }; } export function clearMergeAgentLifecycleCleanup() { return true; } export function listMergeAgentDispatches() { return []; } export function listMergeAgentLifecycleCleanups() { return []; } export async function isMergeAgentDispatchActiveForHead() { return { active: false, reason: 'fixture' }; } export async function pollFastMergeQueue() { return { processed: 0, merged: 0, blocked: 0, requeued_head_change: 0, requeued_veto: 0, skipped_still_pending: 0 }; } export function resolveFastMergePerPollCap() { return 5; } export function shouldUseReviewerTimeoutExhaustedMergeGate() { return false; } export function summarizeChecksConclusion() { return 'SUCCESS'; } export function updateMergeAgentLifecycleCleanup() { return {}; } export function upsertMergeAgentLifecycleCleanup() { return {}; } export function scanStuckMergeAgentDispatches() { return []; } export async function reconcileProactivePhantomHandoffs() { return { inspected: 0, graceStarted: 0, escalated: 0 }; } export function validateStartupMergeAgentConfig() {} export function isScopedMergeAgentRequest() { return false; }",
 } = {}) {
@@ -120,16 +124,17 @@ export async function load(url, context, nextLoad) {
       shortCircuit: true,
       source: ${JSON.stringify(`
         const REPO = 'laceyenterprises/adversarial-review';
+        const subjectHeadOverrides = ${JSON.stringify(subjectHeads)};
         const subjects = [
           {
-            ref: { domainId: 'code-pr', subjectExternalId: REPO + '#101', revisionRef: 'sha-happy-101' },
+            ref: { domainId: 'code-pr', subjectExternalId: REPO + '#101', revisionRef: subjectHeadOverrides['101'] || 'sha-happy-101' },
             lifecycle: 'pending-review',
             title: '[codex] LAC-636 happy path runtime claim',
             authorRef: 'codex-worker',
             builderClass: 'codex',
             labels: ['risk:medium'],
             updatedAt: '2026-05-15T12:00:00.000Z',
-            headSha: 'sha-happy-101',
+            headSha: subjectHeadOverrides['101'] || 'sha-happy-101',
             terminal: false,
             observedAt: '2026-05-15T12:00:01.000Z',
           },
@@ -235,7 +240,7 @@ export async function load(url, context, nextLoad) {
     'fixture:branch-protection': "export function createBranchProtectionChecker() { return {}; } export async function fetchAdversarialGateBranchProtection() {} export async function warnForMissingAdversarialGateBranchProtection() {}",
     'fixture:adversarial-gate-status': "export function buildAdversarialGateSnapshot() { return { settledReview: { verdict: '', remediationPending: false }, reviewedHeadSha: null, mergeableState: '', labels: [] }; } export function deleteGateRecordsForPR() {} export function pickAdversarialGateStatus() { return { state: 'pending', reason: 'fixture', context: 'agent-os/adversarial-gate' }; } export async function projectAdversarialGateStatus() { return { decision: { state: 'pending', reason: 'fixture' } }; } export async function publishAdversarialGateStatus() { return { posted: true }; }",
     'fixture:adversarial-gate-context': "export function resolveGateStatusContext() { return {}; }",
-    'fixture:follow-up-jobs': "export const FOLLOW_UP_JOB_DIRS = { pending: 'pending', inProgress: 'in-progress', completed: 'completed', failed: 'failed', stopped: 'stopped', workspaces: 'workspaces', stoppedArchived: 'stopped-archived' }; export function classifyFollowUpCriticality() { return { critical: false, blockingFindingCount: 0, blockingFindingState: 'known', verdict: 'comment-only' }; } export function listFollowUpJobsInDir() { return []; } export function listInProgressFollowUpJobs() { return []; } export function resolveRoundBudgetForJob() { return { roundBudget: 1, riskClass: 'medium' }; } export function summarizePRRemediationLedger() { return { completedRoundsForPR: 0, latestRiskClass: 'medium', latestMaxRounds: 1 }; } export const PUBLIC_REPLY_MAX_CHARS = 1200; export function detectPublicReplyNoiseSignal() { return null; } export function isActiveFollowUpJobStatus(status) { return ['pending','inProgress','in-progress','in_progress'].includes(status); } export function markFollowUpJobStopped() { return { status: 'stopped' }; } export function requeueFollowUpJobForNextRound() { return { requeued: false }; } export function requeueInProgressFollowUpJobForRetry() { return { requeued: false }; } export function writeFollowUpJob() {}",
+    'fixture:follow-up-jobs': ${JSON.stringify(followUpJobsSource)},
     'fixture:remediation-prompt': "export function followUpJobRepoPrKey(job) { return String(job?.repo || '').toLowerCase() + '#' + (job?.prNumber || ''); }",
     'fixture:follow-up-merge-agent': ${JSON.stringify(followUpMergeAgentSource)},
     'fixture:follow-up-retrigger-label': "export const RETRIGGER_REMEDIATION_LABEL = 'retrigger-remediation'; export async function retryPendingRetriggerAckComments() { return { attempted: 0, posted: 0 }; } export async function tryRetriggerRemediationFromLabel() { return { outcome: 'noop' }; }",
@@ -396,6 +401,9 @@ try {
 
   console.log(${JSON.stringify(SUMMARY_MARKER)} + JSON.stringify({
     rows: readRows(db),
+    fsrRows: db.prepare(
+      'SELECT pr_number, review_status, reviewer_head_sha, revision_ref, rereview_requested_at, rereview_reason FROM reviewed_prs ORDER BY pr_number'
+    ).all(),
     reviewerPassRows: readPassRows(db),
     claims,
     githubCalls,
@@ -1456,4 +1464,179 @@ test('watcher pollOnce serial fallback preserves stop-on-first-spawn-failure beh
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// FSR-06B: a fleet-self-repair trailer-only re-review request on a PR whose
+// review budget and hard review ceiling are both spent.
+// ---------------------------------------------------------------------------
+
+// Same ledger stub as the default harness but with the completed-round
+// timestamp list the budget probe reads; the per-head exhaustion itself comes
+// from the two completed reviewer passes inserted on the live head below.
+const EXHAUSTED_FOLLOW_UP_JOBS_SOURCE = DEFAULT_FOLLOW_UP_JOBS_SOURCE
+  .replace(
+    "export function summarizePRRemediationLedger() { return { completedRoundsForPR: 0, latestRiskClass: 'medium', latestMaxRounds: 1 }; }",
+    "export function summarizePRRemediationLedger() { return { completedRoundsForPR: 0, latestRiskClass: 'medium', latestMaxRounds: 1, completedRoundTimestamps: [] }; }"
+  );
+
+function gitFixture(cwd, ...args) {
+  return spawnSync('git', args, { cwd, encoding: 'utf8' }).stdout.trim();
+}
+
+// A daemon-clone-shaped repo at `<hqRoot>/repos/adversarial-review` (the
+// slug the claim-loop subject fixture uses) with a reviewed head and one
+// commit on top: trailer-only (empty diff) or substantive.
+function makeFsrDaemonClone(tmp, { substantiveMove = false } = {}) {
+  const hqRoot = path.join(tmp, 'hq');
+  const clone = path.join(hqRoot, 'repos', 'adversarial-review');
+  mkdirSync(clone, { recursive: true });
+  gitFixture(clone, 'init', '-q');
+  gitFixture(clone, 'config', 'user.email', 'fixture@example.invalid');
+  gitFixture(clone, 'config', 'user.name', 'Fixture');
+  writeFileSync(path.join(clone, 'code.py'), 'reviewed\n');
+  gitFixture(clone, 'add', 'code.py');
+  gitFixture(clone, 'commit', '-q', '-m', 'Implement ticket');
+  const reviewed = gitFixture(clone, 'rev-parse', 'HEAD');
+  if (substantiveMove) {
+    writeFileSync(path.join(clone, 'code.py'), 'changed\n');
+    gitFixture(clone, 'add', 'code.py');
+    gitFixture(clone, 'commit', '-q', '-m', 'Add provenance trailer\n\nReviewed-by: codex');
+  } else {
+    gitFixture(clone, 'commit', '-q', '--allow-empty', '-m', 'Add provenance trailer\n\nReviewed-by: codex');
+  }
+  const live = gitFixture(clone, 'rev-parse', 'HEAD');
+  return { hqRoot, clone, reviewed, live };
+}
+
+function fsrPrePollSetup({ reviewed, live }) {
+  return `
+        db.prepare(
+          \`INSERT INTO reviewed_prs
+             (repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+              review_attempts, revision_ref, reviewer_head_sha, posted_at,
+              rereview_requested_at, rereview_reason)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)\`
+        ).run(
+          'laceyenterprises/adversarial-review',
+          101,
+          '2026-09-02T12:00:00.000Z',
+          'codex',
+          'open',
+          'pending',
+          2,
+          ${JSON.stringify(live)},
+          '2026-09-03T12:00:00.000Z',
+          ${JSON.stringify(`FSR-06B: trailer-only head move detected; request fresh adversarial review. reviewed=${reviewed} live=${live}`)}
+        );
+        // Two completed reviewer passes already recorded on the LIVE head: the
+        // per-head re-review budget (1) and the hard review ceiling (2) are
+        // both spent, so ordinary policy refuses this spawn.
+        const insertPass = db.prepare(
+          \`INSERT INTO reviewer_passes
+             (repo, pr_number, attempt_number, reviewer_class, reviewer_model,
+              pass_kind, started_at, ended_at, status, head_sha, metadata_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\`
+        );
+        insertPass.run('laceyenterprises/adversarial-review', 101, 1, 'codex', 'codex', 'rereview',
+          '2026-09-02T13:00:00.000Z', '2026-09-02T13:10:00.000Z', 'completed', ${JSON.stringify(live)}, '{}');
+        insertPass.run('laceyenterprises/adversarial-review', 101, 2, 'codex', 'codex', 'rereview',
+          '2026-09-02T14:00:00.000Z', '2026-09-02T14:10:00.000Z', 'completed', ${JSON.stringify(live)}, '{}');
+  `;
+}
+
+function runFsrScenario({ substantiveMove }) {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-fsr-06b-'));
+  const loaderPath = path.join(tmp, 'fixture-loader.mjs');
+  const registerPath = path.join(tmp, 'fixture-register.mjs');
+  const runnerPath = path.join(tmp, 'fixture-fsr-runner.mjs');
+  try {
+    const clone = makeFsrDaemonClone(tmp, { substantiveMove });
+    writeFileSync(loaderPath, buildLoaderSource({
+      subjectHeads: { 101: clone.live },
+      followUpJobsSource: EXHAUSTED_FOLLOW_UP_JOBS_SOURCE,
+    }));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({
+      freshHeads: { 101: clone.live },
+      prePollSetup: fsrPrePollSetup(clone),
+    }));
+
+    const result = spawnSync(
+      process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        env: fixtureEnv({ ...installGhFixture(tmp), HQ_ROOT: clone.hqRoot }),
+      }
+    );
+    const output = `${result.stdout || ''}${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+    const summaryLine = result.stdout
+      .split(/\r?\n/)
+      .find((line) => line.startsWith(SUMMARY_MARKER));
+    assert.ok(summaryLine, output);
+    const summary = JSON.parse(summaryLine.slice(SUMMARY_MARKER.length));
+    return { clone, summary, output };
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+test('watcher spawns a re-review for a verified FSR-06B trailer-only request past a spent budget and ceiling', () => {
+  const { clone, summary, output } = runFsrScenario({ substantiveMove: false });
+  assert.match(
+    output,
+    /FSR-06B re-review request for laceyenterprises\/adversarial-review#101 verified: .* is an empty delta over 1 commit\(s\)/,
+    output
+  );
+  assert.match(
+    output,
+    /reviewer spawn ALLOWED for laceyenterprises\/adversarial-review#101 past remediation-round-budget-exhausted: verified FSR-06B/,
+    output
+  );
+  assert.match(
+    output,
+    /Allowing explicit re-review for laceyenterprises\/adversarial-review#101: hard review ceiling reached .* verified FSR-06B trailer-only re-review request/,
+    output
+  );
+  const spawn101 = summary.reviewerSpawns.find((spawn) => spawn?.subjectContext?.prNumber === 101);
+  assert.ok(spawn101, JSON.stringify(summary, null, 2));
+  assert.equal(spawn101.subjectContext.passKind, 'rereview');
+  assert.equal(spawn101.subjectContext.reviewerHeadSha, clone.live);
+  const row101 = summary.fsrRows.find((row) => row.pr_number === 101);
+  assert.equal(row101.review_status, 'posted');
+  assert.equal(row101.reviewer_head_sha, clone.live);
+  assert.doesNotMatch(output, /FSR-06B re-review request DECLINED/);
+});
+
+test('watcher declines an FSR-06B request it cannot verify instead of leaving the row pending', () => {
+  const { clone, summary, output } = runFsrScenario({ substantiveMove: true });
+  assert.match(
+    output,
+    /FSR-06B re-review request for laceyenterprises\/adversarial-review#101 NOT verified \(non-empty-delta\)/,
+    output
+  );
+  assert.match(
+    output,
+    /reviewer spawn SUPPRESSED for laceyenterprises\/adversarial-review#101: remediation-round-budget-exhausted/,
+    output
+  );
+  assert.match(
+    output,
+    /FSR-06B re-review request DECLINED for laceyenterprises\/adversarial-review#101: remediation-round-budget-exhausted/,
+    output
+  );
+  const spawn101 = summary.reviewerSpawns.find((spawn) => spawn?.subjectContext?.prNumber === 101);
+  assert.equal(spawn101, undefined, JSON.stringify(summary.reviewerSpawns, null, 2));
+  const row101 = summary.fsrRows.find((row) => row.pr_number === 101);
+  const debug = `${JSON.stringify(row101)}\n${output.split(/\r?\n/).filter((line) => /#101/.test(line)).join('\n')}`;
+  assert.equal(row101.review_status, 'posted', debug);
+  assert.equal(row101.reviewer_head_sha, clone.reviewed, debug);
+  assert.equal(row101.rereview_requested_at, null, debug);
+  assert.equal(
+    row101.rereview_reason,
+    `FSR-06B declined: remediation-round-budget-exhausted; reviewed=${clone.reviewed} live=${clone.live}`
+  );
 });

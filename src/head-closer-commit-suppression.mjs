@@ -17,7 +17,7 @@ const execFileAsync = promisify(execFile);
 // `${HQ_ROOT}/repos/<name>`, so resolve there. Returns null when no local
 // checkout exists (the caller falls back to gh) — this is the quiet, expected
 // case, not the noisy "read failed" error.
-async function resolveLocalRepoCheckout(repoPath, hqRoot) {
+export async function resolveLocalRepoCheckout(repoPath, hqRoot) {
   const raw = String(repoPath || '').trim();
   if (!raw) return null;
   const isDir = async (p) => {

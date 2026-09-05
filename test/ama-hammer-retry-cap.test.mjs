@@ -846,8 +846,22 @@ test('same-head terminal HAM remediation passes canonical live gate shape to dae
   assert.equal(first.dispatched, true);
 
   let observedLiveGate = null;
+  let observedRequiredCheckContexts = null;
   const result = await maybeDispatchAmaCloser({
     ...hammerDispatchArgs(rootDir, {
+      cfg: {
+        enabled: true,
+        workerClass: 'hammer',
+        mergeMethod: 'squash',
+        eligibility: {
+          riskClasses: ['low'],
+          highRiskRequiresTwoKey: false,
+        },
+        branchProtection: { required: false },
+        getMergeAuthorityConfig() {
+          return { requiredCheckContexts: ['ci/lint', 'ci/test'] };
+        },
+      },
       reviewState: { reviewCycleExhausted: true },
       prMetadata: {
         state: 'OPEN',
@@ -880,8 +894,9 @@ test('same-head terminal HAM remediation passes canonical live gate shape to dae
         }
         return { stdout: JSON.stringify({ dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
       },
-      attemptDaemonCleanMergeImpl: async ({ liveGate }) => {
+      attemptDaemonCleanMergeImpl: async ({ liveGate, requiredCheckContexts }) => {
         observedLiveGate = liveGate;
+        observedRequiredCheckContexts = requiredCheckContexts;
         return { disposition: 'merged', reason: 'merged', merged: true, mergeCommitSha: 'e'.repeat(40) };
       },
     }),
@@ -899,6 +914,7 @@ test('same-head terminal HAM remediation passes canonical live gate shape to dae
     merged: false,
     branchProtectionRequiredContexts: [],
   });
+  assert.deepEqual(observedRequiredCheckContexts, ['ci/lint', 'ci/test']);
 });
 
 test('same-head terminal HAM remediation records merged audit before nonfatal cleanup failure', async (t) => {

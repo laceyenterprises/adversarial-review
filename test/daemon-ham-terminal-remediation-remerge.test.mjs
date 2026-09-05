@@ -233,6 +233,36 @@ test('daemon re-merges a HAM-validated remediated head under the ham terminal-re
   }
 });
 
+test('daemon resolves required check contexts from AgentOSConfig merge-authority subtree', async () => {
+  const rootDir = tempRoot();
+  try {
+    let captured = null;
+    const result = await runDaemonCleanMergeAttempt(
+      findingsReviewArgs(rootDir, {
+        cfg: {
+          mergeMethod: 'squash',
+          autonomousMergeExecutionEnabled: true,
+          strictMode: true,
+          lha: { consumeAttestations: false },
+          getMergeAuthorityConfig() {
+            return { requiredCheckContexts: ['ci/lint', 'ci/test'] };
+          },
+        },
+        readAmaAuditEntryImpl: () => hamValidatedAuditEntry(HAM_HEAD),
+        attemptDaemonCleanMergeImpl: async (args) => {
+          captured = args;
+          return { disposition: DAEMON_MERGE_DISPOSITION.MERGED, merged: true, attempts: 1 };
+        },
+      }),
+    );
+
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+    assert.deepEqual(captured.requiredCheckContexts, ['ci/lint', 'ci/test']);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('daemon still declines a findings PR whose current head is NOT HAM-validated', async () => {
   const rootDir = tempRoot();
   try {

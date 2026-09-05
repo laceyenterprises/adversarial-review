@@ -83,6 +83,7 @@ import {
   DAEMON_MERGE_DISPOSITION,
   DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS,
 } from './daemon-merge.mjs';
+import { resolveRequiredCheckContextsFromCfg } from './required-check-contexts.mjs';
 import { resolveCloserDispatchHarness } from './harness-fallback.mjs';
 import { acquireMergeLease, releaseMergeLease } from './merge-lease.mjs';
 import {
@@ -3786,9 +3787,7 @@ export async function maybeDispatchAmaCloser({
             branchProtectionRequiredContexts: Array.isArray(prMetadata?.branchProtection?.requiredContexts)
               ? prMetadata.branchProtection.requiredContexts
               : [],
-            requiredCheckContexts: Array.isArray(cfg?.requiredCheckContexts)
-              ? cfg.requiredCheckContexts
-              : [],
+            requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
             liveGate: {
               candidateHead: prMetadata?.headSha || '',
               requiredChecks: Array.isArray(prMetadata?.statusCheckRollup) ? prMetadata.statusCheckRollup : [],

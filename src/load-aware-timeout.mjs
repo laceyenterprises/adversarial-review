@@ -105,10 +105,31 @@ export function loadAwareTimeoutSeconds(baseSeconds, opts = {}) {
   const hasBusyOverride = Object.prototype.hasOwnProperty.call(opts, 'cpuBusyPercent');
   const busy = hasBusyOverride ? cpuBusyPercent : hostCpuBusyPercent();
   const loadPerCore = load / cores;
-  const saturationConfirmed = Number.isFinite(busy) && busy >= CPU_BUSY_THRESHOLD_PERCENT;
-  const effective = Math.ceil(
-    base * (saturationConfirmed ? loadAwareMultiplier(loadPerCore) : MIN_MULTIPLIER),
-  );
+  // Graded corroboration, not an all-or-nothing gate.
+  //
+  // The hard `busy >= 85%` gate was borrowed from admission control, where
+  // acting on an uncorroborated loadavg ADDS load and can harm the host. A
+  // timeout is the opposite trade: extending it costs only delayed hang
+  // detection, while cutting it short costs a full redundant re-run of the
+  // work that timed out.
+  //
+  // On an I/O-bound host that asymmetry bites. Measured 2026-09-05:
+  // loadavg/core 2.51 (raw multiplier 4.78x) at 22.9% CPU busy, so the gate
+  // suppressed the entire extension and reviewers died at their nominal
+  // timeout -- each failure forcing a full re-review (observed attempt=2/4 and
+  // 3/4 across four PRs while the merge queue backed up). This host never
+  // reaches 85% because it is blocked on disk, not CPU.
+  //
+  // So scale the extension by how far CPU has actually climbed toward the
+  // threshold. Both endpoints are unchanged: at or above the threshold the
+  // full multiplier still applies, and an unreadable CPU still yields no
+  // extension at all.
+  const rawMultiplier = loadAwareMultiplier(loadPerCore);
+  const corroboration = Number.isFinite(busy)
+    ? Math.min(1, Math.max(0, busy / CPU_BUSY_THRESHOLD_PERCENT))
+    : 0;
+  const multiplier = MIN_MULTIPLIER + (rawMultiplier - MIN_MULTIPLIER) * corroboration;
+  const effective = Math.ceil(base * multiplier);
   // Never below the nominal. The max cap limits load inflation, not the
   // caller's explicit nominal timeout.
   const nominal = Math.ceil(base);

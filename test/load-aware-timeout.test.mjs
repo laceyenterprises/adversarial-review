@@ -56,9 +56,55 @@ test('heavy contention caps at MAX_MULTIPLIER, not unbounded', () => {
   );
 });
 
-test('high loadavg with low real CPU stays at the nominal timeout', () => {
+test('high loadavg with low real CPU gets graded, not zero, patience', () => {
+  // CONTRACT CHANGE 2026-09-05, with evidence.
+  //
+  // This previously asserted the nominal timeout: an uncorroborated loadavg
+  // bought no patience at all. That rule is correct for ADMISSION control,
+  // where acting on inflated load adds work and can harm the host. It is the
+  // wrong trade for a TIMEOUT, where the costs are asymmetric: over-patience
+  // delays hang detection, under-patience throws away a completed-but-slow
+  // run and pays for the whole thing again.
+  //
+  // Measured on the production host: loadavg/core 2.51 at 22.9% CPU busy
+  // suppressed a 4.78x extension entirely, and gemini reviewers died at their
+  // nominal timeout -- observed attempt=2/4 and 3/4 across four PRs while the
+  // merge queue grew to 18 open with 2 merges/hour. The host is blocked on
+  // disk, so it never reaches the 85% gate and never earns any patience.
+  //
+  // Graded corroboration keeps hang detection bounded (relief is proportional
+  // to measured CPU, and the 3600s clamp still applies) while ending the
+  // all-or-nothing cliff.
+  const graded = loadAwareTimeoutSeconds(360, {
+    loadAvg1m: 80,
+    cpuCount: 18,
+    cpuBusyPercent: 37,
+  });
+  assert.ok(graded > 360, 'low-but-real CPU should buy some patience');
+  const full = loadAwareTimeoutSeconds(360, {
+    loadAvg1m: 80,
+    cpuCount: 18,
+    cpuBusyPercent: 85,
+  });
+  assert.ok(graded < full, 'partial corroboration must stay below full corroboration');
+});
+
+test('corroboration endpoints are unchanged', () => {
+  // At/above the threshold the full multiplier still applies...
   assert.equal(
-    loadAwareTimeoutSeconds(360, { loadAvg1m: 80, cpuCount: 18, cpuBusyPercent: 37 }),
+    loadAwareTimeoutSeconds(360, { loadAvg1m: 48, cpuCount: 8, cpuBusyPercent: 95 }),
+    2160,
+  );
+  // ...and zero measured CPU still buys nothing.
+  assert.equal(
+    loadAwareTimeoutSeconds(360, { loadAvg1m: 80, cpuCount: 18, cpuBusyPercent: 0 }),
+    360,
+  );
+});
+
+test('an idle host keeps a tight cap even with full corroboration', () => {
+  assert.equal(
+    loadAwareTimeoutSeconds(360, { loadAvg1m: 0.5, cpuCount: 18, cpuBusyPercent: 90 }),
     360,
   );
 });

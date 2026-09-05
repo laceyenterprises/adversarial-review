@@ -140,9 +140,22 @@ function verdictEligible(verdict) {
  * @param {Array|boolean|undefined} requiredChecks
  * @returns {boolean}
  */
-function requiredChecksGreen(requiredChecks) {
+function requiredChecksGreen(requiredChecks, requiredCheckContexts = []) {
   if (typeof requiredChecks === 'boolean') return requiredChecks;
   if (!Array.isArray(requiredChecks) || requiredChecks.length === 0) return false;
+
+  const reportedContexts = new Set(
+    requiredChecks
+      .map(check => String(check?.context || check?.name || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+
+  for (const ctx of requiredCheckContexts || []) {
+    if (!reportedContexts.has(String(ctx).trim().toLowerCase())) {
+      return false;
+    }
+  }
+
   const badChecks = requiredChecks.filter((check) => {
     const status = String(check?.status || check?.state || '').toUpperCase();
     const conclusion = String(check?.conclusion || '').toUpperCase();
@@ -228,7 +241,7 @@ export function evaluateMergeEligibility(state = {}) {
   const reasons = [];
 
   if (!verdictEligible(state?.verdict)) reasons.push('verdict-not-eligible');
-  if (!requiredChecksGreen(state?.requiredChecks)) reasons.push('ci-not-green');
+  if (!requiredChecksGreen(state?.requiredChecks, state?.requiredCheckContexts)) reasons.push('ci-not-green');
   if (!prMergeable(state)) reasons.push('pr-not-mergeable');
   if (!branchProtectionRequiresGate(state)) reasons.push('branch-protection-missing-gate');
   if (!headMatches(state)) reasons.push('stale-head');

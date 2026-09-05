@@ -1,4 +1,5 @@
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
+import { loadConfigCached } from './config-loader.mjs';
 
 const DEFAULT_ADVERSARIAL_GATE_CONTEXT = 'agent-os/adversarial-gate';
 
@@ -62,7 +63,7 @@ function isAdversarialOwnStatusContext(item, excludeContexts) {
 // Behavior pinned by test/follow-up-merge-agent.test.mjs
 // ('summarizeChecksConclusion distinguishes missing and empty status check
 // rollups': undefined→null, {}→null, []→null).
-function summarizeChecksConclusion(statusCheckRollup, { env = process.env } = {}) {
+function summarizeChecksConclusion(statusCheckRollup, { env = process.env, cfg = null } = {}) {
   if (!Array.isArray(statusCheckRollup)) {
     return null;
   }
@@ -75,7 +76,24 @@ function summarizeChecksConclusion(statusCheckRollup, { env = process.env } = {}
     return null;
   }
 
+  const config = cfg || loadConfigCached({ env });
+  const requiredContexts = (config.getMergeAuthorityConfig().requiredCheckContexts || [])
+    .map(c => String(c).trim().toLowerCase());
+
+  const reportedContexts = new Set(
+    relevant
+      .map(item => String(item?.context || item?.name || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+
   let sawPending = false;
+  for (const ctx of requiredContexts) {
+    if (!reportedContexts.has(ctx)) {
+      sawPending = true;
+      break;
+    }
+  }
+
   for (const item of relevant) {
     const rawState = String(
       item?.conclusion

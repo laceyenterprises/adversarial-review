@@ -365,3 +365,75 @@ test('classifier accepts the normalized fetchPullRequestRollup `checks` shape', 
   );
   assert.equal(requiredChecksGreen([]), false, 'no checks is still not green');
 });
+
+test('classifier enforces required check contexts when specified', () => {
+  const { requiredChecksGreen } = __testables__;
+  
+  // Empty list preserves today's behavior
+  assert.equal(
+    requiredChecksGreen([{ __typename: 'StatusContext', context: 'ci/test', state: 'SUCCESS' }], []),
+    true,
+    'empty required contexts list allows green'
+  );
+
+  // All present and successful -> green
+  assert.equal(
+    requiredChecksGreen(
+      [
+        { __typename: 'StatusContext', context: 'ci/test', state: 'SUCCESS' },
+        { __typename: 'StatusContext', context: 'ci/lint', state: 'SUCCESS' },
+      ],
+      ['ci/test', 'ci/lint']
+    ),
+    true,
+    'all required contexts present and successful is green'
+  );
+
+  assert.equal(
+    requiredChecksGreen(
+      [
+        { __typename: 'StatusContext', context: 'ci/test', state: 'SUCCESS' },
+        { __typename: 'CheckRun', name: 'ci/lint', status: 'COMPLETED', conclusion: 'SUCCESS' },
+      ],
+      ['ci/test', 'ci/lint']
+    ),
+    true,
+    'GitHub Actions CheckRun names satisfy required contexts'
+  );
+
+  // Absent listed context -> not green (pending)
+  assert.equal(
+    requiredChecksGreen(
+      [{ __typename: 'StatusContext', context: 'ci/test', state: 'SUCCESS' }],
+      ['ci/test', 'ci/lint']
+    ),
+    false,
+    'missing required context is not green'
+  );
+
+  // Pending listed context -> not green
+  assert.equal(
+    requiredChecksGreen(
+      [
+        { __typename: 'StatusContext', context: 'ci/test', state: 'SUCCESS' },
+        { __typename: 'StatusContext', context: 'ci/lint', state: 'PENDING' },
+      ],
+      ['ci/test', 'ci/lint']
+    ),
+    false,
+    'pending required context is not green'
+  );
+  
+  // Failed -> not green
+  assert.equal(
+    requiredChecksGreen(
+      [
+        { __typename: 'StatusContext', context: 'ci/test', state: 'SUCCESS' },
+        { __typename: 'StatusContext', context: 'ci/lint', state: 'FAILURE' },
+      ],
+      ['ci/test', 'ci/lint']
+    ),
+    false,
+    'failed required context is not green'
+  );
+});

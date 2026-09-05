@@ -629,6 +629,7 @@ export async function maybeDispatchAmaClosureFor({
     branchProtectionRequired,
     requiredGateContext,
     branchProtectionRequiredContexts,
+    requiredCheckContexts: cfg?.requiredCheckContexts || [],
     candidateHead: currentPrHeadSha || candidate?.headSha || '',
     validatedHead: reviewState.headSha,
   });

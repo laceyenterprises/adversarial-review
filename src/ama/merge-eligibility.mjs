@@ -151,8 +151,12 @@ function requiredChecksGreen(requiredChecks, requiredCheckContexts = []) {
       .filter(Boolean)
   );
 
-  for (const ctx of requiredCheckContexts || []) {
-    if (!reportedContexts.has(String(ctx).trim().toLowerCase())) {
+  const normalizedRequiredCheckContexts = (requiredCheckContexts || [])
+    .map(ctx => String(ctx).trim().toLowerCase())
+    .filter(Boolean);
+
+  for (const ctx of normalizedRequiredCheckContexts) {
+    if (!reportedContexts.has(ctx)) {
       return false;
     }
   }

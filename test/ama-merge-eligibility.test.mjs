@@ -401,6 +401,18 @@ test('classifier enforces required check contexts when specified', () => {
     'GitHub Actions CheckRun names satisfy required contexts'
   );
 
+  assert.equal(
+    requiredChecksGreen(
+      [
+        { __typename: 'StatusContext', context: 'ci/test', state: 'SUCCESS' },
+        { __typename: 'CheckRun', name: 'ci/lint', status: 'COMPLETED', conclusion: 'SUCCESS' },
+      ],
+      ['ci/test', '', '  ', 'ci/lint']
+    ),
+    true,
+    'empty required contexts are ignored consistently with checks-summary'
+  );
+
   // Absent listed context -> not green (pending)
   assert.equal(
     requiredChecksGreen(

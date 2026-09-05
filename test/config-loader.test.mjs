@@ -5152,7 +5152,7 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
     const envRequiredContextsCfg = loadConfig({
       topPath: top,
       env: {
-        AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_REQUIRED_CHECK_CONTEXTS: 'repo-guards,shellcheck',
+        AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_REQUIRED_CHECK_CONTEXTS: 'repo-guards, shellcheck',
       },
     });
     assert.deepEqual(

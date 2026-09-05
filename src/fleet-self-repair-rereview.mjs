@@ -15,8 +15,10 @@
 // premise from its own daemon clone — `reviewed` is an ancestor of `live`, the
 // two trees are identical, and `live` is the head the tick is looking at — and
 // only a verified request may pass the remediation-round budget suppression and
-// the hard review ceilings. Verification fails CLOSED: a git error, a missing
-// checkout, a missing SHA, or a moved head is "not verified", never "empty".
+// the hard review ceilings. Verification falls back to `gh api compare` when
+// the local checkout is cold. Verification otherwise fails CLOSED: an exhausted
+// git / gh error, a missing SHA, or a moved head is "not verified", never
+// "empty".
 //
 // A request the watcher will not spawn (terminal closer head, review-cycle-cap
 // pause, or an unverified request that ordinary policy suppresses) is DECLINED:
@@ -27,8 +29,10 @@
 // spawned or declined within the tick that reads it.
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { execGhWithRetry } from './gh-cli.mjs';
 import {
   fetchVerifiedCommitFromLocalGit,
+  isTransientLocalGitError,
   resolveLocalRepoCheckout,
 } from './head-closer-commit-suppression.mjs';
 
@@ -39,6 +43,7 @@ export const FLEET_SELF_REPAIR_REREVIEW_DECLINED_MARKER = 'FSR-06B declined';
 
 const LOCAL_GIT_TIMEOUT_MS = 5000;
 const LOCAL_GIT_MAX_BUFFER = 1024 * 1024 * 16;
+const LOCAL_GIT_RETRY_BACKOFF_MS = [250, 1000];
 const FULL_SHA_RE = /^[a-f0-9]{40}$/;
 const REVIEWED_HEAD_RE = /\breviewed=([a-f0-9]{40})\b/i;
 const LIVE_HEAD_RE = /\blive=([a-f0-9]{40})\b/i;
@@ -101,14 +106,44 @@ function gitExitCode(err) {
   return Number.isInteger(code) ? code : null;
 }
 
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function runWithTransientGitRetry({
+  execFileImpl,
+  checkoutDir,
+  args,
+  repoPath,
+  prNumber,
+  logger,
+  retryBackoffMs = LOCAL_GIT_RETRY_BACKOFF_MS,
+  sleepImpl = sleepMs,
+}) {
+  const retryDelays = Array.isArray(retryBackoffMs) ? retryBackoffMs : [];
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await execFileImpl('git', ['-C', checkoutDir, ...args], {
+        timeout: LOCAL_GIT_TIMEOUT_MS,
+        maxBuffer: LOCAL_GIT_MAX_BUFFER,
+      });
+    } catch (err) {
+      if (!isTransientLocalGitError(err) || attempt >= retryDelays.length) throw err;
+      const delayMs = Math.max(0, Number(retryDelays[attempt]) || 0);
+      logger?.debug?.(
+        `[watcher] FSR-06B local git transient failure for ${repoPath}#${prNumber}; ` +
+          `retrying ${attempt + 1}/${retryDelays.length} after ${delayMs}ms: ${err?.message || err}`
+      );
+      if (delayMs > 0) await sleepImpl(delayMs);
+    }
+  }
+}
+
 // Run a boolean git predicate whose exit status is the answer: 0 => true,
 // 1 => false, anything else => a real error (caller fails closed).
-async function runGitPredicate(execFileImpl, checkoutDir, args) {
+async function runGitPredicate(execFileImpl, checkoutDir, args, options = {}) {
   try {
-    await execFileImpl('git', ['-C', checkoutDir, ...args], {
-      timeout: LOCAL_GIT_TIMEOUT_MS,
-      maxBuffer: LOCAL_GIT_MAX_BUFFER,
-    });
+    await runWithTransientGitRetry({ execFileImpl, checkoutDir, args, ...options });
     return true;
   } catch (err) {
     if (gitExitCode(err) === 1 && !String(err?.stderr || '').trim()) return false;
@@ -116,15 +151,58 @@ async function runGitPredicate(execFileImpl, checkoutDir, args) {
   }
 }
 
-async function runGitOutput(execFileImpl, checkoutDir, args) {
-  const { stdout } = await execFileImpl('git', ['-C', checkoutDir, ...args], {
-    timeout: LOCAL_GIT_TIMEOUT_MS,
-    maxBuffer: LOCAL_GIT_MAX_BUFFER,
-  });
+async function runGitOutput(execFileImpl, checkoutDir, args, options = {}) {
+  const { stdout } = await runWithTransientGitRetry({ execFileImpl, checkoutDir, args, ...options });
   return String(stdout || '');
 }
 
-// Re-derive "the head moved by trailer-only commits" from the daemon clone.
+async function verifyTrailerOnlyHeadDeltaViaGhCompare({
+  repoPath,
+  prNumber,
+  reviewed,
+  current,
+  execFileImpl,
+  logger,
+  env = process.env,
+  sleepImpl = sleepMs,
+} = {}) {
+  try {
+    const { stdout } = await execGhWithRetry({
+      execFileImpl,
+      args: ['api', `repos/${repoPath}/compare/${reviewed}...${current}`],
+      env,
+      retries: LOCAL_GIT_RETRY_BACKOFF_MS.length,
+      backoffMs: LOCAL_GIT_RETRY_BACKOFF_MS[0],
+      sleep: sleepImpl,
+    });
+    const comparison = JSON.parse(String(stdout || '{}'));
+    const aheadBy = Number(comparison?.ahead_by);
+    const behindBy = Number(comparison?.behind_by);
+    const files = Array.isArray(comparison?.files) ? comparison.files : null;
+    if (!Number.isInteger(aheadBy) || aheadBy <= 0) {
+      return { verified: false, reason: 'no-commits-after-reviewed-head', detail: String(comparison?.ahead_by ?? '') };
+    }
+    if (Number.isInteger(behindBy) && behindBy > 0) {
+      return { verified: false, reason: 'reviewed-head-not-ancestor', detail: `behind_by=${behindBy}` };
+    }
+    if (!Array.isArray(files)) {
+      return { verified: false, reason: 'gh-compare-files-unavailable' };
+    }
+    if (files.length > 0) {
+      return { verified: false, reason: 'non-empty-delta' };
+    }
+    return { verified: true, reason: 'empty-delta', commitCount: aheadBy, source: 'gh-compare' };
+  } catch (err) {
+    logger?.debug?.(
+      `[watcher] FSR-06B gh compare failed for ${repoPath}#${prNumber} ` +
+        `${reviewed.slice(0, 12)}...${current.slice(0, 12)}: ${err?.message || err}`
+    );
+    return { verified: false, reason: 'gh-compare-failed', detail: err?.message || String(err) };
+  }
+}
+
+// Re-derive "the head moved by trailer-only commits" from the daemon clone, or
+// from GitHub compare when the daemon has not cached the repo locally yet.
 // Every non-affirmative outcome is `verified: false` with a reason; the caller
 // must treat those identically (no bypass), which is the postmortem's rule
 // that a failed diff read must never read as an empty diff.
@@ -138,6 +216,9 @@ export async function verifyTrailerOnlyHeadDelta({
   fetchVerifiedCommitFromLocalGitImpl = fetchVerifiedCommitFromLocalGit,
   resolveLocalRepoCheckoutImpl = resolveLocalRepoCheckout,
   logger = console,
+  retryBackoffMs = LOCAL_GIT_RETRY_BACKOFF_MS,
+  sleepImpl = sleepMs,
+  env = process.env,
 } = {}) {
   const reviewed = normalizeSha(reviewedHeadSha);
   const current = normalizeSha(currentHeadSha);
@@ -155,7 +236,17 @@ export async function verifyTrailerOnlyHeadDelta({
     return { ...base, reason: 'checkout-resolve-failed', detail: err?.message || String(err) };
   }
   if (!checkoutDir) {
-    return { ...base, reason: 'no-local-checkout' };
+    const ghVerification = await verifyTrailerOnlyHeadDeltaViaGhCompare({
+      repoPath,
+      prNumber,
+      reviewed,
+      current,
+      execFileImpl,
+      logger,
+      env,
+      sleepImpl,
+    });
+    return { ...base, ...ghVerification };
   }
   // Make sure both objects are present locally (fetches a missing head into
   // the clone the same way the closer-commit reader does).
@@ -180,19 +271,19 @@ export async function verifyTrailerOnlyHeadDelta({
   try {
     const ancestor = await runGitPredicate(execFileImpl, checkoutDir, [
       'merge-base', '--is-ancestor', '--end-of-options', reviewed, current,
-    ]);
+    ], { repoPath, prNumber, logger, retryBackoffMs, sleepImpl });
     if (!ancestor) {
       return { ...base, reason: 'reviewed-head-not-ancestor' };
     }
     const emptyDiff = await runGitPredicate(execFileImpl, checkoutDir, [
       'diff', '--quiet', '--exit-code', '--end-of-options', reviewed, current,
-    ]);
+    ], { repoPath, prNumber, logger, retryBackoffMs, sleepImpl });
     if (!emptyDiff) {
       return { ...base, reason: 'non-empty-delta' };
     }
     const countOut = await runGitOutput(execFileImpl, checkoutDir, [
       'rev-list', '--count', '--end-of-options', `${reviewed}..${current}`,
-    ]);
+    ], { repoPath, prNumber, logger, retryBackoffMs, sleepImpl });
     const commitCount = Number.parseInt(countOut.trim(), 10);
     if (!Number.isInteger(commitCount) || commitCount <= 0) {
       return { ...base, reason: 'no-commits-after-reviewed-head', detail: countOut.trim() };
@@ -308,7 +399,7 @@ export function declineFleetSelfRepairTrailerOnlyRereview({
         AND pr_state = 'open'
         AND review_status = 'pending'
         AND rereview_requested_at IS NOT NULL
-        AND LOWER(COALESCE(rereview_reason, '')) LIKE ?`
+        AND TRIM(LOWER(COALESCE(rereview_reason, ''))) LIKE ?`
   ).run(
     now,
     normalizeSha(reviewedHeadSha),

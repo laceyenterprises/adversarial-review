@@ -3,10 +3,11 @@
 // declines (never parks) a request it will not spawn.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 
 import {
   FLEET_SELF_REPAIR_REREVIEW_DECLINED_MARKER,
@@ -26,6 +27,7 @@ import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.
 const REPO = 'laceyenterprises/agent-os';
 const PR = 6059;
 const quietLogger = { log() {}, warn() {}, debug() {}, error() {} };
+const execFileAsync = promisify(execFile);
 
 // The exact shape modules/fleet-self-repair writes (pinned on the agent-os side
 // by test_review_head_trailer_only.py): marker sentence + both full SHAs.
@@ -138,6 +140,65 @@ test('verifyTrailerOnlyHeadDelta verifies an empty delta from the daemon clone',
   }
 });
 
+test('verifyTrailerOnlyHeadDelta retries transient local git failures before failing closed', async () => {
+  const fixture = makeDaemonClone();
+  try {
+    let diffCalls = 0;
+    const result = await verifyTrailerOnlyHeadDelta({
+      repoPath: REPO,
+      prNumber: PR,
+      reviewedHeadSha: fixture.reviewed,
+      currentHeadSha: fixture.live,
+      hqRoot: fixture.hqRoot,
+      logger: quietLogger,
+      sleepImpl: async () => {},
+      execFileImpl: async (file, args, options) => {
+        if (file === 'git' && args.includes('diff')) {
+          diffCalls += 1;
+          if (diffCalls === 1) {
+            const err = new Error('read failed: Input/output error');
+            err.code = 'EIO';
+            err.stderr = 'fatal: Input/output error';
+            throw err;
+          }
+        }
+        return execFileAsync(file, args, options);
+      },
+    });
+    assert.equal(result.verified, true, JSON.stringify(result));
+    assert.equal(result.reason, 'empty-delta');
+    assert.equal(diffCalls, 2);
+  } finally {
+    rmSync(fixture.tmp, { recursive: true, force: true });
+  }
+});
+
+test('verifyTrailerOnlyHeadDelta falls back to gh compare when the daemon clone is missing', async () => {
+  const reviewed = 'a'.repeat(40);
+  const live = 'b'.repeat(40);
+  const calls = [];
+  const result = await verifyTrailerOnlyHeadDelta({
+    repoPath: REPO,
+    prNumber: PR,
+    reviewedHeadSha: reviewed,
+    currentHeadSha: live,
+    hqRoot: path.join(tmpdir(), 'fsr-06b-no-such-hq'),
+    logger: quietLogger,
+    sleepImpl: async () => {},
+    execFileImpl: async (file, args) => {
+      calls.push({ file, args });
+      assert.equal(file, 'gh');
+      assert.deepEqual(args, ['api', `repos/${REPO}/compare/${reviewed}...${live}`]);
+      return { stdout: JSON.stringify({ ahead_by: 1, files: [] }), stderr: '' };
+    },
+  });
+  assert.equal(result.verified, true, JSON.stringify(result));
+  assert.equal(result.reason, 'empty-delta');
+  assert.equal(result.commitCount, 1);
+  assert.equal(result.source, 'gh-compare');
+  assert.equal(calls.length, 1);
+});
+
 test('verifyTrailerOnlyHeadDelta refuses a substantive move, a non-ancestor, and a same head', async () => {
   const fixture = makeDaemonClone({ substantiveMove: true });
   try {
@@ -179,19 +240,27 @@ test('verifyTrailerOnlyHeadDelta refuses a substantive move, a non-ancestor, and
   }
 });
 
-test('verifyTrailerOnlyHeadDelta fails CLOSED on a git error, a missing checkout, or a missing object', async () => {
+test('verifyTrailerOnlyHeadDelta fails CLOSED on a git error, gh compare failure, or a missing object', async () => {
   const fixture = makeDaemonClone();
   try {
-    const noCheckout = await verifyTrailerOnlyHeadDelta({
+    const ghCompareFailure = await verifyTrailerOnlyHeadDelta({
       repoPath: REPO,
       prNumber: PR,
       reviewedHeadSha: fixture.reviewed,
       currentHeadSha: fixture.live,
       hqRoot: path.join(fixture.tmp, 'no-such-hq'),
       logger: quietLogger,
+      sleepImpl: async () => {},
+      execFileImpl: async (file) => {
+        assert.equal(file, 'gh');
+        const err = new Error('gh unavailable');
+        err.code = 1;
+        err.stderr = 'gh unavailable';
+        throw err;
+      },
     });
-    assert.equal(noCheckout.verified, false);
-    assert.equal(noCheckout.reason, 'no-local-checkout');
+    assert.equal(ghCompareFailure.verified, false);
+    assert.equal(ghCompareFailure.reason, 'gh-compare-failed');
 
     // The postmortem rule: a failed diff read is NOT an empty diff.
     let calls = 0;
@@ -399,6 +468,19 @@ test('declineFleetSelfRepairTrailerOnlyRereview restores posted with the decline
       db.prepare('SELECT review_status, rereview_reason FROM reviewed_prs WHERE repo = ? AND pr_number = ?').get(REPO, PR).review_status,
       'pending'
     );
+
+    db.prepare(
+      `UPDATE reviewed_prs SET review_status = 'pending', rereview_requested_at = ?, rereview_reason = ?
+        WHERE repo = ? AND pr_number = ?`
+    ).run('2026-09-04T02:00:00Z', `  ${fsrReason(reviewed, live)}`, REPO, PR);
+    const spacedReason = declineFleetSelfRepairTrailerOnlyRereview({
+      db,
+      repoPath: REPO,
+      prNumber: PR,
+      reason: 'leading-space-marker',
+      logger: quietLogger,
+    });
+    assert.equal(spacedReason.declined, true);
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

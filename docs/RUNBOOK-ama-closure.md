@@ -659,8 +659,13 @@ authority:
 
 - It **re-verifies the premise from the daemon clone** — `reviewed` is an
   ancestor of `live`, `git diff --quiet reviewed live` is empty, and `live` is
-  the head the tick is processing. Any git error, missing checkout, or missing
-  object is "not verified" (a failed diff read is never an empty diff).
+  the head the tick is processing. Transient local `git` errors are retried with
+  bounded backoff before the request fails closed. When the daemon has not
+  cached a local checkout for the repo yet, the watcher falls back to
+  `gh api repos/<owner>/<repo>/compare/<reviewed>...<live>` and requires the
+  compare result to be ahead-only with an empty `files` list. Any exhausted git
+  or GitHub compare error, missing object, or missing compare data is "not
+  verified" (a failed diff read is never an empty diff).
 - A **verified** request spawns the re-review past the remediation-round budget
   suppression and the hard review / attempt ceilings (log lines
   `FSR-06B re-review request … verified`, `reviewer spawn ALLOWED … past …`).

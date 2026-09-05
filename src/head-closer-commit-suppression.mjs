@@ -49,7 +49,7 @@ function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function isTransientLocalGitError(err) {
+export function isTransientLocalGitError(err) {
   const code = String(err?.code || '').toUpperCase();
   if (['EAGAIN', 'EBUSY', 'ECONNRESET', 'EIO', 'EMFILE', 'ENFILE', 'ENOMEM', 'ETIMEDOUT'].includes(code)) {
     return true;

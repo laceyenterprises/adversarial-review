@@ -125,6 +125,11 @@ roles:
       # to 0 to disable the hammer path; daemon clean merges keep their own
       # retry budget.
       hammer_lifetime_ceiling: 6
+      # Explicit required GitHub status/check-run names. Empty preserves the
+      # historical gate: reported checks must be green, but no named context is
+      # required to appear. TQL-02 owns adding local-battery after that context
+      # is emitted and verified.
+      required_check_contexts: []
       lha:
         # LHA-06 cutover switch (schema default: true). Explicitly held FALSE:
         # the CONSUMING side (this daemon requiring a valid `produced` head

@@ -49,7 +49,11 @@ import {
   findPendingReviewerBodyCapture,
   findPendingReviewerBodyCaptureForPost,
 } from './review-body-capture.mjs';
-import { emitReviewedAttestation } from './reviewed-attestation.mjs';
+import {
+  classifyReviewedAttestationFailure,
+  emitReviewedAttestation,
+  enqueuePendingReviewedAttestation,
+} from './reviewed-attestation.mjs';
 import { isPackLockhashInputError, resolveReviewedPackLockhash } from './pack-lockhash.mjs';
 import { resolveReviewerAppToken } from './reviewer-broker-refresh.mjs';
 import { preflightGeminiReviewerToken } from './gemini-reviewer-preflight.mjs';
@@ -1738,6 +1742,7 @@ async function postGitHubReviewWithCapture({
   captureReviewerBodyAfterPostImpl = captureReviewerBodyAfterPost,
   packLockhash = null,
   emitReviewedAttestationImpl = emitReviewedAttestation,
+  enqueuePendingReviewedAttestationImpl = enqueuePendingReviewedAttestation,
 } = {}) {
   const normalizedHeadSha = String(reviewerHeadSha || '').trim().toLowerCase();
   const normalizedCurrentHeadSha = String(currentHeadSha || '').trim().toLowerCase();
@@ -1844,7 +1849,7 @@ async function postGitHubReviewWithCapture({
     return;
   }
 
-  await emitReviewedAttestationImpl({
+  const reviewedAttestationArgs = {
     repo,
     prNumber,
     headSha: normalizedHeadSha,
@@ -1855,7 +1860,17 @@ async function postGitHubReviewWithCapture({
     execFileImpl: attestExecFileImpl,
     env: process.env,
     log,
-  });
+  };
+  try {
+    await emitReviewedAttestationImpl(reviewedAttestationArgs);
+  } catch (err) {
+    const failureClass = classifyReviewedAttestationFailure(err);
+    enqueuePendingReviewedAttestationImpl(rootDir, reviewedAttestationArgs, err);
+    log.warn?.(
+      `[reviewer:${prNumber}] attestation sign failed: ${failureClass} (${err?.message || err}) ` +
+        '- verdict stands; attestation queued for retry'
+    );
+  }
 
   if (!alreadyCaptured && !recoveringPendingCapture) {
     await dismissStaleRequestChangesAfterCleanReview({

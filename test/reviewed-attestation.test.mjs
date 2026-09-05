@@ -1,13 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 import {
   buildReviewedAttestationPayload,
+  enqueuePendingReviewedAttestation,
   emitReviewedAttestation,
   recordSignedReviewedAttestation,
+  readPendingReviewedAttestations,
+  retryPendingReviewedAttestations,
   signReviewedAttestation,
 } from '../src/reviewed-attestation.mjs';
 
@@ -212,6 +217,56 @@ test('reviewed attestation signing uses the shipped flag contract and records th
   assert.equal(signedInput.head_sha, 'def456');
   assert.equal(result.signed.signature.subject, 'claude-reviewer-lacey');
   assert.deepEqual(result.recorded, { recorded: true });
+});
+
+test('queued reviewed attestation retries sign and record then removes consumed entry', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewed-attestation-queue-'));
+  try {
+    const payloadArgs = {
+      repo: 'laceyenterprises/demo',
+      prNumber: 23,
+      headSha: 'head-sha',
+      reviewerIdentity: 'codex-reviewer-lacey',
+      verdict: 'comment-only',
+      findingsCount: 0,
+    };
+    enqueuePendingReviewedAttestation(
+      rootDir,
+      payloadArgs,
+      Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:8002'), { code: 'ECONNREFUSED' }),
+    );
+    assert.equal(readPendingReviewedAttestations(rootDir).length, 1);
+    const commands = [];
+    const result = await retryPendingReviewedAttestations({
+      rootDir,
+      execFileImpl: (command, args, options = {}) => {
+        commands.push({ command, args, options });
+        if (args[1] === 'record') {
+          return {
+            child: { stdin: { end(input) { commands.at(-1).input = input; } } },
+            then(resolve) { resolve({ stdout: '{"recorded":true}' }); },
+            catch() { return this; },
+          };
+        }
+        const payloadJson = JSON.parse(args[args.indexOf('--payload-json') + 1]);
+        return Promise.resolve({
+          stdout: JSON.stringify({
+            ...buildReviewedAttestationPayload(payloadArgs),
+            payload: payloadJson,
+            ts: args[args.indexOf('--ts') + 1],
+            signature: signatureFor('codex-reviewer-lacey'),
+          }),
+        });
+      },
+      env: {},
+      log: { log() {} },
+    });
+    assert.deepEqual(result, { attempted: 1, consumed: 1, remaining: 0 });
+    assert.equal(readPendingReviewedAttestations(rootDir).length, 0);
+    assert.equal(commands.map((call) => call.args[1]).join(','), 'sign,record');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });
 
 function resultTimestamp(args) {

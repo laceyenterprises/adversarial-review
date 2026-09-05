@@ -83,6 +83,8 @@ import {
 import {
   PROVIDER_OVERLOADED_FAILURE_CLASS,
   REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS,
+  ATTESTATION_SIGN_FAILED_FAILURE_CLASS,
+  HCP_UNAVAILABLE_FAILURE_CLASS,
 } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS, resolveQuotaResetIso } from './quota-exhaustion.mjs';
 import {
@@ -1066,6 +1068,8 @@ function settleReviewerAttempt({
     'launchctl-bootstrap',
     'daemon-bounce',
     'reviewer-output',
+    ATTESTATION_SIGN_FAILED_FAILURE_CLASS,
+    HCP_UNAVAILABLE_FAILURE_CLASS,
     PROVIDER_OVERLOADED_FAILURE_CLASS,
     REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS,
   ]);
@@ -1079,6 +1083,8 @@ function settleReviewerAttempt({
     'launchctl-bootstrap': 'Claude launchctl session bootstrap failed; watcher backoff engaged.',
     'daemon-bounce': 'Reviewer runtime could not reattach after daemon bounce; watcher backoff engaged.',
     'reviewer-output': 'Reviewer runtime produced an unparseable review artifact; watcher retry engaged.',
+    [ATTESTATION_SIGN_FAILED_FAILURE_CLASS]: 'Reviewed attestation signing failed after review production; watcher retry engaged.',
+    [HCP_UNAVAILABLE_FAILURE_CLASS]: 'HCP is unavailable for reviewed attestation signing; watcher backoff engaged.',
     bug: 'Reviewer failed due to an invocation or implementation bug.',
     unknown: 'Unknown reviewer failure',
   };

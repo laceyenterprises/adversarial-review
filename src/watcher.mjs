@@ -406,6 +406,8 @@ import {
   createRoutingTierReadinessProbeCache,
   probeRoutingTierReadiness,
 } from './routing-tier-readiness.mjs';
+import { checkHcpHealthz } from './hcp-health.mjs';
+import { retryPendingReviewedAttestations } from './reviewed-attestation.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -1161,6 +1163,20 @@ async function pollOnce(
   const healthTick = healthProbe?.beginTick?.();
   try {
     maybeSweepConditionalRequestCache({ rootDir: ROOT, logger: console });
+    try {
+      const retryResult = await retryPendingReviewedAttestations({
+        rootDir: ROOT,
+        log: console,
+      });
+      if (retryResult.attempted > 0) {
+        console.log(
+          `[watcher] reviewed-attestation queue retry attempted=${retryResult.attempted} ` +
+            `consumed=${retryResult.consumed} remaining=${retryResult.remaining}`
+        );
+      }
+    } catch (err) {
+      console.warn(`[watcher] reviewed-attestation queue retry skipped: ${err?.message || err}`);
+    }
     const operatorSurface = createWatcherOperatorSurface();
     await refreshOrgRepos(octokit);
     const reattach = await reconcileReviewerSessions({
@@ -1232,6 +1248,13 @@ async function pollOnce(
     memoryPressureConfig: reviewerMemoryPressureConfig,
   });
   const getRoutingTierReadinessForTick = createRoutingTierReadinessProbeCache();
+  let hcpHealthzForTick = null;
+  const getHcpHealthzForTick = async () => {
+    if (!hcpHealthzForTick || !hcpHealthzForTick.ready) {
+      hcpHealthzForTick = await checkHcpHealthz();
+    }
+    return hcpHealthzForTick;
+  };
   const reviewerCommandFailedReviewProbe = makeReviewPostedProbe(octokit);
   async function drainReviewerDispatchCandidates(reason) {
     if (!reviewerPoolConfig.enabled || reviewerDispatchCandidates.length === 0) {
@@ -1383,6 +1406,7 @@ async function pollOnce(
         reviewerMemoryReservationState,
         reviewerMemoryAdmissionSampleForTick,
         getRoutingTierReadinessForTick,
+        getHcpHealthzForTick,
         reviewerCommandFailedReviewProbe,
         domainId,
         domainReviewerRuntimeAdapter,

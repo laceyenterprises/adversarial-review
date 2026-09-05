@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import Database from 'better-sqlite3';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,11 +8,28 @@ import { CLAUDE_CLI, GEMINI_CLI, AGY_CLI, __test__ } from '../src/reviewer.mjs';
 import { buildObviousDocsGuidance, extractLinkedRepoDocs, fetchLinkedSpecContents, parseGitHubBlobPath } from '../src/prompt-context.mjs';
 import { AgentOSConfigError } from '../src/config-loader.mjs';
 import { beginReviewerPass } from '../src/reviewer-pass-tokens.mjs';
+import { readPendingReviewedAttestations } from '../src/reviewed-attestation.mjs';
 import {
   AGY_TRANSIENT_REMEDIATION,
   clearAgyReviewerAuthCache,
   safeExecFile,
 } from '../src/agy-reviewer-auth.mjs';
+
+function readReviewerPassRow(rootDir, { repo, prNumber, attemptNumber, passKind }) {
+  const db = new Database(join(rootDir, 'data', 'reviews.db'));
+  try {
+    return db.prepare(
+      `SELECT verdict, body_md, gh_comment_id
+         FROM reviewer_passes
+        WHERE repo = ?
+          AND pr_number = ?
+          AND attempt_number = ?
+          AND pass_kind = ?`
+    ).get(repo, prNumber, attemptNumber, passKind);
+  } finally {
+    db.close();
+  }
+}
 
 const {
   CLAUDE_STRIPPED_ENV_VARS,
@@ -885,7 +903,7 @@ test('postGitHubReviewWithCapture includes pack lockhash in signed reviewed atte
   }
 });
 
-test('postGitHubReviewWithCapture propagates signing failure after posting for watcher recovery', async () => {
+test('postGitHubReviewWithCapture keeps posted verdict and queues attestation after signing failure', async () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'review-post-attestation-failure-'));
   mkdirSync(join(rootDir, 'data'), { recursive: true });
   try {
@@ -925,8 +943,11 @@ test('postGitHubReviewWithCapture propagates signing failure after posting for w
         }
         return { stdout: '{}' };
       },
-      attestExecFileImpl: async () => {
-        throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+      attestExecFileImpl: async (_command, args) => {
+        if (args[1] === 'sign') {
+          throw Object.assign(new Error('hcp unavailable on 127.0.0.1:8002'), { code: 'ECONNREFUSED' });
+        }
+        return { stdout: '{}' };
       },
       prepareReviewWrite: async () => {},
     });
@@ -934,19 +955,30 @@ test('postGitHubReviewWithCapture propagates signing failure after posting for w
       GHA_ADAPTER_BIN: '/fixture/github-adapter',
       GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
     }, async () => {
-      await assert.rejects(postAndFailSigning(), /permission denied/);
+      await postAndFailSigning();
     });
+    const pass = readReviewerPassRow(rootDir, {
+      repo: 'laceyenterprises/demo',
+      prNumber: 42,
+      passKind: 'first-pass',
+      attemptNumber: 1,
+    });
+    assert.equal(pass.verdict, 'comment-only');
+    assert.equal(pass.body_md, '## Verdict\nComment only');
+    const queued = readPendingReviewedAttestations(rootDir);
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0].failure_class, 'hcp-unavailable');
+    assert.equal(queued[0].payload.repo, 'laceyenterprises/demo');
+    assert.equal(queued[0].payload.pr_number, 42);
+    assert.equal(queued[0].payload.verdict, 'comment-only');
     await withEnvAsync({
       GHA_ADAPTER_BIN: '/fixture/github-adapter',
       GH_CODEX_REVIEWER_TOKEN: undefined,
     }, async () => {
-      await assert.rejects(
-        postAndFailSigning({
-          attemptNumber: 2,
-          reviewBody: '## Summary\nNon-deterministic retry body\n\n## Verdict\nRequest changes',
-        }),
-        /permission denied/
-      );
+      await postAndFailSigning({
+        attemptNumber: 2,
+        reviewBody: '## Summary\nNon-deterministic retry body\n\n## Verdict\nRequest changes',
+      });
     });
     assert.equal(postCalls, 1);
   } finally {

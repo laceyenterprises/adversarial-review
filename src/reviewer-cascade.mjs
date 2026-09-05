@@ -5,7 +5,7 @@
  * attempts failed"); the module now tracks EVERY transient reviewer failure
  * class (oauth-broken, reviewer-timeout, launchctl-bootstrap, quota-exhausted,
  * broker-unavailable, github-unavailable, deploy-wedge, provider-overloaded,
- * reviewer-empty-output) under the original name. The contract that makes this state matter:
+ * reviewer-empty-output, attestation-sign-failed, hcp-unavailable) under the original name. The contract that makes this state matter:
  * transient failures must NOT burn `reviewed_prs.review_attempts` — the row
  * settles to `pending-upstream` and this file-backed gate
  * (`shouldBackoffReviewerSpawn`, consulted by pollOnce before the claim CAS)
@@ -22,6 +22,8 @@ import { join } from 'node:path';
 import {
   PROVIDER_OVERLOADED_FAILURE_CLASS,
   REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS,
+  ATTESTATION_SIGN_FAILED_FAILURE_CLASS,
+  HCP_UNAVAILABLE_FAILURE_CLASS,
   classifyReviewerFailure,
   isReviewerSubprocessTimeout,
 } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
@@ -120,6 +122,8 @@ function normalizeTransientFailureClass(failureClass) {
     value === 'github-unavailable' ||
     value === 'deploy-wedge' ||
     value === 'reviewer-output' ||
+    value === ATTESTATION_SIGN_FAILED_FAILURE_CLASS ||
+    value === HCP_UNAVAILABLE_FAILURE_CLASS ||
     value === REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS ||
     value === PROVIDER_OVERLOADED_FAILURE_CLASS
   ) {
@@ -338,6 +342,8 @@ function shouldBackoffReviewerSpawn(rootDir, { repo, prNumber, now = new Date().
 
 export {
   CASCADE_FAILURE_CAP,
+  ATTESTATION_SIGN_FAILED_FAILURE_CLASS,
+  HCP_UNAVAILABLE_FAILURE_CLASS,
   PROVIDER_OVERLOADED_FAILURE_CLASS,
   REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS,
   classifyReviewerFailure,

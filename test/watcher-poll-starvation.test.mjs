@@ -50,7 +50,10 @@ import {
   createPollStarvationHandler,
   resolvePollStarvationConfig,
 } from '../src/watcher-poll-starvation-signal.mjs';
-import { processReviewSubject } from '../src/pollonce-phases.mjs';
+import {
+  enforceHcpPreSpawnReadiness,
+  processReviewSubject,
+} from '../src/pollonce-phases.mjs';
 
 const HEAD_A = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const HEAD_B = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
@@ -356,6 +359,42 @@ test('WPS-01: processReviewSubject queues posted-review handler with the SUBJECT
 
   assert.equal(postedReviewHandlers.length, 1);
   assert.equal(postedReviewHandlers[0].headSha, HEAD_A);
+});
+
+test('HCP pre-spawn precheck requeues when down and proceeds when up', async () => {
+  const settles = [];
+  const down = await enforceHcpPreSpawnReadiness({
+    repoPath: REPO,
+    prNumber: 6157,
+    rootDir: '/tmp/adversarial-review-test',
+    attemptAt: '2026-09-03T20:00:00.000Z',
+    maxRemediationRounds: 4,
+    getHcpHealthzForTick: async () => ({
+      ready: false,
+      reason: 'timeout',
+      failureClass: 'hcp-unavailable',
+      failureMessage: 'HCP healthz http://127.0.0.1:8002/v1/healthz failed: timeout',
+    }),
+    settleReviewerAttemptImpl: (payload) => settles.push(payload),
+    logger: silentLogger,
+  });
+  assert.equal(down.proceed, false);
+  assert.equal(settles.length, 1);
+  assert.equal(settles[0].result.failureClass, 'hcp-unavailable');
+  assert.equal(settles[0].failureAt, '2026-09-03T20:00:00.000Z');
+
+  const up = await enforceHcpPreSpawnReadiness({
+    repoPath: REPO,
+    prNumber: 6157,
+    rootDir: '/tmp/adversarial-review-test',
+    attemptAt: '2026-09-03T20:01:00.000Z',
+    maxRemediationRounds: 4,
+    getHcpHealthzForTick: async () => ({ ready: true, reason: 'ok' }),
+    settleReviewerAttemptImpl: (payload) => settles.push(payload),
+    logger: silentLogger,
+  });
+  assert.equal(up.proceed, true);
+  assert.equal(settles.length, 1);
 });
 
 // ── Discovery-first ordering ─────────────────────────────────────────────────

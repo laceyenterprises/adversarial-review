@@ -9,6 +9,8 @@ const CASCADE_ERROR_CODES = new Set(['ETIMEDOUT']);
 const DIFF_TOO_LARGE_FAILURE_CLASS = 'diff-too-large';
 const PROVIDER_OVERLOADED_FAILURE_CLASS = 'provider-overloaded';
 const REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS = 'reviewer-empty-output';
+const ATTESTATION_SIGN_FAILED_FAILURE_CLASS = 'attestation-sign-failed';
+const HCP_UNAVAILABLE_FAILURE_CLASS = 'hcp-unavailable';
 const REVIEWER_TIMEOUT_MESSAGE_RE = /command timed out after \d+ms/;
 const REVIEWER_PROGRESS_TIMEOUT_MESSAGE_RE = new RegExp(
   `command ${escapeRegExp(PROGRESS_TIMEOUT_REASON_PREFIX)} \\d+ms`
@@ -80,6 +82,17 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
   const mentionsRateLimit = /rate.?limit/.test(lower);
   const mentionsProviderOverloaded = hasProviderOverloadedSignal(lower);
   const mentionsReviewerEmptyOutput = REVIEWER_EMPTY_OUTPUT_RE.test(lower);
+  const mentionsAttestationSign =
+    /\bhq attest sign\b/.test(lower) ||
+    /\battestation sign failed\b/.test(lower) ||
+    /\breviewed attestation\b/.test(lower) && /\bsign|signature|record\b/.test(lower);
+  const mentionsHcpUnavailable =
+    mentionsAttestationSign &&
+    (
+      /127\.0\.0\.1:8002|localhost:8002|\[::1\]:8002/.test(lower) ||
+      /\bhcp\b/.test(lower) && /unavailable|connection refused|timed? out|timeout|no answer|refused|unreachable/.test(lower) ||
+      /\beconnrefused\b|\betimedout\b|\behostunreach\b|\benetunreach\b/.test(lower)
+    );
   // Routing-tier unavailability: the LiteLLM proxy on 127.0.0.1:4000 is the
   // single bottleneck every Claude/Codex CLI reviewer goes through. When the
   // proxy bounces (os-restart, main-catchup classification, post-reboot
@@ -156,6 +169,14 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
 
   if (launchctlBootstrap) {
     return 'launchctl-bootstrap';
+  }
+
+  if (mentionsHcpUnavailable) {
+    return HCP_UNAVAILABLE_FAILURE_CLASS;
+  }
+
+  if (mentionsAttestationSign) {
+    return ATTESTATION_SIGN_FAILED_FAILURE_CLASS;
   }
 
   if (/\[stale-review-head\]/.test(lower)) {
@@ -259,6 +280,8 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
 
 export {
   DIFF_TOO_LARGE_FAILURE_CLASS,
+  ATTESTATION_SIGN_FAILED_FAILURE_CLASS,
+  HCP_UNAVAILABLE_FAILURE_CLASS,
   PROVIDER_OVERLOADED_FAILURE_CLASS,
   REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS,
   classifyReviewerFailure,

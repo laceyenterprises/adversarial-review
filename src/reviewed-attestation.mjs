@@ -1,5 +1,7 @@
 import { execFile } from 'node:child_process';
 import { isDeepStrictEqual, promisify } from 'node:util';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 import { classifyStructuredBlockingIssues } from './kernel/verdict.mjs';
 
@@ -9,6 +11,9 @@ const REVIEWED_ATTESTATION_SIGN_MAX_ATTEMPTS = 3;
 const REVIEWED_ATTESTATION_SIGN_RETRY_DELAY_MS = 250;
 const REVIEWED_ATTESTATION_SIGNATURE_ALGORITHM = 'hcp-hmac-sha256:v1';
 const REVIEWED_ATTESTATION_DIGEST_RE = /^sha256:[A-Za-z0-9_-]{43}$/;
+const ATTESTATION_SIGN_FAILED_FAILURE_CLASS = 'attestation-sign-failed';
+const HCP_UNAVAILABLE_FAILURE_CLASS = 'hcp-unavailable';
+const REVIEWED_ATTESTATION_QUEUE_RELATIVE_PATH = join('data', 'reviewed-attestations', 'pending.jsonl');
 
 function isTransientSignError(err) {
   if (err?.killed === true) return true;
@@ -18,6 +23,24 @@ function isTransientSignError(err) {
   }
   const message = String(err?.message || err || '').toLowerCase();
   return /resource temporarily unavailable|timed? out|timeout|tls handshake|socket hang up/.test(message);
+}
+
+function classifyReviewedAttestationFailure(err) {
+  const code = String(err?.code || '').toUpperCase();
+  const text = [
+    err?.message,
+    err?.stderr,
+    err?.stdout,
+    err?.cause?.message,
+  ].filter(Boolean).join('\n').toLowerCase();
+  if (
+    ['ECONNREFUSED', 'ECONNRESET', 'EHOSTUNREACH', 'ENETUNREACH', 'ETIMEDOUT'].includes(code) ||
+    /127\.0\.0\.1:8002|localhost:8002|\[::1\]:8002/.test(text) ||
+    /\bhcp\b/.test(text) && /unavailable|connection refused|timed? out|timeout|no answer|refused|unreachable/.test(text)
+  ) {
+    return HCP_UNAVAILABLE_FAILURE_CLASS;
+  }
+  return ATTESTATION_SIGN_FAILED_FAILURE_CLASS;
 }
 
 function delay(ms) {
@@ -281,14 +304,121 @@ async function emitReviewedAttestation({
   return { payload, signed, recorded };
 }
 
+function reviewedAttestationQueuePath(rootDir) {
+  return join(rootDir, REVIEWED_ATTESTATION_QUEUE_RELATIVE_PATH);
+}
+
+function pendingReviewedAttestationEntry(args = {}, err = null) {
+  const payload = args.payload || buildReviewedAttestationPayload({
+    repo: args.repo,
+    prNumber: args.prNumber,
+    headSha: args.headSha,
+    reviewerIdentity: args.reviewerIdentity,
+    verdict: args.verdict,
+    findingsCount: args.findingsCount,
+    packLockhash: args.packLockhash,
+  });
+  return {
+    schema_version: 1,
+    enqueued_at: new Date().toISOString(),
+    failure_class: classifyReviewedAttestationFailure(err),
+    last_error: err?.message || String(err || ''),
+    payload,
+  };
+}
+
+function enqueuePendingReviewedAttestation(rootDir, args = {}, err = null) {
+  if (!rootDir) throw new TypeError('rootDir is required');
+  const queuePath = reviewedAttestationQueuePath(rootDir);
+  mkdirSync(dirname(queuePath), { recursive: true });
+  const entry = pendingReviewedAttestationEntry(args, err);
+  writeFileSync(queuePath, `${JSON.stringify(entry)}\n`, { flag: 'a' });
+  return entry;
+}
+
+function readPendingReviewedAttestations(rootDir) {
+  const queuePath = reviewedAttestationQueuePath(rootDir);
+  let raw = '';
+  try {
+    raw = readFileSync(queuePath, 'utf8');
+  } catch (err) {
+    if (err?.code === 'ENOENT') return [];
+    throw err;
+  }
+  return raw.split(/\r?\n/)
+    .filter((line) => line.trim())
+    .map((line) => JSON.parse(line));
+}
+
+function rewritePendingReviewedAttestations(rootDir, entries) {
+  const queuePath = reviewedAttestationQueuePath(rootDir);
+  mkdirSync(dirname(queuePath), { recursive: true });
+  const body = entries.map((entry) => JSON.stringify(entry)).join('\n');
+  const tmpPath = `${queuePath}.tmp.${process.pid}`;
+  writeFileSync(tmpPath, body ? `${body}\n` : '');
+  renameSync(tmpPath, queuePath);
+}
+
+async function retryPendingReviewedAttestations({
+  rootDir,
+  hqPath,
+  execFileImpl,
+  env,
+  log = console,
+  now = () => new Date().toISOString(),
+} = {}) {
+  const pending = readPendingReviewedAttestations(rootDir);
+  if (pending.length === 0) {
+    return { attempted: 0, consumed: 0, remaining: 0 };
+  }
+  const remaining = [];
+  const consumed = [];
+  for (const entry of pending) {
+    try {
+      const signed = await signReviewedAttestation({
+        payload: entry.payload,
+        hqPath,
+        execFileImpl,
+        env,
+      });
+      const recorded = await recordSignedReviewedAttestation({
+        signed,
+        hqPath,
+        execFileImpl,
+        env,
+      });
+      consumed.push({ entry, signed, recorded });
+      log?.log?.(
+        `[reviewer] queued reviewed attestation consumed for ${entry.payload.repo}#${entry.payload.pr_number}` +
+          `@${String(entry.payload.head_sha || '').slice(0, 12)}`
+      );
+    } catch (err) {
+      remaining.push({
+        ...entry,
+        failure_class: classifyReviewedAttestationFailure(err),
+        last_error: err?.message || String(err || ''),
+        last_attempted_at: now(),
+      });
+    }
+  }
+  rewritePendingReviewedAttestations(rootDir, remaining);
+  return { attempted: pending.length, consumed: consumed.length, remaining: remaining.length };
+}
+
 export {
+  ATTESTATION_SIGN_FAILED_FAILURE_CLASS,
+  HCP_UNAVAILABLE_FAILURE_CLASS,
   REVIEWED_ATTESTATION_SIGNATURE_ALGORITHM,
   REVIEWED_ATTESTATION_SIGN_MAX_ATTEMPTS,
   REVIEWED_ATTESTATION_SIGN_RETRY_DELAY_MS,
   REVIEWED_ATTESTATION_SIGN_TIMEOUT_MS,
   buildReviewedAttestationPayload,
+  classifyReviewedAttestationFailure,
   emitReviewedAttestation,
+  enqueuePendingReviewedAttestation,
   normalizeFindingsCount,
+  readPendingReviewedAttestations,
+  retryPendingReviewedAttestations,
   isTransientSignError,
   recordSignedReviewedAttestation,
   reviewedAttestationSignArgs,

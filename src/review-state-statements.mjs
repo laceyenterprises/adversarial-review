@@ -73,6 +73,8 @@ export const MARK_INFRA_AUTO_RECOVERY_ATTEMPT_STARTED_SQL =
        WHEN 'provider-overloaded' THEN lower(COALESCE(failure_message, '')) LIKE '[provider-overloaded]%'
        WHEN 'reviewer-timeout' THEN lower(COALESCE(failure_message, '')) LIKE '[reviewer-timeout]%'
        WHEN 'reviewer-output' THEN lower(COALESCE(failure_message, '')) LIKE '[reviewer-output]%'
+       WHEN 'attestation-sign-failed' THEN lower(COALESCE(failure_message, '')) LIKE '[attestation-sign-failed]%'
+       WHEN 'hcp-unavailable' THEN lower(COALESCE(failure_message, '')) LIKE '[hcp-unavailable]%'
        WHEN 'launchctl-bootstrap' THEN (
          lower(COALESCE(failure_message, '')) LIKE '[launchctl-bootstrap]%' OR
          lower(COALESCE(failure_message, '')) LIKE '%claude launchctl session bootstrap failed%' OR

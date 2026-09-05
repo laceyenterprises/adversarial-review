@@ -66,6 +66,10 @@ import {
   resolveFirstPassReviewBudgetSuppression,
 } from './first-pass-review-suppression.mjs';
 import {
+  declineFleetSelfRepairTrailerOnlyRereview,
+  resolveFleetSelfRepairTrailerOnlyRereview,
+} from './fleet-self-repair-rereview.mjs';
+import {
   resolveRoundBudgetForJob,
   summarizePRRemediationLedger,
 } from './follow-up-jobs.mjs';
@@ -1741,6 +1745,34 @@ export async function processReviewSubject(entry, ctx) {
         return;
       }
 
+      // FSR-06B: fleet-self-repair may have re-armed this row for a trailer-only
+      // head move. Verify that premise against the daemon clone ONCE here. A
+      // verified request lifts the round-budget suppression and the hard review
+      // ceilings below (automation never gets the operator `retrigger-review:`
+      // bypass); a request the watcher will not spawn is DECLINED — the row is
+      // restored to `posted` with the reason recorded — so it never parks
+      // silently as `pending`. See ./fleet-self-repair-rereview.mjs.
+      const fleetSelfRepairRereview = await resolveFleetSelfRepairTrailerOnlyRereview({
+        reviewRow: existing,
+        repoPath,
+        prNumber,
+        currentHeadSha: subject.headSha,
+        execFileImpl: execFileAsync,
+        logger: console,
+      });
+      const declineFleetSelfRepairRereview = (reason) => {
+        if (!fleetSelfRepairRereview.requested || fleetSelfRepairRereview.stale) return;
+        declineFleetSelfRepairTrailerOnlyRereview({
+          db,
+          repoPath,
+          prNumber,
+          reason,
+          reviewedHeadSha: fleetSelfRepairRereview.reviewedHeadSha,
+          liveHeadSha: fleetSelfRepairRereview.liveHeadSha || subject.headSha,
+          logger: console,
+        });
+      };
+
       if (!isExplicitOperatorReviewRetrigger(existing)) {
         const closerSpawnSuppression = await resolveHeadCloserCommitSuppression();
         if (closerSpawnSuppression.suppressed) {
@@ -1748,6 +1780,10 @@ export async function processReviewSubject(entry, ctx) {
             `[watcher] reviewer spawn SUPPRESSED for ${repoPath}#${prNumber}: ` +
               `${closerSpawnSuppression.reason} on head ${String(subject.headSha || '').slice(0, 12) || 'unknown'}`
           );
+          // Standing policy: a terminal closer head is never re-reviewed, and a
+          // trailer-only closer head is already merge-covered by
+          // non_reviewable_head_delta — restore the verdict instead of parking.
+          declineFleetSelfRepairRereview(`terminal-closer-head:${closerSpawnSuppression.reason}`);
           return;
         }
 
@@ -1763,7 +1799,19 @@ export async function processReviewSubject(entry, ctx) {
           logger: console,
           db,
         });
-        if (firstPassBudgetSuppression.suppressed) {
+        // The review-cycle cap is the runaway breaker and is never lifted for
+        // automation; every other budget reason yields to a verified FSR-06B
+        // request (an empty delta cannot spend a remediation round on anything).
+        const fleetSelfRepairBypassesBudgetSuppression =
+          firstPassBudgetSuppression.suppressed &&
+          fleetSelfRepairRereview.honored &&
+          firstPassBudgetSuppression.reason !== 'review-cycle-cap-paused';
+        if (fleetSelfRepairBypassesBudgetSuppression) {
+          console.log(
+            `[watcher] reviewer spawn ALLOWED for ${repoPath}#${prNumber} past ` +
+              `${firstPassBudgetSuppression.reason}: verified FSR-06B trailer-only re-review request`
+          );
+        } else if (firstPassBudgetSuppression.suppressed) {
           const budgetDetail =
             firstPassBudgetSuppression.reason === 'remediation-round-budget-exhausted'
               ? ` (${firstPassBudgetSuppression.completedRoundsForPR}/${firstPassBudgetSuppression.roundBudget} rounds, ` +
@@ -1785,6 +1833,7 @@ export async function processReviewSubject(entry, ctx) {
             `[watcher] reviewer spawn SUPPRESSED for ${repoPath}#${prNumber}: ` +
               `${firstPassBudgetSuppression.reason}${budgetDetail}; ${rowActionDetail}`
           );
+          declineFleetSelfRepairRereview(firstPassBudgetSuppression.reason);
           return;
         }
       }
@@ -2271,6 +2320,13 @@ export async function processReviewSubject(entry, ctx) {
               const hardReviewCeiling = resolveHardReviewCeiling(maxRemediationRounds);
               const hardReviewAttemptCeiling = resolveHardReviewAttemptCeiling(maxRemediationRounds);
               const explicitOperatorReviewRetrigger = isExplicitOperatorReviewRetrigger(current);
+              // FSR-06B: a VERIFIED trailer-only re-review request (empty delta
+              // from the reviewed head, checked against local git above) may
+              // pass both fuses once, exactly like an operator retrigger.
+              const fleetSelfRepairTrailerOnlyBypass = fleetSelfRepairRereview.honored;
+              const reviewCeilingBypassDetail = explicitOperatorReviewRetrigger
+                ? 'rereview_reason is an operator retrigger marker'
+                : 'rereview_reason is a verified FSR-06B trailer-only re-review request';
               // REVIEW-DEDUP: both fuses apply to the current proposed head.
               // A completed or failed review of a stale head is audit history,
               // not a reason to deny the required exact-head review after
@@ -2286,7 +2342,8 @@ export async function processReviewSubject(entry, ctx) {
               if (
                 !skipReviewerSpawnReason &&
                 priorReviewCount >= hardReviewCeiling &&
-                !explicitOperatorReviewRetrigger
+                !explicitOperatorReviewRetrigger &&
+                !fleetSelfRepairTrailerOnlyBypass
               ) {
                 console.log(
                   `[watcher] Skipping re-review for ${repoPath}#${prNumber}: hard review ` +
@@ -2297,9 +2354,9 @@ export async function processReviewSubject(entry, ctx) {
                 skipReviewerSpawnReason = 'hard-review-ceiling';
               } else if (!skipReviewerSpawnReason && priorReviewCount >= hardReviewCeiling) {
                 console.log(
-                  `[watcher] Allowing explicit operator re-review for ${repoPath}#${prNumber}: ` +
+                  `[watcher] Allowing explicit re-review for ${repoPath}#${prNumber}: ` +
                   `hard review ceiling reached (${priorReviewCount} review ceiling units >= ` +
-                  `${hardReviewCeiling}), but rereview_reason is an operator retrigger marker.`
+                  `${hardReviewCeiling}), but ${reviewCeilingBypassDetail}.`
                 );
               }
               const priorReviewAttemptCount = countReviewCeilingAttempts({
@@ -2314,6 +2371,7 @@ export async function processReviewSubject(entry, ctx) {
                 !skipReviewerSpawnReason
                 && priorReviewAttemptCount >= hardReviewAttemptCeiling
                 && !explicitOperatorReviewRetrigger
+                && !fleetSelfRepairTrailerOnlyBypass
               ) {
                 console.log(
                   `[watcher] Skipping re-review for ${repoPath}#${prNumber}: hard review ` +
@@ -2324,9 +2382,9 @@ export async function processReviewSubject(entry, ctx) {
                 skipReviewerSpawnReason = 'hard-review-attempt-ceiling';
               } else if (!skipReviewerSpawnReason && priorReviewAttemptCount >= hardReviewAttemptCeiling) {
                 console.log(
-                  `[watcher] Allowing explicit operator re-review for ${repoPath}#${prNumber}: ` +
+                  `[watcher] Allowing explicit re-review for ${repoPath}#${prNumber}: ` +
                   `hard review attempt ceiling reached (${priorReviewAttemptCount} reviewer attempts >= ` +
-                  `${hardReviewAttemptCeiling}), but rereview_reason is an operator retrigger marker.`
+                  `${hardReviewAttemptCeiling}), but ${reviewCeilingBypassDetail}.`
                 );
               }
             }
@@ -2337,6 +2395,8 @@ export async function processReviewSubject(entry, ctx) {
                 `[watcher] Released reviewer claim for ${repoPath}#${prNumber} after ` +
                 `${skipReviewerSpawnReason}; continuing to watcher close/maintenance path.`
               );
+              // An FSR-06B request that a fuse refused must not park as pending.
+              declineFleetSelfRepairRereview(skipReviewerSpawnReason);
             } else {
               // Count only work that made it through defer, budget, dedupe,
               // claim, freshness, and routing checks and is about to enter the

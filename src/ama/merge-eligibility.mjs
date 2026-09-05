@@ -18,10 +18,18 @@
  *   never verify local CI" — the wrong goal. GitHub already ran CI; this gate is
  *   a field read of the fetched `requiredChecks`, never a venv or a subprocess.
  * - No filesystem reads, no `Date.now()`, no randomness. Fully deterministic in
- *   its `state` argument so it is trivially unit-testable and cache-safe.
+ *   its `state` argument so it is trivially unit-testable and cache-safe. The
+ *   one env read (TQL-01) resolves the adversarial-review self-gate CONTEXT
+ *   NAME so it can be dropped from `requiredCheckContexts`; pass `state.env` to
+ *   pin it.
  *
  * @module ama/merge-eligibility
  */
+
+import {
+  missingRequiredCheckContexts,
+  selectRequiredCheckContexts,
+} from '../required-check-contexts.mjs';
 
 /**
  * Verdict tokens that clear the verdict gate. `settled-success` is the direct
@@ -104,6 +112,18 @@ export const MERGE_ELIGIBILITY_REASONS = Object.freeze([
  *                                      GitHub branch protection for the target
  *                                      branch. Missing/empty fails closed when the
  *                                      policy requires branch protection.
+ * @property {string[]=} requiredCheckContexts
+ *                                      Operator-configured
+ *                                      `roles.adversarial.merge_authority.required_check_contexts`
+ *                                      (TQL-01). Each entry is `[<owner>/<repo>:]<context>`;
+ *                                      a listed context with no check of that
+ *                                      name in `requiredChecks` is NOT green.
+ *                                      Empty / missing preserves the pre-TQL-01
+ *                                      behavior exactly.
+ * @property {string=}  repo            `owner/repo` the PR lives in, used to scope
+ *                                      `requiredCheckContexts` entries. Missing ⇒
+ *                                      every entry applies (fail closed).
+ * @property {Object=}  env             Env for resolving the self-gate context name.
  * @property {string=}  candidateHead   The live PR head SHA being considered.
  * @property {string=}  validatedHead   The head SHA that was validated (reviewed /
  *                                      post-remediation). Mismatch → `stale-head`.
@@ -126,8 +146,7 @@ function verdictEligible(verdict) {
  * Classify required checks as green. Mirrors the hammer inline gate's rules
  * exactly (StatusContext must be `SUCCESS`; check-runs must be `COMPLETED` with a
  * `SUCCESS`/`NEUTRAL`/`SKIPPED` conclusion) and requires at least one check —
- * an empty rollup fails closed. A boolean short-circuits to itself for callers
- * that already derived greenness.
+ * an empty rollup fails closed.
  *
  * INVARIANT — empty rollup is NOT green here. At the point of an actual merge
  * decision, "no checks have reported on this head" must read NOT green: a rollup
@@ -137,11 +156,31 @@ function verdictEligible(verdict) {
  * `null`), so this predicate and that classifier now AGREE on the empty case —
  * a zero-external-check PR classifies green on neither surface.
  *
+ * INVARIANT — an ABSENT required context is NOT green either (TQL-01). The
+ * empty-rollup rule above cannot see the other shape of the same hazard: a
+ * populated rollup that is missing ONE expected check because its workflow was
+ * disabled or never triggered. Every name in `requiredContexts` must appear in
+ * the rollup for this head; one that has not reported reads exactly like a
+ * pending check, so the caller raises `ci-not-green` until GitHub reports it.
+ * An empty `requiredContexts` (the schema default) preserves the prior behavior
+ * exactly. The two surfaces stay converged: `summarizeChecksConclusion()`
+ * applies the same list and returns `'PENDING'` for the same rollup.
+ *
+ * A boolean `requiredChecks` short-circuits to itself for callers that already
+ * derived greenness — but ONLY when no context is required. Presence cannot be
+ * proven from a boolean, so a required list plus a boolean fails closed rather
+ * than trusting a greenness the caller derived without this check.
+ *
  * @param {Array|boolean|undefined} requiredChecks
+ * @param {string[]} [requiredContexts] Resolved required context names for this
+ *   PR (see `src/required-check-contexts.mjs`); already scoped and normalized.
  * @returns {boolean}
  */
-function requiredChecksGreen(requiredChecks) {
-  if (typeof requiredChecks === 'boolean') return requiredChecks;
+function requiredChecksGreen(requiredChecks, requiredContexts = []) {
+  const required = Array.isArray(requiredContexts) ? requiredContexts : [];
+  if (typeof requiredChecks === 'boolean') {
+    return requiredChecks && required.length === 0;
+  }
   if (!Array.isArray(requiredChecks) || requiredChecks.length === 0) return false;
   const badChecks = requiredChecks.filter((check) => {
     const status = String(check?.status || check?.state || '').toUpperCase();
@@ -150,7 +189,8 @@ function requiredChecksGreen(requiredChecks) {
     if (status && status !== 'COMPLETED') return true;
     return !['SUCCESS', 'NEUTRAL', 'SKIPPED'].includes(conclusion);
   });
-  return badChecks.length === 0;
+  if (badChecks.length > 0) return false;
+  return missingRequiredCheckContexts(requiredChecks, required).length === 0;
 }
 
 /**
@@ -228,7 +268,11 @@ export function evaluateMergeEligibility(state = {}) {
   const reasons = [];
 
   if (!verdictEligible(state?.verdict)) reasons.push('verdict-not-eligible');
-  if (!requiredChecksGreen(state?.requiredChecks)) reasons.push('ci-not-green');
+  const requiredContexts = selectRequiredCheckContexts(state?.requiredCheckContexts, {
+    repo: state?.repo,
+    env: state?.env,
+  });
+  if (!requiredChecksGreen(state?.requiredChecks, requiredContexts)) reasons.push('ci-not-green');
   if (!prMergeable(state)) reasons.push('pr-not-mergeable');
   if (!branchProtectionRequiresGate(state)) reasons.push('branch-protection-missing-gate');
   if (!headMatches(state)) reasons.push('stale-head');

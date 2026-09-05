@@ -5037,6 +5037,9 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
             worker_class: codex
             merge_method: squash
             strict_non_blocking_remediation: false
+            required_check_contexts:
+              - "laceyenterprises/agent-os:repo-guards"
+              - "local-battery"
             eligibility:
               risk_classes: ["low"]
               fast_merge_labels:
@@ -5117,7 +5120,41 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
     assert.equal(envFlagCfg.get('roles.adversarial.merge_authority.lha.consume_attestations'), true);
     assert.equal(envFlagCfg.getMergeAuthorityConfig().lha.consumeAttestations, true);
 
+    // TQL-01 — required check contexts: list key, camelCase getter, empty
+    // default (an absent key must preserve the pre-TQL-01 merge gate exactly),
+    // and a comma-separated env override through the canonical alias.
+    assert.deepEqual(
+      cfg.get('roles.adversarial.merge_authority.required_check_contexts'),
+      ['laceyenterprises/agent-os:repo-guards', 'local-battery'],
+    );
+    assert.deepEqual(
+      cfg.getMergeAuthorityConfig().requiredCheckContexts,
+      ['laceyenterprises/agent-os:repo-guards', 'local-battery'],
+    );
+    const envRequiredContextsCfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_REQUIRED_CHECK_CONTEXTS:
+          'local-battery, laceyenterprises/adversarial-review:npm test (Node 22)',
+      },
+    });
+    assert.deepEqual(
+      envRequiredContextsCfg.getMergeAuthorityConfig().requiredCheckContexts,
+      ['local-battery', 'laceyenterprises/adversarial-review:npm test (Node 22)'],
+    );
+    assert.equal(
+      envRequiredContextsCfg
+        .resolutionTrace('roles.adversarial.merge_authority.required_check_contexts')
+        .at(-1).source,
+      'env:AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_REQUIRED_CHECK_CONTEXTS',
+    );
+
     const defaultLhaCfg = loadConfig({ topPath: join(tmp, 'missing.yaml'), env: {} });
+    assert.deepEqual(
+      defaultLhaCfg.get('roles.adversarial.merge_authority.required_check_contexts'),
+      [],
+    );
+    assert.deepEqual(defaultLhaCfg.getMergeAuthorityConfig().requiredCheckContexts, []);
     assert.equal(defaultLhaCfg.get('roles.adversarial.merge_authority.lha.consume_attestations'), true);
     assert.equal(defaultLhaCfg.getMergeAuthorityConfig().lha.consumeAttestations, true);
 

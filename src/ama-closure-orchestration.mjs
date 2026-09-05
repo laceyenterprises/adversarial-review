@@ -602,6 +602,8 @@ export async function maybeDispatchAmaClosureFor({
     statusCheckRollup: Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : [],
     branchProtection: { requiredContexts: candidate?.branchProtection?.requiredContexts || [] },
     author: candidate?.prAuthor || null,
+    // TQL-01 — scopes the required-check-context list to this PR's repository.
+    repo: repoPath,
   };
 
   const strictMode = cfg?.strictMode !== false;
@@ -623,6 +625,12 @@ export async function maybeDispatchAmaClosureFor({
     verdict: settledVerdict,
     leaseHeld: true,
     requiredChecks: prMetadata.statusCheckRollup,
+    // TQL-01 — a configured context that has not reported for this head is
+    // pending, so this audit records `ci-not-green` rather than a green read
+    // taken off a rollup that is missing a check entirely.
+    requiredCheckContexts: cfg?.requiredCheckContexts,
+    repo: repoPath,
+    env,
     mergeable: mergeabilityForGate?.mergeable,
     mergeStateStatus: mergeabilityForGate?.mergeStateStatus,
     prState: String(candidate?.prState || 'open').toUpperCase(),

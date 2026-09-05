@@ -52,6 +52,10 @@ import {
   writeAmaAuditEntry,
 } from './audit.mjs';
 import { evaluateMergeEligibility } from './merge-eligibility.mjs';
+import {
+  missingRequiredCheckContexts,
+  selectRequiredCheckContexts,
+} from '../required-check-contexts.mjs';
 
 /** Bounded-retry defaults, byte-for-byte the MSM-01 hammer merge budget. */
 export const DAEMON_MERGE_DEFAULTS = Object.freeze({
@@ -313,6 +317,8 @@ function priorDaemonPermanentFailure({ readAuditImpl, hqRoot, repo, prNumber, va
  * @param {(lease: object) => any} args.releaseLeaseImpl
  * @param {(ctx: object) => Promise<{exitCode:number, stdout?:string, stderr?:string}>} args.runMergeImpl
  * @param {(ctx: object) => Promise<object>} [args.dismissStaleRequestChangesImpl]
+ * @param {string[]} [args.requiredCheckContexts] TQL-01 required check contexts.
+ * @param {Object} [args.env]
  * @param {Function} [args.evaluateEligibilityImpl]
  * @param {Function} [args.writeAuditImpl]
  * @param {Function} [args.appendAuditImpl]
@@ -336,6 +342,13 @@ export async function attemptDaemonCleanMerge({
   branchProtectionRequired = true,
   requiredGateContext = '',
   branchProtectionRequiredContexts = [],
+  // TQL-01 — operator-configured check contexts that must have REPORTED for the
+  // head before this path may read CI green. Threaded into both eligibility
+  // evaluations below (pre-lease and the in-loop live re-read) so a context that
+  // never ran blocks the merge at both, not just the first. Default empty =
+  // pre-TQL-01 behavior.
+  requiredCheckContexts = [],
+  env = process.env,
   mergeMethod = 'squash',
   hqRoot,
   auditMetadata = {},
@@ -399,6 +412,9 @@ export async function attemptDaemonCleanMerge({
     verdict,
     leaseHeld: true,
     requiredChecks: preLease.requiredChecks,
+    requiredCheckContexts,
+    repo,
+    env,
     mergeable: preLease.mergeable,
     mergeStateStatus: preLease.mergeStateStatus,
     prState: preLease.prState,
@@ -566,6 +582,9 @@ export async function attemptDaemonCleanMerge({
       verdict,
       leaseHeld: true,
       requiredChecks: live.requiredChecks,
+      requiredCheckContexts,
+      repo,
+      env,
       mergeable: live.mergeable,
       mergeStateStatus: live.mergeStateStatus,
       prState: live.prState,
@@ -579,7 +598,18 @@ export async function attemptDaemonCleanMerge({
       validatedHead,
     });
     if (!elig.eligible) {
-      terminal = { reason: 'gate-not-eligible', permanent: true, reasons: elig.reasons };
+      terminal = {
+        reason: 'gate-not-eligible',
+        permanent: true,
+        reasons: elig.reasons,
+        // TQL-01 — name the required contexts that never REPORTED for this head.
+        // Without this an absent context and a red check both read `ci-not-green`
+        // and the operator cannot tell "CI failed" from "CI never ran".
+        absentRequiredContexts: missingRequiredCheckContexts(
+          live.requiredChecks,
+          selectRequiredCheckContexts(requiredCheckContexts, { repo, env }),
+        ),
+      };
       break;
     }
 
@@ -755,6 +785,9 @@ export async function attemptDaemonCleanMerge({
       // Name the exact eligibility gate(s) behind a generic `gate-not-eligible`
       // (e.g. ci-not-green) so the operator log is self-diagnosing.
       (Array.isArray(terminal.reasons) && terminal.reasons.length ? `gates=${terminal.reasons.join(',')} ` : '') +
+      (Array.isArray(terminal.absentRequiredContexts) && terminal.absentRequiredContexts.length
+        ? `absent-required-contexts=${terminal.absentRequiredContexts.join(',')} `
+        : '') +
       `(after ${attempts} attempt(s); no hammer spawned` +
       (cleanParkManualCloseRequired ? '; clean PR parked — manual close required' : '') +
       ')' +

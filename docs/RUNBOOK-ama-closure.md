@@ -633,13 +633,43 @@ reasons:
 | `non-blocking-findings-unknown` | Strict non-blocking remediation is enabled and the settled review does not expose a known structured non-blocking-finding count. |
 | `non-blocking-findings-present` | Strict non-blocking remediation is enabled and the settled review has standing structured non-blocking findings. |
 | `risk-class-not-permitted` | PR's risk class is outside `cfg.eligibility.risk_classes` (and no current-head `adversarial-merge-requested`), or high/critical/unknown still require the two-key path. |
-| `ci-not-green` | At least one external CI check is FAILURE / pending. |
+| `ci-not-green` | At least one external CI check is FAILURE / pending, **or** a context listed in `roles.adversarial.merge_authority.required_check_contexts` has not reported for the head at all (TQL-01 — see below). |
 | `branch-protection-missing-gate` | Target branch protection doesn't require the configured adversarial-gate context. Re-check §1 prerequisite. |
 | `branch_protection_requirement_waived` | Audit/provenance reason for the explicit `branch_protection.required=false` opt-out on a no-branch-protection GitHub plan. This is not a refusal reason. |
 | `label-adversarial-merge-blocked` | Current-head `adversarial-merge-blocked` is applied (with head-scoped evidence). |
 | `stale-review-head` | The reviewed head doesn't match the PR's current head. |
 | `pr-not-mergeable` | GitHub's `mergeableState` is not `MERGEABLE` — usually a conflict. |
 | `remediation-pending` | Adversarial-review remediation work is owed before AMA can close. |
+
+### Required check contexts — "absent is pending, never green" (TQL-01)
+
+`roles.adversarial.merge_authority.required_check_contexts` lists checks that
+MUST have reported for the PR head before any merge surface may read CI green.
+A listed context with no check of that name in the head's rollup classifies
+`PENDING`, so the gate keeps emitting `ci-not-green` until GitHub reports it.
+Without it, a check that never runs is invisible: when the `Unit Tests` and
+`Operational CI Gauntlet` workflows were disabled on 2026-08-29 their contexts
+simply stopped appearing, and the lint-and-guards remainder classified green.
+
+Entries are `[<owner>/<repo>:]<context>`. A bare name is required on **every**
+watched repo; a repo-scoped name only on that repo. The watcher gates every
+non-archived org repo, and their check names differ, so seeded names are scoped.
+
+Diagnosing:
+
+- The daemon's fail-closed line names the culprit:
+  `[daemon-merge] fail-closed for <repo>#<pr>@<head>: gate-not-eligible
+  gates=ci-not-green absent-required-contexts=<name>`.
+- An absent context and a red check both surface as `ci-not-green`; the
+  `absent-required-contexts=` field is what separates "CI failed" from
+  "CI never ran".
+
+If merges stop because a listed context was renamed or retired, either fix the
+list (in `tools/adversarial-review/config.yaml`, then bounce the watcher) or set
+it to `[]` — an empty list restores the pre-TQL-01 behavior exactly. The env
+override is
+`AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_REQUIRED_CHECK_CONTEXTS`
+(comma-separated).
 
 ### Strict non-blocking remediation — throughput note
 

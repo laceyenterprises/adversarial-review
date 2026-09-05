@@ -24,6 +24,7 @@ import { parseArgs } from 'node:util';
 
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { loadConfigCached } from '../src/config-loader.mjs';
+import { MODULE_CONFIG_PATH } from '../src/role-config.mjs';
 import {
   resolveRoundBudgetForJob,
   summarizePRRemediationLedger,
@@ -141,7 +142,8 @@ Usage:
 Inputs:
   --pr            JSON from \`gh pr view --json number,headRefOid,state,isDraft,
                   mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName\`
-  --repo          owner/name slug for the PR; required for final-hammer
+  --repo          owner/name slug for the PR; scopes the configured
+                  required check contexts (TQL-01) and required for final-hammer
                   exhaustion recomputation
   --root-dir      adversarial-review checkout root containing data/follow-up-jobs
                   (default: repository root containing this script)
@@ -373,7 +375,7 @@ function buildReviewState({
   return reviewState;
 }
 
-function buildPrMetadata({ prJson, protectionJson }) {
+function buildPrMetadata({ prJson, protectionJson, repo = null }) {
   // Branch-protection contexts come from
   // `required_status_checks.contexts` or, on newer GitHub responses,
   // `required_status_checks.checks[].context`.
@@ -397,6 +399,10 @@ function buildPrMetadata({ prJson, protectionJson }) {
       reason: classifyProtectionFixtureReason(protectionJson, requiredContexts),
     },
     author: prJson?.author?.login || null,
+    // TQL-01 — scopes `roles.adversarial.merge_authority.required_check_contexts`
+    // to this PR's repository. Without it EVERY configured entry applies (fail
+    // closed), which is why `--repo` is passed on every invocation.
+    repo,
   };
 }
 
@@ -476,7 +482,14 @@ function main(argv = process.argv.slice(2)) {
       return 1;
     }
   }
-  const cfg = loadConfigCached().getMergeAuthorityConfig();
+  // Load through the SAME (top + adversarial-review module) shape the
+  // adversarial-watcher uses. A top-level-only load could not see this module's
+  // `config.yaml`, so the hammer's pre-merge recheck would have run against an
+  // EMPTY `required_check_contexts` while the daemon path gated on the seeded
+  // list (TQL-01) — two merge surfaces, two answers. Every other merge-authority
+  // key this CLI consumes is set at the top level or falls back to the schema
+  // default, so the module layer changes only the required-context list.
+  const cfg = loadConfigCached({ modulePaths: [MODULE_CONFIG_PATH] }).getMergeAuthorityConfig();
   let prJson, reviewsJson, protectionJson, timelineJson;
   try {
     prJson = loadJson(args.pr);
@@ -513,7 +526,7 @@ function main(argv = process.argv.slice(2)) {
     riskClass: args['risk-class'],
     reviewCycleExhausted,
   });
-  const prMetadata = buildPrMetadata({ prJson, protectionJson });
+  const prMetadata = buildPrMetadata({ prJson, protectionJson, repo: args.repo || null });
   let hamTerminalRemediation = null;
   let hamTerminalRemediationGroundTruth = null;
   let rebaseReviewCoverage = null;

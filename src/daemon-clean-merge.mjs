@@ -703,6 +703,11 @@ export async function runDaemonCleanMergeAttempt({
     branchProtectionRequired,
     requiredGateContext,
     branchProtectionRequiredContexts,
+    // TQL-01 — required check contexts the head must have REPORTED. Passed from
+    // the resolved merge-authority config so the daemon path and the AMA
+    // eligibility predicate gate on the same list.
+    requiredCheckContexts: cfg?.requiredCheckContexts,
+    env,
     // Initial (pre-lease) GitHub gate snapshot from the live fetch this tick.
     liveGate: {
       candidateHead: liveHead,

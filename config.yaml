@@ -125,6 +125,41 @@ roles:
       # to 0 to disable the hammer path; daemon clean merges keep their own
       # retry budget.
       hammer_lifetime_ceiling: 6
+      # TQL-01 — checks that MUST have reported for the head before the merge
+      # gate may read green. A listed context with no check of that name in the
+      # head's rollup is PENDING, never SUCCESS, so the gate keeps raising
+      # `ci-not-green` instead of merging on whatever happened to run. This
+      # closes the hole the 2026-08-29 workflow disablement opened: a check that
+      # never runs simply vanishes from the rollup, and the lint-only remainder
+      # classified green.
+      #
+      # Entry grammar: `[<owner>/<repo>:]<context>`. One daemon gates several
+      # repositories and their check names differ, so each name below is scoped
+      # to the repo that actually runs it; a bare (unscoped) name would be
+      # required on EVERY repo and would wedge the ones that never emit it.
+      # A name qualifies only if it runs on EVERY PR in its repo. Each one below
+      # was verified twice (2026-09-05): present on the head rollup of the 25
+      # most recently merged PRs in its repo, AND its workflow has no `paths` /
+      # `paths-ignore` filter. A path-filtered check is skipped without creating
+      # a check run at all, so requiring one would hang the PRs it skips at
+      # `ci-not-green` forever. `agent-os:repo-guards` is deliberately NOT here
+      # for exactly that reason: it carries `paths-ignore: '**/*.txt'`, so a
+      # .txt-only PR (e.g. requirements.txt) never emits it.
+      #
+      # OPERATOR NOTES:
+      #   - Set this to `[]` to restore the pre-TQL-01 behavior. That is also
+      #     the recovery move if a listed context is renamed or retired: PRs
+      #     park with `ci-not-green` until the list matches reality again.
+      #   - Renaming a workflow job renames its context. Update this list in the
+      #     SAME change, or every merge after that deploy blocks.
+      #   - `local-battery` is deliberately absent: TQL-02 must emit and verify
+      #     that context in the same deploy before it is required here.
+      #   - Env override (comma-separated):
+      #     AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_REQUIRED_CHECK_CONTEXTS
+      required_check_contexts:
+        - 'laceyenterprises/agent-os:release-freeze-gate'
+        - 'laceyenterprises/adversarial-review:npm test (Node 20)'
+        - 'laceyenterprises/adversarial-review:npm test (Node 22)'
       lha:
         # LHA-06 cutover switch (schema default: true). Explicitly held FALSE:
         # the CONSUMING side (this daemon requiring a valid `produced` head

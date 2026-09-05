@@ -1,4 +1,8 @@
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
+import {
+  missingRequiredCheckContexts,
+  selectRequiredCheckContexts,
+} from './required-check-contexts.mjs';
 
 const DEFAULT_ADVERSARIAL_GATE_CONTEXT = 'agent-os/adversarial-gate';
 
@@ -55,6 +59,12 @@ function isAdversarialOwnStatusContext(item, excludeContexts) {
 //     `skip-checks-unknown`, so a zero-external-check PR is not dispatched.
 //   - `classifyCiGreen()` in `src/ama/eligibility.mjs` (AMA SPEC §4.2 #5):
 //     `green = conclusion === 'SUCCESS'`, so `null` → not green → `ci-not-green`.
+// Only the second is a MERGE-authority read, and it is the one that passes
+// `requiredCheckContexts` (from `getMergeAuthorityConfig()`). The merge-agent
+// DISPATCH candidate deliberately does not: it decides whether to spawn a
+// worker, not whether to merge, and the three surfaces that do decide a merge
+// — `classifyCiGreen()`, `requiredChecksGreen()` and the hammer's
+// `bin/ama-check.mjs` recheck — all apply the list.
 // This now CONVERGES with the MSM merge predicate (`requiredChecksGreen` in
 // `src/ama/merge-eligibility.mjs`), which already failed closed on an empty
 // rollup. `--match-head-commit <reviewedSha>` at merge time remains the head-move
@@ -62,7 +72,22 @@ function isAdversarialOwnStatusContext(item, excludeContexts) {
 // Behavior pinned by test/follow-up-merge-agent.test.mjs
 // ('summarizeChecksConclusion distinguishes missing and empty status check
 // rollups': undefined→null, {}→null, []→null).
-function summarizeChecksConclusion(statusCheckRollup, { env = process.env } = {}) {
+//
+// ABSENT-IS-PENDING CONTRACT (TQL-01). The fail-closed empty read above only
+// catches a rollup with NOTHING in it. A rollup that still has entries but is
+// MISSING an expected one — the shape left behind when a workflow is disabled,
+// as `Unit Tests` and the `Operational CI Gauntlet` were on 2026-08-29 — used to
+// classify SUCCESS off whatever lint and guards remained. `requiredCheckContexts`
+// closes that: any configured context with no check of that name in the head's
+// rollup is PENDING ("has not reported yet"), never green, so the AMA gate keeps
+// raising `ci-not-green` until it does report. A failing check still wins over a
+// missing one — a red rollup returns its failure state, unchanged. An empty /
+// unset list is byte-for-byte the pre-TQL-01 behavior.
+function summarizeChecksConclusion(statusCheckRollup, {
+  env = process.env,
+  requiredCheckContexts = null,
+  repo = null,
+} = {}) {
   if (!Array.isArray(statusCheckRollup)) {
     return null;
   }
@@ -74,6 +99,11 @@ function summarizeChecksConclusion(statusCheckRollup, { env = process.env } = {}
     // Fail closed (LAC-1559): "no external checks reported" is unknown, not green.
     return null;
   }
+  // Resolved against `relevant`, i.e. AFTER the self-gate exclusion: the
+  // required list never contains a self-gate context (dropped by
+  // `selectRequiredCheckContexts`), so the exclusion above cannot make a
+  // required context look absent.
+  const requiredContexts = selectRequiredCheckContexts(requiredCheckContexts, { repo, env });
 
   let sawPending = false;
   for (const item of relevant) {
@@ -96,6 +126,11 @@ function summarizeChecksConclusion(statusCheckRollup, { env = process.env } = {}
       continue;
     }
     return rawState;
+  }
+
+  if (missingRequiredCheckContexts(relevant, requiredContexts).length > 0) {
+    // Configured, expected, and not reported for this head → pending, never green.
+    return 'PENDING';
   }
 
   return sawPending ? 'PENDING' : 'SUCCESS';

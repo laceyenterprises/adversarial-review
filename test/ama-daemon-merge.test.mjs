@@ -586,6 +586,52 @@ test('CI goes red on the retry re-read → fail closed gate-not-eligible; no fur
   assert.equal(h.calls.merge, 1, 'did not attempt merge after CI flipped red');
 });
 
+// ── TQL-01: a required check context that never reported ─────────────────────
+
+test('required context missing on the retry re-read → fail closed, log names the absent context', async () => {
+  // The 2026-08-29 shape at the merge decision: the rollup is still populated
+  // and every check in it is green, but a context the operator requires is not
+  // in it at all. That must fail closed, and the operator log must say WHICH
+  // context never reported — otherwise "CI failed" and "CI never ran" are the
+  // same `ci-not-green` line.
+  const withBattery = (overrides = {}) => greenGate({
+    requiredChecks: [
+      { __typename: 'CheckRun', name: 'lint', status: 'COMPLETED', conclusion: 'SUCCESS' },
+      { __typename: 'CheckRun', name: 'local-battery', status: 'COMPLETED', conclusion: 'SUCCESS' },
+    ],
+    ...overrides,
+  });
+  const warnings = [];
+  const h = makeHarness({
+    mergeResults: [{ exitCode: 1, stderr: 'HTTP 503 service unavailable' }, { exitCode: 0 }],
+    liveGateSequence: [withBattery(), greenGate()],
+  });
+  h.deps.logger = { log() {}, warn: (line) => warnings.push(String(line)) };
+
+  const result = await attemptDaemonCleanMerge(baseArgs(h, {
+    liveGate: withBattery(),
+    requiredCheckContexts: ['o/r:local-battery'],
+    logger: h.deps.logger,
+  }));
+
+  assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED);
+  assert.equal(result.reason, 'gate-not-eligible');
+  assert.deepEqual(result.reasons, ['ci-not-green']);
+  assert.equal(h.calls.merge, 1, 'did not attempt merge once the required context went absent');
+  assert.ok(
+    warnings.some((line) => line.includes('absent-required-contexts=local-battery')),
+    `expected the fail-closed warning to name the absent context; got ${JSON.stringify(warnings)}`,
+  );
+});
+
+test('a required context scoped to another repo does not block this one', async () => {
+  const h = makeHarness();
+  const result = await attemptDaemonCleanMerge(baseArgs(h, {
+    requiredCheckContexts: ['other/repo:local-battery'],
+  }));
+  assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+});
+
 // ── Extra: already-merged idempotent re-entry ────────────────────────────────
 
 test('live gate reports MERGED at validated head → treated as merged success', async () => {

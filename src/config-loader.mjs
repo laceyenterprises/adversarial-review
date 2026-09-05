@@ -1740,6 +1740,32 @@ function schemaV1() {
                     __default: 'squash',
                     __enum: ['squash', 'merge'],
                   },
+                  // TQL-01 — required check contexts. Names of CI checks that
+                  // MUST have reported for a PR head before the merge gate may
+                  // read green. A listed context with no check of that name in
+                  // the head's status rollup classifies PENDING, never SUCCESS,
+                  // so `ci-not-green` is raised until GitHub reports it. This is
+                  // the half `summarizeChecksConclusion()`'s fail-closed EMPTY
+                  // rollup could not cover: when a workflow is disabled its
+                  // context simply stops appearing and the remaining lint-only
+                  // rollup read green (live 2026-08-29 .. 2026-09-05).
+                  //
+                  // Entry grammar: `[<owner>/<repo>:]<context>`. A bare name is
+                  // required on every repo; a repo-scoped name only on that repo
+                  // (one daemon gates several repos, and their check names
+                  // differ). Semantics + normalization live in
+                  // `src/required-check-contexts.mjs`.
+                  //
+                  // Schema default is EMPTY = exactly the pre-TQL-01 behavior,
+                  // so a deployment that never sets it is unaffected; the
+                  // operator seed list ships in this module's `config.yaml`.
+                  // Env override (comma-separated):
+                  // AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_REQUIRED_CHECK_CONTEXTS
+                  required_check_contexts: {
+                    __type: TYPE_LIST,
+                    __item: { __type: TYPE_STRING },
+                    __default: [],
+                  },
                   strict_non_blocking_remediation: {
                     __type: TYPE_BOOL,
                     __default: true,
@@ -3221,6 +3247,10 @@ export const ENV_ALIASES = {
   },
   'roles.adversarial.merge_authority.autonomous_closer_commit_clean_merge_enabled': {
     canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_AUTONOMOUS_CLOSER_COMMIT_CLEAN_MERGE_ENABLED',
+    aliases: [],
+  },
+  'roles.adversarial.merge_authority.required_check_contexts': {
+    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_REQUIRED_CHECK_CONTEXTS',
     aliases: [],
   },
   'roles.adversarial.merge_authority.strict_mode': {
@@ -4867,6 +4897,13 @@ export class AgentOSConfig {
         'roles.adversarial.merge_authority.merge_method',
         'squash',
       ),
+      // TQL-01. Copied (not aliased) so a consumer cannot mutate the cached
+      // config, matching workerClassFallback/riskClasses above. Empty default
+      // keeps the merge gate byte-for-byte pre-TQL-01 when unset.
+      requiredCheckContexts: [...this.get(
+        'roles.adversarial.merge_authority.required_check_contexts',
+        [],
+      )],
       strictNonBlockingRemediation: this.get(
         'roles.adversarial.merge_authority.strict_non_blocking_remediation',
         true,

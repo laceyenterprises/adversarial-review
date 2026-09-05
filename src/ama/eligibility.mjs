@@ -127,6 +127,7 @@ export const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
  * @property {Object}   branchProtection
  * @property {string[]} branchProtection.requiredContexts Required-context list from the GitHub branch-protection API.
  * @property {string=}  author                         PR author login (used as a fallback for self-approval rejection).
+ * @property {string=}  repo                           `owner/repo` the PR lives in. Scopes TQL-01 required check contexts; missing ⇒ every configured entry applies (fail closed).
  */
 
 /**
@@ -143,6 +144,7 @@ export const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
  * @property {string[]} eligibility.riskClasses
  * @property {string[]} eligibility.fastMergeLabels
  * @property {Object}  branchProtection
+ * @property {string[]=} requiredCheckContexts TQL-01 required check contexts; see `src/required-check-contexts.mjs`.
  */
 
 /**
@@ -346,14 +348,25 @@ function presentHardStopLabels(reviewState, prMetadata, recoveryEvidence, advers
  * is observable rather than silently held (LAC-1559 Fix 2). The merge-time
  * `--match-head-commit <reviewedSha>` pin remains the head-move backstop.
  *
+ * ABSENT-IS-PENDING (TQL-01): the same classifier now also treats any context in
+ * `cfg.requiredCheckContexts` that has NOT reported for this head as pending, so
+ * a check whose workflow was disabled reads `ci-not-green` here instead of
+ * vanishing from the rollup and letting the remaining checks classify green. An
+ * empty list (the schema default) leaves this classification untouched.
+ *
  * @param {PrMetadata} prMetadata
  * @param {Object}     env
+ * @param {AmaEligibilityConfig=} cfg
  * @returns {{ green: boolean, conclusion: string|null }}
  */
-function classifyCiGreen(prMetadata, env) {
+function classifyCiGreen(prMetadata, env, cfg = null) {
   const conclusion = summarizeChecksConclusion(
     prMetadata?.statusCheckRollup,
-    { env },
+    {
+      env,
+      requiredCheckContexts: cfg?.requiredCheckContexts,
+      repo: prMetadata?.repo,
+    },
   );
   return {
     // `null` is unknown/fail-closed here: the classifier returns it for
@@ -1040,7 +1053,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   }
 
   // SPEC §4.2 #5 — CI green per the existing classifier.
-  const ci = classifyCiGreen(prMetadata, env);
+  const ci = classifyCiGreen(prMetadata, env, cfg);
   if (!ci.green) {
     reasons.push('ci-not-green');
   }

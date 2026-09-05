@@ -134,8 +134,9 @@ function verdictEligible(verdict) {
  * fetched before GitHub registers the head's checks would otherwise authorize a
  * premature merge. As of LAC-1559, `summarizeChecksConclusion()`
  * (`src/checks-summary.mjs`) also fails closed on an empty rollup (returns
- * `null`), so this predicate and that classifier now AGREE on the empty case —
- * a zero-external-check PR classifies green on neither surface.
+ * `null`, or `PENDING` when explicit required contexts are configured), so this
+ * predicate and that classifier now AGREE on the empty case — a zero-external-
+ * check PR classifies green on neither surface.
  *
  * @param {Array|boolean|undefined} requiredChecks
  * @returns {boolean}

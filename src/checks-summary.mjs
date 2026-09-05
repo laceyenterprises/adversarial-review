@@ -1,4 +1,5 @@
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
+import { resolveRequiredCheckContextsFromCfg } from './ama/required-check-contexts.mjs';
 import { loadConfigCached } from './config-loader.mjs';
 
 const DEFAULT_ADVERSARIAL_GATE_CONTEXT = 'agent-os/adversarial-gate';
@@ -62,23 +63,25 @@ function isAdversarialOwnStatusContext(item, excludeContexts) {
 // backstop; the fail-closed empty read is the checks-registration backstop.
 // Behavior pinned by test/follow-up-merge-agent.test.mjs
 // ('summarizeChecksConclusion distinguishes missing and empty status check
-// rollups': undefined→null, {}→null, []→null).
+// rollups': undefined→null, {}→null, []→null). Required check contexts are the
+// one exception: [] with configured required contexts means "waiting on those
+// named checks" and returns PENDING.
 function summarizeChecksConclusion(statusCheckRollup, { env = process.env, cfg = null } = {}) {
   if (!Array.isArray(statusCheckRollup)) {
     return null;
   }
+  const config = cfg || loadConfigCached({ env });
+  const requiredContexts = resolveRequiredCheckContextsFromCfg(config)
+    .map(c => String(c).trim().toLowerCase())
+    .filter(Boolean);
   const excludeContexts = adversarialOwnCheckContexts(env);
   const relevant = statusCheckRollup.filter(
     (item) => !isAdversarialOwnStatusContext(item, excludeContexts)
   );
   if (relevant.length === 0) {
     // Fail closed (LAC-1559): "no external checks reported" is unknown, not green.
-    return null;
+    return requiredContexts.length > 0 ? 'PENDING' : null;
   }
-
-  const config = cfg || loadConfigCached({ env });
-  const requiredContexts = (config.getMergeAuthorityConfig().requiredCheckContexts || [])
-    .map(c => String(c).trim().toLowerCase());
 
   const reportedContexts = new Set(
     relevant

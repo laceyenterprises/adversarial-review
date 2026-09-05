@@ -1480,6 +1480,10 @@ test('summarizeChecksConclusion fails closed on missing AND empty status check r
   assert.equal(summarizeChecksConclusion(undefined), null);
   assert.equal(summarizeChecksConclusion({}), null);
   assert.equal(summarizeChecksConclusion([]), null);
+  assert.equal(
+    summarizeChecksConclusion([], { cfg: { requiredCheckContexts: ['ci/test'] } }),
+    'PENDING'
+  );
 });
 
 test('summarizeChecksConclusion ignores the adversarial-review pipeline\'s own gate check', () => {
@@ -7297,6 +7301,16 @@ test('summarizeChecksConclusion enforces required check contexts when specified'
       { cfg }
     ),
     'SUCCESS'
+  );
+
+  assert.equal(
+    summarizeChecksConclusion(
+      [
+        { __typename: 'StatusContext', context: 'ci/test', state: 'SUCCESS' },
+      ],
+      { cfg: { requiredCheckContexts: ['ci/test', 'ci/lint'] } }
+    ),
+    'PENDING'
   );
 });
 

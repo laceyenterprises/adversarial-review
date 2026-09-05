@@ -4857,6 +4857,10 @@ export class AgentOSConfig {
       'roles.adversarial.merge_authority.hammer_lifetime_dispatch_ceiling',
       null,
     );
+    const requiredCheckContexts = this.get(
+      'roles.adversarial.merge_authority.required_check_contexts',
+      [],
+    );
     return {
       enabled: this.get('roles.adversarial.merge_authority.enabled', false),
       workerClass: this.get(
@@ -4902,10 +4906,9 @@ export class AgentOSConfig {
         'roles.adversarial.merge_authority.auto_hammer_on_eligibility_miss',
         false,
       ),
-      requiredCheckContexts: [...this.get(
-        'roles.adversarial.merge_authority.required_check_contexts',
-        [],
-      )],
+      requiredCheckContexts: Array.isArray(requiredCheckContexts)
+        ? [...requiredCheckContexts]
+        : [],
       hammerLifetimeDispatchCeiling: legacyHammerLifetimeCeiling !== null && hammerLifetimeCeiling === 6
         ? legacyHammerLifetimeCeiling
         : hammerLifetimeCeiling,

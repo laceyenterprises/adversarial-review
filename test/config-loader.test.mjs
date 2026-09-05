@@ -5643,6 +5643,26 @@ test('AMA getMergeAuthorityConfig returns defensive copies for collection fields
   }
 });
 
+test('AMA getMergeAuthorityConfig ignores non-array required check contexts', () => {
+  for (const raw of [null, 'ci/test']) {
+    const cfg = new AgentOSConfig({
+      values: {
+        roles: {
+          adversarial: {
+            merge_authority: {
+              required_check_contexts: raw,
+            },
+          },
+        },
+      },
+      trace: {},
+      sources: [],
+      schema: {},
+    });
+    assert.deepEqual(cfg.getMergeAuthorityConfig().requiredCheckContexts, []);
+  }
+});
+
 test('quota_probe ok_tick_seconds enforces HRR-02a range bounds', () => {
   const tmp = freshTmp();
   try {

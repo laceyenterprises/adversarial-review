@@ -703,6 +703,9 @@ export async function runDaemonCleanMergeAttempt({
     branchProtectionRequired,
     requiredGateContext,
     branchProtectionRequiredContexts,
+    requiredCheckContexts: Array.isArray(cfg?.requiredCheckContexts)
+      ? cfg.requiredCheckContexts
+      : [],
     // Initial (pre-lease) GitHub gate snapshot from the live fetch this tick.
     liveGate: {
       candidateHead: liveHead,

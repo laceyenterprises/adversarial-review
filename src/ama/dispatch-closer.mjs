@@ -3786,6 +3786,9 @@ export async function maybeDispatchAmaCloser({
             branchProtectionRequiredContexts: Array.isArray(prMetadata?.branchProtection?.requiredContexts)
               ? prMetadata.branchProtection.requiredContexts
               : [],
+            requiredCheckContexts: Array.isArray(cfg?.requiredCheckContexts)
+              ? cfg.requiredCheckContexts
+              : [],
             liveGate: {
               candidateHead: prMetadata?.headSha || '',
               requiredChecks: Array.isArray(prMetadata?.statusCheckRollup) ? prMetadata.statusCheckRollup : [],

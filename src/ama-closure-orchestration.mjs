@@ -222,6 +222,11 @@ export function writeAutonomousMergeDisabledAudit({
   }
 }
 
+function resolveRequiredCheckContextsFromCfg(cfg) {
+  const contexts = cfg?.getMergeAuthorityConfig?.()?.requiredCheckContexts ?? cfg?.requiredCheckContexts;
+  return Array.isArray(contexts) ? contexts : [];
+}
+
 /**
  * Resolve the AMA cfg subtree, build (reviewState, prMetadata)
  * snapshots from the watcher's existing row + candidate data, and
@@ -629,7 +634,7 @@ export async function maybeDispatchAmaClosureFor({
     branchProtectionRequired,
     requiredGateContext,
     branchProtectionRequiredContexts,
-    requiredCheckContexts: cfg?.requiredCheckContexts || [],
+    requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
     candidateHead: currentPrHeadSha || candidate?.headSha || '',
     validatedHead: reviewState.headSha,
   });

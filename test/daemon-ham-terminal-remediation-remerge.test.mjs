@@ -62,6 +62,7 @@ function findingsReviewArgs(rootDir, overrides = {}) {
       autonomousMergeExecutionEnabled: true,
       strictMode: true,
       lha: { consumeAttestations: false },
+      requiredCheckContexts: ['ci/lint', 'ci/test'],
     },
     repoPath: 'acme/repo',
     prNumber: 4987,
@@ -223,6 +224,7 @@ test('daemon re-merges a HAM-validated remediated head under the ham terminal-re
     assert.ok(captured, 'attemptDaemonCleanMerge must be invoked for the HAM-validated head');
     assert.equal(captured.allowHamTerminalRemediation, true);
     assert.equal(captured.verdict, 'ham_terminal_remediation_validated');
+    assert.deepEqual(captured.requiredCheckContexts, ['ci/lint', 'ci/test']);
     // Validated head is the CURRENT (remediation) head, not the stale reviewed head.
     assert.equal(captured.validatedHead, HAM_HEAD);
     assert.equal(captured.auditMetadata.closureAuthority, 'daemon-ham-terminal-remediation');

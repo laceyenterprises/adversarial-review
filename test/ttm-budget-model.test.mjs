@@ -238,6 +238,20 @@ test('an unreadable distribution throws rather than returning an empty sample', 
   );
 });
 
+test('transient read locks bubble out instead of making the budget blind', () => {
+  const busyDb = {
+    prepare() {
+      throw Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' });
+    },
+  };
+  assert.throws(
+    () => readMergedTtmSamples(busyDb),
+    (error) => error?.code === 'SQLITE_BUSY'
+      && !(error instanceof TtmDistributionUnreadableError)
+      && /database is locked/.test(error.message)
+  );
+});
+
 test('an empty-but-readable distribution is unusable, not a zero budget', () => {
   const emptyDb = { prepare: () => ({ all: () => [] }) };
   const derived = deriveTtmBudget(readMergedTtmSamples(emptyDb), { openPrCount: 10 });

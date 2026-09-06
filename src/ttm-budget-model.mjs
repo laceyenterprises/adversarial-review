@@ -75,6 +75,12 @@ export class TtmDistributionUnreadableError extends Error {
   }
 }
 
+function isTtmDistributionStructuralError(error) {
+  const message = String(error?.message || '');
+  return error?.code === 'SQLITE_ERROR'
+    && (message.includes('no such table') || message.includes('no such column'));
+}
+
 function toMs(value) {
   if (!value) return null;
   const parsed = Date.parse(String(value));
@@ -339,6 +345,7 @@ export function readMergedTtmSamples(db, { limit = DEFAULT_TTM_FIT_SAMPLE_LIMIT 
         LIMIT ?`
     ).all(sampleLimit);
   } catch (error) {
+    if (!isTtmDistributionStructuralError(error)) throw error;
     throw new TtmDistributionUnreadableError(
       `reviews.db merged-PR distribution is unreadable: ${error?.message || error}`,
       { cause: error }

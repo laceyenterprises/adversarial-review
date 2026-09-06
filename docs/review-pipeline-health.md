@@ -71,6 +71,8 @@ The Grafana dashboard lives at
   window.
 - `review_pipeline_ttm_open_budget_breaches`: open PRs beyond the
   rounds-aware TTM budget (`base + review_rounds * per_round`).
+- `review_pipeline_ttm_stuck_open_prs`: count of current open PRs that are
+  not progressing.
 - `review_pipeline_ttm_budget_minutes` and
   `review_pipeline_ttm_queue_pressure_multiplier`: derived budget components.
   When the budget model is blind, these and

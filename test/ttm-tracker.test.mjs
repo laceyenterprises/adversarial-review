@@ -23,6 +23,31 @@ function openDb(rootDir) {
   return db;
 }
 
+function countFlagEventSelects(db) {
+  const counts = { flagEventSelects: 0 };
+  return {
+    counts,
+    db: new Proxy(db, {
+      get(target, property, receiver) {
+        if (property === 'prepare') {
+          return (sql) => {
+            if (
+              typeof sql === 'string'
+              && /FROM\s+ttm_flag_events/i.test(sql)
+              && /^\s*SELECT\b/i.test(sql)
+            ) {
+              counts.flagEventSelects += 1;
+            }
+            return target.prepare(sql);
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }),
+  };
+}
+
 function insertReviewRow(db, overrides = {}) {
   db.prepare(
     `INSERT INTO reviewed_prs
@@ -274,6 +299,48 @@ test('rollup uses resolved terminal stall duration instead of the activation thr
     assert.equal(tick.rollup.terminalButUnmergedStallsLast12h, 1);
     assert.equal(tick.rollup.terminalButUnmergedMaxDurationMinutesLast12h, 30);
     assert.equal(tick.rollup.terminalButUnmergedTotalDurationMinutesLast12h, 30);
+  } finally {
+    db.close();
+  }
+});
+
+test('tick reuses pre-sync event rows and in-memory sync writes instead of querying events twice', () => {
+  const rootDir = tempRoot();
+  const db = openDb(rootDir);
+  try {
+    insertReviewRow(db, {
+      prNumber: 16,
+      reviewedAt: '2026-08-09T17:25:00.000Z',
+      postedAt: '2026-08-09T17:30:00.000Z',
+    });
+    insertPass(db, {
+      prNumber: 16,
+      startedAt: '2026-08-09T17:26:00.000Z',
+      endedAt: '2026-08-09T17:30:00.000Z',
+    });
+
+    runTtmTrackerTick(db, {
+      now: () => new Date('2026-08-09T17:42:00.000Z'),
+      config: { baseBudgetMinutes: 15, perRoundBudgetMinutes: 10, terminalUnmergedMinutes: 10 },
+    });
+    runTtmTrackerTick(db, {
+      now: () => new Date(NOW),
+      config: { baseBudgetMinutes: 15, perRoundBudgetMinutes: 10, terminalUnmergedMinutes: 10 },
+    });
+    db.prepare("UPDATE reviewed_prs SET pr_state = 'merged', merged_at = ? WHERE pr_number = ?")
+      .run('2026-08-09T18:05:00.000Z', 16);
+
+    const { counts, db: countedDb } = countFlagEventSelects(db);
+    const tick = runTtmTrackerTick(countedDb, {
+      now: () => new Date('2026-08-09T18:06:00.000Z'),
+      config: { baseBudgetMinutes: 15, perRoundBudgetMinutes: 10, terminalUnmergedMinutes: 10 },
+    });
+
+    assert.equal(counts.flagEventSelects, 1);
+    assert.equal(tick.eventRows.length, 2);
+    assert.equal(tick.sync.eventRows.length, 2);
+    assert.equal(tick.rollup.terminalButUnmergedStallsLast12h, 1);
+    assert.equal(tick.rollup.terminalButUnmergedMaxDurationMinutesLast12h, 30);
   } finally {
     db.close();
   }

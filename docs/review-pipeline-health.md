@@ -71,6 +71,13 @@ The Grafana dashboard lives at
   window.
 - `review_pipeline_ttm_open_budget_breaches`: open PRs beyond the
   rounds-aware TTM budget (`base + review_rounds * per_round`).
+- `review_pipeline_ttm_stuck_open_prs`: count of current open PRs that are
+  not progressing.
+- `review_pipeline_ttm_budget_minutes` and
+  `review_pipeline_ttm_queue_pressure_multiplier`: derived budget components.
+  When the budget model is blind, these and
+  `review_pipeline_ttm_open_budget_breaches` emit `NaN` so dashboards show a
+  data gap rather than a false-clean zero.
 - `review_pipeline_ttm_terminal_unmerged_stalls_12h`: terminal-but-unmerged
   stall events observed in the last 12h.
 - `review_pipeline_ttm_terminal_unmerged_duration_minutes_12h`: max and total
@@ -103,7 +110,9 @@ Its action headline is `Reviews stalled — restore reviewer dispatch`.
 | `review:malformed_pr_title` | one or more open PRs are recorded `review_status='malformed'` | ticket | malformed rows are recreated, explicitly recovered, or no longer open; known bot-authored prefixless PRs are routed to Argus with `review_status='argus-security-queued'` (ASR-04) and do not trigger this alert; neither do legacy `unroutable-bot-author` rows |
 | `review:remediation_backlog` | `follow-up-jobs/pending` has >5 jobs | ticket | pending job count returns to threshold or below |
 | `review:merge_stalled` | a `stopped:review-settled` job remains open for >3 watcher ticks | ticket | the PR is merged/closed or the settled job is no longer past threshold |
-| `review:ttm_budget_breach` | open PR age exceeds `base + review_rounds * per_round` minutes | ticket | the PR merges/closes or falls back under the rounds-aware budget |
+| `review:ttm_budget_breach` | **SLOW** (trend, not alarm): open PR age exceeds a budget DERIVED from the measured merge distribution -- the configured percentile (default p90) of each review-round bucket, weighted-least-squares fitted to `base + review_rounds * per_round` and scaled by measured queue pressure (Little's Law, capped at 3x). Nothing here is a literal; change the distribution and the budget moves. | ticket | the PR merges/closes or falls back under the derived budget |
+| `review:pr_progress_stalled` | **STUCK** (page-worthy): an open PR is not progressing -- a re-review was requested and no reviewer pass has started since, or the reviewer lease expired while the row still claims an in-flight review. Independent of the TTM budget and of elapsed time. | ticket | a reviewer pass starts after the re-review request, or the stale lease is reclaimed/settled |
+| `review:ttm_budget_model_unreadable` | SEN-02 `blind`: the merged-PR distribution the TTM budget is derived from could not be read, so no budget exists to compare against. The SLOW finding is withheld this tick; the STUCK findings still evaluate. Never a health verdict. | ticket | `reviews.db` `reviewed_prs`/`reviewer_passes` are queryable again |
 | `review:terminal_but_unmerged` | settled/clean PR remains open and unmerged past the terminal threshold | ticket | the PR merges/closes or no longer has a settled clean terminal signature |
 | `review:daemon_merge_parked` | the AMA daemon clean-merge declined the same PR for the same reason for 3+ consecutive ticks (e.g. `worker-identity-unresolved`, `verdict-not-eligible`, `lease-not-held`) | ticket | the PR merges/closes, the daemon's decline reason changes, or the park is not refreshed for two pipeline-health ticks |
 | `review:ama_closer_lease_stale` | AMA closer lease is `pending`/`dispatched`, `terminalOutcome=null`, and older than 30m | ticket | the lease reaches terminal state or falls below the age threshold |

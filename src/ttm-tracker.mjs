@@ -469,11 +469,28 @@ function insertTtmFlagEvent(db, flag, state, observedAt) {
     flag.reviewRounds,
     JSON.stringify(flag.details || {})
   );
+  return {
+    event_key: flag.eventKey,
+    repo: flag.repo,
+    pr_number: flag.prNumber,
+    flag_kind: flag.flagKind,
+    state,
+    observed_at: observedAt,
+    opened_at: flag.openedAt,
+    settled_at: flag.settledAt,
+    merged_at: flag.mergedAt,
+    elapsed_minutes: flag.elapsedMinutes,
+    budget_minutes: flag.budgetMinutes,
+    terminal_unmerged_minutes: flag.terminalUnmergedMinutes,
+    review_rounds: flag.reviewRounds,
+    details_json: JSON.stringify(flag.details || {}),
+  };
 }
 
 function syncTtmFlags(db, flags, { observedAt }) {
   ensureTtmTrackerSchema(db);
   const activeKeys = new Set(flags.map((flag) => flag.eventKey));
+  const eventRows = [];
   let activated = 0;
   let refreshed = 0;
   let resolved = 0;
@@ -484,7 +501,7 @@ function syncTtmFlags(db, flags, { observedAt }) {
         'SELECT state FROM ttm_flag_state WHERE event_key = ?'
       ).get(flag.eventKey);
       if (!existing || existing.state !== 'active') {
-        insertTtmFlagEvent(db, flag, 'active', observedAt);
+        eventRows.push(insertTtmFlagEvent(db, flag, 'active', observedAt));
         activated += 1;
       } else {
         refreshed += 1;
@@ -545,7 +562,7 @@ function syncTtmFlags(db, flags, { observedAt }) {
         reviewRounds: row.review_rounds,
         details: JSON.parse(row.details_json || '{}'),
       };
-      insertTtmFlagEvent(db, flag, 'resolved', observedAt);
+      eventRows.push(insertTtmFlagEvent(db, flag, 'resolved', observedAt));
       db.prepare(
         `UPDATE ttm_flag_state
             SET state = 'resolved',
@@ -558,7 +575,7 @@ function syncTtmFlags(db, flags, { observedAt }) {
   });
 
   tx();
-  return { activated, refreshed, resolved, active: flags.length };
+  return { activated, refreshed, resolved, active: flags.length, eventRows };
 }
 
 function summarizeTtmRollupFromTimelines(rows, {
@@ -755,6 +772,7 @@ function evaluateTtmFromDb(db, {
     budget,
     timelines,
     flags,
+    eventRows,
     rollup: summarizeTtmRollupFromTimelines(timelines, {
       observedAt,
       config,
@@ -768,10 +786,7 @@ function evaluateTtmFromDb(db, {
 function runTtmTrackerTick(db, options = {}) {
   const result = evaluateTtmFromDb(db, options);
   const sync = syncTtmFlags(db, result.flags, { observedAt: result.observedAt });
-  const eventRows = readRecentTtmFlagEvents(db, {
-    observedAt: result.observedAt,
-    config: result.config,
-  });
+  const eventRows = [...result.eventRows, ...sync.eventRows];
   return {
     ...result,
     sync,

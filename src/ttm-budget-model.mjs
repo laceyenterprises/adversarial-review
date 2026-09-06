@@ -252,7 +252,13 @@ export function referenceQueueDepth(samples) {
   if (rows.length < 2) return null;
   const mergedMs = rows.map((sample) => toMs(sample.mergedAt)).filter((ms) => ms !== null);
   if (mergedMs.length < 2) return null;
-  const windowMinutes = (Math.max(...mergedMs) - Math.min(...mergedMs)) / 60_000;
+  let earliestMs = mergedMs[0];
+  let latestMs = mergedMs[0];
+  for (const ms of mergedMs) {
+    if (ms < earliestMs) earliestMs = ms;
+    if (ms > latestMs) latestMs = ms;
+  }
+  const windowMinutes = (latestMs - earliestMs) / 60_000;
   if (!(windowMinutes > 0)) return null;
   const throughputPerMinute = mergedMs.length / windowMinutes;
   const meanTtm = rows.reduce((sum, s) => sum + Number(s.ttmMinutes), 0) / rows.length;

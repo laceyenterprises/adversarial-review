@@ -172,6 +172,17 @@ test("reference queue depth comes out of the same sample via Little's Law", () =
   assert.ok(Math.abs(depth - 5.26) < 0.2, `depth ${depth}`);
 });
 
+test('reference queue depth does not spread unbounded merge samples onto the stack', () => {
+  const samples = Array.from({ length: 70_000 }, (_, i) => ({
+    mergedAt: new Date(Date.parse('2026-09-01T00:00:00.000Z') + i * 60_000).toISOString(),
+    ttmMinutes: 100,
+    reviewRounds: 0,
+  }));
+  const depth = referenceQueueDepth(samples);
+  assert.ok(Number.isFinite(depth));
+  assert.ok(depth > 99 && depth < 101);
+});
+
 test('queue pressure widens the budget under load, never tightens it, and saturates', () => {
   const idle = queuePressureMultiplier({ openPrCount: 3, referenceOpenPrCount: 6 });
   assert.equal(idle.multiplier, 1, 'a short queue must not tighten the measured budget');

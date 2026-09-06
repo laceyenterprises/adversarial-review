@@ -579,6 +579,134 @@ test('eligible: same-login operator-approved override is allowed at single-opera
   assert.equal(result.trace.verdict.operatorOverride, true);
 });
 
+test('eligible: bot-applied operator-approved is honored and audited in observe mode', () => {
+  const logs = [];
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['operator-approved'] },
+    reviewState: {
+      verdict: 'request-changes',
+      operatorApprovedEvidence: {
+        applied: true,
+        observedRevisionRef: 'abc12345',
+        actor: 'codex-worker-bot',
+        eventId: 'LE_bot_operator',
+        observedAt: '2026-06-10T20:00:00Z',
+      },
+    },
+    cfg: {
+      operatorLogins: ['paul-the-operator'],
+      operatorLabelActorEnforcement: 'observe',
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    logger: { info: (line) => logs.push(JSON.parse(line)) },
+  });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.verdict.operatorOverride, true);
+  assert.equal(result.trace.verdict.operatorMutationAudit.event, 'operator_mutation_audit');
+  assert.equal(result.trace.verdict.operatorMutationAudit.allowed, false);
+  assert.equal(result.trace.verdict.operatorMutationAudit.honored, true);
+  assert.equal(logs[0].event, 'operator_mutation_audit');
+});
+
+test('not eligible: bot-applied operator-approved is ignored and audited in enforce mode', () => {
+  const logs = [];
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['operator-approved'] },
+    reviewState: {
+      verdict: 'request-changes',
+      operatorApprovedEvidence: {
+        applied: true,
+        observedRevisionRef: 'abc12345',
+        actor: 'codex-worker-bot',
+        eventId: 'LE_bot_operator',
+        observedAt: '2026-06-10T20:00:00Z',
+      },
+    },
+    cfg: {
+      operatorLogins: ['paul-the-operator'],
+      operatorLabelActorEnforcement: 'enforce',
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    logger: { info: (line) => logs.push(JSON.parse(line)) },
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.trace.verdict.operatorOverride, false);
+  assert.equal(result.trace.verdict.operatorMutationAudit.allowed, false);
+  assert.equal(result.trace.verdict.operatorMutationAudit.honored, false);
+  assert.equal(logs[0].event, 'operator_mutation_audit');
+  assert.ok(result.reasons.includes('verdict-not-settled-success'));
+});
+
+test('eligible: allowlisted human-applied operator-approved is honored and remains head-bound', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['operator-approved'] },
+    reviewState: {
+      verdict: 'request-changes',
+      headSha: 'old-reviewed-head',
+      operatorApprovedEvidence: {
+        applied: true,
+        observedRevisionRef: 'abc12345',
+        actor: 'Paul-The-Operator',
+        eventId: 'LE_human_operator',
+        observedAt: '2026-06-10T20:00:00Z',
+      },
+    },
+    cfg: {
+      operatorLogins: ['paul-the-operator'],
+      operatorLabelActorEnforcement: 'enforce',
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.verdict.operatorOverride, true);
+  assert.equal(result.trace.verdict.operatorMutationAudit.allowed, true);
+  assert.ok(!result.reasons.includes('stale-review-head'));
+
+  const stale = isEligibleForAmaClosure(
+    {
+      ...reviewState,
+      operatorApprovedEvidence: {
+        ...reviewState.operatorApprovedEvidence,
+        observedRevisionRef: 'stale-head',
+      },
+    },
+    prMetadata,
+    cfg,
+    { env: ENV },
+  );
+  assert.equal(stale.trace.verdict.operatorOverride, false);
+  assert.ok(stale.reasons.includes('stale-review-head'));
+});
+
+test('not eligible: missing operator-approved actor is non-allowlisted in enforce mode', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['operator-approved'] },
+    reviewState: {
+      verdict: 'request-changes',
+      operatorApprovedEvidence: {
+        applied: true,
+        observedRevisionRef: 'abc12345',
+        actor: null,
+        eventId: 'LE_missing_actor',
+        observedAt: '2026-06-10T20:00:00Z',
+      },
+    },
+    cfg: {
+      operatorLogins: ['paul-the-operator'],
+      operatorLabelActorEnforcement: 'enforce',
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.equal(result.trace.verdict.operatorMutationAudit.actor, null);
+  assert.equal(result.trace.verdict.operatorMutationAudit.allowed, false);
+  assert.equal(result.trace.verdict.operatorOverride, false);
+});
+
 test('not eligible: stale operator-approved evidence (head changed since label) is ignored', () => {
   // SPEC §4.2 #4 / §6 AC#7 — operator-approved label events that were applied
   // at a stale head do NOT clear the verdict gate. The review itself is still
@@ -1382,7 +1510,7 @@ test('operator-approved evidence with applied=false is ignored', () => {
   assert.ok(result.reasons.includes('verdict-not-settled-success'));
 });
 
-test('operator-approved evidence with actor=`unknown` fails closed', () => {
+test('operator-approved evidence with actor=`unknown` follows observe/enforce actor policy', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     prMetadata: { labels: ['operator-approved'] },
     reviewState: {
@@ -1397,8 +1525,24 @@ test('operator-approved evidence with actor=`unknown` fails closed', () => {
     },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
-  assert.equal(result.eligible, false);
-  assert.equal(result.trace.verdict.operatorOverride, false);
+  assert.equal(result.eligible, true);
+  assert.equal(result.trace.verdict.operatorOverride, true);
+  assert.equal(result.trace.verdict.operatorMutationAudit.allowed, false);
+  assert.equal(result.trace.verdict.operatorMutationAudit.honored, true);
+
+  const enforced = isEligibleForAmaClosure(
+    reviewState,
+    prMetadata,
+    {
+      ...cfg,
+      operatorLogins: ['paul-the-operator'],
+      operatorLabelActorEnforcement: 'enforce',
+    },
+    { env: ENV },
+  );
+  assert.equal(enforced.eligible, false);
+  assert.equal(enforced.trace.verdict.operatorOverride, false);
+  assert.equal(enforced.trace.verdict.operatorMutationAudit.honored, false);
 });
 
 test('operator-approved evidence missing event id fails closed', () => {

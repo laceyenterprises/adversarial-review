@@ -242,12 +242,18 @@ function pickMergeAgentDispatch(job, {
   finalPassOnRequestChangesEnabled = isFinalPassOnRequestChangesEnabled(),
   deterministicConvergenceTerminalEnabled = isDeterministicConvergenceTerminalEnabled(),
   blockingFinalPassAttempted = false,
+  operatorLogins = [],
+  operatorLabelActorEnforcement = 'observe',
+  operatorMutationAuditLogger = null,
 } = {}) {
   return pickMergeAgentDispatchDetail(job, {
     recentDispatches,
     finalPassOnRequestChangesEnabled,
     deterministicConvergenceTerminalEnabled,
     blockingFinalPassAttempted,
+    operatorLogins,
+    operatorLabelActorEnforcement,
+    operatorMutationAuditLogger,
   }).decision;
 }
 
@@ -256,13 +262,27 @@ function pickMergeAgentDispatchDetail(job, {
   finalPassOnRequestChangesEnabled = isFinalPassOnRequestChangesEnabled(),
   deterministicConvergenceTerminalEnabled = isDeterministicConvergenceTerminalEnabled(),
   blockingFinalPassAttempted = false,
+  operatorLogins = [],
+  operatorLabelActorEnforcement = 'observe',
+  operatorMutationAuditLogger = null,
 } = {}) {
   const normalizedVerdict = normalizeReviewVerdict(job?.lastVerdict);
   const labels = new Set(normalizeLabelNames(job?.labels));
   const hasMergeAgentRequestedLabel = labels.has(MERGE_AGENT_REQUESTED_LABEL);
   const mergeAgentRequested = hasMergeAgentRequestedLabel && isScopedMergeAgentRequest(job);
   const hasOperatorApprovedLabel = labels.has(OPERATOR_APPROVED_LABEL);
-  const operatorApproved = hasOperatorApprovedLabel && isScopedOperatorApproval(job);
+  const operatorActorPolicy = hasOperatorApprovedLabel && hasScopedOperatorApprovalEvidence(job)
+    ? classifyOperatorApprovalActor(job.operatorApproval, {
+      operatorLogins,
+      enforcement: operatorLabelActorEnforcement,
+    })
+    : null;
+  if (operatorActorPolicy && operatorActorPolicy.allowed !== true) {
+    operatorMutationAuditLogger?.(operatorActorPolicy);
+  }
+  const operatorApproved = hasOperatorApprovedLabel
+    && hasScopedOperatorApprovalEvidence(job)
+    && (operatorActorPolicy?.honored === true);
   const alreadyDispatched = recentDispatches.some((entry) => (
     String(entry?.repo ?? '') === String(job?.repo ?? '')
     && Number(entry?.prNumber) === Number(job?.prNumber)
@@ -609,17 +629,53 @@ function pickNormalMergeAgentDispatchDetail({
   };
 }
 
-function isScopedOperatorApproval(job) {
+function normalizeOperatorLabelActorEnforcement(value) {
+  const normalized = String(value ?? 'observe').trim().toLowerCase();
+  return normalized === 'enforce' ? 'enforce' : 'observe';
+}
+
+function normalizeLogin(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function operatorLoginSet(logins) {
+  return new Set(
+    (Array.isArray(logins) ? logins : [])
+      .map((login) => normalizeLogin(login))
+      .filter(Boolean),
+  );
+}
+
+function classifyOperatorApprovalActor(approval, {
+  operatorLogins = [],
+  enforcement = 'observe',
+} = {}) {
+  const actor = normalizeLogin(approval?.actor);
+  const allowlist = operatorLoginSet(operatorLogins);
+  const allowed = actor !== '' && actor !== 'unknown' && allowlist.has(actor);
+  const normalizedEnforcement = normalizeOperatorLabelActorEnforcement(enforcement);
+  return {
+    event: 'operator_mutation_audit',
+    label: OPERATOR_APPROVED_LABEL,
+    actor: actor || null,
+    allowed,
+    enforcement: normalizedEnforcement,
+    honored: allowed || normalizedEnforcement === 'observe',
+    reason: allowed ? 'allowlisted-operator' : 'operator-login-not-allowlisted',
+  };
+}
+
+function hasScopedOperatorApprovalEvidence(job) {
   const approval = job?.operatorApproval;
   if (!approval) return false;
-  if (!approval.actor || String(approval.actor).trim().toLowerCase() === 'unknown') return false;
-  // Self-approval check intentionally removed at single-operator scale; see
-  // buildScopedOperatorApproval for the design note. Re-introduce the
-  // distinct-actor rule when there is a second human reviewer.
   if (!approval.labelEventId && !approval.labelEventNodeId) return false;
   if (!approval.createdAt) return false;
   if (String(approval.headSha || '') !== String(job?.headSha || '')) return false;
   return true;
+}
+
+function isScopedOperatorApproval(job) {
+  return hasScopedOperatorApprovalEvidence(job);
 }
 
 function isScopedMergeAgentRequest(job) {
@@ -696,6 +752,7 @@ export {
   shouldUseHamTerminalRemediationMergeGate,
   isScopedOperatorApproval,
   isScopedMergeAgentRequest,
+  classifyOperatorApprovalActor,
   buildScopedOperatorApproval,
   buildScopedMergeAgentRequest,
 };

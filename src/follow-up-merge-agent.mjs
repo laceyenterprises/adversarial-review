@@ -2413,6 +2413,22 @@ async function dispatchMergeAgentForPR({
     listMergeAgentDispatches(rootDir, { repo, prNumber }),
     job,
   );
+  let operatorActorPolicy = { operatorLogins: [], operatorLabelActorEnforcement: 'observe' };
+  try {
+    const cfg = loadConfigCached({
+      env: runtimeEnv,
+      modulePaths: [MODULE_CONFIG_PATH],
+    }).getMergeAuthorityConfig();
+    operatorActorPolicy = {
+      operatorLogins: Array.isArray(cfg?.operatorLogins) ? cfg.operatorLogins : [],
+      operatorLabelActorEnforcement: cfg?.operatorLabelActorEnforcement || 'observe',
+    };
+  } catch (err) {
+    logger?.warn?.(
+      '[merge-agent] failed to load roles.adversarial operator label actor policy; '
+      + `falling back to observe with an empty allowlist. ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
   const dispatchDecision = pickMergeAgentDispatchDetail(job, {
     recentDispatches: recentDispatchesForDecision,
     // Honor the merged runtime env so callers can opt-in per-invocation
@@ -2422,6 +2438,14 @@ async function dispatchMergeAgentForPR({
     finalPassOnRequestChangesEnabled: isFinalPassOnRequestChangesEnabled({ env: runtimeEnv }),
     deterministicConvergenceTerminalEnabled: isDeterministicConvergenceTerminalEnabled({ env: runtimeEnv }),
     blockingFinalPassAttempted,
+    ...operatorActorPolicy,
+    operatorMutationAuditLogger: (record) => mergeAgentLifecycleLog(logger, 'operator_mutation_audit', {
+      repo,
+      prNumber,
+      headSha,
+      surface: 'merge-agent-dispatch',
+      ...record,
+    }),
   });
   const { decision } = dispatchDecision;
   // AMA-06N: triggerOverride from the watcher's coexistence path

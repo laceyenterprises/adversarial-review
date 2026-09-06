@@ -198,8 +198,7 @@ function hasOperatorApprovedOverride(reviewState, prMetadata) {
     operatorLogins: reviewState?.operatorLogins ?? prMetadata?.operatorLogins,
     enforcement: reviewState?.operatorLabelActorEnforcement ?? prMetadata?.operatorLabelActorEnforcement,
   });
-  if (actorPolicy.allowed !== true && actorPolicy.enforcement === 'enforce') return false;
-  return true;
+  return actorPolicy.honored === true;
 }
 
 /**
@@ -304,7 +303,8 @@ function classifyOperatorLabelActor(evidence, {
 } = {}) {
   const actor = normalizeLogin(evidence?.actor);
   const allowlist = operatorLoginSet(operatorLogins);
-  const allowed = actor !== '' && actor !== 'unknown' && allowlist.has(actor);
+  const knownActor = actor !== '' && actor !== 'unknown';
+  const allowed = knownActor && allowlist.has(actor);
   const normalizedEnforcement = normalizeOperatorLabelActorEnforcement(enforcement);
   return {
     event: 'operator_mutation_audit',
@@ -312,8 +312,10 @@ function classifyOperatorLabelActor(evidence, {
     actor: actor || null,
     allowed,
     enforcement: normalizedEnforcement,
-    honored: allowed || normalizedEnforcement === 'observe',
-    reason: allowed ? 'allowlisted-operator' : 'operator-login-not-allowlisted',
+    honored: knownActor && (allowed || normalizedEnforcement === 'observe'),
+    reason: allowed
+      ? 'allowlisted-operator'
+      : (knownActor ? 'operator-login-not-allowlisted' : 'operator-provenance-missing'),
   };
 }
 

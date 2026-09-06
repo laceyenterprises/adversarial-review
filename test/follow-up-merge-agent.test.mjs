@@ -1368,6 +1368,27 @@ test('operator-approved from a non-allowlisted actor is logged and honored in ob
   assert.equal(audits[0].honored, true);
 });
 
+test('operator-approved with unknown actor is logged and ignored in observe mode', () => {
+  const audits = [];
+  assert.equal(
+    pickMergeAgentDispatch(makeJob({
+      lastVerdict: 'Request changes',
+      labels: [{ name: 'operator-approved' }],
+      operatorApproval: makeOperatorApproval({ actor: 'unknown' }),
+    }), {
+      operatorLogins: ['VirtualPaul'],
+      operatorLabelActorEnforcement: 'observe',
+      operatorMutationAuditLogger: (row) => audits.push(row),
+    }),
+    'skip-operator-approval-stale'
+  );
+  assert.equal(audits[0].event, 'operator_mutation_audit');
+  assert.equal(audits[0].actor, 'unknown');
+  assert.equal(audits[0].allowed, false);
+  assert.equal(audits[0].honored, false);
+  assert.equal(audits[0].reason, 'operator-provenance-missing');
+});
+
 test('operator-approved from a non-allowlisted actor is logged and ignored in enforce mode', () => {
   const audits = [];
   assert.equal(
@@ -1425,9 +1446,10 @@ test('stale operator-approved label does not block a green normal dispatch', () 
   );
 });
 
-test('operator-approved fails closed when no labeled event was fetched; missing actor follows actor enforcement', () => {
-  // A completely missing label event is still unverifiable. An event with
-  // id/time/head but no actor is handled by the observe/enforce actor policy.
+test('operator-approved fails closed when no labeled event or actor was fetched', () => {
+  // A completely missing label event is unverifiable. An event with
+  // id/time/head but no attributable actor is also provenance failure,
+  // regardless of observe/enforce allowlist mode.
   const noAttribution = {
     lastVerdict: 'Request changes',
     labels: [{ name: 'operator-approved' }],
@@ -1439,11 +1461,19 @@ test('operator-approved fails closed when no labeled event was fetched; missing 
   };
 
   assert.equal(pickMergeAgentDispatch(makeJob(noAttribution)), 'skip-operator-approval-stale');
-  assert.equal(pickMergeAgentDispatch(makeJob(unknownActor)), 'dispatch');
+  assert.equal(pickMergeAgentDispatch(makeJob(unknownActor)), 'skip-operator-approval-stale');
 
   const explicitOff = { recentDispatches: [], finalPassOnRequestChangesEnabled: false };
   assert.equal(
     pickMergeAgentDispatch(makeJob(noAttribution), explicitOff),
+    'skip-operator-approval-stale'
+  );
+  assert.equal(
+    pickMergeAgentDispatch(makeJob(unknownActor), {
+      ...explicitOff,
+      operatorLogins: ['VirtualPaul'],
+      operatorLabelActorEnforcement: 'observe',
+    }),
     'skip-operator-approval-stale'
   );
   assert.equal(

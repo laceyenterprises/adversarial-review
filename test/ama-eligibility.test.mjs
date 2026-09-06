@@ -610,6 +610,38 @@ test('eligible: bot-applied operator-approved is honored and audited in observe 
   assert.equal(logs[0].event, 'operator_mutation_audit');
 });
 
+test('not eligible: unknown-actor operator-approved is ignored and audited in observe mode', () => {
+  const logs = [];
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['operator-approved'] },
+    reviewState: {
+      verdict: 'request-changes',
+      operatorApprovedEvidence: {
+        applied: true,
+        observedRevisionRef: 'abc12345',
+        actor: 'unknown',
+        eventId: 'LE_unknown_operator',
+        observedAt: '2026-06-10T20:00:00Z',
+      },
+    },
+    cfg: {
+      operatorLogins: ['paul-the-operator'],
+      operatorLabelActorEnforcement: 'observe',
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    logger: { info: (line) => logs.push(JSON.parse(line)) },
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.trace.verdict.operatorOverride, false);
+  assert.equal(result.trace.verdict.operatorMutationAudit.allowed, false);
+  assert.equal(result.trace.verdict.operatorMutationAudit.honored, false);
+  assert.equal(result.trace.verdict.operatorMutationAudit.reason, 'operator-provenance-missing');
+  assert.equal(logs[0].event, 'operator_mutation_audit');
+  assert.ok(result.reasons.includes('verdict-not-settled-success'));
+});
+
 test('not eligible: bot-applied operator-approved is ignored and audited in enforce mode', () => {
   const logs = [];
   const { reviewState, prMetadata, cfg } = eligibleFixture({
@@ -1543,7 +1575,7 @@ test('operator-approved evidence with applied=false is ignored', () => {
   assert.ok(result.reasons.includes('verdict-not-settled-success'));
 });
 
-test('operator-approved evidence with actor=`unknown` follows observe/enforce actor policy', () => {
+test('operator-approved evidence with actor=`unknown` fails closed in observe and enforce mode', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     prMetadata: { labels: ['operator-approved'] },
     reviewState: {
@@ -1558,10 +1590,11 @@ test('operator-approved evidence with actor=`unknown` follows observe/enforce ac
     },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
-  assert.equal(result.eligible, true);
-  assert.equal(result.trace.verdict.operatorOverride, true);
+  assert.equal(result.eligible, false);
+  assert.equal(result.trace.verdict.operatorOverride, false);
   assert.equal(result.trace.verdict.operatorMutationAudit.allowed, false);
-  assert.equal(result.trace.verdict.operatorMutationAudit.honored, true);
+  assert.equal(result.trace.verdict.operatorMutationAudit.honored, false);
+  assert.equal(result.trace.verdict.operatorMutationAudit.reason, 'operator-provenance-missing');
 
   const enforced = isEligibleForAmaClosure(
     reviewState,

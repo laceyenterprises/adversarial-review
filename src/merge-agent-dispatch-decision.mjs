@@ -247,6 +247,7 @@ function resolveOperatorLabelActorPolicy({ env = process.env, logger = console }
       operatorLabelActorEnforcement: cfg?.operatorLabelActorEnforcement || 'observe',
     };
   } catch (err) {
+    if (err instanceof ReferenceError) throw err;
     logger?.warn?.(
       '[merge-agent] failed to load roles.adversarial operator label actor policy; '
       + `falling back to observe with an empty allowlist. ${err instanceof Error ? err.message : String(err)}`
@@ -671,7 +672,8 @@ function classifyOperatorApprovalActor(approval, {
 } = {}) {
   const actor = normalizeLogin(approval?.actor);
   const allowlist = operatorLoginSet(operatorLogins);
-  const allowed = actor !== '' && actor !== 'unknown' && allowlist.has(actor);
+  const knownActor = actor !== '' && actor !== 'unknown';
+  const allowed = knownActor && allowlist.has(actor);
   const normalizedEnforcement = normalizeOperatorLabelActorEnforcement(enforcement);
   return {
     event: 'operator_mutation_audit',
@@ -679,8 +681,10 @@ function classifyOperatorApprovalActor(approval, {
     actor: actor || null,
     allowed,
     enforcement: normalizedEnforcement,
-    honored: allowed || normalizedEnforcement === 'observe',
-    reason: allowed ? 'allowlisted-operator' : 'operator-login-not-allowlisted',
+    honored: knownActor && (allowed || normalizedEnforcement === 'observe'),
+    reason: allowed
+      ? 'allowlisted-operator'
+      : (knownActor ? 'operator-login-not-allowlisted' : 'operator-provenance-missing'),
   };
 }
 

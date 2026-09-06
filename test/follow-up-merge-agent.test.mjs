@@ -58,6 +58,7 @@ import {
   listMergeAgentSkippedDispatches,
   lookupOriginalWorkerRunStatus,
   MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION,
+  isScopedOperatorApproval,
   pickMergeAgentDispatch,
   pickMergeAgentDispatchDetail,
   prepareOriginalWorkerForMergeAgent,
@@ -1390,6 +1391,27 @@ test('operator-approved with unknown actor is logged and ignored in observe mode
   assert.equal(audits[0].reason, 'operator-provenance-missing');
 });
 
+test('operator-approved with missing provenance is logged and ignored in observe mode', () => {
+  const audits = [];
+  assert.equal(
+    pickMergeAgentDispatch(makeJob({
+      lastVerdict: 'Request changes',
+      labels: [{ name: 'operator-approved' }],
+      operatorApproval: null,
+    }), {
+      operatorLogins: ['VirtualPaul'],
+      operatorLabelActorEnforcement: 'observe',
+      operatorMutationAuditLogger: (row) => audits.push(row),
+    }),
+    'skip-operator-approval-stale'
+  );
+  assert.equal(audits[0].event, 'operator_mutation_audit');
+  assert.equal(audits[0].actor, null);
+  assert.equal(audits[0].allowed, false);
+  assert.equal(audits[0].honored, false);
+  assert.equal(audits[0].reason, 'operator-provenance-missing');
+});
+
 test('resolveOperatorLabelActorPolicy loads operator actor policy in dispatch decision module', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'merge-agent-operator-policy-'));
   const configPath = path.join(rootDir, 'config.yaml');
@@ -1511,6 +1533,18 @@ test('operator-approved fails closed when no labeled event or actor was fetched'
     }),
     'skip-operator-approval-stale'
   );
+});
+
+test('isScopedOperatorApproval rejects missing or unknown actors', () => {
+  assert.equal(isScopedOperatorApproval(makeJob({
+    operatorApproval: makeOperatorApproval(),
+  })), true);
+  assert.equal(isScopedOperatorApproval(makeJob({
+    operatorApproval: makeOperatorApproval({ actor: '' }),
+  })), false);
+  assert.equal(isScopedOperatorApproval(makeJob({
+    operatorApproval: makeOperatorApproval({ actor: 'unknown' }),
+  })), false);
 });
 
 test('operator-approved bypasses missing or unknown review verdicts for the current head', () => {

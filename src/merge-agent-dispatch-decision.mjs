@@ -291,7 +291,7 @@ function pickMergeAgentDispatchDetail(job, {
   const hasMergeAgentRequestedLabel = labels.has(MERGE_AGENT_REQUESTED_LABEL);
   const mergeAgentRequested = hasMergeAgentRequestedLabel && isScopedMergeAgentRequest(job);
   const hasOperatorApprovedLabel = labels.has(OPERATOR_APPROVED_LABEL);
-  const operatorActorPolicy = hasOperatorApprovedLabel && hasAuditableOperatorApprovalEvidence(job)
+  const operatorActorPolicy = hasOperatorApprovedLabel
     ? classifyOperatorApprovalActor(job.operatorApproval, {
       operatorLogins,
       enforcement: operatorLabelActorEnforcement,
@@ -697,16 +697,10 @@ function hasScopedOperatorApprovalEvidence(job) {
   return true;
 }
 
-function hasAuditableOperatorApprovalEvidence(job) {
-  const approval = job?.operatorApproval;
-  if (!approval) return false;
-  if (!approval.labelEventId && !approval.labelEventNodeId) return false;
-  if (!approval.createdAt) return false;
-  return true;
-}
-
 function isScopedOperatorApproval(job) {
-  return hasScopedOperatorApprovalEvidence(job);
+  if (!hasScopedOperatorApprovalEvidence(job)) return false;
+  const actor = normalizeLogin(job?.operatorApproval?.actor);
+  return actor !== '' && actor !== 'unknown';
 }
 
 function isScopedMergeAgentRequest(job) {

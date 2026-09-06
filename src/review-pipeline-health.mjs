@@ -114,6 +114,9 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_dag_autowalk_healthy',
   'review_pipeline_ttm_minutes',
   'review_pipeline_ttm_open_budget_breaches',
+  'review_pipeline_ttm_stuck_open_prs',
+  'review_pipeline_ttm_budget_minutes',
+  'review_pipeline_ttm_queue_pressure_multiplier',
   'review_pipeline_ttm_terminal_unmerged_stalls_12h',
   'review_pipeline_ttm_terminal_unmerged_duration_minutes_12h',
   'review_pipeline_sentinel_finding_active',
@@ -140,7 +143,10 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_dispatch_spawn_failures: 'Recent dispatch daemon stderr lines matching closer/hammer spawn failure patterns.',
   review_pipeline_dag_autowalk_healthy: 'Whether the dag-autowalk LaunchAgent has a healthy exit/log recency state.',
   review_pipeline_ttm_minutes: 'Time-to-merge rollup in minutes over the configured window.',
-  review_pipeline_ttm_open_budget_breaches: 'Current open PRs exceeding the rounds-aware time-to-merge budget.',
+  review_pipeline_ttm_open_budget_breaches: 'Current open PRs exceeding the measured rounds-aware time-to-merge budget (SLOW; trend only).',
+  review_pipeline_ttm_stuck_open_prs: 'Current open PRs that are not progressing (STUCK; the page-worthy counter).',
+  review_pipeline_ttm_budget_minutes: 'Derived time-to-merge budget in minutes, by component, after queue-pressure scaling.',
+  review_pipeline_ttm_queue_pressure_multiplier: 'Measured queue-depth pressure multiplier applied to the derived budget.',
   review_pipeline_ttm_terminal_unmerged_stalls_12h: 'Terminal-but-unmerged stall events observed in the 12h SEV1 window.',
   review_pipeline_ttm_terminal_unmerged_duration_minutes_12h: 'Terminal-but-unmerged stall duration in the 12h SEV1 window.',
   review_pipeline_sentinel_finding_active: 'Whether a Sentinel finding code is active in the current snapshot.',
@@ -218,9 +224,34 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     code: 'review:ttm_budget_breach',
     tier: 'ticket',
     category: 'review-pipeline',
-    thresholdKey: 'ttm.base/per_round',
+    thresholdKey: 'ttm.base/per_round (derived)',
     defaultThreshold: null,
-    thresholdDescription: 'an open PR exceeds base + review_rounds * per_round minutes',
+    thresholdDescription:
+      'an open PR exceeds the budget DERIVED from the measured merge distribution '
+      + '(percentile curve over round buckets) scaled by measured queue pressure. '
+      + 'This is the SLOW signal: over budget but still moving. It belongs on a trend, '
+      + 'not an alarm -- see review:pr_progress_stalled for the stuck condition.',
+  },
+  {
+    code: 'review:pr_progress_stalled',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: 'ttm.progress_stall_minutes',
+    defaultThreshold: null,
+    thresholdDescription:
+      'an open PR is not progressing: a re-review was requested and no reviewer pass '
+      + 'has started since, or the reviewer lease expired while the row still claims an '
+      + 'in-flight review. Deliberately independent of the TTM budget and of elapsed time.',
+  },
+  {
+    code: 'review:ttm_budget_model_unreadable',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: null,
+    defaultThreshold: null,
+    thresholdDescription:
+      'the merged-PR distribution that the TTM budget is derived from could not be read, '
+      + 'so no budget exists to compare against (SEN-02 blind, never a health verdict)',
   },
   {
     code: 'review:terminal_but_unmerged',
@@ -1870,24 +1901,106 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }));
   }
 
+  // ── SEN-02 blind: the distribution the budget is derived from is unreadable.
+  // Emitted BEFORE the slow/stuck findings and instead of the slow finding, so
+  // "I cannot measure the budget" can never be read as "nothing is over
+  // budget". The stuck findings below still evaluate: they never consult the
+  // budget, so blindness about slowness is not blindness about stalls.
+  const ttmBudget = snapshot.ttm.budget || null;
+  if (ttmBudget?.blind) {
+    findings.push(buildFinding({
+      code: 'review:ttm_budget_model_unreadable',
+      tier: 'ticket',
+      subject: 'the measured TTM budget distribution could not be read',
+      message: `The rounds-aware TTM budget is derived from the merged-PR distribution in reviews.db, and that read failed: ${ttmBudget.blindReason || 'unknown error'}. No budget exists this tick, so no PR can be called slow. This is a statement about the monitor, NOT a health verdict about the review pipeline.`,
+      evidence: [
+        `reviews.db ttm budget model blind reason=${ttmBudget.blindReason || 'unknown'}`,
+        `reviews.db ttm open_prs=${ttmBudget.openPrCount ?? 'unknown'} (evaluated for stalls, not for budget)`,
+      ],
+      recommendedAction: 'Check that reviews.db is readable and carries reviewed_prs/reviewer_passes. Do NOT read the absence of review:ttm_budget_breach this tick as a clean pipeline.',
+      observedAt,
+      details: {
+        blind: true,
+        blindReason: ttmBudget.blindReason || null,
+        config: snapshot.ttm.config,
+      },
+    }));
+  }
+
+  // ── SLOW: over budget, still moving. Expected under load; trend, not alarm.
   const ttmBudgetBreaches = snapshot.ttm.flags.filter((flag) => flag.flagKind === 'round_budget_breach');
   if (ttmBudgetBreaches.length > 0) {
     const sample = ttmBudgetBreaches[0];
+    const provenance = snapshot.ttm.config?.budgetProvenance || {};
+    const derivation = provenance.source === 'measured-fit' || provenance.source === 'measured-flat'
+      ? `budget derived at p${provenance.percentile} from ${provenance.sampleCount} measured merge(s) `
+        + `(${Math.round(provenance.fittedBaseMinutes)}m + ${Math.round(provenance.fittedPerRoundMinutes)}m/round) `
+        + `x${provenance.queuePressureMultiplier?.toFixed(2)} queue pressure`
+      : `budget source=${provenance.source || 'unknown'} (not derived from a measured distribution)`;
     findings.push(buildFinding({
       code: 'review:ttm_budget_breach',
       tier: 'ticket',
-      subject: `${ttmBudgetBreaches.length} open PR(s) exceed the rounds-aware TTM budget`,
-      message: `${sample.repo}#${sample.prNumber} has been open ${Math.round(sample.elapsedMinutes)}m; budget is ${Math.round(sample.budgetMinutes)}m for ${sample.reviewRounds} review/remediation round(s).`,
+      subject: `${ttmBudgetBreaches.length} open PR(s) are slower than the measured TTM budget`,
+      message: `${sample.repo}#${sample.prNumber} has been open ${Math.round(sample.elapsedMinutes)}m; budget is ${Math.round(sample.budgetMinutes)}m for ${sample.reviewRounds} review/remediation round(s). ${derivation}. SLOW is not STUCK: these PRs are still moving and this finding self-clears when they merge.`
+        + (provenance.queuePressureSaturated
+          ? ' Queue pressure is SATURATED: open PRs exceed the widest budget this model grants, so the pipeline is oversubscribed and these breaches are a throughput deficit, not a budget error.'
+          : ''),
       evidence: ttmBudgetBreaches.map((flag) => (
         `reviews.db ttm ${flag.repo}#${flag.prNumber} elapsed=${Math.round(flag.elapsedMinutes)}m budget=${Math.round(flag.budgetMinutes)}m rounds=${flag.reviewRounds}`
-      )),
-      recommendedAction: 'Inspect review/merge lane state and the TTM flag event row before deciding whether to retrigger, dispatch hammer, or hand close.',
+      )).concat([
+        `reviews.db ttm budget provenance source=${provenance.source || 'unknown'} `
+        + `percentile=p${provenance.percentile ?? '?'} samples=${provenance.sampleCount ?? '?'} `
+        + `queue_pressure=${provenance.queuePressureMultiplier?.toFixed?.(2) ?? '?'}x `
+        + `open=${provenance.openPrCount ?? '?'} reference_open=${provenance.referenceOpenPrCount?.toFixed?.(1) ?? '?'}`,
+      ]),
+      recommendedAction: provenance.queuePressureSaturated
+        ? 'Treat this as a THROUGHPUT signal, not a per-PR stall: arrival is outrunning closure. Check reviewer/hammer concurrency and merge-lane capacity. Do not widen the budget to silence it.'
+        : 'Trend only. Watch review_pipeline_ttm_open_budget_breaches over time; act on review:pr_progress_stalled or review:terminal_but_unmerged for a PR that is actually stuck.',
       observedAt,
       details: {
+        progressClass: 'slow',
+        budgetProvenance: provenance,
         config: snapshot.ttm.config,
         flags: ttmBudgetBreaches,
       },
     }));
+  }
+
+  // ── STUCK: not progressing. Independent of budget and of elapsed time.
+  const progressStalls = snapshot.ttm.flags.filter((flag) => (
+    flag.flagKind === 'rereview_unanswered' || flag.flagKind === 'reviewer_lease_expired'
+  ));
+  if (progressStalls.length > 0) {
+    const byReason = new Map();
+    for (const flag of progressStalls) {
+      if (!byReason.has(flag.flagKind)) byReason.set(flag.flagKind, []);
+      byReason.get(flag.flagKind).push(flag);
+    }
+    for (const [flagKind, group] of byReason) {
+      const sample = group[0];
+      findings.push(buildFinding({
+        code: 'review:pr_progress_stalled',
+        tier: 'ticket',
+        subject: `${group.length} open PR(s) are not progressing (${flagKind})`,
+        message: `${sample.repo}#${sample.prNumber} has made no progress for ${Math.round(sample.stallMinutes)}m: ${sample.details?.stallReason || flagKind}. This is independent of the TTM budget -- a busy host still starts the pass it promised.`,
+        evidence: group.map((flag) => (
+          `reviews.db ttm ${flag.repo}#${flag.prNumber} ${flag.flagKind} stalled=${Math.round(flag.stallMinutes)}m `
+          + `review_status=${flag.details?.reviewStatus || 'unknown'} `
+          + `rereview_requested=${flag.details?.rereviewRequestedAt || 'none'} `
+          + `latest_pass_started=${flag.details?.latestPassStartedAt || 'none'}`
+        )),
+        recommendedAction: flagKind === 'rereview_unanswered'
+          ? 'A re-review was requested and no reviewer pass has started since. Check the watcher claim CAS, reviewer pool capacity, and dispatch drain state for this PR.'
+          : 'The reviewer lease expired while the row still claims an in-flight review. Check reviewer-pass-reaper liveness and the lease reclamation path; this is the lease/gate deadlock signature (agent-os#6288).',
+        observedAt,
+        details: {
+          progressClass: 'stuck',
+          flagKind,
+          progressStallThresholdMinutes: snapshot.ttm.config?.progressStallMinutes,
+          flags: group,
+        },
+      }));
+    }
   }
 
   const terminalUnmerged = snapshot.ttm.flags.filter((flag) => flag.flagKind === 'terminal_but_unmerged');
@@ -1904,6 +2017,10 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
       recommendedAction: 'Check the daemon clean merge path, AMA eligibility misses such as worker-identity-unresolved/stale-review-head, and hammer closeout liveness. This is the #806/#5102 stall signature.',
       observedAt,
       details: {
+        // Stuck, not slow: a settled clean verdict that cannot merge is not
+        // making progress at any elapsed time, so this never consults the
+        // TTM budget.
+        progressClass: 'stuck',
         sev1ExitMetric: snapshot.ttm.rollup.standingSev1Metric,
         config: snapshot.ttm.config,
         flags: terminalUnmerged,
@@ -2193,6 +2310,10 @@ function collectReviewPipelineHealth({
       : {
           observedAt,
           config: config.ttm,
+          // No reviews.db at all is a different fact from an unreadable
+          // distribution: there is nothing to be blind about, and the
+          // review_state_ledger findings already own the missing-DB case.
+          budget: { blind: false, source: 'no-review-state-db', model: null, pressure: null, openPrCount: 0 },
           timelines: [],
           flags: [],
           rollup: {
@@ -2201,6 +2322,14 @@ function collectReviewPipelineHealth({
             p90TimeToMergeMinutes: null,
             mergedPrs: 0,
             openPrsBreachingBudget: 0,
+            budgetBlind: false,
+            budgetSource: 'no-review-state-db',
+            baseBudgetMinutes: config.ttm.baseBudgetMinutes,
+            perRoundBudgetMinutes: config.ttm.perRoundBudgetMinutes,
+            budgetPercentile: config.ttm.budgetPercentile,
+            queuePressureMultiplier: null,
+            queuePressureSaturated: false,
+            stuckOpenPrs: 0,
             terminalButUnmergedOpenCount: 0,
             terminalButUnmergedStallsLast12h: 0,
             terminalButUnmergedMaxDurationMinutesLast12h: 0,
@@ -2352,6 +2481,18 @@ function renderReviewPipelinePrometheus(snapshot) {
   pushMetric('review_pipeline_ttm_minutes', { quantile: '0.5' }, snapshot.ttm?.rollup?.medianTimeToMergeMinutes || 0);
   pushMetric('review_pipeline_ttm_minutes', { quantile: '0.9' }, snapshot.ttm?.rollup?.p90TimeToMergeMinutes || 0);
   pushMetric('review_pipeline_ttm_open_budget_breaches', {}, snapshot.ttm?.rollup?.openPrsBreachingBudget || 0);
+  pushMetric('review_pipeline_ttm_stuck_open_prs', {}, snapshot.ttm?.rollup?.stuckOpenPrs || 0);
+  pushMetric('review_pipeline_ttm_budget_minutes', { component: 'base' }, snapshot.ttm?.rollup?.baseBudgetMinutes || 0);
+  pushMetric(
+    'review_pipeline_ttm_budget_minutes',
+    { component: 'per_round' },
+    snapshot.ttm?.rollup?.perRoundBudgetMinutes || 0
+  );
+  pushMetric(
+    'review_pipeline_ttm_queue_pressure_multiplier',
+    {},
+    snapshot.ttm?.rollup?.queuePressureMultiplier || 0
+  );
   pushMetric(
     'review_pipeline_ttm_terminal_unmerged_stalls_12h',
     {},

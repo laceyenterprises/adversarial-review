@@ -329,7 +329,12 @@ test('collector reads review state without mutating legacy or missing-schema dat
   }
 
   const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
-  assert.deepEqual(findingCodes(snapshot), []);
+  // TTM-01: a schema-less database is a database the collector cannot READ,
+  // and SEN-02 says that is reported, not swallowed. It reports `blind`
+  // (ticket severity, never pages) and nothing else -- in particular it makes
+  // no health claim about the pipeline, which is what the previous empty list
+  // silently did.
+  assert.deepEqual(findingCodes(snapshot), ['review:ttm_budget_model_unreadable']);
   assert.equal(snapshot.reviewer.total, 0);
   assert.equal(snapshot.firstPassQueue.depth, 0);
 

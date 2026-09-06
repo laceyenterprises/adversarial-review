@@ -1827,10 +1827,6 @@ async function main() {
     }
   }
 
-  // SEV0 2026-09-06: the per-tick auth refresh cannot keep up when a tick runs
-  // longer than the token lifetime (observed: 54 min of drains inside one tick
-  // against a ~55 min token, then a 401 storm). Drive the same refresh from a
-  // wall clock so cadence no longer depends on tick duration.
   startWatcherAuthenticationRefreshTimer({ log: console });
 
   (async function pollLoop() {

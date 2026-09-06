@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   WATCHER_AUTH_REFRESH_INTERVAL_MS,
+  refreshWatcherAuthenticationForTick,
   startWatcherAuthenticationRefreshTimer,
 } from "../src/watcher-tick-preflight.mjs";
 
@@ -65,6 +66,30 @@ test("a slow refresh never overlaps itself", async () => {
   assert.equal(started, 1, "overlapping refreshes would waste broker calls");
   release();
   await new Promise((r) => setImmediate(r));
+});
+
+test("tick and timer refreshes share the exported in-flight lock", async () => {
+  let reviewerRefreshes = 0;
+  let watcherRefreshes = 0;
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const options = {
+    log: silent,
+    refreshReviewerBrokerTokensImpl: async () => { reviewerRefreshes += 1; await gate; },
+    refreshWatcherGithubTokenImpl: async () => { watcherRefreshes += 1; },
+  };
+
+  const first = refreshWatcherAuthenticationForTick(options);
+  await new Promise((r) => setImmediate(r));
+  const second = await refreshWatcherAuthenticationForTick(options);
+
+  assert.deepEqual(second, { skipped: true, reason: "in-flight" });
+  assert.equal(reviewerRefreshes, 1, "tick/timer overlap should not duplicate broker refreshes");
+  assert.equal(watcherRefreshes, 0, "the second refresh should skip before calling either broker path");
+
+  release();
+  await first;
+  assert.equal(watcherRefreshes, 1);
 });
 
 test("a failing refresh never throws out of the timer", async () => {

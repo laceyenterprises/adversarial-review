@@ -2,13 +2,28 @@ import { checkHcpHealthz } from './hcp-health.mjs';
 import { refreshReviewerBrokerTokens, refreshWatcherGithubToken } from './reviewer-broker-refresh.mjs';
 import { retryPendingReviewedAttestations } from './reviewed-attestation.mjs';
 
-async function refreshWatcherAuthenticationForTick({ log = console } = {}) {
-  // Reviewer-bot GitHub App installation tokens expire while the watcher lives;
-  // this TTL-gated refresh is fail-safe and never clears a still-valid token.
-  await refreshReviewerBrokerTokens({ log });
-  // Same fail-safe refresh for the watcher's own GitHub token. It is a no-op
-  // unless WATCHER_GH_AUTH_VIA_BROKER=true.
-  await refreshWatcherGithubToken({ log });
+let watcherAuthenticationRefreshInFlight = false;
+
+async function refreshWatcherAuthenticationForTick({
+  log = console,
+  refreshReviewerBrokerTokensImpl = refreshReviewerBrokerTokens,
+  refreshWatcherGithubTokenImpl = refreshWatcherGithubToken,
+} = {}) {
+  if (watcherAuthenticationRefreshInFlight) {
+    return { skipped: true, reason: 'in-flight' };
+  }
+  watcherAuthenticationRefreshInFlight = true;
+  try {
+    // Reviewer-bot GitHub App installation tokens expire while the watcher lives;
+    // this TTL-gated refresh is fail-safe and never clears a still-valid token.
+    await refreshReviewerBrokerTokensImpl({ log });
+    // Same fail-safe refresh for the watcher's own GitHub token. It is a no-op
+    // unless WATCHER_GH_AUTH_VIA_BROKER=true.
+    await refreshWatcherGithubTokenImpl({ log });
+    return { refreshed: true };
+  } finally {
+    watcherAuthenticationRefreshInFlight = false;
+  }
 }
 
 
@@ -42,8 +57,8 @@ function startWatcherAuthenticationRefreshTimer({
 } = {}) {
   let inFlight = false;
   const timer = setIntervalImpl(() => {
-    // Never overlap with a refresh already running (either from this timer or
-    // from a tick). A second concurrent broker call would be wasted work.
+    // Never overlap timer-initiated refreshes. The default refresh function also
+    // carries a shared tick/timer guard; injected test doubles rely on this one.
     if (inFlight) return;
     inFlight = true;
     Promise.resolve()

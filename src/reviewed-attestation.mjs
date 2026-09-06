@@ -319,6 +319,7 @@ function reviewedAttestationQueueLockPath(rootDir) {
 async function acquireReviewedAttestationQueueLock(rootDir, {
   waitMs = REVIEWED_ATTESTATION_QUEUE_LOCK_WAIT_MS,
   staleMs = REVIEWED_ATTESTATION_QUEUE_LOCK_STALE_MS,
+  writeOwnerFileImpl = writeFileSync,
 } = {}) {
   const queuePath = reviewedAttestationQueuePath(rootDir);
   const lockPath = reviewedAttestationQueueLockPath(rootDir);
@@ -333,7 +334,12 @@ async function acquireReviewedAttestationQueueLock(rootDir, {
   while (true) {
     try {
       mkdirSync(lockPath);
-      writeFileSync(ownerPath, `${JSON.stringify(owner)}\n`);
+      try {
+        writeOwnerFileImpl(ownerPath, `${JSON.stringify(owner)}\n`);
+      } catch (err) {
+        rmSync(lockPath, { recursive: true, force: true });
+        throw err;
+      }
       return () => {
         try {
           const currentOwner = JSON.parse(readFileSync(ownerPath, 'utf8'));
@@ -385,6 +391,7 @@ function pendingReviewedAttestationEntry(args = {}, err = null) {
   });
   return {
     schema_version: 1,
+    queue_id: randomUUID(),
     enqueued_at: new Date().toISOString(),
     failure_class: classifyReviewedAttestationFailure(err),
     last_error: err?.message || String(err || ''),
@@ -402,23 +409,52 @@ async function enqueuePendingReviewedAttestation(rootDir, args = {}, err = null)
   return entry;
 }
 
-function readPendingReviewedAttestationsUnlocked(rootDir) {
+function normalizePendingReviewedAttestationEntry(entry) {
+  if (entry?.queue_id) return { entry, changed: false };
+  return {
+    entry: {
+      ...entry,
+      queue_id: randomUUID(),
+    },
+    changed: true,
+  };
+}
+
+function readPendingReviewedAttestationsUnlocked(rootDir, { log = console } = {}) {
   const queuePath = reviewedAttestationQueuePath(rootDir);
   let raw = '';
   try {
     raw = readFileSync(queuePath, 'utf8');
   } catch (err) {
-    if (err?.code === 'ENOENT') return [];
+    if (err?.code === 'ENOENT') return { entries: [], changed: false };
     throw err;
   }
-  return raw.split(/\r?\n/)
-    .filter((line) => line.trim())
-    .map((line) => JSON.parse(line));
+  const entries = [];
+  let changed = false;
+  raw.split(/\r?\n/).forEach((line, index) => {
+    if (!line.trim()) return;
+    try {
+      const normalized = normalizePendingReviewedAttestationEntry(JSON.parse(line));
+      entries.push(normalized.entry);
+      changed = changed || normalized.changed;
+    } catch (err) {
+      changed = true;
+      log?.warn?.(
+        `[reviewer] dropping malformed reviewed attestation queue entry at ${queuePath}:${index + 1}: ` +
+          `${err?.message || String(err)}`
+      );
+    }
+  });
+  return { entries, changed };
 }
 
-async function readPendingReviewedAttestations(rootDir) {
+async function readPendingReviewedAttestations(rootDir, { log = console } = {}) {
   if (!rootDir) throw new TypeError('rootDir is required');
-  return withReviewedAttestationQueueLock(rootDir, () => readPendingReviewedAttestationsUnlocked(rootDir));
+  return withReviewedAttestationQueueLock(rootDir, () => {
+    const { entries, changed } = readPendingReviewedAttestationsUnlocked(rootDir, { log });
+    if (changed) rewritePendingReviewedAttestationsUnlocked(rootDir, entries);
+    return entries;
+  });
 }
 
 function rewritePendingReviewedAttestationsUnlocked(rootDir, entries) {
@@ -434,28 +470,25 @@ async function replaceProcessedReviewedAttestations(rootDir, processedEntries) {
   await withReviewedAttestationQueueLock(rootDir, () => {
     const current = readPendingReviewedAttestationsUnlocked(rootDir);
     const replacements = new Map();
-    const consumed = new Map();
+    const consumed = new Set();
     for (const processed of processedEntries) {
-      const key = JSON.stringify(processed.original);
+      const key = processed.original?.queue_id;
+      if (!key) continue;
       if (processed.remaining) {
         const bucket = replacements.get(key) || [];
         bucket.push(processed.remaining);
         replacements.set(key, bucket);
       } else {
-        consumed.set(key, (consumed.get(key) || 0) + 1);
+        consumed.add(key);
       }
     }
-    const next = current.flatMap((entry) => {
-      const key = JSON.stringify(entry);
+    const next = current.entries.flatMap((entry) => {
+      const key = entry.queue_id;
       const replacementBucket = replacements.get(key);
       if (replacementBucket?.length > 0) {
         return [replacementBucket.shift()];
       }
-      const consumeCount = consumed.get(key) || 0;
-      if (consumeCount > 0) {
-        consumed.set(key, consumeCount - 1);
-        return [];
-      }
+      if (consumed.has(key)) return [];
       return [entry];
     });
     rewritePendingReviewedAttestationsUnlocked(rootDir, next);

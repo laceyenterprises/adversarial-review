@@ -20,10 +20,11 @@ import {
 } from '../src/follow-up-jobs.mjs';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { CASCADE_FAILURE_CAP, recordCascadeFailure } from '../src/reviewer-cascade.mjs';
-import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from '../src/config-loader.mjs';
+import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE, resetConfigCache } from '../src/config-loader.mjs';
 import { extractNonBlockingFindingIdentities } from '../src/kernel/remediation-reply.mjs';
 import {
   isDismissStaleRequestChangesOnResolvedEnabled,
+  resolveOperatorLabelActorPolicy,
   shouldUseHamTerminalRemediationMergeGate,
 } from '../src/merge-agent-dispatch-decision.mjs';
 import { HAM_TERMINAL_REMEDIATION_CERTIFIED_TRIGGER } from '../src/merge-agent-prompt.mjs';
@@ -1387,6 +1388,32 @@ test('operator-approved with unknown actor is logged and ignored in observe mode
   assert.equal(audits[0].allowed, false);
   assert.equal(audits[0].honored, false);
   assert.equal(audits[0].reason, 'operator-provenance-missing');
+});
+
+test('resolveOperatorLabelActorPolicy loads operator actor policy in dispatch decision module', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'merge-agent-operator-policy-'));
+  const configPath = path.join(rootDir, 'config.yaml');
+  writeFileSync(configPath, `
+version: 1
+roles:
+  adversarial:
+    operator_logins:
+      - VirtualPaul
+      - backup-human
+    operator_label_actor_enforcement: enforce
+`);
+  try {
+    const policy = resolveOperatorLabelActorPolicy({
+      env: { AGENT_OS_CONFIG_PATH: configPath },
+      logger: { warn() {} },
+    });
+
+    assert.deepEqual(policy.operatorLogins, ['VirtualPaul', 'backup-human']);
+    assert.equal(policy.operatorLabelActorEnforcement, 'enforce');
+  } finally {
+    resetConfigCache();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });
 
 test('operator-approved from a non-allowlisted actor is logged and ignored in enforce mode', () => {

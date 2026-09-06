@@ -17,6 +17,7 @@ import {
   MARK_ARGUS_SECURITY_QUEUED_SQL,
   RECORD_ARGUS_CLASSIFIED_HEAD_SQL,
   SELECT_OPEN_UNROUTABLE_BOT_ROWS_SQL,
+  SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW,
   prepareFinalizePendingTerminalFailure,
   prepareMarkInfraAutoRecoveryAttemptStarted,
   prepareMarkAttemptStarted,
@@ -438,37 +439,6 @@ export const stmtLatestGenuinePostedReviewAt = db.prepare(
             ) DESC
     LIMIT ${LATEST_GENUINE_POSTED_REVIEW_CANDIDATE_LIMIT}`
 );
-const SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW =
-  "SELECT COUNT(*) AS n FROM reviewed_prs " +
-  "WHERE pr_state = 'open' " +
-  // Malformed-title, legacy unroutable-bot, and Argus-routed PRs are not
-  // awaiting a first pass: the dispatch loop returns early on all three, so
-  // none can receive one. Counting them kept the "Reviews stalled" pager above
-  // zero forever and produced pages naming PRs the reviewer will never touch.
-  //
-  // ASR-04 replaced the terminal `unroutable-bot-author` disposition with
-  // `argus-security-queued`, which is NOT terminal — the row stays live so a new
-  // head re-enqueues. It is excluded here anyway, and for the same reason: the
-  // adversarial lane is not the thing it is waiting for. Argus queue depth and
-  // `oldestPendingAgeMs` are where a stuck security review surfaces; an
-  // adversarial stall pager that also fires on them would report the wrong
-  // outage on the wrong dashboard. The legacy status stays in the list because
-  // reopened PRs and kill-switch rows can still carry it.
-  // This is not the same as trusting review_status='posted' -- the comment
-  // above deliberately keys success off gh_comment_id so a stale success claim
-  // cannot mask a real gap. Here we exclude work the pipeline has explicitly
-  // refused, which is evidence about the PR, not about reviewer health.
-  // SQLite's `NOT IN` drops NULL, so keep the null-safe shape explicit: exclude
-  // terminal refused states while still counting rows with no status yet -- the
-  // exact rows most likely to be genuinely awaiting a first pass.
-  "AND (review_status IS NULL OR review_status NOT IN ('malformed', 'unroutable-bot-author', 'argus-security-queued')) " +
-  "AND NOT EXISTS ( " +
-  "  SELECT 1 FROM reviewer_passes " +
-  "  WHERE reviewer_passes.repo = reviewed_prs.repo " +
-  "    AND reviewer_passes.pr_number = reviewed_prs.pr_number " +
-  "    AND reviewer_passes.gh_comment_id IS NOT NULL " +
-  "    AND reviewer_passes.gh_comment_id <> ''" +
-  ")";
 export const stmtCountOpenPrsAwaitingFirstPassReview = db.prepare(
   SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW
 );

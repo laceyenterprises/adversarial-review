@@ -221,3 +221,41 @@ export function prepareFinalizePendingTerminalFailure(db) {
 export function prepareMarkMergedPendingReviewSkipped(db) {
   return db.prepare(MARK_MERGED_PENDING_REVIEW_SKIPPED_SQL);
 }
+
+// Depth of the first-pass review queue: OPEN PRs that have never received a
+// first-pass review. Lives in this side-effect-free statements leaf (rather than
+// beside its prepared statement in review-state-db.mjs) so tests, the RSP-01
+// queue-depth lever, and the `review-queue-depth` operator CLI can all read the
+// EXACT SQL production issues without importing the process-wide singleton DB
+// handle — the same reason every other statement here was extracted.
+export const SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW =
+  "SELECT COUNT(*) AS n FROM reviewed_prs " +
+  "WHERE pr_state = 'open' " +
+  // Malformed-title, legacy unroutable-bot, and Argus-routed PRs are not
+  // awaiting a first pass: the dispatch loop returns early on all three, so
+  // none can receive one. Counting them kept the "Reviews stalled" pager above
+  // zero forever and produced pages naming PRs the reviewer will never touch.
+  //
+  // ASR-04 replaced the terminal `unroutable-bot-author` disposition with
+  // `argus-security-queued`, which is NOT terminal — the row stays live so a new
+  // head re-enqueues. It is excluded here anyway, and for the same reason: the
+  // adversarial lane is not the thing it is waiting for. Argus queue depth and
+  // `oldestPendingAgeMs` are where a stuck security review surfaces; an
+  // adversarial stall pager that also fires on them would report the wrong
+  // outage on the wrong dashboard. The legacy status stays in the list because
+  // reopened PRs and kill-switch rows can still carry it.
+  // This is not the same as trusting review_status='posted' -- the comment
+  // above deliberately keys success off gh_comment_id so a stale success claim
+  // cannot mask a real gap. Here we exclude work the pipeline has explicitly
+  // refused, which is evidence about the PR, not about reviewer health.
+  // SQLite's `NOT IN` drops NULL, so keep the null-safe shape explicit: exclude
+  // terminal refused states while still counting rows with no status yet -- the
+  // exact rows most likely to be genuinely awaiting a first pass.
+  "AND (review_status IS NULL OR review_status NOT IN ('malformed', 'unroutable-bot-author', 'argus-security-queued')) " +
+  "AND NOT EXISTS ( " +
+  "  SELECT 1 FROM reviewer_passes " +
+  "  WHERE reviewer_passes.repo = reviewed_prs.repo " +
+  "    AND reviewer_passes.pr_number = reviewed_prs.pr_number " +
+  "    AND reviewer_passes.gh_comment_id IS NOT NULL " +
+  "    AND reviewer_passes.gh_comment_id <> ''" +
+  ")";

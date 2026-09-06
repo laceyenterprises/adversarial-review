@@ -2798,6 +2798,25 @@ function schemaV1() {
             __nullable: true,
             __min: 1,
           },
+          // RSP-01 break-glass lever. Depth, in PRs AWAITING THEIR FIRST
+          // FIRST-PASS REVIEW (open PR, `posted_at IS NULL`, review_status in
+          // pending/pending-upstream — see review-queue-depth.mjs for the exact
+          // predicate and its exclusions), at or above which first-pass review
+          // is permitted to spill off the cheap single reviewer class onto the
+          // entitled, quota-available fallback classes.
+          //
+          // Null (default) = DISARMED: reviewer selection is byte-identical to
+          // pre-RSP-01. This is deliberately a cost lever, not a parallelism
+          // knob — every non-`agy` reviewer spends provider quota that would
+          // otherwise go to builds and remediations — so it defaults off, spills
+          // the minimum (one extra concurrent reviewer per full multiple of the
+          // threshold in the queue), and disengages the moment depth recovers.
+          first_pass_review_queue_depth_failover_threshold: {
+            __type: TYPE_INT,
+            __default: null,
+            __nullable: true,
+            __min: 1,
+          },
         },
       },
       // Subprocess timeouts for the follow-up pipeline's calls into `hq`.
@@ -3202,6 +3221,10 @@ export const ENV_ALIASES = {
       ['ADVERSARIAL_FIRST_PASS_REVIEWER_MAX_CONCURRENT', identity],
       ['ADVERSARIAL_REVIEWER_POOL_MAX_CONCURRENT', identity],
     ],
+  },
+  'watcher.first_pass_review_queue_depth_failover_threshold': {
+    canonical: 'AGENT_OS_WATCHER_FIRST_PASS_REVIEW_QUEUE_DEPTH_FAILOVER_THRESHOLD',
+    aliases: [['ADVERSARIAL_REVIEW_FIRST_PASS_QUEUE_DEPTH_FAILOVER_THRESHOLD', identity]],
   },
   'follow_up.hq_worker_tear_down_subprocess_timeout_ms': {
     canonical: 'AGENT_OS_FOLLOW_UP_HQ_WORKER_TEAR_DOWN_SUBPROCESS_TIMEOUT_MS',

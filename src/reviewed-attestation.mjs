@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual, promisify } from 'node:util';
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -51,7 +52,10 @@ function delay(ms) {
 }
 
 function sleepSync(ms) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    // Intentionally synchronous: queue mutations use sync fs primitives.
+  }
 }
 
 async function execFileWithTransientRetry(execFileImpl, command, args, options, {
@@ -325,16 +329,28 @@ function acquireReviewedAttestationQueueLock(rootDir, {
 } = {}) {
   const queuePath = reviewedAttestationQueuePath(rootDir);
   const lockPath = reviewedAttestationQueueLockPath(rootDir);
+  const ownerPath = join(lockPath, 'owner.json');
+  const owner = {
+    pid: process.pid,
+    token: `${process.pid}:${Date.now()}:${randomUUID()}`,
+    acquired_at: new Date().toISOString(),
+  };
   mkdirSync(dirname(queuePath), { recursive: true });
   const startedAt = Date.now();
   while (true) {
     try {
       mkdirSync(lockPath);
-      writeFileSync(join(lockPath, 'owner.json'), `${JSON.stringify({
-        pid: process.pid,
-        acquired_at: new Date().toISOString(),
-      })}\n`);
-      return () => rmSync(lockPath, { recursive: true, force: true });
+      writeFileSync(ownerPath, `${JSON.stringify(owner)}\n`);
+      return () => {
+        try {
+          const currentOwner = JSON.parse(readFileSync(ownerPath, 'utf8'));
+          if (currentOwner?.token !== owner.token) return;
+          rmSync(lockPath, { recursive: true, force: true });
+        } catch (err) {
+          if (err?.code === 'ENOENT') return;
+          throw err;
+        }
+      };
     } catch (err) {
       if (err?.code !== 'EEXIST') throw err;
       try {
@@ -512,6 +528,7 @@ export {
   REVIEWED_ATTESTATION_SIGN_TIMEOUT_MS,
   buildReviewedAttestationPayload,
   classifyReviewedAttestationFailure,
+  acquireReviewedAttestationQueueLock,
   emitReviewedAttestation,
   enqueuePendingReviewedAttestation,
   normalizeFindingsCount,

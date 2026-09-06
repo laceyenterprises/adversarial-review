@@ -1166,6 +1166,9 @@ async function pollOnce(
     try {
       const retryResult = await retryPendingReviewedAttestations({
         rootDir: ROOT,
+        hqPath: process.env.HQ_BIN || 'hq',
+        execFileImpl: execFileAsync,
+        env: process.env,
         log: console,
       });
       if (retryResult.attempted > 0) {

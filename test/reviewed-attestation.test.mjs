@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 import {
+  acquireReviewedAttestationQueueLock,
   buildReviewedAttestationPayload,
   enqueuePendingReviewedAttestation,
   emitReviewedAttestation,
@@ -328,6 +329,47 @@ test('queued reviewed attestation retry preserves entries appended while signing
     assert.equal(queued.length, 1);
     assert.equal(queued[0].payload.pr_number, 24);
     assert.equal(queued[0].payload.head_sha, 'head-sha-2');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reviewed attestation queue lock waits without Atomics.wait on contention', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewed-attestation-lock-wait-'));
+  const originalAtomicsWait = Atomics.wait;
+  try {
+    const lockPath = join(rootDir, 'data', 'reviewed-attestations', 'pending.jsonl.lock');
+    mkdirSync(lockPath, { recursive: true });
+    writeFileSync(join(lockPath, 'owner.json'), '{"token":"other"}\n');
+    Atomics.wait = () => {
+      throw new Error('Atomics.wait must not be used for queue lock polling');
+    };
+
+    assert.throws(
+      () => acquireReviewedAttestationQueueLock(rootDir, { waitMs: 50, staleMs: 60_000 }),
+      /timed out acquiring reviewed attestation queue lock/
+    );
+  } finally {
+    Atomics.wait = originalAtomicsWait;
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reviewed attestation queue lock release preserves a lock stolen after stale expiry', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewed-attestation-lock-owner-'));
+  try {
+    const lockPath = join(rootDir, 'data', 'reviewed-attestations', 'pending.jsonl.lock');
+    const releaseOriginal = acquireReviewedAttestationQueueLock(rootDir);
+    rmSync(lockPath, { recursive: true, force: true });
+    mkdirSync(lockPath, { recursive: true });
+    writeFileSync(join(lockPath, 'owner.json'), '{"token":"stolen-lock-owner"}\n');
+
+    releaseOriginal();
+
+    assert.equal(existsSync(lockPath), true);
+    assert.deepEqual(JSON.parse(readFileSync(join(lockPath, 'owner.json'), 'utf8')), {
+      token: 'stolen-lock-owner',
+    });
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

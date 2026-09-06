@@ -1865,7 +1865,7 @@ async function postGitHubReviewWithCapture({
     await emitReviewedAttestationImpl(reviewedAttestationArgs);
   } catch (err) {
     const failureClass = classifyReviewedAttestationFailure(err);
-    enqueuePendingReviewedAttestationImpl(rootDir, reviewedAttestationArgs, err);
+    await enqueuePendingReviewedAttestationImpl(rootDir, reviewedAttestationArgs, err);
     log.warn?.(
       `[reviewer:${prNumber}] attestation sign failed: ${failureClass} (${err?.message || err}) ` +
         '- verdict stands; attestation queued for retry'

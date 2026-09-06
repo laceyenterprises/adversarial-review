@@ -965,7 +965,7 @@ test('postGitHubReviewWithCapture keeps posted verdict and queues attestation af
     });
     assert.equal(pass.verdict, 'comment-only');
     assert.equal(pass.body_md, '## Verdict\nComment only');
-    const queued = readPendingReviewedAttestations(rootDir);
+    const queued = await readPendingReviewedAttestations(rootDir);
     assert.equal(queued.length, 1);
     assert.equal(queued[0].failure_class, 'hcp-unavailable');
     assert.equal(queued[0].payload.repo, 'laceyenterprises/demo');

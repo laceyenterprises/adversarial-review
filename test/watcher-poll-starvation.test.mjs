@@ -363,10 +363,12 @@ test('WPS-01: processReviewSubject queues posted-review handler with the SUBJECT
 
 test('HCP pre-spawn precheck requeues when down and proceeds when up', async () => {
   const settles = [];
+  const statements = { getReviewRow: { get() {} } };
   const down = await enforceHcpPreSpawnReadiness({
     repoPath: REPO,
     prNumber: 6157,
     rootDir: '/tmp/adversarial-review-test',
+    statements,
     attemptAt: '2026-09-03T20:00:00.000Z',
     maxRemediationRounds: 4,
     getHcpHealthzForTick: async () => ({
@@ -380,6 +382,7 @@ test('HCP pre-spawn precheck requeues when down and proceeds when up', async () 
   });
   assert.equal(down.proceed, false);
   assert.equal(settles.length, 1);
+  assert.equal(settles[0].statements, statements);
   assert.equal(settles[0].result.failureClass, 'hcp-unavailable');
   assert.equal(settles[0].failureAt, '2026-09-03T20:00:00.000Z');
 

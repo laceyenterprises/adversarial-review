@@ -231,12 +231,12 @@ test('queued reviewed attestation retries sign and record then removes consumed 
       verdict: 'comment-only',
       findingsCount: 0,
     };
-    enqueuePendingReviewedAttestation(
+    await enqueuePendingReviewedAttestation(
       rootDir,
       payloadArgs,
       Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:8002'), { code: 'ECONNREFUSED' }),
     );
-    assert.equal(readPendingReviewedAttestations(rootDir).length, 1);
+    assert.equal((await readPendingReviewedAttestations(rootDir)).length, 1);
     const commands = [];
     const result = await retryPendingReviewedAttestations({
       rootDir,
@@ -263,7 +263,7 @@ test('queued reviewed attestation retries sign and record then removes consumed 
       log: { log() {} },
     });
     assert.deepEqual(result, { attempted: 1, consumed: 1, remaining: 0 });
-    assert.equal(readPendingReviewedAttestations(rootDir).length, 0);
+    assert.equal((await readPendingReviewedAttestations(rootDir)).length, 0);
     assert.equal(commands.map((call) => call.args[1]).join(','), 'sign,record');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -289,7 +289,7 @@ test('queued reviewed attestation retry preserves entries appended while signing
       verdict: 'request-changes',
       findingsCount: 1,
     };
-    enqueuePendingReviewedAttestation(
+    await enqueuePendingReviewedAttestation(
       rootDir,
       firstPayloadArgs,
       Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:8002'), { code: 'ECONNREFUSED' }),
@@ -302,30 +302,29 @@ test('queued reviewed attestation retry preserves entries appended while signing
         if (args[1] === 'record') {
           return execFileResultWithStdin({ stdout: '{"recorded":true}' });
         }
-        if (!appendedDuringSign) {
-          appendedDuringSign = true;
-          enqueuePendingReviewedAttestation(
-            rootDir,
-            secondPayloadArgs,
-            Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:8002'), { code: 'ECONNREFUSED' }),
-          );
-        }
         const payloadJson = JSON.parse(args[args.indexOf('--payload-json') + 1]);
-        return Promise.resolve({
+        const result = {
           stdout: JSON.stringify({
             ...buildReviewedAttestationPayload(firstPayloadArgs),
             payload: payloadJson,
             ts: args[args.indexOf('--ts') + 1],
             signature: signatureFor('codex-reviewer-lacey'),
           }),
-        });
+        };
+        if (appendedDuringSign) return Promise.resolve(result);
+        appendedDuringSign = true;
+        return enqueuePendingReviewedAttestation(
+          rootDir,
+          secondPayloadArgs,
+          Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:8002'), { code: 'ECONNREFUSED' }),
+        ).then(() => result);
       },
       env: {},
       log: { log() {} },
     });
 
     assert.deepEqual(result, { attempted: 1, consumed: 1, remaining: 0 });
-    const queued = readPendingReviewedAttestations(rootDir);
+    const queued = await readPendingReviewedAttestations(rootDir);
     assert.equal(queued.length, 1);
     assert.equal(queued[0].payload.pr_number, 24);
     assert.equal(queued[0].payload.head_sha, 'head-sha-2');
@@ -334,7 +333,7 @@ test('queued reviewed attestation retry preserves entries appended while signing
   }
 });
 
-test('reviewed attestation queue lock waits without Atomics.wait on contention', () => {
+test('reviewed attestation queue lock waits asynchronously on contention', async () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'reviewed-attestation-lock-wait-'));
   const originalAtomicsWait = Atomics.wait;
   try {
@@ -344,22 +343,27 @@ test('reviewed attestation queue lock waits without Atomics.wait on contention',
     Atomics.wait = () => {
       throw new Error('Atomics.wait must not be used for queue lock polling');
     };
+    let timerFired = false;
+    setTimeout(() => {
+      timerFired = true;
+    }, 0);
 
-    assert.throws(
+    await assert.rejects(
       () => acquireReviewedAttestationQueueLock(rootDir, { waitMs: 50, staleMs: 60_000 }),
       /timed out acquiring reviewed attestation queue lock/
     );
+    assert.equal(timerFired, true);
   } finally {
     Atomics.wait = originalAtomicsWait;
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
 
-test('reviewed attestation queue lock release preserves a lock stolen after stale expiry', () => {
+test('reviewed attestation queue lock release preserves a lock stolen after stale expiry', async () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'reviewed-attestation-lock-owner-'));
   try {
     const lockPath = join(rootDir, 'data', 'reviewed-attestations', 'pending.jsonl.lock');
-    const releaseOriginal = acquireReviewedAttestationQueueLock(rootDir);
+    const releaseOriginal = await acquireReviewedAttestationQueueLock(rootDir);
     rmSync(lockPath, { recursive: true, force: true });
     mkdirSync(lockPath, { recursive: true });
     writeFileSync(join(lockPath, 'owner.json'), '{"token":"stolen-lock-owner"}\n');

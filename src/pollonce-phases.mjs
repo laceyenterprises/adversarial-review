@@ -247,6 +247,7 @@ export async function enforceHcpPreSpawnReadiness({
   repoPath,
   prNumber,
   rootDir,
+  statements,
   attemptAt,
   maxRemediationRounds,
   getHcpHealthzForTick = checkHcpHealthz,
@@ -264,6 +265,7 @@ export async function enforceHcpPreSpawnReadiness({
     rootDir,
     repoPath,
     prNumber,
+    statements,
     result: {
       ok: false,
       failureClass: hcpHealthz.failureClass || 'hcp-unavailable',
@@ -2317,6 +2319,7 @@ export async function processReviewSubject(entry, ctx) {
               repoPath,
               prNumber,
               rootDir: ROOT,
+              statements: ctx.statements,
               attemptAt,
               maxRemediationRounds,
               getHcpHealthzForTick,

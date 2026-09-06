@@ -16,7 +16,7 @@ const ATTESTATION_SIGN_FAILED_FAILURE_CLASS = 'attestation-sign-failed';
 const HCP_UNAVAILABLE_FAILURE_CLASS = 'hcp-unavailable';
 const REVIEWED_ATTESTATION_QUEUE_RELATIVE_PATH = join('data', 'reviewed-attestations', 'pending.jsonl');
 const REVIEWED_ATTESTATION_QUEUE_LOCK_STALE_MS = 60_000;
-const REVIEWED_ATTESTATION_QUEUE_LOCK_WAIT_MS = 30_000;
+const REVIEWED_ATTESTATION_QUEUE_LOCK_WAIT_MS = 65_000;
 const REVIEWED_ATTESTATION_QUEUE_LOCK_POLL_MS = 25;
 
 function isTransientSignError(err) {
@@ -49,13 +49,6 @@ function classifyReviewedAttestationFailure(err) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function sleepSync(ms) {
-  const end = Date.now() + ms;
-  while (Date.now() < end) {
-    // Intentionally synchronous: queue mutations use sync fs primitives.
-  }
 }
 
 async function execFileWithTransientRetry(execFileImpl, command, args, options, {
@@ -323,7 +316,7 @@ function reviewedAttestationQueueLockPath(rootDir) {
   return `${reviewedAttestationQueuePath(rootDir)}.lock`;
 }
 
-function acquireReviewedAttestationQueueLock(rootDir, {
+async function acquireReviewedAttestationQueueLock(rootDir, {
   waitMs = REVIEWED_ATTESTATION_QUEUE_LOCK_WAIT_MS,
   staleMs = REVIEWED_ATTESTATION_QUEUE_LOCK_STALE_MS,
 } = {}) {
@@ -366,13 +359,13 @@ function acquireReviewedAttestationQueueLock(rootDir, {
       if (Date.now() - startedAt >= waitMs) {
         throw new Error(`timed out acquiring reviewed attestation queue lock: ${lockPath}`);
       }
-      sleepSync(REVIEWED_ATTESTATION_QUEUE_LOCK_POLL_MS);
+      await delay(REVIEWED_ATTESTATION_QUEUE_LOCK_POLL_MS);
     }
   }
 }
 
-function withReviewedAttestationQueueLock(rootDir, callback) {
-  const release = acquireReviewedAttestationQueueLock(rootDir);
+async function withReviewedAttestationQueueLock(rootDir, callback) {
+  const release = await acquireReviewedAttestationQueueLock(rootDir);
   try {
     return callback();
   } finally {
@@ -399,10 +392,10 @@ function pendingReviewedAttestationEntry(args = {}, err = null) {
   };
 }
 
-function enqueuePendingReviewedAttestation(rootDir, args = {}, err = null) {
+async function enqueuePendingReviewedAttestation(rootDir, args = {}, err = null) {
   if (!rootDir) throw new TypeError('rootDir is required');
   const entry = pendingReviewedAttestationEntry(args, err);
-  withReviewedAttestationQueueLock(rootDir, () => {
+  await withReviewedAttestationQueueLock(rootDir, () => {
     const queuePath = reviewedAttestationQueuePath(rootDir);
     writeFileSync(queuePath, `${JSON.stringify(entry)}\n`, { flag: 'a' });
   });
@@ -423,7 +416,7 @@ function readPendingReviewedAttestationsUnlocked(rootDir) {
     .map((line) => JSON.parse(line));
 }
 
-function readPendingReviewedAttestations(rootDir) {
+async function readPendingReviewedAttestations(rootDir) {
   if (!rootDir) throw new TypeError('rootDir is required');
   return withReviewedAttestationQueueLock(rootDir, () => readPendingReviewedAttestationsUnlocked(rootDir));
 }
@@ -437,8 +430,8 @@ function rewritePendingReviewedAttestationsUnlocked(rootDir, entries) {
   renameSync(tmpPath, queuePath);
 }
 
-function replaceProcessedReviewedAttestations(rootDir, processedEntries) {
-  withReviewedAttestationQueueLock(rootDir, () => {
+async function replaceProcessedReviewedAttestations(rootDir, processedEntries) {
+  await withReviewedAttestationQueueLock(rootDir, () => {
     const current = readPendingReviewedAttestationsUnlocked(rootDir);
     const replacements = new Map();
     const consumed = new Map();
@@ -477,7 +470,7 @@ async function retryPendingReviewedAttestations({
   log = console,
   now = () => new Date().toISOString(),
 } = {}) {
-  const pending = readPendingReviewedAttestations(rootDir);
+  const pending = await readPendingReviewedAttestations(rootDir);
   if (pending.length === 0) {
     return { attempted: 0, consumed: 0, remaining: 0 };
   }
@@ -515,7 +508,7 @@ async function retryPendingReviewedAttestations({
       processed.push({ original: entry, remaining: failedEntry });
     }
   }
-  replaceProcessedReviewedAttestations(rootDir, processed);
+  await replaceProcessedReviewedAttestations(rootDir, processed);
   return { attempted: pending.length, consumed: consumed.length, remaining: remaining.length };
 }
 

@@ -138,6 +138,8 @@ export const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
  * @property {boolean} enabled
  * @property {string}  workerClass
  * @property {string}  mergeMethod
+ * @property {string[]=} operatorLogins
+ * @property {'observe'|'enforce'=} operatorLabelActorEnforcement
  * @property {boolean=} strictNonBlockingRemediation
  * @property {Object}  eligibility
  * @property {string[]} eligibility.riskClasses
@@ -190,13 +192,13 @@ export const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
  */
 function hasOperatorApprovedOverride(reviewState, prMetadata) {
   const evidence = reviewState?.operatorApprovedEvidence;
-  if (!hasValidScopedOverrideEvidence(evidence, prMetadata)) return false;
+  if (!hasValidScopedOperatorApprovalEvidence(evidence, prMetadata)) return false;
   if (!hasCurrentLabel(prMetadata, OPERATOR_APPROVED_LABEL)) return false;
-  if (
-    String(evidence.observedRevisionRef || '') !==
-    String(prMetadata?.headSha || '')
-  ) return false;
-  return true;
+  const actorPolicy = classifyOperatorLabelActor(evidence, {
+    operatorLogins: reviewState?.operatorLogins ?? prMetadata?.operatorLogins,
+    enforcement: reviewState?.operatorLabelActorEnforcement ?? prMetadata?.operatorLabelActorEnforcement,
+  });
+  return actorPolicy.honored === true;
 }
 
 /**
@@ -264,6 +266,57 @@ function hasValidScopedOverrideEvidence(evidence, prMetadata) {
     String(prMetadata?.headSha || '')
   ) return false;
   return true;
+}
+
+function hasValidScopedOperatorApprovalEvidence(evidence, prMetadata) {
+  if (!evidence || evidence.applied !== true) return false;
+  if (!hasOverrideProvenance(evidence)) return false;
+  if (
+    String(evidence.observedRevisionRef || evidence.headSha || '') !==
+    String(prMetadata?.headSha || '')
+  ) return false;
+  return true;
+}
+
+function hasAuditableOperatorApprovalEvidence(evidence) {
+  if (!evidence || evidence.applied !== true) return false;
+  if (!hasOverrideProvenance(evidence)) return false;
+  return true;
+}
+
+function normalizeOperatorLabelActorEnforcement(value) {
+  const normalized = String(value ?? 'observe').trim().toLowerCase();
+  return normalized === 'enforce' ? 'enforce' : 'observe';
+}
+
+function operatorLoginSet(logins) {
+  return new Set(
+    (Array.isArray(logins) ? logins : [])
+      .map((login) => normalizeLogin(login))
+      .filter(Boolean),
+  );
+}
+
+function classifyOperatorLabelActor(evidence, {
+  operatorLogins = [],
+  enforcement = 'observe',
+} = {}) {
+  const actor = normalizeLogin(evidence?.actor);
+  const allowlist = operatorLoginSet(operatorLogins);
+  const knownActor = actor !== '' && actor !== 'unknown';
+  const allowed = knownActor && allowlist.has(actor);
+  const normalizedEnforcement = normalizeOperatorLabelActorEnforcement(enforcement);
+  return {
+    event: 'operator_mutation_audit',
+    label: OPERATOR_APPROVED_LABEL,
+    actor: actor || null,
+    allowed,
+    enforcement: normalizedEnforcement,
+    honored: knownActor && (allowed || normalizedEnforcement === 'observe'),
+    reason: allowed
+      ? 'allowlisted-operator'
+      : (knownActor ? 'operator-login-not-allowlisted' : 'operator-provenance-missing'),
+  };
 }
 
 /**
@@ -927,7 +980,23 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   // operator-approved evidence's observed head. The override branch is
   // checked inside `hasOperatorApprovedOverride()` against the current
   // head; this gate covers the review-based authority path.
-  const operatorOverride = hasOperatorApprovedOverride(reviewState, prMetadata);
+  const operatorReviewState = {
+    ...reviewState,
+    operatorLogins: cfg?.operatorLogins,
+    operatorLabelActorEnforcement: cfg?.operatorLabelActorEnforcement,
+  };
+  const operatorOverride = hasOperatorApprovedOverride(operatorReviewState, prMetadata);
+  const operatorMutationAudit = reviewState?.operatorApprovedEvidence
+    && hasCurrentLabel(prMetadata, OPERATOR_APPROVED_LABEL)
+    && hasAuditableOperatorApprovalEvidence(reviewState.operatorApprovedEvidence)
+      ? classifyOperatorLabelActor(reviewState.operatorApprovedEvidence, {
+        operatorLogins: cfg?.operatorLogins,
+        enforcement: cfg?.operatorLabelActorEnforcement,
+      })
+      : null;
+  if (operatorMutationAudit && operatorMutationAudit.allowed !== true) {
+    options?.logger?.info?.(JSON.stringify(operatorMutationAudit));
+  }
   const reviewedHead = String(reviewState?.headSha || '');
   const currentHead = String(prMetadata?.headSha || '');
   const blockingFindings = classifyBlockingFindings(reviewState);
@@ -1294,6 +1363,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
       normalized: verdictNormalized,
       settledSuccess,
       operatorOverride,
+      operatorMutationAudit,
       remediationPending,
       remediationStateKnown,
       blockingFindings,
@@ -1371,7 +1441,10 @@ export const __testables__ = {
   hasOperatorApprovedOverride,
   hasAdversarialMergeRequestedOverride,
   hasMergeRequestedOverride: hasAdversarialMergeRequestedOverride,
+  classifyOperatorLabelActor,
   hasValidScopedOverrideEvidence,
+  hasValidScopedOperatorApprovalEvidence,
+  hasAuditableOperatorApprovalEvidence,
   hasCurrentLabel,
   presentHardStopLabels,
   classifyCiGreen,

@@ -5026,6 +5026,10 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
       version: 1
       roles:
         adversarial:
+          operator_logins:
+            - virtualpaul
+            - backup-human
+          operator_label_actor_enforcement: enforce
           merge_authority:
             enabled: false
             autonomous_merge_execution_enabled: false
@@ -5052,6 +5056,10 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
               required: true
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
+    assert.deepEqual(cfg.get('roles.adversarial.operator_logins'), ['virtualpaul', 'backup-human']);
+    assert.equal(cfg.get('roles.adversarial.operator_label_actor_enforcement'), 'enforce');
+    assert.deepEqual(cfg.getMergeAuthorityConfig().operatorLogins, ['virtualpaul', 'backup-human']);
+    assert.equal(cfg.getMergeAuthorityConfig().operatorLabelActorEnforcement, 'enforce');
     assert.equal(cfg.get('roles.adversarial.merge_authority.enabled'), false);
     assert.equal(cfg.get('roles.adversarial.merge_authority.autonomous_merge_execution_enabled'), false);
     assert.equal(cfg.get('roles.adversarial.merge_authority.autonomous_closer_commit_clean_merge_enabled'), false);
@@ -5159,6 +5167,16 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
       envRequiredContextsCfg.getMergeAuthorityConfig().requiredCheckContexts,
       ['repo-guards', 'shellcheck'],
     );
+
+    const envOperatorCfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_ROLES_ADVERSARIAL_OPERATOR_LOGINS: 'human-one,human-two',
+        AGENT_OS_ROLES_ADVERSARIAL_OPERATOR_LABEL_ACTOR_ENFORCEMENT: 'observe',
+      },
+    });
+    assert.deepEqual(envOperatorCfg.getMergeAuthorityConfig().operatorLogins, ['human-one', 'human-two']);
+    assert.equal(envOperatorCfg.getMergeAuthorityConfig().operatorLabelActorEnforcement, 'observe');
 
     const legacyTop = join(tmp, 'legacy-config.yaml');
     writeFile(legacyTop, `

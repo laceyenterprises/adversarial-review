@@ -142,6 +142,7 @@ const ENUM_ROLES_REMEDIATOR = ['claude-code', 'codex', 'gemini', 'adversarial'];
 const ENUM_ROLES_MERGE_AGENT_WORKER_CLASS = ['merge-agent', 'codex', 'claude-code', 'hammer', 'hammer-claude'];
 const ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS = ['codex', 'claude-code'];
 export const ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE = ['native', 'agentos'];
+export const ENUM_ROLES_ADVERSARIAL_OPERATOR_LABEL_ACTOR_ENFORCEMENT = ['observe', 'enforce'];
 const ENUM_ROLES_ADVERSARIAL_MERGE_AUTHORITY_RISK_CLASS = ['low', 'medium', 'high', 'critical'];
 const ENUM_ROLES_FALLBACK_PATH = ['none', 'litellm-vk', 'litellm-vk-then-deferral'];
 const ENUM_SENTINEL_RCA_WORKER_CLASS = ['sre', 'sre-responder', 'sre-claude'];
@@ -1692,6 +1693,16 @@ function schemaV1() {
                 __type: TYPE_STRING,
                 __default: 'native',
                 __enum: ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE,
+              },
+              operator_logins: {
+                __type: TYPE_LIST,
+                __item: { __type: TYPE_STRING },
+                __default: [],
+              },
+              operator_label_actor_enforcement: {
+                __type: TYPE_STRING,
+                __default: 'observe',
+                __enum: ENUM_ROLES_ADVERSARIAL_OPERATOR_LABEL_ACTOR_ENFORCEMENT,
               },
               handoff: {
                 __type: TYPE_DICT,
@@ -3250,6 +3261,14 @@ export const ENV_ALIASES = {
   },
   'roles.adversarial.orchestration_mode': {
     canonical: 'AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE',
+    aliases: [],
+  },
+  'roles.adversarial.operator_logins': {
+    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_OPERATOR_LOGINS',
+    aliases: [],
+  },
+  'roles.adversarial.operator_label_actor_enforcement': {
+    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_OPERATOR_LABEL_ACTOR_ENFORCEMENT',
     aliases: [],
   },
   'roles.adversarial.handoff.enabled': {
@@ -4863,6 +4882,14 @@ export class AgentOSConfig {
     );
     return {
       enabled: this.get('roles.adversarial.merge_authority.enabled', false),
+      operatorLogins: [...this.get(
+        'roles.adversarial.operator_logins',
+        [],
+      )],
+      operatorLabelActorEnforcement: this.get(
+        'roles.adversarial.operator_label_actor_enforcement',
+        'observe',
+      ),
       workerClass: this.get(
         'roles.adversarial.merge_authority.worker_class',
         'hammer',

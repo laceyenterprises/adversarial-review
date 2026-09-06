@@ -60,12 +60,11 @@ import {
 import {
   loadRoleConfig,
   resolveDefaultMergeAgentWorkerClass,
-  MODULE_CONFIG_PATH,
   validateStartupRoleConfig,
 } from './role-config.mjs';
 import { validateStartupRoleRegistry } from './role-registry.mjs';
 import { validateStartupDeliveryIdentity } from './adapters/comms/github-pr-comments/delivery-identity.mjs';
-import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE, loadConfigCached } from './config-loader.mjs';
+import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from './config-loader.mjs';
 import classifyMergeAgentRescue, { parseReviewBody as parseMergeAgentRescueReviewBody } from './merge-agent-rescue-classifier.mjs';
 import {
   classifyBlockingFindings,
@@ -107,9 +106,8 @@ import {
   pickMergeAgentDispatchDetail,
   shouldUseReviewerTimeoutExhaustedMergeGate,
   isScopedOperatorApproval,
-  isScopedMergeAgentRequest,
-  buildScopedOperatorApproval,
-  buildScopedMergeAgentRequest,
+  isScopedMergeAgentRequest, buildScopedOperatorApproval,
+  buildScopedMergeAgentRequest, resolveOperatorLabelActorPolicy,
 } from './merge-agent-dispatch-decision.mjs';
 import {
   formatExecFailure,
@@ -2422,6 +2420,8 @@ async function dispatchMergeAgentForPR({
     finalPassOnRequestChangesEnabled: isFinalPassOnRequestChangesEnabled({ env: runtimeEnv }),
     deterministicConvergenceTerminalEnabled: isDeterministicConvergenceTerminalEnabled({ env: runtimeEnv }),
     blockingFinalPassAttempted,
+    ...resolveOperatorLabelActorPolicy({ env: runtimeEnv, logger }),
+    operatorMutationAuditLogger: (record) => mergeAgentLifecycleLog(logger, 'operator_mutation_audit', { repo, prNumber, headSha, surface: 'merge-agent-dispatch', ...record }),
   });
   const { decision } = dispatchDecision;
   // AMA-06N: triggerOverride from the watcher's coexistence path

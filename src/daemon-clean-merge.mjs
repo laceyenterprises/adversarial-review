@@ -755,7 +755,10 @@ export async function runDaemonCleanMergeAttempt({
     flags: {
       autonomousMergeExecutionEnabled: cfg?.autonomousMergeExecutionEnabled !== false,
       strictMode,
+      mergeCapabilityEnforcement: cfg?.mergeCapabilityEnforcement || 'observe',
     },
+    mergeCapabilityEnforcement: cfg?.mergeCapabilityEnforcement || 'observe',
+    mergeEnv: env,
     dismissStaleRequestChangesImpl: dismissStaleRequestChangesOnResolved !== false
       ? async () => dismissStandingChangesRequestedReviewsForHead(execFileImpl, repoPath, prNumber, daemonValidatedHead, {
           authoritativeReviewerLogins,

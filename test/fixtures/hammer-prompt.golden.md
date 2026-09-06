@@ -1338,6 +1338,23 @@ while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "$HAM_MERGE_ATTEMPTS" 
     exit 0
   fi
 
+  HAM_MERGE_CAPABILITY_ENFORCEMENT="${AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_MERGE_CAPABILITY_ENFORCEMENT:-${MERGE_CAPABILITY_ENFORCEMENT:-observe}}"
+  HAM_MERGE_TOKEN_CLASS="${AGENT_OS_GITHUB_TOKEN_CLASS:-${AGENT_OS_MERGE_TOKEN_CLASS:-${GITHUB_TOKEN_CLASS:-${GH_TOKEN_CLASS:-${OAUTH_BROKER_TOKEN_CLASS:-}}}}}"
+  if [ -z "$HAM_MERGE_TOKEN_CLASS" ]; then
+    HAM_MERGE_TOKEN_CLASS="${OAUTH_BROKER_PROVIDER:-${OAUTH_BROKER_GITHUB_APP_PROVIDER:-}}"
+  fi
+  case "$(printf '%s' "$HAM_MERGE_TOKEN_CLASS" | tr '[:upper:]_' '[:lower:]-')" in
+    builder|builder-class|codex|claude-code|gemini|clio-agent|codex-agent|claude-agent|gemini-agent|github-app-codex-agent|github-app-claude-agent|github-app-gemini-agent|lacey-codex-agent|lacey-claude-agent|lacey-gemini-agent)
+      if [ "$HAM_MERGE_CAPABILITY_ENFORCEMENT" = "enforce" ]; then
+        printf '{"schemaVersion":1,"event":"merge_capability_enforcement","mode":"enforce","action":"deny","surface":"hammer","repo":"acme/myrepo","prNumber":1234,"headSha":"%s","tokenClass":"%s","reason":"builder-token-merge-refused"}\n' "$POST_REMEDIATION_SHA" "$HAM_MERGE_TOKEN_CLASS" >&2
+        ham_append_terminal_audit failed-without-merge builder-token-merge-refused || true
+        ham_release_merge_lease
+        exit 0
+      fi
+      printf '{"schemaVersion":1,"event":"merge_capability_enforcement","mode":"observe","action":"would-deny","surface":"hammer","repo":"acme/myrepo","prNumber":1234,"headSha":"%s","tokenClass":"%s","reason":"builder-token-merge-refused"}\n' "$POST_REMEDIATION_SHA" "$HAM_MERGE_TOKEN_CLASS" >&2
+      ;;
+  esac
+
   gh pr merge https://github.com/acme/myrepo/pull/1234 \
     --squash \
     --match-head-commit "$POST_REMEDIATION_SHA" \

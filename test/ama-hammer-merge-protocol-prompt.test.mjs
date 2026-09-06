@@ -135,15 +135,18 @@ test('terminal-remediation audit is written under the merge lease at the settled
   const rebaseLoopIdx = HAMMER_PROMPT.indexOf('= "BEHIND"');
   const leaseAcquireIdx = HAMMER_PROMPT.indexOf('ham_acquire_merge_lease');
   const predicateIdx = HAMMER_PROMPT.indexOf('ama-check.mjs');
+  const capabilityIdx = HAMMER_PROMPT.indexOf('merge_capability_enforcement');
   const mergeIdx = HAMMER_PROMPT.indexOf('gh pr merge <<PR_URL>>');
   assert.ok(auditIdx > 0, 'audit block present');
   assert.ok(rebaseLoopIdx > 0 && leaseAcquireIdx > 0, 'rebase window + lease acquire present');
-  assert.ok(predicateIdx > 0 && mergeIdx > 0, 'predicate + merge present');
+  assert.ok(predicateIdx > 0 && capabilityIdx > 0 && mergeIdx > 0, 'predicate + capability guard + merge present');
   // Rebase window and lease acquisition come BEFORE the audit:
   assert.ok(rebaseLoopIdx < auditIdx, 'audit must follow the rebase window');
   assert.ok(leaseAcquireIdx < auditIdx, 'audit must follow lease acquisition');
   // Audit comes BEFORE the predicate and the merge:
   assert.ok(auditIdx < predicateIdx, 'audit must precede the ama-check predicate');
+  assert.ok(predicateIdx < capabilityIdx, 'capability guard must follow the ama-check predicate');
+  assert.ok(capabilityIdx < mergeIdx, 'capability guard must precede the merge');
   assert.ok(auditIdx < mergeIdx, 'audit must precede the merge');
   // And it fails closed unless the merge lease is currently held:
   assert.match(

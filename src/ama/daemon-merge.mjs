@@ -52,6 +52,7 @@ import {
   writeAmaAuditEntry,
 } from './audit.mjs';
 import { evaluateMergeEligibility } from './merge-eligibility.mjs';
+import { evaluateMergeCapabilityEnforcement } from './merge-capability-enforcement.mjs';
 
 /** Bounded-retry defaults, byte-for-byte the MSM-01 hammer merge budget. */
 export const DAEMON_MERGE_DEFAULTS = Object.freeze({
@@ -338,9 +339,12 @@ export async function attemptDaemonCleanMerge({
   branchProtectionRequiredContexts = [],
   requiredCheckContexts = [],
   mergeMethod = 'squash',
+  flags = {},
+  mergeCapabilityEnforcement = flags.mergeCapabilityEnforcement || 'observe',
+  mergeCredentialClass = null,
+  mergeEnv = process.env,
   hqRoot,
   auditMetadata = {},
-  flags = {},
   strictMode = flags.strictMode ?? true,
   allowHamTerminalRemediation = false,
   allowHeadCloserCertifiedNonBlocking = false,
@@ -586,6 +590,27 @@ export async function attemptDaemonCleanMerge({
       break;
     }
 
+    const mergeCapability = evaluateMergeCapabilityEnforcement({
+      enforcement: mergeCapabilityEnforcement,
+      credentialClass: mergeCredentialClass,
+      env: mergeEnv,
+      logger,
+      surface: closureAuthority,
+      repo,
+      prNumber,
+      head: validatedHead,
+      mergeMethod,
+    });
+    if (!mergeCapability.allowed) {
+      terminal = {
+        reason: mergeCapability.reason || 'builder-token-merge-refused',
+        permanent: true,
+        tokenClass: mergeCapability.tokenClass,
+        tokenSource: mergeCapability.tokenSource,
+      };
+      break;
+    }
+
     if (typeof dismissStaleRequestChangesImpl === 'function') {
       try {
         const dismissal = await dismissStaleRequestChangesImpl({
@@ -723,6 +748,8 @@ export async function attemptDaemonCleanMerge({
           eligibilityReasons: terminal.reasons || [],
           flagState,
           ...(terminal.mergeDiagnostics ? { mergeDiagnostics: terminal.mergeDiagnostics } : {}),
+          ...(terminal.tokenClass ? { tokenClass: terminal.tokenClass } : {}),
+          ...(terminal.tokenSource ? { tokenSource: terminal.tokenSource } : {}),
           ...(cleanParkManualCloseRequired
             ? { manualCloseRequired: true, operatorAction: 'clean-pr-parked-manual-close-required' }
             : {}),

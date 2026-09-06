@@ -143,6 +143,7 @@ const ENUM_ROLES_MERGE_AGENT_WORKER_CLASS = ['merge-agent', 'codex', 'claude-cod
 const ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS = ['codex', 'claude-code'];
 export const ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE = ['native', 'agentos'];
 export const ENUM_ROLES_ADVERSARIAL_OPERATOR_LABEL_ACTOR_ENFORCEMENT = ['observe', 'enforce'];
+export const ENUM_ROLES_ADVERSARIAL_MERGE_CAPABILITY_ENFORCEMENT = ['observe', 'enforce'];
 const ENUM_ROLES_ADVERSARIAL_MERGE_AUTHORITY_RISK_CLASS = ['low', 'medium', 'high', 'critical'];
 const ENUM_ROLES_FALLBACK_PATH = ['none', 'litellm-vk', 'litellm-vk-then-deferral'];
 const ENUM_SENTINEL_RCA_WORKER_CLASS = ['sre', 'sre-responder', 'sre-claude'];
@@ -1765,6 +1766,11 @@ function schemaV1() {
                     __type: TYPE_BOOL,
                     __default: true,
                   },
+                  merge_capability_enforcement: {
+                    __type: TYPE_STRING,
+                    __default: 'observe',
+                    __enum: ENUM_ROLES_ADVERSARIAL_MERGE_CAPABILITY_ENFORCEMENT,
+                  },
                   // Rollback switch for the narrow stale-head clean closer lane:
                   // a zero-finding settled review whose live head is a trusted
                   // terminal closer commit may close under merge-agent
@@ -3234,6 +3240,10 @@ export const ENV_ALIASES = {
   'roles.adversarial.merge_authority.autonomous_merge_execution_enabled': {
     canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_AUTONOMOUS_MERGE_EXECUTION_ENABLED',
     aliases: [],
+  },
+  'roles.adversarial.merge_authority.merge_capability_enforcement': {
+    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_MERGE_CAPABILITY_ENFORCEMENT',
+    aliases: [['MERGE_CAPABILITY_ENFORCEMENT', identity]],
   },
   'roles.adversarial.merge_authority.autonomous_closer_commit_clean_merge_enabled': {
     canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_AUTONOMOUS_CLOSER_COMMIT_CLEAN_MERGE_ENABLED',
@@ -4914,6 +4924,10 @@ export class AgentOSConfig {
       autonomousMergeExecutionEnabled: this.get(
         'roles.adversarial.merge_authority.autonomous_merge_execution_enabled',
         true,
+      ),
+      mergeCapabilityEnforcement: this.get(
+        'roles.adversarial.merge_authority.merge_capability_enforcement',
+        'observe',
       ),
       autonomousCloserCommitCleanMergeEnabled: this.get(
         'roles.adversarial.merge_authority.autonomous_closer_commit_clean_merge_enabled',

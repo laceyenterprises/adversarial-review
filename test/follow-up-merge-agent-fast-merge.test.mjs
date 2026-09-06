@@ -422,6 +422,51 @@ test('fast-merge falls back to gh admin merge when adapter merge fails', async (
   assert.match(warnings.join('\n'), /fast-merge adapter merge failed.*falling back to gh --admin/);
 });
 
+test('fast-merge refuses builder token in enforce mode before adapter or gh merge', async () => {
+  const db = makeDb();
+  seedFastMerge(db, 806);
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'fast-merge-builder-root-'));
+  const adapterBin = seedAutoDiscoveredAdapter(rootDir);
+  const baseGh = makeGhStub({ views: [openView('sha-A'), openView('sha-A')], checks: [successChecks(), successChecks()] });
+  const calls = [];
+  const warnings = [];
+  async function gh(cmd, args, options = {}) {
+    calls.push({ cmd, args, options });
+    if (cmd === adapterBin) {
+      return { stdout: JSON.stringify({ merged: true }) };
+    }
+    return baseGh(cmd, args, options);
+  }
+  gh.calls = calls;
+
+  let result;
+  try {
+    await withProcessEnv({ GHA_ADAPTER_BIN: undefined, AGENT_OS_GITHUB_ADAPTER_BIN: undefined }, async () => {
+      result = await processFastMergePR({
+        db,
+        ghClient: gh,
+        rootDir,
+        repo: REPO,
+        prNumber: 806,
+        authorizedHeadSha: 'sha-A',
+        mergeCapabilityEnforcement: 'enforce',
+        mergeCredentialClass: 'github-app-gemini-agent',
+        logger: { warn: (msg) => warnings.push(String(msg)) },
+      });
+    });
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(result.reason, 'builder-token-merge-refused');
+  assert.equal(row(db, 806).pr_state, 'fast_merge_blocked');
+  assert.equal(calls.some((call) => call.cmd === adapterBin), false);
+  assert.equal(mergeCalls(gh).length, 0);
+  assert.match(warnings.join('\n'), /"event":"merge_capability_enforcement"/);
+  assert.match(warnings.join('\n'), /"action":"deny"/);
+});
+
 test('merge-agent label add falls back to gh on transient adapter failure', async () => {
   const calls = [];
   async function gh(cmd, args, options = {}) {

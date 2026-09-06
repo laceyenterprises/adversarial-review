@@ -37,6 +37,10 @@ import {
   fetchFastMergeTimeline,
 } from './fast-merge-github-io.mjs';
 import { writeAdapterPullRequestMerge } from './github-adapter-client.mjs';
+import {
+  evaluateMergeCapabilityEnforcement,
+  resolveMergeCapabilityEnforcementFromEnv,
+} from './ama/merge-capability-enforcement.mjs';
 import { requestReviewRereview } from './review-state.mjs';
 import { readJsonFileDetailed } from './merge-agent-original-worker.mjs';
 import { amaAuditFilePath, readAmaAuditEntry } from './ama/audit.mjs';
@@ -883,6 +887,8 @@ async function processFastMergePR({
   auditWriter = null,
   env = process.env,
   logger = console,
+  mergeCapabilityEnforcement = resolveMergeCapabilityEnforcementFromEnv(env),
+  mergeCredentialClass = null,
 } = {}) {
   let exactHeadSha = authorizedHeadSha;
   const firstView = await fetchFastMergePrView({ ghClient, repo, prNumber });
@@ -1124,6 +1130,47 @@ async function processFastMergePR({
   }
   if (preMergeChecks.summary.status === 'pending') {
     return { status: 'skipped_still_pending', reason: 'ci-pending-before-merge' };
+  }
+
+  const mergeCapability = evaluateMergeCapabilityEnforcement({
+    enforcement: mergeCapabilityEnforcement,
+    credentialClass: mergeCredentialClass,
+    env,
+    logger,
+    surface: 'fast-merge',
+    repo,
+    prNumber,
+    head: exactHeadSha,
+    mergeMethod: 'squash',
+  });
+  if (!mergeCapability.allowed) {
+    updateFastMergeTerminalState(db, {
+      state: FAST_MERGE_BLOCKED_STATE,
+      repo,
+      prNumber,
+      failureMessage: 'builder-token-merge-refused',
+    });
+    await writeFastMergeAudit({
+      db,
+      rootDir,
+      auditWriter,
+      logger,
+      entry: buildFastMergeCloseAuditEntry({
+        action: 'blocked',
+        repo,
+        prNumber,
+        authorizedHeadSha: exactHeadSha,
+        currentHeadSha: preMergeView.headRefOid,
+        failureReason: 'builder-token-merge-refused',
+        mergeCapabilityEnforcement: {
+          mode: mergeCapability.mode,
+          action: mergeCapability.action,
+          tokenClass: mergeCapability.tokenClass,
+          tokenSource: mergeCapability.tokenSource,
+        },
+      }),
+    });
+    return { status: 'blocked', reason: 'builder-token-merge-refused' };
   }
 
   let mergeResult;

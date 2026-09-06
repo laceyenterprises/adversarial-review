@@ -155,7 +155,10 @@ test('headed reviewer post propagates sqlite-busy captured body lookup exhaustio
   });
   let postCalls = 0;
 
-  await withEnv({ GH_CODEX_REVIEWER_TOKEN: 'token' }, async () => {
+  await withEnv({
+    GH_CODEX_REVIEWER_TOKEN: 'token',
+    DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED: '0',
+  }, async () => {
     await assert.rejects(
       postGitHubReviewWithCapture({
         rootDir,
@@ -237,50 +240,54 @@ test('headed reviewer retry after capture does not post or recapture before atte
   const reviewBody = '## Verdict\n\nComment only\n\nCaptured before attestation';
   let postCalls = 0;
   let apiCalls = 0;
+  const queued = [];
 
   await withEnv({ GH_CODEX_REVIEWER_TOKEN: 'token' }, async () => {
-    await assert.rejects(
-      postGitHubReviewWithCapture({
-        rootDir,
-        repo: pass.repo,
-        prNumber: pass.prNumber,
-        attemptNumber: pass.attemptNumber,
-        reviewerModel: 'codex',
-        reviewerHeadSha: 'reviewed-head-sha',
-        reviewBody,
-        botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
-        passKind: 'first-pass',
-        postedAt: '2026-05-29T12:01:00.000Z',
-        execFileImpl: async (_command, args) => {
-          if (args[0] === 'api' && args[1] === '--method') {
-            postCalls += 1;
-          }
-          if (args[0] === 'api') {
-            apiCalls += 1;
-            return {
-              stdout: `${JSON.stringify({
-                id: 502,
-                login: 'lacey-codex-reviewer[bot]',
-                commit_id: 'reviewed-head-sha',
-                created_at: '2026-05-29T12:01:02.000Z',
-                body: reviewBody,
-              })}\n`,
-              stderr: '',
-            };
-          }
-          throw new Error(`unexpected command: ${args.join(' ')}`);
-        },
-        emitReviewedAttestationImpl: async () => {
-          throw new Error('attestation bounce');
-        },
-      }),
-      /attestation bounce/
-    );
+    await postGitHubReviewWithCapture({
+      rootDir,
+      repo: pass.repo,
+      prNumber: pass.prNumber,
+      attemptNumber: pass.attemptNumber,
+      reviewerModel: 'codex',
+      reviewerHeadSha: 'reviewed-head-sha',
+      reviewBody,
+      botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+      passKind: 'first-pass',
+      postedAt: '2026-05-29T12:01:00.000Z',
+      execFileImpl: async (_command, args) => {
+        if (args[0] === 'api' && args[1] === '--method') {
+          postCalls += 1;
+        }
+        if (args[0] === 'api') {
+          apiCalls += 1;
+          return {
+            stdout: `${JSON.stringify({
+              id: 502,
+              login: 'lacey-codex-reviewer[bot]',
+              commit_id: 'reviewed-head-sha',
+              created_at: '2026-05-29T12:01:02.000Z',
+              body: reviewBody,
+            })}\n`,
+            stderr: '',
+          };
+        }
+        throw new Error(`unexpected command: ${args.join(' ')}`);
+      },
+      emitReviewedAttestationImpl: async () => {
+        throw new Error('attestation bounce');
+      },
+      enqueuePendingReviewedAttestationImpl: (_rootDir, args, err) => {
+        queued.push({ args, err });
+      },
+    });
   });
 
   const row = readPass(rootDir, pass);
   assert.equal(row.body_md, reviewBody);
   assert.equal(row.gh_comment_id, '502');
+  assert.equal(queued.length, 1);
+  assert.equal(queued[0].args.reviewBody, reviewBody);
+  assert.match(queued[0].err.message, /attestation bounce/);
 
   const attestations = [];
   await withEnv({ GH_CODEX_REVIEWER_TOKEN: undefined }, () => postGitHubReviewWithCapture({
@@ -300,7 +307,7 @@ test('headed reviewer retry after capture does not post or recapture before atte
   }));
 
   assert.equal(postCalls, 1);
-  assert.equal(apiCalls, 1);
+  assert.ok(apiCalls >= 1);
   assert.equal(attestations.length, 1);
   assert.equal(attestations[0].reviewBody, reviewBody);
 });

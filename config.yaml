@@ -114,6 +114,11 @@ roles:
       # fail-closes and leaves the PR for manual operator intervention. Bounce
       # the adversarial watcher after changing this value.
       autonomous_merge_execution_enabled: true
+      # Observe-first TQL-09 rollout. In observe mode a builder-class token
+      # reaching a merge path logs merge_capability_enforcement would-deny and
+      # still preserves today's behavior; flip to enforce only after the
+      # required three days of clean observe evidence.
+      merge_capability_enforcement: observe
       # Default strict mode: daemon merges only zero-finding final reviews.
       # Turning this off permits daemon merge over known non-blocking findings;
       # blocking or unknown findings still route away from the daemon.

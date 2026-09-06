@@ -1350,6 +1350,72 @@ while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "$HAM_MERGE_ATTEMPTS" 
     exit 0
   fi
 
+  HAM_MERGE_CAPABILITY_ENFORCEMENT="${AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_MERGE_CAPABILITY_ENFORCEMENT:-${MERGE_CAPABILITY_ENFORCEMENT:-observe}}"
+  ham_normalize_merge_token_class() {
+    printf '%s' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | tr '[:upper:]_' '[:lower:]-'
+  }
+  ham_merge_capability_known_provider_class() {
+    case "$1" in
+      builder|builder-class|codex|claude-code|gemini|clio-agent|codex-agent|claude-agent|gemini-agent|github-app-codex-agent|github-app-claude-agent|github-app-gemini-agent|lacey-codex-agent|lacey-claude-agent|lacey-gemini-agent|merge-agent|hammer|hammer-claude|the-hammer|github-app-merge-agent|lacey-merge-agent|the-hammer-lacey)
+        return 0
+        ;;
+    esac
+    return 1
+  }
+  ham_first_nonempty_merge_token_class() {
+    for ham_candidate_value in "$@"; do
+      ham_candidate_class="$(ham_normalize_merge_token_class "$ham_candidate_value")"
+      if [ -n "$ham_candidate_class" ]; then
+        printf '%s\n' "$ham_candidate_class"
+        return 0
+      fi
+    done
+    return 1
+  }
+  ham_first_known_merge_provider_class() {
+    for ham_candidate_value in "$@"; do
+      ham_candidate_class="$(ham_normalize_merge_token_class "$ham_candidate_value")"
+      if [ -n "$ham_candidate_class" ] && ham_merge_capability_known_provider_class "$ham_candidate_class"; then
+        printf '%s\n' "$ham_candidate_class"
+        return 0
+      fi
+    done
+    return 1
+  }
+  HAM_MERGE_TOKEN_CLASS="$(ham_first_nonempty_merge_token_class \
+    "${AGENT_OS_GITHUB_TOKEN_CLASS:-}" \
+    "${AGENT_OS_MERGE_TOKEN_CLASS:-}" \
+    "${GITHUB_TOKEN_CLASS:-}" \
+    "${GH_TOKEN_CLASS:-}" \
+    "${HQ_GITHUB_TOKEN_CLASS:-}" \
+    "${OAUTH_BROKER_TOKEN_CLASS:-}" \
+    || true)"
+  if [ -z "$HAM_MERGE_TOKEN_CLASS" ]; then
+    HAM_MERGE_TOKEN_CLASS="$(ham_first_known_merge_provider_class \
+      "${OAUTH_BROKER_PROVIDER:-}" \
+      "${OAUTH_BROKER_GITHUB_APP_PROVIDER:-}" \
+      "${OAUTH_BROKER_MERGE_AGENT_PROVIDER:-}" \
+      "${OAUTH_BROKER_HAMMER_PROVIDER:-}" \
+      "${OAUTH_BROKER_CODEX_PROVIDER:-}" \
+      "${OAUTH_BROKER_CLAUDE_PROVIDER:-}" \
+      "${OAUTH_BROKER_GEMINI_PROVIDER:-}" \
+      "${OAUTH_BROKER_CODEX_REVIEWER_PROVIDER:-}" \
+      "${OAUTH_BROKER_CLAUDE_REVIEWER_PROVIDER:-}" \
+      "${OAUTH_BROKER_GEMINI_REVIEWER_PROVIDER:-}" \
+      || true)"
+  fi
+  case "$HAM_MERGE_TOKEN_CLASS" in
+    builder|builder-class|codex|claude-code|gemini|clio-agent|codex-agent|claude-agent|gemini-agent|github-app-codex-agent|github-app-claude-agent|github-app-gemini-agent|lacey-codex-agent|lacey-claude-agent|lacey-gemini-agent)
+      if [ "$HAM_MERGE_CAPABILITY_ENFORCEMENT" = "enforce" ]; then
+        printf '{"schemaVersion":1,"event":"merge_capability_enforcement","mode":"enforce","action":"deny","surface":"hammer","repo":"<<REPO>>","prNumber":<<PR_NUMBER>>,"headSha":"%s","tokenClass":"%s","reason":"builder-token-merge-refused"}\n' "$POST_REMEDIATION_SHA" "$HAM_MERGE_TOKEN_CLASS" >&2
+        ham_append_terminal_audit failed-without-merge builder-token-merge-refused || true
+        ham_release_merge_lease
+        exit 0
+      fi
+      printf '{"schemaVersion":1,"event":"merge_capability_enforcement","mode":"observe","action":"would-deny","surface":"hammer","repo":"<<REPO>>","prNumber":<<PR_NUMBER>>,"headSha":"%s","tokenClass":"%s","reason":"builder-token-merge-refused"}\n' "$POST_REMEDIATION_SHA" "$HAM_MERGE_TOKEN_CLASS" >&2
+      ;;
+  esac
+
   gh pr merge <<PR_URL>> \
     --<<MERGE_METHOD>> \
     --match-head-commit "$POST_REMEDIATION_SHA" \

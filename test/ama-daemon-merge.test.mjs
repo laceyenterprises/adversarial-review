@@ -260,6 +260,55 @@ test('clean + eligible → daemon merges inline; daemon-merge audit; no local CI
   assert.equal(h.lastMergeCtx.mergeMethod, 'squash');
 });
 
+test('builder token cannot merge in enforce mode', async () => {
+  const h = makeHarness({ mergeResults: [{ exitCode: 0 }] });
+  const warnings = [];
+  const result = await attemptDaemonCleanMerge(baseArgs(h, {
+    mergeCapabilityEnforcement: 'enforce',
+    mergeCredentialClass: 'github-app-codex-agent',
+    logger: { log() {}, warn: (msg) => warnings.push(String(msg)) },
+  }));
+
+  assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED);
+  assert.equal(result.reason, 'builder-token-merge-refused');
+  assert.equal(result.merged, false);
+  assert.equal(h.calls.merge, 0, 'builder token must be refused before gh pr merge');
+  assert.equal(h.calls.release, 1, 'lease released after refusal');
+  assert.match(warnings.join('\n'), /"event":"merge_capability_enforcement"/);
+  assert.match(warnings.join('\n'), /"action":"deny"/);
+  const terminal = h.auditStore.get('o/r#7@' + HEAD).attempts.at(-1);
+  assert.equal(terminal.reason, 'builder-token-merge-refused');
+  assert.equal(terminal.tokenClass, 'github-app-codex-agent');
+});
+
+test('builder token is logged in observe mode and merge still proceeds', async () => {
+  const h = makeHarness({ mergeResults: [{ exitCode: 0 }] });
+  const warnings = [];
+  const result = await attemptDaemonCleanMerge(baseArgs(h, {
+    mergeCapabilityEnforcement: 'observe',
+    mergeCredentialClass: 'github-app-claude-agent',
+    logger: { log() {}, warn: (msg) => warnings.push(String(msg)) },
+  }));
+
+  assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+  assert.equal(h.calls.merge, 1);
+  assert.match(warnings.join('\n'), /"event":"merge_capability_enforcement"/);
+  assert.match(warnings.join('\n'), /"action":"would-deny"/);
+});
+
+test('merge-agent and hammer token classes remain merge-capable in enforce mode', async () => {
+  for (const tokenClass of ['github-app-merge-agent', 'hammer']) {
+    const h = makeHarness({ mergeResults: [{ exitCode: 0 }] });
+    const result = await attemptDaemonCleanMerge(baseArgs(h, {
+      mergeCapabilityEnforcement: 'enforce',
+      mergeCredentialClass: tokenClass,
+    }));
+
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED, tokenClass);
+    assert.equal(h.calls.merge, 1, tokenClass);
+  }
+});
+
 test('clean + eligible dismisses stale Request changes before merge', async () => {
   const h = makeHarness({ mergeResults: [{ exitCode: 0 }] });
   const dismissals = [];

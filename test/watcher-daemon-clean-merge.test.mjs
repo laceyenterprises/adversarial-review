@@ -908,6 +908,7 @@ test('daemon gh merge subprocess is bounded by the shared timeout', async () => 
     assert.equal(capturedOptions.timeout, DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS);
     assert.deepEqual(capturedAttemptArgs.flags, {
       autonomousMergeExecutionEnabled: true,
+      mergeCapabilityEnforcement: 'observe',
       strictMode: false,
     });
     assert.equal(capturedAttemptArgs.retryCap, undefined);

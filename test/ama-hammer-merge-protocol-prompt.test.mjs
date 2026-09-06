@@ -73,6 +73,43 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.match(HAMMER_PROMPT, /Closed-By: hammer \(adversarial-pipe-mode\)/);
 });
 
+test('hammer merge capability shell fallback mirrors JS token-class discovery', () => {
+  for (const name of [
+    'AGENT_OS_GITHUB_TOKEN_CLASS',
+    'AGENT_OS_MERGE_TOKEN_CLASS',
+    'GITHUB_TOKEN_CLASS',
+    'GH_TOKEN_CLASS',
+    'HQ_GITHUB_TOKEN_CLASS',
+    'OAUTH_BROKER_TOKEN_CLASS',
+    'OAUTH_BROKER_PROVIDER',
+    'OAUTH_BROKER_GITHUB_APP_PROVIDER',
+    'OAUTH_BROKER_MERGE_AGENT_PROVIDER',
+    'OAUTH_BROKER_HAMMER_PROVIDER',
+    'OAUTH_BROKER_CODEX_PROVIDER',
+    'OAUTH_BROKER_CLAUDE_PROVIDER',
+    'OAUTH_BROKER_GEMINI_PROVIDER',
+    'OAUTH_BROKER_CODEX_REVIEWER_PROVIDER',
+    'OAUTH_BROKER_CLAUDE_REVIEWER_PROVIDER',
+    'OAUTH_BROKER_GEMINI_REVIEWER_PROVIDER',
+  ]) {
+    assert.match(HAMMER_PROMPT, new RegExp(`\\$\\{${name}:-\\}`), `missing ${name}`);
+  }
+
+  assert.ok(
+    HAMMER_PROMPT.includes(
+      "printf '%s' \"$1\" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | tr '[:upper:]_' '[:lower:]-'",
+    ),
+  );
+  assert.match(HAMMER_PROMPT, /ham_first_nonempty_merge_token_class/);
+  assert.match(HAMMER_PROMPT, /ham_first_known_merge_provider_class/);
+  assert.match(
+    HAMMER_PROMPT,
+    /builder\|builder-class\|codex\|claude-code\|gemini\|clio-agent[\s\S]*merge-agent\|hammer\|hammer-claude\|the-hammer/,
+  );
+  assert.match(HAMMER_PROMPT, /case "\$HAM_MERGE_TOKEN_CLASS" in/);
+  assert.doesNotMatch(HAMMER_PROMPT, /case "\$\(printf '%s' "\$HAM_MERGE_TOKEN_CLASS" \| tr/);
+});
+
 test('hammer audit comment payload excludes prompt-only authoring instructions', () => {
   const commentDetails = HAMMER_PROMPT.match(
     /HAM_AUDIT_COMMENT_DETAILS="\$\(cat <<'EOF'\n(?<body>[\s\S]*?)\nEOF\n\)"/,
@@ -135,15 +172,18 @@ test('terminal-remediation audit is written under the merge lease at the settled
   const rebaseLoopIdx = HAMMER_PROMPT.indexOf('= "BEHIND"');
   const leaseAcquireIdx = HAMMER_PROMPT.indexOf('ham_acquire_merge_lease');
   const predicateIdx = HAMMER_PROMPT.indexOf('ama-check.mjs');
+  const capabilityIdx = HAMMER_PROMPT.indexOf('merge_capability_enforcement');
   const mergeIdx = HAMMER_PROMPT.indexOf('gh pr merge <<PR_URL>>');
   assert.ok(auditIdx > 0, 'audit block present');
   assert.ok(rebaseLoopIdx > 0 && leaseAcquireIdx > 0, 'rebase window + lease acquire present');
-  assert.ok(predicateIdx > 0 && mergeIdx > 0, 'predicate + merge present');
+  assert.ok(predicateIdx > 0 && capabilityIdx > 0 && mergeIdx > 0, 'predicate + capability guard + merge present');
   // Rebase window and lease acquisition come BEFORE the audit:
   assert.ok(rebaseLoopIdx < auditIdx, 'audit must follow the rebase window');
   assert.ok(leaseAcquireIdx < auditIdx, 'audit must follow lease acquisition');
   // Audit comes BEFORE the predicate and the merge:
   assert.ok(auditIdx < predicateIdx, 'audit must precede the ama-check predicate');
+  assert.ok(predicateIdx < capabilityIdx, 'capability guard must follow the ama-check predicate');
+  assert.ok(capabilityIdx < mergeIdx, 'capability guard must precede the merge');
   assert.ok(auditIdx < mergeIdx, 'audit must precede the merge');
   // And it fails closed unless the merge lease is currently held:
   assert.match(

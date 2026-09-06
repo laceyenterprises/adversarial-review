@@ -3845,7 +3845,9 @@ export async function maybeDispatchAmaCloser({
             flags: {
               autonomousMergeExecutionEnabled: cfg?.autonomousMergeExecutionEnabled !== false,
               strictMode: cfg?.strictMode !== false,
+              mergeCapabilityEnforcement: cfg?.mergeCapabilityEnforcement || 'observe',
             },
+            mergeCapabilityEnforcement: cfg?.mergeCapabilityEnforcement || 'observe',
             allowHamTerminalRemediation: true,
             dismissStaleRequestChangesImpl: dispatchContext.dismissStaleRequestChangesOnResolved !== false
               ? async () => dismissStandingChangesRequestedReviewsForHead(execFileImpl, repo, prNumber, reviewedSha, {

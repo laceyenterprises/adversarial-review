@@ -73,6 +73,43 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.match(HAMMER_PROMPT, /Closed-By: hammer \(adversarial-pipe-mode\)/);
 });
 
+test('hammer merge capability shell fallback mirrors JS token-class discovery', () => {
+  for (const name of [
+    'AGENT_OS_GITHUB_TOKEN_CLASS',
+    'AGENT_OS_MERGE_TOKEN_CLASS',
+    'GITHUB_TOKEN_CLASS',
+    'GH_TOKEN_CLASS',
+    'HQ_GITHUB_TOKEN_CLASS',
+    'OAUTH_BROKER_TOKEN_CLASS',
+    'OAUTH_BROKER_PROVIDER',
+    'OAUTH_BROKER_GITHUB_APP_PROVIDER',
+    'OAUTH_BROKER_MERGE_AGENT_PROVIDER',
+    'OAUTH_BROKER_HAMMER_PROVIDER',
+    'OAUTH_BROKER_CODEX_PROVIDER',
+    'OAUTH_BROKER_CLAUDE_PROVIDER',
+    'OAUTH_BROKER_GEMINI_PROVIDER',
+    'OAUTH_BROKER_CODEX_REVIEWER_PROVIDER',
+    'OAUTH_BROKER_CLAUDE_REVIEWER_PROVIDER',
+    'OAUTH_BROKER_GEMINI_REVIEWER_PROVIDER',
+  ]) {
+    assert.match(HAMMER_PROMPT, new RegExp(`\\$\\{${name}:-\\}`), `missing ${name}`);
+  }
+
+  assert.ok(
+    HAMMER_PROMPT.includes(
+      "printf '%s' \"$1\" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | tr '[:upper:]_' '[:lower:]-'",
+    ),
+  );
+  assert.match(HAMMER_PROMPT, /ham_first_nonempty_merge_token_class/);
+  assert.match(HAMMER_PROMPT, /ham_first_known_merge_provider_class/);
+  assert.match(
+    HAMMER_PROMPT,
+    /builder\|builder-class\|codex\|claude-code\|gemini\|clio-agent[\s\S]*merge-agent\|hammer\|hammer-claude\|the-hammer/,
+  );
+  assert.match(HAMMER_PROMPT, /case "\$HAM_MERGE_TOKEN_CLASS" in/);
+  assert.doesNotMatch(HAMMER_PROMPT, /case "\$\(printf '%s' "\$HAM_MERGE_TOKEN_CLASS" \| tr/);
+});
+
 test('hammer audit comment payload excludes prompt-only authoring instructions', () => {
   const commentDetails = HAMMER_PROMPT.match(
     /HAM_AUDIT_COMMENT_DETAILS="\$\(cat <<'EOF'\n(?<body>[\s\S]*?)\nEOF\n\)"/,

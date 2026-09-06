@@ -1976,31 +1976,32 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
       if (!byReason.has(flag.flagKind)) byReason.set(flag.flagKind, []);
       byReason.get(flag.flagKind).push(flag);
     }
-    for (const [flagKind, group] of byReason) {
-      const sample = group[0];
-      findings.push(buildFinding({
-        code: 'review:pr_progress_stalled',
-        tier: 'ticket',
-        subject: `${group.length} open PR(s) are not progressing (${flagKind})`,
-        message: `${sample.repo}#${sample.prNumber} has made no progress for ${Math.round(sample.stallMinutes)}m: ${sample.details?.stallReason || flagKind}. This is independent of the TTM budget -- a busy host still starts the pass it promised.`,
-        evidence: group.map((flag) => (
-          `reviews.db ttm ${flag.repo}#${flag.prNumber} ${flag.flagKind} stalled=${Math.round(flag.stallMinutes)}m `
-          + `review_status=${flag.details?.reviewStatus || 'unknown'} `
-          + `rereview_requested=${flag.details?.rereviewRequestedAt || 'none'} `
-          + `latest_pass_started=${flag.details?.latestPassStartedAt || 'none'}`
-        )),
-        recommendedAction: flagKind === 'rereview_unanswered'
-          ? 'A re-review was requested and no reviewer pass has started since. Check the watcher claim CAS, reviewer pool capacity, and dispatch drain state for this PR.'
-          : 'The reviewer lease expired while the row still claims an in-flight review. Check reviewer-pass-reaper liveness and the lease reclamation path; this is the lease/gate deadlock signature (agent-os#6288).',
-        observedAt,
-        details: {
-          progressClass: 'stuck',
-          flagKind,
-          progressStallThresholdMinutes: snapshot.ttm.config?.progressStallMinutes,
-          flags: group,
-        },
-      }));
-    }
+    const flagKinds = [...byReason.keys()];
+    const distinctPrs = new Set(progressStalls.map((flag) => `${flag.repo}#${flag.prNumber}`));
+    const sample = progressStalls[0];
+    const reasonSummary = flagKinds.map((flagKind) => `${flagKind}: ${byReason.get(flagKind).length}`).join(', ');
+    findings.push(buildFinding({
+      code: 'review:pr_progress_stalled',
+      tier: 'ticket',
+      subject: `${distinctPrs.size} open PR(s) are not progressing (${reasonSummary})`,
+      message: `${sample.repo}#${sample.prNumber} has made no progress for ${Math.round(sample.stallMinutes)}m: ${sample.details?.stallReason || sample.flagKind}. Stall reasons this tick: ${reasonSummary}. This is independent of the TTM budget -- a busy host still starts the pass it promised.`,
+      evidence: progressStalls.map((flag) => (
+        `reviews.db ttm ${flag.repo}#${flag.prNumber} ${flag.flagKind} stalled=${Math.round(flag.stallMinutes)}m `
+        + `review_status=${flag.details?.reviewStatus || 'unknown'} `
+        + `rereview_requested=${flag.details?.rereviewRequestedAt || 'none'} `
+        + `latest_pass_started=${flag.details?.latestPassStartedAt || 'none'}`
+      )),
+      recommendedAction: 'For re-review stalls, check the watcher claim CAS, reviewer pool capacity, and dispatch drain state. For expired reviewer leases, check reviewer-pass-reaper liveness and the lease reclamation path; this is the lease/gate deadlock signature (agent-os#6288).',
+      observedAt,
+      details: {
+        progressClass: 'stuck',
+        flagKind: flagKinds.length === 1 ? flagKinds[0] : 'multiple',
+        flagKinds,
+        byReason: Object.fromEntries(byReason),
+        progressStallThresholdMinutes: snapshot.ttm.config?.progressStallMinutes,
+        flags: progressStalls,
+      },
+    }));
   }
 
   const terminalUnmerged = snapshot.ttm.flags.filter((flag) => flag.flagKind === 'terminal_but_unmerged');

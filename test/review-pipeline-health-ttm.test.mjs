@@ -30,12 +30,13 @@ function insertPr(db, row) {
   db.prepare(
     `INSERT INTO reviewed_prs
        (repo, pr_number, reviewed_at, reviewer, pr_state, merged_at, closed_at,
-        review_status, posted_at, rereview_requested_at)
-     VALUES (?, ?, ?, 'codex', ?, ?, ?, ?, ?, ?)`
+        review_status, posted_at, rereview_requested_at, reviewer_lease_expires_at)
+     VALUES (?, ?, ?, 'codex', ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     REPO, row.prNumber, row.reviewedAt, row.prState || 'open',
     row.mergedAt ?? null, null, row.reviewStatus || 'posted',
-    row.postedAt ?? null, row.rereviewRequestedAt ?? null
+    row.postedAt ?? null, row.rereviewRequestedAt ?? null,
+    row.reviewerLeaseExpiresAt ?? null
   );
 }
 
@@ -44,11 +45,12 @@ function insertPass(db, row) {
     `INSERT INTO reviewer_passes
        (repo, pr_number, attempt_number, reviewer_class, reviewer_model,
         pass_kind, started_at, ended_at, status, verdict, metadata_json)
-     VALUES (?, ?, ?, 'codex', 'gpt-5', ?, ?, ?, 'completed', ?, '{}')`
+     VALUES (?, ?, ?, 'codex', 'gpt-5', ?, ?, ?, ?, ?, '{}')`
   ).run(
     REPO, row.prNumber, row.attemptNumber ?? 1,
     (row.attemptNumber ?? 1) > 1 ? 'rereview' : 'first-pass',
-    row.startedAt, row.endedAt, row.verdict ?? 'request-changes'
+    row.startedAt, row.endedAt, row.status ?? 'completed',
+    row.verdict ?? 'request-changes'
   );
 }
 
@@ -136,6 +138,62 @@ test('a stalled PR emits pr_progress_stalled, and a merely slow one emits only t
   assert.ok(slow.details.budgetProvenance.sampleCount >= 25);
   assert.match(slow.message, /budget derived at p90 from \d+ measured merge\(s\)/);
   assert.match(slow.recommended_action, /Trend only|THROUGHPUT signal/);
+});
+
+test('concurrent progress-stall reasons emit one finding and one Prometheus series', () => {
+  const rootDir = tempRoot();
+  const db = openReviewStateDb(rootDir);
+  ensureReviewStateSchema(db);
+  try {
+    seedDistribution(db, { baseMinutes: 400, perRoundMinutes: 100 });
+
+    insertPr(db, {
+      prNumber: 9010,
+      reviewedAt: iso(90),
+      reviewStatus: 'pending',
+      postedAt: iso(85),
+      rereviewRequestedAt: iso(45),
+    });
+    insertPass(db, { prNumber: 9010, attemptNumber: 1, startedAt: iso(88), endedAt: iso(85) });
+
+    insertPr(db, {
+      prNumber: 9011,
+      reviewedAt: iso(90),
+      reviewStatus: 'reviewing',
+      reviewerLeaseExpiresAt: iso(45),
+    });
+    insertPass(db, {
+      prNumber: 9011,
+      attemptNumber: 1,
+      startedAt: iso(88),
+      endedAt: null,
+      status: 'running',
+      verdict: null,
+    });
+  } finally {
+    db.close();
+  }
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW), env: {} });
+  const stalledFindings = snapshot.findings.filter((finding) => (
+    finding.code === 'review:pr_progress_stalled'
+  ));
+
+  assert.equal(stalledFindings.length, 1);
+  assert.deepEqual(
+    stalledFindings[0].details.flagKinds.sort(),
+    ['rereview_unanswered', 'reviewer_lease_expired']
+  );
+  assert.deepEqual(
+    stalledFindings[0].details.flags.map((flag) => flag.prNumber).sort(),
+    [9010, 9011]
+  );
+
+  const prometheus = renderReviewPipelinePrometheus(snapshot);
+  assert.equal(
+    prometheus.match(/^review_pipeline_sentinel_finding_active\{code="review:pr_progress_stalled",tier="ticket"\} 1$/gm)?.length,
+    1
+  );
 });
 
 test('an unreadable distribution emits the blind code and withholds the slow one', () => {

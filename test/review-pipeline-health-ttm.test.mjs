@@ -13,7 +13,10 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { collectReviewPipelineHealth } from '../src/review-pipeline-health.mjs';
+import {
+  collectReviewPipelineHealth,
+  renderReviewPipelinePrometheus,
+} from '../src/review-pipeline-health.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 
 const REPO = 'laceyenterprises/agent-os';
@@ -167,4 +170,10 @@ test('an unreadable distribution emits the blind code and withholds the slow one
     null,
     'blind must read as a gap, never as zero breaches'
   );
+  const prometheus = renderReviewPipelinePrometheus(snapshot);
+  assert.match(prometheus, /^review_pipeline_ttm_open_budget_breaches NaN$/m);
+  assert.match(prometheus, /^review_pipeline_ttm_budget_minutes\{component="base"\} NaN$/m);
+  assert.match(prometheus, /^review_pipeline_ttm_budget_minutes\{component="per_round"\} NaN$/m);
+  assert.match(prometheus, /^review_pipeline_ttm_queue_pressure_multiplier NaN$/m);
+  assert.doesNotMatch(prometheus, /^review_pipeline_ttm_open_budget_breaches 0$/m);
 });

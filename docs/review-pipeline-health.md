@@ -71,6 +71,11 @@ The Grafana dashboard lives at
   window.
 - `review_pipeline_ttm_open_budget_breaches`: open PRs beyond the
   rounds-aware TTM budget (`base + review_rounds * per_round`).
+- `review_pipeline_ttm_budget_minutes` and
+  `review_pipeline_ttm_queue_pressure_multiplier`: derived budget components.
+  When the budget model is blind, these and
+  `review_pipeline_ttm_open_budget_breaches` emit `NaN` so dashboards show a
+  data gap rather than a false-clean zero.
 - `review_pipeline_ttm_terminal_unmerged_stalls_12h`: terminal-but-unmerged
   stall events observed in the last 12h.
 - `review_pipeline_ttm_terminal_unmerged_duration_minutes_12h`: max and total

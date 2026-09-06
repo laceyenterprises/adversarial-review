@@ -2390,12 +2390,17 @@ function labelsToString(labels = {}) {
 }
 
 function metricLine(name, labels, value) {
-  return `${name}${labelsToString(labels)} ${Number(value) || 0}`;
+  if (value === null || (typeof value === 'number' && Number.isNaN(value))) {
+    return `${name}${labelsToString(labels)} NaN`;
+  }
+  const numeric = Number(value);
+  return `${name}${labelsToString(labels)} ${Number.isFinite(numeric) ? numeric : 0}`;
 }
 
 function renderReviewPipelinePrometheus(snapshot) {
   const lines = [];
   const emittedMetricMetadata = new Set();
+  const withDefault = (value, fallback = 0) => (value === undefined ? fallback : value);
   const pushMetric = (name, labels, value) => {
     if (!emittedMetricMetadata.has(name)) {
       emittedMetricMetadata.add(name);
@@ -2480,18 +2485,18 @@ function renderReviewPipelinePrometheus(snapshot) {
   pushMetric('review_pipeline_dag_autowalk_healthy', {}, snapshot.dagAutowalk?.healthy ? 1 : 0);
   pushMetric('review_pipeline_ttm_minutes', { quantile: '0.5' }, snapshot.ttm?.rollup?.medianTimeToMergeMinutes || 0);
   pushMetric('review_pipeline_ttm_minutes', { quantile: '0.9' }, snapshot.ttm?.rollup?.p90TimeToMergeMinutes || 0);
-  pushMetric('review_pipeline_ttm_open_budget_breaches', {}, snapshot.ttm?.rollup?.openPrsBreachingBudget || 0);
+  pushMetric('review_pipeline_ttm_open_budget_breaches', {}, withDefault(snapshot.ttm?.rollup?.openPrsBreachingBudget));
   pushMetric('review_pipeline_ttm_stuck_open_prs', {}, snapshot.ttm?.rollup?.stuckOpenPrs || 0);
-  pushMetric('review_pipeline_ttm_budget_minutes', { component: 'base' }, snapshot.ttm?.rollup?.baseBudgetMinutes || 0);
+  pushMetric('review_pipeline_ttm_budget_minutes', { component: 'base' }, withDefault(snapshot.ttm?.rollup?.baseBudgetMinutes));
   pushMetric(
     'review_pipeline_ttm_budget_minutes',
     { component: 'per_round' },
-    snapshot.ttm?.rollup?.perRoundBudgetMinutes || 0
+    withDefault(snapshot.ttm?.rollup?.perRoundBudgetMinutes)
   );
   pushMetric(
     'review_pipeline_ttm_queue_pressure_multiplier',
     {},
-    snapshot.ttm?.rollup?.queuePressureMultiplier || 0
+    withDefault(snapshot.ttm?.rollup?.queuePressureMultiplier)
   );
   pushMetric(
     'review_pipeline_ttm_terminal_unmerged_stalls_12h',

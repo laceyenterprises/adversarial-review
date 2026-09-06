@@ -199,10 +199,6 @@ function hasOperatorApprovedOverride(reviewState, prMetadata) {
     enforcement: reviewState?.operatorLabelActorEnforcement ?? prMetadata?.operatorLabelActorEnforcement,
   });
   if (actorPolicy.allowed !== true && actorPolicy.enforcement === 'enforce') return false;
-  if (
-    String(evidence.observedRevisionRef || '') !==
-    String(prMetadata?.headSha || '')
-  ) return false;
   return true;
 }
 
@@ -280,6 +276,12 @@ function hasValidScopedOperatorApprovalEvidence(evidence, prMetadata) {
     String(evidence.observedRevisionRef || evidence.headSha || '') !==
     String(prMetadata?.headSha || '')
   ) return false;
+  return true;
+}
+
+function hasAuditableOperatorApprovalEvidence(evidence) {
+  if (!evidence || evidence.applied !== true) return false;
+  if (!hasOverrideProvenance(evidence)) return false;
   return true;
 }
 
@@ -984,7 +986,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   const operatorOverride = hasOperatorApprovedOverride(operatorReviewState, prMetadata);
   const operatorMutationAudit = reviewState?.operatorApprovedEvidence
     && hasCurrentLabel(prMetadata, OPERATOR_APPROVED_LABEL)
-    && hasValidScopedOperatorApprovalEvidence(reviewState.operatorApprovedEvidence, prMetadata)
+    && hasAuditableOperatorApprovalEvidence(reviewState.operatorApprovedEvidence)
       ? classifyOperatorLabelActor(reviewState.operatorApprovedEvidence, {
         operatorLogins: cfg?.operatorLogins,
         enforcement: cfg?.operatorLabelActorEnforcement,
@@ -1440,6 +1442,7 @@ export const __testables__ = {
   classifyOperatorLabelActor,
   hasValidScopedOverrideEvidence,
   hasValidScopedOperatorApprovalEvidence,
+  hasAuditableOperatorApprovalEvidence,
   hasCurrentLabel,
   presentHardStopLabels,
   classifyCiGreen,

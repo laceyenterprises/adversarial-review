@@ -1387,6 +1387,29 @@ test('operator-approved from a non-allowlisted actor is logged and ignored in en
   assert.equal(audits[0].honored, false);
 });
 
+test('stale operator-approved from a non-allowlisted actor is logged', () => {
+  const audits = [];
+  assert.equal(
+    pickMergeAgentDispatch(makeJob({
+      lastVerdict: 'Request changes',
+      labels: [{ name: 'operator-approved' }],
+      operatorApproval: makeOperatorApproval({
+        actor: 'codex-worker-bot',
+        headSha: 'old-sha',
+      }),
+    }), {
+      operatorLogins: ['VirtualPaul'],
+      operatorLabelActorEnforcement: 'enforce',
+      operatorMutationAuditLogger: (row) => audits.push(row),
+    }),
+    'skip-operator-approval-stale'
+  );
+  assert.equal(audits[0].event, 'operator_mutation_audit');
+  assert.equal(audits[0].actor, 'codex-worker-bot');
+  assert.equal(audits[0].allowed, false);
+  assert.equal(audits[0].honored, false);
+});
+
 test('stale operator-approved label does not block a green normal dispatch', () => {
   assert.equal(
     pickMergeAgentDispatch(makeJob({

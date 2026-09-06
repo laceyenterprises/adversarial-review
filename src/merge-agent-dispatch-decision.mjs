@@ -236,6 +236,25 @@ function isDismissStaleRequestChangesOnResolvedEnabled({
   return false;
 }
 
+function resolveOperatorLabelActorPolicy({ env = process.env, logger = console } = {}) {
+  try {
+    const cfg = loadConfigCached({
+      env,
+      modulePaths: [MODULE_CONFIG_PATH],
+    }).getMergeAuthorityConfig();
+    return {
+      operatorLogins: Array.isArray(cfg?.operatorLogins) ? cfg.operatorLogins : [],
+      operatorLabelActorEnforcement: cfg?.operatorLabelActorEnforcement || 'observe',
+    };
+  } catch (err) {
+    logger?.warn?.(
+      '[merge-agent] failed to load roles.adversarial operator label actor policy; '
+      + `falling back to observe with an empty allowlist. ${err instanceof Error ? err.message : String(err)}`
+    );
+    return { operatorLogins: [], operatorLabelActorEnforcement: 'observe' };
+  }
+}
+
 
 function pickMergeAgentDispatch(job, {
   recentDispatches = [],
@@ -271,7 +290,7 @@ function pickMergeAgentDispatchDetail(job, {
   const hasMergeAgentRequestedLabel = labels.has(MERGE_AGENT_REQUESTED_LABEL);
   const mergeAgentRequested = hasMergeAgentRequestedLabel && isScopedMergeAgentRequest(job);
   const hasOperatorApprovedLabel = labels.has(OPERATOR_APPROVED_LABEL);
-  const operatorActorPolicy = hasOperatorApprovedLabel && hasScopedOperatorApprovalEvidence(job)
+  const operatorActorPolicy = hasOperatorApprovedLabel && hasAuditableOperatorApprovalEvidence(job)
     ? classifyOperatorApprovalActor(job.operatorApproval, {
       operatorLogins,
       enforcement: operatorLabelActorEnforcement,
@@ -674,6 +693,14 @@ function hasScopedOperatorApprovalEvidence(job) {
   return true;
 }
 
+function hasAuditableOperatorApprovalEvidence(job) {
+  const approval = job?.operatorApproval;
+  if (!approval) return false;
+  if (!approval.labelEventId && !approval.labelEventNodeId) return false;
+  if (!approval.createdAt) return false;
+  return true;
+}
+
 function isScopedOperatorApproval(job) {
   return hasScopedOperatorApprovalEvidence(job);
 }
@@ -755,4 +782,5 @@ export {
   classifyOperatorApprovalActor,
   buildScopedOperatorApproval,
   buildScopedMergeAgentRequest,
+  resolveOperatorLabelActorPolicy,
 };

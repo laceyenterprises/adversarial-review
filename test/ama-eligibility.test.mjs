@@ -641,6 +641,39 @@ test('not eligible: bot-applied operator-approved is ignored and audited in enfo
   assert.ok(result.reasons.includes('verdict-not-settled-success'));
 });
 
+test('not eligible: stale bot-applied operator-approved is still audited', () => {
+  const logs = [];
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['operator-approved'] },
+    reviewState: {
+      verdict: 'request-changes',
+      headSha: 'old-reviewed-head',
+      operatorApprovedEvidence: {
+        applied: true,
+        observedRevisionRef: 'stale-head',
+        actor: 'codex-worker-bot',
+        eventId: 'LE_stale_bot_operator',
+        observedAt: '2026-06-10T20:00:00Z',
+      },
+    },
+    cfg: {
+      operatorLogins: ['paul-the-operator'],
+      operatorLabelActorEnforcement: 'enforce',
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    logger: { info: (line) => logs.push(JSON.parse(line)) },
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.trace.verdict.operatorOverride, false);
+  assert.equal(result.trace.verdict.operatorMutationAudit.allowed, false);
+  assert.equal(result.trace.verdict.operatorMutationAudit.honored, false);
+  assert.equal(logs[0].event, 'operator_mutation_audit');
+  assert.equal(logs[0].actor, 'codex-worker-bot');
+  assert.ok(result.reasons.includes('stale-review-head'));
+});
+
 test('eligible: allowlisted human-applied operator-approved is honored and remains head-bound', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     prMetadata: { labels: ['operator-approved'] },

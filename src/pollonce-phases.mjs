@@ -439,6 +439,7 @@ export async function processReviewSubject(entry, ctx) {
     reviewerPoolConfig,
     reviewerMemoryPressureConfig,
     reviewerDispatchCandidates,
+    firstPassSpilloverController = null,
     postedReviewHandlers,
     reviewerMemoryReservationState,
     reviewerMemoryAdmissionSampleForTick,
@@ -1256,12 +1257,18 @@ export async function processReviewSubject(entry, ctx) {
         afhGrounding,
       });
 
-      // RWF-01: review-dispatch worker-class fallback
+      // RWF-01: review-dispatch worker-class fallback (quota trigger)
+      // RSP-01: plus the queue-depth trigger, when the break-glass lever is
+      // armed and this tick still has spill budget. `depthPressure()` is
+      // `{ engaged: false }` on every host that has not armed it, which makes
+      // the resolver take its pre-RSP-01 path unchanged.
+      const reviewerAuthorClass = subject.builderClass || route.builderClass;
       const primaryReviewerWorkerClass = reviewerWorkerClassForRoute(route);
       const rwfDecision = await resolveReviewerWorkerClassWithFallback({
-        authorClass: subject.builderClass || route.builderClass,
+        authorClass: reviewerAuthorClass,
         primary: primaryReviewerWorkerClass,
         fallbackWorkerClasses: reviewWorkerClassFallback(process.env),
+        depthPressure: firstPassSpilloverController?.depthPressure?.() ?? null,
         execFileImpl: execFileAsync,
       });
 
@@ -1270,13 +1277,28 @@ export async function processReviewSubject(entry, ctx) {
           route,
           decision: rwfDecision,
           reviewerRouteByModel: REVIEWER_ROUTE_BY_MODEL,
+          authorClass: reviewerAuthorClass,
         });
         if (appliedFallback.applied) {
           route = appliedFallback.route;
+          // Charge the depth lever's budget/cost ledger only for a spill that
+          // really landed on a route — the operator is owed the number of
+          // non-primary reviews the lever BOUGHT, not the number it attempted.
+          if (rwfDecision.reason === 'queue-depth-pressure') {
+            firstPassSpilloverController?.recordSpill?.({
+              repo: repoPath,
+              prNumber,
+              fromWorkerClass: rwfDecision.from,
+              toWorkerClass: rwfDecision.to,
+            });
+          }
           console.warn(
             `[watcher] review-worker-class-fallback repo=${repoPath} pr=${prNumber} ` +
             `from=${rwfDecision.from} to=${rwfDecision.to} reason=${rwfDecision.reason} ` +
-            `primaryState=${rwfDecision.primaryState}`
+            `primaryState=${rwfDecision.primaryState}` +
+            (rwfDecision.queueDepth === undefined
+              ? ''
+              : ` queueDepth=${rwfDecision.queueDepth} queueDepthThreshold=${rwfDecision.queueDepthThreshold}`)
           );
         } else {
           console.warn(

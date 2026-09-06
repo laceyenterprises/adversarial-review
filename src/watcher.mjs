@@ -382,6 +382,7 @@ import {
   headDispatchLeaseKey,
   resolveAlreadyReviewedHeadDedup,
 } from './reviewed-head-dispatch-gate.mjs';
+import { createFirstPassSpilloverController } from './review-queue-depth.mjs';
 import { reconcilePendingReviewsForSelf } from './reviewer-pre-write.mjs';
 import {
   inspectWatcherExitTimeout,
@@ -1219,6 +1220,7 @@ async function pollOnce(
   const reviewerPoolConfig = resolveFirstPassReviewerPoolConfig({ watcherConfig: config });
   const reviewerMemoryPressureConfig = resolveReviewerMemoryPressureConfig();
   const reviewerDispatchCandidates = [];
+  const firstPassSpilloverController = createFirstPassSpilloverController({ rootDir: ROOT, readDepth: countOpenPrsAwaitingFirstPassReview, logger: console }); // RSP-01: disarmed unless CFG arms it
   const postedReviewHandlers = [];
   const postReviewMaintenanceHandlers = [];
   const reviewerMemoryReservationState = { reservedMb: 0 };
@@ -1375,6 +1377,7 @@ async function pollOnce(
         reviewerPoolConfig,
         reviewerMemoryPressureConfig,
         reviewerDispatchCandidates,
+        firstPassSpilloverController,
         postedReviewHandlers,
         reviewerMemoryReservationState,
         reviewerMemoryAdmissionSampleForTick,

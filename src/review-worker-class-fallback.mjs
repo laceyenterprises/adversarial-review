@@ -6,6 +6,10 @@ import {
   providerForQuotaHarness,
   isGroundedProviderState,
 } from './fleet-quota-status.mjs';
+import {
+  REVIEWER_ROUTE_BY_MODEL as REVIEWER_ROUTE_TABLE_BY_MODEL,
+  isCrossModelReviewWaived,
+} from './adapters/subject/github-pr/routing.mjs';
 
 const execFileAsync = promisify(execFileCb);
 const FLEET_QUOTA_STATUS_TIMEOUT_MS = 20_000;
@@ -36,6 +40,49 @@ function resolveHqPath(env = process.env) {
 
 function reviewerModelForWorkerClass(workerClass) {
   return REVIEWER_MODEL_BY_WORKER_CLASS[String(workerClass || '').trim().toLowerCase()] || null;
+}
+
+// WRITER DIVERSITY — a correctness constraint, not a preference.
+//
+// The raw `candidate !== authorClass` string compare this module used to rely on
+// is NOT sufficient: builder tags and reviewer worker classes are different
+// vocabularies, and several tags map onto a writer model whose name they do not
+// share. `clio-agent` dispatches codex workers, so a clio-agent-authored PR
+// handed to a `codex` reviewer is codex reviewing codex — string-unequal,
+// diversity-dead. `routing.mjs` already owns that mapping
+// (REVIEWER_FAMILY_BY_BUILDER_CLASS, read through `isCrossModelReviewWaived`),
+// and the prior art here is real: a gemini-authored PR was once left with no
+// diverse reviewer when codex was out. So route THROUGH the existing check
+// rather than re-deriving one beside it, and keep the raw compare as a belt-and-
+// braces guard for tags routing.mjs does not know.
+//
+// Depth pressure never relaxes this. Satisfying a deep queue by handing a
+// class-X PR to a class-X reviewer would buy throughput by deleting the thing
+// review exists to provide.
+export function violatesWriterDiversity(authorClass, candidateWorkerClass) {
+  const author = String(authorClass || '').trim().toLowerCase();
+  const candidate = String(candidateWorkerClass || '').trim().toLowerCase();
+  if (!candidate) return true;
+  if (author && candidate === author) return true;
+  const reviewerModel = reviewerModelForWorkerClass(candidate);
+  if (!reviewerModel) return true;
+  return isCrossModelReviewWaived(author, reviewerModel);
+}
+
+// ENTITLEMENT — "spilling onto a class that cannot boot converts a slow queue
+// into a stalled one."
+//
+// A reviewer worker class can only deliver a review if its GitHub reviewer bot
+// token is present: `postGitHubReview` throws `Missing env var: <botTokenEnv>`
+// without it, so an unentitled class burns a spawn and posts nothing. That is
+// tolerable when the primary is quota-grounded and there is no alternative — so
+// the pre-existing quota-triggered path is left exactly as it was — but it is
+// not tolerable for a discretionary, quota-spending depth spill.
+export function reviewerWorkerClassEntitled(workerClass, env = process.env) {
+  const reviewerModel = reviewerModelForWorkerClass(workerClass);
+  const botTokenEnv = reviewerModel ? REVIEWER_ROUTE_TABLE_BY_MODEL[reviewerModel]?.botTokenEnv : null;
+  if (!botTokenEnv) return false;
+  return String(env?.[botTokenEnv] || '').trim() !== '';
 }
 
 function sleep(ms) {
@@ -199,6 +246,7 @@ export function applyReviewerWorkerClassFallbackToRoute({
   route,
   decision,
   reviewerRouteByModel,
+  authorClass = null,
 } = {}) {
   if (!decision?.fellBack) return { applied: false, route, reason: 'no-fallback' };
   const workerClass = String(decision.workerClass || '').trim().toLowerCase();
@@ -206,6 +254,14 @@ export function applyReviewerWorkerClassFallbackToRoute({
   const target = reviewerModel ? reviewerRouteByModel?.[reviewerModel] : null;
   if (!target) {
     return { applied: false, route, reason: 'fallback-route-unavailable' };
+  }
+  // Diversity backstop at the point the route is actually mutated. The resolver
+  // already filters same-writer candidates; this refuses one last time against
+  // the author the CALLER believes in, so no future trigger can reach the route
+  // swap with a class-X reviewer for a class-X PR.
+  const author = authorClass ?? route?.builderClass ?? null;
+  if (author && violatesWriterDiversity(author, workerClass)) {
+    return { applied: false, route, reason: 'writer-diversity-violation' };
   }
 
   return {
@@ -219,6 +275,11 @@ export function applyReviewerWorkerClassFallbackToRoute({
         fromWorkerClass: decision.from,
         toWorkerClass: decision.to,
         reason: decision.reason,
+        // Depth provenance rides along only for a depth-triggered spill, so the
+        // quota-triggered shape stays exactly what it was.
+        ...(decision.queueDepth === undefined
+          ? {}
+          : { queueDepth: decision.queueDepth, queueDepthThreshold: decision.queueDepthThreshold }),
       },
     },
   };
@@ -238,13 +299,20 @@ export function applyReviewerWorkerClassFallbackToRoute({
  * @param {Map=} args.fleetQuotaStatusCache — short-lived stdout cache.
  * @param {number=} args.fleetQuotaStatusCacheTtlMs — cache TTL.
  * @param {Function=} args.nowMs — DI for cache timestamps.
+ * @param {Object=} args.depthPressure — RSP-01 queue-depth snapshot
+ *   `{ engaged, depth, threshold }` from the per-tick spillover controller.
+ *   Absent / `engaged: false` (the default, and the case on any host that has
+ *   not armed the lever) makes this function behave exactly as it did before
+ *   RSP-01, down to the returned reason strings.
  * @returns {Promise<{ workerClass: string, fellBack: boolean, reason: string,
- *   from?: string, to?: string, primaryState?: string, error?: string }>}
+ *   from?: string, to?: string, primaryState?: string, error?: string,
+ *   queueDepth?: number, queueDepthThreshold?: number }>}
  */
 export async function resolveReviewerWorkerClassWithFallback({
   authorClass,
   primary,
   fallbackWorkerClasses,
+  depthPressure = null,
   env = process.env,
   hqPath = resolveHqPath(env),
   execFileImpl = execFileAsync,
@@ -262,19 +330,34 @@ export async function resolveReviewerWorkerClassWithFallback({
     .filter(Boolean);
   const base = { workerClass: primaryClass, fellBack: false };
 
+  // RSP-01 — depth is an ADDITIONAL trigger beside quota, never a replacement.
+  // `depthEngaged` only widens what this function is allowed to consider; every
+  // pre-existing branch below is reached on exactly the conditions it was
+  // before when the lever is disarmed.
+  const depthEngaged = depthPressure?.engaged === true;
+  const depthFields = depthEngaged
+    ? { queueDepth: depthPressure.depth ?? null, queueDepthThreshold: depthPressure.threshold ?? null }
+    : {};
+
   if (!primaryClass || fallbacks.length === 0) {
     return { ...base, reason: 'no-fallback-configured' };
   }
-  if (!providerForQuotaHarness(primaryClass)) {
+  // An untracked primary short-circuits the QUOTA trigger because there is no
+  // provider state to ground it on — and `gemini`/`agy`, the class this whole
+  // ticket is about, is exactly that (QUOTA_HARNESS_PROVIDER covers openai and
+  // anthropic only). That is precisely why a saturated-but-healthy gemini never
+  // yielded. Depth does not need a primary provider state to be meaningful, so
+  // an armed+engaged lever is allowed past this gate; a disarmed one is not.
+  if (!providerForQuotaHarness(primaryClass) && !depthEngaged) {
     return { ...base, reason: 'primary-provider-untracked' };
   }
   const viableFallbacks = fallbacks.filter((candidate) => (
     candidate !== primaryClass &&
-    candidate !== author &&
+    !violatesWriterDiversity(author, candidate) &&
     providerForQuotaHarness(candidate)
   ));
   if (viableFallbacks.length === 0) {
-    return { ...base, reason: 'no-available-fallback' };
+    return { ...base, ...depthFields, reason: 'no-available-fallback' };
   }
 
   const quotaStatus = await readFleetQuotaStatusWithRetry({
@@ -295,8 +378,41 @@ export async function resolveReviewerWorkerClassWithFallback({
   const stdout = quotaStatus.stdout;
   let primaryAvail;
   try {
-    primaryAvail = quotaAvailableFromFleetStatus(stdout, { harness: primaryClass });
+    // A primary with no tracked provider can only be here under depth pressure
+    // (the gate above). It has no quota verdict, so it is treated as ungrounded
+    // and the quota trigger simply does not fire for it — depth does.
+    primaryAvail = providerForQuotaHarness(primaryClass)
+      ? quotaAvailableFromFleetStatus(stdout, { harness: primaryClass })
+      : { available: true, state: 'untracked-quota-harness' };
     if (!isGroundedProviderState(primaryAvail.state)) {
+      // ── RSP-01 depth trigger ──────────────────────────────────────────────
+      // Reached ONLY when the lever is armed, the queue is at/above threshold,
+      // and this tick still has spill budget. The primary is healthy; we are
+      // choosing to spend build quota to drain a backlog.
+      if (depthEngaged) {
+        for (const candidate of viableFallbacks) {
+          // Entitled AND quota-available, in that order — both are "can this
+          // class actually boot and post", and failing either makes the spill a
+          // stall rather than a drain.
+          if (!reviewerWorkerClassEntitled(candidate, env)) continue;
+          if (!quotaAvailableFromFleetStatus(stdout, { harness: candidate }).available) continue;
+          return {
+            workerClass: candidate,
+            fellBack: true,
+            from: primaryClass,
+            to: candidate,
+            reason: 'queue-depth-pressure',
+            primaryState: primaryAvail.state,
+            ...depthFields,
+          };
+        }
+        return {
+          ...base,
+          reason: 'no-available-fallback',
+          primaryState: primaryAvail.state,
+          ...depthFields,
+        };
+      }
       return {
         ...base,
         reason: primaryAvail.available ? 'primary-available' : 'primary-not-grounded',
@@ -304,6 +420,8 @@ export async function resolveReviewerWorkerClassWithFallback({
       };
     }
 
+    // Quota trigger, unchanged: a grounded primary falls over regardless of
+    // depth, and does NOT consume the depth budget — the two triggers compose.
     for (const candidate of viableFallbacks) {
       const candidateAvail = quotaAvailableFromFleetStatus(stdout, { harness: candidate });
       if (candidateAvail.available) {

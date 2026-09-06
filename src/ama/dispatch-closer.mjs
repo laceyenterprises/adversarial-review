@@ -1178,10 +1178,15 @@ const AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS = (
   );
 export const AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS = 30 * 60 * 1000;
 
-// The one terminal outcome a dispatched lease may be reclaimed from. `succeeded`
-// stays sticky per SPEC 4.4 rule #5; this covers only a close that ran and did
-// not merge, which the audit model permits further attempts on.
+// Terminal outcomes a dispatched lease may be reclaimed from. `succeeded`
+// stays sticky per SPEC 4.4 rule #5; these outcomes record attempts that did
+// not spend closure authority, so the audit model permits further attempts.
 export const AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOME = 'failed-without-merge';
+export const AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOMES = new Set([
+  AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOME,
+  'deferred',
+  'superseded',
+]);
 const AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000, 5_000];
 export const AMA_CLOSER_REDISPATCH_BOUND = 2;
 const AMA_CLOSER_BRANCH_HOLDER_BLOCK_BOUND = 3;
@@ -1315,7 +1320,7 @@ export function isReclaimableDispatchedAmaCloserLease(lease, { now = null } = {}
   // volume stays bounded by the separate hammer-retry-cap, which is what is
   // supposed to stop a persistently failing close, not a stuck lease file.
   const terminalOutcome = lease.terminalOutcome ?? null;
-  if (terminalOutcome !== null && terminalOutcome !== AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOME) {
+  if (terminalOutcome !== null && !AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOMES.has(terminalOutcome)) {
     return false;
   }
 

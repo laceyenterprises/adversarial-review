@@ -34,14 +34,21 @@ test('a failed-without-merge lease is reclaimable once aged', () => {
   assert.equal(reclaim('failed-without-merge', AGED), true);
 });
 
+test('deferred and superseded leases are reclaimable once aged', () => {
+  assert.equal(reclaim('deferred', AGED), true);
+  assert.equal(reclaim('superseded', AGED), true);
+});
+
 test('succeeded stays sticky and is never reclaimed', () => {
   // SPEC 4.4 rule #5 -- the terminal-succeeded surface is the contract.
   assert.equal(reclaim('succeeded', AGED), false);
 });
 
-test('the age bound still applies to a failed close', () => {
+test('the age bound still applies to retryable terminal outcomes', () => {
   // Reclaim must not race a close that is still in flight.
   assert.equal(reclaim('failed-without-merge', FRESH), false);
+  assert.equal(reclaim('deferred', FRESH), false);
+  assert.equal(reclaim('superseded', FRESH), false);
 });
 
 test('a lease with no terminal outcome is unchanged', () => {

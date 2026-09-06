@@ -11,6 +11,58 @@ async function refreshWatcherAuthenticationForTick({ log = console } = {}) {
   await refreshWatcherGithubToken({ log });
 }
 
+
+// Wall-clock authentication refresh.
+//
+// SEV0 2026-09-06: refreshWatcherAuthenticationForTick is called at the top of
+// pollOnce, so it runs once PER TICK. A tick is not bounded anywhere near the
+// token lifetime -- two consecutive dispatch drains of 28.4 and 25.8 minutes put
+// 54 minutes inside a single tick against a ~55 minute App installation token.
+// The token expired mid-tick and every remaining `gh` call failed 401 until the
+// tick ended:
+//
+//     refresh -> expires_at = 18:54:06Z          <- exactly ONE refresh
+//     drain exceeded SLA: elapsed_ms=1705575       (28.4 min)
+//     drain exceeded SLA: elapsed_ms=1546663       (25.8 min)
+//     gh: Bad credentials (HTTP 401) x29
+//
+// The refresh itself was never broken -- it is TTL-gated, fail-safe and logs a
+// correct future expires_at. It was on the wrong clock. This drives the SAME
+// function from a timer so refresh cadence no longer depends on how long a tick
+// takes. The underlying refresh is idempotent and TTL-gated (20 min), so calling
+// it every few minutes is cheap: it only re-fetches when the token is actually
+// near expiry.
+const WATCHER_AUTH_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+
+function startWatcherAuthenticationRefreshTimer({
+  log = console,
+  intervalMs = WATCHER_AUTH_REFRESH_INTERVAL_MS,
+  refreshImpl = refreshWatcherAuthenticationForTick,
+  setIntervalImpl = setInterval,
+} = {}) {
+  let inFlight = false;
+  const timer = setIntervalImpl(() => {
+    // Never overlap with a refresh already running (either from this timer or
+    // from a tick). A second concurrent broker call would be wasted work.
+    if (inFlight) return;
+    inFlight = true;
+    Promise.resolve()
+      .then(() => refreshImpl({ log }))
+      .catch((err) => {
+        // Never throw from a timer: an unhandled rejection here would take down
+        // the watcher, which is strictly worse than a stale token.
+        log.warn?.(`[watcher] wall-clock auth refresh failed: ${err?.message || err}`);
+      })
+      .finally(() => {
+        inFlight = false;
+      });
+  }, intervalMs);
+  // Do not hold the event loop open on our own account; the poll-interval timer
+  // is what keeps the watcher alive between polls.
+  timer.unref?.();
+  return timer;
+}
+
 function createTickHcpHealthzProbe({
   checkHcpHealthzImpl = checkHcpHealthz,
 } = {}) {
@@ -53,7 +105,9 @@ async function retryPendingReviewedAttestationQueueForWatcher({
 }
 
 export {
+  WATCHER_AUTH_REFRESH_INTERVAL_MS,
   createTickHcpHealthzProbe,
+  startWatcherAuthenticationRefreshTimer,
   refreshWatcherAuthenticationForTick,
   retryPendingReviewedAttestationQueueForWatcher,
 };

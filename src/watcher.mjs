@@ -356,7 +356,7 @@ import {
 } from './conditional-request.mjs';
 import { reviewBodyHasScopeViolationFinding } from './additive-only-scope.mjs';
 import { sweepEtagCache } from './etag-cache.mjs';
-import { refreshWatcherAuthenticationForTick, createTickHcpHealthzProbe, retryPendingReviewedAttestationQueueForWatcher } from './watcher-tick-preflight.mjs';
+import { refreshWatcherAuthenticationForTick, startWatcherAuthenticationRefreshTimer, createTickHcpHealthzProbe, retryPendingReviewedAttestationQueueForWatcher } from './watcher-tick-preflight.mjs';
 import {
   fetchPullRequestHeadAndState,
   fetchPullRequestMergeability,
@@ -1829,6 +1829,8 @@ async function main() {
       stallWatchdog.endPoll();
     }
   }
+
+  startWatcherAuthenticationRefreshTimer({ log: console });
 
   (async function pollLoop() {
     let nextStart = Date.now();

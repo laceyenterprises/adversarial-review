@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { isDeepStrictEqual, promisify } from 'node:util';
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 import { classifyStructuredBlockingIssues } from './kernel/verdict.mjs';
@@ -14,6 +14,9 @@ const REVIEWED_ATTESTATION_DIGEST_RE = /^sha256:[A-Za-z0-9_-]{43}$/;
 const ATTESTATION_SIGN_FAILED_FAILURE_CLASS = 'attestation-sign-failed';
 const HCP_UNAVAILABLE_FAILURE_CLASS = 'hcp-unavailable';
 const REVIEWED_ATTESTATION_QUEUE_RELATIVE_PATH = join('data', 'reviewed-attestations', 'pending.jsonl');
+const REVIEWED_ATTESTATION_QUEUE_LOCK_STALE_MS = 60_000;
+const REVIEWED_ATTESTATION_QUEUE_LOCK_WAIT_MS = 30_000;
+const REVIEWED_ATTESTATION_QUEUE_LOCK_POLL_MS = 25;
 
 function isTransientSignError(err) {
   if (err?.killed === true) return true;
@@ -45,6 +48,10 @@ function classifyReviewedAttestationFailure(err) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 async function execFileWithTransientRetry(execFileImpl, command, args, options, {
@@ -308,6 +315,55 @@ function reviewedAttestationQueuePath(rootDir) {
   return join(rootDir, REVIEWED_ATTESTATION_QUEUE_RELATIVE_PATH);
 }
 
+function reviewedAttestationQueueLockPath(rootDir) {
+  return `${reviewedAttestationQueuePath(rootDir)}.lock`;
+}
+
+function acquireReviewedAttestationQueueLock(rootDir, {
+  waitMs = REVIEWED_ATTESTATION_QUEUE_LOCK_WAIT_MS,
+  staleMs = REVIEWED_ATTESTATION_QUEUE_LOCK_STALE_MS,
+} = {}) {
+  const queuePath = reviewedAttestationQueuePath(rootDir);
+  const lockPath = reviewedAttestationQueueLockPath(rootDir);
+  mkdirSync(dirname(queuePath), { recursive: true });
+  const startedAt = Date.now();
+  while (true) {
+    try {
+      mkdirSync(lockPath);
+      writeFileSync(join(lockPath, 'owner.json'), `${JSON.stringify({
+        pid: process.pid,
+        acquired_at: new Date().toISOString(),
+      })}\n`);
+      return () => rmSync(lockPath, { recursive: true, force: true });
+    } catch (err) {
+      if (err?.code !== 'EEXIST') throw err;
+      try {
+        const ageMs = Date.now() - statSync(lockPath).mtimeMs;
+        if (ageMs > staleMs) {
+          rmSync(lockPath, { recursive: true, force: true });
+          continue;
+        }
+      } catch (statErr) {
+        if (statErr?.code === 'ENOENT') continue;
+        throw statErr;
+      }
+      if (Date.now() - startedAt >= waitMs) {
+        throw new Error(`timed out acquiring reviewed attestation queue lock: ${lockPath}`);
+      }
+      sleepSync(REVIEWED_ATTESTATION_QUEUE_LOCK_POLL_MS);
+    }
+  }
+}
+
+function withReviewedAttestationQueueLock(rootDir, callback) {
+  const release = acquireReviewedAttestationQueueLock(rootDir);
+  try {
+    return callback();
+  } finally {
+    release();
+  }
+}
+
 function pendingReviewedAttestationEntry(args = {}, err = null) {
   const payload = args.payload || buildReviewedAttestationPayload({
     repo: args.repo,
@@ -329,14 +385,15 @@ function pendingReviewedAttestationEntry(args = {}, err = null) {
 
 function enqueuePendingReviewedAttestation(rootDir, args = {}, err = null) {
   if (!rootDir) throw new TypeError('rootDir is required');
-  const queuePath = reviewedAttestationQueuePath(rootDir);
-  mkdirSync(dirname(queuePath), { recursive: true });
   const entry = pendingReviewedAttestationEntry(args, err);
-  writeFileSync(queuePath, `${JSON.stringify(entry)}\n`, { flag: 'a' });
+  withReviewedAttestationQueueLock(rootDir, () => {
+    const queuePath = reviewedAttestationQueuePath(rootDir);
+    writeFileSync(queuePath, `${JSON.stringify(entry)}\n`, { flag: 'a' });
+  });
   return entry;
 }
 
-function readPendingReviewedAttestations(rootDir) {
+function readPendingReviewedAttestationsUnlocked(rootDir) {
   const queuePath = reviewedAttestationQueuePath(rootDir);
   let raw = '';
   try {
@@ -350,13 +407,50 @@ function readPendingReviewedAttestations(rootDir) {
     .map((line) => JSON.parse(line));
 }
 
-function rewritePendingReviewedAttestations(rootDir, entries) {
+function readPendingReviewedAttestations(rootDir) {
+  if (!rootDir) throw new TypeError('rootDir is required');
+  return withReviewedAttestationQueueLock(rootDir, () => readPendingReviewedAttestationsUnlocked(rootDir));
+}
+
+function rewritePendingReviewedAttestationsUnlocked(rootDir, entries) {
   const queuePath = reviewedAttestationQueuePath(rootDir);
   mkdirSync(dirname(queuePath), { recursive: true });
   const body = entries.map((entry) => JSON.stringify(entry)).join('\n');
   const tmpPath = `${queuePath}.tmp.${process.pid}`;
   writeFileSync(tmpPath, body ? `${body}\n` : '');
   renameSync(tmpPath, queuePath);
+}
+
+function replaceProcessedReviewedAttestations(rootDir, processedEntries) {
+  withReviewedAttestationQueueLock(rootDir, () => {
+    const current = readPendingReviewedAttestationsUnlocked(rootDir);
+    const replacements = new Map();
+    const consumed = new Map();
+    for (const processed of processedEntries) {
+      const key = JSON.stringify(processed.original);
+      if (processed.remaining) {
+        const bucket = replacements.get(key) || [];
+        bucket.push(processed.remaining);
+        replacements.set(key, bucket);
+      } else {
+        consumed.set(key, (consumed.get(key) || 0) + 1);
+      }
+    }
+    const next = current.flatMap((entry) => {
+      const key = JSON.stringify(entry);
+      const replacementBucket = replacements.get(key);
+      if (replacementBucket?.length > 0) {
+        return [replacementBucket.shift()];
+      }
+      const consumeCount = consumed.get(key) || 0;
+      if (consumeCount > 0) {
+        consumed.set(key, consumeCount - 1);
+        return [];
+      }
+      return [entry];
+    });
+    rewritePendingReviewedAttestationsUnlocked(rootDir, next);
+  });
 }
 
 async function retryPendingReviewedAttestations({
@@ -373,6 +467,7 @@ async function retryPendingReviewedAttestations({
   }
   const remaining = [];
   const consumed = [];
+  const processed = [];
   for (const entry of pending) {
     try {
       const signed = await signReviewedAttestation({
@@ -388,20 +483,23 @@ async function retryPendingReviewedAttestations({
         env,
       });
       consumed.push({ entry, signed, recorded });
+      processed.push({ original: entry, remaining: null });
       log?.log?.(
         `[reviewer] queued reviewed attestation consumed for ${entry.payload.repo}#${entry.payload.pr_number}` +
           `@${String(entry.payload.head_sha || '').slice(0, 12)}`
       );
     } catch (err) {
-      remaining.push({
+      const failedEntry = {
         ...entry,
         failure_class: classifyReviewedAttestationFailure(err),
         last_error: err?.message || String(err || ''),
         last_attempted_at: now(),
-      });
+      };
+      remaining.push(failedEntry);
+      processed.push({ original: entry, remaining: failedEntry });
     }
   }
-  rewritePendingReviewedAttestations(rootDir, remaining);
+  replaceProcessedReviewedAttestations(rootDir, processed);
   return { attempted: pending.length, consumed: consumed.length, remaining: remaining.length };
 }
 

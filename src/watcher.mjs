@@ -1250,7 +1250,7 @@ async function pollOnce(
   const getRoutingTierReadinessForTick = createRoutingTierReadinessProbeCache();
   let hcpHealthzForTick = null;
   const getHcpHealthzForTick = async () => {
-    if (!hcpHealthzForTick || !hcpHealthzForTick.ready) {
+    if (hcpHealthzForTick === null) {
       hcpHealthzForTick = await checkHcpHealthz();
     }
     return hcpHealthzForTick;

@@ -269,6 +269,70 @@ test('queued reviewed attestation retries sign and record then removes consumed 
   }
 });
 
+test('queued reviewed attestation retry preserves entries appended while signing is in flight', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewed-attestation-queue-race-'));
+  try {
+    const firstPayloadArgs = {
+      repo: 'laceyenterprises/demo',
+      prNumber: 23,
+      headSha: 'head-sha-1',
+      reviewerIdentity: 'codex-reviewer-lacey',
+      verdict: 'comment-only',
+      findingsCount: 0,
+    };
+    const secondPayloadArgs = {
+      repo: 'laceyenterprises/demo',
+      prNumber: 24,
+      headSha: 'head-sha-2',
+      reviewerIdentity: 'claude-reviewer-lacey',
+      verdict: 'request-changes',
+      findingsCount: 1,
+    };
+    enqueuePendingReviewedAttestation(
+      rootDir,
+      firstPayloadArgs,
+      Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:8002'), { code: 'ECONNREFUSED' }),
+    );
+
+    let appendedDuringSign = false;
+    const result = await retryPendingReviewedAttestations({
+      rootDir,
+      execFileImpl: (command, args, options = {}) => {
+        if (args[1] === 'record') {
+          return execFileResultWithStdin({ stdout: '{"recorded":true}' });
+        }
+        if (!appendedDuringSign) {
+          appendedDuringSign = true;
+          enqueuePendingReviewedAttestation(
+            rootDir,
+            secondPayloadArgs,
+            Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:8002'), { code: 'ECONNREFUSED' }),
+          );
+        }
+        const payloadJson = JSON.parse(args[args.indexOf('--payload-json') + 1]);
+        return Promise.resolve({
+          stdout: JSON.stringify({
+            ...buildReviewedAttestationPayload(firstPayloadArgs),
+            payload: payloadJson,
+            ts: args[args.indexOf('--ts') + 1],
+            signature: signatureFor('codex-reviewer-lacey'),
+          }),
+        });
+      },
+      env: {},
+      log: { log() {} },
+    });
+
+    assert.deepEqual(result, { attempted: 1, consumed: 1, remaining: 0 });
+    const queued = readPendingReviewedAttestations(rootDir);
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0].payload.pr_number, 24);
+    assert.equal(queued[0].payload.head_sha, 'head-sha-2');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 function resultTimestamp(args) {
   return args[args.indexOf('--ts') + 1];
 }

@@ -63,6 +63,14 @@ test('cascade / reviewer-timeout / launchctl-bootstrap / provider degradation re
     infraRecoverableFailureClass({ failure_message: '[reviewer-output] review artifact missing recognized Verdict value' }),
     'reviewer-output'
   );
+  assert.equal(
+    infraRecoverableFailureClass({ failure_message: '[attestation-sign-failed] hq attest sign failed' }),
+    'attestation-sign-failed'
+  );
+  assert.equal(
+    infraRecoverableFailureClass({ failure_message: '[hcp-unavailable] HCP healthz timed out' }),
+    'hcp-unavailable'
+  );
 });
 
 test('forbidden-fallback is NOT infra-recoverable (security must stay terminal)', () => {

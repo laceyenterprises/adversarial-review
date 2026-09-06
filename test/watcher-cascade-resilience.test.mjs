@@ -400,6 +400,21 @@ test('rate-limit and 5xx heuristics distinguish real 429s from cascades', () => 
   );
 });
 
+test('attestation signing failures are classified without GitHub-post masking', () => {
+  assert.equal(
+    classifyReviewerFailure(
+      '[reviewer] GITHUB POST FAILED for laceyenterprises/agent-os#6117: Command failed: hq attest sign\n' +
+        'connect ECONNREFUSED 127.0.0.1:8002',
+      1
+    ),
+    'hcp-unavailable'
+  );
+  assert.equal(
+    classifyReviewerFailure('reviewed attestation signature verification failed after hq attest sign', 1),
+    'attestation-sign-failed'
+  );
+});
+
 test('reviewer subprocess timeouts get a distinct failure class', async () => {
   await assert.rejects(
     execFileAsync(
@@ -1547,6 +1562,57 @@ test('settleReviewerAttempt records provider overload without burning attempts',
     assert.equal(state.lastFailureClass, PROVIDER_OVERLOADED_FAILURE_CLASS);
     assert.deepEqual(state.transientFailureBreakdown, { [PROVIDER_OVERLOADED_FAILURE_CLASS]: 1 });
     assert.match(warnings.join('\n'), /Reviewer provider-overloaded failure/);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('settleReviewerAttempt records HCP unavailable without burning attempts', () => {
+  const { rootDir, db } = setupFixture();
+  try {
+    const repo = 'laceyenterprises/adversarial-review';
+    const prNumber = 195;
+    const warnings = [];
+    const statements = {
+      markPosted: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
+      ),
+      markFailed: stmtMarkBugFailed(db),
+      releaseReviewLease: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
+      ),
+      markCascadeFailed: stmtMarkCascadeFailed(db),
+      markPendingUpstream: stmtMarkPendingUpstream(db),
+      getReviewRow: db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'),
+    };
+
+    settleReviewerAttempt({
+      rootDir,
+      repoPath: repo,
+      prNumber,
+      result: {
+        ok: false,
+        error: 'HCP healthz http://127.0.0.1:8002/v1/healthz failed: timeout',
+        failureClass: 'hcp-unavailable',
+      },
+      failureAt: '2026-09-03T20:00:00.000Z',
+      maxRemediationRounds: 1,
+      statements,
+      log: { warn: (line) => warnings.push(line) },
+    });
+
+    const row = db.prepare(
+      'SELECT review_status, review_attempts, failure_message FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get(repo, prNumber);
+    const state = readCascadeState(rootDir, { repo, prNumber });
+
+    assert.equal(row.review_status, 'pending-upstream');
+    assert.equal(row.review_attempts, 0);
+    assert.match(row.failure_message, /^\[hcp-unavailable\]/);
+    assert.equal(state.lastFailureClass, 'hcp-unavailable');
+    assert.deepEqual(state.transientFailureBreakdown, { 'hcp-unavailable': 1 });
+    assert.match(warnings.join('\n'), /Reviewer hcp-unavailable failure/);
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

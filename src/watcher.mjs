@@ -356,7 +356,7 @@ import {
 } from './conditional-request.mjs';
 import { reviewBodyHasScopeViolationFinding } from './additive-only-scope.mjs';
 import { sweepEtagCache } from './etag-cache.mjs';
-import { refreshReviewerBrokerTokens, refreshWatcherGithubToken } from './reviewer-broker-refresh.mjs';
+import { refreshWatcherAuthenticationForTick, createTickHcpHealthzProbe, retryPendingReviewedAttestationQueueForWatcher } from './watcher-tick-preflight.mjs';
 import {
   fetchPullRequestHeadAndState,
   fetchPullRequestMergeability,
@@ -1145,22 +1145,17 @@ async function pollOnce(
   resetRoleConfigCache();
   refreshReviewerRuntimeAdapter();
   assertReviewDbWritesRoundTrip(db);
-  // Keep the reviewer-bot GitHub App installation tokens fresh. The watcher is
-  // a single long-lived process that resolved these once at startup; App
-  // installation tokens expire ~1h, so without a periodic refresh the GitHub
-  // review-POST starts failing with HTTP 401 about an hour after each restart
-  // (the 2026-06-13 pipeline-wide outage). This is TTL-gated + fail-safe: it
-  // only re-fetches a token older than the TTL and never clears a still-valid
-  // token if the broker is briefly unreachable. Never throws.
-  await refreshReviewerBrokerTokens({ log: console });
-  // Same TTL-gated, fail-safe refresh for the watcher's OWN GitHub token
-  // (GITHUB_TOKEN/GH_TOKEN) so the poll-loop octokit + AMA-eligibility `gh` calls
-  // stay on a rate-limit-isolated App token instead of exhausting the operator
-  // PAT's shared 5000/hr budget under PR surge. No-op unless WATCHER_GH_AUTH_VIA_BROKER=true.
-  await refreshWatcherGithubToken({ log: console });
+  await refreshWatcherAuthenticationForTick({ log: console });
   const healthTick = healthProbe?.beginTick?.();
   try {
     maybeSweepConditionalRequestCache({ rootDir: ROOT, logger: console });
+    await retryPendingReviewedAttestationQueueForWatcher({
+      rootDir: ROOT,
+      hqPath: process.env.HQ_BIN || 'hq',
+      execFileImpl: execFileAsync,
+      env: process.env,
+      log: console,
+    });
     const operatorSurface = createWatcherOperatorSurface();
     await refreshOrgRepos(octokit);
     const reattach = await reconcileReviewerSessions({
@@ -1232,6 +1227,7 @@ async function pollOnce(
     memoryPressureConfig: reviewerMemoryPressureConfig,
   });
   const getRoutingTierReadinessForTick = createRoutingTierReadinessProbeCache();
+  const getHcpHealthzForTick = createTickHcpHealthzProbe();
   const reviewerCommandFailedReviewProbe = makeReviewPostedProbe(octokit);
   async function drainReviewerDispatchCandidates(reason) {
     if (!reviewerPoolConfig.enabled || reviewerDispatchCandidates.length === 0) {
@@ -1383,6 +1379,7 @@ async function pollOnce(
         reviewerMemoryReservationState,
         reviewerMemoryAdmissionSampleForTick,
         getRoutingTierReadinessForTick,
+        getHcpHealthzForTick,
         reviewerCommandFailedReviewProbe,
         domainId,
         domainReviewerRuntimeAdapter,

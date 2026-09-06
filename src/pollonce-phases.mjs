@@ -86,6 +86,7 @@ import {
   createHeadCloserCommitSuppressionResolver,
   getHeadCloserCommitSuppressionWithBoundedRetry,
 } from './head-closer-commit-suppression.mjs';
+import { checkHcpHealthz } from './hcp-health.mjs';
 import { handlePostedReviewRow } from './posted-review-row.mjs';
 import {
   QUOTA_EXHAUSTED_FAILURE_CLASS,
@@ -240,6 +241,41 @@ export function markArgusSecurityQueuedRow({
     prNumber
   );
   return ARGUS_SECURITY_QUEUED_STATUS;
+}
+
+export async function enforceHcpPreSpawnReadiness({
+  repoPath,
+  prNumber,
+  rootDir,
+  statements,
+  attemptAt,
+  maxRemediationRounds,
+  getHcpHealthzForTick = checkHcpHealthz,
+  settleReviewerAttemptImpl = settleReviewerAttempt,
+  logger = console,
+} = {}) {
+  const hcpHealthz = await getHcpHealthzForTick();
+  if (hcpHealthz.ready) return { proceed: true, hcpHealthz };
+  logger.log?.(
+    `[watcher] Skipping reviewer spawn for ${repoPath}#${prNumber}: ` +
+    `HCP healthz not ready (${hcpHealthz.reason}). ` +
+    `Deferring via transient-failure backoff; no attempt budget consumed.`
+  );
+  settleReviewerAttemptImpl({
+    rootDir,
+    repoPath,
+    prNumber,
+    statements,
+    result: {
+      ok: false,
+      failureClass: hcpHealthz.failureClass || 'hcp-unavailable',
+      error: hcpHealthz.failureMessage
+        || `HCP healthz reported ${hcpHealthz.reason}.`,
+    },
+    failureAt: attemptAt,
+    maxRemediationRounds,
+  });
+  return { proceed: false, hcpHealthz };
 }
 
 // ASR-04 — the disposition for a PR whose title carries no worker prefix.
@@ -407,6 +443,7 @@ export async function processReviewSubject(entry, ctx) {
     reviewerMemoryReservationState,
     reviewerMemoryAdmissionSampleForTick,
     getRoutingTierReadinessForTick,
+    getHcpHealthzForTick = checkHcpHealthz,
     getAfhReviewerGroundingForTick,
     reviewerCommandFailedReviewProbe,
     domainId,
@@ -2277,6 +2314,17 @@ export async function processReviewSubject(entry, ctx) {
               });
               return;
             }
+
+            const hcpPrecheck = await enforceHcpPreSpawnReadiness({
+              repoPath,
+              prNumber,
+              rootDir: ROOT,
+              statements: ctx.statements,
+              attemptAt,
+              maxRemediationRounds,
+              getHcpHealthzForTick,
+            });
+            if (!hcpPrecheck.proceed) return;
 
             // Standing policy: the hammer ALWAYS closes on exhaustion and must
             // NEVER trigger a re-review. Two gates before spawning a reviewer on

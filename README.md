@@ -247,6 +247,14 @@ pre-ASR-04 terminal behaviour (loudly — every such write logs
 `ARGUS_ROUTE_DISABLED`). `npm run argus:backfill` recovers rows already stranded
 in the old status; open rows also self-heal on the next watcher tick.
 
+A narrow dependency-bot auto-adjudication path handles simple non-major,
+non-native manifest bumps without waiting for a separate Argus worker; `0.x`
+minor bumps are treated as major for this policy and route to verification. It
+records the exact dependency inputs, hands the exact head to clean merge
+authority, and leaves the Argus job pending when CI has not reached a terminal
+green/red answer yet so the next watcher tick can retry instead of completing a
+job that never merged.
+
 For the seam diagram and the kernel/adapter contract details, read
 [`docs/ARCH-adversarial-review-adapter-architecture.md`](docs/ARCH-adversarial-review-adapter-architecture.md).
 

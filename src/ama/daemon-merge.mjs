@@ -324,7 +324,7 @@ function priorDaemonPermanentFailure({ readAuditImpl, hqRoot, repo, prNumber, va
  * @param {object} [args.logger]
  * @param {number} [args.retryCap]
  * @param {number} [args.backoffBaseMs]
- * @returns {Promise<object>} `{ disposition, reason, merged, attempts, leaseAcquired, auditWritten, reasons }`.
+ * @returns {Promise<object>} `{ disposition, reason, merged, attempts, leaseAcquired, auditWritten, reasons, liveGate }`.
  */
 export async function attemptDaemonCleanMerge({
   repo,
@@ -418,7 +418,7 @@ export async function attemptDaemonCleanMerge({
     validatedHead,
   });
   if (!preEligibility.eligible) {
-    return notTaken('not-eligible', { reasons: preEligibility.reasons });
+    return notTaken('not-eligible', { reasons: preEligibility.reasons, liveGate: preLease });
   }
 
   // ── Gate 3: don't re-loop a head that already failed permanently. ──────────
@@ -586,7 +586,7 @@ export async function attemptDaemonCleanMerge({
       validatedHead,
     });
     if (!elig.eligible) {
-      terminal = { reason: 'gate-not-eligible', permanent: true, reasons: elig.reasons };
+      terminal = { reason: 'gate-not-eligible', permanent: true, reasons: elig.reasons, liveGate: live };
       break;
     }
 
@@ -801,6 +801,7 @@ export async function attemptDaemonCleanMerge({
     auditWritten,
     manualCloseRequired: cleanParkManualCloseRequired,
     ...(terminal.reasons ? { reasons: terminal.reasons } : {}),
+    ...(terminal.liveGate ? { liveGate: terminal.liveGate } : {}),
   };
   } finally {
     releaseLease();

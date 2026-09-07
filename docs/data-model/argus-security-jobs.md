@@ -5,7 +5,8 @@
 **Source of truth:** `src/argus-security-queue.mjs`
 **Runtime surface:** `src/argus-security-queue.mjs`
 **Producer:** `src/argus-security-route.mjs`, called from `processReviewSubject`
-(`src/pollonce-phases.mjs`) once per PR head (ASR-04)
+(`src/pollonce-phases.mjs`) once per PR head (ASR-04). Narrow dependency-bot
+jobs may also be resolved in-process by `src/dependency-bot-autoadjudication.mjs`.
 
 ## Purpose
 
@@ -68,6 +69,7 @@ Directory: `data/argus-security-jobs/`
 | `failedAt` | string or null | ISO-8601 failure time for failed jobs. |
 | `result` | object or null | Successful review result payload on completed jobs. |
 | `error` | string or null | Failure reason on failed jobs. |
+| `lastAutoadjudicationAttempt` | object or null | Optional watcher-written breadcrumb for dependency-bot auto-adjudication attempts that approved the dependency update but left the job pending because merge authority could not yet land the exact head. |
 
 ## Operational Contract
 
@@ -93,5 +95,13 @@ Directory: `data/argus-security-jobs/`
   `failed/` before stamping the terminal payload. Callers may pass the in-memory
   claimed job to avoid re-reading a file that was corrupted while work was in
   flight.
+- Dependency-bot auto-adjudication may complete a pending job without a separate
+  Argus worker only for narrow non-major, non-native manifest updates. For this
+  policy, `0.x` minor bumps are treated as major and require verification. A
+  successful exact-head clean merge completes the job with an approving result;
+  policy denials and permanent merge blockers complete it as
+  `needs_verification`. Transient merge blockers, including required checks that
+  have not reported a terminal result yet, keep the job in `pending/` and update
+  `lastAutoadjudicationAttempt` so the next watcher tick can retry.
 - The files contain no secrets. They contain PR identity, exact head SHA,
   security trigger reasons, timestamps, and review result or failure metadata.

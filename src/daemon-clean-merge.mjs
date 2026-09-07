@@ -665,8 +665,10 @@ export async function runDaemonCleanMergeAttempt({
         workerIdentity,
       };
     }
-    autonomousAccountabilitySubstituted =
-      operatorMergeAccountability?.label === (autonomousMergeAccountability?.label || null);
+    autonomousAccountabilitySubstituted = Boolean(
+      autonomousMergeAccountability
+      && operatorMergeAccountability?.label === (autonomousMergeAccountability.label || null)
+    );
     const accountabilityEvent = cleanCloserCommitAccountability
       ? 'ama.daemon_clean_merge.autonomous_closer_commit_accountability_substituted'
       : autonomousAccountabilitySubstituted

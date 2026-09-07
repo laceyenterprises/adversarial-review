@@ -33,11 +33,16 @@ import { join } from 'node:path';
 import {
   LEGACY_UNROUTABLE_BOT_STATUS,
   isArgusSecurityRouteEnabled,
+  ARGUS_SECURITY_QUEUED_STATUS,
 } from '../src/argus-security-route.mjs';
-import { markUnroutableTitleDisposition } from '../src/pollonce-phases.mjs';
+import {
+  markUnroutableTitleDisposition,
+  processReviewSubject,
+} from '../src/pollonce-phases.mjs';
 import {
   completeArgusJob,
   enqueueArgusSecurityReview,
+  readArgusJob,
 } from '../src/argus-security-queue.mjs';
 import { resolveArgusSecurityVerdict } from '../src/argus-security-verdict.mjs';
 import { pickAdversarialGateStatus } from '../src/adversarial-gate-status.mjs';
@@ -418,6 +423,71 @@ test('a queued additive Argus job holds a human PR whose own review came back cl
   assert.equal(decision.state, 'pending');
   assert.equal(decision.reason, 'argus-security-review-queued');
 }));
+
+test('the watcher leaves a human-authored Argus pending job for Argus instead of dependency-bot auto-adjudication', async () => {
+  const repo = 'laceyenterprises/adversarial-review';
+  const headSha = 'f'.repeat(40);
+  const root = mkdtempSync(join(tmpdir(), 'asr06-human-pending-'));
+  const { jobPath } = enqueueArgusSecurityReview({
+    rootDir: root,
+    repo,
+    prNumber: 1236,
+    headSha,
+    reasons: [{ trigger: 'dependency-manifest' }],
+  });
+  let autoAdjudicationCalls = 0;
+
+  try {
+    await processReviewSubject({
+      subject: {
+        title: '[codex] human security-surface fixture',
+        labels: [],
+        headSha,
+        authorRef: 'human-maintainer',
+        ref: { revisionRef: headSha, subjectExternalId: `${repo}#1236` },
+      },
+      prNumber: 1236,
+      current: {
+        domain_id: 'github-pr',
+        review_status: ARGUS_SECURITY_QUEUED_STATUS,
+        pr_state: 'open',
+        reviewer: 'argus-security',
+        reviewer_head_sha: headSha,
+        argus_classified_head_sha: headSha,
+      },
+    }, {
+      operatorSurface: { extractLinearTicketId: () => null },
+      watcherDrain: { active: false },
+      postedReviewHandlers: [],
+      domainId: 'github-pr',
+      repoPath: repo,
+      currentRepoPRs: [],
+      activeMergeAgentPRs: [],
+      ROOT: root,
+      execFileAsync: async () => ({ stdout: '', stderr: '' }),
+      WATCHER_PRIMARY_DOMAIN_ID: 'github-pr',
+      maybeAutoAdjudicateDependencyBotArgusJobImpl: async () => {
+        autoAdjudicationCalls += 1;
+        throw new Error('human Argus job must not enter dependency-bot auto-adjudication');
+      },
+      adversarialGateProvider: {
+        async gate(_subject, revisionRef, decision) {
+          return {
+            gated: true,
+            providerId: 'fixture-gate',
+            revisionRef,
+            publish: { posted: true, reason: 'fixture', decision },
+          };
+        },
+      },
+    });
+
+    assert.equal(autoAdjudicationCalls, 0);
+    assert.equal(readArgusJob(jobPath).status, 'pending');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('a malformed additive Argus job fails closed instead of hanging or falling through', () => {
   const headSha = 'e'.repeat(40);

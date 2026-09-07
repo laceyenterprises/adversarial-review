@@ -359,6 +359,39 @@ function classifyOutageText(text) {
   ) {
     return { reason: 'broker-unavailable', detail: 'reviewer-token-broker-unavailable' };
   }
+  // RTOK-01: a rejected GitHub credential is a FLEET-WIDE auth outage, not this
+  // PR's reviewer failing. The reviewer's bot token is a broker-minted GitHub
+  // App installation token that GitHub expires after one hour; when the watcher
+  // process outlives its mint, every `gh` call it makes returns 401 for every PR
+  // simultaneously. `gh-cli.mjs` now forces a re-mint and retries once, so
+  // reaching here means the credential is still rejected AFTER a fresh mint.
+  //
+  // Before this branch that failure carried no recognizable class, fell through
+  // to the terminal path, and was logged as "Reviewer unknown-class failure on
+  // #NNNN; counting against attempt budget (3/4)" -- so a single auth outage
+  // permanently burned the retry budget of every PR the watcher touched while it
+  // lasted (PRs #6366-#6370, stranded with zero reviews). Routing it through the
+  // outage signal holds the PR at `pending-upstream` WITHOUT charging
+  // review_attempts, exactly as a provider quota outage is held, so the PRs
+  // resume on their own once the credential recovers.
+  //
+  // Deliberately narrow. It requires BOTH a GitHub context token AND an explicit
+  // rejected-credential signal, so an ordinary review failure -- including a
+  // reviewer that merely mentions a number -- still counts against the budget as
+  // it always has. 403 is excluded: on a valid token that is a permissions or
+  // rate-limit signal, not an expired credential.
+  if (
+    /\b(?:gh|github|api\.github\.com|graphql|github-auth-outage)\b/.test(lower) &&
+    (
+      /\bbad credentials\b/.test(lower) ||
+      /\bhttp\s*401\b/.test(lower) ||
+      /\b401\b[^\n]*\bunauthorized\b/.test(lower) ||
+      /\brequires authentication\b/.test(lower) ||
+      /\bgithub-auth-outage\b/.test(lower)
+    )
+  ) {
+    return { reason: 'github-auth-outage', detail: 'github-auth-outage' };
+  }
   if (
     /\b(?:gh|github|api\.github\.com|graphql)\b/.test(lower) &&
     (

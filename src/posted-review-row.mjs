@@ -36,9 +36,11 @@ import {
   resolveOrchestrationMode,
   retryPendingMergeCloseouts,
   syncPRLifecycle,
+  buildTriageSubjectRef,
 } from './pr-lifecycle-sync.mjs';
 import { retryPendingMergeAgentLifecycleCleanups } from './merge-agent-lifecycle-cleanup.mjs';
 import { retryPendingDagAutowalkOnMerge } from './dag-autowalk-on-merge.mjs';
+import { retryPendingTriageSyncs } from './pending-triage-sync.mjs';
 import { retryPendingRetriggerAckComments } from './follow-up-retrigger-label.mjs';
 import { retryPendingRetriggerReviewAckComments } from './follow-up-retrigger-review-label.mjs';
 import { db, stmtGetLatestPostedReviewBody, stmtGetReviewRow } from './review-state-db.mjs';
@@ -573,6 +575,7 @@ export async function runQueuedReviewAdoptionPhase({
   retryPendingMergeAgentLifecycleCleanupsImpl = retryPendingMergeAgentLifecycleCleanups,
   syncPRLifecycleImpl = syncPRLifecycle,
   retryPendingDagAutowalkOnMergeImpl = retryPendingDagAutowalkOnMerge,
+  retryPendingTriageSyncsImpl = retryPendingTriageSyncs,
   retryPendingMergeCloseoutsImpl = retryPendingMergeCloseouts,
   retryPendingRetriggerAckCommentsImpl = retryPendingRetriggerAckComments,
   retryPendingRetriggerReviewAckCommentsImpl = retryPendingRetriggerReviewAckComments,
@@ -613,6 +616,27 @@ export async function runQueuedReviewAdoptionPhase({
   // shell out to HQ, GitHub, or DAG walkers; a slow or wedged child must not
   // prevent already-queued pending PRs from being claimed into reviewer runs.
   await syncPRLifecycleImpl(octokit, operatorSurface, primaryDomainId);
+  // TREC-01: drains the Linear triage syncs owed by terminal transitions. This
+  // is what lets syncPRLifecycle record a merge/close immediately instead of
+  // holding the row `pr_state=open` as the retry vehicle -- the behaviour that
+  // made review:queue_starvation and review:terminal_but_unmerged fire forever
+  // on already-terminal PRs.
+  try {
+    const triageDrain = await retryPendingTriageSyncsImpl({
+      rootDir,
+      operatorSurface,
+      buildSubjectRef: buildTriageSubjectRef,
+      logger,
+    });
+    if (triageDrain.attempted > 0) {
+      logger.log(
+        `[watcher] triage sync retry: attempted=${triageDrain.attempted} `
+        + `synced=${triageDrain.synced} pending=${triageDrain.pending}`
+      );
+    }
+  } catch (err) {
+    logger.error('[watcher] triage sync retry failed:', err?.message || err);
+  }
   await retryPendingDagAutowalkOnMergeImpl();
   await retryPendingMergeCloseoutsImpl({ octokit });
 

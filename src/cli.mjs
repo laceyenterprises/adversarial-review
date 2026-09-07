@@ -20,6 +20,7 @@ import {
 const USAGE = `\
 Usage:
   adversarial-review pipeline-health [--root <dir>] [--json | --prometheus | --sentinel]
+  adversarial-review reconcile-terminal [--root <dir>] [--dry-run] [--cap <n>] [--json]
   adversarial-review reset-pr <owner/repo> <pr-number> [options]
   adversarial-review tokens [--since 7d] [--by-pr | --by-reviewer] [--json]
   adversarial-review reviewer-roster [--json]
@@ -145,6 +146,13 @@ async function main(argv, io = {}) {
   }
   if (command === 'pipeline-health') {
     return pipelineHealthMain(rest, io);
+  }
+  if (command === 'reconcile-terminal') {
+    // Lazy import: this command opens the review-state singleton, which several
+    // watcher tests replace with narrow fixtures. Unrelated commands must not
+    // pay for it.
+    const { main: reconcileTerminalMain } = await import('./pr-terminal-reconcile-cli.mjs');
+    return reconcileTerminalMain(rest, io);
   }
   if (command === 'tokens') {
     return tokensMain(rest, io);

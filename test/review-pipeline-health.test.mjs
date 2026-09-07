@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
+
+import { writePrTerminalReconcileState } from '../src/pr-terminal-reconcile.mjs';
 import {
   chmodSync,
   existsSync,
@@ -153,6 +155,26 @@ function writeJob(rootDir, state, name, job) {
   const filePath = path.join(dir, `${name}.json`);
   writeFileSync(filePath, `${JSON.stringify(job, null, 2)}\n`);
   return filePath;
+}
+
+// TREC-01: both age-based findings that read `pr_state` are now stamped with
+// whether the mirror row was verified against GitHub. Fixtures that are NOT
+// about reconciliation seed a fresh clean sweep so they exercise the
+// verified-mirror path; the unverified path has its own coverage in
+// test/pr-terminal-reconcile.test.mjs and below.
+function seedFreshReconcile(rootDir, { observedAt = NOW, unresolved = [] } = {}) {
+  writePrTerminalReconcileState(rootDir, {
+    source: 'test',
+    observedAt,
+    completedAt: observedAt,
+    checked: 1,
+    merged: 0,
+    closed: 0,
+    stillOpen: 1,
+    unresolved,
+    unresolvedCount: unresolved.length,
+    deferredCount: 0,
+  });
 }
 
 function findingCodes(snapshot) {
@@ -370,7 +392,14 @@ test('collector reads review state without mutating legacy or missing-schema dat
   // (ticket severity, never pages) and nothing else -- in particular it makes
   // no health claim about the pipeline, which is what the previous empty list
   // silently did.
-  assert.deepEqual(findingCodes(snapshot), ['review:ttm_budget_model_unreadable']);
+  // TREC-01 adds the second blind code: this fixture has no reconciliation
+  // record either, so the collector cannot claim its open-PR population has
+  // been verified against GitHub. Both are SEN-02 blindness reports, and
+  // neither makes a health claim about the pipeline.
+  assert.deepEqual(
+    findingCodes(snapshot),
+    ['review:pr_lifecycle_mirror_unverified', 'review:ttm_budget_model_unreadable'],
+  );
   assert.equal(snapshot.reviewer.total, 0);
   assert.equal(snapshot.firstPassQueue.depth, 0);
 
@@ -587,9 +616,11 @@ test('queue starvation distinguishes a FAILED reviewer from an unstarted one', (
     db.close();
   }
 
+  seedFreshReconcile(rootDir);
   const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
   const finding = snapshot.findings.find((item) => item.code === 'review:queue_starvation');
   assert.ok(finding, 'expected the starvation finding');
+  assert.equal(finding.details.mirrorVerified, true);
   assert.match(finding.message, /reviewer FAILED/);
   assert.match(finding.message, /Command failed with code 1/);
   assert.match(finding.recommended_action, /reviewer-runtime, not capacity/);
@@ -600,6 +631,77 @@ test('queue starvation distinguishes a FAILED reviewer from an unstarted one', (
   assert.match(finding.subject, /1 PR\(s\) awaiting first-pass review/);
 });
 
+test('queue starvation on an unverified mirror row stops blaming reviewer capacity', () => {
+  // TREC-01 / SEV2 2026-09-07. agent-os#6394 was CLOSED at 05:50:15Z and was
+  // still `firstPassQueue.oldest` at 06:18:52Z -- one of only three entries, so
+  // a third of the reported depth was phantom. The finding told the operator to
+  // check reviewer capacity and bounce the adversarial-watcher. The watcher was
+  // healthy; the advice was actively wrong.
+  //
+  // The finding still fires (a genuinely starved queue must page). What changes
+  // is that it now says the row is unverified and tells the operator to confirm
+  // terminal state FIRST.
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 6394,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T17:00:00.000Z',
+  });
+  seedFreshReconcile(rootDir, {
+    unresolved: [{
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 6394,
+      reason: 'Command failed: gh api -i graphql — gh: Bad credentials (HTTP 401)',
+    }],
+  });
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  const finding = snapshot.findings.find((item) => item.code === 'review:queue_starvation');
+  assert.ok(finding, 'the finding must NOT be suppressed — a real starved queue still pages');
+  assert.equal(finding.details.mirrorVerified, false);
+  assert.match(finding.subject, /mirror state UNVERIFIED against GitHub/);
+  assert.match(finding.recommended_action, /may be a PR that is already merged or closed/);
+  assert.match(finding.recommended_action, /do not bounce the watcher on this signal alone/);
+  assert.equal(
+    /check adversarial-watcher liveness and reviewer capacity/.test(finding.recommended_action),
+    false,
+    'an unverified row must not carry the bounce-the-watcher advice',
+  );
+
+  // And the cause is reported alongside the symptom, naming the real fault.
+  const blind = snapshot.findings.find((item) => item.code === 'review:pr_lifecycle_mirror_unverified');
+  assert.ok(blind, 'the mirror-unverified cause must be reported');
+  assert.match(blind.evidence.join('\n'), /Bad credentials \(HTTP 401\)/);
+});
+
+test('a mirror reconciled inside the staleness window emits no blindness finding', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, { prNumber: 950, reviewStatus: 'posted', postedAt: NOW });
+  seedFreshReconcile(rootDir);
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  assert.equal(
+    findingCodes(snapshot).includes('review:pr_lifecycle_mirror_unverified'),
+    false,
+  );
+  assert.equal(snapshot.lifecycleReconciliation.blind, false);
+  assert.equal(snapshot.lifecycleReconciliation.observedAt, NOW);
+});
+
+test('a stale reconciliation record reports blind without touching either threshold', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, { prNumber: 951, reviewStatus: 'posted', postedAt: NOW });
+  // Two hours before NOW, far outside the 15m window.
+  seedFreshReconcile(rootDir, { observedAt: '2026-05-25T16:00:00.000Z' });
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  const blind = snapshot.findings.find((item) => item.code === 'review:pr_lifecycle_mirror_unverified');
+  assert.ok(blind);
+  assert.equal(blind.details.reason, 'reconcile-record-stale');
+  // The explicit ticket constraint: never widen a threshold to hide this.
+  assert.equal(snapshot.config.queueStarvationMaxAgeMs, 600000);
+  assert.match(blind.recommended_action, /rather than adjusting either threshold/);
+  assert.match(blind.recommended_action, /Do not silence the age-based findings/);
+});
+
 test('queue starvation reports an unstarted row as capacity, not reviewer failure', () => {
   const rootDir = tempRoot();
   insertReviewRow(rootDir, {
@@ -607,9 +709,11 @@ test('queue starvation reports an unstarted row as capacity, not reviewer failur
     reviewStatus: 'pending',
     reviewedAt: '2026-05-25T17:00:00.000Z',
   });
+  seedFreshReconcile(rootDir);
   const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
   const finding = snapshot.findings.find((item) => item.code === 'review:queue_starvation');
   assert.ok(finding);
+  assert.equal(finding.details.mirrorVerified, true);
   assert.match(finding.message, /no reviewer has picked it up/);
   assert.match(finding.recommended_action, /Nothing picked this up/);
   assert.equal(finding.details.reviewerFailed, false);

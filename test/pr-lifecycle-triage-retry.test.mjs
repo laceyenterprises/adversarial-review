@@ -1,61 +1,189 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-// Guard test (see the sibling source-reading guards in this suite).
+import { reconcileTerminalPrState } from '../src/pr-terminal-reconcile.mjs';
+import {
+  attemptPendingTriageSync,
+  listPendingTriageSyncs,
+  queuePendingTriageSync,
+  retryPendingTriageSyncs,
+} from '../src/pending-triage-sync.mjs';
+
+// TREC-01 replaced the source-grep guard that used to live here.
 //
-// A GitHub terminal observation must stay retryable until fallible side effects
-// such as Linear triage sync complete. Otherwise a downstream failure leaves the
-// local row terminal and the normal open-row watcher query never retries it.
-const SRC = readFileSync(
-  join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'pr-lifecycle-sync.mjs'),
-  'utf8',
-);
+// The old guard asserted the literal source ordering
+// `syncTriageStatus -> stmtMarkMerged -> branch-level catch`, and that the
+// triage call must NOT have an isolated catch. Its stated reason was sound:
+// "Swallowing this remote failure would mark the row merged/closed while
+// leaving Linear permanently stale."
+//
+// That ordering enforced the invariant by making the OPEN ROW the retry vehicle
+// for the Linear obligation. Which is exactly what made
+// `review:queue_starvation` and `review:terminal_but_unmerged` fire forever on
+// already-terminal PRs: both select on `pr_state='open'` and threshold on
+// elapsed age, so a row held open for a remote retry becomes an alert that can
+// never clear (2026-09-07: 4 merged PRs flagged unmerged, 1 closed PR still
+// `firstPassQueue.oldest` 28.6 minutes after closing).
+//
+// The obligation now has its own durable record, so BOTH invariants hold at
+// once. These are behavioural tests rather than source greps: they exercise the
+// real code paths, so they keep holding under refactors that a string match
+// would either miss or falsely fail.
+//
+// The properties pinned here:
+//   1. A Linear failure does NOT prevent the terminal mark.  (the TREC-01 fix)
+//   2. A Linear failure is NOT lost — it stays durably queued and a later drain
+//      completes it.                                        (the OLD invariant)
+//   3. Owed work that fails to PERSIST still defers the mark, because at that
+//      point the open row really is the only record of the obligation.
 
-function branchSlice(startMarker) {
-  const start = SRC.indexOf(startMarker);
-  assert.ok(start > 0, `branch marker not found: ${startMarker}`);
-  return SRC.slice(start, start + 4000);
+function withTempRoot(fn) {
+  const root = mkdtempSync(join(tmpdir(), 'trec01-triage-'));
+  try {
+    return fn(root);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
-for (const [label, marker, failureMsg, markStmt] of [
-  ['merged', 'was merged — syncing Linear', 'Failed to sync merged PR', 'stmtMarkMerged.run('],
-  ['closed', 'was closed (unmerged) — syncing Linear', 'Failed to sync closed PR', 'stmtMarkClosed.run('],
-]) {
-  test(`${label} branch: terminal state is recorded after remote triage side effects`, () => {
-    const slice = branchSlice(marker);
+const MERGED_ROW = { repo: 'laceyenterprises/agent-os', pr_number: 6364 };
+const MERGED_LIVE = {
+  state: 'MERGED',
+  mergedAt: '2026-09-07T05:10:03Z',
+  closedAt: '2026-09-07T05:10:03Z',
+  headRefOid: 'c04ab8fb48',
+  labels: [],
+};
 
-    const triageIdx = slice.indexOf('operatorSurface.syncTriageStatus(');
-    const markIdx = slice.indexOf(markStmt);
-    const failureIdx = slice.indexOf(failureMsg);
+test('a Linear triage failure does not prevent the terminal mark', async () => {
+  await withTempRoot(async (root) => {
+    const marks = [];
+    const summary = await reconcileTerminalPrState({
+      rows: [MERGED_ROW],
+      fetchLiveState: async () => MERGED_LIVE,
+      onBeforeMark: async ({ repo, prNumber, transition }) => {
+        queuePendingTriageSync(root, {
+          repo, prNumber, transition, status: 'finalized', linearTicketId: 'ENG-1',
+        });
+      },
+      onAfterMark: async () => {
+        throw new Error('Linear API is down');
+      },
+      markMerged: (mergedAt, repo, prNumber) => marks.push({ mergedAt, repo, prNumber }),
+      markClosed: () => assert.fail('a merged PR must not be marked closed'),
+      logger: { error() {}, log() {} },
+    });
 
-    assert.ok(triageIdx > 0, `${label}: triage sync call not found`);
-    assert.ok(markIdx > 0, `${label}: local mark statement not found`);
-    assert.ok(failureIdx > 0, `${label}: branch-level retry catch not found`);
+    assert.equal(summary.merged, 1, 'the merge must be recorded despite the Linear failure');
+    assert.deepEqual(marks, [{
+      mergedAt: '2026-09-07T05:10:03Z',
+      repo: MERGED_ROW.repo,
+      prNumber: MERGED_ROW.pr_number,
+    }]);
+    assert.equal(summary.reportFailureCount, 1, 'the reporting failure must still be surfaced');
+    assert.match(summary.reportFailures[0].reason, /Linear API is down/);
+  });
+});
+
+test('a Linear triage failure stays durably queued and a later drain completes it', async () => {
+  await withTempRoot(async (root) => {
+    queuePendingTriageSync(root, {
+      repo: MERGED_ROW.repo,
+      prNumber: MERGED_ROW.pr_number,
+      transition: 'merged',
+      status: 'finalized',
+      linearTicketId: 'ENG-1',
+      labels: ['claude-code'],
+      revisionRef: 'c04ab8fb48',
+    });
+
+    // First attempt fails, exactly as it would during a Linear outage.
+    const failing = await attemptPendingTriageSync({
+      rootDir: root,
+      record: listPendingTriageSyncs(root)[0].record,
+      operatorSurface: { syncTriageStatus: async () => { throw new Error('502'); } },
+      buildSubjectRef: (record) => record,
+      logger: { error() {} },
+    });
+    assert.equal(failing.ok, false);
     assert.equal(
-      slice.includes(`${label}-PR triage sync failed for`),
-      false,
-      `${label}: triage sync must not have an isolated swallowing catch`,
+      listPendingTriageSyncs(root).length,
+      1,
+      'the obligation must survive a failed attempt — this is the invariant the old guard protected',
     );
-    assert.ok(
-      triageIdx < markIdx && markIdx < failureIdx,
-      `${label}: expected triage call -> local mark -> branch-level catch; got ` +
-        `triage=${triageIdx} mark=${markIdx} catch=${failureIdx}`,
-    );
-    assert.match(
-      slice,
-      /leaving row open so lifecycle side effects retry on the next watcher tick/,
-      `${label}: catch message should name open-row retry semantics`,
+
+    // A later tick drains it. `retryMs: 0` stands in for the elapsed interval.
+    const seen = [];
+    const drained = await retryPendingTriageSyncs({
+      rootDir: root,
+      operatorSurface: {
+        syncTriageStatus: async (subjectRef, status) => { seen.push({ subjectRef, status }); },
+      },
+      buildSubjectRef: (record) => ({ repo: record.repo, prNumber: record.prNumber }),
+      retryMs: 0,
+      logger: { error() {}, log() {} },
+    });
+
+    assert.equal(drained.synced, 1, 'the drain must complete the owed sync');
+    assert.deepEqual(seen, [{
+      subjectRef: { repo: MERGED_ROW.repo, prNumber: MERGED_ROW.pr_number },
+      status: 'finalized',
+    }], 'the replayed call must carry the transition status recorded at queue time');
+    assert.equal(
+      listPendingTriageSyncs(root).length,
+      0,
+      'a completed obligation must be cleared so it cannot be replayed forever',
     );
   });
-}
+});
 
-test('merged branch records terminal state after owed-work side effects', () => {
-  const slice = branchSlice('was merged — syncing Linear');
-  const autowalkIdx = slice.indexOf('fireDagAutowalkOnMerge(');
-  const markIdx = slice.indexOf('stmtMarkMerged.run(');
-  assert.ok(autowalkIdx > 0, 'autowalk call not found');
-  assert.ok(autowalkIdx < markIdx, 'terminal state must be recorded after owed-work side effects');
+test('owed work that fails to persist still defers the mark', async () => {
+  await withTempRoot(async () => {
+    const marks = [];
+    const summary = await reconcileTerminalPrState({
+      rows: [MERGED_ROW],
+      fetchLiveState: async () => MERGED_LIVE,
+      onBeforeMark: async () => {
+        // e.g. fireDagAutowalkOnMerge or queuePendingTriageSync failing to
+        // write. Nothing durable now remembers the obligation, so the row must
+        // stay open — it is the only remaining record that work is owed.
+        throw new Error('ENOSPC writing owed-work record');
+      },
+      markMerged: (...args) => marks.push(args),
+      markClosed: () => assert.fail('must not mark'),
+      logger: { error() {}, log() {} },
+    });
+
+    assert.equal(marks.length, 0, 'the mark must be deferred when owed work did not persist');
+    assert.equal(summary.merged, 0);
+    assert.equal(summary.deferredCount, 1);
+    assert.match(summary.deferred[0].reason, /ENOSPC/);
+  });
+});
+
+test('the queued record carries everything the drain needs without the reviewed_prs row', async () => {
+  await withTempRoot(async (root) => {
+    // Once the row is marked terminal it leaves `stmtGetOpenPRs`, so a drain on
+    // a later tick cannot look the subject ref back up. Regression guard: the
+    // record must be self-sufficient.
+    queuePendingTriageSync(root, {
+      repo: MERGED_ROW.repo,
+      prNumber: MERGED_ROW.pr_number,
+      transition: 'closed',
+      status: 'halted',
+      domainId: 'code-pr',
+      linearTicketId: 'ENG-42',
+      labels: ['codex'],
+      revisionRef: 'deadbeef',
+    });
+    const { record } = listPendingTriageSyncs(root)[0];
+    assert.equal(record.domainId, 'code-pr');
+    assert.equal(record.linearTicketId, 'ENG-42');
+    assert.equal(record.triageStatus, 'halted');
+    assert.equal(record.revisionRef, 'deadbeef');
+    assert.deepEqual(record.labels, ['codex']);
+  });
 });

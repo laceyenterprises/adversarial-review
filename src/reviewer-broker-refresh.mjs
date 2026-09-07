@@ -114,6 +114,9 @@ function resolvePositiveMsEnv(rawValue, fallbackMs) {
 // fingerprint forces an immediate re-fetch when operator-controlled broker
 // routing/identity settings rotate. Exported reset for tests.
 const refreshClock = new Map();
+// Roles already warned about broker-mode-disabled, so the warning is loud once
+// per process instead of once per tick.
+const warnedBrokerModeDisabled = new Set();
 export function _resetReviewerTokenRefreshClockForTest() {
   refreshClock.clear();
 }
@@ -314,6 +317,30 @@ export async function refreshReviewerBrokerTokens({
     const configFingerprint = brokerConfigFingerprint(brokerConfigForRole({ role, env, flag }));
     if (String(env[flag] || '').trim() !== 'true') {
       summary.skipped.push({ role, reason: 'broker-mode-disabled' });
+      // Say it out loud, once per role per process.
+      //
+      // SEV0 2026-09-07: this branch was a silent `continue`. The three reviewer
+      // flags were set only in the launchd plist, and the watcher had moved to
+      // the start-script path, so every role skipped here on every tick and
+      // NOTHING was logged. Reviewer-bot installation tokens (~1h) were seeded
+      // once at boot and never refreshed; about an hour into each boot every
+      // review POST failed 403 "Resource not accessible by integration". The
+      // review text was produced fine — only publication failed — and the
+      // reviewer scored that as failure-class=unknown, which burns the infra
+      // auto-recovery budget until the PR goes terminal at the 4/3 cap.
+      //
+      // A refresh loop that silently refreshes nothing is indistinguishable from
+      // a healthy one. The whole outage was invisible for want of this line.
+      if (!warnedBrokerModeDisabled.has(role)) {
+        warnedBrokerModeDisabled.add(role);
+        log?.warn?.(
+          `[reviewer-broker-refresh] ${flag} is not "true" — ${envVar} will NOT be `
+          + `refreshed for role=${role}. Its GitHub App installation token expires ~1h `
+          + 'after it was seeded and every review POST then fails 403 "Resource not '
+          + 'accessible by integration". Set the flag on the path that actually starts '
+          + 'the watcher (scripts/adversarial-watcher-start.sh), not only in the plist.'
+        );
+      }
       continue;
     }
     let requiredLifetimeMs;

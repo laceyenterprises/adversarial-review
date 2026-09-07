@@ -35,7 +35,19 @@ function allSrcMjs(dir = SRC, acc = []) {
 // 10,462 lines to a thin scheduler by moving the per-PR processing body to
 // pollonce-phases.mjs and the orchestration/state clusters to leaf modules.
 // Raising this means the monolith is regrowing — move code out instead.
-const WATCHER_LINE_CEILING = 2000;
+//
+// 2026-09-07: raised 2000 -> 2050 by OPERATOR DECISION during a SEV1. #956
+// ("watcher: refresh GitHub auth on a wall clock") added a net +2 lines and
+// crossed the ratchet, leaving `main` red and blocking EVERY pull request in
+// this repo — including the config-loader fix that merge authority needed to
+// start at all. The operator chose to bump rather than block the SEV1 on a
+// decomposition refactor of the merge-critical watcher.
+//
+// The decomposition debt is NOT paid. watcher.mjs is 2001 lines; the intended
+// remedy is still to move phase/orchestration code into pollonce-phases.mjs or
+// a leaf module and ratchet this back down. Do not treat 2050 as new headroom
+// to spend.
+const WATCHER_LINE_CEILING = 2050;
 
 test(`ARC-18 gate: watcher.mjs stays under ${WATCHER_LINE_CEILING} lines`, () => {
   const lines = read('watcher.mjs').split('\n').length;

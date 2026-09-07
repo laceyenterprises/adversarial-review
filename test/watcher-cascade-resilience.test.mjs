@@ -338,6 +338,7 @@ test('routing-tier probe failures stay reclaimable until infra cap is exhausted'
         ok: false,
         failureClass: 'cascade',
         error: 'Routing-tier readiness probe failed (UND_ERR_SOCKET)',
+        stdoutTail: '{"status":"failed"}',
       },
       failureAt: '2026-05-04T07:13:00.000Z',
       maxRemediationRounds: 2,
@@ -348,6 +349,7 @@ test('routing-tier probe failures stay reclaimable until infra cap is exhausted'
     assert.equal(terminal.review_status, 'failed');
     assert.equal(terminal.infra_auto_recover_attempts, 3);
     assert.match(terminal.failure_message, /infra auto-recovery cap exhausted/);
+    assert.match(terminal.failure_message, /stdout tail:\n\{"status":"failed"\}\nSystem: infra auto-recovery cap exhausted/);
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

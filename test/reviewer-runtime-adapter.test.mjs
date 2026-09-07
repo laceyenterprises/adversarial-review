@@ -1056,6 +1056,39 @@ test('cli-direct classifies quota text from stdout even when stderr has wrapper 
   }
 });
 
+test('cli-direct preserves stdout classification evidence after long stderr', async () => {
+  const rootDir = makeRoot();
+  try {
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      preflightImpl: noopPreflight,
+      spawnCapturedImpl: async () => {
+        const err = new Error('Command failed with code 1');
+        err.stdout = 'Codex OAuth token invalid; login required';
+        err.stderr = `noisy stack\n${'stderr noise\n'.repeat(600)}`;
+        err.exitCode = 1;
+        throw err;
+      },
+      now: () => '2026-06-23T00:39:39.000Z',
+    });
+
+    const result = await adapter.spawnReviewer({
+      model: 'codex',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 2454 },
+      timeoutMs: 100,
+      sessionUuid: 'classification-stdout-after-long-stderr-session',
+      forbiddenFallbacks: ['api-key'],
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.failureClass, 'oauth-broken');
+    assert.match(result.stdoutTail, /OAuth token invalid/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('cli-direct classifies provider overload text from stdout even when stderr has wrapper noise', async () => {
   const rootDir = makeRoot();
   try {

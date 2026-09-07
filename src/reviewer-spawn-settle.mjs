@@ -1169,7 +1169,7 @@ function settleReviewerAttempt({
       withSqliteBusyRetrySync(
         () => statements.markCascadeFailed.run(
           failureAt,
-          `${classifiedMessage}; ${exhaustionLabel}.`,
+          `${classifiedMessage}\nSystem: ${exhaustionLabel}.`,
           repoPath,
           prNumber
         ),

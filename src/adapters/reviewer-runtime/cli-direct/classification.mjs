@@ -78,8 +78,7 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     (/launchctl/.test(line) && LAUNCHCTL_BOOTSTRAP_ERROR_RE.test(line))
   ));
   const mentionsReal429 =
-    /\b429\b|too many requests|http\s*429|rate_limit_exceeded|ratelimiterror|quota/.test(lower);
-  const mentionsRateLimit = /rate.?limit/.test(lower);
+    /\b429\b|too many requests|http\s*429/.test(lower);
   const mentionsProviderOverloaded = hasProviderOverloadedSignal(lower);
   const mentionsReviewerEmptyOutput = REVIEWER_EMPTY_OUTPUT_RE.test(lower);
   const mentionsAttestationSign =
@@ -225,7 +224,7 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
   // run has clear upstream-cascade evidence, operators should treat the timeout
   // text as a symptom of the exhausted upstream path rather than the primary
   // failure bucket.
-  if (CASCADE_ERROR_CODES.has(normalizedErrorCode) || mentionsRateLimit || mentionsReal429 || mentionsCascade) {
+  if (CASCADE_ERROR_CODES.has(normalizedErrorCode) || mentionsReal429 || mentionsCascade) {
     return 'cascade';
   }
 

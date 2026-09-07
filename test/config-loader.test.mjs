@@ -1133,6 +1133,56 @@ test('top-level config.yaml accepts the mirrored worker_pool.dag.autowalk.deep_r
   }
 });
 
+test('worker_pool.dag.autowalk.deep_reconcile defaults off when absent', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\n');
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('worker_pool.dag.autowalk.deep_reconcile'), false);
+    assert.equal(
+      cfg.resolutionTrace('worker_pool.dag.autowalk.deep_reconcile').at(-1).source,
+      'code-default',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('worker_pool.dag.autowalk.deep_reconcile canonical and legacy env aliases resolve through Node schema', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\n');
+
+    const canonicalCfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_WORKER_POOL_DAG_AUTOWALK_DEEP_RECONCILE: 'true',
+      },
+    });
+    assert.equal(canonicalCfg.get('worker_pool.dag.autowalk.deep_reconcile'), true);
+    assert.equal(
+      canonicalCfg.resolutionTrace('worker_pool.dag.autowalk.deep_reconcile').at(-1).source,
+      'env:AGENT_OS_WORKER_POOL_DAG_AUTOWALK_DEEP_RECONCILE',
+    );
+
+    const legacyCfg = loadConfig({
+      topPath: top,
+      env: {
+        HQ_AUTOWALK_DEEP_RECONCILE: 'true',
+      },
+    });
+    assert.equal(legacyCfg.get('worker_pool.dag.autowalk.deep_reconcile'), true);
+    assert.equal(
+      legacyCfg.resolutionTrace('worker_pool.dag.autowalk.deep_reconcile').at(-1).source,
+      'env:HQ_AUTOWALK_DEEP_RECONCILE',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('top-level config.yaml accepts mirrored web_cookie_broker entitlements', () => {
   // WCB entitlement config is consumed by hq, but the shared config.yaml must
   // remain parseable by this strict Node watcher.

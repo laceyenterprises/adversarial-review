@@ -71,7 +71,7 @@ test('parseArgs rejects a non-positive cap instead of sweeping everything', () =
   assert.equal(parseArgs(['--dry-run']).dryRun, true);
 });
 
-test('the sweep drains stale rows and leaves the genuinely open one alone', async () => {
+test('the sweep reports stale rows without mutating the ledger or attestation', async () => {
   const rootDir = tempRoot();
   const db = seedLedger(rootDir, ROWS);
   try {
@@ -81,18 +81,19 @@ test('the sweep drains stale rows and leaves the genuinely open one alone', asyn
     assert.equal(code, 0, 'a fully resolved sweep exits 0');
     const state = db.prepare('SELECT pr_number, pr_state, merged_at, closed_at FROM reviewed_prs ORDER BY pr_number').all();
     assert.deepEqual(state, [
-      { pr_number: 6364, pr_state: 'merged', merged_at: '2026-09-07T05:10:03Z', closed_at: null },
+      { pr_number: 6364, pr_state: 'open', merged_at: null, closed_at: null },
       { pr_number: 6393, pr_state: 'open', merged_at: null, closed_at: null },
-      { pr_number: 6394, pr_state: 'closed', merged_at: null, closed_at: '2026-09-07T05:50:15Z' },
+      { pr_number: 6394, pr_state: 'open', merged_at: null, closed_at: null },
     ]);
+    assert.match(out.join(''), /Would reconcile 3 open PR\(s\)/);
     assert.match(out.join(''), /merged:     1/);
     assert.match(out.join(''), /closed:     1/);
 
-    // The attestation the health surface reads must exist after a real run.
-    const attestation = readPrTerminalReconcileState(rootDir);
-    assert.equal(attestation.source, 'operator-cli');
-    assert.equal(attestation.merged, 1);
-    assert.equal(attestation.unresolvedCount, 0);
+    assert.equal(
+      readPrTerminalReconcileState(rootDir),
+      null,
+      'the diagnostic command must not claim the mirror was verified',
+    );
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });
@@ -138,10 +139,11 @@ test('an unresolvable PR exits non-zero and is named, not silently skipped', asy
     const text = out.join('');
     assert.match(text, /UNRESOLVED: 1/);
     assert.match(text, /agent-os#6394: .*Bad credentials \(HTTP 401\)/);
-    // The other PR still reconciles — one failure must not blind the sweep.
+    // The command is diagnostic-only: it still reports other transitions, but
+    // does not write any terminal state.
     assert.equal(
       db.prepare('SELECT pr_state FROM reviewed_prs WHERE pr_number = 6364').get().pr_state,
-      'merged',
+      'open',
     );
   } finally {
     db.close();

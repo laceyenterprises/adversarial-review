@@ -232,6 +232,43 @@ export function buildTriageSubjectRef(record) {
   }, record.linearTicketId, record.labels || []);
 }
 
+export function logLifecycleReconcileSummary(summary, logger = console) {
+  for (const entry of summary.unresolved || []) {
+    logger.error?.(
+      `[watcher] Failed to fetch PR ${entry.repo}#${entry.prNumber}: ${entry.reason}`
+    );
+  }
+  if (summary.unresolvedCount > 0) {
+    // The line the 2026-09-07 incident had no equivalent of. Without it, a
+    // fleet-wide 401 read as "every PR is still open" and the health surface
+    // blamed reviewer capacity.
+    logger.error?.(
+      `[watcher] PR lifecycle sync could not resolve ${summary.unresolvedCount}/${summary.checked} `
+      + `open PR(s) against GitHub; their mirror state is UNVERIFIED and any queue_starvation / `
+      + `terminal_but_unmerged finding naming them may be stale.`
+    );
+  }
+  for (const entry of summary.deferred || []) {
+    logger.error?.(
+      `[watcher] Deferred terminal mark for PR ${entry.repo}#${entry.prNumber} `
+      + `(${entry.transition}); owed lifecycle work did not persist: ${entry.reason}`
+    );
+  }
+  if (summary.deferredCount > 0) {
+    logger.error?.(
+      `[watcher] PR lifecycle sync deferred ${summary.deferredCount}/${summary.checked} `
+      + `terminal mark(s) because owed lifecycle work did not persist; those PRs remain open for retry.`
+    );
+  }
+  if (summary.merged > 0 || summary.closed > 0) {
+    logger.log?.(
+      `[watcher] PR lifecycle sync: checked=${summary.checked} merged=${summary.merged} `
+      + `closed=${summary.closed} still_open=${summary.stillOpen} `
+      + `unresolved=${summary.unresolvedCount} deferred=${summary.deferredCount}`
+    );
+  }
+}
+
 // ── Lifecycle sync: check open PRs for merge/close ──────────────────────────
 
 /**
@@ -356,28 +393,7 @@ export async function syncPRLifecycle(octokit, operatorSurface, primaryDomainId 
     markClosed: (closedAt, repo, prNumber) => stmtMarkClosed.run(closedAt, repo, prNumber),
   });
 
-  for (const entry of summary.unresolved) {
-    console.error(
-      `[watcher] Failed to fetch PR ${entry.repo}#${entry.prNumber}: ${entry.reason}`
-    );
-  }
-  if (summary.unresolvedCount > 0) {
-    // The line the 2026-09-07 incident had no equivalent of. Without it, a
-    // fleet-wide 401 read as "every PR is still open" and the health surface
-    // blamed reviewer capacity.
-    console.error(
-      `[watcher] PR lifecycle sync could not resolve ${summary.unresolvedCount}/${summary.checked} `
-      + `open PR(s) against GitHub; their mirror state is UNVERIFIED and any queue_starvation / `
-      + `terminal_but_unmerged finding naming them may be stale.`
-    );
-  }
-  if (summary.merged > 0 || summary.closed > 0) {
-    console.log(
-      `[watcher] PR lifecycle sync: checked=${summary.checked} merged=${summary.merged} `
-      + `closed=${summary.closed} still_open=${summary.stillOpen} `
-      + `unresolved=${summary.unresolvedCount} deferred=${summary.deferredCount}`
-    );
-  }
+  logLifecycleReconcileSummary(summary);
 
   persistReconcileAttestation(summary);
   return summary;

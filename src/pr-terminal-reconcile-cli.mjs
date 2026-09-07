@@ -3,14 +3,13 @@
 // Operator-facing lifecycle reconciliation sweep.
 //
 // TREC-01 item 3. The watcher runs this reconciliation on every poll tick, but
-// an operator staring at a phantom `review:queue_starvation` needs to drain the
-// stale rows NOW rather than wait for a tick that may itself be starved. This
-// is that command, and it is also the fastest way to answer "is this finding
-// real?" -- `--dry-run` reports what GitHub says about every open row without
-// writing anything.
+// an operator staring at a phantom `review:queue_starvation` also needs a safe
+// way to ask "is this finding real?" immediately. This command is strictly
+// diagnostic: it reports what GitHub says about every open row without writing
+// anything. The watcher owns terminal mutation because it also queues the
+// durable closeout work that must precede any mark.
 //
-//   adversarial-review reconcile-terminal --dry-run   # report only
-//   adversarial-review reconcile-terminal             # drain stale rows
+//   adversarial-review reconcile-terminal             # report only
 //
 // It deliberately does NOT touch thresholds, delete rows, or resolve anything
 // that is genuinely still open on GitHub. A PR that GitHub reports open stays
@@ -21,7 +20,6 @@ import { fileURLToPath } from 'node:url';
 import { fetchPullRequestHeadAndState } from './github-api.mjs';
 import {
   reconcileTerminalPrState,
-  writePrTerminalReconcileState,
 } from './pr-terminal-reconcile.mjs';
 
 const TOOL_ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -31,7 +29,7 @@ Usage:
   adversarial-review reconcile-terminal [--root <dir>] [--dry-run] [--cap <n>] [--json]
 
 Reconciles reviewed_prs lifecycle state against authoritative GitHub state and
-records merged_at / closed_at for any PR that has since become terminal.
+reports any PR that has since become terminal. It does not mutate reviews.db.
 
   --dry-run   report what GitHub says; write nothing
   --cap <n>   resolve at most n PRs this run
@@ -118,39 +116,25 @@ export async function main(argv, io = {}) {
   const stmtGetOpenPRs = db.prepare(
     "SELECT repo, pr_number FROM reviewed_prs WHERE pr_state = 'open'"
   );
-  const stmtMarkMerged = db.prepare(
-    "UPDATE reviewed_prs SET pr_state = 'merged', merged_at = ? WHERE repo = ? AND pr_number = ?"
-  );
-  const stmtMarkClosed = db.prepare(
-    "UPDATE reviewed_prs SET pr_state = 'closed', closed_at = ? WHERE repo = ? AND pr_number = ?"
-  );
-
   try {
     const summary = await reconcileTerminalPrState({
       rows: io.rows || stmtGetOpenPRs.all(),
-      source: options.dryRun ? 'operator-cli-dry-run' : 'operator-cli',
+      source: 'operator-cli-diagnostic',
       cap: options.cap ?? Number.POSITIVE_INFINITY,
       fetchLiveState: io.fetchLiveState
         || ((repo, prNumber) => fetchPullRequestHeadAndState(repo, prNumber)),
-      markMerged: options.dryRun
-        ? () => {}
-        : (mergedAt, repo, prNumber) => stmtMarkMerged.run(mergedAt, repo, prNumber),
-      markClosed: options.dryRun
-        ? () => {}
-        : (closedAt, repo, prNumber) => stmtMarkClosed.run(closedAt, repo, prNumber),
+      markMerged: () => {},
+      markClosed: () => {},
       logger: { error: (msg) => stderr.write(`${msg}\n`), log: () => {} },
     });
 
-    if (!options.dryRun) {
-      // A dry run must NOT refresh the attestation: it wrote nothing, so claiming
-      // the mirror is freshly verified would suppress the very blindness finding
-      // that sent the operator here.
-      writePrTerminalReconcileState(options.rootDir, summary);
-    }
+    // This command is diagnostic-only and must NOT refresh the attestation: it
+    // wrote nothing, so claiming the mirror is freshly verified would suppress
+    // the very blindness finding that sent the operator here.
 
     stdout.write(options.json
       ? `${JSON.stringify(summary, null, 2)}\n`
-      : `${renderSummary(summary, options)}\n`);
+      : `${renderSummary(summary, { dryRun: true })}\n`);
 
     // Non-zero when the sweep could not verify everything, so a scripted caller
     // can tell "mirror is now clean" from "mirror is still partly unverified".

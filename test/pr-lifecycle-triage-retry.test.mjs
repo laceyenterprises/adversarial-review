@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { reconcileTerminalPrState } from '../src/pr-terminal-reconcile.mjs';
+import { logLifecycleReconcileSummary } from '../src/pr-lifecycle-sync.mjs';
 import {
   attemptPendingTriageSync,
   listPendingTriageSyncs,
@@ -162,6 +163,33 @@ test('owed work that fails to persist still defers the mark', async () => {
     assert.equal(summary.deferredCount, 1);
     assert.match(summary.deferred[0].reason, /ENOSPC/);
   });
+});
+
+test('deferred lifecycle marks are logged loudly for daemon operators', () => {
+  const errors = [];
+  logLifecycleReconcileSummary({
+    checked: 2,
+    merged: 0,
+    closed: 0,
+    stillOpen: 1,
+    unresolvedCount: 0,
+    deferredCount: 1,
+    unresolved: [],
+    deferred: [{
+      repo: MERGED_ROW.repo,
+      prNumber: MERGED_ROW.pr_number,
+      transition: 'merged',
+      reason: 'ENOSPC writing owed-work record',
+    }],
+  }, {
+    error: (message) => errors.push(message),
+    log: () => {},
+  });
+
+  assert.equal(errors.length, 2);
+  assert.match(errors[0], /Deferred terminal mark for PR laceyenterprises\/agent-os#6364/);
+  assert.match(errors[0], /ENOSPC writing owed-work record/);
+  assert.match(errors[1], /deferred 1\/2 terminal mark/);
 });
 
 test('the queued record carries everything the drain needs without the reviewed_prs row', async () => {

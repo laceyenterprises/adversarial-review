@@ -231,6 +231,11 @@ test('a fresh clean sweep marks every PR verified; a stale one marks them all un
     );
     assert.equal(stale.blind, true, `78m > ${DEFAULT_RECONCILE_STALE_AFTER_MS}ms window`);
     assert.equal(stale.reason, 'reconcile-record-stale');
+    assert.equal(
+      isPrUnverified(stale, 'laceyenterprises/agent-os', 6393),
+      true,
+      'a stale whole-record attestation makes every PR unverified',
+    );
   });
 });
 

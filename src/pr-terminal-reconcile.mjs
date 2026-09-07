@@ -322,6 +322,7 @@ export function evaluateReconcileFreshness(state, { nowMs, staleAfterMs = DEFAUL
 export function isPrUnverified(freshness, repo, prNumber) {
   if (!freshness) return true;
   if (!freshness.present) return true;
+  if (freshness.blind && freshness.reason === 'reconcile-record-stale') return true;
   const target = Number(prNumber);
   return (freshness.unresolved || []).some(
     (entry) => entry.repo === repo && Number(entry.prNumber) === target

@@ -612,6 +612,244 @@ function openReviewStateReadOnlyDb(rootDir) {
   }
 }
 
+function openReviewStateWritableDb(rootDir) {
+  const dbPath = join(rootDir, 'data', 'reviews.db');
+  if (!existsSync(dbPath)) return null;
+  const db = new Database(dbPath, { fileMustExist: true });
+  db.pragma('busy_timeout = 5000');
+  return db;
+}
+
+function normalizeGithubTerminalState(raw) {
+  const state = String(raw?.state || raw?.prState || '').trim().toLowerCase();
+  const mergedAt = raw?.mergedAt || raw?.merged_at || null;
+  const closedAt = raw?.closedAt || raw?.closed_at || null;
+  if (mergedAt || state === 'merged') {
+    return {
+      terminal: true,
+      prState: 'merged',
+      mergedAt: mergedAt || closedAt || null,
+      closedAt: closedAt || mergedAt || null,
+    };
+  }
+  if (state === 'closed') {
+    return {
+      terminal: true,
+      prState: 'closed',
+      mergedAt: null,
+      closedAt: closedAt || null,
+    };
+  }
+  return {
+    terminal: false,
+    prState: state || 'open',
+    mergedAt: null,
+    closedAt: null,
+  };
+}
+
+function fetchPRTerminalStateSync(repo, prNumber, { execFileSyncImpl = execFileSync } = {}) {
+  const stdout = execFileSyncImpl(
+    'gh',
+    ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'state,mergedAt,closedAt'],
+    {
+      encoding: 'utf8',
+      timeout: 10_000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  return normalizeGithubTerminalState(parseJson(stdout, {}));
+}
+
+function readTerminalReconciliationCandidates(db) {
+  const candidates = new Map();
+  const add = (row, reason) => {
+    if (!row?.repo || !row?.pr_number) return;
+    const key = `${row.repo}#${row.pr_number}`;
+    const current = candidates.get(key) || {
+      repo: row.repo,
+      prNumber: Number(row.pr_number),
+      reasons: [],
+    };
+    if (!current.reasons.includes(reason)) current.reasons.push(reason);
+    candidates.set(key, current);
+  };
+
+  for (const row of safeAll(
+    db,
+    `SELECT repo, pr_number
+       FROM reviewed_prs
+      WHERE COALESCE(pr_state, 'open') = 'open'
+        AND review_status = 'pending'`
+  )) {
+    add(row, 'first-pass-queue');
+  }
+
+  for (const row of safeAll(
+    db,
+    `SELECT repo, pr_number
+       FROM reviewed_prs
+      WHERE COALESCE(pr_state, 'open') = 'open'
+        AND review_status = 'posted'
+        AND posted_at IS NOT NULL`
+  )) {
+    add(row, 'posted-terminal-candidate');
+  }
+
+  for (const row of safeAll(
+    db,
+    `SELECT repo, pr_number
+       FROM ttm_flag_state
+      WHERE state = 'active'
+        AND flag_kind = 'terminal_but_unmerged'`
+  )) {
+    add(row, 'terminal-but-unmerged-flag');
+  }
+
+  return Array.from(candidates.values())
+    .sort((left, right) => (
+      String(left.repo).localeCompare(String(right.repo)) ||
+      Number(left.prNumber) - Number(right.prNumber)
+    ));
+}
+
+function resolveActiveTtmFlagsForTerminalPR(db, { repo, prNumber, prState, mergedAt, closedAt, observedAt }) {
+  const activeRows = safeAll(
+    db,
+    `SELECT *
+       FROM ttm_flag_state
+      WHERE repo = ?
+        AND pr_number = ?
+        AND state = 'active'
+        AND flag_kind = 'terminal_but_unmerged'`,
+    [repo, prNumber],
+  );
+  for (const row of activeRows) {
+    const details = {
+      ...parseJson(row.details_json || '{}', {}),
+      githubObservedState: prState,
+      githubObservedMergedAt: mergedAt || null,
+      githubObservedClosedAt: closedAt || null,
+      resolvedBy: 'pipeline-health-terminal-reconciliation',
+    };
+    try {
+      db.prepare(
+        `INSERT INTO ttm_flag_events (
+           event_key, repo, pr_number, flag_kind, state, observed_at,
+           opened_at, settled_at, merged_at, elapsed_minutes, budget_minutes,
+           terminal_unmerged_minutes, review_rounds, details_json
+         ) VALUES (?, ?, ?, ?, 'resolved', ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        row.event_key,
+        row.repo,
+        row.pr_number,
+        row.flag_kind,
+        observedAt,
+        row.opened_at,
+        row.settled_at,
+        mergedAt || row.merged_at || null,
+        row.elapsed_minutes,
+        row.budget_minutes,
+        row.terminal_unmerged_minutes,
+        row.review_rounds,
+        JSON.stringify(details),
+      );
+    } catch (error) {
+      if (!isMissingSchemaError(error)) throw error;
+    }
+    db.prepare(
+      `UPDATE ttm_flag_state
+          SET state = 'resolved',
+              last_observed_at = ?,
+              resolved_at = ?,
+              merged_at = COALESCE(?, merged_at),
+              details_json = ?
+        WHERE event_key = ?`
+    ).run(observedAt, observedAt, mergedAt || null, JSON.stringify(details), row.event_key);
+  }
+  return activeRows.length;
+}
+
+function reconcileTerminalAlertState(rootDir, {
+  observedAt,
+  execFileSyncImpl = execFileSync,
+  fetchPRTerminalStateSyncImpl = fetchPRTerminalStateSync,
+} = {}) {
+  let db;
+  const summary = {
+    enabled: true,
+    checked: 0,
+    reconciled: 0,
+    resolvedFlags: 0,
+    updated: [],
+    errors: [],
+  };
+  try {
+    db = openReviewStateWritableDb(rootDir);
+    if (!db) return { ...summary, enabled: false, reason: 'missing-review-state-db' };
+    const candidates = readTerminalReconciliationCandidates(db);
+    for (const candidate of candidates) {
+      summary.checked += 1;
+      let live;
+      try {
+        live = normalizeGithubTerminalState(
+          fetchPRTerminalStateSyncImpl(candidate.repo, candidate.prNumber, { execFileSyncImpl })
+        );
+      } catch (error) {
+        summary.errors.push({
+          repo: candidate.repo,
+          prNumber: candidate.prNumber,
+          error: String(error?.message || error).slice(0, 300),
+        });
+        continue;
+      }
+      if (!live.terminal) continue;
+      if (live.prState === 'merged') {
+        db.prepare(
+          `UPDATE reviewed_prs
+              SET pr_state = 'merged',
+                  merged_at = COALESCE(?, merged_at),
+                  closed_at = COALESCE(?, closed_at)
+            WHERE repo = ?
+              AND pr_number = ?`
+        ).run(live.mergedAt || observedAt, live.closedAt || live.mergedAt || null, candidate.repo, candidate.prNumber);
+      } else {
+        db.prepare(
+          `UPDATE reviewed_prs
+              SET pr_state = 'closed',
+                  closed_at = COALESCE(?, closed_at)
+            WHERE repo = ?
+              AND pr_number = ?`
+        ).run(live.closedAt || observedAt, candidate.repo, candidate.prNumber);
+      }
+      const resolvedFlags = resolveActiveTtmFlagsForTerminalPR(db, {
+        repo: candidate.repo,
+        prNumber: candidate.prNumber,
+        prState: live.prState,
+        mergedAt: live.mergedAt,
+        closedAt: live.closedAt,
+        observedAt,
+      });
+      summary.reconciled += 1;
+      summary.resolvedFlags += resolvedFlags;
+      summary.updated.push({
+        repo: candidate.repo,
+        prNumber: candidate.prNumber,
+        reasons: candidate.reasons,
+        githubObservedState: live.prState,
+        githubObservedMergedAt: live.mergedAt,
+        githubObservedClosedAt: live.closedAt,
+        resolvedFlags,
+      });
+    }
+  } catch (error) {
+    summary.errors.push({ error: String(error?.message || error).slice(0, 300) });
+  } finally {
+    db?.close();
+  }
+  return summary;
+}
+
 function summarizeReviewerAttempts(db, { nowMs, config }) {
   const cutoff = new Date(nowMs - config.reviewerDeathRateWindowMs).toISOString();
   const unknownRateCutoff = new Date(nowMs - config.reviewUnknownRateWindowMs).toISOString();
@@ -2236,12 +2474,21 @@ function collectReviewPipelineHealth({
   now = () => new Date(),
   env = process.env,
   config: configOverrides = {},
+  reconcileTerminalState = false,
+  fetchPRTerminalStateSyncImpl = fetchPRTerminalStateSync,
   execFileSyncImpl = execFileSync,
   sleepSyncImpl = sleepSyncMs,
 } = {}) {
   const observedAt = toIso(now);
   const nowMs = Date.parse(observedAt);
   const config = resolveReviewPipelineHealthConfig(env, configOverrides);
+  const terminalReconciliation = reconcileTerminalState
+    ? reconcileTerminalAlertState(rootDir, {
+        observedAt,
+        execFileSyncImpl,
+        fetchPRTerminalStateSyncImpl,
+      })
+    : { enabled: false, checked: 0, reconciled: 0, resolvedFlags: 0, updated: [], errors: [] };
   const { db, status: reviewStateLedger } = openReviewStateReadOnlyDb(rootDir);
   try {
     const reviewer = db
@@ -2351,6 +2598,7 @@ function collectReviewPipelineHealth({
       rootDir,
       hqRoot,
       config,
+      terminalReconciliation,
       reviewer,
       reviewerDegradation,
       outage,

@@ -245,6 +245,7 @@ export async function syncPRLifecycle(octokit, operatorSurface, primaryDomainId 
 
     if (pr.mergedAt) {
       console.log(`[watcher] PR ${repo}#${prNumber} was merged — syncing Linear`);
+      stmtMarkMerged.run(pr.mergedAt, repo, prNumber);
       try {
         await queueAndAttemptMergeAgentLifecycleCleanup({
           pr, repo, prNumber, transition: 'merged',
@@ -273,16 +274,16 @@ export async function syncPRLifecycle(octokit, operatorSurface, primaryDomainId 
         }, linearTicketId, labelNames),
         'finalized'
       );
-      stmtMarkMerged.run(pr.mergedAt, repo, prNumber);
       } catch (err) {
         console.error(
-          `[watcher] Failed to sync merged PR ${repo}#${prNumber}; leaving lifecycle row open for retry:`,
+          `[watcher] Failed to sync merged PR ${repo}#${prNumber}; terminal state is recorded and side effects will retry separately:`,
           err?.message || err
         );
         continue;
       }
     } else if (pr.state === 'closed') {
       console.log(`[watcher] PR ${repo}#${prNumber} was closed (unmerged) — syncing Linear`);
+      stmtMarkClosed.run(pr.closedAt ?? new Date().toISOString(), repo, prNumber);
       try {
         await queueAndAttemptMergeAgentLifecycleCleanup({
           pr, repo, prNumber, transition: 'closed',
@@ -298,10 +299,9 @@ export async function syncPRLifecycle(octokit, operatorSurface, primaryDomainId 
         }, linearTicketId, labelNames),
         'halted'
       );
-      stmtMarkClosed.run(pr.closedAt ?? new Date().toISOString(), repo, prNumber);
       } catch (err) {
         console.error(
-          `[watcher] Failed to sync closed PR ${repo}#${prNumber}; leaving lifecycle row open for retry:`,
+          `[watcher] Failed to sync closed PR ${repo}#${prNumber}; terminal state is recorded and side effects will retry separately:`,
           err?.message || err
         );
         continue;

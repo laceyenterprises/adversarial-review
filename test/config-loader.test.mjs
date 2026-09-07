@@ -1277,6 +1277,26 @@ test('config.local.yaml accepts mirrored worker_pool.memory_injection keys', () 
   }
 });
 
+test('config.local.yaml accepts mirrored worker_pool.reliability_loop.mode', () => {
+  // RLC-03 is consumed by worker-pool dispatch, but the shared local override
+  // must not crash-loop the watcher strict loader.
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    const local = join(tmp, 'config.local.yaml');
+    writeFile(top, 'version: 1\n');
+    writeFile(local, `
+      worker_pool:
+        reliability_loop:
+          mode: disabled
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('worker_pool.reliability_loop.mode'), 'disabled');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('top-level config.yaml accepts mirrored worker_pool.shr keys', () => {
   // SHR probe tuning is Python-owned, but checked-in keys may live in shared
   // config.yaml and must parse under the watcher strict schema.
@@ -1803,6 +1823,27 @@ test('worker_pool.memory_injection canonical env aliases resolve through Node sc
     assert.equal(
       cfg.resolutionTrace('worker_pool.memory_injection.enabled').at(-1).source,
       'env:AGENT_OS_WORKER_POOL_MEMORY_INJECTION_ENABLED',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('worker_pool.reliability_loop.mode canonical env alias resolves through Node schema', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\n');
+    const cfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_WORKER_POOL_RELIABILITY_LOOP_MODE: 'disabled',
+      },
+    });
+    assert.equal(cfg.get('worker_pool.reliability_loop.mode'), 'disabled');
+    assert.equal(
+      cfg.resolutionTrace('worker_pool.reliability_loop.mode').at(-1).source,
+      'env:AGENT_OS_WORKER_POOL_RELIABILITY_LOOP_MODE',
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });

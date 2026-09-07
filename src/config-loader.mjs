@@ -2011,7 +2011,8 @@ function schemaV1() {
       // worker_pool.dispatch.substrate.*,
       // worker_pool.hardening_ledger.*,
       // worker_pool.memory.dynamic.*, worker_pool.memory_injection.*,
-      // worker_pool.memory_retention.*, worker_pool.secrets.op_read_cache.*,
+      // worker_pool.memory_retention.*, worker_pool.reliability_loop.*,
+      // worker_pool.secrets.op_read_cache.*,
       // worker_pool.secrets_bus.*, and worker_pool.shr.* —
       // Python-owned (canonical schema at platform/agent-os-config).
       // PARTIAL mirror, same rationale as the
@@ -2267,6 +2268,17 @@ function schemaV1() {
                 __default: 2,
                 __min: 1,
                 __max: 12,
+              },
+            },
+          },
+          reliability_loop: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              mode: {
+                __type: TYPE_STRING,
+                __default: 'observe',
+                __enum: ['observe', 'disabled'],
               },
             },
           },
@@ -3104,6 +3116,10 @@ export const ENV_ALIASES = {
   'worker_pool.memory_retention.shadow_only': {
     canonical: 'AGENT_OS_WORKER_POOL_MEMORY_RETENTION_SHADOW_ONLY',
     aliases: [['HQ_MEMORY_RETENTION_SHADOW_ONLY', identity]],
+  },
+  'worker_pool.reliability_loop.mode': {
+    canonical: 'AGENT_OS_WORKER_POOL_RELIABILITY_LOOP_MODE',
+    aliases: [],
   },
   'worker_pool.dispatch.codex_exec_mode': {
     canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_CODEX_EXEC_MODE',

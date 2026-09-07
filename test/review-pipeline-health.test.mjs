@@ -722,6 +722,83 @@ test('terminal reconciliation resolves an out-of-band merged terminal-unmerged f
   }
 });
 
+test('terminal reconciliation retries transient gh failures before reconciling', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 6395,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T17:00:00.000Z',
+  });
+  let attempts = 0;
+  const sleeps = [];
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    reconcileTerminalState: true,
+    sleepSyncImpl: (delayMs) => sleeps.push(delayMs),
+    execFileSyncImpl: (command, args) => {
+      assert.equal(command, 'gh');
+      assert.deepEqual(args, [
+        'pr', 'view', '6395', '--repo', REPO, '--json', 'state,mergedAt,closedAt',
+      ]);
+      attempts += 1;
+      if (attempts < 3) {
+        const error = new Error('TLS handshake timeout');
+        error.stderr = 'TLS handshake timeout';
+        throw error;
+      }
+      return JSON.stringify({
+        state: 'CLOSED',
+        mergedAt: null,
+        closedAt: '2026-05-25T17:40:00.000Z',
+      });
+    },
+  });
+
+  assert.equal(attempts, 3);
+  assert.deepEqual(sleeps, [100, 250]);
+  assert.equal(snapshot.terminalReconciliation.errors.length, 0);
+  assert.equal(snapshot.terminalReconciliation.reconciled, 1);
+});
+
+test('terminal reconciliation refuses writable reviews.db when caller uid differs from owner', () => {
+  if (typeof process.getuid !== 'function') return;
+
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 6396,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T17:00:00.000Z',
+  });
+  const originalDescriptor = Object.getOwnPropertyDescriptor(process, 'getuid');
+  const originalGetuid = process.getuid;
+  Object.defineProperty(process, 'getuid', {
+    configurable: true,
+    value: () => originalGetuid.call(process) + 1,
+  });
+  try {
+    const snapshot = collectReviewPipelineHealth({
+      rootDir,
+      now: () => new Date(NOW),
+      reconcileTerminalState: true,
+      fetchPRTerminalStateSyncImpl: () => {
+        throw new Error('should not fetch before ownership guard');
+      },
+    });
+    assert.match(
+      snapshot.terminalReconciliation.errors[0]?.error || '',
+      /refusing cross-user review state database write/,
+    );
+  } finally {
+    if (originalDescriptor) {
+      Object.defineProperty(process, 'getuid', originalDescriptor);
+    } else {
+      delete process.getuid;
+    }
+  }
+});
+
 test('an in-flight review does not count as starvation', () => {
   // `summarizeFirstPassQueue` selects only review_status='pending'. A review that
   // is actually RUNNING must never trip the alarm, or a 10m bar would page on

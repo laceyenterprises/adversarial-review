@@ -6,10 +6,9 @@ import { fileURLToPath } from 'node:url';
 
 // Guard test (see the sibling source-reading guards in this suite).
 //
-// A GitHub terminal observation must be recorded before fallible side effects
-// such as Linear triage sync. Otherwise a downstream failure leaves the local
-// row open forever, and age-based alert surfaces keep firing on a PR GitHub
-// already merged or closed.
+// A GitHub terminal observation must stay retryable until fallible side effects
+// such as Linear triage sync complete. Otherwise a downstream failure leaves the
+// local row terminal and the normal open-row watcher query never retries it.
 const SRC = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'pr-lifecycle-sync.mjs'),
   'utf8',
@@ -25,7 +24,7 @@ for (const [label, marker, failureMsg, markStmt] of [
   ['merged', 'was merged — syncing Linear', 'Failed to sync merged PR', 'stmtMarkMerged.run('],
   ['closed', 'was closed (unmerged) — syncing Linear', 'Failed to sync closed PR', 'stmtMarkClosed.run('],
 ]) {
-  test(`${label} branch: terminal state is recorded before remote triage side effects`, () => {
+  test(`${label} branch: terminal state is recorded after remote triage side effects`, () => {
     const slice = branchSlice(marker);
 
     const triageIdx = slice.indexOf('operatorSurface.syncTriageStatus(');
@@ -41,22 +40,22 @@ for (const [label, marker, failureMsg, markStmt] of [
       `${label}: triage sync must not have an isolated swallowing catch`,
     );
     assert.ok(
-      markIdx < triageIdx && triageIdx < failureIdx,
-      `${label}: expected local mark -> triage call -> branch-level catch; got ` +
+      triageIdx < markIdx && markIdx < failureIdx,
+      `${label}: expected triage call -> local mark -> branch-level catch; got ` +
         `triage=${triageIdx} mark=${markIdx} catch=${failureIdx}`,
     );
     assert.match(
       slice,
-      /terminal state is recorded and side effects will retry separately/,
-      `${label}: catch message should name terminal-first retry semantics`,
+      /leaving row open so lifecycle side effects retry on the next watcher tick/,
+      `${label}: catch message should name open-row retry semantics`,
     );
   });
 }
 
-test('merged branch records terminal state before owed-work side effects', () => {
+test('merged branch records terminal state after owed-work side effects', () => {
   const slice = branchSlice('was merged — syncing Linear');
   const autowalkIdx = slice.indexOf('fireDagAutowalkOnMerge(');
   const markIdx = slice.indexOf('stmtMarkMerged.run(');
   assert.ok(autowalkIdx > 0, 'autowalk call not found');
-  assert.ok(markIdx < autowalkIdx, 'terminal state must be recorded before owed-work side effects');
+  assert.ok(autowalkIdx < markIdx, 'terminal state must be recorded after owed-work side effects');
 });

@@ -72,6 +72,7 @@ const DEFAULT_DAG_AUTOWALK_MAX_LOG_AGE_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_DISPATCH_SPAWN_FAILURE_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_LAUNCHD_TIMEOUT_MS = 2_000;
 const DEFAULT_LAUNCHD_TRANSIENT_RETRY_DELAYS_MS = Object.freeze([50, 150]);
+const DEFAULT_GH_TERMINAL_STATE_RETRY_DELAYS_MS = Object.freeze([100, 250]);
 const DEFAULT_LABEL_PREFIX = 'ai.laceyenterprises';
 
 // Infra auto-recovery attempt cap the watcher enforces before it stops
@@ -615,9 +616,26 @@ function openReviewStateReadOnlyDb(rootDir) {
 function openReviewStateWritableDb(rootDir) {
   const dbPath = join(rootDir, 'data', 'reviews.db');
   if (!existsSync(dbPath)) return null;
+  assertReviewStateWritableOwner(dbPath);
   const db = new Database(dbPath, { fileMustExist: true });
   db.pragma('busy_timeout = 5000');
   return db;
+}
+
+function assertReviewStateWritableOwner(dbPath, {
+  currentUid = () => (typeof process.getuid === 'function' ? process.getuid() : null),
+  stat = statSync,
+} = {}) {
+  const callerUid = currentUid();
+  if (callerUid == null) {
+    throw new Error('cannot verify review state database caller ownership');
+  }
+  const ownerUid = stat(dbPath).uid;
+  if (callerUid !== ownerUid) {
+    throw new Error(
+      `refusing cross-user review state database write: caller uid ${callerUid}, canonical owner uid ${ownerUid}`,
+    );
+  }
 }
 
 function normalizeGithubTerminalState(raw) {
@@ -648,17 +666,43 @@ function normalizeGithubTerminalState(raw) {
   };
 }
 
-function fetchPRTerminalStateSync(repo, prNumber, { execFileSyncImpl = execFileSync } = {}) {
-  const stdout = execFileSyncImpl(
-    'gh',
-    ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'state,mergedAt,closedAt'],
-    {
-      encoding: 'utf8',
-      timeout: 10_000,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    },
-  );
-  return normalizeGithubTerminalState(parseJson(stdout, {}));
+function isTransientGhTerminalStateError(error) {
+  const message = [
+    error?.message,
+    error?.stderr,
+    error?.stdout,
+    error?.code,
+    error?.signal,
+  ].map((part) => String(part || '')).join('\n');
+  return /\b(?:ETIMEDOUT|ESOCKETTIMEDOUT|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|EAI_AGAIN|EPIPE|EIO)\b/i.test(message)
+    || /(?:TLS handshake timeout|SSL|timed?\s*out|timeout|connection (?:reset|refused)|network|early EOF|RPC failed|remote end hung up|5\d\d|HTTP 5\d\d|Bad Gateway|Service Unavailable|Gateway Timeout)/i.test(message);
+}
+
+function fetchPRTerminalStateSync(repo, prNumber, {
+  execFileSyncImpl = execFileSync,
+  sleepSyncImpl = sleepSyncMs,
+  retryDelaysMs = DEFAULT_GH_TERMINAL_STATE_RETRY_DELAYS_MS,
+} = {}) {
+  const args = ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'state,mergedAt,closedAt'];
+  const options = {
+    encoding: 'utf8',
+    timeout: 10_000,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  };
+  let lastError;
+  for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
+    try {
+      const stdout = execFileSyncImpl('gh', args, options);
+      return normalizeGithubTerminalState(parseJson(stdout, {}));
+    } catch (error) {
+      lastError = error;
+      if (!isTransientGhTerminalStateError(error) || attempt >= retryDelaysMs.length) {
+        throw error;
+      }
+      sleepSyncImpl(retryDelaysMs[attempt]);
+    }
+  }
+  throw lastError;
 }
 
 function readTerminalReconciliationCandidates(db) {
@@ -773,6 +817,7 @@ function resolveActiveTtmFlagsForTerminalPR(db, { repo, prNumber, prState, merge
 function reconcileTerminalAlertState(rootDir, {
   observedAt,
   execFileSyncImpl = execFileSync,
+  sleepSyncImpl = sleepSyncMs,
   fetchPRTerminalStateSyncImpl = fetchPRTerminalStateSync,
 } = {}) {
   let db;
@@ -793,7 +838,7 @@ function reconcileTerminalAlertState(rootDir, {
       let live;
       try {
         live = normalizeGithubTerminalState(
-          fetchPRTerminalStateSyncImpl(candidate.repo, candidate.prNumber, { execFileSyncImpl })
+          fetchPRTerminalStateSyncImpl(candidate.repo, candidate.prNumber, { execFileSyncImpl, sleepSyncImpl })
         );
       } catch (error) {
         summary.errors.push({
@@ -2486,6 +2531,7 @@ function collectReviewPipelineHealth({
     ? reconcileTerminalAlertState(rootDir, {
         observedAt,
         execFileSyncImpl,
+        sleepSyncImpl,
         fetchPRTerminalStateSyncImpl,
       })
     : { enabled: false, checked: 0, reconciled: 0, resolvedFlags: 0, updated: [], errors: [] };

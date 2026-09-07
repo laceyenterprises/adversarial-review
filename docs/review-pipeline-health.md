@@ -7,6 +7,13 @@ read-only, never runs schema convergence from the metrics path, and treats
 missing review-state tables or columns as an empty snapshot instead of mutating
 the watcher-owned database.
 
+When terminal reconciliation is enabled, the collector may open `reviews.db`
+writable only after verifying that the current process UID matches the database
+file owner, so an operator shell cannot create wrong-owned SQLite WAL sidecars.
+The live `gh pr view` terminal-state probe uses bounded transient retries for
+timeouts, TLS/network drops, and HTTP 5xx-style failures; non-transient failures
+are still reported immediately in the reconciliation summary.
+
 Run locally:
 
 ```sh

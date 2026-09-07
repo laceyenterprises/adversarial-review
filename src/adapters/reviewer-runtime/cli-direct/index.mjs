@@ -494,7 +494,11 @@ function createCliDirectReviewerRuntimeAdapter({
         ? parseCodexJsonTokenUsageFromFailureStdout(err?.stdout || '')
         : { tokenUsage: null, tokenUsageNoUsageReason: null };
       const cancelled = activeRun.cancelled || controller.signal.aborted || errorCode === 'ABORT_ERR';
-      const classificationText = [err?.message, err?.stderr].filter(Boolean).join('\n').trim().slice(0, 4000);
+      const classificationText = [err?.message, err?.stderr, err?.stdout]
+        .filter(Boolean)
+        .join('\n')
+        .trim()
+        .slice(0, 4000);
       const failureClass = reviewerSignalAwareFailureClass(
         err,
         classificationText,

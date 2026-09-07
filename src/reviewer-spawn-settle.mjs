@@ -1137,17 +1137,21 @@ function settleReviewerAttempt({
       failureReason: failureMessage,
     });
     if (infraRecoverAttempts >= INFRA_AUTO_RECOVER_CAP) {
+      const repeatExhaustion = infraRecoverAttempts > INFRA_AUTO_RECOVER_CAP;
+      const exhaustionLabel = repeatExhaustion
+        ? `REPEAT infra auto-recovery cap exhaustion after reset (${infraRecoverAttempts}/${INFRA_AUTO_RECOVER_CAP})`
+        : `infra auto-recovery cap exhausted (${infraRecoverAttempts}/${INFRA_AUTO_RECOVER_CAP})`;
       withSqliteBusyRetrySync(
         () => statements.markCascadeFailed.run(
           failureAt,
-          `${classifiedMessage}; infra auto-recovery cap exhausted (${infraRecoverAttempts}/${INFRA_AUTO_RECOVER_CAP}).`,
+          `${classifiedMessage}; ${exhaustionLabel}.`,
           repoPath,
           prNumber
         ),
         { label: `reviewer-settle-cascade-failed:${repoPath}#${prNumber}`, log }
       );
       log.warn(
-        `[watcher] Reviewer ${failureClass} failure on #${prNumber} exhausted infra auto-recovery cap ` +
+        `[watcher] Reviewer ${failureClass} failure on #${prNumber} ${repeatExhaustion ? 'REPEAT-exhausted' : 'exhausted'} infra auto-recovery cap ` +
         `(${infraRecoverAttempts}/${INFRA_AUTO_RECOVER_CAP}); leaving terminal evidence for operator inspection`
       );
       return;

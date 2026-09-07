@@ -11,6 +11,7 @@ import {
   parseHqFleetQuotaStatus,
   providerAvailabilityFromFleetStatus,
   providerAvailabilityFromStatuses,
+  providerForQuotaHarness,
   providerSoftGroundingFromFleetStatus,
   providerSoftGroundingFromStatuses,
 } from '../src/fleet-quota-status.mjs';
@@ -81,6 +82,18 @@ test('providerAvailabilityFromFleetStatus prefers the oauth auth-path status', (
     ],
   });
   const decision = providerAvailabilityFromFleetStatus(stdout, { provider: 'openai' });
+  assert.equal(decision.state, 'exhausted');
+  assert.equal(decision.available, false);
+});
+
+test('gemini reviewer reads the google/agy quota provider row', () => {
+  const stdout = JSON.stringify({
+    providerStatuses: [
+      { provider: 'google', authPath: 'agy', state: 'exhausted' },
+    ],
+  });
+  assert.equal(providerForQuotaHarness('gemini'), 'google');
+  const decision = providerAvailabilityFromFleetStatus(stdout, { provider: providerForQuotaHarness('gemini') });
   assert.equal(decision.state, 'exhausted');
   assert.equal(decision.available, false);
 });

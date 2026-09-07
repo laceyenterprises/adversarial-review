@@ -354,6 +354,53 @@ test('routing-tier probe failures stay reclaimable until infra cap is exhausted'
   }
 });
 
+test('routing-tier probe failure over cap is labeled as repeat exhaustion', () => {
+  const { rootDir, db } = setupFixture();
+  try {
+    const repo = 'laceyenterprises/adversarial-review';
+    const prNumber = 195;
+    db.prepare(
+      'UPDATE reviewed_prs SET review_status = ?, infra_auto_recover_attempts = ? WHERE repo = ? AND pr_number = ?'
+    ).run('reviewing', 4, repo, prNumber);
+    const statements = {
+      markPosted: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'posted', reviewed_at = ? WHERE repo = ? AND pr_number = ?"
+      ),
+      markFailed: stmtMarkBugFailed(db),
+      releaseReviewLease: stmtMarkCascadeFailed(db),
+      markCascadeFailed: stmtMarkCascadeFailed(db),
+      markPendingUpstream: stmtMarkPendingUpstream(db),
+      getReviewRow: db.prepare(
+        'SELECT review_status, review_attempts, failed_at, failure_message, infra_auto_recover_attempts FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+      ),
+    };
+
+    settleReviewerAttempt({
+      rootDir,
+      repoPath: repo,
+      prNumber,
+      result: {
+        ok: false,
+        failureClass: 'cascade',
+        error: 'Routing-tier readiness probe failed (UND_ERR_SOCKET)',
+      },
+      failureAt: '2026-05-04T07:13:00.000Z',
+      maxRemediationRounds: 2,
+      statements,
+      log: { warn() {} },
+    });
+
+    const terminal = statements.getReviewRow.get(repo, prNumber);
+    assert.equal(terminal.review_status, 'failed');
+    assert.equal(terminal.infra_auto_recover_attempts, 4);
+    assert.match(terminal.failure_message, /REPEAT infra auto-recovery cap exhaustion after reset/);
+    assert.match(terminal.failure_message, /4\/3/);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('bug simulator counts normally and does not create cascade state', () => {
   const { rootDir, db } = setupFixture();
   try {
@@ -397,6 +444,16 @@ test('rate-limit and 5xx heuristics distinguish real 429s from cascades', () => 
   assert.equal(
     classifyReviewerFailure('upstream retry exhausted after HTTP/1.1 503 from LiteLLM', 1),
     'cascade'
+  );
+});
+
+test('reviewer failure classification uses provider response carried on stdout', () => {
+  assert.equal(
+    classifyReviewerFailure(
+      'Command failed with code 1\n{"error":{"status":"RESOURCE_EXHAUSTED","message":"quota exceeded"}}',
+      1,
+    ),
+    'quota-exhausted',
   );
 });
 

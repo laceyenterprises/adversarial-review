@@ -3077,6 +3077,10 @@ export const ENV_ALIASES = {
     canonical: 'AGENT_OS_WORKER_POOL_MEMORY_DYNAMIC_REQUIRE_PRESSURE_NORMAL',
     aliases: [['HQ_MEMORY_DYNAMIC_REQUIRE_PRESSURE_NORMAL', identity]],
   },
+  'worker_pool.dag.autowalk.deep_reconcile': {
+    canonical: 'AGENT_OS_WORKER_POOL_DAG_AUTOWALK_DEEP_RECONCILE',
+    aliases: [['HQ_AUTOWALK_DEEP_RECONCILE', identity]],
+  },
   'worker_pool.memory_injection.enabled': {
     canonical: 'AGENT_OS_WORKER_POOL_MEMORY_INJECTION_ENABLED',
     aliases: [],

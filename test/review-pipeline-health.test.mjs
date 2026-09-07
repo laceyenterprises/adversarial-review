@@ -28,6 +28,7 @@ import { QUOTA_EXHAUSTED_FAILURE_CLASS } from '../src/quota-exhaustion.mjs';
 import { parseArgs } from '../src/review-pipeline-health-cli.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 import { DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS } from '../src/reviewer-pass-reaper.mjs';
+import { ensureTtmTrackerSchema } from '../src/ttm-tracker.mjs';
 
 const NOW = '2026-05-25T18:00:00.000Z';
 const REPO = 'laceyenterprises/adversarial-review';
@@ -109,6 +110,41 @@ function insertReviewerPass(rootDir, overrides = {}) {
 
 function insertReviewerPasses(rootDir, passes) {
   for (const pass of passes) insertReviewerPass(rootDir, pass);
+}
+
+function insertActiveTtmFlag(rootDir, overrides = {}) {
+  const db = openDb(rootDir);
+  try {
+    ensureTtmTrackerSchema(db);
+    const repo = overrides.repo || REPO;
+    const prNumber = overrides.prNumber || 960;
+    const flagKind = overrides.flagKind || 'terminal_but_unmerged';
+    const eventKey = overrides.eventKey || `${repo}#${prNumber}:${flagKind}`;
+    db.prepare(
+      `INSERT INTO ttm_flag_state (
+         event_key, repo, pr_number, flag_kind, state, first_observed_at,
+         last_observed_at, resolved_at, opened_at, settled_at, merged_at,
+         elapsed_minutes, budget_minutes, terminal_unmerged_minutes,
+         review_rounds, details_json
+       ) VALUES (?, ?, ?, ?, 'active', ?, ?, NULL, ?, ?, NULL, ?, ?, ?, ?, ?)`
+    ).run(
+      eventKey,
+      repo,
+      prNumber,
+      flagKind,
+      overrides.firstObservedAt || '2026-05-25T17:10:00.000Z',
+      overrides.lastObservedAt || '2026-05-25T17:50:00.000Z',
+      overrides.openedAt || '2026-05-25T17:00:00.000Z',
+      overrides.settledAt || '2026-05-25T17:10:00.000Z',
+      overrides.elapsedMinutes ?? 60,
+      overrides.budgetMinutes ?? 30,
+      overrides.terminalUnmergedMinutes ?? 50,
+      overrides.reviewRounds ?? 0,
+      JSON.stringify(overrides.details || { prState: 'open' }),
+    );
+  } finally {
+    db.close();
+  }
 }
 
 function writeJob(rootDir, state, name, job) {
@@ -398,6 +434,7 @@ test('parseArgs defaults rootDir to the tool root, not the caller cwd', () => {
   assert.ok(existsSync(path.join(options.rootDir, 'package.json')));
   // An explicit --root still wins.
   assert.equal(parseArgs(['--root', '/tmp/elsewhere']).rootDir, '/tmp/elsewhere');
+  assert.equal(parseArgs(['--no-terminal-reconcile']).reconcileTerminalState, false);
 });
 
 test('collector emits a page finding when an existing review-state ledger cannot be opened', () => {
@@ -576,6 +613,190 @@ test('queue starvation reports an unstarted row as capacity, not reviewer failur
   assert.match(finding.message, /no reviewer has picked it up/);
   assert.match(finding.recommended_action, /Nothing picked this up/);
   assert.equal(finding.details.reviewerFailed, false);
+});
+
+test('terminal reconciliation evicts an out-of-band closed PR from first-pass queue alerts', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 6394,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T17:00:00.000Z',
+  });
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    reconcileTerminalState: true,
+    fetchPRTerminalStateSyncImpl: (repo, prNumber) => {
+      assert.equal(repo, REPO);
+      assert.equal(prNumber, 6394);
+      return {
+        state: 'CLOSED',
+        mergedAt: null,
+        closedAt: '2026-05-25T17:30:00.000Z',
+      };
+    },
+  });
+
+  assert.ok(!findingCodes(snapshot).includes('review:queue_starvation'));
+  assert.equal(snapshot.firstPassQueue.depth, 0);
+  assert.equal(snapshot.terminalReconciliation.reconciled, 1);
+  assert.equal(snapshot.terminalReconciliation.updated[0].githubObservedState, 'closed');
+
+  const db = openDb(rootDir);
+  try {
+    const row = db.prepare(
+      'SELECT pr_state, closed_at FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get(REPO, 6394);
+    assert.equal(row.pr_state, 'closed');
+    assert.equal(row.closed_at, '2026-05-25T17:30:00.000Z');
+  } finally {
+    db.close();
+  }
+});
+
+test('terminal reconciliation resolves an out-of-band merged terminal-unmerged flag', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 6364,
+    reviewStatus: 'posted',
+    postedAt: '2026-05-25T17:10:00.000Z',
+    reviewedAt: '2026-05-25T17:00:00.000Z',
+  });
+  insertReviewerPass(rootDir, {
+    prNumber: 6364,
+    attemptNumber: 1,
+    passKind: 'first-pass',
+    startedAt: '2026-05-25T17:05:00.000Z',
+    endedAt: '2026-05-25T17:10:00.000Z',
+    status: 'completed',
+    metadata: {},
+  });
+  const dbForVerdict = openDb(rootDir);
+  try {
+    dbForVerdict.prepare(
+      "UPDATE reviewer_passes SET verdict = 'approved' WHERE repo = ? AND pr_number = ?"
+    ).run(REPO, 6364);
+  } finally {
+    dbForVerdict.close();
+  }
+  insertActiveTtmFlag(rootDir, { prNumber: 6364 });
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    reconcileTerminalState: true,
+    config: { ttm: { terminalUnmergedMinutes: 10 } },
+    fetchPRTerminalStateSyncImpl: (repo, prNumber) => {
+      assert.equal(repo, REPO);
+      assert.equal(prNumber, 6364);
+      return {
+        state: 'MERGED',
+        mergedAt: '2026-05-25T17:35:00.000Z',
+        closedAt: '2026-05-25T17:35:00.000Z',
+      };
+    },
+  });
+
+  assert.ok(!findingCodes(snapshot).includes('review:terminal_but_unmerged'));
+  assert.equal(snapshot.ttm.flags.some((flag) => flag.prNumber === 6364), false);
+  assert.equal(snapshot.terminalReconciliation.reconciled, 1);
+  assert.equal(snapshot.terminalReconciliation.resolvedFlags, 1);
+
+  const db = openDb(rootDir);
+  try {
+    const row = db.prepare(
+      'SELECT pr_state, merged_at FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get(REPO, 6364);
+    assert.equal(row.pr_state, 'merged');
+    assert.equal(row.merged_at, '2026-05-25T17:35:00.000Z');
+    const flag = db.prepare(
+      'SELECT state, resolved_at, merged_at, details_json FROM ttm_flag_state WHERE event_key = ?'
+    ).get(`${REPO}#6364:terminal_but_unmerged`);
+    assert.equal(flag.state, 'resolved');
+    assert.equal(flag.resolved_at, NOW);
+    assert.equal(flag.merged_at, '2026-05-25T17:35:00.000Z');
+    assert.equal(JSON.parse(flag.details_json).githubObservedState, 'merged');
+  } finally {
+    db.close();
+  }
+});
+
+test('terminal reconciliation retries transient gh failures before reconciling', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 6395,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T17:00:00.000Z',
+  });
+  let attempts = 0;
+  const sleeps = [];
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    reconcileTerminalState: true,
+    sleepSyncImpl: (delayMs) => sleeps.push(delayMs),
+    execFileSyncImpl: (command, args) => {
+      assert.equal(command, 'gh');
+      assert.deepEqual(args, [
+        'pr', 'view', '6395', '--repo', REPO, '--json', 'state,mergedAt,closedAt',
+      ]);
+      attempts += 1;
+      if (attempts < 3) {
+        const error = new Error('TLS handshake timeout');
+        error.stderr = 'TLS handshake timeout';
+        throw error;
+      }
+      return JSON.stringify({
+        state: 'CLOSED',
+        mergedAt: null,
+        closedAt: '2026-05-25T17:40:00.000Z',
+      });
+    },
+  });
+
+  assert.equal(attempts, 3);
+  assert.deepEqual(sleeps, [100, 250]);
+  assert.equal(snapshot.terminalReconciliation.errors.length, 0);
+  assert.equal(snapshot.terminalReconciliation.reconciled, 1);
+});
+
+test('terminal reconciliation refuses writable reviews.db when caller uid differs from owner', () => {
+  if (typeof process.getuid !== 'function') return;
+
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 6396,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T17:00:00.000Z',
+  });
+  const originalDescriptor = Object.getOwnPropertyDescriptor(process, 'getuid');
+  const originalGetuid = process.getuid;
+  Object.defineProperty(process, 'getuid', {
+    configurable: true,
+    value: () => originalGetuid.call(process) + 1,
+  });
+  try {
+    const snapshot = collectReviewPipelineHealth({
+      rootDir,
+      now: () => new Date(NOW),
+      reconcileTerminalState: true,
+      fetchPRTerminalStateSyncImpl: () => {
+        throw new Error('should not fetch before ownership guard');
+      },
+    });
+    assert.match(
+      snapshot.terminalReconciliation.errors[0]?.error || '',
+      /refusing cross-user review state database write/,
+    );
+  } finally {
+    if (originalDescriptor) {
+      Object.defineProperty(process, 'getuid', originalDescriptor);
+    } else {
+      delete process.getuid;
+    }
+  }
 });
 
 test('an in-flight review does not count as starvation', () => {

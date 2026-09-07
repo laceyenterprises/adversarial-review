@@ -6,10 +6,9 @@ import { fileURLToPath } from 'node:url';
 
 // Guard test (see the sibling source-reading guards in this suite).
 //
-// A Linear triage failure must bubble to the branch-level catch so the
-// reviewed_prs row stays open and the full PR lifecycle sync retries. Swallowing
-// this remote failure would mark the row merged/closed while leaving Linear
-// permanently stale.
+// A GitHub terminal observation must stay retryable until fallible side effects
+// such as Linear triage sync complete. Otherwise a downstream failure leaves the
+// local row terminal and the normal open-row watcher query never retries it.
 const SRC = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'pr-lifecycle-sync.mjs'),
   'utf8',
@@ -25,7 +24,7 @@ for (const [label, marker, failureMsg, markStmt] of [
   ['merged', 'was merged — syncing Linear', 'Failed to sync merged PR', 'stmtMarkMerged.run('],
   ['closed', 'was closed (unmerged) — syncing Linear', 'Failed to sync closed PR', 'stmtMarkClosed.run('],
 ]) {
-  test(`${label} branch: remote triage failures leave the lifecycle row retryable`, () => {
+  test(`${label} branch: terminal state is recorded after remote triage side effects`, () => {
     const slice = branchSlice(marker);
 
     const triageIdx = slice.indexOf('operatorSurface.syncTriageStatus(');
@@ -45,16 +44,18 @@ for (const [label, marker, failureMsg, markStmt] of [
       `${label}: expected triage call -> local mark -> branch-level catch; got ` +
         `triage=${triageIdx} mark=${markIdx} catch=${failureIdx}`,
     );
+    assert.match(
+      slice,
+      /leaving row open so lifecycle side effects retry on the next watcher tick/,
+      `${label}: catch message should name open-row retry semantics`,
+    );
   });
 }
 
-test('the owed-work ordering before the mark is preserved', () => {
-  // fireDagAutowalkOnMerge must still run BEFORE the mark: its comment states
-  // that persisting owed work first is what leaves the row eligible for retry
-  // when the LOCAL write fails.
+test('merged branch records terminal state after owed-work side effects', () => {
   const slice = branchSlice('was merged — syncing Linear');
   const autowalkIdx = slice.indexOf('fireDagAutowalkOnMerge(');
   const markIdx = slice.indexOf('stmtMarkMerged.run(');
   assert.ok(autowalkIdx > 0, 'autowalk call not found');
-  assert.ok(autowalkIdx < markIdx, 'owed work must still be persisted before the mark');
+  assert.ok(autowalkIdx < markIdx, 'terminal state must be recorded after owed-work side effects');
 });

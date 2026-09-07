@@ -9,7 +9,7 @@ import {
 
 const USAGE = `\
 Usage:
-  node src/review-pipeline-health-cli.mjs [--root <dir>] [--hq-root <dir>] [--json | --prometheus | --sentinel] [--now <iso>]
+  node src/review-pipeline-health-cli.mjs [--root <dir>] [--hq-root <dir>] [--json | --prometheus | --sentinel] [--now <iso>] [--no-terminal-reconcile]
 `;
 
 // The tool root (parent of src/), where this package's `data/reviews.db` lives.
@@ -31,6 +31,7 @@ function parseArgs(argv) {
     hqRoot: process.env.HQ_ROOT || null,
     format: 'json',
     now: null,
+    reconcileTerminalState: true,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -49,6 +50,8 @@ function parseArgs(argv) {
     } else if (arg === '--now') {
       if (!argv[i + 1]) throw new Error('--now requires an ISO timestamp');
       options.now = argv[++i];
+    } else if (arg === '--no-terminal-reconcile') {
+      options.reconcileTerminalState = false;
     } else if (arg === '--help' || arg === '-h') {
       options.help = true;
     } else {
@@ -83,6 +86,7 @@ function main(argv = process.argv.slice(2), io = {}) {
     rootDir: options.rootDir,
     ...(options.hqRoot ? { hqRoot: options.hqRoot } : {}),
     now: options.now ? () => new Date(options.now) : () => new Date(),
+    reconcileTerminalState: options.reconcileTerminalState,
   });
   if (options.format === 'prometheus') {
     stdout.write(renderReviewPipelinePrometheus(snapshot));

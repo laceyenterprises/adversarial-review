@@ -249,34 +249,33 @@ export async function syncPRLifecycle(octokit, operatorSurface, primaryDomainId 
         await queueAndAttemptMergeAgentLifecycleCleanup({
           pr, repo, prNumber, transition: 'merged',
         });
-      // Advance the merged PR's dag-run (AMA D5 gate). Persist the owed work
-      // before marking the lifecycle transition merged so a local state-write
-      // failure leaves this row eligible for the next watcher tick.
+        // Advance the merged PR's dag-run (AMA D5 gate). This stays inside the
+        // fallible side-effect block so failures leave the open row retryable.
         fireDagAutowalkOnMerge({ repo, prNumber });
-      // Closeout capture is intentionally NOT awaited inline here. The
-      // gh retry budget for a single scrape (~30–45s worst case) would
-      // otherwise stall the gates-deletion and Linear triage sync for
-      // every later PR on the open-list when two or more merge between
-      // polls. retryPendingMergeCloseouts runs later in the same
-      // pollOnce tick and picks up this freshly-merged row from the
-      // pending list.
-      deleteGateRecordsForPR(ROOT, { repo, prNumber });
-      // ARC-03 review finding: sync triage under the row's owning domain so a
-      // secondary domain's tracking ticket is finalized too, not just code-pr's.
-      const mergedRowDomainId =
-        stmtGetReviewRow.get(repo, prNumber)?.domain_id || primaryDomainId;
-      await operatorSurface.syncTriageStatus(
-        subjectRefWithLinearTicket({
-          domainId: mergedRowDomainId,
-          subjectExternalId: `${repo}#${prNumber}`,
-          revisionRef: pr.headRefOid || null,
-        }, linearTicketId, labelNames),
-        'finalized'
-      );
-      stmtMarkMerged.run(pr.mergedAt, repo, prNumber);
+        // Closeout capture is intentionally NOT awaited inline here. The
+        // gh retry budget for a single scrape (~30–45s worst case) would
+        // otherwise stall the gates-deletion and Linear triage sync for
+        // every later PR on the open-list when two or more merge between
+        // polls. retryPendingMergeCloseouts runs later in the same
+        // pollOnce tick and picks up this freshly-merged row from the
+        // pending list.
+        deleteGateRecordsForPR(ROOT, { repo, prNumber });
+        // ARC-03 review finding: sync triage under the row's owning domain so a
+        // secondary domain's tracking ticket is finalized too, not just code-pr's.
+        const mergedRowDomainId =
+          stmtGetReviewRow.get(repo, prNumber)?.domain_id || primaryDomainId;
+        await operatorSurface.syncTriageStatus(
+          subjectRefWithLinearTicket({
+            domainId: mergedRowDomainId,
+            subjectExternalId: `${repo}#${prNumber}`,
+            revisionRef: pr.headRefOid || null,
+          }, linearTicketId, labelNames),
+          'finalized'
+        );
+        stmtMarkMerged.run(pr.mergedAt, repo, prNumber);
       } catch (err) {
         console.error(
-          `[watcher] Failed to sync merged PR ${repo}#${prNumber}; leaving lifecycle row open for retry:`,
+          `[watcher] Failed to sync merged PR ${repo}#${prNumber}; leaving row open so lifecycle side effects retry on the next watcher tick:`,
           err?.message || err
         );
         continue;
@@ -287,21 +286,21 @@ export async function syncPRLifecycle(octokit, operatorSurface, primaryDomainId 
         await queueAndAttemptMergeAgentLifecycleCleanup({
           pr, repo, prNumber, transition: 'closed',
         });
-      deleteGateRecordsForPR(ROOT, { repo, prNumber });
-      const closedRowDomainId =
-        stmtGetReviewRow.get(repo, prNumber)?.domain_id || primaryDomainId;
-      await operatorSurface.syncTriageStatus(
-        subjectRefWithLinearTicket({
-          domainId: closedRowDomainId,
-          subjectExternalId: `${repo}#${prNumber}`,
-          revisionRef: pr.headRefOid || null,
-        }, linearTicketId, labelNames),
-        'halted'
-      );
-      stmtMarkClosed.run(pr.closedAt ?? new Date().toISOString(), repo, prNumber);
+        deleteGateRecordsForPR(ROOT, { repo, prNumber });
+        const closedRowDomainId =
+          stmtGetReviewRow.get(repo, prNumber)?.domain_id || primaryDomainId;
+        await operatorSurface.syncTriageStatus(
+          subjectRefWithLinearTicket({
+            domainId: closedRowDomainId,
+            subjectExternalId: `${repo}#${prNumber}`,
+            revisionRef: pr.headRefOid || null,
+          }, linearTicketId, labelNames),
+          'halted'
+        );
+        stmtMarkClosed.run(pr.closedAt ?? new Date().toISOString(), repo, prNumber);
       } catch (err) {
         console.error(
-          `[watcher] Failed to sync closed PR ${repo}#${prNumber}; leaving lifecycle row open for retry:`,
+          `[watcher] Failed to sync closed PR ${repo}#${prNumber}; leaving row open so lifecycle side effects retry on the next watcher tick:`,
           err?.message || err
         );
         continue;

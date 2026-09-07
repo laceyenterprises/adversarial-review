@@ -22,7 +22,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_MERGE_AGENT_LIFECYCLE_CLEANUP_RETRY_MS = 60 * 1000;
 const DEFAULT_MERGE_AGENT_LIFECYCLE_CLEANUP_PER_POLL = 5;
 
-async function attemptMergeAgentLifecycleCleanup({
+export async function attemptMergeAgentLifecycleCleanup({
   rootDir = ROOT,
   repo,
   prNumber,
@@ -155,7 +155,7 @@ async function attemptMergeAgentDispatchedLabelAddCleanup({
   }
 }
 
-export async function queueAndAttemptMergeAgentLifecycleCleanup({
+export function queueMergeAgentLifecycleCleanup({
   rootDir = ROOT,
   pr,
   repo,
@@ -177,11 +177,29 @@ export async function queueAndAttemptMergeAgentLifecycleCleanup({
     transition,
     headSha: pr?.headRefOid || pr?.head?.sha || null,
   });
-  return attemptMergeAgentLifecycleCleanup({
+  return { repo, prNumber, transition };
+}
+
+export async function queueAndAttemptMergeAgentLifecycleCleanup({
+  rootDir = ROOT,
+  pr,
+  repo,
+  prNumber,
+  transition,
+} = {}) {
+  const queued = queueMergeAgentLifecycleCleanup({
     rootDir,
+    pr,
     repo,
     prNumber,
     transition,
+  });
+  if (!queued) return null;
+  return attemptMergeAgentLifecycleCleanup({
+    rootDir,
+    repo: queued.repo,
+    prNumber: queued.prNumber,
+    transition: queued.transition,
     source: 'lifecycle-sync',
   });
 }

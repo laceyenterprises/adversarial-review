@@ -14,6 +14,12 @@ import {
   resolveTtmTrackerConfig,
 } from './ttm-tracker.mjs';
 import { readDaemonMergeParks } from './daemon-merge-park-log.mjs';
+import {
+  DEFAULT_RECONCILE_STALE_AFTER_MS,
+  evaluateReconcileFreshness,
+  isPrUnverified,
+  readPrTerminalReconcileState,
+} from './pr-terminal-reconcile.mjs';
 
 const DEFAULT_REVIEWER_DEATH_RATE_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_REVIEWER_DEATH_RATE_THRESHOLD = 0.5;
@@ -198,6 +204,18 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     category: 'review-pipeline',
     thresholdKey: 'queueStarvationMaxAgeMs',
     defaultThreshold: DEFAULT_QUEUE_STARVATION_MAX_AGE_MS,
+  },
+  {
+    code: 'review:pr_lifecycle_mirror_unverified',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: 'lifecycleReconcileStaleAfterMs',
+    defaultThreshold: DEFAULT_RECONCILE_STALE_AFTER_MS,
+    thresholdDescription:
+      'the reviewed_prs lifecycle mirror has not been successfully reconciled against GitHub '
+      + 'within the staleness window, or specific PRs could not be resolved. Age-based findings '
+      + 'that read pr_state (queue_starvation, terminal_but_unmerged) cannot be trusted for the '
+      + 'unverified rows (SEN-02 blind, never a health verdict)',
   },
   {
     code: 'review:malformed_pr_title',
@@ -401,6 +419,11 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
       overrides.queueStarvationMaxAgeMs
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_QUEUE_STARVATION_MAX_AGE_MS,
       DEFAULT_QUEUE_STARVATION_MAX_AGE_MS
+    ),
+    lifecycleReconcileStaleAfterMs: parsePositiveInteger(
+      overrides.lifecycleReconcileStaleAfterMs
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_LIFECYCLE_RECONCILE_STALE_AFTER_MS,
+      DEFAULT_RECONCILE_STALE_AFTER_MS
     ),
     remediationBacklogThreshold: parsePositiveInteger(
       overrides.remediationBacklogThreshold
@@ -2099,34 +2122,110 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }));
   }
 
+  // TREC-01. Emitted BEFORE queue_starvation on purpose: when the mirror is
+  // unverified this is the cause and the queue/terminal findings are the
+  // symptom, and on 2026-09-07 the symptom's recommended_action sent the
+  // operator to bounce a healthy watcher. This is a blindness signal in the
+  // SEN-02 sense -- it reports that a population could not be verified. It
+  // never suppresses another finding.
+  const reconcileState = snapshot.lifecycleReconciliation;
+  if (reconcileState?.blind) {
+    const unresolved = reconcileState.unresolved || [];
+    const sampleReason = unresolved[0]?.reason || null;
+    findings.push(buildFinding({
+      code: 'review:pr_lifecycle_mirror_unverified',
+      tier: 'ticket',
+      subject: reconcileState.present
+        ? (unresolved.length > 0
+          ? `${unresolved.length} PR(s) could not be resolved against GitHub; their mirror state is unverified`
+          : `the lifecycle mirror has not reconciled against GitHub for ${Math.round((reconcileState.ageMs || 0) / 60000)}m`)
+        : 'the lifecycle mirror has never been reconciled against GitHub',
+      message: reconcileState.present
+        ? (unresolved.length > 0
+          ? `The last sweep at ${reconcileState.observedAt} checked ${reconcileState.checked} open PR(s) `
+            + `and could not resolve ${unresolved.length} of them`
+            + (sampleReason ? `; first reason: ${sampleReason}` : '.')
+          : `The last successful sweep was ${reconcileState.observedAt}, older than the `
+            + `${Math.round(reconcileState.staleAfterMs / 60000)}m staleness window.`)
+        : 'No PR lifecycle reconciliation record exists, so no open row has been confirmed still '
+          + 'open on GitHub. Merged and closed PRs may still be counted as open.',
+      evidence: [
+        `data/pr-lifecycle-reconcile/state.json ${reconcileState.present ? `observedAt=${reconcileState.observedAt}` : 'MISSING'}`,
+        ...unresolved.slice(0, 10).map((entry) => (
+          `unresolved ${entry.repo}#${entry.prNumber}: ${entry.reason}`
+        )),
+      ],
+      recommendedAction:
+        'reviewed_prs.pr_state is the population for review:queue_starvation and '
+        + 'review:terminal_but_unmerged, and both threshold on elapsed age — an unverified row '
+        + 'produces an alert that can never self-clear. Fix the reason the sweep could not read '
+        + 'GitHub (the recorded reason names it; a `Bad credentials (HTTP 401)` burst means the '
+        + 'watcher GitHub token needs re-minting) rather than adjusting either threshold. Do not '
+        + 'silence the age-based findings: on 2026-09-07 most of them were real backlog.',
+      observedAt,
+      details: reconcileState,
+    }));
+  }
+
   const oldest = snapshot.firstPassQueue.oldest;
   if (oldest && oldest.ageMs > config.queueStarvationMaxAgeMs) {
+    // TREC-01: this population is `pr_state='open' AND review_status='pending'`
+    // read from the SQLite mirror, thresholded on elapsed age. When the mirror
+    // has not been reconciled against GitHub the oldest entry may be a PR that
+    // is already closed -- observed 2026-09-07, agent-os#6394 closed at
+    // 05:50:15Z and still `firstPassQueue.oldest` 28.6 minutes later, one of
+    // only three entries. Age only grows, so nothing clears it. The finding is
+    // NOT suppressed (a real starved queue must still page); it is stamped with
+    // whether this specific PR's mirror state is verified, so an operator can
+    // tell a phantom from a real one without hand-checking GitHub.
+    const reconcile = snapshot.lifecycleReconciliation;
+    const oldestUnverified = isPrUnverified(reconcile, oldest.repo, oldest.prNumber);
     findings.push(buildFinding({
       code: 'review:queue_starvation',
       tier: 'page',
       subject:
         `${snapshot.firstPassQueue.depth} PR(s) awaiting first-pass review; oldest is `
-        + `${Math.round(oldest.ageMs / 60000)}m old`,
+        + `${Math.round(oldest.ageMs / 60000)}m old`
+        + (oldestUnverified ? ' (mirror state UNVERIFIED against GitHub)' : ''),
       message: oldest.reviewerFailed
         ? `${oldest.repo}#${oldest.prNumber} has been pending since ${oldest.pendingSince}; its `
           + `reviewer FAILED at ${oldest.failedAt} after ${oldest.reviewAttempts} attempt(s): `
           + `${oldest.failureMessage || 'no failure message recorded'}`
         : `${oldest.repo}#${oldest.prNumber} has been pending since ${oldest.pendingSince} and no `
           + 'reviewer has picked it up.',
-      evidence: [`reviews.db reviewed_prs ${oldest.repo}#${oldest.prNumber}`],
-      recommendedAction: oldest.reviewerFailed
-        ? 'A reviewer ran and exited non-zero — this is reviewer-runtime, not capacity. Read the '
-          + 'failure message and the reviewer log before retriggering; a blind retrigger will '
-          + 'reproduce the same exit.'
-        : 'Nothing picked this up — check adversarial-watcher liveness and reviewer capacity '
-          + '(hq harness health, reviewer degradation). Retrigger or bounce only after preserving '
-          + 'failure evidence.',
+      evidence: [
+        `reviews.db reviewed_prs ${oldest.repo}#${oldest.prNumber}`,
+        `pr_state mirror ${oldestUnverified ? 'UNVERIFIED' : 'verified'} against GitHub`
+        + (reconcile?.observedAt ? ` (last reconciled ${reconcile.observedAt})` : ' (never reconciled)'),
+      ],
+      // The 2026-09-07 incident's single worst artifact was this string: on a
+      // CLOSED PR it blamed reviewer capacity and advised bouncing a watcher
+      // that was healthy. Naming the mirror first is what makes that advice
+      // conditional instead of confidently wrong.
+      recommendedAction: oldestUnverified
+        ? `The mirror row for ${oldest.repo}#${oldest.prNumber} has NOT been verified against `
+          + 'GitHub, so this queue entry may be a PR that is already merged or closed. Confirm '
+          + `with \`gh pr view ${oldest.prNumber} --repo ${oldest.repo} --json state,mergedAt\` `
+          + 'FIRST. If it is terminal, the fault is the lifecycle sweep (see '
+          + 'review:pr_lifecycle_mirror_unverified), not reviewer capacity — do not bounce the '
+          + 'watcher on this signal alone.'
+        : oldest.reviewerFailed
+          ? 'A reviewer ran and exited non-zero — this is reviewer-runtime, not capacity. Read the '
+            + 'failure message and the reviewer log before retriggering; a blind retrigger will '
+            + 'reproduce the same exit.'
+          : 'Nothing picked this up — check adversarial-watcher liveness and reviewer capacity '
+            + '(hq harness health, reviewer degradation). Retrigger or bounce only after preserving '
+            + 'failure evidence.',
       observedAt,
       details: {
         ...oldest,
         thresholdMs: config.queueStarvationMaxAgeMs,
         depth: snapshot.firstPassQueue.depth,
         failedCount: snapshot.firstPassQueue.failedCount,
+        // Machine-readable so a consumer can filter without parsing prose.
+        mirrorVerified: !oldestUnverified,
+        mirrorReconciledAt: reconcile?.observedAt || null,
+        mirrorUnverifiedCount: reconcile?.unresolvedCount ?? null,
       },
     }));
   }
@@ -2289,16 +2388,46 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
 
   const terminalUnmerged = snapshot.ttm.flags.filter((flag) => flag.flagKind === 'terminal_but_unmerged');
   if (terminalUnmerged.length > 0) {
-    const sample = terminalUnmerged[0];
+    // TREC-01: every flag here carries state='active' and mergedAt=null by
+    // construction, because the tracker only evaluates rows whose mirrored
+    // prState is 'open'. A PR that merged out-of-band without a mirror
+    // write-back is therefore INDISTINGUISHABLE in the payload from one that
+    // genuinely will not merge. Observed 2026-09-07: 4 of 15 flags named PRs
+    // already merged on GitHub (#6364, #6383, #6384, adversarial-review#957),
+    // while the other 11 were real backlog. Stamping each flag with whether its
+    // mirror row is verified separates them without suppressing either.
+    const reconcile = snapshot.lifecycleReconciliation;
+    const annotated = terminalUnmerged.map((flag) => {
+      const mirrorVerified = !isPrUnverified(reconcile, flag.repo, flag.prNumber);
+      return {
+        ...flag,
+        mirrorVerified,
+        mirrorReconciledAt: reconcile?.observedAt || null,
+        details: { ...flag.details, mirrorVerified, mirrorReconciledAt: reconcile?.observedAt || null },
+      };
+    });
+    const unverified = annotated.filter((flag) => !flag.mirrorVerified);
+    const sample = annotated.find((flag) => flag.mirrorVerified) || annotated[0];
     findings.push(buildFinding({
       code: 'review:terminal_but_unmerged',
       tier: 'ticket',
-      subject: `${terminalUnmerged.length} terminal clean PR(s) remain unmerged`,
+      subject: `${annotated.length} terminal clean PR(s) remain unmerged`
+        + (unverified.length > 0
+          ? ` (${unverified.length} with UNVERIFIED mirror state — may already be merged)`
+          : ''),
       message: `${sample.repo}#${sample.prNumber} settled clean at ${sample.settledAt || sample.openedAt} but is still open ${Math.round(sample.terminalUnmergedMinutes)}m later.`,
-      evidence: terminalUnmerged.map((flag) => (
-        `reviews.db ttm ${flag.repo}#${flag.prNumber} terminal_unmerged=${Math.round(flag.terminalUnmergedMinutes)}m verdict=${flag.details?.latestVerdict || 'unknown'}`
+      evidence: annotated.map((flag) => (
+        `reviews.db ttm ${flag.repo}#${flag.prNumber} terminal_unmerged=${Math.round(flag.terminalUnmergedMinutes)}m `
+        + `verdict=${flag.details?.latestVerdict || 'unknown'} `
+        + `mirror=${flag.mirrorVerified ? 'verified' : 'UNVERIFIED'}`
       )),
-      recommendedAction: 'Check the daemon clean merge path, AMA eligibility misses such as worker-identity-unresolved/stale-review-head, and hammer closeout liveness. This is the #806/#5102 stall signature.',
+      recommendedAction: unverified.length > 0
+        ? `${unverified.length} of these ${annotated.length} PR(s) have unverified mirror state and may `
+          + 'already be merged or closed on GitHub — confirm those before triaging them as stalls '
+          + '(see review:pr_lifecycle_mirror_unverified). For the verified ones, check the daemon '
+          + 'clean merge path, AMA eligibility misses such as worker-identity-unresolved/'
+          + 'stale-review-head, and hammer closeout liveness. This is the #806/#5102 stall signature.'
+        : 'Check the daemon clean merge path, AMA eligibility misses such as worker-identity-unresolved/stale-review-head, and hammer closeout liveness. This is the #806/#5102 stall signature.',
       observedAt,
       details: {
         // Stuck, not slow: a settled clean verdict that cannot merge is not
@@ -2307,7 +2436,9 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
         progressClass: 'stuck',
         sev1ExitMetric: snapshot.ttm.rollup.standingSev1Metric,
         config: snapshot.ttm.config,
-        flags: terminalUnmerged,
+        mirrorUnverifiedCount: unverified.length,
+        mirrorReconciledAt: reconcile?.observedAt || null,
+        flags: annotated,
       },
     }));
   }
@@ -2636,6 +2767,16 @@ function collectReviewPipelineHealth({
     const dispatchSpawnFailures = config.hostChecksEnabled
       ? summarizeDispatchSpawnFailures(hqRoot, { nowMs, config })
       : { logPath: join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log'), logExists: false, logAgeMs: null, windowMs: config.dispatchSpawnFailureWindowMs, matches: [] };
+    // TREC-01: both `review:queue_starvation` and `review:terminal_but_unmerged`
+    // select their population from `reviewed_prs.pr_state`, so their findings
+    // are only as true as the mirror. This reads the lifecycle sweep's
+    // attestation so the surface can say WHEN the mirror was last verified
+    // against GitHub and WHICH rows are unverified, instead of presenting a
+    // phantom and a real backlog item identically.
+    const lifecycleReconciliation = evaluateReconcileFreshness(
+      readPrTerminalReconcileState(rootDir),
+      { nowMs, staleAfterMs: config.lifecycleReconcileStaleAfterMs }
+    );
     const dagAutowalk = config.hostChecksEnabled
       ? summarizeDagAutowalkHealth({ env, hqRoot, nowMs, config, launchd })
       : { hqRoot, label: null, loaded: true, lastExitCode: 0, errLogPath: null, outLogPath: null, logAgeMs: null, thresholdMs: config.dagAutowalkMaxLogAgeMs, healthy: true };
@@ -2649,6 +2790,7 @@ function collectReviewPipelineHealth({
       reviewerDegradation,
       outage,
       firstPassQueue,
+      lifecycleReconciliation,
       malformedPrTitles,
       followUpQueues: {
         states: followUpQueues.states,

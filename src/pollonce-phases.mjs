@@ -40,6 +40,7 @@ import {
 } from './adapters/subject/github-pr/routing.mjs';
 import { projectAdversarialGateStatus } from './adversarial-gate-status.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
+import { attemptDependabotAutoAdjudicateMerge } from './dependabot-auto-adjudicate.mjs';
 import {
   ARGUS_SECURITY_QUEUED_STATUS,
   LEGACY_UNROUTABLE_BOT_STATUS,
@@ -723,6 +724,30 @@ export async function processReviewSubject(entry, ctx) {
             reasonSummary: routed.summary,
           });
           existing = stmtGetReviewRow.get(repoPath, prNumber);
+        }
+        if (routed?.queued && isUnroutableBotAuthor(subject.authorRef)) {
+          const autoMerge = await attemptDependabotAutoAdjudicateMerge({
+            rootDir: ROOT,
+            repoPath,
+            prNumber,
+            headSha: routed.headSha || subject.headSha || subject.ref?.revisionRef || null,
+            baseBranch: subject.baseBranch || subject.ref?.baseRef || subject.baseRefName || 'main',
+            author: subject.authorRef || null,
+            title: prTitle,
+            commits: subject.commits || [],
+            branchProtectionRequiredContexts: Array.isArray(subject.branchProtection?.requiredContexts)
+              ? subject.branchProtection.requiredContexts
+              : [],
+            execFileImpl: execFileAsync,
+            logger: console,
+          });
+          if (autoMerge.attempted) {
+            console.log(
+              `[watcher] dependabot auto-adjudicate for ${repoPath}#${prNumber}: ` +
+                `${autoMerge.reason}${autoMerge.merged ? ' (merged)' : ''}`,
+            );
+          }
+          if (autoMerge.merged) return;
         }
         await projectGateStatusSafe(existing);
         return;

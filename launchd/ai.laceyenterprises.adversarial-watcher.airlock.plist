@@ -134,6 +134,19 @@
         -->
         <key>AGY_AUTH_PROBE_TIMEOUT_MS</key>
         <string>45000</string>
+        <!-- Posted-review phase budget. The 600000ms module default is sized for
+          a small queue; on this host the posted-review phase routinely needs
+          628-841s to walk its handler list, so every tick hit the ceiling and
+          deferred 20+ handlers to the front of the next tick. Deferred handlers
+          are not dropped, but a PR near the tail can be re-deferred for hours,
+          and merge evaluation happens inside this phase — so the queue stopped
+          converting reviewed PRs into merges while the open-PR count climbed.
+          1800000ms lets a full pass finish in one tick. The tradeoff named in
+          watcher-poll-fairness.mjs is real: worst-case discovery cadence
+          degrades from ~10m to ~30m. That is the intended trade while the
+          backlog is deep; lower it once the queue is short again. -->
+        <key>ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS</key>
+        <string>1800000</string>
         <key>OAUTH_BROKER_SHARED_SECRET_FILE</key>
         <string>/Users/airlock/agent-os/.secrets/local/oauth-broker-shared-secret</string>
         <key>OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_APP_ID</key>

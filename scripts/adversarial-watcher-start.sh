@@ -453,6 +453,51 @@ fi
 # instead of silently regressing to the shared-identity cascade. To
 # roll back: `unset CLAUDE_REVIEWER_AUTH_VIA_BROKER` /
 # `unset CODEX_REVIEWER_AUTH_VIA_BROKER` and bounce the watcher.
+# SEV0 2026-09-07: default the per-role reviewer broker flags ON, here, on the
+# live start path.
+#
+# refreshReviewerBrokerTokens() iterates BROKER_REVIEWER_ROLES and skips any role
+# whose <ROLE>_AUTH_VIA_BROKER flag is not exactly "true":
+#
+#     if (String(env[flag] || '').trim() !== 'true') {
+#       summary.skipped.push({ role, reason: 'broker-mode-disabled' });
+#       continue;                       // silent — nothing is logged
+#     }
+#
+# These three flags were set ONLY in launchd/ai.laceyenterprises.adversarial-
+# watcher.airlock.plist. The watcher is no longer started by launchd (no loaded
+# job for that label; the on-disk plists are .bak/.deprecated) — it is started by
+# THIS script, which set WATCHER_GH_AUTH_VIA_BROKER but never the reviewer flags.
+# So the watcher's own GITHUB_TOKEN refreshed every tick and kept working, while
+# all three reviewer-bot tokens were seeded once at boot and never refreshed.
+#
+# GitHub App installation tokens live ~1h. Roughly an hour after every boot,
+# `POST /repos/{o}/{r}/pulls/{n}/reviews` began returning
+# 403 "Resource not accessible by integration" — the review itself was produced
+# fine, only publication failed. The reviewer classified that as
+# failure-class=unknown, which counts against the infra auto-recovery budget, so
+# PRs walked to the 4/3 cap and went terminal. Reviewed work stopped converting
+# into merges while the open-PR count climbed.
+#
+# Defaulting here (rather than relying on the plist) keeps the flag with the
+# start path that actually runs. Roll back per role by exporting the flag =false
+# before this script and bouncing the watcher.
+# Posted-review phase budget. The module default (600000ms) is sized for a short
+# queue. On this host the phase needed 628-841s to walk its handler list, so every
+# tick hit the ceiling and deferred 20+ handlers to the front of the next one.
+# Deferred handlers are not dropped, but merge evaluation happens inside this
+# phase, so a PR near the tail could be re-deferred for hours. Set here, on the
+# live start path, for the same reason the reviewer flags are: the plist does not
+# execute. The tradeoff named in watcher-poll-fairness.mjs is real — worst-case
+# discovery cadence degrades from ~10m to ~30m. Lower it once the backlog is short.
+: "${ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS:=1800000}"
+export ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS
+
+: "${CLAUDE_REVIEWER_AUTH_VIA_BROKER:=true}"
+: "${CODEX_REVIEWER_AUTH_VIA_BROKER:=true}"
+: "${GEMINI_REVIEWER_AUTH_VIA_BROKER:=true}"
+export CLAUDE_REVIEWER_AUTH_VIA_BROKER CODEX_REVIEWER_AUTH_VIA_BROKER GEMINI_REVIEWER_AUTH_VIA_BROKER
+
 broker_fail_closed_exit() {
   local flag_name="$1"
   echo "[adversarial-watcher] ERROR: ${flag_name}=true but broker fetch failed; refusing to fall back to op-read PAT path. Unset the flag to roll back." >&2

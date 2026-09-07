@@ -180,6 +180,56 @@ test('one PR failing to resolve does not blind the sweep for the rest', async ()
   );
 });
 
+test('multi-line subprocess diagnostics preserve novel later error lines', async () => {
+  const summary = await reconcileTerminalPrState({
+    rows: [{ repo: 'laceyenterprises/agent-os', pr_number: 6400 }],
+    fetchLiveState: async () => {
+      throw new Error('warning: gh extension is outdated\nerror: new provider fault shape\nhint: retry after broker refresh');
+    },
+    markMerged: () => assert.fail('must not mark unresolved rows'),
+    markClosed: () => assert.fail('must not mark unresolved rows'),
+    logger: { error() {}, log() {} },
+  });
+
+  assert.equal(summary.unresolvedCount, 1);
+  assert.match(summary.unresolved[0].reason, /warning: gh extension is outdated/);
+  assert.match(summary.unresolved[0].reason, /error: new provider fault shape/);
+  assert.match(summary.unresolved[0].reason, /hint: retry after broker refresh/);
+});
+
+test('embedded GraphQL request bodies do not crowd out later gh diagnostics', async () => {
+  const summary = await reconcileTerminalPrState({
+    rows: [{ repo: 'laceyenterprises/agent-os', pr_number: 6401 }],
+    fetchLiveState: async () => {
+      throw new Error([
+        'Command failed: gh api -i graphql',
+        'query PullRequestHeadState(',
+        '  $owner: String!',
+        '  $repo: String!',
+        '  $prNumber: Int!',
+        ') {',
+        '  repository(owner: $owner, name: $repo) {',
+        '    pullRequest(number: $prNumber) {',
+        '      state',
+        '      mergedAt',
+        '      closedAt',
+        '      headRefOid',
+        '    }',
+        '  }',
+        '}',
+        'gh: Bad credentials (HTTP 401)',
+      ].join('\n'));
+    },
+    markMerged: () => assert.fail('must not mark unresolved rows'),
+    markClosed: () => assert.fail('must not mark unresolved rows'),
+    logger: { error() {}, log() {} },
+  });
+
+  assert.match(summary.unresolved[0].reason, /Command failed: gh api -i graphql/);
+  assert.match(summary.unresolved[0].reason, /Bad credentials \(HTTP 401\)/);
+  assert.equal(summary.unresolved[0].reason.includes('query PullRequestHeadState'), false);
+});
+
 test('a merged PR reported by GitHub as state=CLOSED is filed as merged', async () => {
   // GraphQL says MERGED, some REST shapes say CLOSED with a non-null mergedAt.
   // Mis-filing a merge as a close would skip the merge closeout work entirely.

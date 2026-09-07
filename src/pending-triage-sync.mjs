@@ -33,7 +33,7 @@
 //
 // @module pending-triage-sync
 
-import { mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -167,6 +167,22 @@ export function clearPendingTriageSync(rootDir, { repo, prNumber }) {
   rmSync(pendingTriageSyncPath(rootDir, { repo, prNumber }), { force: true });
 }
 
+function quarantineMalformedTriageSync(path, logger) {
+  if (!path) return false;
+  const failedPath = `${path}.failed`;
+  try {
+    rmSync(failedPath, { force: true });
+    renameSync(path, failedPath);
+    logger.error?.(`[watcher] malformed triage sync record moved to ${failedPath}`);
+    return true;
+  } catch (err) {
+    logger.error?.(
+      `[watcher] failed to quarantine malformed triage sync record ${path}: ${err?.message || err}`
+    );
+    return false;
+  }
+}
+
 /**
  * Attempt one owed triage sync. Deletes the record on success; on failure keeps
  * it pending (or marks it `failed` at the attempt cap) so it stays drainable
@@ -174,6 +190,7 @@ export function clearPendingTriageSync(rootDir, { repo, prNumber }) {
  */
 export async function attemptPendingTriageSync({
   rootDir = ROOT,
+  path = null,
   record,
   operatorSurface,
   buildSubjectRef,
@@ -184,7 +201,8 @@ export async function attemptPendingTriageSync({
   const repo = record?.repo;
   const prNumber = record?.prNumber;
   if (!repo || !Number.isFinite(Number(prNumber))) {
-    return { ok: false, skipped: true, reason: 'malformed-record' };
+    const quarantined = quarantineMalformedTriageSync(path, logger);
+    return { ok: false, skipped: true, reason: 'malformed-record', quarantined };
   }
   if (typeof operatorSurface?.syncTriageStatus !== 'function') {
     return { ok: false, skipped: true, reason: 'no-operator-surface' };
@@ -272,6 +290,7 @@ export async function retryPendingTriageSyncs({
     attempted += 1;
     const result = await attemptPendingTriageSync({
       rootDir,
+      path: item.path,
       record: item.record,
       operatorSurface,
       buildSubjectRef,

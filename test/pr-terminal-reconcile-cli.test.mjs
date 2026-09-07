@@ -150,3 +150,29 @@ test('an unresolvable PR exits non-zero and is named, not silently skipped', asy
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
+
+test('fallback live-state fetch uses the injected execFile implementation', async () => {
+  const rootDir = tempRoot();
+  const db = seedLedger(rootDir, [{ repo: 'laceyenterprises/agent-os', prNumber: 6364 }]);
+  const out = [];
+  const err = [];
+  let observedCommand = null;
+  try {
+    const code = await main(['--root', rootDir], {
+      db,
+      stdout: { write: (chunk) => out.push(chunk) },
+      stderr: { write: (chunk) => err.push(chunk) },
+      execFileImpl: async (command) => {
+        observedCommand = command;
+        throw new Error('injected gh failure');
+      },
+    });
+
+    assert.equal(code, 1);
+    assert.equal(observedCommand, 'gh');
+    assert.match(out.join(''), /injected gh failure/);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});

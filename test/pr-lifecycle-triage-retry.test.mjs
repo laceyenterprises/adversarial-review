@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import { reconcileTerminalPrState } from '../src/pr-terminal-reconcile.mjs';
 import { logLifecycleReconcileSummary } from '../src/pr-lifecycle-sync.mjs';
@@ -41,10 +41,10 @@ import {
 //   3. Owed work that fails to PERSIST still defers the mark, because at that
 //      point the open row really is the only record of the obligation.
 
-function withTempRoot(fn) {
+async function withTempRoot(fn) {
   const root = mkdtempSync(join(tmpdir(), 'trec01-triage-'));
   try {
-    return fn(root);
+    return await fn(root);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -213,5 +213,36 @@ test('the queued record carries everything the drain needs without the reviewed_
     assert.equal(record.triageStatus, 'halted');
     assert.equal(record.revisionRef, 'deadbeef');
     assert.deepEqual(record.labels, ['codex']);
+  });
+});
+
+test('malformed pending triage sync records are quarantined out of the active drain', async () => {
+  await withTempRoot(async (root) => {
+    const malformedPath = join(root, 'data', 'follow-up-jobs', 'pending-triage-sync', 'malformed.json');
+    mkdirSync(dirname(malformedPath), { recursive: true });
+    writeFileSync(malformedPath, `${JSON.stringify({ schemaVersion: 1, prNumber: 6364 })}\n`);
+    const errors = [];
+
+    const drained = await retryPendingTriageSyncs({
+      rootDir: root,
+      operatorSurface: {
+        syncTriageStatus: async () => assert.fail('malformed record must not call Linear'),
+      },
+      buildSubjectRef: (record) => record,
+      retryMs: 0,
+      logger: { error: (message) => errors.push(message), log() {} },
+    });
+
+    assert.equal(drained.attempted, 1);
+    assert.equal(drained.synced, 0);
+    assert.equal(drained.pending, 1);
+    assert.equal(listPendingTriageSyncs(root).length, 0);
+    assert.equal(existsSync(malformedPath), false);
+    assert.equal(existsSync(`${malformedPath}.failed`), true);
+    assert.equal(
+      errors.some((message) => message.includes('malformed triage sync record moved')),
+      true,
+      'the quarantine must be loud in daemon logs',
+    );
   });
 });

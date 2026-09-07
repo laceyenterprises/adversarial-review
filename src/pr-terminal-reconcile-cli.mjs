@@ -15,6 +15,8 @@
 // that is genuinely still open on GitHub. A PR that GitHub reports open stays
 // exactly as it was, so a real backlog keeps alerting.
 
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
 import { fetchPullRequestHeadAndState } from './github-api.mjs';
@@ -23,6 +25,7 @@ import {
 } from './pr-terminal-reconcile.mjs';
 
 const TOOL_ROOT = fileURLToPath(new URL('..', import.meta.url));
+const execFileAsync = promisify(execFile);
 
 const USAGE = `\
 Usage:
@@ -122,7 +125,9 @@ export async function main(argv, io = {}) {
       source: 'operator-cli-diagnostic',
       cap: options.cap ?? Number.POSITIVE_INFINITY,
       fetchLiveState: io.fetchLiveState
-        || ((repo, prNumber) => fetchPullRequestHeadAndState(repo, prNumber)),
+        || ((repo, prNumber) => fetchPullRequestHeadAndState(repo, prNumber, {
+          execFileImpl: io.execFileImpl || execFileAsync,
+        })),
       markMerged: () => {},
       markClosed: () => {},
       logger: { error: (msg) => stderr.write(`${msg}\n`), log: () => {} },

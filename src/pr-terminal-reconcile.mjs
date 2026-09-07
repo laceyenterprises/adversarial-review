@@ -121,14 +121,22 @@ export function classifyTerminalTransition(live) {
 
 function describeError(error) {
   const message = String(error?.message || error || 'unknown error');
-  // Live `gh` failures arrive with the whole GraphQL document inlined, which is
-  // several hundred lines of noise in a record an operator has to read. Keep
-  // the first line -- that is where `gh: Bad credentials (HTTP 401)` and the
-  // rate-limit and timeout messages actually live -- and bound the rest.
-  const firstLine = message.split('\n').map((line) => line.trim()).filter(Boolean);
-  const head = firstLine[0] || 'unknown error';
-  const tail = firstLine.slice(1).find((line) => /HTTP \d{3}|Bad credentials|rate limit|timed out|timeout/i.test(line));
-  return (tail ? `${head} — ${tail}` : head).slice(0, 300);
+  // Live `gh` failures can inline the whole GraphQL document, but subprocess
+  // diagnostics are often multi-line too. Preserve every diagnostic line after
+  // filtering obvious query-body noise, then bound the final field.
+  const lines = message
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const diagnosticLines = lines.filter((line) => (
+    /^(Command failed:|gh:|GraphQL:|HTTP\b|warning:|error:|fatal:|hint:)/i.test(line)
+    || /Bad credentials|rate limit|timed out|timeout|ECONN|ETIMEDOUT|EAI_AGAIN/i.test(line)
+  ));
+  if (diagnosticLines.length > 0) {
+    return diagnosticLines.join(' — ').slice(0, 300);
+  }
+  const nonQueryLines = lines.filter((line) => !/^(query|mutation|fragment)\b/.test(line));
+  return (nonQueryLines.join(' — ') || 'unknown error').slice(0, 300);
 }
 
 /**

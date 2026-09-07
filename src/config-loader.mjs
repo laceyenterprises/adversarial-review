@@ -1410,6 +1410,27 @@ function schemaV1() {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
+          // CI spend tracking against a monthly budget (agent-os #6343).
+          // 5th occurrence of the CFG-01 multi-loader drift bug: the key was
+          // added to the canonical agent-os `config.yaml`, which this reader
+          // parses STRICTLY (the tolerant drop path is gated on
+          // `isLocalYamlSource`, so it covers config.local.yaml only). Every
+          // `loadConfig()` therefore threw `ci.billing: unknown key (strict
+          // schema)` and merge authority never initialized -- 9 clean PRs sat
+          // unmerged for hours on 2026-09-06 while reviews kept posting.
+          // Keep in lockstep with the Python schema at
+          // `platform/agent-os-config/src/agent_os_config/schema_v1/oauth_github_ci.py`.
+          billing: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              monthly_budget_usd: { __type: TYPE_FLOAT, __default: 200.0 },
+              warn_at_fraction: { __type: TYPE_FLOAT, __default: 0.8 },
+              rate_usd_per_minute: { __type: TYPE_FLOAT, __default: 0.008 },
+              included_minutes: { __type: TYPE_INT, __default: 0 },
+              calibration_factor: { __type: TYPE_FLOAT, __default: 1.0 },
+            },
+          },
           hosting: {
             __type: TYPE_DICT,
             __strict: true,

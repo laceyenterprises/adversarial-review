@@ -1963,6 +1963,58 @@ test('top-level config.yaml accepts the mirrored main_catchup daemon keys', () =
   }
 });
 
+test('ci.billing from the canonical config.yaml loads (CFG-01 drift regression)', () => {
+  // agent-os #6343 added `ci.billing` to the canonical config.yaml. This
+  // reader parses that file STRICTLY -- the tolerant unknown-key drop is gated
+  // on `isLocalYamlSource`, so it covers config.local.yaml only. Without the
+  // schema mirror every loadConfig() threw
+  // `ci.billing: unknown key (strict schema)`, the watcher could not build its
+  // config, and merge authority never initialized: 9 clean PRs sat unmerged for
+  // hours on 2026-09-06 while reviews kept posting normally. 5th occurrence of
+  // the CFG-01 multi-loader drift bug.
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      ci:
+        billing:
+          monthly_budget_usd: 200.0
+          warn_at_fraction: 0.8
+          rate_usd_per_minute: 0.008
+          included_minutes: 0
+          calibration_factor: 1.0
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('ci.billing.monthly_budget_usd'), 200.0);
+    assert.equal(cfg.get('ci.billing.warn_at_fraction'), 0.8);
+    assert.equal(cfg.get('ci.billing.rate_usd_per_minute'), 0.008);
+    assert.equal(cfg.get('ci.billing.included_minutes'), 0);
+    assert.equal(cfg.get('ci.billing.calibration_factor'), 1.0);
+    // The sibling subtree must keep working.
+    assert.equal(cfg.get('ci.hosting.mode'), 'github');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('an unknown key under ci.billing is still rejected (strictness preserved)', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      ci:
+        billing:
+          monthly_budget_usd: 200.0
+          not_a_real_billing_key: 1
+    `);
+    assert.throws(() => loadConfig({ topPath: top, env: {} }), /unknown key \(strict schema\)/);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('ci.hosting strict mirror preserves mandatory exclusions and mode env alias', () => {
   const tmp = freshTmp();
   try {

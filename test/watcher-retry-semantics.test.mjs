@@ -36,6 +36,9 @@ import {
   listMergeAgentLifecycleCleanups,
   upsertMergeAgentLifecycleCleanup,
 } from '../src/follow-up-merge-agent.mjs';
+import {
+  queueMergeAgentLifecycleCleanup,
+} from '../src/merge-agent-lifecycle-cleanup.mjs';
 import { LEGACY_ORPHAN_FAILURE_MESSAGE } from '../src/reviewer-reattach.mjs';
 import {
   readNoProgressLane,
@@ -384,6 +387,27 @@ test('pending merge-agent lifecycle cleanup retries after the PR leaves the open
       prNumber: 133,
     }),
     null,
+  );
+});
+
+test('merge-agent lifecycle cleanup queue write failures throw before terminal mark can proceed', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  mkdirSync(path.join(rootDir, 'data'), { recursive: true });
+  writeFileSync(path.join(rootDir, 'data', 'follow-up-jobs'), 'not a directory');
+
+  assert.throws(
+    () => queueMergeAgentLifecycleCleanup({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 133,
+      transition: 'merged',
+      pr: {
+        headRefOid: 'sha-cleanup-133',
+        labels: ['merge-agent-dispatched'],
+      },
+    }),
+    /ENOTDIR|not a directory/,
+    'a failed cleanup record write must propagate so lifecycle marking defers',
   );
 });
 

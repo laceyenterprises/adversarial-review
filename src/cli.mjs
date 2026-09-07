@@ -20,7 +20,7 @@ import {
 const USAGE = `\
 Usage:
   adversarial-review pipeline-health [--root <dir>] [--json | --prometheus | --sentinel]
-  adversarial-review reconcile-terminal [--root <dir>] [--dry-run] [--cap <n>] [--json]
+  adversarial-review reconcile-terminal [--root <dir>] [--cap <n>] [--json]
   adversarial-review reset-pr <owner/repo> <pr-number> [options]
   adversarial-review tokens [--since 7d] [--by-pr | --by-reviewer] [--json]
   adversarial-review reviewer-roster [--json]

@@ -216,6 +216,79 @@ test('the queued record carries everything the drain needs without the reviewed_
   });
 });
 
+test('a new triage obligation resets retry exhaustion from an older transition', async () => {
+  await withTempRoot(async (root) => {
+    queuePendingTriageSync(root, {
+      repo: MERGED_ROW.repo,
+      prNumber: MERGED_ROW.pr_number,
+      transition: 'closed',
+      status: 'halted',
+      linearTicketId: 'ENG-1',
+      now: new Date('2026-09-07T05:00:00.000Z'),
+    });
+    await attemptPendingTriageSync({
+      rootDir: root,
+      record: listPendingTriageSyncs(root)[0].record,
+      operatorSurface: { syncTriageStatus: async () => { throw new Error('502'); } },
+      buildSubjectRef: (record) => record,
+      logger: { error() {} },
+      maxAttempts: 1,
+    });
+
+    queuePendingTriageSync(root, {
+      repo: MERGED_ROW.repo,
+      prNumber: MERGED_ROW.pr_number,
+      transition: 'merged',
+      status: 'finalized',
+      linearTicketId: 'ENG-1',
+      now: new Date('2026-09-07T06:00:00.000Z'),
+    });
+
+    const { record } = listPendingTriageSyncs(root)[0];
+    assert.equal(record.transition, 'merged');
+    assert.equal(record.triageStatus, 'finalized');
+    assert.equal(record.status, 'pending');
+    assert.equal(record.attempts, 0);
+    assert.equal(record.lastAttemptAt, null);
+    assert.equal(record.lastError, null);
+  });
+});
+
+test('idempotently re-queueing the same triage obligation preserves retry state', async () => {
+  await withTempRoot(async (root) => {
+    queuePendingTriageSync(root, {
+      repo: MERGED_ROW.repo,
+      prNumber: MERGED_ROW.pr_number,
+      transition: 'merged',
+      status: 'finalized',
+      linearTicketId: 'ENG-1',
+      now: new Date('2026-09-07T05:00:00.000Z'),
+    });
+    await attemptPendingTriageSync({
+      rootDir: root,
+      record: listPendingTriageSyncs(root)[0].record,
+      operatorSurface: { syncTriageStatus: async () => { throw new Error('502'); } },
+      buildSubjectRef: (record) => record,
+      logger: { error() {} },
+      maxAttempts: 12,
+    });
+
+    queuePendingTriageSync(root, {
+      repo: MERGED_ROW.repo,
+      prNumber: MERGED_ROW.pr_number,
+      transition: 'merged',
+      status: 'finalized',
+      linearTicketId: 'ENG-1',
+      now: new Date('2026-09-07T06:00:00.000Z'),
+    });
+
+    const { record } = listPendingTriageSyncs(root)[0];
+    assert.equal(record.attempts, 1);
+    assert.match(record.lastAttemptAt, /^2026-/);
+    assert.equal(record.lastError.message, '502');
+  });
+});
+
 test('malformed pending triage sync records are quarantined out of the active drain', async () => {
   await withTempRoot(async (root) => {
     const malformedPath = join(root, 'data', 'follow-up-jobs', 'pending-triage-sync', 'malformed.json');
@@ -227,6 +300,37 @@ test('malformed pending triage sync records are quarantined out of the active dr
       rootDir: root,
       operatorSurface: {
         syncTriageStatus: async () => assert.fail('malformed record must not call Linear'),
+      },
+      buildSubjectRef: (record) => record,
+      retryMs: 0,
+      logger: { error: (message) => errors.push(message), log() {} },
+    });
+
+    assert.equal(drained.attempted, 1);
+    assert.equal(drained.synced, 0);
+    assert.equal(drained.pending, 1);
+    assert.equal(listPendingTriageSyncs(root).length, 0);
+    assert.equal(existsSync(malformedPath), false);
+    assert.equal(existsSync(`${malformedPath}.failed`), true);
+    assert.equal(
+      errors.some((message) => message.includes('malformed triage sync record moved')),
+      true,
+      'the quarantine must be loud in daemon logs',
+    );
+  });
+});
+
+test('unparseable pending triage sync JSON is quarantined out of the active drain', async () => {
+  await withTempRoot(async (root) => {
+    const malformedPath = join(root, 'data', 'follow-up-jobs', 'pending-triage-sync', 'broken.json');
+    mkdirSync(dirname(malformedPath), { recursive: true });
+    writeFileSync(malformedPath, '{ not valid json\n');
+    const errors = [];
+
+    const drained = await retryPendingTriageSyncs({
+      rootDir: root,
+      operatorSurface: {
+        syncTriageStatus: async () => assert.fail('unparseable record must not call Linear'),
       },
       buildSubjectRef: (record) => record,
       retryMs: 0,

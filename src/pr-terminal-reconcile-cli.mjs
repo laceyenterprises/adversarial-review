@@ -29,18 +29,18 @@ const execFileAsync = promisify(execFile);
 
 const USAGE = `\
 Usage:
-  adversarial-review reconcile-terminal [--root <dir>] [--dry-run] [--cap <n>] [--json]
+  adversarial-review reconcile-terminal [--root <dir>] [--cap <n>] [--json]
 
 Reconciles reviewed_prs lifecycle state against authoritative GitHub state and
-reports any PR that has since become terminal. It does not mutate reviews.db.
+reports any PR that has since become terminal. This command is diagnostic-only
+and does not mutate reviews.db.
 
-  --dry-run   report what GitHub says; write nothing
   --cap <n>   resolve at most n PRs this run
   --json      emit the sweep summary as JSON
 `;
 
 export function parseArgs(argv) {
-  const options = { rootDir: TOOL_ROOT, dryRun: false, cap: null, json: false, help: false };
+  const options = { rootDir: TOOL_ROOT, cap: null, json: false, help: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--root') {
@@ -50,8 +50,6 @@ export function parseArgs(argv) {
       const raw = Number.parseInt(argv[++i] ?? '', 10);
       if (!Number.isFinite(raw) || raw <= 0) throw new Error('--cap requires a positive integer');
       options.cap = raw;
-    } else if (arg === '--dry-run') {
-      options.dryRun = true;
     } else if (arg === '--json') {
       options.json = true;
     } else if (arg === '--help' || arg === '-h') {
@@ -63,9 +61,9 @@ export function parseArgs(argv) {
   return options;
 }
 
-function renderSummary(summary, { dryRun }) {
+function renderSummary(summary) {
   const lines = [
-    `${dryRun ? 'Would reconcile' : 'Reconciled'} ${summary.checked} open PR(s) against GitHub`
+    `Diagnostic-only reconciliation checked ${summary.checked} open PR(s) against GitHub`
     + ` at ${summary.observedAt}`,
     `  merged:     ${summary.merged}`,
     `  closed:     ${summary.closed}`,
@@ -139,7 +137,7 @@ export async function main(argv, io = {}) {
 
     stdout.write(options.json
       ? `${JSON.stringify(summary, null, 2)}\n`
-      : `${renderSummary(summary, { dryRun: true })}\n`);
+      : `${renderSummary(summary)}\n`);
 
     // Non-zero when the sweep could not verify everything, so a scripted caller
     // can tell "mirror is now clean" from "mirror is still partly unverified".

@@ -68,7 +68,7 @@ test('parseArgs rejects a non-positive cap instead of sweeping everything', () =
   assert.throws(() => parseArgs(['--cap', '0']), /--cap requires a positive integer/);
   assert.throws(() => parseArgs(['--cap', 'lots']), /--cap requires a positive integer/);
   assert.throws(() => parseArgs(['--nope']), /Unknown argument/);
-  assert.equal(parseArgs(['--dry-run']).dryRun, true);
+  assert.throws(() => parseArgs(['--dry-run']), /Unknown argument: --dry-run/);
 });
 
 test('the sweep reports stale rows without mutating the ledger or attestation', async () => {
@@ -85,7 +85,7 @@ test('the sweep reports stale rows without mutating the ledger or attestation', 
       { pr_number: 6393, pr_state: 'open', merged_at: null, closed_at: null },
       { pr_number: 6394, pr_state: 'open', merged_at: null, closed_at: null },
     ]);
-    assert.match(out.join(''), /Would reconcile 3 open PR\(s\)/);
+    assert.match(out.join(''), /Diagnostic-only reconciliation checked 3 open PR\(s\)/);
     assert.match(out.join(''), /merged:     1/);
     assert.match(out.join(''), /closed:     1/);
 
@@ -100,24 +100,25 @@ test('the sweep reports stale rows without mutating the ledger or attestation', 
   }
 });
 
-test('--dry-run writes neither the ledger nor the attestation', async () => {
+test('the diagnostic command writes neither the ledger nor the attestation', async () => {
   const rootDir = tempRoot();
   const db = seedLedger(rootDir, ROWS);
   try {
     const { io, out } = collectingIo(db, LIVE);
-    const code = await main(['--root', rootDir, '--dry-run'], io);
+    const code = await main(['--root', rootDir], io);
 
     assert.equal(code, 0);
-    assert.match(out.join(''), /Would reconcile 3 open PR\(s\)/);
+    assert.match(out.join(''), /Diagnostic-only reconciliation checked 3 open PR\(s\)/);
     const states = db.prepare('SELECT pr_state FROM reviewed_prs').all().map((r) => r.pr_state);
-    assert.deepEqual(states, ['open', 'open', 'open'], 'a dry run must not mutate the ledger');
-    // Critically: a dry run must NOT refresh the attestation. Doing so would
-    // clear review:pr_lifecycle_mirror_unverified without having fixed anything
-    // -- the operator would have silenced the finding that sent them here.
+    assert.deepEqual(states, ['open', 'open', 'open'], 'the diagnostic command must not mutate the ledger');
+    // Critically: the diagnostic command must NOT refresh the attestation.
+    // Doing so would clear review:pr_lifecycle_mirror_unverified without
+    // having fixed anything -- the operator would have silenced the finding
+    // that sent them here.
     assert.equal(
       readPrTerminalReconcileState(rootDir),
       null,
-      'a dry run must not claim the mirror was verified',
+      'the diagnostic command must not claim the mirror was verified',
     );
   } finally {
     db.close();

@@ -27,7 +27,10 @@ import { fetchConditionalRestPage } from './conditional-request.mjs';
 import { loadConfigCached } from './config-loader.mjs';
 import { fetchPullRequestHeadAndState } from './github-api.mjs';
 import { normalizeLabelNames, subjectRefWithLinearTicket } from './review-cycle-cap-actions.mjs';
-import { queueAndAttemptMergeAgentLifecycleCleanup } from './merge-agent-lifecycle-cleanup.mjs';
+import {
+  attemptMergeAgentLifecycleCleanup,
+  queueMergeAgentLifecycleCleanup,
+} from './merge-agent-lifecycle-cleanup.mjs';
 import { fireDagAutowalkOnMerge } from './dag-autowalk-on-merge.mjs';
 import { deleteGateRecordsForPR } from './adversarial-gate-status.mjs';
 import {
@@ -329,19 +332,24 @@ export async function syncPRLifecycle(octokit, operatorSurface, primaryDomainId 
     // A throw defers the mark, keeping the row eligible next tick — dropping
     // the mark is the only way these obligations get retried.
     onBeforeMark: async ({ repo, prNumber, transition, live }) => {
-      try {
-        await queueAndAttemptMergeAgentLifecycleCleanup({
-          pr: live, repo, prNumber, transition,
-        });
-      } catch (err) {
-        // upsertMergeAgentLifecycleCleanup already persisted the obligation
-        // before the attempt; retryPendingMergeAgentLifecycleCleanups drains
-        // it. Only the opportunistic attempt failed, so this must not defer.
-        console.error(
-          `[watcher] merge-agent lifecycle cleanup attempt failed for ${repo}#${prNumber} `
-          + `(queued for retry):`,
-          err?.message || err
-        );
+      const queuedMergeAgentCleanup = queueMergeAgentLifecycleCleanup({
+        pr: live, repo, prNumber, transition,
+      });
+      if (queuedMergeAgentCleanup) {
+        try {
+          await attemptMergeAgentLifecycleCleanup({
+            ...queuedMergeAgentCleanup,
+            source: 'lifecycle-sync',
+          });
+        } catch (err) {
+          // The cleanup was already persisted; retryPendingMergeAgentLifecycleCleanups
+          // drains it. Only the opportunistic attempt failed, so this must not defer.
+          console.error(
+            `[watcher] merge-agent lifecycle cleanup attempt failed for ${repo}#${prNumber} `
+            + `(queued for retry):`,
+            err?.message || err
+          );
+        }
       }
       if (transition === 'merged') {
         // Advance the merged PR's dag-run (AMA D5 gate). Persist the owed work

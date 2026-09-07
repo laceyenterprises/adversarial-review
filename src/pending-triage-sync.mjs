@@ -66,11 +66,17 @@ function pendingTriageSyncPath(rootDir, { repo, prNumber }) {
 }
 
 function readRecord(path) {
+  let raw;
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8'));
-    return parsed && typeof parsed === 'object' ? parsed : null;
+    raw = readFileSync(path, 'utf8');
   } catch {
     return null;
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : { malformed: true };
+  } catch {
+    return { malformed: true };
   }
 }
 
@@ -140,6 +146,7 @@ export function queuePendingTriageSync(rootDir, {
   }
   const iso = now.toISOString();
   const existing = readRecord(pendingTriageSyncPath(rootDir, { repo, prNumber }));
+  const sameObligation = existing?.transition === transition && existing?.triageStatus === status;
   const record = {
     schemaVersion: SCHEMA_VERSION,
     repo,
@@ -155,9 +162,9 @@ export function queuePendingTriageSync(rootDir, {
     revisionRef,
     createdAt: existing?.createdAt || iso,
     updatedAt: iso,
-    attempts: Number(existing?.attempts || 0),
-    lastAttemptAt: existing?.lastAttemptAt || null,
-    lastError: existing?.lastError || null,
+    attempts: sameObligation ? Number(existing?.attempts || 0) : 0,
+    lastAttemptAt: sameObligation ? existing?.lastAttemptAt || null : null,
+    lastError: sameObligation ? existing?.lastError || null : null,
   };
   writeRecord(rootDir, record);
   return record;

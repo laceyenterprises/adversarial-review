@@ -104,3 +104,14 @@ test('the enqueue is gated on drain and on non-terminal subjects', () => {
   assert.match(body, /subject\.terminal \|\| watcherDrain\.active/);
   assert.match(body, /pr_state === 'merged' \|\| reviewRow\?\.pr_state === 'closed'/);
 });
+
+test('dependency-bot auto-adjudication is gated to known bot authors', () => {
+  const argusBranch = indexOfOrFail('existing?.review_status === ARGUS_SECURITY_QUEUED_STATUS');
+  const autoAdjudicationGuard = indexOfOrFail(
+    'if (routed?.queued && isUnroutableBotAuthor(subject.authorRef || null)) {',
+    argusBranch,
+  );
+  const autoAdjudicationCall = indexOfOrFail('maybeAutoAdjudicateDependencyBotArgusJobImpl({', autoAdjudicationGuard);
+
+  assert.ok(autoAdjudicationGuard < autoAdjudicationCall);
+});

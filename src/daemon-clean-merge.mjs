@@ -320,6 +320,7 @@ export async function runDaemonCleanMergeAttempt({
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
   readHeadAttestationChainForPrImpl = readHeadAttestationChainForPr,
   resolveOperatorMergeAccountabilityImpl = resolveOperatorMergeAccountability,
+  autonomousMergeAccountability = null,
   readAmaAuditEntryImpl = readAmaAuditEntry,
   headHasValidatedHamTerminalRemediationImpl = headHasValidatedHamTerminalRemediation,
   resolveHeadCloserCommitSuppressionImpl = getHeadCloserCommitSuppression,
@@ -608,6 +609,7 @@ export async function runDaemonCleanMergeAttempt({
   // checks + a mergeable PR, and a live head that matches the validated head.
   // The label must be pinned to the EXACT head being merged (`liveHead`).
   let operatorMergeAccountability = null;
+  let autonomousAccountabilitySubstituted = false;
   if (!workerIdentity.ok) {
     operatorMergeAccountability = resolveOperatorMergeAccountabilityImpl({
       operatorApprovalEvent,
@@ -616,6 +618,29 @@ export async function runDaemonCleanMergeAttempt({
     });
     if (cleanCloserCommitAccountability) {
       operatorMergeAccountability = cleanCloserCommitAccountability;
+    }
+    if (!operatorMergeAccountability) {
+      const autonomousHead = String(autonomousMergeAccountability?.headSha || '').trim();
+      const autonomousActor = String(autonomousMergeAccountability?.actor || '').trim();
+      const autonomousEventId = String(autonomousMergeAccountability?.eventId || '').trim();
+      const autonomousObservedAt = String(autonomousMergeAccountability?.observedAt || '').trim();
+      if (
+        autonomousHead &&
+        autonomousHead === liveHead &&
+        autonomousActor &&
+        autonomousEventId &&
+        autonomousObservedAt
+      ) {
+        operatorMergeAccountability = {
+          label: autonomousMergeAccountability.label || 'autonomous-merge-accountability',
+          actor: autonomousActor,
+          eventId: autonomousEventId,
+          observedAt: autonomousObservedAt,
+          headSha: autonomousHead,
+          reason: autonomousMergeAccountability.reason || 'autonomous-merge-accountability',
+          inputs: autonomousMergeAccountability.inputs || null,
+        };
+      }
     }
     if (!operatorMergeAccountability) {
       if (hamTerminalRemediationHead || headCloserCertifiedNonBlocking) {
@@ -640,9 +665,13 @@ export async function runDaemonCleanMergeAttempt({
         workerIdentity,
       };
     }
+    autonomousAccountabilitySubstituted =
+      operatorMergeAccountability?.label === (autonomousMergeAccountability?.label || null);
     const accountabilityEvent = cleanCloserCommitAccountability
       ? 'ama.daemon_clean_merge.autonomous_closer_commit_accountability_substituted'
-      : 'ama.daemon_clean_merge.operator_accountability_substituted';
+      : autonomousAccountabilitySubstituted
+        ? 'ama.daemon_clean_merge.autonomous_accountability_substituted'
+        : 'ama.daemon_clean_merge.operator_accountability_substituted';
     logger?.log?.(JSON.stringify({
       schemaVersion: 1,
       event: accountabilityEvent,
@@ -653,6 +682,7 @@ export async function runDaemonCleanMergeAttempt({
       label: operatorMergeAccountability.label,
       actor: operatorMergeAccountability.actor,
       eventId: operatorMergeAccountability.eventId,
+      accountabilityReason: operatorMergeAccountability.reason || null,
       workerIdentityReason: workerIdentity.reason || 'worker-identity-unresolved',
       autonomousCloserCommitClean: Boolean(cleanCloserCommitAccountability),
     }));
@@ -662,6 +692,13 @@ export async function runDaemonCleanMergeAttempt({
           `@${String(liveHead).slice(0, 12)} (${workerIdentity.reason || 'worker-identity-unresolved'}) ` +
           `but the stale clean review head ${String(validatedHead || '').slice(0, 12)} advanced only via ` +
           `trusted closer commit identity — substituting merge-agent accountability for the clean daemon merge under lease`,
+      );
+    } else if (autonomousAccountabilitySubstituted) {
+      logger?.warn?.(
+        `[watcher] AMA daemon clean-merge: worker identity unresolved for ${repoPath}#${prNumber}` +
+          `@${String(liveHead).slice(0, 12)} (${workerIdentity.reason || 'worker-identity-unresolved'}) ` +
+          `but autonomous accountability '${operatorMergeAccountability.label}' approved this exact head — ` +
+          `substituting it for the clean daemon merge under lease`,
       );
     } else {
       logger?.warn?.(
@@ -737,9 +774,16 @@ export async function runDaemonCleanMergeAttempt({
         ? 'autonomous-closer-commit'
         : workerIdentity.ok
           ? 'worker-identity'
-          : 'operator-approval',
-      ...(operatorMergeAccountability && !cleanCloserCommitAccountability
+          : autonomousAccountabilitySubstituted
+            ? 'autonomous-accountability'
+            : 'operator-approval',
+      ...(operatorMergeAccountability
+        && !cleanCloserCommitAccountability
+        && !autonomousAccountabilitySubstituted
         ? { operatorApproval: operatorMergeAccountability }
+        : {}),
+      ...(autonomousAccountabilitySubstituted
+        ? { autonomousMergeAccountability: operatorMergeAccountability }
         : {}),
       ...(cleanCloserCommitAccountability
         ? {

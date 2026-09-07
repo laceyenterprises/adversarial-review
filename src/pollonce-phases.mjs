@@ -40,14 +40,19 @@ import {
 } from './adapters/subject/github-pr/routing.mjs';
 import { projectAdversarialGateStatus } from './adversarial-gate-status.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
+import { runDaemonCleanMergeAttempt } from './daemon-clean-merge.mjs';
+import { loadDomainConfig } from './domain-config.mjs';
+import { resolveMergeAuthorityConfigFromDomain } from './domain-policy.mjs';
 import {
   ARGUS_SECURITY_QUEUED_STATUS,
   LEGACY_UNROUTABLE_BOT_STATUS,
   isArgusSecurityRouteEnabled,
   routeSecuritySurfaceToArgus,
 } from './argus-security-route.mjs';
+import { findArgusJob } from './argus-security-queue.mjs';
 import { isUnroutableBotAuthor } from './bot-author.mjs';
 import { loadConfigCached } from './config-loader.mjs';
+import { maybeAutoAdjudicateDependencyBotArgusJob } from './dependency-bot-autoadjudication.mjs';
 import { isPipelineEnabled } from './domain-pipeline.mjs';
 import {
   markFastMergeAuditError,
@@ -475,9 +480,13 @@ export async function processReviewSubject(entry, ctx) {
     isFastMergeSkipEnabled,
     normalizeReviewPopulationRetryConfig,
     shouldDeferReviewForActiveFollowUp,
+    runDaemonCleanMergeAttemptImpl = runDaemonCleanMergeAttempt,
+    findArgusJobImpl = findArgusJob,
+    maybeAutoAdjudicateDependencyBotArgusJobImpl = maybeAutoAdjudicateDependencyBotArgusJob,
   } = ctx;
 
       const prTitle = subject.title || '';
+      const effectiveDomainId = domainId || entry.domainId || subject.domainId || WATCHER_PRIMARY_DOMAIN_ID || 'code-pr';
       const linearTicketId = operatorSurface.extractLinearTicketId(prTitle);
       const staleDriftSkip = shouldSkipReviewerForStaleDrift({
         number: prNumber,
@@ -723,6 +732,65 @@ export async function processReviewSubject(entry, ctx) {
             reasonSummary: routed.summary,
           });
           existing = stmtGetReviewRow.get(repoPath, prNumber);
+        }
+        if (routed?.queued && isUnroutableBotAuthor(subject.authorRef || null)) {
+          let argusJobRecord = null;
+          try {
+            argusJobRecord = findArgusJobImpl(ROOT, {
+              repo: repoPath,
+              prNumber,
+              headSha: routed.headSha || subject.headSha || subject.ref?.revisionRef || null,
+            });
+          } catch (err) {
+            console.warn(
+              `[watcher] dependency bot auto-adjudication skipped for ${repoPath}#${prNumber}: ` +
+                `Argus job lookup failed (${err?.message || err})`
+            );
+          }
+          if (argusJobRecord?.bucket === 'pending') {
+            let mergeAuthorityConfig = null;
+            try {
+              const loadedConfig = loadConfigCached();
+              mergeAuthorityConfig = resolveMergeAuthorityConfigFromDomain(
+                loadDomainConfig(ROOT, effectiveDomainId),
+                loadedConfig.getMergeAuthorityConfig(),
+                { fallbackSources: loadedConfig.sources || {} },
+              );
+            } catch (err) {
+              console.warn(
+                `[watcher] dependency bot auto-adjudication skipped for ${repoPath}#${prNumber}: ` +
+                  `merge-authority config load failed (${err?.message || err})`
+              );
+            }
+            if (mergeAuthorityConfig?.enabled) {
+              const adjudication = await maybeAutoAdjudicateDependencyBotArgusJobImpl({
+                rootDir: ROOT,
+                jobRecord: argusJobRecord,
+                title: prTitle,
+                authorRef: subject.authorRef || null,
+                candidate: {
+                  headSha: routed.headSha || subject.headSha || null,
+                  baseBranch: subject.baseRefName || subject.baseBranch || mergeAuthorityConfig.defaultBaseBranch || 'main',
+                  prState: subject.state || 'open',
+                },
+                gateSnapshot: null,
+                mergeabilityForGate: null,
+                cfg: mergeAuthorityConfig,
+                currentPrHeadSha: routed.headSha || subject.headSha || null,
+                runDaemonCleanMergeAttemptImpl,
+                logger: console,
+                env: process.env,
+              });
+              if (adjudication?.attempted) {
+                console.log(
+                  `[watcher] dependency bot auto-adjudication for ${repoPath}#${prNumber}: ` +
+                    `${adjudication.decision?.autoMergeEligible ? 'approved' : 'withheld'} ` +
+                    `(${adjudication.reason})` +
+                    (adjudication.merge?.disposition ? `; merge=${adjudication.merge.disposition}` : '')
+                );
+              }
+            }
+          }
         }
         await projectGateStatusSafe(existing);
         return;

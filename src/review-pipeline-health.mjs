@@ -12,6 +12,7 @@ import { DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS } from './reviewer-pass-reaper.mjs
 import {
   evaluateTtmFromDb,
   resolveTtmTrackerConfig,
+  runTtmTrackerTick,
 } from './ttm-tracker.mjs';
 import { readDaemonMergeParks } from './daemon-merge-park-log.mjs';
 
@@ -583,7 +584,7 @@ function safeAll(db, sql, params = []) {
   }
 }
 
-function openReviewStateReadOnlyDb(rootDir) {
+function openReviewStateHealthDb(rootDir) {
   const dbPath = join(rootDir, 'data', 'reviews.db');
   if (!existsSync(dbPath)) {
     return {
@@ -592,9 +593,8 @@ function openReviewStateReadOnlyDb(rootDir) {
     };
   }
   try {
-    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    const db = new Database(dbPath, { fileMustExist: true });
     db.pragma('busy_timeout = 5000');
-    db.pragma('query_only = 1');
     return {
       db,
       status: { path: dbPath, exists: true, readable: true, error: null },
@@ -610,6 +610,275 @@ function openReviewStateReadOnlyDb(rootDir) {
       },
     };
   }
+}
+
+function hasTable(db, tableName) {
+  try {
+    return Boolean(db.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?"
+    ).get(tableName));
+  } catch {
+    return false;
+  }
+}
+
+function normalizeGithubState(rawState) {
+  const upper = String(rawState || '').trim().toUpperCase();
+  if (upper === 'OPEN') return 'open';
+  if (upper === 'MERGED') return 'merged';
+  if (upper === 'CLOSED') return 'closed';
+  return null;
+}
+
+function fetchGithubPrLifecycleSync({
+  repo,
+  prNumber,
+  execFileSyncImpl = execFileSync,
+} = {}) {
+  if (!repo || !prNumber) return null;
+  let stdout;
+  try {
+    stdout = execFileSyncImpl(
+      'gh',
+      [
+        'pr',
+        'view',
+        String(prNumber),
+        '--repo',
+        repo,
+        '--json',
+        'state,mergedAt,closedAt,labels',
+      ],
+      {
+        encoding: 'utf8',
+        maxBuffer: 1 * 1024 * 1024,
+        timeout: 5_000,
+      }
+    );
+  } catch {
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(String(stdout || '').trim() || '{}');
+  } catch {
+    return null;
+  }
+  const prState = normalizeGithubState(parsed.state);
+  if (!prState) return null;
+  return {
+    source: 'github',
+    prState,
+    mergedAt: parsed.mergedAt || null,
+    closedAt: parsed.closedAt || null,
+    labels: Array.isArray(parsed.labels) ? parsed.labels : [],
+  };
+}
+
+function readTerminalReconciliationCandidates(db) {
+  const candidates = new Map();
+  const add = (row, reason) => {
+    const repo = row?.repo;
+    const prNumber = Number(row?.pr_number);
+    if (!repo || !Number.isInteger(prNumber)) return;
+    const key = `${repo}#${prNumber}`;
+    const entry = candidates.get(key) || { repo, prNumber, reasons: new Set() };
+    entry.reasons.add(reason);
+    candidates.set(key, entry);
+  };
+
+  for (const row of safeAll(
+    db,
+    `SELECT repo, pr_number
+       FROM reviewed_prs
+      WHERE COALESCE(pr_state, 'open') = 'open'
+        AND review_status = 'pending'`
+  )) {
+    add(row, 'first-pass-queue');
+  }
+
+  for (const row of safeAll(
+    db,
+    `SELECT repo, pr_number
+       FROM ttm_flag_state
+      WHERE state = 'active'`
+  )) {
+    add(row, 'ttm-flag');
+  }
+
+  return Array.from(candidates.values()).map((candidate) => ({
+    ...candidate,
+    reasons: Array.from(candidate.reasons).sort(),
+  }));
+}
+
+function updateReviewedPrTerminalState(db, { repo, prNumber, lifecycle }) {
+  const labelsJson = Array.isArray(lifecycle.labels) ? JSON.stringify(lifecycle.labels) : null;
+  if (lifecycle.prState === 'merged') {
+    return db.prepare(
+      `UPDATE reviewed_prs
+          SET pr_state = 'merged',
+              merged_at = COALESCE(?, merged_at),
+              closed_at = COALESCE(?, closed_at),
+              labels_json = COALESCE(?, labels_json)
+        WHERE repo = ?
+          AND pr_number = ?`
+    ).run(lifecycle.mergedAt || null, lifecycle.closedAt || null, labelsJson, repo, prNumber).changes;
+  }
+  if (lifecycle.prState === 'closed') {
+    return db.prepare(
+      `UPDATE reviewed_prs
+          SET pr_state = 'closed',
+              closed_at = COALESCE(?, closed_at),
+              labels_json = COALESCE(?, labels_json)
+        WHERE repo = ?
+          AND pr_number = ?`
+    ).run(lifecycle.closedAt || null, labelsJson, repo, prNumber).changes;
+  }
+  return 0;
+}
+
+function resolveActiveTtmFlagsForTerminalPr(db, { repo, prNumber, lifecycle, observedAt }) {
+  const rows = safeAll(
+    db,
+    `SELECT *
+       FROM ttm_flag_state
+      WHERE state = 'active'
+        AND repo = ?
+        AND pr_number = ?`,
+    [repo, prNumber]
+  );
+  for (const row of rows) {
+    db.prepare(
+      `INSERT INTO ttm_flag_events (
+         event_key, repo, pr_number, flag_kind, state, observed_at,
+         opened_at, settled_at, merged_at, elapsed_minutes, budget_minutes,
+         terminal_unmerged_minutes, review_rounds, details_json
+       ) VALUES (?, ?, ?, ?, 'resolved', ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      row.event_key,
+      row.repo,
+      row.pr_number,
+      row.flag_kind,
+      observedAt,
+      row.opened_at,
+      row.settled_at,
+      lifecycle.mergedAt || row.merged_at || null,
+      row.elapsed_minutes,
+      row.budget_minutes,
+      row.terminal_unmerged_minutes,
+      row.review_rounds,
+      JSON.stringify({
+        ...parseJson(row.details_json, {}),
+        githubObservedState: lifecycle.prState,
+        githubObservedMergedAt: lifecycle.mergedAt || null,
+        githubObservedClosedAt: lifecycle.closedAt || null,
+        resolvedBy: 'pipeline-health-terminal-reconciliation',
+      })
+    );
+  }
+  if (rows.length > 0) {
+    db.prepare(
+      `UPDATE ttm_flag_state
+          SET state = 'resolved',
+              last_observed_at = ?,
+              resolved_at = ?,
+              merged_at = COALESCE(?, merged_at),
+              details_json = json_set(
+                COALESCE(NULLIF(details_json, ''), '{}'),
+                '$.githubObservedState',
+                ?,
+                '$.githubObservedMergedAt',
+                ?,
+                '$.githubObservedClosedAt',
+                ?,
+                '$.resolvedBy',
+                'pipeline-health-terminal-reconciliation'
+              )
+        WHERE state = 'active'
+          AND repo = ?
+          AND pr_number = ?`
+    ).run(
+      observedAt,
+      observedAt,
+      lifecycle.mergedAt || null,
+      lifecycle.prState,
+      lifecycle.mergedAt || null,
+      lifecycle.closedAt || null,
+      repo,
+      prNumber
+    );
+  }
+  return rows.length;
+}
+
+function reconcilePipelineTerminalState(db, {
+  observedAt,
+  resolvePrLifecycleSyncImpl = fetchGithubPrLifecycleSync,
+  execFileSyncImpl = execFileSync,
+} = {}) {
+  const result = {
+    checked: 0,
+    terminal: 0,
+    open: 0,
+    unavailable: 0,
+    updatedReviewRows: 0,
+    resolvedTtmFlags: 0,
+    observations: [],
+    skipped: null,
+  };
+
+  if (!hasTable(db, 'reviewed_prs')) {
+    result.skipped = 'missing-reviewed-prs-table';
+    return result;
+  }
+
+  const candidates = readTerminalReconciliationCandidates(db);
+  result.checked = candidates.length;
+  if (!resolvePrLifecycleSyncImpl) {
+    result.unavailable = candidates.length;
+    result.skipped = 'terminal-lifecycle-resolver-unavailable';
+    return result;
+  }
+  for (const candidate of candidates) {
+    const lifecycle = resolvePrLifecycleSyncImpl({
+      repo: candidate.repo,
+      prNumber: candidate.prNumber,
+      execFileSyncImpl,
+    });
+    if (!lifecycle?.prState) {
+      result.unavailable += 1;
+      continue;
+    }
+    const observation = {
+      repo: candidate.repo,
+      prNumber: candidate.prNumber,
+      reasons: candidate.reasons,
+      githubObservedState: lifecycle.prState,
+      githubObservedMergedAt: lifecycle.mergedAt || null,
+      githubObservedClosedAt: lifecycle.closedAt || null,
+      source: lifecycle.source || 'github',
+    };
+    result.observations.push(observation);
+    if (lifecycle.prState === 'open') {
+      result.open += 1;
+      continue;
+    }
+    result.terminal += 1;
+    result.updatedReviewRows += updateReviewedPrTerminalState(db, {
+      repo: candidate.repo,
+      prNumber: candidate.prNumber,
+      lifecycle,
+    });
+    result.resolvedTtmFlags += resolveActiveTtmFlagsForTerminalPr(db, {
+      repo: candidate.repo,
+      prNumber: candidate.prNumber,
+      lifecycle,
+      observedAt,
+    });
+  }
+
+  return result;
 }
 
 function summarizeReviewerAttempts(db, { nowMs, config }) {
@@ -2238,12 +2507,31 @@ function collectReviewPipelineHealth({
   config: configOverrides = {},
   execFileSyncImpl = execFileSync,
   sleepSyncImpl = sleepSyncMs,
+  resolvePrLifecycleSyncImpl = null,
 } = {}) {
   const observedAt = toIso(now);
   const nowMs = Date.parse(observedAt);
   const config = resolveReviewPipelineHealthConfig(env, configOverrides);
-  const { db, status: reviewStateLedger } = openReviewStateReadOnlyDb(rootDir);
+  const terminalReconciliationResolver = resolvePrLifecycleSyncImpl
+    || (env.NODE_TEST_CONTEXT || process.env.NODE_TEST_CONTEXT ? null : fetchGithubPrLifecycleSync);
+  const { db, status: reviewStateLedger } = openReviewStateHealthDb(rootDir);
   try {
+    const terminalStateReconciliation = db
+      ? reconcilePipelineTerminalState(db, {
+          observedAt,
+          resolvePrLifecycleSyncImpl: terminalReconciliationResolver,
+          execFileSyncImpl,
+        })
+      : {
+          checked: 0,
+          terminal: 0,
+          open: 0,
+          unavailable: 0,
+          updatedReviewRows: 0,
+          resolvedTtmFlags: 0,
+          observations: [],
+          skipped: reviewStateLedger.exists ? 'unreadable-review-state-db' : 'missing-review-state-db',
+        };
     const reviewer = db
       ? summarizeReviewerAttempts(db, { nowMs, config })
       : {
@@ -2303,11 +2591,17 @@ function collectReviewPipelineHealth({
       : { cap: INFRA_AUTO_RECOVER_CAP, prs: [], byFailureClass: [], dominantFailureClass: null };
     const roundBudget = summarizeRoundBudgetAnomalies(followUpQueues.jobs);
     const ttm = db
-      ? evaluateTtmFromDb(db, {
+      ? (terminalStateReconciliation.skipped
+        ? evaluateTtmFromDb(db, {
+            now: () => new Date(observedAt),
+            env,
+            config: config.ttm,
+          })
+        : runTtmTrackerTick(db, {
           now: () => new Date(observedAt),
           env,
           config: config.ttm,
-        })
+        }))
       : {
           observedAt,
           config: config.ttm,
@@ -2364,6 +2658,7 @@ function collectReviewPipelineHealth({
       reviewStateLedger,
       mergeOutcomes,
       mergeStalls,
+      terminalStateReconciliation,
       amaCloserLeases,
       daemonMergeParks,
       zombieReviewerPasses,

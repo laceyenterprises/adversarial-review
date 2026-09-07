@@ -28,6 +28,7 @@ import { QUOTA_EXHAUSTED_FAILURE_CLASS } from '../src/quota-exhaustion.mjs';
 import { parseArgs } from '../src/review-pipeline-health-cli.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 import { DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS } from '../src/reviewer-pass-reaper.mjs';
+import { ensureTtmTrackerSchema } from '../src/ttm-tracker.mjs';
 
 const NOW = '2026-05-25T18:00:00.000Z';
 const REPO = 'laceyenterprises/adversarial-review';
@@ -576,6 +577,117 @@ test('queue starvation reports an unstarted row as capacity, not reviewer failur
   assert.match(finding.message, /no reviewer has picked it up/);
   assert.match(finding.recommended_action, /Nothing picked this up/);
   assert.equal(finding.details.reviewerFailed, false);
+});
+
+test('terminal reconciliation clears out-of-band merged flags and closed queue rows', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 6394,
+    repo: 'laceyenterprises/agent-os',
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T17:00:00.000Z',
+  });
+  insertReviewRow(rootDir, {
+    prNumber: 6364,
+    repo: 'laceyenterprises/agent-os',
+    reviewStatus: 'posted',
+    reviewedAt: '2026-05-25T16:30:00.000Z',
+    postedAt: '2026-05-25T16:40:00.000Z',
+  });
+
+  insertReviewerPass(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 6364,
+    startedAt: '2026-05-25T16:35:00.000Z',
+    endedAt: '2026-05-25T16:40:00.000Z',
+    status: 'completed',
+  });
+
+  const db = openDb(rootDir);
+  try {
+    db.prepare("UPDATE reviewer_passes SET verdict = 'approved' WHERE repo = ? AND pr_number = ?")
+      .run('laceyenterprises/agent-os', 6364);
+    ensureTtmTrackerSchema(db);
+    db.prepare(
+      `INSERT INTO ttm_flag_state (
+        event_key, repo, pr_number, flag_kind, state, first_observed_at,
+        last_observed_at, opened_at, settled_at, merged_at, elapsed_minutes,
+        budget_minutes, terminal_unmerged_minutes, review_rounds, details_json
+      ) VALUES (?, ?, ?, 'terminal_but_unmerged', 'active', ?, ?, ?, ?, NULL, ?, ?, ?, 1, ?)`
+    ).run(
+      'laceyenterprises/agent-os#6364:terminal_but_unmerged',
+      'laceyenterprises/agent-os',
+      6364,
+      '2026-05-25T17:20:00.000Z',
+      '2026-05-25T17:20:00.000Z',
+      '2026-05-25T16:30:00.000Z',
+      '2026-05-25T16:40:00.000Z',
+      90,
+      30,
+      40,
+      JSON.stringify({ prState: 'open', reviewStatus: 'posted' }),
+    );
+  } finally {
+    db.close();
+  }
+
+  const lifecycleByPr = new Map([
+    ['laceyenterprises/agent-os#6394', {
+      source: 'fixture',
+      prState: 'closed',
+      mergedAt: null,
+      closedAt: '2026-05-25T17:31:00.000Z',
+      labels: [],
+    }],
+    ['laceyenterprises/agent-os#6364', {
+      source: 'fixture',
+      prState: 'merged',
+      mergedAt: '2026-05-25T17:32:00.000Z',
+      closedAt: '2026-05-25T17:32:00.000Z',
+      labels: [],
+    }],
+  ]);
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    resolvePrLifecycleSyncImpl: ({ repo, prNumber }) => lifecycleByPr.get(`${repo}#${prNumber}`) || null,
+  });
+
+  assert.ok(!findingCodes(snapshot).includes('review:queue_starvation'));
+  assert.ok(!findingCodes(snapshot).includes('review:terminal_but_unmerged'));
+  assert.equal(snapshot.firstPassQueue.depth, 0);
+  assert.equal(snapshot.terminalStateReconciliation.checked, 2);
+  assert.equal(snapshot.terminalStateReconciliation.terminal, 2);
+  assert.equal(snapshot.terminalStateReconciliation.updatedReviewRows, 2);
+  assert.equal(snapshot.terminalStateReconciliation.resolvedTtmFlags, 1);
+
+  const verifyDb = openDb(rootDir);
+  try {
+    const closedQueueRow = verifyDb.prepare(
+      'SELECT pr_state, closed_at FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get('laceyenterprises/agent-os', 6394);
+    assert.deepEqual(closedQueueRow, {
+      pr_state: 'closed',
+      closed_at: '2026-05-25T17:31:00.000Z',
+    });
+    const mergedFlagRow = verifyDb.prepare(
+      'SELECT pr_state, merged_at FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get('laceyenterprises/agent-os', 6364);
+    assert.deepEqual(mergedFlagRow, {
+      pr_state: 'merged',
+      merged_at: '2026-05-25T17:32:00.000Z',
+    });
+    const flagState = verifyDb.prepare(
+      'SELECT state, resolved_at, merged_at, details_json FROM ttm_flag_state WHERE event_key = ?'
+    ).get('laceyenterprises/agent-os#6364:terminal_but_unmerged');
+    assert.equal(flagState.state, 'resolved');
+    assert.equal(flagState.resolved_at, NOW);
+    assert.equal(flagState.merged_at, '2026-05-25T17:32:00.000Z');
+    assert.equal(JSON.parse(flagState.details_json).githubObservedState, 'merged');
+  } finally {
+    verifyDb.close();
+  }
 });
 
 test('an in-flight review does not count as starvation', () => {

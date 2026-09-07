@@ -29,6 +29,7 @@ import { createCliDirectReviewerRuntimeAdapter } from '../src/adapters/reviewer-
 import {
   CANONICAL_OAUTH_STRIP_ENV as CLI_DIRECT_CANONICAL_OAUTH_STRIP_ENV,
   resolveProgressTimeoutForModel,
+  tailText,
 } from '../src/adapters/reviewer-runtime/cli-direct/index.mjs';
 import { AgentOSConfigError, resetConfigCache } from '../src/config-loader.mjs';
 import { probeCodexCli, resolveCliBinary } from '../src/adapters/reviewer-runtime/cli-direct/discovery.mjs';
@@ -1087,6 +1088,14 @@ test('cli-direct preserves stdout classification evidence after long stderr', as
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+test('cli-direct tailText aligns raw byte tails to UTF-8 character boundaries', () => {
+  const text = `${'a'.repeat(8190)}😀tail`;
+  const tail = tailText(text, 8);
+
+  assert.equal(tail, '😀tail');
+  assert.equal(tail.includes('\uFFFD'), false);
 });
 
 test('cli-direct classifies provider overload text from stdout even when stderr has wrapper noise', async () => {

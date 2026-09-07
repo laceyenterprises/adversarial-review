@@ -332,7 +332,13 @@ function appendFailureDiagnostics(message, result = {}) {
   const diagnostics = formatFailureDiagnosticText(result);
   if (!diagnostics) return base;
   const combined = [base, diagnostics].filter(Boolean).join('\n');
-  return combined.slice(0, 12000);
+  return truncateCodePoints(combined, 12000);
+}
+
+function truncateCodePoints(value, maxLength) {
+  const text = String(value || '');
+  if (text.length <= maxLength) return text;
+  return Array.from(text).slice(0, maxLength).join('');
 }
 
 function readJsonFile(path) {
@@ -1319,4 +1325,5 @@ export {
   parsePipelineStageStates,
   settleReviewerAttempt,
   evaluateRoundBudgetForReview,
+  truncateCodePoints,
 };

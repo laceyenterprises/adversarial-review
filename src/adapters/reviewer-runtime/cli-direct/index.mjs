@@ -703,4 +703,5 @@ export {
   reviewerSignalAwareFailureClass,
   stripForbiddenFallbackEnv,
   stdoutLooksLikeFailureSignal,
+  tailText,
 };

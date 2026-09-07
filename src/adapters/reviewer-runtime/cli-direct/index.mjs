@@ -39,6 +39,7 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_REVIEWER_PATH = join(__dirname, '..', '..', '..', 'reviewer.mjs');
 const DEFAULT_TAIL_BYTES = 8 * 1024;
+const DEFAULT_CLASSIFICATION_FIELD_BYTES = 2 * 1024;
 const DEFAULT_CANCEL_GRACE_MS = 10_000;
 const DEFAULT_CANCEL_POLL_MS = 250;
 const DEFAULT_REATTACH_POLL_MS = 1_000;
@@ -63,6 +64,13 @@ function tailText(value, maxBytes = DEFAULT_TAIL_BYTES) {
     start += 1;
   }
   return buffer.subarray(start).toString('utf8');
+}
+
+function stdoutLooksLikeFailureSignal(value) {
+  return (
+    /resource[_ -]?exhausted|quota|rate[_ -]?limit|too many requests|\b429\b|\b529\b|overloaded|capacity/i.test(value) ||
+    /oauth|login required|not logged in|token|credentials unavailable|api error|litellm/i.test(value)
+  );
 }
 
 function reviewerSignalAwareFailureClass(err, classificationText, exitCode, details = {}) {
@@ -494,7 +502,15 @@ function createCliDirectReviewerRuntimeAdapter({
         ? parseCodexJsonTokenUsageFromFailureStdout(err?.stdout || '')
         : { tokenUsage: null, tokenUsageNoUsageReason: null };
       const cancelled = activeRun.cancelled || controller.signal.aborted || errorCode === 'ABORT_ERR';
-      const classificationText = [err?.message, err?.stderr].filter(Boolean).join('\n').trim().slice(0, 4000);
+      const stdoutClassificationTail = tailText(err?.stdout || '', DEFAULT_CLASSIFICATION_FIELD_BYTES);
+      const classificationText = [
+        tailText(err?.message || '', DEFAULT_CLASSIFICATION_FIELD_BYTES),
+        tailText(err?.stderr || '', DEFAULT_CLASSIFICATION_FIELD_BYTES),
+        stdoutLooksLikeFailureSignal(stdoutClassificationTail) ? stdoutClassificationTail : '',
+      ]
+        .filter(Boolean)
+        .join('\n')
+        .trim();
       const failureClass = reviewerSignalAwareFailureClass(
         err,
         classificationText,
@@ -686,4 +702,6 @@ export {
   resolveProgressTimeoutForModel,
   reviewerSignalAwareFailureClass,
   stripForbiddenFallbackEnv,
+  stdoutLooksLikeFailureSignal,
+  tailText,
 };

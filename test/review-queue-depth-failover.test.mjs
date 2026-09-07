@@ -127,9 +127,9 @@ test('disarmed (threshold unset) is byte-identical to pre-RSP-01 even at huge de
     const withLever = await resolveReviewerWorkerClassWithFallback({ ...args, depthPressure: pressure });
     const withoutLever = await resolveReviewerWorkerClassWithFallback(args);
     assert.deepEqual(withLever, withoutLever);
-    // gemini/agy is not a tracked quota harness, so the pre-RSP-01 path bails
-    // here — which is exactly why a saturated-but-healthy gemini never yielded.
-    assert.equal(withLever.reason, 'primary-provider-untracked');
+    // With the queue-depth lever disarmed, the resolver must preserve the
+    // primary route and its ordinary no-fallback reason even under huge depth.
+    assert.equal(withLever.reason, 'primary-not-grounded');
     assert.equal(withLever.fellBack, false);
   } finally {
     rmSync(root, { recursive: true, force: true });

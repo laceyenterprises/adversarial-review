@@ -722,6 +722,9 @@ test('maintainer watcher launcher preserves environment token when broker auth i
     brokerMode: 'fail',
     extraEnv: {
       LINEAR_API_KEY: 'linear-test-token',
+      CLAUDE_REVIEWER_AUTH_VIA_BROKER: 'false',
+      CODEX_REVIEWER_AUTH_VIA_BROKER: 'false',
+      GEMINI_REVIEWER_AUTH_VIA_BROKER: 'false',
       WATCHER_GH_AUTH_VIA_BROKER: 'false',
       GITHUB_TOKEN: 'env-token',
     },

@@ -1686,6 +1686,10 @@ export async function processReviewSubject(entry, ctx) {
       const infraRecoveryAttempts = Number(current?.infra_auto_recover_attempts || 0);
       if (infraRecoveryClass && infraRecoveryAttempts >= INFRA_AUTO_RECOVER_CAP) {
         const alertedAt = new Date().toISOString();
+        const repeatExhaustion = infraRecoveryAttempts > INFRA_AUTO_RECOVER_CAP;
+        const exhaustionSummary = repeatExhaustion
+          ? 'REPEAT infra auto-recovery cap exhaustion after reset'
+          : 'infra auto-recovery cap exhausted';
         const alertMark = markCascadeCapExhaustedAlerted(ROOT, {
           repo: repoPath,
           prNumber,
@@ -1698,7 +1702,7 @@ export async function processReviewSubject(entry, ctx) {
         if (alertMark.marked && typeof deliverAlertFn === 'function') {
           try {
             await deliverAlertFn(
-              `Adversarial reviewer infra auto-recovery cap exhausted for ` +
+              `Adversarial reviewer ${exhaustionSummary} for ` +
               `${repoPath}#${prNumber}: class=${infraRecoveryClass} ` +
               `attempts=${infraRecoveryAttempts}/${INFRA_AUTO_RECOVER_CAP}. ` +
               `Retry backoff remains active; inspect cascade-state for the persisted reason.`,
@@ -1733,14 +1737,14 @@ export async function processReviewSubject(entry, ctx) {
             cap: INFRA_AUTO_RECOVER_CAP,
           });
           console.log(
-            `[watcher] Infra auto-recovery cap exhausted for ${repoPath}#${prNumber}: ` +
+            `[watcher] ${exhaustionSummary} for ${repoPath}#${prNumber}: ` +
               `class=${infraRecoveryClass} attempts=${infraRecoveryAttempts}/${INFRA_AUTO_RECOVER_CAP}; ` +
               `leaving failure evidence for operator inspection`
           );
           return;
         }
         console.warn(
-          `[watcher] Infra auto-recovery cap exhausted for ${repoPath}#${prNumber}: ` +
+          `[watcher] ${exhaustionSummary} for ${repoPath}#${prNumber}: ` +
             `class=${infraRecoveryClass} attempts=${infraRecoveryAttempts}/${INFRA_AUTO_RECOVER_CAP}; ` +
             `scheduled cascade retry is due, so retrying instead of parking`
         );

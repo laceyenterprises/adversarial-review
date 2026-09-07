@@ -21,6 +21,7 @@ export const QUOTA_HARNESS_PROVIDER = Object.freeze({
   codex: 'openai',
   claude: 'anthropic',
   'claude-code': 'anthropic',
+  gemini: 'google',
 });
 
 export function providerForQuotaHarness(harness) {

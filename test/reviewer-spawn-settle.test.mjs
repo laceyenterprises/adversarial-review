@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { spawnReviewer } from '../src/reviewer-spawn-settle.mjs';
+import { spawnReviewer, truncateCodePoints } from '../src/reviewer-spawn-settle.mjs';
 import {
   beginReviewerPass,
   completeReviewerPass,
@@ -66,6 +66,15 @@ test('spawnReviewer posts successful adapter-produced review bodies through GitH
   assert.match(posted[0].reviewBody, /^## Verdict\nComment only/m);
   assert.equal(spawnRequests[0]?.subjectContext?.reviewDbAttemptNumber, 3);
   assert.equal(spawnRequests[0]?.subjectContext?.passKind, 'first-pass');
+});
+
+test('failure diagnostics truncation does not leave a dangling surrogate', () => {
+  const text = `${'a'.repeat(11999)}😀tail`;
+  const truncated = truncateCodePoints(text, 12000);
+
+  assert.equal(Array.from(truncated).length, 12000);
+  assert.equal(truncated.endsWith('😀'), true);
+  assert.equal(/[\uD800-\uDBFF]$/.test(truncated), false);
 });
 
 test('spawnReviewer discards adapter review body when current PR head moved before post', async () => {

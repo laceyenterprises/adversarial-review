@@ -177,16 +177,12 @@ test('launchctl-bootstrap still wins over routing-tier patterns', () => {
   assert.equal(classifyReviewerFailure(stderr, 1), 'launchctl-bootstrap');
 });
 
-test('real 429 (mentionsReal429 set) does NOT classify as cascade', () => {
-  // Defensive: routing-tier patterns must not steal real 429s into cascade.
-  // The existing classifier suppresses cascade when `mentionsReal429` is set
-  // (the `(mentionsRateLimit && !mentionsReal429)` guard); a real 429 falls
-  // into the terminal 'unknown' bucket today (the classifier has no dedicated
-  // 'rate-limit' class). What matters here is that the new routing-tier
-  // patterns don't promote it back into 'cascade'.
+test('transient 429/rate-limit evidence classifies as cascade after hard quota detection', () => {
+  // Hard usage caps are classified before this branch by detectQuotaExhaustion().
+  // A bare 429/rate_limit_exceeded without a cap/reset marker is a transient
+  // provider throttle and should not remain an unattributable unknown.
   const stderr = 'API Error: 429 Too Many Requests — rate_limit_exceeded';
-  const cls = classifyReviewerFailure(stderr, 1);
-  assert.notEqual(cls, 'cascade');
+  assert.equal(classifyReviewerFailure(stderr, 1), 'cascade');
 });
 
 test('benign success-shaped output classifies as unknown (no over-matching)', () => {

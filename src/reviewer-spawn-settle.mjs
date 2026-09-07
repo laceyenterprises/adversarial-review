@@ -311,6 +311,36 @@ function resultWithGitHubPostFailure(result, err) {
   };
 }
 
+function formatFailureDiagnosticText(result = {}) {
+  const sections = [];
+  const exitCode = Number.isInteger(result.exitCode) ? result.exitCode : null;
+  const signal = typeof result.signal === 'string' && result.signal.trim()
+    ? result.signal.trim()
+    : null;
+  if (exitCode !== null || signal) {
+    sections.push(`exit: code=${exitCode === null ? 'unknown' : exitCode}${signal ? ` signal=${signal}` : ''}`);
+  }
+  const stderr = String(result.stderr || result.stderrTail || '').trim();
+  const stdout = String(result.stdout || result.stdoutTail || '').trim();
+  if (stderr) sections.push(`stderr tail:\n${stderr}`);
+  if (stdout) sections.push(`stdout tail:\n${stdout}`);
+  return sections.join('\n').trim();
+}
+
+function appendFailureDiagnostics(message, result = {}) {
+  const base = String(message || '').trim();
+  const diagnostics = formatFailureDiagnosticText(result);
+  if (!diagnostics) return base;
+  const combined = [base, diagnostics].filter(Boolean).join('\n');
+  return truncateCodePoints(combined, 12000);
+}
+
+function truncateCodePoints(value, maxLength) {
+  const text = String(value || '');
+  if (text.length <= maxLength) return text;
+  return Array.from(text).slice(0, maxLength).join('');
+}
+
 function readJsonFile(path) {
   try {
     return JSON.parse(readFileSync(path, 'utf8'));
@@ -1121,7 +1151,8 @@ function settleReviewerAttempt({
     bug: 'Reviewer failed due to an invocation or implementation bug.',
     unknown: 'Unknown reviewer failure',
   };
-  const failureMessage = String(result.error || '').trim() || defaultFailureMessages[failureClass] || defaultFailureMessages.unknown;
+  const baseFailureMessage = String(result.error || '').trim() || defaultFailureMessages[failureClass] || defaultFailureMessages.unknown;
+  const failureMessage = appendFailureDiagnostics(baseFailureMessage, result);
   const classifiedMessage = `[${failureClass}] ${failureMessage}`;
   if (transientFailureClasses.has(failureClass)) {
     if (typeof statements.getReviewRow?.get !== 'function') {
@@ -1137,17 +1168,21 @@ function settleReviewerAttempt({
       failureReason: failureMessage,
     });
     if (infraRecoverAttempts >= INFRA_AUTO_RECOVER_CAP) {
+      const repeatExhaustion = infraRecoverAttempts > INFRA_AUTO_RECOVER_CAP;
+      const exhaustionLabel = repeatExhaustion
+        ? `REPEAT infra auto-recovery cap exhaustion after reset (${infraRecoverAttempts}/${INFRA_AUTO_RECOVER_CAP})`
+        : `infra auto-recovery cap exhausted (${infraRecoverAttempts}/${INFRA_AUTO_RECOVER_CAP})`;
       withSqliteBusyRetrySync(
         () => statements.markCascadeFailed.run(
           failureAt,
-          `${classifiedMessage}; infra auto-recovery cap exhausted (${infraRecoverAttempts}/${INFRA_AUTO_RECOVER_CAP}).`,
+          `${classifiedMessage}\nSystem: ${exhaustionLabel}.`,
           repoPath,
           prNumber
         ),
         { label: `reviewer-settle-cascade-failed:${repoPath}#${prNumber}`, log }
       );
       log.warn(
-        `[watcher] Reviewer ${failureClass} failure on #${prNumber} exhausted infra auto-recovery cap ` +
+        `[watcher] Reviewer ${failureClass} failure on #${prNumber} ${repeatExhaustion ? 'REPEAT-exhausted' : 'exhausted'} infra auto-recovery cap ` +
         `(${infraRecoverAttempts}/${INFRA_AUTO_RECOVER_CAP}); leaving terminal evidence for operator inspection`
       );
       return;
@@ -1290,4 +1325,5 @@ export {
   parsePipelineStageStates,
   settleReviewerAttempt,
   evaluateRoundBudgetForReview,
+  truncateCodePoints,
 };

@@ -311,6 +311,30 @@ function resultWithGitHubPostFailure(result, err) {
   };
 }
 
+function formatFailureDiagnosticText(result = {}) {
+  const sections = [];
+  const exitCode = Number.isInteger(result.exitCode) ? result.exitCode : null;
+  const signal = typeof result.signal === 'string' && result.signal.trim()
+    ? result.signal.trim()
+    : null;
+  if (exitCode !== null || signal) {
+    sections.push(`exit: code=${exitCode === null ? 'unknown' : exitCode}${signal ? ` signal=${signal}` : ''}`);
+  }
+  const stderr = String(result.stderr || result.stderrTail || '').trim();
+  const stdout = String(result.stdout || result.stdoutTail || '').trim();
+  if (stderr) sections.push(`stderr tail:\n${stderr}`);
+  if (stdout) sections.push(`stdout tail:\n${stdout}`);
+  return sections.join('\n').trim();
+}
+
+function appendFailureDiagnostics(message, result = {}) {
+  const base = String(message || '').trim();
+  const diagnostics = formatFailureDiagnosticText(result);
+  if (!diagnostics) return base;
+  const combined = [base, diagnostics].filter(Boolean).join('\n');
+  return combined.slice(0, 12000);
+}
+
 function readJsonFile(path) {
   try {
     return JSON.parse(readFileSync(path, 'utf8'));
@@ -1121,7 +1145,8 @@ function settleReviewerAttempt({
     bug: 'Reviewer failed due to an invocation or implementation bug.',
     unknown: 'Unknown reviewer failure',
   };
-  const failureMessage = String(result.error || '').trim() || defaultFailureMessages[failureClass] || defaultFailureMessages.unknown;
+  const baseFailureMessage = String(result.error || '').trim() || defaultFailureMessages[failureClass] || defaultFailureMessages.unknown;
+  const failureMessage = appendFailureDiagnostics(baseFailureMessage, result);
   const classifiedMessage = `[${failureClass}] ${failureMessage}`;
   if (transientFailureClasses.has(failureClass)) {
     if (typeof statements.getReviewRow?.get !== 'function') {

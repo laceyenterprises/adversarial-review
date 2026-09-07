@@ -60,6 +60,10 @@ test('cascade / reviewer-timeout / launchctl-bootstrap / provider degradation re
     REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS
   );
   assert.equal(
+    infraRecoverableFailureClass({ failure_message: '[unknown] Command failed with code 1\nstderr tail:\nAPI Error: 429 Too Many Requests' }),
+    'cascade'
+  );
+  assert.equal(
     infraRecoverableFailureClass({ failure_message: '[reviewer-output] review artifact missing recognized Verdict value' }),
     'reviewer-output'
   );

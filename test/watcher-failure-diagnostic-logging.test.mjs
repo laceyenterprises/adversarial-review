@@ -231,3 +231,34 @@ test('cascade-class transient failure path also logs stderr', () => {
   const joined = log.lines.join('\n');
   assert.match(joined, /\[reviewer:357\] stderr \(failure-class=cascade\): all upstream attempts failed/);
 });
+
+test('transient failure rows persist exit metadata and captured tails', () => {
+  const db = setupDb();
+  const log = captureLogs();
+
+  withIsolatedHqRoot((rootDir) => settleReviewerAttempt({
+    rootDir,
+    repoPath: REPO,
+    prNumber: PR,
+    result: {
+      ok: false,
+      error: 'Command failed with code 1',
+      stderr: 'API Error: 429 Too Many Requests',
+      stdout: '[reviewer] Starting review: laceyenterprises/agent-os#357',
+      failureClass: 'cascade',
+      exitCode: 1,
+      signal: null,
+    },
+    failureAt: '2026-05-11T00:06:00.000Z',
+    maxRemediationRounds: 2,
+    statements: makeStatements(db),
+    log,
+  }));
+
+  const row = makeStatements(db).getReviewRow.get(REPO, PR);
+  assert.equal(row.review_status, 'pending-upstream');
+  assert.match(row.failure_message, /^\[cascade\] Command failed with code 1/);
+  assert.match(row.failure_message, /exit: code=1/);
+  assert.match(row.failure_message, /stderr tail:\nAPI Error: 429 Too Many Requests/);
+  assert.match(row.failure_message, /stdout tail:\n\[reviewer\] Starting review/);
+});

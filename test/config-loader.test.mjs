@@ -2273,17 +2273,35 @@ test('top-level config.yaml accepts mirrored op.vault and rejects unknown nested
       version: 1
       op:
         vault: OpsVault
+        known_vaults:
+          - OpsVault
+          - Personal
+        release_signing_private_key_ref: op://OpsVault/release-signing/private-key
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(cfg.get('op.vault'), 'OpsVault');
+    assert.deepEqual(cfg.get('op.known_vaults'), ['OpsVault', 'Personal']);
+    assert.equal(
+      cfg.get('op.release_signing_private_key_ref'),
+      'op://OpsVault/release-signing/private-key',
+    );
 
     const envCfg = loadConfig({
       topPath: top,
       env: {
         AGENT_OS_OP_VAULT: 'EnvOpsVault',
+        AGENT_OS_OP_KNOWN_VAULTS: 'EnvOpsVault,OtherVault',
+        AGENT_OS_OP_RELEASE_SIGNING_PRIVATE_KEY_REF: (
+          'op://EnvOpsVault/release-signing/private-key'
+        ),
       },
     });
     assert.equal(envCfg.get('op.vault'), 'EnvOpsVault');
+    assert.deepEqual(envCfg.get('op.known_vaults'), ['EnvOpsVault', 'OtherVault']);
+    assert.equal(
+      envCfg.get('op.release_signing_private_key_ref'),
+      'op://EnvOpsVault/release-signing/private-key',
+    );
     assert.equal(
       envCfg.resolutionTrace('op.vault').at(-1).source,
       'env:AGENT_OS_OP_VAULT',

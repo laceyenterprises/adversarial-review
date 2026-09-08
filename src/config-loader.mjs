@@ -1616,6 +1616,17 @@ function schemaV1() {
             __type: TYPE_STRING,
             __default: 'Cliovault',
           },
+          known_vaults: {
+            __type: TYPE_LIST,
+            __item: { __type: TYPE_STRING },
+            __default: ['Cliovault', 'mem423y7ewrymvxv4ibh34zdk4', 'Personal'],
+          },
+          release_signing_private_key_ref: {
+            __type: TYPE_STRING,
+            __default: 'op://Cliovault/release-signing/private-key',
+            __pattern: PATTERN_OP_REF,
+            __pattern_description: PATTERN_OP_REF_DESCRIPTION,
+          },
         },
       },
       submodules: {
@@ -3653,6 +3664,14 @@ export const ENV_ALIASES = {
   },
   'op.vault': {
     canonical: 'AGENT_OS_OP_VAULT',
+    aliases: [],
+  },
+  'op.known_vaults': {
+    canonical: 'AGENT_OS_OP_KNOWN_VAULTS',
+    aliases: [],
+  },
+  'op.release_signing_private_key_ref': {
+    canonical: 'AGENT_OS_OP_RELEASE_SIGNING_PRIVATE_KEY_REF',
     aliases: [],
   },
   'host.name': {

@@ -1448,6 +1448,9 @@ class ReviewerPostAuthRefreshRetryableError extends Error {
 
 function isReviewerPostAuthFailure(err, { preWriteSaw401 = false } = {}) {
   const detail = buildGhErrorDetail(err);
+  if (/\bauthor cannot review this pull request\b/.test(detail)) {
+    return false;
+  }
   if (
     /\b401\b/.test(detail)
     || /\bunauthorized\b/.test(detail)
@@ -1456,6 +1459,10 @@ function isReviewerPostAuthFailure(err, { preWriteSaw401 = false } = {}) {
     || /\brequires authentication\b/.test(detail)
     || /\bnot logged in\b/.test(detail)
     || /\blogin required\b/.test(detail)
+    || (
+      (/\b403\b/.test(detail) || /\bforbidden\b/.test(detail))
+      && /\bresource not accessible by integration\b/.test(detail)
+    )
   ) {
     return true;
   }

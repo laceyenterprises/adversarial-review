@@ -397,6 +397,11 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
       reject(err);
     });
 
+    child.stdin?.on('error', (err) => {
+      if (err?.code === 'EPIPE') return;
+      finishReject(err);
+    });
+
     if (input !== null && child.stdin) {
       child.stdin.end(input);
     }

@@ -155,19 +155,52 @@ test('an ordinary review failure STILL counts against the attempt budget', () =>
   }
 });
 
-test('a 403 is NOT treated as an auth outage', () => {
-  // 403 on a valid token is permissions/rate-limit, not an expired credential;
-  // re-minting cannot clear it, so it must keep its ordinary terminal handling.
+test('a review-create 403 is treated as transient GitHub infrastructure, not an auth outage', () => {
+  // REVRETRY-02: this is an intermittent GitHub review-create denial, not a
+  // per-PR permission defect and not an expired-token outage. Hold it without
+  // charging the reviewer attempt budget so the watcher can retry after backoff.
   const { rootDir, db } = setupFixture(6372);
   try {
     const row = settleWith(
       rootDir,
       db,
       6372,
-      'Command failed with code 1\nstderr tail:\ngh: Resource not accessible by integration (HTTP 403)'
+      [
+        'Command failed with code 1',
+        'stderr tail:',
+        'gh api --method POST repos/laceyenterprises/agent-os/pulls/6372/reviews',
+        'gh: Resource not accessible by integration (HTTP 403)',
+        'documentation_url: https://docs.github.com/rest/pulls/reviews#create-a-review-for-a-pull-request',
+      ].join('\n')
+    );
+    assert.equal(row.review_attempts, 0);
+    assert.equal(row.review_status, 'pending-upstream');
+    assert.match(row.failure_message, /github-review-create-transient/);
+    assert.doesNotMatch(row.failure_message, /github-auth-outage/);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('a review-create 422 remains terminal and charges the attempt budget', () => {
+  const { rootDir, db } = setupFixture(6373);
+  try {
+    const row = settleWith(
+      rootDir,
+      db,
+      6373,
+      [
+        'Command failed with code 1',
+        'stderr tail:',
+        'gh api --method POST repos/laceyenterprises/agent-os/pulls/6373/reviews',
+        'gh: Validation Failed (HTTP 422)',
+        'documentation_url: https://docs.github.com/rest/pulls/reviews#create-a-review-for-a-pull-request',
+      ].join('\n')
     );
     assert.equal(row.review_attempts, 1);
     assert.notEqual(row.review_status, 'pending-upstream');
+    assert.match(row.failure_message, /\[github-review-create-terminal\]/);
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

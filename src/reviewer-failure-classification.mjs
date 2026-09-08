@@ -90,6 +90,41 @@ function reviewerFailureClassFromStoredRow(reviewRow) {
     return 'launchctl-bootstrap';
   }
   if (/litellm\/upstream cascade|watcher backoff engaged/.test(message)) return 'cascade';
+  const reviewCreateClass = classifyGitHubReviewCreateFailure(rawMessage);
+  if (reviewCreateClass?.recoverable) return reviewCreateClass.failureClass;
+  return null;
+}
+
+function classifyGitHubReviewCreateFailure(text) {
+  const raw = String(text || '');
+  const lower = raw.toLowerCase();
+  const reviewCreateContext = (
+    /repos\/[^/\s]+\/[^/\s]+\/pulls\/\d+\/reviews\b/i.test(raw) ||
+    /\bpulls?\/\d+\/reviews\b/i.test(raw) ||
+    /\bcreate-a-review-for-a-pull-request\b/i.test(raw) ||
+    /\bcreate (?:a )?review\b/i.test(lower) ||
+    /\breview-create\b/i.test(lower)
+  );
+  if (!reviewCreateContext) return null;
+
+  const statusMatch = raw.match(/\b(?:HTTP|status)\s*:?\s*(\d{3})\b/i)
+    || raw.match(/"status"\s*:\s*"?(\d{3})"?/i);
+  if (!statusMatch) return null;
+  const status = Number(statusMatch[1]);
+  if (status === 422) {
+    return {
+      failureClass: 'github-review-create-terminal',
+      status,
+      recoverable: false,
+    };
+  }
+  if (status === 403 || status === 429 || status >= 500) {
+    return {
+      failureClass: 'github-review-create-transient',
+      status,
+      recoverable: true,
+    };
+  }
   return null;
 }
 
@@ -110,6 +145,8 @@ function infraRecoverableFailureClass(reviewRow) {
   if (message.includes('[oauth-broken]')) {
     return 'oauth-broken';
   }
+  const reviewCreateClass = classifyGitHubReviewCreateFailure(reviewRow?.failure_message);
+  if (reviewCreateClass) return reviewCreateClass.recoverable ? reviewCreateClass.failureClass : null;
   // LAC-1359: a reviewer that exited non-zero WITHOUT posting a verdict
   // (`[unknown] Command failed with code N`, with stdout showing it had already
   // begun the review) is an infrastructure crash, not a review outcome — the
@@ -137,6 +174,7 @@ function unknownReviewerCommandFailureClass(reviewRow) {
   const message = rawMessage.toLowerCase();
   const tagMatch = message.match(/^\[([^\]]+)\]/);
   if (tagMatch && tagMatch[1] !== 'unknown') return null;
+  if (classifyGitHubReviewCreateFailure(rawMessage)) return null;
   if (reviewerFailureClassFromStoredRow(reviewRow)) return null;
   if (classifyReviewerFailure(rawMessage, null) !== 'unknown') return null;
   if (
@@ -169,6 +207,7 @@ function reviewPopulationFailureClass(reviewRow) {
 }
 
 export {
+  classifyGitHubReviewCreateFailure,
   infraRecoverableFailureClass,
   reviewerFailureClassFromStoredRow,
   reviewPopulationFailureClass,

@@ -199,6 +199,14 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     thresholdDescription: 'one or more PRs are currently held by provider overload or quota exhaustion',
   },
   {
+    code: 'review:terminal_review_failure_active',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: null,
+    defaultThreshold: null,
+    thresholdDescription: 'one or more open PRs have terminal reviewer failure evidence in reviewed_prs',
+  },
+  {
     code: 'review:queue_starvation',
     tier: 'ticket',
     category: 'review-pipeline',
@@ -559,6 +567,8 @@ function classifyFailure(value) {
     text.includes('usage cap') ||
     text.includes('usage limit')
   ) return QUOTA_EXHAUSTED_FAILURE_CLASS;
+  if (text.includes('github-review-create-transient')) return 'github-review-create-transient';
+  if (text.includes('github-review-create-terminal')) return 'github-review-create-terminal';
   if (
     text.includes(PROVIDER_OVERLOADED_FAILURE_CLASS) ||
     /\b529\b/.test(text) ||
@@ -1580,6 +1590,49 @@ function summarizeStuckRetryLoops(db, { cap }) {
   };
 }
 
+function summarizeTerminalReviewFailures(db) {
+  if (!db) return { prs: [], byFailureClass: [], dominantFailureClass: null };
+  const rows = safeAll(
+    db,
+    `SELECT repo,
+            pr_number,
+            review_status,
+            pr_state,
+            review_attempts,
+            failed_at,
+            last_attempted_at,
+            failure_message,
+            infra_auto_recover_attempts
+       FROM reviewed_prs
+      WHERE review_status = 'failed'
+        AND COALESCE(pr_state, 'open') = 'open'
+      ORDER BY failed_at ASC, last_attempted_at ASC, pr_number ASC`
+  );
+  const byClass = new Map();
+  const prs = rows.map((row) => {
+    const failureClass = classifyFailure(row.failure_message || row.review_status);
+    byClass.set(failureClass, (byClass.get(failureClass) || 0) + 1);
+    return {
+      repo: row.repo,
+      prNumber: row.pr_number,
+      failedAt: row.failed_at || row.last_attempted_at || null,
+      reviewAttempts: Number(row.review_attempts || 0),
+      infraAutoRecoverAttempts: Number(row.infra_auto_recover_attempts || 0),
+      failureMessage: row.failure_message || null,
+      failureClass,
+    };
+  });
+  const byFailureClass = Array.from(byClass, ([failureClass, count]) => ({ failureClass, count }))
+    .sort((left, right) => (
+      right.count - left.count || left.failureClass.localeCompare(right.failureClass)
+    ));
+  return {
+    prs,
+    byFailureClass,
+    dominantFailureClass: byFailureClass[0]?.failureClass || null,
+  };
+}
+
 function normalizeRiskClassForBudget(value) {
   const normalized = String(value || '').trim().toLowerCase();
   return Object.prototype.hasOwnProperty.call(ROUND_BUDGET_BY_RISK_CLASS, normalized) ? normalized : 'medium';
@@ -2119,6 +2172,24 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
         byClass: surfacedByClass,
         entries: surfacedReviewerDegradationEntries,
       },
+    }));
+  }
+
+  if ((snapshot.terminalReviewFailures?.prs || []).length > 0) {
+    const sample = snapshot.terminalReviewFailures.prs[0];
+    findings.push(buildFinding({
+      code: 'review:terminal_review_failure_active',
+      tier: 'ticket',
+      subject: `${snapshot.terminalReviewFailures.prs.length} open PR(s) have terminal reviewer failure evidence`,
+      message: `${sample.repo}#${sample.prNumber} is review_status='failed' with class ${sample.failureClass} after ${sample.reviewAttempts} attempt(s).`,
+      evidence: snapshot.terminalReviewFailures.prs.slice(0, 20).map((row) => (
+        `reviews.db reviewed_prs ${row.repo}#${row.prNumber} class=${row.failureClass} `
+        + `attempts=${row.reviewAttempts} infraAutoRecoverAttempts=${row.infraAutoRecoverAttempts} `
+        + `failedAt=${row.failedAt || 'unknown'}`
+      )),
+      recommendedAction: 'Inspect the preserved failure_message and watcher logs for the named PR(s); terminal review failures must be retriggered or remediated, not left as a clean reviews=0 state.',
+      observedAt,
+      details: snapshot.terminalReviewFailures,
     }));
   }
 
@@ -2725,6 +2796,9 @@ function collectReviewPipelineHealth({
     const stuckReviewLoops = db
       ? summarizeStuckRetryLoops(db, { cap: INFRA_AUTO_RECOVER_CAP })
       : { cap: INFRA_AUTO_RECOVER_CAP, prs: [], byFailureClass: [], dominantFailureClass: null };
+    const terminalReviewFailures = db
+      ? summarizeTerminalReviewFailures(db)
+      : { prs: [], byFailureClass: [], dominantFailureClass: null };
     const roundBudget = summarizeRoundBudgetAnomalies(followUpQueues.jobs);
     const ttm = db
       ? evaluateTtmFromDb(db, {
@@ -2804,6 +2878,7 @@ function collectReviewPipelineHealth({
       daemonMergeParks,
       zombieReviewerPasses,
       stuckReviewLoops,
+      terminalReviewFailures,
       roundBudget,
       ttm,
       launchd,

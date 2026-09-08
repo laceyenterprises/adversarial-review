@@ -87,6 +87,7 @@ import {
   HCP_UNAVAILABLE_FAILURE_CLASS,
 } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS, resolveQuotaResetIso } from './quota-exhaustion.mjs';
+import { classifyGitHubReviewCreateFailure } from './reviewer-failure-classification.mjs';
 import {
   resolveRoundBudgetForJob,
   summarizePRRemediationLedger,
@@ -898,7 +899,7 @@ async function spawnReviewer({
       let tokenUsage = null;
       try {
         tokenUsage = rawErrTokenUsage ? tagTokenUsage(rawErrTokenUsage, 'guardrail') : null;
-      } catch (tagErr) {
+      } catch {
         tokenUsage = null;
       }
       await withSqliteBusyRetry(() => completeReviewerPassImpl(rootDir, {
@@ -1073,7 +1074,11 @@ function settleReviewerAttempt({
     return;
   }
 
-  const failureClass = result.failureClass || 'unknown';
+  const fullFailureOutput = [result.error, result.stdout, result.stderr]
+    .filter(Boolean)
+    .join('\n');
+  const reviewCreateFailure = classifyGitHubReviewCreateFailure(fullFailureOutput);
+  const failureClass = reviewCreateFailure?.failureClass || result.failureClass || 'unknown';
 
   if (failureClass === 'stale-review-head') {
     // Clear the session-bound claim first. The default releaseReviewLease
@@ -1131,6 +1136,7 @@ function settleReviewerAttempt({
     'launchctl-bootstrap',
     'daemon-bounce',
     'reviewer-output',
+    'github-review-create-transient',
     ATTESTATION_SIGN_FAILED_FAILURE_CLASS,
     HCP_UNAVAILABLE_FAILURE_CLASS,
     PROVIDER_OVERLOADED_FAILURE_CLASS,
@@ -1146,6 +1152,8 @@ function settleReviewerAttempt({
     'launchctl-bootstrap': 'Claude launchctl session bootstrap failed; watcher backoff engaged.',
     'daemon-bounce': 'Reviewer runtime could not reattach after daemon bounce; watcher backoff engaged.',
     'reviewer-output': 'Reviewer runtime produced an unparseable review artifact; watcher retry engaged.',
+    'github-review-create-transient': 'GitHub rejected review creation with a transient status; watcher backoff engaged.',
+    'github-review-create-terminal': 'GitHub rejected review creation with a terminal status.',
     [ATTESTATION_SIGN_FAILED_FAILURE_CLASS]: 'Reviewed attestation signing failed after review production; watcher retry engaged.',
     [HCP_UNAVAILABLE_FAILURE_CLASS]: 'HCP is unavailable for reviewed attestation signing; watcher backoff engaged.',
     bug: 'Reviewer failed due to an invocation or implementation bug.',
@@ -1202,9 +1210,6 @@ function settleReviewerAttempt({
     return;
   }
 
-  const fullFailureOutput = [result.error, result.stdout, result.stderr]
-    .filter(Boolean)
-    .join('\n');
   const failureAtMs = Date.parse(failureAt);
   const quotaResetIso = failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS
     ? resolveQuotaResetIso(fullFailureOutput, {
@@ -1277,7 +1282,7 @@ function evaluateRoundBudgetForReview({
   linearTicketId,
   reviewStatus,
   reviewAttempts = 0,
-  log = console.log,
+  _log = console.log,
 }) {
   // Convergence loop, post-2026-05-06:
   // The rereview is ALWAYS allowed to fire after a remediation round —

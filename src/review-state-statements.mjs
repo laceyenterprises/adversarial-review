@@ -94,6 +94,24 @@ export const MARK_INFRA_AUTO_RECOVERY_ATTEMPT_STARTED_SQL =
          ) OR
          lower(COALESCE(failure_message, '')) LIKE '[unknown] command failed with code %'
        )
+       WHEN 'github-review-create-transient' THEN (
+         lower(COALESCE(failure_message, '')) LIKE '[github-review-create-transient]%' OR
+         (
+           (
+             lower(COALESCE(failure_message, '')) LIKE '%pulls/%/reviews%' OR
+             lower(COALESCE(failure_message, '')) LIKE '%create-a-review-for-a-pull-request%' OR
+             lower(COALESCE(failure_message, '')) LIKE '%review-create%'
+           ) AND
+           (
+             lower(COALESCE(failure_message, '')) LIKE '%http 403%' OR
+             lower(COALESCE(failure_message, '')) LIKE '%http 429%' OR
+             lower(COALESCE(failure_message, '')) LIKE '%status 403%' OR
+             lower(COALESCE(failure_message, '')) LIKE '%status 429%' OR
+             lower(COALESCE(failure_message, '')) LIKE '%http 5__%' OR
+             lower(COALESCE(failure_message, '')) LIKE '%status 5__%'
+           )
+         )
+       )
        ELSE 0
      END`;
 

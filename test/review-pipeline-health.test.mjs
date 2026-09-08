@@ -449,6 +449,32 @@ test('collector emits a finding when the review-state ledger is missing entirely
   assert.match(finding.recommended_action, /Treat this snapshot as unusable/);
 });
 
+test('collector surfaces terminal reviewer failures on open PRs', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    repo: REPO,
+    prNumber: 6443,
+    reviewStatus: 'failed',
+    reviewAttempts: 3,
+    failedAt: '2026-09-08T04:20:00.000Z',
+    failureMessage: [
+      '[github-review-create-terminal] Command failed with code 1',
+      'stderr tail:',
+      'gh api --method POST repos/laceyenterprises/agent-os/pulls/6443/reviews',
+      'gh: Validation Failed (HTTP 422)',
+    ].join('\n'),
+  });
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  assert.equal(snapshot.terminalReviewFailures.prs.length, 1);
+  assert.equal(snapshot.terminalReviewFailures.prs[0].failureClass, 'github-review-create-terminal');
+  assert.ok(findingCodes(snapshot).includes('review:terminal_review_failure_active'));
+  const finding = snapshot.findings.find((item) => item.code === 'review:terminal_review_failure_active');
+  assert.equal(finding.tier, 'ticket');
+  assert.match(finding.message, /laceyenterprises\/adversarial-review#6443/);
+  assert.match(finding.evidence[0], /class=github-review-create-terminal/);
+});
+
 test('parseArgs defaults rootDir to the tool root, not the caller cwd', () => {
   // `hq adversarial pipeline-health` execs this CLI without `--root`. Defaulting
   // to process.cwd() resolved the ledger relative to wherever the operator

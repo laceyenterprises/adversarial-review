@@ -8,6 +8,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  classifyGitHubReviewCreateFailure,
   infraRecoverableFailureClass,
   reviewerFailureClassFromStoredRow,
   unknownReviewerCommandFailureClass,
@@ -190,4 +191,57 @@ test('a 403 rate-limit is NOT reclassified as oauth-broken', () => {
     failure_message: 'gh: API rate limit exceeded (HTTP 403)',
   };
   assert.notEqual(reviewerFailureClassFromStoredRow(row), 'oauth-broken');
+});
+
+test('GitHub review-create HTTP status table separates transient and terminal failures', () => {
+  for (const [statusText, expected] of [
+    ['HTTP 403', 'github-review-create-transient'],
+    ['HTTP 429', 'github-review-create-transient'],
+    ['HTTP 500', 'github-review-create-transient'],
+    ['status 503', 'github-review-create-transient'],
+    ['status 422', 'github-review-create-terminal'],
+  ]) {
+    const text = [
+      'Command failed with code 1',
+      'stderr tail:',
+      'gh api --method POST repos/laceyenterprises/agent-os/pulls/6443/reviews',
+      `gh: Resource not accessible by integration (${statusText})`,
+      'documentation_url: https://docs.github.com/rest/pulls/reviews#create-a-review-for-a-pull-request',
+    ].join('\n');
+    assert.equal(
+      classifyGitHubReviewCreateFailure(text)?.failureClass,
+      expected,
+      `expected ${expected} for ${statusText}`,
+    );
+  }
+});
+
+test('GitHub review-create 403 is infra-recoverable, not generic reviewer-command-failed', () => {
+  const row = {
+    failure_message: [
+      '[unknown] Command failed with code 1',
+      'stderr tail:',
+      'gh api --method POST repos/laceyenterprises/agent-os/pulls/6443/reviews',
+      'gh: Resource not accessible by integration (HTTP 403)',
+      'documentation_url: https://docs.github.com/rest/pulls/reviews#create-a-review-for-a-pull-request',
+    ].join('\n'),
+  };
+  assert.equal(reviewerFailureClassFromStoredRow(row), 'github-review-create-transient');
+  assert.equal(infraRecoverableFailureClass(row), 'github-review-create-transient');
+  assert.equal(unknownReviewerCommandFailureClass(row), null);
+});
+
+test('GitHub review-create 422 remains terminal', () => {
+  const row = {
+    failure_message: [
+      '[unknown] Command failed with code 1',
+      'stderr tail:',
+      'gh api --method POST repos/laceyenterprises/agent-os/pulls/6443/reviews',
+      'gh: Validation Failed (HTTP 422)',
+      'documentation_url: https://docs.github.com/rest/pulls/reviews#create-a-review-for-a-pull-request',
+    ].join('\n'),
+  };
+  assert.equal(classifyGitHubReviewCreateFailure(row.failure_message)?.failureClass, 'github-review-create-terminal');
+  assert.equal(reviewerFailureClassFromStoredRow(row), null);
+  assert.equal(infraRecoverableFailureClass(row), null);
 });

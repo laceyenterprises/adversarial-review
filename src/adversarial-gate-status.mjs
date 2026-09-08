@@ -588,7 +588,7 @@ function pickAdversarialGateStatus({
     const fallbackModel = 'gemini';
     const statusPart = reviewStatus === 'skipped' ? 'skipped:quota' : 'failed:quota';
 
-    if (settledReview?.verdict) {
+    if (settledReviewMatchesHead && settledReview?.verdict) {
       if (settledReview.verdict === 'comment-only' || settledReview.verdict === 'approved') {
         console.log(`[watcher] gate-settle: pr=#${reviewRow.pr_number} primary=${primaryModel}(${statusPart}) fallback=${fallbackModel}(${settledReview.verdict})\n          -> settled-success via fallback (primary quota-capped, fallback verdict adopted)`);
         return decide(

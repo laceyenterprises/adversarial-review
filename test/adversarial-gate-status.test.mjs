@@ -2018,7 +2018,7 @@ test('Primary failed (reaped, quota class) + gemini fallback Comment only -> gat
       failed_at: new Date().toISOString(),
     }),
     headSha: 'head-sha',
-    settledReview: { verdict: 'comment-only' }
+    settledReview: { verdict: 'comment-only', reviewedHeadSha: 'head-sha' }
   });
   assert.equal(decision.state, 'success');
   assert.equal(decision.reason, 'settled-success-fallback');
@@ -2032,7 +2032,7 @@ test('Primary skipped (QRT-02N quota) + gemini fallback Comment only -> gate = s
       reviewer_model: 'codex',
     }),
     headSha: 'head-sha',
-    settledReview: { verdict: 'comment-only' }
+    settledReview: { verdict: 'comment-only', reviewedHeadSha: 'head-sha' }
   });
   assert.equal(decision.state, 'success');
   assert.equal(decision.reason, 'settled-success-fallback');
@@ -2046,7 +2046,7 @@ test('Primary quota-capped + gemini fallback Approved -> gate = success via fall
       reviewer_model: 'codex',
     }),
     headSha: 'head-sha',
-    settledReview: { verdict: 'approved' }
+    settledReview: { verdict: 'approved', reviewedHeadSha: 'head-sha' }
   });
   assert.equal(decision.state, 'success');
   assert.equal(decision.reason, 'settled-success-fallback');
@@ -2090,7 +2090,7 @@ test('Primary quota-capped + gemini fallback Request changes -> gate = failure/b
       reviewer_model: 'codex',
     }),
     headSha: 'head-sha',
-    settledReview: { verdict: 'request-changes' }
+    settledReview: { verdict: 'request-changes', reviewedHeadSha: 'head-sha' }
   });
   assert.equal(decision.state, 'failure');
   assert.equal(decision.reason, 'blocking-review');
@@ -2105,6 +2105,36 @@ test('Both primary and fallback unsettled -> gate stays blocked', () => {
     }),
     headSha: 'head-sha',
     settledReview: { verdict: '' }
+  });
+  assert.equal(decision.state, 'pending');
+  assert.equal(decision.reason, 'awaiting-fallback');
+});
+
+test('Primary quota-capped current row ignores fallback verdict without head proof', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'skipped',
+      failure_class: 'quota-exhausted',
+      reviewer_model: 'codex',
+      reviewer_head_sha: 'head-sha',
+    }),
+    headSha: 'head-sha',
+    settledReview: { verdict: 'comment-only' },
+  });
+  assert.equal(decision.state, 'pending');
+  assert.equal(decision.reason, 'awaiting-fallback');
+});
+
+test('Primary quota-capped current row ignores fallback verdict from another head', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'skipped',
+      failure_class: 'quota-exhausted',
+      reviewer_model: 'codex',
+      reviewer_head_sha: 'head-sha',
+    }),
+    headSha: 'head-sha',
+    settledReview: { verdict: 'comment-only', reviewedHeadSha: 'other-head' },
   });
   assert.equal(decision.state, 'pending');
   assert.equal(decision.reason, 'awaiting-fallback');

@@ -72,6 +72,21 @@ test('watcher drains queued reviewer dispatches before merge-side handoffs', () 
   assert.ok(lifecycleCleanup < dagAutowalk, 'dag autowalk remains post-review maintenance');
 });
 
+test('queued reviewer dispatch candidates carry reviewer model for concurrency caps', () => {
+  const pollPhases = pollOncePhasesSource();
+  const candidateStart = pollPhases.indexOf('const dispatchCandidate = {');
+  assert.notEqual(candidateStart, -1, 'reviewer dispatch candidate is constructed');
+  const runStart = pollPhases.indexOf('async run() {', candidateStart);
+  assert.notEqual(runStart, -1, 'candidate run closure exists');
+  const candidateFields = pollPhases.slice(candidateStart, runStart);
+
+  assert.match(
+    candidateFields,
+    /reviewerModel:\s*route\.reviewerModel/,
+    'pooled dispatch candidates must expose reviewerModel so Gemini credential caps apply',
+  );
+});
+
 test('watcher post-review phase behavior preserves reviewer-first ordering and isolates maintenance failures', async () => {
   const events = [];
   const errors = [];

@@ -2056,6 +2056,7 @@ export async function processReviewSubject(entry, ctx) {
       const dispatchCandidate = {
         repoPath,
         prNumber,
+        reviewerModel: route.reviewerModel,
         subject,
         current,
         enqueuedAtMs: Date.now(),

@@ -141,6 +141,7 @@ import {
 import {
   retryPendingMergeCloseouts,
   runFastMergeClosePathIsolated,
+  syncPRLifecycle,
 } from './pr-lifecycle-sync.mjs';
 import {
   isDaemonFailClosedHammerRemediable,
@@ -1159,6 +1160,12 @@ async function pollOnce(
     });
     const operatorSurface = createWatcherOperatorSurface();
     await refreshOrgRepos(octokit);
+    await retryPendingMergeAgentLifecycleCleanups();
+    // Lifecycle sync is the health surface's authoritative "is this PR still
+    // open?" mirror. It must refresh before the per-PR discovery/retry sweep:
+    // under incident backlog that sweep can spend minutes enqueueing reviewer
+    // work before the adoption phase gets a turn.
+    await syncPRLifecycle(octokit, operatorSurface, WATCHER_PRIMARY_DOMAIN_ID);
     const reattach = await reconcileReviewerSessions({
       db,
       octokit,

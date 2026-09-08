@@ -53,6 +53,20 @@ test('caps concurrent gemini reviewers at the credential count, dispatches all',
   assert.equal(state.maxByModel.gemini, 1, 'never more than 1 gemini reviewer in flight');
 });
 
+test('single-wave drain yields instead of serial-draining a gemini backlog', async () => {
+  const { state, hook } = makeTracker();
+  const tasks = Array.from({ length: 6 }, (_u, i) => candidate(i + 1, 'gemini', hook));
+  const summary = await runBoundedReviewerDispatchQueue(tasks, {
+    maxConcurrent: 6,
+    geminiCredentialConcurrency: 1,
+    singleWave: true,
+  });
+
+  assert.equal(summary.dispatched, 1, 'only the initial gemini credential slot is consumed this tick');
+  assert.equal(summary.deferred, 5, 'remaining gemini candidates are left for the next poll tick');
+  assert.equal(state.maxByModel.gemini, 1, 'single-wave mode still respects the gemini credential cap');
+});
+
 test('gemini cap does NOT throttle codex/claude reviewers behind it', async () => {
   const { state, hook } = makeTracker();
   // 3 gemini + 3 codex, pool of 6, gemini capped at 1.
@@ -72,6 +86,26 @@ test('gemini cap does NOT throttle codex/claude reviewers behind it', async () =
   assert.equal(state.maxByModel.gemini, 1, 'gemini serialized to 1');
   assert.ok(state.maxByModel.codex >= 2, `codex ran in parallel (not throttled), saw ${state.maxByModel.codex}`);
   assert.ok(state.maxAll >= 2, 'overall concurrency exceeded the gemini cap (codex parallel)');
+});
+
+test('single-wave drain still fills non-gemini slots behind a capped gemini reviewer', async () => {
+  const { state, hook } = makeTracker();
+  const tasks = [
+    candidate(1, 'gemini', hook),
+    candidate(2, 'gemini', hook),
+    candidate(3, 'codex', hook),
+  ];
+  const summary = await runBoundedReviewerDispatchQueue(tasks, {
+    maxConcurrent: 2,
+    geminiCredentialConcurrency: 1,
+    singleWave: true,
+  });
+
+  assert.equal(summary.dispatched, 2);
+  assert.equal(summary.deferred, 1);
+  assert.equal(state.maxByModel.gemini, 1);
+  assert.equal(state.maxByModel.codex, 1);
+  assert.equal(state.maxAll, 2);
 });
 
 test('null gemini cap conservatively serializes gemini reviewers', async () => {

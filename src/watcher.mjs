@@ -1252,11 +1252,20 @@ async function pollOnce(
       // yields null => no gemini cap, so review dispatch never wedges on this.
       const geminiCredentialConcurrency =
         await resolveGeminiCredentialConcurrencyForDispatchCandidates(candidates);
-      return await runBoundedReviewerDispatchQueue(candidates, {
+      const drainResult = await runBoundedReviewerDispatchQueue(candidates, {
         maxConcurrent: reviewerPoolConfig.maxConcurrent,
         geminiCredentialConcurrency,
+        singleWave: true,
         logger: console,
       });
+      if (drainResult.deferred > 0) {
+        console.log(
+          `[watcher] reviewer dispatch drain yielded after one launch wave: ` +
+          `dispatched=${drainResult.dispatched} deferred=${drainResult.deferred} ` +
+          `max_observed_concurrency=${drainResult.maxObservedConcurrency}`
+        );
+      }
+      return drainResult;
     } finally {
       const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
       if (elapsedMs >= REVIEWER_DISPATCH_DRAIN_WARN_MS) {

@@ -11,6 +11,7 @@ import {
   readAmaCloserDispatchRecord,
   updateAmaCloserDispatchRecord,
 } from '../src/ama/dispatch-closer.mjs';
+import { AMA_CLOSER_LEASE_STATUS, readAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { maybeDispatchAmaClosureFor } from '../src/watcher.mjs';
 
 const CURRENT_USER = userInfo().username || process.env.USER || process.env.LOGNAME || 'unknown';
@@ -150,9 +151,24 @@ test('DCR-02: merged PR does not dispatch hammer merge task', async (t) => {
 
   assert.equal(result.dispatched, false);
   assert.equal(result.skipMergeAgent, true);
-  assert.equal(result.reason, 'live-pr-closed');
+  assert.equal(result.reason, 'target-already-merged');
   assert.equal(result.prState, 'MERGED');
   assert.equal(deps.calls.length, 0, 'must not run hq dispatch for already-merged PR');
+  const record = readAmaCloserDispatchRecord(rootDir, {
+    repo: 'acme/repo',
+    prNumber: 404,
+    headSha: HEAD,
+  });
+  assert.equal(record.state, 'completed');
+  assert.equal(record.status, 'target-already-merged');
+  assert.equal(record.terminalOutcome, 'succeeded');
+  const lease = readAmaCloserLease(rootDir, {
+    repo: 'acme/repo',
+    prNumber: 404,
+    headSha: HEAD,
+  });
+  assert.equal(lease.status, AMA_CLOSER_LEASE_STATUS.TERMINAL);
+  assert.equal(lease.terminalOutcome, 'succeeded');
 });
 
 test('DCR-02: pruned head branch does not dispatch hammer merge task', async (t) => {

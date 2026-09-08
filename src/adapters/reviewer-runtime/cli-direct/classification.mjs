@@ -17,7 +17,7 @@ const REVIEWER_PROGRESS_TIMEOUT_MESSAGE_RE = new RegExp(
 );
 const REVIEWER_EMPTY_OUTPUT_RE = /\b(?:returned|produced)\s+empty output\b/;
 const LAUNCHCTL_BOOTSTRAP_ERROR_RE =
-  /bootstrap failed|could not find domain|input\/output error|not privileged to set domain/;
+  /bootstrap failed|could not find domain|could not switch to audit session|input\/output error|not privileged to set domain/;
 const PROVIDER_CONTEXT_RE =
   /\b(?:provider|model|backend|upstream|server|service|anthropic|claude|openai|codex|gemini|api)\b/;
 const PROVIDER_OVERLOADED_FORWARD_RE =
@@ -26,6 +26,8 @@ const PROVIDER_OVERLOADED_REVERSE_RE =
   /\boverloaded\b[\s\S]{0,160}\b(?:provider|model|backend|upstream|server|service|anthropic|claude|openai|codex|gemini|api)\b/;
 const PROVIDER_CAPACITY_RE =
   /\b(?:api|service|server|backend|provider|model)\s+(?:is\s+)?(?:at|over)\s+capacity\b/;
+const GEMINI_CREDENTIAL_POOL_BUSY_RE =
+  /gemini credential checkout (?:busy|unavailable:\s*broker returned http 409)|shared credential lease still busy|checkout conflict/;
 
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -75,11 +77,13 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     REVIEWER_PROGRESS_TIMEOUT_MESSAGE_RE.test(lower);
   const launchctlBootstrap = lower.split(/\r?\n/).some((line) => (
     /launchctlsessionerror|claude launchctl session bootstrap failed/.test(line) ||
+    /could not switch to audit session/.test(line) ||
     (/launchctl/.test(line) && LAUNCHCTL_BOOTSTRAP_ERROR_RE.test(line))
   ));
   const mentionsReal429 =
     /\b429\b|too many requests|http\s*429/.test(lower);
   const mentionsProviderOverloaded = hasProviderOverloadedSignal(lower);
+  const mentionsGeminiCredentialPoolBusy = GEMINI_CREDENTIAL_POOL_BUSY_RE.test(lower);
   const mentionsReviewerEmptyOutput = REVIEWER_EMPTY_OUTPUT_RE.test(lower);
   const mentionsAttestationSign =
     /\bhq attest sign\b/.test(lower) ||
@@ -208,7 +212,7 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     return 'oauth-broken';
   }
 
-  if (mentionsProviderOverloaded) {
+  if (mentionsGeminiCredentialPoolBusy || mentionsProviderOverloaded) {
     return PROVIDER_OVERLOADED_FAILURE_CLASS;
   }
 

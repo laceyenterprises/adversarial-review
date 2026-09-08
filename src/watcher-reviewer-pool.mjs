@@ -384,9 +384,9 @@ async function reserveReviewerMemoryAdmission({
 // Fetch the number of gemini credentials that can currently serve a concurrent
 // checkout (registered credentials not in a real-429 cooldown) from the broker's
 // /quota endpoint. This is the DYNAMIC source for the gemini dispatch cap — the
-// value lives in the broker/quota DB, never hardcoded here. Fails OPEN (returns
-// null => no gemini cap) on any error so a broker hiccup never wedges review
-// dispatch.
+// value lives in the broker/quota DB, never hardcoded here. Failures return
+// null; the resolver below treats that as a conservative single-Gemini cap so a
+// telemetry hiccup cannot fan out into multiple 409-bound reviewer timeouts.
 async function fetchGeminiCredentialConcurrency({
   brokerUrl,
   secret = '',
@@ -418,13 +418,13 @@ async function fetchGeminiCredentialConcurrency({
 // Resolve the concurrent-GEMINI-reviewer cap. Gemini reviewers all check out
 // from a shared, typically single-account credential pool, so dispatching more
 // concurrent gemini reviewers than gemini credentials just makes them contend on
-// the checkout lease and lose — the broker returns no-credit, which the reviewer
-// surfaces as a MISLEADING "no credential with remaining quota" and the PR gets
-// orphaned. `geminiCredentialConcurrency` is the live broker credential count
-// (see fetchGeminiCredentialConcurrency). `null`/`''`/malformed => no gemini
-// cap (fail-open to the existing behavior); a real count caps gemini in-flight
-// at min(count, pool ceiling). 0 usable credentials => gemini simply does not
-// dispatch this tick (graceful — no spin, retried next tick).
+// the checkout lease and lose — the broker returns 409, and older callers then
+// fell into a serialized 30-minute fallback lock. `geminiCredentialConcurrency`
+// is the live broker credential count (see fetchGeminiCredentialConcurrency).
+// `null`/`''`/malformed => one Gemini at a time (safe degraded mode); a real
+// count caps gemini in-flight at min(count, pool ceiling). 0 usable credentials
+// => gemini simply does not dispatch this tick (graceful — no spin, retried next
+// tick).
 function resolveGeminiDispatchConcurrencyLimit({ geminiCredentialConcurrency = null, ceiling } = {}) {
   const cap = Math.max(1, Number.parseInt(String(ceiling), 10) || 1);
   if (
@@ -432,10 +432,10 @@ function resolveGeminiDispatchConcurrencyLimit({ geminiCredentialConcurrency = n
     || geminiCredentialConcurrency === undefined
     || geminiCredentialConcurrency === ''
   ) {
-    return cap;
+    return Math.min(cap, 1);
   }
   const parsed = Number.parseInt(String(geminiCredentialConcurrency), 10);
-  if (Number.isNaN(parsed)) return cap;
+  if (Number.isNaN(parsed)) return Math.min(cap, 1);
   return Math.min(cap, Math.max(0, parsed));
 }
 

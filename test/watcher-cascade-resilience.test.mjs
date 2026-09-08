@@ -444,6 +444,13 @@ test('rate-limit and 5xx heuristics distinguish real 429s from cascades', () => 
     PROVIDER_OVERLOADED_FAILURE_CLASS
   );
   assert.equal(
+    classifyReviewerFailure(
+      'Gemini credential checkout busy: shared credential lease still busy after 300000ms',
+      1
+    ),
+    PROVIDER_OVERLOADED_FAILURE_CLASS
+  );
+  assert.equal(
     classifyReviewerFailure('upstream retry exhausted after HTTP/1.1 503 from LiteLLM', 1),
     'cascade'
   );
@@ -585,6 +592,13 @@ test('launchctl bootstrap errors get a distinct failure class', () => {
   assert.equal(
     classifyReviewerFailure(
       'LaunchctlSessionError: Claude launchctl session bootstrap failed: Command failed: /bin/launchctl asuser 501 /usr/bin/env -u ANTHROPIC_API_KEY /opt/homebrew/bin/claude auth status',
+      1
+    ),
+    'launchctl-bootstrap'
+  );
+  assert.equal(
+    classifyReviewerFailure(
+      'Reason: [OAuth] claude credentials unavailable: Claude auth probe failed: Could not switch to audit session 0x18757: 1: Operation not permitted',
       1
     ),
     'launchctl-bootstrap'

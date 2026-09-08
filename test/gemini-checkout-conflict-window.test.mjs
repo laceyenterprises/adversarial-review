@@ -53,8 +53,8 @@ test('keeps waiting past the old attempt cap while the window is open', async ()
 
 test('gives up once the wall-clock window is exhausted', async () => {
   reviewerHarness.resetGeminiCredentialCheckoutQueueForTest();
-  // A genuinely orphaned lease must still fall through to the fallback rather
-  // than blocking forever -- the window is under the lease TTL for that reason.
+  // A genuinely orphaned lease must still stop waiting once the bounded window
+  // expires, but it must not fall into the 30-minute legacy fallback lock.
   let clock = 0;
   await assert.rejects(
     reviewerHarness.checkoutGeminiCredentialFromBroker({
@@ -68,7 +68,7 @@ test('gives up once the wall-clock window is exhausted', async () => {
       nowImpl: () => clock,
       log: { warn() {} },
     }),
-    (err) => err?.isGeminiCredentialPoolUnavailable === true,
+    (err) => err?.isGeminiCredentialPoolBusy === true,
   );
   assert.ok(clock >= 5000, `expected to wait out the window, waited ${clock}ms`);
   assert.ok(clock <= 8000, `should not overshoot the window materially, waited ${clock}ms`);
@@ -144,7 +144,7 @@ test('explicit retry-only configuration preserves the legacy attempt-count bound
       nowImpl: () => clock,
       log: { warn() {} },
     }),
-    (err) => err?.isGeminiCredentialPoolUnavailable === true,
+    (err) => err?.isGeminiCredentialPoolBusy === true,
   );
   assert.equal(reviewerHarness.resolveGeminiCheckoutConflictWindowMs({
     AGENT_OS_GEMINI_CHECKOUT_409_RETRIES: '2',
@@ -195,7 +195,7 @@ test('window=0 preserves the legacy attempt-count bound', async () => {
       nowImpl: () => clock,
       log: { warn() {} },
     }),
-    (err) => err?.isGeminiCredentialPoolUnavailable === true,
+    (err) => err?.isGeminiCredentialPoolBusy === true,
   );
   assert.equal(calls, 3, 'retries=2 means 3 total attempts');
 });

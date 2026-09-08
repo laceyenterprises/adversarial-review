@@ -80,6 +80,7 @@ const {
   acquireGeminiFallbackLock,
   GeminiCredentialPoolUnavailableError,
   GeminiCredentialPoolNoCreditError,
+  GeminiCredentialPoolBusyError,
   resolveReviewerMetadata,
   resolveReviewerSubprocessCwd,
   buildGeminiReviewArgs,
@@ -2791,6 +2792,18 @@ test('spawnClaude classifies launchctl session failures separately from oauth fa
     }),
     (err) => err?.isLaunchctlSessionError === true && /bootstrap failed/i.test(err.message)
   );
+  await assert.rejects(
+    () => spawnClaude(['auth', 'status'], {
+      platform: 'darwin',
+      uid: 502,
+      execFileImpl: async () => {
+        const err = new Error('Command failed');
+        err.stderr = 'Could not switch to audit session 0x18757: 1: Operation not permitted';
+        throw err;
+      },
+    }),
+    (err) => err?.isLaunchctlSessionError === true && /could not switch to audit session/i.test(err.message)
+  );
 });
 
 test('assertClaudeOAuth retries bounded launchctl session failures', async () => {
@@ -4611,6 +4624,28 @@ test('reviewWithGemini no-credit defers without single-credential fallback', asy
       },
     }),
     (err) => err?.isGeminiCredentialPoolNoCredit === true,
+  );
+});
+
+test('reviewWithGemini broker 409 busy defers without legacy fallback lock', async () => {
+  resetGeminiReviewerSessionPreflightForTest();
+  await assert.rejects(
+    () => reviewWithGemini('+diff\n', '', {
+      resolveGeminiRuntimeImpl: () => 'antigravity',
+      checkoutGeminiCredentialImpl: async () => {
+        throw new GeminiCredentialPoolBusyError('shared credential lease still busy');
+      },
+      acquireGeminiFallbackLockImpl: async () => {
+        throw new Error('fallback lock must not be acquired');
+      },
+      assertAgyAuthImpl: async () => {
+        throw new Error('auth must not run without a credential');
+      },
+      spawnAgyReviewImpl: async () => {
+        throw new Error('spawn must not run without a credential');
+      },
+    }),
+    (err) => err?.isGeminiCredentialPoolBusy === true,
   );
 });
 

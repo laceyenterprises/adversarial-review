@@ -34,9 +34,9 @@ function candidate(prNumber, reviewerModel, hook) {
 }
 
 test('resolveGeminiDispatchConcurrencyLimit', () => {
-  assert.equal(resolveGeminiDispatchConcurrencyLimit({ geminiCredentialConcurrency: null, ceiling: 6 }), 6);
-  assert.equal(resolveGeminiDispatchConcurrencyLimit({ geminiCredentialConcurrency: '', ceiling: 6 }), 6);
-  assert.equal(resolveGeminiDispatchConcurrencyLimit({ geminiCredentialConcurrency: 'foo', ceiling: 6 }), 6);
+  assert.equal(resolveGeminiDispatchConcurrencyLimit({ geminiCredentialConcurrency: null, ceiling: 6 }), 1);
+  assert.equal(resolveGeminiDispatchConcurrencyLimit({ geminiCredentialConcurrency: '', ceiling: 6 }), 1);
+  assert.equal(resolveGeminiDispatchConcurrencyLimit({ geminiCredentialConcurrency: 'foo', ceiling: 6 }), 1);
   assert.equal(resolveGeminiDispatchConcurrencyLimit({ geminiCredentialConcurrency: 1, ceiling: 6 }), 1);
   assert.equal(resolveGeminiDispatchConcurrencyLimit({ geminiCredentialConcurrency: 0, ceiling: 6 }), 0);
   assert.equal(resolveGeminiDispatchConcurrencyLimit({ geminiCredentialConcurrency: 10, ceiling: 6 }), 6); // clamp to ceiling
@@ -74,7 +74,7 @@ test('gemini cap does NOT throttle codex/claude reviewers behind it', async () =
   assert.ok(state.maxAll >= 2, 'overall concurrency exceeded the gemini cap (codex parallel)');
 });
 
-test('null gemini cap preserves prior behavior (gemini up to pool limit)', async () => {
+test('null gemini cap conservatively serializes gemini reviewers', async () => {
   const { state, hook } = makeTracker();
   const tasks = Array.from({ length: 6 }, (_u, i) => candidate(i + 1, 'gemini', hook));
   const summary = await runBoundedReviewerDispatchQueue(tasks, {
@@ -82,7 +82,7 @@ test('null gemini cap preserves prior behavior (gemini up to pool limit)', async
     geminiCredentialConcurrency: null,
   });
   assert.equal(summary.dispatched, 6);
-  assert.equal(state.maxByModel.gemini, 4, 'without a cap, gemini fills the pool');
+  assert.equal(state.maxByModel.gemini, 1, 'unknown broker telemetry falls back to one gemini at a time');
 });
 
 test('zero gemini credentials leaves gemini candidates undispatched (no spin)', async () => {
@@ -113,7 +113,7 @@ test('fetchGeminiCredentialConcurrency counts non-cooled credentials', async () 
   assert.equal(n, 2);
 });
 
-test('fetchGeminiCredentialConcurrency fails open (null) on missing url / bad response / throw', async () => {
+test('fetchGeminiCredentialConcurrency returns null on missing url / bad response / throw', async () => {
   assert.equal(await fetchGeminiCredentialConcurrency({ brokerUrl: null }), null);
   assert.equal(
     await fetchGeminiCredentialConcurrency({ brokerUrl: 'http://b', fetchImpl: async () => ({ ok: false }) }),

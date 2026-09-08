@@ -509,7 +509,7 @@ function formatChildProcessFailureDetails(err) {
 }
 
 function isLaunchctlSessionFailure(text) {
-  return /(launchctl|bootstrap failed|could not find domain|input\/output error|not privileged to set domain|gui\/\d+)/i.test(String(text ?? ''));
+  return /(launchctl|bootstrap failed|could not find domain|could not switch to audit session|input\/output error|not privileged to set domain|gui\/\d+)/i.test(String(text ?? ''));
 }
 
 function isClaudeLoggedOutStatus(text) {
@@ -988,6 +988,15 @@ class GeminiCredentialPoolNoCreditError extends Error {
   }
 }
 
+class GeminiCredentialPoolBusyError extends Error {
+  constructor(reason = 'shared-credential-busy', { cause } = {}) {
+    super(`Gemini credential checkout busy: ${reason}`);
+    this.name = 'GeminiCredentialPoolBusyError';
+    this.cause = cause;
+    this.isGeminiCredentialPoolBusy = true;
+  }
+}
+
 function resolveGeminiReviewerSessionParent(env = process.env) {
   if (env.GEMINI_REVIEWER_SESSION_PARENT) return env.GEMINI_REVIEWER_SESSION_PARENT;
   return join(env.HOME || homedir(), '.gemini', 'reviewer-sessions');
@@ -1414,6 +1423,15 @@ async function checkoutGeminiCredentialFromBrokerSerialized(options = {}) {
         : Math.max(0, Math.min(wait, remaining));
       await sleepImpl(sleepMs);
     }
+  }
+  if (lastError?.isGeminiCredentialPoolUnavailable && /broker returned HTTP 409\b/.test(lastError.message)) {
+    const elapsedMs = Math.max(0, Math.round(nowMs() - startedAt));
+    const bound = windowMs > 0
+      ? `after ${elapsedMs}ms (${windowMs}ms conflict window)`
+      : `after ${retries + 1} checkout attempts`;
+    throw new GeminiCredentialPoolBusyError(`shared credential lease still busy ${bound}`, {
+      cause: lastError,
+    });
   }
   throw lastError;
 }
@@ -2197,7 +2215,7 @@ async function reviewWithGemini(diff, extraContext = '', {
         }
         throw err;
       }
-      if (err?.isGeminiCredentialPoolNoCredit) {
+      if (err?.isGeminiCredentialPoolNoCredit || err?.isGeminiCredentialPoolBusy) {
         throw err;
       }
       if (!err?.isGeminiCredentialPoolUnavailable) {
@@ -2814,6 +2832,7 @@ const __test__ = {
   GEMINI_CQP_FALLBACK_LOCK_WAIT_MS,
   GEMINI_REVIEWER_SESSION_DIR_PREFIX,
   GEMINI_REVIEWER_SESSION_STALE_AGE_MS,
+  GeminiCredentialPoolBusyError,
   GeminiCredentialPoolNoCreditError,
   GeminiCredentialPoolUnavailableError,
   LAUNCHCTL,

@@ -82,7 +82,11 @@ function reviewerFailureClassFromStoredRow(reviewRow) {
   ) {
     return 'oauth-broken';
   }
-  if (message.includes('claude launchctl session bootstrap failed') || message.includes('launchctlsessionerror')) {
+  if (
+    message.includes('claude launchctl session bootstrap failed') ||
+    message.includes('launchctlsessionerror') ||
+    message.includes('could not switch to audit session')
+  ) {
     return 'launchctl-bootstrap';
   }
   if (/litellm\/upstream cascade|watcher backoff engaged/.test(message)) return 'cascade';

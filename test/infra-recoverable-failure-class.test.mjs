@@ -48,6 +48,13 @@ test('cascade / reviewer-timeout / launchctl-bootstrap / provider degradation re
     'launchctl-bootstrap'
   );
   assert.equal(
+    infraRecoverableFailureClass({
+      failure_message:
+        'Reason: [OAuth] claude credentials unavailable: Claude auth probe failed: Could not switch to audit session 0x18757: 1: Operation not permitted',
+    }),
+    'launchctl-bootstrap'
+  );
+  assert.equal(
     infraRecoverableFailureClass({ failure_message: '[provider-overloaded] HTTP 529 provider overloaded' }),
     PROVIDER_OVERLOADED_FAILURE_CLASS
   );

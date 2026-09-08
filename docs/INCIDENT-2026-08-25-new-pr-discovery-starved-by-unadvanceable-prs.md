@@ -105,7 +105,7 @@ guarantees a new PR is **seen**.
 ### 2. A bounded posted-review phase (`runPostedReviewHandlersFairly`)
 
 - **Per-handler deadline** (`ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS`,
-  default 5m). A phase budget alone cannot save a tick, because it is only checked
+  default 60s). A phase budget alone cannot save a tick, because it is only checked
   *between* handlers: one handler that never settles wedges the tick regardless of
   remaining budget. Same trade-off `safePollOnce` already documents — the
   abandoned promise may still complete its side effects, which is tolerable

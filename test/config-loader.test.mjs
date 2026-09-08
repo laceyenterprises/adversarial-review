@@ -1133,6 +1133,33 @@ test('top-level config.yaml accepts the mirrored worker_pool.dag.autowalk.deep_r
   }
 });
 
+test('top-level config.yaml accepts mirrored worker_pool.dag.chains.enabled key and env alias', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      worker_pool:
+        dag:
+          chains:
+            enabled: false
+    `);
+    const cfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_WORKER_POOL_DAG_CHAINS_ENABLED: 'true',
+      },
+    });
+    assert.equal(cfg.get('worker_pool.dag.chains.enabled'), true);
+    assert.equal(
+      cfg.resolutionTrace('worker_pool.dag.chains.enabled').at(-1).source,
+      'env:AGENT_OS_WORKER_POOL_DAG_CHAINS_ENABLED',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('worker_pool.dag.autowalk.deep_reconcile defaults off when absent', () => {
   const tmp = freshTmp();
   try {

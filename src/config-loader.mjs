@@ -2003,7 +2003,7 @@ function schemaV1() {
         },
       },
       // worker_pool.comms.responder.*,
-      // worker_pool.dag.autowalk.deep_reconcile,
+      // worker_pool.dag.autowalk.deep_reconcile, worker_pool.dag.chains.enabled,
       // worker_pool.dispatch.codex_exec_mode,
       // worker_pool.dispatch.fleet_launch_health.*,
       // worker_pool.dispatch.goal_lineage.*,
@@ -2053,6 +2053,13 @@ function schemaV1() {
             __type: TYPE_DICT,
             __strict: true,
             __keys: {
+              chains: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  enabled: { __type: TYPE_BOOL, __default: false },
+                },
+              },
               autowalk: {
                 __type: TYPE_DICT,
                 __strict: true,
@@ -3080,6 +3087,10 @@ export const ENV_ALIASES = {
   'worker_pool.dag.autowalk.deep_reconcile': {
     canonical: 'AGENT_OS_WORKER_POOL_DAG_AUTOWALK_DEEP_RECONCILE',
     aliases: [['HQ_AUTOWALK_DEEP_RECONCILE', identity]],
+  },
+  'worker_pool.dag.chains.enabled': {
+    canonical: 'AGENT_OS_WORKER_POOL_DAG_CHAINS_ENABLED',
+    aliases: [],
   },
   'worker_pool.memory_injection.enabled': {
     canonical: 'AGENT_OS_WORKER_POOL_MEMORY_INJECTION_ENABLED',

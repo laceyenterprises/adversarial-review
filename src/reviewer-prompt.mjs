@@ -110,7 +110,7 @@ function buildAgyReviewerPromptPrefix({ stage }) {
 Antigravity runtime instructions:
 - This is a single-shot GitHub review. The PR diff and all needed context are already provided below.
 - Review the PROVIDED diff. Do not re-list the repository, re-derive the diff with git, inspect unrelated files, or run exploratory filesystem/git commands.
-- Use at most one narrowly targeted lookup only if the provided diff is insufficient to verify a concrete suspected bug. Otherwise use no tools.
+- Use at most one narrowly targeted lookup inside the provided reviewer checkout only if the provided diff is insufficient to verify a concrete suspected bug. Otherwise use no tools. Never search absolute host paths such as /Users, /private, /tmp, or another checkout.
 - Emit ONLY the final Markdown review block for GitHub. Do not narrate your plan, tool calls, exploration steps, uncertainty, or internal reasoning.
 - Start with "## Adversarial Review — Gemini (gemini-reviewer-lacey)" unless an outer caller already supplied that header.
 - Include "## Verdict" with the first non-empty verdict line exactly one of: "Comment only", "Request changes", or "Approve".

@@ -1863,16 +1863,28 @@ function formatAgyPrintTimeout(timeoutMs) {
 //
 // The verified-working form binds the model and delivers the prompt as the
 // `--print` ARGUMENT:
-//   ['--model', <token>, '--print-timeout', <T>, '--dangerously-skip-permissions', '--print', <prompt>]
+//   ['--model', <token>, '--print-timeout', <T>, '--sandbox', '--add-dir', <cwd>, '--dangerously-skip-permissions', '--print', <prompt>]
 // Every flag with its own value sits BEFORE `--print` so `--print` consumes
 // the prompt (the last argv element) as its value.
-function buildAgyReviewArgs({ model, prompt, printTimeoutMs = resolveAgyPrintTimeoutMs() }) {
-  return [
+function buildAgyReviewArgs({
+  model,
+  prompt,
+  printTimeoutMs = resolveAgyPrintTimeoutMs(),
+  workspaceDir = null,
+}) {
+  const args = [
     '--model', model,
     '--print-timeout', formatAgyPrintTimeout(printTimeoutMs),
+    '--sandbox',
+  ];
+  if (workspaceDir) {
+    args.push('--add-dir', workspaceDir);
+  }
+  args.push(
     '--dangerously-skip-permissions',
     '--print', String(prompt ?? ''),
-  ];
+  );
+  return args;
 }
 
 // Antigravity `agy --print <prompt>` carries the full review prompt on argv so
@@ -2090,7 +2102,7 @@ async function spawnAgyReview({
   assertAgyPromptFitsArgv(prompt, { maxBytes: resolveAgyArgvMaxBytes(env) });
   return spawnWithInputImpl(
     agyCli,
-    buildAgyReviewArgs({ model, prompt, printTimeoutMs }),
+    buildAgyReviewArgs({ model, prompt, printTimeoutMs, workspaceDir: cwd }),
     {
       env,
       cwd,

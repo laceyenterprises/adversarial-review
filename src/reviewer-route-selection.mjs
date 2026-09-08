@@ -181,9 +181,10 @@ function candidateReviewerModelsForExecFallback({ baseRoute, builderClass }) {
 // then hit quota, the row must remain on the normal quota hold instead of
 // recursively selecting Gemini again.
 export function primaryReviewerQuotaCappedForRow(row, { nowMs = null, expectedReviewerModel = null } = {}) {
-  if (!row || row.review_status !== 'failed') return false;
+  if (!row || !['failed', 'skipped'].includes(row.review_status)) return false;
   if (!rowReviewerMatches(row, expectedReviewerModel)) return false;
   if (infraRecoverableFailureClass(row) !== QUOTA_EXHAUSTED_FAILURE_CLASS) return false;
+  if (row.review_status === 'skipped') return true;
   return quotaHoldDecision(row, {
     nowMs,
     fallbackBackoffMs: QUOTA_EXHAUSTED_BACKOFF_MS,

@@ -26,6 +26,8 @@ import {
   ARGUS_VERDICT_STATES,
   resolveArgusSecurityVerdict,
 } from './argus-security-verdict.mjs';
+import { primaryReviewerQuotaCappedForRow } from "./reviewer-route-selection.mjs";
+
 import { normalizeGithubMergeability } from './github-mergeability.mjs';
 import { extractNonBlockingFindingIdentities } from './kernel/remediation-reply.mjs';
 import {
@@ -233,6 +235,28 @@ function classifyBlockersFromBody(body, verdict) {
   };
 }
 
+function normalizeComparableString(value) {
+  return String(value ?? '').trim().toLowerCase();
+}
+
+function fallbackReviewReasonForJob(job) {
+  return normalizeComparableString(
+    job?.fallbackReason
+      ?? job?.fallbackReviewReason
+      ?? job?.reviewerModelFallback?.reason
+      ?? job?.reviewerFallback?.reason
+      ?? job?.trigger?.reason
+      ?? job?.trigger?.fallbackReason
+      ?? ''
+  );
+}
+
+function isCompletedGeminiQuotaFallbackJob(job, status) {
+  if (status !== 'completed') return false;
+  if (normalizeComparableString(job?.reviewerModel ?? job?.reviewer_model) !== 'gemini') return false;
+  return fallbackReviewReasonForJob(job) === 'primary-reviewer-quota-capped';
+}
+
 function resolveSettledReviewVerdict(
   rootDir,
   {
@@ -246,11 +270,14 @@ function resolveSettledReviewVerdict(
 ) {
   const reviewedHeadSha = reviewRow?.reviewer_head_sha || null;
   const reviewStatus = normalizeReviewStatus(reviewRow?.review_status);
-  if (reviewStatus !== 'posted') {
+  const isQuotaCapped = primaryReviewerQuotaCappedForRow(reviewRow);
+  if (reviewStatus !== 'posted' && !isQuotaCapped) {
     return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
   }
   if (currentHeadSha && reviewedHeadSha && String(reviewedHeadSha) !== String(currentHeadSha)) {
-    return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
+    if (!isQuotaCapped) {
+      return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
+    }
   }
 
   const latestJobQuery = { repo, prNumber };
@@ -262,6 +289,11 @@ function resolveSettledReviewVerdict(
   }
   if (latestJobStatus === 'completed' && latestJob?.reReview?.requested === true) {
     return { verdict: '', remediationPending: true, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
+  }
+  if (isQuotaCapped && latestJob) {
+    if (!isCompletedGeminiQuotaFallbackJob(latestJob, latestJobStatus)) {
+      return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
+    }
   }
 
   // Live-review reconciliation: when supplied, the live latest review on the
@@ -295,10 +327,13 @@ function resolveSettledReviewVerdict(
     ? latestJob.reviewBody
     : extractReviewBodyFromRow(reviewRow);
   const verdict = String(normalizeEffectiveReviewVerdict(body) || '').toLowerCase();
+  const settledReviewedHeadSha = latestJob
+    ? (latestJob.revisionRef || latestJob.currentRevisionRef || latestJob.subjectRef?.revisionRef || null)
+    : reviewedHeadSha;
   return {
     verdict,
     remediationPending: false,
-    reviewedHeadSha,
+    reviewedHeadSha: settledReviewedHeadSha,
     ...classifyBlockersFromBody(body, verdict),
   };
 }
@@ -362,6 +397,7 @@ function pickAdversarialGateStatus({
   headSha = null,
   argusVerdict = null,
   env = process.env,
+  settledReview = null,
 } = {}) {
   const context = resolveGateStatusContext(env);
   const decide = (state, description, reason, extra = null) =>
@@ -538,7 +574,38 @@ function pickAdversarialGateStatus({
   // legacy row predating that column. Operator override (`operator-approved`,
   // handled above) already pins to the current head, so it is unaffected.
   const reviewedHead = reviewRow.reviewer_head_sha || null;
-  if (headSha && reviewedHead && String(reviewedHead) !== String(headSha)) {
+  const primaryReviewerQuotaCapped = primaryReviewerQuotaCappedForRow(reviewRow);
+  const primaryRowIsStale = Boolean(headSha && reviewedHead && String(reviewedHead) !== String(headSha));
+  const settledReviewedHead = resolveProvenReviewedHead(settledReview);
+  const settledReviewMatchesHead = Boolean(
+    headSha
+    && settledReviewedHead
+    && String(settledReviewedHead) === String(headSha)
+  );
+
+  if (primaryReviewerQuotaCapped && (!primaryRowIsStale || settledReviewMatchesHead)) {
+    const primaryModel = reviewRow.reviewer_model || 'unknown';
+    const fallbackModel = 'gemini';
+    const statusPart = reviewStatus === 'skipped' ? 'skipped:quota' : 'failed:quota';
+
+    if (settledReviewMatchesHead && settledReview?.verdict) {
+      if (settledReview.verdict === 'comment-only' || settledReview.verdict === 'approved') {
+        console.log(`[watcher] gate-settle: pr=#${reviewRow.pr_number} primary=${primaryModel}(${statusPart}) fallback=${fallbackModel}(${settledReview.verdict})\n          -> settled-success via fallback (primary quota-capped, fallback verdict adopted)`);
+        return decide(
+          'success',
+          `Settled-success via fallback (primary quota-capped, fallback verdict adopted).`,
+          'settled-success-fallback'
+        );
+      }
+      if (settledReview.verdict === 'request-changes') {
+        return decide('failure', 'Blocking adversarial review is still unsettled.', 'blocking-review');
+      }
+    }
+    // If neither the primary nor the fallback has settled, the gate stays blocked.
+    return decide('pending', 'Adversarial review (primary quota-capped) is awaiting fallback verdict.', 'awaiting-fallback');
+  }
+
+  if (primaryRowIsStale) {
     return decide(
       'pending',
       'Live head has advanced past the reviewed head; re-review of the current head is pending.',
@@ -676,7 +743,9 @@ async function buildAdversarialGateSnapshot(rootDir, {
   const argusVerdict = headSha
     ? resolveArgusSecurityVerdict({ rootDir, repo, prNumber, headSha })
     : null;
-  const settledReview = includeSettledReview
+  const shouldIncludeSettledReview = includeSettledReview === true
+    || (includeSettledReview === 'quota-capped' && primaryReviewerQuotaCappedForRow(resolvedRow));
+  const settledReview = shouldIncludeSettledReview
     ? resolveSettledReviewVerdict(rootDir, {
       repo,
       prNumber,
@@ -715,7 +784,7 @@ async function buildAdversarialGateSnapshot(rootDir, {
     settledReview,
     reviewedHeadSha,
     argusVerdict,
-    mergeableState: includeSettledReview ? normalizeGithubMergeability(mergeability || {}) : '',
+    mergeableState: shouldIncludeSettledReview ? normalizeGithubMergeability(mergeability || {}) : '',
   };
 }
 
@@ -867,7 +936,7 @@ async function projectAdversarialGateStatus(rootDir, {
     prUpdatedAt,
     prAuthor,
     reviewRow,
-    includeSettledReview: false,
+    includeSettledReview: 'quota-capped',
     execFileImpl,
     fetchLatestLabelEventImpl,
     operatorApprovalEvent,

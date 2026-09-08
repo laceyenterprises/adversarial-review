@@ -2008,3 +2008,400 @@ test('HOM-04 inline final hammer handoff failure is retryable on later posted-re
   assert.equal(result.reason, 'inline-final-hammer-failed');
   assert.match(errors.join('\n'), /posted-review recovery will retry on a later poll/);
 });
+
+test('Primary failed (reaped, quota class) + gemini fallback Comment only -> gate = success via fallback', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'failed',
+      failure_class: 'quota-exhausted',
+      reviewer_model: 'codex',
+      failed_at: new Date().toISOString(),
+    }),
+    headSha: 'head-sha',
+    settledReview: { verdict: 'comment-only', reviewedHeadSha: 'head-sha' }
+  });
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'settled-success-fallback');
+});
+
+test('Primary skipped (QRT-02N quota) + gemini fallback Comment only -> gate = success via fallback', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'skipped',
+      failure_class: 'quota-exhausted',
+      reviewer_model: 'codex',
+    }),
+    headSha: 'head-sha',
+    settledReview: { verdict: 'comment-only', reviewedHeadSha: 'head-sha' }
+  });
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'settled-success-fallback');
+});
+
+test('Primary quota-capped + gemini fallback Approved -> gate = success via fallback', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'skipped',
+      failure_class: 'quota-exhausted',
+      reviewer_model: 'codex',
+    }),
+    headSha: 'head-sha',
+    settledReview: { verdict: 'approved', reviewedHeadSha: 'head-sha' }
+  });
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'settled-success-fallback');
+});
+
+test('Primary quota-capped stale row + current-head gemini fallback Comment only -> gate = success via fallback', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'skipped',
+      failure_class: 'quota-exhausted',
+      reviewer_model: 'codex',
+      reviewer_head_sha: 'old-primary-head',
+    }),
+    headSha: 'current-head',
+    settledReview: { verdict: 'comment-only', reviewedHeadSha: 'current-head' },
+  });
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'settled-success-fallback');
+});
+
+test('Primary quota-capped stale row without current-head fallback proof stays stale', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'skipped',
+      failure_class: 'quota-exhausted',
+      reviewer_model: 'codex',
+      reviewer_head_sha: 'old-primary-head',
+    }),
+    headSha: 'current-head',
+    settledReview: { verdict: 'comment-only', reviewedHeadSha: 'old-primary-head' },
+  });
+  assert.equal(decision.state, 'pending');
+  assert.equal(decision.reason, 'stale-review-head');
+});
+
+test('Primary quota-capped + gemini fallback Request changes -> gate = failure/blocked via fallback verdict', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'skipped',
+      failure_class: 'quota-exhausted',
+      reviewer_model: 'codex',
+    }),
+    headSha: 'head-sha',
+    settledReview: { verdict: 'request-changes', reviewedHeadSha: 'head-sha' }
+  });
+  assert.equal(decision.state, 'failure');
+  assert.equal(decision.reason, 'blocking-review');
+});
+
+test('Both primary and fallback unsettled -> gate stays blocked', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'skipped',
+      failure_class: 'quota-exhausted',
+      reviewer_model: 'codex',
+    }),
+    headSha: 'head-sha',
+    settledReview: { verdict: '' }
+  });
+  assert.equal(decision.state, 'pending');
+  assert.equal(decision.reason, 'awaiting-fallback');
+});
+
+test('Primary quota-capped current row ignores fallback verdict without head proof', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'skipped',
+      failure_class: 'quota-exhausted',
+      reviewer_model: 'codex',
+      reviewer_head_sha: 'head-sha',
+    }),
+    headSha: 'head-sha',
+    settledReview: { verdict: 'comment-only' },
+  });
+  assert.equal(decision.state, 'pending');
+  assert.equal(decision.reason, 'awaiting-fallback');
+});
+
+test('Primary quota-capped current row ignores fallback verdict from another head', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'skipped',
+      failure_class: 'quota-exhausted',
+      reviewer_model: 'codex',
+      reviewer_head_sha: 'head-sha',
+    }),
+    headSha: 'head-sha',
+    settledReview: { verdict: 'comment-only', reviewedHeadSha: 'other-head' },
+  });
+  assert.equal(decision.state, 'pending');
+  assert.equal(decision.reason, 'awaiting-fallback');
+});
+
+test('Primary failed for a non-quota reason -> existing behavior preserved', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'failed',
+      failure_class: 'reviewer-timeout',
+      reviewer_model: 'codex',
+    }),
+    headSha: 'head-sha',
+    settledReview: { verdict: 'request-changes' }
+  });
+  // Non-quota failure preserves existing behavior which is 'success' (operator decides)
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'reviewer-timeout');
+});
+
+test('projectAdversarialGateStatus adopts a settled fallback verdict for quota-capped primary rows', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-gate-quota-fallback-'));
+  try {
+    const repo = 'laceyenterprises/adversarial-review';
+    const prNumber = 973;
+    const headSha = 'quota-fallback-head';
+    const completedDir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
+    mkdirSync(completedDir, { recursive: true });
+    writeFileSync(
+      path.join(completedDir, 'job-quota-fallback.json'),
+      `${JSON.stringify({
+        jobId: 'job-quota-fallback',
+        repo,
+        prNumber,
+        revisionRef: headSha,
+        status: 'completed',
+        reviewerModel: 'gemini',
+        fallbackReason: 'primary-reviewer-quota-capped',
+        createdAt: '2026-09-08T20:00:00.000Z',
+        completedAt: '2026-09-08T20:01:00.000Z',
+        reviewBody: '## Summary\nFallback review is clean.\n\n## Verdict\nComment only\n',
+        remediationPlan: {
+          currentRound: 1,
+          maxRounds: 3,
+        },
+        reReview: {
+          requested: false,
+        },
+      }, null, 2)}\n`
+    );
+
+    const result = await projectAdversarialGateStatus(rootDir, {
+      repo,
+      prNumber,
+      headSha,
+      reviewRow: makeReviewRow({
+        repo,
+        pr_number: prNumber,
+        review_status: 'skipped',
+        failure_class: 'quota-exhausted',
+        reviewer_model: 'codex',
+        reviewer_head_sha: 'stale-primary-head',
+      }),
+      env: {
+        PATH: '/usr/bin:/bin',
+        HOME: '/tmp/test-home',
+        GITHUB_TOKEN: 'token-123',
+      },
+      gateProvider: {
+        providerId: 'fixture-gate',
+        gate: async (_subject, _revisionRef, decision) => ({
+          gated: true,
+          decision,
+        }),
+      },
+    });
+
+    assert.equal(result.snapshot.settledReview.verdict, 'comment-only');
+    assert.equal(result.snapshot.settledReview.reviewedHeadSha, headSha);
+    assert.equal(result.decision.state, 'success');
+    assert.equal(result.decision.reason, 'settled-success-fallback');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+for (const terminalStatus of ['failed', 'stopped']) {
+  test(`projectAdversarialGateStatus ignores ${terminalStatus} fallback-shaped jobs for quota-capped primary rows`, async () => {
+    const rootDir = mkdtempSync(path.join(tmpdir(), `adversarial-gate-quota-${terminalStatus}-fallback-`));
+    try {
+      const repo = 'laceyenterprises/adversarial-review';
+      const prNumber = 973;
+      const headSha = `quota-${terminalStatus}-head`;
+      const jobDir = path.join(rootDir, 'data', 'follow-up-jobs', terminalStatus);
+      mkdirSync(jobDir, { recursive: true });
+      writeFileSync(
+        path.join(jobDir, `job-quota-${terminalStatus}.json`),
+        `${JSON.stringify({
+          jobId: `job-quota-${terminalStatus}`,
+          repo,
+          prNumber,
+          revisionRef: headSha,
+          status: terminalStatus,
+          reviewerModel: 'gemini',
+          fallbackReason: 'primary-reviewer-quota-capped',
+          createdAt: '2026-09-08T20:00:00.000Z',
+          [`${terminalStatus}At`]: '2026-09-08T20:01:00.000Z',
+          reviewBody: '## Summary\nFallback review is clean.\n\n## Verdict\nComment only\n',
+          reReview: {
+            requested: false,
+          },
+        }, null, 2)}\n`
+      );
+
+      const result = await projectAdversarialGateStatus(rootDir, {
+        repo,
+        prNumber,
+        headSha,
+        reviewRow: makeReviewRow({
+          repo,
+          pr_number: prNumber,
+          review_status: 'skipped',
+          failure_class: 'quota-exhausted',
+          reviewer_model: 'codex',
+          reviewer_head_sha: headSha,
+        }),
+        env: {
+          PATH: '/usr/bin:/bin',
+          HOME: '/tmp/test-home',
+          GITHUB_TOKEN: 'token-123',
+        },
+        gateProvider: {
+          providerId: 'fixture-gate',
+          gate: async (_subject, _revisionRef, decision) => ({
+            gated: true,
+            decision,
+          }),
+        },
+      });
+
+      assert.equal(result.snapshot.settledReview.verdict, '');
+      assert.equal(result.decision.state, 'pending');
+      assert.equal(result.decision.reason, 'awaiting-fallback');
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+}
+
+test('projectAdversarialGateStatus ignores completed non-Gemini follow-up jobs for quota-capped primary rows', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-gate-quota-non-gemini-fallback-'));
+  try {
+    const repo = 'laceyenterprises/adversarial-review';
+    const prNumber = 973;
+    const headSha = 'quota-non-gemini-head';
+    const completedDir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
+    mkdirSync(completedDir, { recursive: true });
+    writeFileSync(
+      path.join(completedDir, 'job-quota-non-gemini.json'),
+      `${JSON.stringify({
+        jobId: 'job-quota-non-gemini',
+        repo,
+        prNumber,
+        revisionRef: headSha,
+        status: 'completed',
+        reviewerModel: 'codex',
+        fallbackReason: 'primary-reviewer-quota-capped',
+        createdAt: '2026-09-08T20:00:00.000Z',
+        completedAt: '2026-09-08T20:01:00.000Z',
+        reviewBody: '## Summary\nCodex follow-up is clean.\n\n## Verdict\nComment only\n',
+        reReview: {
+          requested: false,
+        },
+      }, null, 2)}\n`
+    );
+
+    const result = await projectAdversarialGateStatus(rootDir, {
+      repo,
+      prNumber,
+      headSha,
+      reviewRow: makeReviewRow({
+        repo,
+        pr_number: prNumber,
+        review_status: 'skipped',
+        failure_class: 'quota-exhausted',
+        reviewer_model: 'codex',
+        reviewer_head_sha: headSha,
+      }),
+      env: {
+        PATH: '/usr/bin:/bin',
+        HOME: '/tmp/test-home',
+        GITHUB_TOKEN: 'token-123',
+      },
+      gateProvider: {
+        providerId: 'fixture-gate',
+        gate: async (_subject, _revisionRef, decision) => ({
+          gated: true,
+          decision,
+        }),
+      },
+    });
+
+    assert.equal(result.snapshot.settledReview.verdict, '');
+    assert.equal(result.decision.state, 'pending');
+    assert.equal(result.decision.reason, 'awaiting-fallback');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('projectAdversarialGateStatus ignores completed Gemini follow-up jobs without quota fallback provenance', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-gate-quota-non-fallback-'));
+  try {
+    const repo = 'laceyenterprises/adversarial-review';
+    const prNumber = 973;
+    const headSha = 'quota-non-fallback-head';
+    const completedDir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
+    mkdirSync(completedDir, { recursive: true });
+    writeFileSync(
+      path.join(completedDir, 'job-quota-non-fallback.json'),
+      `${JSON.stringify({
+        jobId: 'job-quota-non-fallback',
+        repo,
+        prNumber,
+        revisionRef: headSha,
+        status: 'completed',
+        reviewerModel: 'gemini',
+        fallbackReason: 'manual-follow-up',
+        createdAt: '2026-09-08T20:00:00.000Z',
+        completedAt: '2026-09-08T20:01:00.000Z',
+        reviewBody: '## Summary\nGemini follow-up is clean.\n\n## Verdict\nComment only\n',
+        reReview: {
+          requested: false,
+        },
+      }, null, 2)}\n`
+    );
+
+    const result = await projectAdversarialGateStatus(rootDir, {
+      repo,
+      prNumber,
+      headSha,
+      reviewRow: makeReviewRow({
+        repo,
+        pr_number: prNumber,
+        review_status: 'skipped',
+        failure_class: 'quota-exhausted',
+        reviewer_model: 'codex',
+        reviewer_head_sha: headSha,
+      }),
+      env: {
+        PATH: '/usr/bin:/bin',
+        HOME: '/tmp/test-home',
+        GITHUB_TOKEN: 'token-123',
+      },
+      gateProvider: {
+        providerId: 'fixture-gate',
+        gate: async (_subject, _revisionRef, decision) => ({
+          gated: true,
+          decision,
+        }),
+      },
+    });
+
+    assert.equal(result.snapshot.settledReview.verdict, '');
+    assert.equal(result.decision.state, 'pending');
+    assert.equal(result.decision.reason, 'awaiting-fallback');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});

@@ -271,13 +271,14 @@ test('watcher terminal rereview skip releases claim and falls through to close p
   );
   assert.ok(spawnIndex > skipReleaseIndex, 'spawnReviewer should be in the non-skip branch');
 
-  // pollOnce still runs the per-PR phase (processReviewSubject, which drives
-  // spawnReviewer) before the close/maintenance adoption phase.
+  // pollOnce still runs the per-PR phase (processReviewSubject, which queues
+  // posted-review handoffs and reviewer candidates) before the close/maintenance
+  // adoption phase.
   const watcherSource = readFileSync(WATCHER_SOURCE, 'utf8');
   const dispatchPhaseIndex = watcherSource.indexOf("await processReviewSubject(subjectEntry, {");
   const adoptionIndex = watcherSource.indexOf("await runQueuedReviewAdoptionPhase({", dispatchPhaseIndex);
   assert.ok(dispatchPhaseIndex > 0, 'per-PR processing phase should be driven from pollOnce');
-  assert.ok(adoptionIndex > dispatchPhaseIndex, 'watcher close/maintenance phase should remain after reviewer dispatch');
+  assert.ok(adoptionIndex > dispatchPhaseIndex, 'watcher close/maintenance phase should remain after per-PR queueing');
 });
 
 test('hard review ceiling defaults only for missing or invalid round budgets', () => {

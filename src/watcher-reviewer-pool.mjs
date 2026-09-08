@@ -444,6 +444,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   availableCredentials = null,
   geminiCredentialConcurrency = null,
   maxThrownFailures = 1,
+  singleWave = false,
   logger = console,
   now = () => Date.now(),
   waitWarnMs = DEFAULT_REVIEWER_DISPATCH_WAIT_WARN_MS,
@@ -456,6 +457,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
     return {
       dispatched: 0,
       maxObservedConcurrency: 0,
+      deferred: Array.isArray(candidates) ? candidates.length : 0,
     };
   }
   const geminiConcurrencyLimit = resolveGeminiDispatchConcurrencyLimit({
@@ -470,6 +472,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   let maxObservedConcurrency = 0;
   let started = 0;
   let activeGemini = 0;
+  let initialWaveClosed = false;
 
   const isGeminiCandidate = (candidate) =>
     String(candidate?.reviewerModel || '').toLowerCase() === 'gemini';
@@ -509,15 +512,29 @@ async function runBoundedReviewerDispatchQueue(candidates, {
 
   const hasUnstarted = () => pending.some((entry) => !entry.started);
 
-  while ((errors.length < thrownFailureLimit && hasUnstarted()) || active.size > 0) {
+  while (
+    (errors.length < thrownFailureLimit && hasUnstarted() && !initialWaveClosed)
+    || active.size > 0
+  ) {
     let entry;
-    while (errors.length < thrownFailureLimit && (entry = nextStartableEntry()) !== null) {
+    while (
+      errors.length < thrownFailureLimit
+      && !initialWaveClosed
+      && (entry = nextStartableEntry()) !== null
+    ) {
       entry.started = true;
       const promise = start(entry.candidate);
       started += 1;
       active.add(promise);
       promise.finally(() => active.delete(promise));
       maxObservedConcurrency = Math.max(maxObservedConcurrency, active.size);
+    }
+    if (singleWave && started > 0) {
+      // The watcher needs a dispatch *wave*, not a full batch drain. Some
+      // runtimes await reviewer completion inside candidate.run(), so admitting
+      // a new reviewer every time a slot frees can serialize an entire backlog
+      // ahead of posted-review maintenance and hammer closeout.
+      initialWaveClosed = true;
     }
     if (active.size > 0) {
       await Promise.race(active);
@@ -537,6 +554,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   return {
     dispatched: started,
     maxObservedConcurrency,
+    deferred: pending.filter((entry) => !entry.started).length,
   };
 }
 

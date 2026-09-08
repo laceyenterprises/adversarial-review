@@ -1960,3 +1960,95 @@ test('HOM-04 inline final hammer handoff failure is retryable on later posted-re
   assert.equal(result.reason, 'inline-final-hammer-failed');
   assert.match(errors.join('\n'), /posted-review recovery will retry on a later poll/);
 });
+    review_status: 'posted',
+    reviewer_head_sha: 'head-sha',
+    ...overrides,
+  };
+}
+
+test('Primary failed (reaped, quota class) + gemini fallback Comment only -> gate = success via fallback', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'failed',
+      failure_class: 'quota-exhausted',
+      reviewer_model: 'codex',
+      failed_at: new Date().toISOString(),
+    }),
+    headSha: 'head-sha',
+    settledReview: { verdict: 'comment-only' }
+  });
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'settled-success-fallback');
+});
+
+test('Primary skipped (QRT-02N quota) + gemini fallback Comment only -> gate = success via fallback', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'skipped',
+      failure_class: 'quota-exhausted',
+      reviewer_model: 'codex',
+    }),
+    headSha: 'head-sha',
+    settledReview: { verdict: 'comment-only' }
+  });
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'settled-success-fallback');
+});
+
+test('Primary quota-capped + gemini fallback Approved -> gate = success via fallback', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'skipped',
+      failure_class: 'quota-exhausted',
+      reviewer_model: 'codex',
+    }),
+    headSha: 'head-sha',
+    settledReview: { verdict: 'approved' }
+  });
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'settled-success-fallback');
+});
+
+test('Primary quota-capped + gemini fallback Request changes -> gate = failure/blocked via fallback verdict', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'skipped',
+      failure_class: 'quota-exhausted',
+      reviewer_model: 'codex',
+    }),
+    headSha: 'head-sha',
+    settledReview: { verdict: 'request-changes' }
+  });
+  assert.equal(decision.state, 'failure');
+  assert.equal(decision.reason, 'blocking-review');
+});
+
+test('Both primary and fallback unsettled -> gate stays blocked', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'skipped',
+      failure_class: 'quota-exhausted',
+      reviewer_model: 'codex',
+    }),
+    headSha: 'head-sha',
+    settledReview: { verdict: '' }
+  });
+  assert.equal(decision.state, 'pending');
+  assert.equal(decision.reason, 'awaiting-fallback');
+});
+
+test('Primary failed for a non-quota reason -> existing behavior preserved', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'failed',
+      failure_class: 'reviewer-timeout',
+      reviewer_model: 'codex',
+    }),
+    headSha: 'head-sha',
+    settledReview: { verdict: 'request-changes' }
+  });
+  // Non-quota failure preserves existing behavior which is 'success' (operator decides)
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'reviewer-timeout');
+});
+

@@ -21,6 +21,7 @@ import {
   openReviewStateDb,
 } from './review-state.mjs';
 import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
+import { primaryReviewerQuotaCappedForRow } from './reviewer-route-selection.mjs';
 import { normalizeGithubMergeability } from './github-mergeability.mjs';
 import { extractNonBlockingFindingIdentities } from './kernel/remediation-reply.mjs';
 import {
@@ -241,11 +242,14 @@ function resolveSettledReviewVerdict(
 ) {
   const reviewedHeadSha = reviewRow?.reviewer_head_sha || null;
   const reviewStatus = normalizeReviewStatus(reviewRow?.review_status);
-  if (reviewStatus !== 'posted') {
+  const isQuotaCapped = primaryReviewerQuotaCappedForRow(reviewRow);
+  if (reviewStatus !== 'posted' && !isQuotaCapped) {
     return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
   }
   if (currentHeadSha && reviewedHeadSha && String(reviewedHeadSha) !== String(currentHeadSha)) {
-    return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
+    if (!isQuotaCapped) {
+      return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
+    }
   }
 
   const latestJobQuery = { repo, prNumber };
@@ -356,6 +360,7 @@ function pickAdversarialGateStatus({
   labels = [],
   headSha = null,
   env = process.env,
+  settledReview = null,
 } = {}) {
   const context = resolveGateStatusContext(env);
   const decide = (state, description, reason, extra = null) =>
@@ -437,6 +442,28 @@ function pickAdversarialGateStatus({
       'Live head has advanced past the reviewed head; re-review of the current head is pending.',
       'stale-review-head'
     );
+  }
+
+  if (primaryReviewerQuotaCappedForRow(reviewRow)) {
+    const primaryModel = reviewRow.reviewer_model || 'unknown';
+    const fallbackModel = 'gemini';
+    const statusPart = reviewStatus === 'skipped' ? 'skipped:quota' : 'failed:quota';
+
+    if (settledReview?.verdict) {
+      if (settledReview.verdict === 'comment-only' || settledReview.verdict === 'approved') {
+        console.log(`[watcher] gate-settle: pr=#${reviewRow.pr_number} primary=${primaryModel}(${statusPart}) fallback=${fallbackModel}(${settledReview.verdict})\n          -> settled-success via fallback (primary quota-capped, fallback verdict adopted)`);
+        return decide(
+          'success',
+          `Settled-success via fallback (primary quota-capped, fallback verdict adopted).`,
+          'settled-success-fallback'
+        );
+      }
+      if (settledReview.verdict === 'request-changes') {
+        return decide('failure', 'Blocking adversarial review is still unsettled.', 'blocking-review');
+      }
+    }
+    // If neither the primary nor the fallback has settled, the gate stays blocked.
+    return decide('pending', 'Adversarial review (primary quota-capped) is awaiting fallback verdict.', 'awaiting-fallback');
   }
 
   if (reviewStatus === 'failed') {

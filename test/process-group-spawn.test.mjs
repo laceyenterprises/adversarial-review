@@ -131,6 +131,32 @@ test('maxBuffer enforces a byte ceiling for multibyte output', async () => {
   );
 });
 
+test('stdin EPIPE is reported through child close instead of crashing the parent', async () => {
+  await assert.rejects(
+    () => spawnCapturedProcessGroup(
+      process.execPath,
+      [
+        '-e',
+        [
+          'process.stdin.destroy();',
+          'process.stderr.write("closed stdin before prompt\\n");',
+          'setTimeout(() => process.exit(7), 50);',
+        ].join(''),
+      ],
+      {
+        input: 'x'.repeat(16 * 1024 * 1024),
+        timeout: 5_000,
+        progressTimeout: 0,
+      }
+    ),
+    (err) => {
+      assert.equal(err.exitCode, 7);
+      assert.match(err.stderr, /closed stdin before prompt/);
+      return true;
+    }
+  );
+});
+
 test('maxBuffer kills stdout side-channel writers before reading the full file', async () => {
   const fixtureDir = mkdtempSync(path.join(tmpdir(), 'process-group-side-channel-'));
   const stdoutPath = path.join(fixtureDir, 'reviewer.stdout');

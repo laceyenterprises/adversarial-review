@@ -251,17 +251,21 @@ head.
 Quota-capped primary review rows have a narrower fallback adoption rule. When
 the primary reviewer row is `failed` or `skipped` because the reviewer quota is
 exhausted, the adversarial gate may adopt the latest completed fallback review
-body only when that follow-up job is pinned to the current PR head. This
-current-head fallback proof outranks the stale primary row's
+body only when that follow-up job is pinned to the current PR head and carries
+explicit fallback provenance: `reviewerModel: "gemini"` and fallback reason
+`primary-reviewer-quota-capped` (for example in `fallbackReason`,
+`fallbackReviewReason`, or the persisted reviewer-fallback metadata). This
+current-head Gemini fallback proof outranks the stale primary row's
 `reviewer_head_sha`: a clean fallback verdict (`Comment only` or `Approved`)
 publishes `settled-success-fallback`, while a fallback `Request changes` verdict
-publishes the normal blocking-review failure. If the fallback verdict is absent,
-malformed, queued, in progress, requested another re-review, or is pinned to any
-head other than the live PR head, the primary row remains unsettled: matching
-quota-capped rows wait at `awaiting-fallback`, and stale primary rows continue
-to report `stale-review-head`. This exception applies only to quota-capped
-primary rows; non-quota stale review rows must still wait for a fresh
-current-head adversarial review or a scoped operator override.
+publishes the normal blocking-review failure. If the fallback job is absent,
+not completed (`pending`, `in-progress`, `failed`, or `stopped`), not a Gemini
+quota fallback, has a missing or malformed verdict, requested another re-review,
+or is pinned to any head other than the live PR head, the primary row remains
+unsettled: matching quota-capped rows wait at `awaiting-fallback`, and stale
+primary rows continue to report `stale-review-head`. This exception applies
+only to quota-capped primary rows; non-quota stale review rows must still wait
+for a fresh current-head adversarial review or a scoped operator override.
 
 ### §4.2a — AMA final hammer (review-cycle exhaustion)
 

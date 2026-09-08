@@ -235,6 +235,28 @@ function classifyBlockersFromBody(body, verdict) {
   };
 }
 
+function normalizeComparableString(value) {
+  return String(value ?? '').trim().toLowerCase();
+}
+
+function fallbackReviewReasonForJob(job) {
+  return normalizeComparableString(
+    job?.fallbackReason
+      ?? job?.fallbackReviewReason
+      ?? job?.reviewerModelFallback?.reason
+      ?? job?.reviewerFallback?.reason
+      ?? job?.trigger?.reason
+      ?? job?.trigger?.fallbackReason
+      ?? ''
+  );
+}
+
+function isCompletedGeminiQuotaFallbackJob(job, status) {
+  if (status !== 'completed') return false;
+  if (normalizeComparableString(job?.reviewerModel ?? job?.reviewer_model) !== 'gemini') return false;
+  return fallbackReviewReasonForJob(job) === 'primary-reviewer-quota-capped';
+}
+
 function resolveSettledReviewVerdict(
   rootDir,
   {
@@ -267,6 +289,11 @@ function resolveSettledReviewVerdict(
   }
   if (latestJobStatus === 'completed' && latestJob?.reReview?.requested === true) {
     return { verdict: '', remediationPending: true, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
+  }
+  if (isQuotaCapped && latestJob) {
+    if (!isCompletedGeminiQuotaFallbackJob(latestJob, latestJobStatus)) {
+      return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
+    }
   }
 
   // Live-review reconciliation: when supplied, the live latest review on the

@@ -4,10 +4,10 @@
 // dispatch hub run once per queued posted-review handoff; its two private
 // helpers (`extractReviewBodyFromRow`, `findLatestPostedReviewBody`, used only
 // here) move with it. `runQueuedReviewAdoptionPhase` — the once-per-tick phase
-// that drains reviewer dispatches then runs the merge/autowalk/closeout
-// maintenance sweep — also lives here; `pollOnce` stays in watcher and imports
-// both back. ROOT/execFileAsync are re-derived; WATCHER_PRIMARY_DOMAIN_ID is
-// threaded (see the `domainId`/`primaryDomainId` defaults).
+// that runs posted-review merge/autowalk/closeout maintenance before launching
+// the next reviewer wave — also lives here; `pollOnce` stays in watcher and
+// imports both back. ROOT/execFileAsync are re-derived; WATCHER_PRIMARY_DOMAIN_ID
+// is threaded (see the `domainId`/`primaryDomainId` defaults).
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { dirname, join } from 'node:path';
@@ -593,7 +593,6 @@ export async function runQueuedReviewAdoptionPhase({
     throw new TypeError('runQueuedReviewAdoptionPhase requires drainReviewerDispatchCandidates');
   }
 
-  await drainReviewerDispatchCandidates('posted-review handoffs and watcher maintenance');
   // WPS-01: this loop used to be unbounded — every queued handler, to
   // completion, every tick. When the queue filled with PRs that could not
   // advance, the tick stopped finishing and pollOnce never returned to phase 1,
@@ -612,9 +611,10 @@ export async function runQueuedReviewAdoptionPhase({
 
   await retryPendingMergeAgentLifecycleCleanupsImpl();
 
-  // Keep review adoption ahead of merge/autowalk maintenance. These tasks may
-  // shell out to HQ, GitHub, or DAG walkers; a slow or wedged child must not
-  // prevent already-queued pending PRs from being claimed into reviewer runs.
+  // Keep posted-review adoption ahead of merge/autowalk maintenance. These
+  // tasks may shell out to HQ, GitHub, or DAG walkers; the fairness scheduler
+  // keeps them bounded while still letting clean rows reach AMA/merge closeout
+  // before the watcher spends this tick on new reviewer launches.
   await syncPRLifecycleImpl(octokit, operatorSurface, primaryDomainId);
   // TREC-01: drains the Linear triage syncs owed by terminal transitions. This
   // is what lets syncPRLifecycle record a merge/close immediately instead of
@@ -678,4 +678,10 @@ export async function runQueuedReviewAdoptionPhase({
       );
     }
   }
+
+  // Reviewer launches are intentionally last. The child runtime is designed to
+  // detach, but production incidents showed slow admission or subprocess edges
+  // can still hold this await long enough to starve already-reviewed PRs. A
+  // delayed next reviewer wave is cheaper than a wedged hammer.
+  await drainReviewerDispatchCandidates('the next reviewer wave');
 }

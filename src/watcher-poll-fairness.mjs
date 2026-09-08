@@ -4,7 +4,7 @@
 // WPS-01. The starvation this fixes had a specific shape, worth stating exactly
 // because the fix is shaped to match it:
 //
-//   pollOnce runs three phases per tick, in this order:
+//   pollOnce used to run three phases per tick, in this order:
 //     1. discover subjects + per-subject routing/claim (creates the reviewed_prs
 //        row for a brand-new PR and queues its reviewer)
 //     2. drain the reviewer dispatch queue (spawns reviewers)
@@ -19,6 +19,9 @@
 //   stuck in review, never seen. The poll deadline could not catch it either —
 //   `computeWorkloadAwarePollDeadlineMs` budgets 50 PRs × 15m for a single repo,
 //   i.e. ~12.5 hours, which is a safety bound, not a schedule.
+//
+// The current scheduler keeps phase 1 first, then runs phase 3 before launching
+// the next reviewer wave. Closure work must not sit behind a slow reviewer spawn.
 //
 // Two mechanisms here, addressing the two halves:
 //

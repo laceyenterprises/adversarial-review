@@ -36,6 +36,12 @@ test('watcher runs merge-side handoffs before queued reviewer dispatches', () =>
   // Queue initialization is part of pollOnce and stays in watcher.mjs.
   const candidateQueue = watcher.indexOf('const reviewerDispatchCandidates = [];');
   const postedQueue = watcher.indexOf('const postedReviewHandlers = [];');
+  const orgRefresh = watcher.indexOf('await refreshOrgRepos(octokit);');
+  const frontLifecycleCleanup = watcher.indexOf('await retryPendingMergeAgentLifecycleCleanups();', orgRefresh);
+  const frontLifecycleSync = watcher.indexOf(
+    'await syncPRLifecycle(octokit, operatorSurface, WATCHER_PRIMARY_DOMAIN_ID);',
+    frontLifecycleCleanup,
+  );
   // pollOnce drives the per-PR processing phase, which is where the posted
   // handoff is enqueued (ARC-18: the enqueue moved to pollonce-phases.mjs).
   const perPrPhaseCall = watcher.indexOf('await processReviewSubject(subjectEntry, {');
@@ -56,6 +62,9 @@ test('watcher runs merge-side handoffs before queued reviewer dispatches', () =>
 
   assert.notEqual(candidateQueue, -1, 'reviewer dispatch candidate queue exists');
   assert.notEqual(postedQueue, -1, 'posted review handoffs are queued');
+  assert.notEqual(orgRefresh, -1, 'pollOnce refreshes org repos');
+  assert.notEqual(frontLifecycleCleanup, -1, 'pollOnce runs front-of-tick lifecycle cleanup');
+  assert.notEqual(frontLifecycleSync, -1, 'pollOnce runs front-of-tick lifecycle sync');
   assert.notEqual(perPrPhaseCall, -1, 'pollOnce drives the per-PR processing phase');
   assert.notEqual(postedEnqueue, -1, 'posted review rows enqueue their handoff');
   assert.notEqual(phaseHelper, -1, 'post-review phase helper exists');
@@ -68,6 +77,9 @@ test('watcher runs merge-side handoffs before queued reviewer dispatches', () =>
 
   assert.ok(candidateQueue < postedQueue, 'queues are initialized near the reviewer scheduler');
   assert.ok(postedQueue < perPrPhaseCall, 'posted handler queue is initialized before the per-PR phase that enqueues into it');
+  assert.ok(orgRefresh < frontLifecycleCleanup, 'lifecycle cleanup runs after repo refresh gives the tick its operator surface');
+  assert.ok(frontLifecycleCleanup < frontLifecycleSync, 'front-of-tick cleanup runs before front-of-tick lifecycle sync');
+  assert.ok(frontLifecycleSync < perPrPhaseCall, 'lifecycle sync runs before the per-PR discovery/retry sweep');
   assert.ok(phaseHelper < lifecycleCleanup, 'ordering lives in the executable phase helper');
   assert.ok(lifecycleCleanup < lifecycleSync, 'merge-agent lifecycle cleanup runs before lifecycle sync');
   assert.ok(lifecycleSync < postedDrain, 'lifecycle sync runs before posted-review handlers');

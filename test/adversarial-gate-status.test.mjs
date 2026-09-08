@@ -2008,11 +2008,6 @@ test('HOM-04 inline final hammer handoff failure is retryable on later posted-re
   assert.equal(result.reason, 'inline-final-hammer-failed');
   assert.match(errors.join('\n'), /posted-review recovery will retry on a later poll/);
 });
-    review_status: 'posted',
-    reviewer_head_sha: 'head-sha',
-    ...overrides,
-  };
-}
 
 test('Primary failed (reaped, quota class) + gemini fallback Comment only -> gate = success via fallback', () => {
   const decision = pickAdversarialGateStatus({
@@ -2100,3 +2095,65 @@ test('Primary failed for a non-quota reason -> existing behavior preserved', () 
   assert.equal(decision.reason, 'reviewer-timeout');
 });
 
+test('projectAdversarialGateStatus adopts a settled fallback verdict for quota-capped primary rows', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-gate-quota-fallback-'));
+  try {
+    const repo = 'laceyenterprises/adversarial-review';
+    const prNumber = 973;
+    const headSha = 'quota-fallback-head';
+    const completedDir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
+    mkdirSync(completedDir, { recursive: true });
+    writeFileSync(
+      path.join(completedDir, 'job-quota-fallback.json'),
+      `${JSON.stringify({
+        jobId: 'job-quota-fallback',
+        repo,
+        prNumber,
+        revisionRef: headSha,
+        status: 'completed',
+        createdAt: '2026-09-08T20:00:00.000Z',
+        completedAt: '2026-09-08T20:01:00.000Z',
+        reviewBody: '## Summary\nFallback review is clean.\n\n## Verdict\nComment only\n',
+        remediationPlan: {
+          currentRound: 1,
+          maxRounds: 3,
+        },
+        reReview: {
+          requested: false,
+        },
+      }, null, 2)}\n`
+    );
+
+    const result = await projectAdversarialGateStatus(rootDir, {
+      repo,
+      prNumber,
+      headSha,
+      reviewRow: makeReviewRow({
+        repo,
+        pr_number: prNumber,
+        review_status: 'skipped',
+        failure_class: 'quota-exhausted',
+        reviewer_model: 'codex',
+        reviewer_head_sha: headSha,
+      }),
+      env: {
+        PATH: '/usr/bin:/bin',
+        HOME: '/tmp/test-home',
+        GITHUB_TOKEN: 'token-123',
+      },
+      gateProvider: {
+        providerId: 'fixture-gate',
+        gate: async (_subject, _revisionRef, decision) => ({
+          gated: true,
+          decision,
+        }),
+      },
+    });
+
+    assert.equal(result.snapshot.settledReview.verdict, 'comment-only');
+    assert.equal(result.decision.state, 'success');
+    assert.equal(result.decision.reason, 'settled-success-fallback');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});

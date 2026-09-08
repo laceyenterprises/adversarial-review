@@ -704,7 +704,9 @@ async function buildAdversarialGateSnapshot(rootDir, {
   const argusVerdict = headSha
     ? resolveArgusSecurityVerdict({ rootDir, repo, prNumber, headSha })
     : null;
-  const settledReview = includeSettledReview
+  const shouldIncludeSettledReview = includeSettledReview === true
+    || (includeSettledReview === 'quota-capped' && primaryReviewerQuotaCappedForRow(resolvedRow));
+  const settledReview = shouldIncludeSettledReview
     ? resolveSettledReviewVerdict(rootDir, {
       repo,
       prNumber,
@@ -743,7 +745,7 @@ async function buildAdversarialGateSnapshot(rootDir, {
     settledReview,
     reviewedHeadSha,
     argusVerdict,
-    mergeableState: includeSettledReview ? normalizeGithubMergeability(mergeability || {}) : '',
+    mergeableState: shouldIncludeSettledReview ? normalizeGithubMergeability(mergeability || {}) : '',
   };
 }
 
@@ -895,7 +897,7 @@ async function projectAdversarialGateStatus(rootDir, {
     prUpdatedAt,
     prAuthor,
     reviewRow,
-    includeSettledReview: false,
+    includeSettledReview: 'quota-capped',
     execFileImpl,
     fetchLatestLabelEventImpl,
     operatorApprovalEvent,

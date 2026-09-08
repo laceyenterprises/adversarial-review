@@ -61,14 +61,16 @@ export const DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS = 10 * 60 * 1000;
 // Per-handler deadline. The phase budget alone cannot save a tick, because it is
 // only checked BETWEEN handlers: one handler that never settles (an `hq` dispatch
 // that hangs, a GitHub call with no timeout) wedges the tick forever regardless
-// of how much budget is left. This bounds the individual handler too.
+// of how much budget is left. This bounds the individual handler too. Keep this
+// short enough that one pathological PR cannot hold lifecycle reconciliation and
+// hammer maintenance for an entire poll interval.
 //
 // Same trade-off `safePollOnce` already documents and accepts: the abandoned
 // promise is still alive and may still complete its side effects later. That is
 // tolerable here because every side effect downstream of a posted-review handler
 // is already guarded by a lease or a CAS, and the alternative — a tick that never
 // returns to discovery — is exactly the outage being fixed.
-export const DEFAULT_POSTED_REVIEW_HANDLER_TIMEOUT_MS = 5 * 60 * 1000;
+export const DEFAULT_POSTED_REVIEW_HANDLER_TIMEOUT_MS = 60 * 1000;
 
 function parsePositiveMs(value, fallback) {
   const numeric = Number(value);
@@ -217,6 +219,7 @@ export async function runPostedReviewHandlersFairly({
     timedOut: 0,
     skippedByLane: 0,
     deferredByBudget: 0,
+    deferredAfterTimeout: 0,
     deferred: [],
   };
   if (handlers.length === 0) {
@@ -285,11 +288,13 @@ export async function runPostedReviewHandlersFairly({
       continue;
     }
 
+    const handlerStartedMs = nowMs();
     const outcome = await runWithDeadline(() => handler.run(), {
       timeoutMs: effectiveHandlerTimeoutMs,
       setTimeoutFn,
       clearTimeoutFn,
     });
+    const handlerElapsedMs = Math.round(nowMs() - handlerStartedMs);
     if (outcome.timedOut) {
       summary.timedOut += 1;
       logger?.error?.(
@@ -319,18 +324,39 @@ export async function runPostedReviewHandlersFairly({
         );
       }
     }
+
+    if (outcome.timedOut) {
+      for (let rest = index + 1; rest < ordered.length; rest += 1) {
+        nextDeferred.add(postedReviewHandlerKey(ordered[rest]));
+      }
+      summary.deferredAfterTimeout = ordered.length - index - 1;
+      if (summary.deferredAfterTimeout > 0) {
+        logger?.warn?.(
+          `[watcher] posted-review phase yielded after timeout for ${key} ` +
+            `elapsed_ms=${handlerElapsedMs}: ${summary.deferredAfterTimeout} handler(s) ` +
+            `deferred to the front of the next tick (${[...nextDeferred].join(' ')})`,
+        );
+      }
+      break;
+    }
   }
 
   state.deferredKeys = nextDeferred;
   summary.deferred = [...nextDeferred];
-  if (summary.skippedByLane > 0 || summary.deferredByBudget > 0 || summary.timedOut > 0) {
+  if (
+    summary.skippedByLane > 0
+    || summary.deferredByBudget > 0
+    || summary.deferredAfterTimeout > 0
+    || summary.timedOut > 0
+  ) {
     // One operator-facing line per tick that summarises everything NOT walked at
     // full speed. A PR in the slow lane is visible here even when nobody is
     // reading the per-PR lines above.
     logger?.log?.(
       `[watcher] posted-review phase: queued=${summary.queued} ran=${summary.ran} ` +
         `failed=${summary.failed} timed_out=${summary.timedOut} ` +
-        `slow_lane_deferred=${summary.skippedByLane} budget_deferred=${summary.deferredByBudget}`,
+        `slow_lane_deferred=${summary.skippedByLane} budget_deferred=${summary.deferredByBudget} ` +
+        `timeout_deferred=${summary.deferredAfterTimeout}`,
     );
   }
   return summary;

@@ -593,13 +593,22 @@ export async function runQueuedReviewAdoptionPhase({
     throw new TypeError('runQueuedReviewAdoptionPhase requires drainReviewerDispatchCandidates');
   }
 
-  // WPS-01: this loop used to be unbounded — every queued handler, to
+  await retryPendingMergeAgentLifecycleCleanupsImpl();
+
+  // Lifecycle sync is the authoritative "is this PR still open?" guard for the
+  // health surface. It must not sit behind a single slow posted-review handler:
+  // one 300s handler timeout was enough to leave the mirror stale for hours and
+  // make queue-starvation/terminal-but-unmerged findings untrustworthy.
+  await syncPRLifecycleImpl(octokit, operatorSurface, primaryDomainId);
+
+  // WPS-01/RVHAND-01: this loop used to be unbounded — every queued handler, to
   // completion, every tick. When the queue filled with PRs that could not
   // advance, the tick stopped finishing and pollOnce never returned to phase 1,
   // so brand-new PRs were never discovered at all. The scheduler bounds the
   // phase (wall-clock budget + per-handler deadline) and consults the
   // no-progress lane, which is what stops the same unadvanceable set from
-  // re-consuming the budget on every tick.
+  // re-consuming the budget on every tick. It now runs after lifecycle sync, so
+  // stale terminal rows are cleaned before any per-PR hammer path can wait.
   await runPostedReviewHandlersFairly({
     handlers: postedReviewHandlers,
     state: postedReviewFairness,
@@ -609,13 +618,6 @@ export async function runQueuedReviewAdoptionPhase({
     logger,
   });
 
-  await retryPendingMergeAgentLifecycleCleanupsImpl();
-
-  // Keep posted-review adoption ahead of merge/autowalk maintenance. These
-  // tasks may shell out to HQ, GitHub, or DAG walkers; the fairness scheduler
-  // keeps them bounded while still letting clean rows reach AMA/merge closeout
-  // before the watcher spends this tick on new reviewer launches.
-  await syncPRLifecycleImpl(octokit, operatorSurface, primaryDomainId);
   // TREC-01: drains the Linear triage syncs owed by terminal transitions. This
   // is what lets syncPRLifecycle record a merge/close immediately instead of
   // holding the row `pr_state=open` as the retry vehicle -- the behaviour that

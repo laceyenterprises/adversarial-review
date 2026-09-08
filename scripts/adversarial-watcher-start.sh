@@ -493,6 +493,12 @@ fi
 : "${ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS:=1800000}"
 export ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS
 
+# Individual posted-review handler deadline. Keep this below the poll interval:
+# one slow hammer/merge check should yield quickly so lifecycle reconciliation
+# and maintenance still run on the same tick.
+: "${ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS:=60000}"
+export ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS
+
 : "${CLAUDE_REVIEWER_AUTH_VIA_BROKER:=true}"
 : "${CODEX_REVIEWER_AUTH_VIA_BROKER:=true}"
 : "${GEMINI_REVIEWER_AUTH_VIA_BROKER:=true}"

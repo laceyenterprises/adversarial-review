@@ -137,6 +137,10 @@ test('reviewer post auth classifier avoids broad author/auth substring matches',
     false,
   );
   assert.equal(
+    isReviewerPostAuthFailure(new Error('GraphQL: Resource not accessible by integration (HTTP 403)')),
+    true,
+  );
+  assert.equal(
     isReviewerPostAuthFailure(new Error('gh: authentication required')),
     true,
   );
@@ -146,6 +150,73 @@ test('reviewer post auth classifier avoids broad author/auth substring matches',
     }),
     true,
   );
+});
+
+test('postGitHubReview refreshes the reviewer App token once after a 403 integration denial', async () => {
+  const rootDir = makeRootDir('reviewer-post-403-refresh-retry-');
+  try {
+    const stateDir = path.join(rootDir, 'data');
+    const prepareTokens = [];
+    const ghTokens = [];
+    let brokerCalls = 0;
+    let ghCalls = 0;
+    await withEnv({
+      GH_CLAUDE_REVIEWER_TOKEN: 'ghs_stale_token',
+      CLAUDE_REVIEWER_AUTH_VIA_BROKER: 'true',
+      OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_APP_ID: '111',
+      OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_INSTALLATION_ID: '42',
+      OAUTH_BROKER_SHARED_SECRET_FILE: '/secret/oauth-broker-shared-secret',
+      ADVERSARIAL_REVIEW_STATE_DIR: stateDir,
+    }, async () => {
+      await postGitHubReview(
+        'laceyenterprises/adversarial-review',
+        177,
+        'body',
+        'GH_CLAUDE_REVIEWER_TOKEN',
+        async (_command, _args, options) => {
+          ghCalls += 1;
+          ghTokens.push(options.env.GH_TOKEN);
+          if (ghCalls === 1) {
+            const err = new Error('gh review failed');
+            err.stderr = 'GraphQL: Resource not accessible by integration (HTTP 403)';
+            throw err;
+          }
+          return { stdout: '', stderr: '' };
+        },
+        {
+          rootDir,
+          reviewerIdentity: 'claude-reviewer-lacey',
+          prepareReviewWrite: async ({ token }) => {
+            prepareTokens.push(token);
+            return { cleared: 0, listed: 0 };
+          },
+          fetchImpl: async (url) => {
+            brokerCalls += 1;
+            assert.match(url, /\/token\?provider=github-app-claude-reviewer$/);
+            return {
+              ok: true,
+              status: 200,
+              async json() {
+                return {
+                  access_token: 'ghs_fresh_token',
+                  provider: 'github-app-claude-reviewer',
+                  metadata: { app_id: '111', installation_id: '42' },
+                  expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+                };
+              },
+            };
+          },
+          readFileImpl: () => 'broker-shared-secret',
+        },
+      );
+    });
+    assert.equal(brokerCalls, 1);
+    assert.equal(ghCalls, 2);
+    assert.deepEqual(prepareTokens, ['ghs_stale_token', 'ghs_fresh_token']);
+    assert.deepEqual(ghTokens, ['ghs_stale_token', 'ghs_fresh_token']);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });
 
 test('postGitHubReview refreshes the reviewer App token once after a 401 and retries the post once', async () => {

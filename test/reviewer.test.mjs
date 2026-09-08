@@ -2896,12 +2896,19 @@ test('buildGeminiReviewArgs enters headless mode without carrying the prompt bod
 
 test('buildAgyReviewArgs binds --model before --print and carries the prompt as the --print value', () => {
   const prompt = '## Adversarial Review\n\n```diff\n+x\n```';
-  const args = buildAgyReviewArgs({ model: 'Gemini 3.1 Pro (High)', prompt, printTimeoutMs: 1_140_000 });
+  const args = buildAgyReviewArgs({
+    model: 'Gemini 3.1 Pro (High)',
+    prompt,
+    printTimeoutMs: 1_140_000,
+    workspaceDir: '/tmp/reviewer-checkout',
+  });
   // agy's --print is a VALUE flag: the prompt must be its argument, and every
   // value-bearing flag (incl. --model) must precede --print so it binds.
   assert.deepEqual(args, [
     '--model', 'Gemini 3.1 Pro (High)',
     '--print-timeout', '1140s',
+    '--sandbox',
+    '--add-dir', '/tmp/reviewer-checkout',
     '--dangerously-skip-permissions',
     '--print', prompt,
   ]);
@@ -2997,6 +3004,8 @@ test('spawnAgyReview delivers the prompt on argv (as the --print value) so the m
   assert.deepEqual(calls[0].args, [
     '--model', 'Gemini 3.1 Pro (High)',
     '--print-timeout', '9s',
+    '--sandbox',
+    '--add-dir', '/tmp/repo',
     '--dangerously-skip-permissions',
     '--print', prompt,
   ]);
@@ -3722,6 +3731,7 @@ test('reviewWithGemini antigravity runtime uses agy print, stdin prompt, env scr
   assert.match(spawnCalls[0].prompt, /AGY CONTEXT/);
   assert.match(spawnCalls[0].prompt, /Review the PROVIDED diff/);
   assert.match(spawnCalls[0].prompt, /Do not re-list the repository/);
+  assert.match(spawnCalls[0].prompt, /Never search absolute host paths/);
   assert.match(spawnCalls[0].prompt, /Emit ONLY the final Markdown review block/);
   assert.match(spawnCalls[0].prompt, /```diff\n\+diff/);
   assert.strictEqual(authCalls[0].env, spawnCalls[0].env);

@@ -2348,6 +2348,17 @@ function schemaV1() {
                 __min: 0,
                 __max: 2592000,
               },
+              known_vaults: {
+                __type: TYPE_LIST,
+                __default: ['Cliovault', 'mem423y7ewrymvxv4ibh34zdk4', 'Personal'],
+                __item: { __type: TYPE_STRING },
+              },
+              release_signing_private_key_ref: {
+                __type: TYPE_STRING,
+                __default: 'op://Cliovault/release-signing/private-key',
+                __pattern: PATTERN_OP_REF,
+                __pattern_description: PATTERN_OP_REF_DESCRIPTION,
+              },
               op_read_cache: {
                 __type: TYPE_DICT,
                 __strict: true,

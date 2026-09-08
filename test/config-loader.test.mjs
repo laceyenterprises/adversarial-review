@@ -1520,6 +1520,9 @@ test('top-level config.yaml accepts mirrored worker_pool.secrets.prewarm keys', 
             - alert-delivery telegram bot token
             - alert-delivery gateway delivery token
           availability_critical_max_stale_seconds: 3600
+          known_vaults:
+            - ForkVault
+          release_signing_private_key_ref: op://ForkVault/release/private-key
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(cfg.get('worker_pool.secrets.prewarm.enabled'), true);
@@ -1535,6 +1538,11 @@ test('top-level config.yaml accepts mirrored worker_pool.secrets.prewarm keys', 
       'alert-delivery gateway delivery token',
     ]);
     assert.equal(cfg.get('worker_pool.secrets.availability_critical_max_stale_seconds'), 3600);
+    assert.deepEqual(cfg.get('worker_pool.secrets.known_vaults'), ['ForkVault']);
+    assert.equal(
+      cfg.get('worker_pool.secrets.release_signing_private_key_ref'),
+      'op://ForkVault/release/private-key',
+    );
 
     const defaults = join(tmp, 'config-defaults.yaml');
     writeFile(defaults, 'version: 1\nworker_pool:\n  secrets: {}\n');
@@ -1543,6 +1551,15 @@ test('top-level config.yaml accepts mirrored worker_pool.secrets.prewarm keys', 
       'alert-delivery telegram bot token',
     ]);
     assert.equal(defaultCfg.get('worker_pool.secrets.availability_critical_max_stale_seconds'), 604800);
+    assert.deepEqual(defaultCfg.get('worker_pool.secrets.known_vaults'), [
+      'Cliovault',
+      'mem423y7ewrymvxv4ibh34zdk4',
+      'Personal',
+    ]);
+    assert.equal(
+      defaultCfg.get('worker_pool.secrets.release_signing_private_key_ref'),
+      'op://Cliovault/release-signing/private-key',
+    );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

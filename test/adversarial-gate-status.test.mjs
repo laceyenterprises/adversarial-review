@@ -2052,6 +2052,36 @@ test('Primary quota-capped + gemini fallback Approved -> gate = success via fall
   assert.equal(decision.reason, 'settled-success-fallback');
 });
 
+test('Primary quota-capped stale row + current-head gemini fallback Comment only -> gate = success via fallback', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'skipped',
+      failure_class: 'quota-exhausted',
+      reviewer_model: 'codex',
+      reviewer_head_sha: 'old-primary-head',
+    }),
+    headSha: 'current-head',
+    settledReview: { verdict: 'comment-only', reviewedHeadSha: 'current-head' },
+  });
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'settled-success-fallback');
+});
+
+test('Primary quota-capped stale row without current-head fallback proof stays stale', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'skipped',
+      failure_class: 'quota-exhausted',
+      reviewer_model: 'codex',
+      reviewer_head_sha: 'old-primary-head',
+    }),
+    headSha: 'current-head',
+    settledReview: { verdict: 'comment-only', reviewedHeadSha: 'old-primary-head' },
+  });
+  assert.equal(decision.state, 'pending');
+  assert.equal(decision.reason, 'stale-review-head');
+});
+
 test('Primary quota-capped + gemini fallback Request changes -> gate = failure/blocked via fallback verdict', () => {
   const decision = pickAdversarialGateStatus({
     reviewRow: makeReviewRow({
@@ -2134,7 +2164,7 @@ test('projectAdversarialGateStatus adopts a settled fallback verdict for quota-c
         review_status: 'skipped',
         failure_class: 'quota-exhausted',
         reviewer_model: 'codex',
-        reviewer_head_sha: headSha,
+        reviewer_head_sha: 'stale-primary-head',
       }),
       env: {
         PATH: '/usr/bin:/bin',
@@ -2151,6 +2181,7 @@ test('projectAdversarialGateStatus adopts a settled fallback verdict for quota-c
     });
 
     assert.equal(result.snapshot.settledReview.verdict, 'comment-only');
+    assert.equal(result.snapshot.settledReview.reviewedHeadSha, headSha);
     assert.equal(result.decision.state, 'success');
     assert.equal(result.decision.reason, 'settled-success-fallback');
   } finally {

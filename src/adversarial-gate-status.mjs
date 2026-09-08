@@ -300,10 +300,13 @@ function resolveSettledReviewVerdict(
     ? latestJob.reviewBody
     : extractReviewBodyFromRow(reviewRow);
   const verdict = String(normalizeEffectiveReviewVerdict(body) || '').toLowerCase();
+  const settledReviewedHeadSha = latestJob
+    ? (latestJob.revisionRef || latestJob.currentRevisionRef || latestJob.subjectRef?.revisionRef || null)
+    : reviewedHeadSha;
   return {
     verdict,
     remediationPending: false,
-    reviewedHeadSha,
+    reviewedHeadSha: settledReviewedHeadSha,
     ...classifyBlockersFromBody(body, verdict),
   };
 }
@@ -544,15 +547,16 @@ function pickAdversarialGateStatus({
   // legacy row predating that column. Operator override (`operator-approved`,
   // handled above) already pins to the current head, so it is unaffected.
   const reviewedHead = reviewRow.reviewer_head_sha || null;
-  if (headSha && reviewedHead && String(reviewedHead) !== String(headSha)) {
-    return decide(
-      'pending',
-      'Live head has advanced past the reviewed head; re-review of the current head is pending.',
-      'stale-review-head'
-    );
-  }
+  const primaryReviewerQuotaCapped = primaryReviewerQuotaCappedForRow(reviewRow);
+  const primaryRowIsStale = Boolean(headSha && reviewedHead && String(reviewedHead) !== String(headSha));
+  const settledReviewedHead = resolveProvenReviewedHead(settledReview);
+  const settledReviewMatchesHead = Boolean(
+    headSha
+    && settledReviewedHead
+    && String(settledReviewedHead) === String(headSha)
+  );
 
-  if (primaryReviewerQuotaCappedForRow(reviewRow)) {
+  if (primaryReviewerQuotaCapped && (!primaryRowIsStale || settledReviewMatchesHead)) {
     const primaryModel = reviewRow.reviewer_model || 'unknown';
     const fallbackModel = 'gemini';
     const statusPart = reviewStatus === 'skipped' ? 'skipped:quota' : 'failed:quota';
@@ -572,6 +576,14 @@ function pickAdversarialGateStatus({
     }
     // If neither the primary nor the fallback has settled, the gate stays blocked.
     return decide('pending', 'Adversarial review (primary quota-capped) is awaiting fallback verdict.', 'awaiting-fallback');
+  }
+
+  if (primaryRowIsStale) {
+    return decide(
+      'pending',
+      'Live head has advanced past the reviewed head; re-review of the current head is pending.',
+      'stale-review-head'
+    );
   }
 
   if (reviewStatus === 'failed') {

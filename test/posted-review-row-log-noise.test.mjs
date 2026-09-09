@@ -205,6 +205,37 @@ test('timePostedReviewStep: soft deadline rejects without aborting pending work'
   assert.equal(completed, true, 'soft-deadlined work can still settle in the background');
 });
 
+test('timePostedReviewStep: soft-deadlined background failure is logged as an error', async () => {
+  const errors = [];
+  const warnings = [];
+  let rejectLate;
+
+  await assert.rejects(
+    timePostedReviewStep(
+      'resolveMergeAgentCoexistence',
+      'laceyenterprises/agent-os#4242',
+      {
+        warn: (m) => warnings.push(String(m)),
+        error: (m) => errors.push(String(m)),
+      },
+      () => new Promise((_, reject) => {
+        rejectLate = reject;
+      }),
+      1000,
+      { deadlineMs: 10, abortOnDeadline: false },
+    ),
+    PostedReviewStepDeadlineError,
+  );
+
+  rejectLate(new Error('hq dispatch exited 75'));
+  await delay(25);
+
+  assert.equal(warnings.length, 0);
+  assert.match(errors[0], /posted-review step deadline exceeded/);
+  assert.match(errors.join('\n'), /posted-review step failed in background after deadline/);
+  assert.match(errors.join('\n'), /hq dispatch exited 75/);
+});
+
 test('handlePostedReviewRow: resolveMergeAgentCoexistence deadline is a soft handled outcome', async () => {
   const oldDeadline = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
   process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = '10';

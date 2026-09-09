@@ -195,10 +195,16 @@ export async function timePostedReviewStep(
     .then(() => fn({ signal: controller?.signal || null }))
     .catch((err) => {
       if (timedOut) {
-        logger?.warn?.(
-          `[watcher] posted-review step aborted after deadline for ${key}: ` +
-            `${label} stopped with ${err?.message || err}`,
-        );
+        const detail = `${label} stopped with ${err?.message || err}`;
+        if (abortOnDeadline) {
+          logger?.warn?.(
+            `[watcher] posted-review step aborted after deadline for ${key}: ${detail}`,
+          );
+        } else {
+          logger?.error?.(
+            `[watcher] posted-review step failed in background after deadline for ${key}: ${detail}`,
+          );
+        }
       }
       throw err;
     });

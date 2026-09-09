@@ -39,9 +39,11 @@
 //   decision; this only guarantees that a new PR is SEEN.
 //
 //   `runPostedReviewHandlersFairly` — phase 3 boundedness. A per-tick wall-clock
-//   budget plus a per-handler deadline, with deferred handlers promoted to the
-//   front of the next tick so the budget rotates instead of always cutting off
-//   the same tail. Combined with the no-progress lane (see
+//   budget plus a per-handler deadline, with budget-deferred handlers promoted
+//   to the front of the next tick so the budget rotates instead of always
+//   cutting off the same tail. A single timed-out handler is abandoned and
+//   recorded, but the phase keeps walking other PRs until the total phase budget
+//   is spent. Combined with the no-progress lane (see
 //   `watcher-no-progress-lane.mjs`), the PRs that cannot move stop consuming the
 //   budget at all, and the tick reliably returns to discovery.
 //
@@ -220,6 +222,7 @@ export async function runPostedReviewHandlersFairly({
     skippedByLane: 0,
     deferredByBudget: 0,
     deferredAfterTimeout: 0,
+    continuedAfterTimeout: 0,
     deferred: [],
   };
   if (handlers.length === 0) {
@@ -326,18 +329,16 @@ export async function runPostedReviewHandlersFairly({
     }
 
     if (outcome.timedOut) {
-      for (let rest = index + 1; rest < ordered.length; rest += 1) {
-        nextDeferred.add(postedReviewHandlerKey(ordered[rest]));
-      }
-      summary.deferredAfterTimeout = ordered.length - index - 1;
-      if (summary.deferredAfterTimeout > 0) {
+      const remainingAfterTimeout = ordered.length - index - 1;
+      if (remainingAfterTimeout > 0) {
+        summary.continuedAfterTimeout += 1;
         logger?.warn?.(
-          `[watcher] posted-review phase yielded after timeout for ${key} ` +
-            `elapsed_ms=${handlerElapsedMs}: ${summary.deferredAfterTimeout} handler(s) ` +
-            `deferred to the front of the next tick (${[...nextDeferred].join(' ')})`,
+          `[watcher] posted-review phase continuing after timeout for ${key} ` +
+            `elapsed_ms=${handlerElapsedMs}: ${remainingAfterTimeout} handler(s) still queued ` +
+            'behind it under the phase budget',
         );
       }
-      break;
+      continue;
     }
   }
 
@@ -356,7 +357,8 @@ export async function runPostedReviewHandlersFairly({
       `[watcher] posted-review phase: queued=${summary.queued} ran=${summary.ran} ` +
         `failed=${summary.failed} timed_out=${summary.timedOut} ` +
         `slow_lane_deferred=${summary.skippedByLane} budget_deferred=${summary.deferredByBudget} ` +
-        `timeout_deferred=${summary.deferredAfterTimeout}`,
+        `timeout_deferred=${summary.deferredAfterTimeout} ` +
+        `continued_after_timeout=${summary.continuedAfterTimeout}`,
     );
   }
   return summary;

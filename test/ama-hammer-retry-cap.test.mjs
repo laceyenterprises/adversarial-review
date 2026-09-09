@@ -1982,6 +1982,58 @@ test('active AMA closer dispatch classification releases stale launch-only recor
   );
 });
 
+test('stale dispatching record with reaped lease redispatches instead of exhausting retry bound', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-stale-dispatching-no-lease-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  updateAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD }, () => ({
+    schemaVersion: 1,
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: REVIEWED_HEAD,
+    reviewedSha: REVIEWED_HEAD,
+    targetRemediationSha: REVIEWED_HEAD,
+    workerClass: 'hammer',
+    dispatchWorkerClass: 'hammer',
+    promptPath: '/tmp/stale-prompt.md',
+    promptDir: '/tmp',
+    hqRoot: join(rootDir, 'hq-root'),
+    retryCount: AMA_CLOSER_REDISPATCH_BOUND,
+    state: 'dispatching',
+    lastAttemptedAt: '2026-07-06T12:00:00Z',
+    dispatchedAt: null,
+    dispatchId: null,
+    launchRequestId: null,
+    lastObservedStatus: null,
+    lastError: null,
+  }));
+
+  const deps = hammerDispatchDeps();
+  const result = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir, {
+      dispatchContext: {
+        dispatchedAt: '2026-07-06T18:00:00Z',
+      },
+    }),
+    ...deps,
+  });
+
+  assert.equal(result.dispatched, true);
+  assert.equal(result.launchRequestId, 'lrq_hammer');
+  assert.ok(
+    deps.execCalls.some((call) => call.args[0] === 'dispatch' && call.args.includes('--worker-id')),
+    'a stale launch-only record without a lease must not suppress hq dispatch',
+  );
+  const record = readAmaCloserDispatchRecord(rootDir, {
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: REVIEWED_HEAD,
+  });
+  assert.equal(record.state, 'dispatched');
+  assert.equal(record.launchRequestId, 'lrq_hammer');
+  assert.equal(record.retryCount, AMA_CLOSER_REDISPATCH_BOUND);
+});
+
 test('maybeDispatchAmaCloser suppresses after lifetime ceiling and emits operator alert once', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'hammer-cap-integration-suppress-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

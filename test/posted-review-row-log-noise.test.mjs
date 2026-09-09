@@ -56,14 +56,14 @@ test('timePostedReviewStep: warns while a step is still pending', async () => {
       await pending;
       return 'done';
     },
-    20,
+    10,
   );
 
-  await delay(35);
+  await delay(100);
 
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /still running/);
-  assert.match(warnings[0], /resolve coexistence exceeded 20ms/);
+  assert.match(warnings[0], /resolve coexistence exceeded 10ms/);
 
   release();
   assert.equal(await result, 'done');

@@ -527,6 +527,45 @@ test('AFH-04R: Claude launchctl denial grounds the local Claude reviewer and rou
   assert.equal(route.afhReviewerFallback.lastResort, false);
 });
 
+test('AFH-04R: Claude runtime probe still applies when fleet quota status is unavailable', async () => {
+  const grounding = await readAfhReviewerGrounding({
+    hqPath: 'hq',
+    execFileImpl: async () => {
+      const err = new Error('hq fleet quota status timed out');
+      err.killed = true;
+      throw err;
+    },
+    claudeRuntimeProbeImpl: async () => ({
+      available: false,
+      reason: CLAUDE_REVIEWER_RUNTIME_GROUNDING_REASON,
+      error: 'Could not switch to audit session 0x18757: 1: Operation not permitted',
+    }),
+    env: {},
+    retryDelaysMs: [],
+  });
+
+  assert.equal(grounding.available, false);
+  assert.equal(grounding.reason, 'fleet-quota-status-unavailable');
+  assert.deepEqual(grounding.providers, {});
+  assert.equal(grounding.localRuntimeGrounding.claude.available, false);
+
+  const claudeStatus = reviewerModelGrounding(grounding, 'claude');
+  assert.equal(claudeStatus.grounded, true);
+  assert.equal(claudeStatus.localRuntimeGrounded, true);
+  assert.equal(reviewerModelGrounding(grounding, 'codex').grounded, false);
+
+  const baseRoute = baseRouteFor('codex');
+  const route = applyAfhReviewerFallback({
+    builderClass: 'codex',
+    baseRoute,
+    grounding,
+    geminiReviewerMode: 'fallback',
+  });
+
+  assert.equal(route.reviewerModel, 'gemini');
+  assert.equal(route.afhReviewerFallback.primarySoftGrounded, true);
+});
+
 test('AFH-04R: Claude runtime grounding auto-reverts when launchctl succeeds', async () => {
   const okGrounding = await readAfhReviewerGrounding({
     hqPath: 'hq',

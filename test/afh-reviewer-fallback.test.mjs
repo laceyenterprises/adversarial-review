@@ -22,12 +22,15 @@ import { join } from 'node:path';
 import {
   AFH_REVIEWER_MODEL_PROVIDER,
   AFH_FLEET_QUOTA_STATUS_RETRY_TIMEOUT_FRACTION,
+  CLAUDE_REVIEWER_RUNTIME_GROUNDING_REASON,
+  applyClaudeReviewerRuntimeGrounding,
   afhGroundingSnapshotFromStdout,
   afhReviewerFallbackDecision,
   applyAfhReviewerFallback,
   createAfhReviewerGroundingCache,
   describeAfhReviewerFallback,
   geminiFallbackEligibility,
+  probeClaudeReviewerRuntime,
   providerForReviewerModel,
   readAfhReviewerGrounding,
   reviewerModelGrounding,
@@ -492,6 +495,81 @@ test('AFH-04: a hard-exhausted provider still grounds when the afhGrounding key 
     geminiReviewerMode: 'fallback',
   });
   assert.equal(route.reviewerModel, 'gemini', 'the pre-AFH hard signal is unchanged, not weakened');
+});
+
+test('AFH-04R: Claude launchctl denial grounds the local Claude reviewer and routes codex-built PRs to gemini', () => {
+  const runtimeGrounding = applyClaudeReviewerRuntimeGrounding(ALL_OK(), {
+    available: false,
+    reason: CLAUDE_REVIEWER_RUNTIME_GROUNDING_REASON,
+    error: 'Could not switch to audit session 0x18757: 1: Operation not permitted',
+  });
+  const claudeStatus = reviewerModelGrounding(runtimeGrounding, 'claude');
+  assert.equal(claudeStatus.grounded, true);
+  assert.equal(claudeStatus.softGrounded, true);
+  assert.equal(claudeStatus.softVerdict.reason, CLAUDE_REVIEWER_RUNTIME_GROUNDING_REASON);
+
+  const baseRoute = baseRouteFor('codex');
+  assert.equal(baseRoute.reviewerModel, 'claude');
+  const route = applyAfhReviewerFallback({
+    builderClass: 'codex',
+    baseRoute,
+    grounding: runtimeGrounding,
+    geminiReviewerMode: 'fallback',
+  });
+
+  assert.equal(route.reviewerModel, 'gemini');
+  assert.equal(route.botTokenEnv, 'GH_GEMINI_REVIEWER_TOKEN');
+  assert.equal(route.afhReviewerFallback.fromReviewerModel, 'claude');
+  assert.equal(route.afhReviewerFallback.toReviewerModel, 'gemini');
+  assert.equal(route.afhReviewerFallback.primaryProvider, 'anthropic');
+  assert.equal(route.afhReviewerFallback.primarySoftGrounded, true);
+  assert.equal(route.afhReviewerFallback.lastResort, false);
+});
+
+test('AFH-04R: Claude runtime grounding auto-reverts when launchctl succeeds', async () => {
+  const okGrounding = await readAfhReviewerGrounding({
+    hqPath: 'hq',
+    execFileImpl: async () => ({ stdout: fleetStatusJson({ openai: OK, anthropic: OK, google: OK }) }),
+    claudeRuntimeProbeImpl: async () => ({ available: true, reason: 'ok' }),
+    env: {},
+    retryDelaysMs: [],
+  });
+  const baseRoute = baseRouteFor('codex');
+  const route = applyAfhReviewerFallback({
+    builderClass: 'codex',
+    baseRoute,
+    grounding: okGrounding,
+    geminiReviewerMode: 'fallback',
+  });
+
+  assert.equal(reviewerModelGrounding(okGrounding, 'claude').grounded, false);
+  assert.deepEqual(route, baseRoute);
+});
+
+test('AFH-04R: Claude runtime probe captures the exact launchctl-asuser primitive', async () => {
+  const calls = [];
+  const status = await probeClaudeReviewerRuntime({
+    platform: 'darwin',
+    uid: 501,
+    execFileImpl: async (cmd, args, options) => {
+      calls.push({ cmd, args, timeout: options.timeout });
+      const err = new Error('Command failed');
+      err.stderr = 'Could not switch to audit session 0x18757: 1: Operation not permitted';
+      throw err;
+    },
+    env: {},
+  });
+
+  assert.deepEqual(calls, [
+    {
+      cmd: '/bin/launchctl',
+      args: ['asuser', '501', '/usr/bin/true'],
+      timeout: 2_000,
+    },
+  ]);
+  assert.equal(status.available, false);
+  assert.equal(status.reason, CLAUDE_REVIEWER_RUNTIME_GROUNDING_REASON);
+  assert.match(status.error, /Could not switch to audit session/);
 });
 
 test('AFH-04: a non-boolean afhGrounding.grounded is discarded, not coerced', () => {

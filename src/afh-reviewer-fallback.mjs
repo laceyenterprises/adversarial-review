@@ -26,9 +26,13 @@
 //   4. claude — last resort.
 //
 // The first candidate that is neither hard-grounded (`GROUNDED_PROVIDER_STATES`)
-// nor AFH-02 soft-grounded wins. If every candidate is grounded, the configured
-// route is kept unchanged — a doomed spawn on the primary is no worse than a
-// doomed spawn on an equally-grounded fallback, and it preserves auto-revert.
+// nor AFH-02 soft-grounded wins. On macOS the Claude reviewer also needs the
+// local `launchctl asuser` bridge; a bounded local probe overlays that host
+// runtime signal onto the reviewer-only grounding snapshot so a bad audit
+// session does not make every new head pay one doomed Claude attempt. If every
+// candidate is grounded, the configured route is kept unchanged — a doomed spawn
+// on the primary is no worse than a doomed spawn on an equally-grounded
+// fallback, and it preserves auto-revert.
 //
 // Auto-revert is structural: this is a per-attempt, stateless read. The moment
 // openai stops being grounded, the very next attempt returns to the configured
@@ -73,6 +77,10 @@ export const AFH_FLEET_QUOTA_STATUS_RETRY_TIMEOUT_FRACTION = 0.25;
 export const DEFAULT_AFH_GROUNDING_TTL_MS = 60_000;
 export const DEFAULT_AFH_STALE_IF_ERROR_MS = 10 * 60_000;
 export const AFH_LAST_RESORT_REVIEWER_MODEL = 'claude';
+export const CLAUDE_REVIEWER_RUNTIME_PROBE_TIMEOUT_MS = 2_000;
+export const CLAUDE_REVIEWER_RUNTIME_GROUNDING_REASON = 'claude-launchctl-asuser-unavailable';
+const LAUNCHCTL = '/bin/launchctl';
+const TRUE_BIN = '/usr/bin/true';
 
 // Reviewer model → the provider whose OAuth quota gates whether that reviewer
 // can spawn at all. Kept in sync with QUOTA_HARNESS_PROVIDER
@@ -98,6 +106,105 @@ function unavailableGrounding(reason, error = null) {
     error: error === null || error === undefined ? null : String(error?.message || error),
     verdictPresent: false,
     providers: Object.freeze({}),
+  });
+}
+
+function claudeRuntimeProbeDisabled(env = process.env) {
+  return /^(0|false|no|off)$/i.test(
+    String(env?.ADVERSARIAL_AFH_CLAUDE_RUNTIME_PROBE ?? '').trim()
+  );
+}
+
+function reviewerRuntimeProbeErrorText(error) {
+  const text = fleetQuotaStatusErrorText(error);
+  return text || String(error?.message || error || 'runtime probe failed');
+}
+
+export async function probeClaudeReviewerRuntime({
+  execFileImpl = execFileAsync,
+  env = process.env,
+  platform = process.platform,
+  uid = typeof process.getuid === 'function' ? process.getuid() : null,
+  timeoutMs = CLAUDE_REVIEWER_RUNTIME_PROBE_TIMEOUT_MS,
+} = {}) {
+  if (claudeRuntimeProbeDisabled(env)) {
+    return Object.freeze({ available: true, reason: 'claude-runtime-probe-disabled' });
+  }
+  if (platform !== 'darwin') {
+    return Object.freeze({ available: true, reason: 'not-darwin' });
+  }
+  if (!Number.isInteger(uid) || uid <= 0) {
+    return Object.freeze({
+      available: false,
+      reason: 'claude-launchctl-uid-unavailable',
+      error: `invalid uid: ${uid}`,
+    });
+  }
+  try {
+    await execFileImpl(LAUNCHCTL, ['asuser', String(uid), TRUE_BIN], {
+      env,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024,
+      timeout: timeoutMs,
+    });
+    return Object.freeze({ available: true, reason: 'ok' });
+  } catch (err) {
+    return Object.freeze({
+      available: false,
+      reason: CLAUDE_REVIEWER_RUNTIME_GROUNDING_REASON,
+      error: reviewerRuntimeProbeErrorText(err),
+    });
+  }
+}
+
+function shouldAutoProbeClaudeRuntime({ execFileImpl, env = process.env } = {}) {
+  if (claudeRuntimeProbeDisabled(env)) return false;
+  return execFileImpl === execFileAsync;
+}
+
+export function applyClaudeReviewerRuntimeGrounding(grounding, runtimeStatus = null) {
+  if (runtimeStatus?.available !== false) return grounding;
+  const base = grounding?.available
+    ? grounding
+    : Object.freeze({
+        available: true,
+        reason: 'ok',
+        error: null,
+        verdictPresent: false,
+        providers: Object.freeze({}),
+      });
+  const providers = { ...(base.providers || {}) };
+  const previous = providers.anthropic || {};
+  providers.anthropic = Object.freeze({
+    provider: 'anthropic',
+    authPath: previous.authPath || 'oauth',
+    state: previous.state || 'runtime-unavailable',
+    hardGrounded: Boolean(previous.hardGrounded),
+    softGrounded: true,
+    softVerdict: Object.freeze({
+      grounded: true,
+      reason: runtimeStatus.reason || CLAUDE_REVIEWER_RUNTIME_GROUNDING_REASON,
+      signals: 1,
+      threshold: 1,
+      quotaExhaustedKills: 0,
+      suspendedLrqDepth: 0,
+      source: 'local-claude-runtime-probe',
+      error: runtimeStatus.error || null,
+    }),
+  });
+  return Object.freeze({
+    ...base,
+    available: true,
+    reason: base.reason || 'ok',
+    verdictPresent: true,
+    providers: Object.freeze(providers),
+    localRuntimeGrounding: Object.freeze({
+      claude: Object.freeze({
+        available: false,
+        reason: runtimeStatus.reason || CLAUDE_REVIEWER_RUNTIME_GROUNDING_REASON,
+        error: runtimeStatus.error || null,
+      }),
+    }),
   });
 }
 
@@ -242,6 +349,7 @@ export async function readAfhReviewerGrounding({
   timeoutMs = AFH_FLEET_QUOTA_STATUS_TIMEOUT_MS,
   retryDelaysMs = AFH_FLEET_QUOTA_STATUS_RETRY_DELAYS_MS,
   sleepImpl = sleep,
+  claudeRuntimeProbeImpl = null,
 } = {}) {
   if (afhReviewerFallbackDisabled(env)) {
     return unavailableGrounding('afh-reviewer-fallback-disabled');
@@ -261,10 +369,27 @@ export async function readAfhReviewerGrounding({
     // Missing binary, non-zero exit, and the execFile timeout kill all land here.
     return unavailableGrounding('fleet-quota-status-unavailable', err);
   }
+  let snapshot;
   try {
-    return afhGroundingSnapshotFromStdout(stdout);
+    snapshot = afhGroundingSnapshotFromStdout(stdout);
   } catch (err) {
     return unavailableGrounding('fleet-quota-status-unreadable', err);
+  }
+  const probeImpl = typeof claudeRuntimeProbeImpl === 'function'
+    ? claudeRuntimeProbeImpl
+    : shouldAutoProbeClaudeRuntime({ execFileImpl, env })
+      ? probeClaudeReviewerRuntime
+      : null;
+  if (!probeImpl) return snapshot;
+  try {
+    const runtimeStatus = await probeImpl({ env });
+    return applyClaudeReviewerRuntimeGrounding(snapshot, runtimeStatus);
+  } catch (err) {
+    return applyClaudeReviewerRuntimeGrounding(snapshot, {
+      available: false,
+      reason: 'claude-runtime-probe-error',
+      error: reviewerRuntimeProbeErrorText(err),
+    });
   }
 }
 

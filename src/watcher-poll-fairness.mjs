@@ -72,6 +72,12 @@ export const DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS = 10 * 60 * 1000;
 // tolerable here because every side effect downstream of a posted-review handler
 // is already guarded by a lease or a CAS, and the alternative — a tick that never
 // returns to discovery — is exactly the outage being fixed.
+//
+// A timed-out handler is also a phase-level stop. Continuing through a backlog of
+// slow hammer/merge handlers just serializes one abandoned 60s dispatch after
+// another, which recreates poll starvation while the first abandoned promise is
+// still alive. Defer the tail to the next tick instead; the fairness state
+// promotes it, and the no-progress lane slows repeatedly unproductive PRs.
 export const DEFAULT_POSTED_REVIEW_HANDLER_TIMEOUT_MS = 60 * 1000;
 
 function parsePositiveMs(value, fallback) {
@@ -331,14 +337,17 @@ export async function runPostedReviewHandlersFairly({
     if (outcome.timedOut) {
       const remainingAfterTimeout = ordered.length - index - 1;
       if (remainingAfterTimeout > 0) {
-        summary.continuedAfterTimeout += 1;
+        for (let rest = index + 1; rest < ordered.length; rest += 1) {
+          nextDeferred.add(postedReviewHandlerKey(ordered[rest]));
+        }
+        summary.deferredAfterTimeout = remainingAfterTimeout;
         logger?.warn?.(
-          `[watcher] posted-review phase continuing after timeout for ${key} ` +
-            `elapsed_ms=${handlerElapsedMs}: ${remainingAfterTimeout} handler(s) still queued ` +
-            'behind it under the phase budget',
+          `[watcher] posted-review phase yielding after timeout for ${key} ` +
+            `elapsed_ms=${handlerElapsedMs}: ${remainingAfterTimeout} handler(s) deferred ` +
+            `to the front of the next tick (${[...nextDeferred].join(' ')})`,
         );
       }
-      continue;
+      break;
     }
   }
 

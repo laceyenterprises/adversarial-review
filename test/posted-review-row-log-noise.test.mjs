@@ -8,7 +8,13 @@ import {
   timePostedReviewStep,
 } from '../src/posted-review-row.mjs';
 import { createLogChangeGate } from '../src/log-change-gate.mjs';
-import { resolvePostedReviewPhaseBudgetMs } from '../src/watcher-poll-fairness.mjs';
+import {
+  DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT,
+  derivePostedReviewExpensiveStepBudgetMs,
+  resolvePostedReviewHandlerHeadroomMs,
+  resolvePostedReviewHandlerTimeoutMs,
+  resolvePostedReviewPhaseBudgetMs,
+} from '../src/watcher-poll-fairness.mjs';
 
 // Drive handlePostedReviewRow straight to the AMA `ama-pending` retained-ownership
 // branch with fully injected collaborators, then assert the LOG-ONLY line is
@@ -47,18 +53,29 @@ function baseArgs(overrides = {}) {
 const retained = (logs) => logs.filter((m) => /AMA hammer route retained ownership/.test(m));
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-test('RVHAND-05: resolveMergeAgentCoexistence deadline is derived below the posted-review phase budget', () => {
+test('RVHAND-06: bounded posted-review step budgets fit under the handler cap', () => {
   const env = {
     ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS: '330000',
     ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS: '300000',
+    ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS: '60000',
   };
 
   const phaseBudgetMs = resolvePostedReviewPhaseBudgetMs(env);
+  const handlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs(env);
+  const headroomMs = resolvePostedReviewHandlerHeadroomMs(env);
   const deadlineMs = resolveMergeAgentCoexistenceStepDeadlineMs(env);
+  const derivedDeadlineMs = derivePostedReviewExpensiveStepBudgetMs(handlerTimeoutMs, { headroomMs });
+  const boundedStepBudgetTotalMs = derivedDeadlineMs * DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT;
 
   assert.equal(phaseBudgetMs, 330_000);
-  assert.equal(deadlineMs, 66_000);
+  assert.equal(handlerTimeoutMs, 60_000);
+  assert.equal(deadlineMs, 27_500);
   assert.ok(deadlineMs < phaseBudgetMs);
+  assert.ok(
+    boundedStepBudgetTotalMs + headroomMs <= handlerTimeoutMs,
+    `step budgets (${boundedStepBudgetTotalMs}ms) + headroom (${headroomMs}ms) ` +
+      `must fit under handler cap (${handlerTimeoutMs}ms)`,
+  );
 });
 
 test('timePostedReviewStep: warns while a step is still pending', async () => {
@@ -169,6 +186,47 @@ test('handlePostedReviewRow: resolveMergeAgentCoexistence deadline returns a nam
       'resolve-merge-agent-coexistence-deadline-exceeded',
     );
     assert.match(errors.join('\n'), /reason=resolve-merge-agent-coexistence-deadline-exceeded/);
+  } finally {
+    if (oldDeadline === undefined) {
+      delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
+    } else {
+      process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = oldDeadline;
+    }
+  }
+});
+
+test('handlePostedReviewRow: fetchMergeAgentCandidate deadline returns a named handled outcome', async () => {
+  const oldDeadline = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
+  process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = '10';
+  const errors = [];
+  let sawAbort = false;
+  const { args } = baseArgs({
+    logger: {
+      log() {},
+      warn() {},
+      error: (m) => errors.push(String(m)),
+    },
+    fetchMergeAgentCandidateImpl: async (repo, prNumber, opts) => new Promise((_, reject) => {
+      assert.equal(repo, 'laceyenterprises/agent-os');
+      assert.equal(prNumber, 4242);
+      opts?.signal?.addEventListener?.('abort', () => {
+        sawAbort = true;
+        reject(opts.signal.reason);
+      });
+    }),
+  });
+
+  try {
+    const result = await handlePostedReviewRow(args);
+
+    assert.equal(sawAbort, true);
+    assert.equal(result.handled, true);
+    assert.equal(result.outcome, 'candidate-fetch-deadline');
+    assert.equal(
+      result.amaClosureResult.reason,
+      'fetch-merge-agent-candidate-deadline-exceeded',
+    );
+    assert.match(errors.join('\n'), /reason=fetch-merge-agent-candidate-deadline-exceeded/);
   } finally {
     if (oldDeadline === undefined) {
       delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;

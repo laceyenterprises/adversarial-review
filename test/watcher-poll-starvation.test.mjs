@@ -284,6 +284,37 @@ test('RVHAND-01: posted-review timeout yields and defers the rest of the bounded
   assert.match(logs[0], /timeout_deferred=1 continued_after_timeout=0/);
 });
 
+test('RVHAND-06: posted-review phase warns when queued handlers make zero progress', async () => {
+  const warnings = [];
+
+  const summary = await runPostedReviewHandlersFairly({
+    handlers: [
+      {
+        repoPath: REPO,
+        prNumber: 6486,
+        run: async () => {},
+      },
+    ],
+    state: createPostedReviewFairnessState(),
+    budgetMs: 60_000,
+    handlerTimeoutMs: 60_000,
+    laneGate: {
+      evaluate: () => ({ run: false, lane: 'slow', noProgressTicks: 4, backoffTicks: 8, skippedTicks: 1 }),
+      record: async () => {},
+    },
+    logger: {
+      log() {},
+      warn: (...args) => warnings.push(args.join(' ')),
+      error() {},
+    },
+  });
+
+  assert.equal(summary.queued, 1);
+  assert.equal(summary.ran, 0);
+  assert.match(warnings.join('\n'), /posted-review phase made zero progress/);
+  assert.match(warnings.join('\n'), /queued=1 ran=0/);
+});
+
 test('RVHAND-03: per-handler timeout lets slow hammer launch finish without raising the global default', async () => {
   const state = createPostedReviewFairnessState();
   const events = [];
@@ -758,6 +789,7 @@ test('runPostedReviewHandlersFairly defers the tail when the budget runs out and
     handlers,
     state,
     budgetMs: 100,
+    minimumHandlerStartBudgetMs: 1,
     nowMs: () => clock,
     logger: silentLogger,
   });
@@ -771,6 +803,7 @@ test('runPostedReviewHandlersFairly defers the tail when the budget runs out and
     handlers,
     state,
     budgetMs: 100,
+    minimumHandlerStartBudgetMs: 1,
     nowMs: () => clock,
     logger: silentLogger,
   });
@@ -800,6 +833,7 @@ test('runPostedReviewHandlersFairly preserves deferred order across more than tw
       handlers,
       state,
       budgetMs: 50,
+      minimumHandlerStartBudgetMs: 1,
       nowMs: () => clock,
       logger: silentLogger,
     });

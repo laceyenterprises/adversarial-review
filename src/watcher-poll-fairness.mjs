@@ -59,7 +59,8 @@
 // derived from `pollIntervalMs` because this module sits below config — override
 // with ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS if you retune the poll.
 export const DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS = 10 * 60 * 1000;
-export const DEFAULT_POSTED_REVIEW_EXPENSIVE_STEP_BUDGET_FRACTION = 0.2;
+export const DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT = 2;
+export const DEFAULT_POSTED_REVIEW_HANDLER_HEADROOM_MS = 5 * 1000;
 
 // Per-handler deadline. The phase budget alone cannot save a tick, because it is
 // only checked BETWEEN handlers: one handler that never settles (an `hq` dispatch
@@ -100,15 +101,33 @@ export function resolvePostedReviewHandlerTimeoutMs(env = process.env) {
   );
 }
 
-export function derivePostedReviewExpensiveStepBudgetMs(phaseBudgetMs) {
-  const effectivePhaseBudgetMs = parsePositiveMs(
-    phaseBudgetMs,
-    DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS,
+export function resolvePostedReviewHandlerHeadroomMs(env = process.env) {
+  return parsePositiveMs(
+    env?.ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_HEADROOM_MS,
+    DEFAULT_POSTED_REVIEW_HANDLER_HEADROOM_MS,
   );
-  const derivedMs = Math.floor(
-    effectivePhaseBudgetMs * DEFAULT_POSTED_REVIEW_EXPENSIVE_STEP_BUDGET_FRACTION,
+}
+
+export function derivePostedReviewExpensiveStepBudgetMs(
+  handlerTimeoutMs,
+  {
+    headroomMs = DEFAULT_POSTED_REVIEW_HANDLER_HEADROOM_MS,
+    stepCount = DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT,
+  } = {},
+) {
+  const effectiveHandlerTimeoutMs = parsePositiveMs(
+    handlerTimeoutMs,
+    DEFAULT_POSTED_REVIEW_HANDLER_TIMEOUT_MS,
   );
-  return Math.max(1, Math.min(derivedMs, effectivePhaseBudgetMs - 1));
+  const effectiveStepCount = Number.isInteger(stepCount) && stepCount > 0
+    ? stepCount
+    : DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT;
+  const effectiveHeadroomMs = Math.min(
+    parsePositiveMs(headroomMs, DEFAULT_POSTED_REVIEW_HANDLER_HEADROOM_MS),
+    effectiveHandlerTimeoutMs - 1,
+  );
+  const availableForStepsMs = Math.max(1, effectiveHandlerTimeoutMs - effectiveHeadroomMs);
+  return Math.max(1, Math.floor(availableForStepsMs / effectiveStepCount));
 }
 
 /**
@@ -261,7 +280,7 @@ export async function runPostedReviewHandlersFairly({
   );
   const effectiveMinimumHandlerStartBudgetMs = parsePositiveMs(
     minimumHandlerStartBudgetMs,
-    derivePostedReviewExpensiveStepBudgetMs(effectiveBudgetMs),
+    derivePostedReviewExpensiveStepBudgetMs(effectiveHandlerTimeoutMs),
   );
   const startedMs = nowMs();
   const ordered = orderDeferredFirst(handlers, state);
@@ -397,6 +416,14 @@ export async function runPostedReviewHandlersFairly({
 
   state.deferredKeys = nextDeferred;
   summary.deferred = [...nextDeferred];
+  if (summary.queued > 0 && summary.ran === 0) {
+    logger?.warn?.(
+      `[watcher] posted-review phase made zero progress: queued=${summary.queued} ` +
+        `ran=0 failed=${summary.failed} timed_out=${summary.timedOut} ` +
+        `slow_lane_deferred=${summary.skippedByLane} budget_deferred=${summary.deferredByBudget} ` +
+        `timeout_deferred=${summary.deferredAfterTimeout}`,
+    );
+  }
   if (
     summary.skippedByLane > 0
     || summary.deferredByBudget > 0

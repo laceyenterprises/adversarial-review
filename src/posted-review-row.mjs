@@ -64,6 +64,7 @@ import {
 import {
   createPostedReviewFairnessState,
   derivePostedReviewExpensiveStepBudgetMs,
+  resolvePostedReviewHandlerHeadroomMs,
   resolvePostedReviewHandlerTimeoutMs,
   resolvePostedReviewPhaseBudgetMs,
   runPostedReviewHandlersFairly,
@@ -138,9 +139,12 @@ function parsePositiveMs(value, fallback) {
 
 export function resolveMergeAgentCoexistenceStepDeadlineMs(
   env = process.env,
-  { phaseBudgetMs = resolvePostedReviewPhaseBudgetMs(env) } = {},
+  {
+    handlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs(env),
+    headroomMs = resolvePostedReviewHandlerHeadroomMs(env),
+  } = {},
 ) {
-  const derivedDeadlineMs = derivePostedReviewExpensiveStepBudgetMs(phaseBudgetMs);
+  const derivedDeadlineMs = derivePostedReviewExpensiveStepBudgetMs(handlerTimeoutMs, { headroomMs });
   const overrideDeadlineMs = parsePositiveMs(
     env?.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS,
     derivedDeadlineMs,
@@ -292,14 +296,41 @@ export async function handlePostedReviewRow({
     // drain first. This live fetch is therefore the dispatch-time guard: it
     // re-reads PR state/mergeability/head before AMA or merge-agent selection
     // instead of trusting the previous tick's lifecycle mirror.
-    const candidate = await timePostedReviewStep(
-      'fetchMergeAgentCandidate', stepKey, logger, () =>
-        fetchMergeAgentCandidateImpl(repoPath, prNumber, {
-          execFileImpl,
-          operatorApprovalEvent,
-          mergeAgentRequestEvent,
-        }),
-    );
+    const candidateDeadlineMs = resolveMergeAgentCoexistenceStepDeadlineMs();
+    let candidate;
+    try {
+      candidate = await timePostedReviewStep(
+        'fetchMergeAgentCandidate', stepKey, logger, ({ signal }) =>
+          fetchMergeAgentCandidateImpl(repoPath, prNumber, {
+            execFileImpl,
+            operatorApprovalEvent,
+            mergeAgentRequestEvent,
+            signal,
+          }),
+        undefined,
+        { deadlineMs: candidateDeadlineMs },
+      );
+    } catch (err) {
+      if (err?.code !== 'POSTED_REVIEW_STEP_DEADLINE_EXCEEDED') throw err;
+      const reason = 'fetch-merge-agent-candidate-deadline-exceeded';
+      logger?.error?.(
+        `[watcher] merge-agent candidate fetch deadline exceeded for ${repoPath}#${prNumber}; ` +
+          `reason=${reason} deadline_ms=${candidateDeadlineMs}. ` +
+          'Skipping merge action for this PR on this tick so the posted-review phase can continue.',
+      );
+      return {
+        handled: true,
+        outcome: 'candidate-fetch-deadline',
+        gateDecision: gateProjection?.decision || null,
+        amaClosureResult: {
+          dispatched: false,
+          skipMergeAgent: true,
+          reason,
+          namedReason: reason,
+          deadlineMs: candidateDeadlineMs,
+        },
+      };
+    }
     const dispatchJob = buildMergeAgentDispatchJobImpl(rootDir, candidate, { reviewStateDb: db });
 
     // MSM-04: AMA-enabled posted-review rows have one autonomous merge route:
@@ -734,7 +765,7 @@ export async function runQueuedReviewAdoptionPhase({
   postedReviewHandlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs(),
   minimumHandlerStartBudgetMs = resolveMergeAgentCoexistenceStepDeadlineMs(
     process.env,
-    { phaseBudgetMs: postedReviewPhaseBudgetMs },
+    { handlerTimeoutMs: postedReviewHandlerTimeoutMs },
   ),
   noProgressLaneGate = createNoProgressLaneGate({ rootDir, logger }),
 } = {}) {

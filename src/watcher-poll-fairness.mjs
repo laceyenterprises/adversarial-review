@@ -81,7 +81,24 @@ export const DEFAULT_POSTED_REVIEW_HANDLER_HEADROOM_MS = 5 * 1000;
 // another, which recreates poll starvation while the first abandoned promise is
 // still alive. Defer the tail to the next tick instead; the fairness state
 // promotes it, and the no-progress lane slows repeatedly unproductive PRs.
-export const DEFAULT_POSTED_REVIEW_HANDLER_TIMEOUT_MS = 60 * 1000;
+// Sized from the MEASURED cost of the expensive steps this timeout must contain,
+// not from a round number. The step budget is derived as
+// (handlerTimeout - headroom) / stepCount, so this value is what decides whether a
+// step deadline lands above or below the step's real cost.
+//
+// At 60_000 the derived step budget was (60000 - 5000) / 2 = 27_500 ms, while
+// `resolveMergeAgentCoexistence` had a measured median elapsed of 27_514 ms and a
+// max of 41_061 ms (n=73, live watcher log 2026-09-09). The deadline therefore sat
+// 14 ms BELOW the median of the work it bounded: 60% of aborted steps missed by
+// under half a second, and because a coexistence expiry SKIPS the merge rather than
+// retrying, the daemon clean-merge path produced zero merges.
+//
+// 95_000 derives (95000 - 5000) / 2 = 45_000 ms per expensive step, which clears the
+// 41_061 ms observed max with headroom. The phase budget is 600_000 ms, so a phase
+// still admits ~6 handlers; before this change most of them aborted anyway.
+// See docs/postmortems/SEV1-every-deadline-is-set-at-its-steps-median-2026-09-09.md
+// in laceyenterprises/agent-os (PR #6530).
+export const DEFAULT_POSTED_REVIEW_HANDLER_TIMEOUT_MS = 95 * 1000;
 
 function parsePositiveMs(value, fallback) {
   const numeric = Number(value);

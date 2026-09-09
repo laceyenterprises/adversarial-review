@@ -41,7 +41,9 @@ import {
   subjectProgressFingerprint,
 } from '../src/watcher-no-progress-lane.mjs';
 import {
+  DEFAULT_POSTED_REVIEW_HANDLER_TIMEOUT_MS,
   createPostedReviewFairnessState,
+  derivePostedReviewExpensiveStepBudgetMs,
   orderSubjectEntriesDiscoveryFirst,
   runPostedReviewHandlersFairly,
 } from '../src/watcher-poll-fairness.mjs';
@@ -1893,5 +1895,31 @@ test('the queued posted-review handler reads the head from subject, not entry', 
     watcher,
     /return\s*\{\s*subjectRef,\s*subject,\s*prNumber\s*\}/,
     'subjectEntry shape changed; re-check which object owns headSha before trusting this guard',
+  );
+});
+
+// RVHAND-09: the derived expensive-step budget must sit ABOVE the measured cost of
+// the step it bounds, not at its median.
+//
+// Live measurement (adversarial-watcher.log, 2026-09-09, n=73 expiries of the
+// coexistence step): median elapsed 27_514 ms, max elapsed 41_061 ms. The then
+// derived budget was 27_500 ms — 14 ms BELOW the median — so 60% of aborted steps
+// missed by under half a second. Because a coexistence expiry skips the merge
+// rather than retrying, the daemon clean-merge path produced zero merges.
+//
+// This test fails if a future retune of the handler timeout, headroom, or step
+// count pushes the derived budget back down onto the step's distribution.
+const OBSERVED_COEXISTENCE_MAX_ELAPSED_MS = 41_061;
+
+test('derived expensive-step budget clears the measured coexistence cost', () => {
+  const derivedMs = derivePostedReviewExpensiveStepBudgetMs(
+    DEFAULT_POSTED_REVIEW_HANDLER_TIMEOUT_MS,
+    {},
+  );
+  assert.ok(
+    derivedMs > OBSERVED_COEXISTENCE_MAX_ELAPSED_MS,
+    `derived step budget ${derivedMs}ms must exceed the observed max coexistence `
+      + `elapsed ${OBSERVED_COEXISTENCE_MAX_ELAPSED_MS}ms; a budget at or below the `
+      + `step's real cost aborts work milliseconds from completion and forfeits the merge`,
   );
 });

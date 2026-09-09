@@ -6,6 +6,10 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import {
+  DEFAULT_POSTED_REVIEW_HANDLER_TIMEOUT_MS,
+  derivePostedReviewExpensiveStepBudgetMs,
+} from '../src/watcher-poll-fairness.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
@@ -39,6 +43,13 @@ function readLauncherScript(name) {
   assert.notEqual(statSync(scriptPath).mode & 0o111, 0, `${name} must be executable`);
   assert.match(script, /set -euo pipefail/, `${name} must fail closed under shell errors`);
   return script;
+}
+
+function extractShellDefaultMs(script, envName) {
+  const escapedName = envName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = script.match(new RegExp(`:\\s+"\\$\\{${escapedName}:=(\\d+)\\}"`));
+  assert.ok(match, `missing shell default for ${envName}`);
+  return Number(match[1]);
 }
 
 function writeExecutable(filePath, body) {
@@ -361,6 +372,22 @@ test('launcher scripts avoid zsh-only numeric glob syntax in runtime guards', ()
   assert.match(script, /\[\[ "\$auth_mode" =~ \^\[0-9\]\+\$ \]\]/);
   assert.match(script, /\[\[ "\$WATCHER_GH_TRANSIENT_RETRY_SECONDS" =~ \^\[0-9\]\{1,4\}\$ \]\]/);
   assert.match(script, /10#\$WATCHER_GH_TRANSIENT_RETRY_SECONDS/);
+});
+
+test('airlock watcher launcher keeps posted-review handler timeout aligned with module default', () => {
+  const script = readLauncherScript('adversarial-watcher-start.sh');
+  const launcherTimeoutMs = extractShellDefaultMs(
+    script,
+    'ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS',
+  );
+  const derivedStepBudgetMs = derivePostedReviewExpensiveStepBudgetMs(launcherTimeoutMs, {});
+
+  assert.equal(launcherTimeoutMs, DEFAULT_POSTED_REVIEW_HANDLER_TIMEOUT_MS);
+  assert.equal(derivedStepBudgetMs, 87_500);
+  assert.ok(
+    derivedStepBudgetMs > 80_000,
+    `launcher-derived step budget ${derivedStepBudgetMs}ms must stay above observed HAM tails`,
+  );
 });
 
 test('launcher scripts resolve gh dynamically when they still use GitHub token keychain fallback', () => {

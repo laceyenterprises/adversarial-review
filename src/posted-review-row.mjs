@@ -119,6 +119,7 @@ function isTerminalReviewRow(row) {
 // finishes. A handler that hangs now names the step it is still waiting on; a
 // slow step that eventually completes also records the monotonic elapsed time.
 const POSTED_REVIEW_STEP_LOG_THRESHOLD_MS = 5000;
+const POSTED_REVIEW_STEP_HANDLER_MARGIN_MS = 5000;
 
 export class PostedReviewStepDeadlineError extends Error {
   constructor(label, key, deadlineMs) {
@@ -138,14 +139,25 @@ function parsePositiveMs(value, fallback) {
 
 export function resolveMergeAgentCoexistenceStepDeadlineMs(
   env = process.env,
-  { phaseBudgetMs = resolvePostedReviewPhaseBudgetMs(env) } = {},
+  {
+    phaseBudgetMs = resolvePostedReviewPhaseBudgetMs(env),
+    handlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs(env),
+  } = {},
 ) {
   const derivedDeadlineMs = derivePostedReviewExpensiveStepBudgetMs(phaseBudgetMs);
+  const effectiveHandlerTimeoutMs = parsePositiveMs(
+    handlerTimeoutMs,
+    resolvePostedReviewHandlerTimeoutMs(env),
+  );
+  const handlerBoundMs = Math.max(
+    1,
+    effectiveHandlerTimeoutMs - Math.min(POSTED_REVIEW_STEP_HANDLER_MARGIN_MS, effectiveHandlerTimeoutMs - 1),
+  );
   const overrideDeadlineMs = parsePositiveMs(
     env?.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS,
     derivedDeadlineMs,
   );
-  return Math.min(overrideDeadlineMs, derivedDeadlineMs);
+  return Math.min(overrideDeadlineMs, derivedDeadlineMs, handlerBoundMs);
 }
 
 export async function timePostedReviewStep(
@@ -154,12 +166,21 @@ export async function timePostedReviewStep(
   logger,
   fn,
   thresholdMs = POSTED_REVIEW_STEP_LOG_THRESHOLD_MS,
-  { deadlineMs = null, setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout } = {},
+  {
+    deadlineMs = null,
+    signal: parentSignal = null,
+    setTimeoutFn = setTimeout,
+    clearTimeoutFn = clearTimeout,
+  } = {},
 ) {
+  if (parentSignal?.aborted) throw parentSignal.reason || new Error('posted-review handler aborted');
   const startedMs = performance.now();
   let warned = false;
   let timedOut = false;
-  const controller = deadlineMs ? new AbortController() : null;
+  const effectiveDeadlineMs = deadlineMs === null || deadlineMs === undefined
+    ? null
+    : parsePositiveMs(deadlineMs, null);
+  const controller = effectiveDeadlineMs || parentSignal ? new AbortController() : null;
   const timer = setTimeoutFn(() => {
     warned = true;
     logger?.warn?.(
@@ -168,17 +189,32 @@ export async function timePostedReviewStep(
   }, thresholdMs);
   timer.unref?.();
   let deadlineTimer = null;
-  const effectiveDeadlineMs = deadlineMs === null || deadlineMs === undefined
-    ? null
-    : parsePositiveMs(deadlineMs, null);
+  let parentAbortHandler = null;
+
+  const abortStep = (reason) => {
+    if (controller && !controller.signal.aborted) {
+      controller.abort(reason);
+    }
+  };
+
   const deadline = effectiveDeadlineMs
     ? new Promise((_, reject) => {
         deadlineTimer = setTimeoutFn(() => {
           timedOut = true;
           const err = new PostedReviewStepDeadlineError(label, key, effectiveDeadlineMs);
-          controller?.abort(err);
+          abortStep(err);
           reject(err);
         }, effectiveDeadlineMs);
+      })
+    : null;
+  const parentAbort = parentSignal
+    ? new Promise((_, reject) => {
+        parentAbortHandler = () => {
+          const reason = parentSignal.reason || new Error('posted-review handler aborted');
+          abortStep(reason);
+          reject(reason);
+        };
+        parentSignal.addEventListener('abort', parentAbortHandler, { once: true });
       })
     : null;
   const work = Promise.resolve()
@@ -193,10 +229,16 @@ export async function timePostedReviewStep(
       throw err;
     });
   try {
-    return await (deadline ? Promise.race([work, deadline]) : work);
+    const racers = [work];
+    if (deadline) racers.push(deadline);
+    if (parentAbort) racers.push(parentAbort);
+    return await (racers.length > 1 ? Promise.race(racers) : work);
   } finally {
     clearTimeoutFn(timer);
     if (deadlineTimer !== null) clearTimeoutFn(deadlineTimer);
+    if (parentSignal && parentAbortHandler) {
+      parentSignal.removeEventListener('abort', parentAbortHandler);
+    }
     if (warned && !timedOut) {
       const elapsedMs = Math.round(performance.now() - startedMs);
       logger?.warn?.(
@@ -234,10 +276,17 @@ export async function handlePostedReviewRow({
   domainId = null, // ARC-18: WATCHER_PRIMARY_DOMAIN_ID stays in watcher; threaded by callers (pollOnce passes domainId). Default is never read (only used when operatorSurface is set, and every such caller passes domainId).
   logGate = postedReviewRowLogGate,
   logger = console,
+  signal = null,
+  handlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs(),
 } = {}) {
   const stepKey = `${repoPath}#${prNumber}`;
   const gateProjection = await timePostedReviewStep(
-    'projectGateStatusSafe', stepKey, logger, () => projectGateStatusSafe(existing),
+    'projectGateStatusSafe',
+    stepKey,
+    logger,
+    () => projectGateStatusSafe(existing),
+    undefined,
+    { signal },
   );
 
   try {
@@ -299,6 +348,8 @@ export async function handlePostedReviewRow({
           operatorApprovalEvent,
           mergeAgentRequestEvent,
         }),
+      undefined,
+      { signal },
     );
     const dispatchJob = buildMergeAgentDispatchJobImpl(rootDir, candidate, { reviewStateDb: db });
 
@@ -306,7 +357,10 @@ export async function handlePostedReviewRow({
     // clean PRs are handled by the daemon, and dirty/conflicted/red-CI PRs are
     // handled by one hammer under the launch lease. A separate merge-clicking
     // agent is no longer a valid outcome.
-    const coexistenceDeadlineMs = resolveMergeAgentCoexistenceStepDeadlineMs();
+    const coexistenceDeadlineMs = resolveMergeAgentCoexistenceStepDeadlineMs(
+      process.env,
+      { handlerTimeoutMs },
+    );
     let coexistenceDecision;
     try {
       coexistenceDecision = await timePostedReviewStep(
@@ -326,9 +380,9 @@ export async function handlePostedReviewRow({
             domainId,
             logger,
             signal,
-          }),
+        }),
         undefined,
-        { deadlineMs: coexistenceDeadlineMs },
+        { deadlineMs: coexistenceDeadlineMs, signal },
       );
     } catch (err) {
       if (err?.code !== 'POSTED_REVIEW_STEP_DEADLINE_EXCEEDED') throw err;

@@ -1081,7 +1081,7 @@ export async function processReviewSubject(entry, ctx) {
       }
 
       if (existing?.review_status === 'posted') {
-        const runPostedReviewHandler = () => handlePostedReviewRow({
+        const runPostedReviewHandler = ({ signal, timeoutMs } = {}) => handlePostedReviewRow({
           rootDir: ROOT,
           repoPath,
           prNumber,
@@ -1093,6 +1093,8 @@ export async function processReviewSubject(entry, ctx) {
           execFileImpl: execFileAsync,
           operatorSurface,
           domainId,
+          signal,
+          handlerTimeoutMs: timeoutMs,
         });
         postedReviewHandlers.push({
           repoPath,

@@ -47,9 +47,10 @@ function baseArgs(overrides = {}) {
 const retained = (logs) => logs.filter((m) => /AMA hammer route retained ownership/.test(m));
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-test('RVHAND-05: resolveMergeAgentCoexistence deadline is derived below the posted-review phase budget', () => {
+test('RVHAND-06: resolveMergeAgentCoexistence deadline is capped below the handler timeout', () => {
   const env = {
     ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS: '330000',
+    ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS: '60000',
     ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS: '300000',
   };
 
@@ -57,8 +58,9 @@ test('RVHAND-05: resolveMergeAgentCoexistence deadline is derived below the post
   const deadlineMs = resolveMergeAgentCoexistenceStepDeadlineMs(env);
 
   assert.equal(phaseBudgetMs, 330_000);
-  assert.equal(deadlineMs, 66_000);
+  assert.equal(deadlineMs, 55_000);
   assert.ok(deadlineMs < phaseBudgetMs);
+  assert.ok(deadlineMs < Number(env.ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS));
 });
 
 test('timePostedReviewStep: warns while a step is still pending', async () => {
@@ -137,6 +139,40 @@ test('timePostedReviewStep: deadline rejects and aborts pending work', async () 
   assert.match(errors[0], /deadline_ms=10/);
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /posted-review step aborted after deadline/);
+});
+
+test('timePostedReviewStep: parent handler abort rejects pending work before the step deadline', async () => {
+  const errors = [];
+  const warnings = [];
+  const controller = new AbortController();
+  let sawAbort = false;
+
+  const pending = timePostedReviewStep(
+    'resolveMergeAgentCoexistence',
+    'laceyenterprises/agent-os#4242',
+    {
+      warn: (m) => warnings.push(String(m)),
+      error: (m) => errors.push(String(m)),
+    },
+    ({ signal }) => new Promise((_, reject) => {
+      signal.addEventListener('abort', () => {
+        sawAbort = true;
+        reject(signal.reason);
+      });
+    }),
+    1000,
+    { deadlineMs: 1000, signal: controller.signal },
+  );
+
+  const err = new Error('posted-review handler exceeded 10ms');
+  err.code = 'POSTED_REVIEW_HANDLER_DEADLINE_EXCEEDED';
+  await delay(0);
+  controller.abort(err);
+
+  await assert.rejects(pending, /posted-review handler exceeded 10ms/);
+  assert.equal(sawAbort, true);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(warnings, []);
 });
 
 test('handlePostedReviewRow: resolveMergeAgentCoexistence deadline returns a named handled outcome', async () => {

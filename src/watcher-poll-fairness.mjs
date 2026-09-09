@@ -199,13 +199,24 @@ function runWithDeadline(run, {
   setTimeoutFn,
   clearTimeoutFn,
 }) {
+  const controller = new AbortController();
+  let didTimeOut = false;
   let timer = null;
   const deadline = new Promise((resolve) => {
-    timer = setTimeoutFn(() => resolve({ timedOut: true }), timeoutMs);
+    timer = setTimeoutFn(() => {
+      didTimeOut = true;
+      const err = new Error(`posted-review handler exceeded ${timeoutMs}ms`);
+      err.code = 'POSTED_REVIEW_HANDLER_DEADLINE_EXCEEDED';
+      controller.abort(err);
+      resolve({ timedOut: true, error: err });
+    }, timeoutMs);
   });
   const work = Promise.resolve()
-    .then(() => run())
-    .then((value) => ({ timedOut: false, value }), (error) => ({ timedOut: false, error }));
+    .then(() => run({ signal: controller.signal, timeoutMs }))
+    .then(
+      (value) => (didTimeOut ? { timedOut: true, value } : { timedOut: false, value }),
+      (error) => (didTimeOut ? { timedOut: true, error } : { timedOut: false, error }),
+    );
   return Promise.race([work, deadline]).finally(() => {
     if (timer !== null) clearTimeoutFn(timer);
   });
@@ -323,7 +334,7 @@ export async function runPostedReviewHandlersFairly({
 
     const handlerStartedMs = nowMs();
     const handlerDeadlineMs = parsePositiveMs(handler?.timeoutMs, effectiveHandlerTimeoutMs);
-    const outcome = await runWithDeadline(() => handler.run(), {
+    const outcome = await runWithDeadline((deadlineArgs) => handler.run(deadlineArgs), {
       timeoutMs: handlerDeadlineMs,
       setTimeoutFn,
       clearTimeoutFn,

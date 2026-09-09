@@ -243,13 +243,19 @@ test('RVHAND-01: posted-review timeout yields and defers the rest of the bounded
   const errors = [];
   const warnings = [];
   const logs = [];
+  let sawAbort = false;
 
   const summary = await runPostedReviewHandlersFairly({
     handlers: [
       {
         repoPath: REPO,
         prNumber: 5908,
-        run: async () => new Promise(() => {}),
+        run: async ({ signal }) => new Promise((_, reject) => {
+          signal.addEventListener('abort', () => {
+            sawAbort = true;
+            reject(signal.reason);
+          });
+        }),
       },
       {
         repoPath: REPO,
@@ -274,6 +280,7 @@ test('RVHAND-01: posted-review timeout yields and defers the rest of the bounded
   });
 
   assert.equal(summary.timedOut, 1);
+  assert.equal(sawAbort, true);
   assert.equal(summary.ran, 0);
   assert.equal(summary.deferredAfterTimeout, 1);
   assert.equal(summary.continuedAfterTimeout, 0);

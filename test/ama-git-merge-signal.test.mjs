@@ -20,11 +20,12 @@ test('AMA closer emits worker.git.merge_signal with merge commit metadata', asyn
     mergedBy: 'hammer',
     mode: 'squash',
     logger: { warn() {} },
+    env: { HQ_PYTHON3: '/opt/homebrew/bin/python3', PYTHONPATH: '/existing/pythonpath' },
   });
 
   assert.equal(emitted, true);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].cmd, 'python3');
+  assert.equal(calls[0].cmd, '/opt/homebrew/bin/python3');
   assert.deepEqual(calls[0].args.slice(0, 4), ['-m', 'cwp_dispatch.git_signal', 'emit', '--root']);
   assert.equal(calls[0].args[calls[0].args.indexOf('--event-type') + 1], 'worker.git.merge_signal');
   assert.equal(calls[0].args[calls[0].args.indexOf('--launch-request-id') + 1], 'lrq_hammer_1');
@@ -34,6 +35,16 @@ test('AMA closer emits worker.git.merge_signal with merge commit metadata', asyn
   assert.equal(calls[0].args[calls[0].args.indexOf('--merged-by') + 1], 'hammer');
   assert.equal(calls[0].args[calls[0].args.indexOf('--mode') + 1], 'squash');
   assert.match(calls[0].options.env.PYTHONPATH, /modules\/worker-pool\/lib\/python/);
+  assert.match(calls[0].options.env.PYTHONPATH, /\/existing\/pythonpath/);
+});
+
+test('AMA closer resolves the Agent OS Python runtime before falling back to python3', () => {
+  const { resolveAgentOsPythonBin } = __testables__;
+  assert.equal(resolveAgentOsPythonBin({ HAM_PYTHON_BIN: ' /tmp/ham-python ', HQ_PYTHON3: '/tmp/hq-python' }), '/tmp/ham-python');
+  assert.equal(resolveAgentOsPythonBin({ HQ_PYTHON3: '/tmp/hq-python' }), '/tmp/hq-python');
+  assert.equal(resolveAgentOsPythonBin({ AGENT_OS_PY: '/tmp/agent-os-python' }), '/tmp/agent-os-python');
+  assert.equal(resolveAgentOsPythonBin({}, { existsImpl: (path) => path === '/opt/homebrew/bin/python3' }), '/opt/homebrew/bin/python3');
+  assert.equal(resolveAgentOsPythonBin({}, { existsImpl: () => false }), 'python3');
 });
 
 test('AMA closer merge signal emission reports failure', async () => {

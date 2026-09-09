@@ -1018,11 +1018,19 @@ ham_emit_git_merge_signal() {
   HAM_AGENT_OS_ROOT="${AGENT_OS_ROOT:-/Users/airlock/agent-os}"
   [ -d "$HAM_AGENT_OS_ROOT/modules/worker-pool/lib/python" ] || return 1
   [ -d "$HAM_AGENT_OS_ROOT/platform/session-ledger/src" ] || return 1
+  HAM_SIGNAL_PYTHON_BIN="${HAM_PYTHON_BIN:-${HQ_PYTHON3:-${AGENT_OS_PY:-}}}"
+  if [ -z "$HAM_SIGNAL_PYTHON_BIN" ] && [ -x /opt/homebrew/bin/python3 ]; then
+    HAM_SIGNAL_PYTHON_BIN=/opt/homebrew/bin/python3
+  fi
+  if [ -z "$HAM_SIGNAL_PYTHON_BIN" ]; then
+    HAM_SIGNAL_PYTHON_BIN="$(command -v python3 2>/dev/null || true)"
+  fi
+  [ -n "$HAM_SIGNAL_PYTHON_BIN" ] || return 1
   HAM_SIGNAL_ATTEMPTS=0
   while [ "$HAM_SIGNAL_ATTEMPTS" -lt "$HAM_MERGE_RETRY_CAP" ]; do
     HAM_SIGNAL_ATTEMPTS=$((HAM_SIGNAL_ATTEMPTS + 1))
     if PYTHONPATH="$HAM_AGENT_OS_ROOT/modules/worker-pool/lib/python:$HAM_AGENT_OS_ROOT/platform/session-ledger/src${PYTHONPATH:+:$PYTHONPATH}" \
-      /usr/bin/perl -e 'alarm shift; exec @ARGV' 15 python3 - "/tmp/ama-test-hqroot" "1234" "$HAM_MERGE_COMMIT" "squash" <<'PYEOF' >/dev/null 2>&1
+      /usr/bin/perl -e 'alarm shift; exec @ARGV' 15 "$HAM_SIGNAL_PYTHON_BIN" - "/tmp/ama-test-hqroot" "1234" "$HAM_MERGE_COMMIT" "squash" <<'PYEOF' >/dev/null 2>&1
 import sys
 
 from cwp_dispatch.git_signal import EVENT_MERGE_SIGNAL, emit_git_event_best_effort, workspace_context

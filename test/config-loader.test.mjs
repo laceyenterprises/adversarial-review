@@ -612,6 +612,8 @@ test('OSR-05 operator and org identity load through strict Node schema', () => {
       operator:
         email: operator@example.com
         full_name: Example Operator
+        first_name: Example
+        github_handle: example-operator
       linear:
         team_name: ExampleTeam
         issue_prefix: EX
@@ -620,6 +622,8 @@ test('OSR-05 operator and org identity load through strict Node schema', () => {
     assert.equal(cfg.get('github.org_email_domain'), 'cfg.example');
     assert.equal(cfg.get('operator.email'), 'operator@example.com');
     assert.equal(cfg.get('operator.full_name'), 'Example Operator');
+    assert.equal(cfg.get('operator.first_name'), 'Example');
+    assert.equal(cfg.get('operator.github_handle'), 'example-operator');
     assert.equal(cfg.get('linear.team_name'), 'ExampleTeam');
     assert.equal(cfg.get('linear.issue_prefix'), 'EX');
 
@@ -629,12 +633,16 @@ test('OSR-05 operator and org identity load through strict Node schema', () => {
         AGENT_OS_GITHUB_ORG_EMAIL_DOMAIN: 'ops.example',
         AGENT_OS_OPERATOR_EMAIL: 'env-operator@example.com',
         AGENT_OS_OPERATOR_FULL_NAME: 'Env Operator',
+        AGENT_OS_OPERATOR_FIRST_NAME: 'Env',
+        AGENT_OS_OPERATOR_GITHUB_HANDLE: 'env-operator',
         AGENT_OS_LINEAR_TEAM_NAME: 'EnvTeam',
       },
     });
     assert.equal(envCfg.get('github.org_email_domain'), 'ops.example');
     assert.equal(envCfg.get('operator.email'), 'env-operator@example.com');
     assert.equal(envCfg.get('operator.full_name'), 'Env Operator');
+    assert.equal(envCfg.get('operator.first_name'), 'Env');
+    assert.equal(envCfg.get('operator.github_handle'), 'env-operator');
     assert.equal(envCfg.get('linear.team_name'), 'EnvTeam');
     assert.equal(
       envCfg.resolutionTrace('github.org_email_domain').at(-1).source,
@@ -647,6 +655,14 @@ test('OSR-05 operator and org identity load through strict Node schema', () => {
     assert.equal(
       envCfg.resolutionTrace('operator.full_name').at(-1).source,
       'env:AGENT_OS_OPERATOR_FULL_NAME',
+    );
+    assert.equal(
+      envCfg.resolutionTrace('operator.first_name').at(-1).source,
+      'env:AGENT_OS_OPERATOR_FIRST_NAME',
+    );
+    assert.equal(
+      envCfg.resolutionTrace('operator.github_handle').at(-1).source,
+      'env:AGENT_OS_OPERATOR_GITHUB_HANDLE',
     );
     assert.equal(
       envCfg.resolutionTrace('linear.team_name').at(-1).source,

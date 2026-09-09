@@ -1469,6 +1469,14 @@ function schemaV1() {
             __type: TYPE_STRING,
             __default: 'Paul Lacey',  // cfg-allowlist(operator-name): oss-readiness-apply-reviewed
           },
+          first_name: {
+            __type: TYPE_STRING,
+            __default: 'operator',
+          },
+          github_handle: {
+            __type: TYPE_STRING,
+            __default: 'operator',
+          },
         },
       },
       // OSR-06 — host + Tailscale per-device identity. Keep these keys in
@@ -3652,6 +3660,14 @@ export const ENV_ALIASES = {
   },
   'operator.full_name': {
     canonical: 'AGENT_OS_OPERATOR_FULL_NAME',
+    aliases: [],
+  },
+  'operator.first_name': {
+    canonical: 'AGENT_OS_OPERATOR_FIRST_NAME',
+    aliases: [],
+  },
+  'operator.github_handle': {
+    canonical: 'AGENT_OS_OPERATOR_GITHUB_HANDLE',
     aliases: [],
   },
   'github.org_email_domain': {

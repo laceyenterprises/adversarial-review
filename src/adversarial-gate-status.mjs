@@ -419,6 +419,9 @@ function pickAdversarialGateStatus({
     );
   }
 
+  const reviewStatus = normalizeReviewStatus(reviewRow?.review_status);
+  const argusOwnsReview = reviewStatus === 'argus-security-queued';
+
   // ASR-06 — blocking authority, and it runs BEFORE the review-row branches.
   //
   // Placed here because an Argus block must not depend on what the adversarial
@@ -429,17 +432,23 @@ function pickAdversarialGateStatus({
   // thing that looked; its answer has to outrank a clean review from something
   // that was looking elsewhere.
   //
-  // `stalled` and `failed` are here too, and that is the fail-closed half: they
-  // are the states where the security question was ASKED (a trigger fired, a job
-  // exists) and never answered. An unanswered question resolves red, not green.
-  // Only states with a real job behind them can reach this branch — a PR that
-  // fired no trigger resolves `missing`, which never blocks, so this cannot
-  // gate the PRs Argus was never asked about.
+  // For Argus-owned rows, silence is still fail-closed below: the bot PR has no
+  // ordinary reviewer to fall back to. For routable PRs, however, the additive
+  // queue must not turn into a second mandatory reviewer until the fleet has a
+  // real PR-security consumer for that queue. A completed high-severity Argus
+  // result still outranks the ordinary review; an unanswered additive job does
+  // not starve a clean, routable PR behind a lane nobody is operating.
   //
   // Below the operator override deliberately: a scoped, head-pinned operator
   // approval remains the documented escape hatch, and a security finding an
   // operator has explicitly looked at and accepted is a decision, not a bypass.
-  if (argusVerdict?.blocks === true) {
+  if (
+    argusVerdict?.blocks === true
+    && (
+      argusOwnsReview
+      || argusVerdict.state === ARGUS_VERDICT_STATES.BLOCKED
+    )
+  ) {
     return decide(
       'failure',
       argusVerdict.summary,
@@ -448,11 +457,14 @@ function pickAdversarialGateStatus({
     );
   }
 
-  // Additive Argus jobs also hold routable PRs. A human PR can have a clean
-  // ordinary review while Argus is still answering a dependency-surface
-  // question; that is pending, not approval. `missing` remains inert because
-  // the gate runs for every PR, including PRs Argus was never asked to review.
+  // Additive Argus jobs no longer hold routable PRs while unanswered. The queue
+  // was added before a general PR-security consumer existed, and treating
+  // `queued`/`in_progress`/`stalled` as a required second review starved normal
+  // code-review PRs behind filesystem records no daemon would drain. The
+  // completed blocking-result path above remains global.
   if (
+    argusOwnsReview
+    &&
     argusVerdict
     && argusVerdict.satisfiesGate !== true
     && argusVerdict.state !== ARGUS_VERDICT_STATES.MISSING
@@ -468,7 +480,6 @@ function pickAdversarialGateStatus({
     return decide('pending', 'Adversarial review has not posted yet.', 'review-not-posted');
   }
 
-  const reviewStatus = normalizeReviewStatus(reviewRow.review_status);
   const latestJobStatus = normalizeFollowUpJobStatus(latestJob?.status);
 
   if (reviewStatus === 'pending') {

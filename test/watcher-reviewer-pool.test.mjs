@@ -126,6 +126,36 @@ test('reviewer pool starts another PR while an older review is slow', async () =
   await runPromise;
 });
 
+test('single-wave reviewer drain returns after launching instead of waiting for completion', async () => {
+  const events = [];
+  let releaseSlow;
+  const slowCompletion = new Promise((resolve) => {
+    releaseSlow = resolve;
+  });
+  const summary = await runBoundedReviewerDispatchQueue([
+    candidate(1, async () => {
+      events.push('start:1');
+      await slowCompletion;
+      events.push('done:1');
+    }),
+    candidate(2, async () => {
+      events.push('start:2');
+    }),
+  ], {
+    maxConcurrent: 1,
+    singleWave: true,
+    singleWaveSettleGraceMs: 0,
+    logger: { error() {}, log() {}, warn() {} },
+  });
+
+  assert.deepEqual(events, ['start:1']);
+  assert.equal(summary.dispatched, 1);
+  assert.equal(summary.deferred, 1);
+  releaseSlow();
+  await Promise.resolve();
+  assert.deepEqual(events, ['start:1', 'done:1']);
+});
+
 test('reviewer dispatch candidates sort oldest pending PR first', () => {
   const sorted = sortReviewerDispatchCandidates([
     candidate(20, async () => {}, '2026-05-03T00:00:00.000Z'),

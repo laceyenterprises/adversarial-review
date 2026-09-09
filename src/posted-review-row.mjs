@@ -601,6 +601,11 @@ export async function runQueuedReviewAdoptionPhase({
   // make queue-starvation/terminal-but-unmerged findings untrustworthy.
   await syncPRLifecycleImpl(octokit, operatorSurface, primaryDomainId);
 
+  // Reviewer candidates were collected during the PR discovery sweep. Launch
+  // them before the posted-review/hammer lane so a slow closer cannot hold every
+  // first-pass or re-review claim until the tail of the tick.
+  await drainReviewerDispatchCandidates('posted-review handlers');
+
   // WPS-01/RVHAND-01: this loop used to be unbounded — every queued handler, to
   // completion, every tick. When the queue filled with PRs that could not
   // advance, the tick stopped finishing and pollOnce never returned to phase 1,
@@ -681,9 +686,4 @@ export async function runQueuedReviewAdoptionPhase({
     }
   }
 
-  // Reviewer launches are intentionally last. The child runtime is designed to
-  // detach, but production incidents showed slow admission or subprocess edges
-  // can still hold this await long enough to starve already-reviewed PRs. A
-  // delayed next reviewer wave is cheaper than a wedged hammer.
-  await drainReviewerDispatchCandidates('the next reviewer wave');
 }

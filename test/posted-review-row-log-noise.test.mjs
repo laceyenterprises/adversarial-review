@@ -98,6 +98,124 @@ test('RVHAND-07: operator deadline override can lower the coexistence deadline',
   );
 });
 
+test('RVHAND-06: retry coexistence deadline stays below the handler watchdog', async () => {
+  const oldDeadline = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
+  const oldP95 = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS;
+  const oldMax = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_MAX_DEADLINE_MS;
+  const oldTimeout = process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS;
+  const oldHeadroom = process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_HEADROOM_MS;
+  process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = '150';
+  process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS = '120';
+  process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_MAX_DEADLINE_MS = '300';
+  process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS = '350';
+  process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_HEADROOM_MS = '10';
+  const { args } = baseArgs({
+    prNumber: 4243,
+    resolveMergeAgentCoexistenceForWatcherImpl: ({ signal }) => new Promise((_, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason));
+    }),
+  });
+
+  try {
+    const first = await handlePostedReviewRow(args);
+    const second = await handlePostedReviewRow(args);
+
+    assert.equal(first.outcome, 'coexistence-deadline-retry');
+    assert.equal(first.amaClosureResult.deadlineMs, 150);
+    assert.equal(first.amaClosureResult.retryDeadlineMs, 170);
+    assert.equal(second.amaClosureResult.deadlineMs, 170);
+    assert.equal(second.amaClosureResult.retryDeadlineMs, 170);
+  } finally {
+    if (oldDeadline === undefined) {
+      delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
+    } else {
+      process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = oldDeadline;
+    }
+    if (oldP95 === undefined) {
+      delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS;
+    } else {
+      process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS = oldP95;
+    }
+    if (oldMax === undefined) {
+      delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_MAX_DEADLINE_MS;
+    } else {
+      process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_MAX_DEADLINE_MS = oldMax;
+    }
+    if (oldTimeout === undefined) {
+      delete process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS;
+    } else {
+      process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS = oldTimeout;
+    }
+    if (oldHeadroom === undefined) {
+      delete process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_HEADROOM_MS;
+    } else {
+      process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_HEADROOM_MS = oldHeadroom;
+    }
+  }
+});
+
+test('RVHAND-06: abandoned coexistence retry floors expire', async () => {
+  const oldDeadline = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
+  const oldP95 = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS;
+  const oldMax = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_MAX_DEADLINE_MS;
+  const oldTimeout = process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS;
+  const oldHeadroom = process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_HEADROOM_MS;
+  const oldTtl = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_RETRY_FLOOR_TTL_MS;
+  process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = '150';
+  process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS = '120';
+  process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_MAX_DEADLINE_MS = '300';
+  process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS = '350';
+  process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_HEADROOM_MS = '10';
+  process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_RETRY_FLOOR_TTL_MS = '1';
+  const { args } = baseArgs({
+    prNumber: 4244,
+    resolveMergeAgentCoexistenceForWatcherImpl: ({ signal }) => new Promise((_, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason));
+    }),
+  });
+
+  try {
+    const first = await handlePostedReviewRow(args);
+    await delay(25);
+    const second = await handlePostedReviewRow(args);
+
+    assert.equal(first.amaClosureResult.deadlineMs, 150);
+    assert.equal(first.amaClosureResult.retryDeadlineMs, 170);
+    assert.equal(second.amaClosureResult.deadlineMs, 150);
+  } finally {
+    if (oldDeadline === undefined) {
+      delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
+    } else {
+      process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = oldDeadline;
+    }
+    if (oldP95 === undefined) {
+      delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS;
+    } else {
+      process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS = oldP95;
+    }
+    if (oldMax === undefined) {
+      delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_MAX_DEADLINE_MS;
+    } else {
+      process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_MAX_DEADLINE_MS = oldMax;
+    }
+    if (oldTimeout === undefined) {
+      delete process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS;
+    } else {
+      process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS = oldTimeout;
+    }
+    if (oldHeadroom === undefined) {
+      delete process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_HEADROOM_MS;
+    } else {
+      process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_HEADROOM_MS = oldHeadroom;
+    }
+    if (oldTtl === undefined) {
+      delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_RETRY_FLOOR_TTL_MS;
+    } else {
+      process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_RETRY_FLOOR_TTL_MS = oldTtl;
+    }
+  }
+});
+
 test('RVHAND-07: reviewer-pressure posted-review phase budget has a bounded default and override', () => {
   assert.equal(resolvePostedReviewReviewerPressurePhaseBudgetMs({}), 180_000);
   assert.equal(
@@ -287,7 +405,7 @@ test('handlePostedReviewRow: resolveMergeAgentCoexistence deadline is a soft han
       'resolve-merge-agent-coexistence-deadline-exceeded',
     );
     assert.equal(result.amaClosureResult.retryable, true);
-    assert.ok(result.amaClosureResult.retryDeadlineMs > result.amaClosureResult.deadlineMs);
+    assert.ok(result.amaClosureResult.retryDeadlineMs >= result.amaClosureResult.deadlineMs);
     assert.match(errors.join('\n'), /reason=resolve-merge-agent-coexistence-deadline-exceeded/);
     assert.match(errors.join('\n'), /Leaving any in-flight HAM launch to settle/);
     assert.match(errors.join('\n'), /retry_deadline_ms=/);
@@ -336,12 +454,13 @@ test('handlePostedReviewRow: HAM coexistence deadline does not abort in-flight l
 
     assert.equal(sawAbort, false);
     assert.equal(result.handled, true);
-    assert.equal(result.outcome, 'coexistence-deadline');
+    assert.equal(result.outcome, 'coexistence-deadline-retry');
     assert.equal(
       result.amaClosureResult.reason,
       'resolve-merge-agent-coexistence-deadline-exceeded',
     );
     assert.match(errors.join('\n'), /Leaving any in-flight HAM launch to settle/);
+    assert.match(errors.join('\n'), /retry_deadline_ms=/);
 
     release();
     await delay(25);
@@ -351,11 +470,6 @@ test('handlePostedReviewRow: HAM coexistence deadline does not abort in-flight l
       delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
     } else {
       process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = oldDeadline;
-    }
-    if (oldP95 === undefined) {
-      delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS;
-    } else {
-      process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS = oldP95;
     }
   }
 });

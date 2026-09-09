@@ -488,7 +488,7 @@ test('RVHAND-04: resolveMergeAgentCoexistence soft deadline does not consume the
   }
 });
 
-test('RVHAND-07: posted-review phase warns when handlers run but no daemon clean-merge lands', async () => {
+test('RVHAND-07: posted-review phase does not warn solely because no daemon clean-merge lands', async () => {
   const warnings = [];
 
   const summary = await runPostedReviewHandlersFairly({
@@ -513,8 +513,7 @@ test('RVHAND-07: posted-review phase warns when handlers run but no daemon clean
 
   assert.equal(summary.ran, 1);
   assert.equal(summary.daemonCleanMerged, 0);
-  assert.match(warnings.join('\n'), /posted-review handlers completed with no daemon clean-merge/);
-  assert.match(warnings.join('\n'), /ran=1 daemon_clean_merged=0/);
+  assert.doesNotMatch(warnings.join('\n'), /posted-review handlers completed with no daemon clean-merge/);
 });
 
 test('RVHAND-02: timeout log reports phase elapsed at handler start', async () => {

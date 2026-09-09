@@ -124,6 +124,8 @@ const POSTED_REVIEW_STEP_LOG_THRESHOLD_MS = 5000;
 export const DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS = 120 * 1000;
 export const DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_TAIL_MARGIN_RATIO = 0.25;
 export const DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_MAX_DEADLINE_MS = 5 * 60 * 1000;
+export const DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_RETRY_FLOOR_TTL_MS = 30 * 60 * 1000;
+export const DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_RETRY_FLOOR_MAX_ENTRIES = 500;
 
 const coexistenceDeadlineRetryFloorByKey = new Map();
 
@@ -166,6 +168,24 @@ export function deriveResolveMergeAgentCoexistenceDeadlineMs({
   return Math.min(Math.max(p95Ms + 1, aboveTailMs), capMs);
 }
 
+function resolveMergeAgentCoexistenceMaxStepDeadlineMs(
+  env = process.env,
+  {
+    handlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs(env),
+    handlerHeadroomMs = resolvePostedReviewHandlerHeadroomMs(env),
+  } = {},
+) {
+  const maxDeadlineMs = parsePositiveMs(
+    env?.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_MAX_DEADLINE_MS,
+    DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_MAX_DEADLINE_MS,
+  );
+  const handlerBoundedMaxDeadlineMs = derivePostedReviewExpensiveStepBudgetMs(
+    handlerTimeoutMs,
+    { headroomMs: handlerHeadroomMs },
+  );
+  return Math.min(maxDeadlineMs, handlerBoundedMaxDeadlineMs);
+}
+
 export function resolveMergeAgentCoexistenceStepDeadlineMs(
   env = process.env,
   {
@@ -178,15 +198,10 @@ export function resolveMergeAgentCoexistenceStepDeadlineMs(
     env?.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS,
     DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS,
   );
-  const configuredMaxDeadlineMs = parsePositiveMs(
-    env?.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_MAX_DEADLINE_MS,
-    DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_MAX_DEADLINE_MS,
-  );
-  const handlerBoundedMaxDeadlineMs = derivePostedReviewExpensiveStepBudgetMs(
+  const effectiveMaxDeadlineMs = resolveMergeAgentCoexistenceMaxStepDeadlineMs(env, {
     handlerTimeoutMs,
-    { headroomMs: handlerHeadroomMs },
-  );
-  const effectiveMaxDeadlineMs = Math.min(configuredMaxDeadlineMs, handlerBoundedMaxDeadlineMs);
+    handlerHeadroomMs,
+  });
   const derivedDeadlineMs = deriveResolveMergeAgentCoexistenceDeadlineMs({
     expectedP95Ms,
     tailMarginRatio: parseNonNegativeRatio(
@@ -194,7 +209,7 @@ export function resolveMergeAgentCoexistenceStepDeadlineMs(
       DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_TAIL_MARGIN_RATIO,
     ),
     maxDeadlineMs: effectiveMaxDeadlineMs,
-  );
+  });
   const hasOverrideDeadline = env?.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS != null;
   const baseDeadlineMs = hasOverrideDeadline
     ? parsePositiveMs(
@@ -210,8 +225,31 @@ function retryFloorMapKey(label, key) {
   return `${label}:${key}`;
 }
 
-function retryFloorForStep(label, key) {
-  return coexistenceDeadlineRetryFloorByKey.get(retryFloorMapKey(label, key)) || null;
+function pruneCoexistenceRetryFloors(nowMs = Date.now()) {
+  for (const [key, entry] of coexistenceDeadlineRetryFloorByKey) {
+    if (!entry || entry.expiresAtMs <= nowMs) {
+      coexistenceDeadlineRetryFloorByKey.delete(key);
+    }
+  }
+  while (coexistenceDeadlineRetryFloorByKey.size > DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_RETRY_FLOOR_MAX_ENTRIES) {
+    const oldestKey = coexistenceDeadlineRetryFloorByKey.keys().next().value;
+    if (oldestKey === undefined) break;
+    coexistenceDeadlineRetryFloorByKey.delete(oldestKey);
+  }
+}
+
+function retryFloorForStep(label, key, nowMs = Date.now()) {
+  pruneCoexistenceRetryFloors(nowMs);
+  const mapKey = retryFloorMapKey(label, key);
+  const entry = coexistenceDeadlineRetryFloorByKey.get(mapKey);
+  if (!entry) return null;
+  if (entry.expiresAtMs <= nowMs) {
+    coexistenceDeadlineRetryFloorByKey.delete(mapKey);
+    return null;
+  }
+  coexistenceDeadlineRetryFloorByKey.delete(mapKey);
+  coexistenceDeadlineRetryFloorByKey.set(mapKey, entry);
+  return entry.deadlineMs || null;
 }
 
 function clearRetryFloorForStep(label, key) {
@@ -219,12 +257,18 @@ function clearRetryFloorForStep(label, key) {
 }
 
 function markLongerCoexistenceRetry(label, key, deadlineMs, env = process.env) {
-  const maxDeadlineMs = parsePositiveMs(
-    env?.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_MAX_DEADLINE_MS,
-    DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_MAX_DEADLINE_MS,
-  );
+  const maxDeadlineMs = resolveMergeAgentCoexistenceMaxStepDeadlineMs(env);
   const nextDeadlineMs = Math.min(maxDeadlineMs, Math.max(deadlineMs + 1, Math.ceil(deadlineMs * 2)));
-  coexistenceDeadlineRetryFloorByKey.set(retryFloorMapKey(label, key), nextDeadlineMs);
+  const ttlMs = parsePositiveMs(
+    env?.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_RETRY_FLOOR_TTL_MS,
+    DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_RETRY_FLOOR_TTL_MS,
+  );
+  const nowMs = Date.now();
+  coexistenceDeadlineRetryFloorByKey.set(retryFloorMapKey(label, key), {
+    deadlineMs: nextDeadlineMs,
+    expiresAtMs: nowMs + ttlMs,
+  });
+  pruneCoexistenceRetryFloors(nowMs);
   return nextDeadlineMs;
 }
 

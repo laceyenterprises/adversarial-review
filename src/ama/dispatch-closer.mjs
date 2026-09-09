@@ -1907,6 +1907,26 @@ function formatHqDispatchError(errOrText) {
   return parts.join('\n') || String(errOrText || 'unknown hq dispatch error');
 }
 
+function resolveAmaDispatchTimeoutMs(cfg) {
+  const configured = Number(cfg?.dispatchTimeoutMs);
+  return Number.isFinite(configured) && configured > 0 ? configured : 300_000;
+}
+
+function withProvisionTimeoutCappedAtDispatch(env, dispatchTimeoutMs) {
+  const baseEnv = env || process.env;
+  const normalizedDispatchTimeoutMs = resolveAmaDispatchTimeoutMs({ dispatchTimeoutMs });
+  const dispatchTimeoutSeconds = Math.max(1, Math.floor(normalizedDispatchTimeoutMs / 1000));
+  const currentProvisionTimeoutSeconds = Number(baseEnv.HQ_WORKER_PROVISION_TIMEOUT_SECONDS);
+  const effectiveProvisionTimeoutSeconds =
+    Number.isFinite(currentProvisionTimeoutSeconds) && currentProvisionTimeoutSeconds > 0
+      ? Math.min(Math.floor(currentProvisionTimeoutSeconds), dispatchTimeoutSeconds)
+      : dispatchTimeoutSeconds;
+  return {
+    ...baseEnv,
+    HQ_WORKER_PROVISION_TIMEOUT_SECONDS: String(effectiveProvisionTimeoutSeconds),
+  };
+}
+
 // GitHub primary/secondary rate-limit + HTTP 429 + OAuth-broker 503 signals.
 // These are TRANSIENT: the bot token is valid and authorized — the request was
 // merely throttled (or the broker that mints the token is briefly unavailable).
@@ -2598,6 +2618,8 @@ export const __testables__ = Object.freeze({
   resolveTerminalCodingBranchHolder,
   isTerminalBranchHolderWorkerRunStatus,
   isPhantomActiveWorkerRun,
+  resolveAmaDispatchTimeoutMs,
+  withProvisionTimeoutCappedAtDispatch,
   defaultAmaLivePrProbe,
   normalizeAmaLivePrProbeResult,
   fetchMergeCommitShaBestEffort,
@@ -4837,10 +4859,12 @@ export async function maybeDispatchAmaCloser({
   let execResult;
   let transientRetryIndex = 0;
   let samePrHammerHolderRetryUsed = false;
+  const dispatchTimeoutMs = resolveAmaDispatchTimeoutMs(cfg);
+  const dispatchEnv = withProvisionTimeoutCappedAtDispatch(process.env, dispatchTimeoutMs);
   for (;;) {
     try {
       execResult = await execFileImpl(hqPath, activeArgs, {
-        env: process.env,
+        env: dispatchEnv,
         cwd: AGENT_OS_ROOT,
         maxBuffer: 5 * 1024 * 1024,
         // CFG-knobbed (roles.adversarial.merge_authority.dispatch_timeout_ms,
@@ -4848,7 +4872,13 @@ export async function maybeDispatchAmaCloser({
         // provision time (~57s baseline, slower under contention), so the
         // watcher SIGTERM'd healthy dispatches before they returned an lrq ->
         // dispatch-failed -> the hammer never closed.
-        timeout: Number(cfg?.dispatchTimeoutMs) > 0 ? Number(cfg.dispatchTimeoutMs) : 300_000,
+        //
+        // Keep HQ_WORKER_PROVISION_TIMEOUT_SECONDS at-or-below the same wall
+        // clock. hq-worker-provision.sh defaults to 600s; if it outlives this
+        // caller, the watcher fairness guard can abandon the handler while a
+        // child provision keeps running and the closer record stays frozen in
+        // `dispatching` with no lrq.
+        timeout: dispatchTimeoutMs,
         killSignal: 'SIGTERM',
       });
       break;

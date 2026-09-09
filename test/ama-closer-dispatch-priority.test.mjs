@@ -36,8 +36,8 @@ function testDeps() {
   const calls = [];
   return {
     calls,
-    execFileImpl: async (cmd, args) => {
-      calls.push({ cmd, args });
+    execFileImpl: async (cmd, args, options = {}) => {
+      calls.push({ cmd, args, options });
       return { stdout: JSON.stringify({ dispatchId: 'lrq_hammer_1', launchRequestId: 'lrq_hammer_1' }), stderr: '' };
     },
     readTemplateImpl: () => 'hammer prompt <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
@@ -168,6 +168,56 @@ test('LCR: findings-remediation hammer dispatches with --priority normal', async
     'normal',
     'findings-remediation hammer must NOT take the reserved critical lane',
   );
+});
+
+test('LCR: hq dispatch caps worker provision watchdog at the AMA dispatch timeout', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'lcr-provision-timeout-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const previousProvisionTimeout = process.env.HQ_WORKER_PROVISION_TIMEOUT_SECONDS;
+  delete process.env.HQ_WORKER_PROVISION_TIMEOUT_SECONDS;
+  t.after(() => {
+    if (previousProvisionTimeout === undefined) {
+      delete process.env.HQ_WORKER_PROVISION_TIMEOUT_SECONDS;
+    } else {
+      process.env.HQ_WORKER_PROVISION_TIMEOUT_SECONDS = previousProvisionTimeout;
+    }
+  });
+  const deps = testDeps();
+
+  const result = await maybeDispatchAmaCloser({
+    ...findingsRemediationArgs(rootDir, { cfg: { dispatchTimeoutMs: 240_000 } }),
+    ...deps,
+  });
+
+  assert.equal(result.dispatched, true);
+  assert.equal(deps.calls.length, 1);
+  assert.equal(deps.calls[0].options.timeout, 240_000);
+  assert.equal(deps.calls[0].options.env.HQ_WORKER_PROVISION_TIMEOUT_SECONDS, '240');
+});
+
+test('LCR: hq dispatch preserves an already stricter worker provision timeout', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'lcr-provision-timeout-strict-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const previousProvisionTimeout = process.env.HQ_WORKER_PROVISION_TIMEOUT_SECONDS;
+  process.env.HQ_WORKER_PROVISION_TIMEOUT_SECONDS = '45';
+  t.after(() => {
+    if (previousProvisionTimeout === undefined) {
+      delete process.env.HQ_WORKER_PROVISION_TIMEOUT_SECONDS;
+    } else {
+      process.env.HQ_WORKER_PROVISION_TIMEOUT_SECONDS = previousProvisionTimeout;
+    }
+  });
+  const deps = testDeps();
+
+  const result = await maybeDispatchAmaCloser({
+    ...findingsRemediationArgs(rootDir, { cfg: { dispatchTimeoutMs: 240_000 } }),
+    ...deps,
+  });
+
+  assert.equal(result.dispatched, true);
+  assert.equal(deps.calls.length, 1);
+  assert.equal(deps.calls[0].options.timeout, 240_000);
+  assert.equal(deps.calls[0].options.env.HQ_WORKER_PROVISION_TIMEOUT_SECONDS, '45');
 });
 
 test('LCR: non-exhausted request-changes findings do not dispatch hammer before Codex remediation', async (t) => {

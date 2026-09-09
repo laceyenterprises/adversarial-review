@@ -133,6 +133,25 @@ test('pickAdversarialGateStatus reports a genuinely queued Argus job as queued',
   assert.equal(decision.reason, 'argus-security-review-queued');
 });
 
+test('pickAdversarialGateStatus does not hold a routable PR on an unanswered additive Argus job', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      reviewer_head_sha: 'abc123',
+      reviewBody: '## Summary\nClean.\n## Verdict\nComment only',
+    }),
+    headSha: 'abc123',
+    argusVerdict: {
+      state: 'queued',
+      blocks: false,
+      satisfiesGate: false,
+      summary: 'Argus security review is queued for this head.',
+    },
+  });
+
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'review-settled');
+});
+
 test('pickAdversarialGateStatus still explains the legacy unroutable-bot status', () => {
   // ASR-04 stopped writing it, but rows on disk still carry it -- pre-backfill
   // strandings, reopened PRs, and rows written while the kill switch was off.

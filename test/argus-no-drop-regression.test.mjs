@@ -393,10 +393,10 @@ test('a high finding blocks a routable PR whose own review came back clean', () 
   assert.equal(decision.reason, 'argus-security-blocked');
 }));
 
-test('a queued additive Argus job holds a human PR whose own review came back clean', () => withRoot((root) => {
-  // The additive case must hold before Argus reaches a finding. A human review
-  // can approve the diff while Argus is still reading the dependency surface;
-  // that in-flight security question is not a clean gate.
+test('a queued additive Argus job does not hold a human PR whose own review came back clean', () => withRoot((root) => {
+  // Additive Argus enqueue is useful telemetry, but the filesystem queue does
+  // not have a general human-PR consumer. Treating its unanswered state as a
+  // required second reviewer starves otherwise-settled routable PRs.
   const repo = 'laceyenterprises/adversarial-review';
   const headSha = 'd'.repeat(40);
   enqueueArgusSecurityReview({
@@ -410,18 +410,18 @@ test('a queued additive Argus job holds a human PR whose own review came back cl
   const verdict = resolveArgusSecurityVerdict({ rootDir: root, repo, prNumber: 1235, headSha });
   const decision = pickAdversarialGateStatus({
     reviewRow: {
-      review_status: 'reviewed',
+      review_status: 'posted',
       reviewer: 'claude-code',
       reviewer_head_sha: headSha,
-      review_verdict: 'Comment only',
+      reviewBody: '## Summary\nClean.\n## Verdict\nComment only',
     },
     headSha,
     argusVerdict: verdict,
   });
 
   assert.equal(verdict.state, 'queued');
-  assert.equal(decision.state, 'pending');
-  assert.equal(decision.reason, 'argus-security-review-queued');
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'review-settled');
 }));
 
 test('the watcher leaves a human-authored Argus pending job for Argus instead of dependency-bot auto-adjudication', async () => {
@@ -489,7 +489,7 @@ test('the watcher leaves a human-authored Argus pending job for Argus instead of
   }
 });
 
-test('a malformed additive Argus job fails closed instead of hanging or falling through', () => {
+test('a malformed additive Argus job does not hold a routable PR whose own review is settled', () => {
   const headSha = 'e'.repeat(40);
   const verdict = resolveArgusSecurityVerdict({
     rootDir: '/unused',
@@ -504,10 +504,10 @@ test('a malformed additive Argus job fails closed instead of hanging or falling 
   });
   const decision = pickAdversarialGateStatus({
     reviewRow: {
-      review_status: 'reviewed',
+      review_status: 'posted',
       reviewer: 'claude-code',
       reviewer_head_sha: headSha,
-      review_verdict: 'Comment only',
+      reviewBody: '## Summary\nClean.\n## Verdict\nComment only',
     },
     headSha,
     argusVerdict: verdict,
@@ -515,8 +515,8 @@ test('a malformed additive Argus job fails closed instead of hanging or falling 
 
   assert.equal(verdict.state, 'malformed');
   assert.equal(verdict.blocks, true);
-  assert.equal(decision.state, 'failure');
-  assert.equal(decision.reason, 'argus-security-review-malformed');
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'review-settled');
 });
 
 test('a PR Argus never reviewed is unaffected by the verdict wiring', () => withRoot((root) => {

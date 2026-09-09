@@ -159,7 +159,12 @@ export async function timePostedReviewStep(
   logger,
   fn,
   thresholdMs = POSTED_REVIEW_STEP_LOG_THRESHOLD_MS,
-  { deadlineMs = null, setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout } = {},
+  {
+    deadlineMs = null,
+    abortOnDeadline = true,
+    setTimeoutFn = setTimeout,
+    clearTimeoutFn = clearTimeout,
+  } = {},
 ) {
   const startedMs = performance.now();
   let warned = false;
@@ -181,7 +186,7 @@ export async function timePostedReviewStep(
         deadlineTimer = setTimeoutFn(() => {
           timedOut = true;
           const err = new PostedReviewStepDeadlineError(label, key, effectiveDeadlineMs);
-          controller?.abort(err);
+          if (abortOnDeadline) controller?.abort(err);
           reject(err);
         }, effectiveDeadlineMs);
       })
@@ -360,7 +365,7 @@ export async function handlePostedReviewRow({
             signal,
           }),
         undefined,
-        { deadlineMs: coexistenceDeadlineMs },
+        { deadlineMs: coexistenceDeadlineMs, abortOnDeadline: false },
       );
     } catch (err) {
       if (err?.code !== 'POSTED_REVIEW_STEP_DEADLINE_EXCEEDED') throw err;
@@ -368,7 +373,8 @@ export async function handlePostedReviewRow({
       logger?.error?.(
         `[watcher] AMA/merge-agent coexistence deadline exceeded for ${repoPath}#${prNumber}; ` +
           `reason=${reason} deadline_ms=${coexistenceDeadlineMs}. ` +
-          'Skipping merge action for this PR on this tick so the posted-review phase can continue.',
+          'Leaving any in-flight HAM launch to settle under its own lease and dispatch timeout; ' +
+          'skipping merge action for this PR on this tick so the posted-review phase can continue.',
       );
       return {
         handled: true,

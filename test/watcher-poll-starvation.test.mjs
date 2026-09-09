@@ -407,7 +407,7 @@ test('RVHAND-05: posted-review phase defers before starting when remaining budge
   assert.match(warnings[0], /remaining=60000ms minimum_start_budget=66000ms/);
 });
 
-test('RVHAND-04: resolveMergeAgentCoexistence deadline does not consume the remaining phase budget', async () => {
+test('RVHAND-04: resolveMergeAgentCoexistence soft deadline does not consume the remaining phase budget', async () => {
   const oldDeadline = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
   process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = '10';
   const state = createPostedReviewFairnessState();
@@ -466,7 +466,7 @@ test('RVHAND-04: resolveMergeAgentCoexistence deadline does not consume the rema
       logger: silentLogger,
     });
 
-    assert.equal(firstStepAborted, true);
+    assert.equal(firstStepAborted, false);
     assert.equal(summary.timedOut, 0);
     assert.equal(summary.ran, 2);
     assert.equal(summary.deferredAfterTimeout, 0);

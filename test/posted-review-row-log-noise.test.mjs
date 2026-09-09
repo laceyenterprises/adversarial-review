@@ -167,7 +167,45 @@ test('timePostedReviewStep: deadline rejects and aborts pending work', async () 
   assert.match(warnings[0], /posted-review step aborted after deadline/);
 });
 
-test('handlePostedReviewRow: resolveMergeAgentCoexistence deadline returns a named handled outcome', async () => {
+test('timePostedReviewStep: soft deadline rejects without aborting pending work', async () => {
+  const errors = [];
+  let sawAbort = false;
+  let completed = false;
+  let release;
+
+  await assert.rejects(
+    timePostedReviewStep(
+      'resolveMergeAgentCoexistence',
+      'laceyenterprises/agent-os#4242',
+      {
+        warn() {},
+        error: (m) => errors.push(String(m)),
+      },
+      ({ signal }) => new Promise((resolve, reject) => {
+        release = () => {
+          completed = true;
+          resolve('late-success');
+        };
+        signal.addEventListener('abort', () => {
+          sawAbort = true;
+          reject(signal.reason);
+        });
+      }),
+      1000,
+      { deadlineMs: 10, abortOnDeadline: false },
+    ),
+    PostedReviewStepDeadlineError,
+  );
+
+  assert.equal(sawAbort, false, 'soft deadline must not abort the running step');
+  assert.match(errors[0], /posted-review step deadline exceeded/);
+
+  release();
+  await delay(25);
+  assert.equal(completed, true, 'soft-deadlined work can still settle in the background');
+});
+
+test('handlePostedReviewRow: resolveMergeAgentCoexistence deadline is a soft handled outcome', async () => {
   const oldDeadline = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
   process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = '10';
   const errors = [];
@@ -189,7 +227,7 @@ test('handlePostedReviewRow: resolveMergeAgentCoexistence deadline returns a nam
   try {
     const result = await handlePostedReviewRow(args);
 
-    assert.equal(sawAbort, true);
+    assert.equal(sawAbort, false);
     assert.equal(result.handled, true);
     assert.equal(result.outcome, 'coexistence-deadline');
     assert.equal(
@@ -197,6 +235,62 @@ test('handlePostedReviewRow: resolveMergeAgentCoexistence deadline returns a nam
       'resolve-merge-agent-coexistence-deadline-exceeded',
     );
     assert.match(errors.join('\n'), /reason=resolve-merge-agent-coexistence-deadline-exceeded/);
+    assert.match(errors.join('\n'), /Leaving any in-flight HAM launch to settle/);
+  } finally {
+    if (oldDeadline === undefined) {
+      delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
+    } else {
+      process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = oldDeadline;
+    }
+  }
+});
+
+test('handlePostedReviewRow: HAM coexistence deadline does not abort in-flight launch settlement', async () => {
+  const oldDeadline = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
+  process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = '10';
+  const errors = [];
+  let sawAbort = false;
+  let release;
+  let settled = false;
+  const { args } = baseArgs({
+    logger: {
+      log() {},
+      warn() {},
+      error: (m) => errors.push(String(m)),
+    },
+    resolveMergeAgentCoexistenceForWatcherImpl: ({ signal }) => new Promise((resolve, reject) => {
+      release = () => {
+        settled = true;
+        resolve({
+          outcome: 'ama-pending',
+          amaClosureResult: {
+            reason: 'dispatch-deferred-transient',
+            workerClass: 'hammer',
+          },
+        });
+      };
+      signal.addEventListener('abort', () => {
+        sawAbort = true;
+        reject(signal.reason);
+      });
+    }),
+  });
+
+  try {
+    const result = await handlePostedReviewRow(args);
+
+    assert.equal(sawAbort, false);
+    assert.equal(result.handled, true);
+    assert.equal(result.outcome, 'coexistence-deadline');
+    assert.equal(
+      result.amaClosureResult.reason,
+      'resolve-merge-agent-coexistence-deadline-exceeded',
+    );
+    assert.match(errors.join('\n'), /Leaving any in-flight HAM launch to settle/);
+
+    release();
+    await delay(25);
+    assert.equal(settled, true);
   } finally {
     if (oldDeadline === undefined) {
       delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;

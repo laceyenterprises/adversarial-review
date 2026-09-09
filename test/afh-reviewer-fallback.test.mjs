@@ -585,8 +585,9 @@ test('AFH-04R: Claude runtime probe retries transient launchctl failures', async
     execFileImpl: async (cmd, args, options) => {
       calls.push({ cmd, args, timeout: options.timeout });
       if (calls.length === 1) {
-        const err = new Error('Bootstrap failed: 5: Input/output error');
-        err.code = 'EIO';
+        const err = new Error('Command failed: /bin/launchctl asuser 501 /usr/bin/true');
+        err.code = 5;
+        err.stderr = 'Bootstrap failed: 5: Input/output error';
         throw err;
       }
       return { stdout: '' };

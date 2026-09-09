@@ -121,6 +121,15 @@ function reviewerRuntimeProbeErrorText(error) {
   return text || String(error?.message || error || 'runtime probe failed');
 }
 
+function isTransientClaudeRuntimeProbeError(error) {
+  if (isTransientFleetQuotaStatusError(error)) return true;
+  const text = reviewerRuntimeProbeErrorText(error).toLowerCase();
+  return (
+    /input\/output error/u.test(text) ||
+    /bootstrap failed:\s*5\b/u.test(text)
+  );
+}
+
 export async function probeClaudeReviewerRuntime({
   execFileImpl = execFileAsync,
   env = process.env,
@@ -158,7 +167,7 @@ export async function probeClaudeReviewerRuntime({
       return Object.freeze({ available: true, reason: 'ok' });
     } catch (err) {
       lastError = err;
-      if (!isTransientFleetQuotaStatusError(err) || attemptIndex >= attempts - 1) break;
+      if (!isTransientClaudeRuntimeProbeError(err) || attemptIndex >= attempts - 1) break;
       const delayMs = delays[attemptIndex] || 0;
       if (delayMs > 0) await pause(delayMs);
     }

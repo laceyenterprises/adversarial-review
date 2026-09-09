@@ -1315,6 +1315,51 @@ test('RVHAND-10: starvation recovery retries campaign marker after ledger read f
   }
 });
 
+test('RVHAND-10: starvation recovery skips a ledger write failure and promotes the rest', () => {
+  const rootDir = tempRoot();
+  try {
+    const failedIdentity = { repo: REPO, prNumber: 6530 };
+    const promotedIdentity = { repo: REPO, prNumber: 6531 };
+    for (const identity of [failedIdentity, promotedIdentity]) {
+      for (let i = 0; i < DEFAULT_NO_PROGRESS_LANE_CAP + 2; i += 1) {
+        recordNoProgressLaneRun(rootDir, identity, {
+          headSha: HEAD_A,
+          fingerprint: `starved-clean-pr-${identity.prNumber}`,
+          now: `t${i}`,
+          logger: silentLogger,
+        });
+      }
+      assert.equal(readNoProgressLane(rootDir, identity, { logger: silentLogger }).lane, LANE_SLOW);
+    }
+
+    const failedLedgerPath = noProgressLaneFilePath(rootDir, failedIdentity);
+    const laneDir = join(rootDir, 'data', 'watcher-no-progress-lane');
+    const warnings = [];
+    const first = promoteStarvedNoProgressLaneLedgers(rootDir, {
+      now: 'recover-write-failure',
+      logger: { ...silentLogger, warn: (...args) => warnings.push(args.join(' ')) },
+      writeFileAtomicImpl: (filePath, contents) => {
+        if (filePath === failedLedgerPath) throw new Error('disk full while writing ledger');
+        writeFileSync(filePath, contents);
+      },
+    });
+
+    assert.equal(first.attempted, true);
+    assert.equal(first.promoted, 1);
+    assert.equal(first.reason, 'ledger-write-failed');
+    assert.equal(readNoProgressLane(rootDir, failedIdentity, { logger: silentLogger }).lane, LANE_SLOW);
+    assert.equal(readNoProgressLane(rootDir, promotedIdentity, { logger: silentLogger }).lane, LANE_ACTIVE);
+    assert.equal(
+      existsSync(join(laneDir, 'rvhand-10-starved-slow-lane-recovery.promotion.json')),
+      false,
+    );
+    assert.match(warnings.join('\n'), /failed to write promoted ledger/);
+    assert.match(warnings.join('\n'), /left campaign marker unwritten after write errors/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('operator-decision alert fires once after threshold, not every tick', async () => {
   const rootDir = tempRoot();
   try {

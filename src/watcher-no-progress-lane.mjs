@@ -308,6 +308,7 @@ export function promoteStarvedNoProgressLaneLedgers(rootDir, {
   promotionId = STARVED_SLOW_LANE_PROMOTION_ID,
   now = new Date().toISOString(),
   logger = console,
+  writeFileAtomicImpl = writeFileAtomic,
 } = {}) {
   const markerPath = starvedPromotionMarkerPath(rootDir, promotionId);
   if (existsSync(markerPath)) {
@@ -321,7 +322,7 @@ export function promoteStarvedNoProgressLaneLedgers(rootDir, {
   } catch (err) {
     if (err?.code === 'ENOENT') {
       mkdirSync(dir, { recursive: true });
-      writeFileAtomic(markerPath, `${JSON.stringify({
+      writeFileAtomicImpl(markerPath, `${JSON.stringify({
         schemaVersion: 1,
         promotionId,
         promoted: 0,
@@ -339,6 +340,7 @@ export function promoteStarvedNoProgressLaneLedgers(rootDir, {
 
   let promoted = 0;
   let hadReadErrors = false;
+  let hadWriteErrors = false;
   for (const entry of entries) {
     if (!entry.isFile() || !entry.name.endsWith('.json') || entry.name.endsWith('.promotion.json')) {
       continue;
@@ -356,7 +358,6 @@ export function promoteStarvedNoProgressLaneLedgers(rootDir, {
       continue;
     }
     if (doc?.lane !== LANE_SLOW) continue;
-    promoted += 1;
     const promotedFrom = {
       lane: doc.lane,
       noProgressTicks: normalizeCount(doc.noProgressTicks),
@@ -364,28 +365,40 @@ export function promoteStarvedNoProgressLaneLedgers(rootDir, {
       promotionId,
       promotedAt: now,
     };
-    writeFileAtomic(filePath, `${JSON.stringify({
-      ...doc,
-      schemaVersion: NO_PROGRESS_LANE_SCHEMA_VERSION,
-      lane: LANE_ACTIVE,
-      noProgressTicks: 0,
-      skippedTicks: 0,
-      firstNoProgressAt: null,
-      promotedFrom,
-      promotionHistory: promotionHistoryWith(doc, promotedFrom),
-      updatedAt: now,
-    }, null, 2)}\n`);
+    try {
+      writeFileAtomicImpl(filePath, `${JSON.stringify({
+        ...doc,
+        schemaVersion: NO_PROGRESS_LANE_SCHEMA_VERSION,
+        lane: LANE_ACTIVE,
+        noProgressTicks: 0,
+        skippedTicks: 0,
+        firstNoProgressAt: null,
+        promotedFrom,
+        promotionHistory: promotionHistoryWith(doc, promotedFrom),
+        updatedAt: now,
+      }, null, 2)}\n`);
+      promoted += 1;
+    } catch (err) {
+      logger?.warn?.(
+        `[watcher] no-progress lane: failed to write promoted ledger during starvation recovery ` +
+          `${filePath} (${err?.message || err})`,
+      );
+      hadWriteErrors = true;
+    }
   }
 
-  if (hadReadErrors) {
+  if (hadReadErrors || hadWriteErrors) {
+    const errorLabel = hadReadErrors && hadWriteErrors
+      ? 'read/write errors'
+      : hadReadErrors ? 'read errors' : 'write errors';
     logger?.warn?.(
       `[watcher] no-progress lane: starvation recovery promoted ${promoted} readable ` +
-        `ledger(s) but left campaign marker unwritten after read errors (${promotionId})`,
+        `ledger(s) but left campaign marker unwritten after ${errorLabel} (${promotionId})`,
     );
-    return { attempted: true, promoted, reason: 'ledger-read-failed' };
+    return { attempted: true, promoted, reason: hadReadErrors ? 'ledger-read-failed' : 'ledger-write-failed' };
   }
 
-  writeFileAtomic(markerPath, `${JSON.stringify({
+  writeFileAtomicImpl(markerPath, `${JSON.stringify({
     schemaVersion: 1,
     promotionId,
     promoted,

@@ -3701,11 +3701,20 @@ export async function maybeDispatchAmaCloser({
     });
   }
   const mergedSignalUnknown = isUnknownMergedSignal(mergedSignal);
+  const existingRecordIsStaleLaunchOnlyDispatch = hasInterruptedInFlightAmaCloserDispatchShape(existingRecord)
+    && isStaleDispatchingAmaCloserRecord(existingRecord, { now: dispatchContext.dispatchedAt })
+    && (
+      !existingLeaseBeforeDispatch
+      || isReclaimablePendingAmaCloserLease(existingLeaseBeforeDispatch, {
+        now: dispatchContext.dispatchedAt,
+        processKillImpl,
+      })
+    );
   const existingRecordIsReclaimableInterruption = isInterruptedInFlightAmaCloserDispatch(
     existingRecord,
     existingLeaseBeforeDispatch,
     { now: dispatchContext.dispatchedAt, processKillImpl },
-  );
+  ) || existingRecordIsStaleLaunchOnlyDispatch;
   const existingRecordHasLivePendingInterruption = hasInterruptedInFlightAmaCloserDispatchShape(existingRecord)
     && existingLeaseBeforeDispatch?.status === AMA_CLOSER_LEASE_STATUS.PENDING
     && !existingRecordIsReclaimableInterruption;
@@ -4337,8 +4346,8 @@ export async function maybeDispatchAmaCloser({
   ) {
     // Genuine completed failures are bounded; an interrupted in-flight dispatch
     // (watcher SIGTERM'd mid-launch, e.g. a deploy bounce) is reclaimed below
-    // only after the stale `pending` lease it left behind proves the owner died
-    // or outlived the full hq dispatch retry loop.
+    // after its stale `pending` lease proves the owner died/outlived the launch
+    // loop, or after the lease reaper already removed that stale pending lease.
     return noAmaDispatch({ dispatched: false, reason: 'dispatch-retry-exhausted' });
   } else if (
     existingRecordIsBranchHolderBlocked

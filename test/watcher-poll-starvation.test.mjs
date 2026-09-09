@@ -1003,6 +1003,26 @@ test('runPostedReviewHandlersFairly runs the handler when the lane gate faults',
   assert.deepEqual(ran, [1], 'a lane fault must never suppress a PR');
 });
 
+test('RVHAND-10: posted-review summary counts nested AMA daemon clean merges', async () => {
+  const summary = await runPostedReviewHandlersFairly({
+    handlers: [{
+      repoPath: REPO,
+      prNumber: 6529,
+      run: async () => ({
+        handled: true,
+        prTerminal: true,
+        amaClosureResult: {
+          daemonCleanMerge: { merged: true, disposition: 'merged' },
+        },
+      }),
+    }],
+    logger: silentLogger,
+  });
+
+  assert.equal(summary.ran, 1);
+  assert.equal(summary.daemonCleanMerges, 1);
+});
+
 // ── No-progress lane ─────────────────────────────────────────────────────────
 
 test('no-progress lane demotes at the cap, and any state change resets it', () => {

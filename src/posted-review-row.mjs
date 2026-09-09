@@ -405,7 +405,13 @@ export async function handlePostedReviewRow({
         `${coexistenceDecision.terminalReason} — dropping ownership`
       );
       clearNoProgressLane(rootDir, { repo: repoPath, prNumber }, { logger });
-      return { handled: true, dispatchJob, prTerminal: true, gateDecision: gateProjection?.decision || null };
+      return {
+        handled: true,
+        dispatchJob,
+        prTerminal: true,
+        amaClosureResult: coexistenceDecision.amaClosureResult || null,
+        gateDecision: gateProjection?.decision || null,
+      };
     }
     if (coexistenceDecision.outcome === 'ama-dispatched') {
       const { amaClosureResult } = coexistenceDecision;

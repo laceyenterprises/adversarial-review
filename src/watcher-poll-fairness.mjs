@@ -108,8 +108,9 @@ export function resolvePostedReviewReviewerPressurePhaseBudgetMs(env = process.e
 }
 
 function isDaemonCleanMergeMerged(value) {
-  return value?.daemonCleanMerge?.merged === true
-    || value?.daemonCleanMerge?.disposition === 'merged';
+  const daemonCleanMerge = value?.amaClosureResult?.daemonCleanMerge || value?.daemonCleanMerge;
+  return daemonCleanMerge?.merged === true
+    || daemonCleanMerge?.disposition === 'merged';
 }
 
 export function resolvePostedReviewHandlerTimeoutMs(env = process.env) {

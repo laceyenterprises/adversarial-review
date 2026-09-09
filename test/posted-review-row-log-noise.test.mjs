@@ -539,3 +539,22 @@ test('handlePostedReviewRow: await-operator returns the AMA closure result', asy
   assert.equal(result.amaClosureResult, amaClosureResult);
   assert.match(logs.at(-1), /not-eligible:blocking-findings-present/);
 });
+
+test('handlePostedReviewRow: terminal PR result returns AMA closure details', async () => {
+  const amaClosureResult = {
+    reason: 'pr-merged',
+    daemonCleanMerge: { merged: true, disposition: 'merged' },
+  };
+  const { args } = baseArgs({
+    resolveMergeAgentCoexistenceForWatcherImpl: async () => ({
+      outcome: 'pr-terminal',
+      terminalReason: 'merged',
+      amaClosureResult,
+    }),
+  });
+
+  const result = await handlePostedReviewRow(args);
+
+  assert.equal(result.prTerminal, true);
+  assert.equal(result.amaClosureResult, amaClosureResult);
+});

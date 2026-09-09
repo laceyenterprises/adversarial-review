@@ -115,6 +115,12 @@ guarantees a new PR is **seen**.
   (`ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS`, default 10m). Handlers cut
   off are **deferred, not dropped**: their keys are promoted to the front of the
   next tick, so the cut point rotates and the same tail cannot be starved.
+- **Reviewer-pressure cap**
+  (`ADVERSARIAL_WATCHER_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS`, default
+  2m). When the tick just dispatched or deferred reviewer work, posted-review
+  handlers get this shorter cap for that tick only. This keeps fresh first-pass
+  and rereview claims from sitting behind a large hammer/merge-closeout backlog
+  while preserving the normal 10m window when no reviewer lane work moved.
 
 ### 3. A no-progress lane (`src/watcher-no-progress-lane.mjs`)
 

@@ -14,6 +14,7 @@ import {
   resolvePostedReviewHandlerHeadroomMs,
   resolvePostedReviewHandlerTimeoutMs,
   resolvePostedReviewPhaseBudgetMs,
+  resolvePostedReviewReviewerPressurePhaseBudgetMs,
 } from '../src/watcher-poll-fairness.mjs';
 
 // Drive handlePostedReviewRow straight to the AMA `ama-pending` retained-ownership
@@ -75,6 +76,16 @@ test('RVHAND-06: bounded posted-review step budgets fit under the handler cap', 
     boundedStepBudgetTotalMs + headroomMs <= handlerTimeoutMs,
     `step budgets (${boundedStepBudgetTotalMs}ms) + headroom (${headroomMs}ms) ` +
       `must fit under handler cap (${handlerTimeoutMs}ms)`,
+  );
+});
+
+test('RVHAND-07: reviewer-pressure posted-review phase budget has a bounded default and override', () => {
+  assert.equal(resolvePostedReviewReviewerPressurePhaseBudgetMs({}), 120_000);
+  assert.equal(
+    resolvePostedReviewReviewerPressurePhaseBudgetMs({
+      ADVERSARIAL_WATCHER_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS: '90000',
+    }),
+    90_000,
   );
 });
 

@@ -67,6 +67,7 @@ import {
   resolvePostedReviewHandlerHeadroomMs,
   resolvePostedReviewHandlerTimeoutMs,
   resolvePostedReviewPhaseBudgetMs,
+  resolvePostedReviewReviewerPressurePhaseBudgetMs,
   runPostedReviewHandlersFairly,
 } from './watcher-poll-fairness.mjs';
 
@@ -762,12 +763,14 @@ export async function runQueuedReviewAdoptionPhase({
   // drive the budget/lane without a clock or a database.
   postedReviewFairness = postedReviewFairnessState,
   postedReviewPhaseBudgetMs = resolvePostedReviewPhaseBudgetMs(),
+  postedReviewReviewerPressurePhaseBudgetMs = resolvePostedReviewReviewerPressurePhaseBudgetMs(),
   postedReviewHandlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs(),
   minimumHandlerStartBudgetMs = resolveMergeAgentCoexistenceStepDeadlineMs(
     process.env,
     { handlerTimeoutMs: postedReviewHandlerTimeoutMs },
   ),
   noProgressLaneGate = createNoProgressLaneGate({ rootDir, logger }),
+  runPostedReviewHandlersFairlyImpl = runPostedReviewHandlersFairly,
 } = {}) {
   if (typeof drainReviewerDispatchCandidates !== 'function') {
     throw new TypeError('runQueuedReviewAdoptionPhase requires drainReviewerDispatchCandidates');
@@ -784,7 +787,26 @@ export async function runQueuedReviewAdoptionPhase({
   // Reviewer candidates were collected during the PR discovery sweep. Launch
   // them before the posted-review/hammer lane so a slow closer cannot hold every
   // first-pass or re-review claim until the tail of the tick.
-  await drainReviewerDispatchCandidates('posted-review handlers');
+  const reviewerDrainResult = await drainReviewerDispatchCandidates('posted-review handlers');
+  const reviewerDispatchCount = Number(reviewerDrainResult?.dispatched || 0);
+  const reviewerDeferredCount = Number(reviewerDrainResult?.deferred || 0);
+  const reviewerPressure = reviewerDispatchCount > 0 || reviewerDeferredCount > 0;
+  const reviewerPressurePhaseBudgetMs = Number(postedReviewReviewerPressurePhaseBudgetMs);
+  const boundedReviewerPressurePhaseBudgetMs =
+    Number.isFinite(reviewerPressurePhaseBudgetMs) && reviewerPressurePhaseBudgetMs > 0
+      ? reviewerPressurePhaseBudgetMs
+      : postedReviewPhaseBudgetMs;
+  const effectivePostedReviewPhaseBudgetMs = reviewerPressure
+    ? Math.min(postedReviewPhaseBudgetMs, boundedReviewerPressurePhaseBudgetMs)
+    : postedReviewPhaseBudgetMs;
+  if (reviewerPressure && effectivePostedReviewPhaseBudgetMs < postedReviewPhaseBudgetMs) {
+    logger?.warn?.(
+      `[watcher] posted-review phase budget capped under reviewer pressure: ` +
+        `dispatched=${reviewerDispatchCount} deferred=${reviewerDeferredCount} ` +
+        `budget_ms=${effectivePostedReviewPhaseBudgetMs} ` +
+        `normal_budget_ms=${postedReviewPhaseBudgetMs}`,
+    );
+  }
 
   // WPS-01/RVHAND-01: this loop used to be unbounded — every queued handler, to
   // completion, every tick. When the queue filled with PRs that could not
@@ -794,10 +816,10 @@ export async function runQueuedReviewAdoptionPhase({
   // no-progress lane, which is what stops the same unadvanceable set from
   // re-consuming the budget on every tick. It now runs after lifecycle sync, so
   // stale terminal rows are cleaned before any per-PR hammer path can wait.
-  await runPostedReviewHandlersFairly({
+  await runPostedReviewHandlersFairlyImpl({
     handlers: postedReviewHandlers,
     state: postedReviewFairness,
-    budgetMs: postedReviewPhaseBudgetMs,
+    budgetMs: effectivePostedReviewPhaseBudgetMs,
     handlerTimeoutMs: postedReviewHandlerTimeoutMs,
     minimumHandlerStartBudgetMs,
     laneGate: noProgressLaneGate,

@@ -60,7 +60,7 @@ test('watcher drains queued reviewer dispatches before merge-side handoffs', () 
   // postedReviewHandlers)` loop became a budgeted, lane-gated scheduler call.
   // Reviewer dispatch now drains ahead of that handler lane so review claims are
   // not held behind a single slow hammer path.
-  const postedDrain = phase.indexOf('await runPostedReviewHandlersFairly({');
+  const postedDrain = phase.indexOf('await runPostedReviewHandlersFairlyImpl({');
   const lifecycleCleanup = phase.indexOf('await retryPendingMergeAgentLifecycleCleanupsImpl();');
   const lifecycleSync = phase.indexOf('await syncPRLifecycleImpl(octokit, operatorSurface, primaryDomainId);');
   const dagAutowalk = phase.indexOf('await retryPendingDagAutowalkOnMergeImpl();');
@@ -191,4 +191,119 @@ test('watcher post-review phase behavior drains reviewers first and isolates mai
   assert.equal(errors.length, 1);
   assert.match(errors[0], /post-review maintenance failed for laceyenterprises\/adversarial-review/);
   assert.match(errors[0], /boom/);
+});
+
+test('watcher caps posted-review phase budget when reviewer dispatch is under pressure', async () => {
+  const events = [];
+  const warnings = [];
+  const fairnessCalls = [];
+
+  await runQueuedReviewAdoptionPhase({
+    drainReviewerDispatchCandidates: async (reason) => {
+      events.push(`drain:${reason}`);
+      return { dispatched: 1, deferred: 2, maxObservedConcurrency: 1 };
+    },
+    postedReviewHandlers: [
+      {
+        repoPath: 'laceyenterprises/agent-os',
+        prNumber: 6528,
+        run: async () => {
+          events.push('posted-review-handoff');
+        },
+      },
+    ],
+    retryPendingMergeAgentLifecycleCleanupsImpl: async () => {
+      events.push('lifecycle-cleanup');
+    },
+    syncPRLifecycleImpl: async () => {
+      events.push('lifecycle-sync');
+    },
+    retryPendingTriageSyncsImpl: async () => ({ attempted: 0, synced: 0, pending: 0 }),
+    retryPendingDagAutowalkOnMergeImpl: async () => {
+      events.push('dag-autowalk');
+    },
+    retryPendingMergeCloseoutsImpl: async () => {
+      events.push('merge-closeouts');
+    },
+    retryPendingRetriggerAckCommentsImpl: async () => ({ attempted: 0, posted: 0 }),
+    retryPendingRetriggerReviewAckCommentsImpl: async () => ({ attempted: 0, posted: 0 }),
+    runPostedReviewHandlersFairlyImpl: async (args) => {
+      fairnessCalls.push(args);
+      events.push(`posted-budget:${args.budgetMs}`);
+      return {
+        queued: args.handlers.length,
+        ran: args.handlers.length,
+        failed: 0,
+        timedOut: 0,
+        skippedByLane: 0,
+        deferredByBudget: 0,
+        deferredAfterTimeout: 0,
+        continuedAfterTimeout: 0,
+        deferred: [],
+      };
+    },
+    postedReviewPhaseBudgetMs: 600_000,
+    postedReviewReviewerPressurePhaseBudgetMs: 120_000,
+    logger: {
+      log: () => {},
+      warn: (...args) => warnings.push(args.join(' ')),
+      error: () => {},
+    },
+  });
+
+  assert.deepEqual(events, [
+    'lifecycle-cleanup',
+    'lifecycle-sync',
+    'drain:posted-review handlers',
+    'posted-budget:120000',
+    'dag-autowalk',
+    'merge-closeouts',
+  ]);
+  assert.equal(fairnessCalls.length, 1);
+  assert.equal(fairnessCalls[0].budgetMs, 120_000);
+  assert.equal(fairnessCalls[0].handlers.length, 1);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /posted-review phase budget capped under reviewer pressure/);
+  assert.match(warnings[0], /dispatched=1 deferred=2/);
+});
+
+test('watcher keeps normal posted-review phase budget when reviewer drain is idle', async () => {
+  const fairnessCalls = [];
+  const warnings = [];
+
+  await runQueuedReviewAdoptionPhase({
+    drainReviewerDispatchCandidates: async () => ({ dispatched: 0, deferred: 0 }),
+    retryPendingMergeAgentLifecycleCleanupsImpl: async () => {},
+    syncPRLifecycleImpl: async () => {},
+    retryPendingTriageSyncsImpl: async () => ({ attempted: 0, synced: 0, pending: 0 }),
+    retryPendingDagAutowalkOnMergeImpl: async () => {},
+    retryPendingMergeCloseoutsImpl: async () => {},
+    retryPendingRetriggerAckCommentsImpl: async () => ({ attempted: 0, posted: 0 }),
+    retryPendingRetriggerReviewAckCommentsImpl: async () => ({ attempted: 0, posted: 0 }),
+    runPostedReviewHandlersFairlyImpl: async (args) => {
+      fairnessCalls.push(args);
+      return {
+        queued: 0,
+        ran: 0,
+        failed: 0,
+        timedOut: 0,
+        skippedByLane: 0,
+        deferredByBudget: 0,
+        deferredAfterTimeout: 0,
+        continuedAfterTimeout: 0,
+        deferred: [],
+      };
+    },
+    postedReviewPhaseBudgetMs: 600_000,
+    postedReviewReviewerPressurePhaseBudgetMs: 120_000,
+    logger: {
+      log: () => {},
+      warn: (...args) => warnings.push(args.join(' ')),
+      error: () => {},
+    },
+  });
+
+  assert.equal(fairnessCalls.length, 1);
+  assert.equal(fairnessCalls[0].budgetMs, 600_000);
+  assert.equal(warnings.length, 0);
 });

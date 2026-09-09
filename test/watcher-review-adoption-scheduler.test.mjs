@@ -36,6 +36,8 @@ test('watcher drains queued reviewer dispatches before merge-side handoffs', () 
   // Queue initialization is part of pollOnce and stays in watcher.mjs.
   const candidateQueue = watcher.indexOf('const reviewerDispatchCandidates = [];');
   const postedQueue = watcher.indexOf('const postedReviewHandlers = [];');
+  const discoveryDrainHelper = watcher.indexOf('async function drainReviewerDispatchCandidatesIfBatchReady(reason)');
+  const subjectFifoSort = watcher.indexOf('.sort((a, b) => compareReviewerDispatchCandidates({');
   const orgRefresh = watcher.indexOf('await refreshOrgRepos(octokit);');
   const frontLifecycleCleanup = watcher.indexOf('await retryPendingMergeAgentLifecycleCleanups();', orgRefresh);
   const frontLifecycleSync = watcher.indexOf(
@@ -45,6 +47,10 @@ test('watcher drains queued reviewer dispatches before merge-side handoffs', () 
   // pollOnce drives the per-PR processing phase, which is where the posted
   // handoff is enqueued (ARC-18: the enqueue moved to pollonce-phases.mjs).
   const perPrPhaseCall = watcher.indexOf('await processReviewSubject(subjectEntry, {');
+  const midDiscoveryDrain = watcher.indexOf(
+    "await drainReviewerDispatchCandidatesIfBatchReady('continuing reviewer discovery');",
+    perPrPhaseCall,
+  );
   const postedEnqueue = pollPhases.indexOf('postedReviewHandlers.push({');
   // The executable phase ordering moved into the runQueuedReviewAdoptionPhase
   // helper, now in posted-review-row.mjs.
@@ -62,10 +68,13 @@ test('watcher drains queued reviewer dispatches before merge-side handoffs', () 
 
   assert.notEqual(candidateQueue, -1, 'reviewer dispatch candidate queue exists');
   assert.notEqual(postedQueue, -1, 'posted review handoffs are queued');
+  assert.notEqual(discoveryDrainHelper, -1, 'watcher has a bounded mid-discovery reviewer drain');
+  assert.notEqual(subjectFifoSort, -1, 'discovered subjects are reviewer-FIFO sorted before bounded drains');
   assert.notEqual(orgRefresh, -1, 'pollOnce refreshes org repos');
   assert.notEqual(frontLifecycleCleanup, -1, 'pollOnce runs front-of-tick lifecycle cleanup');
   assert.notEqual(frontLifecycleSync, -1, 'pollOnce runs front-of-tick lifecycle sync');
   assert.notEqual(perPrPhaseCall, -1, 'pollOnce drives the per-PR processing phase');
+  assert.notEqual(midDiscoveryDrain, -1, 'pollOnce can drain a full reviewer batch before discovery completes');
   assert.notEqual(postedEnqueue, -1, 'posted review rows enqueue their handoff');
   assert.notEqual(phaseHelper, -1, 'post-review phase helper exists');
   assert.notEqual(drainBeforePostedHandlers, -1, 'reviewer dispatch drain exists before posted-review handlers');
@@ -76,10 +85,13 @@ test('watcher drains queued reviewer dispatches before merge-side handoffs', () 
   assert.notEqual(maintenanceLoop, -1, 'post-review maintenance handlers still run');
 
   assert.ok(candidateQueue < postedQueue, 'queues are initialized near the reviewer scheduler');
+  assert.ok(candidateQueue < discoveryDrainHelper, 'bounded drain helper is scoped to the tick candidate queue');
+  assert.ok(subjectFifoSort < perPrPhaseCall, 'subjects are FIFO sorted before processReviewSubject can enqueue candidates');
   assert.ok(postedQueue < perPrPhaseCall, 'posted handler queue is initialized before the per-PR phase that enqueues into it');
   assert.ok(orgRefresh < frontLifecycleCleanup, 'lifecycle cleanup runs after repo refresh gives the tick its operator surface');
   assert.ok(frontLifecycleCleanup < frontLifecycleSync, 'front-of-tick cleanup runs before front-of-tick lifecycle sync');
   assert.ok(frontLifecycleSync < perPrPhaseCall, 'lifecycle sync runs before the per-PR discovery/retry sweep');
+  assert.ok(perPrPhaseCall < midDiscoveryDrain, 'mid-discovery drain runs immediately after per-PR enqueue opportunity');
   assert.ok(phaseHelper < lifecycleCleanup, 'ordering lives in the executable phase helper');
   assert.ok(lifecycleCleanup < lifecycleSync, 'merge-agent lifecycle cleanup runs before lifecycle sync');
   assert.ok(lifecycleSync < drainBeforePostedHandlers, 'lifecycle sync runs before reviewer dispatch');

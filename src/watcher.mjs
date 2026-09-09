@@ -1238,6 +1238,8 @@ async function pollOnce(
   const getRoutingTierReadinessForTick = createRoutingTierReadinessProbeCache();
   const getHcpHealthzForTick = createTickHcpHealthzProbe();
   const reviewerCommandFailedReviewProbe = makeReviewPostedProbe(octokit);
+  const reviewerDiscoveryDrainBatchSize = Math.max(1, reviewerPoolConfig.maxConcurrent || 1);
+  let reviewerDiscoveryDrainUsed = false;
   async function drainReviewerDispatchCandidates(reason) {
     if (!reviewerPoolConfig.enabled || reviewerDispatchCandidates.length === 0) {
       return { dispatched: 0, maxObservedConcurrency: 0 };
@@ -1282,6 +1284,16 @@ async function pollOnce(
         );
       }
     }
+  }
+  async function drainReviewerDispatchCandidatesIfBatchReady(reason) {
+    if (reviewerDiscoveryDrainUsed) {
+      return { dispatched: 0, maxObservedConcurrency: 0, deferred: 0 };
+    }
+    if (reviewerDispatchCandidates.length < reviewerDiscoveryDrainBatchSize) {
+      return { dispatched: 0, maxObservedConcurrency: 0, deferred: 0 };
+    }
+    reviewerDiscoveryDrainUsed = true;
+    return drainReviewerDispatchCandidates(reason);
   }
 
   // ARC-03: pump every enabled domain through its own adapter set instead of
@@ -1354,27 +1366,25 @@ async function pollOnce(
         return null;
       }
     }))).filter(Boolean);
-    if (!reviewerPoolConfig.enabled) {
-      subjectEntries = subjectEntries
-        .map((entry) => ({
-          ...entry,
-          current: stmtGetReviewRow.get(repoPath, entry.prNumber),
-        }))
-        .sort((a, b) => compareReviewerDispatchCandidates({
-          repoPath,
-          prNumber: a.prNumber,
-          subject: a.subject,
-          current: a.current,
-        }, {
-          repoPath,
-          prNumber: b.prNumber,
-          subject: b.subject,
-          current: b.current,
-        }));
-    }
+    subjectEntries = subjectEntries
+      .map((entry) => ({
+        ...entry,
+        current: stmtGetReviewRow.get(repoPath, entry.prNumber),
+      }))
+      .sort((a, b) => compareReviewerDispatchCandidates({
+        repoPath,
+        prNumber: a.prNumber,
+        subject: a.subject,
+        current: a.current,
+      }, {
+        repoPath,
+        prNumber: b.prNumber,
+        subject: b.subject,
+        current: b.current,
+      }));
 
     // WPS-01: a PR that has never been reviewed goes to the front of the tick —
-    // note the pool-disabled sort just above orders oldest-created FIRST, which
+    // note the reviewer FIFO sort just above orders oldest-created FIRST, which
     // puts a brand-new PR dead last. Rationale in watcher-poll-fairness.mjs.
     subjectEntries = orderSubjectEntriesDiscoveryFirst(subjectEntries, {
       repoPath,
@@ -1427,6 +1437,7 @@ async function pollOnce(
         normalizeReviewPopulationRetryConfig,
         shouldDeferReviewForActiveFollowUp,
       });
+      await drainReviewerDispatchCandidatesIfBatchReady('continuing reviewer discovery');
     }
 
     postReviewMaintenanceHandlers.push({

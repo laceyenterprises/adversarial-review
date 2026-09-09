@@ -298,8 +298,9 @@ export async function runPostedReviewHandlersFairly({
     }
 
     const handlerStartedMs = nowMs();
+    const handlerDeadlineMs = parsePositiveMs(handler?.timeoutMs, effectiveHandlerTimeoutMs);
     const outcome = await runWithDeadline(() => handler.run(), {
-      timeoutMs: effectiveHandlerTimeoutMs,
+      timeoutMs: handlerDeadlineMs,
       setTimeoutFn,
       clearTimeoutFn,
     });
@@ -322,7 +323,7 @@ export async function runPostedReviewHandlersFairly({
       const phaseElapsedAtStartMs = Math.round(handlerStartedMs - startedMs);
       const phaseElapsedTotalMs = Math.round(nowMs() - startedMs);
       logger?.error?.(
-        `[watcher] posted-review handler for ${key} exceeded ${effectiveHandlerTimeoutMs}ms; ` +
+        `[watcher] posted-review handler for ${key} exceeded ${handlerDeadlineMs}ms; ` +
           'abandoning it so the tick can return to new-PR discovery ' +
           `(elapsed=${handlerElapsedMs}ms position=${index + 1}/${ordered.length} ` +
           `phase_elapsed_at_start=${phaseElapsedAtStartMs}ms ` +

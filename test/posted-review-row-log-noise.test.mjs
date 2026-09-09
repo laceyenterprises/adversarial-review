@@ -4,9 +4,11 @@ import assert from 'node:assert/strict';
 import {
   PostedReviewStepDeadlineError,
   handlePostedReviewRow,
+  resolveMergeAgentCoexistenceStepDeadlineMs,
   timePostedReviewStep,
 } from '../src/posted-review-row.mjs';
 import { createLogChangeGate } from '../src/log-change-gate.mjs';
+import { resolvePostedReviewPhaseBudgetMs } from '../src/watcher-poll-fairness.mjs';
 
 // Drive handlePostedReviewRow straight to the AMA `ama-pending` retained-ownership
 // branch with fully injected collaborators, then assert the LOG-ONLY line is
@@ -44,6 +46,20 @@ function baseArgs(overrides = {}) {
 
 const retained = (logs) => logs.filter((m) => /AMA hammer route retained ownership/.test(m));
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test('RVHAND-05: resolveMergeAgentCoexistence deadline is derived below the posted-review phase budget', () => {
+  const env = {
+    ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS: '330000',
+    ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS: '300000',
+  };
+
+  const phaseBudgetMs = resolvePostedReviewPhaseBudgetMs(env);
+  const deadlineMs = resolveMergeAgentCoexistenceStepDeadlineMs(env);
+
+  assert.equal(phaseBudgetMs, 330_000);
+  assert.equal(deadlineMs, 66_000);
+  assert.ok(deadlineMs < phaseBudgetMs);
+});
 
 test('timePostedReviewStep: warns while a step is still pending', async () => {
   const warnings = [];

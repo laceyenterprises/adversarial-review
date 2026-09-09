@@ -63,6 +63,7 @@ import {
 } from './watcher-no-progress-lane.mjs';
 import {
   createPostedReviewFairnessState,
+  derivePostedReviewExpensiveStepBudgetMs,
   resolvePostedReviewHandlerTimeoutMs,
   resolvePostedReviewPhaseBudgetMs,
   runPostedReviewHandlersFairly,
@@ -118,7 +119,6 @@ function isTerminalReviewRow(row) {
 // finishes. A handler that hangs now names the step it is still waiting on; a
 // slow step that eventually completes also records the monotonic elapsed time.
 const POSTED_REVIEW_STEP_LOG_THRESHOLD_MS = 5000;
-const DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = 300_000;
 
 export class PostedReviewStepDeadlineError extends Error {
   constructor(label, key, deadlineMs) {
@@ -136,11 +136,16 @@ function parsePositiveMs(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-export function resolveMergeAgentCoexistenceStepDeadlineMs(env = process.env) {
-  return parsePositiveMs(
+export function resolveMergeAgentCoexistenceStepDeadlineMs(
+  env = process.env,
+  { phaseBudgetMs = resolvePostedReviewPhaseBudgetMs(env) } = {},
+) {
+  const derivedDeadlineMs = derivePostedReviewExpensiveStepBudgetMs(phaseBudgetMs);
+  const overrideDeadlineMs = parsePositiveMs(
     env?.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS,
-    DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS,
+    derivedDeadlineMs,
   );
+  return Math.min(overrideDeadlineMs, derivedDeadlineMs);
 }
 
 export async function timePostedReviewStep(
@@ -727,6 +732,10 @@ export async function runQueuedReviewAdoptionPhase({
   postedReviewFairness = postedReviewFairnessState,
   postedReviewPhaseBudgetMs = resolvePostedReviewPhaseBudgetMs(),
   postedReviewHandlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs(),
+  minimumHandlerStartBudgetMs = resolveMergeAgentCoexistenceStepDeadlineMs(
+    process.env,
+    { phaseBudgetMs: postedReviewPhaseBudgetMs },
+  ),
   noProgressLaneGate = createNoProgressLaneGate({ rootDir, logger }),
 } = {}) {
   if (typeof drainReviewerDispatchCandidates !== 'function') {
@@ -759,6 +768,7 @@ export async function runQueuedReviewAdoptionPhase({
     state: postedReviewFairness,
     budgetMs: postedReviewPhaseBudgetMs,
     handlerTimeoutMs: postedReviewHandlerTimeoutMs,
+    minimumHandlerStartBudgetMs,
     laneGate: noProgressLaneGate,
     logger,
   });

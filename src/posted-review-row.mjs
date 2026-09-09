@@ -104,6 +104,35 @@ function isTerminalReviewRow(row) {
   return Boolean(row?.merged_at || row?.mergedAt || row?.closed_at || row?.closedAt);
 }
 
+// RVHAND-03: an abandoned handler cannot report its own timing.
+//
+// `runWithDeadline` in the fairness loop stops WAITING on a slow handler and lets
+// the tick continue; the handler is never told, so any breakdown it would emit at
+// the end is never reached. RVHAND-02 established that these timeouts are always a
+// single slow handler (13/13 samples start with the phase idle, 2-233ms in) and
+// never phase saturation — but it cannot say WHICH step inside the handler is slow,
+// precisely because the handler dies before reporting.
+//
+// So log each step as it COMPLETES, and only when it is slow enough to matter. A
+// handler that hangs then leaves a trail of finished steps, and the step that never
+// appears is the one that hung. Under the threshold this is silent, so the normal
+// path costs one comparison per step.
+const POSTED_REVIEW_STEP_LOG_THRESHOLD_MS = 5000;
+
+async function timePostedReviewStep(label, key, logger, fn) {
+  const startedMs = Date.now();
+  try {
+    return await fn();
+  } finally {
+    const elapsedMs = Date.now() - startedMs;
+    if (elapsedMs >= POSTED_REVIEW_STEP_LOG_THRESHOLD_MS) {
+      logger?.warn?.(
+        `[watcher] posted-review step slow for ${key}: ${label} took ${elapsedMs}ms`,
+      );
+    }
+  }
+}
+
 export async function handlePostedReviewRow({
   rootDir = ROOT,
   repoPath,
@@ -126,7 +155,10 @@ export async function handlePostedReviewRow({
   logGate = postedReviewRowLogGate,
   logger = console,
 } = {}) {
-  const gateProjection = await projectGateStatusSafe(existing);
+  const stepKey = `${repoPath}#${prNumber}`;
+  const gateProjection = await timePostedReviewStep(
+    'projectGateStatusSafe', stepKey, logger, () => projectGateStatusSafe(existing),
+  );
 
   try {
     const latestPostedReviewBody = latestPostedReviewBodyFinder(rootDir, { repo: repoPath, prNumber });
@@ -180,32 +212,38 @@ export async function handlePostedReviewRow({
     // drain first. This live fetch is therefore the dispatch-time guard: it
     // re-reads PR state/mergeability/head before AMA or merge-agent selection
     // instead of trusting the previous tick's lifecycle mirror.
-    const candidate = await fetchMergeAgentCandidateImpl(repoPath, prNumber, {
-      execFileImpl,
-      operatorApprovalEvent,
-      mergeAgentRequestEvent,
-    });
+    const candidate = await timePostedReviewStep(
+      'fetchMergeAgentCandidate', stepKey, logger, () =>
+        fetchMergeAgentCandidateImpl(repoPath, prNumber, {
+          execFileImpl,
+          operatorApprovalEvent,
+          mergeAgentRequestEvent,
+        }),
+    );
     const dispatchJob = buildMergeAgentDispatchJobImpl(rootDir, candidate, { reviewStateDb: db });
 
     // MSM-04: AMA-enabled posted-review rows have one autonomous merge route:
     // clean PRs are handled by the daemon, and dirty/conflicted/red-CI PRs are
     // handled by one hammer under the launch lease. A separate merge-clicking
     // agent is no longer a valid outcome.
-    const coexistenceDecision = await resolveMergeAgentCoexistenceForWatcherImpl({
-      rootDir,
-      reviewStateRow: existing,
-      dispatchJob,
-      candidate,
-      labelNames,
-      operatorApprovalEvent,
-      mergeAgentRequestEvent,
-      adversarialMergeRequestedEvent,
-      repoPath,
-      prNumber,
-      currentRevisionRef,
-      domainId,
-      logger,
-    });
+    const coexistenceDecision = await timePostedReviewStep(
+      'resolveMergeAgentCoexistence', stepKey, logger, () =>
+        resolveMergeAgentCoexistenceForWatcherImpl({
+          rootDir,
+          reviewStateRow: existing,
+          dispatchJob,
+          candidate,
+          labelNames,
+          operatorApprovalEvent,
+          mergeAgentRequestEvent,
+          adversarialMergeRequestedEvent,
+          repoPath,
+          prNumber,
+          currentRevisionRef,
+          domainId,
+          logger,
+        }),
+    );
     if (coexistenceDecision.outcome === 'pr-terminal') {
       // BUG-1: the live candidate read shows the PR already merged. No
       // AMA/merge-agent action is possible — drop ownership instead of retaining

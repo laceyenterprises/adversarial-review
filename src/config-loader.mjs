@@ -2348,6 +2348,17 @@ function schemaV1() {
                 __min: 0,
                 __max: 2592000,
               },
+              known_vaults: {
+                __type: TYPE_LIST,
+                __default: ['Cliovault', 'mem423y7ewrymvxv4ibh34zdk4', 'Personal'],
+                __item: { __type: TYPE_STRING },
+              },
+              release_signing_private_key_ref: {
+                __type: TYPE_STRING,
+                __default: 'op://Cliovault/release-signing/private-key',
+                __pattern: PATTERN_OP_REF,
+                __pattern_description: PATTERN_OP_REF_DESCRIPTION,
+              },
               op_read_cache: {
                 __type: TYPE_DICT,
                 __strict: true,
@@ -3179,6 +3190,14 @@ export const ENV_ALIASES = {
   },
   'worker_pool.secrets.prewarm.min_interval_seconds': {
     canonical: 'AGENT_OS_WORKER_POOL_SECRETS_PREWARM_MIN_INTERVAL_SECONDS',
+    aliases: [],
+  },
+  'worker_pool.secrets.known_vaults': {
+    canonical: 'AGENT_OS_WORKER_POOL_SECRETS_KNOWN_VAULTS',
+    aliases: [],
+  },
+  'worker_pool.secrets.release_signing_private_key_ref': {
+    canonical: 'AGENT_OS_WORKER_POOL_SECRETS_RELEASE_SIGNING_PRIVATE_KEY_REF',
     aliases: [],
   },
   'worker_pool.secrets_bus.op_timeout_seconds': {

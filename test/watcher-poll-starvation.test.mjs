@@ -284,6 +284,50 @@ test('RVHAND-01: posted-review timeout yields and defers the rest of the bounded
   assert.match(logs[0], /timeout_deferred=1 continued_after_timeout=0/);
 });
 
+test('RVHAND-03: per-handler timeout lets slow hammer launch finish without raising the global default', async () => {
+  const state = createPostedReviewFairnessState();
+  const events = [];
+  const errors = [];
+
+  const summary = await runPostedReviewHandlersFairly({
+    handlers: [
+      {
+        repoPath: REPO,
+        prNumber: 5910,
+        timeoutMs: 100,
+        run: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          events.push('slow-handler-finished');
+        },
+      },
+      {
+        repoPath: REPO,
+        prNumber: 5911,
+        run: async () => {
+          events.push('next-handler-ran');
+        },
+      },
+    ],
+    state,
+    budgetMs: 60_000,
+    handlerTimeoutMs: 5,
+    laneGate: {
+      evaluate: () => ({ run: true }),
+      record: async () => {},
+    },
+    logger: {
+      log() {},
+      warn() {},
+      error: (...args) => errors.push(args.join(' ')),
+    },
+  });
+
+  assert.equal(summary.ran, 2);
+  assert.equal(summary.timedOut, 0);
+  assert.deepEqual(events, ['slow-handler-finished', 'next-handler-ran']);
+  assert.deepEqual(errors, []);
+});
+
 test('RVHAND-02: timeout log reports phase elapsed at handler start', async () => {
   const state = createPostedReviewFairnessState();
   const errors = [];
@@ -458,6 +502,7 @@ test('WPS-01: processReviewSubject queues posted-review handler with the SUBJECT
 
   assert.equal(postedReviewHandlers.length, 1);
   assert.equal(postedReviewHandlers[0].headSha, HEAD_A);
+  assert.equal(postedReviewHandlers[0].timeoutMs, 330_000);
 });
 
 test('HCP pre-spawn precheck requeues when down and proceeds when up', async () => {

@@ -424,11 +424,32 @@ const REVIEWER_WORKER_CLASS_BY_MODEL = Object.freeze({
   gemini: 'gemini',
 });
 
+const POSTED_REVIEW_HANDLER_DISPATCH_TIMEOUT_CUSHION_MS = 30_000;
+
 function reviewerWorkerClassForRoute(route) {
   const explicit = String(route?.reviewerWorkerClass || route?.workerClass || '').trim().toLowerCase();
   if (explicit) return explicit;
   const reviewerModel = String(route?.reviewerModel || '').trim().toLowerCase();
   return REVIEWER_WORKER_CLASS_BY_MODEL[reviewerModel] || reviewerModel;
+}
+
+function resolvePostedReviewHandlerDispatchTimeoutMs({ rootDir, domainId }) {
+  try {
+    const loadedConfig = loadConfigCached();
+    const mergeAuthorityConfig = resolveMergeAuthorityConfigFromDomain(
+      loadDomainConfig(rootDir, domainId),
+      loadedConfig.getMergeAuthorityConfig(),
+      { fallbackSources: loadedConfig.sources || {} },
+    );
+    const dispatchTimeoutMs = Number(mergeAuthorityConfig?.dispatchTimeoutMs);
+    if (Number.isFinite(dispatchTimeoutMs) && dispatchTimeoutMs > 0) {
+      return dispatchTimeoutMs + POSTED_REVIEW_HANDLER_DISPATCH_TIMEOUT_CUSHION_MS;
+    }
+  } catch {
+    // Fall back to the scheduler default; config load failures are surfaced by
+    // the handler's own merge-authority path.
+  }
+  return null;
 }
 
 
@@ -1098,6 +1119,10 @@ export async function processReviewSubject(entry, ctx) {
         postedReviewHandlers.push({
           repoPath,
           prNumber,
+          timeoutMs: resolvePostedReviewHandlerDispatchTimeoutMs({
+            rootDir: ROOT,
+            domainId: effectiveDomainId,
+          }),
           // WPS-01: the head this handoff was queued against. The no-progress
           // lane keys its series on (repo, pr, head) so a new push always resets
           // the series and a PR that starts moving is never held back.

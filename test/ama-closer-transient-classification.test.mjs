@@ -313,6 +313,10 @@ test('a rate-limit hammer-dispatch failure does NOT burn the redispatch budget',
 
   const { result } = await dispatchWithError(rootDir, () => {
     const err = new Error('hq dispatch failed');
+    err.code = 'ETIMEDOUT';
+    err.signal = 'SIGTERM';
+    err.killed = true;
+    err.stdout = '{"partial":true}';
     err.stderr = 'gh: API rate limit exceeded (HTTP 403)';
     return err;
   });
@@ -325,6 +329,11 @@ test('a rate-limit hammer-dispatch failure does NOT burn the redispatch budget',
   assert.equal(record.retryCount, 0, 'transient failure did not increment retryCount');
   assert.equal(record.state, 'dispatch-deferred-transient');
   assert.equal(record.lastFailureTransient, true);
+  assert.match(record.lastError, /code: ETIMEDOUT/);
+  assert.match(record.lastError, /signal: SIGTERM/);
+  assert.match(record.lastError, /killed: true/);
+  assert.match(record.lastError, /stdout: \{"partial":true\}/);
+  assert.match(record.lastError, /stderr: gh: API rate limit exceeded \(HTTP 403\)/);
 });
 
 test('BUG-2: an hq drain-in-effect hammer-dispatch refusal is transient (no merge-agent fallback, budget preserved)', () => {

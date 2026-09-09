@@ -80,7 +80,10 @@ function reapRunningPassTimeouts({ db, rootDir = process.cwd(), log = console } 
        FROM reviewer_passes
       WHERE status = 'running'
         AND ended_at IS NULL
-        AND datetime(started_at) < datetime('now', '-' || ? || ' seconds')`
+        AND (
+          (gh_comment_id IS NOT NULL AND gh_comment_id <> '')
+          OR datetime(started_at) < datetime('now', '-' || ? || ' seconds')
+        )`
   ).all(thresholdSeconds);
 
   const getReviewRow = db.prepare(

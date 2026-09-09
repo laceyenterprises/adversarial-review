@@ -790,6 +790,7 @@ async function cleanupHammerCloserWorker({
     try {
       await execFileImpl(hqPath, args, {
         env: process.env,
+        cwd: AGENT_OS_ROOT,
         maxBuffer: 1024 * 1024,
         timeout: 60_000,
         killSignal: 'SIGTERM',
@@ -1891,6 +1892,21 @@ function errDetailText(errOrText) {
     .toLowerCase();
 }
 
+function formatHqDispatchError(errOrText) {
+  if (typeof errOrText === 'string') return errOrText;
+  const parts = [
+    ['code', errOrText?.code],
+    ['signal', errOrText?.signal],
+    ['killed', errOrText?.killed],
+    ['message', errOrText?.message],
+    ['stdout', errOrText?.stdout],
+    ['stderr', errOrText?.stderr],
+  ]
+    .filter(([, value]) => value !== undefined && value !== null && value !== '')
+    .map(([key, value]) => `${key}: ${String(value)}`);
+  return parts.join('\n') || String(errOrText || 'unknown hq dispatch error');
+}
+
 // GitHub primary/secondary rate-limit + HTTP 429 + OAuth-broker 503 signals.
 // These are TRANSIENT: the bot token is valid and authorized — the request was
 // merely throttled (or the broker that mints the token is briefly unavailable).
@@ -2228,6 +2244,7 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
     try {
       await execFileImpl(hqPath, args, {
         env: process.env,
+        cwd: AGENT_OS_ROOT,
         maxBuffer: 1024 * 1024,
         timeout: 60_000,
         killSignal: 'SIGTERM',
@@ -2420,6 +2437,7 @@ async function teardownSamePrHammerHolder({
       try {
         await execFileImpl(hqPath, tearDownArgs, {
           env,
+          cwd: AGENT_OS_ROOT,
           maxBuffer: 1024 * 1024,
           timeout: 60_000,
           killSignal: 'SIGTERM',
@@ -2659,6 +2677,7 @@ async function probeAmaCloserDispatchStatus({
     try {
       const { stdout } = await execFileImpl(hqPath, args, {
         env: { ...env },
+        cwd: AGENT_OS_ROOT,
         maxBuffer: 1024 * 1024,
         timeout: 5_000,
       });
@@ -4822,6 +4841,7 @@ export async function maybeDispatchAmaCloser({
     try {
       execResult = await execFileImpl(hqPath, activeArgs, {
         env: process.env,
+        cwd: AGENT_OS_ROOT,
         maxBuffer: 5 * 1024 * 1024,
         // CFG-knobbed (roles.adversarial.merge_authority.dispatch_timeout_ms,
         // default 300s). The old hardcoded 90s was below the merge-worker
@@ -4854,7 +4874,7 @@ export async function maybeDispatchAmaCloser({
       const parsedFailure = normalizeDispatchIdentifiers(parseAmaCloserDispatchOutput(err?.stdout || ''));
       const ambiguousLaunch = Boolean(parsedFailure.launchRequestId || parsedFailure.dispatchId);
       const branchHolderBlocked = !ambiguousLaunch && isProvisionBranchHolderBlocked(err);
-      const dispatchError = String(err?.stderr || err?.message || err);
+      const dispatchError = formatHqDispatchError(err);
       if (branchHolderBlocked && isHammerWorkerClass(workerClass) && !samePrHammerHolderRetryUsed) {
         samePrHammerHolderRetryUsed = true;
         const samePrTeardown = await teardownSamePrHammerHolder({
@@ -4980,7 +5000,7 @@ export async function maybeDispatchAmaCloser({
             transientFailure ? 'dispatch-deferred-transient' : 'dispatch-failed'
           )
         ),
-        error: String(err?.stderr || err?.message || err),
+        error: dispatchError,
         workerClass,
         ...(dispatchWorkerClass !== workerClass ? { dispatchWorkerClass } : {}),
         dispatchId: parsedFailure.dispatchId || null,

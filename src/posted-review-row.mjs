@@ -9,6 +9,7 @@
 // imports both back. ROOT/execFileAsync are re-derived; WATCHER_PRIMARY_DOMAIN_ID
 // is threaded (see the `domainId`/`primaryDomainId` defaults).
 import { execFile } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
 import { promisify } from 'node:util';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -113,21 +114,35 @@ function isTerminalReviewRow(row) {
 // never phase saturation — but it cannot say WHICH step inside the handler is slow,
 // precisely because the handler dies before reporting.
 //
-// So log each step as it COMPLETES, and only when it is slow enough to matter. A
-// handler that hangs then leaves a trail of finished steps, and the step that never
-// appears is the one that hung. Under the threshold this is silent, so the normal
-// path costs one comparison per step.
+// So arm a pending-step warning before each await, then clear it when the step
+// finishes. A handler that hangs now names the step it is still waiting on; a
+// slow step that eventually completes also records the monotonic elapsed time.
 const POSTED_REVIEW_STEP_LOG_THRESHOLD_MS = 5000;
 
-async function timePostedReviewStep(label, key, logger, fn) {
-  const startedMs = Date.now();
+export async function timePostedReviewStep(
+  label,
+  key,
+  logger,
+  fn,
+  thresholdMs = POSTED_REVIEW_STEP_LOG_THRESHOLD_MS,
+) {
+  const startedMs = performance.now();
+  let warned = false;
+  const timer = setTimeout(() => {
+    warned = true;
+    logger?.warn?.(
+      `[watcher] posted-review step still running for ${key}: ${label} exceeded ${thresholdMs}ms`,
+    );
+  }, thresholdMs);
+  timer.unref?.();
   try {
     return await fn();
   } finally {
-    const elapsedMs = Date.now() - startedMs;
-    if (elapsedMs >= POSTED_REVIEW_STEP_LOG_THRESHOLD_MS) {
+    clearTimeout(timer);
+    if (warned) {
+      const elapsedMs = Math.round(performance.now() - startedMs);
       logger?.warn?.(
-        `[watcher] posted-review step slow for ${key}: ${label} took ${elapsedMs}ms`,
+        `[watcher] posted-review step completed for ${key}: ${label} took ${elapsedMs}ms`,
       );
     }
   }

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { handlePostedReviewRow } from '../src/posted-review-row.mjs';
+import { handlePostedReviewRow, timePostedReviewStep } from '../src/posted-review-row.mjs';
 import { createLogChangeGate } from '../src/log-change-gate.mjs';
 
 // Drive handlePostedReviewRow straight to the AMA `ama-pending` retained-ownership
@@ -39,6 +39,53 @@ function baseArgs(overrides = {}) {
 }
 
 const retained = (logs) => logs.filter((m) => /AMA hammer route retained ownership/.test(m));
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test('timePostedReviewStep: warns while a step is still pending', async () => {
+  const warnings = [];
+  let release;
+  const pending = new Promise((resolve) => {
+    release = resolve;
+  });
+
+  const result = timePostedReviewStep(
+    'resolve coexistence',
+    'laceyenterprises/agent-os#4242',
+    { warn: (m) => warnings.push(String(m)) },
+    async () => {
+      await pending;
+      return 'done';
+    },
+    20,
+  );
+
+  await delay(35);
+
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /still running/);
+  assert.match(warnings[0], /resolve coexistence exceeded 20ms/);
+
+  release();
+  assert.equal(await result, 'done');
+  assert.equal(warnings.length, 2);
+  assert.match(warnings[1], /completed/);
+  assert.match(warnings[1], /resolve coexistence took \d+ms/);
+});
+
+test('timePostedReviewStep: does not warn for fast completed steps', async () => {
+  const warnings = [];
+
+  const result = await timePostedReviewStep(
+    'project gate',
+    'laceyenterprises/agent-os#4242',
+    { warn: (m) => warnings.push(String(m)) },
+    async () => 'ok',
+    50,
+  );
+
+  assert.equal(result, 'ok');
+  assert.deepEqual(warnings, []);
+});
 
 test('handlePostedReviewRow: retained-ownership logs once and is suppressed on unchanged repeats', async () => {
   const logGate = createLogChangeGate();

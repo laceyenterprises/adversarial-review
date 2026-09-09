@@ -287,15 +287,15 @@ function writeLedger(rootDir, identity, doc) {
 }
 
 /**
- * Backoff spacing for a demoted PR, in ticks. Doubles per no-progress tick past
- * the cap and saturates at `maxBackoffTicks`, so the schedule is
+ * Backoff spacing for a demoted PR, in ticks. Starts at the cap, then doubles
+ * per no-progress tick and saturates at `maxBackoffTicks`, so the schedule is
  * 1, 2, 4, 8, … capped — never unbounded, never zero.
  */
 export function backoffTicksFor(noProgressTicks, {
   cap = DEFAULT_NO_PROGRESS_LANE_CAP,
   maxBackoffTicks = DEFAULT_NO_PROGRESS_MAX_BACKOFF_TICKS,
 } = {}) {
-  const over = normalizeCount(noProgressTicks) - positiveIntOr(cap, DEFAULT_NO_PROGRESS_LANE_CAP);
+  const over = normalizeCount(noProgressTicks) - positiveIntOr(cap, DEFAULT_NO_PROGRESS_LANE_CAP) + 1;
   if (over <= 0) return 0;
   const ceiling = positiveIntOr(maxBackoffTicks, DEFAULT_NO_PROGRESS_MAX_BACKOFF_TICKS);
   // 2**over grows fast; clamp the exponent too so a long-lived ledger can never

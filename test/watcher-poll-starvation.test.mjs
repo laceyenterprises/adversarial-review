@@ -729,7 +729,7 @@ test('runPostedReviewHandlersFairly runs the handler when the lane gate faults',
 
 // ── No-progress lane ─────────────────────────────────────────────────────────
 
-test('no-progress lane demotes only after the cap, and any state change resets it', () => {
+test('no-progress lane demotes at the cap, and any state change resets it', () => {
   const rootDir = tempRoot();
   try {
     const identity = { repo: REPO, prNumber: 5909 };
@@ -739,7 +739,7 @@ test('no-progress lane demotes only after the cap, and any state change resets i
     );
 
     let outcome = null;
-    for (let i = 0; i <= DEFAULT_NO_PROGRESS_LANE_CAP; i += 1) {
+    for (let i = 0; i < DEFAULT_NO_PROGRESS_LANE_CAP; i += 1) {
       outcome = recordNoProgressLaneRun(rootDir, identity, {
         headSha: HEAD_A,
         fingerprint: stuck,
@@ -751,7 +751,7 @@ test('no-progress lane demotes only after the cap, and any state change resets i
     outcome = recordNoProgressLaneRun(rootDir, identity, {
       headSha: HEAD_A,
       fingerprint: stuck,
-      now: 'demote',
+      now: `t${DEFAULT_NO_PROGRESS_LANE_CAP}`,
       logger: silentLogger,
     });
     assert.equal(outcome.lane, LANE_SLOW);
@@ -809,10 +809,11 @@ test('no-progress lane treats a new head as fresh evidence and walks it immediat
 });
 
 test('no-progress lane backoff is bounded, so a demoted PR is never dropped', () => {
-  assert.equal(backoffTicksFor(DEFAULT_NO_PROGRESS_LANE_CAP), 0, 'at the cap it is still active');
-  assert.equal(backoffTicksFor(DEFAULT_NO_PROGRESS_LANE_CAP + 1), 1);
-  assert.equal(backoffTicksFor(DEFAULT_NO_PROGRESS_LANE_CAP + 2), 2);
-  assert.equal(backoffTicksFor(DEFAULT_NO_PROGRESS_LANE_CAP + 3), 4);
+  assert.equal(backoffTicksFor(DEFAULT_NO_PROGRESS_LANE_CAP - 1), 0, 'below the cap it is still active');
+  assert.equal(backoffTicksFor(DEFAULT_NO_PROGRESS_LANE_CAP), 1, 'at the cap it enters the slow lane');
+  assert.equal(backoffTicksFor(DEFAULT_NO_PROGRESS_LANE_CAP + 1), 2);
+  assert.equal(backoffTicksFor(DEFAULT_NO_PROGRESS_LANE_CAP + 2), 4);
+  assert.equal(backoffTicksFor(DEFAULT_NO_PROGRESS_LANE_CAP + 3), 8);
   // Saturates at the ceiling however long the series runs — an hour at the
   // production 5m interval, never longer.
   assert.equal(backoffTicksFor(DEFAULT_NO_PROGRESS_LANE_CAP + 500, { maxBackoffTicks: 12 }), 12);

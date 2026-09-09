@@ -29,7 +29,10 @@ import {
 } from '../src/recovery-reaper.mjs';
 import { beginReviewerPass, completeReviewerPass } from '../src/reviewer-pass-tokens.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
-import { amaCloserDispatchFilePath } from '../src/ama/dispatch-closer.mjs';
+import {
+  AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS,
+  amaCloserDispatchFilePath,
+} from '../src/ama/dispatch-closer.mjs';
 import { startWatcherStaleStateReaper } from '../src/watcher-stale-state-reaper.mjs';
 
 function tempRoot() {
@@ -56,6 +59,10 @@ function leaseDirFileCount(rootDir) {
   } catch {
     return 0;
   }
+}
+
+function msAgo(n) {
+  return new Date(Date.parse(NOW) - n).toISOString();
 }
 
 function writeLease(rootDir, lease) {
@@ -242,6 +249,16 @@ test('selectReleasableCloserLeases: below-threshold lease is retained even when 
   assert.equal(dead.length, 0, 'local dead-pid result is ignored for cross-namespace leases');
 });
 
+test('selectReleasableCloserLeases: interrupted dispatch callback can release below generic threshold', () => {
+  const lease = { repo: 'a/x', prNumber: 1, headSha: 'h1', status: 'pending', terminalOutcome: null, updatedAt: hoursAgo(1), watcherPid: 4242, _path: 'p1' };
+  const releasable = selectReleasableCloserLeases([lease], {
+    now: NOW,
+    thresholdMs: 6 * 60 * 60 * 1000,
+    isInterruptedInFlightDispatch: (candidate) => candidate._path === 'p1',
+  });
+  assert.deepEqual(releasable.map((l) => l._path), ['p1']);
+});
+
 test('selectReleasableCloserLeases: corrupt lease records are age-gated by file mtime', () => {
   const releasable = selectReleasableCloserLeases([
     { _path: 'fresh.json', _isCorrupt: true, mtimeMs: Date.parse(hoursAgo(1)), status: 'corrupt', terminalOutcome: null },
@@ -313,6 +330,49 @@ test('reapStaleCloserLeases does NOT reset a budget exhausted by a genuine (non-
   assert.equal(result.budgetsReset, 0, 'genuine-failure budget preserved');
   const record = JSON.parse(readFileSync(recordPath, 'utf8'));
   assert.equal(record.retryCount, 2, 'genuine-failure budget NOT reset');
+});
+
+test('reapStaleCloserLeases reclaims interrupted launch-only dispatch below generic threshold', async (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const identity = { repo: 'acme/repo', prNumber: 90, headSha: 'cab005ecab005ecab005ecab005ecab005ecab0' };
+  const acquiredAt = msAgo(AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS + 1_000);
+  const leasePath = writeLease(rootDir, {
+    ...identity,
+    status: 'pending',
+    terminalOutcome: null,
+    acquiredAt,
+    updatedAt: acquiredAt,
+    watcherPid: 31337,
+  });
+  const recordPath = amaCloserDispatchFilePath(rootDir, identity);
+  mkdirSync(dirname(recordPath), { recursive: true });
+  writeFileSync(recordPath, `${JSON.stringify({
+    ...identity,
+    retryCount: 2,
+    state: 'dispatching',
+    lastAttemptedAt: acquiredAt,
+    launchRequestId: null,
+    dispatchId: null,
+    lastError: null,
+  }, null, 2)}\n`);
+
+  const result = await reapStaleCloserLeases({
+    rootDir,
+    now: NOW,
+    thresholdMs: 6 * 60 * 60 * 1000,
+    logger: { warn() {}, error() {} },
+  });
+
+  assert.equal(result.released, 1);
+  assert.equal(result.interruptedDispatchesReclaimed, 1);
+  assert.equal(result.budgetsReset, 0);
+  assert.equal(existsSync(leasePath), false, 'pending lease deleted -> closer can re-dispatch');
+  const record = JSON.parse(readFileSync(recordPath, 'utf8'));
+  assert.equal(record.retryCount, 1, 'phantom in-flight retry rolled back');
+  assert.equal(record.state, 'dispatch-interrupted-reclaimed');
+  assert.equal(record.lastObservedStatus, 'interrupted-before-launch');
 });
 
 test('reapStaleCloserLeases unlinks corrupt lease files', async (t) => {

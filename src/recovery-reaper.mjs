@@ -59,6 +59,7 @@ import { basename, dirname, join } from 'node:path';
 
 import {
   AMA_CLOSER_REDISPATCH_BOUND,
+  isInterruptedInFlightAmaCloserDispatch,
   isTransientHqDispatchError,
   readAmaCloserDispatchRecord,
   updateAmaCloserDispatchRecord,
@@ -257,6 +258,7 @@ export function selectReleasableCloserLeases(leases, {
   deadHolderThresholdMs = null,
   isProcessAlive = null,
   host = null,
+  isInterruptedInFlightDispatch = null,
 } = {}) {
   const nowMs = parseTimestampMs(now) ?? (now instanceof Date ? now.getTime() : Number(now));
   if (!Number.isFinite(nowMs) || !Number.isFinite(Number(thresholdMs))) return [];
@@ -282,6 +284,10 @@ export function selectReleasableCloserLeases(leases, {
     if (stampMs == null) return false;
     const ageMs = nowMs - stampMs;
     if (ageMs >= Number(thresholdMs)) return true;
+    if (
+      typeof isInterruptedInFlightDispatch === 'function'
+      && isInterruptedInFlightDispatch(lease) === true
+    ) return true;
     if (!deadHolderTierEnabled) return false;
     if (!holderIsProvablyDeadHere(lease, { isProcessAlive, host: localHost })) return false;
     return ageMs >= deadHolderMs;
@@ -642,7 +648,7 @@ async function readLeaseRecords(rootDir, {
  * offline). Without this, a budget already exhausted *by* the outage stays
  * exhausted forever — `dispatch-retry-exhausted` — even after recovery.
  */
-function resetTransientExhaustedCloserBudget(rootDir, lease, logger) {
+function resetTransientExhaustedCloserBudget(rootDir, lease, logger, { now = new Date().toISOString() } = {}) {
   const identity = { repo: lease.repo, prNumber: lease.prNumber, headSha: lease.headSha };
   let record;
   try {
@@ -651,6 +657,29 @@ function resetTransientExhaustedCloserBudget(rootDir, lease, logger) {
     return 'failed';
   }
   if (!record) return 'not-needed';
+  if (isInterruptedInFlightAmaCloserDispatch(record, lease, { now })) {
+    try {
+      updateAmaCloserDispatchRecord(rootDir, identity, (current) => ({
+        ...(current || {}),
+        retryCount: Math.max(0, Number(current?.retryCount || record.retryCount || 1) - 1),
+        state: 'dispatch-interrupted-reclaimed',
+        lastObservedStatus: 'interrupted-before-launch',
+        lastObservedAt: now,
+        reclaimedAt: now,
+      }));
+    } catch (err) {
+      logger?.error?.(
+        `[reaper] failed to reclaim interrupted closer dispatch repo=${lease.repo} `
+        + `pr=${lease.prNumber} head=${String(lease.headSha || '').slice(0, 12)}: ${err?.message || err}`,
+      );
+      return 'failed';
+    }
+    logger?.warn?.(
+      `[reaper] reclaimed interrupted closer dispatch repo=${lease.repo} pr=${lease.prNumber} `
+      + `head=${String(lease.headSha || '').slice(0, 12)} (phantom retry rolled back)`,
+    );
+    return 'reclaimed-interrupted';
+  }
   const exhausted = Number(record.retryCount || 0) >= AMA_CLOSER_REDISPATCH_BOUND;
   if (!exhausted) return 'not-needed';
   const transient = record.lastFailureTransient === true
@@ -707,7 +736,8 @@ export async function reapStaleCloserLeases({
 } = {}) {
   if (!rootDir) {
     return {
-      released: 0, pruned: 0, budgetsReset: 0, leases: [], prunedLeases: [],
+      released: 0, pruned: 0, budgetsReset: 0, interruptedDispatchesReclaimed: 0,
+      leases: [], prunedLeases: [],
       scannedEntries: 0, readRecords: 0,
     };
   }
@@ -720,19 +750,43 @@ export async function reapStaleCloserLeases({
     readFileImpl,
     statImpl,
   });
+  const interruptedDispatchLeasePaths = new Set();
+  for (const lease of discovery.records) {
+    if (!lease?._path || lease._isCorrupt === true) continue;
+    const identity = { repo: lease.repo, prNumber: lease.prNumber, headSha: lease.headSha };
+    let record = null;
+    try {
+      record = readAmaCloserDispatchRecord(rootDir, identity);
+    } catch {
+      record = null;
+    }
+    if (isInterruptedInFlightAmaCloserDispatch(record, lease, { now })) {
+      interruptedDispatchLeasePaths.add(lease._path);
+    }
+  }
   const releasable = selectReleasableCloserLeases(discovery.records, {
-    now, thresholdMs, livePid, deadHolderThresholdMs, isProcessAlive, host,
+    now,
+    thresholdMs,
+    livePid,
+    deadHolderThresholdMs,
+    isProcessAlive,
+    host,
+    isInterruptedInFlightDispatch: (lease) => interruptedDispatchLeasePaths.has(lease._path),
   });
   let released = 0;
   let budgetsReset = 0;
+  let interruptedDispatchesReclaimed = 0;
   for (const lease of releasable) {
     if (lease._isCorrupt !== true) {
-      const resetStatus = resetTransientExhaustedCloserBudget(rootDir, lease, logger);
+      const resetStatus = resetTransientExhaustedCloserBudget(rootDir, lease, logger, { now });
       if (resetStatus === 'failed') {
         continue;
       }
       if (resetStatus === 'reset') {
         budgetsReset += 1;
+      }
+      if (resetStatus === 'reclaimed-interrupted') {
+        interruptedDispatchesReclaimed += 1;
       }
     }
     try {
@@ -794,6 +848,7 @@ export async function reapStaleCloserLeases({
     cursorEntriesSeen: discovery.cursorEntriesSeen,
     readRecords: discovery.readRecords,
     cursorPersisted,
+    interruptedDispatchesReclaimed,
   };
 }
 
@@ -821,7 +876,8 @@ export async function runStaleStateReaper({
   const out = {
     reviewerPasses: { reaped: 0, passes: [] },
     closerLeases: {
-      released: 0, pruned: 0, budgetsReset: 0, leases: [], prunedLeases: [],
+      released: 0, pruned: 0, budgetsReset: 0, interruptedDispatchesReclaimed: 0,
+      leases: [], prunedLeases: [],
       scannedEntries: 0, readRecords: 0,
     },
   };
@@ -859,6 +915,7 @@ export async function runStaleStateReaper({
       `[reaper] ${phase} stale-state sweep: reaped ${out.reviewerPasses.reaped} running reviewer pass(es), `
       + `released ${out.closerLeases.released} closer lease(s), `
       + `pruned ${out.closerLeases.pruned} finished closer lease(s), `
+      + `reclaimed ${out.closerLeases.interruptedDispatchesReclaimed || 0} interrupted closer dispatch(es), `
       + `reset ${out.closerLeases.budgetsReset} transient-exhausted budget(s)`,
     );
   }

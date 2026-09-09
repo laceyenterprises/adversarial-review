@@ -107,6 +107,37 @@ test('reviewer exec fallback uses row-level command-failed retry count for SIGKI
   assert.equal(secondFailure.reviewerModelFallback.failureCount, 2);
 });
 
+test('reviewer exec fallback switches after a Claude launchctl bootstrap failure is retried', () => {
+  const route = selectReviewerRouteForAttempt({
+    rootDir: '/nonexistent-reviewer-model-fallback-root',
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 6524,
+    subject: { builderClass: 'codex' },
+    baseRoute: {
+      builderClass: 'codex',
+      tag: '[codex]',
+      reviewerModel: 'claude',
+      botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+    },
+    currentRow: {
+      review_status: 'pending-upstream',
+      reviewer: 'claude',
+      reviewer_head_sha: 'head-1',
+      infra_auto_recover_attempts: 1,
+      failure_message: '[launchctl-bootstrap] Claude launchctl session bootstrap failed: Could not switch to audit session',
+    },
+    headSha: 'head-1',
+    env: {},
+  });
+
+  assert.equal(route.reviewerModel, 'gemini');
+  assert.equal(route.botTokenEnv, 'GH_GEMINI_REVIEWER_TOKEN');
+  assert.equal(route.reviewerModelFallback.fromReviewerModel, 'claude');
+  assert.equal(route.reviewerModelFallback.toReviewerModel, 'gemini');
+  assert.equal(route.reviewerModelFallback.failureClass, 'launchctl-bootstrap');
+  assert.equal(route.reviewerModelFallback.failureCount, 2);
+});
+
 test('reviewer exec fallback is keyed to the current head and failed model', () => {
   const staleHead = selectAfterFailures({
     failures: 2,

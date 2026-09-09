@@ -68,6 +68,7 @@ const DEFAULT_REVIEWER_TIMEOUT_FALLBACK_THRESHOLD = 2;
 const DEFAULT_REVIEWER_EXEC_FALLBACK_THRESHOLD = 2;
 const REVIEWER_EXEC_FALLBACK_FAILURE_CLASSES = Object.freeze([
   'reviewer-timeout',
+  'launchctl-bootstrap',
   'reviewer-command-failed',
   'oauth-broken',
 ]);

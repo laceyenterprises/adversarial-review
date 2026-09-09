@@ -422,11 +422,12 @@ export async function maybeDispatchAmaClosureFor({
   // GitHub returns mergeable=UNKNOWN transiently right after a push or when the
   // base branch moves (a steady merge stream keeps `main` moving), and the
   // eligibility predicate maps a non-MERGEABLE state to `pr-not-mergeable`. Only
-  // when the first read is NOT already terminal (MERGEABLE/CONFLICTING) do we
-  // re-sample over a bounded window so we don't wrongly park an eligible PR.
+  // re-sample the actually-unresolved states; BLOCKED/BEHIND/false are already
+  // classified enough for this tick and sleeping on them just consumes the
+  // posted-review handler budget.
   let mergeabilityForGate = candidate;
   const initialMergeability = normalizeGithubMergeability(candidate || {});
-  if (initialMergeability !== 'MERGEABLE' && initialMergeability !== 'CONFLICTING') {
+  if (!initialMergeability || initialMergeability === 'UNKNOWN') {
     throwIfAborted(signal);
     const sampled = await resolveMergeabilityWithSampling(
       candidate || {},

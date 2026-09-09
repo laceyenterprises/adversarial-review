@@ -1319,6 +1319,59 @@ test('maybeDispatchAmaClosureFor preserves explicit conflicting mergeability ove
   assert.equal(observed.prMetadata.mergeableState, 'CONFLICTING');
 });
 
+test('RVHAND-06: maybeDispatchAmaClosureFor does not re-sample classified non-mergeable states', async () => {
+  let mergeAttempt = null;
+  const result = await maybeDispatchAmaClosureFor({
+    reviewStateRow: makeReviewRow({
+      last_verdict: 'Comment only',
+      risk_class: 'low',
+      remediation_pending: 0,
+      reviewer: 'claude',
+      reviewer_head_sha: 'abc123',
+      review_body: '## Verdict\nComment only\n\n## Blocking Issues\n\n- None.\n\n## Non-blocking Issues\n\n- None.',
+    }),
+    dispatchJob: {
+      blockingFindingCount: 0,
+      blockingFindingState: 'known',
+    },
+    candidate: {
+      headSha: 'abc123',
+      riskClass: 'low',
+      prAuthor: 'codex-worker-bot',
+      prState: 'open',
+      mergeable: 'BLOCKED',
+      mergeStateStatus: 'BEHIND',
+      statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' }],
+      branchProtection: { requiredContexts: ['agent-os/adversarial-gate'] },
+      isDraft: false,
+    },
+    labelNames: ['adversarial-merge-requested'],
+    operatorApprovalEvent: null,
+    adversarialMergeRequestedEvent: null,
+    repoPath: 'laceyenterprises/adversarial-review',
+    prNumber: 265,
+    currentRevisionRef: 'abc123',
+    logger: { warn() {}, log() {} },
+    fetchLatestHeadReviewBodiesImpl: async () => [
+      '## Verdict\nComment only\n\n## Blocking Issues\n\n- None.\n\n## Non-blocking Issues\n\n- None.',
+    ],
+    loadConfigImpl: () => ({
+      getMergeAuthorityConfig() {
+        return { enabled: true };
+      },
+    }),
+    maybeDispatchAmaCloserImpl: async () => ({ dispatched: false, reason: 'not-eligible' }),
+    runDaemonCleanMergeAttemptImpl: async (payload) => {
+      mergeAttempt = payload;
+      return { disposition: 'not-taken', reason: 'not-eligible' };
+    },
+  });
+
+  assert.equal(result.dispatched, false);
+  assert.equal(mergeAttempt.mergeabilityForGate.mergeable, 'BLOCKED');
+  assert.equal(mergeAttempt.mergeabilityForGate.mergeStateStatus, 'BEHIND');
+});
+
 test('maybeDispatchAmaClosureFor resolves risk class from the remediation ledger when neither candidate nor review row carries it', async () => {
   // Root cause of "AMA closed 0 PRs ever": fetchMergeAgentCandidate never sets
   // candidate.riskClass and reviewed_prs has no risk_class column, so the

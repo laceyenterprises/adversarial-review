@@ -2880,7 +2880,7 @@ async function dispatchMergeAgentForPR({
 async function fetchMergeAgentCandidate(repo, prNumber, {
   execFileImpl = execFileAsync, env = process.env,
   operatorApprovalEvent = undefined,
-  mergeAgentRequestEvent = undefined,
+  mergeAgentRequestEvent = undefined, signal = null,
 } = {}) {
   const { stdout } = await execFileImpl(
     'gh',
@@ -2893,7 +2893,7 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
       '--json',
       'mergeable,mergeStateStatus,headRefName,baseRefName,headRefOid,body,labels,statusCheckRollup,state,mergedAt,closedAt,updatedAt,author',
     ],
-    { maxBuffer: 5 * 1024 * 1024 }
+    { maxBuffer: 5 * 1024 * 1024, ...(signal ? { signal } : {}) }
   );
   const parsed = JSON.parse(String(stdout || '{}'));
   const labels = parsed.labels || [];

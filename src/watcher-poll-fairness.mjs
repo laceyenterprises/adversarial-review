@@ -306,9 +306,28 @@ export async function runPostedReviewHandlersFairly({
     const handlerElapsedMs = Math.round(nowMs() - handlerStartedMs);
     if (outcome.timedOut) {
       summary.timedOut += 1;
+      // RVHAND-01: the abandon log used to report only the budget, so a timeout
+      // said nothing about WHERE the time went. An operator could not tell
+      // "this one PR is pathologically slow" from "the phase was already
+      // saturated when this handler started". Those are different defects and
+      // they want opposite fixes, so raising the timeout without knowing which
+      // one you have just moves the threshold.
+      //
+      // Every value below is already available in this loop and was simply
+      // being discarded. `position` separates an early handler (slow in
+      // isolation) from a late one (starved by its predecessors);
+      // `phase_elapsed_at_start` against the phase budget shows how much room
+      // was left when it began, while `phase_elapsed_total` captures where the
+      // phase stood after the handler timed out.
+      const phaseElapsedAtStartMs = Math.round(handlerStartedMs - startedMs);
+      const phaseElapsedTotalMs = Math.round(nowMs() - startedMs);
       logger?.error?.(
         `[watcher] posted-review handler for ${key} exceeded ${effectiveHandlerTimeoutMs}ms; ` +
-          'abandoning it so the tick can return to new-PR discovery',
+          'abandoning it so the tick can return to new-PR discovery ' +
+          `(elapsed=${handlerElapsedMs}ms position=${index + 1}/${ordered.length} ` +
+          `phase_elapsed_at_start=${phaseElapsedAtStartMs}ms ` +
+          `phase_elapsed_total=${phaseElapsedTotalMs}ms phase_budget=${effectiveBudgetMs}ms ` +
+          `ran_before=${summary.ran} timed_out_before=${summary.timedOut - 1})`,
       );
     } else if (outcome.error) {
       summary.failed += 1;

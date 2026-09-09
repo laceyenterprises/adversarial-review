@@ -1037,13 +1037,15 @@ async function emitWorkerGitMergeSignalBestEffort({
   mergedBy,
   mode,
   logger = console,
+  env = process.env,
 }) {
   if (!hqRoot || !prNumber || !mergeCommitSha) return false;
   const pythonPath = [
     join(AGENT_OS_ROOT, 'modules', 'worker-pool', 'lib', 'python'),
     join(AGENT_OS_ROOT, 'platform', 'session-ledger', 'src'),
-    process.env.PYTHONPATH || '',
+    env.PYTHONPATH || '',
   ].filter(Boolean).join(':');
+  const pythonBin = resolveAgentOsPythonBin(env);
   const args = [
     '-m',
     'cwp_dispatch.git_signal',
@@ -1064,8 +1066,8 @@ async function emitWorkerGitMergeSignalBestEffort({
   if (launchRequestId) args.push('--launch-request-id', String(launchRequestId));
   if (ticketRef) args.push('--ticket-ref', String(ticketRef));
   try {
-    await execFileImpl('python3', args, {
-      env: { ...process.env, PYTHONPATH: pythonPath },
+    await execFileImpl(pythonBin, args, {
+      env: { ...env, PYTHONPATH: pythonPath },
       maxBuffer: 1024 * 1024,
       timeout: 15_000,
     });
@@ -1080,6 +1082,18 @@ async function emitWorkerGitMergeSignalBestEffort({
     }));
     return false;
   }
+}
+
+function resolveAgentOsPythonBin(env = process.env, { existsImpl = existsSync } = {}) {
+  for (const candidate of [
+    env.HAM_PYTHON_BIN,
+    env.HQ_PYTHON3,
+    env.AGENT_OS_PY,
+  ]) {
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+  }
+  if (existsImpl('/opt/homebrew/bin/python3')) return '/opt/homebrew/bin/python3';
+  return 'python3';
 }
 
 /**
@@ -2620,6 +2634,7 @@ export const __testables__ = Object.freeze({
   isPhantomActiveWorkerRun,
   resolveAmaDispatchTimeoutMs,
   withProvisionTimeoutCappedAtDispatch,
+  resolveAgentOsPythonBin,
   defaultAmaLivePrProbe,
   normalizeAmaLivePrProbeResult,
   fetchMergeCommitShaBestEffort,

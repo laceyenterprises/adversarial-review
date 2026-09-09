@@ -72,7 +72,7 @@ export const HAMMER_RETRY_CAP_LIFETIME_EXHAUSTED_REASON = 'hammer-lifetime-ceili
 export const HAMMER_TARGET_REDRIVE_CAP_SUPPRESSION_STATE = 'hammer-target-redrive-cap-exhausted-needs-operator';
 export const HAMMER_TARGET_REDRIVE_CAP_EXHAUSTED_REASON = 'hammer-target-redrive-cap-exhausted';
 
-const HAMMER_RETRY_CAP_SCHEMA_VERSION = 1;
+const HAMMER_RETRY_CAP_SCHEMA_VERSION = 2;
 
 function hammerRetryCapDir(rootDir) {
   return join(rootDir, 'data', 'follow-up-jobs', 'hammer-retry-cap');

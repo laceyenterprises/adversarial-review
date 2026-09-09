@@ -69,6 +69,14 @@
       "owner": "AMA daemon clean-merge diagnostics"
     },
     {
+      "id": "hammer-retry-cap",
+      "title": "Hammer Retry Cap Ledger",
+      "path": "docs/data-model/hammer-retry-cap.md",
+      "store": "data/follow-up-jobs/hammer-retry-cap/",
+      "schemaSurface": "src/ama/hammer-retry-cap.mjs",
+      "owner": "AMA hammer dispatch retry and redrive caps"
+    },
+    {
       "id": "runtime-settle-smoke",
       "title": "Agent Runtime Settle Smoke",
       "path": "docs/data-model/runtime-settle-smoke.md",

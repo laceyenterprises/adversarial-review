@@ -58,7 +58,6 @@ test('RVHAND-06: bounded posted-review step budgets fit under the handler cap', 
   const env = {
     ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS: '330000',
     ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS: '300000',
-    ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS: '60000',
   };
 
   const phaseBudgetMs = resolvePostedReviewPhaseBudgetMs(env);
@@ -69,8 +68,8 @@ test('RVHAND-06: bounded posted-review step budgets fit under the handler cap', 
   const boundedStepBudgetTotalMs = derivedDeadlineMs * DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT;
 
   assert.equal(phaseBudgetMs, 330_000);
-  assert.equal(handlerTimeoutMs, 60_000);
-  assert.equal(deadlineMs, 27_500);
+  assert.equal(handlerTimeoutMs, 180_000);
+  assert.equal(deadlineMs, 87_500);
   assert.ok(deadlineMs < phaseBudgetMs);
   assert.ok(
     boundedStepBudgetTotalMs + headroomMs <= handlerTimeoutMs,
@@ -79,14 +78,36 @@ test('RVHAND-06: bounded posted-review step budgets fit under the handler cap', 
   );
 });
 
-test('RVHAND-07: reviewer-pressure posted-review phase budget has a bounded default and override', () => {
-  assert.equal(resolvePostedReviewReviewerPressurePhaseBudgetMs({}), 120_000);
+test('RVHAND-10: posted-review HAM step budget admits observed live tails without exceeding the handler cap', () => {
+  const handlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs({});
+  const headroomMs = resolvePostedReviewHandlerHeadroomMs({});
+  const deadlineMs = resolveMergeAgentCoexistenceStepDeadlineMs({});
+
+  assert.equal(handlerTimeoutMs, 180_000);
+  assert.equal(deadlineMs, 87_500);
+  assert.ok(deadlineMs > 80_000, 'live HAM candidate/coexistence tails have exceeded 75s under load');
+  assert.ok(
+    (deadlineMs * DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT) + headroomMs <= handlerTimeoutMs,
+    'the two bounded expensive steps must still fit inside one handler watchdog',
+  );
+});
+
+test('RVHAND-11: reviewer-pressure posted-review phase budget has a bounded default and override', () => {
+  assert.equal(resolvePostedReviewReviewerPressurePhaseBudgetMs({}), 180_000);
   assert.equal(
     resolvePostedReviewReviewerPressurePhaseBudgetMs({
       ADVERSARIAL_WATCHER_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS: '90000',
     }),
     90_000,
   );
+});
+
+test('RVHAND-12: operator can still lower the HAM coexistence deadline during an incident', () => {
+  const env = {
+    ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS: '10000',
+  };
+
+  assert.equal(resolveMergeAgentCoexistenceStepDeadlineMs(env), 10_000);
 });
 
 test('timePostedReviewStep: warns while a step is still pending', async () => {

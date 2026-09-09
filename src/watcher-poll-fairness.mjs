@@ -59,7 +59,7 @@
 // derived from `pollIntervalMs` because this module sits below config — override
 // with ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS if you retune the poll.
 export const DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS = 10 * 60 * 1000;
-export const DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS = 2 * 60 * 1000;
+export const DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS = 3 * 60 * 1000;
 export const DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT = 2;
 export const DEFAULT_POSTED_REVIEW_HANDLER_HEADROOM_MS = 5 * 1000;
 
@@ -77,11 +77,11 @@ export const DEFAULT_POSTED_REVIEW_HANDLER_HEADROOM_MS = 5 * 1000;
 // returns to discovery — is exactly the outage being fixed.
 //
 // A timed-out handler is also a phase-level stop. Continuing through a backlog of
-// slow hammer/merge handlers just serializes one abandoned 60s dispatch after
+// slow hammer/merge handlers just serializes one abandoned 3m dispatch after
 // another, which recreates poll starvation while the first abandoned promise is
 // still alive. Defer the tail to the next tick instead; the fairness state
 // promotes it, and the no-progress lane slows repeatedly unproductive PRs.
-export const DEFAULT_POSTED_REVIEW_HANDLER_TIMEOUT_MS = 60 * 1000;
+export const DEFAULT_POSTED_REVIEW_HANDLER_TIMEOUT_MS = 3 * 60 * 1000;
 
 function parsePositiveMs(value, fallback) {
   const numeric = Number(value);

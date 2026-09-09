@@ -375,7 +375,7 @@ export async function runPostedReviewHandlersFairly({
       const phaseElapsedTotalMs = Math.round(nowMs() - startedMs);
       logger?.error?.(
         `[watcher] posted-review handler for ${key} exceeded ${handlerDeadlineMs}ms; ` +
-          'abandoning it so the tick can return to new-PR discovery ' +
+          'abandoning this handler; remaining phase budget will decide whether the posted-review phase continues ' +
           `(elapsed=${handlerElapsedMs}ms position=${index + 1}/${ordered.length} ` +
           `phase_elapsed_at_start=${phaseElapsedAtStartMs}ms ` +
           `phase_elapsed_total=${phaseElapsedTotalMs}ms phase_budget=${effectiveBudgetMs}ms ` +
@@ -407,6 +407,21 @@ export async function runPostedReviewHandlersFairly({
 
     if (outcome.timedOut) {
       const remainingAfterTimeout = ordered.length - index - 1;
+      const phaseElapsedAfterTimeoutMs = Math.round(nowMs() - startedMs);
+      const remainingBudgetAfterTimeoutMs = effectiveBudgetMs - phaseElapsedAfterTimeoutMs;
+      if (
+        remainingAfterTimeout > 0
+        && remainingBudgetAfterTimeoutMs >= effectiveMinimumHandlerStartBudgetMs
+      ) {
+        summary.continuedAfterTimeout += 1;
+        logger?.warn?.(
+          `[watcher] posted-review phase continuing after timeout for ${key} ` +
+            `elapsed_ms=${handlerElapsedMs}: ${remainingAfterTimeout} handler(s) still eligible ` +
+            `this tick (remaining=${Math.max(0, remainingBudgetAfterTimeoutMs)}ms ` +
+            `minimum_start_budget=${effectiveMinimumHandlerStartBudgetMs}ms)`,
+        );
+        continue;
+      }
       if (remainingAfterTimeout > 0) {
         for (let rest = index + 1; rest < ordered.length; rest += 1) {
           nextDeferred.add(postedReviewHandlerKey(ordered[rest]));
@@ -415,7 +430,9 @@ export async function runPostedReviewHandlersFairly({
         logger?.warn?.(
           `[watcher] posted-review phase yielding after timeout for ${key} ` +
             `elapsed_ms=${handlerElapsedMs}: ${remainingAfterTimeout} handler(s) deferred ` +
-            `to the front of the next tick (${[...nextDeferred].join(' ')})`,
+            `to the front of the next tick (remaining=${Math.max(0, remainingBudgetAfterTimeoutMs)}ms ` +
+            `minimum_start_budget=${effectiveMinimumHandlerStartBudgetMs}ms; ` +
+            `${[...nextDeferred].join(' ')})`,
         );
       }
       break;

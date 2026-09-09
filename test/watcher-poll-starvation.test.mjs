@@ -284,6 +284,58 @@ test('RVHAND-01: posted-review timeout yields and defers the rest of the bounded
   assert.match(logs[0], /timeout_deferred=1 continued_after_timeout=0/);
 });
 
+test('RVHAND-02: timeout log reports phase elapsed at handler start', async () => {
+  const state = createPostedReviewFairnessState();
+  const errors = [];
+  let clock = 0;
+  let pendingTimer = null;
+
+  const summary = await runPostedReviewHandlersFairly({
+    handlers: [
+      {
+        repoPath: REPO,
+        prNumber: 5908,
+        run: async () => {
+          clock += 599_000;
+        },
+      },
+      {
+        repoPath: REPO,
+        prNumber: 5909,
+        run: () => {
+          queueMicrotask(() => {
+            clock += pendingTimer.delay;
+            pendingTimer.callback();
+          });
+          return new Promise(() => {});
+        },
+      },
+    ],
+    state,
+    budgetMs: 600_000,
+    handlerTimeoutMs: 60_000,
+    nowMs: () => clock,
+    setTimeoutFn: (callback, delay) => {
+      pendingTimer = { callback, delay };
+      return pendingTimer;
+    },
+    clearTimeoutFn: (timer) => {
+      if (pendingTimer === timer) pendingTimer = null;
+    },
+    logger: {
+      log() {},
+      warn() {},
+      error: (...args) => errors.push(args.join(' ')),
+    },
+  });
+
+  assert.equal(summary.ran, 1);
+  assert.equal(summary.timedOut, 1);
+  assert.match(errors[0], /phase_elapsed_at_start=599000ms/);
+  assert.match(errors[0], /phase_elapsed_total=659000ms/);
+  assert.doesNotMatch(errors[0], /phase_elapsed=659000ms/);
+});
+
 test('WPS-01: unadvanceable PRs back off to the slow lane while the new PR keeps full speed', async () => {
   const fixture = buildStarvationFixture();
   try {

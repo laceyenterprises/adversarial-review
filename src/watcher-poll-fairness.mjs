@@ -313,16 +313,20 @@ export async function runPostedReviewHandlersFairly({
       // they want opposite fixes, so raising the timeout without knowing which
       // one you have just moves the threshold.
       //
-      // Every value below is already computed in this loop and was simply being
-      // discarded. `position` separates an early handler (slow in isolation)
-      // from a late one (starved by its predecessors); `phase_elapsed` against
-      // the phase budget shows how much room was left when it began.
-      const phaseElapsedMs = Math.round(nowMs() - startedMs);
+      // Every value below is already available in this loop and was simply
+      // being discarded. `position` separates an early handler (slow in
+      // isolation) from a late one (starved by its predecessors);
+      // `phase_elapsed_at_start` against the phase budget shows how much room
+      // was left when it began, while `phase_elapsed_total` captures where the
+      // phase stood after the handler timed out.
+      const phaseElapsedAtStartMs = Math.round(handlerStartedMs - startedMs);
+      const phaseElapsedTotalMs = Math.round(nowMs() - startedMs);
       logger?.error?.(
         `[watcher] posted-review handler for ${key} exceeded ${effectiveHandlerTimeoutMs}ms; ` +
           'abandoning it so the tick can return to new-PR discovery ' +
           `(elapsed=${handlerElapsedMs}ms position=${index + 1}/${ordered.length} ` +
-          `phase_elapsed=${phaseElapsedMs}ms phase_budget=${effectiveBudgetMs}ms ` +
+          `phase_elapsed_at_start=${phaseElapsedAtStartMs}ms ` +
+          `phase_elapsed_total=${phaseElapsedTotalMs}ms phase_budget=${effectiveBudgetMs}ms ` +
           `ran_before=${summary.ran} timed_out_before=${summary.timedOut - 1})`,
       );
     } else if (outcome.error) {

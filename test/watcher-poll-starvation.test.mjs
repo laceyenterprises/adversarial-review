@@ -576,7 +576,11 @@ test('WPS-01: processReviewSubject queues posted-review handler with the SUBJECT
 
   assert.equal(postedReviewHandlers.length, 1);
   assert.equal(postedReviewHandlers[0].headSha, HEAD_A);
-  assert.equal(postedReviewHandlers[0].timeoutMs, 330_000);
+  assert.equal(
+    Object.hasOwn(postedReviewHandlers[0], 'timeoutMs'),
+    false,
+    'posted-review handlers use the scheduler ceiling, not the merge-authority dispatch timeout',
+  );
 });
 
 test('HCP pre-spawn precheck requeues when down and proceeds when up', async () => {

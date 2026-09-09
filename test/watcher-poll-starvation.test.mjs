@@ -237,7 +237,7 @@ test('WPS-01: a new PR is ingested on the first tick despite a backlog of unadva
   }
 });
 
-test('RVHAND-01: posted-review timeout keeps walking the rest of the bounded phase', async () => {
+test('RVHAND-01: posted-review timeout yields and defers the rest of the bounded phase', async () => {
   const state = createPostedReviewFairnessState();
   const events = [];
   const errors = [];
@@ -274,14 +274,14 @@ test('RVHAND-01: posted-review timeout keeps walking the rest of the bounded pha
   });
 
   assert.equal(summary.timedOut, 1);
-  assert.equal(summary.ran, 1);
-  assert.equal(summary.deferredAfterTimeout, 0);
-  assert.equal(summary.continuedAfterTimeout, 1);
-  assert.deepEqual(summary.deferred, []);
-  assert.deepEqual(events, ['second-handler-ran']);
+  assert.equal(summary.ran, 0);
+  assert.equal(summary.deferredAfterTimeout, 1);
+  assert.equal(summary.continuedAfterTimeout, 0);
+  assert.deepEqual(summary.deferred, ['laceyenterprises/agent-os#5909']);
+  assert.deepEqual(events, []);
   assert.match(errors[0], /posted-review handler for laceyenterprises\/agent-os#5908 exceeded 10ms/);
-  assert.match(warnings[0], /posted-review phase continuing after timeout/);
-  assert.match(logs[0], /timeout_deferred=0 continued_after_timeout=1/);
+  assert.match(warnings[0], /posted-review phase yielding after timeout/);
+  assert.match(logs[0], /timeout_deferred=1 continued_after_timeout=0/);
 });
 
 test('WPS-01: unadvanceable PRs back off to the slow lane while the new PR keeps full speed', async () => {
@@ -595,11 +595,11 @@ test('runPostedReviewHandlersFairly bounds a single never-settling handler', asy
     logger: silentLogger,
   });
   assert.equal(summary.timedOut, 1);
-  assert.equal(summary.ran, 1);
-  assert.equal(summary.deferredAfterTimeout, 0);
-  assert.equal(summary.continuedAfterTimeout, 1);
-  assert.deepEqual(summary.deferred, []);
-  assert.deepEqual(ran, [2], 'the handler behind the wedged one still runs within the phase budget');
+  assert.equal(summary.ran, 0);
+  assert.equal(summary.deferredAfterTimeout, 1);
+  assert.equal(summary.continuedAfterTimeout, 0);
+  assert.deepEqual(summary.deferred, [`${REPO}#2`]);
+  assert.deepEqual(ran, [], 'the handler behind the wedged one is rotated to the next tick');
 });
 
 test('runPostedReviewHandlersFairly isolates a throwing handler', async () => {

@@ -210,7 +210,6 @@ export async function fetchLatestHeadReviewBodiesWithRetry({
   };
   const sleep = (delayMs) => new Promise((resolve, reject) => {
     const timer = setTimeout(resolve, delayMs);
-    timer.unref?.();
     const onAbort = () => {
       clearTimeout(timer);
       reject(signal.reason instanceof Error ? signal.reason : new Error('aborted'));

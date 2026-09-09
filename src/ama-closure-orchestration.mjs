@@ -99,7 +99,6 @@ function abortableSleep(ms, signal) {
   if (!ms) return Promise.resolve();
   return new Promise((resolve, reject) => {
     const timer = setTimeout(resolve, ms);
-    timer.unref?.();
     const onAbort = () => {
       clearTimeout(timer);
       reject(signal.reason instanceof Error ? signal.reason : new AmaCoexistenceAbortError());

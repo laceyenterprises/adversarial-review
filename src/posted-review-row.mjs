@@ -174,7 +174,6 @@ export async function timePostedReviewStep(
           controller?.abort(err);
           reject(err);
         }, effectiveDeadlineMs);
-        deadlineTimer.unref?.();
       })
     : null;
   const work = Promise.resolve()

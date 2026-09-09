@@ -10,6 +10,7 @@ import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { DEFAULT_ADVERSARIAL_GATE_CONTEXT } from '../src/adversarial-gate-context.mjs';
 
 const CURRENT_USER = userInfo().username || process.env.USER || process.env.LOGNAME || 'unknown';
+const HEAD = 'a'.repeat(40);
 
 // These cover the AMA phantom-column fix: AMA must resolve the verdict +
 // remediation-pending from the canonical follow-up-job / review-row body, NOT
@@ -17,6 +18,18 @@ const CURRENT_USER = userInfo().username || process.env.USER || process.env.LOGN
 
 function finder(job) {
   return () => job;
+}
+
+function capturedPass(body, overrides = {}) {
+  return {
+    body_md: body,
+    head_sha: overrides.head_sha || HEAD,
+    body_captured_at: overrides.body_captured_at || '2026-09-09T15:05:00.000Z',
+    ended_at: overrides.ended_at || '2026-09-09T15:05:01.000Z',
+    started_at: overrides.started_at || '2026-09-09T15:04:00.000Z',
+    status: overrides.status || 'completed',
+    gh_comment_id: overrides.gh_comment_id || '123456789',
+  };
 }
 
 test('comment-only verdict from the latest completed follow-up job body is settled-success', () => {
@@ -90,6 +103,82 @@ test('a completed job with a queued re-review is remediation-pending, not settle
   });
   assert.equal(res.verdict, '');
   assert.equal(res.remediationPending, true);
+});
+
+test('a captured exact-head pass after queued re-review settles the verdict', () => {
+  const res = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 5,
+    currentHeadSha: HEAD,
+    reviewRow: { review_status: 'posted', reviewer_head_sha: HEAD },
+    latestJobFinder: finder({
+      status: 'completed',
+      completedAt: '2026-09-09T15:00:00.000Z',
+      reReview: { requested: true, requestedAt: '2026-09-09T15:00:00.000Z' },
+      reviewBody: '## Verdict\n\nComment only',
+    }),
+    capturedReviewerPassFinder: () => capturedPass(
+      '## Blocking Issues\n\n- None.\n\n## Non-blocking Issues\n\n- None.\n\n## Verdict\n\nComment only',
+    ),
+  });
+  assert.equal(res.verdict, 'comment-only');
+  assert.equal(res.remediationPending, false);
+  assert.equal(res.reviewedHeadSha, HEAD);
+  assert.equal(res.blockingFindingState, 'known');
+  assert.equal(res.blockingFindingCount, 0);
+});
+
+test('a captured exact-head pass before queued re-review does not settle the verdict', () => {
+  const res = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 5,
+    currentHeadSha: HEAD,
+    reviewRow: { review_status: 'posted', reviewer_head_sha: HEAD },
+    latestJobFinder: finder({
+      status: 'completed',
+      completedAt: '2026-09-09T15:00:00.000Z',
+      reReview: { requested: true, requestedAt: '2026-09-09T15:10:00.000Z' },
+      reviewBody: '## Verdict\n\nComment only',
+    }),
+    capturedReviewerPassFinder: () => capturedPass('## Verdict\n\nComment only', {
+      body_captured_at: '2026-09-09T15:05:00.000Z',
+    }),
+  });
+  assert.equal(res.verdict, '');
+  assert.equal(res.remediationPending, true);
+  assert.equal(res.reviewedHeadSha, HEAD);
+});
+
+test('a captured exact-head pass settles when no follow-up job exists', () => {
+  const res = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 6,
+    currentHeadSha: HEAD,
+    reviewRow: { review_status: 'posted', reviewer_head_sha: HEAD },
+    latestJobFinder: finder(null),
+    capturedReviewerPassFinder: () => capturedPass('## Verdict\n\nComment only'),
+  });
+  assert.equal(res.verdict, 'comment-only');
+  assert.equal(res.remediationPending, false);
+  assert.equal(res.reviewedHeadSha, HEAD);
+});
+
+test('a captured exact-head Request-changes pass remains unsettled', () => {
+  const res = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 6,
+    currentHeadSha: HEAD,
+    reviewRow: { review_status: 'posted', reviewer_head_sha: HEAD },
+    latestJobFinder: finder(null),
+    capturedReviewerPassFinder: () => capturedPass(
+      '## Blocking Issues\n\n### 1. Crash on empty input\n\nThe worker exits before posting.\n\n## Verdict\n\nRequest changes',
+    ),
+  });
+  assert.equal(res.verdict, 'request-changes');
+  assert.equal(res.remediationPending, false);
+  assert.equal(res.reviewedHeadSha, HEAD);
+  assert.equal(res.blockingFindingState, 'known');
+  assert.ok(res.blockingFindingCount >= 1, `expected >= 1, got ${res.blockingFindingCount}`);
 });
 
 test('falls back to the review-row body when there is no follow-up job', () => {
@@ -210,8 +299,6 @@ test('no job and no row body yields empty verdict (not falsely settled)', () => 
 // to a fresh `Request changes` review posted on the SAME head. When the caller
 // supplies the live latest review(s) on currentHeadSha, they override the stale
 // body and the closer must NOT see settled-success.
-
-const HEAD = 'a'.repeat(40);
 
 test('live Request-changes on head OVERRIDES a stale comment-only job body (the #1824 fail-open)', () => {
   const res = resolveSettledReviewVerdict('/root', {

@@ -20,6 +20,7 @@ import {
   getReviewRow,
   openReviewStateDb,
 } from './review-state.mjs';
+import { withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
 import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
 import {
   ARGUS_GATE_REASONS,
@@ -164,6 +165,77 @@ function extractReviewBodyFromRow(reviewRow) {
   return reviewRow?.reviewBody ?? reviewRow?.review_body ?? reviewRow?.review_text ?? null;
 }
 
+function parseTimestampMs(value) {
+  if (!String(value ?? '').trim()) return null;
+  const parsed = Date.parse(String(value).trim());
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function findCapturedReviewerPassForHead(rootDir, { repo, prNumber, headSha } = {}) {
+  const normalizedHeadSha = String(headSha ?? '').trim();
+  if (!repo || !prNumber || !normalizedHeadSha) return null;
+  let db = null;
+  try {
+    db = openReviewStateDb(rootDir);
+    return withSqliteBusyRetrySync(
+      () => {
+        ensureReviewStateSchema(db);
+        return db.prepare(
+          `SELECT body_md,
+                  verdict,
+                  head_sha,
+                  body_captured_at,
+                  ended_at,
+                  started_at,
+                  status,
+                  gh_comment_id
+             FROM reviewer_passes
+            WHERE repo = ?
+              AND pr_number = ?
+              AND pass_kind IN ('first-pass', 'rereview')
+              AND head_sha = ?
+              AND body_md IS NOT NULL
+              AND TRIM(body_md) <> ''
+              AND gh_comment_id IS NOT NULL
+              AND TRIM(CAST(gh_comment_id AS TEXT)) <> ''
+              AND body_captured_at IS NOT NULL
+              AND TRIM(body_captured_at) <> ''
+            ORDER BY body_captured_at DESC,
+                     ended_at DESC,
+                     started_at DESC,
+                     pass_id DESC
+            LIMIT 1`
+        ).get(repo, prNumber, normalizedHeadSha) || null;
+      },
+      { label: 'captured-reviewer-pass-for-head' },
+    );
+  } catch {
+    return null;
+  } finally {
+    if (db) db.close();
+  }
+}
+
+function capturedPassAnswersReReview(job, capturedPass) {
+  if (!job?.reReview?.requested) return true;
+  if (!capturedPass?.body_md) return false;
+  const requestedMs = parseTimestampMs(
+    job?.reReview?.requestedAt
+      ?? job?.completedAt
+      ?? job?.updatedAt
+      ?? job?.createdAt
+  );
+  const capturedMs = parseTimestampMs(
+    capturedPass?.body_captured_at
+      ?? capturedPass?.ended_at
+      ?? capturedPass?.started_at
+  );
+  if (requestedMs !== null && capturedMs !== null && capturedMs < requestedMs) {
+    return false;
+  }
+  return true;
+}
+
 /**
  * Resolve a PR's settled review verdict + remediation-pending state from the
  * SAME canonical source `pickAdversarialGateStatus()` uses: the latest
@@ -265,6 +337,7 @@ function resolveSettledReviewVerdict(
     reviewRow = null,
     currentHeadSha = null,
     latestJobFinder = findLatestFollowUpJobForPR,
+    capturedReviewerPassFinder = findCapturedReviewerPassForHead,
     liveHeadReview = undefined,
   } = {}
 ) {
@@ -287,7 +360,20 @@ function resolveSettledReviewVerdict(
   if (latestJobStatus === 'pending' || latestJobStatus === 'in-progress') {
     return { verdict: '', remediationPending: true, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
   }
-  if (latestJobStatus === 'completed' && latestJob?.reReview?.requested === true) {
+  const currentHeadCapturedPass = (
+    reviewStatus === 'posted'
+      && currentHeadSha
+      && reviewedHeadSha
+      && String(reviewedHeadSha) === String(currentHeadSha)
+      && typeof capturedReviewerPassFinder === 'function'
+  )
+    ? capturedReviewerPassFinder(rootDir, { repo, prNumber, headSha: currentHeadSha })
+    : null;
+  if (
+    latestJobStatus === 'completed'
+      && latestJob?.reReview?.requested === true
+      && !capturedPassAnswersReReview(latestJob, currentHeadCapturedPass)
+  ) {
     return { verdict: '', remediationPending: true, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
   }
   if (isQuotaCapped && latestJob) {
@@ -323,13 +409,14 @@ function resolveSettledReviewVerdict(
     };
   }
 
-  const body = latestJob
-    ? latestJob.reviewBody
-    : extractReviewBodyFromRow(reviewRow);
+  const body = currentHeadCapturedPass?.body_md
+    ?? (latestJob
+      ? latestJob.reviewBody
+      : extractReviewBodyFromRow(reviewRow));
   const verdict = String(normalizeEffectiveReviewVerdict(body) || '').toLowerCase();
-  const settledReviewedHeadSha = latestJob
+  const settledReviewedHeadSha = currentHeadCapturedPass?.head_sha || (latestJob
     ? (latestJob.revisionRef || latestJob.currentRevisionRef || latestJob.subjectRef?.revisionRef || null)
-    : reviewedHeadSha;
+    : reviewedHeadSha);
   return {
     verdict,
     remediationPending: false,

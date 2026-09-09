@@ -125,6 +125,33 @@ function insertReviewRow(rootDir, overrides = {}) {
   }
 }
 
+function insertReviewerPass(rootDir, overrides = {}) {
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    db.prepare(
+      `INSERT INTO reviewer_passes (
+        repo, pr_number, attempt_number, reviewer_class, reviewer_model, pass_kind,
+        started_at, ended_at, status, head_sha, metadata_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      overrides.repo || 'laceyenterprises/agent-os',
+      overrides.prNumber || 238,
+      overrides.attemptNumber || 1,
+      overrides.reviewerClass || 'codex',
+      overrides.reviewerModel || overrides.reviewerClass || 'codex',
+      overrides.passKind || 'first-pass',
+      overrides.startedAt || '2026-05-05T04:01:00.000Z',
+      overrides.endedAt || null,
+      overrides.status || 'running',
+      overrides.headSha || 'head-current-238',
+      JSON.stringify(overrides.metadata || { reviewerSessionUuid: 'sess-238' }),
+    );
+  } finally {
+    db.close();
+  }
+}
+
 function makeJob(rootDir, overrides = {}) {
   const result = createFollowUpJob({
     rootDir,
@@ -865,6 +892,10 @@ test('retrigger-review allow-active-review-reset preserves a null pgid guard', a
     reviewerSessionUuid: 'sess-238',
     reviewerPgid: null,
   });
+  insertReviewerPass(rootDir, {
+    reviewerModel: 'gemini',
+    metadata: { reviewerSessionUuid: 'sess-238', reviewerModel: 'gemini' },
+  });
 
   const out = makeCaptureStream();
   const rc = await main([
@@ -889,9 +920,15 @@ test('retrigger-review allow-active-review-reset preserves a null pgid guard', a
     const row = db.prepare(
       'SELECT review_status, reviewer_pgid, reviewer_session_uuid FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
     ).get('laceyenterprises/agent-os', 238);
+    const pass = db.prepare(
+      'SELECT status, ended_at, metadata_json FROM reviewer_passes WHERE repo = ? AND pr_number = ?'
+    ).get('laceyenterprises/agent-os', 238);
     assert.equal(row.review_status, 'pending');
     assert.equal(row.reviewer_pgid, null);
     assert.equal(row.reviewer_session_uuid, null);
+    assert.equal(pass.status, 'abandoned');
+    assert.ok(pass.ended_at);
+    assert.equal(JSON.parse(pass.metadata_json).activeReviewReset.reason, 'force-reset-review-to-pending');
   } finally {
     db.close();
   }

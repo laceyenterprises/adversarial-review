@@ -645,7 +645,20 @@ test('target remediation SHA cap pages exactly once per PR and target SHA', asyn
   assert.equal(alertCalls[0].opts.event, 'ama_closer.hammer_target_redrive_cap_exhausted');
   const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
   assert.equal(ledger.targetSuppressed, true);
-  assert.equal(ledger.targetAlertedAt, '2026-07-17T12:10:00Z');
+  assert.equal(ledger.targetAlertedAt, '2026-07-17T12:11:00Z');
+
+  markHammerRetryCapExhausted(rootDir, { repo: REPO, prNumber: PR_NUMBER }, {
+    jobKey: 'fresh-review-blocked-2',
+    headSha: targetSha,
+    attemptCount: HAMMER_RETRY_CAP_TOTAL_DISPATCHES,
+    target: true,
+    alertEmitted: true,
+    now: '2026-07-17T12:20:00Z',
+  });
+  assert.equal(
+    readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER }).targetAlertedAt,
+    '2026-07-17T12:20:00Z',
+  );
 });
 
 test('merged live target terminalizes closer record and lease without re-dispatch', async (t) => {
@@ -685,6 +698,53 @@ test('merged live target terminalizes closer record and lease without re-dispatc
   const lease = readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: targetSha });
   assert.equal(lease.status, AMA_CLOSER_LEASE_STATUS.TERMINAL);
   assert.equal(lease.terminalOutcome, 'succeeded');
+});
+
+test('merged live target leaves lease retryable when terminal record update fails', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-merged-target-write-fail-'));
+  const dispatchDir = dirname(amaCloserDispatchFilePath(rootDir, {
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: ADVANCED_HEAD,
+  }));
+  t.after(() => {
+    try {
+      chmodSync(dispatchDir, 0o700);
+    } catch {}
+    rmSync(rootDir, { recursive: true, force: true });
+  });
+  const deps = hammerDispatchDeps();
+
+  await assert.rejects(
+    maybeDispatchAmaCloser({
+      ...hammerDispatchArgs(rootDir, {
+        reviewState: { reviewCycleExhausted: true, headSha: ADVANCED_HEAD },
+        prMetadata: { headSha: ADVANCED_HEAD, mergeableState: 'DIRTY' },
+        dispatchContext: {
+          reviewedSha: ADVANCED_HEAD,
+          targetRemediationSha: ADVANCED_HEAD,
+          dispatchRecordHeadSha: ADVANCED_HEAD,
+          allowStaleReviewHeadHammerResume: true,
+          dispatchedAt: '2026-07-17T12:00:00Z',
+          livePrProbeImpl: async () => {
+            chmodSync(dispatchDir, 0o500);
+            return {
+              state: 'MERGED',
+              headBranchExists: false,
+              headRefName: 'stale/merged',
+            };
+          },
+        },
+      }),
+      ...deps,
+    }),
+    /EACCES|EPERM/,
+  );
+
+  assert.equal(deps.execCalls.length, 0);
+  const lease = readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD });
+  assert.equal(lease.status, AMA_CLOSER_LEASE_STATUS.PENDING);
+  assert.equal(lease.terminalOutcome, null);
 });
 
 test('configured hammer lifetime ceiling disables hammer at 0 and controls dispatch at 1 and 3', async (t) => {

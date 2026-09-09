@@ -401,7 +401,7 @@ export function markHammerRetryCapExhausted(rootDir, identity, {
     // the alert doesn't erase the record that it once succeeded.
     alertedAt: alertEmitted ? (now || existing?.alertedAt || null) : (existing?.alertedAt || null),
     targetAlertedAt: target && alertEmitted
-      ? (existing?.targetAlertedAt || now || null)
+      ? (now || existing?.targetAlertedAt || null)
       : (existing?.targetAlertedAt || null),
     createdAt: existing?.createdAt || now || null,
     updatedAt: now || existing?.updatedAt || null,

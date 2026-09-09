@@ -9,8 +9,9 @@ import {
 } from '../src/posted-review-row.mjs';
 import { createLogChangeGate } from '../src/log-change-gate.mjs';
 import {
-  DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT,
-  derivePostedReviewExpensiveStepBudgetMs,
+  POSTED_REVIEW_OBSERVED_STEP_P95_MS,
+  derivePostedReviewHandlerStartBudgetMs,
+  derivePostedReviewStepDeadlineMs,
   resolvePostedReviewHandlerHeadroomMs,
   resolvePostedReviewHandlerTimeoutMs,
   resolvePostedReviewPhaseBudgetMs,
@@ -54,7 +55,7 @@ function baseArgs(overrides = {}) {
 const retained = (logs) => logs.filter((m) => /AMA hammer route retained ownership/.test(m));
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-test('RVHAND-06: bounded posted-review step budgets fit under the handler cap', () => {
+test('RVHAND-08: posted-review step deadlines derive from observed step tails', () => {
   const env = {
     ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS: '330000',
     ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS: '300000',
@@ -65,18 +66,42 @@ test('RVHAND-06: bounded posted-review step budgets fit under the handler cap', 
   const handlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs(env);
   const headroomMs = resolvePostedReviewHandlerHeadroomMs(env);
   const deadlineMs = resolveMergeAgentCoexistenceStepDeadlineMs(env);
-  const derivedDeadlineMs = derivePostedReviewExpensiveStepBudgetMs(handlerTimeoutMs, { headroomMs });
-  const boundedStepBudgetTotalMs = derivedDeadlineMs * DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT;
+  const handlerStartBudgetMs = derivePostedReviewHandlerStartBudgetMs({ headroomMs });
 
   assert.equal(phaseBudgetMs, 330_000);
   assert.equal(handlerTimeoutMs, 60_000);
-  assert.equal(deadlineMs, 27_500);
+  assert.equal(deadlineMs, 45_061);
   assert.ok(deadlineMs < phaseBudgetMs);
   assert.ok(
-    boundedStepBudgetTotalMs + headroomMs <= handlerTimeoutMs,
-    `step budgets (${boundedStepBudgetTotalMs}ms) + headroom (${headroomMs}ms) ` +
-      `must fit under handler cap (${handlerTimeoutMs}ms)`,
+    handlerStartBudgetMs > handlerTimeoutMs,
+    `step start budget (${handlerStartBudgetMs}ms) is measured independently ` +
+      `from handler cap (${handlerTimeoutMs}ms)`,
   );
+});
+
+test('RVHAND-08: shipped posted-review deadlines sit above their observed p95s', () => {
+  const deadlines = [
+    {
+      stepName: 'fetchMergeAgentCandidate',
+      deadlineMs: derivePostedReviewStepDeadlineMs('fetchMergeAgentCandidate'),
+    },
+    {
+      stepName: 'resolveMergeAgentCoexistence',
+      deadlineMs: resolveMergeAgentCoexistenceStepDeadlineMs({}),
+    },
+    {
+      stepName: 'resolveMergeAgentCoexistenceRetry',
+      deadlineMs: derivePostedReviewStepDeadlineMs('resolveMergeAgentCoexistenceRetry'),
+    },
+  ];
+
+  for (const { stepName, deadlineMs } of deadlines) {
+    const observedP95Ms = POSTED_REVIEW_OBSERVED_STEP_P95_MS[stepName];
+    assert.ok(
+      deadlineMs > observedP95Ms,
+      `${stepName} deadline ${deadlineMs}ms must exceed observed p95 ${observedP95Ms}ms`,
+    );
+  }
 });
 
 test('RVHAND-07: reviewer-pressure posted-review phase budget has a bounded default and override', () => {
@@ -238,7 +263,9 @@ test('timePostedReviewStep: soft-deadlined background failure is logged as an er
 
 test('handlePostedReviewRow: resolveMergeAgentCoexistence deadline is a soft handled outcome', async () => {
   const oldDeadline = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
+  const oldRetryDeadline = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_RETRY_DEADLINE_MS;
   process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = '10';
+  process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_RETRY_DEADLINE_MS = '20';
   const errors = [];
   let sawAbort = false;
   const { args } = baseArgs({
@@ -266,19 +293,27 @@ test('handlePostedReviewRow: resolveMergeAgentCoexistence deadline is a soft han
       'resolve-merge-agent-coexistence-deadline-exceeded',
     );
     assert.match(errors.join('\n'), /reason=resolve-merge-agent-coexistence-deadline-exceeded/);
-    assert.match(errors.join('\n'), /Leaving any in-flight HAM launch to settle/);
+    assert.match(errors.join('\n'), /Retrying once with the extended coexistence budget/);
+    assert.match(errors.join('\n'), /coexistence retry deadline exceeded/);
   } finally {
     if (oldDeadline === undefined) {
       delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
     } else {
       process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = oldDeadline;
     }
+    if (oldRetryDeadline === undefined) {
+      delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_RETRY_DEADLINE_MS;
+    } else {
+      process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_RETRY_DEADLINE_MS = oldRetryDeadline;
+    }
   }
 });
 
 test('handlePostedReviewRow: HAM coexistence deadline does not abort in-flight launch settlement', async () => {
   const oldDeadline = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
+  const oldRetryDeadline = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_RETRY_DEADLINE_MS;
   process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = '10';
+  process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_RETRY_DEADLINE_MS = '20';
   const errors = [];
   let sawAbort = false;
   let release;
@@ -328,12 +363,57 @@ test('handlePostedReviewRow: HAM coexistence deadline does not abort in-flight l
     } else {
       process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = oldDeadline;
     }
+    if (oldRetryDeadline === undefined) {
+      delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_RETRY_DEADLINE_MS;
+    } else {
+      process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_RETRY_DEADLINE_MS = oldRetryDeadline;
+    }
+  }
+});
+
+test('handlePostedReviewRow: coexistence deadline retries before forfeiting merge action', async () => {
+  const oldDeadline = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
+  const oldRetryDeadline = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_RETRY_DEADLINE_MS;
+  process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = '10';
+  process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_RETRY_DEADLINE_MS = '50';
+  const errors = [];
+  let calls = 0;
+  const { args } = baseArgs({
+    logger: {
+      log() {},
+      warn() {},
+      error: (m) => errors.push(String(m)),
+    },
+    resolveMergeAgentCoexistenceForWatcherImpl: () => {
+      calls += 1;
+      if (calls === 1) return new Promise(() => {});
+      return { outcome: 'await-operator', amaClosureResult: { reason: 'not-eligible' } };
+    },
+  });
+
+  try {
+    const result = await handlePostedReviewRow(args);
+
+    assert.equal(calls, 2);
+    assert.equal(result.outcome, 'await-operator');
+    assert.match(errors.join('\n'), /Retrying once with the extended coexistence budget/);
+  } finally {
+    if (oldDeadline === undefined) {
+      delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
+    } else {
+      process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = oldDeadline;
+    }
+    if (oldRetryDeadline === undefined) {
+      delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_RETRY_DEADLINE_MS;
+    } else {
+      process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_RETRY_DEADLINE_MS = oldRetryDeadline;
+    }
   }
 });
 
 test('handlePostedReviewRow: fetchMergeAgentCandidate deadline returns a named handled outcome', async () => {
-  const oldDeadline = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
-  process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = '10';
+  const oldDeadline = process.env.ADVERSARIAL_WATCHER_FETCH_MERGE_AGENT_CANDIDATE_DEADLINE_MS;
+  process.env.ADVERSARIAL_WATCHER_FETCH_MERGE_AGENT_CANDIDATE_DEADLINE_MS = '10';
   const errors = [];
   let sawAbort = false;
   const { args } = baseArgs({
@@ -365,9 +445,9 @@ test('handlePostedReviewRow: fetchMergeAgentCandidate deadline returns a named h
     assert.match(errors.join('\n'), /reason=fetch-merge-agent-candidate-deadline-exceeded/);
   } finally {
     if (oldDeadline === undefined) {
-      delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
+      delete process.env.ADVERSARIAL_WATCHER_FETCH_MERGE_AGENT_CANDIDATE_DEADLINE_MS;
     } else {
-      process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = oldDeadline;
+      process.env.ADVERSARIAL_WATCHER_FETCH_MERGE_AGENT_CANDIDATE_DEADLINE_MS = oldDeadline;
     }
   }
 });

@@ -62,6 +62,12 @@ export const DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS = 10 * 60 * 1000;
 export const DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS = 2 * 60 * 1000;
 export const DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT = 2;
 export const DEFAULT_POSTED_REVIEW_HANDLER_HEADROOM_MS = 5 * 1000;
+export const POSTED_REVIEW_OBSERVED_STEP_P95_MS = Object.freeze({
+  fetchMergeAgentCandidate: 36_638,
+  resolveMergeAgentCoexistence: 41_061,
+  resolveMergeAgentCoexistenceRetry: 379_200,
+});
+export const DEFAULT_POSTED_REVIEW_STEP_TAIL_HEADROOM_MS = 4 * 1000;
 
 // Per-handler deadline. The phase budget alone cannot save a tick, because it is
 // only checked BETWEEN handlers: one handler that never settles (an `hq` dispatch
@@ -81,7 +87,11 @@ export const DEFAULT_POSTED_REVIEW_HANDLER_HEADROOM_MS = 5 * 1000;
 // another, which recreates poll starvation while the first abandoned promise is
 // still alive. Defer the tail to the next tick instead; the fairness state
 // promotes it, and the no-progress lane slows repeatedly unproductive PRs.
-export const DEFAULT_POSTED_REVIEW_HANDLER_TIMEOUT_MS = 60 * 1000;
+export const DEFAULT_POSTED_REVIEW_HANDLER_TIMEOUT_MS =
+  POSTED_REVIEW_OBSERVED_STEP_P95_MS.fetchMergeAgentCandidate +
+  POSTED_REVIEW_OBSERVED_STEP_P95_MS.resolveMergeAgentCoexistence +
+  (DEFAULT_POSTED_REVIEW_STEP_TAIL_HEADROOM_MS * DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT) +
+  DEFAULT_POSTED_REVIEW_HANDLER_HEADROOM_MS;
 
 function parsePositiveMs(value, fallback) {
   const numeric = Number(value);
@@ -136,6 +146,29 @@ export function derivePostedReviewExpensiveStepBudgetMs(
   );
   const availableForStepsMs = Math.max(1, effectiveHandlerTimeoutMs - effectiveHeadroomMs);
   return Math.max(1, Math.floor(availableForStepsMs / effectiveStepCount));
+}
+
+export function derivePostedReviewStepDeadlineMs(stepName, {
+  observedP95ByStep = POSTED_REVIEW_OBSERVED_STEP_P95_MS,
+  tailHeadroomMs = DEFAULT_POSTED_REVIEW_STEP_TAIL_HEADROOM_MS,
+} = {}) {
+  const observedP95Ms = parsePositiveMs(observedP95ByStep?.[stepName], null);
+  if (!observedP95Ms) {
+    return derivePostedReviewExpensiveStepBudgetMs(DEFAULT_POSTED_REVIEW_HANDLER_TIMEOUT_MS);
+  }
+  return Math.ceil(observedP95Ms + parsePositiveMs(tailHeadroomMs, DEFAULT_POSTED_REVIEW_STEP_TAIL_HEADROOM_MS));
+}
+
+export function derivePostedReviewHandlerStartBudgetMs({
+  stepNames = ['fetchMergeAgentCandidate', 'resolveMergeAgentCoexistence'],
+  headroomMs = DEFAULT_POSTED_REVIEW_HANDLER_HEADROOM_MS,
+  tailHeadroomMs = DEFAULT_POSTED_REVIEW_STEP_TAIL_HEADROOM_MS,
+} = {}) {
+  const totalStepBudgetMs = stepNames.reduce(
+    (sum, stepName) => sum + derivePostedReviewStepDeadlineMs(stepName, { tailHeadroomMs }),
+    0,
+  );
+  return Math.ceil(totalStepBudgetMs + parsePositiveMs(headroomMs, DEFAULT_POSTED_REVIEW_HANDLER_HEADROOM_MS));
 }
 
 /**
@@ -288,7 +321,7 @@ export async function runPostedReviewHandlersFairly({
   );
   const effectiveMinimumHandlerStartBudgetMs = parsePositiveMs(
     minimumHandlerStartBudgetMs,
-    derivePostedReviewExpensiveStepBudgetMs(effectiveHandlerTimeoutMs),
+    Math.min(derivePostedReviewHandlerStartBudgetMs(), effectiveHandlerTimeoutMs),
   );
   const startedMs = nowMs();
   const ordered = orderDeferredFirst(handlers, state);

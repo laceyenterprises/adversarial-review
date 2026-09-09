@@ -409,7 +409,9 @@ test('RVHAND-05: posted-review phase defers before starting when remaining budge
 
 test('RVHAND-04: resolveMergeAgentCoexistence soft deadline does not consume the remaining phase budget', async () => {
   const oldDeadline = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
+  const oldRetryDeadline = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_RETRY_DEADLINE_MS;
   process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = '10';
+  process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_RETRY_DEADLINE_MS = '20';
   const state = createPostedReviewFairnessState();
   const events = [];
   let firstStepAborted = false;
@@ -477,6 +479,11 @@ test('RVHAND-04: resolveMergeAgentCoexistence soft deadline does not consume the
       delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
     } else {
       process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = oldDeadline;
+    }
+    if (oldRetryDeadline === undefined) {
+      delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_RETRY_DEADLINE_MS;
+    } else {
+      process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_RETRY_DEADLINE_MS = oldRetryDeadline;
     }
   }
 });

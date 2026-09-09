@@ -63,7 +63,8 @@ import {
 } from './watcher-no-progress-lane.mjs';
 import {
   createPostedReviewFairnessState,
-  derivePostedReviewExpensiveStepBudgetMs,
+  derivePostedReviewHandlerStartBudgetMs,
+  derivePostedReviewStepDeadlineMs,
   resolvePostedReviewHandlerHeadroomMs,
   resolvePostedReviewHandlerTimeoutMs,
   resolvePostedReviewPhaseBudgetMs,
@@ -140,17 +141,32 @@ function parsePositiveMs(value, fallback) {
 
 export function resolveMergeAgentCoexistenceStepDeadlineMs(
   env = process.env,
-  {
-    handlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs(env),
-    headroomMs = resolvePostedReviewHandlerHeadroomMs(env),
-  } = {},
 ) {
-  const derivedDeadlineMs = derivePostedReviewExpensiveStepBudgetMs(handlerTimeoutMs, { headroomMs });
+  const derivedDeadlineMs = derivePostedReviewStepDeadlineMs('resolveMergeAgentCoexistence');
   const overrideDeadlineMs = parsePositiveMs(
     env?.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS,
     derivedDeadlineMs,
   );
   return Math.min(overrideDeadlineMs, derivedDeadlineMs);
+}
+
+export function resolveFetchMergeAgentCandidateStepDeadlineMs(env = process.env) {
+  const derivedDeadlineMs = derivePostedReviewStepDeadlineMs('fetchMergeAgentCandidate');
+  const overrideDeadlineMs = parsePositiveMs(
+    env?.ADVERSARIAL_WATCHER_FETCH_MERGE_AGENT_CANDIDATE_DEADLINE_MS,
+    derivedDeadlineMs,
+  );
+  return Math.min(overrideDeadlineMs, derivedDeadlineMs);
+}
+
+export function resolveMergeAgentCoexistenceRetryDeadlineMs(env = process.env) {
+  const firstDeadlineMs = resolveMergeAgentCoexistenceStepDeadlineMs(env);
+  const derivedRetryDeadlineMs = derivePostedReviewStepDeadlineMs('resolveMergeAgentCoexistenceRetry');
+  const overrideDeadlineMs = parsePositiveMs(
+    env?.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_RETRY_DEADLINE_MS,
+    derivedRetryDeadlineMs,
+  );
+  return Math.max(firstDeadlineMs + 1, overrideDeadlineMs);
 }
 
 export async function timePostedReviewStep(
@@ -308,7 +324,7 @@ export async function handlePostedReviewRow({
     // drain first. This live fetch is therefore the dispatch-time guard: it
     // re-reads PR state/mergeability/head before AMA or merge-agent selection
     // instead of trusting the previous tick's lifecycle mirror.
-    const candidateDeadlineMs = resolveMergeAgentCoexistenceStepDeadlineMs();
+    const candidateDeadlineMs = resolveFetchMergeAgentCandidateStepDeadlineMs();
     let candidate;
     try {
       candidate = await timePostedReviewStep(
@@ -379,21 +395,53 @@ export async function handlePostedReviewRow({
       logger?.error?.(
         `[watcher] AMA/merge-agent coexistence deadline exceeded for ${repoPath}#${prNumber}; ` +
           `reason=${reason} deadline_ms=${coexistenceDeadlineMs}. ` +
-          'Leaving any in-flight HAM launch to settle under its own lease and dispatch timeout; ' +
-          'skipping merge action for this PR on this tick so the posted-review phase can continue.',
+          'Retrying once with the extended coexistence budget before yielding this merge opportunity.',
       );
-      return {
-        handled: true,
-        outcome: 'coexistence-deadline',
-        gateDecision: gateProjection?.decision || null,
-        amaClosureResult: {
-          dispatched: false,
-          skipMergeAgent: true,
-          reason,
-          namedReason: reason,
-          deadlineMs: coexistenceDeadlineMs,
-        },
-      };
+      const retryDeadlineMs = resolveMergeAgentCoexistenceRetryDeadlineMs();
+      try {
+        coexistenceDecision = await timePostedReviewStep(
+          'resolveMergeAgentCoexistenceRetry', stepKey, logger, ({ signal }) =>
+            resolveMergeAgentCoexistenceForWatcherImpl({
+              rootDir,
+              reviewStateRow: existing,
+              dispatchJob,
+              candidate,
+              labelNames,
+              operatorApprovalEvent,
+              mergeAgentRequestEvent,
+              adversarialMergeRequestedEvent,
+              repoPath,
+              prNumber,
+              currentRevisionRef,
+              domainId,
+              logger,
+              signal,
+            }),
+          undefined,
+          { deadlineMs: retryDeadlineMs, abortOnDeadline: false },
+        );
+      } catch (retryErr) {
+        if (retryErr?.code !== 'POSTED_REVIEW_STEP_DEADLINE_EXCEEDED') throw retryErr;
+        logger?.error?.(
+          `[watcher] AMA/merge-agent coexistence retry deadline exceeded for ${repoPath}#${prNumber}; ` +
+            `reason=${reason} first_deadline_ms=${coexistenceDeadlineMs} retry_deadline_ms=${retryDeadlineMs}. ` +
+            'Leaving any in-flight HAM launch to settle under its own lease and dispatch timeout; ' +
+            'skipping merge action for this PR on this tick so the posted-review phase can continue.',
+        );
+        return {
+          handled: true,
+          outcome: 'coexistence-deadline',
+          gateDecision: gateProjection?.decision || null,
+          amaClosureResult: {
+            dispatched: false,
+            skipMergeAgent: true,
+            reason,
+            namedReason: reason,
+            deadlineMs: coexistenceDeadlineMs,
+            retryDeadlineMs,
+          },
+        };
+      }
     }
     if (coexistenceDecision.outcome === 'pr-terminal') {
       // BUG-1: the live candidate read shows the PR already merged. No
@@ -777,10 +825,9 @@ export async function runQueuedReviewAdoptionPhase({
   postedReviewPhaseBudgetMs = resolvePostedReviewPhaseBudgetMs(),
   postedReviewReviewerPressurePhaseBudgetMs = resolvePostedReviewReviewerPressurePhaseBudgetMs(),
   postedReviewHandlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs(),
-  minimumHandlerStartBudgetMs = resolveMergeAgentCoexistenceStepDeadlineMs(
-    process.env,
-    { handlerTimeoutMs: postedReviewHandlerTimeoutMs },
-  ),
+  minimumHandlerStartBudgetMs = derivePostedReviewHandlerStartBudgetMs({
+    headroomMs: resolvePostedReviewHandlerHeadroomMs(),
+  }),
   noProgressLaneGate = createNoProgressLaneGate({ rootDir, logger }),
   runPostedReviewHandlersFairlyImpl = runPostedReviewHandlersFairly,
 } = {}) {

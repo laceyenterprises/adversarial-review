@@ -4,7 +4,13 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 
-import { __testables__, maybeDispatchAmaCloser, updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
+import {
+  __testables__,
+  AMA_CLOSER_REDISPATCH_BOUND,
+  maybeDispatchAmaCloser,
+  readAmaCloserDispatchRecord,
+  updateAmaCloserDispatchRecord,
+} from '../src/ama/dispatch-closer.mjs';
 import { maybeDispatchAmaClosureFor } from '../src/watcher.mjs';
 
 const CURRENT_USER = userInfo().username || process.env.USER || process.env.LOGNAME || 'unknown';
@@ -168,6 +174,48 @@ test('DCR-02: pruned head branch does not dispatch hammer merge task', async (t)
   assert.equal(result.reason, 'live-head-branch-missing');
   assert.equal(result.prState, 'OPEN');
   assert.equal(deps.calls.length, 0, 'must not run hq dispatch for pruned PR branch');
+});
+
+test('DCR-02: stale branch-missing no-dispatch record revalidates before retry cap', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'dcr-02-stale-branch-missing-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const deps = testDeps();
+  updateAmaCloserDispatchRecord(rootDir, {
+    repo: 'acme/repo',
+    prNumber: 404,
+    headSha: HEAD,
+  }, () => ({
+    schemaVersion: 1,
+    repo: 'acme/repo',
+    prNumber: 404,
+    headSha: HEAD,
+    reviewedSha: HEAD,
+    state: 'no-dispatch',
+    reason: 'live-head-branch-missing',
+    headBranchExists: false,
+    headRefName: 'codex/live',
+    retryCount: AMA_CLOSER_REDISPATCH_BOUND,
+  }));
+
+  const result = await maybeDispatchAmaCloser({
+    ...mechanicalHammerArgs(rootDir, {
+      dispatchContext: {
+        livePrProbeImpl: async () => ({ state: 'OPEN', headBranchExists: true, headRefName: 'codex/live' }),
+      },
+    }),
+    ...deps,
+  });
+
+  assert.equal(result.dispatched, true);
+  assert.equal(result.launchRequestId, 'lrq_hammer_1');
+  assert.equal(deps.calls.length, 1, 'must re-dispatch after branch existence is revalidated');
+  const record = readAmaCloserDispatchRecord(rootDir, {
+    repo: 'acme/repo',
+    prNumber: 404,
+    headSha: HEAD,
+  });
+  assert.equal(record.state, 'dispatched');
+  assert.equal(record.retryCount, 1);
 });
 
 test('DCR-02: default live probe treats git ls-remote exit 2 as pruned branch', async (t) => {

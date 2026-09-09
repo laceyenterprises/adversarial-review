@@ -289,6 +289,39 @@ function createGitHubPRSubjectAdapter({
     return snapshot;
   }
 
+  async function listOpenPullRequestsWithGh(repoPath) {
+    let stdout;
+    try {
+      ({ stdout } = await execFileImpl('gh', [
+        'pr',
+        'list',
+        '--repo',
+        repoPath,
+        '--state',
+        'open',
+        '--limit',
+        '100',
+        '--json',
+        'number,title,state,headRefOid,labels,createdAt,updatedAt,author',
+      ], {
+        maxBuffer: 10 * 1024 * 1024,
+      }));
+    } catch (err) {
+      const detail = err?.stderr || err?.message || String(err);
+      throw new Error(`gh pr list failed for ${repoPath}: ${detail}`);
+    }
+    let pulls;
+    try {
+      pulls = JSON.parse(stdout);
+    } catch (err) {
+      throw new Error(`gh pr list returned invalid JSON for ${repoPath}: ${err?.message || err}`);
+    }
+    if (!Array.isArray(pulls)) {
+      throw new Error(`gh pr list returned a non-array payload for ${repoPath}`);
+    }
+    return pulls;
+  }
+
   return {
     async discoverSubjects() {
       const refs = [];
@@ -323,6 +356,7 @@ function createGitHubPRSubjectAdapter({
         if (!octokit?.rest?.pulls?.list) {
           throw new Error('No GitHub client available to discover GitHub PR subjects');
         }
+        let octokitListError = null;
         try {
           const { data } = await withApiTelemetry('pr_view', { repo: repoPath }, () => octokit.rest.pulls.list({
             owner,
@@ -336,7 +370,29 @@ function createGitHubPRSubjectAdapter({
             appendSnapshot(pr);
           }
         } catch (err) {
-          if (!Array.isArray(adapterPulls) || adapterPulls.length === 0) throw err;
+          octokitListError = err;
+          try {
+            const data = await withApiTelemetry('pr_view', {
+              repo: repoPath,
+              extra: { transport: 'gh-cli-fallback' },
+            }, async () => ({
+              data: await listOpenPullRequestsWithGh(repoPath),
+              status: 200,
+            }));
+            for (const pr of data.data) {
+              appendSnapshot(pr);
+            }
+          } catch (ghErr) {
+            if (Array.isArray(adapterPulls) && adapterPulls.length > 0) {
+              throw new Error(
+                `GitHub PR discovery incomplete for ${repoPath}: ` +
+                  `adapter returned ${adapterPulls.length} PR(s), but Octokit supplement failed ` +
+                  `(${octokitListError?.message || octokitListError}) and gh fallback failed ` +
+                  `(${ghErr?.message || ghErr})`
+              );
+            }
+            throw octokitListError;
+          }
         }
       }
       return refs;

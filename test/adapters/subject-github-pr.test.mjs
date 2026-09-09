@@ -620,6 +620,129 @@ test('github-pr subject adapter supplements non-empty adapter discovery with Oct
   assert.equal(state.headSha, 'adapter-head');
 });
 
+test('github-pr subject adapter supplements stale adapter discovery with gh when Octokit fails', async () => {
+  const calls = [];
+  let octokitListCalls = 0;
+  const adapterPull = {
+    ...fixture.pulls[0],
+    head: {
+      ...fixture.pulls[0].head,
+      sha: 'adapter-head',
+    },
+    headRefOid: 'adapter-head',
+  };
+  const ghNewPull = {
+    ...fixture.pulls[0],
+    number: 485,
+    title: '[codex] LAC-485 discovered by gh fallback',
+    head: {
+      ...fixture.pulls[0].head,
+      sha: 'gh-new-head',
+    },
+    headRefOid: 'gh-new-head',
+  };
+  const adapter = createGitHubPRSubjectAdapter({
+    octokit: {
+      rest: {
+        pulls: {
+          list: async ({ owner, repo, state }) => {
+            octokitListCalls += 1;
+            assert.equal(`${owner}/${repo}`, fixture.repo);
+            assert.equal(state, 'open');
+            throw new Error('api rate limit');
+          },
+        },
+      },
+    },
+    repos: [fixture.repo],
+    env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+    execFileImpl: async (command, args) => {
+      calls.push({ command, args: [...args] });
+      if (command === '/fixture/github-adapter') {
+        const kind = args[args.indexOf('--kind') + 1];
+        assert.equal(kind, 'open-pull-requests');
+        return { stdout: JSON.stringify({ pullRequests: [adapterPull] }) };
+      }
+      assert.equal(command, 'gh');
+      assert.deepEqual(args, [
+        'pr',
+        'list',
+        '--repo',
+        fixture.repo,
+        '--state',
+        'open',
+        '--limit',
+        '100',
+        '--json',
+        'number,title,state,headRefOid,labels,createdAt,updatedAt,author',
+      ]);
+      return { stdout: JSON.stringify([ghNewPull, adapterPull]) };
+    },
+  });
+
+  const refs = await adapter.discoverSubjects();
+
+  assert.deepEqual(refs, [
+    {
+      domainId: 'code-pr',
+      subjectExternalId: `${fixture.repo}#484`,
+      revisionRef: 'adapter-head',
+    },
+    {
+      domainId: 'code-pr',
+      subjectExternalId: `${fixture.repo}#485`,
+      revisionRef: 'gh-new-head',
+    },
+  ]);
+  assert.equal(octokitListCalls, 1);
+  assert.deepEqual(calls.map((call) => (
+    call.command === '/fixture/github-adapter'
+      ? [call.command, call.args[call.args.indexOf('--kind') + 1]]
+      : [call.command, ...call.args.slice(0, 3)]
+  )), [
+    ['/fixture/github-adapter', 'open-pull-requests'],
+    ['gh', 'pr', 'list', '--repo'],
+  ]);
+});
+
+test('github-pr subject adapter fails loud when adapter discovery may be partial and supplements fail', async () => {
+  const adapterPull = {
+    ...fixture.pulls[0],
+    head: {
+      ...fixture.pulls[0].head,
+      sha: 'adapter-head',
+    },
+    headRefOid: 'adapter-head',
+  };
+  const adapter = createGitHubPRSubjectAdapter({
+    octokit: {
+      rest: {
+        pulls: {
+          list: async () => {
+            throw new Error('api rate limit');
+          },
+        },
+      },
+    },
+    repos: [fixture.repo],
+    env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+    execFileImpl: async (command, args) => {
+      if (command === '/fixture/github-adapter') {
+        const kind = args[args.indexOf('--kind') + 1];
+        assert.equal(kind, 'open-pull-requests');
+        return { stdout: JSON.stringify({ pullRequests: [adapterPull] }) };
+      }
+      assert.equal(command, 'gh');
+      throw new Error('gh auth failed');
+    },
+  });
+
+  await assert.rejects(
+    adapter.discoverSubjects(),
+    /GitHub PR discovery incomplete.*adapter returned 1 PR.*api rate limit.*gh auth failed/
+  );
+});
+
 test('github-pr subject adapter does not emit adapter telemetry when adapter is absent', async () => {
   const telemetry = [];
   const adapter = createGitHubPRSubjectAdapter({

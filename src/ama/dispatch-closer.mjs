@@ -3719,6 +3719,9 @@ export async function maybeDispatchAmaCloser({
     && existingLeaseBeforeDispatch?.status === AMA_CLOSER_LEASE_STATUS.PENDING
     && !existingRecordIsReclaimableInterruption;
   const existingRecordIsBranchHolderBlocked = isProvisionBranchHolderBlocked(existingRecord?.lastError || '');
+  const existingRecordIsRevalidatableBranchMissing =
+    String(existingRecord?.state || '').trim().toLowerCase() === 'no-dispatch'
+    && String(existingRecord?.reason || '').trim() === 'live-head-branch-missing';
   const existingBranchHolderBlockCount = Number(existingRecord?.branchHolderBlockCount || 0);
   let existingDispatchStatus = null;
   if (existingRecord?.launchRequestId) {
@@ -4343,6 +4346,7 @@ export async function maybeDispatchAmaCloser({
     && Number(existingRecord.retryCount || 0) >= AMA_CLOSER_REDISPATCH_BOUND
     && !existingRecordIsReclaimableInterruption
     && !existingRecordIsBranchHolderBlocked
+    && !existingRecordIsRevalidatableBranchMissing
   ) {
     // Genuine completed failures are bounded; an interrupted in-flight dispatch
     // (watcher SIGTERM'd mid-launch, e.g. a deploy bounce) is reclaimed below
@@ -4484,6 +4488,8 @@ export async function maybeDispatchAmaCloser({
   // inflate across repeated deploy-bounce interruptions.
   const priorRetryCount = existingRecordIsReclaimableInterruption
     ? Math.max(0, Number(existingRecord?.retryCount || 1) - 1)
+    : existingRecordIsRevalidatableBranchMissing
+      ? 0
     : Number(existingRecord?.retryCount || 0);
 
   // HHR harness-fallback: resolve the PHYSICAL harness the closer runs on. The

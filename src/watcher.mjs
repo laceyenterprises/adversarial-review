@@ -1225,6 +1225,13 @@ async function pollOnce(
   }
 
   const reviewerPoolConfig = resolveFirstPassReviewerPoolConfig({ watcherConfig: config });
+  const reviewerDispatchSingleWaveSettleGraceMs = Math.max(
+    0,
+    Number.parseInt(
+      String(process.env.ADVERSARIAL_REVIEWER_DISPATCH_SINGLE_WAVE_SETTLE_GRACE_MS || ''),
+      10,
+    ) || 0,
+  ) || undefined;
   const reviewerMemoryPressureConfig = resolveReviewerMemoryPressureConfig();
   const reviewerDispatchCandidates = [];
   const firstPassSpilloverController = createFirstPassSpilloverController({ rootDir: ROOT, readDepth: countOpenPrsAwaitingFirstPassReview, logger: console }); // RSP-01: disarmed unless CFG arms it
@@ -1265,9 +1272,14 @@ async function pollOnce(
         maxConcurrent: reviewerPoolConfig.maxConcurrent,
         geminiCredentialConcurrency,
         singleWave: true,
+        singleWaveSettleGraceMs: reviewerDispatchSingleWaveSettleGraceMs,
         logger: console,
       });
       if (drainResult.deferred > 0) {
+        const deferredCandidates = Array.isArray(drainResult.deferredCandidates)
+          ? drainResult.deferredCandidates
+          : [];
+        reviewerDispatchCandidates.unshift(...deferredCandidates);
         console.log(
           `[watcher] reviewer dispatch drain yielded after one launch wave: ` +
           `dispatched=${drainResult.dispatched} deferred=${drainResult.deferred} ` +

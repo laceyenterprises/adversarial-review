@@ -408,7 +408,9 @@ export function markHammerRetryCapExhausted(rootDir, identity, {
       : Math.max(0, Number(existing?.attemptCount || 0)),
     // Preserve a prior alertedAt so a repeat suppression tick that couldn't send
     // the alert doesn't erase the record that it once succeeded.
-    alertedAt: alertEmitted ? (now || existing?.alertedAt || null) : (existing?.alertedAt || null),
+    alertedAt: !target && alertEmitted
+      ? (now || existing?.alertedAt || null)
+      : (existing?.alertedAt || null),
     targetAlertedAt: target && alertEmitted
       ? (now || existing?.targetAlertedAt || null)
       : (targetShaChanged ? null : (existing?.targetAlertedAt || null)),

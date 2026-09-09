@@ -4553,6 +4553,11 @@ export async function maybeDispatchAmaCloser({
       lifetimeDispatchCeiling: hammerLifetimeDispatchCeiling,
     });
     if (hammerRetryCapDecision.capExhausted) {
+      const hammerSeriesCapExhausted = hammerRetryCapDecision.alreadySuppressed
+        || hammerRetryCapDecision.nextAttemptCount > HAMMER_RETRY_CAP_TOTAL_DISPATCHES;
+      const hammerTargetCapExhausted = !hammerRetryCapDecision.lifetimeCapExhausted
+        && !hammerSeriesCapExhausted
+        && hammerRetryCapDecision.targetRedriveCapExhausted;
       return await suppressHammerRetryCapExhaustion({
         rootDir,
         identity: hammerCapIdentity,
@@ -4562,22 +4567,21 @@ export async function maybeDispatchAmaCloser({
         headSha: targetRemediationSha,
         attemptCount: hammerRetryCapDecision.lifetimeCapExhausted
           ? hammerRetryCapDecision.priorLifetimeCount
-          : hammerRetryCapDecision.targetRedriveCapExhausted
+          : hammerTargetCapExhausted
           ? hammerRetryCapDecision.priorTargetAttemptCount
           : hammerRetryCapDecision.priorAttemptCount,
         cap: hammerRetryCapDecision.lifetimeCapExhausted
           ? hammerLifetimeDispatchCeiling
-          : hammerRetryCapDecision.targetRedriveCapExhausted
+          : hammerTargetCapExhausted
           ? HAMMER_RETRY_CAP_TOTAL_DISPATCHES
           : HAMMER_RETRY_CAP_TOTAL_DISPATCHES,
         lifetime: hammerRetryCapDecision.lifetimeCapExhausted,
-        target: !hammerRetryCapDecision.lifetimeCapExhausted
-          && hammerRetryCapDecision.targetRedriveCapExhausted,
+        target: hammerTargetCapExhausted,
         workerClass,
         existingRecord,
         alertAlreadyEmitted: hammerRetryCapDecision.lifetimeCapExhausted
           ? hammerRetryCapDecision.lifetimeAlertAlreadyEmitted
-          : hammerRetryCapDecision.targetRedriveCapExhausted
+          : hammerTargetCapExhausted
           ? hammerRetryCapDecision.targetAlertAlreadyEmitted
           : hammerRetryCapDecision.seriesAlertAlreadyEmitted,
         deliverAlertImpl,

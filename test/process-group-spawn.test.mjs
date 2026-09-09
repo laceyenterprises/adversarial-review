@@ -18,6 +18,11 @@ function processExists(pid) {
   }
 }
 
+function readPidFile(filePath) {
+  const value = Number.parseInt(readFileSync(filePath, 'utf8').trim(), 10);
+  return Number.isInteger(value) ? value : null;
+}
+
 async function waitFor(assertion, { timeoutMs = 5_000, intervalMs = 25 } = {}) {
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
@@ -272,15 +277,15 @@ test('detached reviewer process group survives parent SIGTERM for daemon bounce 
       stdio: 'ignore',
     });
 
+    let sleepPid = null;
     await waitFor(() => {
       assert.equal(existsSync(bashPidPath), true);
       assert.equal(existsSync(sleepPidPath), true);
+      bashPid = readPidFile(bashPidPath);
+      sleepPid = readPidFile(sleepPidPath);
+      assert.equal(Number.isInteger(bashPid), true);
+      assert.equal(Number.isInteger(sleepPid), true);
     }, { timeoutMs: 5_000, intervalMs: 25 });
-
-    bashPid = Number.parseInt(readFileSync(bashPidPath, 'utf8').trim(), 10);
-    const sleepPid = Number.parseInt(readFileSync(sleepPidPath, 'utf8').trim(), 10);
-    assert.equal(Number.isInteger(bashPid), true);
-    assert.equal(Number.isInteger(sleepPid), true);
     await waitFor(() => {
       assert.equal(processExists(bashPid), true);
       assert.equal(processExists(sleepPid), true);

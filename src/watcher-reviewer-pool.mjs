@@ -460,6 +460,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
       dispatched: 0,
       maxObservedConcurrency: 0,
       deferred: Array.isArray(candidates) ? candidates.length : 0,
+      deferredCandidates: Array.isArray(candidates) ? [...candidates] : [],
     };
   }
   const geminiConcurrencyLimit = resolveGeminiDispatchConcurrencyLimit({
@@ -581,6 +582,9 @@ async function runBoundedReviewerDispatchQueue(candidates, {
     dispatched: started,
     maxObservedConcurrency,
     deferred: pending.filter((entry) => !entry.started).length,
+    deferredCandidates: pending
+      .filter((entry) => !entry.started)
+      .map((entry) => entry.candidate),
   };
 }
 

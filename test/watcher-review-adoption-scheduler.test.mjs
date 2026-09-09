@@ -28,7 +28,7 @@ function pollOncePhasesSource() {
   return readFileSync(path.join(ROOT, 'src', 'pollonce-phases.mjs'), 'utf8');
 }
 
-test('watcher runs merge-side handoffs before queued reviewer dispatches', () => {
+test('watcher drains queued reviewer dispatches before merge-side handoffs', () => {
   const watcher = watcherSource();
   const phase = postedReviewRowSource();
   const pollPhases = pollOncePhasesSource();
@@ -49,10 +49,10 @@ test('watcher runs merge-side handoffs before queued reviewer dispatches', () =>
   // The executable phase ordering moved into the runQueuedReviewAdoptionPhase
   // helper, now in posted-review-row.mjs.
   const phaseHelper = phase.indexOf('async function runQueuedReviewAdoptionPhase');
-  const drainAfterMaintenance = phase.indexOf("await drainReviewerDispatchCandidates('the next reviewer wave');");
+  const drainBeforePostedHandlers = phase.indexOf("await drainReviewerDispatchCandidates('posted-review handlers');");
   // WPS-01/RVHAND-01: the unbounded `for (const postedReviewHandler of
   // postedReviewHandlers)` loop became a budgeted, lane-gated scheduler call.
-  // Lifecycle sync runs ahead of that handler drain so stale terminal rows are
+  // Reviewer dispatch now drains ahead of that handler lane so review claims are
   // not held behind a single slow hammer path.
   const postedDrain = phase.indexOf('await runPostedReviewHandlersFairly({');
   const lifecycleCleanup = phase.indexOf('await retryPendingMergeAgentLifecycleCleanupsImpl();');
@@ -68,8 +68,8 @@ test('watcher runs merge-side handoffs before queued reviewer dispatches', () =>
   assert.notEqual(perPrPhaseCall, -1, 'pollOnce drives the per-PR processing phase');
   assert.notEqual(postedEnqueue, -1, 'posted review rows enqueue their handoff');
   assert.notEqual(phaseHelper, -1, 'post-review phase helper exists');
-  assert.notEqual(drainAfterMaintenance, -1, 'reviewer dispatch drain exists after maintenance');
-  assert.notEqual(postedDrain, -1, 'queued posted-review handlers drain before reviewers');
+  assert.notEqual(drainBeforePostedHandlers, -1, 'reviewer dispatch drain exists before posted-review handlers');
+  assert.notEqual(postedDrain, -1, 'queued posted-review handlers still drain');
   assert.notEqual(lifecycleCleanup, -1, 'merge-agent cleanup still runs');
   assert.notEqual(lifecycleSync, -1, 'lifecycle sync still runs');
   assert.notEqual(dagAutowalk, -1, 'dag autowalk retry still runs');
@@ -82,10 +82,11 @@ test('watcher runs merge-side handoffs before queued reviewer dispatches', () =>
   assert.ok(frontLifecycleSync < perPrPhaseCall, 'lifecycle sync runs before the per-PR discovery/retry sweep');
   assert.ok(phaseHelper < lifecycleCleanup, 'ordering lives in the executable phase helper');
   assert.ok(lifecycleCleanup < lifecycleSync, 'merge-agent lifecycle cleanup runs before lifecycle sync');
-  assert.ok(lifecycleSync < postedDrain, 'lifecycle sync runs before posted-review handlers');
+  assert.ok(lifecycleSync < drainBeforePostedHandlers, 'lifecycle sync runs before reviewer dispatch');
+  assert.ok(drainBeforePostedHandlers < postedDrain, 'queued reviewers drain before posted-review handlers');
   assert.ok(postedDrain < dagAutowalk, 'posted-review handoffs remain ahead of post-review maintenance');
   assert.ok(dagAutowalk < maintenanceLoop, 'dag autowalk remains ahead of per-repo maintenance');
-  assert.ok(maintenanceLoop < drainAfterMaintenance, 'reviewer dispatch waits until merge-side maintenance has run');
+  assert.ok(drainBeforePostedHandlers < maintenanceLoop, 'reviewer dispatch does not wait for merge-side maintenance');
 });
 
 test('queued reviewer dispatch candidates carry reviewer model for concurrency caps', () => {
@@ -103,7 +104,7 @@ test('queued reviewer dispatch candidates carry reviewer model for concurrency c
   );
 });
 
-test('watcher post-review phase behavior preserves hammer-first ordering and isolates maintenance failures', async () => {
+test('watcher post-review phase behavior drains reviewers first and isolates maintenance failures', async () => {
   const events = [];
   const errors = [];
   const logs = [];
@@ -165,6 +166,7 @@ test('watcher post-review phase behavior preserves hammer-first ordering and iso
   assert.deepEqual(events, [
     'lifecycle-cleanup',
     'lifecycle-sync',
+    'drain:posted-review handlers',
     'posted-review-handoff',
     'dag-autowalk',
     'merge-closeouts',
@@ -172,7 +174,6 @@ test('watcher post-review phase behavior preserves hammer-first ordering and iso
     'review-ack',
     'maintenance-a',
     'maintenance-b',
-    'drain:the next reviewer wave',
   ]);
   assert.equal(logs.length, 0);
   assert.equal(errors.length, 1);

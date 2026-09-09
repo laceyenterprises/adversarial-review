@@ -295,6 +295,18 @@ function createGitHubPRSubjectAdapter({
       for (const repoPath of repos) {
         const { owner, repo } = splitRepo(repoPath);
         let adapterPulls = null;
+        const seenSubjectExternalIds = new Set();
+        const appendSnapshot = (pr) => {
+          const snapshot = normalizePRSnapshot(repoPath, pr);
+          if (seenSubjectExternalIds.has(snapshot.subjectExternalId)) return;
+          seenSubjectExternalIds.add(snapshot.subjectExternalId);
+          setCache(snapshot);
+          refs.push({
+            domainId: snapshot.domainId,
+            subjectExternalId: snapshot.subjectExternalId,
+            revisionRef: snapshot.revisionRef,
+          });
+        };
         try {
           adapterPulls = await withAdapterTelemetry('pr_view', {
             repo: repoPath,
@@ -302,37 +314,29 @@ function createGitHubPRSubjectAdapter({
         } catch {
           adapterPulls = null;
         }
-        if (Array.isArray(adapterPulls) && (adapterPulls.length > 0 || !octokit?.rest?.pulls?.list)) {
+        if (Array.isArray(adapterPulls)) {
           for (const pr of adapterPulls) {
-            const snapshot = normalizePRSnapshot(repoPath, pr);
-            setCache(snapshot);
-            refs.push({
-              domainId: snapshot.domainId,
-              subjectExternalId: snapshot.subjectExternalId,
-              revisionRef: snapshot.revisionRef,
-            });
+            appendSnapshot(pr);
           }
-          continue;
+          if (!octokit?.rest?.pulls?.list) continue;
         }
         if (!octokit?.rest?.pulls?.list) {
           throw new Error('No GitHub client available to discover GitHub PR subjects');
         }
-        const { data } = await withApiTelemetry('pr_view', { repo: repoPath }, () => octokit.rest.pulls.list({
-          owner,
-          repo,
-          state: 'open',
-          per_page: 50,
-          sort: 'created',
-          direction: 'desc',
-        }));
-        for (const pr of data) {
-          const snapshot = normalizePRSnapshot(repoPath, pr);
-          setCache(snapshot);
-          refs.push({
-            domainId: snapshot.domainId,
-            subjectExternalId: snapshot.subjectExternalId,
-            revisionRef: snapshot.revisionRef,
-          });
+        try {
+          const { data } = await withApiTelemetry('pr_view', { repo: repoPath }, () => octokit.rest.pulls.list({
+            owner,
+            repo,
+            state: 'open',
+            per_page: 50,
+            sort: 'created',
+            direction: 'desc',
+          }));
+          for (const pr of data) {
+            appendSnapshot(pr);
+          }
+        } catch (err) {
+          if (!Array.isArray(adapterPulls) || adapterPulls.length === 0) throw err;
         }
       }
       return refs;

@@ -544,6 +544,82 @@ test('github-pr subject adapter falls back to Octokit when adapter discovery ret
   ]);
 });
 
+test('github-pr subject adapter supplements non-empty adapter discovery with Octokit', async () => {
+  const calls = [];
+  let octokitListCalls = 0;
+  const adapterPull = {
+    ...fixture.pulls[0],
+    head: {
+      ...fixture.pulls[0].head,
+      sha: 'adapter-head',
+    },
+    headRefOid: 'adapter-head',
+  };
+  const octokitDuplicatePull = {
+    ...fixture.pulls[0],
+    head: {
+      ...fixture.pulls[0].head,
+      sha: 'octokit-duplicate-head',
+    },
+    headRefOid: 'octokit-duplicate-head',
+  };
+  const octokitNewPull = {
+    ...fixture.pulls[0],
+    number: 485,
+    title: '[codex] LAC-485 discovered by Octokit backfill',
+    head: {
+      ...fixture.pulls[0].head,
+      sha: 'octokit-new-head',
+    },
+    headRefOid: 'octokit-new-head',
+  };
+  const adapter = createGitHubPRSubjectAdapter({
+    octokit: {
+      rest: {
+        pulls: {
+          list: async ({ owner, repo, state }) => {
+            octokitListCalls += 1;
+            assert.equal(`${owner}/${repo}`, fixture.repo);
+            assert.equal(state, 'open');
+            return { data: [octokitNewPull, octokitDuplicatePull] };
+          },
+        },
+      },
+    },
+    repos: [fixture.repo],
+    env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+    execFileImpl: async (command, args) => {
+      calls.push({ command, args: [...args] });
+      assert.equal(command, '/fixture/github-adapter');
+      const kind = args[args.indexOf('--kind') + 1];
+      assert.equal(kind, 'open-pull-requests');
+      return { stdout: JSON.stringify({ pullRequests: [adapterPull] }) };
+    },
+  });
+
+  const refs = await adapter.discoverSubjects();
+
+  assert.deepEqual(refs, [
+    {
+      domainId: 'code-pr',
+      subjectExternalId: `${fixture.repo}#484`,
+      revisionRef: 'adapter-head',
+    },
+    {
+      domainId: 'code-pr',
+      subjectExternalId: `${fixture.repo}#485`,
+      revisionRef: 'octokit-new-head',
+    },
+  ]);
+  assert.equal(octokitListCalls, 1);
+  assert.deepEqual(calls.map((call) => call.args[call.args.indexOf('--kind') + 1]), [
+    'open-pull-requests',
+  ]);
+
+  const state = await adapter.fetchState(refs[0]);
+  assert.equal(state.headSha, 'adapter-head');
+});
+
 test('github-pr subject adapter does not emit adapter telemetry when adapter is absent', async () => {
   const telemetry = [];
   const adapter = createGitHubPRSubjectAdapter({

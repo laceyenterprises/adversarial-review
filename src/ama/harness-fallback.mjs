@@ -47,6 +47,8 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   isGroundedProviderState,
@@ -56,6 +58,9 @@ import {
 } from '../fleet-quota-status.mjs';
 
 const execFileAsync = promisify(execFile);
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const SUBMODULE_ROOT = resolve(__dirname, '..', '..');
+const AGENT_OS_ROOT = resolve(SUBMODULE_ROOT, '..', '..');
 
 const FLEET_QUOTA_STATUS_TIMEOUT_MS = 10_000;
 
@@ -87,6 +92,7 @@ function normalizeFallbackList(fallbackWorkerClasses) {
 async function readFleetQuotaStatusStdout({ hqPath, execFileImpl, env }) {
   const result = await execFileImpl(hqPath, ['fleet', 'quota', 'status', '--json'], {
     env,
+    cwd: String(env?.AGENT_OS_ROOT || AGENT_OS_ROOT).trim() || AGENT_OS_ROOT,
     encoding: 'utf8',
     maxBuffer: 5 * 1024 * 1024,
     timeout: FLEET_QUOTA_STATUS_TIMEOUT_MS,

@@ -1,5 +1,7 @@
 import { promisify } from 'node:util';
 import { execFile as execFileCb } from 'node:child_process';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   quotaAvailableFromFleetStatus,
@@ -12,6 +14,9 @@ import {
 } from './adapters/subject/github-pr/routing.mjs';
 
 const execFileAsync = promisify(execFileCb);
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const SUBMODULE_ROOT = resolve(__dirname, '..');
+const AGENT_OS_ROOT = resolve(SUBMODULE_ROOT, '..', '..');
 const FLEET_QUOTA_STATUS_TIMEOUT_MS = 20_000;
 const FLEET_QUOTA_STATUS_RETRY_DELAYS_MS = Object.freeze([250, 1000]);
 const FLEET_QUOTA_STATUS_CACHE_TTL_MS = 10_000;
@@ -36,6 +41,10 @@ export function reviewWorkerClassFallback(env = process.env) {
 
 function resolveHqPath(env = process.env) {
   return String(env?.AGENT_OS_HQ_BIN || env?.HQ_BIN || 'hq').trim() || 'hq';
+}
+
+function resolveHqCwd(env = process.env) {
+  return String(env?.AGENT_OS_ROOT || AGENT_OS_ROOT).trim() || AGENT_OS_ROOT;
 }
 
 function reviewerModelForWorkerClass(workerClass) {
@@ -99,8 +108,8 @@ function fleetQuotaStatusCacheFor(execFileImpl) {
   return cache;
 }
 
-function fleetQuotaStatusCacheKey({ hqPath }) {
-  return JSON.stringify({ hqPath: String(hqPath || '') });
+function fleetQuotaStatusCacheKey({ hqPath, hqCwd }) {
+  return JSON.stringify({ hqPath: String(hqPath || ''), hqCwd: String(hqCwd || '') });
 }
 
 function fleetQuotaStatusErrorMessage(error) {
@@ -160,6 +169,7 @@ function isTransientFleetQuotaStatusError(error) {
 async function executeFleetQuotaStatusWithRetry({
   env,
   hqPath,
+  hqCwd,
   execFileImpl,
   logger,
   sleepImpl,
@@ -172,6 +182,7 @@ async function executeFleetQuotaStatusWithRetry({
     try {
       const result = await execFileImpl(hqPath, ['fleet', 'quota', 'status', '--json'], {
         env,
+        cwd: hqCwd,
         encoding: 'utf8',
         maxBuffer: 5 * 1024 * 1024,
         timeout: FLEET_QUOTA_STATUS_TIMEOUT_MS,
@@ -214,7 +225,8 @@ async function readFleetQuotaStatusWithRetry({
   cacheTtlMs,
   nowMs,
 }) {
-  const cacheKey = fleetQuotaStatusCacheKey({ hqPath });
+  const hqCwd = resolveHqCwd(env);
+  const cacheKey = fleetQuotaStatusCacheKey({ hqPath, hqCwd });
   const now = nowMs();
   const cached = cache?.get(cacheKey);
   if (cached && now - cached.readAtMs <= cacheTtlMs) {
@@ -225,6 +237,7 @@ async function readFleetQuotaStatusWithRetry({
   const promise = executeFleetQuotaStatusWithRetry({
     env,
     hqPath,
+    hqCwd,
     execFileImpl,
     logger,
     sleepImpl,

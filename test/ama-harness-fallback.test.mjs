@@ -49,8 +49,8 @@ function afhGrounding({ grounded, signals = 0, reason = null, kills = 0, lrqDept
 
 function buildFleetExec(stdout) {
   const calls = [];
-  const impl = async (cmd, args) => {
-    calls.push({ cmd, args });
+  const impl = async (cmd, args, options = {}) => {
+    calls.push({ cmd, args, options });
     return { stdout, stderr: '' };
   };
   return { impl, calls };
@@ -127,6 +127,19 @@ test('codex grounded (exhausted) + hammer primary → falls back to claude-code'
   assert.equal(result.fallbackProvider, 'anthropic');
   assert.equal(exec.calls.length, 1);
   assert.deepEqual(exec.calls[0].args, ['fleet', 'quota', 'status', '--json']);
+});
+
+test('fleet quota status runs from the configured Agent OS root', async () => {
+  const exec = buildFleetExec(fleetQuotaStdout({ openai: 'exhausted', anthropic: 'ok' }));
+  const result = await resolveCloserDispatchHarness({
+    workerClass: 'hammer',
+    fallbackWorkerClasses: ['hammer-claude'],
+    execFileImpl: exec.impl,
+    env: { AGENT_OS_ROOT: '/tmp/agent-os-root-for-hammer' },
+  });
+  assert.equal(result.fellBack, true);
+  assert.equal(exec.calls.length, 1);
+  assert.equal(exec.calls[0].options.cwd, '/tmp/agent-os-root-for-hammer');
 });
 
 test('codex healthy (ok) → keep primary hammer (auto-revert, no fallback)', async () => {

@@ -34,6 +34,23 @@ test('falls back codex -> claude-code when the routed codex harness provider is 
   assert.equal(result.primaryState, 'exhausted');
 });
 
+test('fleet quota status runs from the configured Agent OS root', async () => {
+  const calls = [];
+  const result = await resolveReviewerWorkerClassWithFallback({
+    authorClass: 'gemini',
+    primary: 'codex',
+    fallbackWorkerClasses: ['claude-code'],
+    env: { AGENT_OS_ROOT: '/tmp/agent-os-root-for-reviewer' },
+    execFileImpl: async (cmd, args, options = {}) => {
+      calls.push({ cmd, args, options });
+      return { stdout: JSON.stringify({ providerStatuses: CODEX_EXHAUSTED_CLAUDE_OK }) };
+    },
+  });
+  assert.equal(result.workerClass, 'claude-code');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.cwd, '/tmp/agent-os-root-for-reviewer');
+});
+
 test('keeps the routed codex harness when codex has quota (auto-revert on recovery)', async () => {
   const result = await resolveReviewerWorkerClassWithFallback({
     authorClass: 'gemini',

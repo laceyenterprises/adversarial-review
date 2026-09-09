@@ -69,8 +69,10 @@ export const HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES = hammerLifetimeDispatch
 );
 export const HAMMER_RETRY_CAP_LIFETIME_SUPPRESSION_STATE = 'hammer-lifetime-ceiling-reached-needs-operator';
 export const HAMMER_RETRY_CAP_LIFETIME_EXHAUSTED_REASON = 'hammer-lifetime-ceiling-reached';
+export const HAMMER_TARGET_REDRIVE_CAP_SUPPRESSION_STATE = 'hammer-target-redrive-cap-exhausted-needs-operator';
+export const HAMMER_TARGET_REDRIVE_CAP_EXHAUSTED_REASON = 'hammer-target-redrive-cap-exhausted';
 
-const HAMMER_RETRY_CAP_SCHEMA_VERSION = 1;
+const HAMMER_RETRY_CAP_SCHEMA_VERSION = 2;
 
 function hammerRetryCapDir(rootDir) {
   return join(rootDir, 'data', 'follow-up-jobs', 'hammer-retry-cap');
@@ -227,6 +229,24 @@ export function evaluateHammerRetryCap(ledger, {
   const lifetimeAlreadySuppressed = Boolean(ledger?.lifetimeSuppressed);
   const lifetimeCapExhausted = lifetimeAlreadySuppressed
     || nextLifetimeCount > lifetimeCeiling;
+  const incomingTargetSha = normalizeKey(headSha);
+  const ledgerTargetSha = normalizeKey(ledger?.targetRemediationSha);
+  const targetShaChanged = Boolean(
+    ledger
+      && ledgerTargetSha
+      && incomingTargetSha
+      && ledgerTargetSha !== incomingTargetSha,
+  );
+  const priorTargetAttemptCount = (!ledger || targetShaChanged)
+    ? 0
+    : Math.max(0, Number(ledgerTargetSha ? (ledger.targetAttemptCount ?? 0) : 0));
+  const nextTargetAttemptCount = priorTargetAttemptCount + 1;
+  const targetAlreadySuppressed = Boolean(ledger?.targetSuppressed) && !targetShaChanged;
+  const targetRedriveCapExhausted = targetAlreadySuppressed
+    || nextTargetAttemptCount > HAMMER_RETRY_CAP_TOTAL_DISPATCHES;
+  const seriesAlertAlreadyEmitted = alreadySuppressed && Boolean(ledger?.alertedAt);
+  const lifetimeAlertAlreadyEmitted = lifetimeAlreadySuppressed && Boolean(ledger?.alertedAt);
+  const targetAlertAlreadyEmitted = targetAlreadySuppressed && Boolean(ledger?.targetAlertedAt);
   // Three independent stop conditions. The MIDDLE term — the per-series cap of
   // HAMMER_RETRY_CAP_TOTAL_DISPATCHES (2, i.e. 1 hammer + 1 retry per reviewed
   // head) — is load-bearing: without it a PR that never converges on a stable
@@ -237,6 +257,7 @@ export function evaluateHammerRetryCap(ledger, {
   // `alreadySuppressed || lifetimeCapExhausted`.
   const capExhausted = alreadySuppressed
     || nextAttemptCount > HAMMER_RETRY_CAP_TOTAL_DISPATCHES
+    || targetRedriveCapExhausted
     || lifetimeCapExhausted;
   return {
     jobKeyChanged,
@@ -244,14 +265,24 @@ export function evaluateHammerRetryCap(ledger, {
     nextAttemptCount,
     priorLifetimeCount,
     nextLifetimeCount,
+    priorTargetAttemptCount,
+    nextTargetAttemptCount,
     lifetimeDispatchCeiling: lifetimeCeiling,
     alreadySuppressed,
     lifetimeAlreadySuppressed,
     lifetimeCapExhausted,
+    targetShaChanged,
+    targetAlreadySuppressed,
+    targetRedriveCapExhausted,
     capExhausted,
-    alertAlreadyEmitted: (alreadySuppressed || lifetimeAlreadySuppressed) && Boolean(ledger?.alertedAt),
+    seriesAlertAlreadyEmitted,
+    lifetimeAlertAlreadyEmitted,
+    targetAlertAlreadyEmitted,
+    alertAlreadyEmitted: seriesAlertAlreadyEmitted
+      || lifetimeAlertAlreadyEmitted
+      || targetAlertAlreadyEmitted,
     resetFromJobKey: jobKeyChanged ? ledgerJobKey : null,
-    headSha: normalizeKey(headSha),
+    headSha: incomingTargetSha,
   };
 }
 
@@ -270,6 +301,8 @@ export function recordHammerRetryDispatch(rootDir, identity, {
   const decision = evaluateHammerRetryCap(existing, { jobKey, headSha, lifetimeDispatchCeiling });
   const incomingJobKey = normalizeKey(jobKey);
   const head = normalizeKey(headSha);
+  const existingTargetSha = normalizeKey(existing?.targetRemediationSha);
+  const targetShaChanged = Boolean(existing && existingTargetSha && head && existingTargetSha !== head);
   // On a fresh-review reset the head history restarts; otherwise accumulate.
   const priorHeads = (!existing || decision.jobKeyChanged)
     ? []
@@ -285,6 +318,8 @@ export function recordHammerRetryDispatch(rootDir, identity, {
     attemptCount: decision.nextAttemptCount,
     // Lifetime count accumulates across fresh-review resets and never rolls back.
     lifetimeAttemptCount: decision.nextLifetimeCount,
+    targetRemediationSha: head || existingTargetSha,
+    targetAttemptCount: targetShaChanged ? 1 : decision.nextTargetAttemptCount,
     dispatchHeads,
     lastDispatchedHeadSha: head || existing?.lastDispatchedHeadSha || null,
     // A dispatch clears any stale PER-SERIES suppression from a prior series (the
@@ -294,11 +329,13 @@ export function recordHammerRetryDispatch(rootDir, identity, {
     // so reaching here always means the lifetime ceiling has not been hit.
     suppressed: false,
     lifetimeSuppressed: false,
+    targetSuppressed: false,
     suppressionState: null,
     suppressedJobKey: null,
     suppressedHeadSha: null,
     suppressedAttemptCount: null,
     alertedAt: null,
+    targetAlertedAt: null,
     createdAt: existing?.createdAt || now || null,
     updatedAt: now || existing?.updatedAt || null,
   };
@@ -319,17 +356,26 @@ export function markHammerRetryCapExhausted(rootDir, identity, {
   attemptCount,
   alertEmitted = false,
   lifetime = false,
+  target = false,
   now = null,
 } = {}) {
   const existing = readHammerRetryCapLedger(rootDir, identity);
   const incomingJobKey = normalizeKey(jobKey);
   const head = normalizeKey(headSha);
+  const existingTargetSha = normalizeKey(existing?.targetRemediationSha);
+  const targetShaChanged = Boolean(
+    existing
+      && existingTargetSha
+      && head
+      && existingTargetSha !== head,
+  );
   const priorHeads = Array.isArray(existing?.dispatchHeads) ? existing.dispatchHeads : [];
   const dispatchHeads = head && !priorHeads.includes(head) ? [...priorHeads, head] : priorHeads;
   // A lifetime exhaustion (or one already stamped) is immune to the fresh-review
   // reset: `lifetimeSuppressed` is never cleared by a jobKey change, so a hammer
   // cannot re-arm the loop by earning a fresh review on the head it moved.
   const lifetimeSuppressed = Boolean(lifetime) || Boolean(existing?.lifetimeSuppressed);
+  const targetSuppressed = Boolean(target) || (Boolean(existing?.targetSuppressed) && !targetShaChanged);
   const doc = {
     schemaVersion: HAMMER_RETRY_CAP_SCHEMA_VERSION,
     repo: identity.repo,
@@ -341,12 +387,19 @@ export function markHammerRetryCapExhausted(rootDir, identity, {
     lifetimeAttemptCount: sanitizeLifetimeCount(
       existing?.lifetimeAttemptCount ?? existing?.attemptCount,
     ),
+    targetRemediationSha: head || existingTargetSha,
+    targetAttemptCount: targetShaChanged
+      ? 0
+      : Math.max(0, Number(existing?.targetAttemptCount ?? existing?.attemptCount ?? 0)),
     lifetimeSuppressed,
+    targetSuppressed,
     dispatchHeads,
     lastDispatchedHeadSha: head || existing?.lastDispatchedHeadSha || null,
     suppressed: true,
     suppressionState: lifetimeSuppressed
       ? HAMMER_RETRY_CAP_LIFETIME_SUPPRESSION_STATE
+      : targetSuppressed
+      ? HAMMER_TARGET_REDRIVE_CAP_SUPPRESSION_STATE
       : HAMMER_RETRY_CAP_SUPPRESSION_STATE,
     suppressedJobKey: incomingJobKey || normalizeKey(existing?.jobKey),
     suppressedHeadSha: head || existing?.suppressedHeadSha || null,
@@ -355,7 +408,12 @@ export function markHammerRetryCapExhausted(rootDir, identity, {
       : Math.max(0, Number(existing?.attemptCount || 0)),
     // Preserve a prior alertedAt so a repeat suppression tick that couldn't send
     // the alert doesn't erase the record that it once succeeded.
-    alertedAt: alertEmitted ? (now || existing?.alertedAt || null) : (existing?.alertedAt || null),
+    alertedAt: !target && alertEmitted
+      ? (now || existing?.alertedAt || null)
+      : (existing?.alertedAt || null),
+    targetAlertedAt: target && alertEmitted
+      ? (now || existing?.targetAlertedAt || null)
+      : (targetShaChanged ? null : (existing?.targetAlertedAt || null)),
     createdAt: existing?.createdAt || now || null,
     updatedAt: now || existing?.updatedAt || null,
   };

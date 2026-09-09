@@ -92,6 +92,8 @@ import {
   HAMMER_RETRY_CAP_LIFETIME_SUPPRESSION_STATE,
   HAMMER_RETRY_CAP_SUPPRESSION_STATE,
   HAMMER_RETRY_CAP_TOTAL_DISPATCHES,
+  HAMMER_TARGET_REDRIVE_CAP_EXHAUSTED_REASON,
+  HAMMER_TARGET_REDRIVE_CAP_SUPPRESSION_STATE,
   evaluateHammerRetryCap,
   normalizeHammerLifetimeDispatchCeiling,
   markHammerRetryCapExhausted,
@@ -654,6 +656,7 @@ async function suppressHammerRetryCapExhaustion({
   attemptCount,
   cap,
   lifetime = false,
+  target = false,
   workerClass,
   existingRecord,
   alertAlreadyEmitted,
@@ -664,16 +667,24 @@ async function suppressHammerRetryCapExhaustion({
   const attemptTotal = Number(attemptCount || 0);
   const suppressionReason = lifetime
     ? HAMMER_RETRY_CAP_LIFETIME_EXHAUSTED_REASON
+    : target
+    ? HAMMER_TARGET_REDRIVE_CAP_EXHAUSTED_REASON
     : HAMMER_RETRY_CAP_EXHAUSTED_REASON;
   const suppressionState = lifetime
     ? HAMMER_RETRY_CAP_LIFETIME_SUPPRESSION_STATE
+    : target
+    ? HAMMER_TARGET_REDRIVE_CAP_SUPPRESSION_STATE
     : HAMMER_RETRY_CAP_SUPPRESSION_STATE;
   const eventName = lifetime
     ? 'hammer_lifetime_ceiling_reached'
+    : target
+    ? 'ama_closer.hammer_target_redrive_cap_exhausted'
     : 'ama_closer.hammer_retry_cap_exhausted';
   const effectiveCap = Number.isFinite(Number(cap)) ? Number(cap) : HAMMER_RETRY_CAP_TOTAL_DISPATCHES;
   const alertSeriesKey = lifetime
     ? `${repo}\0${prNumber}\0lifetime`
+    : target
+    ? `${repo}\0${prNumber}\0target\0${headSha || ''}`
     : `${repo}\0${prNumber}\0${jobKey || ''}`;
   const shouldEmitExhaustionEvent =
     !alertAlreadyEmitted && !HAMMER_RETRY_CAP_ALERTED_SERIES.has(alertSeriesKey);
@@ -704,7 +715,7 @@ async function suppressHammerRetryCapExhaustion({
   ) {
     const shortHead = String(headSha || 'unknown').slice(0, 12);
     const text =
-      `Adversarial-review hammer lifetime ceiling reached for ${repo}#${prNumber} `
+      `Adversarial-review ${suppressionReason} for ${repo}#${prNumber} `
       + `(head ${shortHead}, ${attemptTotal}/${effectiveCap} hammer terminal-remediation dispatches). `
       + 'PR not closing — operator intervention required; further hammer dispatch '
       + 'suppressed to protect quota.';
@@ -746,6 +757,7 @@ async function suppressHammerRetryCapExhaustion({
       attemptCount: attemptTotal,
       alertEmitted,
       lifetime,
+      target,
       now,
     });
   } catch (persistErr) {
@@ -4541,6 +4553,11 @@ export async function maybeDispatchAmaCloser({
       lifetimeDispatchCeiling: hammerLifetimeDispatchCeiling,
     });
     if (hammerRetryCapDecision.capExhausted) {
+      const hammerSeriesCapExhausted = hammerRetryCapDecision.alreadySuppressed
+        || hammerRetryCapDecision.nextAttemptCount > HAMMER_RETRY_CAP_TOTAL_DISPATCHES;
+      const hammerTargetCapExhausted = !hammerRetryCapDecision.lifetimeCapExhausted
+        && !hammerSeriesCapExhausted
+        && hammerRetryCapDecision.targetRedriveCapExhausted;
       return await suppressHammerRetryCapExhaustion({
         rootDir,
         identity: hammerCapIdentity,
@@ -4550,14 +4567,23 @@ export async function maybeDispatchAmaCloser({
         headSha: targetRemediationSha,
         attemptCount: hammerRetryCapDecision.lifetimeCapExhausted
           ? hammerRetryCapDecision.priorLifetimeCount
+          : hammerTargetCapExhausted
+          ? hammerRetryCapDecision.priorTargetAttemptCount
           : hammerRetryCapDecision.priorAttemptCount,
         cap: hammerRetryCapDecision.lifetimeCapExhausted
           ? hammerLifetimeDispatchCeiling
+          : hammerTargetCapExhausted
+          ? HAMMER_RETRY_CAP_TOTAL_DISPATCHES
           : HAMMER_RETRY_CAP_TOTAL_DISPATCHES,
         lifetime: hammerRetryCapDecision.lifetimeCapExhausted,
+        target: hammerTargetCapExhausted,
         workerClass,
         existingRecord,
-        alertAlreadyEmitted: hammerRetryCapDecision.alertAlreadyEmitted,
+        alertAlreadyEmitted: hammerRetryCapDecision.lifetimeCapExhausted
+          ? hammerRetryCapDecision.lifetimeAlertAlreadyEmitted
+          : hammerTargetCapExhausted
+          ? hammerRetryCapDecision.targetAlertAlreadyEmitted
+          : hammerRetryCapDecision.seriesAlertAlreadyEmitted,
         deliverAlertImpl,
         logger,
         now: dispatchContext.dispatchedAt,
@@ -4767,7 +4793,42 @@ export async function maybeDispatchAmaCloser({
     signal,
   });
   throwIfAborted(signal);
-  if (livePrProbe?.state === 'MERGED' || livePrProbe?.state === 'CLOSED') {
+  if (livePrProbe?.state === 'MERGED') {
+    updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => ({
+      ...(current || {}),
+      state: 'completed',
+      status: 'target-already-merged',
+      reason: 'target-already-merged',
+      prState: livePrProbe.state,
+      headBranchExists: livePrProbe.headBranchExists,
+      observedAt: dispatchContext.dispatchedAt,
+      lastObservedStatus: 'succeeded',
+      lastObservedAt: dispatchContext.dispatchedAt,
+      lastError: null,
+      terminalOutcome: 'succeeded',
+      workerClass,
+      dispatchWorkerClass,
+    }));
+    finalizeAmaCloserLeaseBestEffort({
+      rootDir,
+      leaseIdentity,
+      terminalOutcome: 'succeeded',
+      now: dispatchContext.dispatchedAt,
+      logger,
+      repo,
+      prNumber,
+    });
+    logger.log?.(
+      `[ama-closer] no dispatch: PR ${repo}#${prNumber} is MERGED; marking closer target complete`
+    );
+    return noAmaDispatch({
+      dispatched: false,
+      skipMergeAgent: true,
+      reason: 'target-already-merged',
+      prState: livePrProbe.state,
+    });
+  }
+  if (livePrProbe?.state === 'CLOSED') {
     updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => ({
       ...(current || {}),
       state: 'no-dispatch',

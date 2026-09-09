@@ -1181,29 +1181,80 @@ function forceResetReviewToPending({
       params.push(expectedReviewerPgid);
     }
 
-    const updateResult = db.prepare(
-      `UPDATE reviewed_prs
-          SET pr_state = 'open',
-              ${buildReviewStateResetAssignments({
-                overrides: {
-                  review_attempts: 'review_attempts',
-                  last_attempted_at: 'last_attempted_at',
-                  rereview_requested_at: '?',
-                  rereview_reason: '?',
-                },
-              })}
-        WHERE repo = ?
-          AND pr_number = ?
-          AND pr_state = 'open'
-          AND review_status = ?
-          AND ${sessionGuard}
-          AND ${pgidGuard}`
-    ).run(...params);
+    const resetTransaction = db.transaction(() => {
+      const updateResult = db.prepare(
+        `UPDATE reviewed_prs
+            SET pr_state = 'open',
+                ${buildReviewStateResetAssignments({
+                  overrides: {
+                    review_attempts: 'review_attempts',
+                    last_attempted_at: 'last_attempted_at',
+                    rereview_requested_at: '?',
+                    rereview_reason: '?',
+                  },
+                })}
+          WHERE repo = ?
+            AND pr_number = ?
+            AND pr_state = 'open'
+            AND review_status = ?
+            AND ${sessionGuard}
+            AND ${pgidGuard}`
+      ).run(...params);
+
+      let abandonedReviewerPasses = 0;
+      if (updateResult.changes === 1 && expectedReviewerSessionUuid !== null) {
+        const passRows = db.prepare(
+          `SELECT pass_id, metadata_json
+             FROM reviewer_passes
+            WHERE repo = ?
+              AND pr_number = ?
+              AND status = 'running'
+              AND ended_at IS NULL`
+        ).all(repo, prNumber);
+        const updatePass = db.prepare(
+          `UPDATE reviewer_passes
+              SET status = 'abandoned',
+                  ended_at = ?,
+                  metadata_json = ?
+            WHERE pass_id = ?
+              AND status = 'running'
+              AND ended_at IS NULL`
+        );
+        for (const passRow of passRows) {
+          let metadata = {};
+          try {
+            const parsed = JSON.parse(passRow.metadata_json || '{}');
+            metadata = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+          } catch {
+            metadata = {};
+          }
+          if (metadata.reviewerSessionUuid !== expectedReviewerSessionUuid) {
+            continue;
+          }
+          const passUpdate = updatePass.run(
+            requestedAt,
+            JSON.stringify({
+              ...metadata,
+              activeReviewReset: {
+                resetAt: requestedAt,
+                reason: 'force-reset-review-to-pending',
+              },
+            }),
+            passRow.pass_id
+          );
+          abandonedReviewerPasses += passUpdate.changes;
+        }
+      }
+      return { updateResult, abandonedReviewerPasses };
+    });
+
+    const { updateResult, abandonedReviewerPasses } = resetTransaction();
 
     if (updateResult.changes === 1) {
       return {
         reset: true,
         reason: 'review-status-reset',
+        abandonedReviewerPasses,
         reviewRow: getReviewRow(db, { repo, prNumber }),
       };
     }

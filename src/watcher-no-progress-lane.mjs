@@ -291,6 +291,19 @@ function starvedPromotionMarkerPath(rootDir, promotionId = STARVED_SLOW_LANE_PRO
   return join(noProgressLaneDir(rootDir), `${sanitizePathSegment(promotionId)}.promotion.json`);
 }
 
+function promotionHistoryWith(doc, nextPromotion) {
+  const history = Array.isArray(doc?.promotionHistory)
+    ? doc.promotionHistory.filter((entry) => entry && typeof entry === 'object')
+    : [];
+  if (doc?.promotedFrom && typeof doc.promotedFrom === 'object') {
+    const priorSerialized = JSON.stringify(doc.promotedFrom);
+    const alreadyRecorded = history.some((entry) => JSON.stringify(entry) === priorSerialized);
+    if (!alreadyRecorded) history.push(doc.promotedFrom);
+  }
+  history.push(nextPromotion);
+  return history;
+}
+
 export function promoteStarvedNoProgressLaneLedgers(rootDir, {
   promotionId = STARVED_SLOW_LANE_PROMOTION_ID,
   now = new Date().toISOString(),
@@ -342,6 +355,13 @@ export function promoteStarvedNoProgressLaneLedgers(rootDir, {
     }
     if (doc?.lane !== LANE_SLOW) continue;
     promoted += 1;
+    const promotedFrom = {
+      lane: doc.lane,
+      noProgressTicks: normalizeCount(doc.noProgressTicks),
+      skippedTicks: normalizeCount(doc.skippedTicks),
+      promotionId,
+      promotedAt: now,
+    };
     writeFileAtomic(filePath, `${JSON.stringify({
       ...doc,
       schemaVersion: NO_PROGRESS_LANE_SCHEMA_VERSION,
@@ -349,13 +369,8 @@ export function promoteStarvedNoProgressLaneLedgers(rootDir, {
       noProgressTicks: 0,
       skippedTicks: 0,
       firstNoProgressAt: null,
-      promotedFrom: {
-        lane: doc.lane,
-        noProgressTicks: normalizeCount(doc.noProgressTicks),
-        skippedTicks: normalizeCount(doc.skippedTicks),
-        promotionId,
-        promotedAt: now,
-      },
+      promotedFrom,
+      promotionHistory: promotionHistoryWith(doc, promotedFrom),
       updatedAt: now,
     }, null, 2)}\n`);
   }

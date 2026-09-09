@@ -1209,6 +1209,21 @@ test('RVHAND-10: starvation recovery promotes existing slow-lane ledgers once', 
       });
     }
     assert.equal(readNoProgressLane(rootDir, identity, { logger: silentLogger }).lane, LANE_SLOW);
+    const ledgerPath = noProgressLaneFilePath(rootDir, identity);
+    const priorPromotion = {
+      lane: LANE_SLOW,
+      noProgressTicks: 12,
+      skippedTicks: 3,
+      promotionId: 'older-recovery',
+      promotedAt: 'earlier',
+    };
+    writeFileSync(
+      ledgerPath,
+      `${JSON.stringify({
+        ...JSON.parse(readFileSync(ledgerPath, 'utf8')),
+        promotedFrom: priorPromotion,
+      }, null, 2)}\n`,
+    );
 
     const first = promoteStarvedNoProgressLaneLedgers(rootDir, {
       now: 'recover',
@@ -1220,6 +1235,8 @@ test('RVHAND-10: starvation recovery promotes existing slow-lane ledgers once', 
     assert.equal(recovered.noProgressTicks, 0);
     assert.equal(recovered.skippedTicks, 0);
     assert.equal(recovered.promotedFrom.noProgressTicks > 0, true);
+    assert.deepEqual(recovered.promotionHistory[0], priorPromotion);
+    assert.deepEqual(recovered.promotionHistory[1], recovered.promotedFrom);
 
     const second = promoteStarvedNoProgressLaneLedgers(rootDir, {
       now: 'recover-again',

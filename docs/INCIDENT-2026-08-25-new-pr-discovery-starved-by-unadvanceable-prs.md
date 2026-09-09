@@ -122,6 +122,23 @@ guarantees a new PR is **seen**.
   and rereview claims from sitting behind a large hammer/merge-closeout backlog
   while preserving the normal 10m window when no reviewer lane work moved.
 
+#### 2026-09-09 follow-up: HAM launch settlement must use a soft step deadline
+
+The bounded posted-review handler added a second, smaller deadline around
+`resolveMergeAgentCoexistence`. That was correct for cheap probes, but too
+aggressive once the HAM route had entered `hq dispatch`: the 27.5s step budget
+could SIGTERM the dispatch subprocess before the AMA dispatch timeout and worker
+provision watchdog had finished. The live symptom was repeated
+`auto-hammer: dispatching terminal remediation` followed by
+`AMA/merge-agent coexistence deadline exceeded`, leaving the PR posted-review
+row to retry on the next tick while no closer actually settled.
+
+The handler deadline remains bounded, so the poll loop can keep discovering and
+dispatching reviews. The inner coexistence step is now a soft deadline: the row
+returns `coexistence-deadline` for this tick, but the in-flight HAM launch is
+allowed to complete under its own lease and dispatch timeout. Candidate fetch
+keeps the hard abort because it has not yet started a durable side effect.
+
 ### 3. A no-progress lane (`src/watcher-no-progress-lane.mjs`)
 
 A per-`(repo, pr, head)` ledger counting consecutive ticks that produced no

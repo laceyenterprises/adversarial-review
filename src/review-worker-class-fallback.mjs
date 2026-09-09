@@ -17,7 +17,7 @@ const FLEET_QUOTA_STATUS_RETRY_DELAYS_MS = Object.freeze([250, 1000]);
 const FLEET_QUOTA_STATUS_CACHE_TTL_MS = 10_000;
 const FLEET_QUOTA_STATUS_CACHE_BY_EXEC = new WeakMap();
 
-const DEFAULT_REVIEWER_WORKER_CLASS_FALLBACK = Object.freeze(['claude-code']);
+const DEFAULT_REVIEWER_WORKER_CLASS_FALLBACK = Object.freeze(['codex']);
 const REVIEWER_MODEL_BY_WORKER_CLASS = Object.freeze({
   claude: 'claude',
   'claude-code': 'claude',

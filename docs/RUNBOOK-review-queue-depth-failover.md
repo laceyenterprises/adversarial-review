@@ -56,8 +56,11 @@ this stays a lever rather than becoming the default path.
 | Unit | see below |
 
 The classes it may spill to are the pre-existing
-`ADVERSARIAL_REVIEW_REVIEWER_WORKER_CLASS_FALLBACK` list (default
-`['claude-code']`) — this ticket did not introduce a second roster.
+`ADVERSARIAL_REVIEW_REVIEWER_WORKER_CLASS_FALLBACK` list (default `['codex']`)
+— this ticket did not introduce a second roster. `claude-code` is intentionally
+not the default spillover class because the airlock launchd reviewer path cannot
+bootstrap Claude's audit session reliably; operators can still opt it in with
+the env override after proving that lane healthy.
 
 ### The unit: what "queue depth" counts
 

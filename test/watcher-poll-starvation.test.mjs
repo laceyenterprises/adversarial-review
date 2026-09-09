@@ -1315,6 +1315,54 @@ test('RVHAND-10: starvation recovery retries campaign marker after ledger read f
   }
 });
 
+test('RVHAND-10: starvation recovery ignores ledgers deleted by terminal cleanup', () => {
+  const rootDir = tempRoot();
+  try {
+    const missingIdentity = { repo: REPO, prNumber: 6529 };
+    const promotedIdentity = { repo: REPO, prNumber: 6532 };
+    for (const identity of [missingIdentity, promotedIdentity]) {
+      for (let i = 0; i < DEFAULT_NO_PROGRESS_LANE_CAP + 2; i += 1) {
+        recordNoProgressLaneRun(rootDir, identity, {
+          headSha: HEAD_A,
+          fingerprint: `starved-clean-pr-${identity.prNumber}`,
+          now: `t${i}`,
+          logger: silentLogger,
+        });
+      }
+      assert.equal(readNoProgressLane(rootDir, identity, { logger: silentLogger }).lane, LANE_SLOW);
+    }
+
+    const missingLedgerPath = noProgressLaneFilePath(rootDir, missingIdentity);
+    const laneDir = join(rootDir, 'data', 'watcher-no-progress-lane');
+    const warnings = [];
+    const first = promoteStarvedNoProgressLaneLedgers(rootDir, {
+      now: 'recover-enoent',
+      logger: { ...silentLogger, warn: (...args) => warnings.push(args.join(' ')) },
+      readFileSyncImpl: (filePath, encoding) => {
+        if (filePath === missingLedgerPath) {
+          rmSync(filePath, { force: true });
+          const err = new Error('ledger disappeared');
+          err.code = 'ENOENT';
+          throw err;
+        }
+        return readFileSync(filePath, encoding);
+      },
+    });
+
+    assert.equal(first.attempted, true);
+    assert.equal(first.promoted, 1);
+    assert.equal(first.reason, 'scheduler-starvation-recovery');
+    assert.equal(readNoProgressLane(rootDir, promotedIdentity, { logger: silentLogger }).lane, LANE_ACTIVE);
+    assert.equal(
+      existsSync(join(laneDir, 'rvhand-10-starved-slow-lane-recovery.promotion.json')),
+      true,
+    );
+    assert.equal(warnings.some((line) => /failed to read ledger/.test(line)), false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('RVHAND-10: starvation recovery skips a ledger write failure and promotes the rest', () => {
   const rootDir = tempRoot();
   try {
@@ -1355,6 +1403,48 @@ test('RVHAND-10: starvation recovery skips a ledger write failure and promotes t
     );
     assert.match(warnings.join('\n'), /failed to write promoted ledger/);
     assert.match(warnings.join('\n'), /left campaign marker unwritten after write errors/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('RVHAND-10: starvation recovery caps promotion history in persistent ledgers', () => {
+  const rootDir = tempRoot();
+  try {
+    const identity = { repo: REPO, prNumber: 6533 };
+    for (let i = 0; i < DEFAULT_NO_PROGRESS_LANE_CAP + 2; i += 1) {
+      recordNoProgressLaneRun(rootDir, identity, {
+        headSha: HEAD_A,
+        fingerprint: 'starved-clean-pr-history',
+        now: `t${i}`,
+        logger: silentLogger,
+      });
+    }
+    const ledgerPath = noProgressLaneFilePath(rootDir, identity);
+    writeFileSync(
+      ledgerPath,
+      `${JSON.stringify({
+        ...JSON.parse(readFileSync(ledgerPath, 'utf8')),
+        promotionHistory: Array.from({ length: 12 }, (_value, index) => ({
+          lane: LANE_SLOW,
+          noProgressTicks: index,
+          skippedTicks: 0,
+          promotionId: `older-recovery-${index}`,
+          promotedAt: `earlier-${index}`,
+        })),
+      }, null, 2)}\n`,
+    );
+
+    const result = promoteStarvedNoProgressLaneLedgers(rootDir, {
+      now: 'recover-capped-history',
+      logger: silentLogger,
+    });
+    const recovered = readNoProgressLane(rootDir, identity, { logger: silentLogger });
+
+    assert.equal(result.promoted, 1);
+    assert.equal(recovered.promotionHistory.length, 10);
+    assert.equal(recovered.promotionHistory[0].promotionId, 'older-recovery-3');
+    assert.deepEqual(recovered.promotionHistory.at(-1), recovered.promotedFrom);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

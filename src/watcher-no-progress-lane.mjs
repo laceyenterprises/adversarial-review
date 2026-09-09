@@ -72,6 +72,7 @@ export const DEFAULT_OPERATOR_BLOCKED_ALERT_NO_PROGRESS_TICKS = 6;
 const NO_PROGRESS_LANE_SCHEMA_VERSION = 1;
 const STALLED_EVENT_SCHEMA_VERSION = 1;
 const STARVED_SLOW_LANE_PROMOTION_ID = 'rvhand-10-starved-slow-lane-recovery';
+const MAX_PROMOTION_HISTORY_ENTRIES = 10;
 
 export const LANE_ACTIVE = 'active';
 export const LANE_SLOW = 'slow';
@@ -301,13 +302,14 @@ function promotionHistoryWith(doc, nextPromotion) {
     if (!alreadyRecorded) history.push(doc.promotedFrom);
   }
   history.push(nextPromotion);
-  return history;
+  return history.slice(-MAX_PROMOTION_HISTORY_ENTRIES);
 }
 
 export function promoteStarvedNoProgressLaneLedgers(rootDir, {
   promotionId = STARVED_SLOW_LANE_PROMOTION_ID,
   now = new Date().toISOString(),
   logger = console,
+  readFileSyncImpl = readFileSync,
   writeFileAtomicImpl = writeFileAtomic,
 } = {}) {
   const markerPath = starvedPromotionMarkerPath(rootDir, promotionId);
@@ -348,8 +350,9 @@ export function promoteStarvedNoProgressLaneLedgers(rootDir, {
     const filePath = join(dir, entry.name);
     let doc = null;
     try {
-      doc = JSON.parse(readFileSync(filePath, 'utf8'));
+      doc = JSON.parse(readFileSyncImpl(filePath, 'utf8'));
     } catch (err) {
+      if (err?.code === 'ENOENT') continue;
       logger?.warn?.(
         `[watcher] no-progress lane: failed to read ledger during starvation recovery ` +
           `${filePath} (${err?.message || err})`,

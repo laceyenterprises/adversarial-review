@@ -800,7 +800,7 @@ test('same-head terminal HAM remediation leaves terminal breadcrumb when merge s
         if (cmd === 'gh' && args[0] === 'pr' && args[1] === 'view') {
           return { stdout: JSON.stringify({ mergeCommit: { oid: 'd'.repeat(40) } }), stderr: '' };
         }
-        if (cmd === 'python3') {
+        if (String(cmd).endsWith('/python3') || cmd === 'python3') {
           throw new Error('database is locked');
         }
         if (args[0] === 'worker' && args[1] === 'tear-down') {
@@ -825,7 +825,7 @@ test('same-head terminal HAM remediation leaves terminal breadcrumb when merge s
     readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD }).terminalOutcome,
     'succeeded',
   );
-  assert.equal(calls.some((call) => call.cmd === 'python3'), true);
+  assert.equal(calls.some((call) => String(call.cmd).endsWith('/python3') || call.cmd === 'python3'), true);
   const dispatchRecord = readAmaCloserDispatchRecord(rootDir, {
     repo: REPO,
     prNumber: PR_NUMBER,

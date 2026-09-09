@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { handlePostedReviewRow, timePostedReviewStep } from '../src/posted-review-row.mjs';
+import {
+  PostedReviewStepDeadlineError,
+  handlePostedReviewRow,
+  timePostedReviewStep,
+} from '../src/posted-review-row.mjs';
 import { createLogChangeGate } from '../src/log-change-gate.mjs';
 
 // Drive handlePostedReviewRow straight to the AMA `ama-pending` retained-ownership
@@ -85,6 +89,77 @@ test('timePostedReviewStep: does not warn for fast completed steps', async () =>
 
   assert.equal(result, 'ok');
   assert.deepEqual(warnings, []);
+});
+
+test('timePostedReviewStep: deadline rejects and aborts pending work', async () => {
+  const errors = [];
+  const warnings = [];
+  let sawAbort = false;
+
+  await assert.rejects(
+    timePostedReviewStep(
+      'resolveMergeAgentCoexistence',
+      'laceyenterprises/agent-os#4242',
+      {
+        warn: (m) => warnings.push(String(m)),
+        error: (m) => errors.push(String(m)),
+      },
+      ({ signal }) => new Promise((_, reject) => {
+        signal.addEventListener('abort', () => {
+          sawAbort = true;
+          reject(signal.reason);
+        });
+      }),
+      1000,
+      { deadlineMs: 10 },
+    ),
+    PostedReviewStepDeadlineError,
+  );
+
+  assert.equal(sawAbort, true);
+  assert.match(errors[0], /posted-review step deadline exceeded/);
+  assert.match(errors[0], /deadline_ms=10/);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /posted-review step aborted after deadline/);
+});
+
+test('handlePostedReviewRow: resolveMergeAgentCoexistence deadline returns a named handled outcome', async () => {
+  const oldDeadline = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
+  process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = '10';
+  const errors = [];
+  let sawAbort = false;
+  const { args } = baseArgs({
+    logger: {
+      log() {},
+      warn() {},
+      error: (m) => errors.push(String(m)),
+    },
+    resolveMergeAgentCoexistenceForWatcherImpl: ({ signal }) => new Promise((_, reject) => {
+      signal.addEventListener('abort', () => {
+        sawAbort = true;
+        reject(signal.reason);
+      });
+    }),
+  });
+
+  try {
+    const result = await handlePostedReviewRow(args);
+
+    assert.equal(sawAbort, true);
+    assert.equal(result.handled, true);
+    assert.equal(result.outcome, 'coexistence-deadline');
+    assert.equal(
+      result.amaClosureResult.reason,
+      'resolve-merge-agent-coexistence-deadline-exceeded',
+    );
+    assert.match(errors.join('\n'), /reason=resolve-merge-agent-coexistence-deadline-exceeded/);
+  } finally {
+    if (oldDeadline === undefined) {
+      delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
+    } else {
+      process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = oldDeadline;
+    }
+  }
 });
 
 test('handlePostedReviewRow: retained-ownership logs once and is suppressed on unchanged repeats', async () => {

@@ -118,6 +118,30 @@ function isTerminalReviewRow(row) {
 // finishes. A handler that hangs now names the step it is still waiting on; a
 // slow step that eventually completes also records the monotonic elapsed time.
 const POSTED_REVIEW_STEP_LOG_THRESHOLD_MS = 5000;
+const DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = 300_000;
+
+export class PostedReviewStepDeadlineError extends Error {
+  constructor(label, key, deadlineMs) {
+    super(`posted-review step ${label} exceeded ${deadlineMs}ms for ${key}`);
+    this.name = 'PostedReviewStepDeadlineError';
+    this.code = 'POSTED_REVIEW_STEP_DEADLINE_EXCEEDED';
+    this.label = label;
+    this.key = key;
+    this.deadlineMs = deadlineMs;
+  }
+}
+
+function parsePositiveMs(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+export function resolveMergeAgentCoexistenceStepDeadlineMs(env = process.env) {
+  return parsePositiveMs(
+    env?.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS,
+    DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS,
+  );
+}
 
 export async function timePostedReviewStep(
   label,
@@ -125,24 +149,61 @@ export async function timePostedReviewStep(
   logger,
   fn,
   thresholdMs = POSTED_REVIEW_STEP_LOG_THRESHOLD_MS,
+  { deadlineMs = null, setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout } = {},
 ) {
   const startedMs = performance.now();
   let warned = false;
-  const timer = setTimeout(() => {
+  let timedOut = false;
+  const controller = deadlineMs ? new AbortController() : null;
+  const timer = setTimeoutFn(() => {
     warned = true;
     logger?.warn?.(
       `[watcher] posted-review step still running for ${key}: ${label} exceeded ${thresholdMs}ms`,
     );
   }, thresholdMs);
   timer.unref?.();
+  let deadlineTimer = null;
+  const effectiveDeadlineMs = deadlineMs === null || deadlineMs === undefined
+    ? null
+    : parsePositiveMs(deadlineMs, null);
+  const deadline = effectiveDeadlineMs
+    ? new Promise((_, reject) => {
+        deadlineTimer = setTimeoutFn(() => {
+          timedOut = true;
+          const err = new PostedReviewStepDeadlineError(label, key, effectiveDeadlineMs);
+          controller?.abort(err);
+          reject(err);
+        }, effectiveDeadlineMs);
+        deadlineTimer.unref?.();
+      })
+    : null;
+  const work = Promise.resolve()
+    .then(() => fn({ signal: controller?.signal || null }))
+    .catch((err) => {
+      if (timedOut) {
+        logger?.warn?.(
+          `[watcher] posted-review step aborted after deadline for ${key}: ` +
+            `${label} stopped with ${err?.message || err}`,
+        );
+      }
+      throw err;
+    });
   try {
-    return await fn();
+    return await (deadline ? Promise.race([work, deadline]) : work);
   } finally {
-    clearTimeout(timer);
-    if (warned) {
+    clearTimeoutFn(timer);
+    if (deadlineTimer !== null) clearTimeoutFn(deadlineTimer);
+    if (warned && !timedOut) {
       const elapsedMs = Math.round(performance.now() - startedMs);
       logger?.warn?.(
         `[watcher] posted-review step completed for ${key}: ${label} took ${elapsedMs}ms`,
+      );
+    }
+    if (timedOut) {
+      const elapsedMs = Math.round(performance.now() - startedMs);
+      logger?.error?.(
+        `[watcher] posted-review step deadline exceeded for ${key}: ` +
+          `${label} deadline_ms=${effectiveDeadlineMs} elapsed_ms=${elapsedMs}`,
       );
     }
   }
@@ -241,24 +302,51 @@ export async function handlePostedReviewRow({
     // clean PRs are handled by the daemon, and dirty/conflicted/red-CI PRs are
     // handled by one hammer under the launch lease. A separate merge-clicking
     // agent is no longer a valid outcome.
-    const coexistenceDecision = await timePostedReviewStep(
-      'resolveMergeAgentCoexistence', stepKey, logger, () =>
-        resolveMergeAgentCoexistenceForWatcherImpl({
-          rootDir,
-          reviewStateRow: existing,
-          dispatchJob,
-          candidate,
-          labelNames,
-          operatorApprovalEvent,
-          mergeAgentRequestEvent,
-          adversarialMergeRequestedEvent,
-          repoPath,
-          prNumber,
-          currentRevisionRef,
-          domainId,
-          logger,
-        }),
-    );
+    const coexistenceDeadlineMs = resolveMergeAgentCoexistenceStepDeadlineMs();
+    let coexistenceDecision;
+    try {
+      coexistenceDecision = await timePostedReviewStep(
+        'resolveMergeAgentCoexistence', stepKey, logger, ({ signal }) =>
+          resolveMergeAgentCoexistenceForWatcherImpl({
+            rootDir,
+            reviewStateRow: existing,
+            dispatchJob,
+            candidate,
+            labelNames,
+            operatorApprovalEvent,
+            mergeAgentRequestEvent,
+            adversarialMergeRequestedEvent,
+            repoPath,
+            prNumber,
+            currentRevisionRef,
+            domainId,
+            logger,
+            signal,
+          }),
+        undefined,
+        { deadlineMs: coexistenceDeadlineMs },
+      );
+    } catch (err) {
+      if (err?.code !== 'POSTED_REVIEW_STEP_DEADLINE_EXCEEDED') throw err;
+      const reason = 'resolve-merge-agent-coexistence-deadline-exceeded';
+      logger?.error?.(
+        `[watcher] AMA/merge-agent coexistence deadline exceeded for ${repoPath}#${prNumber}; ` +
+          `reason=${reason} deadline_ms=${coexistenceDeadlineMs}. ` +
+          'Skipping merge action for this PR on this tick so the posted-review phase can continue.',
+      );
+      return {
+        handled: true,
+        outcome: 'coexistence-deadline',
+        gateDecision: gateProjection?.decision || null,
+        amaClosureResult: {
+          dispatched: false,
+          skipMergeAgent: true,
+          reason,
+          namedReason: reason,
+          deadlineMs: coexistenceDeadlineMs,
+        },
+      };
+    }
     if (coexistenceDecision.outcome === 'pr-terminal') {
       // BUG-1: the live candidate read shows the PR already merged. No
       // AMA/merge-agent action is possible — drop ownership instead of retaining

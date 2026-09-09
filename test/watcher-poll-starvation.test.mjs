@@ -45,7 +45,7 @@ import {
   orderSubjectEntriesDiscoveryFirst,
   runPostedReviewHandlersFairly,
 } from '../src/watcher-poll-fairness.mjs';
-import { createNoProgressLaneGate } from '../src/posted-review-row.mjs';
+import { createNoProgressLaneGate, handlePostedReviewRow } from '../src/posted-review-row.mjs';
 import {
   createPollStarvationHandler,
   resolvePollStarvationConfig,
@@ -326,6 +326,80 @@ test('RVHAND-03: per-handler timeout lets slow hammer launch finish without rais
   assert.equal(summary.timedOut, 0);
   assert.deepEqual(events, ['slow-handler-finished', 'next-handler-ran']);
   assert.deepEqual(errors, []);
+});
+
+test('RVHAND-04: resolveMergeAgentCoexistence deadline does not consume the remaining phase budget', async () => {
+  const oldDeadline = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
+  process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = '10';
+  const state = createPostedReviewFairnessState();
+  const events = [];
+  let firstStepAborted = false;
+
+  const baseHandlerArgs = {
+    rootDir: tempRoot(),
+    repoPath: REPO,
+    existing: { body_md: null },
+    subjectRef: null,
+    currentRevisionRef: HEAD_A,
+    labelNames: [],
+    projectGateStatusSafe: async () => ({}),
+    fetchMergeAgentCandidateImpl: async () => ({ merged: false, prState: 'open' }),
+    buildMergeAgentDispatchJobImpl: () => ({}),
+    latestFollowUpJobFinder: () => null,
+    latestPostedReviewBodyFinder: () => null,
+    reviewBodyHasScopeViolationFindingImpl: () => false,
+    logger: silentLogger,
+  };
+
+  try {
+    const summary = await runPostedReviewHandlersFairly({
+      handlers: [
+        {
+          repoPath: REPO,
+          prNumber: 6504,
+          run: () => handlePostedReviewRow({
+            ...baseHandlerArgs,
+            prNumber: 6504,
+            resolveMergeAgentCoexistenceForWatcherImpl: ({ signal }) =>
+              new Promise((_, reject) => {
+                signal.addEventListener('abort', () => {
+                  firstStepAborted = true;
+                  reject(signal.reason);
+                });
+              }),
+          }),
+        },
+        {
+          repoPath: REPO,
+          prNumber: 6505,
+          run: async () => {
+            events.push('second-handler-ran');
+          },
+        },
+      ],
+      state,
+      budgetMs: 60_000,
+      handlerTimeoutMs: 1_000,
+      laneGate: {
+        evaluate: () => ({ run: true }),
+        record: async () => {},
+      },
+      logger: silentLogger,
+    });
+
+    assert.equal(firstStepAborted, true);
+    assert.equal(summary.timedOut, 0);
+    assert.equal(summary.ran, 2);
+    assert.equal(summary.deferredAfterTimeout, 0);
+    assert.deepEqual(events, ['second-handler-ran']);
+  } finally {
+    rmSync(baseHandlerArgs.rootDir, { recursive: true, force: true });
+    if (oldDeadline === undefined) {
+      delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
+    } else {
+      process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = oldDeadline;
+    }
+  }
 });
 
 test('RVHAND-02: timeout log reports phase elapsed at handler start', async () => {

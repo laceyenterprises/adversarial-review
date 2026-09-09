@@ -95,6 +95,15 @@ test('RVHAND-10: posted-review HAM step budget admits observed live tails withou
   );
 });
 
+test('RVHAND-10: invalid posted-review phase budget falls back to capacity-expanded default', () => {
+  const env = { ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS: 'invalid' };
+  const handlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs(env);
+  assert.equal(
+    resolvePostedReviewPhaseBudgetMs(env),
+    handlerTimeoutMs * DEFAULT_POSTED_REVIEW_PHASE_HANDLER_CAPACITY,
+  );
+});
+
 test('RVHAND-11: reviewer-pressure posted-review phase budget has a bounded default and override', () => {
   assert.equal(resolvePostedReviewReviewerPressurePhaseBudgetMs({}), 180_000);
   assert.equal(

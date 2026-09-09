@@ -90,13 +90,14 @@ function parsePositiveMs(value, fallback) {
 }
 
 export function resolvePostedReviewPhaseBudgetMs(env = process.env) {
-  const configured = env?.ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS;
-  if (configured !== undefined && configured !== null && configured !== '') {
-    return parsePositiveMs(configured, DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS);
-  }
   const handlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs(env);
   const capacityBudgetMs = handlerTimeoutMs * DEFAULT_POSTED_REVIEW_PHASE_HANDLER_CAPACITY;
-  return Math.max(DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS, capacityBudgetMs);
+  const fallbackBudgetMs = Math.max(DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS, capacityBudgetMs);
+  const configured = env?.ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS;
+  if (configured !== undefined && configured !== null && configured !== '') {
+    return parsePositiveMs(configured, fallbackBudgetMs);
+  }
+  return fallbackBudgetMs;
 }
 
 export function resolvePostedReviewReviewerPressurePhaseBudgetMs(env = process.env) {

@@ -338,6 +338,7 @@ export function promoteStarvedNoProgressLaneLedgers(rootDir, {
   }
 
   let promoted = 0;
+  let hadReadErrors = false;
   for (const entry of entries) {
     if (!entry.isFile() || !entry.name.endsWith('.json') || entry.name.endsWith('.promotion.json')) {
       continue;
@@ -351,6 +352,7 @@ export function promoteStarvedNoProgressLaneLedgers(rootDir, {
         `[watcher] no-progress lane: failed to read ledger during starvation recovery ` +
           `${filePath} (${err?.message || err})`,
       );
+      hadReadErrors = true;
       continue;
     }
     if (doc?.lane !== LANE_SLOW) continue;
@@ -373,6 +375,14 @@ export function promoteStarvedNoProgressLaneLedgers(rootDir, {
       promotionHistory: promotionHistoryWith(doc, promotedFrom),
       updatedAt: now,
     }, null, 2)}\n`);
+  }
+
+  if (hadReadErrors) {
+    logger?.warn?.(
+      `[watcher] no-progress lane: starvation recovery promoted ${promoted} readable ` +
+        `ledger(s) but left campaign marker unwritten after read errors (${promotionId})`,
+    );
+    return { attempted: true, promoted, reason: 'ledger-read-failed' };
   }
 
   writeFileAtomic(markerPath, `${JSON.stringify({

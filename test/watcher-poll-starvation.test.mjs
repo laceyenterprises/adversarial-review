@@ -1249,6 +1249,52 @@ test('RVHAND-10: starvation recovery promotes existing slow-lane ledgers once', 
   }
 });
 
+test('RVHAND-10: starvation recovery retries campaign marker after ledger read failures', () => {
+  const rootDir = tempRoot();
+  try {
+    const identity = { repo: REPO, prNumber: 6528 };
+    for (let i = 0; i < DEFAULT_NO_PROGRESS_LANE_CAP + 2; i += 1) {
+      recordNoProgressLaneRun(rootDir, identity, {
+        headSha: HEAD_A,
+        fingerprint: 'starved-clean-pr',
+        now: `t${i}`,
+        logger: silentLogger,
+      });
+    }
+    assert.equal(readNoProgressLane(rootDir, identity, { logger: silentLogger }).lane, LANE_SLOW);
+    const laneDir = join(rootDir, 'data', 'watcher-no-progress-lane');
+    const badLedgerPath = join(laneDir, 'transient-read-failure.json');
+    writeFileSync(badLedgerPath, '{');
+
+    const first = promoteStarvedNoProgressLaneLedgers(rootDir, {
+      now: 'recover',
+      logger: silentLogger,
+    });
+    assert.equal(first.attempted, true);
+    assert.equal(first.promoted, 1);
+    assert.equal(first.reason, 'ledger-read-failed');
+    assert.equal(
+      existsSync(join(laneDir, 'rvhand-10-starved-slow-lane-recovery.promotion.json')),
+      false,
+    );
+
+    rmSync(badLedgerPath);
+    const second = promoteStarvedNoProgressLaneLedgers(rootDir, {
+      now: 'recover-again',
+      logger: silentLogger,
+    });
+    assert.equal(second.attempted, true);
+    assert.equal(second.promoted, 0);
+    assert.equal(second.reason, 'scheduler-starvation-recovery');
+    assert.equal(
+      existsSync(join(laneDir, 'rvhand-10-starved-slow-lane-recovery.promotion.json')),
+      true,
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('operator-decision alert fires once after threshold, not every tick', async () => {
   const rootDir = tempRoot();
   try {

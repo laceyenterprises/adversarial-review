@@ -59,6 +59,7 @@
 // derived from `pollIntervalMs` because this module sits below config — override
 // with ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS if you retune the poll.
 export const DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS = 10 * 60 * 1000;
+export const DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS = 2 * 60 * 1000;
 export const DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT = 2;
 export const DEFAULT_POSTED_REVIEW_HANDLER_HEADROOM_MS = 5 * 1000;
 
@@ -91,6 +92,13 @@ export function resolvePostedReviewPhaseBudgetMs(env = process.env) {
   return parsePositiveMs(
     env?.ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS,
     DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS,
+  );
+}
+
+export function resolvePostedReviewReviewerPressurePhaseBudgetMs(env = process.env) {
+  return parsePositiveMs(
+    env?.ADVERSARIAL_WATCHER_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS,
+    DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS,
   );
 }
 

@@ -9,6 +9,7 @@
 // imports both back. ROOT/execFileAsync are re-derived; WATCHER_PRIMARY_DOMAIN_ID
 // is threaded (see the `domainId`/`primaryDomainId` defaults).
 import { execFile } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
 import { promisify } from 'node:util';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -104,6 +105,49 @@ function isTerminalReviewRow(row) {
   return Boolean(row?.merged_at || row?.mergedAt || row?.closed_at || row?.closedAt);
 }
 
+// RVHAND-03: an abandoned handler cannot report its own timing.
+//
+// `runWithDeadline` in the fairness loop stops WAITING on a slow handler and lets
+// the tick continue; the handler is never told, so any breakdown it would emit at
+// the end is never reached. RVHAND-02 established that these timeouts are always a
+// single slow handler (13/13 samples start with the phase idle, 2-233ms in) and
+// never phase saturation — but it cannot say WHICH step inside the handler is slow,
+// precisely because the handler dies before reporting.
+//
+// So arm a pending-step warning before each await, then clear it when the step
+// finishes. A handler that hangs now names the step it is still waiting on; a
+// slow step that eventually completes also records the monotonic elapsed time.
+const POSTED_REVIEW_STEP_LOG_THRESHOLD_MS = 5000;
+
+export async function timePostedReviewStep(
+  label,
+  key,
+  logger,
+  fn,
+  thresholdMs = POSTED_REVIEW_STEP_LOG_THRESHOLD_MS,
+) {
+  const startedMs = performance.now();
+  let warned = false;
+  const timer = setTimeout(() => {
+    warned = true;
+    logger?.warn?.(
+      `[watcher] posted-review step still running for ${key}: ${label} exceeded ${thresholdMs}ms`,
+    );
+  }, thresholdMs);
+  timer.unref?.();
+  try {
+    return await fn();
+  } finally {
+    clearTimeout(timer);
+    if (warned) {
+      const elapsedMs = Math.round(performance.now() - startedMs);
+      logger?.warn?.(
+        `[watcher] posted-review step completed for ${key}: ${label} took ${elapsedMs}ms`,
+      );
+    }
+  }
+}
+
 export async function handlePostedReviewRow({
   rootDir = ROOT,
   repoPath,
@@ -126,7 +170,10 @@ export async function handlePostedReviewRow({
   logGate = postedReviewRowLogGate,
   logger = console,
 } = {}) {
-  const gateProjection = await projectGateStatusSafe(existing);
+  const stepKey = `${repoPath}#${prNumber}`;
+  const gateProjection = await timePostedReviewStep(
+    'projectGateStatusSafe', stepKey, logger, () => projectGateStatusSafe(existing),
+  );
 
   try {
     const latestPostedReviewBody = latestPostedReviewBodyFinder(rootDir, { repo: repoPath, prNumber });
@@ -180,32 +227,38 @@ export async function handlePostedReviewRow({
     // drain first. This live fetch is therefore the dispatch-time guard: it
     // re-reads PR state/mergeability/head before AMA or merge-agent selection
     // instead of trusting the previous tick's lifecycle mirror.
-    const candidate = await fetchMergeAgentCandidateImpl(repoPath, prNumber, {
-      execFileImpl,
-      operatorApprovalEvent,
-      mergeAgentRequestEvent,
-    });
+    const candidate = await timePostedReviewStep(
+      'fetchMergeAgentCandidate', stepKey, logger, () =>
+        fetchMergeAgentCandidateImpl(repoPath, prNumber, {
+          execFileImpl,
+          operatorApprovalEvent,
+          mergeAgentRequestEvent,
+        }),
+    );
     const dispatchJob = buildMergeAgentDispatchJobImpl(rootDir, candidate, { reviewStateDb: db });
 
     // MSM-04: AMA-enabled posted-review rows have one autonomous merge route:
     // clean PRs are handled by the daemon, and dirty/conflicted/red-CI PRs are
     // handled by one hammer under the launch lease. A separate merge-clicking
     // agent is no longer a valid outcome.
-    const coexistenceDecision = await resolveMergeAgentCoexistenceForWatcherImpl({
-      rootDir,
-      reviewStateRow: existing,
-      dispatchJob,
-      candidate,
-      labelNames,
-      operatorApprovalEvent,
-      mergeAgentRequestEvent,
-      adversarialMergeRequestedEvent,
-      repoPath,
-      prNumber,
-      currentRevisionRef,
-      domainId,
-      logger,
-    });
+    const coexistenceDecision = await timePostedReviewStep(
+      'resolveMergeAgentCoexistence', stepKey, logger, () =>
+        resolveMergeAgentCoexistenceForWatcherImpl({
+          rootDir,
+          reviewStateRow: existing,
+          dispatchJob,
+          candidate,
+          labelNames,
+          operatorApprovalEvent,
+          mergeAgentRequestEvent,
+          adversarialMergeRequestedEvent,
+          repoPath,
+          prNumber,
+          currentRevisionRef,
+          domainId,
+          logger,
+        }),
+    );
     if (coexistenceDecision.outcome === 'pr-terminal') {
       // BUG-1: the live candidate read shows the PR already merged. No
       // AMA/merge-agent action is possible — drop ownership instead of retaining

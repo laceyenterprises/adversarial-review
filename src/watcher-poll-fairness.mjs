@@ -59,6 +59,7 @@
 // derived from `pollIntervalMs` because this module sits below config — override
 // with ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS if you retune the poll.
 export const DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS = 10 * 60 * 1000;
+export const DEFAULT_POSTED_REVIEW_EXPENSIVE_STEP_BUDGET_FRACTION = 0.2;
 
 // Per-handler deadline. The phase budget alone cannot save a tick, because it is
 // only checked BETWEEN handlers: one handler that never settles (an `hq` dispatch
@@ -97,6 +98,17 @@ export function resolvePostedReviewHandlerTimeoutMs(env = process.env) {
     env?.ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS,
     DEFAULT_POSTED_REVIEW_HANDLER_TIMEOUT_MS,
   );
+}
+
+export function derivePostedReviewExpensiveStepBudgetMs(phaseBudgetMs) {
+  const effectivePhaseBudgetMs = parsePositiveMs(
+    phaseBudgetMs,
+    DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS,
+  );
+  const derivedMs = Math.floor(
+    effectivePhaseBudgetMs * DEFAULT_POSTED_REVIEW_EXPENSIVE_STEP_BUDGET_FRACTION,
+  );
+  return Math.max(1, Math.min(derivedMs, effectivePhaseBudgetMs - 1));
 }
 
 /**
@@ -214,6 +226,7 @@ export async function runPostedReviewHandlersFairly({
   state = createPostedReviewFairnessState(),
   budgetMs = DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS,
   handlerTimeoutMs = DEFAULT_POSTED_REVIEW_HANDLER_TIMEOUT_MS,
+  minimumHandlerStartBudgetMs = null,
   laneGate = null,
   nowMs = () => Date.now(),
   setTimeoutFn = setTimeout,
@@ -246,6 +259,10 @@ export async function runPostedReviewHandlersFairly({
     handlerTimeoutMs,
     DEFAULT_POSTED_REVIEW_HANDLER_TIMEOUT_MS,
   );
+  const effectiveMinimumHandlerStartBudgetMs = parsePositiveMs(
+    minimumHandlerStartBudgetMs,
+    derivePostedReviewExpensiveStepBudgetMs(effectiveBudgetMs),
+  );
   const startedMs = nowMs();
   const ordered = orderDeferredFirst(handlers, state);
   const nextDeferred = new Set();
@@ -253,8 +270,13 @@ export async function runPostedReviewHandlersFairly({
   for (let index = 0; index < ordered.length; index += 1) {
     const handler = ordered[index];
     const key = postedReviewHandlerKey(handler);
+    const phaseElapsedMs = nowMs() - startedMs;
+    const remainingBudgetMs = effectiveBudgetMs - phaseElapsedMs;
 
-    if (nowMs() - startedMs >= effectiveBudgetMs) {
+    if (
+      phaseElapsedMs >= effectiveBudgetMs ||
+      remainingBudgetMs < effectiveMinimumHandlerStartBudgetMs
+    ) {
       // Budget exhausted. Everything left is deferred — NOT dropped: each key is
       // promoted to the front of the next tick, so the cut point rotates and the
       // same tail cannot be starved tick after tick.
@@ -263,8 +285,10 @@ export async function runPostedReviewHandlersFairly({
       }
       summary.deferredByBudget = ordered.length - index;
       logger?.warn?.(
-        `[watcher] posted-review phase budget exhausted after ` +
+        `[watcher] posted-review phase budget insufficient after ` +
           `${Math.round(nowMs() - startedMs)}ms (budget=${effectiveBudgetMs}ms): ` +
+          `remaining=${Math.max(0, Math.round(remainingBudgetMs))}ms ` +
+          `minimum_start_budget=${effectiveMinimumHandlerStartBudgetMs}ms; ` +
           `${summary.deferredByBudget} handler(s) deferred to the front of the next tick ` +
           `(${[...nextDeferred].join(' ')})`,
       );

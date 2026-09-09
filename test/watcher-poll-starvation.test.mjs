@@ -328,6 +328,54 @@ test('RVHAND-03: per-handler timeout lets slow hammer launch finish without rais
   assert.deepEqual(errors, []);
 });
 
+test('RVHAND-05: posted-review phase defers before starting when remaining budget cannot cover a step', async () => {
+  const state = createPostedReviewFairnessState();
+  const events = [];
+  const warnings = [];
+  let clock = 0;
+
+  const summary = await runPostedReviewHandlersFairly({
+    handlers: [
+      {
+        repoPath: REPO,
+        prNumber: 6504,
+        run: async () => {
+          events.push('first-handler-ran');
+          clock += 270_000;
+        },
+      },
+      {
+        repoPath: REPO,
+        prNumber: 6505,
+        run: async () => {
+          events.push('second-handler-ran');
+        },
+      },
+    ],
+    state,
+    budgetMs: 330_000,
+    handlerTimeoutMs: 330_000,
+    minimumHandlerStartBudgetMs: 66_000,
+    nowMs: () => clock,
+    laneGate: {
+      evaluate: () => ({ run: true }),
+      record: async () => {},
+    },
+    logger: {
+      log() {},
+      warn: (...args) => warnings.push(args.join(' ')),
+      error() {},
+    },
+  });
+
+  assert.equal(summary.ran, 1);
+  assert.equal(summary.deferredByBudget, 1);
+  assert.deepEqual(summary.deferred, ['laceyenterprises/agent-os#6505']);
+  assert.deepEqual(events, ['first-handler-ran']);
+  assert.match(warnings[0], /posted-review phase budget insufficient/);
+  assert.match(warnings[0], /remaining=60000ms minimum_start_budget=66000ms/);
+});
+
 test('RVHAND-04: resolveMergeAgentCoexistence deadline does not consume the remaining phase budget', async () => {
   const oldDeadline = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
   process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = '10';
@@ -432,6 +480,7 @@ test('RVHAND-02: timeout log reports phase elapsed at handler start', async () =
     state,
     budgetMs: 600_000,
     handlerTimeoutMs: 60_000,
+    minimumHandlerStartBudgetMs: 1,
     nowMs: () => clock,
     setTimeoutFn: (callback, delay) => {
       pendingTimer = { callback, delay };

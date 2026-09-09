@@ -362,13 +362,20 @@ export function markHammerRetryCapExhausted(rootDir, identity, {
   const existing = readHammerRetryCapLedger(rootDir, identity);
   const incomingJobKey = normalizeKey(jobKey);
   const head = normalizeKey(headSha);
+  const existingTargetSha = normalizeKey(existing?.targetRemediationSha);
+  const targetShaChanged = Boolean(
+    existing
+      && existingTargetSha
+      && head
+      && existingTargetSha !== head,
+  );
   const priorHeads = Array.isArray(existing?.dispatchHeads) ? existing.dispatchHeads : [];
   const dispatchHeads = head && !priorHeads.includes(head) ? [...priorHeads, head] : priorHeads;
   // A lifetime exhaustion (or one already stamped) is immune to the fresh-review
   // reset: `lifetimeSuppressed` is never cleared by a jobKey change, so a hammer
   // cannot re-arm the loop by earning a fresh review on the head it moved.
   const lifetimeSuppressed = Boolean(lifetime) || Boolean(existing?.lifetimeSuppressed);
-  const targetSuppressed = Boolean(target) || Boolean(existing?.targetSuppressed);
+  const targetSuppressed = Boolean(target) || (Boolean(existing?.targetSuppressed) && !targetShaChanged);
   const doc = {
     schemaVersion: HAMMER_RETRY_CAP_SCHEMA_VERSION,
     repo: identity.repo,
@@ -380,8 +387,10 @@ export function markHammerRetryCapExhausted(rootDir, identity, {
     lifetimeAttemptCount: sanitizeLifetimeCount(
       existing?.lifetimeAttemptCount ?? existing?.attemptCount,
     ),
-    targetRemediationSha: head || normalizeKey(existing?.targetRemediationSha),
-    targetAttemptCount: Math.max(0, Number(existing?.targetAttemptCount ?? existing?.attemptCount ?? 0)),
+    targetRemediationSha: head || existingTargetSha,
+    targetAttemptCount: targetShaChanged
+      ? 0
+      : Math.max(0, Number(existing?.targetAttemptCount ?? existing?.attemptCount ?? 0)),
     lifetimeSuppressed,
     targetSuppressed,
     dispatchHeads,
@@ -402,7 +411,7 @@ export function markHammerRetryCapExhausted(rootDir, identity, {
     alertedAt: alertEmitted ? (now || existing?.alertedAt || null) : (existing?.alertedAt || null),
     targetAlertedAt: target && alertEmitted
       ? (now || existing?.targetAlertedAt || null)
-      : (existing?.targetAlertedAt || null),
+      : (targetShaChanged ? null : (existing?.targetAlertedAt || null)),
     createdAt: existing?.createdAt || now || null,
     updatedAt: now || existing?.updatedAt || null,
   };

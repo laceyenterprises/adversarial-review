@@ -343,6 +343,46 @@ test('lifetime suppression is immune to the fresh-review reset', (t) => {
   assert.equal(afterFreshReview.capExhausted, true);
 });
 
+test('suppressed lifetime ledger does not inherit target attempts across pushed heads', (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-cap-lifetime-head-reset-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: REPO, prNumber: 4244 };
+
+  markHammerRetryCapExhausted(rootDir, identity, {
+    jobKey: 'old-review-head',
+    headSha: 'old-target-head',
+    attemptCount: HAMMER_RETRY_CAP_TOTAL_DISPATCHES,
+    lifetime: true,
+    now: '2026-07-06T00:00:00Z',
+  });
+  const bumpedWhileSuppressed = markHammerRetryCapExhausted(rootDir, identity, {
+    jobKey: 'old-review-head',
+    headSha: 'new-target-head',
+    attemptCount: HAMMER_RETRY_CAP_TOTAL_DISPATCHES,
+    lifetime: true,
+    now: '2026-07-06T00:01:00Z',
+  });
+
+  assert.equal(bumpedWhileSuppressed.targetRemediationSha, 'new-target-head');
+  assert.equal(bumpedWhileSuppressed.targetAttemptCount, 0);
+  assert.equal(bumpedWhileSuppressed.targetSuppressed, false);
+  assert.equal(bumpedWhileSuppressed.lifetimeSuppressed, true);
+  assert.equal(bumpedWhileSuppressed.suppressionState, HAMMER_RETRY_CAP_LIFETIME_SUPPRESSION_STATE);
+
+  const afterOperatorClearsLifetime = {
+    ...readHammerRetryCapLedger(rootDir, identity),
+    lifetimeSuppressed: false,
+    suppressed: false,
+    suppressionState: null,
+  };
+  const freshTargetDecision = evaluateHammerRetryCap(afterOperatorClearsLifetime, {
+    jobKey: 'old-review-head',
+    headSha: 'new-target-head',
+  });
+  assert.equal(freshTargetDecision.priorTargetAttemptCount, 0);
+  assert.equal(freshTargetDecision.targetRedriveCapExhausted, false);
+});
+
 test('a non-finite lifetimeAttemptCount fails CLOSED (no silent NaN bypass)', () => {
   // An operator hand-editing the ledger to a non-numeric truthy value must not
   // re-arm the loop by making `NaN > ceiling` evaluate false.

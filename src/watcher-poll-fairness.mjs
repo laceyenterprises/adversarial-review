@@ -144,6 +144,10 @@ export function postedReviewHandlerKey(handler) {
   return `${handler?.repoPath ?? ''}#${handler?.prNumber ?? ''}`;
 }
 
+function isPostedReviewStepTimeout(outcome) {
+  return outcome?.error?.code === 'POSTED_REVIEW_STEP_TIMEOUT';
+}
+
 /**
  * Cross-tick fairness state. Lives for the process lifetime in the watcher, so a
  * handler cut off by the budget is promoted to the front of the next tick rather
@@ -305,7 +309,8 @@ export async function runPostedReviewHandlersFairly({
       clearTimeoutFn,
     });
     const handlerElapsedMs = Math.round(nowMs() - handlerStartedMs);
-    if (outcome.timedOut) {
+    const timedOut = outcome.timedOut || isPostedReviewStepTimeout(outcome);
+    if (timedOut) {
       summary.timedOut += 1;
       // RVHAND-01: the abandon log used to report only the budget, so a timeout
       // said nothing about WHERE the time went. An operator could not tell
@@ -323,8 +328,9 @@ export async function runPostedReviewHandlersFairly({
       const phaseElapsedAtStartMs = Math.round(handlerStartedMs - startedMs);
       const phaseElapsedTotalMs = Math.round(nowMs() - startedMs);
       logger?.error?.(
-        `[watcher] posted-review handler for ${key} exceeded ${handlerDeadlineMs}ms; ` +
-          'abandoning it so the tick can return to new-PR discovery ' +
+        `[watcher] posted-review handler for ${key} ` +
+          `${outcome.timedOut ? `exceeded ${handlerDeadlineMs}ms` : 'reported a timed-out step'}; ` +
+          'deferring it so the tick can return to new-PR discovery ' +
           `(elapsed=${handlerElapsedMs}ms position=${index + 1}/${ordered.length} ` +
           `phase_elapsed_at_start=${phaseElapsedAtStartMs}ms ` +
           `phase_elapsed_total=${phaseElapsedTotalMs}ms phase_budget=${effectiveBudgetMs}ms ` +
@@ -343,7 +349,7 @@ export async function runPostedReviewHandlersFairly({
     if (laneGate && typeof laneGate.record === 'function') {
       try {
         await laneGate.record(handler, {
-          timedOut: outcome.timedOut,
+          timedOut,
           error: outcome.error || null,
           value: outcome.value,
         });
@@ -354,7 +360,7 @@ export async function runPostedReviewHandlersFairly({
       }
     }
 
-    if (outcome.timedOut) {
+    if (timedOut) {
       const remainingAfterTimeout = ordered.length - index - 1;
       if (remainingAfterTimeout > 0) {
         for (let rest = index + 1; rest < ordered.length; rest += 1) {

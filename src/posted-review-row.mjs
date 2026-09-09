@@ -118,6 +118,31 @@ function isTerminalReviewRow(row) {
 // finishes. A handler that hangs now names the step it is still waiting on; a
 // slow step that eventually completes also records the monotonic elapsed time.
 const POSTED_REVIEW_STEP_LOG_THRESHOLD_MS = 5000;
+export const POSTED_REVIEW_STEP_TIMEOUT_CODE = 'POSTED_REVIEW_STEP_TIMEOUT';
+export const DEFAULT_POSTED_REVIEW_STEP_TIMEOUT_MS = 55 * 1000;
+
+function parsePositiveMs(value, fallback) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : fallback;
+}
+
+export function resolvePostedReviewStepTimeoutMs(env = process.env) {
+  return parsePositiveMs(
+    env?.ADVERSARIAL_WATCHER_POSTED_REVIEW_STEP_TIMEOUT_MS,
+    DEFAULT_POSTED_REVIEW_STEP_TIMEOUT_MS,
+  );
+}
+
+export class PostedReviewStepTimeoutError extends Error {
+  constructor(label, key, timeoutMs) {
+    super(`posted-review step ${label} for ${key} exceeded ${timeoutMs}ms`);
+    this.name = 'PostedReviewStepTimeoutError';
+    this.code = POSTED_REVIEW_STEP_TIMEOUT_CODE;
+    this.stepLabel = label;
+    this.stepKey = key;
+    this.timeoutMs = timeoutMs;
+  }
+}
 
 export async function timePostedReviewStep(
   label,
@@ -125,21 +150,45 @@ export async function timePostedReviewStep(
   logger,
   fn,
   thresholdMs = POSTED_REVIEW_STEP_LOG_THRESHOLD_MS,
+  {
+    timeoutMs = null,
+    setTimeoutFn = setTimeout,
+    clearTimeoutFn = clearTimeout,
+  } = {},
 ) {
   const startedMs = performance.now();
   let warned = false;
-  const timer = setTimeout(() => {
+  let timedOut = false;
+  const timer = setTimeoutFn(() => {
     warned = true;
     logger?.warn?.(
       `[watcher] posted-review step still running for ${key}: ${label} exceeded ${thresholdMs}ms`,
     );
   }, thresholdMs);
   timer.unref?.();
+  const effectiveTimeoutMs = Number(timeoutMs);
+  let timeoutTimer = null;
+  const work = Promise.resolve().then(() => fn());
+  const deadline = Number.isFinite(effectiveTimeoutMs) && effectiveTimeoutMs > 0
+    ? new Promise((_, reject) => {
+        timeoutTimer = setTimeoutFn(() => {
+          timedOut = true;
+          const error = new PostedReviewStepTimeoutError(label, key, effectiveTimeoutMs);
+          logger?.error?.(
+            `[watcher] posted-review step timeout for ${key}: ` +
+              `${label} exceeded ${effectiveTimeoutMs}ms; deferring this row`,
+          );
+          reject(error);
+        }, effectiveTimeoutMs);
+        timeoutTimer.unref?.();
+      })
+    : null;
   try {
-    return await fn();
+    return deadline ? await Promise.race([work, deadline]) : await work;
   } finally {
-    clearTimeout(timer);
-    if (warned) {
+    clearTimeoutFn(timer);
+    if (timeoutTimer !== null) clearTimeoutFn(timeoutTimer);
+    if (warned && !timedOut) {
       const elapsedMs = Math.round(performance.now() - startedMs);
       logger?.warn?.(
         `[watcher] posted-review step completed for ${key}: ${label} took ${elapsedMs}ms`,
@@ -169,13 +218,19 @@ export async function handlePostedReviewRow({
   domainId = null, // ARC-18: WATCHER_PRIMARY_DOMAIN_ID stays in watcher; threaded by callers (pollOnce passes domainId). Default is never read (only used when operatorSurface is set, and every such caller passes domainId).
   logGate = postedReviewRowLogGate,
   logger = console,
+  postedReviewStepTimeoutMs = resolvePostedReviewStepTimeoutMs(),
 } = {}) {
   const stepKey = `${repoPath}#${prNumber}`;
-  const gateProjection = await timePostedReviewStep(
-    'projectGateStatusSafe', stepKey, logger, () => projectGateStatusSafe(existing),
-  );
-
+  let gateProjection = null;
   try {
+    gateProjection = await timePostedReviewStep(
+      'projectGateStatusSafe',
+      stepKey,
+      logger,
+      () => projectGateStatusSafe(existing),
+      POSTED_REVIEW_STEP_LOG_THRESHOLD_MS,
+      { timeoutMs: postedReviewStepTimeoutMs },
+    );
     const latestPostedReviewBody = latestPostedReviewBodyFinder(rootDir, { repo: repoPath, prNumber });
     const latestFollowUp = latestFollowUpJobFinder(rootDir, { repo: repoPath, prNumber });
     const reviewBodiesToCheck = [
@@ -234,6 +289,8 @@ export async function handlePostedReviewRow({
           operatorApprovalEvent,
           mergeAgentRequestEvent,
         }),
+      POSTED_REVIEW_STEP_LOG_THRESHOLD_MS,
+      { timeoutMs: postedReviewStepTimeoutMs },
     );
     const dispatchJob = buildMergeAgentDispatchJobImpl(rootDir, candidate, { reviewStateDb: db });
 
@@ -258,6 +315,8 @@ export async function handlePostedReviewRow({
           domainId,
           logger,
         }),
+      POSTED_REVIEW_STEP_LOG_THRESHOLD_MS,
+      { timeoutMs: postedReviewStepTimeoutMs },
     );
     if (coexistenceDecision.outcome === 'pr-terminal') {
       // BUG-1: the live candidate read shows the PR already merged. No
@@ -432,6 +491,9 @@ export async function handlePostedReviewRow({
       );
     }
   } catch (err) {
+    if (err?.code === POSTED_REVIEW_STEP_TIMEOUT_CODE) {
+      throw err;
+    }
     // The augmented error from `dispatchMergeAgentForPR` already
     // inlines stderr+stdout into `err.message`, so just dumping
     // `err.message` here surfaces the full diagnostic chain (rather

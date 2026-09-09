@@ -699,6 +699,34 @@ test('runPostedReviewHandlersFairly bounds a single never-settling handler', asy
   assert.deepEqual(ran, [], 'the handler behind the wedged one is rotated to the next tick');
 });
 
+test('runPostedReviewHandlersFairly treats typed step timeouts as handler timeouts', async () => {
+  const ran = [];
+  const summary = await runPostedReviewHandlersFairly({
+    handlers: [
+      {
+        repoPath: REPO,
+        prNumber: 1,
+        headSha: HEAD_A,
+        run: async () => {
+          const err = new Error('posted-review step resolveMergeAgentCoexistence timed out');
+          err.code = 'POSTED_REVIEW_STEP_TIMEOUT';
+          throw err;
+        },
+      },
+      { repoPath: REPO, prNumber: 2, headSha: HEAD_A, run: async () => { ran.push(2); } },
+    ],
+    handlerTimeoutMs: 1_000,
+    logger: silentLogger,
+  });
+
+  assert.equal(summary.timedOut, 1);
+  assert.equal(summary.failed, 0);
+  assert.equal(summary.ran, 0);
+  assert.equal(summary.deferredAfterTimeout, 1);
+  assert.deepEqual(summary.deferred, [`${REPO}#2`]);
+  assert.deepEqual(ran, [], 'the handler behind the timed-out step is rotated to the next tick');
+});
+
 test('runPostedReviewHandlersFairly isolates a throwing handler', async () => {
   const ran = [];
   const summary = await runPostedReviewHandlersFairly({

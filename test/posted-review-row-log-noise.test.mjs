@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { handlePostedReviewRow, timePostedReviewStep } from '../src/posted-review-row.mjs';
+import {
+  handlePostedReviewRow,
+  POSTED_REVIEW_STEP_TIMEOUT_CODE,
+  timePostedReviewStep,
+} from '../src/posted-review-row.mjs';
 import { createLogChangeGate } from '../src/log-change-gate.mjs';
 
 // Drive handlePostedReviewRow straight to the AMA `ama-pending` retained-ownership
@@ -85,6 +89,47 @@ test('timePostedReviewStep: does not warn for fast completed steps', async () =>
 
   assert.equal(result, 'ok');
   assert.deepEqual(warnings, []);
+});
+
+test('timePostedReviewStep: raises a typed timeout for a wedged step', async () => {
+  const errors = [];
+
+  await assert.rejects(
+    () => timePostedReviewStep(
+      'resolve coexistence',
+      'laceyenterprises/agent-os#4242',
+      { error: (m) => errors.push(String(m)), warn() {} },
+      async () => new Promise(() => {}),
+      50,
+      { timeoutMs: 10 },
+    ),
+    (err) => {
+      assert.equal(err.code, POSTED_REVIEW_STEP_TIMEOUT_CODE);
+      assert.equal(err.stepLabel, 'resolve coexistence');
+      assert.equal(err.stepKey, 'laceyenterprises/agent-os#4242');
+      assert.equal(err.timeoutMs, 10);
+      return true;
+    },
+  );
+
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /posted-review step timeout/);
+});
+
+test('handlePostedReviewRow: rethrows typed coexistence timeout for fairness demotion', async () => {
+  const { args } = baseArgs({
+    postedReviewStepTimeoutMs: 10,
+    resolveMergeAgentCoexistenceForWatcherImpl: async () => new Promise(() => {}),
+  });
+
+  await assert.rejects(
+    () => handlePostedReviewRow(args),
+    (err) => {
+      assert.equal(err.code, POSTED_REVIEW_STEP_TIMEOUT_CODE);
+      assert.equal(err.stepLabel, 'resolveMergeAgentCoexistence');
+      return true;
+    },
+  );
 });
 
 test('handlePostedReviewRow: retained-ownership logs once and is suppressed on unchanged repeats', async () => {

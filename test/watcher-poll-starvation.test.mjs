@@ -409,7 +409,9 @@ test('RVHAND-05: posted-review phase defers before starting when remaining budge
 
 test('RVHAND-04: resolveMergeAgentCoexistence soft deadline does not consume the remaining phase budget', async () => {
   const oldDeadline = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
+  const oldP95 = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS;
   process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = '10';
+  process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS = '5';
   const state = createPostedReviewFairnessState();
   const events = [];
   let firstStepAborted = false;
@@ -478,7 +480,41 @@ test('RVHAND-04: resolveMergeAgentCoexistence soft deadline does not consume the
     } else {
       process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = oldDeadline;
     }
+    if (oldP95 === undefined) {
+      delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS;
+    } else {
+      process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS = oldP95;
+    }
   }
+});
+
+test('RVHAND-07: posted-review phase warns when handlers run but no daemon clean-merge lands', async () => {
+  const warnings = [];
+
+  const summary = await runPostedReviewHandlersFairly({
+    handlers: [
+      {
+        repoPath: REPO,
+        prNumber: 6527,
+        run: async () => ({
+          handled: true,
+          outcome: 'ama-pending',
+          amaClosureResult: { reason: 'daemon-failed-closed' },
+        }),
+      },
+    ],
+    state: createPostedReviewFairnessState(),
+    logger: {
+      log() {},
+      warn: (...args) => warnings.push(args.join(' ')),
+      error() {},
+    },
+  });
+
+  assert.equal(summary.ran, 1);
+  assert.equal(summary.daemonCleanMerged, 0);
+  assert.match(warnings.join('\n'), /posted-review handlers completed with no daemon clean-merge/);
+  assert.match(warnings.join('\n'), /ran=1 daemon_clean_merged=0/);
 });
 
 test('RVHAND-02: timeout log reports phase elapsed at handler start', async () => {

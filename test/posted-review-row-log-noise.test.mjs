@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS,
+  deriveResolveMergeAgentCoexistenceDeadlineMs,
   PostedReviewStepDeadlineError,
   handlePostedReviewRow,
   resolveMergeAgentCoexistenceStepDeadlineMs,
@@ -9,7 +11,6 @@ import {
 } from '../src/posted-review-row.mjs';
 import { createLogChangeGate } from '../src/log-change-gate.mjs';
 import {
-  DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT,
   derivePostedReviewExpensiveStepBudgetMs,
   resolvePostedReviewHandlerHeadroomMs,
   resolvePostedReviewHandlerTimeoutMs,
@@ -57,30 +58,48 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 test('RVHAND-06: bounded posted-review step budgets fit under the handler cap', () => {
   const env = {
     ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS: '330000',
-    ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS: '300000',
-    ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS: '60000',
+    ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS: '120000',
   };
 
   const phaseBudgetMs = resolvePostedReviewPhaseBudgetMs(env);
   const handlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs(env);
-  const headroomMs = resolvePostedReviewHandlerHeadroomMs(env);
+  const handlerHeadroomMs = resolvePostedReviewHandlerHeadroomMs(env);
   const deadlineMs = resolveMergeAgentCoexistenceStepDeadlineMs(env);
-  const derivedDeadlineMs = derivePostedReviewExpensiveStepBudgetMs(handlerTimeoutMs, { headroomMs });
-  const boundedStepBudgetTotalMs = derivedDeadlineMs * DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT;
+  const stepBudgetMs = derivePostedReviewExpensiveStepBudgetMs(handlerTimeoutMs, {
+    headroomMs: handlerHeadroomMs,
+  });
+  const derivedDeadlineMs = deriveResolveMergeAgentCoexistenceDeadlineMs({
+    expectedP95Ms: 120_000,
+    maxDeadlineMs: stepBudgetMs,
+  });
 
   assert.equal(phaseBudgetMs, 330_000);
-  assert.equal(handlerTimeoutMs, 60_000);
-  assert.equal(deadlineMs, 27_500);
+  assert.equal(handlerTimeoutMs, 180_000);
+  assert.equal(stepBudgetMs, 87_500);
+  assert.equal(deadlineMs, derivedDeadlineMs);
+  assert.equal(deadlineMs, stepBudgetMs);
   assert.ok(deadlineMs < phaseBudgetMs);
   assert.ok(
-    boundedStepBudgetTotalMs + headroomMs <= handlerTimeoutMs,
-    `step budgets (${boundedStepBudgetTotalMs}ms) + headroom (${headroomMs}ms) ` +
-      `must fit under handler cap (${handlerTimeoutMs}ms)`,
+    deadlineMs < DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS,
+    'the per-step cap keeps two sequential expensive steps inside the handler watchdog',
+  );
+});
+
+test('RVHAND-07: operator deadline override can lower the coexistence deadline', () => {
+  const env = {
+    ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS: '10000',
+    ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS: '120000',
+  };
+
+  assert.equal(resolveMergeAgentCoexistenceStepDeadlineMs(env), 10_000);
+  assert.equal(
+    resolveMergeAgentCoexistenceStepDeadlineMs(env, { retryFloorMs: 20_000 }),
+    20_000,
   );
 });
 
 test('RVHAND-07: reviewer-pressure posted-review phase budget has a bounded default and override', () => {
-  assert.equal(resolvePostedReviewReviewerPressurePhaseBudgetMs({}), 120_000);
+  assert.equal(resolvePostedReviewReviewerPressurePhaseBudgetMs({}), 180_000);
   assert.equal(
     resolvePostedReviewReviewerPressurePhaseBudgetMs({
       ADVERSARIAL_WATCHER_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS: '90000',
@@ -238,7 +257,9 @@ test('timePostedReviewStep: soft-deadlined background failure is logged as an er
 
 test('handlePostedReviewRow: resolveMergeAgentCoexistence deadline is a soft handled outcome', async () => {
   const oldDeadline = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
+  const oldP95 = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS;
   process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = '10';
+  process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS = '5';
   const errors = [];
   let sawAbort = false;
   const { args } = baseArgs({
@@ -260,13 +281,16 @@ test('handlePostedReviewRow: resolveMergeAgentCoexistence deadline is a soft han
 
     assert.equal(sawAbort, false);
     assert.equal(result.handled, true);
-    assert.equal(result.outcome, 'coexistence-deadline');
+    assert.equal(result.outcome, 'coexistence-deadline-retry');
     assert.equal(
       result.amaClosureResult.reason,
       'resolve-merge-agent-coexistence-deadline-exceeded',
     );
+    assert.equal(result.amaClosureResult.retryable, true);
+    assert.ok(result.amaClosureResult.retryDeadlineMs > result.amaClosureResult.deadlineMs);
     assert.match(errors.join('\n'), /reason=resolve-merge-agent-coexistence-deadline-exceeded/);
     assert.match(errors.join('\n'), /Leaving any in-flight HAM launch to settle/);
+    assert.match(errors.join('\n'), /retry_deadline_ms=/);
   } finally {
     if (oldDeadline === undefined) {
       delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
@@ -328,12 +352,19 @@ test('handlePostedReviewRow: HAM coexistence deadline does not abort in-flight l
     } else {
       process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = oldDeadline;
     }
+    if (oldP95 === undefined) {
+      delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS;
+    } else {
+      process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS = oldP95;
+    }
   }
 });
 
 test('handlePostedReviewRow: fetchMergeAgentCandidate deadline returns a named handled outcome', async () => {
   const oldDeadline = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
+  const oldP95 = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS;
   process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = '10';
+  process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS = '5';
   const errors = [];
   let sawAbort = false;
   const { args } = baseArgs({
@@ -368,6 +399,11 @@ test('handlePostedReviewRow: fetchMergeAgentCandidate deadline returns a named h
       delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
     } else {
       process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = oldDeadline;
+    }
+    if (oldP95 === undefined) {
+      delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS;
+    } else {
+      process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS = oldP95;
     }
   }
 });

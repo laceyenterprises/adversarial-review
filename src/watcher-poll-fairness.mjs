@@ -59,9 +59,10 @@
 // derived from `pollIntervalMs` because this module sits below config — override
 // with ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS if you retune the poll.
 export const DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS = 10 * 60 * 1000;
-export const DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS = 2 * 60 * 1000;
+export const DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS = 3 * 60 * 1000;
 export const DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT = 2;
 export const DEFAULT_POSTED_REVIEW_HANDLER_HEADROOM_MS = 5 * 1000;
+export const DEFAULT_POSTED_REVIEW_NO_CLEAN_MERGE_WARNING_TICKS = 1;
 
 // Per-handler deadline. The phase budget alone cannot save a tick, because it is
 // only checked BETWEEN handlers: one handler that never settles (an `hq` dispatch
@@ -77,11 +78,11 @@ export const DEFAULT_POSTED_REVIEW_HANDLER_HEADROOM_MS = 5 * 1000;
 // returns to discovery — is exactly the outage being fixed.
 //
 // A timed-out handler is also a phase-level stop. Continuing through a backlog of
-// slow hammer/merge handlers just serializes one abandoned 60s dispatch after
+// slow hammer/merge handlers just serializes one abandoned dispatch after
 // another, which recreates poll starvation while the first abandoned promise is
 // still alive. Defer the tail to the next tick instead; the fairness state
 // promotes it, and the no-progress lane slows repeatedly unproductive PRs.
-export const DEFAULT_POSTED_REVIEW_HANDLER_TIMEOUT_MS = 60 * 1000;
+export const DEFAULT_POSTED_REVIEW_HANDLER_TIMEOUT_MS = 3 * 60 * 1000;
 
 function parsePositiveMs(value, fallback) {
   const numeric = Number(value);
@@ -189,7 +190,7 @@ export function postedReviewHandlerKey(handler) {
  * than being cut off again in the same position.
  */
 export function createPostedReviewFairnessState() {
-  return { deferredKeys: new Set() };
+  return { deferredKeys: new Set(), noCleanMergeCompletionTicks: 0 };
 }
 
 function orderDeferredFirst(handlers, state) {
@@ -269,6 +270,7 @@ export async function runPostedReviewHandlersFairly({
     deferredByBudget: 0,
     deferredAfterTimeout: 0,
     continuedAfterTimeout: 0,
+    daemonCleanMerged: 0,
     deferred: [],
   };
   if (handlers.length === 0) {
@@ -389,6 +391,13 @@ export async function runPostedReviewHandlersFairly({
       );
     } else {
       summary.ran += 1;
+      const amaClosureResult = outcome.value?.amaClosureResult || null;
+      const daemonDisposition = String(
+        amaClosureResult?.daemonCleanMerge?.disposition || amaClosureResult?.reason || '',
+      ).toLowerCase();
+      if (daemonDisposition === 'merged' || daemonDisposition === 'daemon-merged') {
+        summary.daemonCleanMerged += 1;
+      }
     }
 
     if (laneGate && typeof laneGate.record === 'function') {
@@ -424,6 +433,21 @@ export async function runPostedReviewHandlersFairly({
 
   state.deferredKeys = nextDeferred;
   summary.deferred = [...nextDeferred];
+  const noCleanMergeWarningTicks = DEFAULT_POSTED_REVIEW_NO_CLEAN_MERGE_WARNING_TICKS;
+  if (summary.ran > 0 && summary.daemonCleanMerged === 0) {
+    state.noCleanMergeCompletionTicks = (state.noCleanMergeCompletionTicks || 0) + 1;
+    if (state.noCleanMergeCompletionTicks >= noCleanMergeWarningTicks) {
+      logger?.warn?.(
+        `[watcher] posted-review handlers completed with no daemon clean-merge: ` +
+          `queued=${summary.queued} ran=${summary.ran} daemon_clean_merged=0 ` +
+          `window_ticks=${state.noCleanMergeCompletionTicks}. ` +
+          `This is not healthy solely because ran>0; inspect coexistence deadlines, ` +
+          `daemon merge parks, and CLEAN reviewed PRs that remain unmerged.`,
+      );
+    }
+  } else if (summary.daemonCleanMerged > 0) {
+    state.noCleanMergeCompletionTicks = 0;
+  }
   if (summary.queued > 0 && summary.ran === 0) {
     logger?.warn?.(
       `[watcher] posted-review phase made zero progress: queued=${summary.queued} ` +

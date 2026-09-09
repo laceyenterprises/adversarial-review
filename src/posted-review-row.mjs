@@ -121,6 +121,11 @@ function isTerminalReviewRow(row) {
 // finishes. A handler that hangs now names the step it is still waiting on; a
 // slow step that eventually completes also records the monotonic elapsed time.
 const POSTED_REVIEW_STEP_LOG_THRESHOLD_MS = 5000;
+export const DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS = 120 * 1000;
+export const DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_TAIL_MARGIN_RATIO = 0.25;
+export const DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_MAX_DEADLINE_MS = 5 * 60 * 1000;
+
+const coexistenceDeadlineRetryFloorByKey = new Map();
 
 export class PostedReviewStepDeadlineError extends Error {
   constructor(label, key, deadlineMs) {
@@ -138,19 +143,89 @@ function parsePositiveMs(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function parseNonNegativeRatio(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+export function deriveResolveMergeAgentCoexistenceDeadlineMs({
+  expectedP95Ms = DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS,
+  tailMarginRatio = DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_TAIL_MARGIN_RATIO,
+  maxDeadlineMs = DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_MAX_DEADLINE_MS,
+} = {}) {
+  const p95Ms = parsePositiveMs(
+    expectedP95Ms,
+    DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS,
+  );
+  const marginRatio = parseNonNegativeRatio(
+    tailMarginRatio,
+    DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_TAIL_MARGIN_RATIO,
+  );
+  const capMs = parsePositiveMs(maxDeadlineMs, DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_MAX_DEADLINE_MS);
+  const aboveTailMs = Math.ceil(p95Ms * (1 + marginRatio));
+  return Math.min(Math.max(p95Ms + 1, aboveTailMs), capMs);
+}
+
 export function resolveMergeAgentCoexistenceStepDeadlineMs(
   env = process.env,
   {
+    retryFloorMs = null,
     handlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs(env),
-    headroomMs = resolvePostedReviewHandlerHeadroomMs(env),
+    handlerHeadroomMs = resolvePostedReviewHandlerHeadroomMs(env),
   } = {},
 ) {
-  const derivedDeadlineMs = derivePostedReviewExpensiveStepBudgetMs(handlerTimeoutMs, { headroomMs });
-  const overrideDeadlineMs = parsePositiveMs(
-    env?.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS,
-    derivedDeadlineMs,
+  const expectedP95Ms = parsePositiveMs(
+    env?.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS,
+    DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_EXPECTED_P95_MS,
   );
-  return Math.min(overrideDeadlineMs, derivedDeadlineMs);
+  const configuredMaxDeadlineMs = parsePositiveMs(
+    env?.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_MAX_DEADLINE_MS,
+    DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_MAX_DEADLINE_MS,
+  );
+  const handlerBoundedMaxDeadlineMs = derivePostedReviewExpensiveStepBudgetMs(
+    handlerTimeoutMs,
+    { headroomMs: handlerHeadroomMs },
+  );
+  const effectiveMaxDeadlineMs = Math.min(configuredMaxDeadlineMs, handlerBoundedMaxDeadlineMs);
+  const derivedDeadlineMs = deriveResolveMergeAgentCoexistenceDeadlineMs({
+    expectedP95Ms,
+    tailMarginRatio: parseNonNegativeRatio(
+      env?.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_TAIL_MARGIN_RATIO,
+      DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_TAIL_MARGIN_RATIO,
+    ),
+    maxDeadlineMs: effectiveMaxDeadlineMs,
+  );
+  const hasOverrideDeadline = env?.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS != null;
+  const baseDeadlineMs = hasOverrideDeadline
+    ? parsePositiveMs(
+      env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS,
+      derivedDeadlineMs,
+    )
+    : derivedDeadlineMs;
+  const retryDeadlineMs = parsePositiveMs(retryFloorMs, 0);
+  return Math.min(Math.max(baseDeadlineMs, retryDeadlineMs), effectiveMaxDeadlineMs);
+}
+
+function retryFloorMapKey(label, key) {
+  return `${label}:${key}`;
+}
+
+function retryFloorForStep(label, key) {
+  return coexistenceDeadlineRetryFloorByKey.get(retryFloorMapKey(label, key)) || null;
+}
+
+function clearRetryFloorForStep(label, key) {
+  coexistenceDeadlineRetryFloorByKey.delete(retryFloorMapKey(label, key));
+}
+
+function markLongerCoexistenceRetry(label, key, deadlineMs, env = process.env) {
+  const maxDeadlineMs = parsePositiveMs(
+    env?.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_MAX_DEADLINE_MS,
+    DEFAULT_RESOLVE_MERGE_AGENT_COEXISTENCE_MAX_DEADLINE_MS,
+  );
+  const nextDeadlineMs = Math.min(maxDeadlineMs, Math.max(deadlineMs + 1, Math.ceil(deadlineMs * 2)));
+  coexistenceDeadlineRetryFloorByKey.set(retryFloorMapKey(label, key), nextDeadlineMs);
+  return nextDeadlineMs;
 }
 
 export async function timePostedReviewStep(
@@ -349,11 +424,15 @@ export async function handlePostedReviewRow({
     // clean PRs are handled by the daemon, and dirty/conflicted/red-CI PRs are
     // handled by one hammer under the launch lease. A separate merge-clicking
     // agent is no longer a valid outcome.
-    const coexistenceDeadlineMs = resolveMergeAgentCoexistenceStepDeadlineMs();
+    const coexistenceLabel = 'resolveMergeAgentCoexistence';
+    const coexistenceDeadlineMs = resolveMergeAgentCoexistenceStepDeadlineMs(
+      process.env,
+      { retryFloorMs: retryFloorForStep(coexistenceLabel, stepKey) },
+    );
     let coexistenceDecision;
     try {
       coexistenceDecision = await timePostedReviewStep(
-        'resolveMergeAgentCoexistence', stepKey, logger, ({ signal }) =>
+        coexistenceLabel, stepKey, logger, ({ signal }) =>
           resolveMergeAgentCoexistenceForWatcherImpl({
             rootDir,
             reviewStateRow: existing,
@@ -376,15 +455,17 @@ export async function handlePostedReviewRow({
     } catch (err) {
       if (err?.code !== 'POSTED_REVIEW_STEP_DEADLINE_EXCEEDED') throw err;
       const reason = 'resolve-merge-agent-coexistence-deadline-exceeded';
+      const nextDeadlineMs = markLongerCoexistenceRetry(coexistenceLabel, stepKey, coexistenceDeadlineMs);
       logger?.error?.(
         `[watcher] AMA/merge-agent coexistence deadline exceeded for ${repoPath}#${prNumber}; ` +
-          `reason=${reason} deadline_ms=${coexistenceDeadlineMs}. ` +
+          `reason=${reason} deadline_ms=${coexistenceDeadlineMs} ` +
+          `retry_deadline_ms=${nextDeadlineMs}. ` +
           'Leaving any in-flight HAM launch to settle under its own lease and dispatch timeout; ' +
-          'skipping merge action for this PR on this tick so the posted-review phase can continue.',
+          'marking the PR for a longer-budget retry.',
       );
       return {
         handled: true,
-        outcome: 'coexistence-deadline',
+        outcome: 'coexistence-deadline-retry',
         gateDecision: gateProjection?.decision || null,
         amaClosureResult: {
           dispatched: false,
@@ -392,9 +473,12 @@ export async function handlePostedReviewRow({
           reason,
           namedReason: reason,
           deadlineMs: coexistenceDeadlineMs,
+          retryable: true,
+          retryDeadlineMs: nextDeadlineMs,
         },
       };
     }
+    clearRetryFloorForStep(coexistenceLabel, stepKey);
     if (coexistenceDecision.outcome === 'pr-terminal') {
       // BUG-1: the live candidate read shows the PR already merged. No
       // AMA/merge-agent action is possible — drop ownership instead of retaining

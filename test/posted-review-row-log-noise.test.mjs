@@ -10,6 +10,7 @@ import {
 import { createLogChangeGate } from '../src/log-change-gate.mjs';
 import {
   DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT,
+  DEFAULT_POSTED_REVIEW_PHASE_HANDLER_CAPACITY,
   derivePostedReviewExpensiveStepBudgetMs,
   resolvePostedReviewHandlerHeadroomMs,
   resolvePostedReviewHandlerTimeoutMs,
@@ -80,10 +81,12 @@ test('RVHAND-06: bounded posted-review step budgets fit under the handler cap', 
 
 test('RVHAND-10: posted-review HAM step budget admits observed live tails without exceeding the handler cap', () => {
   const handlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs({});
+  const phaseBudgetMs = resolvePostedReviewPhaseBudgetMs({});
   const headroomMs = resolvePostedReviewHandlerHeadroomMs({});
   const deadlineMs = resolveMergeAgentCoexistenceStepDeadlineMs({});
 
   assert.equal(handlerTimeoutMs, 180_000);
+  assert.equal(phaseBudgetMs, handlerTimeoutMs * DEFAULT_POSTED_REVIEW_PHASE_HANDLER_CAPACITY);
   assert.equal(deadlineMs, 87_500);
   assert.ok(deadlineMs > 80_000, 'live HAM candidate/coexistence tails have exceeded 75s under load');
   assert.ok(

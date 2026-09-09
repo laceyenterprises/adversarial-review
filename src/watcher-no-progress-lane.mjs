@@ -71,6 +71,7 @@ export const DEFAULT_OPERATOR_BLOCKED_ALERT_NO_PROGRESS_TICKS = 6;
 
 const NO_PROGRESS_LANE_SCHEMA_VERSION = 1;
 const STALLED_EVENT_SCHEMA_VERSION = 1;
+const STARVED_SLOW_LANE_PROMOTION_ID = 'rvhand-10-starved-slow-lane-recovery';
 
 export const LANE_ACTIVE = 'active';
 export const LANE_SLOW = 'slow';
@@ -284,6 +285,95 @@ function writeLedger(rootDir, identity, doc) {
   mkdirSync(noProgressLaneDir(rootDir), { recursive: true });
   writeFileAtomic(noProgressLaneFilePath(rootDir, identity), `${JSON.stringify(doc, null, 2)}\n`);
   return doc;
+}
+
+function starvedPromotionMarkerPath(rootDir, promotionId = STARVED_SLOW_LANE_PROMOTION_ID) {
+  return join(noProgressLaneDir(rootDir), `${sanitizePathSegment(promotionId)}.promotion.json`);
+}
+
+export function promoteStarvedNoProgressLaneLedgers(rootDir, {
+  promotionId = STARVED_SLOW_LANE_PROMOTION_ID,
+  now = new Date().toISOString(),
+  logger = console,
+} = {}) {
+  const markerPath = starvedPromotionMarkerPath(rootDir, promotionId);
+  if (existsSync(markerPath)) {
+    return { attempted: false, promoted: 0, reason: 'already-promoted' };
+  }
+
+  const dir = noProgressLaneDir(rootDir);
+  let entries = [];
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch (err) {
+    if (err?.code === 'ENOENT') {
+      mkdirSync(dir, { recursive: true });
+      writeFileAtomic(markerPath, `${JSON.stringify({
+        schemaVersion: 1,
+        promotionId,
+        promoted: 0,
+        promotedAt: now,
+        reason: 'no-ledgers',
+      }, null, 2)}\n`);
+      return { attempted: true, promoted: 0, reason: 'no-ledgers' };
+    }
+    logger?.warn?.(
+      `[watcher] no-progress lane: failed to list ledgers for starvation recovery ` +
+        `(${err?.code || err?.message || 'unknown'})`,
+    );
+    return { attempted: false, promoted: 0, reason: 'list-failed' };
+  }
+
+  let promoted = 0;
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.json') || entry.name.endsWith('.promotion.json')) {
+      continue;
+    }
+    const filePath = join(dir, entry.name);
+    let doc = null;
+    try {
+      doc = JSON.parse(readFileSync(filePath, 'utf8'));
+    } catch (err) {
+      logger?.warn?.(
+        `[watcher] no-progress lane: failed to read ledger during starvation recovery ` +
+          `${filePath} (${err?.message || err})`,
+      );
+      continue;
+    }
+    if (doc?.lane !== LANE_SLOW) continue;
+    promoted += 1;
+    writeFileAtomic(filePath, `${JSON.stringify({
+      ...doc,
+      schemaVersion: NO_PROGRESS_LANE_SCHEMA_VERSION,
+      lane: LANE_ACTIVE,
+      noProgressTicks: 0,
+      skippedTicks: 0,
+      firstNoProgressAt: null,
+      promotedFrom: {
+        lane: doc.lane,
+        noProgressTicks: normalizeCount(doc.noProgressTicks),
+        skippedTicks: normalizeCount(doc.skippedTicks),
+        promotionId,
+        promotedAt: now,
+      },
+      updatedAt: now,
+    }, null, 2)}\n`);
+  }
+
+  writeFileAtomic(markerPath, `${JSON.stringify({
+    schemaVersion: 1,
+    promotionId,
+    promoted,
+    promotedAt: now,
+    reason: 'scheduler-starvation-recovery',
+  }, null, 2)}\n`);
+  if (promoted > 0) {
+    logger?.warn?.(
+      `[watcher] no-progress lane: promoted ${promoted} slow-lane ledger(s) for ` +
+        `scheduler starvation recovery (${promotionId})`,
+    );
+  }
+  return { attempted: true, promoted, reason: 'scheduler-starvation-recovery' };
 }
 
 /**

@@ -60,6 +60,7 @@
 // with ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS if you retune the poll.
 export const DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS = 10 * 60 * 1000;
 export const DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS = 3 * 60 * 1000;
+export const DEFAULT_POSTED_REVIEW_PHASE_HANDLER_CAPACITY = 8;
 export const DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT = 2;
 export const DEFAULT_POSTED_REVIEW_HANDLER_HEADROOM_MS = 5 * 1000;
 
@@ -89,10 +90,13 @@ function parsePositiveMs(value, fallback) {
 }
 
 export function resolvePostedReviewPhaseBudgetMs(env = process.env) {
-  return parsePositiveMs(
-    env?.ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS,
-    DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS,
-  );
+  const configured = env?.ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS;
+  if (configured !== undefined && configured !== null && configured !== '') {
+    return parsePositiveMs(configured, DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS);
+  }
+  const handlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs(env);
+  const capacityBudgetMs = handlerTimeoutMs * DEFAULT_POSTED_REVIEW_PHASE_HANDLER_CAPACITY;
+  return Math.max(DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS, capacityBudgetMs);
 }
 
 export function resolvePostedReviewReviewerPressurePhaseBudgetMs(env = process.env) {
@@ -100,6 +104,11 @@ export function resolvePostedReviewReviewerPressurePhaseBudgetMs(env = process.e
     env?.ADVERSARIAL_WATCHER_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS,
     DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS,
   );
+}
+
+function isDaemonCleanMergeMerged(value) {
+  return value?.daemonCleanMerge?.merged === true
+    || value?.daemonCleanMerge?.disposition === 'merged';
 }
 
 export function resolvePostedReviewHandlerTimeoutMs(env = process.env) {
@@ -269,6 +278,7 @@ export async function runPostedReviewHandlersFairly({
     deferredByBudget: 0,
     deferredAfterTimeout: 0,
     continuedAfterTimeout: 0,
+    daemonCleanMerges: 0,
     deferred: [],
   };
   if (handlers.length === 0) {
@@ -389,6 +399,9 @@ export async function runPostedReviewHandlersFairly({
       );
     } else {
       summary.ran += 1;
+      if (isDaemonCleanMergeMerged(outcome.value)) {
+        summary.daemonCleanMerges += 1;
+      }
     }
 
     if (laneGate && typeof laneGate.record === 'function') {

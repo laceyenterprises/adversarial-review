@@ -51,6 +51,7 @@ import {
   markNoProgressStalledEventEmitted,
   maybeFireOperatorDecisionRequiredAlert,
   maybeMarkNoProgressStalledEvent,
+  promoteStarvedNoProgressLaneLedgers,
   readNoProgressLane,
   clearNoProgressLane,
   PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED,
@@ -828,7 +829,9 @@ export async function runQueuedReviewAdoptionPhase({
   // no-progress lane, which is what stops the same unadvanceable set from
   // re-consuming the budget on every tick. It now runs after lifecycle sync, so
   // stale terminal rows are cleaned before any per-PR hammer path can wait.
-  await runPostedReviewHandlersFairlyImpl({
+  promoteStarvedNoProgressLaneLedgers(rootDir, { logger });
+
+  const postedReviewSummary = await runPostedReviewHandlersFairlyImpl({
     handlers: postedReviewHandlers,
     state: postedReviewFairness,
     budgetMs: effectivePostedReviewPhaseBudgetMs,
@@ -837,6 +840,20 @@ export async function runQueuedReviewAdoptionPhase({
     laneGate: noProgressLaneGate,
     logger,
   });
+  if (
+    Number(postedReviewSummary?.ran || 0) > 0
+    && Number(postedReviewSummary?.daemonCleanMerges || 0) === 0
+  ) {
+    logger?.warn?.(
+      `[watcher] posted-review handlers completed with zero daemon clean-merges: ` +
+        `queued=${postedReviewSummary.queued ?? postedReviewHandlers.length} ` +
+        `ran=${postedReviewSummary.ran} failed=${postedReviewSummary.failed ?? 0} ` +
+        `timed_out=${postedReviewSummary.timedOut ?? 0} ` +
+        `slow_lane_deferred=${postedReviewSummary.skippedByLane ?? 0} ` +
+        `budget_deferred=${postedReviewSummary.deferredByBudget ?? 0} ` +
+        `timeout_deferred=${postedReviewSummary.deferredAfterTimeout ?? 0}`,
+    );
+  }
 
   // TREC-01: drains the Linear triage syncs owed by terminal transitions. This
   // is what lets syncPRLifecycle record a merge/close immediately instead of

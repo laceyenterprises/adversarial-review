@@ -35,6 +35,7 @@ import {
   maybeFireOperatorDecisionRequiredAlert,
   noProgressLaneFilePath,
   operatorDecisionAlertStateDir,
+  promoteStarvedNoProgressLaneLedgers,
   readNoProgressLane,
   recordNoProgressLaneRun,
   recordNoProgressLaneSkip,
@@ -873,6 +874,59 @@ test('runPostedReviewHandlersFairly defers the tail when the budget runs out and
   assert.deepEqual(second.deferred.sort(), [`${REPO}#1`, `${REPO}#2`]);
 });
 
+test('RVHAND-10: budget-deferred handlers do not record no-progress lane runs', async () => {
+  const state = createPostedReviewFairnessState();
+  let clock = 0;
+  const recorded = [];
+  const handlers = [1, 2, 3].map((prNumber) => ({
+    repoPath: REPO,
+    prNumber,
+    headSha: HEAD_A,
+    run: async () => {
+      clock += 60;
+    },
+  }));
+
+  const summary = await runPostedReviewHandlersFairly({
+    handlers,
+    state,
+    budgetMs: 100,
+    minimumHandlerStartBudgetMs: 1,
+    nowMs: () => clock,
+    laneGate: {
+      evaluate: () => ({ run: true }),
+      record: (handler) => recorded.push(handler.prNumber),
+    },
+    logger: silentLogger,
+  });
+
+  assert.equal(summary.deferredByBudget, 1);
+  assert.deepEqual(recorded, [1, 2], 'only handlers that actually ran can count toward no-progress');
+});
+
+test('RVHAND-10: timeout-deferred handlers do not record no-progress lane runs', async () => {
+  const recorded = [];
+  const summary = await runPostedReviewHandlersFairly({
+    handlers: [
+      { repoPath: REPO, prNumber: 1, headSha: HEAD_A, run: () => new Promise(() => {}) },
+      { repoPath: REPO, prNumber: 2, headSha: HEAD_A, run: async () => {} },
+      { repoPath: REPO, prNumber: 3, headSha: HEAD_A, run: async () => {} },
+    ],
+    budgetMs: 30,
+    handlerTimeoutMs: 25,
+    minimumHandlerStartBudgetMs: 10,
+    laneGate: {
+      evaluate: () => ({ run: true }),
+      record: (handler) => recorded.push(handler.prNumber),
+    },
+    logger: silentLogger,
+  });
+
+  assert.equal(summary.timedOut, 1);
+  assert.equal(summary.deferredAfterTimeout, 2);
+  assert.deepEqual(recorded, [1], 'tail handlers deferred after a timeout were never examined');
+});
+
 test('runPostedReviewHandlersFairly preserves deferred order across more than two budgeted ticks', async () => {
   const state = createPostedReviewFairnessState();
   let clock = 0;
@@ -1137,6 +1191,42 @@ test('legacy no-progress ledgers without progressClass are due immediately for r
     assert.equal(decision.due, true);
     assert.equal(decision.lane, LANE_OPERATOR_BLOCKED);
     assert.equal(decision.reason, 'legacy-progress-class-missing');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('RVHAND-10: starvation recovery promotes existing slow-lane ledgers once', () => {
+  const rootDir = tempRoot();
+  try {
+    const identity = { repo: REPO, prNumber: 6527 };
+    for (let i = 0; i < DEFAULT_NO_PROGRESS_LANE_CAP + 2; i += 1) {
+      recordNoProgressLaneRun(rootDir, identity, {
+        headSha: HEAD_A,
+        fingerprint: 'starved-clean-pr',
+        now: `t${i}`,
+        logger: silentLogger,
+      });
+    }
+    assert.equal(readNoProgressLane(rootDir, identity, { logger: silentLogger }).lane, LANE_SLOW);
+
+    const first = promoteStarvedNoProgressLaneLedgers(rootDir, {
+      now: 'recover',
+      logger: silentLogger,
+    });
+    const recovered = readNoProgressLane(rootDir, identity, { logger: silentLogger });
+    assert.equal(first.promoted, 1);
+    assert.equal(recovered.lane, LANE_ACTIVE);
+    assert.equal(recovered.noProgressTicks, 0);
+    assert.equal(recovered.skippedTicks, 0);
+    assert.equal(recovered.promotedFrom.noProgressTicks > 0, true);
+
+    const second = promoteStarvedNoProgressLaneLedgers(rootDir, {
+      now: 'recover-again',
+      logger: silentLogger,
+    });
+    assert.equal(second.attempted, false);
+    assert.equal(second.reason, 'already-promoted');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

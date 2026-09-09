@@ -9,6 +9,7 @@ const DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX = 6;
 const MAX_FIRST_PASS_REVIEWER_POOL_MAX = 12;
 const DEFAULT_REVIEWER_MEMORY_SAMPLE_TTL_MS = 120_000;
 const DEFAULT_REVIEWER_DISPATCH_WAIT_WARN_MS = 15 * 60 * 1000;
+const DEFAULT_SINGLE_WAVE_SETTLE_GRACE_MS = 1000;
 const DEFAULT_REVIEWER_MEMORY_PRESSURE_CONFIG = Object.freeze({
   projectedHeadroomFloorMb: 1024,
   elevatedAvailableMb: 2048,
@@ -445,6 +446,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   geminiCredentialConcurrency = null,
   maxThrownFailures = 1,
   singleWave = false,
+  singleWaveSettleGraceMs = DEFAULT_SINGLE_WAVE_SETTLE_GRACE_MS,
   logger = console,
   now = () => Date.now(),
   waitWarnMs = DEFAULT_REVIEWER_DISPATCH_WAIT_WARN_MS,
@@ -535,6 +537,30 @@ async function runBoundedReviewerDispatchQueue(candidates, {
       // a new reviewer every time a slot frees can serialize an entire backlog
       // ahead of posted-review maintenance and hammer closeout.
       initialWaveClosed = true;
+      const settleGraceMs = Math.max(
+        0,
+        Number.parseInt(String(singleWaveSettleGraceMs), 10) || 0,
+      );
+      if (active.size > 0 && settleGraceMs > 0) {
+        let settleTimer = null;
+        try {
+          await Promise.race([
+            Promise.all([...active]),
+            new Promise((resolve) => {
+              settleTimer = setTimeout(resolve, settleGraceMs);
+            }),
+          ]);
+        } finally {
+          if (settleTimer) clearTimeout(settleTimer);
+        }
+      }
+      if (active.size > 0) {
+        logger?.log?.(
+          `[watcher] reviewer dispatch single-wave detached after launch wave: ` +
+            `active=${active.size} deferred=${pending.filter((item) => !item.started).length}`
+        );
+        break;
+      }
     }
     if (active.size > 0) {
       await Promise.race(active);
@@ -563,6 +589,7 @@ export {
   DEFAULT_REVIEWER_DISPATCH_WAIT_WARN_MS,
   MAX_FIRST_PASS_REVIEWER_POOL_MAX,
   DEFAULT_REVIEWER_MEMORY_SAMPLE_TTL_MS,
+  DEFAULT_SINGLE_WAVE_SETTLE_GRACE_MS,
   compareReviewerDispatchCandidates,
   createReviewerMemoryAdmissionSampler,
   logReviewerDispatchWait,

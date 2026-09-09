@@ -837,7 +837,7 @@ export async function runQueuedReviewAdoptionPhase({
   // stale terminal rows are cleaned before any per-PR hammer path can wait.
   promoteStarvedNoProgressLaneLedgers(rootDir, { logger });
 
-  const postedReviewSummary = await runPostedReviewHandlersFairlyImpl({
+  await runPostedReviewHandlersFairlyImpl({
     handlers: postedReviewHandlers,
     state: postedReviewFairness,
     budgetMs: effectivePostedReviewPhaseBudgetMs,
@@ -846,20 +846,6 @@ export async function runQueuedReviewAdoptionPhase({
     laneGate: noProgressLaneGate,
     logger,
   });
-  if (
-    Number(postedReviewSummary?.ran || 0) > 0
-    && Number(postedReviewSummary?.daemonCleanMerges || 0) === 0
-  ) {
-    logger?.warn?.(
-      `[watcher] posted-review handlers completed with zero daemon clean-merges: ` +
-        `queued=${postedReviewSummary.queued ?? postedReviewHandlers.length} ` +
-        `ran=${postedReviewSummary.ran} failed=${postedReviewSummary.failed ?? 0} ` +
-        `timed_out=${postedReviewSummary.timedOut ?? 0} ` +
-        `slow_lane_deferred=${postedReviewSummary.skippedByLane ?? 0} ` +
-        `budget_deferred=${postedReviewSummary.deferredByBudget ?? 0} ` +
-        `timeout_deferred=${postedReviewSummary.deferredAfterTimeout ?? 0}`,
-    );
-  }
 
   // TREC-01: drains the Linear triage syncs owed by terminal transitions. This
   // is what lets syncPRLifecycle record a merge/close immediately instead of

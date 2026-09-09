@@ -78,6 +78,7 @@ export const DEFAULT_AFH_GROUNDING_TTL_MS = 60_000;
 export const DEFAULT_AFH_STALE_IF_ERROR_MS = 10 * 60_000;
 export const AFH_LAST_RESORT_REVIEWER_MODEL = 'claude';
 export const CLAUDE_REVIEWER_RUNTIME_PROBE_TIMEOUT_MS = 2_000;
+export const CLAUDE_REVIEWER_RUNTIME_PROBE_RETRY_DELAYS_MS = Object.freeze([250, 750]);
 export const CLAUDE_REVIEWER_RUNTIME_GROUNDING_REASON = 'claude-launchctl-asuser-unavailable';
 const LAUNCHCTL = '/bin/launchctl';
 const TRUE_BIN = '/usr/bin/true';
@@ -126,6 +127,8 @@ export async function probeClaudeReviewerRuntime({
   platform = process.platform,
   uid = typeof process.getuid === 'function' ? process.getuid() : null,
   timeoutMs = CLAUDE_REVIEWER_RUNTIME_PROBE_TIMEOUT_MS,
+  retryDelaysMs = CLAUDE_REVIEWER_RUNTIME_PROBE_RETRY_DELAYS_MS,
+  sleepImpl = sleep,
 } = {}) {
   if (claudeRuntimeProbeDisabled(env)) {
     return Object.freeze({ available: true, reason: 'claude-runtime-probe-disabled' });
@@ -140,21 +143,31 @@ export async function probeClaudeReviewerRuntime({
       error: `invalid uid: ${uid}`,
     });
   }
-  try {
-    await execFileImpl(LAUNCHCTL, ['asuser', String(uid), TRUE_BIN], {
-      env,
-      encoding: 'utf8',
-      maxBuffer: 64 * 1024,
-      timeout: timeoutMs,
-    });
-    return Object.freeze({ available: true, reason: 'ok' });
-  } catch (err) {
-    return Object.freeze({
-      available: false,
-      reason: CLAUDE_REVIEWER_RUNTIME_GROUNDING_REASON,
-      error: reviewerRuntimeProbeErrorText(err),
-    });
+  const delays = Array.isArray(retryDelaysMs) ? retryDelaysMs : [];
+  const pause = typeof sleepImpl === 'function' ? sleepImpl : sleep;
+  const attempts = delays.length + 1;
+  let lastError = null;
+  for (let attemptIndex = 0; attemptIndex < attempts; attemptIndex += 1) {
+    try {
+      await execFileImpl(LAUNCHCTL, ['asuser', String(uid), TRUE_BIN], {
+        env,
+        encoding: 'utf8',
+        maxBuffer: 64 * 1024,
+        timeout: timeoutMs,
+      });
+      return Object.freeze({ available: true, reason: 'ok' });
+    } catch (err) {
+      lastError = err;
+      if (!isTransientFleetQuotaStatusError(err) || attemptIndex >= attempts - 1) break;
+      const delayMs = delays[attemptIndex] || 0;
+      if (delayMs > 0) await pause(delayMs);
+    }
   }
+  return Object.freeze({
+    available: false,
+    reason: CLAUDE_REVIEWER_RUNTIME_GROUNDING_REASON,
+    error: reviewerRuntimeProbeErrorText(lastError),
+  });
 }
 
 function shouldAutoProbeClaudeRuntime({ execFileImpl, env = process.env } = {}) {

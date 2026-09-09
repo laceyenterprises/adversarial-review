@@ -23,6 +23,7 @@ import {
   AFH_REVIEWER_MODEL_PROVIDER,
   AFH_FLEET_QUOTA_STATUS_RETRY_TIMEOUT_FRACTION,
   CLAUDE_REVIEWER_RUNTIME_GROUNDING_REASON,
+  CLAUDE_REVIEWER_RUNTIME_PROBE_RETRY_DELAYS_MS,
   applyClaudeReviewerRuntimeGrounding,
   afhGroundingSnapshotFromStdout,
   afhReviewerFallbackDecision,
@@ -570,6 +571,69 @@ test('AFH-04R: Claude runtime probe captures the exact launchctl-asuser primitiv
   assert.equal(status.available, false);
   assert.equal(status.reason, CLAUDE_REVIEWER_RUNTIME_GROUNDING_REASON);
   assert.match(status.error, /Could not switch to audit session/);
+});
+
+test('AFH-04R: Claude runtime probe retries transient launchctl failures', async () => {
+  const calls = [];
+  const sleeps = [];
+  const status = await probeClaudeReviewerRuntime({
+    platform: 'darwin',
+    uid: 501,
+    timeoutMs: 1234,
+    retryDelaysMs: [17],
+    sleepImpl: async (ms) => sleeps.push(ms),
+    execFileImpl: async (cmd, args, options) => {
+      calls.push({ cmd, args, timeout: options.timeout });
+      if (calls.length === 1) {
+        const err = new Error('Bootstrap failed: 5: Input/output error');
+        err.code = 'EIO';
+        throw err;
+      }
+      return { stdout: '' };
+    },
+    env: {},
+  });
+
+  assert.deepEqual(sleeps, [17]);
+  assert.deepEqual(calls, [
+    {
+      cmd: '/bin/launchctl',
+      args: ['asuser', '501', '/usr/bin/true'],
+      timeout: 1234,
+    },
+    {
+      cmd: '/bin/launchctl',
+      args: ['asuser', '501', '/usr/bin/true'],
+      timeout: 1234,
+    },
+  ]);
+  assert.equal(status.available, true);
+  assert.equal(status.reason, 'ok');
+});
+
+test('AFH-04R: Claude runtime probe has a bounded transient retry cap', async () => {
+  assert.deepEqual(CLAUDE_REVIEWER_RUNTIME_PROBE_RETRY_DELAYS_MS, [250, 750]);
+  let calls = 0;
+  const sleeps = [];
+  const status = await probeClaudeReviewerRuntime({
+    platform: 'darwin',
+    uid: 501,
+    retryDelaysMs: [1, 2],
+    sleepImpl: async (ms) => sleeps.push(ms),
+    execFileImpl: async () => {
+      calls += 1;
+      const err = new Error('Resource temporarily unavailable');
+      err.stderr = 'Resource temporarily unavailable';
+      throw err;
+    },
+    env: {},
+  });
+
+  assert.equal(calls, 3);
+  assert.deepEqual(sleeps, [1, 2]);
+  assert.equal(status.available, false);
+  assert.equal(status.reason, CLAUDE_REVIEWER_RUNTIME_GROUNDING_REASON);
+  assert.match(status.error, /Resource temporarily unavailable/);
 });
 
 test('AFH-04: a non-boolean afhGrounding.grounded is discarded, not coerced', () => {

@@ -268,7 +268,7 @@ test('watcher caps posted-review phase budget when reviewer dispatch is under pr
   assert.match(warnings[0], /dispatched=1 deferred=2/);
 });
 
-test('RVHAND-10: watcher warns when posted-review handlers run but clean merges stay at zero', async () => {
+test('RVHAND-10: watcher stays quiet when pending handlers run but clean merges stay at zero', async () => {
   const warnings = [];
 
   await runQueuedReviewAdoptionPhase({
@@ -299,9 +299,7 @@ test('RVHAND-10: watcher warns when posted-review handlers run but clean merges 
     },
   });
 
-  assert.equal(warnings.length, 1);
-  assert.match(warnings[0], /posted-review handlers completed with zero daemon clean-merges/);
-  assert.match(warnings[0], /ran=4/);
+  assert.equal(warnings.length, 0);
 });
 
 test('watcher keeps normal posted-review phase budget when reviewer drain is idle', async () => {

@@ -5,6 +5,8 @@ import { DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS } from './reviewer-lease.m
 const DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS = 3600;
 const RUNNING_PASS_TIMEOUT_FAILURE_CLASS = 'reviewer-timeout';
 const RUNNING_PASS_TIMEOUT_FAILURE_REASON = 'running-pass-timeout';
+const POSTED_REVIEW_ARTIFACT_RECOVERY_CLASS = 'posted-review-artifact-recovery';
+const POSTED_REVIEW_ARTIFACT_RECOVERY_REASON = 'running-pass-had-github-review-artifact';
 const INFRA_AUTO_RECOVER_CAP = DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS;
 
 function parseMetadataJson(raw) {
@@ -27,6 +29,10 @@ function reviewerSessionUuidFromPass(row) {
   const metadata = parseMetadataJson(row?.metadata_json);
   const value = metadata.reviewerSessionUuid;
   return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function hasPostedReviewArtifact(row) {
+  return typeof row?.gh_comment_id === 'string' && row.gh_comment_id.trim() !== '';
 }
 
 function resolveRunningPassTimeoutSeconds(env = process.env, options = {}) {
@@ -70,7 +76,7 @@ function reapRunningPassTimeouts({ db, rootDir = process.cwd(), log = console } 
   const thresholdSeconds = resolveRunningPassTimeoutSeconds();
   const rows = db.prepare(
     `SELECT pass_id, repo, pr_number, attempt_number, pass_kind, reviewer_class, reviewer_model,
-            started_at, metadata_json, head_sha
+            started_at, metadata_json, head_sha, gh_comment_id, body_captured_at, verdict
        FROM reviewer_passes
       WHERE status = 'running'
         AND ended_at IS NULL
@@ -109,6 +115,21 @@ function reapRunningPassTimeouts({ db, rootDir = process.cwd(), log = console } 
         AND ${ACTIVE_REVIEW_CLAIM_PREDICATE}
         AND COALESCE(infra_auto_recover_attempts, 0) >= ?`
   );
+  const recoverPostedReviewClaim = db.prepare(
+    `UPDATE reviewed_prs
+        SET review_status = 'posted',
+            posted_at = ?,
+            failed_at = NULL,
+            failure_message = NULL,
+            quota_reset_at_utc = NULL,
+            review_attempts = review_attempts + 1,
+            reviewer_lease_expires_at = NULL,
+            infra_auto_recover_attempts = 0
+      WHERE repo = ?
+        AND pr_number = ?
+        AND review_status = 'reviewing'
+        AND ${ACTIVE_REVIEW_CLAIM_PREDICATE}`
+  );
   const updatePass = db.prepare(
     `UPDATE reviewer_passes
         SET ended_at = ?,
@@ -118,6 +139,45 @@ function reapRunningPassTimeouts({ db, rootDir = process.cwd(), log = console } 
         AND status = 'running'
         AND ended_at IS NULL`
   );
+  const completePostedPass = db.prepare(
+    `UPDATE reviewer_passes
+        SET ended_at = ?,
+            status = 'completed',
+            metadata_json = ?
+      WHERE pass_id = ?
+        AND status = 'running'
+        AND ended_at IS NULL
+        AND gh_comment_id IS NOT NULL
+        AND gh_comment_id <> ''`
+  );
+
+  const settlePostedArtifactPass = db.transaction(({ row, endedAt, metadataJson }) => {
+    const current = getReviewRow.get(row.repo, row.pr_number);
+    let reviewChanged = false;
+    if (current?.review_status === 'reviewing') {
+      const reviewerSessionUuid = reviewerSessionUuidFromPass(row);
+      const reviewResult = recoverPostedReviewClaim.run(
+        endedAt,
+        row.repo,
+        row.pr_number,
+        reviewerSessionUuid,
+        reviewerSessionUuid,
+        reviewerSessionUuid,
+        row.started_at,
+        row.started_at,
+        row.head_sha || null,
+        row.head_sha || null
+      );
+      reviewChanged = reviewResult.changes > 0;
+    }
+
+    const passResult = completePostedPass.run(endedAt, metadataJson, row.pass_id);
+    return {
+      passChanged: passResult.changes > 0,
+      reviewChanged,
+      reviewStatus: current?.review_status || null,
+    };
+  });
 
   const settleTimedOutPass = db.transaction(({ row, endedAt, metadataJson, failureMessage, capFailureMessage }) => {
     const current = getReviewRow.get(row.repo, row.pr_number);
@@ -157,12 +217,45 @@ function reapRunningPassTimeouts({ db, rootDir = process.cwd(), log = console } 
   let reaped = 0;
   let reviewClaimsReleased = 0;
   let reviewClaimsFailed = 0;
+  let postedReviewArtifactsRecovered = 0;
   for (const row of rows) {
     try {
       const startedMs = parseTimestampMs(row.started_at);
       if (startedMs == null) continue;
-      const endedAt = new Date().toISOString();
+      const postedReviewArtifact = hasPostedReviewArtifact(row);
+      const bodyCapturedMs = parseTimestampMs(row.body_captured_at);
+      const endedAt = postedReviewArtifact && bodyCapturedMs != null
+        ? new Date(bodyCapturedMs).toISOString()
+        : new Date().toISOString();
       const ageSeconds = Math.floor((Date.now() - startedMs) / 1000);
+      if (postedReviewArtifact) {
+        const metadata = {
+          ...parseMetadataJson(row.metadata_json),
+          recoveryClass: POSTED_REVIEW_ARTIFACT_RECOVERY_CLASS,
+          recoveryReason: POSTED_REVIEW_ARTIFACT_RECOVERY_REASON,
+          recoveredAt: new Date().toISOString(),
+        };
+        const result = settlePostedArtifactPass({
+          row,
+          endedAt,
+          metadataJson: JSON.stringify(metadata),
+        });
+        if (!result.passChanged) {
+          log.warn?.(
+            `[watcher] reviewer-pass reaper skipped posted artifact ${row.repo}#${row.pr_number} ` +
+            `pass_id=${row.pass_id}: pass no longer running or artifact missing`
+          );
+          continue;
+        }
+        log.log(
+          `[watcher] reviewer-pass reaper: pr=${row.repo}#${row.pr_number} reviewer=${row.reviewer_model || row.reviewer_class}\n` +
+          `          pass_id=${row.pass_id} status running->completed reason=${POSTED_REVIEW_ARTIFACT_RECOVERY_REASON}\n` +
+          `          age=${ageSeconds}s threshold=${thresholdSeconds}s review_claim=${result.reviewChanged ? 'posted' : 'unchanged'}`
+        );
+        reaped++;
+        postedReviewArtifactsRecovered++;
+        continue;
+      }
       const failureMessage = buildTimeoutFailureMessage({ thresholdSeconds, ageSeconds });
       const capFailureMessage = buildTimeoutFailureMessage({
         thresholdSeconds,
@@ -213,11 +306,13 @@ function reapRunningPassTimeouts({ db, rootDir = process.cwd(), log = console } 
       log.error(`[watcher] reviewer-pass reaper failed for ${row.repo}#${row.pr_number}:`, err);
     }
   }
-  return { reaped, reviewClaimsReleased, reviewClaimsFailed };
+  return { reaped, reviewClaimsReleased, reviewClaimsFailed, postedReviewArtifactsRecovered };
 }
 
 export {
   DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS,
+  POSTED_REVIEW_ARTIFACT_RECOVERY_CLASS,
+  POSTED_REVIEW_ARTIFACT_RECOVERY_REASON,
   resolveRunningPassTimeoutSeconds,
   reapRunningPassTimeouts,
 };

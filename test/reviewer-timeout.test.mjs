@@ -109,7 +109,10 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
-import { reapRunningPassTimeouts } from '../src/reviewer-pass-reaper.mjs';
+import {
+  POSTED_REVIEW_ARTIFACT_RECOVERY_CLASS,
+  reapRunningPassTimeouts,
+} from '../src/reviewer-pass-reaper.mjs';
 import { DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS } from '../src/reviewer-lease.mjs';
 
 function setupDb() {
@@ -139,6 +142,155 @@ test('reapRunningPassTimeouts reaps a stuck running pass older than threshold', 
     assert.equal(metadata.failureClass, 'reviewer-timeout');
     assert.equal(metadata.failureReason, 'running-pass-timeout');
     assert.equal(metadata.timeoutThresholdSeconds, 3600);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reapRunningPassTimeouts completes stale running pass that already posted a GitHub review', () => {
+  const { rootDir, db } = setupDb();
+  try {
+    const startedAt = new Date(Date.now() - 3_605_000).toISOString();
+    const bodyCapturedAt = new Date(Date.now() - 3_500_000).toISOString();
+    db.prepare(
+      `INSERT INTO reviewed_prs (
+         repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+         review_attempts, failed_at, failure_message, quota_reset_at_utc,
+         reviewer_session_uuid, reviewer_started_at, reviewer_head_sha,
+         reviewer_lease_expires_at, infra_auto_recover_attempts
+       ) VALUES (?, ?, ?, ?, 'open', 'reviewing', 0, ?, ?, ?, ?, ?, ?, ?, 1)`
+    ).run(
+      'laceyenterprises/agent-os',
+      133,
+      startedAt,
+      'gemini',
+      new Date(Date.now() - 1_000).toISOString(),
+      'old failure',
+      new Date(Date.now() + 60_000).toISOString(),
+      'posted-session',
+      startedAt,
+      'posted-head',
+      new Date(Date.now() + 60_000).toISOString()
+    );
+    db.prepare(
+      `INSERT INTO reviewer_passes (
+         repo, pr_number, attempt_number, reviewer_class, reviewer_model,
+         pass_kind, started_at, status, head_sha, gh_comment_id,
+         body_captured_at, verdict, metadata_json
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?)`
+    ).run(
+      'laceyenterprises/agent-os',
+      133,
+      1,
+      'gemini',
+      'gemini',
+      'first-pass',
+      startedAt,
+      'posted-head',
+      '5149385185',
+      bodyCapturedAt,
+      'comment-only',
+      JSON.stringify({ reviewerSessionUuid: 'posted-session' })
+    );
+
+    const result = reapRunningPassTimeouts({ db, rootDir, log: { log() {}, warn() {}, error() {} } });
+    assert.equal(result.reaped, 1);
+    assert.equal(result.postedReviewArtifactsRecovered, 1);
+    assert.equal(result.reviewClaimsReleased, 0);
+    assert.equal(result.reviewClaimsFailed, 0);
+
+    const pass = db.prepare(
+      `SELECT status, ended_at, metadata_json FROM reviewer_passes WHERE pr_number = 133`
+    ).get();
+    assert.equal(pass.status, 'completed');
+    assert.equal(pass.ended_at, bodyCapturedAt);
+    assert.equal(JSON.parse(pass.metadata_json).recoveryClass, POSTED_REVIEW_ARTIFACT_RECOVERY_CLASS);
+
+    const review = db.prepare(
+      `SELECT review_status, posted_at, failed_at, failure_message, reviewer_lease_expires_at,
+              quota_reset_at_utc, review_attempts, infra_auto_recover_attempts
+         FROM reviewed_prs
+        WHERE pr_number = 133`
+    ).get();
+    assert.equal(review.review_status, 'posted');
+    assert.equal(review.posted_at, bodyCapturedAt);
+    assert.equal(review.failed_at, null);
+    assert.equal(review.failure_message, null);
+    assert.equal(review.reviewer_lease_expires_at, null);
+    assert.equal(review.quota_reset_at_utc, null);
+    assert.equal(review.review_attempts, 1);
+    assert.equal(review.infra_auto_recover_attempts, 0);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reapRunningPassTimeouts does not overwrite a newer active review claim for posted stale pass', () => {
+  const { rootDir, db } = setupDb();
+  try {
+    const staleStartedAt = new Date(Date.now() - 3_605_000).toISOString();
+    const activeStartedAt = new Date(Date.now() - 30_000).toISOString();
+    const bodyCapturedAt = new Date(Date.now() - 3_500_000).toISOString();
+    db.prepare(
+      `INSERT INTO reviewed_prs (
+         repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+         review_attempts, reviewer_session_uuid, reviewer_started_at,
+         reviewer_head_sha, reviewer_lease_expires_at, infra_auto_recover_attempts
+       ) VALUES (?, ?, ?, ?, 'open', 'reviewing', 7, ?, ?, ?, ?, 2)`
+    ).run(
+      'laceyenterprises/agent-os',
+      134,
+      staleStartedAt,
+      'gemini',
+      'active-session',
+      activeStartedAt,
+      'new-head',
+      new Date(Date.now() + 60_000).toISOString()
+    );
+    db.prepare(
+      `INSERT INTO reviewer_passes (
+         repo, pr_number, attempt_number, reviewer_class, reviewer_model,
+         pass_kind, started_at, status, head_sha, gh_comment_id,
+         body_captured_at, verdict, metadata_json
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?)`
+    ).run(
+      'laceyenterprises/agent-os',
+      134,
+      1,
+      'gemini',
+      'gemini',
+      'rereview',
+      staleStartedAt,
+      'old-head',
+      '5149385186',
+      bodyCapturedAt,
+      'comment-only',
+      JSON.stringify({ reviewerSessionUuid: 'stale-session' })
+    );
+
+    const result = reapRunningPassTimeouts({ db, rootDir, log: { log() {}, warn() {}, error() {} } });
+    assert.equal(result.reaped, 1);
+    assert.equal(result.postedReviewArtifactsRecovered, 1);
+
+    const pass = db.prepare(`SELECT status, ended_at FROM reviewer_passes WHERE pr_number = 134`).get();
+    assert.equal(pass.status, 'completed');
+    assert.equal(pass.ended_at, bodyCapturedAt);
+
+    const review = db.prepare(
+      `SELECT review_status, posted_at, review_attempts, reviewer_session_uuid,
+              reviewer_started_at, reviewer_head_sha, infra_auto_recover_attempts
+         FROM reviewed_prs
+        WHERE pr_number = 134`
+    ).get();
+    assert.equal(review.review_status, 'reviewing');
+    assert.equal(review.posted_at, null);
+    assert.equal(review.review_attempts, 7);
+    assert.equal(review.reviewer_session_uuid, 'active-session');
+    assert.equal(review.reviewer_started_at, activeStartedAt);
+    assert.equal(review.reviewer_head_sha, 'new-head');
+    assert.equal(review.infra_auto_recover_attempts, 2);
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

@@ -1926,18 +1926,45 @@ function resolveAmaDispatchTimeoutMs(cfg) {
   return Number.isFinite(configured) && configured > 0 ? configured : 300_000;
 }
 
+const PROVISION_SELF_TIMEOUT_CUSHION_SECONDS = 30;
+const PROVISION_SUBPROCESS_TIMEOUT_CUSHION_SECONDS = 10;
+
+function capExistingTimeoutSeconds(env, key, capSeconds) {
+  const current = Number(env?.[key]);
+  return Number.isFinite(current) && current > 0
+    ? Math.min(Math.floor(current), capSeconds)
+    : capSeconds;
+}
+
 function withProvisionTimeoutCappedAtDispatch(env, dispatchTimeoutMs) {
   const baseEnv = env || process.env;
   const normalizedDispatchTimeoutMs = resolveAmaDispatchTimeoutMs({ dispatchTimeoutMs });
   const dispatchTimeoutSeconds = Math.max(1, Math.floor(normalizedDispatchTimeoutMs / 1000));
-  const currentProvisionTimeoutSeconds = Number(baseEnv.HQ_WORKER_PROVISION_TIMEOUT_SECONDS);
-  const effectiveProvisionTimeoutSeconds =
-    Number.isFinite(currentProvisionTimeoutSeconds) && currentProvisionTimeoutSeconds > 0
-      ? Math.min(Math.floor(currentProvisionTimeoutSeconds), dispatchTimeoutSeconds)
-      : dispatchTimeoutSeconds;
+  const provisionTimeoutCapSeconds = Math.max(
+    1,
+    dispatchTimeoutSeconds - PROVISION_SELF_TIMEOUT_CUSHION_SECONDS,
+  );
+  const provisionSubprocessTimeoutCapSeconds = Math.max(
+    provisionTimeoutCapSeconds,
+    dispatchTimeoutSeconds - PROVISION_SUBPROCESS_TIMEOUT_CUSHION_SECONDS,
+  );
   return {
     ...baseEnv,
-    HQ_WORKER_PROVISION_TIMEOUT_SECONDS: String(effectiveProvisionTimeoutSeconds),
+    // The shell provision watchdog must fire before the outer `hq dispatch`
+    // timeout so it can emit forensics and clean partial worktree state.
+    HQ_WORKER_PROVISION_TIMEOUT_SECONDS: String(capExistingTimeoutSeconds(
+      baseEnv,
+      'HQ_WORKER_PROVISION_TIMEOUT_SECONDS',
+      provisionTimeoutCapSeconds,
+    )),
+    // The Python provision wrapper is the process-tree reap backstop. Keep it
+    // below the outer Node execFile timeout too; otherwise the watcher kills only
+    // the Python parent and leaves hq-worker-provision.sh orphaned under launchd.
+    HQ_PROVISION_SUBPROCESS_TIMEOUT_SECONDS: String(capExistingTimeoutSeconds(
+      baseEnv,
+      'HQ_PROVISION_SUBPROCESS_TIMEOUT_SECONDS',
+      provisionSubprocessTimeoutCapSeconds,
+    )),
   };
 }
 

@@ -174,12 +174,19 @@ test('LCR: hq dispatch caps worker provision watchdog at the AMA dispatch timeou
   const rootDir = mkdtempSync(join(tmpdir(), 'lcr-provision-timeout-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const previousProvisionTimeout = process.env.HQ_WORKER_PROVISION_TIMEOUT_SECONDS;
+  const previousProvisionSubprocessTimeout = process.env.HQ_PROVISION_SUBPROCESS_TIMEOUT_SECONDS;
   delete process.env.HQ_WORKER_PROVISION_TIMEOUT_SECONDS;
+  delete process.env.HQ_PROVISION_SUBPROCESS_TIMEOUT_SECONDS;
   t.after(() => {
     if (previousProvisionTimeout === undefined) {
       delete process.env.HQ_WORKER_PROVISION_TIMEOUT_SECONDS;
     } else {
       process.env.HQ_WORKER_PROVISION_TIMEOUT_SECONDS = previousProvisionTimeout;
+    }
+    if (previousProvisionSubprocessTimeout === undefined) {
+      delete process.env.HQ_PROVISION_SUBPROCESS_TIMEOUT_SECONDS;
+    } else {
+      process.env.HQ_PROVISION_SUBPROCESS_TIMEOUT_SECONDS = previousProvisionSubprocessTimeout;
     }
   });
   const deps = testDeps();
@@ -192,19 +199,27 @@ test('LCR: hq dispatch caps worker provision watchdog at the AMA dispatch timeou
   assert.equal(result.dispatched, true);
   assert.equal(deps.calls.length, 1);
   assert.equal(deps.calls[0].options.timeout, 240_000);
-  assert.equal(deps.calls[0].options.env.HQ_WORKER_PROVISION_TIMEOUT_SECONDS, '240');
+  assert.equal(deps.calls[0].options.env.HQ_WORKER_PROVISION_TIMEOUT_SECONDS, '210');
+  assert.equal(deps.calls[0].options.env.HQ_PROVISION_SUBPROCESS_TIMEOUT_SECONDS, '230');
 });
 
 test('LCR: hq dispatch preserves an already stricter worker provision timeout', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'lcr-provision-timeout-strict-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const previousProvisionTimeout = process.env.HQ_WORKER_PROVISION_TIMEOUT_SECONDS;
+  const previousProvisionSubprocessTimeout = process.env.HQ_PROVISION_SUBPROCESS_TIMEOUT_SECONDS;
   process.env.HQ_WORKER_PROVISION_TIMEOUT_SECONDS = '45';
+  process.env.HQ_PROVISION_SUBPROCESS_TIMEOUT_SECONDS = '30';
   t.after(() => {
     if (previousProvisionTimeout === undefined) {
       delete process.env.HQ_WORKER_PROVISION_TIMEOUT_SECONDS;
     } else {
       process.env.HQ_WORKER_PROVISION_TIMEOUT_SECONDS = previousProvisionTimeout;
+    }
+    if (previousProvisionSubprocessTimeout === undefined) {
+      delete process.env.HQ_PROVISION_SUBPROCESS_TIMEOUT_SECONDS;
+    } else {
+      process.env.HQ_PROVISION_SUBPROCESS_TIMEOUT_SECONDS = previousProvisionSubprocessTimeout;
     }
   });
   const deps = testDeps();
@@ -218,6 +233,7 @@ test('LCR: hq dispatch preserves an already stricter worker provision timeout', 
   assert.equal(deps.calls.length, 1);
   assert.equal(deps.calls[0].options.timeout, 240_000);
   assert.equal(deps.calls[0].options.env.HQ_WORKER_PROVISION_TIMEOUT_SECONDS, '45');
+  assert.equal(deps.calls[0].options.env.HQ_PROVISION_SUBPROCESS_TIMEOUT_SECONDS, '30');
 });
 
 test('LCR: non-exhausted request-changes findings do not dispatch hammer before Codex remediation', async (t) => {

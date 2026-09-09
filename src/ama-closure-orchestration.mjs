@@ -81,6 +81,32 @@ const {
   namedAmaNoDispatchReason,
 } = amaDispatchCloser;
 
+export class AmaCoexistenceAbortError extends Error {
+  constructor(reason = 'ama-coexistence-aborted') {
+    super(reason);
+    this.name = 'AmaCoexistenceAbortError';
+    this.code = 'AMA_COEXISTENCE_ABORTED';
+  }
+}
+
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  throw signal.reason instanceof Error ? signal.reason : new AmaCoexistenceAbortError();
+}
+
+function abortableSleep(ms, signal) {
+  throwIfAborted(signal);
+  if (!ms) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason instanceof Error ? signal.reason : new AmaCoexistenceAbortError());
+    };
+    signal?.addEventListener?.('abort', onAbort, { once: true });
+  });
+}
+
 export function normalizeCompletedRoundCount(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
@@ -273,7 +299,9 @@ export async function maybeDispatchAmaClosureFor({
     dismissSupersededBlockingVerdictAtRemediatedHead,
   writeAutonomousMergeDisabledAuditImpl = writeAutonomousMergeDisabledAudit,
   env = process.env,
+  signal = null,
 }) {
+  throwIfAborted(signal);
   let cfg;
   let orchestrationMode;
   try {
@@ -311,6 +339,7 @@ export async function maybeDispatchAmaClosureFor({
     );
   }
 
+  throwIfAborted(signal);
   // AMA "final hammer" signal: the review cycle is EXHAUSTED once the PR has
   // consumed its full remediation round budget. At that point the adversarial
   // verdict can loop on `Request changes` forever, so AMA must land the PR
@@ -398,11 +427,20 @@ export async function maybeDispatchAmaClosureFor({
   let mergeabilityForGate = candidate;
   const initialMergeability = normalizeGithubMergeability(candidate || {});
   if (initialMergeability !== 'MERGEABLE' && initialMergeability !== 'CONFLICTING') {
+    throwIfAborted(signal);
     const sampled = await resolveMergeabilityWithSampling(
       candidate || {},
-      () => fetchPullRequestMergeability(repoPath, prNumber, { execFileImpl: execFileAsync }),
-      { attempts: MERGEABILITY_SAMPLE_ATTEMPTS, delayMs: MERGEABILITY_SAMPLE_DELAY_MS },
+      async () => {
+        throwIfAborted(signal);
+        return fetchPullRequestMergeability(repoPath, prNumber, { execFileImpl: execFileAsync, signal });
+      },
+      {
+        attempts: MERGEABILITY_SAMPLE_ATTEMPTS,
+        delayMs: MERGEABILITY_SAMPLE_DELAY_MS,
+        sleepImpl: (ms) => abortableSleep(ms, signal),
+      },
     );
+    throwIfAborted(signal);
     mergeabilityForGate = {
       ...(candidate || {}),
       mergeable: sampled.mergeable,
@@ -415,6 +453,7 @@ export async function maybeDispatchAmaClosureFor({
       );
     }
   }
+  throwIfAborted(signal);
   let gateSnapshot = await buildAdversarialGateSnapshot(rootDir, {
     repo: repoPath,
     prNumber,
@@ -462,8 +501,10 @@ export async function maybeDispatchAmaClosureFor({
             fetchLatestHeadReviewBodiesImpl,
             retryDelaysMs: liveReviewRetryDelaysMs,
             logger,
+            signal,
           })
         : [];
+      throwIfAborted(signal);
       if (!authoritativeReviewerLogins.length) {
         logger?.warn?.(
           `[watcher] AMA live-review reconcile could not resolve an authoritative reviewer ` +
@@ -473,6 +514,7 @@ export async function maybeDispatchAmaClosureFor({
       }
       liveHeadReview = { resolved: true, bodies: Array.isArray(bodies) ? bodies : [] };
     } catch (err) {
+      throwIfAborted(signal);
       logger?.warn?.(
         `[watcher] AMA live-review reconcile failed for ${repoPath}#${prNumber}@${settledReviewHeadSha}; ` +
           `failing closed: ${err?.message || err}`,
@@ -493,6 +535,7 @@ export async function maybeDispatchAmaClosureFor({
       liveHeadReview,
     });
   }
+  throwIfAborted(signal);
   const currentPrHeadSha = candidate?.headSha || currentRevisionRef || null;
 
   // CLR-01 — carry a live closer lease forward when the head it is keyed to is no
@@ -544,6 +587,7 @@ export async function maybeDispatchAmaClosureFor({
     }
   }
 
+  throwIfAborted(signal);
   const reviewState = {
     verdict: gateSnapshot.settledReview?.verdict || '',
     // `headSha` is the head the adversarial reviewer actually reviewed. MSM-04
@@ -692,18 +736,22 @@ export async function maybeDispatchAmaClosureFor({
   // never self-certify past the stale-head block.
   if (reviewedHeadIsStale) {
     try {
+      throwIfAborted(signal);
       const closerCommitSuppression = typeof resolveHeadCloserCommitSuppressionImpl === 'function'
         ? await resolveHeadCloserCommitSuppressionImpl({
             repoPath,
             prNumber,
             headSha: currentPrHeadSha,
+            signal,
           })
         : await getHeadCloserCommitSuppression({
             repoPath,
             prNumber,
             headSha: currentPrHeadSha,
             logger,
+            signal,
           });
+      throwIfAborted(signal);
       allowStaleReviewHeadHammerResume = closerCommitSuppression?.suppressed === true;
       if (
         allowStaleReviewHeadHammerResume &&
@@ -715,7 +763,9 @@ export async function maybeDispatchAmaClosureFor({
           headSha: currentPrHeadSha,
           execFileImpl: execFileAsync,
           logger,
+          signal,
         });
+        throwIfAborted(signal);
         nonReviewableHeadDeltaEvidence = buildNonReviewableHeadDeltaEvidence({
           reviewedHead: reviewState.headSha,
           currentHead: currentPrHeadSha,
@@ -735,7 +785,9 @@ export async function maybeDispatchAmaClosureFor({
           execFileImpl: execFileAsync,
           closerCommitSuppression,
           logger,
+          signal,
         });
+        throwIfAborted(signal);
         if (
           resolvedHamEvidence?.hamTerminalRemediation &&
           resolvedHamEvidence?.hamTerminalRemediationGroundTruth
@@ -752,6 +804,7 @@ export async function maybeDispatchAmaClosureFor({
         }
       }
     } catch (err) {
+      throwIfAborted(signal);
       if (isTransientGhError(err)) {
         throw err;
       }
@@ -794,6 +847,7 @@ export async function maybeDispatchAmaClosureFor({
     dismissStaleRequestChangesOnResolved &&
     standingBlockingFindingCount > 0
   ) {
+    throwIfAborted(signal);
     await dismissSupersededBlockingVerdictAtRemediatedHeadImpl({
       repo: repoPath,
       prNumber,
@@ -802,6 +856,7 @@ export async function maybeDispatchAmaClosureFor({
       authoritativeReviewerLogins,
       env,
       logger,
+      signal,
     });
   }
 
@@ -835,6 +890,7 @@ export async function maybeDispatchAmaClosureFor({
   //                     released; NO hammer spawned (retry path never hammers).
   //   - deferred      → lease contention / audit bootstrap failure; retry next
   //                     tick with no double-merge.
+  throwIfAborted(signal);
   const daemonCleanMerge = await runDaemonCleanMergeAttemptImpl({
     rootDir,
     cfg,
@@ -856,7 +912,9 @@ export async function maybeDispatchAmaClosureFor({
     authoritativeReviewerLogins,
     dismissStaleRequestChangesOnResolved,
     hamTerminalRemediationValidated,
+    signal,
   });
+  throwIfAborted(signal);
   if (daemonCleanMerge?.disposition && daemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) {
     const daemonHeadShort = String(gateSnapshot?.reviewedHeadSha || '').slice(0, 12);
     logger?.log?.(
@@ -1009,6 +1067,7 @@ export async function maybeDispatchAmaClosureFor({
 
   let result;
   try {
+    throwIfAborted(signal);
     result = await maybeDispatchAmaCloserImpl({
       reviewState,
       prMetadata,
@@ -1040,8 +1099,11 @@ export async function maybeDispatchAmaClosureFor({
       },
       dispatchContext,
       logger,
+      signal,
     });
+    throwIfAborted(signal);
   } catch (err) {
+    throwIfAborted(signal);
     logger?.warn?.(`[watcher] AMA dispatch failed: ${err?.message || err}`);
     // Carry the ground-truth HAM proof into the failure result. AMA can fail to
     // dispatch its own closer for reasons unrelated to the remediation's validity
@@ -1090,7 +1152,9 @@ export async function resolveMergeAgentCoexistenceForWatcher({
   domainId = 'code-pr',
   logger,
   maybeDispatchAmaClosureForImpl = maybeDispatchAmaClosureFor,
+  signal = null,
 }) {
+  throwIfAborted(signal);
   // BUG-1 dispatch-time terminal guard. `candidate` is the live PR read for
   // this tick (fetchMergeAgentCandidate). An already-MERGED PR needs no
   // AMA/merge-agent action. Without this, it flows into maybeDispatchAmaClosureFor
@@ -1126,7 +1190,9 @@ export async function resolveMergeAgentCoexistenceForWatcher({
     currentRevisionRef,
     domainId,
     logger,
+    signal,
   });
+  throwIfAborted(signal);
   if (amaClosureResult?.dispatched) {
     return { outcome: 'ama-dispatched', amaClosureResult };
   }

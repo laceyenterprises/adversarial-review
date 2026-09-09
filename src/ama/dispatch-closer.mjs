@@ -178,6 +178,11 @@ export const HARNESS_FALLBACK_ALERT_DEBOUNCE_MS = 60 * 60 * 1000;
 const HARNESS_FALLBACK_ALERT_STATE_DIRNAME = 'ama-harness-fallback-alerts';
 const HARNESS_FALLBACK_ALERT_STATE_DIR_MODE = 0o2775;
 const HARNESS_FALLBACK_ALERT_STATE_FILE_MODE = 0o664;
+
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  throw signal.reason instanceof Error ? signal.reason : new Error('aborted');
+}
 const FINAL_HAMMER_TERMINAL_REMEDIATION_WAIVER_REASONS = new Set([
   'blocking-findings-present',
   'blocking-findings-unknown',
@@ -491,16 +496,19 @@ async function execAmaLivePrProbeCommandWithTransientRetry(
   {
     sleepImpl = sleep,
     retryDelaysMs = AMA_LIVE_PR_PROBE_TRANSIENT_RETRY_DELAYS_MS,
+    signal = null,
   } = {},
 ) {
   for (let attempt = 0; ; attempt += 1) {
     try {
+      throwIfAborted(signal);
       return await execFileImpl(cmd, args, options);
     } catch (err) {
+      throwIfAborted(signal);
       if (attempt >= retryDelaysMs.length || !isTransientHqDispatchError(err)) {
         throw err;
       }
-      await sleepImpl(Number(retryDelaysMs[attempt]) || 0);
+      await sleepImpl(Number(retryDelaysMs[attempt]) || 0, signal);
     }
   }
 }
@@ -511,7 +519,9 @@ async function defaultAmaLivePrProbe({
   prNumber,
   sleepImpl,
   retryDelaysMs,
+  signal = null,
 }) {
+  throwIfAborted(signal);
   const { stdout } = await execAmaLivePrProbeCommandWithTransientRetry(execFileImpl, 'gh', [
     'pr',
     'view',
@@ -524,10 +534,13 @@ async function defaultAmaLivePrProbe({
     env: process.env,
     timeout: AMA_LIVE_PR_PROBE_TIMEOUT_MS,
     maxBuffer: 1024 * 1024,
+    ...(signal ? { signal } : {}),
   }, {
     sleepImpl,
     retryDelaysMs,
+    signal,
   });
+  throwIfAborted(signal);
   const payload = JSON.parse(stdout || '{}');
   const state = String(payload?.state || '').trim().toUpperCase();
   let headBranchExists = null;
@@ -550,12 +563,16 @@ async function defaultAmaLivePrProbe({
         env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
         timeout: AMA_LIVE_PR_PROBE_TIMEOUT_MS,
         maxBuffer: 1024 * 1024,
+        ...(signal ? { signal } : {}),
       }, {
         sleepImpl,
         retryDelaysMs,
+        signal,
       });
+      throwIfAborted(signal);
       headBranchExists = String(probe?.stdout || '').trim().length > 0;
     } catch (err) {
+      throwIfAborted(signal);
       if (Number(err?.code) === 2) {
         headBranchExists = false;
       } else {
@@ -578,16 +595,20 @@ async function probeAmaLivePrForMergeDispatch({
   execFileImpl,
   repo,
   prNumber,
+  signal = null,
 }) {
   const probeImpl = dispatchContext?.livePrProbeImpl || defaultAmaLivePrProbe;
   try {
+    throwIfAborted(signal);
     return normalizeAmaLivePrProbeResult(await probeImpl({
       dispatchContext,
       execFileImpl,
       repo,
       prNumber,
+      signal,
     }));
   } catch (err) {
+    throwIfAborted(signal);
     return {
       state: null,
       headBranchExists: null,
@@ -2668,9 +2689,17 @@ export const __testables__ = Object.freeze({
   emitWorkerGitMergeSignalBestEffort,
 });
 
-function sleep(ms) {
+function sleep(ms, signal = null) {
+  throwIfAborted(signal);
   if (!ms) return Promise.resolve();
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason instanceof Error ? signal.reason : new Error('aborted'));
+    };
+    signal?.addEventListener?.('abort', onAbort, { once: true });
+  });
 }
 
 function resolveHqOwner(hqRoot) {
@@ -2732,6 +2761,7 @@ async function probeAmaCloserDispatchStatus({
   asOwner = null,
   execFileImpl = execFileAsync,
   env = {},
+  signal = null,
 } = {}) {
   if (!hqPath || !launchRequestId) return null;
   const args = asOwner
@@ -2739,25 +2769,29 @@ async function probeAmaCloserDispatchStatus({
     : ['dispatch', 'status', launchRequestId, '--json'];
   for (let attempt = 0; attempt <= AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS.length; attempt += 1) {
     try {
+      throwIfAborted(signal);
       const { stdout } = await execFileImpl(hqPath, args, {
         env: { ...env },
         cwd: AGENT_OS_ROOT,
         maxBuffer: 1024 * 1024,
         timeout: 5_000,
+        ...(signal ? { signal } : {}),
       });
+      throwIfAborted(signal);
       const parsed = parseAmaCloserDispatchStatusOutput(stdout);
       if (parsed) return parsed;
       if (attempt < AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS.length) {
-        await sleep(AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS[attempt]);
+        await sleep(AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS[attempt], signal);
         continue;
       }
       return { status: 'unknown', degraded: true };
     } catch (err) {
+      throwIfAborted(signal);
       if (hasAuthoritativeOwnerVisibility(asOwner) && isNotFoundDispatchStatusError(err)) {
         return { status: 'not-found' };
       }
       if (isTransientHqDispatchError(err) && attempt < AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS.length) {
-        await sleep(AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS[attempt]);
+        await sleep(AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS[attempt], signal);
         continue;
       }
       return { status: 'unknown', degraded: true, error: err?.message || String(err) };
@@ -3330,7 +3364,9 @@ export async function maybeDispatchAmaCloser({
   deliverAlertImpl = deliverAlert,
   logGate = dispatchCloserLogGate,
   logger = console,
+  signal = null,
 }) {
+  throwIfAborted(signal);
   // The master gate. With no operator config, this is `false` per
   // AMA-01 schema defaults and the entire path is a no-op.
   if (!cfg?.enabled) {
@@ -3357,6 +3393,7 @@ export async function maybeDispatchAmaCloser({
     typeof resolveHamTerminalRemediationEvidenceImpl === 'function'
   ) {
     try {
+      throwIfAborted(signal);
       const resolvedHamEvidence = await resolveHamTerminalRemediationEvidenceImpl({
         reviewState,
         prMetadata,
@@ -3365,13 +3402,16 @@ export async function maybeDispatchAmaCloser({
         execFileImpl,
         fetchPullRequestRollupImpl,
         logger,
+        signal,
       });
+      throwIfAborted(signal);
       if (resolvedHamEvidence?.hamTerminalRemediation && resolvedHamEvidence?.hamTerminalRemediationGroundTruth) {
         eligibilityOptions.hamTerminalRemediation = resolvedHamEvidence.hamTerminalRemediation;
         eligibilityOptions.hamTerminalRemediationGroundTruth =
           resolvedHamEvidence.hamTerminalRemediationGroundTruth;
       }
     } catch (err) {
+      throwIfAborted(signal);
       if (isTransientGhError(err)) throw err;
       logger?.warn?.(
         `[ama-closer] HAM terminal-remediation evidence resolution failed for ` +
@@ -3812,13 +3852,16 @@ export async function maybeDispatchAmaCloser({
     let releaseUnprovenTerminalHoldError = null;
     let releaseUnprovenTerminalHoldMerged = false;
     let advancedTerminalDispatchSuperseded = false;
+    throwIfAborted(signal);
     const statusProbe = await probeAmaCloserDispatchStatus({
       hqPath,
       launchRequestId: existingRecord.launchRequestId,
       asOwner: ownerUser,
       execFileImpl,
       env: process.env,
+      signal,
     });
+    throwIfAborted(signal);
     let status = statusProbe?.status || null;
     existingDispatchStatus = status;
     let phantomActiveWorkerRun = null;
@@ -3831,6 +3874,7 @@ export async function maybeDispatchAmaCloser({
         hqRoot,
         rootDir,
       });
+      throwIfAborted(signal);
       if (
         workerRunProbe?.ok
         // Keep the caller-injected probe: maybeDispatchAmaCloser destructures
@@ -4585,14 +4629,18 @@ export async function maybeDispatchAmaCloser({
   let dispatchWorkerClass = workerClass;
   let harnessFallback = null;
   try {
+    throwIfAborted(signal);
     harnessFallback = await resolveCloserDispatchHarnessImpl({
       workerClass,
       fallbackWorkerClasses: Array.isArray(cfg?.workerClassFallback) ? cfg.workerClassFallback : [],
       hqPath,
       execFileImpl,
       env: process.env,
+      signal,
     });
+    throwIfAborted(signal);
   } catch (err) {
+    throwIfAborted(signal);
     // Fail-open: a resolver fault must never block the merge. Dispatch on the
     // configured primary exactly as the pre-HHR path did.
     harnessFallback = { workerClass, fellBack: false, reason: 'harness-fallback-resolver-error', error: String(err?.message || err) };
@@ -4710,12 +4758,15 @@ export async function maybeDispatchAmaCloser({
     });
   }
 
+  throwIfAborted(signal);
   const livePrProbe = await probeAmaLivePrForMergeDispatch({
     dispatchContext,
     execFileImpl,
     repo,
     prNumber,
+    signal,
   });
+  throwIfAborted(signal);
   if (livePrProbe?.state === 'MERGED' || livePrProbe?.state === 'CLOSED') {
     updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => ({
       ...(current || {}),
@@ -4905,6 +4956,7 @@ export async function maybeDispatchAmaCloser({
   const dispatchEnv = withProvisionTimeoutCappedAtDispatch(process.env, dispatchTimeoutMs);
   for (;;) {
     try {
+      throwIfAborted(signal);
       execResult = await execFileImpl(hqPath, activeArgs, {
         env: dispatchEnv,
         cwd: AGENT_OS_ROOT,
@@ -4922,9 +4974,12 @@ export async function maybeDispatchAmaCloser({
         // `dispatching` with no lrq.
         timeout: dispatchTimeoutMs,
         killSignal: 'SIGTERM',
+        ...(signal ? { signal } : {}),
       });
+      throwIfAborted(signal);
       break;
     } catch (err) {
+      throwIfAborted(signal);
       // Older / forked `hq` that predates `--priority`: retry once without the
       // flag so the closer still dispatches (degraded to default-`normal`
       // admission) instead of failing outright. An arg-parse rejection happens
@@ -4940,7 +4995,7 @@ export async function maybeDispatchAmaCloser({
       if (isTransientHqDispatchError(err) && transientRetryIndex < AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.length) {
         const delayMs = Number(AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS[transientRetryIndex]) || 0;
         transientRetryIndex += 1;
-        await sleep(delayMs);
+        await sleep(delayMs, signal);
         continue;
       }
       const parsedFailure = normalizeDispatchIdentifiers(parseAmaCloserDispatchOutput(err?.stdout || ''));

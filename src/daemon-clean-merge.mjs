@@ -202,14 +202,30 @@ export async function fetchLatestHeadReviewBodiesWithRetry({
   fetchLatestHeadReviewBodiesImpl,
   retryDelaysMs = AMA_LIVE_REVIEW_LOOKUP_RETRY_DELAYS_MS,
   logger,
+  signal = null,
 }) {
+  const throwIfAborted = () => {
+    if (!signal?.aborted) return;
+    throw signal.reason instanceof Error ? signal.reason : new Error('aborted');
+  };
+  const sleep = (delayMs) => new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, delayMs);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason instanceof Error ? signal.reason : new Error('aborted'));
+    };
+    signal?.addEventListener?.('abort', onAbort, { once: true });
+  });
   const delays = Array.isArray(retryDelaysMs) ? retryDelaysMs : [];
   for (let attempt = 0; attempt <= delays.length; attempt += 1) {
     try {
+      throwIfAborted();
       return await fetchLatestHeadReviewBodiesImpl(repoPath, prNumber, headSha, {
         authoritativeReviewerLogins,
+        signal,
       });
     } catch (err) {
+      throwIfAborted();
       const canRetry = attempt < delays.length && isTransientAmaLiveReviewLookupError(err);
       if (!canRetry) throw err;
       const delayMs = Math.max(0, Number(delays[attempt]) || 0);
@@ -218,7 +234,7 @@ export async function fetchLatestHeadReviewBodiesWithRetry({
           `${repoPath}#${prNumber}@${headSha}; retrying in ${delayMs}ms: ${err?.message || err}`,
       );
       if (delayMs > 0) {
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        await sleep(delayMs);
       }
     }
   }

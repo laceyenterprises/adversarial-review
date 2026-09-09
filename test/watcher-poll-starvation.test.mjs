@@ -237,7 +237,7 @@ test('WPS-01: a new PR is ingested on the first tick despite a backlog of unadva
   }
 });
 
-test('RVHAND-01: posted-review timeout yields and defers the rest of the bounded phase', async () => {
+test('RVHAND-08: posted-review timeout continues to the rest of the bounded phase', async () => {
   const state = createPostedReviewFairnessState();
   const events = [];
   const errors = [];
@@ -274,14 +274,75 @@ test('RVHAND-01: posted-review timeout yields and defers the rest of the bounded
   });
 
   assert.equal(summary.timedOut, 1);
+  assert.equal(summary.ran, 1);
+  assert.equal(summary.deferredAfterTimeout, 0);
+  assert.equal(summary.continuedAfterTimeout, 1);
+  assert.deepEqual(summary.deferred, []);
+  assert.deepEqual(events, ['second-handler-ran']);
+  assert.match(errors[0], /posted-review handler for laceyenterprises\/agent-os#5908 exceeded 10ms/);
+  assert.match(warnings[0], /posted-review phase continuing after timeout/);
+  assert.match(logs[0], /timeout_deferred=0 continued_after_timeout=1/);
+});
+
+test('RVHAND-09: posted-review timeout still defers when the phase budget is spent', async () => {
+  const state = createPostedReviewFairnessState();
+  const events = [];
+  const warnings = [];
+  let clock = 0;
+  let pendingTimer = null;
+
+  const summary = await runPostedReviewHandlersFairly({
+    handlers: [
+      {
+        repoPath: REPO,
+        prNumber: 5908,
+        run: () => {
+          queueMicrotask(() => {
+            clock += pendingTimer.delay;
+            pendingTimer.callback();
+          });
+          return new Promise(() => {});
+        },
+      },
+      {
+        repoPath: REPO,
+        prNumber: 5909,
+        run: async () => {
+          events.push('second-handler-ran');
+        },
+      },
+    ],
+    state,
+    budgetMs: 10,
+    handlerTimeoutMs: 10,
+    minimumHandlerStartBudgetMs: 1,
+    nowMs: () => clock,
+    setTimeoutFn: (callback, delay) => {
+      pendingTimer = { callback, delay };
+      return pendingTimer;
+    },
+    clearTimeoutFn: (timer) => {
+      if (pendingTimer === timer) pendingTimer = null;
+    },
+    laneGate: {
+      evaluate: () => ({ run: true }),
+      record: async () => {},
+    },
+    logger: {
+      log() {},
+      warn: (...args) => warnings.push(args.join(' ')),
+      error() {},
+    },
+  });
+
+  assert.equal(summary.timedOut, 1);
   assert.equal(summary.ran, 0);
   assert.equal(summary.deferredAfterTimeout, 1);
   assert.equal(summary.continuedAfterTimeout, 0);
   assert.deepEqual(summary.deferred, ['laceyenterprises/agent-os#5909']);
   assert.deepEqual(events, []);
-  assert.match(errors[0], /posted-review handler for laceyenterprises\/agent-os#5908 exceeded 10ms/);
-  assert.match(warnings[0], /posted-review phase yielding after timeout/);
-  assert.match(logs[0], /timeout_deferred=1 continued_after_timeout=0/);
+  assert.match(warnings.join('\n'), /posted-review phase yielding after timeout/);
+  assert.match(warnings.join('\n'), /minimum_start_budget=1ms/);
 });
 
 test('RVHAND-06: posted-review phase warns when queued handlers make zero progress', async () => {
@@ -853,11 +914,11 @@ test('runPostedReviewHandlersFairly bounds a single never-settling handler', asy
     logger: silentLogger,
   });
   assert.equal(summary.timedOut, 1);
-  assert.equal(summary.ran, 0);
-  assert.equal(summary.deferredAfterTimeout, 1);
-  assert.equal(summary.continuedAfterTimeout, 0);
-  assert.deepEqual(summary.deferred, [`${REPO}#2`]);
-  assert.deepEqual(ran, [], 'the handler behind the wedged one is rotated to the next tick');
+  assert.equal(summary.ran, 1);
+  assert.equal(summary.deferredAfterTimeout, 0);
+  assert.equal(summary.continuedAfterTimeout, 1);
+  assert.deepEqual(summary.deferred, []);
+  assert.deepEqual(ran, [2], 'the handler behind the wedged one still runs in this tick');
 });
 
 test('runPostedReviewHandlersFairly isolates a throwing handler', async () => {

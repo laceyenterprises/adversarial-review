@@ -485,7 +485,7 @@ class OAuthError extends Error {
 class LaunchctlSessionError extends Error {
   constructor(reason, { cause, stdout = '', stderr = '' } = {}) {
     const text = String(reason || '');
-    const detail = /\bstd(?:out|err):\n/.test(text)
+    const detail = /\bstd(?:out|err):\n/.test(text) || /\bcode=.*\bexitCode=.*\bsignal=.*\bkilled=(?:true|false)\b/.test(text)
       ? text.trim()
       : formatChildProcessFailureDetails({ message: text, stdout, stderr }).trim();
     super(`Claude launchctl session bootstrap failed: ${detail || reason}`);

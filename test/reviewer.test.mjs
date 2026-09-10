@@ -41,6 +41,7 @@ const {
   parseCodexJsonTokenUsage,
   queueFollowUpForPostedReview,
   resolveClaudeLaunchctlUidForSpawn,
+  LaunchctlSessionError,
   resolveCodexAuthPath,
   resolveCodexExecOverrides,
   resolveReviewerTimeoutMs,
@@ -2845,6 +2846,21 @@ test('spawnClaude launchctl session failure message retains child stderr', async
       return true;
     }
   );
+});
+
+test('LaunchctlSessionError does not reformat empty-stdio child failure details', () => {
+  const reason = [
+    'Command failed: /bin/launchctl asuser 501 /usr/bin/env -u ANTHROPIC_API_KEY claude auth status',
+    'code=EIO exitCode=<none> signal=<none> killed=false',
+  ].join('\n');
+  const err = new LaunchctlSessionError(reason, { cause: { code: 'EIO' } });
+
+  assert.equal(err.isLaunchctlSessionError, true);
+  assert.equal(
+    (err.message.match(/\bcode=EIO exitCode=<none> signal=<none> killed=false\b/g) || []).length,
+    1
+  );
+  assert.doesNotMatch(err.message, /\bcode=<none> exitCode=<none> signal=<none> killed=false\b/);
 });
 
 test('assertClaudeOAuth retries bounded launchctl session failures', async () => {

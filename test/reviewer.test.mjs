@@ -2826,6 +2826,27 @@ test('spawnClaude classifies launchctl session failures separately from oauth fa
   );
 });
 
+test('spawnClaude launchctl session failure message retains child stderr', async () => {
+  await assert.rejects(
+    () => spawnClaude(['auth', 'status'], {
+      platform: 'darwin',
+      uid: 501,
+      execFileImpl: async () => {
+        const err = new Error('Command failed with code 1');
+        err.code = 1;
+        err.stderr = 'bootstrap failed: 5: Input/output error';
+        throw err;
+      },
+    }),
+    (err) => {
+      assert.equal(err?.isLaunchctlSessionError, true);
+      assert.match(err.message, /Command failed with code 1/);
+      assert.match(err.message, /stderr:\nbootstrap failed: 5: Input\/output error/);
+      return true;
+    }
+  );
+});
+
 test('assertClaudeOAuth retries bounded launchctl session failures', async () => {
   let attempts = 0;
   const delays = [];

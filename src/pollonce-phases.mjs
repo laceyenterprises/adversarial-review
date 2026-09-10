@@ -199,6 +199,78 @@ import { computeVocabularyFatigueFindingForPR } from './vocabulary-fatigue.mjs';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import { reserveReviewerMemoryAdmission } from './watcher-reviewer-pool.mjs';
 
+const DEFAULT_REVIEWER_MODEL_FALLBACK_ALERT_WINDOW_MS = 10 * 60 * 1000;
+const DEFAULT_REVIEWER_MODEL_FALLBACK_ALERT_THRESHOLD = 5;
+const reviewerModelFallbackAlertState = {
+  events: [],
+  lastAlertKey: null,
+};
+
+function resolvePositiveIntegerEnv(env, name, fallback) {
+  const parsed = Number(env?.[name]);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+export function reviewerModelFallbackAlertConfig(env = process.env) {
+  return {
+    windowMs: resolvePositiveIntegerEnv(
+      env,
+      'ADVERSARIAL_REVIEWER_MODEL_FALLBACK_ALERT_WINDOW_MS',
+      DEFAULT_REVIEWER_MODEL_FALLBACK_ALERT_WINDOW_MS,
+    ),
+    threshold: resolvePositiveIntegerEnv(
+      env,
+      'ADVERSARIAL_REVIEWER_MODEL_FALLBACK_ALERT_THRESHOLD',
+      DEFAULT_REVIEWER_MODEL_FALLBACK_ALERT_THRESHOLD,
+    ),
+  };
+}
+
+export function recordReviewerModelFallbackForAlert({
+  repoPath,
+  prNumber,
+  fallback,
+  nowMs = Date.now(),
+  state = reviewerModelFallbackAlertState,
+  config = reviewerModelFallbackAlertConfig(),
+  log = console,
+} = {}) {
+  if (!fallback || !repoPath || !Number.isInteger(Number(prNumber))) {
+    return { alerted: false, distinctSubjects: 0 };
+  }
+  const windowMs = Number(config.windowMs);
+  const threshold = Number(config.threshold);
+  if (!Number.isFinite(windowMs) || windowMs <= 0 || !Number.isInteger(threshold) || threshold <= 0) {
+    return { alerted: false, distinctSubjects: 0 };
+  }
+  const cutoffMs = nowMs - windowMs;
+  const events = Array.isArray(state.events) ? state.events : [];
+  state.events = events.filter((event) => Number(event.atMs) >= cutoffMs);
+  state.events.push({
+    atMs: nowMs,
+    subject: `${repoPath}#${prNumber}`,
+    fromReviewerModel: fallback.fromReviewerModel || null,
+    toReviewerModel: fallback.toReviewerModel || null,
+    failureClass: fallback.failureClass || null,
+  });
+
+  const distinctSubjects = new Set(state.events.map((event) => event.subject)).size;
+  const windowSeconds = Math.round(windowMs / 1000);
+  const alertKey = `${Math.floor(nowMs / windowMs)}:${distinctSubjects}`;
+  if (distinctSubjects < threshold || state.lastAlertKey === alertKey) {
+    return { alerted: false, distinctSubjects };
+  }
+  state.lastAlertKey = alertKey;
+  const classes = [...new Set(state.events.map((event) => event.failureClass).filter(Boolean))].join(',') || 'unknown';
+  const routes = [...new Set(state.events.map((event) => `${event.fromReviewerModel || '?'}->${event.toReviewerModel || '?'}`))]
+    .join(',');
+  log.warn?.(
+    `[watcher] reviewer-lane-fallback-rate-high distinctSubjects=${distinctSubjects} ` +
+      `threshold=${threshold} windowSeconds=${windowSeconds} classes=${classes} routes=${routes}`
+  );
+  return { alerted: true, distinctSubjects };
+}
+
 // MAL-01: a PR that carries no worker prefix is not necessarily MALFORMED.
 //
 // `routeSubject` returns no route when the title has no creation-time worker
@@ -1404,6 +1476,12 @@ export async function processReviewSubject(entry, ctx) {
             `count=${route.reviewerModelFallback.failureCount}/${route.reviewerModelFallback.threshold} ` +
             `reason=${route.reviewerModelFallback.reason}`
         );
+        recordReviewerModelFallbackForAlert({
+          repoPath,
+          prNumber,
+          fallback: route.reviewerModelFallback,
+          log: console,
+        });
       } else if (route.reviewerModelFallbackSkipped) {
         console.warn(
           `[watcher] reviewer-model-fallback-skipped repo=${repoPath} pr=${prNumber} ` +

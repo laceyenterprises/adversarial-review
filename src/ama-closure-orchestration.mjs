@@ -168,7 +168,6 @@ async function runCoexistenceOperation(
         controller.abort(err);
         reject(err);
       }, effectiveTimeoutMs);
-      timer.unref?.();
     });
     return await Promise.race([work, timeout]);
   } catch (err) {

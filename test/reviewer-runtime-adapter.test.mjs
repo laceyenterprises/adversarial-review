@@ -26,6 +26,7 @@ import { writeRuntimeStatusSnapshot } from '../src/runtime-status-snapshot.mjs';
 import { writeCanaryStatus } from '../src/adapters/agent-runtime/canary.mjs';
 import { writeSettleSmokeResult } from '../src/adapters/agent-runtime/settle-smoke.mjs';
 import { createCliDirectReviewerRuntimeAdapter } from '../src/adapters/reviewer-runtime/cli-direct/index.mjs';
+import { persistReviewerChildRunState } from '../src/reviewer-child-run-state.mjs';
 import {
   CANONICAL_OAUTH_STRIP_ENV as CLI_DIRECT_CANONICAL_OAUTH_STRIP_ENV,
   resolveProgressTimeoutForModel,
@@ -1360,6 +1361,54 @@ test('cli-direct writes atomic reviewer run records and refuses double-spawn for
   }
 });
 
+test('cli-direct records launch intent before subprocess onSpawn callback', async () => {
+  const rootDir = makeRoot();
+  let capturedOptions;
+  let release;
+  try {
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      preflightImpl: noopPreflight,
+      spawnCapturedImpl: async (_command, _args, options) => {
+        capturedOptions = options;
+        await new Promise((resolve) => { release = resolve; });
+        options.onSpawn({ pgid: 5151 });
+        return { stdout: 'posted\n', stderr: '' };
+      },
+      now: () => '2026-05-11T20:00:00.000Z',
+    });
+
+    const req = {
+      model: 'claude',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 2 },
+      timeoutMs: 100,
+      sessionUuid: 'launching-session',
+      forbiddenFallbacks: ['api-key'],
+    };
+    const first = adapter.spawnReviewer(req);
+    await waitFor(() => assert.ok(capturedOptions));
+
+    const launchingRecord = readReviewerRunRecord(rootDir, req.sessionUuid);
+    assert.equal(launchingRecord.state, 'launching');
+    assert.equal(launchingRecord.pgid, null);
+    assert.equal(capturedOptions.env.REVIEWER_RUN_STATE_ROOT_DIR, rootDir);
+
+    const duplicate = await adapter.spawnReviewer(req);
+    assert.equal(duplicate.ok, false);
+    assert.equal(duplicate.failureClass, 'daemon-bounce');
+
+    release();
+    const completed = await first;
+    assert.equal(completed.ok, true);
+    const completedRecord = readReviewerRunRecord(rootDir, req.sessionUuid);
+    assert.equal(completedRecord.state, 'completed');
+    assert.equal(completedRecord.pgid, 5151);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('cli-direct preserves cancelled state across abort races', async () => {
   const rootDir = makeRoot();
   let release;
@@ -1408,6 +1457,52 @@ test('cli-direct preserves cancelled state across abort races', async () => {
     assert.equal(cancelled.ok, false);
     assert.equal(cancelled.failureClass, 'unknown');
     assert.equal(existsSync(reviewerRunStatePath(rootDir, req.sessionUuid)), true);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reviewer child self-persists detached pgid without overwriting terminal records', () => {
+  const rootDir = makeRoot();
+  try {
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'child-start-session',
+      runtime: 'cli-direct',
+      state: 'launching',
+      pgid: null,
+      spawnedAt: '2026-05-11T19:59:59.000Z',
+      reattachToken: 'child-start-session',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 7 },
+    });
+
+    const updated = persistReviewerChildRunState({
+      rootDir,
+      env: { REVIEWER_RUN_STATE_ROOT_DIR: rootDir },
+      sessionUuid: 'child-start-session',
+      pid: 6161,
+      now: () => '2026-05-11T20:00:00.000Z',
+    });
+    assert.equal(updated.state, 'heartbeating');
+    assert.equal(updated.pgid, 6161);
+    assert.equal(updated.spawnedAt, '2026-05-11T20:00:00.000Z');
+
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'child-cancelled-session',
+      runtime: 'cli-direct',
+      state: 'cancelled',
+      pgid: null,
+      spawnedAt: '2026-05-11T19:59:59.000Z',
+      reattachToken: 'child-cancelled-session',
+    });
+    const terminal = persistReviewerChildRunState({
+      rootDir,
+      env: { REVIEWER_RUN_STATE_ROOT_DIR: rootDir },
+      sessionUuid: 'child-cancelled-session',
+      pid: 6162,
+      now: () => '2026-05-11T20:00:00.000Z',
+    });
+    assert.equal(terminal.state, 'cancelled');
+    assert.equal(terminal.pgid, null);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

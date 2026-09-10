@@ -857,7 +857,7 @@ test('claimed rows with null pgid adopt a live run-state pgid after watcher boun
 
 test('claimed rows with null pgid auto-rearm when no live run-state or GitHub review exists', async () => {
   const db = setupDb();
-  seedReviewing(db, { pgid: null, reviewerTimeoutMs: 60 * 1000 });
+  seedReviewing(db, { pgid: null, startedAt: null });
   const log = makeLog();
   const settled = [];
 
@@ -883,7 +883,7 @@ test('claimed rows with null pgid auto-rearm when no live run-state or GitHub re
 
 test('claimed rows with null pgid use quarantine-only failure text when the recovery cap is exhausted', async () => {
   const db = setupDb();
-  seedReviewing(db, { pgid: null, infraAutoRecoverAttempts: 3, reviewerTimeoutMs: 60 * 1000 });
+  seedReviewing(db, { pgid: null, startedAt: null, infraAutoRecoverAttempts: 3 });
   const log = makeLog();
 
   await reconcileReviewerSessions({
@@ -932,12 +932,12 @@ test('claimed rows with null pgid stay reviewing while launch guard window is ac
   assert.equal(row.review_status, 'reviewing');
   assert.equal(row.review_attempts, 2);
   assert.equal(row.failure_message, null);
-  assert.equal(headProbeCount, 0, 'active launch guard must avoid head probing');
-  assert.equal(reviewProbeCount, 0, 'active launch guard must avoid review probing');
+  assert.equal(headProbeCount, 0, 'active guard must avoid head probing');
+  assert.equal(reviewProbeCount, 0, 'active guard must avoid review probing');
   assert.match(log.lines.join('\n'), /reviewer_reattach_null_pgid_guard_active/);
 });
 
-test('claimed rows with null pgid stay reviewing after launch grace while reviewer timeout is active', async () => {
+test('old spawned/null-pgid rows wait the full reviewer timeout before rearm', async () => {
   const db = setupDb();
   seedReviewing(db, {
     pgid: null,
@@ -949,10 +949,20 @@ test('claimed rows with null pgid stay reviewing after launch grace while review
   const settled = [];
   let headProbeCount = 0;
   let reviewProbeCount = 0;
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewer-reattach-old-nullpgid-'));
+  writeReviewerRunRecord(rootDir, {
+    sessionUuid: 'session-70',
+    runtime: 'cli-direct',
+    state: 'spawned',
+    pgid: null,
+    spawnedAt: '2026-05-11T05:18:59.000Z',
+    reattachToken: 'session-70',
+  });
 
   await reconcileReviewerSessions({
     db,
     octokit: makeOctokit([]),
+    rootDir,
     now: new Date(FAILURE_AT),
     log,
     fetchHeadSha: async () => {
@@ -969,16 +979,67 @@ test('claimed rows with null pgid stay reviewing after launch grace while review
   const row = readRow(db);
   assert.equal(row.review_status, 'reviewing');
   assert.equal(row.review_attempts, 2);
-  assert.equal(row.failure_message, null);
-  assert.equal(headProbeCount, 0, 'full reviewer-timeout guard must avoid head probing');
-  assert.equal(reviewProbeCount, 0, 'full reviewer-timeout guard must avoid review probing');
-  assert.deepEqual(settled, []);
-  assert.match(log.lines.join('\n'), /reviewer_reattach_null_pgid_guard_active/);
+  assert.equal(headProbeCount, 0);
+  assert.equal(reviewProbeCount, 0);
+  assert.equal(settled.length, 0);
+  assert.match(log.lines.join('\n'), /run_state=spawned/);
+});
+
+test('new launching/null-pgid rows auto-rearm after launch grace expires before reviewer timeout', async () => {
+  const db = setupDb();
+  seedReviewing(db, {
+    pgid: null,
+    lastAttemptedAt: '2026-05-11T05:18:59.000Z',
+    startedAt: null,
+    reviewerTimeoutMs: 20 * 60 * 1000,
+  });
+  const log = makeLog();
+  const settled = [];
+  let headProbeCount = 0;
+  let reviewProbeCount = 0;
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewer-reattach-launching-nullpgid-'));
+  writeReviewerRunRecord(rootDir, {
+    sessionUuid: 'session-70',
+    runtime: 'cli-direct',
+    state: 'launching',
+    pgid: null,
+    spawnedAt: '2026-05-11T05:18:59.000Z',
+    reattachToken: 'session-70',
+  });
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    rootDir,
+    now: new Date(FAILURE_AT),
+    log,
+    fetchHeadSha: async () => {
+      headProbeCount += 1;
+      return HEAD_SHA;
+    },
+    findPostedReview: async () => {
+      reviewProbeCount += 1;
+      return null;
+    },
+    onTerminalDeadSession: async (event) => settled.push(event),
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'pending');
+  assert.equal(row.review_attempts, 3);
+  assert.equal(headProbeCount, 1);
+  assert.equal(reviewProbeCount, 1);
+  assert.match(row.failure_message, /no live reviewer process group was found/);
+  assert.deepEqual(
+    settled.map(({ state, reason }) => ({ state, reason })),
+    [{ state: 'cancelled', reason: 'missing-pgid-no-live-reviewer' }]
+  );
+  assert.match(log.lines.join('\n'), /reviewer_reattach_null_pgid_requeued/);
 });
 
 test('claimed rows with null pgid reconcile to an already posted current-head review', async () => {
   const db = setupDb();
-  seedReviewing(db, { pgid: null, reviewerTimeoutMs: 60 * 1000 });
+  seedReviewing(db, { pgid: null, startedAt: null });
   const log = makeLog();
   const settled = [];
 
@@ -1008,7 +1069,7 @@ test('claimed rows with null pgid reconcile to an already posted current-head re
 
 test('claimed rows with null pgid retry later when GitHub review probe fails transiently', async () => {
   const db = setupDb();
-  seedReviewing(db, { pgid: null, reviewerTimeoutMs: 60 * 1000 });
+  seedReviewing(db, { pgid: null, startedAt: null });
   const log = makeLog();
 
   await reconcileReviewerSessions({
@@ -1033,7 +1094,7 @@ test('claimed rows with null pgid retry later when GitHub review probe fails tra
 
 test('claimed rows with null pgid stay sticky when GitHub review probe fails non-transiently', async () => {
   const db = setupDb();
-  seedReviewing(db, { pgid: null, reviewerTimeoutMs: 60 * 1000 });
+  seedReviewing(db, { pgid: null, startedAt: null });
   const log = makeLog();
 
   await reconcileReviewerSessions({

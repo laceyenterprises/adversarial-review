@@ -16,6 +16,7 @@ import {
 
 const execFileAsync = promisify(execFile);
 import {
+  ACTIVE_RUN_STATES,
   claimReviewerRunRecord,
   readReviewerRunRecord,
   reviewerRunSideChannelPaths,
@@ -359,6 +360,7 @@ function createCliDirectReviewerRuntimeAdapter({
     const reviewerEnv = {
       ...process.env,
       REVIEWER_SESSION_UUID: sessionUuid,
+      REVIEWER_RUN_STATE_ROOT_DIR: rootDir,
     };
     let stripped = [];
     let preflightResult = null;
@@ -405,7 +407,7 @@ function createCliDirectReviewerRuntimeAdapter({
       sessionUuid,
       domain: subjectContext.domainId,
       runtime: 'cli-direct',
-      state: 'spawned',
+      state: 'launching',
       pgid: null,
       spawnedAt,
       lastHeartbeatAt: null,
@@ -413,7 +415,7 @@ function createCliDirectReviewerRuntimeAdapter({
       subjectContext,
     };
     const claim = claimReviewerRunRecord(rootDir, initialRecord);
-    if (!claim.claimed && ['spawned', 'heartbeating'].includes(claim.record?.state)) {
+    if (!claim.claimed && ACTIVE_RUN_STATES.has(claim.record?.state)) {
       return emptyResult({
         ok: false,
         spawnedAt: claim.record.spawnedAt || spawnedAt,

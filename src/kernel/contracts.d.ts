@@ -552,6 +552,7 @@ export interface RemediatorRunResult {
 }
 
 export type ReviewerRunState =
+  | 'launching'
   | 'spawned'
   | 'heartbeating'
   | 'completed'

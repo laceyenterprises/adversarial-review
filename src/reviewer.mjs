@@ -88,6 +88,7 @@ import { parseExactHeadReviewArtifactOrNull, postExactHeadReview } from './revie
 import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
+import { persistReviewerChildRunState } from './reviewer-child-run-state.mjs';
 import {
   appendScopeViolationFinding,
   resolveAdditiveOnlyScopeReview,
@@ -1980,6 +1981,19 @@ async function main() {
   if (reviewerSessionUuid && !process.env.REVIEWER_SESSION_UUID) {
     process.env.REVIEWER_SESSION_UUID = String(reviewerSessionUuid);
   }
+  persistReviewerChildRunState({
+    rootDir: ROOT,
+    sessionUuid: reviewerSessionUuid,
+    subjectContext: {
+      domainId: 'code-pr',
+      repo,
+      prNumber,
+      reviewerModel,
+      botTokenEnv,
+      reviewerHeadSha,
+      reviewerSpawnToken,
+    },
+  });
 
   if (reviewerHeadSha) {
     try {

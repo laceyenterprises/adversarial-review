@@ -41,7 +41,7 @@ const CLAUDE_QUOTA_PATTERNS = [
 // Shared / provider-agnostic hard-cap markers.
 const GENERIC_QUOTA_PATTERNS = [
   /resource_exhausted/i,
-  /\bquota (?:exceeded|exhausted)\b/i,
+  /\bquota (?:exceeded|exhausted|reached)\b/i,
   /\bplan_limit\b/i,
 ];
 

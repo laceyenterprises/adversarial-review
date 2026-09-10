@@ -67,6 +67,14 @@ test('generic resource_exhausted is detected as a hard cap (harness unknown)', (
   assert.equal(result.harness, 'unknown');
 });
 
+test('Gemini individual quota reached text is detected as a hard cap', () => {
+  const result = detectQuotaExhaustion(
+    'Error: Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 8h50m23s.',
+  );
+  assert.equal(result.isQuotaExhausted, true);
+  assert.equal(result.harness, 'unknown');
+});
+
 test('transient HTTP-429 throttle is NOT a hard cap (stays on cascade path)', () => {
   // A bare 429 / rate_limit_exceeded must keep riding the cascade short-backoff
   // path, NOT the quota-hold path. detectQuotaExhaustion must ignore it.
@@ -277,6 +285,16 @@ test('classifyReviewerFailure routes a claude hard cap to quota-exhausted', () =
   assert.equal(
     classifyReviewerFailure('Claude usage limit reached; resets at 2026-06-17T17:39:00Z', 1),
     QUOTA_EXHAUSTED_FAILURE_CLASS
+  );
+});
+
+test('classifyReviewerFailure routes Gemini individual quota reached to quota-exhausted', () => {
+  assert.equal(
+    classifyReviewerFailure(
+      'Error: Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 8h50m23s.',
+      1,
+    ),
+    QUOTA_EXHAUSTED_FAILURE_CLASS,
   );
 });
 

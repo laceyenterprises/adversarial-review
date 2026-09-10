@@ -13,9 +13,11 @@
  * Claude reviews MUST use OAuth (claude CLI), never ANTHROPIC_API_KEY.
  * Codex reviews MUST use OAuth (codex CLI), never OPENAI_API_KEY.
  * If OAuth credentials are missing or expired → STOP and alert Paul via Clio.
- * API key fallback is intentionally NOT implemented here. On Darwin,
- * Claude is launched via `launchctl asuser`, so the wrapped command also
- * explicitly unsets API-key env vars inside the target process.
+ * API key fallback is intentionally NOT implemented here. On Darwin, keychain
+ * Claude launches use `launchctl asuser`; broker-mode Claude launches bypass
+ * launchctl and hand off a short-lived bearer after broker secrets have been
+ * stripped. Both paths explicitly unset API-key env vars inside the target
+ * process.
  * ────────────────────────────────────────────────────────────────────────────
  */
 

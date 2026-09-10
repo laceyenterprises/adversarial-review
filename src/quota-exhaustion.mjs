@@ -43,6 +43,7 @@ const GENERIC_QUOTA_PATTERNS = [
   /resource_exhausted/i,
   /\bquota (?:exceeded|exhausted|reached)\b/i,
   /\bplan_limit\b/i,
+  /would exceed your account['’]s rate limit/i,
 ];
 
 const CODEX_HUMAN_RESET_TIME_ZONE = 'America/Los_Angeles';
@@ -244,7 +245,15 @@ function detectQuotaExhaustion(text, { nowMs = null } = {}) {
   if (!codex && !claude && !generic) {
     return { isQuotaExhausted: false, harness: null, resetAt: null };
   }
-  const harness = codex ? 'codex' : claude ? 'claude' : 'unknown';
+  const lower = t.toLowerCase();
+  const accountRateLimit = /would exceed your account['’]s rate limit/i.test(t);
+  const harness = codex
+    ? 'codex'
+    : claude || (accountRateLimit && /\b(?:claude|anthropic)\b/.test(lower))
+      ? 'claude'
+      : accountRateLimit && /\b(?:codex|openai)\b/.test(lower)
+        ? 'codex'
+        : 'unknown';
   return {
     isQuotaExhausted: true,
     harness,

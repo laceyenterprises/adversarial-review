@@ -565,7 +565,9 @@ function classifyFailure(value) {
   if (
     text.includes(QUOTA_EXHAUSTED_FAILURE_CLASS) ||
     text.includes('usage cap') ||
-    text.includes('usage limit')
+    text.includes('usage limit') ||
+    text.includes("would exceed your account's rate limit") ||
+    text.includes('would exceed your account’s rate limit')
   ) return QUOTA_EXHAUSTED_FAILURE_CLASS;
   if (text.includes('github-review-create-transient')) return 'github-review-create-transient';
   if (text.includes('github-review-create-terminal')) return 'github-review-create-terminal';
@@ -576,6 +578,11 @@ function classifyFailure(value) {
     /\boverloaded\b[\s\S]{0,160}\b(provider|model|backend|upstream|server|service|api)\b/.test(text) ||
     /\b(provider|model|backend|upstream|server|service|api)\b[\s\S]{0,160}\boverloaded\b/.test(text)
   ) return PROVIDER_OVERLOADED_FAILURE_CLASS;
+  if (
+    /api_error_status["']?\s*:\s*429\b/.test(text) ||
+    /\btoo many requests\b/.test(text) ||
+    /\brate limit\b/.test(text)
+  ) return 'upstream';
   if (text.includes('timeout') || text.includes('timed out') || text.includes('no output')) return 'timeout';
   if (text.includes('oauth') || text.includes('auth') || text.includes('token') || text.includes('credential')) return 'auth';
   if (text.includes('upstream') || text.includes('litellm') || text.includes('rate limit') || text.includes('5xx')) return 'upstream';

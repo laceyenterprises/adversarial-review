@@ -440,6 +440,14 @@ test('rate-limit and 5xx heuristics distinguish real 429s from cascades', () => 
     'unknown'
   );
   assert.equal(
+    classifyReviewerFailure(
+      `model=claude
+{"api_error_status":429,"result":"API Error: Request rejected (429) · This request would exceed your account's rate limit. Please try again later."}`,
+      1,
+    ),
+    'quota-exhausted'
+  );
+  assert.equal(
     classifyReviewerFailure('API Error 529: provider overloaded; please retry later', 1),
     PROVIDER_OVERLOADED_FAILURE_CLASS
   );

@@ -44,6 +44,7 @@ import {
   reviewerRunSideChannelPaths,
   reviewerRunStatePath,
   settleReviewerRunRecord,
+  updateReviewerRunRecord,
   writeReviewerRunRecord,
 } from '../src/adapters/reviewer-runtime/run-state.mjs';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
@@ -1409,7 +1410,7 @@ test('cli-direct records launch intent before subprocess onSpawn callback', asyn
   }
 });
 
-test('cli-direct onSpawn preserves child-persisted run state', async () => {
+test('cli-direct onSpawn preserves newer owner-written run state', async () => {
   const rootDir = makeRoot();
   let release;
   try {
@@ -1417,13 +1418,22 @@ test('cli-direct onSpawn preserves child-persisted run state', async () => {
       rootDir,
       preflightImpl: noopPreflight,
       spawnCapturedImpl: async (_command, _args, options) => {
-        persistReviewerChildRunState({
+        writeReviewerRunRecord(options.env.REVIEWER_RUN_STATE_ROOT_DIR, {
+          sessionUuid: 'child-wins-session',
+          domain: 'code-pr',
+          runtime: 'cli-direct',
+          state: 'heartbeating',
+          pgid: 6161,
+          spawnedAt: '2026-05-11T20:00:01.000Z',
+          lastHeartbeatAt: '2026-05-11T20:00:01.000Z',
+          reattachToken: 'child-wins-session',
+          subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 2 },
+        });
+        assert.equal(persistReviewerChildRunState({
           rootDir,
           env: options.env,
           sessionUuid: 'child-wins-session',
-          pid: 6161,
-          now: () => '2026-05-11T20:00:01.000Z',
-        });
+        })?.pgid, 6161);
         options.onSpawn({ pgid: 6161 });
         await new Promise((resolve) => { release = resolve; });
         return { stdout: 'posted\n', stderr: '' };
@@ -1514,7 +1524,61 @@ test('cli-direct preserves cancelled state across abort races', async () => {
   }
 });
 
-test('reviewer child self-persists detached pgid without overwriting terminal records', () => {
+test('cli-direct preserves cancelled terminal state when onSpawn loses the cancellation race', async () => {
+  const rootDir = makeRoot();
+  let capturedOptions;
+  let releaseSpawn;
+  const killCalls = [];
+  try {
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      preflightImpl: noopPreflight,
+      processKillImpl: (pid, signal) => {
+        killCalls.push([pid, signal]);
+        return true;
+      },
+      spawnCapturedImpl: async (_command, _args, options) => {
+        capturedOptions = options;
+        await new Promise((resolve) => { releaseSpawn = resolve; });
+        options.onSpawn({ pgid: 4244 });
+        return { stdout: 'posted-after-cancel\n', stderr: '' };
+      },
+      now: () => '2026-05-11T20:00:00.000Z',
+    });
+
+    const req = {
+      model: 'claude',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 2 },
+      timeoutMs: 5_000,
+      sessionUuid: 'cancelled-before-onspawn-session',
+      forbiddenFallbacks: ['api-key'],
+    };
+    const run = adapter.spawnReviewer(req);
+    await waitFor(() => assert.ok(capturedOptions));
+    const claimed = readReviewerRunRecord(rootDir, req.sessionUuid);
+    assert.equal(claimed.state, 'launching');
+    updateReviewerRunRecord(rootDir, claimed, {
+      state: 'cancelled',
+      lastHeartbeatAt: '2026-05-11T20:00:01.000Z',
+    });
+
+    releaseSpawn();
+    const cancelled = await run;
+
+    assert.equal(cancelled.ok, false);
+    assert.equal(cancelled.failureClass, 'daemon-bounce');
+    assert.equal(cancelled.pgid, 4244);
+    assert.deepEqual(killCalls, [[-4244, 'SIGTERM']]);
+    const record = readReviewerRunRecord(rootDir, req.sessionUuid);
+    assert.equal(record.state, 'cancelled');
+    assert.equal(record.pgid, 4244);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reviewer child run-state helper is read-only for watcher-owned records', () => {
   const rootDir = makeRoot();
   try {
     writeReviewerRunRecord(rootDir, {
@@ -1526,17 +1590,19 @@ test('reviewer child self-persists detached pgid without overwriting terminal re
       reattachToken: 'child-start-session',
       subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 7 },
     });
+    const before = readFileSync(reviewerRunStatePath(rootDir, 'child-start-session'), 'utf8');
 
-    const updated = persistReviewerChildRunState({
+    const observed = persistReviewerChildRunState({
       rootDir,
       env: { REVIEWER_RUN_STATE_ROOT_DIR: rootDir },
       sessionUuid: 'child-start-session',
       pid: 6161,
       now: () => '2026-05-11T20:00:00.000Z',
     });
-    assert.equal(updated.state, 'heartbeating');
-    assert.equal(updated.pgid, 6161);
-    assert.equal(updated.spawnedAt, '2026-05-11T20:00:00.000Z');
+    assert.equal(observed.state, 'launching');
+    assert.equal(observed.pgid, null);
+    assert.equal(observed.spawnedAt, '2026-05-11T19:59:59.000Z');
+    assert.equal(readFileSync(reviewerRunStatePath(rootDir, 'child-start-session'), 'utf8'), before);
 
     writeReviewerRunRecord(rootDir, {
       sessionUuid: 'child-cancelled-session',

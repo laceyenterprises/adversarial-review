@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 
-import { readReviewerRunRecord } from './adapters/reviewer-runtime/run-state.mjs';
+import { readReviewerRunRecord, TERMINAL_RUN_STATES } from './adapters/reviewer-runtime/run-state.mjs';
 import {
   loginsMatch,
   resolveReviewerBotLogin,
@@ -356,6 +356,7 @@ function nullPgidGuardWindowMs({
   reviewerDeadlineMs,
 } = {}) {
   const state = String(runRecord?.state || '').trim();
+  if (TERMINAL_RUN_STATES.has(state)) return 0;
   if (
     state === 'launching' ||
     (!runRecord && parseTime(row?.reviewer_started_at) === null)

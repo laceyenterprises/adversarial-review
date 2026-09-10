@@ -315,6 +315,25 @@ async function terminateProcessGroup(pgid, {
   }
 }
 
+function signalTerminalSpawnedPgid(pgid, {
+  processKillImpl,
+  logger,
+  sessionUuid,
+  state,
+} = {}) {
+  if (!Number.isInteger(pgid) || pgid <= 0) return;
+  try {
+    processKillImpl(-pgid, 'SIGTERM');
+  } catch (err) {
+    if (err?.code === 'ESRCH') return;
+    logger?.warn?.(
+      `[cli-direct] failed to signal reviewer process group ${pgid} after ` +
+      `terminal onSpawn race for session=${sessionUuid || 'unknown'} state=${state || 'unknown'}: ` +
+      `${err?.message || err}`
+    );
+  }
+}
+
 function readSideChannelTails(rootDir, sessionUuid) {
   const { stdoutPath, stderrPath } = reviewerRunSideChannelPaths(rootDir, sessionUuid);
   return {
@@ -464,7 +483,19 @@ function createCliDirectReviewerRuntimeAdapter({
               currentRecord = record;
             }
             if (TERMINAL_RUN_STATES.has(currentRecord.state)) {
-              record = currentRecord;
+              const spawnedPgid = Number.isInteger(pgid) && pgid > 0 ? pgid : null;
+              const recordPgid = Number.isInteger(currentRecord.pgid) && currentRecord.pgid > 0
+                ? currentRecord.pgid
+                : spawnedPgid;
+              record = recordPgid && recordPgid !== currentRecord.pgid
+                ? updateReviewerRunRecord(rootDir, currentRecord, { pgid: recordPgid })
+                : currentRecord;
+              signalTerminalSpawnedPgid(spawnedPgid, {
+                processKillImpl,
+                logger,
+                sessionUuid,
+                state: currentRecord.state,
+              });
             } else {
               const spawnedAt = currentRecord.spawnedAt || authoritativeSpawnedAt;
               const lastHeartbeatAt =
@@ -486,6 +517,23 @@ function createCliDirectReviewerRuntimeAdapter({
           },
         }
       );
+
+      if (TERMINAL_RUN_STATES.has(record.state) && record.state !== 'completed') {
+        const terminalMessage = `reviewer run ${sessionUuid} reached terminal state ${record.state} before subprocess completion`;
+        return emptyResult({
+          ok: false,
+          spawnedAt: record.spawnedAt,
+          failureClass: 'daemon-bounce',
+          stderrTail: terminalMessage,
+          stdoutTail: tailText(stdout),
+          pgid: record.pgid,
+          reattachToken: record.reattachToken,
+          tokenUsage: shouldParseStdoutTokenUsage(req.model)
+            ? parseCodexJsonTokenUsage(stdout)
+            : null,
+          error: terminalMessage,
+        });
+      }
 
       record = updateReviewerRunRecord(rootDir, record, {
         state: 'completed',

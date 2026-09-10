@@ -155,6 +155,20 @@ export function resolveMergeAgentCoexistenceStepDeadlineMs(
   return Math.min(overrideDeadlineMs, derivedDeadlineMs);
 }
 
+export function resolveMergeAgentCoexistenceOperationTimeoutMs(
+  env = process.env,
+  { stepDeadlineMs = resolveMergeAgentCoexistenceStepDeadlineMs(env) } = {},
+) {
+  const resolvedStepDeadlineMs = parsePositiveMs(stepDeadlineMs, resolveMergeAgentCoexistenceStepDeadlineMs(env));
+  const headroomMs = Math.min(5_000, Math.max(1, Math.floor(resolvedStepDeadlineMs * 0.2)));
+  const derivedTimeoutMs = Math.max(1, Math.min(60_000, resolvedStepDeadlineMs - headroomMs));
+  const overrideTimeoutMs = parsePositiveMs(
+    env?.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_OPERATION_TIMEOUT_MS,
+    derivedTimeoutMs,
+  );
+  return Math.max(1, Math.min(overrideTimeoutMs, Math.max(1, resolvedStepDeadlineMs - 1)));
+}
+
 export async function timePostedReviewStep(
   label,
   key,
@@ -164,6 +178,7 @@ export async function timePostedReviewStep(
   {
     deadlineMs = null,
     abortOnDeadline = true,
+    getInFlightOperation = null,
     setTimeoutFn = setTimeout,
     clearTimeoutFn = clearTimeout,
   } = {},
@@ -223,9 +238,16 @@ export async function timePostedReviewStep(
     }
     if (timedOut) {
       const elapsedMs = Math.round(performance.now() - startedMs);
+      const inFlight = typeof getInFlightOperation === 'function' ? getInFlightOperation() : null;
+      const inFlightDetail = inFlight?.name
+        ? ` in_flight_operation=${inFlight.name}` +
+          (Number.isFinite(inFlight.elapsedMs)
+            ? ` in_flight_elapsed_ms=${Math.round(inFlight.elapsedMs)}`
+            : '')
+        : '';
       logger?.error?.(
         `[watcher] posted-review step deadline exceeded for ${key}: ` +
-          `${label} deadline_ms=${effectiveDeadlineMs} elapsed_ms=${elapsedMs}`,
+          `${label} deadline_ms=${effectiveDeadlineMs} elapsed_ms=${elapsedMs}${inFlightDetail}`,
       );
     }
   }
@@ -352,6 +374,11 @@ export async function handlePostedReviewRow({
     // handled by one hammer under the launch lease. A separate merge-clicking
     // agent is no longer a valid outcome.
     const coexistenceDeadlineMs = resolveMergeAgentCoexistenceStepDeadlineMs();
+    const coexistenceOperationTimeoutMs = resolveMergeAgentCoexistenceOperationTimeoutMs(
+      process.env,
+      { stepDeadlineMs: coexistenceDeadlineMs },
+    );
+    const coexistenceOperationTracker = { current: null, currentStartedMs: null };
     let coexistenceDecision;
     try {
       coexistenceDecision = await timePostedReviewStep(
@@ -371,16 +398,34 @@ export async function handlePostedReviewRow({
             domainId,
             logger,
             signal,
+            operationTimeoutMs: coexistenceOperationTimeoutMs,
+            operationTracker: coexistenceOperationTracker,
           }),
         undefined,
-        { deadlineMs: coexistenceDeadlineMs, abortOnDeadline: false },
+        {
+          deadlineMs: coexistenceDeadlineMs,
+          abortOnDeadline: false,
+          getInFlightOperation: () => {
+            if (!coexistenceOperationTracker.current) return null;
+            return {
+              name: coexistenceOperationTracker.current,
+              elapsedMs: performance.now() - coexistenceOperationTracker.currentStartedMs,
+            };
+          },
+        },
       );
     } catch (err) {
       if (err?.code !== 'POSTED_REVIEW_STEP_DEADLINE_EXCEEDED') throw err;
       const reason = 'resolve-merge-agent-coexistence-deadline-exceeded';
+      const inFlight = coexistenceOperationTracker.current
+        ? ` in_flight_operation=${coexistenceOperationTracker.current}` +
+          (Number.isFinite(coexistenceOperationTracker.currentStartedMs)
+            ? ` in_flight_elapsed_ms=${Math.round(performance.now() - coexistenceOperationTracker.currentStartedMs)}`
+            : '')
+        : '';
       logger?.error?.(
         `[watcher] AMA/merge-agent coexistence deadline exceeded for ${repoPath}#${prNumber}; ` +
-          `reason=${reason} deadline_ms=${coexistenceDeadlineMs}. ` +
+          `reason=${reason} deadline_ms=${coexistenceDeadlineMs}${inFlight}. ` +
           'Leaving any in-flight HAM launch to settle under its own lease and dispatch timeout; ' +
           'skipping merge action for this PR on this tick so the posted-review phase can continue.',
       );

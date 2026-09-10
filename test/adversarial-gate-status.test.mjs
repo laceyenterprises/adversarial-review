@@ -1795,6 +1795,73 @@ test('resolveMergeAgentCoexistenceForWatcher treats eligible clean AMA dispatch 
   assert.notEqual(decision.outcome, 'await-operator');
 });
 
+test('RVCOEX-01: resolveMergeAgentCoexistenceForWatcher returns a named result on internal AMA operation timeout', async () => {
+  const warnings = [];
+  const decision = await resolveMergeAgentCoexistenceForWatcher({
+    reviewStateRow: makeReviewRow({
+      last_verdict: 'Comment only',
+      risk_class: 'low',
+      remediation_pending: 0,
+      reviewer: 'claude',
+      reviewer_head_sha: 'abc123',
+      review_body: '## Verdict\nComment only\n\n## Blocking Issues\n\n- None.\n\n## Non-blocking Issues\n\n- None.',
+    }),
+    dispatchJob: {
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 53,
+      headSha: 'abc123',
+      prUpdatedAt: '2026-05-07T12:05:00.000Z',
+    },
+    candidate: {
+      headSha: 'abc123',
+      riskClass: 'low',
+      prAuthor: 'codex-worker-bot',
+      prState: 'open',
+      mergeable: 'MERGEABLE',
+      mergeStateStatus: 'CLEAN',
+      statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' }],
+      branchProtection: { requiredContexts: [] },
+      isDraft: false,
+      prUpdatedAt: '2026-05-07T12:05:00.000Z',
+    },
+    labelNames: [],
+    mergeAgentRequestEvent: null,
+    repoPath: 'laceyenterprises/adversarial-review',
+    prNumber: 53,
+    currentRevisionRef: 'abc123',
+    logger: { log() {}, warn: (m) => warnings.push(String(m)), error() {} },
+    operationTimeoutMs: 10,
+    operationTracker: {},
+    maybeDispatchAmaClosureForImpl: (args) => maybeDispatchAmaClosureFor({
+      ...args,
+      fetchLatestHeadReviewBodiesImpl: async () => [
+        '## Verdict\nComment only\n\n## Blocking Issues\n\n- None.\n\n## Non-blocking Issues\n\n- None.',
+      ],
+      loadConfigImpl: () => ({
+        getMergeAuthorityConfig() {
+          return {
+            enabled: true,
+            eligibility: {
+              riskClasses: ['low', 'medium', 'high', 'critical'],
+              highRiskRequiresTwoKey: false,
+            },
+            branchProtection: { required: false },
+          };
+        },
+      }),
+      runDaemonCleanMergeAttemptImpl: ({ signal }) => new Promise((_, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason));
+      }),
+    }),
+  });
+
+  assert.equal(decision.outcome, 'ama-pending');
+  assert.equal(decision.amaClosureResult.reason, 'ama-coexistence-operation-timeout');
+  assert.equal(decision.amaClosureResult.timedOutOperation, 'daemon-clean-merge-attempt');
+  assert.equal(decision.amaClosureResult.timeoutMs, 10);
+  assert.match(warnings.join('\n'), /operation=daemon-clean-merge-attempt timeout_ms=10/);
+});
+
 test('BUG-1: resolveMergeAgentCoexistenceForWatcher drops ownership for an already-merged PR without invoking the AMA closer', async () => {
   let amaClosureInvoked = false;
   const decision = await resolveMergeAgentCoexistenceForWatcher({

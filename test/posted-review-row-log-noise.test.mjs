@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   PostedReviewStepDeadlineError,
   handlePostedReviewRow,
+  resolveMergeAgentCoexistenceOperationTimeoutMs,
   resolveMergeAgentCoexistenceStepDeadlineMs,
   runQueuedReviewAdoptionPhase,
   timePostedReviewStep,
@@ -102,6 +103,28 @@ test('RVHAND-10: posted-review HAM step budget admits observed live tails withou
 test('RVHAND-10: invalid posted-review phase budget falls back to cadence cap', () => {
   const env = { ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS: 'invalid' };
   assert.equal(resolvePostedReviewPhaseBudgetMs(env), 600_000);
+});
+
+test('RVCOEX-01: coexistence operation timeout stays inside the step deadline', () => {
+  const env = {
+    ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS: '87500',
+  };
+
+  assert.equal(resolveMergeAgentCoexistenceOperationTimeoutMs(env, { stepDeadlineMs: 87_500 }), 60_000);
+  assert.equal(
+    resolveMergeAgentCoexistenceOperationTimeoutMs(
+      { ...env, ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_OPERATION_TIMEOUT_MS: '87000' },
+      { stepDeadlineMs: 87_500 },
+    ),
+    87_000,
+  );
+  assert.equal(
+    resolveMergeAgentCoexistenceOperationTimeoutMs(
+      { ...env, ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_OPERATION_TIMEOUT_MS: '999999' },
+      { stepDeadlineMs: 87_500 },
+    ),
+    87_499,
+  );
 });
 
 test('RVHAND-11: reviewer-pressure posted-review phase budget is bounded to one handler window', () => {
@@ -430,6 +453,38 @@ test('handlePostedReviewRow: resolveMergeAgentCoexistence deadline is a soft han
     );
     assert.match(errors.join('\n'), /reason=resolve-merge-agent-coexistence-deadline-exceeded/);
     assert.match(errors.join('\n'), /Leaving any in-flight HAM launch to settle/);
+  } finally {
+    if (oldDeadline === undefined) {
+      delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
+    } else {
+      process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = oldDeadline;
+    }
+  }
+});
+
+test('RVCOEX-01: resolveMergeAgentCoexistence deadline logs the in-flight operation', async () => {
+  const oldDeadline = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
+  process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = '10';
+  const errors = [];
+  const { args } = baseArgs({
+    logger: {
+      log() {},
+      warn() {},
+      error: (m) => errors.push(String(m)),
+    },
+    resolveMergeAgentCoexistenceForWatcherImpl: ({ operationTracker }) => new Promise(() => {
+      operationTracker.current = 'ama-hammer-dispatch';
+      operationTracker.currentStartedMs = performance.now();
+    }),
+  });
+
+  try {
+    const result = await handlePostedReviewRow(args);
+
+    assert.equal(result.handled, true);
+    assert.equal(result.outcome, 'coexistence-deadline');
+    assert.match(errors.join('\n'), /in_flight_operation=ama-hammer-dispatch/);
+    assert.match(errors.join('\n'), /in_flight_elapsed_ms=\d+/);
   } finally {
     if (oldDeadline === undefined) {
       delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;

@@ -594,7 +594,6 @@ test('postGitHubReview retries transient exact-head gh transport failure', async
     {
       env: {
         GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
-        GH_CODEX_REVIEWER_TOKEN_BROKER_PROVIDER: 'github-app-lacey-codex-reviewer',
         PATH: '/opt/homebrew/bin:/usr/bin',
         HOME: '/Users/test',
       },
@@ -640,7 +639,6 @@ test('postGitHubReview retries transient exact-head GitHub HTTP/2 GOAWAY 500', a
     {
       env: {
         GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
-        GH_CODEX_REVIEWER_TOKEN_BROKER_PROVIDER: 'github-app-lacey-codex-reviewer',
         PATH: '/opt/homebrew/bin:/usr/bin',
         HOME: '/Users/test',
       },

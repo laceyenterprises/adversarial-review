@@ -1675,7 +1675,8 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
             }
           }
           if (isRetryableGhTransportError(err) && !authRetryable) {
-            if (!appSelfLogin) {
+            const reviewerLoginForReconciliation = appSelfLogin || writeIdentity;
+            if (!reviewerLoginForReconciliation) {
               throw new AmbiguousReviewerPostUnreconciledError(
                 `Ambiguous GitHub review post for ${repo}#${prNumber} cannot be safely retried without reviewer login proof`,
                 { cause: err }
@@ -1687,7 +1688,7 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
               prNumber,
               reviewBody,
               reviewerHeadSha,
-              reviewerLogin: appSelfLogin,
+              reviewerLogin: reviewerLoginForReconciliation,
               event: reviewerHeadSha ? exactHeadReviewEventForBody(reviewBody) : 'COMMENT',
               env: adapterEnv,
               log,

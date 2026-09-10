@@ -204,6 +204,11 @@ function buildAdapterEnv(env = process.env) {
     'USER',
     'LOGNAME',
     'TMPDIR',
+    'AGENT_OS_GITHUB_ADAPTER_AUTH',
+    'AGENT_OS_GITHUB_ADAPTER_AUTH_MODE',
+    'AGENT_OS_GITHUB_ADAPTER_TRANSPORT',
+    'AGENT_OS_GITHUB_ADAPTER_ENV_TOKEN_FROM_AMBIENT_GH',
+    'AGENT_OS_GITHUB_ADAPTER_ALLOW_FIXTURE_READS',
     'GH_TOKEN',
     'GITHUB_TOKEN',
     'GH_CLAUDE_REVIEWER_TOKEN',
@@ -273,9 +278,10 @@ function appendCommonAdapterArgs(args, params = {}) {
   return args;
 }
 
-function makeAdapterArgs(kind, params = {}) {
+function makeAdapterArgs(kind, params = {}, env = {}) {
   const args = ['read', '--kind', kind, '--json'];
   appendCommonAdapterArgs(args, params);
+  appendMergeAgentServiceAuthAdapterArgs(args, kind, params, env);
   return args;
 }
 
@@ -354,11 +360,12 @@ function appendReviewerAuthAdapterArgs(args, reviewerLogin, env = {}) {
   return args;
 }
 
-// Watcher/merge-agent-owned writes (labels, commit-status) carry no reviewer
-// identity, so appendReviewerAuthAdapterArgs never binds a token for them.
+// Watcher/merge-agent-owned reads and writes (labels, commit-status, PR state)
+// carry no reviewer identity, so appendReviewerAuthAdapterArgs never binds a
+// token for them.
 // Without an explicit --auth selector the adapter defaults to the fixture
 // selector, whose gh-cli transport strips ambient GH_TOKEN/GITHUB_TOKEN and only
-// re-injects an explicitly-resolved auth token. The write therefore falls
+// re-injects an explicitly-resolved auth token. The call therefore falls
 // through to `gh`'s ambient keychain, which is invalid in the headless launchd
 // watcher session -> HTTP 401 on api.github.com/graphql (observed ~1k/tick on
 // stuck `merge-agent-dispatched` label cleanups; auth:{mode:ambient-gh,
@@ -367,7 +374,7 @@ function appendReviewerAuthAdapterArgs(args, reviewerLogin, env = {}) {
 // The watcher start script resolves a broker-backed App installation token into
 // GITHUB_TOKEN/GH_TOKEN (WATCHER_GH_AUTH_VIA_BROKER=true, role
 // WATCHER_GH_BROKER_ROLE, default merge-agent) and refreshes it per tick. When
-// that explicit signal is present, bind these service-owned writes to env-token
+// that explicit signal is present, bind these service-owned calls to env-token
 // auth so the adapter uses the already-resolved broker token instead of
 // discarding it. Gated on the watcher signal (never on ambient process.env) so
 // tests and tokenless callers are unaffected, skipped when reviewer identity is
@@ -415,7 +422,7 @@ async function runGitHubAdapter(kind, params = {}, {
   }
   const adapterBin = resolveGitHubAdapterBin({ env, rootDir });
   if (!adapterBin) return null;
-  const { stdout } = await execFileImpl(adapterBin, makeAdapterArgs(kind, params), {
+  const { stdout } = await execFileImpl(adapterBin, makeAdapterArgs(kind, params, env), {
     maxBuffer: ADAPTER_MAX_BUFFER,
     timeout: ADAPTER_TIMEOUT_MS,
     env: buildAdapterEnv(env),

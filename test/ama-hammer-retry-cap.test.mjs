@@ -7,8 +7,10 @@ import { dirname, join } from 'node:path';
 import {
   _resetHammerRetryCapAlertDebounceForTests,
   AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS,
+  AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS,
   AMA_CLOSER_REDISPATCH_BOUND,
   amaCloserDispatchFilePath,
+  isAmaCloserLaunchInProgress,
   isActiveAmaCloserDispatchRecord,
   isReclaimableDispatchedAmaCloserLease,
   listActiveAmaCloserDispatches,
@@ -2259,6 +2261,37 @@ test('active AMA closer dispatch classification releases stale launch-only recor
       lastObservedStatus: 'unknown',
     }),
     true,
+  );
+});
+
+test('active AMA closer launch-only record stays active across a 600s retry window', () => {
+  assert.ok(
+    AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS > 30 * 60 * 1000,
+    'the reclaim window must cover three 600s dispatch attempts plus retry overhead',
+  );
+  const record = {
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    state: 'dispatching',
+    lastAttemptedAt: '2026-07-06T12:00:00Z',
+    dispatchedAt: null,
+    dispatchId: null,
+    launchRequestId: null,
+    lastError: null,
+    dispatchTimeoutMs: 600_000,
+  };
+  assert.equal(
+    isActiveAmaCloserDispatchRecord(record, { now: '2026-07-06T12:20:00Z' }),
+    true,
+    'a default AMA launch can still be inside its retry budget after twenty minutes',
+  );
+  assert.equal(
+    isAmaCloserLaunchInProgress(record, { now: '2026-07-06T12:20:00Z' }),
+    true,
+  );
+  assert.equal(
+    isActiveAmaCloserDispatchRecord(record, { now: '2026-07-06T12:40:00Z' }),
+    false,
   );
 });
 

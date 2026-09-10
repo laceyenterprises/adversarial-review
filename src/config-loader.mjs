@@ -1865,13 +1865,13 @@ function schemaV1() {
                     __min: 0,
                   },
                   // Wall-clock cap (ms) the watcher gives `hq dispatch` to admit
-                  // + provision a closer/hammer worker before SIGTERM. The old
-                  // hardcoded 90s was below the merge-worker provision time
-                  // (~57s baseline, slower under contention), so the watcher
-                  // killed healthy dispatches -> dispatch-failed -> no close.
+                  // + provision a closer/hammer worker before SIGTERM. This
+                  // must exceed the worker-pool provision watchdog plus cleanup
+                  // cushion, otherwise the watcher can kill the dispatch parent
+                  // while worker-pool is still reaping a slow provision tree.
                   dispatch_timeout_ms: {
                     __type: TYPE_INT,
-                    __default: 300000,
+                    __default: 600000,
                   },
                   eligibility: {
                     __type: TYPE_DICT,
@@ -5040,7 +5040,7 @@ export class AgentOSConfig {
         : hammerLifetimeCeiling,
       dispatchTimeoutMs: this.get(
         'roles.adversarial.merge_authority.dispatch_timeout_ms',
-        300000,
+        600000,
       ),
       eligibility: {
         riskClasses: [...this.get(

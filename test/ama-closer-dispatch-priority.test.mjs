@@ -4,7 +4,11 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 
-import { maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
+import {
+  maybeDispatchAmaCloser,
+  updateAmaCloserDispatchRecord,
+} from '../src/ama/dispatch-closer.mjs';
+import { acquireAmaCloserLease } from '../src/ama/closer-lease.mjs';
 
 // LCR — AMA closer dispatch admission-priority routing.
 //
@@ -199,8 +203,8 @@ test('LCR: hq dispatch caps worker provision watchdog at the AMA dispatch timeou
   assert.equal(result.dispatched, true);
   assert.equal(deps.calls.length, 1);
   assert.equal(deps.calls[0].options.timeout, 240_000);
-  assert.equal(deps.calls[0].options.env.HQ_WORKER_PROVISION_TIMEOUT_SECONDS, '210');
-  assert.equal(deps.calls[0].options.env.HQ_PROVISION_SUBPROCESS_TIMEOUT_SECONDS, '230');
+  assert.equal(deps.calls[0].options.env.HQ_WORKER_PROVISION_TIMEOUT_SECONDS, '150');
+  assert.equal(deps.calls[0].options.env.HQ_PROVISION_SUBPROCESS_TIMEOUT_SECONDS, '195');
 });
 
 test('LCR: hq dispatch preserves an already stricter worker provision timeout', async (t) => {
@@ -234,6 +238,101 @@ test('LCR: hq dispatch preserves an already stricter worker provision timeout', 
   assert.equal(deps.calls[0].options.timeout, 240_000);
   assert.equal(deps.calls[0].options.env.HQ_WORKER_PROVISION_TIMEOUT_SECONDS, '45');
   assert.equal(deps.calls[0].options.env.HQ_PROVISION_SUBPROCESS_TIMEOUT_SECONDS, '30');
+});
+
+test('LCR: no-LRQ AMA launch in progress defers another hammer dispatch', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'lcr-active-launch-defers-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  updateAmaCloserDispatchRecord(rootDir, {
+    repo: 'acme/repo',
+    prNumber: 999,
+    headSha: 'b'.repeat(40),
+  }, () => ({
+    schemaVersion: 1,
+    repo: 'acme/repo',
+    prNumber: 999,
+    headSha: 'b'.repeat(40),
+    state: 'dispatching',
+    lastAttemptedAt: '2026-07-20T12:00:00Z',
+    dispatchedAt: null,
+    dispatchId: null,
+    launchRequestId: null,
+    lastError: null,
+    dispatchTimeoutMs: 300_000,
+  }));
+  acquireAmaCloserLease({
+    rootDir,
+    repo: 'acme/repo',
+    prNumber: 999,
+    headSha: 'b'.repeat(40),
+    watcherPid: process.pid,
+    now: '2026-07-20T12:00:00Z',
+  });
+  const deps = testDeps();
+
+  const result = await maybeDispatchAmaCloser({
+    ...findingsRemediationArgs(rootDir, {
+      dispatchContext: {
+        dispatchedAt: '2026-07-20T12:05:00Z',
+      },
+    }),
+    ...deps,
+  });
+
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'ama-closer-launch-in-progress');
+  assert.equal(result.skipMergeAgent, true);
+  assert.equal(result.activeLaunch.prNumber, 999);
+  assert.equal(deps.calls.length, 0, 'do not start another hq dispatch before the first has an lrq');
+});
+
+test('LCR: dead no-LRQ AMA launch lease does not globally hold hammer dispatch', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'lcr-dead-active-launch-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  updateAmaCloserDispatchRecord(rootDir, {
+    repo: 'acme/repo',
+    prNumber: 999,
+    headSha: 'c'.repeat(40),
+  }, () => ({
+    schemaVersion: 1,
+    repo: 'acme/repo',
+    prNumber: 999,
+    headSha: 'c'.repeat(40),
+    state: 'dispatching',
+    lastAttemptedAt: '2026-07-20T12:00:00Z',
+    dispatchedAt: null,
+    dispatchId: null,
+    launchRequestId: null,
+    lastError: null,
+    dispatchTimeoutMs: 600_000,
+  }));
+  acquireAmaCloserLease({
+    rootDir,
+    repo: 'acme/repo',
+    prNumber: 999,
+    headSha: 'c'.repeat(40),
+    watcherPid: 999999,
+    now: '2026-07-20T12:00:00Z',
+  });
+  const deps = testDeps();
+  const gone = new Error('pid is gone');
+  gone.code = 'ESRCH';
+
+  const result = await maybeDispatchAmaCloser({
+    ...findingsRemediationArgs(rootDir, {
+      dispatchContext: {
+        dispatchedAt: '2026-07-20T12:20:00Z',
+      },
+    }),
+    ...deps,
+    processKillImpl: () => {
+      throw gone;
+    },
+  });
+
+  assert.equal(result.dispatched, true);
+  assert.equal(result.launchRequestId, 'lrq_hammer_1');
+  assert.equal(deps.calls.length, 1, 'dead no-LRQ launches must not block later PRs');
 });
 
 test('LCR: non-exhausted request-changes findings do not dispatch hammer before Codex remediation', async (t) => {

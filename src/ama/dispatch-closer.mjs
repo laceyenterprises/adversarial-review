@@ -1213,17 +1213,26 @@ export function isStaleWorktreeRegistrationError(detail) {
 }
 
 const AMA_CLOSER_TEARDOWN_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000];
-const AMA_CLOSER_HQ_DISPATCH_LAUNCH_WINDOW_MS = 90_000;
+const AMA_CLOSER_HQ_DISPATCH_LAUNCH_WINDOW_MS = 600_000;
 const AMA_CLOSER_HQ_DISPATCH_MAX_ATTEMPTS = AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.length + 1;
 const AMA_CLOSER_TOKEN_ROLLUP_POLL_DELAYS_MS = [500, 1_000, 2_000, 5_000];
-export const AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS = (
-  AMA_CLOSER_HQ_DISPATCH_LAUNCH_WINDOW_MS * AMA_CLOSER_HQ_DISPATCH_MAX_ATTEMPTS
-)
-  + AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.reduce((total, delay) => total + delay, 0)
-  + (
-    AMA_CLOSER_TOKEN_ROLLUP_POLL_DELAYS_MS.reduce((total, delay) => total + delay, 0)
-    * AMA_CLOSER_HQ_DISPATCH_MAX_ATTEMPTS
-  );
+const AMA_CLOSER_LEASELESS_LAUNCH_GRACE_MS = 30_000;
+const AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_TOTAL_MS =
+  AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.reduce((total, delay) => total + delay, 0);
+const AMA_CLOSER_TOKEN_ROLLUP_POLL_TOTAL_MS =
+  AMA_CLOSER_TOKEN_ROLLUP_POLL_DELAYS_MS.reduce((total, delay) => total + delay, 0);
+
+function amaCloserPendingLeaseReclaimAgeMs(record = null) {
+  const recordedTimeoutMs = Number(record?.dispatchTimeoutMs);
+  const launchWindowMs = Number.isFinite(recordedTimeoutMs) && recordedTimeoutMs > 0
+    ? recordedTimeoutMs
+    : AMA_CLOSER_HQ_DISPATCH_LAUNCH_WINDOW_MS;
+  return (launchWindowMs * AMA_CLOSER_HQ_DISPATCH_MAX_ATTEMPTS)
+    + AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_TOTAL_MS
+    + (AMA_CLOSER_TOKEN_ROLLUP_POLL_TOTAL_MS * AMA_CLOSER_HQ_DISPATCH_MAX_ATTEMPTS);
+}
+
+export const AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS = amaCloserPendingLeaseReclaimAgeMs();
 export const AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS = 30 * 60 * 1000;
 
 // Terminal outcomes a dispatched lease may be reclaimed from. `succeeded`
@@ -1283,7 +1292,7 @@ const AMA_CLOSER_AUDIT_TERMINAL_OUTCOMES = new Set([
  * Detect a dispatch record frozen mid-`hq dispatch` by an external SIGTERM.
  *
  * The canonical case is a main-catchup deploy bounce of the watcher landing in
- * the ~90s window of the closer's `hq dispatch` execFile (the watcher's launchd
+ * the launch window of the closer's `hq dispatch` execFile (the watcher's launchd
  * `kickstart -k` SIGTERMs the whole process group). The record is written
  * `state: 'dispatching'` immediately BEFORE the launch and is only advanced to
  * `dispatched` (on success, with an lrq/dispatchId) or `dispatch-failed` (on a
@@ -1505,7 +1514,31 @@ function isStaleDispatchingAmaCloserRecord(record, { now = null } = {}) {
   // launch-only case, which is why the two do not share one predicate.
   if (mostRecentAmaCloserTouchMs(record) === null) return true;
   const ageMs = amaCloserRecordAgeMs(record, { now });
-  return ageMs !== null && ageMs >= AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS;
+  return ageMs !== null && ageMs >= amaCloserPendingLeaseReclaimAgeMs(record);
+}
+
+export function isAmaCloserLaunchInProgress(record, options = {}) {
+  if (
+    !hasInterruptedInFlightAmaCloserDispatchShape(record)
+    || isStaleDispatchingAmaCloserRecord(record, options)
+  ) {
+    return false;
+  }
+
+  if (!Object.hasOwn(options, 'lease')) return true;
+  if (options.lease?.status === AMA_CLOSER_LEASE_STATUS.PENDING) {
+    return !isReclaimablePendingAmaCloserLease(options.lease, options);
+  }
+
+  // The dispatch record is written immediately before the lease is acquired.
+  // Treat a lease-less record as live only for that narrow gap; old orphaned
+  // pre-LRQ JSON should not become a global hammer hold after a restart.
+  if (options.lease === null) {
+    const ageMs = amaCloserRecordAgeMs(record, options);
+    return ageMs !== null && ageMs < AMA_CLOSER_LEASELESS_LAUNCH_GRACE_MS;
+  }
+
+  return false;
 }
 
 export function isActiveAmaCloserDispatchRecord(record, options = {}) {
@@ -1581,6 +1614,34 @@ export function listActiveAmaCloserDispatches(rootDir, options = {}) {
     }
   }
   return activeDispatches;
+}
+
+function sameAmaCloserDispatchIdentity(record, identity) {
+  return Boolean(
+    record
+      && identity
+      && String(record.repo || '') === String(identity.repo || '')
+      && Number(record.prNumber) === Number(identity.prNumber)
+      && String(record.headSha || '') === String(identity.headSha || ''),
+  );
+}
+
+function findActiveAmaCloserLaunch(rootDir, identity, options = {}) {
+  const active = listActiveAmaCloserDispatches(rootDir, options);
+  return active.find((record) => {
+    if (sameAmaCloserDispatchIdentity(record, identity)) return false;
+    let lease = null;
+    try {
+      lease = readAmaCloserLease(rootDir, {
+        repo: record.repo,
+        prNumber: record.prNumber,
+        headSha: record.headSha,
+      });
+    } catch {
+      lease = null;
+    }
+    return isAmaCloserLaunchInProgress(record, { ...options, lease });
+  }) || null;
 }
 
 function writeAmaCloserDispatchRecord(rootDir, identity, doc) {
@@ -1956,11 +2017,11 @@ function formatHqDispatchError(errOrText) {
 
 function resolveAmaDispatchTimeoutMs(cfg) {
   const configured = Number(cfg?.dispatchTimeoutMs);
-  return Number.isFinite(configured) && configured > 0 ? configured : 300_000;
+  return Number.isFinite(configured) && configured > 0 ? configured : 600_000;
 }
 
-const PROVISION_SELF_TIMEOUT_CUSHION_SECONDS = 30;
-const PROVISION_SUBPROCESS_TIMEOUT_CUSHION_SECONDS = 10;
+const PROVISION_SELF_TIMEOUT_CUSHION_SECONDS = 90;
+const PROVISION_SUBPROCESS_TIMEOUT_CUSHION_SECONDS = 45;
 
 function capExistingTimeoutSeconds(env, key, capSeconds) {
   const current = Number(env?.[key]);
@@ -4711,6 +4772,35 @@ export async function maybeDispatchAmaCloser({
       `[ama-closer] unsupported merge dispatch route=${JSON.stringify(mergeDispatchRoute)}`,
     );
   }
+  const dispatchTimeoutMs = resolveAmaDispatchTimeoutMs(cfg);
+  const activeLaunch = findActiveAmaCloserLaunch(rootDir, targetDispatchIdentity, {
+    now: dispatchContext.dispatchedAt,
+    log: logger,
+    processKillImpl,
+  });
+  if (activeLaunch) {
+    logAmaCloserDispatchEvent(logger, 'ama_closer.dispatch_deferred_active_launch', {
+      repo,
+      prNumber,
+      headSha: targetRemediationSha,
+      activeRepo: activeLaunch.repo,
+      activePrNumber: activeLaunch.prNumber,
+      activeHeadSha: activeLaunch.headSha || null,
+      activeLastAttemptedAt: activeLaunch.lastAttemptedAt || null,
+      activeDispatchPath: activeLaunch.dispatchPath || null,
+    });
+    return noAmaDispatch({
+      dispatched: false,
+      skipMergeAgent: true,
+      reason: 'ama-closer-launch-in-progress',
+      activeLaunch: {
+        repo: activeLaunch.repo,
+        prNumber: activeLaunch.prNumber,
+        headSha: activeLaunch.headSha || null,
+        lastAttemptedAt: activeLaunch.lastAttemptedAt || null,
+      },
+    });
+  }
   writeAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, {
     schemaVersion: AMA_CLOSER_DISPATCH_SCHEMA_VERSION,
     repo,
@@ -4724,6 +4814,7 @@ export async function maybeDispatchAmaCloser({
     promptPath,
     promptDir,
     hqRoot,
+    dispatchTimeoutMs,
     lastAttemptedAt: dispatchContext.dispatchedAt,
     dispatchedAt: null,
     dispatchId: existingRecord?.dispatchId || null,
@@ -5013,7 +5104,6 @@ export async function maybeDispatchAmaCloser({
   let execResult;
   let transientRetryIndex = 0;
   let samePrHammerHolderRetryUsed = false;
-  const dispatchTimeoutMs = resolveAmaDispatchTimeoutMs(cfg);
   const dispatchEnv = withProvisionTimeoutCappedAtDispatch(process.env, dispatchTimeoutMs);
   for (;;) {
     try {
@@ -5023,10 +5113,9 @@ export async function maybeDispatchAmaCloser({
         cwd: AGENT_OS_ROOT,
         maxBuffer: 5 * 1024 * 1024,
         // CFG-knobbed (roles.adversarial.merge_authority.dispatch_timeout_ms,
-        // default 300s). The old hardcoded 90s was below the merge-worker
-        // provision time (~57s baseline, slower under contention), so the
-        // watcher SIGTERM'd healthy dispatches before they returned an lrq ->
-        // dispatch-failed -> the hammer never closed.
+        // default 600s). Shorter caps were below the HCP/VDB-era merge-worker
+        // provision tail under contention, so the watcher SIGTERM'd dispatches
+        // before they returned an lrq -> dispatch-failed -> no close.
         //
         // Keep HQ_WORKER_PROVISION_TIMEOUT_SECONDS at-or-below the same wall
         // clock. hq-worker-provision.sh defaults to 600s; if it outlives this

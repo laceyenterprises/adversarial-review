@@ -279,10 +279,11 @@ new PR
   next watcher pass. Null-PGID rows with active/legacy runtime records still use
   the persisted `reviewer_timeout_ms` fallback (or the configured reviewer
   deadline) before recovery, preserving the conservative wait for sessions that
-  might represent a watcher bounce after fork. If null-PGID recovery must probe
-  GitHub and no historical start timestamp is available, the lookup is anchored
-  to `last_attempted_at` so a review already posted by the orphan can still be
-  recovered.
+  might represent a watcher bounce after fork. `last_attempted_at` anchors only
+  the local null-PGID grace window. If null-PGID recovery must probe GitHub and
+  no historical `reviewer_started_at` timestamp is available, the GitHub lookup
+  omits its lower time bound so a current-head review already posted by the
+  orphan can still be recovered despite local/GitHub clock skew.
 - Overdue orphan auto-retry is deliberately narrow. The watcher only attempts it when the row persisted the original launch timeout and an authoritative reviewer spawn timestamp, the orphan age exceeds that persisted timeout from the actual subprocess start, the process group is confirmed dead after the bounded recovery loop, and GitHub is reprobed over a short delayed window with no late review found. That same steady-state recovery path also settles the runtime reviewer run-state ledger before the SQLite row flips terminal. Any ambiguity falls back to sticky `failed-orphan` instead of launching a second reviewer.
 - Re-review does **not** happen because of prose. It happens because reconciliation resets the row to `pending`.
 - A PR can move from `posted` back to `pending` only via explicit recovery logic or a valid rereview request.

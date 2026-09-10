@@ -519,7 +519,7 @@ async function reconcileReviewerSessions({
         try {
           const probeRow = {
             ...row,
-            reviewer_started_at: row.reviewer_started_at || row.last_attempted_at || null,
+            reviewer_started_at: row.reviewer_started_at || null,
           };
           postedReview = await findPostedReview(probeRow, { refresh: true });
         } catch (err) {

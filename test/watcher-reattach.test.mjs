@@ -1191,6 +1191,40 @@ test('claimed rows with null pgid do not synthesize now as the review lookup sta
   assert.match(log.lines.join('\n'), /reviewer_reattach_null_pgid_recovered/);
 });
 
+test('claimed rows with null pgid do not use last_attempted_at as a synthetic review lower bound', async () => {
+  const db = setupDb();
+  seedReviewing(db, {
+    pgid: null,
+    startedAt: null,
+    lastAttemptedAt: '2026-05-11T05:14:00.000Z',
+  });
+  const log = makeLog();
+  const probedRows = [];
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    now: new Date(FAILURE_AT),
+    log,
+    fetchHeadSha: async () => HEAD_SHA,
+    findPostedReview: async (probeRow) => {
+      probedRows.push(probeRow);
+      return {
+        user: { login: 'codex-reviewer-lacey' },
+        submitted_at: '2026-05-11T05:13:09.000Z',
+        commit_id: HEAD_SHA,
+      };
+    },
+  });
+
+  assert.equal(probedRows.length, 1);
+  assert.equal(probedRows[0].reviewer_started_at, null);
+  const row = readRow(db);
+  assert.equal(row.review_status, 'posted');
+  assert.equal(row.posted_at, '2026-05-11T05:13:09.000Z');
+  assert.match(log.lines.join('\n'), /reviewer_reattach_null_pgid_recovered/);
+});
+
 test('alive pgid that does not match the reviewer session becomes sticky failed-orphan', async () => {
   const db = setupDb();
   seedReviewing(db);

@@ -582,6 +582,7 @@ test('AFH-04R: Claude runtime probe still applies when fleet quota status is una
       reason: CLAUDE_REVIEWER_RUNTIME_GROUNDING_REASON,
       error: 'Could not switch to audit session 0x18757: 1: Operation not permitted',
     }),
+    claudeRuntimeProbeUid: 501,
     env: {},
     retryDelaysMs: [],
   });
@@ -620,6 +621,7 @@ test('AFH-04R: Claude runtime probe receives caller execution context', async ()
       calls.push(options);
       return { available: true, reason: 'ok' };
     },
+    claudeRuntimeProbeUid: 501,
     claudeRuntimeProbeTimeoutMs: 3456,
     claudeRuntimeProbeRetryDelaysMs: [7, 11],
     env,
@@ -632,9 +634,33 @@ test('AFH-04R: Claude runtime probe receives caller execution context', async ()
   assert.equal(calls.length, 1);
   assert.equal(calls[0].execFileImpl, execFileImpl);
   assert.equal(calls[0].env, env);
+  assert.equal(calls[0].uid, 501);
   assert.equal(calls[0].timeoutMs, 3456);
   assert.deepEqual(calls[0].retryDelaysMs, [7, 11]);
   assert.equal(calls[0].sleepImpl, sleepImpl);
+});
+
+test('AFH-04R: readAfhReviewerGrounding does not infer a Claude runtime probe uid', async () => {
+  let probeCalls = 0;
+  const grounding = await readAfhReviewerGrounding({
+    hqPath: 'hq',
+    execFileImpl: async () => ({ stdout: fleetStatusJson({ openai: OK, anthropic: OK, google: OK }) }),
+    claudeRuntimeProbeImpl: async () => {
+      probeCalls += 1;
+      return {
+        available: false,
+        reason: CLAUDE_REVIEWER_RUNTIME_GROUNDING_REASON,
+        error: 'would have poisoned the quota-only snapshot',
+      };
+    },
+    env: {},
+    retryDelaysMs: [],
+  });
+
+  assert.equal(probeCalls, 0, 'no explicit target UID means no local runtime probe');
+  assert.equal(grounding.available, true);
+  assert.equal(grounding.localRuntimeGrounding, undefined);
+  assert.equal(reviewerModelGrounding(grounding, 'claude').grounded, false);
 });
 
 test('AFH-04R: Claude runtime grounding auto-reverts when launchctl succeeds', async () => {
@@ -642,6 +668,7 @@ test('AFH-04R: Claude runtime grounding auto-reverts when launchctl succeeds', a
     hqPath: 'hq',
     execFileImpl: async () => ({ stdout: fleetStatusJson({ openai: OK, anthropic: OK, google: OK }) }),
     claudeRuntimeProbeImpl: async () => ({ available: true, reason: 'ok' }),
+    claudeRuntimeProbeUid: 501,
     env: {},
     retryDelaysMs: [],
   });
@@ -666,13 +693,31 @@ test('AFH-04R: readAfhReviewerGrounding keeps default runtime probe budget disti
       calls.push(options);
       return { available: true, reason: 'ok' };
     },
+    claudeRuntimeProbeUid: 501,
     env: {},
     timeoutMs: 55_000,
     retryDelaysMs: [9_000],
   });
 
+  assert.equal(calls[0].uid, 501);
   assert.equal(calls[0].timeoutMs, CLAUDE_REVIEWER_RUNTIME_PROBE_TIMEOUT_MS);
   assert.deepEqual(calls[0].retryDelaysMs, CLAUDE_REVIEWER_RUNTIME_PROBE_RETRY_DELAYS_MS);
+});
+
+test('AFH-04R: Claude runtime probe refuses to guess a uid', async () => {
+  let calls = 0;
+  const status = await probeClaudeReviewerRuntime({
+    platform: 'darwin',
+    execFileImpl: async () => {
+      calls += 1;
+      return { stdout: '' };
+    },
+    env: {},
+  });
+
+  assert.equal(calls, 0);
+  assert.equal(status.available, false);
+  assert.equal(status.reason, 'claude-launchctl-uid-unavailable');
 });
 
 test('AFH-04R: Claude runtime probe captures the exact launchctl-asuser primitive', async () => {
@@ -867,6 +912,36 @@ test('AFH-04: the per-tick cache reads hq once per TTL and never rejects', async
   await throwing();
   assert.equal(warnings.length, 1, 'the degraded breadcrumb is once per refresh window, not per PR');
   assert.match(warnings[0], /afh-reviewer-grounding degraded/);
+});
+
+test('AFH-04R: the per-tick cache scopes Claude runtime grounding by explicit uid', async () => {
+  const seenProbeUids = [];
+  let now = 1_000_000;
+  const getGrounding = createAfhReviewerGroundingCache({
+    ttlMs: 60_000,
+    nowFn: () => now,
+    readImpl: async (options) => {
+      seenProbeUids.push(options.claudeRuntimeProbeUid ?? null);
+      return afhGroundingSnapshotFromStdout(fleetStatusJson({ openai: OK, anthropic: OK, google: OK }));
+    },
+  });
+
+  await getGrounding();
+  await getGrounding();
+  await getGrounding({ claudeRuntimeProbeUid: 501 });
+  await getGrounding({ claudeRuntimeProbeUid: 501 });
+  await getGrounding({ claudeRuntimeProbeUid: '502' });
+  await getGrounding({ claudeRuntimeProbeUid: 0 });
+
+  assert.deepEqual(
+    seenProbeUids,
+    [null, 501, 502],
+    'quota-only, uid 501, and uid 502 have separate cache entries'
+  );
+
+  now += 60_001;
+  await getGrounding({ claudeRuntimeProbeUid: 501 });
+  assert.deepEqual(seenProbeUids, [null, 501, 502, 501]);
 });
 
 test('AFH-04: the per-tick cache stale-serves a recent good grounding after a refresh failure', async () => {

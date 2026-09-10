@@ -431,6 +431,10 @@ function reviewerWorkerClassForRoute(route) {
   return REVIEWER_WORKER_CLASS_BY_MODEL[reviewerModel] || reviewerModel;
 }
 
+function reviewerDispatchUid() {
+  return typeof process.getuid === 'function' ? process.getuid() : null;
+}
+
 export async function processReviewSubject(entry, ctx) {
   const { subject, prNumber, current: cachedCurrent } = entry;
   const {
@@ -1278,14 +1282,16 @@ export async function processReviewSubject(entry, ctx) {
       // on the AFH-02 soft/hard provider-grounding signal. The read is memoized
       // per tick and fail-open: an unavailable/unreadable `hq fleet quota status
       // --json` yields a snapshot with `available: false`, which leaves the
-      // configured primary/gemini route untouched. It can never throw here.
+      // configured primary/gemini route untouched. The local Claude bridge probe
+      // is keyed by the dispatch UID resolved here, not guessed inside the
+      // module-scope cache. It can never throw here.
       let afhGrounding = null;
       {
         const readAfhGrounding = typeof getAfhReviewerGroundingForTick === 'function'
           ? getAfhReviewerGroundingForTick
           : defaultAfhReviewerGroundingForTick;
         try {
-          afhGrounding = await readAfhGrounding();
+          afhGrounding = await readAfhGrounding({ claudeRuntimeProbeUid: reviewerDispatchUid() });
         } catch (err) {
           afhGrounding = null;
           console.warn(

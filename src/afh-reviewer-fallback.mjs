@@ -27,12 +27,13 @@
 //
 // The first candidate that is neither hard-grounded (`GROUNDED_PROVIDER_STATES`)
 // nor AFH-02 soft-grounded wins. On macOS the Claude reviewer also needs the
-// local `launchctl asuser` bridge; a bounded local probe overlays that host
-// runtime signal onto the reviewer-only grounding snapshot so a bad audit
-// session does not make every new head pay one doomed Claude attempt. If every
-// candidate is grounded, the configured route is kept unchanged — a doomed spawn
-// on the primary is no worse than a doomed spawn on an equally-grounded
-// fallback, and it preserves auto-revert.
+// local `launchctl asuser` bridge; callers that know the target operator UID at
+// dispatch time may layer a bounded local probe onto the reviewer-only grounding
+// snapshot so a bad audit session does not make every new head pay one doomed
+// Claude attempt. The global quota read never guesses a UID. If every candidate
+// is grounded, the configured route is kept unchanged — a doomed spawn on the
+// primary is no worse than a doomed spawn on an equally-grounded fallback, and it
+// preserves auto-revert.
 //
 // Auto-revert is structural: this is a per-attempt, stateless read. The moment
 // openai stops being grounded, the very next attempt returns to the configured
@@ -82,6 +83,7 @@ export const CLAUDE_REVIEWER_RUNTIME_PROBE_RETRY_DELAYS_MS = Object.freeze([250,
 export const CLAUDE_REVIEWER_RUNTIME_GROUNDING_REASON = 'claude-launchctl-asuser-unavailable';
 const LAUNCHCTL = '/bin/launchctl';
 const TRUE_BIN = '/usr/bin/true';
+const AFH_QUOTA_ONLY_CACHE_KEY = 'quota-only';
 
 // Reviewer model → the provider whose OAuth quota gates whether that reviewer
 // can spawn at all. Kept in sync with QUOTA_HARNESS_PROVIDER
@@ -116,6 +118,14 @@ function claudeRuntimeProbeDisabled(env = process.env) {
   );
 }
 
+function normalizeClaudeRuntimeProbeUid(uid) {
+  if (uid === undefined || uid === null) return null;
+  const text = String(uid).trim();
+  if (!text) return null;
+  const parsed = typeof uid === 'number' ? uid : Number(text);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
 function reviewerRuntimeProbeErrorText(error) {
   const text = fleetQuotaStatusErrorText(error);
   return text || String(error?.message || error || 'runtime probe failed');
@@ -134,7 +144,7 @@ export async function probeClaudeReviewerRuntime({
   execFileImpl = execFileAsync,
   env = process.env,
   platform = process.platform,
-  uid = typeof process.getuid === 'function' ? process.getuid() : null,
+  uid = null,
   timeoutMs = CLAUDE_REVIEWER_RUNTIME_PROBE_TIMEOUT_MS,
   retryDelaysMs = CLAUDE_REVIEWER_RUNTIME_PROBE_RETRY_DELAYS_MS,
   sleepImpl = sleep,
@@ -145,7 +155,8 @@ export async function probeClaudeReviewerRuntime({
   if (platform !== 'darwin') {
     return Object.freeze({ available: true, reason: 'not-darwin' });
   }
-  if (!Number.isInteger(uid) || uid <= 0) {
+  const runtimeUid = normalizeClaudeRuntimeProbeUid(uid);
+  if (runtimeUid === null) {
     return Object.freeze({
       available: false,
       reason: 'claude-launchctl-uid-unavailable',
@@ -158,7 +169,7 @@ export async function probeClaudeReviewerRuntime({
   let lastError = null;
   for (let attemptIndex = 0; attemptIndex < attempts; attemptIndex += 1) {
     try {
-      await execFileImpl(LAUNCHCTL, ['asuser', String(uid), TRUE_BIN], {
+      await execFileImpl(LAUNCHCTL, ['asuser', String(runtimeUid), TRUE_BIN], {
         env,
         encoding: 'utf8',
         maxBuffer: 64 * 1024,
@@ -179,8 +190,9 @@ export async function probeClaudeReviewerRuntime({
   });
 }
 
-function shouldAutoProbeClaudeRuntime({ execFileImpl, env = process.env } = {}) {
+function shouldAutoProbeClaudeRuntime({ execFileImpl, env = process.env, uid = null } = {}) {
   if (claudeRuntimeProbeDisabled(env)) return false;
+  if (normalizeClaudeRuntimeProbeUid(uid) === null) return false;
   return execFileImpl === execFileAsync;
 }
 
@@ -373,6 +385,7 @@ export async function readAfhReviewerGrounding({
   retryDelaysMs = AFH_FLEET_QUOTA_STATUS_RETRY_DELAYS_MS,
   sleepImpl = sleep,
   claudeRuntimeProbeImpl = null,
+  claudeRuntimeProbeUid = null,
   claudeRuntimeProbeTimeoutMs = CLAUDE_REVIEWER_RUNTIME_PROBE_TIMEOUT_MS,
   claudeRuntimeProbeRetryDelaysMs = CLAUDE_REVIEWER_RUNTIME_PROBE_RETRY_DELAYS_MS,
 } = {}) {
@@ -402,16 +415,20 @@ export async function readAfhReviewerGrounding({
       snapshot = unavailableGrounding('fleet-quota-status-unreadable', err);
     }
   }
-  const probeImpl = typeof claudeRuntimeProbeImpl === 'function'
-    ? claudeRuntimeProbeImpl
-    : shouldAutoProbeClaudeRuntime({ execFileImpl, env })
-      ? probeClaudeReviewerRuntime
-      : null;
+  const runtimeProbeUid = normalizeClaudeRuntimeProbeUid(claudeRuntimeProbeUid);
+  const probeImpl = runtimeProbeUid === null
+    ? null
+    : typeof claudeRuntimeProbeImpl === 'function'
+      ? claudeRuntimeProbeImpl
+      : shouldAutoProbeClaudeRuntime({ execFileImpl, env, uid: runtimeProbeUid })
+        ? probeClaudeReviewerRuntime
+        : null;
   if (!probeImpl) return snapshot;
   try {
     const runtimeStatus = await probeImpl({
       execFileImpl,
       env,
+      uid: runtimeProbeUid,
       timeoutMs: claudeRuntimeProbeTimeoutMs,
       retryDelaysMs: claudeRuntimeProbeRetryDelaysMs,
       sleepImpl,
@@ -439,18 +456,34 @@ export function createAfhReviewerGroundingCache({
   hqPath = null,
   logger = console,
 } = {}) {
-  let cached = null;
-  let lastGood = null;
-  let inFlight = null;
+  const cacheByProbeKey = new Map();
 
-  return async function getAfhReviewerGrounding() {
+  function cacheEntryFor(probeKey) {
+    let entry = cacheByProbeKey.get(probeKey);
+    if (!entry) {
+      entry = { cached: null, lastGood: null, inFlight: null };
+      cacheByProbeKey.set(probeKey, entry);
+    }
+    return entry;
+  }
+
+  return async function getAfhReviewerGrounding({ claudeRuntimeProbeUid = null } = {}) {
+    const runtimeProbeUid = normalizeClaudeRuntimeProbeUid(claudeRuntimeProbeUid);
+    const probeKey = runtimeProbeUid === null
+      ? AFH_QUOTA_ONLY_CACHE_KEY
+      : `claude-runtime-uid:${runtimeProbeUid}`;
+    const entry = cacheEntryFor(probeKey);
     const now = nowFn();
-    if (cached && now < cached.expiresAt) return cached.snapshot;
-    if (!inFlight) {
-      inFlight = (async () => {
+    if (entry.cached && now < entry.cached.expiresAt) return entry.cached.snapshot;
+    if (!entry.inFlight) {
+      entry.inFlight = (async () => {
         let snapshot;
         try {
-          snapshot = await readImpl({ env, hqPath });
+          snapshot = await readImpl({
+            env,
+            hqPath,
+            ...(runtimeProbeUid === null ? {} : { claudeRuntimeProbeUid: runtimeProbeUid }),
+          });
         } catch (err) {
           // readAfhReviewerGrounding is already fail-open; this is the belt for
           // an injected reader that rejects.
@@ -458,21 +491,21 @@ export function createAfhReviewerGroundingCache({
         }
         const afterRead = nowFn();
         if (snapshot?.available) {
-          if (!snapshot.staleIfError) lastGood = { snapshot, readAt: afterRead };
+          if (!snapshot.staleIfError) entry.lastGood = { snapshot, readAt: afterRead };
         } else if (
-          lastGood?.snapshot &&
-          afterRead - lastGood.readAt <= DEFAULT_AFH_STALE_IF_ERROR_MS
+          entry.lastGood?.snapshot &&
+          afterRead - entry.lastGood.readAt <= DEFAULT_AFH_STALE_IF_ERROR_MS
         ) {
           snapshot = Object.freeze({
-            ...lastGood.snapshot,
+            ...entry.lastGood.snapshot,
             staleIfError: Object.freeze({
               reason: snapshot?.reason || 'fleet-quota-status-unavailable',
               error: snapshot?.error || null,
-              lastGoodAtMs: lastGood.readAt,
+              lastGoodAtMs: entry.lastGood.readAt,
             }),
           });
         }
-        cached = { snapshot, expiresAt: nowFn() + ttlMs };
+        entry.cached = { snapshot, expiresAt: nowFn() + ttlMs };
         // Degraded-read breadcrumb, once per refresh window rather than once per
         // PR: a watcher without `hq` on PATH would otherwise log this per subject
         // on every tick forever.
@@ -492,10 +525,10 @@ export function createAfhReviewerGroundingCache({
         }
         return snapshot;
       })().finally(() => {
-        inFlight = null;
+        entry.inFlight = null;
       });
     }
-    return inFlight;
+    return entry.inFlight;
   };
 }
 

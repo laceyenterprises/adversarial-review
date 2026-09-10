@@ -30,23 +30,26 @@ async function probeClaudeRuntime() {
     // requires an audit session bound to the calling shell. Inside
     // `npm test`, sandbox-exec, container CI, or any non-interactive
     // context that wasn't launched via a real user login, the call
-    // fails immediately with "Could not switch to audit session
-    // <id>: 1: Operation not permitted" — BEFORE Claude is ever
-    // invoked. That's an environment limitation, not a Claude-auth
-    // failure: the postflight cannot probe Claude from a context
-    // that can't even hand off to the user's launchd domain. Treat
-    // it as a probe-skip with a clear warning and return cleanly so
-    // the installer / test sweep can continue. Production installs
-    // run from a real operator shell with a live audit session, so
-    // the launchctl handoff succeeds and this branch never fires.
+    // fails before Claude is ever invoked. The same is true for the
+    // portable single-user fixture, which has no split-user
+    // roots.admin_uid. That's an environment limitation, not a
+    // Claude-auth failure: the postflight cannot probe Claude from a
+    // context that can't resolve or hand off to the user's launchd
+    // domain. Treat it as a probe-skip with a clear warning and return
+    // cleanly so the installer / test sweep can continue. Production
+    // installs run from a real operator shell with a configured admin
+    // user/UID and a live audit session, so this branch never fires.
     const msg = String(err?.message || err || '');
-    if (/Could not switch to audit session.*Operation not permitted/i.test(msg)) {
+    if (
+      /Could not switch to audit session.*Operation not permitted/i.test(msg)
+      || /Cannot resolve configured admin uid for Claude launchctl asuser/i.test(msg)
+    ) {
       process.stderr.write(
         '[install-postflight] probe-claude skipped: '
-          + 'launchctl audit session unavailable in this context '
+          + 'launchctl admin user/session unavailable in this context '
           + '(non-interactive test/sandbox env; production installs '
-          + 'run from an interactive operator shell with a real audit '
-          + 'session and this probe runs normally there).\n'
+          + 'run from an interactive operator shell with configured '
+          + 'admin ownership and a real audit session).\n'
       );
       return;
     }

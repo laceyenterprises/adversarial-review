@@ -67,6 +67,7 @@ import {
   buildAgyReviewerPromptPrefix,
 } from './reviewer-prompt.mjs';
 import { parseCodexJsonTokenUsage } from './reviewer-model-detection.mjs';
+import { resolveClaudeLaunchctlUidFromConfig } from './claude-launchctl-uid.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -199,6 +200,18 @@ function resolveAcpxCliPath({ env = process.env, preferLocalAcpx = false } = {})
  */
 const CLAUDE_LAUNCHCTL_RETRY_DELAYS_MS = [250, 750];
 
+async function resolveClaudeLaunchctlUidForSpawn({
+  platform = process.platform,
+  env = process.env,
+  resolveClaudeLaunchctlUidImpl = resolveClaudeLaunchctlUidFromConfig,
+  logger = console,
+} = {}) {
+  if (platform !== 'darwin') return null;
+  const uid = await resolveClaudeLaunchctlUidImpl({ env, logger });
+  if (uid !== null) return uid;
+  throw new Error('Cannot resolve configured admin uid for Claude launchctl asuser');
+}
+
 async function withClaudeLaunchctlRetry(operation, {
   retryDelaysMs = CLAUDE_LAUNCHCTL_RETRY_DELAYS_MS,
   sleepImpl = sleep,
@@ -218,18 +231,31 @@ async function assertClaudeOAuth({
   retryDelaysMs,
   sleepImpl,
   existsSyncImpl = existsSync,
+  resolveClaudeLaunchctlUidImpl = resolveClaudeLaunchctlUidFromConfig,
+  logger = console,
+  platform = process.platform,
 } = {}) {
   if (spawnClaudeImpl === spawnClaude && !existsSyncImpl(CLAUDE_CLI)) {
     throw new OAuthError('claude', `claude CLI not found at ${CLAUDE_CLI}`);
   }
 
   const { env } = scrubOAuthFallbackEnv(process.env);
+  const claudeLaunchctlUid = await resolveClaudeLaunchctlUidForSpawn({
+    platform,
+    env,
+    resolveClaudeLaunchctlUidImpl,
+    logger,
+  });
 
   let stdout = '';
   let stderr = '';
   try {
     ({ stdout, stderr } = await withClaudeLaunchctlRetry(
-      () => spawnClaudeImpl(['auth', 'status'], { env, timeout: resolveClaudeAuthProbeTimeoutMs(env) }),
+      () => spawnClaudeImpl(['auth', 'status'], {
+        env,
+        timeout: resolveClaudeAuthProbeTimeoutMs(env),
+        ...(claudeLaunchctlUid === null ? {} : { uid: claudeLaunchctlUid }),
+      }),
       { retryDelaysMs, sleepImpl },
     ));
   } catch (err) {
@@ -255,7 +281,7 @@ async function spawnClaude(args, options = {}) {
   const {
     execFileImpl = execFileAsync,
     platform = process.platform,
-    uid = typeof process.getuid === 'function' ? process.getuid() : null,
+    uid = null,
     ...execOptions
   } = options;
 
@@ -527,8 +553,11 @@ function isClaudeLoggedOutStatus(text) {
 async function reviewWithClaude(diff, extraContext = '', {
   promptStage = 'first', reviewerSubprocessCwd = process.cwd(), assertClaudeOAuthImpl = assertClaudeOAuth,
   spawnClaudeImpl = spawnClaude, launchctlRetryDelaysMs, sleepImpl,
+  resolveClaudeLaunchctlUidImpl = resolveClaudeLaunchctlUidFromConfig,
+  logger = console,
+  platform = process.platform,
 } = {}) {
-  await assertClaudeOAuthImpl();
+  await assertClaudeOAuthImpl({ resolveClaudeLaunchctlUidImpl, logger, platform });
 
   const promptPrefix = buildReviewerPromptPrefix({ stage: promptStage });
   const prompt = buildReviewerPrompt({ promptPrefix, extraContext, diff });
@@ -536,6 +565,12 @@ async function reviewWithClaude(diff, extraContext = '', {
   // Strip API key from env — Claude CLI falls back to OAuth when it's absent
   const { env } = scrubOAuthFallbackEnv(process.env);
   const subprocessEnv = withReviewerSubprocessCwdEnv(env, reviewerSubprocessCwd);
+  const claudeLaunchctlUid = await resolveClaudeLaunchctlUidForSpawn({
+    platform,
+    env: subprocessEnv,
+    resolveClaudeLaunchctlUidImpl,
+    logger,
+  });
 
   let stdout, stderr;
   try {
@@ -545,6 +580,7 @@ async function reviewWithClaude(diff, extraContext = '', {
         cwd: reviewerSubprocessCwd,
         timeout: resolveReviewerTimeoutMs(subprocessEnv),
         maxBuffer: 10 * 1024 * 1024,
+        ...(claudeLaunchctlUid === null ? {} : { uid: claudeLaunchctlUid }),
       }),
       { retryDelaysMs: launchctlRetryDelaysMs, sleepImpl },
     ));
@@ -2923,6 +2959,7 @@ const __test__ = {
   resolveAgyReviewerSubprocessTimeoutMs,
   resolveClaudeAuthProbeTimeoutMs,
   resolveClaudeCliPath,
+  resolveClaudeLaunchctlUidForSpawn,
   resolveCodexAuthPath,
   resolveCodexCliPath,
   resolveCodexExecOverrides,
@@ -2981,5 +3018,6 @@ export {
   assertClaudeOAuth,
   assertCodexOAuth,
   spawnCaptured,
+  resolveClaudeLaunchctlUidForSpawn,
   __test__,
 };

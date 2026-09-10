@@ -489,9 +489,9 @@ function schemaV1() {
           // env aliases on the Python side. Forks override per-host.
           runtime_home: { __type: TYPE_STRING, __default: null, __nullable: true },
           admin_home: { __type: TYPE_STRING, __default: null, __nullable: true },
-          // OSR-03 account-name extension. The Node loader does not consume
-          // these values directly, but strict CFG parity means top-level
-          // config.yaml must parse in every language sibling.
+          // OSR-03 account-name/UID extension. The watcher uses the admin UID
+          // for local reviewer-runtime probes; strict CFG parity means
+          // top-level config.yaml must parse in every language sibling.
           runtime_user: {
             __type: TYPE_STRING,
             __default: null,
@@ -506,6 +506,8 @@ function schemaV1() {
             __pattern: PATTERN_LOCAL_USERNAME,
             __pattern_description: PATTERN_LOCAL_USERNAME_DESCRIPTION,
           },
+          runtime_uid: { __type: TYPE_INT, __default: null, __nullable: true, __min: 1 },
+          admin_uid: { __type: TYPE_INT, __default: null, __nullable: true, __min: 1 },
         },
       },
       // FRC-02 — mirror the Python `frc.offlan_transport` shard so strict
@@ -2983,6 +2985,22 @@ export const ENV_ALIASES = {
   },
   'frc.offlan_transport.kill_switch_path': {
     canonical: 'AGENT_OS_FRC_OFFLAN_TRANSPORT_KILL_SWITCH_PATH',
+    aliases: [],
+  },
+  'roots.runtime_user': {
+    canonical: 'AGENT_OS_ROOTS_RUNTIME_USER',
+    aliases: [],
+  },
+  'roots.runtime_uid': {
+    canonical: 'AGENT_OS_ROOTS_RUNTIME_UID',
+    aliases: [],
+  },
+  'roots.admin_user': {
+    canonical: 'AGENT_OS_ROOTS_ADMIN_USER',
+    aliases: [],
+  },
+  'roots.admin_uid': {
+    canonical: 'AGENT_OS_ROOTS_ADMIN_UID',
     aliases: [],
   },
   'roles.reviewer': {

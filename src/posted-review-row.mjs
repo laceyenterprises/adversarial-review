@@ -857,12 +857,17 @@ export async function runQueuedReviewAdoptionPhase({
   const reviewerDeferredCount = Number(reviewerDrainResult?.deferred || 0);
   const reviewerPressure = reviewerDispatchCount > 0 || reviewerDeferredCount > 0;
   const boundedReviewerPressurePhaseBudgetMs = reviewerPressure
-    ? enforcePostedReviewReviewerPressureBudgetFloor({
-        pressureBudgetMs: postedReviewReviewerPressurePhaseBudgetMs,
-        handlerTimeoutMs: postedReviewHandlerTimeoutMs,
-        minimumHandlerStartBudgetMs,
-        logger,
-      })
+    ? Math.min(
+        postedReviewPhaseBudgetMs,
+        postedReviewReviewerPressurePhaseBudgetMs < postedReviewPhaseBudgetMs
+          ? enforcePostedReviewReviewerPressureBudgetFloor({
+              pressureBudgetMs: postedReviewReviewerPressurePhaseBudgetMs,
+              handlerTimeoutMs: postedReviewHandlerTimeoutMs,
+              minimumHandlerStartBudgetMs,
+              logger,
+            })
+          : postedReviewReviewerPressurePhaseBudgetMs,
+      )
     : postedReviewPhaseBudgetMs;
   const effectivePostedReviewPhaseBudgetMs = reviewerPressure
     ? Math.min(postedReviewPhaseBudgetMs, boundedReviewerPressurePhaseBudgetMs)

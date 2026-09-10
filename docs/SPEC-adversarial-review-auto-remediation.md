@@ -611,6 +611,25 @@ provider, wrong-provider echo) fails over immediately without burning the
 ladder. When every endpoint is exhausted the mint fails closed rather than
 spawning an unauthenticated worker.
 
+Claude reviewer model auth uses the same credential contract. When
+`ADVERSARIAL_REVIEW_CLAUDE_REVIEWER_OAUTH_TRANSPORT` or
+`ADVERSARIAL_REVIEW_CLAUDE_MODEL_OAUTH_TRANSPORT` is set to `broker` or
+`keychain`, that explicit value wins; any other non-empty explicit value is a
+configuration error and fails closed before route auto-detection. Otherwise the existing
+`CLAUDE_REVIEWER_AUTH_VIA_BROKER` role flag governs both the reviewer GitHub App
+token and the Claude model credential: `true` selects broker bearer injection,
+while `false` selects keychain/`launchctl asuser`. If the role flag is absent,
+the remediation auto-detect rule applies so broker-configured fleet hosts use
+broker auth and standalone installs keep keychain auth. Broker-mode Claude
+reviewer spawns bypass `launchctl asuser` entirely; `launchctl-bootstrap`
+therefore describes only keychain-mode Claude reviewer failures on broker hosts.
+Broker bearers handed to the reviewer subprocess must remain valid for the
+configured reviewer timeout plus post slack before the subprocess is spawned.
+The subprocess environment must not receive `OAUTH_BROKER_SHARED_SECRET` or
+`OAUTH_BROKER_SHARED_SECRET_FILE`; those mint credentials are consumed only in
+the parent reviewer process before the short-lived `ANTHROPIC_AUTH_TOKEN` is
+handed off.
+
 The broker shared secret is a fleet-wide credential and the remediation worker
 executes model-generated payloads, so the claude-code spawn env withholds both
 `OAUTH_BROKER_SHARED_SECRET` and `OAUTH_BROKER_SHARED_SECRET_FILE` by default.
@@ -1652,6 +1671,9 @@ includes:
 - `max-rounds-reached` — another round would exceed the stored cap.
 - `stale-heartbeat` — the stuck-claim sweep reclaimed an orphaned in-progress
   claim after liveness went stale.
+- `revision-superseded` — pending-only release: a queued job was created for an
+  older reviewed revision and a newer PR head is already live before worker
+  spawn.
 - `operator-merged-pr` — the PR merged before consume or reconcile could
   advance the loop.
 - `operator-closed-pr` — the PR closed unmerged before consume or reconcile
@@ -1666,6 +1688,12 @@ and uses the newest observation as the liveness anchor; file mtime is only the
 legacy fallback when no valid timestamp field exists. A reclaimed job remains
 operator-retriggerable through the normal CLI or
 `retrigger-remediation` label flow after inspection.
+
+`revision-superseded` is the pending-job sibling of `stale-review-head` and is
+operator-retriggerable through the same CLI or `retrigger-remediation` label
+flow. A label-triggered requeue records the label event's current head as the new
+`revisionRef`; a CLI requeue without current-head context clears `revisionRef`
+so the consume-time stale-head guard cannot immediately fire again.
 
 `stale-review-head` is intentionally a pre-spawn stale-job signal, not a
 post-spawn invariant. Reconcile must not emit it merely because the remediation
@@ -1766,7 +1794,7 @@ The watcher must project the gate on terminal early-exit paths, including alread
 `retrigger-review` and `retrigger-remediation` are separate operator surfaces:
 
 - `retrigger-review` resets the watcher delivery row to `review_status='pending'` so the watcher can post another adversarial review.
-- `retrigger-remediation` bumps the remediation budget and requeues the latest eligible terminal follow-up job. It does not reset `reviews.db` first; the next fresh adversarial review must come from the requeued worker's durable `reReview.requested=true` reply during normal reconciliation. Eligible terminal jobs are `failed`, `completed` with `reReview.requested=true`, or `stopped` with one of `max-rounds-reached`, `round-budget-exhausted`, `daemon-bounce-safety`, or `review-settled`. `stopped:review-settled` is retriggerable because the automatic loop has settled the review as non-blocking, but an explicit operator action can still request a worker pass over the remaining findings. That retrigger is carried durably on `remediationPlan.nextAction={type:'consume-pending-round', operatorOverride:true, requestedAt, requestedBy, operatorVisibility:'explicit'}`; `claimNextFollowUpJob` must suppress the claim-time `review-settled` early-stop for that one claim, then consume the override by rewriting `nextAction` to `worker-spawn`. While the requeued job is `pending` or `inProgress`, the adversarial gate must stay pending rather than projecting the stored Comment-only verdict as settled. `stopped:operator-stop` and `stopped:rereview-blocked` are intentionally not retriggerable through this surface because those states encode operator intent or a watcher refusal that needs human handling.
+- `retrigger-remediation` bumps the remediation budget and requeues the latest eligible terminal follow-up job. It does not reset `reviews.db` first; the next fresh adversarial review must come from the requeued worker's durable `reReview.requested=true` reply during normal reconciliation. Eligible terminal jobs are `failed`, `completed` with `reReview.requested=true`, or `stopped` with one of `max-rounds-reached`, `round-budget-exhausted`, `daemon-bounce-safety`, `review-settled`, `no-progress`, `stale-review-head`, `revision-superseded`, or `stale-heartbeat`. `stopped:review-settled` is retriggerable because the automatic loop has settled the review as non-blocking, but an explicit operator action can still request a worker pass over the remaining findings. That retrigger is carried durably on `remediationPlan.nextAction={type:'consume-pending-round', operatorOverride:true, requestedAt, requestedBy, operatorVisibility:'explicit'}`; `claimNextFollowUpJob` must suppress the claim-time `review-settled` early-stop for that one claim, then consume the override by rewriting `nextAction` to `worker-spawn`. While the requeued job is `pending` or `inProgress`, the adversarial gate must stay pending rather than projecting the stored Comment-only verdict as settled. `stopped:operator-stop` and `stopped:rereview-blocked` are intentionally not retriggerable through this surface because those states encode operator intent or a watcher refusal that needs human handling.
 
 For PR-side `retrigger-remediation` labels, a successful budget bump is the durable consumption boundary. Once the bump lands, the watcher must write the label-consumption record and operator-mutation audit before attempting the queue rearm. If requeue then fails, the watcher still removes the label and posts a failure-flavored acknowledgement that names the partial-success state; the same GitHub label event must not authorize another budget bump on retry.
 

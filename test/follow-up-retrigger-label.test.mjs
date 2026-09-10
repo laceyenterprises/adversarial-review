@@ -9,6 +9,7 @@ import {
   createFollowUpJob,
   readFollowUpJob,
   requeueFollowUpJobForNextRound,
+  RETRIGGERABLE_STOP_CODES,
   writeFollowUpJob,
 } from '../src/follow-up-jobs.mjs';
 import {
@@ -18,6 +19,14 @@ import {
 } from '../src/follow-up-retrigger-label.mjs';
 
 const COMMENT_ONLY_REVIEW_BODY = '## Summary\nsummary\n\n## Verdict\nComment only';
+
+function sectionBetween(text, startMarker, endMarker) {
+  const start = text.indexOf(startMarker);
+  assert.notEqual(start, -1, `missing start marker: ${startMarker}`);
+  const end = text.indexOf(endMarker, start + startMarker.length);
+  assert.notEqual(end, -1, `missing end marker: ${endMarker}`);
+  return text.slice(start, end);
+}
 
 function makeHaltedJob(rootDir, {
   status = 'stopped',
@@ -168,6 +177,32 @@ test('tryRetriggerRemediationFromLabel bumps + requeues + removes label on halte
   assert.equal(updated.remediationPlan.maxRounds, 3);
   assert.equal(updated.status, 'pending');
   assert.equal(updated.remediationPlan.nextAction.operatorOverride, true);
+});
+
+test('operator retrigger docs list every retriggerable stopped code', () => {
+  const specText = readFileSync(
+    new URL('../docs/SPEC-adversarial-review-auto-remediation.md', import.meta.url),
+    'utf8',
+  );
+  const runbookText = readFileSync(
+    new URL('../docs/follow-up-runbook.md', import.meta.url),
+    'utf8',
+  );
+  const specSection = sectionBetween(
+    specText,
+    '## Operator Retrigger Contracts',
+    '## Reviewer Runtime Recovery Contract',
+  );
+  const runbookSection = sectionBetween(
+    runbookText,
+    '## Operator retrigger contracts',
+    'Fresh transient reviewer failures',
+  );
+
+  for (const code of RETRIGGERABLE_STOP_CODES) {
+    assert.match(specSection, new RegExp(`\\b${code}\\b`), `SPEC missing ${code}`);
+    assert.match(runbookSection, new RegExp(`\\b${code}\\b`), `runbook missing ${code}`);
+  }
 });
 
 test('tryRetriggerRemediationFromLabel requeues stopped:review-settled jobs for explicit operator flags', async () => {
@@ -363,6 +398,31 @@ test('tryRetriggerRemediationFromLabel requeues stopped:stale-review-head with t
   );
 });
 
+test('tryRetriggerRemediationFromLabel requeues stopped:revision-superseded with the fresh head', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  makeHaltedJob(rootDir, {
+    stopCode: 'revision-superseded',
+    currentRound: 1,
+    maxRounds: 2,
+    revisionRef: 'sha-old',
+  });
+
+  const result = await tryRetriggerRemediationFromLabel({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 238,
+    labelEvent: makeLabelEvent({ id: 'evt-revision-superseded' }),
+    execFileImpl: async () => ({ stdout: '', stderr: '' }),
+    appendAuditRow: () => {},
+    now: () => '2026-05-30T18:00:00.000Z',
+  });
+
+  assert.equal(result.outcome, 'bumped-and-requeued');
+  const requeued = readFollowUpJob(result.jobPath);
+  assert.equal(requeued.status, 'pending');
+  assert.equal(requeued.revisionRef, 'sha-retrigger');
+});
+
 test('requeueFollowUpJobForNextRound clears stale revisionRef when caller omits one (CLI fallback)', async () => {
   // CLI invocations don't have a current-head context, so when an
   // operator retriggers a stopped:stale-review-head job via the CLI
@@ -399,6 +459,31 @@ test('requeueFollowUpJobForNextRound clears stale revisionRef when caller omits 
     'CLI fallback must clear revisionRef so consume-time stale-head check '
       + 'short-circuits',
   );
+});
+
+test('requeueFollowUpJobForNextRound clears revision-superseded revisionRef when caller omits one', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { jobPath } = makeHaltedJob(rootDir, {
+    stopCode: 'revision-superseded',
+    currentRound: 1,
+    maxRounds: 2,
+    revisionRef: 'sha-old',
+  });
+
+  requeueFollowUpJobForNextRound({
+    rootDir,
+    jobPath,
+    requestedAt: '2026-05-30T18:00:00.000Z',
+    requestedBy: 'cli-operator',
+    reason: 'CLI retrigger',
+  });
+
+  const dir = path.join(rootDir, 'data', 'follow-up-jobs', 'pending');
+  const names = readdirSync(dir).filter((n) => n.endsWith('.json'));
+  assert.equal(names.length, 1);
+  const requeued = JSON.parse(readFileSync(path.join(dir, names[0]), 'utf8'));
+  assert.equal(requeued.status, 'pending');
+  assert.equal(requeued.revisionRef, null);
 });
 
 test('requeueFollowUpJobForNextRound preserves revisionRef for non-stale stop codes', async () => {

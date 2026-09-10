@@ -256,16 +256,17 @@ test('watcher caps posted-review phase budget when reviewer dispatch is under pr
     'lifecycle-cleanup',
     'lifecycle-sync',
     'drain:posted-review handlers',
-    'posted-budget:120000',
+    'posted-budget:360000',
     'dag-autowalk',
     'merge-closeouts',
   ]);
   assert.equal(fairnessCalls.length, 1);
-  assert.equal(fairnessCalls[0].budgetMs, 120_000);
+  assert.equal(fairnessCalls[0].budgetMs, 360_000);
   assert.equal(fairnessCalls[0].handlers.length, 1);
-  assert.equal(warnings.length, 1);
-  assert.match(warnings[0], /posted-review phase budget capped under reviewer pressure/);
-  assert.match(warnings[0], /dispatched=1 deferred=2/);
+  assert.equal(warnings.length, 2);
+  assert.match(warnings[0], /raised to handler-capacity floor/);
+  assert.match(warnings[1], /posted-review phase budget capped under reviewer pressure/);
+  assert.match(warnings[1], /dispatched=1 deferred=2/);
 });
 
 test('RVHAND-10: watcher stays quiet when pending handlers run but clean merges stay at zero', async () => {

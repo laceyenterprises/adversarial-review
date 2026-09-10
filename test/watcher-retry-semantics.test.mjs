@@ -1013,6 +1013,67 @@ test('watcher still defers a genuinely active in-progress remediation job on the
   assert.equal(existsSync(spawned.jobPath), true, 'live current-head job must remain in progress');
 });
 
+test('watcher keeps a fresh in-progress follow-up job even when the PR head moved', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-superseded-in-progress-held-'));
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 1023,
+    reviewerModel: 'gemini',
+    linearTicketId: null,
+    revisionRef: 'sha-old',
+    reviewBody: '## Summary\nOld-head remediation fixture.\n\n## Verdict\nRequest changes',
+    reviewPostedAt: '2026-09-10T09:06:23.000Z',
+    critical: false,
+    maxRemediationRounds: 2,
+  });
+  const claimed = claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-09-10T09:06:43.542Z',
+  });
+  const spawned = markFollowUpJobSpawned({
+    rootDir,
+    jobPath: claimed.jobPath,
+    worker: {
+      model: 'codex',
+      state: 'spawned',
+      processId: 13600,
+      processGroupId: 13600,
+      workspaceDir: '/tmp/superseded-remediator-workspace',
+    },
+    spawnedAt: '2026-09-10T09:07:00.000Z',
+  });
+  writeFollowUpJob(spawned.jobPath, {
+    ...spawned.job,
+    revisionRef: 'sha-old',
+    lastHeartbeatAt: '2026-09-10T09:08:00.000Z',
+  });
+
+  const signalCalls = [];
+  const decision = shouldDeferReviewForActiveFollowUpDirect({
+    rootDir,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 1023,
+    currentRevisionRef: 'sha-new',
+    nowMs: Date.parse('2026-09-10T09:09:00.000Z'),
+    staleSignalImpl(args) {
+      signalCalls.push(args);
+      return {
+        signalled: true,
+        skipped: false,
+        target: { kind: 'process-group', id: 13600 },
+        error: null,
+      };
+    },
+  });
+
+  assert.equal(decision.defer, true, 'head movement alone must not release a live remediation worker');
+  assert.equal(decision.latestJobStatus, 'in_progress');
+  assert.equal(decision.releaseReason, undefined);
+  assert.equal(signalCalls.length, 0, 'fresh in-progress workers must not be signalled solely because head moved');
+  assert.equal(existsSync(spawned.jobPath), true, 'in-progress claim must stay held');
+});
+
 test('watcher releases stale in-progress follow-up claims through the stuck-claim sweep before deferring', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-stale-release-'));
   createFollowUpJob({

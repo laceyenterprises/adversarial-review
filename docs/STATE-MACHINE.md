@@ -636,6 +636,7 @@ non-JSON stdout falls through to a parse-error retry.
 | `no-progress` | worker did not leave a durable rereview request |
 | `max-rounds-reached` | bounded loop cap hit |
 | `stale-review-head` | consume-time stale-job guard: the PR head moved before this worker spawned |
+| `revision-superseded` | pending-job stale-head release: a newer PR head exists before this job can spawn |
 
 ### Common failure classes
 

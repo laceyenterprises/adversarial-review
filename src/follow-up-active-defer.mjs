@@ -9,10 +9,16 @@ import { currentProcessGroupId, isPgidAlive } from './process-group-identity.mjs
 const IN_PROGRESS_STUCK_THRESHOLD_MS_ENV = 'ADVERSARIAL_FOLLOW_UP_IN_PROGRESS_STUCK_THRESHOLD_MS';
 const DEFAULT_IN_PROGRESS_STUCK_THRESHOLD_MS = 10 * 60 * 1000;
 const STALE_HEARTBEAT_STOP_CODE = 'stale-heartbeat';
+const REVISION_SUPERSEDED_STOP_CODE = 'revision-superseded';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const IN_PROGRESS_FOLLOW_UP_STATUSES = new Set(['in_progress', 'inProgress', 'in-progress']);
 
 function isActiveFollowUpJob(job) {
   return followUpJobs.isActiveFollowUpJobStatus(job?.status);
+}
+
+function isInProgressFollowUpJob(job) {
+  return IN_PROGRESS_FOLLOW_UP_STATUSES.has(String(job?.status || ''));
 }
 
 function stopBudgetExhaustedPendingFollowUpJob({
@@ -91,7 +97,7 @@ function stopTerminalPendingFollowUpJob({
     ? 'settled-clean-head-moved'
     : settledClean
     ? 'settled-clean'
-    : 'revision-superseded';
+    : REVISION_SUPERSEDED_STOP_CODE;
   const reasonDetail = revisionSuperseded
     ? ` Job revision ${jobRevisionRef} is superseded by current head ${headRevisionRef}.`
     : '';
@@ -241,7 +247,7 @@ function stopStaleInProgressFollowUpJob({
   log = console,
 }) {
   const job = latest?.job;
-  if (!['in_progress', 'inProgress', 'in-progress'].includes(String(job?.status || ''))) {
+  if (!isInProgressFollowUpJob(job)) {
     return null;
   }
   const worker = job?.worker || job?.remediationWorker || {};

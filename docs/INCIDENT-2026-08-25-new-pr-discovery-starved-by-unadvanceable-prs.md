@@ -119,10 +119,11 @@ guarantees a new PR is **seen**.
   (`ADVERSARIAL_WATCHER_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS`, default
   10m). When the tick just dispatched or deferred reviewer work, posted-review
   handlers get this shorter cap for that tick only. The effective cap is derived
-  from the resolved normal phase budget, then floored at three handler windows;
-  a lower positive operator override is raised to that floor. This keeps fresh
+  from the resolved normal phase budget, floored at three handler windows, then
+  clamped back under the normal phase budget. A lower positive operator override
+  is raised to that floor before the normal ceiling is applied. This keeps fresh
   first-pass and rereview claims from sitting behind a large hammer/merge-closeout
-  backlog while preserving the normal window when no reviewer lane work moved.
+  backlog while preserving the operator's normal window.
 
 #### 2026-09-09 follow-up: HAM launch settlement must use a soft step deadline
 

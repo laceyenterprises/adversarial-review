@@ -13,6 +13,7 @@ import { createLogChangeGate } from '../src/log-change-gate.mjs';
 import {
   DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT,
   DEFAULT_POSTED_REVIEW_HANDLER_HEADROOM_MS,
+  DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS,
   DEFAULT_POSTED_REVIEW_PHASE_HANDLER_CAPACITY,
   DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_HANDLER_CAPACITY,
   derivePostedReviewExpensiveStepBudgetMs,
@@ -92,7 +93,8 @@ test('RVHAND-10: posted-review HAM step budget admits observed live tails withou
   const deadlineMs = resolveMergeAgentCoexistenceStepDeadlineMs({});
 
   assert.equal(handlerTimeoutMs, 180_000);
-  assert.equal(phaseBudgetMs, handlerTimeoutMs * DEFAULT_POSTED_REVIEW_PHASE_HANDLER_CAPACITY);
+  assert.equal(phaseBudgetMs, DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS);
+  assert.ok(phaseBudgetMs >= handlerTimeoutMs * DEFAULT_POSTED_REVIEW_PHASE_HANDLER_CAPACITY);
   assert.equal(deadlineMs, 87_500);
   assert.ok(deadlineMs > 80_000, 'live HAM candidate/coexistence tails have exceeded 75s under load');
   assert.ok(
@@ -101,12 +103,11 @@ test('RVHAND-10: posted-review HAM step budget admits observed live tails withou
   );
 });
 
-test('RVHAND-10: invalid posted-review phase budget falls back to capacity-expanded default', () => {
+test('RVHAND-10: invalid posted-review phase budget falls back to bounded default', () => {
   const env = { ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS: 'invalid' };
-  const handlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs(env);
   assert.equal(
     resolvePostedReviewPhaseBudgetMs(env),
-    handlerTimeoutMs * DEFAULT_POSTED_REVIEW_PHASE_HANDLER_CAPACITY,
+    DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS,
   );
 });
 
@@ -291,6 +292,58 @@ test('RVPRESS-02: reviewer-pressure cap preserves the operator normal budget in 
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /budget_ms=600000/);
   assert.match(warnings[0], /normal_budget_ms=1800000/);
+});
+
+test('RVPRESS-02: reviewer-pressure cap never exceeds operator normal budget', async () => {
+  const previousPhaseBudget = process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS;
+  const previousPressureBudget = process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS;
+  const previousTimeout = process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS;
+  const warnings = [];
+  let observedBudgetMs;
+
+  try {
+    process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS = '300000';
+    process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS = '180000';
+    process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS = '180000';
+
+    await runQueuedReviewAdoptionPhase({
+      drainReviewerDispatchCandidates: async () => ({ dispatched: 1, deferred: 0 }),
+      retryPendingMergeAgentLifecycleCleanupsImpl: async () => {},
+      syncPRLifecycleImpl: async () => {},
+      retryPendingDagAutowalkOnMergeImpl: async () => {},
+      retryPendingTriageSyncsImpl: async () => ({ attempted: 0, synced: 0, pending: 0 }),
+      retryPendingMergeCloseoutsImpl: async () => {},
+      retryPendingRetriggerAckCommentsImpl: async () => ({ attempted: 0, posted: 0 }),
+      retryPendingRetriggerReviewAckCommentsImpl: async () => ({ attempted: 0, posted: 0 }),
+      noProgressLaneGate: { shouldRun: () => true, recordResult: () => {} },
+      postedReviewHandlers: [],
+      postReviewMaintenanceHandlers: [],
+      runPostedReviewHandlersFairlyImpl: async ({ budgetMs }) => {
+        observedBudgetMs = budgetMs;
+        return { executed: [], deferred: [], timedOut: null };
+      },
+      logger: { warn: (message) => warnings.push(String(message)) },
+    });
+  } finally {
+    if (previousPhaseBudget === undefined) {
+      delete process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS;
+    } else {
+      process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS = previousPhaseBudget;
+    }
+    if (previousPressureBudget === undefined) {
+      delete process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS;
+    } else {
+      process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS = previousPressureBudget;
+    }
+    if (previousTimeout === undefined) {
+      delete process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS;
+    } else {
+      process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS = previousTimeout;
+    }
+  }
+
+  assert.equal(observedBudgetMs, 300_000);
+  assert.equal(warnings.length, 0);
 });
 
 test('RVHAND-11: reviewer-pressure floor leaves time to start one handler', async () => {

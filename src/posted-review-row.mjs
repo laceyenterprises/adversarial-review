@@ -65,7 +65,6 @@ import {
 import {
   createPostedReviewFairnessState,
   derivePostedReviewExpensiveStepBudgetMs,
-  derivePostedReviewReviewerPressureBudgetFloorMs,
   enforcePostedReviewReviewerPressureBudgetFloor,
   resolvePostedReviewHandlerHeadroomMs,
   resolvePostedReviewHandlerTimeoutMs,
@@ -865,14 +864,8 @@ export async function runQueuedReviewAdoptionPhase({
         logger,
       })
     : postedReviewPhaseBudgetMs;
-  const reviewerPressureFloorMs = reviewerPressure
-    ? derivePostedReviewReviewerPressureBudgetFloorMs(postedReviewHandlerTimeoutMs)
-    : postedReviewPhaseBudgetMs;
   const effectivePostedReviewPhaseBudgetMs = reviewerPressure
-    ? Math.max(
-        Math.min(postedReviewPhaseBudgetMs, boundedReviewerPressurePhaseBudgetMs),
-        reviewerPressureFloorMs,
-      )
+    ? Math.min(postedReviewPhaseBudgetMs, boundedReviewerPressurePhaseBudgetMs)
     : postedReviewPhaseBudgetMs;
   if (reviewerPressure && effectivePostedReviewPhaseBudgetMs < postedReviewPhaseBudgetMs) {
     logger?.warn?.(

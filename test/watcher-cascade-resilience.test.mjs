@@ -1539,6 +1539,56 @@ test('settleReviewerAttempt records reviewer timeout class without burning attem
   }
 });
 
+test('settleReviewerAttempt records launchctl bootstrap stderr without burning attempts', () => {
+  const { rootDir, db } = setupFixture();
+  try {
+    const repo = 'laceyenterprises/adversarial-review';
+    const prNumber = 195;
+    const statements = {
+      markPosted: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
+      ),
+      markFailed: stmtMarkBugFailed(db),
+      releaseReviewLease: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
+      ),
+      markCascadeFailed: stmtMarkCascadeFailed(db),
+      markPendingUpstream: stmtMarkPendingUpstream(db),
+      getReviewRow: db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'),
+    };
+
+    settleReviewerAttempt({
+      rootDir,
+      repoPath: repo,
+      prNumber,
+      result: {
+        ok: false,
+        error: 'Claude launchctl session bootstrap failed: Command failed with code 1',
+        failureClass: 'launchctl-bootstrap',
+        stderr: 'bootstrap failed: 5: Input/output error',
+        exitCode: 1,
+      },
+      failureAt: '2026-09-10T07:10:00.000Z',
+      maxRemediationRounds: 1,
+      statements,
+      log: { warn() {} },
+    });
+
+    const row = db.prepare(
+      'SELECT review_status, review_attempts, failure_message FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get(repo, prNumber);
+
+    assert.equal(row.review_status, 'pending-upstream');
+    assert.equal(row.review_attempts, 0);
+    assert.match(row.failure_message, /^\[launchctl-bootstrap\]/);
+    assert.match(row.failure_message, /Command failed with code 1/);
+    assert.match(row.failure_message, /stderr tail:\nbootstrap failed: 5: Input\/output error/);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('settleReviewerAttempt records oauth-broken without burning attempts', () => {
   const { rootDir, db } = setupFixture();
   try {

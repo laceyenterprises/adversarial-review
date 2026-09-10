@@ -41,6 +41,7 @@ const {
   parseCodexJsonTokenUsage,
   queueFollowUpForPostedReview,
   resolveClaudeLaunchctlUidForSpawn,
+  LaunchctlSessionError,
   resolveCodexAuthPath,
   resolveCodexExecOverrides,
   resolveReviewerTimeoutMs,
@@ -2824,6 +2825,60 @@ test('spawnClaude classifies launchctl session failures separately from oauth fa
     }),
     (err) => err?.isLaunchctlSessionError === true && /could not switch to audit session/i.test(err.message)
   );
+});
+
+test('spawnClaude launchctl session failure message retains child stderr', async () => {
+  await assert.rejects(
+    () => spawnClaude(['auth', 'status'], {
+      platform: 'darwin',
+      uid: 501,
+      execFileImpl: async () => {
+        const err = new Error('Command failed with code 1');
+        err.code = 1;
+        err.stderr = 'bootstrap failed: 5: Input/output error';
+        throw err;
+      },
+    }),
+    (err) => {
+      assert.equal(err?.isLaunchctlSessionError, true);
+      assert.match(err.message, /Command failed with code 1/);
+      assert.match(err.message, /stderr:\nbootstrap failed: 5: Input\/output error/);
+      return true;
+    }
+  );
+});
+
+test('LaunchctlSessionError does not reformat empty-stdio child failure details', () => {
+  const reason = [
+    'Command failed: /bin/launchctl asuser 501 /usr/bin/env -u ANTHROPIC_API_KEY claude auth status',
+    'code=EIO exitCode=<none> signal=<none> killed=false',
+  ].join('\n');
+  const err = new LaunchctlSessionError(reason, { cause: { code: 'EIO' } });
+
+  assert.equal(err.isLaunchctlSessionError, true);
+  assert.equal(
+    (err.message.match(/\bcode=EIO exitCode=<none> signal=<none> killed=false\b/g) || []).length,
+    1
+  );
+  assert.doesNotMatch(err.message, /\bcode=<none> exitCode=<none> signal=<none> killed=false\b/);
+});
+
+test('LaunchctlSessionError preserves cause exit state for unformatted reasons', () => {
+  const err = new LaunchctlSessionError('launchctl bootstrap failed', {
+    cause: {
+      code: 'EIO',
+      exitCode: 5,
+      signal: 'SIGTERM',
+      killed: true,
+    },
+    stderr: 'bootstrap failed: 5: Input/output error',
+  });
+
+  assert.equal(err.isLaunchctlSessionError, true);
+  assert.match(err.message, /launchctl bootstrap failed/);
+  assert.match(err.message, /\bcode=EIO exitCode=5 signal=SIGTERM killed=true\b/);
+  assert.match(err.message, /stderr:\nbootstrap failed: 5: Input\/output error/);
+  assert.doesNotMatch(err.message, /\bcode=<none> exitCode=<none> signal=<none> killed=false\b/);
 });
 
 test('assertClaudeOAuth retries bounded launchctl session failures', async () => {

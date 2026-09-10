@@ -484,7 +484,19 @@ class OAuthError extends Error {
 
 class LaunchctlSessionError extends Error {
   constructor(reason, { cause, stdout = '', stderr = '' } = {}) {
-    super(`Claude launchctl session bootstrap failed: ${reason}`);
+    const text = String(reason || '');
+    const detail = /\bstd(?:out|err):\n/.test(text) || /\bcode=.*\bexitCode=.*\bsignal=.*\bkilled=(?:true|false)\b/.test(text)
+      ? text.trim()
+      : formatChildProcessFailureDetails({
+        message: text,
+        stdout,
+        stderr,
+        code: cause?.code,
+        exitCode: cause?.exitCode,
+        signal: cause?.signal,
+        killed: cause?.killed,
+      }).trim();
+    super(`Claude launchctl session bootstrap failed: ${detail || reason}`);
     this.name = 'LaunchctlSessionError';
     this.cause = cause;
     this.stdout = stdout;
@@ -526,9 +538,10 @@ function previewText(text, limit = 200) {
 }
 
 function formatChildProcessFailureDetails(err) {
+  const code = err?.code ?? err?.exitCode ?? '<none>';
   return [
     err?.message || '',
-    `code=${err?.code ?? '<none>'} exitCode=${err?.exitCode ?? '<none>'} signal=${err?.signal ?? '<none>'} killed=${err?.killed === true}`,
+    `code=${code} exitCode=${err?.exitCode ?? '<none>'} signal=${err?.signal ?? '<none>'} killed=${err?.killed === true}`,
     err?.stdout ? `stdout:\n${err.stdout}` : '',
     err?.stderr ? `stderr:\n${err.stderr}` : '',
   ].filter(Boolean).join('\n');

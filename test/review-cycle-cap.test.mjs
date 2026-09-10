@@ -367,7 +367,10 @@ test('postReviewCycleCapEscalation ignores spoofed duplicate bodies from untrust
     rest: {
       issues: {
         listComments: async () => ({
-          data: [{ id: 101, body: 'escalation body', user: { login: 'outside-contributor' } }],
+          data: [
+            { id: 101, body: 'escalation body', user: { login: 'outside-contributor' } },
+            { id: 102, body: 'escalation body', user: { login: 'lacey-merge-agent' } },
+          ],
         }),
         createComment: async (params) => {
           calls.push(params);

@@ -54,7 +54,7 @@ function normalizeCommentBodyForMatch(value) {
 }
 
 function normalizeAuthorLoginForMatch(value) {
-  return String(value || '').trim().toLowerCase().replace(/\[bot\]$/, '');
+  return String(value || '').trim().toLowerCase();
 }
 
 function normalizeTrustedAuthorLogins(values = []) {

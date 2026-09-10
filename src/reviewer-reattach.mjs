@@ -357,10 +357,7 @@ function nullPgidGuardWindowMs({
 } = {}) {
   const state = String(runRecord?.state || '').trim();
   if (TERMINAL_RUN_STATES.has(state)) return 0;
-  if (
-    state === 'launching' ||
-    (!runRecord && parseTime(row?.reviewer_started_at) === null)
-  ) {
+  if (!runRecord && parseTime(row?.reviewer_started_at) === null) {
     return nullPgidGraceMs;
   }
   return reviewerRunTimeoutMs(row, reviewerDeadlineMs);

@@ -1037,7 +1037,7 @@ test('terminal/null-pgid rows rearm without waiting for full reviewer timeout', 
   assert.match(log.lines.join('\n'), /reviewer_reattach_null_pgid_requeued/);
 });
 
-test('new launching/null-pgid rows auto-rearm after launch grace expires before reviewer timeout', async () => {
+test('launching/null-pgid rows wait full reviewer timeout before rearm', async () => {
   const db = setupDb();
   seedReviewing(db, {
     pgid: null,
@@ -1077,16 +1077,14 @@ test('new launching/null-pgid rows auto-rearm after launch grace expires before 
   });
 
   const row = readRow(db);
-  assert.equal(row.review_status, 'pending');
-  assert.equal(row.review_attempts, 3);
-  assert.equal(headProbeCount, 1);
-  assert.equal(reviewProbeCount, 1);
-  assert.match(row.failure_message, /no live reviewer process group was found/);
-  assert.deepEqual(
-    settled.map(({ state, reason }) => ({ state, reason })),
-    [{ state: 'cancelled', reason: 'missing-pgid-no-live-reviewer' }]
-  );
-  assert.match(log.lines.join('\n'), /reviewer_reattach_null_pgid_requeued/);
+  assert.equal(row.review_status, 'reviewing');
+  assert.equal(row.review_attempts, 2);
+  assert.equal(row.failure_message, null);
+  assert.equal(headProbeCount, 0, 'ambiguous launches must not probe GitHub before the full reviewer timeout');
+  assert.equal(reviewProbeCount, 0, 'ambiguous launches must not probe reviews before the full reviewer timeout');
+  assert.equal(settled.length, 0);
+  assert.match(log.lines.join('\n'), /reviewer_reattach_null_pgid_guard_active/);
+  assert.match(log.lines.join('\n'), /run_state=launching/);
 });
 
 test('claimed rows with null pgid reconcile to an already posted current-head review', async () => {

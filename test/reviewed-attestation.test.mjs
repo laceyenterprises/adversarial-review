@@ -312,6 +312,53 @@ test('queued reviewed attestation retry preserves transient code through pre-fli
   }
 });
 
+test('queued reviewed attestation retry preserves killed timeout through pre-flight classification', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewed-attestation-queue-killed-'));
+  try {
+    const payloadArgs = {
+      repo: 'laceyenterprises/demo',
+      prNumber: 23,
+      headSha: 'head-sha',
+      reviewerIdentity: 'codex-reviewer-lacey',
+      verdict: 'comment-only',
+      findingsCount: 0,
+    };
+    await enqueuePendingReviewedAttestation(
+      rootDir,
+      payloadArgs,
+      Object.assign(new Error('opaque subprocess failure'), { killed: true, signal: 'SIGTERM' }),
+    );
+    const initialQueued = await readPendingReviewedAttestations(rootDir);
+    assert.equal(initialQueued[0].last_error_killed, true);
+
+    let signAttempts = 0;
+    const result = await retryPendingReviewedAttestations({
+      rootDir,
+      execFileImpl: async () => {
+        signAttempts += 1;
+        throw Object.assign(new Error('opaque subprocess failure'), {
+          killed: true,
+          signal: 'SIGTERM',
+        });
+      },
+      env: {},
+      log: { warn: assert.fail },
+      now: () => '2026-09-10T21:31:45.000Z',
+    });
+
+    assert.ok(signAttempts > 0);
+    assert.deepEqual(result, { attempted: 1, consumed: 0, remaining: 1 });
+    const queued = await readPendingReviewedAttestations(rootDir);
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0].failure_class, 'attestation-sign-failed');
+    assert.equal(queued[0].last_error_killed, true);
+    assert.equal(queued[0].retry_attempts, 1);
+    assert.equal(existsSync(join(rootDir, 'data', 'reviewed-attestations', 'failed.jsonl')), false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('queued reviewed attestation retry quarantines permanent record conflicts', async () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'reviewed-attestation-queue-terminal-'));
   try {

@@ -405,6 +405,7 @@ function pendingReviewedAttestationEntry(args = {}, err = null) {
     failure_class: classifyReviewedAttestationFailure(err),
     last_error: err?.message || String(err || ''),
     last_error_code: err?.code ? String(err.code) : undefined,
+    last_error_killed: err?.killed === true ? true : undefined,
     payload,
   };
 }
@@ -571,7 +572,11 @@ async function retryPendingReviewedAttestations({
   };
   for (const entry of pending) {
     const queuedFailureClass = String(entry?.failure_class || '');
-    const queuedError = { message: entry.last_error, code: entry.last_error_code };
+    const queuedError = {
+      message: entry.last_error,
+      code: entry.last_error_code,
+      killed: entry.last_error_killed,
+    };
     const effectiveQueuedFailureClass = queuedFailureClass === HCP_UNAVAILABLE_FAILURE_CLASS
       ? queuedFailureClass
       : classifyReviewedAttestationFailure(queuedError);
@@ -620,6 +625,7 @@ async function retryPendingReviewedAttestations({
         failure_class: failureClass,
         last_error: err?.message || String(err || ''),
         last_error_code: err?.code ? String(err.code) : undefined,
+        last_error_killed: err?.killed === true ? true : undefined,
         last_attempted_at: attemptedAt,
         retry_attempts: retryAttempts,
       };

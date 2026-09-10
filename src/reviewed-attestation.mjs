@@ -15,6 +15,7 @@ const REVIEWED_ATTESTATION_DIGEST_RE = /^sha256:[A-Za-z0-9_-]{43}$/;
 const ATTESTATION_SIGN_FAILED_FAILURE_CLASS = 'attestation-sign-failed';
 const HCP_UNAVAILABLE_FAILURE_CLASS = 'hcp-unavailable';
 const REVIEWED_ATTESTATION_QUEUE_RELATIVE_PATH = join('data', 'reviewed-attestations', 'pending.jsonl');
+const REVIEWED_ATTESTATION_TERMINAL_RELATIVE_PATH = join('data', 'reviewed-attestations', 'failed.jsonl');
 const REVIEWED_ATTESTATION_QUEUE_LOCK_STALE_MS = 60_000;
 const REVIEWED_ATTESTATION_QUEUE_LOCK_WAIT_MS = 65_000;
 const REVIEWED_ATTESTATION_QUEUE_LOCK_POLL_MS = 25;
@@ -45,6 +46,10 @@ function classifyReviewedAttestationFailure(err) {
     return HCP_UNAVAILABLE_FAILURE_CLASS;
   }
   return ATTESTATION_SIGN_FAILED_FAILURE_CLASS;
+}
+
+function isRetryableReviewedAttestationFailure(failureClass, err) {
+  return failureClass === HCP_UNAVAILABLE_FAILURE_CLASS || isTransientSignError(err);
 }
 
 function delay(ms) {
@@ -312,6 +317,10 @@ function reviewedAttestationQueuePath(rootDir) {
   return join(rootDir, REVIEWED_ATTESTATION_QUEUE_RELATIVE_PATH);
 }
 
+function reviewedAttestationTerminalPath(rootDir) {
+  return join(rootDir, REVIEWED_ATTESTATION_TERMINAL_RELATIVE_PATH);
+}
+
 function reviewedAttestationQueueLockPath(rootDir) {
   return `${reviewedAttestationQueuePath(rootDir)}.lock`;
 }
@@ -395,6 +404,8 @@ function pendingReviewedAttestationEntry(args = {}, err = null) {
     enqueued_at: new Date().toISOString(),
     failure_class: classifyReviewedAttestationFailure(err),
     last_error: err?.message || String(err || ''),
+    last_error_code: err?.code ? String(err.code) : undefined,
+    last_error_killed: err?.killed === true ? true : undefined,
     payload,
   };
 }
@@ -466,11 +477,20 @@ function rewritePendingReviewedAttestationsUnlocked(rootDir, entries) {
   renameSync(tmpPath, queuePath);
 }
 
+function appendTerminalReviewedAttestationsUnlocked(rootDir, entries) {
+  if (entries.length === 0) return;
+  const terminalPath = reviewedAttestationTerminalPath(rootDir);
+  mkdirSync(dirname(terminalPath), { recursive: true });
+  const body = entries.map((entry) => JSON.stringify(entry)).join('\n');
+  writeFileSync(terminalPath, `${body}\n`, { flag: 'a' });
+}
+
 async function replaceProcessedReviewedAttestations(rootDir, processedEntries) {
   await withReviewedAttestationQueueLock(rootDir, () => {
     const current = readPendingReviewedAttestationsUnlocked(rootDir);
     const replacements = new Map();
     const consumed = new Set();
+    const terminalArchives = new Map();
     for (const processed of processedEntries) {
       const key = processed.original?.queue_id;
       if (!key) continue;
@@ -480,17 +500,28 @@ async function replaceProcessedReviewedAttestations(rootDir, processedEntries) {
         replacements.set(key, bucket);
       } else {
         consumed.add(key);
+        if (processed.terminal) {
+          const bucket = terminalArchives.get(key) || [];
+          bucket.push(processed.terminal);
+          terminalArchives.set(key, bucket);
+        }
       }
     }
+    const terminalToArchive = [];
     const next = current.entries.flatMap((entry) => {
       const key = entry.queue_id;
       const replacementBucket = replacements.get(key);
       if (replacementBucket?.length > 0) {
         return [replacementBucket.shift()];
       }
-      if (consumed.has(key)) return [];
+      if (consumed.has(key)) {
+        const terminalBucket = terminalArchives.get(key);
+        if (terminalBucket?.length > 0) terminalToArchive.push(terminalBucket.shift());
+        return [];
+      }
       return [entry];
     });
+    appendTerminalReviewedAttestationsUnlocked(rootDir, terminalToArchive);
     rewritePendingReviewedAttestationsUnlocked(rootDir, next);
   });
 }
@@ -502,15 +533,70 @@ async function retryPendingReviewedAttestations({
   env,
   log = console,
   now = () => new Date().toISOString(),
+  maxEntriesPerRun = Number.POSITIVE_INFINITY,
 } = {}) {
   const pending = await readPendingReviewedAttestations(rootDir);
   if (pending.length === 0) {
     return { attempted: 0, consumed: 0, remaining: 0 };
   }
+  const entryLimit = Number.isFinite(maxEntriesPerRun)
+    ? Math.max(0, Math.floor(maxEntriesPerRun))
+    : pending.length;
   const remaining = [];
   const consumed = [];
+  const terminal = [];
   const processed = [];
+  const attemptable = [];
+  const terminalizeEntry = (entry, {
+    failureClass,
+    lastError,
+    attemptedAt,
+    retryAttempts,
+    terminalReason,
+  }) => {
+    const terminalEntry = {
+      ...entry,
+      failure_class: failureClass,
+      last_error: lastError,
+      last_attempted_at: attemptedAt,
+      retry_attempts: retryAttempts,
+      terminal_at: attemptedAt,
+      terminal_reason: terminalReason,
+    };
+    terminal.push(terminalEntry);
+    processed.push({ original: entry, remaining: null, terminal: terminalEntry });
+    log?.warn?.(
+      `[reviewer] queued reviewed attestation quarantined for ${entry.payload.repo}#${entry.payload.pr_number}` +
+        `@${String(entry.payload.head_sha || '').slice(0, 12)}: ${terminalEntry.last_error}`
+    );
+  };
   for (const entry of pending) {
+    const queuedFailureClass = String(entry?.failure_class || '');
+    const queuedError = {
+      message: entry.last_error,
+      code: entry.last_error_code,
+      killed: entry.last_error_killed,
+    };
+    const effectiveQueuedFailureClass = queuedFailureClass === HCP_UNAVAILABLE_FAILURE_CLASS
+      ? queuedFailureClass
+      : classifyReviewedAttestationFailure(queuedError);
+    if (
+      queuedFailureClass &&
+      !isRetryableReviewedAttestationFailure(effectiveQueuedFailureClass, queuedError)
+    ) {
+      const attemptedAt = now();
+      terminalizeEntry(entry, {
+        failureClass: effectiveQueuedFailureClass,
+        lastError: entry.last_error || 'non-transient reviewed attestation failure',
+        attemptedAt,
+        retryAttempts: Number.isInteger(entry.retry_attempts) ? entry.retry_attempts : 0,
+        terminalReason: 'previous-non-transient-reviewed-attestation-failure',
+      });
+      continue;
+    }
+    if (attemptable.length < entryLimit) attemptable.push(entry);
+  }
+  for (const entry of attemptable) {
     try {
       const signed = await signReviewedAttestation({
         payload: entry.payload,
@@ -531,18 +617,40 @@ async function retryPendingReviewedAttestations({
           `@${String(entry.payload.head_sha || '').slice(0, 12)}`
       );
     } catch (err) {
+      const failureClass = classifyReviewedAttestationFailure(err);
+      const attemptedAt = now();
+      const retryAttempts = Number.isInteger(entry.retry_attempts) ? entry.retry_attempts + 1 : 1;
       const failedEntry = {
         ...entry,
-        failure_class: classifyReviewedAttestationFailure(err),
+        failure_class: failureClass,
         last_error: err?.message || String(err || ''),
-        last_attempted_at: now(),
+        last_error_code: err?.code ? String(err.code) : undefined,
+        last_error_killed: err?.killed === true ? true : undefined,
+        last_attempted_at: attemptedAt,
+        retry_attempts: retryAttempts,
       };
-      remaining.push(failedEntry);
-      processed.push({ original: entry, remaining: failedEntry });
+      if (isRetryableReviewedAttestationFailure(failureClass, err)) {
+        remaining.push(failedEntry);
+        processed.push({ original: entry, remaining: failedEntry });
+      } else {
+        terminalizeEntry(failedEntry, {
+          failureClass,
+          lastError: failedEntry.last_error,
+          attemptedAt,
+          retryAttempts,
+          terminalReason: 'non-transient-reviewed-attestation-retry-failure',
+        });
+      }
     }
   }
   await replaceProcessedReviewedAttestations(rootDir, processed);
-  return { attempted: pending.length, consumed: consumed.length, remaining: remaining.length };
+  const result = {
+    attempted: attemptable.length,
+    consumed: consumed.length,
+    remaining: pending.length - consumed.length - terminal.length,
+  };
+  if (terminal.length > 0) result.terminal = terminal.length;
+  return result;
 }
 
 export {

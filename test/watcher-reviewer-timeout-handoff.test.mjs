@@ -108,7 +108,15 @@ export async function load(url, context, nextLoad) {
                 builderClass: 'codex',
                 labels: [
                   'risk:medium',
-                  ...(process.env.FIXTURE_MERGE_AGENT_REQUESTED === '1' ? ['merge-agent-requested'] : []),
+                  ...(
+                    process.env.FIXTURE_MERGE_AGENT_LABEL_PRESENT === '1' ||
+                    (
+                      process.env.FIXTURE_MERGE_AGENT_LABEL_PRESENT !== '0' &&
+                      process.env.FIXTURE_MERGE_AGENT_REQUESTED === '1'
+                    )
+                      ? ['merge-agent-requested']
+                      : []
+                  ),
                 ],
                 updatedAt: '2026-05-27T04:00:00.000Z',
                 headSha: 'timeout-head-164',
@@ -130,7 +138,7 @@ export async function load(url, context, nextLoad) {
     'fixture:adversarial-gate-context': "export function resolveGateStatusContext() { return {}; }",
     'fixture:follow-up-jobs': "export const FOLLOW_UP_JOB_DIRS = { pending: 'pending', inProgress: 'in-progress', completed: 'completed', failed: 'failed', stopped: 'stopped', workspaces: 'workspaces', stoppedArchived: 'stopped-archived' }; export function classifyFollowUpCriticality() { return { critical: false, blockingFindingCount: 0, blockingFindingState: 'known', verdict: 'comment-only' }; } export function listFollowUpJobsInDir() { return []; } export function listInProgressFollowUpJobs() { return []; } export function resolveRoundBudgetForJob() { return { roundBudget: 2, riskClass: 'medium' }; } export function summarizePRRemediationLedger() { return { completedRoundsForPR: 1, latestRiskClass: 'medium', latestMaxRounds: 2 }; } export function isActiveFollowUpJobStatus(status) { return ['pending','inProgress','in-progress','in_progress'].includes(status); } export function markFollowUpJobStopped() { return { status: 'stopped' }; } export function requeueFollowUpJobForNextRound() { return { requeued: false }; } export function requeueInProgressFollowUpJobForRetry() { return { requeued: false }; } export function writeFollowUpJob() {}",
     'fixture:remediation-prompt': "export function followUpJobRepoPrKey(job) { return String(job?.repo || '').toLowerCase() + '#' + (job?.prNumber || ''); }",
-    'fixture:follow-up-merge-agent': "globalThis.__timeoutHandoffDispatches = []; export const MERGE_AGENT_DISPATCHED_LABEL = 'merge-agent-dispatched'; export const MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION = 'dispatched-label-add'; export function classifyBlockingFindings() { return { count: 0, state: 'known' }; } export function addMergeAgentDispatchedLabel() { return { added: true }; } export function buildMergeAgentDispatchJob() { return { repo: 'laceyenterprises/adversarial-review', prNumber: 164, branch: 'codex/timeout-handoff', baseBranch: 'main', headSha: 'timeout-head-164', lastVerdict: 'Request changes', latestFollowUpJobStatus: 'completed', latestFollowUpReReviewRequested: true, reviewFailureClass: 'reviewer-timeout', reviewFailureExhausted: true, mergeable: 'MERGEABLE', checksConclusion: 'SUCCESS', labels: [] }; } export async function cancelMergeAgentDispatchOnMerge() { return { attempted: false, cancelled: false, labelRemoved: false }; } export function clearMergeAgentLifecycleCleanup() { return true; } export async function dispatchMergeAgentForPR(payload) { globalThis.__timeoutHandoffDispatches.push(payload); return { decision: 'dispatch', trigger: 'reviewer-timeout-exhausted' }; } export function fetchMergeAgentCandidate(repo, prNumber) { return { repo, prNumber, branch: 'codex/timeout-handoff', baseBranch: 'main', headSha: 'timeout-head-164', mergeable: 'MERGEABLE', checksConclusion: 'SUCCESS', labels: [], operatorNotes: null, prState: 'open', merged: false, prUpdatedAt: '2026-05-27T04:00:01.000Z' }; } export async function isMergeAgentDispatchActiveForHead() { return { active: false, reason: 'fixture' }; } export function isScopedMergeAgentRequest(job) { const request = job?.mergeAgentRequest; if (!request) return false; if (!request.actor || String(request.actor).trim().toLowerCase() === 'unknown') return false; if (!request.labelEventId && !request.labelEventNodeId) return false; if (!request.createdAt) return false; if (String(request.headSha || '') !== String(job?.headSha || '')) return false; const prUpdatedAt = request.prUpdatedAt || job?.prUpdatedAt || null; if (prUpdatedAt && Date.parse(request.createdAt) < Date.parse(prUpdatedAt)) return false; return true; } export function listMergeAgentDispatches() { return []; } export function listMergeAgentLifecycleCleanups() { return []; } export function resolveFastMergePerPollCap() { return 5; } export function scanStuckMergeAgentDispatches() { return []; } export function shouldUseReviewerTimeoutExhaustedMergeGate(job) { return job.reviewFailureClass === 'reviewer-timeout' && job.reviewFailureExhausted === true && job.latestFollowUpJobStatus === 'completed' && job.latestFollowUpReReviewRequested === true; } export function summarizeChecksConclusion() { return 'SUCCESS'; } export function updateMergeAgentLifecycleCleanup() { return {}; } export function upsertMergeAgentLifecycleCleanup() { return {}; } export async function pollFastMergeQueue() { return { processed: 0, merged: 0, blocked: 0, requeued_head_change: 0, requeued_veto: 0, skipped_still_pending: 0 }; } export async function reconcileProactivePhantomHandoffs() { return { inspected: 0, graceStarted: 0, escalated: 0 }; } export function validateStartupMergeAgentConfig() {}",
+    'fixture:follow-up-merge-agent': "globalThis.__timeoutHandoffDispatches = []; export const MERGE_AGENT_DISPATCHED_LABEL = 'merge-agent-dispatched'; export const MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION = 'dispatched-label-add'; function fixtureMergeAgentRequest() { return process.env.FIXTURE_MERGE_AGENT_REQUESTED === '1' ? { id: 'evt-merge-agent-requested', label: 'merge-agent-requested', actor: process.env.FIXTURE_MERGE_AGENT_ACTOR || 'operator-bot', createdAt: process.env.FIXTURE_MERGE_AGENT_CREATED_AT || '2026-05-27T04:00:01.000Z', headSha: 'timeout-head-164' } : null; } export function classifyBlockingFindings() { return { count: 0, state: 'known' }; } export function addMergeAgentDispatchedLabel() { return { added: true }; } export function buildMergeAgentDispatchJob(rootDir, candidate = {}) { return { ...candidate, repo: 'laceyenterprises/adversarial-review', prNumber: 164, branch: 'codex/timeout-handoff', baseBranch: 'main', headSha: 'timeout-head-164', lastVerdict: 'Request changes', latestFollowUpJobStatus: 'completed', latestFollowUpReReviewRequested: true, reviewFailureClass: 'reviewer-timeout', reviewFailureExhausted: true, mergeable: 'MERGEABLE', checksConclusion: 'SUCCESS', labels: candidate.labels || [], mergeAgentRequest: candidate.mergeAgentRequestEvent ? { kind: 'merge-agent-requested', actor: candidate.mergeAgentRequestEvent.actor, labelEventId: candidate.mergeAgentRequestEvent.id, createdAt: candidate.mergeAgentRequestEvent.createdAt, headSha: candidate.mergeAgentRequestEvent.headSha, prUpdatedAt: candidate.prUpdatedAt } : null }; } export async function cancelMergeAgentDispatchOnMerge() { return { attempted: false, cancelled: false, labelRemoved: false }; } export function clearMergeAgentLifecycleCleanup() { return true; } export async function dispatchMergeAgentForPR(payload) { globalThis.__timeoutHandoffDispatches.push(payload); return { decision: 'dispatch', trigger: 'reviewer-timeout-exhausted' }; } export function fetchMergeAgentCandidate(repo, prNumber) { const mergeAgentRequestEvent = fixtureMergeAgentRequest(); return { repo, prNumber, branch: 'codex/timeout-handoff', baseBranch: 'main', headSha: 'timeout-head-164', mergeable: 'MERGEABLE', checksConclusion: 'SUCCESS', labels: mergeAgentRequestEvent ? ['merge-agent-requested'] : [], operatorNotes: null, prState: 'open', merged: false, prUpdatedAt: '2026-05-27T04:00:01.000Z', mergeAgentRequestEvent }; } export async function isMergeAgentDispatchActiveForHead() { return { active: false, reason: 'fixture' }; } export function isScopedMergeAgentRequest(job) { const request = job?.mergeAgentRequest; if (!request) return false; if (!request.actor || String(request.actor).trim().toLowerCase() === 'unknown') return false; if (!request.labelEventId && !request.labelEventNodeId) return false; if (!request.createdAt) return false; if (String(request.headSha || '') !== String(job?.headSha || '')) return false; const prUpdatedAt = request.prUpdatedAt || job?.prUpdatedAt || null; if (prUpdatedAt && Date.parse(request.createdAt) < Date.parse(prUpdatedAt)) return false; return true; } export function listMergeAgentDispatches() { return []; } export function listMergeAgentLifecycleCleanups() { return []; } export function resolveFastMergePerPollCap() { return 5; } export function scanStuckMergeAgentDispatches() { return []; } export function shouldUseReviewerTimeoutExhaustedMergeGate(job) { return job.reviewFailureClass === 'reviewer-timeout' && job.reviewFailureExhausted === true && job.latestFollowUpJobStatus === 'completed' && job.latestFollowUpReReviewRequested === true; } export function summarizeChecksConclusion() { return 'SUCCESS'; } export function updateMergeAgentLifecycleCleanup() { return {}; } export function upsertMergeAgentLifecycleCleanup() { return {}; } export async function pollFastMergeQueue() { return { processed: 0, merged: 0, blocked: 0, requeued_head_change: 0, requeued_veto: 0, skipped_still_pending: 0 }; } export async function reconcileProactivePhantomHandoffs() { return { inspected: 0, graceStarted: 0, escalated: 0 }; } export function validateStartupMergeAgentConfig() {}",
     'fixture:follow-up-retrigger-label': "export const RETRIGGER_REMEDIATION_LABEL = 'retrigger-remediation'; export async function retryPendingRetriggerAckComments() { return { attempted: 0, posted: 0 }; } export async function tryRetriggerRemediationFromLabel() { return { outcome: 'noop' }; }",
     'fixture:follow-up-retrigger-review-label': "export const RETRIGGER_REVIEW_LABEL = 'retrigger-review'; export async function retryPendingRetriggerReviewAckComments() { return { attempted: 0, posted: 0 }; } export async function tryRetriggerReviewFromLabel() { return { outcome: 'noop' }; }",
     'fixture:operator-retrigger-helpers': "export function findLatestFollowUpJob() { return null; }",
@@ -381,6 +389,53 @@ test('watcher pollOnce uses the AMA operator-fallback env on reviewer-timeout ex
           FIXTURE_AMA_ENABLED: '1',
           FIXTURE_AMA_REASON: 'not-eligible',
           FIXTURE_MERGE_AGENT_REQUESTED: '1',
+          FIXTURE_MERGE_AGENT_ACTOR: 'codex-worker',
+          FIXTURE_MERGE_AGENT_CREATED_AT: '2026-05-27T04:00:01.000Z',
+        },
+      }
+    );
+
+    const output = `${result.stdout || ''}${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+    const summaryLine = result.stdout
+      .split(/\r?\n/)
+      .find((line) => line.startsWith(SUMMARY_MARKER));
+    assert.ok(summaryLine, output);
+    const summary = JSON.parse(summaryLine.slice(SUMMARY_MARKER.length));
+
+    assert.equal(summary.reviewStatus, 'pending-upstream');
+    assert.equal(summary.reviewerSpawns.length, 0);
+    assert.equal(summary.dispatches.length, 1);
+    assert.equal(summary.dispatches[0].env.AMA_OPERATOR_MERGE_AGENT_OVERRIDE, 'true');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('watcher pollOnce honors a fresh timeout fallback request even when the tick labels are stale', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-timeout-handoff-ama-stale-label-'));
+  const loaderPath = path.join(tmp, 'fixture-loader.mjs');
+  const registerPath = path.join(tmp, 'fixture-register.mjs');
+  const runnerPath = path.join(tmp, 'fixture-runner.mjs');
+  try {
+    writeFileSync(loaderPath, buildLoaderSource());
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource());
+
+    const result = spawnSync(
+      process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          GITHUB_TOKEN: 'fixture-token',
+          ADVERSARIAL_AFH_REVIEWER_FALLBACK: 'false',
+          FIXTURE_AMA_ENABLED: '1',
+          FIXTURE_AMA_REASON: 'not-eligible',
+          FIXTURE_MERGE_AGENT_REQUESTED: '1',
+          FIXTURE_MERGE_AGENT_LABEL_PRESENT: '0',
           FIXTURE_MERGE_AGENT_ACTOR: 'codex-worker',
           FIXTURE_MERGE_AGENT_CREATED_AT: '2026-05-27T04:00:01.000Z',
         },

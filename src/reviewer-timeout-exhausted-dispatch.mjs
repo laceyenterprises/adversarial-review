@@ -69,13 +69,17 @@ export async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
         revisionRef: currentRevisionRef || null,
       };
       const revisionRef = currentRevisionRef || controlSubjectRef.revisionRef || null;
+      // Label snapshots can be older than a hammer/operator wake. Leave missing
+      // events unresolved so the live candidate fetch can use fresh PR labels.
       const [operatorApproval, mergeAgentRequest, adversarialMergeRequest] = await Promise.all([
-        labelNames.includes(OPERATOR_APPROVED_LABEL)
+        labelNames.includes(OPERATOR_APPROVED_LABEL) &&
+          typeof operatorSurface.observeOperatorApproved === 'function'
           ? operatorSurface.observeOperatorApproved(controlSubjectRef, revisionRef)
-          : null,
-        labelNames.includes(MERGE_AGENT_REQUESTED_LABEL)
+          : undefined,
+        labelNames.includes(MERGE_AGENT_REQUESTED_LABEL) &&
+          typeof operatorSurface.observeMergeAgentOverride === 'function'
           ? operatorSurface.observeMergeAgentOverride(controlSubjectRef, revisionRef)
-          : null,
+          : undefined,
         labelNames.includes(ADVERSARIAL_MERGE_REQUESTED_LABEL) &&
           typeof operatorSurface.observeLabelControl === 'function'
           ? operatorSurface.observeLabelControl(
@@ -83,20 +87,28 @@ export async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
               revisionRef,
               ADVERSARIAL_MERGE_REQUESTED_LABEL,
             )
-          : null,
+          : undefined,
       ]);
-      operatorApprovalEvent = legacyLabelEventFromControlResult(operatorApproval, OPERATOR_APPROVED_LABEL);
-      mergeAgentRequestEvent = legacyLabelEventFromControlResult(mergeAgentRequest, MERGE_AGENT_REQUESTED_LABEL);
-      adversarialMergeRequestedEvent = legacyLabelEventFromControlResult(
-        adversarialMergeRequest,
-        ADVERSARIAL_MERGE_REQUESTED_LABEL,
-      );
+      operatorApprovalEvent = operatorApproval === undefined
+        ? undefined
+        : legacyLabelEventFromControlResult(operatorApproval, OPERATOR_APPROVED_LABEL);
+      mergeAgentRequestEvent = mergeAgentRequest === undefined
+        ? undefined
+        : legacyLabelEventFromControlResult(mergeAgentRequest, MERGE_AGENT_REQUESTED_LABEL);
+      adversarialMergeRequestedEvent = adversarialMergeRequest === undefined
+        ? undefined
+        : legacyLabelEventFromControlResult(
+            adversarialMergeRequest,
+            ADVERSARIAL_MERGE_REQUESTED_LABEL,
+          );
     }
     const candidate = await fetchMergeAgentCandidateImpl(repoPath, prNumber, {
       execFileImpl,
       operatorApprovalEvent,
       mergeAgentRequestEvent,
     });
+    operatorApprovalEvent = operatorApprovalEvent ?? candidate?.operatorApprovalEvent ?? null;
+    mergeAgentRequestEvent = mergeAgentRequestEvent ?? candidate?.mergeAgentRequestEvent ?? null;
     const dispatchJob = buildMergeAgentDispatchJobImpl(rootDir, candidate, { reviewStateDb: db });
     if (!shouldUseReviewerTimeoutExhaustedMergeGate(dispatchJob)) {
       return { handled: false, dispatchJob };

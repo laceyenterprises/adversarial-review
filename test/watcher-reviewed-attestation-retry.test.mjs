@@ -2,7 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { retryPendingReviewedAttestationQueueForWatcher } from '../src/watcher-tick-preflight.mjs';
+import {
+  WATCHER_REVIEWED_ATTESTATION_RETRY_MAX_ENTRIES_PER_TICK,
+  retryPendingReviewedAttestationQueueForWatcher,
+} from '../src/watcher-tick-preflight.mjs';
 
 test('watcher injects hq execution dependencies when retrying reviewed attestations', () => {
   const watcherSrc = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
@@ -28,10 +31,31 @@ test('reviewed attestation retry helper logs consumed queue entries', async () =
       assert.equal(args.rootDir, '/fixture/root');
       assert.equal(args.hqPath, '/fixture/hq');
       assert.equal(args.env.FOO, 'bar');
+      assert.equal(args.maxEntriesPerRun, WATCHER_REVIEWED_ATTESTATION_RETRY_MAX_ENTRIES_PER_TICK);
       return { attempted: 2, consumed: 1, remaining: 1 };
     },
   });
 
   assert.deepEqual(result, { attempted: 2, consumed: 1, remaining: 1 });
   assert.match(messages.join('\n'), /attempted=2 consumed=1 remaining=1/);
+});
+
+test('reviewed attestation retry helper logs pure terminal queue ticks', async () => {
+  const messages = [];
+  const result = await retryPendingReviewedAttestationQueueForWatcher({
+    rootDir: '/fixture/root',
+    hqPath: '/fixture/hq',
+    execFileImpl: async () => ({ stdout: '{}' }),
+    env: {},
+    log: { log: (message) => messages.push(String(message)), warn: assert.fail },
+    retryPendingReviewedAttestationsImpl: async () => ({
+      attempted: 0,
+      consumed: 0,
+      remaining: 0,
+      terminal: 2,
+    }),
+  });
+
+  assert.deepEqual(result, { attempted: 0, consumed: 0, remaining: 0, terminal: 2 });
+  assert.match(messages.join('\n'), /attempted=0 consumed=0 remaining=0 terminal=2/);
 });

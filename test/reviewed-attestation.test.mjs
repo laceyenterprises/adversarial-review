@@ -237,6 +237,7 @@ test('queued reviewed attestation retries sign and record then removes consumed 
       Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:8002'), { code: 'ECONNREFUSED' }),
     );
     assert.equal((await readPendingReviewedAttestations(rootDir)).length, 1);
+    assert.equal((await readPendingReviewedAttestations(rootDir))[0].last_error_code, 'ECONNREFUSED');
     const commands = [];
     const result = await retryPendingReviewedAttestations({
       rootDir,
@@ -265,6 +266,300 @@ test('queued reviewed attestation retries sign and record then removes consumed 
     assert.deepEqual(result, { attempted: 1, consumed: 1, remaining: 0 });
     assert.equal((await readPendingReviewedAttestations(rootDir)).length, 0);
     assert.equal(commands.map((call) => call.args[1]).join(','), 'sign,record');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('queued reviewed attestation retry preserves transient code through pre-flight classification', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewed-attestation-queue-code-'));
+  try {
+    const payloadArgs = {
+      repo: 'laceyenterprises/demo',
+      prNumber: 23,
+      headSha: 'head-sha',
+      reviewerIdentity: 'codex-reviewer-lacey',
+      verdict: 'comment-only',
+      findingsCount: 0,
+    };
+    await enqueuePendingReviewedAttestation(
+      rootDir,
+      payloadArgs,
+      Object.assign(new Error('opaque subprocess failure'), { code: 'EIO' }),
+    );
+
+    let signAttempts = 0;
+    const result = await retryPendingReviewedAttestations({
+      rootDir,
+      execFileImpl: async () => {
+        signAttempts += 1;
+        throw Object.assign(new Error('still temporarily unavailable'), { code: 'EIO' });
+      },
+      env: {},
+      log: { warn: assert.fail },
+      now: () => '2026-09-10T21:31:30.000Z',
+    });
+
+    assert.ok(signAttempts > 0);
+    assert.deepEqual(result, { attempted: 1, consumed: 0, remaining: 1 });
+    const queued = await readPendingReviewedAttestations(rootDir);
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0].failure_class, 'attestation-sign-failed');
+    assert.equal(queued[0].last_error_code, 'EIO');
+    assert.equal(existsSync(join(rootDir, 'data', 'reviewed-attestations', 'failed.jsonl')), false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('queued reviewed attestation retry preserves killed timeout through pre-flight classification', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewed-attestation-queue-killed-'));
+  try {
+    const payloadArgs = {
+      repo: 'laceyenterprises/demo',
+      prNumber: 23,
+      headSha: 'head-sha',
+      reviewerIdentity: 'codex-reviewer-lacey',
+      verdict: 'comment-only',
+      findingsCount: 0,
+    };
+    await enqueuePendingReviewedAttestation(
+      rootDir,
+      payloadArgs,
+      Object.assign(new Error('opaque subprocess failure'), { killed: true, signal: 'SIGTERM' }),
+    );
+    const initialQueued = await readPendingReviewedAttestations(rootDir);
+    assert.equal(initialQueued[0].last_error_killed, true);
+
+    let signAttempts = 0;
+    const result = await retryPendingReviewedAttestations({
+      rootDir,
+      execFileImpl: async () => {
+        signAttempts += 1;
+        throw Object.assign(new Error('opaque subprocess failure'), {
+          killed: true,
+          signal: 'SIGTERM',
+        });
+      },
+      env: {},
+      log: { warn: assert.fail },
+      now: () => '2026-09-10T21:31:45.000Z',
+    });
+
+    assert.ok(signAttempts > 0);
+    assert.deepEqual(result, { attempted: 1, consumed: 0, remaining: 1 });
+    const queued = await readPendingReviewedAttestations(rootDir);
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0].failure_class, 'attestation-sign-failed');
+    assert.equal(queued[0].last_error_killed, true);
+    assert.equal(queued[0].retry_attempts, 1);
+    assert.equal(existsSync(join(rootDir, 'data', 'reviewed-attestations', 'failed.jsonl')), false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('queued reviewed attestation retry quarantines permanent record conflicts', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewed-attestation-queue-terminal-'));
+  try {
+    const payloadArgs = {
+      repo: 'laceyenterprises/demo',
+      prNumber: 23,
+      headSha: 'head-sha',
+      reviewerIdentity: 'codex-reviewer-lacey',
+      verdict: 'comment-only',
+      findingsCount: 0,
+    };
+    await enqueuePendingReviewedAttestation(
+      rootDir,
+      payloadArgs,
+      Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:8002'), { code: 'ECONNREFUSED' }),
+    );
+    const warnings = [];
+    const result = await retryPendingReviewedAttestations({
+      rootDir,
+      execFileImpl: (_command, args) => {
+        if (args[1] === 'record') {
+          return execFileResultWithStdin({
+            error: Object.assign(
+              new Error('Command failed: hq attest record --payload -\nhq attest: error: conflicting head attestation already exists'),
+              { code: 2 },
+            ),
+          });
+        }
+        const payloadJson = JSON.parse(args[args.indexOf('--payload-json') + 1]);
+        return Promise.resolve({
+          stdout: JSON.stringify({
+            ...buildReviewedAttestationPayload(payloadArgs),
+            payload: payloadJson,
+            ts: resultTimestamp(args),
+            signature: signatureFor('codex-reviewer-lacey'),
+          }),
+        });
+      },
+      env: {},
+      log: { log() {}, warn(message) { warnings.push(String(message)); } },
+      now: () => '2026-09-10T21:30:00.000Z',
+    });
+
+    assert.deepEqual(result, { attempted: 1, consumed: 0, remaining: 0, terminal: 1 });
+    assert.equal((await readPendingReviewedAttestations(rootDir)).length, 0);
+    const terminalPath = join(rootDir, 'data', 'reviewed-attestations', 'failed.jsonl');
+    const terminalEntries = readFileSync(terminalPath, 'utf8').trim().split('\n').map(JSON.parse);
+    assert.equal(terminalEntries.length, 1);
+    assert.equal(terminalEntries[0].payload.pr_number, 23);
+    assert.equal(terminalEntries[0].failure_class, 'attestation-sign-failed');
+    assert.equal(terminalEntries[0].last_attempted_at, '2026-09-10T21:30:00.000Z');
+    assert.equal(terminalEntries[0].terminal_at, '2026-09-10T21:30:00.000Z');
+    assert.equal(
+      terminalEntries[0].terminal_reason,
+      'non-transient-reviewed-attestation-retry-failure',
+    );
+    assert.match(warnings.join('\n'), /queued reviewed attestation quarantined/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('queued reviewed attestation retry quarantines known permanent failures without subprocess work', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewed-attestation-queue-known-terminal-'));
+  try {
+    const payloadArgs = {
+      repo: 'laceyenterprises/demo',
+      prNumber: 23,
+      headSha: 'head-sha',
+      reviewerIdentity: 'codex-reviewer-lacey',
+      verdict: 'comment-only',
+      findingsCount: 0,
+    };
+    await enqueuePendingReviewedAttestation(
+      rootDir,
+      payloadArgs,
+      new Error('Command failed: hq attest record --payload -\nhq attest: error: conflicting head attestation already exists'),
+    );
+
+    let execCalled = false;
+    const result = await retryPendingReviewedAttestations({
+      rootDir,
+      execFileImpl: async () => {
+        execCalled = true;
+        throw new Error('should not spawn for known permanent failures');
+      },
+      env: {},
+      log: { warn() {} },
+      now: () => '2026-09-10T21:30:30.000Z',
+    });
+
+    assert.equal(execCalled, false);
+    assert.deepEqual(result, { attempted: 0, consumed: 0, remaining: 0, terminal: 1 });
+    assert.equal((await readPendingReviewedAttestations(rootDir)).length, 0);
+    const terminalPath = join(rootDir, 'data', 'reviewed-attestations', 'failed.jsonl');
+    const terminalEntries = readFileSync(terminalPath, 'utf8').trim().split('\n').map(JSON.parse);
+    assert.equal(terminalEntries.length, 1);
+    assert.equal(
+      terminalEntries[0].terminal_reason,
+      'previous-non-transient-reviewed-attestation-failure',
+    );
+    assert.equal(terminalEntries[0].last_attempted_at, '2026-09-10T21:30:30.000Z');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('queued reviewed attestation retry keeps HCP unavailable entries pending', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewed-attestation-queue-hcp-'));
+  try {
+    const payloadArgs = {
+      repo: 'laceyenterprises/demo',
+      prNumber: 23,
+      headSha: 'head-sha',
+      reviewerIdentity: 'codex-reviewer-lacey',
+      verdict: 'comment-only',
+      findingsCount: 0,
+    };
+    await enqueuePendingReviewedAttestation(
+      rootDir,
+      payloadArgs,
+      Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:8002'), { code: 'ECONNREFUSED' }),
+    );
+
+    const result = await retryPendingReviewedAttestations({
+      rootDir,
+      execFileImpl: async () => {
+        throw Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:8002'), { code: 'ECONNREFUSED' });
+      },
+      env: {},
+      now: () => '2026-09-10T21:31:00.000Z',
+    });
+
+    assert.deepEqual(result, { attempted: 1, consumed: 0, remaining: 1 });
+    const queued = await readPendingReviewedAttestations(rootDir);
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0].failure_class, 'hcp-unavailable');
+    assert.equal(queued[0].last_attempted_at, '2026-09-10T21:31:00.000Z');
+    assert.equal(queued[0].retry_attempts, 1);
+    assert.equal(existsSync(join(rootDir, 'data', 'reviewed-attestations', 'failed.jsonl')), false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('queued reviewed attestation retry cap leaves later entries pending', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewed-attestation-queue-cap-'));
+  try {
+    const firstPayloadArgs = {
+      repo: 'laceyenterprises/demo',
+      prNumber: 23,
+      headSha: 'head-sha-1',
+      reviewerIdentity: 'codex-reviewer-lacey',
+      verdict: 'comment-only',
+      findingsCount: 0,
+    };
+    const secondPayloadArgs = {
+      repo: 'laceyenterprises/demo',
+      prNumber: 24,
+      headSha: 'head-sha-2',
+      reviewerIdentity: 'claude-reviewer-lacey',
+      verdict: 'request-changes',
+      findingsCount: 1,
+    };
+    await enqueuePendingReviewedAttestation(
+      rootDir,
+      firstPayloadArgs,
+      Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:8002'), { code: 'ECONNREFUSED' }),
+    );
+    await enqueuePendingReviewedAttestation(
+      rootDir,
+      secondPayloadArgs,
+      Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:8002'), { code: 'ECONNREFUSED' }),
+    );
+
+    const result = await retryPendingReviewedAttestations({
+      rootDir,
+      maxEntriesPerRun: 1,
+      execFileImpl: (_command, args) => {
+        if (args[1] === 'record') {
+          return execFileResultWithStdin({ stdout: '{"recorded":true}' });
+        }
+        const payloadJson = JSON.parse(args[args.indexOf('--payload-json') + 1]);
+        return Promise.resolve({
+          stdout: JSON.stringify({
+            ...buildReviewedAttestationPayload(firstPayloadArgs),
+            payload: payloadJson,
+            ts: resultTimestamp(args),
+            signature: signatureFor('codex-reviewer-lacey'),
+          }),
+        });
+      },
+      env: {},
+      log: { log() {} },
+    });
+
+    assert.deepEqual(result, { attempted: 1, consumed: 1, remaining: 1 });
+    const queued = await readPendingReviewedAttestations(rootDir);
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0].payload.pr_number, 24);
+    assert.equal(queued[0].payload.head_sha, 'head-sha-2');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

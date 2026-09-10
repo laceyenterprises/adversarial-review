@@ -8,6 +8,82 @@ import {
 import { classifyBlockingFindings } from './follow-up-merge-agent.mjs';
 import { extractReviewVerdict } from './review-verdict.mjs';
 
+const REVIEW_CYCLE_CAP_COMMENT_RETRY_DELAYS_MS = Object.freeze([250, 1000]);
+
+function sleep(ms) {
+  if (!ms) return Promise.resolve();
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function reviewCycleCapCommentErrorDetail(err) {
+  return [
+    err?.status,
+    err?.response?.status,
+    err?.code,
+    err?.message,
+    err?.response?.data?.message,
+  ].filter(Boolean).join('\n').toLowerCase();
+}
+
+function isRetryableReviewCycleCapCommentError(err) {
+  const status = Number(err?.status || err?.response?.status || 0);
+  if (status === 429 || (status >= 500 && status <= 599)) return true;
+  const detail = reviewCycleCapCommentErrorDetail(err);
+  return /\b(etimedout|econnreset|econnrefused|ehostunreach|eai_again|enotfound|epipe|eagain)\b/.test(detail)
+    || detail.includes('goaway')
+    || detail.includes('http/2')
+    || detail.includes('timeout')
+    || detail.includes('timed out')
+    || detail.includes('temporary failure')
+    || detail.includes('temporarily unavailable')
+    || detail.includes('rate limit')
+    || detail.includes('secondary rate limit')
+    || detail.includes('bad gateway')
+    || detail.includes('service unavailable')
+    || detail.includes('gateway timeout');
+}
+
+function normalizeCommentBodyForMatch(value) {
+  return String(value || '').replace(/\r\n/g, '\n').trim();
+}
+
+async function findMatchingReviewCycleCapEscalationComment(octokit, {
+  owner,
+  repo,
+  prNumber,
+  body,
+  logger = console,
+} = {}) {
+  const listComments = octokit?.rest?.issues?.listComments;
+  if (typeof listComments !== 'function') {
+    return { status: 'unsupported' };
+  }
+  const params = {
+    owner,
+    repo,
+    issue_number: Number(prNumber),
+    per_page: 100,
+  };
+  let comments;
+  try {
+    comments = typeof octokit.paginate === 'function'
+      ? await octokit.paginate(listComments, params)
+      : (await listComments(params))?.data;
+  } catch (err) {
+    logger?.warn?.(
+      `[watcher] review-cycle-cap escalation comment lookup failed for ${owner}/${repo}#${prNumber}: ${err?.message || err}`
+    );
+    return { status: 'unavailable', error: err };
+  }
+  const expectedBody = normalizeCommentBodyForMatch(body);
+  const match = (Array.isArray(comments) ? comments : []).find((comment) => (
+    comment
+    && typeof comment === 'object'
+    && normalizeCommentBodyForMatch(comment.body) === expectedBody
+  ));
+  return match ? { status: 'matched', comment: match } : { status: 'none' };
+}
+
 export function subjectRefWithLinearTicket(subjectRef, linearTicketId, labels = []) {
   return {
     ...subjectRef,
@@ -101,15 +177,64 @@ export async function postReviewCycleCapEscalation(octokit, {
   repoPath,
   prNumber,
   body,
+  retryDelaysMs = REVIEW_CYCLE_CAP_COMMENT_RETRY_DELAYS_MS,
+  sleepImpl = sleep,
+  logger = console,
 }) {
   const [owner, repo] = String(repoPath || '').split('/');
   if (!owner || !repo) throw new Error(`Invalid repo slug: ${repoPath}`);
-  await octokit.rest.issues.createComment({
+  const preexisting = await findMatchingReviewCycleCapEscalationComment(octokit, {
     owner,
     repo,
-    issue_number: Number(prNumber),
+    prNumber,
     body,
+    logger,
   });
+  if (preexisting.status === 'matched') {
+    logger?.warn?.(
+      `[watcher] review-cycle-cap escalation comment already exists for ${repoPath}#${prNumber}; suppressing duplicate post`
+    );
+    return;
+  }
+  let lastErr = null;
+  for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
+    try {
+      await octokit.rest.issues.createComment({
+        owner,
+        repo,
+        issue_number: Number(prNumber),
+        body,
+      });
+      return;
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryableReviewCycleCapCommentError(err) || attempt >= retryDelaysMs.length) {
+        throw err;
+      }
+      const reconciled = await findMatchingReviewCycleCapEscalationComment(octokit, {
+        owner,
+        repo,
+        prNumber,
+        body,
+        logger,
+      });
+      if (reconciled.status === 'matched') {
+        logger?.warn?.(
+          `[watcher] review-cycle-cap escalation comment for ${repoPath}#${prNumber} already landed; suppressing duplicate retry`
+        );
+        return;
+      }
+      if (reconciled.status === 'unavailable') {
+        throw err;
+      }
+      logger?.warn?.(
+        `[watcher] review-cycle-cap escalation comment retry ${attempt + 1}/${retryDelaysMs.length} ` +
+          `for ${repoPath}#${prNumber}: ${err?.message || err}`
+      );
+      await sleepImpl(retryDelaysMs[attempt]);
+    }
+  }
+  throw lastErr;
 }
 
 export async function clearReviewCycleCapForOverride({

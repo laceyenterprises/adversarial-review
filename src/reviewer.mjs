@@ -84,7 +84,12 @@ import {
   adapterUnsupportedError,
   writeAdapterPullRequestReview,
 } from './github-adapter-client.mjs';
-import { parseExactHeadReviewArtifactOrNull, postExactHeadReview } from './reviewer-exact-head-post.mjs';
+import { exactHeadReviewEventForBody, parseExactHeadReviewArtifactOrNull, postExactHeadReview } from './reviewer-exact-head-post.mjs';
+import {
+  AmbiguousReviewerPostUnreconciledError,
+  findMatchingSubmittedReviewAfterAmbiguousPost,
+  withGhRetry,
+} from './reviewer-post-reconcile.mjs';
 import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
@@ -196,10 +201,6 @@ function pinReviewerGhIdentity(env, botTokenEnv) {
     return { pinned: true, botTokenEnv };
   }
   return { pinned: false, botTokenEnv };
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // ── Local OSS shadow review (opt-in, non-gating) ────────────────────────────
@@ -1479,39 +1480,27 @@ function isReviewerPostAuthFailure(err, { preWriteSaw401 = false } = {}) {
 
 function isRetryableGhTransportError(err, { allowAuthRefresh = false, preWriteSaw401 = false } = {}) {
   const detail = buildGhErrorDetail(err);
+  const status = Number(err?.status || err?.response?.status || 0);
   if (allowAuthRefresh && isReviewerPostAuthFailure(err, { preWriteSaw401 })) {
     return true;
   }
-  return /\b(etimedout|econnreset|econnrefused|ehostunreach|eai_again|enotfound|epipe|eagain)\b/.test(detail)
+  return status === 429
+    || (status >= 500 && status <= 599)
+    || /\b(etimedout|econnreset|econnrefused|ehostunreach|eai_again|enotfound|epipe|eagain)\b/.test(detail)
+    || detail.includes('goaway')
+    || detail.includes('http/2')
     || detail.includes('timeout')
     || detail.includes('timed out')
     || detail.includes('temporary failure')
     || detail.includes('temporarily unavailable')
     || detail.includes('rate limit')
     || detail.includes('secondary rate limit')
+    || detail.includes('500 internal server error')
     || detail.includes('502 bad gateway')
     || detail.includes('503 service unavailable')
     || detail.includes('504 gateway timeout');
 }
 
-async function withGhRetry(operation, {
-  retryDelaysMs = REVIEW_POST_RETRY_DELAYS_MS,
-  isRetryable = () => false,
-} = {}) {
-  let lastErr = null;
-  for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
-    try {
-      return await operation();
-    } catch (err) {
-      lastErr = err;
-      if (!isRetryable(err) || attempt >= retryDelaysMs.length) {
-        throw err;
-      }
-      await sleep(retryDelaysMs[attempt]);
-    }
-  }
-  throw lastErr;
-}
 
 function createReviewerPreWriteLogProxy(log = console) {
   const base = log || console;
@@ -1608,9 +1597,10 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
         await prepareReviewWrite({
           repo, prNumber, token, selfLogin: appSelfLogin, fetchImpl: opts.fetchImpl, log: preWriteLog.log,
         });
+        let adapterEnv = null;
         try {
           await awaitThrottleIfNeeded();
-          const adapterEnv = {
+          adapterEnv = {
             PATH: sourceEnv.PATH ?? '/usr/bin:/bin',
             HOME: sourceEnv.HOME ?? '',
             GH_TOKEN: token,
@@ -1684,12 +1674,55 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
               );
             }
           }
+          if (isRetryableGhTransportError(err) && !authRetryable) {
+            const reviewerLoginForReconciliation = appSelfLogin || writeIdentity;
+            if (!reviewerLoginForReconciliation) {
+              throw new AmbiguousReviewerPostUnreconciledError(
+                `Ambiguous GitHub review post for ${repo}#${prNumber} cannot be safely retried without reviewer login proof`,
+                { cause: err }
+              );
+            }
+            const reconciled = await findMatchingSubmittedReviewAfterAmbiguousPost({
+              execFileImpl,
+              repo,
+              prNumber,
+              reviewBody,
+              reviewerHeadSha,
+              reviewerLogin: reviewerLoginForReconciliation,
+              event: reviewerHeadSha ? exactHeadReviewEventForBody(reviewBody) : 'COMMENT',
+              env: adapterEnv,
+              log,
+            });
+            if (reconciled.status === 'matched') {
+              log.warn?.(
+                `[reviewer] ambiguous GitHub review post for ${repo}#${prNumber} already landed; suppressing duplicate retry`
+              );
+              if (reviewerHeadSha) {
+                return {
+                  stdout: JSON.stringify({
+                    id: reconciled.reviewArtifact.id,
+                    commit_id: reconciled.reviewArtifact.commitId,
+                  }),
+                };
+              }
+              return { reviewArtifact: null, matchedExistingReview: true };
+            }
+            if (reconciled.status === 'unavailable') {
+              throw new AmbiguousReviewerPostUnreconciledError(
+                `Ambiguous GitHub review post for ${repo}#${prNumber} could not be reconciled safely`,
+                { cause: err }
+              );
+            }
+          }
           throw err;
         }
       },
       {
         retryDelaysMs: REVIEW_POST_RETRY_DELAYS_MS,
-        isRetryable: (err) => err instanceof ReviewerPostAuthRefreshRetryableError || isRetryableGhTransportError(err),
+        isRetryable: (err) => err instanceof ReviewerPostAuthRefreshRetryableError || (
+          !(err instanceof AmbiguousReviewerPostUnreconciledError)
+          && isRetryableGhTransportError(err)
+        ),
       }
     );
     const exactHeadReviewArtifact = reviewerHeadSha

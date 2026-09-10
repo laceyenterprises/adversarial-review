@@ -77,6 +77,14 @@
       "owner": "AMA hammer dispatch retry and redrive caps"
     },
     {
+      "id": "ama-closer-dispatches",
+      "title": "AMA Closer Dispatch Records",
+      "path": "docs/data-model/ama-closer-dispatches.md",
+      "store": "data/follow-up-jobs/ama-closer-dispatches/",
+      "schemaSurface": "src/ama/dispatch-closer.mjs",
+      "owner": "AMA closer dispatch and recovery"
+    },
+    {
       "id": "runtime-settle-smoke",
       "title": "Agent Runtime Settle Smoke",
       "path": "docs/data-model/runtime-settle-smoke.md",

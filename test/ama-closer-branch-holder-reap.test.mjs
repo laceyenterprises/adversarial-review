@@ -153,6 +153,34 @@ test('preserves prior hammer-ama-pr-<PR> matching when no git holder clause is p
   assert.deepEqual(paths, ['/Users/airlock/agent-os-hq/workers/hammer-ama-pr-3064-live/agent-os']);
 });
 
+test('suffixed hammer holder is self-owned and skips coding-worker terminal probe', async () => {
+  const hqRoot = join(tmpdir(), `agent-os-hq-suffixed-hammer-${Date.now()}`);
+  const workerId = 'hammer-ama-pr-3064-a0a0a0a0a0a0';
+  const err = {
+    stderr: `branch-holder-blocked at ${hqRoot}/workers/${workerId}/agent-os`,
+  };
+  const calls = [];
+
+  const result = await __testables__.teardownSamePrHammerHolder({
+    err,
+    prNumber: 3064,
+    hqPath: '/opt/hq/bin/hq',
+    hqRoot,
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      return { stdout: '', stderr: '' };
+    },
+    readLatestWorkerRunStatusImpl: async () => {
+      throw new Error('self-owned hammer holder must not require a coding-worker terminal probe');
+    },
+    logger: { warn() {} },
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls.map(call => call.cmd), ['git', '/opt/hq/bin/hq']);
+  assert.deepEqual(calls[1].args, ['worker', 'tear-down', workerId, '--force', '--root', hqRoot]);
+});
+
 test('returns [] for empty / non-collision error', () => {
   assert.deepEqual(samePrHammerHolderWorktreePaths('', 3219, HQ_ROOT), []);
   assert.deepEqual(samePrHammerHolderWorktreePaths({ stderr: 'unrelated failure' }, 3219, HQ_ROOT), []);

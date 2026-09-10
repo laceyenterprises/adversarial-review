@@ -798,10 +798,29 @@ async function suppressHammerRetryCapExhaustion({
   });
 }
 
-function hammerCloserWorkerId(prNumber) {
+function normalizeHammerCloserWorkerIdScope(scope) {
+  const normalized = String(scope || '').trim().toLowerCase();
+  if (!normalized) return null;
+  const hex = normalized.match(/[0-9a-f]{7,40}/u)?.[0];
+  if (hex) return hex.slice(0, 12);
+  const slug = normalized
+    .replace(/[^a-z0-9._-]+/gu, '-')
+    .replace(/^-+|-+$/gu, '')
+    .slice(0, 24);
+  return slug || null;
+}
+
+function hammerCloserWorkerId(prNumber, scope = null) {
   const normalized = String(prNumber || '').trim();
   if (!/^[0-9]+$/.test(normalized)) return null;
-  return `hammer-ama-pr-${normalized}`;
+  const suffix = normalizeHammerCloserWorkerIdScope(scope);
+  return suffix ? `hammer-ama-pr-${normalized}-${suffix}` : `hammer-ama-pr-${normalized}`;
+}
+
+function hammerCloserWorkerIdFromRecord(prNumber, record = null, fallbackScope = null) {
+  const workerId = String(record?.workerId || '').trim();
+  if (isSamePrHammerCloserWorkerId(workerId, prNumber)) return workerId;
+  return hammerCloserWorkerId(prNumber, fallbackScope);
 }
 
 async function cleanupHammerCloserWorker({
@@ -816,7 +835,7 @@ async function cleanupHammerCloserWorker({
 }) {
   const effectiveWorkerClass = String(existingRecord?.workerClass || workerClass || '').trim();
   if (!isHammerWorkerClass(effectiveWorkerClass)) return null;
-  const workerId = hammerCloserWorkerId(prNumber);
+  const workerId = hammerCloserWorkerIdFromRecord(prNumber, existingRecord);
   if (!workerId) return null;
   const args = ['worker', 'tear-down', workerId, '--force', '--root', hqRoot];
   for (let attempt = 0; attempt <= AMA_CLOSER_TEARDOWN_TRANSIENT_RETRY_DELAYS_MS.length; attempt += 1) {
@@ -906,7 +925,9 @@ function isPhantomActiveWorkerRun(row, processKillImpl = process.kill) {
 }
 
 function isSamePrHammerCloserWorkerId(workerId, prNumber) {
-  return String(workerId || '') === hammerCloserWorkerId(prNumber);
+  const base = hammerCloserWorkerId(prNumber);
+  const normalized = String(workerId || '').trim();
+  return Boolean(base) && (normalized === base || normalized.startsWith(`${base}-`));
 }
 
 function isRecognizedCodingBranchHolderWorkerId(workerId) {
@@ -2259,8 +2280,10 @@ export function samePrHammerHolderWorktreePaths(errOrText, prNumber, hqRoot) {
   return paths;
 }
 
-function selfOwnedHammerCloserWorktreePath(prNumber, hqRoot) {
-  const workerId = hammerCloserWorkerId(prNumber);
+function selfOwnedHammerCloserWorktreePath(prNumber, hqRoot, workerIdOverride = null) {
+  const workerId = isSamePrHammerCloserWorkerId(workerIdOverride, prNumber)
+    ? String(workerIdOverride).trim()
+    : hammerCloserWorkerId(prNumber);
   const root = String(hqRoot || '').trim();
   if (!workerId || !root) return null;
   return join(root, 'workers', workerId, 'agent-os');
@@ -2279,12 +2302,15 @@ function selfOwnedHammerCloserWorktreePath(prNumber, hqRoot) {
 async function resolveSelfOwnedHammerCloserRunLiveness({
   prNumber,
   hqRoot,
+  workerId: workerIdOverride = null,
   env = process.env,
   readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedger,
   readJsonFileImpl = readJsonFile,
   processKillImpl = process.kill,
 } = {}) {
-  const workerId = hammerCloserWorkerId(prNumber);
+  const workerId = isSamePrHammerCloserWorkerId(workerIdOverride, prNumber)
+    ? String(workerIdOverride).trim()
+    : hammerCloserWorkerId(prNumber);
   const root = String(hqRoot || '').trim();
   if (!workerId || !root) return { live: false, reason: 'invalid-worker-id-or-root' };
   const workerDir = join(root, 'workers', workerId);
@@ -2316,6 +2342,7 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
   repo,
   prNumber,
   workerClass,
+  workerId: workerIdOverride = null,
   hqPath,
   hqRoot,
   execFileImpl,
@@ -2332,7 +2359,9 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
   if (!isHammerWorkerClass(workerClass)) {
     return { attempted: false, reason: 'not-hammer-worker-class' };
   }
-  const workerId = hammerCloserWorkerId(prNumber);
+  const workerId = isSamePrHammerCloserWorkerId(workerIdOverride, prNumber)
+    ? String(workerIdOverride).trim()
+    : hammerCloserWorkerId(prNumber);
   const root = String(hqRoot || '').trim();
   if (!workerId) {
     return { attempted: false, reason: 'invalid-worker-id' };
@@ -2340,7 +2369,7 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
   if (!root) {
     return { attempted: false, reason: 'invalid-hq-root', workerId };
   }
-  const worktreePath = selfOwnedHammerCloserWorktreePath(prNumber, root);
+  const worktreePath = selfOwnedHammerCloserWorktreePath(prNumber, root, workerId);
   if (!existsSyncImpl(worktreePath)) {
     return { attempted: false, workerId, worktreePath, reason: 'worktree-absent' };
   }
@@ -2363,6 +2392,7 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
   const liveness = await resolveSelfOwnedHammerCloserRunLiveness({
     prNumber,
     hqRoot: root,
+    workerId,
     env,
     readLatestWorkerRunStatusImpl,
     readJsonFileImpl,
@@ -3733,6 +3763,16 @@ export async function maybeDispatchAmaCloser({
     && targetRemediationSha
     && existingRecord.headSha !== targetRemediationSha
   );
+  const targetRecordForWorkerId = existingDispatchHeadAdvanced
+    ? readAmaCloserDispatchRecord(rootDir, targetDispatchIdentity)
+    : existingRecord;
+  const workerId = isHammerWorkerClass(workerClass)
+    ? hammerCloserWorkerIdFromRecord(
+      prNumber,
+      targetRecordForWorkerId,
+      targetRemediationSha || dispatchRecordHeadSha || reviewedSha,
+    )
+    : null;
   const existingLeaseBeforeDispatch = readAmaCloserLease(rootDir, existingDispatchLeaseIdentity);
   let targetLeaseBeforeDispatch = leaseIdentity.headSha !== existingDispatchLeaseIdentity.headSha
     ? readAmaCloserLease(rootDir, leaseIdentity)
@@ -4818,6 +4858,7 @@ export async function maybeDispatchAmaCloser({
     dispatchReason,
     workerClass,
     dispatchWorkerClass,
+    workerId,
     promptPath,
     promptDir,
     hqRoot,
@@ -4906,6 +4947,7 @@ export async function maybeDispatchAmaCloser({
       terminalOutcome: 'succeeded',
       workerClass,
       dispatchWorkerClass,
+      workerId,
     }));
     finalizeAmaCloserLeaseBestEffort({
       rootDir,
@@ -4937,6 +4979,7 @@ export async function maybeDispatchAmaCloser({
       observedAt: dispatchContext.dispatchedAt,
       workerClass,
       dispatchWorkerClass,
+      workerId,
     }));
     deleteAmaCloserLease(rootDir, leaseIdentity);
     logger.log?.(
@@ -4961,6 +5004,7 @@ export async function maybeDispatchAmaCloser({
       observedAt: dispatchContext.dispatchedAt,
       workerClass,
       dispatchWorkerClass,
+      workerId,
     }));
     deleteAmaCloserLease(rootDir, leaseIdentity);
     logger.log?.(
@@ -4990,10 +5034,6 @@ export async function maybeDispatchAmaCloser({
   //     accounting separate from the merge-agent stream.
   //   - `--ticket AMA-PR-<n>` so the launch is traceable per-PR.
   const repoBasename = repo.split('/')[1] || repo;
-  // The stable worker identity belongs to the logical closer class. A quota
-  // fallback changes only the physical harness (dispatchWorkerClass), so it
-  // must not make a hammer retry lose its deterministic worker/worktree id.
-  const workerId = isHammerWorkerClass(workerClass) ? hammerCloserWorkerId(prNumber) : null;
   const args = [
     'dispatch',
     '--worker-class', dispatchWorkerClass,
@@ -5040,6 +5080,7 @@ export async function maybeDispatchAmaCloser({
     repo,
     prNumber,
     workerClass,
+    workerId,
     hqPath,
     hqRoot,
     execFileImpl,
@@ -5204,6 +5245,7 @@ export async function maybeDispatchAmaCloser({
           dispatchReason,
           workerClass,
           dispatchWorkerClass,
+          workerId,
           promptPath,
           promptDir,
           hqRoot,
@@ -5308,6 +5350,7 @@ export async function maybeDispatchAmaCloser({
     dispatchReason,
     workerClass,
     dispatchWorkerClass,
+    workerId,
     promptPath,
     promptDir,
     hqRoot,

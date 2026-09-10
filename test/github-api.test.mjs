@@ -313,6 +313,59 @@ test('service-owned label write binds merge-agent env-token auth under the watch
   ]);
 });
 
+test('service-owned read binds merge-agent env-token auth under the watcher broker signal', async () => {
+  const mod = await importGithubAdapterClientFresh();
+
+  assert.deepEqual(mod.__test__.makeAdapterArgs('pull-request-head-state', {
+    repo: FIXTURE_REPO,
+    prNumber: FIXTURE_PR,
+  }, {
+    WATCHER_GH_AUTH_VIA_BROKER: 'true',
+    WATCHER_GH_BROKER_ROLE: 'merge-agent',
+    GITHUB_TOKEN: 'ghs_broker_merge_agent',
+    GH_TOKEN: 'ghs_broker_merge_agent',
+  }), [
+    'read',
+    '--kind',
+    'pull-request-head-state',
+    '--json',
+    '--repo',
+    FIXTURE_REPO,
+    '--pr-number',
+    String(FIXTURE_PR),
+    '--auth',
+    'merge-agent',
+    '--auth-mode',
+    'env-token',
+    '--pat-env',
+    'GITHUB_TOKEN',
+    '--pat-env',
+    'GH_TOKEN',
+  ]);
+});
+
+test('adapter child env preserves explicit transport and auth controls', async () => {
+  const mod = await importGithubAdapterClientFresh();
+
+  const adapterEnv = mod.__test__.buildAdapterEnv({
+    PATH: '/opt/homebrew/bin:/usr/bin',
+    HOME: '/Users/airlock',
+    AGENT_OS_GITHUB_ADAPTER_AUTH: 'merge-agent',
+    AGENT_OS_GITHUB_ADAPTER_AUTH_MODE: 'broker',
+    AGENT_OS_GITHUB_ADAPTER_TRANSPORT: 'gh-cli',
+    AGENT_OS_GITHUB_ADAPTER_ENV_TOKEN_FROM_AMBIENT_GH: '0',
+    GITHUB_TOKEN: 'ghs_broker_merge_agent',
+    SECRET_SHOULD_NOT_PASS: 'nope',
+  });
+
+  assert.equal(adapterEnv.AGENT_OS_GITHUB_ADAPTER_AUTH, 'merge-agent');
+  assert.equal(adapterEnv.AGENT_OS_GITHUB_ADAPTER_AUTH_MODE, 'broker');
+  assert.equal(adapterEnv.AGENT_OS_GITHUB_ADAPTER_TRANSPORT, 'gh-cli');
+  assert.equal(adapterEnv.AGENT_OS_GITHUB_ADAPTER_ENV_TOKEN_FROM_AMBIENT_GH, '0');
+  assert.equal(adapterEnv.GH_TOKEN, 'ghs_broker_merge_agent');
+  assert.equal(adapterEnv.SECRET_SHOULD_NOT_PASS, undefined);
+});
+
 test('service-owned write auth is not suppressed by user values matching auth flag text', async () => {
   const mod = await importGithubAdapterClientFresh();
 

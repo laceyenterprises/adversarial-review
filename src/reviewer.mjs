@@ -84,7 +84,7 @@ import {
   adapterUnsupportedError,
   writeAdapterPullRequestReview,
 } from './github-adapter-client.mjs';
-import { parseExactHeadReviewArtifactOrNull, postExactHeadReview } from './reviewer-exact-head-post.mjs';
+import { exactHeadReviewEventForBody, parseExactHeadReviewArtifactOrNull, postExactHeadReview } from './reviewer-exact-head-post.mjs';
 import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
@@ -1448,6 +1448,14 @@ class ReviewerPostAuthRefreshRetryableError extends Error {
   }
 }
 
+class AmbiguousReviewerPostUnreconciledError extends Error {
+  constructor(message, { cause } = {}) {
+    super(message);
+    this.name = 'AmbiguousReviewerPostUnreconciledError';
+    this.cause = cause;
+  }
+}
+
 function isReviewerPostAuthFailure(err, { preWriteSaw401 = false } = {}) {
   const detail = buildGhErrorDetail(err);
   if (/\bauthor cannot review this pull request\b/.test(detail)) {
@@ -1517,6 +1525,87 @@ async function withGhRetry(operation, {
     }
   }
   throw lastErr;
+}
+
+function normalizeReviewBodyForMatch(value) {
+  return String(value || '').replace(/\r\n/g, '\n').trim();
+}
+
+function exactHeadReviewStateForEvent(event) {
+  if (event === 'REQUEST_CHANGES') return 'CHANGES_REQUESTED';
+  if (event === 'APPROVE') return 'APPROVED';
+  return 'COMMENTED';
+}
+
+function parseGitHubJsonArray(stdout) {
+  const text = String(stdout || '').trim();
+  if (!text) return [];
+  const jsonStart = text.search(/[\[{]/);
+  const payload = jsonStart >= 0 ? text.slice(jsonStart).trim() : text;
+  const parsed = JSON.parse(payload);
+  if (Array.isArray(parsed)) return parsed;
+  if (Array.isArray(parsed?.data)) return parsed.data;
+  return [];
+}
+
+async function findMatchingSubmittedReviewAfterAmbiguousPost({
+  execFileImpl,
+  repo,
+  prNumber,
+  reviewBody,
+  reviewerHeadSha,
+  reviewerLogin,
+  event,
+  env,
+  log = console,
+} = {}) {
+  const expectedBody = normalizeReviewBodyForMatch(reviewBody);
+  const expectedCommit = String(reviewerHeadSha || '').trim();
+  const expectedLogin = String(reviewerLogin || '').trim();
+  const expectedState = exactHeadReviewStateForEvent(event);
+  let response;
+  try {
+    response = await execFileImpl(
+      'gh',
+      ['api', `repos/${repo}/pulls/${prNumber}/reviews`, '--paginate'],
+      {
+        env,
+        maxBuffer: 5 * 1024 * 1024,
+      }
+    );
+  } catch (err) {
+    log.warn?.(
+      `[reviewer] ambiguous review post for ${repo}#${prNumber} could not be reconciled: ${err?.message || err}`
+    );
+    return { status: 'unavailable', error: err };
+  }
+  let reviews;
+  try {
+    reviews = parseGitHubJsonArray(response?.stdout);
+  } catch (err) {
+    log.warn?.(
+      `[reviewer] ambiguous review post for ${repo}#${prNumber} returned unreadable review list: ${err?.message || err}`
+    );
+    return { status: 'unavailable', error: err };
+  }
+  const matches = reviews.filter((review) => {
+    if (!review || typeof review !== 'object') return false;
+    if (expectedCommit && String(review.commit_id || '').trim() !== expectedCommit) return false;
+    if (expectedState && String(review.state || '').trim() !== expectedState) return false;
+    if (normalizeReviewBodyForMatch(review.body) !== expectedBody) return false;
+    if (expectedLogin && String(review.user?.login || '').trim() !== expectedLogin) return false;
+    return Boolean(review.id);
+  });
+  if (!matches.length) return { status: 'none' };
+  matches.sort((a, b) => String(b.submitted_at || b.submittedAt || '').localeCompare(String(a.submitted_at || a.submittedAt || '')));
+  const review = matches[0];
+  return {
+    status: 'matched',
+    reviewArtifact: {
+      id: String(review.id),
+      commitId: String(review.commit_id || expectedCommit),
+    },
+  };
 }
 
 function createReviewerPreWriteLogProxy(log = console) {
@@ -1614,9 +1703,10 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
         await prepareReviewWrite({
           repo, prNumber, token, selfLogin: appSelfLogin, fetchImpl: opts.fetchImpl, log: preWriteLog.log,
         });
+        let adapterEnv = null;
         try {
           await awaitThrottleIfNeeded();
-          const adapterEnv = {
+          adapterEnv = {
             PATH: sourceEnv.PATH ?? '/usr/bin:/bin',
             HOME: sourceEnv.HOME ?? '',
             GH_TOKEN: token,
@@ -1690,12 +1780,55 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
               );
             }
           }
+          if (isRetryableGhTransportError(err) && !authRetryable) {
+            const canReconcileAmbiguousWrite = reviewerHeadSha || appSelfLogin;
+            if (!canReconcileAmbiguousWrite) {
+              throw new AmbiguousReviewerPostUnreconciledError(
+                `Ambiguous GitHub review post for ${repo}#${prNumber} cannot be safely retried without an exact head or reviewer login`,
+                { cause: err }
+              );
+            }
+            const reconciled = await findMatchingSubmittedReviewAfterAmbiguousPost({
+              execFileImpl,
+              repo,
+              prNumber,
+              reviewBody,
+              reviewerHeadSha,
+              reviewerLogin: appSelfLogin,
+              event: reviewerHeadSha ? exactHeadReviewEventForBody(reviewBody) : 'COMMENT',
+              env: adapterEnv,
+              log,
+            });
+            if (reconciled.status === 'matched') {
+              log.warn?.(
+                `[reviewer] ambiguous GitHub review post for ${repo}#${prNumber} already landed; suppressing duplicate retry`
+              );
+              if (reviewerHeadSha) {
+                return {
+                  stdout: JSON.stringify({
+                    id: reconciled.reviewArtifact.id,
+                    commit_id: reconciled.reviewArtifact.commitId,
+                  }),
+                };
+              }
+              return { reviewArtifact: null, matchedExistingReview: true };
+            }
+            if (reconciled.status === 'unavailable') {
+              throw new AmbiguousReviewerPostUnreconciledError(
+                `Ambiguous GitHub review post for ${repo}#${prNumber} could not be reconciled safely`,
+                { cause: err }
+              );
+            }
+          }
           throw err;
         }
       },
       {
         retryDelaysMs: REVIEW_POST_RETRY_DELAYS_MS,
-        isRetryable: (err) => err instanceof ReviewerPostAuthRefreshRetryableError || isRetryableGhTransportError(err),
+        isRetryable: (err) => err instanceof ReviewerPostAuthRefreshRetryableError || (
+          !(err instanceof AmbiguousReviewerPostUnreconciledError)
+          && isRetryableGhTransportError(err)
+        ),
       }
     );
     const exactHeadReviewArtifact = reviewerHeadSha

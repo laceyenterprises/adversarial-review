@@ -603,7 +603,12 @@ test('postGitHubReview retries transient exact-head gh transport failure', async
   assert.deepEqual(result, {
     reviewArtifact: { id: '4242', commitId: 'reviewed-head-sha' },
   });
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls[1].args, [
+    'api',
+    'repos/laceyenterprises/demo/pulls/42/reviews',
+    '--paginate',
+  ]);
 });
 
 test('postGitHubReview retries transient exact-head GitHub HTTP/2 GOAWAY 500', async () => {
@@ -642,7 +647,60 @@ test('postGitHubReview retries transient exact-head GitHub HTTP/2 GOAWAY 500', a
   assert.deepEqual(result, {
     reviewArtifact: { id: '4242', commitId: 'reviewed-head-sha' },
   });
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls[1].args, [
+    'api',
+    'repos/laceyenterprises/demo/pulls/42/reviews',
+    '--paginate',
+  ]);
+});
+
+test('postGitHubReview suppresses duplicate retry when an ambiguous exact-head write already landed', async () => {
+  const calls = [];
+  const result = await postGitHubReview(
+    'laceyenterprises/demo',
+    42,
+    'review body',
+    'GH_CODEX_REVIEWER_TOKEN',
+    async (command, args, options = {}) => {
+      calls.push({ command, args, options });
+      const isPost = args.includes('--method') && args.includes('POST');
+      if (isPost) {
+        const err = new Error('HTTP/2: "GOAWAY" frame received with code 0');
+        err.status = 500;
+        throw err;
+      }
+      return {
+        stdout: JSON.stringify([
+          {
+            id: 4242,
+            commit_id: 'reviewed-head-sha',
+            state: 'COMMENTED',
+            body: 'review body',
+            user: { login: 'lacey-codex-reviewer[bot]' },
+            submitted_at: '2026-09-10T17:35:00Z',
+          },
+        ]),
+      };
+    },
+    {
+      env: {
+        GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
+        PATH: '/opt/homebrew/bin:/usr/bin',
+        HOME: '/Users/test',
+      },
+      reviewerIdentity: 'codex-reviewer-lacey',
+      reviewerHeadSha: 'reviewed-head-sha',
+      prepareReviewWrite: async () => {},
+      log: { warn() {} },
+    }
+  );
+
+  assert.deepEqual(result, {
+    reviewArtifact: { id: '4242', commitId: 'reviewed-head-sha' },
+  });
+  assert.equal(calls.filter((call) => call.args.includes('--method') && call.args.includes('POST')).length, 1);
+  assert.equal(calls.filter((call) => call.args.includes('--paginate')).length, 1);
 });
 
 test('postGitHubReview returns null exact-head artifact when response validation fails', async () => {

@@ -43,6 +43,47 @@ function isRetryableReviewCycleCapCommentError(err) {
     || detail.includes('gateway timeout');
 }
 
+function normalizeCommentBodyForMatch(value) {
+  return String(value || '').replace(/\r\n/g, '\n').trim();
+}
+
+async function findMatchingReviewCycleCapEscalationComment(octokit, {
+  owner,
+  repo,
+  prNumber,
+  body,
+  logger = console,
+} = {}) {
+  const listComments = octokit?.rest?.issues?.listComments;
+  if (typeof listComments !== 'function') {
+    return { status: 'unsupported' };
+  }
+  const params = {
+    owner,
+    repo,
+    issue_number: Number(prNumber),
+    per_page: 100,
+  };
+  let comments;
+  try {
+    comments = typeof octokit.paginate === 'function'
+      ? await octokit.paginate(listComments, params)
+      : (await listComments(params))?.data;
+  } catch (err) {
+    logger?.warn?.(
+      `[watcher] review-cycle-cap escalation comment lookup failed for ${owner}/${repo}#${prNumber}: ${err?.message || err}`
+    );
+    return { status: 'unavailable', error: err };
+  }
+  const expectedBody = normalizeCommentBodyForMatch(body);
+  const match = (Array.isArray(comments) ? comments : []).find((comment) => (
+    comment
+    && typeof comment === 'object'
+    && normalizeCommentBodyForMatch(comment.body) === expectedBody
+  ));
+  return match ? { status: 'matched', comment: match } : { status: 'none' };
+}
+
 export function subjectRefWithLinearTicket(subjectRef, linearTicketId, labels = []) {
   return {
     ...subjectRef,
@@ -142,6 +183,19 @@ export async function postReviewCycleCapEscalation(octokit, {
 }) {
   const [owner, repo] = String(repoPath || '').split('/');
   if (!owner || !repo) throw new Error(`Invalid repo slug: ${repoPath}`);
+  const preexisting = await findMatchingReviewCycleCapEscalationComment(octokit, {
+    owner,
+    repo,
+    prNumber,
+    body,
+    logger,
+  });
+  if (preexisting.status === 'matched') {
+    logger?.warn?.(
+      `[watcher] review-cycle-cap escalation comment already exists for ${repoPath}#${prNumber}; suppressing duplicate post`
+    );
+    return;
+  }
   let lastErr = null;
   for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
     try {
@@ -155,6 +209,22 @@ export async function postReviewCycleCapEscalation(octokit, {
     } catch (err) {
       lastErr = err;
       if (!isRetryableReviewCycleCapCommentError(err) || attempt >= retryDelaysMs.length) {
+        throw err;
+      }
+      const reconciled = await findMatchingReviewCycleCapEscalationComment(octokit, {
+        owner,
+        repo,
+        prNumber,
+        body,
+        logger,
+      });
+      if (reconciled.status === 'matched') {
+        logger?.warn?.(
+          `[watcher] review-cycle-cap escalation comment for ${repoPath}#${prNumber} already landed; suppressing duplicate retry`
+        );
+        return;
+      }
+      if (reconciled.status === 'unavailable') {
         throw err;
       }
       logger?.warn?.(

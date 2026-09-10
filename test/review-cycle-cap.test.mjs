@@ -324,6 +324,43 @@ test('postReviewCycleCapEscalation retries transient GitHub GOAWAY comment failu
   assert.deepEqual(calls.map((call) => call.body), ['escalation body', 'escalation body']);
 });
 
+test('postReviewCycleCapEscalation suppresses duplicate retry when ambiguous comment landed', async () => {
+  let createCalls = 0;
+  let listCalls = 0;
+  const octokit = {
+    rest: {
+      issues: {
+        listComments: async () => {
+          listCalls += 1;
+          return {
+            data: createCalls > 0
+              ? [{ id: 101, body: 'escalation body' }]
+              : [],
+          };
+        },
+        createComment: async () => {
+          createCalls += 1;
+          const err = new Error('HTTP/2: "GOAWAY" frame received with code 0');
+          err.status = 500;
+          throw err;
+        },
+      },
+    },
+  };
+
+  await postReviewCycleCapEscalation(octokit, {
+    repoPath: REPO,
+    prNumber: PR,
+    body: 'escalation body',
+    retryDelaysMs: [0],
+    sleepImpl: async () => {},
+    logger: { warn() {} },
+  });
+
+  assert.equal(createCalls, 1);
+  assert.equal(listCalls, 2);
+});
+
 test('postReviewCycleCapEscalation does not retry permanent GitHub comment failures', async () => {
   let calls = 0;
   const octokit = {

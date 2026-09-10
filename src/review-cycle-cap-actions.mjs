@@ -86,7 +86,6 @@ function trustedReviewCycleCapCommentAuthors({
   const watcherRole = resolveWatcherGhBrokerRole(env);
   const configuredLogin = resolveGitHubAppBotLogin({
     identity: watcherRole,
-    provider: `github-app-${watcherRole}`,
     env,
     log: logger,
   });
@@ -273,12 +272,18 @@ export async function postReviewCycleCapEscalation(octokit, {
   let lastErr = null;
   for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
     try {
-      await octokit.rest.issues.createComment({
+      const created = await octokit.rest.issues.createComment({
         owner,
         repo,
         issue_number: Number(prNumber),
         body,
       });
+      const createdBody = normalizeCommentBodyForMatch(created?.data?.body);
+      if (createdBody && createdBody !== normalizeCommentBodyForMatch(body)) {
+        logger?.warn?.(
+          `[watcher] review-cycle-cap escalation comment for ${repoPath}#${prNumber} returned unexpected body`
+        );
+      }
       return;
     } catch (err) {
       lastErr = err;

@@ -417,6 +417,73 @@ test('postReviewCycleCapEscalation suppresses trusted existing escalation commen
   assert.equal(createCalls, 0);
 });
 
+test('postReviewCycleCapEscalation trusts custom watcher broker provider comments', async () => {
+  let createCalls = 0;
+  let listCalls = 0;
+  const octokit = {
+    rest: {
+      issues: {
+        listComments: async () => {
+          listCalls += 1;
+          return {
+            data: [{ id: 101, body: 'escalation body', user: { login: 'custom-merge-agent[bot]' } }],
+          };
+        },
+        createComment: async () => {
+          createCalls += 1;
+        },
+      },
+    },
+  };
+
+  await postReviewCycleCapEscalation(octokit, {
+    repoPath: REPO,
+    prNumber: PR,
+    body: 'escalation body',
+    env: {
+      WATCHER_GH_BROKER_ROLE: 'merge-agent',
+      OAUTH_BROKER_MERGE_AGENT_PROVIDER: 'github-app-custom-merge-agent',
+    },
+    logger: { warn() {} },
+  });
+
+  assert.equal(listCalls, 1);
+  assert.equal(createCalls, 0);
+});
+
+test('postReviewCycleCapEscalation does not reread comments after successful create', async () => {
+  let createCalls = 0;
+  let listCalls = 0;
+  const octokit = {
+    rest: {
+      issues: {
+        listComments: async () => {
+          listCalls += 1;
+          return { data: [] };
+        },
+        createComment: async (params) => {
+          createCalls += 1;
+          return { data: { id: 101, body: params.body, user: { login: 'custom-merge-agent[bot]' } } };
+        },
+      },
+    },
+  };
+
+  await postReviewCycleCapEscalation(octokit, {
+    repoPath: REPO,
+    prNumber: PR,
+    body: 'escalation body',
+    env: {
+      WATCHER_GH_BROKER_ROLE: 'merge-agent',
+      OAUTH_BROKER_MERGE_AGENT_PROVIDER: 'github-app-custom-merge-agent',
+    },
+    logger: { warn() {} },
+  });
+
+  assert.equal(listCalls, 1);
+  assert.equal(createCalls, 1);
+});
+
 test('postReviewCycleCapEscalation does not retry permanent GitHub comment failures', async () => {
   let calls = 0;
   const octokit = {

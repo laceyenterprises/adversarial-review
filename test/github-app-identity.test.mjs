@@ -5,6 +5,7 @@ import {
   providerSlugToBotLogin,
   resolveGitHubAppBotLogin,
   resolveProviderForBotTokenEnv,
+  resolveProviderForIdentity,
 } from '../src/github-app-identity.mjs';
 
 test('provider slug derives deterministic GitHub App bot login', () => {
@@ -43,6 +44,25 @@ test('app identity resolver falls back to configured provider slug', () => {
       loaderImpl: () => ({ get: () => '' }),
     }),
     'lacey-codex-reviewer[bot]',
+  );
+});
+
+test('app identity resolver honors role-scoped provider overrides without a token env', () => {
+  assert.equal(
+    resolveProviderForIdentity('merge-agent', {
+      OAUTH_BROKER_MERGE_AGENT_PROVIDER: 'github-app-custom-merge-agent',
+    }),
+    'github-app-custom-merge-agent',
+  );
+  assert.equal(
+    resolveGitHubAppBotLogin({
+      identity: 'merge-agent',
+      env: {
+        OAUTH_BROKER_MERGE_AGENT_PROVIDER: 'github-app-custom-merge-agent',
+      },
+      loaderImpl: () => ({ get: () => '' }),
+    }),
+    'custom-merge-agent[bot]',
   );
 });
 

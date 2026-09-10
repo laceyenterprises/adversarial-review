@@ -1068,7 +1068,7 @@ export async function maybeDispatchAmaClosureFor({
     authoritativeReviewerLogins,
     dismissStaleRequestChangesOnResolved,
     hamTerminalRemediationValidated,
-      signal: operationSignal,
+    signal: operationSignal,
     }),
     {
       timeoutMs: operationTimeoutMs,

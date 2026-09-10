@@ -49,6 +49,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
+import { setImmediate as setImmediatePromise } from 'node:timers/promises';
 
 import { writeFileAtomic } from './atomic-write.mjs';
 
@@ -336,7 +337,7 @@ function promotionHistoryWith(doc, nextPromotion) {
   return history.slice(-MAX_PROMOTION_HISTORY_ENTRIES);
 }
 
-export function promoteStarvedNoProgressLaneLedgers(rootDir, {
+export async function promoteStarvedNoProgressLaneLedgers(rootDir, {
   promotionId = STARVED_SLOW_LANE_PROMOTION_ID,
   now = new Date().toISOString(),
   logger = console,
@@ -344,6 +345,8 @@ export function promoteStarvedNoProgressLaneLedgers(rootDir, {
   readFileSyncImpl = readFileSync,
   renameSyncImpl = renameSync,
   writeFileAtomicImpl = writeFileAtomic,
+  yieldEveryLedgers = 100,
+  yieldImpl = setImmediatePromise,
 } = {}) {
   const markerPath = starvedPromotionMarkerPath(rootDir, promotionId);
   if (existsSync(markerPath)) {
@@ -382,12 +385,20 @@ export function promoteStarvedNoProgressLaneLedgers(rootDir, {
   }
 
   let promoted = 0;
+  let previouslyPromoted = 0;
   let quarantined = 0;
   let hadReadErrors = false;
   let hadWriteErrors = false;
+  const yieldEvery = positiveIntOr(yieldEveryLedgers, 100);
+  const maybeYield = typeof yieldImpl === 'function' ? yieldImpl : setImmediatePromise;
+  let scanned = 0;
   for (const entry of entries) {
     if (!entry.isFile() || !entry.name.endsWith('.json') || entry.name.endsWith('.promotion.json')) {
       continue;
+    }
+    scanned += 1;
+    if (scanned > 1 && (scanned - 1) % yieldEvery === 0) {
+      await maybeYield();
     }
     const filePath = join(dir, entry.name);
     let doc = null;
@@ -423,7 +434,12 @@ export function promoteStarvedNoProgressLaneLedgers(rootDir, {
       }
       continue;
     }
-    if (doc?.lane !== LANE_SLOW) continue;
+    if (doc?.lane !== LANE_SLOW) {
+      if (doc?.lane === LANE_ACTIVE && doc?.promotedFrom?.promotionId === promotionId) {
+        previouslyPromoted += 1;
+      }
+      continue;
+    }
     const promotedFrom = {
       lane: doc.lane,
       noProgressTicks: normalizeCount(doc.noProgressTicks),
@@ -461,24 +477,32 @@ export function promoteStarvedNoProgressLaneLedgers(rootDir, {
       `[watcher] no-progress lane: starvation recovery promoted ${promoted} readable ` +
         `ledger(s) but left campaign marker unwritten after ${errorLabel} (${promotionId})`,
     );
-    return { attempted: true, promoted, reason: hadReadErrors ? 'ledger-read-failed' : 'ledger-write-failed' };
+    return {
+      attempted: true,
+      promoted,
+      previouslyPromoted,
+      reason: hadReadErrors ? 'ledger-read-failed' : 'ledger-write-failed',
+    };
   }
 
+  const totalPromoted = promoted + previouslyPromoted;
   writeFileAtomicImpl(markerPath, `${JSON.stringify({
     schemaVersion: 1,
     promotionId,
-    promoted,
+    promoted: totalPromoted,
+    promotedThisPass: promoted,
+    previouslyPromoted,
     quarantined,
     promotedAt: now,
     reason: 'scheduler-starvation-recovery',
   }, null, 2)}\n`);
-  if (promoted > 0) {
+  if (totalPromoted > 0) {
     logger?.warn?.(
-      `[watcher] no-progress lane: promoted ${promoted} slow-lane ledger(s) for ` +
+      `[watcher] no-progress lane: promoted ${totalPromoted} slow-lane ledger(s) for ` +
         `scheduler starvation recovery (${promotionId})`,
     );
   }
-  return { attempted: true, promoted, reason: 'scheduler-starvation-recovery' };
+  return { attempted: true, promoted, previouslyPromoted, reason: 'scheduler-starvation-recovery' };
 }
 
 /**

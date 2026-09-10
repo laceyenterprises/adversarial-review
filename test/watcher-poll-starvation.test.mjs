@@ -1216,7 +1216,7 @@ test('legacy no-progress ledgers without progressClass are due immediately for r
   }
 });
 
-test('RVHAND-10: starvation recovery promotes existing slow-lane ledgers once', () => {
+test('RVHAND-10: starvation recovery promotes existing slow-lane ledgers once', async () => {
   const rootDir = tempRoot();
   try {
     const identity = { repo: REPO, prNumber: 6527 };
@@ -1245,7 +1245,7 @@ test('RVHAND-10: starvation recovery promotes existing slow-lane ledgers once', 
       }, null, 2)}\n`,
     );
 
-    const first = promoteStarvedNoProgressLaneLedgers(rootDir, {
+    const first = await promoteStarvedNoProgressLaneLedgers(rootDir, {
       now: 'recover',
       logger: silentLogger,
     });
@@ -1258,7 +1258,7 @@ test('RVHAND-10: starvation recovery promotes existing slow-lane ledgers once', 
     assert.deepEqual(recovered.promotionHistory[0], priorPromotion);
     assert.deepEqual(recovered.promotionHistory[1], recovered.promotedFrom);
 
-    const second = promoteStarvedNoProgressLaneLedgers(rootDir, {
+    const second = await promoteStarvedNoProgressLaneLedgers(rootDir, {
       now: 'recover-again',
       logger: silentLogger,
     });
@@ -1269,11 +1269,45 @@ test('RVHAND-10: starvation recovery promotes existing slow-lane ledgers once', 
   }
 });
 
-test('RVHAND-10: starvation recovery reports marker write failures without crashing', () => {
+test('RVHAND-10: starvation recovery yields between ledger batches', async () => {
+  const rootDir = tempRoot();
+  try {
+    for (const identity of [
+      { repo: REPO, prNumber: 6527 },
+      { repo: REPO, prNumber: 6528 },
+    ]) {
+      for (let i = 0; i < DEFAULT_NO_PROGRESS_LANE_CAP + 2; i += 1) {
+        recordNoProgressLaneRun(rootDir, identity, {
+          headSha: HEAD_A,
+          fingerprint: `starved-clean-pr-${identity.prNumber}`,
+          now: `t${i}`,
+          logger: silentLogger,
+        });
+      }
+    }
+    let yieldCount = 0;
+
+    const result = await promoteStarvedNoProgressLaneLedgers(rootDir, {
+      now: 'recover-yield',
+      logger: silentLogger,
+      yieldEveryLedgers: 1,
+      yieldImpl: async () => {
+        yieldCount += 1;
+      },
+    });
+
+    assert.equal(result.promoted, 2);
+    assert.equal(yieldCount, 1);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('RVHAND-10: starvation recovery reports marker write failures without crashing', async () => {
   const rootDir = tempRoot();
   try {
     const warnings = [];
-    const result = promoteStarvedNoProgressLaneLedgers(rootDir, {
+    const result = await promoteStarvedNoProgressLaneLedgers(rootDir, {
       now: 'recover-marker-failure',
       logger: { ...silentLogger, warn: (...args) => warnings.push(args.join(' ')) },
       mkdirSyncImpl: () => {
@@ -1290,7 +1324,7 @@ test('RVHAND-10: starvation recovery reports marker write failures without crash
   }
 });
 
-test('RVHAND-10: starvation recovery quarantines corrupt ledgers and writes campaign marker', () => {
+test('RVHAND-10: starvation recovery quarantines corrupt ledgers and writes campaign marker', async () => {
   const rootDir = tempRoot();
   try {
     const identity = { repo: REPO, prNumber: 6528 };
@@ -1307,7 +1341,7 @@ test('RVHAND-10: starvation recovery quarantines corrupt ledgers and writes camp
     const badLedgerPath = join(laneDir, 'transient-read-failure.json');
     writeFileSync(badLedgerPath, '{');
 
-    const first = promoteStarvedNoProgressLaneLedgers(rootDir, {
+    const first = await promoteStarvedNoProgressLaneLedgers(rootDir, {
       now: 'recover',
       logger: silentLogger,
     });
@@ -1320,7 +1354,7 @@ test('RVHAND-10: starvation recovery quarantines corrupt ledgers and writes camp
     assert.equal(existsSync(badLedgerPath), false);
     assert.equal(existsSync(join(laneDir, 'quarantine', 'recover-transient-read-failure.json')), true);
 
-    const second = promoteStarvedNoProgressLaneLedgers(rootDir, {
+    const second = await promoteStarvedNoProgressLaneLedgers(rootDir, {
       now: 'recover-again',
       logger: silentLogger,
     });
@@ -1332,7 +1366,7 @@ test('RVHAND-10: starvation recovery quarantines corrupt ledgers and writes camp
   }
 });
 
-test('RVHAND-10: starvation recovery leaves transient read failures for the next tick', () => {
+test('RVHAND-10: starvation recovery leaves transient read failures for the next tick', async () => {
   const rootDir = tempRoot();
   try {
     const identity = { repo: REPO, prNumber: 6535 };
@@ -1349,7 +1383,7 @@ test('RVHAND-10: starvation recovery leaves transient read failures for the next
     const ledgerPath = noProgressLaneFilePath(rootDir, identity);
     const warnings = [];
 
-    const first = promoteStarvedNoProgressLaneLedgers(rootDir, {
+    const first = await promoteStarvedNoProgressLaneLedgers(rootDir, {
       now: 'recover-transient-read',
       logger: { ...silentLogger, warn: (...args) => warnings.push(args.join(' ')) },
       readFileSyncImpl: (filePath, encoding) => {
@@ -1374,7 +1408,7 @@ test('RVHAND-10: starvation recovery leaves transient read failures for the next
   }
 });
 
-test('RVHAND-10: starvation recovery retries campaign marker when quarantine fails', () => {
+test('RVHAND-10: starvation recovery retries campaign marker when quarantine fails', async () => {
   const rootDir = tempRoot();
   try {
     const identity = { repo: REPO, prNumber: 6534 };
@@ -1391,7 +1425,7 @@ test('RVHAND-10: starvation recovery retries campaign marker when quarantine fai
     const badLedgerPath = join(laneDir, 'unmovable-read-failure.json');
     writeFileSync(badLedgerPath, '{');
 
-    const first = promoteStarvedNoProgressLaneLedgers(rootDir, {
+    const first = await promoteStarvedNoProgressLaneLedgers(rootDir, {
       now: 'recover',
       logger: silentLogger,
       mkdirSyncImpl: () => {
@@ -1408,7 +1442,7 @@ test('RVHAND-10: starvation recovery retries campaign marker when quarantine fai
   }
 });
 
-test('RVHAND-10: starvation recovery ignores ledgers deleted by terminal cleanup', () => {
+test('RVHAND-10: starvation recovery ignores ledgers deleted by terminal cleanup', async () => {
   const rootDir = tempRoot();
   try {
     const missingIdentity = { repo: REPO, prNumber: 6529 };
@@ -1428,7 +1462,7 @@ test('RVHAND-10: starvation recovery ignores ledgers deleted by terminal cleanup
     const missingLedgerPath = noProgressLaneFilePath(rootDir, missingIdentity);
     const laneDir = join(rootDir, 'data', 'watcher-no-progress-lane');
     const warnings = [];
-    const first = promoteStarvedNoProgressLaneLedgers(rootDir, {
+    const first = await promoteStarvedNoProgressLaneLedgers(rootDir, {
       now: 'recover-enoent',
       logger: { ...silentLogger, warn: (...args) => warnings.push(args.join(' ')) },
       readFileSyncImpl: (filePath, encoding) => {
@@ -1456,7 +1490,7 @@ test('RVHAND-10: starvation recovery ignores ledgers deleted by terminal cleanup
   }
 });
 
-test('RVHAND-10: starvation recovery skips a ledger write failure and promotes the rest', () => {
+test('RVHAND-10: starvation recovery skips a ledger write failure and promotes the rest', async () => {
   const rootDir = tempRoot();
   try {
     const failedIdentity = { repo: REPO, prNumber: 6530 };
@@ -1476,7 +1510,7 @@ test('RVHAND-10: starvation recovery skips a ledger write failure and promotes t
     const failedLedgerPath = noProgressLaneFilePath(rootDir, failedIdentity);
     const laneDir = join(rootDir, 'data', 'watcher-no-progress-lane');
     const warnings = [];
-    const first = promoteStarvedNoProgressLaneLedgers(rootDir, {
+    const first = await promoteStarvedNoProgressLaneLedgers(rootDir, {
       now: 'recover-write-failure',
       logger: { ...silentLogger, warn: (...args) => warnings.push(args.join(' ')) },
       writeFileAtomicImpl: (filePath, contents) => {
@@ -1496,12 +1530,25 @@ test('RVHAND-10: starvation recovery skips a ledger write failure and promotes t
     );
     assert.match(warnings.join('\n'), /failed to write promoted ledger/);
     assert.match(warnings.join('\n'), /left campaign marker unwritten after write errors/);
+
+    const second = await promoteStarvedNoProgressLaneLedgers(rootDir, {
+      now: 'recover-write-retry',
+      logger: silentLogger,
+    });
+    const marker = JSON.parse(
+      readFileSync(join(laneDir, 'rvhand-10-starved-slow-lane-recovery.promotion.json'), 'utf8'),
+    );
+    assert.equal(second.promoted, 1);
+    assert.equal(second.previouslyPromoted, 1);
+    assert.equal(marker.promoted, 2);
+    assert.equal(marker.promotedThisPass, 1);
+    assert.equal(marker.previouslyPromoted, 1);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
 
-test('RVHAND-10: starvation recovery caps promotion history in persistent ledgers', () => {
+test('RVHAND-10: starvation recovery caps promotion history in persistent ledgers', async () => {
   const rootDir = tempRoot();
   try {
     const identity = { repo: REPO, prNumber: 6533 };
@@ -1528,7 +1575,7 @@ test('RVHAND-10: starvation recovery caps promotion history in persistent ledger
       }, null, 2)}\n`,
     );
 
-    const result = promoteStarvedNoProgressLaneLedgers(rootDir, {
+    const result = await promoteStarvedNoProgressLaneLedgers(rootDir, {
       now: 'recover-capped-history',
       logger: silentLogger,
     });

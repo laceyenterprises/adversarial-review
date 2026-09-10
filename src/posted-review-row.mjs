@@ -835,7 +835,7 @@ export async function runQueuedReviewAdoptionPhase({
   // no-progress lane, which is what stops the same unadvanceable set from
   // re-consuming the budget on every tick. It now runs after lifecycle sync, so
   // stale terminal rows are cleaned before any per-PR hammer path can wait.
-  promoteStarvedNoProgressLaneLedgers(rootDir, { logger });
+  await promoteStarvedNoProgressLaneLedgers(rootDir, { logger });
 
   await runPostedReviewHandlersFairlyImpl({
     handlers: postedReviewHandlers,

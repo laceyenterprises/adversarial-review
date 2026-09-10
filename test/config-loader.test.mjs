@@ -5725,7 +5725,7 @@ test('AMA getMergeAuthorityConfig returns the camelCased subtree with defaults i
     assert.equal(ma.branchProtection.required, true);
     assert.equal(ma.autoHammerOnEligibilityMiss, false);
     assert.deepEqual(ma.requiredCheckContexts, []);
-    assert.equal(ma.dispatchTimeoutMs, 300000);
+    assert.equal(ma.dispatchTimeoutMs, 600000);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

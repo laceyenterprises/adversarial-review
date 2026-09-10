@@ -1605,7 +1605,8 @@ function schemaV1() {
         },
       },
       // CFG-01 multi-loader parity: Python owns the global `op.vault` key (the
-      // single source of truth for the 1Password vault in op://<vault>/... refs).
+      // single source of truth for the 1Password vault in op://<vault>/... refs)
+      // and the fork-overridable vault allowlist / release signing ref.
       // The adversarial-review loader does not consume it, but the top-level
       // schema is __strict, so it must be mirrored here or strict validation
       // rejects checked-in config.yaml ("op: unknown key"). Keep in lockstep with
@@ -1617,6 +1618,15 @@ function schemaV1() {
           vault: {
             __type: TYPE_STRING,
             __default: 'Cliovault',
+          },
+          known_vaults: {
+            __type: TYPE_LIST,
+            __item: { __type: TYPE_STRING },
+            __default: ['Cliovault', 'mem423y7ewrymvxv4ibh34zdk4', 'Personal'],
+          },
+          release_signing_private_key_ref: {
+            __type: TYPE_STRING,
+            __default: 'op://Cliovault/release-signing/private-key',
           },
         },
       },
@@ -3690,6 +3700,14 @@ export const ENV_ALIASES = {
   },
   'op.vault': {
     canonical: 'AGENT_OS_OP_VAULT',
+    aliases: [],
+  },
+  'op.known_vaults': {
+    canonical: 'AGENT_OS_OP_KNOWN_VAULTS',
+    aliases: [],
+  },
+  'op.release_signing_private_key_ref': {
+    canonical: 'AGENT_OS_OP_RELEASE_SIGNING_PRIVATE_KEY_REF',
     aliases: [],
   },
   'host.name': {

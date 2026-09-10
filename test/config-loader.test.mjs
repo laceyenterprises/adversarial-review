@@ -2366,7 +2366,7 @@ test('config.local.yaml tolerates unknown nested main_catchup keys and reads mir
   }
 });
 
-test('top-level config.yaml accepts mirrored op.vault and rejects unknown nested op keys', () => {
+test('top-level config.yaml accepts mirrored op keys and rejects unknown nested op keys', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -2374,17 +2374,34 @@ test('top-level config.yaml accepts mirrored op.vault and rejects unknown nested
       version: 1
       op:
         vault: OpsVault
+        known_vaults:
+          - OpsVault
+          - BackupVault
+        release_signing_private_key_ref: op://OpsVault/release-signing/private-key
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(cfg.get('op.vault'), 'OpsVault');
+    assert.deepEqual(cfg.get('op.known_vaults'), ['OpsVault', 'BackupVault']);
+    assert.equal(
+      cfg.get('op.release_signing_private_key_ref'),
+      'op://OpsVault/release-signing/private-key',
+    );
 
     const envCfg = loadConfig({
       topPath: top,
       env: {
         AGENT_OS_OP_VAULT: 'EnvOpsVault',
+        AGENT_OS_OP_KNOWN_VAULTS: 'EnvOpsVault,EnvBackupVault',
+        AGENT_OS_OP_RELEASE_SIGNING_PRIVATE_KEY_REF:
+          'op://EnvOpsVault/release-signing/private-key',
       },
     });
     assert.equal(envCfg.get('op.vault'), 'EnvOpsVault');
+    assert.deepEqual(envCfg.get('op.known_vaults'), ['EnvOpsVault', 'EnvBackupVault']);
+    assert.equal(
+      envCfg.get('op.release_signing_private_key_ref'),
+      'op://EnvOpsVault/release-signing/private-key',
+    );
     assert.equal(
       envCfg.resolutionTrace('op.vault').at(-1).source,
       'env:AGENT_OS_OP_VAULT',
@@ -2427,11 +2444,19 @@ test('config.local.yaml tolerates unknown nested op keys and reads mirrored vaul
         hq: /from-local
       op:
         vault: LocalOpsVault
+        known_vaults:
+          - LocalOpsVault
+        release_signing_private_key_ref: op://LocalOpsVault/release-signing/private-key
         account: example
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(cfg.get('roots.hq'), '/from-local');
     assert.equal(cfg.get('op.vault'), 'LocalOpsVault');
+    assert.deepEqual(cfg.get('op.known_vaults'), ['LocalOpsVault']);
+    assert.equal(
+      cfg.get('op.release_signing_private_key_ref'),
+      'op://LocalOpsVault/release-signing/private-key',
+    );
     assert.equal(cfg.get('op.account'), null);
   } finally {
     rmSync(tmp, { recursive: true, force: true });

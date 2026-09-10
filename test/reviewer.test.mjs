@@ -39,8 +39,10 @@ const {
   buildCodexReviewArgs,
   parseClaudeJsonOutput,
   parseCodexJsonTokenUsage,
+  prepareClaudeOAuthEnv,
   queueFollowUpForPostedReview,
   resolveClaudeLaunchctlUidForSpawn,
+  resolveClaudeReviewerOAuthTransport,
   LaunchctlSessionError,
   resolveCodexAuthPath,
   resolveCodexExecOverrides,
@@ -2798,6 +2800,109 @@ test('spawnClaude rejects invalid darwin uids', async () => {
     () => spawnClaude(['auth', 'status'], { platform: 'darwin', uid: null }),
     /Cannot resolve a non-root user uid/
   );
+});
+
+test('resolveClaudeReviewerOAuthTransport defaults to broker when the broker secret is configured', () => {
+  assert.equal(resolveClaudeReviewerOAuthTransport({
+    OAUTH_BROKER_SHARED_SECRET_FILE: '/run/secrets/oauth-broker',
+  }), 'broker');
+  assert.equal(resolveClaudeReviewerOAuthTransport({
+    OAUTH_BROKER_SHARED_SECRET_FILE: '/run/secrets/oauth-broker',
+    ADVERSARIAL_REVIEW_CLAUDE_REVIEWER_OAUTH_TRANSPORT: 'keychain',
+  }), 'keychain');
+  assert.equal(resolveClaudeReviewerOAuthTransport({}), 'keychain');
+});
+
+test('prepareClaudeOAuthEnv mints a broker bearer without logging or launchctl state', async () => {
+  const warnings = [];
+  const auth = await prepareClaudeOAuthEnv({
+    sourceEnv: {
+      ANTHROPIC_API_KEY: 'api-key-must-disappear',
+      OAUTH_BROKER_SHARED_SECRET_FILE: '/run/secrets/oauth-broker',
+    },
+    fetchImpl: async () => {
+      throw new Error('mint stub should not fetch');
+    },
+    mintClaudeCodeBrokerTokenImpl: async ({ env }) => {
+      assert.equal(env.ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT, 'broker');
+      assert.equal(env.ANTHROPIC_API_KEY, undefined);
+      return {
+        injected: true,
+        token: 'broker-oauth-token',
+        brokerUrl: 'http://127.0.0.1:4099',
+        expiresAt: '2026-09-10T17:53:16Z',
+      };
+    },
+    logger: { warn: (msg) => warnings.push(msg) },
+  });
+
+  assert.equal(auth.transport, 'broker');
+  assert.equal(auth.env.ANTHROPIC_AUTH_TOKEN, 'broker-oauth-token');
+  assert.equal(auth.env.ANTHROPIC_API_KEY, undefined);
+  assert.deepEqual(auth.stripped, ['ANTHROPIC_API_KEY']);
+  assert.equal(auth.brokerUrl, 'http://127.0.0.1:4099');
+  assert.deepEqual(warnings, []);
+});
+
+test('assertClaudeOAuth uses broker bearer headlessly on darwin', async () => {
+  const calls = [];
+  const auth = await assertClaudeOAuth({
+    platform: 'darwin',
+    existsSyncImpl: () => true,
+    resolveClaudeLaunchctlUidImpl: async () => {
+      throw new Error('launchctl uid should not be resolved in broker mode');
+    },
+    prepareClaudeOAuthEnvImpl: async () => ({
+      transport: 'broker',
+      env: { PATH: process.env.PATH, ANTHROPIC_AUTH_TOKEN: 'broker-oauth-token' },
+    }),
+    spawnClaudeImpl: async (args, options) => {
+      calls.push({ args, options });
+      return {
+        stdout: JSON.stringify({ loggedIn: true, authMethod: 'oauth_token', apiProvider: 'firstParty' }),
+        stderr: '',
+      };
+    },
+  });
+
+  assert.equal(auth.transport, 'broker');
+  assert.deepEqual(calls, [
+    {
+      args: ['auth', 'status', '--json'],
+      options: {
+        env: { PATH: process.env.PATH, ANTHROPIC_AUTH_TOKEN: 'broker-oauth-token' },
+        timeout: 60_000,
+        useLaunchctl: false,
+      },
+    },
+  ]);
+});
+
+test('reviewWithClaude reuses broker auth env and skips launchctl', async () => {
+  const calls = [];
+  const result = await reviewWithClaude('+diff\n', '', {
+    platform: 'darwin',
+    assertClaudeOAuthImpl: async () => ({
+      transport: 'broker',
+      env: { PATH: process.env.PATH, ANTHROPIC_AUTH_TOKEN: 'broker-oauth-token' },
+    }),
+    resolveClaudeLaunchctlUidImpl: async () => {
+      throw new Error('launchctl uid should not be resolved in broker mode');
+    },
+    spawnClaudeImpl: async (args, options) => {
+      calls.push({ args, options });
+      return {
+        stdout: JSON.stringify({ result: '## Verdict\nComment only', usage: {} }),
+        stderr: '',
+      };
+    },
+  });
+
+  assert.equal(result.reviewText, '## Verdict\nComment only');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.useLaunchctl, false);
+  assert.equal(calls[0].options.uid, undefined);
+  assert.equal(calls[0].options.env.ANTHROPIC_AUTH_TOKEN, 'broker-oauth-token');
 });
 
 test('spawnClaude classifies launchctl session failures separately from oauth failures', async () => {

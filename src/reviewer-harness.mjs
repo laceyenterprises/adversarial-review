@@ -46,6 +46,10 @@ import {
 } from './kernel/verdict.mjs';
 import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 import {
+  mintClaudeCodeRemediationBrokerToken,
+  resolveClaudeCodeOAuthTransport,
+} from './remediation-oauth-preflight.mjs';
+import {
   AGY_KEYCHAIN_ACCOUNT,
   AGY_KEYCHAIN_REMEDIATION,
   AGY_KEYCHAIN_SERVICE,
@@ -158,6 +162,17 @@ function resolveClaudeAuthProbeTimeoutMs(env = process.env) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 60_000;
 }
 
+function resolveClaudeReviewerOAuthTransport(env = process.env) {
+  const raw = String(
+    env.ADVERSARIAL_REVIEW_CLAUDE_REVIEWER_OAUTH_TRANSPORT ||
+    env.ADVERSARIAL_REVIEW_CLAUDE_MODEL_OAUTH_TRANSPORT ||
+    ''
+  ).trim().toLowerCase();
+  if (raw === 'broker') return 'broker';
+  if (raw === 'keychain') return 'keychain';
+  return resolveClaudeCodeOAuthTransport(env);
+}
+
 function findOnPath(binaryName, pathValue = process.env.PATH || '') {
   for (const dir of pathValue.split(':').filter(Boolean)) {
     const candidate = join(dir, binaryName);
@@ -226,12 +241,50 @@ async function withClaudeLaunchctlRetry(operation, {
   }
 }
 
+async function prepareClaudeOAuthEnv({
+  sourceEnv = process.env,
+  fetchImpl = globalThis.fetch,
+  mintClaudeCodeBrokerTokenImpl = mintClaudeCodeRemediationBrokerToken,
+  logger = console,
+} = {}) {
+  const { env, stripped } = scrubOAuthFallbackEnv(sourceEnv);
+  const transport = resolveClaudeReviewerOAuthTransport(env);
+  if (transport !== 'broker') {
+    return { env, stripped, transport: 'keychain' };
+  }
+
+  const brokerEnv = {
+    ...env,
+    ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT: 'broker',
+  };
+  const minted = await mintClaudeCodeBrokerTokenImpl({
+    env: brokerEnv,
+    fetchImpl,
+    log: logger,
+  });
+  const authEnv = { ...env };
+  if (minted?.token) {
+    authEnv.ANTHROPIC_AUTH_TOKEN = minted.token;
+  }
+  return {
+    env: authEnv,
+    stripped,
+    transport: 'broker',
+    tokenInjected: minted?.injected === true || Boolean(minted?.token),
+    brokerUrl: minted?.brokerUrl || null,
+    expiresAt: minted?.expiresAt || null,
+  };
+}
+
 async function assertClaudeOAuth({
   spawnClaudeImpl = spawnClaude,
   retryDelaysMs,
   sleepImpl,
   existsSyncImpl = existsSync,
   resolveClaudeLaunchctlUidImpl = resolveClaudeLaunchctlUidFromConfig,
+  prepareClaudeOAuthEnvImpl = prepareClaudeOAuthEnv,
+  fetchImpl = globalThis.fetch,
+  mintClaudeCodeBrokerTokenImpl = mintClaudeCodeRemediationBrokerToken,
   logger = console,
   platform = process.platform,
 } = {}) {
@@ -239,22 +292,30 @@ async function assertClaudeOAuth({
     throw new OAuthError('claude', `claude CLI not found at ${CLAUDE_CLI}`);
   }
 
-  const { env } = scrubOAuthFallbackEnv(process.env);
-  const claudeLaunchctlUid = await resolveClaudeLaunchctlUidForSpawn({
-    platform,
-    env,
-    resolveClaudeLaunchctlUidImpl,
+  const auth = await prepareClaudeOAuthEnvImpl({
+    sourceEnv: process.env,
+    fetchImpl,
+    mintClaudeCodeBrokerTokenImpl,
     logger,
   });
+  const { env } = auth;
+  const claudeLaunchctlUid = auth.transport === 'broker'
+    ? null
+    : await resolveClaudeLaunchctlUidForSpawn({
+      platform,
+      env,
+      resolveClaudeLaunchctlUidImpl,
+      logger,
+    });
 
   let stdout = '';
   let stderr = '';
   try {
     ({ stdout, stderr } = await withClaudeLaunchctlRetry(
-      () => spawnClaudeImpl(['auth', 'status'], {
+      () => spawnClaudeImpl(['auth', 'status', '--json'], {
         env,
         timeout: resolveClaudeAuthProbeTimeoutMs(env),
-        ...(claudeLaunchctlUid === null ? {} : { uid: claudeLaunchctlUid }),
+        ...(auth.transport === 'broker' ? { useLaunchctl: false } : { uid: claudeLaunchctlUid }),
       }),
       { retryDelaysMs, sleepImpl },
     ));
@@ -275,6 +336,8 @@ async function assertClaudeOAuth({
   if (text.includes('"loggedin": false') || text.includes('not logged in') || text.includes('login required')) {
     throw new OAuthError('claude', `Claude CLI reports not logged in: ${(stdout || stderr).trim()}`);
   }
+
+  return auth;
 }
 
 async function spawnClaude(args, options = {}) {
@@ -282,10 +345,11 @@ async function spawnClaude(args, options = {}) {
     execFileImpl = execFileAsync,
     platform = process.platform,
     uid = null,
+    useLaunchctl = true,
     ...execOptions
   } = options;
 
-  if (platform === 'darwin') {
+  if (platform === 'darwin' && useLaunchctl) {
     if (!Number.isInteger(uid) || uid <= 0) {
       throw new Error('Cannot resolve a non-root user uid for launchctl asuser');
     }
@@ -570,20 +634,25 @@ async function reviewWithClaude(diff, extraContext = '', {
   logger = console,
   platform = process.platform,
 } = {}) {
-  await assertClaudeOAuthImpl({ resolveClaudeLaunchctlUidImpl, logger, platform });
+  const auth = await assertClaudeOAuthImpl({ resolveClaudeLaunchctlUidImpl, logger, platform });
 
   const promptPrefix = buildReviewerPromptPrefix({ stage: promptStage });
   const prompt = buildReviewerPrompt({ promptPrefix, extraContext, diff });
 
   // Strip API key from env — Claude CLI falls back to OAuth when it's absent
-  const { env } = scrubOAuthFallbackEnv(process.env);
+  const env = auth?.env && typeof auth.env === 'object'
+    ? auth.env
+    : scrubOAuthFallbackEnv(process.env).env;
   const subprocessEnv = withReviewerSubprocessCwdEnv(env, reviewerSubprocessCwd);
-  const claudeLaunchctlUid = await resolveClaudeLaunchctlUidForSpawn({
-    platform,
-    env: subprocessEnv,
-    resolveClaudeLaunchctlUidImpl,
-    logger,
-  });
+  const authTransport = auth?.transport || resolveClaudeReviewerOAuthTransport(subprocessEnv);
+  const claudeLaunchctlUid = authTransport === 'broker'
+    ? null
+    : await resolveClaudeLaunchctlUidForSpawn({
+      platform,
+      env: subprocessEnv,
+      resolveClaudeLaunchctlUidImpl,
+      logger,
+    });
 
   let stdout, stderr;
   try {
@@ -593,7 +662,7 @@ async function reviewWithClaude(diff, extraContext = '', {
         cwd: reviewerSubprocessCwd,
         timeout: resolveReviewerTimeoutMs(subprocessEnv),
         maxBuffer: 10 * 1024 * 1024,
-        ...(claudeLaunchctlUid === null ? {} : { uid: claudeLaunchctlUid }),
+        ...(authTransport === 'broker' ? { useLaunchctl: false } : { uid: claudeLaunchctlUid }),
       }),
       { retryDelaysMs: launchctlRetryDelaysMs, sleepImpl },
     ));
@@ -2948,6 +3017,7 @@ const __test__ = {
   normalizeGeminiReviewerHostname,
   parseClaudeJsonOutput,
   parseCodexConfigLiteralString,
+  prepareClaudeOAuthEnv,
   previewText,
   purgeStaleGeminiReviewerSessionDirs,
   pushAgyChunk,
@@ -2973,6 +3043,7 @@ const __test__ = {
   resolveClaudeAuthProbeTimeoutMs,
   resolveClaudeCliPath,
   resolveClaudeLaunchctlUidForSpawn,
+  resolveClaudeReviewerOAuthTransport,
   resolveCodexAuthPath,
   resolveCodexCliPath,
   resolveCodexExecOverrides,
@@ -3024,6 +3095,7 @@ export {
   estimateTokensFromText,
   execFileWithTransientRetry,
   previewText,
+  prepareClaudeOAuthEnv,
   CLAUDE_CLI,
   CODEX_CLI,
   GEMINI_CLI,

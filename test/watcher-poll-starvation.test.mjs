@@ -1626,6 +1626,54 @@ test('RVHAND-10: starvation recovery caps promotion history in persistent ledger
   }
 });
 
+test('RVHAND-10: starvation recovery dedupes promotion history by promotion id', async () => {
+  const rootDir = tempRoot();
+  try {
+    const identity = { repo: REPO, prNumber: 6538 };
+    for (let i = 0; i < DEFAULT_NO_PROGRESS_LANE_CAP + 2; i += 1) {
+      recordNoProgressLaneRun(rootDir, identity, {
+        headSha: HEAD_A,
+        fingerprint: 'starved-clean-pr-history-dedupe',
+        now: `t${i}`,
+        logger: silentLogger,
+      });
+    }
+    const ledgerPath = noProgressLaneFilePath(rootDir, identity);
+    const doc = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+    doc.promotedFrom = {
+      noProgressTicks: 11,
+      lane: LANE_SLOW,
+      reason: 'scheduler-starvation-recovery',
+      promotedAt: 'previous-pass',
+      promotionId: 'same-promotion',
+    };
+    doc.promotionHistory = [{
+      promotionId: 'same-promotion',
+      promotedAt: 'previous-pass',
+      reason: 'scheduler-starvation-recovery',
+      lane: LANE_SLOW,
+      noProgressTicks: 11,
+    }];
+    writeFileSync(ledgerPath, `${JSON.stringify(doc, null, 2)}\n`);
+
+    const result = await promoteStarvedNoProgressLaneLedgers(rootDir, {
+      promotionId: 'next-promotion',
+      now: 'dedupe-recover',
+      logger: silentLogger,
+    });
+    const recovered = readNoProgressLane(rootDir, identity, { logger: silentLogger });
+
+    assert.equal(result.promoted, 1);
+    assert.equal(recovered.promotionHistory.length, 2);
+    assert.deepEqual(
+      recovered.promotionHistory.map((entry) => entry.promotionId),
+      ['same-promotion', 'next-promotion'],
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('operator-decision alert fires once after threshold, not every tick', async () => {
   const rootDir = tempRoot();
   try {

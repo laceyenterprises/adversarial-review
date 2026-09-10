@@ -324,13 +324,21 @@ function starvedPromotionMarkerPath(rootDir, promotionId = STARVED_SLOW_LANE_PRO
   return join(noProgressLaneDir(rootDir), `${sanitizePathSegment(promotionId)}.promotion.json`);
 }
 
+function promotionIdOf(entry) {
+  return typeof entry?.promotionId === 'string' && entry.promotionId.length > 0
+    ? entry.promotionId
+    : null;
+}
+
 function promotionHistoryWith(doc, nextPromotion) {
   const history = Array.isArray(doc?.promotionHistory)
     ? doc.promotionHistory.filter((entry) => entry && typeof entry === 'object')
     : [];
   if (doc?.promotedFrom && typeof doc.promotedFrom === 'object') {
-    const priorSerialized = JSON.stringify(doc.promotedFrom);
-    const alreadyRecorded = history.some((entry) => JSON.stringify(entry) === priorSerialized);
+    const priorPromotionId = promotionIdOf(doc.promotedFrom);
+    const alreadyRecorded = priorPromotionId
+      ? history.some((entry) => promotionIdOf(entry) === priorPromotionId)
+      : false;
     if (!alreadyRecorded) history.push(doc.promotedFrom);
   }
   history.push(nextPromotion);

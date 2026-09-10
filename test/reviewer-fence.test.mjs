@@ -459,7 +459,8 @@ test('postGitHubReview retries transient review-post transport errors without re
   try {
     const stateDir = path.join(rootDir, 'data');
     let brokerCalls = 0;
-    let ghCalls = 0;
+    let reviewListCalls = 0;
+    let reviewWriteCalls = 0;
     await withEnv({
       GH_CLAUDE_REVIEWER_TOKEN: 'ghs_stale_token',
       CLAUDE_REVIEWER_AUTH_VIA_BROKER: 'true',
@@ -471,9 +472,13 @@ test('postGitHubReview retries transient review-post transport errors without re
           177,
           'body',
           'GH_CLAUDE_REVIEWER_TOKEN',
-          async () => {
-            ghCalls += 1;
-            if (ghCalls === 1) {
+          async (_cmd, args = []) => {
+            if (args[0] === 'api' && args[1] === 'repos/laceyenterprises/adversarial-review/pulls/177/reviews') {
+              reviewListCalls += 1;
+              return { stdout: '[]' };
+            }
+            reviewWriteCalls += 1;
+            if (reviewWriteCalls === 1) {
               const err = new Error('socket hang up before review mutation');
               err.code = 'ECONNRESET';
               err.stderr = 'read ECONNRESET';
@@ -497,7 +502,8 @@ test('postGitHubReview retries transient review-post transport errors without re
       );
       assert.deepEqual(result, { reviewArtifact: null });
     });
-    assert.equal(ghCalls, 2);
+    assert.equal(reviewWriteCalls, 2);
+    assert.equal(reviewListCalls, 1);
     assert.equal(brokerCalls, 0);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

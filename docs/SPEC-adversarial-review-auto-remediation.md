@@ -614,7 +614,8 @@ spawning an unauthenticated worker.
 Claude reviewer model auth uses the same credential contract. When
 `ADVERSARIAL_REVIEW_CLAUDE_REVIEWER_OAUTH_TRANSPORT` or
 `ADVERSARIAL_REVIEW_CLAUDE_MODEL_OAUTH_TRANSPORT` is set to `broker` or
-`keychain`, that explicit value wins. Otherwise the existing
+`keychain`, that explicit value wins; any other non-empty explicit value is a
+configuration error and fails closed before route auto-detection. Otherwise the existing
 `CLAUDE_REVIEWER_AUTH_VIA_BROKER` role flag governs both the reviewer GitHub App
 token and the Claude model credential: `true` selects broker bearer injection,
 while `false` selects keychain/`launchctl asuser`. If the role flag is absent,
@@ -624,6 +625,10 @@ reviewer spawns bypass `launchctl asuser` entirely; `launchctl-bootstrap`
 therefore describes only keychain-mode Claude reviewer failures on broker hosts.
 Broker bearers handed to the reviewer subprocess must remain valid for the
 configured reviewer timeout plus post slack before the subprocess is spawned.
+The subprocess environment must not receive `OAUTH_BROKER_SHARED_SECRET` or
+`OAUTH_BROKER_SHARED_SECRET_FILE`; those mint credentials are consumed only in
+the parent reviewer process before the short-lived `ANTHROPIC_AUTH_TOKEN` is
+handed off.
 
 The broker shared secret is a fleet-wide credential and the remediation worker
 executes model-generated payloads, so the claude-code spawn env withholds both

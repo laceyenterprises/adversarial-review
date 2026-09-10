@@ -2820,6 +2820,20 @@ test('resolveClaudeReviewerOAuthTransport defaults to broker when the broker sec
     CLAUDE_REVIEWER_AUTH_VIA_BROKER: 'true',
   }), 'broker');
   assert.equal(resolveClaudeReviewerOAuthTransport({}), 'keychain');
+  assert.throws(
+    () => resolveClaudeReviewerOAuthTransport({
+      ADVERSARIAL_REVIEW_CLAUDE_REVIEWER_OAUTH_TRANSPORT: 'brokre',
+      CLAUDE_REVIEWER_AUTH_VIA_BROKER: 'true',
+    }),
+    /ADVERSARIAL_REVIEW_CLAUDE_REVIEWER_OAUTH_TRANSPORT must be broker or keychain/,
+  );
+  assert.throws(
+    () => resolveClaudeReviewerOAuthTransport({
+      ADVERSARIAL_REVIEW_CLAUDE_MODEL_OAUTH_TRANSPORT: 'login',
+      OAUTH_BROKER_SHARED_SECRET_FILE: '/run/secrets/oauth-broker',
+    }),
+    /ADVERSARIAL_REVIEW_CLAUDE_MODEL_OAUTH_TRANSPORT must be broker or keychain/,
+  );
 });
 
 test('prepareClaudeOAuthEnv mints a broker bearer without logging or launchctl state', async () => {
@@ -2828,6 +2842,7 @@ test('prepareClaudeOAuthEnv mints a broker bearer without logging or launchctl s
     sourceEnv: {
       ANTHROPIC_API_KEY: 'api-key-must-disappear',
       ANTHROPIC_AUTH_TOKEN: 'ambient-bearer-must-disappear',
+      OAUTH_BROKER_SHARED_SECRET: 'inline-secret-must-not-leak',
       OAUTH_BROKER_SHARED_SECRET_FILE: '/run/secrets/oauth-broker',
     },
     fetchImpl: async () => {
@@ -2853,6 +2868,8 @@ test('prepareClaudeOAuthEnv mints a broker bearer without logging or launchctl s
   assert.equal(auth.transport, 'broker');
   assert.equal(auth.env.ANTHROPIC_AUTH_TOKEN, 'broker-oauth-token');
   assert.equal(auth.env.ANTHROPIC_API_KEY, undefined);
+  assert.equal(auth.env.OAUTH_BROKER_SHARED_SECRET, undefined);
+  assert.equal(auth.env.OAUTH_BROKER_SHARED_SECRET_FILE, undefined);
   assert.deepEqual(auth.stripped, ['ANTHROPIC_API_KEY']);
   assert.equal(auth.brokerUrl, 'http://127.0.0.1:4099');
   assert.deepEqual(warnings, []);

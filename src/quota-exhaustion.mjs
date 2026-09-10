@@ -141,6 +141,7 @@ function localYearInTimeZone(base, timeZone) {
 // (UTC) or null. Handles the two known phrasings:
 //   codex:  "try again at Jun 17th, 2026 5:39 PM"
 //   claude: "resets at 5:39 PM" / "resets at 2026-06-17T17:39:00Z"
+//   gemini: "Resets in 8h50m23s"
 // A missing/unparseable reset is not fatal — callers fall back to a fixed
 // quota backoff. `nowMs` is injectable for deterministic tests.
 function parseQuotaResetAt(text, { nowMs = null } = {}) {
@@ -186,6 +187,21 @@ function parseQuotaResetAt(text, { nowMs = null } = {}) {
       }, timeZone);
     }
     if (d && !Number.isNaN(d.getTime())) return d.toISOString();
+  }
+  const relative = t.match(/resets?\s+in\s+(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?\b/i);
+  if (relative && (relative[1] || relative[2] || relative[3])) {
+    const hours = Number(relative[1] || 0);
+    const minutes = Number(relative[2] || 0);
+    const seconds = Number(relative[3] || 0);
+    if (
+      Number.isFinite(hours) && hours >= 0 &&
+      Number.isFinite(minutes) && minutes >= 0 &&
+      Number.isFinite(seconds) && seconds >= 0
+    ) {
+      const base = baseDateFromNowMs(nowMs, { fallbackMissingToNow: true, fallbackInvalidToNow: true });
+      const offsetMs = ((hours * 60 + minutes) * 60 + seconds) * 1000;
+      if (base && offsetMs > 0) return new Date(base.getTime() + offsetMs).toISOString();
+    }
   }
   // Claude often prints only a local clock time for rolling caps:
   // "resets at 5:39 PM". Anchor that to today's local date, then roll forward

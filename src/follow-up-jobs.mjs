@@ -120,6 +120,11 @@ const RETRIGGERABLE_STOP_CODES = Object.freeze([
   // consume-time `lifecycleStopDecision` check does not re-fire the
   // same stop on the next tick (round-1 review B1).
   'stale-review-head',
+  // The pending job was released before spawn because a newer PR head already
+  // superseded the reviewed revision. This is the same operator-retriggerable
+  // stale-head recovery shape as `stale-review-head`; the requeue path refreshes
+  // or clears `revisionRef` before the next consume tick.
+  'revision-superseded',
   // The stuck-claim sweep reclaims orphaned in-progress jobs into a
   // durable stop state. That reclamation is a transient recovery path,
   // so the normal operator retrigger surfaces must be able to requeue it.
@@ -2774,17 +2779,20 @@ function requeueFollowUpJobForNextRound({
   //   - Caller-supplied head (label handler) → write that. The operator
   //     gesture is "remediate against this head" so it's authoritative.
   //   - Caller didn't supply a head AND the job was stopped with
-  //     `stale-review-head` → clear `revisionRef` so the consume-time
-  //     `jobRevisionRef && currentHeadSha && jobRevisionRef !== currentHeadSha`
-  //     check short-circuits on the next tick. Otherwise the operator
-  //     gesture is silently inert: the job flips to `pending`, then the
+  //     `stale-review-head` / `revision-superseded` → clear `revisionRef` so
+  //     the consume-time stale-head check short-circuits on the next tick.
+  //     Otherwise the operator gesture is silently inert: the job flips to
+  //     `pending`, then the
   //     next consume tick re-fires the same stale-head stop within ≤120s.
   //   - Otherwise → preserve the existing revisionRef unchanged.
   const previousStopCode = currentJob?.remediationPlan?.stop?.code || null;
   let nextRevisionRef;
   if (typeof revisionRef === 'string' && revisionRef.trim()) {
     nextRevisionRef = revisionRef.trim();
-  } else if (previousStopCode === 'stale-review-head') {
+  } else if (
+    previousStopCode === 'stale-review-head' ||
+    previousStopCode === 'revision-superseded'
+  ) {
     nextRevisionRef = null;
   } else {
     nextRevisionRef = currentJob?.revisionRef ?? null;

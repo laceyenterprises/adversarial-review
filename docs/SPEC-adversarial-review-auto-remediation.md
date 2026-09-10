@@ -611,6 +611,20 @@ provider, wrong-provider echo) fails over immediately without burning the
 ladder. When every endpoint is exhausted the mint fails closed rather than
 spawning an unauthenticated worker.
 
+Claude reviewer model auth uses the same credential contract. When
+`ADVERSARIAL_REVIEW_CLAUDE_REVIEWER_OAUTH_TRANSPORT` or
+`ADVERSARIAL_REVIEW_CLAUDE_MODEL_OAUTH_TRANSPORT` is set to `broker` or
+`keychain`, that explicit value wins. Otherwise the existing
+`CLAUDE_REVIEWER_AUTH_VIA_BROKER` role flag governs both the reviewer GitHub App
+token and the Claude model credential: `true` selects broker bearer injection,
+while `false` selects keychain/`launchctl asuser`. If the role flag is absent,
+the remediation auto-detect rule applies so broker-configured fleet hosts use
+broker auth and standalone installs keep keychain auth. Broker-mode Claude
+reviewer spawns bypass `launchctl asuser` entirely; `launchctl-bootstrap`
+therefore describes only keychain-mode Claude reviewer failures on broker hosts.
+Broker bearers handed to the reviewer subprocess must remain valid for the
+configured reviewer timeout plus post slack before the subprocess is spawned.
+
 The broker shared secret is a fleet-wide credential and the remediation worker
 executes model-generated payloads, so the claude-code spawn env withholds both
 `OAUTH_BROKER_SHARED_SECRET` and `OAUTH_BROKER_SHARED_SECRET_FILE` by default.
@@ -1652,6 +1666,9 @@ includes:
 - `max-rounds-reached` — another round would exceed the stored cap.
 - `stale-heartbeat` — the stuck-claim sweep reclaimed an orphaned in-progress
   claim after liveness went stale.
+- `revision-superseded` — pending-only release: a queued job was created for an
+  older reviewed revision and a newer PR head is already live before worker
+  spawn.
 - `operator-merged-pr` — the PR merged before consume or reconcile could
   advance the loop.
 - `operator-closed-pr` — the PR closed unmerged before consume or reconcile
@@ -1666,6 +1683,12 @@ and uses the newest observation as the liveness anchor; file mtime is only the
 legacy fallback when no valid timestamp field exists. A reclaimed job remains
 operator-retriggerable through the normal CLI or
 `retrigger-remediation` label flow after inspection.
+
+`revision-superseded` is the pending-job sibling of `stale-review-head` and is
+operator-retriggerable through the same CLI or `retrigger-remediation` label
+flow. A label-triggered requeue records the label event's current head as the new
+`revisionRef`; a CLI requeue without current-head context clears `revisionRef`
+so the consume-time stale-head guard cannot immediately fire again.
 
 `stale-review-head` is intentionally a pre-spawn stale-job signal, not a
 post-spawn invariant. Reconcile must not emit it merely because the remediation

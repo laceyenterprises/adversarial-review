@@ -56,13 +56,12 @@
 // the production 5m cadence: generous enough that a busy-but-productive tick is
 // never cut short, tight enough that discovery cadence degrades to ~10m in the
 // worst case instead of the 40m+ the unbounded loop actually produced. Not
-// derived from `pollIntervalMs` because this module sits below config. The
-// effective budget still floors to enough handler capacity so raising the
-// per-handler timeout cannot collapse the phase to a degenerate one-handler
-// window.
+// derived from `pollIntervalMs` because this module sits below config. Keep this
+// as the hard default even when the handler timeout is longer; production once
+// carried a 30m override and fresh PR discovery stalled.
 export const DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS = 10 * 60 * 1000;
 export const DEFAULT_POSTED_REVIEW_PHASE_HANDLER_CAPACITY = 3;
-export const DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_HANDLER_CAPACITY = 3;
+export const DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_HANDLER_CAPACITY = 2;
 export const DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT = 2;
 export const DEFAULT_POSTED_REVIEW_HANDLER_HEADROOM_MS = 5 * 1000;
 
@@ -86,7 +85,8 @@ export const DEFAULT_POSTED_REVIEW_HANDLER_HEADROOM_MS = 5 * 1000;
 // promotes it, and the no-progress lane slows repeatedly unproductive PRs.
 export const DEFAULT_POSTED_REVIEW_HANDLER_TIMEOUT_MS = 3 * 60 * 1000;
 export const DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS =
-  DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS;
+  DEFAULT_POSTED_REVIEW_HANDLER_TIMEOUT_MS *
+  DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_HANDLER_CAPACITY;
 
 function parsePositiveMs(value, fallback) {
   const numeric = Number(value);
@@ -94,14 +94,11 @@ function parsePositiveMs(value, fallback) {
 }
 
 export function resolvePostedReviewPhaseBudgetMs(env = process.env) {
-  const handlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs(env);
-  const capacityBudgetMs = handlerTimeoutMs * DEFAULT_POSTED_REVIEW_PHASE_HANDLER_CAPACITY;
-  const fallbackBudgetMs = Math.max(DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS, capacityBudgetMs);
   const configured = env?.ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS;
   if (configured !== undefined && configured !== null && configured !== '') {
-    return parsePositiveMs(configured, fallbackBudgetMs);
+    return parsePositiveMs(configured, DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS);
   }
-  return fallbackBudgetMs;
+  return DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS;
 }
 
 export function resolvePostedReviewReviewerPressurePhaseBudgetMs(

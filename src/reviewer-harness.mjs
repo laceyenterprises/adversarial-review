@@ -49,6 +49,7 @@ import {
   mintClaudeCodeRemediationBrokerToken,
   resolveClaudeCodeOAuthTransport,
 } from './remediation-oauth-preflight.mjs';
+import { REVIEWER_TOKEN_POST_SLACK_MS } from './reviewer-broker-refresh.mjs';
 import {
   AGY_KEYCHAIN_ACCOUNT,
   AGY_KEYCHAIN_REMEDIATION,
@@ -170,6 +171,9 @@ function resolveClaudeReviewerOAuthTransport(env = process.env) {
   ).trim().toLowerCase();
   if (raw === 'broker') return 'broker';
   if (raw === 'keychain') return 'keychain';
+  const roleFlag = String(env.CLAUDE_REVIEWER_AUTH_VIA_BROKER ?? '').trim().toLowerCase();
+  if (roleFlag === 'true') return 'broker';
+  if (['false', '0', 'no', 'off', 'keychain'].includes(roleFlag)) return 'keychain';
   return resolveClaudeCodeOAuthTransport(env);
 }
 
@@ -246,6 +250,9 @@ async function prepareClaudeOAuthEnv({
   fetchImpl = globalThis.fetch,
   mintClaudeCodeBrokerTokenImpl = mintClaudeCodeRemediationBrokerToken,
   logger = console,
+  nowMs = Date.now(),
+  reviewerTimeoutMs = null,
+  postSlackMs = REVIEWER_TOKEN_POST_SLACK_MS,
 } = {}) {
   const { env, stripped } = scrubOAuthFallbackEnv(sourceEnv);
   const transport = resolveClaudeReviewerOAuthTransport(env);
@@ -266,6 +273,22 @@ async function prepareClaudeOAuthEnv({
   if (minted?.token) {
     authEnv.ANTHROPIC_AUTH_TOKEN = minted.token;
   }
+  if (!String(authEnv.ANTHROPIC_AUTH_TOKEN || '').trim()) {
+    throw new OAuthError('claude', 'broker Claude reviewer token mint returned no ANTHROPIC_AUTH_TOKEN bearer');
+  }
+  if (minted?.token) {
+    assertClaudeBrokerTokenHandoffLifetime({
+      expiresAt: minted.expiresAt,
+      env: authEnv,
+      nowMs,
+      reviewerTimeoutMs,
+      postSlackMs,
+    });
+    logger?.info?.(
+      `[reviewer] Claude reviewer broker token prepared for subprocess handoff ` +
+      `(broker_url=${minted?.brokerUrl || 'unknown'} expires_at=${minted?.expiresAt || 'unknown'})`
+    );
+  }
   return {
     env: authEnv,
     stripped,
@@ -274,6 +297,49 @@ async function prepareClaudeOAuthEnv({
     brokerUrl: minted?.brokerUrl || null,
     expiresAt: minted?.expiresAt || null,
   };
+}
+
+function assertClaudeBrokerTokenHandoffLifetime({
+  expiresAt,
+  env = process.env,
+  nowMs = Date.now(),
+  reviewerTimeoutMs = null,
+  postSlackMs = REVIEWER_TOKEN_POST_SLACK_MS,
+} = {}) {
+  const expiresAtMs = Date.parse(String(expiresAt || ''));
+  if (!Number.isFinite(expiresAtMs)) {
+    throw new OAuthError('claude', 'broker Claude reviewer token response missing parseable expiresAt');
+  }
+  const requiredLifetimeMs =
+    (reviewerTimeoutMs ?? resolveReviewerTimeoutMs(env)) + postSlackMs;
+  const remainingMs = expiresAtMs - nowMs;
+  if (remainingMs <= requiredLifetimeMs) {
+    throw new OAuthError(
+      'claude',
+      `broker Claude reviewer token expires too soon for subprocess handoff: ` +
+      `remaining=${remainingMs}ms minimum=${requiredLifetimeMs}ms`
+    );
+  }
+  return { expiresAtMs, remainingMs, requiredLifetimeMs };
+}
+
+function claudeAuthOutputIndicatesLoggedOut(stdout = '', stderr = '', message = '') {
+  const raw = String(stdout || '').trim();
+  if (raw) {
+    try {
+      const doc = JSON.parse(raw);
+      if (doc && typeof doc === 'object' && doc.loggedIn === false) {
+        return true;
+      }
+    } catch {
+      // Fall through to substring checks for non-JSON CLI output.
+    }
+  }
+  const text = `${message || ''}\n${stdout || ''}\n${stderr || ''}`.toLowerCase();
+  return /"loggedin"\s*:\s*false/.test(text)
+    || text.includes('not logged in')
+    || text.includes('login required')
+    || text.includes('unauthorized');
 }
 
 async function assertClaudeOAuth({
@@ -325,15 +391,13 @@ async function assertClaudeOAuth({
     }
     stdout = err.stdout || '';
     stderr = err.stderr || '';
-    const msg = `${err.message || ''}\n${stdout}\n${stderr}`.toLowerCase();
-    if (msg.includes('"loggedin": false') || msg.includes('not logged in') || msg.includes('login required') || msg.includes('unauthorized')) {
+    if (claudeAuthOutputIndicatesLoggedOut(stdout, stderr, err.message || '')) {
       throw new OAuthError('claude', `Claude CLI reports not logged in: ${(stdout || stderr || err.message).trim()}`);
     }
     throw new OAuthError('claude', `Claude auth probe failed: ${(stdout || stderr || err.message).trim()}`);
   }
 
-  const text = `${stdout || ''}\n${stderr || ''}`.toLowerCase();
-  if (text.includes('"loggedin": false') || text.includes('not logged in') || text.includes('login required')) {
+  if (claudeAuthOutputIndicatesLoggedOut(stdout, stderr)) {
     throw new OAuthError('claude', `Claude CLI reports not logged in: ${(stdout || stderr).trim()}`);
   }
 
@@ -640,11 +704,13 @@ async function reviewWithClaude(diff, extraContext = '', {
   const prompt = buildReviewerPrompt({ promptPrefix, extraContext, diff });
 
   // Strip API key from env — Claude CLI falls back to OAuth when it's absent
-  const env = auth?.env && typeof auth.env === 'object'
-    ? auth.env
-    : scrubOAuthFallbackEnv(process.env).env;
+  const hasAuthEnv = auth?.env && typeof auth.env === 'object';
+  if (auth?.transport === 'broker' && (!hasAuthEnv || !String(auth.env.ANTHROPIC_AUTH_TOKEN || '').trim())) {
+    throw new OAuthError('claude', 'broker Claude reviewer auth did not return an ANTHROPIC_AUTH_TOKEN-bearing env');
+  }
+  const env = hasAuthEnv ? auth.env : scrubOAuthFallbackEnv(process.env).env;
   const subprocessEnv = withReviewerSubprocessCwdEnv(env, reviewerSubprocessCwd);
-  const authTransport = auth?.transport || resolveClaudeReviewerOAuthTransport(subprocessEnv);
+  const authTransport = hasAuthEnv ? (auth?.transport || resolveClaudeReviewerOAuthTransport(subprocessEnv)) : 'keychain';
   const claudeLaunchctlUid = authTransport === 'broker'
     ? null
     : await resolveClaudeLaunchctlUidForSpawn({
@@ -2966,6 +3032,7 @@ const __test__ = {
   agyPromptBytes,
   assertAgyPromptFitsArgv,
   assertAgyReviewerAuth,
+  assertClaudeBrokerTokenHandoffLifetime,
   assertClaudeOAuth,
   assertCodexAuthReadable,
   assertCodexOAuth,
@@ -2981,6 +3048,7 @@ const __test__ = {
   checkoutGeminiCredentialFromBrokerOnce,
   chooseAgyOversizedCrossModelRoute,
   cleanupGeminiAntigravityResources,
+  claudeAuthOutputIndicatesLoggedOut,
   configureGeminiSignalReleaseForTest,
   createGeminiReviewerSessionDir,
   currentGeminiReviewerHostname,

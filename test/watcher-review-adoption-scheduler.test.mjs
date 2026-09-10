@@ -256,12 +256,12 @@ test('watcher caps posted-review phase budget when reviewer dispatch is under pr
     'lifecycle-cleanup',
     'lifecycle-sync',
     'drain:posted-review handlers',
-    'posted-budget:540000',
+    'posted-budget:360000',
     'dag-autowalk',
     'merge-closeouts',
   ]);
   assert.equal(fairnessCalls.length, 1);
-  assert.equal(fairnessCalls[0].budgetMs, 540_000);
+  assert.equal(fairnessCalls[0].budgetMs, 360_000);
   assert.equal(fairnessCalls[0].handlers.length, 1);
   assert.equal(warnings.length, 2);
   assert.match(warnings[0], /raised to handler-capacity floor/);

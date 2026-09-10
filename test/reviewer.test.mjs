@@ -35,8 +35,10 @@ const {
   CLAUDE_STRIPPED_ENV_VARS,
   ENV_BIN,
   LAUNCHCTL,
+  assertClaudeBrokerTokenHandoffLifetime,
   buildClaudeReviewArgs,
   buildCodexReviewArgs,
+  claudeAuthOutputIndicatesLoggedOut,
   parseClaudeJsonOutput,
   parseCodexJsonTokenUsage,
   prepareClaudeOAuthEnv,
@@ -2810,6 +2812,13 @@ test('resolveClaudeReviewerOAuthTransport defaults to broker when the broker sec
     OAUTH_BROKER_SHARED_SECRET_FILE: '/run/secrets/oauth-broker',
     ADVERSARIAL_REVIEW_CLAUDE_REVIEWER_OAUTH_TRANSPORT: 'keychain',
   }), 'keychain');
+  assert.equal(resolveClaudeReviewerOAuthTransport({
+    OAUTH_BROKER_SHARED_SECRET_FILE: '/run/secrets/oauth-broker',
+    CLAUDE_REVIEWER_AUTH_VIA_BROKER: 'false',
+  }), 'keychain');
+  assert.equal(resolveClaudeReviewerOAuthTransport({
+    CLAUDE_REVIEWER_AUTH_VIA_BROKER: 'true',
+  }), 'broker');
   assert.equal(resolveClaudeReviewerOAuthTransport({}), 'keychain');
 });
 
@@ -2834,6 +2843,9 @@ test('prepareClaudeOAuthEnv mints a broker bearer without logging or launchctl s
       };
     },
     logger: { warn: (msg) => warnings.push(msg) },
+    nowMs: Date.parse('2026-09-10T17:20:00Z'),
+    reviewerTimeoutMs: 20 * 60 * 1000,
+    postSlackMs: 2 * 60 * 1000,
   });
 
   assert.equal(auth.transport, 'broker');
@@ -2842,6 +2854,62 @@ test('prepareClaudeOAuthEnv mints a broker bearer without logging or launchctl s
   assert.deepEqual(auth.stripped, ['ANTHROPIC_API_KEY']);
   assert.equal(auth.brokerUrl, 'http://127.0.0.1:4099');
   assert.deepEqual(warnings, []);
+});
+
+test('prepareClaudeOAuthEnv rejects broker bearers too short for reviewer handoff', async () => {
+  await assert.rejects(
+    () => prepareClaudeOAuthEnv({
+      sourceEnv: {
+        OAUTH_BROKER_SHARED_SECRET_FILE: '/run/secrets/oauth-broker',
+      },
+      mintClaudeCodeBrokerTokenImpl: async () => ({
+        injected: true,
+        token: 'short-lived-broker-token',
+        brokerUrl: 'http://127.0.0.1:4099',
+        expiresAt: '2026-09-10T17:30:00Z',
+      }),
+      nowMs: Date.parse('2026-09-10T17:20:00Z'),
+      reviewerTimeoutMs: 20 * 60 * 1000,
+      postSlackMs: 2 * 60 * 1000,
+    }),
+    /expires too soon for subprocess handoff/,
+  );
+  assert.deepEqual(
+    assertClaudeBrokerTokenHandoffLifetime({
+      expiresAt: '2026-09-10T18:00:00Z',
+      nowMs: Date.parse('2026-09-10T17:20:00Z'),
+      reviewerTimeoutMs: 20 * 60 * 1000,
+      postSlackMs: 2 * 60 * 1000,
+    }),
+    {
+      expiresAtMs: Date.parse('2026-09-10T18:00:00Z'),
+      remainingMs: 40 * 60 * 1000,
+      requiredLifetimeMs: 22 * 60 * 1000,
+    },
+  );
+});
+
+test('assertClaudeOAuth detects compact logged-out JSON from auth status', async () => {
+  assert.equal(
+    claudeAuthOutputIndicatesLoggedOut(JSON.stringify({ loggedIn: false, authMethod: 'none' })),
+    true,
+  );
+  await assert.rejects(
+    () => assertClaudeOAuth({
+      platform: 'darwin',
+      existsSyncImpl: () => true,
+      resolveClaudeLaunchctlUidImpl: async () => 501,
+      prepareClaudeOAuthEnvImpl: async () => ({
+        transport: 'keychain',
+        env: { PATH: process.env.PATH },
+      }),
+      spawnClaudeImpl: async () => ({
+        stdout: JSON.stringify({ loggedIn: false, authMethod: 'none' }),
+        stderr: '',
+      }),
+    }),
+    /Claude CLI reports not logged in/,
+  );
 });
 
 test('assertClaudeOAuth uses broker bearer headlessly on darwin', async () => {
@@ -2903,6 +2971,19 @@ test('reviewWithClaude reuses broker auth env and skips launchctl', async () => 
   assert.equal(calls[0].options.useLaunchctl, false);
   assert.equal(calls[0].options.uid, undefined);
   assert.equal(calls[0].options.env.ANTHROPIC_AUTH_TOKEN, 'broker-oauth-token');
+});
+
+test('reviewWithClaude refuses broker transport without a bearer env', async () => {
+  await assert.rejects(
+    () => reviewWithClaude('+diff\n', '', {
+      platform: 'darwin',
+      assertClaudeOAuthImpl: async () => ({ transport: 'broker' }),
+      spawnClaudeImpl: async () => {
+        throw new Error('spawn must not run without a broker bearer');
+      },
+    }),
+    /did not return an ANTHROPIC_AUTH_TOKEN-bearing env/,
+  );
 });
 
 test('spawnClaude classifies launchctl session failures separately from oauth failures', async () => {

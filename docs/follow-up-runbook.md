@@ -704,6 +704,7 @@ The loop is intentionally capped and explicit. A job moves to `data/follow-up-jo
 - `operator-stop`
 - `no-progress`
 - `max-rounds-reached`
+- `revision-superseded`
 - `stale-heartbeat`
 - `stale-review-head`
 
@@ -712,6 +713,8 @@ The loop is intentionally capped and explicit. A job moves to `data/follow-up-jo
 `max-rounds-reached` means another round would exceed the stored `remediationPlan.maxRounds` cap.
 
 `stale-heartbeat` means the stuck-claim sweep reclaimed an orphaned in-progress job after daemon-observed liveness went stale. The sweep evaluates valid `lastWorkerArtifactProgressAt`, `lastHeartbeatAt`, worker `spawnedAt`, and `claimedAt` timestamps and uses the newest observation as the liveness anchor; file mtime is only the legacy fallback when no valid timestamp field exists. After the stale retry budget is exhausted, the sweep posts the owed terminal comment while the job is still in `in-progress/` and moves the job to `stopped/` only after that delivery succeeds; delivery failures leave the in-progress claim recoverable for a later sweep. This is a transient recovery stop, not a terminal business state, so `stale-heartbeat` is operator-retriggerable through the normal `retrigger-remediation` label or CLI requeue path after inspection.
+
+`revision-superseded` means a pending follow-up job was released before worker spawn because it was created for an older reviewed head SHA and the live PR already moved to a newer head. It is operator-retriggerable; label-triggered requeues write the label event's current head into `revisionRef`, and CLI requeues without head context clear `revisionRef` so the stale-head guard does not immediately stop the job again.
 
 `stale-review-head` means the follow-up job was created for an older reviewed head SHA and the consume-time lifecycle lookup already sees a newer PR head. This is a stale-job/race guard before worker spawn, not a reconcile-time failure mode: once a remediation worker pushes commits, the PR head is expected to differ from `job.revisionRef`, and that success path must continue to the rereview request.
 
@@ -789,7 +792,7 @@ Guardrails:
 - if the source job is `completed/` but `reReview.requested` is not `true`, requeue stops the job with `no-progress`
 - if the source job is `stopped/`, only retriggerable stop codes are accepted:
   `max-rounds-reached`, `round-budget-exhausted`, `daemon-bounce-safety`,
-  `review-settled`, `no-progress`, `stale-review-head`, and
+  `review-settled`, `no-progress`, `revision-superseded`, `stale-review-head`, and
   `stale-heartbeat`
 - `stopped:review-settled` is accepted for an explicit operator pass over
   remaining non-blocking findings; `operator-stop`, `rereview-blocked`,

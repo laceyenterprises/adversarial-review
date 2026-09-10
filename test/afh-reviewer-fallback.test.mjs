@@ -528,6 +528,39 @@ test('AFH-04R: Claude launchctl denial grounds the local Claude reviewer and rou
   assert.equal(route.afhReviewerFallback.lastResort, false);
 });
 
+test('AFH-04R: codex-built PRs use codex as the audited last resort when Claude and Gemini cannot run', () => {
+  const runtimeGrounding = applyClaudeReviewerRuntimeGrounding(
+    groundingFor({
+      openai: OK,
+      anthropic: OK,
+      google: { state: 'exhausted', grounded: false },
+    }),
+    {
+      available: false,
+      reason: CLAUDE_REVIEWER_RUNTIME_GROUNDING_REASON,
+      error: 'Could not switch to audit session 0x18757: 1: Operation not permitted',
+    }
+  );
+  const route = applyAfhReviewerFallback({
+    builderClass: 'codex',
+    baseRoute: baseRouteFor('codex'),
+    grounding: runtimeGrounding,
+    geminiReviewerMode: 'fallback',
+  });
+
+  assert.equal(route.reviewerModel, 'codex');
+  assert.equal(route.botTokenEnv, 'GH_CODEX_REVIEWER_TOKEN');
+  assert.equal(route.afhReviewerFallback.fromReviewerModel, 'claude');
+  assert.equal(route.afhReviewerFallback.toReviewerModel, 'codex');
+  assert.equal(route.afhReviewerFallback.lastResort, true);
+  assert.ok(
+    route.afhReviewerFallback.considered.some(
+      (entry) => entry.reviewerModel === 'gemini' && /grounded/.test(entry.reason)
+    ),
+    'gemini was tried before the same-writer last resort'
+  );
+});
+
 test('AFH-04R: Claude runtime grounding preserves canonical provider fields', () => {
   const grounding = Object.freeze({
     available: true,

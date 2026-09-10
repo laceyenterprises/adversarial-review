@@ -20,6 +20,10 @@ const CODEX_OK = [
   { provider: 'openai', authPath: 'oauth', state: 'ok' },
   { provider: 'anthropic', authPath: 'oauth', state: 'ok' },
 ];
+const GEMINI_EXHAUSTED_CODEX_OK = [
+  { provider: 'google', authPath: 'agy', state: 'exhausted' },
+  { provider: 'openai', authPath: 'oauth', state: 'ok' },
+];
 
 test('falls back codex -> claude-code when the routed codex harness provider is exhausted', async () => {
   const result = await resolveReviewerWorkerClassWithFallback({
@@ -127,16 +131,18 @@ test('fail-open: malformed fleet-quota status stdout keeps the primary', async (
   assert.match(errors[0], /failing open/);
 });
 
-test('rejects a fallback candidate equal to the PR author class (diversity preserved)', async () => {
+test('uses a same-writer reviewer only as an explicit quota-grounded last resort', async () => {
   const result = await resolveReviewerWorkerClassWithFallback({
-    authorClass: 'claude-code',
-    primary: 'codex',
-    fallbackWorkerClasses: ['claude-code'],
-    execFileImpl: fleetStatusStub(CODEX_EXHAUSTED_CLAUDE_OK),
+    authorClass: 'codex',
+    primary: 'gemini',
+    fallbackWorkerClasses: ['codex'],
+    execFileImpl: fleetStatusStub(GEMINI_EXHAUSTED_CODEX_OK),
   });
   assert.equal(result.workerClass, 'codex');
-  assert.equal(result.fellBack, false);
-  assert.equal(result.reason, 'no-available-fallback');
+  assert.equal(result.fellBack, true);
+  assert.equal(result.reason, 'primary-grounded-last-resort');
+  assert.equal(result.lastResort, true);
+  assert.equal(result.primaryState, 'exhausted');
 });
 
 test('retries transient fleet quota status failures with bounded backoff before falling back', async () => {
@@ -489,6 +495,49 @@ test('applies fallback route with explicit worker-class precedence and model-key
     toWorkerClass: 'claude-code',
     reason: 'primary-grounded-fallback',
   });
+});
+
+test('route application preserves the diversity guard unless the decision is stamped last-resort', () => {
+  const route = {
+    builderClass: 'codex',
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+  };
+  const rejected = applyReviewerWorkerClassFallbackToRoute({
+    route,
+    decision: {
+      fellBack: true,
+      workerClass: 'codex',
+      from: 'gemini',
+      to: 'codex',
+      reason: 'primary-grounded-fallback',
+    },
+    reviewerRouteByModel: {
+      codex: { reviewerModel: 'codex', botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN' },
+    },
+    authorClass: 'codex',
+  });
+  assert.equal(rejected.applied, false);
+  assert.equal(rejected.reason, 'writer-diversity-violation');
+
+  const applied = applyReviewerWorkerClassFallbackToRoute({
+    route,
+    decision: {
+      fellBack: true,
+      workerClass: 'codex',
+      from: 'gemini',
+      to: 'codex',
+      reason: 'primary-grounded-last-resort',
+      lastResort: true,
+    },
+    reviewerRouteByModel: {
+      codex: { reviewerModel: 'codex', botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN' },
+    },
+    authorClass: 'codex',
+  });
+  assert.equal(applied.applied, true);
+  assert.equal(applied.route.reviewerModel, 'codex');
+  assert.equal(applied.route.reviewWorkerClassFallback.lastResort, true);
 });
 
 test('does not apply or claim fallback success when the worker class has no model route', () => {

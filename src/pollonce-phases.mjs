@@ -1514,6 +1514,13 @@ export async function processReviewSubject(entry, ctx) {
               ? `reviewer=${route.timeoutFallback.toReviewerModel} matches builder=${route.timeoutFallback.builderClass}, so cross-model guarantee is waived for this recovery pass.`
               : 'cross-model guarantee remains intact for this recovery pass.')
           )
+        : route.reviewWorkerClassFallback?.lastResort
+        ? (
+            `review-worker-class fallback switched worker=${route.reviewWorkerClassFallback.fromWorkerClass} ` +
+            `to worker=${route.reviewWorkerClassFallback.toWorkerClass} because the selected reviewer was ` +
+            `grounded (${route.reviewWorkerClassFallback.reason}); reviewer=${route.reviewerModel} ` +
+            `matches builder=${route.builderClass}, so the cross-model guarantee is waived for this recovery pass.`
+          )
         : describeCrossModelReviewWaiver(
             route.builderClass,
             route.reviewerModel,

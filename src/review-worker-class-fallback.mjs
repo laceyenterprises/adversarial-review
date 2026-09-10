@@ -273,7 +273,7 @@ export function applyReviewerWorkerClassFallbackToRoute({
   // the author the CALLER believes in, so no future trigger can reach the route
   // swap with a class-X reviewer for a class-X PR.
   const author = authorClass ?? route?.builderClass ?? null;
-  if (author && violatesWriterDiversity(author, workerClass)) {
+  if (author && violatesWriterDiversity(author, workerClass) && decision.lastResort !== true) {
     return { applied: false, route, reason: 'writer-diversity-violation' };
   }
 
@@ -288,6 +288,7 @@ export function applyReviewerWorkerClassFallbackToRoute({
         fromWorkerClass: decision.from,
         toWorkerClass: decision.to,
         reason: decision.reason,
+        ...(decision.lastResort ? { lastResort: true } : {}),
         // Depth provenance rides along only for a depth-triggered spill, so the
         // quota-triggered shape stays exactly what it was.
         ...(decision.queueDepth === undefined
@@ -364,12 +365,17 @@ export async function resolveReviewerWorkerClassWithFallback({
   if (!providerForQuotaHarness(primaryClass) && !depthEngaged) {
     return { ...base, reason: 'primary-provider-untracked' };
   }
-  const viableFallbacks = fallbacks.filter((candidate) => (
+  const quotaTrackedFallbacks = fallbacks.filter((candidate) => (
     candidate !== primaryClass &&
-    !violatesWriterDiversity(author, candidate) &&
     providerForQuotaHarness(candidate)
   ));
-  if (viableFallbacks.length === 0) {
+  const viableFallbacks = quotaTrackedFallbacks.filter(
+    (candidate) => !violatesWriterDiversity(author, candidate)
+  );
+  const sameWriterLastResorts = quotaTrackedFallbacks.filter(
+    (candidate) => violatesWriterDiversity(author, candidate)
+  );
+  if (quotaTrackedFallbacks.length === 0) {
     return { ...base, ...depthFields, reason: 'no-available-fallback' };
   }
 
@@ -445,6 +451,20 @@ export async function resolveReviewerWorkerClassWithFallback({
           to: candidate,
           reason: 'primary-grounded-fallback',
           primaryState: primaryAvail.state,
+        };
+      }
+    }
+    for (const candidate of sameWriterLastResorts) {
+      const candidateAvail = quotaAvailableFromFleetStatus(stdout, { harness: candidate });
+      if (candidateAvail.available) {
+        return {
+          workerClass: candidate,
+          fellBack: true,
+          from: primaryClass,
+          to: candidate,
+          reason: 'primary-grounded-last-resort',
+          primaryState: primaryAvail.state,
+          lastResort: true,
         };
       }
     }

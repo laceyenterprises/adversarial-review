@@ -40,6 +40,12 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.match(HAMMER_PROMPT, /HAM_REMOTE_CI_WAIT_SECONDS="\$\{HAM_REMOTE_CI_WAIT_SECONDS:-900\}"/);
   assert.match(HAMMER_PROMPT, /HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT="\$\{HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT:-3\}"/);
   assert.match(HAMMER_PROMPT, /HAM_REMOTE_CI_GATE_READ_FAILURES=\$\(\(HAM_REMOTE_CI_GATE_READ_FAILURES \+ 1\)\)/);
+  assert.match(HAMMER_PROMPT, /const checks = Array\.isArray\(rollup\.checks\)/);
+  assert.match(HAMMER_PROMPT, /Array\.isArray\(rollup\.statusCheckRollup\)[\s\S]*rollup\.statusCheckRollup/);
+  assert.doesNotMatch(
+    HAMMER_PROMPT,
+    /const checks = Array\.isArray\(rollup\.statusCheckRollup\) \? rollup\.statusCheckRollup : \[\];/,
+  );
   assert.match(HAMMER_PROMPT, /transient GitHub gate read failure/);
   assert.match(HAMMER_PROMPT, /github-gate-red/);
   assert.match(HAMMER_PROMPT, /github-gate-timeout/);

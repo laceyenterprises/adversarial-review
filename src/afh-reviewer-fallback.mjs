@@ -55,7 +55,9 @@
 // stamp so an operator can see the diversity loss.
 
 import { execFile } from 'node:child_process';
+import { dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 
 import {
   isGroundedProviderState,
@@ -66,11 +68,15 @@ import {
   REVIEWER_ROUTE_BY_MODEL,
   ROUTE_BY_BUILDER_CLASS,
   geminiMayReviewBuilder,
+  isCrossModelReviewWaived,
   normalizeBuilderClass,
   normalizeReviewerModel,
 } from './adapters/subject/github-pr/routing.mjs';
 
 const execFileAsync = promisify(execFile);
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const SUBMODULE_ROOT = resolve(__dirname, '..');
+const AGENT_OS_ROOT = resolve(SUBMODULE_ROOT, '..', '..');
 
 export const AFH_FLEET_QUOTA_STATUS_TIMEOUT_MS = 10_000;
 export const AFH_FLEET_QUOTA_STATUS_RETRY_DELAYS_MS = Object.freeze([250, 1000]);
@@ -287,6 +293,14 @@ function afhReviewerFallbackDisabled(env = process.env) {
   return /^(0|false|no|off)$/i.test(String(env?.ADVERSARIAL_AFH_REVIEWER_FALLBACK ?? '').trim());
 }
 
+function resolveHqPath(env = process.env) {
+  return String(env?.AGENT_OS_HQ_BIN || env?.HQ_BIN || 'hq').trim() || 'hq';
+}
+
+function resolveHqCwd(env = process.env) {
+  return String(env?.AGENT_OS_ROOT || AGENT_OS_ROOT).trim() || AGENT_OS_ROOT;
+}
+
 function sleep(ms) {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ms);
@@ -341,6 +355,7 @@ function timeoutMsForFleetQuotaStatusAttempt(timeoutMs, attemptIndex) {
 
 async function readFleetQuotaStatusStdoutWithRetry({
   resolvedHqPath,
+  hqCwd,
   execFileImpl,
   env,
   timeoutMs,
@@ -355,6 +370,7 @@ async function readFleetQuotaStatusStdoutWithRetry({
     try {
       const result = await execFileImpl(resolvedHqPath, ['fleet', 'quota', 'status', '--json'], {
         env,
+        cwd: hqCwd,
         encoding: 'utf8',
         maxBuffer: 5 * 1024 * 1024,
         timeout: timeoutMsForFleetQuotaStatusAttempt(timeoutMs, attemptIndex),
@@ -392,12 +408,14 @@ export async function readAfhReviewerGrounding({
   if (afhReviewerFallbackDisabled(env)) {
     return unavailableGrounding('afh-reviewer-fallback-disabled');
   }
-  const resolvedHqPath = hqPath || env?.HQ_BIN || 'hq';
+  const resolvedHqPath = hqPath || resolveHqPath(env);
+  const hqCwd = resolveHqCwd(env);
   let snapshot = null;
   let stdout;
   try {
     stdout = await readFleetQuotaStatusStdoutWithRetry({
       resolvedHqPath,
+      hqCwd,
       execFileImpl,
       env,
       timeoutMs,
@@ -624,9 +642,24 @@ export function geminiFallbackEligibility({
   return { eligible: true, reason: 'gemini-eligible' };
 }
 
-function orderedFallbackCandidates({ currentModel, crossModelPrimaryModel }) {
+function sameWriterReviewerModelForBuilder(builderClass) {
+  for (const candidate of Object.keys(REVIEWER_ROUTE_BY_MODEL)) {
+    const normalized = normalizeReviewerModel(candidate);
+    if (!normalized) continue;
+    if (isCrossModelReviewWaived(builderClass, normalized)) return normalized;
+  }
+  return null;
+}
+
+function orderedFallbackCandidates({ currentModel, crossModelPrimaryModel, builderClass }) {
   const ordered = [];
-  for (const candidate of [crossModelPrimaryModel, 'gemini', AFH_LAST_RESORT_REVIEWER_MODEL]) {
+  const sameWriterLastResort = sameWriterReviewerModelForBuilder(builderClass);
+  for (const candidate of [
+    crossModelPrimaryModel,
+    'gemini',
+    AFH_LAST_RESORT_REVIEWER_MODEL,
+    sameWriterLastResort,
+  ]) {
     const normalized = normalizeReviewerModel(candidate);
     if (!normalized) continue;
     if (normalized === currentModel) continue;
@@ -692,7 +725,11 @@ export function afhReviewerFallbackDecision({
   );
 
   const considered = [];
-  for (const candidate of orderedFallbackCandidates({ currentModel, crossModelPrimaryModel })) {
+  for (const candidate of orderedFallbackCandidates({
+    currentModel,
+    crossModelPrimaryModel,
+    builderClass: normalizedBuilder,
+  })) {
     if (candidate === 'gemini') {
       const eligibility = geminiFallbackEligibility({
         builderClass: normalizedBuilder,
@@ -723,9 +760,7 @@ export function afhReviewerFallbackDecision({
       // Diversity bookkeeping: `lastResort` is true only when the selected
       // reviewer is the builder's own model family — reachable ONLY after gemini
       // was rejected above, by construction of the candidate order.
-      lastResort:
-        candidate === AFH_LAST_RESORT_REVIEWER_MODEL
-        && normalizeReviewerModel(normalizedBuilder) === AFH_LAST_RESORT_REVIEWER_MODEL,
+      lastResort: isCrossModelReviewWaived(normalizedBuilder, candidate),
       considered,
       primary,
       builderClass: normalizedBuilder,

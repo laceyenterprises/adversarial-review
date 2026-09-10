@@ -47,8 +47,8 @@
 // nothing for this PR.
 
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
 
 import { writeFileAtomic } from './atomic-write.mjs';
 
@@ -85,6 +85,10 @@ function noProgressLaneDir(rootDir) {
   return join(rootDir, 'data', 'watcher-no-progress-lane');
 }
 
+function noProgressLaneQuarantineDir(rootDir) {
+  return join(noProgressLaneDir(rootDir), 'quarantine');
+}
+
 function sanitizePathSegment(value) {
   return String(value ?? '').replace(/[^A-Za-z0-9._-]/g, '-');
 }
@@ -95,6 +99,32 @@ export function noProgressLaneFilePath(rootDir, { repo, prNumber } = {}) {
   // series without leaking one file per head — same shape as
   // `amaRetainLoopCapFilePath`.
   return join(noProgressLaneDir(rootDir), `${safeRepo}-pr-${Number(prNumber)}.json`);
+}
+
+function quarantineNoProgressLaneLedger(rootDir, filePath, error, {
+  now,
+  logger = console,
+  renameSyncImpl = renameSync,
+} = {}) {
+  const dir = noProgressLaneQuarantineDir(rootDir);
+  mkdirSync(dir, { recursive: true });
+  const stamp = sanitizePathSegment(now || new Date().toISOString());
+  const originalName = basename(filePath);
+  let quarantinedPath = join(dir, `${stamp}-${originalName}`);
+  for (let attempt = 1; existsSync(quarantinedPath) && attempt < 1000; attempt += 1) {
+    quarantinedPath = join(dir, `${stamp}-${attempt}-${originalName}`);
+  }
+  try {
+    renameSyncImpl(filePath, quarantinedPath);
+  } catch (renameError) {
+    if (renameError?.code === 'ENOENT') return null;
+    throw renameError;
+  }
+  logger?.warn?.(
+    `[watcher] no-progress lane: quarantined unreadable ledger during starvation recovery ` +
+      `${filePath} -> ${quarantinedPath} (${error?.message || error})`,
+  );
+  return quarantinedPath;
 }
 
 function normalizeHead(value) {
@@ -310,6 +340,7 @@ export function promoteStarvedNoProgressLaneLedgers(rootDir, {
   now = new Date().toISOString(),
   logger = console,
   readFileSyncImpl = readFileSync,
+  renameSyncImpl = renameSync,
   writeFileAtomicImpl = writeFileAtomic,
 } = {}) {
   const markerPath = starvedPromotionMarkerPath(rootDir, promotionId);
@@ -341,6 +372,7 @@ export function promoteStarvedNoProgressLaneLedgers(rootDir, {
   }
 
   let promoted = 0;
+  let quarantined = 0;
   let hadReadErrors = false;
   let hadWriteErrors = false;
   for (const entry of entries) {
@@ -353,11 +385,23 @@ export function promoteStarvedNoProgressLaneLedgers(rootDir, {
       doc = JSON.parse(readFileSyncImpl(filePath, 'utf8'));
     } catch (err) {
       if (err?.code === 'ENOENT') continue;
-      logger?.warn?.(
-        `[watcher] no-progress lane: failed to read ledger during starvation recovery ` +
-          `${filePath} (${err?.message || err})`,
-      );
-      hadReadErrors = true;
+      try {
+        const quarantinedPath = quarantineNoProgressLaneLedger(rootDir, filePath, err, {
+          now,
+          logger,
+          renameSyncImpl,
+        });
+        if (quarantinedPath) {
+          quarantined += 1;
+          continue;
+        }
+      } catch (quarantineErr) {
+        logger?.warn?.(
+          `[watcher] no-progress lane: failed to quarantine unreadable ledger during starvation recovery ` +
+            `${filePath} (${quarantineErr?.message || quarantineErr})`,
+        );
+        hadReadErrors = true;
+      }
       continue;
     }
     if (doc?.lane !== LANE_SLOW) continue;
@@ -405,6 +449,7 @@ export function promoteStarvedNoProgressLaneLedgers(rootDir, {
     schemaVersion: 1,
     promotionId,
     promoted,
+    quarantined,
     promotedAt: now,
     reason: 'scheduler-starvation-recovery',
   }, null, 2)}\n`);

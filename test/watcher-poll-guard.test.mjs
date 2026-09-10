@@ -66,6 +66,25 @@ test('safePollOnce passes octokit through to pollOnceImpl', async () => {
   assert.equal(received, 'octokit-stub');
 });
 
+test('safePollOnce forwards per-call poll options to pollOnceImpl', async () => {
+  const seen = [];
+  const pollOnceImpl = async (octokit, options) => {
+    seen.push({ octokit, options });
+  };
+
+  const safePollOnce = buildSafePollOnce({
+    pollOnceImpl,
+    octokit: 'octokit-stub',
+    log: { log: () => {}, error: () => {} },
+  });
+
+  await safePollOnce('wake pollOnce', { wakePayload: { pr_number: 6569 } });
+  assert.deepEqual(seen, [{
+    octokit: 'octokit-stub',
+    options: { wakePayload: { pr_number: 6569 } },
+  }]);
+});
+
 test('safePollOnce returns ok=false with the error when pollOnceImpl rejects', async () => {
   const boom = new Error('boom');
   const pollOnceImpl = async () => { throw boom; };

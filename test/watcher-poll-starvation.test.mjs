@@ -1013,6 +1013,85 @@ test('RVHAND-10: budget-deferred handlers do not record no-progress lane runs', 
   assert.deepEqual(recorded, [1, 2], 'only handlers that actually ran can count toward no-progress');
 });
 
+test('watcher wake priority runs the exact PR head ahead of slow-lane backlog', async () => {
+  const ran = [];
+  const laneEvaluations = [];
+  const recorded = [];
+  const handlers = [
+    { repoPath: REPO, prNumber: 1, headSha: HEAD_A, run: async () => { ran.push(1); } },
+    { repoPath: REPO, prNumber: 6569, headSha: HEAD_B, run: async () => { ran.push(6569); } },
+    { repoPath: REPO, prNumber: 2, headSha: HEAD_A, run: async () => { ran.push(2); } },
+  ];
+
+  const summary = await runPostedReviewHandlersFairly({
+    handlers,
+    priorityTargets: [{
+      repoPath: REPO,
+      prNumber: 6569,
+      headSha: HEAD_B,
+      reason: 'hammer-pr-eligible',
+    }],
+    laneGate: {
+      evaluate(handler) {
+        laneEvaluations.push(handler.prNumber);
+        return {
+          run: false,
+          lane: 'slow',
+          noProgressTicks: 12,
+          backoffTicks: 12,
+          skippedTicks: 3,
+        };
+      },
+      record(handler) {
+        recorded.push(handler.prNumber);
+      },
+    },
+    logger: silentLogger,
+  });
+
+  assert.deepEqual(ran, [6569], 'the woken PR/head bypasses slow-lane backoff and runs first');
+  assert.deepEqual(laneEvaluations, [6569, 1, 2]);
+  assert.deepEqual(recorded, [6569], 'only the bypassed handler records a run');
+  assert.equal(summary.priorityLaneBypasses, 1);
+  assert.equal(summary.skippedByLane, 2);
+});
+
+test('watcher wake priority is head-scoped and does not bypass a stale head', async () => {
+  const ran = [];
+  const summary = await runPostedReviewHandlersFairly({
+    handlers: [{
+      repoPath: REPO,
+      prNumber: 6569,
+      headSha: HEAD_B,
+      run: async () => { ran.push(6569); },
+    }],
+    priorityTargets: [{
+      repoPath: REPO,
+      prNumber: 6569,
+      headSha: HEAD_A,
+    }],
+    laneGate: {
+      evaluate() {
+        return {
+          run: false,
+          lane: 'slow',
+          noProgressTicks: 12,
+          backoffTicks: 12,
+          skippedTicks: 3,
+        };
+      },
+      record() {
+        throw new Error('stale wake target must not run');
+      },
+    },
+    logger: silentLogger,
+  });
+
+  assert.deepEqual(ran, []);
+  assert.equal(summary.priorityLaneBypasses, 0);
+  assert.equal(summary.skippedByLane, 1);
+});
+
 test('RVPRESS-01: posted-review phase warns on one-handler budget stall signature', async () => {
   let clock = 0;
   const warnings = [];

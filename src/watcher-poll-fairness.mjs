@@ -265,6 +265,45 @@ export function postedReviewHandlerKey(handler) {
   return `${handler?.repoPath ?? ''}#${handler?.prNumber ?? ''}`;
 }
 
+function normalizePostedReviewPriorityTargets(priorityTargets) {
+  const rawTargets = Array.isArray(priorityTargets)
+    ? priorityTargets
+    : (priorityTargets ? [priorityTargets] : []);
+  return rawTargets
+    .map((target) => ({
+      repoPath: String(target?.repoPath || target?.repo || '').trim(),
+      prNumber: Number(target?.prNumber ?? target?.pr_number ?? target?.pr),
+      headSha: String(target?.headSha || target?.head_sha || '').trim(),
+      reason: String(target?.reason || '').trim(),
+    }))
+    .filter((target) => (
+      target.repoPath
+      && Number.isInteger(target.prNumber)
+      && target.prNumber > 0
+    ));
+}
+
+function postedReviewHandlerMatchesPriorityTarget(handler, target) {
+  if (String(handler?.repoPath || '') !== target.repoPath) return false;
+  if (Number(handler?.prNumber) !== target.prNumber) return false;
+  if (target.headSha && String(handler?.headSha || '') !== target.headSha) return false;
+  return true;
+}
+
+function postedReviewHandlerMatchesPriority(handler, priorityTargets) {
+  return priorityTargets.some((target) => postedReviewHandlerMatchesPriorityTarget(handler, target));
+}
+
+function orderPriorityFirst(handlers, priorityTargets) {
+  if (!priorityTargets.length) return handlers;
+  const priority = [];
+  const rest = [];
+  for (const handler of handlers) {
+    (postedReviewHandlerMatchesPriority(handler, priorityTargets) ? priority : rest).push(handler);
+  }
+  return priority.length > 0 ? [...priority, ...rest] : handlers;
+}
+
 /**
  * Cross-tick fairness state. Lives for the process lifetime in the watcher, so a
  * handler cut off by the budget is promoted to the front of the next tick rather
@@ -337,6 +376,7 @@ export async function runPostedReviewHandlersFairly({
   handlerTimeoutMs = DEFAULT_POSTED_REVIEW_HANDLER_TIMEOUT_MS,
   minimumHandlerStartBudgetMs = null,
   laneGate = null,
+  priorityTargets = [],
   nowMs = () => Date.now(),
   setTimeoutFn = setTimeout,
   clearTimeoutFn = clearTimeout,
@@ -352,6 +392,7 @@ export async function runPostedReviewHandlersFairly({
     deferredAfterTimeout: 0,
     continuedAfterTimeout: 0,
     daemonCleanMerges: 0,
+    priorityLaneBypasses: 0,
     deferred: [],
   };
   if (handlers.length === 0) {
@@ -374,7 +415,8 @@ export async function runPostedReviewHandlersFairly({
     derivePostedReviewExpensiveStepBudgetMs(effectiveHandlerTimeoutMs),
   );
   const startedMs = nowMs();
-  const ordered = orderDeferredFirst(handlers, state);
+  const normalizedPriorityTargets = normalizePostedReviewPriorityTargets(priorityTargets);
+  const ordered = orderPriorityFirst(orderDeferredFirst(handlers, state), normalizedPriorityTargets);
   const nextDeferred = new Set();
 
   for (let index = 0; index < ordered.length; index += 1) {
@@ -418,7 +460,17 @@ export async function runPostedReviewHandlersFairly({
         laneDecision = { run: true };
       }
     }
-    if (!laneDecision.run) {
+    const priorityMatched = postedReviewHandlerMatchesPriority(handler, normalizedPriorityTargets);
+    if (!laneDecision.run && priorityMatched) {
+      summary.priorityLaneBypasses += 1;
+      logger?.log?.(
+        `[watcher] posted-review wake priority: running ${key} despite ` +
+          `no-progress lane=${laneDecision.lane || 'slow'} ` +
+          `no_progress_ticks=${laneDecision.noProgressTicks ?? 0} ` +
+          `backoff_ticks=${laneDecision.backoffTicks ?? 0} ` +
+          `skipped_ticks=${laneDecision.skippedTicks ?? 0}`,
+      );
+    } else if (!laneDecision.run) {
       summary.skippedByLane += 1;
       logger?.log?.(
         `[watcher] no-progress lane: deferring ${key} this tick ` +
@@ -561,7 +613,8 @@ export async function runPostedReviewHandlersFairly({
         `failed=${summary.failed} timed_out=${summary.timedOut} ` +
         `slow_lane_deferred=${summary.skippedByLane} budget_deferred=${summary.deferredByBudget} ` +
         `timeout_deferred=${summary.deferredAfterTimeout} ` +
-        `continued_after_timeout=${summary.continuedAfterTimeout}`,
+        `continued_after_timeout=${summary.continuedAfterTimeout}` +
+        (summary.priorityLaneBypasses > 0 ? ` priority_lane_bypasses=${summary.priorityLaneBypasses}` : ''),
     );
   }
   return summary;

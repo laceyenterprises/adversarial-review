@@ -104,7 +104,7 @@ function buildSafePollOnce({
     }
   }
 
-  return function safePollOnce(source = 'scheduled pollOnce') {
+  return function safePollOnce(source = 'scheduled pollOnce', pollOptions = undefined) {
     let timeoutHandle;
     const effectiveDeadlineMs = resolveDeadlineMs(deadlineMs, source);
 
@@ -127,7 +127,7 @@ function buildSafePollOnce({
 
     const work = Promise.resolve()
       .then(() => withSqliteBusyRetry(
-        () => pollOnceImpl(octokit),
+        () => pollOnceImpl(octokit, pollOptions),
         {
           label: `watcher ${source}`,
           ...(sqliteBusyRetryDelaysMs ? { delaysMs: sqliteBusyRetryDelaysMs } : {}),

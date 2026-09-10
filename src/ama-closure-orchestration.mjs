@@ -89,6 +89,16 @@ export class AmaCoexistenceAbortError extends Error {
   }
 }
 
+export class AmaCoexistenceOperationTimeoutError extends Error {
+  constructor(operation, timeoutMs) {
+    super(`ama-coexistence operation timed out: ${operation}`);
+    this.name = 'AmaCoexistenceOperationTimeoutError';
+    this.code = 'AMA_COEXISTENCE_OPERATION_TIMEOUT';
+    this.operation = operation;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
 function throwIfAborted(signal) {
   if (!signal?.aborted) return;
   throw signal.reason instanceof Error ? signal.reason : new AmaCoexistenceAbortError();
@@ -105,6 +115,74 @@ function abortableSleep(ms, signal) {
     };
     signal?.addEventListener?.('abort', onAbort, { once: true });
   });
+}
+
+function trackCoexistenceOperation(operationTracker, operation) {
+  if (!operationTracker || typeof operationTracker !== 'object') {
+    return () => {};
+  }
+  const previous = operationTracker.current || null;
+  const previousStartedMs = operationTracker.currentStartedMs || null;
+  operationTracker.current = operation;
+  operationTracker.currentStartedMs = performance.now();
+  return () => {
+    operationTracker.current = previous;
+    operationTracker.currentStartedMs = previousStartedMs;
+  };
+}
+
+async function runCoexistenceOperation(
+  operation,
+  fn,
+  {
+    timeoutMs = null,
+    parentSignal = null,
+    operationTracker = null,
+    logger = null,
+    repoPath = null,
+    prNumber = null,
+    setTimeoutFn = setTimeout,
+    clearTimeoutFn = clearTimeout,
+  } = {},
+) {
+  throwIfAborted(parentSignal);
+  const stopTracking = trackCoexistenceOperation(operationTracker, operation);
+  const effectiveTimeoutMs = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0
+    ? Math.max(1, Math.floor(Number(timeoutMs)))
+    : null;
+  const controller = effectiveTimeoutMs ? new AbortController() : null;
+  let timer = null;
+  let timedOut = false;
+  const childSignal = controller?.signal || parentSignal;
+  const onParentAbort = () => {
+    controller?.abort(parentSignal?.reason instanceof Error ? parentSignal.reason : new AmaCoexistenceAbortError());
+  };
+  parentSignal?.addEventListener?.('abort', onParentAbort, { once: true });
+  try {
+    const work = Promise.resolve().then(() => fn({ signal: childSignal }));
+    if (!effectiveTimeoutMs) return await work;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeoutFn(() => {
+        timedOut = true;
+        const err = new AmaCoexistenceOperationTimeoutError(operation, effectiveTimeoutMs);
+        controller.abort(err);
+        reject(err);
+      }, effectiveTimeoutMs);
+    });
+    return await Promise.race([work, timeout]);
+  } catch (err) {
+    if (timedOut || err?.code === 'AMA_COEXISTENCE_OPERATION_TIMEOUT') {
+      logger?.warn?.(
+        `[watcher] AMA coexistence operation timed out for ${repoPath || 'unknown'}#${prNumber || 'unknown'}: ` +
+          `operation=${operation} timeout_ms=${effectiveTimeoutMs}`,
+      );
+    }
+    throw err;
+  } finally {
+    if (timer !== null) clearTimeoutFn(timer);
+    parentSignal?.removeEventListener?.('abort', onParentAbort);
+    stopTracking();
+  }
 }
 
 export function normalizeCompletedRoundCount(value) {
@@ -300,6 +378,8 @@ export async function maybeDispatchAmaClosureFor({
   writeAutonomousMergeDisabledAuditImpl = writeAutonomousMergeDisabledAudit,
   env = process.env,
   signal = null,
+  operationTimeoutMs = null,
+  operationTracker = null,
 }) {
   throwIfAborted(signal);
   let cfg;
@@ -429,16 +509,30 @@ export async function maybeDispatchAmaClosureFor({
   const initialMergeability = normalizeGithubMergeability(candidate || {});
   if (!initialMergeability || initialMergeability === 'UNKNOWN') {
     throwIfAborted(signal);
-    const sampled = await resolveMergeabilityWithSampling(
-      candidate || {},
-      async () => {
-        throwIfAborted(signal);
-        return fetchPullRequestMergeability(repoPath, prNumber, { execFileImpl: execFileAsync, signal });
-      },
+    const sampled = await runCoexistenceOperation(
+      'mergeability-sampling',
+      async ({ signal: operationSignal }) => resolveMergeabilityWithSampling(
+        candidate || {},
+        async () => {
+          throwIfAborted(operationSignal);
+          return fetchPullRequestMergeability(repoPath, prNumber, {
+            execFileImpl: execFileAsync,
+            signal: operationSignal,
+          });
+        },
+        {
+          attempts: MERGEABILITY_SAMPLE_ATTEMPTS,
+          delayMs: MERGEABILITY_SAMPLE_DELAY_MS,
+          sleepImpl: (ms) => abortableSleep(ms, operationSignal),
+        },
+      ),
       {
-        attempts: MERGEABILITY_SAMPLE_ATTEMPTS,
-        delayMs: MERGEABILITY_SAMPLE_DELAY_MS,
-        sleepImpl: (ms) => abortableSleep(ms, signal),
+        timeoutMs: operationTimeoutMs,
+        parentSignal: signal,
+        operationTracker,
+        logger,
+        repoPath,
+        prNumber,
       },
     );
     throwIfAborted(signal);
@@ -494,16 +588,27 @@ export async function maybeDispatchAmaClosureFor({
     // REVIEWER_BOT_LOGINS map (which review-body-capture / closeout-scraper rely on).
     try {
       const bodies = authoritativeReviewerLogins.length
-        ? await fetchLatestHeadReviewBodiesWithRetry({
-            repoPath,
-            prNumber,
-            headSha: settledReviewHeadSha,
-            authoritativeReviewerLogins,
-            fetchLatestHeadReviewBodiesImpl,
-            retryDelaysMs: liveReviewRetryDelaysMs,
-            logger,
-            signal,
-          })
+        ? await runCoexistenceOperation(
+            'live-review-reconcile',
+            ({ signal: operationSignal }) => fetchLatestHeadReviewBodiesWithRetry({
+              repoPath,
+              prNumber,
+              headSha: settledReviewHeadSha,
+              authoritativeReviewerLogins,
+              fetchLatestHeadReviewBodiesImpl,
+              retryDelaysMs: liveReviewRetryDelaysMs,
+              logger,
+              signal: operationSignal,
+            }),
+            {
+              timeoutMs: operationTimeoutMs,
+              parentSignal: signal,
+              operationTracker,
+              logger,
+              repoPath,
+              prNumber,
+            },
+          )
         : [];
       throwIfAborted(signal);
       if (!authoritativeReviewerLogins.length) {
@@ -516,6 +621,9 @@ export async function maybeDispatchAmaClosureFor({
       liveHeadReview = { resolved: true, bodies: Array.isArray(bodies) ? bodies : [] };
     } catch (err) {
       throwIfAborted(signal);
+      if (err?.code === 'AMA_COEXISTENCE_OPERATION_TIMEOUT') {
+        throw err;
+      }
       logger?.warn?.(
         `[watcher] AMA live-review reconcile failed for ${repoPath}#${prNumber}@${settledReviewHeadSha}; ` +
           `failing closed: ${err?.message || err}`,
@@ -738,34 +846,56 @@ export async function maybeDispatchAmaClosureFor({
   if (reviewedHeadIsStale) {
     try {
       throwIfAborted(signal);
-      const closerCommitSuppression = typeof resolveHeadCloserCommitSuppressionImpl === 'function'
-        ? await resolveHeadCloserCommitSuppressionImpl({
+      const closerCommitSuppression = await runCoexistenceOperation(
+        'stale-head-suppression-proof',
+        ({ signal: operationSignal }) => (typeof resolveHeadCloserCommitSuppressionImpl === 'function'
+          ? resolveHeadCloserCommitSuppressionImpl({
             repoPath,
             prNumber,
             headSha: currentPrHeadSha,
-            signal,
+            signal: operationSignal,
           })
-        : await getHeadCloserCommitSuppression({
+          : getHeadCloserCommitSuppression({
             repoPath,
             prNumber,
             headSha: currentPrHeadSha,
             logger,
-            signal,
-          });
+            signal: operationSignal,
+          })),
+        {
+          timeoutMs: operationTimeoutMs,
+          parentSignal: signal,
+          operationTracker,
+          logger,
+          repoPath,
+          prNumber,
+        },
+      );
       throwIfAborted(signal);
       allowStaleReviewHeadHammerResume = closerCommitSuppression?.suppressed === true;
       if (
         allowStaleReviewHeadHammerResume &&
         closerCommitSuppression?.reason === 'closer-commit-trailer'
       ) {
-        const verifiedCommit = await fetchHeadCloserVerifiedCommitImpl({
-          repoPath,
-          prNumber,
-          headSha: currentPrHeadSha,
-          execFileImpl: execFileAsync,
-          logger,
-          signal,
-        });
+        const verifiedCommit = await runCoexistenceOperation(
+          'head-closer-verified-commit',
+          ({ signal: operationSignal }) => fetchHeadCloserVerifiedCommitImpl({
+            repoPath,
+            prNumber,
+            headSha: currentPrHeadSha,
+            execFileImpl: execFileAsync,
+            logger,
+            signal: operationSignal,
+          }),
+          {
+            timeoutMs: operationTimeoutMs,
+            parentSignal: signal,
+            operationTracker,
+            logger,
+            repoPath,
+            prNumber,
+          },
+        );
         throwIfAborted(signal);
         nonReviewableHeadDeltaEvidence = buildNonReviewableHeadDeltaEvidence({
           reviewedHead: reviewState.headSha,
@@ -778,16 +908,27 @@ export async function maybeDispatchAmaClosureFor({
         allowStaleReviewHeadHammerResume &&
         typeof resolveHamTerminalRemediationEvidenceImpl === 'function'
       ) {
-        const resolvedHamEvidence = await resolveHamTerminalRemediationEvidenceImpl({
-          reviewState,
-          prMetadata,
-          repoPath,
-          prNumber,
-          execFileImpl: execFileAsync,
-          closerCommitSuppression,
-          logger,
-          signal,
-        });
+        const resolvedHamEvidence = await runCoexistenceOperation(
+          'ham-terminal-remediation-evidence',
+          ({ signal: operationSignal }) => resolveHamTerminalRemediationEvidenceImpl({
+            reviewState,
+            prMetadata,
+            repoPath,
+            prNumber,
+            execFileImpl: execFileAsync,
+            closerCommitSuppression,
+            logger,
+            signal: operationSignal,
+          }),
+          {
+            timeoutMs: operationTimeoutMs,
+            parentSignal: signal,
+            operationTracker,
+            logger,
+            repoPath,
+            prNumber,
+          },
+        );
         throwIfAborted(signal);
         if (
           resolvedHamEvidence?.hamTerminalRemediation &&
@@ -806,6 +947,9 @@ export async function maybeDispatchAmaClosureFor({
       }
     } catch (err) {
       throwIfAborted(signal);
+      if (err?.code === 'AMA_COEXISTENCE_OPERATION_TIMEOUT') {
+        throw err;
+      }
       if (isTransientGhError(err)) {
         throw err;
       }
@@ -849,16 +993,27 @@ export async function maybeDispatchAmaClosureFor({
     standingBlockingFindingCount > 0
   ) {
     throwIfAborted(signal);
-    await dismissSupersededBlockingVerdictAtRemediatedHeadImpl({
-      repo: repoPath,
-      prNumber,
-      currentHeadSha: currentPrHeadSha || candidate?.headSha || null,
-      hamTerminalRemediationValidated,
-      authoritativeReviewerLogins,
-      env,
-      logger,
-      signal,
-    });
+    await runCoexistenceOperation(
+      'dismiss-superseded-blocking-verdict',
+      ({ signal: operationSignal }) => dismissSupersededBlockingVerdictAtRemediatedHeadImpl({
+        repo: repoPath,
+        prNumber,
+        currentHeadSha: currentPrHeadSha || candidate?.headSha || null,
+        hamTerminalRemediationValidated,
+        authoritativeReviewerLogins,
+        env,
+        logger,
+        signal: operationSignal,
+      }),
+      {
+        timeoutMs: operationTimeoutMs,
+        parentSignal: signal,
+        operationTracker,
+        logger,
+        repoPath,
+        prNumber,
+      },
+    );
   }
 
   // CI-SETTLEMENT MODEL — read this before hunting for a wait loop; there is
@@ -892,29 +1047,40 @@ export async function maybeDispatchAmaClosureFor({
   //   - deferred      → lease contention / audit bootstrap failure; retry next
   //                     tick with no double-merge.
   throwIfAborted(signal);
-  const daemonCleanMerge = await runDaemonCleanMergeAttemptImpl({
-    rootDir,
-    cfg,
-    repoPath,
-    prNumber,
-    candidate,
-    gateSnapshot,
-    mergeabilityForGate,
-    reviewState,
-    reviewStateRow,
-    currentPrHeadSha,
-    // Deliverable 1 — the head-scoped operator labels that substitute for an
-    // unresolved worker identity so a clean un-attributed PR closes under an
-    // operator-accountable lease instead of parking `worker-identity-unresolved`.
-    operatorApprovalEvent,
-    mergeAgentRequestEvent,
-    logger,
-    env,
-    authoritativeReviewerLogins,
-    dismissStaleRequestChangesOnResolved,
-    hamTerminalRemediationValidated,
-    signal,
-  });
+  const daemonCleanMerge = await runCoexistenceOperation(
+    'daemon-clean-merge-attempt',
+    ({ signal: operationSignal }) => runDaemonCleanMergeAttemptImpl({
+      rootDir,
+      cfg,
+      repoPath,
+      prNumber,
+      candidate,
+      gateSnapshot,
+      mergeabilityForGate,
+      reviewState,
+      reviewStateRow,
+      currentPrHeadSha,
+      // Deliverable 1 — the head-scoped operator labels that substitute for an
+      // unresolved worker identity so a clean un-attributed PR closes under an
+      // operator-accountable lease instead of parking `worker-identity-unresolved`.
+      operatorApprovalEvent,
+      mergeAgentRequestEvent,
+      logger,
+      env,
+      authoritativeReviewerLogins,
+      dismissStaleRequestChangesOnResolved,
+      hamTerminalRemediationValidated,
+      signal: operationSignal,
+    }),
+    {
+      timeoutMs: operationTimeoutMs,
+      parentSignal: signal,
+      operationTracker,
+      logger,
+      repoPath,
+      prNumber,
+    },
+  );
   throwIfAborted(signal);
   if (daemonCleanMerge?.disposition && daemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) {
     const daemonHeadShort = String(gateSnapshot?.reviewedHeadSha || '').slice(0, 12);
@@ -1069,42 +1235,50 @@ export async function maybeDispatchAmaClosureFor({
   let result;
   try {
     throwIfAborted(signal);
-    result = await maybeDispatchAmaCloserImpl({
-      reviewState,
-      prMetadata,
-      cfg,
-      options: {
-        env: process.env,
-        ...(nonReviewableHeadDeltaEvidence
-          ? { nonReviewableHeadDelta: nonReviewableHeadDeltaEvidence }
-          : {}),
-        ...(hamTerminalRemediationEvidenceOptions || {}),
-        adversarialMergeRequested: adversarialMergeRequestedEvent
-          ? {
-              applied: true,
-              observedRevisionRef:
-                adversarialMergeRequestedEvent.headSha ||
-                adversarialMergeRequestedEvent.head_sha ||
-                null,
-              actor: adversarialMergeRequestedEvent.actor || null,
-              eventId:
-                adversarialMergeRequestedEvent.id ||
-                adversarialMergeRequestedEvent.nodeId ||
-                null,
-              observedAt:
-                adversarialMergeRequestedEvent.createdAt ||
-                adversarialMergeRequestedEvent.created_at ||
-                null,
-            }
-          : null,
-      },
-      dispatchContext,
-      logger,
-      signal,
-    });
+    const stopTracking = trackCoexistenceOperation(operationTracker, 'ama-hammer-dispatch');
+    try {
+      result = await maybeDispatchAmaCloserImpl({
+        reviewState,
+        prMetadata,
+        cfg,
+        options: {
+          env: process.env,
+          ...(nonReviewableHeadDeltaEvidence
+            ? { nonReviewableHeadDelta: nonReviewableHeadDeltaEvidence }
+            : {}),
+          ...(hamTerminalRemediationEvidenceOptions || {}),
+          adversarialMergeRequested: adversarialMergeRequestedEvent
+            ? {
+                applied: true,
+                observedRevisionRef:
+                  adversarialMergeRequestedEvent.headSha ||
+                  adversarialMergeRequestedEvent.head_sha ||
+                  null,
+                actor: adversarialMergeRequestedEvent.actor || null,
+                eventId:
+                  adversarialMergeRequestedEvent.id ||
+                  adversarialMergeRequestedEvent.nodeId ||
+                  null,
+                observedAt:
+                  adversarialMergeRequestedEvent.createdAt ||
+                  adversarialMergeRequestedEvent.created_at ||
+                  null,
+              }
+            : null,
+        },
+        dispatchContext,
+        logger,
+        signal,
+      });
+    } finally {
+      stopTracking();
+    }
     throwIfAborted(signal);
   } catch (err) {
     throwIfAborted(signal);
+    if (err?.code === 'AMA_COEXISTENCE_OPERATION_TIMEOUT') {
+      throw err;
+    }
     logger?.warn?.(`[watcher] AMA dispatch failed: ${err?.message || err}`);
     // Carry the ground-truth HAM proof into the failure result. AMA can fail to
     // dispatch its own closer for reasons unrelated to the remediation's validity
@@ -1154,6 +1328,8 @@ export async function resolveMergeAgentCoexistenceForWatcher({
   logger,
   maybeDispatchAmaClosureForImpl = maybeDispatchAmaClosureFor,
   signal = null,
+  operationTimeoutMs = null,
+  operationTracker = null,
 }) {
   throwIfAborted(signal);
   // BUG-1 dispatch-time terminal guard. `candidate` is the live PR read for
@@ -1174,25 +1350,53 @@ export async function resolveMergeAgentCoexistenceForWatcher({
   if (liveMerged) {
     return { outcome: 'pr-terminal', terminalReason: 'merged' };
   }
-  const amaClosureResult = await maybeDispatchAmaClosureForImpl({
-    rootDir,
-    reviewStateRow,
-    dispatchJob,
-    candidate,
-    labelNames,
-    operatorApprovalEvent,
-    // Deliverable 1 — thread the operator merge-agent-requested label event into
-    // the closure dispatch so the daemon path can substitute it for an unresolved
-    // worker identity (head-scoped) instead of parking.
-    mergeAgentRequestEvent,
-    adversarialMergeRequestedEvent,
-    repoPath,
-    prNumber,
-    currentRevisionRef,
-    domainId,
-    logger,
-    signal,
-  });
+  let amaClosureResult;
+  try {
+    amaClosureResult = await maybeDispatchAmaClosureForImpl({
+      rootDir,
+      reviewStateRow,
+      dispatchJob,
+      candidate,
+      labelNames,
+      operatorApprovalEvent,
+      // Deliverable 1 — thread the operator merge-agent-requested label event into
+      // the closure dispatch so the daemon path can substitute it for an unresolved
+      // worker identity (head-scoped) instead of parking.
+      mergeAgentRequestEvent,
+      adversarialMergeRequestedEvent,
+      repoPath,
+      prNumber,
+      currentRevisionRef,
+      domainId,
+      logger,
+      signal,
+      operationTimeoutMs,
+      operationTracker,
+    });
+  } catch (err) {
+    throwIfAborted(signal);
+    if (err?.code !== 'AMA_COEXISTENCE_OPERATION_TIMEOUT') throw err;
+    const operation = err.operation || operationTracker?.current || 'unknown';
+    logger?.warn?.(
+      `[watcher] AMA/merge-agent coexistence internal timeout for ${repoPath}#${prNumber}: ` +
+        `operation=${operation} timeout_ms=${err.timeoutMs || operationTimeoutMs || 'unknown'}. ` +
+        'Skipping merge action for this PR on this tick so the posted-review phase can continue.',
+    );
+    return {
+      outcome: 'ama-pending',
+      amaClosureResult: withAmaDispatchMetadata(
+        {
+          dispatched: false,
+          skipMergeAgent: true,
+          reason: 'ama-coexistence-operation-timeout',
+          namedReason: `ama-coexistence-operation-timeout:${operation}`,
+          timedOutOperation: operation,
+          timeoutMs: err.timeoutMs || operationTimeoutMs || null,
+        },
+        { amaEnabled: true },
+      ),
+    };
+  }
   throwIfAborted(signal);
   if (amaClosureResult?.dispatched) {
     return { outcome: 'ama-dispatched', amaClosureResult };

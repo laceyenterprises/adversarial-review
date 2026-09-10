@@ -40,6 +40,7 @@ const {
   parseClaudeJsonOutput,
   parseCodexJsonTokenUsage,
   queueFollowUpForPostedReview,
+  resolveClaudeLaunchctlUidForSpawn,
   resolveCodexAuthPath,
   resolveCodexExecOverrides,
   resolveReviewerTimeoutMs,
@@ -2476,6 +2477,25 @@ test('spawnClaude invokes claude directly on non-darwin platforms', async () => 
   ]);
 });
 
+test('resolveClaudeLaunchctlUidForSpawn requires configured admin UID on darwin', async () => {
+  const uid = await resolveClaudeLaunchctlUidForSpawn({
+    platform: 'darwin',
+    env: { AGENT_OS_ROOTS_ADMIN_UID: '501' },
+    resolveClaudeLaunchctlUidImpl: async ({ env }) => Number(env.AGENT_OS_ROOTS_ADMIN_UID),
+    logger: { warn() {} },
+  });
+  assert.equal(uid, 501);
+
+  await assert.rejects(
+    () => resolveClaudeLaunchctlUidForSpawn({
+      platform: 'darwin',
+      resolveClaudeLaunchctlUidImpl: async () => null,
+      logger: { warn() {} },
+    }),
+    /Cannot resolve configured admin uid/
+  );
+});
+
 test('buildClaudeReviewArgs requests json output for exact usage capture', () => {
   const args = buildClaudeReviewArgs('the prompt');
   const oIdx = args.indexOf('--output-format');
@@ -2809,8 +2829,10 @@ test('spawnClaude classifies launchctl session failures separately from oauth fa
 test('assertClaudeOAuth retries bounded launchctl session failures', async () => {
   let attempts = 0;
   const delays = [];
+  const seenUids = [];
   await assertClaudeOAuth({
-    spawnClaudeImpl: async () => {
+    spawnClaudeImpl: async (_args, options) => {
+      seenUids.push(options.uid);
       attempts += 1;
       if (attempts < 3) {
         const err = new Error('launchctl settling');
@@ -2819,18 +2841,23 @@ test('assertClaudeOAuth retries bounded launchctl session failures', async () =>
       }
       return { stdout: '{"loggedIn":true}', stderr: '' };
     },
+    resolveClaudeLaunchctlUidImpl: async () => 501,
+    platform: 'darwin',
     retryDelaysMs: [1, 2],
     sleepImpl: async (delay) => delays.push(delay),
   });
   assert.equal(attempts, 3);
   assert.deepEqual(delays, [1, 2]);
+  assert.deepEqual(seenUids, [501, 501, 501]);
 });
 
 test('reviewWithClaude retries bounded launchctl session failures', async () => {
   let attempts = 0;
+  const seenUids = [];
   const result = await reviewWithClaude('+diff\n', '', {
     assertClaudeOAuthImpl: async () => {},
-    spawnClaudeImpl: async () => {
+    spawnClaudeImpl: async (_args, options) => {
+      seenUids.push(options.uid);
       attempts += 1;
       if (attempts === 1) {
         const err = new Error('launchctl settling');
@@ -2839,10 +2866,13 @@ test('reviewWithClaude retries bounded launchctl session failures', async () => 
       }
       return { stdout: JSON.stringify({ result: '## Verdict\nComment only', usage: {} }), stderr: '' };
     },
+    resolveClaudeLaunchctlUidImpl: async () => 501,
+    platform: 'darwin',
     launchctlRetryDelaysMs: [1],
     sleepImpl: async () => {},
   });
   assert.equal(attempts, 2);
+  assert.deepEqual(seenUids, [501, 501]);
   assert.equal(result.reviewText, '## Verdict\nComment only');
 });
 

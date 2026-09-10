@@ -51,6 +51,7 @@ import {
 } from './argus-security-route.mjs';
 import { findArgusJob } from './argus-security-queue.mjs';
 import { isUnroutableBotAuthor } from './bot-author.mjs';
+import { resolveClaudeLaunchctlUidFromConfig } from './claude-launchctl-uid.mjs';
 import { loadConfigCached } from './config-loader.mjs';
 import { maybeAutoAdjudicateDependencyBotArgusJob } from './dependency-bot-autoadjudication.mjs';
 import { isPipelineEnabled } from './domain-pipeline.mjs';
@@ -431,8 +432,13 @@ function reviewerWorkerClassForRoute(route) {
   return REVIEWER_WORKER_CLASS_BY_MODEL[reviewerModel] || reviewerModel;
 }
 
-function reviewerDispatchUid() {
-  return typeof process.getuid === 'function' ? process.getuid() : null;
+export async function resolveClaudeRuntimeProbeUidForWatcher({
+  loadConfigImpl = loadConfigCached,
+  execFileImpl = undefined,
+  env = process.env,
+  logger = console,
+} = {}) {
+  return resolveClaudeLaunchctlUidFromConfig({ loadConfigImpl, execFileImpl, env, logger });
 }
 
 export async function processReviewSubject(entry, ctx) {
@@ -1283,15 +1289,22 @@ export async function processReviewSubject(entry, ctx) {
       // per tick and fail-open: an unavailable/unreadable `hq fleet quota status
       // --json` yields a snapshot with `available: false`, which leaves the
       // configured primary/gemini route untouched. The local Claude bridge probe
-      // is keyed by the dispatch UID resolved here, not guessed inside the
-      // module-scope cache. It can never throw here.
+      // is keyed by the configured operator/admin UID resolved here, not guessed
+      // inside the module-scope cache. It can never throw here.
       let afhGrounding = null;
       {
         const readAfhGrounding = typeof getAfhReviewerGroundingForTick === 'function'
           ? getAfhReviewerGroundingForTick
           : defaultAfhReviewerGroundingForTick;
         try {
-          afhGrounding = await readAfhGrounding({ claudeRuntimeProbeUid: reviewerDispatchUid() });
+          const claudeRuntimeProbeUid = await resolveClaudeRuntimeProbeUidForWatcher({
+            execFileImpl: execFileAsync,
+            env: process.env,
+            logger: console,
+          });
+          afhGrounding = await readAfhGrounding(
+            claudeRuntimeProbeUid === null ? {} : { claudeRuntimeProbeUid }
+          );
         } catch (err) {
           afhGrounding = null;
           console.warn(

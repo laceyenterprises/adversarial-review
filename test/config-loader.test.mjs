@@ -964,7 +964,7 @@ test('roots.hq from top-level resolves with trace', () => {
   }
 });
 
-test('roots runtime/admin users load through strict Node schema', () => {
+test('roots runtime/admin users and UIDs load through strict Node schema', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -972,11 +972,39 @@ test('roots runtime/admin users load through strict Node schema', () => {
       version: 1
       roots:
         runtime_user: _runtime-agent
+        runtime_uid: 502
         admin_user: fork-admin
+        admin_uid: 501
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(cfg.get('roots.runtime_user'), '_runtime-agent');
+    assert.equal(cfg.get('roots.runtime_uid'), 502);
     assert.equal(cfg.get('roots.admin_user'), 'fork-admin');
+    assert.equal(cfg.get('roots.admin_uid'), 501);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('roots runtime/admin users and UIDs load from canonical env aliases', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\n');
+    const cfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_ROOTS_RUNTIME_USER: 'runtime-agent',
+        AGENT_OS_ROOTS_RUNTIME_UID: '502',
+        AGENT_OS_ROOTS_ADMIN_USER: 'placey',
+        AGENT_OS_ROOTS_ADMIN_UID: '501',
+      },
+    });
+    assert.equal(cfg.get('roots.runtime_user'), 'runtime-agent');
+    assert.equal(cfg.get('roots.runtime_uid'), 502);
+    assert.equal(cfg.get('roots.admin_user'), 'placey');
+    assert.equal(cfg.get('roots.admin_uid'), 501);
+    assert.equal(cfg.resolutionTrace('roots.admin_uid').at(-1).source, 'env:AGENT_OS_ROOTS_ADMIN_UID');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -1005,6 +1033,35 @@ test('roots runtime/admin users reject invalid local username shapes', () => {
           assert.ok(err instanceof AgentOSConfigError);
           assert.equal(err.key, `roots.${key}`);
           assert.match(err.message, /local username/);
+          return true;
+        },
+      );
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('roots runtime/admin UIDs reject non-positive values', () => {
+  const tmp = freshTmp();
+  try {
+    const cases = [
+      ['runtime_uid', 0],
+      ['admin_uid', -1],
+    ];
+    for (const [key, value] of cases) {
+      const top = join(tmp, `bad-${key}.yaml`);
+      writeFile(top, `
+        version: 1
+        roots:
+          ${key}: ${value}
+      `);
+      assert.throws(
+        () => loadConfig({ topPath: top, env: {} }),
+        (err) => {
+          assert.ok(err instanceof AgentOSConfigError);
+          assert.equal(err.key, `roots.${key}`);
+          assert.match(err.message, /below minimum 1/);
           return true;
         },
       );

@@ -15,6 +15,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { resolveClaudeLaunchctlUidFromConfig } from '../src/claude-launchctl-uid.mjs';
 import {
   createWatcherHeartbeat,
   createWatcherStallWatchdog,
@@ -54,6 +55,7 @@ import {
 import {
   enforceHcpPreSpawnReadiness,
   processReviewSubject,
+  resolveClaudeRuntimeProbeUidForWatcher,
 } from '../src/pollonce-phases.mjs';
 
 const HEAD_A = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -723,6 +725,111 @@ test('WPS-01: processReviewSubject queues posted-review handler with the SUBJECT
     false,
     'posted-review handlers use the scheduler ceiling, not the merge-authority dispatch timeout',
   );
+});
+
+test('RVHAND-10: Claude runtime probe UID prefers configured admin_uid', async () => {
+  let lookups = 0;
+  const uid = await resolveClaudeRuntimeProbeUidForWatcher({
+    loadConfigImpl: () => ({
+      get(key, fallback = null) {
+        if (key === 'roots.admin_uid') return 501;
+        if (key === 'roots.admin_user') return 'placey';
+        return fallback;
+      },
+    }),
+    execFileImpl: async () => {
+      lookups += 1;
+      return { stdout: '502\n' };
+    },
+    env: {},
+    logger: silentLogger,
+  });
+
+  assert.equal(uid, 501);
+  assert.equal(lookups, 0, 'the pinned admin UID is authoritative');
+});
+
+test('RVHAND-10: Claude runtime probe UID resolves configured admin_user', async () => {
+  const calls = [];
+  const uid = await resolveClaudeRuntimeProbeUidForWatcher({
+    loadConfigImpl: () => ({
+      get(key, fallback = null) {
+        if (key === 'roots.admin_uid') return null;
+        if (key === 'roots.admin_user') return 'placey';
+        return fallback;
+      },
+    }),
+    execFileImpl: async (cmd, args, options) => {
+      calls.push({ cmd, args, timeout: options.timeout });
+      return { stdout: '501\n' };
+    },
+    env: { PATH: process.env.PATH },
+    logger: silentLogger,
+  });
+
+  assert.equal(uid, 501);
+  assert.deepEqual(calls, [
+    { cmd: '/usr/bin/id', args: ['-u', 'placey'], timeout: 2_000 },
+  ]);
+});
+
+test('RVHAND-10: Claude runtime UID lookup retries transient id failures', async () => {
+  let attempts = 0;
+  const delays = [];
+  const warnings = [];
+  const uid = await resolveClaudeLaunchctlUidFromConfig({
+    loadConfigImpl: () => ({
+      get(key, fallback = null) {
+        if (key === 'roots.admin_uid') return null;
+        if (key === 'roots.admin_user') return 'placey';
+        return fallback;
+      },
+    }),
+    execFileImpl: async () => {
+      attempts += 1;
+      if (attempts < 3) {
+        const err = new Error('OpenDirectory temporary lookup failure');
+        err.code = 'EIO';
+        throw err;
+      }
+      return { stdout: '501\n' };
+    },
+    lookupRetryDelaysMs: [1, 2],
+    sleepImpl: async (delay) => delays.push(delay),
+    env: {},
+    logger: { warn: (message) => warnings.push(message) },
+  });
+
+  assert.equal(uid, 501);
+  assert.equal(attempts, 3);
+  assert.deepEqual(delays, [1, 2]);
+  assert.match(warnings.join('\n'), /retrying in 1ms/);
+  assert.doesNotMatch(warnings.join('\n'), /skipping local runtime grounding/);
+});
+
+test('RVHAND-10: Claude runtime probe UID skips local grounding on malformed ownership config', async () => {
+  let lookups = 0;
+  const warnings = [];
+  const uid = await resolveClaudeRuntimeProbeUidForWatcher({
+    loadConfigImpl: () => ({
+      get(key, fallback = null) {
+        if (key === 'roots.admin_uid') return 'not-a-uid';
+        if (key === 'roots.admin_user') return 'placey';
+        return fallback;
+      },
+    }),
+    execFileImpl: async () => {
+      lookups += 1;
+      return { stdout: '501\n' };
+    },
+    env: {},
+    logger: { warn: (message) => warnings.push(message) },
+  });
+
+  assert.equal(uid, null);
+  assert.equal(lookups, 0, 'a malformed explicit UID must not fall back to guessing by user');
+  assert.match(warnings.join('\n'), /invalid/);
+  assert.doesNotMatch(warnings.join('\n'), /skipping local runtime grounding/);
 });
 
 test('HCP pre-spawn precheck requeues when down and proceeds when up', async () => {

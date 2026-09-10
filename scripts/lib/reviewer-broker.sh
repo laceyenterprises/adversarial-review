@@ -29,6 +29,7 @@
 # Env contract per role:
 #   <ROLE>_AUTH_VIA_BROKER          # 'true' enables broker path
 #   OAUTH_BROKER_URL                # default http://127.0.0.1:4099
+#   OAUTH_BROKER_URL_FALLBACK       # default http://127.0.0.1:4097
 #   OAUTH_BROKER_<ROLE>_PROVIDER    # default github-app-<role>
 #   OAUTH_BROKER_<ROLE>_EXPECTED_APP_ID
 #   OAUTH_BROKER_<ROLE>_EXPECTED_INSTALLATION_ID
@@ -64,6 +65,14 @@ _reviewer_broker_fetch_timeout_seconds() {
     awk -v ms="$timeout_ms" 'BEGIN { printf "%.3f", ms / 1000 }'
 }
 
+_reviewer_broker_failure_is_transient_http() {
+    local http_code="$1"
+    case "$http_code" in
+      000|408|409|425|429|5??|"") return 0 ;;
+      *) return 1 ;;
+    esac
+}
+
 reviewer_broker_mode_enabled() {
     local role="$1"
     local role_upper
@@ -90,7 +99,10 @@ resolve_reviewer_token_via_broker() {
     local role_upper
     role_upper="$(printf '%s' "$role" | tr '[:lower:]-' '[:upper:]_')"
 
-    local broker_url="${OAUTH_BROKER_URL:-http://127.0.0.1:4099}"
+    local primary_broker_url="${OAUTH_BROKER_URL:-http://127.0.0.1:4099}"
+    local fallback_broker_url="${OAUTH_BROKER_URL_FALLBACK:-http://127.0.0.1:4097}"
+    primary_broker_url="${primary_broker_url%/}"
+    fallback_broker_url="${fallback_broker_url%/}"
     local provider_env="OAUTH_BROKER_${role_upper}_PROVIDER"
     local broker_provider
     broker_provider="$(_reviewer_broker_indirect "$provider_env")"
@@ -133,69 +145,102 @@ resolve_reviewer_token_via_broker() {
     fi
 
     local response_file curl_stderr_file http_code response_body="" curl_stderr="" timeout_seconds curl_rc=0
+    local broker_url="" first_broker_url="" is_fallback="false"
     timeout_seconds="$(_reviewer_broker_fetch_timeout_seconds)"
-    response_file="$(mktemp -t reviewer-broker-resp.XXXXXX)"
-    curl_stderr_file="$(mktemp -t reviewer-broker-curl.XXXXXX)"
-    http_code="$(curl -sS --fail-with-body \
-        --connect-timeout "$timeout_seconds" \
-        --max-time "$timeout_seconds" \
-        -w '%{http_code}' \
-        -o "$response_file" \
-        -H "Authorization: Bearer $broker_secret" \
-        -H "Accept: application/json" \
-        "${broker_url%/}/token?provider=${broker_provider}" \
-        2>"$curl_stderr_file")" || curl_rc=$?
-    curl_stderr="$(tr '\n' ' ' <"$curl_stderr_file" 2>/dev/null | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//' || true)"
-    rm -f "$curl_stderr_file"
+    for broker_url in "$primary_broker_url" "$fallback_broker_url"; do
+        [[ -n "$broker_url" ]] || continue
+        if [[ -n "$first_broker_url" && "$broker_url" == "$first_broker_url" ]]; then
+            continue
+        fi
+        if [[ -z "$first_broker_url" ]]; then
+            first_broker_url="$broker_url"
+            is_fallback="false"
+        else
+            is_fallback="true"
+        fi
+
+        response_file="$(mktemp -t reviewer-broker-resp.XXXXXX)"
+        curl_stderr_file="$(mktemp -t reviewer-broker-curl.XXXXXX)"
+        curl_rc=0
+        http_code="$(curl -sS --fail-with-body \
+            --connect-timeout "$timeout_seconds" \
+            --max-time "$timeout_seconds" \
+            -w '%{http_code}' \
+            -o "$response_file" \
+            -H "Authorization: Bearer $broker_secret" \
+            -H "Accept: application/json" \
+            "${broker_url}/token?provider=${broker_provider}" \
+            2>"$curl_stderr_file")" || curl_rc=$?
+        curl_stderr="$(tr '\n' ' ' <"$curl_stderr_file" 2>/dev/null | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//' || true)"
+        rm -f "$curl_stderr_file"
+
+        if [[ "$http_code" != "200" ]]; then
+            response_body="$(head -c 256 "$response_file" 2>/dev/null || true)"
+            rm -f "$response_file"
+            if _reviewer_broker_failure_is_transient_http "$http_code"; then
+                REVIEWER_BROKER_FAILURE_CLASS="transient"
+            else
+                REVIEWER_BROKER_FAILURE_CLASS="permanent"
+            fi
+            if [[ "$curl_rc" -ne 0 && ( -z "$http_code" || "$http_code" == "000" ) ]]; then
+                REVIEWER_BROKER_FAILURE_CLASS="transient"
+            fi
+            echo "[reviewer-broker] broker mode (${role}): ${broker_url} returned HTTP ${http_code:-<no-code>}; stderr: ${curl_stderr:-<none>}; body[:256]: ${response_body:-<empty>}" >&2
+            if [[ "$is_fallback" != "true" && "$REVIEWER_BROKER_FAILURE_CLASS" == "transient" && -n "$fallback_broker_url" && "$fallback_broker_url" != "$primary_broker_url" ]]; then
+                echo "[reviewer-broker] broker mode (${role}): trying fallback broker ${fallback_broker_url}" >&2
+                continue
+            fi
+            broker_secret=""
+            unset broker_secret
+            return 1
+        fi
+
+        local access_token actual_provider actual_app_id actual_installation_id
+        access_token="$(jq -r '.access_token // empty' <"$response_file" 2>/dev/null)"
+        actual_provider="$(jq -r '.provider // empty' <"$response_file" 2>/dev/null)"
+        actual_app_id="$(jq -r '.metadata.app_id // empty' <"$response_file" 2>/dev/null)"
+        actual_installation_id="$(jq -r '.metadata.installation_id // empty' <"$response_file" 2>/dev/null)"
+        rm -f "$response_file"
+        broker_secret=""
+        unset broker_secret
+
+        if [[ -z "$access_token" ]]; then
+            REVIEWER_BROKER_FAILURE_CLASS="permanent"
+            echo "[reviewer-broker] broker mode (${role}): response missing access_token field from ${broker_url}" >&2
+            return 1
+        fi
+
+        if [[ "$actual_provider" != "$broker_provider" ]]; then
+            REVIEWER_BROKER_FAILURE_CLASS="permanent"
+            echo "[reviewer-broker] broker mode (${role}): response.provider='${actual_provider}' does not match expected '${broker_provider}' from ${broker_url}" >&2
+            return 1
+        fi
+        if [[ -n "$expected_app_id" && "$actual_app_id" != "$expected_app_id" ]]; then
+            REVIEWER_BROKER_FAILURE_CLASS="permanent"
+            echo "[reviewer-broker] broker mode (${role}): response.metadata.app_id='${actual_app_id}' does not match expected '${expected_app_id}' (${expected_app_id_env}) from ${broker_url}" >&2
+            return 1
+        fi
+        if [[ -n "$expected_installation_id" && "$actual_installation_id" != "$expected_installation_id" ]]; then
+            REVIEWER_BROKER_FAILURE_CLASS="permanent"
+            echo "[reviewer-broker] broker mode (${role}): response.metadata.installation_id='${actual_installation_id}' does not match expected '${expected_installation_id}' (${expected_installation_id_env}) from ${broker_url}" >&2
+            return 1
+        fi
+
+        REVIEWER_BROKER_FAILURE_CLASS=""
+        export "${target_env}=${access_token}"
+        if [[ "$is_fallback" == "true" ]]; then
+            echo "[reviewer-broker] resolved ${target_env} via OAuth broker fallback ${broker_url} (role=${role} provider=${actual_provider} app_id=${actual_app_id} installation_id=${actual_installation_id})" >&2
+        else
+            echo "[reviewer-broker] resolved ${target_env} via OAuth broker (role=${role} provider=${actual_provider} app_id=${actual_app_id} installation_id=${actual_installation_id})" >&2
+        fi
+        return 0
+    done
+
     broker_secret=""
     unset broker_secret
-
-    if [[ "$http_code" != "200" ]]; then
-        response_body="$(head -c 256 "$response_file" 2>/dev/null || true)"
-        rm -f "$response_file"
-        case "$http_code" in
-          000|408|409|425|429|5??|"") REVIEWER_BROKER_FAILURE_CLASS="transient" ;;
-          *) REVIEWER_BROKER_FAILURE_CLASS="permanent" ;;
-        esac
-        if [[ "$curl_rc" -ne 0 && ( -z "$http_code" || "$http_code" == "000" ) ]]; then
-            REVIEWER_BROKER_FAILURE_CLASS="transient"
-        fi
-        echo "[reviewer-broker] broker mode (${role}): ${broker_url} returned HTTP ${http_code:-<no-code>}; stderr: ${curl_stderr:-<none>}; body[:256]: ${response_body:-<empty>}" >&2
-        return 1
-    fi
-
-    local access_token actual_provider actual_app_id actual_installation_id
-    access_token="$(jq -r '.access_token // empty' <"$response_file" 2>/dev/null)"
-    actual_provider="$(jq -r '.provider // empty' <"$response_file" 2>/dev/null)"
-    actual_app_id="$(jq -r '.metadata.app_id // empty' <"$response_file" 2>/dev/null)"
-    actual_installation_id="$(jq -r '.metadata.installation_id // empty' <"$response_file" 2>/dev/null)"
-    rm -f "$response_file"
-
-    if [[ -z "$access_token" ]]; then
-        REVIEWER_BROKER_FAILURE_CLASS="permanent"
-        echo "[reviewer-broker] broker mode (${role}): response missing access_token field" >&2
-        return 1
-    fi
-
-    if [[ "$actual_provider" != "$broker_provider" ]]; then
-        REVIEWER_BROKER_FAILURE_CLASS="permanent"
-        echo "[reviewer-broker] broker mode (${role}): response.provider='${actual_provider}' does not match expected '${broker_provider}'" >&2
-        return 1
-    fi
-    if [[ -n "$expected_app_id" && "$actual_app_id" != "$expected_app_id" ]]; then
-        REVIEWER_BROKER_FAILURE_CLASS="permanent"
-        echo "[reviewer-broker] broker mode (${role}): response.metadata.app_id='${actual_app_id}' does not match expected '${expected_app_id}' (${expected_app_id_env})" >&2
-        return 1
-    fi
-    if [[ -n "$expected_installation_id" && "$actual_installation_id" != "$expected_installation_id" ]]; then
-        REVIEWER_BROKER_FAILURE_CLASS="permanent"
-        echo "[reviewer-broker] broker mode (${role}): response.metadata.installation_id='${actual_installation_id}' does not match expected '${expected_installation_id}' (${expected_installation_id_env})" >&2
-        return 1
-    fi
-
-    export "${target_env}=${access_token}"
-    echo "[reviewer-broker] resolved ${target_env} via OAuth broker (role=${role} provider=${actual_provider} app_id=${actual_app_id} installation_id=${actual_installation_id})" >&2
-    return 0
+    REVIEWER_BROKER_FAILURE_CLASS="permanent"
+    echo "[reviewer-broker] broker mode (${role}): no OAuth broker URLs configured" >&2
+    return 1
 }
 
 # Combined entry point. Calls broker if the role-flag is enabled; on

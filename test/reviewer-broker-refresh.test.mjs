@@ -472,6 +472,50 @@ test('FAIL-SAFE: broker non-200 keeps the existing token (never blanks it)', asy
   assert.match(summary.failed[0].reason, /HTTP 503/);
 });
 
+test('uses standby broker after transient primary failure', async () => {
+  _resetReviewerTokenRefreshClockForTest();
+  const env = makeEnv({ OAUTH_BROKER_URL_FALLBACK: 'http://127.0.0.1:4097' });
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(url);
+    if (url.startsWith('http://127.0.0.1:4099/')) {
+      return { ok: false, status: 503, async json() { return {}; } };
+    }
+    return brokerOk('github-app-claude-reviewer', 'ghs_STANDBY_token', {
+      expiresAt: new Date(1_000_000 + HOUR_MS).toISOString(),
+    });
+  };
+  const summary = await refreshReviewerBrokerTokens({
+    env, now: 1_000_000, fetchImpl, readFileImpl: readSecret, log: silentLog,
+  });
+  assert.deepEqual(calls, [
+    'http://127.0.0.1:4099/token?provider=github-app-claude-reviewer',
+    'http://127.0.0.1:4097/token?provider=github-app-claude-reviewer',
+  ]);
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_STANDBY_token');
+  assert.equal(summary.refreshed[0].brokerUrl, 'http://127.0.0.1:4097');
+});
+
+test('does not use standby after primary returns the wrong App identity', async () => {
+  _resetReviewerTokenRefreshClockForTest();
+  const env = makeEnv({ OAUTH_BROKER_URL_FALLBACK: 'http://127.0.0.1:4097' });
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(url);
+    return brokerOk('github-app-other-reviewer', 'ghs_WRONG_identity', {
+      expiresAt: new Date(1_000_000 + HOUR_MS).toISOString(),
+    });
+  };
+  const summary = await refreshReviewerBrokerTokens({
+    env, now: 1_000_000, fetchImpl, readFileImpl: readSecret, log: silentLog,
+  });
+  assert.deepEqual(calls, [
+    'http://127.0.0.1:4099/token?provider=github-app-claude-reviewer',
+  ]);
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token');
+  assert.match(summary.failed[0].reason, /response\.provider/);
+});
+
 test('FAIL-SAFE: broker unreachable (fetch throws) keeps the existing token', async () => {
   _resetReviewerTokenRefreshClockForTest();
   const env = makeEnv();

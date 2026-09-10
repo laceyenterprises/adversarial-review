@@ -195,6 +195,77 @@ test('reviewer exec fallback uses audited same-family last resort after repeated
   }
 });
 
+test('reviewer exec fallback uses cascade breakdown after exact-head rearm even when HCP failed last', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'reviewer-exact-rearm-fallback-'));
+  const repo = 'laceyenterprises/agent-os';
+  const prNumber = 6548;
+  try {
+    for (const [i, failureClass] of ['quota-exhausted', 'quota-exhausted', 'hcp-unavailable'].entries()) {
+      recordCascadeFailure(rootDir, {
+        repo,
+        prNumber,
+        failedAt: `2026-09-10T12:0${i}:00.000Z`,
+        failureClass,
+      });
+    }
+
+    const route = selectReviewerRouteForAttempt({
+      rootDir,
+      repoPath: repo,
+      prNumber,
+      subject: { builderClass: 'codex' },
+      baseRoute: {
+        builderClass: 'codex',
+        tag: '[codex]',
+        reviewerModel: 'claude',
+        botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+      },
+      currentRow: {
+        review_status: 'pending',
+        reviewer: 'claude',
+        revision_ref: 'head-1',
+      },
+      headSha: 'head-1',
+      afhGrounding: {
+        available: true,
+        providers: {
+          google: { state: 'exhausted', hardGrounded: true, softGrounded: false },
+          openai: { state: 'ok', hardGrounded: false, softGrounded: false },
+        },
+      },
+      env: {},
+    });
+
+    assert.equal(route.reviewerModel, 'codex');
+    assert.equal(route.botTokenEnv, 'GH_CODEX_REVIEWER_TOKEN');
+    assert.equal(route.reviewerModelFallback.fromReviewerModel, 'claude');
+    assert.equal(route.reviewerModelFallback.toReviewerModel, 'codex');
+    assert.equal(route.reviewerModelFallback.failureClass, 'quota-exhausted');
+    assert.equal(route.reviewerModelFallback.failureCount, 2);
+    assert.equal(route.reviewerModelFallback.lastResort, true);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reviewer exec fallback does not switch on HCP-only cascade state', () => {
+  const route = selectAfterFailures({
+    failures: 3,
+    failureClass: 'hcp-unavailable',
+    row: { revision_ref: 'head-1', reviewer_head_sha: null },
+    grounding: {
+      available: true,
+      providers: {
+        anthropic: { state: 'ok', hardGrounded: false, softGrounded: false },
+        google: { state: 'ok', hardGrounded: false, softGrounded: false },
+        openai: { state: 'ok', hardGrounded: false, softGrounded: false },
+      },
+    },
+  });
+  assert.equal(route.reviewerModel, 'gemini');
+  assert.equal(route.reviewerModelFallback, undefined);
+});
+
 test('reviewer exec fallback is keyed to the current head and failed model', () => {
   const staleHead = selectAfterFailures({
     failures: 2,

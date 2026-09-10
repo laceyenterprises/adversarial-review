@@ -75,6 +75,7 @@ const REVIEWER_EXEC_FALLBACK_FAILURE_CLASSES = Object.freeze([
   'launchctl-bootstrap',
   'reviewer-command-failed',
   'oauth-broken',
+  'quota-exhausted',
   'provider-overloaded',
 ]);
 
@@ -134,30 +135,57 @@ function reviewerExecFailureCount(cascadeState, failureClass) {
 }
 
 function reviewerExecFailureSignal({ cascadeState, currentRow }) {
-  const cascadeFailureClass = REVIEWER_EXEC_FALLBACK_FAILURE_CLASSES.includes(cascadeState?.lastFailureClass)
+  const candidates = [];
+  const lastFailureClass = REVIEWER_EXEC_FALLBACK_FAILURE_CLASSES.includes(cascadeState?.lastFailureClass)
     ? cascadeState.lastFailureClass
     : null;
-  const rowFailureClass = REVIEWER_EXEC_FALLBACK_FAILURE_CLASSES.includes(infraRecoverableFailureClass(currentRow))
-    ? infraRecoverableFailureClass(currentRow)
+  const rowRecoverableFailureClass = infraRecoverableFailureClass(currentRow);
+  const rowFailureClass = REVIEWER_EXEC_FALLBACK_FAILURE_CLASSES.includes(rowRecoverableFailureClass)
+    ? rowRecoverableFailureClass
     : null;
-  const failureClass = cascadeFailureClass || rowFailureClass;
-  if (!failureClass) return { failureClass: null, failureCount: 0 };
-  const cascadeCount = cascadeFailureClass === failureClass
-    ? reviewerExecFailureCount(cascadeState, failureClass)
-    : 0;
+
   // Row-level command failures charge infra_auto_recover_attempts when the
   // retry is claimed, so a row sitting after its first failure has 0, after its
   // second same-head failure has 1. Add one to express actual consecutive
   // failures for the threshold check without falling back on the first failure.
-  const rowCount = rowFailureClass === failureClass
-    ? Number(currentRow?.infra_auto_recover_attempts || 0) + 1
-    : 0;
-  return { failureClass, failureCount: Math.max(cascadeCount, rowCount) };
+  if (rowFailureClass) {
+    candidates.push({
+      failureClass: rowFailureClass,
+      failureCount: Number(currentRow?.infra_auto_recover_attempts || 0) + 1,
+      priority: 3,
+    });
+  }
+
+  for (const failureClass of REVIEWER_EXEC_FALLBACK_FAILURE_CLASSES) {
+    const failureCount = reviewerExecFailureCount(cascadeState, failureClass);
+    if (failureCount <= 0) continue;
+    candidates.push({
+      failureClass,
+      failureCount,
+      priority: failureClass === lastFailureClass ? 2 : 1,
+    });
+  }
+
+  if (candidates.length === 0) return { failureClass: null, failureCount: 0 };
+  candidates.sort((left, right) => (
+    (right.failureCount - left.failureCount)
+    || (right.priority - left.priority)
+    || left.failureClass.localeCompare(right.failureClass)
+  ));
+  return {
+    failureClass: candidates[0].failureClass,
+    failureCount: candidates[0].failureCount,
+  };
 }
 
 function currentRowHeadMatches(row, headSha) {
   if (!row || !headSha) return false;
-  return String(row.reviewer_head_sha || '') === String(headSha || '');
+  const expected = String(headSha || '');
+  return [
+    row.reviewer_head_sha,
+    row.revision_ref,
+    row.head_sha,
+  ].some((candidate) => String(candidate || '') === expected);
 }
 
 function modelMayReviewBuilder(model, builderClass) {

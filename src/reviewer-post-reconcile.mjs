@@ -47,7 +47,13 @@ function parseGitHubJsonArray(stdout) {
   const jsonStart = text.search(/[\[{]/);
   const payload = jsonStart >= 0 ? text.slice(jsonStart).trim() : text;
   const parsed = JSON.parse(payload);
-  if (Array.isArray(parsed)) return parsed;
+  if (Array.isArray(parsed)) {
+    return parsed.flatMap((page) => {
+      if (Array.isArray(page)) return page;
+      if (Array.isArray(page?.data)) return page.data;
+      return [page];
+    });
+  }
   if (Array.isArray(parsed?.data)) return parsed.data;
   return [];
 }
@@ -71,7 +77,7 @@ async function findMatchingSubmittedReviewAfterAmbiguousPost({
   try {
     response = await execFileImpl(
       'gh',
-      ['api', `repos/${repo}/pulls/${prNumber}/reviews`, '--paginate'],
+      ['api', `repos/${repo}/pulls/${prNumber}/reviews`, '--paginate', '--slurp'],
       {
         env,
         maxBuffer: 5 * 1024 * 1024,

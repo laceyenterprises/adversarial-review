@@ -162,6 +162,73 @@ test('resolve_reviewer_token_via_broker bounds broker curl with fetch timeout op
   assert.match(curlArgs, /--max-time\n0\.250\n/);
 });
 
+test('resolve_reviewer_token_via_broker uses standby after transient primary failure', () => {
+  const root = mkdtempSync(join(tmpdir(), 'reviewer-broker-fallback-'));
+  const bin = join(root, 'bin');
+  const secretFile = join(root, 'secret');
+  const urlsFile = join(root, 'curl-urls.txt');
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(secretFile, 'shared-secret', 'utf8');
+  writeExecutable(
+    join(bin, 'curl'),
+    '#!/bin/bash\n'
+      + 'response_file=""\n'
+      + 'url=""\n'
+      + 'while [[ "$#" -gt 0 ]]; do\n'
+      + '  if [[ "$1" == "-o" ]]; then shift; response_file="$1"; else url="$1"; fi\n'
+      + '  shift || true\n'
+      + 'done\n'
+      + 'printf "%s\\n" "$url" >>"$TEST_CURL_URLS_FILE"\n'
+      + 'if [[ "$url" == http://primary.invalid/* ]]; then printf "000"; exit 7; fi\n'
+      + 'cat >"$response_file" <<JSON\n'
+      + '{"access_token":"ghs_STANDBY","provider":"github-app-claude-reviewer","metadata":{"app_id":"3994110","installation_id":"138772505"}}\n'
+      + 'JSON\n'
+      + 'printf "200"\n',
+  );
+  writeExecutable(
+    join(bin, 'jq'),
+    '#!/bin/bash\n'
+      + 'expr="$2"\n'
+      + 'case "$expr" in\n'
+      + '  *access_token*) echo ghs_STANDBY ;;\n'
+      + '  *provider*) echo github-app-claude-reviewer ;;\n'
+      + '  *app_id*) echo 3994110 ;;\n'
+      + '  *installation_id*) echo 138772505 ;;\n'
+      + '  *) exit 1 ;;\n'
+      + 'esac\n',
+  );
+  const out = execFileSync(
+    '/bin/bash',
+    [
+      '-c',
+      `source "${HELPER}"; resolve_reviewer_token_via_broker GH_FAKE_REVIEWER_TOKEN claude-reviewer 2>&1; echo "rc=$? token=$GH_FAKE_REVIEWER_TOKEN class=$REVIEWER_BROKER_FAILURE_CLASS"`,
+    ],
+    {
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        OAUTH_BROKER_URL: 'http://primary.invalid',
+        OAUTH_BROKER_URL_FALLBACK: 'http://standby.invalid',
+        OAUTH_BROKER_SHARED_SECRET_FILE: secretFile,
+        OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_APP_ID: '3994110',
+        OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_INSTALLATION_ID: '138772505',
+        TEST_CURL_URLS_FILE: urlsFile,
+      },
+      encoding: 'utf8',
+    },
+  );
+  assert.match(out, /trying fallback broker http:\/\/standby\.invalid/);
+  assert.match(out, /resolved GH_FAKE_REVIEWER_TOKEN via OAuth broker fallback/);
+  assert.match(out, /rc=0 token=ghs_STANDBY class=\n?$/);
+  assert.deepEqual(
+    readFileSync(urlsFile, 'utf8').trim().split('\n'),
+    [
+      'http://primary.invalid/token?provider=github-app-claude-reviewer',
+      'http://standby.invalid/token?provider=github-app-claude-reviewer',
+    ],
+  );
+});
+
 test('watcher start scripts source the reviewer-broker helper', () => {
   for (const name of [
     'adversarial-watcher-start.sh',

@@ -28,6 +28,7 @@ import { readFileSync } from 'node:fs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 
 const DEFAULT_OAUTH_BROKER_URL = 'http://127.0.0.1:4099';
+const DEFAULT_OAUTH_BROKER_FALLBACK_URL = 'http://127.0.0.1:4097';
 
 // Refresh when the current token is within this much of its real expiry.
 // We key off the broker response's `expires_at` rather than a blind
@@ -122,6 +123,30 @@ export function _resetReviewerTokenRefreshClockForTest() {
 }
 
 class ReviewerTokenTooShortError extends Error {}
+class BrokerTokenFetchError extends Error {
+  constructor(message, { transient = false } = {}) {
+    super(message);
+    this.name = 'BrokerTokenFetchError';
+    this.transient = transient;
+  }
+}
+
+function brokerHttpStatusIsTransient(status) {
+  return (
+    status === 0
+    || status === 408
+    || status === 409
+    || status === 425
+    || status === 429
+    || (status >= 500 && status <= 599)
+  );
+}
+
+function brokerFetchErrorIsTransient(err) {
+  if (err instanceof BrokerTokenFetchError) return err.transient;
+  return /aborted|AbortError|ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|fetch failed|network/i
+    .test(String(err?.message || err));
+}
 
 function reviewerTokenHandoffState({ role, envVar, env, now, requiredLifetimeMs }) {
   const base = { role, envVar };
@@ -163,15 +188,22 @@ function recordReviewerTokenHandoffState(summary, opts) {
   return state;
 }
 
+function brokerUrlsForEnv(env) {
+  const primary = String(env.OAUTH_BROKER_URL || DEFAULT_OAUTH_BROKER_URL).replace(/\/+$/, '');
+  const fallback = String(env.OAUTH_BROKER_URL_FALLBACK || DEFAULT_OAUTH_BROKER_FALLBACK_URL).replace(/\/+$/, '');
+  return [primary, fallback].filter((url, index, urls) => url && urls.indexOf(url) === index);
+}
+
 function brokerConfigForRole({ role, env, flag }) {
   const upper = roleUpper(role);
-  const brokerUrl = (env.OAUTH_BROKER_URL || DEFAULT_OAUTH_BROKER_URL).replace(/\/+$/, '');
+  const brokerUrls = brokerUrlsForEnv(env);
   const provider = env[`OAUTH_BROKER_${upper}_PROVIDER`] || `github-app-${role}`;
   const expectedAppId = env[`OAUTH_BROKER_${upper}_EXPECTED_APP_ID`] || '';
   const expectedInstallationId = env[`OAUTH_BROKER_${upper}_EXPECTED_INSTALLATION_ID`] || '';
   const secretFile = env.OAUTH_BROKER_SHARED_SECRET_FILE || '';
   return {
-    brokerUrl,
+    brokerUrl: brokerUrls[0] || '',
+    brokerUrls,
     provider,
     expectedAppId,
     expectedInstallationId,
@@ -182,7 +214,7 @@ function brokerConfigForRole({ role, env, flag }) {
 
 function brokerConfigFingerprint(config) {
   return JSON.stringify([
-    config.brokerUrl,
+    config.brokerUrls || [config.brokerUrl],
     config.provider,
     config.expectedAppId,
     config.expectedInstallationId,
@@ -191,21 +223,15 @@ function brokerConfigFingerprint(config) {
   ]);
 }
 
-// Resolve one role's token from the broker. Returns { token, expiresAtMs }
-// on success (expiresAtMs is null when the broker omits a parseable
-// expires_at), or throws on any failure (caller keeps the old token on throw).
-async function fetchReviewerTokenFromBroker({ role, env, fetchImpl, readFileImpl, timeoutMs }) {
-  const config = brokerConfigForRole({ role, env, flag: '' });
-  const { brokerUrl, provider, expectedAppId, expectedInstallationId, secretFile } = config;
-
-  if (!secretFile) {
-    throw new Error('OAUTH_BROKER_SHARED_SECRET_FILE is empty');
-  }
-  const secret = String(readFileImpl(secretFile, 'utf8') || '').trim();
-  if (!secret) {
-    throw new Error(`OAUTH_BROKER_SHARED_SECRET_FILE '${secretFile}' is empty`);
-  }
-
+async function fetchReviewerTokenFromBrokerUrl({
+  brokerUrl,
+  provider,
+  expectedAppId,
+  expectedInstallationId,
+  secret,
+  fetchImpl,
+  timeoutMs,
+}) {
   // Bound the WHOLE network exchange so a wedged broker can't hang the watcher
   // tick. The timeout/abort must cover both the headers (fetchImpl) AND the body
   // read (res.json()): in Fetch, the response promise resolves once headers
@@ -222,36 +248,92 @@ async function fetchReviewerTokenFromBroker({ role, env, fetchImpl, readFileImpl
       signal: controller.signal,
     });
     if (!res.ok) {
-      throw new Error(`broker returned HTTP ${res.status}`);
+      throw new BrokerTokenFetchError(`broker ${brokerUrl} returned HTTP ${res.status}`, {
+        transient: brokerHttpStatusIsTransient(res.status),
+      });
     }
     const body = await res.json();
     const accessToken = body?.access_token;
     if (!accessToken || typeof accessToken !== 'string') {
-      throw new Error('broker response missing access_token');
+      throw new BrokerTokenFetchError(
+        `broker ${brokerUrl} response missing access_token`,
+        { transient: false },
+      );
     }
     // Same metadata verification as scripts/lib/reviewer-broker.sh: never accept
     // a token minted for the wrong App/installation just because the call
     // returned 200. The bash contract compares provider UNCONDITIONALLY, so a
     // missing / empty provider is a rejection here too (don't guard on presence).
     if (String(body?.provider || '') !== provider) {
-      throw new Error(`response.provider='${body?.provider ?? ''}' != expected '${provider}'`);
+      throw new BrokerTokenFetchError(
+        `broker ${brokerUrl} response.provider='${body?.provider ?? ''}' != expected '${provider}'`,
+        { transient: false },
+      );
     }
     const actualAppId = body?.metadata?.app_id != null ? String(body.metadata.app_id) : '';
     const actualInstallationId =
       body?.metadata?.installation_id != null ? String(body.metadata.installation_id) : '';
     if (expectedAppId && actualAppId !== expectedAppId) {
-      throw new Error(`response.metadata.app_id='${actualAppId}' != expected '${expectedAppId}'`);
+      throw new BrokerTokenFetchError(
+        `broker ${brokerUrl} response.metadata.app_id='${actualAppId}' != expected '${expectedAppId}'`,
+        { transient: false },
+      );
     }
     if (expectedInstallationId && actualInstallationId !== expectedInstallationId) {
-      throw new Error(
-        `response.metadata.installation_id='${actualInstallationId}' != expected '${expectedInstallationId}'`
+      throw new BrokerTokenFetchError(
+        `broker ${brokerUrl} response.metadata.installation_id='${actualInstallationId}' != expected '${expectedInstallationId}'`,
+        { transient: false },
       );
     }
     const expiresAtMs = body?.expires_at ? Date.parse(body.expires_at) : NaN;
-    return { token: accessToken, expiresAtMs: Number.isFinite(expiresAtMs) ? expiresAtMs : null };
+    return {
+      token: accessToken,
+      expiresAtMs: Number.isFinite(expiresAtMs) ? expiresAtMs : null,
+      brokerUrl,
+    };
   } finally {
     clearTimeout(timer);
   }
+}
+
+// Resolve one role's token from the broker. Returns { token, expiresAtMs }
+// on success (expiresAtMs is null when the broker omits a parseable
+// expires_at), or throws on any failure (caller keeps the old token on throw).
+async function fetchReviewerTokenFromBroker({ role, env, fetchImpl, readFileImpl, timeoutMs }) {
+  const config = brokerConfigForRole({ role, env, flag: '' });
+  const { brokerUrls, provider, expectedAppId, expectedInstallationId, secretFile } = config;
+
+  if (!secretFile) {
+    throw new Error('OAUTH_BROKER_SHARED_SECRET_FILE is empty');
+  }
+  const secret = String(readFileImpl(secretFile, 'utf8') || '').trim();
+  if (!secret) {
+    throw new Error(`OAUTH_BROKER_SHARED_SECRET_FILE '${secretFile}' is empty`);
+  }
+  if (!brokerUrls.length) {
+    throw new Error('no OAuth broker URLs configured');
+  }
+
+  let lastTransientError = null;
+  for (let index = 0; index < brokerUrls.length; index += 1) {
+    const brokerUrl = brokerUrls[index];
+    try {
+      return await fetchReviewerTokenFromBrokerUrl({
+        brokerUrl,
+        provider,
+        expectedAppId,
+        expectedInstallationId,
+        secret,
+        fetchImpl,
+        timeoutMs,
+      });
+    } catch (err) {
+      if (!brokerFetchErrorIsTransient(err)) throw err;
+      lastTransientError = err;
+      if (index >= brokerUrls.length - 1) break;
+    }
+  }
+  throw lastTransientError || new Error('all OAuth broker token fetches failed');
 }
 
 export async function resolveReviewerAppToken(identity, {
@@ -268,7 +350,7 @@ export async function resolveReviewerAppToken(identity, {
   if (!roleConfig) {
     throw new Error(`Reviewer broker role '${role}' is not configured`);
   }
-  const { token, expiresAtMs } = await fetchReviewerTokenFromBroker({
+  const { token, expiresAtMs, brokerUrl } = await fetchReviewerTokenFromBroker({
     role,
     env,
     fetchImpl,
@@ -281,6 +363,7 @@ export async function resolveReviewerAppToken(identity, {
     envVar: roleConfig.envVar,
     token,
     expiresAtMs,
+    brokerUrl,
   };
 }
 
@@ -386,7 +469,7 @@ export async function refreshReviewerBrokerTokens({
       }
     }
     try {
-      const { token, expiresAtMs } = await fetchReviewerTokenFromBroker({
+      const { token, expiresAtMs, brokerUrl } = await fetchReviewerTokenFromBroker({
         role,
         env,
         fetchImpl,
@@ -416,7 +499,7 @@ export async function refreshReviewerBrokerTokens({
         configFingerprint,
         expiresAtMs: expiresAtMs ?? null,
       });
-      summary.refreshed.push({ role, envVar, expiresAtMs: expiresAtMs ?? null });
+      summary.refreshed.push({ role, envVar, expiresAtMs: expiresAtMs ?? null, brokerUrl });
       recordReviewerTokenHandoffState(summary, { role, envVar, env, now, requiredLifetimeMs });
     } catch (err) {
       // Fail-safe: keep whatever token env already holds. Do NOT clear it, and
@@ -514,7 +597,7 @@ export async function refreshFollowUpGithubToken({
   const effectiveTimeoutMs =
     timeoutMs ?? resolvePositiveMsEnv(env.REVIEWER_TOKEN_FETCH_TIMEOUT_MS, REVIEWER_TOKEN_FETCH_TIMEOUT_MS);
   try {
-    const { token, expiresAtMs } = await fetchReviewerTokenFromBroker({
+    const { token, expiresAtMs, brokerUrl } = await fetchReviewerTokenFromBroker({
       role,
       env,
       fetchImpl,
@@ -533,7 +616,7 @@ export async function refreshFollowUpGithubToken({
     });
     summary.refreshed = true;
     log?.log?.(
-      `[reviewer-broker-refresh] follow-up GITHUB_TOKEN/GH_TOKEN refreshed via broker (role=${role}; expires_at=${expiresAtMs ? new Date(expiresAtMs).toISOString() : 'unknown'})`
+      `[reviewer-broker-refresh] follow-up GITHUB_TOKEN/GH_TOKEN refreshed via broker ${brokerUrl} (role=${role}; expires_at=${expiresAtMs ? new Date(expiresAtMs).toISOString() : 'unknown'})`
     );
   } catch (err) {
     summary.failed = err?.message || String(err);
@@ -590,7 +673,7 @@ export async function refreshWatcherGithubToken({
   const effectiveTimeoutMs =
     timeoutMs ?? resolvePositiveMsEnv(env.REVIEWER_TOKEN_FETCH_TIMEOUT_MS, REVIEWER_TOKEN_FETCH_TIMEOUT_MS);
   try {
-    const { token, expiresAtMs } = await fetchReviewerTokenFromBroker({
+    const { token, expiresAtMs, brokerUrl } = await fetchReviewerTokenFromBroker({
       role,
       env,
       fetchImpl,
@@ -612,7 +695,7 @@ export async function refreshWatcherGithubToken({
     });
     summary.refreshed = true;
     log?.log?.(
-      `[reviewer-broker-refresh] watcher GITHUB_TOKEN/GH_TOKEN refreshed via broker (role=${role}; expires_at=${expiresAtMs ? new Date(expiresAtMs).toISOString() : 'unknown'})`
+      `[reviewer-broker-refresh] watcher GITHUB_TOKEN/GH_TOKEN refreshed via broker ${brokerUrl} (role=${role}; expires_at=${expiresAtMs ? new Date(expiresAtMs).toISOString() : 'unknown'})`
     );
   } catch (err) {
     // FAIL-SAFE: keep whatever token env already holds (the PAT, or a still-valid

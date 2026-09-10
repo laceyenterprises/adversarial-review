@@ -536,7 +536,7 @@ function createCliDirectReviewerRuntimeAdapter({
         }
       );
 
-      if (TERMINAL_RUN_STATES.has(record.state) && record.state !== 'completed') {
+      if (TERMINAL_RUN_STATES.has(record.state)) {
         const terminalMessage = `reviewer run ${sessionUuid} reached terminal state ${record.state} before subprocess completion`;
         const terminalSpawnTerminationError = terminalSpawnTermination
           ? await terminalSpawnTermination

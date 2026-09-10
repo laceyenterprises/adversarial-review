@@ -1654,6 +1654,68 @@ test('cli-direct escalates terminal onSpawn cancellation before returning', asyn
   }
 });
 
+test('cli-direct fails closed when completed terminal onSpawn cleanup cannot kill the pgid', async () => {
+  const rootDir = makeRoot();
+  let capturedOptions;
+  let releaseSpawn;
+  const killCalls = [];
+  try {
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      preflightImpl: noopPreflight,
+      cancelGraceMs: 2,
+      cancelPollIntervalMs: 1,
+      sleepImpl: async (ms) => new Promise((resolve) => setTimeout(resolve, Math.min(ms, 1))),
+      processKillImpl: (pid, signal) => {
+        assert.equal(pid, -4246);
+        if (signal === 0) return true;
+        killCalls.push([pid, signal]);
+        return true;
+      },
+      spawnCapturedImpl: async (_command, _args, options) => {
+        capturedOptions = options;
+        await new Promise((resolve) => { releaseSpawn = resolve; });
+        options.onSpawn({ pgid: 4246 });
+        return { stdout: 'posted-after-completed\n', stderr: '' };
+      },
+      now: () => '2026-05-11T20:00:00.000Z',
+    });
+
+    const req = {
+      model: 'claude',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 2 },
+      timeoutMs: 5_000,
+      sessionUuid: 'completed-before-onspawn-kill-failure-session',
+      forbiddenFallbacks: ['api-key'],
+    };
+    const run = adapter.spawnReviewer(req);
+    await waitFor(() => assert.ok(capturedOptions));
+    const claimed = readReviewerRunRecord(rootDir, req.sessionUuid);
+    assert.equal(claimed.state, 'launching');
+    updateReviewerRunRecord(rootDir, claimed, {
+      state: 'completed',
+      lastHeartbeatAt: '2026-05-11T20:00:01.000Z',
+    });
+
+    releaseSpawn();
+    const failed = await run;
+
+    assert.equal(failed.ok, false);
+    assert.equal(failed.failureClass, 'bug');
+    assert.equal(failed.preventLeaseRecovery, true);
+    assert.equal(failed.pgid, 4246);
+    assert.match(failed.stderrTail, /terminal state completed/);
+    assert.match(failed.stderrTail, /survived SIGKILL/);
+    assert.deepEqual(killCalls, [[-4246, 'SIGTERM'], [-4246, 'SIGKILL']]);
+    const record = readReviewerRunRecord(rootDir, req.sessionUuid);
+    assert.equal(record.state, 'failed');
+    assert.equal(record.pgid, 4246);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('reviewer child run-state helper is read-only for watcher-owned records', () => {
   const rootDir = makeRoot();
   try {

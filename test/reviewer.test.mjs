@@ -607,6 +607,7 @@ test('postGitHubReview retries transient exact-head gh transport failure', async
     reviewArtifact: { id: '4242', commitId: 'reviewed-head-sha' },
   });
   assert.equal(calls.length, 3);
+  assert.ok(calls.every((call) => call.options.env.GH_CODEX_REVIEWER_TOKEN_BROKER_PROVIDER === undefined));
   assert.deepEqual(calls[1].args, [
     'api',
     'repos/laceyenterprises/demo/pulls/42/reviews',
@@ -652,6 +653,7 @@ test('postGitHubReview retries transient exact-head GitHub HTTP/2 GOAWAY 500', a
     reviewArtifact: { id: '4242', commitId: 'reviewed-head-sha' },
   });
   assert.equal(calls.length, 3);
+  assert.ok(calls.every((call) => call.options.env.GH_CODEX_REVIEWER_TOKEN_BROKER_PROVIDER === undefined));
   assert.deepEqual(calls[1].args, [
     'api',
     'repos/laceyenterprises/demo/pulls/42/reviews',

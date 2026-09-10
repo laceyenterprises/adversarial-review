@@ -104,10 +104,11 @@ export function noProgressLaneFilePath(rootDir, { repo, prNumber } = {}) {
 function quarantineNoProgressLaneLedger(rootDir, filePath, error, {
   now,
   logger = console,
+  mkdirSyncImpl = mkdirSync,
   renameSyncImpl = renameSync,
 } = {}) {
   const dir = noProgressLaneQuarantineDir(rootDir);
-  mkdirSync(dir, { recursive: true });
+  mkdirSyncImpl(dir, { recursive: true });
   const stamp = sanitizePathSegment(now || new Date().toISOString());
   const originalName = basename(filePath);
   let quarantinedPath = join(dir, `${stamp}-${originalName}`);
@@ -399,6 +400,7 @@ export function promoteStarvedNoProgressLaneLedgers(rootDir, {
           const quarantinedPath = quarantineNoProgressLaneLedger(rootDir, filePath, err, {
             now,
             logger,
+            mkdirSyncImpl,
             renameSyncImpl,
           });
           if (quarantinedPath) {

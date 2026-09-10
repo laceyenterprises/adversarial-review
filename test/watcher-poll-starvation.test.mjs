@@ -1394,8 +1394,8 @@ test('RVHAND-10: starvation recovery retries campaign marker when quarantine fai
     const first = promoteStarvedNoProgressLaneLedgers(rootDir, {
       now: 'recover',
       logger: silentLogger,
-      renameSyncImpl: () => {
-        throw new Error('permission denied moving ledger');
+      mkdirSyncImpl: () => {
+        throw new Error('permission denied creating quarantine');
       },
     });
 

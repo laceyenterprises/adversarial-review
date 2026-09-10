@@ -59,8 +59,8 @@
 // derived from `pollIntervalMs` because this module sits below config — override
 // with ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS if you retune the poll.
 export const DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS = 10 * 60 * 1000;
-export const DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS = 3 * 60 * 1000;
 export const DEFAULT_POSTED_REVIEW_PHASE_HANDLER_CAPACITY = 8;
+export const DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_HANDLER_CAPACITY = 3;
 export const DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT = 2;
 export const DEFAULT_POSTED_REVIEW_HANDLER_HEADROOM_MS = 5 * 1000;
 
@@ -83,6 +83,8 @@ export const DEFAULT_POSTED_REVIEW_HANDLER_HEADROOM_MS = 5 * 1000;
 // still alive. Defer the tail to the next tick instead; the fairness state
 // promotes it, and the no-progress lane slows repeatedly unproductive PRs.
 export const DEFAULT_POSTED_REVIEW_HANDLER_TIMEOUT_MS = 3 * 60 * 1000;
+export const DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS =
+  DEFAULT_POSTED_REVIEW_HANDLER_TIMEOUT_MS * DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_HANDLER_CAPACITY;
 
 function parsePositiveMs(value, fallback) {
   const numeric = Number(value);
@@ -101,10 +103,47 @@ export function resolvePostedReviewPhaseBudgetMs(env = process.env) {
 }
 
 export function resolvePostedReviewReviewerPressurePhaseBudgetMs(env = process.env) {
-  return parsePositiveMs(
-    env?.ADVERSARIAL_WATCHER_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS,
-    DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS,
+  const handlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs(env);
+  const minimumPressureBudgetMs =
+    handlerTimeoutMs * DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_HANDLER_CAPACITY;
+  const configured = env?.ADVERSARIAL_WATCHER_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS;
+  if (configured === undefined || configured === null || configured === '') {
+    return minimumPressureBudgetMs;
+  }
+  const configuredBudgetMs = parsePositiveMs(
+    configured,
+    minimumPressureBudgetMs,
   );
+  return configuredBudgetMs;
+}
+
+export function enforcePostedReviewReviewerPressureBudgetFloor({
+  pressureBudgetMs,
+  handlerTimeoutMs,
+  logger = console,
+} = {}) {
+  const effectiveHandlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs({
+    ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS: handlerTimeoutMs,
+  });
+  const minimumPressureBudgetMs =
+    effectiveHandlerTimeoutMs * DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_HANDLER_CAPACITY;
+  const hasRequestedPressureBudget =
+    pressureBudgetMs !== undefined && pressureBudgetMs !== null && pressureBudgetMs !== '';
+  const requestedPressureBudgetMs = parsePositiveMs(
+    pressureBudgetMs,
+    minimumPressureBudgetMs,
+  );
+  if (!hasRequestedPressureBudget || requestedPressureBudgetMs >= minimumPressureBudgetMs) {
+    return requestedPressureBudgetMs;
+  }
+  logger?.warn?.(
+    `[watcher] posted-review reviewer-pressure phase budget raised to handler-capacity floor: ` +
+      `requested_budget_ms=${requestedPressureBudgetMs} ` +
+      `minimum_budget_ms=${minimumPressureBudgetMs} ` +
+      `handler_timeout_ms=${effectiveHandlerTimeoutMs} ` +
+      `handler_capacity=${DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_HANDLER_CAPACITY}`,
+  );
+  return minimumPressureBudgetMs;
 }
 
 function isDaemonCleanMergeMerged(value) {
@@ -460,6 +499,18 @@ export async function runPostedReviewHandlersFairly({
     logger?.warn?.(
       `[watcher] posted-review phase made zero progress: queued=${summary.queued} ` +
         `ran=0 failed=${summary.failed} timed_out=${summary.timedOut} ` +
+        `slow_lane_deferred=${summary.skippedByLane} budget_deferred=${summary.deferredByBudget} ` +
+        `timeout_deferred=${summary.deferredAfterTimeout}`,
+    );
+  }
+  if (
+    summary.queued > 1
+    && summary.ran <= 1
+    && summary.deferredByBudget >= summary.queued - 1
+  ) {
+    logger?.warn?.(
+      `[watcher] posted-review phase stall signature: queued=${summary.queued} ` +
+        `ran=${summary.ran} failed=${summary.failed} timed_out=${summary.timedOut} ` +
         `slow_lane_deferred=${summary.skippedByLane} budget_deferred=${summary.deferredByBudget} ` +
         `timeout_deferred=${summary.deferredAfterTimeout}`,
     );

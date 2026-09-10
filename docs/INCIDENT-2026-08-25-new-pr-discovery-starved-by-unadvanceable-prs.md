@@ -105,7 +105,7 @@ guarantees a new PR is **seen**.
 ### 2. A bounded posted-review phase (`runPostedReviewHandlersFairly`)
 
 - **Per-handler deadline** (`ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS`,
-  default 60s). A phase budget alone cannot save a tick, because it is only checked
+  default 3m). A phase budget alone cannot save a tick, because it is only checked
   *between* handlers: one handler that never settles wedges the tick regardless of
   remaining budget. Same trade-off `safePollOnce` already documents — the
   abandoned promise may still complete its side effects, which is tolerable
@@ -117,10 +117,13 @@ guarantees a new PR is **seen**.
   next tick, so the cut point rotates and the same tail cannot be starved.
 - **Reviewer-pressure cap**
   (`ADVERSARIAL_WATCHER_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS`, default
-  2m). When the tick just dispatched or deferred reviewer work, posted-review
-  handlers get this shorter cap for that tick only. This keeps fresh first-pass
-  and rereview claims from sitting behind a large hammer/merge-closeout backlog
-  while preserving the normal 10m window when no reviewer lane work moved.
+  9m). When the tick just dispatched or deferred reviewer work, posted-review
+  handlers get this shorter cap for that tick only. The effective cap is floored
+  at three handler deadlines; a lower positive operator override is honored as
+  input, then raised with a warning so the ignored setting is visible. This keeps
+  fresh first-pass and rereview claims from sitting behind a large
+  hammer/merge-closeout backlog while preserving the normal 10m window when no
+  reviewer lane work moved.
 
 #### 2026-09-09 follow-up: HAM launch settlement must use a soft step deadline
 

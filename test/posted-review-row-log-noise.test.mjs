@@ -5,13 +5,16 @@ import {
   PostedReviewStepDeadlineError,
   handlePostedReviewRow,
   resolveMergeAgentCoexistenceStepDeadlineMs,
+  runQueuedReviewAdoptionPhase,
   timePostedReviewStep,
 } from '../src/posted-review-row.mjs';
 import { createLogChangeGate } from '../src/log-change-gate.mjs';
 import {
   DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT,
   DEFAULT_POSTED_REVIEW_PHASE_HANDLER_CAPACITY,
+  DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_HANDLER_CAPACITY,
   derivePostedReviewExpensiveStepBudgetMs,
+  enforcePostedReviewReviewerPressureBudgetFloor,
   resolvePostedReviewHandlerHeadroomMs,
   resolvePostedReviewHandlerTimeoutMs,
   resolvePostedReviewPhaseBudgetMs,
@@ -104,14 +107,104 @@ test('RVHAND-10: invalid posted-review phase budget falls back to capacity-expan
   );
 });
 
+test('RVHAND-11: reviewer-pressure posted-review phase budget is derived from handler capacity', () => {
+  const env = {
+    ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS: '180000',
+    ADVERSARIAL_WATCHER_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS: '180000',
+  };
+  const handlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs(env);
+  const pressureBudgetMs = resolvePostedReviewReviewerPressurePhaseBudgetMs(env);
+
+  assert.equal(
+    pressureBudgetMs,
+    180_000,
+  );
+  assert.ok(pressureBudgetMs < handlerTimeoutMs * DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_HANDLER_CAPACITY);
+});
+
 test('RVHAND-11: reviewer-pressure posted-review phase budget has a bounded default and override', () => {
-  assert.equal(resolvePostedReviewReviewerPressurePhaseBudgetMs({}), 180_000);
+  assert.equal(resolvePostedReviewReviewerPressurePhaseBudgetMs({}), 540_000);
+  assert.equal(
+    resolvePostedReviewReviewerPressurePhaseBudgetMs({
+      ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS: '60000',
+    }),
+    180_000,
+  );
   assert.equal(
     resolvePostedReviewReviewerPressurePhaseBudgetMs({
       ADVERSARIAL_WATCHER_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS: '90000',
     }),
     90_000,
   );
+  assert.equal(
+    resolvePostedReviewReviewerPressurePhaseBudgetMs({
+      ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS: '60000',
+      ADVERSARIAL_WATCHER_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS: '240000',
+    }),
+    240_000,
+  );
+});
+
+test('RVHAND-11: call-site pressure budget guard raises direct low values', () => {
+  const warnings = [];
+
+  assert.equal(
+    enforcePostedReviewReviewerPressureBudgetFloor({
+      pressureBudgetMs: 180_000,
+      handlerTimeoutMs: 180_000,
+      logger: { warn: (...args) => warnings.push(args.join(' ')) },
+    }),
+    540_000,
+  );
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /raised to handler-capacity floor/);
+});
+
+test('RVHAND-11: production default path warns when configured reviewer-pressure budget is below floor', async () => {
+  const previousBudget = process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS;
+  const previousTimeout = process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS;
+  const warnings = [];
+  let observedBudgetMs;
+
+  try {
+    process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS = '180000';
+    process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS = '180000';
+
+    await runQueuedReviewAdoptionPhase({
+      drainReviewerDispatchCandidates: async () => ({ dispatched: 1, deferred: 0 }),
+      retryPendingMergeAgentLifecycleCleanupsImpl: async () => {},
+      syncPRLifecycleImpl: async () => {},
+      retryPendingDagAutowalkOnMergeImpl: async () => {},
+      retryPendingTriageSyncsImpl: async () => ({ attempted: 0, synced: 0, pending: 0 }),
+      retryPendingMergeCloseoutsImpl: async () => {},
+      retryPendingRetriggerAckCommentsImpl: async () => ({ attempted: 0, posted: 0 }),
+      retryPendingRetriggerReviewAckCommentsImpl: async () => ({ attempted: 0, posted: 0 }),
+      noProgressLaneGate: { shouldRun: () => true, recordResult: () => {} },
+      postedReviewHandlers: [],
+      postReviewMaintenanceHandlers: [],
+      runPostedReviewHandlersFairlyImpl: async ({ budgetMs }) => {
+        observedBudgetMs = budgetMs;
+        return { executed: [], deferred: [], timedOut: null };
+      },
+      logger: { warn: (message) => warnings.push(String(message)) },
+    });
+  } finally {
+    if (previousBudget === undefined) {
+      delete process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS;
+    } else {
+      process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS = previousBudget;
+    }
+    if (previousTimeout === undefined) {
+      delete process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS;
+    } else {
+      process.env.ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS = previousTimeout;
+    }
+  }
+
+  assert.equal(observedBudgetMs, 540_000);
+  assert.equal(warnings.length, 2);
+  assert.match(warnings[0], /raised to handler-capacity floor/);
+  assert.match(warnings[1], /posted-review phase budget capped under reviewer pressure/);
 });
 
 test('RVHAND-12: operator can still lower the HAM coexistence deadline during an incident', () => {

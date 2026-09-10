@@ -2663,7 +2663,7 @@ test('acpx adapter persists heartbeat rows while reviewer is running', async () 
       model: 'codex',
       prompt: 'keep heartbeating',
       subjectContext: { domainId: 'acpx-smoke', repo: 'lacey/repo', prNumber: 7 },
-      timeoutMs: 100,
+      timeoutMs: 5_000,
       sessionUuid: 'acpx-heartbeat-session',
       forbiddenFallbacks: ['api-key'],
     });

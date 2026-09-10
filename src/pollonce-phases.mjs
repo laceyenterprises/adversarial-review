@@ -256,7 +256,7 @@ export function recordReviewerModelFallbackForAlert({
 
   const distinctSubjects = new Set(state.events.map((event) => event.subject)).size;
   const windowSeconds = Math.round(windowMs / 1000);
-  const alertKey = `${Math.floor(nowMs / windowMs)}:${distinctSubjects}`;
+  const alertKey = String(Math.floor(nowMs / windowMs));
   if (distinctSubjects < threshold || state.lastAlertKey === alertKey) {
     return { alerted: false, distinctSubjects };
   }

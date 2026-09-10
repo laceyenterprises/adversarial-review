@@ -70,6 +70,29 @@ test('reviewer model fallback rate warning counts distinct subjects in a window'
   assert.match(warnings[0], /routes=claude->gemini/);
 });
 
+test('reviewer model fallback rate warning alerts once per time bucket after threshold', () => {
+  const warnings = [];
+  const state = { events: [], lastAlertKey: null };
+  const config = { windowMs: 60_000, threshold: 3 };
+  const log = { warn: (line) => warnings.push(line) };
+
+  for (const prNumber of [6501, 6502, 6503, 6504, 6505]) {
+    recordReviewerModelFallbackForAlert({
+      repoPath: 'laceyenterprises/agent-os',
+      prNumber,
+      fallback,
+      nowMs: prNumber,
+      state,
+      config,
+      log,
+    });
+  }
+
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /distinctSubjects=3/);
+  assert.equal(state.lastAlertKey, '0');
+});
+
 test('reviewer model fallback rate warning drops events outside the window', () => {
   const warnings = [];
   const state = { events: [], lastAlertKey: null };

@@ -264,12 +264,14 @@ async function prepareClaudeOAuthEnv({
     ...env,
     ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT: 'broker',
   };
+  delete brokerEnv.ANTHROPIC_AUTH_TOKEN;
   const minted = await mintClaudeCodeBrokerTokenImpl({
     env: brokerEnv,
     fetchImpl,
     log: logger,
   });
   const authEnv = { ...env };
+  delete authEnv.ANTHROPIC_AUTH_TOKEN;
   if (minted?.token) {
     authEnv.ANTHROPIC_AUTH_TOKEN = minted.token;
   }

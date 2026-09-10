@@ -2827,6 +2827,7 @@ test('prepareClaudeOAuthEnv mints a broker bearer without logging or launchctl s
   const auth = await prepareClaudeOAuthEnv({
     sourceEnv: {
       ANTHROPIC_API_KEY: 'api-key-must-disappear',
+      ANTHROPIC_AUTH_TOKEN: 'ambient-bearer-must-disappear',
       OAUTH_BROKER_SHARED_SECRET_FILE: '/run/secrets/oauth-broker',
     },
     fetchImpl: async () => {
@@ -2835,6 +2836,7 @@ test('prepareClaudeOAuthEnv mints a broker bearer without logging or launchctl s
     mintClaudeCodeBrokerTokenImpl: async ({ env }) => {
       assert.equal(env.ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT, 'broker');
       assert.equal(env.ANTHROPIC_API_KEY, undefined);
+      assert.equal(env.ANTHROPIC_AUTH_TOKEN, undefined);
       return {
         injected: true,
         token: 'broker-oauth-token',
@@ -2854,6 +2856,28 @@ test('prepareClaudeOAuthEnv mints a broker bearer without logging or launchctl s
   assert.deepEqual(auth.stripped, ['ANTHROPIC_API_KEY']);
   assert.equal(auth.brokerUrl, 'http://127.0.0.1:4099');
   assert.deepEqual(warnings, []);
+});
+
+test('prepareClaudeOAuthEnv rejects missing broker bearer despite ambient auth token', async () => {
+  await assert.rejects(
+    () => prepareClaudeOAuthEnv({
+      sourceEnv: {
+        ANTHROPIC_AUTH_TOKEN: 'ambient-bearer-must-not-mask-broker-mint-failure',
+        CLAUDE_REVIEWER_AUTH_VIA_BROKER: 'true',
+        OAUTH_BROKER_SHARED_SECRET_FILE: '/run/secrets/oauth-broker',
+      },
+      mintClaudeCodeBrokerTokenImpl: async ({ env }) => {
+        assert.equal(env.ANTHROPIC_AUTH_TOKEN, undefined);
+        return {
+          injected: false,
+          token: '',
+          brokerUrl: 'http://127.0.0.1:4099',
+          expiresAt: '2026-09-10T18:00:00Z',
+        };
+      },
+    }),
+    /token mint returned no ANTHROPIC_AUTH_TOKEN bearer/,
+  );
 });
 
 test('prepareClaudeOAuthEnv rejects broker bearers too short for reviewer handoff', async () => {

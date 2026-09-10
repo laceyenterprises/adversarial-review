@@ -2,7 +2,10 @@ import { QUOTA_EXHAUSTED_FAILURE_CLASS, quotaHoldDecision } from './quota-exhaus
 import { infraRecoverableFailureClass, reviewPopulationFailureClass } from './reviewer-failure-classification.mjs';
 import { resolveGeminiReviewerModeWithSource } from './role-config.mjs';
 import { readCascadeState } from './reviewer-cascade.mjs';
-import { isCrossModelReviewWaived } from './adapters/subject/github-pr/routing.mjs';
+import {
+  isCrossModelReviewWaived,
+  normalizeBuilderClass,
+} from './adapters/subject/github-pr/routing.mjs';
 import {
   afhReviewerFallbackDecision,
   applyAfhReviewerFallbackDecision,
@@ -67,11 +70,19 @@ const DEFAULT_STALE_REVIEWER_RECONCILE_PER_POLL = 6;
 const DEFAULT_REVIEWER_TIMEOUT_FALLBACK_THRESHOLD = 2;
 const DEFAULT_REVIEWER_EXEC_FALLBACK_THRESHOLD = 2;
 const REVIEWER_EXEC_FALLBACK_FAILURE_CLASSES = Object.freeze([
+  'cascade',
   'reviewer-timeout',
   'launchctl-bootstrap',
   'reviewer-command-failed',
   'oauth-broken',
+  'provider-overloaded',
 ]);
+
+const LAST_RESORT_REVIEWER_BY_BUILDER_CLASS = Object.freeze({
+  codex: 'codex',
+  'claude-code': 'claude',
+  'clio-agent': 'codex',
+});
 
 export function resolveReviewerTimeoutFallbackThreshold(env = process.env) {
   const raw = env.ADVERSARIAL_REVIEW_TIMEOUT_FALLBACK_THRESHOLD;
@@ -159,19 +170,26 @@ function modelMayReviewBuilder(model, builderClass) {
 function candidateReviewerModelsForExecFallback({ baseRoute, builderClass }) {
   const seen = new Set();
   const candidates = [];
-  const push = (model) => {
+  const push = (model, { sameModelLastResort = false } = {}) => {
     const normalized = normalizeReviewerAttribution(model);
     if (!normalized || seen.has(normalized)) return;
+    if (!sameModelLastResort && !modelMayReviewBuilder(normalized, builderClass)) return;
     seen.add(normalized);
-    candidates.push(normalized);
+    candidates.push({ reviewerModel: normalized, sameModelLastResort });
   };
   push(baseRoute?.geminiReviewerSelection?.replacedReviewerModel);
   push(baseRoute?.timeoutFallback?.fromReviewerModel);
   for (const model of ['claude', 'codex', 'gemini']) push(model);
-  return candidates.filter((model) => (
-    model !== normalizeReviewerAttribution(baseRoute?.reviewerModel) &&
-    reviewerRouteForModel(model) &&
-    modelMayReviewBuilder(model, builderClass)
+  const normalizedBuilder = normalizeBuilderClass(builderClass);
+  const builderLastResort = LAST_RESORT_REVIEWER_BY_BUILDER_CLASS[normalizedBuilder] || null;
+  if (builderLastResort) push(builderLastResort, { sameModelLastResort: true });
+  return candidates.filter(({ reviewerModel, sameModelLastResort }) => (
+    reviewerModel !== normalizeReviewerAttribution(baseRoute?.reviewerModel) &&
+    reviewerRouteForModel(reviewerModel) &&
+    (
+      sameModelLastResort ||
+      modelMayReviewBuilder(reviewerModel, builderClass)
+    )
   ));
 }
 
@@ -347,10 +365,12 @@ export function selectReviewerRouteForAttempt({
     execFailureSignal.failureCount >= execThreshold
   ) {
     const attempted = [];
-    for (const candidateModel of candidateReviewerModelsForExecFallback({ baseRoute, builderClass })) {
+    for (const candidate of candidateReviewerModelsForExecFallback({ baseRoute, builderClass })) {
+      const candidateModel = candidate.reviewerModel;
       const fallbackGrounding = reviewerModelGrounding(afhGrounding, candidateModel);
       attempted.push({
         reviewerModel: candidateModel,
+        sameModelLastResort: candidate.sameModelLastResort,
         grounded: fallbackGrounding.grounded,
         provider: fallbackGrounding.provider,
         state: fallbackGrounding.state,
@@ -371,6 +391,8 @@ export function selectReviewerRouteForAttempt({
           threshold: execThreshold,
           headSha,
           builderClass,
+          sameModelAsBuilder: isCrossModelReviewWaived(builderClass, fallbackRoute.reviewerModel),
+          lastResort: candidate.sameModelLastResort,
         },
       };
     }

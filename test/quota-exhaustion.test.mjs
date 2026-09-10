@@ -51,6 +51,15 @@ test('claude hard usage cap is detected with harness=claude', () => {
   assert.equal(result.resetAt, '2026-06-17T17:39:00.000Z');
 });
 
+test('claude account-level 429 cap is detected without matching bare 429 throttles', () => {
+  const stderr = `[reviewer] Starting review: repo#1 model=claude
+{"api_error_status":429,"result":"API Error: Request rejected (429) · This request would exceed your account's rate limit. Please try again later."}`;
+  const result = detectQuotaExhaustion(stderr);
+  assert.equal(result.isQuotaExhausted, true);
+  assert.equal(result.harness, 'claude');
+  assert.equal(result.resetAt, null);
+});
+
 test('claude weekly cap is detected and carries the provider reset', () => {
   const result = detectQuotaExhaustion(
     "You've hit your weekly limit · resets Jun 27 at 3am (America/Los_Angeles)",
@@ -296,6 +305,17 @@ test('classifyReviewerFailure routes a claude hard cap to quota-exhausted', () =
   assert.equal(
     classifyReviewerFailure('Claude usage limit reached; resets at 2026-06-17T17:39:00Z', 1),
     QUOTA_EXHAUSTED_FAILURE_CLASS
+  );
+});
+
+test('classifyReviewerFailure routes claude account-level 429 caps to quota-exhausted', () => {
+  assert.equal(
+    classifyReviewerFailure(
+      `[reviewer] Starting review: repo#1 model=claude
+{"api_error_status":429,"result":"API Error: Request rejected (429) · This request would exceed your account's rate limit. Please try again later."}`,
+      1,
+    ),
+    QUOTA_EXHAUSTED_FAILURE_CLASS,
   );
 });
 

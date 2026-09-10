@@ -2246,6 +2246,37 @@ test('a routine OAuth banner in the tail does not classify a failure as auth', (
   assert.match(finding.recommended_action, /do not retrigger/);
 });
 
+test('claude account-level 429 in a captured tail is classified as quota, not auth', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 961,
+    reviewStatus: 'failed',
+    reviewedAt: '2026-05-25T17:00:00.000Z',
+  });
+  const db = openDb(rootDir);
+  try {
+    db.prepare(
+      'UPDATE reviewed_prs SET failure_message = ?, infra_auto_recover_attempts = ? WHERE pr_number = ?',
+    ).run(
+      '[cascade] Command failed with code 1\nstdout tail:\n'
+      + '[reviewer] Starting review: laceyenterprises/agent-os#6548 '
+      + 'model=claude (OAuth-only mode; prompt stage=last)\n'
+      + '{"api_error_status":429,"result":"API Error: Request rejected (429) · '
+      + 'This request would exceed your account\'s rate limit. Please try again later."}',
+      3,
+      961,
+    );
+  } finally {
+    db.close();
+  }
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  const finding = snapshot.findings.find((item) => item.code === 'review:stuck_retry_loop');
+  assert.ok(finding, 'expected the stuck-retry-loop finding');
+  assert.equal(finding.details.dominantFailureClass, QUOTA_EXHAUSTED_FAILURE_CLASS);
+  assert.notEqual(finding.details.dominantFailureClass, 'auth');
+});
+
 test('reviewer_pass_zombie threshold stays above the reaper timeout', () => {
   // The reviewer-pass-reaper ends a hung pass at
   // DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS. This finding exists to catch a reaper

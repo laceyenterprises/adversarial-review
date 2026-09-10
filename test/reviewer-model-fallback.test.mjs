@@ -138,6 +138,63 @@ test('reviewer exec fallback switches after a Claude launchctl bootstrap failure
   assert.equal(route.reviewerModelFallback.failureCount, 2);
 });
 
+test('reviewer exec fallback uses audited same-family last resort after repeated cascade when alternatives are grounded', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'reviewer-ratecap-fallback-'));
+  const repo = 'laceyenterprises/agent-os';
+  const prNumber = 6548;
+  try {
+    recordCascadeFailure(rootDir, {
+      repo,
+      prNumber,
+      failedAt: '2026-09-10T12:09:00.000Z',
+      failureClass: 'cascade',
+    });
+    recordCascadeFailure(rootDir, {
+      repo,
+      prNumber,
+      failedAt: '2026-09-10T12:10:00.000Z',
+      failureClass: 'cascade',
+    });
+
+    const route = selectReviewerRouteForAttempt({
+      rootDir,
+      repoPath: repo,
+      prNumber,
+      subject: { builderClass: 'codex' },
+      baseRoute: {
+        builderClass: 'codex',
+        tag: '[codex]',
+        reviewerModel: 'claude',
+        botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+      },
+      currentRow: {
+        review_status: 'pending-upstream',
+        reviewer: 'claude',
+        reviewer_head_sha: 'head-1',
+      },
+      headSha: 'head-1',
+      afhGrounding: {
+        available: true,
+        providers: {
+          google: { state: 'exhausted', hardGrounded: true, softGrounded: false },
+          openai: { state: 'ok', hardGrounded: false, softGrounded: false },
+        },
+      },
+      env: {},
+    });
+
+    assert.equal(route.reviewerModel, 'codex');
+    assert.equal(route.botTokenEnv, 'GH_CODEX_REVIEWER_TOKEN');
+    assert.equal(route.reviewerModelFallback.fromReviewerModel, 'claude');
+    assert.equal(route.reviewerModelFallback.toReviewerModel, 'codex');
+    assert.equal(route.reviewerModelFallback.failureClass, 'cascade');
+    assert.equal(route.reviewerModelFallback.sameModelAsBuilder, true);
+    assert.equal(route.reviewerModelFallback.lastResort, true);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('reviewer exec fallback is keyed to the current head and failed model', () => {
   const staleHead = selectAfterFailures({
     failures: 2,

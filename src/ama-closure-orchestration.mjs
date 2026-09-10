@@ -1057,17 +1057,17 @@ export async function maybeDispatchAmaClosureFor({
       reviewState,
       reviewStateRow,
       currentPrHeadSha,
-    // Deliverable 1 — the head-scoped operator labels that substitute for an
-    // unresolved worker identity so a clean un-attributed PR closes under an
-    // operator-accountable lease instead of parking `worker-identity-unresolved`.
-    operatorApprovalEvent,
-    mergeAgentRequestEvent,
-    logger,
-    env,
-    authoritativeReviewerLogins,
-    dismissStaleRequestChangesOnResolved,
-    hamTerminalRemediationValidated,
-    signal: operationSignal,
+      // Deliverable 1 — the head-scoped operator labels that substitute for an
+      // unresolved worker identity so a clean un-attributed PR closes under an
+      // operator-accountable lease instead of parking `worker-identity-unresolved`.
+      operatorApprovalEvent,
+      mergeAgentRequestEvent,
+      logger,
+      env,
+      authoritativeReviewerLogins,
+      dismissStaleRequestChangesOnResolved,
+      hamTerminalRemediationValidated,
+      signal: operationSignal,
     }),
     {
       timeoutMs: operationTimeoutMs,
@@ -1279,6 +1279,9 @@ export async function maybeDispatchAmaClosureFor({
     throwIfAborted(signal);
   } catch (err) {
     throwIfAborted(signal);
+    if (err?.code === 'AMA_COEXISTENCE_OPERATION_TIMEOUT') {
+      throw err;
+    }
     logger?.warn?.(`[watcher] AMA dispatch failed: ${err?.message || err}`);
     // Carry the ground-truth HAM proof into the failure result. AMA can fail to
     // dispatch its own closer for reasons unrelated to the remediation's validity

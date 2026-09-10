@@ -937,6 +937,48 @@ test('claimed rows with null pgid stay reviewing while launch guard window is ac
   assert.match(log.lines.join('\n'), /reviewer_reattach_null_pgid_guard_active/);
 });
 
+test('claimed rows with null pgid auto-rearm after launch grace expires before reviewer timeout', async () => {
+  const db = setupDb();
+  seedReviewing(db, {
+    pgid: null,
+    lastAttemptedAt: '2026-05-11T05:18:59.000Z',
+    startedAt: null,
+    reviewerTimeoutMs: 20 * 60 * 1000,
+  });
+  const log = makeLog();
+  const settled = [];
+  let headProbeCount = 0;
+  let reviewProbeCount = 0;
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    now: new Date(FAILURE_AT),
+    log,
+    fetchHeadSha: async () => {
+      headProbeCount += 1;
+      return HEAD_SHA;
+    },
+    findPostedReview: async () => {
+      reviewProbeCount += 1;
+      return null;
+    },
+    onTerminalDeadSession: async (event) => settled.push(event),
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'pending');
+  assert.equal(row.review_attempts, 3);
+  assert.equal(headProbeCount, 1);
+  assert.equal(reviewProbeCount, 1);
+  assert.match(row.failure_message, /no live reviewer process group was found/);
+  assert.deepEqual(
+    settled.map(({ state, reason }) => ({ state, reason })),
+    [{ state: 'cancelled', reason: 'missing-pgid-no-live-reviewer' }]
+  );
+  assert.match(log.lines.join('\n'), /reviewer_reattach_null_pgid_requeued/);
+});
+
 test('claimed rows with null pgid reconcile to an already posted current-head review', async () => {
   const db = setupDb();
   seedReviewing(db, { pgid: null });

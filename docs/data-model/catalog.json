@@ -82,7 +82,7 @@
       "path": "docs/data-model/ama-closer-dispatches.md",
       "store": "data/follow-up-jobs/ama-closer-dispatches/",
       "schemaSurface": "src/ama/dispatch-closer.mjs",
-      "owner": "AMA closer dispatch and recovery"
+      "owner": "AMA closer dispatch, stale-head redrive, and recovery"
     },
     {
       "id": "runtime-settle-smoke",

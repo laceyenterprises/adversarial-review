@@ -47,6 +47,22 @@ function resolveProviderForBotTokenEnv(botTokenEnv, env = process.env) {
   return null;
 }
 
+function resolveProviderForIdentity(identity, env = process.env) {
+  const normalizedIdentity = String(identity || '').trim();
+  if (!normalizedIdentity) return null;
+
+  const upper = roleUpper(normalizedIdentity);
+  const roleScopedProvider = String(env[`OAUTH_BROKER_${upper}_PROVIDER`] || '').trim();
+  if (roleScopedProvider) return roleScopedProvider;
+
+  const brokerFlag = String(env[`${upper}_AUTH_VIA_BROKER`] || '').trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(brokerFlag)) {
+    return `github-app-${normalizedIdentity}`;
+  }
+
+  return null;
+}
+
 function resolveConfiguredEntitlementBotLogin({
   identity,
   env = process.env,
@@ -91,7 +107,9 @@ function resolveGitHubAppBotLogin({
     );
   }
 
-  const providerLogin = providerSlugToBotLogin(provider || resolveProviderForBotTokenEnv(botTokenEnv, env));
+  const providerLogin = providerSlugToBotLogin(
+    provider || resolveProviderForBotTokenEnv(botTokenEnv, env) || resolveProviderForIdentity(identity, env)
+  );
   if (providerLogin) return providerLogin;
 
   return null;
@@ -101,4 +119,5 @@ export {
   providerSlugToBotLogin,
   resolveGitHubAppBotLogin,
   resolveProviderForBotTokenEnv,
+  resolveProviderForIdentity,
 };

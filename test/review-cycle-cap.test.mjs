@@ -334,7 +334,7 @@ test('postReviewCycleCapEscalation suppresses duplicate retry when ambiguous com
           listCalls += 1;
           return {
             data: createCalls > 0
-              ? [{ id: 101, body: 'escalation body' }]
+              ? [{ id: 101, body: 'escalation body', user: { login: 'lacey-merge-agent[bot]' } }]
               : [],
           };
         },
@@ -359,6 +359,129 @@ test('postReviewCycleCapEscalation suppresses duplicate retry when ambiguous com
 
   assert.equal(createCalls, 1);
   assert.equal(listCalls, 2);
+});
+
+test('postReviewCycleCapEscalation ignores spoofed duplicate bodies from untrusted commenters', async () => {
+  const calls = [];
+  const octokit = {
+    rest: {
+      issues: {
+        listComments: async () => ({
+          data: [
+            { id: 101, body: 'escalation body', user: { login: 'outside-contributor' } },
+            { id: 102, body: 'escalation body', user: { login: 'lacey-merge-agent' } },
+          ],
+        }),
+        createComment: async (params) => {
+          calls.push(params);
+        },
+      },
+    },
+  };
+
+  await postReviewCycleCapEscalation(octokit, {
+    repoPath: REPO,
+    prNumber: PR,
+    body: 'escalation body',
+    trustedAuthorLogins: ['lacey-merge-agent[bot]'],
+    logger: { warn() {} },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].body, 'escalation body');
+});
+
+test('postReviewCycleCapEscalation suppresses trusted existing escalation comments', async () => {
+  let createCalls = 0;
+  const octokit = {
+    rest: {
+      issues: {
+        listComments: async () => ({
+          data: [{ id: 101, body: 'escalation body', user: { login: 'lacey-merge-agent[bot]' } }],
+        }),
+        createComment: async () => {
+          createCalls += 1;
+        },
+      },
+    },
+  };
+
+  await postReviewCycleCapEscalation(octokit, {
+    repoPath: REPO,
+    prNumber: PR,
+    body: 'escalation body',
+    trustedAuthorLogins: ['lacey-merge-agent[bot]'],
+    logger: { warn() {} },
+  });
+
+  assert.equal(createCalls, 0);
+});
+
+test('postReviewCycleCapEscalation trusts custom watcher broker provider comments', async () => {
+  let createCalls = 0;
+  let listCalls = 0;
+  const octokit = {
+    rest: {
+      issues: {
+        listComments: async () => {
+          listCalls += 1;
+          return {
+            data: [{ id: 101, body: 'escalation body', user: { login: 'custom-merge-agent[bot]' } }],
+          };
+        },
+        createComment: async () => {
+          createCalls += 1;
+        },
+      },
+    },
+  };
+
+  await postReviewCycleCapEscalation(octokit, {
+    repoPath: REPO,
+    prNumber: PR,
+    body: 'escalation body',
+    env: {
+      WATCHER_GH_BROKER_ROLE: 'merge-agent',
+      OAUTH_BROKER_MERGE_AGENT_PROVIDER: 'github-app-custom-merge-agent',
+    },
+    logger: { warn() {} },
+  });
+
+  assert.equal(listCalls, 1);
+  assert.equal(createCalls, 0);
+});
+
+test('postReviewCycleCapEscalation does not reread comments after successful create', async () => {
+  let createCalls = 0;
+  let listCalls = 0;
+  const octokit = {
+    rest: {
+      issues: {
+        listComments: async () => {
+          listCalls += 1;
+          return { data: [] };
+        },
+        createComment: async (params) => {
+          createCalls += 1;
+          return { data: { id: 101, body: params.body, user: { login: 'custom-merge-agent[bot]' } } };
+        },
+      },
+    },
+  };
+
+  await postReviewCycleCapEscalation(octokit, {
+    repoPath: REPO,
+    prNumber: PR,
+    body: 'escalation body',
+    env: {
+      WATCHER_GH_BROKER_ROLE: 'merge-agent',
+      OAUTH_BROKER_MERGE_AGENT_PROVIDER: 'github-app-custom-merge-agent',
+    },
+    logger: { warn() {} },
+  });
+
+  assert.equal(listCalls, 1);
+  assert.equal(createCalls, 1);
 });
 
 test('postReviewCycleCapEscalation does not retry permanent GitHub comment failures', async () => {

@@ -83,6 +83,22 @@ data/reviews.db
 | `argus-security-queued` | bot-authored PR routed to the Argus security queue (ASR-04). **Not terminal** — the dispatch loop keeps visiting the row so a new head re-enqueues, and the adversarial gate reports `pending` (never `success`) until Argus answers or the narrow dependency-bot auto-adjudicator lands/completes the exact head. Excluded from malformed-title ticketing and from the adversarial stall count; a stuck security review surfaces on the Argus queue depth instead |
 | `unroutable-bot-author` | **Legacy (pre-ASR-04).** Bot-authored PR recorded terminal because nothing could route it — that terminal write is what stranded `#909`/`#910` for 14 hours. No longer written unless `ADVERSARIAL_ARGUS_SECURITY_ROUTE` is off; open rows still carrying it self-heal to `argus-security-queued` on the next watcher tick, and `npm run argus:backfill` recovers them immediately |
 
+### Reviewer run-state ledger
+
+The SQLite `reviewing` row is the durable delivery claim. The reviewer runtime
+also writes a per-session JSON record in `data/reviewer-runs/` so a restarted
+watcher can adopt or settle the subprocess without relying only on SQLite spawn
+columns.
+
+| run-state | Meaning |
+|---|---|
+| `launching` | runtime-adapter launch intent written before the detached reviewer PGID is authoritative; because the fork may already have succeeded, null-PGID reconciliation treats this as ambiguous process evidence rather than proven pre-spawn failure |
+| `heartbeating` | reviewer subprocess has been spawned and its `pgid`, `spawnedAt`, and `lastHeartbeatAt` have been captured |
+| `spawned` | legacy active state for older records that captured spawn metadata without heartbeat semantics |
+| `completed` | reviewer subprocess finished cleanly; terminal for the run-state ledger |
+| `failed` | reviewer subprocess failed; terminal for the run-state ledger |
+| `cancelled` | reviewer subprocess was cancelled or the watcher settled the session as cancelled; terminal for the run-state ledger, but still recoverable for PGID adoption/killing |
+
 ### Transitions
 
 ```text
@@ -242,7 +258,32 @@ new PR
   1. Inspect the GitHub PR. If a review was already posted by the reviewer bot, leave the row alone (the round is effectively done).
   2. If no orphan review is present, run `npm run retrigger-review --repo <slug> --pr <n> --reason "verified no orphan review"`. The reset clears the sticky state and re-arms `pending`.
 - With reviewer lease recovery enabled, each proven-dead `reviewing → pending` re-arm increments `infra_auto_recover_attempts`. After three automatic re-arms, another dead session is quarantined in sticky `failed` with `[reviewer-lease-recovery-cap]` evidence instead of returning to `pending`; a successful posted review, intentional re-review re-arm, or superseding PR head resets the counter. This bounds deterministic reviewer crash loops while preserving automatic recovery from transient watcher bounces.
-- Steady-state recovery does not touch a newly claimed row merely because `reviewer_started_at` is still empty. Until the authoritative spawn callback persists `reviewer_started_at` and `reviewer_pgid`, `last_attempted_at + reviewer_timeout_ms` is the temporary guard window; only after that window expires may the row be reconciled as missing spawn metadata. If null-PGID recovery must probe GitHub and no historical start timestamp is available, the lookup omits the lower time bound rather than synthesizing `now`, so a review already posted by the orphan can still be recovered.
+- Steady-state recovery does not touch a newly claimed row merely because
+  `reviewer_started_at` and `reviewer_pgid` are still empty. The watcher now
+  distinguishes proven pre-spawn failure from ambiguous runtime launch evidence.
+  A row with no run-state record and no historical `reviewer_started_at` is
+  guarded by the null-PGID launch grace window
+  (`DEFAULT_NULL_PGID_LAUNCH_GRACE_MS`, 60 seconds by default) from
+  `last_attempted_at`; after that grace expires, the watcher may probe GitHub
+  for a posted review on the current head and, if no review exists and the
+  recovery cap has room, settle any run-state as `cancelled` and re-arm the
+  SQLite row to `pending`.
+- A row with a durable `launching` run-state is not the same as a missing
+  run-state record. The adapter has already written runtime launch intent, and a
+  watcher bounce after fork but before PGID persistence can leave the detached
+  reviewer alive but unadoptable. Null-PGID `launching` rows therefore wait the
+  persisted reviewer timeout before GitHub probing/re-arm, preserving the
+  duplicate-spawn guard for slow reviewers whose PGID was not captured.
+- Null-PGID rows with terminal run-state records (`completed`, `failed`, or
+  `cancelled`) have no timeout guard; they are reconciled immediately on the
+  next watcher pass. Null-PGID rows with active/legacy runtime records still use
+  the persisted `reviewer_timeout_ms` fallback (or the configured reviewer
+  deadline) before recovery, preserving the conservative wait for sessions that
+  might represent a watcher bounce after fork. `last_attempted_at` anchors only
+  the local null-PGID grace window. If null-PGID recovery must probe GitHub and
+  no historical `reviewer_started_at` timestamp is available, the GitHub lookup
+  omits its lower time bound so a current-head review already posted by the
+  orphan can still be recovered despite local/GitHub clock skew.
 - Overdue orphan auto-retry is deliberately narrow. The watcher only attempts it when the row persisted the original launch timeout and an authoritative reviewer spawn timestamp, the orphan age exceeds that persisted timeout from the actual subprocess start, the process group is confirmed dead after the bounded recovery loop, and GitHub is reprobed over a short delayed window with no late review found. That same steady-state recovery path also settles the runtime reviewer run-state ledger before the SQLite row flips terminal. Any ambiguity falls back to sticky `failed-orphan` instead of launching a second reviewer.
 - Re-review does **not** happen because of prose. It happens because reconciliation resets the row to `pending`.
 - A PR can move from `posted` back to `pending` only via explicit recovery logic or a valid rereview request.

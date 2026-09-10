@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 
-import { readReviewerRunRecord } from './adapters/reviewer-runtime/run-state.mjs';
+import { readReviewerRunRecord, TERMINAL_RUN_STATES } from './adapters/reviewer-runtime/run-state.mjs';
 import {
   loginsMatch,
   resolveReviewerBotLogin,
@@ -25,6 +25,7 @@ const NULL_PGID_DIAGNOSTIC_MESSAGE =
 const NULL_PGID_REARM_MESSAGE =
   `${NULL_PGID_DIAGNOSTIC_MESSAGE} ` +
   'GitHub was checked for a completed review before automatically re-arming.';
+const DEFAULT_NULL_PGID_LAUNCH_GRACE_MS = 60 * 1000;
 const UNKNOWN_REVIEWER_FAILURE_MESSAGE =
   'Reviewer session has an unknown reviewer value; operator must verify GitHub before retrying.';
 const CORRUPT_SESSION_FAILURE_MESSAGE =
@@ -95,6 +96,16 @@ function parsePositiveInteger(value) {
   const numeric = Number(value);
   if (!Number.isInteger(numeric) || numeric <= 0) return null;
   return numeric;
+}
+
+function resolveNullPgidLaunchGraceMs(value) {
+  return parsePositiveInteger(value) || DEFAULT_NULL_PGID_LAUNCH_GRACE_MS;
+}
+
+function reviewerRunTimeoutMs(row, fallbackMs) {
+  return parsePositiveInteger(row?.reviewer_timeout_ms)
+    || parsePositiveInteger(fallbackMs)
+    || resolveReviewerTimeoutMs();
 }
 
 function errorText(err) {
@@ -319,14 +330,16 @@ function markStickyOrphan({ statements, row, failureAt, message, log, event }) {
   );
 }
 
-function reviewerRunStateAdoptionCandidate(rootDir, row) {
+function readReviewerRunRecordBestEffort(rootDir, row) {
   if (!row?.reviewer_session_uuid) return null;
-  let record = null;
   try {
-    record = readReviewerRunRecord(rootDir, row.reviewer_session_uuid);
+    return readReviewerRunRecord(rootDir, row.reviewer_session_uuid);
   } catch {
     return null;
   }
+}
+
+function reviewerRunStateAdoptionCandidate(row, record) {
   const pgid = parsePositiveInteger(record?.pgid);
   if (!record || record.sessionUuid !== row.reviewer_session_uuid || pgid === null) return null;
   return {
@@ -334,6 +347,20 @@ function reviewerRunStateAdoptionCandidate(rootDir, row) {
     spawnedAt: record.spawnedAt || row.reviewer_started_at,
     reattachToken: record.reattachToken || record.sessionUuid,
   };
+}
+
+function nullPgidGuardWindowMs({
+  row,
+  runRecord,
+  nullPgidGraceMs,
+  reviewerDeadlineMs,
+} = {}) {
+  const state = String(runRecord?.state || '').trim();
+  if (TERMINAL_RUN_STATES.has(state)) return 0;
+  if (!runRecord && parseTime(row?.reviewer_started_at) === null) {
+    return nullPgidGraceMs;
+  }
+  return reviewerRunTimeoutMs(row, reviewerDeadlineMs);
 }
 
 function reviewerLeaseExpiryAt(startedAt, timeoutMs) {
@@ -361,6 +388,7 @@ async function reconcileReviewerSessions({
   reviewerDeadlineMs = resolveReviewerTimeoutMs(),
   leaseRecoveryEnabled = resolveReviewerLeaseRecoveryEnabled(),
   leaseRecoveryMaxAttempts = DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS,
+  nullPgidLaunchGraceMs = DEFAULT_NULL_PGID_LAUNCH_GRACE_MS,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   postKillReviewReprobeDelaysMs = [500, 1500, 3000],
 } = {}) {
@@ -375,6 +403,7 @@ async function reconcileReviewerSessions({
   const recoveryCap = Number.isInteger(Number(leaseRecoveryMaxAttempts)) && Number(leaseRecoveryMaxAttempts) > 0
     ? Number(leaseRecoveryMaxAttempts)
     : DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS;
+  const nullPgidGraceMs = resolveNullPgidLaunchGraceMs(nullPgidLaunchGraceMs);
 
   function recoveryCapAvailable(row) {
     return Number(row.infra_auto_recover_attempts || 0) < recoveryCap;
@@ -415,7 +444,8 @@ async function reconcileReviewerSessions({
     }
 
     if (row.reviewer_pgid === null || row.reviewer_pgid === undefined || row.reviewer_pgid === '') {
-      const adoption = reviewerRunStateAdoptionCandidate(rootDir, row);
+      const runRecord = readReviewerRunRecordBestEffort(rootDir, row);
+      const adoption = reviewerRunStateAdoptionCandidate(row, runRecord);
       if (adoption) {
         const startedAt = adoption.spawnedAt || row.reviewer_started_at || row.last_attempted_at || failureAt;
         const leaseExpiresAt = reviewerLeaseExpiryAt(startedAt, row.reviewer_timeout_ms);
@@ -440,16 +470,21 @@ async function reconcileReviewerSessions({
         );
       } else {
         const claimedAtMs = parseTime(row.last_attempted_at);
-        const reviewerTimeoutMs = parsePositiveInteger(row.reviewer_timeout_ms);
+        const guardWindowMs = nullPgidGuardWindowMs({
+          row,
+          runRecord,
+          nullPgidGraceMs,
+          reviewerDeadlineMs,
+        });
         if (
           claimedAtMs !== null &&
-          reviewerTimeoutMs !== null &&
-          now.getTime() <= claimedAtMs + reviewerTimeoutMs
+          now.getTime() <= claimedAtMs + guardWindowMs
         ) {
+          const claimedAgeMs = Math.max(0, now.getTime() - claimedAtMs);
           log.log(
             `[watcher] reviewer_reattach_null_pgid_guard_active repo=${row.repo} pr=${row.pr_number} ` +
             `session=${row.reviewer_session_uuid} last_attempted_at=${row.last_attempted_at} ` +
-            `timeout_ms=${reviewerTimeoutMs}`
+            `age_ms=${claimedAgeMs} guard_ms=${guardWindowMs} run_state=${runRecord?.state || 'missing'}`
           );
           continue;
         }
@@ -484,7 +519,7 @@ async function reconcileReviewerSessions({
         try {
           const probeRow = {
             ...row,
-            reviewer_started_at: row.reviewer_started_at || row.last_attempted_at || null,
+            reviewer_started_at: row.reviewer_started_at || null,
           };
           postedReview = await findPostedReview(probeRow, { refresh: true });
         } catch (err) {
@@ -905,12 +940,14 @@ async function reconcileReviewerSessions({
 export {
   LEGACY_ORPHAN_FAILURE_MESSAGE,
   NULL_PGID_FAILURE_MESSAGE,
+  DEFAULT_NULL_PGID_LAUNCH_GRACE_MS,
   PGID_IDENTITY_FAILURE_MESSAGE,
   killPgid,
   makeReviewPostedProbe,
   probePgidAlive,
   probeReviewerSession,
   reconcileReviewerSessions,
+  resolveNullPgidLaunchGraceMs,
   reviewerBotLogin,
   isTransientGithubProbeError,
 };

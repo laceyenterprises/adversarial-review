@@ -16,6 +16,8 @@ import {
 
 const execFileAsync = promisify(execFile);
 import {
+  ACTIVE_RUN_STATES,
+  TERMINAL_RUN_STATES,
   claimReviewerRunRecord,
   readReviewerRunRecord,
   reviewerRunSideChannelPaths,
@@ -133,6 +135,7 @@ function emptyResult({
   reattachToken = null,
   tokenUsage = null,
   tokenUsageNoUsageReason = null,
+  preventLeaseRecovery = false,
   error = null,
 } = {}) {
   return {
@@ -148,6 +151,7 @@ function emptyResult({
     reattachToken,
     tokenUsage,
     tokenUsageNoUsageReason,
+    ...(preventLeaseRecovery ? { preventLeaseRecovery: true } : {}),
     error,
     stderr: stderrTail,
     stdout: stdoutTail,
@@ -313,6 +317,37 @@ async function terminateProcessGroup(pgid, {
   }
 }
 
+function terminalSpawnedPgidFailureMessage(pgid, err) {
+  return `terminal onSpawn process group ${pgid} termination failed: ${err?.message || err}`;
+}
+
+async function terminateTerminalSpawnedPgid(pgid, {
+  processKillImpl,
+  sleepImpl,
+  cancelGraceMs,
+  cancelPollIntervalMs,
+  logger,
+  sessionUuid,
+  state,
+} = {}) {
+  if (!Number.isInteger(pgid) || pgid <= 0) return;
+  try {
+    await terminateProcessGroup(pgid, {
+      processKillImpl,
+      sleepImpl,
+      graceMs: cancelGraceMs,
+      pollIntervalMs: cancelPollIntervalMs,
+    });
+  } catch (err) {
+    logger?.warn?.(
+      `[cli-direct] failed to terminate reviewer process group ${pgid} after ` +
+      `terminal onSpawn race for session=${sessionUuid || 'unknown'} state=${state || 'unknown'}: ` +
+      `${err?.message || err}`
+    );
+    throw err;
+  }
+}
+
 function readSideChannelTails(rootDir, sessionUuid) {
   const { stdoutPath, stderrPath } = reviewerRunSideChannelPaths(rootDir, sessionUuid);
   return {
@@ -359,6 +394,7 @@ function createCliDirectReviewerRuntimeAdapter({
     const reviewerEnv = {
       ...process.env,
       REVIEWER_SESSION_UUID: sessionUuid,
+      REVIEWER_RUN_STATE_ROOT_DIR: rootDir,
     };
     let stripped = [];
     let preflightResult = null;
@@ -405,7 +441,7 @@ function createCliDirectReviewerRuntimeAdapter({
       sessionUuid,
       domain: subjectContext.domainId,
       runtime: 'cli-direct',
-      state: 'spawned',
+      state: 'launching',
       pgid: null,
       spawnedAt,
       lastHeartbeatAt: null,
@@ -413,7 +449,7 @@ function createCliDirectReviewerRuntimeAdapter({
       subjectContext,
     };
     const claim = claimReviewerRunRecord(rootDir, initialRecord);
-    if (!claim.claimed && ['spawned', 'heartbeating'].includes(claim.record?.state)) {
+    if (!claim.claimed && ACTIVE_RUN_STATES.has(claim.record?.state)) {
       return emptyResult({
         ok: false,
         spawnedAt: claim.record.spawnedAt || spawnedAt,
@@ -438,6 +474,7 @@ function createCliDirectReviewerRuntimeAdapter({
     const controller = new AbortController();
     const activeRun = { controller, record, cancelled: false };
     activeRuns.set(sessionUuid, activeRun);
+    let terminalSpawnTermination = null;
 
     try {
       const reviewerArgs = buildReviewerProcessArgs(subjectContext);
@@ -454,18 +491,89 @@ function createCliDirectReviewerRuntimeAdapter({
           stderrPath: sideChannels.stderrPath,
           onSpawn: ({ pgid }) => {
             const authoritativeSpawnedAt = now();
-            record = updateReviewerRunRecord(rootDir, record, {
-              state: 'heartbeating',
-              pgid,
-              spawnedAt: authoritativeSpawnedAt,
-              lastHeartbeatAt: authoritativeSpawnedAt,
-            });
+            let currentRecord = record;
+            try {
+              currentRecord = readReviewerRunRecord(rootDir, sessionUuid) || record;
+            } catch {
+              currentRecord = record;
+            }
+            if (TERMINAL_RUN_STATES.has(currentRecord.state)) {
+              const spawnedPgid = Number.isInteger(pgid) && pgid > 0 ? pgid : null;
+              const recordPgid = Number.isInteger(currentRecord.pgid) && currentRecord.pgid > 0
+                ? currentRecord.pgid
+                : spawnedPgid;
+              record = recordPgid && recordPgid !== currentRecord.pgid
+                ? updateReviewerRunRecord(rootDir, currentRecord, { pgid: recordPgid })
+                : currentRecord;
+              terminalSpawnTermination = terminateTerminalSpawnedPgid(spawnedPgid, {
+                processKillImpl,
+                sleepImpl,
+                cancelGraceMs,
+                cancelPollIntervalMs,
+                logger,
+                sessionUuid,
+                state: currentRecord.state,
+              }).then(() => null, (err) => err);
+            } else {
+              const spawnedAt = currentRecord.spawnedAt || authoritativeSpawnedAt;
+              const lastHeartbeatAt =
+                currentRecord.lastHeartbeatAt || spawnedAt || authoritativeSpawnedAt;
+              record = updateReviewerRunRecord(rootDir, currentRecord, {
+                state: 'heartbeating',
+                pgid: currentRecord.pgid || pgid,
+                spawnedAt,
+                lastHeartbeatAt,
+              });
+            }
             activeRun.record = record;
             activeRuns.set(sessionUuid, activeRun);
-            req.onReviewerPgid?.({ sessionUuid, pgid, spawnedAt: authoritativeSpawnedAt });
+            req.onReviewerPgid?.({
+              sessionUuid,
+              pgid: record.pgid || pgid,
+              spawnedAt: record.spawnedAt || authoritativeSpawnedAt,
+            });
           },
         }
       );
+
+      if (TERMINAL_RUN_STATES.has(record.state)) {
+        const terminalMessage = `reviewer run ${sessionUuid} reached terminal state ${record.state} before subprocess completion`;
+        const terminalSpawnTerminationError = terminalSpawnTermination
+          ? await terminalSpawnTermination
+          : null;
+        if (terminalSpawnTerminationError) {
+          const killFailureMessage = terminalSpawnedPgidFailureMessage(record.pgid, terminalSpawnTerminationError);
+          record = updateReviewerRunRecord(rootDir, record, {
+            state: 'failed',
+            lastHeartbeatAt: now(),
+          });
+          activeRun.record = record;
+          return emptyResult({
+            ok: false,
+            spawnedAt: record.spawnedAt,
+            failureClass: 'bug',
+            stderrTail: [terminalMessage, killFailureMessage].join('\n'),
+            stdoutTail: tailText(stdout),
+            pgid: record.pgid,
+            reattachToken: record.reattachToken,
+            preventLeaseRecovery: true,
+            error: killFailureMessage,
+          });
+        }
+        return emptyResult({
+          ok: false,
+          spawnedAt: record.spawnedAt,
+          failureClass: 'daemon-bounce',
+          stderrTail: terminalMessage,
+          stdoutTail: tailText(stdout),
+          pgid: record.pgid,
+          reattachToken: record.reattachToken,
+          tokenUsage: shouldParseStdoutTokenUsage(req.model)
+            ? parseCodexJsonTokenUsage(stdout)
+            : null,
+          error: terminalMessage,
+        });
+      }
 
       record = updateReviewerRunRecord(rootDir, record, {
         state: 'completed',
@@ -486,60 +594,67 @@ function createCliDirectReviewerRuntimeAdapter({
           : null,
       });
     } catch (err) {
-      const timedOut = isReviewerSubprocessTimeout(err, { killSignal: 'SIGTERM' });
-      const detail = [err.message, err.stdout, err.stderr]
+      const terminalSpawnTerminationError = terminalSpawnTermination
+        ? await terminalSpawnTermination
+        : null;
+      const effectiveErr = terminalSpawnTerminationError || err;
+      const timedOut = isReviewerSubprocessTimeout(effectiveErr, { killSignal: 'SIGTERM' });
+      const detail = [effectiveErr.message, effectiveErr.stdout, effectiveErr.stderr]
         .filter(Boolean)
         .join('\n')
         .trim()
         .slice(0, 4000);
-      const exitCode = Number.isInteger(err?.exitCode)
-        ? err.exitCode
-        : (Number.isInteger(err?.code) ? err.code : null);
-      const errorCode = typeof err?.code === 'string' ? err.code : null;
-      const stderrTail = tailText(err?.stderr || detail || '');
-      const stdoutTail = tailText(err?.stdout || '');
+      const exitCode = Number.isInteger(effectiveErr?.exitCode)
+        ? effectiveErr.exitCode
+        : (Number.isInteger(effectiveErr?.code) ? effectiveErr.code : null);
+      const errorCode = typeof effectiveErr?.code === 'string' ? effectiveErr.code : null;
+      const stderrTail = tailText(effectiveErr?.stderr || detail || '');
+      const stdoutTail = tailText(effectiveErr?.stdout || '');
       const failureTokenEvidence = shouldParseStdoutTokenUsage(req.model)
-        ? parseCodexJsonTokenUsageFromFailureStdout(err?.stdout || '')
+        ? parseCodexJsonTokenUsageFromFailureStdout(effectiveErr?.stdout || '')
         : { tokenUsage: null, tokenUsageNoUsageReason: null };
       const cancelled = activeRun.cancelled || controller.signal.aborted || errorCode === 'ABORT_ERR';
-      const stdoutClassificationTail = tailText(err?.stdout || '', DEFAULT_CLASSIFICATION_FIELD_BYTES);
+      const stdoutClassificationTail = tailText(effectiveErr?.stdout || '', DEFAULT_CLASSIFICATION_FIELD_BYTES);
       const classificationText = [
-        tailText(err?.message || '', DEFAULT_CLASSIFICATION_FIELD_BYTES),
-        tailText(err?.stderr || '', DEFAULT_CLASSIFICATION_FIELD_BYTES),
+        tailText(effectiveErr?.message || '', DEFAULT_CLASSIFICATION_FIELD_BYTES),
+        tailText(effectiveErr?.stderr || '', DEFAULT_CLASSIFICATION_FIELD_BYTES),
         stdoutLooksLikeFailureSignal(stdoutClassificationTail) ? stdoutClassificationTail : '',
       ]
         .filter(Boolean)
         .join('\n')
         .trim();
       const failureClass = reviewerSignalAwareFailureClass(
-        err,
+        effectiveErr,
         classificationText,
         exitCode,
         {
-          killed: err?.killed === true,
-          signal: err?.signal,
-          code: err?.code,
+          killed: effectiveErr?.killed === true,
+          signal: effectiveErr?.signal,
+          code: effectiveErr?.code,
           timeoutKilled: timedOut,
         },
       );
       record = updateReviewerRunRecord(rootDir, record, {
-        state: cancelled || failureClass === 'daemon-bounce' ? 'cancelled' : 'failed',
+        state: terminalSpawnTerminationError
+          ? 'failed'
+          : (cancelled || failureClass === 'daemon-bounce' ? 'cancelled' : 'failed'),
         lastHeartbeatAt: now(),
       });
       activeRun.record = record;
       return emptyResult({
         ok: false,
         spawnedAt: record.spawnedAt,
-        failureClass,
+        failureClass: terminalSpawnTerminationError ? 'bug' : failureClass,
         stderrTail,
         stdoutTail,
         exitCode,
-        signal: typeof err?.signal === 'string' ? err.signal : null,
+        signal: typeof effectiveErr?.signal === 'string' ? effectiveErr.signal : null,
         pgid: record.pgid,
         reattachToken: record.reattachToken,
         tokenUsage: failureTokenEvidence.tokenUsage,
         tokenUsageNoUsageReason: failureTokenEvidence.tokenUsageNoUsageReason,
-        error: detail || err.message,
+        preventLeaseRecovery: terminalSpawnTerminationError,
+        error: detail || effectiveErr.message,
       });
     } finally {
       activeRuns.delete(sessionUuid);

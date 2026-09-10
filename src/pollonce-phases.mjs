@@ -2551,13 +2551,14 @@ export async function processReviewSubject(entry, ctx) {
             //     larger fuse so a broken reviewer path cannot retry forever.
             let skipReviewerSpawnReason = null;
             if (passKind === 'rereview') {
+              const explicitOperatorReviewRetrigger = isExplicitOperatorReviewRetrigger(current);
               const closerHead = await getHeadCloserCommitSuppressionWithBoundedRetry({
                 repoPath,
                 prNumber,
                 headSha: reviewerHeadSha,
                 logger: console,
               });
-              if (closerHead?.suppressed) {
+              if (closerHead?.suppressed && !explicitOperatorReviewRetrigger) {
                 console.log(
                   `[watcher] Skipping re-review for ${repoPath}#${prNumber}: head ` +
                   `${String(reviewerHeadSha || '').slice(0, 12)} is a terminal closer commit ` +
@@ -2565,11 +2566,16 @@ export async function processReviewSubject(entry, ctx) {
                   `close path. No attempt budget consumed.`,
                 );
                 skipReviewerSpawnReason = 'terminal-closer-head';
+              } else if (closerHead?.suppressed) {
+                console.log(
+                  `[watcher] Allowing explicit re-review for ${repoPath}#${prNumber}: head ` +
+                  `${String(reviewerHeadSha || '').slice(0, 12)} is a terminal closer commit ` +
+                  `(${closerHead.reason}), but rereview_reason is an operator retrigger marker.`
+                );
               }
 
               const hardReviewCeiling = resolveHardReviewCeiling(maxRemediationRounds);
               const hardReviewAttemptCeiling = resolveHardReviewAttemptCeiling(maxRemediationRounds);
-              const explicitOperatorReviewRetrigger = isExplicitOperatorReviewRetrigger(current);
               // FSR-06B: a VERIFIED trailer-only re-review request (empty delta
               // from the reviewed head, checked against local git above) may
               // pass both fuses once, exactly like an operator retrigger.

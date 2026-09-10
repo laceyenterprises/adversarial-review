@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { writeFileAtomic } from '../../atomic-write.mjs';
 
 const RUN_STATE_DIR = ['data', 'reviewer-runs'];
-const ACTIVE_RUN_STATES = new Set(['spawned', 'heartbeating']);
+const ACTIVE_RUN_STATES = new Set(['launching', 'spawned', 'heartbeating']);
 const RECOVERABLE_RUN_STATES = new Set(['spawned', 'heartbeating', 'cancelled']);
 const TERMINAL_RUN_STATES = new Set(['completed', 'failed', 'cancelled']);
 

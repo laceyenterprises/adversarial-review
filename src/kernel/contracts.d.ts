@@ -525,6 +525,7 @@ export interface ReviewerRunResult {
   pgid: number | null;
   spawnedAt: IsoTimestamp;
   reattachToken: string | null;
+  preventLeaseRecovery?: boolean;
 }
 
 export interface RemediatorRunRequest {
@@ -552,6 +553,7 @@ export interface RemediatorRunResult {
 }
 
 export type ReviewerRunState =
+  | 'launching'
   | 'spawned'
   | 'heartbeating'
   | 'completed'

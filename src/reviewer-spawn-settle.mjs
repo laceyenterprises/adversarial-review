@@ -1256,7 +1256,7 @@ function settleReviewerAttempt({
     return;
   }
   clearCascadeState(rootDir, { repo: repoPath, prNumber });
-  const terminalFailureStatement = leaseRecoveryEnabled
+  const terminalFailureStatement = leaseRecoveryEnabled && result.preventLeaseRecovery !== true
     ? statements.releaseReviewLease
     : statements.markFailed;
   withSqliteBusyRetrySync(

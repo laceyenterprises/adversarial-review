@@ -222,11 +222,15 @@ test('watcher terminal rereview skip releases claim and falls through to close p
   const source = readFileSync(POLLONCE_PHASES_SOURCE, 'utf8');
   const guardIndex = source.indexOf("let skipReviewerSpawnReason = null;");
   const closerProbeIndex = source.indexOf("const closerHead = await getHeadCloserCommitSuppressionWithBoundedRetry({", guardIndex);
-  const closerSuppressedIndex = source.indexOf("if (closerHead?.suppressed) {", guardIndex);
+  const closerSuppressedUnlessOperatorIndex = source.indexOf(
+    "if (closerHead?.suppressed && !explicitOperatorReviewRetrigger) {",
+    guardIndex
+  );
+  const closerSuppressedIndex = closerSuppressedUnlessOperatorIndex;
   const hardCeilingIndex = source.indexOf("const hardReviewCeiling =", guardIndex);
   const operatorRetriggerIndex = source.indexOf(
     "const explicitOperatorReviewRetrigger = isExplicitOperatorReviewRetrigger(current);",
-    hardCeilingIndex
+    guardIndex
   );
   const hardSkipIndex = source.indexOf("!explicitOperatorReviewRetrigger", hardCeilingIndex);
   const attemptCeilingIndex = source.indexOf("const priorReviewAttemptCount = countReviewCeilingAttempts({", hardSkipIndex);
@@ -238,15 +242,24 @@ test('watcher terminal rereview skip releases claim and falls through to close p
   const spawnIndex = source.indexOf("await spawnReviewer(spawnReviewerArgs)", guardIndex);
 
   assert.ok(guardIndex > 0, 'rereview skip guard should exist');
+  assert.ok(
+    operatorRetriggerIndex > guardIndex && operatorRetriggerIndex < closerProbeIndex,
+    'explicit operator retrigger should be resolved before terminal closer-head suppression'
+  );
   assert.ok(closerProbeIndex > guardIndex, 'closer-head probe should use bounded retry wrapper');
   assert.ok(closerSuppressedIndex > closerProbeIndex, 'terminal closer-head check should follow the probe');
+  assert.equal(
+    closerSuppressedIndex,
+    closerSuppressedUnlessOperatorIndex,
+    'explicit operator retrigger should bypass terminal closer-head suppression'
+  );
   assert.equal(
     source.slice(closerSuppressedIndex, hardCeilingIndex).includes("return;"),
     false,
     'terminal closer-head skip must not return before watcher close/maintenance work'
   );
   assert.ok(
-    operatorRetriggerIndex > hardCeilingIndex && operatorRetriggerIndex < hardSkipIndex,
+    operatorRetriggerIndex < hardSkipIndex,
     'explicit operator retrigger should be resolved before the hard landed-review ceiling'
   );
   assert.equal(

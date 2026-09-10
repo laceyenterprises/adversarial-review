@@ -26,6 +26,7 @@ import { writeRuntimeStatusSnapshot } from '../src/runtime-status-snapshot.mjs';
 import { writeCanaryStatus } from '../src/adapters/agent-runtime/canary.mjs';
 import { writeSettleSmokeResult } from '../src/adapters/agent-runtime/settle-smoke.mjs';
 import { createCliDirectReviewerRuntimeAdapter } from '../src/adapters/reviewer-runtime/cli-direct/index.mjs';
+import { persistReviewerChildRunState } from '../src/reviewer-child-run-state.mjs';
 import {
   CANONICAL_OAUTH_STRIP_ENV as CLI_DIRECT_CANONICAL_OAUTH_STRIP_ENV,
   resolveProgressTimeoutForModel,
@@ -43,6 +44,7 @@ import {
   reviewerRunSideChannelPaths,
   reviewerRunStatePath,
   settleReviewerRunRecord,
+  updateReviewerRunRecord,
   writeReviewerRunRecord,
 } from '../src/adapters/reviewer-runtime/run-state.mjs';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
@@ -1360,6 +1362,115 @@ test('cli-direct writes atomic reviewer run records and refuses double-spawn for
   }
 });
 
+test('cli-direct records launch intent before subprocess onSpawn callback', async () => {
+  const rootDir = makeRoot();
+  let capturedOptions;
+  let release;
+  try {
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      preflightImpl: noopPreflight,
+      spawnCapturedImpl: async (_command, _args, options) => {
+        capturedOptions = options;
+        await new Promise((resolve) => { release = resolve; });
+        options.onSpawn({ pgid: 5151 });
+        return { stdout: 'posted\n', stderr: '' };
+      },
+      now: () => '2026-05-11T20:00:00.000Z',
+    });
+
+    const req = {
+      model: 'claude',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 2 },
+      timeoutMs: 100,
+      sessionUuid: 'launching-session',
+      forbiddenFallbacks: ['api-key'],
+    };
+    const first = adapter.spawnReviewer(req);
+    await waitFor(() => assert.ok(capturedOptions));
+
+    const launchingRecord = readReviewerRunRecord(rootDir, req.sessionUuid);
+    assert.equal(launchingRecord.state, 'launching');
+    assert.equal(launchingRecord.pgid, null);
+    assert.equal(capturedOptions.env.REVIEWER_RUN_STATE_ROOT_DIR, rootDir);
+
+    const duplicate = await adapter.spawnReviewer(req);
+    assert.equal(duplicate.ok, false);
+    assert.equal(duplicate.failureClass, 'daemon-bounce');
+
+    release();
+    const completed = await first;
+    assert.equal(completed.ok, true);
+    const completedRecord = readReviewerRunRecord(rootDir, req.sessionUuid);
+    assert.equal(completedRecord.state, 'completed');
+    assert.equal(completedRecord.pgid, 5151);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('cli-direct onSpawn preserves newer owner-written run state', async () => {
+  const rootDir = makeRoot();
+  let release;
+  try {
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      preflightImpl: noopPreflight,
+      spawnCapturedImpl: async (_command, _args, options) => {
+        writeReviewerRunRecord(options.env.REVIEWER_RUN_STATE_ROOT_DIR, {
+          sessionUuid: 'child-wins-session',
+          domain: 'code-pr',
+          runtime: 'cli-direct',
+          state: 'heartbeating',
+          pgid: 6161,
+          spawnedAt: '2026-05-11T20:00:01.000Z',
+          lastHeartbeatAt: '2026-05-11T20:00:01.000Z',
+          reattachToken: 'child-wins-session',
+          subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 2 },
+        });
+        assert.equal(persistReviewerChildRunState({
+          rootDir,
+          env: options.env,
+          sessionUuid: 'child-wins-session',
+        })?.pgid, 6161);
+        options.onSpawn({ pgid: 6161 });
+        await new Promise((resolve) => { release = resolve; });
+        return { stdout: 'posted\n', stderr: '' };
+      },
+      now: () => '2026-05-11T20:00:00.000Z',
+    });
+
+    const req = {
+      model: 'claude',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 2 },
+      timeoutMs: 100,
+      sessionUuid: 'child-wins-session',
+      forbiddenFallbacks: ['api-key'],
+    };
+    const run = adapter.spawnReviewer(req);
+
+    await waitFor(() => {
+      const activeRecord = readReviewerRunRecord(rootDir, req.sessionUuid);
+      assert.equal(activeRecord.state, 'heartbeating');
+      assert.equal(activeRecord.pgid, 6161);
+      assert.equal(activeRecord.spawnedAt, '2026-05-11T20:00:01.000Z');
+      assert.equal(activeRecord.lastHeartbeatAt, '2026-05-11T20:00:01.000Z');
+    });
+
+    release();
+    const completed = await run;
+    assert.equal(completed.ok, true);
+    const completedRecord = readReviewerRunRecord(rootDir, req.sessionUuid);
+    assert.equal(completedRecord.state, 'completed');
+    assert.equal(completedRecord.pgid, 6161);
+    assert.equal(completedRecord.spawnedAt, '2026-05-11T20:00:01.000Z');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('cli-direct preserves cancelled state across abort races', async () => {
   const rootDir = makeRoot();
   let release;
@@ -1408,6 +1519,246 @@ test('cli-direct preserves cancelled state across abort races', async () => {
     assert.equal(cancelled.ok, false);
     assert.equal(cancelled.failureClass, 'unknown');
     assert.equal(existsSync(reviewerRunStatePath(rootDir, req.sessionUuid)), true);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('cli-direct preserves cancelled terminal state when onSpawn loses the cancellation race', async () => {
+  const rootDir = makeRoot();
+  let capturedOptions;
+  let releaseSpawn;
+  const killCalls = [];
+  let pgidAlive = true;
+  try {
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      preflightImpl: noopPreflight,
+      processKillImpl: (pid, signal) => {
+        assert.equal(pid, -4244);
+        if (signal === 0) {
+          if (pgidAlive) return true;
+          const err = new Error('no such process group');
+          err.code = 'ESRCH';
+          throw err;
+        }
+        killCalls.push([pid, signal]);
+        if (signal === 'SIGTERM') pgidAlive = false;
+        return true;
+      },
+      spawnCapturedImpl: async (_command, _args, options) => {
+        capturedOptions = options;
+        await new Promise((resolve) => { releaseSpawn = resolve; });
+        options.onSpawn({ pgid: 4244 });
+        return { stdout: 'posted-after-cancel\n', stderr: '' };
+      },
+      now: () => '2026-05-11T20:00:00.000Z',
+    });
+
+    const req = {
+      model: 'claude',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 2 },
+      timeoutMs: 5_000,
+      sessionUuid: 'cancelled-before-onspawn-session',
+      forbiddenFallbacks: ['api-key'],
+    };
+    const run = adapter.spawnReviewer(req);
+    await waitFor(() => assert.ok(capturedOptions));
+    const claimed = readReviewerRunRecord(rootDir, req.sessionUuid);
+    assert.equal(claimed.state, 'launching');
+    updateReviewerRunRecord(rootDir, claimed, {
+      state: 'cancelled',
+      lastHeartbeatAt: '2026-05-11T20:00:01.000Z',
+    });
+
+    releaseSpawn();
+    const cancelled = await run;
+
+    assert.equal(cancelled.ok, false);
+    assert.equal(cancelled.failureClass, 'daemon-bounce');
+    assert.equal(cancelled.pgid, 4244);
+    assert.deepEqual(killCalls, [[-4244, 'SIGTERM']]);
+    const record = readReviewerRunRecord(rootDir, req.sessionUuid);
+    assert.equal(record.state, 'cancelled');
+    assert.equal(record.pgid, 4244);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('cli-direct escalates terminal onSpawn cancellation before returning', async () => {
+  const rootDir = makeRoot();
+  let capturedOptions;
+  let releaseSpawn;
+  const killCalls = [];
+  let pgidAlive = true;
+  try {
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      preflightImpl: noopPreflight,
+      cancelGraceMs: 2,
+      cancelPollIntervalMs: 1,
+      sleepImpl: async (ms) => new Promise((resolve) => setTimeout(resolve, Math.min(ms, 1))),
+      processKillImpl: (pid, signal) => {
+        assert.equal(pid, -4245);
+        if (signal === 0) {
+          if (pgidAlive) return true;
+          const err = new Error('no such process group');
+          err.code = 'ESRCH';
+          throw err;
+        }
+        killCalls.push([pid, signal]);
+        if (signal === 'SIGKILL') pgidAlive = false;
+        return true;
+      },
+      spawnCapturedImpl: async (_command, _args, options) => {
+        capturedOptions = options;
+        await new Promise((resolve) => { releaseSpawn = resolve; });
+        options.onSpawn({ pgid: 4245 });
+        return { stdout: 'posted-after-cancel\n', stderr: '' };
+      },
+      now: () => '2026-05-11T20:00:00.000Z',
+    });
+
+    const req = {
+      model: 'claude',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 2 },
+      timeoutMs: 5_000,
+      sessionUuid: 'cancelled-before-onspawn-escalates-session',
+      forbiddenFallbacks: ['api-key'],
+    };
+    const run = adapter.spawnReviewer(req);
+    await waitFor(() => assert.ok(capturedOptions));
+    const claimed = readReviewerRunRecord(rootDir, req.sessionUuid);
+    assert.equal(claimed.state, 'launching');
+    updateReviewerRunRecord(rootDir, claimed, {
+      state: 'cancelled',
+      lastHeartbeatAt: '2026-05-11T20:00:01.000Z',
+    });
+
+    releaseSpawn();
+    const cancelled = await run;
+
+    assert.equal(cancelled.ok, false);
+    assert.equal(cancelled.failureClass, 'daemon-bounce');
+    assert.equal(cancelled.pgid, 4245);
+    assert.deepEqual(killCalls, [[-4245, 'SIGTERM'], [-4245, 'SIGKILL']]);
+    assert.equal(pgidAlive, false);
+    const record = readReviewerRunRecord(rootDir, req.sessionUuid);
+    assert.equal(record.state, 'cancelled');
+    assert.equal(record.pgid, 4245);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('cli-direct fails closed when completed terminal onSpawn cleanup cannot kill the pgid', async () => {
+  const rootDir = makeRoot();
+  let capturedOptions;
+  let releaseSpawn;
+  const killCalls = [];
+  try {
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      preflightImpl: noopPreflight,
+      cancelGraceMs: 2,
+      cancelPollIntervalMs: 1,
+      sleepImpl: async (ms) => new Promise((resolve) => setTimeout(resolve, Math.min(ms, 1))),
+      processKillImpl: (pid, signal) => {
+        assert.equal(pid, -4246);
+        if (signal === 0) return true;
+        killCalls.push([pid, signal]);
+        return true;
+      },
+      spawnCapturedImpl: async (_command, _args, options) => {
+        capturedOptions = options;
+        await new Promise((resolve) => { releaseSpawn = resolve; });
+        options.onSpawn({ pgid: 4246 });
+        return { stdout: 'posted-after-completed\n', stderr: '' };
+      },
+      now: () => '2026-05-11T20:00:00.000Z',
+    });
+
+    const req = {
+      model: 'claude',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 2 },
+      timeoutMs: 5_000,
+      sessionUuid: 'completed-before-onspawn-kill-failure-session',
+      forbiddenFallbacks: ['api-key'],
+    };
+    const run = adapter.spawnReviewer(req);
+    await waitFor(() => assert.ok(capturedOptions));
+    const claimed = readReviewerRunRecord(rootDir, req.sessionUuid);
+    assert.equal(claimed.state, 'launching');
+    updateReviewerRunRecord(rootDir, claimed, {
+      state: 'completed',
+      lastHeartbeatAt: '2026-05-11T20:00:01.000Z',
+    });
+
+    releaseSpawn();
+    const failed = await run;
+
+    assert.equal(failed.ok, false);
+    assert.equal(failed.failureClass, 'bug');
+    assert.equal(failed.preventLeaseRecovery, true);
+    assert.equal(failed.pgid, 4246);
+    assert.match(failed.stderrTail, /terminal state completed/);
+    assert.match(failed.stderrTail, /survived SIGKILL/);
+    assert.deepEqual(killCalls, [[-4246, 'SIGTERM'], [-4246, 'SIGKILL']]);
+    const record = readReviewerRunRecord(rootDir, req.sessionUuid);
+    assert.equal(record.state, 'failed');
+    assert.equal(record.pgid, 4246);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reviewer child run-state helper is read-only for watcher-owned records', () => {
+  const rootDir = makeRoot();
+  try {
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'child-start-session',
+      runtime: 'cli-direct',
+      state: 'launching',
+      pgid: null,
+      spawnedAt: '2026-05-11T19:59:59.000Z',
+      reattachToken: 'child-start-session',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 7 },
+    });
+    const before = readFileSync(reviewerRunStatePath(rootDir, 'child-start-session'), 'utf8');
+
+    const observed = persistReviewerChildRunState({
+      rootDir,
+      env: { REVIEWER_RUN_STATE_ROOT_DIR: rootDir },
+      sessionUuid: 'child-start-session',
+      pid: 6161,
+      now: () => '2026-05-11T20:00:00.000Z',
+    });
+    assert.equal(observed.state, 'launching');
+    assert.equal(observed.pgid, null);
+    assert.equal(observed.spawnedAt, '2026-05-11T19:59:59.000Z');
+    assert.equal(readFileSync(reviewerRunStatePath(rootDir, 'child-start-session'), 'utf8'), before);
+
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'child-cancelled-session',
+      runtime: 'cli-direct',
+      state: 'cancelled',
+      pgid: null,
+      spawnedAt: '2026-05-11T19:59:59.000Z',
+      reattachToken: 'child-cancelled-session',
+    });
+    const terminal = persistReviewerChildRunState({
+      rootDir,
+      env: { REVIEWER_RUN_STATE_ROOT_DIR: rootDir },
+      sessionUuid: 'child-cancelled-session',
+      pid: 6162,
+      now: () => '2026-05-11T20:00:00.000Z',
+    });
+    assert.equal(terminal.state, 'cancelled');
+    assert.equal(terminal.pgid, null);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -2516,7 +2867,7 @@ test('acpx adapter persists heartbeat rows while reviewer is running', async () 
       model: 'codex',
       prompt: 'keep heartbeating',
       subjectContext: { domainId: 'acpx-smoke', repo: 'lacey/repo', prNumber: 7 },
-      timeoutMs: 100,
+      timeoutMs: 5_000,
       sessionUuid: 'acpx-heartbeat-session',
       forbiddenFallbacks: ['api-key'],
     });

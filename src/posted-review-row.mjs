@@ -848,6 +848,7 @@ export async function runQueuedReviewAdoptionPhase({
   ),
   noProgressLaneGate = createNoProgressLaneGate({ rootDir, logger }),
   runPostedReviewHandlersFairlyImpl = runPostedReviewHandlersFairly,
+  postedReviewPriorityTargets = [],
 } = {}) {
   if (typeof drainReviewerDispatchCandidates !== 'function') {
     throw new TypeError('runQueuedReviewAdoptionPhase requires drainReviewerDispatchCandidates');
@@ -910,6 +911,7 @@ export async function runQueuedReviewAdoptionPhase({
     handlerTimeoutMs: postedReviewHandlerTimeoutMs,
     minimumHandlerStartBudgetMs,
     laneGate: noProgressLaneGate,
+    priorityTargets: postedReviewPriorityTargets,
     logger,
   });
 

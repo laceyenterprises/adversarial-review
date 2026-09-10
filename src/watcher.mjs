@@ -1139,7 +1139,7 @@ async function pollOnce(
   octokit,
   {
     healthProbe = watcherHealthProbe,
-    afterClaim = null,
+    afterClaim = null, wakePayload = null,
   } = {}
 ) {
   // CFG-09: per-tick boundary for the role-config cascade cache. Drop
@@ -1540,6 +1540,7 @@ async function pollOnce(
     octokit,
     operatorSurface,
     primaryDomainId: WATCHER_PRIMARY_DOMAIN_ID,
+    postedReviewPriorityTargets: wakePayload || [],
   });
   } finally {
     try {
@@ -1842,7 +1843,7 @@ async function main() {
     logger: console,
   });
   let lastAlertSinkDegradedFingerprint = null;
-  async function runHeartbeatPoll(source) {
+  async function runHeartbeatPoll(source, pollOptions = undefined) {
     watcherHeartbeat.markPoll({ source });
     stallWatchdog.beginPoll();
     try {
@@ -1869,7 +1870,7 @@ async function main() {
         console.error(`[watcher] alert delivery sink health unavailable: ${error?.message || error}`);
       }
       await staleStateReaperTicker.tick();
-      const result = await safePollOnce(source);
+      const result = await safePollOnce(source, pollOptions);
       watcherHeartbeat.markPollCompleted({ source, ok: Boolean(result?.ok), timed_out: Boolean(result?.timedOut), error: result?.error ? String(result.error?.message || result.error) : null });
       return result;
     } finally {
@@ -1897,7 +1898,7 @@ async function main() {
         const source = wake.woken
           ? `wake pollOnce (${wake.payload?.reason || 'watcher-wake'})`
           : 'scheduled pollOnce';
-        await runHeartbeatPoll(source);
+        await runHeartbeatPoll(source, { wakePayload: wake.payload || null });
         if (wake.woken) {
           nextStart = Date.now();
         }

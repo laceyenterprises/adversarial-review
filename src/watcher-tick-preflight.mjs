@@ -109,7 +109,7 @@ async function retryPendingReviewedAttestationQueueForWatcher({
       log,
       maxEntriesPerRun: maxEntriesPerTick,
     });
-    if (retryResult.attempted > 0) {
+    if (retryResult.attempted > 0 || retryResult.terminal > 0) {
       const terminalSuffix = retryResult.terminal > 0 ? ` terminal=${retryResult.terminal}` : '';
       log.log?.(
         `[watcher] reviewed-attestation queue retry attempted=${retryResult.attempted} ` +

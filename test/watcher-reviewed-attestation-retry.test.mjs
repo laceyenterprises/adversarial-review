@@ -39,3 +39,23 @@ test('reviewed attestation retry helper logs consumed queue entries', async () =
   assert.deepEqual(result, { attempted: 2, consumed: 1, remaining: 1 });
   assert.match(messages.join('\n'), /attempted=2 consumed=1 remaining=1/);
 });
+
+test('reviewed attestation retry helper logs pure terminal queue ticks', async () => {
+  const messages = [];
+  const result = await retryPendingReviewedAttestationQueueForWatcher({
+    rootDir: '/fixture/root',
+    hqPath: '/fixture/hq',
+    execFileImpl: async () => ({ stdout: '{}' }),
+    env: {},
+    log: { log: (message) => messages.push(String(message)), warn: assert.fail },
+    retryPendingReviewedAttestationsImpl: async () => ({
+      attempted: 0,
+      consumed: 0,
+      remaining: 0,
+      terminal: 2,
+    }),
+  });
+
+  assert.deepEqual(result, { attempted: 0, consumed: 0, remaining: 0, terminal: 2 });
+  assert.match(messages.join('\n'), /attempted=0 consumed=0 remaining=0 terminal=2/);
+});

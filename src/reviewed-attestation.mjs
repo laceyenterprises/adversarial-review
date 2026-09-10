@@ -404,6 +404,7 @@ function pendingReviewedAttestationEntry(args = {}, err = null) {
     enqueued_at: new Date().toISOString(),
     failure_class: classifyReviewedAttestationFailure(err),
     last_error: err?.message || String(err || ''),
+    last_error_code: err?.code ? String(err.code) : undefined,
     payload,
   };
 }
@@ -570,12 +571,13 @@ async function retryPendingReviewedAttestations({
   };
   for (const entry of pending) {
     const queuedFailureClass = String(entry?.failure_class || '');
+    const queuedError = { message: entry.last_error, code: entry.last_error_code };
     const effectiveQueuedFailureClass = queuedFailureClass === HCP_UNAVAILABLE_FAILURE_CLASS
       ? queuedFailureClass
-      : classifyReviewedAttestationFailure({ message: entry.last_error });
+      : classifyReviewedAttestationFailure(queuedError);
     if (
       queuedFailureClass &&
-      !isRetryableReviewedAttestationFailure(effectiveQueuedFailureClass, { message: entry.last_error })
+      !isRetryableReviewedAttestationFailure(effectiveQueuedFailureClass, queuedError)
     ) {
       const attemptedAt = now();
       terminalizeEntry(entry, {
@@ -617,6 +619,7 @@ async function retryPendingReviewedAttestations({
         ...entry,
         failure_class: failureClass,
         last_error: err?.message || String(err || ''),
+        last_error_code: err?.code ? String(err.code) : undefined,
         last_attempted_at: attemptedAt,
         retry_attempts: retryAttempts,
       };

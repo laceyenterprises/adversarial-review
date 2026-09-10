@@ -18,9 +18,9 @@ operator-only cleanup.
 
 | Path | Shape | Contract |
 |---|---|---|
-| `pending.jsonl` | One JSON object per queued attestation retry | Active retry queue. Each entry carries a stable `queue_id`, the signed payload inputs under `payload`, failure class, error text, enqueue time, and retry breadcrumbs. |
+| `pending.jsonl` | One JSON object per queued attestation retry | Active retry queue. Each entry carries a stable `queue_id`, the signed payload inputs under `payload`, failure class, error text, optional error code, enqueue time, and retry breadcrumbs. |
 | `pending.jsonl.lock/owner.json` | Lock owner document | Mutual exclusion for queue reads, rewrites, and terminal archiving. Stale locks are removed after the source-defined stale window. |
-| `failed.jsonl` | One JSON object per terminal retry failure | Side ledger for queued entries that are known non-retryable, such as `hq attest record` reporting an already-conflicting head attestation. Entries preserve the original payload, last error, retry count, `terminal_at`, and `terminal_reason`. |
+| `failed.jsonl` | One JSON object per terminal retry failure | Side ledger for queued entries that are known non-retryable, such as `hq attest record` reporting an already-conflicting head attestation. Entries preserve the original payload, last error, optional error code, retry count, `terminal_at`, and `terminal_reason`. |
 
 ## Operational Contract
 
@@ -31,7 +31,9 @@ operator-only cleanup.
 - Watcher startup and poll preflight cap subprocess-backed retry attempts per
   tick so attestation maintenance cannot starve first-pass or rereview dispatch.
 - `hcp-unavailable` and transient subprocess failures stay in `pending.jsonl` for
-  later retry.
+  later retry. When the transient signal depends on an error code such as `EIO`
+  or `ECONNRESET`, retry pre-flight classification uses the persisted
+  `last_error_code` field instead of relying on message text alone.
 - Non-transient attestation failures are moved to `failed.jsonl` under the same
   queue lock before they are removed from `pending.jsonl`; if terminal archiving
   fails, the pending entry remains available for operator inspection.

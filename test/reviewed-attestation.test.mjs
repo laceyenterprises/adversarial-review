@@ -237,6 +237,7 @@ test('queued reviewed attestation retries sign and record then removes consumed 
       Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:8002'), { code: 'ECONNREFUSED' }),
     );
     assert.equal((await readPendingReviewedAttestations(rootDir)).length, 1);
+    assert.equal((await readPendingReviewedAttestations(rootDir))[0].last_error_code, 'ECONNREFUSED');
     const commands = [];
     const result = await retryPendingReviewedAttestations({
       rootDir,
@@ -265,6 +266,47 @@ test('queued reviewed attestation retries sign and record then removes consumed 
     assert.deepEqual(result, { attempted: 1, consumed: 1, remaining: 0 });
     assert.equal((await readPendingReviewedAttestations(rootDir)).length, 0);
     assert.equal(commands.map((call) => call.args[1]).join(','), 'sign,record');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('queued reviewed attestation retry preserves transient code through pre-flight classification', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewed-attestation-queue-code-'));
+  try {
+    const payloadArgs = {
+      repo: 'laceyenterprises/demo',
+      prNumber: 23,
+      headSha: 'head-sha',
+      reviewerIdentity: 'codex-reviewer-lacey',
+      verdict: 'comment-only',
+      findingsCount: 0,
+    };
+    await enqueuePendingReviewedAttestation(
+      rootDir,
+      payloadArgs,
+      Object.assign(new Error('opaque subprocess failure'), { code: 'EIO' }),
+    );
+
+    let signAttempts = 0;
+    const result = await retryPendingReviewedAttestations({
+      rootDir,
+      execFileImpl: async () => {
+        signAttempts += 1;
+        throw Object.assign(new Error('still temporarily unavailable'), { code: 'EIO' });
+      },
+      env: {},
+      log: { warn: assert.fail },
+      now: () => '2026-09-10T21:31:30.000Z',
+    });
+
+    assert.ok(signAttempts > 0);
+    assert.deepEqual(result, { attempted: 1, consumed: 0, remaining: 1 });
+    const queued = await readPendingReviewedAttestations(rootDir);
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0].failure_class, 'attestation-sign-failed');
+    assert.equal(queued[0].last_error_code, 'EIO');
+    assert.equal(existsSync(join(rootDir, 'data', 'reviewed-attestations', 'failed.jsonl')), false);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

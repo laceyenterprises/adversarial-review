@@ -42,6 +42,9 @@
       "path": "docs/data-model/reviewed-attestations.md",
       "store": "data/reviewed-attestations/",
       "schemaSurface": "src/reviewed-attestation.mjs",
+      "relatedSchemaSurfaces": [
+        "src/watcher-tick-preflight.mjs"
+      ],
       "owner": "reviewed attestation signing and watcher retry"
     },
     {

@@ -1023,6 +1023,77 @@ test('cli-direct delegates failure classification to the runtime adapter', async
   }
 });
 
+test('cli-direct runs reviewer subprocesses from per-session scratch cwd', async () => {
+  const rootDir = makeRoot();
+  const hqRoot = mkdtempSync(join(tmpdir(), 'reviewer-runtime-scratch-hq-'));
+  const observed = {};
+  const oldHqRoot = process.env.HQ_ROOT;
+  const oldReviewerScratchRoot = process.env.REVIEWER_SCRATCH_ROOT;
+  const oldWorkerScratchDir = process.env.WORKER_SCRATCH_DIR;
+  process.env.HQ_ROOT = hqRoot;
+  delete process.env.REVIEWER_SCRATCH_ROOT;
+  delete process.env.WORKER_SCRATCH_DIR;
+  try {
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      preflightImpl: async ({ cwd }) => {
+        observed.preflightCwd = cwd;
+        return { claudeCli: '/tmp/fake-claude' };
+      },
+      spawnCapturedImpl: async (_command, _args, options) => {
+        observed.spawnCwd = options.cwd;
+        observed.workerScratchDir = options.env.WORKER_SCRATCH_DIR;
+        observed.tmpdir = options.env.TMPDIR;
+        writeFileSync(join(options.cwd, 'review.md'), 'scratch draft\n');
+        return { stdout: '', stderr: '' };
+      },
+      now: () => '2026-09-10T07:15:00.000Z',
+    });
+
+    const result = await adapter.spawnReviewer({
+      model: 'claude',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 6520 },
+      timeoutMs: 100,
+      sessionUuid: 'scratch-session',
+      forbiddenFallbacks: ['api-key'],
+    });
+
+    assert.equal(result.ok, true);
+    const expectedCwd = join(
+      hqRoot,
+      'tmp',
+      'adversarial-review',
+      'reviewer-scratch',
+      'scratch-session',
+    );
+    assert.equal(observed.preflightCwd, expectedCwd);
+    assert.equal(observed.spawnCwd, expectedCwd);
+    assert.equal(observed.workerScratchDir, expectedCwd);
+    assert.equal(observed.tmpdir, expectedCwd);
+    assert.equal(existsSync(join(rootDir, 'review.md')), false);
+    assert.equal(readFileSync(join(expectedCwd, 'review.md'), 'utf8'), 'scratch draft\n');
+  } finally {
+    if (oldHqRoot === undefined) {
+      delete process.env.HQ_ROOT;
+    } else {
+      process.env.HQ_ROOT = oldHqRoot;
+    }
+    if (oldReviewerScratchRoot === undefined) {
+      delete process.env.REVIEWER_SCRATCH_ROOT;
+    } else {
+      process.env.REVIEWER_SCRATCH_ROOT = oldReviewerScratchRoot;
+    }
+    if (oldWorkerScratchDir === undefined) {
+      delete process.env.WORKER_SCRATCH_DIR;
+    } else {
+      process.env.WORKER_SCRATCH_DIR = oldWorkerScratchDir;
+    }
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
 test('cli-direct classifies quota text from stdout even when stderr has wrapper noise', async () => {
   const rootDir = makeRoot();
   try {

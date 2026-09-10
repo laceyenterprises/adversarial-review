@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
-import { closeSync, openSync, readSync, statSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, readSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -332,6 +333,19 @@ function readSideChannelTailsBestEffort(rootDir, sessionUuid) {
   }
 }
 
+function resolveReviewerScratchCwd(sessionUuid, env = process.env) {
+  const safeSession = String(sessionUuid || 'unknown').replace(/[^A-Za-z0-9_.-]/g, '_');
+  const scratchRoot =
+    env.REVIEWER_SCRATCH_ROOT ||
+    env.WORKER_SCRATCH_DIR ||
+    (env.HQ_ROOT
+      ? join(env.HQ_ROOT, 'tmp', 'adversarial-review', 'reviewer-scratch')
+      : join(tmpdir(), 'adversarial-review-reviewer-scratch'));
+  const scratchCwd = join(scratchRoot, safeSession);
+  mkdirSync(scratchCwd, { recursive: true, mode: 0o750 });
+  return scratchCwd;
+}
+
 function createCliDirectReviewerRuntimeAdapter({
   rootDir = process.cwd(),
   domainConfig = {},
@@ -360,6 +374,10 @@ function createCliDirectReviewerRuntimeAdapter({
       ...process.env,
       REVIEWER_SESSION_UUID: sessionUuid,
     };
+    const reviewerScratchCwd = resolveReviewerScratchCwd(sessionUuid, reviewerEnv);
+    reviewerEnv.WORKER_SCRATCH_DIR = reviewerScratchCwd;
+    reviewerEnv.REVIEWER_SCRATCH_DIR = reviewerScratchCwd;
+    reviewerEnv.TMPDIR = reviewerScratchCwd;
     let stripped = [];
     let preflightResult = null;
     try {
@@ -373,7 +391,7 @@ function createCliDirectReviewerRuntimeAdapter({
         preflightResult = await preflightImpl({
           model: req.model,
           env: reviewerEnv,
-          cwd: rootDir,
+          cwd: reviewerScratchCwd,
           timeout: req.preflightTimeoutMs || 30_000,
           requireMcpOAuth: domainRequiresMcpOAuth(domainConfig),
         });
@@ -447,6 +465,7 @@ function createCliDirectReviewerRuntimeAdapter({
         [reviewerProcessPath, JSON.stringify(reviewerArgs)],
         {
           env: reviewerEnv,
+          cwd: reviewerScratchCwd,
           timeout: req.timeoutMs || resolveReviewerTimeoutMs(reviewerEnv),
           progressTimeout: resolveProgressTimeoutForModel(req.model, reviewerEnv),
           signal: controller.signal,

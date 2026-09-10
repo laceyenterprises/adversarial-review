@@ -815,6 +815,7 @@ export async function runQueuedReviewAdoptionPhase({
     ? enforcePostedReviewReviewerPressureBudgetFloor({
         pressureBudgetMs: postedReviewReviewerPressurePhaseBudgetMs,
         handlerTimeoutMs: postedReviewHandlerTimeoutMs,
+        minimumHandlerStartBudgetMs,
         logger,
       })
     : postedReviewPhaseBudgetMs;

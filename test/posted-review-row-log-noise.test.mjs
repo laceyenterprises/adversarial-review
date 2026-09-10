@@ -11,7 +11,7 @@ import {
 import { createLogChangeGate } from '../src/log-change-gate.mjs';
 import {
   DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT,
-  DEFAULT_POSTED_REVIEW_PHASE_HANDLER_CAPACITY,
+  DEFAULT_POSTED_REVIEW_HANDLER_HEADROOM_MS,
   DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_HANDLER_CAPACITY,
   derivePostedReviewExpensiveStepBudgetMs,
   enforcePostedReviewReviewerPressureBudgetFloor,
@@ -19,6 +19,7 @@ import {
   resolvePostedReviewHandlerTimeoutMs,
   resolvePostedReviewPhaseBudgetMs,
   resolvePostedReviewReviewerPressurePhaseBudgetMs,
+  runPostedReviewHandlersFairly,
 } from '../src/watcher-poll-fairness.mjs';
 
 // Drive handlePostedReviewRow straight to the AMA `ama-pending` retained-ownership
@@ -146,17 +147,19 @@ test('RVHAND-11: reviewer-pressure posted-review phase budget has a bounded defa
 
 test('RVHAND-11: call-site pressure budget guard raises sub-step values', () => {
   const warnings = [];
+  const minimumStartBudgetMs = derivePostedReviewExpensiveStepBudgetMs(180_000);
 
   assert.equal(
     enforcePostedReviewReviewerPressureBudgetFloor({
       pressureBudgetMs: 10_000,
       handlerTimeoutMs: 180_000,
+      minimumHandlerStartBudgetMs: minimumStartBudgetMs,
       logger: { warn: (...args) => warnings.push(args.join(' ')) },
     }),
-    87_500,
+    minimumStartBudgetMs + DEFAULT_POSTED_REVIEW_HANDLER_HEADROOM_MS,
   );
   assert.equal(warnings.length, 1);
-  assert.match(warnings[0], /raised to expensive-step floor/);
+  assert.match(warnings[0], /raised to handler-start floor/);
 });
 
 test('RVHAND-11: production default path warns when configured reviewer-pressure budget is below floor', async () => {
@@ -200,9 +203,45 @@ test('RVHAND-11: production default path warns when configured reviewer-pressure
     }
   }
 
-  assert.equal(observedBudgetMs, 90_000);
+  assert.equal(observedBudgetMs, 92_500);
+  assert.equal(warnings.length, 2);
+  assert.match(warnings[0], /raised to handler-start floor/);
+  assert.match(warnings[1], /posted-review phase budget capped under reviewer pressure/);
+});
+
+test('RVHAND-11: reviewer-pressure floor leaves time to start one handler', async () => {
+  const warnings = [];
+  const ran = [];
+  const handlerTimeoutMs = 180_000;
+  const minimumStartBudgetMs = derivePostedReviewExpensiveStepBudgetMs(handlerTimeoutMs);
+  const budgetMs = enforcePostedReviewReviewerPressureBudgetFloor({
+    pressureBudgetMs: 10_000,
+    handlerTimeoutMs,
+    minimumHandlerStartBudgetMs: minimumStartBudgetMs,
+    logger: { warn: (...args) => warnings.push(args.join(' ')) },
+  });
+  const nowValues = [0, 1, 2, 3];
+
+  const summary = await runPostedReviewHandlersFairly({
+    handlers: [
+      {
+        repoPath: 'laceyenterprises/agent-os',
+        prNumber: 6528,
+        run: async () => ran.push('handler'),
+      },
+    ],
+    budgetMs,
+    handlerTimeoutMs,
+    minimumHandlerStartBudgetMs: minimumStartBudgetMs,
+    nowMs: () => nowValues.shift() ?? 3,
+    logger: { warn: (...args) => warnings.push(args.join(' ')) },
+  });
+
+  assert.equal(budgetMs, minimumStartBudgetMs + DEFAULT_POSTED_REVIEW_HANDLER_HEADROOM_MS);
+  assert.deepEqual(ran, ['handler']);
+  assert.equal(summary.ran, 1);
+  assert.equal(summary.deferredByBudget, 0);
   assert.equal(warnings.length, 1);
-  assert.match(warnings[0], /posted-review phase budget capped under reviewer pressure/);
 });
 
 test('RVHAND-12: operator can still lower the HAM coexistence deadline during an incident', () => {

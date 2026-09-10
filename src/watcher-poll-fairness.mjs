@@ -61,7 +61,6 @@
 // maintenance tail. Override with ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS
 // only when the operator explicitly accepts slower review discovery.
 export const DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS = 10 * 60 * 1000;
-export const DEFAULT_POSTED_REVIEW_PHASE_HANDLER_CAPACITY = 3;
 export const DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_HANDLER_CAPACITY = 1;
 export const DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT = 2;
 export const DEFAULT_POSTED_REVIEW_HANDLER_HEADROOM_MS = 5 * 1000;
@@ -120,27 +119,40 @@ export function resolvePostedReviewReviewerPressurePhaseBudgetMs(env = process.e
 export function enforcePostedReviewReviewerPressureBudgetFloor({
   pressureBudgetMs,
   handlerTimeoutMs,
+  minimumHandlerStartBudgetMs = null,
+  headroomMs = DEFAULT_POSTED_REVIEW_HANDLER_HEADROOM_MS,
   logger = console,
 } = {}) {
   const effectiveHandlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs({
     ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS: handlerTimeoutMs,
   });
-  const minimumPressureBudgetMs = derivePostedReviewExpensiveStepBudgetMs(
+  const effectiveMinimumHandlerStartBudgetMs = parsePositiveMs(
+    minimumHandlerStartBudgetMs,
+    derivePostedReviewExpensiveStepBudgetMs(effectiveHandlerTimeoutMs),
+  );
+  const effectiveHeadroomMs = parsePositiveMs(
+    headroomMs,
+    DEFAULT_POSTED_REVIEW_HANDLER_HEADROOM_MS,
+  );
+  const minimumPressureBudgetMs = effectiveMinimumHandlerStartBudgetMs + effectiveHeadroomMs;
+  const expensiveStepFloorMs = derivePostedReviewExpensiveStepBudgetMs(
     effectiveHandlerTimeoutMs,
   );
   const hasRequestedPressureBudget =
     pressureBudgetMs !== undefined && pressureBudgetMs !== null && pressureBudgetMs !== '';
   const requestedPressureBudgetMs = parsePositiveMs(
     pressureBudgetMs,
-    minimumPressureBudgetMs,
+    expensiveStepFloorMs,
   );
   if (!hasRequestedPressureBudget || requestedPressureBudgetMs >= minimumPressureBudgetMs) {
     return requestedPressureBudgetMs;
   }
   logger?.warn?.(
-    `[watcher] posted-review reviewer-pressure phase budget raised to expensive-step floor: ` +
+    `[watcher] posted-review reviewer-pressure phase budget raised to handler-start floor: ` +
       `requested_budget_ms=${requestedPressureBudgetMs} ` +
       `minimum_budget_ms=${minimumPressureBudgetMs} ` +
+      `minimum_start_budget_ms=${effectiveMinimumHandlerStartBudgetMs} ` +
+      `headroom_ms=${effectiveHeadroomMs} ` +
       `handler_timeout_ms=${effectiveHandlerTimeoutMs}`,
   );
   return minimumPressureBudgetMs;

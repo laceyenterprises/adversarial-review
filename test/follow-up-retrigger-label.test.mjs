@@ -9,6 +9,7 @@ import {
   createFollowUpJob,
   readFollowUpJob,
   requeueFollowUpJobForNextRound,
+  RETRIGGERABLE_STOP_CODES,
   writeFollowUpJob,
 } from '../src/follow-up-jobs.mjs';
 import {
@@ -18,6 +19,14 @@ import {
 } from '../src/follow-up-retrigger-label.mjs';
 
 const COMMENT_ONLY_REVIEW_BODY = '## Summary\nsummary\n\n## Verdict\nComment only';
+
+function sectionBetween(text, startMarker, endMarker) {
+  const start = text.indexOf(startMarker);
+  assert.notEqual(start, -1, `missing start marker: ${startMarker}`);
+  const end = text.indexOf(endMarker, start + startMarker.length);
+  assert.notEqual(end, -1, `missing end marker: ${endMarker}`);
+  return text.slice(start, end);
+}
 
 function makeHaltedJob(rootDir, {
   status = 'stopped',
@@ -168,6 +177,32 @@ test('tryRetriggerRemediationFromLabel bumps + requeues + removes label on halte
   assert.equal(updated.remediationPlan.maxRounds, 3);
   assert.equal(updated.status, 'pending');
   assert.equal(updated.remediationPlan.nextAction.operatorOverride, true);
+});
+
+test('operator retrigger docs list every retriggerable stopped code', () => {
+  const specText = readFileSync(
+    new URL('../docs/SPEC-adversarial-review-auto-remediation.md', import.meta.url),
+    'utf8',
+  );
+  const runbookText = readFileSync(
+    new URL('../docs/follow-up-runbook.md', import.meta.url),
+    'utf8',
+  );
+  const specSection = sectionBetween(
+    specText,
+    '## Operator Retrigger Contracts',
+    '## Reviewer Runtime Recovery Contract',
+  );
+  const runbookSection = sectionBetween(
+    runbookText,
+    '## Operator retrigger contracts',
+    'Fresh transient reviewer failures',
+  );
+
+  for (const code of RETRIGGERABLE_STOP_CODES) {
+    assert.match(specSection, new RegExp(`\\b${code}\\b`), `SPEC missing ${code}`);
+    assert.match(runbookSection, new RegExp(`\\b${code}\\b`), `runbook missing ${code}`);
+  }
 });
 
 test('tryRetriggerRemediationFromLabel requeues stopped:review-settled jobs for explicit operator flags', async () => {

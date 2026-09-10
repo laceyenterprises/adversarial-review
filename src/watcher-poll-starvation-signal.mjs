@@ -7,7 +7,8 @@
 // which file to write, which event name to page on — is exactly the kind of
 // policy leaf that should be unit-testable without booting a watcher.
 //
-// See `watcher-heartbeat.mjs` for why this signals rather than exits.
+// See `watcher-heartbeat.mjs` for why the detector delegates recovery policy to
+// this hook rather than exiting inline.
 
 import {
   DEFAULT_WATCHER_POLL_STARVATION_CHECKS,
@@ -64,6 +65,7 @@ export function resolvePollStarvationConfig({
 export function createPollStarvationHandler({
   getHeartbeat,
   deliverAlertFn,
+  requestRestartFn,
   logger = console,
 } = {}) {
   return function onStarvation({ inFlightMs, starvationMs, checks, heartbeat } = {}) {
@@ -79,26 +81,59 @@ export function createPollStarvationHandler({
     } catch (err) {
       logger?.error?.(`[watcher] poll-starvation heartbeat write failed: ${err?.message || err}`);
     }
-    if (typeof deliverAlertFn !== 'function') return;
-    Promise.resolve()
-      .then(() => deliverAlertFn(
-        `Adversarial watcher poll starved: one tick has been in flight for ` +
-        `${Math.round(roundedMs / 60000)}m with no poll_counter advance. ` +
-        'New PRs are not being discovered.',
-        {
-          event: 'adversarial_review.poll_starved',
-          payload: {
-            reason: 'poll-in-flight-past-sla-with-frozen-poll-counter',
-            in_flight_ms: roundedMs,
-            starvation_ms: starvationMs,
-            consecutive_checks: checks,
-            poll_counter: heartbeat?.poll_counter ?? null,
-            last_poll_at: heartbeat?.last_poll_at ?? null,
+    if (typeof deliverAlertFn === 'function') {
+      Promise.resolve()
+        .then(() => deliverAlertFn(
+          `Adversarial watcher poll starved: one tick has been in flight for ` +
+          `${Math.round(roundedMs / 60000)}m with no poll_counter advance. ` +
+          'New PRs are not being discovered.',
+          {
+            event: 'adversarial_review.poll_starved',
+            payload: {
+              reason: 'poll-in-flight-past-sla-with-frozen-poll-counter',
+              in_flight_ms: roundedMs,
+              starvation_ms: starvationMs,
+              consecutive_checks: checks,
+              poll_counter: heartbeat?.poll_counter ?? null,
+              last_poll_at: heartbeat?.last_poll_at ?? null,
+            },
           },
-        },
-      ))
-      .catch((err) => {
-        logger?.error?.(`[watcher] poll-starvation alert delivery failed: ${err?.message || err}`);
+        ))
+        .catch((err) => {
+          logger?.error?.(`[watcher] poll-starvation alert delivery failed: ${err?.message || err}`);
+        });
+    }
+    if (typeof requestRestartFn !== 'function') return;
+    try {
+      requestRestartFn({
+        reason: 'poll-in-flight-past-sla-with-frozen-poll-counter',
+        inFlightMs: roundedMs,
+        starvationMs,
+        checks,
+        heartbeat,
       });
+    } catch (err) {
+      logger?.error?.(`[watcher] poll-starvation restart request failed: ${err?.message || err}`);
+    }
+  };
+}
+
+export function createPollStarvationRestartRequester({
+  exitAfterReviewerCleanup,
+  exitCode,
+} = {}) {
+  if (typeof exitAfterReviewerCleanup !== 'function') return null;
+  return function requestPollStarvationRestart({ inFlightMs, heartbeat } = {}) {
+    exitAfterReviewerCleanup({
+      code: exitCode,
+      reason: 'watcher poll-starvation watchdog',
+      source: 'watcher poll-starvation watchdog',
+      err: new Error(
+        `watcher poll starved for ${inFlightMs}ms ` +
+        `(poll_counter=${heartbeat?.poll_counter ?? 'null'}, last_poll_at=${heartbeat?.last_poll_at || 'null'})`
+      ),
+      message:
+        'FATAL: watcher poll starved while in flight; preserving in-flight reviewer runtime sessions so launchd can respawn',
+    });
   };
 }

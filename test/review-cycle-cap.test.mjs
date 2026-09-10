@@ -334,7 +334,7 @@ test('postReviewCycleCapEscalation suppresses duplicate retry when ambiguous com
           listCalls += 1;
           return {
             data: createCalls > 0
-              ? [{ id: 101, body: 'escalation body' }]
+              ? [{ id: 101, body: 'escalation body', user: { login: 'lacey-merge-agent[bot]' } }]
               : [],
           };
         },
@@ -359,6 +359,59 @@ test('postReviewCycleCapEscalation suppresses duplicate retry when ambiguous com
 
   assert.equal(createCalls, 1);
   assert.equal(listCalls, 2);
+});
+
+test('postReviewCycleCapEscalation ignores spoofed duplicate bodies from untrusted commenters', async () => {
+  const calls = [];
+  const octokit = {
+    rest: {
+      issues: {
+        listComments: async () => ({
+          data: [{ id: 101, body: 'escalation body', user: { login: 'outside-contributor' } }],
+        }),
+        createComment: async (params) => {
+          calls.push(params);
+        },
+      },
+    },
+  };
+
+  await postReviewCycleCapEscalation(octokit, {
+    repoPath: REPO,
+    prNumber: PR,
+    body: 'escalation body',
+    trustedAuthorLogins: ['lacey-merge-agent[bot]'],
+    logger: { warn() {} },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].body, 'escalation body');
+});
+
+test('postReviewCycleCapEscalation suppresses trusted existing escalation comments', async () => {
+  let createCalls = 0;
+  const octokit = {
+    rest: {
+      issues: {
+        listComments: async () => ({
+          data: [{ id: 101, body: 'escalation body', user: { login: 'lacey-merge-agent[bot]' } }],
+        }),
+        createComment: async () => {
+          createCalls += 1;
+        },
+      },
+    },
+  };
+
+  await postReviewCycleCapEscalation(octokit, {
+    repoPath: REPO,
+    prNumber: PR,
+    body: 'escalation body',
+    trustedAuthorLogins: ['lacey-merge-agent[bot]'],
+    logger: { warn() {} },
+  });
+
+  assert.equal(createCalls, 0);
 });
 
 test('postReviewCycleCapEscalation does not retry permanent GitHub comment failures', async () => {

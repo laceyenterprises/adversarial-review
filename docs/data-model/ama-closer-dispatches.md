@@ -13,10 +13,13 @@ reapers use these files to avoid double-dispatching terminal remediation, to
 reattach to a live closer, and to release stale launch records after bounded
 recovery checks.
 
-The file is keyed by `(repo, PR, headSha)`. For stale-review terminal-hammer
-redrive, `reviewedSha` preserves the reviewed commit and
-`targetRemediationSha` identifies the live head the hammer is allowed to
-remediate.
+The file is keyed by `(repo, PR, headSha)`. `headSha` is the dispatch-record
+identity and filename SHA, not necessarily the commit that produced the posted
+review verdict. For stale-review terminal-hammer redrive, current writers store
+the live remediation target in `headSha`/`targetRemediationSha`, while
+`reviewedSha` preserves the posted-review commit for audit paths and freshness
+guards. Human-readable routing reasons such as `exhausted-final-hammer` belong
+only in `dispatchReason`, never in a field whose contract is a Git commit SHA.
 
 ## Files
 
@@ -33,8 +36,8 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 | `schemaVersion` | number | Current value is `1`. |
 | `repo` | string | Repository full name, such as `owner/repo`. |
 | `prNumber` | positive integer | Pull request number. |
-| `headSha` | string | Dispatch-record identity SHA. Current writers use the live remediation target SHA. |
-| `reviewedSha` | string or null | Commit SHA that carried the posted review verdict. |
+| `headSha` | string | Dispatch-record identity SHA and filename key. Current stale-head redrive writers use the live remediation target SHA. |
+| `reviewedSha` | string or null | Commit SHA that carried the posted review verdict; preserved for audit/freshness even when `headSha` targets newer remediation. |
 | `targetRemediationSha` | string or null | Live PR head SHA targeted by HAM remediation; may differ from `reviewedSha` during stale-review exhausted-lane redrive. |
 | `dispatchReason` | string or null | Operator-visible reason for dispatch, such as `exhausted-final-hammer`. |
 | `workerClass` | string | Logical closer class requested by AMA, usually `hammer`. |

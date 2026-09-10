@@ -705,6 +705,7 @@ async function reviewWithClaude(diff, extraContext = '', {
   resolveClaudeLaunchctlUidImpl = resolveClaudeLaunchctlUidFromConfig,
   logger = console,
   platform = process.platform,
+  nowMs = () => Date.now(),
 } = {}) {
   const auth = await assertClaudeOAuthImpl({ resolveClaudeLaunchctlUidImpl, logger, platform });
 
@@ -719,6 +720,7 @@ async function reviewWithClaude(diff, extraContext = '', {
   const env = hasAuthEnv ? auth.env : scrubOAuthFallbackEnv(process.env).env;
   const subprocessEnv = withReviewerSubprocessCwdEnv(env, reviewerSubprocessCwd);
   const authTransport = hasAuthEnv ? (auth?.transport || resolveClaudeReviewerOAuthTransport(subprocessEnv)) : 'keychain';
+  const reviewerTimeoutMs = resolveReviewerTimeoutMs(subprocessEnv);
   const claudeLaunchctlUid = authTransport === 'broker'
     ? null
     : await resolveClaudeLaunchctlUidForSpawn({
@@ -727,6 +729,15 @@ async function reviewWithClaude(diff, extraContext = '', {
       resolveClaudeLaunchctlUidImpl,
       logger,
     });
+  if (authTransport === 'broker') {
+    const handoffNowMs = typeof nowMs === 'function' ? nowMs() : Number(nowMs);
+    assertClaudeBrokerTokenHandoffLifetime({
+      expiresAt: auth?.expiresAt,
+      env: subprocessEnv,
+      nowMs: handoffNowMs,
+      reviewerTimeoutMs,
+    });
+  }
 
   let stdout, stderr;
   try {
@@ -734,7 +745,7 @@ async function reviewWithClaude(diff, extraContext = '', {
       () => spawnClaudeImpl(buildClaudeReviewArgs(prompt), {
         env: subprocessEnv,
         cwd: reviewerSubprocessCwd,
-        timeout: resolveReviewerTimeoutMs(subprocessEnv),
+        timeout: reviewerTimeoutMs,
         maxBuffer: 10 * 1024 * 1024,
         ...(authTransport === 'broker' ? { useLaunchctl: false } : { uid: claudeLaunchctlUid }),
       }),

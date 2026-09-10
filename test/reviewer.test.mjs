@@ -2994,6 +2994,7 @@ test('reviewWithClaude reuses broker auth env and skips launchctl', async () => 
     assertClaudeOAuthImpl: async () => ({
       transport: 'broker',
       env: { PATH: process.env.PATH, ANTHROPIC_AUTH_TOKEN: 'broker-oauth-token' },
+      expiresAt: '2026-09-10T18:00:00Z',
     }),
     resolveClaudeLaunchctlUidImpl: async () => {
       throw new Error('launchctl uid should not be resolved in broker mode');
@@ -3005,6 +3006,7 @@ test('reviewWithClaude reuses broker auth env and skips launchctl', async () => 
         stderr: '',
       };
     },
+    nowMs: Date.parse('2026-09-10T17:20:00Z'),
   });
 
   assert.equal(result.reviewText, '## Verdict\nComment only');
@@ -3012,6 +3014,27 @@ test('reviewWithClaude reuses broker auth env and skips launchctl', async () => 
   assert.equal(calls[0].options.useLaunchctl, false);
   assert.equal(calls[0].options.uid, undefined);
   assert.equal(calls[0].options.env.ANTHROPIC_AUTH_TOKEN, 'broker-oauth-token');
+});
+
+test('reviewWithClaude rechecks broker bearer lifetime at subprocess handoff', async () => {
+  await assert.rejects(
+    () => reviewWithClaude('+diff\n', '', {
+      platform: 'darwin',
+      assertClaudeOAuthImpl: async () => ({
+        transport: 'broker',
+        env: { PATH: process.env.PATH, ANTHROPIC_AUTH_TOKEN: 'broker-oauth-token' },
+        expiresAt: '2026-09-10T17:43:00Z',
+      }),
+      resolveClaudeLaunchctlUidImpl: async () => {
+        throw new Error('launchctl uid should not be resolved in broker mode');
+      },
+      spawnClaudeImpl: async () => {
+        throw new Error('spawn must not run with a now-too-short broker bearer');
+      },
+      nowMs: Date.parse('2026-09-10T17:21:30Z'),
+    }),
+    /expires too soon for subprocess handoff/,
+  );
 });
 
 test('reviewWithClaude refuses broker transport without a bearer env', async () => {

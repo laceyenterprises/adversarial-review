@@ -175,6 +175,14 @@ test('RVHAND-11: reviewer-pressure posted-review phase budget has a bounded defa
     }),
     240_000,
   );
+  assert.equal(
+    resolvePostedReviewReviewerPressurePhaseBudgetMs({
+      ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS: '300000',
+      ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS: '180000',
+      ADVERSARIAL_WATCHER_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS: '900000',
+    }),
+    300_000,
+  );
 });
 
 test('RVPRESS-02: call-site pressure budget guard raises direct low values', () => {

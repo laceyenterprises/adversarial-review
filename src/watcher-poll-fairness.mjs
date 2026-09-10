@@ -112,17 +112,21 @@ export function resolvePostedReviewReviewerPressurePhaseBudgetMs(
     resolvePostedReviewPhaseBudgetMs(env),
   );
   const configured = env?.ADVERSARIAL_WATCHER_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS;
+  const capAtNormalBudget = (pressureBudgetMs) => Math.min(
+    resolvedPhaseBudgetMs,
+    Math.max(pressureBudgetMs, minimumPressureBudgetMs),
+  );
   if (configured === undefined || configured === null || configured === '') {
-    return Math.max(
-      Math.min(resolvedPhaseBudgetMs, DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS),
-      minimumPressureBudgetMs,
-    );
+    return capAtNormalBudget(Math.min(
+      resolvedPhaseBudgetMs,
+      DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS,
+    ));
   }
   const configuredBudgetMs = parsePositiveMs(
     configured,
     minimumPressureBudgetMs,
   );
-  return Math.max(configuredBudgetMs, minimumPressureBudgetMs);
+  return capAtNormalBudget(configuredBudgetMs);
 }
 
 export function derivePostedReviewReviewerPressureBudgetFloorMs(handlerTimeoutMs) {

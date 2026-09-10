@@ -92,7 +92,7 @@ columns.
 
 | run-state | Meaning |
 |---|---|
-| `launching` | pre-spawn intent written before the detached reviewer is forked; `pgid` is not authoritative yet |
+| `launching` | runtime-adapter launch intent written before the detached reviewer PGID is authoritative; because the fork may already have succeeded, null-PGID reconciliation treats this as ambiguous process evidence rather than proven pre-spawn failure |
 | `heartbeating` | reviewer subprocess has been spawned and its `pgid`, `spawnedAt`, and `lastHeartbeatAt` have been captured |
 | `spawned` | legacy active state for older records that captured spawn metadata without heartbeat semantics |
 | `completed` | reviewer subprocess finished cleanly; terminal for the run-state ledger |
@@ -260,20 +260,26 @@ new PR
 - With reviewer lease recovery enabled, each proven-dead `reviewing → pending` re-arm increments `infra_auto_recover_attempts`. After three automatic re-arms, another dead session is quarantined in sticky `failed` with `[reviewer-lease-recovery-cap]` evidence instead of returning to `pending`; a successful posted review, intentional re-review re-arm, or superseding PR head resets the counter. This bounds deterministic reviewer crash loops while preserving automatic recovery from transient watcher bounces.
 - Steady-state recovery does not touch a newly claimed row merely because
   `reviewer_started_at` and `reviewer_pgid` are still empty. The watcher now
-  distinguishes launch intent from active runtime records. A row with a
-  `launching` run-state, or a row with no run-state and no historical
-  `reviewer_started_at`, is guarded by the null-PGID launch grace window
+  distinguishes proven pre-spawn failure from ambiguous runtime launch evidence.
+  A row with no run-state record and no historical `reviewer_started_at` is
+  guarded by the null-PGID launch grace window
   (`DEFAULT_NULL_PGID_LAUNCH_GRACE_MS`, 60 seconds by default) from
-  `last_attempted_at`. After that grace window expires, the watcher may probe
-  GitHub for a posted review on the current head and, if no review exists and
-  the recovery cap has room, settle the run-state as `cancelled` and re-arm the
+  `last_attempted_at`; after that grace expires, the watcher may probe GitHub
+  for a posted review on the current head and, if no review exists and the
+  recovery cap has room, settle any run-state as `cancelled` and re-arm the
   SQLite row to `pending`.
+- A row with a durable `launching` run-state is not the same as a missing
+  run-state record. The adapter has already written runtime launch intent, and a
+  watcher bounce after fork but before PGID persistence can leave the detached
+  reviewer alive but unadoptable. Null-PGID `launching` rows therefore wait the
+  persisted reviewer timeout before GitHub probing/re-arm, preserving the
+  duplicate-spawn guard for slow reviewers whose PGID was not captured.
 - Null-PGID rows with terminal run-state records (`completed`, `failed`, or
   `cancelled`) have no timeout guard; they are reconciled immediately on the
-  next watcher pass. Null-PGID rows with non-launch active/legacy records still
-  use the persisted `reviewer_timeout_ms` fallback (or the configured reviewer
+  next watcher pass. Null-PGID rows with active/legacy runtime records still use
+  the persisted `reviewer_timeout_ms` fallback (or the configured reviewer
   deadline) before recovery, preserving the conservative wait for sessions that
-  might represent an older watcher bounce. If null-PGID recovery must probe
+  might represent a watcher bounce after fork. If null-PGID recovery must probe
   GitHub and no historical start timestamp is available, the lookup is anchored
   to `last_attempted_at` so a review already posted by the orphan can still be
   recovered.

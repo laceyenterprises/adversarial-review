@@ -1935,8 +1935,10 @@ test('RVCOEX-01: resolveMergeAgentCoexistenceForWatcher propagates live review r
   assert.match(warnings.join('\n'), /operation=live-review-reconcile timeout_ms=10/);
 });
 
-test('RVCOEX-01: resolveMergeAgentCoexistenceForWatcher propagates hammer dispatch timeouts', async () => {
+test('RVCOEX-01: resolveMergeAgentCoexistenceForWatcher does not abort hammer dispatch on operation timeout', async () => {
   const warnings = [];
+  const parentController = new AbortController();
+  let sawAbort = false;
   const decision = await resolveMergeAgentCoexistenceForWatcher({
     reviewStateRow: makeReviewRow({
       last_verdict: 'Comment only',
@@ -1944,6 +1946,7 @@ test('RVCOEX-01: resolveMergeAgentCoexistenceForWatcher propagates hammer dispat
       remediation_pending: 0,
       reviewer: 'claude',
       reviewer_head_sha: 'abc123',
+      posted_at: new Date(Date.now() - 15 * 60 * 1000).toISOString(),
       review_body: '## Verdict\nComment only\n\n## Blocking Issues\n\n- None.\n\n## Non-blocking Issues\n\n- None.',
     }),
     dispatchJob: {
@@ -1970,6 +1973,7 @@ test('RVCOEX-01: resolveMergeAgentCoexistenceForWatcher propagates hammer dispat
     prNumber: 53,
     currentRevisionRef: 'abc123',
     logger: { log() {}, warn: (m) => warnings.push(String(m)), error() {} },
+    signal: parentController.signal,
     operationTimeoutMs: 10,
     operationTracker: {},
     maybeDispatchAmaClosureForImpl: (args) => maybeDispatchAmaClosureFor({
@@ -1993,17 +1997,26 @@ test('RVCOEX-01: resolveMergeAgentCoexistenceForWatcher propagates hammer dispat
         disposition: 'not-taken',
         reason: 'not-eligible',
       }),
-      maybeDispatchAmaCloserImpl: ({ signal }) => new Promise((_, reject) => {
-        signal.addEventListener('abort', () => reject(signal.reason));
+      resolveReviewCycleExhaustionImpl: () => ({
+        reviewCycleExhausted: true,
+        ledgerRiskClass: 'low',
+        completedRemediationRevisionRefs: ['abc123'],
+      }),
+      maybeDispatchAmaCloserImpl: ({ signal }) => new Promise((resolve, reject) => {
+        signal.addEventListener('abort', () => {
+          sawAbort = true;
+          reject(signal.reason);
+        }, { once: true });
+        setTimeout(() => resolve({ dispatched: true, launchRequestId: 'lrq-ham' }), 25);
       }),
     }),
   });
 
-  assert.equal(decision.outcome, 'ama-pending');
-  assert.equal(decision.amaClosureResult.reason, 'ama-coexistence-operation-timeout');
-  assert.equal(decision.amaClosureResult.timedOutOperation, 'ama-hammer-dispatch');
-  assert.equal(decision.amaClosureResult.timeoutMs, 10);
-  assert.match(warnings.join('\n'), /operation=ama-hammer-dispatch timeout_ms=10/);
+  assert.equal(sawAbort, false, 'HAM dispatch must outlive the short coexistence operation timeout');
+  assert.equal(decision.outcome, 'ama-dispatched');
+  assert.equal(decision.amaClosureResult.dispatched, true);
+  assert.equal(decision.amaClosureResult.launchRequestId, 'lrq-ham');
+  assert.doesNotMatch(warnings.join('\n'), /operation=ama-hammer-dispatch timeout_ms=10/);
 });
 
 test('BUG-1: resolveMergeAgentCoexistenceForWatcher drops ownership for an already-merged PR without invoking the AMA closer', async () => {

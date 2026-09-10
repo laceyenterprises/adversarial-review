@@ -1235,9 +1235,9 @@ export async function maybeDispatchAmaClosureFor({
   let result;
   try {
     throwIfAborted(signal);
-    result = await runCoexistenceOperation(
-      'ama-hammer-dispatch',
-      ({ signal: operationSignal }) => maybeDispatchAmaCloserImpl({
+    const stopTracking = trackCoexistenceOperation(operationTracker, 'ama-hammer-dispatch');
+    try {
+      result = await maybeDispatchAmaCloserImpl({
         reviewState,
         prMetadata,
         cfg,
@@ -1268,17 +1268,11 @@ export async function maybeDispatchAmaClosureFor({
         },
         dispatchContext,
         logger,
-        signal: operationSignal,
-      }),
-      {
-        timeoutMs: operationTimeoutMs,
-        parentSignal: signal,
-        operationTracker,
-        logger,
-        repoPath,
-        prNumber,
-      },
-    );
+        signal,
+      });
+    } finally {
+      stopTracking();
+    }
     throwIfAborted(signal);
   } catch (err) {
     throwIfAborted(signal);

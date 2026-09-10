@@ -114,7 +114,7 @@ export function resolvePostedReviewReviewerPressurePhaseBudgetMs(env = process.e
     configured,
     minimumPressureBudgetMs,
   );
-  return Math.max(configuredBudgetMs, minimumPressureBudgetMs);
+  return configuredBudgetMs;
 }
 
 export function enforcePostedReviewReviewerPressureBudgetFloor({

@@ -7,8 +7,14 @@ import {
 } from './review-cycle-cap.mjs';
 import { classifyBlockingFindings } from './follow-up-merge-agent.mjs';
 import { extractReviewVerdict } from './review-verdict.mjs';
+import { resolveGitHubAppBotLogin } from './github-app-identity.mjs';
+import { resolveWatcherGhBrokerRole } from './reviewer-broker-refresh.mjs';
 
 const REVIEW_CYCLE_CAP_COMMENT_RETRY_DELAYS_MS = Object.freeze([250, 1000]);
+const FALLBACK_REVIEW_CYCLE_CAP_COMMENT_AUTHOR_LOGINS = Object.freeze([
+  'lacey-merge-agent[bot]',
+  'merge-agent-lacey[bot]',
+]);
 
 function sleep(ms) {
   if (!ms) return Promise.resolve();
@@ -47,11 +53,61 @@ function normalizeCommentBodyForMatch(value) {
   return String(value || '').replace(/\r\n/g, '\n').trim();
 }
 
+function normalizeAuthorLoginForMatch(value) {
+  return String(value || '').trim().toLowerCase().replace(/\[bot\]$/, '');
+}
+
+function normalizeTrustedAuthorLogins(values = []) {
+  return new Set(
+    (Array.isArray(values) ? values : [])
+      .map(normalizeAuthorLoginForMatch)
+      .filter(Boolean)
+  );
+}
+
+function commentAuthorLogin(comment) {
+  return String(
+    comment?.user?.login
+    || comment?.author?.login
+    || comment?.author
+    || ''
+  ).trim();
+}
+
+function trustedReviewCycleCapCommentAuthors({
+  trustedAuthorLogins = null,
+  env = process.env,
+  logger = console,
+} = {}) {
+  if (trustedAuthorLogins != null) {
+    return normalizeTrustedAuthorLogins(trustedAuthorLogins);
+  }
+
+  const watcherRole = resolveWatcherGhBrokerRole(env);
+  const configuredLogin = resolveGitHubAppBotLogin({
+    identity: watcherRole,
+    provider: `github-app-${watcherRole}`,
+    env,
+    log: logger,
+  });
+  return normalizeTrustedAuthorLogins([
+    configuredLogin,
+    ...FALLBACK_REVIEW_CYCLE_CAP_COMMENT_AUTHOR_LOGINS,
+  ]);
+}
+
+function commentMatchesTrustedAuthor(comment, trustedAuthors) {
+  const login = normalizeAuthorLoginForMatch(commentAuthorLogin(comment));
+  return Boolean(login && trustedAuthors?.has(login));
+}
+
 async function findMatchingReviewCycleCapEscalationComment(octokit, {
   owner,
   repo,
   prNumber,
   body,
+  trustedAuthorLogins = null,
+  env = process.env,
   logger = console,
 } = {}) {
   const listComments = octokit?.rest?.issues?.listComments;
@@ -76,12 +132,21 @@ async function findMatchingReviewCycleCapEscalationComment(octokit, {
     return { status: 'unavailable', error: err };
   }
   const expectedBody = normalizeCommentBodyForMatch(body);
-  const match = (Array.isArray(comments) ? comments : []).find((comment) => (
+  const trustedAuthors = trustedReviewCycleCapCommentAuthors({ trustedAuthorLogins, env, logger });
+  const bodyMatches = (Array.isArray(comments) ? comments : []).filter((comment) => (
     comment
     && typeof comment === 'object'
     && normalizeCommentBodyForMatch(comment.body) === expectedBody
   ));
-  return match ? { status: 'matched', comment: match } : { status: 'none' };
+  const trustedMatch = bodyMatches.find((comment) => (
+    commentMatchesTrustedAuthor(comment, trustedAuthors)
+  ));
+  if (trustedMatch) {
+    return { status: 'matched', comment: trustedMatch };
+  }
+  return bodyMatches.length
+    ? { status: 'untrusted-match', comment: bodyMatches[0] }
+    : { status: 'none' };
 }
 
 export function subjectRefWithLinearTicket(subjectRef, linearTicketId, labels = []) {
@@ -179,6 +244,8 @@ export async function postReviewCycleCapEscalation(octokit, {
   body,
   retryDelaysMs = REVIEW_CYCLE_CAP_COMMENT_RETRY_DELAYS_MS,
   sleepImpl = sleep,
+  trustedAuthorLogins = null,
+  env = process.env,
   logger = console,
 }) {
   const [owner, repo] = String(repoPath || '').split('/');
@@ -188,6 +255,8 @@ export async function postReviewCycleCapEscalation(octokit, {
     repo,
     prNumber,
     body,
+    trustedAuthorLogins,
+    env,
     logger,
   });
   if (preexisting.status === 'matched') {
@@ -195,6 +264,11 @@ export async function postReviewCycleCapEscalation(octokit, {
       `[watcher] review-cycle-cap escalation comment already exists for ${repoPath}#${prNumber}; suppressing duplicate post`
     );
     return;
+  }
+  if (preexisting.status === 'untrusted-match') {
+    logger?.warn?.(
+      `[watcher] untrusted review-cycle-cap escalation body already exists for ${repoPath}#${prNumber}; posting trusted service comment`
+    );
   }
   let lastErr = null;
   for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
@@ -216,6 +290,8 @@ export async function postReviewCycleCapEscalation(octokit, {
         repo,
         prNumber,
         body,
+        trustedAuthorLogins,
+        env,
         logger,
       });
       if (reconciled.status === 'matched') {
@@ -223,6 +299,11 @@ export async function postReviewCycleCapEscalation(octokit, {
           `[watcher] review-cycle-cap escalation comment for ${repoPath}#${prNumber} already landed; suppressing duplicate retry`
         );
         return;
+      }
+      if (reconciled.status === 'untrusted-match') {
+        logger?.warn?.(
+          `[watcher] untrusted review-cycle-cap escalation body exists for ${repoPath}#${prNumber}; retrying trusted service comment`
+        );
       }
       if (reconciled.status === 'unavailable') {
         throw err;

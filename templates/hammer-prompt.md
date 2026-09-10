@@ -1106,6 +1106,23 @@ updateAmaCloserLease({
 NODE
 }
 
+ham_fire_watcher_merge_wake() {
+  if "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/watcher-wake.mjs" \
+    --root-dir "<<ROOT_DIR>>" \
+    --repo <<REPO>> \
+    --pr <<PR_NUMBER>> \
+    --head-sha "$POST_REMEDIATION_SHA" \
+    --reason hammer-pr-eligible \
+    > /tmp/ham-<<PR_NUMBER>>-watcher-wake.json; then
+    echo "HAM watcher wake fired for eligible head ${POST_REMEDIATION_SHA}" >&2
+    return 0
+  fi
+  HAM_WATCHER_WAKE_EXIT=$?
+  echo "HAM watcher wake hook failed (exit ${HAM_WATCHER_WAKE_EXIT}); continuing with held merge lease" >&2
+  cat /tmp/ham-<<PR_NUMBER>>-watcher-wake.json >&2 || true
+  return 0
+}
+
 ham_refresh_github_gate_once() {
   POST_REMEDIATION_SHA="$POST_REMEDIATION_SHA" \
   HAM_REQUIRES_UP_TO_DATE="${HAM_REQUIRES_UP_TO_DATE:-1}" \
@@ -1333,6 +1350,7 @@ else
     --outcome in_progress \
     --attempt-json "$HAM_PRE_MERGE_ATTEMPT_FILE" || exit 1
   rm -f "$HAM_PRE_MERGE_ATTEMPT_FILE"
+  ham_fire_watcher_merge_wake
 fi
 while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "$HAM_MERGE_ATTEMPTS" -lt "$HAM_MERGE_RETRY_CAP" ]; do
   HAM_MERGE_ATTEMPTS=$((HAM_MERGE_ATTEMPTS + 1))

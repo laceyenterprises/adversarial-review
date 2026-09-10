@@ -764,6 +764,57 @@ test('handlePostedReviewRow: fetchMergeAgentCandidate deadline returns a named h
   }
 });
 
+test('handlePostedReviewRow: threads a fresh merge-agent request when the tick label snapshot is stale', async () => {
+  const mergeAgentRequest = {
+    id: 'label-event-1',
+    label: 'merge-agent-requested',
+    actor: 'VirtualPaul',
+    createdAt: '2026-09-10T21:39:43.000Z',
+    headSha: 'headsha-1',
+  };
+  const observedOverrides = [];
+  let candidateInputMergeAgentRequestEvent = 'not-called';
+  let candidateMergeAgentRequestEvent;
+  let coexistenceMergeAgentRequestEvent;
+  const { args } = baseArgs({
+    labelNames: [],
+    operatorSurface: {
+      observeOperatorApproved: async () => null,
+      observeMergeAgentOverride: async (subjectRef, revisionRef) => {
+        observedOverrides.push({ subjectRef, revisionRef });
+        return mergeAgentRequest;
+      },
+      observeLabelControl: async () => null,
+    },
+    fetchMergeAgentCandidateImpl: async (repo, prNumber, options = {}) => {
+      candidateInputMergeAgentRequestEvent = options.mergeAgentRequestEvent;
+      candidateMergeAgentRequestEvent = mergeAgentRequest;
+      return { repo, prNumber, merged: false, prState: 'open', mergeAgentRequestEvent: mergeAgentRequest };
+    },
+    resolveMergeAgentCoexistenceForWatcherImpl: async (options = {}) => {
+      coexistenceMergeAgentRequestEvent = options.mergeAgentRequestEvent;
+      return {
+        outcome: 'await-operator',
+        amaClosureResult: {
+          reason: 'not-eligible',
+          namedReason: 'not-eligible:test',
+          reasons: ['test'],
+        },
+      };
+    },
+  });
+
+  const result = await handlePostedReviewRow(args);
+
+  assert.equal(result.outcome, 'await-operator');
+  assert.equal(observedOverrides.length, 0);
+  assert.equal(candidateInputMergeAgentRequestEvent, undefined);
+  assert.equal(candidateMergeAgentRequestEvent?.id, 'label-event-1');
+  assert.equal(candidateMergeAgentRequestEvent?.label, 'merge-agent-requested');
+  assert.equal(candidateMergeAgentRequestEvent?.headSha, 'headsha-1');
+  assert.equal(coexistenceMergeAgentRequestEvent?.id, 'label-event-1');
+});
+
 test('handlePostedReviewRow: retained-ownership logs once and is suppressed on unchanged repeats', async () => {
   const logGate = createLogChangeGate();
   const { args, logs } = baseArgs({ logGate });

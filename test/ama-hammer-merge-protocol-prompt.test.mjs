@@ -22,6 +22,9 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort merge-retry-budget-exhausted/);
   assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort github-gate-read-failed/);
   assert.doesNotMatch(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort merge-confirmation-read-failed/);
+  assert.match(HAMMER_PROMPT, /ham_fire_watcher_merge_wake\(\)/);
+  assert.match(HAMMER_PROMPT, /bin\/watcher-wake\.mjs/);
+  assert.match(HAMMER_PROMPT, /--reason hammer-pr-eligible/);
   assert.match(HAMMER_PROMPT, /HAM_CAPTURED_BASE_SHA=\$\(git rev-parse FETCH_HEAD/);
   assert.match(HAMMER_PROMPT, /current_base_sha=\$\(git rev-parse FETCH_HEAD/);
   assert.match(HAMMER_PROMPT, /base_files=\$\(git diff --name-only "\$HAM_VALIDATION_BASE_SHA\.\.\$current_base_sha"/);
@@ -77,6 +80,26 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.match(HAMMER_PROMPT, /localCiStatus: \$localCiStatus/);
   assert.match(HAMMER_PROMPT, /remoteCiStatus: \$remoteCiStatus/);
   assert.match(HAMMER_PROMPT, /Closed-By: hammer \(adversarial-pipe-mode\)/);
+});
+
+test('hammer fires watcher wake only after durable eligible audit append', () => {
+  const wakeFunctionIdx = HAMMER_PROMPT.indexOf('ham_fire_watcher_merge_wake()');
+  const remoteGreenIdx = HAMMER_PROMPT.indexOf('HAM_REMOTE_CI_STATUS=remote-ci-green');
+  const eligibleIdx = HAMMER_PROMPT.indexOf('HAM_PRE_MERGE_ELIGIBLE=1', remoteGreenIdx);
+  const preMergeAuditIdx = HAMMER_PROMPT.indexOf('--outcome in_progress', eligibleIdx);
+  const wakeCallIdx = HAMMER_PROMPT.indexOf('ham_fire_watcher_merge_wake', preMergeAuditIdx);
+  const mergeLoopIdx = HAMMER_PROMPT.indexOf(
+    'while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ]',
+  );
+  const mergeIdx = HAMMER_PROMPT.indexOf('gh pr merge <<PR_URL>>');
+
+  assert.ok(wakeFunctionIdx > 0, 'watcher wake helper must exist');
+  assert.ok(remoteGreenIdx > 0, 'remote CI green gate must exist');
+  assert.ok(eligibleIdx > remoteGreenIdx, 'pre-merge eligibility is set after remote CI green');
+  assert.ok(preMergeAuditIdx > eligibleIdx, 'eligible audit append must follow eligibility');
+  assert.ok(wakeCallIdx > preMergeAuditIdx, 'wake fires after durable eligible audit append');
+  assert.ok(wakeCallIdx < mergeLoopIdx, 'wake fires before the merge retry loop');
+  assert.ok(mergeLoopIdx < mergeIdx, 'merge command remains inside the retry loop');
 });
 
 test('hammer merge capability shell fallback mirrors JS token-class discovery', () => {

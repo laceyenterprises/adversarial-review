@@ -1409,6 +1409,58 @@ test('cli-direct records launch intent before subprocess onSpawn callback', asyn
   }
 });
 
+test('cli-direct onSpawn preserves child-persisted run state', async () => {
+  const rootDir = makeRoot();
+  let release;
+  try {
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      preflightImpl: noopPreflight,
+      spawnCapturedImpl: async (_command, _args, options) => {
+        persistReviewerChildRunState({
+          rootDir,
+          env: options.env,
+          sessionUuid: 'child-wins-session',
+          pid: 6161,
+          now: () => '2026-05-11T20:00:01.000Z',
+        });
+        options.onSpawn({ pgid: 6161 });
+        await new Promise((resolve) => { release = resolve; });
+        return { stdout: 'posted\n', stderr: '' };
+      },
+      now: () => '2026-05-11T20:00:00.000Z',
+    });
+
+    const req = {
+      model: 'claude',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 2 },
+      timeoutMs: 100,
+      sessionUuid: 'child-wins-session',
+      forbiddenFallbacks: ['api-key'],
+    };
+    const run = adapter.spawnReviewer(req);
+
+    await waitFor(() => {
+      const activeRecord = readReviewerRunRecord(rootDir, req.sessionUuid);
+      assert.equal(activeRecord.state, 'heartbeating');
+      assert.equal(activeRecord.pgid, 6161);
+      assert.equal(activeRecord.spawnedAt, '2026-05-11T20:00:01.000Z');
+      assert.equal(activeRecord.lastHeartbeatAt, '2026-05-11T20:00:01.000Z');
+    });
+
+    release();
+    const completed = await run;
+    assert.equal(completed.ok, true);
+    const completedRecord = readReviewerRunRecord(rootDir, req.sessionUuid);
+    assert.equal(completedRecord.state, 'completed');
+    assert.equal(completedRecord.pgid, 6161);
+    assert.equal(completedRecord.spawnedAt, '2026-05-11T20:00:01.000Z');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('cli-direct preserves cancelled state across abort races', async () => {
   const rootDir = makeRoot();
   let release;

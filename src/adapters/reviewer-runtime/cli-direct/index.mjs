@@ -17,6 +17,7 @@ import {
 const execFileAsync = promisify(execFile);
 import {
   ACTIVE_RUN_STATES,
+  TERMINAL_RUN_STATES,
   claimReviewerRunRecord,
   readReviewerRunRecord,
   reviewerRunSideChannelPaths,
@@ -456,15 +457,32 @@ function createCliDirectReviewerRuntimeAdapter({
           stderrPath: sideChannels.stderrPath,
           onSpawn: ({ pgid }) => {
             const authoritativeSpawnedAt = now();
-            record = updateReviewerRunRecord(rootDir, record, {
-              state: 'heartbeating',
-              pgid,
-              spawnedAt: authoritativeSpawnedAt,
-              lastHeartbeatAt: authoritativeSpawnedAt,
-            });
+            let currentRecord = record;
+            try {
+              currentRecord = readReviewerRunRecord(rootDir, sessionUuid) || record;
+            } catch {
+              currentRecord = record;
+            }
+            if (TERMINAL_RUN_STATES.has(currentRecord.state)) {
+              record = currentRecord;
+            } else {
+              const spawnedAt = currentRecord.spawnedAt || authoritativeSpawnedAt;
+              const lastHeartbeatAt =
+                currentRecord.lastHeartbeatAt || spawnedAt || authoritativeSpawnedAt;
+              record = updateReviewerRunRecord(rootDir, currentRecord, {
+                state: 'heartbeating',
+                pgid: currentRecord.pgid || pgid,
+                spawnedAt,
+                lastHeartbeatAt,
+              });
+            }
             activeRun.record = record;
             activeRuns.set(sessionUuid, activeRun);
-            req.onReviewerPgid?.({ sessionUuid, pgid, spawnedAt: authoritativeSpawnedAt });
+            req.onReviewerPgid?.({
+              sessionUuid,
+              pgid: record.pgid || pgid,
+              spawnedAt: record.spawnedAt || authoritativeSpawnedAt,
+            });
           },
         }
       );

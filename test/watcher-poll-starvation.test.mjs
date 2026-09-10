@@ -19,6 +19,7 @@ import { resolveClaudeLaunchctlUidFromConfig } from '../src/claude-launchctl-uid
 import {
   createWatcherHeartbeat,
   createWatcherStallWatchdog,
+  DEFAULT_WATCHER_STALL_EXIT_CODE,
 } from '../src/watcher-heartbeat.mjs';
 import {
   DEFAULT_NO_PROGRESS_LANE_CAP,
@@ -50,6 +51,7 @@ import {
 import { createNoProgressLaneGate, handlePostedReviewRow } from '../src/posted-review-row.mjs';
 import {
   createPollStarvationHandler,
+  createPollStarvationRestartRequester,
   resolvePollStarvationConfig,
 } from '../src/watcher-poll-starvation-signal.mjs';
 import {
@@ -2512,12 +2514,14 @@ test('resolvePollStarvationConfig scales with the poll interval and honours env 
   assert.equal(garbage.checksRequired, 3);
 });
 
-test('poll-starvation handler marks the heartbeat and pages without touching last_poll_at', async () => {
+test('poll-starvation handler marks the heartbeat, pages, and requests respawn without touching last_poll_at', async () => {
   const persisted = [];
   const alerts = [];
+  const restarts = [];
   const handler = createPollStarvationHandler({
     getHeartbeat: () => ({ persist: (event, extra) => persisted.push({ event, extra }) }),
     deliverAlertFn: async (text, meta) => { alerts.push({ text, meta }); },
+    requestRestartFn: (event) => { restarts.push(event); },
     logger: silentLogger,
   });
 
@@ -2542,6 +2546,10 @@ test('poll-starvation handler marks the heartbeat and pages without touching las
   assert.equal(alerts[0].meta.event, 'adversarial_review.poll_starved');
   assert.equal(alerts[0].meta.payload.poll_counter, 41);
   assert.match(alerts[0].text, /in flight for 40m/);
+  assert.equal(restarts.length, 1);
+  assert.equal(restarts[0].reason, 'poll-in-flight-past-sla-with-frozen-poll-counter');
+  assert.equal(restarts[0].inFlightMs, 2_400_000);
+  assert.equal(restarts[0].heartbeat.poll_counter, 41);
 });
 
 test('poll-starvation handler survives a heartbeat write fault and still pages', async () => {
@@ -2554,6 +2562,31 @@ test('poll-starvation handler survives a heartbeat write fault and still pages',
   handler({ inFlightMs: 1_000_000, starvationMs: 900_000, checks: 3, heartbeat: {} });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(alerts.length, 1, 'a reporting fault must not become a second outage');
+});
+
+test('poll-starvation handler requests respawn even when alert delivery is disabled', () => {
+  const restarts = [];
+  const handler = createPollStarvationHandler({
+    getHeartbeat: () => null,
+    requestRestartFn: (event) => { restarts.push(event); },
+    logger: silentLogger,
+  });
+  handler({ inFlightMs: 1_000_000, starvationMs: 900_000, checks: 3, heartbeat: {} });
+  assert.equal(restarts.length, 1);
+});
+
+test('poll-starvation restart requester preserves reviewer sessions for launchd respawn', () => {
+  const exits = [];
+  const requestRestart = createPollStarvationRestartRequester({
+    exitAfterReviewerCleanup: (event) => { exits.push(event); },
+    exitCode: DEFAULT_WATCHER_STALL_EXIT_CODE,
+  });
+  requestRestart({ inFlightMs: 1_000_000, heartbeat: { poll_counter: 12, last_poll_at: '2026-08-25T10:00:00.000Z' } });
+  assert.equal(exits.length, 1);
+  assert.equal(exits[0].code, DEFAULT_WATCHER_STALL_EXIT_CODE);
+  assert.equal(exits[0].reason, 'watcher poll-starvation watchdog');
+  assert.equal(exits[0].preserveInFlightReviewers, undefined);
+  assert.match(exits[0].err.message, /poll_counter=12/);
 });
 
 test('poll-starvation handler swallows an alert-delivery rejection', async () => {

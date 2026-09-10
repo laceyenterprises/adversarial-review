@@ -24,11 +24,10 @@ const DEFAULT_WATCHER_STALL_CHECK_INTERVAL_MS = 30 * 1000;
 // longer than the heartbeat SLA with no `poll_counter` advance, observed across
 // several consecutive checks so a single slow-but-productive tick is not paged.
 //
-// It SIGNALS, it does not exit. Killing a long tick would abort in-flight
-// reviewer work that may be legitimately slow, and the existing
-// POLL_DEADLINE_EXCEEDED path already owns the kill decision. What was missing
-// was somebody being told — this fills that gap and leaves recovery policy where
-// it already lives.
+// It invokes a policy hook instead of calling process.exit directly. Production
+// wires that hook to the same reviewer-preserving shutdown path used by the idle
+// stall watchdog, so launchd respawns the watcher without orphaning active
+// reviewer sessions; tests can still observe the signal without forking.
 const DEFAULT_WATCHER_POLL_STARVATION_MS = 15 * 60 * 1000;
 const DEFAULT_WATCHER_POLL_STARVATION_CHECKS = 3;
 const WRONG_OWNED_HEARTBEAT_MESSAGE = 'refusing write to non-canonical-owned watcher heartbeat file';

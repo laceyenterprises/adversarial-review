@@ -343,7 +343,11 @@ import {
   DEFAULT_WATCHER_STALL_WATCHDOG_MS,
 } from './watcher-heartbeat.mjs';
 import { orderSubjectEntriesDiscoveryFirst } from './watcher-poll-fairness.mjs';
-import { createPollStarvationHandler, resolvePollStarvationConfig } from './watcher-poll-starvation-signal.mjs';
+import {
+  createPollStarvationHandler,
+  createPollStarvationRestartRequester,
+  resolvePollStarvationConfig,
+} from './watcher-poll-starvation-signal.mjs';
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
 import {
   awaitThrottleIfNeeded,
@@ -1702,7 +1706,7 @@ async function main() {
     ? configuredStallMs
     : Math.max(DEFAULT_WATCHER_STALL_WATCHDOG_MS, intervalMs * 3);
   // WPS-01: how long ONE poll may stay in flight with a frozen poll_counter
-  // before the watcher pages itself. See watcher-poll-starvation-signal.mjs.
+  // before the watcher respawns itself. See watcher-poll-starvation-signal.mjs.
   const pollStarvation = resolvePollStarvationConfig({ env: process.env, intervalMs });
   const configuredStallCheckMs = Number(process.env.ADVERSARIAL_WATCHER_STALL_CHECK_INTERVAL_MS);
   const stallWatchdogCheckMs = Number.isFinite(configuredStallCheckMs) && configuredStallCheckMs > 0
@@ -1771,7 +1775,7 @@ async function main() {
   console.log(
     `[watcher] Starting — ${watchMode} | poll interval: ${intervalMs / 1000}s | ` +
     `poll deadline: ${deadlineLabel} | stall watchdog: ${stallWatchdogMs / 1000}s | ` +
-    `poll-starvation signal: ${pollStarvation.starvationMs / 1000}s × ${pollStarvation.checksRequired} checks`);
+    `poll-starvation respawn: ${pollStarvation.starvationMs / 1000}s × ${pollStarvation.checksRequired} checks`);
 
   watcherHeartbeat = createWatcherHeartbeat({
     rootDir: ROOT,
@@ -1788,11 +1792,15 @@ async function main() {
     starvationChecksRequired: pollStarvation.checksRequired,
     exitCode: DEFAULT_WATCHER_STALL_EXIT_CODE,
     logger: console,
-    // WPS-01: page on a STARVED poll (live process, one tick in flight past its SLA,
-    // poll_counter frozen) — the state every liveness surface read as healthy.
+    // WPS-01: persist/page a STARVED in-flight poll, then respawn via the
+    // reviewer-preserving shutdown path so launchd recovers discovery.
     onStarvation: createPollStarvationHandler({
       getHeartbeat: () => watcherHeartbeat,
       deliverAlertFn: defaultDeliverAlert,
+      requestRestartFn: createPollStarvationRestartRequester({
+        exitAfterReviewerCleanup,
+        exitCode: DEFAULT_WATCHER_STALL_EXIT_CODE,
+      }),
       logger: console,
     }),
     onStall: ({ exitCode, stalledForMs, heartbeat }) => {

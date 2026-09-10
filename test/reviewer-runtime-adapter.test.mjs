@@ -1529,12 +1529,21 @@ test('cli-direct preserves cancelled terminal state when onSpawn loses the cance
   let capturedOptions;
   let releaseSpawn;
   const killCalls = [];
+  let pgidAlive = true;
   try {
     const adapter = createCliDirectReviewerRuntimeAdapter({
       rootDir,
       preflightImpl: noopPreflight,
       processKillImpl: (pid, signal) => {
+        assert.equal(pid, -4244);
+        if (signal === 0) {
+          if (pgidAlive) return true;
+          const err = new Error('no such process group');
+          err.code = 'ESRCH';
+          throw err;
+        }
         killCalls.push([pid, signal]);
+        if (signal === 'SIGTERM') pgidAlive = false;
         return true;
       },
       spawnCapturedImpl: async (_command, _args, options) => {
@@ -1573,6 +1582,73 @@ test('cli-direct preserves cancelled terminal state when onSpawn loses the cance
     const record = readReviewerRunRecord(rootDir, req.sessionUuid);
     assert.equal(record.state, 'cancelled');
     assert.equal(record.pgid, 4244);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('cli-direct escalates terminal onSpawn cancellation before returning', async () => {
+  const rootDir = makeRoot();
+  let capturedOptions;
+  let releaseSpawn;
+  const killCalls = [];
+  let pgidAlive = true;
+  try {
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      preflightImpl: noopPreflight,
+      cancelGraceMs: 2,
+      cancelPollIntervalMs: 1,
+      sleepImpl: async (ms) => new Promise((resolve) => setTimeout(resolve, Math.min(ms, 1))),
+      processKillImpl: (pid, signal) => {
+        assert.equal(pid, -4245);
+        if (signal === 0) {
+          if (pgidAlive) return true;
+          const err = new Error('no such process group');
+          err.code = 'ESRCH';
+          throw err;
+        }
+        killCalls.push([pid, signal]);
+        if (signal === 'SIGKILL') pgidAlive = false;
+        return true;
+      },
+      spawnCapturedImpl: async (_command, _args, options) => {
+        capturedOptions = options;
+        await new Promise((resolve) => { releaseSpawn = resolve; });
+        options.onSpawn({ pgid: 4245 });
+        return { stdout: 'posted-after-cancel\n', stderr: '' };
+      },
+      now: () => '2026-05-11T20:00:00.000Z',
+    });
+
+    const req = {
+      model: 'claude',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 2 },
+      timeoutMs: 5_000,
+      sessionUuid: 'cancelled-before-onspawn-escalates-session',
+      forbiddenFallbacks: ['api-key'],
+    };
+    const run = adapter.spawnReviewer(req);
+    await waitFor(() => assert.ok(capturedOptions));
+    const claimed = readReviewerRunRecord(rootDir, req.sessionUuid);
+    assert.equal(claimed.state, 'launching');
+    updateReviewerRunRecord(rootDir, claimed, {
+      state: 'cancelled',
+      lastHeartbeatAt: '2026-05-11T20:00:01.000Z',
+    });
+
+    releaseSpawn();
+    const cancelled = await run;
+
+    assert.equal(cancelled.ok, false);
+    assert.equal(cancelled.failureClass, 'daemon-bounce');
+    assert.equal(cancelled.pgid, 4245);
+    assert.deepEqual(killCalls, [[-4245, 'SIGTERM'], [-4245, 'SIGKILL']]);
+    assert.equal(pgidAlive, false);
+    const record = readReviewerRunRecord(rootDir, req.sessionUuid);
+    assert.equal(record.state, 'cancelled');
+    assert.equal(record.pgid, 4245);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

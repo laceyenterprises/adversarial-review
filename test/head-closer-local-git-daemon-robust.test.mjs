@@ -260,7 +260,7 @@ test('fetchVerifiedCommitFromLocalGit retries transient sha fetch failures befor
   );
 });
 
-test('fetchVerifiedCommitFromLocalGit does not treat exhausted transient sha fetch as bare-sha rejection', async () => {
+test('fetchVerifiedCommitFromLocalGit falls back to pull-ref fetch after exhausted transient sha fetch', async () => {
   const git = makeFakeGit({ missingUntilFetch: true, transientShaFetchFailures: 3 });
   const sleeps = [];
   const commit = await fetchVerifiedCommitFromLocalGit({
@@ -272,7 +272,7 @@ test('fetchVerifiedCommitFromLocalGit does not treat exhausted transient sha fet
     sleepImpl: async (ms) => { sleeps.push(ms); },
     logger: { warn() {}, debug() {} },
   });
-  assert.equal(commit, null);
+  assert.equal(commit.sha, HEAD_SHA);
   assert.deepEqual(sleeps, [3, 7]);
   assert.equal(
     git.calls.filter((call) => call.includes(`fetch --quiet --no-tags origin ${HEAD_SHA}`)).length,
@@ -280,8 +280,8 @@ test('fetchVerifiedCommitFromLocalGit does not treat exhausted transient sha fet
   );
   assert.equal(
     git.calls.some((call) => call.includes('+refs/pull/5348/head')),
-    false,
-    'exhausted transient sha fetch must not be reclassified as an unresolvable sha',
+    true,
+    'exhausted transient sha fetch should still try the PR head ref before remote gh fallback',
   );
 });
 

@@ -48,6 +48,7 @@ async function refreshWatcherAuthenticationForTick({
 // it every few minutes is cheap: it only re-fetches when the token is actually
 // near expiry.
 const WATCHER_AUTH_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+const WATCHER_REVIEWED_ATTESTATION_RETRY_MAX_ENTRIES_PER_TICK = 1;
 
 function startWatcherAuthenticationRefreshTimer({
   log = console,
@@ -97,6 +98,7 @@ async function retryPendingReviewedAttestationQueueForWatcher({
   env,
   log = console,
   retryPendingReviewedAttestationsImpl = retryPendingReviewedAttestations,
+  maxEntriesPerTick = WATCHER_REVIEWED_ATTESTATION_RETRY_MAX_ENTRIES_PER_TICK,
 } = {}) {
   try {
     const retryResult = await retryPendingReviewedAttestationsImpl({
@@ -105,11 +107,13 @@ async function retryPendingReviewedAttestationQueueForWatcher({
       execFileImpl,
       env,
       log,
+      maxEntriesPerRun: maxEntriesPerTick,
     });
     if (retryResult.attempted > 0) {
+      const terminalSuffix = retryResult.terminal > 0 ? ` terminal=${retryResult.terminal}` : '';
       log.log?.(
         `[watcher] reviewed-attestation queue retry attempted=${retryResult.attempted} ` +
-          `consumed=${retryResult.consumed} remaining=${retryResult.remaining}`
+          `consumed=${retryResult.consumed} remaining=${retryResult.remaining}${terminalSuffix}`
       );
     }
     return retryResult;
@@ -121,6 +125,7 @@ async function retryPendingReviewedAttestationQueueForWatcher({
 
 export {
   WATCHER_AUTH_REFRESH_INTERVAL_MS,
+  WATCHER_REVIEWED_ATTESTATION_RETRY_MAX_ENTRIES_PER_TICK,
   createTickHcpHealthzProbe,
   startWatcherAuthenticationRefreshTimer,
   refreshWatcherAuthenticationForTick,

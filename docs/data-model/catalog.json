@@ -37,6 +37,14 @@
       "owner": "reviewer spawn, settle, and token attribution"
     },
     {
+      "id": "reviewed-attestations",
+      "title": "Reviewed Attestation Queue",
+      "path": "docs/data-model/reviewed-attestations.md",
+      "store": "data/reviewed-attestations/",
+      "schemaSurface": "src/reviewed-attestation.mjs",
+      "owner": "reviewed attestation signing and watcher retry"
+    },
+    {
       "id": "review-freshness-state",
       "title": "Review Freshness State",
       "path": "docs/data-model/review-freshness-state.md",

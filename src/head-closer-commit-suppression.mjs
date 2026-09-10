@@ -200,23 +200,13 @@ export async function fetchVerifiedCommitFromLocalGit({
       );
       return false;
     }
-    try {
-      await runGit(['fetch', '--quiet', '--no-tags', 'origin', sha]);
-      return true;
-    } catch (shaFetchErr) {
-      if (isTransientLocalGitError(shaFetchErr)) {
-        logger?.debug?.(
-          `[watcher] local closer-commit sha fetch exhausted transient retries for ${repoPath}#${prNumber} ` +
-            `head=${sha.slice(0, 12)}; deferring to gh: ${shaFetchErr?.message || shaFetchErr}`
-        );
-        return false;
-      }
-      logger?.debug?.(
-        `[watcher] local closer-commit sha fetch failed for ${repoPath}#${prNumber} ` +
-          `head=${sha.slice(0, 12)}; trying pull ref: ${shaFetchErr?.message || shaFetchErr}`
-      );
+    const fetchPullRef = async (reason) => {
       const pr = String(prNumber || '').trim();
       if (!pr) return false;
+      logger?.debug?.(
+        `[watcher] local closer-commit sha fetch ${reason} for ${repoPath}#${prNumber} ` +
+          `head=${sha.slice(0, 12)}; trying pull ref`
+      );
       try {
         await runGit([
           'fetch',
@@ -240,6 +230,15 @@ export async function fetchVerifiedCommitFromLocalGit({
         );
         return false;
       }
+    };
+    try {
+      await runGit(['fetch', '--quiet', '--no-tags', 'origin', sha]);
+      return true;
+    } catch (shaFetchErr) {
+      if (isTransientLocalGitError(shaFetchErr)) {
+        return await fetchPullRef(`exhausted transient retries: ${shaFetchErr?.message || shaFetchErr}`);
+      }
+      return await fetchPullRef(`failed: ${shaFetchErr?.message || shaFetchErr}`);
     }
   };
   try {

@@ -2,7 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { retryPendingReviewedAttestationQueueForWatcher } from '../src/watcher-tick-preflight.mjs';
+import {
+  WATCHER_REVIEWED_ATTESTATION_RETRY_MAX_ENTRIES_PER_TICK,
+  retryPendingReviewedAttestationQueueForWatcher,
+} from '../src/watcher-tick-preflight.mjs';
 
 test('watcher injects hq execution dependencies when retrying reviewed attestations', () => {
   const watcherSrc = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
@@ -28,6 +31,7 @@ test('reviewed attestation retry helper logs consumed queue entries', async () =
       assert.equal(args.rootDir, '/fixture/root');
       assert.equal(args.hqPath, '/fixture/hq');
       assert.equal(args.env.FOO, 'bar');
+      assert.equal(args.maxEntriesPerRun, WATCHER_REVIEWED_ATTESTATION_RETRY_MAX_ENTRIES_PER_TICK);
       return { attempted: 2, consumed: 1, remaining: 1 };
     },
   });

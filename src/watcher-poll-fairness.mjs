@@ -55,12 +55,14 @@
 // Per-tick wall-clock budget for the posted-review phase. Two poll intervals at
 // the production 5m cadence: generous enough that a busy-but-productive tick is
 // never cut short, tight enough that discovery cadence degrades to ~10m in the
-// worst case instead of the 40m+ the unbounded loop actually produced. Not
-// derived from `pollIntervalMs` because this module sits below config — override
-// with ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS if you retune the poll.
+// worst case instead of the 40m+ the unbounded loop actually produced. Keep this
+// as the effective default even when the handler timeout is longer; production
+// once carried a 30m override and fresh PR discovery stalled behind the merge
+// maintenance tail. Override with ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS
+// only when the operator explicitly accepts slower review discovery.
 export const DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS = 10 * 60 * 1000;
-export const DEFAULT_POSTED_REVIEW_PHASE_HANDLER_CAPACITY = 8;
-export const DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_HANDLER_CAPACITY = 3;
+export const DEFAULT_POSTED_REVIEW_PHASE_HANDLER_CAPACITY = 3;
+export const DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_HANDLER_CAPACITY = 1;
 export const DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT = 2;
 export const DEFAULT_POSTED_REVIEW_HANDLER_HEADROOM_MS = 5 * 1000;
 
@@ -92,9 +94,7 @@ function parsePositiveMs(value, fallback) {
 }
 
 export function resolvePostedReviewPhaseBudgetMs(env = process.env) {
-  const handlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs(env);
-  const capacityBudgetMs = handlerTimeoutMs * DEFAULT_POSTED_REVIEW_PHASE_HANDLER_CAPACITY;
-  const fallbackBudgetMs = Math.max(DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS, capacityBudgetMs);
+  const fallbackBudgetMs = DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS;
   const configured = env?.ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS;
   if (configured !== undefined && configured !== null && configured !== '') {
     return parsePositiveMs(configured, fallbackBudgetMs);
@@ -125,8 +125,9 @@ export function enforcePostedReviewReviewerPressureBudgetFloor({
   const effectiveHandlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs({
     ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS: handlerTimeoutMs,
   });
-  const minimumPressureBudgetMs =
-    effectiveHandlerTimeoutMs * DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_HANDLER_CAPACITY;
+  const minimumPressureBudgetMs = derivePostedReviewExpensiveStepBudgetMs(
+    effectiveHandlerTimeoutMs,
+  );
   const hasRequestedPressureBudget =
     pressureBudgetMs !== undefined && pressureBudgetMs !== null && pressureBudgetMs !== '';
   const requestedPressureBudgetMs = parsePositiveMs(
@@ -137,11 +138,10 @@ export function enforcePostedReviewReviewerPressureBudgetFloor({
     return requestedPressureBudgetMs;
   }
   logger?.warn?.(
-    `[watcher] posted-review reviewer-pressure phase budget raised to handler-capacity floor: ` +
+    `[watcher] posted-review reviewer-pressure phase budget raised to expensive-step floor: ` +
       `requested_budget_ms=${requestedPressureBudgetMs} ` +
       `minimum_budget_ms=${minimumPressureBudgetMs} ` +
-      `handler_timeout_ms=${effectiveHandlerTimeoutMs} ` +
-      `handler_capacity=${DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_HANDLER_CAPACITY}`,
+      `handler_timeout_ms=${effectiveHandlerTimeoutMs}`,
   );
   return minimumPressureBudgetMs;
 }

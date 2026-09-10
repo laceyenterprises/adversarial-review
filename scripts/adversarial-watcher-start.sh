@@ -482,15 +482,11 @@ fi
 # Defaulting here (rather than relying on the plist) keeps the flag with the
 # start path that actually runs. Roll back per role by exporting the flag =false
 # before this script and bouncing the watcher.
-# Posted-review phase budget. The module default (600000ms) is sized for a short
-# queue. On this host the phase needed 628-841s to walk its handler list, so every
-# tick hit the ceiling and deferred 20+ handlers to the front of the next one.
-# Deferred handlers are not dropped, but merge evaluation happens inside this
-# phase, so a PR near the tail could be re-deferred for hours. Set here, on the
-# live start path, for the same reason the reviewer flags are: the plist does not
-# execute. The tradeoff named in watcher-poll-fairness.mjs is real — worst-case
-# discovery cadence degrades from ~10m to ~30m. Lower it once the backlog is short.
-: "${ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS:=1800000}"
+# Posted-review phase budget. Do not stretch this to clear a deep merge backlog:
+# production carried a 30m override and fresh PR discovery stalled behind a long
+# HAM/merge-coexistence tail. The fair scheduler defers, rotates, and slow-lanes
+# old posted-review work; discovery/review freshness owns the poll cadence.
+: "${ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS:=600000}"
 export ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS
 
 # Individual posted-review handler deadline. Keep this aligned with

@@ -117,11 +117,11 @@ guarantees a new PR is **seen**.
   next tick, so the cut point rotates and the same tail cannot be starved.
 - **Reviewer-pressure cap**
   (`ADVERSARIAL_WATCHER_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS`, default
-  9m). When the tick just dispatched or deferred reviewer work, posted-review
+  3m). When the tick just dispatched or deferred reviewer work, posted-review
   handlers get this shorter cap for that tick only. The effective cap is floored
-  at three handler deadlines; a lower positive operator override is honored as
-  input, then raised with a warning so the ignored setting is visible. This keeps
-  fresh first-pass and rereview claims from sitting behind a large
+  only at one bounded expensive-step deadline; a lower positive operator override
+  is raised just far enough to let one handler start. This keeps fresh first-pass
+  and rereview claims from sitting behind a large
   hammer/merge-closeout backlog while preserving the normal 10m window when no
   reviewer lane work moved.
 

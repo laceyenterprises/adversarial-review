@@ -203,7 +203,7 @@ const DEFAULT_REVIEWER_MODEL_FALLBACK_ALERT_WINDOW_MS = 10 * 60 * 1000;
 const DEFAULT_REVIEWER_MODEL_FALLBACK_ALERT_THRESHOLD = 5;
 const reviewerModelFallbackAlertState = {
   events: [],
-  lastAlertKey: null,
+  lastAlertMs: null,
 };
 
 function resolvePositiveIntegerEnv(env, name, fallback) {
@@ -235,7 +235,8 @@ export function recordReviewerModelFallbackForAlert({
   config = reviewerModelFallbackAlertConfig(),
   log = console,
 } = {}) {
-  if (!fallback || !repoPath || !Number.isInteger(Number(prNumber))) {
+  const parsedPrNumber = Number(prNumber);
+  if (!fallback || !repoPath || !Number.isInteger(parsedPrNumber) || parsedPrNumber <= 0) {
     return { alerted: false, distinctSubjects: 0 };
   }
   const windowMs = Number(config.windowMs);
@@ -248,7 +249,7 @@ export function recordReviewerModelFallbackForAlert({
   state.events = events.filter((event) => Number(event.atMs) >= cutoffMs);
   state.events.push({
     atMs: nowMs,
-    subject: `${repoPath}#${prNumber}`,
+    subject: `${repoPath}#${parsedPrNumber}`,
     fromReviewerModel: fallback.fromReviewerModel || null,
     toReviewerModel: fallback.toReviewerModel || null,
     failureClass: fallback.failureClass || null,
@@ -256,11 +257,14 @@ export function recordReviewerModelFallbackForAlert({
 
   const distinctSubjects = new Set(state.events.map((event) => event.subject)).size;
   const windowSeconds = Math.round(windowMs / 1000);
-  const alertKey = String(Math.floor(nowMs / windowMs));
-  if (distinctSubjects < threshold || state.lastAlertKey === alertKey) {
+  const lastAlertMs = typeof state.lastAlertMs === 'number' ? state.lastAlertMs : NaN;
+  if (
+    distinctSubjects < threshold
+    || (Number.isFinite(lastAlertMs) && nowMs - lastAlertMs < windowMs)
+  ) {
     return { alerted: false, distinctSubjects };
   }
-  state.lastAlertKey = alertKey;
+  state.lastAlertMs = nowMs;
   const classes = [...new Set(state.events.map((event) => event.failureClass).filter(Boolean))].join(',') || 'unknown';
   const routes = [...new Set(state.events.map((event) => `${event.fromReviewerModel || '?'}->${event.toReviewerModel || '?'}`))]
     .join(',');

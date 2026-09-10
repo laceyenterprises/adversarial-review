@@ -2863,6 +2863,24 @@ test('LaunchctlSessionError does not reformat empty-stdio child failure details'
   assert.doesNotMatch(err.message, /\bcode=<none> exitCode=<none> signal=<none> killed=false\b/);
 });
 
+test('LaunchctlSessionError preserves cause exit state for unformatted reasons', () => {
+  const err = new LaunchctlSessionError('launchctl bootstrap failed', {
+    cause: {
+      code: 'EIO',
+      exitCode: 5,
+      signal: 'SIGTERM',
+      killed: true,
+    },
+    stderr: 'bootstrap failed: 5: Input/output error',
+  });
+
+  assert.equal(err.isLaunchctlSessionError, true);
+  assert.match(err.message, /launchctl bootstrap failed/);
+  assert.match(err.message, /\bcode=EIO exitCode=5 signal=SIGTERM killed=true\b/);
+  assert.match(err.message, /stderr:\nbootstrap failed: 5: Input\/output error/);
+  assert.doesNotMatch(err.message, /\bcode=<none> exitCode=<none> signal=<none> killed=false\b/);
+});
+
 test('assertClaudeOAuth retries bounded launchctl session failures', async () => {
   let attempts = 0;
   const delays = [];

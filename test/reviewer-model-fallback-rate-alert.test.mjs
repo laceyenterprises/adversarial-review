@@ -14,7 +14,7 @@ const fallback = {
 
 test('reviewer model fallback rate warning counts distinct subjects in a window', () => {
   const warnings = [];
-  const state = { events: [], lastAlertKey: null };
+  const state = { events: [], lastAlertMs: null };
   const config = { windowMs: 60_000, threshold: 3 };
   const log = { warn: (line) => warnings.push(line) };
 
@@ -70,9 +70,9 @@ test('reviewer model fallback rate warning counts distinct subjects in a window'
   assert.match(warnings[0], /routes=claude->gemini/);
 });
 
-test('reviewer model fallback rate warning alerts once per time bucket after threshold', () => {
+test('reviewer model fallback rate warning uses a trailing cooldown after threshold', () => {
   const warnings = [];
-  const state = { events: [], lastAlertKey: null };
+  const state = { events: [], lastAlertMs: null };
   const config = { windowMs: 60_000, threshold: 3 };
   const log = { warn: (line) => warnings.push(line) };
 
@@ -90,12 +90,49 @@ test('reviewer model fallback rate warning alerts once per time bucket after thr
 
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /distinctSubjects=3/);
-  assert.equal(state.lastAlertKey, '0');
+  assert.equal(state.lastAlertMs, 6503);
+});
+
+test('reviewer model fallback rate warning does not duplicate across bucket boundaries', () => {
+  const warnings = [];
+  const state = { events: [], lastAlertMs: null };
+  const config = { windowMs: 60_000, threshold: 3 };
+  const log = { warn: (line) => warnings.push(line) };
+
+  for (const [prNumber, nowMs] of [
+    [6501, 59_900],
+    [6502, 59_950],
+    [6503, 59_990],
+  ]) {
+    recordReviewerModelFallbackForAlert({
+      repoPath: 'laceyenterprises/agent-os',
+      prNumber,
+      fallback,
+      nowMs,
+      state,
+      config,
+      log,
+    });
+  }
+
+  const duplicate = recordReviewerModelFallbackForAlert({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 6504,
+    fallback,
+    nowMs: 60_001,
+    state,
+    config,
+    log,
+  });
+
+  assert.equal(duplicate.alerted, false);
+  assert.equal(duplicate.distinctSubjects, 4);
+  assert.equal(warnings.length, 1);
 });
 
 test('reviewer model fallback rate warning drops events outside the window', () => {
   const warnings = [];
-  const state = { events: [], lastAlertKey: null };
+  const state = { events: [], lastAlertMs: null };
   const config = { windowMs: 10_000, threshold: 2 };
   const log = { warn: (line) => warnings.push(line) };
 
@@ -120,6 +157,29 @@ test('reviewer model fallback rate warning drops events outside the window', () 
 
   assert.equal(result.alerted, false);
   assert.equal(result.distinctSubjects, 1);
+  assert.deepEqual(warnings, []);
+});
+
+test('reviewer model fallback rate warning rejects non-positive and coerced PR numbers', () => {
+  const warnings = [];
+  const state = { events: [], lastAlertMs: null };
+  const config = { windowMs: 60_000, threshold: 1 };
+  const log = { warn: (line) => warnings.push(line) };
+
+  for (const prNumber of [null, false, '', [], 0, -1]) {
+    const result = recordReviewerModelFallbackForAlert({
+      repoPath: 'laceyenterprises/agent-os',
+      prNumber,
+      fallback,
+      nowMs: 1_000,
+      state,
+      config,
+      log,
+    });
+    assert.deepEqual(result, { alerted: false, distinctSubjects: 0 });
+  }
+
+  assert.deepEqual(state.events, []);
   assert.deepEqual(warnings, []);
 });
 

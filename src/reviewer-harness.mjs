@@ -487,7 +487,15 @@ class LaunchctlSessionError extends Error {
     const text = String(reason || '');
     const detail = /\bstd(?:out|err):\n/.test(text) || /\bcode=.*\bexitCode=.*\bsignal=.*\bkilled=(?:true|false)\b/.test(text)
       ? text.trim()
-      : formatChildProcessFailureDetails({ message: text, stdout, stderr }).trim();
+      : formatChildProcessFailureDetails({
+        message: text,
+        stdout,
+        stderr,
+        code: cause?.code,
+        exitCode: cause?.exitCode,
+        signal: cause?.signal,
+        killed: cause?.killed,
+      }).trim();
     super(`Claude launchctl session bootstrap failed: ${detail || reason}`);
     this.name = 'LaunchctlSessionError';
     this.cause = cause;

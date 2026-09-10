@@ -1862,6 +1862,79 @@ test('RVCOEX-01: resolveMergeAgentCoexistenceForWatcher returns a named result o
   assert.match(warnings.join('\n'), /operation=daemon-clean-merge-attempt timeout_ms=10/);
 });
 
+test('RVCOEX-01: resolveMergeAgentCoexistenceForWatcher propagates live review reconcile timeouts', async () => {
+  const warnings = [];
+  let cleanMergeInvoked = false;
+  const decision = await resolveMergeAgentCoexistenceForWatcher({
+    reviewStateRow: makeReviewRow({
+      last_verdict: 'Comment only',
+      risk_class: 'low',
+      remediation_pending: 0,
+      reviewer: 'claude',
+      reviewer_head_sha: 'abc123',
+      review_body: '## Verdict\nComment only\n\n## Blocking Issues\n\n- None.\n\n## Non-blocking Issues\n\n- None.',
+    }),
+    dispatchJob: {
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 53,
+      headSha: 'abc123',
+      prUpdatedAt: '2026-05-07T12:05:00.000Z',
+    },
+    candidate: {
+      headSha: 'abc123',
+      riskClass: 'low',
+      prAuthor: 'codex-worker-bot',
+      prState: 'open',
+      mergeable: 'MERGEABLE',
+      mergeStateStatus: 'CLEAN',
+      statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' }],
+      branchProtection: { requiredContexts: [] },
+      isDraft: false,
+      prUpdatedAt: '2026-05-07T12:05:00.000Z',
+    },
+    labelNames: [],
+    mergeAgentRequestEvent: null,
+    repoPath: 'laceyenterprises/adversarial-review',
+    prNumber: 53,
+    currentRevisionRef: 'abc123',
+    logger: { log() {}, warn: (m) => warnings.push(String(m)), error() {} },
+    operationTimeoutMs: 10,
+    operationTracker: {},
+    maybeDispatchAmaClosureForImpl: (args) => maybeDispatchAmaClosureFor({
+      ...args,
+      fetchLatestHeadReviewBodiesImpl: (_repo, _pr, _head, { signal }) => new Promise((_, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      }),
+      loadConfigImpl: () => ({
+        getMergeAuthorityConfig() {
+          return {
+            enabled: true,
+            eligibility: {
+              riskClasses: ['low', 'medium', 'high', 'critical'],
+              highRiskRequiresTwoKey: false,
+            },
+            branchProtection: { required: false },
+          };
+        },
+      }),
+      runDaemonCleanMergeAttemptImpl: async () => {
+        cleanMergeInvoked = true;
+        return {
+          disposition: 'not-taken',
+          reason: 'not-eligible',
+        };
+      },
+    }),
+  });
+
+  assert.equal(decision.outcome, 'ama-pending');
+  assert.equal(decision.amaClosureResult.reason, 'ama-coexistence-operation-timeout');
+  assert.equal(decision.amaClosureResult.timedOutOperation, 'live-review-reconcile');
+  assert.equal(decision.amaClosureResult.timeoutMs, 10);
+  assert.equal(cleanMergeInvoked, false);
+  assert.match(warnings.join('\n'), /operation=live-review-reconcile timeout_ms=10/);
+});
+
 test('RVCOEX-01: resolveMergeAgentCoexistenceForWatcher propagates hammer dispatch timeouts', async () => {
   const warnings = [];
   const decision = await resolveMergeAgentCoexistenceForWatcher({

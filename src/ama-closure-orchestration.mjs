@@ -621,6 +621,9 @@ export async function maybeDispatchAmaClosureFor({
       liveHeadReview = { resolved: true, bodies: Array.isArray(bodies) ? bodies : [] };
     } catch (err) {
       throwIfAborted(signal);
+      if (err?.code === 'AMA_COEXISTENCE_OPERATION_TIMEOUT') {
+        throw err;
+      }
       logger?.warn?.(
         `[watcher] AMA live-review reconcile failed for ${repoPath}#${prNumber}@${settledReviewHeadSha}; ` +
           `failing closed: ${err?.message || err}`,

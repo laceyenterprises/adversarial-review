@@ -1013,6 +1013,146 @@ test('watcher still defers a genuinely active in-progress remediation job on the
   assert.equal(existsSync(spawned.jobPath), true, 'live current-head job must remain in progress');
 });
 
+test('watcher releases a superseded in-progress follow-up job after signalling the local worker', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-superseded-in-progress-'));
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 1023,
+    reviewerModel: 'gemini',
+    linearTicketId: null,
+    revisionRef: 'sha-old',
+    reviewBody: '## Summary\nOld-head remediation fixture.\n\n## Verdict\nRequest changes',
+    reviewPostedAt: '2026-09-10T09:06:23.000Z',
+    critical: false,
+    maxRemediationRounds: 2,
+  });
+  const claimed = claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-09-10T09:06:43.542Z',
+  });
+  const spawned = markFollowUpJobSpawned({
+    rootDir,
+    jobPath: claimed.jobPath,
+    worker: {
+      model: 'codex',
+      state: 'spawned',
+      processId: 13600,
+      processGroupId: 13600,
+      workspaceDir: '/tmp/superseded-remediator-workspace',
+    },
+    spawnedAt: '2026-09-10T09:07:00.000Z',
+  });
+  writeFollowUpJob(spawned.jobPath, {
+    ...spawned.job,
+    revisionRef: 'sha-old',
+    lastHeartbeatAt: '2026-09-10T09:08:00.000Z',
+  });
+
+  const signalCalls = [];
+  const decision = shouldDeferReviewForActiveFollowUpDirect({
+    rootDir,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 1023,
+    currentRevisionRef: 'sha-new',
+    nowMs: Date.parse('2026-09-10T09:09:00.000Z'),
+    staleSignalImpl(args) {
+      signalCalls.push(args);
+      return {
+        signalled: true,
+        skipped: false,
+        target: { kind: 'process-group', id: 13600 },
+        error: null,
+      };
+    },
+  });
+
+  assert.equal(decision.defer, false, 'superseded local worker should not keep blocking current-head review');
+  assert.equal(decision.latestJobStatus, 'stopped');
+  assert.equal(decision.releaseReason, 'revision-superseded');
+  assert.equal(signalCalls.length, 1, 'superseded local worker must be signalled before release');
+  assert.equal(signalCalls[0].job.remediationWorker.processGroupId, 13600);
+  assert.equal(existsSync(spawned.jobPath), false, 'superseded in-progress claim must be moved');
+  const stoppedPath = path.join(
+    getFollowUpJobDir(rootDir, 'stopped'),
+    path.basename(spawned.jobPath),
+  );
+  const stoppedJob = readFollowUpJob(stoppedPath);
+  assert.equal(stoppedJob.remediationPlan?.stop?.code, 'revision-superseded');
+  assert.match(stoppedJob.remediationPlan?.stop?.reason || '', /superseded by current head sha-new/);
+  assert.equal(stoppedJob.remediationWorker?.state, 'reclaimed-revision-superseded');
+  assert.equal(stoppedJob.remediationWorker?.reclaimRevisionRef, 'sha-old');
+  assert.equal(stoppedJob.remediationWorker?.currentRevisionRef, 'sha-new');
+  assert.deepEqual(stoppedJob.remediationWorker?.supersededReclaimSignal?.target, {
+    kind: 'process-group',
+    id: 13600,
+  });
+  assert.equal(claimNextFollowUpJob({ rootDir }), null, 'superseded release must not spawn remediation for the old head');
+});
+
+test('watcher keeps a superseded in-progress follow-up job held when worker signal fails', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-superseded-signal-fail-'));
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 1022,
+    reviewerModel: 'gemini',
+    linearTicketId: null,
+    revisionRef: 'sha-old',
+    reviewBody: '## Summary\nOld-head remediation fixture.\n\n## Verdict\nRequest changes',
+    reviewPostedAt: '2026-09-10T09:02:57.000Z',
+    critical: false,
+    maxRemediationRounds: 2,
+  });
+  const claimed = claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-09-10T09:03:26.575Z',
+  });
+  const spawned = markFollowUpJobSpawned({
+    rootDir,
+    jobPath: claimed.jobPath,
+    worker: {
+      model: 'codex',
+      state: 'spawned',
+      processId: 13600,
+      processGroupId: 13600,
+      workspaceDir: '/tmp/superseded-remediator-workspace',
+    },
+    spawnedAt: '2026-09-10T09:04:00.000Z',
+  });
+  writeFollowUpJob(spawned.jobPath, {
+    ...spawned.job,
+    revisionRef: 'sha-old',
+    lastHeartbeatAt: '2026-09-10T09:08:00.000Z',
+  });
+
+  const warnings = [];
+  const decision = shouldDeferReviewForActiveFollowUpDirect({
+    rootDir,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 1022,
+    currentRevisionRef: 'sha-new',
+    nowMs: Date.parse('2026-09-10T09:09:00.000Z'),
+    staleSignalImpl() {
+      return {
+        signalled: false,
+        skipped: false,
+        target: { kind: 'process-group', id: 13600 },
+        error: 'EPERM',
+      };
+    },
+    log: { warn: (message) => warnings.push(message) },
+  });
+
+  assert.equal(decision.defer, true, 'unkillable superseded worker must keep the exclusive lock');
+  assert.equal(decision.latestJobStatus, 'in_progress');
+  assert.equal(decision.releaseReason, undefined);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /Keeping superseded follow-up job .* in progress after worker signal failure/);
+  assert.match(warnings[0], /EPERM/);
+  assert.equal(existsSync(spawned.jobPath), true, 'in-progress claim must stay held');
+});
+
 test('watcher releases stale in-progress follow-up claims through the stuck-claim sweep before deferring', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-stale-release-'));
   createFollowUpJob({

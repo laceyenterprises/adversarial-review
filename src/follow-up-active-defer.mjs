@@ -9,10 +9,16 @@ import { currentProcessGroupId, isPgidAlive } from './process-group-identity.mjs
 const IN_PROGRESS_STUCK_THRESHOLD_MS_ENV = 'ADVERSARIAL_FOLLOW_UP_IN_PROGRESS_STUCK_THRESHOLD_MS';
 const DEFAULT_IN_PROGRESS_STUCK_THRESHOLD_MS = 10 * 60 * 1000;
 const STALE_HEARTBEAT_STOP_CODE = 'stale-heartbeat';
+const REVISION_SUPERSEDED_STOP_CODE = 'revision-superseded';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const IN_PROGRESS_FOLLOW_UP_STATUSES = new Set(['in_progress', 'inProgress', 'in-progress']);
 
 function isActiveFollowUpJob(job) {
   return followUpJobs.isActiveFollowUpJobStatus(job?.status);
+}
+
+function isInProgressFollowUpJob(job) {
+  return IN_PROGRESS_FOLLOW_UP_STATUSES.has(String(job?.status || ''));
 }
 
 function stopBudgetExhaustedPendingFollowUpJob({
@@ -231,6 +237,63 @@ function resolveLatestFollowUpObservedAtMs(latest) {
   }
 }
 
+function stopSupersededInProgressFollowUpJob({
+  rootDir,
+  latest,
+  currentRevisionRef = null,
+  nowMs = Date.now(),
+  markStoppedImpl = followUpJobs.markFollowUpJobStopped,
+  signalWorkerImpl = signalStaleFollowUpWorker,
+  log = console,
+}) {
+  const job = latest?.job;
+  if (!isInProgressFollowUpJob(job)) {
+    return null;
+  }
+  const worker = job?.worker || job?.remediationWorker || {};
+  if (worker?.dispatchMode === 'hq') {
+    return null;
+  }
+  const jobRevisionRef = normalizeRevisionRef(job?.revisionRef);
+  const headRevisionRef = normalizeRevisionRef(currentRevisionRef);
+  if (!jobRevisionRef || !headRevisionRef || jobRevisionRef === headRevisionRef) {
+    return null;
+  }
+
+  const stoppedAt = new Date(nowMs).toISOString();
+  const jobId = job?.jobId || basename(latest.jobPath);
+  const supersededReclaimSignal = typeof signalWorkerImpl === 'function'
+    ? signalWorkerImpl({ job, requestedAt: stoppedAt })
+    : { signalled: false, skipped: true, target: null, error: 'signal-worker-disabled' };
+  if (!supersededReclaimSignal?.signalled && !supersededReclaimSignal?.skipped) {
+    log?.warn?.(
+      `[watcher] Keeping superseded follow-up job ${jobId} in progress after worker signal failure: ` +
+      `worker signal failed: ${supersededReclaimSignal?.error || 'unknown'}`
+    );
+    return null;
+  }
+
+  return markStoppedImpl({
+    rootDir,
+    jobPath: latest.jobPath,
+    stoppedAt,
+    stopCode: REVISION_SUPERSEDED_STOP_CODE,
+    stopReason:
+      `Reclaimed in-progress follow-up claim ${jobId}: job revision ${jobRevisionRef} ` +
+      `is superseded by current head ${headRevisionRef}.`,
+    sourceStatus: job.status,
+    remediationWorker: {
+      ...worker,
+      state: 'reclaimed-revision-superseded',
+      reclaimedAt: stoppedAt,
+      reclaimReason: REVISION_SUPERSEDED_STOP_CODE,
+      reclaimRevisionRef: jobRevisionRef,
+      currentRevisionRef: headRevisionRef,
+      supersededReclaimSignal,
+    },
+  });
+}
+
 function stopStaleInProgressFollowUpJob({
   rootDir,
   latest,
@@ -241,7 +304,7 @@ function stopStaleInProgressFollowUpJob({
   log = console,
 }) {
   const job = latest?.job;
-  if (!['in_progress', 'inProgress', 'in-progress'].includes(String(job?.status || ''))) {
+  if (!isInProgressFollowUpJob(job)) {
     return null;
   }
   const worker = job?.worker || job?.remediationWorker || {};
@@ -299,6 +362,7 @@ function shouldDeferReviewForActiveFollowUp({
   budgetSweepImpl = stopBudgetExhaustedPendingFollowUpJob,
   terminalPendingSweepImpl = stopTerminalPendingFollowUpJob,
   staleClaimSweepImpl = stopStaleInProgressFollowUpJob,
+  supersededInProgressSweepImpl = stopSupersededInProgressFollowUpJob,
   markStoppedImpl = followUpJobs.markFollowUpJobStopped,
   currentRevisionRef = null,
   nowMs = Date.now(),
@@ -347,6 +411,21 @@ function shouldDeferReviewForActiveFollowUp({
     };
   }
 
+  if (typeof supersededInProgressSweepImpl === 'function') {
+    const supersededStopped = supersededInProgressSweepImpl({
+      rootDir,
+      latest,
+      currentRevisionRef,
+      nowMs,
+      markStoppedImpl,
+      signalWorkerImpl: staleSignalImpl,
+      log,
+    });
+    if (supersededStopped) {
+      latest = latestJobFinder(rootDir, { repo, prNumber });
+    }
+  }
+
   if (typeof staleClaimSweepImpl === 'function') {
     const staleStopped = staleClaimSweepImpl({
       rootDir,
@@ -383,6 +462,7 @@ export {
   shouldDeferReviewForActiveFollowUp,
   stopBudgetExhaustedPendingFollowUpJob,
   stopTerminalPendingFollowUpJob,
+  stopSupersededInProgressFollowUpJob,
   stopStaleInProgressFollowUpJob,
   signalStaleFollowUpWorker,
 };

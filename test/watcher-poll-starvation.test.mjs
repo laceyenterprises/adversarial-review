@@ -1269,6 +1269,51 @@ test('RVHAND-10: starvation recovery promotes existing slow-lane ledgers once', 
   }
 });
 
+test('RVHAND-10: walked promoted ledgers preserve promotion audit fields', async () => {
+  const rootDir = tempRoot();
+  try {
+    const identity = { repo: REPO, prNumber: 6539 };
+    for (let i = 0; i < DEFAULT_NO_PROGRESS_LANE_CAP + 2; i += 1) {
+      recordNoProgressLaneRun(rootDir, identity, {
+        headSha: HEAD_A,
+        fingerprint: 'starved-clean-pr-preserve-history',
+        now: `t${i}`,
+        logger: silentLogger,
+      });
+    }
+
+    await promoteStarvedNoProgressLaneLedgers(rootDir, {
+      now: 'recover-preserve-history',
+      logger: silentLogger,
+    });
+    const promoted = readNoProgressLane(rootDir, identity, { logger: silentLogger });
+
+    recordNoProgressLaneRun(rootDir, identity, {
+      headSha: HEAD_A,
+      fingerprint: 'post-promotion-walk',
+      now: 'after-recovery-walk',
+      logger: silentLogger,
+    });
+    const walked = readNoProgressLane(rootDir, identity, { logger: silentLogger });
+
+    assert.deepEqual(walked.promotedFrom, promoted.promotedFrom);
+    assert.deepEqual(walked.promotionHistory, promoted.promotionHistory);
+
+    recordNoProgressLaneRun(rootDir, identity, {
+      headSha: HEAD_B,
+      fingerprint: 'new-head-starts-fresh',
+      now: 'new-head',
+      logger: silentLogger,
+    });
+    const freshHead = readNoProgressLane(rootDir, identity, { logger: silentLogger });
+
+    assert.equal(freshHead.promotedFrom, undefined);
+    assert.equal(freshHead.promotionHistory, undefined);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('RVHAND-10: starvation recovery yields between ledger batches', async () => {
   const rootDir = tempRoot();
   try {

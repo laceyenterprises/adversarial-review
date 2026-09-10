@@ -373,6 +373,8 @@ export async function readAfhReviewerGrounding({
   retryDelaysMs = AFH_FLEET_QUOTA_STATUS_RETRY_DELAYS_MS,
   sleepImpl = sleep,
   claudeRuntimeProbeImpl = null,
+  claudeRuntimeProbeTimeoutMs = CLAUDE_REVIEWER_RUNTIME_PROBE_TIMEOUT_MS,
+  claudeRuntimeProbeRetryDelaysMs = CLAUDE_REVIEWER_RUNTIME_PROBE_RETRY_DELAYS_MS,
 } = {}) {
   if (afhReviewerFallbackDisabled(env)) {
     return unavailableGrounding('afh-reviewer-fallback-disabled');
@@ -407,7 +409,13 @@ export async function readAfhReviewerGrounding({
       : null;
   if (!probeImpl) return snapshot;
   try {
-    const runtimeStatus = await probeImpl({ env });
+    const runtimeStatus = await probeImpl({
+      execFileImpl,
+      env,
+      timeoutMs: claudeRuntimeProbeTimeoutMs,
+      retryDelaysMs: claudeRuntimeProbeRetryDelaysMs,
+      sleepImpl,
+    });
     return applyClaudeReviewerRuntimeGrounding(snapshot, runtimeStatus);
   } catch (err) {
     return applyClaudeReviewerRuntimeGrounding(snapshot, {

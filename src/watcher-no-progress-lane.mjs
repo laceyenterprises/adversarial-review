@@ -686,6 +686,12 @@ export function recordNoProgressLaneRun(rootDir, identity, {
   const priorStalledEvent = sameFingerprint && existing?.stalledEvent
     ? existing.stalledEvent
     : null;
+  const priorPromotedFrom = sameHead && existing?.promotedFrom && typeof existing.promotedFrom === 'object'
+    ? existing.promotedFrom
+    : null;
+  const priorPromotionHistory = sameHead && Array.isArray(existing?.promotionHistory)
+    ? existing.promotionHistory.filter((entry) => entry && typeof entry === 'object')
+    : [];
   writeLedger(rootDir, identity, {
     schemaVersion: NO_PROGRESS_LANE_SCHEMA_VERSION,
     repo: identity?.repo ?? null,
@@ -699,6 +705,8 @@ export function recordNoProgressLaneRun(rootDir, identity, {
     lane,
     firstNoProgressAt,
     ...(priorStalledEvent ? { stalledEvent: priorStalledEvent } : {}),
+    ...(priorPromotedFrom ? { promotedFrom: priorPromotedFrom } : {}),
+    ...(priorPromotionHistory.length > 0 ? { promotionHistory: priorPromotionHistory } : {}),
     updatedAt: now || null,
   });
   return {

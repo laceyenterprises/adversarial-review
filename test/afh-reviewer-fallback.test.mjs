@@ -23,6 +23,7 @@ import {
   AFH_REVIEWER_MODEL_PROVIDER,
   AFH_FLEET_QUOTA_STATUS_RETRY_TIMEOUT_FRACTION,
   CLAUDE_REVIEWER_RUNTIME_GROUNDING_REASON,
+  CLAUDE_REVIEWER_RUNTIME_PROBE_TIMEOUT_MS,
   CLAUDE_REVIEWER_RUNTIME_PROBE_RETRY_DELAYS_MS,
   applyClaudeReviewerRuntimeGrounding,
   afhGroundingSnapshotFromStdout,
@@ -607,6 +608,35 @@ test('AFH-04R: Claude runtime probe still applies when fleet quota status is una
   assert.equal(route.afhReviewerFallback.primarySoftGrounded, true);
 });
 
+test('AFH-04R: Claude runtime probe receives caller execution context', async () => {
+  const execFileImpl = async () => ({ stdout: fleetStatusJson({ openai: OK, anthropic: OK, google: OK }) });
+  const sleepImpl = async () => {};
+  const env = {};
+  const calls = [];
+  const grounding = await readAfhReviewerGrounding({
+    hqPath: 'hq',
+    execFileImpl,
+    claudeRuntimeProbeImpl: async (options) => {
+      calls.push(options);
+      return { available: true, reason: 'ok' };
+    },
+    claudeRuntimeProbeTimeoutMs: 3456,
+    claudeRuntimeProbeRetryDelaysMs: [7, 11],
+    env,
+    timeoutMs: 1234,
+    retryDelaysMs: [5],
+    sleepImpl,
+  });
+
+  assert.equal(grounding.available, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].execFileImpl, execFileImpl);
+  assert.equal(calls[0].env, env);
+  assert.equal(calls[0].timeoutMs, 3456);
+  assert.deepEqual(calls[0].retryDelaysMs, [7, 11]);
+  assert.equal(calls[0].sleepImpl, sleepImpl);
+});
+
 test('AFH-04R: Claude runtime grounding auto-reverts when launchctl succeeds', async () => {
   const okGrounding = await readAfhReviewerGrounding({
     hqPath: 'hq',
@@ -625,6 +655,24 @@ test('AFH-04R: Claude runtime grounding auto-reverts when launchctl succeeds', a
 
   assert.equal(reviewerModelGrounding(okGrounding, 'claude').grounded, false);
   assert.deepEqual(route, baseRoute);
+});
+
+test('AFH-04R: readAfhReviewerGrounding keeps default runtime probe budget distinct from quota status budget', async () => {
+  const calls = [];
+  await readAfhReviewerGrounding({
+    hqPath: 'hq',
+    execFileImpl: async () => ({ stdout: fleetStatusJson({ openai: OK, anthropic: OK, google: OK }) }),
+    claudeRuntimeProbeImpl: async (options) => {
+      calls.push(options);
+      return { available: true, reason: 'ok' };
+    },
+    env: {},
+    timeoutMs: 55_000,
+    retryDelaysMs: [9_000],
+  });
+
+  assert.equal(calls[0].timeoutMs, CLAUDE_REVIEWER_RUNTIME_PROBE_TIMEOUT_MS);
+  assert.deepEqual(calls[0].retryDelaysMs, CLAUDE_REVIEWER_RUNTIME_PROBE_RETRY_DELAYS_MS);
 });
 
 test('AFH-04R: Claude runtime probe captures the exact launchctl-asuser primitive', async () => {

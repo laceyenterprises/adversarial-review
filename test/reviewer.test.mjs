@@ -606,6 +606,45 @@ test('postGitHubReview retries transient exact-head gh transport failure', async
   assert.equal(calls.length, 2);
 });
 
+test('postGitHubReview retries transient exact-head GitHub HTTP/2 GOAWAY 500', async () => {
+  const calls = [];
+  const result = await postGitHubReview(
+    'laceyenterprises/demo',
+    42,
+    'review body',
+    'GH_CODEX_REVIEWER_TOKEN',
+    async (command, args, options = {}) => {
+      calls.push({ command, args, options });
+      if (calls.length === 1) {
+        const err = new Error('HTTP/2: "GOAWAY" frame received with code 0');
+        err.status = 500;
+        throw err;
+      }
+      return {
+        stdout: JSON.stringify({
+          id: 4242,
+          commit_id: 'reviewed-head-sha',
+        }),
+      };
+    },
+    {
+      env: {
+        GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
+        PATH: '/opt/homebrew/bin:/usr/bin',
+        HOME: '/Users/test',
+      },
+      reviewerIdentity: 'codex-reviewer-lacey',
+      reviewerHeadSha: 'reviewed-head-sha',
+      prepareReviewWrite: async () => {},
+    }
+  );
+
+  assert.deepEqual(result, {
+    reviewArtifact: { id: '4242', commitId: 'reviewed-head-sha' },
+  });
+  assert.equal(calls.length, 2);
+});
+
 test('postGitHubReview returns null exact-head artifact when response validation fails', async () => {
   const calls = [];
   const warnings = [];

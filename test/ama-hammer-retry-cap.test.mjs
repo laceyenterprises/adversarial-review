@@ -43,6 +43,8 @@ const REPO = 'acme/myrepo';
 const PR_NUMBER = 3116;
 const REVIEWED_HEAD = 'a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0';
 const ADVANCED_HEAD = 'b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1';
+const REVIEWED_HAMMER_WORKER_ID = `hammer-ama-pr-${PR_NUMBER}-${REVIEWED_HEAD.slice(0, 12)}`;
+const ADVANCED_HAMMER_WORKER_ID = `hammer-ama-pr-${PR_NUMBER}-${ADVANCED_HEAD.slice(0, 12)}`;
 const CURRENT_USER = userInfo().username || process.env.USER || process.env.LOGNAME || 'unknown';
 
 function hammerDispatchArgs(rootDir, overrides = {}) {
@@ -469,12 +471,18 @@ test('maybeDispatchAmaCloser records confirmed hammer launches in the retry-cap 
       deps.execCalls[0].args.indexOf('--worker-id'),
       deps.execCalls[0].args.indexOf('--worker-id') + 2,
     ),
-    ['--worker-id', `hammer-ama-pr-${PR_NUMBER}`],
+    ['--worker-id', REVIEWED_HAMMER_WORKER_ID],
   );
   const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
   assert.equal(ledger.jobKey, REVIEWED_HEAD);
   assert.equal(ledger.attemptCount, 1);
   assert.deepEqual(ledger.dispatchHeads, [REVIEWED_HEAD]);
+  const record = readAmaCloserDispatchRecord(rootDir, {
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: REVIEWED_HEAD,
+  });
+  assert.equal(record.workerId, REVIEWED_HAMMER_WORKER_ID);
 });
 
 test('maybeDispatchAmaCloser dispatches comment-only terminal unknown non-blocking findings after grace', async (t) => {
@@ -1447,7 +1455,7 @@ test('terminal old-head hammer dispatch is superseded when remediation advanced 
   assert.equal(result.launchRequestId, 'lrq_new_head');
   assert.deepEqual(
     launchedArgs.slice(launchedArgs.indexOf('--worker-id'), launchedArgs.indexOf('--worker-id') + 2),
-    ['--worker-id', `hammer-ama-pr-${PR_NUMBER}`],
+    ['--worker-id', ADVANCED_HAMMER_WORKER_ID],
   );
   const oldLease = readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD });
   assert.equal(oldLease.status, AMA_CLOSER_LEASE_STATUS.TERMINAL);
@@ -1463,6 +1471,7 @@ test('terminal old-head hammer dispatch is superseded when remediation advanced 
   assert.equal(currentRecord.headSha, ADVANCED_HEAD);
   assert.equal(currentRecord.reviewedSha, REVIEWED_HEAD);
   assert.equal(currentRecord.launchRequestId, 'lrq_new_head');
+  assert.equal(currentRecord.workerId, ADVANCED_HAMMER_WORKER_ID);
   assert.equal(currentRecord.state, 'dispatched');
 });
 

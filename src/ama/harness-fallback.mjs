@@ -62,7 +62,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const SUBMODULE_ROOT = resolve(__dirname, '..', '..');
 const AGENT_OS_ROOT = resolve(SUBMODULE_ROOT, '..', '..');
 
-const FLEET_QUOTA_STATUS_TIMEOUT_MS = 10_000;
+const FLEET_QUOTA_STATUS_TIMEOUT_MS = 20_000;
 
 // Closer/hammer worker_class → HHR provider whose OAuth quota gates whether that
 // harness can spawn at all. `hammer` runs on the codex harness (OpenAI OAuth),

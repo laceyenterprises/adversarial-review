@@ -294,6 +294,66 @@ test('postReviewCycleCapEscalation posts only the comment (no label add) so the 
   assert.deepEqual(calls.map(([name]) => name), ['createComment']);
 });
 
+test('postReviewCycleCapEscalation retries transient GitHub GOAWAY comment failures', async () => {
+  const calls = [];
+  const octokit = {
+    rest: {
+      issues: {
+        createComment: async (params) => {
+          calls.push(params);
+          if (calls.length === 1) {
+            const err = new Error('HTTP/2: "GOAWAY" frame received with code 0');
+            err.status = 500;
+            throw err;
+          }
+        },
+      },
+    },
+  };
+
+  await postReviewCycleCapEscalation(octokit, {
+    repoPath: REPO,
+    prNumber: PR,
+    body: 'escalation body',
+    retryDelaysMs: [0],
+    sleepImpl: async () => {},
+    logger: { warn() {} },
+  });
+
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls.map((call) => call.body), ['escalation body', 'escalation body']);
+});
+
+test('postReviewCycleCapEscalation does not retry permanent GitHub comment failures', async () => {
+  let calls = 0;
+  const octokit = {
+    rest: {
+      issues: {
+        createComment: async () => {
+          calls += 1;
+          const err = new Error('Validation Failed');
+          err.status = 422;
+          throw err;
+        },
+      },
+    },
+  };
+
+  await assert.rejects(
+    () => postReviewCycleCapEscalation(octokit, {
+      repoPath: REPO,
+      prNumber: PR,
+      body: 'escalation body',
+      retryDelaysMs: [0, 0],
+      sleepImpl: async () => {},
+      logger: { warn() {} },
+    }),
+    /Validation Failed/
+  );
+
+  assert.equal(calls, 1);
+});
+
 test('operator-approved clears a persisted cap pause even when the cap label add failed', async () => {
   const db = setupDb();
   const removed = [];

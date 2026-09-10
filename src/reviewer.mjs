@@ -1479,16 +1479,22 @@ function isReviewerPostAuthFailure(err, { preWriteSaw401 = false } = {}) {
 
 function isRetryableGhTransportError(err, { allowAuthRefresh = false, preWriteSaw401 = false } = {}) {
   const detail = buildGhErrorDetail(err);
+  const status = Number(err?.status || err?.response?.status || 0);
   if (allowAuthRefresh && isReviewerPostAuthFailure(err, { preWriteSaw401 })) {
     return true;
   }
-  return /\b(etimedout|econnreset|econnrefused|ehostunreach|eai_again|enotfound|epipe|eagain)\b/.test(detail)
+  return status === 429
+    || (status >= 500 && status <= 599)
+    || /\b(etimedout|econnreset|econnrefused|ehostunreach|eai_again|enotfound|epipe|eagain)\b/.test(detail)
+    || detail.includes('goaway')
+    || detail.includes('http/2')
     || detail.includes('timeout')
     || detail.includes('timed out')
     || detail.includes('temporary failure')
     || detail.includes('temporarily unavailable')
     || detail.includes('rate limit')
     || detail.includes('secondary rate limit')
+    || detail.includes('500 internal server error')
     || detail.includes('502 bad gateway')
     || detail.includes('503 service unavailable')
     || detail.includes('504 gateway timeout');

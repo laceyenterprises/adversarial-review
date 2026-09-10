@@ -454,7 +454,7 @@ test('AFH-04: transient hq quota-status failures retry before failing open', asy
     sleepImpl: async () => {},
   });
   assert.equal(calls, 2, 'the transient failure was retried once');
-  assert.deepEqual(timeouts, [10_000, 2_500], 'retry attempts use a shorter child timeout');
+  assert.deepEqual(timeouts, [20_000, 5_000], 'retry attempts use a shorter child timeout');
   assert.equal(grounding.available, true);
   assert.equal(grounding.reason, 'ok');
 });

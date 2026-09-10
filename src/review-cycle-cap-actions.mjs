@@ -8,6 +8,41 @@ import {
 import { classifyBlockingFindings } from './follow-up-merge-agent.mjs';
 import { extractReviewVerdict } from './review-verdict.mjs';
 
+const REVIEW_CYCLE_CAP_COMMENT_RETRY_DELAYS_MS = Object.freeze([250, 1000]);
+
+function sleep(ms) {
+  if (!ms) return Promise.resolve();
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function reviewCycleCapCommentErrorDetail(err) {
+  return [
+    err?.status,
+    err?.response?.status,
+    err?.code,
+    err?.message,
+    err?.response?.data?.message,
+  ].filter(Boolean).join('\n').toLowerCase();
+}
+
+function isRetryableReviewCycleCapCommentError(err) {
+  const status = Number(err?.status || err?.response?.status || 0);
+  if (status === 429 || (status >= 500 && status <= 599)) return true;
+  const detail = reviewCycleCapCommentErrorDetail(err);
+  return /\b(etimedout|econnreset|econnrefused|ehostunreach|eai_again|enotfound|epipe|eagain)\b/.test(detail)
+    || detail.includes('goaway')
+    || detail.includes('http/2')
+    || detail.includes('timeout')
+    || detail.includes('timed out')
+    || detail.includes('temporary failure')
+    || detail.includes('temporarily unavailable')
+    || detail.includes('rate limit')
+    || detail.includes('secondary rate limit')
+    || detail.includes('bad gateway')
+    || detail.includes('service unavailable')
+    || detail.includes('gateway timeout');
+}
+
 export function subjectRefWithLinearTicket(subjectRef, linearTicketId, labels = []) {
   return {
     ...subjectRef,
@@ -101,15 +136,35 @@ export async function postReviewCycleCapEscalation(octokit, {
   repoPath,
   prNumber,
   body,
+  retryDelaysMs = REVIEW_CYCLE_CAP_COMMENT_RETRY_DELAYS_MS,
+  sleepImpl = sleep,
+  logger = console,
 }) {
   const [owner, repo] = String(repoPath || '').split('/');
   if (!owner || !repo) throw new Error(`Invalid repo slug: ${repoPath}`);
-  await octokit.rest.issues.createComment({
-    owner,
-    repo,
-    issue_number: Number(prNumber),
-    body,
-  });
+  let lastErr = null;
+  for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
+    try {
+      await octokit.rest.issues.createComment({
+        owner,
+        repo,
+        issue_number: Number(prNumber),
+        body,
+      });
+      return;
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryableReviewCycleCapCommentError(err) || attempt >= retryDelaysMs.length) {
+        throw err;
+      }
+      logger?.warn?.(
+        `[watcher] review-cycle-cap escalation comment retry ${attempt + 1}/${retryDelaysMs.length} ` +
+          `for ${repoPath}#${prNumber}: ${err?.message || err}`
+      );
+      await sleepImpl(retryDelaysMs[attempt]);
+    }
+  }
+  throw lastErr;
 }
 
 export async function clearReviewCycleCapForOverride({

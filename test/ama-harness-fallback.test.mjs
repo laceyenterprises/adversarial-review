@@ -140,6 +140,7 @@ test('fleet quota status runs from the configured Agent OS root', async () => {
   assert.equal(result.fellBack, true);
   assert.equal(exec.calls.length, 1);
   assert.equal(exec.calls[0].options.cwd, '/tmp/agent-os-root-for-hammer');
+  assert.equal(exec.calls[0].options.timeout, 20_000);
 });
 
 test('codex healthy (ok) → keep primary hammer (auto-revert, no fallback)', async () => {

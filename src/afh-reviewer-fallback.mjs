@@ -78,7 +78,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const SUBMODULE_ROOT = resolve(__dirname, '..');
 const AGENT_OS_ROOT = resolve(SUBMODULE_ROOT, '..', '..');
 
-export const AFH_FLEET_QUOTA_STATUS_TIMEOUT_MS = 10_000;
+export const AFH_FLEET_QUOTA_STATUS_TIMEOUT_MS = 20_000;
 export const AFH_FLEET_QUOTA_STATUS_RETRY_DELAYS_MS = Object.freeze([250, 1000]);
 export const AFH_FLEET_QUOTA_STATUS_RETRY_TIMEOUT_FRACTION = 0.25;
 export const DEFAULT_AFH_GROUNDING_TTL_MS = 60_000;

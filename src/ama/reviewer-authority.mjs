@@ -20,3 +20,7 @@ export function amaAuthoritativeReviewerLoginsForModel(reviewerModel) {
   const route = REVIEWER_ROUTE_BY_MODEL[m] || ROUTE_BY_BUILDER_CLASS[m];
   return AMA_AUTHORITATIVE_REVIEWER_LOGINS_BY_MODEL[route?.reviewerModel] || [];
 }
+
+export function amaAllAuthoritativeReviewerLogins() {
+  return [...new Set(Object.values(AMA_AUTHORITATIVE_REVIEWER_LOGINS_BY_MODEL).flat())];
+}

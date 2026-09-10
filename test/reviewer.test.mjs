@@ -490,6 +490,99 @@ test('postGitHubReviewWithCapture dismisses prior request-changes after clean ex
   }
 });
 
+test('postGitHubReviewWithCapture dismisses superseded cross-family bot request-changes only', async () => {
+  const calls = [];
+  const rootDir = mkdtempSync(join(tmpdir(), 'review-cross-family-dismissal-'));
+  mkdirSync(join(rootDir, 'data'), { recursive: true });
+  const reviewBody = [
+    '## Summary',
+    'Clean after remediation.',
+    '',
+    '## Verdict',
+    'Comment only',
+  ].join('\n');
+  try {
+    await withEnvAsync({
+      GH_GEMINI_REVIEWER_TOKEN: 'ghp_gemini_reviewer_pat',
+      DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED: '1',
+    }, () => postGitHubReviewWithCapture({
+      rootDir,
+      repo: 'laceyenterprises/demo',
+      prNumber: 42,
+      attemptNumber: 1,
+      reviewerModel: 'gemini',
+      reviewerHeadSha: 'reviewed-head-sha',
+      reviewBody,
+      botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+      passKind: 'rereview',
+      postedAt: '2026-08-09T10:10:00.000Z',
+      lookupRetryBackoffMs: [],
+      execFileImpl: async (command, args, options = {}) => {
+        calls.push({ command, args, options });
+        assert.equal(command, 'gh');
+        const joined = args.join(' ');
+        if (joined.includes('--method POST') && joined.includes('/reviews')) {
+          return {
+            stdout: JSON.stringify({
+              id: 4242,
+              commit_id: 'reviewed-head-sha',
+            }),
+          };
+        }
+        if (joined.includes('/reviews/9101/dismissals')) {
+          return { stdout: '{}' };
+        }
+        if (joined.includes('/reviews/9102/dismissals')) {
+          throw new Error('same-head cross-family review must not be dismissed');
+        }
+        if (joined.includes('/pulls/42/reviews?')) {
+          return {
+            stdout:
+              'HTTP/1.1 200 OK\nx-ratelimit-resource: core\nx-ratelimit-remaining: 4999\nx-ratelimit-reset: 1780000000\n\n' +
+              JSON.stringify([
+                {
+                  id: 9101,
+                  user: { login: 'lacey-codex-reviewer[bot]' },
+                  body: 'old codex block',
+                  state: 'CHANGES_REQUESTED',
+                  submitted_at: '2026-08-09T10:00:00Z',
+                  commit_id: 'old-reviewed-head-sha',
+                },
+                {
+                  id: 9102,
+                  user: { login: 'lacey-codex-reviewer[bot]' },
+                  body: 'live codex block',
+                  state: 'CHANGES_REQUESTED',
+                  submitted_at: '2026-08-09T10:01:00Z',
+                  commit_id: 'reviewed-head-sha',
+                },
+                {
+                  id: 9103,
+                  user: { login: 'human' },
+                  body: 'old human block',
+                  state: 'CHANGES_REQUESTED',
+                  submitted_at: '2026-08-09T10:02:00Z',
+                  commit_id: 'old-reviewed-head-sha',
+                },
+              ]),
+          };
+        }
+        throw new Error(`unexpected gh call: ${joined}`);
+      },
+      emitReviewedAttestationImpl: async () => ({}),
+    }));
+
+    const dismissalCalls = calls.filter((call) => call.args.join(' ').includes('/dismissals'));
+    assert.equal(dismissalCalls.length, 1);
+    assert.match(dismissalCalls[0].args.join(' '), /reviews\/9101\/dismissals/);
+    assert.equal(dismissalCalls[0].options.env.GH_TOKEN, 'ghp_gemini_reviewer_pat');
+    assert.ok(!calls.some((call) => call.args.join(' ').includes('/reviews/9102/dismissals')));
+    assert.ok(!calls.some((call) => call.args.join(' ').includes('/reviews/9103/dismissals')));
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('postGitHubReview maps exact-head request-changes verdicts to blocking GitHub reviews', async () => {
   const calls = [];
   const reviewBody = [

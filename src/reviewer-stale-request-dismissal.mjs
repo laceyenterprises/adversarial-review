@@ -1,6 +1,13 @@
-import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
+import {
+  amaAllAuthoritativeReviewerLogins,
+  amaAuthoritativeReviewerLoginsForModel,
+} from './ama/reviewer-authority.mjs';
 import { dismissStandingChangesRequestedReviewsForHead } from './github-api.mjs';
 import { isDismissStaleRequestChangesOnResolvedEnabled } from './merge-agent-dispatch-decision.mjs';
+
+function normalizeReviewerLogin(login) {
+  return String(login || '').trim().toLowerCase().replace(/\[bot\]$/u, '');
+}
 
 export async function dismissStaleRequestChangesAfterCleanReview({
   repo,
@@ -44,6 +51,32 @@ export async function dismissStaleRequestChangesAfterCleanReview({
         },
       },
     );
+    const primaryReviewerLogins = new Set(
+      authoritativeReviewerLogins.map((login) => normalizeReviewerLogin(login)),
+    );
+    const supersededCrossFamilyReviewerLogins = amaAllAuthoritativeReviewerLogins()
+      .filter((login) => !primaryReviewerLogins.has(normalizeReviewerLogin(login)));
+    const supersededCrossFamilyDismissal = supersededCrossFamilyReviewerLogins.length > 0
+      ? await dismissStandingChangesRequestedReviewsForHead(
+        execFileImpl,
+        repo,
+        prNumber,
+        headSha,
+        {
+          authoritativeReviewerLogins: supersededCrossFamilyReviewerLogins,
+          requireSupersededCommitId: headSha,
+          message: (review) => (
+            `Reviewer posted a clean comment-only re-review on ${headSha}; ` +
+            `dismissing superseded stale Request changes from ${review?.commitId || review?.commit_id || 'an older head'}.`
+          ),
+          env: {
+            ...env,
+            GH_TOKEN: token,
+            ...(botTokenEnv ? { [botTokenEnv]: token } : {}),
+          },
+        },
+      )
+      : { attempted: 0, dismissed: [] };
     log?.log?.(JSON.stringify({
       schemaVersion: 1,
       event: 'reviewer.stale_request_changes.dismissal',
@@ -51,13 +84,23 @@ export async function dismissStaleRequestChangesAfterCleanReview({
       pr: prNumber,
       headSha,
       reviewerModel: reviewerModel || null,
-      attempted: Number(dismissal?.attempted || 0),
-      dismissed: Array.isArray(dismissal?.dismissed)
-        ? dismissal.dismissed.map((review) => review.id).filter(Boolean)
+      attempted: Number(dismissal?.attempted || 0)
+        + Number(supersededCrossFamilyDismissal?.attempted || 0),
+      dismissed: [
+        ...(Array.isArray(dismissal?.dismissed) ? dismissal.dismissed : []),
+        ...(Array.isArray(supersededCrossFamilyDismissal?.dismissed)
+          ? supersededCrossFamilyDismissal.dismissed
+          : []),
+      ]
+        .map((review) => review.id)
+        .filter(Boolean),
+      crossFamilyAttempted: Number(supersededCrossFamilyDismissal?.attempted || 0),
+      crossFamilyDismissed: Array.isArray(supersededCrossFamilyDismissal?.dismissed)
+        ? supersededCrossFamilyDismissal.dismissed.map((review) => review.id).filter(Boolean)
         : [],
       ok: true,
     }));
-    return { ok: true, dismissal };
+    return { ok: true, dismissal, supersededCrossFamilyDismissal };
   } catch (err) {
     log?.warn?.(
       `[reviewer] stale Request changes dismissal failed for ` +

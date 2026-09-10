@@ -402,6 +402,19 @@ test('MSM-04: no source path still uses the standalone closer prompt for dispatc
   assert.equal(/const\s+TEMPLATE_PATH\b/.test(source), false);
 });
 
+test('MSM-04: HAM live gate prefers normalized rollup checks over legacy statusCheckRollup', () => {
+  const checks = [{ __typename: 'CheckRun', name: 'ci', status: 'COMPLETED', conclusion: 'SUCCESS' }];
+  const legacy = [{ __typename: 'CheckRun', name: 'legacy', status: 'COMPLETED', conclusion: 'FAILURE' }];
+  const empty = [];
+  const { resolveRollupRequiredChecks } = __testables__;
+
+  assert.strictEqual(resolveRollupRequiredChecks({ checks, statusCheckRollup: legacy }), checks);
+  assert.strictEqual(resolveRollupRequiredChecks({ checks: empty, statusCheckRollup: legacy }), empty);
+  assert.strictEqual(resolveRollupRequiredChecks({ statusCheckRollup: legacy }), legacy);
+  assert.strictEqual(resolveRollupRequiredChecks({}), null);
+  assert.strictEqual(resolveRollupRequiredChecks(null), null);
+});
+
 test('MSM-04: stale reviewed head without closer proof does not re-hammer', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'msm-04-stale-head-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

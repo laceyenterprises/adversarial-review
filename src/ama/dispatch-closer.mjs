@@ -2747,6 +2747,7 @@ export const __testables__ = Object.freeze({
   cleanupHammerCloserWorker,
   reclaimSelfOwnedHammerCloserWorktreeBeforeProvision,
   resolveSelfOwnedHammerCloserRunLiveness,
+  resolveRollupRequiredChecks,
   selfOwnedHammerCloserWorktreePath,
   isProvisionBranchHolderBlocked,
   teardownSamePrHammerHolder,
@@ -2761,6 +2762,12 @@ export const __testables__ = Object.freeze({
   fetchMergeCommitShaBestEffort,
   emitWorkerGitMergeSignalBestEffort,
 });
+
+function resolveRollupRequiredChecks(rollup) {
+  if (Array.isArray(rollup?.checks)) return rollup.checks;
+  if (Array.isArray(rollup?.statusCheckRollup)) return rollup.statusCheckRollup;
+  return null;
+}
 
 function sleep(ms, signal = null) {
   throwIfAborted(signal);
@@ -4035,7 +4042,7 @@ export async function maybeDispatchAmaCloser({
             requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
             liveGate: {
               candidateHead: prMetadata?.headSha || '',
-              requiredChecks: Array.isArray(prMetadata?.statusCheckRollup) ? prMetadata.statusCheckRollup : [],
+              requiredChecks: resolveRollupRequiredChecks(prMetadata) ?? [],
               mergeable: prMetadata?.mergeable || prMetadata?.mergeableState,
               mergeStateStatus: prMetadata?.mergeStateStatus,
               prState: String(prMetadata?.state || '').trim() || (prMetadata?.isOpen === false ? 'CLOSED' : 'OPEN'),
@@ -4075,7 +4082,7 @@ export async function maybeDispatchAmaCloser({
               const state = String(rollup?.state || '');
               return {
                 candidateHead: rollup?.headSha || rollup?.headRefOid || '',
-                requiredChecks: Array.isArray(rollup?.statusCheckRollup) ? rollup.statusCheckRollup : [],
+                requiredChecks: resolveRollupRequiredChecks(rollup) ?? [],
                 mergeable: rollup?.mergeable,
                 mergeStateStatus: rollup?.mergeStateStatus,
                 prState: state,

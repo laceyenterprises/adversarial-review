@@ -1117,7 +1117,11 @@ const repo = '<<REPO>>';
 const prNumber = Number('<<PR_NUMBER>>');
 const expectedHead = process.env.POST_REMEDIATION_SHA;
 const rollup = await fetchPullRequestRollup(repo, prNumber);
-const checks = Array.isArray(rollup.statusCheckRollup) ? rollup.statusCheckRollup : [];
+const checks = Array.isArray(rollup.checks)
+  ? rollup.checks
+  : Array.isArray(rollup.statusCheckRollup)
+    ? rollup.statusCheckRollup
+    : [];
 const badChecks = checks.filter((check) => {
   const status = String(check.status || check.state || '').toUpperCase();
   const conclusion = String(check.conclusion || '').toUpperCase();

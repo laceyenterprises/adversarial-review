@@ -1324,6 +1324,42 @@ test('RVHAND-10: starvation recovery reports marker write failures without crash
   }
 });
 
+test('RVHAND-10: starvation recovery reports final marker write failures after promotion', async () => {
+  const rootDir = tempRoot();
+  try {
+    const identity = { repo: REPO, prNumber: 6536 };
+    for (let i = 0; i < DEFAULT_NO_PROGRESS_LANE_CAP + 2; i += 1) {
+      recordNoProgressLaneRun(rootDir, identity, {
+        headSha: HEAD_A,
+        fingerprint: 'starved-clean-pr-6536',
+        now: `t${i}`,
+        logger: silentLogger,
+      });
+    }
+    const markerWrites = [];
+    const warnings = [];
+    const result = await promoteStarvedNoProgressLaneLedgers(rootDir, {
+      now: 'recover-final-marker-failure',
+      logger: { ...silentLogger, warn: (...args) => warnings.push(args.join(' ')) },
+      writeFileAtomicImpl: (filePath, contents) => {
+        if (filePath.endsWith('.promotion.json')) {
+          markerWrites.push({ filePath, contents });
+          throw new Error('disk full writing marker');
+        }
+        writeFileSync(filePath, contents);
+      },
+    });
+
+    assert.equal(result.attempted, true);
+    assert.equal(result.promoted, 1);
+    assert.equal(result.reason, 'marker-write-failed');
+    assert.equal(markerWrites.length, 1);
+    assert.match(warnings.join('\n'), /failed to write starvation recovery marker/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('RVHAND-10: starvation recovery quarantines corrupt ledgers and writes campaign marker', async () => {
   const rootDir = tempRoot();
   try {

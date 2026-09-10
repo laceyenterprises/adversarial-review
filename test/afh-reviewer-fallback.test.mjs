@@ -537,8 +537,9 @@ test('AFH-04R: Claude runtime grounding preserves canonical provider fields', ()
       anthropic: Object.freeze({
         provider: 'anthropic',
         authPath: 'oauth',
-        state: 'ok',
-        hardVerdict: Object.freeze({ grounded: false, source: 'quota-snapshot' }),
+        state: 'exhausted',
+        hardGrounded: true,
+        hardVerdict: Object.freeze({ grounded: true, source: 'quota-snapshot' }),
         futureCanonicalField: 'keep-me',
       }),
     }),
@@ -552,10 +553,19 @@ test('AFH-04R: Claude runtime grounding preserves canonical provider fields', ()
 
   assert.deepEqual(
     runtimeGrounding.providers.anthropic.hardVerdict,
-    { grounded: false, source: 'quota-snapshot' },
+    { grounded: true, source: 'quota-snapshot' },
   );
   assert.equal(runtimeGrounding.providers.anthropic.futureCanonicalField, 'keep-me');
   assert.equal(runtimeGrounding.providers.anthropic.softGrounded, true);
+
+  const claudeStatus = reviewerModelGrounding(runtimeGrounding, 'claude');
+  assert.deepEqual(
+    claudeStatus.hardVerdict,
+    { grounded: true, source: 'quota-snapshot' },
+  );
+  assert.equal(claudeStatus.hardGrounded, true);
+  assert.equal(claudeStatus.authPath, 'oauth');
+  assert.equal(claudeStatus.futureCanonicalField, 'keep-me');
 });
 
 test('AFH-04R: Claude runtime probe still applies when fleet quota status is unavailable', async () => {

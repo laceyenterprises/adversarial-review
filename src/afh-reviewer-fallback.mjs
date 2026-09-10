@@ -513,6 +513,7 @@ export function reviewerModelGrounding(grounding, reviewerModel) {
   };
   if (model === 'claude' && grounding?.localRuntimeGrounding?.claude?.available === false) {
     const runtimeStatus = grounding.localRuntimeGrounding.claude;
+    const entry = grounding?.providers?.[provider] || base;
     const softVerdict = Object.freeze({
       grounded: true,
       reason: runtimeStatus.reason || CLAUDE_REVIEWER_RUNTIME_GROUNDING_REASON,
@@ -525,6 +526,7 @@ export function reviewerModelGrounding(grounding, reviewerModel) {
     });
     return {
       ...base,
+      ...entry,
       state: 'runtime-unavailable',
       softGrounded: true,
       grounded: true,

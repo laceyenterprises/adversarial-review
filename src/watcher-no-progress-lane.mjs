@@ -486,16 +486,24 @@ export async function promoteStarvedNoProgressLaneLedgers(rootDir, {
   }
 
   const totalPromoted = promoted + previouslyPromoted;
-  writeFileAtomicImpl(markerPath, `${JSON.stringify({
-    schemaVersion: 1,
-    promotionId,
-    promoted: totalPromoted,
-    promotedThisPass: promoted,
-    previouslyPromoted,
-    quarantined,
-    promotedAt: now,
-    reason: 'scheduler-starvation-recovery',
-  }, null, 2)}\n`);
+  try {
+    writeFileAtomicImpl(markerPath, `${JSON.stringify({
+      schemaVersion: 1,
+      promotionId,
+      promoted: totalPromoted,
+      promotedThisPass: promoted,
+      previouslyPromoted,
+      quarantined,
+      promotedAt: now,
+      reason: 'scheduler-starvation-recovery',
+    }, null, 2)}\n`);
+  } catch (err) {
+    logger?.warn?.(
+      `[watcher] no-progress lane: failed to write starvation recovery marker ` +
+        `${markerPath} (${err?.message || err})`,
+    );
+    return { attempted: true, promoted, previouslyPromoted, reason: 'marker-write-failed' };
+  }
   if (totalPromoted > 0) {
     logger?.warn?.(
       `[watcher] no-progress lane: promoted ${totalPromoted} slow-lane ledger(s) for ` +

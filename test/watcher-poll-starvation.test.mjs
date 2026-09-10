@@ -1011,6 +1011,40 @@ test('RVHAND-10: budget-deferred handlers do not record no-progress lane runs', 
   assert.deepEqual(recorded, [1, 2], 'only handlers that actually ran can count toward no-progress');
 });
 
+test('RVPRESS-01: posted-review phase warns on one-handler budget stall signature', async () => {
+  let clock = 0;
+  const warnings = [];
+  const logs = [];
+  const handlers = [1, 2, 3].map((prNumber) => ({
+    repoPath: REPO,
+    prNumber,
+    headSha: HEAD_A,
+    run: async () => {
+      clock += 100;
+    },
+  }));
+
+  const summary = await runPostedReviewHandlersFairly({
+    handlers,
+    budgetMs: 100,
+    minimumHandlerStartBudgetMs: 1,
+    nowMs: () => clock,
+    logger: {
+      log: (...args) => logs.push(args.join(' ')),
+      warn: (...args) => warnings.push(args.join(' ')),
+      error: () => {},
+    },
+  });
+
+  assert.equal(summary.queued, 3);
+  assert.equal(summary.ran, 1);
+  assert.equal(summary.deferredByBudget, 2);
+  assert.match(warnings.join('\n'), /posted-review phase stall signature/);
+  assert.match(warnings.join('\n'), /queued=3 ran=1/);
+  assert.match(warnings.join('\n'), /budget_deferred=2/);
+  assert.match(logs.join('\n'), /posted-review phase: queued=3 ran=1/);
+});
+
 test('RVHAND-10: timeout-deferred handlers do not record no-progress lane runs', async () => {
   const recorded = [];
   const summary = await runPostedReviewHandlersFairly({

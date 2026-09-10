@@ -121,7 +121,7 @@ function quarantineNoProgressLaneLedger(rootDir, filePath, error, {
     throw renameError;
   }
   logger?.warn?.(
-    `[watcher] no-progress lane: quarantined unreadable ledger during starvation recovery ` +
+    `[watcher] no-progress lane: quarantined corrupt ledger during starvation recovery ` +
       `${filePath} -> ${quarantinedPath} (${error?.message || error})`,
   );
   return quarantinedPath;
@@ -339,6 +339,7 @@ export function promoteStarvedNoProgressLaneLedgers(rootDir, {
   promotionId = STARVED_SLOW_LANE_PROMOTION_ID,
   now = new Date().toISOString(),
   logger = console,
+  mkdirSyncImpl = mkdirSync,
   readFileSyncImpl = readFileSync,
   renameSyncImpl = renameSync,
   writeFileAtomicImpl = writeFileAtomic,
@@ -354,15 +355,23 @@ export function promoteStarvedNoProgressLaneLedgers(rootDir, {
     entries = readdirSync(dir, { withFileTypes: true });
   } catch (err) {
     if (err?.code === 'ENOENT') {
-      mkdirSync(dir, { recursive: true });
-      writeFileAtomicImpl(markerPath, `${JSON.stringify({
-        schemaVersion: 1,
-        promotionId,
-        promoted: 0,
-        promotedAt: now,
-        reason: 'no-ledgers',
-      }, null, 2)}\n`);
-      return { attempted: true, promoted: 0, reason: 'no-ledgers' };
+      try {
+        mkdirSyncImpl(dir, { recursive: true });
+        writeFileAtomicImpl(markerPath, `${JSON.stringify({
+          schemaVersion: 1,
+          promotionId,
+          promoted: 0,
+          promotedAt: now,
+          reason: 'no-ledgers',
+        }, null, 2)}\n`);
+        return { attempted: true, promoted: 0, reason: 'no-ledgers' };
+      } catch (writeErr) {
+        logger?.warn?.(
+          `[watcher] no-progress lane: failed to write starvation recovery marker ` +
+            `${markerPath} (${writeErr?.message || writeErr})`,
+        );
+        return { attempted: false, promoted: 0, reason: 'marker-write-failed' };
+      }
     }
     logger?.warn?.(
       `[watcher] no-progress lane: failed to list ledgers for starvation recovery ` +
@@ -385,20 +394,28 @@ export function promoteStarvedNoProgressLaneLedgers(rootDir, {
       doc = JSON.parse(readFileSyncImpl(filePath, 'utf8'));
     } catch (err) {
       if (err?.code === 'ENOENT') continue;
-      try {
-        const quarantinedPath = quarantineNoProgressLaneLedger(rootDir, filePath, err, {
-          now,
-          logger,
-          renameSyncImpl,
-        });
-        if (quarantinedPath) {
-          quarantined += 1;
-          continue;
+      if (err instanceof SyntaxError) {
+        try {
+          const quarantinedPath = quarantineNoProgressLaneLedger(rootDir, filePath, err, {
+            now,
+            logger,
+            renameSyncImpl,
+          });
+          if (quarantinedPath) {
+            quarantined += 1;
+            continue;
+          }
+        } catch (quarantineErr) {
+          logger?.warn?.(
+            `[watcher] no-progress lane: failed to quarantine corrupt ledger during starvation recovery ` +
+              `${filePath} (${quarantineErr?.message || quarantineErr})`,
+          );
+          hadReadErrors = true;
         }
-      } catch (quarantineErr) {
+      } else {
         logger?.warn?.(
-          `[watcher] no-progress lane: failed to quarantine unreadable ledger during starvation recovery ` +
-            `${filePath} (${quarantineErr?.message || quarantineErr})`,
+          `[watcher] no-progress lane: transient read error during starvation recovery ` +
+            `${filePath} (${err?.message || err})`,
         );
         hadReadErrors = true;
       }

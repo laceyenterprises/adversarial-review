@@ -1269,6 +1269,27 @@ test('RVHAND-10: starvation recovery promotes existing slow-lane ledgers once', 
   }
 });
 
+test('RVHAND-10: starvation recovery reports marker write failures without crashing', () => {
+  const rootDir = tempRoot();
+  try {
+    const warnings = [];
+    const result = promoteStarvedNoProgressLaneLedgers(rootDir, {
+      now: 'recover-marker-failure',
+      logger: { ...silentLogger, warn: (...args) => warnings.push(args.join(' ')) },
+      mkdirSyncImpl: () => {
+        throw new Error('permission denied creating no-progress lane');
+      },
+    });
+
+    assert.equal(result.attempted, false);
+    assert.equal(result.promoted, 0);
+    assert.equal(result.reason, 'marker-write-failed');
+    assert.match(warnings.join('\n'), /failed to write starvation recovery marker/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('RVHAND-10: starvation recovery quarantines corrupt ledgers and writes campaign marker', () => {
   const rootDir = tempRoot();
   try {
@@ -1306,6 +1327,48 @@ test('RVHAND-10: starvation recovery quarantines corrupt ledgers and writes camp
     assert.equal(second.attempted, false);
     assert.equal(second.promoted, 0);
     assert.equal(second.reason, 'already-promoted');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('RVHAND-10: starvation recovery leaves transient read failures for the next tick', () => {
+  const rootDir = tempRoot();
+  try {
+    const identity = { repo: REPO, prNumber: 6535 };
+    for (let i = 0; i < DEFAULT_NO_PROGRESS_LANE_CAP + 2; i += 1) {
+      recordNoProgressLaneRun(rootDir, identity, {
+        headSha: HEAD_A,
+        fingerprint: 'starved-clean-pr',
+        now: `t${i}`,
+        logger: silentLogger,
+      });
+    }
+    assert.equal(readNoProgressLane(rootDir, identity, { logger: silentLogger }).lane, LANE_SLOW);
+    const laneDir = join(rootDir, 'data', 'watcher-no-progress-lane');
+    const ledgerPath = noProgressLaneFilePath(rootDir, identity);
+    const warnings = [];
+
+    const first = promoteStarvedNoProgressLaneLedgers(rootDir, {
+      now: 'recover-transient-read',
+      logger: { ...silentLogger, warn: (...args) => warnings.push(args.join(' ')) },
+      readFileSyncImpl: (filePath, encoding) => {
+        if (filePath === ledgerPath) {
+          const err = new Error('too many open files');
+          err.code = 'EMFILE';
+          throw err;
+        }
+        return readFileSync(filePath, encoding);
+      },
+    });
+
+    assert.equal(first.attempted, true);
+    assert.equal(first.promoted, 0);
+    assert.equal(first.reason, 'ledger-read-failed');
+    assert.equal(existsSync(ledgerPath), true);
+    assert.equal(existsSync(join(laneDir, 'quarantine')), false);
+    assert.equal(existsSync(join(laneDir, 'rvhand-10-starved-slow-lane-recovery.promotion.json')), false);
+    assert.match(warnings.join('\n'), /transient read error/);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

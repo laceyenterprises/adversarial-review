@@ -527,6 +527,37 @@ test('AFH-04R: Claude launchctl denial grounds the local Claude reviewer and rou
   assert.equal(route.afhReviewerFallback.lastResort, false);
 });
 
+test('AFH-04R: Claude runtime grounding preserves canonical provider fields', () => {
+  const grounding = Object.freeze({
+    available: true,
+    reason: 'ok',
+    error: null,
+    verdictPresent: true,
+    providers: Object.freeze({
+      anthropic: Object.freeze({
+        provider: 'anthropic',
+        authPath: 'oauth',
+        state: 'ok',
+        hardVerdict: Object.freeze({ grounded: false, source: 'quota-snapshot' }),
+        futureCanonicalField: 'keep-me',
+      }),
+    }),
+  });
+
+  const runtimeGrounding = applyClaudeReviewerRuntimeGrounding(grounding, {
+    available: false,
+    reason: CLAUDE_REVIEWER_RUNTIME_GROUNDING_REASON,
+    error: 'Could not switch to audit session 0x18757: 1: Operation not permitted',
+  });
+
+  assert.deepEqual(
+    runtimeGrounding.providers.anthropic.hardVerdict,
+    { grounded: false, source: 'quota-snapshot' },
+  );
+  assert.equal(runtimeGrounding.providers.anthropic.futureCanonicalField, 'keep-me');
+  assert.equal(runtimeGrounding.providers.anthropic.softGrounded, true);
+});
+
 test('AFH-04R: Claude runtime probe still applies when fleet quota status is unavailable', async () => {
   const grounding = await readAfhReviewerGrounding({
     hqPath: 'hq',

@@ -204,6 +204,7 @@ export function applyClaudeReviewerRuntimeGrounding(grounding, runtimeStatus = n
   const providers = { ...(base.providers || {}) };
   const previous = providers.anthropic || {};
   providers.anthropic = Object.freeze({
+    ...previous,
     provider: 'anthropic',
     authPath: previous.authPath || 'oauth',
     state: previous.state || 'runtime-unavailable',

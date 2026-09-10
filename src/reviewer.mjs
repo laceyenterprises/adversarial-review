@@ -1675,10 +1675,9 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
             }
           }
           if (isRetryableGhTransportError(err) && !authRetryable) {
-            const canReconcileAmbiguousWrite = reviewerHeadSha || appSelfLogin;
-            if (!canReconcileAmbiguousWrite) {
+            if (!appSelfLogin) {
               throw new AmbiguousReviewerPostUnreconciledError(
-                `Ambiguous GitHub review post for ${repo}#${prNumber} cannot be safely retried without an exact head or reviewer login`,
+                `Ambiguous GitHub review post for ${repo}#${prNumber} cannot be safely retried without reviewer login proof`,
                 { cause: err }
               );
             }

@@ -279,6 +279,7 @@ test('postGitHubReview binds a known reviewed snapshot to GitHub commit_id', asy
     {
       env: {
         GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
+        GH_CODEX_REVIEWER_TOKEN_BROKER_PROVIDER: 'github-app-lacey-codex-reviewer',
         PATH: '/opt/homebrew/bin:/usr/bin',
         HOME: '/Users/test',
       },
@@ -521,6 +522,7 @@ test('postGitHubReview maps exact-head request-changes verdicts to blocking GitH
     {
       env: {
         GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
+        GH_CODEX_REVIEWER_TOKEN_BROKER_PROVIDER: 'github-app-lacey-codex-reviewer',
         PATH: '/opt/homebrew/bin:/usr/bin',
         HOME: '/Users/test',
       },
@@ -553,6 +555,7 @@ test('postGitHubReview parses exact-head JSON after gh stdout warnings', async (
     {
       env: {
         GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
+        GH_CODEX_REVIEWER_TOKEN_BROKER_PROVIDER: 'github-app-lacey-codex-reviewer',
         PATH: '/opt/homebrew/bin:/usr/bin',
         HOME: '/Users/test',
       },
@@ -591,6 +594,7 @@ test('postGitHubReview retries transient exact-head gh transport failure', async
     {
       env: {
         GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
+        GH_CODEX_REVIEWER_TOKEN_BROKER_PROVIDER: 'github-app-lacey-codex-reviewer',
         PATH: '/opt/homebrew/bin:/usr/bin',
         HOME: '/Users/test',
       },
@@ -636,6 +640,7 @@ test('postGitHubReview retries transient exact-head GitHub HTTP/2 GOAWAY 500', a
     {
       env: {
         GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
+        GH_CODEX_REVIEWER_TOKEN_BROKER_PROVIDER: 'github-app-lacey-codex-reviewer',
         PATH: '/opt/homebrew/bin:/usr/bin',
         HOME: '/Users/test',
       },
@@ -688,6 +693,7 @@ test('postGitHubReview suppresses duplicate retry when an ambiguous exact-head w
     {
       env: {
         GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
+        GH_CODEX_REVIEWER_TOKEN_BROKER_PROVIDER: 'github-app-lacey-codex-reviewer',
         PATH: '/opt/homebrew/bin:/usr/bin',
         HOME: '/Users/test',
       },
@@ -748,6 +754,7 @@ test('postGitHubReview reconciles ambiguous exact-head writes across slurped rev
     {
       env: {
         GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
+        GH_CODEX_REVIEWER_TOKEN_BROKER_PROVIDER: 'github-app-lacey-codex-reviewer',
         PATH: '/opt/homebrew/bin:/usr/bin',
         HOME: '/Users/test',
       },
@@ -770,6 +777,65 @@ test('postGitHubReview reconciles ambiguous exact-head writes across slurped rev
     '--paginate',
     '--slurp',
   ]);
+});
+
+test('postGitHubReview does not suppress ambiguous exact-head retry for another reviewer login', async () => {
+  const calls = [];
+  let postCount = 0;
+  const result = await postGitHubReview(
+    'laceyenterprises/demo',
+    42,
+    'review body',
+    'GH_CODEX_REVIEWER_TOKEN',
+    async (command, args, options = {}) => {
+      calls.push({ command, args, options });
+      const isPost = args.includes('--method') && args.includes('POST');
+      if (isPost) {
+        postCount += 1;
+        if (postCount === 1) {
+          const err = new Error('HTTP 503 Service Unavailable');
+          err.status = 503;
+          throw err;
+        }
+        return {
+          stdout: JSON.stringify({
+            id: 4242,
+            commit_id: 'reviewed-head-sha',
+          }),
+        };
+      }
+      return {
+        stdout: JSON.stringify([
+          {
+            id: 31337,
+            commit_id: 'reviewed-head-sha',
+            state: 'COMMENTED',
+            body: 'review body',
+            user: { login: 'some-other-reviewer[bot]' },
+            submitted_at: '2026-09-10T17:35:00Z',
+          },
+        ]),
+      };
+    },
+    {
+      env: {
+        GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
+        GH_CODEX_REVIEWER_TOKEN_BROKER_PROVIDER: 'github-app-lacey-codex-reviewer',
+        PATH: '/opt/homebrew/bin:/usr/bin',
+        HOME: '/Users/test',
+      },
+      reviewerIdentity: 'codex-reviewer-lacey',
+      reviewerHeadSha: 'reviewed-head-sha',
+      prepareReviewWrite: async () => {},
+      log: { warn() {} },
+    }
+  );
+
+  assert.deepEqual(result, {
+    reviewArtifact: { id: '4242', commitId: 'reviewed-head-sha' },
+  });
+  assert.equal(calls.filter((call) => call.args.includes('--method') && call.args.includes('POST')).length, 2);
+  assert.equal(calls.filter((call) => call.args.includes('--paginate')).length, 1);
 });
 
 test('postGitHubReview returns null exact-head artifact when response validation fails', async () => {

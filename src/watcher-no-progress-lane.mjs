@@ -47,8 +47,9 @@
 // nothing for this PR.
 
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
+import { setImmediate as setImmediatePromise } from 'node:timers/promises';
 
 import { writeFileAtomic } from './atomic-write.mjs';
 
@@ -71,6 +72,8 @@ export const DEFAULT_OPERATOR_BLOCKED_ALERT_NO_PROGRESS_TICKS = 6;
 
 const NO_PROGRESS_LANE_SCHEMA_VERSION = 1;
 const STALLED_EVENT_SCHEMA_VERSION = 1;
+const STARVED_SLOW_LANE_PROMOTION_ID = 'rvhand-10-starved-slow-lane-recovery';
+const MAX_PROMOTION_HISTORY_ENTRIES = 10;
 
 export const LANE_ACTIVE = 'active';
 export const LANE_SLOW = 'slow';
@@ -83,6 +86,10 @@ function noProgressLaneDir(rootDir) {
   return join(rootDir, 'data', 'watcher-no-progress-lane');
 }
 
+function noProgressLaneQuarantineDir(rootDir) {
+  return join(noProgressLaneDir(rootDir), 'quarantine');
+}
+
 function sanitizePathSegment(value) {
   return String(value ?? '').replace(/[^A-Za-z0-9._-]/g, '-');
 }
@@ -93,6 +100,33 @@ export function noProgressLaneFilePath(rootDir, { repo, prNumber } = {}) {
   // series without leaking one file per head — same shape as
   // `amaRetainLoopCapFilePath`.
   return join(noProgressLaneDir(rootDir), `${safeRepo}-pr-${Number(prNumber)}.json`);
+}
+
+function quarantineNoProgressLaneLedger(rootDir, filePath, error, {
+  now,
+  logger = console,
+  mkdirSyncImpl = mkdirSync,
+  renameSyncImpl = renameSync,
+} = {}) {
+  const dir = noProgressLaneQuarantineDir(rootDir);
+  mkdirSyncImpl(dir, { recursive: true });
+  const stamp = sanitizePathSegment(now || new Date().toISOString());
+  const originalName = basename(filePath);
+  let quarantinedPath = join(dir, `${stamp}-${originalName}`);
+  for (let attempt = 1; existsSync(quarantinedPath) && attempt < 1000; attempt += 1) {
+    quarantinedPath = join(dir, `${stamp}-${attempt}-${originalName}`);
+  }
+  try {
+    renameSyncImpl(filePath, quarantinedPath);
+  } catch (renameError) {
+    if (renameError?.code === 'ENOENT') return null;
+    throw renameError;
+  }
+  logger?.warn?.(
+    `[watcher] no-progress lane: quarantined corrupt ledger during starvation recovery ` +
+      `${filePath} -> ${quarantinedPath} (${error?.message || error})`,
+  );
+  return quarantinedPath;
 }
 
 function normalizeHead(value) {
@@ -286,6 +320,207 @@ function writeLedger(rootDir, identity, doc) {
   return doc;
 }
 
+function starvedPromotionMarkerPath(rootDir, promotionId = STARVED_SLOW_LANE_PROMOTION_ID) {
+  return join(noProgressLaneDir(rootDir), `${sanitizePathSegment(promotionId)}.promotion.json`);
+}
+
+function promotionIdOf(entry) {
+  return typeof entry?.promotionId === 'string' && entry.promotionId.length > 0
+    ? entry.promotionId
+    : null;
+}
+
+function promotionHistoryWith(doc, nextPromotion) {
+  const history = Array.isArray(doc?.promotionHistory)
+    ? doc.promotionHistory.filter((entry) => entry && typeof entry === 'object')
+    : [];
+  if (doc?.promotedFrom && typeof doc.promotedFrom === 'object') {
+    const priorPromotionId = promotionIdOf(doc.promotedFrom);
+    const alreadyRecorded = priorPromotionId
+      ? history.some((entry) => promotionIdOf(entry) === priorPromotionId)
+      : false;
+    if (!alreadyRecorded) history.push(doc.promotedFrom);
+  }
+  history.push(nextPromotion);
+  return history.slice(-MAX_PROMOTION_HISTORY_ENTRIES);
+}
+
+export async function promoteStarvedNoProgressLaneLedgers(rootDir, {
+  promotionId = STARVED_SLOW_LANE_PROMOTION_ID,
+  now = new Date().toISOString(),
+  logger = console,
+  mkdirSyncImpl = mkdirSync,
+  readFileSyncImpl = readFileSync,
+  renameSyncImpl = renameSync,
+  writeFileAtomicImpl = writeFileAtomic,
+  yieldEveryLedgers = 100,
+  yieldImpl = setImmediatePromise,
+} = {}) {
+  const markerPath = starvedPromotionMarkerPath(rootDir, promotionId);
+  if (existsSync(markerPath)) {
+    return { attempted: false, promoted: 0, reason: 'already-promoted' };
+  }
+
+  const dir = noProgressLaneDir(rootDir);
+  let entries = [];
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch (err) {
+    if (err?.code === 'ENOENT') {
+      try {
+        mkdirSyncImpl(dir, { recursive: true });
+        writeFileAtomicImpl(markerPath, `${JSON.stringify({
+          schemaVersion: 1,
+          promotionId,
+          promoted: 0,
+          promotedAt: now,
+          reason: 'no-ledgers',
+        }, null, 2)}\n`);
+        return { attempted: true, promoted: 0, reason: 'no-ledgers' };
+      } catch (writeErr) {
+        logger?.warn?.(
+          `[watcher] no-progress lane: failed to write starvation recovery marker ` +
+            `${markerPath} (${writeErr?.message || writeErr})`,
+        );
+        return { attempted: false, promoted: 0, reason: 'marker-write-failed' };
+      }
+    }
+    logger?.warn?.(
+      `[watcher] no-progress lane: failed to list ledgers for starvation recovery ` +
+        `(${err?.code || err?.message || 'unknown'})`,
+    );
+    return { attempted: false, promoted: 0, reason: 'list-failed' };
+  }
+
+  let promoted = 0;
+  let previouslyPromoted = 0;
+  let quarantined = 0;
+  let hadReadErrors = false;
+  let hadWriteErrors = false;
+  const yieldEvery = positiveIntOr(yieldEveryLedgers, 100);
+  const maybeYield = typeof yieldImpl === 'function' ? yieldImpl : setImmediatePromise;
+  let scanned = 0;
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.json') || entry.name.endsWith('.promotion.json')) {
+      continue;
+    }
+    scanned += 1;
+    if (scanned > 1 && (scanned - 1) % yieldEvery === 0) {
+      await maybeYield();
+    }
+    const filePath = join(dir, entry.name);
+    let doc = null;
+    try {
+      doc = JSON.parse(readFileSyncImpl(filePath, 'utf8'));
+    } catch (err) {
+      if (err?.code === 'ENOENT') continue;
+      if (err instanceof SyntaxError) {
+        try {
+          const quarantinedPath = quarantineNoProgressLaneLedger(rootDir, filePath, err, {
+            now,
+            logger,
+            mkdirSyncImpl,
+            renameSyncImpl,
+          });
+          if (quarantinedPath) {
+            quarantined += 1;
+            continue;
+          }
+        } catch (quarantineErr) {
+          logger?.warn?.(
+            `[watcher] no-progress lane: failed to quarantine corrupt ledger during starvation recovery ` +
+              `${filePath} (${quarantineErr?.message || quarantineErr})`,
+          );
+          hadReadErrors = true;
+        }
+      } else {
+        logger?.warn?.(
+          `[watcher] no-progress lane: transient read error during starvation recovery ` +
+            `${filePath} (${err?.message || err})`,
+        );
+        hadReadErrors = true;
+      }
+      continue;
+    }
+    if (doc?.lane !== LANE_SLOW) {
+      if (doc?.lane === LANE_ACTIVE && doc?.promotedFrom?.promotionId === promotionId) {
+        previouslyPromoted += 1;
+      }
+      continue;
+    }
+    const promotedFrom = {
+      lane: doc.lane,
+      noProgressTicks: normalizeCount(doc.noProgressTicks),
+      skippedTicks: normalizeCount(doc.skippedTicks),
+      promotionId,
+      promotedAt: now,
+    };
+    try {
+      writeFileAtomicImpl(filePath, `${JSON.stringify({
+        ...doc,
+        schemaVersion: NO_PROGRESS_LANE_SCHEMA_VERSION,
+        lane: LANE_ACTIVE,
+        noProgressTicks: 0,
+        skippedTicks: 0,
+        firstNoProgressAt: null,
+        promotedFrom,
+        promotionHistory: promotionHistoryWith(doc, promotedFrom),
+        updatedAt: now,
+      }, null, 2)}\n`);
+      promoted += 1;
+    } catch (err) {
+      logger?.warn?.(
+        `[watcher] no-progress lane: failed to write promoted ledger during starvation recovery ` +
+          `${filePath} (${err?.message || err})`,
+      );
+      hadWriteErrors = true;
+    }
+  }
+
+  if (hadReadErrors || hadWriteErrors) {
+    const errorLabel = hadReadErrors && hadWriteErrors
+      ? 'read/write errors'
+      : hadReadErrors ? 'read errors' : 'write errors';
+    logger?.warn?.(
+      `[watcher] no-progress lane: starvation recovery promoted ${promoted} readable ` +
+        `ledger(s) but left campaign marker unwritten after ${errorLabel} (${promotionId})`,
+    );
+    return {
+      attempted: true,
+      promoted,
+      previouslyPromoted,
+      reason: hadReadErrors ? 'ledger-read-failed' : 'ledger-write-failed',
+    };
+  }
+
+  const totalPromoted = promoted + previouslyPromoted;
+  try {
+    writeFileAtomicImpl(markerPath, `${JSON.stringify({
+      schemaVersion: 1,
+      promotionId,
+      promoted: totalPromoted,
+      promotedThisPass: promoted,
+      previouslyPromoted,
+      quarantined,
+      promotedAt: now,
+      reason: 'scheduler-starvation-recovery',
+    }, null, 2)}\n`);
+  } catch (err) {
+    logger?.warn?.(
+      `[watcher] no-progress lane: failed to write starvation recovery marker ` +
+        `${markerPath} (${err?.message || err})`,
+    );
+    return { attempted: true, promoted, previouslyPromoted, reason: 'marker-write-failed' };
+  }
+  if (totalPromoted > 0) {
+    logger?.warn?.(
+      `[watcher] no-progress lane: promoted ${totalPromoted} slow-lane ledger(s) for ` +
+        `scheduler starvation recovery (${promotionId})`,
+    );
+  }
+  return { attempted: true, promoted, previouslyPromoted, reason: 'scheduler-starvation-recovery' };
+}
+
 /**
  * Backoff spacing for a demoted PR, in ticks. Starts at the cap, then doubles
  * per no-progress tick and saturates at `maxBackoffTicks`, so the schedule is
@@ -451,6 +686,12 @@ export function recordNoProgressLaneRun(rootDir, identity, {
   const priorStalledEvent = sameFingerprint && existing?.stalledEvent
     ? existing.stalledEvent
     : null;
+  const priorPromotedFrom = sameHead && existing?.promotedFrom && typeof existing.promotedFrom === 'object'
+    ? existing.promotedFrom
+    : null;
+  const priorPromotionHistory = sameHead && Array.isArray(existing?.promotionHistory)
+    ? existing.promotionHistory.filter((entry) => entry && typeof entry === 'object')
+    : [];
   writeLedger(rootDir, identity, {
     schemaVersion: NO_PROGRESS_LANE_SCHEMA_VERSION,
     repo: identity?.repo ?? null,
@@ -464,6 +705,8 @@ export function recordNoProgressLaneRun(rootDir, identity, {
     lane,
     firstNoProgressAt,
     ...(priorStalledEvent ? { stalledEvent: priorStalledEvent } : {}),
+    ...(priorPromotedFrom ? { promotedFrom: priorPromotedFrom } : {}),
+    ...(priorPromotionHistory.length > 0 ? { promotionHistory: priorPromotionHistory } : {}),
     updatedAt: now || null,
   });
   return {

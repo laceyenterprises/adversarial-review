@@ -10,6 +10,7 @@ import {
 import { createLogChangeGate } from '../src/log-change-gate.mjs';
 import {
   DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT,
+  DEFAULT_POSTED_REVIEW_PHASE_HANDLER_CAPACITY,
   derivePostedReviewExpensiveStepBudgetMs,
   resolvePostedReviewHandlerHeadroomMs,
   resolvePostedReviewHandlerTimeoutMs,
@@ -80,15 +81,26 @@ test('RVHAND-06: bounded posted-review step budgets fit under the handler cap', 
 
 test('RVHAND-10: posted-review HAM step budget admits observed live tails without exceeding the handler cap', () => {
   const handlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs({});
+  const phaseBudgetMs = resolvePostedReviewPhaseBudgetMs({});
   const headroomMs = resolvePostedReviewHandlerHeadroomMs({});
   const deadlineMs = resolveMergeAgentCoexistenceStepDeadlineMs({});
 
   assert.equal(handlerTimeoutMs, 180_000);
+  assert.equal(phaseBudgetMs, handlerTimeoutMs * DEFAULT_POSTED_REVIEW_PHASE_HANDLER_CAPACITY);
   assert.equal(deadlineMs, 87_500);
   assert.ok(deadlineMs > 80_000, 'live HAM candidate/coexistence tails have exceeded 75s under load');
   assert.ok(
     (deadlineMs * DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT) + headroomMs <= handlerTimeoutMs,
     'the two bounded expensive steps must still fit inside one handler watchdog',
+  );
+});
+
+test('RVHAND-10: invalid posted-review phase budget falls back to capacity-expanded default', () => {
+  const env = { ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS: 'invalid' };
+  const handlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs(env);
+  assert.equal(
+    resolvePostedReviewPhaseBudgetMs(env),
+    handlerTimeoutMs * DEFAULT_POSTED_REVIEW_PHASE_HANDLER_CAPACITY,
   );
 });
 
@@ -526,4 +538,23 @@ test('handlePostedReviewRow: await-operator returns the AMA closure result', asy
   assert.equal(result.outcome, 'await-operator');
   assert.equal(result.amaClosureResult, amaClosureResult);
   assert.match(logs.at(-1), /not-eligible:blocking-findings-present/);
+});
+
+test('handlePostedReviewRow: terminal PR result returns AMA closure details', async () => {
+  const amaClosureResult = {
+    reason: 'pr-merged',
+    daemonCleanMerge: { merged: true, disposition: 'merged' },
+  };
+  const { args } = baseArgs({
+    resolveMergeAgentCoexistenceForWatcherImpl: async () => ({
+      outcome: 'pr-terminal',
+      terminalReason: 'merged',
+      amaClosureResult,
+    }),
+  });
+
+  const result = await handlePostedReviewRow(args);
+
+  assert.equal(result.prTerminal, true);
+  assert.equal(result.amaClosureResult, amaClosureResult);
 });

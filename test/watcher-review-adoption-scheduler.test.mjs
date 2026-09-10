@@ -239,6 +239,7 @@ test('watcher caps posted-review phase budget when reviewer dispatch is under pr
         deferredByBudget: 0,
         deferredAfterTimeout: 0,
         continuedAfterTimeout: 0,
+        daemonCleanMerges: 1,
         deferred: [],
       };
     },
@@ -265,6 +266,40 @@ test('watcher caps posted-review phase budget when reviewer dispatch is under pr
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /posted-review phase budget capped under reviewer pressure/);
   assert.match(warnings[0], /dispatched=1 deferred=2/);
+});
+
+test('RVHAND-10: watcher stays quiet when pending handlers run but clean merges stay at zero', async () => {
+  const warnings = [];
+
+  await runQueuedReviewAdoptionPhase({
+    drainReviewerDispatchCandidates: async () => ({ dispatched: 0, deferred: 0 }),
+    retryPendingMergeAgentLifecycleCleanupsImpl: async () => {},
+    syncPRLifecycleImpl: async () => {},
+    retryPendingTriageSyncsImpl: async () => ({ attempted: 0, synced: 0, pending: 0 }),
+    retryPendingDagAutowalkOnMergeImpl: async () => {},
+    retryPendingMergeCloseoutsImpl: async () => {},
+    retryPendingRetriggerAckCommentsImpl: async () => ({ attempted: 0, posted: 0 }),
+    retryPendingRetriggerReviewAckCommentsImpl: async () => ({ attempted: 0, posted: 0 }),
+    runPostedReviewHandlersFairlyImpl: async () => ({
+      queued: 4,
+      ran: 4,
+      failed: 0,
+      timedOut: 0,
+      skippedByLane: 0,
+      deferredByBudget: 0,
+      deferredAfterTimeout: 0,
+      continuedAfterTimeout: 0,
+      daemonCleanMerges: 0,
+      deferred: [],
+    }),
+    logger: {
+      log: () => {},
+      warn: (...args) => warnings.push(args.join(' ')),
+      error: () => {},
+    },
+  });
+
+  assert.equal(warnings.length, 0);
 });
 
 test('watcher keeps normal posted-review phase budget when reviewer drain is idle', async () => {

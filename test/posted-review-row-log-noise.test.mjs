@@ -791,6 +791,41 @@ test('handlePostedReviewRow: skips stale posted snapshot when the row is no long
   assert.match(logs.join('\n'), /snapshot no longer current/);
 });
 
+test('handlePostedReviewRow: operator-skip-label hard-stops merge closeout', async () => {
+  let fetched = false;
+  let resolvedCoexistence = false;
+  const gateDecision = {
+    state: 'failure',
+    reason: 'operator-skip-label',
+    description: 'Explicit operator skip label blocks adversarial gate.',
+  };
+  const { args, logs } = baseArgs({
+    projectGateStatusSafe: async () => ({ decision: gateDecision }),
+    fetchMergeAgentCandidateImpl: async () => {
+      fetched = true;
+      return { merged: false, prState: 'open' };
+    },
+    resolveMergeAgentCoexistenceForWatcherImpl: async () => {
+      resolvedCoexistence = true;
+      return {
+        outcome: 'ama-pending',
+        amaClosureResult: { reason: 'daemon-failed-closed', workerClass: 'hammer' },
+      };
+    },
+  });
+
+  const result = await handlePostedReviewRow(args);
+
+  assert.equal(fetched, false);
+  assert.equal(resolvedCoexistence, false);
+  assert.equal(result.handled, true);
+  assert.equal(result.outcome, 'operator-skip-label');
+  assert.equal(result.reason, 'operator-skip-label');
+  assert.equal(result.amaClosureResult.skipMergeAgent, true);
+  assert.deepEqual(result.gateDecision, gateDecision);
+  assert.match(logs.join('\n'), /operator-skip-label blocks merge\/hammer closeout/);
+});
+
 test('handlePostedReviewRow: rechecks review row after candidate fetch before merge work', async () => {
   let reads = 0;
   let fetched = false;

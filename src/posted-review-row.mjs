@@ -343,6 +343,25 @@ export async function handlePostedReviewRow({
   const gateProjection = await timePostedReviewStep(
     'projectGateStatusSafe', stepKey, logger, () => projectGateStatusSafe(existing),
   );
+  const gateDecision = gateProjection?.decision || null;
+  if (gateDecision?.reason === 'operator-skip-label') {
+    logger?.log?.(
+      `[watcher] posted-review handler held for ${repoPath}#${prNumber}: ` +
+        'operator-skip-label blocks merge/hammer closeout for this tick',
+    );
+    return {
+      handled: true,
+      outcome: 'operator-skip-label',
+      reason: 'operator-skip-label',
+      gateDecision,
+      amaClosureResult: {
+        dispatched: false,
+        skipMergeAgent: true,
+        reason: 'operator-skip-label',
+        namedReason: 'operator-skip-label',
+      },
+    };
+  }
 
   try {
     const latestPostedReviewBody = latestPostedReviewBodyFinder(rootDir, { repo: repoPath, prNumber });

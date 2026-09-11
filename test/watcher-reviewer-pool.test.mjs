@@ -9,6 +9,7 @@ import {
   reserveReviewerMemoryAdmission,
   runBoundedReviewerDispatchQueue,
   sortReviewerDispatchCandidates,
+  reviewerDispatchIsFirstPass,
 } from '../src/watcher-reviewer-pool.mjs';
 import {
   PROJECTED_HEADROOM_FLOOR_MB,
@@ -267,6 +268,28 @@ test('a claimed-but-unposted review row still counts as first pass', () => {
   assert.deepEqual(sorted.map((item) => item.prNumber), [80, 10]);
 });
 
+test('pending rereviews do not masquerade as first-pass work when posted_at is cleared', () => {
+  const pendingRereview = {
+    posted_at: null,
+    rereview_requested_at: '2026-05-06T00:00:00.000Z',
+    reviewed_at: '2026-05-01T00:00:00.000Z',
+  };
+  const firstPassCandidate = candidate(90, async () => {}, '2026-05-09T00:00:00.000Z');
+  const rereviewCandidate = candidate(10, async () => {}, '2026-05-01T00:00:00.000Z', {
+    current: pendingRereview,
+  });
+
+  assert.equal(reviewerDispatchIsFirstPass(firstPassCandidate), true);
+  assert.equal(reviewerDispatchIsFirstPass(rereviewCandidate), false);
+
+  const sorted = sortReviewerDispatchCandidates([
+    rereviewCandidate,
+    firstPassCandidate,
+  ]);
+
+  assert.deepEqual(sorted.map((item) => item.prNumber), [90, 10]);
+});
+
 test('reviewer dispatch tie-breaks equal ages by repo path before PR number', () => {
   const createdAt = '2026-05-01T00:00:00.000Z';
   const sorted = sortReviewerDispatchCandidates([
@@ -360,7 +383,7 @@ test('reviewer dispatch sorts re-reviews in the same FIFO lane by original PR ag
     }),
   ]);
 
-  assert.deepEqual(sorted.map((item) => item.prNumber), [10, 40, 50]);
+  assert.deepEqual(sorted.map((item) => item.prNumber), [40, 10, 50]);
 });
 
 test('reviewer dispatch logs wait time and warns beyond threshold', async () => {

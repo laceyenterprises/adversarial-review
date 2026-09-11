@@ -332,6 +332,10 @@ if [[ "\${1:-}" == "api" && "\${2:-}" =~ ^repos/[^/]+/[^/]+/commits/(.+)$ ]]; th
   printf '{"sha":"%s","message":"Fixture commit","committerLogin":null,"authorLogin":null,"committerName":"Fixture Worker","committerEmail":"fixture@example.com"}\\n' "$sha"
   exit 0
 fi
+if [[ "\${1:-}" == "pr" && "\${2:-}" == "view" ]]; then
+  printf '{"headRefOid":null,"statusCheckRollup":[{"__typename":"CheckRun","name":"fixture-ci","conclusion":"SUCCESS"}]}\\n'
+  exit 0
+fi
 echo "unexpected gh fixture call: $*" >&2
 exit 1
 `);

@@ -243,8 +243,11 @@ function reviewerDispatchSortTimeMs(candidate) {
 function reviewerDispatchIsFirstPass(candidate) {
   const current = candidate?.current;
   if (!current) return true;
-  // A row can exist before anything is posted (claimed, retrying, failed).
-  // `posted_at` is what marks a review actually delivered to the PR.
+  // Rereview requests clear posted_at while waiting for the next reviewer pass,
+  // so rereview_requested_at owns the lane decision for those pending rows.
+  if (current.rereview_requested_at) return false;
+  // A non-rereview row can exist before anything is posted (claimed, retrying,
+  // failed). `posted_at` is what marks a first-pass review as delivered.
   return !current.posted_at;
 }
 

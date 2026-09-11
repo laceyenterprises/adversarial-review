@@ -620,6 +620,49 @@ test('buildRemediationPrompt carries job context and follow-up operating rules',
   assert.match(prompt, /git status --porcelain --untracked-files=all/);
 });
 
+test('buildRemediationPrompt turns CI-regression retries into a concrete remediation objective', () => {
+  const prompt = buildRemediationPrompt(makeJob({
+    remediationPlan: {
+      mode: 'bounded-manual-rounds',
+      maxRounds: 3,
+      currentRound: 1,
+      rounds: [],
+      retryHistory: [{
+        retryReason: 'Remediation introduced or left failed CI.',
+        retryMetadata: {
+          code: 'ci-regression',
+          revisionRef: 'abc123def456',
+          failedChecks: [
+            {
+              name: 'repo-guards',
+              state: 'FAILURE',
+              detailsUrl: 'https://github.example/repo-guards',
+            },
+          ],
+          pendingChecks: [
+            {
+              name: 'fast-python-guards',
+              state: 'IN_PROGRESS',
+            },
+          ],
+        },
+      }],
+    },
+  }), {
+    template: 'You are a remediation worker.',
+    ...testReplyContext(),
+  });
+
+  assert.match(prompt, /Trusted Previous Remediation Attempt/);
+  assert.match(prompt, /CI Regression Remediation Objective/);
+  assert.match(prompt, /previous remediation attempt introduced or left failed external CI/);
+  assert.match(prompt, /PR head `abc123def456`/);
+  assert.match(prompt, /repo-guards=FAILURE/);
+  assert.match(prompt, /Use each failed check's `detailsUrl` from the trusted JSON metadata/);
+  assert.match(prompt, /fast-python-guards=IN_PROGRESS/);
+  assert.match(prompt, /Do not request re-review until the PR's current head has no failed external CI checks/);
+});
+
 test('buildRemediationPrompt uses the job base branch in the rebase and contamination audit contract', () => {
   const prompt = buildRemediationPrompt(makeJob({
     baseBranch: 'release/2026.05',

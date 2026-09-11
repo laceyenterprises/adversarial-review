@@ -17,6 +17,7 @@ import { formatFencedBlock, loadFollowUpPromptTemplate } from './remediation-pro
 import { requireJobBaseBranch } from './remediation-git-pr-io.mjs';
 import { buildRemediationReply } from './follow-up-jobs.mjs';
 import { buildObviousDocsGuidance, interpolatePromptTemplate } from './prompt-context.mjs';
+import { formatCiCheckList } from './ci-check-format.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -36,6 +37,38 @@ function latestRetryHistoryEntry(job) {
   return history.length > 0 ? history[history.length - 1] : null;
 }
 
+function isCiRegressionRetry(latestRetry) {
+  const retryCode = String(latestRetry?.retryMetadata?.code || latestRetry?.retryReason || '')
+    .trim()
+    .toLowerCase();
+  return retryCode.includes('ci-regression');
+}
+
+function ciRegressionRetryGuidance(latestRetry) {
+  if (!isCiRegressionRetry(latestRetry)) return '';
+  const metadata = latestRetry?.retryMetadata || {};
+  const failedChecks = Array.isArray(metadata.failedChecks) ? metadata.failedChecks : [];
+  const pendingChecks = Array.isArray(metadata.pendingChecks) ? metadata.pendingChecks : [];
+  const failedCheckText = formatCiCheckList(failedChecks);
+  const pendingCheckText = formatCiCheckList(pendingChecks);
+  const currentHead = metadata.revisionRef || metadata.headSha || null;
+  const headLine = currentHead
+    ? ` The failed CI was observed on PR head \`${currentHead}\`.`
+    : '';
+  const failedLine = failedChecks.length > 0
+    ? ` Fix the failing CI lane(s) before changing unrelated code: ${failedCheckText}. Use each failed check's \`detailsUrl\` from the trusted JSON metadata when present so you start from the actual CI log.`
+    : '';
+  const pendingLine = pendingChecks.length > 0
+    ? ` Pending checks at the time were: ${pendingCheckText}.`
+    : '';
+  return `
+
+### CI Regression Remediation Objective
+This retry exists because the previous remediation attempt introduced or left failed external CI.${headLine}${failedLine}${pendingLine}
+
+Do not request re-review until the PR's current head has no failed external CI checks. If GitHub checks are still pending, wait briefly and re-check; if the checks do not settle inside a bounded wait, write an \`operationalBlockers[]\` entry instead of claiming success.`;
+}
+
 function retryContextBlock(job) {
   const latestRetry = latestRetryHistoryEntry(job);
   if (!latestRetry) return '';
@@ -47,7 +80,7 @@ function retryContextBlock(job) {
 
 ## Trusted Previous Remediation Attempt
 The previous remediation attempt did not satisfy the daemon's completion gate. Treat this as trusted daemon feedback and fix it before requesting re-review.
-${formatFencedBlock(JSON.stringify(retryContext, null, 2), 'json')}`;
+${formatFencedBlock(JSON.stringify(retryContext, null, 2), 'json')}${ciRegressionRetryGuidance(latestRetry)}`;
 }
 
 export function buildRemediationPrompt(job, {

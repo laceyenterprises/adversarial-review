@@ -235,7 +235,7 @@ test('fetchVerifiedCommitFromLocalGit fetches a missing commit by sha, then read
   );
 });
 
-test('fetchVerifiedCommitFromLocalGit fetches immediately when missing-object text carries transient markers', async () => {
+test('fetchVerifiedCommitFromLocalGit retries timeout failures before treating missing-object text as fetchable', async () => {
   const git = makeFakeGit();
   let fetched = false;
   const mixedGit = async (file, args) => {
@@ -268,10 +268,10 @@ test('fetchVerifiedCommitFromLocalGit fetches immediately when missing-object te
     logger: { warn() {}, debug() {} },
   });
   assert.equal(commit.sha, HEAD_SHA);
-  assert.deepEqual(sleeps, [], 'missing-object reads should fetch instead of sleeping through transient retry');
+  assert.deepEqual(sleeps, [3, 7], 'timeout missing-object reads should exhaust bounded retry before fetch');
   assert.ok(
     git.calls.some((call) => call.includes(`fetch --quiet --no-tags origin ${HEAD_SHA}`)),
-    'mixed missing/transient read should fetch the missing object directly',
+    'exhausted mixed missing/transient read should still fetch the missing object directly',
   );
 });
 

@@ -54,9 +54,6 @@ const LOCAL_GIT_TRANSIENT_SYSTEM_CODES = new Set([
   'ENOMEM',
   'ETIMEDOUT',
 ]);
-const LOCAL_GIT_STRONG_TRANSIENT_DIAGNOSTIC_RE =
-  /input\/output error|i\/o error|resource temporarily unavailable|temporarily unavailable|try again|too many open files|cannot allocate memory|connection reset|early eof|remote end hung up/;
-
 function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -75,16 +72,6 @@ export function isTransientLocalGitError(err) {
   return /timed?\s*out|timeout|input\/output error|i\/o error|resource temporarily unavailable|temporarily unavailable|try again|too many open files|cannot allocate memory|connection reset|early eof|remote end hung up/.test(detail);
 }
 
-function hasStrongTransientLocalGitEvidence(err) {
-  const code = String(err?.code || '').toUpperCase();
-  if (LOCAL_GIT_TRANSIENT_SYSTEM_CODES.has(code)) return true;
-  const detail = [
-    err?.message,
-    err?.stderr,
-  ].map((part) => String(part || '').toLowerCase()).filter(Boolean).join('\n');
-  return LOCAL_GIT_STRONG_TRANSIENT_DIAGNOSTIC_RE.test(detail);
-}
-
 function isMissingLocalGitObjectError(err) {
   const detail = [
     err?.message,
@@ -95,10 +82,7 @@ function isMissingLocalGitObjectError(err) {
 }
 
 function shouldFetchMissingLocalGitObjectImmediately(err) {
-  if (!isMissingLocalGitObjectError(err) || hasStrongTransientLocalGitEvidence(err)) return false;
-  const code = String(err?.code || '').toUpperCase();
-  if ((err?.killed || err?.signal) && code !== '128') return false;
-  return true;
+  return isMissingLocalGitObjectError(err) && !isTransientLocalGitError(err);
 }
 
 function extractIdentityHashes(identityOutput, expectedSha) {

@@ -473,7 +473,7 @@ export async function handlePostedReviewRow({
           gateDecision,
         };
       }
-      logger?.log?.(
+      logger.log(
         `[watcher] posted-review handler held for ${repoPath}#${prNumber}: ` +
           'operator-skip-label blocks merge/hammer closeout for this tick',
       );

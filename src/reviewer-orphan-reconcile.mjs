@@ -3,10 +3,7 @@ import { promisify } from 'node:util';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import {
-  DEFAULT_NULL_PGID_LAUNCH_GRACE_MS,
-  reconcileReviewerSessions,
-} from './reviewer-reattach.mjs';
+import { reconcileReviewerSessions } from './reviewer-reattach.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import {
   DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS,
@@ -44,6 +41,7 @@ const INFRA_AUTO_RECOVER_CAP = DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS;
 // REVIEWER_LEASE_RECOVERY_ENABLED above. A claim only a poll or two old keeps
 // its full lease; the fast path only fires once it is older than this grace.
 const DEAD_REVIEWER_FAST_PATH_GRACE_MS = 300_000;
+const NULL_PGID_LAUNCH_GRACE_MS = 60 * 1000;
 
 // ── Reviewer session reconciliation (startup) ────────────────────────────────
 //
@@ -98,7 +96,7 @@ export function shouldReconcileStaleReviewerSession(row, now, {
   leaseRecoveryEnabled = REVIEWER_LEASE_RECOVERY_ENABLED,
   probeGroupAliveImpl = probeReviewerProcessGroupAlive,
   fastPathGraceMs = DEAD_REVIEWER_FAST_PATH_GRACE_MS,
-  nullPgidGraceMs = DEFAULT_NULL_PGID_LAUNCH_GRACE_MS,
+  nullPgidGraceMs = NULL_PGID_LAUNCH_GRACE_MS,
 } = {}) {
   if (leaseRecoveryEnabled && isReviewerLeaseExpired(row, now, { reviewerTimeoutMs })) {
     return true;

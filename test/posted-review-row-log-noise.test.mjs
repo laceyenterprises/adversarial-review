@@ -30,11 +30,12 @@ import {
 // emitted once per retained-worker state transition rather than every tick.
 function baseArgs(overrides = {}) {
   const logs = [];
+  const existing = overrides.existing || { body_md: null, review_status: 'posted' };
   const args = {
     rootDir: '/tmp/adversarial-review-log-noise',
     repoPath: 'laceyenterprises/agent-os',
     prNumber: 4242,
-    existing: { body_md: null },
+    existing,
     subjectRef: null,
     currentRevisionRef: 'headsha-1',
     labelNames: [],
@@ -52,6 +53,7 @@ function baseArgs(overrides = {}) {
     latestFollowUpJobFinder: () => null,
     latestPostedReviewBodyFinder: () => null,
     reviewBodyHasScopeViolationFindingImpl: () => false,
+    currentReviewRowReader: () => existing,
     operatorSurface: null,
     logger: { log: (m) => logs.push(String(m)) },
     ...overrides,
@@ -762,6 +764,71 @@ test('handlePostedReviewRow: fetchMergeAgentCandidate deadline returns a named h
       process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = oldDeadline;
     }
   }
+});
+
+test('handlePostedReviewRow: skips stale posted snapshot when the row is no longer posted', async () => {
+  let projected = false;
+  let fetched = false;
+  const { args, logs } = baseArgs({
+    currentReviewRowReader: () => ({ review_status: 'pending' }),
+    projectGateStatusSafe: async () => {
+      projected = true;
+    },
+    fetchMergeAgentCandidateImpl: async () => {
+      fetched = true;
+      return { merged: false, prState: 'open' };
+    },
+  });
+
+  const result = await handlePostedReviewRow(args);
+
+  assert.equal(result.handled, true);
+  assert.equal(result.outcome, 'stale-posted-review-snapshot');
+  assert.equal(result.reason, 'review-status-pending');
+  assert.equal(result.stage, 'projectGateStatusSafe');
+  assert.equal(projected, false);
+  assert.equal(fetched, false);
+  assert.match(logs.join('\n'), /snapshot no longer current/);
+});
+
+test('handlePostedReviewRow: rechecks review row after candidate fetch before merge work', async () => {
+  let reads = 0;
+  let fetched = false;
+  let resolvedCoexistence = false;
+  const { args, logs } = baseArgs({
+    projectGateStatusSafe: async () => ({
+      decision: { state: 'success', reason: 'review-settled' },
+    }),
+    currentReviewRowReader: () => {
+      reads += 1;
+      return reads === 1
+        ? { review_status: 'posted', reviewer_head_sha: 'headsha-1' }
+        : { review_status: 'pending', reviewer_head_sha: null };
+    },
+    fetchMergeAgentCandidateImpl: async () => {
+      fetched = true;
+      return { merged: false, prState: 'open' };
+    },
+    resolveMergeAgentCoexistenceForWatcherImpl: async () => {
+      resolvedCoexistence = true;
+      return {
+        outcome: 'ama-pending',
+        amaClosureResult: { reason: 'daemon-failed-closed', workerClass: 'hammer' },
+      };
+    },
+  });
+
+  const result = await handlePostedReviewRow(args);
+
+  assert.equal(reads, 2);
+  assert.equal(fetched, true);
+  assert.equal(resolvedCoexistence, false);
+  assert.equal(result.handled, true);
+  assert.equal(result.outcome, 'stale-posted-review-snapshot');
+  assert.equal(result.reason, 'review-status-pending');
+  assert.equal(result.stage, 'resolveMergeAgentCoexistence');
+  assert.deepEqual(result.gateDecision, { state: 'success', reason: 'review-settled' });
+  assert.match(logs.join('\n'), /snapshot no longer current/);
 });
 
 test('handlePostedReviewRow: threads a fresh merge-agent request when the tick label snapshot is stale', async () => {

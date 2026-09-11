@@ -105,7 +105,7 @@ test('agy reviewer subprocess timeout is never shorter than agy print timeout', 
 });
 
 import Database from 'better-sqlite3';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
@@ -221,6 +221,110 @@ test('reapRunningPassTimeouts completes stale running pass that already posted a
     assert.equal(review.quota_reset_at_utc, null);
     assert.equal(review.review_attempts, 1);
     assert.equal(review.infra_auto_recover_attempts, 0);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reapRunningPassTimeouts queues follow-up when recovering a posted GitHub review artifact', () => {
+  const { rootDir, db } = setupDb();
+  const wakes = [];
+  try {
+    const startedAt = new Date(Date.now() - 3_605_000).toISOString();
+    const bodyCapturedAt = new Date(Date.now() - 3_500_000).toISOString();
+    const reviewBody = [
+      '## Adversarial Review — Gemini (gemini-reviewer-lacey)',
+      '',
+      '## Summary',
+      'Recovered review body.',
+      '',
+      '## Blocking issues',
+      '- Real bug requiring remediation.',
+      '',
+      '## Verdict',
+      'Request changes',
+    ].join('\n');
+    db.prepare(
+      `INSERT INTO reviewed_prs (
+         repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+         linear_ticket, review_attempts, reviewer_session_uuid, reviewer_started_at,
+         reviewer_head_sha, reviewer_lease_expires_at, infra_auto_recover_attempts
+       ) VALUES (?, ?, ?, ?, 'open', 'reviewing', ?, 0, ?, ?, ?, ?, 1)`
+    ).run(
+      'laceyenterprises/adversarial-review',
+      1037,
+      startedAt,
+      'gemini',
+      'DPA-01',
+      'recovered-session',
+      startedAt,
+      'recovered-head',
+      new Date(Date.now() + 60_000).toISOString()
+    );
+    db.prepare(
+      `INSERT INTO reviewer_passes (
+         repo, pr_number, attempt_number, reviewer_class, reviewer_model,
+         pass_kind, started_at, status, head_sha, gh_comment_id,
+         body_captured_at, verdict, body_md, metadata_json
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?)`
+    ).run(
+      'laceyenterprises/adversarial-review',
+      1037,
+      1,
+      'gemini',
+      'gemini',
+      'first-pass',
+      startedAt,
+      'recovered-head',
+      '5173111111',
+      bodyCapturedAt,
+      'request-changes',
+      reviewBody,
+      JSON.stringify({ reviewerSessionUuid: 'recovered-session', builderTag: 'codex' })
+    );
+
+    const result = reapRunningPassTimeouts({
+      db,
+      rootDir,
+      log: { log() {}, warn() {}, error() {} },
+      defaultBaseBranchByRepo: {
+        'laceyenterprises/adversarial-review': 'stable',
+      },
+      resolveHandoffConfigImpl: () => ({ enabled: true, reviewToRemediation: true }),
+      signalFollowUpDaemonWakeImpl: (payload) => {
+        wakes.push(payload);
+        return { wakePath: '/tmp/follow-up.wake' };
+      },
+    });
+    assert.equal(result.reaped, 1);
+    assert.equal(result.postedReviewArtifactsRecovered, 1);
+    assert.equal(result.postedReviewArtifactFollowUpsQueued, 1);
+    assert.equal(result.postedReviewArtifactFollowUpsSkipped, 0);
+    assert.equal(result.postedReviewArtifactFollowUpsFailed, 0);
+
+    const pendingDir = path.join(rootDir, 'data', 'follow-up-jobs', 'pending');
+    const [jobName] = readdirSync(pendingDir).filter((name) => name.endsWith('.json'));
+    assert.ok(jobName);
+    const job = JSON.parse(readFileSync(path.join(pendingDir, jobName), 'utf8'));
+    assert.equal(job.repo, 'laceyenterprises/adversarial-review');
+    assert.equal(job.prNumber, 1037);
+    assert.equal(job.baseBranch, 'stable');
+    assert.equal(job.revisionRef, 'recovered-head');
+    assert.equal(job.reviewerModel, 'gemini');
+    assert.equal(job.builderTag, 'codex');
+    assert.equal(job.linearTicketId, 'DPA-01');
+    assert.equal(job.reviewBody, reviewBody);
+    assert.equal(job.critical, true);
+    assert.equal(job.trigger.type, 'github-review-posted');
+    assert.equal(job.trigger.postedAt, bodyCapturedAt);
+    assert.deepEqual(wakes, [{
+      rootDir,
+      reason: 'recovered-review-to-remediation',
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 1037,
+      headSha: 'recovered-head',
+    }]);
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

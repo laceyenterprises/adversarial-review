@@ -1199,7 +1199,7 @@ async function pollOnce(
     );
   }
 
-  const passReaper = reapRunningPassTimeouts({ db, rootDir: ROOT, log: console });
+  const passReaper = reapRunningPassTimeouts({ db, rootDir: ROOT, log: console, defaultBaseBranch: config.adversarialGateBaseBranch || 'main', defaultBaseBranchByRepo: config.adversarialGateBaseBranches || {} });
   if (passReaper.reaped > 0) {
     console.log(`[watcher] reaped ${passReaper.reaped} stuck reviewer_passes`);
   }

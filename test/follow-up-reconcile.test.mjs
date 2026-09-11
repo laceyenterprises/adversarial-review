@@ -350,6 +350,11 @@ test('reconcileFollowUpJob requeues remediation when the pushed head has failed 
   });
 
   let rereviewCalls = 0;
+  const failedChecks = Array.from({ length: 12 }, (_, index) => ({
+    name: index === 0 ? 'Ruff lint and format baseline' : `matrix-${index}`,
+    state: 'FAILURE',
+  }));
+
   const reconciled = await reconcileFollowUpJob({
     rootDir,
     jobPath: spawned.jobPath,
@@ -365,8 +370,8 @@ test('reconcileFollowUpJob requeues remediation when the pushed head has failed 
       state: 'failed',
       conclusion: 'FAILURE',
       headSha: 'failed-head',
-      totalExternalChecks: 3,
-      failedChecks: [{ name: 'Ruff lint and format baseline', state: 'FAILURE' }],
+      totalExternalChecks: failedChecks.length,
+      failedChecks,
       pendingChecks: [],
     }),
   });
@@ -380,7 +385,9 @@ test('reconcileFollowUpJob requeues remediation when the pushed head has failed 
   const latestRetry = reconciled.job.remediationPlan.retryHistory.at(-1);
   assert.equal(latestRetry.retryMetadata.code, 'ci-regression');
   assert.equal(latestRetry.retryMetadata.failedChecks[0].name, 'Ruff lint and format baseline');
+  assert.equal(latestRetry.retryMetadata.failedChecks.length, 12);
   assert.match(latestRetry.retryReason, /introduced or left failed CI/);
+  assert.match(latestRetry.retryReason, /\.\.\. \(\+2 more\)/);
 });
 
 test('reconcileFollowUpJob wakes watcher when handoff.remediation_to_rereview is enabled', async () => {

@@ -471,14 +471,26 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   const queue = sortReviewerDispatchCandidates(candidates);
   const pending = queue.map((candidate) => ({ candidate, started: false }));
   const active = new Set();
+  const activeRecords = new Map();
   const errors = [];
   let maxObservedConcurrency = 0;
-  let started = 0;
+  let attempted = 0;
+  let dispatched = 0;
   let activeGemini = 0;
   let initialWaveClosed = false;
 
   const isGeminiCandidate = (candidate) =>
     String(candidate?.reviewerModel || '').toLowerCase() === 'gemini';
+
+  const dispatchWasSkipped = (result) =>
+    result && typeof result === 'object' && result.dispatched === false;
+
+  const countDispatch = (promise) => {
+    const record = activeRecords.get(promise);
+    if (!record || record.counted) return;
+    record.counted = true;
+    dispatched += 1;
+  };
 
   async function start(candidate) {
     const gemini = isGeminiCandidate(candidate);
@@ -487,7 +499,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
       const currentNowMs = Number(now());
       const resolvedNowMs = Number.isFinite(currentNowMs) ? currentNowMs : Date.now();
       logReviewerDispatchWait(candidate, { logger, nowMs: resolvedNowMs, waitWarnMs });
-      await candidate.run();
+      return await candidate.run();
     } catch (err) {
       errors.push(err);
       logger?.error?.(
@@ -519,6 +531,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
     (errors.length < thrownFailureLimit && hasUnstarted() && !initialWaveClosed)
     || active.size > 0
   ) {
+    const attemptedBeforeStart = attempted;
     let entry;
     while (
       errors.length < thrownFailureLimit
@@ -527,22 +540,27 @@ async function runBoundedReviewerDispatchQueue(candidates, {
     ) {
       entry.started = true;
       const promise = start(entry.candidate);
-      started += 1;
+      attempted += 1;
       active.add(promise);
-      promise.finally(() => active.delete(promise));
+      activeRecords.set(promise, { counted: false });
+      promise.then((result) => {
+        if (!dispatchWasSkipped(result)) countDispatch(promise);
+      }).finally(() => {
+        active.delete(promise);
+        activeRecords.delete(promise);
+      });
       maxObservedConcurrency = Math.max(maxObservedConcurrency, active.size);
     }
-    if (singleWave && started > 0) {
+    if (singleWave && attempted > attemptedBeforeStart) {
       // The watcher needs a dispatch *wave*, not a full batch drain. Some
       // runtimes await reviewer completion inside candidate.run(), so admitting
       // a new reviewer every time a slot frees can serialize an entire backlog
       // ahead of posted-review maintenance and hammer closeout.
-      initialWaveClosed = true;
       const settleGraceMs = Math.max(
         0,
         Number.parseInt(String(singleWaveSettleGraceMs), 10) || 0,
       );
-      if (active.size > 0 && settleGraceMs > 0) {
+      if (active.size > 0) {
         let settleTimer = null;
         try {
           await Promise.race([
@@ -556,11 +574,15 @@ async function runBoundedReviewerDispatchQueue(candidates, {
         }
       }
       if (active.size > 0) {
+        initialWaveClosed = true;
         logger?.log?.(
           `[watcher] reviewer dispatch single-wave detached after launch wave: ` +
             `active=${active.size} deferred=${pending.filter((item) => !item.started).length}`
         );
         break;
+      }
+      if (dispatched > 0) {
+        initialWaveClosed = true;
       }
     }
     if (active.size > 0) {
@@ -570,6 +592,9 @@ async function runBoundedReviewerDispatchQueue(candidates, {
       // and the gemini cap is 0, or a full pool of gemini is blocked with none
       // active to free the cap). Leave the remainder for the next tick rather
       // than spin.
+      if (hasUnstarted() && !initialWaveClosed && nextStartableEntry() !== null) {
+        continue;
+      }
       break;
     }
   }
@@ -579,7 +604,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
     throw new AggregateError(errors, `${errors.length} reviewer dispatch tasks failed`);
   }
   return {
-    dispatched: started,
+    dispatched,
     maxObservedConcurrency,
     deferred: pending.filter((entry) => !entry.started).length,
     deferredCandidates: pending

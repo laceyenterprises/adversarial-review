@@ -2065,6 +2065,13 @@ function schemaV1() {
             __type: TYPE_DICT,
             __strict: true,
             __keys: {
+              chains: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  enabled: { __type: TYPE_BOOL, __default: false },
+                },
+              },
               autowalk: {
                 __type: TYPE_DICT,
                 __strict: true,

@@ -3492,6 +3492,29 @@ test('dispatch.default_worker_class_by_task_kind defaults coding/research/etc to
   }
 });
 
+test('worker_pool.dag.chains.enabled is accepted by the strict Node mirror', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(
+      top,
+      `
+      version: 1
+      worker_pool:
+        dag:
+          chains:
+            enabled: true
+      `,
+    );
+
+    const cfg = loadConfig({ topPath: top, env: {} });
+
+    assert.equal(cfg.get('worker_pool.dag.chains.enabled'), true);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('dispatch.default_worker_class_by_task_kind defaults merge family to merge-agent', () => {
   const tmp = freshTmp();
   try {

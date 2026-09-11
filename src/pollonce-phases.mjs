@@ -179,6 +179,7 @@ import {
   selectReviewerRouteForAttempt,
   shouldBypassPrimaryReviewerQuotaHold,
 } from './reviewer-route-selection.mjs';
+import { guardRereviewCiBeforeReviewer } from './reviewer-ci-admission.mjs';
 import {
   createAfhReviewerGroundingCache,
   describeAfhReviewerFallback,
@@ -2517,6 +2518,35 @@ export async function processReviewSubject(entry, ctx) {
               passKind,
               fallbackReviewAttempts: current?.review_attempts || 0,
             });
+            const ciAdmission = await guardRereviewCiBeforeReviewer({
+              rootDir: ROOT,
+              repo: repoPath,
+              prNumber,
+              passKind,
+              reviewerHeadSha,
+              execFileImpl: execFileAsync,
+              env: process.env,
+              log: console,
+              cfg: domainAdapterSet.domainConfig,
+            });
+            if (!ciAdmission.proceed) {
+              stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
+              markWatcherSpawnDecision({
+                repo: repoPath,
+                pr_number: prNumber,
+                decision: ciAdmission.reason,
+                failure_class: ciAdmission.reason?.startsWith('ci-regression')
+                  ? 'ci-regression'
+                  : null,
+                previous_status: current?.review_status || existing?.review_status || null,
+                reviewer_head_sha: reviewerHeadSha,
+              });
+              console.log(
+                `[watcher] Released reviewer claim for ${repoPath}#${prNumber} after ` +
+                  `${ciAdmission.reason}; reviewer admission requires green external CI for rereview.`
+              );
+              return { dispatched: false, reason: ciAdmission.reason };
+            }
             const vocabularyFatigueFinding = passKind === 'rereview'
               ? await computeVocabularyFatigueFindingForPR({
                 repoPath,

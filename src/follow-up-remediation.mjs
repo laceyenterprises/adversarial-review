@@ -164,6 +164,7 @@ import {
   runWorkspaceNetworkCommandWithTransientRetry,
 } from './remediation-git-pr-io.mjs';
 import { inspectRemediationCiRegression } from './remediation-ci-regression.mjs';
+import { formatCiCheckList } from './ci-check-format.mjs';
 import {
   cancelHqDispatch,
   classifyHqDispatchFailure,
@@ -291,7 +292,6 @@ const MAX_REMEDIATION_MAX_CONCURRENT_JOBS = 8;
 const REMEDIATION_CI_SETTLE_TIMEOUT_MS_ENV = 'ADVERSARIAL_REMEDIATION_CI_SETTLE_TIMEOUT_MS';
 const DEFAULT_REMEDIATION_CI_SETTLE_TIMEOUT_MS = 30 * 60 * 1000;
 const REMEDIATION_CI_REGRESSION_RETRY_DELAY_MS = 60 * 1000;
-const MAX_FORMATTED_CI_CHECKS = 10;
 const DEFAULT_DEPLOY_CHECKOUT = '/Users/airlock/agent-os';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
 const HQ_REMEDIATION_WORKSPACE_SEGMENTS = ['adversarial-review', 'follow-up-workspaces'];
 
@@ -314,19 +314,6 @@ function resolveRemediationCiSettleTimeoutMs(env = process.env) {
 function isoAfter(startIso, deltaMs) {
   const startMs = parseTimestampMs(startIso) ?? Date.now();
   return new Date(startMs + deltaMs).toISOString();
-}
-
-function formatCiCheckList(checks) {
-  const normalized = Array.isArray(checks) ? checks : [];
-  if (normalized.length === 0) return 'none';
-  const rendered = normalized
-    .slice(0, MAX_FORMATTED_CI_CHECKS)
-    .map((check) => `${check.name || 'unknown-check'}=${check.state || 'UNKNOWN'}`);
-  const overflow = normalized.length - MAX_FORMATTED_CI_CHECKS;
-  if (overflow > 0) {
-    rendered.push(`... (+${overflow} more)`);
-  }
-  return rendered.join(', ');
 }
 
 function ciGuardRecord({ job, ciGate, observedAt, timeoutMs }) {

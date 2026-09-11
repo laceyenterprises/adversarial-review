@@ -57,6 +57,29 @@ test('gemini credential count fetch reads the secret only for gemini candidates 
   assert.equal(secretReads, 1);
 });
 
+test('gemini credential count fetch uses the local broker default when watcher env omits broker url', async () => {
+  let secretReads = 0;
+  const concurrency = await resolveGeminiCredentialConcurrencyForDispatchCandidates([
+    { reviewerModel: 'gemini' },
+  ], {
+    env: {
+      OAUTH_BROKER_SHARED_SECRET_FILE: '/tmp/secret',
+    },
+    fetchCredentialConcurrency: async ({ brokerUrl, secret }) => {
+      assert.equal(brokerUrl, 'http://127.0.0.1:4099');
+      assert.equal(secret, 'secret');
+      return 3;
+    },
+    readSharedSecret: async () => {
+      secretReads += 1;
+      return 'secret';
+    },
+  });
+
+  assert.equal(concurrency, 3);
+  assert.equal(secretReads, 1);
+});
+
 test('reviewer broker shared secret reads asynchronously and uses TTL cache', async () => {
   let reads = 0;
   const fsImpl = {

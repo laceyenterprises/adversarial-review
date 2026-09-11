@@ -19,6 +19,7 @@ import { writeReviewerTokenUsageArtifact } from './reviewer-pass-tokens.mjs';
 import { fetchGeminiCredentialConcurrency } from './watcher-reviewer-pool.mjs';
 
 const DEFAULT_REVIEWER_BROKER_SECRET_CACHE_TTL_MS = 5 * 60 * 1000;
+const DEFAULT_CQP_BROKER_URL = 'http://127.0.0.1:4099';
 let reviewerBrokerSharedSecretCache = {
   file: null,
   value: '',
@@ -106,7 +107,7 @@ export async function resolveGeminiCredentialConcurrencyForDispatchCandidates(
   );
   if (!hasGeminiCandidates) return null;
 
-  const brokerUrl = env.CQP_BROKER_URL || env.OAUTH_BROKER_URL || null;
+  const brokerUrl = env.CQP_BROKER_URL || env.OAUTH_BROKER_URL || DEFAULT_CQP_BROKER_URL;
   return await fetchCredentialConcurrency({
     brokerUrl,
     secret: brokerUrl ? await readSharedSecret(env) : '',

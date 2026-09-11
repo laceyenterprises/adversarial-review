@@ -9,7 +9,10 @@ import {
   shouldReconcileReviewerSession,
   shouldReconcileStaleReviewerSession,
 } from '../src/reviewer-orphan-reconcile.mjs';
-import { reconcileReviewerSessions } from '../src/reviewer-reattach.mjs';
+import {
+  DEFAULT_NULL_PGID_LAUNCH_GRACE_MS,
+  reconcileReviewerSessions,
+} from '../src/reviewer-reattach.mjs';
 
 // SEV (agent-os #5059): a remediation advanced the PR head, a fresh review
 // auto-armed, but the reviewer holding the `reviewing` single-owner claim
@@ -149,6 +152,48 @@ test('shouldReconcileReviewerSession leaves a provably-ALIVE same-lease reviewer
   );
 });
 
+test('shouldReconcileReviewerSession fast-paths null-pgid claims after launch grace', () => {
+  const now = new Date('2026-08-08T21:19:26.000Z');
+  const lastAttemptedAt = new Date(now.getTime() - (DEFAULT_NULL_PGID_LAUNCH_GRACE_MS + 1000)).toISOString();
+  const db = setupDb();
+
+  seedReviewing(db, {
+    lastAttemptedAt,
+    startedAt: null,
+    pgid: null,
+    reviewerTimeoutMs: LEASE_TIMEOUT_MS,
+    headSha: HEAD_A,
+  });
+  const row = readRow(db);
+
+  assert.equal(
+    shouldReconcileReviewerSession(row, now),
+    true,
+    'null-pgid claims past the launch grace must be retried before the full reviewer lease',
+  );
+});
+
+test('shouldReconcileReviewerSession leaves fresh null-pgid claims inside launch grace alone', () => {
+  const now = new Date('2026-08-08T21:19:26.000Z');
+  const lastAttemptedAt = new Date(now.getTime() - (DEFAULT_NULL_PGID_LAUNCH_GRACE_MS - 1000)).toISOString();
+  const db = setupDb();
+
+  seedReviewing(db, {
+    lastAttemptedAt,
+    startedAt: null,
+    pgid: null,
+    reviewerTimeoutMs: LEASE_TIMEOUT_MS,
+    headSha: HEAD_A,
+  });
+  const row = readRow(db);
+
+  assert.equal(
+    shouldReconcileReviewerSession(row, now),
+    false,
+    'the short launch grace still protects an in-flight spawn callback',
+  );
+});
+
 test('reconcile releases a dead reviewer whose head advanced -> pending + armable (releaseSuperseded)', async () => {
   const now = new Date('2026-08-08T21:19:26.000Z');
   const startedAt = new Date(now.getTime() - (GRACE_MS + 1000)).toISOString();
@@ -187,7 +232,7 @@ test('reconcile releases a dead reviewer whose head advanced -> pending + armabl
   // Armable: the claim CAS (only fires on pending/pending-upstream) now matches.
   const leaseExpiry = new Date(now.getTime() + LEASE_TIMEOUT_MS).toISOString();
   const armed = prepareMarkAttemptStarted(db).run(
-    now.toISOString(), 'fresh-session', HEAD_B, LEASE_TIMEOUT_MS, leaseExpiry, HEAD_B, REPO, PR,
+    now.toISOString(), 'fresh-session', HEAD_B, HEAD_B, LEASE_TIMEOUT_MS, leaseExpiry, HEAD_B, REPO, PR,
   );
   assert.equal(armed.changes, 1, 'released row is re-armable by the reviewer claim CAS');
 });

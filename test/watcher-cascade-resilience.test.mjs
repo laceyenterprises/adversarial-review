@@ -1019,6 +1019,7 @@ test('elapsed cascade nextRetryAfter allows infra retry after auto-recovery cap'
       '2026-05-04T07:22:00.000Z',
       'session-cascade-retry',
       'head-cascade',
+      'head-cascade',
       20 * 60 * 1000,
       '2026-05-04T07:42:00.000Z',
       repo,

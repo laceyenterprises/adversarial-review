@@ -11,6 +11,7 @@ import {
   resolveReviewerLeaseRecoveryEnabled,
 } from './reviewer-lease.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
+import { MARK_MERGED_PENDING_REVIEW_SKIPPED_SQL } from './review-state-statements.mjs';
 
 const LEGACY_ORPHAN_FAILURE_MESSAGE =
   'Watcher restarted while review subprocess was in flight. ' +
@@ -40,8 +41,6 @@ const OVERDUE_RECOVERY_FAILURE_MESSAGE =
   'Overdue reviewer recovery could not prove the process exited cleanly without a late GitHub review; operator must verify before retrying.';
 const LEASE_RECOVERY_CAP_FAILURE_MESSAGE =
   'Reviewer lease recovery cap exhausted; leaving the review failed for operator inspection.';
-
-
 
 function splitRepoPath(repoPath) {
   const [owner, repo] = String(repoPath || '').split('/');
@@ -168,6 +167,30 @@ function probeReviewerSession({ pgid, sessionUuid, probeAlive = probePgidAlive }
   }
 }
 
+function findReviewerProcessBySessionUuid(sessionUuid, { execFileSyncImpl = execFileSync } = {}) {
+  const needle = String(sessionUuid || '').trim();
+  if (!needle) return { found: false };
+  try {
+    const stdout = execFileSyncImpl('ps', ['-ww', '-axo', 'pid=,pgid=,command='], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 2_000,
+    });
+    for (const line of String(stdout || '').split(/\r?\n/)) {
+      if (!line.includes(needle)) continue;
+      const match = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/);
+      if (!match) continue;
+      const pid = parsePositiveInteger(match[1]);
+      const pgid = parsePositiveInteger(match[2]);
+      if (pid === null || pgid === null) continue;
+      return { found: true, pid, pgid, command: match[3] || '' };
+    }
+    return { found: false };
+  } catch (err) {
+    return { found: null, error: err?.message || String(err) };
+  }
+}
+
 function killPgid(pgid, signal = 'SIGKILL') {
   const numericPgid = Number(pgid);
   if (!Number.isInteger(numericPgid) || numericPgid <= 0) return false;
@@ -245,10 +268,11 @@ function prepareStatements(db) {
       `SELECT repo, pr_number, reviewer, review_attempts, last_attempted_at,
               reviewer_session_uuid, reviewer_pgid, reviewer_started_at,
               reviewer_head_sha, reviewer_timeout_ms, reviewer_lease_expires_at,
-              infra_auto_recover_attempts
+              infra_auto_recover_attempts, pr_state, merged_at, closed_at
          FROM reviewed_prs
         WHERE review_status = 'reviewing'`
     ),
+    markMergedPendingReviewSkipped: db.prepare(MARK_MERGED_PENDING_REVIEW_SKIPPED_SQL),
     markOrphan: db.prepare(
       "UPDATE reviewed_prs SET review_status = 'failed-orphan', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
     ),
@@ -349,6 +373,17 @@ function reviewerRunStateAdoptionCandidate(row, record) {
   };
 }
 
+function reviewerProcessScanAdoptionCandidate(row, processMatch, runRecord = null) {
+  const pgid = parsePositiveInteger(processMatch?.pgid);
+  if (processMatch?.found !== true || pgid === null) return null;
+  return {
+    pgid,
+    spawnedAt: runRecord?.spawnedAt || row.reviewer_started_at || row.last_attempted_at,
+    reattachToken: row.reviewer_session_uuid,
+    source: 'process_scan',
+  };
+}
+
 function nullPgidGuardWindowMs({
   row,
   runRecord,
@@ -379,6 +414,7 @@ async function reconcileReviewerSessions({
   statements = prepareStatements(db),
   probeAlive = probePgidAlive,
   probeSession,
+  findReviewerProcess = findReviewerProcessBySessionUuid,
   killProcessGroup = killPgid,
   fetchHeadSha = (row) => fetchCurrentHeadSha(octokit, row),
   findPostedReview = makeReviewPostedProbe(octokit),
@@ -426,6 +462,52 @@ async function reconcileReviewerSessions({
 
   for (const listedRow of rows) {
     let row = listedRow;
+    if (String(row.pr_state || '').trim().toLowerCase() === 'merged') {
+      const settledAt = row.merged_at || failureAt;
+      let killResult = false;
+      let terminalPgid = parsePositiveInteger(row.reviewer_pgid);
+      if (terminalPgid === null && row.reviewer_session_uuid && typeof findReviewerProcess === 'function') {
+        terminalPgid = parsePositiveInteger(findReviewerProcess(row.reviewer_session_uuid)?.pgid);
+      }
+      if (terminalPgid !== null) {
+        const terminalRow = { ...row, reviewer_pgid: terminalPgid };
+        const terminalSessionProbe = typeof probeSession === 'function'
+          ? probeSession(terminalRow)
+          : probeReviewerSession({
+            pgid: terminalPgid,
+            sessionUuid: row.reviewer_session_uuid,
+            probeAlive,
+          });
+        const terminalAlive = typeof terminalSessionProbe === 'boolean'
+          ? terminalSessionProbe
+          : terminalSessionProbe?.alive === true;
+        const terminalMatched = typeof terminalSessionProbe === 'boolean'
+          ? terminalSessionProbe
+          : terminalSessionProbe?.matched === true;
+        if (terminalAlive && terminalMatched) {
+          killResult = killProcessGroup(terminalPgid, 'SIGKILL');
+        }
+      }
+      await onTerminalDeadSession({
+        row,
+        state: 'cancelled',
+        settledAt,
+        reason: 'merged-pr-reviewer-claim-cleared',
+      });
+      statements.markMergedPendingReviewSkipped.run(
+        'Skipped reviewer spawn because PR is already merged.',
+        settledAt,
+        row.repo,
+        row.pr_number
+      );
+      log.warn(
+        `[watcher] reviewer_reattach_merged_claim_cleared repo=${row.repo} pr=${row.pr_number} ` +
+        `session=${row.reviewer_session_uuid || 'unknown'} pgid=${terminalPgid || row.reviewer_pgid || 'unknown'} ` +
+        `kill_sent=${killResult ? 'true' : 'false'}`
+      );
+      continue;
+    }
+
     if (!row.reviewer_session_uuid) {
       markLegacyOrphan({ statements, row, failureAt, log });
       continue;
@@ -445,7 +527,12 @@ async function reconcileReviewerSessions({
 
     if (row.reviewer_pgid === null || row.reviewer_pgid === undefined || row.reviewer_pgid === '') {
       const runRecord = readReviewerRunRecordBestEffort(rootDir, row);
-      const adoption = reviewerRunStateAdoptionCandidate(row, runRecord);
+      let processMatch = null;
+      let adoption = reviewerRunStateAdoptionCandidate(row, runRecord);
+      if (!adoption && typeof findReviewerProcess === 'function') {
+        processMatch = findReviewerProcess(row.reviewer_session_uuid);
+        adoption = reviewerProcessScanAdoptionCandidate(row, processMatch, runRecord);
+      }
       if (adoption) {
         const startedAt = adoption.spawnedAt || row.reviewer_started_at || row.last_attempted_at || failureAt;
         const leaseExpiresAt = reviewerLeaseExpiryAt(startedAt, row.reviewer_timeout_ms);
@@ -464,11 +551,17 @@ async function reconcileReviewerSessions({
           reviewer_lease_expires_at: row.reviewer_lease_expires_at || leaseExpiresAt,
         };
         log.log(
-          `[watcher] reviewer_reattach_adopted_run_state repo=${row.repo} pr=${row.pr_number} ` +
+          `[watcher] reviewer_reattach_adopted_${adoption.source || 'run_state'} repo=${row.repo} pr=${row.pr_number} ` +
           `session=${row.reviewer_session_uuid} token=${adoption.reattachToken || row.reviewer_session_uuid} ` +
           `pgid=${adoption.pgid}`
         );
       } else {
+        if (processMatch?.found === null) {
+          log.warn(
+            `[watcher] reviewer_reattach_null_pgid_process_scan_failed repo=${row.repo} pr=${row.pr_number} ` +
+            `session=${row.reviewer_session_uuid} error=${processMatch.error || 'unknown'}`
+          );
+        }
         const claimedAtMs = parseTime(row.last_attempted_at);
         const guardWindowMs = nullPgidGuardWindowMs({
           row,
@@ -944,6 +1037,7 @@ export {
   PGID_IDENTITY_FAILURE_MESSAGE,
   killPgid,
   makeReviewPostedProbe,
+  findReviewerProcessBySessionUuid,
   probePgidAlive,
   probeReviewerSession,
   reconcileReviewerSessions,

@@ -252,6 +252,7 @@ test('fresh-head generic pending claim resets inherited failure attempts', () =>
       '2026-08-17T15:00:00Z',
       'session-fresh',
       OTHER_HEAD,
+      OTHER_HEAD,
       1200000,
       '2026-08-17T15:20:00Z',
       OTHER_HEAD,

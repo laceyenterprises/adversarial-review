@@ -20,6 +20,7 @@ const UNKNOWN_FAILURE_RETRY_CLAIM_SQL = `UPDATE reviewed_prs
          reviewer_session_uuid = ?,
          reviewer_started_at = NULL,
          reviewer_head_sha = ?,
+         revision_ref = COALESCE(?, revision_ref),
          reviewer_timeout_ms = ?,
          reviewer_lease_expires_at = ?,
          reviewer_pgid = NULL,
@@ -48,6 +49,7 @@ function runClaim(db, attemptedAt, repo = REPO, prNumber = PR, {
   return prepareMarkAttemptStarted(db).run(
     attemptedAt,
     sessionUuid,
+    headSha,
     headSha,
     reviewerTimeoutMs,
     '2026-05-02T18:30:00.000Z',
@@ -84,6 +86,7 @@ function runInfraRecoveryClaim(db, attemptedAt, infraClass = 'oauth-broken', rep
     attemptedAt,
     sessionUuid,
     headSha,
+    headSha,
     reviewerTimeoutMs,
     '2026-05-02T18:30:00.000Z',
     repo,
@@ -105,6 +108,7 @@ function runUnknownFailureRetryClaim(db, attemptedAt, repo = REPO, prNumber = PR
   return db.prepare(UNKNOWN_FAILURE_RETRY_CLAIM_SQL).run(
     attemptedAt,
     sessionUuid,
+    headSha,
     headSha,
     reviewerTimeoutMs,
     '2026-05-02T18:30:00.000Z',
@@ -137,8 +141,8 @@ function seedReviewRow(db, {
     `INSERT INTO reviewed_prs
        (repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
         review_attempts, last_attempted_at, failed_at, failure_message,
-        infra_auto_recover_attempts, reviewer_head_sha)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        infra_auto_recover_attempts, reviewer_head_sha, revision_ref)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     REPO,
     PR,
@@ -151,6 +155,7 @@ function seedReviewRow(db, {
     failedAt,
     failureMessage,
     infraAutoRecoverAttempts,
+    reviewerHeadSha,
     reviewerHeadSha
   );
 }
@@ -172,6 +177,7 @@ test('atomic claim succeeds for a pending row and flips status to reviewing', ()
   assert.equal(row.reviewer_session_uuid, 'session-999');
   assert.equal(row.reviewer_started_at, null);
   assert.equal(row.reviewer_head_sha, 'head-999');
+  assert.equal(row.revision_ref, 'head-999');
   assert.equal(row.reviewer_timeout_ms, 20 * 60 * 1000);
   assert.equal(row.reviewer_lease_expires_at, '2026-05-02T18:30:00.000Z');
   assert.equal(row.reviewer_pgid, null);

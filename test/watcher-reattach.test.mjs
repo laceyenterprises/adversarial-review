@@ -39,7 +39,7 @@ function seedReviewing(db, overrides = {}) {
     overrides.prNumber || PR,
     '2026-05-11T05:09:00.000Z',
     overrides.reviewer || 'codex',
-    'open',
+    overrides.prState || 'open',
     'reviewing',
     overrides.reviewAttempts ?? 2,
     Object.prototype.hasOwnProperty.call(overrides, 'lastAttemptedAt')
@@ -61,6 +61,24 @@ function seedReviewing(db, overrides = {}) {
       : null,
     overrides.infraAutoRecoverAttempts ?? 0
   );
+
+  if (
+    Object.prototype.hasOwnProperty.call(overrides, 'mergedAt') ||
+    Object.prototype.hasOwnProperty.call(overrides, 'closedAt')
+  ) {
+    db.prepare(
+      `UPDATE reviewed_prs
+          SET merged_at = ?,
+              closed_at = ?
+        WHERE repo = ?
+          AND pr_number = ?`
+    ).run(
+      Object.prototype.hasOwnProperty.call(overrides, 'mergedAt') ? overrides.mergedAt : null,
+      Object.prototype.hasOwnProperty.call(overrides, 'closedAt') ? overrides.closedAt : null,
+      overrides.repo || REPO,
+      overrides.prNumber || PR
+    );
+  }
 
   if (
     Object.prototype.hasOwnProperty.call(overrides, 'reviewPopulationRetryAttempts') ||
@@ -140,6 +158,106 @@ test('reattaches when pgid is alive, head sha is unchanged, and no review is pos
   assert.equal(row.review_attempts, 2, 'reattach must not burn an attempt');
   assert.match(log.lines.join('\n'), /reviewer_reattach_alive/);
   assert.match(log.lines.join('\n'), /session=session-70 pgid=9001/);
+});
+
+test('merged reviewing rows are skipped and their live reviewer process is cancelled', async () => {
+  const db = setupDb();
+  seedReviewing(db, {
+    prState: 'merged',
+    mergedAt: '2026-05-11T05:19:00.000Z',
+  });
+  const killed = [];
+  const settled = [];
+  const log = makeLog();
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    now: new Date(FAILURE_AT),
+    log,
+    probeSession: () => ({ alive: true, matched: true }),
+    killProcessGroup: (pgid, signal) => killed.push({ pgid, signal }),
+    fetchHeadSha: async () => {
+      throw new Error('merged rows must not probe GitHub heads');
+    },
+    findPostedReview: async () => {
+      throw new Error('merged rows must not probe GitHub reviews');
+    },
+    onTerminalDeadSession: async (event) => settled.push(event),
+  });
+
+  const row = readRow(db);
+  assert.equal(row.pr_state, 'merged');
+  assert.equal(row.review_status, 'skipped');
+  assert.equal(row.reviewer_session_uuid, null);
+  assert.equal(row.reviewer_pgid, null);
+  assert.equal(row.reviewer_started_at, null);
+  assert.equal(row.reviewer_head_sha, null);
+  assert.equal(row.reviewer_timeout_ms, null);
+  assert.equal(row.reviewer_lease_expires_at, null);
+  assert.deepEqual(killed, [{ pgid: 9001, signal: 'SIGKILL' }]);
+  assert.deepEqual(
+    settled.map(({ state, reason }) => ({ state, reason })),
+    [{ state: 'cancelled', reason: 'merged-pr-reviewer-claim-cleared' }]
+  );
+  assert.match(log.lines.join('\n'), /reviewer_reattach_merged_claim_cleared/);
+});
+
+test('merged reviewing rows are skipped without killing an unmatched process group', async () => {
+  const db = setupDb();
+  seedReviewing(db, {
+    prState: 'merged',
+    mergedAt: '2026-05-11T05:19:00.000Z',
+  });
+  const killed = [];
+  const log = makeLog();
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    now: new Date(FAILURE_AT),
+    log,
+    probeSession: () => ({ alive: true, matched: false }),
+    killProcessGroup: (pgid, signal) => killed.push({ pgid, signal }),
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'skipped');
+  assert.deepEqual(killed, []);
+  assert.match(log.lines.join('\n'), /kill_sent=false/);
+});
+
+test('merged reviewing rows with null pgid cancel a session process found by uuid', async () => {
+  const db = setupDb();
+  seedReviewing(db, {
+    prState: 'merged',
+    mergedAt: '2026-05-11T05:19:00.000Z',
+    pgid: null,
+    startedAt: null,
+  });
+  const killed = [];
+  const log = makeLog();
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    now: new Date(FAILURE_AT),
+    log,
+    findReviewerProcess: () => ({
+      found: true,
+      pid: 9202,
+      pgid: 9202,
+      command: 'node reviewer.mjs --reviewer-session-uuid session-70',
+    }),
+    probeSession: () => ({ alive: true, matched: true }),
+    killProcessGroup: (pgid, signal) => killed.push({ pgid, signal }),
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'skipped');
+  assert.deepEqual(killed, [{ pgid: 9202, signal: 'SIGKILL' }]);
+  assert.match(log.lines.join('\n'), /pgid=9202/);
+  assert.match(log.lines.join('\n'), /kill_sent=true/);
 });
 
 test('selective stale probing recovers only overdue reviewing rows during steady-state polls', async () => {
@@ -935,6 +1053,40 @@ test('claimed rows with null pgid stay reviewing while launch guard window is ac
   assert.equal(headProbeCount, 0, 'active guard must avoid head probing');
   assert.equal(reviewProbeCount, 0, 'active guard must avoid review probing');
   assert.match(log.lines.join('\n'), /reviewer_reattach_null_pgid_guard_active/);
+});
+
+test('claimed rows with null pgid adopt a matching process found by session uuid', async () => {
+  const db = setupDb();
+  seedReviewing(db, {
+    pgid: null,
+    lastAttemptedAt: '2026-05-11T05:19:00.000Z',
+    startedAt: null,
+    reviewerTimeoutMs: 20 * 60 * 1000,
+  });
+  const log = makeLog();
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    now: new Date(FAILURE_AT),
+    log,
+    findReviewerProcess: () => ({
+      found: true,
+      pid: 9101,
+      pgid: 9101,
+      command: 'node reviewer.mjs --reviewer-session-uuid session-70',
+    }),
+    probeSession: () => ({ alive: true, matched: true }),
+    fetchHeadSha: async () => HEAD_SHA,
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'reviewing');
+  assert.equal(row.reviewer_pgid, 9101);
+  assert.equal(row.reviewer_started_at, '2026-05-11T05:19:00.000Z');
+  assert.equal(row.reviewer_lease_expires_at, '2026-05-11T05:39:00.000Z');
+  assert.match(log.lines.join('\n'), /reviewer_reattach_adopted_process_scan/);
+  assert.match(log.lines.join('\n'), /reviewer_reattach_alive/);
 });
 
 test('old spawned/null-pgid rows wait the full reviewer timeout before rearm', async () => {

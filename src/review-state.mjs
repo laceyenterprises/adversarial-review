@@ -1102,22 +1102,25 @@ function requestReviewRereview({
     if (reviewRow.review_status === 'pending') {
       const normalizedReason = reason || 'Re-review requested from remediation reply.';
       const explicitOperatorRetrigger = isExplicitOperatorRetriggerReason(normalizedReason);
-      if (explicitOperatorRetrigger) {
+      const pendingRevisionRefMoved =
+        normalizedTargetRevisionRef &&
+        String(reviewRow.revision_ref || '') !== normalizedTargetRevisionRef;
+      if (explicitOperatorRetrigger || pendingRevisionRefMoved) {
+        const pendingAssignments = [];
         const pendingParams = [];
         if (normalizedTargetRevisionRef) {
+          pendingAssignments.push('revision_ref = ?');
           pendingParams.push(normalizedTargetRevisionRef);
         }
-        pendingParams.push(
-          requestedAt,
-          normalizedReason,
-          repo,
-          prNumber
-        );
+        if (explicitOperatorRetrigger) {
+          pendingAssignments.push('rereview_requested_at = ?');
+          pendingAssignments.push('rereview_reason = ?');
+          pendingParams.push(requestedAt, normalizedReason);
+        }
+        pendingParams.push(repo, prNumber);
         db.prepare(
           `UPDATE reviewed_prs
-              SET ${normalizedTargetRevisionRef ? 'revision_ref = ?,' : ''}
-                  rereview_requested_at = ?,
-                  rereview_reason = ?
+              SET ${pendingAssignments.join(',\n                  ')}
             WHERE repo = ?
               AND pr_number = ?
               AND pr_state = 'open'

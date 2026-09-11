@@ -49,6 +49,7 @@ const DEFAULT_FOLLOW_UP_JOBS_SOURCE = "export const FOLLOW_UP_JOB_DIRS = { pendi
 
 function buildLoaderSource({
   subjectHeads = {},
+  subjectRevisionRefs = {},
   followUpJobsSource = DEFAULT_FOLLOW_UP_JOBS_SOURCE,
   reviewerRuntimeSource = "globalThis.__watcherClaimLoopReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__watcherClaimLoopReviewerSpawns.push(payload); return { ok: true, stdout: '', stderr: '' }; }, cancel: async () => {}, reattach: async () => ({}) }; } export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); } export function loadDomainConfig() { return {}; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",
   followUpMergeAgentSource = "export const MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION = 'dispatched-label-add'; export function classifyBlockingFindings() { return { count: 0, state: 'known' }; } export async function addMergeAgentDispatchedLabel() { return { added: true }; } export function buildMergeAgentDispatchJob() { return null; } export async function dispatchMergeAgentForPR() { return { dispatched: false }; } export function fetchMergeAgentCandidate() { return null; } export async function cancelMergeAgentDispatchOnMerge() { return { attempted: false, cancelled: false, labelRemoved: false }; } export function clearMergeAgentLifecycleCleanup() { return true; } export function listMergeAgentDispatches() { return []; } export function listMergeAgentLifecycleCleanups() { return []; } export async function isMergeAgentDispatchActiveForHead() { return { active: false, reason: 'fixture' }; } export async function pollFastMergeQueue() { return { processed: 0, merged: 0, blocked: 0, requeued_head_change: 0, requeued_veto: 0, skipped_still_pending: 0 }; } export function resolveFastMergePerPollCap() { return 5; } export function shouldUseReviewerTimeoutExhaustedMergeGate() { return false; } export function summarizeChecksConclusion() { return 'SUCCESS'; } export function updateMergeAgentLifecycleCleanup() { return {}; } export function upsertMergeAgentLifecycleCleanup() { return {}; } export function scanStuckMergeAgentDispatches() { return []; } export async function reconcileProactivePhantomHandoffs() { return { inspected: 0, graceStarted: 0, escalated: 0 }; } export function validateStartupMergeAgentConfig() {} export function isScopedMergeAgentRequest() { return false; }",
@@ -128,9 +129,14 @@ export async function load(url, context, nextLoad) {
       source: ${JSON.stringify(`
         const REPO = 'laceyenterprises/adversarial-review';
         const subjectHeadOverrides = ${JSON.stringify(subjectHeads)};
+        const subjectRevisionRefOverrides = ${JSON.stringify(subjectRevisionRefs)};
         const subjects = [
           {
-            ref: { domainId: 'code-pr', subjectExternalId: REPO + '#101', revisionRef: subjectHeadOverrides['101'] || 'sha-happy-101' },
+            ref: {
+              domainId: 'code-pr',
+              subjectExternalId: REPO + '#101',
+              revisionRef: subjectRevisionRefOverrides['101'] || subjectHeadOverrides['101'] || 'sha-happy-101',
+            },
             lifecycle: 'pending-review',
             title: '[codex] LAC-636 happy path runtime claim',
             authorRef: 'codex-worker',
@@ -911,6 +917,135 @@ test('watcher pollOnce claim loop records subject-state head SHAs and drives the
     assert.ok(
       summary.reviewerPassRows.every((row) => row.workspace_path === REPO_ROOT),
       'reviewer pass rows should retain the tool root so transcript token fallback can match Claude sessions on disk'
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('watcher pollOnce refreshes a stale pending revision_ref before reviewer claim', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-stale-pending-head-'));
+  const loaderPath = path.join(tmp, 'fixture-loader.mjs');
+  const registerPath = path.join(tmp, 'fixture-register.mjs');
+  const runnerPath = path.join(tmp, 'fixture-runner.mjs');
+  try {
+    writeFileSync(loaderPath, buildLoaderSource({
+      subjectHeads: { 101: 'head-current-1035' },
+    }));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({
+      freshHeads: { 101: 'head-current-1035' },
+      prePollSetup: `
+        db.prepare(
+          \`INSERT INTO reviewed_prs
+             (repo, pr_number, domain_id, subject_external_id, revision_ref,
+              reviewed_at, reviewer, pr_state, review_status, review_attempts)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\`
+        ).run(
+          'laceyenterprises/adversarial-review',
+          101,
+          'code-pr',
+          'laceyenterprises/adversarial-review#101',
+          'head-stale-1035',
+          '2026-09-11T02:20:00.000Z',
+          'gemini',
+          'open',
+          'pending',
+          0
+        );
+      `,
+    }));
+
+    const result = spawnSync(
+      process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        env: fixtureEnv(installGhFixture(tmp)),
+      }
+    );
+
+    const output = `${result.stdout || ''}${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+    const summaryLine = result.stdout
+      .split(/\r?\n/)
+      .find((line) => line.startsWith(SUMMARY_MARKER));
+    assert.ok(summaryLine, output);
+    const summary = JSON.parse(summaryLine.slice(SUMMARY_MARKER.length));
+
+    assert.equal(summary.rows['101'].revision_ref, 'head-current-1035');
+    assert.equal(summary.rows['101'].reviewer_head_sha, 'head-current-1035');
+    assert.ok(
+      summary.reviewerSpawns.some(
+        (spawn) => spawn.subjectContext?.reviewerHeadSha === 'head-current-1035',
+      ),
+      'reviewer spawn must target the refreshed current head',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('watcher claim preserves canonical revision_ref when it differs from head SHA', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-canonical-revision-ref-'));
+  const loaderPath = path.join(tmp, 'fixture-loader.mjs');
+  const registerPath = path.join(tmp, 'fixture-register.mjs');
+  const runnerPath = path.join(tmp, 'fixture-runner.mjs');
+  try {
+    writeFileSync(loaderPath, buildLoaderSource({
+      subjectHeads: { 101: 'git-head-current-1035' },
+      subjectRevisionRefs: { 101: 'canonical-review-ref-1035' },
+    }));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({
+      freshHeads: { 101: 'git-head-current-1035' },
+      prePollSetup: `
+        db.prepare(
+          \`INSERT INTO reviewed_prs
+             (repo, pr_number, domain_id, subject_external_id, revision_ref,
+              reviewed_at, reviewer, pr_state, review_status, review_attempts)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\`
+        ).run(
+          'laceyenterprises/adversarial-review',
+          101,
+          'code-pr',
+          'laceyenterprises/adversarial-review#101',
+          'canonical-review-ref-stale',
+          '2026-09-11T02:20:00.000Z',
+          'gemini',
+          'open',
+          'pending',
+          0
+        );
+      `,
+    }));
+
+    const result = spawnSync(
+      process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        env: fixtureEnv(installGhFixture(tmp)),
+      }
+    );
+
+    const output = `${result.stdout || ''}${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+    const summaryLine = result.stdout
+      .split(/\r?\n/)
+      .find((line) => line.startsWith(SUMMARY_MARKER));
+    assert.ok(summaryLine, output);
+    const summary = JSON.parse(summaryLine.slice(SUMMARY_MARKER.length));
+
+    assert.equal(summary.rows['101'].revision_ref, 'canonical-review-ref-1035');
+    assert.equal(summary.rows['101'].reviewer_head_sha, 'git-head-current-1035');
+    assert.ok(
+      summary.reviewerSpawns.some(
+        (spawn) => spawn.subjectContext?.reviewerHeadSha === 'git-head-current-1035',
+      ),
+      'reviewer spawn must still execute against the raw Git head',
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });

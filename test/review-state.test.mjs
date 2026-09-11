@@ -914,6 +914,47 @@ test("requestReviewRereview returns already-pending when row is already 'pending
   assert.equal(result.status, 'already-pending');
 });
 
+test("requestReviewRereview refreshes an already-pending row's revision_ref for a newer head", () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: 'pending',
+    postedAt: null,
+  });
+  const db = openReviewStateDb(rootDir);
+  try {
+    db.prepare(
+      'UPDATE reviewed_prs SET revision_ref = ?, rereview_requested_at = NULL, rereview_reason = NULL WHERE repo = ? AND pr_number = ?'
+    ).run('head-old-238', 'laceyenterprises/adversarial-review', 10);
+  } finally {
+    db.close();
+  }
+
+  const result = requestReviewRereview({
+    rootDir,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 10,
+    requestedAt: '2026-09-11T02:30:00.000Z',
+    targetRevisionRef: 'head-current-238',
+    reason: 'auto-refresh: pending review queued on stale head head-old-238; current head is head-current',
+  });
+
+  assert.equal(result.triggered, false);
+  assert.equal(result.status, 'already-pending');
+
+  const verify = openReviewStateDb(rootDir);
+  try {
+    const row = verify.prepare(
+      'SELECT review_status, revision_ref, rereview_requested_at, rereview_reason FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get('laceyenterprises/adversarial-review', 10);
+    assert.equal(row.review_status, 'pending');
+    assert.equal(row.revision_ref, 'head-current-238');
+    assert.equal(row.rereview_requested_at, null);
+    assert.equal(row.rereview_reason, null);
+  } finally {
+    verify.close();
+  }
+});
+
 test("requestReviewRereview does not treat incidental retrigger-review prose as explicit pending-row override", () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   insertReviewRow(rootDir, {

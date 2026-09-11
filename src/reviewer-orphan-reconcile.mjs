@@ -41,6 +41,7 @@ const INFRA_AUTO_RECOVER_CAP = DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS;
 // REVIEWER_LEASE_RECOVERY_ENABLED above. A claim only a poll or two old keeps
 // its full lease; the fast path only fires once it is older than this grace.
 const DEAD_REVIEWER_FAST_PATH_GRACE_MS = 300_000;
+const NULL_PGID_LAUNCH_GRACE_MS = 60 * 1000;
 
 // ── Reviewer session reconciliation (startup) ────────────────────────────────
 //
@@ -95,6 +96,7 @@ export function shouldReconcileStaleReviewerSession(row, now, {
   leaseRecoveryEnabled = REVIEWER_LEASE_RECOVERY_ENABLED,
   probeGroupAliveImpl = probeReviewerProcessGroupAlive,
   fastPathGraceMs = DEAD_REVIEWER_FAST_PATH_GRACE_MS,
+  nullPgidGraceMs = NULL_PGID_LAUNCH_GRACE_MS,
 } = {}) {
   if (leaseRecoveryEnabled && isReviewerLeaseExpired(row, now, { reviewerTimeoutMs })) {
     return true;
@@ -110,12 +112,14 @@ export function shouldReconcileStaleReviewerSession(row, now, {
   // small grace (~one poll interval) AND the reviewer is PROVABLY DEAD — its
   // recorded process group is gone, checked with a cheap local kill(-pgid,0)
   // probe and no GitHub/network call — surface the row for reconcile now.
-  // SAFETY INVARIANT: this fires only when a pgid was persisted AND that group
-  // is confirmed dead. A provably-ALIVE reviewer, or a row with no pgid yet
-  // (liveness unknown — it may still be spawning), keeps its full lease
-  // untouched, so a legitimately slow review is never reclaimed; null-pgid rows
-  // stay governed by the existing full-timeout lease path below and by
-  // reconcileReviewerSessions' own null-pgid within-timeout guard.
+  // SAFETY INVARIANT: a provably-ALIVE reviewer with a persisted pgid keeps its
+  // full lease untouched, so a legitimately slow review is never reclaimed.
+  // A row with no pgid yet keeps only the short spawn-callback grace: after that
+  // reconcileReviewerSessions scans for the session UUID, adopts any matching
+  // child it finds, and only then decides whether the claim can be re-armed.
+  // This avoids the 20-minute invisible interval for claims where the watcher
+  // died before persistReviewerPgid ran, while preserving the duplicate-review
+  // guard during the actual launch window.
   // reconcileReviewerSessions still re-probes and makes the actual release
   // decision (dead+head-moved -> releaseSuperseded->pending, dead+same-head ->
   // releasePending->pending); this only widens the poll filter, which the boot
@@ -125,11 +129,20 @@ export function shouldReconcileStaleReviewerSession(row, now, {
     const pgid = row?.reviewer_pgid;
     const hasPgid = pgid !== null && pgid !== undefined && pgid !== '';
     const claimAgeMs = reviewerClaimAgeMs(row, now);
+    const missingPgid = !hasPgid;
     if (
       hasPgid &&
       Number.isFinite(claimAgeMs) &&
       claimAgeMs > fastPathGraceMs &&
       !probeGroupAliveImpl(pgid)
+    ) {
+      return true;
+    }
+    if (
+      missingPgid &&
+      row?.reviewer_session_uuid &&
+      Number.isFinite(claimAgeMs) &&
+      claimAgeMs > Math.max(0, Number(nullPgidGraceMs) || 0)
     ) {
       return true;
     }

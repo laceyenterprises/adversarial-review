@@ -64,6 +64,28 @@ test('summarizeExternalChecks treats unreported external states as pending', () 
   assert.deepEqual(summary.failedChecks, []);
 });
 
+test('summarizeExternalChecks treats missing required external contexts as pending', () => {
+  const summary = summarizeExternalChecks([
+    {
+      __typename: 'StatusContext',
+      context: 'agent-os/adversarial-gate',
+      state: 'SUCCESS',
+    },
+  ], {
+    cfg: { requiredCheckContexts: ['repo-guards'] },
+  });
+
+  assert.equal(summary.conclusion, 'PENDING');
+  assert.equal(summary.totalExternalChecks, 0);
+  assert.deepEqual(summary.failedChecks, []);
+  assert.deepEqual(summary.pendingChecks, [{
+    name: 'repo-guards',
+    state: 'PENDING',
+    workflowName: null,
+    detailsUrl: null,
+  }]);
+});
+
 test('inspectRemediationCiRegression fetches PR checks and returns failed state details', async () => {
   const calls = [];
   const result = await inspectRemediationCiRegression({
@@ -97,4 +119,62 @@ test('inspectRemediationCiRegression fetches PR checks and returns failed state 
   assert.equal(result.state, 'failed');
   assert.equal(result.headSha, 'abc123');
   assert.equal(result.failedChecks[0].name, 'repo-guards');
+});
+
+test('inspectRemediationCiRegression returns green when external checks pass and only self-gate fails', async () => {
+  const result = await inspectRemediationCiRegression({
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 1036,
+    cfg: EMPTY_CFG,
+    execFileImpl: async () => ({
+      stdout: JSON.stringify({
+        headRefOid: 'abc123',
+        statusCheckRollup: [
+          {
+            __typename: 'StatusContext',
+            context: 'agent-os/adversarial-gate',
+            state: 'FAILURE',
+          },
+          {
+            __typename: 'CheckRun',
+            name: 'npm test (Node 20)',
+            conclusion: 'SUCCESS',
+          },
+          {
+            __typename: 'CheckRun',
+            name: 'npm test (Node 22)',
+            conclusion: 'SUCCESS',
+          },
+        ],
+      }),
+    }),
+    log: { warn() {} },
+  });
+
+  assert.equal(result.conclusion, 'SUCCESS');
+  assert.equal(result.state, 'green');
+  assert.equal(result.headSha, 'abc123');
+  assert.equal(result.totalExternalChecks, 2);
+  assert.deepEqual(result.failedChecks, []);
+  assert.deepEqual(result.pendingChecks, []);
+});
+
+test('inspectRemediationCiRegression keeps missing rollups unknown', async () => {
+  const result = await inspectRemediationCiRegression({
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 1036,
+    cfg: EMPTY_CFG,
+    execFileImpl: async () => ({
+      stdout: JSON.stringify({
+        headRefOid: 'abc123',
+        statusCheckRollup: null,
+      }),
+    }),
+    log: { warn() {} },
+  });
+
+  assert.equal(result.conclusion, null);
+  assert.equal(result.rollupKnown, false);
+  assert.equal(result.state, 'unknown');
+  assert.equal(result.headSha, 'abc123');
 });

@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { resolveRequiredCheckContextsFromCfg } from './ama/required-check-contexts.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 import { summarizeChecksConclusion } from './checks-summary.mjs';
 import { execGhWithRetry } from './gh-cli.mjs';
@@ -58,11 +59,20 @@ function normalizeCheckForRecord(item) {
 }
 
 function summarizeExternalChecks(statusCheckRollup, { env = process.env, cfg = null } = {}) {
+  const rollupKnown = Array.isArray(statusCheckRollup);
   const conclusion = summarizeChecksConclusion(statusCheckRollup, { env, cfg });
-  const items = Array.isArray(statusCheckRollup) ? statusCheckRollup : [];
+  const items = rollupKnown ? statusCheckRollup : [];
   const external = items.filter((item) => !isOwnGateItem(item, env));
   const failedChecks = [];
   const pendingChecks = [];
+  const reportedContexts = new Set(
+    external
+      .map((item) => String(item?.context || item?.name || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+  const requiredContexts = resolveRequiredCheckContextsFromCfg(cfg)
+    .map((context) => String(context).trim())
+    .filter(Boolean);
 
   for (const item of external) {
     const state = normalizeCheckState(item);
@@ -74,9 +84,19 @@ function summarizeExternalChecks(statusCheckRollup, { env = process.env, cfg = n
       failedChecks.push(normalizeCheckForRecord(item));
     }
   }
+  for (const context of requiredContexts) {
+    if (reportedContexts.has(context.toLowerCase())) continue;
+    pendingChecks.push({
+      name: context,
+      state: 'PENDING',
+      workflowName: null,
+      detailsUrl: null,
+    });
+  }
 
   return {
     conclusion,
+    rollupKnown,
     failedChecks,
     pendingChecks,
     totalExternalChecks: external.length,
@@ -135,6 +155,13 @@ async function inspectRemediationCiRegression({
   }
 
   const summary = summarizeExternalChecks(payload.statusCheckRollup, { env, cfg });
+  if (!summary.rollupKnown) {
+    return {
+      state: 'unknown',
+      headSha: payload.headSha,
+      ...summary,
+    };
+  }
   if (summary.failedChecks.length > 0) {
     return {
       state: 'failed',
@@ -142,15 +169,15 @@ async function inspectRemediationCiRegression({
       ...summary,
     };
   }
-  if (summary.conclusion === 'SUCCESS') {
+  if (summary.pendingChecks.length > 0) {
     return {
-      state: 'green',
+      state: 'pending',
       headSha: payload.headSha,
       ...summary,
     };
   }
   return {
-    state: summary.conclusion === 'PENDING' ? 'pending' : 'unknown',
+    state: 'green',
     headSha: payload.headSha,
     ...summary,
   };

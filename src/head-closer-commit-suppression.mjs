@@ -44,6 +44,18 @@ const LOCAL_GIT_TIMEOUT_MS = 5000;
 const LOCAL_GIT_MAX_BUFFER = 1024 * 1024 * 16;
 const FULL_SHA_RE = /\b[a-f0-9]{40}\b/gi;
 const GIT_STDOUT_DIAGNOSTIC_RE = /^(warning|hint):\s/i;
+const LOCAL_GIT_TRANSIENT_SYSTEM_CODES = new Set([
+  'EAGAIN',
+  'EBUSY',
+  'ECONNRESET',
+  'EIO',
+  'EMFILE',
+  'ENFILE',
+  'ENOMEM',
+  'ETIMEDOUT',
+]);
+const LOCAL_GIT_STRONG_TRANSIENT_DIAGNOSTIC_RE =
+  /input\/output error|i\/o error|resource temporarily unavailable|temporarily unavailable|try again|too many open files|cannot allocate memory|connection reset|early eof|remote end hung up/;
 
 function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -51,7 +63,7 @@ function sleepMs(ms) {
 
 export function isTransientLocalGitError(err) {
   const code = String(err?.code || '').toUpperCase();
-  if (['EAGAIN', 'EBUSY', 'ECONNRESET', 'EIO', 'EMFILE', 'ENFILE', 'ENOMEM', 'ETIMEDOUT'].includes(code)) {
+  if (LOCAL_GIT_TRANSIENT_SYSTEM_CODES.has(code)) {
     return true;
   }
   if (err?.killed || err?.signal) return true;
@@ -63,6 +75,16 @@ export function isTransientLocalGitError(err) {
   return /timed?\s*out|timeout|input\/output error|i\/o error|resource temporarily unavailable|temporarily unavailable|try again|too many open files|cannot allocate memory|connection reset|early eof|remote end hung up/.test(detail);
 }
 
+function hasStrongTransientLocalGitEvidence(err) {
+  const code = String(err?.code || '').toUpperCase();
+  if (LOCAL_GIT_TRANSIENT_SYSTEM_CODES.has(code)) return true;
+  const detail = [
+    err?.message,
+    err?.stderr,
+  ].map((part) => String(part || '').toLowerCase()).filter(Boolean).join('\n');
+  return LOCAL_GIT_STRONG_TRANSIENT_DIAGNOSTIC_RE.test(detail);
+}
+
 function isMissingLocalGitObjectError(err) {
   const detail = [
     err?.message,
@@ -70,6 +92,13 @@ function isMissingLocalGitObjectError(err) {
     err?.stdout,
   ].map((part) => String(part || '').toLowerCase()).filter(Boolean).join('\n');
   return /bad object|unknown revision|ambiguous argument|not a valid object name|needed a single revision|invalid object name|object .* not found|could not parse/.test(detail);
+}
+
+function shouldFetchMissingLocalGitObjectImmediately(err) {
+  if (!isMissingLocalGitObjectError(err) || hasStrongTransientLocalGitEvidence(err)) return false;
+  const code = String(err?.code || '').toUpperCase();
+  if ((err?.killed || err?.signal) && code !== '128') return false;
+  return true;
 }
 
 function extractIdentityHashes(identityOutput, expectedSha) {
@@ -151,6 +180,7 @@ export async function fetchVerifiedCommitFromLocalGit({
         });
         return String(stdout || '');
       } catch (err) {
+        if (shouldFetchMissingLocalGitObjectImmediately(err)) throw err;
         if (!isTransientLocalGitError(err) || attempt >= retryDelays.length) throw err;
         const delayMs = Math.max(0, Number(retryDelays[attempt]) || 0);
         logger?.debug?.(

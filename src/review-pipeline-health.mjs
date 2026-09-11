@@ -20,6 +20,7 @@ import {
   isPrUnverified,
   readPrTerminalReconcileState,
 } from './pr-terminal-reconcile.mjs';
+import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
 
 const DEFAULT_REVIEWER_DEATH_RATE_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_REVIEWER_DEATH_RATE_THRESHOLD = 0.5;
@@ -108,6 +109,7 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_reviewer_degradation_active',
   'review_pipeline_first_pass_queue_depth',
   'review_pipeline_first_pass_oldest_pending_age_seconds',
+  'review_pipeline_ci_blocked_rereviews',
   'review_pipeline_remediation_backlog_jobs',
   'review_pipeline_remediation_oldest_pending_age_seconds',
   'review_pipeline_remediation_throughput_jobs',
@@ -138,6 +140,7 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_reviewer_degradation_active: 'Active reviewer degradation/backoff PR count by failure class and state.',
   review_pipeline_first_pass_queue_depth: 'Current count of pending first-pass or rereview rows.',
   review_pipeline_first_pass_oldest_pending_age_seconds: 'Age in seconds of the oldest pending first-pass or rereview row.',
+  review_pipeline_ci_blocked_rereviews: 'Current count of re-reviews parked behind failed external CI.',
   review_pipeline_remediation_backlog_jobs: 'Current follow-up remediation job count by state.',
   review_pipeline_remediation_oldest_pending_age_seconds: 'Age in seconds of the oldest pending remediation job.',
   review_pipeline_remediation_throughput_jobs: 'Terminal remediation jobs observed in the configured throughput window.',
@@ -212,6 +215,14 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     category: 'review-pipeline',
     thresholdKey: 'queueStarvationMaxAgeMs',
     defaultThreshold: DEFAULT_QUEUE_STARVATION_MAX_AGE_MS,
+  },
+  {
+    code: 'review:rereview_ci_blocked',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: null,
+    defaultThreshold: null,
+    thresholdDescription: 'one or more open re-reviews are parked because external CI failed and no remediation job exists to requeue',
   },
   {
     code: 'review:pr_lifecycle_mirror_unverified',
@@ -1295,6 +1306,47 @@ function summarizeFirstPassQueue(db, { nowMs }) {
   };
 }
 
+function summarizeCiBlockedRereviews(db, { nowMs }) {
+  if (!db) return { count: 0, oldest: null, prs: [] };
+  const rows = safeAll(
+    db,
+    `SELECT repo,
+            pr_number,
+            reviewed_at,
+            rereview_requested_at,
+            last_attempted_at,
+            failed_at,
+            failure_message,
+            review_attempts,
+            reviewer_head_sha,
+            revision_ref
+       FROM reviewed_prs
+      WHERE COALESCE(pr_state, 'open') = 'open'
+        AND review_status = ?
+      ORDER BY failed_at ASC, last_attempted_at ASC, pr_number ASC`,
+    [REREVIEW_CI_BLOCKED_STATUS]
+  );
+  const prs = rows.map((row) => {
+    const blockedSince = row.failed_at || row.last_attempted_at || row.rereview_requested_at || row.reviewed_at || null;
+    return {
+      repo: row.repo,
+      prNumber: row.pr_number,
+      blockedSince,
+      ageMs: ageMs(nowMs, blockedSince),
+      reviewAttempts: Number(row.review_attempts || 0),
+      reviewerHeadSha: row.reviewer_head_sha || null,
+      revisionRef: row.revision_ref || null,
+      failureMessage: String(row.failure_message || '').slice(0, 300) || null,
+    };
+  });
+  let oldest = null;
+  for (const pr of prs) {
+    if (pr.ageMs === null) continue;
+    if (!oldest || pr.ageMs > oldest.ageMs) oldest = pr;
+  }
+  return { count: prs.length, oldest, prs };
+}
+
 function summarizeMalformedPrTitles(db) {
   const rows = safeAll(
     db,
@@ -2324,6 +2376,22 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }));
   }
 
+  if (snapshot.ciBlockedRereviews.count > 0) {
+    const sample = snapshot.ciBlockedRereviews.oldest || snapshot.ciBlockedRereviews.prs[0];
+    findings.push(buildFinding({
+      code: 'review:rereview_ci_blocked',
+      tier: 'ticket',
+      subject: `${snapshot.ciBlockedRereviews.count} re-review(s) are parked behind failed external CI`,
+      message: `${sample.repo}#${sample.prNumber} is review_status='${REREVIEW_CI_BLOCKED_STATUS}' since ${sample.blockedSince || 'unknown'}; the watcher will not spend reviewer capacity on this head until CI turns green or remediation is requeued.`,
+      evidence: snapshot.ciBlockedRereviews.prs.map((pr) => (
+        `reviews.db reviewed_prs ${pr.repo}#${pr.prNumber} status=${REREVIEW_CI_BLOCKED_STATUS} head=${pr.reviewerHeadSha || pr.revisionRef || 'unknown'}`
+      )),
+      recommendedAction: 'Fix the failing external CI on the PR head or requeue remediation. Do not bounce reviewer daemons for this signal alone; the parked row is intentionally not claimable.',
+      observedAt,
+      details: snapshot.ciBlockedRereviews,
+    }));
+  }
+
   const pendingRemediation = snapshot.followUpQueues.states.pending || 0;
   if (pendingRemediation > config.remediationBacklogThreshold) {
     findings.push(buildFinding({
@@ -2767,6 +2835,9 @@ function collectReviewPipelineHealth({
     const firstPassQueue = db
       ? summarizeFirstPassQueue(db, { nowMs })
       : { depth: 0, oldest: null };
+    const ciBlockedRereviews = db
+      ? summarizeCiBlockedRereviews(db, { nowMs })
+      : { count: 0, oldest: null, prs: [] };
     const malformedPrTitles = db
       ? summarizeMalformedPrTitles(db)
       : { count: 0, prs: [] };
@@ -2871,6 +2942,7 @@ function collectReviewPipelineHealth({
       reviewerDegradation,
       outage,
       firstPassQueue,
+      ciBlockedRereviews,
       lifecycleReconciliation,
       malformedPrTitles,
       followUpQueues: {
@@ -2967,6 +3039,7 @@ function renderReviewPipelinePrometheus(snapshot) {
     {},
     Math.round((snapshot.firstPassQueue.oldest?.ageMs || 0) / 1000)
   );
+  pushMetric('review_pipeline_ci_blocked_rereviews', {}, snapshot.ciBlockedRereviews?.count || 0);
   for (const [state, count] of Object.entries(snapshot.followUpQueues.states)) {
     pushMetric('review_pipeline_remediation_backlog_jobs', { state }, count);
   }

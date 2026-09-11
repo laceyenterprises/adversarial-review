@@ -135,6 +135,7 @@ import {
   stmtRecordArgusClassifiedHead,
   stmtMarkMerged,
   stmtMarkMergedPendingReviewSkipped,
+  stmtMarkRereviewCiBlocked,
   stmtMarkReviewCycleCapPaused,
   stmtMarkReviewPopulationRetryAttemptStarted,
   stmtMarkReviewerCommandFailedRecoveredPosted,
@@ -146,6 +147,7 @@ import {
   stmtUpdateReviewRouting,
 } from './review-state-db.mjs';
 import { requestReviewRereview } from './review-state.mjs';
+import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
 import {
   buildDuplicateReviewSkipAudit,
   headDispatchLeaseKey,
@@ -1698,7 +1700,7 @@ export async function processReviewSubject(entry, ctx) {
         );
       }
 
-      const current = stmtGetReviewRow.get(repoPath, prNumber);
+      let current = stmtGetReviewRow.get(repoPath, prNumber);
       const pendingRevisionRef = subject.ref?.revisionRef || subject.headSha || null;
       if (
         current?.review_status === 'pending' &&
@@ -1735,6 +1737,112 @@ export async function processReviewSubject(entry, ctx) {
             err?.message || err
           );
         }
+      }
+      if (
+        current?.review_status === REREVIEW_CI_BLOCKED_STATUS &&
+        !subject.terminal
+      ) {
+        const blockedHeadSha = current.reviewer_head_sha || current.revision_ref || null;
+        const blockedHeadMoved =
+          blockedHeadSha &&
+          pendingRevisionRef &&
+          String(blockedHeadSha) !== String(pendingRevisionRef);
+        if (blockedHeadMoved) {
+          try {
+            const refreshResult = requestReviewRereview({
+              rootDir: ROOT,
+              repo: repoPath,
+              prNumber,
+              targetRevisionRef: pendingRevisionRef,
+              reason:
+                `auto-refresh: ci-blocked re-review parked on stale head ` +
+                `${String(blockedHeadSha).slice(0, 12)}; ` +
+                `current head is ${String(pendingRevisionRef).slice(0, 12)}`,
+            });
+            current = stmtGetReviewRow.get(repoPath, prNumber);
+            if (refreshResult.triggered || current?.review_status === 'pending') {
+              console.log(
+                `[watcher] re-armed CI-blocked re-review for ${repoPath}#${prNumber}: ` +
+                  `${String(blockedHeadSha).slice(0, 12)} -> ${String(pendingRevisionRef).slice(0, 12)}`
+              );
+            }
+          } catch (err) {
+            console.error(
+              `[watcher] CI-blocked re-review head refresh for ${repoPath}#${prNumber} failed:`,
+              err?.message || err
+            );
+          }
+        } else {
+          const ciBlockedActiveFollowUp = shouldDeferReviewForActiveFollowUp({
+            rootDir: ROOT,
+            repo: repoPath,
+            prNumber,
+            currentRevisionRef: pendingRevisionRef,
+          });
+          if (ciBlockedActiveFollowUp.defer) {
+            console.log(
+              `[watcher] Holding CI-blocked re-review for ${repoPath}#${prNumber}: active follow-up job` +
+                (ciBlockedActiveFollowUp.jobId ? ` ${ciBlockedActiveFollowUp.jobId}` : '') +
+                ` is ${ciBlockedActiveFollowUp.latestJobStatus}`
+            );
+            await projectGateStatusSafe(current);
+            return;
+          }
+          const ciAdmission = await guardRereviewCiBeforeReviewer({
+            rootDir: ROOT,
+            repo: repoPath,
+            prNumber,
+            passKind: 'rereview',
+            reviewerHeadSha: blockedHeadSha || pendingRevisionRef,
+            execFileImpl: execFileAsync,
+            env: process.env,
+            log: console,
+            cfg: domainAdapterSet?.domainConfig,
+          });
+          if (ciAdmission.proceed) {
+            try {
+              const refreshResult = requestReviewRereview({
+                rootDir: ROOT,
+                repo: repoPath,
+                prNumber,
+                targetRevisionRef: pendingRevisionRef,
+                reason:
+                  `auto-refresh: ci-blocked re-review for ${repoPath}#${prNumber} ` +
+                  'now has green external CI on the parked head.',
+              });
+              current = stmtGetReviewRow.get(repoPath, prNumber);
+              if (refreshResult.triggered || current?.review_status === 'pending') {
+                console.log(
+                  `[watcher] re-armed CI-blocked re-review for ${repoPath}#${prNumber}: external CI is green`
+                );
+              }
+            } catch (err) {
+              console.error(
+                `[watcher] CI-blocked re-review green-CI refresh for ${repoPath}#${prNumber} failed:`,
+                err?.message || err
+              );
+            }
+          } else {
+            markWatcherSpawnDecision({
+              repo: repoPath,
+              pr_number: prNumber,
+              decision: ciAdmission.reason,
+              failure_class: 'ci-regression',
+              previous_status: current.review_status,
+              reviewer_head_sha: blockedHeadSha || pendingRevisionRef,
+            });
+            console.log(
+              `[watcher] Holding CI-blocked re-review for ${repoPath}#${prNumber}: ` +
+                `${ciAdmission.reason}; reviewer admission requires green external CI.`
+            );
+            await projectGateStatusSafe(current);
+            return;
+          }
+        }
+      }
+      if (current?.review_status === REREVIEW_CI_BLOCKED_STATUS) {
+        await projectGateStatusSafe(current);
+        return;
       }
       await projectGateStatusSafe(current);
       const activeFollowUp = shouldDeferReviewForActiveFollowUp({
@@ -2527,10 +2635,33 @@ export async function processReviewSubject(entry, ctx) {
               execFileImpl: execFileAsync,
               env: process.env,
               log: console,
-              cfg: domainAdapterSet.domainConfig,
+              cfg: domainAdapterSet?.domainConfig,
             });
             if (!ciAdmission.proceed) {
-              stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
+              if (ciAdmission.parkReview && ciAdmission.parkReviewStatus === REREVIEW_CI_BLOCKED_STATUS) {
+                const failureMessage = ciAdmission.failureMessage
+                  || `[ci-regression-no-job] Re-review for ${repoPath}#${prNumber} is parked because external CI failed and no follow-up job exists to requeue.`;
+                const parked = stmtMarkRereviewCiBlocked.run(
+                  attemptAt,
+                  failureMessage,
+                  attemptAt,
+                  reviewerHeadSha,
+                  pendingRevisionRef,
+                  reviewerSessionUuid,
+                  repoPath,
+                  prNumber
+                );
+                if (parked.changes === 1) {
+                  console.warn(
+                    `[watcher] Parked CI-blocked re-review for ${repoPath}#${prNumber}: ` +
+                      'failed external CI with no follow-up job to requeue.'
+                  );
+                } else {
+                  stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
+                }
+              } else {
+                stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
+              }
               markWatcherSpawnDecision({
                 repo: repoPath,
                 pr_number: prNumber,

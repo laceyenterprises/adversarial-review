@@ -29,6 +29,7 @@ import { PROVIDER_OVERLOADED_FAILURE_CLASS } from '../src/adapters/reviewer-runt
 import { QUOTA_EXHAUSTED_FAILURE_CLASS } from '../src/quota-exhaustion.mjs';
 import { parseArgs } from '../src/review-pipeline-health-cli.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
+import { REREVIEW_CI_BLOCKED_STATUS } from '../src/review-statuses.mjs';
 import { DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS } from '../src/reviewer-pass-reaper.mjs';
 import { ensureTtmTrackerSchema } from '../src/ttm-tracker.mjs';
 
@@ -942,6 +943,31 @@ test('an in-flight review does not count as starvation', () => {
   const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
   assert.ok(!findingCodes(snapshot).includes('review:queue_starvation'));
   assert.equal(snapshot.firstPassQueue.depth, 0);
+});
+
+test('CI-blocked rereviews do not count as starvation and get their own finding', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 951,
+    reviewStatus: REREVIEW_CI_BLOCKED_STATUS,
+    reviewedAt: '2026-05-25T16:00:00.000Z',
+    lastAttemptedAt: '2026-05-25T16:05:00.000Z',
+    failedAt: '2026-05-25T16:05:00.000Z',
+    failureMessage: '[ci-regression-no-job] public-clone-readiness=FAILURE',
+  });
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+
+  assert.ok(!findingCodes(snapshot).includes('review:queue_starvation'));
+  assert.equal(snapshot.firstPassQueue.depth, 0);
+  assert.equal(snapshot.ciBlockedRereviews.count, 1);
+  assert.equal(snapshot.ciBlockedRereviews.oldest.prNumber, 951);
+  const finding = snapshot.findings.find((item) => item.code === 'review:rereview_ci_blocked');
+  assert.equal(finding.tier, 'ticket');
+  assert.match(finding.message, /review_status='ci-blocked'/);
+  assert.match(finding.recommended_action, /Fix the failing external CI/);
+
+  const output = renderReviewPipelinePrometheus(snapshot);
+  assert.match(output, /^review_pipeline_ci_blocked_rereviews 1$/m);
 });
 
 test('malformed PR title finding fires for open malformed review rows', () => {

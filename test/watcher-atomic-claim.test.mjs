@@ -7,8 +7,10 @@ import {
   prepareMarkInfraAutoRecoveryAttemptStarted,
   prepareMarkAttemptStarted,
   prepareMarkMergedPendingReviewSkipped,
+  prepareMarkRereviewCiBlocked,
 } from '../src/review-state-statements.mjs';
 import { infraRecoverableFailureClass } from '../src/reviewer-failure-classification.mjs';
+import { REREVIEW_CI_BLOCKED_STATUS } from '../src/review-statuses.mjs';
 
 const RELEASE_TO_PENDING_SQL =
   "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'";
@@ -585,6 +587,50 @@ test('atomic claim refuses for terminal and orphan-locked statuses', () => {
     const row = readRow(db);
     assert.equal(row.review_status, status, `status='${status}' unchanged`);
   }
+});
+
+test('CI-blocked rereview park clears the claim and remains non-claimable', () => {
+  const db = setupDb();
+  seedReviewRow(db, { reviewStatus: 'reviewing', reviewerHeadSha: 'head-red' });
+  db.prepare(
+    `UPDATE reviewed_prs
+        SET reviewer_session_uuid = ?,
+            reviewer_timeout_ms = ?,
+            reviewer_lease_expires_at = ?
+      WHERE repo = ? AND pr_number = ?`
+  ).run(
+    'session-ci-blocked',
+    20 * 60 * 1000,
+    '2026-05-02T18:30:00.000Z',
+    REPO,
+    PR
+  );
+
+  const parked = prepareMarkRereviewCiBlocked(db).run(
+    '2026-05-02T18:10:00.000Z',
+    '[ci-regression-no-job] public-clone-readiness=FAILURE',
+    '2026-05-02T18:10:00.000Z',
+    'head-red',
+    'head-red',
+    'session-ci-blocked',
+    REPO,
+    PR
+  );
+
+  assert.equal(parked.changes, 1);
+  const row = readRow(db);
+  assert.equal(row.review_status, REREVIEW_CI_BLOCKED_STATUS);
+  assert.equal(row.reviewer_session_uuid, null);
+  assert.equal(row.reviewer_timeout_ms, null);
+  assert.equal(row.reviewer_lease_expires_at, null);
+  assert.equal(row.reviewer_head_sha, 'head-red');
+  assert.equal(row.revision_ref, 'head-red');
+  assert.match(row.failure_message, /public-clone-readiness=FAILURE/);
+  assert.equal(
+    runClaim(db, '2026-05-02T18:11:00.000Z').changes,
+    0,
+    'ci-blocked rows must not consume reviewer dispatch capacity'
+  );
 });
 
 test('atomic claim simulates a real two-process race — only one wins', () => {

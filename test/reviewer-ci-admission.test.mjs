@@ -2,9 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  buildRereviewCiBlockedFailureMessage,
   buildRereviewCiRegressionReason,
   guardRereviewCiBeforeReviewer,
 } from '../src/reviewer-ci-admission.mjs';
+import { REREVIEW_CI_BLOCKED_STATUS } from '../src/review-statuses.mjs';
 
 function silentLog() {
   return {
@@ -146,6 +148,24 @@ test('guardRereviewCiBeforeReviewer refuses failed-CI rereview when there is no 
 
   assert.equal(result.proceed, false);
   assert.equal(result.reason, 'ci-regression-no-job');
+  assert.equal(result.parkReview, true);
+  assert.equal(result.parkReviewStatus, REREVIEW_CI_BLOCKED_STATUS);
+  assert.match(result.failureMessage, /^\[ci-regression-no-job\]/);
+  assert.match(result.failureMessage, /repo-guards=FAILURE/);
+});
+
+test('buildRereviewCiBlockedFailureMessage explains the parked recovery path', () => {
+  const message = buildRereviewCiBlockedFailureMessage({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 6593,
+    ciGate: {
+      failedChecks: [{ name: 'public-clone-readiness', state: 'FAILURE' }],
+    },
+  });
+
+  assert.match(message, /^\[ci-regression-no-job\]/);
+  assert.match(message, /public-clone-readiness=FAILURE/);
+  assert.match(message, /re-arm once the head changes or CI turns green/);
 });
 
 test('guardRereviewCiBeforeReviewer releases admission when CI observes a newer head', async () => {

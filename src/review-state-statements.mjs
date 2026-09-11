@@ -1,3 +1,5 @@
+import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
+
 export const MARK_ATTEMPT_STARTED_SQL = `UPDATE reviewed_prs
      SET review_status = 'reviewing',
          last_attempted_at = ?,
@@ -39,6 +41,24 @@ export const MARK_ATTEMPT_STARTED_SQL = `UPDATE reviewed_prs
      -- so blocking 'closed' here would wrongly defer a reopened PR by a tick.
      -- COALESCE treats a NULL pr_state as open so a legitimate PR is never skipped.
      AND COALESCE(pr_state, 'open') != 'merged'`;
+
+export const MARK_REREVIEW_CI_BLOCKED_SQL = `UPDATE reviewed_prs
+      SET review_status = '${REREVIEW_CI_BLOCKED_STATUS}',
+          failed_at = ?,
+          failure_message = ?,
+          last_attempted_at = ?,
+          reviewer_session_uuid = NULL,
+          reviewer_started_at = NULL,
+          reviewer_head_sha = COALESCE(?, reviewer_head_sha),
+          revision_ref = COALESCE(?, revision_ref),
+          reviewer_timeout_ms = NULL,
+          reviewer_lease_expires_at = NULL,
+          reviewer_pgid = NULL,
+          quota_reset_at_utc = NULL
+    WHERE reviewer_session_uuid = ?
+      AND repo = ?
+      AND pr_number = ?
+      AND review_status = 'reviewing'`;
 
 export const MARK_INFRA_AUTO_RECOVERY_ATTEMPT_STARTED_SQL =
   `UPDATE reviewed_prs
@@ -226,6 +246,10 @@ export function prepareMarkAttemptStarted(db) {
   return db.prepare(MARK_ATTEMPT_STARTED_SQL);
 }
 
+export function prepareMarkRereviewCiBlocked(db) {
+  return db.prepare(MARK_REREVIEW_CI_BLOCKED_SQL);
+}
+
 export function prepareMarkInfraAutoRecoveryAttemptStarted(db) {
   return db.prepare(MARK_INFRA_AUTO_RECOVERY_ATTEMPT_STARTED_SQL);
 }
@@ -271,7 +295,7 @@ export const SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW =
   // SQLite's `NOT IN` drops NULL, so keep the null-safe shape explicit: exclude
   // terminal refused states while still counting rows with no status yet -- the
   // exact rows most likely to be genuinely awaiting a first pass.
-  "AND (review_status IS NULL OR review_status NOT IN ('malformed', 'unroutable-bot-author', 'argus-security-queued')) " +
+  `AND (review_status IS NULL OR review_status NOT IN ('malformed', 'unroutable-bot-author', 'argus-security-queued', '${REREVIEW_CI_BLOCKED_STATUS}')) ` +
   "AND NOT EXISTS ( " +
   "  SELECT 1 FROM reviewer_passes " +
   "  WHERE reviewer_passes.repo = reviewed_prs.repo " +

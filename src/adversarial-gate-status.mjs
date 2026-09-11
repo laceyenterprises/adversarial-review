@@ -22,6 +22,7 @@ import {
 } from './review-state.mjs';
 import { withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
 import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
+import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
 import {
   ARGUS_GATE_REASONS,
   ARGUS_VERDICT_STATES,
@@ -590,6 +591,13 @@ function pickAdversarialGateStatus({
       return decide('pending', 'Adversarial reviewer hit an upstream cascade; retry is pending.', 'reviewer-cascade-retry-pending');
     }
     return decide('pending', 'Adversarial review retry is pending.', 'review-retry-pending');
+  }
+  if (reviewStatus === REREVIEW_CI_BLOCKED_STATUS) {
+    return decide(
+      'pending',
+      'Re-review is parked until the PR head has green external CI or remediation is requeued.',
+      'rereview-ci-blocked'
+    );
   }
   if (reviewStatus === 'fast_merge_skipped') {
     return decide(

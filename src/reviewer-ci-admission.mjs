@@ -2,9 +2,14 @@ import { requeueFollowUpJobForNextRound } from './follow-up-jobs.mjs';
 import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 import { inspectRemediationCiRegression } from './remediation-ci-regression.mjs';
 import { formatCiCheckList } from './ci-check-format.mjs';
+import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
 
 function buildRereviewCiRegressionReason({ repo, prNumber, ciGate }) {
   return `Remediation for ${repo}#${prNumber} introduced or left failed CI on the current PR head before re-review: ${formatCiCheckList(ciGate?.failedChecks)}. Requeueing so the next remediation worker fixes CI before re-review.`;
+}
+
+function buildRereviewCiBlockedFailureMessage({ repo, prNumber, ciGate }) {
+  return `[ci-regression-no-job] Re-review for ${repo}#${prNumber} is parked because the current PR head has failed external CI and no follow-up job exists to requeue: ${formatCiCheckList(ciGate?.failedChecks)}. Push a fix or requeue remediation; the watcher will re-arm once the head changes or CI turns green.`;
 }
 
 function normalizeCiAdmissionState(state) {
@@ -67,7 +72,14 @@ async function guardRereviewCiBeforeReviewer({
         `[watcher] Refusing re-review for ${repo}#${prNumber}: failed external CI ` +
           `(${formatCiCheckList(ciGate.failedChecks)}) but no follow-up job exists to requeue.`
       );
-      return { proceed: false, reason: 'ci-regression-no-job', ciGate };
+      return {
+        proceed: false,
+        reason: 'ci-regression-no-job',
+        ciGate,
+        parkReview: true,
+        parkReviewStatus: REREVIEW_CI_BLOCKED_STATUS,
+        failureMessage: buildRereviewCiBlockedFailureMessage({ repo, prNumber, ciGate }),
+      };
     }
 
     const reason = buildRereviewCiRegressionReason({ repo, prNumber, ciGate });
@@ -133,6 +145,7 @@ async function guardRereviewCiBeforeReviewer({
 }
 
 export {
+  buildRereviewCiBlockedFailureMessage,
   buildRereviewCiRegressionReason,
   guardRereviewCiBeforeReviewer,
 };

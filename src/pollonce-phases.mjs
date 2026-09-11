@@ -1698,6 +1698,43 @@ export async function processReviewSubject(entry, ctx) {
       }
 
       const current = stmtGetReviewRow.get(repoPath, prNumber);
+      const pendingRevisionRef = subject.ref?.revisionRef || subject.headSha || null;
+      if (
+        current?.review_status === 'pending' &&
+        pendingRevisionRef &&
+        String(current.revision_ref || '') !== String(pendingRevisionRef) &&
+        !subject.terminal
+      ) {
+        try {
+          const beforeRevisionRef = current.revision_ref || null;
+          const refreshResult = requestReviewRereview({
+            rootDir: ROOT,
+            repo: repoPath,
+            prNumber,
+            targetRevisionRef: pendingRevisionRef,
+            reason:
+              `auto-refresh: pending review queued on stale head ` +
+              `${beforeRevisionRef ? String(beforeRevisionRef).slice(0, 12) : '<unset>'}; ` +
+              `current head is ${String(pendingRevisionRef).slice(0, 12)}`,
+          });
+          const refreshed = stmtGetReviewRow.get(repoPath, prNumber);
+          if (
+            refreshResult.status === 'already-pending' &&
+            String(refreshed?.revision_ref || '') === String(pendingRevisionRef)
+          ) {
+            console.log(
+              `[watcher] auto-refresh stale pending review for ${repoPath}#${prNumber}: ` +
+                `${beforeRevisionRef ? String(beforeRevisionRef).slice(0, 12) : '<unset>'} → ` +
+                `${String(pendingRevisionRef).slice(0, 12)}`
+            );
+          }
+        } catch (err) {
+          console.error(
+            `[watcher] pending review head refresh for ${repoPath}#${prNumber} failed:`,
+            err?.message || err
+          );
+        }
+      }
       await projectGateStatusSafe(current);
       const activeFollowUp = shouldDeferReviewForActiveFollowUp({
         rootDir: ROOT,
@@ -2262,6 +2299,7 @@ export async function processReviewSubject(entry, ctx) {
                 attemptAt,
                 reviewerSessionUuid,
                 reviewerHeadSha,
+                reviewerHeadSha,
                 reviewerTimeoutMs,
                 reviewerLeaseExpiresAt,
                 repoPath,
@@ -2276,6 +2314,7 @@ export async function processReviewSubject(entry, ctx) {
                 ? stmtMarkReviewPopulationRetryAttemptStarted.run(
                   attemptAt,
                   reviewerSessionUuid,
+                  reviewerHeadSha,
                   reviewerHeadSha,
                   reviewerTimeoutMs,
                   reviewerLeaseExpiresAt,
@@ -2292,6 +2331,7 @@ export async function processReviewSubject(entry, ctx) {
                   attemptAt,
                   reviewerSessionUuid,
                   reviewerHeadSha,
+                  reviewerHeadSha,
                   reviewerTimeoutMs,
                   reviewerLeaseExpiresAt,
                   repoPath,
@@ -2301,6 +2341,7 @@ export async function processReviewSubject(entry, ctx) {
               : stmtMarkAttemptStarted.run(
                 attemptAt,
                 reviewerSessionUuid,
+                reviewerHeadSha,
                 reviewerHeadSha,
                 reviewerTimeoutMs,
                 reviewerLeaseExpiresAt,

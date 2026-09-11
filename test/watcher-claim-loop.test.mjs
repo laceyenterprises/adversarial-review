@@ -917,6 +917,70 @@ test('watcher pollOnce claim loop records subject-state head SHAs and drives the
   }
 });
 
+test('watcher pollOnce refreshes a stale pending revision_ref before reviewer claim', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-stale-pending-head-'));
+  const loaderPath = path.join(tmp, 'fixture-loader.mjs');
+  const registerPath = path.join(tmp, 'fixture-register.mjs');
+  const runnerPath = path.join(tmp, 'fixture-runner.mjs');
+  try {
+    writeFileSync(loaderPath, buildLoaderSource({
+      subjectHeads: { 101: 'head-current-1035' },
+    }));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({
+      freshHeads: { 101: 'head-current-1035' },
+      prePollSetup: `
+        db.prepare(
+          \`INSERT INTO reviewed_prs
+             (repo, pr_number, domain_id, subject_external_id, revision_ref,
+              reviewed_at, reviewer, pr_state, review_status, review_attempts)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\`
+        ).run(
+          'laceyenterprises/adversarial-review',
+          101,
+          'code-pr',
+          'laceyenterprises/adversarial-review#101',
+          'head-stale-1035',
+          '2026-09-11T02:20:00.000Z',
+          'gemini',
+          'open',
+          'pending',
+          0
+        );
+      `,
+    }));
+
+    const result = spawnSync(
+      process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        env: fixtureEnv(installGhFixture(tmp)),
+      }
+    );
+
+    const output = `${result.stdout || ''}${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+    const summaryLine = result.stdout
+      .split(/\r?\n/)
+      .find((line) => line.startsWith(SUMMARY_MARKER));
+    assert.ok(summaryLine, output);
+    const summary = JSON.parse(summaryLine.slice(SUMMARY_MARKER.length));
+
+    assert.equal(summary.rows['101'].revision_ref, 'head-current-1035');
+    assert.equal(summary.rows['101'].reviewer_head_sha, 'head-current-1035');
+    assert.ok(
+      summary.reviewerSpawns.some(
+        (spawn) => spawn.subjectContext?.reviewerHeadSha === 'head-current-1035',
+      ),
+      'reviewer spawn must target the refreshed current head',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('watcher pollOnce skips stale terminal rereview pass keys', () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-rereview-attempt-key-'));
   const loaderPath = path.join(tmp, 'fixture-loader.mjs');

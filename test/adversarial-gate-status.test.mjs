@@ -29,6 +29,7 @@ import { resetConfigCache } from '../src/config-loader.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { HANDOFF_EVENTS } from '../src/handoff-telemetry.mjs';
 import { normalizeReviewVerdict as normalizeReviewVerdictCompat } from '../src/review-verdict.mjs';
+import { REREVIEW_CI_BLOCKED_STATUS } from '../src/review-statuses.mjs';
 
 // Pin AMA enabled/disabled for a test body regardless of the host's live
 // config.local.yaml (which may set roles.adversarial.merge_authority.enabled).
@@ -116,6 +117,18 @@ test('pickAdversarialGateStatus reports an Argus-routed PR as pending, never suc
 
   assert.equal(decision.state, 'pending');
   assert.equal(decision.reason, 'argus-security-review-missing');
+});
+
+test('pickAdversarialGateStatus reports CI-blocked rereviews as pending', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: REREVIEW_CI_BLOCKED_STATUS,
+      failure_message: '[ci-regression-no-job] public-clone-readiness=FAILURE',
+    }),
+  });
+
+  assert.equal(decision.state, 'pending');
+  assert.equal(decision.reason, 'rereview-ci-blocked');
 });
 
 test('pickAdversarialGateStatus reports a genuinely queued Argus job as queued', () => {

@@ -277,9 +277,10 @@ test('GMW-02 watcher: existing-row routing updates happen only after spawn claim
   // processReviewSubject (src/pollonce-phases.mjs); read from its new home.
   const source = readFileSync(new URL('../src/pollonce-phases.mjs', import.meta.url), 'utf8');
   const createRowStart = source.indexOf('if (!existing) {\n        stmtCreateReviewRow.run(');
-  const currentRead = source.indexOf('const current = stmtGetReviewRow.get(repoPath, prNumber);', createRowStart);
+  const currentRead = source.search(/let current = stmtGetReviewRow\.get\(repoPath, prNumber\);/);
   assert.notEqual(createRowStart, -1);
   assert.notEqual(currentRead, -1);
+  assert.ok(currentRead > createRowStart, 'current row read must stay after row creation');
   const preGateBlock = source.slice(createRowStart, currentRead);
   assert.doesNotMatch(preGateBlock, /stmtUpdateReviewRouting\.run/);
 

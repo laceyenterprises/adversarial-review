@@ -10,6 +10,7 @@ import {
   REVIEW_STATE_SCHEMA_VERSION,
   requestReviewRereview,
 } from '../src/review-state.mjs';
+import { REREVIEW_CI_BLOCKED_STATUS } from '../src/review-statuses.mjs';
 
 function insertReviewRow(rootDir, overrides = {}) {
   const db = openReviewStateDb(rootDir);
@@ -728,6 +729,42 @@ test('requestReviewRereview preserves attempt history and records rereview metad
   assert.equal(result.reviewRow.infra_auto_recover_attempts, 0);
   assert.equal(result.reviewRow.rereview_requested_at, '2026-04-24T12:10:00.000Z');
   assert.equal(result.reviewRow.rereview_reason, 'Remediation landed and is ready for another adversarial pass.');
+});
+
+test('requestReviewRereview re-arms CI-blocked rows through the normal reset CAS', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: REREVIEW_CI_BLOCKED_STATUS,
+    postedAt: null,
+    failedAt: '2026-04-24T12:08:00.000Z',
+    failureMessage: '[ci-regression-no-job] public-clone-readiness=FAILURE',
+  });
+  const seededDb = openReviewStateDb(rootDir);
+  try {
+    seededDb.prepare(
+      'UPDATE reviewed_prs SET reviewer_head_sha = ?, revision_ref = ? WHERE repo = ? AND pr_number = ?'
+    ).run('head-red', 'head-red', 'laceyenterprises/adversarial-review', 10);
+  } finally {
+    seededDb.close();
+  }
+
+  const result = requestReviewRereview({
+    rootDir,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 10,
+    requestedAt: '2026-04-24T12:12:00.000Z',
+    targetRevisionRef: 'head-green',
+    reason: 'auto-refresh: ci-blocked re-review parked on stale head head-red; current head is head-green',
+  });
+
+  assert.equal(result.triggered, true);
+  assert.equal(result.status, 'pending');
+  assert.equal(result.reviewRow.review_status, 'pending');
+  assert.equal(result.reviewRow.revision_ref, 'head-green');
+  assert.equal(result.reviewRow.failed_at, null);
+  assert.equal(result.reviewRow.failure_message, null);
+  assert.equal(result.reviewRow.reviewer_head_sha, null);
+  assert.equal(result.reviewRow.rereview_requested_at, '2026-04-24T12:12:00.000Z');
 });
 
 test("requestReviewRereview is atomic: a concurrent watcher claim cannot be overwritten back to pending", () => {

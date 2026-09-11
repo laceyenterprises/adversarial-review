@@ -22,6 +22,8 @@ import {
   prepareMarkInfraAutoRecoveryAttemptStarted,
   prepareMarkAttemptStarted,
   prepareMarkMergedPendingReviewSkipped,
+  prepareMarkRereviewCiBlocked,
+  prepareMarkRereviewCiBlockedRecheck,
   prepareMarkReviewerCommandFailedRecoveredPosted,
 } from './review-state-statements.mjs';
 
@@ -251,6 +253,8 @@ export const stmtBackfillUnroutableBotToArgusQueued = db.prepare(
 // test/watcher-atomic-claim.test.mjs (claim/refusal per status) and the
 // surrounding hot path by test/watcher-claim-loop.test.mjs.
 export const stmtMarkAttemptStarted = prepareMarkAttemptStarted(db);
+export const stmtMarkRereviewCiBlocked = prepareMarkRereviewCiBlocked(db);
+export const stmtMarkRereviewCiBlockedRecheck = prepareMarkRereviewCiBlockedRecheck(db);
 export const stmtMarkMergedPendingReviewSkipped = prepareMarkMergedPendingReviewSkipped(db);
 export const stmtMarkReviewerPgid = db.prepare(
   `UPDATE reviewed_prs

@@ -35,6 +35,14 @@ import { ensureTtmTrackerSchema } from './ttm-tracker.mjs';
  *   reviewing ─► failed | pending | pending-upstream
  *                                              (terminal failure vs lease
  *                                               release vs transient upstream)
+ *   reviewing ─► ci-blocked                    (rereview admission found
+ *                                               failed external CI on the
+ *                                               current head and no follow-up
+ *                                               job exists to requeue; not
+ *                                               claimable until head moves, CI
+ *                                               turns green, or an operator/
+ *                                               remediation reset uses
+ *                                               requestReviewRereview)
  *   reviewing ─► failed-orphan                 (watcher restart; safe recovery
  *                                               unprovable)
  *   failed-orphan ─► pending                   ONLY via the guarded
@@ -45,7 +53,8 @@ import { ensureTtmTrackerSchema } from './ttm-tracker.mjs';
  *                                              retrigger-review. STICKY
  *                                              otherwise — generic claims must
  *                                              never match it.
- *   posted ─► pending                          ONLY via requestReviewRereview's
+ *   posted ─► pending ┐
+ *   ci-blocked ─► pending ┘                    ONLY via requestReviewRereview's
  *                                              CAS below (refuses 'reviewing',
  *                                              'malformed', already-'pending';
  *                                              requires an open pr_state).

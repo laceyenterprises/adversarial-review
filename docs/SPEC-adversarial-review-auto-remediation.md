@@ -2171,8 +2171,11 @@ only Gemini in-flight dispatch to that count. The broker count fetch is skipped
 entirely for drains with no Gemini candidates so broker latency cannot block
 Codex or Claude review adoption. The shared broker secret used for
 that read-only probe is read asynchronously and cached in-process for a short
-TTL; missing or unreadable secret files fail open to the uncapped Gemini
-dispatch behavior, with non-missing read failures logged for operator diagnosis.
+TTL. If the watcher environment omits the broker URL, it uses the same local
+broker default as reviewer token checkout (`http://127.0.0.1:4099`) before
+falling back to the conservative one-Gemini degraded mode. Missing or unreadable
+secret files fail open to that conservative degraded mode, with non-missing read
+failures logged for operator diagnosis.
 
 Posted-review handlers run after reviewer dispatch has drained. Because that
 places them before lifecycle sync, merge-side dispatch decisions must re-fetch

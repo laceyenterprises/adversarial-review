@@ -2,9 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  buildRereviewCiBlockedFailureMessage,
   buildRereviewCiRegressionReason,
+  DEFAULT_CI_BLOCKED_REREVIEW_RECHECK_MS,
   guardRereviewCiBeforeReviewer,
+  shouldRecheckCiBlockedRereview,
 } from '../src/reviewer-ci-admission.mjs';
+import { REREVIEW_CI_BLOCKED_STATUS } from '../src/review-statuses.mjs';
 
 function silentLog() {
   return {
@@ -146,6 +150,58 @@ test('guardRereviewCiBeforeReviewer refuses failed-CI rereview when there is no 
 
   assert.equal(result.proceed, false);
   assert.equal(result.reason, 'ci-regression-no-job');
+  assert.equal(result.parkReview, true);
+  assert.equal(result.parkReviewStatus, REREVIEW_CI_BLOCKED_STATUS);
+  assert.match(result.failureMessage, /^\[ci-regression-no-job\]/);
+  assert.match(result.failureMessage, /repo-guards=FAILURE/);
+});
+
+test('buildRereviewCiBlockedFailureMessage explains the parked recovery path', () => {
+  const message = buildRereviewCiBlockedFailureMessage({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 6593,
+    ciGate: {
+      failedChecks: [{ name: 'public-clone-readiness', state: 'FAILURE' }],
+    },
+  });
+
+  assert.match(message, /^\[ci-regression-no-job\]/);
+  assert.match(message, /public-clone-readiness=FAILURE/);
+  assert.match(message, /re-arm once the head changes or CI turns green/);
+});
+
+test('shouldRecheckCiBlockedRereview backs off same-head CI probes', () => {
+  const lastAttempted = '2026-09-11T13:00:00.000Z';
+  const early = shouldRecheckCiBlockedRereview(
+    { review_status: REREVIEW_CI_BLOCKED_STATUS, last_attempted_at: lastAttempted },
+    { nowMs: Date.parse(lastAttempted) + DEFAULT_CI_BLOCKED_REREVIEW_RECHECK_MS - 1 }
+  );
+
+  assert.equal(early.shouldRecheck, false);
+  assert.equal(early.reason, 'ci-blocked-recheck-backoff-active');
+  assert.equal(early.nextCheckAt, '2026-09-11T13:05:00.000Z');
+
+  const expired = shouldRecheckCiBlockedRereview(
+    { review_status: REREVIEW_CI_BLOCKED_STATUS, last_attempted_at: lastAttempted },
+    { nowMs: Date.parse(lastAttempted) + DEFAULT_CI_BLOCKED_REREVIEW_RECHECK_MS }
+  );
+
+  assert.equal(expired.shouldRecheck, true);
+  assert.equal(expired.reason, 'ci-blocked-recheck-backoff-expired');
+});
+
+test('shouldRecheckCiBlockedRereview honors the explicit recheck interval env', () => {
+  const lastAttempted = '2026-09-11T13:00:00.000Z';
+  const result = shouldRecheckCiBlockedRereview(
+    { review_status: REREVIEW_CI_BLOCKED_STATUS, last_attempted_at: lastAttempted },
+    {
+      nowMs: Date.parse(lastAttempted) + 999,
+      env: { ADVERSARIAL_REREVIEW_CI_BLOCKED_RECHECK_MS: '1000' },
+    }
+  );
+
+  assert.equal(result.shouldRecheck, false);
+  assert.equal(result.nextCheckAt, '2026-09-11T13:00:01.000Z');
 });
 
 test('guardRereviewCiBeforeReviewer releases admission when CI observes a newer head', async () => {

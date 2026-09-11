@@ -76,6 +76,7 @@ data/reviews.db
 | `pending` | eligible for watcher review / re-review |
 | `pending-upstream` | transient upstream/provider failure; parked behind the file-backed cascade backoff window, reclaimable by the normal claim once it expires (does not burn `review_attempts`) |
 | `reviewing` | reviewer subprocess in flight; durable claim before spawn |
+| `ci-blocked` | rereview admission found failed external CI on the current PR head and no follow-up job exists to requeue. Not claimable by reviewer dispatch; the watcher re-arms it when the head moves or CI turns green, and explicit remediation/operator re-review resets still go through `requestReviewRereview`. Same-head CI probes are backoff-gated so parked rows cannot make the watcher poll GitHub on every tick |
 | `posted` | review posted successfully |
 | `failed` | review attempt failed; eligible rows are auto-retried by the normal dispatch path on a later poll |
 | `failed-orphan` | watcher restarted while a `reviewing` row was in flight and safe automatic recovery could not be proven — sticky, requires operator verification + `npm run retrigger-review` |
@@ -135,6 +136,11 @@ new PR
             │    └─ failed
             │         └─ eligible retry: normal dispatch gates + stmtMarkAttemptStarted
             │              └─ reviewing
+            │
+            ├─ rereview admission sees failed external CI and no follow-up job
+            │    └─ ci-blocked
+            │         ├─ PR head advances or CI turns green ── pending
+            │         └─ remediation/operator reset ───────── pending
             │
             ├─ lease-released same-head terminal failure exhausts retry cap
             │    └─ failed

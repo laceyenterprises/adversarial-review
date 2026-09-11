@@ -81,10 +81,6 @@ function isMissingLocalGitObjectError(err) {
   return /bad object|unknown revision|ambiguous argument|not a valid object name|needed a single revision|invalid object name|object .* not found|could not parse/.test(detail);
 }
 
-function shouldFetchMissingLocalGitObjectImmediately(err) {
-  return isMissingLocalGitObjectError(err) && !isTransientLocalGitError(err);
-}
-
 function extractIdentityHashes(identityOutput, expectedSha) {
   const hashes = String(identityOutput || '').match(FULL_SHA_RE) || [];
   if (hashes.length === 0) {
@@ -164,7 +160,6 @@ export async function fetchVerifiedCommitFromLocalGit({
         });
         return String(stdout || '');
       } catch (err) {
-        if (shouldFetchMissingLocalGitObjectImmediately(err)) throw err;
         if (!isTransientLocalGitError(err) || attempt >= retryDelays.length) throw err;
         const delayMs = Math.max(0, Number(retryDelays[attempt]) || 0);
         logger?.debug?.(

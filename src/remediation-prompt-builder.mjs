@@ -55,13 +55,16 @@ function ciRegressionRetryGuidance(latestRetry) {
   const headLine = currentHead
     ? ` The failed CI was observed on PR head \`${currentHead}\`.`
     : '';
+  const failedLine = failedChecks.length > 0
+    ? ` Fix the failing CI lane(s) before changing unrelated code: ${failedCheckText}. Use each failed check's \`detailsUrl\` from the trusted JSON metadata when present so you start from the actual CI log.`
+    : '';
   const pendingLine = pendingChecks.length > 0
     ? ` Pending checks at the time were: ${pendingCheckText}.`
     : '';
   return `
 
 ### CI Regression Remediation Objective
-This retry exists because the previous remediation attempt introduced or left failed external CI.${headLine} Fix the failing CI lane(s) before changing unrelated code: ${failedCheckText}. Use each failed check's \`detailsUrl\` from the trusted JSON metadata when present so you start from the actual CI log.${pendingLine}
+This retry exists because the previous remediation attempt introduced or left failed external CI.${headLine}${failedLine}${pendingLine}
 
 Do not request re-review until the PR's current head has no failed external CI checks. If GitHub checks are still pending, wait briefly and re-check; if the checks do not settle inside a bounded wait, write an \`operationalBlockers[]\` entry instead of claiming success.`;
 }

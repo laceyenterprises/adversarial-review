@@ -44,14 +44,23 @@ const LOCAL_GIT_TIMEOUT_MS = 5000;
 const LOCAL_GIT_MAX_BUFFER = 1024 * 1024 * 16;
 const FULL_SHA_RE = /\b[a-f0-9]{40}\b/gi;
 const GIT_STDOUT_DIAGNOSTIC_RE = /^(warning|hint):\s/i;
-
+const LOCAL_GIT_TRANSIENT_SYSTEM_CODES = new Set([
+  'EAGAIN',
+  'EBUSY',
+  'ECONNRESET',
+  'EIO',
+  'EMFILE',
+  'ENFILE',
+  'ENOMEM',
+  'ETIMEDOUT',
+]);
 function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export function isTransientLocalGitError(err) {
   const code = String(err?.code || '').toUpperCase();
-  if (['EAGAIN', 'EBUSY', 'ECONNRESET', 'EIO', 'EMFILE', 'ENFILE', 'ENOMEM', 'ETIMEDOUT'].includes(code)) {
+  if (LOCAL_GIT_TRANSIENT_SYSTEM_CODES.has(code)) {
     return true;
   }
   if (err?.killed || err?.signal) return true;

@@ -235,6 +235,84 @@ test('fetchVerifiedCommitFromLocalGit fetches a missing commit by sha, then read
   );
 });
 
+test('fetchVerifiedCommitFromLocalGit retries timeout failures before treating missing-object text as fetchable', async () => {
+  const git = makeFakeGit();
+  let fetched = false;
+  const mixedGit = async (file, args) => {
+    const joined = args.join(' ');
+    if (!fetched && joined.includes('show') && joined.includes('--format=%H %P')) {
+      const err = Object.assign(
+        new Error(`Command failed: git show ${HEAD_SHA}^{commit}\nfatal: ambiguous argument '${HEAD_SHA}^{commit}': unknown revision or path not in the working tree.\ntimeout while reading local mirror`),
+        {
+          code: 128,
+          signal: 'SIGTERM',
+          stderr: `fatal: ambiguous argument '${HEAD_SHA}^{commit}': unknown revision or path not in the working tree.`,
+        },
+      );
+      throw err;
+    }
+    if (joined.includes(`fetch --quiet --no-tags origin ${HEAD_SHA}`)) {
+      fetched = true;
+    }
+    return git(file, args);
+  };
+  mixedGit.calls = git.calls;
+  const sleeps = [];
+  const commit = await fetchVerifiedCommitFromLocalGit({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 5348,
+    headSha: HEAD_SHA,
+    execFileImpl: mixedGit,
+    retryBackoffMs: [3, 7],
+    sleepImpl: async (ms) => { sleeps.push(ms); },
+    logger: { warn() {}, debug() {} },
+  });
+  assert.equal(commit.sha, HEAD_SHA);
+  assert.deepEqual(sleeps, [3, 7], 'timeout missing-object reads should exhaust bounded retry before fetch');
+  assert.ok(
+    git.calls.some((call) => call.includes(`fetch --quiet --no-tags origin ${HEAD_SHA}`)),
+    'exhausted mixed missing/transient read should still fetch the missing object directly',
+  );
+});
+
+test('fetchVerifiedCommitFromLocalGit retries strong transient reads even with missing-object text', async () => {
+  const git = makeFakeGit();
+  let failedOnce = false;
+  const transientBadObjectGit = async (file, args) => {
+    const joined = args.join(' ');
+    if (!failedOnce && joined.includes('show') && joined.includes('--format=%H %P')) {
+      failedOnce = true;
+      const err = Object.assign(
+        new Error(`fatal: bad object ${HEAD_SHA}\nInput/output error`),
+        {
+          code: 'EIO',
+          stderr: `fatal: bad object ${HEAD_SHA}\nInput/output error`,
+        },
+      );
+      throw err;
+    }
+    return git(file, args);
+  };
+  transientBadObjectGit.calls = git.calls;
+  const sleeps = [];
+  const commit = await fetchVerifiedCommitFromLocalGit({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 5348,
+    headSha: HEAD_SHA,
+    execFileImpl: transientBadObjectGit,
+    retryBackoffMs: [3, 7],
+    sleepImpl: async (ms) => { sleeps.push(ms); },
+    logger: { warn() {}, debug() {} },
+  });
+  assert.equal(commit.sha, HEAD_SHA);
+  assert.deepEqual(sleeps, [3], 'strong transient local git errors should still use the retry ladder');
+  assert.equal(
+    git.calls.some((call) => call.includes(`fetch --quiet --no-tags origin ${HEAD_SHA}`)),
+    false,
+    'strong transient read recovery should not fetch when retry succeeds',
+  );
+});
+
 test('fetchVerifiedCommitFromLocalGit retries transient sha fetch failures before reading identity', async () => {
   const git = makeFakeGit({ missingUntilFetch: true, transientShaFetchFailures: 1 });
   const sleeps = [];

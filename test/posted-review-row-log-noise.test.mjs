@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 
 import {
   PostedReviewStepDeadlineError,
@@ -24,6 +26,7 @@ import {
   resolvePostedReviewReviewerPressurePhaseBudgetMs,
   runPostedReviewHandlersFairly,
 } from '../src/watcher-poll-fairness.mjs';
+import { noProgressLaneFilePath } from '../src/watcher-no-progress-lane.mjs';
 
 // Drive handlePostedReviewRow straight to the AMA `ama-pending` retained-ownership
 // branch with fully injected collaborators, then assert the LOG-ONLY line is
@@ -816,14 +819,51 @@ test('handlePostedReviewRow: operator-skip-label hard-stops merge closeout', asy
 
   const result = await handlePostedReviewRow(args);
 
-  assert.equal(fetched, false);
+  assert.equal(fetched, true);
   assert.equal(resolvedCoexistence, false);
   assert.equal(result.handled, true);
   assert.equal(result.outcome, 'operator-skip-label');
-  assert.equal(result.reason, 'operator-skip-label');
+  assert.equal(result.reason, 'skip-operator-skip');
   assert.equal(result.amaClosureResult.skipMergeAgent, true);
+  assert.equal(result.amaClosureResult.reason, 'skip-operator-skip');
+  assert.equal(result.amaClosureResult.namedReason, 'skip-operator-skip');
   assert.deepEqual(result.gateDecision, gateDecision);
   assert.match(logs.join('\n'), /operator-skip-label blocks merge\/hammer closeout/);
+});
+
+test('handlePostedReviewRow: operator-skip-label still clears terminal PRs', async () => {
+  let resolvedCoexistence = false;
+  const gateDecision = {
+    state: 'failure',
+    reason: 'operator-skip-label',
+    description: 'Explicit operator skip label blocks adversarial gate.',
+  };
+  const { args, logs } = baseArgs({
+    projectGateStatusSafe: async () => ({ decision: gateDecision }),
+    fetchMergeAgentCandidateImpl: async () => ({ merged: true, prState: 'merged' }),
+    resolveMergeAgentCoexistenceForWatcherImpl: async () => {
+      resolvedCoexistence = true;
+      return {
+        outcome: 'ama-pending',
+        amaClosureResult: { reason: 'daemon-failed-closed', workerClass: 'hammer' },
+      };
+    },
+  });
+  const lanePath = noProgressLaneFilePath(args.rootDir, {
+    repo: args.repoPath,
+    prNumber: args.prNumber,
+  });
+  mkdirSync(dirname(lanePath), { recursive: true });
+  writeFileSync(lanePath, `${JSON.stringify({ schemaVersion: 1, state: 'active' })}\n`);
+  assert.equal(existsSync(lanePath), true);
+
+  const result = await handlePostedReviewRow(args);
+
+  assert.equal(resolvedCoexistence, false);
+  assert.equal(result.prTerminal, true);
+  assert.equal(existsSync(lanePath), false);
+  assert.deepEqual(result.gateDecision, gateDecision);
+  assert.match(logs.join('\n'), /PR already merged under operator-skip-label/);
 });
 
 test('handlePostedReviewRow: rechecks review row after candidate fetch before merge work', async () => {

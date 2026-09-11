@@ -30,6 +30,12 @@ test('fresh DB includes subject identity columns and current schema version', ()
     assert.ok(columns.includes('subject_external_id'));
     assert.ok(columns.includes('revision_ref'));
     assert.ok(columns.includes('pipeline_stage_states_json'));
+    assert.ok(
+      db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'duplicate_families'").get()
+    );
+    assert.ok(
+      db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'duplicate_family_candidates'").get()
+    );
     const tableInfo = db.prepare('PRAGMA table_info(reviewed_prs)').all();
     const repoColumn = tableInfo.find((column) => column.name === 'repo');
     const prNumberColumn = tableInfo.find((column) => column.name === 'pr_number');

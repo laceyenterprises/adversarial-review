@@ -3,7 +3,6 @@
  * Polls GitHub every N minutes for new agent-built PRs and spawns reviewer agents.
  * Also tracks PR lifecycle (merged/closed) and syncs status to Linear automatically.
  */
-
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { homedir, hostname } from 'node:os';
@@ -88,6 +87,7 @@ import {
 import { validateStartupRoleRegistry } from './role-registry.mjs';
 import { validateStartupDeliveryIdentity } from './adapters/comms/github-pr-comments/delivery-identity.mjs';
 import { isPipelineEnabled } from './domain-pipeline.mjs';
+import { runDuplicateFamilyCensusForWatcher } from './duplicate-family-state.mjs';
 import { checkAgyReviewerAuth } from './agy-reviewer-auth.mjs';
 import { scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 import { createCompositeOperatorSurface } from './adapters/operator/index.mjs';
@@ -1407,7 +1407,7 @@ async function pollOnce(
       logger: console,
       hasReviewRow: (entry) => Boolean('current' in entry ? entry.current : (entry.current = stmtGetReviewRow.get(repoPath, entry.prNumber))),
     });
-
+    await runDuplicateFamilyCensusForWatcher({ db, subjectEntries, repoPath, rootDir: ROOT, env: process.env });
     for (const subjectEntry of subjectEntries) {
       await processReviewSubject(subjectEntry, {
         octokit,

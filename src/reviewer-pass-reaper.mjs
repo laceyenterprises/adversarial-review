@@ -1,6 +1,18 @@
 import { loadRoleConfig } from './role-config.mjs';
 import { recordCascadeFailure } from './reviewer-cascade.mjs';
 import { DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS } from './reviewer-lease.mjs';
+import { reviewBodyHasScopeViolationFinding } from './additive-only-scope.mjs';
+import {
+  classifyFollowUpCriticality,
+  createFollowUpJob,
+  resolveRoundBudgetForJob,
+  summarizePRRemediationLedger,
+} from './follow-up-jobs.mjs';
+import { getConfig } from './config-loader.mjs';
+import {
+  resolveHandoffConfig,
+  signalFollowUpDaemonWake,
+} from './handoff-wake.mjs';
 
 const DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS = 3600;
 const RUNNING_PASS_TIMEOUT_FAILURE_CLASS = 'reviewer-timeout';
@@ -8,6 +20,9 @@ const RUNNING_PASS_TIMEOUT_FAILURE_REASON = 'running-pass-timeout';
 const POSTED_REVIEW_ARTIFACT_RECOVERY_CLASS = 'posted-review-artifact-recovery';
 const POSTED_REVIEW_ARTIFACT_RECOVERY_REASON = 'running-pass-had-github-review-artifact';
 const INFRA_AUTO_RECOVER_CAP = DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS;
+const VERDICT_MODE_ENFORCE = 'enforce';
+const VERDICT_MODE_ADVISORY_ONLY = 'advisory-only';
+const ADVISORY_ONLY_REVIEW_HEADER_RE = /^## Adversarial Review \(advisory-only\)\b/;
 
 function parseMetadataJson(raw) {
   try {
@@ -33,6 +48,130 @@ function reviewerSessionUuidFromPass(row) {
 
 function hasPostedReviewArtifact(row) {
   return typeof row?.gh_comment_id === 'string' && row.gh_comment_id.trim() !== '';
+}
+
+function normalizeRecoveredVerdictMode(row) {
+  const metadata = parseMetadataJson(row?.metadata_json);
+  const explicit = String(metadata.verdictMode || metadata.verdict_mode || '').trim();
+  if (explicit === VERDICT_MODE_ADVISORY_ONLY) return VERDICT_MODE_ADVISORY_ONLY;
+  const [firstLine = ''] = String(row?.body_md || '').trimStart().split(/\r?\n/, 1);
+  return ADVISORY_ONLY_REVIEW_HEADER_RE.test(firstLine)
+    ? VERDICT_MODE_ADVISORY_ONLY
+    : VERDICT_MODE_ENFORCE;
+}
+
+function resolveRecoveredFollowUpBaseBranch(repo, {
+  defaultBaseBranch = 'main',
+  defaultBaseBranchByRepo = {},
+} = {}) {
+  const repoSpecific = defaultBaseBranchByRepo?.[repo];
+  const candidate = typeof repoSpecific === 'string' && repoSpecific.trim()
+    ? repoSpecific
+    : defaultBaseBranch;
+  return typeof candidate === 'string' && candidate.trim() ? candidate.trim() : 'main';
+}
+
+function builderTagFromRecoveredPass(row) {
+  const metadata = parseMetadataJson(row?.metadata_json);
+  const value = metadata.builderTag || metadata.builder_tag || metadata.subjectContext?.builderTag;
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function shouldQueueRecoveredPostedReviewFollowUp(row, {
+  reviewBodyHasScopeViolationFindingImpl = reviewBodyHasScopeViolationFinding,
+} = {}) {
+  const reviewBody = String(row?.body_md || '');
+  if (!reviewBody.trim()) {
+    return { queue: false, reason: 'empty-review-body' };
+  }
+  if (normalizeRecoveredVerdictMode(row) === VERDICT_MODE_ADVISORY_ONLY) {
+    return { queue: false, reason: 'advisory-only-review' };
+  }
+  if (reviewBodyHasScopeViolationFindingImpl(reviewBody)) {
+    return { queue: false, reason: 'scope-violation' };
+  }
+  return { queue: true, reason: null };
+}
+
+function queueFollowUpForRecoveredPostedReview({
+  rootDir,
+  row,
+  reviewRow = null,
+  reviewPostedAt,
+  defaultBaseBranch = 'main',
+  defaultBaseBranchByRepo = {},
+  summarizePRRemediationLedgerImpl = summarizePRRemediationLedger,
+  resolveRoundBudgetForJobImpl = resolveRoundBudgetForJob,
+  createFollowUpJobImpl = createFollowUpJob,
+  resolveHandoffConfigImpl = () => resolveHandoffConfig({ getConfigImpl: getConfig }),
+  signalFollowUpDaemonWakeImpl = signalFollowUpDaemonWake,
+  reviewBodyHasScopeViolationFindingImpl = reviewBodyHasScopeViolationFinding,
+} = {}) {
+  const queueDecision = shouldQueueRecoveredPostedReviewFollowUp(row, {
+    reviewBodyHasScopeViolationFindingImpl,
+  });
+  if (!queueDecision.queue) {
+    return { queued: false, reason: queueDecision.reason };
+  }
+
+  const repo = row.repo;
+  const prNumber = Number(row.pr_number);
+  const reviewBody = String(row.body_md || '');
+  const linearTicketId = reviewRow?.linear_ticket || null;
+  const priorLedger = summarizePRRemediationLedgerImpl(rootDir, { repo, prNumber });
+  const tierResolution = resolveRoundBudgetForJobImpl({ linearTicketId }, {
+    rootDir,
+    preferPersisted: false,
+  });
+  const latestMaxRounds = Number(priorLedger.latestMaxRounds);
+  const elevatedPriorCap = Number.isInteger(latestMaxRounds) && latestMaxRounds > tierResolution.roundBudget
+    ? latestMaxRounds
+    : null;
+  const classification = classifyFollowUpCriticality(reviewBody);
+  const revisionRef = row.head_sha || reviewRow?.reviewer_head_sha || reviewRow?.revision_ref || null;
+  const { jobPath } = createFollowUpJobImpl({
+    rootDir,
+    repo,
+    prNumber,
+    baseBranch: resolveRecoveredFollowUpBaseBranch(repo, {
+      defaultBaseBranch,
+      defaultBaseBranchByRepo,
+    }),
+    revisionRef,
+    reviewerModel: row.reviewer_model || row.reviewer_class || reviewRow?.reviewer || null,
+    builderTag: builderTagFromRecoveredPass(row),
+    linearTicketId,
+    reviewBody,
+    reviewPostedAt,
+    critical: classification.critical,
+    verdictMode: VERDICT_MODE_ENFORCE,
+    riskClass: tierResolution.riskClass,
+    priorCompletedRounds: priorLedger.completedRoundsForPR,
+    ...(elevatedPriorCap ? { maxRemediationRounds: elevatedPriorCap } : {}),
+  });
+
+  let handoffWake = { attempted: false };
+  try {
+    const handoffConfig = resolveHandoffConfigImpl();
+    if (handoffConfig.enabled && handoffConfig.reviewToRemediation) {
+      const wake = signalFollowUpDaemonWakeImpl({
+        rootDir,
+        reason: 'recovered-review-to-remediation',
+        repo,
+        prNumber,
+        headSha: revisionRef,
+      });
+      handoffWake = { attempted: true, ok: true, ...wake };
+    }
+  } catch (err) {
+    handoffWake = {
+      attempted: true,
+      ok: false,
+      error: err?.message || String(err),
+    };
+  }
+
+  return { queued: true, jobPath, handoffWake };
 }
 
 function resolveRunningPassTimeoutSeconds(env = process.env, options = {}) {
@@ -72,11 +211,24 @@ function buildTimeoutFailureMessage({ thresholdSeconds, ageSeconds, capExhausted
     `after ${ageSeconds}s (threshold=${thresholdSeconds}s, reason=${RUNNING_PASS_TIMEOUT_FAILURE_REASON})${suffix}.`;
 }
 
-function reapRunningPassTimeouts({ db, rootDir = process.cwd(), log = console } = {}) {
+function reapRunningPassTimeouts({
+  db,
+  rootDir = process.cwd(),
+  log = console,
+  defaultBaseBranch = 'main',
+  defaultBaseBranchByRepo = {},
+  queueFollowUpForRecoveredPostedReviewImpl = queueFollowUpForRecoveredPostedReview,
+  summarizePRRemediationLedgerImpl = summarizePRRemediationLedger,
+  resolveRoundBudgetForJobImpl = resolveRoundBudgetForJob,
+  createFollowUpJobImpl = createFollowUpJob,
+  resolveHandoffConfigImpl = () => resolveHandoffConfig({ getConfigImpl: getConfig }),
+  signalFollowUpDaemonWakeImpl = signalFollowUpDaemonWake,
+  reviewBodyHasScopeViolationFindingImpl = reviewBodyHasScopeViolationFinding,
+} = {}) {
   const thresholdSeconds = resolveRunningPassTimeoutSeconds();
   const rows = db.prepare(
     `SELECT pass_id, repo, pr_number, attempt_number, pass_kind, reviewer_class, reviewer_model,
-            started_at, metadata_json, head_sha, gh_comment_id, body_captured_at, verdict
+            started_at, metadata_json, head_sha, gh_comment_id, body_captured_at, verdict, body_md
        FROM reviewer_passes
       WHERE status = 'running'
         AND ended_at IS NULL
@@ -88,7 +240,7 @@ function reapRunningPassTimeouts({ db, rootDir = process.cwd(), log = console } 
 
   const getReviewRow = db.prepare(
     `SELECT review_status, reviewer_session_uuid, reviewer_started_at, reviewer_head_sha,
-            infra_auto_recover_attempts
+            revision_ref, reviewer, linear_ticket, infra_auto_recover_attempts
        FROM reviewed_prs
       WHERE repo = ?
         AND pr_number = ?`
@@ -179,6 +331,7 @@ function reapRunningPassTimeouts({ db, rootDir = process.cwd(), log = console } 
       passChanged: passResult.changes > 0,
       reviewChanged,
       reviewStatus: current?.review_status || null,
+      reviewRow: current || null,
     };
   });
 
@@ -221,6 +374,9 @@ function reapRunningPassTimeouts({ db, rootDir = process.cwd(), log = console } 
   let reviewClaimsReleased = 0;
   let reviewClaimsFailed = 0;
   let postedReviewArtifactsRecovered = 0;
+  let postedReviewArtifactFollowUpsQueued = 0;
+  let postedReviewArtifactFollowUpsSkipped = 0;
+  let postedReviewArtifactFollowUpsFailed = 0;
   for (const row of rows) {
     try {
       const startedMs = parseTimestampMs(row.started_at);
@@ -255,6 +411,43 @@ function reapRunningPassTimeouts({ db, rootDir = process.cwd(), log = console } 
           `          pass_id=${row.pass_id} status running->completed reason=${POSTED_REVIEW_ARTIFACT_RECOVERY_REASON}\n` +
           `          age=${ageSeconds}s threshold=${thresholdSeconds}s review_claim=${result.reviewChanged ? 'posted' : 'unchanged'}`
         );
+        if (result.reviewChanged) {
+          try {
+            const queued = queueFollowUpForRecoveredPostedReviewImpl({
+              rootDir,
+              row,
+              reviewRow: result.reviewRow,
+              reviewPostedAt: endedAt,
+              defaultBaseBranch,
+              defaultBaseBranchByRepo,
+              summarizePRRemediationLedgerImpl,
+              resolveRoundBudgetForJobImpl,
+              createFollowUpJobImpl,
+              resolveHandoffConfigImpl,
+              signalFollowUpDaemonWakeImpl,
+              reviewBodyHasScopeViolationFindingImpl,
+            });
+            if (queued?.queued) {
+              postedReviewArtifactFollowUpsQueued++;
+              log.log(
+                `[watcher] reviewer-pass reaper queued recovered follow-up for ` +
+                `${row.repo}#${row.pr_number} at ${queued.jobPath}`
+              );
+            } else {
+              postedReviewArtifactFollowUpsSkipped++;
+              log.warn?.(
+                `[watcher] reviewer-pass reaper skipped recovered follow-up for ` +
+                `${row.repo}#${row.pr_number}: ${queued?.reason || 'not-queued'}`
+              );
+            }
+          } catch (err) {
+            postedReviewArtifactFollowUpsFailed++;
+            log.error?.(
+              `[watcher] reviewer-pass reaper failed to queue recovered follow-up for ` +
+              `${row.repo}#${row.pr_number}: ${err?.message || err}`
+            );
+          }
+        }
         reaped++;
         postedReviewArtifactsRecovered++;
         continue;
@@ -309,13 +502,23 @@ function reapRunningPassTimeouts({ db, rootDir = process.cwd(), log = console } 
       log.error(`[watcher] reviewer-pass reaper failed for ${row.repo}#${row.pr_number}:`, err);
     }
   }
-  return { reaped, reviewClaimsReleased, reviewClaimsFailed, postedReviewArtifactsRecovered };
+  return {
+    reaped,
+    reviewClaimsReleased,
+    reviewClaimsFailed,
+    postedReviewArtifactsRecovered,
+    postedReviewArtifactFollowUpsQueued,
+    postedReviewArtifactFollowUpsSkipped,
+    postedReviewArtifactFollowUpsFailed,
+  };
 }
 
 export {
   DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS,
   POSTED_REVIEW_ARTIFACT_RECOVERY_CLASS,
   POSTED_REVIEW_ARTIFACT_RECOVERY_REASON,
+  queueFollowUpForRecoveredPostedReview,
   resolveRunningPassTimeoutSeconds,
   reapRunningPassTimeouts,
+  shouldQueueRecoveredPostedReviewFollowUp,
 };

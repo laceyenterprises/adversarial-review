@@ -43,6 +43,21 @@ test('posted scope-violation finding suppresses automated merge-agent dispatch w
         postedReviewBody,
         '2026-06-19T10:01:05.000Z',
       );
+      db.prepare(
+        `INSERT INTO reviewed_prs (
+           repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+           reviewer_head_sha, revision_ref
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        'laceyenterprises/adversarial-review',
+        57,
+        '2026-06-19T10:01:05.000Z',
+        'claude',
+        'open',
+        'posted',
+        'head-57',
+        'head-57',
+      );
     } finally {
       db.close();
     }

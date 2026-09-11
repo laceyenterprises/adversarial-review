@@ -989,6 +989,7 @@ test('posted watcher rows project the adversarial gate before merge-agent dispat
       repoPath: repo,
       prNumber,
       existing: reviewRow,
+      currentReviewRowReader: () => reviewRow,
       projectGateStatusSafe: async (row) => {
         assert.equal(row, reviewRow);
         return projectAdversarialGateStatus(rootDir, {
@@ -1045,6 +1046,7 @@ test('BUG-1: handlePostedReviewRow explicitly handles already-merged terminal PR
       repoPath: repo,
       prNumber,
       existing: makeReviewRow({ repo, pr_number: prNumber }),
+      currentReviewRowReader: () => makeReviewRow({ repo, pr_number: prNumber }),
       projectGateStatusSafe: async () => {},
       latestFollowUpJobFinder: () => null,
       latestPostedReviewBodyFinder: () => null,

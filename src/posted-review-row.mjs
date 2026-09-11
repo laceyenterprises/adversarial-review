@@ -102,6 +102,25 @@ function findLatestPostedReviewBody(rootDir = ROOT, { repo, prNumber } = {}) {
   }
 }
 
+function readCurrentReviewRow(rootDir = ROOT, { repo, prNumber } = {}) {
+  if (rootDir === ROOT) {
+    return stmtGetReviewRow.get(repo, prNumber) || null;
+  }
+  const localDb = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(localDb);
+    return localDb.prepare(
+      'SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get(repo, prNumber) || null;
+  } finally {
+    localDb.close();
+  }
+}
+
+function normalizeReviewStatus(row) {
+  return String(row?.review_status || row?.reviewStatus || '').trim().toLowerCase();
+}
+
 const postedReviewRowLogGate = createLogChangeGate();
 
 function isTerminalReviewRow(row) {
@@ -270,12 +289,57 @@ export async function handlePostedReviewRow({
   latestFollowUpJobFinder = findLatestFollowUpJob,
   latestPostedReviewBodyFinder = findLatestPostedReviewBody,
   reviewBodyHasScopeViolationFindingImpl = reviewBodyHasScopeViolationFinding,
+  currentReviewRowReader = readCurrentReviewRow,
   operatorSurface = null,
   domainId = null, // ARC-18: WATCHER_PRIMARY_DOMAIN_ID stays in watcher; threaded by callers (pollOnce passes domainId). Default is never read (only used when operatorSurface is set, and every such caller passes domainId).
   logGate = postedReviewRowLogGate,
   logger = console,
 } = {}) {
   const stepKey = `${repoPath}#${prNumber}`;
+  const rereadPostedReviewRow = (stage) => {
+    let currentRow;
+    try {
+      currentRow = currentReviewRowReader(rootDir, { repo: repoPath, prNumber }) || null;
+    } catch (err) {
+      logger?.error?.(
+        `[watcher] posted-review handler skipped for ${repoPath}#${prNumber}: ` +
+          `review row reread failed before ${stage} (${err?.message || err})`,
+      );
+      return {
+        ok: false,
+        result: {
+          handled: true,
+          outcome: 'review-row-reread-failed',
+          reason: 'review-row-reread-failed',
+          stage,
+        },
+      };
+    }
+
+    const reviewStatus = normalizeReviewStatus(currentRow);
+    if (reviewStatus !== 'posted') {
+      const statusHint = reviewStatus || 'missing';
+      logger?.log?.(
+        `[watcher] posted-review handler skipped for ${repoPath}#${prNumber}: ` +
+          `snapshot no longer current before ${stage} (review_status=${statusHint})`,
+      );
+      return {
+        ok: false,
+        result: {
+          handled: true,
+          outcome: 'stale-posted-review-snapshot',
+          reason: `review-status-${statusHint}`,
+          stage,
+        },
+      };
+    }
+    return { ok: true, row: currentRow };
+  };
+
+  const initialReviewState = rereadPostedReviewRow('projectGateStatusSafe');
+  if (!initialReviewState.ok) return initialReviewState.result;
+  existing = initialReviewState.row;
+
   const gateProjection = await timePostedReviewStep(
     'projectGateStatusSafe', stepKey, logger, () => projectGateStatusSafe(existing),
   );
@@ -377,6 +441,11 @@ export async function handlePostedReviewRow({
         },
       };
     }
+    const postCandidateReviewState = rereadPostedReviewRow('resolveMergeAgentCoexistence');
+    if (!postCandidateReviewState.ok) {
+      return { ...postCandidateReviewState.result, gateDecision: gateProjection?.decision || null };
+    }
+    existing = postCandidateReviewState.row;
     operatorApprovalEvent = operatorApprovalEvent ?? candidate?.operatorApprovalEvent ?? null;
     mergeAgentRequestEvent = mergeAgentRequestEvent ?? candidate?.mergeAgentRequestEvent ?? null;
     const dispatchJob = buildMergeAgentDispatchJobImpl(rootDir, candidate, { reviewStateDb: db });

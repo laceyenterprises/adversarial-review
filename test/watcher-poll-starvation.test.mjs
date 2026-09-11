@@ -493,6 +493,7 @@ test('RVHAND-04: resolveMergeAgentCoexistence soft deadline does not consume the
     latestFollowUpJobFinder: () => null,
     latestPostedReviewBodyFinder: () => null,
     reviewBodyHasScopeViolationFindingImpl: () => false,
+    currentReviewRowReader: () => ({ review_status: 'posted', reviewer_head_sha: HEAD_A }),
     logger: silentLogger,
   };
 

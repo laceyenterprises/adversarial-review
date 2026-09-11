@@ -20,7 +20,11 @@ function buildCompletionPreview(text, limit = 240) {
 }
 
 function mapReconcileResult(result) {
-  if (result.action === 'completed' || result.action === 'failed' || result.action === 'stopped') {
+  if (
+    result.action === 'completed'
+    || result.action === 'failed'
+    || result.action === 'stopped'
+  ) {
     return {
       reconciled: true,
       outcome: result.action,
@@ -30,7 +34,8 @@ function mapReconcileResult(result) {
   }
 
   const reasonMap = {
-    active: 'worker-still-running',
+    active: result.reason || 'worker-still-running',
+    requeued: result.reason || 'requeued',
     skipped: 'worker-not-spawned',
   };
 
@@ -52,6 +57,7 @@ async function reconcileFollowUpJob({
   requestWatcherWakeImpl,
   resolvePRLifecycleImpl,
   auditWorkspaceForContaminationImpl,
+  inspectRemediationCiRegressionImpl,
   execFileImpl,
 }) {
   const entry = listFollowUpJobsInDir(rootDir, 'inProgress').find((item) => item.jobPath === jobPath);
@@ -70,6 +76,7 @@ async function reconcileFollowUpJob({
     requestWatcherWakeImpl,
     resolvePRLifecycleImpl,
     auditWorkspaceForContaminationImpl,
+    inspectRemediationCiRegressionImpl,
     execFileImpl,
   });
 
@@ -84,6 +91,7 @@ async function reconcileInProgressFollowUpJobs({
   requestReviewRereviewImpl,
   requestWatcherWakeImpl,
   resolvePRLifecycleImpl,
+  inspectRemediationCiRegressionImpl,
   execFileImpl,
 } = {}) {
   const result = await reconcileInProgressFollowUpJobsImpl({
@@ -94,6 +102,7 @@ async function reconcileInProgressFollowUpJobs({
     requestReviewRereviewImpl,
     requestWatcherWakeImpl,
     resolvePRLifecycleImpl,
+    inspectRemediationCiRegressionImpl,
     execFileImpl,
   });
 

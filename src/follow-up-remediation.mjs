@@ -163,6 +163,7 @@ import {
   runWorkspaceGitWithTransientRetry,
   runWorkspaceNetworkCommandWithTransientRetry,
 } from './remediation-git-pr-io.mjs';
+import { inspectRemediationCiRegression } from './remediation-ci-regression.mjs';
 import {
   cancelHqDispatch,
   classifyHqDispatchFailure,
@@ -287,8 +288,67 @@ const REMEDIATION_MAX_CONCURRENT_JOBS_ENV = 'ADVERSARIAL_REMEDIATION_MAX_CONCURR
 const REMEDIATION_WORKSPACE_ROOT_ENV = 'ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT';
 const DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS = 1;
 const MAX_REMEDIATION_MAX_CONCURRENT_JOBS = 8;
+const REMEDIATION_CI_SETTLE_TIMEOUT_MS_ENV = 'ADVERSARIAL_REMEDIATION_CI_SETTLE_TIMEOUT_MS';
+const DEFAULT_REMEDIATION_CI_SETTLE_TIMEOUT_MS = 30 * 60 * 1000;
+const REMEDIATION_CI_REGRESSION_RETRY_DELAY_MS = 60 * 1000;
 const DEFAULT_DEPLOY_CHECKOUT = '/Users/airlock/agent-os';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
 const HQ_REMEDIATION_WORKSPACE_SEGMENTS = ['adversarial-review', 'follow-up-workspaces'];
+
+function parseTimestampMs(value) {
+  const parsed = Date.parse(String(value || ''));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function resolveRemediationCiSettleTimeoutMs(env = process.env) {
+  const raw = env?.[REMEDIATION_CI_SETTLE_TIMEOUT_MS_ENV];
+  if (raw === undefined || raw === null || raw === '') {
+    return DEFAULT_REMEDIATION_CI_SETTLE_TIMEOUT_MS;
+  }
+  const parsed = Number.parseInt(String(raw), 10);
+  return Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : DEFAULT_REMEDIATION_CI_SETTLE_TIMEOUT_MS;
+}
+
+function isoAfter(startIso, deltaMs) {
+  const startMs = parseTimestampMs(startIso) ?? Date.now();
+  return new Date(startMs + deltaMs).toISOString();
+}
+
+function formatCiCheckList(checks) {
+  const normalized = Array.isArray(checks) ? checks : [];
+  if (normalized.length === 0) return 'none';
+  return normalized
+    .slice(0, 10)
+    .map((check) => `${check.name || 'unknown-check'}=${check.state || 'UNKNOWN'}`)
+    .join(', ');
+}
+
+function ciGuardRecord({ job, ciGate, observedAt, timeoutMs }) {
+  const firstObservedAt = job?.ciRegressionGuard?.firstObservedAt || observedAt;
+  return {
+    state: ciGate.state,
+    conclusion: ciGate.conclusion || null,
+    headSha: ciGate.headSha || null,
+    firstObservedAt,
+    lastObservedAt: observedAt,
+    timeoutAt: isoAfter(firstObservedAt, timeoutMs),
+    totalExternalChecks: ciGate.totalExternalChecks || 0,
+    failedChecks: ciGate.failedChecks || [],
+    pendingChecks: ciGate.pendingChecks || [],
+    error: ciGate.error || null,
+  };
+}
+
+function ciGuardTimedOut(record, observedAt) {
+  const timeoutAtMs = parseTimestampMs(record?.timeoutAt);
+  const observedAtMs = parseTimestampMs(observedAt) ?? Date.now();
+  return timeoutAtMs !== null && observedAtMs >= timeoutAtMs;
+}
+
+function buildCiRegressionRetryReason(job, ciGate) {
+  return `Remediation for ${job.repo}#${job.prNumber} introduced or left failed CI on the current PR head: ${formatCiCheckList(ciGate.failedChecks)}. Requeueing so the next remediation worker fixes the CI regression before re-review.`;
+}
 
 function logRoundBudgetDecision(log, {
   riskClass,
@@ -1726,6 +1786,7 @@ async function reconcileFollowUpJob({
   requestWatcherWakeImpl = requestWatcherWake,
   resolvePRLifecycleImpl = resolvePRLifecycle,
   auditWorkspaceForContaminationImpl = auditWorkspaceForContamination,
+  inspectRemediationCiRegressionImpl = inspectRemediationCiRegression,
   execFileImpl = execFileAsync,
   workerTerminalEvent = null,
   log = console,
@@ -2432,12 +2493,239 @@ async function reconcileFollowUpJob({
               log,
             });
 
+          return {
+            action: 'failed',
+            reason: 'branch-contamination',
+            job: failed.job,
+            jobPath: failed.jobPath,
+          };
+        }
+
+        const ciGate = await inspectRemediationCiRegressionImpl({
+          repo: job.repo,
+          prNumber: job.prNumber,
+          execFileImpl,
+          env: process.env,
+          log,
+        });
+        if (ciGate.state === 'failed') {
+          const maxRetries = resolveMaxTransientRemediationRetries();
+          const priorRetries = Number(job?.remediationPlan?.transientRetries || 0);
+          if (priorRetries < maxRetries) {
+            const retryAfter = isoAfter(completedAt, REMEDIATION_CI_REGRESSION_RETRY_DELAY_MS);
+            const requeued = requeueInProgressFollowUpJobForRetry({
+              rootDir,
+              jobPath,
+              requeuedAt: completedAt,
+              retryReason: buildCiRegressionRetryReason(job, ciGate),
+              remediationWorker: null,
+              allowDirectWorkerRetry: true,
+              retryAfterOverride: retryAfter,
+              retryMetadata: {
+                code: 'ci-regression',
+                recoverable: true,
+                conclusion: ciGate.conclusion || null,
+                headSha: ciGate.headSha || null,
+                failedChecks: ciGate.failedChecks || [],
+                pendingChecks: ciGate.pendingChecks || [],
+                retry: priorRetries + 1,
+                maxRetries,
+              },
+            });
+            log.warn?.(
+              `[follow-up-remediation] ci-regression requeued ${job.repo}#${job.prNumber}: ` +
+              formatCiCheckList(ciGate.failedChecks)
+            );
             return {
-              action: 'failed',
-              reason: 'branch-contamination',
-              job: failed.job,
-              jobPath: failed.jobPath,
+              action: 'requeued',
+              reason: 'ci-regression',
+              job: requeued.job,
+              jobPath: requeued.jobPath,
             };
+          }
+
+          rereview = buildRereviewResult({
+            requested: false,
+            reason: null,
+            outcome: {
+              status: 'refused',
+              reason: 'ci-regression',
+              failedChecks: ciGate.failedChecks || [],
+            },
+          });
+          const ciFailure = {
+            code: 'ci-regression',
+            message: [
+              'Refused to request re-review because remediation left failed external CI on the current PR head.',
+              `Failed checks: ${formatCiCheckList(ciGate.failedChecks)}`,
+              `Exhausted CI-regression retry budget (${priorRetries}/${maxRetries}).`,
+            ].join('\n'),
+          };
+          const { commentDelivery: ciFailureDelivery } = buildReconcileCommentDelivery({
+            job,
+            worker,
+            action: 'failed',
+            reply: parsedReply,
+            failure: ciFailure,
+            now,
+          });
+          const failed = markFollowUpJobFailed({
+            rootDir,
+            jobPath,
+            failedAt: completedAt,
+            failureCode: 'ci-regression',
+            error: new Error(ciFailure.message),
+            remediationWorker: {
+              ...workerState,
+              state: 'failed',
+            },
+            failure: {
+              remediationReplyPath: worker.replyPath || job?.remediationReply?.path || null,
+              ciGate,
+            },
+            commentDelivery: ciFailureDelivery,
+            jobUpdates: {
+              completedAt,
+              remediationReply,
+              completionMetadata: {
+                source: 'reconcile:ci-regression',
+                note: 'External CI failed after remediation; refused to request rereview.',
+                ciGate,
+              },
+              parsedReply,
+              rereview,
+            },
+          });
+
+          await postReconcileOutcomeCommentSafe({
+            rootDir,
+            jobPath: failed.jobPath,
+            job: failed.job,
+            worker,
+            action: 'failed',
+            reply: parsedReply,
+            failure: ciFailure,
+            postCommentImpl,
+            alreadyTerminal: failed.alreadyTerminal,
+            now,
+            log,
+          });
+
+          return {
+            action: 'failed',
+            reason: 'ci-regression',
+            job: failed.job,
+            jobPath: failed.jobPath,
+          };
+        }
+        if (ciGate.state !== 'green') {
+          const timeoutMs = resolveRemediationCiSettleTimeoutMs(process.env);
+          const guard = ciGuardRecord({ job, ciGate, observedAt: completedAt, timeoutMs });
+          if (!ciGuardTimedOut(guard, completedAt)) {
+            const waitingJob = {
+              ...job,
+              lastHeartbeatAt: completedAt,
+              ciRegressionGuard: guard,
+              remediationPlan: {
+                ...(job.remediationPlan || {}),
+                nextAction: {
+                  type: 'wait-ci-settlement',
+                  round: job?.remediationPlan?.currentRound || 1,
+                  operatorVisibility: 'explicit',
+                  requestedAt: completedAt,
+                  requestedBy: 'system',
+                  reason: ciGate.state === 'pending'
+                    ? `Waiting for external CI to settle before requesting re-review: ${formatCiCheckList(ciGate.pendingChecks)}.`
+                    : `Waiting for external CI evidence before requesting re-review: ${ciGate.error || 'status check rollup unavailable'}.`,
+                },
+              },
+            };
+            writeFollowUpJob(jobPath, waitingJob);
+            log.log?.(
+              `[follow-up-remediation] ci-settlement waiting ${job.repo}#${job.prNumber}: ` +
+              `state=${ciGate.state} conclusion=${ciGate.conclusion || 'unknown'} ` +
+              `pending=${formatCiCheckList(ciGate.pendingChecks)}`
+            );
+            return {
+              action: 'active',
+              reason: `ci-settlement-${ciGate.state}`,
+              job: waitingJob,
+              jobPath,
+            };
+          }
+
+          rereview = buildRereviewResult({
+            requested: false,
+            reason: null,
+            outcome: {
+              status: 'refused',
+              reason: 'ci-settlement-timeout',
+              ciGate,
+            },
+          });
+          const timeoutFailure = {
+            code: 'ci-settlement-timeout',
+            message: [
+              'Refused to request re-review because external CI did not settle for the remediated PR head before the daemon timeout.',
+              `Last observed state: ${ciGate.state}; pending checks: ${formatCiCheckList(ciGate.pendingChecks)}.`,
+            ].join('\n'),
+          };
+          const { commentDelivery: timeoutDelivery } = buildReconcileCommentDelivery({
+            job,
+            worker,
+            action: 'failed',
+            reply: parsedReply,
+            failure: timeoutFailure,
+            now,
+          });
+          const failed = markFollowUpJobFailed({
+            rootDir,
+            jobPath,
+            failedAt: completedAt,
+            failureCode: 'ci-settlement-timeout',
+            error: new Error(timeoutFailure.message),
+            remediationWorker: {
+              ...workerState,
+              state: 'failed',
+            },
+            failure: {
+              remediationReplyPath: worker.replyPath || job?.remediationReply?.path || null,
+              ciGate,
+            },
+            commentDelivery: timeoutDelivery,
+            jobUpdates: {
+              completedAt,
+              remediationReply,
+              completionMetadata: {
+                source: 'reconcile:ci-settlement-timeout',
+                note: 'External CI did not settle before the remediation completion timeout; refused rereview.',
+                ciGate,
+              },
+              parsedReply,
+              rereview,
+            },
+          });
+
+          await postReconcileOutcomeCommentSafe({
+            rootDir,
+            jobPath: failed.jobPath,
+            job: failed.job,
+            worker,
+            action: 'failed',
+            reply: parsedReply,
+            failure: timeoutFailure,
+            postCommentImpl,
+            alreadyTerminal: failed.alreadyTerminal,
+            now,
+            log,
+          });
+
+          return {
+            action: 'failed',
+            reason: 'ci-settlement-timeout',
+            job: failed.job,
+            jobPath: failed.jobPath,
+          };
         }
 
         const requestedAt = completedAt;
@@ -2938,6 +3226,7 @@ async function reconcileInProgressFollowUpJobs({
   requestReviewRereviewImpl = requestReviewRereview,
   requestWatcherWakeImpl = requestWatcherWake,
   resolvePRLifecycleImpl = resolvePRLifecycle,
+  inspectRemediationCiRegressionImpl = inspectRemediationCiRegression,
   execFileImpl = execFileAsync,
   log = console,
 } = {}) {
@@ -3010,6 +3299,7 @@ async function reconcileInProgressFollowUpJobs({
         requestReviewRereviewImpl,
         requestWatcherWakeImpl,
         resolvePRLifecycleImpl,
+        inspectRemediationCiRegressionImpl,
         execFileImpl,
         log,
       });
@@ -3052,6 +3342,7 @@ async function handleRemediationTelemetryEvent({
   requestWatcherWakeImpl = requestWatcherWake,
   resolvePRLifecycleImpl = resolvePRLifecycle,
   auditWorkspaceForContaminationImpl = auditWorkspaceForContamination,
+  inspectRemediationCiRegressionImpl = inspectRemediationCiRegression,
   execFileImpl = execFileAsync,
   log = console,
 } = {}) {
@@ -3108,6 +3399,7 @@ async function handleRemediationTelemetryEvent({
       requestWatcherWakeImpl,
       resolvePRLifecycleImpl,
       auditWorkspaceForContaminationImpl,
+      inspectRemediationCiRegressionImpl,
       execFileImpl,
       workerTerminalEvent: terminalEvent,
       log,

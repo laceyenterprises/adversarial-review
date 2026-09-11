@@ -68,6 +68,17 @@ function writeValidReply(replyPath, job) {
   }, null, 2)}\n`, 'utf8');
 }
 
+function greenCiGate() {
+  return {
+    state: 'green',
+    conclusion: 'SUCCESS',
+    headSha: 'ci-green-head',
+    totalExternalChecks: 3,
+    failedChecks: [],
+    pendingChecks: [],
+  };
+}
+
 test('local-mode consume, prompt build, and reconcile agree on the same reply path', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-local-'));
 
@@ -140,6 +151,7 @@ test('local-mode consume, prompt build, and reconcile agree on the same reply pa
         },
       }),
       auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
+      inspectRemediationCiRegressionImpl: async () => greenCiGate(),
       log: { warn: () => {}, error: () => {} },
     });
 

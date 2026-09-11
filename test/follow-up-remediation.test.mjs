@@ -85,6 +85,17 @@ import {
   resolveClaudeCodeOAuthTransport,
 } from '../src/remediation-oauth-preflight.mjs';
 
+function greenCiGate() {
+  return {
+    state: 'green',
+    conclusion: 'SUCCESS',
+    headSha: 'ci-green-head',
+    totalExternalChecks: 3,
+    failedChecks: [],
+    pendingChecks: [],
+  };
+}
+
 test('createQuotaHoldRevalidator caches hq quota status failures for the TTL window', async () => {
   let calls = 0;
   const execOptions = [];
@@ -7801,6 +7812,7 @@ test('reconcileFollowUpJob keeps HQ-dispatched remediation active across daemon 
         assert.equal(workspaceDir, spawned.job.remediationWorker.workspaceDir);
         return cleanContaminationAudit();
       },
+      inspectRemediationCiRegressionImpl: async () => greenCiGate(),
     });
 
     assert.equal(completed.action, 'completed');
@@ -7863,6 +7875,7 @@ test('health.worker.terminal topic event completes an HQ remediation worker with
       reviewRow: { repo: spawned.job.repo, pr_number: spawned.job.prNumber, pr_state: 'open', review_status: 'pending' },
     }),
     auditWorkspaceForContaminationImpl: cleanContaminationAudit,
+    inspectRemediationCiRegressionImpl: async () => greenCiGate(),
   }));
 
   assert.equal(result.action, 'completed');
@@ -8154,6 +8167,7 @@ test('health.worker.terminal topic event reclaims corrupt reconcile claim locks'
       reviewRow: { repo: spawned.job.repo, pr_number: spawned.job.prNumber, pr_state: 'open', review_status: 'pending' },
     }),
     auditWorkspaceForContaminationImpl: cleanContaminationAudit,
+    inspectRemediationCiRegressionImpl: async () => greenCiGate(),
   }));
 
   assert.equal(result.action, 'completed');
@@ -8524,6 +8538,7 @@ test('reconcileFollowUpJob resolves the HQ workspace from dispatch status when t
         assert.equal(workspaceDir, resolvedWorkspaceDir);
         return cleanContaminationAudit();
       },
+      inspectRemediationCiRegressionImpl: async () => greenCiGate(),
     });
 
     assert.equal(completed.action, 'completed');
@@ -9511,6 +9526,7 @@ test('reconcileFollowUpJob reads remediation replies from HQ storage before any 
         reviewRow: { repo: claimed.job.repo, pr_number: claimed.job.prNumber, pr_state: 'open', review_status: 'pending' },
       }),
       auditWorkspaceForContaminationImpl: cleanContaminationAudit,
+      inspectRemediationCiRegressionImpl: async () => greenCiGate(),
       log: { warn: (msg) => warnings.push(msg), error: () => {} },
     });
 
@@ -10505,6 +10521,7 @@ test('reconcileFollowUpJob posts a public PR comment on completed (re-review que
       reviewRow: { repo: claimed.job.repo, pr_number: claimed.job.prNumber, pr_state: 'open', review_status: 'pending' },
     }),
     auditWorkspaceForContaminationImpl: cleanContaminationAudit,
+    inspectRemediationCiRegressionImpl: async () => greenCiGate(),
     postCommentImpl: async (args) => {
       commentCalls.push(args);
       return { posted: true };
@@ -10590,6 +10607,7 @@ test('reconcileFollowUpJob does not stop stale-review-head after this worker pus
       };
     },
     auditWorkspaceForContaminationImpl: cleanContaminationAudit,
+    inspectRemediationCiRegressionImpl: async () => greenCiGate(),
     postCommentImpl: async () => ({ posted: true }),
   }));
 
@@ -10782,6 +10800,7 @@ test('reconcile routes blocked rereview (review-row-missing) to stopped, NOT com
       reason: 'review-row-missing',
     }),
     auditWorkspaceForContaminationImpl: cleanContaminationAudit,
+    inspectRemediationCiRegressionImpl: async () => greenCiGate(),
     postCommentImpl: async (args) => { commentCalls.push(args); return { posted: true }; },
   }));
 
@@ -10817,6 +10836,7 @@ test('reconcile routes blocked rereview (pr-not-open) to stopped with the closed
       reviewRow: { repo: 'laceyenterprises/clio', pr_number: 61, pr_state: 'closed' },
     }),
     auditWorkspaceForContaminationImpl: cleanContaminationAudit,
+    inspectRemediationCiRegressionImpl: async () => greenCiGate(),
     postCommentImpl: async (args) => { commentCalls.push(args); return { posted: true }; },
   }));
 
@@ -10845,6 +10865,7 @@ test('reconcile routes blocked rereview (malformed-title-terminal) to stopped', 
       reviewRow: { repo: 'laceyenterprises/clio', pr_number: 62, review_status: 'malformed' },
     }),
     auditWorkspaceForContaminationImpl: cleanContaminationAudit,
+    inspectRemediationCiRegressionImpl: async () => greenCiGate(),
     postCommentImpl: async (args) => { commentCalls.push(args); return { posted: true }; },
   }));
 
@@ -10877,6 +10898,7 @@ test('reconcile treats already-pending as a benign success (still completed, com
       reviewRow: { repo: 'laceyenterprises/clio', pr_number: 63, review_status: 'pending' },
     }),
     auditWorkspaceForContaminationImpl: cleanContaminationAudit,
+    inspectRemediationCiRegressionImpl: async () => greenCiGate(),
     postCommentImpl: async (args) => { commentCalls.push(args); return { posted: true }; },
   }));
 
@@ -10940,6 +10962,7 @@ test('reconcileFollowUpJob preserves a spawned HQ workspace after HQ_ROOT change
       reviewRow: { repo: claimed.job.repo, pr_number: claimed.job.prNumber, pr_state: 'open', review_status: 'pending' },
     }),
     auditWorkspaceForContaminationImpl: cleanContaminationAudit,
+    inspectRemediationCiRegressionImpl: async () => greenCiGate(),
   }));
 
   assert.equal(result.action, 'completed');
@@ -11001,6 +11024,7 @@ test('reconcileFollowUpJob defaults missing workspaceDir to the canonical worksp
       auditedWorkspaceDir = audited;
       return cleanContaminationAudit();
     },
+    inspectRemediationCiRegressionImpl: async () => greenCiGate(),
   }));
 
   assert.equal(result.action, 'completed');

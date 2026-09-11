@@ -126,7 +126,7 @@ test('reviewer pool starts another PR while an older review is slow', async () =
   await runPromise;
 });
 
-test('single-wave reviewer drain returns after launching instead of waiting for completion', async () => {
+test('single-wave reviewer drain detaches slow candidates instead of waiting for completion', async () => {
   const events = [];
   let releaseSlow;
   const slowCompletion = new Promise((resolve) => {
@@ -149,11 +149,65 @@ test('single-wave reviewer drain returns after launching instead of waiting for 
   });
 
   assert.deepEqual(events, ['start:1']);
-  assert.equal(summary.dispatched, 1);
+  assert.equal(summary.dispatched, 0);
   assert.equal(summary.deferred, 1);
   releaseSlow();
   await Promise.resolve();
   assert.deepEqual(events, ['start:1', 'done:1']);
+});
+
+test('single-wave reviewer drain keeps scanning after skipped candidates', async () => {
+  const events = [];
+  const summary = await runBoundedReviewerDispatchQueue([
+    candidate(1, async () => {
+      events.push('skip:1');
+      return { dispatched: false, reason: 'already-reviewed-head' };
+    }),
+    candidate(2, async () => {
+      events.push('start:2');
+    }),
+    candidate(3, async () => {
+      events.push('start:3');
+    }),
+  ], {
+    maxConcurrent: 1,
+    singleWave: true,
+    singleWaveSettleGraceMs: 0,
+    logger: { error() {}, log() {}, warn() {} },
+  });
+
+  assert.deepEqual(events, ['skip:1', 'start:2']);
+  assert.equal(summary.dispatched, 1);
+  assert.equal(summary.deferred, 1);
+  assert.deepEqual(summary.deferredCandidates.map((item) => item.prNumber), [3]);
+});
+
+test('single-wave reviewer drain does not count delayed skipped candidates as dispatched', async () => {
+  const events = [];
+  let resolveSkipped;
+  const delayedSkip = new Promise((resolve) => {
+    resolveSkipped = () => resolve({ dispatched: false, reason: 'memory-admission-deferred' });
+  });
+  const summary = await runBoundedReviewerDispatchQueue([
+    candidate(1, async () => {
+      events.push('start:1');
+      return delayedSkip;
+    }),
+    candidate(2, async () => {
+      events.push('start:2');
+    }),
+  ], {
+    maxConcurrent: 1,
+    singleWave: true,
+    singleWaveSettleGraceMs: 0,
+    logger: { error() {}, log() {}, warn() {} },
+  });
+
+  assert.deepEqual(events, ['start:1']);
+  assert.equal(summary.dispatched, 0);
+  assert.equal(summary.deferred, 1);
+  resolveSkipped();
+  await Promise.resolve();
 });
 
 test('reviewer dispatch candidates sort oldest pending PR first', () => {

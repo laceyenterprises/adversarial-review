@@ -62,6 +62,17 @@ function writeValidReply(replyPath, job, overrides = {}) {
   }, null, 2)}\n`, 'utf8');
 }
 
+function greenCiGate() {
+  return {
+    state: 'green',
+    conclusion: 'SUCCESS',
+    headSha: 'ci-green-head',
+    totalExternalChecks: 3,
+    failedChecks: [],
+    pendingChecks: [],
+  };
+}
+
 async function withHqRootEnv(hqRoot, run) {
   const previous = process.env.HQ_ROOT;
   mkdirSync(hqRoot, { recursive: true });
@@ -287,6 +298,7 @@ test('reconcileFollowUpJob prefers the HQ reply path and rejects the legacy fall
         reviewRow: { repo: claimed.job.repo, pr_number: claimed.job.prNumber, pr_state: 'open', review_status: 'pending' },
       }),
       auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
+      inspectRemediationCiRegressionImpl: async () => greenCiGate(),
       log: { warn: () => {}, error: () => {} },
     });
 

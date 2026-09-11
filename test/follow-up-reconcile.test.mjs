@@ -1,6 +1,6 @@
 import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
@@ -103,6 +103,17 @@ function hqReplyPathForJob(job) {
   return replyPath;
 }
 
+function greenCiGate() {
+  return {
+    state: 'green',
+    conclusion: 'SUCCESS',
+    headSha: 'ci-green-head',
+    totalExternalChecks: 3,
+    failedChecks: [],
+    pendingChecks: [],
+  };
+}
+
 test('reconcileFollowUpJob stops a finished spawned round for no-progress when no re-review is requested', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createFollowUpJob({
@@ -202,6 +213,7 @@ test('reconcileFollowUpJob resets watcher review state when remediation reply re
     isProcessAliveImpl: () => false,
     resolvePRLifecycleImpl: async () => null,
     auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
+    inspectRemediationCiRegressionImpl: async () => greenCiGate(),
   });
 
   const reviewRow = readReviewRow(rootDir);
@@ -219,6 +231,156 @@ test('reconcileFollowUpJob resets watcher review state when remediation reply re
   assert.equal(reviewRow.review_attempts, 1);
   assert.equal(reviewRow.posted_at, null);
   assert.equal(reconciled.job.reReview.wake, undefined);
+});
+
+test('reconcileFollowUpJob waits for external CI before requesting re-review', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  writeReviewRow(rootDir);
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  const replyPath = hqReplyPathForJob(claimed.job);
+  writeFileSync(outputPath, 'Validation: npm test\nFiles changed: src/auth.mjs\n', 'utf8');
+  writeFileSync(replyPath, `${JSON.stringify({
+    kind: 'adversarial-review-remediation-reply',
+    schemaVersion: 1,
+    jobId: claimed.job.jobId,
+    repo: claimed.job.repo,
+    prNumber: claimed.job.prNumber,
+    outcome: 'completed',
+    summary: 'Applied the remediation changes.',
+    validation: ['npm test'],
+    blockers: [],
+    reReview: {
+      requested: true,
+      reason: 'Remediation landed and is ready for another adversarial pass.',
+    },
+  }, null, 2)}\n`, 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      processId: 8123,
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
+      replyPath,
+    },
+  });
+
+  let rereviewCalls = 0;
+  const reconciled = await reconcileFollowUpJob({
+    rootDir,
+    jobPath: spawned.jobPath,
+    now: () => '2026-04-21T10:05:00.000Z',
+    isProcessAliveImpl: () => false,
+    requestReviewRereviewImpl: () => {
+      rereviewCalls += 1;
+      throw new Error('rereview must wait for CI settlement');
+    },
+    resolvePRLifecycleImpl: async () => null,
+    auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
+    inspectRemediationCiRegressionImpl: async () => ({
+      state: 'pending',
+      conclusion: 'PENDING',
+      headSha: 'pending-head',
+      totalExternalChecks: 2,
+      failedChecks: [],
+      pendingChecks: [{ name: 'repo-guards', state: 'IN_PROGRESS' }],
+    }),
+  });
+
+  const stored = JSON.parse(readFileSync(spawned.jobPath, 'utf8'));
+  assert.equal(reconciled.reconciled, false);
+  assert.equal(reconciled.reason, 'ci-settlement-pending');
+  assert.equal(rereviewCalls, 0);
+  assert.equal(readReviewRow(rootDir).review_status, 'posted');
+  assert.equal(stored.status, 'in_progress');
+  assert.equal(stored.lastHeartbeatAt, '2026-04-21T10:05:00.000Z');
+  assert.equal(stored.ciRegressionGuard.state, 'pending');
+  assert.equal(stored.ciRegressionGuard.pendingChecks[0].name, 'repo-guards');
+  assert.equal(stored.remediationPlan.nextAction.type, 'wait-ci-settlement');
+});
+
+test('reconcileFollowUpJob requeues remediation when the pushed head has failed CI', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  writeReviewRow(rootDir);
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  const replyPath = hqReplyPathForJob(claimed.job);
+  writeFileSync(outputPath, 'Validation: npm test\nFiles changed: src/auth.mjs\n', 'utf8');
+  writeFileSync(replyPath, `${JSON.stringify({
+    kind: 'adversarial-review-remediation-reply',
+    schemaVersion: 1,
+    jobId: claimed.job.jobId,
+    repo: claimed.job.repo,
+    prNumber: claimed.job.prNumber,
+    outcome: 'completed',
+    summary: 'Applied the remediation changes.',
+    validation: ['npm test'],
+    blockers: [],
+    reReview: {
+      requested: true,
+      reason: 'Remediation landed and is ready for another adversarial pass.',
+    },
+  }, null, 2)}\n`, 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      processId: 8123,
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
+      replyPath,
+    },
+  });
+
+  let rereviewCalls = 0;
+  const reconciled = await reconcileFollowUpJob({
+    rootDir,
+    jobPath: spawned.jobPath,
+    now: () => '2026-04-21T10:05:00.000Z',
+    isProcessAliveImpl: () => false,
+    requestReviewRereviewImpl: () => {
+      rereviewCalls += 1;
+      throw new Error('rereview must not run after failed CI');
+    },
+    resolvePRLifecycleImpl: async () => null,
+    auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
+    inspectRemediationCiRegressionImpl: async () => ({
+      state: 'failed',
+      conclusion: 'FAILURE',
+      headSha: 'failed-head',
+      totalExternalChecks: 3,
+      failedChecks: [{ name: 'Ruff lint and format baseline', state: 'FAILURE' }],
+      pendingChecks: [],
+    }),
+  });
+
+  assert.equal(reconciled.reconciled, false);
+  assert.equal(reconciled.reason, 'ci-regression');
+  assert.equal(reconciled.job.status, 'pending');
+  assert.match(reconciled.jobPath, /data\/follow-up-jobs\/pending\/.+\.json$/);
+  assert.equal(rereviewCalls, 0);
+  assert.equal(readReviewRow(rootDir).review_status, 'posted');
+  const latestRetry = reconciled.job.remediationPlan.retryHistory.at(-1);
+  assert.equal(latestRetry.retryMetadata.code, 'ci-regression');
+  assert.equal(latestRetry.retryMetadata.failedChecks[0].name, 'Ruff lint and format baseline');
+  assert.match(latestRetry.retryReason, /introduced or left failed CI/);
 });
 
 test('reconcileFollowUpJob wakes watcher when handoff.remediation_to_rereview is enabled', async () => {
@@ -281,6 +443,7 @@ test('reconcileFollowUpJob wakes watcher when handoff.remediation_to_rereview is
     },
     resolvePRLifecycleImpl: async () => null,
     auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
+    inspectRemediationCiRegressionImpl: async () => greenCiGate(),
   });
 
   assert.equal(reconciled.reconciled, true);
@@ -361,6 +524,7 @@ test('reconcileFollowUpJob loads handoff.remediation_to_rereview from the repo c
     },
     resolvePRLifecycleImpl: async () => null,
     auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
+    inspectRemediationCiRegressionImpl: async () => greenCiGate(),
   });
 
   assert.equal(reconciled.reconciled, true);
@@ -619,6 +783,7 @@ test('reconcileFollowUpJob records a blocked re-review request when the watcher 
     isProcessAliveImpl: () => false,
     resolvePRLifecycleImpl: async () => null,
     auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
+    inspectRemediationCiRegressionImpl: async () => greenCiGate(),
   });
 
   const reviewRow = readReviewRow(rootDir);
@@ -776,6 +941,7 @@ test('reconcileFollowUpJob completes when stdout is empty but the reply.json val
     isProcessAliveImpl: () => false,
     resolvePRLifecycleImpl: async () => null,
     auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
+    inspectRemediationCiRegressionImpl: async () => greenCiGate(),
   });
 
   const reviewRow = readReviewRow(rootDir);
@@ -844,6 +1010,7 @@ test('reconcileFollowUpJob honors a valid LEGACY-shape reply (no addressed[]) as
     isProcessAliveImpl: () => false,
     resolvePRLifecycleImpl: async () => null,
     auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
+    inspectRemediationCiRegressionImpl: async () => greenCiGate(),
   });
 
   const reviewRow = readReviewRow(rootDir);
@@ -912,6 +1079,7 @@ test('reconcileFollowUpJob completes when stdout is empty and reply has reReview
     isProcessAliveImpl: () => false,
     resolvePRLifecycleImpl: async () => null,
     auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
+    inspectRemediationCiRegressionImpl: async () => greenCiGate(),
   });
 
   const reviewRow = readReviewRow(rootDir);
@@ -969,6 +1137,7 @@ test('reconcileFollowUpJob fails as invalid-remediation-reply when stdout is emp
     isProcessAliveImpl: () => false,
     resolvePRLifecycleImpl: async () => null,
     auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
+    inspectRemediationCiRegressionImpl: async () => greenCiGate(),
   });
 
   assert.equal(reconciled.reconciled, true);
@@ -1015,6 +1184,7 @@ test('reconcileFollowUpJob still fails when stdout is empty AND no reply.json ex
     isProcessAliveImpl: () => false,
     resolvePRLifecycleImpl: async () => null,
     auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
+    inspectRemediationCiRegressionImpl: async () => greenCiGate(),
   });
 
   assert.equal(reconciled.reconciled, true);
@@ -1229,6 +1399,7 @@ test('reconcileFollowUpJob completes when codex-last-message.md is missing entir
     isProcessAliveImpl: () => false,
     resolvePRLifecycleImpl: async () => null,
     auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
+    inspectRemediationCiRegressionImpl: async () => greenCiGate(),
   });
 
   const reviewRow = readReviewRow(rootDir);

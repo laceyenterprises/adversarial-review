@@ -2219,7 +2219,7 @@ export async function processReviewSubject(entry, ctx) {
                 `(pr, head) dispatch lease already held this window (${dispatchLeaseKey}); ` +
                 `another pool worker owns this head`
             );
-            return;
+            return { dispatched: false, reason: 'head-dispatch-lease-held' };
           }
 
           let reservation = null;
@@ -2259,7 +2259,7 @@ export async function processReviewSubject(entry, ctx) {
                       : 'restore skipped by CAS')
                 );
               }
-              return;
+              return { dispatched: false, reason: 'already-reviewed-head' };
             }
 
             reservation = await reserveReviewerMemoryAdmission({
@@ -2278,7 +2278,7 @@ export async function processReviewSubject(entry, ctx) {
                   `estimated=${memoryDecision.estimatedReviewerRssMb ?? estimatedReviewerRssMb}MB ` +
                   `projected=${memoryDecision.projectedHeadroomMb ?? 'unknown'}MB`
               );
-              return;
+              return { dispatched: false, reason: 'memory-admission-deferred' };
             }
 
             const respawnAgeSeconds = resolvePendingDraftRespawnAgeSeconds();
@@ -2358,7 +2358,7 @@ export async function processReviewSubject(entry, ctx) {
               console.log(
                 `[watcher] Lost claim race on ${repoPath}#${prNumber} — another watcher is handling this PR (or its row is now in a non-claimable state). Skipping.`
               );
-              return;
+              return { dispatched: false, reason: 'claim-race-lost' };
             }
             if (existing) {
               stmtUpdateReviewRouting.run(route.reviewerModel, linearTicketId, repoPath, prNumber);
@@ -2426,14 +2426,14 @@ export async function processReviewSubject(entry, ctx) {
                   `[watcher] PR ${repoPath}#${prNumber} was merged since tick-start snapshot — marking row + skipping reviewer spawn`
                 );
                 stmtMarkMerged.run(freshPR.mergedAt, repoPath, prNumber);
-                return;
+                return { dispatched: false, reason: 'pr-merged-before-spawn' };
               }
               if (freshPR.state !== 'open') {
                 console.log(
                   `[watcher] PR ${repoPath}#${prNumber} was closed since tick-start snapshot (state=${freshPR.state}) — marking row + skipping reviewer spawn`
                 );
                 stmtMarkClosed.run(new Date().toISOString(), repoPath, prNumber);
-                return;
+                return { dispatched: false, reason: 'pr-closed-before-spawn' };
               }
               const freshHeadSha = freshPR.headRefOid || null;
               if (
@@ -2447,7 +2447,7 @@ export async function processReviewSubject(entry, ctx) {
                   'releasing claim and skipping stale reviewer spawn'
                 );
                 stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
-                return;
+                return { dispatched: false, reason: 'head-moved-before-spawn' };
               }
             } catch (err) {
               // Non-fatal — proceed with spawn rather than block. A failed
@@ -2472,7 +2472,7 @@ export async function processReviewSubject(entry, ctx) {
                 `until ${preSpawnReconciliation.respawnDeadlineUtc || 'unknown deadline'}`
               );
               stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
-              return;
+              return { dispatched: false, reason: 'fresh-pending-draft-retained' };
             }
 
             // Final-round inputs come from the durable per-PR follow-up ledger,
@@ -2555,7 +2555,7 @@ export async function processReviewSubject(entry, ctx) {
                 failureAt: attemptAt,
                 maxRemediationRounds,
               });
-              return;
+              return { dispatched: false, reason: 'routing-tier-not-ready' };
             }
 
             const hcpPrecheck = await enforceHcpPreSpawnReadiness({
@@ -2567,7 +2567,9 @@ export async function processReviewSubject(entry, ctx) {
               maxRemediationRounds,
               getHcpHealthzForTick,
             });
-            if (!hcpPrecheck.proceed) return;
+            if (!hcpPrecheck.proceed) {
+              return { dispatched: false, reason: 'hcp-precheck-not-ready' };
+            }
 
             // Standing policy: the hammer ALWAYS closes on exhaustion and must
             // NEVER trigger a re-review. Two gates before spawning a reviewer on
@@ -2694,6 +2696,7 @@ export async function processReviewSubject(entry, ctx) {
               );
               // An FSR-06B request that a fuse refused must not park as pending.
               declineFleetSelfRepairRereview(skipReviewerSpawnReason);
+              return { dispatched: false, reason: skipReviewerSpawnReason };
             } else {
               // Count only work that made it through defer, budget, dedupe,
               // claim, freshness, and routing checks and is about to enter the

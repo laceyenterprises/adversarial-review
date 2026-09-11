@@ -29,6 +29,27 @@ const ROOT = join(__dirname, '..');
 // codex path.
 const REMEDIATION_WORKER_TRAILER_CLASS = 'codex-remediation';
 
+function latestRetryHistoryEntry(job) {
+  const history = Array.isArray(job?.remediationPlan?.retryHistory)
+    ? job.remediationPlan.retryHistory
+    : [];
+  return history.length > 0 ? history[history.length - 1] : null;
+}
+
+function retryContextBlock(job) {
+  const latestRetry = latestRetryHistoryEntry(job);
+  if (!latestRetry) return '';
+  const retryContext = {
+    retryReason: latestRetry.retryReason || null,
+    retryMetadata: latestRetry.retryMetadata || null,
+  };
+  return `
+
+## Trusted Previous Remediation Attempt
+The previous remediation attempt did not satisfy the daemon's completion gate. Treat this as trusted daemon feedback and fix it before requesting re-review.
+${formatFencedBlock(JSON.stringify(retryContext, null, 2), 'json')}`;
+}
+
 export function buildRemediationPrompt(job, {
   template,
   remediationReplyPath = job?.remediationReply?.path || null,
@@ -132,7 +153,9 @@ ${formatFencedBlock(job.reviewBody, 'markdown')}${governingDocContext}${buildObv
   \`WORKER_JOB_ID=${job.jobId}\`
   \`WORKER_RUN_AT=<current ISO 8601 timestamp>\`
 - Run the smallest relevant validation before finishing.
+- Before pushing, run every local guard that corresponds to the files you touched and every cheap repo-level guard that the PR previously relied on. At minimum, run \`git diff --check\`; for Python repos with a checked-in Ruff baseline gate, run the repo's Ruff/format baseline command before commit. If a local guard fails, fix it before pushing.
 - Commit the remediation changes and push the PR branch.
+- After pushing, perform a bounded PR-head CI regression check before writing a successful reply. Inspect the pushed PR head's checks with \`gh pr checks <pr> --repo <repo>\` or \`gh pr view <pr> --repo <repo> --json headRefOid,statusCheckRollup\`. If any external CI lane is failed, fix that regression in this same remediation round and push again. If checks are still queued or in progress, wait briefly and re-check; do not claim completion while a known failed lane exists.
 - Do not open a new PR; this job is for an existing PR follow-up.
 - Use OAuth-backed authentication only; do not rely on API key fallbacks.
 - Write a machine-readable remediation reply JSON file to the remediation reply artifact path from the trusted metadata.
@@ -143,5 +166,5 @@ ${formatFencedBlock(job.reviewBody, 'markdown')}${governingDocContext}${buildObv
 ## Required Remediation Reply Contract
 Write JSON matching this schema exactly, filling in real values for the work you performed:
 ${formatFencedBlock(JSON.stringify(replyContract, null, 2), 'json')}
-`.trim();
+${retryContextBlock(job)}`.trim();
 }

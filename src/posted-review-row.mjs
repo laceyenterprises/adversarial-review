@@ -132,7 +132,6 @@ function isTerminalReviewRow(row) {
 function liveCandidateTerminalReason(candidate) {
   const prState = String(candidate?.prState || '').trim().toLowerCase();
   if (candidate?.merged === true || prState === 'merged') return 'merged';
-  if (prState === 'closed') return 'closed';
   return null;
 }
 

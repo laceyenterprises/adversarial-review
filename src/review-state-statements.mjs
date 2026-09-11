@@ -60,6 +60,12 @@ export const MARK_REREVIEW_CI_BLOCKED_SQL = `UPDATE reviewed_prs
       AND pr_number = ?
       AND review_status = 'reviewing'`;
 
+export const MARK_REREVIEW_CI_BLOCKED_RECHECK_SQL = `UPDATE reviewed_prs
+      SET last_attempted_at = ?
+    WHERE repo = ?
+      AND pr_number = ?
+      AND review_status = '${REREVIEW_CI_BLOCKED_STATUS}'`;
+
 export const MARK_INFRA_AUTO_RECOVERY_ATTEMPT_STARTED_SQL =
   `UPDATE reviewed_prs
      SET review_status = 'reviewing',
@@ -248,6 +254,10 @@ export function prepareMarkAttemptStarted(db) {
 
 export function prepareMarkRereviewCiBlocked(db) {
   return db.prepare(MARK_REREVIEW_CI_BLOCKED_SQL);
+}
+
+export function prepareMarkRereviewCiBlockedRecheck(db) {
+  return db.prepare(MARK_REREVIEW_CI_BLOCKED_RECHECK_SQL);
 }
 
 export function prepareMarkInfraAutoRecoveryAttemptStarted(db) {

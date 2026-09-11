@@ -8,6 +8,7 @@ import {
   prepareMarkAttemptStarted,
   prepareMarkMergedPendingReviewSkipped,
   prepareMarkRereviewCiBlocked,
+  prepareMarkRereviewCiBlockedRecheck,
 } from '../src/review-state-statements.mjs';
 import { infraRecoverableFailureClass } from '../src/reviewer-failure-classification.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from '../src/review-statuses.mjs';
@@ -631,6 +632,34 @@ test('CI-blocked rereview park clears the claim and remains non-claimable', () =
     0,
     'ci-blocked rows must not consume reviewer dispatch capacity'
   );
+});
+
+test('CI-blocked rereview recheck records a bounded probe timestamp', () => {
+  const db = setupDb();
+  seedReviewRow(db, { reviewStatus: REREVIEW_CI_BLOCKED_STATUS, reviewerHeadSha: 'head-red' });
+
+  const updated = prepareMarkRereviewCiBlockedRecheck(db).run(
+    '2026-05-02T18:15:00.000Z',
+    REPO,
+    PR
+  );
+
+  assert.equal(updated.changes, 1);
+  let row = readRow(db);
+  assert.equal(row.review_status, REREVIEW_CI_BLOCKED_STATUS);
+  assert.equal(row.last_attempted_at, '2026-05-02T18:15:00.000Z');
+
+  db.prepare("UPDATE reviewed_prs SET review_status = 'pending' WHERE repo = ? AND pr_number = ?").run(REPO, PR);
+  const refused = prepareMarkRereviewCiBlockedRecheck(db).run(
+    '2026-05-02T18:20:00.000Z',
+    REPO,
+    PR
+  );
+  row = readRow(db);
+
+  assert.equal(refused.changes, 0);
+  assert.equal(row.review_status, 'pending');
+  assert.equal(row.last_attempted_at, '2026-05-02T18:15:00.000Z');
 });
 
 test('atomic claim simulates a real two-process race — only one wins', () => {

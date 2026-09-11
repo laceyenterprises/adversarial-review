@@ -50,7 +50,9 @@ The Grafana dashboard lives at
   pending first-pass/rereview row.
 - `review_pipeline_ci_blocked_rereviews`: open re-reviews parked at
   `review_status='ci-blocked'` because external CI failed and no remediation
-  job exists to requeue.
+  job exists to requeue. The watcher backoff-gates same-head CI rechecks for
+  parked rows so the finding remains observable without turning into a GitHub
+  polling loop.
 - `review_pipeline_remediation_backlog_jobs`: follow-up job counts by queue
   state.
 - `review_pipeline_remediation_oldest_pending_age_seconds`: age of the oldest
@@ -118,7 +120,7 @@ Its action headline is `Reviews stalled — restore reviewer dispatch`.
 | `review:reviewer_degradation_active` | at least one PR is currently held by `provider-overloaded` transient backoff or `quota-exhausted` quota hold | ticket | no active provider-overload backoff or quota hold remains |
 | `review:terminal_review_failure_active` | at least one open PR has terminal reviewer failure evidence in `reviewed_prs` | ticket | the failed review row is retriggered, remediated, or the PR leaves the open population |
 | `review:queue_starvation` | oldest pending first-pass row is >10m old | ticket | no pending row exceeds the age threshold |
-| `review:rereview_ci_blocked` | one or more open re-reviews are parked at `review_status='ci-blocked'` because external CI failed and no remediation job exists to requeue | ticket | the PR head moves, CI turns green, remediation is requeued, or the PR leaves the open population |
+| `review:rereview_ci_blocked` | one or more open re-reviews are parked at `review_status='ci-blocked'` because external CI failed and no remediation job exists to requeue; same-head CI probes are backoff-gated | ticket | the PR head moves, CI turns green, remediation is requeued, or the PR leaves the open population |
 | `review:pr_lifecycle_mirror_unverified` | SEN-02 `blind`: the `reviewed_prs` lifecycle mirror has not reconciled against GitHub inside the staleness window (default 15m), or specific open PRs could not be resolved. Both the queue-starvation and terminal-but-unmerged findings select their population from `pr_state='open'` and then threshold on elapsed age, so an unverified row yields an alert that can never self-clear. Never a health verdict, and never suppresses either finding. | ticket | a sweep resolves every open PR against GitHub inside the staleness window |
 | `review:malformed_pr_title` | one or more open PRs are recorded `review_status='malformed'` | ticket | malformed rows are recreated, explicitly recovered, or no longer open; known bot-authored prefixless PRs are routed to Argus with `review_status='argus-security-queued'` (ASR-04) and do not trigger this alert; neither do legacy `unroutable-bot-author` rows |
 | `review:remediation_backlog` | `follow-up-jobs/pending` has >5 jobs | ticket | pending job count returns to threshold or below |

@@ -136,6 +136,7 @@ import {
   stmtMarkMerged,
   stmtMarkMergedPendingReviewSkipped,
   stmtMarkRereviewCiBlocked,
+  stmtMarkRereviewCiBlockedRecheck,
   stmtMarkReviewCycleCapPaused,
   stmtMarkReviewPopulationRetryAttemptStarted,
   stmtMarkReviewerCommandFailedRecoveredPosted,
@@ -181,7 +182,10 @@ import {
   selectReviewerRouteForAttempt,
   shouldBypassPrimaryReviewerQuotaHold,
 } from './reviewer-route-selection.mjs';
-import { guardRereviewCiBeforeReviewer } from './reviewer-ci-admission.mjs';
+import {
+  guardRereviewCiBeforeReviewer,
+  shouldRecheckCiBlockedRereview,
+} from './reviewer-ci-admission.mjs';
 import {
   createAfhReviewerGroundingCache,
   describeAfhReviewerFallback,
@@ -1788,6 +1792,30 @@ export async function processReviewSubject(entry, ctx) {
             await projectGateStatusSafe(current);
             return;
           }
+          const ciBlockedRecheck = shouldRecheckCiBlockedRereview(current, {
+            nowMs: Date.now(),
+            env: process.env,
+          });
+          if (!ciBlockedRecheck.shouldRecheck) {
+            console.log(
+              `[watcher] Holding CI-blocked re-review for ${repoPath}#${prNumber}: ` +
+                `same-head CI recheck backoff active until ${ciBlockedRecheck.nextCheckAt}`
+            );
+            await projectGateStatusSafe(current);
+            return;
+          }
+          const recheckAt = new Date().toISOString();
+          const recheckUpdate = stmtMarkRereviewCiBlockedRecheck.run(
+            recheckAt,
+            repoPath,
+            prNumber
+          );
+          if (recheckUpdate.changes !== 1) {
+            current = stmtGetReviewRow.get(repoPath, prNumber);
+            await projectGateStatusSafe(current);
+            return;
+          }
+          current = stmtGetReviewRow.get(repoPath, prNumber) || current;
           const ciAdmission = await guardRereviewCiBeforeReviewer({
             rootDir: ROOT,
             repo: repoPath,

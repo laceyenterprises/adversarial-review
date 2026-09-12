@@ -1281,8 +1281,14 @@ const AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES = new Set([
   'superseded',
   'not-found',
   'unverified-terminal-success',
+  'operator_triage_required',
+  'reaped_stuck_requested',
 ]);
 const AMA_CLOSER_TERMINAL_HOLD_STATUSES = new Set(['succeeded']);
+const AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_OPERATOR_HOLD_STATUSES = new Set([
+  'operator_triage_required',
+  'reaped_stuck_requested',
+]);
 const BRANCH_HOLDER_TERMINAL_WORKER_RUN_STATUSES = new Set(['succeeded', 'failed', 'cancelled']);
 const BRANCH_HOLDER_WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const CODING_BRANCH_HOLDER_PREFIXES = [
@@ -1310,6 +1316,20 @@ const AMA_CLOSER_AUDIT_TERMINAL_OUTCOMES = new Set([
   'deferred',
   'superseded',
 ]);
+
+function amaCloserStatusFromTerminalLaunchRequestStatus(launchRequestStatus) {
+  if (launchRequestStatus === 'succeeded') return 'unverified-terminal-success';
+  if (AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_OPERATOR_HOLD_STATUSES.has(launchRequestStatus)) {
+    return launchRequestStatus;
+  }
+  return AMA_CLOSER_RETRYABLE_STATUSES.has(launchRequestStatus)
+    ? launchRequestStatus
+    : 'failed';
+}
+
+function dispatchStatusReason(status) {
+  return `dispatch-status-${String(status || 'unknown').replace(/_/g, '-')}`;
+}
 
 /**
  * Detect a dispatch record frozen mid-`hq dispatch` by an external SIGTERM.
@@ -4566,28 +4586,34 @@ export async function maybeDispatchAmaCloser({
       });
       const launchRequestStatus = String(launchRequestProbe?.row?.status || '').trim().toLowerCase();
       if (launchRequestProbe?.ok && TERMINAL_LAUNCH_REQUEST_STATUSES.has(launchRequestStatus)) {
-        status = launchRequestStatus === 'succeeded'
-          ? 'unverified-terminal-success'
-          : launchRequestStatus;
-        if (!AMA_CLOSER_RETRYABLE_STATUSES.has(status)) status = 'failed';
+        status = amaCloserStatusFromTerminalLaunchRequestStatus(launchRequestStatus);
         existingDispatchStatus = status;
-        finalizeAmaCloserLeaseBestEffort({
-          rootDir,
-          leaseIdentity: existingRecordLeaseIdentity,
-          terminalOutcome: existingDispatchHeadAdvanced || status === 'superseded'
-            ? 'superseded'
-            : 'failed-without-merge',
-          now: dispatchContext.dispatchedAt,
-          logger,
-          repo,
-          prNumber,
-        });
         updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
           ...(current || existingRecord),
-          lastObservedStatus: launchRequestStatus,
+          lastObservedStatus: status,
           lastObservedAt: dispatchContext.dispatchedAt,
           lastError: `dispatch-status-unknown-terminal-lrq-${launchRequestStatus}`,
         }));
+        if (AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_OPERATOR_HOLD_STATUSES.has(status)) {
+          finalizeAmaCloserLeaseBestEffort({
+            rootDir,
+            leaseIdentity: existingRecordLeaseIdentity,
+            terminalOutcome: 'deferred',
+            now: dispatchContext.dispatchedAt,
+            logger,
+            repo,
+            prNumber,
+          });
+          return noAmaDispatch({
+            dispatched: false,
+            skipMergeAgent: true,
+            reason: dispatchStatusReason(status),
+            workerClass: existingRecord.workerClass || workerClass,
+            dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
+            launchRequestId: existingRecord.launchRequestId || null,
+            promptPath: existingRecord.promptPath || null,
+          });
+        }
       } else {
         updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
           ...(current || existingRecord),
@@ -4652,7 +4678,7 @@ export async function maybeDispatchAmaCloser({
       && !advancedTerminalDispatchSuperseded
       && !AMA_CLOSER_RETRYABLE_STATUSES.has(status)
     ) {
-      return noAmaDispatch({ dispatched: false, reason: `dispatch-status-${status || 'unknown'}` });
+      return noAmaDispatch({ dispatched: false, reason: dispatchStatusReason(status) });
     }
   } else if (existingRecordHasLivePendingInterruption) {
     return noAmaDispatch({

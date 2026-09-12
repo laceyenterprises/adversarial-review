@@ -551,12 +551,20 @@ test('the lever thresholds on the production countOpenPrsAwaitingFirstPassReview
   const reportRoot = tempRoot('rsp01-report-');
   const db = openReviewStateDb(dbRoot);
   let prSeq = 9000;
-  const seed = (prState, reviewStatus) => {
+  const seed = (prState, reviewStatus, { revisionRef = null } = {}) => {
     const prNumber = prSeq++;
     db.prepare(
-      'INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, review_status)'
-      + ' VALUES (?, ?, ?, ?, ?, ?)'
-    ).run('laceyenterprises/agent-os', prNumber, '2026-09-06T00:00:00.000Z', 'gemini', prState, reviewStatus);
+      'INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, revision_ref)'
+      + ' VALUES (?, ?, ?, ?, ?, ?, ?)'
+    ).run(
+      'laceyenterprises/agent-os',
+      prNumber,
+      '2026-09-06T00:00:00.000Z',
+      'gemini',
+      prState,
+      reviewStatus,
+      revisionRef
+    );
     return prNumber;
   };
   try {
@@ -585,17 +593,49 @@ test('the lever thresholds on the production countOpenPrsAwaitingFirstPassReview
     assert.equal(engagedPlan.engaged, true);
     assert.equal(engagedPlan.spillSlots, 1);
 
-    // A genuinely delivered review (a reviewer_passes row carrying a GitHub
-    // comment id) drops the depth under threshold and disengages the lever.
-    const delivered = seed('open', 'pending');
+    // A genuinely delivered review for the CURRENT head drops the depth under
+    // threshold and disengages the lever.
+    const delivered = seed('open', 'pending', { revisionRef: 'head-current' });
+    const invalidated = seed('open', 'pending', { revisionRef: 'head-new' });
     db.prepare(
       'INSERT INTO reviewer_passes (repo, pr_number, attempt_number, reviewer_class, reviewer_model,'
-      + ' pass_kind, started_at, ended_at, status, body_md, gh_comment_id)'
-      + " VALUES (?, ?, 1, 'gemini', 'gemini', 'first-pass', ?, ?, 'completed', 'body', 'RV_1')"
-    ).run('laceyenterprises/agent-os', delivered, '2026-09-06T00:00:00.000Z', '2026-09-06T00:10:00.000Z');
+      + ' pass_kind, started_at, ended_at, status, body_md, gh_comment_id, head_sha)'
+      + " VALUES (?, ?, 1, 'gemini', 'gemini', 'first-pass', ?, ?, 'completed', 'body', ?, ?)"
+    ).run(
+      'laceyenterprises/agent-os',
+      delivered,
+      '2026-09-06T00:00:00.000Z',
+      '2026-09-06T00:10:00.000Z',
+      'RV_current_head',
+      'head-current'
+    );
+    db.prepare(
+      'INSERT INTO reviewer_passes (repo, pr_number, attempt_number, reviewer_class, reviewer_model,'
+      + ' pass_kind, started_at, ended_at, status, body_md, gh_comment_id, head_sha)'
+      + " VALUES (?, ?, 1, 'gemini', 'gemini', 'first-pass', ?, ?, 'completed', 'body', ?, ?)"
+    ).run(
+      'laceyenterprises/agent-os',
+      invalidated,
+      '2026-09-06T00:00:00.000Z',
+      '2026-09-06T00:10:00.000Z',
+      'RV_old_head',
+      'head-old'
+    );
     db.prepare('DELETE FROM reviewed_prs WHERE pr_number IN (9000, 9001)').run();
 
-    assert.equal(countOpenPrsAwaitingFirstPassReview(db), 1);
+    assert.equal(
+      countOpenPrsAwaitingFirstPassReview(db),
+      2,
+      'legacy in-flight row plus invalidated current-head row remain queued; current-head pass is excluded'
+    );
+    const { collectReviewPipelineHealth } = await import('../src/review-pipeline-health.mjs');
+    const pipelineSnapshot = collectReviewPipelineHealth({
+      rootDir: dbRoot,
+      now: () => new Date('2026-09-06T00:30:00.000Z'),
+      reconcileTerminalState: false,
+    });
+    assert.equal(pipelineSnapshot.firstPassQueue.depth, countOpenPrsAwaitingFirstPassReview(db));
+    assert.equal(pipelineSnapshot.firstPassQueue.depthUnit, FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT);
     assert.equal(ctl().plan().engaged, false, 'depth recovered => lever disengages, review returns to agy');
   } finally {
     db.close();

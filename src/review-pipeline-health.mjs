@@ -20,6 +20,8 @@ import {
   isPrUnverified,
   readPrTerminalReconcileState,
 } from './pr-terminal-reconcile.mjs';
+import { FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT } from './review-queue-depth.mjs';
+import { SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW } from './review-state-statements.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
 
 const DEFAULT_REVIEWER_DEATH_RATE_WINDOW_MS = 60 * 60 * 1000;
@@ -33,11 +35,12 @@ const DEFAULT_REVIEW_UNKNOWN_RATE_DISTINCT_PR_FLOOR = 2;
 // How long a PR may sit WAITING for its first-pass review before that is a
 // finding.
 //
-// This measures wait, not work: `summarizeFirstPassQueue` selects only
-// `review_status = 'pending'`, so a review that is actually running
-// (`reviewing`) is NOT counted. A long review therefore cannot trip this; only a
-// PR nothing has picked up, or one whose reviewer failed and left the row
-// pending, can.
+// This measures wait, not work: `summarizeFirstPassQueue` reports total depth
+// from the same current-head predicate the RSP-01 spillover lever uses, but its
+// oldest/starvation scan selects only `review_status = 'pending'`, so a review
+// that is actually running (`reviewing`) is NOT aged. A long review therefore
+// cannot trip this; only a PR nothing has picked up, or one whose reviewer
+// failed and left the row pending, can.
 //
 // Lowered from 30m to 10m (2026-08-22). At 30m the alarm was useless in
 // practice: the operator noticed a visible pile-up — 11 open PRs, first-pass
@@ -631,6 +634,15 @@ function safeAll(db, sql, params = []) {
     return db.prepare(sql).all(...params);
   } catch (error) {
     if (isMissingSchemaError(error)) return [];
+    throw error;
+  }
+}
+
+function safeGet(db, sql, params = []) {
+  try {
+    return db.prepare(sql).get(...params);
+  } catch (error) {
+    if (isMissingSchemaError(error)) return null;
     throw error;
   }
 }
@@ -1263,13 +1275,28 @@ function summarizeReviewerDegradation(rootDir, db, { nowMs }) {
 }
 
 function summarizeFirstPassQueue(db, { nowMs }) {
+  const depth = Number(safeGet(db, SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW)?.n ?? 0);
   const rows = safeAll(
     db,
     `SELECT repo, pr_number, reviewed_at, rereview_requested_at, last_attempted_at,
             failed_at, failure_message, review_attempts
        FROM reviewed_prs
       WHERE pr_state = 'open'
-        AND review_status = 'pending'`
+        AND review_status = 'pending'
+        AND NOT EXISTS (
+          SELECT 1 FROM reviewer_passes
+           WHERE reviewer_passes.repo = reviewed_prs.repo
+             AND reviewer_passes.pr_number = reviewed_prs.pr_number
+             AND reviewer_passes.gh_comment_id IS NOT NULL
+             AND reviewer_passes.gh_comment_id <> ''
+             AND (
+               (
+                 COALESCE(NULLIF(reviewed_prs.revision_ref, ''), NULLIF(reviewed_prs.reviewer_head_sha, '')) IS NOT NULL
+                 AND reviewer_passes.head_sha = COALESCE(NULLIF(reviewed_prs.revision_ref, ''), NULLIF(reviewed_prs.reviewer_head_sha, ''))
+               )
+               OR COALESCE(NULLIF(reviewed_prs.revision_ref, ''), NULLIF(reviewed_prs.reviewer_head_sha, '')) IS NULL
+             )
+        )`
   );
   let oldest = null;
   let failedCount = 0;
@@ -1300,7 +1327,8 @@ function summarizeFirstPassQueue(db, { nowMs }) {
     }
   }
   return {
-    depth: rows.length,
+    depth: Number.isFinite(depth) && depth >= 0 ? depth : rows.length,
+    depthUnit: FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT,
     failedCount,
     oldest,
   };

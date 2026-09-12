@@ -483,13 +483,13 @@ export function latestPostedReviewAtMs(handle = db) {
   return latest;
 }
 
-// Count of currently-open PRs with no genuine posted review. Keying off
-// reviewer_passes.gh_comment_id keeps the freshness pager unmaskable: a
-// stale/mistaken per-PR review_status='posted' cannot hide a PR that never
-// actually received a published review, while a re-entered PR with posted_at
-// reset is not double-counted as first-pass-awaiting. Scoped to pr_state='open'
-// so a stale closed/merged row can never hold the count above zero during a
-// quiet posting lull.
+// Count of currently-open PRs whose current head has no genuine posted review.
+// Keying off reviewer_passes.gh_comment_id keeps the freshness pager
+// unmaskable: a stale/mistaken per-PR review_status='posted' cannot hide a PR
+// that never actually received a published review for this head, while a
+// current-head re-review backlog is not double-counted as first-pass-awaiting.
+// Scoped to pr_state='open' so a stale closed/merged row can never hold the
+// count above zero during a quiet posting lull.
 export function countOpenPrsAwaitingFirstPassReview(handle = db) {
   const stmt =
     handle === db

@@ -2855,12 +2855,11 @@ function schemaV1() {
             __nullable: true,
             __min: 1,
           },
-          // RSP-01 break-glass lever. Depth, in PRs AWAITING THEIR FIRST
-          // FIRST-PASS REVIEW (open PR, `posted_at IS NULL`, review_status in
-          // pending/pending-upstream — see review-queue-depth.mjs for the exact
-          // predicate and its exclusions), at or above which first-pass review
-          // is permitted to spill off the cheap single reviewer class onto the
-          // entitled, quota-available fallback classes.
+          // RSP-01 break-glass lever. Depth, in open PRs whose CURRENT head has
+          // no published adversarial review (see review-queue-depth.mjs for the
+          // exact predicate and its exclusions), at or above which first-pass
+          // review is permitted to spill off the cheap single reviewer class
+          // onto the entitled, quota-available fallback classes.
           //
           // Null (default) = DISARMED: reviewer selection is byte-identical to
           // pre-RSP-01. This is deliberately a cost lever, not a parallelism

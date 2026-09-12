@@ -66,8 +66,9 @@ function insertReviewRow(rootDir, overrides = {}) {
     db.prepare(
       `INSERT INTO reviewed_prs
          (repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
-          review_attempts, last_attempted_at, posted_at, failed_at, failure_message)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          review_attempts, last_attempted_at, posted_at, failed_at, failure_message,
+          revision_ref, reviewer_head_sha)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       overrides.repo || REPO,
       overrides.prNumber || 946,
@@ -79,7 +80,9 @@ function insertReviewRow(rootDir, overrides = {}) {
       overrides.lastAttemptedAt ?? null,
       overrides.postedAt ?? null,
       overrides.failedAt ?? null,
-      overrides.failureMessage ?? null
+      overrides.failureMessage ?? null,
+      overrides.revisionRef ?? null,
+      overrides.reviewerHeadSha ?? null
     );
   } finally {
     db.close();
@@ -92,8 +95,8 @@ function insertReviewerPass(rootDir, overrides = {}) {
     db.prepare(
       `INSERT INTO reviewer_passes
          (repo, pr_number, attempt_number, reviewer_class, reviewer_model,
-          pass_kind, started_at, ended_at, status, metadata_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          pass_kind, started_at, ended_at, status, metadata_json, gh_comment_id, head_sha)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       overrides.repo || REPO,
       overrides.prNumber || 950,
@@ -104,7 +107,9 @@ function insertReviewerPass(rootDir, overrides = {}) {
       overrides.startedAt || '2026-05-25T17:45:00.000Z',
       overrides.endedAt || '2026-05-25T17:50:00.000Z',
       overrides.status || 'failed',
-      JSON.stringify(overrides.metadata || { failureClass: 'timeout' })
+      JSON.stringify(overrides.metadata || { failureClass: 'timeout' }),
+      overrides.ghCommentId ?? null,
+      overrides.headSha ?? null
     );
   } finally {
     db.close();
@@ -592,6 +597,58 @@ test('queue starvation finding fires on an old pending first-pass row and clears
   assert.ok(!findingCodes(cleared).includes('review:queue_starvation'));
 });
 
+test('first-pass queue depth counts invalidated reviews but not current-head rereview backlog', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 6680,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T17:00:00.000Z',
+  });
+  insertReviewerPass(rootDir, {
+    prNumber: 6680,
+    attemptNumber: 1,
+    passKind: 'first-pass',
+    status: 'completed',
+    ghCommentId: 'RV_old_head',
+    headSha: 'head-old',
+  });
+  insertReviewRow(rootDir, {
+    prNumber: 6681,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T17:05:00.000Z',
+  });
+  insertReviewerPass(rootDir, {
+    prNumber: 6681,
+    attemptNumber: 1,
+    passKind: 'first-pass',
+    status: 'completed',
+    ghCommentId: 'RV_current_head',
+    headSha: 'head-current',
+  });
+  insertReviewRow(rootDir, {
+    prNumber: 6682,
+    reviewStatus: 'reviewing',
+    reviewedAt: '2026-05-25T17:10:00.000Z',
+  });
+  const db = openDb(rootDir);
+  try {
+    db.prepare('UPDATE reviewed_prs SET revision_ref = ? WHERE pr_number = ?').run('head-new', 6680);
+    db.prepare('UPDATE reviewed_prs SET revision_ref = ? WHERE pr_number = ?').run('head-current', 6681);
+    db.prepare('UPDATE reviewed_prs SET revision_ref = ? WHERE pr_number = ?').run('head-in-flight', 6682);
+  } finally {
+    db.close();
+  }
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    reconcileTerminalState: false,
+  });
+  assert.equal(snapshot.firstPassQueue.depth, 2);
+  assert.match(snapshot.firstPassQueue.depthUnit, /current head has no published adversarial review/);
+  assert.equal(snapshot.firstPassQueue.oldest.prNumber, 6680);
+});
+
 test('queue starvation default threshold is 10m, not 30m', () => {
   // At the old 30m default the alarm was silent through a visible pile-up: 11
   // open PRs, first-pass depth 4, oldest pending 19.4m after its reviewer exited
@@ -931,9 +988,11 @@ test('terminal reconciliation refuses writable reviews.db when caller uid differ
 });
 
 test('an in-flight review does not count as starvation', () => {
-  // `summarizeFirstPassQueue` selects only review_status='pending'. A review that
-  // is actually RUNNING must never trip the alarm, or a 10m bar would page on
-  // every slow-but-healthy review.
+  // Total depth uses the RSP-01 current-head predicate, so an in-flight review
+  // still contributes to "current head has no published review". The starvation
+  // alarm, however, ages only review_status='pending'. A review that is actually
+  // RUNNING must never trip the alarm, or a 10m bar would page on every
+  // slow-but-healthy review.
   const rootDir = tempRoot();
   insertReviewRow(rootDir, {
     prNumber: 950,
@@ -942,7 +1001,8 @@ test('an in-flight review does not count as starvation', () => {
   });
   const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
   assert.ok(!findingCodes(snapshot).includes('review:queue_starvation'));
-  assert.equal(snapshot.firstPassQueue.depth, 0);
+  assert.equal(snapshot.firstPassQueue.depth, 1);
+  assert.equal(snapshot.firstPassQueue.oldest, null);
 });
 
 test('CI-blocked rereviews do not count as starvation and get their own finding', () => {

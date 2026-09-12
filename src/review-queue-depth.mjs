@@ -51,7 +51,7 @@ import { loadRoleConfig } from './role-config.mjs';
 // ── The unit ─────────────────────────────────────────────────────────────────
 // "Queue depth" is stated precisely, because an operator sets a threshold in it:
 //
-//   depth = OPEN PRs THAT HAVE NEVER RECEIVED A FIRST-PASS REVIEW.
+//   depth = OPEN PRs WHOSE CURRENT HEAD HAS NO PUBLISHED ADVERSARIAL REVIEW.
 //
 // This is NOT a new number. It is exactly `countOpenPrsAwaitingFirstPassReview`
 // in `review-state-db.mjs` — the same count the review-stall pager already
@@ -60,39 +60,41 @@ import { loadRoleConfig } from './role-config.mjs';
 // during exactly the incident where both get read. Its predicate, verbatim from
 // that module:
 //   - `pr_state = 'open'` — merged/closed PRs are not waiting for anything.
-//   - NO `reviewer_passes` row with a non-empty `gh_comment_id` — that is
-//     GitHub-artifact evidence that a review really landed, deliberately chosen
-//     over `reviewed_prs.posted_at`/`review_status` because those are maskable
-//     by a stale success claim and are reset on re-entry.
+//   - NO `reviewer_passes` row for the PR's current head with a non-empty
+//     `gh_comment_id` — that is GitHub-artifact evidence that a review really
+//     landed on the head being merged, deliberately chosen over
+//     `reviewed_prs.posted_at`/`review_status` because those are maskable by a
+//     stale success claim and are reset on re-entry. On legacy rows with no
+//     head identity, the predicate falls back to historical `gh_comment_id`
+//     behavior rather than counting every old reviewed PR.
 //   - `review_status NOT IN ('malformed','unroutable-bot-author',
 //     'argus-security-queued')` — work the dispatch loop explicitly refuses. It
 //     will never get a first pass, so more reviewers cannot drain it.
 //
 // SAY WHAT ELSE IT COUNTS, AND WHAT IT DOES NOT:
 //   - It DOES count a PR whose FIRST pass is in flight (`review_status =
-//     'reviewing'` with no delivered pass yet) — that PR still has no review. So
-//     the count cannot fall below the number of FIRST-PASS reviewers currently
-//     in flight. A threshold at or under the first-pass pool ceiling (default 6,
-//     max 12) could therefore be satisfied by a saturated-but-healthy pipeline
-//     and pin the lever on; set it meaningfully ABOVE the pool ceiling, which is
-//     also where arrivals genuinely exceed what one class absorbs.
-//   - It does NOT count re-review churn at all. A PR that already has a
-//     delivered pass is excluded even while a re-review is in flight for it.
-//     That is the intended scope: the ticket is about first-pass throughput, and
-//     re-review is not what the operator asked to parallelize. Observed on this
-//     host 2026-09-06: 9 open PRs, 6 reviewers in flight, depth = 0 — every open
-//     PR had already been first-passed, so the backlog was re-review, not
-//     first-pass, and the lever correctly would not engage at any threshold.
+//     'reviewing'` with no delivered pass for this head yet) — that PR still has
+//     no current-head review. So the count cannot fall below the number of
+//     FIRST-PASS reviewers currently in flight. A threshold at or under the
+//     first-pass pool ceiling (default 6, max 12) could therefore be satisfied by
+//     a saturated-but-healthy pipeline and pin the lever on; set it meaningfully
+//     ABOVE the pool ceiling, which is also where arrivals genuinely exceed what
+//     one class absorbs.
+//   - It does NOT count re-review churn for heads that already have a delivered
+//     pass. A PR with a published pass for its current head is excluded even
+//     while a re-review/remediation loop runs for it. That preserves the
+//     2026-09-06 observation: 9 open PRs, 6 reviewers in flight, depth = 0,
+//     because every open PR already had a published pass for its current head.
 //
 // One-tick lag, by design: a PR discovered seconds ago gets its `reviewed_prs`
 // row created later in the same tick that routes it, so it joins the count on
 // the next tick. PRs sit in this queue for tens of minutes (measured p90
 // time-to-merge 282 min), so one tick is immaterial to a depth threshold.
 export const FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT =
-  'open PRs that have never received a first-pass review '
+  'open PRs whose current head has no published adversarial review '
   + '(review-state-db.countOpenPrsAwaitingFirstPassReview: pr_state open, no reviewer_passes row '
-  + 'with a gh_comment_id, excluding malformed/unroutable-bot/argus-queued; '
-  + 'INCLUDES first passes currently in flight)';
+  + 'for the current head with a gh_comment_id, excluding malformed/unroutable-bot/argus-queued; '
+  + 'INCLUDES current-head reviews currently in flight)';
 
 export const REVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY =
   'watcher.first_pass_review_queue_depth_failover_threshold';

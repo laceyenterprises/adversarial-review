@@ -64,34 +64,38 @@ the env override after proving that lane healthy.
 
 ### The unit: what "queue depth" counts
 
-Depth is **open PRs that have never received a first-pass review**, read from the
-existing `countOpenPrsAwaitingFirstPassReview` in `review-state-db.mjs` — the
-same number the review-stall pager already reports. Defining a second, slightly
-different "queue depth" beside it would give you two numbers that disagree during
-exactly the incident where you read both. Its predicate:
+Depth is **open PRs whose current head has no published adversarial review**,
+read from the existing `countOpenPrsAwaitingFirstPassReview` in
+`review-state-db.mjs` — the same number the review-stall pager already reports.
+Defining a second, slightly different "queue depth" beside it would give you two
+numbers that disagree during exactly the incident where you read both. Its
+predicate:
 
 - `pr_state = 'open'` (merged/closed PRs are not waiting for anything), **and**
-- no `reviewer_passes` row with a non-empty `gh_comment_id` — GitHub-artifact
-  evidence that a review really landed, deliberately preferred over
-  `reviewed_prs.posted_at`/`review_status`, which are maskable by a stale success
-  claim and are reset on re-entry, **and**
+- no `reviewer_passes` row for the PR's current head with a non-empty
+  `gh_comment_id` — GitHub-artifact evidence that a review really landed on the
+  head being merged, deliberately preferred over `reviewed_prs.posted_at`/
+  `review_status`, which are maskable by a stale success claim and are reset on
+  re-entry. Legacy rows with no current-head identity fall back to the historical
+  `gh_comment_id` behavior rather than counting every old reviewed PR, **and**
 - `review_status NOT IN ('malformed', 'unroutable-bot-author',
   'argus-security-queued')` — work the dispatch loop explicitly refuses and no
   number of reviewers can drain.
 
 Two things worth stating explicitly, because they decide what threshold to pick:
 
-- **It counts first passes that are currently in flight.** A PR being reviewed
-  right now has still never received a review. So the count cannot fall below the
-  number of *first-pass* reviewers in flight, and a threshold at or under the
-  first-pass pool ceiling (default 6, max 12) could be satisfied by a
-  saturated-but-healthy pipeline and pin the lever on. Set it meaningfully
-  **above** the pool ceiling.
-- **It does not count re-review churn at all.** A PR with a delivered pass is
-  excluded even while a re-review runs for it. Observed here on 2026-09-06: 9
-  open PRs and 6 reviewers in flight, but depth `0` — every open PR had already
-  been first-passed, so that backlog was re-review, and the lever correctly would
-  not have engaged at any threshold.
+- **It counts current-head reviews that are currently in flight.** A PR being
+  reviewed right now still has no published review for that head. So the count
+  cannot fall below the number of *current-head* reviewers in flight, and a
+  threshold at or under the first-pass pool ceiling (default 6, max 12) could be
+  satisfied by a saturated-but-healthy pipeline and pin the lever on. Set it
+  meaningfully **above** the pool ceiling.
+- **It does not count re-review churn on heads that already have a delivered
+  pass.** A PR with a current-head published pass is excluded even while a
+  re-review runs for it. Observed here on 2026-09-06: 9 open PRs and 6 reviewers
+  in flight, but depth `0` — every open PR already had a published pass for its
+  current head, so that backlog was re-review, and the lever correctly would not
+  have engaged at any threshold.
 
 ## Arming it
 

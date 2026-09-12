@@ -276,12 +276,13 @@ export function prepareMarkMergedPendingReviewSkipped(db) {
   return db.prepare(MARK_MERGED_PENDING_REVIEW_SKIPPED_SQL);
 }
 
-// Depth of the first-pass review queue: OPEN PRs that have never received a
-// first-pass review. Lives in this side-effect-free statements leaf (rather than
-// beside its prepared statement in review-state-db.mjs) so tests, the RSP-01
-// queue-depth lever, and the `review-queue-depth` operator CLI can all read the
-// EXACT SQL production issues without importing the process-wide singleton DB
-// handle — the same reason every other statement here was extracted.
+// Depth of the first-pass review queue: OPEN PRs whose CURRENT head has not
+// received a published adversarial review. Lives in this side-effect-free
+// statements leaf (rather than beside its prepared statement in
+// review-state-db.mjs) so tests, the RSP-01 queue-depth lever, and the
+// `review-queue-depth` operator CLI can all read the EXACT SQL production uses
+// without importing the process-wide singleton DB handle — the same reason every
+// other statement here was extracted.
 export const SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW =
   "SELECT COUNT(*) AS n FROM reviewed_prs " +
   "WHERE pr_state = 'open' " +
@@ -298,10 +299,11 @@ export const SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW =
   // adversarial stall pager that also fires on them would report the wrong
   // outage on the wrong dashboard. The legacy status stays in the list because
   // reopened PRs and kill-switch rows can still carry it.
-  // This is not the same as trusting review_status='posted' -- the comment
-  // above deliberately keys success off gh_comment_id so a stale success claim
-  // cannot mask a real gap. Here we exclude work the pipeline has explicitly
-  // refused, which is evidence about the PR, not about reviewer health.
+  // This is not the same as trusting review_status='posted' -- the query below
+  // deliberately keys success off gh_comment_id for the row's current head so a
+  // stale success claim, or a published review for an earlier head, cannot mask
+  // a real gap. Here we exclude work the pipeline has explicitly refused, which
+  // is evidence about the PR, not about reviewer health.
   // SQLite's `NOT IN` drops NULL, so keep the null-safe shape explicit: exclude
   // terminal refused states while still counting rows with no status yet -- the
   // exact rows most likely to be genuinely awaiting a first pass.
@@ -311,5 +313,10 @@ export const SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW =
   "  WHERE reviewer_passes.repo = reviewed_prs.repo " +
   "    AND reviewer_passes.pr_number = reviewed_prs.pr_number " +
   "    AND reviewer_passes.gh_comment_id IS NOT NULL " +
-  "    AND reviewer_passes.gh_comment_id <> ''" +
+  "    AND reviewer_passes.gh_comment_id <> '' " +
+  "    AND ( " +
+  "      (COALESCE(NULLIF(reviewed_prs.revision_ref, ''), NULLIF(reviewed_prs.reviewer_head_sha, '')) IS NOT NULL " +
+  "       AND reviewer_passes.head_sha = COALESCE(NULLIF(reviewed_prs.revision_ref, ''), NULLIF(reviewed_prs.reviewer_head_sha, ''))) " +
+  "      OR (COALESCE(NULLIF(reviewed_prs.revision_ref, ''), NULLIF(reviewed_prs.reviewer_head_sha, '')) IS NULL) " +
+  "    )" +
   ")";

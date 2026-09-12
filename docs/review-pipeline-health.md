@@ -44,8 +44,9 @@ The Grafana dashboard lives at
   unreadable. Page on the specific unreadable-ledger Sentinel finding for the
   exists-but-unopenable case; keep any `collector_up == 0` page scoped to the
   missing-ledger case or downgrade it to avoid double-paging the same incident.
-- `review_pipeline_first_pass_queue_depth`: open PRs waiting in
-  `reviewed_prs.review_status='pending'`.
+- `review_pipeline_first_pass_queue_depth`: open PRs whose current head has no
+  published adversarial review; this is the same unit used by the RSP-01
+  queue-depth spillover report.
 - `review_pipeline_first_pass_oldest_pending_age_seconds`: age of the oldest
   pending first-pass/rereview row.
 - `review_pipeline_ci_blocked_rereviews`: open re-reviews parked at

@@ -47,12 +47,13 @@ async function withTempDbAsync(fn) {
 }
 
 let prSeq = 1;
-function seed(db, { prState, reviewStatus, postedAt = null }) {
+function seed(db, { prState, reviewStatus, postedAt = null, revisionRef = null, reviewerHeadSha = null }) {
   const prNumber = prSeq++;
   db.prepare(
     `INSERT INTO reviewed_prs (
-       repo, pr_number, reviewed_at, reviewer, pr_state, review_status, posted_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?)`
+       repo, pr_number, reviewed_at, reviewer, pr_state, review_status, posted_at,
+       revision_ref, reviewer_head_sha
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     'laceyenterprises/agent-os',
     prNumber,
@@ -60,7 +61,9 @@ function seed(db, { prState, reviewStatus, postedAt = null }) {
     'gemini',
     prState,
     reviewStatus,
-    postedAt
+    postedAt,
+    revisionRef,
+    reviewerHeadSha
   );
   return prNumber;
 }
@@ -72,13 +75,14 @@ function seedReviewerPass(db, {
   endedAt = null,
   bodyCapturedAt = null,
   ghCommentId = null,
+  headSha = null,
 }) {
   db.prepare(
     `INSERT INTO reviewer_passes (
        repo, pr_number, attempt_number, reviewer_class, reviewer_model,
        pass_kind, started_at, ended_at, status, body_md, gh_comment_id,
-       body_captured_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       body_captured_at, head_sha
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     'laceyenterprises/agent-os',
     prNumber,
@@ -91,7 +95,8 @@ function seedReviewerPass(db, {
     'completed',
     ghCommentId ? 'review body' : null,
     ghCommentId,
-    bodyCapturedAt
+    bodyCapturedAt,
+    headSha
   );
 }
 
@@ -238,6 +243,7 @@ test('rereview post after posted_at reset advances freshness and does not count 
       prState: 'open',
       reviewStatus: 'reviewing',
       postedAt: null,
+      revisionRef: 'head-current',
     });
     seedReviewerPass(db, {
       prNumber: churning,
@@ -245,6 +251,7 @@ test('rereview post after posted_at reset advances freshness and does not count 
       passKind: 'first-pass',
       endedAt: '2026-08-10T20:28:04.000Z',
       ghCommentId: 'RV_5177_first',
+      headSha: 'head-current',
     });
     seedReviewerPass(db, {
       prNumber: churning,
@@ -252,9 +259,54 @@ test('rereview post after posted_at reset advances freshness and does not count 
       passKind: 'rereview',
       endedAt: '2026-08-10T20:39:22.000Z',
       ghCommentId: 'RV_5177_rereview',
+      headSha: 'head-current',
     });
 
     assert.equal(latestPostedReviewAtMs(db), Date.parse('2026-08-10T20:39:22.000Z'));
+    assert.equal(countOpenPrsAwaitingFirstPassReview(db), 0);
+  });
+});
+
+test('an invalidated old-head review counts as awaiting first pass for the current head', () => {
+  withTempDb((db) => {
+    const invalidated = seed(db, {
+      prState: 'open',
+      reviewStatus: 'pending',
+      postedAt: null,
+      revisionRef: 'head-new',
+      reviewerHeadSha: null,
+    });
+    seedReviewerPass(db, {
+      prNumber: invalidated,
+      attemptNumber: 1,
+      passKind: 'first-pass',
+      endedAt: '2026-09-12T15:00:00.000Z',
+      ghCommentId: 'RV_old_head',
+      headSha: 'head-old',
+    });
+
+    assert.equal(countOpenPrsAwaitingFirstPassReview(db), 1);
+  });
+});
+
+test('a valid current-head pass awaiting re-review does not count as first-pass awaiting', () => {
+  withTempDb((db) => {
+    const rereviewBacklog = seed(db, {
+      prState: 'open',
+      reviewStatus: 'pending',
+      postedAt: null,
+      revisionRef: 'head-current',
+      reviewerHeadSha: null,
+    });
+    seedReviewerPass(db, {
+      prNumber: rereviewBacklog,
+      attemptNumber: 1,
+      passKind: 'first-pass',
+      endedAt: '2026-09-12T15:00:00.000Z',
+      ghCommentId: 'RV_current_head',
+      headSha: 'head-current',
+    });
+
     assert.equal(countOpenPrsAwaitingFirstPassReview(db), 0);
   });
 });

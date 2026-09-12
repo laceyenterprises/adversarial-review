@@ -30,21 +30,24 @@ function freshDb() {
   const db = new Database(':memory:');
   db.exec(`
     CREATE TABLE reviewed_prs (
-      repo TEXT, pr_number INTEGER, pr_state TEXT, review_status TEXT
+      repo TEXT, pr_number INTEGER, pr_state TEXT, review_status TEXT,
+      revision_ref TEXT, reviewer_head_sha TEXT
     );
     CREATE TABLE reviewer_passes (
-      repo TEXT, pr_number INTEGER, gh_comment_id TEXT
+      repo TEXT, pr_number INTEGER, gh_comment_id TEXT, head_sha TEXT
     );
   `);
   return db;
 }
 
-function addPr(db, { pr, state = 'open', status = 'pending', commentId = null }) {
-  db.prepare('INSERT INTO reviewed_prs (repo, pr_number, pr_state, review_status) VALUES (?,?,?,?)')
-    .run('laceyenterprises/agent-os', pr, state, status);
+function addPr(db, { pr, state = 'open', status = 'pending', commentId = null, revisionRef = null, headSha = null }) {
+  db.prepare(
+    'INSERT INTO reviewed_prs (repo, pr_number, pr_state, review_status, revision_ref, reviewer_head_sha) '
+    + 'VALUES (?,?,?,?,?,?)'
+  ).run('laceyenterprises/agent-os', pr, state, status, revisionRef, null);
   if (commentId !== null) {
-    db.prepare('INSERT INTO reviewer_passes (repo, pr_number, gh_comment_id) VALUES (?,?,?)')
-      .run('laceyenterprises/agent-os', pr, commentId);
+    db.prepare('INSERT INTO reviewer_passes (repo, pr_number, gh_comment_id, head_sha) VALUES (?,?,?,?)')
+      .run('laceyenterprises/agent-os', pr, commentId, headSha);
   }
 }
 

@@ -301,6 +301,14 @@ function createReviewerLaneState({
   };
 }
 
+const PERSISTENT_REVIEWER_LANE_STATE = createReviewerLaneState();
+
+function refreshPersistentReviewerLaneState() {
+  const reviewerLaneConfig = resolveReviewLaneConfig();
+  PERSISTENT_REVIEWER_LANE_STATE.firstPassBurstLimit = reviewerLaneConfig.firstPassBurstLimit;
+  return PERSISTENT_REVIEWER_LANE_STATE;
+}
+
 function reviewerDispatchPassKind(candidate) {
   return reviewerDispatchIsFirstPass(candidate) ? 'first-pass' : 'rereview';
 }
@@ -604,6 +612,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   geminiCredentialConcurrency = null,
   activeReviewerCounts = null,
   laneState = null,
+  usePersistentReviewerLaneState = false,
   maxThrownFailures = 1,
   singleWave = false,
   singleWaveSettleGraceMs = DEFAULT_SINGLE_WAVE_SETTLE_GRACE_MS,
@@ -631,6 +640,9 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   const thrownFailureLimit = Math.max(1, Number.parseInt(String(maxThrownFailures), 10) || 0);
   const queue = sortReviewerDispatchCandidates(candidates);
   const pending = queue.map((candidate) => ({ candidate, started: false }));
+  const activeLaneState = laneState || (
+    usePersistentReviewerLaneState ? refreshPersistentReviewerLaneState() : null
+  );
   const active = new Set();
   const activeRecords = new Map();
   const errors = [];
@@ -678,7 +690,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   // stall on reviewers that don't touch the gemini pool).
   const nextStartableEntry = () => {
     if (active.size >= concurrencyLimit) return null;
-    for (const entry of orderPendingReviewerDispatchEntries(pending, { laneState })) {
+    for (const entry of orderPendingReviewerDispatchEntries(pending, { laneState: activeLaneState })) {
       if (entry.started) continue;
       if (isGeminiCandidate(entry.candidate) && activeGemini >= geminiConcurrencyLimit) continue;
       return entry;
@@ -700,7 +712,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
       && (entry = nextStartableEntry()) !== null
     ) {
       entry.started = true;
-      recordReviewerLaneStart(entry.candidate, laneState);
+      recordReviewerLaneStart(entry.candidate, activeLaneState);
       const promise = start(entry.candidate);
       if (typeof onCandidateStarted === 'function') {
         try {
@@ -780,7 +792,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
     dispatched,
     maxObservedConcurrency,
     deferred: pending.filter((entry) => !entry.started).length,
-    deferredCandidates: orderPendingReviewerDispatchEntries(pending, { laneState })
+    deferredCandidates: orderPendingReviewerDispatchEntries(pending, { laneState: activeLaneState })
       .filter((entry) => !entry.started)
       .map((entry) => entry.candidate),
   };

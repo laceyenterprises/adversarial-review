@@ -2356,6 +2356,116 @@ test('stale dispatching record with reaped lease redispatches instead of exhaust
   assert.equal(record.retryCount, AMA_CLOSER_REDISPATCH_BOUND);
 });
 
+test('aged branch-holder exhaustion record retries instead of pinning the closer forever', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-aged-branch-holder-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const hqRoot = join(rootDir, 'hq-root');
+
+  updateAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD }, () => ({
+    schemaVersion: 1,
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: REVIEWED_HEAD,
+    reviewedSha: REVIEWED_HEAD,
+    targetRemediationSha: REVIEWED_HEAD,
+    workerClass: 'hammer',
+    dispatchWorkerClass: 'hammer',
+    promptPath: '/tmp/branch-holder-prompt.md',
+    promptDir: '/tmp',
+    hqRoot,
+    retryCount: 0,
+    branchHolderBlockCount: 3,
+    state: 'dispatch-branch-holder-block-exhausted',
+    lastAttemptedAt: '2026-07-06T12:00:00Z',
+    lastObservedAt: '2026-07-06T12:00:00Z',
+    dispatchedAt: null,
+    dispatchId: null,
+    launchRequestId: null,
+    lastObservedStatus: 'blocked',
+    lastFailureTransient: false,
+    lastError:
+      "[hq] dispatch failed: branch_already_used_by_worktree\n" +
+      `cause: Branch 'feature/x' is still checked out by worker 'builder-1' at ${hqRoot}/workers/builder-1/agent-os.\n` +
+      '[hq] hammer close branch-holder resolution refused for branch feature/x: holder has dirty local state',
+  }));
+
+  const deps = hammerDispatchDeps();
+  const result = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir, {
+      dispatchContext: {
+        hqRoot,
+        dispatchedAt: '2026-07-06T18:00:00Z',
+      },
+    }),
+    ...deps,
+  });
+
+  assert.equal(result.dispatched, true);
+  assert.equal(result.launchRequestId, 'lrq_hammer');
+  assert.ok(
+    deps.execCalls.some((call) => call.args[0] === 'dispatch' && call.args.includes('--worker-id')),
+    'an aged branch-holder tombstone must re-probe hq dispatch',
+  );
+  const record = readAmaCloserDispatchRecord(rootDir, {
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: REVIEWED_HEAD,
+  });
+  assert.equal(record.state, 'dispatched');
+  assert.equal(record.branchHolderBlockCount, 0);
+  assert.equal(record.lastError, null);
+});
+
+test('fresh branch-holder exhaustion record still holds instead of hot-looping dispatch', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-fresh-branch-holder-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const hqRoot = join(rootDir, 'hq-root');
+
+  updateAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD }, () => ({
+    schemaVersion: 1,
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: REVIEWED_HEAD,
+    reviewedSha: REVIEWED_HEAD,
+    targetRemediationSha: REVIEWED_HEAD,
+    workerClass: 'hammer',
+    dispatchWorkerClass: 'hammer',
+    promptPath: '/tmp/branch-holder-prompt.md',
+    promptDir: '/tmp',
+    hqRoot,
+    retryCount: 0,
+    branchHolderBlockCount: 3,
+    state: 'dispatch-branch-holder-block-exhausted',
+    lastAttemptedAt: '2026-07-06T11:59:45Z',
+    lastObservedAt: '2026-07-06T11:59:45Z',
+    dispatchedAt: null,
+    dispatchId: null,
+    launchRequestId: null,
+    lastObservedStatus: 'blocked',
+    lastFailureTransient: false,
+    lastError:
+      "[hq] dispatch failed: branch_already_used_by_worktree\n" +
+      `cause: Branch 'feature/x' is still checked out by worker 'builder-1' at ${hqRoot}/workers/builder-1/agent-os.\n` +
+      '[hq] hammer close branch-holder resolution refused for branch feature/x: holder has dirty local state',
+  }));
+
+  const deps = hammerDispatchDeps();
+  const result = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir, {
+      dispatchContext: {
+        hqRoot,
+        dispatchedAt: '2026-07-06T12:00:00Z',
+      },
+    }),
+    ...deps,
+  });
+
+  assert.equal(result.dispatched, false);
+  assert.equal(result.skipMergeAgent, true);
+  assert.equal(result.reason, 'dispatch-branch-holder-block-exhausted');
+  assert.equal(deps.execCalls.length, 0, 'fresh branch-holder exhaustion must not hot-loop hq dispatch');
+});
+
 test('maybeDispatchAmaCloser suppresses after lifetime ceiling and emits operator alert once', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'hammer-cap-integration-suppress-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

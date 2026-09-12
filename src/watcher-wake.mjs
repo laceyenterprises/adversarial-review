@@ -64,6 +64,60 @@ function requestWatcherWake({
   return { requested: true, filePath, payload };
 }
 
+function normalizeWakePrNumber(value) {
+  const prNumber = Number(value);
+  return Number.isInteger(prNumber) && prNumber > 0 ? prNumber : null;
+}
+
+function watcherWakeMatchesSubject(payload, {
+  repoPath = null,
+  prNumber = null,
+  headSha = null,
+} = {}) {
+  if (!payload || typeof payload !== 'object') return false;
+  const requestedRepo = String(payload.repo || '').trim();
+  const requestedPrNumber = normalizeWakePrNumber(payload.pr_number ?? payload.prNumber);
+  if (!requestedRepo || requestedPrNumber === null) return false;
+  if (String(repoPath || '').trim() !== requestedRepo) return false;
+  if (normalizeWakePrNumber(prNumber) !== requestedPrNumber) return false;
+  const requestedHead = String(payload.head_sha || payload.headSha || '').trim();
+  if (requestedHead && String(headSha || '').trim() !== requestedHead) return false;
+  return true;
+}
+
+function createWatcherWakePayloadAccessor({
+  initialPayload = null,
+  consumeWakePayload = null,
+} = {}) {
+  let activePayload = initialPayload || null;
+  return () => {
+    if (activePayload || typeof consumeWakePayload !== 'function') return activePayload;
+    activePayload = consumeWakePayload() || null;
+    return activePayload;
+  };
+}
+
+function watcherWakeDispatchCandidate(payload, repoPath, entry) {
+  return {
+    repoPath,
+    prNumber: entry.prNumber,
+    subject: entry.subject,
+    current: entry.current,
+    wakePriority: watcherWakeMatchesSubject(payload, {
+      repoPath,
+      prNumber: entry.prNumber,
+      headSha: entry.subject?.headSha,
+    }),
+  };
+}
+
+function compareWatcherWakeSubjectEntries(payload, repoPath, a, b, compareCandidates) {
+  return compareCandidates(
+    watcherWakeDispatchCandidate(payload, repoPath, a),
+    watcherWakeDispatchCandidate(payload, repoPath, b),
+  );
+}
+
 function createWatcherWakeSource({
   rootDir,
   logger = console,
@@ -72,6 +126,7 @@ function createWatcherWakeSource({
   loadConfigImpl = loadConfigCached,
   env = process.env,
   recordHandoffWakeEventsImpl = recordHandoffWakeEvents,
+  consumeExistingOnStart = false,
 } = {}) {
   if (!rootDir) {
     throw new Error('createWatcherWakeSource requires rootDir');
@@ -80,7 +135,7 @@ function createWatcherWakeSource({
   const dirPath = dirname(filePath);
   mkdirSync(dirPath, { recursive: true });
 
-  let lastSeen = readWakeSnapshot(filePath)?.key || null;
+  let lastSeen = consumeExistingOnStart ? null : (readWakeSnapshot(filePath)?.key || null);
   let closed = false;
   const waiters = new Set();
 
@@ -176,12 +231,15 @@ function createWatcherWakeSource({
     waiters.clear();
   }
 
-  return { filePath, wait, close };
+  return { filePath, wait, close, consumeCurrent: consumeIfChanged };
 }
 
 export {
   DEFAULT_WAKE_POLL_MS,
+  compareWatcherWakeSubjectEntries,
+  createWatcherWakePayloadAccessor,
   createWatcherWakeSource,
   requestWatcherWake,
+  watcherWakeMatchesSubject,
   watcherWakePath,
 };

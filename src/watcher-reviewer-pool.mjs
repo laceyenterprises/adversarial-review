@@ -252,7 +252,8 @@ function reviewerDispatchIsFirstPass(candidate) {
 }
 
 function reviewerDispatchTierRank(candidate) {
-  return reviewerDispatchIsFirstPass(candidate) ? 0 : 1;
+  if (candidate?.wakePriority === true) return 0;
+  return reviewerDispatchIsFirstPass(candidate) ? 1 : 2;
 }
 
 function compareReviewerDispatchCandidates(a, b) {
@@ -464,6 +465,52 @@ function countActiveReviewerSpawnsByModel(activeReviewerSpawns) {
   return counts;
 }
 
+function reviewerDispatchPrKey({ repo, prNumber } = {}) {
+  const normalizedRepo = String(repo || '').trim().toLowerCase();
+  const normalizedPr = Number(prNumber);
+  if (!normalizedRepo || !Number.isFinite(normalizedPr)) return null;
+  return `${normalizedRepo}#${normalizedPr}`;
+}
+
+function incrementReviewerModelCount(counts, model) {
+  const normalizedModel = String(model || '').trim().toLowerCase();
+  if (!normalizedModel) return;
+  counts.set(normalizedModel, (counts.get(normalizedModel) || 0) + 1);
+}
+
+function createDetachedReviewerDispatchTracker({ activeReviewerSpawns } = {}) {
+  const detachedReviewerDispatches = new Map();
+  return {
+    activeCounts() {
+      const counts = countActiveReviewerSpawnsByModel(activeReviewerSpawns);
+      const registeredPrKeys = new Set();
+      for (const record of activeReviewerSpawns?.values?.() || []) {
+        const key = reviewerDispatchPrKey({ repo: record?.repo, prNumber: record?.pr });
+        if (key) registeredPrKeys.add(key);
+      }
+      for (const record of detachedReviewerDispatches.values()) {
+        const key = reviewerDispatchPrKey({ repo: record?.repo, prNumber: record?.prNumber });
+        if (!key || registeredPrKeys.has(key)) continue;
+        incrementReviewerModelCount(counts, record?.reviewerModel);
+      }
+      return counts;
+    },
+    track({ candidate, promise } = {}) {
+      const repo = String(candidate?.repoPath || '').trim();
+      const prNumber = Number(candidate?.prNumber);
+      const reviewerModel = String(candidate?.reviewerModel || '').trim().toLowerCase();
+      if (!repo || !Number.isFinite(prNumber) || !reviewerModel || !promise) return;
+      const token = Symbol('detached-reviewer-dispatch');
+      detachedReviewerDispatches.set(token, { repo, prNumber, reviewerModel });
+      Promise.resolve(promise)
+        .finally(() => {
+          detachedReviewerDispatches.delete(token);
+        })
+        .catch(() => {});
+    },
+  };
+}
+
 async function runBoundedReviewerDispatchQueue(candidates, {
   maxConcurrent = DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX,
   availableCredentials = null,
@@ -472,6 +519,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   maxThrownFailures = 1,
   singleWave = false,
   singleWaveSettleGraceMs = DEFAULT_SINGLE_WAVE_SETTLE_GRACE_MS,
+  onCandidateStarted = null,
   logger = console,
   now = () => Date.now(),
   waitWarnMs = DEFAULT_REVIEWER_DISPATCH_WAIT_WARN_MS,
@@ -565,6 +613,17 @@ async function runBoundedReviewerDispatchQueue(candidates, {
     ) {
       entry.started = true;
       const promise = start(entry.candidate);
+      if (typeof onCandidateStarted === 'function') {
+        try {
+          onCandidateStarted({ candidate: entry.candidate, promise });
+        } catch (err) {
+          logger?.warn?.(
+            `[watcher] reviewer dispatch start observer failed for ` +
+              `${entry.candidate?.repoPath || 'unknown'}#${entry.candidate?.prNumber || 'unknown'}: ` +
+              `${err?.message || err}`
+          );
+        }
+      }
       attempted += 1;
       active.add(promise);
       activeRecords.set(promise, { counted: false });
@@ -646,6 +705,7 @@ export {
   DEFAULT_SINGLE_WAVE_SETTLE_GRACE_MS,
   compareReviewerDispatchCandidates,
   countActiveReviewerSpawnsByModel,
+  createDetachedReviewerDispatchTracker,
   createReviewerMemoryAdmissionSampler,
   logReviewerDispatchWait,
   reserveReviewerMemoryAdmission,

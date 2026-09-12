@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  createDetachedReviewerDispatchTracker,
   createReviewerMemoryAdmissionSampler,
   resolveReviewerCredentialConcurrencyLimit,
   resolveReviewerMemoryPressureConfig,
@@ -26,6 +27,7 @@ function candidate(prNumber, run, createdAt = `2026-05-01T00:00:${String(prNumbe
     subject: { createdAt },
     current: options.current ?? null,
     enqueuedAtMs: options.enqueuedAtMs,
+    wakePriority: options.wakePriority,
     run,
   };
 }
@@ -207,6 +209,66 @@ test('single-wave reviewer drain treats active gemini reviewers from prior drain
   assert.deepEqual(summary.deferredCandidates.map((item) => item.prNumber), [10, 11]);
 });
 
+test('single-wave reviewer drain exposes detached launches for pre-registration capacity accounting', async () => {
+  const events = [];
+  const activeReviewerSpawns = new Map();
+  const tracker = createDetachedReviewerDispatchTracker({ activeReviewerSpawns });
+  const observedPromises = [];
+  let releaseSlow;
+  const slowCompletion = new Promise((resolve) => {
+    releaseSlow = resolve;
+  });
+  const reserveDetached = ({ candidate: item, promise }) => {
+    observedPromises.push(promise);
+    tracker.track({ candidate: item, promise });
+  };
+
+  const first = await runBoundedReviewerDispatchQueue([
+    candidate(10, async () => {
+      events.push('start:10');
+      await slowCompletion;
+    }, '2026-05-01T00:00:00.000Z', { reviewerModel: 'gemini' }),
+    candidate(11, async () => {
+      events.push('start:11');
+    }, '2026-05-01T00:00:01.000Z', { reviewerModel: 'gemini' }),
+  ], {
+    maxConcurrent: 2,
+    geminiCredentialConcurrency: 1,
+    activeReviewerCounts: tracker.activeCounts(),
+    singleWave: true,
+    singleWaveSettleGraceMs: 0,
+    onCandidateStarted: reserveDetached,
+    logger: { error() {}, log() {}, warn() {} },
+  });
+
+  assert.deepEqual(events, ['start:10']);
+  assert.equal(first.deferred, 1);
+  assert.equal(tracker.activeCounts().get('gemini'), 1);
+
+  const second = await runBoundedReviewerDispatchQueue([
+    candidate(12, async () => {
+      events.push('start:12');
+    }, '2026-05-01T00:00:02.000Z', { reviewerModel: 'gemini' }),
+  ], {
+    maxConcurrent: 2,
+    geminiCredentialConcurrency: 1,
+    activeReviewerCounts: tracker.activeCounts(),
+    singleWave: true,
+    singleWaveSettleGraceMs: 0,
+    onCandidateStarted: reserveDetached,
+    logger: { error() {}, log() {}, warn() {} },
+  });
+
+  assert.deepEqual(events, ['start:10']);
+  assert.equal(second.dispatched, 0);
+  assert.equal(second.deferred, 1);
+  assert.deepEqual(second.deferredCandidates.map((item) => item.prNumber), [12]);
+
+  releaseSlow();
+  await Promise.all(observedPromises);
+  assert.equal(tracker.activeCounts().get('gemini') || 0, 0);
+});
+
 test('single-wave reviewer drain skips externally capped gemini and still starts another reviewer class', async () => {
   const events = [];
   const summary = await runBoundedReviewerDispatchQueue([
@@ -286,6 +348,25 @@ test('reviewer dispatch puts never-reviewed PRs ahead of re-reviews', () => {
   ]);
 
   assert.deepEqual(sorted.map((item) => item.prNumber), [90, 91, 10, 11]);
+});
+
+test('reviewer dispatch puts a wake-targeted PR ahead of ordinary first-pass work', () => {
+  const pendingRereview = {
+    posted_at: null,
+    rereview_requested_at: '2026-09-12T05:07:48.905Z',
+    reviewed_at: '2026-09-12T04:55:00.000Z',
+  };
+  const sorted = sortReviewerDispatchCandidates([
+    candidate(90, async () => {}, '2026-09-12T05:00:00.000Z'),
+    candidate(6654, async () => {}, '2026-09-11T20:00:00.000Z', {
+      current: pendingRereview,
+      wakePriority: true,
+      repoPath: 'laceyenterprises/agent-os',
+    }),
+    candidate(91, async () => {}, '2026-09-12T05:01:00.000Z'),
+  ]);
+
+  assert.deepEqual(sorted.map((item) => item.prNumber), [6654, 90, 91]);
 });
 
 test('reviewer dispatch keeps oldest-first fairness inside each tier', () => {

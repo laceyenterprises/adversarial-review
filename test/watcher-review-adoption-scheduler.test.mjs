@@ -35,9 +35,13 @@ test('watcher drains queued reviewer dispatches before merge-side handoffs', () 
 
   // Queue initialization is part of pollOnce and stays in watcher.mjs.
   const candidateQueue = watcher.indexOf('const reviewerDispatchCandidates = [];');
+  const detachedTrackerImport = watcher.indexOf('createDetachedReviewerDispatchTracker,');
+  const detachedTracker = watcher.indexOf('const detachedReviewerDispatchTracker = createDetachedReviewerDispatchTracker');
   const postedQueue = watcher.indexOf('const postedReviewHandlers = [];');
   const discoveryDrainHelper = watcher.indexOf('async function drainReviewerDispatchCandidatesIfBatchReady(reason)');
-  const subjectFifoSort = watcher.indexOf('.sort((a, b) => compareReviewerDispatchCandidates({');
+  const subjectFifoSort = watcher.indexOf(
+    'compareWatcherWakeSubjectEntries(wakePayloadForPoll(), repoPath, a, b, compareReviewerDispatchCandidates)',
+  );
   const orgRefresh = watcher.indexOf('await refreshOrgRepos(octokit);');
   const frontLifecycleCleanup = watcher.indexOf('await retryPendingMergeAgentLifecycleCleanups();', orgRefresh);
   const frontLifecycleSync = watcher.indexOf(
@@ -67,9 +71,11 @@ test('watcher drains queued reviewer dispatches before merge-side handoffs', () 
   const maintenanceLoop = phase.indexOf('for (const postReviewMaintenanceHandler of postReviewMaintenanceHandlers)');
 
   assert.notEqual(candidateQueue, -1, 'reviewer dispatch candidate queue exists');
+  assert.notEqual(detachedTrackerImport, -1, 'watcher imports detached reviewer dispatch tracking');
+  assert.notEqual(detachedTracker, -1, 'watcher tracks detached reviewer dispatch starts');
   assert.notEqual(postedQueue, -1, 'posted review handoffs are queued');
   assert.notEqual(discoveryDrainHelper, -1, 'watcher has a bounded mid-discovery reviewer drain');
-  assert.notEqual(subjectFifoSort, -1, 'discovered subjects are reviewer-FIFO sorted before bounded drains');
+  assert.notEqual(subjectFifoSort, -1, 'discovered subjects are wake-aware reviewer-FIFO sorted before bounded drains');
   assert.notEqual(orgRefresh, -1, 'pollOnce refreshes org repos');
   assert.notEqual(frontLifecycleCleanup, -1, 'pollOnce runs front-of-tick lifecycle cleanup');
   assert.notEqual(frontLifecycleSync, -1, 'pollOnce runs front-of-tick lifecycle sync');
@@ -85,8 +91,9 @@ test('watcher drains queued reviewer dispatches before merge-side handoffs', () 
   assert.notEqual(maintenanceLoop, -1, 'post-review maintenance handlers still run');
 
   assert.ok(candidateQueue < postedQueue, 'queues are initialized near the reviewer scheduler');
+  assert.ok(detachedTracker < candidateQueue, 'detached launch tracker is initialized before queue drains');
   assert.ok(candidateQueue < discoveryDrainHelper, 'bounded drain helper is scoped to the tick candidate queue');
-  assert.ok(subjectFifoSort < perPrPhaseCall, 'subjects are FIFO sorted before processReviewSubject can enqueue candidates');
+  assert.ok(subjectFifoSort < perPrPhaseCall, 'subjects are wake-aware FIFO sorted before processReviewSubject can enqueue candidates');
   assert.ok(postedQueue < perPrPhaseCall, 'posted handler queue is initialized before the per-PR phase that enqueues into it');
   assert.ok(orgRefresh < frontLifecycleCleanup, 'lifecycle cleanup runs after repo refresh gives the tick its operator surface');
   assert.ok(frontLifecycleCleanup < frontLifecycleSync, 'front-of-tick cleanup runs before front-of-tick lifecycle sync');
@@ -99,6 +106,11 @@ test('watcher drains queued reviewer dispatches before merge-side handoffs', () 
   assert.ok(postedDrain < dagAutowalk, 'posted-review handoffs remain ahead of post-review maintenance');
   assert.ok(dagAutowalk < maintenanceLoop, 'dag autowalk remains ahead of per-repo maintenance');
   assert.ok(drainBeforePostedHandlers < maintenanceLoop, 'reviewer dispatch does not wait for merge-side maintenance');
+  assert.match(
+    watcher,
+    /activeReviewerCounts: detachedReviewerDispatchTracker\.activeCounts\(\),[\s\S]*onCandidateStarted: detachedReviewerDispatchTracker\.track,/,
+    'reviewer drains include detached pre-registration launch reservations in model caps',
+  );
 });
 
 test('queued reviewer dispatch candidates carry reviewer model for concurrency caps', () => {
@@ -113,6 +125,11 @@ test('queued reviewer dispatch candidates carry reviewer model for concurrency c
     candidateFields,
     /reviewerModel:\s*route\.reviewerModel/,
     'pooled dispatch candidates must expose reviewerModel so Gemini credential caps apply',
+  );
+  assert.match(
+    candidateFields,
+    /wakePriority:\s*watcherWakeMatchesSubject\(/,
+    'pooled dispatch candidates must preserve exact wake priority for reviewer scheduling',
   );
 });
 

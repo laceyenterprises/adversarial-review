@@ -37,6 +37,18 @@
       "owner": "reviewer spawn, settle, and token attribution"
     },
     {
+      "id": "review-latency-events",
+      "title": "Review Latency Events",
+      "path": "docs/data-model/review-latency-events.md",
+      "store": "data/reviews.db",
+      "schemaSurface": "migrations/20260911_review_latency_events.sql",
+      "relatedSchemaSurfaces": [
+        "src/review-state.mjs",
+        "src/review-latency-report.mjs"
+      ],
+      "owner": "review latency instrumentation and reporting"
+    },
+    {
       "id": "reviewed-attestations",
       "title": "Reviewed Attestation Queue",
       "path": "docs/data-model/reviewed-attestations.md",

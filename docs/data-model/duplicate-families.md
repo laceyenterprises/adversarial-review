@@ -78,6 +78,11 @@ family advisory active. Existing databases created with the older
 
 - `ensureDuplicateFamilySchema(db)` creates both tables and the supporting
   candidate PR and family status indexes.
+- Existing `duplicate_family_candidates` tables with the former
+  `(family_id, repo, pr_number)` primary key are rebuilt to `(repo, pr_number)`
+  inside a single SQLite transaction. If any rebuild step fails, the original
+  table and rows remain in place so startup can retry instead of abandoning
+  candidates in an orphaned legacy table.
 - `detectDuplicateFamiliesForRepo()` requires at least two open unsuppressed
   candidates with at least two common strong signals before returning an
   advisory family.

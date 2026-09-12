@@ -94,6 +94,44 @@ function insertLegacyCandidateRow(db, familyId, prNumber, updatedAt) {
   `).run(familyId, REPO, prNumber, `head-${familyId}`, updatedAt, updatedAt, updatedAt);
 }
 
+function installIncompleteLegacyCandidateTable(db) {
+  db.exec(`
+    DROP TABLE duplicate_family_candidates;
+    CREATE TABLE duplicate_family_candidates (
+      family_id                 TEXT NOT NULL,
+      repo                      TEXT NOT NULL,
+      pr_number                 INTEGER NOT NULL,
+      title                     TEXT,
+      pr_state                  TEXT,
+      base_branch               TEXT,
+      head_branch               TEXT,
+      head_sha                  TEXT,
+      base_sha                  TEXT,
+      role                      TEXT NOT NULL DEFAULT 'candidate',
+      work_identity_json        TEXT NOT NULL,
+      signals_json              TEXT NOT NULL,
+      suppressions_json         TEXT NOT NULL DEFAULT '[]',
+      first_seen_at             TEXT NOT NULL,
+      last_seen_at              TEXT NOT NULL,
+      updated_at                TEXT NOT NULL,
+      PRIMARY KEY (family_id, repo, pr_number)
+    );
+  `);
+}
+
+function insertIncompleteLegacyCandidateRow(db, familyId, prNumber, updatedAt) {
+  db.prepare(`
+    INSERT INTO duplicate_family_candidates (
+      family_id, repo, pr_number, title, pr_state, base_branch, head_branch,
+      head_sha, base_sha, role, work_identity_json, signals_json,
+      suppressions_json, first_seen_at, last_seen_at, updated_at
+    ) VALUES (
+      ?, ?, ?, '[codex] DPA-01: legacy candidate', 'open', 'main', 'codex/dpa-01',
+      ?, 'base-main', 'candidate', '{}', '[]', '[]', ?, ?, ?
+    )
+  `).run(familyId, REPO, prNumber, `head-${familyId}`, updatedAt, updatedAt, updatedAt);
+}
+
 test('legacy candidate primary key migration keeps one row per PR', () => {
   const db = memoryDb();
   try {
@@ -116,6 +154,40 @@ test('legacy candidate primary key migration keeps one row per PR', () => {
       1
     );
     assert.equal(readDuplicateFamilyForPr(db, { repo: REPO, prNumber: 601 })?.family_id, 'legacy-family-b');
+    assert.equal(
+      db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name LIKE 'duplicate_family_candidates_legacy_%'")
+        .get().n,
+      0
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test('candidate primary-key migration rolls back partial rebuild failures', () => {
+  const db = memoryDb();
+  try {
+    installIncompleteLegacyCandidateTable(db);
+    insertFamilyRow(db, 'legacy-family-a', 'legacy-key-a', '2026-09-11T00:00:00.000Z');
+    insertIncompleteLegacyCandidateRow(db, 'legacy-family-a', 991, '2026-09-11T00:00:00.000Z');
+
+    assert.throws(
+      () => ensureDuplicateFamilySchema(db),
+      /no such column: labels_json/
+    );
+    assert.deepEqual(
+      db.prepare('PRAGMA table_info(duplicate_family_candidates)')
+        .all()
+        .filter((column) => Number(column.pk) > 0)
+        .sort((a, b) => Number(a.pk) - Number(b.pk))
+        .map((column) => column.name),
+      ['family_id', 'repo', 'pr_number']
+    );
+    assert.equal(
+      db.prepare('SELECT COUNT(*) AS n FROM duplicate_family_candidates WHERE repo = ? AND pr_number = ?')
+        .get(REPO, 991).n,
+      1
+    );
     assert.equal(
       db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name LIKE 'duplicate_family_candidates_legacy_%'")
         .get().n,

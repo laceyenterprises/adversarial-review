@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import { CODE_PR_DOMAIN_ID, makeCodePrSubjectExternalId } from './identity-shapes.mjs';
 import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
 import { ensureReviewCycleCapSchema } from './review-cycle-cap.mjs';
+import { duplicateFamilySchemaTableNames, ensureDuplicateFamilySchema } from './duplicate-family-state.mjs';
 import { withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
 import { isExplicitOperatorRetriggerReason } from './retrigger-review-reason.mjs';
 import { ensureTtmTrackerSchema } from './ttm-tracker.mjs';
@@ -89,6 +90,7 @@ const REVIEW_STATE_TABLE_NAMES = new Set([
   'ttm_flag_events',
   'ttm_flag_state',
   'watcher_db_canary',
+  ...duplicateFamilySchemaTableNames(),
 ]);
 
 const REVIEWED_PRS_HEAD_SHA_COLUMNS = Object.freeze([
@@ -237,6 +239,7 @@ function ensureReviewStateSchema(db) {
   runReviewStateMigrations(db);
   ensureReviewCycleCapSchema(db);
   ensureTtmTrackerSchema(db);
+  ensureDuplicateFamilySchema(db);
   db.exec(`
     CREATE TABLE IF NOT EXISTS watcher_db_canary (
       id         TEXT PRIMARY KEY,

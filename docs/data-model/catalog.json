@@ -56,6 +56,18 @@
       "owner": "review-freshness liveness alert"
     },
     {
+      "id": "duplicate-families",
+      "title": "Duplicate Families",
+      "path": "docs/data-model/duplicate-families.md",
+      "store": "data/reviews.db",
+      "schemaSurface": "src/duplicate-family-state.mjs",
+      "relatedSchemaSurfaces": [
+        "src/review-state.mjs",
+        "src/watcher.mjs"
+      ],
+      "owner": "duplicate-family advisory census"
+    },
+    {
       "id": "watcher-no-progress-lane",
       "title": "Watcher No-progress Lane",
       "path": "docs/data-model/watcher-no-progress-lane.md",

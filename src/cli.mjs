@@ -3,6 +3,7 @@
 import { fileURLToPath } from 'node:url';
 
 import { main as pipelineHealthMain } from './review-pipeline-health-cli.mjs';
+import { main as latencyMain } from './review-latency-cli.mjs';
 import { main as resetPrMain } from './reset-pr.mjs';
 import { main as tokensMain } from './tokens-cli.mjs';
 import { runtimeMain } from './runtime-status-cli.mjs';
@@ -20,6 +21,7 @@ import {
 const USAGE = `\
 Usage:
   adversarial-review pipeline-health [--root <dir>] [--json | --prometheus | --sentinel]
+  adversarial-review latency report [--root <dir>] [--since <24h>] [--json]
   adversarial-review reconcile-terminal [--root <dir>] [--cap <n>] [--json]
   adversarial-review reset-pr <owner/repo> <pr-number> [options]
   adversarial-review tokens [--since 7d] [--by-pr | --by-reviewer] [--json]
@@ -146,6 +148,9 @@ async function main(argv, io = {}) {
   }
   if (command === 'pipeline-health') {
     return pipelineHealthMain(rest, io);
+  }
+  if (command === 'latency') {
+    return latencyMain(rest, io);
   }
   if (command === 'reconcile-terminal') {
     // Lazy import: this command opens the review-state singleton, which several

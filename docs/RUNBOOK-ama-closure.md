@@ -434,7 +434,12 @@ For the four other hard-stop labels (`merge-agent-skip`, `do-not-merge`,
 closure regardless of evidence except for the documented
 `merge-agent-stuck` carve-out above, which requires current-head
 `merge-agent-requested` evidence and does not accept `operator-approved`
-as a substitute recovery signal.
+as a substitute recovery signal. On the posted-review closeout tick, these
+labels surface as the `operator-skip-label` gate reason and the handler returns
+`skip-operator-skip`: open PRs stay owned but no daemon merge, hammer, or
+merge-agent dispatch is launched. If GitHub reports the held PR is already
+terminal (`merged` or `closed`), the watcher clears the no-progress lane and
+drops ownership instead of retaining the hold forever.
 
 ---
 
@@ -637,6 +642,7 @@ reasons:
 | `branch-protection-missing-gate` | Target branch protection doesn't require the configured adversarial-gate context. Re-check §1 prerequisite. |
 | `branch_protection_requirement_waived` | Audit/provenance reason for the explicit `branch_protection.required=false` opt-out on a no-branch-protection GitHub plan. This is not a refusal reason. |
 | `label-adversarial-merge-blocked` | Current-head `adversarial-merge-blocked` is applied (with head-scoped evidence). |
+| `skip-operator-skip` | A hard-stop operator label produced `operator-skip-label`; the watcher is deliberately holding merge/hammer/merge-agent closeout for an open PR. Terminal held PRs are cleaned up instead of held. |
 | `stale-review-head` | The reviewed head doesn't match the PR's current head. |
 | `pr-not-mergeable` | GitHub's `mergeableState` is not `MERGEABLE` — usually a conflict. |
 | `remediation-pending` | Adversarial-review remediation work is owed before AMA can close. |

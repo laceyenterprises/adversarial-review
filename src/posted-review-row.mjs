@@ -129,6 +129,13 @@ function isTerminalReviewRow(row) {
   return Boolean(row?.merged_at || row?.mergedAt || row?.closed_at || row?.closedAt);
 }
 
+function liveCandidateTerminalReason(candidate) {
+  const prState = String(candidate?.prState || '').trim().toLowerCase();
+  if (candidate?.merged === true || prState === 'merged') return 'merged';
+  if (prState === 'closed') return 'closed';
+  return null;
+}
+
 // RVHAND-03: an abandoned handler cannot report its own timing.
 //
 // `runWithDeadline` in the fairness loop stops WAITING on a slow handler and lets
@@ -343,6 +350,7 @@ export async function handlePostedReviewRow({
   const gateProjection = await timePostedReviewStep(
     'projectGateStatusSafe', stepKey, logger, () => projectGateStatusSafe(existing),
   );
+  const gateDecision = gateProjection?.decision || null;
 
   try {
     const latestPostedReviewBody = latestPostedReviewBodyFinder(rootDir, { repo: repoPath, prNumber });
@@ -449,6 +457,41 @@ export async function handlePostedReviewRow({
     operatorApprovalEvent = operatorApprovalEvent ?? candidate?.operatorApprovalEvent ?? null;
     mergeAgentRequestEvent = mergeAgentRequestEvent ?? candidate?.mergeAgentRequestEvent ?? null;
     const dispatchJob = buildMergeAgentDispatchJobImpl(rootDir, candidate, { reviewStateDb: db });
+
+    if (gateDecision?.reason === 'operator-skip-label') {
+      const terminalReason = liveCandidateTerminalReason(candidate);
+      if (terminalReason) {
+        logger.log(
+          `[watcher] AMA/merge-agent skipped for ${repoPath}#${prNumber}: PR already ` +
+          `${terminalReason} under operator-skip-label — dropping ownership`
+        );
+        clearNoProgressLane(rootDir, { repo: repoPath, prNumber }, { logger });
+        return {
+          handled: true,
+          dispatchJob,
+          prTerminal: true,
+          gateDecision,
+          amaClosureResult: null,
+        };
+      }
+      logger.log(
+        `[watcher] posted-review handler held for ${repoPath}#${prNumber}: ` +
+          'operator-skip-label blocks merge/hammer closeout for this tick',
+      );
+      return {
+        handled: true,
+        outcome: 'operator-skip-label',
+        reason: 'skip-operator-skip',
+        dispatchJob,
+        gateDecision,
+        amaClosureResult: {
+          dispatched: false,
+          skipMergeAgent: true,
+          reason: 'skip-operator-skip',
+          namedReason: 'skip-operator-skip',
+        },
+      };
+    }
 
     // MSM-04: AMA-enabled posted-review rows have one autonomous merge route:
     // clean PRs are handled by the daemon, and dirty/conflicted/red-CI PRs are

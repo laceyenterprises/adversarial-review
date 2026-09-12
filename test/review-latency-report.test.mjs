@@ -362,3 +362,76 @@ test('latency report keeps generic domain subjects in separate timelines', () =>
   assert.equal(reviewerRuntime.sampleCount, 0);
   assert.equal(reviewerRuntime.p50Ms, null);
 });
+
+test('latency report does not coerce missing PR numbers into PR zero', () => {
+  const rootDir = tempRoot();
+  const db = openDb(rootDir);
+  try {
+    recordReviewLatencyEvent(db, {
+      repo: REPO,
+      domainId: 'research-finding',
+      subjectExternalId: 'finding-a',
+      eventType: 'row_claimed',
+      at: '2026-09-11T12:00:00.000Z',
+      source: 'test-domain-a',
+      idempotencyKey: 'repo-domain-a-claimed',
+    });
+    recordReviewLatencyEvent(db, {
+      repo: REPO,
+      domainId: 'research-finding',
+      subjectExternalId: 'finding-b',
+      eventType: 'reviewer_first_output',
+      at: '2026-09-11T12:10:00.000Z',
+      source: 'test-domain-b',
+      idempotencyKey: 'repo-domain-b-first-output',
+    });
+  } finally {
+    db.close();
+  }
+
+  const report = collectReviewLatencyReport({
+    rootDir,
+    since: '24h',
+    now: () => new Date('2026-09-11T13:00:00.000Z'),
+  });
+
+  const reviewerRuntime = report.stages.find((stage) => stage.key === 'row_claimed_to_reviewer_first_output');
+  assert.equal(reviewerRuntime.sampleCount, 0);
+  assert.equal(reviewerRuntime.p50Ms, null);
+});
+
+test('latency report fetches explicit subject history across the window boundary', () => {
+  const rootDir = tempRoot();
+  const db = openDb(rootDir);
+  try {
+    recordReviewLatencyEvent(db, {
+      repo: REPO,
+      prNumber: 6612,
+      eventType: 'queue_eligible',
+      at: '2026-09-09T12:00:00.000Z',
+      source: 'test-admission',
+      idempotencyKey: 'queue-6612',
+    });
+    recordReviewLatencyEvent(db, {
+      repo: REPO,
+      prNumber: 6612,
+      eventType: 'row_claimed',
+      at: '2026-09-11T12:05:00.000Z',
+      source: 'test-admission',
+      idempotencyKey: 'claim-6612',
+    });
+  } finally {
+    db.close();
+  }
+
+  const report = collectReviewLatencyReport({
+    rootDir,
+    since: '24h',
+    now: () => new Date('2026-09-11T13:00:00.000Z'),
+  });
+
+  assert.equal(report.surfaces.explicitEvents, 2);
+  const admission = report.stages.find((stage) => stage.key === 'review_eligible_to_row_claimed');
+  assert.equal(admission.sampleCount, 1);
+  assert.equal(admission.p50Ms, 48 * 60 * 60 * 1000 + 5 * 60 * 1000);
+});

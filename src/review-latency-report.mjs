@@ -164,8 +164,14 @@ function safeAll(db, sql, params = []) {
   }
 }
 
+function hasPrNumber(prNumber) {
+  if (prNumber == null) return false;
+  if (typeof prNumber === 'string' && prNumber.trim() === '') return false;
+  return Number.isInteger(Number(prNumber));
+}
+
 function subjectKey({ repo, prNumber, domainId, subjectExternalId }) {
-  if (repo && Number.isInteger(Number(prNumber))) {
+  if (repo && hasPrNumber(prNumber)) {
     return `pr:${repo}#${Number(prNumber)}`;
   }
   if (domainId && subjectExternalId) {
@@ -192,7 +198,7 @@ function addSubjectEvent(subjects, {
   const subject = subjects.get(key) || {
     key,
     repo: repo || null,
-    prNumber: Number.isInteger(Number(prNumber)) ? Number(prNumber) : null,
+    prNumber: hasPrNumber(prNumber) ? Number(prNumber) : null,
     domainId: domainId || null,
     subjectExternalId: subjectExternalId || null,
     events: [],
@@ -220,30 +226,50 @@ function firstEvent(subject, eventTypes) {
 }
 
 function addExplicitEvents(db, subjects, { sinceIso }) {
-  const rows = safeAll(
+  const activeSubjects = safeAll(
     db,
-    `SELECT repo, pr_number, domain_id, subject_external_id,
-            event_type, at, source, reason, payload_json
+    `SELECT DISTINCT repo, pr_number, domain_id, subject_external_id
        FROM review_latency_events
       WHERE at >= ?
-      ORDER BY at ASC, event_id ASC`,
+      ORDER BY repo ASC, pr_number ASC, domain_id ASC, subject_external_id ASC`,
     [sinceIso]
   );
-  for (const row of rows) {
-    addSubjectEvent(subjects, {
-      repo: row.repo,
-      prNumber: row.pr_number,
-      domainId: row.domain_id,
-      subjectExternalId: row.subject_external_id,
-      eventType: row.event_type,
-      at: row.at,
-      source: row.source || 'review_latency_events',
-      inferred: false,
-      reason: row.reason || null,
-      payload: parseJson(row.payload_json, {}),
-    });
+  let eventCount = 0;
+  for (const activeSubject of activeSubjects) {
+    const rows = safeAll(
+      db,
+      `SELECT repo, pr_number, domain_id, subject_external_id,
+              event_type, at, source, reason, payload_json
+         FROM review_latency_events
+        WHERE repo IS ?
+          AND pr_number IS ?
+          AND domain_id IS ?
+          AND subject_external_id IS ?
+        ORDER BY at ASC, event_id ASC`,
+      [
+        activeSubject.repo,
+        activeSubject.pr_number,
+        activeSubject.domain_id,
+        activeSubject.subject_external_id,
+      ]
+    );
+    for (const row of rows) {
+      eventCount += 1;
+      addSubjectEvent(subjects, {
+        repo: row.repo,
+        prNumber: row.pr_number,
+        domainId: row.domain_id,
+        subjectExternalId: row.subject_external_id,
+        eventType: row.event_type,
+        at: row.at,
+        source: row.source || 'review_latency_events',
+        inferred: false,
+        reason: row.reason || null,
+        payload: parseJson(row.payload_json, {}),
+      });
+    }
   }
-  return rows.length;
+  return eventCount;
 }
 
 function addReviewRowInferredEvents(db, subjects, { sinceIso }) {

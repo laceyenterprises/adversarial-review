@@ -64,7 +64,13 @@ import {
 import { buildOwedDelivery, recordInitialCommentDelivery } from './adapters/comms/github-pr-comments/comment-delivery.mjs';
 import { deliverAlert } from './alert-delivery.mjs';
 import { captureRemediationBodyAfterPost } from './review-body-capture.mjs';
-import { resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
+import {
+  ensureReviewStateSchema,
+  openReviewStateDb,
+  recordReviewLatencyEvent,
+  resolvePRLifecycle,
+  requestReviewRereview,
+} from './review-state.mjs';
 import { requestWatcherWake } from './watcher-wake.mjs';
 import { lifecycleStopDecision, resolveJobPRLifecycleSafe } from './follow-up-lifecycle.mjs';
 import { buildRemediationPrompt } from './remediation-prompt-builder.mjs';
@@ -3452,6 +3458,121 @@ async function connectFollowUpTelemetryListener({
   return listener;
 }
 
+function requestHammerWakeForSettledReviewStop({
+  rootDir = ROOT,
+  job,
+  jobPath = null,
+  stoppedAt = new Date().toISOString(),
+  requestWatcherWakeImpl = requestWatcherWake,
+  log = console,
+} = {}) {
+  const repo = String(job?.repo || '').trim();
+  const prNumber = Number(job?.prNumber);
+  if (!repo || !Number.isInteger(prNumber) || prNumber <= 0) {
+    return { requested: false, reason: 'invalid-job-subject' };
+  }
+
+  const requestedAt = String(
+    job?.stoppedAt
+    || job?.remediationPlan?.stop?.stoppedAt
+    || stoppedAt
+    || new Date().toISOString()
+  );
+  const revisionRef = String(job?.revisionRef || job?.headSha || '').trim();
+  const reason = 'clean-verdict-to-hammer';
+  let wakeRecord;
+  try {
+    const wake = requestWatcherWakeImpl({
+      rootDir,
+      reason,
+      repo,
+      prNumber,
+      requestedAt,
+    });
+    wakeRecord = {
+      requested: wake?.requested !== false,
+      reason: wake?.payload?.reason || reason,
+      requestedAt: wake?.payload?.requested_at || requestedAt,
+      requestId: wake?.payload?.request_id || null,
+      ...(revisionRef ? { reviewedHeadSha: revisionRef } : {}),
+    };
+  } catch (err) {
+    wakeRecord = {
+      requested: false,
+      reason: 'wake-failed',
+      error: err?.message || String(err),
+      requestedAt,
+      ...(revisionRef ? { reviewedHeadSha: revisionRef } : {}),
+    };
+    log.warn?.(
+      `[follow-up-remediation] watcher hammer wake failed after settled review stop for ` +
+      `${repo}#${prNumber}: ${err?.message || err}`
+    );
+  }
+
+  let latencyEvent = { recorded: false, reason: 'wake-not-requested' };
+  if (wakeRecord.requested) {
+    let db = null;
+    try {
+      db = openReviewStateDb(rootDir);
+      ensureReviewStateSchema(db);
+      recordReviewLatencyEvent(db, {
+        repo,
+        prNumber,
+        domainId: job?.domainId || 'code-pr',
+        subjectExternalId: job?.subjectExternalId || `${repo}#${prNumber}`,
+        revisionRef: revisionRef || job?.revisionRef || null,
+        eventType: 'hammer_wake',
+        at: requestedAt,
+        source: 'follow-up-remediation',
+        sourceRef: job?.jobId || null,
+        idempotencyKey: `follow-up-review-settled-hammer-wake:${job?.jobId || `${repo}#${prNumber}:${revisionRef || 'no-head'}`}`,
+        reason,
+        payload: {
+          jobId: job?.jobId || null,
+          jobPath,
+          stopCode: job?.remediationPlan?.stop?.code || 'review-settled',
+          wake: wakeRecord,
+        },
+      });
+      latencyEvent = { recorded: true, eventType: 'hammer_wake' };
+    } catch (err) {
+      latencyEvent = {
+        recorded: false,
+        reason: 'latency-event-failed',
+        error: err?.message || String(err),
+      };
+      log.warn?.(
+        `[follow-up-remediation] hammer wake latency event failed for ` +
+        `${repo}#${prNumber}: ${err?.message || err}`
+      );
+    } finally {
+      try {
+        db?.close?.();
+      } catch {
+        // Best-effort cleanup only.
+      }
+    }
+  }
+
+  if (jobPath && job && typeof job === 'object') {
+    try {
+      writeFollowUpJob(jobPath, {
+        ...job,
+        hammerWake: wakeRecord,
+        hammerWakeLatencyEvent: latencyEvent,
+      });
+    } catch (err) {
+      log.warn?.(
+        `[follow-up-remediation] could not persist hammer wake metadata for ` +
+        `${repo}#${prNumber}: ${err?.message || err}`
+      );
+    }
+  }
+
+  return { ...wakeRecord, latencyEvent };
+}
+
 async function consumeNextFollowUpJob({
   rootDir = ROOT,
   execFileImpl = execFileAsync,
@@ -3460,6 +3581,7 @@ async function consumeNextFollowUpJob({
   promptTemplate = loadFollowUpPromptTemplate(rootDir),
   resolvePRLifecycleImpl = resolvePRLifecycle,
   postCommentImpl = postRemediationOutcomeComment,
+  requestWatcherWakeImpl = requestWatcherWake,
   excludedRepoPrKeys = new Set(),
   onExcludedRepoPrKey = null,
   delayedPendingPaths = null,
@@ -3496,6 +3618,7 @@ async function consumeNextFollowUpJob({
     return { consumed: false, reason: 'no-pending-jobs' };
   }
   if (claimed.stopped) {
+    const stoppedAt = now();
     if (claimed.reason === 'max-rounds-reached') {
       const persistedCap = Number(claimed.job?.remediationPlan?.maxRounds);
       logRoundBudgetDecision(log, {
@@ -3505,6 +3628,16 @@ async function consumeNextFollowUpJob({
         runsCompleted: Number(claimed.job?.remediationPlan?.currentRound || 0),
         cap: Number.isFinite(persistedCap) ? persistedCap : null,
         decision: 'deny',
+      });
+    }
+    if (claimed.reason === 'review-settled') {
+      requestHammerWakeForSettledReviewStop({
+        rootDir,
+        job: claimed.job,
+        jobPath: claimed.jobPath,
+        stoppedAt,
+        requestWatcherWakeImpl,
+        log,
       });
     }
     return {
@@ -4126,6 +4259,7 @@ async function consumeFollowUpJobsUntilCapacity({
   promptTemplate = loadFollowUpPromptTemplate(rootDir),
   resolvePRLifecycleImpl = resolvePRLifecycle,
   postCommentImpl = postRemediationOutcomeComment,
+  requestWatcherWakeImpl = requestWatcherWake,
   shouldStop = () => false,
   quotaHoldRevalidator = defaultQuotaHoldRevalidator,
   resolveRemediationWorkerClassImpl = null,
@@ -4162,6 +4296,7 @@ async function consumeFollowUpJobsUntilCapacity({
         promptTemplate,
         resolvePRLifecycleImpl,
         postCommentImpl,
+        requestWatcherWakeImpl,
         healthRouter,
         excludedRepoPrKeys: blockedRepoPrKeys,
         onExcludedRepoPrKey: (pendingPath) => {

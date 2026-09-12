@@ -1115,7 +1115,24 @@ function requestReviewRereview({
         normalizedTargetRevisionRef &&
         String(reviewRow.revision_ref || '') !== normalizedTargetRevisionRef;
       if (explicitOperatorRetrigger || pendingRevisionRefMoved) {
-        const pendingAssignments = [];
+        const pendingAssignments = [
+          'review_attempts = 0',
+          'last_attempted_at = NULL',
+          'posted_at = NULL',
+          'failed_at = NULL',
+          'failure_message = NULL',
+          'reviewer_session_uuid = NULL',
+          'reviewer_pgid = NULL',
+          'reviewer_started_at = NULL',
+          'reviewer_head_sha = NULL',
+          'reviewer_timeout_ms = NULL',
+          'reviewer_lease_expires_at = NULL',
+          'quota_reset_at_utc = NULL',
+          'infra_auto_recover_attempts = 0',
+          'review_population_retry_attempts = 0',
+          'review_population_retry_last_at = NULL',
+          'review_population_retry_head_sha = NULL',
+        ];
         const pendingParams = [];
         if (normalizedTargetRevisionRef) {
           pendingAssignments.push('revision_ref = ?');
@@ -1125,6 +1142,9 @@ function requestReviewRereview({
           pendingAssignments.push('rereview_requested_at = ?');
           pendingAssignments.push('rereview_reason = ?');
           pendingParams.push(requestedAt, normalizedReason);
+        } else {
+          pendingAssignments.push('rereview_requested_at = NULL');
+          pendingAssignments.push('rereview_reason = NULL');
         }
         pendingParams.push(repo, prNumber);
         db.prepare(

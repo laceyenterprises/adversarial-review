@@ -393,6 +393,104 @@ test('retrigger-review bumps pending timestamp even when explicit reason is unch
   }
 });
 
+test('retrigger-review exact-head-now scrubs stale reviewer handles on already-pending rows', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
+  insertReviewRow(rootDir, { reviewStatus: 'pending' });
+  const db = openReviewStateDb(rootDir);
+  try {
+    db.prepare(
+      `UPDATE reviewed_prs
+          SET revision_ref = ?,
+              review_attempts = 3,
+              last_attempted_at = ?,
+              posted_at = ?,
+              failed_at = ?,
+              failure_message = ?,
+              reviewer_session_uuid = ?,
+              reviewer_pgid = ?,
+              reviewer_started_at = ?,
+              reviewer_head_sha = ?,
+              reviewer_timeout_ms = ?,
+              reviewer_lease_expires_at = ?,
+              quota_reset_at_utc = ?,
+              infra_auto_recover_attempts = 2,
+              review_population_retry_attempts = 2,
+              review_population_retry_last_at = ?,
+              review_population_retry_head_sha = ?
+        WHERE repo = ?
+          AND pr_number = ?`
+    ).run(
+      'head-old-238',
+      '2026-09-12T03:48:44.098Z',
+      '2026-09-12T03:55:31.000Z',
+      '2026-09-12T03:56:00.000Z',
+      'old reviewer failed',
+      'stale-session',
+      7010,
+      '2026-09-12T03:48:59.686Z',
+      'head-old-238',
+      900000,
+      '2026-09-12T04:03:59.686Z',
+      '2026-09-12T04:40:00.000Z',
+      '2026-09-12T03:56:00.000Z',
+      'head-old-238',
+      'laceyenterprises/agent-os',
+      238,
+    );
+  } finally {
+    db.close();
+  }
+
+  const rc = await main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'fixed head is ready',
+    '--exact-head-now',
+    '--head-sha', 'head-current-238',
+    '--root-dir', rootDir,
+    '--no-bump-budget',
+  ], { stdout: makeCaptureStream(), stderr: makeCaptureStream() });
+
+  assert.equal(rc, 0);
+  const readDb = openReviewStateDb(rootDir);
+  try {
+    const row = readDb.prepare(
+      `SELECT review_status, revision_ref, review_attempts, last_attempted_at,
+              posted_at, failed_at, failure_message, reviewer_session_uuid,
+              reviewer_pgid, reviewer_started_at, reviewer_head_sha,
+              reviewer_timeout_ms, reviewer_lease_expires_at, quota_reset_at_utc,
+              infra_auto_recover_attempts, review_population_retry_attempts,
+              review_population_retry_last_at, review_population_retry_head_sha,
+              rereview_requested_at, rereview_reason
+         FROM reviewed_prs
+        WHERE repo = ?
+          AND pr_number = ?`
+    ).get('laceyenterprises/agent-os', 238);
+    assert.equal(row.review_status, 'pending');
+    assert.equal(row.revision_ref, 'head-current-238');
+    assert.equal(row.review_attempts, 0);
+    assert.equal(row.last_attempted_at, null);
+    assert.equal(row.posted_at, null);
+    assert.equal(row.failed_at, null);
+    assert.equal(row.failure_message, null);
+    assert.equal(row.reviewer_session_uuid, null);
+    assert.equal(row.reviewer_pgid, null);
+    assert.equal(row.reviewer_started_at, null);
+    assert.equal(row.reviewer_head_sha, null);
+    assert.equal(row.reviewer_timeout_ms, null);
+    assert.equal(row.reviewer_lease_expires_at, null);
+    assert.equal(row.quota_reset_at_utc, null);
+    assert.equal(row.infra_auto_recover_attempts, 0);
+    assert.equal(row.review_population_retry_attempts, 0);
+    assert.equal(row.review_population_retry_last_at, null);
+    assert.equal(row.review_population_retry_head_sha, null);
+    assert.match(row.rereview_reason, /^retrigger-review: fixed head is ready$/);
+    assert.equal(isExplicitOperatorReviewRetrigger(row), true);
+  } finally {
+    readDb.close();
+  }
+});
+
 test('retrigger-review bumps the terminal job budget and resets review status', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
   insertReviewRow(rootDir, { reviewStatus: 'posted' });

@@ -608,6 +608,14 @@ test('collector surfaces first-pass wait, rereview share, and effective reviewer
     endedAt: '2026-05-25T17:40:00.000Z',
   });
   insertReviewerPass(rootDir, {
+    prNumber: 944,
+    attemptNumber: 1,
+    passKind: 'first-pass',
+    status: 'completed',
+    startedAt: '2026-05-25T16:55:00.000Z',
+    endedAt: '2026-05-25T17:32:00.000Z',
+  });
+  insertReviewerPass(rootDir, {
     prNumber: 942,
     attemptNumber: 1,
     passKind: 'first-pass',
@@ -625,15 +633,15 @@ test('collector surfaces first-pass wait, rereview share, and effective reviewer
   });
 
   const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
-  assert.equal(snapshot.reviewerCapacity.totalPasses, 3);
-  assert.equal(snapshot.reviewerCapacity.firstPassPasses, 2);
+  assert.equal(snapshot.reviewerCapacity.totalPasses, 4);
+  assert.equal(snapshot.reviewerCapacity.firstPassPasses, 3);
   assert.equal(snapshot.reviewerCapacity.rereviewPasses, 1);
-  assert.equal(snapshot.reviewerCapacity.rereviewShare, 1 / 3);
+  assert.equal(snapshot.reviewerCapacity.rereviewShare, 1 / 4);
   assert.equal(snapshot.reviewerCapacity.effectiveConcurrency, 2);
 
   const output = renderReviewPipelinePrometheus(snapshot);
   assert.match(output, /^review_pipeline_first_pass_wait_seconds 600$/m);
-  assert.match(output, /^review_pipeline_rereview_capacity_share\{window="3600000ms"\} 0\.3333333333333333$/m);
+  assert.match(output, /^review_pipeline_rereview_capacity_share\{window="3600000ms"\} 0\.25$/m);
   assert.match(output, /^review_pipeline_effective_reviewer_concurrency\{window="3600000ms"\} 2$/m);
 });
 

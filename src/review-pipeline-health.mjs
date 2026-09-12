@@ -1075,7 +1075,7 @@ function summarizeReviewerCapacity(db, { nowMs, config }) {
     db,
     `SELECT pass_kind, started_at, ended_at, status
        FROM reviewer_passes
-      WHERE started_at >= ?
+      WHERE (ended_at >= ? OR ended_at IS NULL)
         AND pass_kind IN ('first-pass', 'rereview')`,
     [cutoff]
   );

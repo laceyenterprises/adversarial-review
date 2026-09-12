@@ -36,6 +36,7 @@ import {
   adapterUnsupportedError,
   writeAdapterCommitStatus,
 } from './github-adapter-client.mjs';
+import { isFleetSelfRepairTrailerOnlyRereviewReason } from './fleet-self-repair-rereview.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -334,7 +335,7 @@ function isHeadChangeRereviewReason(reason) {
   const normalized = normalizeComparableString(reason);
   return (
     normalized.startsWith('auto-refresh: posted review on stale head')
-    || normalized.startsWith('fsr-06b: trailer-only head move detected')
+    || isFleetSelfRepairTrailerOnlyRereviewReason(reason)
   );
 }
 
@@ -352,7 +353,7 @@ function completedHeadChangeRereviewIsSettledClean({ latestJob, latestJobStatus,
   if (latestJob?.reReview?.requested !== true) return false;
   if (!isHeadChangeRereviewReason(reviewRow?.rereview_reason)) return false;
   const jobHead = followUpJobRevisionRef(latestJob);
-  if (headSha && jobHead && String(jobHead) !== String(headSha)) return false;
+  if (!headSha || !jobHead || String(jobHead) !== String(headSha)) return false;
   const verdict = normalizeEffectiveReviewVerdict(latestJob.reviewBody);
   if (verdict !== 'comment-only' && verdict !== 'approved') return false;
   const blocking = classifyBlockingFindings(latestJob.reviewBody, { lastVerdict: verdict || null });

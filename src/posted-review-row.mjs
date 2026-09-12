@@ -136,6 +136,14 @@ function isTerminalReviewRow(row) {
   return Boolean(row?.merged_at || row?.mergedAt || row?.closed_at || row?.closedAt);
 }
 
+function gateRelevantReviewRowSnapshot(row) {
+  return JSON.stringify({
+    reviewStatus: row?.review_status ?? row?.reviewStatus ?? null,
+    rereviewRequestedAt: row?.rereview_requested_at ?? row?.rereviewRequestedAt ?? null,
+    reviewerHeadSha: row?.reviewer_head_sha ?? row?.reviewerHeadSha ?? null,
+  });
+}
+
 function liveCandidateTerminalReason(candidate) {
   const prState = String(candidate?.prState || '').trim().toLowerCase();
   if (candidate?.merged === true || prState === 'merged') return 'merged';
@@ -356,6 +364,9 @@ export async function handlePostedReviewRow({
   const initialReviewState = rereadPostedReviewRow('projectGateStatusSafe', { allowPending: true });
   if (!initialReviewState.ok) return initialReviewState.result;
   existing = initialReviewState.row;
+  let reviewRowSnapshot = gateRelevantReviewRowSnapshot(existing);
+  let pendingAllowed = normalizeReviewStatus(existing) === 'pending'
+    && isExplicitPendingRereviewRow(existing);
 
   const gateProjection = await timePostedReviewStep(
     'projectGateStatusSafe', stepKey, logger, () => projectGateStatusSafe(existing),
@@ -364,7 +375,7 @@ export async function handlePostedReviewRow({
 
   const gateBlocksMergeAction = (decision) =>
     decision?.state && decision.state !== 'success' && decision.reason !== 'operator-skip-label';
-  if (gateBlocksMergeAction(gateDecision)) {
+  if (pendingAllowed && gateBlocksMergeAction(gateDecision)) {
     logger?.log?.(
       `[watcher] posted-review handler held for ${repoPath}#${prNumber}: ` +
         `adversarial gate is ${gateDecision.state} (${gateDecision.reason || 'unknown'})`,
@@ -487,14 +498,20 @@ export async function handlePostedReviewRow({
       return { ...postCandidateReviewState.result, gateDecision: gateProjection?.decision || null };
     }
     existing = postCandidateReviewState.row;
-    const refreshedGateProjection = await timePostedReviewStep(
-      'projectGateStatusSafe-after-candidate',
-      stepKey,
-      logger,
-      () => projectGateStatusSafe(existing),
-    );
-    gateDecision = refreshedGateProjection?.decision || gateDecision;
-    if (gateBlocksMergeAction(gateDecision)) {
+    const nextReviewRowSnapshot = gateRelevantReviewRowSnapshot(existing);
+    pendingAllowed = normalizeReviewStatus(existing) === 'pending'
+      && isExplicitPendingRereviewRow(existing);
+    if (nextReviewRowSnapshot !== reviewRowSnapshot) {
+      const refreshedGateProjection = await timePostedReviewStep(
+        'projectGateStatusSafe-after-candidate',
+        stepKey,
+        logger,
+        () => projectGateStatusSafe(existing),
+      );
+      gateDecision = refreshedGateProjection?.decision || gateDecision;
+      reviewRowSnapshot = nextReviewRowSnapshot;
+    }
+    if (pendingAllowed && gateBlocksMergeAction(gateDecision)) {
       logger?.log?.(
         `[watcher] posted-review handler held for ${repoPath}#${prNumber}: ` +
           `adversarial gate changed to ${gateDecision.state} (${gateDecision.reason || 'unknown'})`,

@@ -535,6 +535,37 @@ test('pickAdversarialGateStatus lets a clean settled verdict satisfy a queued he
   assert.equal(decision.reason, 'review-settled-head-change-rereview');
 });
 
+test('pickAdversarialGateStatus fails closed when queued head-change job has no proven head', () => {
+  const decision = pickAdversarialGateStatus({
+    headSha: 'rebased-head',
+    reviewRow: makeReviewRow({
+      review_status: 'pending',
+      rereview_reason: 'auto-refresh: posted review on stale head old-head; current head is rebased-head',
+    }),
+    latestJob: makeJob({
+      revisionRef: null,
+      currentRevisionRef: null,
+      subjectRef: { revisionRef: null },
+      reviewBody: [
+        '## Summary',
+        'Clean final review.',
+        '',
+        '## Blocking issues',
+        '- None.',
+        '',
+        '## Verdict',
+        'Comment only',
+      ].join('\n'),
+      reReview: {
+        requested: true,
+      },
+    }),
+  });
+
+  assert.equal(decision.state, 'pending');
+  assert.equal(decision.reason, 'rereview-queued');
+});
+
 test('pickAdversarialGateStatus still blocks a queued findings rereview with a clean-looking body', () => {
   const decision = pickAdversarialGateStatus({
     headSha: 'remediated-head',

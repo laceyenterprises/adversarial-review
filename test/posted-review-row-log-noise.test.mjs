@@ -914,6 +914,70 @@ test('handlePostedReviewRow: operator-skip-label clears closed terminal PRs', as
   assert.match(logs.join('\n'), /PR already closed under operator-skip-label/);
 });
 
+test('handlePostedReviewRow: stale posted review gate still reaches coexistence', async () => {
+  let fetched = false;
+  let resolvedCoexistence = false;
+  const gateDecision = {
+    state: 'pending',
+    reason: 'stale-review-head',
+    description: 'Posted adversarial review is for a stale head.',
+  };
+  const { args } = baseArgs({
+    projectGateStatusSafe: async () => ({ decision: gateDecision }),
+    fetchMergeAgentCandidateImpl: async () => {
+      fetched = true;
+      return { merged: false, prState: 'open' };
+    },
+    resolveMergeAgentCoexistenceForWatcherImpl: async () => {
+      resolvedCoexistence = true;
+      return {
+        outcome: 'ama-pending',
+        amaClosureResult: { reason: 'daemon-failed-closed', workerClass: 'hammer' },
+      };
+    },
+  });
+
+  const result = await handlePostedReviewRow(args);
+
+  assert.equal(fetched, true);
+  assert.equal(resolvedCoexistence, true);
+  assert.equal(result.handled, true);
+  assert.equal(result.outcome, 'ama-pending');
+  assert.deepEqual(result.gateDecision, gateDecision);
+});
+
+test('handlePostedReviewRow: blocking posted review gate still reaches coexistence', async () => {
+  let fetched = false;
+  let resolvedCoexistence = false;
+  const gateDecision = {
+    state: 'failure',
+    reason: 'blocking-review',
+    description: 'Adversarial review requested changes.',
+  };
+  const { args } = baseArgs({
+    projectGateStatusSafe: async () => ({ decision: gateDecision }),
+    fetchMergeAgentCandidateImpl: async () => {
+      fetched = true;
+      return { merged: false, prState: 'open' };
+    },
+    resolveMergeAgentCoexistenceForWatcherImpl: async () => {
+      resolvedCoexistence = true;
+      return {
+        outcome: 'ama-pending',
+        amaClosureResult: { reason: 'daemon-failed-closed', workerClass: 'hammer' },
+      };
+    },
+  });
+
+  const result = await handlePostedReviewRow(args);
+
+  assert.equal(fetched, true);
+  assert.equal(resolvedCoexistence, true);
+  assert.equal(result.handled, true);
+  assert.equal(result.outcome, 'ama-pending');
+  assert.deepEqual(result.gateDecision, gateDecision);
+});
+
 test('handlePostedReviewRow: rechecks review row after candidate fetch before merge work', async () => {
   let reads = 0;
   let fetched = false;

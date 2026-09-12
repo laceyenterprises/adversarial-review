@@ -135,6 +135,7 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_ttm_stuck_open_prs',
   'review_pipeline_ttm_budget_minutes',
   'review_pipeline_ttm_queue_pressure_multiplier',
+  'review_pipeline_ttm_terminal_clean_rereview_blocked_open',
   'review_pipeline_ttm_terminal_unmerged_stalls_12h',
   'review_pipeline_ttm_terminal_unmerged_duration_minutes_12h',
   'review_pipeline_sentinel_finding_active',
@@ -174,6 +175,7 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_ttm_stuck_open_prs: 'Current open PRs that are not progressing (STUCK; the page-worthy counter).',
   review_pipeline_ttm_budget_minutes: 'Derived time-to-merge budget in minutes, by component, after queue-pressure scaling.',
   review_pipeline_ttm_queue_pressure_multiplier: 'Measured queue-depth pressure multiplier applied to the derived budget.',
+  review_pipeline_ttm_terminal_clean_rereview_blocked_open: 'Current open PRs with a clean terminal re-review still blocked from closeout.',
   review_pipeline_ttm_terminal_unmerged_stalls_12h: 'Terminal-but-unmerged stall events observed in the 12h SEV1 window.',
   review_pipeline_ttm_terminal_unmerged_duration_minutes_12h: 'Terminal-but-unmerged stall duration in the 12h SEV1 window.',
   review_pipeline_sentinel_finding_active: 'Whether a Sentinel finding code is active in the current snapshot.',
@@ -3249,6 +3251,7 @@ function collectReviewPipelineHealth({
             queuePressureSaturated: false,
             stuckOpenPrs: 0,
             terminalButUnmergedOpenCount: 0,
+            terminalCleanRereviewBlockedOpenCount: 0,
             terminalButUnmergedStallsLast12h: 0,
             terminalButUnmergedMaxDurationMinutesLast12h: 0,
             terminalButUnmergedTotalDurationMinutesLast12h: 0,
@@ -3474,6 +3477,11 @@ function renderReviewPipelinePrometheus(snapshot) {
     'review_pipeline_ttm_queue_pressure_multiplier',
     {},
     withDefault(snapshot.ttm?.rollup?.queuePressureMultiplier)
+  );
+  pushMetric(
+    'review_pipeline_ttm_terminal_clean_rereview_blocked_open',
+    {},
+    snapshot.ttm?.rollup?.terminalCleanRereviewBlockedOpenCount || 0
   );
   pushMetric(
     'review_pipeline_ttm_terminal_unmerged_stalls_12h',

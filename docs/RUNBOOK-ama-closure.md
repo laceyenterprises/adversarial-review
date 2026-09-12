@@ -441,6 +441,22 @@ merge-agent dispatch is launched. If GitHub reports the held PR is already
 terminal (`merged` or `closed`), the watcher clears the no-progress lane and
 drops ownership instead of retaining the hold forever.
 
+The posted-review handler also admits explicit pending re-review rows when a
+follow-up worker has just requested another adversarial pass. Those rows are
+held while the gate remains `review-queued`, `review-in-progress`,
+`rereview-queued`, or otherwise non-success: reviewer delivery owns that state,
+not AMA/HAM. The narrow exception is a head-change re-review whose latest
+completed follow-up job carries a clean settled verdict for the current head;
+that projects `review-settled-head-change-rereview` and lets closeout continue
+without waiting for a redundant reviewer post. A missing job head fails closed.
+
+Normal `posted` rows are different. `stale-review-head`,
+`blocking-findings-present`, and `verdict-not-settled-success` remain AMA/HAM
+eligibility inputs, because the merge authority owns the evidence-specific
+waivers for rebase coverage, trailer-only head moves, terminal remediation, and
+operator-scoped approvals. The watcher must not hard-hold those posted rows
+before `resolveMergeAgentCoexistence`.
+
 ---
 
 ## 6. Diagnostic playbook — the §4.4 state-machine outcomes

@@ -15,6 +15,23 @@ function sh(cwd, args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 }
 
+async function execFileViaSync(command, args, options) {
+  try {
+    return {
+      stdout: execFileSync(command, args, {
+        encoding: 'utf8',
+        maxBuffer: options?.maxBuffer,
+        timeout: options?.timeout,
+      }),
+      stderr: '',
+    };
+  } catch (err) {
+    if (Buffer.isBuffer(err.stdout)) err.stdout = err.stdout.toString('utf8');
+    if (Buffer.isBuffer(err.stderr)) err.stderr = err.stderr.toString('utf8');
+    throw err;
+  }
+}
+
 function write(cwd, rel, body) {
   writeFileSync(path.join(cwd, rel), body, 'utf8');
 }
@@ -205,11 +222,17 @@ test('packet builder reads an injected query-only review database without schema
   }
 });
 
-test('missing persisted loser object fails loud with typed missing-object reason', async () => {
+test('missing persisted loser object fetches PR head before typed failure', async () => {
   const fixture = makeFixtureRepo();
   const rootDir = makeRootWithFamily(fixture, { missingHead: 6463 });
+  const calls = [];
   await assert.rejects(
-    () => buildFixturePacket(rootDir, fixture.repoDir),
+    () => buildFixturePacketWithOptions(rootDir, fixture.repoDir, {
+      execFileImpl: async (command, args, options) => {
+        calls.push(args);
+        return execFileViaSync(command, args, options);
+      },
+    }),
     (err) => {
       assert.equal(err.code, 'missing-object');
       assert.equal(err.details.reason, 'missing-persisted-head-object');
@@ -217,6 +240,38 @@ test('missing persisted loser object fails loud with typed missing-object reason
       return true;
     }
   );
+  assert.ok(
+    calls.some((args) => args.join('\0') === [
+      '-C',
+      fixture.repoDir,
+      'fetch',
+      '--no-tags',
+      'origin',
+      'pull/6463/head',
+    ].join('\0'))
+  );
+});
+
+test('git helper retries transient failures before building packet', async () => {
+  const fixture = makeFixtureRepo();
+  const rootDir = makeRootWithFamily(fixture);
+  let transientFailures = 0;
+
+  const packet = await buildFixturePacketWithOptions(rootDir, fixture.repoDir, {
+    execFileImpl: async (command, args, options) => {
+      if (transientFailures === 0 && args.includes('cat-file')) {
+        transientFailures += 1;
+        const err = new Error('fatal: unable to create .git/index.lock: File exists');
+        err.stderr = 'fatal: unable to create .git/index.lock: File exists';
+        err.code = 'EAGAIN';
+        throw err;
+      }
+      return execFileViaSync(command, args, options);
+    },
+  });
+
+  assert.equal(transientFailures, 1);
+  assert.equal(packet.packet.family.familyId, FAMILY_ID);
 });
 
 test('current-tree diff is labeled as stale-base diagnostic when current main moved', async () => {

@@ -8,6 +8,8 @@ import { duplicateFamilyCandidateRows } from './duplicate-family-state.mjs';
 import { openReviewStateDb } from './review-state.mjs';
 
 const execFileDefault = promisify(execFileCallback);
+const GIT_MAX_ATTEMPTS = 3;
+const GIT_RETRY_BACKOFF_MS = 50;
 
 class DuplicateFamilyPacketError extends Error {
   constructor(message, { code, details = {} } = {}) {
@@ -77,19 +79,50 @@ function relevantComments(comments) {
   ));
 }
 
+function sleep(ms) {
+  return new Promise((resolveSleep) => {
+    setTimeout(resolveSleep, ms);
+  });
+}
+
+function isTransientGitError(err) {
+  const text = [
+    err?.code,
+    err?.signal,
+    err?.message,
+    err?.stderr,
+    err?.stdout,
+  ].filter(Boolean).join('\n');
+  return /\b(ETIMEDOUT|EAGAIN|EBUSY|EIO)\b/i.test(text)
+    || /timed?\s*out/i.test(text)
+    || /resource temporarily unavailable/i.test(text)
+    || /index\.lock|could not lock/i.test(text);
+}
+
 async function git(repoDir, args, { execFileImpl = execFileDefault, allowFailure = false } = {}) {
-  try {
-    const result = await execFileImpl('git', ['-C', repoDir, ...args], {
-      maxBuffer: 20 * 1024 * 1024,
-      timeout: 30_000,
-    });
-    return String(result.stdout || '').trimEnd();
-  } catch (err) {
-    if (allowFailure) {
-      return null;
+  let lastError = null;
+  for (let attempt = 1; attempt <= GIT_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      const result = await execFileImpl('git', ['-C', repoDir, ...args], {
+        maxBuffer: 20 * 1024 * 1024,
+        timeout: 30_000,
+      });
+      return String(result.stdout || '').trimEnd();
+    } catch (err) {
+      lastError = err;
+      if (!isTransientGitError(err) || attempt === GIT_MAX_ATTEMPTS) {
+        if (allowFailure) {
+          return null;
+        }
+        throw err;
+      }
+      await sleep(GIT_RETRY_BACKOFF_MS * attempt);
     }
-    throw err;
   }
+  if (allowFailure) {
+    return null;
+  }
+  throw lastError;
 }
 
 async function objectExists(repoDir, objectName, deps) {
@@ -99,6 +132,25 @@ async function objectExists(repoDir, objectName, deps) {
     allowFailure: true,
   });
   return result !== null;
+}
+
+async function fetchPullHead(repoDir, prNumber, deps) {
+  if (!prNumber) return false;
+  const result = await git(
+    repoDir,
+    ['fetch', '--no-tags', 'origin', `pull/${prNumber}/head`],
+    { ...deps, allowFailure: true }
+  );
+  return result !== null;
+}
+
+async function ensureCandidateObject(repoDir, candidate, deps) {
+  if (!candidate.headSha) return false;
+  if (await objectExists(repoDir, candidate.headSha, deps)) {
+    return true;
+  }
+  await fetchPullHead(repoDir, candidate.prNumber, deps);
+  return objectExists(repoDir, candidate.headSha, deps);
 }
 
 async function resolveRef(repoDir, ref, deps) {
@@ -206,7 +258,7 @@ function readReviewStateEvidence(db, candidate) {
 async function collectGitEvidence(repoDir, family, deps) {
   const candidates = [];
   for (const candidate of family.candidates) {
-    if (!candidate.headSha || !(await objectExists(repoDir, candidate.headSha, deps))) {
+    if (!(await ensureCandidateObject(repoDir, candidate, deps))) {
       throw new DuplicateFamilyPacketError(
         `missing persisted head object for ${candidate.repo}#${candidate.prNumber}: ${candidate.headSha || '<none>'}`,
         {

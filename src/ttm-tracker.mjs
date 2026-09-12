@@ -29,6 +29,12 @@ import {
   deriveTtmBudget,
   readMergedTtmSamples,
 } from './ttm-budget-model.mjs';
+import { getConfig } from './config-loader.mjs';
+import { classifyFollowUpCriticality } from './follow-up-jobs.mjs';
+import {
+  isDaemonMergeReviewAllowed,
+  resolveDaemonMergeUncleanReason,
+} from './ama/daemon-merge.mjs';
 
 // Seeds, NOT the operating budget. These are what the tracker falls back to
 // when the distribution cannot support a fit; the live budget comes from
@@ -60,6 +66,28 @@ const TTM_STUCK_FLAG_KINDS = new Set([
 function parsePositiveNumber(value, fallback) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseBooleanValue(value, fallback = true) {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (typeof value === 'boolean') return value;
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return fallback;
+}
+
+function resolveMergeAuthorityStrictMode(overrides = {}) {
+  if (Object.prototype.hasOwnProperty.call(overrides, 'mergeAuthorityStrictMode')) {
+    return parseBooleanValue(overrides.mergeAuthorityStrictMode, true);
+  }
+  if (Object.prototype.hasOwnProperty.call(overrides, 'strictMode')) {
+    return parseBooleanValue(overrides.strictMode, true);
+  }
+  return parseBooleanValue(
+    getConfig('roles.adversarial.merge_authority.strict_mode', true),
+    true,
+  );
 }
 
 function toMs(value) {
@@ -143,6 +171,7 @@ function resolveTtmTrackerConfig(env = process.env, overrides = {}) {
       overrides.budgetMinSamples ?? env.ADVERSARIAL_TTM_BUDGET_MIN_SAMPLES,
       DEFAULT_TTM_MIN_FIT_SAMPLES
     ),
+    mergeAuthorityStrictMode: resolveMergeAuthorityStrictMode(overrides),
   };
 }
 
@@ -206,10 +235,54 @@ function normalizeReviewPass(row) {
     endedAt: row.ended_at || null,
     status: String(row.status || '').trim().toLowerCase(),
     verdict: row.verdict ? String(row.verdict).trim().toLowerCase() : null,
+    bodyMd: typeof row.body_md === 'string' ? row.body_md : null,
     attemptNumber: Number.isInteger(Number(row.attempt_number))
       ? Number(row.attempt_number)
       : null,
     passKind,
+  };
+}
+
+function classifyLatestReviewForMergeEligibility(latestCompleted, { strictMode }) {
+  if (!latestCompleted) {
+    return {
+      mergeEligible: false,
+      holdReason: 'verdict-not-settled-success',
+      classification: null,
+      reviewState: {
+        blockingFindingCount: null,
+        blockingFindingState: 'unknown',
+        nonBlockingFindingCount: null,
+        nonBlockingFindingState: 'unknown',
+      },
+    };
+  }
+  if (!latestCompleted.bodyMd) {
+    const reviewState = {
+      blockingFindingCount: null,
+      blockingFindingState: 'unknown',
+      nonBlockingFindingCount: null,
+      nonBlockingFindingState: 'unknown',
+    };
+    return {
+      mergeEligible: false,
+      holdReason: resolveDaemonMergeUncleanReason(reviewState, { strictMode }) || 'findings-unknown',
+      classification: null,
+      reviewState,
+    };
+  }
+  const classification = classifyFollowUpCriticality(latestCompleted.bodyMd);
+  const reviewState = {
+    blockingFindingCount: classification.blockingFindingCount,
+    blockingFindingState: classification.blockingFindingState,
+    nonBlockingFindingCount: classification.nonBlockingFindingCount,
+    nonBlockingFindingState: classification.nonBlockingFindingState,
+  };
+  return {
+    mergeEligible: isDaemonMergeReviewAllowed(reviewState, { strictMode }),
+    holdReason: resolveDaemonMergeUncleanReason(reviewState, { strictMode }),
+    classification,
+    reviewState,
   };
 }
 
@@ -231,6 +304,11 @@ function derivePrTtmTimeline(row, passes, { nowIso }) {
   const latestCompleted = completedPasses
     .filter((pass) => pass.endedAt)
     .sort((a, b) => toMs(b.endedAt) - toMs(a.endedAt))[0] || null;
+  const mergeAuthorityStrictMode = parseBooleanValue(row.mergeAuthorityStrictMode, true);
+  const mergeEligibility = classifyLatestReviewForMergeEligibility(
+    latestCompleted,
+    { strictMode: mergeAuthorityStrictMode },
+  );
   const maxAttempt = completedPasses.reduce((max, pass) => {
     if (!Number.isInteger(pass.attemptNumber)) return max;
     return Math.max(max, pass.attemptNumber);
@@ -238,12 +316,13 @@ function derivePrTtmTimeline(row, passes, { nowIso }) {
   const reviewRounds = Math.max(0, maxAttempt - 1);
   const settledAt = row.posted_at || latestCompleted?.endedAt || null;
   const latestVerdict = latestCompleted?.verdict || null;
-  const terminalClean = CLEAN_VERDICTS.has(latestVerdict)
+  const settledSuccessVerdict = CLEAN_VERDICTS.has(latestVerdict)
     || (
       String(row.review_status || '').trim().toLowerCase() === 'posted'
       && !latestVerdict
       && Boolean(row.posted_at)
     );
+  const terminalClean = settledSuccessVerdict && mergeEligibility.mergeEligible;
 
   // Progress evidence, independent of the TTM budget. ANY pass counts here,
   // including a running one: a reviewer that is mid-pass is progress, and a
@@ -277,7 +356,15 @@ function derivePrTtmTimeline(row, passes, { nowIso }) {
     reviewStatus: String(row.review_status || '').trim().toLowerCase(),
     reviewRounds,
     latestVerdict,
+    settledSuccessVerdict,
     terminalClean,
+    mergeEligibleForTerminalUnmerged: mergeEligibility.mergeEligible,
+    mergeEligibilityHoldReason: settledSuccessVerdict ? mergeEligibility.holdReason : null,
+    mergeAuthorityStrictMode,
+    blockingFindingCount: mergeEligibility.reviewState.blockingFindingCount,
+    blockingFindingState: mergeEligibility.reviewState.blockingFindingState,
+    nonBlockingFindingCount: mergeEligibility.reviewState.nonBlockingFindingCount,
+    nonBlockingFindingState: mergeEligibility.reviewState.nonBlockingFindingState,
     elapsedMinutes: minutesBetween(openedAt, mergedAt || closedAt || nowIso),
     terminalUnmergedMinutes: terminalClean && !mergedAt && String(row.pr_state || 'open').toLowerCase() === 'open'
       ? minutesBetween(settledAt || openedAt, nowIso)
@@ -342,6 +429,14 @@ function buildTtmFlag(row, flagKind, observedAt, config, extraDetails = {}) {
       prState: row.prState,
       reviewStatus: row.reviewStatus,
       latestVerdict: row.latestVerdict,
+      settledSuccessVerdict: row.settledSuccessVerdict,
+      mergeEligibleForTerminalUnmerged: row.mergeEligibleForTerminalUnmerged,
+      mergeEligibilityHoldReason: row.mergeEligibilityHoldReason,
+      mergeAuthorityStrictMode: row.mergeAuthorityStrictMode,
+      blockingFindingCount: row.blockingFindingCount,
+      blockingFindingState: row.blockingFindingState,
+      nonBlockingFindingCount: row.nonBlockingFindingCount,
+      nonBlockingFindingState: row.nonBlockingFindingState,
       baseBudgetMinutes: config.baseBudgetMinutes,
       perRoundBudgetMinutes: config.perRoundBudgetMinutes,
       terminalUnmergedThresholdMinutes: config.terminalUnmergedMinutes,
@@ -379,7 +474,7 @@ function evaluateTtmTimelines(rows, { observedAt, config, budgetBlind = false })
       && row.terminalUnmergedMinutes > config.terminalUnmergedMinutes
     ) {
       flags.push(buildTtmFlag(row, 'terminal_but_unmerged', observedAt, config, {
-        stallReason: 'terminal clean verdict is settled but the PR will not merge',
+        stallReason: 'merge-eligible terminal verdict is settled but the PR will not merge',
       }));
     }
     if (
@@ -406,19 +501,20 @@ function evaluateTtmTimelines(rows, { observedAt, config, budgetBlind = false })
   return flags;
 }
 
-function readTtmTimelines(db, { nowIso }) {
+function readTtmTimelines(db, { nowIso, mergeAuthorityStrictMode }) {
   let reviewRows;
   let passRows;
   try {
     reviewRows = db.prepare(
       `SELECT repo, pr_number, reviewed_at, pr_state, merged_at, closed_at,
               review_status, posted_at, rereview_requested_at,
-              reviewer_lease_expires_at
+              reviewer_lease_expires_at,
+              ? AS mergeAuthorityStrictMode
          FROM reviewed_prs`
-    ).all();
+    ).all(mergeAuthorityStrictMode === false ? 0 : 1);
     passRows = db.prepare(
       `SELECT repo, pr_number, attempt_number, pass_kind, started_at, ended_at,
-              status, verdict
+              status, verdict, body_md
          FROM reviewer_passes
         WHERE pass_kind IN ('first-pass', 'rereview')`
     ).all();
@@ -640,7 +736,7 @@ function summarizeTtmRollupFromTimelines(rows, {
       ? Math.max(...terminalDurations)
       : 0,
     terminalButUnmergedTotalDurationMinutesLast12h: terminalDurations.reduce((sum, value) => sum + value, 0),
-    standingSev1Metric: '100% hammer-closed / 12h requires zero terminal-but-unmerged stalls requiring manual close',
+    standingSev1Metric: '100% hammer-closed / 12h requires zero merge-eligible terminal-but-unmerged stalls requiring manual close (rebased 2026-09-12 by TBUALIGN-01)',
   };
 }
 
@@ -758,7 +854,10 @@ function evaluateTtmFromDb(db, {
 } = {}) {
   const observedAt = typeof now === 'function' ? now().toISOString() : new Date(now).toISOString();
   const seededConfig = resolveTtmTrackerConfig(env, configOverrides);
-  const timelines = readTtmTimelines(db, { nowIso: observedAt });
+  const timelines = readTtmTimelines(db, {
+    nowIso: observedAt,
+    mergeAuthorityStrictMode: seededConfig.mergeAuthorityStrictMode,
+  });
   const { config, budget } = applyMeasuredTtmBudget(db, seededConfig, timelines);
   const flags = evaluateTtmTimelines(timelines, {
     observedAt,

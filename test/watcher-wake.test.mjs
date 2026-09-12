@@ -6,6 +6,7 @@ import path from 'node:path';
 import {
   createWatcherWakeSource,
   requestWatcherWake,
+  watcherWakeMatchesSubject,
   watcherWakePath,
 } from '../src/watcher-wake.mjs';
 import { createHandoffRateLimiter } from '../src/handoff-rate-cap.mjs';
@@ -62,6 +63,34 @@ test('watcher wake wait preserves normal timeout path when no wake is written', 
   }
 });
 
+test('watcher wake can consume the latest file on daemon startup', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'watcher-wake-'));
+  requestWatcherWake({
+    rootDir,
+    reason: 'hammer-pr-eligible',
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 6654,
+    headSha: 'head-a',
+    requestId: 'startup-wake',
+  });
+  const wakeSource = createWatcherWakeSource({
+    rootDir,
+    logger: { warn() {} },
+    pollMs: 100,
+    consumeExistingOnStart: true,
+  });
+
+  try {
+    const result = await wakeSource.wait(50);
+    assert.equal(result.woken, true);
+    assert.equal(result.payload.request_id, 'startup-wake');
+    assert.equal(result.payload.repo, 'laceyenterprises/agent-os');
+    assert.equal(result.payload.pr_number, 6654);
+  } finally {
+    wakeSource.close();
+  }
+});
+
 test('watcher wake dedupes by request_id instead of file mtime and size', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'watcher-wake-'));
   requestWatcherWake({
@@ -98,6 +127,47 @@ test('watcher wake dedupes by request_id instead of file mtime and size', async 
   } finally {
     wakeSource.close();
   }
+});
+
+test('watcher wake subject matching is repo, PR, and optional head scoped', () => {
+  const payload = {
+    repo: 'laceyenterprises/agent-os',
+    pr_number: 6654,
+    head_sha: 'head-a',
+  };
+
+  assert.equal(
+    watcherWakeMatchesSubject(payload, {
+      repoPath: 'laceyenterprises/agent-os',
+      prNumber: 6654,
+      headSha: 'head-a',
+    }),
+    true,
+  );
+  assert.equal(
+    watcherWakeMatchesSubject(payload, {
+      repoPath: 'laceyenterprises/agent-os',
+      prNumber: 6654,
+      headSha: 'head-b',
+    }),
+    false,
+  );
+  assert.equal(
+    watcherWakeMatchesSubject({ repo: 'laceyenterprises/agent-os', pr_number: 6654 }, {
+      repoPath: 'laceyenterprises/agent-os',
+      prNumber: 6654,
+      headSha: 'head-b',
+    }),
+    true,
+  );
+  assert.equal(
+    watcherWakeMatchesSubject(payload, {
+      repoPath: 'laceyenterprises/adversarial-review',
+      prNumber: 6654,
+      headSha: 'head-a',
+    }),
+    false,
+  );
 });
 
 test('watcher wake dedupes request_id-less payloads by content hash', async () => {

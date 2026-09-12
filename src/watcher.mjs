@@ -5,7 +5,6 @@
  */
 
 import { execFile } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
 import { homedir, hostname } from 'node:os';
 import { promisify } from 'node:util';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -101,7 +100,11 @@ import {
   computeWorkloadAwarePollDeadlineMs,
   DEFAULT_POLL_DEADLINE_FLOOR_MS,
 } from './watcher-poll-guard.mjs';
-import { createWatcherWakeSource } from './watcher-wake.mjs';
+import {
+  compareWatcherWakeSubjectEntries,
+  createWatcherWakePayloadAccessor,
+  createWatcherWakeSource,
+} from './watcher-wake.mjs';
 import { reapRunningPassTimeouts } from './reviewer-pass-reaper.mjs';
 import {
   ensureReviewStateSchema,
@@ -395,7 +398,8 @@ import {
   validateFenceConfig,
 } from './reviewer-fence.mjs';
 import {
-  compareReviewerDispatchCandidates, countActiveReviewerSpawnsByModel,
+  compareReviewerDispatchCandidates,
+  createDetachedReviewerDispatchTracker,
   createReviewerMemoryAdmissionSampler,
   reserveReviewerMemoryAdmission, resolveFirstPassReviewerPoolConfig,
   resolveReviewerMemoryPressureConfig,
@@ -1027,6 +1031,7 @@ function normalizeReviewPopulationRetryConfig(config = {}) {
 // pool race that the CAS alone cannot (both workers read `pending`, both fetch,
 // both claim in sequence).
 const reviewerHeadDispatchLease = createHeadDispatchLease();
+const detachedReviewerDispatchTracker = createDetachedReviewerDispatchTracker({ activeReviewerSpawns });
 
 // ── Operator surface ─────────────────────────────────────────────────────────
 
@@ -1138,7 +1143,7 @@ async function pollOnce(
   octokit,
   {
     healthProbe = watcherHealthProbe,
-    afterClaim = null, wakePayload = null,
+    afterClaim = null, wakePayload = null, consumeWakePayload = null,
   } = {}
 ) {
   // CFG-09: per-tick boundary for the role-config cascade cache. Drop
@@ -1151,6 +1156,7 @@ async function pollOnce(
   refreshReviewerRuntimeAdapter();
   assertReviewDbWritesRoundTrip(db);
   await refreshWatcherAuthenticationForTick({ log: console });
+  const wakePayloadForPoll = createWatcherWakePayloadAccessor({ initialPayload: wakePayload, consumeWakePayload });
   const healthTick = healthProbe?.beginTick?.();
   try {
     maybeSweepConditionalRequestCache({ rootDir: ROOT, logger: console });
@@ -1274,9 +1280,10 @@ async function pollOnce(
       const drainResult = await runBoundedReviewerDispatchQueue(candidates, {
         maxConcurrent: reviewerPoolConfig.maxConcurrent,
         geminiCredentialConcurrency,
-        activeReviewerCounts: countActiveReviewerSpawnsByModel(activeReviewerSpawns),
+        activeReviewerCounts: detachedReviewerDispatchTracker.activeCounts(),
         singleWave: true,
         singleWaveSettleGraceMs: reviewerDispatchSingleWaveSettleGraceMs,
+        onCandidateStarted: detachedReviewerDispatchTracker.track,
         logger: console,
       });
       if (drainResult.deferred > 0) {
@@ -1387,17 +1394,9 @@ async function pollOnce(
         ...entry,
         current: stmtGetReviewRow.get(repoPath, entry.prNumber),
       }))
-      .sort((a, b) => compareReviewerDispatchCandidates({
-        repoPath,
-        prNumber: a.prNumber,
-        subject: a.subject,
-        current: a.current,
-      }, {
-        repoPath,
-        prNumber: b.prNumber,
-        subject: b.subject,
-        current: b.current,
-      }));
+      .sort((a, b) =>
+        compareWatcherWakeSubjectEntries(wakePayloadForPoll(), repoPath, a, b, compareReviewerDispatchCandidates)
+      );
 
     // WPS-01: a PR that has never been reviewed goes to the front of the tick —
     // note the reviewer FIFO sort just above orders oldest-created FIRST, which
@@ -1452,6 +1451,7 @@ async function pollOnce(
         isFastMergeSkipEnabled,
         normalizeReviewPopulationRetryConfig,
         shouldDeferReviewForActiveFollowUp,
+        wakePayload: wakePayloadForPoll(),
       });
       await drainReviewerDispatchCandidatesIfBatchReady('continuing reviewer discovery');
     }
@@ -1540,7 +1540,7 @@ async function pollOnce(
     octokit,
     operatorSurface,
     primaryDomainId: WATCHER_PRIMARY_DOMAIN_ID,
-    postedReviewPriorityTargets: wakePayload || [],
+    postedReviewPriorityTargets: wakePayloadForPoll() || [],
   });
   } finally {
     try {
@@ -1841,6 +1841,7 @@ async function main() {
   const watcherWakeSource = createWatcherWakeSource({
     rootDir: ROOT,
     logger: console,
+    consumeExistingOnStart: true,
   });
   let lastAlertSinkDegradedFingerprint = null;
   async function runHeartbeatPoll(source, pollOptions = undefined) {
@@ -1870,7 +1871,7 @@ async function main() {
         console.error(`[watcher] alert delivery sink health unavailable: ${error?.message || error}`);
       }
       await staleStateReaperTicker.tick();
-      const result = await safePollOnce(source, pollOptions);
+      const result = await safePollOnce(source, { ...(pollOptions || {}), consumeWakePayload: () => watcherWakeSource.consumeCurrent() });
       watcherHeartbeat.markPollCompleted({ source, ok: Boolean(result?.ok), timed_out: Boolean(result?.timedOut), error: result?.error ? String(result.error?.message || result.error) : null });
       return result;
     } finally {

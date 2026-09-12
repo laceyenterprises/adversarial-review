@@ -206,6 +206,7 @@ import { getStalePostedReviewAutoRereviewSuppression } from './stale-posted-revi
 import { computeVocabularyFatigueFindingForPR } from './vocabulary-fatigue.mjs';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import { reserveReviewerMemoryAdmission } from './watcher-reviewer-pool.mjs';
+import { watcherWakeMatchesSubject } from './watcher-wake.mjs';
 
 const DEFAULT_REVIEWER_MODEL_FALLBACK_ALERT_WINDOW_MS = 10 * 60 * 1000;
 const DEFAULT_REVIEWER_MODEL_FALLBACK_ALERT_THRESHOLD = 5;
@@ -635,6 +636,7 @@ export async function processReviewSubject(entry, ctx) {
     isFastMergeSkipEnabled,
     normalizeReviewPopulationRetryConfig,
     shouldDeferReviewForActiveFollowUp,
+    wakePayload = null,
     runDaemonCleanMergeAttemptImpl = runDaemonCleanMergeAttempt,
     findArgusJobImpl = findArgusJob,
     maybeAutoAdjudicateDependencyBotArgusJobImpl = maybeAutoAdjudicateDependencyBotArgusJob,
@@ -2416,6 +2418,11 @@ export async function processReviewSubject(entry, ctx) {
         reviewerModel: route.reviewerModel,
         subject,
         current,
+        wakePriority: watcherWakeMatchesSubject(wakePayload, {
+          repoPath,
+          prNumber,
+          headSha: subject?.headSha,
+        }),
         enqueuedAtMs: Date.now(),
         async run() {
           // REVIEW-DEDUP (idempotency lease): one (pr, head) dispatch per

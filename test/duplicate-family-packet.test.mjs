@@ -137,6 +137,15 @@ async function buildFixturePacket(rootDir, repoDir) {
   });
 }
 
+async function buildFixturePacketWithOptions(rootDir, repoDir, options = {}) {
+  return buildDuplicateFamilyPacket({
+    rootDir,
+    repoDir,
+    familyId: FAMILY_ID,
+    ...options,
+  });
+}
+
 test('duplicate-family packet writes deterministic evidence files for divergent PR refs', async () => {
   const fixture = makeFixtureRepo();
   const rootDir = makeRootWithFamily(fixture);
@@ -176,6 +185,26 @@ test('deleted loser branch renders from persisted candidate head SHA', async () 
   assert.match(packet.files['candidate-6463.diffstat.txt'], /evidence\.txt/);
 });
 
+test('packet builder reads an injected query-only review database without schema writes', async () => {
+  const fixture = makeFixtureRepo();
+  const rootDir = makeRootWithFamily(fixture);
+  const db = openReviewStateDb(rootDir);
+  db.exec('DROP TABLE IF EXISTS reviewer_passes');
+  db.pragma('query_only = ON');
+
+  try {
+    const packet = await buildFixturePacketWithOptions(rootDir, fixture.repoDir, {
+      db,
+      skipGithub: true,
+    });
+    assert.equal(packet.packet.family.familyId, FAMILY_ID);
+    assert.deepEqual(packet.packet.reviewStateEvidence['6466'].passes, []);
+  } finally {
+    db.pragma('query_only = OFF');
+    db.close();
+  }
+});
+
 test('missing persisted loser object fails loud with typed missing-object reason', async () => {
   const fixture = makeFixtureRepo();
   const rootDir = makeRootWithFamily(fixture, { missingHead: 6463 });
@@ -199,6 +228,65 @@ test('current-tree diff is labeled as stale-base diagnostic when current main mo
   assert.match(diagnostic, /STALE-BASE DIAGNOSTIC/);
   assert.match(diagnostic, /current base branch/);
   assert.match(diagnostic, /main-only\.txt/);
+});
+
+test('missing persisted base object is still labeled as stale against current base', async () => {
+  const fixture = makeFixtureRepo();
+  const rootDir = makeRootWithFamily(fixture);
+  const missingBaseSha = '1'.repeat(40);
+  const db = openReviewStateDb(rootDir);
+  db.prepare('UPDATE duplicate_family_candidates SET base_sha = ? WHERE pr_number = ?')
+    .run(missingBaseSha, 6466);
+  db.close();
+
+  const packet = await buildFixturePacket(rootDir, fixture.repoDir);
+  const candidate = packet.packet.candidates.find((item) => item.prNumber === 6466);
+  const diagnostic = packet.files['candidate-6466.stale-base-diagnostic.txt'];
+
+  assert.equal(candidate.git.persistedBaseObjectAvailable, false);
+  assert.equal(candidate.git.staleBaseDiagnostic.staleBase, true);
+  assert.equal(candidate.git.staleBaseDiagnostic.persistedBaseSha, missingBaseSha);
+  assert.match(diagnostic, /STALE-BASE DIAGNOSTIC/);
+});
+
+test('unresolved review extraction ignores harmless prose and keeps explicit request changes verdicts', async () => {
+  const fixture = makeFixtureRepo();
+  const rootDir = makeRootWithFamily(fixture);
+  const packet = await buildFixturePacketWithOptions(rootDir, fixture.repoDir, {
+    skipGithub: false,
+    fetchRollupImpl: async (_repo, prNumber) => ({
+      state: 'OPEN',
+      mergeable: 'MERGEABLE',
+      mergeStateStatus: 'CLEAN',
+      checks: [],
+      comments: [],
+      reviews: prNumber === 6466 ? [
+        {
+          state: 'COMMENTED',
+          author: { login: 'reviewer' },
+          submittedAt: '2026-09-11T12:00:00Z',
+          body: 'There is no blocking finding here; keep going.',
+        },
+      ] : [
+        {
+          state: 'COMMENTED',
+          author: { login: 'reviewer' },
+          submittedAt: '2026-09-11T12:01:00Z',
+          body: '## Verdict\n\nRequest changes',
+        },
+      ],
+    }),
+  });
+  const markdown = packet.files['reviews.md'];
+
+  assert.match(
+    markdown,
+    /## PR #6466[\s\S]*There is no blocking finding here[\s\S]*### Unresolved Findings\s+\n- \(none detected from latest review bodies\)/
+  );
+  assert.match(
+    markdown,
+    /## PR #6463[\s\S]*### Unresolved Findings\s+\n- COMMENTED by reviewer at 2026-09-11T12:01:00Z/
+  );
 });
 
 test('report skeleton uses corpus-style sections and relative packet links', async () => {

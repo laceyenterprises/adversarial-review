@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 
 import { fetchPullRequestRollup } from './github-api.mjs';
 import { duplicateFamilyCandidateRows } from './duplicate-family-state.mjs';
-import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
+import { openReviewStateDb } from './review-state.mjs';
 
 const execFileDefault = promisify(execFileCallback);
 
@@ -67,8 +67,7 @@ function reviewHasUnresolvedFinding(review) {
   const state = String(review?.state || '').toUpperCase();
   const body = String(review?.body || '');
   return state === 'CHANGES_REQUESTED'
-    || /##\s+Verdict\s*\n\s*Request changes/i.test(body)
-    || /\b(blocking finding|request changes|must fix|unresolved)\b/i.test(body);
+    || /##\s+Verdict\s*\n\s*Request changes/i.test(body);
 }
 
 function relevantComments(comments) {
@@ -251,7 +250,6 @@ async function collectGitEvidence(repoDir, family, deps) {
     const staleBase = Boolean(
       currentBase.sha
       && candidate.baseSha
-      && persistedBaseExists
       && currentBase.sha !== candidate.baseSha
     );
     candidates.push({
@@ -542,7 +540,6 @@ async function buildDuplicateFamilyPacket({
   }
   const ownDb = db || openReviewStateDb(rootDir);
   try {
-    ensureReviewStateSchema(ownDb);
     const family = readFamily(ownDb, familyId);
     const gitCandidates = await collectGitEvidence(resolve(repoDir), family, { execFileImpl });
     const githubEvidence = await collectGithubEvidence({ ...family, candidates: gitCandidates }, {

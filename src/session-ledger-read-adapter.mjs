@@ -830,15 +830,6 @@ export function readLatestWorkerRunStatusFromLedger({
   return { ok: true, row, target: queried.target };
 }
 
-export const TERMINAL_LAUNCH_REQUEST_STATUSES = new Set([
-  'succeeded',
-  'failed',
-  'operator_triage_required',
-  'canceled',
-  'superseded',
-  'reaped_stuck_requested',
-]);
-
 export function readLaunchRequestStatusFromLedger({
   launchRequestId,
   ledgerTarget = null,

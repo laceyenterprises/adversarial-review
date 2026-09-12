@@ -44,9 +44,7 @@ import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from '../config-loader.mjs'
 import {
   readBuildCompletionProducerEvidence,
   readBuildCompletionSignalForPr,
-  readLaunchRequestStatusFromLedger,
   readLatestWorkerRunStatusFromLedger,
-  TERMINAL_LAUNCH_REQUEST_STATUSES,
 } from '../session-ledger-read-adapter.mjs';
 import {
   dismissStandingChangesRequestedReviewsForHead,
@@ -1289,6 +1287,14 @@ const AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_OPERATOR_HOLD_STATUSES = new Set([
   'operator_triage_required',
   'reaped_stuck_requested',
 ]);
+const AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES = new Set([
+  'succeeded',
+  'failed',
+  'operator_triage_required',
+  'canceled',
+  'superseded',
+  'reaped_stuck_requested',
+]);
 const BRANCH_HOLDER_TERMINAL_WORKER_RUN_STATUSES = new Set(['succeeded', 'failed', 'cancelled']);
 const BRANCH_HOLDER_WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const CODING_BRANCH_HOLDER_PREFIXES = [
@@ -1329,6 +1335,11 @@ function amaCloserStatusFromTerminalLaunchRequestStatus(launchRequestStatus) {
 
 function dispatchStatusReason(status) {
   return `dispatch-status-${String(status || 'unknown').replace(/_/g, '-')}`;
+}
+
+async function readLaunchRequestStatusFromLedgerDefault(args) {
+  const { readLaunchRequestStatusFromLedger } = await import('../session-ledger-read-adapter.mjs');
+  return readLaunchRequestStatusFromLedger(args);
 }
 
 /**
@@ -3504,7 +3515,7 @@ export async function maybeDispatchAmaCloser({
   writeFileImpl = null,
   readBuildCompletionProducerEvidenceImpl = readBuildCompletionProducerEvidence,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
-  readLaunchRequestStatusImpl = readLaunchRequestStatusFromLedger,
+  readLaunchRequestStatusImpl = readLaunchRequestStatusFromLedgerDefault,
   resolveCloserDispatchHarnessImpl = resolveCloserDispatchHarness,
   attemptDaemonCleanMergeImpl = attemptDaemonCleanMerge,
   acquireMergeLeaseImpl = acquireMergeLease,
@@ -4585,7 +4596,7 @@ export async function maybeDispatchAmaCloser({
         rootDir,
       });
       const launchRequestStatus = String(launchRequestProbe?.row?.status || '').trim().toLowerCase();
-      if (launchRequestProbe?.ok && TERMINAL_LAUNCH_REQUEST_STATUSES.has(launchRequestStatus)) {
+      if (launchRequestProbe?.ok && AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(launchRequestStatus)) {
         status = amaCloserStatusFromTerminalLaunchRequestStatus(launchRequestStatus);
         existingDispatchStatus = status;
         updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({

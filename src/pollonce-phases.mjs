@@ -190,6 +190,7 @@ import {
 import {
   createAfhReviewerGroundingCache,
   describeAfhReviewerFallback,
+  recordSustainedSoftGrounding,
 } from './afh-reviewer-fallback.mjs';
 import {
   evaluateRoundBudgetForReview,
@@ -1487,6 +1488,7 @@ export async function processReviewSubject(entry, ctx) {
           `[watcher] reviewer-selection ${repoPath}#${prNumber} ` +
             `${describeAfhReviewerFallback(afhSelection.decision)}`
         );
+        recordSustainedSoftGrounding({ decision: afhSelection.decision, logger: console });
       } else if (afhSelection.decision.reason === 'all-candidates-grounded') {
         console.warn(
           `[watcher] afh-reviewer-fallback found no ungrounded reviewer for ${repoPath}#${prNumber}; ` +

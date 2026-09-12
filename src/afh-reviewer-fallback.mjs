@@ -87,9 +87,11 @@ export const AFH_LAST_RESORT_REVIEWER_MODEL = 'claude';
 export const CLAUDE_REVIEWER_RUNTIME_PROBE_TIMEOUT_MS = 2_000;
 export const CLAUDE_REVIEWER_RUNTIME_PROBE_RETRY_DELAYS_MS = Object.freeze([250, 750]);
 export const CLAUDE_REVIEWER_RUNTIME_GROUNDING_REASON = 'claude-launchctl-asuser-unavailable';
+export const DEFAULT_SUSTAINED_SOFT_GROUNDING_ALARM_THRESHOLD = 10;
 const LAUNCHCTL = '/bin/launchctl';
 const TRUE_BIN = '/usr/bin/true';
 const AFH_QUOTA_ONLY_CACHE_KEY = 'quota-only';
+const sustainedSoftGroundingCounters = new Map();
 
 // Reviewer model → the provider whose OAuth quota gates whether that reviewer
 // can spawn at all. Kept in sync with QUOTA_HARNESS_PROVIDER
@@ -819,4 +821,54 @@ export function describeAfhReviewerFallback(decision) {
       ? ' — LAST RESORT: same-model as builder, cross-model review diversity is lost for this attempt'
       : '')
   );
+}
+
+function sustainedSoftGroundingKey(decision) {
+  const primary = decision?.primary || {};
+  const reason = primary.softVerdict?.reason || decision?.reason || 'unknown';
+  const provider = primary.provider || 'unknown';
+  return `${provider}:${reason}`;
+}
+
+export function resetSustainedSoftGroundingCountersForTests() {
+  sustainedSoftGroundingCounters.clear();
+}
+
+/**
+ * Emit a per-reason counter for reviewer AFH soft-grounding, and alarm when the
+ * same reason sustains past a threshold. AFH fallback remains enabled: this is
+ * observability for "fallback did the right thing too many times".
+ */
+export function recordSustainedSoftGrounding({
+  decision,
+  threshold = DEFAULT_SUSTAINED_SOFT_GROUNDING_ALARM_THRESHOLD,
+  logger = console,
+} = {}) {
+  if (!decision?.applied || !decision.primary?.softGrounded) return null;
+  const key = sustainedSoftGroundingKey(decision);
+  const previous = sustainedSoftGroundingCounters.get(key) || 0;
+  const count = previous + 1;
+  sustainedSoftGroundingCounters.set(key, count);
+  const provider = decision.primary?.provider || 'unknown';
+  const reason = decision.primary?.softVerdict?.reason || decision.reason || 'unknown';
+  const payload = Object.freeze({
+    provider,
+    reason,
+    count,
+    threshold,
+    from: decision.from || null,
+    to: decision.to || null,
+  });
+  logger?.warn?.(
+    `[watcher] afh-reviewer-soft-grounding counter provider=${provider} ` +
+      `reason=${reason} count=${count} threshold=${threshold} ` +
+      `route=${payload.from || 'unknown'}->${payload.to || 'unknown'}`
+  );
+  if (count >= threshold && (count === threshold || count % threshold === 0)) {
+    logger?.error?.(
+      `[watcher] ALERT sustained reviewer soft-grounding provider=${provider} ` +
+        `reason=${reason} count=${count} threshold=${threshold}; AFH fallback is active`
+    );
+  }
+  return payload;
 }

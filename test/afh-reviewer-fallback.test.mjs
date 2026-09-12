@@ -35,6 +35,8 @@ import {
   probeClaudeReviewerRuntime,
   providerForReviewerModel,
   readAfhReviewerGrounding,
+  recordSustainedSoftGrounding,
+  resetSustainedSoftGroundingCountersForTests,
   reviewerModelGrounding,
 } from '../src/afh-reviewer-fallback.mjs';
 import { applyGeminiReviewerRoute, routeSubject } from '../src/adapters/subject/github-pr/routing.mjs';
@@ -130,6 +132,35 @@ test('AFH-04: soft-grounded codex-reviewer routes to gemini (cross-model preserv
       assert.equal(route.afhReviewerFallback.lastResort, false);
     }
   }
+});
+
+test('AFH-04: sustained soft-grounding emits per-reason counter and threshold alarm', () => {
+  resetSustainedSoftGroundingCountersForTests();
+  const decision = afhReviewerFallbackDecision({
+    builderClass: 'claude-code',
+    baseRoute: effectiveRouteFor('claude-code', 'fallback'),
+    grounding: CODEX_SOFT_GROUNDED(),
+    geminiReviewerMode: 'fallback',
+  });
+  const logs = { warn: [], error: [] };
+  const logger = {
+    warn: (message) => logs.warn.push(String(message)),
+    error: (message) => logs.error.push(String(message)),
+  };
+
+  const first = recordSustainedSoftGrounding({ decision, threshold: 2, logger });
+  const second = recordSustainedSoftGrounding({ decision, threshold: 2, logger });
+
+  assert.equal(first.provider, 'openai');
+  assert.equal(first.reason, 'sustained_provider_quota_exhausted_kills');
+  assert.equal(second.count, 2);
+  assert.equal(logs.warn.length, 2);
+  assert.match(logs.warn[1], /provider=openai/);
+  assert.match(logs.warn[1], /reason=sustained_provider_quota_exhausted_kills/);
+  assert.equal(logs.error.length, 1);
+  assert.match(logs.error[0], /ALERT sustained reviewer soft-grounding/);
+  assert.match(logs.error[0], /threshold=2/);
+  resetSustainedSoftGroundingCountersForTests();
 });
 
 test('AFH-04: hard-grounded codex-reviewer routes to gemini too (hard OR soft)', () => {

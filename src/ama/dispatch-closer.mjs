@@ -44,7 +44,9 @@ import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from '../config-loader.mjs'
 import {
   readBuildCompletionProducerEvidence,
   readBuildCompletionSignalForPr,
+  readLaunchRequestStatusFromLedger,
   readLatestWorkerRunStatusFromLedger,
+  TERMINAL_LAUNCH_REQUEST_STATUSES,
 } from '../session-ledger-read-adapter.mjs';
 import {
   dismissStandingChangesRequestedReviewsForHead,
@@ -3482,6 +3484,7 @@ export async function maybeDispatchAmaCloser({
   writeFileImpl = null,
   readBuildCompletionProducerEvidenceImpl = readBuildCompletionProducerEvidence,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
+  readLaunchRequestStatusImpl = readLaunchRequestStatusFromLedger,
   resolveCloserDispatchHarnessImpl = resolveCloserDispatchHarness,
   attemptDaemonCleanMergeImpl = attemptDaemonCleanMerge,
   acquireMergeLeaseImpl = acquireMergeLease,
@@ -4553,21 +4556,55 @@ export async function maybeDispatchAmaCloser({
       }
     }
     if (status === 'unknown') {
-      updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
-        ...(current || existingRecord),
-        lastObservedStatus: status,
-        lastObservedAt: dispatchContext.dispatchedAt,
-        lastError: statusProbe?.error || null,
-      }));
-      return noAmaDispatch({
-        dispatched: false,
-        skipMergeAgent: true,
-        reason: 'dispatch-status-unknown',
-        workerClass: existingRecord.workerClass || workerClass,
-        dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
-        launchRequestId: existingRecord.launchRequestId || null,
-        promptPath: existingRecord.promptPath || null,
+      const launchRequestProbe = await readLaunchRequestStatusImpl({
+        launchRequestId: existingRecord.launchRequestId,
+        ledgerTarget: dispatchContext.ledgerTarget || null,
+        ledgerDbPath: dispatchContext.ledgerDbPath || null,
+        env: process.env,
+        hqRoot,
+        rootDir,
       });
+      const launchRequestStatus = String(launchRequestProbe?.row?.status || '').trim().toLowerCase();
+      if (launchRequestProbe?.ok && TERMINAL_LAUNCH_REQUEST_STATUSES.has(launchRequestStatus)) {
+        status = launchRequestStatus === 'succeeded'
+          ? 'unverified-terminal-success'
+          : launchRequestStatus;
+        if (!AMA_CLOSER_RETRYABLE_STATUSES.has(status)) status = 'failed';
+        existingDispatchStatus = status;
+        finalizeAmaCloserLeaseBestEffort({
+          rootDir,
+          leaseIdentity: existingRecordLeaseIdentity,
+          terminalOutcome: existingDispatchHeadAdvanced || status === 'superseded'
+            ? 'superseded'
+            : 'failed-without-merge',
+          now: dispatchContext.dispatchedAt,
+          logger,
+          repo,
+          prNumber,
+        });
+        updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+          ...(current || existingRecord),
+          lastObservedStatus: launchRequestStatus,
+          lastObservedAt: dispatchContext.dispatchedAt,
+          lastError: `dispatch-status-unknown-terminal-lrq-${launchRequestStatus}`,
+        }));
+      } else {
+        updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+          ...(current || existingRecord),
+          lastObservedStatus: status,
+          lastObservedAt: dispatchContext.dispatchedAt,
+          lastError: statusProbe?.error || launchRequestProbe?.reason || null,
+        }));
+        return noAmaDispatch({
+          dispatched: false,
+          skipMergeAgent: true,
+          reason: 'dispatch-status-unknown',
+          workerClass: existingRecord.workerClass || workerClass,
+          dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
+          launchRequestId: existingRecord.launchRequestId || null,
+          promptPath: existingRecord.promptPath || null,
+        });
+      }
     }
     if (AMA_CLOSER_RETRYABLE_STATUSES.has(status)) {
       finalizeAmaCloserLeaseBestEffort({

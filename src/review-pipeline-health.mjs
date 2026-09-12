@@ -77,6 +77,7 @@ const DEFAULT_RUNNING_REVIEWER_PASS_MAX_AGE_MS = Math.round(
 );
 const DEFAULT_DAG_AUTOWALK_MAX_LOG_AGE_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_DISPATCH_SPAWN_FAILURE_WINDOW_MS = 60 * 60 * 1000;
+const DEFAULT_HAMMER_DISPATCH_STALL_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_LAUNCHD_TIMEOUT_MS = 2_000;
 const DEFAULT_LAUNCHD_TRANSIENT_RETRY_DELAYS_MS = Object.freeze([50, 150]);
 const DEFAULT_GH_TERMINAL_STATE_RETRY_DELAYS_MS = Object.freeze([100, 250]);
@@ -120,6 +121,7 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_round_budget_anomalies',
   'review_pipeline_launchd_service_up',
   'review_pipeline_dispatch_spawn_failures',
+  'review_pipeline_hammer_dispatch_stalled',
   'review_pipeline_dag_autowalk_healthy',
   'review_pipeline_ttm_minutes',
   'review_pipeline_ttm_open_budget_breaches',
@@ -151,6 +153,7 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_round_budget_anomalies: 'Current count of remediation jobs whose rounds exceed or misuse their risk-class budget.',
   review_pipeline_launchd_service_up: 'Whether required local pipeline launchd services are loaded.',
   review_pipeline_dispatch_spawn_failures: 'Recent dispatch daemon stderr lines matching closer/hammer spawn failure patterns.',
+  review_pipeline_hammer_dispatch_stalled: 'Whether conflicted PRs exist while no hammer dispatch has been observed within the configured window.',
   review_pipeline_dag_autowalk_healthy: 'Whether the dag-autowalk LaunchAgent has a healthy exit/log recency state.',
   review_pipeline_ttm_minutes: 'Time-to-merge rollup in minutes over the configured window.',
   review_pipeline_ttm_open_budget_breaches: 'Current open PRs exceeding the measured rounds-aware time-to-merge budget (SLOW; trend only).',
@@ -361,6 +364,16 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     defaultThreshold: DEFAULT_DISPATCH_SPAWN_FAILURE_WINDOW_MS,
   },
   {
+    code: 'review:hammer_dispatch_stalled_with_conflicts',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: 'hammerDispatchStallMaxAgeMs',
+    defaultThreshold: DEFAULT_HAMMER_DISPATCH_STALL_MAX_AGE_MS,
+    thresholdDescription:
+      'conflicted/dirty PRs are present in auto-merge state and no hammer dispatch '
+      + 'has been observed in the dispatch daemon log within the threshold',
+  },
+  {
     code: 'review:dag_autowalk_launchd_unhealthy',
     tier: 'ticket',
     category: 'review-pipeline',
@@ -488,6 +501,11 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
       overrides.dispatchSpawnFailureWindowMs
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DISPATCH_SPAWN_FAILURE_WINDOW_MS,
       DEFAULT_DISPATCH_SPAWN_FAILURE_WINDOW_MS
+    ),
+    hammerDispatchStallMaxAgeMs: parsePositiveInteger(
+      overrides.hammerDispatchStallMaxAgeMs
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HAMMER_DISPATCH_STALL_MAX_AGE_MS,
+      DEFAULT_HAMMER_DISPATCH_STALL_MAX_AGE_MS
     ),
     launchdTimeoutMs: parsePositiveInteger(
       overrides.launchdTimeoutMs
@@ -2073,6 +2091,85 @@ function summarizeDispatchSpawnFailures(hqRoot, { nowMs, config }) {
   };
 }
 
+function parseDaemonLogTimestampMs(line) {
+  const match = String(line || '').match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:,\d+|\.\d+)?/);
+  if (!match) return null;
+  const parsed = Date.parse(`${match[1]}T${match[2]}Z`);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function hammerDispatchPattern() {
+  return /\b(?:cwp\.daemon\s+spawned|spawn(?:ed)?)\b[\s\S]{0,180}\bworker_class=hammer\b/i;
+}
+
+function readDirtyPrBacklogState(hqRoot, { env = process.env, nowMs }) {
+  const owner = env.AUTO_MERGE_OWNER_USER
+    || env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_OWNER_USER
+    || currentUserName(env);
+  const statePaths = [
+    join(hqRoot, 'dispatch', `_auto_merge-${owner}`, 'daemon-state.json'),
+    join(hqRoot, 'dispatch', '_auto_merge', 'daemon-state.json'),
+  ];
+  for (const statePath of statePaths) {
+    if (!existsSync(statePath)) continue;
+    let state;
+    try {
+      state = parseJson(readFileSync(statePath, 'utf8'), null);
+    } catch {
+      continue;
+    }
+    const backlog = state?.dirtyPrBacklog;
+    const dirtyPrCount = Number(backlog?.dirtyPrCount || 0);
+    if (!backlog || !Number.isFinite(dirtyPrCount) || dirtyPrCount <= 0) {
+      return { present: false, statePath, dirtyPrCount: 0, prs: [] };
+    }
+    const recordedAt = backlog.recordedAt || null;
+    return {
+      present: true,
+      statePath,
+      dirtyPrCount,
+      recordedAt,
+      ageMs: recordedAt ? ageMs(nowMs, recordedAt) : null,
+      prs: Array.isArray(backlog.signature) ? backlog.signature : [],
+    };
+  }
+  return { present: false, statePath: statePaths[0], dirtyPrCount: 0, prs: [] };
+}
+
+function summarizeHammerDispatchStall(hqRoot, { env = process.env, nowMs, config }) {
+  const backlog = readDirtyPrBacklogState(hqRoot, { env, nowMs });
+  const logPath = join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log');
+  const log = tailRecentLines(logPath);
+  let lastHammerDispatchAt = null;
+  const pattern = hammerDispatchPattern();
+  if (log.exists) {
+    for (const line of log.lines) {
+      if (!pattern.test(line)) continue;
+      const lineMs = parseDaemonLogTimestampMs(line);
+      if (lineMs !== null && (lastHammerDispatchAt === null || lineMs > lastHammerDispatchAt)) {
+        lastHammerDispatchAt = lineMs;
+      }
+    }
+  }
+  const lastHammerDispatchAgeMs = lastHammerDispatchAt === null
+    ? null
+    : Math.max(0, nowMs - lastHammerDispatchAt);
+  const backlogOldEnough = backlog.present && (
+    backlog.ageMs === null || backlog.ageMs >= config.hammerDispatchStallMaxAgeMs
+  );
+  const dispatchStale = lastHammerDispatchAgeMs === null
+    || lastHammerDispatchAgeMs >= config.hammerDispatchStallMaxAgeMs;
+  return {
+    active: Boolean(backlogOldEnough && dispatchStale),
+    thresholdMs: config.hammerDispatchStallMaxAgeMs,
+    backlog,
+    logPath,
+    logExists: log.exists,
+    lastHammerDispatchAt: lastHammerDispatchAt === null ? null : new Date(lastHammerDispatchAt).toISOString(),
+    lastHammerDispatchAgeMs,
+  };
+}
+
 function summarizeDagAutowalkHealth({ env, hqRoot, nowMs, config, launchd }) {
   const owner = launchd.owner;
   const defaultErrLog = join(homedir(), 'Library', 'Logs', `${DEFAULT_LABEL_PREFIX}.dag-autowalk.${owner}.tick.err.log`);
@@ -2774,6 +2871,26 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }));
   }
 
+  if (snapshot.hammerDispatchStall?.active) {
+    const backlog = snapshot.hammerDispatchStall.backlog || {};
+    const thresholdMinutes = Math.round(snapshot.hammerDispatchStall.thresholdMs / 60000);
+    findings.push(buildFinding({
+      code: 'review:hammer_dispatch_stalled_with_conflicts',
+      tier: 'page',
+      subject: `${backlog.dirtyPrCount || 0} conflicted PR(s) exist with no recent hammer dispatch`,
+      message: `Auto-merge state reports ${backlog.dirtyPrCount || 0} conflicted/dirty PR(s), but the dispatch daemon log has no hammer spawn within ${thresholdMinutes}m.`,
+      evidence: [
+        `auto-merge state ${backlog.statePath || 'unknown'} recordedAt=${backlog.recordedAt || 'unknown'}`,
+        `dispatch log ${snapshot.hammerDispatchStall.logPath} lastHammerDispatchAt=${snapshot.hammerDispatchStall.lastHammerDispatchAt || 'none'}`,
+        ...(backlog.prs || []).slice(0, 10),
+      ],
+      recommendedAction:
+        'Inspect AMA eligibility misses and hammer dispatch ownership. A conflicted PR should route to the capped hammer for rebase, not retain ownership indefinitely.',
+      observedAt,
+      details: snapshot.hammerDispatchStall,
+    }));
+  }
+
   if (!snapshot.dagAutowalk.healthy && !snapshot.dagAutowalk.probeFailure) {
     findings.push(buildFinding({
       code: 'review:dag_autowalk_launchd_unhealthy',
@@ -2919,6 +3036,7 @@ function collectReviewPipelineHealth({
     const dispatchSpawnFailures = config.hostChecksEnabled
       ? summarizeDispatchSpawnFailures(hqRoot, { nowMs, config })
       : { logPath: join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log'), logExists: false, logAgeMs: null, windowMs: config.dispatchSpawnFailureWindowMs, matches: [] };
+    const hammerDispatchStall = summarizeHammerDispatchStall(hqRoot, { env, nowMs, config });
     // TREC-01: both `review:queue_starvation` and `review:terminal_but_unmerged`
     // select their population from `reviewed_prs.pr_state`, so their findings
     // are only as true as the mirror. This reads the lifecycle sweep's
@@ -2962,6 +3080,7 @@ function collectReviewPipelineHealth({
       ttm,
       launchd,
       dispatchSpawnFailures,
+      hammerDispatchStall,
       dagAutowalk,
     };
     return {
@@ -3074,6 +3193,7 @@ function renderReviewPipelinePrometheus(snapshot) {
     }, service.loaded ? 1 : 0);
   }
   pushMetric('review_pipeline_dispatch_spawn_failures', {}, snapshot.dispatchSpawnFailures?.matches?.length || 0);
+  pushMetric('review_pipeline_hammer_dispatch_stalled', {}, snapshot.hammerDispatchStall?.active ? 1 : 0);
   pushMetric('review_pipeline_dag_autowalk_healthy', {}, snapshot.dagAutowalk?.healthy ? 1 : 0);
   pushMetric('review_pipeline_ttm_minutes', { quantile: '0.5' }, snapshot.ttm?.rollup?.medianTimeToMergeMinutes || 0);
   pushMetric('review_pipeline_ttm_minutes', { quantile: '0.9' }, snapshot.ttm?.rollup?.p90TimeToMergeMinutes || 0);

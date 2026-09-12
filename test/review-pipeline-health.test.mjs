@@ -1638,6 +1638,50 @@ test('dispatch spawn failure log lines are suppressed when stale or self-recover
   assert.equal(stale.dispatchSpawnFailures.matches.length, 0);
 });
 
+test('AMAGAP-01: conflicted backlog with no recent hammer dispatch raises a health finding', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const stateDir = path.join(hqRoot, 'dispatch', '_auto_merge-fixture');
+  const dispatchLog = path.join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log');
+  mkdirSync(stateDir, { recursive: true });
+  mkdirSync(path.dirname(dispatchLog), { recursive: true });
+  writeFileSync(path.join(stateDir, 'daemon-state.json'), `${JSON.stringify({
+    dirtyPrBacklog: {
+      dirtyPrCount: 2,
+      recordedAt: '2026-05-25T15:00:00.000Z',
+      signature: ['laceyenterprises/agent-os#6651@aaa', 'laceyenterprises/agent-os#6666@bbb'],
+    },
+  }, null, 2)}\n`);
+  writeFileSync(dispatchLog, '2026-05-25 14:30:00,000 INFO worker_class=codex spawned\n');
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot,
+    now: () => new Date(NOW),
+    env: { USER: 'fixture' },
+    config: { hammerDispatchStallMaxAgeMs: 60 * 60 * 1000 },
+  });
+
+  assert.ok(findingCodes(snapshot).includes('review:hammer_dispatch_stalled_with_conflicts'));
+  assert.equal(snapshot.hammerDispatchStall.active, true);
+  assert.equal(snapshot.hammerDispatchStall.backlog.dirtyPrCount, 2);
+  assert.match(renderReviewPipelinePrometheus(snapshot), /review_pipeline_hammer_dispatch_stalled 1/);
+
+  writeFileSync(
+    dispatchLog,
+    '2026-05-25 17:45:00,000 INFO cwp.daemon spawned lrq_1 pid=123 worker_class=hammer\n',
+  );
+  const recovered = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot,
+    now: () => new Date(NOW),
+    env: { USER: 'fixture' },
+    config: { hammerDispatchStallMaxAgeMs: 60 * 60 * 1000 },
+  });
+  assert.ok(!findingCodes(recovered).includes('review:hammer_dispatch_stalled_with_conflicts'));
+  assert.equal(recovered.hammerDispatchStall.active, false);
+});
+
 test('dispatch spawn classifier ignores op cache backoff and successful daemon spawns', () => {
   const rootDir = tempRoot();
   const hqRoot = tempRoot();

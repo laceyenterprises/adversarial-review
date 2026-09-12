@@ -2150,6 +2150,59 @@ test('stale dispatched/null closer lease is terminalized instead of held forever
   assert.equal(lease.terminalOutcome, 'failed-without-merge');
 });
 
+test('AMAGAP-01: unknown dispatch status releases when ledger says LRQ is terminal failed', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-terminal-lrq-release-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const launchRequestStatusCalls = [];
+  updateAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD }, () => ({
+    schemaVersion: 1,
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: REVIEWED_HEAD,
+    state: 'dispatched',
+    launchRequestId: 'lrq_terminal_failed',
+    dispatchId: 'dispatch-terminal-failed',
+    workerClass: 'hammer',
+    lastObservedStatus: 'unknown',
+    lastObservedAt: '2026-07-06T12:00:00Z',
+    dispatchedAt: '2026-07-06T12:00:00Z',
+  }));
+
+  const deps = hammerDispatchDeps({
+    execFileImpl: async (cmd, args) => {
+      deps.execCalls.push({ cmd, args });
+      if (args[0] === 'dispatch' && args[1] === 'status') {
+        return { stdout: JSON.stringify({ status: 'unknown' }), stderr: '' };
+      }
+      return { stdout: JSON.stringify({ dispatchId: 'dispatch_retry', launchRequestId: 'lrq_retry' }), stderr: '' };
+    },
+    readLaunchRequestStatusImpl: async (args) => {
+      launchRequestStatusCalls.push(args);
+      return {
+        ok: true,
+        row: { launch_request_id: 'lrq_terminal_failed', status: 'failed' },
+      };
+    },
+  });
+
+  const result = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir),
+    ...deps,
+  });
+
+  assert.equal(result.dispatched, true);
+  assert.equal(result.launchRequestId, 'lrq_retry');
+  assert.equal(launchRequestStatusCalls.length, 1);
+  assert.equal(launchRequestStatusCalls[0].launchRequestId, 'lrq_terminal_failed');
+  const record = readAmaCloserDispatchRecord(rootDir, {
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: REVIEWED_HEAD,
+  });
+  assert.equal(record.launchRequestId, 'lrq_retry');
+  assert.equal(record.lastObservedStatus, 'starting');
+});
+
 test('active AMA closer dispatches reserve their repo PR until terminal status', (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'hammer-active-dispatches-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

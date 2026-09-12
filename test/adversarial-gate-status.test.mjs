@@ -25,6 +25,7 @@ import {
   resolveMergeAgentCoexistenceForWatcher,
   shouldInlineFinalHammerAfterReview,
 } from '../src/watcher.mjs';
+import { DEFAULT_AMA_CLOSURE_OPERATION_TIMEOUT_MS } from '../src/ama-closure-orchestration.mjs';
 import { resetConfigCache } from '../src/config-loader.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { HANDOFF_EVENTS } from '../src/handoff-telemetry.mjs';
@@ -1808,6 +1809,36 @@ test('resolveMergeAgentCoexistenceForWatcher treats eligible clean AMA dispatch 
 
   assert.equal(decision.outcome, 'ama-dispatched');
   assert.notEqual(decision.outcome, 'await-operator');
+});
+
+test('AMAGAP-01: resolveMergeAgentCoexistenceForWatcher supplies a default bounded AMA operation timeout', async () => {
+  let observedTimeout = null;
+  await resolveMergeAgentCoexistenceForWatcher({
+    reviewStateRow: makeReviewRow(),
+    dispatchJob: {
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 53,
+      headSha: 'abc123',
+      prUpdatedAt: '2026-05-07T12:05:00.000Z',
+    },
+    candidate: {
+      headSha: 'abc123',
+      mergeStateStatus: 'CLEAN',
+      prUpdatedAt: '2026-05-07T12:05:00.000Z',
+    },
+    labelNames: [],
+    mergeAgentRequestEvent: null,
+    repoPath: 'laceyenterprises/adversarial-review',
+    prNumber: 53,
+    currentRevisionRef: 'abc123',
+    logger: { log() {}, warn() {}, error() {} },
+    maybeDispatchAmaClosureForImpl: async ({ operationTimeoutMs }) => {
+      observedTimeout = operationTimeoutMs;
+      return { amaEnabled: true, dispatched: false, skipMergeAgent: true, reason: 'not-eligible' };
+    },
+  });
+
+  assert.equal(observedTimeout, DEFAULT_AMA_CLOSURE_OPERATION_TIMEOUT_MS);
 });
 
 test('RVCOEX-01: resolveMergeAgentCoexistenceForWatcher returns a named result on internal AMA operation timeout', async () => {

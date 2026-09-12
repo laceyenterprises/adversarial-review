@@ -918,7 +918,14 @@ function recordReviewLatencyEvent(db, {
       WHERE event_type = ?
         AND (
           (? IS NOT NULL AND idempotency_key = ?)
-          OR (? IS NULL AND repo IS ? AND pr_number IS ? AND at = ?)
+          OR (
+            ? IS NULL
+            AND repo IS ?
+            AND pr_number IS ?
+            AND domain_id IS ?
+            AND subject_external_id IS ?
+            AND at = ?
+          )
         )
       ORDER BY event_id DESC
       LIMIT 1`
@@ -929,6 +936,8 @@ function recordReviewLatencyEvent(db, {
     idempotencyKey || null,
     normalizedRepo,
     Number.isInteger(normalizedPrNumber) ? normalizedPrNumber : null,
+    domainId || null,
+    subjectExternalId || null,
     normalizedAt
   ) || null;
 }

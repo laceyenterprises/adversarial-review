@@ -266,8 +266,14 @@ function addReviewRowInferredEvents(db, subjects, { sinceIso }) {
             pr_state,
             failure_message
        FROM reviewed_prs
-      WHERE COALESCE(reviewed_at, rereview_requested_at, last_attempted_at, posted_at, failed_at, merged_at) >= ?`,
-    [sinceIso]
+      WHERE reviewed_at >= ?
+         OR rereview_requested_at >= ?
+         OR last_attempted_at >= ?
+         OR posted_at >= ?
+         OR failed_at >= ?
+         OR reviewer_started_at >= ?
+         OR merged_at >= ?`,
+    [sinceIso, sinceIso, sinceIso, sinceIso, sinceIso, sinceIso, sinceIso]
   );
   for (const row of rows) {
     const repo = row.repo;
@@ -389,8 +395,10 @@ function addReviewerPassInferredEvents(db, subjects, { sinceIso }) {
             body_captured_at,
             metadata_json
        FROM reviewer_passes
-      WHERE COALESCE(started_at, ended_at, body_captured_at) >= ?`,
-    [sinceIso]
+      WHERE started_at >= ?
+         OR ended_at >= ?
+         OR body_captured_at >= ?`,
+    [sinceIso, sinceIso, sinceIso]
   );
   for (const row of rows) {
     const metadata = parseJson(row.metadata_json, {});
@@ -503,7 +511,10 @@ function addFollowUpInferredEvents(rootDir, subjects, { sinceMs }) {
     const prNumber = Number(job.prNumber);
     if (!repo || !Number.isInteger(prNumber)) continue;
     const createdAt = job.createdAt || new Date(entry.stat.birthtimeMs || entry.stat.mtimeMs).toISOString();
-    if ((toMs(createdAt) || 0) < sinceMs) continue;
+    const stoppedAt = job.stoppedAt || job.remediationPlan?.stop?.stoppedAt || createdAt;
+    const createdAtMs = toMs(createdAt) || 0;
+    const stoppedAtMs = toMs(stoppedAt) || 0;
+    if (createdAtMs < sinceMs && stoppedAtMs < sinceMs) continue;
     count += 1;
     addSubjectEvent(subjects, {
       repo,
@@ -519,7 +530,6 @@ function addFollowUpInferredEvents(rootDir, subjects, { sinceMs }) {
       },
     });
     if (isCleanVerdictJob(job)) {
-      const stoppedAt = job.stoppedAt || job.remediationPlan?.stop?.stoppedAt || createdAt;
       addSubjectEvent(subjects, {
         repo,
         prNumber,

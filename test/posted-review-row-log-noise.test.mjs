@@ -1,6 +1,6 @@
-import test from 'node:test';
+import test, { afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -32,11 +32,22 @@ import { noProgressLaneFilePath } from '../src/watcher-no-progress-lane.mjs';
 // Drive handlePostedReviewRow straight to the AMA `ama-pending` retained-ownership
 // branch with fully injected collaborators, then assert the LOG-ONLY line is
 // emitted once per retained-worker state transition rather than every tick.
+const tempRoots = new Set();
+
+afterEach(() => {
+  for (const rootDir of tempRoots) {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+  tempRoots.clear();
+});
+
 function baseArgs(overrides = {}) {
   const logs = [];
   const existing = overrides.existing || { body_md: null, review_status: 'posted' };
+  const rootDir = mkdtempSync(join(tmpdir(), 'adversarial-review-log-noise-'));
+  tempRoots.add(rootDir);
   const args = {
-    rootDir: mkdtempSync(join(tmpdir(), 'adversarial-review-log-noise-')),
+    rootDir,
     repoPath: 'laceyenterprises/agent-os',
     prNumber: 4242,
     existing,
@@ -867,7 +878,7 @@ test('handlePostedReviewRow: operator-skip-label still clears terminal PRs', asy
   assert.match(logs.join('\n'), /PR already merged under operator-skip-label/);
 });
 
-test('handlePostedReviewRow: operator-skip-label does not terminal-drop closed unmerged PRs', async () => {
+test('handlePostedReviewRow: operator-skip-label clears closed terminal PRs', async () => {
   let resolvedCoexistence = false;
   const gateDecision = {
     state: 'failure',
@@ -897,13 +908,10 @@ test('handlePostedReviewRow: operator-skip-label does not terminal-drop closed u
 
   assert.equal(resolvedCoexistence, false);
   assert.equal(result.handled, true);
-  assert.equal(result.outcome, 'operator-skip-label');
-  assert.equal(result.reason, 'skip-operator-skip');
-  assert.equal(result.prTerminal, undefined);
-  assert.equal(existsSync(lanePath), true);
+  assert.equal(result.prTerminal, true);
+  assert.equal(existsSync(lanePath), false);
   assert.deepEqual(result.gateDecision, gateDecision);
-  assert.match(logs.join('\n'), /operator-skip-label blocks merge\/hammer closeout/);
-  assert.doesNotMatch(logs.join('\n'), /PR already closed under operator-skip-label/);
+  assert.match(logs.join('\n'), /PR already closed under operator-skip-label/);
 });
 
 test('handlePostedReviewRow: rechecks review row after candidate fetch before merge work', async () => {

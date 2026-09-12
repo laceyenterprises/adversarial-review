@@ -303,7 +303,7 @@ export async function handlePostedReviewRow({
   logger = console,
 } = {}) {
   const stepKey = `${repoPath}#${prNumber}`;
-  const rereadPostedReviewRow = (stage) => {
+  const rereadPostedReviewRow = (stage, { allowPending = false } = {}) => {
     let currentRow;
     try {
       currentRow = currentReviewRowReader(rootDir, { repo: repoPath, prNumber }) || null;
@@ -324,7 +324,7 @@ export async function handlePostedReviewRow({
     }
 
     const reviewStatus = normalizeReviewStatus(currentRow);
-    if (reviewStatus !== 'posted') {
+    if (reviewStatus !== 'posted' && !(allowPending && reviewStatus === 'pending')) {
       const statusHint = reviewStatus || 'missing';
       logger?.log?.(
         `[watcher] posted-review handler skipped for ${repoPath}#${prNumber}: ` +
@@ -343,14 +343,35 @@ export async function handlePostedReviewRow({
     return { ok: true, row: currentRow };
   };
 
-  const initialReviewState = rereadPostedReviewRow('projectGateStatusSafe');
+  const initialReviewState = rereadPostedReviewRow('projectGateStatusSafe', { allowPending: true });
   if (!initialReviewState.ok) return initialReviewState.result;
   existing = initialReviewState.row;
 
   const gateProjection = await timePostedReviewStep(
     'projectGateStatusSafe', stepKey, logger, () => projectGateStatusSafe(existing),
   );
-  const gateDecision = gateProjection?.decision || null;
+  let gateDecision = gateProjection?.decision || null;
+
+  const gateBlocksMergeAction = (decision) =>
+    decision?.state && decision.state !== 'success' && decision.reason !== 'operator-skip-label';
+  if (gateBlocksMergeAction(gateDecision)) {
+    logger?.log?.(
+      `[watcher] posted-review handler held for ${repoPath}#${prNumber}: ` +
+        `adversarial gate is ${gateDecision.state} (${gateDecision.reason || 'unknown'})`,
+    );
+    return {
+      handled: true,
+      outcome: 'adversarial-gate-not-satisfied',
+      reason: gateDecision.reason || 'adversarial-gate-not-satisfied',
+      gateDecision,
+      amaClosureResult: {
+        dispatched: false,
+        skipMergeAgent: true,
+        reason: gateDecision.reason || 'adversarial-gate-not-satisfied',
+        namedReason: gateDecision.reason || 'adversarial-gate-not-satisfied',
+      },
+    };
+  }
 
   try {
     const latestPostedReviewBody = latestPostedReviewBodyFinder(rootDir, { repo: repoPath, prNumber });
@@ -449,11 +470,38 @@ export async function handlePostedReviewRow({
         },
       };
     }
-    const postCandidateReviewState = rereadPostedReviewRow('resolveMergeAgentCoexistence');
+    const postCandidateReviewState = rereadPostedReviewRow('resolveMergeAgentCoexistence', {
+      allowPending: true,
+    });
     if (!postCandidateReviewState.ok) {
       return { ...postCandidateReviewState.result, gateDecision: gateProjection?.decision || null };
     }
     existing = postCandidateReviewState.row;
+    const refreshedGateProjection = await timePostedReviewStep(
+      'projectGateStatusSafe-after-candidate',
+      stepKey,
+      logger,
+      () => projectGateStatusSafe(existing),
+    );
+    gateDecision = refreshedGateProjection?.decision || gateDecision;
+    if (gateBlocksMergeAction(gateDecision)) {
+      logger?.log?.(
+        `[watcher] posted-review handler held for ${repoPath}#${prNumber}: ` +
+          `adversarial gate changed to ${gateDecision.state} (${gateDecision.reason || 'unknown'})`,
+      );
+      return {
+        handled: true,
+        outcome: 'adversarial-gate-not-satisfied',
+        reason: gateDecision.reason || 'adversarial-gate-not-satisfied',
+        gateDecision,
+        amaClosureResult: {
+          dispatched: false,
+          skipMergeAgent: true,
+          reason: gateDecision.reason || 'adversarial-gate-not-satisfied',
+          namedReason: gateDecision.reason || 'adversarial-gate-not-satisfied',
+        },
+      };
+    }
     operatorApprovalEvent = operatorApprovalEvent ?? candidate?.operatorApprovalEvent ?? null;
     mergeAgentRequestEvent = mergeAgentRequestEvent ?? candidate?.mergeAgentRequestEvent ?? null;
     const dispatchJob = buildMergeAgentDispatchJobImpl(rootDir, candidate, { reviewStateDb: db });

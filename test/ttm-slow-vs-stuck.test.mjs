@@ -343,6 +343,35 @@ test('a terminal-clean verdict that cannot merge is stuck regardless of elapsed 
   }
 });
 
+test('rollup separates terminal-clean rows blocked by an unanswered rereview queue', () => {
+  const db = openDb();
+  try {
+    seedMergeDistribution(db, { baseMinutes: 400, perRoundMinutes: 100 });
+    insertPr(db, {
+      prNumber: 9015,
+      reviewedAt: iso(120),
+      reviewStatus: 'pending',
+      postedAt: iso(60),
+      rereviewRequestedAt: iso(45),
+    });
+    insertPass(db, {
+      prNumber: 9015,
+      attemptNumber: 2,
+      passKind: 'rereview',
+      startedAt: iso(75),
+      endedAt: iso(60),
+      verdict: 'approved',
+    });
+
+    const result = evaluate(db);
+    assert.deepEqual(flagKinds(result, 9015), ['rereview_unanswered', 'terminal_but_unmerged']);
+    assert.equal(result.rollup.terminalButUnmergedOpenCount, 1);
+    assert.equal(result.rollup.terminalCleanRereviewBlockedOpenCount, 1);
+  } finally {
+    db.close();
+  }
+});
+
 // ── 4. Lease/gate deadlock => STUCK ──────────────────────────────────────
 
 test('a reviewer lease that expired while the row still claims a review is stuck', () => {

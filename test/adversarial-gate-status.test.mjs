@@ -505,6 +505,64 @@ test('pickAdversarialGateStatus keeps PR #53 queued-rereview shape pending until
   assert.match(decision.description, /queued re-review/i);
 });
 
+test('pickAdversarialGateStatus lets a clean settled verdict satisfy a queued head-change rereview', () => {
+  const decision = pickAdversarialGateStatus({
+    headSha: 'rebased-head',
+    reviewRow: makeReviewRow({
+      review_status: 'pending',
+      rereview_reason: 'auto-refresh: posted review on stale head old-head; current head is rebased-head',
+    }),
+    latestJob: makeJob({
+      revisionRef: 'rebased-head',
+      reviewBody: [
+        '## Summary',
+        'Clean final review.',
+        '',
+        '## Blocking issues',
+        '- None.',
+        '',
+        '## Verdict',
+        'Comment only',
+      ].join('\n'),
+      reReview: {
+        requested: true,
+      },
+    }),
+  });
+
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'review-settled-head-change-rereview');
+});
+
+test('pickAdversarialGateStatus still blocks a queued findings rereview with a clean-looking body', () => {
+  const decision = pickAdversarialGateStatus({
+    headSha: 'remediated-head',
+    reviewRow: makeReviewRow({
+      review_status: 'pending',
+      rereview_reason: 'Remediation applied and ready for another adversarial review pass.',
+    }),
+    latestJob: makeJob({
+      revisionRef: 'remediated-head',
+      reviewBody: [
+        '## Summary',
+        'Looks clean, but this rereview was requested to validate fixed findings.',
+        '',
+        '## Blocking issues',
+        '- None.',
+        '',
+        '## Verdict',
+        'Comment only',
+      ].join('\n'),
+      reReview: {
+        requested: true,
+      },
+    }),
+  });
+
+  assert.equal(decision.state, 'pending');
+  assert.equal(decision.reason, 'rereview-queued');
+});
+
 test('pickAdversarialGateStatus keeps fast-merge skipped rows pending', () => {
   const decision = pickAdversarialGateStatus({
     reviewRow: makeReviewRow({
@@ -1043,6 +1101,123 @@ test('posted watcher rows project the adversarial gate before merge-agent dispat
     assert.ok(ghCalls[0].args.includes(`repos/laceyenterprises/adversarial-review/statuses/${headSha}`));
     assert.ok(ghCalls[0].args.includes('state=success'));
     assert.ok(ghCalls[0].args.includes(`context=${ADVERSARIAL_GATE_CONTEXT}`));
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('posted watcher handler uses a fresher pending head-change rereview row when the settled verdict is clean', async () => {
+  const repo = 'laceyenterprises/adversarial-review';
+  const prNumber = 6667;
+  const headSha = 'rebased-clean-head';
+  const reviewRow = makeReviewRow({
+    repo,
+    pr_number: prNumber,
+    review_status: 'pending',
+    rereview_reason: 'auto-refresh: posted review on stale head old-head; current head is rebased-clean-head',
+  });
+  const dispatches = [];
+  const fetches = [];
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'posted-review-pending-clean-'));
+  try {
+    const result = await withMergeAuthorityEnabled(false, () => handlePostedReviewRow({
+      rootDir,
+      repoPath: repo,
+      prNumber,
+      existing: makeReviewRow({ repo, pr_number: prNumber }),
+      currentReviewRowReader: () => reviewRow,
+      projectGateStatusSafe: async (row) => ({
+        decision: pickAdversarialGateStatus({
+          headSha,
+          reviewRow: row,
+          latestJob: makeJob({
+            repo,
+            prNumber,
+            revisionRef: headSha,
+            reviewBody: [
+              '## Summary',
+              'Clean final review.',
+              '',
+              '## Blocking issues',
+              '- None.',
+              '',
+              '## Verdict',
+              'Comment only',
+            ].join('\n'),
+            reReview: { requested: true },
+          }),
+        }),
+      }),
+      fetchMergeAgentCandidateImpl: async () => {
+        fetches.push(prNumber);
+        return { repo, prNumber, headSha };
+      },
+      buildMergeAgentDispatchJobImpl: (_rootDir, candidate) => candidate,
+      dispatchMergeAgentForPRImpl: async (job) => {
+        dispatches.push(job);
+        return { decision: 'skip-test' };
+      },
+      resolveMergeAgentCoexistenceForWatcherImpl: async () => ({
+        outcome: 'dispatch-merge-agent',
+        dispatchEnv: null,
+      }),
+      logger: {
+        log() {},
+        error() {},
+      },
+    }));
+
+    assert.equal(result.handled, true);
+    assert.deepEqual(fetches, [prNumber]);
+    assert.equal(dispatches.length, 1);
+    assert.equal(result.gateDecision.reason, 'review-settled-head-change-rereview');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('posted watcher handler holds a fresher pending findings rereview row', async () => {
+  const repo = 'laceyenterprises/adversarial-review';
+  const prNumber = 6670;
+  const reviewRow = makeReviewRow({
+    repo,
+    pr_number: prNumber,
+    review_status: 'pending',
+    rereview_reason: 'Remediation applied and ready for another adversarial review pass.',
+  });
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'posted-review-pending-findings-'));
+  try {
+    const result = await handlePostedReviewRow({
+      rootDir,
+      repoPath: repo,
+      prNumber,
+      existing: makeReviewRow({ repo, pr_number: prNumber }),
+      currentReviewRowReader: () => reviewRow,
+      projectGateStatusSafe: async (row) => ({
+        decision: pickAdversarialGateStatus({
+          headSha: 'remediated-head',
+          reviewRow: row,
+          latestJob: makeJob({
+            repo,
+            prNumber,
+            revisionRef: 'remediated-head',
+            reReview: { requested: true },
+          }),
+        }),
+      }),
+      fetchMergeAgentCandidateImpl: async () => {
+        throw new Error('must not fetch merge candidate while gate is pending');
+      },
+      logger: {
+        log() {},
+        error() {},
+      },
+    });
+
+    assert.equal(result.handled, true);
+    assert.equal(result.outcome, 'adversarial-gate-not-satisfied');
+    assert.equal(result.gateDecision.state, 'pending');
+    assert.equal(result.gateDecision.reason, 'rereview-queued');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

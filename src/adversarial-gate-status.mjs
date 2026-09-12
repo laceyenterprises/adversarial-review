@@ -330,6 +330,35 @@ function isCompletedGeminiQuotaFallbackJob(job, status) {
   return fallbackReviewReasonForJob(job) === 'primary-reviewer-quota-capped';
 }
 
+function isHeadChangeRereviewReason(reason) {
+  const normalized = normalizeComparableString(reason);
+  return (
+    normalized.startsWith('auto-refresh: posted review on stale head')
+    || normalized.startsWith('fsr-06b: trailer-only head move detected')
+  );
+}
+
+function followUpJobRevisionRef(job) {
+  return String(
+    job?.revisionRef
+      ?? job?.currentRevisionRef
+      ?? job?.subjectRef?.revisionRef
+      ?? ''
+  ).trim() || null;
+}
+
+function completedHeadChangeRereviewIsSettledClean({ latestJob, latestJobStatus, reviewRow, headSha }) {
+  if (latestJobStatus !== 'completed') return false;
+  if (latestJob?.reReview?.requested !== true) return false;
+  if (!isHeadChangeRereviewReason(reviewRow?.rereview_reason)) return false;
+  const jobHead = followUpJobRevisionRef(latestJob);
+  if (headSha && jobHead && String(jobHead) !== String(headSha)) return false;
+  const verdict = normalizeEffectiveReviewVerdict(latestJob.reviewBody);
+  if (verdict !== 'comment-only' && verdict !== 'approved') return false;
+  const blocking = classifyBlockingFindings(latestJob.reviewBody, { lastVerdict: verdict || null });
+  return blocking.state === 'known' && blocking.count === 0;
+}
+
 function resolveSettledReviewVerdict(
   rootDir,
   {
@@ -571,6 +600,13 @@ function pickAdversarialGateStatus({
   const latestJobStatus = normalizeFollowUpJobStatus(latestJob?.status);
 
   if (reviewStatus === 'pending') {
+    if (completedHeadChangeRereviewIsSettledClean({ latestJob, latestJobStatus, reviewRow, headSha })) {
+      return decide(
+        'success',
+        'Non-blocking adversarial review is settled; queued head-change revalidation is advisory.',
+        'review-settled-head-change-rereview'
+      );
+    }
     if (latestJobStatus === 'completed' && latestJob?.reReview?.requested === true) {
       return decide('pending', 'Queued re-review has not posted yet.', 'rereview-queued');
     }

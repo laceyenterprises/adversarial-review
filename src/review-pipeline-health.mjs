@@ -21,6 +21,8 @@ import {
   readPrTerminalReconcileState,
 } from './pr-terminal-reconcile.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
+import { FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT } from './review-queue-depth.mjs';
+import { SQL_SELECT_OPEN_AWAITING_CURRENT_FIRST_PASS_REVIEW } from './review-state-statements.mjs';
 
 const DEFAULT_REVIEWER_DEATH_RATE_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_REVIEWER_DEATH_RATE_THRESHOLD = 0.5;
@@ -1265,15 +1267,12 @@ function summarizeReviewerDegradation(rootDir, db, { nowMs }) {
 function summarizeFirstPassQueue(db, { nowMs }) {
   const rows = safeAll(
     db,
-    `SELECT repo, pr_number, reviewed_at, rereview_requested_at, last_attempted_at,
-            failed_at, failure_message, review_attempts
-       FROM reviewed_prs
-      WHERE pr_state = 'open'
-        AND review_status = 'pending'`
+    SQL_SELECT_OPEN_AWAITING_CURRENT_FIRST_PASS_REVIEW
   );
   let oldest = null;
   let failedCount = 0;
   for (const row of rows) {
+    if (row.review_status !== 'pending') continue;
     const pendingSince = row.rereview_requested_at || row.reviewed_at || row.last_attempted_at;
     const pendingAgeMs = ageMs(nowMs, pendingSince);
     if (pendingAgeMs === null) continue;
@@ -1301,6 +1300,7 @@ function summarizeFirstPassQueue(db, { nowMs }) {
   }
   return {
     depth: rows.length,
+    depthUnit: FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT,
     failedCount,
     oldest,
   };
@@ -2834,7 +2834,7 @@ function collectReviewPipelineHealth({
         };
     const firstPassQueue = db
       ? summarizeFirstPassQueue(db, { nowMs })
-      : { depth: 0, oldest: null };
+      : { depth: 0, depthUnit: FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT, oldest: null };
     const ciBlockedRereviews = db
       ? summarizeCiBlockedRereviews(db, { nowMs })
       : { count: 0, oldest: null, prs: [] };

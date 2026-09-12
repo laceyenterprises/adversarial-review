@@ -931,8 +931,8 @@ test('terminal reconciliation refuses writable reviews.db when caller uid differ
 });
 
 test('an in-flight review does not count as starvation', () => {
-  // `summarizeFirstPassQueue` selects only review_status='pending'. A review that
-  // is actually RUNNING must never trip the alarm, or a 10m bar would page on
+  // Current-head depth includes in-flight work, but a review that is actually
+  // RUNNING must never trip the starvation alarm, or a 10m bar would page on
   // every slow-but-healthy review.
   const rootDir = tempRoot();
   insertReviewRow(rootDir, {
@@ -942,7 +942,7 @@ test('an in-flight review does not count as starvation', () => {
   });
   const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
   assert.ok(!findingCodes(snapshot).includes('review:queue_starvation'));
-  assert.equal(snapshot.firstPassQueue.depth, 0);
+  assert.equal(snapshot.firstPassQueue.depth, 1);
 });
 
 test('CI-blocked rereviews do not count as starvation and get their own finding', () => {

@@ -16,6 +16,7 @@ import {
   BACKFILL_UNROUTABLE_BOT_TO_ARGUS_QUEUED_SQL,
   MARK_ARGUS_SECURITY_QUEUED_SQL,
   RECORD_ARGUS_CLASSIFIED_HEAD_SQL,
+  SQL_COUNT_OPEN_AWAITING_CURRENT_FIRST_PASS_REVIEW,
   SELECT_OPEN_UNROUTABLE_BOT_ROWS_SQL,
   SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW,
   prepareFinalizePendingTerminalFailure,
@@ -448,6 +449,9 @@ export const stmtLatestGenuinePostedReviewAt = db.prepare(
 export const stmtCountOpenPrsAwaitingFirstPassReview = db.prepare(
   SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW
 );
+export const stmtCountOpenPrsAwaitingCurrentFirstPassReview = db.prepare(
+  SQL_COUNT_OPEN_AWAITING_CURRENT_FIRST_PASS_REVIEW
+);
 
 // Normalize a reviewed_prs timestamp to epoch ms. SQLite CURRENT_TIMESTAMP is
 // space-separated and tz-less, and a JS toISOString() value may have lost its
@@ -495,6 +499,19 @@ export function countOpenPrsAwaitingFirstPassReview(handle = db) {
     handle === db
       ? stmtCountOpenPrsAwaitingFirstPassReview
       : handle.prepare(SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW);
+  const n = stmt.get()?.n;
+  return Number.isFinite(n) ? n : 0;
+}
+
+// Count of currently-open PRs awaiting a first-pass lane for their current head.
+// A previously posted pass for an older head does not prove the current diff was
+// reviewed, while a same-head posted pass keeps ordinary re-review churn out of
+// the first-pass spillover lever.
+export function countOpenPrsAwaitingCurrentFirstPassReview(handle = db) {
+  const stmt =
+    handle === db
+      ? stmtCountOpenPrsAwaitingCurrentFirstPassReview
+      : handle.prepare(SQL_COUNT_OPEN_AWAITING_CURRENT_FIRST_PASS_REVIEW);
   const n = stmt.get()?.n;
   return Number.isFinite(n) ? n : 0;
 }

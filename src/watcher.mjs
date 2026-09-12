@@ -139,6 +139,7 @@ import {
   stmtMarkMerged,
   stmtMarkClosed,
   latestPostedReviewAtMs,
+  countOpenPrsAwaitingCurrentFirstPassReview,
   countOpenPrsAwaitingFirstPassReview,
 } from './review-state-db.mjs';
 import {
@@ -1243,7 +1244,7 @@ async function pollOnce(
   ) || undefined;
   const reviewerMemoryPressureConfig = resolveReviewerMemoryPressureConfig();
   const reviewerDispatchCandidates = [];
-  const firstPassSpilloverController = createFirstPassSpilloverController({ rootDir: ROOT, readDepth: countOpenPrsAwaitingFirstPassReview, logger: console }); // RSP-01: disarmed unless CFG arms it
+  const firstPassSpilloverController = createFirstPassSpilloverController({ rootDir: ROOT, readDepth: countOpenPrsAwaitingCurrentFirstPassReview, logger: console }); // RSP-01: disarmed unless CFG arms it
   const postedReviewHandlers = [];
   const postReviewMaintenanceHandlers = [];
   const reviewerMemoryReservationState = { reservedMb: 0 };

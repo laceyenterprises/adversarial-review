@@ -2855,9 +2855,10 @@ function schemaV1() {
             __nullable: true,
             __min: 1,
           },
-          // RSP-01 break-glass lever. Depth, in PRs AWAITING THEIR FIRST
-          // FIRST-PASS REVIEW (open PR, `posted_at IS NULL`, review_status in
-          // pending/pending-upstream — see review-queue-depth.mjs for the exact
+          // RSP-01 break-glass lever. Depth, in PRs awaiting first-pass review
+          // for their current head (open PR, review_status in
+          // pending/pending-upstream/reviewing, no posted reviewer_passes row
+          // for revision_ref — see review-queue-depth.mjs for the exact
           // predicate and its exclusions), at or above which first-pass review
           // is permitted to spill off the cheap single reviewer class onto the
           // entitled, quota-available fallback classes.

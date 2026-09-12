@@ -2006,6 +2006,18 @@ test('health output names aborted HCP preflights and estimated reviewer minutes 
     prNumber: 6670,
     reviewerClass: 'gemini',
     reviewerModel: 'gemini',
+    passKind: 'first-pass',
+    startedAt: '2026-09-12T13:00:00.000Z',
+    endedAt: '2026-09-12T13:04:00.000Z',
+    status: 'completed',
+    metadata: {},
+  });
+  insertReviewerPass(rootDir, {
+    prNumber: 6670,
+    attemptNumber: 2,
+    reviewerClass: 'codex',
+    reviewerModel: 'gpt-5',
+    passKind: 'rereview',
     startedAt: '2026-09-12T14:13:08.000Z',
     endedAt: '2026-09-12T14:25:44.000Z',
     status: 'completed',
@@ -2017,6 +2029,8 @@ test('health output names aborted HCP preflights and estimated reviewer minutes 
   assert.equal(snapshot.hcpPreflightAborts.active, 1);
   assert.equal(snapshot.hcpPreflightAborts.reviewerMinutesLost, 12.6);
   assert.equal(snapshot.hcpPreflightAborts.examples[0].prNumber, 6670);
+  assert.equal(snapshot.hcpPreflightAborts.examples[0].reviewerModel, 'gpt-5');
+  assert.equal(snapshot.hcpPreflightAborts.examples[0].passKind, 'rereview');
   const output = renderReviewPipelinePrometheus(snapshot);
   assert.match(output, /^review_pipeline_hcp_preflight_aborted_passes 1$/m);
   assert.match(output, /^review_pipeline_hcp_preflight_aborted_reviewer_minutes_lost 12\.6$/m);

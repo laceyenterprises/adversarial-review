@@ -639,15 +639,6 @@ function safeAll(db, sql, params = []) {
   }
 }
 
-function safeGet(db, sql, params = []) {
-  try {
-    return db.prepare(sql).get(...params);
-  } catch (error) {
-    if (isMissingSchemaError(error)) return null;
-    throw error;
-  }
-}
-
 function openReviewStateReadOnlyDb(rootDir) {
   const dbPath = join(rootDir, 'data', 'reviews.db');
   if (!existsSync(dbPath)) {
@@ -1225,17 +1216,40 @@ function readHcpPreflightAbortedRows(db) {
   if (!db) return [];
   return safeAll(
     db,
-    `SELECT repo,
-            pr_number,
-            review_status,
-            failed_at,
-            last_attempted_at,
-            failure_message
+    `WITH latest_completed_pass AS (
+       SELECT repo,
+              pr_number,
+              started_at,
+              ended_at,
+              pass_kind,
+              reviewer_model,
+              ROW_NUMBER() OVER (
+                PARTITION BY repo, pr_number
+                ORDER BY ended_at DESC
+              ) AS pass_rank
+         FROM reviewer_passes
+        WHERE started_at IS NOT NULL
+          AND ended_at IS NOT NULL
+     )
+     SELECT reviewed_prs.repo,
+            reviewed_prs.pr_number,
+            reviewed_prs.review_status,
+            reviewed_prs.failed_at,
+            reviewed_prs.last_attempted_at,
+            reviewed_prs.failure_message,
+            latest_completed_pass.started_at AS pass_started_at,
+            latest_completed_pass.ended_at AS pass_ended_at,
+            latest_completed_pass.pass_kind,
+            latest_completed_pass.reviewer_model
        FROM reviewed_prs
-      WHERE COALESCE(pr_state, 'open') = 'open'
-        AND review_status IN ('pending', 'pending-upstream')
-        AND lower(COALESCE(failure_message, '')) LIKE '[hcp-unavailable]%'
-        AND lower(COALESCE(failure_message, '')) LIKE '%operation was aborted%'`
+       LEFT JOIN latest_completed_pass
+         ON latest_completed_pass.repo = reviewed_prs.repo
+        AND latest_completed_pass.pr_number = reviewed_prs.pr_number
+        AND latest_completed_pass.pass_rank = 1
+      WHERE COALESCE(reviewed_prs.pr_state, 'open') = 'open'
+        AND reviewed_prs.review_status IN ('pending', 'pending-upstream')
+        AND lower(COALESCE(reviewed_prs.failure_message, '')) LIKE '[hcp-unavailable]%'
+        AND lower(COALESCE(reviewed_prs.failure_message, '')) LIKE '%operation was aborted%'`
   );
 }
 
@@ -1244,20 +1258,8 @@ function summarizeHcpPreflightAborts(db) {
   let reviewerMinutesLost = 0;
   const examples = [];
   for (const row of rows) {
-    const pass = safeGet(
-      db,
-      `SELECT started_at, ended_at, status, pass_kind, reviewer_model
-         FROM reviewer_passes
-        WHERE repo = ?
-          AND pr_number = ?
-          AND started_at IS NOT NULL
-          AND ended_at IS NOT NULL
-        ORDER BY ended_at DESC
-        LIMIT 1`,
-      [row.repo, row.pr_number]
-    );
-    const startedMs = Date.parse(pass?.started_at || '');
-    const endedMs = Date.parse(pass?.ended_at || '');
+    const startedMs = Date.parse(row.pass_started_at || '');
+    const endedMs = Date.parse(row.pass_ended_at || '');
     const minutesLost = (
       Number.isNaN(startedMs) || Number.isNaN(endedMs) || endedMs <= startedMs
     )
@@ -1271,8 +1273,8 @@ function summarizeHcpPreflightAborts(db) {
         reviewStatus: row.review_status,
         since: row.failed_at || row.last_attempted_at || null,
         reviewerMinutesLost: Math.round(minutesLost * 10) / 10,
-        reviewerModel: pass?.reviewer_model || null,
-        passKind: pass?.pass_kind || null,
+        reviewerModel: row.reviewer_model || null,
+        passKind: row.pass_kind || null,
       });
     }
   }

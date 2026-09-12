@@ -42,6 +42,7 @@ export async function resolveLocalRepoCheckout(repoPath, hqRoot) {
 const HEAD_CLOSER_SUPPRESSION_RETRY_BACKOFF_MS = [250, 1000];
 const LOCAL_GIT_TIMEOUT_MS = 5000;
 const LOCAL_GIT_MAX_BUFFER = 1024 * 1024 * 16;
+const NON_RECURSIVE_FETCH_CONFIG = ['-c', 'fetch.recurseSubmodules=false'];
 const FULL_SHA_RE = /\b[a-f0-9]{40}\b/gi;
 const GIT_STDOUT_DIAGNOSTIC_RE = /^(warning|hint):\s/i;
 const LOCAL_GIT_TRANSIENT_SYSTEM_CODES = new Set([
@@ -218,6 +219,7 @@ export async function fetchVerifiedCommitFromLocalGit({
       );
       try {
         await runGit([
+          ...NON_RECURSIVE_FETCH_CONFIG,
           'fetch',
           '--quiet',
           '--no-tags',
@@ -241,7 +243,7 @@ export async function fetchVerifiedCommitFromLocalGit({
       }
     };
     try {
-      await runGit(['fetch', '--quiet', '--no-tags', 'origin', sha]);
+      await runGit([...NON_RECURSIVE_FETCH_CONFIG, 'fetch', '--quiet', '--no-tags', 'origin', sha]);
       return true;
     } catch (shaFetchErr) {
       if (isTransientLocalGitError(shaFetchErr)) {

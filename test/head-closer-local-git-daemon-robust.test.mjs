@@ -50,6 +50,7 @@ const HAMMER_MESSAGE = [
 const HEAD_SHA = 'e95ce0c267ede587f453925aad6ca508f6856339';
 const PARENT_SHA = '7097a3c3a0000000000000000000000000000000';
 const SECOND_PARENT_SHA = '8097a3c3a0000000000000000000000000000000';
+const NON_RECURSIVE_FETCH_PREFIX = '-c fetch.recurseSubmodules=false fetch --quiet --no-tags origin';
 
 // A fake `git` execFileImpl that answers the exact commands the local reader issues.
 function makeFakeGit({
@@ -233,6 +234,10 @@ test('fetchVerifiedCommitFromLocalGit fetches a missing commit by sha, then read
     git.calls.some((call) => call.includes(`fetch --quiet --no-tags origin ${HEAD_SHA}`)),
     'missing local object should be fetched directly by sha',
   );
+  assert.ok(
+    git.calls.some((call) => call.includes(`${NON_RECURSIVE_FETCH_PREFIX} ${HEAD_SHA}`)),
+    'local sha fetch must not recurse into optional submodules from the daemon cache',
+  );
 });
 
 test('fetchVerifiedCommitFromLocalGit retries timeout failures before treating missing-object text as fetchable', async () => {
@@ -376,6 +381,10 @@ test('fetchVerifiedCommitFromLocalGit falls back to pull-ref fetch when bare sha
   assert.ok(
     git.calls.some((call) => call.includes('fetch --quiet --no-tags origin +refs/pull/5348/head:refs/remotes/origin/pr/5348')),
     'bare sha rejection should fall back to the PR head ref',
+  );
+  assert.ok(
+    git.calls.some((call) => call.includes(`${NON_RECURSIVE_FETCH_PREFIX} +refs/pull/5348/head:refs/remotes/origin/pr/5348`)),
+    'local pull-ref fetch must not recurse into optional submodules from the daemon cache',
   );
 });
 

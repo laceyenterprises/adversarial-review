@@ -1071,13 +1071,18 @@ function summarizeReviewerAttempts(db, { nowMs, config }) {
 function summarizeReviewerCapacity(db, { nowMs, config }) {
   const cutoffMs = nowMs - config.reviewerDeathRateWindowMs;
   const cutoff = new Date(cutoffMs).toISOString();
+  const runningFreshCutoff = new Date(nowMs - REVIEWER_PASS_REAPER_TIMEOUT_MS).toISOString();
   const rows = safeAll(
     db,
     `SELECT pass_kind, started_at, ended_at, status
        FROM reviewer_passes
-      WHERE (ended_at >= ? OR ended_at IS NULL)
+      WHERE (
+          ended_at >= ?
+          OR (ended_at IS NULL AND status = 'running' AND started_at >= ?)
+        )
+        AND status != 'abandoned'
         AND pass_kind IN ('first-pass', 'rereview')`,
-    [cutoff]
+    [cutoff, runningFreshCutoff]
   );
   let totalPasses = 0;
   let firstPassPasses = 0;
@@ -1092,6 +1097,7 @@ function summarizeReviewerCapacity(db, { nowMs, config }) {
     totalPasses += 1;
     if (row.pass_kind === 'rereview') rereviewPasses += 1;
     else firstPassPasses += 1;
+    if (boundedEnd <= boundedStart) continue;
     events.push({ at: boundedStart, delta: 1 });
     events.push({ at: boundedEnd, delta: -1 });
   }

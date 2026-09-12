@@ -39,6 +39,11 @@ The Grafana dashboard lives at
   `transient-backoff` for HTTP 529/backend capacity signals, while
   `quota-exhausted` appears as `quota-hold` until the stored provider reset
   time or fallback window clears.
+- `review_pipeline_outage_active`: 1 when the outage controller is preserving
+  reviewer attempt budget for currently classified transient infrastructure
+  failures.
+- `review_pipeline_outage_attempts_not_charged`: count of current reviewer
+  failures whose attempt budget was preserved by the outage controller.
 - `review_pipeline_health_collector_up`: 1 when the collector can open
   `reviews.db` read-only, 0 when the review-state ledger is missing or
   unreadable. Page on the specific unreadable-ledger Sentinel finding for the
@@ -46,8 +51,18 @@ The Grafana dashboard lives at
   missing-ledger case or downgrade it to avoid double-paging the same incident.
 - `review_pipeline_first_pass_queue_depth`: open PRs waiting in
   `reviewed_prs.review_status='pending'`.
+- `review_pipeline_first_pass_wait_seconds`: age in seconds of the oldest
+  pending first-pass/rereview row.
 - `review_pipeline_first_pass_oldest_pending_age_seconds`: age of the oldest
   pending first-pass/rereview row.
+- `review_pipeline_rereview_capacity_share`: windowed share of live reviewer
+  passes consumed by rereviews. It carries a `window` label derived from
+  `reviewerDeathRateWindowMs`; abandoned passes and stale null-ended reviewer
+  rows do not count as capacity.
+- `review_pipeline_effective_reviewer_concurrency`: maximum overlapping live
+  reviewer passes observed inside the reviewer health window. It carries the
+  same `window` label and excludes the zombie/abandoned rows reported by
+  `review_pipeline_zombie_reviewer_passes`.
 - `review_pipeline_ci_blocked_rereviews`: open re-reviews parked at
   `review_status='ci-blocked'` because external CI failed and no remediation
   job exists to requeue. The watcher backoff-gates same-head CI rechecks for
@@ -104,6 +119,15 @@ The Grafana dashboard lives at
   and recent-log health.
 - `review_pipeline_sentinel_finding_active`: 1 when a finding code is currently
   firing, 0 after it clears.
+
+## Reviewer Lane Controls
+
+- `watcher.review_lane_first_pass_burst_limit` (default `2`, canonical env
+  `AGENT_OS_WATCHER_REVIEW_LANE_FIRST_PASS_BURST_LIMIT`) bounds first-pass
+  priority. After that many successful first-pass dispatches, a pending
+  rereview gets the next lane slot. Skipped admissions such as
+  `head-dispatch-lease-held`, `already-reviewed-head`, or
+  `memory-admission-deferred` do not spend or reset the burst budget.
 
 ## Sentinel Findings
 

@@ -445,6 +445,27 @@ test('reviewer lane gives rereview a floor after the configured first-pass burst
   assert.equal(laneState.firstPassStartsSinceRereview, 1);
 });
 
+test('reviewer lane budget is not spent by skipped rereview admissions', async () => {
+  const laneState = createReviewerLaneState({ firstPassBurstLimit: 2 });
+  laneState.firstPassStartsSinceRereview = 2;
+
+  const summary = await runBoundedReviewerDispatchQueue([
+    candidate(10, async () => ({ dispatched: false, reason: 'head-dispatch-lease-held' }), '2026-05-01T00:00:00.000Z', {
+      current: {
+        posted_at: null,
+        rereview_requested_at: '2026-05-01T00:05:00.000Z',
+      },
+    }),
+  ], {
+    maxConcurrent: 1,
+    laneState,
+    logger: { error() {}, log() {}, warn() {} },
+  });
+
+  assert.equal(summary.dispatched, 0);
+  assert.equal(laneState.firstPassStartsSinceRereview, 2);
+});
+
 test('reviewer lane state persists across single-slot drain ticks', async () => {
   const events = [];
   const laneState = createReviewerLaneState({ firstPassBurstLimit: 2 });

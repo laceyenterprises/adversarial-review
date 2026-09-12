@@ -645,6 +645,71 @@ test('collector surfaces first-pass wait, rereview share, and effective reviewer
   assert.match(output, /^review_pipeline_effective_reviewer_concurrency\{window="3600000ms"\} 2$/m);
 });
 
+test('reviewer capacity excludes abandoned and stale running passes', () => {
+  const rootDir = tempRoot();
+  insertReviewerPass(rootDir, {
+    prNumber: 960,
+    attemptNumber: 1,
+    passKind: 'first-pass',
+    status: 'abandoned',
+    startedAt: '2026-05-25T16:00:00.000Z',
+    endedAt: '2026-05-25T17:30:00.000Z',
+  });
+  insertReviewerPass(rootDir, {
+    prNumber: 961,
+    attemptNumber: 1,
+    passKind: 'rereview',
+    status: 'running',
+    startedAt: '2026-05-25T16:30:00.000Z',
+  });
+  const db = openDb(rootDir);
+  try {
+    db.prepare('UPDATE reviewer_passes SET ended_at = NULL WHERE pr_number = ?').run(961);
+  } finally {
+    db.close();
+  }
+  insertReviewerPass(rootDir, {
+    prNumber: 962,
+    attemptNumber: 1,
+    passKind: 'first-pass',
+    status: 'completed',
+    startedAt: '2026-05-25T17:50:00.000Z',
+    endedAt: '2026-05-25T17:55:00.000Z',
+  });
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+
+  assert.equal(snapshot.reviewerCapacity.totalPasses, 1);
+  assert.equal(snapshot.reviewerCapacity.firstPassPasses, 1);
+  assert.equal(snapshot.reviewerCapacity.rereviewPasses, 0);
+  assert.equal(snapshot.reviewerCapacity.effectiveConcurrency, 1);
+});
+
+test('reviewer capacity skips degenerate intervals without leaking concurrency', () => {
+  const rootDir = tempRoot();
+  insertReviewerPass(rootDir, {
+    prNumber: 963,
+    attemptNumber: 1,
+    passKind: 'first-pass',
+    status: 'completed',
+    startedAt: '2026-05-25T17:10:00.000Z',
+    endedAt: '2026-05-25T17:10:00.000Z',
+  });
+  insertReviewerPass(rootDir, {
+    prNumber: 964,
+    attemptNumber: 1,
+    passKind: 'first-pass',
+    status: 'completed',
+    startedAt: '2026-05-25T17:20:00.000Z',
+    endedAt: '2026-05-25T17:25:00.000Z',
+  });
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+
+  assert.equal(snapshot.reviewerCapacity.totalPasses, 2);
+  assert.equal(snapshot.reviewerCapacity.effectiveConcurrency, 1);
+});
+
 test('queue starvation default threshold is 10m, not 30m', () => {
   // At the old 30m default the alarm was silent through a visible pile-up: 11
   // open PRs, first-pass depth 4, oldest pending 19.4m after its reviewer exited

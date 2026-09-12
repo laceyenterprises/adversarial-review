@@ -256,9 +256,11 @@ function reviewerDispatchSortTimeMs(candidate) {
 // load: first-pass work is the scarce, latency-sensitive product, and re-review
 // churn was crowding it out.
 //
-// Ordering first-pass ahead of re-review is strictly a priority change: nothing
+// Ordering first-pass ahead of re-review is a bounded priority change: nothing
 // is dropped, and within each tier the previous oldest-first fairness is
-// preserved exactly.
+// preserved exactly. When persistent lane state is enabled,
+// watcher.review_lane_first_pass_burst_limit gives rereviews a floor after the
+// configured number of real first-pass dispatches.
 function reviewerDispatchIsFirstPass(candidate) {
   const current = candidate?.current;
   if (!current) return true;
@@ -712,15 +714,15 @@ async function runBoundedReviewerDispatchQueue(candidates, {
       && (entry = nextStartableEntry()) !== null
     ) {
       entry.started = true;
-      recordReviewerLaneStart(entry.candidate, activeLaneState);
-      const promise = start(entry.candidate);
+      const startedEntry = entry;
+      const promise = start(startedEntry.candidate);
       if (typeof onCandidateStarted === 'function') {
         try {
-          onCandidateStarted({ candidate: entry.candidate, promise });
+          onCandidateStarted({ candidate: startedEntry.candidate, promise });
         } catch (err) {
           logger?.warn?.(
             `[watcher] reviewer dispatch start observer failed for ` +
-              `${entry.candidate?.repoPath || 'unknown'}#${entry.candidate?.prNumber || 'unknown'}: ` +
+              `${startedEntry.candidate?.repoPath || 'unknown'}#${startedEntry.candidate?.prNumber || 'unknown'}: ` +
               `${err?.message || err}`
           );
         }
@@ -729,7 +731,10 @@ async function runBoundedReviewerDispatchQueue(candidates, {
       active.add(promise);
       activeRecords.set(promise, { counted: false });
       promise.then((result) => {
-        if (!dispatchWasSkipped(result)) countDispatch(promise);
+        if (!dispatchWasSkipped(result)) {
+          recordReviewerLaneStart(startedEntry.candidate, activeLaneState);
+          countDispatch(promise);
+        }
       }).finally(() => {
         active.delete(promise);
         activeRecords.delete(promise);

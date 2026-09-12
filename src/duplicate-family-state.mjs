@@ -351,6 +351,7 @@ export function detectDuplicateFamiliesForRepo(subjectEntries, {
       strongestSignal: commonSignals[0] || null,
       commonSignals,
       candidates: openUnsuppressed,
+      allCandidates: group,
     });
   }
   return families;
@@ -368,6 +369,9 @@ function updateOperatorOverrideForHeadMove(existing, candidates) {
   if (!Number.isInteger(prNumber) || prNumber <= 0 || !headSha) return existing?.operator_override_json || null;
   const candidate = candidates.find((item) => item.prNumber === prNumber);
   if (!candidate || !candidate.headSha || candidate.headSha === headSha) return existing?.operator_override_json || null;
+  if (override.stale && override.staleObservedHeadSha === candidate.headSha) {
+    return existing?.operator_override_json || null;
+  }
   return JSON.stringify({
     ...override,
     stale: true,
@@ -488,11 +492,12 @@ export function upsertDuplicateFamilies(db, families, {
         now,
       );
       const row = readExistingFamilyByKey(db, family.familyKey);
-      const nextOverride = updateOperatorOverrideForHeadMove(row, family.candidates);
+      const persistedCandidates = Array.isArray(family.allCandidates) ? family.allCandidates : family.candidates;
+      const nextOverride = updateOperatorOverrideForHeadMove(row, persistedCandidates);
       if (nextOverride !== (row.operator_override_json || null)) {
         updateOverride.run(nextOverride, now, family.familyKey);
       }
-      for (const candidate of family.candidates) {
+      for (const candidate of persistedCandidates) {
         upsertCandidate.run(
           row.family_id,
           candidate.repoPath,

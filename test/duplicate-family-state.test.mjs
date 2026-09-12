@@ -72,6 +72,7 @@ test('dispatch-provenance duplicate fixture becomes one advisory family', () => 
   assert.equal(families.length, 1);
   assert.equal(families[0].status, 'advisory');
   assert.equal(families[0].candidates.length, 2);
+  assert.equal(families[0].allCandidates.length, 2);
   assert.deepEqual(families[0].commonSignals, [
     'branch-ticket',
     'dispatch-spec',
@@ -218,6 +219,48 @@ test('idempotent re-census does not duplicate family, candidates, or transitions
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM duplicate_family_candidates').get().n, 2);
     const family = listDuplicateFamilies(db)[0];
     assert.equal(JSON.parse(family.transition_log_json).length, 1);
+  } finally {
+    db.close();
+  }
+});
+
+test('re-census persists terminal candidates while family remains active', () => {
+  const db = memoryDb();
+  const entries = [
+    subject(421),
+    subject(422),
+    subject(423),
+  ];
+  const provenance = provenanceReader({
+    421: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+    422: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+    423: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+  });
+  try {
+    const first = reconcileDuplicateFamiliesForRepo(db, entries, {
+      repoPath: REPO,
+      now: '2026-09-11T00:00:00.000Z',
+      readBuildCompletionSignalForPrImpl: provenance,
+    });
+    assert.equal(first.familyIds.length, 1);
+
+    reconcileDuplicateFamiliesForRepo(db, [
+      subject(421, { state: 'MERGED' }),
+      subject(422),
+      subject(423),
+    ], {
+      repoPath: REPO,
+      now: '2026-09-11T00:05:00.000Z',
+      readBuildCompletionSignalForPrImpl: provenance,
+    });
+
+    const family = listDuplicateFamilies(db)[0];
+    assert.equal(family.status, 'advisory');
+    assert.equal(family.candidate_count, 2);
+    const rows = duplicateFamilyCandidateRows(db, first.familyIds[0]);
+    assert.equal(rows.length, 3);
+    assert.equal(rows.find((row) => row.pr_number === 421)?.pr_state, 'merged');
+    assert.equal(rows.find((row) => row.pr_number === 421)?.last_seen_at, '2026-09-11T00:05:00.000Z');
   } finally {
     db.close();
   }
@@ -392,6 +435,19 @@ test('head movement ignores current-head suppressions and stales operator overri
     assert.equal(override.stale, true);
     assert.equal(override.staleReason, 'candidate-head-moved');
     assert.equal(override.staleObservedHeadSha, 'moved-head');
+
+    reconcileDuplicateFamiliesForRepo(db, [
+      subject(501, { headSha: 'moved-head' }),
+      subject(502, { headSha: 'sibling-head' }),
+    ], {
+      repoPath: REPO,
+      now: '2026-09-11T00:03:00.000Z',
+      readBuildCompletionSignalForPrImpl: provenanceReader({
+        501: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+        502: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+      }),
+    });
+    assert.equal(listDuplicateFamilies(db)[0].operator_override_json, updated.operator_override_json);
   } finally {
     db.close();
   }

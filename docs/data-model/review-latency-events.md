@@ -21,6 +21,8 @@ domain subject (`domain_id`, `subject_external_id`, `revision_ref`). The
 `event_type` describes the boundary being recorded, while `stage` records the
 owning subsystem for display and diagnosis. `recordReviewLatencyEvent` derives
 the stage from the event type when callers do not pass one explicitly.
+The latency report preserves those generic subject identifiers when building
+timelines, so unrelated non-PR subjects cannot be paired across domains.
 
 ## Event contract
 
@@ -60,5 +62,6 @@ Callers that can provide a stable event identity should set
 idempotency key.
 
 `idx_review_latency_events_subject_at` supports per-PR timeline reads ordered by
-event time. `idx_review_latency_events_type_at` supports type/window scans used
-by latency reporting and route-state diagnostics.
+event time. `idx_review_latency_events_at` supports the latency report's primary
+time-window scan. `idx_review_latency_events_type_at` supports type/window scans
+used by route-state diagnostics and event-type filtering.

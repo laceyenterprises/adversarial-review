@@ -50,6 +50,7 @@ test('review latency schema creates durable event table and indexes', () => {
     assert.ok(columns.includes('payload_json'));
     const indexes = db.prepare("PRAGMA index_list('review_latency_events')").all().map((index) => index.name);
     assert.ok(indexes.includes('review_latency_events_idempotency_unique'));
+    assert.ok(indexes.includes('idx_review_latency_events_at'));
   } finally {
     db.close();
   }
@@ -192,4 +193,40 @@ test('latency report backfills critical path and queue state from fixtures', () 
   assert.match(text, /current queue: 1 waiting/);
   assert.match(text, /recent wakes:/);
   assert.match(text, /hammer_wake/);
+});
+
+test('latency report keeps generic domain subjects in separate timelines', () => {
+  const rootDir = tempRoot();
+  const db = openDb(rootDir);
+  try {
+    recordReviewLatencyEvent(db, {
+      domainId: 'research-finding',
+      subjectExternalId: 'finding-a',
+      eventType: 'reviewer_started',
+      at: '2026-09-11T12:00:00.000Z',
+      source: 'test-domain-a',
+      idempotencyKey: 'domain-a-started',
+    });
+    recordReviewLatencyEvent(db, {
+      domainId: 'research-finding',
+      subjectExternalId: 'finding-b',
+      eventType: 'reviewer_first_output',
+      at: '2026-09-11T12:10:00.000Z',
+      source: 'test-domain-b',
+      idempotencyKey: 'domain-b-first-output',
+    });
+  } finally {
+    db.close();
+  }
+
+  const report = collectReviewLatencyReport({
+    rootDir,
+    since: '24h',
+    now: () => new Date('2026-09-11T13:00:00.000Z'),
+  });
+
+  assert.equal(report.surfaces.explicitEvents, 2);
+  const reviewerRuntime = report.stages.find((stage) => stage.key === 'row_claimed_to_reviewer_first_output');
+  assert.equal(reviewerRuntime.sampleCount, 0);
+  assert.equal(reviewerRuntime.p50Ms, null);
 });

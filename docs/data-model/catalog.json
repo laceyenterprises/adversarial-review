@@ -46,7 +46,7 @@
         "src/review-state.mjs",
         "src/review-latency-report.mjs"
       ],
-      "owner": "review latency instrumentation and reporting"
+      "owner": "review latency instrumentation and generic-subject reporting"
     },
     {
       "id": "reviewed-attestations",

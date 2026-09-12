@@ -289,6 +289,9 @@ function ensureReviewStateSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_review_latency_events_subject_at
       ON review_latency_events(repo, pr_number, at);
 
+    CREATE INDEX IF NOT EXISTS idx_review_latency_events_at
+      ON review_latency_events(at);
+
     CREATE INDEX IF NOT EXISTS idx_review_latency_events_type_at
       ON review_latency_events(event_type, at);
 

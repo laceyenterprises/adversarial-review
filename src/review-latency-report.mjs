@@ -164,13 +164,21 @@ function safeAll(db, sql, params = []) {
   }
 }
 
-function subjectKey(repo, prNumber) {
-  return `${repo || 'unknown'}#${Number(prNumber) || 0}`;
+function subjectKey({ repo, prNumber, domainId, subjectExternalId }) {
+  if (repo && Number.isInteger(Number(prNumber))) {
+    return `pr:${repo}#${Number(prNumber)}`;
+  }
+  if (domainId && subjectExternalId) {
+    return `domain:${domainId}#${subjectExternalId}`;
+  }
+  return 'unknown#0';
 }
 
 function addSubjectEvent(subjects, {
   repo,
   prNumber,
+  domainId,
+  subjectExternalId,
   eventType,
   at,
   source,
@@ -180,11 +188,13 @@ function addSubjectEvent(subjects, {
 }) {
   const atMs = toMs(at);
   if (atMs === null || !eventType) return;
-  const key = subjectKey(repo, prNumber);
+  const key = subjectKey({ repo, prNumber, domainId, subjectExternalId });
   const subject = subjects.get(key) || {
     key,
-    repo,
-    prNumber: Number(prNumber),
+    repo: repo || null,
+    prNumber: Number.isInteger(Number(prNumber)) ? Number(prNumber) : null,
+    domainId: domainId || null,
+    subjectExternalId: subjectExternalId || null,
     events: [],
   };
   subject.events.push({
@@ -212,7 +222,8 @@ function firstEvent(subject, eventTypes) {
 function addExplicitEvents(db, subjects, { sinceIso }) {
   const rows = safeAll(
     db,
-    `SELECT repo, pr_number, event_type, at, source, reason, payload_json
+    `SELECT repo, pr_number, domain_id, subject_external_id,
+            event_type, at, source, reason, payload_json
        FROM review_latency_events
       WHERE at >= ?
       ORDER BY at ASC, event_id ASC`,
@@ -222,6 +233,8 @@ function addExplicitEvents(db, subjects, { sinceIso }) {
     addSubjectEvent(subjects, {
       repo: row.repo,
       prNumber: row.pr_number,
+      domainId: row.domain_id,
+      subjectExternalId: row.subject_external_id,
       eventType: row.event_type,
       at: row.at,
       source: row.source || 'review_latency_events',

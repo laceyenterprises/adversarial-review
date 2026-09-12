@@ -2281,6 +2281,45 @@ test('CLZ-03: stalled event emission failure remains retryable until acknowledge
   }
 });
 
+test('no-progress gate treats AMA needsOperator as operator-blocked', async () => {
+  const rootDir = tempRoot();
+  try {
+    const identity = { repo: REPO, prNumber: 6030 };
+    const gate = createNoProgressLaneGate({
+      rootDir,
+      readReviewRow: () => ({
+        review_status: 'posted',
+        pr_state: 'open',
+        reviewer_head_sha: HEAD_A,
+        review_attempts: 1,
+        posted_at: '2026-08-31T07:00:00.000Z',
+        failed_at: null,
+        merged_at: null,
+      }),
+      now: () => '2026-08-31T13:00:00.000Z',
+      logger: silentLogger,
+    });
+    const handler = { repoPath: identity.repo, prNumber: identity.prNumber, headSha: HEAD_A };
+
+    await gate.record(handler, {
+      value: {
+        outcome: 'ama-pending',
+        amaClosureResult: {
+          needsOperator: true,
+          reason: 'dispatch-branch-holder-block-exhausted',
+          reasons: ['branch-holder-blocked'],
+        },
+      },
+    });
+
+    const ledger = readNoProgressLane(rootDir, identity, { logger: silentLogger });
+    assert.equal(ledger.lane, LANE_OPERATOR_BLOCKED);
+    assert.equal(ledger.progressClass, PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('CLZ-03: stalled event delivery failure does not abort operator alerts', async () => {
   const rootDir = tempRoot();
   try {

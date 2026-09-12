@@ -832,6 +832,8 @@ export function createNoProgressLaneGate({
         ? 'timed-out'
         : subjectProgressFingerprint(row, { headSha: handler.headSha || null });
       const progressClass = value?.gateDecision?.operatorDecisionRequired === true
+        || value?.amaClosureResult?.needsOperator === true
+        || value?.outcome === 'await-operator'
         ? PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED
         : PROGRESS_CLASS_SELF_RESOLVING;
       const observedAt = now();

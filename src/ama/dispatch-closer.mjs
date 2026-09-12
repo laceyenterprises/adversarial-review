@@ -1538,6 +1538,20 @@ function isStaleDispatchingAmaCloserRecord(record, { now = null } = {}) {
   return ageMs !== null && ageMs >= amaCloserPendingLeaseReclaimAgeMs(record);
 }
 
+function isReclaimableBranchHolderBlockedAmaCloserRecord(record, { now = null } = {}) {
+  const state = String(record?.state || '').trim().toLowerCase();
+  if (
+    state !== 'dispatch-blocked-branch-holder' &&
+    state !== 'dispatch-branch-holder-block-exhausted'
+  ) {
+    return false;
+  }
+  if (!isProvisionBranchHolderBlocked(record?.lastError || '')) return false;
+  const ageMs = amaCloserRecordAgeMs(record, { now });
+  if (ageMs === null) return true;
+  return ageMs >= amaCloserPendingLeaseReclaimAgeMs(record);
+}
+
 export function isAmaCloserLaunchInProgress(record, options = {}) {
   if (
     !hasInterruptedInFlightAmaCloserDispatchShape(record)
@@ -3962,10 +3976,29 @@ export async function maybeDispatchAmaCloser({
     && existingLeaseBeforeDispatch?.status === AMA_CLOSER_LEASE_STATUS.PENDING
     && !existingRecordIsReclaimableInterruption;
   const existingRecordIsBranchHolderBlocked = isProvisionBranchHolderBlocked(existingRecord?.lastError || '');
+  const existingRecordIsReclaimableBranchHolderBlock =
+    isReclaimableBranchHolderBlockedAmaCloserRecord(existingRecord, {
+      now: dispatchContext.dispatchedAt,
+    });
   const existingRecordIsRevalidatableBranchMissing =
     String(existingRecord?.state || '').trim().toLowerCase() === 'no-dispatch'
     && String(existingRecord?.reason || '').trim() === 'live-head-branch-missing';
-  const existingBranchHolderBlockCount = Number(existingRecord?.branchHolderBlockCount || 0);
+  const existingBranchHolderBlockCount = existingRecordIsReclaimableBranchHolderBlock
+    ? 0
+    : Number(existingRecord?.branchHolderBlockCount || 0);
+  if (existingRecordIsReclaimableBranchHolderBlock) {
+    logger?.warn?.(JSON.stringify({
+      event: 'ama_closer.branch_holder_block_reclaimable',
+      repo,
+      prNumber,
+      headSha: existingRecord?.headSha || dispatchRecordHeadSha || reviewedSha,
+      previousState: existingRecord?.state || null,
+      previousBranchHolderBlockCount: Number(existingRecord?.branchHolderBlockCount || 0),
+      lastAttemptedAt: existingRecord?.lastAttemptedAt || null,
+      lastObservedAt: existingRecord?.lastObservedAt || null,
+      reason: 'aged-branch-holder-block-retrying',
+    }));
+  }
   let existingDispatchStatus = null;
   if (existingRecord?.launchRequestId) {
     let releaseUnprovenTerminalHold = false;
@@ -4602,6 +4635,7 @@ export async function maybeDispatchAmaCloser({
     return noAmaDispatch({ dispatched: false, reason: 'dispatch-retry-exhausted' });
   } else if (
     existingRecordIsBranchHolderBlocked
+    && !existingRecordIsReclaimableBranchHolderBlock
     && existingBranchHolderBlockCount >= AMA_CLOSER_BRANCH_HOLDER_BLOCK_BOUND
   ) {
     return noAmaDispatch({
@@ -5231,9 +5265,12 @@ export async function maybeDispatchAmaCloser({
         && isTransientHqDispatchError(err);
       const budgetPreservingFailure = branchHolderBlocked || transientFailure;
       const updatedDispatchRecord = updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => {
-        const branchHolderBlockCount = branchHolderBlocked
-          ? Number(current?.branchHolderBlockCount || existingBranchHolderBlockCount) + 1
+        const currentBranchHolderBlockBase = existingRecordIsReclaimableBranchHolderBlock
+          ? existingBranchHolderBlockCount
           : Number(current?.branchHolderBlockCount || existingBranchHolderBlockCount);
+        const branchHolderBlockCount = branchHolderBlocked
+          ? currentBranchHolderBlockBase + 1
+          : currentBranchHolderBlockBase;
         return {
           ...(current || {}),
           schemaVersion: AMA_CLOSER_DISPATCH_SCHEMA_VERSION,

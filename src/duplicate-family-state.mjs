@@ -9,6 +9,13 @@ export const DUPLICATE_FAMILY_SUPPRESSION_LABEL = 'not-a-duplicate-stack';
 const TICKET_RE = /\b([A-Z][A-Z0-9]{1,12}-\d{1,6})\b/i;
 const STACK_LABEL_RE = /^(?:stack|stacked|depends-on|follow-up|followup|remediation)(?::|$)/i;
 const EXPLICIT_IDENTITY_LABEL_RE = /^work-identity:(.+)$/i;
+const TRANSIENT_PROVENANCE_FAILURES = new Set([
+  'missing-ledger-target',
+  'malformed-ledger-target',
+  'postgres-configured-but-sqlite-resolved',
+  'psql-not-installed',
+  'ledger-read-failed',
+]);
 
 function normalizeText(value) {
   const text = String(value || '').trim();
@@ -108,6 +115,8 @@ export function ensureDuplicateFamilySchema(db) {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_duplicate_family_candidates_pr
       ON duplicate_family_candidates(repo, pr_number, head_sha);
+    CREATE INDEX IF NOT EXISTS idx_duplicate_family_candidates_family_id
+      ON duplicate_family_candidates(family_id);
     CREATE INDEX IF NOT EXISTS idx_duplicate_families_status
       ON duplicate_families(status, target_repo, base_branch);
   `);
@@ -761,13 +770,7 @@ export async function runDuplicateFamilyCensusForWatcher({
 }
 
 function shouldDisableProvenanceForTick(reason) {
-  return new Set([
-    'missing-ledger-target',
-    'malformed-ledger-target',
-    'postgres-configured-but-sqlite-resolved',
-    'psql-not-installed',
-    'ledger-read-failed',
-  ]).has(String(reason || ''));
+  return TRANSIENT_PROVENANCE_FAILURES.has(String(reason || ''));
 }
 
 export function listDuplicateFamilies(db, { repo = null, status = null } = {}) {

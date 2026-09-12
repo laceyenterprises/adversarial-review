@@ -149,6 +149,12 @@ test('legacy candidate primary key migration keeps one row per PR', () => {
       .sort((a, b) => Number(a.pk) - Number(b.pk))
       .map((column) => column.name);
     assert.deepEqual(primaryKeyColumns, ['repo', 'pr_number']);
+    assert.deepEqual(
+      db.prepare("PRAGMA index_info('idx_duplicate_family_candidates_family_id')")
+        .all()
+        .map((column) => column.name),
+      ['family_id']
+    );
     assert.equal(
       db.prepare('SELECT COUNT(*) AS n FROM duplicate_family_candidates WHERE repo = ? AND pr_number = ?').get(REPO, 601).n,
       1

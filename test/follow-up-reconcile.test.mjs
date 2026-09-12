@@ -227,6 +227,7 @@ test('reconcileFollowUpJob resets watcher review state when remediation reply re
   assert.equal(reviewRow.failure_message, null);
   assert.equal(reviewRow.rereview_reason, 'Remediation landed and is ready for another adversarial pass.');
   assert.equal(reviewRow.rereview_requested_at, '2026-04-21T10:05:00.000Z');
+  assert.equal(reviewRow.revision_ref, 'ci-green-head');
   assert.equal(reviewRow.last_attempted_at, null);
   assert.equal(reviewRow.review_attempts, 1);
   assert.equal(reviewRow.posted_at, null);
@@ -462,6 +463,7 @@ test('reconcileFollowUpJob wakes watcher when handoff.remediation_to_rereview is
     reason: 'remediation-to-rereview',
     repo: 'laceyenterprises/clio',
     prNumber: 7,
+    headSha: 'ci-green-head',
     requestedAt: '2026-04-21T10:05:00.000Z',
   });
   assert.deepEqual(reconciled.job.reReview.wake, {
@@ -543,6 +545,100 @@ test('reconcileFollowUpJob loads handoff.remediation_to_rereview from the repo c
     reason: 'remediation-to-rereview',
     repo: 'laceyenterprises/clio',
     prNumber: 7,
+    headSha: 'ci-green-head',
+    requestedAt: '2026-04-21T10:05:00.000Z',
+  });
+  assert.deepEqual(reconciled.job.reReview.wake, {
+    requested: true,
+    reason: 'remediation-to-rereview',
+    requestedAt: '2026-04-21T10:05:00.000Z',
+  });
+});
+
+test('reconcileFollowUpJob wakes watcher when re-review was already pending', async () => {
+  process.env.ADVERSARIAL_HANDOFF_REMEDIATION_TO_REREVIEW = '1';
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  const replyPath = hqReplyPathForJob(claimed.job);
+  writeFileSync(outputPath, 'Validation: npm test\nFiles changed: src/auth.mjs\n', 'utf8');
+  writeFileSync(replyPath, `${JSON.stringify({
+    kind: 'adversarial-review-remediation-reply',
+    schemaVersion: 1,
+    jobId: claimed.job.jobId,
+    repo: claimed.job.repo,
+    prNumber: claimed.job.prNumber,
+    outcome: 'completed',
+    summary: 'Applied the remediation changes.',
+    validation: ['npm test'],
+    blockers: [],
+    reReview: {
+      requested: true,
+      reason: 'Remediation landed after an operator already armed rereview.',
+    },
+  }, null, 2)}\n`, 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      processId: 8123,
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
+      replyPath,
+    },
+  });
+
+  const wakeCalls = [];
+  const reconciled = await reconcileFollowUpJob({
+    rootDir,
+    jobPath: spawned.jobPath,
+    now: () => '2026-04-21T10:05:00.000Z',
+    isProcessAliveImpl: () => false,
+    requestReviewRereviewImpl: () => ({
+      triggered: false,
+      status: 'already-pending',
+      reason: 'review-already-pending',
+      reviewRow: {
+        repo: 'laceyenterprises/clio',
+        pr_number: 7,
+        pr_state: 'open',
+        review_status: 'pending',
+        revision_ref: 'current-pending-head',
+      },
+    }),
+    requestWatcherWakeImpl: (payload) => {
+      wakeCalls.push(payload);
+      return {
+        requested: true,
+        payload: {
+          reason: payload.reason,
+          requested_at: payload.requestedAt,
+        },
+      };
+    },
+    resolvePRLifecycleImpl: async () => null,
+    auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
+    inspectRemediationCiRegressionImpl: async () => greenCiGate(),
+  });
+
+  assert.equal(reconciled.reconciled, true);
+  assert.equal(reconciled.outcome, 'completed');
+  assert.equal(reconciled.job.reReview.status, 'already-pending');
+  assert.equal(wakeCalls.length, 1);
+  assert.deepEqual(wakeCalls[0], {
+    rootDir,
+    reason: 'remediation-to-rereview',
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+    headSha: 'current-pending-head',
     requestedAt: '2026-04-21T10:05:00.000Z',
   });
   assert.deepEqual(reconciled.job.reReview.wake, {

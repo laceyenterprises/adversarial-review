@@ -1494,6 +1494,8 @@ function buildRereviewResult({ requested, reason, outcome = null }) {
           lastAttemptedAt: outcome.reviewRow.last_attempted_at,
           postedAt: outcome.reviewRow.posted_at,
           failedAt: outcome.reviewRow.failed_at,
+          revisionRef: outcome.reviewRow.revision_ref || null,
+          reviewerHeadSha: outcome.reviewRow.reviewer_head_sha || null,
         }
       : null,
   };
@@ -2727,6 +2729,7 @@ async function reconcileFollowUpJob({
           prNumber: job.prNumber,
           requestedAt,
           reason: reply.reReview.reason,
+          targetRevisionRef: ciGate.headSha || null,
         });
         rereview = buildRereviewResult({
           requested: true,
@@ -2785,16 +2788,21 @@ async function reconcileFollowUpJob({
 
     if (
       rereviewAccepted &&
-      rereview.triggered &&
       isRemediationToRereviewHandoffEnabled(process.env, { topPath: join(rootDir, 'config.yaml') })
     ) {
       try {
+        const wakeHeadSha =
+          rereview.reviewRow?.revisionRef ||
+          rereview.reviewRow?.reviewerHeadSha ||
+          job.headSha ||
+          job.revisionRef ||
+          null;
         const wake = requestWatcherWakeImpl({
           rootDir,
           reason: 'remediation-to-rereview',
           repo: job.repo,
           prNumber: job.prNumber,
-          ...(job.revisionRef || job.headSha ? { headSha: job.revisionRef || job.headSha } : {}),
+          ...(wakeHeadSha ? { headSha: wakeHeadSha } : {}),
           requestedAt: completedAt,
         });
         rereview.wake = {

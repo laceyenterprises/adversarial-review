@@ -183,6 +183,54 @@ test('single-wave reviewer drain keeps scanning after skipped candidates', async
   assert.deepEqual(summary.deferredCandidates.map((item) => item.prNumber), [3]);
 });
 
+test('single-wave reviewer drain treats active gemini reviewers from prior drains as occupying capacity', async () => {
+  const events = [];
+  const summary = await runBoundedReviewerDispatchQueue([
+    candidate(10, async () => {
+      events.push('start:10');
+    }, '2026-05-01T00:00:00.000Z', { reviewerModel: 'gemini' }),
+    candidate(11, async () => {
+      events.push('start:11');
+    }, '2026-05-01T00:00:01.000Z', { reviewerModel: 'gemini' }),
+  ], {
+    maxConcurrent: 2,
+    geminiCredentialConcurrency: 1,
+    activeReviewerCounts: new Map([['gemini', 1]]),
+    singleWave: true,
+    singleWaveSettleGraceMs: 0,
+    logger: { error() {}, log() {}, warn() {} },
+  });
+
+  assert.deepEqual(events, []);
+  assert.equal(summary.dispatched, 0);
+  assert.equal(summary.deferred, 2);
+  assert.deepEqual(summary.deferredCandidates.map((item) => item.prNumber), [10, 11]);
+});
+
+test('single-wave reviewer drain skips externally capped gemini and still starts another reviewer class', async () => {
+  const events = [];
+  const summary = await runBoundedReviewerDispatchQueue([
+    candidate(10, async () => {
+      events.push('start:10');
+    }, '2026-05-01T00:00:00.000Z', { reviewerModel: 'gemini' }),
+    candidate(11, async () => {
+      events.push('start:11');
+    }, '2026-05-01T00:00:01.000Z', { reviewerModel: 'codex' }),
+  ], {
+    maxConcurrent: 2,
+    geminiCredentialConcurrency: 1,
+    activeReviewerCounts: { gemini: 1 },
+    singleWave: true,
+    singleWaveSettleGraceMs: 0,
+    logger: { error() {}, log() {}, warn() {} },
+  });
+
+  assert.deepEqual(events, ['start:11']);
+  assert.equal(summary.dispatched, 1);
+  assert.equal(summary.deferred, 1);
+  assert.deepEqual(summary.deferredCandidates.map((item) => item.prNumber), [10]);
+});
+
 test('single-wave reviewer drain does not count delayed skipped candidates as dispatched', async () => {
   const events = [];
   let resolveSkipped;

@@ -443,10 +443,32 @@ function resolveGeminiDispatchConcurrencyLimit({ geminiCredentialConcurrency = n
   return Math.min(cap, Math.max(0, parsed));
 }
 
+function activeReviewerCountForModel(activeReviewerCounts, model) {
+  const normalizedModel = String(model || '').trim().toLowerCase();
+  if (!normalizedModel || !activeReviewerCounts) return 0;
+  if (activeReviewerCounts instanceof Map) {
+    return Math.max(0, Number.parseInt(String(activeReviewerCounts.get(normalizedModel) || 0), 10) || 0);
+  }
+  if (typeof activeReviewerCounts === 'object') {
+    return Math.max(0, Number.parseInt(String(activeReviewerCounts[normalizedModel] || 0), 10) || 0);
+  }
+  return 0;
+}
+
+function countActiveReviewerSpawnsByModel(activeReviewerSpawns) {
+  const counts = new Map();
+  for (const record of activeReviewerSpawns?.values?.() || []) {
+    const model = String(record?.reviewerModel || '').trim().toLowerCase();
+    if (model) counts.set(model, (counts.get(model) || 0) + 1);
+  }
+  return counts;
+}
+
 async function runBoundedReviewerDispatchQueue(candidates, {
   maxConcurrent = DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX,
   availableCredentials = null,
   geminiCredentialConcurrency = null,
+  activeReviewerCounts = null,
   maxThrownFailures = 1,
   singleWave = false,
   singleWaveSettleGraceMs = DEFAULT_SINGLE_WAVE_SETTLE_GRACE_MS,
@@ -479,7 +501,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   let maxObservedConcurrency = 0;
   let attempted = 0;
   let dispatched = 0;
-  let activeGemini = 0;
+  let activeGemini = activeReviewerCountForModel(activeReviewerCounts, 'gemini');
   let initialWaveClosed = false;
 
   const isGeminiCandidate = (candidate) =>
@@ -623,6 +645,7 @@ export {
   DEFAULT_REVIEWER_MEMORY_SAMPLE_TTL_MS,
   DEFAULT_SINGLE_WAVE_SETTLE_GRACE_MS,
   compareReviewerDispatchCandidates,
+  countActiveReviewerSpawnsByModel,
   createReviewerMemoryAdmissionSampler,
   logReviewerDispatchWait,
   reserveReviewerMemoryAdmission,

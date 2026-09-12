@@ -433,6 +433,14 @@ down exactly one of two paths:
 | **Hammer (common)** | Final review carries findings (blocking, or non-blocking under the default strict posture), the PR needs a rebase, or CI needs repair | The watcher dispatches exactly one hammer terminal-remediation worker (`templates/hammer-prompt.md`, via `src/ama/dispatch-closer.mjs`). The hammer remediates, rebases at least once onto a recent current base, holds the required-checks-plus-changed-surface-tests merge bar, waits out GitHub required checks on the exact post-remediation head inside a bounded remote-CI window, and merges under its own lease with `--match-head-commit`. If the target branch does not require strict up-to-date heads (`required_status_checks.strict=false` or no strict rule), a post-validation `BEHIND` state caused only by unrelated base movement does not force another rebase when the PR remains `MERGEABLE` and the newer base has no changed-file overlap with this PR. |
 | **Daemon inline merge (rare)** | Final review is fully clean — zero blocking AND zero non-blocking findings, both classifications known — plus green required checks, a MERGEABLE PR, and a live head matching the reviewed head | The watcher daemon clicks merge inline through a bounded `gh pr merge --match-head-commit` subprocess under the shared merge lease (`src/ama/daemon-merge.mjs`). No agent is spawned. Dispositions: `merged`, `failed-closed` (no hammer spawned from this path), `deferred` (lease contention; retry next tick), `not-taken` (falls through to the hammer route). |
 
+Hard-stop operator labels short-circuit both closure paths before the MSM
+decision. When `merge-agent-skip`, `do-not-merge`, `no-merge-hold`, or
+`merge-agent-stuck` produces the `operator-skip-label` gate reason, the
+posted-review handler returns `skip-operator-skip` and keeps ownership of an
+open PR so no daemon merge, hammer, or merge-agent dispatch can close it. If
+the same held PR is already terminal (`merged` or `closed`), the handler clears
+the no-progress lane and drops ownership instead of retaining a permanent row.
+
 Key control points:
 
 - **Shared predicate.** Both paths evaluate `evaluateMergeEligibility`

@@ -471,6 +471,7 @@ export async function handlePostedReviewRow({
           dispatchJob,
           prTerminal: true,
           gateDecision,
+          amaClosureResult: null,
         };
       }
       logger.log(
@@ -481,6 +482,7 @@ export async function handlePostedReviewRow({
         handled: true,
         outcome: 'operator-skip-label',
         reason: 'skip-operator-skip',
+        dispatchJob,
         gateDecision,
         amaClosureResult: {
           dispatched: false,

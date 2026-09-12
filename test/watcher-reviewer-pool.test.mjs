@@ -257,6 +257,31 @@ test('RRSTALL-01: a queued rereview with a free slot starts in the same drain', 
   assert.deepEqual(summary.deferredReasons, []);
 });
 
+test('deferred reviewer reason is captured before single-wave settle frees capacity', async () => {
+  const events = [];
+  const summary = await runBoundedReviewerDispatchQueue([
+    candidate(10, async () => {
+      events.push('start:10');
+    }),
+    candidate(11, async () => {
+      events.push('start:11');
+    }),
+  ], {
+    maxConcurrent: 1,
+    singleWave: true,
+    singleWaveSettleGraceMs: 25,
+    logger: { error() {}, log() {}, warn() {} },
+  });
+
+  assert.deepEqual(events, ['start:10']);
+  assert.equal(summary.dispatched, 1);
+  assert.equal(summary.deferred, 1);
+  assert.deepEqual(
+    summary.deferredReasons.map((item) => [item.prNumber, item.reason]),
+    [[11, 'reviewer-pool-saturated']],
+  );
+});
+
 test('single-wave reviewer drain exposes detached launches for pre-registration capacity accounting', async () => {
   const events = [];
   const activeReviewerSpawns = new Map();

@@ -514,10 +514,36 @@ test('pickAdversarialGateStatus lets a clean settled verdict satisfy a queued he
       rereview_reason: 'auto-refresh: posted review on stale head old-head; current head is rebased-head',
     }),
     latestJob: makeJob({
-      revisionRef: 'rebased-head',
+      revisionRef: 'old-head',
       reviewBody: [
         '## Summary',
         'Clean final review.',
+        '',
+        '## Blocking issues',
+        '- None.',
+        '',
+        '## Verdict',
+        'Comment only',
+      ].join('\n'),
+    }),
+  });
+
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'review-settled-head-change-rereview');
+});
+
+test('pickAdversarialGateStatus holds head-change rereview when the latest job asks for another pass', () => {
+  const decision = pickAdversarialGateStatus({
+    headSha: 'rebased-head',
+    reviewRow: makeReviewRow({
+      review_status: 'pending',
+      rereview_reason: 'auto-refresh: posted review on stale head old-head; current head is rebased-head',
+    }),
+    latestJob: makeJob({
+      revisionRef: 'old-head',
+      reviewBody: [
+        '## Summary',
+        'Clean final review body, but follow-up explicitly requested another pass.',
         '',
         '## Blocking issues',
         '- None.',
@@ -531,8 +557,8 @@ test('pickAdversarialGateStatus lets a clean settled verdict satisfy a queued he
     }),
   });
 
-  assert.equal(decision.state, 'success');
-  assert.equal(decision.reason, 'review-settled-head-change-rereview');
+  assert.equal(decision.state, 'pending');
+  assert.equal(decision.reason, 'rereview-queued');
 });
 
 test('pickAdversarialGateStatus still blocks a queued findings rereview with a clean-looking body', () => {
@@ -1134,7 +1160,7 @@ test('posted watcher handler uses a fresher pending head-change rereview row whe
           latestJob: makeJob({
             repo,
             prNumber,
-            revisionRef: headSha,
+            revisionRef: 'old-head',
             reviewBody: [
               '## Summary',
               'Clean final review.',
@@ -1145,7 +1171,6 @@ test('posted watcher handler uses a fresher pending head-change rereview row whe
               '## Verdict',
               'Comment only',
             ].join('\n'),
-            reReview: { requested: true },
           }),
         }),
       }),

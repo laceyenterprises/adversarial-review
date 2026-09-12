@@ -338,21 +338,10 @@ function isHeadChangeRereviewReason(reason) {
   );
 }
 
-function followUpJobRevisionRef(job) {
-  return String(
-    job?.revisionRef
-      ?? job?.currentRevisionRef
-      ?? job?.subjectRef?.revisionRef
-      ?? ''
-  ).trim() || null;
-}
-
-function completedHeadChangeRereviewIsSettledClean({ latestJob, latestJobStatus, reviewRow, headSha }) {
+function completedHeadChangeRereviewIsSettledClean({ latestJob, latestJobStatus, reviewRow }) {
   if (latestJobStatus !== 'completed') return false;
-  if (latestJob?.reReview?.requested !== true) return false;
+  if (latestJob?.reReview?.requested === true) return false;
   if (!isHeadChangeRereviewReason(reviewRow?.rereview_reason)) return false;
-  const jobHead = followUpJobRevisionRef(latestJob);
-  if (headSha && jobHead && String(jobHead) !== String(headSha)) return false;
   const verdict = normalizeEffectiveReviewVerdict(latestJob.reviewBody);
   if (verdict !== 'comment-only' && verdict !== 'approved') return false;
   const blocking = classifyBlockingFindings(latestJob.reviewBody, { lastVerdict: verdict || null });
@@ -373,18 +362,21 @@ function resolveSettledReviewVerdict(
 ) {
   const reviewedHeadSha = reviewRow?.reviewer_head_sha || null;
   const reviewStatus = normalizeReviewStatus(reviewRow?.review_status);
+  const isHeadChangeRereview = isHeadChangeRereviewReason(reviewRow?.rereview_reason);
   const isQuotaCapped = primaryReviewerQuotaCappedForRow(reviewRow);
-  if (reviewStatus !== 'posted' && !isQuotaCapped) {
+  if (reviewStatus !== 'posted' && !isQuotaCapped && !(reviewStatus === 'pending' && isHeadChangeRereview)) {
     return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
   }
   if (currentHeadSha && reviewedHeadSha && String(reviewedHeadSha) !== String(currentHeadSha)) {
-    if (!isQuotaCapped) {
+    if (!isQuotaCapped && !isHeadChangeRereview) {
       return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
     }
   }
 
   const latestJobQuery = { repo, prNumber };
-  if (currentHeadSha) latestJobQuery.revisionRef = currentHeadSha;
+  if (currentHeadSha && !isHeadChangeRereview) {
+    latestJobQuery.revisionRef = currentHeadSha;
+  }
   const latestJob = latestJobFinder(rootDir, latestJobQuery);
   const latestJobStatus = normalizeFollowUpJobStatus(latestJob?.status);
   if (latestJobStatus === 'pending' || latestJobStatus === 'in-progress') {

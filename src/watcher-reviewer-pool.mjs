@@ -733,11 +733,29 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   // candidates, the gemini in-flight cap is not yet reached. A capped gemini
   // head does NOT block codex/claude candidates behind it (no head-of-line
   // stall on reviewers that don't touch the gemini pool).
+  const recordDeferredReason = (entry, reason) => {
+    if (!entry || entry.started || entry.deferredReason) return;
+    entry.deferredReason = reason;
+  };
+
   const nextStartableEntry = () => {
-    if (active.size >= concurrencyLimit) return null;
+    if (active.size >= concurrencyLimit) {
+      for (const entry of orderPendingReviewerDispatchEntries(pending, { laneState: activeLaneState })) {
+        if (!entry.started) recordDeferredReason(entry, 'reviewer-pool-saturated');
+      }
+      return null;
+    }
     for (const entry of orderPendingReviewerDispatchEntries(pending, { laneState: activeLaneState })) {
       if (entry.started) continue;
-      if (isGeminiCandidate(entry.candidate) && activeGemini >= geminiConcurrencyLimit) continue;
+      if (isGeminiCandidate(entry.candidate) && activeGemini >= geminiConcurrencyLimit) {
+        recordDeferredReason(
+          entry,
+          geminiConcurrencyLimit < 1
+            ? 'gemini-credential-concurrency-zero'
+            : 'gemini-credential-concurrency-saturated'
+        );
+        continue;
+      }
       return entry;
     }
     return null;
@@ -819,6 +837,9 @@ async function runBoundedReviewerDispatchQueue(candidates, {
       }
       if (active.size > 0) {
         initialWaveClosed = true;
+        for (const entry of pending) {
+          if (!entry.started) recordDeferredReason(entry, 'single-wave-deferred');
+        }
         logger?.log?.(
           `[watcher] reviewer dispatch single-wave detached after launch wave: ` +
             `active=${active.size} deferred=${pending.filter((item) => !item.started).length}`
@@ -855,7 +876,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
     prNumber: entry.candidate?.prNumber || null,
     reviewerModel: entry.candidate?.reviewerModel || null,
     passKind: reviewerDispatchPassKind(entry.candidate),
-    reason: deferReasonFor(entry.candidate),
+    reason: entry.deferredReason || deferReasonFor(entry.candidate),
   }));
   for (let index = 0; index < deferredEntries.length; index += 1) {
     logReviewerDispatchDeferred(deferredEntries[index].candidate, {

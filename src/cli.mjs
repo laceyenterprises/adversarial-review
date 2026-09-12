@@ -24,6 +24,7 @@ Usage:
   adversarial-review reset-pr <owner/repo> <pr-number> [options]
   adversarial-review tokens [--since 7d] [--by-pr | --by-reviewer] [--json]
   adversarial-review reviewer-roster [--json]
+  adversarial-review duplicate-family packet <family-id> [--root <dir>] [--repo-dir <dir>] [--out <dir>] [--no-github]
   adversarial-review handoff status [--repo <owner/repo>] [--window <24h>] [--root <dir>] [--json]
   adversarial-review handoff trace <owner/repo#pr> [--root <dir>] [--json]
   adversarial-review runtime status [--root <dir>] [--window <24h>] [--json]
@@ -159,6 +160,10 @@ async function main(argv, io = {}) {
   }
   if (command === 'reviewer-roster') {
     return reviewerRosterMain(rest, io);
+  }
+  if (command === 'duplicate-family') {
+    const { duplicateFamilyMain } = await import('./duplicate-family-packet.mjs');
+    return duplicateFamilyMain(rest, io);
   }
   if (command === 'handoff') {
     return handoffMain(rest, io);

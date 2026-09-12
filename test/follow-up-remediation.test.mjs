@@ -84,6 +84,7 @@ import {
   assertClaudeCodeBrokerOAuth,
   resolveClaudeCodeOAuthTransport,
 } from '../src/remediation-oauth-preflight.mjs';
+import { openReviewStateDb } from '../src/review-state.mjs';
 
 function greenCiGate() {
   return {
@@ -6087,6 +6088,7 @@ test('consumeFollowUpJobsUntilCapacity does not charge claim-time terminal trans
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createPendingRemediationJob(rootDir, {
     prNumber: 6,
+    revisionRef: 'clean-head-sha',
     critical: false,
     reviewBody: '## Summary\nClean.\n\n## Blocking Issues\n- None.\n\n## Non-blocking Issues\n- None.\n\n## Verdict\nComment only',
     reviewPostedAt: '2026-04-21T07:59:00.000Z',
@@ -6095,8 +6097,22 @@ test('consumeFollowUpJobsUntilCapacity does not charge claim-time terminal trans
   createPendingRemediationJob(rootDir, { prNumber: 8, reviewPostedAt: '2026-04-21T08:01:00.000Z' });
 
   const spawnCalls = [];
+  const wakeCalls = [];
   const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity(
-    drainerTestOptions(rootDir, spawnCalls, { maxConcurrent: 2 })
+    drainerTestOptions(rootDir, spawnCalls, {
+      maxConcurrent: 2,
+      requestWatcherWakeImpl: (args) => {
+        wakeCalls.push(args);
+        return {
+          requested: true,
+          payload: {
+            reason: args.reason,
+            requested_at: args.requestedAt,
+            request_id: 'wake-1',
+          },
+        };
+      },
+    })
   ));
 
   assert.equal(result.stopped, 1);
@@ -6106,6 +6122,54 @@ test('consumeFollowUpJobsUntilCapacity does not charge claim-time terminal trans
     result.results.map((entry) => entry.reason || (entry.consumed ? 'spawned' : 'unknown')),
     ['review-settled', 'spawned', 'spawned']
   );
+  assert.deepEqual(wakeCalls, [{
+    rootDir,
+    reason: 'clean-verdict-to-hammer',
+    repo: 'laceyenterprises/clio',
+    prNumber: 6,
+    requestedAt: '2026-04-21T10:30:00.000Z',
+  }]);
+
+  const stoppedDir = path.join(rootDir, 'data', 'follow-up-jobs', 'stopped');
+  const stoppedJobPath = path.join(
+    stoppedDir,
+    readdirSync(stoppedDir).find((name) => name.includes('pr-6-'))
+  );
+  const stoppedJob = JSON.parse(readFileSync(stoppedJobPath, 'utf8'));
+  assert.deepEqual(stoppedJob.hammerWake, {
+    requested: true,
+    reason: 'clean-verdict-to-hammer',
+    requestedAt: '2026-04-21T10:30:00.000Z',
+    requestId: 'wake-1',
+    reviewedHeadSha: 'clean-head-sha',
+  });
+  // `wakeOutcome` is carried so a FAILED wake is countable in the latency
+  // table rather than simply absent (review follow-up on #1052).
+  assert.deepEqual(stoppedJob.hammerWakeLatencyEvent, {
+    recorded: true,
+    eventType: 'hammer_wake',
+    wakeOutcome: 'requested',
+  });
+
+  const db = openReviewStateDb(rootDir);
+  try {
+    const events = db.prepare(
+      `SELECT repo, pr_number, revision_ref, event_type, stage, source, reason
+         FROM review_latency_events
+        WHERE event_type = 'hammer_wake'`
+    ).all();
+    assert.deepEqual(events, [{
+      repo: 'laceyenterprises/clio',
+      pr_number: 6,
+      revision_ref: 'clean-head-sha',
+      event_type: 'hammer_wake',
+      stage: 'merge',
+      source: 'follow-up-remediation',
+      reason: 'clean-verdict-to-hammer',
+    }]);
+  } finally {
+    db.close();
+  }
 });
 
 test('consumeFollowUpJobsUntilCapacity continues filling capacity after one job fails to spawn', async () => {

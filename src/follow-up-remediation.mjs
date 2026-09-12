@@ -66,6 +66,7 @@ import { deliverAlert } from './alert-delivery.mjs';
 import { captureRemediationBodyAfterPost } from './review-body-capture.mjs';
 import { resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
 import { requestWatcherWake } from './watcher-wake.mjs';
+import { requestHammerWakeForSettledReviewStop } from './hammer-wake.mjs';
 import { lifecycleStopDecision, resolveJobPRLifecycleSafe } from './follow-up-lifecycle.mjs';
 import { buildRemediationPrompt } from './remediation-prompt-builder.mjs';
 import {
@@ -2806,7 +2807,7 @@ async function reconcileFollowUpJob({
           requestedAt: completedAt,
         });
         rereview.wake = {
-          requested: wake?.requested !== false,
+          requested: wake?.requested === true,
           reason: wake?.payload?.reason || 'remediation-to-rereview',
           requestedAt: wake?.payload?.requested_at || completedAt,
         };
@@ -3460,6 +3461,7 @@ async function consumeNextFollowUpJob({
   promptTemplate = loadFollowUpPromptTemplate(rootDir),
   resolvePRLifecycleImpl = resolvePRLifecycle,
   postCommentImpl = postRemediationOutcomeComment,
+  requestWatcherWakeImpl = requestWatcherWake,
   excludedRepoPrKeys = new Set(),
   onExcludedRepoPrKey = null,
   delayedPendingPaths = null,
@@ -3496,6 +3498,7 @@ async function consumeNextFollowUpJob({
     return { consumed: false, reason: 'no-pending-jobs' };
   }
   if (claimed.stopped) {
+    const stoppedAt = now();
     if (claimed.reason === 'max-rounds-reached') {
       const persistedCap = Number(claimed.job?.remediationPlan?.maxRounds);
       logRoundBudgetDecision(log, {
@@ -3505,6 +3508,16 @@ async function consumeNextFollowUpJob({
         runsCompleted: Number(claimed.job?.remediationPlan?.currentRound || 0),
         cap: Number.isFinite(persistedCap) ? persistedCap : null,
         decision: 'deny',
+      });
+    }
+    if (claimed.reason === 'review-settled') {
+      requestHammerWakeForSettledReviewStop({
+        rootDir,
+        job: claimed.job,
+        jobPath: claimed.jobPath,
+        stoppedAt,
+        requestWatcherWakeImpl,
+        log,
       });
     }
     return {
@@ -4126,6 +4139,7 @@ async function consumeFollowUpJobsUntilCapacity({
   promptTemplate = loadFollowUpPromptTemplate(rootDir),
   resolvePRLifecycleImpl = resolvePRLifecycle,
   postCommentImpl = postRemediationOutcomeComment,
+  requestWatcherWakeImpl = requestWatcherWake,
   shouldStop = () => false,
   quotaHoldRevalidator = defaultQuotaHoldRevalidator,
   resolveRemediationWorkerClassImpl = null,
@@ -4162,6 +4176,7 @@ async function consumeFollowUpJobsUntilCapacity({
         promptTemplate,
         resolvePRLifecycleImpl,
         postCommentImpl,
+        requestWatcherWakeImpl,
         healthRouter,
         excludedRepoPrKeys: blockedRepoPrKeys,
         onExcludedRepoPrKey: (pendingPath) => {

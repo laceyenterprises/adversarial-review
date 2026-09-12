@@ -51,6 +51,10 @@ test('watcher-wake CLI writes the HAM eligible wake payload', async () => {
       filePath: watcherWakePath(rootDir),
       payload: persisted,
     });
+    // `pending_subjects` carries the un-consumed subjects so a burst of wakes
+    // does not lose all but the last (review follow-up on #1052). The
+    // top-level fields still describe the newest request, so readers predating
+    // the list are unaffected; on a fresh root the list holds just this one.
     assert.deepEqual(persisted, {
       schema_version: 1,
       request_id: 'test-hammer-eligible',
@@ -59,6 +63,13 @@ test('watcher-wake CLI writes the HAM eligible wake payload', async () => {
       repo: 'laceyenterprises/agent-os',
       pr_number: 6561,
       head_sha: 'abc123abc123abc123abc123abc123abc123abc1',
+      pending_subjects: [
+        {
+          repo: 'laceyenterprises/agent-os',
+          pr_number: 6561,
+          head_sha: 'abc123abc123abc123abc123abc123abc123abc1',
+        },
+      ],
     });
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

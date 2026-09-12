@@ -2874,6 +2874,16 @@ function schemaV1() {
             __nullable: true,
             __min: 1,
           },
+          // REVFAIR-01 lane share. While both first-pass and rereview work are
+          // pending, admit at most this many first-pass starts before giving the
+          // oldest rereview a floor slot. Default 2 keeps first-pass as the
+          // majority lane on a one-credential reviewer while preventing an
+          // endless first-pass stream from starving rereviews.
+          review_lane_first_pass_burst_limit: {
+            __type: TYPE_INT,
+            __default: 2,
+            __min: 1,
+          },
         },
       },
       // Subprocess timeouts for the follow-up pipeline's calls into `hq`.
@@ -3310,6 +3320,10 @@ export const ENV_ALIASES = {
   'watcher.first_pass_review_queue_depth_failover_threshold': {
     canonical: 'AGENT_OS_WATCHER_FIRST_PASS_REVIEW_QUEUE_DEPTH_FAILOVER_THRESHOLD',
     aliases: [['ADVERSARIAL_REVIEW_FIRST_PASS_QUEUE_DEPTH_FAILOVER_THRESHOLD', identity]],
+  },
+  'watcher.review_lane_first_pass_burst_limit': {
+    canonical: 'AGENT_OS_WATCHER_REVIEW_LANE_FIRST_PASS_BURST_LIMIT',
+    aliases: [['ADVERSARIAL_REVIEW_LANE_FIRST_PASS_BURST_LIMIT', identity]],
   },
   'follow_up.hq_worker_tear_down_subprocess_timeout_ms': {
     canonical: 'AGENT_OS_FOLLOW_UP_HQ_WORKER_TEAR_DOWN_SUBPROCESS_TIMEOUT_MS',

@@ -399,9 +399,11 @@ import {
 } from './reviewer-fence.mjs';
 import {
   compareReviewerDispatchCandidates,
+  createReviewerLaneState,
   createDetachedReviewerDispatchTracker,
   createReviewerMemoryAdmissionSampler,
   reserveReviewerMemoryAdmission, resolveFirstPassReviewerPoolConfig,
+  resolveReviewLaneConfig,
   resolveReviewerMemoryPressureConfig,
   runBoundedReviewerDispatchQueue,
   sortReviewerDispatchCandidates,
@@ -440,6 +442,7 @@ const domainRegistry = loadDomainRegistry(ROOT);
 // daemon restart. Startup stays fail-loud; per-tick refresh fails soft and
 // keeps the last-known-good list.
 let ENABLED_DOMAINS = domainRegistry.enabledDomains;
+const reviewerLaneState = createReviewerLaneState();
 function refreshEnabledDomains({ logger = console } = {}) {
   try {
     const fresh = loadDomainRegistry(ROOT).enabledDomains;
@@ -1234,6 +1237,8 @@ async function pollOnce(
   }
 
   const reviewerPoolConfig = resolveFirstPassReviewerPoolConfig({ watcherConfig: config });
+  const reviewerLaneConfig = resolveReviewLaneConfig();
+  reviewerLaneState.firstPassBurstLimit = reviewerLaneConfig.firstPassBurstLimit;
   const reviewerDispatchSingleWaveSettleGraceMs = Math.max(
     0,
     Number.parseInt(
@@ -1281,6 +1286,7 @@ async function pollOnce(
         maxConcurrent: reviewerPoolConfig.maxConcurrent,
         geminiCredentialConcurrency,
         activeReviewerCounts: detachedReviewerDispatchTracker.activeCounts(),
+        laneState: reviewerLaneState,
         singleWave: true,
         singleWaveSettleGraceMs: reviewerDispatchSingleWaveSettleGraceMs,
         onCandidateStarted: detachedReviewerDispatchTracker.track,

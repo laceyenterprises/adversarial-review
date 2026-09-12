@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 
 import {
   createDetachedReviewerDispatchTracker,
+  createReviewerLaneState,
   createReviewerMemoryAdmissionSampler,
+  resolveReviewLaneConfig,
   resolveReviewerCredentialConcurrencyLimit,
   resolveReviewerMemoryPressureConfig,
   resolveFirstPassReviewerPoolConfig,
@@ -417,6 +419,79 @@ test('pending rereviews do not masquerade as first-pass work when posted_at is c
   ]);
 
   assert.deepEqual(sorted.map((item) => item.prNumber), [90, 10]);
+});
+
+test('reviewer lane gives rereview a floor after the configured first-pass burst', async () => {
+  const events = [];
+  const laneState = createReviewerLaneState({ firstPassBurstLimit: 2 });
+
+  await runBoundedReviewerDispatchQueue([
+    candidate(90, async () => { events.push(90); }, '2026-05-09T00:00:00.000Z'),
+    candidate(10, async () => { events.push(10); }, '2026-05-01T00:00:00.000Z', {
+      current: {
+        posted_at: null,
+        rereview_requested_at: '2026-05-01T00:05:00.000Z',
+      },
+    }),
+    candidate(91, async () => { events.push(91); }, '2026-05-10T00:00:00.000Z'),
+    candidate(92, async () => { events.push(92); }, '2026-05-11T00:00:00.000Z'),
+  ], {
+    maxConcurrent: 1,
+    laneState,
+    logger: { error() {}, log() {}, warn() {} },
+  });
+
+  assert.deepEqual(events, [90, 91, 10, 92]);
+  assert.equal(laneState.firstPassStartsSinceRereview, 1);
+});
+
+test('reviewer lane state persists across single-slot drain ticks', async () => {
+  const events = [];
+  const laneState = createReviewerLaneState({ firstPassBurstLimit: 2 });
+  const pendingRereview = {
+    posted_at: null,
+    rereview_requested_at: '2026-05-01T00:05:00.000Z',
+  };
+
+  for (const batch of [
+    [
+      candidate(90, async () => { events.push(90); }, '2026-05-09T00:00:00.000Z'),
+      candidate(10, async () => { events.push(10); }, '2026-05-01T00:00:00.000Z', { current: pendingRereview }),
+    ],
+    [
+      candidate(91, async () => { events.push(91); }, '2026-05-10T00:00:00.000Z'),
+      candidate(10, async () => { events.push('10b'); }, '2026-05-01T00:00:00.000Z', { current: pendingRereview }),
+    ],
+    [
+      candidate(92, async () => { events.push(92); }, '2026-05-11T00:00:00.000Z'),
+      candidate(10, async () => { events.push('10c'); }, '2026-05-01T00:00:00.000Z', { current: pendingRereview }),
+    ],
+  ]) {
+    const summary = await runBoundedReviewerDispatchQueue(batch, {
+      maxConcurrent: 1,
+      laneState,
+      singleWave: true,
+      singleWaveSettleGraceMs: 0,
+      logger: { error() {}, log() {}, warn() {} },
+    });
+    assert.equal(summary.dispatched, 1);
+  }
+
+  assert.deepEqual(events, [90, 91, '10c']);
+  assert.equal(laneState.firstPassStartsSinceRereview, 0);
+});
+
+test('reviewer lane config defaults to a 2:first-pass burst and honors canonical env', () => {
+  assert.deepEqual(resolveReviewLaneConfig({ env: {}, topPath: '/dev/null' }), {
+    firstPassBurstLimit: 2,
+  });
+  assert.deepEqual(
+    resolveReviewLaneConfig({
+      env: { AGENT_OS_WATCHER_REVIEW_LANE_FIRST_PASS_BURST_LIMIT: '4' },
+      topPath: '/dev/null',
+    }),
+    { firstPassBurstLimit: 4 },
+  );
 });
 
 test('reviewer dispatch tie-breaks equal ages by repo path before PR number', () => {

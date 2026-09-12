@@ -6,6 +6,7 @@ import {
   duplicateFamilyCandidateRows,
   ensureDuplicateFamilySchema,
   listDuplicateFamilies,
+  readDuplicateFamilyForPr,
   reconcileDuplicateFamiliesForRepo,
   runDuplicateFamilyCensusForWatcher,
 } from '../src/duplicate-family-state.mjs';
@@ -282,11 +283,11 @@ test('re-census marks absent advisory families inactive without duplicate transi
   };
   try {
     reconcileDuplicateFamiliesForRepo(db, duplicateEntries, options);
-    reconcileDuplicateFamiliesForRepo(db, [subject(451)], {
+    reconcileDuplicateFamiliesForRepo(db, [subject(451, { state: 'CLOSED' })], {
       ...options,
       now: '2026-09-11T00:05:00.000Z',
     });
-    reconcileDuplicateFamiliesForRepo(db, [subject(451)], {
+    reconcileDuplicateFamiliesForRepo(db, [subject(451, { state: 'CLOSED' })], {
       ...options,
       now: '2026-09-11T00:06:00.000Z',
     });
@@ -318,7 +319,7 @@ test('re-census records reactivation when an inactive family becomes advisory ag
   };
   try {
     reconcileDuplicateFamiliesForRepo(db, duplicateEntries, options);
-    reconcileDuplicateFamiliesForRepo(db, [subject(471)], {
+    reconcileDuplicateFamiliesForRepo(db, [subject(471, { state: 'CLOSED' })], {
       ...options,
       now: '2026-09-11T00:05:00.000Z',
     });
@@ -336,6 +337,132 @@ test('re-census records reactivation when an inactive family becomes advisory ag
       'reactivated-advisory',
     ]);
     assert.equal(transitions[2].reason, 'duplicate-census-detected-again');
+  } finally {
+    db.close();
+  }
+});
+
+test('transition log records recurring inactive and reactivated cycles', () => {
+  const db = memoryDb();
+  const duplicateEntries = [
+    subject(475),
+    subject(476),
+  ];
+  const options = {
+    repoPath: REPO,
+    now: '2026-09-11T00:00:00.000Z',
+    readBuildCompletionSignalForPrImpl: provenanceReader({
+      475: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+      476: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+    }),
+  };
+  try {
+    reconcileDuplicateFamiliesForRepo(db, duplicateEntries, options);
+    reconcileDuplicateFamiliesForRepo(db, [subject(475, { state: 'CLOSED' })], {
+      ...options,
+      now: '2026-09-11T00:05:00.000Z',
+    });
+    reconcileDuplicateFamiliesForRepo(db, duplicateEntries, {
+      ...options,
+      now: '2026-09-11T00:10:00.000Z',
+    });
+    reconcileDuplicateFamiliesForRepo(db, [subject(475, { state: 'CLOSED' })], {
+      ...options,
+      now: '2026-09-11T00:15:00.000Z',
+    });
+    reconcileDuplicateFamiliesForRepo(db, duplicateEntries, {
+      ...options,
+      now: '2026-09-11T00:20:00.000Z',
+    });
+
+    const transitions = JSON.parse(listDuplicateFamilies(db)[0].transition_log_json);
+    assert.deepEqual(transitions.map((entry) => entry.transition), [
+      'detected-advisory',
+      'census-no-longer-duplicate',
+      'reactivated-advisory',
+      'census-no-longer-duplicate',
+      'reactivated-advisory',
+    ]);
+  } finally {
+    db.close();
+  }
+});
+
+test('candidate reassignment keeps one family mapping per PR', () => {
+  const db = memoryDb();
+  try {
+    const dpaFamily = reconcileDuplicateFamiliesForRepo(db, [
+      subject(601, { title: '[codex] DPA-01: first', headRefName: 'codex/dpa-01-a' }),
+      subject(602, { title: '[codex] DPA-01: second', headRefName: 'codex/dpa-01-b' }),
+    ], {
+      repoPath: REPO,
+      now: '2026-09-11T00:00:00.000Z',
+      readBuildCompletionSignalForPrImpl: provenanceReader({
+        601: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+        602: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+      }),
+    });
+    const dpaFamilyId = dpaFamily.familyIds[0];
+
+    const dpbFamily = reconcileDuplicateFamiliesForRepo(db, [
+      subject(601, { title: '[codex] DPB-02: moved', headRefName: 'codex/dpb-02-a' }),
+      subject(603, { title: '[codex] DPB-02: sibling', headRefName: 'codex/dpb-02-b' }),
+    ], {
+      repoPath: REPO,
+      now: '2026-09-11T00:05:00.000Z',
+      readBuildCompletionSignalForPrImpl: provenanceReader({
+        601: { ticket_id: 'DPB-02', spec_ref: 'spec@2' },
+        603: { ticket_id: 'DPB-02', spec_ref: 'spec@2' },
+      }),
+    });
+
+    assert.notEqual(dpbFamily.familyIds[0], dpaFamilyId);
+    assert.equal(
+      db.prepare('SELECT COUNT(*) AS n FROM duplicate_family_candidates WHERE repo = ? AND pr_number = ?').get(REPO, 601).n,
+      1
+    );
+    assert.equal(readDuplicateFamilyForPr(db, { repo: REPO, prNumber: 601 })?.family_id, dpbFamily.familyIds[0]);
+
+    db.prepare('UPDATE duplicate_families SET updated_at = ? WHERE family_id = ?')
+      .run('2026-09-11T00:10:00.000Z', dpaFamilyId);
+    assert.equal(readDuplicateFamilyForPr(db, { repo: REPO, prNumber: 601 })?.family_id, dpbFamily.familyIds[0]);
+  } finally {
+    db.close();
+  }
+});
+
+test('windowed census preserves active families when no candidate is observed', () => {
+  const db = memoryDb();
+  const duplicateEntries = [
+    subject(701),
+    subject(702),
+  ];
+  const options = {
+    repoPath: REPO,
+    now: '2026-09-11T00:00:00.000Z',
+    readBuildCompletionSignalForPrImpl: provenanceReader({
+      701: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+      702: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+      801: { ticket_id: 'OTHER-01', spec_ref: 'spec@other' },
+    }),
+  };
+  try {
+    const first = reconcileDuplicateFamiliesForRepo(db, duplicateEntries, options);
+    assert.equal(first.familyIds.length, 1);
+
+    reconcileDuplicateFamiliesForRepo(db, [subject(801, {
+      title: '[codex] OTHER-01: unrelated',
+      headRefName: 'codex/other-01',
+    })], {
+      ...options,
+      now: '2026-09-11T00:05:00.000Z',
+    });
+
+    const family = listDuplicateFamilies(db).find((row) => row.family_id === first.familyIds[0]);
+    assert.equal(family.status, 'advisory');
+    assert.deepEqual(JSON.parse(family.transition_log_json).map((entry) => entry.transition), [
+      'detected-advisory',
+    ]);
   } finally {
     db.close();
   }

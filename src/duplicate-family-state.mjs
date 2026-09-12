@@ -99,10 +99,17 @@ export function ensureDuplicateFamilySchema(db) {
       first_seen_at             TEXT NOT NULL,
       last_seen_at              TEXT NOT NULL,
       updated_at                TEXT NOT NULL,
-      PRIMARY KEY (family_id, repo, pr_number),
+      PRIMARY KEY (repo, pr_number),
       FOREIGN KEY (family_id) REFERENCES duplicate_families(family_id) ON DELETE CASCADE
     );
 
+    CREATE INDEX IF NOT EXISTS idx_duplicate_family_candidates_pr
+      ON duplicate_family_candidates(repo, pr_number, head_sha);
+    CREATE INDEX IF NOT EXISTS idx_duplicate_families_status
+      ON duplicate_families(status, target_repo, base_branch);
+  `);
+  migrateDuplicateFamilyCandidatesPrimaryKey(db);
+  db.exec(`
     CREATE INDEX IF NOT EXISTS idx_duplicate_family_candidates_pr
       ON duplicate_family_candidates(repo, pr_number, head_sha);
     CREATE INDEX IF NOT EXISTS idx_duplicate_families_status
@@ -285,7 +292,9 @@ export function detectDuplicateFamiliesForRepo(subjectEntries, {
     const subject = entry?.subject || {};
     const prNumber = Number(entry?.prNumber ?? subject.number ?? subject.prNumber);
     if (!Number.isInteger(prNumber) || prNumber <= 0) continue;
-    const identity = extractDuplicateWorkIdentity(entry, {
+    const identity = shouldUseSuppliedDuplicateWorkIdentity(entry)
+      ? duplicateWorkIdentityFromEntry(entry)
+      : extractDuplicateWorkIdentity(entry, {
       repoPath,
       rootDir,
       hqRoot,
@@ -361,6 +370,55 @@ function readExistingFamilyByKey(db, familyKey) {
   return db.prepare('SELECT * FROM duplicate_families WHERE family_key = ?').get(familyKey) || null;
 }
 
+function duplicateFamilyCandidatesPrimaryKeyColumns(db) {
+  return db.prepare('PRAGMA table_info(duplicate_family_candidates)')
+    .all()
+    .filter((column) => Number(column.pk) > 0)
+    .sort((a, b) => Number(a.pk) - Number(b.pk))
+    .map((column) => column.name);
+}
+
+function migrateDuplicateFamilyCandidatesPrimaryKey(db) {
+  const primaryKeyColumns = duplicateFamilyCandidatesPrimaryKeyColumns(db);
+  if (primaryKeyColumns.join('|') === 'repo|pr_number') return;
+  const legacyTable = `duplicate_family_candidates_legacy_${Date.now()}`;
+  db.exec(`
+    ALTER TABLE duplicate_family_candidates RENAME TO ${legacyTable};
+    CREATE TABLE duplicate_family_candidates (
+      family_id                 TEXT NOT NULL,
+      repo                      TEXT NOT NULL,
+      pr_number                 INTEGER NOT NULL,
+      title                     TEXT,
+      pr_state                  TEXT,
+      base_branch               TEXT,
+      head_branch               TEXT,
+      head_sha                  TEXT,
+      base_sha                  TEXT,
+      role                      TEXT NOT NULL DEFAULT 'candidate',
+      work_identity_json        TEXT NOT NULL,
+      signals_json              TEXT NOT NULL,
+      suppressions_json         TEXT NOT NULL DEFAULT '[]',
+      labels_json               TEXT NOT NULL DEFAULT '[]',
+      first_seen_at             TEXT NOT NULL,
+      last_seen_at              TEXT NOT NULL,
+      updated_at                TEXT NOT NULL,
+      PRIMARY KEY (repo, pr_number),
+      FOREIGN KEY (family_id) REFERENCES duplicate_families(family_id) ON DELETE CASCADE
+    );
+    INSERT OR REPLACE INTO duplicate_family_candidates (
+      family_id, repo, pr_number, title, pr_state, base_branch, head_branch,
+      head_sha, base_sha, role, work_identity_json, signals_json,
+      suppressions_json, labels_json, first_seen_at, last_seen_at, updated_at
+    )
+    SELECT family_id, repo, pr_number, title, pr_state, base_branch, head_branch,
+           head_sha, base_sha, role, work_identity_json, signals_json,
+           suppressions_json, labels_json, first_seen_at, last_seen_at, updated_at
+      FROM ${legacyTable}
+     ORDER BY updated_at ASC, last_seen_at ASC, family_id ASC;
+    DROP TABLE ${legacyTable};
+  `);
+}
+
 function updateOperatorOverrideForHeadMove(existing, candidates) {
   const override = parseMaybeJson(existing?.operator_override_json, null);
   if (!override || typeof override !== 'object' || Array.isArray(override)) return existing?.operator_override_json || null;
@@ -384,18 +442,112 @@ function updateOperatorOverrideForHeadMove(existing, candidates) {
 function appendTransitionLog(existingJson, transition) {
   const existing = parseMaybeJson(existingJson, []);
   const transitions = Array.isArray(existing) ? existing : [];
-  const alreadyPresent = transitions.some((entry) => (
-    entry?.transition === transition.transition
-    && entry?.status === transition.status
-    && entry?.reason === transition.reason
-  ));
+  const previous = transitions.at(-1);
+  const alreadyPresent = (
+    previous?.transition === transition.transition
+    && previous?.status === transition.status
+    && previous?.reason === transition.reason
+  );
   return JSON.stringify(alreadyPresent ? transitions : [...transitions, transition]);
+}
+
+function subjectEntryKey(entry, fallbackRepo = null) {
+  const subject = entry?.subject || {};
+  const repo = normalizeText(entry?.repoPath || entry?.repo || subject.repositoryWithOwner || subject.repo || fallbackRepo);
+  const prNumber = Number(entry?.prNumber ?? subject.number ?? subject.prNumber);
+  if (!repo || !Number.isInteger(prNumber) || prNumber <= 0) return null;
+  return `${repo}\0${prNumber}`;
+}
+
+function observedSubjectCandidateKeys(subjectEntries, repoPath) {
+  const keys = new Set();
+  for (const entry of Array.isArray(subjectEntries) ? subjectEntries : []) {
+    const subject = entry?.subject || {};
+    const prNumber = Number(entry?.prNumber ?? subject.number ?? subject.prNumber);
+    if (!Number.isInteger(prNumber) || prNumber <= 0) continue;
+    const repo = normalizeText(entry?.repoPath || entry?.repo || subject.repositoryWithOwner || subject.repo || repoPath);
+    if (!repo) continue;
+    keys.add(`${repo}\0${prNumber}`);
+  }
+  return keys;
+}
+
+function familyHasObservedCandidate(db, familyId, observedCandidateKeys) {
+  if (!(observedCandidateKeys instanceof Set) || observedCandidateKeys.size === 0) return false;
+  const rows = db.prepare(
+    `SELECT repo, pr_number
+       FROM duplicate_family_candidates
+      WHERE family_id = ?`
+  ).all(familyId);
+  return rows.some((row) => observedCandidateKeys.has(`${row.repo}\0${row.pr_number}`));
+}
+
+function mergePersistedDuplicateCandidates(db, subjectEntries, repoPath) {
+  if (!repoPath) return Array.isArray(subjectEntries) ? subjectEntries : [];
+  const merged = Array.isArray(subjectEntries) ? [...subjectEntries] : [];
+  const seen = new Set(merged.map((entry) => subjectEntryKey(entry, repoPath)).filter(Boolean));
+  const rows = db.prepare(
+    `SELECT duplicate_family_candidates.*
+       FROM duplicate_family_candidates
+       JOIN duplicate_families
+         ON duplicate_families.family_id = duplicate_family_candidates.family_id
+      WHERE duplicate_families.target_repo = ?
+        AND duplicate_families.status = ?`
+  ).all(repoPath, DUPLICATE_FAMILY_STATUS_ADVISORY);
+  for (const row of rows) {
+    const key = `${row.repo}\0${row.pr_number}`;
+    if (seen.has(key)) continue;
+    const workIdentity = parseMaybeJson(row.work_identity_json, {});
+    const signals = parseMaybeJson(row.signals_json, []);
+    const labels = parseMaybeJson(row.labels_json, []);
+    merged.push({
+      repoPath: row.repo,
+      prNumber: row.pr_number,
+      subject: {
+        number: row.pr_number,
+        title: row.title,
+        state: row.pr_state,
+        baseRefName: row.base_branch,
+        headRefName: row.head_branch,
+        headSha: row.head_sha,
+        baseSha: row.base_sha,
+        labels,
+      },
+      current: { pr_state: row.pr_state },
+      duplicateWorkIdentity: {
+        ...workIdentity,
+        found: Boolean(workIdentity?.normalizedWorkIdentity),
+        signals,
+      },
+    });
+    seen.add(key);
+  }
+  return merged;
+}
+
+function shouldUseSuppliedDuplicateWorkIdentity(entry) {
+  return Boolean(entry?.duplicateWorkIdentity?.found && entry.duplicateWorkIdentity?.normalizedWorkIdentity);
+}
+
+function duplicateWorkIdentityFromEntry(entry) {
+  const identity = entry.duplicateWorkIdentity || {};
+  return {
+    found: true,
+    normalizedWorkIdentity: identity.normalizedWorkIdentity,
+    baseBranch: identity.baseBranch || entry?.subject?.baseRefName || 'main',
+    headBranch: identity.headBranch || entry?.subject?.headRefName || null,
+    headSha: identity.headSha || entry?.subject?.headSha || null,
+    baseSha: identity.baseSha || entry?.subject?.baseSha || null,
+    signals: Array.isArray(identity.signals) ? identity.signals : [],
+    provenance: identity.provenance || { ok: true, resolvedBy: 'persisted-duplicate-candidate' },
+  };
 }
 
 export function upsertDuplicateFamilies(db, families, {
   now = new Date().toISOString(),
   repoPath = null,
   deactivateMissing = false,
+  observedCandidateKeys = null,
 } = {}) {
   ensureDuplicateFamilySchema(db);
   const upsertFamily = db.prepare(
@@ -445,7 +597,8 @@ export function upsertDuplicateFamilies(db, families, {
        head_sha, base_sha, role, work_identity_json, signals_json,
        suppressions_json, labels_json, first_seen_at, last_seen_at, updated_at
      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'candidate', ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(family_id, repo, pr_number) DO UPDATE SET
+     ON CONFLICT(repo, pr_number) DO UPDATE SET
+       family_id = excluded.family_id,
        title = excluded.title,
        pr_state = excluded.pr_state,
        base_branch = excluded.base_branch,
@@ -523,6 +676,7 @@ export function upsertDuplicateFamilies(db, families, {
       const activeKeys = new Set((Array.isArray(families) ? families : []).map((family) => family.familyKey));
       for (const row of selectActiveRepoFamilies.all(repoPath, DUPLICATE_FAMILY_STATUS_ADVISORY)) {
         if (activeKeys.has(row.family_key)) continue;
+        if (!familyHasObservedCandidate(db, row.family_id, observedCandidateKeys)) continue;
         markInactive.run(
           DUPLICATE_FAMILY_STATUS_INACTIVE,
           appendTransitionLog(row.transition_log_json, {
@@ -544,11 +698,16 @@ export function upsertDuplicateFamilies(db, families, {
 }
 
 export function reconcileDuplicateFamiliesForRepo(db, subjectEntries, options = {}) {
-  const families = detectDuplicateFamiliesForRepo(subjectEntries, options);
+  ensureDuplicateFamilySchema(db);
+  const repoPath = options.repoPath;
+  const observedCandidateKeys = observedSubjectCandidateKeys(subjectEntries, repoPath);
+  const censusEntries = mergePersistedDuplicateCandidates(db, subjectEntries, repoPath);
+  const families = detectDuplicateFamiliesForRepo(censusEntries, options);
   const familyIds = upsertDuplicateFamilies(db, families, {
     ...options,
-    repoPath: options.repoPath,
+    repoPath,
     deactivateMissing: true,
+    observedCandidateKeys,
   });
   return { families, familyIds };
 }

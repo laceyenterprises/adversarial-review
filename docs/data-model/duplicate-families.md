@@ -42,7 +42,9 @@ One row per detected work-identity family.
 
 ### `duplicate_family_candidates`
 
-One row per PR candidate associated with an active family.
+One row per PR candidate currently associated with a duplicate family. A PR can
+belong to only one family at a time; reassignment updates the row's
+`family_id`.
 
 | Column | Contract |
 |---|---|
@@ -64,11 +66,13 @@ One row per PR candidate associated with an active family.
 | `last_seen_at` | Last census time this PR was observed for the family. |
 | `updated_at` | Last time this candidate row was refreshed. |
 
-The primary key is `(family_id, repo, pr_number)`. The watcher keeps candidate
+The primary key is `(repo, pr_number)`. The watcher keeps candidate
 rows current for every PR still mapped to an active family, including PRs that
 became merged, closed, or suppressed after the family was first detected. This
 prevents stale `open` candidate state from surviving while sibling PRs keep the
-family advisory active.
+family advisory active. Existing databases created with the older
+`(family_id, repo, pr_number)` key are migrated in place by
+`ensureDuplicateFamilySchema(db)`.
 
 ## Operational Contract
 
@@ -78,9 +82,14 @@ family advisory active.
   candidates with at least two common strong signals before returning an
   advisory family.
 - `upsertDuplicateFamilies()` persists all candidates in each returned family,
-  while `candidate_count` tracks only the active open unsuppressed subset.
-- `deactivateMissing` marks active advisory families inactive when a repo census
-  no longer returns that family key.
+  while `candidate_count` tracks only the active open unsuppressed subset. If a
+  PR is detected in a different family, its existing candidate row is reassigned
+  to the new `family_id`.
+- `deactivateMissing` marks active advisory families inactive only when the
+  current census observed at least one persisted candidate from that family and
+  no longer returns the family key. Families that are absent solely because all
+  candidates fell outside a windowed polling slice remain advisory until a later
+  observation proves they no longer have two live unsuppressed candidates.
 - Operator overrides are not deleted automatically. If the override references
   a candidate whose head moved, the override is marked stale for that observed
   head without regenerating the stale timestamp on later identical polls.

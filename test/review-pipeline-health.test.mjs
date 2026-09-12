@@ -1653,12 +1653,13 @@ test('AMAGAP-01: conflicted backlog with no recent hammer dispatch raises a heal
     },
   }, null, 2)}\n`);
   writeFileSync(dispatchLog, '2026-05-25 14:30:00,000 INFO worker_class=codex spawned\n');
+  utimesSync(dispatchLog, new Date('2026-05-25T14:30:00.000Z'), new Date('2026-05-25T14:30:00.000Z'));
 
   const snapshot = collectReviewPipelineHealth({
     rootDir,
     hqRoot,
     now: () => new Date(NOW),
-    env: { USER: 'fixture' },
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
     config: { hammerDispatchStallMaxAgeMs: 60 * 60 * 1000 },
   });
 
@@ -1669,17 +1670,45 @@ test('AMAGAP-01: conflicted backlog with no recent hammer dispatch raises a heal
 
   writeFileSync(
     dispatchLog,
-    '2026-05-25 17:45:00,000 INFO cwp.daemon spawned lrq_1 pid=123 worker_class=hammer\n',
+    '2026-05-25 10:45:00,000 INFO cwp.daemon spawned lrq_1 pid=123 worker_class=hammer\n',
   );
+  utimesSync(dispatchLog, new Date('2026-05-25T17:45:00.000Z'), new Date('2026-05-25T17:45:00.000Z'));
   const recovered = collectReviewPipelineHealth({
     rootDir,
     hqRoot,
     now: () => new Date(NOW),
-    env: { USER: 'fixture' },
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
     config: { hammerDispatchStallMaxAgeMs: 60 * 60 * 1000 },
   });
   assert.ok(!findingCodes(recovered).includes('review:hammer_dispatch_stalled_with_conflicts'));
   assert.equal(recovered.hammerDispatchStall.active, false);
+  assert.equal(recovered.hammerDispatchStall.hammerDispatchSeen, true);
+});
+
+test('AMAGAP-01: hammer dispatch stall probe is inert when host checks are disabled', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const stateDir = path.join(hqRoot, 'dispatch', '_auto_merge-fixture');
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(path.join(stateDir, 'daemon-state.json'), `${JSON.stringify({
+    dirtyPrBacklog: {
+      dirtyPrCount: 9,
+      recordedAt: '2026-05-25T15:00:00.000Z',
+      signature: ['laceyenterprises/agent-os#6651@aaa'],
+    },
+  }, null, 2)}\n`);
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot,
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '0' },
+    config: { hammerDispatchStallMaxAgeMs: 60 * 60 * 1000 },
+  });
+
+  assert.ok(!findingCodes(snapshot).includes('review:hammer_dispatch_stalled_with_conflicts'));
+  assert.equal(snapshot.hammerDispatchStall.active, false);
+  assert.equal(snapshot.hammerDispatchStall.backlog.present, false);
 });
 
 test('dispatch spawn classifier ignores op cache backoff and successful daemon spawns', () => {

@@ -100,6 +100,8 @@ The Grafana dashboard lives at
 - `review_pipeline_dispatch_spawn_failures`: recent dispatch daemon stderr
   lines matching closer/hammer spawn failure signals such as entitlement-auth,
   403 rate-limit, or exit 65.
+- `review_pipeline_hammer_dispatch_stalled`: conflicted PR backlog exists while
+  the dispatch daemon log has no recent hammer spawn.
 - `review_pipeline_dag_autowalk_healthy`: dag-autowalk LaunchAgent last-exit
   and recent-log health.
 - `review_pipeline_sentinel_finding_active`: 1 when a finding code is currently
@@ -137,6 +139,7 @@ Its action headline is `Reviews stalled — restore reviewer dispatch`.
 | `review:daemon_liveness` | required local pipeline LaunchAgent is not loaded | ticket | adversarial watcher, adversarial follow-up, and dispatch daemon labels are loaded |
 | `review:daemon_probe_failure` | required local pipeline LaunchAgent loaded state cannot be determined | ticket | launchctl probes can determine loaded state for adversarial watcher, adversarial follow-up, dispatch daemon, and dag-autowalk labels |
 | `review:dispatch_spawn_failures` | dispatch daemon stderr has recent closer/hammer spawn-failure signals over 1h | ticket | no matching recent dispatch daemon stderr lines remain |
+| `review:hammer_dispatch_stalled_with_conflicts` | conflicted/dirty PRs are present in auto-merge state and no hammer dispatch has been observed in the dispatch daemon log within 2h | ticket | a hammer dispatch is observed in the dispatch daemon log, the conflicted backlog clears, or the log is outside host-check collection |
 | `review:dag_autowalk_launchd_unhealthy` | dag-autowalk is unloaded, last exit is non-zero, or logs are stale for >2h | ticket | dag-autowalk is loaded with a zero/unknown last exit and fresh logs |
 
 ## Configuration

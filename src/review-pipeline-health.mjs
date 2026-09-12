@@ -2091,13 +2091,6 @@ function summarizeDispatchSpawnFailures(hqRoot, { nowMs, config }) {
   };
 }
 
-function parseDaemonLogTimestampMs(line) {
-  const match = String(line || '').match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:,\d+|\.\d+)?/);
-  if (!match) return null;
-  const parsed = Date.parse(`${match[1]}T${match[2]}Z`);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
 function hammerDispatchPattern() {
   return /\b(?:cwp\.daemon\s+spawned|spawn(?:ed)?)\b[\s\S]{0,180}\bworker_class=hammer\b/i;
 }
@@ -2140,17 +2133,15 @@ function summarizeHammerDispatchStall(hqRoot, { env = process.env, nowMs, config
   const backlog = readDirtyPrBacklogState(hqRoot, { env, nowMs });
   const logPath = join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log');
   const log = tailRecentLines(logPath);
-  let lastHammerDispatchAt = null;
+  let hammerDispatchSeen = false;
   const pattern = hammerDispatchPattern();
   if (log.exists) {
     for (const line of log.lines) {
       if (!pattern.test(line)) continue;
-      const lineMs = parseDaemonLogTimestampMs(line);
-      if (lineMs !== null && (lastHammerDispatchAt === null || lineMs > lastHammerDispatchAt)) {
-        lastHammerDispatchAt = lineMs;
-      }
+      hammerDispatchSeen = true;
     }
   }
+  const lastHammerDispatchAt = hammerDispatchSeen ? log.mtimeMs : null;
   const lastHammerDispatchAgeMs = lastHammerDispatchAt === null
     ? null
     : Math.max(0, nowMs - lastHammerDispatchAt);
@@ -2165,6 +2156,7 @@ function summarizeHammerDispatchStall(hqRoot, { env = process.env, nowMs, config
     backlog,
     logPath,
     logExists: log.exists,
+    hammerDispatchSeen,
     lastHammerDispatchAt: lastHammerDispatchAt === null ? null : new Date(lastHammerDispatchAt).toISOString(),
     lastHammerDispatchAgeMs,
   };
@@ -2876,7 +2868,7 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     const thresholdMinutes = Math.round(snapshot.hammerDispatchStall.thresholdMs / 60000);
     findings.push(buildFinding({
       code: 'review:hammer_dispatch_stalled_with_conflicts',
-      tier: 'page',
+      tier: 'ticket',
       subject: `${backlog.dirtyPrCount || 0} conflicted PR(s) exist with no recent hammer dispatch`,
       message: `Auto-merge state reports ${backlog.dirtyPrCount || 0} conflicted/dirty PR(s), but the dispatch daemon log has no hammer spawn within ${thresholdMinutes}m.`,
       evidence: [
@@ -3036,7 +3028,18 @@ function collectReviewPipelineHealth({
     const dispatchSpawnFailures = config.hostChecksEnabled
       ? summarizeDispatchSpawnFailures(hqRoot, { nowMs, config })
       : { logPath: join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log'), logExists: false, logAgeMs: null, windowMs: config.dispatchSpawnFailureWindowMs, matches: [] };
-    const hammerDispatchStall = summarizeHammerDispatchStall(hqRoot, { env, nowMs, config });
+    const hammerDispatchStall = config.hostChecksEnabled
+      ? summarizeHammerDispatchStall(hqRoot, { env, nowMs, config })
+      : {
+          active: false,
+          thresholdMs: config.hammerDispatchStallMaxAgeMs,
+          backlog: { present: false, statePath: null, dirtyPrCount: 0, prs: [] },
+          logPath: join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log'),
+          logExists: false,
+          hammerDispatchSeen: false,
+          lastHammerDispatchAt: null,
+          lastHammerDispatchAgeMs: null,
+        };
     // TREC-01: both `review:queue_starvation` and `review:terminal_but_unmerged`
     // select their population from `reviewed_prs.pr_state`, so their findings
     // are only as true as the mirror. This reads the lifecycle sweep's

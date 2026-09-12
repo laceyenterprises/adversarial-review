@@ -6,6 +6,7 @@ import path from 'node:path';
 
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 import {
+  emitTerminalButUnmergedAlarm,
   evaluateTtmFromDb,
   runTtmTrackerTick,
 } from '../src/ttm-tracker.mjs';
@@ -218,6 +219,76 @@ test('rollup computes median, p90, open breaches, and 12h terminal stall duratio
     assert.equal(tick.rollup.openPrsBreachingBudget, 1);
     assert.equal(tick.rollup.terminalButUnmergedStallsLast12h, 1);
     assert.equal(tick.rollup.terminalButUnmergedMaxDurationMinutesLast12h, 20);
+  } finally {
+    db.close();
+  }
+});
+
+test('terminal-but-unmerged activation emits the outcome alarm', async () => {
+  const rootDir = tempRoot();
+  const db = openDb(rootDir);
+  try {
+    insertReviewRow(db, {
+      prNumber: 17,
+      reviewedAt: '2026-08-09T17:25:00.000Z',
+      postedAt: '2026-08-09T17:30:00.000Z',
+    });
+    insertPass(db, {
+      prNumber: 17,
+      startedAt: '2026-08-09T17:26:00.000Z',
+      endedAt: '2026-08-09T17:30:00.000Z',
+    });
+    const tick = runTtmTrackerTick(db, {
+      now: () => new Date(NOW),
+      config: { baseBudgetMinutes: 15, perRoundBudgetMinutes: 10, terminalUnmergedMinutes: 10 },
+    });
+    const alerts = [];
+
+    const result = await emitTerminalButUnmergedAlarm({
+      ttm: tick,
+      deliverAlertFn: async (text, meta) => alerts.push({ text, meta }),
+    });
+
+    assert.equal(result.fired, 1);
+    assert.equal(alerts.length, 1);
+    assert.equal(alerts[0].meta.event, 'adversarial_review.terminal_but_unmerged');
+    assert.equal(alerts[0].meta.payload.terminalButUnmergedOpenCount, 1);
+    assert.match(alerts[0].text, /terminal-but-unmerged/);
+  } finally {
+    db.close();
+  }
+});
+
+test('slow-only budget breach does not emit terminal-unmerged alarm', async () => {
+  const rootDir = tempRoot();
+  const db = openDb(rootDir);
+  try {
+    insertReviewRow(db, {
+      prNumber: 18,
+      reviewedAt: '2026-08-09T17:30:00.000Z',
+      reviewStatus: 'reviewing',
+      postedAt: null,
+    });
+    insertPass(db, {
+      prNumber: 18,
+      startedAt: '2026-08-09T17:31:00.000Z',
+      endedAt: null,
+      status: 'running',
+      verdict: null,
+    });
+    const tick = runTtmTrackerTick(db, {
+      now: () => new Date(NOW),
+      config: { baseBudgetMinutes: 5, perRoundBudgetMinutes: 1, terminalUnmergedMinutes: 10 },
+    });
+    const alerts = [];
+
+    const result = await emitTerminalButUnmergedAlarm({
+      ttm: tick,
+      deliverAlertFn: async (text, meta) => alerts.push({ text, meta }),
+    });
+
+    assert.equal(result.fired, 0);
+    assert.equal(alerts.length, 0);
   } finally {
     db.close();
   }

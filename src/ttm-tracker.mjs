@@ -29,6 +29,7 @@ import {
   deriveTtmBudget,
   readMergedTtmSamples,
 } from './ttm-budget-model.mjs';
+import { deliverAlert as defaultDeliverAlert } from './alert-delivery.mjs';
 
 // Seeds, NOT the operating budget. These are what the tracker falls back to
 // when the distribution cannot support a fit; the live budget comes from
@@ -800,7 +801,51 @@ function runTtmTrackerTick(db, options = {}) {
   };
 }
 
-function runTtmTrackerWatcherTick({ db, logger = console } = {}) {
+async function emitTerminalButUnmergedAlarm({
+  ttm,
+  deliverAlertFn = defaultDeliverAlert,
+  logger = console,
+} = {}) {
+  if (!ttm || typeof deliverAlertFn !== 'function') return { fired: 0 };
+  const terminalActivations = (ttm.sync?.eventRows || []).filter((row) => (
+    row?.flag_kind === 'terminal_but_unmerged' && row?.state === 'active'
+  ));
+  if (terminalActivations.length === 0) return { fired: 0 };
+  const rollup = ttm.rollup || {};
+  const prs = terminalActivations
+    .map((row) => `${row.repo}#${row.pr_number}`)
+    .join(', ');
+  const text = `[adversarial-review] terminal-but-unmerged PRs require merge attention: `
+    + `${rollup.terminalButUnmergedOpenCount ?? terminalActivations.length} open; `
+    + `${rollup.terminalButUnmergedStallsLast12h ?? terminalActivations.length} stalls/`
+    + `${rollup.windowHours ?? 12}h; activated=${prs}`;
+  try {
+    await deliverAlertFn(text, {
+      event: 'adversarial_review.terminal_but_unmerged',
+      payload: {
+        terminalButUnmergedOpenCount: rollup.terminalButUnmergedOpenCount ?? null,
+        terminalButUnmergedStallsLast12h: rollup.terminalButUnmergedStallsLast12h ?? null,
+        terminalButUnmergedMaxDurationMinutesLast12h:
+          rollup.terminalButUnmergedMaxDurationMinutesLast12h ?? null,
+        terminalButUnmergedTotalDurationMinutesLast12h:
+          rollup.terminalButUnmergedTotalDurationMinutesLast12h ?? null,
+        standingSev1Metric: rollup.standingSev1Metric ?? null,
+        activated: terminalActivations.map((row) => ({
+          repo: row.repo,
+          prNumber: row.pr_number,
+          eventKey: row.event_key,
+          terminalUnmergedMinutes: row.terminal_unmerged_minutes,
+        })),
+      },
+    });
+    return { fired: terminalActivations.length };
+  } catch (err) {
+    logger.error?.(`[watcher] terminal-but-unmerged alert delivery failed: ${err?.message || err}`);
+    return { fired: 0, error: err?.message || String(err) };
+  }
+}
+
+function runTtmTrackerWatcherTick({ db, logger = console, deliverAlertFn = defaultDeliverAlert } = {}) {
   try {
     const ttm = runTtmTrackerTick(db);
     if (ttm.sync.activated > 0 || ttm.sync.resolved > 0) {
@@ -813,6 +858,10 @@ function runTtmTrackerWatcherTick({ db, logger = console } = {}) {
         + `+${ttm.rollup.perRoundBudgetMinutes === null ? 'blind' : Math.round(ttm.rollup.perRoundBudgetMinutes)}m/round`
       );
     }
+    const alarmPromise = emitTerminalButUnmergedAlarm({ ttm, deliverAlertFn, logger });
+    alarmPromise.catch?.((err) => {
+      logger.error?.(`[watcher] terminal-but-unmerged alarm raised: ${err?.message || err}`);
+    });
     return ttm;
   } catch (ttmErr) {
     logger.error?.(`[watcher] ttm-tracker tick raised: ${ttmErr?.message || ttmErr}`);
@@ -832,6 +881,7 @@ export {
   applyMeasuredTtmBudget,
   computeTtmBudget,
   derivePrTtmTimeline,
+  emitTerminalButUnmergedAlarm,
   ensureTtmTrackerSchema,
   evaluateTtmFromDb,
   evaluateTtmTimelines,

@@ -201,6 +201,7 @@ const MERGEABILITY_SAMPLE_DELAY_MS = Math.max(
   0,
   Number.parseInt(process.env.ADVERSARIAL_MERGEABILITY_SAMPLE_DELAY_MS || '', 10) || 2500,
 );
+export const DEFAULT_AMA_CLOSURE_OPERATION_TIMEOUT_MS = 5_000;
 
 // Deliverable 2 — daemon-fail-closed hammer fallback classification.
 //
@@ -1328,7 +1329,7 @@ export async function resolveMergeAgentCoexistenceForWatcher({
   logger,
   maybeDispatchAmaClosureForImpl = maybeDispatchAmaClosureFor,
   signal = null,
-  operationTimeoutMs = null,
+  operationTimeoutMs = DEFAULT_AMA_CLOSURE_OPERATION_TIMEOUT_MS,
   operationTracker = null,
 }) {
   throwIfAborted(signal);

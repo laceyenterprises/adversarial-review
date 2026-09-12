@@ -830,6 +830,72 @@ export function readLatestWorkerRunStatusFromLedger({
   return { ok: true, row, target: queried.target };
 }
 
+export function readLaunchRequestStatusFromLedger({
+  launchRequestId,
+  ledgerTarget = null,
+  ledgerDbPath = null,
+  env = process.env,
+  rootDir = process.cwd(),
+  hqRoot = null,
+  spawnSyncImpl = spawnSync,
+} = {}) {
+  const normalizedLaunchRequestId = normalizeText(launchRequestId);
+  if (!normalizedLaunchRequestId) {
+    return { ok: false, reason: 'missing-launch-request-id' };
+  }
+  const resolution = resolveSessionLedgerReadTarget({
+    ledgerTarget,
+    ledgerDbPath,
+    requiredTables: ['launch_requests'],
+    env,
+    rootDir,
+    hqRoot,
+  });
+  if (!resolution.ok) return resolution;
+  let queried;
+  if (resolution.target.backend === 'sqlite') {
+    queried = querySqliteRows(
+      resolution.target,
+      `SELECT launch_request_id, status, updated_at, terminal_at, failure_class
+         FROM launch_requests
+        WHERE launch_request_id = @launchRequestId
+        LIMIT 1`,
+      { launchRequestId: normalizedLaunchRequestId },
+    );
+  } else if (resolution.target.backend === 'postgres') {
+    queried = queryPostgresRows(
+      resolution.target,
+      `SELECT json_build_object(
+          'launch_request_id', launch_request_id,
+          'status', status,
+          'updated_at', updated_at,
+          'terminal_at', terminal_at,
+          'failure_class', failure_class
+        )
+         FROM launch_requests
+        WHERE launch_request_id = :'lrq'
+        LIMIT 1`,
+      {
+        spawnSyncImpl,
+        psqlVars: [['lrq', normalizedLaunchRequestId]],
+      },
+    );
+  } else {
+    return unsupportedBackend(resolution.target);
+  }
+  if (!queried.ok) return queried;
+  const [row] = queried.rows;
+  if (!row) {
+    return {
+      ok: false,
+      reason: 'missing-launch-request-row',
+      launchRequestId: normalizedLaunchRequestId,
+      target: queried.target,
+    };
+  }
+  return { ok: true, row, target: queried.target };
+}
+
 export function readBuildCompletionSignalForPr({
   repo,
   prNumber,

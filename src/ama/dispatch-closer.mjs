@@ -1279,8 +1279,22 @@ const AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES = new Set([
   'superseded',
   'not-found',
   'unverified-terminal-success',
+  'operator_triage_required',
+  'reaped_stuck_requested',
 ]);
 const AMA_CLOSER_TERMINAL_HOLD_STATUSES = new Set(['succeeded']);
+const AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_OPERATOR_HOLD_STATUSES = new Set([
+  'operator_triage_required',
+  'reaped_stuck_requested',
+]);
+const AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES = new Set([
+  'succeeded',
+  'failed',
+  'operator_triage_required',
+  'canceled',
+  'superseded',
+  'reaped_stuck_requested',
+]);
 const BRANCH_HOLDER_TERMINAL_WORKER_RUN_STATUSES = new Set(['succeeded', 'failed', 'cancelled']);
 const BRANCH_HOLDER_WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const CODING_BRANCH_HOLDER_PREFIXES = [
@@ -1308,6 +1322,25 @@ const AMA_CLOSER_AUDIT_TERMINAL_OUTCOMES = new Set([
   'deferred',
   'superseded',
 ]);
+
+function amaCloserStatusFromTerminalLaunchRequestStatus(launchRequestStatus) {
+  if (launchRequestStatus === 'succeeded') return 'unverified-terminal-success';
+  if (AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_OPERATOR_HOLD_STATUSES.has(launchRequestStatus)) {
+    return launchRequestStatus;
+  }
+  return AMA_CLOSER_RETRYABLE_STATUSES.has(launchRequestStatus)
+    ? launchRequestStatus
+    : 'failed';
+}
+
+function dispatchStatusReason(status) {
+  return `dispatch-status-${String(status || 'unknown').replace(/_/g, '-')}`;
+}
+
+async function readLaunchRequestStatusFromLedgerDefault(args) {
+  const { readLaunchRequestStatusFromLedger } = await import('../session-ledger-read-adapter.mjs');
+  return readLaunchRequestStatusFromLedger(args);
+}
 
 /**
  * Detect a dispatch record frozen mid-`hq dispatch` by an external SIGTERM.
@@ -3482,6 +3515,7 @@ export async function maybeDispatchAmaCloser({
   writeFileImpl = null,
   readBuildCompletionProducerEvidenceImpl = readBuildCompletionProducerEvidence,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
+  readLaunchRequestStatusImpl = readLaunchRequestStatusFromLedgerDefault,
   resolveCloserDispatchHarnessImpl = resolveCloserDispatchHarness,
   attemptDaemonCleanMergeImpl = attemptDaemonCleanMerge,
   acquireMergeLeaseImpl = acquireMergeLease,
@@ -4553,21 +4587,61 @@ export async function maybeDispatchAmaCloser({
       }
     }
     if (status === 'unknown') {
-      updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
-        ...(current || existingRecord),
-        lastObservedStatus: status,
-        lastObservedAt: dispatchContext.dispatchedAt,
-        lastError: statusProbe?.error || null,
-      }));
-      return noAmaDispatch({
-        dispatched: false,
-        skipMergeAgent: true,
-        reason: 'dispatch-status-unknown',
-        workerClass: existingRecord.workerClass || workerClass,
-        dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
-        launchRequestId: existingRecord.launchRequestId || null,
-        promptPath: existingRecord.promptPath || null,
+      const launchRequestProbe = await readLaunchRequestStatusImpl({
+        launchRequestId: existingRecord.launchRequestId,
+        ledgerTarget: dispatchContext.ledgerTarget || null,
+        ledgerDbPath: dispatchContext.ledgerDbPath || null,
+        env: process.env,
+        hqRoot,
+        rootDir,
       });
+      const launchRequestStatus = String(launchRequestProbe?.row?.status || '').trim().toLowerCase();
+      if (launchRequestProbe?.ok && AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(launchRequestStatus)) {
+        status = amaCloserStatusFromTerminalLaunchRequestStatus(launchRequestStatus);
+        existingDispatchStatus = status;
+        updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+          ...(current || existingRecord),
+          lastObservedStatus: status,
+          lastObservedAt: dispatchContext.dispatchedAt,
+          lastError: `dispatch-status-unknown-terminal-lrq-${launchRequestStatus}`,
+        }));
+        if (AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_OPERATOR_HOLD_STATUSES.has(status)) {
+          finalizeAmaCloserLeaseBestEffort({
+            rootDir,
+            leaseIdentity: existingRecordLeaseIdentity,
+            terminalOutcome: 'deferred',
+            now: dispatchContext.dispatchedAt,
+            logger,
+            repo,
+            prNumber,
+          });
+          return noAmaDispatch({
+            dispatched: false,
+            skipMergeAgent: true,
+            reason: dispatchStatusReason(status),
+            workerClass: existingRecord.workerClass || workerClass,
+            dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
+            launchRequestId: existingRecord.launchRequestId || null,
+            promptPath: existingRecord.promptPath || null,
+          });
+        }
+      } else {
+        updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+          ...(current || existingRecord),
+          lastObservedStatus: status,
+          lastObservedAt: dispatchContext.dispatchedAt,
+          lastError: statusProbe?.error || launchRequestProbe?.reason || null,
+        }));
+        return noAmaDispatch({
+          dispatched: false,
+          skipMergeAgent: true,
+          reason: 'dispatch-status-unknown',
+          workerClass: existingRecord.workerClass || workerClass,
+          dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
+          launchRequestId: existingRecord.launchRequestId || null,
+          promptPath: existingRecord.promptPath || null,
+        });
+      }
     }
     if (AMA_CLOSER_RETRYABLE_STATUSES.has(status)) {
       finalizeAmaCloserLeaseBestEffort({
@@ -4615,7 +4689,7 @@ export async function maybeDispatchAmaCloser({
       && !advancedTerminalDispatchSuperseded
       && !AMA_CLOSER_RETRYABLE_STATUSES.has(status)
     ) {
-      return noAmaDispatch({ dispatched: false, reason: `dispatch-status-${status || 'unknown'}` });
+      return noAmaDispatch({ dispatched: false, reason: dispatchStatusReason(status) });
     }
   } else if (existingRecordHasLivePendingInterruption) {
     return noAmaDispatch({

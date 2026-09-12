@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -8,6 +8,7 @@ import { AgentOSConfigError, loadConfigCached } from '../../../config-loader.mjs
 import { resolveProgressTimeoutMs, resolveReviewerTimeoutMs } from '../../../reviewer-timeout.mjs';
 import { MODULE_CONFIG_PATH } from '../../../role-config.mjs';
 import { spawnCapturedProcessGroup } from '../../../process-group-spawn.mjs';
+import { scratchPrefix } from '../../../scratch-root.mjs';
 import { domainRequiresMcpOAuth } from '../domain-mcp-oauth.mjs';
 import {
   claimReviewerRunRecord,
@@ -395,7 +396,9 @@ function createAcpxReviewerRuntimeAdapter({
 
     try {
       activeRuns.set(sessionUuid, activeRun);
-      tmpDir = mkdtempImpl(join(tmpdir(), `adversarial-review-acpx-${sessionUuid}-`));
+      tmpDir = mkdtempImpl(
+        scratchPrefix(rootDir, 'reviewer-runtime', `adversarial-review-acpx-${sessionUuid}-`),
+      );
       outputPath = join(tmpDir, 'last-message.txt');
       const reviewerEnv = {
         ...process.env,

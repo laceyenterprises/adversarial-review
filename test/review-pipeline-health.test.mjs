@@ -47,11 +47,12 @@ function launchctlPrintError({ message = 'launchctl print failed', stdout = '', 
   return error;
 }
 
-test('pipeline Sentinel findings are diagnostics, never pages', () => {
+test('pipeline Sentinel findings reserve page tier for terminal outcome stalls', () => {
   assert.ok(REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS.length > 0);
-  assert.ok(
-    REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS.every((finding) => finding.tier === 'ticket')
-  );
+  const pageCodes = REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS
+    .filter((finding) => finding.tier === 'page')
+    .map((finding) => finding.code);
+  assert.deepEqual(pageCodes, ['review:terminal_but_unmerged']);
 });
 
 function openDb(rootDir) {

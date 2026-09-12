@@ -2,10 +2,10 @@
  * TTM-01, at the finding surface: what the pipeline-health collector actually
  * emits for slow, for stuck, and for a budget it cannot measure.
  *
- * The escalation (page vs warn vs blind) is Sentinel's call -- every definition
- * here is `tier: 'ticket'` by contract. What this file pins is that the three
- * conditions produce three DIFFERENT codes, so Sentinel has something to
- * escalate differently.
+ * Stalls that mean "clean PRs are not landing" are page-tier at the source;
+ * budget-only slowness stays a ticket. What this file pins is that the
+ * conditions produce different codes and severities, so downstream surfaces do
+ * not have to infer the outcome from intermediate metrics.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -194,6 +194,38 @@ test('concurrent progress-stall reasons emit one finding and one Prometheus seri
     prometheus.match(/^review_pipeline_sentinel_finding_active\{code="review:pr_progress_stalled",tier="ticket"\} 1$/gm)?.length,
     1
   );
+});
+
+test('terminal-but-unmerged emits a page-tier outcome alarm', () => {
+  const rootDir = tempRoot();
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    seedDistribution(db, { baseMinutes: 30, perRoundMinutes: 20 });
+    insertPr(db, {
+      prNumber: 9101,
+      reviewedAt: iso(420),
+      reviewStatus: 'posted',
+      postedAt: iso(410),
+    });
+    insertPass(db, {
+      prNumber: 9101,
+      attemptNumber: 1,
+      startedAt: iso(415),
+      endedAt: iso(410),
+      verdict: 'approved',
+    });
+  } finally {
+    db.close();
+  }
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW), env: {} });
+  const terminal = findingFor(snapshot, 'review:terminal_but_unmerged');
+
+  assert.equal(snapshot.ttm.rollup.terminalButUnmergedOpenCount, 1);
+  assert.equal(terminal.tier, 'page');
+  assert.equal(terminal.details.progressClass, 'stuck');
+  assert.match(terminal.subject, /terminal clean PR/);
 });
 
 test('an unreadable distribution emits the blind code and withholds the slow one', () => {

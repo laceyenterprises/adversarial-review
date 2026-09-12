@@ -1,11 +1,11 @@
 import { execFile } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 import { execGhWithRetry } from './gh-cli.mjs';
 import { parseDiffFiles } from './reviewer-util.mjs';
+import { scratchPrefix } from './scratch-root.mjs';
 
 const execFileAsync = promisify(execFile);
 const PACKS_REPO_RE = /(^|\/)agent-os-packs$/;
@@ -88,7 +88,9 @@ async function computeCanonicalSpecLockhash(specText, metaText, {
   env = process.env,
 } = {}) {
   const parent = canonicalContentParent || join(import.meta.dirname, '..', '..', '..', 'platform');
-  const tempDir = await mkdtemp(join(tmpdir(), 'agent-os-pack-lockhash-'));
+  const tempDir = await mkdtemp(
+    scratchPrefix(null, 'pack-lockhash', 'agent-os-pack-lockhash-'),
+  );
   try {
     const specPath = join(tempDir, 'SPEC.md');
     const metaPath = join(tempDir, 'SPEC.meta.json');

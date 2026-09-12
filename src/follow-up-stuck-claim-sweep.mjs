@@ -42,7 +42,6 @@
 // worker that is still producing artifacts.
 
 import { existsSync, mkdtempSync, promises as fsPromises, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
   computeFollowUpJobStoppedState,
@@ -63,6 +62,7 @@ import {
 import {
   recordInitialCommentDelivery,
 } from './adapters/comms/github-pr-comments/comment-delivery.mjs';
+import { scratchPrefix } from './scratch-root.mjs';
 
 const IN_PROGRESS_STUCK_THRESHOLD_MS_ENV = 'ADVERSARIAL_FOLLOW_UP_IN_PROGRESS_STUCK_THRESHOLD_MS';
 const DEFAULT_IN_PROGRESS_STUCK_THRESHOLD_MS = 10 * 60 * 1000;
@@ -430,7 +430,9 @@ async function attemptDirtyMerge({
     refs: [resolvedBase, resolvedBranch],
     execFileImpl,
   });
-  const worktreeParent = mkdtempSync(join(tmpdir(), 'dirty-pr-merge-'));
+  const worktreeParent = mkdtempSync(
+    scratchPrefix(null, 'dirty-pr-merge', 'dirty-pr-merge-'),
+  );
   const worktreeDir = join(worktreeParent, 'worktree');
   let worktreeAdded = false;
   let worktreeAdd = null;

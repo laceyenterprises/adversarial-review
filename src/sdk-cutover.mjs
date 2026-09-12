@@ -1,6 +1,5 @@
 import Database from 'better-sqlite3';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -17,6 +16,7 @@ import {
   resolveRemediationRuntimeMode,
 } from './remediation-dispatch-mode.mjs';
 import { collectReviewPipelineHealth } from './review-pipeline-health.mjs';
+import { scratchPrefix } from './scratch-root.mjs';
 import {
   ensureReviewStateSchema,
   fetchLivePRLifecycle,
@@ -168,7 +168,7 @@ function collectRemediationStatus({ rootDir, env = process.env } = {}) {
 }
 
 function createRereviewRecoveryFixture({ now = () => new Date() } = {}) {
-  const rootDir = mkdtempSync(join(tmpdir(), 'sdk-cutover-rereview-'));
+  const rootDir = mkdtempSync(scratchPrefix(null, 'sdk-cutover', 'sdk-cutover-rereview-'));
   const repo = 'fixture/repo';
   const prNumber = 31;
   const requestedAt = toIso(now);
@@ -221,7 +221,7 @@ async function collectSdkCutoverObservations({
   collectVerdictFidelityImpl = collectVerdictFidelity,
   createRereviewRecoveryFixtureImpl = createRereviewRecoveryFixture,
 } = {}) {
-  const drillRoot = mkdtempSync(join(tmpdir(), 'sdk-cutover-drill-'));
+  const drillRoot = mkdtempSync(scratchPrefix(rootDir || null, 'sdk-cutover', 'sdk-cutover-drill-'));
   let drill;
   try {
     drill = await runFailoverDrillImpl({ rootDir: drillRoot, now });

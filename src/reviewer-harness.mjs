@@ -24,12 +24,13 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { hostname, homedir, tmpdir } from 'node:os';
+import { hostname, homedir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { promisify } from 'node:util';
 import { materializePerWorkerCodexAuth } from './codex-per-worker-auth.mjs';
 import { reviewWithCodexOAuthResponses } from './codex-oauth-responses.mjs';
+import { scratchPrefix } from './scratch-root.mjs';
 import {
   resolveAgyPrintTimeoutMs,
   resolveAgyReviewerSubprocessTimeoutMs,
@@ -1021,7 +1022,11 @@ async function reviewWithCodex(diff, extraContext = '', {
     key: `reviewer-${process.pid}-${Date.now()}`,
   });
   const effectiveAuthPath = perWorkerAuth?.authPath || authPath;
-  const outputPath = join(tmpdir(), `codex-review-${process.pid}-${Date.now()}.md`);
+  const outputPath = `${scratchPrefix(
+    null,
+    'reviewer-harness',
+    `codex-review-${process.pid}-${Date.now()}-`,
+  )}last-message.md`;
   const codexExecOverrides = resolveCodexExecOverrides();
 
   const { env } = scrubOAuthFallbackEnv({

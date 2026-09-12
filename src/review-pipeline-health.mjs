@@ -162,10 +162,8 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_sentinel_finding_active: 'Whether a Sentinel finding code is active in the current snapshot.',
 });
 
-// This collector remains the full diagnostic/ticket surface. The single
-// operator page is emitted by review-freshness-detector only after actual
-// published reviews stop while open PRs wait; no collector finding may create
-// a second, differently-worded page for the same or an unrelated condition.
+// This collector remains the full diagnostic surface. Most findings are tickets;
+// outcome stalls that prove clean PRs are not landing page at the source.
 const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
   {
     code: 'review:review_state_ledger_unreadable',
@@ -293,7 +291,7 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
   },
   {
     code: 'review:terminal_but_unmerged',
-    tier: 'ticket',
+    tier: 'page',
     category: 'review-pipeline',
     thresholdKey: 'ttm.terminal_unmerged_minutes',
     defaultThreshold: null,
@@ -2102,11 +2100,13 @@ function summarizeDagAutowalkHealth({ env, hqRoot, nowMs, config, launchd }) {
 }
 
 function buildFinding({ code, tier, subject, message, evidence, recommendedAction, observedAt, details = {} }) {
+  const definition = REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS.find((item) => item.code === code);
+  const registeredTier = definition?.tier || tier;
   return {
     agent_id: 'sentinel',
-    // Do not let a new source-level finding quietly become a pager route. The
-    // review-freshness detector owns the sole page criterion for this domain.
-    tier: tier === 'page' ? 'ticket' : tier,
+    // Do not let a new source-level finding quietly become a pager route.
+    // Page only when the checked-in finding registry explicitly says so.
+    tier: tier === 'page' && registeredTier !== 'page' ? 'ticket' : tier,
     category: 'review-pipeline',
     code,
     subject,
@@ -2556,7 +2556,7 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     const sample = annotated.find((flag) => flag.mirrorVerified) || annotated[0];
     findings.push(buildFinding({
       code: 'review:terminal_but_unmerged',
-      tier: 'ticket',
+      tier: 'page',
       subject: `${annotated.length} terminal clean PR(s) remain unmerged`
         + (unverified.length > 0
           ? ` (${unverified.length} with UNVERIFIED mirror state — may already be merged)`

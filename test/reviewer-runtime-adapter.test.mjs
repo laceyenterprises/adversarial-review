@@ -3228,6 +3228,51 @@ test('acpx spawnReviewer fails when ACPX exits 0 without a review body', async (
   }
 });
 
+test('acpx spawnReviewer allocates scratch under the review data root', async () => {
+  const rootDir = makeRoot();
+  const requestedPrefixes = [];
+  try {
+    const adapter = createAcpxReviewerRuntimeAdapter({
+      rootDir,
+      domainConfig: { id: 'acpx-smoke' },
+      resolveAcpxCliImpl: async () => '/opt/acpx/bin/acpx',
+      execFileImpl: async () => ({ stdout: '[]\n', stderr: '' }),
+      mkdtempImpl: (prefix) => {
+        requestedPrefixes.push(prefix);
+        const dir = `${prefix}fixture`;
+        mkdirSync(dir, { recursive: true });
+        return dir;
+      },
+      spawnCapturedImpl: async (_command, args, options) => {
+        options.onSpawn({ pgid: 7676 });
+        const outputPath = args[args.indexOf('--output-last-message') + 1];
+        writeFileSync(outputPath, 'review body\n');
+        return { stdout: 'ok\n', stderr: '' };
+      },
+      now: () => '2026-09-12T20:00:00.000Z',
+    });
+
+    const result = await adapter.spawnReviewer({
+      model: 'codex',
+      prompt: 'review',
+      subjectContext: { domainId: 'acpx-smoke', repo: 'lacey/repo', prNumber: 12 },
+      timeoutMs: 100,
+      sessionUuid: 'acpx-scratch-root-session',
+      forbiddenFallbacks: ['api-key'],
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(requestedPrefixes.length, 1);
+    assert.match(
+      requestedPrefixes[0],
+      new RegExp(`${rootDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/data/scratch/reviewer-runtime/adversarial-review-acpx-`),
+    );
+    assert.equal(existsSync(join(rootDir, 'data', 'scratch', 'reviewer-runtime', '.metadata_never_index')), true);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('acpx spawnReviewer releases the active claim when tmpdir allocation throws', async () => {
   const rootDir = makeRoot();
   let attempts = 0;

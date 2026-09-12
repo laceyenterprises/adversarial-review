@@ -395,10 +395,9 @@ import {
   validateFenceConfig,
 } from './reviewer-fence.mjs';
 import {
-  compareReviewerDispatchCandidates,
+  compareReviewerDispatchCandidates, countActiveReviewerSpawnsByModel,
   createReviewerMemoryAdmissionSampler,
-  reserveReviewerMemoryAdmission,
-  resolveFirstPassReviewerPoolConfig,
+  reserveReviewerMemoryAdmission, resolveFirstPassReviewerPoolConfig,
   resolveReviewerMemoryPressureConfig,
   runBoundedReviewerDispatchQueue,
   sortReviewerDispatchCandidates,
@@ -1275,6 +1274,7 @@ async function pollOnce(
       const drainResult = await runBoundedReviewerDispatchQueue(candidates, {
         maxConcurrent: reviewerPoolConfig.maxConcurrent,
         geminiCredentialConcurrency,
+        activeReviewerCounts: countActiveReviewerSpawnsByModel(activeReviewerSpawns),
         singleWave: true,
         singleWaveSettleGraceMs: reviewerDispatchSingleWaveSettleGraceMs,
         logger: console,

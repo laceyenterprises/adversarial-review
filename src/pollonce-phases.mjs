@@ -172,8 +172,9 @@ import { computeReviewerLeaseExpiryAt } from './reviewer-lease.mjs';
 import {
   persistReviewerPgid,
   settleDurableReviewerRunState,
+  shouldReconcileReviewerSession,
 } from './reviewer-orphan-reconcile.mjs';
-import { reviewerBotLogin } from './reviewer-reattach.mjs';
+import { reconcileReviewerSessions, reviewerBotLogin } from './reviewer-reattach.mjs';
 import {
   applyAfhReviewerRouteForAttempt,
   primaryReviewerQuotaCappedForRow,
@@ -280,6 +281,68 @@ export function recordReviewerModelFallbackForAlert({
       `threshold=${threshold} windowSeconds=${windowSeconds} classes=${classes} routes=${routes}`
   );
   return { alerted: true, distinctSubjects };
+}
+
+export async function reconcileEligibleReviewingClaimInline({
+  reviewDb = db,
+  octokit,
+  rootDir,
+  repoPath,
+  prNumber,
+  row,
+  now = new Date(),
+  log = console,
+  leaseRecoveryMaxAttempts,
+  onTerminalDeadSession,
+} = {}) {
+  const parsedPrNumber = Number(prNumber);
+  if (!repoPath || !Number.isInteger(parsedPrNumber) || parsedPrNumber <= 0) {
+    return { attempted: false, reconciled: 0, skipped: 0, row };
+  }
+  if (row?.review_status !== 'reviewing') {
+    return { attempted: false, reconciled: 0, skipped: 0, row };
+  }
+  const shouldReconcile = shouldReconcileReviewerSession(row, now, { rootDir });
+  if (!shouldReconcile) {
+    return { attempted: false, reconciled: 0, skipped: 0, row };
+  }
+
+  const result = await reconcileReviewerSessions({
+    db: reviewDb,
+    octokit,
+    rootDir,
+    now,
+    log,
+    maxRows: 1,
+    leaseRecoveryMaxAttempts,
+    shouldReconcileRow: (candidate, reconcileNow) =>
+      String(candidate?.repo || '') === String(repoPath) &&
+      Number(candidate?.pr_number) === parsedPrNumber &&
+      shouldReconcileReviewerSession(candidate, reconcileNow, { rootDir }),
+    onTerminalDeadSession: onTerminalDeadSession || ((event) => settleDurableReviewerRunState({
+      rootDir,
+      sessionUuid: event?.row?.reviewer_session_uuid,
+      state: event?.state,
+      settledAt: event?.settledAt,
+      reason: event?.reason,
+      log,
+    })),
+  });
+  const refreshed = reviewDb.prepare(
+    'SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+  ).get(repoPath, parsedPrNumber);
+  if (result.reconciled > 0) {
+    log.warn?.(
+      `[watcher] inline stale reviewer claim reconcile for ${repoPath}#${parsedPrNumber}: ` +
+      `reviewing -> ${refreshed?.review_status || 'missing'} before spawn suppression`
+    );
+  }
+  return {
+    attempted: true,
+    reconciled: result.reconciled || 0,
+    skipped: result.skipped || 0,
+    row: refreshed || row,
+  };
 }
 
 // MAL-01: a PR that carries no worker prefix is not necessarily MALFORMED.
@@ -738,6 +801,19 @@ export async function processReviewSubject(entry, ctx) {
       if (existing?.pr_state === 'merged') {
         await projectGateStatusSafe(existing);
         return;
+      }
+
+      const inlineReviewerReconcile = await reconcileEligibleReviewingClaimInline({
+        reviewDb: db,
+        octokit,
+        rootDir: ROOT,
+        repoPath,
+        prNumber,
+        row: existing,
+        leaseRecoveryMaxAttempts: INFRA_AUTO_RECOVER_CAP,
+      });
+      if (inlineReviewerReconcile.attempted) {
+        existing = inlineReviewerReconcile.row || stmtGetReviewRow.get(repoPath, prNumber);
       }
 
       // ASR-04 — classify this head's security surface and enqueue an Argus

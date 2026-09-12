@@ -2812,7 +2812,7 @@ async function reconcileFollowUpJob({
           requestedAt: completedAt,
         });
         rereview.wake = {
-          requested: wake?.requested !== false,
+          requested: wake?.requested === true,
           reason: wake?.payload?.reason || 'remediation-to-rereview',
           requestedAt: wake?.payload?.requested_at || completedAt,
         };
@@ -3490,7 +3490,7 @@ function requestHammerWakeForSettledReviewStop({
       requestedAt,
     });
     wakeRecord = {
-      requested: wake?.requested !== false,
+      requested: wake?.requested === true,
       reason: wake?.payload?.reason || reason,
       requestedAt: wake?.payload?.requested_at || requestedAt,
       requestId: wake?.payload?.request_id || null,
@@ -3510,48 +3510,58 @@ function requestHammerWakeForSettledReviewStop({
     );
   }
 
-  let latencyEvent = { recorded: false, reason: 'wake-not-requested' };
-  if (wakeRecord.requested) {
-    let db = null;
+  // Record the event whether or not the wake succeeded. Gating this on
+  // `wakeRecord.requested` meant a FAILED wake wrote nothing to the latency
+  // table --- the single number an operator would want from this feature, "how
+  // often did the hammer wake fail", was the one case with no telemetry, and a
+  // regression to zero wakes would have looked identical to a quiet backlog.
+  // The outcome is carried on the event so a failed wake is countable rather
+  // than merely absent.
+  const wakeOutcome = wakeRecord.requested ? 'requested' : 'failed';
+  let latencyEvent = { recorded: false, reason: 'not-attempted' };
+  let db = null;
+  try {
+    db = openReviewStateDb(rootDir);
+    ensureReviewStateSchema(db);
+    recordReviewLatencyEvent(db, {
+      repo,
+      prNumber,
+      domainId: job?.domainId || 'code-pr',
+      subjectExternalId: job?.subjectExternalId || `${repo}#${prNumber}`,
+      revisionRef: revisionRef || job?.revisionRef || null,
+      eventType: 'hammer_wake',
+      at: requestedAt,
+      source: 'follow-up-remediation',
+      sourceRef: job?.jobId || null,
+      // Keyed by outcome as well, so a retry that succeeds after a failure is
+      // recorded rather than swallowed as a duplicate of the failure.
+      idempotencyKey: `follow-up-review-settled-hammer-wake:${wakeOutcome}:${job?.jobId || `${repo}#${prNumber}:${revisionRef || 'no-head'}`}`,
+      reason,
+      payload: {
+        jobId: job?.jobId || null,
+        jobPath,
+        stopCode: job?.remediationPlan?.stop?.code || 'review-settled',
+        wakeOutcome,
+        wake: wakeRecord,
+      },
+    });
+    latencyEvent = { recorded: true, eventType: 'hammer_wake', wakeOutcome };
+  } catch (err) {
+    latencyEvent = {
+      recorded: false,
+      reason: 'latency-event-failed',
+      wakeOutcome,
+      error: err?.message || String(err),
+    };
+    log.warn?.(
+      `[follow-up-remediation] hammer wake latency event failed for ` +
+      `${repo}#${prNumber}: ${err?.message || err}`
+    );
+  } finally {
     try {
-      db = openReviewStateDb(rootDir);
-      ensureReviewStateSchema(db);
-      recordReviewLatencyEvent(db, {
-        repo,
-        prNumber,
-        domainId: job?.domainId || 'code-pr',
-        subjectExternalId: job?.subjectExternalId || `${repo}#${prNumber}`,
-        revisionRef: revisionRef || job?.revisionRef || null,
-        eventType: 'hammer_wake',
-        at: requestedAt,
-        source: 'follow-up-remediation',
-        sourceRef: job?.jobId || null,
-        idempotencyKey: `follow-up-review-settled-hammer-wake:${job?.jobId || `${repo}#${prNumber}:${revisionRef || 'no-head'}`}`,
-        reason,
-        payload: {
-          jobId: job?.jobId || null,
-          jobPath,
-          stopCode: job?.remediationPlan?.stop?.code || 'review-settled',
-          wake: wakeRecord,
-        },
-      });
-      latencyEvent = { recorded: true, eventType: 'hammer_wake' };
-    } catch (err) {
-      latencyEvent = {
-        recorded: false,
-        reason: 'latency-event-failed',
-        error: err?.message || String(err),
-      };
-      log.warn?.(
-        `[follow-up-remediation] hammer wake latency event failed for ` +
-        `${repo}#${prNumber}: ${err?.message || err}`
-      );
-    } finally {
-      try {
-        db?.close?.();
-      } catch {
-        // Best-effort cleanup only.
-      }
+      db?.close?.();
+    } catch {
+      // Best-effort cleanup only.
     }
   }
 

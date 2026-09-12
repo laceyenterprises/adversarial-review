@@ -6143,9 +6143,12 @@ test('consumeFollowUpJobsUntilCapacity does not charge claim-time terminal trans
     requestId: 'wake-1',
     reviewedHeadSha: 'clean-head-sha',
   });
+  // `wakeOutcome` is carried so a FAILED wake is countable in the latency
+  // table rather than simply absent (review follow-up on #1052).
   assert.deepEqual(stoppedJob.hammerWakeLatencyEvent, {
     recorded: true,
     eventType: 'hammer_wake',
+    wakeOutcome: 'requested',
   });
 
   const db = openReviewStateDb(rootDir);

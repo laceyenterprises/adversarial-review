@@ -561,64 +561,92 @@ test('an empty report reads back as a well-formed disarmed report', () => {
 // ── the unit is the PRODUCTION counter, not a hand-rolled second definition ───
 //
 // Every test above injects a stub depth. This one wires the controller to the
-// SAME function watcher.mjs injects (`countOpenPrsAwaitingFirstPassReview`) over
+// SAME function watcher.mjs injects (`countOpenPrsAwaitingCurrentFirstPassReview`) over
 // a real review-state schema, so the number the lever thresholds on is provably
-// the number the review-stall pager already reports — not a lookalike that can
-// drift from it.
+// the number pipeline-health reports — not a lookalike that can drift from it.
 
-test('the lever thresholds on the production countOpenPrsAwaitingFirstPassReview', async () => {
+test('the lever thresholds on the production current-head first-pass queue count', async () => {
   const { ensureReviewStateSchema, openReviewStateDb } = await import('../src/review-state.mjs');
-  const { countOpenPrsAwaitingFirstPassReview } = await import('../src/review-state-db.mjs');
+  const {
+    countOpenPrsAwaitingCurrentFirstPassReview,
+  } = await import('../src/review-state-db.mjs');
+  const {
+    SQL_SELECT_OPEN_AWAITING_CURRENT_FIRST_PASS_REVIEW,
+  } = await import('../src/review-state-statements.mjs');
 
   const dbRoot = tempRoot('rsp01-db-');
   const reportRoot = tempRoot('rsp01-report-');
   const db = openReviewStateDb(dbRoot);
   let prSeq = 9000;
-  const seed = (prState, reviewStatus) => {
+  const seed = (prState, reviewStatus, revisionRef = null) => {
     const prNumber = prSeq++;
     db.prepare(
-      'INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, review_status)'
-      + ' VALUES (?, ?, ?, ?, ?, ?)'
-    ).run('laceyenterprises/agent-os', prNumber, '2026-09-06T00:00:00.000Z', 'gemini', prState, reviewStatus);
+      'INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, revision_ref)'
+      + ' VALUES (?, ?, ?, ?, ?, ?, ?)'
+    ).run(
+      'laceyenterprises/agent-os',
+      prNumber,
+      '2026-09-06T00:00:00.000Z',
+      'gemini',
+      prState,
+      reviewStatus,
+      revisionRef
+    );
     return prNumber;
+  };
+  const postedPass = (prNumber, headSha, commentId) => {
+    db.prepare(
+      'INSERT INTO reviewer_passes (repo, pr_number, attempt_number, reviewer_class, reviewer_model,'
+      + ' pass_kind, started_at, ended_at, status, body_md, gh_comment_id, head_sha)'
+      + " VALUES (?, ?, 1, 'gemini', 'gemini', 'first-pass', ?, ?, 'completed', 'body', ?, ?)"
+    ).run(
+      'laceyenterprises/agent-os',
+      prNumber,
+      '2026-09-06T00:00:00.000Z',
+      '2026-09-06T00:10:00.000Z',
+      commentId,
+      headSha
+    );
   };
   try {
     ensureReviewStateSchema(db);
     const ctl = () => createFirstPassSpilloverController({
       rootDir: reportRoot,
-      readDepth: () => countOpenPrsAwaitingFirstPassReview(db),
+      readDepth: () => countOpenPrsAwaitingCurrentFirstPassReview(db),
       resolveThresholdImpl: () => 3,
       logger: { warn() {} },
     });
 
-    // Two waiting + one in flight = depth 3 under the documented unit (in-flight
-    // first passes COUNT: the PR still has no review).
-    seed('open', 'pending');
-    seed('open', 'pending');
-    seed('open', 'reviewing');
+    // Waiting + upstream hold + in flight = depth 3 under the documented unit
+    // (in-flight first passes COUNT: the current head still has no review).
+    seed('open', 'pending', 'head-1');
+    seed('open', 'pending-upstream', 'head-2');
+    seed('open', 'reviewing', 'head-3');
     // Noise that must NOT inflate the depth.
-    seed('merged', 'pending');
-    seed('closed', 'pending');
-    seed('open', 'malformed');
+    seed('merged', 'pending', 'head-merged');
+    seed('closed', 'pending', 'head-closed');
     seed('open', 'argus-security-queued');
+    const sameHeadRereview = seed('open', 'pending', 'same-head');
+    postedPass(sameHeadRereview, 'same-head', 'RV_same_head');
 
-    assert.equal(countOpenPrsAwaitingFirstPassReview(db), 3);
+    assert.equal(countOpenPrsAwaitingCurrentFirstPassReview(db), 3);
+    assert.equal(db.prepare(SQL_SELECT_OPEN_AWAITING_CURRENT_FIRST_PASS_REVIEW).all().length, 3);
     const engagedPlan = ctl().plan();
     assert.equal(engagedPlan.depth, 3);
     assert.equal(engagedPlan.engaged, true);
     assert.equal(engagedPlan.spillSlots, 1);
 
-    // A genuinely delivered review (a reviewer_passes row carrying a GitHub
-    // comment id) drops the depth under threshold and disengages the lever.
-    const delivered = seed('open', 'pending');
-    db.prepare(
-      'INSERT INTO reviewer_passes (repo, pr_number, attempt_number, reviewer_class, reviewer_model,'
-      + ' pass_kind, started_at, ended_at, status, body_md, gh_comment_id)'
-      + " VALUES (?, ?, 1, 'gemini', 'gemini', 'first-pass', ?, ?, 'completed', 'body', 'RV_1')"
-    ).run('laceyenterprises/agent-os', delivered, '2026-09-06T00:00:00.000Z', '2026-09-06T00:10:00.000Z');
+    // A review invalidated by a new head counts again: the GitHub comment is
+    // real, but it belongs to `old-head`, not the current `new-head`.
+    const invalidated = seed('open', 'pending', 'new-head');
+    postedPass(invalidated, 'old-head', 'RV_old_head');
+    assert.equal(countOpenPrsAwaitingCurrentFirstPassReview(db), 4);
+
     db.prepare('DELETE FROM reviewed_prs WHERE pr_number IN (9000, 9001)').run();
 
-    assert.equal(countOpenPrsAwaitingFirstPassReview(db), 1);
+    assert.equal(countOpenPrsAwaitingCurrentFirstPassReview(db), 2);
+    db.prepare('DELETE FROM reviewed_prs WHERE pr_number = ?').run(invalidated);
+    assert.equal(countOpenPrsAwaitingCurrentFirstPassReview(db), 1);
     assert.equal(ctl().plan().engaged, false, 'depth recovered => lever disengages, review returns to agy');
   } finally {
     db.close();
@@ -638,7 +666,7 @@ test('the lever thresholds on the production countOpenPrsAwaitingFirstPassReview
 
 test('watcher.mjs builds the per-tick controller from the production depth counter', () => {
   const src = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
-  assert.match(src, /createFirstPassSpilloverController\(\{[^}]*readDepth: countOpenPrsAwaitingFirstPassReview/);
+  assert.match(src, /createFirstPassSpilloverController\(\{[^}]*readDepth: countOpenPrsAwaitingCurrentFirstPassReview/);
   assert.match(src, /^\s*firstPassSpilloverController,$/m, 'controller must be threaded into the per-PR ctx');
 });
 

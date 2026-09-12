@@ -276,12 +276,12 @@ export function prepareMarkMergedPendingReviewSkipped(db) {
   return db.prepare(MARK_MERGED_PENDING_REVIEW_SKIPPED_SQL);
 }
 
-// Depth of the first-pass review queue: OPEN PRs that have never received a
-// first-pass review. Lives in this side-effect-free statements leaf (rather than
-// beside its prepared statement in review-state-db.mjs) so tests, the RSP-01
-// queue-depth lever, and the `review-queue-depth` operator CLI can all read the
-// EXACT SQL production issues without importing the process-wide singleton DB
-// handle — the same reason every other statement here was extracted.
+// Depth of the freshness-stall queue: OPEN PRs that have never received any
+// posted review. Lives in this side-effect-free statements leaf (rather than
+// beside its prepared statement in review-state-db.mjs) so tests and liveness
+// callers can read the exact SQL production issues without importing the
+// process-wide singleton DB handle — the same reason every other statement here
+// was extracted.
 export const SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW =
   "SELECT COUNT(*) AS n FROM reviewed_prs " +
   "WHERE pr_state = 'open' " +
@@ -313,3 +313,27 @@ export const SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW =
   "    AND reviewer_passes.gh_comment_id IS NOT NULL " +
   "    AND reviewer_passes.gh_comment_id <> ''" +
   ")";
+
+// Depth of the RSP-01 / pipeline-health first-pass queue: OPEN PRs awaiting a
+// first-pass lane for their current head. Older posted reviews do not drain the
+// current-head queue; same-head posted reviews keep re-review churn out of it.
+
+export const CURRENT_FIRST_PASS_QUEUE_WHERE_SQL =
+  "COALESCE(reviewed_prs.pr_state, 'open') = 'open' " +
+  "AND reviewed_prs.review_status IN ('pending', 'pending-upstream', 'reviewing') " +
+  "AND (reviewed_prs.revision_ref IS NULL OR NOT EXISTS ( " +
+  "  SELECT 1 FROM reviewer_passes " +
+  "  WHERE reviewer_passes.repo = reviewed_prs.repo " +
+  "    AND reviewer_passes.pr_number = reviewed_prs.pr_number " +
+  "    AND reviewer_passes.gh_comment_id IS NOT NULL " +
+  "    AND reviewer_passes.gh_comment_id <> '' " +
+  "    AND reviewer_passes.head_sha = reviewed_prs.revision_ref" +
+  "))";
+
+export const SQL_COUNT_OPEN_AWAITING_CURRENT_FIRST_PASS_REVIEW =
+  "SELECT COUNT(*) AS n FROM reviewed_prs WHERE " + CURRENT_FIRST_PASS_QUEUE_WHERE_SQL;
+
+export const SQL_SELECT_OPEN_AWAITING_CURRENT_FIRST_PASS_REVIEW =
+  "SELECT repo, pr_number, reviewed_at, rereview_requested_at, last_attempted_at, " +
+  "failed_at, failure_message, review_attempts, review_status, revision_ref " +
+  "FROM reviewed_prs WHERE " + CURRENT_FIRST_PASS_QUEUE_WHERE_SQL;

@@ -1548,6 +1548,9 @@ function isReclaimableBranchHolderBlockedAmaCloserRecord(record, { now = null } 
   }
   if (!isProvisionBranchHolderBlocked(record?.lastError || '')) return false;
   const ageMs = amaCloserRecordAgeMs(record, { now });
+  // Branch-holder records are tombstones, not proof of a live process. If the
+  // timestamp payload is malformed, prefer one cautious re-probe over pinning
+  // an eligible PR until an operator edits state by hand.
   if (ageMs === null) return true;
   return ageMs >= amaCloserPendingLeaseReclaimAgeMs(record);
 }
@@ -3970,7 +3973,7 @@ export async function maybeDispatchAmaCloser({
   const existingRecordIsReclaimableInterruption = isInterruptedInFlightAmaCloserDispatch(
     existingRecord,
     existingLeaseBeforeDispatch,
-    { now: dispatchContext.dispatchedAt, processKillImpl },
+    { now: dispatchContext?.dispatchedAt, processKillImpl },
   ) || existingRecordIsStaleLaunchOnlyDispatch;
   const existingRecordHasLivePendingInterruption = hasInterruptedInFlightAmaCloserDispatchShape(existingRecord)
     && existingLeaseBeforeDispatch?.status === AMA_CLOSER_LEASE_STATUS.PENDING
@@ -3978,7 +3981,7 @@ export async function maybeDispatchAmaCloser({
   const existingRecordIsBranchHolderBlocked = isProvisionBranchHolderBlocked(existingRecord?.lastError || '');
   const existingRecordIsReclaimableBranchHolderBlock =
     isReclaimableBranchHolderBlockedAmaCloserRecord(existingRecord, {
-      now: dispatchContext.dispatchedAt,
+      now: dispatchContext?.dispatchedAt,
     });
   const existingRecordIsRevalidatableBranchMissing =
     String(existingRecord?.state || '').trim().toLowerCase() === 'no-dispatch'

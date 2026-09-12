@@ -448,8 +448,8 @@ test('does not read fleet quota status when no configured fallback is a viable a
   assert.equal(result.reason, 'no-available-fallback');
 });
 
-test('reviewWorkerClassFallback defaults to [codex] and honors the env override', () => {
-  assert.deepEqual(reviewWorkerClassFallback({}), ['codex']);
+test('reviewWorkerClassFallback defaults to a cross-model pair and honors the env override', () => {
+  assert.deepEqual(reviewWorkerClassFallback({}), ['codex', 'claude-code']);
   assert.deepEqual(
     reviewWorkerClassFallback({ ADVERSARIAL_REVIEW_REVIEWER_WORKER_CLASS_FALLBACK: 'claude-code, gemini' }),
     ['claude-code', 'gemini'],

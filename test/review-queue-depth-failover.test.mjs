@@ -30,6 +30,7 @@ import {
 import {
   applyReviewerWorkerClassFallbackToRoute,
   resolveReviewerWorkerClassWithFallback,
+  reviewWorkerClassFallback,
   reviewerWorkerClassEntitled,
   violatesWriterDiversity,
 } from '../src/review-worker-class-fallback.mjs';
@@ -200,6 +201,28 @@ test('spillover produces a usable route and passes run across multiple classes',
     assert.deepEqual(spilled, ['codex', 'claude-code']);
     assert.equal(ctl.granted(), 2);
     assert.equal(ctl.depthPressure().engaged, false, 'budget spent => further PRs stay on the primary');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('default spillover roster preserves cross-model review for codex-family authors', async () => {
+  const root = tempRoot();
+  try {
+    const ctl = controller({ root, depth: 10, threshold: 10 });
+    const decision = await resolveReviewerWorkerClassWithFallback({
+      authorClass: 'codex',
+      primary: 'gemini',
+      fallbackWorkerClasses: reviewWorkerClassFallback({}),
+      depthPressure: ctl.depthPressure(),
+      execFileImpl: fleetStatusStub(CODEX_OK_CLAUDE_OK),
+      env: ENTITLED_ENV,
+    });
+    assert.equal(decision.fellBack, true);
+    assert.equal(decision.workerClass, 'claude-code');
+    assert.equal(decision.reason, 'queue-depth-pressure');
+    assert.equal(decision.from, 'gemini');
+    assert.equal(decision.to, 'claude-code');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

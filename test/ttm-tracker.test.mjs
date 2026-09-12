@@ -223,6 +223,35 @@ test('rollup computes median, p90, open breaches, and 12h terminal stall duratio
   }
 });
 
+test('rollup splits first-pass queue wait from pass duration', () => {
+  const rootDir = tempRoot();
+  const db = openDb(rootDir);
+  try {
+    insertReviewRow(db, {
+      prNumber: 17,
+      reviewedAt: '2026-08-09T17:00:00.000Z',
+      postedAt: '2026-08-09T17:55:00.000Z',
+    });
+    insertPass(db, {
+      prNumber: 17,
+      startedAt: '2026-08-09T17:51:00.000Z',
+      endedAt: '2026-08-09T17:55:00.000Z',
+    });
+
+    const result = evaluateTtmFromDb(db, {
+      now: () => new Date(NOW),
+      config: { baseBudgetMinutes: 120, perRoundBudgetMinutes: 10, terminalUnmergedMinutes: 120 },
+    });
+
+    assert.equal(result.timelines.find((row) => row.prNumber === 17).firstPassWaitMinutes, 51);
+    assert.equal(result.timelines.find((row) => row.prNumber === 17).firstPassDurationMinutes, 4);
+    assert.equal(result.rollup.medianFirstPassWaitMinutes, 51);
+    assert.equal(result.rollup.medianFirstPassDurationMinutes, 4);
+  } finally {
+    db.close();
+  }
+});
+
 test('rollup includes current terminal stall duration when activation event aged out of the window', () => {
   const rootDir = tempRoot();
   const db = openDb(rootDir);

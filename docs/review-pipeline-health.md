@@ -48,6 +48,11 @@ The Grafana dashboard lives at
   `reviewed_prs.review_status='pending'`.
 - `review_pipeline_first_pass_oldest_pending_age_seconds`: age of the oldest
   pending first-pass/rereview row.
+- `review_pipeline_effective_reviewer_concurrency`: effective first-pass
+  reviewer concurrency measured by the RSP-01 spillover controller after
+  applying the live Gemini credential count.
+- `review_pipeline_gemini_credential_count`: usable Gemini reviewer credential
+  count last measured by the watcher from the broker.
 - `review_pipeline_ci_blocked_rereviews`: open re-reviews parked at
   `review_status='ci-blocked'` because external CI failed and no remediation
   job exists to requeue. The watcher backoff-gates same-head CI rechecks for
@@ -119,6 +124,7 @@ Its action headline is `Reviews stalled — restore reviewer dispatch`.
 | `review:unknown_failure_rate_high` | unknown-classified failures are >30% of failures over 15m, with at least 5 failures and at least 2 distinct PRs contributing unknown failures | ticket | the failure window falls back to threshold or below, the sample floor is no longer met, or unknown failures collapse to fewer than 2 PRs |
 | `review:reviewer_degradation_active` | at least one PR is currently held by `provider-overloaded` transient backoff or `quota-exhausted` quota hold | ticket | no active provider-overload backoff or quota hold remains |
 | `review:terminal_review_failure_active` | at least one open PR has terminal reviewer failure evidence in `reviewed_prs` | ticket | the failed review row is retriggered, remediated, or the PR leaves the open population |
+| `review:effective_reviewer_concurrency_collapsed` | configured first-pass reviewer pool is >1 but the RSP-01 report shows lower effective concurrency (for example pool 6 backed by one usable Gemini credential) | ticket | effective reviewer concurrency reaches the configured pool ceiling, or the pool ceiling is intentionally lowered |
 | `review:queue_starvation` | oldest pending first-pass row is >10m old | ticket | no pending row exceeds the age threshold |
 | `review:rereview_ci_blocked` | one or more open re-reviews are parked at `review_status='ci-blocked'` because external CI failed and no remediation job exists to requeue; same-head CI probes are backoff-gated | ticket | the PR head moves, CI turns green, remediation is requeued, or the PR leaves the open population |
 | `review:pr_lifecycle_mirror_unverified` | SEN-02 `blind`: the `reviewed_prs` lifecycle mirror has not reconciled against GitHub inside the staleness window (default 15m), or specific open PRs could not be resolved. Both the queue-starvation and terminal-but-unmerged findings select their population from `pr_state='open'` and then threshold on elapsed age, so an unverified row yields an alert that can never self-clear. Never a health verdict, and never suppresses either finding. | ticket | a sweep resolves every open PR against GitHub inside the staleness window |

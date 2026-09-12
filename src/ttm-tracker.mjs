@@ -263,6 +263,11 @@ function derivePrTtmTimeline(row, passes, { nowIso }) {
   const reviewerLeaseExpiresAt = row.reviewer_lease_expires_at || null;
   const reviewerLeaseExpiresMs = toMs(reviewerLeaseExpiresAt);
   const nowMs = toMs(nowIso);
+  const firstPasses = passes
+    .map(normalizeReviewPass)
+    .filter((pass) => pass && pass.passKind === 'first-pass' && pass.startedAt)
+    .sort((a, b) => toMs(a.startedAt) - toMs(b.startedAt));
+  const firstPass = firstPasses[0] || null;
 
   return {
     repo: row.repo,
@@ -276,6 +281,8 @@ function derivePrTtmTimeline(row, passes, { nowIso }) {
     prState: String(row.pr_state || 'open').trim().toLowerCase(),
     reviewStatus: String(row.review_status || '').trim().toLowerCase(),
     reviewRounds,
+    firstPassWaitMinutes: firstPass ? minutesBetween(openedAt, firstPass.startedAt) : null,
+    firstPassDurationMinutes: firstPass?.endedAt ? minutesBetween(firstPass.startedAt, firstPass.endedAt) : null,
     latestVerdict,
     terminalClean,
     elapsedMinutes: minutesBetween(openedAt, mergedAt || closedAt || nowIso),
@@ -619,6 +626,22 @@ function summarizeTtmRollupFromTimelines(rows, {
     medianTimeToMergeMinutes: percentile(mergedDurations, 50),
     p90TimeToMergeMinutes: percentile(mergedDurations, 90),
     mergedPrs: mergedDurations.length,
+    medianFirstPassWaitMinutes: percentile(
+      rows.map((row) => row.firstPassWaitMinutes).filter((value) => Number.isFinite(value)),
+      50
+    ),
+    p90FirstPassWaitMinutes: percentile(
+      rows.map((row) => row.firstPassWaitMinutes).filter((value) => Number.isFinite(value)),
+      90
+    ),
+    medianFirstPassDurationMinutes: percentile(
+      rows.map((row) => row.firstPassDurationMinutes).filter((value) => Number.isFinite(value)),
+      50
+    ),
+    p90FirstPassDurationMinutes: percentile(
+      rows.map((row) => row.firstPassDurationMinutes).filter((value) => Number.isFinite(value)),
+      90
+    ),
     // The trend pair. `openPrsBreachingBudget` is the SLOW counter and is null
     // (not 0) when blind, so a graph can show a gap instead of a clean line.
     openPrsBreachingBudget: budgetBlind ? null : openBreaches.length,

@@ -140,6 +140,7 @@ import {
   stmtMarkClosed,
   latestPostedReviewAtMs,
   countOpenPrsAwaitingFirstPassReview,
+  firstPassReviewPassDurationStats,
 } from './review-state-db.mjs';
 import {
   retryPendingMergeCloseouts,
@@ -1243,7 +1244,24 @@ async function pollOnce(
   ) || undefined;
   const reviewerMemoryPressureConfig = resolveReviewerMemoryPressureConfig();
   const reviewerDispatchCandidates = [];
-  const firstPassSpilloverController = createFirstPassSpilloverController({ rootDir: ROOT, readDepth: countOpenPrsAwaitingFirstPassReview, logger: console }); // RSP-01: disarmed unless CFG arms it
+  let geminiCredentialConcurrencyForTick = null;
+  const firstPassSpilloverController = createFirstPassSpilloverController({
+    rootDir: ROOT,
+    readDepth: countOpenPrsAwaitingFirstPassReview,
+    readPassDurationStats: firstPassReviewPassDurationStats,
+    reviewerPoolMaxConcurrent: reviewerPoolConfig.maxConcurrent,
+    geminiCredentialConcurrency: () => geminiCredentialConcurrencyForTick,
+    logger: console,
+  });
+  try {
+    geminiCredentialConcurrencyForTick =
+      await resolveGeminiCredentialConcurrencyForDispatchCandidates([{ reviewerModel: 'gemini' }]);
+  } catch (err) {
+    console.warn(
+      `[watcher] gemini credential concurrency probe failed; using conservative single-gemini cap: ${err?.message || err}`
+    );
+    geminiCredentialConcurrencyForTick = null;
+  }
   const postedReviewHandlers = [];
   const postReviewMaintenanceHandlers = [];
   const reviewerMemoryReservationState = { reservedMb: 0 };
@@ -1273,10 +1291,11 @@ async function pollOnce(
       // Cap concurrent GEMINI reviewers at the live broker credential count so
       // they don't over-dispatch against a single-account pool and lose the
       // checkout-lease race (the "no credential with remaining quota"
-      // misdiagnosis). Fail-open: a missing broker URL / secret / endpoint
-      // yields null => no gemini cap, so review dispatch never wedges on this.
-      const geminiCredentialConcurrency =
-        await resolveGeminiCredentialConcurrencyForDispatchCandidates(candidates);
+      // misdiagnosis). Missing broker URL / secret / endpoint yields null; the
+      // resolver deliberately fails closed to one Gemini reviewer so a telemetry
+      // hiccup cannot fan out into 409-bound reviewer timeouts.
+      const geminiCredentialConcurrency = geminiCredentialConcurrencyForTick
+        ?? await resolveGeminiCredentialConcurrencyForDispatchCandidates(candidates);
       const drainResult = await runBoundedReviewerDispatchQueue(candidates, {
         maxConcurrent: reviewerPoolConfig.maxConcurrent,
         geminiCredentialConcurrency,

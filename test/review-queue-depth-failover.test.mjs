@@ -21,6 +21,7 @@ import {
   FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT,
   REVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY,
   createFirstPassSpilloverController,
+  deriveFirstPassReviewQueueDepthFailoverThreshold,
   firstPassSpilloverPlan,
   readFirstPassReviewQueueDepth,
   readReviewQueueDepthFailoverReport,
@@ -112,7 +113,7 @@ test('below threshold: reviewer selection is byte-identical to pre-RSP-01', asyn
   }
 });
 
-test('disarmed (threshold unset) is byte-identical to pre-RSP-01 even at huge depth', async () => {
+test('unset static threshold derives a live threshold and can spill under pressure', async () => {
   const args = {
     authorClass: 'claude-code',
     primary: 'gemini',
@@ -123,14 +124,11 @@ test('disarmed (threshold unset) is byte-identical to pre-RSP-01 even at huge de
   const root = tempRoot();
   try {
     const pressure = controller({ root, depth: 9999, threshold: null }).depthPressure();
-    assert.equal(pressure.engaged, false);
+    assert.equal(pressure.engaged, true);
     const withLever = await resolveReviewerWorkerClassWithFallback({ ...args, depthPressure: pressure });
-    const withoutLever = await resolveReviewerWorkerClassWithFallback(args);
-    assert.deepEqual(withLever, withoutLever);
-    // With the queue-depth lever disarmed, the resolver must preserve the
-    // primary route and its ordinary no-fallback reason even under huge depth.
-    assert.equal(withLever.reason, 'primary-not-grounded');
-    assert.equal(withLever.fellBack, false);
+    assert.equal(withLever.reason, 'queue-depth-pressure');
+    assert.equal(withLever.fellBack, true);
+    assert.equal(withLever.workerClass, 'codex');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -453,20 +451,50 @@ test('the transition log is emitted with the depth and the cost', () => {
   }
 });
 
-test('no report is written and no depth is read while the lever is disarmed', () => {
+test('derived threshold sizes against effective concurrency and p50 pass duration', () => {
+  const args = {
+    reviewerPoolMaxConcurrent: 6,
+    p50PassDurationMs: 4 * 60 * 1000,
+    targetWaitMs: 10 * 60 * 1000,
+  };
+  assert.equal(deriveFirstPassReviewQueueDepthFailoverThreshold({
+    ...args,
+    geminiCredentialConcurrency: 1,
+  }).threshold, 3);
+  assert.equal(deriveFirstPassReviewQueueDepthFailoverThreshold({
+    ...args,
+    geminiCredentialConcurrency: 2,
+  }).threshold, 6);
+  assert.equal(deriveFirstPassReviewQueueDepthFailoverThreshold({
+    ...args,
+    geminiCredentialConcurrency: 6,
+  }).threshold, 18);
+});
+
+test('unset threshold is derived and the report is stamped on every evaluation', () => {
   const root = tempRoot();
   let depthReads = 0;
   try {
     const ctl = createFirstPassSpilloverController({
       rootDir: root,
-      readDepth: () => { depthReads += 1; return 500; },
+      readDepth: () => { depthReads += 1; return 2; },
       resolveThresholdImpl: () => null,
+      readPassDurationStats: () => ({ sampleCount: 4, p50Ms: 4 * 60 * 1000 }),
+      reviewerPoolMaxConcurrent: 6,
+      geminiCredentialConcurrency: 1,
       logger: { warn() {} },
+      now: () => new Date('2026-09-12T14:00:00.000Z'),
     });
-    assert.equal(ctl.plan().armed, false);
+    assert.equal(ctl.plan().armed, true);
+    assert.equal(ctl.plan().threshold, 3);
     assert.equal(ctl.depthPressure().engaged, false);
-    assert.equal(depthReads, 0, 'a disarmed lever must not pay for a queue-depth count');
-    assert.throws(() => readFileSync(reviewQueueDepthFailoverReportPath(root), 'utf8'));
+    assert.equal(depthReads, 1);
+    const report = JSON.parse(readFileSync(reviewQueueDepthFailoverReportPath(root), 'utf8'));
+    assert.equal(report.evaluatedAt, '2026-09-12T14:00:00.000Z');
+    assert.equal(report.updatedAt, '2026-09-12T14:00:00.000Z');
+    assert.equal(report.sizing.source, 'derived-wait-slo');
+    assert.equal(report.sizing.effectiveReviewerConcurrency, 1);
+    assert.equal(report.sizing.geminiCredentialConcurrency, 1);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -486,7 +514,7 @@ test('an unreadable depth leaves the lever disengaged rather than guessing', () 
   assert.equal(readFirstPassReviewQueueDepth(null), null);
 });
 
-test('an unreadable threshold stays disarmed rather than engaging', () => {
+test('an unreadable static threshold falls back to derived sizing', () => {
   const root = tempRoot();
   try {
     const ctl = createFirstPassSpilloverController({
@@ -495,18 +523,19 @@ test('an unreadable threshold stays disarmed rather than engaging', () => {
       resolveThresholdImpl: () => { throw new Error('config broken'); },
       logger: { warn() {} },
     });
-    assert.equal(ctl.plan().armed, false);
-    assert.equal(ctl.depthPressure().engaged, false);
+    assert.equal(ctl.plan().armed, true);
+    assert.equal(ctl.depthPressure().engaged, true);
+    assert.equal(ctl.plan().threshold, 3);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test('the CFG knob defaults to disarmed and is registered in ENV_ALIASES', () => {
+test('the CFG static override defaults to null and is registered in ENV_ALIASES', () => {
   assert.equal(
     resolveFirstPassReviewQueueDepthFailoverThreshold({ env: {}, topPath: '/dev/null' }),
     null,
-    'a host that takes this change behaves exactly as it does today'
+    'unset means the controller uses the derived wait-SLO threshold'
   );
   const alias = ENV_ALIASES[REVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY];
   assert.ok(alias, `missing ENV_ALIASES entry: ${REVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY}`);

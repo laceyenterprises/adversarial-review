@@ -498,3 +498,42 @@ export function countOpenPrsAwaitingFirstPassReview(handle = db) {
   const n = stmt.get()?.n;
   return Number.isFinite(n) ? n : 0;
 }
+
+export function firstPassReviewPassDurationStats(handle = db, { limit = 50 } = {}) {
+  const sampleLimit = Number.isInteger(Number(limit)) && Number(limit) > 0
+    ? Number(limit)
+    : 50;
+  let rows;
+  try {
+    rows = handle.prepare(
+      `SELECT started_at, ended_at
+         FROM reviewer_passes
+        WHERE pass_kind = 'first-pass'
+          AND status = 'completed'
+          AND started_at IS NOT NULL
+          AND ended_at IS NOT NULL
+        ORDER BY ended_at DESC
+        LIMIT ?`
+    ).all(sampleLimit);
+  } catch (error) {
+    const message = String(error?.message || '');
+    if (error?.code === 'SQLITE_ERROR' && (message.includes('no such table') || message.includes('no such column'))) {
+      return { sampleCount: 0, p50Ms: null };
+    }
+    throw error;
+  }
+  const durations = rows
+    .map((row) => {
+      const started = parsePostedAtMs(row.started_at);
+      const ended = parsePostedAtMs(row.ended_at);
+      return started === null || ended === null || ended < started ? null : ended - started;
+    })
+    .filter((duration) => Number.isFinite(duration) && duration >= 0)
+    .sort((left, right) => left - right);
+  if (durations.length === 0) return { sampleCount: 0, p50Ms: null };
+  const mid = Math.floor(durations.length / 2);
+  const p50Ms = durations.length % 2 === 1
+    ? durations[mid]
+    : (durations[mid - 1] + durations[mid]) / 2;
+  return { sampleCount: durations.length, p50Ms };
+}

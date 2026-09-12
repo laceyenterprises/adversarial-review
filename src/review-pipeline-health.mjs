@@ -13,6 +13,7 @@ import {
   evaluateTtmFromDb,
   resolveTtmTrackerConfig,
 } from './ttm-tracker.mjs';
+import { readReviewQueueDepthFailoverReport } from './review-queue-depth.mjs';
 import { readDaemonMergeParks } from './daemon-merge-park-log.mjs';
 import {
   DEFAULT_RECONCILE_STALE_AFTER_MS,
@@ -109,6 +110,8 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_reviewer_degradation_active',
   'review_pipeline_first_pass_queue_depth',
   'review_pipeline_first_pass_oldest_pending_age_seconds',
+  'review_pipeline_effective_reviewer_concurrency',
+  'review_pipeline_gemini_credential_count',
   'review_pipeline_ci_blocked_rereviews',
   'review_pipeline_remediation_backlog_jobs',
   'review_pipeline_remediation_oldest_pending_age_seconds',
@@ -122,6 +125,8 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_dispatch_spawn_failures',
   'review_pipeline_dag_autowalk_healthy',
   'review_pipeline_ttm_minutes',
+  'review_pipeline_first_pass_wait_minutes',
+  'review_pipeline_first_pass_duration_minutes',
   'review_pipeline_ttm_open_budget_breaches',
   'review_pipeline_ttm_stuck_open_prs',
   'review_pipeline_ttm_budget_minutes',
@@ -140,6 +145,8 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_reviewer_degradation_active: 'Active reviewer degradation/backoff PR count by failure class and state.',
   review_pipeline_first_pass_queue_depth: 'Current count of pending first-pass or rereview rows.',
   review_pipeline_first_pass_oldest_pending_age_seconds: 'Age in seconds of the oldest pending first-pass or rereview row.',
+  review_pipeline_effective_reviewer_concurrency: 'Effective first-pass reviewer concurrency measured by the RSP-01 spillover controller.',
+  review_pipeline_gemini_credential_count: 'Usable Gemini reviewer credential count measured from the broker by the watcher.',
   review_pipeline_ci_blocked_rereviews: 'Current count of re-reviews parked behind failed external CI.',
   review_pipeline_remediation_backlog_jobs: 'Current follow-up remediation job count by state.',
   review_pipeline_remediation_oldest_pending_age_seconds: 'Age in seconds of the oldest pending remediation job.',
@@ -153,6 +160,8 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_dispatch_spawn_failures: 'Recent dispatch daemon stderr lines matching closer/hammer spawn failure patterns.',
   review_pipeline_dag_autowalk_healthy: 'Whether the dag-autowalk LaunchAgent has a healthy exit/log recency state.',
   review_pipeline_ttm_minutes: 'Time-to-merge rollup in minutes over the configured window.',
+  review_pipeline_first_pass_wait_minutes: 'First-pass queue wait in minutes, from PR open/record to reviewer pass start.',
+  review_pipeline_first_pass_duration_minutes: 'First-pass reviewer work duration in minutes, from pass start to pass end.',
   review_pipeline_ttm_open_budget_breaches: 'Current open PRs exceeding the measured rounds-aware time-to-merge budget (SLOW; trend only).',
   review_pipeline_ttm_stuck_open_prs: 'Current open PRs that are not progressing (STUCK; the page-worthy counter).',
   review_pipeline_ttm_budget_minutes: 'Derived time-to-merge budget in minutes, by component, after queue-pressure scaling.',
@@ -167,6 +176,14 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
 // published reviews stop while open PRs wait; no collector finding may create
 // a second, differently-worded page for the same or an unrelated condition.
 const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
+  {
+    code: 'review:effective_reviewer_concurrency_collapsed',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: 'watcher.first_pass_reviewer_pool_max_concurrent_reviewers vs RSP-01 effective concurrency',
+    defaultThreshold: null,
+    thresholdDescription: 'the configured first-pass reviewer pool is larger than the live effective reviewer concurrency',
+  },
   {
     code: 'review:review_state_ledger_unreadable',
     tier: 'ticket',
@@ -1306,6 +1323,33 @@ function summarizeFirstPassQueue(db, { nowMs }) {
   };
 }
 
+function summarizeReviewerConcurrency(rootDir) {
+  const report = readReviewQueueDepthFailoverReport(rootDir);
+  const sizing = report?.sizing && typeof report.sizing === 'object' ? report.sizing : {};
+  return {
+    evaluatedAt: report?.evaluatedAt || null,
+    updatedAt: report?.updatedAt || null,
+    source: sizing.source || null,
+    poolMaxConcurrent: Number.isFinite(Number(sizing.reviewerPoolMaxConcurrent))
+      ? Number(sizing.reviewerPoolMaxConcurrent)
+      : null,
+    effectiveReviewerConcurrency: Number.isFinite(Number(sizing.effectiveReviewerConcurrency))
+      ? Number(sizing.effectiveReviewerConcurrency)
+      : null,
+    geminiCredentialCount: Number.isFinite(Number(sizing.geminiCredentialConcurrency))
+      ? Number(sizing.geminiCredentialConcurrency)
+      : null,
+    p50PassDurationMs: Number.isFinite(Number(sizing.p50PassDurationMs))
+      ? Number(sizing.p50PassDurationMs)
+      : null,
+    targetWaitMs: Number.isFinite(Number(sizing.targetWaitMs))
+      ? Number(sizing.targetWaitMs)
+      : null,
+    threshold: Number.isFinite(Number(report?.threshold)) ? Number(report.threshold) : null,
+    depth: Number.isFinite(Number(report?.depth)) ? Number(report.depth) : null,
+  };
+}
+
 function summarizeCiBlockedRereviews(db, { nowMs }) {
   if (!db) return { count: 0, oldest: null, prs: [] };
   const rows = safeAll(
@@ -2298,6 +2342,37 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
   }
 
   const oldest = snapshot.firstPassQueue.oldest;
+  const concurrency = snapshot.reviewerConcurrency || {};
+  if (
+    Number.isFinite(Number(concurrency.poolMaxConcurrent))
+    && Number.isFinite(Number(concurrency.effectiveReviewerConcurrency))
+    && Number(concurrency.poolMaxConcurrent) > 1
+    && Number(concurrency.effectiveReviewerConcurrency) < Number(concurrency.poolMaxConcurrent)
+  ) {
+    findings.push(buildFinding({
+      code: 'review:effective_reviewer_concurrency_collapsed',
+      tier: 'ticket',
+      subject:
+        `first-pass reviewer pool is configured for ${concurrency.poolMaxConcurrent} `
+        + `but effective concurrency is ${concurrency.effectiveReviewerConcurrency}`,
+      message:
+        `RSP-01 last evaluated at ${concurrency.evaluatedAt || 'unknown'} with `
+        + `geminiCredentialCount=${concurrency.geminiCredentialCount ?? 'unknown'}, `
+        + `p50PassDurationMs=${concurrency.p50PassDurationMs ?? 'unknown'}, `
+        + `derivedThreshold=${concurrency.threshold ?? 'unknown'}.`,
+      evidence: [
+        `review-queue-depth-failover evaluatedAt=${concurrency.evaluatedAt || 'unknown'}`,
+        `poolMaxConcurrent=${concurrency.poolMaxConcurrent}`,
+        `effectiveReviewerConcurrency=${concurrency.effectiveReviewerConcurrency}`,
+        `geminiCredentialCount=${concurrency.geminiCredentialCount ?? 'unknown'}`,
+      ],
+      recommendedAction:
+        'Treat first-pass latency as queue wait, not reviewer runtime. Leave the Gemini cap at the live credential count; let RSP-01 spillover buy non-primary reviewer slots under load or add credentials.',
+      observedAt,
+      details: concurrency,
+    }));
+  }
+
   if (oldest && oldest.ageMs > config.queueStarvationMaxAgeMs) {
     // TREC-01: this population is `pr_state='open' AND review_status='pending'`
     // read from the SQLite mirror, thresholded on elapsed age. When the mirror
@@ -2835,6 +2910,7 @@ function collectReviewPipelineHealth({
     const firstPassQueue = db
       ? summarizeFirstPassQueue(db, { nowMs })
       : { depth: 0, oldest: null };
+    const reviewerConcurrency = summarizeReviewerConcurrency(rootDir);
     const ciBlockedRereviews = db
       ? summarizeCiBlockedRereviews(db, { nowMs })
       : { count: 0, oldest: null, prs: [] };
@@ -2905,6 +2981,10 @@ function collectReviewPipelineHealth({
             perRoundBudgetMinutes: config.ttm.perRoundBudgetMinutes,
             budgetPercentile: config.ttm.budgetPercentile,
             queuePressureMultiplier: null,
+            medianFirstPassWaitMinutes: null,
+            p90FirstPassWaitMinutes: null,
+            medianFirstPassDurationMinutes: null,
+            p90FirstPassDurationMinutes: null,
             queuePressureSaturated: false,
             stuckOpenPrs: 0,
             terminalButUnmergedOpenCount: 0,
@@ -2939,6 +3019,7 @@ function collectReviewPipelineHealth({
       config,
       terminalReconciliation,
       reviewer,
+      reviewerConcurrency,
       reviewerDegradation,
       outage,
       firstPassQueue,
@@ -3039,6 +3120,16 @@ function renderReviewPipelinePrometheus(snapshot) {
     {},
     Math.round((snapshot.firstPassQueue.oldest?.ageMs || 0) / 1000)
   );
+  pushMetric(
+    'review_pipeline_effective_reviewer_concurrency',
+    {},
+    withDefault(snapshot.reviewerConcurrency?.effectiveReviewerConcurrency)
+  );
+  pushMetric(
+    'review_pipeline_gemini_credential_count',
+    {},
+    withDefault(snapshot.reviewerConcurrency?.geminiCredentialCount)
+  );
   pushMetric('review_pipeline_ci_blocked_rereviews', {}, snapshot.ciBlockedRereviews?.count || 0);
   for (const [state, count] of Object.entries(snapshot.followUpQueues.states)) {
     pushMetric('review_pipeline_remediation_backlog_jobs', { state }, count);
@@ -3077,6 +3168,26 @@ function renderReviewPipelinePrometheus(snapshot) {
   pushMetric('review_pipeline_dag_autowalk_healthy', {}, snapshot.dagAutowalk?.healthy ? 1 : 0);
   pushMetric('review_pipeline_ttm_minutes', { quantile: '0.5' }, snapshot.ttm?.rollup?.medianTimeToMergeMinutes || 0);
   pushMetric('review_pipeline_ttm_minutes', { quantile: '0.9' }, snapshot.ttm?.rollup?.p90TimeToMergeMinutes || 0);
+  pushMetric(
+    'review_pipeline_first_pass_wait_minutes',
+    { quantile: '0.5' },
+    snapshot.ttm?.rollup?.medianFirstPassWaitMinutes || 0
+  );
+  pushMetric(
+    'review_pipeline_first_pass_wait_minutes',
+    { quantile: '0.9' },
+    snapshot.ttm?.rollup?.p90FirstPassWaitMinutes || 0
+  );
+  pushMetric(
+    'review_pipeline_first_pass_duration_minutes',
+    { quantile: '0.5' },
+    snapshot.ttm?.rollup?.medianFirstPassDurationMinutes || 0
+  );
+  pushMetric(
+    'review_pipeline_first_pass_duration_minutes',
+    { quantile: '0.9' },
+    snapshot.ttm?.rollup?.p90FirstPassDurationMinutes || 0
+  );
   pushMetric('review_pipeline_ttm_open_budget_breaches', {}, withDefault(snapshot.ttm?.rollup?.openPrsBreachingBudget));
   pushMetric('review_pipeline_ttm_stuck_open_prs', {}, snapshot.ttm?.rollup?.stuckOpenPrs || 0);
   pushMetric('review_pipeline_ttm_budget_minutes', { component: 'base' }, withDefault(snapshot.ttm?.rollup?.baseBudgetMinutes));

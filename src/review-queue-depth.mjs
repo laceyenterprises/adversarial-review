@@ -22,12 +22,12 @@
 // `agy` is serialized on purpose: it is cheap, and keeping review on it
 // preserves provider quota for the work that actually ships code (builds and
 // remediations). Every other reviewer class parallelizes AND spends that same
-// quota. So the threshold is not "how much parallelism do we want" — it is "how
-// deep does the backlog have to get before clearing it is worth spending build
-// quota on". Hence:
+// quota. So the threshold is not a static "how much parallelism do we want" knob
+// — it is derived from live effective reviewer concurrency and measured p50 pass
+// duration against a wait SLO. Hence:
 //
-//   1. DISARMED BY DEFAULT. A host that takes this change behaves exactly as it
-//      does today until an operator sets one value.
+//   1. MEASURED BY DEFAULT. The threshold follows credential count and pass
+//      duration changes instead of silently aging into the wrong value.
 //   2. GRADED, not on/off. Each full multiple of the threshold sitting in the
 //      queue buys exactly ONE concurrent non-primary reviewer
 //      (`floor(depth / threshold)`), so a marginal overflow spends marginally.
@@ -47,6 +47,7 @@ import { join } from 'node:path';
 
 import { writeFileAtomic } from './atomic-write.mjs';
 import { loadRoleConfig } from './role-config.mjs';
+import { resolveGeminiDispatchConcurrencyLimit } from './watcher-reviewer-pool.mjs';
 
 // ── The unit ─────────────────────────────────────────────────────────────────
 // "Queue depth" is stated precisely, because an operator sets a threshold in it:
@@ -100,6 +101,8 @@ export const REVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY =
 const REPORT_RELATIVE_PATH = ['data', 'review-queue-depth-failover.json'];
 const REPORT_SCHEMA_VERSION = 1;
 const MAX_RETAINED_TRANSITIONS = 20;
+const DEFAULT_TARGET_FIRST_PASS_WAIT_MS = 10 * 60 * 1000;
+const DEFAULT_FIRST_PASS_P50_REVIEW_DURATION_MS = 4 * 60 * 1000;
 
 export function reviewQueueDepthFailoverReportPath(rootDir) {
   return join(rootDir, ...REPORT_RELATIVE_PATH);
@@ -130,10 +133,9 @@ export function readFirstPassReviewQueueDepth(readDepth, { logger = null } = {})
 /**
  * The break-glass threshold, in units of {@link FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT}.
  *
- * `null` (the default) means DISARMED: reviewer selection is byte-identical to
- * pre-RSP-01 behaviour. Any integer >= 1 arms the lever at that depth. Being
- * unset-by-default and a single value is the whole "break glass" contract — one
- * config value flips it, and nothing flips it implicitly.
+ * `null` (the default) means "derive from live concurrency and measured pass
+ * duration". Any integer >= 1 is an explicit static override for operators who
+ * need to pin the threshold during an incident.
  *
  * CFG parity note: the key is declared in this repo's Node schema and reachable
  * from `AGENT_OS_WATCHER_FIRST_PASS_REVIEW_QUEUE_DEPTH_FAILOVER_THRESHOLD`
@@ -161,6 +163,46 @@ export function resolveFirstPassReviewQueueDepthFailoverThreshold({
   return Number.isInteger(parsed) && parsed >= 1 ? parsed : null;
 }
 
+export function deriveFirstPassReviewQueueDepthFailoverThreshold({
+  reviewerPoolMaxConcurrent = 1,
+  geminiCredentialConcurrency = null,
+  p50PassDurationMs = null,
+  targetWaitMs = DEFAULT_TARGET_FIRST_PASS_WAIT_MS,
+} = {}) {
+  const poolCeiling = Math.max(1, Number.parseInt(String(reviewerPoolMaxConcurrent), 10) || 1);
+  const effectiveReviewerConcurrency = resolveGeminiDispatchConcurrencyLimit({
+    geminiCredentialConcurrency,
+    ceiling: poolCeiling,
+  });
+  const observedP50PassDurationMs = Number(p50PassDurationMs);
+  const passDurationMs = Number.isFinite(observedP50PassDurationMs) && observedP50PassDurationMs > 0
+    ? observedP50PassDurationMs
+    : DEFAULT_FIRST_PASS_P50_REVIEW_DURATION_MS;
+  const waitBudgetMs = Number.isFinite(Number(targetWaitMs)) && Number(targetWaitMs) > 0
+    ? Number(targetWaitMs)
+    : DEFAULT_TARGET_FIRST_PASS_WAIT_MS;
+  const slotsPerReviewerBeforeSlo = Math.floor(waitBudgetMs / passDurationMs) + 1;
+  const threshold = Math.max(
+    1,
+    Math.max(0, effectiveReviewerConcurrency) * slotsPerReviewerBeforeSlo
+  );
+  return {
+    threshold,
+    source: 'derived-wait-slo',
+    targetWaitMs: waitBudgetMs,
+    p50PassDurationMs: passDurationMs,
+    p50PassDurationSource: Number.isFinite(observedP50PassDurationMs) && observedP50PassDurationMs > 0
+      ? 'reviewer_passes'
+      : 'fallback',
+    reviewerPoolMaxConcurrent: poolCeiling,
+    effectiveReviewerConcurrency,
+    geminiCredentialConcurrency:
+      geminiCredentialConcurrency === null || geminiCredentialConcurrency === undefined || geminiCredentialConcurrency === ''
+        ? null
+        : Math.max(0, Number.parseInt(String(geminiCredentialConcurrency), 10) || 0),
+  };
+}
+
 /**
  * The graded response.
  *
@@ -171,7 +213,7 @@ export function resolveFirstPassReviewQueueDepthFailoverThreshold({
  * armed value rather than introducing a second knob, and it errs late/cheap:
  * a queue 1.9x the threshold still only spends one extra reviewer.
  *
- * `null`/absent threshold (disarmed) or an unreadable depth => never engaged.
+ * An unreadable depth => never engaged.
  */
 export function firstPassSpilloverPlan({ depth = null, threshold = null } = {}) {
   const normalizedThreshold = Number.isInteger(threshold) && threshold >= 1 ? threshold : null;
@@ -208,8 +250,18 @@ function emptyReport() {
     engagedSince: null,
     engagedAtDepth: null,
     updatedAt: null,
+    evaluatedAt: null,
     lastTransition: null,
     transitions: [],
+    sizing: {
+      source: null,
+      targetWaitMs: null,
+      p50PassDurationMs: null,
+      p50PassDurationSource: null,
+      reviewerPoolMaxConcurrent: null,
+      effectiveReviewerConcurrency: null,
+      geminiCredentialConcurrency: null,
+    },
     cost: {
       spilloverReviewsTotal: 0,
       byWorkerClass: {},
@@ -247,8 +299,9 @@ export function readReviewQueueDepthFailoverReport(rootDir, { readFileImpl = rea
  *     ran elsewhere, not attempts.
  *   - the durable engage/disengage + cost report.
  *
- * Every method is fail-open: any error leaves the lever disengaged and review on
- * the cheap primary, which is the pre-RSP-01 behaviour.
+ * Every method is fail-open where the measured inputs are unreadable: a depth
+ * read failure leaves the lever disengaged, and a duration-sample failure uses
+ * the conservative p50 fallback.
  */
 export function createFirstPassSpilloverController({
   readDepth = null,
@@ -260,6 +313,10 @@ export function createFirstPassSpilloverController({
   resolveThresholdImpl = resolveFirstPassReviewQueueDepthFailoverThreshold,
   readReportImpl = readReviewQueueDepthFailoverReport,
   writeFileImpl = writeFileAtomic,
+  reviewerPoolMaxConcurrent = 1,
+  geminiCredentialConcurrency = null,
+  readPassDurationStats = null,
+  targetWaitMs = DEFAULT_TARGET_FIRST_PASS_WAIT_MS,
 } = {}) {
   let plan = null;
   let remaining = 0;
@@ -279,17 +336,37 @@ export function createFirstPassSpilloverController({
 
   function evaluate() {
     if (plan) return plan;
-    let threshold = null;
+    let staticThreshold = null;
     try {
-      threshold = resolveThresholdImpl({ env });
+      staticThreshold = resolveThresholdImpl({ env });
     } catch (err) {
       logger?.warn?.(
-        `[watcher] review-queue-depth-failover threshold unreadable; staying disarmed: ${err?.message || err}`
+        `[watcher] review-queue-depth-failover static threshold unreadable; using derived sizing: ${err?.message || err}`
       );
-      threshold = null;
+      staticThreshold = null;
     }
-    // Disarmed is the overwhelmingly common case; do not pay a SQL count for it.
-    const depth = threshold === null ? null : readDepthImpl(readDepth, { logger });
+    let passDurationStats = { sampleCount: 0, p50Ms: null };
+    try {
+      passDurationStats = typeof readPassDurationStats === 'function'
+        ? (readPassDurationStats() || passDurationStats)
+        : passDurationStats;
+    } catch (err) {
+      logger?.warn?.(
+        `[watcher] review-queue-depth-failover duration sample unreadable; using fallback p50: ${err?.message || err}`
+      );
+    }
+    const currentGeminiCredentialConcurrency = typeof geminiCredentialConcurrency === 'function'
+      ? geminiCredentialConcurrency()
+      : geminiCredentialConcurrency;
+    const derived = deriveFirstPassReviewQueueDepthFailoverThreshold({
+      reviewerPoolMaxConcurrent,
+      geminiCredentialConcurrency: currentGeminiCredentialConcurrency,
+      p50PassDurationMs: passDurationStats.p50Ms,
+      targetWaitMs,
+    });
+    const threshold = staticThreshold ?? derived.threshold;
+    const thresholdSource = staticThreshold === null ? derived.source : 'static-override';
+    const depth = readDepthImpl(readDepth, { logger });
     plan = firstPassSpilloverPlan({ depth, threshold });
     remaining = plan.spillSlots;
     granted = 0;
@@ -305,7 +382,18 @@ export function createFirstPassSpilloverController({
     report.depth = plan.depth;
     report.threshold = plan.threshold;
     report.spillSlots = plan.spillSlots;
+    report.evaluatedAt = at;
     report.updatedAt = at;
+    report.sizing = {
+      source: thresholdSource,
+      targetWaitMs: derived.targetWaitMs,
+      p50PassDurationMs: derived.p50PassDurationMs,
+      p50PassDurationSource: derived.p50PassDurationSource,
+      p50PassDurationSampleCount: Number(passDurationStats.sampleCount || 0),
+      reviewerPoolMaxConcurrent: derived.reviewerPoolMaxConcurrent,
+      effectiveReviewerConcurrency: derived.effectiveReviewerConcurrency,
+      geminiCredentialConcurrency: derived.geminiCredentialConcurrency,
+    };
 
     if (plan.engaged !== wasEngaged) {
       const event = plan.engaged ? 'engage' : 'disengage';
@@ -340,7 +428,7 @@ export function createFirstPassSpilloverController({
         + `unit="${FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT}"`
       );
       persist();
-    } else if (plan.engaged) {
+    } else {
       persist();
     }
     return plan;
@@ -353,9 +441,8 @@ export function createFirstPassSpilloverController({
     },
     /**
      * Snapshot handed to `resolveReviewerWorkerClassWithFallback`. `engaged` is
-     * false whenever the lever is disarmed, depth is under threshold, or the
-     * tick's spill budget is spent — in all three cases the resolver takes its
-     * pre-RSP-01 path unchanged.
+     * false whenever depth is under threshold or the tick's spill budget is
+     * spent — in both cases the resolver takes its primary path unchanged.
      */
     depthPressure() {
       const current = evaluate();

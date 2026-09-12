@@ -54,6 +54,43 @@ test('pipeline Sentinel findings are diagnostics, never pages', () => {
   );
 });
 
+test('pipeline health surfaces collapsed effective reviewer concurrency', () => {
+  const rootDir = tempRoot();
+  try {
+    mkdirSync(path.join(rootDir, 'data'), { recursive: true });
+    writeFileSync(path.join(rootDir, 'data', 'review-queue-depth-failover.json'), JSON.stringify({
+      schemaVersion: 1,
+      evaluatedAt: NOW,
+      updatedAt: NOW,
+      depth: 8,
+      threshold: 3,
+      sizing: {
+        source: 'derived-wait-slo',
+        reviewerPoolMaxConcurrent: 6,
+        effectiveReviewerConcurrency: 1,
+        geminiCredentialConcurrency: 1,
+        p50PassDurationMs: 4 * 60 * 1000,
+        targetWaitMs: 10 * 60 * 1000,
+      },
+      cost: { spilloverReviewsTotal: 0, byWorkerClass: {}, currentEngagementSpilloverReviews: 0 },
+      transitions: [],
+    }, null, 2));
+
+    const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW), env: {} });
+    assert.equal(snapshot.reviewerConcurrency.poolMaxConcurrent, 6);
+    assert.equal(snapshot.reviewerConcurrency.effectiveReviewerConcurrency, 1);
+    assert.equal(snapshot.reviewerConcurrency.geminiCredentialCount, 1);
+    assert.ok(snapshot.findings.some((finding) => (
+      finding.code === 'review:effective_reviewer_concurrency_collapsed'
+    )));
+    const prometheus = renderReviewPipelinePrometheus(snapshot);
+    assert.match(prometheus, /^review_pipeline_effective_reviewer_concurrency 1$/m);
+    assert.match(prometheus, /^review_pipeline_gemini_credential_count 1$/m);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 function openDb(rootDir) {
   const db = openReviewStateDb(rootDir);
   ensureReviewStateSchema(db);

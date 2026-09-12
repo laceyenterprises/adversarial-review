@@ -338,10 +338,21 @@ function isHeadChangeRereviewReason(reason) {
   );
 }
 
-function completedHeadChangeRereviewIsSettledClean({ latestJob, latestJobStatus, reviewRow }) {
+function followUpJobRevisionRef(job) {
+  return String(
+    job?.revisionRef
+      ?? job?.currentRevisionRef
+      ?? job?.subjectRef?.revisionRef
+      ?? ''
+  ).trim() || null;
+}
+
+function completedHeadChangeRereviewIsSettledClean({ latestJob, latestJobStatus, reviewRow, headSha }) {
   if (latestJobStatus !== 'completed') return false;
-  if (latestJob?.reReview?.requested === true) return false;
+  if (latestJob?.reReview?.requested !== true) return false;
   if (!isHeadChangeRereviewReason(reviewRow?.rereview_reason)) return false;
+  const jobHead = followUpJobRevisionRef(latestJob);
+  if (headSha && jobHead && String(jobHead) !== String(headSha)) return false;
   const verdict = normalizeEffectiveReviewVerdict(latestJob.reviewBody);
   if (verdict !== 'comment-only' && verdict !== 'approved') return false;
   const blocking = classifyBlockingFindings(latestJob.reviewBody, { lastVerdict: verdict || null });

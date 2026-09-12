@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -205,4 +205,17 @@ test('watcher wake caps one PR head without starving another PR head', async () 
   } finally {
     wakeSource.close();
   }
+});
+
+test('watcher main loop does not gate wake-file sleeps behind handoff config', () => {
+  const watcherSource = readFileSync(
+    new URL('../src/watcher.mjs', import.meta.url),
+    'utf8',
+  );
+
+  assert.match(watcherSource, /const wake = await watcherWakeSource\.wait\(sleepMs\);/);
+  assert.doesNotMatch(
+    watcherSource,
+    /if\s*\(\s*resolveWatcherHandoffEnabled\([^)]*\)\s*\)\s*{\s*const wake = await watcherWakeSource\.wait\(sleepMs\);/s,
+  );
 });

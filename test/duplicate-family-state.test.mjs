@@ -7,6 +7,7 @@ import {
   ensureDuplicateFamilySchema,
   listDuplicateFamilies,
   reconcileDuplicateFamiliesForRepo,
+  runDuplicateFamilyCensusForWatcher,
 } from '../src/duplicate-family-state.mjs';
 
 const REPO = 'laceyenterprises/agent-os';
@@ -20,7 +21,7 @@ function subject(prNumber, overrides = {}) {
       state: overrides.state || 'OPEN',
       baseRefName: overrides.baseRefName || 'main',
       headRefName: overrides.headRefName || `codex/dpa-01-${prNumber}`,
-      headSha: overrides.headSha || `head-${prNumber}`,
+      headSha: Object.hasOwn(overrides, 'headSha') ? overrides.headSha : `head-${prNumber}`,
       baseSha: overrides.baseSha || 'base-main',
       labels: overrides.labels || [],
     },
@@ -131,6 +132,25 @@ test('title fallback needs a second corroborating strong signal', () => {
   assert.deepEqual(family[0].commonSignals, ['branch-ticket', 'title-ticket']);
 });
 
+test('head-independent dispatch provenance is not queried twice when head SHA is absent', () => {
+  const calls = [];
+  detectDuplicateFamiliesForRepo([
+    subject(251, { headSha: null }),
+    subject(252, { headSha: null }),
+  ], {
+    repoPath: REPO,
+    readBuildCompletionSignalForPrImpl: (args) => {
+      calls.push({ prNumber: args.prNumber, headSha: args.headSha });
+      return { ok: false, reason: 'missing-build-completion-signal' };
+    },
+  });
+
+  assert.deepEqual(calls, [
+    { prNumber: 251, headSha: null },
+    { prNumber: 252, headSha: null },
+  ]);
+});
+
 test('stack, follow-up, and same-branch remediation candidates are suppressed', () => {
   const stacked = detectDuplicateFamiliesForRepo([
     subject(301, { headSha: 'merged-predecessor', state: 'MERGED' }),
@@ -233,6 +253,87 @@ test('re-census marks absent advisory families inactive without duplicate transi
     assert.deepEqual(transitions.map((entry) => entry.transition), [
       'detected-advisory',
       'census-no-longer-duplicate',
+    ]);
+  } finally {
+    db.close();
+  }
+});
+
+test('re-census records reactivation when an inactive family becomes advisory again', () => {
+  const db = memoryDb();
+  const duplicateEntries = [
+    subject(471),
+    subject(472),
+  ];
+  const options = {
+    repoPath: REPO,
+    now: '2026-09-11T00:00:00.000Z',
+    readBuildCompletionSignalForPrImpl: provenanceReader({
+      471: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+      472: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+    }),
+  };
+  try {
+    reconcileDuplicateFamiliesForRepo(db, duplicateEntries, options);
+    reconcileDuplicateFamiliesForRepo(db, [subject(471)], {
+      ...options,
+      now: '2026-09-11T00:05:00.000Z',
+    });
+    reconcileDuplicateFamiliesForRepo(db, duplicateEntries, {
+      ...options,
+      now: '2026-09-11T00:10:00.000Z',
+    });
+
+    const family = listDuplicateFamilies(db)[0];
+    assert.equal(family.status, 'advisory');
+    const transitions = JSON.parse(family.transition_log_json);
+    assert.deepEqual(transitions.map((entry) => entry.transition), [
+      'detected-advisory',
+      'census-no-longer-duplicate',
+      'reactivated-advisory',
+    ]);
+    assert.equal(transitions[2].reason, 'duplicate-census-detected-again');
+  } finally {
+    db.close();
+  }
+});
+
+test('watcher census aborts transient provenance failures without deactivating active families', async () => {
+  const db = memoryDb();
+  const duplicateEntries = [
+    subject(481),
+    subject(482),
+  ];
+  try {
+    reconcileDuplicateFamiliesForRepo(db, duplicateEntries, {
+      repoPath: REPO,
+      now: '2026-09-11T00:00:00.000Z',
+      readBuildCompletionSignalForPrImpl: provenanceReader({
+        481: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+        482: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+      }),
+    });
+
+    const result = await runDuplicateFamilyCensusForWatcher({
+      db,
+      subjectEntries: duplicateEntries,
+      repoPath: REPO,
+      rootDir: '/private/tmp/nonexistent-agent-os-root',
+      env: {
+        AGENT_OS_SESSION_LEDGER_DB_PATH: '/private/tmp/nonexistent-session-ledger.db',
+      },
+      log: { log() {}, error() {} },
+    });
+
+    assert.match(
+      result.error?.message || '',
+      /^Transient provenance failure: (malformed-ledger-target|missing-ledger-target)$/
+    );
+    const family = listDuplicateFamilies(db)[0];
+    assert.equal(family.status, 'advisory');
+    assert.equal(family.candidate_count, 2);
+    assert.deepEqual(JSON.parse(family.transition_log_json).map((entry) => entry.transition), [
+      'detected-advisory',
     ]);
   } finally {
     db.close();

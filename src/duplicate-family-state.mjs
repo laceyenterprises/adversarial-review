@@ -136,9 +136,10 @@ function readDispatchProvenance({
     ledgerTarget,
     spawnSyncImpl,
   };
-  let result = reader({ ...common, headSha: headSha || null });
-  let resolvedBy = 'current-head';
-  if (!result?.ok) {
+  const normalizedHeadSha = normalizeText(headSha);
+  let result = reader({ ...common, headSha: normalizedHeadSha || null });
+  let resolvedBy = normalizedHeadSha ? 'current-head' : 'pr-opened-head-independent';
+  if (!result?.ok && normalizedHeadSha) {
     result = reader({ ...common, headSha: null });
     resolvedBy = result?.ok ? 'pr-opened-head-independent' : null;
   }
@@ -404,6 +405,10 @@ export function upsertDuplicateFamilies(db, families, {
          WHEN duplicate_families.status = 'inactive' THEN excluded.status
          ELSE duplicate_families.status
        END,
+       transition_log_json = CASE
+         WHEN duplicate_families.status = 'inactive' THEN excluded.transition_log_json
+         ELSE duplicate_families.transition_log_json
+       END,
        strongest_signal = excluded.strongest_signal,
        candidate_count = excluded.candidate_count,
        last_seen_at = excluded.last_seen_at,
@@ -455,11 +460,19 @@ export function upsertDuplicateFamilies(db, families, {
     const changed = [];
     for (const family of Array.isArray(families) ? families : []) {
       const existing = readExistingFamilyByKey(db, family.familyKey);
-      const transitionLog = existing?.transition_log_json || JSON.stringify([{
+      let transitionLog = existing?.transition_log_json || JSON.stringify([{
         at: now,
         transition: 'detected-advisory',
         status: DUPLICATE_FAMILY_STATUS_ADVISORY,
       }]);
+      if (existing?.status === DUPLICATE_FAMILY_STATUS_INACTIVE) {
+        transitionLog = appendTransitionLog(transitionLog, {
+          at: now,
+          transition: 'reactivated-advisory',
+          status: DUPLICATE_FAMILY_STATUS_ADVISORY,
+          reason: 'duplicate-census-detected-again',
+        });
+      }
       upsertFamily.run(
         existing?.family_id || family.familyId,
         family.familyKey,
@@ -551,6 +564,7 @@ export async function runDuplicateFamilyCensusForWatcher({
     const result = readBuildCompletionSignalForPr(args);
     if (!result?.ok && shouldDisableProvenanceForTick(result.reason)) {
       provenanceDisabledReason = result.reason || 'duplicate-family-provenance-unavailable';
+      throw new Error(`Transient provenance failure: ${provenanceDisabledReason}`);
     }
     return result;
   };

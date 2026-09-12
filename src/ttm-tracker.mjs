@@ -596,6 +596,13 @@ function summarizeTtmRollupFromTimelines(rows, {
   const stuckFlags = allFlags.filter((flag) => flag.progressClass === 'stuck');
   const terminalUnmerged = allFlags
     .filter((flag) => flag.flagKind === 'terminal_but_unmerged');
+  const terminalCleanRereviewBlocked = rows.filter((row) => (
+    row.prState === 'open'
+    && row.terminalClean
+    && row.reviewStatus === 'pending'
+    && row.rereviewUnansweredMinutes !== null
+    && row.rereviewUnansweredMinutes > config.progressStallMinutes
+  ));
   const terminalEventRows = eventRows.filter((row) => (
     row.flag_kind === 'terminal_but_unmerged'
     && toMs(row.observed_at) !== null
@@ -635,6 +642,7 @@ function summarizeTtmRollupFromTimelines(rows, {
     // The page-worthy counter.
     stuckOpenPrs: stuckFlags.length,
     terminalButUnmergedOpenCount: terminalUnmerged.length,
+    terminalCleanRereviewBlockedOpenCount: terminalCleanRereviewBlocked.length,
     terminalButUnmergedStallsLast12h: terminalStallKeys.size,
     terminalButUnmergedMaxDurationMinutesLast12h: terminalDurations.length
       ? Math.max(...terminalDurations)

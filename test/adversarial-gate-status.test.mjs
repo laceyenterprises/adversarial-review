@@ -505,6 +505,58 @@ test('pickAdversarialGateStatus keeps PR #53 queued-rereview shape pending until
   assert.match(decision.description, /queued re-review/i);
 });
 
+test('pickAdversarialGateStatus lets an overdue head-change rereview use a clean current-head verdict', () => {
+  const headSha = 'current-head-clean';
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'pending',
+      revision_ref: headSha,
+      rereview_requested_at: '2026-09-12T17:00:00.000Z',
+      rereview_reason: 'auto-refresh: pending review queued on stale head old-head; current head is current-head',
+    }),
+    latestJob: makeJob({
+      status: 'completed',
+      revisionRef: headSha,
+      reviewBody: '## Summary\nClean.\n## Blocking issues\n- None.\n## Verdict\nComment only',
+      reReview: {
+        requested: true,
+        requestedAt: '2026-09-12T17:00:00.000Z',
+      },
+    }),
+    headSha,
+    now: () => new Date('2026-09-12T17:16:00.000Z'),
+  });
+
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'review-settled-rereview-overdue');
+});
+
+test('pickAdversarialGateStatus still blocks findings-driven queued rereviews even after the grace window', () => {
+  const headSha = 'current-head-findings';
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'pending',
+      revision_ref: headSha,
+      rereview_requested_at: '2026-09-12T17:00:00.000Z',
+      rereview_reason: 'Re-review requested from remediation reply.',
+    }),
+    latestJob: makeJob({
+      status: 'completed',
+      revisionRef: headSha,
+      reviewBody: '## Summary\nClean.\n## Blocking issues\n- None.\n## Verdict\nComment only',
+      reReview: {
+        requested: true,
+        requestedAt: '2026-09-12T17:00:00.000Z',
+      },
+    }),
+    headSha,
+    now: () => new Date('2026-09-12T18:00:00.000Z'),
+  });
+
+  assert.equal(decision.state, 'pending');
+  assert.equal(decision.reason, 'rereview-queued');
+});
+
 test('pickAdversarialGateStatus keeps fast-merge skipped rows pending', () => {
   const decision = pickAdversarialGateStatus({
     reviewRow: makeReviewRow({
@@ -1043,6 +1095,48 @@ test('posted watcher rows project the adversarial gate before merge-agent dispat
     assert.ok(ghCalls[0].args.includes(`repos/laceyenterprises/adversarial-review/statuses/${headSha}`));
     assert.ok(ghCalls[0].args.includes('state=success'));
     assert.ok(ghCalls[0].args.includes(`context=${ADVERSARIAL_GATE_CONTEXT}`));
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('posted-review handler projects the gate from a fresh non-posted row instead of skipping outright', async () => {
+  const repo = 'laceyenterprises/adversarial-review';
+  const prNumber = 6672;
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'posted-review-reread-pending-'));
+  const projectedRows = [];
+  const fetches = [];
+  const pendingRow = makeReviewRow({
+    repo,
+    pr_number: prNumber,
+    review_status: 'pending',
+  });
+
+  try {
+    const result = await handlePostedReviewRow({
+      rootDir,
+      repoPath: repo,
+      prNumber,
+      existing: makeReviewRow({ repo, pr_number: prNumber }),
+      currentReviewRowReader: () => pendingRow,
+      projectGateStatusSafe: async (row) => {
+        projectedRows.push(row);
+        return { decision: { state: 'pending', reason: 'rereview-queued' } };
+      },
+      fetchMergeAgentCandidateImpl: async () => {
+        fetches.push('fetch');
+        return { repo, prNumber };
+      },
+      logger: {
+        log() {},
+        error() {},
+      },
+    });
+
+    assert.equal(result.outcome, 'stale-posted-review-snapshot');
+    assert.equal(result.gateDecision.reason, 'rereview-queued');
+    assert.deepEqual(projectedRows, [pendingRow]);
+    assert.deepEqual(fetches, []);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

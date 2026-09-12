@@ -332,6 +332,7 @@ export async function handlePostedReviewRow({
       );
       return {
         ok: false,
+        row: currentRow,
         result: {
           handled: true,
           outcome: 'stale-posted-review-snapshot',
@@ -344,7 +345,16 @@ export async function handlePostedReviewRow({
   };
 
   const initialReviewState = rereadPostedReviewRow('projectGateStatusSafe');
-  if (!initialReviewState.ok) return initialReviewState.result;
+  if (!initialReviewState.ok) {
+    const freshRow = initialReviewState.row;
+    if (freshRow) {
+      const gateProjection = await timePostedReviewStep(
+        'projectGateStatusSafe', stepKey, logger, () => projectGateStatusSafe(freshRow),
+      );
+      return { ...initialReviewState.result, gateDecision: gateProjection?.decision || null };
+    }
+    return initialReviewState.result;
+  }
   existing = initialReviewState.row;
 
   const gateProjection = await timePostedReviewStep(

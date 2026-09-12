@@ -41,6 +41,7 @@ const execFileAsync = promisify(execFile);
 
 const ADVERSARIAL_GATE_RECORD_DIR = ['data', 'adversarial-gate-status'];
 const DESCRIPTION_MAX_CHARS = 140;
+const DEFAULT_HEAD_CHANGE_REREVIEW_GRACE_MS = 15 * 60 * 1000;
 
 function sanitizePathSegment(value) {
   return String(value ?? '').replace(/[^A-Za-z0-9._-]/g, '-');
@@ -170,6 +171,66 @@ function parseTimestampMs(value) {
   if (!String(value ?? '').trim()) return null;
   const parsed = Date.parse(String(value).trim());
   return Number.isNaN(parsed) ? null : parsed;
+}
+
+function parseNonNegativeInteger(value) {
+  const text = String(value ?? '').trim();
+  if (!text) return null;
+  const parsed = Number(text);
+  if (!Number.isFinite(parsed) || parsed < 0) return null;
+  return Math.floor(parsed);
+}
+
+function resolveHeadChangeRereviewGraceMs(env = process.env) {
+  return parseNonNegativeInteger(env.ADVERSARIAL_GATE_HEAD_CHANGE_REREVIEW_GRACE_MS)
+    ?? DEFAULT_HEAD_CHANGE_REREVIEW_GRACE_MS;
+}
+
+function isHeadChangeRereviewReason(reason) {
+  const text = String(reason || '').trim().toLowerCase();
+  return (
+    text.startsWith('auto-refresh: posted review on stale head') ||
+    text.startsWith('auto-refresh: pending review queued on stale head') ||
+    text.startsWith('auto-refresh: ci-blocked re-review parked on stale head') ||
+    text.startsWith('auto-refresh: ci-blocked re-review for ') ||
+    text.startsWith('fsr-06b: trailer-only head move detected') ||
+    text.startsWith('fast-merge head changed')
+  );
+}
+
+function extractJobRevisionRef(job) {
+  return String(
+    job?.revisionRef
+      ?? job?.currentRevisionRef
+      ?? job?.subjectRef?.revisionRef
+      ?? ''
+  ).trim() || null;
+}
+
+function pendingHeadChangeRereviewHasCleanCurrentHeadVerdict({
+  reviewRow,
+  latestJob,
+  latestJobStatus,
+  headSha,
+  env,
+  now = () => new Date(),
+} = {}) {
+  if (latestJobStatus !== 'completed' || latestJob?.reReview?.requested !== true) return false;
+  if (!isHeadChangeRereviewReason(reviewRow?.rereview_reason)) return false;
+
+  const normalizedVerdict = normalizeEffectiveReviewVerdict(latestJob.reviewBody);
+  if (normalizedVerdict !== 'comment-only' && normalizedVerdict !== 'approved') return false;
+
+  const liveHead = String(headSha || '').trim();
+  const jobRevision = extractJobRevisionRef(latestJob);
+  const queuedRevision = String(reviewRow?.revision_ref || '').trim() || null;
+  if (!liveHead || (jobRevision || queuedRevision) !== liveHead) return false;
+
+  const requestedMs = parseTimestampMs(reviewRow?.rereview_requested_at);
+  if (requestedMs === null) return false;
+  const nowMs = now() instanceof Date ? now().getTime() : Date.parse(String(now()));
+  if (!Number.isFinite(nowMs)) return false;
+  return nowMs - requestedMs >= resolveHeadChangeRereviewGraceMs(env);
 }
 
 function findCapturedReviewerPassForHead(rootDir, { repo, prNumber, headSha } = {}) {
@@ -486,6 +547,7 @@ function pickAdversarialGateStatus({
   argusVerdict = null,
   env = process.env,
   settledReview = null,
+  now = () => new Date(),
 } = {}) {
   const context = resolveGateStatusContext(env);
   const decide = (state, description, reason, extra = null) =>
@@ -572,6 +634,20 @@ function pickAdversarialGateStatus({
 
   if (reviewStatus === 'pending') {
     if (latestJobStatus === 'completed' && latestJob?.reReview?.requested === true) {
+      if (pendingHeadChangeRereviewHasCleanCurrentHeadVerdict({
+        reviewRow,
+        latestJob,
+        latestJobStatus,
+        headSha,
+        env,
+        now,
+      })) {
+        return decide(
+          'success',
+          'Clean current-head verdict settled; overdue head-change re-review is non-blocking.',
+          'review-settled-rereview-overdue'
+        );
+      }
       return decide('pending', 'Queued re-review has not posted yet.', 'rereview-queued');
     }
     return decide('pending', 'Adversarial review is queued.', 'review-queued');

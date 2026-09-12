@@ -1891,20 +1891,17 @@ async function main() {
       // interval starts the next pass immediately rather than
       // sleeping for a negative delay.
       const sleepMs = Math.max(0, nextStart - Date.now());
-      // The interval-sleep timer is the only handle keeping the
-      // event loop alive between polls, so it MUST NOT be unref'd.
-      if (resolveWatcherHandoffEnabled()) {
-        const wake = await watcherWakeSource.wait(sleepMs);
-        const source = wake.woken
-          ? `wake pollOnce (${wake.payload?.reason || 'watcher-wake'})`
-          : 'scheduled pollOnce';
-        await runHeartbeatPoll(source, { wakePayload: wake.payload || null });
-        if (wake.woken) {
-          nextStart = Date.now();
-        }
-      } else {
-        await new Promise((resolve) => setTimeout(resolve, sleepMs));
-        await runHeartbeatPoll('scheduled pollOnce');
+      // The wake source owns the interval-sleep timer, so it MUST remain
+      // referenced. Handoff config gates handoff actions, not the local wake
+      // file itself: HAM uses this same hook to shorten close latency even when
+      // cross-daemon handoffs are disabled.
+      const wake = await watcherWakeSource.wait(sleepMs);
+      const source = wake.woken
+        ? `wake pollOnce (${wake.payload?.reason || 'watcher-wake'})`
+        : 'scheduled pollOnce';
+      await runHeartbeatPoll(source, { wakePayload: wake.payload || null });
+      if (wake.woken) {
+        nextStart = Date.now();
       }
       nextStart += intervalMs;
     }

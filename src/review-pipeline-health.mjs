@@ -115,6 +115,8 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_first_pass_oldest_pending_age_seconds',
   'review_pipeline_rereview_capacity_share',
   'review_pipeline_effective_reviewer_concurrency',
+  'review_pipeline_queued_rereviews',
+  'review_pipeline_queued_rereview_oldest_age_seconds',
   'review_pipeline_ci_blocked_rereviews',
   'review_pipeline_remediation_backlog_jobs',
   'review_pipeline_remediation_oldest_pending_age_seconds',
@@ -147,11 +149,13 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_reviewer_attempts_total: 'Windowed reviewer attempt count by status, failure class, and pass kind.',
   review_pipeline_failed_attempts_distinct_prs: 'Windowed distinct PR count contributing failed reviewer attempts by failure class.',
   review_pipeline_reviewer_degradation_active: 'Active reviewer degradation/backoff PR count by failure class and state.',
-  review_pipeline_first_pass_queue_depth: 'Current count of pending first-pass or rereview rows.',
+  review_pipeline_first_pass_queue_depth: 'Current count of pending first-pass or rereview rows (legacy combined queue signal).',
   review_pipeline_first_pass_wait_seconds: 'Wait in seconds of the oldest pending first-pass row, distinct from reviewer pass duration.',
-  review_pipeline_first_pass_oldest_pending_age_seconds: 'Age in seconds of the oldest pending first-pass or rereview row.',
+  review_pipeline_first_pass_oldest_pending_age_seconds: 'Age in seconds of the oldest pending first-pass or rereview row (legacy combined queue signal).',
   review_pipeline_rereview_capacity_share: 'Windowed share of reviewer passes consumed by rereviews.',
   review_pipeline_effective_reviewer_concurrency: 'Maximum overlapping reviewer passes observed in the reviewer health window.',
+  review_pipeline_queued_rereviews: 'Current count of pending re-review rows.',
+  review_pipeline_queued_rereview_oldest_age_seconds: 'Age in seconds of the oldest pending re-review row.',
   review_pipeline_ci_blocked_rereviews: 'Current count of re-reviews parked behind failed external CI.',
   review_pipeline_remediation_backlog_jobs: 'Current follow-up remediation job count by state.',
   review_pipeline_remediation_oldest_pending_age_seconds: 'Age in seconds of the oldest pending remediation job.',
@@ -1478,6 +1482,47 @@ function summarizeFirstPassQueue(db, { nowMs }) {
   };
 }
 
+function summarizeQueuedRereviews(db, { nowMs }) {
+  if (!db) return { count: 0, oldest: null, prs: [] };
+  const rows = safeAll(
+    db,
+    `SELECT repo,
+            pr_number,
+            reviewed_at,
+            rereview_requested_at,
+            last_attempted_at,
+            rereview_reason,
+            review_attempts,
+            reviewer_head_sha,
+            revision_ref
+       FROM reviewed_prs
+      WHERE COALESCE(pr_state, 'open') = 'open'
+        AND review_status = 'pending'
+        AND rereview_requested_at IS NOT NULL
+        AND rereview_requested_at <> ''
+      ORDER BY rereview_requested_at ASC, repo ASC, pr_number ASC
+      LIMIT 25`
+  );
+  const prs = rows.map((row) => {
+    const requestedAt = row.rereview_requested_at || row.reviewed_at || row.last_attempted_at || null;
+    return {
+      repo: row.repo,
+      prNumber: row.pr_number,
+      requestedAt,
+      ageMs: ageMs(nowMs, requestedAt),
+      reason: String(row.rereview_reason || '').slice(0, 300) || null,
+      reviewAttempts: Number(row.review_attempts || 0),
+      reviewerHeadSha: row.reviewer_head_sha || null,
+      revisionRef: row.revision_ref || null,
+    };
+  });
+  return {
+    count: rows.length,
+    oldest: prs[0] || null,
+    prs,
+  };
+}
+
 function summarizeCiBlockedRereviews(db, { nowMs }) {
   if (!db) return { count: 0, oldest: null, prs: [] };
   const rows = safeAll(
@@ -2751,24 +2796,37 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     const distinctPrs = new Set(progressStalls.map((flag) => `${flag.repo}#${flag.prNumber}`));
     const sample = progressStalls[0];
     const reasonSummary = flagKinds.map((flagKind) => `${flagKind}: ${byReason.get(flagKind).length}`).join(', ');
+    const queuedRereview = snapshot.queuedRereviews || { count: 0, oldest: null, prs: [] };
+    const queuedRereviewText = queuedRereview.count > 0
+      ? ` Queued re-review depth=${queuedRereview.count}, oldest_age=${Math.round((queuedRereview.oldest?.ageMs || 0) / 60000)}m.`
+      : '';
     findings.push(buildFinding({
       code: 'review:pr_progress_stalled',
       tier: 'ticket',
       subject: `${distinctPrs.size} open PR(s) are not progressing (${reasonSummary})`,
-      message: `${sample.repo}#${sample.prNumber} has made no progress for ${Math.round(sample.stallMinutes)}m: ${sample.details?.stallReason || sample.flagKind}. Stall reasons this tick: ${reasonSummary}. This is independent of the TTM budget -- a busy host still starts the pass it promised.`,
+      message: `${sample.repo}#${sample.prNumber} has made no progress for ${Math.round(sample.stallMinutes)}m: ${sample.details?.stallReason || sample.flagKind}. Stall reasons this tick: ${reasonSummary}.${queuedRereviewText} This is independent of the TTM budget -- a busy host still starts the pass it promised.`,
       evidence: progressStalls.map((flag) => (
         `reviews.db ttm ${flag.repo}#${flag.prNumber} ${flag.flagKind} stalled=${Math.round(flag.stallMinutes)}m `
         + `review_status=${flag.details?.reviewStatus || 'unknown'} `
         + `rereview_requested=${flag.details?.rereviewRequestedAt || 'none'} `
         + `latest_pass_started=${flag.details?.latestPassStartedAt || 'none'}`
-      )),
-      recommendedAction: 'For re-review stalls, check the watcher claim CAS, reviewer pool capacity, and dispatch drain state. For expired reviewer leases, check reviewer-pass-reaper liveness and the lease reclamation path; this is the lease/gate deadlock signature (agent-os#6288).',
+      )).concat(
+        queuedRereview.oldest
+          ? [
+              `queued rereview oldest ${queuedRereview.oldest.repo}#${queuedRereview.oldest.prNumber} `
+              + `requested=${queuedRereview.oldest.requestedAt || 'unknown'} `
+              + `age=${Math.round((queuedRereview.oldest.ageMs || 0) / 60000)}m`,
+            ]
+          : []
+      ),
+      recommendedAction: 'For re-review stalls, check the watcher claim CAS, reviewer pool capacity, dispatch drain state, and reviewer-specific capacity caps (for example Gemini credential concurrency). For expired reviewer leases, check reviewer-pass-reaper liveness and the lease reclamation path; this is the lease/gate deadlock signature (agent-os#6288).',
       observedAt,
       details: {
         progressClass: 'stuck',
         flagKind: flagKinds.length === 1 ? flagKinds[0] : 'multiple',
         flagKinds,
         byReason: Object.fromEntries(byReason),
+        queuedRereviews: queuedRereview,
         progressStallThresholdMinutes: snapshot.ttm.config?.progressStallMinutes,
         flags: progressStalls,
       },
@@ -3111,6 +3169,9 @@ function collectReviewPipelineHealth({
     const ciBlockedRereviews = db
       ? summarizeCiBlockedRereviews(db, { nowMs })
       : { count: 0, oldest: null, prs: [] };
+    const queuedRereviews = db
+      ? summarizeQueuedRereviews(db, { nowMs })
+      : { count: 0, oldest: null, prs: [] };
     const malformedPrTitles = db
       ? summarizeMalformedPrTitles(db)
       : { count: 0, prs: [] };
@@ -3232,6 +3293,7 @@ function collectReviewPipelineHealth({
       outage,
       hcpPreflightAborts,
       firstPassQueue,
+      queuedRereviews,
       ciBlockedRereviews,
       lifecycleReconciliation,
       malformedPrTitles,
@@ -3350,6 +3412,12 @@ function renderReviewPipelinePrometheus(snapshot) {
     'review_pipeline_effective_reviewer_concurrency',
     { window: `${snapshot.reviewerCapacity?.windowMs || snapshot.config.reviewerDeathRateWindowMs}ms` },
     snapshot.reviewerCapacity?.effectiveConcurrency || 0
+  );
+  pushMetric('review_pipeline_queued_rereviews', {}, snapshot.queuedRereviews?.count || 0);
+  pushMetric(
+    'review_pipeline_queued_rereview_oldest_age_seconds',
+    {},
+    Math.round((snapshot.queuedRereviews?.oldest?.ageMs || 0) / 1000)
   );
   pushMetric('review_pipeline_ci_blocked_rereviews', {}, snapshot.ciBlockedRereviews?.count || 0);
   for (const [state, count] of Object.entries(snapshot.followUpQueues.states)) {

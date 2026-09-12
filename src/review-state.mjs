@@ -84,6 +84,7 @@ const REVIEW_STATE_TABLE_NAMES = new Set([
   'reviewed_prs',
   'comment_deliveries',
   'reviewer_passes',
+  'review_latency_events',
   'pr_merge_closeouts',
   'review_cycle_verdicts',
   'review_cycle_counters',
@@ -262,6 +263,38 @@ function ensureReviewStateSchema(db) {
   // schema-convergence path because SQLite has no ADD COLUMN IF NOT EXISTS.
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN head_sha TEXT`);
   db.exec(`
+    CREATE TABLE IF NOT EXISTS review_latency_events (
+      event_id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      repo                 TEXT,
+      pr_number            INTEGER,
+      domain_id            TEXT,
+      subject_external_id  TEXT,
+      revision_ref         TEXT,
+      event_type           TEXT NOT NULL,
+      stage                TEXT NOT NULL,
+      at                   TEXT NOT NULL,
+      source               TEXT NOT NULL DEFAULT 'unknown',
+      source_ref           TEXT,
+      idempotency_key      TEXT,
+      reason               TEXT,
+      payload_json         TEXT NOT NULL DEFAULT '{}',
+      recorded_at          TEXT NOT NULL DEFAULT (datetime('now')),
+      CHECK (json_valid(payload_json))
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS review_latency_events_idempotency_unique
+      ON review_latency_events(event_type, idempotency_key)
+      WHERE idempotency_key IS NOT NULL;
+
+    CREATE INDEX IF NOT EXISTS idx_review_latency_events_subject_at
+      ON review_latency_events(repo, pr_number, at);
+
+    CREATE INDEX IF NOT EXISTS idx_review_latency_events_at
+      ON review_latency_events(at);
+
+    CREATE INDEX IF NOT EXISTS idx_review_latency_events_type_at
+      ON review_latency_events(event_type, at);
+
     CREATE INDEX IF NOT EXISTS idx_reviewer_passes_head
       ON reviewer_passes(repo, pr_number, pass_kind, head_sha);
 
@@ -775,6 +808,138 @@ function lookupReviewRowDualRead(db, {
 
 function hasReviewRowForSubject(db, options = {}) {
   return lookupReviewRowDualRead(db, options).found;
+}
+
+const REVIEW_LATENCY_EVENT_TYPES = Object.freeze(new Set([
+  'pr_observed',
+  'queue_eligible',
+  'row_claimed',
+  'reviewer_started',
+  'reviewer_first_output',
+  'reviewer_post_attempt',
+  'reviewer_post_success',
+  'reviewer_post_failure',
+  'settlement_completed',
+  'follow_up_created',
+  'clean_verdict',
+  'rereview_wake',
+  'hammer_wake',
+  'merge_completed',
+  'deploy_observed',
+  'smoke_result',
+]));
+
+const REVIEW_LATENCY_EVENT_STAGE_BY_TYPE = Object.freeze({
+  pr_observed: 'watcher',
+  queue_eligible: 'admission',
+  row_claimed: 'admission',
+  reviewer_started: 'reviewer-runtime',
+  reviewer_first_output: 'reviewer-runtime',
+  reviewer_post_attempt: 'reviewer-runtime',
+  reviewer_post_success: 'reviewer-runtime',
+  reviewer_post_failure: 'reviewer-runtime',
+  settlement_completed: 'watcher',
+  follow_up_created: 'follow-up',
+  clean_verdict: 'merge',
+  rereview_wake: 'rereview',
+  hammer_wake: 'merge',
+  merge_completed: 'merge',
+  deploy_observed: 'deploy',
+  smoke_result: 'smoke',
+});
+
+function normalizeLatencyEventType(eventType) {
+  const normalized = String(eventType || '').trim();
+  if (!REVIEW_LATENCY_EVENT_TYPES.has(normalized)) {
+    throw new TypeError(`Invalid review latency event_type: ${eventType}`);
+  }
+  return normalized;
+}
+
+function normalizeLatencyEventPayload(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return '{}';
+  return JSON.stringify(payload);
+}
+
+function recordReviewLatencyEvent(db, {
+  repo = null,
+  prNumber = null,
+  domainId = null,
+  subjectExternalId = null,
+  revisionRef = null,
+  eventType,
+  stage = null,
+  at = new Date().toISOString(),
+  source = 'unknown',
+  sourceRef = null,
+  idempotencyKey = null,
+  reason = null,
+  payload = {},
+} = {}) {
+  const normalizedType = normalizeLatencyEventType(eventType);
+  const normalizedStage = String(stage || REVIEW_LATENCY_EVENT_STAGE_BY_TYPE[normalizedType] || 'unknown');
+  const normalizedAt = at instanceof Date ? at.toISOString() : new Date(at).toISOString();
+  const normalizedRepo = repo ? String(repo) : null;
+  const normalizedPrNumber = prNumber == null ? null : Number(prNumber);
+  db.prepare(
+    `INSERT OR IGNORE INTO review_latency_events (
+       repo,
+       pr_number,
+       domain_id,
+       subject_external_id,
+       revision_ref,
+       event_type,
+       stage,
+       at,
+       source,
+       source_ref,
+       idempotency_key,
+       reason,
+       payload_json
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    normalizedRepo,
+    Number.isInteger(normalizedPrNumber) ? normalizedPrNumber : null,
+    domainId || null,
+    subjectExternalId || null,
+    revisionRef || null,
+    normalizedType,
+    normalizedStage,
+    normalizedAt,
+    String(source || 'unknown'),
+    sourceRef || null,
+    idempotencyKey || null,
+    reason || null,
+    normalizeLatencyEventPayload(payload)
+  );
+  return db.prepare(
+    `SELECT *
+       FROM review_latency_events
+      WHERE event_type = ?
+        AND (
+          (? IS NOT NULL AND idempotency_key = ?)
+          OR (
+            ? IS NULL
+            AND repo IS ?
+            AND pr_number IS ?
+            AND domain_id IS ?
+            AND subject_external_id IS ?
+            AND at = ?
+          )
+        )
+      ORDER BY event_id DESC
+      LIMIT 1`
+  ).get(
+    normalizedType,
+    idempotencyKey || null,
+    idempotencyKey || null,
+    idempotencyKey || null,
+    normalizedRepo,
+    Number.isInteger(normalizedPrNumber) ? normalizedPrNumber : null,
+    domainId || null,
+    subjectExternalId || null,
+    normalizedAt
+  ) || null;
 }
 
 // Read just the PR-lifecycle columns the watcher's syncPRLifecycle
@@ -1324,6 +1489,7 @@ export {
   readPRState,
   fetchLivePRLifecycle,
   persistPRStateToMirror,
+  recordReviewLatencyEvent,
   resolvePRLifecycle,
   requestReviewRereview,
 };

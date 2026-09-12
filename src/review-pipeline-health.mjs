@@ -104,6 +104,8 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_health_collector_up',
   'review_pipeline_outage_active',
   'review_pipeline_outage_attempts_not_charged',
+  'review_pipeline_hcp_preflight_aborted_passes',
+  'review_pipeline_hcp_preflight_aborted_reviewer_minutes_lost',
   'review_pipeline_reviewer_attempts_total',
   'review_pipeline_failed_attempts_distinct_prs',
   'review_pipeline_reviewer_degradation_active',
@@ -135,6 +137,8 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_health_collector_up: 'Whether the collector could open the review-state ledger.',
   review_pipeline_outage_active: 'Whether review attempts are paused by an active outage signal.',
   review_pipeline_outage_attempts_not_charged: 'Current count of outage-transient reviewer failures that preserved the attempt budget.',
+  review_pipeline_hcp_preflight_aborted_passes: 'Current count of open reviews parked by an aborted HCP healthz preflight.',
+  review_pipeline_hcp_preflight_aborted_reviewer_minutes_lost: 'Estimated reviewer minutes tied to open reviews parked by an aborted HCP healthz preflight.',
   review_pipeline_reviewer_attempts_total: 'Windowed reviewer attempt count by status, failure class, and pass kind.',
   review_pipeline_failed_attempts_distinct_prs: 'Windowed distinct PR count contributing failed reviewer attempts by failure class.',
   review_pipeline_reviewer_degradation_active: 'Active reviewer degradation/backoff PR count by failure class and state.',
@@ -631,6 +635,15 @@ function safeAll(db, sql, params = []) {
     return db.prepare(sql).all(...params);
   } catch (error) {
     if (isMissingSchemaError(error)) return [];
+    throw error;
+  }
+}
+
+function safeGet(db, sql, params = []) {
+  try {
+    return db.prepare(sql).get(...params);
+  } catch (error) {
+    if (isMissingSchemaError(error)) return null;
     throw error;
   }
 }
@@ -1204,6 +1217,68 @@ function summarizeOutage(db) {
     attempts_not_charged: rows.length,
     reasons: Array.from(reasons, ([reason, count]) => ({ reason, count }))
       .sort((left, right) => left.reason.localeCompare(right.reason)),
+    examples,
+  };
+}
+
+function readHcpPreflightAbortedRows(db) {
+  if (!db) return [];
+  return safeAll(
+    db,
+    `SELECT repo,
+            pr_number,
+            review_status,
+            failed_at,
+            last_attempted_at,
+            failure_message
+       FROM reviewed_prs
+      WHERE COALESCE(pr_state, 'open') = 'open'
+        AND review_status IN ('pending', 'pending-upstream')
+        AND lower(COALESCE(failure_message, '')) LIKE '[hcp-unavailable]%'
+        AND lower(COALESCE(failure_message, '')) LIKE '%operation was aborted%'`
+  );
+}
+
+function summarizeHcpPreflightAborts(db) {
+  const rows = readHcpPreflightAbortedRows(db);
+  let reviewerMinutesLost = 0;
+  const examples = [];
+  for (const row of rows) {
+    const pass = safeGet(
+      db,
+      `SELECT started_at, ended_at, status, pass_kind, reviewer_model
+         FROM reviewer_passes
+        WHERE repo = ?
+          AND pr_number = ?
+          AND started_at IS NOT NULL
+          AND ended_at IS NOT NULL
+        ORDER BY ended_at DESC
+        LIMIT 1`,
+      [row.repo, row.pr_number]
+    );
+    const startedMs = Date.parse(pass?.started_at || '');
+    const endedMs = Date.parse(pass?.ended_at || '');
+    const minutesLost = (
+      Number.isNaN(startedMs) || Number.isNaN(endedMs) || endedMs <= startedMs
+    )
+      ? 0
+      : (endedMs - startedMs) / 60_000;
+    reviewerMinutesLost += minutesLost;
+    if (examples.length < 5) {
+      examples.push({
+        repo: row.repo,
+        prNumber: row.pr_number,
+        reviewStatus: row.review_status,
+        since: row.failed_at || row.last_attempted_at || null,
+        reviewerMinutesLost: Math.round(minutesLost * 10) / 10,
+        reviewerModel: pass?.reviewer_model || null,
+        passKind: pass?.pass_kind || null,
+      });
+    }
+  }
+  return {
+    active: rows.length,
+    reviewerMinutesLost: Math.round(reviewerMinutesLost * 10) / 10,
     examples,
   };
 }
@@ -2853,6 +2928,9 @@ function collectReviewPipelineHealth({
           reasons: [],
           examples: [],
         };
+    const hcpPreflightAborts = db
+      ? summarizeHcpPreflightAborts(db)
+      : { active: 0, reviewerMinutesLost: 0, examples: [] };
     const mergeOutcomes = db ? summarizeMergeOutcomes(db) : [];
     const reviewRows = db ? reviewRowsByRepoPr(db) : new Map();
     const mergeStalls = summarizeMergeStalls({
@@ -2941,6 +3019,7 @@ function collectReviewPipelineHealth({
       reviewer,
       reviewerDegradation,
       outage,
+      hcpPreflightAborts,
       firstPassQueue,
       ciBlockedRereviews,
       lifecycleReconciliation,
@@ -3003,6 +3082,12 @@ function renderReviewPipelinePrometheus(snapshot) {
   pushMetric('review_pipeline_health_collector_up', {}, snapshot.reviewStateLedger?.readable ? 1 : 0);
   pushMetric('review_pipeline_outage_active', {}, snapshot.outage?.active ? 1 : 0);
   pushMetric('review_pipeline_outage_attempts_not_charged', {}, snapshot.outage?.attempts_not_charged || 0);
+  pushMetric('review_pipeline_hcp_preflight_aborted_passes', {}, snapshot.hcpPreflightAborts?.active || 0);
+  pushMetric(
+    'review_pipeline_hcp_preflight_aborted_reviewer_minutes_lost',
+    {},
+    snapshot.hcpPreflightAborts?.reviewerMinutesLost || 0
+  );
   const reviewerAttempts = snapshot.reviewer.attempts.length
     ? snapshot.reviewer.attempts
     : [{ status: 'none', failure_class: 'none', pass_kind: 'first-pass', value: 0 }];

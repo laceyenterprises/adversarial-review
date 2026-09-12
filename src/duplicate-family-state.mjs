@@ -103,10 +103,6 @@ export function ensureDuplicateFamilySchema(db) {
       FOREIGN KEY (family_id) REFERENCES duplicate_families(family_id) ON DELETE CASCADE
     );
 
-    CREATE INDEX IF NOT EXISTS idx_duplicate_family_candidates_pr
-      ON duplicate_family_candidates(repo, pr_number, head_sha);
-    CREATE INDEX IF NOT EXISTS idx_duplicate_families_status
-      ON duplicate_families(status, target_repo, base_branch);
   `);
   migrateDuplicateFamilyCandidatesPrimaryKey(db);
   db.exec(`
@@ -382,41 +378,43 @@ function migrateDuplicateFamilyCandidatesPrimaryKey(db) {
   const primaryKeyColumns = duplicateFamilyCandidatesPrimaryKeyColumns(db);
   if (primaryKeyColumns.join('|') === 'repo|pr_number') return;
   const legacyTable = `duplicate_family_candidates_legacy_${Date.now()}`;
-  db.exec(`
-    ALTER TABLE duplicate_family_candidates RENAME TO ${legacyTable};
-    CREATE TABLE duplicate_family_candidates (
-      family_id                 TEXT NOT NULL,
-      repo                      TEXT NOT NULL,
-      pr_number                 INTEGER NOT NULL,
-      title                     TEXT,
-      pr_state                  TEXT,
-      base_branch               TEXT,
-      head_branch               TEXT,
-      head_sha                  TEXT,
-      base_sha                  TEXT,
-      role                      TEXT NOT NULL DEFAULT 'candidate',
-      work_identity_json        TEXT NOT NULL,
-      signals_json              TEXT NOT NULL,
-      suppressions_json         TEXT NOT NULL DEFAULT '[]',
-      labels_json               TEXT NOT NULL DEFAULT '[]',
-      first_seen_at             TEXT NOT NULL,
-      last_seen_at              TEXT NOT NULL,
-      updated_at                TEXT NOT NULL,
-      PRIMARY KEY (repo, pr_number),
-      FOREIGN KEY (family_id) REFERENCES duplicate_families(family_id) ON DELETE CASCADE
-    );
-    INSERT OR REPLACE INTO duplicate_family_candidates (
-      family_id, repo, pr_number, title, pr_state, base_branch, head_branch,
-      head_sha, base_sha, role, work_identity_json, signals_json,
-      suppressions_json, labels_json, first_seen_at, last_seen_at, updated_at
-    )
-    SELECT family_id, repo, pr_number, title, pr_state, base_branch, head_branch,
-           head_sha, base_sha, role, work_identity_json, signals_json,
-           suppressions_json, labels_json, first_seen_at, last_seen_at, updated_at
-      FROM ${legacyTable}
-     ORDER BY updated_at ASC, last_seen_at ASC, family_id ASC;
-    DROP TABLE ${legacyTable};
-  `);
+  db.transaction(() => {
+    db.exec(`
+      ALTER TABLE duplicate_family_candidates RENAME TO ${legacyTable};
+      CREATE TABLE duplicate_family_candidates (
+        family_id                 TEXT NOT NULL,
+        repo                      TEXT NOT NULL,
+        pr_number                 INTEGER NOT NULL,
+        title                     TEXT,
+        pr_state                  TEXT,
+        base_branch               TEXT,
+        head_branch               TEXT,
+        head_sha                  TEXT,
+        base_sha                  TEXT,
+        role                      TEXT NOT NULL DEFAULT 'candidate',
+        work_identity_json        TEXT NOT NULL,
+        signals_json              TEXT NOT NULL,
+        suppressions_json         TEXT NOT NULL DEFAULT '[]',
+        labels_json               TEXT NOT NULL DEFAULT '[]',
+        first_seen_at             TEXT NOT NULL,
+        last_seen_at              TEXT NOT NULL,
+        updated_at                TEXT NOT NULL,
+        PRIMARY KEY (repo, pr_number),
+        FOREIGN KEY (family_id) REFERENCES duplicate_families(family_id) ON DELETE CASCADE
+      );
+      INSERT OR REPLACE INTO duplicate_family_candidates (
+        family_id, repo, pr_number, title, pr_state, base_branch, head_branch,
+        head_sha, base_sha, role, work_identity_json, signals_json,
+        suppressions_json, labels_json, first_seen_at, last_seen_at, updated_at
+      )
+      SELECT family_id, repo, pr_number, title, pr_state, base_branch, head_branch,
+             head_sha, base_sha, role, work_identity_json, signals_json,
+             suppressions_json, labels_json, first_seen_at, last_seen_at, updated_at
+        FROM ${legacyTable}
+       ORDER BY updated_at ASC, last_seen_at ASC, family_id ASC;
+      DROP TABLE ${legacyTable};
+    `);
+  })();
 }
 
 function updateOperatorOverrideForHeadMove(existing, candidates) {

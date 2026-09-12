@@ -44,6 +44,88 @@ function memoryDb() {
   return db;
 }
 
+function installLegacyCandidateTable(db) {
+  db.exec(`
+    DROP TABLE duplicate_family_candidates;
+    CREATE TABLE duplicate_family_candidates (
+      family_id                 TEXT NOT NULL,
+      repo                      TEXT NOT NULL,
+      pr_number                 INTEGER NOT NULL,
+      title                     TEXT,
+      pr_state                  TEXT,
+      base_branch               TEXT,
+      head_branch               TEXT,
+      head_sha                  TEXT,
+      base_sha                  TEXT,
+      role                      TEXT NOT NULL DEFAULT 'candidate',
+      work_identity_json        TEXT NOT NULL,
+      signals_json              TEXT NOT NULL,
+      suppressions_json         TEXT NOT NULL DEFAULT '[]',
+      labels_json               TEXT NOT NULL DEFAULT '[]',
+      first_seen_at             TEXT NOT NULL,
+      last_seen_at              TEXT NOT NULL,
+      updated_at                TEXT NOT NULL,
+      PRIMARY KEY (family_id, repo, pr_number),
+      FOREIGN KEY (family_id) REFERENCES duplicate_families(family_id) ON DELETE CASCADE
+    );
+  `);
+}
+
+function insertFamilyRow(db, familyId, familyKey, updatedAt) {
+  db.prepare(`
+    INSERT INTO duplicate_families (
+      family_id, family_key, target_repo, base_branch, normalized_work_identity,
+      status, strongest_signal, transition_log_json, candidate_count,
+      first_detected_at, last_seen_at, updated_at
+    ) VALUES (?, ?, ?, 'main', ?, 'advisory', 'dispatch-ticket', '[]', 1, ?, ?, ?)
+  `).run(familyId, familyKey, REPO, familyKey, updatedAt, updatedAt, updatedAt);
+}
+
+function insertLegacyCandidateRow(db, familyId, prNumber, updatedAt) {
+  db.prepare(`
+    INSERT INTO duplicate_family_candidates (
+      family_id, repo, pr_number, title, pr_state, base_branch, head_branch,
+      head_sha, base_sha, role, work_identity_json, signals_json,
+      suppressions_json, labels_json, first_seen_at, last_seen_at, updated_at
+    ) VALUES (
+      ?, ?, ?, '[codex] DPA-01: legacy candidate', 'open', 'main', 'codex/dpa-01',
+      ?, 'base-main', 'candidate', '{}', '[]', '[]', '[]', ?, ?, ?
+    )
+  `).run(familyId, REPO, prNumber, `head-${familyId}`, updatedAt, updatedAt, updatedAt);
+}
+
+test('legacy candidate primary key migration keeps one row per PR', () => {
+  const db = memoryDb();
+  try {
+    installLegacyCandidateTable(db);
+    insertFamilyRow(db, 'legacy-family-a', 'legacy-key-a', '2026-09-11T00:00:00.000Z');
+    insertFamilyRow(db, 'legacy-family-b', 'legacy-key-b', '2026-09-11T00:05:00.000Z');
+    insertLegacyCandidateRow(db, 'legacy-family-a', 601, '2026-09-11T00:00:00.000Z');
+    insertLegacyCandidateRow(db, 'legacy-family-b', 601, '2026-09-11T00:05:00.000Z');
+
+    ensureDuplicateFamilySchema(db);
+
+    const primaryKeyColumns = db.prepare('PRAGMA table_info(duplicate_family_candidates)')
+      .all()
+      .filter((column) => Number(column.pk) > 0)
+      .sort((a, b) => Number(a.pk) - Number(b.pk))
+      .map((column) => column.name);
+    assert.deepEqual(primaryKeyColumns, ['repo', 'pr_number']);
+    assert.equal(
+      db.prepare('SELECT COUNT(*) AS n FROM duplicate_family_candidates WHERE repo = ? AND pr_number = ?').get(REPO, 601).n,
+      1
+    );
+    assert.equal(readDuplicateFamilyForPr(db, { repo: REPO, prNumber: 601 })?.family_id, 'legacy-family-b');
+    assert.equal(
+      db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name LIKE 'duplicate_family_candidates_legacy_%'")
+        .get().n,
+      0
+    );
+  } finally {
+    db.close();
+  }
+});
+
 test('dispatch-provenance duplicate fixture becomes one advisory family', () => {
   const entries = [
     subject(101, { headSha: 'head-a' }),

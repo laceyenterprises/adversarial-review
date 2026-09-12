@@ -111,7 +111,10 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_failed_attempts_distinct_prs',
   'review_pipeline_reviewer_degradation_active',
   'review_pipeline_first_pass_queue_depth',
+  'review_pipeline_first_pass_wait_seconds',
   'review_pipeline_first_pass_oldest_pending_age_seconds',
+  'review_pipeline_rereview_capacity_share',
+  'review_pipeline_effective_reviewer_concurrency',
   'review_pipeline_ci_blocked_rereviews',
   'review_pipeline_remediation_backlog_jobs',
   'review_pipeline_remediation_oldest_pending_age_seconds',
@@ -145,7 +148,10 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_failed_attempts_distinct_prs: 'Windowed distinct PR count contributing failed reviewer attempts by failure class.',
   review_pipeline_reviewer_degradation_active: 'Active reviewer degradation/backoff PR count by failure class and state.',
   review_pipeline_first_pass_queue_depth: 'Current count of pending first-pass or rereview rows.',
+  review_pipeline_first_pass_wait_seconds: 'Wait in seconds of the oldest pending first-pass row, distinct from reviewer pass duration.',
   review_pipeline_first_pass_oldest_pending_age_seconds: 'Age in seconds of the oldest pending first-pass or rereview row.',
+  review_pipeline_rereview_capacity_share: 'Windowed share of reviewer passes consumed by rereviews.',
+  review_pipeline_effective_reviewer_concurrency: 'Maximum overlapping reviewer passes observed in the reviewer health window.',
   review_pipeline_ci_blocked_rereviews: 'Current count of re-reviews parked behind failed external CI.',
   review_pipeline_remediation_backlog_jobs: 'Current follow-up remediation job count by state.',
   review_pipeline_remediation_oldest_pending_age_seconds: 'Age in seconds of the oldest pending remediation job.',
@@ -1084,6 +1090,61 @@ function summarizeReviewerAttempts(db, { nowMs, config }) {
   };
 }
 
+function summarizeReviewerCapacity(db, { nowMs, config }) {
+  const cutoffMs = nowMs - config.reviewerDeathRateWindowMs;
+  const cutoff = new Date(cutoffMs).toISOString();
+  const runningFreshCutoff = new Date(nowMs - REVIEWER_PASS_REAPER_TIMEOUT_MS).toISOString();
+  const rows = safeAll(
+    db,
+    `SELECT pass_kind, started_at, ended_at, status
+       FROM reviewer_passes
+      WHERE (
+          ended_at >= ?
+          OR (ended_at IS NULL AND status = 'running' AND started_at >= ?)
+        )
+        AND status != 'abandoned'
+        AND pass_kind IN ('first-pass', 'rereview')`,
+    [cutoff, runningFreshCutoff]
+  );
+  let totalPasses = 0;
+  let firstPassPasses = 0;
+  let rereviewPasses = 0;
+  const events = [];
+  for (const row of rows) {
+    const startedMs = toMs(row.started_at);
+    if (startedMs === null) continue;
+    const endedMs = toMs(row.ended_at) ?? nowMs;
+    const boundedStart = Math.max(startedMs, cutoffMs);
+    const boundedEnd = Math.max(boundedStart, Math.min(endedMs, nowMs));
+    totalPasses += 1;
+    if (row.pass_kind === 'rereview') rereviewPasses += 1;
+    else firstPassPasses += 1;
+    if (boundedEnd <= boundedStart) continue;
+    events.push({ at: boundedStart, delta: 1 });
+    events.push({ at: boundedEnd, delta: -1 });
+  }
+  events.sort((left, right) => (
+    left.at - right.at
+    // End events at the same timestamp should release before a start at that
+    // timestamp, so adjacent passes do not look concurrent.
+    || left.delta - right.delta
+  ));
+  let active = 0;
+  let maxConcurrent = 0;
+  for (const event of events) {
+    active = Math.max(0, active + event.delta);
+    maxConcurrent = Math.max(maxConcurrent, active);
+  }
+  return {
+    windowMs: config.reviewerDeathRateWindowMs,
+    totalPasses,
+    firstPassPasses,
+    rereviewPasses,
+    rereviewShare: totalPasses > 0 ? rereviewPasses / totalPasses : 0,
+    effectiveConcurrency: maxConcurrent,
+  };
+}
+
 function decodeCascadeStateRepo(encodedRepo) {
   try {
     return decodeURIComponent(encodedRepo);
@@ -1367,6 +1428,7 @@ function summarizeFirstPassQueue(db, { nowMs }) {
         AND review_status = 'pending'`
   );
   let oldest = null;
+  let oldestFirstPass = null;
   let failedCount = 0;
   for (const row of rows) {
     const pendingSince = row.rereview_requested_at || row.reviewed_at || row.last_attempted_at;
@@ -1390,6 +1452,20 @@ function summarizeFirstPassQueue(db, { nowMs }) {
         reviewAttempts: Number(row.review_attempts || 0),
         failureMessage: reviewerFailed
           ? String(row.failure_message || '').slice(0, 300) || null
+        : null,
+      };
+    }
+    if (!row.rereview_requested_at && (!oldestFirstPass || pendingAgeMs > oldestFirstPass.ageMs)) {
+      oldestFirstPass = {
+        repo: row.repo,
+        prNumber: row.pr_number,
+        pendingSince,
+        ageMs: pendingAgeMs,
+        reviewerFailed,
+        failedAt: row.failed_at || null,
+        reviewAttempts: Number(row.review_attempts || 0),
+        failureMessage: reviewerFailed
+          ? String(row.failure_message || '').slice(0, 300) || null
           : null,
       };
     }
@@ -1398,6 +1474,7 @@ function summarizeFirstPassQueue(db, { nowMs }) {
     depth: rows.length,
     failedCount,
     oldest,
+    oldestFirstPass,
   };
 }
 
@@ -3018,6 +3095,16 @@ function collectReviewPipelineHealth({
             windowMs: config.reviewUnknownRateWindowMs,
           },
         };
+    const reviewerCapacity = db
+      ? summarizeReviewerCapacity(db, { nowMs, config })
+      : {
+          windowMs: config.reviewerDeathRateWindowMs,
+          totalPasses: 0,
+          firstPassPasses: 0,
+          rereviewPasses: 0,
+          rereviewShare: 0,
+          effectiveConcurrency: 0,
+        };
     const firstPassQueue = db
       ? summarizeFirstPassQueue(db, { nowMs })
       : { depth: 0, oldest: null };
@@ -3140,6 +3227,7 @@ function collectReviewPipelineHealth({
       config,
       terminalReconciliation,
       reviewer,
+      reviewerCapacity,
       reviewerDegradation,
       outage,
       hcpPreflightAborts,
@@ -3244,9 +3332,24 @@ function renderReviewPipelinePrometheus(snapshot) {
   }
   pushMetric('review_pipeline_first_pass_queue_depth', {}, snapshot.firstPassQueue.depth);
   pushMetric(
+    'review_pipeline_first_pass_wait_seconds',
+    {},
+    Math.round((snapshot.firstPassQueue.oldestFirstPass?.ageMs || 0) / 1000)
+  );
+  pushMetric(
     'review_pipeline_first_pass_oldest_pending_age_seconds',
     {},
     Math.round((snapshot.firstPassQueue.oldest?.ageMs || 0) / 1000)
+  );
+  pushMetric(
+    'review_pipeline_rereview_capacity_share',
+    { window: `${snapshot.reviewerCapacity?.windowMs || snapshot.config.reviewerDeathRateWindowMs}ms` },
+    snapshot.reviewerCapacity?.rereviewShare || 0
+  );
+  pushMetric(
+    'review_pipeline_effective_reviewer_concurrency',
+    { window: `${snapshot.reviewerCapacity?.windowMs || snapshot.config.reviewerDeathRateWindowMs}ms` },
+    snapshot.reviewerCapacity?.effectiveConcurrency || 0
   );
   pushMetric('review_pipeline_ci_blocked_rereviews', {}, snapshot.ciBlockedRereviews?.count || 0);
   for (const [state, count] of Object.entries(snapshot.followUpQueues.states)) {

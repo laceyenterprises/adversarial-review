@@ -7,6 +7,7 @@ import { loadRoleConfig } from './role-config.mjs';
 
 const DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX = 6;
 const MAX_FIRST_PASS_REVIEWER_POOL_MAX = 12;
+const DEFAULT_REVIEW_LANE_FIRST_PASS_BURST_LIMIT = 2;
 const DEFAULT_REVIEWER_MEMORY_SAMPLE_TTL_MS = 120_000;
 const DEFAULT_REVIEWER_DISPATCH_WAIT_WARN_MS = 15 * 60 * 1000;
 const DEFAULT_SINGLE_WAVE_SETTLE_GRACE_MS = 1000;
@@ -214,6 +215,24 @@ function resolveFirstPassReviewerPoolConfig({
   };
 }
 
+function resolveReviewLaneConfig({
+  env = process.env,
+  topPath,
+  modulePaths,
+  loaderImpl,
+} = {}) {
+  const raw = loadRoleConfig({
+    env,
+    topPath,
+    modulePaths,
+    loaderImpl,
+    contextKey: 'watcher.review_lane_first_pass_burst_limit',
+  }).get('watcher.review_lane_first_pass_burst_limit', DEFAULT_REVIEW_LANE_FIRST_PASS_BURST_LIMIT);
+  return {
+    firstPassBurstLimit: parsePositiveInteger(raw, DEFAULT_REVIEW_LANE_FIRST_PASS_BURST_LIMIT),
+  };
+}
+
 function parseSortTimeMs(value) {
   const ms = Date.parse(String(value || ''));
   return Number.isFinite(ms) ? ms : null;
@@ -237,9 +256,11 @@ function reviewerDispatchSortTimeMs(candidate) {
 // load: first-pass work is the scarce, latency-sensitive product, and re-review
 // churn was crowding it out.
 //
-// Ordering first-pass ahead of re-review is strictly a priority change: nothing
+// Ordering first-pass ahead of re-review is a bounded priority change: nothing
 // is dropped, and within each tier the previous oldest-first fairness is
-// preserved exactly.
+// preserved exactly. When persistent lane state is enabled,
+// watcher.review_lane_first_pass_burst_limit gives rereviews a floor after the
+// configured number of real first-pass dispatches.
 function reviewerDispatchIsFirstPass(candidate) {
   const current = candidate?.current;
   if (!current) return true;
@@ -268,6 +289,82 @@ function compareReviewerDispatchCandidates(a, b) {
 
 function sortReviewerDispatchCandidates(candidates) {
   return [...candidates].sort(compareReviewerDispatchCandidates);
+}
+
+function createReviewerLaneState({
+  firstPassBurstLimit = DEFAULT_REVIEW_LANE_FIRST_PASS_BURST_LIMIT,
+} = {}) {
+  return {
+    firstPassBurstLimit: parsePositiveInteger(
+      firstPassBurstLimit,
+      DEFAULT_REVIEW_LANE_FIRST_PASS_BURST_LIMIT,
+    ),
+    firstPassStartsSinceRereview: 0,
+  };
+}
+
+const PERSISTENT_REVIEWER_LANE_STATE = createReviewerLaneState();
+
+function refreshPersistentReviewerLaneState() {
+  const reviewerLaneConfig = resolveReviewLaneConfig();
+  PERSISTENT_REVIEWER_LANE_STATE.firstPassBurstLimit = reviewerLaneConfig.firstPassBurstLimit;
+  return PERSISTENT_REVIEWER_LANE_STATE;
+}
+
+function reviewerDispatchPassKind(candidate) {
+  return reviewerDispatchIsFirstPass(candidate) ? 'first-pass' : 'rereview';
+}
+
+function pendingLaneCounts(entries) {
+  let firstPass = 0;
+  let rereview = 0;
+  for (const entry of entries) {
+    if (entry.started) continue;
+    if (reviewerDispatchIsFirstPass(entry.candidate)) firstPass += 1;
+    else rereview += 1;
+  }
+  return { firstPass, rereview };
+}
+
+function compareReviewerDispatchEntries(a, b, { laneState = null, laneCounts = null } = {}) {
+  const aWake = a?.candidate?.wakePriority === true;
+  const bWake = b?.candidate?.wakePriority === true;
+  if (aWake !== bWake) return aWake ? -1 : 1;
+
+  const counts = laneCounts || { firstPass: 0, rereview: 0 };
+  const bothLanesPending = counts.firstPass > 0 && counts.rereview > 0;
+  if (bothLanesPending) {
+    const burstLimit = parsePositiveInteger(
+      laneState?.firstPassBurstLimit,
+      DEFAULT_REVIEW_LANE_FIRST_PASS_BURST_LIMIT,
+    );
+    const streak = Math.max(0, Number.parseInt(String(laneState?.firstPassStartsSinceRereview || 0), 10) || 0);
+    const preferRereview = streak >= burstLimit;
+    const aFirst = reviewerDispatchIsFirstPass(a.candidate);
+    const bFirst = reviewerDispatchIsFirstPass(b.candidate);
+    if (aFirst !== bFirst) {
+      return preferRereview
+        ? (aFirst ? 1 : -1)
+        : (aFirst ? -1 : 1);
+    }
+  }
+
+  return compareReviewerDispatchCandidates(a.candidate, b.candidate);
+}
+
+function orderPendingReviewerDispatchEntries(entries, { laneState = null } = {}) {
+  const laneCounts = pendingLaneCounts(entries);
+  return [...entries].sort((a, b) => compareReviewerDispatchEntries(a, b, { laneState, laneCounts }));
+}
+
+function recordReviewerLaneStart(candidate, laneState = null) {
+  if (!laneState) return;
+  if (reviewerDispatchPassKind(candidate) === 'first-pass') {
+    laneState.firstPassStartsSinceRereview =
+      Math.max(0, Number.parseInt(String(laneState.firstPassStartsSinceRereview || 0), 10) || 0) + 1;
+  } else {
+    laneState.firstPassStartsSinceRereview = 0;
+  }
 }
 
 function reviewerDispatchAgeMs(candidate, nowMs = Date.now()) {
@@ -516,6 +613,8 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   availableCredentials = null,
   geminiCredentialConcurrency = null,
   activeReviewerCounts = null,
+  laneState = null,
+  usePersistentReviewerLaneState = false,
   maxThrownFailures = 1,
   singleWave = false,
   singleWaveSettleGraceMs = DEFAULT_SINGLE_WAVE_SETTLE_GRACE_MS,
@@ -543,6 +642,9 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   const thrownFailureLimit = Math.max(1, Number.parseInt(String(maxThrownFailures), 10) || 0);
   const queue = sortReviewerDispatchCandidates(candidates);
   const pending = queue.map((candidate) => ({ candidate, started: false }));
+  const activeLaneState = laneState || (
+    usePersistentReviewerLaneState ? refreshPersistentReviewerLaneState() : null
+  );
   const active = new Set();
   const activeRecords = new Map();
   const errors = [];
@@ -590,7 +692,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   // stall on reviewers that don't touch the gemini pool).
   const nextStartableEntry = () => {
     if (active.size >= concurrencyLimit) return null;
-    for (const entry of pending) {
+    for (const entry of orderPendingReviewerDispatchEntries(pending, { laneState: activeLaneState })) {
       if (entry.started) continue;
       if (isGeminiCandidate(entry.candidate) && activeGemini >= geminiConcurrencyLimit) continue;
       return entry;
@@ -612,14 +714,15 @@ async function runBoundedReviewerDispatchQueue(candidates, {
       && (entry = nextStartableEntry()) !== null
     ) {
       entry.started = true;
-      const promise = start(entry.candidate);
+      const startedEntry = entry;
+      const promise = start(startedEntry.candidate);
       if (typeof onCandidateStarted === 'function') {
         try {
-          onCandidateStarted({ candidate: entry.candidate, promise });
+          onCandidateStarted({ candidate: startedEntry.candidate, promise });
         } catch (err) {
           logger?.warn?.(
             `[watcher] reviewer dispatch start observer failed for ` +
-              `${entry.candidate?.repoPath || 'unknown'}#${entry.candidate?.prNumber || 'unknown'}: ` +
+              `${startedEntry.candidate?.repoPath || 'unknown'}#${startedEntry.candidate?.prNumber || 'unknown'}: ` +
               `${err?.message || err}`
           );
         }
@@ -628,7 +731,10 @@ async function runBoundedReviewerDispatchQueue(candidates, {
       active.add(promise);
       activeRecords.set(promise, { counted: false });
       promise.then((result) => {
-        if (!dispatchWasSkipped(result)) countDispatch(promise);
+        if (!dispatchWasSkipped(result)) {
+          recordReviewerLaneStart(startedEntry.candidate, activeLaneState);
+          countDispatch(promise);
+        }
       }).finally(() => {
         active.delete(promise);
         activeRecords.delete(promise);
@@ -691,7 +797,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
     dispatched,
     maxObservedConcurrency,
     deferred: pending.filter((entry) => !entry.started).length,
-    deferredCandidates: pending
+    deferredCandidates: orderPendingReviewerDispatchEntries(pending, { laneState: activeLaneState })
       .filter((entry) => !entry.started)
       .map((entry) => entry.candidate),
   };
@@ -699,6 +805,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
 
 export {
   DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX,
+  DEFAULT_REVIEW_LANE_FIRST_PASS_BURST_LIMIT,
   DEFAULT_REVIEWER_DISPATCH_WAIT_WARN_MS,
   MAX_FIRST_PASS_REVIEWER_POOL_MAX,
   DEFAULT_REVIEWER_MEMORY_SAMPLE_TTL_MS,
@@ -706,6 +813,7 @@ export {
   compareReviewerDispatchCandidates,
   countActiveReviewerSpawnsByModel,
   createDetachedReviewerDispatchTracker,
+  createReviewerLaneState,
   createReviewerMemoryAdmissionSampler,
   logReviewerDispatchWait,
   reserveReviewerMemoryAdmission,
@@ -714,6 +822,7 @@ export {
   resolveReviewerCredentialConcurrencyLimit,
   resolveReviewerMemoryPressureConfig,
   resolveFirstPassReviewerPoolConfig,
+  resolveReviewLaneConfig,
   runBoundedReviewerDispatchQueue,
   sortReviewerDispatchCandidates,
   reviewerDispatchIsFirstPass,

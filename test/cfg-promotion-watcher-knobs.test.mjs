@@ -1,4 +1,4 @@
-// Tests for the 2026-06-09 CFG promotion of 8 adversarial-review knobs.
+// Tests for the CFG promotion of adversarial-review knobs.
 //
 // Verifies:
 //   1. Each new CFG key resolves to its hardcoded default when nothing is set.
@@ -36,6 +36,7 @@ const ALL_NEW_FLAT_KEYS = Object.freeze([
   'watcher.pending_draft_review_respawn_age_seconds',
   'watcher.stuck_dispatch_alert_debounce_ms',
   'watcher.first_pass_reviewer_pool_max_concurrent_reviewers',
+  'watcher.review_lane_first_pass_burst_limit',
   'follow_up.hq_worker_tear_down_subprocess_timeout_ms',
   'follow_up.hq_dispatch_subprocess_timeout_ms',
 ]);
@@ -225,6 +226,7 @@ test('schema defaults resolve to documented values when nothing is overridden', 
     'watcher.pending_draft_review_respawn_age_seconds': 900,
     'watcher.stuck_dispatch_alert_debounce_ms': 21_600_000,
     'watcher.first_pass_reviewer_pool_max_concurrent_reviewers': null,
+    'watcher.review_lane_first_pass_burst_limit': 2,
     'follow_up.hq_worker_tear_down_subprocess_timeout_ms': 60_000,
     'follow_up.hq_dispatch_subprocess_timeout_ms': 90_000,
   };

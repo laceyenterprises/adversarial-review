@@ -1281,6 +1281,7 @@ async function pollOnce(
         maxConcurrent: reviewerPoolConfig.maxConcurrent,
         geminiCredentialConcurrency,
         activeReviewerCounts: detachedReviewerDispatchTracker.activeCounts(),
+        usePersistentReviewerLaneState: true,
         singleWave: true,
         singleWaveSettleGraceMs: reviewerDispatchSingleWaveSettleGraceMs,
         onCandidateStarted: detachedReviewerDispatchTracker.track,

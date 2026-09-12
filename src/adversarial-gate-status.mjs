@@ -163,6 +163,14 @@ function normalizeReviewStatus(status) {
   return String(status ?? '').trim().toLowerCase();
 }
 
+function reviewRowStatus(reviewRow) {
+  return normalizeReviewStatus(reviewRow?.review_status ?? reviewRow?.reviewStatus);
+}
+
+function reviewRowReviewerHeadSha(reviewRow) {
+  return reviewRow?.reviewer_head_sha ?? reviewRow?.reviewerHeadSha ?? null;
+}
+
 function extractReviewBodyFromRow(reviewRow) {
   return reviewRow?.reviewBody ?? reviewRow?.review_body ?? reviewRow?.review_text ?? null;
 }
@@ -351,7 +359,7 @@ function followUpJobRevisionRef(job) {
 function completedHeadChangeRereviewIsSettledClean({ latestJob, latestJobStatus, reviewRow, headSha }) {
   if (latestJobStatus !== 'completed') return false;
   if (latestJob?.reReview?.requested !== true) return false;
-  if (!isHeadChangeRereviewReason(reviewRow?.rereview_reason)) return false;
+  if (!isHeadChangeRereviewReason(reviewRow?.rereview_reason ?? reviewRow?.rereviewReason)) return false;
   const jobHead = followUpJobRevisionRef(latestJob);
   if (!headSha || !jobHead || String(jobHead) !== String(headSha)) return false;
   const verdict = normalizeEffectiveReviewVerdict(latestJob.reviewBody);
@@ -372,9 +380,9 @@ function resolveSettledReviewVerdict(
     liveHeadReview = undefined,
   } = {}
 ) {
-  const reviewedHeadSha = reviewRow?.reviewer_head_sha || null;
-  const reviewStatus = normalizeReviewStatus(reviewRow?.review_status);
-  const isHeadChangeRereview = isHeadChangeRereviewReason(reviewRow?.rereview_reason);
+  const reviewedHeadSha = reviewRowReviewerHeadSha(reviewRow);
+  const reviewStatus = reviewRowStatus(reviewRow);
+  const isHeadChangeRereview = isHeadChangeRereviewReason(reviewRow?.rereview_reason ?? reviewRow?.rereviewReason);
   const isQuotaCapped = primaryReviewerQuotaCappedForRow(reviewRow);
   if (reviewStatus !== 'posted' && !isQuotaCapped && !(reviewStatus === 'pending' && isHeadChangeRereview)) {
     return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
@@ -540,7 +548,7 @@ function pickAdversarialGateStatus({
     );
   }
 
-  const reviewStatus = normalizeReviewStatus(reviewRow?.review_status);
+  const reviewStatus = reviewRowStatus(reviewRow);
   const argusOwnsReview = reviewStatus === 'argus-security-queued';
 
   // ASR-06 — blocking authority, and it runs BEFORE the review-row branches.

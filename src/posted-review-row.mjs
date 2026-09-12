@@ -140,6 +140,7 @@ function gateRelevantReviewRowSnapshot(row) {
   return JSON.stringify({
     reviewStatus: row?.review_status ?? row?.reviewStatus ?? null,
     rereviewRequestedAt: row?.rereview_requested_at ?? row?.rereviewRequestedAt ?? null,
+    rereviewReason: row?.rereview_reason ?? row?.rereviewReason ?? null,
     reviewerHeadSha: row?.reviewer_head_sha ?? row?.reviewerHeadSha ?? null,
   });
 }
@@ -374,7 +375,7 @@ export async function handlePostedReviewRow({
   let gateDecision = gateProjection?.decision || null;
 
   const gateBlocksMergeAction = (decision) =>
-    decision?.state && decision.state !== 'success' && decision.reason !== 'operator-skip-label';
+    decision?.state && decision.state !== 'success';
   if (pendingAllowed && gateBlocksMergeAction(gateDecision)) {
     logger?.log?.(
       `[watcher] posted-review handler held for ${repoPath}#${prNumber}: ` +

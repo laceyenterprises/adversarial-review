@@ -535,6 +535,36 @@ test('pickAdversarialGateStatus lets a clean settled verdict satisfy a queued he
   assert.equal(decision.reason, 'review-settled-head-change-rereview');
 });
 
+test('pickAdversarialGateStatus accepts camelCase queued head-change rereview rows', () => {
+  const decision = pickAdversarialGateStatus({
+    headSha: 'rebased-head',
+    reviewRow: makeReviewRow({
+      review_status: undefined,
+      reviewStatus: 'pending',
+      rereviewReason: 'auto-refresh: posted review on stale head old-head; current head is rebased-head',
+    }),
+    latestJob: makeJob({
+      revisionRef: 'rebased-head',
+      reviewBody: [
+        '## Summary',
+        'Clean final review.',
+        '',
+        '## Blocking issues',
+        '- None.',
+        '',
+        '## Verdict',
+        'Comment only',
+      ].join('\n'),
+      reReview: {
+        requested: true,
+      },
+    }),
+  });
+
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'review-settled-head-change-rereview');
+});
+
 test('pickAdversarialGateStatus fails closed when queued head-change job has no proven head', () => {
   const decision = pickAdversarialGateStatus({
     headSha: 'rebased-head',

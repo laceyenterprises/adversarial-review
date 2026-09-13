@@ -414,6 +414,15 @@ function laneFairnessPreference({
       return aFirst ? -1 : 1;
     }
     if (starts.rereview < baseFloor && starts.firstPass >= firstPassFloor) {
+      const burstLimit = parsePositiveInteger(
+        laneState?.firstPassBurstLimit,
+        DEFAULT_REVIEW_LANE_FIRST_PASS_BURST_LIMIT,
+      );
+      const persistedStreak =
+        Math.max(0, Number.parseInt(String(laneState?.firstPassStartsSinceRereview || 0), 10) || 0);
+      const admittedStreak =
+        Math.max(0, Number.parseInt(String(starts.firstPass || 0), 10) || 0);
+      if (persistedStreak + admittedStreak < burstLimit) return 0;
       return aFirst ? 1 : -1;
     }
   }
@@ -846,6 +855,16 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   const dispatchWasSkipped = (result) =>
     result && typeof result === 'object' && result.dispatched === false;
 
+  const recordLaneAdmission = (candidate) => {
+    const key = reviewerDispatchIsFirstPass(candidate) ? 'firstPass' : 'rereview';
+    laneStarts[key] += 1;
+  };
+
+  const refundLaneAdmission = (candidate) => {
+    const key = reviewerDispatchIsFirstPass(candidate) ? 'firstPass' : 'rereview';
+    laneStarts[key] = Math.max(0, laneStarts[key] - 1);
+  };
+
   const countDispatch = (promise) => {
     const record = activeRecords.get(promise);
     if (!record || record.counted) return;
@@ -913,7 +932,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
         );
         continue;
       }
-      laneStarts[reviewerDispatchPassKind(entry.candidate)] += 1;
+      recordLaneAdmission(entry.candidate);
       return entry;
     }
     return null;
@@ -965,6 +984,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
           recordReviewerLaneStart(startedEntry.candidate, activeLaneState);
           countDispatch(promise);
         }
+        refundLaneAdmission(startedEntry.candidate);
       }).finally(() => {
         active.delete(promise);
         activeRecords.delete(promise);

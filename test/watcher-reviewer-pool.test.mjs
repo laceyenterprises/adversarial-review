@@ -132,79 +132,78 @@ test('reviewer pool starts another PR while an older review is slow', async () =
   await runPromise;
 });
 
-test('reviewer dispatch gives a queued first pass its guaranteed share under re-review load', async () => {
+test('reviewer dispatch gives re-reviews their floor after the configured burst at four slots', async () => {
   const started = [];
   let release;
   const hold = new Promise((resolve) => {
     release = resolve;
   });
   const tasks = [
-    candidate(10, async () => {
-      started.push('rereview:10');
+    ...Array.from({ length: 6 }, (_unused, index) => candidate(90 + index, async () => {
+      started.push(`first-pass:${90 + index}`);
       await hold;
-    }, '2026-05-01T00:00:00.000Z', { current: { rereview_requested_at: '2026-05-01T00:10:00.000Z' } }),
-    candidate(11, async () => {
-      started.push('rereview:11');
+    }, `2026-05-01T00:00:${10 + index}.000Z`)),
+    ...Array.from({ length: 2 }, (_unused, index) => candidate(10 + index, async () => {
+      started.push(`rereview:${10 + index}`);
       await hold;
-    }, '2026-05-01T00:00:01.000Z', { current: { rereview_requested_at: '2026-05-01T00:11:00.000Z' } }),
-    candidate(12, async () => {
-      started.push('rereview:12');
-      await hold;
-    }, '2026-05-01T00:00:02.000Z', { current: { rereview_requested_at: '2026-05-01T00:12:00.000Z' } }),
-    candidate(90, async () => {
-      started.push('first-pass:90');
-      await hold;
-    }, '2026-05-01T00:00:03.000Z', { enqueuedAtMs: 0 }),
+    }, `2026-05-01T00:00:0${index}.000Z`, {
+      current: { rereview_requested_at: `2026-05-01T00:10:0${index}.000Z` },
+    })),
   ];
 
   const runPromise = runBoundedReviewerDispatchQueue(tasks, {
     maxConcurrent: 4,
     laneState: createReviewerLaneState({ minShare: 0.25 }),
     logger: { error() {}, log() {}, warn() {} },
-    now: () => 1000,
   });
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.equal(started.length, 4);
-  assert.ok(started.includes('first-pass:90'), started.join(','));
+  assert.deepEqual(started, ['first-pass:90', 'first-pass:91', 'rereview:10', 'first-pass:92']);
   release();
   await runPromise;
 });
 
-test('reviewer dispatch gives queued re-reviews their guaranteed share under first-pass load', async () => {
+test('reviewer dispatch raises the first-pass floor when queued first-pass work is urgent', async () => {
   const started = [];
   let release;
   const hold = new Promise((resolve) => {
     release = resolve;
   });
   const tasks = [
-    candidate(10, async () => {
-      started.push('first-pass:10');
+    ...Array.from({ length: 5 }, (_unused, index) => candidate(20 + index, async () => {
+      started.push(`rereview:${20 + index}`);
       await hold;
-    }, '2026-05-01T00:00:00.000Z'),
-    candidate(11, async () => {
-      started.push('first-pass:11');
+    }, `2026-05-01T00:00:0${index}.000Z`, {
+      current: { rereview_requested_at: `2026-05-01T00:10:0${index}.000Z` },
+    })),
+    ...Array.from({ length: 5 }, (_unused, index) => candidate(90 + index, async () => {
+      started.push(`first-pass:${90 + index}`);
       await hold;
-    }, '2026-05-01T00:00:01.000Z'),
-    candidate(12, async () => {
-      started.push('first-pass:12');
-      await hold;
-    }, '2026-05-01T00:00:02.000Z'),
-    candidate(90, async () => {
-      started.push('rereview:90');
-      await hold;
-    }, '2026-05-01T00:00:03.000Z', { current: { rereview_requested_at: '2026-05-01T00:10:00.000Z' } }),
+    }, `2026-05-01T00:00:${10 + index}.000Z`, { enqueuedAtMs: index * 1000 })),
   ];
 
   const runPromise = runBoundedReviewerDispatchQueue(tasks, {
-    maxConcurrent: 4,
-    laneState: createReviewerLaneState({ minShare: 0.25 }),
+    maxConcurrent: 7,
+    laneState: createReviewerLaneState({
+      minShare: 0.25,
+      firstPassUrgentAgeMs: 5 * 60 * 1000,
+    }),
     logger: { error() {}, log() {}, warn() {} },
+    now: () => 6 * 60 * 1000,
   });
   await new Promise((resolve) => setTimeout(resolve, 0));
 
-  assert.equal(started.length, 4);
-  assert.ok(started.includes('rereview:90'), started.join(','));
+  assert.equal(started.length, 7);
+  assert.deepEqual(started, [
+    'first-pass:90',
+    'first-pass:91',
+    'first-pass:92',
+    'first-pass:93',
+    'rereview:20',
+    'rereview:21',
+    'first-pass:94',
+  ]);
   release();
   await runPromise;
 });
@@ -654,6 +653,42 @@ test('reviewer lane budget is not spent by skipped rereview admissions', async (
 
   assert.equal(summary.dispatched, 0);
   assert.equal(laneState.firstPassStartsSinceRereview, 2);
+});
+
+test('reviewer lane floor is not satisfied by a skipped rereview admission', async () => {
+  const events = [];
+  const laneState = createReviewerLaneState({ firstPassBurstLimit: 2, minShare: 0.5 });
+  laneState.firstPassStartsSinceRereview = 2;
+
+  const summary = await runBoundedReviewerDispatchQueue([
+    candidate(10, async () => {
+      events.push('skip:10');
+      return { dispatched: false, reason: 'head-dispatch-lease-held' };
+    }, '2026-05-01T00:00:00.000Z', {
+      current: {
+        posted_at: null,
+        rereview_requested_at: '2026-05-01T00:05:00.000Z',
+      },
+    }),
+    candidate(90, async () => {
+      events.push('first-pass:90');
+    }, '2026-05-09T00:00:00.000Z'),
+    candidate(11, async () => {
+      events.push('rereview:11');
+    }, '2026-05-01T00:00:01.000Z', {
+      current: {
+        posted_at: null,
+        rereview_requested_at: '2026-05-01T00:05:01.000Z',
+      },
+    }),
+  ], {
+    maxConcurrent: 1,
+    laneState,
+    logger: { error() {}, log() {}, warn() {} },
+  });
+
+  assert.equal(summary.dispatched, 2);
+  assert.deepEqual(events, ['skip:10', 'rereview:11', 'first-pass:90']);
 });
 
 test('reviewer lane state persists across single-slot drain ticks', async () => {

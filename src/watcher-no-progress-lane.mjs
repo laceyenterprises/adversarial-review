@@ -68,6 +68,33 @@ export const DEFAULT_NO_PROGRESS_STALLED_EVENT_TICKS = DEFAULT_NO_PROGRESS_LANE_
 // been stuck.
 export const DEFAULT_NO_PROGRESS_MAX_BACKOFF_TICKS = 12;
 export const DEFAULT_OPERATOR_BLOCKED_REWALK_TICKS = 3;
+
+// LANESTARVE-01. Absolute ceiling on consecutive skipped ticks, independent of
+// whatever `backoffTicks` computes. `backoffTicksFor` is already clamped to
+// `maxBackoffTicks`, so with the shipped defaults this is a belt-and-braces
+// bound — but it is the bound an operator can reason about without reading the
+// exponent, and it holds even if a caller passes a larger `maxBackoffTicks`. A
+// PR in the slow lane is re-walked at least this often, always.
+export const DEFAULT_NO_PROGRESS_REWALK_CEILING_TICKS = DEFAULT_NO_PROGRESS_MAX_BACKOFF_TICKS;
+
+// LANESTARVE-01. How many times a handler-decision change may reset the series
+// on the SAME head before the lane stops honouring it.
+//
+// `subjectProgressFingerprint` is deliberately narrow: it covers only the review
+// -state fields the watcher itself writes. But the merge decision depends on
+// inputs the watcher does NOT write — CI conclusion, mergeability, the AMA
+// closer lease, hammer dispatch status. When one of those flips, the PR becomes
+// advanceable and the review row does not change by so much as a byte, so the
+// lane goes on counting no-progress ticks against a PR that is now ready to
+// merge and keeps it deferred for up to a full backoff window.
+//
+// The handler already reports those inputs back to us as stable gate/closure
+// reason slugs. Treating a CHANGE in that reason set as evidence the world
+// moved is what stops deferral from being self-reinforcing. The cap is what
+// stops a flapping reason set from pinning a PR in the active lane forever and
+// recreating the WPS-01 unbounded-phase outage: after this many decision-only
+// resets on one head, only real review-state progress (or a new head) counts.
+export const DEFAULT_NO_PROGRESS_DECISION_RESET_CAP = 5;
 export const DEFAULT_OPERATOR_BLOCKED_ALERT_NO_PROGRESS_TICKS = 6;
 
 const NO_PROGRESS_LANE_SCHEMA_VERSION = 1;
@@ -269,6 +296,57 @@ export function subjectProgressFingerprint(row, { headSha = null } = {}) {
     failedAt: row?.failed_at ?? null,
     mergedAt: row?.merged_at ?? null,
   });
+}
+
+// Cap on how much of a decision fingerprint we keep. The reason vocabulary is a
+// fixed set of slugs (`ci-not-green`, `pr-not-mergeable`, `stale-review-head`,
+// `lease-not-held`, …), so this only ever truncates a pathological producer.
+const MAX_DECISION_FINGERPRINT_SLUGS = 16;
+const MAX_DECISION_FINGERPRINT_SLUG_LENGTH = 64;
+
+function normalizeDecisionSlug(value) {
+  const slug = String(value ?? '').trim().toLowerCase();
+  if (!slug) return null;
+  return slug.slice(0, MAX_DECISION_FINGERPRINT_SLUG_LENGTH);
+}
+
+/**
+ * LANESTARVE-01. Order-independent fingerprint of the INPUTS the posted-review
+ * handler used to decide it could not advance this PR, as reported back by the
+ * handler itself.
+ *
+ * This is the second progress signal, and it exists because the first one is
+ * blind in exactly the direction that matters for autonomous merge. A PR that is
+ * `posted` + clean but waiting on CI reports `ci-not-green` every tick and never
+ * touches its review row; when CI finally goes green the row STILL does not
+ * change, so `subjectProgressFingerprint` sees nothing and the lane holds the PR
+ * back for up to a full backoff window after it became mergeable. The reason set
+ * is what changed, and the handler already hands it to us.
+ *
+ * Deliberately built only from enumerated slugs — never free text, timestamps,
+ * SHAs, or counters. A fingerprint that churns on its own would keep every PR in
+ * the active lane and recreate the unbounded posted-review phase WPS-01 fixed,
+ * so anything that could churn without the world actually moving is excluded.
+ *
+ * Returns `null` when the handler reported nothing usable; a null fingerprint
+ * never counts as a change, so an unreporting handler behaves exactly as before.
+ */
+export function handlerDecisionFingerprint(value) {
+  if (!value || typeof value !== 'object') return null;
+  const slugs = new Set();
+  const add = (raw) => {
+    const slug = normalizeDecisionSlug(raw);
+    if (slug) slugs.add(slug);
+  };
+  add(value.outcome);
+  add(value.gateDecision?.state);
+  add(value.gateDecision?.reason);
+  for (const reason of normalizeReasonList(value.gateDecision?.reasons)) add(reason);
+  add(value.amaClosureResult?.reason);
+  add(value.amaClosureResult?.namedReason);
+  for (const reason of normalizeReasonList(value.amaClosureResult?.reasons)) add(reason);
+  if (slugs.size === 0) return null;
+  return JSON.stringify([...slugs].sort().slice(0, MAX_DECISION_FINGERPRINT_SLUGS));
 }
 
 export function readNoProgressLane(rootDir, identity, { logger = console } = {}) {
@@ -554,7 +632,9 @@ export function evaluateNoProgressLane(ledger, {
   cap = DEFAULT_NO_PROGRESS_LANE_CAP,
   maxBackoffTicks = DEFAULT_NO_PROGRESS_MAX_BACKOFF_TICKS,
   operatorBlockedRewalkTicks: operatorRewalkTicks = DEFAULT_OPERATOR_BLOCKED_REWALK_TICKS,
+  rewalkCeilingTicks = DEFAULT_NO_PROGRESS_REWALK_CEILING_TICKS,
 } = {}) {
+  const ceilingTicks = positiveIntOr(rewalkCeilingTicks, DEFAULT_NO_PROGRESS_REWALK_CEILING_TICKS);
   const head = normalizeHead(headSha);
   const ledgerHead = normalizeHead(ledger?.headSha);
   const base = {
@@ -583,7 +663,9 @@ export function evaluateNoProgressLane(ledger, {
   }
   const progressClass = normalizeProgressClass(ledger.progressClass);
   if (progressClass === PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED) {
-    const backoffTicks = operatorBlockedRewalkTicks(operatorRewalkTicks);
+    // LANESTARVE-01: the ceiling applies to every lane. Nothing may keep a PR
+    // unwalked for longer than it, whatever the per-lane cadence says.
+    const backoffTicks = Math.min(operatorBlockedRewalkTicks(operatorRewalkTicks), ceilingTicks);
     const skippedTicks = normalizeCount(ledger.skippedTicks);
     const due = skippedTicks >= backoffTicks;
     return {
@@ -592,14 +674,16 @@ export function evaluateNoProgressLane(ledger, {
       noProgressTicks,
       skippedTicks,
       backoffTicks,
+      rewalkCeilingTicks: ceilingTicks,
       headSha: head,
       reason: due ? 'operator-blocked-due' : 'operator-blocked-flat-wait',
     };
   }
-  const backoffTicks = backoffTicksFor(noProgressTicks, { cap, maxBackoffTicks });
-  if (backoffTicks <= 0) {
-    return { ...base, noProgressTicks, reason: 'under-cap' };
+  const uncappedBackoffTicks = backoffTicksFor(noProgressTicks, { cap, maxBackoffTicks });
+  if (uncappedBackoffTicks <= 0) {
+    return { ...base, noProgressTicks, rewalkCeilingTicks: ceilingTicks, reason: 'under-cap' };
   }
+  const backoffTicks = Math.min(uncappedBackoffTicks, ceilingTicks);
   const skippedTicks = normalizeCount(ledger.skippedTicks);
   const due = skippedTicks >= backoffTicks;
   return {
@@ -608,8 +692,11 @@ export function evaluateNoProgressLane(ledger, {
     noProgressTicks,
     skippedTicks,
     backoffTicks,
+    rewalkCeilingTicks: ceilingTicks,
     headSha: head,
-    reason: due ? 'slow-lane-due' : 'slow-lane-backoff',
+    reason: due
+      ? (uncappedBackoffTicks > ceilingTicks ? 'slow-lane-rewalk-ceiling' : 'slow-lane-due')
+      : 'slow-lane-backoff',
   };
 }
 
@@ -652,9 +739,12 @@ export function recordNoProgressLaneSkip(rootDir, identity, {
 export function recordNoProgressLaneRun(rootDir, identity, {
   headSha,
   fingerprint,
+  decisionFingerprint = null,
   progressClass = PROGRESS_CLASS_SELF_RESOLVING,
+  escalate = true,
   cap = DEFAULT_NO_PROGRESS_LANE_CAP,
   maxBackoffTicks = DEFAULT_NO_PROGRESS_MAX_BACKOFF_TICKS,
+  decisionResetCap = DEFAULT_NO_PROGRESS_DECISION_RESET_CAP,
   operatorBlockedRewalkTicks: operatorRewalkTicks = DEFAULT_OPERATOR_BLOCKED_REWALK_TICKS,
   now = null,
   logger = console,
@@ -671,7 +761,49 @@ export function recordNoProgressLaneRun(rootDir, identity, {
     && typeof existing?.fingerprint === 'string'
     && existing.fingerprint === fingerprint;
   const priorNoProgress = sameHead ? normalizeCount(existing?.noProgressTicks) : 0;
-  const noProgressTicks = sameFingerprint ? priorNoProgress + 1 : 0;
+
+  // LANESTARVE-01 — the two loop-breakers. Both only ever move the series TOWARD
+  // being walked; neither can make a PR wait longer than it does today.
+  //
+  // (1) Decision change. `sameFingerprint` says the review row did not move, but
+  //     the row is blind to CI, mergeability, and lease ownership. If the
+  //     handler's own reason set changed, the PR's blocker changed, so the
+  //     no-progress series is stale evidence and restarts. Bounded by
+  //     `decisionResetCap` per head so a flapping reason set cannot hold a
+  //     genuinely-wedged PR in the active lane forever.
+  //
+  // (2) Non-escalating walk. A walk the lane did not schedule — the scheduler's
+  //     starvation floor admitting a deferred handler into an otherwise idle
+  //     tick — must not double the backoff. Charging a PR for a look it never
+  //     asked for is precisely how deferral became self-reinforcing: every
+  //     attempt to escape the lane made the next escape twice as far away.
+  const priorDecisionResets = sameHead ? normalizeCount(existing?.decisionResets) : 0;
+  const resetCap = positiveIntOr(decisionResetCap, DEFAULT_NO_PROGRESS_DECISION_RESET_CAP);
+  const decisionChanged = sameFingerprint
+    && typeof decisionFingerprint === 'string'
+    && typeof existing?.decisionFingerprint === 'string'
+    && existing.decisionFingerprint !== decisionFingerprint;
+  const decisionResetHonoured = decisionChanged && priorDecisionResets < resetCap;
+  const decisionResets = sameHead
+    ? (decisionResetHonoured ? priorDecisionResets + 1 : priorDecisionResets)
+    : 0;
+  const escalating = escalate !== false;
+  let noProgressTicks;
+  if (!sameFingerprint || decisionResetHonoured) {
+    noProgressTicks = 0;
+  } else if (escalating) {
+    noProgressTicks = priorNoProgress + 1;
+  } else {
+    noProgressTicks = priorNoProgress;
+  }
+  if (decisionChanged && !decisionResetHonoured) {
+    logger?.warn?.(
+      `[watcher] no-progress lane: ${identity?.repo ?? 'unknown'}#${Number(identity?.prNumber)} ` +
+        `handler decision changed again on head ${head.slice(0, 12)} but the decision-reset cap ` +
+        `(${resetCap}) is spent; holding the slow-lane series at ` +
+        `no_progress_ticks=${priorNoProgress + (escalating ? 1 : 0)}`,
+    );
+  }
   const normalizedProgressClass = normalizeProgressClass(progressClass);
   const backoffTicks = normalizedProgressClass === PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED
     ? operatorBlockedRewalkTicks(operatorRewalkTicks)
@@ -680,12 +812,31 @@ export function recordNoProgressLaneRun(rootDir, identity, {
     ? LANE_OPERATOR_BLOCKED
     : (backoffTicks > 0 ? LANE_SLOW : LANE_ACTIVE);
   const priorLane = sameHead ? (existing?.lane || LANE_ACTIVE) : LANE_ACTIVE;
-  const firstNoProgressAt = (sameFingerprint ? existing?.firstNoProgressAt : null)
+  // A decision-only reset restarts the series, so the "stuck since" stamp and
+  // the already-emitted stalled event both belong to a stall that no longer
+  // describes this PR. Drop them with the counter, exactly as a row change does.
+  const seriesContinues = sameFingerprint && !decisionResetHonoured;
+  const firstNoProgressAt = (seriesContinues ? existing?.firstNoProgressAt : null)
     || (noProgressTicks > 0 ? now : null)
     || null;
-  const priorStalledEvent = sameFingerprint && existing?.stalledEvent
+  const priorStalledEvent = seriesContinues && existing?.stalledEvent
     ? existing.stalledEvent
     : null;
+  // The operator-decision alert debounce is a SEPARATE durable store, keyed by
+  // repo/PR/head/review-state fingerprint --- and NOT by decisionFingerprint. A
+  // decision-only reset keeps the review-state fingerprint identical, so a
+  // debounce file written for an earlier blocker on this head still matches and
+  // would suppress the alert for the new series.
+  //
+  // That is precisely the case this reset exists to represent: "the blocker
+  // moved even though the row did not." Restarting the counter while silently
+  // holding the old debounce would park a PR on a DIFFERENT operator-required
+  // condition and never tell the operator. `clearNoProgressLane` already clears
+  // this store when the whole lane is dropped; a decision-only reset has the
+  // same claim on it.
+  if (decisionResetHonoured) {
+    clearOperatorDecisionAlertState(rootDir, identity, { logger });
+  }
   const priorPromotedFrom = sameHead && existing?.promotedFrom && typeof existing.promotedFrom === 'object'
     ? existing.promotedFrom
     : null;
@@ -698,6 +849,14 @@ export function recordNoProgressLaneRun(rootDir, identity, {
     prNumber: Number(identity?.prNumber),
     headSha: head,
     fingerprint: typeof fingerprint === 'string' ? fingerprint : null,
+    // Carried forward when this walk reported nothing usable, so an occasional
+    // silent handler does not erase the decision baseline the next one needs.
+    decisionFingerprint: typeof decisionFingerprint === 'string'
+      ? decisionFingerprint
+      : (sameHead && typeof existing?.decisionFingerprint === 'string'
+        ? existing.decisionFingerprint
+        : null),
+    decisionResets,
     progressClass: normalizedProgressClass,
     noProgressTicks,
     // A walked PR starts its next backoff window from zero regardless of outcome.
@@ -713,12 +872,18 @@ export function recordNoProgressLaneRun(rootDir, identity, {
     lane,
     progressClass: normalizedProgressClass,
     progressed: !sameFingerprint,
+    // A decision-only reset is NOT review-state progress — `progressed` stays
+    // false so the stalled-event/alert paths are unchanged — but it does clear
+    // the no-progress series, so report it separately for the operator.
+    decisionChanged,
+    decisionReset: decisionResetHonoured,
+    decisionResets,
+    escalated: escalating,
     noProgressTicks,
     firstNoProgressAt,
     backoffTicks,
     demoted: lane === LANE_SLOW && priorLane !== LANE_SLOW,
     headSha: head,
-    firstNoProgressAt,
   };
 }
 

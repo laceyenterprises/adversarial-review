@@ -36,6 +36,8 @@ Required fields:
 | `prNumber` | number | Pull request number. |
 | `headSha` | string or null | Head SHA for the series. A different head resets the lane. |
 | `fingerprint` | string or null | Stable review-state fingerprint used to detect progress. |
+| `decisionFingerprint` | string or null | Stable handler-decision fingerprint for the current head. This is carried forward across silent walks so the next usable decision can detect decision-only changes without treating missing handler output as a new baseline. |
+| `decisionResets` | number | Count of decision-only resets already honored for the current head. A new head resets this to `0`; repeated decision changes are capped by the watcher so the lane cannot reset forever on decision churn. |
 | `progressClass` | string | `self-resolving` or `operator-decision-required`. |
 | `noProgressTicks` | number | Consecutive walked ticks with the same fingerprint. |
 | `skippedTicks` | number | Deferred ticks counted toward the current backoff window. |
@@ -60,6 +62,15 @@ Optional `stalledEvent` field:
   remediation, or merge eligibility decisions.
 - Missing, unreadable, malformed, legacy, or head-mismatched ledgers fail open
   toward walking the PR.
+- Review-state progress is keyed by `fingerprint`. A change in
+  `decisionFingerprint` for the same `fingerprint` is a decision-only reset:
+  it clears `noProgressTicks`, `firstNoProgressAt`, and any prepared or emitted
+  `stalledEvent`, but it does not report durable review-state progress to the
+  caller. The watcher records the reset separately via `decisionResets`.
+- Decision-only resets are capped per head by the watcher's configured
+  decision-reset cap. Once the cap is spent, later decision changes keep the
+  current no-progress series and are logged instead of resetting the lane
+  again.
 - Stalled-event delivery is prepare-and-acknowledge. The watcher may persist
   `stalledEvent.emitted=false` before calling the event sink, but it flips the
   value to `true` only after the sink resolves successfully. A transient sink

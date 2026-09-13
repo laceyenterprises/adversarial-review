@@ -2911,6 +2911,26 @@ function schemaV1() {
             __default: 2,
             __min: 1,
           },
+          // LANEFAIR-01 cross-lane floor. While both first-pass and rereview
+          // work are pending, each non-priority lane receives at least this
+          // share of effective reviewer concurrency. The watcher computes a
+          // ceiling-rounded slot floor from the live pool size, so the
+          // guarantee scales as reviewer capacity changes.
+          review_lane_min_share: {
+            __type: TYPE_FLOAT,
+            __default: 0.25,
+            __min: 0,
+            __max: 0.5,
+          },
+          // Pre-alarm first-pass age that temporarily raises the first-pass
+          // floor to half the pool while rereviews are also queued. This uses
+          // the same queue-age signal pipeline-health reports as
+          // oldestFirstPass, but acts before queue_starvation's later page.
+          review_lane_first_pass_urgent_age_ms: {
+            __type: TYPE_INT,
+            __default: 300000,
+            __min: 60000,
+          },
         },
       },
       // Subprocess timeouts for the follow-up pipeline's calls into `hq`.
@@ -3359,6 +3379,14 @@ export const ENV_ALIASES = {
   'watcher.review_lane_first_pass_burst_limit': {
     canonical: 'AGENT_OS_WATCHER_REVIEW_LANE_FIRST_PASS_BURST_LIMIT',
     aliases: [['ADVERSARIAL_REVIEW_LANE_FIRST_PASS_BURST_LIMIT', identity]],
+  },
+  'watcher.review_lane_min_share': {
+    canonical: 'AGENT_OS_WATCHER_REVIEW_LANE_MIN_SHARE',
+    aliases: [['ADVERSARIAL_REVIEW_LANE_MIN_SHARE', identity]],
+  },
+  'watcher.review_lane_first_pass_urgent_age_ms': {
+    canonical: 'AGENT_OS_WATCHER_REVIEW_LANE_FIRST_PASS_URGENT_AGE_MS',
+    aliases: [['ADVERSARIAL_REVIEW_LANE_FIRST_PASS_URGENT_AGE_MS', identity]],
   },
   'follow_up.hq_worker_tear_down_subprocess_timeout_ms': {
     canonical: 'AGENT_OS_FOLLOW_UP_HQ_WORKER_TEAR_DOWN_SUBPROCESS_TIMEOUT_MS',

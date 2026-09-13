@@ -34,6 +34,8 @@ const DEFAULT_AFH_FALLBACK_SUPERMAJORITY_THRESHOLD = 0.80;
 const DEFAULT_AFH_FALLBACK_SUPERMAJORITY_MIN_SELECTIONS = 5;
 const DEFAULT_AFH_FALLBACK_SUPERMAJORITY_DISTINCT_PR_FLOOR = 2;
 const DEFAULT_AFH_FALLBACK_SUPERMAJORITY_WINDOW_MS = 60 * 60 * 1000;
+const DEFAULT_REVIEW_LANE_SHARE_SUPERMAJORITY_THRESHOLD = 0.75;
+const DEFAULT_REVIEW_LANE_SHARE_SUPERMAJORITY_MIN_PASSES = 5;
 // How long a PR may sit WAITING for its first-pass review before that is a
 // finding.
 //
@@ -236,6 +238,18 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     defaultThreshold: DEFAULT_AFH_FALLBACK_SUPERMAJORITY_THRESHOLD,
     windowKey: 'afhFallbackSupermajorityWindowMs',
     defaultWindowMs: DEFAULT_AFH_FALLBACK_SUPERMAJORITY_WINDOW_MS,
+  },
+  {
+    code: 'review:review_lane_share_supermajority',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: 'reviewLaneShareSupermajorityThreshold',
+    defaultThreshold: DEFAULT_REVIEW_LANE_SHARE_SUPERMAJORITY_THRESHOLD,
+    windowKey: 'reviewerDeathRateWindowMs',
+    defaultWindowMs: DEFAULT_REVIEWER_DEATH_RATE_WINDOW_MS,
+    thresholdDescription:
+      'one reviewer lane consumed a sustained supermajority of recent pass starts '
+      + 'while the other lane still had queued work',
   },
   {
     code: 'review:terminal_review_failure_active',
@@ -506,6 +520,16 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
       overrides.afhFallbackSupermajorityWindowMs
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_AFH_FALLBACK_SUPERMAJORITY_WINDOW_MS,
       DEFAULT_AFH_FALLBACK_SUPERMAJORITY_WINDOW_MS
+    ),
+    reviewLaneShareSupermajorityThreshold: parseUnitIntervalThreshold(
+      overrides.reviewLaneShareSupermajorityThreshold
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_LANE_SHARE_SUPERMAJORITY_THRESHOLD,
+      DEFAULT_REVIEW_LANE_SHARE_SUPERMAJORITY_THRESHOLD
+    ),
+    reviewLaneShareSupermajorityMinPasses: parsePositiveInteger(
+      overrides.reviewLaneShareSupermajorityMinPasses
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_LANE_SHARE_SUPERMAJORITY_MIN_PASSES,
+      DEFAULT_REVIEW_LANE_SHARE_SUPERMAJORITY_MIN_PASSES
     ),
     queueStarvationMaxAgeMs: parsePositiveInteger(
       overrides.queueStarvationMaxAgeMs
@@ -2721,6 +2745,66 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
       observedAt,
       details: reconcileState,
     }));
+  }
+
+  const capacity = snapshot.reviewerCapacity || {};
+  const totalLanePasses = Number(capacity.totalPasses || 0);
+  if (totalLanePasses >= config.reviewLaneShareSupermajorityMinPasses) {
+    const rereviewShare = Number(capacity.rereviewShare || 0);
+    const firstPassShare = 1 - rereviewShare;
+    const threshold = config.reviewLaneShareSupermajorityThreshold;
+    const firstPassQueued = Boolean(snapshot.firstPassQueue.oldestFirstPass);
+    const rereviewQueued = Number(snapshot.queuedRereviews?.count || 0) > 0;
+    const dominantLane = rereviewShare >= threshold && firstPassQueued
+      ? 'rereview'
+      : (firstPassShare >= threshold && rereviewQueued ? 'first-pass' : null);
+    if (dominantLane) {
+      const starvedLane = dominantLane === 'rereview' ? 'first-pass' : 'rereview';
+      const dominantShare = dominantLane === 'rereview' ? rereviewShare : firstPassShare;
+      const dominantPasses = dominantLane === 'rereview'
+        ? Number(capacity.rereviewPasses || 0)
+        : Number(capacity.firstPassPasses || 0);
+      const queuedEvidence = starvedLane === 'first-pass'
+        ? snapshot.firstPassQueue.oldestFirstPass
+        : snapshot.queuedRereviews.oldest;
+      findings.push(buildFinding({
+        code: 'review:review_lane_share_supermajority',
+        tier: 'ticket',
+        subject:
+          `${dominantLane} consumed ${Math.round(dominantShare * 100)}% of recent reviewer starts `
+          + `while ${starvedLane} work is queued`,
+        message:
+          `${dominantLane} took ${dominantPasses}/${totalLanePasses} reviewer pass start(s) in the last `
+          + `${Math.round((capacity.windowMs || config.reviewerDeathRateWindowMs) / 60000)}m while `
+          + `${starvedLane} had queued work. Share is the leading starvation signal; age-based findings `
+          + 'should be the lagging alarm, not the first indication.',
+        evidence: [
+          `reviewerCapacity total=${totalLanePasses} first_pass=${capacity.firstPassPasses || 0} `
+          + `rereview=${capacity.rereviewPasses || 0} rereview_share=${rereviewShare.toFixed(3)} `
+          + `effective_concurrency=${capacity.effectiveConcurrency || 0}`,
+          starvedLane === 'first-pass'
+            ? `oldestFirstPass ${queuedEvidence.repo}#${queuedEvidence.prNumber} age=${Math.round((queuedEvidence.ageMs || 0) / 60000)}m`
+            : `queuedRereview ${queuedEvidence.repo}#${queuedEvidence.prNumber} age=${Math.round((queuedEvidence.ageMs || 0) / 60000)}m`,
+        ],
+        recommendedAction:
+          'Check watcher.review_lane_min_share and the reviewer-pool launch logs. Do not enlarge the pool '
+          + 'for this signal alone: capacity exists, but the shared pool is being allocated unevenly across lanes.',
+        observedAt,
+        details: {
+          dominantLane,
+          starvedLane,
+          dominantShare,
+          threshold,
+          minPasses: config.reviewLaneShareSupermajorityMinPasses,
+          totalPasses: totalLanePasses,
+          firstPassPasses: capacity.firstPassPasses || 0,
+          rereviewPasses: capacity.rereviewPasses || 0,
+          rereviewShare,
+          effectiveConcurrency: capacity.effectiveConcurrency || 0,
+          queuedOtherLane: queuedEvidence,
+        },
+      }));
+    }
   }
 
   const oldest = snapshot.firstPassQueue.oldest;

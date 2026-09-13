@@ -685,6 +685,69 @@ test('reviewer capacity excludes abandoned and stale running passes', () => {
   assert.equal(snapshot.reviewerCapacity.effectiveConcurrency, 1);
 });
 
+test('lane-share supermajority fires when rereviews dominate while first pass waits', () => {
+  const rootDir = tempRoot();
+  seedFreshReconcile(rootDir);
+  insertReviewRow(rootDir, {
+    prNumber: 970,
+    reviewedAt: '2026-05-25T17:50:00.000Z',
+    reviewStatus: 'pending',
+  });
+  for (let index = 0; index < 4; index += 1) {
+    insertReviewerPass(rootDir, {
+      prNumber: 980 + index,
+      attemptNumber: 2,
+      passKind: 'rereview',
+      status: 'completed',
+      startedAt: `2026-05-25T17:${10 + index}:00.000Z`,
+      endedAt: `2026-05-25T17:${11 + index}:00.000Z`,
+    });
+  }
+  insertReviewerPass(rootDir, {
+    prNumber: 984,
+    attemptNumber: 1,
+    passKind: 'first-pass',
+    status: 'completed',
+    startedAt: '2026-05-25T17:20:00.000Z',
+    endedAt: '2026-05-25T17:21:00.000Z',
+  });
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    configOverrides: { reviewLaneShareSupermajorityMinPasses: 5 },
+  });
+  const finding = snapshot.findings.find((item) => item.code === 'review:review_lane_share_supermajority');
+
+  assert.ok(finding, findingCodes(snapshot).join(','));
+  assert.equal(finding.details.dominantLane, 'rereview');
+  assert.equal(finding.details.starvedLane, 'first-pass');
+  assert.equal(finding.details.totalPasses, 5);
+  assert.equal(finding.details.queuedOtherLane.prNumber, 970);
+});
+
+test('lane-share supermajority stays quiet when the other lane is empty', () => {
+  const rootDir = tempRoot();
+  for (let index = 0; index < 5; index += 1) {
+    insertReviewerPass(rootDir, {
+      prNumber: 990 + index,
+      attemptNumber: 2,
+      passKind: 'rereview',
+      status: 'completed',
+      startedAt: `2026-05-25T17:${10 + index}:00.000Z`,
+      endedAt: `2026-05-25T17:${11 + index}:00.000Z`,
+    });
+  }
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    configOverrides: { reviewLaneShareSupermajorityMinPasses: 5 },
+  });
+
+  assert.ok(!snapshot.findings.some((item) => item.code === 'review:review_lane_share_supermajority'));
+});
+
 test('reviewer capacity skips degenerate intervals without leaking concurrency', () => {
   const rootDir = tempRoot();
   insertReviewerPass(rootDir, {

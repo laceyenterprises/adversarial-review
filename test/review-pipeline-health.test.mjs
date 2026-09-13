@@ -746,6 +746,10 @@ test('AFH fallback edge supermajority fires at threshold', () => {
   assert.equal(snapshot.afhFallbackSupermajority.dominant.reason, 'claude-launchctl-asuser-unavailable');
   assert.equal(snapshot.afhFallbackSupermajority.dominant.share, 0.8);
   assert.ok(findingCodes(snapshot).includes('review:afh_fallback_edge_supermajority'));
+  const finding = snapshot.findings.find(
+    (item) => item.code === 'review:afh_fallback_edge_supermajority',
+  );
+  assert.equal(finding.tier, 'ticket');
   const output = renderReviewPipelinePrometheus(snapshot);
   assert.match(
     output,

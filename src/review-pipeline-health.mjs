@@ -2619,7 +2619,7 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     const dominant = snapshot.afhFallbackSupermajority.dominant;
     findings.push(buildFinding({
       code: 'review:afh_fallback_edge_supermajority',
-      tier: 'page',
+      tier: 'ticket',
       subject: `AFH reviewer fallback edge ${dominant.edge} carries ${Math.round(dominant.share * 100)}% of selections`,
       message: (
         `${dominant.count}/${snapshot.afhFallbackSupermajority.totalSelections} reviewer selections in ` +

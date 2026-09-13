@@ -39,12 +39,6 @@ The Grafana dashboard lives at
   `transient-backoff` for HTTP 529/backend capacity signals, while
   `quota-exhausted` appears as `quota-hold` until the stored provider reset
   time or fallback window clears.
-- `review_pipeline_afh_fallback_edge_share`: windowed share of reviewer
-  selections carried by each AFH reviewer fallback edge, labelled with
-  `edge`, `from`, `to`, `reason`, and `window`.
-- `review_pipeline_afh_fallback_supermajority_active`: 1 when one AFH reviewer
-  fallback edge carries at least the configured supermajority of reviewer
-  selections in the window.
 - `review_pipeline_outage_active`: 1 when the outage controller is preserving
   reviewer attempt budget for currently classified transient infrastructure
   failures.
@@ -128,6 +122,15 @@ The Grafana dashboard lives at
 - `review_pipeline_sentinel_finding_active`: 1 when a finding code is currently
   firing, 0 after it clears.
 
+### Scrape-Only Metrics
+
+- `review_pipeline_afh_fallback_edge_share`: windowed share of reviewer
+  selections carried by each AFH reviewer fallback edge, labelled with
+  `edge`, `from`, `to`, `reason`, and `window`.
+- `review_pipeline_afh_fallback_supermajority_active`: 1 when one AFH reviewer
+  fallback edge carries at least the configured supermajority of reviewer
+  selections in the window.
+
 ## Reviewer Lane Controls
 
 - `watcher.review_lane_first_pass_burst_limit` (default `2`, canonical env
@@ -136,11 +139,10 @@ The Grafana dashboard lives at
   rereview gets the next lane slot. Skipped admissions such as
   `head-dispatch-lease-held`, `already-reviewed-head`, or
   `memory-admission-deferred` do not spend or reset the burst budget.
-- Keychain-mode Claude reviewer runtime probes use the scoped helper installed
-  by `scripts/install-claude-reviewer-runtime-probe-helper.sh` at
-  `/usr/local/libexec/agent-os/claude-reviewer-runtime-probe`. Broker-mode
-  Claude reviewer launches bypass launchctl, so the AFH runtime probe reports
-  `claude-broker-transport-no-launchctl` and does not require this helper.
+- Keychain-mode Claude reviewer runtime probes use the same unprivileged
+  `launchctl asuser <uid> /usr/bin/true` primitive as reviewer spawn.
+  Broker-mode Claude reviewer launches bypass launchctl, so the AFH runtime
+  probe reports `claude-broker-transport-no-launchctl`.
 
 ## Sentinel Findings
 
@@ -155,7 +157,7 @@ Its action headline is `Reviews stalled — restore reviewer dispatch`.
 | `review:reviewer_death_rate_high` | failed reviewer attempts are >50% of completed+failed attempts over 1h, with at least 3 completed+failed attempts; `running` and `cancelled` are excluded from the denominator | ticket | the settled-attempt window falls below threshold or the minimum-attempt guard |
 | `review:unknown_failure_rate_high` | unknown-classified failures are >30% of failures over 15m, with at least 5 failures and at least 2 distinct PRs contributing unknown failures | ticket | the failure window falls back to threshold or below, the sample floor is no longer met, or unknown failures collapse to fewer than 2 PRs |
 | `review:reviewer_degradation_active` | at least one PR is currently held by `provider-overloaded` transient backoff or `quota-exhausted` quota hold | ticket | no active provider-overload backoff or quota hold remains |
-| `review:afh_fallback_edge_supermajority` | one AFH reviewer fallback edge carries >=80% of reviewer selections over 1h with at least 5 selections, including the edge and grounding reason | ticket | the dominant edge falls below threshold, the sample floor is no longer met, or AFH returns to the primary reviewer |
+| `review:afh_fallback_edge_supermajority` | one AFH reviewer fallback edge carries >=80% of reviewer selections over 1h with at least 5 selections and 2 distinct PRs, including the edge and grounding reason | ticket | the dominant edge falls below threshold, the sample floor is no longer met, the distinct-PR floor is no longer met, or AFH returns to the primary reviewer |
 | `review:terminal_review_failure_active` | at least one open PR has terminal reviewer failure evidence in `reviewed_prs` | ticket | the failed review row is retriggered, remediated, or the PR leaves the open population |
 | `review:queue_starvation` | oldest pending first-pass row is >10m old | ticket | no pending row exceeds the age threshold |
 | `review:rereview_ci_blocked` | one or more open re-reviews are parked at `review_status='ci-blocked'` because external CI failed and no remediation job exists to requeue; same-head CI probes are backoff-gated | ticket | the PR head moves, CI turns green, remediation is requeued, or the PR leaves the open population |
@@ -205,6 +207,8 @@ All thresholds are configurable through environment variables:
   (default `0.80`)
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_AFH_FALLBACK_SUPERMAJORITY_MIN_SELECTIONS`
   (default `5`)
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_AFH_FALLBACK_SUPERMAJORITY_DISTINCT_PR_FLOOR`
+  (default `2`)
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_AFH_FALLBACK_SUPERMAJORITY_WINDOW_MS`
   (default `3600000`)
 - `REVIEW_UNKNOWN_RATE_THRESHOLD`

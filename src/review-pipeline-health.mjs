@@ -32,6 +32,7 @@ const MIN_REVIEW_UNKNOWN_RATE_SAMPLE_FLOOR = 3;
 const DEFAULT_REVIEW_UNKNOWN_RATE_DISTINCT_PR_FLOOR = 2;
 const DEFAULT_AFH_FALLBACK_SUPERMAJORITY_THRESHOLD = 0.80;
 const DEFAULT_AFH_FALLBACK_SUPERMAJORITY_MIN_SELECTIONS = 5;
+const DEFAULT_AFH_FALLBACK_SUPERMAJORITY_DISTINCT_PR_FLOOR = 2;
 const DEFAULT_AFH_FALLBACK_SUPERMAJORITY_WINDOW_MS = 60 * 60 * 1000;
 // How long a PR may sit WAITING for its first-pass review before that is a
 // finding.
@@ -419,6 +420,12 @@ function parseNumber(value, fallback) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function parseUnitIntervalThreshold(value, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.min(1, parsed);
+}
+
 function parsePositiveInteger(value, fallback) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
@@ -479,7 +486,7 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
       DEFAULT_REVIEW_UNKNOWN_RATE_DISTINCT_PR_FLOOR,
       1
     ),
-    afhFallbackSupermajorityThreshold: parseNumber(
+    afhFallbackSupermajorityThreshold: parseUnitIntervalThreshold(
       overrides.afhFallbackSupermajorityThreshold
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_AFH_FALLBACK_SUPERMAJORITY_THRESHOLD,
       DEFAULT_AFH_FALLBACK_SUPERMAJORITY_THRESHOLD
@@ -488,6 +495,12 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
       overrides.afhFallbackSupermajorityMinSelections
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_AFH_FALLBACK_SUPERMAJORITY_MIN_SELECTIONS,
       DEFAULT_AFH_FALLBACK_SUPERMAJORITY_MIN_SELECTIONS
+    ),
+    afhFallbackSupermajorityDistinctPrFloor: parseIntegerAtLeast(
+      overrides.afhFallbackSupermajorityDistinctPrFloor
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_AFH_FALLBACK_SUPERMAJORITY_DISTINCT_PR_FLOOR,
+      DEFAULT_AFH_FALLBACK_SUPERMAJORITY_DISTINCT_PR_FLOOR,
+      1
     ),
     afhFallbackSupermajorityWindowMs: parsePositiveInteger(
       overrides.afhFallbackSupermajorityWindowMs
@@ -1201,7 +1214,7 @@ function summarizeAfhFallbackSupermajority(db, { nowMs, config }) {
   const cutoff = new Date(cutoffMs).toISOString();
   const rows = safeAll(
     db,
-    `SELECT metadata_json
+    `SELECT repo, pr_number, metadata_json
        FROM reviewer_passes
       WHERE started_at >= ?
         AND status != 'abandoned'
@@ -1214,13 +1227,21 @@ function summarizeAfhFallbackSupermajority(db, { nowMs, config }) {
     const edge = normalizeAfhFallbackEdge(row);
     if (!edge) continue;
     const key = `${edge.edge}\n${edge.reason}`;
-    const current = byEdgeReason.get(key) || { ...edge, count: 0 };
+    const current = byEdgeReason.get(key) || { ...edge, count: 0, prKeys: new Set() };
     current.count += 1;
+    if (row.repo && row.pr_number !== null && row.pr_number !== undefined) {
+      current.prKeys.add(`${row.repo}#${row.pr_number}`);
+    }
     byEdgeReason.set(key, current);
   }
   const edges = Array.from(byEdgeReason.values())
     .map((entry) => ({
-      ...entry,
+      edge: entry.edge,
+      from: entry.from,
+      to: entry.to,
+      reason: entry.reason,
+      count: entry.count,
+      distinctPrs: entry.prKeys.size,
       share: totalSelections > 0 ? entry.count / totalSelections : 0,
     }))
     .sort((left, right) => right.count - left.count || left.edge.localeCompare(right.edge));
@@ -1229,6 +1250,7 @@ function summarizeAfhFallbackSupermajority(db, { nowMs, config }) {
   const active = Boolean(
     dominant
     && totalSelections >= config.afhFallbackSupermajorityMinSelections
+    && dominant.distinctPrs >= config.afhFallbackSupermajorityDistinctPrFloor
     && dominant.share >= threshold
   );
   return {
@@ -1236,6 +1258,7 @@ function summarizeAfhFallbackSupermajority(db, { nowMs, config }) {
     windowMs: config.afhFallbackSupermajorityWindowMs,
     threshold,
     minSelections: config.afhFallbackSupermajorityMinSelections,
+    distinctPrFloor: config.afhFallbackSupermajorityDistinctPrFloor,
     totalSelections,
     dominant,
     edges,
@@ -2623,11 +2646,12 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
       subject: `AFH reviewer fallback edge ${dominant.edge} carries ${Math.round(dominant.share * 100)}% of selections`,
       message: (
         `${dominant.count}/${snapshot.afhFallbackSupermajority.totalSelections} reviewer selections in ` +
-        `the window used AFH edge ${dominant.edge} because ${dominant.reason}.`
+        `the window used AFH edge ${dominant.edge} across ${dominant.distinctPrs} distinct PR(s) ` +
+        `because ${dominant.reason}.`
       ),
       evidence: [
         `reviews.db reviewer_passes window=${snapshot.afhFallbackSupermajority.windowMs}ms`,
-        `edge=${dominant.edge} share=${dominant.share} reason=${dominant.reason}`,
+        `edge=${dominant.edge} share=${dominant.share} distinctPrs=${dominant.distinctPrs} reason=${dominant.reason}`,
       ],
       recommendedAction:
         'Treat a sustained dominant fallback edge as load-bearing, not merely successful failover. Inspect AFH grounding reason and primary reviewer transport before the fallback provider saturates.',
@@ -3320,6 +3344,7 @@ function collectReviewPipelineHealth({
           windowMs: config.afhFallbackSupermajorityWindowMs,
           threshold: config.afhFallbackSupermajorityThreshold,
           minSelections: config.afhFallbackSupermajorityMinSelections,
+          distinctPrFloor: config.afhFallbackSupermajorityDistinctPrFloor,
           totalSelections: 0,
           dominant: null,
           edges: [],

@@ -758,6 +758,52 @@ test('AFH fallback edge supermajority fires at threshold', () => {
   assert.match(output, /^review_pipeline_afh_fallback_supermajority_active 1$/m);
 });
 
+test('AFH fallback edge supermajority requires a distinct PR floor', () => {
+  const rootDir = tempRoot();
+  for (let i = 0; i < 5; i += 1) {
+    insertReviewerPass(rootDir, {
+      prNumber: 981,
+      attemptNumber: i + 1,
+      passKind: i % 2 === 0 ? 'first-pass' : 'rereview',
+      status: 'completed',
+      startedAt: `2026-05-25T17:${10 + i}:00.000Z`,
+      endedAt: `2026-05-25T17:${11 + i}:00.000Z`,
+      metadata: {
+        afhReviewerFallback: {
+          fromReviewerModel: 'claude',
+          toReviewerModel: 'gemini',
+          reason: 'claude-launchctl-asuser-unavailable',
+        },
+      },
+    });
+  }
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+
+  assert.equal(snapshot.afhFallbackSupermajority.totalSelections, 5);
+  assert.equal(snapshot.afhFallbackSupermajority.dominant.distinctPrs, 1);
+  assert.equal(snapshot.afhFallbackSupermajority.distinctPrFloor, 2);
+  assert.equal(snapshot.afhFallbackSupermajority.active, false);
+  assert.ok(!findingCodes(snapshot).includes('review:afh_fallback_edge_supermajority'));
+  assert.match(renderReviewPipelinePrometheus(snapshot), /^review_pipeline_afh_fallback_supermajority_active 0$/m);
+});
+
+test('AFH fallback edge supermajority bounds the configured threshold', () => {
+  const high = collectReviewPipelineHealth({
+    rootDir: tempRoot(),
+    now: () => new Date(NOW),
+    config: { afhFallbackSupermajorityThreshold: 1.5 },
+  });
+  assert.equal(high.config.afhFallbackSupermajorityThreshold, 1);
+
+  const low = collectReviewPipelineHealth({
+    rootDir: tempRoot(),
+    now: () => new Date(NOW),
+    config: { afhFallbackSupermajorityThreshold: -0.1 },
+  });
+  assert.equal(low.config.afhFallbackSupermajorityThreshold, 0.8);
+});
+
 test('AFH fallback edge supermajority stays quiet below threshold', () => {
   const rootDir = tempRoot();
   for (let i = 0; i < 3; i += 1) {

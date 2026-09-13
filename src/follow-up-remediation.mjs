@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -115,6 +115,7 @@ import { validateStartupDeliveryIdentity } from './adapters/comms/github-pr-comm
 import { applyPreSpawnLifecycleGate } from './follow-up-stuck-claim-sweep.mjs';
 import { detectQuotaExhaustion, parseQuotaResetAt } from './quota-exhaustion.mjs';
 import { remediationWorkerClassFallback } from './remediation-worker-class-fallback.mjs';
+import { OPERATIONAL_BLOCKER_TITLES } from './kernel/remediation-reply.mjs';
 import {
   DEFAULT_REPLIES_ROOT,
   HQ_REMEDIATION_DISPATCH_TRIGGER,
@@ -204,6 +205,11 @@ const REMEDIATION_LEGACY_UNSTAGE_COMMANDS = [
   'git rm --cached -r -- .adversarial-follow-up/ 2>/dev/null || true',
 ];
 const WORKSPACE_ARTIFACT_EXCLUDE_ENTRY = '.adversarial-follow-up/';
+const RESCUE_BUNDLE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const RESCUE_BUNDLE_MAX_TOTAL_BYTES = 256 * 1024 * 1024;
+const AUTH_OPERATIONAL_BLOCKER_TITLES = new Set(
+  ['missing-auth', 'auth-failure'].filter((title) => OPERATIONAL_BLOCKER_TITLES.has(title))
+);
 
 function parseBooleanEnvFlag(value) {
   const normalized = String(value ?? '').trim().toLowerCase();
@@ -1514,12 +1520,80 @@ function replyHasOperationalBlocker(reply, category = null) {
   });
 }
 
+function replyHasAuthOperationalBlocker(reply) {
+  const blockers = Array.isArray(reply?.operationalBlockers) ? reply.operationalBlockers : [];
+  return blockers.some((blocker) => {
+    const title = String(blocker?.title || '').trim().toLowerCase();
+    return AUTH_OPERATIONAL_BLOCKER_TITLES.has(title);
+  });
+}
+
 function sanitizeRescueComponent(value, fallback) {
+  // The allowlist filter collapses separators, so the result is one safe path component.
   return String(value || fallback || 'unknown')
     .trim()
     .replace(/[^A-Za-z0-9_.-]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 120) || fallback;
+}
+
+function pruneRemediationRescueBundles({
+  rescueRoot,
+  nowMs = Date.now(),
+  maxAgeMs = RESCUE_BUNDLE_MAX_AGE_MS,
+  maxTotalBytes = RESCUE_BUNDLE_MAX_TOTAL_BYTES,
+  log = console,
+} = {}) {
+  let entries = [];
+  try {
+    entries = readdirSync(rescueRoot, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith('.bundle'))
+      .map((entry) => {
+        const bundlePath = join(rescueRoot, entry.name);
+        const stat = statSync(bundlePath);
+        return { bundlePath, size: stat.size, mtimeMs: stat.mtimeMs };
+      });
+  } catch (err) {
+    log?.warn?.(`[follow-up-remediation] rescue bundle retention scan failed: ${err?.message || err}`);
+    return { scanned: 0, removed: 0, bytesRemoved: 0, error: err?.message || String(err) };
+  }
+
+  let removed = 0;
+  let bytesRemoved = 0;
+  const removeEntry = (entry) => {
+    try {
+      rmSync(entry.bundlePath, { force: true });
+      removed += 1;
+      bytesRemoved += entry.size || 0;
+      return true;
+    } catch (err) {
+      log?.warn?.(
+        `[follow-up-remediation] rescue bundle retention delete failed for ${entry.bundlePath}: ` +
+        `${err?.message || err}`
+      );
+      return false;
+    }
+  };
+
+  let survivors = [];
+  for (const entry of entries) {
+    if (maxAgeMs > 0 && nowMs - entry.mtimeMs > maxAgeMs) {
+      removeEntry(entry);
+    } else {
+      survivors.push(entry);
+    }
+  }
+
+  if (maxTotalBytes > 0) {
+    let totalBytes = survivors.reduce((sum, entry) => sum + (entry.size || 0), 0);
+    survivors = survivors.sort((left, right) => left.mtimeMs - right.mtimeMs);
+    for (const entry of survivors) {
+      if (totalBytes <= maxTotalBytes) break;
+      if (removeEntry(entry)) totalBytes -= entry.size || 0;
+    }
+  }
+
+  return { scanned: entries.length, removed, bytesRemoved };
 }
 
 async function preserveRemediationHeadBundle({
@@ -1545,8 +1619,9 @@ async function preserveRemediationHeadBundle({
     }
   }
   const rescueRoot = join(resolvedHqRoot || rootDir, 'remediation-rescue');
-  mkdirSync(rescueRoot, { recursive: true });
   try {
+    mkdirSync(rescueRoot, { recursive: true });
+    pruneRemediationRescueBundles({ rescueRoot, nowMs: Date.parse(observedAt), log });
     const { stdout } = await execFileImpl('git', ['rev-parse', 'HEAD^{commit}'], {
       cwd: workspaceDir,
       maxBuffer: 1024 * 1024,
@@ -1556,13 +1631,13 @@ async function preserveRemediationHeadBundle({
       return { attempted: true, ok: false, reason: 'head-not-a-commit', observedAt };
     }
     const stem = [
-      sanitizeRescueComponent(job?.repo, 'repo').replace(/\//g, '-'),
+      sanitizeRescueComponent(job?.repo, 'repo'),
       sanitizeRescueComponent(job?.prNumber, 'pr'),
       sanitizeRescueComponent(job?.jobId, 'job'),
       headSha.slice(0, 12),
     ].join('-');
     const bundlePath = join(rescueRoot, `${stem}.bundle`);
-    await execFileImpl('git', ['bundle', 'create', bundlePath, 'HEAD'], {
+    await execFileImpl('git', ['bundle', 'create', bundlePath, 'HEAD', '--not', '--remotes'], {
       cwd: workspaceDir,
       maxBuffer: 10 * 1024 * 1024,
     });
@@ -2929,7 +3004,7 @@ async function reconcileFollowUpJob({
             rootDir,
             job,
             workspaceDir: paths.workspaceDir,
-            reason: replyHasOperationalBlocker(parsedReply, 'github-auth')
+            reason: replyHasAuthOperationalBlocker(parsedReply)
               ? 'github-auth-operational-blocker'
               : 'operational-blocker',
             now,
@@ -2965,6 +3040,7 @@ async function reconcileFollowUpJob({
         },
         completion: completionMetadata,
         remediationReply,
+        operationalBlockers: parsedReply?.operationalBlockers || [],
         reReview: rereview,
         rescue,
         stopReason,
@@ -3001,7 +3077,7 @@ async function reconcileFollowUpJob({
             rootDir,
             job,
             workspaceDir: paths.workspaceDir,
-            reason: replyHasOperationalBlocker(parsedReply, 'github-auth')
+            reason: replyHasAuthOperationalBlocker(parsedReply)
               ? 'github-auth-operational-blocker'
               : 'operational-blocker',
             now,
@@ -3033,6 +3109,7 @@ async function reconcileFollowUpJob({
         },
         completion: completionMetadata,
         remediationReply,
+        operationalBlockers: parsedReply?.operationalBlockers || [],
         reReview: rereview,
         rescue,
         stopReason: stopReasonText,

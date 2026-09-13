@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -15,15 +15,29 @@ test('validated unpushed remediation commit is recoverable after worktree remova
   const rootDir = mkdtempSync(join(tmpdir(), 'remediation-rescue-root-'));
   const hqRoot = mkdtempSync(join(tmpdir(), 'remediation-rescue-hq-'));
   const workspaceDir = mkdtempSync(join(tmpdir(), 'remediation-rescue-worktree-'));
+  const remoteDir = mkdtempSync(join(tmpdir(), 'remediation-rescue-remote-'));
   const restoreDir = mkdtempSync(join(tmpdir(), 'remediation-rescue-restore-'));
   try {
     git(workspaceDir, ['init']);
     git(workspaceDir, ['config', 'user.name', 'Test Remediator']);
     git(workspaceDir, ['config', 'user.email', 'test-remediator@example.invalid']);
+    writeFileSync(join(workspaceDir, 'base.txt'), 'reviewed base\n', 'utf8');
+    git(workspaceDir, ['add', 'base.txt']);
+    git(workspaceDir, ['commit', '-m', 'reviewed base']);
+    git(remoteDir, ['init', '--bare']);
+    git(workspaceDir, ['remote', 'add', 'origin', remoteDir]);
+    git(workspaceDir, ['push', '-u', 'origin', 'HEAD:main']);
+
     writeFileSync(join(workspaceDir, 'fix.txt'), 'validated fix\n', 'utf8');
     git(workspaceDir, ['add', 'fix.txt']);
     git(workspaceDir, ['commit', '-m', 'validated remediation']);
     const headSha = git(workspaceDir, ['rev-parse', 'HEAD']);
+    const rescueRoot = join(hqRoot, 'remediation-rescue');
+    mkdirSync(rescueRoot, { recursive: true });
+    const staleBundle = join(rescueRoot, 'stale.bundle');
+    writeFileSync(staleBundle, 'stale full-history bundle\n', 'utf8');
+    const staleTime = new Date('2026-09-01T20:00:00.000Z');
+    utimesSync(staleBundle, staleTime, staleTime);
 
     const rescue = await preserveRemediationHeadBundle({
       rootDir,
@@ -41,16 +55,21 @@ test('validated unpushed remediation commit is recoverable after worktree remova
     assert.equal(rescue.ok, true);
     assert.equal(rescue.headSha, headSha);
     assert.equal(existsSync(rescue.bundlePath), true);
+    assert.equal(existsSync(staleBundle), false);
 
     rmSync(workspaceDir, { recursive: true, force: true });
     git(restoreDir, ['init']);
+    git(restoreDir, ['remote', 'add', 'origin', remoteDir]);
+    git(restoreDir, ['fetch', 'origin', 'main']);
     git(restoreDir, ['fetch', rescue.bundlePath, headSha]);
     const restoredSha = git(restoreDir, ['rev-parse', 'FETCH_HEAD^{commit}']);
     assert.equal(restoredSha, headSha);
+    assert.equal(git(restoreDir, ['rev-list', '--count', 'FETCH_HEAD', '--not', 'origin/main']), '1');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
     rmSync(hqRoot, { recursive: true, force: true });
     rmSync(workspaceDir, { recursive: true, force: true });
+    rmSync(remoteDir, { recursive: true, force: true });
     rmSync(restoreDir, { recursive: true, force: true });
   }
 });

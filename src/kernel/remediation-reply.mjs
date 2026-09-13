@@ -954,6 +954,7 @@ function parseRemediationReply(raw, options = {}) {
 
 export {
   PUBLIC_REPLY_MAX_CHARS,
+  OPERATIONAL_BLOCKER_TITLES,
   REMEDIATION_REPLY_KIND,
   REMEDIATION_REPLY_SCHEMA_VERSION,
   assertNoPlaceholderText,

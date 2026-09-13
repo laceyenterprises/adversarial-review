@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { markFollowUpJobStopped } from '../src/follow-up-jobs.mjs';
 import { collectReviewPipelineHealth } from '../src/review-pipeline-health.mjs';
 import { DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS } from '../src/reviewer-lease.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
@@ -181,45 +182,52 @@ test('stuck retry-loop check does not throw and emits no finding when the DB is 
 
 test('stopped remediation operational blockers are surfaced by category', () => {
   const rootDir = tempRoot();
-  const stoppedDir = path.join(rootDir, 'data', 'follow-up-jobs', 'stopped');
-  mkdirSync(stoppedDir, { recursive: true });
-  writeFileSync(path.join(stoppedDir, 'job-auth.json'), `${JSON.stringify({
+  const pendingDir = path.join(rootDir, 'data', 'follow-up-jobs', 'pending');
+  mkdirSync(pendingDir, { recursive: true });
+  const jobPath = path.join(pendingDir, 'job-auth.json');
+  writeFileSync(jobPath, `${JSON.stringify({
     jobId: 'job-auth',
     repo: REPO,
     prNumber: 6755,
-    status: 'stopped',
-    stoppedAt: '2026-08-11T17:00:00.000Z',
+    status: 'pending',
     remediationPlan: {
-      stop: {
-        code: 'no-progress',
-        reason: 'Human intervention required.',
+      currentRound: 2,
+      maxRounds: 3,
+      rounds: [{ round: 2, state: 'in-progress' }],
+    },
+  }, null, 2)}\n`, 'utf8');
+
+  const stopped = markFollowUpJobStopped({
+    rootDir,
+    jobPath,
+    stoppedAt: '2026-08-11T17:00:00.000Z',
+    stopCode: 'no-progress',
+    stopReason: 'Human intervention required.',
+    operationalBlockers: [
+      {
+        title: 'auth-failure',
+        finding: 'GitHub OAuth failed while publishing remediation.',
+        reasoning: 'The worker could not fetch or push the current PR branch.',
       },
-    },
-    parsedReply: {
-      outcome: 'blocked',
-      operationalBlockers: [
-        {
-          category: 'github-auth',
-          summary: 'The worker could not fetch or push the current PR branch.',
-        },
-      ],
-    },
+    ],
     rescue: {
       kind: 'git-bundle',
       bundlePath: '/tmp/rescue/job-auth.bundle',
       headSha: 'bb3cd479c0000000000000000000000000000000',
     },
-  }, null, 2)}\n`, 'utf8');
+  });
+  assert.equal(stopped.job.status, 'stopped');
+  assert.equal(stopped.job.operationalBlockers[0].title, 'auth-failure');
 
   const snapshot = collect(rootDir);
   assert.equal(snapshot.operationalBlockers.count, 1);
   assert.deepEqual(snapshot.operationalBlockers.byCategory, [
-    { category: 'github-auth', count: 1 },
+    { category: 'auth-failure', count: 1 },
   ]);
 
   const finding = snapshot.findings.find((f) => f.code === 'review:operational_blocker_stopped_round');
   assert.ok(finding);
-  assert.match(finding.message, /github-auth/);
-  assert.ok(finding.evidence.some((line) => line.includes('job-auth') && line.includes('github-auth')));
+  assert.match(finding.message, /auth-failure/);
+  assert.ok(finding.evidence.some((line) => line.includes('job-auth') && line.includes('auth-failure')));
   assert.equal(finding.details.oldest.rescue.bundlePath, '/tmp/rescue/job-auth.bundle');
 });

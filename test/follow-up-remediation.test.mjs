@@ -10553,6 +10553,7 @@ test('reconcileFollowUpJob posts a public PR comment on no-progress stop with th
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
   const outputPath = path.join(artifactDir, 'codex-last-message.md');
   const { hqRoot, replyPath } = prepareCanonicalReply(rootDir, claimed.job);
   writeFileSync(outputPath, 'Worker did the thing.\n', 'utf8');
@@ -10562,10 +10563,15 @@ test('reconcileFollowUpJob posts a public PR comment on no-progress stop with th
     jobId: claimed.job.jobId,
     repo: claimed.job.repo,
     prNumber: claimed.job.prNumber,
-    outcome: 'completed',
+    outcome: 'blocked',
     summary: 'Tightened token refresh handling.',
     validation: ['npm test'],
     blockers: [],
+    operationalBlockers: [{
+      title: 'auth-failure',
+      finding: 'GitHub OAuth failed while pushing the remediation branch.',
+      reasoning: 'gh auth status reported an expired OAuth token.',
+    }],
     reReview: { requested: false, reason: null },
   }), 'utf8');
 
@@ -10584,6 +10590,7 @@ test('reconcileFollowUpJob posts a public PR comment on no-progress stop with th
   });
 
   const commentCalls = [];
+  const bundleCalls = [];
   const result = await withHqRootEnv(hqRoot, async () => reconcileFollowUpJob({
     rootDir,
     job: spawned.job,
@@ -10595,9 +10602,22 @@ test('reconcileFollowUpJob posts a public PR comment on no-progress stop with th
       commentCalls.push(args);
       return { posted: true };
     },
+    execFileImpl: async (command, args) => {
+      if (command === 'git' && args[0] === 'rev-parse') {
+        return { stdout: 'bb3cd479c0000000000000000000000000000000\n', stderr: '' };
+      }
+      if (command === 'git' && args[0] === 'bundle') {
+        bundleCalls.push(args);
+        return { stdout: '', stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    },
   }));
 
   assert.equal(result.action, 'stopped');
+  assert.equal(result.job.operationalBlockers[0].title, 'auth-failure');
+  assert.equal(result.job.rescue.reason, 'github-auth-operational-blocker');
+  assert.deepEqual(bundleCalls[0].slice(0, 6), ['bundle', 'create', result.job.rescue.bundlePath, 'HEAD', '--not', '--remotes']);
   assert.equal(commentCalls.length, 1, 'reconcile must post exactly one comment per terminal transition');
   assert.equal(commentCalls[0].repo, 'laceyenterprises/clio');
   assert.equal(commentCalls[0].prNumber, 50);

@@ -2919,7 +2919,7 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
         + `job=${round.jobId || 'unknown'} categories=${round.categories.join(',')} `
         + `stoppedAt=${round.stoppedAt || 'unknown'} rescue=${round.rescue?.bundlePath || round.rescue?.ref || 'none'}`
       )),
-      recommendedAction: 'Treat stopped operational blockers as fleet work, not just PR comments. For github-auth, inspect whether the job recorded a rescue bundle/ref and resume from it after credential repair.',
+      recommendedAction: 'Treat stopped operational blockers as fleet work, not just PR comments. For missing-auth/auth-failure, inspect whether the job recorded a rescue bundle/ref and resume from it after credential repair.',
       observedAt,
       details: snapshot.operationalBlockers,
     }));

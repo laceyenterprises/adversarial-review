@@ -2835,6 +2835,38 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }));
   }
 
+  const rereviewLaneShare = snapshot.ttm.rereviewLaneShare;
+  if (rereviewLaneShare?.monopolist) {
+    const top = rereviewLaneShare.monopolist;
+    const sharePct = Math.round(top.share * 100);
+    findings.push(buildFinding({
+      code: 'review:rereview_lane_unfair_share',
+      tier: 'ticket',
+      subject: `${top.repo}#${top.prNumber} consumed ${top.count}/${rereviewLaneShare.totalPasses} recent re-review slot(s)`,
+      message: `${top.repo}#${top.prNumber} consumed ${sharePct}% of re-review starts in the last ${Math.round(rereviewLaneShare.windowMinutes)}m (${top.count}/${rereviewLaneShare.totalPasses}). The lane is active, but one churning PR can starve older queued re-review requests unless selection drains oldest-first.`,
+      evidence: rereviewLaneShare.topPrs.slice(0, 5).map((entry) => (
+        `reviews.db rereview_lane ${entry.repo}#${entry.prNumber} `
+        + `count=${entry.count}/${rereviewLaneShare.totalPasses} `
+        + `share=${Math.round(entry.share * 100)}% `
+        + `first_started=${entry.firstStartedAt || 'none'} `
+        + `latest_started=${entry.latestStartedAt || 'none'} `
+        + `latest_status=${entry.latestStatus || 'unknown'} `
+        + `latest_verdict=${entry.latestVerdict || 'unknown'}`
+      )),
+      recommendedAction: 'Check whether the named PR is cycling on the same finding, and confirm re-review selection is serving pending rows by oldest rereview_requested_at before allowing that PR another turn.',
+      observedAt,
+      details: {
+        progressClass: 'stuck',
+        windowMinutes: rereviewLaneShare.windowMinutes,
+        threshold: rereviewLaneShare.threshold,
+        minPasses: rereviewLaneShare.minPasses,
+        totalPasses: rereviewLaneShare.totalPasses,
+        monopolist: top,
+        topPrs: rereviewLaneShare.topPrs.slice(0, 10),
+      },
+    }));
+  }
+
   const terminalUnmerged = snapshot.ttm.flags.filter((flag) => flag.flagKind === 'terminal_but_unmerged');
   if (terminalUnmerged.length > 0) {
     // TREC-01: every flag here carries state='active' and mergedAt=null by

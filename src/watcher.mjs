@@ -345,7 +345,7 @@ import {
   DEFAULT_WATCHER_STALL_EXIT_CODE,
   DEFAULT_WATCHER_STALL_WATCHDOG_MS,
 } from './watcher-heartbeat.mjs';
-import { orderSubjectEntriesDiscoveryFirst } from './watcher-poll-fairness.mjs';
+import { orderSubjectEntriesDiscoveryFirst, orderSubjectEntriesRereviewOldestFirst } from './watcher-poll-fairness.mjs';
 import {
   createPollStarvationHandler,
   createPollStarvationRestartRequester,
@@ -1400,14 +1400,13 @@ async function pollOnce(
         compareWatcherWakeSubjectEntries(wakePayloadForPoll(), repoPath, a, b, compareReviewerDispatchCandidates)
       );
 
-    // WPS-01: a PR that has never been reviewed goes to the front of the tick —
-    // note the reviewer FIFO sort just above orders oldest-created FIRST, which
-    // puts a brand-new PR dead last. Rationale in watcher-poll-fairness.mjs.
+    // WPS-01: never-reviewed PRs go first; rationale in watcher-poll-fairness.mjs.
     subjectEntries = orderSubjectEntriesDiscoveryFirst(subjectEntries, {
       repoPath,
       logger: console,
       hasReviewRow: (entry) => Boolean('current' in entry ? entry.current : (entry.current = stmtGetReviewRow.get(repoPath, entry.prNumber))),
     });
+    subjectEntries = orderSubjectEntriesRereviewOldestFirst(subjectEntries, { repoPath, logger: console });
     await runDuplicateFamilyCensusForWatcher({ db, subjectEntries, repoPath, rootDir: ROOT, env: process.env });
     for (const subjectEntry of subjectEntries) {
       await processReviewSubject(subjectEntry, {

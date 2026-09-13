@@ -261,6 +261,59 @@ export function orderSubjectEntriesDiscoveryFirst(entries, {
   return [...undiscovered, ...known];
 }
 
+function pendingRereviewRequestedAt(entry) {
+  const row = entry?.current;
+  if (!row || row.review_status !== 'pending' || !row.rereview_requested_at) return null;
+  const requestedAtMs = Date.parse(String(row.rereview_requested_at));
+  return Number.isFinite(requestedAtMs) ? requestedAtMs : null;
+}
+
+/**
+ * Stable partition for within-lane re-review fairness.
+ *
+ * Pending re-review rows are reviewer work the pipeline has already promised.
+ * Walk them oldest-first so the queue drains FIFO and no job can be starved by
+ * a steady stream of fast remediation churn from one PR. Everything else keeps
+ * its incoming relative order, so first-pass discovery and posted-row handling
+ * retain their existing policy.
+ */
+export function orderSubjectEntriesRereviewOldestFirst(entries, {
+  repoPath = null,
+  logger = console,
+} = {}) {
+  if (!Array.isArray(entries) || entries.length === 0) return entries ?? [];
+
+  const rereviews = [];
+  const rest = [];
+  entries.forEach((entry, index) => {
+    const requestedAtMs = pendingRereviewRequestedAt(entry);
+    if (requestedAtMs === null) {
+      rest.push({ entry, index });
+      return;
+    }
+    rereviews.push({ entry, index, requestedAtMs });
+  });
+
+  if (rereviews.length <= 1) return entries;
+
+  rereviews.sort((a, b) => (
+    a.requestedAtMs - b.requestedAtMs
+    || a.index - b.index
+  ));
+  logger?.log?.(
+    `[watcher] re-review FIFO ordering${repoPath ? ` for ${repoPath}` : ''}: ` +
+      `${rereviews.length} pending re-review PR(s) ordered oldest-first (` +
+      rereviews
+        .map(({ entry }) => `#${entry?.prNumber}`)
+        .join(',') +
+      ')',
+  );
+  return [
+    ...rereviews.map(({ entry }) => entry),
+    ...rest.map(({ entry }) => entry),
+  ];
+}
+
 export function postedReviewHandlerKey(handler) {
   return `${handler?.repoPath ?? ''}#${handler?.prNumber ?? ''}`;
 }

@@ -3582,6 +3582,7 @@ test('assertClaudeOAuth retries bounded launchctl session failures', async () =>
       }
       return { stdout: '{"loggedIn":true}', stderr: '' };
     },
+    prepareClaudeOAuthEnvImpl: async () => ({ env: {}, transport: 'keychain' }),
     resolveClaudeLaunchctlUidImpl: async () => 501,
     platform: 'darwin',
     retryDelaysMs: [1, 2],

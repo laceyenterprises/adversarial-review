@@ -72,6 +72,7 @@ import {
   normalizeBuilderClass,
   normalizeReviewerModel,
 } from './adapters/subject/github-pr/routing.mjs';
+import { resolveClaudeReviewerOAuthTransport } from './claude-reviewer-oauth-transport.mjs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -87,8 +88,9 @@ export const AFH_LAST_RESORT_REVIEWER_MODEL = 'claude';
 export const CLAUDE_REVIEWER_RUNTIME_PROBE_TIMEOUT_MS = 2_000;
 export const CLAUDE_REVIEWER_RUNTIME_PROBE_RETRY_DELAYS_MS = Object.freeze([250, 750]);
 export const CLAUDE_REVIEWER_RUNTIME_GROUNDING_REASON = 'claude-launchctl-asuser-unavailable';
-const LAUNCHCTL = '/bin/launchctl';
-const TRUE_BIN = '/usr/bin/true';
+export const CLAUDE_REVIEWER_BROKER_TRANSPORT_REASON = 'claude-broker-transport-no-launchctl';
+export const CLAUDE_REVIEWER_RUNTIME_TRANSPORT_CONFIG_REASON = 'claude-runtime-probe-transport-config-invalid';
+const LAUNCHCTL_BIN = '/bin/launchctl';
 const AFH_QUOTA_ONLY_CACHE_KEY = 'quota-only';
 
 // Reviewer model → the provider whose OAuth quota gates whether that reviewer
@@ -137,7 +139,16 @@ function reviewerRuntimeProbeErrorText(error) {
   return text || String(error?.message || error || 'runtime probe failed');
 }
 
+function isClaudeLaunchctlAsuserUnavailableError(error) {
+  const text = reviewerRuntimeProbeErrorText(error).toLowerCase();
+  return (
+    /failed to get user context:\s*\d+:\s*operation not permitted/u.test(text) ||
+    /could not switch to audit session\s+\S+:\s*\d+:\s*operation not permitted/u.test(text)
+  );
+}
+
 function isTransientClaudeRuntimeProbeError(error) {
+  if (isClaudeLaunchctlAsuserUnavailableError(error)) return false;
   if (isTransientFleetQuotaStatusError(error)) return true;
   const text = reviewerRuntimeProbeErrorText(error).toLowerCase();
   return (
@@ -151,12 +162,26 @@ export async function probeClaudeReviewerRuntime({
   env = process.env,
   platform = process.platform,
   uid = null,
+  transport = null,
   timeoutMs = CLAUDE_REVIEWER_RUNTIME_PROBE_TIMEOUT_MS,
   retryDelaysMs = CLAUDE_REVIEWER_RUNTIME_PROBE_RETRY_DELAYS_MS,
   sleepImpl = sleep,
 } = {}) {
   if (claudeRuntimeProbeDisabled(env)) {
     return Object.freeze({ available: true, reason: 'claude-runtime-probe-disabled' });
+  }
+  let resolvedTransport;
+  try {
+    resolvedTransport = transport || resolveClaudeReviewerOAuthTransport(env);
+  } catch (err) {
+    return Object.freeze({
+      available: false,
+      reason: CLAUDE_REVIEWER_RUNTIME_TRANSPORT_CONFIG_REASON,
+      error: reviewerRuntimeProbeErrorText(err),
+    });
+  }
+  if (resolvedTransport === 'broker') {
+    return Object.freeze({ available: true, reason: CLAUDE_REVIEWER_BROKER_TRANSPORT_REASON });
   }
   if (platform !== 'darwin') {
     return Object.freeze({ available: true, reason: 'not-darwin' });
@@ -175,7 +200,7 @@ export async function probeClaudeReviewerRuntime({
   let lastError = null;
   for (let attemptIndex = 0; attemptIndex < attempts; attemptIndex += 1) {
     try {
-      await execFileImpl(LAUNCHCTL, ['asuser', String(runtimeUid), TRUE_BIN], {
+      await execFileImpl(LAUNCHCTL_BIN, ['asuser', String(runtimeUid), '/usr/bin/true'], {
         env,
         encoding: 'utf8',
         maxBuffer: 64 * 1024,
@@ -447,6 +472,7 @@ export async function readAfhReviewerGrounding({
       execFileImpl,
       env,
       uid: runtimeProbeUid,
+      transport: null,
       timeoutMs: claudeRuntimeProbeTimeoutMs,
       retryDelaysMs: claudeRuntimeProbeRetryDelaysMs,
       sleepImpl,

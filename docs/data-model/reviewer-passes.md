@@ -31,6 +31,7 @@ The `metadata_json` object keeps two different identifiers separate:
 | `launchRequestId` | Real worker-pool `launch_request_id` surfaced by the runtime adapter, or `null`. An adapter reattach/idempotency token must never be promoted into this field. |
 | `reattachToken` | Adapter-owned session, request, or idempotency handle used to resume the reviewer runtime. It is not launch provenance. |
 | `workerRunAttribution` | Durable resolution state for `worker_run_id`, described below. |
+| `afhReviewerFallback` | Present only when AFH reviewer fallback rewrites the selected reviewer for this pass. The object records `fromReviewerModel`, `toReviewerModel`, `reason`, `lastResort`, `builderClass`, `primaryProvider`, `primaryState`, `primaryHardGrounded`, `primarySoftGrounded`, and the ordered `considered[]` candidate audit so the posted pass can be traced back to the grounding decision that changed reviewer identity. |
 
 `workerRunAttribution.state` is one of:
 

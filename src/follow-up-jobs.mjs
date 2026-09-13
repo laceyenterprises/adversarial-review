@@ -2604,6 +2604,7 @@ function computeFollowUpJobStoppedState({
   reReview,
   completion,
   failure,
+  rescue,
   commentDelivery = null,
 }) {
   const currentRound = Number(currentJob?.remediationPlan?.currentRound || 0);
@@ -2627,6 +2628,7 @@ function computeFollowUpJobStoppedState({
     reReview: reReview ?? currentJob.reReview ?? null,
     completion: completion ?? currentJob.completion ?? null,
     failure: failure ?? currentJob.failure ?? null,
+    rescue: rescue ?? currentJob.rescue ?? null,
     remediationPlan: {
       ...(currentJob.remediationPlan || buildRemediationRoundPlan()),
       stopReason: stop.reason,
@@ -2645,6 +2647,7 @@ function computeFollowUpJobStoppedState({
       reReview: reReview ?? round.reReview ?? currentJob.reReview ?? null,
       completion: completion ?? round.completion ?? currentJob.completion ?? null,
       failure: failure ?? round.failure ?? currentJob.failure ?? null,
+      rescue: rescue ?? round.rescue ?? currentJob.rescue ?? null,
       stop,
     }));
   }
@@ -2672,6 +2675,7 @@ function markFollowUpJobStopped({
   reReview,
   completion,
   failure,
+  rescue,
   commentDelivery = null,
 }) {
   return moveTerminalJobRecord({
@@ -2691,6 +2695,7 @@ function markFollowUpJobStopped({
         reReview,
         completion,
         failure,
+        rescue,
         commentDelivery,
       });
 

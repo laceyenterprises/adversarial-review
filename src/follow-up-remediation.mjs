@@ -1502,6 +1502,97 @@ function buildRereviewResult({ requested, reason, outcome = null }) {
   };
 }
 
+function replyHasOperationalBlocker(reply, category = null) {
+  const blockers = Array.isArray(reply?.operationalBlockers) ? reply.operationalBlockers : [];
+  if (!category) return blockers.length > 0;
+  const expected = String(category).trim().toLowerCase();
+  return blockers.some((blocker) => {
+    const actual = String(
+      blocker?.category || blocker?.code || blocker?.kind || blocker?.name || blocker?.title || ''
+    ).trim().toLowerCase();
+    return actual === expected;
+  });
+}
+
+function sanitizeRescueComponent(value, fallback) {
+  return String(value || fallback || 'unknown')
+    .trim()
+    .replace(/[^A-Za-z0-9_.-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 120) || fallback;
+}
+
+async function preserveRemediationHeadBundle({
+  rootDir,
+  hqRoot = null,
+  job,
+  workspaceDir,
+  reason,
+  now = () => new Date().toISOString(),
+  execFileImpl = execFileAsync,
+  log = console,
+} = {}) {
+  if (!workspaceDir || !existsSync(join(workspaceDir, '.git'))) {
+    return { attempted: false, reason: 'missing-workspace-git' };
+  }
+  const observedAt = now();
+  let resolvedHqRoot = hqRoot;
+  if (!resolvedHqRoot) {
+    try {
+      resolvedHqRoot = resolveHqRoot(process.env, { requireExists: false });
+    } catch {
+      resolvedHqRoot = null;
+    }
+  }
+  const rescueRoot = join(resolvedHqRoot || rootDir, 'remediation-rescue');
+  mkdirSync(rescueRoot, { recursive: true });
+  try {
+    const { stdout } = await execFileImpl('git', ['rev-parse', 'HEAD^{commit}'], {
+      cwd: workspaceDir,
+      maxBuffer: 1024 * 1024,
+    });
+    const headSha = String(stdout || '').trim();
+    if (!/^[0-9a-f]{40}$/i.test(headSha)) {
+      return { attempted: true, ok: false, reason: 'head-not-a-commit', observedAt };
+    }
+    const stem = [
+      sanitizeRescueComponent(job?.repo, 'repo').replace(/\//g, '-'),
+      sanitizeRescueComponent(job?.prNumber, 'pr'),
+      sanitizeRescueComponent(job?.jobId, 'job'),
+      headSha.slice(0, 12),
+    ].join('-');
+    const bundlePath = join(rescueRoot, `${stem}.bundle`);
+    await execFileImpl('git', ['bundle', 'create', bundlePath, 'HEAD'], {
+      cwd: workspaceDir,
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    const rescue = {
+      attempted: true,
+      ok: true,
+      kind: 'git-bundle',
+      reason,
+      observedAt,
+      headSha,
+      bundlePath,
+      restoreHint: `git fetch ${bundlePath} ${headSha}`,
+    };
+    log?.warn?.(
+      `[follow-up-remediation] preserved unpushed remediation commit ${headSha.slice(0, 12)} ` +
+      `for ${job?.repo || 'unknown'}#${job?.prNumber || 'unknown'} at ${bundlePath}`
+    );
+    return rescue;
+  } catch (err) {
+    return {
+      attempted: true,
+      ok: false,
+      kind: 'git-bundle',
+      reason,
+      observedAt,
+      error: err?.message || String(err),
+    };
+  }
+}
+
 // Resolve the worker class (codex / claude-code) for a reconcile-time
 // comment. Must reuse the same canonical mapping consume uses
 // (`pickRemediationWorkerClass`), because the bot-token map only
@@ -2833,6 +2924,19 @@ async function reconcileFollowUpJob({
       const stopReason = stopCode === 'max-rounds-reached'
         ? `Remediation round ${currentRound || 1} finished without a durable re-review request and reached the max remediation rounds cap (${currentRound}/${maxRounds}); stopping the bounded loop.`
         : `No durable re-review request was recorded after remediation round ${currentRound || 1}; stopping to avoid a silent no-progress loop.`;
+      const rescue = replyHasOperationalBlocker(parsedReply)
+        ? await preserveRemediationHeadBundle({
+            rootDir,
+            job,
+            workspaceDir: paths.workspaceDir,
+            reason: replyHasOperationalBlocker(parsedReply, 'github-auth')
+              ? 'github-auth-operational-blocker'
+              : 'operational-blocker',
+            now,
+            execFileImpl,
+            log,
+          })
+        : null;
       // Pre-build commentDelivery from the projected stopped-job shape
       // (the actual stop metadata we'll record) so the body the
       // walker may later reconstruct from this owed stamp matches
@@ -2862,6 +2966,7 @@ async function reconcileFollowUpJob({
         completion: completionMetadata,
         remediationReply,
         reReview: rereview,
+        rescue,
         stopReason,
         commentDelivery: noProgressDelivery,
       });
@@ -2891,6 +2996,19 @@ async function reconcileFollowUpJob({
     if (rereviewBlocked) {
       const blockedReason = rereview.outcomeReason || rereview.status || 'rereview-blocked';
       const stopReasonText = `Worker requested re-review but the watcher refused the reset: ${blockedReason}. The PR's existing adversarial review verdict will not be replaced; human intervention required.`;
+      const rescue = replyHasOperationalBlocker(parsedReply)
+        ? await preserveRemediationHeadBundle({
+            rootDir,
+            job,
+            workspaceDir: paths.workspaceDir,
+            reason: replyHasOperationalBlocker(parsedReply, 'github-auth')
+              ? 'github-auth-operational-blocker'
+              : 'operational-blocker',
+            now,
+            execFileImpl,
+            log,
+          })
+        : null;
       const projectedStopJob = {
         ...job,
         status: 'stopped',
@@ -2916,6 +3034,7 @@ async function reconcileFollowUpJob({
         completion: completionMetadata,
         remediationReply,
         reReview: rereview,
+        rescue,
         stopReason: stopReasonText,
         commentDelivery: blockedDelivery,
       });
@@ -4433,6 +4552,7 @@ export {
   loadFollowUpPromptTemplate,
   prepareCodexRemediationStartupEnv,
   prepareWorkspaceForJob,
+  preserveRemediationHeadBundle,
   remediationWorkerGitIdentity,
   REMEDIATION_WORKER_IDENTITY_DEFAULTS,
   reconcileFollowUpJob,

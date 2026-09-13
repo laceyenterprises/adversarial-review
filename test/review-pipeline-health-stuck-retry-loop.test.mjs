@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -177,4 +177,49 @@ test('stuck retry-loop check does not throw and emits no finding when the DB is 
   assert.ok(!findingCodes(snapshot).includes('review:stuck_retry_loop'));
   assert.deepEqual(snapshot.stuckReviewLoops.prs, []);
   assert.equal(snapshot.stuckReviewLoops.cap, CAP);
+});
+
+test('stopped remediation operational blockers are surfaced by category', () => {
+  const rootDir = tempRoot();
+  const stoppedDir = path.join(rootDir, 'data', 'follow-up-jobs', 'stopped');
+  mkdirSync(stoppedDir, { recursive: true });
+  writeFileSync(path.join(stoppedDir, 'job-auth.json'), `${JSON.stringify({
+    jobId: 'job-auth',
+    repo: REPO,
+    prNumber: 6755,
+    status: 'stopped',
+    stoppedAt: '2026-08-11T17:00:00.000Z',
+    remediationPlan: {
+      stop: {
+        code: 'no-progress',
+        reason: 'Human intervention required.',
+      },
+    },
+    parsedReply: {
+      outcome: 'blocked',
+      operationalBlockers: [
+        {
+          category: 'github-auth',
+          summary: 'The worker could not fetch or push the current PR branch.',
+        },
+      ],
+    },
+    rescue: {
+      kind: 'git-bundle',
+      bundlePath: '/tmp/rescue/job-auth.bundle',
+      headSha: 'bb3cd479c0000000000000000000000000000000',
+    },
+  }, null, 2)}\n`, 'utf8');
+
+  const snapshot = collect(rootDir);
+  assert.equal(snapshot.operationalBlockers.count, 1);
+  assert.deepEqual(snapshot.operationalBlockers.byCategory, [
+    { category: 'github-auth', count: 1 },
+  ]);
+
+  const finding = snapshot.findings.find((f) => f.code === 'review:operational_blocker_stopped_round');
+  assert.ok(finding);
+  assert.match(finding.message, /github-auth/);
+  assert.ok(finding.evidence.some((line) => line.includes('job-auth') && line.includes('github-auth')));
+  assert.equal(finding.details.oldest.rescue.bundlePath, '/tmp/rescue/job-auth.bundle');
 });

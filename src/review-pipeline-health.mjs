@@ -127,6 +127,8 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_remediation_backlog_jobs',
   'review_pipeline_remediation_oldest_pending_age_seconds',
   'review_pipeline_remediation_throughput_jobs',
+  'review_pipeline_operational_blocker_stopped_rounds',
+  'review_pipeline_operational_blocker_oldest_age_seconds',
   'review_pipeline_merge_outcomes_total',
   'review_pipeline_merge_stalled_jobs',
   'review_pipeline_stale_ama_closer_leases',
@@ -169,6 +171,8 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_remediation_backlog_jobs: 'Current follow-up remediation job count by state.',
   review_pipeline_remediation_oldest_pending_age_seconds: 'Age in seconds of the oldest pending remediation job.',
   review_pipeline_remediation_throughput_jobs: 'Terminal remediation jobs observed in the configured throughput window.',
+  review_pipeline_operational_blocker_stopped_rounds: 'Stopped remediation rounds reporting operational blockers, grouped by blocker category.',
+  review_pipeline_operational_blocker_oldest_age_seconds: 'Age in seconds of the oldest stopped remediation round with an operational blocker.',
   review_pipeline_merge_outcomes_total: 'Current review-ledger PR outcome count by state.',
   review_pipeline_merge_stalled_jobs: 'Current count of clean review-settled jobs still waiting on merge.',
   review_pipeline_stale_ama_closer_leases: 'Current count of AMA closer leases for still-open PRs stuck pending or dispatched past the configured age.',
@@ -286,6 +290,14 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     category: 'review-pipeline',
     thresholdKey: 'remediationBacklogThreshold',
     defaultThreshold: DEFAULT_REMEDIATION_BACKLOG_THRESHOLD,
+  },
+  {
+    code: 'review:operational_blocker_stopped_round',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: null,
+    defaultThreshold: null,
+    thresholdDescription: 'one or more stopped remediation rounds reported an operational blocker requiring intervention',
   },
   {
     code: 'review:merge_stalled',
@@ -1796,6 +1808,62 @@ function summarizeFollowUpQueues(rootDir, { nowMs, config }) {
   return { jobs, states, throughput, oldestPending };
 }
 
+function normalizeOperationalBlockerCategory(blocker) {
+  if (!blocker || typeof blocker !== 'object') return null;
+  const raw = blocker.category || blocker.code || blocker.kind || blocker.name || blocker.title;
+  const category = String(raw || '').trim().toLowerCase();
+  return category || null;
+}
+
+function summarizeOperationalBlockerStops(followUpJobs, { nowMs }) {
+  const byCategory = new Map();
+  const rounds = [];
+  let oldest = null;
+
+  for (const entry of followUpJobs || []) {
+    const job = entry?.job || {};
+    if (entry?.state !== 'stopped' && job.status !== 'stopped') continue;
+    const blockers = Array.isArray(job?.parsedReply?.operationalBlockers)
+      ? job.parsedReply.operationalBlockers
+      : (Array.isArray(job?.operationalBlockers) ? job.operationalBlockers : []);
+    if (blockers.length === 0) continue;
+
+    const categories = Array.from(new Set(
+      blockers
+        .map((blocker) => normalizeOperationalBlockerCategory(blocker))
+        .filter(Boolean)
+    ));
+    if (categories.length === 0) categories.push('uncategorized');
+    const stoppedAt = job.stoppedAt || job?.remediationPlan?.stop?.stoppedAt || null;
+    const observedAt = stoppedAt || new Date(entry?.stat?.mtimeMs || nowMs).toISOString();
+    const age = ageMs(nowMs, observedAt);
+    const round = {
+      jobId: job.jobId || null,
+      repo: job.repo || null,
+      prNumber: job.prNumber || null,
+      categories,
+      stoppedAt: observedAt,
+      ageMs: age,
+      stopCode: job?.remediationPlan?.stop?.code || job.stopCode || null,
+      stopReason: job?.remediationPlan?.stop?.reason || job.stopReason || null,
+      rescue: job?.rescue || null,
+    };
+    rounds.push(round);
+    if (age !== null && (!oldest || age > oldest.ageMs)) oldest = round;
+    for (const category of categories) {
+      byCategory.set(category, Number(byCategory.get(category) || 0) + 1);
+    }
+  }
+
+  return {
+    count: rounds.length,
+    byCategory: Array.from(byCategory, ([category, count]) => ({ category, count }))
+      .sort((left, right) => right.count - left.count || left.category.localeCompare(right.category)),
+    oldest,
+    rounds: rounds.sort((left, right) => (right.ageMs || 0) - (left.ageMs || 0)),
+  };
+}
+
 function reviewRowsByRepoPr(db) {
   const rows = safeAll(
     db,
@@ -2836,6 +2904,27 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }));
   }
 
+  if (snapshot.operationalBlockers?.count > 0) {
+    const oldest = snapshot.operationalBlockers.oldest || snapshot.operationalBlockers.rounds[0];
+    const categories = snapshot.operationalBlockers.byCategory
+      .map((entry) => `${entry.category}=${entry.count}`)
+      .join(', ');
+    findings.push(buildFinding({
+      code: 'review:operational_blocker_stopped_round',
+      tier: 'ticket',
+      subject: `${snapshot.operationalBlockers.count} stopped remediation round(s) reported operational blockers`,
+      message: `${oldest.repo || 'unknown'}#${oldest.prNumber || 'unknown'} stopped with operational blocker category ${oldest.categories.join(', ')}; by-category counts: ${categories}.`,
+      evidence: snapshot.operationalBlockers.rounds.slice(0, 20).map((round) => (
+        `data/follow-up-jobs/stopped ${round.repo || 'unknown'}#${round.prNumber || 'unknown'} `
+        + `job=${round.jobId || 'unknown'} categories=${round.categories.join(',')} `
+        + `stoppedAt=${round.stoppedAt || 'unknown'} rescue=${round.rescue?.bundlePath || round.rescue?.ref || 'none'}`
+      )),
+      recommendedAction: 'Treat stopped operational blockers as fleet work, not just PR comments. For github-auth, inspect whether the job recorded a rescue bundle/ref and resume from it after credential repair.',
+      observedAt,
+      details: snapshot.operationalBlockers,
+    }));
+  }
+
   if (snapshot.mergeStalls.candidates.length > 0) {
     const sample = snapshot.mergeStalls.candidates[0];
     findings.push(buildFinding({
@@ -3362,6 +3451,7 @@ function collectReviewPipelineHealth({
       ? summarizeMalformedPrTitles(db)
       : { count: 0, prs: [] };
     const followUpQueues = summarizeFollowUpQueues(rootDir, { nowMs, config });
+    const operationalBlockers = summarizeOperationalBlockerStops(followUpQueues.jobs, { nowMs });
     const reviewerDegradation = summarizeReviewerDegradation(rootDir, db, { nowMs });
     const outage = db
       ? summarizeOutage(db)
@@ -3490,6 +3580,7 @@ function collectReviewPipelineHealth({
         throughput: followUpQueues.throughput,
         oldestPending: followUpQueues.oldestPending,
       },
+      operationalBlockers,
       reviewStateLedger,
       mergeOutcomes,
       mergeStalls,
@@ -3639,6 +3730,19 @@ function renderReviewPipelinePrometheus(snapshot) {
       window: `${snapshot.config.remediationThroughputWindowMs}ms`,
     }, count);
   }
+  const blockerCategories = snapshot.operationalBlockers?.byCategory?.length
+    ? snapshot.operationalBlockers.byCategory
+    : [{ category: 'none', count: 0 }];
+  for (const row of blockerCategories) {
+    pushMetric('review_pipeline_operational_blocker_stopped_rounds', {
+      category: row.category,
+    }, row.count);
+  }
+  pushMetric(
+    'review_pipeline_operational_blocker_oldest_age_seconds',
+    {},
+    Math.round((snapshot.operationalBlockers?.oldest?.ageMs || 0) / 1000)
+  );
   const mergeOutcomes = snapshot.mergeOutcomes.length
     ? snapshot.mergeOutcomes
     : [{ outcome: 'none', count: 0 }];

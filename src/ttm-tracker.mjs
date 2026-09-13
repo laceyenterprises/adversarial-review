@@ -243,6 +243,17 @@ function normalizeReviewPass(row) {
   };
 }
 
+function latestCompletedPassKey(pass) {
+  if (!pass) return null;
+  return [
+    pass.repo,
+    pass.pr_number,
+    pass.attempt_number,
+    pass.pass_kind,
+    pass.ended_at,
+  ].map((part) => String(part ?? '')).join('\u0000');
+}
+
 function classifyLatestReviewForMergeEligibility(latestCompleted, { strictMode }) {
   if (!latestCompleted) {
     return {
@@ -286,7 +297,7 @@ function classifyLatestReviewForMergeEligibility(latestCompleted, { strictMode }
   };
 }
 
-function derivePrTtmTimeline(row, passes, { nowIso }) {
+function derivePrTtmTimeline(row, passes, { nowIso, mergeAuthorityStrictMode = true }) {
   const openedAt = row.reviewed_at || null;
   const mergedAt = row.merged_at || null;
   const closedAt = row.closed_at || null;
@@ -304,10 +315,10 @@ function derivePrTtmTimeline(row, passes, { nowIso }) {
   const latestCompleted = completedPasses
     .filter((pass) => pass.endedAt)
     .sort((a, b) => toMs(b.endedAt) - toMs(a.endedAt))[0] || null;
-  const mergeAuthorityStrictMode = parseBooleanValue(row.mergeAuthorityStrictMode, true);
+  const strictMode = parseBooleanValue(mergeAuthorityStrictMode, true);
   const mergeEligibility = classifyLatestReviewForMergeEligibility(
     latestCompleted,
-    { strictMode: mergeAuthorityStrictMode },
+    { strictMode },
   );
   const maxAttempt = completedPasses.reduce((max, pass) => {
     if (!Number.isInteger(pass.attemptNumber)) return max;
@@ -360,7 +371,7 @@ function derivePrTtmTimeline(row, passes, { nowIso }) {
     terminalClean,
     mergeEligibleForTerminalUnmerged: mergeEligibility.mergeEligible,
     mergeEligibilityHoldReason: settledSuccessVerdict ? mergeEligibility.holdReason : null,
-    mergeAuthorityStrictMode,
+    mergeAuthorityStrictMode: strictMode,
     blockingFindingCount: mergeEligibility.reviewState.blockingFindingCount,
     blockingFindingState: mergeEligibility.reviewState.blockingFindingState,
     nonBlockingFindingCount: mergeEligibility.reviewState.nonBlockingFindingCount,
@@ -504,20 +515,29 @@ function evaluateTtmTimelines(rows, { observedAt, config, budgetBlind = false })
 function readTtmTimelines(db, { nowIso, mergeAuthorityStrictMode }) {
   let reviewRows;
   let passRows;
+  let bodyStmt;
   try {
     reviewRows = db.prepare(
       `SELECT repo, pr_number, reviewed_at, pr_state, merged_at, closed_at,
               review_status, posted_at, rereview_requested_at,
-              reviewer_lease_expires_at,
-              ? AS mergeAuthorityStrictMode
+              reviewer_lease_expires_at
          FROM reviewed_prs`
-    ).all(mergeAuthorityStrictMode === false ? 0 : 1);
+    ).all();
     passRows = db.prepare(
       `SELECT repo, pr_number, attempt_number, pass_kind, started_at, ended_at,
-              status, verdict, body_md
+              status, verdict
          FROM reviewer_passes
         WHERE pass_kind IN ('first-pass', 'rereview')`
     ).all();
+    bodyStmt = db.prepare(
+      `SELECT body_md
+         FROM reviewer_passes
+        WHERE repo = ?
+          AND pr_number = ?
+          AND attempt_number = ?
+          AND pass_kind = ?
+          AND ended_at = ?`
+    );
   } catch (error) {
     const message = String(error?.message || '');
     if (
@@ -535,10 +555,42 @@ function readTtmTimelines(db, { nowIso, mergeAuthorityStrictMode }) {
     list.push(pass);
     passesByPr.set(key, list);
   }
+  const openUnmergedPrKeys = new Set(reviewRows
+    .filter((row) => String(row.pr_state || 'open').trim().toLowerCase() === 'open' && !row.merged_at)
+    .map((row) => `${row.repo}#${row.pr_number}`));
+  const bodyByLatestPassKey = new Map();
+  for (const key of openUnmergedPrKeys) {
+    const latestCompleted = (passesByPr.get(key) || [])
+      .map(normalizeReviewPass)
+      .filter((pass) => pass && pass.status === 'completed' && pass.endedAt)
+      .sort((a, b) => toMs(b.endedAt) - toMs(a.endedAt))[0] || null;
+    const rawLatest = latestCompleted
+      ? (passesByPr.get(key) || []).find((pass) => (
+        String(pass.attempt_number ?? '') === String(latestCompleted.attemptNumber ?? '')
+        && String(pass.pass_kind || '') === latestCompleted.passKind
+        && String(pass.ended_at || '') === latestCompleted.endedAt
+      ))
+      : null;
+    const passKey = latestCompletedPassKey(rawLatest);
+    if (!passKey || bodyByLatestPassKey.has(passKey)) continue;
+    const row = bodyStmt.get(
+      rawLatest.repo,
+      rawLatest.pr_number,
+      rawLatest.attempt_number,
+      rawLatest.pass_kind,
+      rawLatest.ended_at,
+    );
+    bodyByLatestPassKey.set(passKey, typeof row?.body_md === 'string' ? row.body_md : null);
+  }
   return reviewRows.map((row) => derivePrTtmTimeline(
     row,
-    passesByPr.get(`${row.repo}#${row.pr_number}`) || [],
-    { nowIso }
+    (passesByPr.get(`${row.repo}#${row.pr_number}`) || []).map((pass) => {
+      const passKey = latestCompletedPassKey(pass);
+      return passKey && bodyByLatestPassKey.has(passKey)
+        ? { ...pass, body_md: bodyByLatestPassKey.get(passKey) }
+        : pass;
+    }),
+    { nowIso, mergeAuthorityStrictMode }
   ));
 }
 

@@ -68,9 +68,9 @@ function insertPass(db, {
   endedAt = null,
   status = 'completed',
   verdict = 'comment-only',
-  bodyMd = null,
+  bodyMd = undefined,
 }) {
-  const reviewBody = bodyMd ?? reviewBodyFor({
+  const reviewBody = bodyMd !== undefined ? bodyMd : reviewBodyFor({
     verdict,
     blocking: '- None.',
     nonBlocking: '- None.',

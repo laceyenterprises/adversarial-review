@@ -22,6 +22,20 @@ import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.
 const REPO = 'laceyenterprises/agent-os';
 const NOW = '2026-09-06T12:00:00.000Z';
 const NOW_MS = Date.parse(NOW);
+const CLEAN_REVIEW_BODY = `## Adversarial Review
+
+## Summary
+Synthetic clean review.
+
+## Blocking issues
+- None.
+
+## Non-blocking issues
+- None.
+
+## Verdict
+Comment only
+`;
 
 const tempRoot = () => mkdtempSync(path.join(tmpdir(), 'review-health-ttm-'));
 const iso = (minutesAgo) => new Date(NOW_MS - minutesAgo * 60_000).toISOString();
@@ -44,13 +58,14 @@ function insertPass(db, row) {
   db.prepare(
     `INSERT INTO reviewer_passes
        (repo, pr_number, attempt_number, reviewer_class, reviewer_model,
-        pass_kind, started_at, ended_at, status, verdict, metadata_json)
-     VALUES (?, ?, ?, 'codex', 'gpt-5', ?, ?, ?, ?, ?, '{}')`
+        pass_kind, started_at, ended_at, status, verdict, body_md, metadata_json)
+     VALUES (?, ?, ?, 'codex', 'gpt-5', ?, ?, ?, ?, ?, ?, '{}')`
   ).run(
     REPO, row.prNumber, row.attemptNumber ?? 1,
     (row.attemptNumber ?? 1) > 1 ? 'rereview' : 'first-pass',
     row.startedAt, row.endedAt, row.status ?? 'completed',
-    row.verdict ?? 'request-changes'
+    row.verdict ?? 'request-changes',
+    row.bodyMd !== undefined ? row.bodyMd : CLEAN_REVIEW_BODY
   );
 }
 

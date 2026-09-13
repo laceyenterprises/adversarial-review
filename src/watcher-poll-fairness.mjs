@@ -65,6 +65,26 @@ export const DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_HANDLER_CAPACITY = 2;
 export const DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT = 2;
 export const DEFAULT_POSTED_REVIEW_HANDLER_HEADROOM_MS = 5 * 1000;
 
+// LANESTARVE-01. Minimum-service floor for the no-progress lane.
+//
+// The lane is advisory; the scheduler was treating it as absolute. When every
+// queued handler was lane-deferred the phase returned `ran=0` having spent none
+// of its 10-minute budget — 95 such ticks in one day, against `ran=278` and
+// `slow_lane_deferred=1040`. A tick that does nothing is not "bounded", it is
+// idle, and the budget the lane exists to protect goes to waste.
+//
+// This floor admits up to N lane-deferred handlers into a tick that would
+// otherwise run nothing at all. It cannot cost a faster PR anything: it fires
+// ONLY when no handler ran, failed, or timed out, so the slot it consumes is a
+// slot no other work wanted. Prioritisation is fully preserved — active-lane
+// PRs are walked first and every tick, slow-lane PRs get the leftovers.
+//
+// Keep this small. It is a liveness guarantee ("a tick with queued work and
+// spare budget never does nothing"), not a capacity knob; raising it would walk
+// the unadvanceable backlog the lane was built to stop walking, which is the
+// WPS-01 outage.
+export const DEFAULT_POSTED_REVIEW_LANE_STARVATION_FLOOR = 1;
+
 // Per-handler deadline. The phase budget alone cannot save a tick, because it is
 // only checked BETWEEN handlers: one handler that never settles (an `hq` dispatch
 // that hangs, a GitHub call with no timeout) wedges the tick forever regardless
@@ -430,6 +450,7 @@ export async function runPostedReviewHandlersFairly({
   minimumHandlerStartBudgetMs = null,
   laneGate = null,
   priorityTargets = [],
+  laneStarvationFloor = DEFAULT_POSTED_REVIEW_LANE_STARVATION_FLOOR,
   nowMs = () => Date.now(),
   setTimeoutFn = setTimeout,
   clearTimeoutFn = clearTimeout,
@@ -446,6 +467,7 @@ export async function runPostedReviewHandlersFairly({
     continuedAfterTimeout: 0,
     daemonCleanMerges: 0,
     priorityLaneBypasses: 0,
+    laneFloorAdmissions: 0,
     deferred: [],
   };
   if (handlers.length === 0) {
@@ -471,6 +493,83 @@ export async function runPostedReviewHandlersFairly({
   const normalizedPriorityTargets = normalizePostedReviewPriorityTargets(priorityTargets);
   const ordered = orderPriorityFirst(orderDeferredFirst(handlers, state), normalizedPriorityTargets);
   const nextDeferred = new Set();
+  // LANESTARVE-01: every handler the lane turned away this tick, in queue order,
+  // with the decision that turned it away. The starvation floor picks from here.
+  const laneDeferred = [];
+
+  /**
+   * Run one handler under its deadline, fold the result into the summary, and
+   * tell the lane what happened. Shared by the normal walk and the starvation
+   * floor so a floor-admitted handler is accounted for and recorded identically.
+   *
+   * `laneAdmission` is passed straight through to `laneGate.record`. A run the
+   * lane did not schedule is reported as non-escalating so an opportunistic look
+   * cannot double the PR's backoff.
+   */
+  async function executeHandler({ handler, key, positionLabel, laneAdmission = null }) {
+    const handlerStartedMs = nowMs();
+    const handlerDeadlineMs = parsePositiveMs(handler?.timeoutMs, effectiveHandlerTimeoutMs);
+    const outcome = await runWithDeadline(() => handler.run(), {
+      timeoutMs: handlerDeadlineMs,
+      setTimeoutFn,
+      clearTimeoutFn,
+    });
+    const handlerElapsedMs = Math.round(nowMs() - handlerStartedMs);
+    if (outcome.timedOut) {
+      summary.timedOut += 1;
+      // RVHAND-01: the abandon log used to report only the budget, so a timeout
+      // said nothing about WHERE the time went. An operator could not tell
+      // "this one PR is pathologically slow" from "the phase was already
+      // saturated when this handler started". Those are different defects and
+      // they want opposite fixes, so raising the timeout without knowing which
+      // one you have just moves the threshold.
+      //
+      // Every value below is already available in this loop and was simply
+      // being discarded. `position` separates an early handler (slow in
+      // isolation) from a late one (starved by its predecessors);
+      // `phase_elapsed_at_start` against the phase budget shows how much room
+      // was left when it began, while `phase_elapsed_total` captures where the
+      // phase stood after the handler timed out.
+      const phaseElapsedAtStartMs = Math.round(handlerStartedMs - startedMs);
+      const phaseElapsedTotalMs = Math.round(nowMs() - startedMs);
+      logger?.error?.(
+        `[watcher] posted-review handler for ${key} exceeded ${handlerDeadlineMs}ms; ` +
+          'abandoning this handler; remaining phase budget will decide whether the posted-review phase continues ' +
+          `(elapsed=${handlerElapsedMs}ms position=${positionLabel} ` +
+          `phase_elapsed_at_start=${phaseElapsedAtStartMs}ms ` +
+          `phase_elapsed_total=${phaseElapsedTotalMs}ms phase_budget=${effectiveBudgetMs}ms ` +
+          `ran_before=${summary.ran} timed_out_before=${summary.timedOut - 1})`,
+      );
+    } else if (outcome.error) {
+      summary.failed += 1;
+      logger?.error?.(
+        `[watcher] posted-review handler failed for ${key}:`,
+        outcome.error?.message || outcome.error,
+      );
+    } else {
+      summary.ran += 1;
+      if (isDaemonCleanMergeMerged(outcome.value)) {
+        summary.daemonCleanMerges += 1;
+      }
+    }
+
+    if (laneGate && typeof laneGate.record === 'function') {
+      try {
+        await laneGate.record(handler, {
+          timedOut: outcome.timedOut,
+          error: outcome.error || null,
+          value: outcome.value,
+          ...(laneAdmission ? { laneAdmission } : {}),
+        });
+      } catch (err) {
+        logger?.warn?.(
+          `[watcher] no-progress lane record failed for ${key} (${err?.message || err})`,
+        );
+      }
+    }
+
+    return { outcome, handlerElapsedMs };
+  }
 
   for (let index = 0; index < ordered.length; index += 1) {
     const handler = ordered[index];
@@ -525,6 +624,7 @@ export async function runPostedReviewHandlersFairly({
       );
     } else if (!laneDecision.run) {
       summary.skippedByLane += 1;
+      laneDeferred.push({ handler, key, index, decision: laneDecision });
       logger?.log?.(
         `[watcher] no-progress lane: deferring ${key} this tick ` +
           `(lane=${laneDecision.lane || 'slow'} ` +
@@ -536,65 +636,11 @@ export async function runPostedReviewHandlersFairly({
       continue;
     }
 
-    const handlerStartedMs = nowMs();
-    const handlerDeadlineMs = parsePositiveMs(handler?.timeoutMs, effectiveHandlerTimeoutMs);
-    const outcome = await runWithDeadline(() => handler.run(), {
-      timeoutMs: handlerDeadlineMs,
-      setTimeoutFn,
-      clearTimeoutFn,
+    const { outcome, handlerElapsedMs } = await executeHandler({
+      handler,
+      key,
+      positionLabel: `${index + 1}/${ordered.length}`,
     });
-    const handlerElapsedMs = Math.round(nowMs() - handlerStartedMs);
-    if (outcome.timedOut) {
-      summary.timedOut += 1;
-      // RVHAND-01: the abandon log used to report only the budget, so a timeout
-      // said nothing about WHERE the time went. An operator could not tell
-      // "this one PR is pathologically slow" from "the phase was already
-      // saturated when this handler started". Those are different defects and
-      // they want opposite fixes, so raising the timeout without knowing which
-      // one you have just moves the threshold.
-      //
-      // Every value below is already available in this loop and was simply
-      // being discarded. `position` separates an early handler (slow in
-      // isolation) from a late one (starved by its predecessors);
-      // `phase_elapsed_at_start` against the phase budget shows how much room
-      // was left when it began, while `phase_elapsed_total` captures where the
-      // phase stood after the handler timed out.
-      const phaseElapsedAtStartMs = Math.round(handlerStartedMs - startedMs);
-      const phaseElapsedTotalMs = Math.round(nowMs() - startedMs);
-      logger?.error?.(
-        `[watcher] posted-review handler for ${key} exceeded ${handlerDeadlineMs}ms; ` +
-          'abandoning this handler; remaining phase budget will decide whether the posted-review phase continues ' +
-          `(elapsed=${handlerElapsedMs}ms position=${index + 1}/${ordered.length} ` +
-          `phase_elapsed_at_start=${phaseElapsedAtStartMs}ms ` +
-          `phase_elapsed_total=${phaseElapsedTotalMs}ms phase_budget=${effectiveBudgetMs}ms ` +
-          `ran_before=${summary.ran} timed_out_before=${summary.timedOut - 1})`,
-      );
-    } else if (outcome.error) {
-      summary.failed += 1;
-      logger?.error?.(
-        `[watcher] posted-review handler failed for ${key}:`,
-        outcome.error?.message || outcome.error,
-      );
-    } else {
-      summary.ran += 1;
-      if (isDaemonCleanMergeMerged(outcome.value)) {
-        summary.daemonCleanMerges += 1;
-      }
-    }
-
-    if (laneGate && typeof laneGate.record === 'function') {
-      try {
-        await laneGate.record(handler, {
-          timedOut: outcome.timedOut,
-          error: outcome.error || null,
-          value: outcome.value,
-        });
-      } catch (err) {
-        logger?.warn?.(
-          `[watcher] no-progress lane record failed for ${key} (${err?.message || err})`,
-        );
-      }
-    }
 
     if (outcome.timedOut) {
       const remainingAfterTimeout = ordered.length - index - 1;
@@ -630,6 +676,81 @@ export async function runPostedReviewHandlersFairly({
     }
   }
 
+  // ── LANESTARVE-01: minimum-service floor ───────────────────────────────────
+  //
+  // The tick reaches here having walked the whole queue. If it ran NOTHING — no
+  // handler succeeded, failed, or timed out — while the lane turned handlers
+  // away and the phase budget is still largely unspent, the tick is idle, not
+  // bounded. Admit the most-starved deferred handler(s) rather than burn the
+  // interval.
+  //
+  // Guarded on `ran===0 && failed===0 && timedOut===0`: any executed handler
+  // means the slot was wanted by work the lane considered live, and the floor
+  // stands down. That is what keeps the slow lane a real deprioritisation — it
+  // never preempts a fast PR, it only uses a slot nothing else claimed.
+  // `deferredByBudget===0` because a budget-deferred tail means there is no
+  // budget to spend; the budget check below is belt-and-braces on top of that.
+  const laneFloor = Number.isInteger(laneStarvationFloor) && laneStarvationFloor > 0
+    ? laneStarvationFloor
+    : 0;
+  if (
+    laneFloor > 0
+    && laneDeferred.length > 0
+    && summary.ran === 0
+    && summary.failed === 0
+    && summary.timedOut === 0
+    && summary.deferredByBudget === 0
+  ) {
+    // Most-starved first: the PR that has waited the most ticks since its last
+    // walk, then the one with the longest no-progress series, then queue order.
+    // Ties fall back to the order the queue already chose, so the promotion set
+    // and wake-priority ordering upstream still carry through.
+    const byStarvation = [...laneDeferred].sort((a, b) => (
+      (b.decision?.skippedTicks ?? 0) - (a.decision?.skippedTicks ?? 0)
+      || (b.decision?.noProgressTicks ?? 0) - (a.decision?.noProgressTicks ?? 0)
+      || a.index - b.index
+    ));
+    for (const candidate of byStarvation) {
+      if (summary.laneFloorAdmissions >= laneFloor) break;
+      const phaseElapsedMs = nowMs() - startedMs;
+      const remainingBudgetMs = effectiveBudgetMs - phaseElapsedMs;
+      if (
+        phaseElapsedMs >= effectiveBudgetMs
+        || remainingBudgetMs < effectiveMinimumHandlerStartBudgetMs
+      ) {
+        // No budget left to honour the floor. Say so rather than silently
+        // skipping it — an invisible floor is indistinguishable from no floor.
+        logger?.warn?.(
+          `[watcher] posted-review slow-lane floor could not run ${candidate.key}: ` +
+            `remaining=${Math.max(0, Math.round(remainingBudgetMs))}ms ` +
+            `minimum_start_budget=${effectiveMinimumHandlerStartBudgetMs}ms ` +
+            `phase_budget=${effectiveBudgetMs}ms; still deferred`,
+        );
+        break;
+      }
+      summary.laneFloorAdmissions += 1;
+      summary.skippedByLane = Math.max(0, summary.skippedByLane - 1);
+      logger?.warn?.(
+        `[watcher] posted-review slow-lane floor: admitting ${candidate.key} into an otherwise ` +
+          `idle tick (queued=${summary.queued} ran=0 lane_deferred=${laneDeferred.length} ` +
+          `lane=${candidate.decision?.lane || 'slow'} ` +
+          `no_progress_ticks=${candidate.decision?.noProgressTicks ?? 0} ` +
+          `skipped_ticks=${candidate.decision?.skippedTicks ?? 0} ` +
+          `backoff_ticks=${candidate.decision?.backoffTicks ?? 0}). This walk does not ` +
+          'escalate its backoff — it was not due, the tick simply had nothing else to do.',
+      );
+      const { outcome } = await executeHandler({
+        handler: candidate.handler,
+        key: candidate.key,
+        positionLabel: `floor ${summary.laneFloorAdmissions}/${laneFloor}`,
+        laneAdmission: 'starvation-floor',
+      });
+      // A floor admission that times out has consumed the same budget a normal
+      // handler would; stop here exactly as the main loop does after a timeout.
+      if (outcome.timedOut) break;
+    }
+  }
+
   state.deferredKeys = nextDeferred;
   summary.deferred = [...nextDeferred];
   if (summary.queued > 0 && summary.ran === 0) {
@@ -637,7 +758,8 @@ export async function runPostedReviewHandlersFairly({
       `[watcher] posted-review phase made zero progress: queued=${summary.queued} ` +
         `ran=0 failed=${summary.failed} timed_out=${summary.timedOut} ` +
         `slow_lane_deferred=${summary.skippedByLane} budget_deferred=${summary.deferredByBudget} ` +
-        `timeout_deferred=${summary.deferredAfterTimeout}`,
+        `timeout_deferred=${summary.deferredAfterTimeout} ` +
+        `slow_lane_floor_admissions=${summary.laneFloorAdmissions}`,
     );
   }
   if (
@@ -657,6 +779,7 @@ export async function runPostedReviewHandlersFairly({
     || summary.deferredByBudget > 0
     || summary.deferredAfterTimeout > 0
     || summary.timedOut > 0
+    || summary.laneFloorAdmissions > 0
   ) {
     // One operator-facing line per tick that summarises everything NOT walked at
     // full speed. A PR in the slow lane is visible here even when nobody is
@@ -667,7 +790,8 @@ export async function runPostedReviewHandlersFairly({
         `slow_lane_deferred=${summary.skippedByLane} budget_deferred=${summary.deferredByBudget} ` +
         `timeout_deferred=${summary.deferredAfterTimeout} ` +
         `continued_after_timeout=${summary.continuedAfterTimeout}` +
-        (summary.priorityLaneBypasses > 0 ? ` priority_lane_bypasses=${summary.priorityLaneBypasses}` : ''),
+        (summary.priorityLaneBypasses > 0 ? ` priority_lane_bypasses=${summary.priorityLaneBypasses}` : '') +
+        (summary.laneFloorAdmissions > 0 ? ` slow_lane_floor_admissions=${summary.laneFloorAdmissions}` : ''),
     );
   }
   return summary;

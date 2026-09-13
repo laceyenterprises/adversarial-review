@@ -48,6 +48,7 @@ import { db, stmtGetLatestPostedReviewBody, stmtGetReviewRow } from './review-st
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import {
   evaluateNoProgressLane,
+  handlerDecisionFingerprint,
   markNoProgressStalledEventEmitted,
   maybeFireOperatorDecisionRequiredAlert,
   maybeMarkNoProgressStalledEvent,
@@ -894,7 +895,7 @@ export function createNoProgressLaneGate({
       }
       return { run: decision.due, ...decision };
     },
-    async record(handler, { timedOut = false, value = null } = {}) {
+    async record(handler, { timedOut = false, value = null, laneAdmission = null } = {}) {
       // Without a head there is no series to key on; skip the row read too.
       if (!handler.headSha) return null;
       const identity = { repo: handler.repoPath, prNumber: handler.prNumber };
@@ -921,13 +922,31 @@ export function createNoProgressLaneGate({
         ? PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED
         : PROGRESS_CLASS_SELF_RESOLVING;
       const observedAt = now();
+      // LANESTARVE-01. A timed-out handler reported no decision at all, so it
+      // carries no decision fingerprint — its `'timed-out'` row fingerprint is
+      // the whole signal, exactly as before.
+      const decisionFingerprint = timedOut ? null : handlerDecisionFingerprint(value);
       const outcome = recordNoProgressLaneRun(rootDir, identity, {
         headSha: handler.headSha || null,
         fingerprint,
+        decisionFingerprint,
         progressClass,
+        // A starvation-floor admission is a walk the lane did not schedule.
+        // Recording it as escalating would charge the PR for a look it never
+        // asked for and push its next real walk twice as far away — the exact
+        // self-reinforcement this lane was accused of.
+        escalate: laneAdmission !== 'starvation-floor',
         now: observedAt,
         logger,
       });
+      if (outcome?.decisionReset) {
+        logger?.log?.(
+          `[watcher] no-progress lane: ${handler.repoPath}#${handler.prNumber} handler decision ` +
+            `changed on head ${(handler.headSha || 'unknown').slice(0, 12)} with the review row ` +
+            'unchanged; restarting the no-progress series (the blocker moved even though the row ' +
+            `did not) — decision_resets=${outcome.decisionResets}`,
+        );
+      }
       if (outcome?.demoted) {
         logger?.warn?.(
           `[watcher] no-progress lane: ${handler.repoPath}#${handler.prNumber} demoted to the ` +

@@ -43,6 +43,13 @@ import {
   recordNoProgressLaneSkip,
   subjectProgressFingerprint,
 } from '../src/watcher-no-progress-lane.mjs';
+// LANESTARVE-01 symbols are reached through a namespace import on purpose: a
+// named import of a symbol `main` does not export is a module-load error, which
+// would take the WHOLE file down and make the required A/B ("this test fails on
+// main, passes with the change") unreadable. Through the namespace, each new
+// test fails on its own assertion — on behaviour — which is the evidence the
+// ticket asks for.
+import * as noProgressLane from '../src/watcher-no-progress-lane.mjs';
 import {
   createPostedReviewFairnessState,
   orderSubjectEntriesDiscoveryFirst,
@@ -365,6 +372,13 @@ test('RVHAND-06: posted-review phase warns when queued handlers make zero progre
     state: createPostedReviewFairnessState(),
     budgetMs: 60_000,
     handlerTimeoutMs: 60_000,
+    // LANESTARVE-01: this test owns the zero-progress WARNING — that the phase
+    // says so, in the documented format, when a tick achieves nothing. It is not
+    // a claim that an all-lane-deferred tick SHOULD achieve nothing; the
+    // starvation floor now prevents that state from arising with budget in hand
+    // (see 'an all-slow-lane tick drains instead of reporting ran=0'). Pin the
+    // floor off here so the warning itself stays under test.
+    laneStarvationFloor: 0,
     laneGate: {
       evaluate: () => ({ run: false, lane: 'slow', noProgressTicks: 4, backoffTicks: 8, skippedTicks: 1 }),
       record: async () => {},
@@ -1126,6 +1140,12 @@ test('watcher wake priority is head-scoped and does not bypass a stale head', as
       prNumber: 6569,
       headSha: HEAD_A,
     }],
+    // LANESTARVE-01: this test is about wake-priority HEAD SCOPING, not about
+    // the slow-lane starvation floor. Disable the floor so "did it run?" answers
+    // only the question being asked — otherwise the sole queued handler would be
+    // admitted by the floor (the tick ran nothing else) and the head-scoping
+    // assertion would be testing two mechanisms at once.
+    laneStarvationFloor: 0,
     laneGate: {
       evaluate() {
         return {
@@ -2819,4 +2839,348 @@ test('the queued posted-review handler reads the head from subject, not entry', 
     /return\s*\{\s*subjectRef,\s*subject,\s*prNumber\s*\}/,
     'subjectEntry shape changed; re-check which object owns headSha before trusting this guard',
   );
+});
+
+// ── LANESTARVE-01: the slow lane must not absorb the whole queue ─────────────
+//
+// Measured shape, /Users/airlock/Library/Logs/adversarial-watcher.log 2026-09-12:
+// `slow_lane_deferred=1040` against `ran=278`, with 95 phases logging
+// "posted-review phase made zero progress: queued=5 ran=0 ... slow_lane_deferred=5
+// budget_deferred=0 timeout_deferred=0". Queued work, a 10-minute phase budget
+// untouched, and nothing run. The lane is advisory; the scheduler was treating
+// it as absolute, so an entirely lane-deferred tick spent its whole interval
+// doing nothing while the fleet's autonomous merge share fell from 96% to 49%.
+//
+// Two defects, regressed separately below:
+//   1. no minimum-service floor — `ran=0` with budget in hand was reachable;
+//   2. a self-reinforcing demotion — the progress signal is blind to CI,
+//      mergeability, and lease ownership, and every unproductive walk doubled
+//      the wait for the next one, so escaping the lane got monotonically harder.
+
+// Build the decision fingerprint through the module when it exports one, and
+// through an equivalent local encoding when it does not. That keeps the A/B
+// honest: against `main` the tests below fail because the lane IGNORES a changed
+// handler decision, not merely because a symbol is missing.
+function decisionFingerprintOf(value) {
+  return typeof noProgressLane.handlerDecisionFingerprint === 'function'
+    ? noProgressLane.handlerDecisionFingerprint(value)
+    : JSON.stringify(value);
+}
+
+test('LANESTARVE-01: an all-slow-lane tick drains instead of reporting ran=0', async () => {
+  const ran = [];
+  const warnings = [];
+  const handlers = [1, 2, 3, 4, 5].map((prNumber) => ({
+    repoPath: REPO,
+    prNumber,
+    headSha: HEAD_A,
+    run: async () => { ran.push(prNumber); },
+  }));
+
+  const summary = await runPostedReviewHandlersFairly({
+    handlers,
+    // Every PR slow-lane classified and none of them due: the exact live shape.
+    laneGate: {
+      evaluate: (handler) => ({
+        run: false,
+        lane: LANE_SLOW,
+        noProgressTicks: 7,
+        backoffTicks: 12,
+        // #3 has waited the longest since its last walk.
+        skippedTicks: handler.prNumber === 3 ? 9 : 2,
+      }),
+      record: () => {},
+    },
+    logger: { log() {}, warn: (line) => warnings.push(String(line)), error() {} },
+  });
+
+  assert.equal(summary.queued, 5);
+  assert.equal(
+    summary.ran,
+    1,
+    'a tick with queued work and an untouched budget must not run nothing at all',
+  );
+  assert.deepEqual(ran, [3], 'the floor admits the most-starved deferred PR');
+  assert.equal(summary.laneFloorAdmissions, 1);
+  assert.equal(summary.skippedByLane, 4, 'the admitted handler is no longer counted as deferred');
+  assert.ok(
+    warnings.some((line) => /slow-lane floor: admitting .*#3/.test(line)),
+    'the admission is operator-visible, not silent',
+  );
+  assert.equal(
+    warnings.some((line) => /made zero progress/.test(line)),
+    false,
+    'the zero-progress signature is gone because the tick is no longer idle',
+  );
+});
+
+test('LANESTARVE-01: the floor never preempts a PR the lane considers live', async () => {
+  const ran = [];
+  const summary = await runPostedReviewHandlersFairly({
+    handlers: [
+      // A fast PR the lane is happy to walk...
+      { repoPath: REPO, prNumber: 10, headSha: HEAD_A, run: async () => { ran.push(10); } },
+      // ...and a genuinely slow one, deeply backed off.
+      { repoPath: REPO, prNumber: 20, headSha: HEAD_A, run: async () => { ran.push(20); } },
+    ],
+    laneGate: {
+      evaluate: (handler) => (handler.prNumber === 10
+        ? { run: true, lane: LANE_ACTIVE }
+        : { run: false, lane: LANE_SLOW, noProgressTicks: 9, backoffTicks: 12, skippedTicks: 11 }),
+      record: () => {},
+    },
+    logger: silentLogger,
+  });
+
+  assert.deepEqual(ran, [10], 'the slow PR stays deprioritised while a fast PR wants the tick');
+  assert.equal(summary.skippedByLane, 1);
+  // Deliberately an invariant guard, not an A/B test: "a genuinely slow PR stays
+  // deprioritised behind a fast one" must hold BOTH before and after this change.
+  // Written so it passes on `main` too — if it ever goes red, the fix has traded
+  // starvation for the loss of the prioritisation the lane exists to provide.
+  assert.ok(!summary.laneFloorAdmissions, 'the floor only claims a slot nothing else wanted');
+});
+
+test('LANESTARVE-01: the floor stands down when the budget cannot cover a handler', async () => {
+  let clock = 0;
+  const ran = [];
+  const warnings = [];
+  const summary = await runPostedReviewHandlersFairly({
+    handlers: [{
+      repoPath: REPO,
+      prNumber: 42,
+      headSha: HEAD_A,
+      run: async () => { ran.push(42); },
+    }],
+    budgetMs: 100,
+    // Enough budget to walk the queue and evaluate the lane, not enough left
+    // by the time the floor pass asks.
+    minimumHandlerStartBudgetMs: 50,
+    nowMs: () => { clock += 40; return clock; },
+    laneGate: {
+      evaluate: () => ({ run: false, lane: LANE_SLOW, noProgressTicks: 5, backoffTicks: 4, skippedTicks: 1 }),
+      record: () => {},
+    },
+    logger: { log() {}, warn: (line) => warnings.push(String(line)), error() {} },
+  });
+
+  assert.deepEqual(ran, [], 'the floor never overruns the phase budget it is bounded by');
+  assert.ok(
+    warnings.some((line) => /slow-lane floor could not run/.test(line)),
+    'a floor that cannot fire reports why instead of failing silently',
+  );
+  assert.equal(summary.laneFloorAdmissions, 0);
+});
+
+test('LANESTARVE-01: a floor-admitted walk does not escalate the backoff it did not earn', async () => {
+  const rootDir = tempRoot();
+  try {
+    const identity = { repo: REPO, prNumber: 6649 };
+    const stuck = subjectProgressFingerprint(
+      { review_status: 'posted', pr_state: 'open', reviewer_head_sha: HEAD_A, review_attempts: 1 },
+      { headSha: HEAD_A },
+    );
+
+    // Walk it into the slow lane the ordinary way.
+    let outcome = null;
+    for (let i = 0; i <= DEFAULT_NO_PROGRESS_LANE_CAP; i += 1) {
+      outcome = recordNoProgressLaneRun(rootDir, identity, {
+        headSha: HEAD_A,
+        fingerprint: stuck,
+        now: `t${i}`,
+        logger: silentLogger,
+      });
+    }
+    assert.equal(outcome.lane, LANE_SLOW);
+    const demotedTicks = outcome.noProgressTicks;
+    const demotedBackoff = outcome.backoffTicks;
+
+    // A walk the lane never scheduled. It still could not move the PR, but the
+    // lane did not ask for it, so it must not cost the PR anything.
+    const floorWalk = recordNoProgressLaneRun(rootDir, identity, {
+      headSha: HEAD_A,
+      fingerprint: stuck,
+      escalate: false,
+      now: 'floor',
+      logger: silentLogger,
+    });
+    assert.equal(
+      floorWalk.noProgressTicks,
+      demotedTicks,
+      'an opportunistic look must not push the next real walk further away',
+    );
+    assert.equal(floorWalk.escalated, false);
+    assert.equal(floorWalk.backoffTicks, demotedBackoff);
+    assert.equal(
+      readNoProgressLane(rootDir, identity, { logger: silentLogger }).skippedTicks,
+      0,
+      'the PR was walked, so its backoff window restarts',
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('LANESTARVE-01: a changed handler decision breaks the self-reinforcing demotion', async () => {
+  const rootDir = tempRoot();
+  try {
+    const identity = { repo: REPO, prNumber: 1046 };
+    // The review row NEVER changes: the watcher writes nothing for a clean PR
+    // that is only waiting on CI. This is what the lane reads as "cannot move".
+    const unchangedRow = subjectProgressFingerprint(
+      { review_status: 'posted', pr_state: 'open', reviewer_head_sha: HEAD_A, review_attempts: 1 },
+      { headSha: HEAD_A },
+    );
+    const blockedOnCi = decisionFingerprintOf({
+      outcome: 'await-operator',
+      gateDecision: { state: 'success', reason: 'review-settled' },
+      amaClosureResult: { reason: 'not-eligible', reasons: ['ci-not-green'] },
+    });
+    const ciGreen = decisionFingerprintOf({
+      outcome: 'await-operator',
+      gateDecision: { state: 'success', reason: 'review-settled' },
+      amaClosureResult: { reason: 'not-eligible', reasons: ['pr-not-mergeable'] },
+    });
+    assert.notEqual(blockedOnCi, ciGreen);
+
+    let outcome = null;
+    for (let i = 0; i <= DEFAULT_NO_PROGRESS_LANE_CAP; i += 1) {
+      outcome = recordNoProgressLaneRun(rootDir, identity, {
+        headSha: HEAD_A,
+        fingerprint: unchangedRow,
+        decisionFingerprint: blockedOnCi,
+        now: `t${i}`,
+        logger: silentLogger,
+      });
+    }
+    assert.equal(outcome.lane, LANE_SLOW, 'a PR whose blocker never moves is still demoted');
+
+    // CI goes green. The review row is byte-identical — the watcher wrote
+    // nothing — but the handler now reports a different blocker, which is
+    // observable evidence that the world moved.
+    const recovered = recordNoProgressLaneRun(rootDir, identity, {
+      headSha: HEAD_A,
+      fingerprint: unchangedRow,
+      decisionFingerprint: ciGreen,
+      now: 'ci-green',
+      logger: silentLogger,
+    });
+    assert.equal(recovered.noProgressTicks, 0);
+    assert.equal(recovered.decisionChanged, true);
+    assert.equal(recovered.decisionReset, true);
+    assert.equal(
+      recovered.lane,
+      LANE_ACTIVE,
+      'the PR is walked every tick again instead of waiting out a 12-tick backoff it no longer deserves',
+    );
+    assert.equal(
+      evaluateNoProgressLane(readNoProgressLane(rootDir, identity, { logger: silentLogger }), {
+        headSha: HEAD_A,
+      }).due,
+      true,
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('LANESTARVE-01: decision-only resets are capped so a flapping PR still demotes', async () => {
+  const rootDir = tempRoot();
+  try {
+    const identity = { repo: REPO, prNumber: 6654 };
+    const unchangedRow = subjectProgressFingerprint(
+      { review_status: 'posted', pr_state: 'open', reviewer_head_sha: HEAD_A, review_attempts: 1 },
+      { headSha: HEAD_A },
+    );
+
+    // Alternate the reported blocker on every single walk. Without a cap this
+    // would hold the PR in the active lane forever and recreate the unbounded
+    // posted-review phase WPS-01 exists to prevent.
+    const RESET_CAP = 5;
+
+    let outcome = null;
+    for (let i = 0; i < (RESET_CAP + DEFAULT_NO_PROGRESS_LANE_CAP + 2); i += 1) {
+      outcome = recordNoProgressLaneRun(rootDir, identity, {
+        headSha: HEAD_A,
+        fingerprint: unchangedRow,
+        decisionFingerprint: decisionFingerprintOf({
+          amaClosureResult: { reasons: [i % 2 === 0 ? 'ci-not-green' : 'pr-not-mergeable'] },
+        }),
+        now: `t${i}`,
+        logger: silentLogger,
+      });
+    }
+
+    assert.equal(
+      outcome.decisionResets,
+      RESET_CAP,
+      'the escape hatch is bounded per head',
+    );
+    assert.equal(outcome.lane, LANE_SLOW, 'once the cap is spent the lane demotes as it always did');
+    assert.equal(noProgressLane.DEFAULT_NO_PROGRESS_DECISION_RESET_CAP, RESET_CAP);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('LANESTARVE-01: a slow-lane PR is re-walked within the ceiling however deep its backoff', () => {
+  // 12 ticks = one hour at the production 5m cadence, the ceiling the module
+  // already documents. Asserted as a literal so the claim survives the constant
+  // being renamed, and cross-checked against the export below.
+  const CEILING = 12;
+  const ledger = {
+    headSha: HEAD_A,
+    progressClass: 'self-resolving',
+    fingerprint: 'x',
+    noProgressTicks: 40,
+    skippedTicks: CEILING,
+  };
+  // Even asked for an absurd backoff, the ceiling is what decides.
+  const decision = evaluateNoProgressLane(ledger, {
+    headSha: HEAD_A,
+    maxBackoffTicks: 10_000,
+  });
+  assert.equal(decision.lane, LANE_SLOW);
+  assert.equal(decision.backoffTicks, CEILING);
+  assert.equal(decision.due, true, 'no PR sits in the slow lane past the re-walk ceiling');
+  assert.equal(decision.reason, 'slow-lane-rewalk-ceiling');
+  assert.equal(noProgressLane.DEFAULT_NO_PROGRESS_REWALK_CEILING_TICKS, CEILING);
+});
+
+test('LANESTARVE-01: the gate threads the handler decision and floor admission into the ledger', async () => {
+  const rootDir = tempRoot();
+  try {
+    const row = { review_status: 'posted', pr_state: 'open', reviewer_head_sha: HEAD_A, review_attempts: 1 };
+    const gate = createNoProgressLaneGate({
+      rootDir,
+      readReviewRow: () => row,
+      now: () => '2026-09-12T00:00:00.000Z',
+      logger: silentLogger,
+    });
+    const handler = { repoPath: REPO, prNumber: 777, headSha: HEAD_A };
+
+    await gate.record(handler, {
+      value: { outcome: 'await-operator', amaClosureResult: { reasons: ['ci-not-green'] } },
+    });
+    const first = readNoProgressLane(rootDir, { repo: REPO, prNumber: 777 }, { logger: silentLogger });
+    assert.equal(
+      first.decisionFingerprint,
+      decisionFingerprintOf({ outcome: 'await-operator', amaClosureResult: { reasons: ['ci-not-green'] } }),
+      'the gate persists what the handler actually decided, not just the review row',
+    );
+
+    // Same row, same decision, but admitted by the starvation floor: no escalation.
+    await gate.record(handler, {
+      value: { outcome: 'await-operator', amaClosureResult: { reasons: ['ci-not-green'] } },
+      laneAdmission: 'starvation-floor',
+    });
+    const second = readNoProgressLane(rootDir, { repo: REPO, prNumber: 777 }, { logger: silentLogger });
+    assert.equal(
+      second.noProgressTicks,
+      first.noProgressTicks,
+      'a floor admission recorded through the real gate does not escalate either',
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });

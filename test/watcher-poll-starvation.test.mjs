@@ -3184,3 +3184,127 @@ test('LANESTARVE-01: the gate threads the handler decision and floor admission i
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
+
+// --- LANESTARVE-01 review follow-up: the operator-alert debounce must not
+// --- survive a decision-only reset ------------------------------------------
+//
+// The no-progress ledger and the operator-decision alert debounce are SEPARATE
+// durable stores. The debounce is keyed by repo/PR/head/review-state
+// fingerprint and NOT by decisionFingerprint, so a decision-only reset leaves
+// the key identical.
+//
+// That is exactly the case the reset represents: "the blocker moved even though
+// the row did not." Restarting the counter while holding the old debounce parks
+// a PR on a DIFFERENT operator-required condition and never tells the operator —
+// the alert the new series earns is swallowed by a debounce written for a
+// blocker that no longer applies.
+//
+// `clearNoProgressLane` already clears this store when the whole lane is
+// dropped; a decision-only reset has the same claim on it.
+
+test('LANESTARVE-01: a decision-only reset re-arms the operator-decision alert', async () => {
+  const rootDir = tempRoot();
+  try {
+    const identity = { repo: REPO, prNumber: 1061 };
+    // The review row never changes — the watcher writes nothing for a PR that is
+    // only waiting on an operator — so the debounce key is stable across both
+    // series. That stability is the whole bug.
+    const unchangedRow = subjectProgressFingerprint(
+      { review_status: 'posted', pr_state: 'open', reviewer_head_sha: HEAD_A, review_attempts: 1 },
+      { headSha: HEAD_A },
+    );
+    const blockerOne = decisionFingerprintOf({
+      outcome: 'await-operator',
+      gateDecision: { state: 'blocked', reason: 'blocking-findings' },
+      amaClosureResult: { reason: 'not-eligible', reasons: ['blocking-findings'] },
+    });
+    const blockerTwo = decisionFingerprintOf({
+      outcome: 'await-operator',
+      gateDecision: { state: 'blocked', reason: 'operator-skip-label' },
+      amaClosureResult: { reason: 'not-eligible', reasons: ['operator-skip-label'] },
+    });
+    assert.notEqual(blockerOne, blockerTwo, 'the two blockers must differ for this test to mean anything');
+
+    const alerts = [];
+    const deliverAlertFn = async (text, meta) => { alerts.push({ text, meta }); };
+
+    // Series 1: drive past the alert threshold and fire the operator alert.
+    let outcome = null;
+    for (let i = 0; i <= DEFAULT_OPERATOR_BLOCKED_ALERT_NO_PROGRESS_TICKS; i += 1) {
+      outcome = recordNoProgressLaneRun(rootDir, identity, {
+        headSha: HEAD_A,
+        fingerprint: unchangedRow,
+        decisionFingerprint: blockerOne,
+        progressClass: PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED,
+        now: `a${i}`,
+        logger: silentLogger,
+      });
+    }
+    const firedFirst = await maybeFireOperatorDecisionRequiredAlert({
+      rootDir,
+      identity,
+      headSha: HEAD_A,
+      fingerprint: unchangedRow,
+      noProgressTicks: outcome.noProgressTicks,
+      deliverAlertFn,
+      logger: silentLogger,
+    });
+    assert.equal(firedFirst, true, 'the first operator alert must fire');
+    assert.equal(alerts.length, 1);
+
+    // Debounce holds while the SAME blocker persists — this must keep working.
+    const suppressed = await maybeFireOperatorDecisionRequiredAlert({
+      rootDir,
+      identity,
+      headSha: HEAD_A,
+      fingerprint: unchangedRow,
+      noProgressTicks: outcome.noProgressTicks,
+      deliverAlertFn,
+      logger: silentLogger,
+    });
+    assert.equal(suppressed, false, 'the debounce must still suppress a repeat of the same blocker');
+    assert.equal(alerts.length, 1);
+
+    // The blocker moves. Row is byte-identical, so the debounce key is too.
+    const reset = recordNoProgressLaneRun(rootDir, identity, {
+      headSha: HEAD_A,
+      fingerprint: unchangedRow,
+      decisionFingerprint: blockerTwo,
+      progressClass: PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED,
+      now: 'blocker-moved',
+      logger: silentLogger,
+    });
+    assert.equal(reset.decisionReset, true, 'the decision change must reset the series');
+    assert.equal(reset.noProgressTicks, 0);
+
+    // Series 2: the NEW blocker earns its own alert.
+    let second = reset;
+    for (let i = 0; i <= DEFAULT_OPERATOR_BLOCKED_ALERT_NO_PROGRESS_TICKS; i += 1) {
+      second = recordNoProgressLaneRun(rootDir, identity, {
+        headSha: HEAD_A,
+        fingerprint: unchangedRow,
+        decisionFingerprint: blockerTwo,
+        progressClass: PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED,
+        now: `b${i}`,
+        logger: silentLogger,
+      });
+    }
+    const firedSecond = await maybeFireOperatorDecisionRequiredAlert({
+      rootDir,
+      identity,
+      headSha: HEAD_A,
+      fingerprint: unchangedRow,
+      noProgressTicks: second.noProgressTicks,
+      deliverAlertFn,
+      logger: silentLogger,
+    });
+    assert.equal(
+      firedSecond,
+      true,
+      'a decision-only reset must re-arm the alert: the PR is parked on a DIFFERENT operator blocker and the operator has not been told',
+    );
+    assert.equal(alerts.length, 2);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});

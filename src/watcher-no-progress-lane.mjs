@@ -822,6 +822,21 @@ export function recordNoProgressLaneRun(rootDir, identity, {
   const priorStalledEvent = seriesContinues && existing?.stalledEvent
     ? existing.stalledEvent
     : null;
+  // The operator-decision alert debounce is a SEPARATE durable store, keyed by
+  // repo/PR/head/review-state fingerprint --- and NOT by decisionFingerprint. A
+  // decision-only reset keeps the review-state fingerprint identical, so a
+  // debounce file written for an earlier blocker on this head still matches and
+  // would suppress the alert for the new series.
+  //
+  // That is precisely the case this reset exists to represent: "the blocker
+  // moved even though the row did not." Restarting the counter while silently
+  // holding the old debounce would park a PR on a DIFFERENT operator-required
+  // condition and never tell the operator. `clearNoProgressLane` already clears
+  // this store when the whole lane is dropped; a decision-only reset has the
+  // same claim on it.
+  if (decisionResetHonoured) {
+    clearOperatorDecisionAlertState(rootDir, identity, { logger });
+  }
   const priorPromotedFrom = sameHead && existing?.promotedFrom && typeof existing.promotedFrom === 'object'
     ? existing.promotedFrom
     : null;

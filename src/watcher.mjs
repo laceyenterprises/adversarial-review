@@ -345,7 +345,7 @@ import {
   DEFAULT_WATCHER_STALL_EXIT_CODE,
   DEFAULT_WATCHER_STALL_WATCHDOG_MS,
 } from './watcher-heartbeat.mjs';
-import { orderSubjectEntriesDiscoveryFirst } from './watcher-poll-fairness.mjs';
+import { orderSubjectEntriesDiscoveryFirst, orderSubjectEntriesRereviewOldestFirst } from './watcher-poll-fairness.mjs';
 import {
   createPollStarvationHandler,
   createPollStarvationRestartRequester,
@@ -1408,6 +1408,7 @@ async function pollOnce(
       logger: console,
       hasReviewRow: (entry) => Boolean('current' in entry ? entry.current : (entry.current = stmtGetReviewRow.get(repoPath, entry.prNumber))),
     });
+    subjectEntries = orderSubjectEntriesRereviewOldestFirst(subjectEntries, { repoPath, logger: console });
     await runDuplicateFamilyCensusForWatcher({ db, subjectEntries, repoPath, rootDir: ROOT, env: process.env });
     for (const subjectEntry of subjectEntries) {
       await processReviewSubject(subjectEntry, {

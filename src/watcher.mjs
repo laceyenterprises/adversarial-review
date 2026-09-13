@@ -302,7 +302,10 @@ import {
   getStalePostedReviewBudgetSuppression,
   isExplicitOperatorReviewRetrigger,
 } from './first-pass-review-suppression.mjs';
-import { getStalePostedReviewAutoRereviewSuppression } from './stale-posted-review-rereview.mjs';
+import {
+  getStalePostedReviewAutoRereviewSuppression,
+  shouldSuppressStalePostedReviewForCloserHead,
+} from './stale-posted-review-rereview.mjs';
 import {
   reconcileOrphanedReviewing,
   shouldReconcileStaleReviewerSession,
@@ -1954,6 +1957,7 @@ export {
   reviewCycleExhaustedFromRounds,
   createHeadCloserCommitSuppressionResolver,
   getStalePostedReviewAutoRereviewSuppression,
+  shouldSuppressStalePostedReviewForCloserHead,
   getStalePostedReviewBudgetSuppression,
   getHeadCloserCommitSuppression,
   getHeadCloserCommitSuppressionWithBoundedRetry,

@@ -53,6 +53,7 @@ import {
   isTerminalCloserCommitIdentity,
   maybeDispatchAmaClosureFor,
   resolveFirstPassReviewBudgetSuppression,
+  shouldSuppressStalePostedReviewForCloserHead,
 } from '../src/watcher.mjs';
 
 
@@ -347,6 +348,56 @@ test('watcher suppresses stale-review auto-refresh only for an active current-he
     suppressed: true,
     reason: 'dispatch-running',
   });
+});
+
+test('closer-head auto-refresh suppression stays only while close handoff is active', () => {
+  const closerSuppression = { suppressed: true, reason: 'closer-commit-trailer' };
+
+  assert.deepEqual(
+    shouldSuppressStalePostedReviewForCloserHead({
+      closerSuppression,
+      mergeAgentSuppression: {
+        suppressed: true,
+        reason: 'active-current-head-merge-agent-dispatch',
+      },
+    }),
+    {
+      suppressed: true,
+      reason: 'closer-commit-trailer',
+      mergeAgentReason: 'active-current-head-merge-agent-dispatch',
+    }
+  );
+
+  assert.deepEqual(
+    shouldSuppressStalePostedReviewForCloserHead({
+      closerSuppression,
+      mergeAgentSuppression: { suppressed: false, reason: 'dispatch-failed' },
+    }),
+    {
+      suppressed: false,
+      reason: null,
+      lifted: true,
+      closerReason: 'closer-commit-trailer',
+    }
+  );
+});
+
+test('explicit retrigger-review overrides closer-head auto-refresh suppression', () => {
+  assert.deepEqual(
+    shouldSuppressStalePostedReviewForCloserHead({
+      closerSuppression: { suppressed: true, reason: 'closer-commit-trailer' },
+      mergeAgentSuppression: {
+        suppressed: true,
+        reason: 'active-current-head-merge-agent-dispatch',
+      },
+      explicitOperatorRetrigger: true,
+    }),
+    {
+      suppressed: false,
+      reason: null,
+      override: 'explicit-operator-retrigger',
+    }
+  );
 });
 
 test('watcher ignores stranded merge-agent-dispatched labels once current-head dispatch state is gone', async () => {

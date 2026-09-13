@@ -67,3 +67,33 @@ export async function getStalePostedReviewAutoRereviewSuppression({
 
   return { suppressed: false, reason: null };
 }
+
+export function shouldSuppressStalePostedReviewForCloserHead({
+  closerSuppression,
+  mergeAgentSuppression,
+  explicitOperatorRetrigger = false,
+} = {}) {
+  if (explicitOperatorRetrigger) {
+    return {
+      suppressed: false,
+      reason: null,
+      override: 'explicit-operator-retrigger',
+    };
+  }
+  if (!closerSuppression?.suppressed) {
+    return { suppressed: false, reason: null };
+  }
+  if (mergeAgentSuppression?.suppressed) {
+    return {
+      suppressed: true,
+      reason: closerSuppression.reason || 'closer-commit',
+      mergeAgentReason: mergeAgentSuppression.reason || null,
+    };
+  }
+  return {
+    suppressed: false,
+    reason: null,
+    lifted: true,
+    closerReason: closerSuppression.reason || 'closer-commit',
+  };
+}

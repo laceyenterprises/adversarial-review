@@ -344,6 +344,15 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     thresholdDescription: 'the daemon clean-merge declined the same PR for the same reason this many consecutive ticks',
   },
   {
+    code: 'review:closer_head_rereview_deadlock',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: null,
+    defaultThreshold: null,
+    thresholdDescription:
+      'a closer-authored head remains open after the merge attempt resolved, while a stale posted review on the previous head still blocks the verdict',
+  },
+  {
     code: 'review:ama_closer_lease_stale',
     tier: 'ticket',
     category: 'review-pipeline',
@@ -1809,6 +1818,74 @@ function reviewRowsByRepoPr(db) {
   return map;
 }
 
+function parseLabelsJson(labelsJson) {
+  if (!labelsJson) return [];
+  try {
+    const parsed = JSON.parse(labelsJson);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((label) => (typeof label === 'string' ? label : label?.name))
+      .map((label) => String(label || '').trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function summarizeCloserHeadRereviewDeadlocks(db, daemonMergeParks = []) {
+  if (!db) return { count: 0, prs: [] };
+  const verdictParks = new Map();
+  for (const park of Array.isArray(daemonMergeParks) ? daemonMergeParks : []) {
+    if (park?.reason !== 'verdict-not-settled-success') continue;
+    if (!park.repo || !Number.isFinite(Number(park.prNumber))) continue;
+    verdictParks.set(`${park.repo}#${Number(park.prNumber)}`, park);
+  }
+  if (verdictParks.size === 0) return { count: 0, prs: [] };
+
+  const rows = safeAll(
+    db,
+    `SELECT repo,
+            pr_number,
+            review_status,
+            reviewer_head_sha,
+            revision_ref,
+            rereview_reason,
+            posted_at,
+            labels_json
+       FROM reviewed_prs
+      WHERE COALESCE(pr_state, 'open') = 'open'
+        AND review_status = 'posted'
+        AND reviewer_head_sha IS NOT NULL
+        AND reviewer_head_sha <> ''
+        AND revision_ref IS NOT NULL
+        AND revision_ref <> ''
+        AND reviewer_head_sha <> revision_ref`
+  );
+
+  const prs = [];
+  for (const row of rows) {
+    const key = `${row.repo}#${row.pr_number}`;
+    const park = verdictParks.get(key);
+    if (!park) continue;
+    prs.push({
+      repo: row.repo,
+      prNumber: row.pr_number,
+      reviewedHeadSha: row.reviewer_head_sha,
+      currentHeadSha: row.revision_ref,
+      reviewStatus: row.review_status,
+      rereviewReason: row.rereview_reason || null,
+      postedAt: row.posted_at || null,
+      parkReason: park.reason,
+      firstObservedAt: park.firstObservedAt || null,
+      lastObservedAt: park.lastObservedAt || null,
+      observationCount: Number(park.observationCount || 0),
+      headSha: park.headSha || row.revision_ref,
+      labels: parseLabelsJson(row.labels_json),
+    });
+  }
+  return { count: prs.length, prs };
+}
+
 function isReviewSettledStop(job) {
   return job?.remediationPlan?.stop?.code === 'review-settled'
     || job?.stopCode === 'review-settled'
@@ -3064,6 +3141,34 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }));
   }
 
+  if (snapshot.closerHeadRereviewDeadlocks?.count > 0) {
+    const deadlocks = snapshot.closerHeadRereviewDeadlocks.prs;
+    const sample = deadlocks[0];
+    findings.push(buildFinding({
+      code: 'review:closer_head_rereview_deadlock',
+      tier: 'ticket',
+      subject: `${deadlocks.length} closer-remediated PR(s) need a current-head review after the closer did not merge`,
+      message: `${sample.repo}#${sample.prNumber} is still open with a posted review on superseded head `
+        + `${String(sample.reviewedHeadSha || '').slice(0, 12)}, while the current closer head `
+        + `${String(sample.currentHeadSha || sample.headSha || '').slice(0, 12)} is parked on `
+        + '`verdict-not-settled-success`. The closer-head auto-refresh suppression is no longer safe '
+        + 'once the merge attempt has resolved without closing.',
+      evidence: deadlocks.map((entry) => (
+        `reviews.db + daemon-merge-parks ${entry.repo}#${entry.prNumber} `
+        + `review_status=${entry.reviewStatus} reviewed_head=${String(entry.reviewedHeadSha || '').slice(0, 12)} `
+        + `current_head=${String(entry.currentHeadSha || entry.headSha || '').slice(0, 12)} `
+        + `park_reason=${entry.parkReason} observations=${entry.observationCount}`
+      )),
+      recommendedAction: 'Let the watcher re-arm a review for the current closer head. If immediate operator recovery is needed, apply `retrigger-review`; that label is an explicit override of closer-head suppression.',
+      observedAt,
+      details: {
+        progressClass: 'stuck',
+        reason: 'closer-head-rereview-deadlock',
+        prs: deadlocks,
+      },
+    }));
+  }
+
   // A standing daemon park is the highest-signal stall we have: the daemon named
   // the exact reason it declined, so the ticket can name the lever instead of
   // listing candidates. Grouped by reason so one ticket per distinct cause.
@@ -3391,6 +3496,9 @@ function collectReviewPipelineHealth({
       nowMs,
       staleAfterMs: config.pipelineTickIntervalMs * 2,
     });
+    const closerHeadRereviewDeadlocks = db
+      ? summarizeCloserHeadRereviewDeadlocks(db, daemonMergeParks)
+      : { count: 0, prs: [] };
     const zombieReviewerPasses = db
       ? summarizeZombieReviewerPasses(db, { nowMs, config })
       : { thresholdMs: config.runningReviewerPassMaxAgeMs, rows: [] };
@@ -3495,6 +3603,7 @@ function collectReviewPipelineHealth({
       mergeStalls,
       amaCloserLeases,
       daemonMergeParks,
+      closerHeadRereviewDeadlocks,
       zombieReviewerPasses,
       stuckReviewLoops,
       terminalReviewFailures,

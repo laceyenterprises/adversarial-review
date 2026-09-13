@@ -150,6 +150,29 @@ function insertActiveTtmFlag(rootDir, overrides = {}) {
   }
 }
 
+function writeDaemonMergePark(rootDir, overrides = {}) {
+  const dir = path.join(rootDir, 'data', 'daemon-merge-parks');
+  mkdirSync(dir, { recursive: true });
+  const repo = overrides.repo || REPO;
+  const prNumber = overrides.prNumber || 6746;
+  const filePath = path.join(
+    dir,
+    `${repo.replace(/[^A-Za-z0-9._-]+/g, '__')}__pr-${prNumber}.json`
+  );
+  writeFileSync(filePath, `${JSON.stringify({
+    schemaVersion: 1,
+    repo,
+    prNumber,
+    headSha: overrides.headSha || '9207249a6-current-closer-head',
+    reason: overrides.reason || 'verdict-not-settled-success',
+    firstObservedAt: overrides.firstObservedAt || '2026-05-25T17:55:00.000Z',
+    lastObservedAt: overrides.lastObservedAt || NOW,
+    observationCount: overrides.observationCount ?? 1,
+    remedy: null,
+  }, null, 2)}\n`);
+  return filePath;
+}
+
 function writeJob(rootDir, state, name, job) {
   const dir = path.join(rootDir, 'data', 'follow-up-jobs', state);
   mkdirSync(dir, { recursive: true });
@@ -202,6 +225,45 @@ test('reviewer death-rate finding fires on a high failed/attempted ratio and cle
 
   const cleared = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
   assert.ok(!findingCodes(cleared).includes('review:reviewer_death_rate_high'));
+});
+
+test('pipeline health names closer-head rereview deadlock separately from ordinary changes requested', () => {
+  const rootDir = tempRoot();
+  const db = openDb(rootDir);
+  try {
+    db.prepare(
+      `INSERT INTO reviewed_prs
+         (repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+          review_attempts, last_attempted_at, posted_at, reviewer_head_sha,
+          revision_ref, labels_json)
+       VALUES (?, ?, ?, ?, 'open', 'posted', 1, ?, ?, ?, ?, ?)`
+    ).run(
+      REPO,
+      6746,
+      '2026-05-25T17:00:00.000Z',
+      'claude',
+      '2026-05-25T17:00:00.000Z',
+      '2026-05-25T17:00:00.000Z',
+      '70c8395f7-reviewed-head',
+      '9207249a6-current-closer-head',
+      JSON.stringify(['merge-agent-dispatched'])
+    );
+  } finally {
+    db.close();
+  }
+  seedFreshReconcile(rootDir);
+  writeDaemonMergePark(rootDir, { prNumber: 6746 });
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+
+  assert.ok(findingCodes(snapshot).includes('review:closer_head_rereview_deadlock'));
+  assert.equal(snapshot.closerHeadRereviewDeadlocks.count, 1);
+  assert.equal(snapshot.closerHeadRereviewDeadlocks.prs[0].prNumber, 6746);
+  const finding = snapshot.findings.find(
+    (entry) => entry.code === 'review:closer_head_rereview_deadlock'
+  );
+  assert.match(finding.recommended_action, /retrigger-review/);
+  assert.match(finding.evidence[0], /reviewed_head=70c8395f7-re/);
 });
 
 test('reviewer death-rate finding aggregates mixed failure classes over settled attempts only', () => {

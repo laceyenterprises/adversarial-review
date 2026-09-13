@@ -202,7 +202,10 @@ import { maybeDispatchReviewerTimeoutExhaustedMergeAgent } from './reviewer-time
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { resolveReviewPopulationRetryConfig } from './role-config.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
-import { getStalePostedReviewAutoRereviewSuppression } from './stale-posted-review-rereview.mjs';
+import {
+  getStalePostedReviewAutoRereviewSuppression,
+  shouldSuppressStalePostedReviewForCloserHead,
+} from './stale-posted-review-rereview.mjs';
 import { computeVocabularyFatigueFindingForPR } from './vocabulary-fatigue.mjs';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import { reserveReviewerMemoryAdmission } from './watcher-reviewer-pool.mjs';
@@ -1184,10 +1187,18 @@ export async function processReviewSubject(entry, ctx) {
         postedReviewHeadMoved && !stalePostedReviewSuppression.suppressed
           ? await resolveHeadCloserCommitSuppression()
           : { suppressed: false, reason: null };
+      const stalePostedReviewCloserRefreshSuppression =
+        postedReviewHeadMoved && !stalePostedReviewSuppression.suppressed
+          ? shouldSuppressStalePostedReviewForCloserHead({
+            closerSuppression: stalePostedReviewCloserSuppression,
+            mergeAgentSuppression: stalePostedReviewSuppression,
+            explicitOperatorRetrigger: isExplicitOperatorReviewRetrigger(existing),
+          })
+          : { suppressed: false, reason: null };
       const stalePostedReviewBudgetSuppression =
         postedReviewHeadMoved &&
           !stalePostedReviewSuppression.suppressed &&
-          !stalePostedReviewCloserSuppression.suppressed
+          !stalePostedReviewCloserRefreshSuppression.suppressed
           ? getStalePostedReviewBudgetSuppression({
             rootDir: ROOT,
             domainId,
@@ -1207,11 +1218,13 @@ export async function processReviewSubject(entry, ctx) {
             `head moved ${existing.reviewer_head_sha.slice(0, 12)} → ${subject.headSha.slice(0, 12)} ` +
             `because ${stalePostedReviewSuppression.reason}; leaving posted review to the merge-agent`
         );
-      } else if (postedReviewHeadMoved && stalePostedReviewCloserSuppression.suppressed) {
+      } else if (postedReviewHeadMoved && stalePostedReviewCloserRefreshSuppression.suppressed) {
         console.log(
           `[watcher] auto-refresh SUPPRESSED for ${repoPath}#${prNumber}: ` +
             `head moved ${existing.reviewer_head_sha.slice(0, 12)} → ${subject.headSha.slice(0, 12)} ` +
-            `because ${stalePostedReviewCloserSuppression.reason}; leaving posted review intact`
+            `because ${stalePostedReviewCloserRefreshSuppression.reason}; closer merge attempt still in flight ` +
+            `(${stalePostedReviewCloserRefreshSuppression.mergeAgentReason || 'merge-agent-active'}); ` +
+            `leaving posted review intact`
         );
       } else if (postedReviewHeadMoved && stalePostedReviewBudgetSuppression.suppressed) {
         const budgetDetail =

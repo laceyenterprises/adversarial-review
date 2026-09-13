@@ -961,6 +961,7 @@ export {
   detectPublicReplyNoiseSignal,
   extractNonBlockingFindingIdentities,
   isNoneFindingsSentinelOnly,
+  normalizeOperationalBlockerTitle,
   normalizeCoverageTitle,
   parseBlockingFindingsSection,
   parseNonBlockingFindingsSection,

@@ -10568,7 +10568,7 @@ test('reconcileFollowUpJob posts a public PR comment on no-progress stop with th
     validation: ['npm test'],
     blockers: [],
     operationalBlockers: [{
-      title: 'auth-failure',
+      title: 'auth_failure',
       finding: 'GitHub OAuth failed while pushing the remediation branch.',
       reasoning: 'gh auth status reported an expired OAuth token.',
     }],
@@ -10615,7 +10615,7 @@ test('reconcileFollowUpJob posts a public PR comment on no-progress stop with th
   }));
 
   assert.equal(result.action, 'stopped');
-  assert.equal(result.job.operationalBlockers[0].title, 'auth-failure');
+  assert.equal(result.job.operationalBlockers[0].title, 'auth_failure');
   assert.equal(result.job.rescue.reason, 'github-auth-operational-blocker');
   assert.deepEqual(bundleCalls[0].slice(0, 6), ['bundle', 'create', result.job.rescue.bundlePath, 'HEAD', '--not', '--remotes']);
   assert.equal(commentCalls.length, 1, 'reconcile must post exactly one comment per terminal transition');

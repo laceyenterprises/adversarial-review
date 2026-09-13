@@ -5,7 +5,10 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { markFollowUpJobStopped } from '../src/follow-up-jobs.mjs';
-import { collectReviewPipelineHealth } from '../src/review-pipeline-health.mjs';
+import {
+  collectReviewPipelineHealth,
+  renderReviewPipelinePrometheus,
+} from '../src/review-pipeline-health.mjs';
 import { DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS } from '../src/reviewer-lease.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 
@@ -230,4 +233,52 @@ test('stopped remediation operational blockers are surfaced by category', () => 
   assert.match(finding.message, /auth-failure/);
   assert.ok(finding.evidence.some((line) => line.includes('job-auth') && line.includes('auth-failure')));
   assert.equal(finding.details.oldest.rescue.bundlePath, '/tmp/rescue/job-auth.bundle');
+});
+
+test('stopped remediation operational blocker metrics bucket free-text categories', () => {
+  const rootDir = tempRoot();
+  const pendingDir = path.join(rootDir, 'data', 'follow-up-jobs', 'pending');
+  mkdirSync(pendingDir, { recursive: true });
+  const jobPath = path.join(pendingDir, 'job-free-text.json');
+  const rawTitle = 'auth-failure while pushing laceyenterprises/agent-os#6755 at 2026-09-13T01:02:03Z';
+  writeFileSync(jobPath, `${JSON.stringify({
+    jobId: 'job-free-text',
+    repo: REPO,
+    prNumber: 6755,
+    status: 'pending',
+    remediationPlan: {
+      currentRound: 2,
+      maxRounds: 3,
+      rounds: [{ round: 2, state: 'in-progress' }],
+    },
+  }, null, 2)}\n`, 'utf8');
+
+  markFollowUpJobStopped({
+    rootDir,
+    jobPath,
+    stoppedAt: '2026-08-11T17:00:00.000Z',
+    stopCode: 'no-progress',
+    stopReason: 'Human intervention required.',
+    operationalBlockers: [
+      {
+        title: rawTitle,
+        finding: 'GitHub OAuth failed while publishing remediation.',
+        reasoning: 'The worker could not fetch or push the current PR branch.',
+      },
+    ],
+  });
+
+  const snapshot = collect(rootDir);
+  assert.deepEqual(snapshot.operationalBlockers.byCategory, [
+    { category: 'other', count: 1 },
+  ]);
+  assert.ok(snapshot.operationalBlockers.rounds[0].categories.includes('other'));
+  const finding = snapshot.findings.find((entry) => entry.code === 'review:operational_blocker_stopped_round');
+  assert.ok(finding);
+  assert.ok(finding.evidence.some((line) => line.includes('other')));
+  assert.equal(finding.details.rounds[0].jobId, 'job-free-text');
+
+  const output = renderReviewPipelinePrometheus(snapshot);
+  assert.match(output, /^review_pipeline_operational_blocker_stopped_rounds\{category="other"\} 1$/m);
+  assert.doesNotMatch(output, /2026-09-13T01:02:03Z/);
 });

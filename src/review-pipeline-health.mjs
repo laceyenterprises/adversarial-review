@@ -15,6 +15,10 @@ import {
 } from './ttm-tracker.mjs';
 import { readDaemonMergeParks } from './daemon-merge-park-log.mjs';
 import {
+  OPERATIONAL_BLOCKER_TITLES,
+  normalizeOperationalBlockerTitle,
+} from './kernel/remediation-reply.mjs';
+import {
   DEFAULT_RECONCILE_STALE_AFTER_MS,
   evaluateReconcileFreshness,
   isPrUnverified,
@@ -1811,8 +1815,9 @@ function summarizeFollowUpQueues(rootDir, { nowMs, config }) {
 function normalizeOperationalBlockerCategory(blocker) {
   if (!blocker || typeof blocker !== 'object') return null;
   const raw = blocker.category || blocker.code || blocker.kind || blocker.name || blocker.title;
-  const category = String(raw || '').trim().toLowerCase();
-  return category || null;
+  const category = normalizeOperationalBlockerTitle(raw);
+  if (!category) return null;
+  return OPERATIONAL_BLOCKER_TITLES.has(category) ? category : 'other';
 }
 
 function summarizeOperationalBlockerStops(followUpJobs, { nowMs }) {
@@ -1823,9 +1828,7 @@ function summarizeOperationalBlockerStops(followUpJobs, { nowMs }) {
   for (const entry of followUpJobs || []) {
     const job = entry?.job || {};
     if (entry?.state !== 'stopped' && job.status !== 'stopped') continue;
-    const blockers = Array.isArray(job?.parsedReply?.operationalBlockers)
-      ? job.parsedReply.operationalBlockers
-      : (Array.isArray(job?.operationalBlockers) ? job.operationalBlockers : []);
+    const blockers = Array.isArray(job?.operationalBlockers) ? job.operationalBlockers : [];
     if (blockers.length === 0) continue;
 
     const categories = Array.from(new Set(

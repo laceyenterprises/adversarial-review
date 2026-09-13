@@ -73,3 +73,42 @@ test('validated unpushed remediation commit is recoverable after worktree remova
     rmSync(restoreDir, { recursive: true, force: true });
   }
 });
+
+test('rescue bundle fallback stays under ignored data when HQ_ROOT is unavailable', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'remediation-rescue-root-'));
+  const workspaceDir = mkdtempSync(join(tmpdir(), 'remediation-rescue-worktree-'));
+  const previousHqRoot = process.env.HQ_ROOT;
+  try {
+    delete process.env.HQ_ROOT;
+    git(workspaceDir, ['init']);
+    git(workspaceDir, ['config', 'user.name', 'Test Remediator']);
+    git(workspaceDir, ['config', 'user.email', 'test-remediator@example.invalid']);
+    writeFileSync(join(workspaceDir, 'fix.txt'), 'validated fix\n', 'utf8');
+    git(workspaceDir, ['add', 'fix.txt']);
+    git(workspaceDir, ['commit', '-m', 'validated remediation']);
+
+    const rescue = await preserveRemediationHeadBundle({
+      rootDir,
+      job: {
+        jobId: 'job-auth',
+        repo: 'laceyenterprises/agent-os',
+        prNumber: 6755,
+      },
+      workspaceDir,
+      reason: 'github-auth-operational-blocker',
+      now: () => '2026-09-13T20:00:00.000Z',
+    });
+
+    assert.equal(rescue.ok, true);
+    assert.equal(rescue.bundlePath.startsWith(join(rootDir, 'data', 'remediation-rescue')), true);
+    assert.equal(existsSync(join(rootDir, 'remediation-rescue')), false);
+  } finally {
+    if (previousHqRoot === undefined) {
+      delete process.env.HQ_ROOT;
+    } else {
+      process.env.HQ_ROOT = previousHqRoot;
+    }
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(workspaceDir, { recursive: true, force: true });
+  }
+});

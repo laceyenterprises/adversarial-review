@@ -115,7 +115,10 @@ import { validateStartupDeliveryIdentity } from './adapters/comms/github-pr-comm
 import { applyPreSpawnLifecycleGate } from './follow-up-stuck-claim-sweep.mjs';
 import { detectQuotaExhaustion, parseQuotaResetAt } from './quota-exhaustion.mjs';
 import { remediationWorkerClassFallback } from './remediation-worker-class-fallback.mjs';
-import { OPERATIONAL_BLOCKER_TITLES } from './kernel/remediation-reply.mjs';
+import {
+  OPERATIONAL_BLOCKER_TITLES,
+  normalizeOperationalBlockerTitle,
+} from './kernel/remediation-reply.mjs';
 import {
   DEFAULT_REPLIES_ROOT,
   HQ_REMEDIATION_DISPATCH_TRIGGER,
@@ -1511,11 +1514,11 @@ function buildRereviewResult({ requested, reason, outcome = null }) {
 function replyHasOperationalBlocker(reply, category = null) {
   const blockers = Array.isArray(reply?.operationalBlockers) ? reply.operationalBlockers : [];
   if (!category) return blockers.length > 0;
-  const expected = String(category).trim().toLowerCase();
+  const expected = normalizeOperationalBlockerTitle(category);
   return blockers.some((blocker) => {
-    const actual = String(
+    const actual = normalizeOperationalBlockerTitle(
       blocker?.category || blocker?.code || blocker?.kind || blocker?.name || blocker?.title || ''
-    ).trim().toLowerCase();
+    );
     return actual === expected;
   });
 }
@@ -1523,7 +1526,7 @@ function replyHasOperationalBlocker(reply, category = null) {
 function replyHasAuthOperationalBlocker(reply) {
   const blockers = Array.isArray(reply?.operationalBlockers) ? reply.operationalBlockers : [];
   return blockers.some((blocker) => {
-    const title = String(blocker?.title || '').trim().toLowerCase();
+    const title = normalizeOperationalBlockerTitle(blocker?.title);
     return AUTH_OPERATIONAL_BLOCKER_TITLES.has(title);
   });
 }
@@ -1618,7 +1621,9 @@ async function preserveRemediationHeadBundle({
       resolvedHqRoot = null;
     }
   }
-  const rescueRoot = join(resolvedHqRoot || rootDir, 'remediation-rescue');
+  const rescueRoot = resolvedHqRoot
+    ? join(resolvedHqRoot, 'remediation-rescue')
+    : join(rootDir, 'data', 'remediation-rescue');
   try {
     mkdirSync(rescueRoot, { recursive: true });
     pruneRemediationRescueBundles({ rescueRoot, nowMs: Date.parse(observedAt), log });

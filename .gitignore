@@ -2,6 +2,10 @@ node_modules/
 .env
 tools/adversarial-review/adversarial-review.env
 data/
+# Rescue bundles normally live under $HQ_ROOT/remediation-rescue. If HQ_ROOT is
+# unavailable, the local fallback is under ignored data/; keep a direct guard too
+# so an operator probe cannot dirty the deployed submodule checkout.
+/remediation-rescue/
 *.log
 /reviews.db
 # Rendered LaunchAgent wrappers produced by

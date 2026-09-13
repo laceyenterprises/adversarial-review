@@ -330,6 +330,24 @@ function isCompletedGeminiQuotaFallbackJob(job, status) {
   return fallbackReviewReasonForJob(job) === 'primary-reviewer-quota-capped';
 }
 
+function isHeadChangeRereviewReason(reason) {
+  const normalized = normalizeComparableString(reason);
+  return (
+    normalized.startsWith('auto-refresh: posted review on stale head')
+    || normalized.startsWith('fsr-06b: trailer-only head move detected')
+  );
+}
+
+function completedHeadChangeRereviewIsSettledClean({ latestJob, latestJobStatus, reviewRow }) {
+  if (latestJobStatus !== 'completed') return false;
+  if (latestJob?.reReview?.requested === true) return false;
+  if (!isHeadChangeRereviewReason(reviewRow?.rereview_reason)) return false;
+  const verdict = normalizeEffectiveReviewVerdict(latestJob.reviewBody);
+  if (verdict !== 'comment-only' && verdict !== 'approved') return false;
+  const blocking = classifyBlockingFindings(latestJob.reviewBody, { lastVerdict: verdict || null });
+  return blocking.state === 'known' && blocking.count === 0;
+}
+
 function resolveSettledReviewVerdict(
   rootDir,
   {
@@ -344,18 +362,21 @@ function resolveSettledReviewVerdict(
 ) {
   const reviewedHeadSha = reviewRow?.reviewer_head_sha || null;
   const reviewStatus = normalizeReviewStatus(reviewRow?.review_status);
+  const isHeadChangeRereview = isHeadChangeRereviewReason(reviewRow?.rereview_reason);
   const isQuotaCapped = primaryReviewerQuotaCappedForRow(reviewRow);
-  if (reviewStatus !== 'posted' && !isQuotaCapped) {
+  if (reviewStatus !== 'posted' && !isQuotaCapped && !(reviewStatus === 'pending' && isHeadChangeRereview)) {
     return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
   }
   if (currentHeadSha && reviewedHeadSha && String(reviewedHeadSha) !== String(currentHeadSha)) {
-    if (!isQuotaCapped) {
+    if (!isQuotaCapped && !isHeadChangeRereview) {
       return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
     }
   }
 
   const latestJobQuery = { repo, prNumber };
-  if (currentHeadSha) latestJobQuery.revisionRef = currentHeadSha;
+  if (currentHeadSha && !isHeadChangeRereview) {
+    latestJobQuery.revisionRef = currentHeadSha;
+  }
   const latestJob = latestJobFinder(rootDir, latestJobQuery);
   const latestJobStatus = normalizeFollowUpJobStatus(latestJob?.status);
   if (latestJobStatus === 'pending' || latestJobStatus === 'in-progress') {
@@ -571,6 +592,13 @@ function pickAdversarialGateStatus({
   const latestJobStatus = normalizeFollowUpJobStatus(latestJob?.status);
 
   if (reviewStatus === 'pending') {
+    if (completedHeadChangeRereviewIsSettledClean({ latestJob, latestJobStatus, reviewRow, headSha })) {
+      return decide(
+        'success',
+        'Non-blocking adversarial review is settled; queued head-change revalidation is advisory.',
+        'review-settled-head-change-rereview'
+      );
+    }
     if (latestJobStatus === 'completed' && latestJob?.reReview?.requested === true) {
       return decide('pending', 'Queued re-review has not posted yet.', 'rereview-queued');
     }

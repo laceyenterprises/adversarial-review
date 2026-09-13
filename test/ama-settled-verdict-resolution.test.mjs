@@ -79,6 +79,32 @@ test('an in-progress remediation is remediation-pending, not settled', () => {
   assert.equal(res.remediationPending, true);
 });
 
+test('head-change advisory rereview resolves clean prior-head job without current-head filtering', () => {
+  const queries = [];
+  const res = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 53,
+    currentHeadSha: 'new-head',
+    reviewRow: {
+      review_status: 'pending',
+      rereview_reason: 'auto-refresh: posted review on stale head old-head; current head is new-head',
+    },
+    latestJobFinder: (_rootDir, query) => {
+      queries.push(query);
+      return {
+        status: 'completed',
+        revisionRef: 'old-head',
+        reviewBody: REVIEW_BODY('Comment only', '- None.'),
+        reReview: { requested: false },
+      };
+    },
+  });
+
+  assert.deepEqual(queries, [{ repo: 'acme/agent-os', prNumber: 53 }]);
+  assert.equal(res.verdict, 'comment-only');
+  assert.equal(res.remediationPending, false);
+});
+
 test('a pending remediation is remediation-pending, not settled', () => {
   const res = resolveSettledReviewVerdict('/root', {
     repo: 'acme/agent-os',

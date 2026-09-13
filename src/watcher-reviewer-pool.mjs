@@ -407,6 +407,21 @@ function logReviewerDispatchWait(candidate, {
   }
 }
 
+function logReviewerDispatchDeferred(candidate, {
+  logger = console,
+  reason = 'not-started',
+  nowMs = Date.now(),
+} = {}) {
+  const waitMs = reviewerDispatchWaitMs(candidate, nowMs);
+  const waitText = waitMs === null ? 'unknown' : String(Math.round(waitMs));
+  logger?.warn?.(
+    `[watcher] reviewer dispatch DEFERRED for ` +
+      `${candidate?.repoPath || 'unknown'}#${candidate?.prNumber || 'unknown'}: ` +
+      `reason=${reason} reviewer=${candidate?.reviewerModel || 'unknown'} ` +
+      `pass_kind=${reviewerDispatchPassKind(candidate)} wait_ms=${waitText}`
+  );
+}
+
 function createReviewerMemoryAdmissionSampler({
   readSample = readMemoryPressureSample,
   logger = console,
@@ -575,6 +590,15 @@ function incrementReviewerModelCount(counts, model) {
   counts.set(normalizedModel, (counts.get(normalizedModel) || 0) + 1);
 }
 
+function summarizeDeferredReviewerReasons(deferredReasons = []) {
+  const counts = new Map();
+  for (const reasonRow of deferredReasons) {
+    const reason = reasonRow?.reason || 'unknown';
+    counts.set(reason, (counts.get(reason) || 0) + 1);
+  }
+  return [...counts.entries()].map(([reason, count]) => `${reason}:${count}`).join(',');
+}
+
 function createDetachedReviewerDispatchTracker({ activeReviewerSpawns } = {}) {
   const detachedReviewerDispatches = new Map();
   return {
@@ -628,11 +652,30 @@ async function runBoundedReviewerDispatchQueue(candidates, {
     availableCredentials,
   });
   if (concurrencyLimit < 1) {
+    const deferredCandidates = Array.isArray(candidates) ? [...candidates] : [];
+    const nowMs = Number(now());
+    const resolvedNowMs = Number.isFinite(nowMs) ? nowMs : Date.now();
+    for (const candidate of deferredCandidates) {
+      logReviewerDispatchDeferred(candidate, {
+        logger,
+        reason: 'reviewer-pool-credential-capacity-zero',
+        nowMs: resolvedNowMs,
+      });
+    }
+    const deferredReasons = deferredCandidates.map((candidate) => ({
+      repoPath: candidate?.repoPath || null,
+      prNumber: candidate?.prNumber || null,
+      reviewerModel: candidate?.reviewerModel || null,
+      passKind: reviewerDispatchPassKind(candidate),
+      reason: 'reviewer-pool-credential-capacity-zero',
+    }));
     return {
       dispatched: 0,
       maxObservedConcurrency: 0,
-      deferred: Array.isArray(candidates) ? candidates.length : 0,
-      deferredCandidates: Array.isArray(candidates) ? [...candidates] : [],
+      deferred: deferredCandidates.length,
+      deferredCandidates,
+      deferredReasons,
+      deferredReasonSummary: summarizeDeferredReviewerReasons(deferredReasons),
     };
   }
   const geminiConcurrencyLimit = resolveGeminiDispatchConcurrencyLimit({
@@ -690,17 +733,46 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   // candidates, the gemini in-flight cap is not yet reached. A capped gemini
   // head does NOT block codex/claude candidates behind it (no head-of-line
   // stall on reviewers that don't touch the gemini pool).
+  const recordDeferredReason = (entry, reason) => {
+    if (!entry || entry.started || entry.deferredReason) return;
+    entry.deferredReason = reason;
+  };
+
   const nextStartableEntry = () => {
-    if (active.size >= concurrencyLimit) return null;
+    if (active.size >= concurrencyLimit) {
+      for (const entry of orderPendingReviewerDispatchEntries(pending, { laneState: activeLaneState })) {
+        if (!entry.started) recordDeferredReason(entry, 'reviewer-pool-saturated');
+      }
+      return null;
+    }
     for (const entry of orderPendingReviewerDispatchEntries(pending, { laneState: activeLaneState })) {
       if (entry.started) continue;
-      if (isGeminiCandidate(entry.candidate) && activeGemini >= geminiConcurrencyLimit) continue;
+      if (isGeminiCandidate(entry.candidate) && activeGemini >= geminiConcurrencyLimit) {
+        recordDeferredReason(
+          entry,
+          geminiConcurrencyLimit < 1
+            ? 'gemini-credential-concurrency-zero'
+            : 'gemini-credential-concurrency-saturated'
+        );
+        continue;
+      }
       return entry;
     }
     return null;
   };
 
   const hasUnstarted = () => pending.some((entry) => !entry.started);
+  const deferReasonFor = (candidate) => {
+    if (isGeminiCandidate(candidate) && geminiConcurrencyLimit < 1) {
+      return 'gemini-credential-concurrency-zero';
+    }
+    if (isGeminiCandidate(candidate) && activeGemini >= geminiConcurrencyLimit) {
+      return 'gemini-credential-concurrency-saturated';
+    }
+    if (initialWaveClosed) return 'single-wave-deferred';
+    if (active.size >= concurrencyLimit) return 'reviewer-pool-saturated';
+    return 'not-started';
+  };
 
   while (
     (errors.length < thrownFailureLimit && hasUnstarted() && !initialWaveClosed)
@@ -765,6 +837,9 @@ async function runBoundedReviewerDispatchQueue(candidates, {
       }
       if (active.size > 0) {
         initialWaveClosed = true;
+        for (const entry of pending) {
+          if (!entry.started) recordDeferredReason(entry, 'single-wave-deferred');
+        }
         logger?.log?.(
           `[watcher] reviewer dispatch single-wave detached after launch wave: ` +
             `active=${active.size} deferred=${pending.filter((item) => !item.started).length}`
@@ -793,13 +868,30 @@ async function runBoundedReviewerDispatchQueue(candidates, {
     if (errors.length === 1) throw errors[0];
     throw new AggregateError(errors, `${errors.length} reviewer dispatch tasks failed`);
   }
+  const deferredEntries = orderPendingReviewerDispatchEntries(pending, { laneState: activeLaneState })
+    .filter((entry) => !entry.started);
+  const resolvedNowMs = Date.now();
+  const deferredReasons = deferredEntries.map((entry) => ({
+    repoPath: entry.candidate?.repoPath || null,
+    prNumber: entry.candidate?.prNumber || null,
+    reviewerModel: entry.candidate?.reviewerModel || null,
+    passKind: reviewerDispatchPassKind(entry.candidate),
+    reason: entry.deferredReason || deferReasonFor(entry.candidate),
+  }));
+  for (let index = 0; index < deferredEntries.length; index += 1) {
+    logReviewerDispatchDeferred(deferredEntries[index].candidate, {
+      logger,
+      reason: deferredReasons[index].reason,
+      nowMs: resolvedNowMs,
+    });
+  }
   return {
     dispatched,
     maxObservedConcurrency,
-    deferred: pending.filter((entry) => !entry.started).length,
-    deferredCandidates: orderPendingReviewerDispatchEntries(pending, { laneState: activeLaneState })
-      .filter((entry) => !entry.started)
-      .map((entry) => entry.candidate),
+    deferred: deferredEntries.length,
+    deferredCandidates: deferredEntries.map((entry) => entry.candidate),
+    deferredReasons,
+    deferredReasonSummary: summarizeDeferredReviewerReasons(deferredReasons),
   };
 }
 

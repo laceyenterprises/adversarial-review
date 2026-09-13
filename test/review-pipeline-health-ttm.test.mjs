@@ -142,6 +142,13 @@ test('a stalled PR emits pr_progress_stalled, and a merely slow one emits only t
   assert.equal(stalled.details.progressClass, 'stuck');
   assert.equal(stalled.details.flagKind, 'rereview_unanswered');
   assert.deepEqual(stalled.details.flags.map((flag) => flag.prNumber), [9001]);
+  assert.equal(stalled.details.queuedRereviews.count, 1);
+  assert.equal(stalled.details.queuedRereviews.oldest.prNumber, 9001);
+  assert.match(stalled.message, /Queued re-review depth=1, oldest_age=45m/);
+  assert.ok(
+    stalled.evidence.some((line) => line.includes('queued rereview oldest')),
+    'the stalled finding should name the queued re-review backlog, not only the generic progress symptom',
+  );
 
   const slow = findingFor(snapshot, 'review:ttm_budget_breach');
   assert.equal(slow.details.progressClass, 'slow');
@@ -153,6 +160,10 @@ test('a stalled PR emits pr_progress_stalled, and a merely slow one emits only t
   assert.ok(slow.details.budgetProvenance.sampleCount >= 25);
   assert.match(slow.message, /budget derived at p90 from \d+ measured merge\(s\)/);
   assert.match(slow.recommended_action, /Trend only|THROUGHPUT signal/);
+
+  const prometheus = renderReviewPipelinePrometheus(snapshot);
+  assert.match(prometheus, /^review_pipeline_queued_rereviews 1$/m);
+  assert.match(prometheus, /^review_pipeline_queued_rereview_oldest_age_seconds 2700$/m);
 });
 
 test('concurrent progress-stall reasons emit one finding and one Prometheus series', () => {

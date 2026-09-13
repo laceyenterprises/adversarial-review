@@ -189,6 +189,7 @@ test('single-wave reviewer drain keeps scanning after skipped candidates', async
 
 test('single-wave reviewer drain treats active gemini reviewers from prior drains as occupying capacity', async () => {
   const events = [];
+  const warnings = [];
   const summary = await runBoundedReviewerDispatchQueue([
     candidate(10, async () => {
       events.push('start:10');
@@ -202,13 +203,83 @@ test('single-wave reviewer drain treats active gemini reviewers from prior drain
     activeReviewerCounts: new Map([['gemini', 1]]),
     singleWave: true,
     singleWaveSettleGraceMs: 0,
-    logger: { error() {}, log() {}, warn() {} },
+    logger: {
+      error() {},
+      log() {},
+      warn(message) {
+        warnings.push(message);
+      },
+    },
   });
 
   assert.deepEqual(events, []);
   assert.equal(summary.dispatched, 0);
   assert.equal(summary.deferred, 2);
   assert.deepEqual(summary.deferredCandidates.map((item) => item.prNumber), [10, 11]);
+  assert.deepEqual(
+    summary.deferredReasons.map((item) => [item.prNumber, item.reason]),
+    [
+      [10, 'gemini-credential-concurrency-saturated'],
+      [11, 'gemini-credential-concurrency-saturated'],
+    ],
+  );
+  assert.equal(summary.deferredReasonSummary, 'gemini-credential-concurrency-saturated:2');
+  assert.equal(warnings.length, 2);
+  assert.match(warnings[0], /reviewer dispatch DEFERRED/);
+  assert.match(warnings[0], /reason=gemini-credential-concurrency-saturated/);
+});
+
+test('RRSTALL-01: a queued rereview with a free slot starts in the same drain', async () => {
+  const events = [];
+  const rereviewCandidate = candidate(6671, async () => {
+    events.push('start:6671');
+  }, '2026-09-12T15:24:16.000Z', {
+    reviewerModel: 'gemini',
+    current: {
+      review_status: 'pending',
+      posted_at: null,
+      rereview_requested_at: '2026-09-12T15:24:16.000Z',
+    },
+  });
+
+  const summary = await runBoundedReviewerDispatchQueue([rereviewCandidate], {
+    maxConcurrent: 6,
+    geminiCredentialConcurrency: 1,
+    activeReviewerCounts: new Map(),
+    singleWave: true,
+    singleWaveSettleGraceMs: 0,
+    logger: { error() {}, log() {}, warn() {} },
+  });
+
+  assert.deepEqual(events, ['start:6671']);
+  assert.equal(summary.dispatched, 1);
+  assert.equal(summary.deferred, 0);
+  assert.deepEqual(summary.deferredReasons, []);
+});
+
+test('deferred reviewer reason is captured before single-wave settle frees capacity', async () => {
+  const events = [];
+  const summary = await runBoundedReviewerDispatchQueue([
+    candidate(10, async () => {
+      events.push('start:10');
+    }),
+    candidate(11, async () => {
+      events.push('start:11');
+    }),
+  ], {
+    maxConcurrent: 1,
+    singleWave: true,
+    singleWaveSettleGraceMs: 25,
+    logger: { error() {}, log() {}, warn() {} },
+  });
+
+  assert.deepEqual(events, ['start:10']);
+  assert.equal(summary.dispatched, 1);
+  assert.equal(summary.deferred, 1);
+  assert.deepEqual(
+    summary.deferredReasons.map((item) => [item.prNumber, item.reason]),
+    [[11, 'reviewer-pool-saturated']],
+  );
 });
 
 test('single-wave reviewer drain exposes detached launches for pre-registration capacity accounting', async () => {

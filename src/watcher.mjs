@@ -1295,7 +1295,8 @@ async function pollOnce(
         console.log(
           `[watcher] reviewer dispatch drain yielded after one launch wave: ` +
           `dispatched=${drainResult.dispatched} deferred=${drainResult.deferred} ` +
-          `max_observed_concurrency=${drainResult.maxObservedConcurrency}`
+          `max_observed_concurrency=${drainResult.maxObservedConcurrency}` +
+          (drainResult.deferredReasonSummary ? ` deferred_reasons=${drainResult.deferredReasonSummary}` : '')
         );
       }
       return drainResult;

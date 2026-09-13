@@ -2036,6 +2036,12 @@ function schemaV1() {
                 __min: 600,
                 __max: 21600,
               },
+              evidence_ttl_seconds: {
+                __type: TYPE_INT,
+                __default: 86400,
+                __min: 3600,
+                __max: 604800,
+              },
             },
           },
         },
@@ -3512,6 +3518,10 @@ export const ENV_ALIASES = {
   },
   'roles.quota_probe.exhausted_unknown_tick_seconds': {
     canonical: 'AGENT_OS_ROLES_QUOTA_PROBE_EXHAUSTED_UNKNOWN_TICK_SECONDS',
+    aliases: [],
+  },
+  'roles.quota_probe.evidence_ttl_seconds': {
+    canonical: 'AGENT_OS_ROLES_QUOTA_PROBE_EVIDENCE_TTL_SECONDS',
     aliases: [],
   },
   'oauth_broker.watchdog.portforward_self_heal_max_cycles': {

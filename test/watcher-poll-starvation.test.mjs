@@ -46,6 +46,7 @@ import {
 import {
   createPostedReviewFairnessState,
   orderSubjectEntriesDiscoveryFirst,
+  orderSubjectEntriesRereviewOldestFirst,
   runPostedReviewHandlersFairly,
 } from '../src/watcher-poll-fairness.mjs';
 import { createNoProgressLaneGate, handlePostedReviewRow } from '../src/posted-review-row.mjs';
@@ -939,6 +940,60 @@ test('discovery-first review-row callback caches the fetched row on the entry', 
   assert.equal(ordered[0], entry);
   assert.equal(reads, 1);
   assert.equal(entry.current, row);
+});
+
+test('orderSubjectEntriesRereviewOldestFirst drains pending re-reviews FIFO', () => {
+  const entries = [
+    {
+      prNumber: 6671,
+      current: {
+        review_status: 'pending',
+        rereview_requested_at: '2026-09-13T01:26:45.000Z',
+      },
+    },
+    {
+      prNumber: 6696,
+      current: {
+        review_status: 'pending',
+        rereview_requested_at: '2026-09-12T19:28:36.000Z',
+      },
+    },
+    {
+      prNumber: 6689,
+      current: {
+        review_status: 'pending',
+        rereview_requested_at: '2026-09-12T19:31:42.000Z',
+      },
+    },
+    { prNumber: 6700, current: { review_status: 'posted' } },
+  ];
+
+  const ordered = orderSubjectEntriesRereviewOldestFirst(entries, { logger: silentLogger });
+
+  assert.deepEqual(
+    ordered.map((entry) => entry.prNumber),
+    [6696, 6689, 6671, 6700],
+    'older queued re-reviews must run before a PR that re-requested again',
+  );
+});
+
+test('orderSubjectEntriesRereviewOldestFirst is stable outside pending re-reviews', () => {
+  const entries = [
+    { prNumber: 1, current: { review_status: 'pending', rereview_requested_at: null } },
+    { prNumber: 2, current: { review_status: 'posted' } },
+    {
+      prNumber: 3,
+      current: {
+        review_status: 'pending',
+        rereview_requested_at: 'not-a-date',
+      },
+    },
+  ];
+
+  assert.equal(
+    orderSubjectEntriesRereviewOldestFirst(entries, { logger: silentLogger }),
+    entries,
+  );
 });
 
 // ── Posted-review phase budget + per-handler deadline ────────────────────────

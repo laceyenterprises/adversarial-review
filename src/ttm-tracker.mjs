@@ -45,6 +45,9 @@ const DEFAULT_TTM_BASE_BUDGET_MINUTES = 15;
 const DEFAULT_TTM_PER_ROUND_BUDGET_MINUTES = 10;
 const DEFAULT_TTM_TERMINAL_UNMERGED_MINUTES = 10;
 const DEFAULT_TTM_ROLLUP_WINDOW_HOURS = 12;
+const DEFAULT_TTM_REREVIEW_LANE_SHARE_WINDOW_MINUTES = 60;
+const DEFAULT_TTM_REREVIEW_LANE_SHARE_THRESHOLD = 0.4;
+const DEFAULT_TTM_REREVIEW_LANE_SHARE_MIN_PASSES = 3;
 // Grace before an unanswered re-review request or an expired reviewer lease is
 // called stuck rather than in-flight. Deliberately a small fixed number and
 // deliberately NOT the TTM budget: this measures "nothing happened since the
@@ -172,6 +175,18 @@ function resolveTtmTrackerConfig(env = process.env, overrides = {}) {
       DEFAULT_TTM_MIN_FIT_SAMPLES
     ),
     mergeAuthorityStrictMode: resolveMergeAuthorityStrictMode(overrides),
+    rereviewLaneShareWindowMinutes: parsePositiveNumber(
+      overrides.rereviewLaneShareWindowMinutes ?? env.ADVERSARIAL_TTM_REREVIEW_LANE_SHARE_WINDOW_MINUTES,
+      DEFAULT_TTM_REREVIEW_LANE_SHARE_WINDOW_MINUTES
+    ),
+    rereviewLaneShareThreshold: parsePositiveNumber(
+      overrides.rereviewLaneShareThreshold ?? env.ADVERSARIAL_TTM_REREVIEW_LANE_SHARE_THRESHOLD,
+      DEFAULT_TTM_REREVIEW_LANE_SHARE_THRESHOLD
+    ),
+    rereviewLaneShareMinPasses: parsePositiveNumber(
+      overrides.rereviewLaneShareMinPasses ?? env.ADVERSARIAL_TTM_REREVIEW_LANE_SHARE_MIN_PASSES,
+      DEFAULT_TTM_REREVIEW_LANE_SHARE_MIN_PASSES
+    ),
   };
 }
 
@@ -594,6 +609,85 @@ function readTtmTimelines(db, { nowIso, mergeAuthorityStrictMode }) {
   ));
 }
 
+function readRecentRereviewLaneShare(db, { observedAt, config }) {
+  const observedMs = toMs(observedAt);
+  if (observedMs === null) {
+    return { windowMinutes: config.rereviewLaneShareWindowMinutes, totalPasses: 0, topPrs: [], monopolist: null };
+  }
+  const windowMinutes = config.rereviewLaneShareWindowMinutes;
+  const windowStart = isoFromMs(observedMs - windowMinutes * 60_000);
+  let rows;
+  try {
+    rows = db.prepare(
+      `SELECT repo, pr_number, started_at, ended_at, status, verdict
+         FROM reviewer_passes
+        WHERE pass_kind = 'rereview'
+          AND started_at IS NOT NULL
+          AND started_at >= ?
+        ORDER BY started_at ASC, pass_id ASC`
+    ).all(windowStart);
+  } catch (error) {
+    if (
+      error?.code === 'SQLITE_ERROR'
+      && String(error?.message || '').includes('no such table')
+    ) {
+      return { windowMinutes, totalPasses: 0, topPrs: [], monopolist: null };
+    }
+    throw error;
+  }
+
+  const byPr = new Map();
+  for (const row of rows) {
+    const key = `${row.repo}#${row.pr_number}`;
+    const existing = byPr.get(key) || {
+      repo: row.repo,
+      prNumber: Number(row.pr_number),
+      count: 0,
+      share: 0,
+      firstStartedAt: row.started_at || null,
+      latestStartedAt: row.started_at || null,
+      latestStatus: row.status || null,
+      latestVerdict: row.verdict || null,
+    };
+    existing.count += 1;
+    if (!existing.firstStartedAt || String(row.started_at || '') < String(existing.firstStartedAt)) {
+      existing.firstStartedAt = row.started_at || null;
+    }
+    if (!existing.latestStartedAt || String(row.started_at || '') > String(existing.latestStartedAt)) {
+      existing.latestStartedAt = row.started_at || null;
+      existing.latestStatus = row.status || null;
+      existing.latestVerdict = row.verdict || null;
+    }
+    byPr.set(key, existing);
+  }
+
+  const totalPasses = rows.length;
+  const topPrs = [...byPr.values()]
+    .map((entry) => ({
+      ...entry,
+      share: totalPasses > 0 ? entry.count / totalPasses : 0,
+    }))
+    .sort((a, b) => (
+      b.count - a.count
+      || a.repo.localeCompare(b.repo)
+      || a.prNumber - b.prNumber
+    ));
+  const top = topPrs[0] || null;
+  const monopolist = top
+    && top.count >= config.rereviewLaneShareMinPasses
+    && top.share >= config.rereviewLaneShareThreshold
+    ? top
+    : null;
+  return {
+    windowMinutes,
+    totalPasses,
+    threshold: config.rereviewLaneShareThreshold,
+    minPasses: config.rereviewLaneShareMinPasses,
+    topPrs,
+    monopolist,
+  };
+}
+
 function insertTtmFlagEvent(db, flag, state, observedAt) {
   db.prepare(
     `INSERT INTO ttm_flag_events (
@@ -925,6 +1019,7 @@ function evaluateTtmFromDb(db, {
     budgetBlind: budget.blind,
   });
   const eventRows = readRecentTtmFlagEvents(db, { observedAt, config });
+  const rereviewLaneShare = readRecentRereviewLaneShare(db, { observedAt, config });
   return {
     observedAt,
     config,
@@ -932,6 +1027,7 @@ function evaluateTtmFromDb(db, {
     timelines,
     flags,
     eventRows,
+    rereviewLaneShare,
     rollup: summarizeTtmRollupFromTimelines(timelines, {
       observedAt,
       config,
@@ -949,6 +1045,7 @@ function runTtmTrackerTick(db, options = {}) {
   return {
     ...result,
     sync,
+    rereviewLaneShare: result.rereviewLaneShare,
     rollup: summarizeTtmRollupFromTimelines(result.timelines, {
       observedAt: result.observedAt,
       config: result.config,
@@ -985,6 +1082,9 @@ export {
   DEFAULT_TTM_BASE_BUDGET_MINUTES,
   DEFAULT_TTM_PER_ROUND_BUDGET_MINUTES,
   DEFAULT_TTM_PROGRESS_STALL_MINUTES,
+  DEFAULT_TTM_REREVIEW_LANE_SHARE_MIN_PASSES,
+  DEFAULT_TTM_REREVIEW_LANE_SHARE_THRESHOLD,
+  DEFAULT_TTM_REREVIEW_LANE_SHARE_WINDOW_MINUTES,
   DEFAULT_TTM_ROLLUP_WINDOW_HOURS,
   DEFAULT_TTM_TERMINAL_UNMERGED_MINUTES,
   TTM_SLOW_FLAG_KINDS,
@@ -995,6 +1095,7 @@ export {
   ensureTtmTrackerSchema,
   evaluateTtmFromDb,
   evaluateTtmTimelines,
+  readRecentRereviewLaneShare,
   resolveTtmTrackerConfig,
   runTtmTrackerTick,
   runTtmTrackerWatcherTick,

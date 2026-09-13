@@ -36,6 +36,7 @@ import {
   adapterUnsupportedError,
   writeAdapterCommitStatus,
 } from './github-adapter-client.mjs';
+import { isFleetSelfRepairTrailerOnlyRereviewReason } from './fleet-self-repair-rereview.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -160,6 +161,14 @@ function normalizeLabelNames(labels) {
 
 function normalizeReviewStatus(status) {
   return String(status ?? '').trim().toLowerCase();
+}
+
+function reviewRowStatus(reviewRow) {
+  return normalizeReviewStatus(reviewRow?.review_status ?? reviewRow?.reviewStatus);
+}
+
+function reviewRowReviewerHeadSha(reviewRow) {
+  return reviewRow?.reviewer_head_sha ?? reviewRow?.reviewerHeadSha ?? null;
 }
 
 function extractReviewBodyFromRow(reviewRow) {
@@ -334,14 +343,25 @@ function isHeadChangeRereviewReason(reason) {
   const normalized = normalizeComparableString(reason);
   return (
     normalized.startsWith('auto-refresh: posted review on stale head')
-    || normalized.startsWith('fsr-06b: trailer-only head move detected')
+    || isFleetSelfRepairTrailerOnlyRereviewReason(reason)
   );
 }
 
-function completedHeadChangeRereviewIsSettledClean({ latestJob, latestJobStatus, reviewRow }) {
+function followUpJobRevisionRef(job) {
+  return String(
+    job?.revisionRef
+      ?? job?.currentRevisionRef
+      ?? job?.subjectRef?.revisionRef
+      ?? ''
+  ).trim() || null;
+}
+
+function completedHeadChangeRereviewIsSettledClean({ latestJob, latestJobStatus, reviewRow, headSha }) {
   if (latestJobStatus !== 'completed') return false;
-  if (latestJob?.reReview?.requested === true) return false;
-  if (!isHeadChangeRereviewReason(reviewRow?.rereview_reason)) return false;
+  if (latestJob?.reReview?.requested !== true) return false;
+  if (!isHeadChangeRereviewReason(reviewRow?.rereview_reason ?? reviewRow?.rereviewReason)) return false;
+  const jobHead = followUpJobRevisionRef(latestJob);
+  if (!headSha || !jobHead || String(jobHead) !== String(headSha)) return false;
   const verdict = normalizeEffectiveReviewVerdict(latestJob.reviewBody);
   if (verdict !== 'comment-only' && verdict !== 'approved') return false;
   const blocking = classifyBlockingFindings(latestJob.reviewBody, { lastVerdict: verdict || null });
@@ -360,9 +380,9 @@ function resolveSettledReviewVerdict(
     liveHeadReview = undefined,
   } = {}
 ) {
-  const reviewedHeadSha = reviewRow?.reviewer_head_sha || null;
-  const reviewStatus = normalizeReviewStatus(reviewRow?.review_status);
-  const isHeadChangeRereview = isHeadChangeRereviewReason(reviewRow?.rereview_reason);
+  const reviewedHeadSha = reviewRowReviewerHeadSha(reviewRow);
+  const reviewStatus = reviewRowStatus(reviewRow);
+  const isHeadChangeRereview = isHeadChangeRereviewReason(reviewRow?.rereview_reason ?? reviewRow?.rereviewReason);
   const isQuotaCapped = primaryReviewerQuotaCappedForRow(reviewRow);
   if (reviewStatus !== 'posted' && !isQuotaCapped && !(reviewStatus === 'pending' && isHeadChangeRereview)) {
     return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
@@ -528,7 +548,7 @@ function pickAdversarialGateStatus({
     );
   }
 
-  const reviewStatus = normalizeReviewStatus(reviewRow?.review_status);
+  const reviewStatus = reviewRowStatus(reviewRow);
   const argusOwnsReview = reviewStatus === 'argus-security-queued';
 
   // ASR-06 — blocking authority, and it runs BEFORE the review-row branches.

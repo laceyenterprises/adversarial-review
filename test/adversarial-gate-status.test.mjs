@@ -514,7 +514,7 @@ test('pickAdversarialGateStatus lets a clean settled verdict satisfy a queued he
       rereview_reason: 'auto-refresh: posted review on stale head old-head; current head is rebased-head',
     }),
     latestJob: makeJob({
-      revisionRef: 'old-head',
+      revisionRef: 'rebased-head',
       reviewBody: [
         '## Summary',
         'Clean final review.',
@@ -525,6 +525,9 @@ test('pickAdversarialGateStatus lets a clean settled verdict satisfy a queued he
         '## Verdict',
         'Comment only',
       ].join('\n'),
+      reReview: {
+        requested: true,
+      },
     }),
   });
 
@@ -532,7 +535,37 @@ test('pickAdversarialGateStatus lets a clean settled verdict satisfy a queued he
   assert.equal(decision.reason, 'review-settled-head-change-rereview');
 });
 
-test('pickAdversarialGateStatus holds head-change rereview when the latest job asks for another pass', () => {
+test('pickAdversarialGateStatus accepts camelCase queued head-change rereview rows', () => {
+  const decision = pickAdversarialGateStatus({
+    headSha: 'rebased-head',
+    reviewRow: makeReviewRow({
+      review_status: undefined,
+      reviewStatus: 'pending',
+      rereviewReason: 'auto-refresh: posted review on stale head old-head; current head is rebased-head',
+    }),
+    latestJob: makeJob({
+      revisionRef: 'rebased-head',
+      reviewBody: [
+        '## Summary',
+        'Clean final review.',
+        '',
+        '## Blocking issues',
+        '- None.',
+        '',
+        '## Verdict',
+        'Comment only',
+      ].join('\n'),
+      reReview: {
+        requested: true,
+      },
+    }),
+  });
+
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'review-settled-head-change-rereview');
+});
+
+test('pickAdversarialGateStatus fails closed when queued head-change job has no proven head', () => {
   const decision = pickAdversarialGateStatus({
     headSha: 'rebased-head',
     reviewRow: makeReviewRow({
@@ -540,10 +573,12 @@ test('pickAdversarialGateStatus holds head-change rereview when the latest job a
       rereview_reason: 'auto-refresh: posted review on stale head old-head; current head is rebased-head',
     }),
     latestJob: makeJob({
-      revisionRef: 'old-head',
+      revisionRef: null,
+      currentRevisionRef: null,
+      subjectRef: { revisionRef: null },
       reviewBody: [
         '## Summary',
-        'Clean final review body, but follow-up explicitly requested another pass.',
+        'Clean final review.',
         '',
         '## Blocking issues',
         '- None.',
@@ -1160,7 +1195,7 @@ test('posted watcher handler uses a fresher pending head-change rereview row whe
           latestJob: makeJob({
             repo,
             prNumber,
-            revisionRef: 'old-head',
+            revisionRef: headSha,
             reviewBody: [
               '## Summary',
               'Clean final review.',
@@ -1171,6 +1206,7 @@ test('posted watcher handler uses a fresher pending head-change rereview row whe
               '## Verdict',
               'Comment only',
             ].join('\n'),
+            reReview: { requested: true },
           }),
         }),
       }),

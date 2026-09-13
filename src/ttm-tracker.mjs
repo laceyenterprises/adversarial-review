@@ -966,6 +966,7 @@ function runTtmTrackerWatcherTick({ db, logger = console } = {}) {
       logger.log?.(
         `[watcher] ttm-tracker active=${ttm.sync.active} activated=${ttm.sync.activated} `
         + `resolved=${ttm.sync.resolved} terminal_unmerged_open=${ttm.rollup.terminalButUnmergedOpenCount} `
+        + `terminal_clean_rereview_blocked_open=${ttm.rollup.terminalCleanRereviewBlockedOpenCount} `
         + `stuck=${ttm.rollup.stuckOpenPrs} budget_breaches=${ttm.rollup.openPrsBreachingBudget} `
         + `budget=${ttm.rollup.budgetSource}:`
         + `${ttm.rollup.baseBudgetMinutes === null ? 'blind' : Math.round(ttm.rollup.baseBudgetMinutes)}m`

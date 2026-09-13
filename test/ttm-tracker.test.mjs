@@ -12,6 +12,20 @@ import {
 
 const REPO = 'laceyenterprises/agent-os';
 const NOW = '2026-08-09T18:00:00.000Z';
+const CLEAN_REVIEW_BODY = `## Adversarial Review
+
+## Summary
+Synthetic clean review.
+
+## Blocking issues
+- None.
+
+## Non-blocking issues
+- None.
+
+## Verdict
+Comment only
+`;
 
 function tempRoot() {
   return mkdtempSync(path.join(tmpdir(), 'ttm-tracker-'));
@@ -48,6 +62,36 @@ function countFlagEventSelects(db) {
   };
 }
 
+function countBulkReviewBodySelects(db) {
+  const counts = { bulkBodySelects: 0, scalarBodySelects: 0 };
+  return {
+    counts,
+    db: new Proxy(db, {
+      get(target, property, receiver) {
+        if (property === 'prepare') {
+          return (sql) => {
+            if (
+              typeof sql === 'string'
+              && /^\s*SELECT\b/i.test(sql)
+              && /\bbody_md\b/i.test(sql)
+              && /FROM\s+reviewer_passes/i.test(sql)
+            ) {
+              if (/WHERE\s+repo\s+=\s+\?/i.test(sql)) {
+                counts.scalarBodySelects += 1;
+              } else {
+                counts.bulkBodySelects += 1;
+              }
+            }
+            return target.prepare(sql);
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }),
+  };
+}
+
 function insertReviewRow(db, overrides = {}) {
   db.prepare(
     `INSERT INTO reviewed_prs
@@ -71,8 +115,8 @@ function insertPass(db, overrides = {}) {
   db.prepare(
     `INSERT INTO reviewer_passes
        (repo, pr_number, attempt_number, reviewer_class, reviewer_model,
-        pass_kind, started_at, ended_at, status, verdict, metadata_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        pass_kind, started_at, ended_at, status, verdict, body_md, metadata_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     overrides.repo || REPO,
     overrides.prNumber,
@@ -84,9 +128,39 @@ function insertPass(db, overrides = {}) {
     overrides.endedAt,
     overrides.status || 'completed',
     overrides.verdict ?? 'comment-only',
+    overrides.bodyMd !== undefined ? overrides.bodyMd : CLEAN_REVIEW_BODY,
     JSON.stringify(overrides.metadata || {})
   );
 }
+
+test('TTM timeline aggregation does not bulk-select historical review bodies', () => {
+  const rootDir = tempRoot();
+  const rawDb = openDb(rootDir);
+  const { db, counts } = countBulkReviewBodySelects(rawDb);
+  try {
+    insertReviewRow(rawDb, {
+      prNumber: 33,
+      reviewedAt: '2026-08-09T17:30:00.000Z',
+      postedAt: '2026-08-09T17:35:00.000Z',
+    });
+    insertPass(rawDb, {
+      prNumber: 33,
+      startedAt: '2026-08-09T17:31:00.000Z',
+      endedAt: '2026-08-09T17:35:00.000Z',
+    });
+
+    const result = evaluateTtmFromDb(db, {
+      now: () => new Date(NOW),
+      config: { baseBudgetMinutes: 120, perRoundBudgetMinutes: 10, terminalUnmergedMinutes: 10 },
+    });
+
+    assert.equal(counts.bulkBodySelects, 0);
+    assert.equal(counts.scalarBodySelects, 1);
+    assert.ok(result.flags.some((flag) => flag.prNumber === 33 && flag.flagKind === 'terminal_but_unmerged'));
+  } finally {
+    rawDb.close();
+  }
+});
 
 test('rounds-aware budget flags a 0-round overdue PR but not a 3-round PR within expanded budget', () => {
   const rootDir = tempRoot();

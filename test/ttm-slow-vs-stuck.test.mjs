@@ -14,6 +14,7 @@ import path from 'node:path';
 
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 import { evaluateTtmFromDb } from '../src/ttm-tracker.mjs';
+import { isDaemonMergeReviewAllowed } from '../src/ama/daemon-merge.mjs';
 
 const REPO = 'laceyenterprises/agent-os';
 const NOW = '2026-09-06T12:00:00.000Z';
@@ -67,18 +68,48 @@ function insertPass(db, {
   endedAt = null,
   status = 'completed',
   verdict = 'comment-only',
+  bodyMd = undefined,
 }) {
+  const reviewBody = bodyMd !== undefined ? bodyMd : reviewBodyFor({
+    verdict,
+    blocking: '- None.',
+    nonBlocking: '- None.',
+  });
   db.prepare(
     `INSERT INTO reviewer_passes
        (repo, pr_number, attempt_number, reviewer_class, reviewer_model,
-        pass_kind, started_at, ended_at, status, verdict, metadata_json)
-     VALUES (?, ?, ?, 'codex', 'gpt-5', ?, ?, ?, ?, ?, '{}')`
+        pass_kind, started_at, ended_at, status, verdict, body_md, metadata_json)
+     VALUES (?, ?, ?, 'codex', 'gpt-5', ?, ?, ?, ?, ?, ?, '{}')`
   ).run(
     REPO, prNumber, attemptNumber,
     attemptNumber > 1 ? 'rereview' : 'first-pass',
-    startedAt, endedAt, status, verdict
+    startedAt, endedAt, status, verdict, reviewBody
   );
 }
+
+function reviewBodyFor({ verdict = 'Comment only', blocking = '- None.', nonBlocking = '- None.' } = {}) {
+  return `## Adversarial Review
+
+## Summary
+Synthetic TTM fixture.
+
+## Blocking issues
+${blocking}
+
+## Non-blocking issues
+${nonBlocking}
+
+## Verdict
+${verdict}
+`;
+}
+
+const A_NON_BLOCKING_FINDING = `- **One advisory polish**
+  - **File:** \`x.mjs\`
+  - **Lines:** \`20\`
+  - **Problem:** Naming could be clearer.
+  - **Why it matters:** Operators scan this output.
+  - **Recommended fix:** Rename the field.`;
 
 /**
  * Seed a merged-PR history whose time-to-merge really is
@@ -146,6 +177,24 @@ const flagKinds = (result, prNumber) => result.flags
 
 const stuckFlags = (result, prNumber) => result.flags
   .filter((flag) => flag.prNumber === prNumber && flag.progressClass === 'stuck');
+
+function assertTerminalUnmergedFlagsPassDaemonEligibility(result) {
+  for (const flag of result.flags.filter((entry) => entry.flagKind === 'terminal_but_unmerged')) {
+    assert.equal(
+      isDaemonMergeReviewAllowed(
+        {
+          blockingFindingCount: flag.details.blockingFindingCount,
+          blockingFindingState: flag.details.blockingFindingState,
+          nonBlockingFindingCount: flag.details.nonBlockingFindingCount,
+          nonBlockingFindingState: flag.details.nonBlockingFindingState,
+        },
+        { strictMode: flag.details.mergeAuthorityStrictMode },
+      ),
+      true,
+      `${flag.repo}#${flag.prNumber} must satisfy the daemon findings gate before terminal_but_unmerged names it`,
+    );
+  }
+}
 
 // ── 1. Moving normally under load must not raise a page-tier condition ─────
 
@@ -338,6 +387,65 @@ test('a terminal-clean verdict that cannot merge is stuck regardless of elapsed 
     );
     assert.deepEqual(flagKinds(result, 9005), ['terminal_but_unmerged']);
     assert.equal(stuckFlags(result, 9005).length, 1);
+    assertTerminalUnmergedFlagsPassDaemonEligibility(result);
+  } finally {
+    db.close();
+  }
+});
+
+test('comment-only with non-blocking findings is not terminal-unmerged under strict mode', () => {
+  const db = openDb();
+  try {
+    seedMergeDistribution(db, { baseMinutes: 400, perRoundMinutes: 100 });
+
+    insertPr(db, { prNumber: 9008, reviewedAt: iso(60), postedAt: iso(45) });
+    insertPass(db, {
+      prNumber: 9008,
+      attemptNumber: 1,
+      startedAt: iso(58),
+      endedAt: iso(45),
+      verdict: 'comment-only',
+      bodyMd: reviewBodyFor({ verdict: 'Comment only', nonBlocking: A_NON_BLOCKING_FINDING }),
+    });
+
+    const result = evaluate(db, { mergeAuthorityStrictMode: true });
+    const pr = result.timelines.find((row) => row.prNumber === 9008);
+
+    assert.equal(pr.settledSuccessVerdict, true);
+    assert.equal(pr.mergeEligibleForTerminalUnmerged, false);
+    assert.equal(pr.mergeEligibilityHoldReason, 'non-blocking-findings-present');
+    assert.deepEqual(flagKinds(result, 9008), []);
+    assert.equal(result.rollup.terminalButUnmergedOpenCount, 0);
+    assertTerminalUnmergedFlagsPassDaemonEligibility(result);
+  } finally {
+    db.close();
+  }
+});
+
+test('comment-only with non-blocking findings is terminal-unmerged when strict mode is off', () => {
+  const db = openDb();
+  try {
+    seedMergeDistribution(db, { baseMinutes: 400, perRoundMinutes: 100 });
+
+    insertPr(db, { prNumber: 9009, reviewedAt: iso(60), postedAt: iso(45) });
+    insertPass(db, {
+      prNumber: 9009,
+      attemptNumber: 1,
+      startedAt: iso(58),
+      endedAt: iso(45),
+      verdict: 'comment-only',
+      bodyMd: reviewBodyFor({ verdict: 'Comment only', nonBlocking: A_NON_BLOCKING_FINDING }),
+    });
+
+    const result = evaluate(db, { mergeAuthorityStrictMode: false });
+    const pr = result.timelines.find((row) => row.prNumber === 9009);
+
+    assert.equal(pr.settledSuccessVerdict, true);
+    assert.equal(pr.mergeEligibleForTerminalUnmerged, true);
+    assert.equal(pr.mergeEligibilityHoldReason, null);
+    assert.deepEqual(flagKinds(result, 9009), ['terminal_but_unmerged']);
+    assert.equal(result.rollup.terminalButUnmergedOpenCount, 1);
+    assertTerminalUnmergedFlagsPassDaemonEligibility(result);
   } finally {
     db.close();
   }

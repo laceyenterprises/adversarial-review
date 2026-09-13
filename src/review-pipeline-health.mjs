@@ -2800,14 +2800,17 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     findings.push(buildFinding({
       code: 'review:terminal_but_unmerged',
       tier: 'ticket',
-      subject: `${annotated.length} terminal clean PR(s) remain unmerged`
+      subject: `${annotated.length} merge-eligible terminal PR(s) remain unmerged`
         + (unverified.length > 0
           ? ` (${unverified.length} with UNVERIFIED mirror state — may already be merged)`
           : ''),
-      message: `${sample.repo}#${sample.prNumber} settled clean at ${sample.settledAt || sample.openedAt} but is still open ${Math.round(sample.terminalUnmergedMinutes)}m later.`,
+      message: `${sample.repo}#${sample.prNumber} passed the merge-authority findings gate at ${sample.settledAt || sample.openedAt} but is still open ${Math.round(sample.terminalUnmergedMinutes)}m later.`,
       evidence: annotated.map((flag) => (
         `reviews.db ttm ${flag.repo}#${flag.prNumber} terminal_unmerged=${Math.round(flag.terminalUnmergedMinutes)}m `
         + `verdict=${flag.details?.latestVerdict || 'unknown'} `
+        + `strict_mode=${flag.details?.mergeAuthorityStrictMode !== false ? 'true' : 'false'} `
+        + `blocking=${flag.details?.blockingFindingState || 'unknown'}:${flag.details?.blockingFindingCount ?? 'unknown'} `
+        + `non_blocking=${flag.details?.nonBlockingFindingState || 'unknown'}:${flag.details?.nonBlockingFindingCount ?? 'unknown'} `
         + `mirror=${flag.mirrorVerified ? 'verified' : 'UNVERIFIED'}`
       )),
       recommendedAction: unverified.length > 0
@@ -2824,6 +2827,7 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
         // TTM budget.
         progressClass: 'stuck',
         sev1ExitMetric: snapshot.ttm.rollup.standingSev1Metric,
+        definitionRebasedAt: '2026-09-12TBUALIGN-01',
         config: snapshot.ttm.config,
         mirrorUnverifiedCount: unverified.length,
         mirrorReconciledAt: reconcile?.observedAt || null,

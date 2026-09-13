@@ -7,6 +7,11 @@ HELPER_DEST="${CLAUDE_REVIEWER_RUNTIME_PROBE_HELPER_DEST:-/usr/local/libexec/age
 SUDOERS_DEST="${CLAUDE_REVIEWER_RUNTIME_PROBE_SUDOERS_DEST:-/etc/sudoers.d/40-agent-os-claude-reviewer-runtime-probe}"
 RUNTIME_USER="${CLAUDE_REVIEWER_RUNTIME_PROBE_SUDO_USER:-${1:-${SUDO_USER:-${USER:-}}}}"
 
+sudoers_escape_command_path() {
+  local escaped="${1//\\/\\\\}"
+  printf '%s' "${escaped// /\\ }"
+}
+
 if [[ -z "${RUNTIME_USER}" ]]; then
   echo "error: runtime sudo user is required" >&2
   echo "usage: $0 <runtime-user>" >&2
@@ -26,10 +31,11 @@ fi
 install -d -o root -g wheel -m 0755 "$(dirname "${HELPER_DEST}")"
 install -o root -g wheel -m 0755 "${HELPER_SOURCE}" "${HELPER_DEST}"
 
+SUDOERS_HELPER_DEST="$(sudoers_escape_command_path "${HELPER_DEST}")"
 tmp="$(mktemp "${SUDOERS_DEST}.XXXXXX")"
 trap 'rm -f "${tmp}"' EXIT
 cat >"${tmp}" <<EOF
-${RUNTIME_USER} ALL=(root) NOPASSWD: ${HELPER_DEST} *
+${RUNTIME_USER} ALL=(root) NOPASSWD: ${SUDOERS_HELPER_DEST} *
 EOF
 chmod 0440 "${tmp}"
 /usr/sbin/visudo -cf "${tmp}" >/dev/null

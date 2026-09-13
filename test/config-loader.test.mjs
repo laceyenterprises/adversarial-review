@@ -2319,6 +2319,8 @@ test('post-merge activation rollout controls load through strict Node schema and
           enforce: false
           dispatch_on_fail: false
           baseline_worker_boot_probe_interval_seconds: 1200
+          hold_alert_budget_seconds: 6000
+          hold_alert_consecutive_passes: 4
     `);
     const cfg = loadConfig({
       topPath: top,
@@ -2326,15 +2328,23 @@ test('post-merge activation rollout controls load through strict Node schema and
         HQ_POST_MERGE_ACTIVATION_ENABLED: 'false',
         AGENT_OS_POST_MERGE_ACTIVATION_ENFORCE: 'true',
         HQ_POST_MERGE_ACTIVATION_DISPATCH_ON_FAIL: 'true',
+        AGENT_OS_POST_MERGE_ACTIVATION_HOLD_ALERT_BUDGET_SECONDS: '7200',
+        HQ_POST_MERGE_ACTIVATION_HOLD_ALERT_CONSECUTIVE_PASSES: '5',
       },
     });
     assert.equal(cfg.get('deploy.post_merge_activation.enabled'), false);
     assert.equal(cfg.get('deploy.post_merge_activation.enforce'), true);
     assert.equal(cfg.get('deploy.post_merge_activation.dispatch_on_fail'), true);
     assert.equal(cfg.get('deploy.post_merge_activation.baseline_worker_boot_probe_interval_seconds'), 1200);
+    assert.equal(cfg.get('deploy.post_merge_activation.hold_alert_budget_seconds'), 7200);
+    assert.equal(cfg.get('deploy.post_merge_activation.hold_alert_consecutive_passes'), 5);
     assert.equal(
       cfg.resolutionTrace('deploy.post_merge_activation.enforce').at(-1).source,
       'env:AGENT_OS_POST_MERGE_ACTIVATION_ENFORCE',
+    );
+    assert.equal(
+      cfg.resolutionTrace('deploy.post_merge_activation.hold_alert_consecutive_passes').at(-1).source,
+      'env:HQ_POST_MERGE_ACTIVATION_HOLD_ALERT_CONSECUTIVE_PASSES',
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });

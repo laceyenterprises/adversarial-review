@@ -474,6 +474,18 @@ function schemaV1() {
                 __min: 0,
                 __max: 86400,
               },
+              hold_alert_budget_seconds: {
+                __type: TYPE_INT,
+                __default: 5400,
+                __min: 60,
+                __max: 86400,
+              },
+              hold_alert_consecutive_passes: {
+                __type: TYPE_INT,
+                __default: 2,
+                __min: 1,
+                __max: 288,
+              },
             },
           },
         },
@@ -3295,6 +3307,14 @@ export const ENV_ALIASES = {
   'deploy.post_merge_activation.dispatch_on_fail': {
     canonical: 'AGENT_OS_POST_MERGE_ACTIVATION_DISPATCH_ON_FAIL',
     aliases: [['HQ_POST_MERGE_ACTIVATION_DISPATCH_ON_FAIL', identity]],
+  },
+  'deploy.post_merge_activation.hold_alert_budget_seconds': {
+    canonical: 'AGENT_OS_POST_MERGE_ACTIVATION_HOLD_ALERT_BUDGET_SECONDS',
+    aliases: [['HQ_POST_MERGE_ACTIVATION_HOLD_ALERT_BUDGET_SECONDS', identity]],
+  },
+  'deploy.post_merge_activation.hold_alert_consecutive_passes': {
+    canonical: 'AGENT_OS_POST_MERGE_ACTIVATION_HOLD_ALERT_CONSECUTIVE_PASSES',
+    aliases: [['HQ_POST_MERGE_ACTIVATION_HOLD_ALERT_CONSECUTIVE_PASSES', identity]],
   },
   'reviewer.gemini.mode': {
     canonical: 'AGENT_OS_REVIEWER_GEMINI_MODE',

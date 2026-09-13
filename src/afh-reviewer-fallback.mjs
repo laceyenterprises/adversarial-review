@@ -55,6 +55,7 @@
 // stamp so an operator can see the diversity loss.
 
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -72,6 +73,7 @@ import {
   normalizeBuilderClass,
   normalizeReviewerModel,
 } from './adapters/subject/github-pr/routing.mjs';
+import { resolveClaudeReviewerOAuthTransport } from './claude-reviewer-oauth-transport.mjs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -87,8 +89,10 @@ export const AFH_LAST_RESORT_REVIEWER_MODEL = 'claude';
 export const CLAUDE_REVIEWER_RUNTIME_PROBE_TIMEOUT_MS = 2_000;
 export const CLAUDE_REVIEWER_RUNTIME_PROBE_RETRY_DELAYS_MS = Object.freeze([250, 750]);
 export const CLAUDE_REVIEWER_RUNTIME_GROUNDING_REASON = 'claude-launchctl-asuser-unavailable';
-const LAUNCHCTL = '/bin/launchctl';
-const TRUE_BIN = '/usr/bin/true';
+export const CLAUDE_REVIEWER_BROKER_TRANSPORT_REASON = 'claude-broker-transport-no-launchctl';
+export const CLAUDE_REVIEWER_RUNTIME_PROBE_HELPER_MISSING_REASON = 'claude-runtime-probe-helper-missing';
+export const CLAUDE_REVIEWER_RUNTIME_PROBE_HELPER = '/usr/local/libexec/agent-os/claude-reviewer-runtime-probe';
+const SUDO_BIN = '/usr/bin/sudo';
 const AFH_QUOTA_ONLY_CACHE_KEY = 'quota-only';
 
 // Reviewer model → the provider whose OAuth quota gates whether that reviewer
@@ -137,7 +141,16 @@ function reviewerRuntimeProbeErrorText(error) {
   return text || String(error?.message || error || 'runtime probe failed');
 }
 
+function isClaudeLaunchctlAsuserUnavailableError(error) {
+  const text = reviewerRuntimeProbeErrorText(error).toLowerCase();
+  return (
+    /failed to get user context:\s*\d+:\s*operation not permitted/u.test(text) ||
+    /could not switch to audit session\s+\S+:\s*\d+:\s*operation not permitted/u.test(text)
+  );
+}
+
 function isTransientClaudeRuntimeProbeError(error) {
+  if (isClaudeLaunchctlAsuserUnavailableError(error)) return false;
   if (isTransientFleetQuotaStatusError(error)) return true;
   const text = reviewerRuntimeProbeErrorText(error).toLowerCase();
   return (
@@ -148,15 +161,22 @@ function isTransientClaudeRuntimeProbeError(error) {
 
 export async function probeClaudeReviewerRuntime({
   execFileImpl = execFileAsync,
+  existsSyncImpl = existsSync,
   env = process.env,
   platform = process.platform,
   uid = null,
+  transport = null,
+  helperPath = CLAUDE_REVIEWER_RUNTIME_PROBE_HELPER,
   timeoutMs = CLAUDE_REVIEWER_RUNTIME_PROBE_TIMEOUT_MS,
   retryDelaysMs = CLAUDE_REVIEWER_RUNTIME_PROBE_RETRY_DELAYS_MS,
   sleepImpl = sleep,
 } = {}) {
   if (claudeRuntimeProbeDisabled(env)) {
     return Object.freeze({ available: true, reason: 'claude-runtime-probe-disabled' });
+  }
+  const resolvedTransport = transport || resolveClaudeReviewerOAuthTransport(env);
+  if (resolvedTransport === 'broker') {
+    return Object.freeze({ available: true, reason: CLAUDE_REVIEWER_BROKER_TRANSPORT_REASON });
   }
   if (platform !== 'darwin') {
     return Object.freeze({ available: true, reason: 'not-darwin' });
@@ -169,13 +189,20 @@ export async function probeClaudeReviewerRuntime({
       error: `invalid uid: ${uid}`,
     });
   }
+  if (!existsSyncImpl(helperPath)) {
+    return Object.freeze({
+      available: false,
+      reason: CLAUDE_REVIEWER_RUNTIME_PROBE_HELPER_MISSING_REASON,
+      error: `missing helper: ${helperPath}`,
+    });
+  }
   const delays = Array.isArray(retryDelaysMs) ? retryDelaysMs : [];
   const pause = typeof sleepImpl === 'function' ? sleepImpl : sleep;
   const attempts = delays.length + 1;
   let lastError = null;
   for (let attemptIndex = 0; attemptIndex < attempts; attemptIndex += 1) {
     try {
-      await execFileImpl(LAUNCHCTL, ['asuser', String(runtimeUid), TRUE_BIN], {
+      await execFileImpl(SUDO_BIN, ['-n', helperPath, String(runtimeUid)], {
         env,
         encoding: 'utf8',
         maxBuffer: 64 * 1024,
@@ -447,6 +474,7 @@ export async function readAfhReviewerGrounding({
       execFileImpl,
       env,
       uid: runtimeProbeUid,
+      transport: resolveClaudeReviewerOAuthTransport(env),
       timeoutMs: claudeRuntimeProbeTimeoutMs,
       retryDelaysMs: claudeRuntimeProbeRetryDelaysMs,
       sleepImpl,

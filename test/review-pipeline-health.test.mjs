@@ -710,6 +710,97 @@ test('reviewer capacity skips degenerate intervals without leaking concurrency',
   assert.equal(snapshot.reviewerCapacity.effectiveConcurrency, 1);
 });
 
+test('AFH fallback edge supermajority fires at threshold', () => {
+  const rootDir = tempRoot();
+  for (let i = 0; i < 4; i += 1) {
+    insertReviewerPass(rootDir, {
+      prNumber: 980 + i,
+      attemptNumber: 1,
+      passKind: 'first-pass',
+      status: 'completed',
+      startedAt: `2026-05-25T17:${10 + i}:00.000Z`,
+      endedAt: `2026-05-25T17:${11 + i}:00.000Z`,
+      metadata: {
+        afhReviewerFallback: {
+          fromReviewerModel: 'claude',
+          toReviewerModel: 'gemini',
+          reason: 'claude-launchctl-asuser-unavailable',
+        },
+      },
+    });
+  }
+  insertReviewerPass(rootDir, {
+    prNumber: 984,
+    attemptNumber: 1,
+    passKind: 'first-pass',
+    status: 'completed',
+    startedAt: '2026-05-25T17:20:00.000Z',
+    endedAt: '2026-05-25T17:21:00.000Z',
+    metadata: {},
+  });
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+
+  assert.equal(snapshot.afhFallbackSupermajority.active, true);
+  assert.equal(snapshot.afhFallbackSupermajority.dominant.edge, 'claude -> gemini');
+  assert.equal(snapshot.afhFallbackSupermajority.dominant.reason, 'claude-launchctl-asuser-unavailable');
+  assert.equal(snapshot.afhFallbackSupermajority.dominant.share, 0.8);
+  assert.ok(findingCodes(snapshot).includes('review:afh_fallback_edge_supermajority'));
+  const output = renderReviewPipelinePrometheus(snapshot);
+  assert.match(
+    output,
+    /^review_pipeline_afh_fallback_edge_share\{edge="claude -> gemini",from="claude",to="gemini",reason="claude-launchctl-asuser-unavailable",window="3600000ms"\} 0\.8$/m
+  );
+  assert.match(output, /^review_pipeline_afh_fallback_supermajority_active 1$/m);
+});
+
+test('AFH fallback edge supermajority stays quiet below threshold', () => {
+  const rootDir = tempRoot();
+  for (let i = 0; i < 3; i += 1) {
+    insertReviewerPass(rootDir, {
+      prNumber: 990 + i,
+      attemptNumber: 1,
+      passKind: 'first-pass',
+      status: 'completed',
+      startedAt: `2026-05-25T17:${10 + i}:00.000Z`,
+      endedAt: `2026-05-25T17:${11 + i}:00.000Z`,
+      metadata: {
+        afhReviewerFallback: {
+          fromReviewerModel: 'claude',
+          toReviewerModel: 'gemini',
+          reason: 'claude-launchctl-asuser-unavailable',
+        },
+      },
+    });
+  }
+  insertReviewerPass(rootDir, {
+    prNumber: 994,
+    attemptNumber: 1,
+    passKind: 'first-pass',
+    status: 'completed',
+    startedAt: '2026-05-25T17:20:00.000Z',
+    endedAt: '2026-05-25T17:21:00.000Z',
+    metadata: {},
+  });
+  insertReviewerPass(rootDir, {
+    prNumber: 995,
+    attemptNumber: 1,
+    passKind: 'first-pass',
+    status: 'completed',
+    startedAt: '2026-05-25T17:22:00.000Z',
+    endedAt: '2026-05-25T17:23:00.000Z',
+    metadata: {},
+  });
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+
+  assert.equal(snapshot.afhFallbackSupermajority.totalSelections, 5);
+  assert.equal(snapshot.afhFallbackSupermajority.dominant.share, 0.6);
+  assert.equal(snapshot.afhFallbackSupermajority.active, false);
+  assert.ok(!findingCodes(snapshot).includes('review:afh_fallback_edge_supermajority'));
+  assert.match(renderReviewPipelinePrometheus(snapshot), /^review_pipeline_afh_fallback_supermajority_active 0$/m);
+});
+
 test('queue starvation default threshold is 10m, not 30m', () => {
   // At the old 30m default the alarm was silent through a visible pile-up: 11
   // open PRs, first-pass depth 4, oldest pending 19.4m after its reviewer exited

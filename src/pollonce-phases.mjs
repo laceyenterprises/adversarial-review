@@ -3000,6 +3000,7 @@ export async function processReviewSubject(entry, ctx) {
                 reviewerTimeoutMs,
                 workspacePath: null,
                 domainId,
+                afhReviewerFallback: route.afhReviewerFallback || null,
                 reviewerRuntimeAdapterOverride: domainReviewerRuntimeAdapter,
                 onReviewerPgid: ({ pgid, spawnedAt }) => {
                   persistReviewerPgid({

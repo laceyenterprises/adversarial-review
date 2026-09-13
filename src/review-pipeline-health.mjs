@@ -30,6 +30,9 @@ const DEFAULT_REVIEW_UNKNOWN_RATE_WINDOW_MINUTES = 15;
 const DEFAULT_REVIEW_UNKNOWN_RATE_SAMPLE_FLOOR = 5;
 const MIN_REVIEW_UNKNOWN_RATE_SAMPLE_FLOOR = 3;
 const DEFAULT_REVIEW_UNKNOWN_RATE_DISTINCT_PR_FLOOR = 2;
+const DEFAULT_AFH_FALLBACK_SUPERMAJORITY_THRESHOLD = 0.80;
+const DEFAULT_AFH_FALLBACK_SUPERMAJORITY_MIN_SELECTIONS = 5;
+const DEFAULT_AFH_FALLBACK_SUPERMAJORITY_WINDOW_MS = 60 * 60 * 1000;
 // How long a PR may sit WAITING for its first-pass review before that is a
 // finding.
 //
@@ -110,6 +113,8 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_reviewer_attempts_total',
   'review_pipeline_failed_attempts_distinct_prs',
   'review_pipeline_reviewer_degradation_active',
+  'review_pipeline_afh_fallback_edge_share',
+  'review_pipeline_afh_fallback_supermajority_active',
   'review_pipeline_first_pass_queue_depth',
   'review_pipeline_first_pass_wait_seconds',
   'review_pipeline_first_pass_oldest_pending_age_seconds',
@@ -150,6 +155,8 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_reviewer_attempts_total: 'Windowed reviewer attempt count by status, failure class, and pass kind.',
   review_pipeline_failed_attempts_distinct_prs: 'Windowed distinct PR count contributing failed reviewer attempts by failure class.',
   review_pipeline_reviewer_degradation_active: 'Active reviewer degradation/backoff PR count by failure class and state.',
+  review_pipeline_afh_fallback_edge_share: 'Windowed reviewer-selection share carried by one AFH reviewer fallback edge.',
+  review_pipeline_afh_fallback_supermajority_active: 'Whether one AFH reviewer fallback edge carries a sustained configured supermajority of reviewer selections.',
   review_pipeline_first_pass_queue_depth: 'Current count of pending first-pass or rereview rows (legacy combined queue signal).',
   review_pipeline_first_pass_wait_seconds: 'Wait in seconds of the oldest pending first-pass row, distinct from reviewer pass duration.',
   review_pipeline_first_pass_oldest_pending_age_seconds: 'Age in seconds of the oldest pending first-pass or rereview row (legacy combined queue signal).',
@@ -219,6 +226,15 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     thresholdKey: null,
     defaultThreshold: null,
     thresholdDescription: 'one or more PRs are currently held by provider overload or quota exhaustion',
+  },
+  {
+    code: 'review:afh_fallback_edge_supermajority',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: 'afhFallbackSupermajorityThreshold',
+    defaultThreshold: DEFAULT_AFH_FALLBACK_SUPERMAJORITY_THRESHOLD,
+    windowKey: 'afhFallbackSupermajorityWindowMs',
+    defaultWindowMs: DEFAULT_AFH_FALLBACK_SUPERMAJORITY_WINDOW_MS,
   },
   {
     code: 'review:terminal_review_failure_active',
@@ -462,6 +478,21 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
         ?? env.REVIEW_UNKNOWN_RATE_DISTINCT_PR_FLOOR,
       DEFAULT_REVIEW_UNKNOWN_RATE_DISTINCT_PR_FLOOR,
       1
+    ),
+    afhFallbackSupermajorityThreshold: parseNumber(
+      overrides.afhFallbackSupermajorityThreshold
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_AFH_FALLBACK_SUPERMAJORITY_THRESHOLD,
+      DEFAULT_AFH_FALLBACK_SUPERMAJORITY_THRESHOLD
+    ),
+    afhFallbackSupermajorityMinSelections: parsePositiveInteger(
+      overrides.afhFallbackSupermajorityMinSelections
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_AFH_FALLBACK_SUPERMAJORITY_MIN_SELECTIONS,
+      DEFAULT_AFH_FALLBACK_SUPERMAJORITY_MIN_SELECTIONS
+    ),
+    afhFallbackSupermajorityWindowMs: parsePositiveInteger(
+      overrides.afhFallbackSupermajorityWindowMs
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_AFH_FALLBACK_SUPERMAJORITY_WINDOW_MS,
+      DEFAULT_AFH_FALLBACK_SUPERMAJORITY_WINDOW_MS
     ),
     queueStarvationMaxAgeMs: parsePositiveInteger(
       overrides.queueStarvationMaxAgeMs
@@ -1148,6 +1179,66 @@ function summarizeReviewerCapacity(db, { nowMs, config }) {
     rereviewPasses,
     rereviewShare: totalPasses > 0 ? rereviewPasses / totalPasses : 0,
     effectiveConcurrency: maxConcurrent,
+  };
+}
+
+function normalizeAfhFallbackEdge(row) {
+  const metadata = parseJson(row?.metadata_json, {});
+  const fallback = metadata.afhReviewerFallback || null;
+  const from = String(fallback?.fromReviewerModel || '').trim().toLowerCase();
+  const to = String(fallback?.toReviewerModel || '').trim().toLowerCase();
+  if (!from || !to) return null;
+  return {
+    edge: `${from} -> ${to}`,
+    from,
+    to,
+    reason: String(fallback.reason || 'unknown').trim() || 'unknown',
+  };
+}
+
+function summarizeAfhFallbackSupermajority(db, { nowMs, config }) {
+  const cutoffMs = nowMs - config.afhFallbackSupermajorityWindowMs;
+  const cutoff = new Date(cutoffMs).toISOString();
+  const rows = safeAll(
+    db,
+    `SELECT metadata_json
+       FROM reviewer_passes
+      WHERE started_at >= ?
+        AND status != 'abandoned'
+        AND pass_kind IN ('first-pass', 'rereview')`,
+    [cutoff]
+  );
+  const totalSelections = rows.length;
+  const byEdgeReason = new Map();
+  for (const row of rows) {
+    const edge = normalizeAfhFallbackEdge(row);
+    if (!edge) continue;
+    const key = `${edge.edge}\n${edge.reason}`;
+    const current = byEdgeReason.get(key) || { ...edge, count: 0 };
+    current.count += 1;
+    byEdgeReason.set(key, current);
+  }
+  const edges = Array.from(byEdgeReason.values())
+    .map((entry) => ({
+      ...entry,
+      share: totalSelections > 0 ? entry.count / totalSelections : 0,
+    }))
+    .sort((left, right) => right.count - left.count || left.edge.localeCompare(right.edge));
+  const dominant = edges[0] || null;
+  const threshold = config.afhFallbackSupermajorityThreshold;
+  const active = Boolean(
+    dominant
+    && totalSelections >= config.afhFallbackSupermajorityMinSelections
+    && dominant.share >= threshold
+  );
+  return {
+    active,
+    windowMs: config.afhFallbackSupermajorityWindowMs,
+    threshold,
+    minSelections: config.afhFallbackSupermajorityMinSelections,
+    totalSelections,
+    dominant,
+    edges,
   };
 }
 
@@ -2524,6 +2615,27 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }));
   }
 
+  if (snapshot.afhFallbackSupermajority?.active) {
+    const dominant = snapshot.afhFallbackSupermajority.dominant;
+    findings.push(buildFinding({
+      code: 'review:afh_fallback_edge_supermajority',
+      tier: 'page',
+      subject: `AFH reviewer fallback edge ${dominant.edge} carries ${Math.round(dominant.share * 100)}% of selections`,
+      message: (
+        `${dominant.count}/${snapshot.afhFallbackSupermajority.totalSelections} reviewer selections in ` +
+        `the window used AFH edge ${dominant.edge} because ${dominant.reason}.`
+      ),
+      evidence: [
+        `reviews.db reviewer_passes window=${snapshot.afhFallbackSupermajority.windowMs}ms`,
+        `edge=${dominant.edge} share=${dominant.share} reason=${dominant.reason}`,
+      ],
+      recommendedAction:
+        'Treat a sustained dominant fallback edge as load-bearing, not merely successful failover. Inspect AFH grounding reason and primary reviewer transport before the fallback provider saturates.',
+      observedAt,
+      details: snapshot.afhFallbackSupermajority,
+    }));
+  }
+
   if ((snapshot.terminalReviewFailures?.prs || []).length > 0) {
     const sample = snapshot.terminalReviewFailures.prs[0];
     findings.push(buildFinding({
@@ -3201,6 +3313,17 @@ function collectReviewPipelineHealth({
           rereviewShare: 0,
           effectiveConcurrency: 0,
         };
+    const afhFallbackSupermajority = db
+      ? summarizeAfhFallbackSupermajority(db, { nowMs, config })
+      : {
+          active: false,
+          windowMs: config.afhFallbackSupermajorityWindowMs,
+          threshold: config.afhFallbackSupermajorityThreshold,
+          minSelections: config.afhFallbackSupermajorityMinSelections,
+          totalSelections: 0,
+          dominant: null,
+          edges: [],
+        };
     const firstPassQueue = db
       ? summarizeFirstPassQueue(db, { nowMs })
       : { depth: 0, oldest: null };
@@ -3328,6 +3451,7 @@ function collectReviewPipelineHealth({
       terminalReconciliation,
       reviewer,
       reviewerCapacity,
+      afhFallbackSupermajority,
       reviewerDegradation,
       outage,
       hcpPreflightAborts,
@@ -3431,6 +3555,23 @@ function renderReviewPipelinePrometheus(snapshot) {
       }, count);
     }
   }
+  const afhFallbackEdges = snapshot.afhFallbackSupermajority?.edges?.length
+    ? snapshot.afhFallbackSupermajority.edges
+    : [{ edge: 'none', from: 'none', to: 'none', reason: 'none', share: 0 }];
+  for (const edge of afhFallbackEdges) {
+    pushMetric('review_pipeline_afh_fallback_edge_share', {
+      edge: edge.edge,
+      from: edge.from,
+      to: edge.to,
+      reason: edge.reason,
+      window: `${snapshot.afhFallbackSupermajority?.windowMs || snapshot.config.afhFallbackSupermajorityWindowMs}ms`,
+    }, edge.share);
+  }
+  pushMetric(
+    'review_pipeline_afh_fallback_supermajority_active',
+    {},
+    snapshot.afhFallbackSupermajority?.active ? 1 : 0
+  );
   pushMetric('review_pipeline_first_pass_queue_depth', {}, snapshot.firstPassQueue.depth);
   pushMetric(
     'review_pipeline_first_pass_wait_seconds',

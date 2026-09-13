@@ -47,8 +47,8 @@ import {
 import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 import {
   mintClaudeCodeRemediationBrokerToken,
-  resolveClaudeCodeOAuthTransport,
 } from './remediation-oauth-preflight.mjs';
+import { resolveClaudeReviewerOAuthTransport } from './claude-reviewer-oauth-transport.mjs';
 import { REVIEWER_TOKEN_POST_SLACK_MS } from './reviewer-broker-refresh.mjs';
 import {
   AGY_KEYCHAIN_ACCOUNT,
@@ -161,24 +161,6 @@ const AGY_CLI = resolveAgyCliPath();
 function resolveClaudeAuthProbeTimeoutMs(env = process.env) {
   const parsed = Number.parseInt(env.CLAUDE_AUTH_PROBE_TIMEOUT_MS || '', 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 60_000;
-}
-
-function resolveClaudeReviewerOAuthTransport(env = process.env) {
-  const explicitTransportEntries = [
-    ['ADVERSARIAL_REVIEW_CLAUDE_REVIEWER_OAUTH_TRANSPORT', env.ADVERSARIAL_REVIEW_CLAUDE_REVIEWER_OAUTH_TRANSPORT],
-    ['ADVERSARIAL_REVIEW_CLAUDE_MODEL_OAUTH_TRANSPORT', env.ADVERSARIAL_REVIEW_CLAUDE_MODEL_OAUTH_TRANSPORT],
-  ];
-  for (const [name, value] of explicitTransportEntries) {
-    const raw = String(value || '').trim().toLowerCase();
-    if (!raw) continue;
-    if (raw === 'broker') return 'broker';
-    if (raw === 'keychain') return 'keychain';
-    throw new OAuthError('claude', `${name} must be broker or keychain (found ${JSON.stringify(value)})`);
-  }
-  const roleFlag = String(env.CLAUDE_REVIEWER_AUTH_VIA_BROKER ?? '').trim().toLowerCase();
-  if (roleFlag === 'true') return 'broker';
-  if (['false', '0', 'no', 'off', 'keychain'].includes(roleFlag)) return 'keychain';
-  return resolveClaudeCodeOAuthTransport(env);
 }
 
 function findOnPath(binaryName, pathValue = process.env.PATH || '') {

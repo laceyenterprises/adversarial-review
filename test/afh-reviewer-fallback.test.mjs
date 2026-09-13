@@ -22,7 +22,10 @@ import { join } from 'node:path';
 import {
   AFH_REVIEWER_MODEL_PROVIDER,
   AFH_FLEET_QUOTA_STATUS_RETRY_TIMEOUT_FRACTION,
+  CLAUDE_REVIEWER_BROKER_TRANSPORT_REASON,
   CLAUDE_REVIEWER_RUNTIME_GROUNDING_REASON,
+  CLAUDE_REVIEWER_RUNTIME_PROBE_HELPER,
+  CLAUDE_REVIEWER_RUNTIME_PROBE_HELPER_MISSING_REASON,
   CLAUDE_REVIEWER_RUNTIME_PROBE_TIMEOUT_MS,
   CLAUDE_REVIEWER_RUNTIME_PROBE_RETRY_DELAYS_MS,
   applyClaudeReviewerRuntimeGrounding,
@@ -753,7 +756,94 @@ test('AFH-04R: Claude runtime probe refuses to guess a uid', async () => {
   assert.equal(status.reason, 'claude-launchctl-uid-unavailable');
 });
 
-test('AFH-04R: Claude runtime probe captures the exact launchctl-asuser primitive', async () => {
+test('AFH-04R: broker Claude runtime probe skips launchctl and reports available', async () => {
+  let calls = 0;
+  const status = await probeClaudeReviewerRuntime({
+    platform: 'darwin',
+    uid: 501,
+    execFileImpl: async () => {
+      calls += 1;
+      throw new Error('must not execute launchctl helper for broker transport');
+    },
+    env: { CLAUDE_REVIEWER_AUTH_VIA_BROKER: 'true' },
+  });
+
+  assert.equal(calls, 0);
+  assert.equal(status.available, true);
+  assert.equal(status.reason, CLAUDE_REVIEWER_BROKER_TRANSPORT_REASON);
+});
+
+test('AFH-04R: keychain Claude runtime probe reports missing helper before execution', async () => {
+  let calls = 0;
+  const status = await probeClaudeReviewerRuntime({
+    platform: 'darwin',
+    uid: 501,
+    execFileImpl: async () => {
+      calls += 1;
+      throw new Error('must not execute without the scoped helper');
+    },
+    existsSyncImpl: () => false,
+    env: { CLAUDE_REVIEWER_AUTH_VIA_BROKER: 'false' },
+  });
+
+  assert.equal(calls, 0);
+  assert.equal(status.available, false);
+  assert.equal(status.reason, CLAUDE_REVIEWER_RUNTIME_PROBE_HELPER_MISSING_REASON);
+  assert.match(status.error, new RegExp(CLAUDE_REVIEWER_RUNTIME_PROBE_HELPER));
+});
+
+test('AFH-04R: keychain Claude runtime probe executes the scoped privileged helper', async () => {
+  const calls = [];
+  const status = await probeClaudeReviewerRuntime({
+    platform: 'darwin',
+    uid: 501,
+    execFileImpl: async (cmd, args, options) => {
+      calls.push({ cmd, args, timeout: options.timeout });
+      return { stdout: '' };
+    },
+    existsSyncImpl: (path) => path === CLAUDE_REVIEWER_RUNTIME_PROBE_HELPER,
+    env: { CLAUDE_REVIEWER_AUTH_VIA_BROKER: 'false' },
+  });
+
+  assert.deepEqual(calls, [
+    {
+      cmd: '/usr/bin/sudo',
+      args: ['-n', CLAUDE_REVIEWER_RUNTIME_PROBE_HELPER, '501'],
+      timeout: 2_000,
+    },
+  ]);
+  assert.equal(status.available, true);
+  assert.equal(status.reason, 'ok');
+});
+
+test('AFH-04R: Claude runtime probe maps unprivileged asuser denial text to grounding', async () => {
+  for (const stderr of [
+    'Failed to get user context: 1: Operation not permitted',
+    'Could not switch to audit session 0x1870b: 1: Operation not permitted',
+  ]) {
+    let calls = 0;
+    const status = await probeClaudeReviewerRuntime({
+      platform: 'darwin',
+      uid: 501,
+      retryDelaysMs: [1, 1],
+      execFileImpl: async () => {
+        calls += 1;
+        const err = new Error('Command failed');
+        err.stderr = stderr;
+        throw err;
+      },
+      existsSyncImpl: () => true,
+      env: { CLAUDE_REVIEWER_AUTH_VIA_BROKER: 'false' },
+    });
+
+    assert.equal(calls, 1, stderr);
+    assert.equal(status.available, false);
+    assert.equal(status.reason, CLAUDE_REVIEWER_RUNTIME_GROUNDING_REASON);
+    assert.match(status.error, /Operation not permitted/);
+  }
+});
+
+test('AFH-04R: Claude runtime probe captures the exact scoped helper primitive', async () => {
   const calls = [];
   const status = await probeClaudeReviewerRuntime({
     platform: 'darwin',
@@ -764,13 +854,14 @@ test('AFH-04R: Claude runtime probe captures the exact launchctl-asuser primitiv
       err.stderr = 'Could not switch to audit session 0x18757: 1: Operation not permitted';
       throw err;
     },
-    env: {},
+    existsSyncImpl: () => true,
+    env: { CLAUDE_REVIEWER_AUTH_VIA_BROKER: 'false' },
   });
 
   assert.deepEqual(calls, [
     {
-      cmd: '/bin/launchctl',
-      args: ['asuser', '501', '/usr/bin/true'],
+      cmd: '/usr/bin/sudo',
+      args: ['-n', CLAUDE_REVIEWER_RUNTIME_PROBE_HELPER, '501'],
       timeout: 2_000,
     },
   ]);
@@ -791,26 +882,27 @@ test('AFH-04R: Claude runtime probe retries transient launchctl failures', async
     execFileImpl: async (cmd, args, options) => {
       calls.push({ cmd, args, timeout: options.timeout });
       if (calls.length === 1) {
-        const err = new Error('Command failed: /bin/launchctl asuser 501 /usr/bin/true');
+        const err = new Error('Command failed: /usr/bin/sudo -n claude-reviewer-runtime-probe 501');
         err.code = 5;
         err.stderr = 'Bootstrap failed: 5: Input/output error';
         throw err;
       }
       return { stdout: '' };
     },
-    env: {},
+    existsSyncImpl: () => true,
+    env: { CLAUDE_REVIEWER_AUTH_VIA_BROKER: 'false' },
   });
 
   assert.deepEqual(sleeps, [17]);
   assert.deepEqual(calls, [
     {
-      cmd: '/bin/launchctl',
-      args: ['asuser', '501', '/usr/bin/true'],
+      cmd: '/usr/bin/sudo',
+      args: ['-n', CLAUDE_REVIEWER_RUNTIME_PROBE_HELPER, '501'],
       timeout: 1234,
     },
     {
-      cmd: '/bin/launchctl',
-      args: ['asuser', '501', '/usr/bin/true'],
+      cmd: '/usr/bin/sudo',
+      args: ['-n', CLAUDE_REVIEWER_RUNTIME_PROBE_HELPER, '501'],
       timeout: 1234,
     },
   ]);
@@ -833,7 +925,8 @@ test('AFH-04R: Claude runtime probe has a bounded transient retry cap', async ()
       err.stderr = 'Resource temporarily unavailable';
       throw err;
     },
-    env: {},
+    existsSyncImpl: () => true,
+    env: { CLAUDE_REVIEWER_AUTH_VIA_BROKER: 'false' },
   });
 
   assert.equal(calls, 3);

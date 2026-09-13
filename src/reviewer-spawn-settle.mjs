@@ -500,6 +500,7 @@ async function spawnReviewer({
   rootDir = ROOT,
   crossModelReviewWaived = false,
   crossModelReviewWaiverReason = null,
+  afhReviewerFallback = null,
   onReviewerPgid = () => {},
   domainId = null, // ARC-18: WATCHER_PRIMARY_DOMAIN_ID stays in watcher; threaded by callers (pollOnce always passes domainId in spawnReviewerArgs). Default is never read.
   reviewerRuntimeAdapterOverride = null,
@@ -623,6 +624,7 @@ async function spawnReviewer({
         reviewAttemptNumber,
         completedRemediationRounds,
         maxRemediationRounds,
+        ...(afhReviewerFallback ? { afhReviewerFallback } : {}),
       },
     });
 
@@ -661,6 +663,7 @@ async function spawnReviewer({
         reviewerSpawnToken,
         crossModelReviewWaived,
         crossModelReviewWaiverReason,
+        afhReviewerFallback,
       },
       timeoutMs: effectiveReviewerTimeoutMs,
       sessionUuid: reviewerSessionUuid,

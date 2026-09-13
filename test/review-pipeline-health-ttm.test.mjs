@@ -196,6 +196,53 @@ test('concurrent progress-stall reasons emit one finding and one Prometheus seri
   );
 });
 
+test('a PR taking a disproportionate share of re-review starts emits a lane-share finding', () => {
+  const rootDir = tempRoot();
+  const db = openReviewStateDb(rootDir);
+  ensureReviewStateSchema(db);
+  try {
+    seedDistribution(db, { baseMinutes: 400, perRoundMinutes: 100 });
+
+    for (const prNumber of [6671, 6696, 6689, 6685, 6699, 6692, 6697]) {
+      insertPr(db, {
+        prNumber,
+        reviewedAt: iso(600),
+        reviewStatus: 'pending',
+        postedAt: iso(590),
+      });
+    }
+    [
+      [6671, 2, 55, 'request-changes'],
+      [6696, 2, 50, 'comment-only'],
+      [6671, 3, 35, 'request-changes'],
+      [6689, 2, 30, 'comment-only'],
+      [6685, 2, 25, 'comment-only'],
+      [6699, 2, 15, 'comment-only'],
+      [6671, 4, 5, 'request-changes'],
+    ].forEach(([prNumber, attemptNumber, minutesAgo, verdict]) => {
+      insertPass(db, {
+        prNumber,
+        attemptNumber,
+        startedAt: iso(minutesAgo),
+        endedAt: iso(minutesAgo - 1),
+        verdict,
+      });
+    });
+  } finally {
+    db.close();
+  }
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW), env: {} });
+  const laneShare = findingFor(snapshot, 'review:rereview_lane_unfair_share');
+
+  assert.ok(laneShare, `emitted: ${codes(snapshot).join(', ')}`);
+  assert.equal(laneShare.details.monopolist.prNumber, 6671);
+  assert.equal(laneShare.details.monopolist.count, 3);
+  assert.equal(laneShare.details.totalPasses, 7);
+  assert.match(laneShare.message, /3\/7/);
+  assert.match(laneShare.evidence.join('\n'), /request-changes/);
+});
+
 test('an unreadable distribution emits the blind code and withholds the slow one', () => {
   const rootDir = tempRoot();
   const db = openReviewStateDb(rootDir);

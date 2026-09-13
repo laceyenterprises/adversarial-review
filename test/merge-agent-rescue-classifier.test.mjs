@@ -55,13 +55,13 @@ function withEnv(name, value, fn) {
 const decisionFixtures = [
   ['comment-only-merge-eligible.md', 'merge-eligible'],
   ['approved-merge-eligible.md', 'merge-eligible'],
-  ['approved-with-non-blocking-findings.md', 'merge-eligible'],
+  ['approved-with-non-blocking-findings.md', 'inconclusive'],
   ['formatted-verdict-and-none-variants.md', 'merge-eligible'],
-  ['request-changes-non-blocking-only.md', 'merge-eligible'],
+  ['request-changes-non-blocking-only.md', 'remediation-eligible'],
   ['request-changes-with-blockers-addressable.md', 'remediation-eligible'],
   ['request-changes-with-blockers-auth.md', 'escalate-blockers'],
   ['request-changes-with-blockers-schema-migration.md', 'escalate-blockers'],
-  ['comment-only-with-non-blocking-findings.md', 'merge-eligible'],
+  ['comment-only-with-non-blocking-findings.md', 'inconclusive'],
   ['operator-approved-override.md', 'merge-eligible', {
     operatorApprovalHeadSha: HEAD_SHA,
     operatorApprovalLabelEventId: 'evt-operator-approved',
@@ -156,11 +156,11 @@ test('None sentinel tolerates trailing prose on the same line', () => {
   assert.equal(result.nonBlockingFindings, 0);
 });
 
-test('Approved reviews ignore non-blocking findings for merge eligibility', () => {
+test('Approved reviews with non-blocking findings are inconclusive', () => {
   const result = classify(inputFor('approved-with-non-blocking-findings.md'));
 
-  assert.equal(result.decision, 'merge-eligible');
-  assert.equal(result.reason, 'clean-review');
+  assert.equal(result.decision, 'inconclusive');
+  assert.equal(result.reason, 'no-matching-decision-rule');
   assert.equal(result.blockingFindings, 0);
   assert.equal(result.nonBlockingFindings, 1);
 });
@@ -192,6 +192,36 @@ test('check rollup ignores stale rows and the adversarial gate context', () => {
   }));
 
   assert.equal(result.decision, 'merge-eligible');
+});
+
+test('clean conflicting PR routes to rebase eligibility', () => {
+  const result = classify(inputFor('comment-only-merge-eligible.md', {
+    mergeable: 'CONFLICTING',
+    mergeStateStatus: 'DIRTY',
+  }));
+
+  assert.equal(result.decision, 'rebase-eligible');
+  assert.equal(result.reason, 'clean-review-requires-rebase');
+});
+
+test('merge-agent-stuck label does not block rebase eligibility', () => {
+  const result = classify(inputFor('comment-only-merge-eligible.md', {
+    mergeable: 'CONFLICTING',
+    mergeStateStatus: 'DIRTY',
+    labels: ['merge-agent-stuck'],
+  }));
+
+  assert.equal(result.decision, 'rebase-eligible');
+});
+
+test('recovery-in-flight label blocks rebase eligibility', () => {
+  const result = classify(inputFor('comment-only-merge-eligible.md', {
+    mergeable: 'CONFLICTING',
+    mergeStateStatus: 'DIRTY',
+    labels: ['merge-agent-recovery-in-flight'],
+  }));
+
+  assert.equal(result.decision, 'inconclusive');
 });
 
 test('check rollup ignores adversarial gate CheckRun names and custom gate contexts', () => {
@@ -267,7 +297,7 @@ Request changes
   assert.match(parsed.parsedFindings[0].problem, /not a real heading/);
 });
 
-test('request-changes with empty blocking list is effective comment-only', () => {
+test('request-changes with empty blocking list and non-blocking findings is remediation eligible', () => {
   const reviewBody = `
 ## Summary
 Only advisory findings remain.
@@ -293,7 +323,7 @@ Request changes
   assert.equal(parsed.nonBlocking.count, 1);
 
   const result = classify(inputFor('comment-only-merge-eligible.md', { reviewBody }));
-  assert.equal(result.decision, 'merge-eligible');
+  assert.equal(result.decision, 'remediation-eligible');
   assert.equal(result.blockingFindings, 0);
   assert.equal(result.nonBlockingFindings, 1);
 });
@@ -326,7 +356,7 @@ test('parsed findings expose normalized category and structured fields', () => {
   const parsed = parseReviewBody(fixture('request-changes-with-blockers-addressable.md'));
 
   assert.equal(parsed.blocking.count, 2);
-  assert.equal(parsed.parsedFindings[0].title, 'Normalize stale-review routing');
+  assert.equal(parsed.parsedFindings[0].title, undefined);
   assert.equal(parsed.parsedFindings[0].category, 'correctness');
   assert.equal(parsed.parsedFindings[0].file, '`src/merge-agent-rescue-classifier.mjs`');
   assert.equal(parsed.parsedFindings[0].whyItMatters, null);
@@ -372,7 +402,7 @@ test('parsed findings retain why-it-matters field when present', () => {
 Request changes
 `);
 
-  assert.equal(parsed.parsedFindings[0].title, 'Preserve diagnostic shape');
+  assert.equal(parsed.parsedFindings[0].title, undefined);
   assert.equal(parsed.parsedFindings[0].whyItMatters, 'Downstream diagnostics lose reviewer context.');
 });
 

@@ -11,6 +11,9 @@ const HARD_STOP_LABELS = new Set([
   'paused-for-redesign',
   'reviewer-cycle-cap-reached',
 ]);
+const REBASE_HARD_STOP_LABELS = new Set(
+  [...HARD_STOP_LABELS].filter((label) => label !== 'merge-agent-stuck'),
+);
 const UNADDRESSABLE_CATEGORIES = new Set(['auth', 'schema-migration', 'external-system', 'policy']);
 const NESTED_FIELD_LABEL_PATTERN = String.raw`(?:Category|File|Lines|Problem|Why it matters|Recommended fix)`;
 
@@ -57,6 +60,22 @@ function verdictKindToDisplay(kind) {
   if (kind === 'approved') return 'Approved';
   if (kind === 'comment-only') return 'Comment only';
   if (kind === 'request-changes') return 'Request changes';
+  return null;
+}
+
+function statedVerdictDisplay(reviewBody) {
+  const section = extractSection(reviewBody, 'Verdict');
+  if (section == null) return null;
+  const lines = section
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index];
+    if (/^approved(?:\s*$|\s*[:\-–—].*)/i.test(line)) return 'Approved';
+    if (/^comment only(?:\s*$|\s*[:\-–—].*)/i.test(line)) return 'Comment only';
+    if (/^request changes(?:\s*$|\s*[:\-–—].*)/i.test(line)) return 'Request changes';
+  }
   return null;
 }
 
@@ -155,6 +174,10 @@ function hasHardStopLabel(labels) {
   return normalizeLabels(labels).some((label) => HARD_STOP_LABELS.has(label));
 }
 
+function hasRebaseHardStopLabel(labels) {
+  return normalizeLabels(labels).some((label) => REBASE_HARD_STOP_LABELS.has(label));
+}
+
 function isGateRow(row) {
   const contexts = new Set([GATE_CONTEXT]);
   try {
@@ -206,15 +229,24 @@ function isMergeable(input) {
 }
 
 function classify(input = {}) {
-  const verdict = verdictKindToDisplay(normalizeEffectiveReviewVerdict(input.reviewBody));
+  let verdict = verdictKindToDisplay(normalizeEffectiveReviewVerdict(input.reviewBody));
   const blocking = parseIssueSection(input.reviewBody, 'Blocking issues', 'blocking');
   const nonBlocking = parseIssueSection(input.reviewBody, 'Non-blocking issues', 'non-blocking');
-  const parsedFindings = [...blocking.findings, ...nonBlocking.findings].map(({ kind: _kind, ...finding }) => finding);
+  const parsedFindings = [...blocking.findings, ...nonBlocking.findings].map(({ kind: _kind, title: _title, ...finding }) => finding);
   const blockingFindings = blocking.count;
   const nonBlockingFindings = nonBlocking.count;
+  if (
+    statedVerdictDisplay(input.reviewBody) === 'Request changes'
+    && blockingFindings === 0
+    && nonBlockingFindings > 0
+  ) {
+    verdict = 'Request changes';
+  }
   const hardStop = hasHardStopLabel(input.labels);
+  const rebaseHardStop = hasRebaseHardStopLabel(input.labels);
   const checksArePassing = checksPass(input);
   const mergeable = isMergeable(input);
+  const conflicting = String(input?.mergeable ?? '').trim().toUpperCase() === 'CONFLICTING';
 
   if (hasValidOperatorApproval(input) && mergeable && checksArePassing && !hardStop) {
     return {
@@ -249,6 +281,7 @@ function classify(input = {}) {
   if (
     (verdict === 'Approved' || verdict === 'Comment only')
     && blockingFindings === 0
+    && nonBlockingFindings === 0
     && mergeable
     && checksArePassing
     && !hardStop
@@ -256,6 +289,23 @@ function classify(input = {}) {
     return {
       decision: 'merge-eligible',
       reason: 'clean-review',
+      blockingFindings,
+      nonBlockingFindings,
+      parsedFindings,
+    };
+  }
+
+  if (
+    (verdict === 'Approved' || verdict === 'Comment only')
+    && blockingFindings === 0
+    && nonBlockingFindings === 0
+    && conflicting
+    && checksArePassing
+    && !rebaseHardStop
+  ) {
+    return {
+      decision: 'rebase-eligible',
+      reason: 'clean-review-requires-rebase',
       blockingFindings,
       nonBlockingFindings,
       parsedFindings,
@@ -302,12 +352,13 @@ function parseReviewBody(reviewBody) {
     verdict: verdictKindToDisplay(normalizeEffectiveReviewVerdict(reviewBody)),
     blocking,
     nonBlocking,
-    parsedFindings: [...blocking.findings, ...nonBlocking.findings].map(({ kind: _kind, ...finding }) => finding),
+    parsedFindings: [...blocking.findings, ...nonBlocking.findings].map(({ kind: _kind, title: _title, ...finding }) => finding),
   };
 }
 
 export {
   HARD_STOP_LABELS,
+  REBASE_HARD_STOP_LABELS,
   UNADDRESSABLE_CATEGORIES,
   checkRowsForHead,
   checksPass,

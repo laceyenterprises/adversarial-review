@@ -363,6 +363,19 @@ two-path merge model** (operational reference:
   spawned. `strict_mode` defaults on; turning it off permits daemon
   merge over *known non-blocking* findings only.
 
+A PR body may declare a merge-order hold with the bare full-line trailer
+`Protects-Against-Unsafe-Merge-Until-PR: #1234`.
+
+Every autonomous merge path that can land a PR must honor that declaration
+before calling GitHub merge. The watcher evaluates it before choosing between
+daemon inline merge and hammer dispatch, and the hammer prompt re-checks it
+immediately before its lease-guarded `gh pr merge` call for already-running
+workers. The parser is intentionally line-oriented: any exact full-line trailer
+arms the hold, including inside fenced code blocks. Documentation examples must
+break the trailer name, for example
+`Protects-Against-Unsafe-Merge-Until-PR (example): #1234`, when they should not
+arm a real hold.
+
 There is no standing merge-agent in this model — no agent whose only job
 is to click merge — and both paths share one eligibility predicate
 (`src/ama/merge-eligibility.mjs`) that fails closed on empty required

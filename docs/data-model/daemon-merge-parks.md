@@ -35,7 +35,7 @@ Directory: `data/daemon-merge-parks/`
 | `firstObservedAt` | string | ISO-8601 timestamp for the first observation in the current same-reason streak. |
 | `lastObservedAt` | string | ISO-8601 timestamp for the latest observation in the current same-reason streak. |
 | `observationCount` | positive integer | Consecutive observations for the same reason. A different reason restarts the record at `1`. |
-| `remedy` | string or null | Reason-specific operator remedy when known, otherwise null. |
+| `remedy` | string or null | Reason-specific operator remedy when known, otherwise null. Known protective predecessor reasons include remedies to merge/close the protector, retry or inspect unreadable GitHub state, or fix malformed/unresolvable trailer lines. |
 
 ## Operational Contract
 

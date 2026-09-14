@@ -1446,6 +1446,104 @@ while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "$HAM_MERGE_ATTEMPTS" 
       ;;
   esac
 
+  ham_read_protective_predecessor_value() {
+    local ham_pph_label="$1"
+    local ham_pph_out_var="$2"
+    shift 2
+    local ham_pph_attempts=0
+    local ham_pph_stderr="/tmp/ham-<<PR_NUMBER>>-${ham_pph_label}.stderr"
+    local ham_pph_output=""
+    while [ "$ham_pph_attempts" -lt "$HAM_MERGE_RETRY_CAP" ]; do
+      ham_pph_attempts=$((ham_pph_attempts + 1))
+      : > "$ham_pph_stderr"
+      if ham_pph_output=$("$@" 2> "$ham_pph_stderr"); then
+        printf -v "$ham_pph_out_var" '%s' "$ham_pph_output"
+        rm -f "$ham_pph_stderr"
+        return 0
+      fi
+      if ! ham_merge_error_retryable "$ham_pph_stderr"; then
+        cat "$ham_pph_stderr" >&2 || true
+        rm -f "$ham_pph_stderr"
+        return 2
+      fi
+      if [ "$ham_pph_attempts" -ge "$HAM_MERGE_RETRY_CAP" ]; then
+        cat "$ham_pph_stderr" >&2 || true
+        rm -f "$ham_pph_stderr"
+        return 1
+      fi
+      HAM_PPH_BACKOFF_MULTIPLIER=$((1 << (ham_pph_attempts - 1)))
+      HAM_PPH_JITTER=$(awk 'BEGIN{srand(); print int(rand()*3)}')
+      HAM_PPH_SLEEP=$((HAM_MERGE_BACKOFF_BASE_SECONDS * HAM_PPH_BACKOFF_MULTIPLIER + HAM_PPH_JITTER))
+      echo "HAM protective predecessor ${ham_pph_label} transient failure; retrying ${ham_pph_attempts}/${HAM_MERGE_RETRY_CAP} after ${HAM_PPH_SLEEP}s" >&2
+      sleep "$HAM_PPH_SLEEP"
+    done
+    return 1
+  }
+
+  HAM_PROTECTIVE_PREDECESSOR_BODY=""
+  ham_read_protective_predecessor_value body HAM_PROTECTIVE_PREDECESSOR_BODY \
+    gh pr view <<PR_URL>> --json body --jq '.body // ""'
+  HAM_PROTECTIVE_PREDECESSOR_READ_STATUS=$?
+  if [ "$HAM_PROTECTIVE_PREDECESSOR_READ_STATUS" -ne 0 ]; then
+    echo "HAM hard-blocker: protective predecessor body read failed; refusing merge" >&2
+    if [ "$HAM_PROTECTIVE_PREDECESSOR_READ_STATUS" -eq 1 ]; then
+      ham_append_terminal_audit failed-without-merge protective-predecessor-state-unreadable || true
+      ham_mark_merge_lease_retryable_abort protective-predecessor-read-failed
+      ham_release_merge_lease
+      exit 1
+    fi
+    ham_append_terminal_audit failed-without-merge protective-predecessor-state-unreadable || true
+    ham_release_merge_lease
+    exit 0
+  fi
+  HAM_PROTECTIVE_PREDECESSORS=$(printf '%s\n' "$HAM_PROTECTIVE_PREDECESSOR_BODY" | awk '/^[[:space:]]*Protects-Against-Unsafe-Merge-Until-PR[[:space:]]*:/ {print $0}')
+  if [ -n "$HAM_PROTECTIVE_PREDECESSORS" ]; then
+    while IFS= read -r predecessor_line; do
+      HAM_PROTECTOR_PR=$(printf "%s" "$predecessor_line" | sed -nE 's/^[[:space:]]*Protects-Against-Unsafe-Merge-Until-PR[[:space:]]*:[[:space:]]*#?([1-9][0-9]*)[[:space:]]*$/\1/p')
+      if [ -z "$HAM_PROTECTOR_PR" ]; then
+        echo "HAM hard-blocker: malformed protective predecessor trailer; refusing merge" >&2
+        ham_append_terminal_audit failed-without-merge protective-predecessor-malformed-trailer || true
+        ham_release_merge_lease
+        exit 0
+      fi
+      if [ "$HAM_PROTECTOR_PR" = "<<PR_NUMBER>>" ]; then
+        echo "protective predecessor declaration points at this PR; ignoring malformed self-reference" >&2
+        continue
+      fi
+      HAM_PROTECTOR_STATE=""
+      ham_read_protective_predecessor_value "state-${HAM_PROTECTOR_PR}" HAM_PROTECTOR_STATE \
+        gh pr view "$HAM_PROTECTOR_PR" --repo "<<REPO>>" --json state --jq '.state // ""'
+      HAM_PROTECTOR_STATE_READ_STATUS=$?
+      if [ "$HAM_PROTECTOR_STATE_READ_STATUS" -ne 0 ]; then
+        echo "HAM hard-blocker: protective predecessor state unreadable for PR #$HAM_PROTECTOR_PR; refusing merge" >&2
+        if [ "$HAM_PROTECTOR_STATE_READ_STATUS" -eq 1 ]; then
+          ham_append_terminal_audit failed-without-merge protective-predecessor-state-unreadable || true
+          ham_mark_merge_lease_retryable_abort protective-predecessor-read-failed
+          ham_release_merge_lease
+          exit 1
+        fi
+        ham_append_terminal_audit failed-without-merge protective-predecessor-state-unreadable || true
+        ham_release_merge_lease
+        exit 0
+      fi
+      if [ -z "$HAM_PROTECTOR_STATE" ]; then
+        echo "HAM hard-blocker: protective predecessor state empty for PR #$HAM_PROTECTOR_PR; refusing merge" >&2
+        ham_append_terminal_audit failed-without-merge protective-predecessor-state-unreadable || true
+        ham_mark_merge_lease_retryable_abort protective-predecessor-read-failed
+        ham_release_merge_lease
+        exit 1
+      fi
+      if [ "$HAM_PROTECTOR_STATE" = "OPEN" ]; then
+        echo "HAM hard-blocker: protective predecessor PR #$HAM_PROTECTOR_PR is still open; refusing merge" >&2
+        ham_append_terminal_audit failed-without-merge protective-predecessor-open || true
+        ham_release_merge_lease
+        exit 0
+      fi
+    done <<EOF_HAM_PROTECTIVE_PREDECESSORS
+$HAM_PROTECTIVE_PREDECESSORS
+EOF_HAM_PROTECTIVE_PREDECESSORS
+  fi
+
   gh pr merge <<PR_URL>> \
     --<<MERGE_METHOD>> \
     --match-head-commit "$POST_REMEDIATION_SHA" \

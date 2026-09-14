@@ -805,6 +805,7 @@ test('watcher fails closed on permanent HAM stale-head resume proof errors', asy
         disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN,
         reason: 'not-eligible',
       }),
+      fetchMergedProtectiveDependentsImpl: async () => [],
       maybeDispatchAmaCloserImpl: async ({ dispatchContext }) => {
         seenDispatchContext = dispatchContext;
         return { dispatched: false, reason: 'not-eligible' };
@@ -2905,6 +2906,172 @@ test('Deliverable 2: daemon fail-closed stale-head routes to the capped hammer (
     assert.equal(result.dispatched, true);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('MERGEORDER-01: candidate body is threaded into closer metadata', async () => {
+  const rootDir = tempRoot();
+  try {
+    let capturedBody = null;
+    const body = 'PR body fallback marker';
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      candidate: {
+        ...baseArgs(rootDir).candidate,
+        prBody: body,
+      },
+      runDaemonCleanMergeAttemptImpl: async () => ({
+        disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN,
+        reason: 'findings-unknown',
+      }),
+      fetchProtectivePredecessorStateImpl: async () => ({ state: 'MERGED' }),
+      fetchMergedProtectiveDependentsImpl: async () => [],
+      maybeDispatchAmaCloserImpl: async ({ prMetadata }) => {
+        capturedBody = prMetadata.body;
+        return { dispatched: true };
+      },
+    });
+
+    assert.equal(result.dispatched, true);
+    assert.equal(capturedBody, body);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('MERGEORDER-01: findings-present protective predecessor hold parks before daemon or hammer dispatch', async () => {
+  const rootDir = tempRoot();
+  try {
+    const logs = [];
+    let closerCalls = 0;
+    let daemonCalls = 0;
+    let emittedFinding = null;
+    const requestChangesBody = [
+      '## Blocking issues',
+      '',
+      '- Still broken.',
+      '',
+      '## Verdict',
+      '',
+      'Request changes',
+    ].join('\n');
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      reviewStateRow: {
+        ...baseArgs(rootDir).reviewStateRow,
+        review_body: requestChangesBody,
+      },
+      dispatchJob: { blockingFindingCount: 1, blockingFindingState: 'known' },
+      candidate: {
+        ...baseArgs(rootDir).candidate,
+        body: 'Protects-Against-Unsafe-Merge-Until-PR: #299',
+      },
+      logger: { log: (m) => logs.push(String(m)), warn: (m) => logs.push(String(m)) },
+      runDaemonCleanMergeAttemptImpl: async () => {
+        daemonCalls += 1;
+        throw new Error('protective hold must be evaluated before daemon route');
+      },
+      fetchProtectivePredecessorStateImpl: async ({ prNumber }) => {
+        assert.equal(prNumber, 299);
+        return { state: 'OPEN' };
+      },
+      fetchMergedProtectiveDependentsImpl: async () => [],
+      maybeDispatchAmaCloserImpl: async () => {
+        closerCalls += 1;
+        return { dispatched: true };
+      },
+      emitProtectivePredecessorFindingImpl: async (finding) => {
+        emittedFinding = finding;
+      },
+    });
+
+    assert.equal(daemonCalls, 0, 'protective hold must be evaluated before daemon route');
+    assert.equal(closerCalls, 0, 'an open protective predecessor must not fall through to HAM');
+    assert.equal(result.dispatched, false);
+    assert.equal(result.skipMergeAgent, true);
+    assert.equal(result.reason, 'protective-predecessor-open');
+    assert.equal(emittedFinding.protectorPrNumber, 299);
+    assert.ok(logs.some((line) => line.includes('protective predecessor hold')));
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('MERGEORDER-01: findings-present protective hold suppresses hammer before daemon fork', async () => {
+  const rootDir = tempRoot();
+  try {
+    let closerCalls = 0;
+    let daemonCalls = 0;
+    let emittedFinding = null;
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      dispatchJob: { blockingFindingCount: 1, blockingFindingState: 'known' },
+      candidate: {
+        ...baseArgs(rootDir).candidate,
+        prBody: 'Protects-Against-Unsafe-Merge-Until-PR: #299',
+      },
+      env: { DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED: '0' },
+      fetchProtectivePredecessorStateImpl: async ({ prNumber }) => {
+        assert.equal(prNumber, 299);
+        return { state: 'OPEN', prState: 'OPEN', isOpen: true };
+      },
+      runDaemonCleanMergeAttemptImpl: async () => {
+        daemonCalls += 1;
+        return {
+          disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN,
+          reason: 'blocking-findings-present',
+        };
+      },
+      fetchMergedProtectiveDependentsImpl: async () => [],
+      maybeDispatchAmaCloserImpl: async () => {
+        closerCalls += 1;
+        return { dispatched: true };
+      },
+      emitProtectivePredecessorFindingImpl: async (finding) => {
+        emittedFinding = finding;
+      },
+    });
+
+    assert.equal(daemonCalls, 0, 'protective gate must run before daemon clean-merge eligibility');
+    assert.equal(closerCalls, 0, 'open protector must suppress HAM dispatch even with findings present');
+    assert.equal(result.dispatched, false);
+    assert.equal(result.skipMergeAgent, true);
+    assert.equal(result.reason, 'protective-predecessor-open');
+    assert.equal(emittedFinding.protectorPrNumber, 299);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('MERGEORDER-01: daemon protective hold reasons do not fall through to hammer', async () => {
+  for (const reason of [
+    'protective-predecessor-open',
+    'protective-predecessor-state-unreadable',
+    'protective-predecessor-not-found',
+    'protective-predecessor-malformed-trailer',
+  ]) {
+    const rootDir = tempRoot();
+    try {
+      let closerCalls = 0;
+      const result = await maybeDispatchAmaClosureFor({
+        ...baseArgs(rootDir),
+        runDaemonCleanMergeAttemptImpl: async () => ({
+          disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN,
+          reason,
+        }),
+        maybeDispatchAmaCloserImpl: async () => {
+          closerCalls += 1;
+          return { dispatched: true };
+        },
+      });
+
+      assert.equal(closerCalls, 0, `${reason} must not dispatch HAM`);
+      assert.equal(result.dispatched, false);
+      assert.equal(result.skipMergeAgent, true);
+      assert.equal(result.reason, reason);
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
   }
 });
 

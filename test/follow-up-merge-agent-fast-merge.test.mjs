@@ -70,6 +70,7 @@ function openView(head = 'sha-A', labels = [{ name: 'fast-merge:docs' }]) {
     closedAt: null,
     headRefOid: head,
     labels,
+    body: '',
   };
 }
 
@@ -326,6 +327,67 @@ test('fast-merge happy path merges authorized green head and writes audit', asyn
   assert.equal(audits.at(-1).merged_head_sha, 'sha-A');
   assert.equal(audits.at(-1).merge_sha, 'feedfacefeedfacefeedfacefeedfacefeedface');
   assert.deepEqual(mergeCalls(gh)[0].args.slice(-3), ['--match-head-commit', 'sha-A', '--delete-branch']);
+});
+
+test('fast-merge requeues instead of admin-merging while protective predecessor is open', async () => {
+  const db = makeDb();
+  seedFastMerge(db, 8011);
+  const audits = [];
+  const dependentView = {
+    ...openView('sha-A'),
+    body: 'Protects-Against-Unsafe-Merge-Until-PR: #8001',
+  };
+  const protectorView = { ...openView('protector-head'), headRefOid: 'protector-head' };
+  const gh = makeGhStub({
+    views: [dependentView, dependentView, protectorView],
+    checks: [successChecks()],
+  });
+
+  const result = await processFastMergePR({
+    db,
+    ghClient: gh,
+    repo: REPO,
+    prNumber: 8011,
+    authorizedHeadSha: 'sha-A',
+    auditWriter: (entry) => audits.push(entry),
+  });
+
+  assert.equal(result.status, 'requeued_protective_predecessor');
+  assert.equal(row(db, 8011).pr_state, 'open');
+  assert.equal(row(db, 8011).review_status, 'pending');
+  assert.equal(mergeCalls(gh).length, 0);
+  assert.equal(audits.at(-1).action, 'protective-predecessor-requeued');
+  assert.equal(audits.at(-1).failure_reason, 'protective-predecessor-open');
+});
+
+test('fast-merge distinguishes missing protective predecessor PRs from unreadable state', async () => {
+  const db = makeDb();
+  seedFastMerge(db, 8012);
+  const audits = [];
+  const dependentView = {
+    ...openView('sha-A'),
+    body: 'Protects-Against-Unsafe-Merge-Until-PR: #8001',
+  };
+  const notFound = new Error('GraphQL: Could not resolve to a PullRequest with number 8001');
+  notFound.stderr = 'HTTP 404 Not Found';
+  const gh = makeGhStub({
+    views: [dependentView, dependentView, notFound],
+    checks: [successChecks()],
+  });
+
+  const result = await processFastMergePR({
+    db,
+    ghClient: gh,
+    repo: REPO,
+    prNumber: 8012,
+    authorizedHeadSha: 'sha-A',
+    auditWriter: (entry) => audits.push(entry),
+  });
+
+  assert.equal(result.status, 'requeued_protective_predecessor');
+  assert.equal(mergeCalls(gh).length, 0);
+  assert.equal(audits.at(-1).action, 'protective-predecessor-requeued');
+  assert.equal(audits.at(-1).failure_reason, 'protective-predecessor-not-found');
 });
 
 test('fast-merge uses adapter mutation after eligibility checks and still writes audit', async () => {

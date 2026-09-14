@@ -25,6 +25,14 @@ import { DAEMON_MERGE_DISPOSITION, isDaemonMergeReviewAllowed } from './ama/daem
 import * as amaDispatchCloser from './ama/dispatch-closer.mjs';
 import { isEligibleForAmaClosure, SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
 import { evaluateMergeEligibility } from './ama/merge-eligibility.mjs';
+import {
+  findMalformedProtectivePredecessorLines,
+  isProtectorOpen,
+  parseProtectivePredecessorDeclaration,
+  PROTECTIVE_PREDECESSOR_HOLD_REASONS,
+  protectivePredecessorMergeWindowFinding,
+  resolveProtectivePredecessorDeclaration,
+} from './ama/protective-predecessor.mjs';
 import { recordAmaRetain } from './ama-retain-loop-cap.mjs';
 import { amaRetainLoopCapFor } from './kernel/convergence-budget.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
@@ -46,7 +54,7 @@ import {
   rekeyAmaCloserLease,
 } from './ama/closer-lease.mjs';
 import { resolveRoundBudgetForJob, summarizePRRemediationLedger } from './follow-up-jobs.mjs';
-import { isTransientGhError } from './gh-cli.mjs';
+import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
 import { fetchPullRequestMergeability, fetchReviewBodiesForHead } from './github-api.mjs';
 import { normalizeGithubMergeability, resolveMergeabilityWithSampling } from './github-mergeability.mjs';
 import {
@@ -80,6 +88,260 @@ const {
   maybeDispatchAmaCloser,
   namedAmaNoDispatchReason,
 } = amaDispatchCloser;
+
+const PROTECTIVE_DEPENDENT_LOOKUP_CACHE_MS = 60_000;
+const mergedProtectiveDependentsCache = new Map();
+
+function githubSearchPhrase(value) {
+  const phrase = String(value || '').replace(/"/gu, ' ').replace(/\s+/gu, ' ').trim();
+  return `"${phrase}"`;
+}
+
+function isGhNotFoundError(err) {
+  const detail = [
+    err?.code,
+    err?.status,
+    err?.statusCode,
+    err?.stderr,
+    err?.stdout,
+    err?.message,
+  ].filter(Boolean).join('\n').toLowerCase();
+  return /\b404\b/.test(detail)
+    || detail.includes('not found')
+    || detail.includes('could not resolve to a pullrequest')
+    || detail.includes('no pull requests found');
+}
+
+function protectivePredecessorStateError(reason, err) {
+  const error = new Error(err?.message || String(err || reason));
+  error.protectivePredecessorReason = reason;
+  error.cause = err;
+  if (err?.stderr) error.stderr = err.stderr;
+  if (err?.stdout) error.stdout = err.stdout;
+  if (err?.code) error.code = err.code;
+  return error;
+}
+
+async function fetchProtectivePredecessorStateForPr({
+  repo,
+  prNumber,
+  execFileImpl = execFileAsync,
+  execGhWithRetryImpl = execGhWithRetry,
+  logger = console,
+} = {}) {
+  try {
+    const { stdout } = await execGhWithRetryImpl({
+      execFileImpl,
+      args: [
+        'pr',
+        'view',
+        String(prNumber),
+        '--repo',
+        repo,
+        '--json',
+        'state',
+      ],
+      timeoutMs: 30_000,
+      log: logger,
+    });
+    const parsed = JSON.parse(String(stdout || '{}'));
+    const state = String(parsed?.state || '').trim().toUpperCase();
+    if (!state) {
+      throw protectivePredecessorStateError(
+        'protective-predecessor-state-unreadable',
+        new Error(`protector #${prNumber} state missing`),
+      );
+    }
+    return {
+      state,
+      prState: state,
+      isOpen: state === 'OPEN',
+    };
+  } catch (err) {
+    if (err?.protectivePredecessorReason) throw err;
+    throw protectivePredecessorStateError(
+      isGhNotFoundError(err)
+        ? 'protective-predecessor-not-found'
+        : 'protective-predecessor-state-unreadable',
+      err,
+    );
+  }
+}
+
+export async function fetchMergedProtectiveDependentsForPr({
+  repo,
+  prNumber,
+  execFileImpl = execFileAsync,
+  execGhWithRetryImpl = execGhWithRetry,
+  logger = console,
+  now = () => Date.now(),
+  cacheTtlMs = PROTECTIVE_DEPENDENT_LOOKUP_CACHE_MS,
+} = {}) {
+  const target = Number(prNumber);
+  if (!repo || !Number.isInteger(target) || target <= 0) return [];
+  const cacheKey = `${repo}#${target}`;
+  const nowMs = Number(now());
+  const resolvedNowMs = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const cached = mergedProtectiveDependentsCache.get(cacheKey);
+  if (
+    cached
+    && resolvedNowMs - Number(cached.storedAtMs || 0) < Math.max(0, Number(cacheTtlMs) || 0)
+  ) {
+    return cached.value;
+  }
+  const query = [
+    `repo:${repo}`,
+    'is:pr',
+    'is:merged',
+    githubSearchPhrase('Protects-Against-Unsafe-Merge-Until-PR'),
+    String(target),
+  ].join(' ');
+  let stdout;
+  try {
+    ({ stdout } = await execGhWithRetryImpl({
+      execFileImpl,
+      args: [
+        'api',
+        `search/issues?q=${encodeURIComponent(query)}&per_page=50`,
+      ],
+      timeoutMs: 30_000,
+      log: logger,
+    }));
+  } catch (err) {
+    logger?.warn?.(
+      `[watcher] protective predecessor dependent lookup failed for ${repo}#${target}: ${err?.message || err}`,
+    );
+    logger?.warn?.(JSON.stringify({
+      event: 'ama.protective_predecessor.dependent_lookup_failed',
+      repo,
+      prNumber: target,
+      error: err?.message || String(err),
+    }));
+    return [];
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(String(stdout || '{}'));
+  } catch (err) {
+    logger?.warn?.(
+      `[watcher] protective predecessor dependent lookup returned invalid JSON for ${repo}#${target}: ${err?.message || err}`,
+    );
+    return [];
+  }
+  const value = (Array.isArray(parsed?.items) ? parsed.items : [])
+    .map((item) => {
+      const declaration = parseProtectivePredecessorDeclaration(item?.body || '');
+      if (!declaration || !declaration.protectorPrNumbers?.includes(target)) return null;
+      return {
+        repo,
+        prNumber: Number(item?.number),
+        state: 'MERGED',
+        mergedAt: item?.pull_request?.merged_at || item?.closed_at || null,
+        protectivePredecessor: declaration,
+      };
+    })
+    .filter((item) => Number.isInteger(item?.prNumber) && item.prNumber > 0);
+  mergedProtectiveDependentsCache.set(cacheKey, { storedAtMs: resolvedNowMs, value });
+  return value;
+}
+
+async function evaluateProtectivePredecessorHoldForClosure({
+  repo,
+  prNumber,
+  body,
+  fetchProtectivePredecessorStateImpl = fetchProtectivePredecessorStateForPr,
+  execFileImpl = execFileAsync,
+  logger = console,
+} = {}) {
+  const malformedLines = findMalformedProtectivePredecessorLines(body);
+  if (malformedLines.length > 0) {
+    const finding = protectivePredecessorMergeWindowFinding({
+      repo,
+      dependentPrNumber: prNumber,
+      protectorPrNumber: 0,
+      outcome: 'malformed-trailer',
+      detail: { malformedLines },
+    });
+    return {
+      reason: 'protective-predecessor-malformed-trailer',
+      finding,
+      protectivePredecessor: { malformedLines },
+    };
+  }
+
+  const declaration = resolveProtectivePredecessorDeclaration({ prBody: body });
+  if (!declaration) return null;
+  const protectorPrNumbers = Array.isArray(declaration.protectorPrNumbers)
+    ? declaration.protectorPrNumbers
+    : [declaration.protectorPrNumber];
+  for (const protectorPrNumber of protectorPrNumbers) {
+    if (Number(protectorPrNumber) === Number(prNumber)) {
+      logger?.warn?.(
+        `[watcher] protective predecessor self-reference for ${repo}#${prNumber}; ignoring malformed declaration`,
+      );
+      continue;
+    }
+    let protectorState = null;
+    try {
+      protectorState = await fetchProtectivePredecessorStateImpl({
+        repo,
+        prNumber: protectorPrNumber,
+        dependentPrNumber: prNumber,
+        execFileImpl,
+        logger,
+      });
+    } catch (err) {
+      const reason = err?.protectivePredecessorReason || 'protective-predecessor-state-unreadable';
+      const finding = protectivePredecessorMergeWindowFinding({
+        repo,
+        dependentPrNumber: prNumber,
+        protectorPrNumber,
+        outcome: reason === 'protective-predecessor-not-found' ? 'not-found' : 'state-unreadable',
+        reason: err?.message || null,
+      });
+      return {
+        reason,
+        finding,
+        protectivePredecessor: { ...declaration, protectorPrNumber },
+      };
+    }
+    const protectorStateText = String(protectorState?.state ?? protectorState?.prState ?? '').trim();
+    if (!protectorStateText && protectorState?.isOpen !== true && protectorState?.isOpen !== false) {
+      const finding = protectivePredecessorMergeWindowFinding({
+        repo,
+        dependentPrNumber: prNumber,
+        protectorPrNumber,
+        outcome: 'state-unreadable',
+      });
+      return {
+        reason: 'protective-predecessor-state-unreadable',
+        finding,
+        protectivePredecessor: { ...declaration, protectorPrNumber },
+      };
+    }
+    if (isProtectorOpen(protectorState)) {
+      const finding = protectivePredecessorMergeWindowFinding({
+        repo,
+        dependentPrNumber: prNumber,
+        protectorPrNumber,
+        outcome: 'held-before-merge',
+      });
+      return {
+        reason: 'protective-predecessor-open',
+        finding,
+        protectivePredecessor: { ...declaration, protectorPrNumber },
+      };
+    }
+  }
+  return null;
+}
+
+async function emitProtectivePredecessorFindingToLog(logger, finding) {
+  logger?.warn?.(JSON.stringify({
+    event: 'ama.protective_predecessor.finding',
+    ...finding,
+  }));
+}
 
 export class AmaCoexistenceAbortError extends Error {
   constructor(reason = 'ama-coexistence-aborted') {
@@ -377,6 +639,9 @@ export async function maybeDispatchAmaClosureFor({
   dismissSupersededBlockingVerdictAtRemediatedHeadImpl =
     dismissSupersededBlockingVerdictAtRemediatedHead,
   writeAutonomousMergeDisabledAuditImpl = writeAutonomousMergeDisabledAudit,
+  fetchMergedProtectiveDependentsImpl = fetchMergedProtectiveDependentsForPr,
+  fetchProtectivePredecessorStateImpl = fetchProtectivePredecessorStateForPr,
+  emitProtectivePredecessorFindingImpl = null,
   env = process.env,
   signal = null,
   operationTimeoutMs = null,
@@ -757,6 +1022,7 @@ export async function maybeDispatchAmaClosureFor({
     statusCheckRollup: Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : [],
     branchProtection: { requiredContexts: candidate?.branchProtection?.requiredContexts || [] },
     author: candidate?.prAuthor || null,
+    body: String(candidate?.body ?? candidate?.prBody ?? ''),
   };
 
   const strictMode = cfg?.strictMode !== false;
@@ -819,6 +1085,50 @@ export async function maybeDispatchAmaClosureFor({
           flagState: autonomousFlagState,
           auditWritten: Boolean(disabledAudit?.written),
         },
+      },
+      { amaEnabled: true },
+    );
+  }
+
+  const protectiveHold = await evaluateProtectivePredecessorHoldForClosure({
+    repo: repoPath,
+    prNumber,
+    body: prMetadata.body,
+    fetchProtectivePredecessorStateImpl,
+    execFileImpl: execFileAsync,
+    logger,
+  });
+  if (protectiveHold) {
+    const daemonHeadShort = String(gateSnapshot?.reviewedHeadSha || '').slice(0, 12);
+    logger?.warn?.(
+      `[watcher] AMA protective predecessor hold before closeout routing for ` +
+        `${repoPath}#${prNumber}@${daemonHeadShort}: ${protectiveHold.reason}`,
+    );
+    recordDaemonMergePark({
+      rootDir,
+      repo: repoPath,
+      prNumber,
+      headSha: gateSnapshot?.reviewedHeadSha || null,
+      reason: protectiveHold.reason,
+    });
+    if (typeof emitProtectivePredecessorFindingImpl === 'function' && protectiveHold.finding) {
+      try {
+        await emitProtectivePredecessorFindingImpl(protectiveHold.finding);
+      } catch (err) {
+        logger?.warn?.(
+          `[watcher] protective predecessor finding emit failed for ${repoPath}#${prNumber}: ` +
+            `${err?.message || err}`,
+        );
+      }
+    } else if (protectiveHold.finding) {
+      await emitProtectivePredecessorFindingToLog(logger, protectiveHold.finding);
+    }
+    return withAmaDispatchMetadata(
+      {
+        dispatched: false,
+        skipMergeAgent: true,
+        reason: protectiveHold.reason,
+        protectivePredecessor: protectiveHold.protectivePredecessor,
       },
       { amaEnabled: true },
     );
@@ -1071,6 +1381,8 @@ export async function maybeDispatchAmaClosureFor({
       authoritativeReviewerLogins,
       dismissStaleRequestChangesOnResolved,
       hamTerminalRemediationValidated,
+      emitProtectivePredecessorFindingImpl: emitProtectivePredecessorFindingImpl
+        || ((finding) => emitProtectivePredecessorFindingToLog(logger, finding)),
       signal: operationSignal,
     }),
     {
@@ -1190,6 +1502,31 @@ export async function maybeDispatchAmaClosureFor({
       );
     }
   }
+  if (
+    daemonCleanMerge?.disposition === DAEMON_MERGE_DISPOSITION.NOT_TAKEN &&
+    (
+      PROTECTIVE_PREDECESSOR_HOLD_REASONS.has(daemonCleanMerge.reason)
+    )
+  ) {
+    const daemonHeadShort = String(gateSnapshot?.reviewedHeadSha || '').slice(0, 12);
+    logger?.warn?.(
+      `[watcher] AMA protective predecessor hold for ${repoPath}#${prNumber}` +
+        `@${daemonHeadShort}: ${daemonCleanMerge.reason}`,
+    );
+    recordDaemonMergePark({
+      rootDir,
+      repo: repoPath,
+      prNumber,
+      headSha: gateSnapshot?.reviewedHeadSha || null,
+      reason: daemonCleanMerge.reason,
+    });
+    return {
+      dispatched: false,
+      skipMergeAgent: true,
+      reason: daemonCleanMerge.reason,
+      daemonCleanMerge,
+    };
+  }
 
   const [owner, name] = repoPath.split('/');
   // HMR-01: how long has this PR been TERMINAL and still unmerged?
@@ -1210,6 +1547,19 @@ export async function maybeDispatchAmaClosureFor({
     if (!Number.isFinite(postedAt)) return null;
     return Math.max(0, Date.now() - postedAt);
   })();
+  const shouldLookupMergedProtectiveDependents =
+    reviewCycleExhausted ||
+    hamTerminalRemediationValidated ||
+    Number(reviewState.blockingFindingCount || 0) > 0 ||
+    Number(reviewState.nonBlockingFindingCount || 0) > 0;
+  const mergedProtectiveDependents = shouldLookupMergedProtectiveDependents
+    ? await fetchMergedProtectiveDependentsImpl({
+        repo: repoPath,
+        prNumber,
+        execFileImpl: execFileAsync,
+        logger,
+      })
+    : [];
 
   const dispatchContext = {
     settledCommentOnlyTerminalMs,
@@ -1228,6 +1578,7 @@ export async function maybeDispatchAmaClosureFor({
     reviewer: reviewStateRow?.reviewer || '',
     authoritativeReviewerLogins,
     dismissStaleRequestChangesOnResolved: isDismissStaleRequestChangesOnResolvedEnabled({ env, logger }),
+    mergedProtectiveDependents,
     parentSession: process.env.HQ_PARENT_SESSION || 'session:unknown:airlock+watcher',
     dispatchedAt: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
     orchestrationMode,

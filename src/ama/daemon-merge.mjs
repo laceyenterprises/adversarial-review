@@ -53,6 +53,12 @@ import {
 } from './audit.mjs';
 import { evaluateMergeEligibility } from './merge-eligibility.mjs';
 import { evaluateMergeCapabilityEnforcement } from './merge-capability-enforcement.mjs';
+import {
+  findMalformedProtectivePredecessorLines,
+  isProtectorOpen,
+  protectivePredecessorMergeWindowFinding,
+  resolveProtectivePredecessorDeclaration,
+} from './protective-predecessor.mjs';
 
 /** Bounded-retry defaults, byte-for-byte the MSM-01 hammer merge budget. */
 export const DAEMON_MERGE_DEFAULTS = Object.freeze({
@@ -307,6 +313,8 @@ function priorDaemonPermanentFailure({ readAuditImpl, hqRoot, repo, prNumber, va
  * @param {string} [args.mergeMethod]    `squash` (default) | `merge`.
  * @param {string} args.hqRoot          HQ root for the audit doc.
  * @param {object} [args.auditMetadata] Extra top-level audit fields (reviewer, risk).
+ * @param {string=} [args.prBody]       PR body, used only for explicit
+ *                                      protective-predecessor trailers.
  *
  * Injected collaborators (all required for the merge path; defaulted for audit):
  * @param {() => Promise<object>} args.fetchLiveGateImpl  Re-read live head+gate.
@@ -345,6 +353,10 @@ export async function attemptDaemonCleanMerge({
   mergeEnv = process.env,
   hqRoot,
   auditMetadata = {},
+  prBody = '',
+  protectivePredecessor = null,
+  fetchProtectivePredecessorStateImpl = null,
+  emitFindingImpl = null,
   strictMode = flags.strictMode ?? true,
   allowHamTerminalRemediation = false,
   allowHeadCloserCertifiedNonBlocking = false,
@@ -373,6 +385,106 @@ export async function attemptDaemonCleanMerge({
     auditWritten: false,
     ...extra,
   });
+
+  const protectiveDeclaration = resolveProtectivePredecessorDeclaration({
+    prBody,
+    explicit: protectivePredecessor,
+  });
+  const malformedProtectiveLines = findMalformedProtectivePredecessorLines(prBody);
+  if (!protectivePredecessor && malformedProtectiveLines.length > 0) {
+    const finding = protectivePredecessorMergeWindowFinding({
+      repo,
+      dependentPrNumber: prNumber,
+      protectorPrNumber: 0,
+      outcome: 'malformed-trailer',
+      detail: { malformedLines: malformedProtectiveLines },
+    });
+    logger?.warn?.(
+      `[daemon-merge] malformed protective predecessor trailer for ${repo}#${prNumber}; holding merge`,
+    );
+    if (typeof emitFindingImpl === 'function') {
+      try {
+        await emitFindingImpl(finding);
+      } catch (err) {
+        logger?.warn?.(
+          `[daemon-merge] protective predecessor finding emit failed for ${repo}#${prNumber}: ` +
+            `${err?.message || err}`,
+        );
+      }
+    }
+    return notTaken('protective-predecessor-malformed-trailer', {
+      protectivePredecessor: { malformedLines: malformedProtectiveLines },
+      finding,
+    });
+  }
+  if (protectiveDeclaration) {
+    const protectorPrNumbers = Array.isArray(protectiveDeclaration.protectorPrNumbers)
+      ? protectiveDeclaration.protectorPrNumbers
+      : [protectiveDeclaration.protectorPrNumber];
+    for (const protectorPrNumber of protectorPrNumbers) {
+      if (Number(protectorPrNumber) === Number(prNumber)) {
+        logger?.warn?.(
+          `[daemon-merge] protective predecessor self-reference for ${repo}#${prNumber}; ignoring malformed declaration`,
+        );
+        continue;
+      }
+      let protectorState = null;
+      try {
+        protectorState = typeof fetchProtectivePredecessorStateImpl === 'function'
+          ? await fetchProtectivePredecessorStateImpl({
+              repo,
+              prNumber: protectorPrNumber,
+              dependentPrNumber: prNumber,
+            })
+          : null;
+      } catch (err) {
+        const reason = err?.protectivePredecessorReason || 'protective-predecessor-state-unreadable';
+        logger?.warn?.(
+          `[daemon-merge] protective predecessor read failed for ${repo}#${prNumber} ` +
+            `protector #${protectorPrNumber}; holding merge (${reason}): ${err?.message || err}`,
+        );
+        return notTaken(reason, {
+          protectivePredecessor: { ...protectiveDeclaration, protectorPrNumber },
+        });
+      }
+      const protectorStateText = String(protectorState?.state ?? protectorState?.prState ?? '').trim();
+      if (!protectorStateText && protectorState?.isOpen !== true && protectorState?.isOpen !== false) {
+        logger?.warn?.(
+          `[daemon-merge] protective predecessor state missing for ${repo}#${prNumber} ` +
+            `protector #${protectorPrNumber}; holding merge`,
+        );
+        return notTaken('protective-predecessor-state-unreadable', {
+          protectivePredecessor: { ...protectiveDeclaration, protectorPrNumber },
+        });
+      }
+      if (isProtectorOpen(protectorState)) {
+        const finding = protectivePredecessorMergeWindowFinding({
+          repo,
+          dependentPrNumber: prNumber,
+          protectorPrNumber,
+          outcome: 'held-before-merge',
+        });
+        logger?.warn?.(
+          `[daemon-merge] protective predecessor open for ${repo}#${prNumber}; ` +
+            `holding merge until protector #${protectorPrNumber} closes`,
+        );
+        if (typeof emitFindingImpl === 'function') {
+          try {
+            await emitFindingImpl(finding);
+          } catch (err) {
+            logger?.warn?.(
+              `[daemon-merge] protective predecessor finding emit failed for ${repo}#${prNumber}: ` +
+                `${err?.message || err}`,
+            );
+          }
+        }
+        return notTaken('protective-predecessor-open', {
+          protectivePredecessor: { ...protectiveDeclaration, protectorPrNumber },
+          finding,
+        });
+      }
+    }
+  }
 
   // ── Gate 1: STRICT clean-only. Any finding (or unknown classification) routes
   // to the hammer. When strict mode is explicitly off, known non-blocking

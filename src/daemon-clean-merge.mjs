@@ -194,6 +194,31 @@ function isTransientAmaLiveReviewLookupError(err) {
   );
 }
 
+function isGhPrNotFoundError(err) {
+  const detail = [
+    err?.code,
+    err?.status,
+    err?.statusCode,
+    err?.stderr,
+    err?.stdout,
+    err?.message,
+  ].filter(Boolean).join('\n').toLowerCase();
+  return /\b404\b/.test(detail)
+    || detail.includes('not found')
+    || detail.includes('could not resolve to a pullrequest')
+    || detail.includes('no pull requests found');
+}
+
+function protectivePredecessorStateError(reason, err) {
+  const error = new Error(err?.message || String(err || reason));
+  error.protectivePredecessorReason = reason;
+  error.cause = err;
+  if (err?.stderr) error.stderr = err.stderr;
+  if (err?.stdout) error.stdout = err.stdout;
+  if (err?.code) error.code = err.code;
+  return error;
+}
+
 export async function fetchLatestHeadReviewBodiesWithRetry({
   repoPath,
   prNumber,
@@ -348,6 +373,7 @@ export async function runDaemonCleanMergeAttempt({
   evaluateMovedHeadClobberGuardImpl = evaluateMovedHeadClobberGuard,
   appendAmaAuditAttemptImpl = appendAmaAuditAttempt,
   clobberGuardNowImpl = () => new Date().toISOString(),
+  emitProtectivePredecessorFindingImpl = null,
 } = {}) {
   const base = candidate?.baseBranch;
   const validatedHead = gateSnapshot?.reviewedHeadSha || reviewState?.headSha || null;
@@ -821,6 +847,48 @@ export async function runDaemonCleanMergeAttempt({
     },
     mergeCapabilityEnforcement: cfg?.mergeCapabilityEnforcement || 'observe',
     mergeEnv: env,
+    prBody: String(liveRollup?.body ?? candidate?.body ?? candidate?.prBody ?? ''),
+    fetchProtectivePredecessorStateImpl: async ({ prNumber: protectorPrNumber }) => {
+      try {
+        const { stdout } = await execGhWithRetryImpl({
+          execFileImpl,
+          args: [
+            'pr',
+            'view',
+            String(protectorPrNumber),
+            '--repo',
+            repoPath,
+            '--json',
+            'state',
+          ],
+          env,
+          timeoutMs: 30_000,
+          log: logger,
+        });
+        const protector = JSON.parse(String(stdout || '{}'));
+        const state = String(protector?.state || '').trim().toUpperCase();
+        if (!state) {
+          throw protectivePredecessorStateError(
+            'protective-predecessor-state-unreadable',
+            new Error(`protector #${protectorPrNumber} state missing`),
+          );
+        }
+        return {
+          state,
+          prState: state,
+          isOpen: state === 'OPEN',
+        };
+      } catch (err) {
+        if (err?.protectivePredecessorReason) throw err;
+        throw protectivePredecessorStateError(
+          isGhPrNotFoundError(err)
+            ? 'protective-predecessor-not-found'
+            : 'protective-predecessor-state-unreadable',
+          err,
+        );
+      }
+    },
+    emitFindingImpl: emitProtectivePredecessorFindingImpl,
     dismissStaleRequestChangesImpl: dismissStaleRequestChangesOnResolved !== false
       ? async () => dismissStandingChangesRequestedReviewsForHead(execFileImpl, repoPath, prNumber, daemonValidatedHead, {
           authoritativeReviewerLogins,

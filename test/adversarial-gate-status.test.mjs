@@ -25,7 +25,10 @@ import {
   resolveMergeAgentCoexistenceForWatcher,
   shouldInlineFinalHammerAfterReview,
 } from '../src/watcher.mjs';
-import { DEFAULT_AMA_CLOSURE_OPERATION_TIMEOUT_MS } from '../src/ama-closure-orchestration.mjs';
+import {
+  DEFAULT_AMA_CLOSURE_OPERATION_TIMEOUT_MS,
+  fetchMergedProtectiveDependentsForPr,
+} from '../src/ama-closure-orchestration.mjs';
 import { resetConfigCache } from '../src/config-loader.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { HANDOFF_EVENTS } from '../src/handoff-telemetry.mjs';
@@ -89,6 +92,38 @@ function makeOperatorApproval(overrides = {}) {
     ...overrides,
   };
 }
+
+test('MERGEORDER-01: merged dependent lookup uses GET-compatible gh api argv', async () => {
+  const calls = [];
+  const dependents = await fetchMergedProtectiveDependentsForPr({
+    repo: 'acme/repo',
+    prNumber: 6767,
+    logger: { warn() {} },
+    execGhWithRetryImpl: async ({ args }) => {
+      calls.push(args);
+      return {
+        stdout: JSON.stringify({
+          items: [
+            {
+              number: 6760,
+              state: 'closed',
+              closed_at: '2026-09-01T12:00:00Z',
+              pull_request: { merged_at: '2026-09-01T12:00:00Z' },
+              body: 'Protects-Against-Unsafe-Merge-Until-PR: #6767',
+            },
+          ],
+        }),
+      };
+    },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], 'api');
+  assert.match(calls[0][1], /^search\/issues\?q=/);
+  assert.match(calls[0][1], /&per_page=50$/);
+  assert.equal(calls[0].includes('-f'), false);
+  assert.deepEqual(dependents.map((dependent) => dependent.prNumber), [6760]);
+});
 
 test('pickAdversarialGateStatus returns success for a settled non-blocking review', () => {
   const decision = pickAdversarialGateStatus({

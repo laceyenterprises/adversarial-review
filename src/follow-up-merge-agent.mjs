@@ -2939,6 +2939,7 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
     statusCheckRollup: Array.isArray(parsed.statusCheckRollup) ? parsed.statusCheckRollup : [],
     branchProtection,
     labels,
+    body: String(parsed.body || ''),
     operatorNotes: extractOperatorNotes(parsed.body),
     prState: parsed.mergedAt ? 'merged' : String(parsed.state || 'unknown').trim().toLowerCase(),
     merged: Boolean(parsed.mergedAt),
@@ -2950,7 +2951,6 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
     mergeAgentRequestEvent: resolvedMergeAgentRequestEvent,
   };
 }
-
 function buildMergeAgentDispatchJob(rootDir, candidate, { reviewStateDb = null } = {}) {
   const latestJob = findLatestFollowUpJobForPR(rootDir, {
     repo: candidate.repo,

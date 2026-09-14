@@ -2046,6 +2046,17 @@ Concrete contract example used by operator docs and regression tests:
 5. If `abc123` already has a dispatch record or a live `merge-agent-dispatched` handoff, the watcher returns `skip-already-dispatched` instead of launching a duplicate worker.
 6. If the same `Comment only` review still lists a real blocking issue, the watcher returns `skip-blockers-present` (ARP-06 / #157) and keeps the PR out of the merge path until a fresh structured clean review or a scoped current-head operator override exists.
 
+Protective predecessor declarations are merge-order holds, not advisory text.
+Authors declare them with a bare full-line trailer such as
+`Protects-Against-Unsafe-Merge-Until-PR: #1234`. The parser is intentionally
+line-oriented: any exact full-line trailer arms the hold, including inside
+fenced code blocks. Documentation examples must break the trailer name, for
+example `Protects-Against-Unsafe-Merge-Until-PR (example): #1234`, when they
+should not arm a real hold. Every autonomous path that can land a PR must honor
+a parsed declaration before calling GitHub merge: the watcher evaluates it
+before the daemon/hammer fork, and the hammer prompt re-checks it immediately
+before its lease-guarded `gh pr merge` loop.
+
 #### Why a fifth dispatch path exists
 
 Without the final-pass path, every PR whose verdict never converges to `Comment only` halts at `max-rounds-reached` and waits for the operator. In practice the codex reviewer almost always returns `Request changes` because the reviewer prompt is adversarial by design; the lenient final-round addendum relaxes *categorization* but keeps the *verdict* at `Request changes` whenever any finding remains. Result: the auto-merge daemon never auto-merged a single PR in the observed window leading up to 2026-05-14. The final-pass dispatch path closes that loop by giving the merge-agent itself the responsibility for the final substance check — the merge-agent's `comment_only_followups.py` is the right place to decide whether reviewer findings warrant blocking a merge or warrant another review round on a freshly-pushed head.

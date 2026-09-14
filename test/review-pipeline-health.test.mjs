@@ -219,6 +219,28 @@ test('stopped remediation operational blockers surface in pipeline health findin
   assert.match(renderReviewPipelinePrometheus(snapshot), /review_pipeline_operational_blocker_rounds\{category="github-auth"\} 1/);
 });
 
+test('operational blocker human-intervention finding ignores explicit no-action text', () => {
+  const rootDir = tempRoot();
+  writeJob(rootDir, 'stopped', 'job-auth-retrying', {
+    jobId: 'job-auth-retrying',
+    repo: REPO,
+    prNumber: 6756,
+    stoppedAt: '2026-05-25T17:30:00.000Z',
+    parsedReply: {
+      operationalBlockers: [{
+        title: 'github-auth',
+        finding: 'No human intervention required; credential retry is queued.',
+        reasoning: 'Push is required after the token refresh completes.',
+      }],
+    },
+  });
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+
+  assert.equal(snapshot.operationalBlockers.total, 1);
+  assert.ok(!findingCodes(snapshot).includes('review:operational_blocker_human_intervention'));
+});
+
 test('reviewer death-rate finding fires on a high failed/attempted ratio and clears when passes recover', () => {
   const rootDir = tempRoot();
   insertReviewRow(rootDir, { prNumber: 1, reviewStatus: 'posted', postedAt: '2026-05-25T17:00:00.000Z' });

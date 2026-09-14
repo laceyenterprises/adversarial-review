@@ -1851,7 +1851,19 @@ function jobRequiresHumanIntervention(job, blockers) {
         : [blocker]
     )),
   ].map((value) => String(value || '').toLocaleLowerCase('en-US'));
-  return texts.some((text) => /human intervention required|human needs? to|manual intervention|required/.test(text));
+  const negatesHumanIntervention = (text) => (
+    /(?:no|not|without) (?:human|manual|operator) (?:intervention|action|input) required/.test(text)
+  );
+  return texts.some((text) => (
+    !negatesHumanIntervention(text) && (
+      /human intervention required/.test(text)
+      || /human needs? to/.test(text)
+      || /human input required/.test(text)
+      || /manual (?:intervention|action) required/.test(text)
+      || /operator (?:intervention|action) required/.test(text)
+      || /requires? (?:human|manual|operator) (?:intervention|action|input)/.test(text)
+    )
+  ));
 }
 
 function summarizeOperationalBlockers(followUpJobs, { nowMs }) {

@@ -1283,7 +1283,17 @@ function requestReviewRereview({
         normalizedTargetRevisionRef &&
         String(reviewRow.revision_ref || '') !== normalizedTargetRevisionRef;
       if (explicitOperatorRetrigger || pendingRevisionRefMoved) {
+        const hasStaleReviewerHandle = Boolean(
+          reviewRow.reviewer_session_uuid ||
+          reviewRow.reviewer_pgid ||
+          reviewRow.reviewer_started_at ||
+          reviewRow.reviewer_head_sha ||
+          reviewRow.reviewer_timeout_ms ||
+          reviewRow.reviewer_lease_expires_at ||
+          reviewRow.quota_reset_at_utc
+        );
         const pendingAssignments = [
+          ...(pendingRevisionRefMoved && hasStaleReviewerHandle ? ['review_attempts = 0'] : []),
           'last_attempted_at = NULL',
           'posted_at = NULL',
           'failed_at = NULL',

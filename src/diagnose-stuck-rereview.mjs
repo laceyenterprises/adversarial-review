@@ -26,8 +26,8 @@
  * tick can claim it.
  * The automated path uses its own `stuck-rereview-watchdog:` reason
  * prefix, preserves the original rereview timestamp, refreshes only the
- * reason marker, refuses rows that carry terminal-failure evidence, and caps
- * repeated re-arms per PR/head.
+ * reason marker, writes a watcher wake, refuses rows that carry
+ * terminal-failure evidence, and caps repeated re-arms per PR/head.
  *
  * Usage:
  *   npm run diagnose-stuck-rereview                  # all open rows
@@ -53,6 +53,7 @@ const DEFAULT_ROOT = join(__dirname, '..');
 const DEFAULT_STUCK_THRESHOLD_MINUTES = 5;
 const DEFAULT_APPLY_LIMIT = 25;
 const DEFAULT_APPLY_MAX_ATTEMPTS = 3;
+const DEFAULT_STATE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const APPLY_REASON = 'stuck-rereview-watchdog: stuck rereview detected by diagnose-stuck-rereview --apply';
 
 function parseTimestamp(value) {
@@ -333,6 +334,22 @@ function writeWatchdogState(rootDir, state) {
   );
 }
 
+function pruneWatchdogStateEntries(state, { nowMs = Date.now(), retentionMs = DEFAULT_STATE_RETENTION_MS } = {}) {
+  const entries = state.entries && typeof state.entries === 'object' ? state.entries : {};
+  let pruned = 0;
+  for (const [key, entry] of Object.entries(entries)) {
+    const lastTouchedMs = parseTimestamp(entry?.lastAppliedAt)
+      ?? parseTimestamp(entry?.lastWakeRequestedAt)
+      ?? parseTimestamp(entry?.nextEligibleAt);
+    if (lastTouchedMs != null && nowMs - lastTouchedMs > retentionMs) {
+      delete entries[key];
+      pruned += 1;
+    }
+  }
+  state.entries = entries;
+  return pruned;
+}
+
 function watchdogKey(row) {
   const head = String(row.revision_ref || row.reviewer_head_sha || 'unknown-head');
   return `${row.repo}#${row.pr_number}@${head}`;
@@ -392,7 +409,7 @@ function applyStuckRereviewRows({
   const results = [];
   const state = readWatchdogState(rootDir);
   const requestedAtMs = parseTimestamp(requestedAt) ?? Date.now();
-  let stateChanged = false;
+  let stateChanged = pruneWatchdogStateEntries(state, { nowMs: requestedAtMs }) > 0;
   const eligible = [];
 
   for (const entry of stuckRows) {

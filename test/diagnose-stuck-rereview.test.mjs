@@ -387,6 +387,8 @@ test('--apply backs off repeated watchdog re-arms per PR head', async (t) => {
 test('--apply stops re-arming after the per-head watchdog cap', async (t) => {
   const root = makeRoot(t);
   const old = '2026-05-29T22:00:00.000Z';
+  const recentAppliedAt = new Date(Date.now() - 60_000).toISOString();
+  const recentNextEligibleAt = new Date(Date.now() + 60_000).toISOString();
   seedReviewedPRsRow(root, {
     rereview_requested_at: old,
     rereview_reason: 'worker requested rereview',
@@ -404,8 +406,8 @@ test('--apply stops re-arming after the per-head watchdog cap', async (t) => {
           prNumber: 1000,
           head: 'capped-head',
           attempts: 3,
-          lastAppliedAt: '2026-05-29T23:00:00.000Z',
-          nextEligibleAt: '2026-05-30T00:00:00.000Z',
+          lastAppliedAt: recentAppliedAt,
+          nextEligibleAt: recentNextEligibleAt,
         },
       },
     }, null, 2),
@@ -433,6 +435,62 @@ test('--apply stops re-arming after the per-head watchdog cap', async (t) => {
   } finally {
     db.close();
   }
+});
+
+test('--apply prunes stale watchdog state entries on write', async (t) => {
+  const root = makeRoot(t);
+  const old = '2026-05-29T22:00:00.000Z';
+  seedReviewedPRsRow(root, {
+    rereview_requested_at: old,
+    rereview_reason: 'worker requested rereview',
+    last_attempted_at: '2026-05-29T21:00:00.000Z',
+    reviewer_head_sha: 'fresh-head',
+    revision_ref: 'fresh-head',
+  });
+  seedCompletedJob(root, { completedAt: old, reReviewRequested: true });
+  writeFileSync(
+    join(root, 'data', 'follow-up-jobs', 'stuck-rereview-watchdog.json'),
+    JSON.stringify({
+      entries: {
+        'laceyenterprises/agent-os#999@stale-head': {
+          repo: 'laceyenterprises/agent-os',
+          prNumber: 999,
+          head: 'stale-head',
+          attempts: 3,
+          originalRequestedAt: '2026-05-01T00:00:00.000Z',
+          lastAppliedAt: '2026-05-01T01:00:00.000Z',
+          nextEligibleAt: '2026-05-01T01:05:00.000Z',
+        },
+      },
+    }, null, 2),
+    'utf8'
+  );
+
+  const db = openReviewStateDb(root);
+  try {
+    const results = applyStuckRereviewRows({
+      db,
+      rootDir: root,
+      stuckRows: [{
+        row: {
+          repo: 'laceyenterprises/agent-os',
+          pr_number: 1000,
+          rereview_requested_at: old,
+          reviewer_head_sha: 'fresh-head',
+          revision_ref: 'fresh-head',
+        },
+      }],
+      requestedAt: '2026-05-30T23:00:00.000Z',
+      thresholdMs: 5 * 60_000,
+    });
+    assert.equal(results[0].applied, true);
+  } finally {
+    db.close();
+  }
+
+  const state = JSON.parse(readFileSync(join(root, 'data', 'follow-up-jobs', 'stuck-rereview-watchdog.json'), 'utf8'));
+  assert.equal(state.entries['laceyenterprises/agent-os#999@stale-head'], undefined);
+  assert.equal(state.entries['laceyenterprises/agent-os#1000@fresh-head'].attempts, 1);
 });
 
 test('apply treats a watcher claim race as a skip', async (t) => {

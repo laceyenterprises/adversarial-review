@@ -22,10 +22,12 @@
  * This tool surfaces the same triage information operators had to chase
  * manually, plus a "what would need to be true" hint set for each stuck
  * row. By default it is read-only. With `--apply`, it re-arms the stuck
- * row through a watchdog-only CAS, so the next watcher tick can claim it.
+ * row through a watchdog-only CAS plus a watcher wake, so the next watcher
+ * tick can claim it.
  * The automated path uses its own `stuck-rereview-watchdog:` reason
- * prefix, refreshes only the rereview timestamp/reason, refuses rows that
- * carry terminal-failure evidence, and caps repeated re-arms per PR/head.
+ * prefix, preserves the original rereview timestamp, refreshes only the
+ * reason marker, refuses rows that carry terminal-failure evidence, and caps
+ * repeated re-arms per PR/head.
  *
  * Usage:
  *   npm run diagnose-stuck-rereview                  # all open rows
@@ -43,6 +45,7 @@ import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 
 import { writeFileAtomic } from './atomic-write.mjs';
+import { requestWatcherWake } from './watcher-wake.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT = join(__dirname, '..');
@@ -341,23 +344,22 @@ function rearmBackoffMs(thresholdMs, nextAttempt) {
 }
 
 function isBenignApplyRace(reason) {
-  return ['review-in-flight', 'pr-not-open', 'terminal-failure-evidence-present'].includes(reason);
+  return ['review-in-flight', 'pr-not-open', 'terminal-failure-evidence-present', 'rereview-cas-no-match'].includes(reason);
 }
 
-function refreshPendingRereviewRow({ db, row, requestedAt, reason }) {
+function refreshPendingRereviewRow({ db, row, reason }) {
   const result = db.prepare(
     `UPDATE reviewed_prs
-        SET rereview_requested_at = ?,
-            rereview_reason = ?
+        SET rereview_reason = ?
       WHERE repo = ?
         AND pr_number = ?
         AND pr_state = 'open'
         AND review_status = 'pending'
         AND rereview_requested_at = ?
         AND failed_at IS NULL`
-  ).run(requestedAt, reason, row.repo, row.pr_number, row.rereview_requested_at);
+  ).run(reason, row.repo, row.pr_number, row.rereview_requested_at);
   if (result.changes === 1) {
-    return { triggered: true, status: 'pending', reason: 'watchdog-rereview-refreshed' };
+    return { triggered: true, status: 'pending', reason: 'watchdog-rereview-wake-requested' };
   }
 
   const current = db.prepare(
@@ -391,8 +393,9 @@ function applyStuckRereviewRows({
   const state = readWatchdogState(rootDir);
   const requestedAtMs = parseTimestamp(requestedAt) ?? Date.now();
   let stateChanged = false;
+  const eligible = [];
 
-  for (const entry of stuckRows.slice(0, limit)) {
+  for (const entry of stuckRows) {
     const row = entry.row;
     const key = watchdogKey(row);
     const prior = state.entries[key] && typeof state.entries[key] === 'object'
@@ -406,7 +409,8 @@ function applyStuckRereviewRows({
         repo: row.repo,
         prNumber: row.pr_number,
         applied: false,
-        status: 'blocked',
+        skipped: true,
+        status: 'skipped',
         reason: 'watchdog-rearm-cap-exhausted',
         attempts,
         nextEligibleAt: prior.nextEligibleAt || null,
@@ -428,12 +432,19 @@ function applyStuckRereviewRows({
       continue;
     }
 
+    eligible.push({ row, key, attempts });
+  }
+
+  const selected = eligible.slice(0, limit);
+  results.skippedForLimit = Math.max(0, eligible.length - selected.length);
+  results.truncated = results.skippedForLimit > 0;
+
+  for (const { row, key, attempts } of selected) {
     let result;
     try {
       result = refreshPendingRereviewRow({
         db,
         row,
-        requestedAt,
         reason: APPLY_REASON,
       });
     } catch (err) {
@@ -448,14 +459,39 @@ function applyStuckRereviewRows({
 
     const applied = result.triggered === true || result.status === 'already-pending';
     const skipped = !applied && isBenignApplyRace(result.reason);
+    let wake = null;
     if (applied) {
+      try {
+        wake = requestWatcherWake({
+          rootDir,
+          reason: 'stuck-rereview-watchdog',
+          repo: row.repo,
+          prNumber: row.pr_number,
+          headSha: row.revision_ref || row.reviewer_head_sha || null,
+          requestedAt,
+        });
+      } catch (err) {
+        result = {
+          triggered: false,
+          status: 'blocked',
+          reason: 'watcher-wake-failed',
+          error: err?.message || String(err),
+        };
+      }
+    }
+
+    const wakeRequested = wake?.requested === true;
+    const finalApplied = applied && wakeRequested;
+    if (finalApplied) {
       const nextAttempts = attempts + 1;
       state.entries[key] = {
         repo: row.repo,
         prNumber: row.pr_number,
         head: String(row.revision_ref || row.reviewer_head_sha || 'unknown-head'),
+        originalRequestedAt: row.rereview_requested_at || null,
         attempts: nextAttempts,
         lastAppliedAt: requestedAt,
+        lastWakeRequestedAt: wake.payload?.requested_at || requestedAt,
         nextEligibleAt: new Date(requestedAtMs + rearmBackoffMs(thresholdMs, nextAttempts)).toISOString(),
       };
       stateChanged = true;
@@ -464,11 +500,13 @@ function applyStuckRereviewRows({
     results.push({
       repo: row.repo,
       prNumber: row.pr_number,
-      applied,
+      applied: finalApplied,
       skipped,
       status: result.status || null,
       reason: result.reason || null,
-      attempts: applied ? attempts + 1 : attempts,
+      attempts: finalApplied ? attempts + 1 : attempts,
+      wakeRequested,
+      ...(result.error ? { error: result.error } : {}),
     });
   }
   if (stateChanged) {
@@ -551,13 +589,11 @@ function main(argv = process.argv.slice(2), { stdout = process.stdout, stderr = 
     return 3;
   }
 
-  // The watcher runs as `placey` and owns `reviews.db`; opening that file
-  // with a writeable handle from a different uid (e.g. an `airlock` shell)
-  // would materialize WAL/SHM sidecars under the wrong owner and break the
-  // watcher's next bounce. Opening readonly with `query_only=1` keeps us off
-  // that footgun entirely (no WAL/SHM writes), and the soft owner mismatch
-  // warning surfaces the misconfiguration so the operator notices instead of
-  // silently using a stale or wrong DB path.
+  // The watcher owns `reviews.db`; opening that file with a writeable handle
+  // from a different uid would materialize WAL/SHM sidecars under the wrong
+  // owner and break the watcher's next bounce. Read-only diagnostics use
+  // `query_only=1` and warn on owner-probe failures; `--apply` fails closed
+  // before opening a writeable handle unless the DB owner can be verified.
   if (typeof process.getuid === 'function') {
     try {
       const fileUid = statSync(dbPath).uid;
@@ -575,8 +611,12 @@ function main(argv = process.argv.slice(2), { stdout = process.stdout, stderr = 
         }
         stderr.write(message);
       }
-    } catch {
-      // best-effort owner probe; do not fail the diagnostic if statSync errors
+    } catch (err) {
+      if (args.apply) {
+        stderr.write(`error: refusing --apply because reviews.db ownership could not be verified: ${err?.message || err}\n`);
+        return 3;
+      }
+      stderr.write(`warning: could not verify reviews.db ownership: ${err?.message || err}\n`);
     }
   }
 
@@ -610,7 +650,10 @@ function main(argv = process.argv.slice(2), { stdout = process.stdout, stderr = 
            FROM reviewed_prs
           WHERE pr_state = 'open'
             AND review_status = 'pending'
-            AND rereview_requested_at IS NOT NULL`
+            AND rereview_requested_at IS NOT NULL
+          ORDER BY COALESCE(NULLIF(rereview_requested_at, ''), reviewed_at, last_attempted_at, '') ASC,
+                   repo ASC,
+                   pr_number ASC`
       ).all();
     }
     const report = [];
@@ -640,6 +683,8 @@ function main(argv = process.argv.slice(2), { stdout = process.stdout, stderr = 
         appliedCount,
         skippedApplyCount,
         failedApplyCount,
+        truncated: applyResults.truncated === true,
+        skippedForLimit: applyResults.skippedForLimit || 0,
         applyResults,
         rows: report,
       }, null, 2) + '\n');

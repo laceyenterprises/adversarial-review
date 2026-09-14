@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 import { isExplicitOperatorReviewRetrigger } from '../src/first-pass-review-suppression.mjs';
 import { APPLY_REASON, applyStuckRereviewRows } from '../src/diagnose-stuck-rereview.mjs';
+import { collectReviewLatencyReport } from '../src/review-latency-report.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
@@ -246,12 +247,19 @@ test('--apply re-arms stuck pending rereview rows without operator bypass or des
     assert.equal(row.review_attempts, 3);
     assert.equal(row.last_attempted_at, '2026-05-29T21:00:00.000Z');
     assert.equal(row.reviewer_head_sha, 'head-under-review');
-    assert.notEqual(row.rereview_requested_at, old);
+    assert.equal(row.rereview_requested_at, old);
     assert.equal(row.rereview_reason, APPLY_REASON);
     assert.equal(isExplicitOperatorReviewRetrigger(row), false);
   } finally {
     db.close();
   }
+  const wake = JSON.parse(readFileSync(join(root, 'data', 'watcher-wake.json'), 'utf8'));
+  assert.equal(wake.reason, 'stuck-rereview-watchdog');
+  assert.equal(wake.repo, 'laceyenterprises/agent-os');
+  assert.equal(wake.pr_number, 1000);
+  assert.equal(wake.head_sha, 'head-under-review');
+  assert.equal(payload.applyResults[0].wakeRequested, true);
+  assert.equal(payload.applyResults[0].reason, 'watchdog-rereview-wake-requested');
 });
 
 test('--apply leaves failed pending rows to terminal-failure finalization', async (t) => {
@@ -295,6 +303,49 @@ test('--apply leaves failed pending rows to terminal-failure finalization', asyn
   } finally {
     db.close();
   }
+});
+
+test('--apply preserves rereview_requested_at as the latency wait clock', async (t) => {
+  const root = makeRoot(t);
+  const old = '2026-05-29T22:00:00.000Z';
+  seedReviewedPRsRow(root, {
+    rereview_requested_at: old,
+    rereview_reason: 'worker requested rereview',
+    last_attempted_at: '2026-05-29T21:00:00.000Z',
+    reviewer_head_sha: 'latency-head',
+    revision_ref: 'latency-head',
+  });
+  seedCompletedJob(root, { completedAt: old, reReviewRequested: true });
+
+  const db = openReviewStateDb(root);
+  try {
+    const results = applyStuckRereviewRows({
+      db,
+      rootDir: root,
+      stuckRows: [{
+        row: {
+          repo: 'laceyenterprises/agent-os',
+          pr_number: 1000,
+          rereview_requested_at: old,
+          reviewer_head_sha: 'latency-head',
+          revision_ref: 'latency-head',
+        },
+      }],
+      requestedAt: '2026-05-29T23:00:00.000Z',
+      thresholdMs: 5 * 60_000,
+    });
+    assert.equal(results[0].applied, true);
+  } finally {
+    db.close();
+  }
+
+  const report = collectReviewLatencyReport({
+    rootDir: root,
+    since: '24h',
+    now: () => new Date('2026-05-29T23:30:00.000Z'),
+  });
+  assert.equal(report.queue.oldest.waitingSince, old);
+  assert.equal(report.queue.oldest.ageMs, 90 * 60 * 1000);
 });
 
 test('--apply backs off repeated watchdog re-arms per PR head', async (t) => {
@@ -362,11 +413,12 @@ test('--apply stops re-arming after the per-head watchdog cap', async (t) => {
   );
 
   const result = await runDiagnose(root, '--threshold-minutes', '5', '--apply');
-  assert.equal(result.code, 5, `expected cap exhaustion to alert with exit 5; got ${result.code}`);
+  assert.equal(result.code, 0, `expected cap exhaustion to skip with exit 0; got ${result.code}`);
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.stuckCount, 1);
   assert.equal(payload.appliedCount, 0);
-  assert.equal(payload.failedApplyCount, 1);
+  assert.equal(payload.skippedApplyCount, 1);
+  assert.equal(payload.failedApplyCount, 0);
   assert.equal(payload.applyResults[0].reason, 'watchdog-rearm-cap-exhausted');
 
   const db = openReviewStateDb(root);
@@ -417,6 +469,44 @@ test('apply treats a watcher claim race as a skip', async (t) => {
     assert.equal(results[0].applied, false);
     assert.equal(results[0].skipped, true);
     assert.equal(results[0].reason, 'review-in-flight');
+  } finally {
+    db.close();
+  }
+});
+
+test('apply treats rereview CAS miss as a benign race', async (t) => {
+  const root = makeRoot(t);
+  const old = '2026-05-29T22:00:00.000Z';
+  seedReviewedPRsRow(root, {
+    rereview_requested_at: '2026-05-29T22:05:00.000Z',
+    rereview_reason: 'worker requested rereview',
+    last_attempted_at: '2026-05-29T21:00:00.000Z',
+    reviewer_head_sha: 'cas-head',
+    revision_ref: 'cas-head',
+  });
+
+  const db = openReviewStateDb(root);
+  try {
+    const results = applyStuckRereviewRows({
+      db,
+      rootDir: root,
+      stuckRows: [{
+        row: {
+          repo: 'laceyenterprises/agent-os',
+          pr_number: 1000,
+          review_status: 'pending',
+          rereview_requested_at: old,
+          reviewer_head_sha: 'cas-head',
+          revision_ref: 'cas-head',
+        },
+      }],
+      requestedAt: '2026-05-29T23:00:00.000Z',
+      thresholdMs: 5 * 60_000,
+    });
+    assert.equal(results.length, 1);
+    assert.equal(results[0].applied, false);
+    assert.equal(results[0].skipped, true);
+    assert.equal(results[0].reason, 'rereview-cas-no-match');
   } finally {
     db.close();
   }

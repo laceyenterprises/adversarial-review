@@ -222,11 +222,27 @@ test('conflicting open PRs are grouped by merge-tree conflict paths', () => {
       ]);
     }
     if (command === 'git' && args.at(-1) === 'head-a') {
-      return 'docs/INDEX.md\nprojects/worker-pool/prompts/a.md\n';
+      return [
+        '0fbf96c31adb255b6d545f3ad21fbfe275d62c8d',
+        'docs/INDEX.md',
+        'projects/worker-pool/prompts/a.md',
+        '',
+        'Auto-merging docs/INDEX.md',
+        'CONFLICT (content): Merge conflict in docs/INDEX.md',
+        '',
+      ].join('\n');
     }
     if (command === 'git' && args.at(-1) === 'head-b') {
       const error = new Error('merge-tree conflict');
-      error.stdout = 'docs/INDEX.md\nprojects/worker-pool/prompts/b.md\n';
+      error.stdout = [
+        '2ce94f3a29f4143ce5f73ea68146df7bca394276',
+        'docs/INDEX.md',
+        'projects/worker-pool/prompts/b.md',
+        '',
+        'Auto-merging docs/INDEX.md',
+        'CONFLICT (content): Merge conflict in docs/INDEX.md',
+        '',
+      ].join('\n');
       error.stderr = 'fatal: merge-tree reported conflicts';
       throw error;
     }
@@ -237,10 +253,12 @@ test('conflicting open PRs are grouped by merge-tree conflict paths', () => {
     rootDir,
     now: () => new Date(NOW),
     execFileSyncImpl,
+    sleepSyncImpl: () => {},
     config: {
       conflictingPrChecksEnabled: true,
       conflictingPrRepo: 'laceyenterprises/agent-os',
       conflictingPrRepoRoot: '/repo/agent-os',
+      conflictingPrMinSharedPathCount: 2,
     },
   });
 
@@ -250,18 +268,73 @@ test('conflicting open PRs are grouped by merge-tree conflict paths', () => {
     count: 2,
     prNumbers: [6822, 6826],
   });
-  assert.ok(snapshot.conflictingOpenPrs.errors[0].includes('#6826'));
+  assert.deepEqual(snapshot.conflictingOpenPrs.sharedPathGroups, [{
+    path: 'docs/INDEX.md',
+    count: 2,
+    prNumbers: [6822, 6826],
+  }]);
+  assert.deepEqual(snapshot.conflictingOpenPrs.errors, []);
   const finding = snapshot.findings.find((entry) => entry.code === 'review:conflicting_open_prs');
   assert.ok(finding);
   assert.match(finding.message, /docs\/INDEX\.md -> #6822, #6826/);
+  assert.doesNotMatch(finding.message, /Auto-merging|0fbf96c/);
   assert.match(renderReviewPipelinePrometheus(snapshot), /^review_pipeline_conflicting_open_prs 2$/m);
+  assert.match(renderReviewPipelinePrometheus(snapshot), /^review_pipeline_conflicting_open_prs_collected 1$/m);
+  assert.match(renderReviewPipelinePrometheus(snapshot), /^review_pipeline_conflicting_open_pr_shared_path_groups 1$/m);
   assert.equal(calls.filter((call) => call.command === 'git').length, 2);
   assert.ok(calls.filter((call) => call.command === 'git').every((call) => call.cwd === '/repo/agent-os'));
 });
 
-test('conflicting open PR diagnostic failure does not create a false finding', () => {
+test('conflicting open PR diagnostic only finds shared conflict paths', () => {
   const rootDir = tempRoot();
+  const execFileSyncImpl = (command, args) => {
+    if (command === 'gh') {
+      return JSON.stringify([
+        {
+          number: 6822,
+          headRefOid: 'head-a',
+          baseRefName: 'main',
+          mergeable: 'CONFLICTING',
+          isDraft: false,
+        },
+      ]);
+    }
+    if (command === 'git') {
+      return [
+        '0fbf96c31adb255b6d545f3ad21fbfe275d62c8d',
+        'docs/INDEX.md',
+        '',
+        'Auto-merging docs/INDEX.md',
+        'CONFLICT (content): Merge conflict in docs/INDEX.md',
+        '',
+      ].join('\n');
+    }
+    throw new Error(`unexpected command: ${command} ${args.join(' ')}`);
+  };
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    execFileSyncImpl,
+    sleepSyncImpl: () => {},
+    config: {
+      conflictingPrChecksEnabled: true,
+      conflictingPrRepo: 'laceyenterprises/agent-os',
+      conflictingPrRepoRoot: '/repo/agent-os',
+    },
+  });
+
+  assert.equal(snapshot.conflictingOpenPrs.count, 1);
+  assert.equal(snapshot.conflictingOpenPrs.groupedPaths.length, 1);
+  assert.equal(snapshot.conflictingOpenPrs.sharedPathGroups.length, 0);
+  assert.ok(!findingCodes(snapshot).includes('review:conflicting_open_prs'));
+});
+
+test('conflicting open PR diagnostic failure creates a blind finding, not a zero-conflict finding', () => {
+  const rootDir = tempRoot();
+  let calls = 0;
   const execFileSyncImpl = () => {
+    calls += 1;
     const error = new Error('gh unavailable');
     error.stderr = 'HTTP 502';
     throw error;
@@ -271,6 +344,7 @@ test('conflicting open PR diagnostic failure does not create a false finding', (
     rootDir,
     now: () => new Date(NOW),
     execFileSyncImpl,
+    sleepSyncImpl: () => {},
     config: {
       conflictingPrChecksEnabled: true,
       conflictingPrRepo: 'laceyenterprises/agent-os',
@@ -279,8 +353,13 @@ test('conflicting open PR diagnostic failure does not create a false finding', (
   });
 
   assert.equal(snapshot.conflictingOpenPrs.count, 0);
+  assert.equal(snapshot.conflictingOpenPrs.collected, false);
   assert.match(snapshot.conflictingOpenPrs.errors[0], /HTTP 502/);
   assert.ok(!findingCodes(snapshot).includes('review:conflicting_open_prs'));
+  assert.ok(findingCodes(snapshot).includes('review:conflicting_open_prs_unreadable'));
+  assert.match(renderReviewPipelinePrometheus(snapshot), /^review_pipeline_conflicting_open_prs 0$/m);
+  assert.match(renderReviewPipelinePrometheus(snapshot), /^review_pipeline_conflicting_open_prs_collected 0$/m);
+  assert.equal(calls, 3);
 });
 
 test('stopped remediation operational blockers surface in pipeline health findings', () => {

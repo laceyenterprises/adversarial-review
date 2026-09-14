@@ -86,6 +86,7 @@ const DEFAULT_RUNNING_REVIEWER_PASS_MAX_AGE_MS = Math.round(
 const DEFAULT_DAG_AUTOWALK_MAX_LOG_AGE_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_DISPATCH_SPAWN_FAILURE_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_HAMMER_DISPATCH_STALL_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+const DEFAULT_CONFLICTING_PR_MIN_SHARED_PATH_COUNT = 5;
 const DEFAULT_LAUNCHD_TIMEOUT_MS = 2_000;
 const DEFAULT_LAUNCHD_TRANSIENT_RETRY_DELAYS_MS = Object.freeze([50, 150]);
 const DEFAULT_GH_TERMINAL_STATE_RETRY_DELAYS_MS = Object.freeze([100, 250]);
@@ -137,6 +138,8 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_merge_outcomes_total',
   'review_pipeline_merge_stalled_jobs',
   'review_pipeline_conflicting_open_prs',
+  'review_pipeline_conflicting_open_prs_collected',
+  'review_pipeline_conflicting_open_pr_shared_path_groups',
   'review_pipeline_stale_ama_closer_leases',
   'review_pipeline_zombie_reviewer_passes',
   'review_pipeline_round_budget_anomalies',
@@ -182,6 +185,8 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_merge_outcomes_total: 'Current review-ledger PR outcome count by state.',
   review_pipeline_merge_stalled_jobs: 'Current count of clean review-settled jobs still waiting on merge.',
   review_pipeline_conflicting_open_prs: 'Current count of open non-draft PRs GitHub reports as CONFLICTING.',
+  review_pipeline_conflicting_open_prs_collected: 'Whether the conflicting-open-PR collector reached GitHub successfully.',
+  review_pipeline_conflicting_open_pr_shared_path_groups: 'Current count of conflict path groups shared by at least the configured minimum PR count.',
   review_pipeline_stale_ama_closer_leases: 'Current count of AMA closer leases for still-open PRs stuck pending or dispatched past the configured age.',
   review_pipeline_zombie_reviewer_passes: 'Current count of reviewer_passes rows stuck running past the configured age.',
   review_pipeline_round_budget_anomalies: 'Current count of remediation jobs whose rounds exceed or misuse their risk-class budget.',
@@ -329,9 +334,17 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     code: 'review:conflicting_open_prs',
     tier: 'ticket',
     category: 'review-pipeline',
+    thresholdKey: 'conflictingPrMinSharedPathCount',
+    defaultThreshold: DEFAULT_CONFLICTING_PR_MIN_SHARED_PATH_COUNT,
+    thresholdDescription: 'one or more local merge-tree conflict paths are shared by at least this many open non-draft CONFLICTING PRs',
+  },
+  {
+    code: 'review:conflicting_open_prs_unreadable',
+    tier: 'ticket',
+    category: 'review-pipeline',
     thresholdKey: null,
     defaultThreshold: null,
-    thresholdDescription: 'one or more open non-draft PRs are currently CONFLICTING, grouped by local merge-tree conflict paths',
+    thresholdDescription: 'GitHub open-PR listing for conflict diagnostics could not be collected (SEN-02 blind, never a health verdict)',
   },
   {
     code: 'review:ttm_budget_breach',
@@ -639,6 +652,11 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
         ?? env.AGENT_OS_DEPLOY_CHECKOUT
         ?? join(TOOL_ROOT, '..', '..')
     ).trim(),
+    conflictingPrMinSharedPathCount: parsePositiveInteger(
+      overrides.conflictingPrMinSharedPathCount
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_MIN_SHARED_PATH_COUNT,
+      DEFAULT_CONFLICTING_PR_MIN_SHARED_PATH_COUNT
+    ),
     launchdTimeoutMs: parsePositiveInteger(
       overrides.launchdTimeoutMs
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_LAUNCHD_TIMEOUT_MS,
@@ -2050,10 +2068,14 @@ function normalizeConflictingPrRow(row) {
 }
 
 function parseConflictPaths(output) {
-  return String(output || '')
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
+  const lines = String(output || '').split(/\r?\n/);
+  const pathLines = [];
+  for (const line of lines.slice(1)) {
+    if (line === '') break;
+    const path = line.trim();
+    if (path) pathLines.push(path);
+  }
+  return pathLines
     .sort((left, right) => left.localeCompare(right));
 }
 
@@ -2073,6 +2095,9 @@ function mergeTreeConflictPaths(pr, { repoRoot, execFileSyncImpl }) {
     return { paths: parseConflictPaths(output), error: null };
   } catch (error) {
     const paths = parseConflictPaths(error?.stdout || '');
+    if (paths.length > 0) {
+      return { paths, error: null };
+    }
     return {
       paths,
       error: String(error?.stderr || error?.message || 'git merge-tree failed').slice(0, 500),
@@ -2080,46 +2105,63 @@ function mergeTreeConflictPaths(pr, { repoRoot, execFileSyncImpl }) {
   }
 }
 
-function summarizeConflictingOpenPrs({ config, execFileSyncImpl }) {
+function ghPrListOpenSync(repo, { execFileSyncImpl, sleepSyncImpl = sleepSyncMs }) {
+  const args = [
+    'pr',
+    'list',
+    '--repo',
+    repo,
+    '--state',
+    'open',
+    '--limit',
+    '100',
+    '--json',
+    'number,url,title,headRefName,headRefOid,baseRefName,mergeable,isDraft',
+  ];
+  const options = {
+    encoding: 'utf8',
+    timeout: 20_000,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  };
+  let lastError;
+  for (let attempt = 0; attempt <= DEFAULT_GH_TERMINAL_STATE_RETRY_DELAYS_MS.length; attempt += 1) {
+    try {
+      return execFileSyncImpl('gh', args, options);
+    } catch (error) {
+      lastError = error;
+      if (!isTransientGhTerminalStateError(error)
+        || attempt >= DEFAULT_GH_TERMINAL_STATE_RETRY_DELAYS_MS.length) {
+        throw error;
+      }
+      sleepSyncImpl(DEFAULT_GH_TERMINAL_STATE_RETRY_DELAYS_MS[attempt]);
+    }
+  }
+  throw lastError;
+}
+
+function summarizeConflictingOpenPrs({ config, execFileSyncImpl, sleepSyncImpl = sleepSyncMs }) {
   if (!config.conflictingPrChecksEnabled) {
-    return { enabled: false, count: 0, prs: [], paths: [], groupedPaths: [], errors: [] };
+    return { enabled: false, collected: false, count: 0, prs: [], paths: [], groupedPaths: [], sharedPathGroups: [], errors: [] };
   }
   const repo = config.conflictingPrRepo;
   const repoRoot = config.conflictingPrRepoRoot;
   if (!repo || !repoRoot) {
-    return { enabled: true, count: 0, prs: [], paths: [], groupedPaths: [], errors: ['missing-repo-config'] };
+    return { enabled: true, collected: false, count: 0, prs: [], paths: [], groupedPaths: [], sharedPathGroups: [], errors: ['missing-repo-config'] };
   }
 
   let rows;
   try {
-    const output = execFileSyncImpl(
-      'gh',
-      [
-        'pr',
-        'list',
-        '--repo',
-        repo,
-        '--state',
-        'open',
-        '--limit',
-        '100',
-        '--json',
-        'number,url,title,headRefName,headRefOid,baseRefName,mergeable,isDraft',
-      ],
-      {
-        encoding: 'utf8',
-        timeout: 20_000,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      }
-    );
+    const output = ghPrListOpenSync(repo, { execFileSyncImpl, sleepSyncImpl });
     rows = JSON.parse(output || '[]');
   } catch (error) {
     return {
       count: 0,
       enabled: true,
+      collected: false,
       prs: [],
       paths: [],
       groupedPaths: [],
+      sharedPathGroups: [],
       errors: [String(error?.stderr || error?.message || 'gh pr list failed').slice(0, 500)],
     };
   }
@@ -2146,14 +2188,19 @@ function summarizeConflictingOpenPrs({ config, execFileSyncImpl }) {
       prNumbers: prNumbers.sort((left, right) => left - right),
     }))
     .sort((left, right) => right.count - left.count || left.path.localeCompare(right.path));
+  const minSharedPathCount = config.conflictingPrMinSharedPathCount || DEFAULT_CONFLICTING_PR_MIN_SHARED_PATH_COUNT;
+  const sharedPathGroups = groupedPaths.filter((entry) => entry.count >= minSharedPathCount);
   return {
     repo,
     repoRoot,
     enabled: true,
+    collected: true,
     count: prs.length,
     prs,
     paths: groupedPaths.map((entry) => entry.path),
     groupedPaths,
+    sharedPathGroups,
+    minSharedPathCount,
     errors,
   };
 }
@@ -3270,17 +3317,30 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }));
   }
 
-  if (snapshot.conflictingOpenPrs?.count > 0) {
-    const top = snapshot.conflictingOpenPrs.groupedPaths?.[0] || null;
+  if (snapshot.conflictingOpenPrs?.enabled && snapshot.conflictingOpenPrs?.collected === false) {
+    findings.push(buildFinding({
+      code: 'review:conflicting_open_prs_unreadable',
+      tier: 'ticket',
+      subject: 'open conflicting PR diagnostics could not be collected',
+      message: `GitHub open-PR listing for ${snapshot.conflictingOpenPrs.repo || 'the configured repo'} failed; this is a blind collector state, not proof that no PRs are conflicting.`,
+      evidence: (snapshot.conflictingOpenPrs.errors || []).slice(0, 3),
+      recommendedAction: 'Check gh authentication/network health for the pipeline-health host, then re-run the collector.',
+      observedAt,
+      details: snapshot.conflictingOpenPrs,
+    }));
+  }
+
+  if ((snapshot.conflictingOpenPrs?.sharedPathGroups || []).length > 0) {
+    const top = snapshot.conflictingOpenPrs.sharedPathGroups?.[0] || null;
     const topText = top
       ? `${top.path} -> ${top.prNumbers.map((number) => `#${number}`).join(', ')}`
       : 'no local merge-tree path detail available';
     findings.push(buildFinding({
       code: 'review:conflicting_open_prs',
       tier: 'ticket',
-      subject: `${snapshot.conflictingOpenPrs.count} open PR(s) are CONFLICTING`,
-      message: `GitHub reports open non-draft PRs as CONFLICTING; top path group: ${topText}.`,
-      evidence: (snapshot.conflictingOpenPrs.groupedPaths || []).slice(0, 12).map((entry) => (
+      subject: `${snapshot.conflictingOpenPrs.sharedPathGroups.length} conflict path group(s) are shared across open PRs`,
+      message: `GitHub reports ${snapshot.conflictingOpenPrs.count} open non-draft PR(s) as CONFLICTING; top shared path group: ${topText}.`,
+      evidence: (snapshot.conflictingOpenPrs.sharedPathGroups || []).slice(0, 12).map((entry) => (
         `${entry.path} -> ${entry.prNumbers.map((number) => `#${number}`).join(', ')}`
       )),
       recommendedAction: 'Inspect the grouped conflict paths; if conflicts concentrate on generated or prompt-stamp files, fix that shared writer instead of rebasing each PR one at a time.',
@@ -3822,6 +3882,7 @@ function collectReviewPipelineHealth({
     const conflictingOpenPrs = summarizeConflictingOpenPrs({
       config,
       execFileSyncImpl,
+      sleepSyncImpl,
     });
     const amaCloserLeases = readAmaCloserLeases(rootDir, { nowMs, config, reviewRows });
     const daemonMergeParks = readDaemonMergeParks({
@@ -4099,6 +4160,16 @@ function renderReviewPipelinePrometheus(snapshot) {
   }
   pushMetric('review_pipeline_merge_stalled_jobs', {}, snapshot.mergeStalls.candidates.length);
   pushMetric('review_pipeline_conflicting_open_prs', {}, snapshot.conflictingOpenPrs?.count || 0);
+  pushMetric(
+    'review_pipeline_conflicting_open_prs_collected',
+    {},
+    snapshot.conflictingOpenPrs?.collected ? 1 : 0
+  );
+  pushMetric(
+    'review_pipeline_conflicting_open_pr_shared_path_groups',
+    {},
+    snapshot.conflictingOpenPrs?.sharedPathGroups?.length || 0
+  );
   pushMetric('review_pipeline_stale_ama_closer_leases', {}, snapshot.amaCloserLeases?.stale?.length || 0);
   pushMetric('review_pipeline_zombie_reviewer_passes', {}, snapshot.zombieReviewerPasses?.rows?.length || 0);
   pushMetric('review_pipeline_round_budget_anomalies', {}, snapshot.roundBudget?.anomalies?.length || 0);

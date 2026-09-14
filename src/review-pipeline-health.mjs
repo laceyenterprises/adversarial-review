@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { PROVIDER_OVERLOADED_FAILURE_CLASS } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { ROUND_BUDGET_BY_RISK_CLASS } from './follow-up-jobs.mjs';
@@ -89,6 +90,7 @@ const DEFAULT_LAUNCHD_TIMEOUT_MS = 2_000;
 const DEFAULT_LAUNCHD_TRANSIENT_RETRY_DELAYS_MS = Object.freeze([50, 150]);
 const DEFAULT_GH_TERMINAL_STATE_RETRY_DELAYS_MS = Object.freeze([100, 250]);
 const DEFAULT_LABEL_PREFIX = 'ai.laceyenterprises';
+const TOOL_ROOT = fileURLToPath(new URL('..', import.meta.url));
 
 // Infra auto-recovery attempt cap the watcher enforces before it stops
 // re-arming an infrastructure-class `failed` review and leaves the row terminal
@@ -134,6 +136,7 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_remediation_throughput_jobs',
   'review_pipeline_merge_outcomes_total',
   'review_pipeline_merge_stalled_jobs',
+  'review_pipeline_conflicting_open_prs',
   'review_pipeline_stale_ama_closer_leases',
   'review_pipeline_zombie_reviewer_passes',
   'review_pipeline_round_budget_anomalies',
@@ -178,6 +181,7 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_remediation_throughput_jobs: 'Terminal remediation jobs observed in the configured throughput window.',
   review_pipeline_merge_outcomes_total: 'Current review-ledger PR outcome count by state.',
   review_pipeline_merge_stalled_jobs: 'Current count of clean review-settled jobs still waiting on merge.',
+  review_pipeline_conflicting_open_prs: 'Current count of open non-draft PRs GitHub reports as CONFLICTING.',
   review_pipeline_stale_ama_closer_leases: 'Current count of AMA closer leases for still-open PRs stuck pending or dispatched past the configured age.',
   review_pipeline_zombie_reviewer_passes: 'Current count of reviewer_passes rows stuck running past the configured age.',
   review_pipeline_round_budget_anomalies: 'Current count of remediation jobs whose rounds exceed or misuse their risk-class budget.',
@@ -320,6 +324,14 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     category: 'review-pipeline',
     thresholdKey: 'mergeStalledMaxTicks',
     defaultThreshold: DEFAULT_MERGE_STALLED_MAX_TICKS,
+  },
+  {
+    code: 'review:conflicting_open_prs',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: null,
+    defaultThreshold: null,
+    thresholdDescription: 'one or more open non-draft PRs are currently CONFLICTING, grouped by local merge-tree conflict paths',
   },
   {
     code: 'review:ttm_budget_breach',
@@ -610,6 +622,23 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HAMMER_DISPATCH_STALL_MAX_AGE_MS,
       DEFAULT_HAMMER_DISPATCH_STALL_MAX_AGE_MS
     ),
+    conflictingPrChecksEnabled: parseBoolean(
+      overrides.conflictingPrChecksEnabled
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_CHECKS,
+      false
+    ),
+    conflictingPrRepo: String(
+      overrides.conflictingPrRepo
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_REPO
+        ?? env.GITHUB_REPOSITORY
+        ?? `${env.AGENT_OS_GITHUB_ORG || 'laceyenterprises'}/agent-os`
+    ).trim(),
+    conflictingPrRepoRoot: String(
+      overrides.conflictingPrRepoRoot
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_REPO_ROOT
+        ?? env.AGENT_OS_DEPLOY_CHECKOUT
+        ?? join(TOOL_ROOT, '..', '..')
+    ).trim(),
     launchdTimeoutMs: parsePositiveInteger(
       overrides.launchdTimeoutMs
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_LAUNCHD_TIMEOUT_MS,
@@ -2004,6 +2033,131 @@ function summarizeMergeStalls({ followUpJobs, reviewRows, nowMs, config }) {
   };
 }
 
+function normalizeConflictingPrRow(row) {
+  const prNumber = Number(row?.number);
+  const mergeable = String(row?.mergeable || '').trim().toUpperCase();
+  if (!Number.isInteger(prNumber) || prNumber <= 0) return null;
+  if (row?.isDraft === true || mergeable !== 'CONFLICTING') return null;
+  return {
+    number: prNumber,
+    url: row.url || null,
+    title: row.title || null,
+    headRefName: row.headRefName || null,
+    headRefOid: row.headRefOid || null,
+    baseRefName: row.baseRefName || 'main',
+    mergeable,
+  };
+}
+
+function parseConflictPaths(output) {
+  return String(output || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .sort((left, right) => left.localeCompare(right));
+}
+
+function mergeTreeConflictPaths(pr, { repoRoot, execFileSyncImpl }) {
+  if (!pr.headRefOid) return { paths: [], error: 'missing-headRefOid' };
+  try {
+    const output = execFileSyncImpl(
+      'git',
+      ['merge-tree', '--write-tree', '--name-only', `origin/${pr.baseRefName || 'main'}`, pr.headRefOid],
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        timeout: 20_000,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }
+    );
+    return { paths: parseConflictPaths(output), error: null };
+  } catch (error) {
+    const paths = parseConflictPaths(error?.stdout || '');
+    return {
+      paths,
+      error: String(error?.stderr || error?.message || 'git merge-tree failed').slice(0, 500),
+    };
+  }
+}
+
+function summarizeConflictingOpenPrs({ config, execFileSyncImpl }) {
+  if (!config.conflictingPrChecksEnabled) {
+    return { enabled: false, count: 0, prs: [], paths: [], groupedPaths: [], errors: [] };
+  }
+  const repo = config.conflictingPrRepo;
+  const repoRoot = config.conflictingPrRepoRoot;
+  if (!repo || !repoRoot) {
+    return { enabled: true, count: 0, prs: [], paths: [], groupedPaths: [], errors: ['missing-repo-config'] };
+  }
+
+  let rows;
+  try {
+    const output = execFileSyncImpl(
+      'gh',
+      [
+        'pr',
+        'list',
+        '--repo',
+        repo,
+        '--state',
+        'open',
+        '--limit',
+        '100',
+        '--json',
+        'number,url,title,headRefName,headRefOid,baseRefName,mergeable,isDraft',
+      ],
+      {
+        encoding: 'utf8',
+        timeout: 20_000,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }
+    );
+    rows = JSON.parse(output || '[]');
+  } catch (error) {
+    return {
+      count: 0,
+      enabled: true,
+      prs: [],
+      paths: [],
+      groupedPaths: [],
+      errors: [String(error?.stderr || error?.message || 'gh pr list failed').slice(0, 500)],
+    };
+  }
+
+  const grouped = new Map();
+  const prs = [];
+  const errors = [];
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const pr = normalizeConflictingPrRow(row);
+    if (!pr) continue;
+    const conflict = mergeTreeConflictPaths(pr, { repoRoot, execFileSyncImpl });
+    if (conflict.error) errors.push(`#${pr.number}: ${conflict.error}`);
+    prs.push({ ...pr, conflictingPaths: conflict.paths });
+    for (const conflictPath of conflict.paths) {
+      if (!grouped.has(conflictPath)) grouped.set(conflictPath, []);
+      grouped.get(conflictPath).push(pr.number);
+    }
+  }
+
+  const groupedPaths = Array.from(grouped.entries())
+    .map(([pathName, prNumbers]) => ({
+      path: pathName,
+      count: prNumbers.length,
+      prNumbers: prNumbers.sort((left, right) => left - right),
+    }))
+    .sort((left, right) => right.count - left.count || left.path.localeCompare(right.path));
+  return {
+    repo,
+    repoRoot,
+    enabled: true,
+    count: prs.length,
+    prs,
+    paths: groupedPaths.map((entry) => entry.path),
+    groupedPaths,
+    errors,
+  };
+}
+
 function readAmaCloserLeases(rootDir, { nowMs, config, reviewRows = new Map() }) {
   const dir = join(rootDir, 'data', 'ama-closer-leases');
   const stale = [];
@@ -3116,6 +3270,25 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }));
   }
 
+  if (snapshot.conflictingOpenPrs?.count > 0) {
+    const top = snapshot.conflictingOpenPrs.groupedPaths?.[0] || null;
+    const topText = top
+      ? `${top.path} -> ${top.prNumbers.map((number) => `#${number}`).join(', ')}`
+      : 'no local merge-tree path detail available';
+    findings.push(buildFinding({
+      code: 'review:conflicting_open_prs',
+      tier: 'ticket',
+      subject: `${snapshot.conflictingOpenPrs.count} open PR(s) are CONFLICTING`,
+      message: `GitHub reports open non-draft PRs as CONFLICTING; top path group: ${topText}.`,
+      evidence: (snapshot.conflictingOpenPrs.groupedPaths || []).slice(0, 12).map((entry) => (
+        `${entry.path} -> ${entry.prNumbers.map((number) => `#${number}`).join(', ')}`
+      )),
+      recommendedAction: 'Inspect the grouped conflict paths; if conflicts concentrate on generated or prompt-stamp files, fix that shared writer instead of rebasing each PR one at a time.',
+      observedAt,
+      details: snapshot.conflictingOpenPrs,
+    }));
+  }
+
   // ── SEN-02 blind: the distribution the budget is derived from is unreadable.
   // Emitted BEFORE the slow/stuck findings and instead of the slow finding, so
   // "I cannot measure the budget" can never be read as "nothing is over
@@ -3646,6 +3819,10 @@ function collectReviewPipelineHealth({
       nowMs,
       config,
     });
+    const conflictingOpenPrs = summarizeConflictingOpenPrs({
+      config,
+      execFileSyncImpl,
+    });
     const amaCloserLeases = readAmaCloserLeases(rootDir, { nowMs, config, reviewRows });
     const daemonMergeParks = readDaemonMergeParks({
       rootDir,
@@ -3756,6 +3933,7 @@ function collectReviewPipelineHealth({
       reviewStateLedger,
       mergeOutcomes,
       mergeStalls,
+      conflictingOpenPrs,
       amaCloserLeases,
       daemonMergeParks,
       zombieReviewerPasses,
@@ -3920,6 +4098,7 @@ function renderReviewPipelinePrometheus(snapshot) {
     pushMetric('review_pipeline_merge_outcomes_total', { outcome: outcome.outcome }, outcome.count);
   }
   pushMetric('review_pipeline_merge_stalled_jobs', {}, snapshot.mergeStalls.candidates.length);
+  pushMetric('review_pipeline_conflicting_open_prs', {}, snapshot.conflictingOpenPrs?.count || 0);
   pushMetric('review_pipeline_stale_ama_closer_leases', {}, snapshot.amaCloserLeases?.stale?.length || 0);
   pushMetric('review_pipeline_zombie_reviewer_passes', {}, snapshot.zombieReviewerPasses?.rows?.length || 0);
   pushMetric('review_pipeline_round_budget_anomalies', {}, snapshot.roundBudget?.anomalies?.length || 0);

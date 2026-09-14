@@ -79,6 +79,10 @@ The Grafana dashboard lives at
   states.
 - `review_pipeline_merge_stalled_jobs`: clean `review-settled` verdict jobs
   whose PR row remains open past the merge-stall tick threshold.
+- `review_pipeline_conflicting_open_prs`: open non-draft PRs GitHub reports as
+  `CONFLICTING`. The snapshot groups local `git merge-tree --write-tree
+  --name-only` paths so repeated generated-file or prompt-stamp collisions are
+  visible at a glance.
 - `review_pipeline_stale_ama_closer_leases`: AMA closer leases in
   `pending`/`dispatched` with no terminal outcome past the age threshold.
 - `review_pipeline_zombie_reviewer_passes`: `reviewer_passes` rows still
@@ -183,6 +187,7 @@ Its action headline is `Reviews stalled — restore reviewer dispatch`.
 | `review:malformed_pr_title` | one or more open PRs are recorded `review_status='malformed'` | ticket | malformed rows are recreated, explicitly recovered, or no longer open; known bot-authored prefixless PRs are routed to Argus with `review_status='argus-security-queued'` (ASR-04) and do not trigger this alert; neither do legacy `unroutable-bot-author` rows |
 | `review:remediation_backlog` | `follow-up-jobs/pending` has >5 jobs | ticket | pending job count returns to threshold or below |
 | `review:merge_stalled` | a `stopped:review-settled` job remains open for >3 watcher ticks | ticket | the PR is merged/closed or the settled job is no longer past threshold |
+| `review:conflicting_open_prs` | GitHub reports one or more open non-draft PRs as `CONFLICTING`, with conflict paths grouped from local `git merge-tree --write-tree --name-only` diagnostics | ticket | no open non-draft PR is `CONFLICTING` |
 | `review:ttm_budget_breach` | **SLOW** (trend, not alarm): open PR age exceeds a budget DERIVED from the measured merge distribution -- the configured percentile (default p90) of each review-round bucket, weighted-least-squares fitted to `base + review_rounds * per_round` and scaled by measured queue pressure (Little's Law, capped at 3x). Nothing here is a literal; change the distribution and the budget moves. | ticket | the PR merges/closes or falls back under the derived budget |
 | `review:pr_progress_stalled` | **STUCK** (page-worthy): an open PR is not progressing -- a re-review was requested and no reviewer pass has started since, or the reviewer lease expired while the row still claims an in-flight review. Independent of the TTM budget and of elapsed time. | ticket | a reviewer pass starts after the re-review request, or the stale lease is reclaimed/settled |
 | `review:ttm_budget_model_unreadable` | SEN-02 `blind`: the merged-PR distribution the TTM budget is derived from could not be read, so no budget exists to compare against. The SLOW finding is withheld this tick; the STUCK findings still evaluate. Never a health verdict. | ticket | `reviews.db` `reviewed_prs`/`reviewer_passes` are queryable again |

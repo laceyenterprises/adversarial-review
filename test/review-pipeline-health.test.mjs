@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { execFileSync } from 'node:child_process';
 
 import { writePrTerminalReconcileState } from '../src/pr-terminal-reconcile.mjs';
 import {
@@ -184,6 +183,105 @@ function seedFreshReconcile(rootDir, { observedAt = NOW, unresolved = [] } = {})
 function findingCodes(snapshot) {
   return snapshot.findings.map((finding) => finding.code).sort();
 }
+
+test('conflicting open PRs are grouped by merge-tree conflict paths', () => {
+  const rootDir = tempRoot();
+  const calls = [];
+  const execFileSyncImpl = (command, args, options = {}) => {
+    calls.push({ command, args, cwd: options.cwd || null });
+    if (command === 'gh') {
+      assert.deepEqual(args.slice(0, 6), ['pr', 'list', '--repo', 'laceyenterprises/agent-os', '--state', 'open']);
+      return JSON.stringify([
+        {
+          number: 6822,
+          url: 'https://github.com/laceyenterprises/agent-os/pull/6822',
+          title: '[codex] ACTASSERT-01',
+          headRefName: 'codex/actassert',
+          headRefOid: 'head-a',
+          baseRefName: 'main',
+          mergeable: 'CONFLICTING',
+          isDraft: false,
+        },
+        {
+          number: 6826,
+          url: 'https://github.com/laceyenterprises/agent-os/pull/6826',
+          title: '[codex] PCREPO-01',
+          headRefName: 'codex/pcrepo',
+          headRefOid: 'head-b',
+          baseRefName: 'main',
+          mergeable: 'CONFLICTING',
+          isDraft: false,
+        },
+        {
+          number: 6827,
+          headRefOid: 'head-c',
+          baseRefName: 'main',
+          mergeable: 'MERGEABLE',
+          isDraft: false,
+        },
+      ]);
+    }
+    if (command === 'git' && args.at(-1) === 'head-a') {
+      return 'docs/INDEX.md\nprojects/worker-pool/prompts/a.md\n';
+    }
+    if (command === 'git' && args.at(-1) === 'head-b') {
+      const error = new Error('merge-tree conflict');
+      error.stdout = 'docs/INDEX.md\nprojects/worker-pool/prompts/b.md\n';
+      error.stderr = 'fatal: merge-tree reported conflicts';
+      throw error;
+    }
+    throw new Error(`unexpected command: ${command} ${args.join(' ')}`);
+  };
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    execFileSyncImpl,
+    config: {
+      conflictingPrChecksEnabled: true,
+      conflictingPrRepo: 'laceyenterprises/agent-os',
+      conflictingPrRepoRoot: '/repo/agent-os',
+    },
+  });
+
+  assert.equal(snapshot.conflictingOpenPrs.count, 2);
+  assert.deepEqual(snapshot.conflictingOpenPrs.groupedPaths[0], {
+    path: 'docs/INDEX.md',
+    count: 2,
+    prNumbers: [6822, 6826],
+  });
+  assert.ok(snapshot.conflictingOpenPrs.errors[0].includes('#6826'));
+  const finding = snapshot.findings.find((entry) => entry.code === 'review:conflicting_open_prs');
+  assert.ok(finding);
+  assert.match(finding.message, /docs\/INDEX\.md -> #6822, #6826/);
+  assert.match(renderReviewPipelinePrometheus(snapshot), /^review_pipeline_conflicting_open_prs 2$/m);
+  assert.equal(calls.filter((call) => call.command === 'git').length, 2);
+  assert.ok(calls.filter((call) => call.command === 'git').every((call) => call.cwd === '/repo/agent-os'));
+});
+
+test('conflicting open PR diagnostic failure does not create a false finding', () => {
+  const rootDir = tempRoot();
+  const execFileSyncImpl = () => {
+    const error = new Error('gh unavailable');
+    error.stderr = 'HTTP 502';
+    throw error;
+  };
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    execFileSyncImpl,
+    config: {
+      conflictingPrChecksEnabled: true,
+      conflictingPrRepo: 'laceyenterprises/agent-os',
+      conflictingPrRepoRoot: '/repo/agent-os',
+    },
+  });
+
+  assert.equal(snapshot.conflictingOpenPrs.count, 0);
+  assert.match(snapshot.conflictingOpenPrs.errors[0], /HTTP 502/);
+  assert.ok(!findingCodes(snapshot).includes('review:conflicting_open_prs'));
+});
 
 test('stopped remediation operational blockers surface in pipeline health findings', () => {
   const rootDir = tempRoot();

@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 import { isExplicitOperatorReviewRetrigger } from '../src/first-pass-review-suppression.mjs';
-import { APPLY_REASON, applyStuckRereviewRows } from '../src/diagnose-stuck-rereview.mjs';
+import { applyStuckRereviewRows } from '../src/diagnose-stuck-rereview.mjs';
 import { collectReviewLatencyReport } from '../src/review-latency-report.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -215,7 +215,7 @@ test('stuck when rereview_requested_at is older than threshold and no spawn happ
   assert.ok(payload.rows[0].classification.suggestedAction.includes('npm run retrigger-review'));
 });
 
-test('--apply re-arms stuck pending rereview rows without operator bypass or destructive reset', async (t) => {
+test('--apply wakes stuck pending rereview rows without reason rewrite or destructive reset', async (t) => {
   const root = makeRoot(t);
   const old = '2026-05-29T22:00:00.000Z';
   seedReviewedPRsRow(root, {
@@ -248,7 +248,7 @@ test('--apply re-arms stuck pending rereview rows without operator bypass or des
     assert.equal(row.last_attempted_at, '2026-05-29T21:00:00.000Z');
     assert.equal(row.reviewer_head_sha, 'head-under-review');
     assert.equal(row.rereview_requested_at, old);
-    assert.equal(row.rereview_reason, APPLY_REASON);
+    assert.equal(row.rereview_reason, 'worker requested rereview');
     assert.equal(isExplicitOperatorReviewRetrigger(row), false);
   } finally {
     db.close();
@@ -260,6 +260,55 @@ test('--apply re-arms stuck pending rereview rows without operator bypass or des
   assert.equal(wake.head_sha, 'head-under-review');
   assert.equal(payload.applyResults[0].wakeRequested, true);
   assert.equal(payload.applyResults[0].reason, 'watchdog-rereview-wake-requested');
+});
+
+test('--apply preserves load-bearing rereview_reason markers while waking watcher', async (t) => {
+  const markerReasons = [
+    'retrigger-review: operator wants this exact head reviewed now',
+    'auto-refresh: posted review on stale head',
+    'FSR-06B: trailer-only head move detected; reviewed=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa live=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    'FSR-06B declined: terminal-closer-head; reviewed=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa live=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+  ];
+
+  for (const [index, reason] of markerReasons.entries()) {
+    const root = makeRoot(t);
+    const old = '2026-05-29T22:00:00.000Z';
+    const prNumber = 1000 + index;
+    const head = `marker-head-${index}`;
+    seedReviewedPRsRow(root, {
+      pr_number: prNumber,
+      rereview_requested_at: old,
+      rereview_reason: reason,
+      last_attempted_at: '2026-05-29T21:00:00.000Z',
+      reviewer_head_sha: head,
+      revision_ref: head,
+    });
+    seedCompletedJob(root, { prNumber, completedAt: old, reReviewRequested: true });
+
+    const result = await runDiagnose(root, '--repo', 'laceyenterprises/agent-os', '--pr', String(prNumber), '--threshold-minutes', '5', '--apply');
+    assert.equal(result.code, 0, `expected marker apply exit 0; got ${result.code}\nstderr:\n${result.stderr}`);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.appliedCount, 1);
+    assert.equal(payload.failedApplyCount, 0);
+
+    const db = openReviewStateDb(root);
+    try {
+      const row = db.prepare(
+        `SELECT rereview_requested_at, rereview_reason
+           FROM reviewed_prs
+          WHERE repo = ? AND pr_number = ?`
+      ).get('laceyenterprises/agent-os', prNumber);
+      assert.equal(row.rereview_requested_at, old);
+      assert.equal(row.rereview_reason, reason);
+    } finally {
+      db.close();
+    }
+
+    const wake = JSON.parse(readFileSync(join(root, 'data', 'watcher-wake.json'), 'utf8'));
+    assert.equal(wake.reason, 'stuck-rereview-watchdog');
+    assert.equal(wake.pr_number, prNumber);
+    assert.equal(wake.head_sha, head);
+  }
 });
 
 test('--apply leaves failed pending rows to terminal-failure finalization', async (t) => {
@@ -282,11 +331,18 @@ test('--apply leaves failed pending rows to terminal-failure finalization', asyn
     body_md: null,
   });
 
+  const readOnly = await runDiagnose(root, '--threshold-minutes', '5');
+  assert.equal(readOnly.code, 4, `expected failed row to remain visible in read-only mode; got ${readOnly.code}`);
+  const readOnlyPayload = JSON.parse(readOnly.stdout);
+  assert.equal(readOnlyPayload.stuckCount, 1);
+
   const result = await runDiagnose(root, '--threshold-minutes', '5', '--apply');
   assert.equal(result.code, 0, `expected exit 0; got ${result.code}\nstderr:\n${result.stderr}`);
   const payload = JSON.parse(result.stdout);
-  assert.equal(payload.stuckCount, 0);
+  assert.equal(payload.stuckCount, 1);
   assert.equal(payload.appliedCount, 0);
+  assert.equal(payload.skippedApplyCount, 1);
+  assert.equal(payload.applyResults[0].reason, 'terminal-failure-evidence-present');
 
   const db = openReviewStateDb(root);
   try {
@@ -491,6 +547,51 @@ test('--apply prunes stale watchdog state entries on write', async (t) => {
   const state = JSON.parse(readFileSync(join(root, 'data', 'follow-up-jobs', 'stuck-rereview-watchdog.json'), 'utf8'));
   assert.equal(state.entries['laceyenterprises/agent-os#999@stale-head'], undefined);
   assert.equal(state.entries['laceyenterprises/agent-os#1000@fresh-head'].attempts, 1);
+});
+
+test('--apply records backoff state when the watcher wake fails after eligibility check', async (t) => {
+  const root = makeRoot(t);
+  const old = '2026-05-29T22:00:00.000Z';
+  seedReviewedPRsRow(root, {
+    rereview_requested_at: old,
+    rereview_reason: 'worker requested rereview',
+    last_attempted_at: '2026-05-29T21:00:00.000Z',
+    reviewer_head_sha: 'wake-failure-head',
+    revision_ref: 'wake-failure-head',
+  });
+  seedCompletedJob(root, { completedAt: old, reReviewRequested: true });
+  mkdirSync(join(root, 'data', 'watcher-wake.json'), { recursive: true });
+
+  const db = openReviewStateDb(root);
+  try {
+    const results = applyStuckRereviewRows({
+      db,
+      rootDir: root,
+      stuckRows: [{
+        row: {
+          repo: 'laceyenterprises/agent-os',
+          pr_number: 1000,
+          rereview_requested_at: old,
+          rereview_reason: 'worker requested rereview',
+          reviewer_head_sha: 'wake-failure-head',
+          revision_ref: 'wake-failure-head',
+        },
+      }],
+      requestedAt: '2026-05-29T23:00:00.000Z',
+      thresholdMs: 5 * 60_000,
+    });
+    assert.equal(results[0].applied, false);
+    assert.equal(results[0].reason, 'watcher-wake-failed');
+    assert.equal(results[0].attempts, 1);
+  } finally {
+    db.close();
+  }
+
+  const state = JSON.parse(readFileSync(join(root, 'data', 'follow-up-jobs', 'stuck-rereview-watchdog.json'), 'utf8'));
+  const entry = state.entries['laceyenterprises/agent-os#1000@wake-failure-head'];
+  assert.equal(entry.attempts, 1);
+  assert.equal(entry.lastWakeFailureAt, '2026-05-29T23:00:00.000Z');
+  assert.ok(entry.nextEligibleAt);
 });
 
 test('apply treats a watcher claim race as a skip', async (t) => {

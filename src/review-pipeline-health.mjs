@@ -1662,6 +1662,7 @@ function summarizeFirstPassQueue(db, { nowMs, stoppedCiRegressionJobs = null }) 
     db,
     `SELECT repo, pr_number, reviewed_at, rereview_requested_at, last_attempted_at, posted_at,
             failed_at, failure_message, review_attempts,
+            reviewer_head_sha,
             (
               SELECT pass_kind
                 FROM reviewer_passes
@@ -1678,6 +1679,7 @@ function summarizeFirstPassQueue(db, { nowMs, stoppedCiRegressionJobs = null }) 
                WHERE reviewer_passes.repo = reviewed_prs.repo
                  AND reviewer_passes.pr_number = reviewed_prs.pr_number
                  AND reviewer_passes.pass_kind IN ('first-pass', 'rereview')
+                 AND reviewer_passes.head_sha = reviewed_prs.reviewer_head_sha
             ) AS reviewer_claim_starts
        FROM reviewed_prs
       WHERE COALESCE(pr_state, 'open') = 'open'

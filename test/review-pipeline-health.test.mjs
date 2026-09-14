@@ -91,8 +91,8 @@ function insertReviewRow(rootDir, overrides = {}) {
       `INSERT INTO reviewed_prs
          (repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
           review_attempts, last_attempted_at, rereview_requested_at, posted_at,
-          failed_at, failure_message)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          failed_at, failure_message, reviewer_head_sha)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       overrides.repo || REPO,
       overrides.prNumber || 946,
@@ -105,7 +105,8 @@ function insertReviewRow(rootDir, overrides = {}) {
       overrides.rereviewRequestedAt ?? null,
       overrides.postedAt ?? null,
       overrides.failedAt ?? null,
-      overrides.failureMessage ?? null
+      overrides.failureMessage ?? null,
+      overrides.reviewerHeadSha ?? null
     );
   } finally {
     db.close();
@@ -118,8 +119,8 @@ function insertReviewerPass(rootDir, overrides = {}) {
     db.prepare(
       `INSERT INTO reviewer_passes
          (repo, pr_number, attempt_number, reviewer_class, reviewer_model,
-          pass_kind, started_at, ended_at, status, metadata_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          pass_kind, started_at, ended_at, status, head_sha, metadata_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       overrides.repo || REPO,
       overrides.prNumber || 950,
@@ -130,6 +131,7 @@ function insertReviewerPass(rootDir, overrides = {}) {
       overrides.startedAt || '2026-05-25T17:45:00.000Z',
       overrides.endedAt || '2026-05-25T17:50:00.000Z',
       overrides.status || 'failed',
+      overrides.headSha ?? null,
       JSON.stringify(overrides.metadata || { failureClass: 'timeout' })
     );
   } finally {
@@ -2045,6 +2047,41 @@ test('prior rereview pass history does not relabel watcher first-pass rows', () 
   assert.equal(snapshot.firstPassQueue.oldestFirstPass.latestReviewerPassKind, 'rereview');
   assert.equal(snapshot.queuedRereviews.count, 0);
   assert.ok(findingCodes(snapshot).includes('review:queue_starvation'));
+});
+
+test('prior head reviewer pass history does not count as current first-pass claim starts', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 6842,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T16:00:00.000Z',
+    lastAttemptedAt: '2026-05-25T16:05:00.000Z',
+    postedAt: null,
+    rereviewRequestedAt: null,
+    reviewAttempts: 0,
+    reviewerHeadSha: 'current-head',
+  });
+  insertReviewerPass(rootDir, {
+    prNumber: 6842,
+    attemptNumber: 3,
+    passKind: 'first-pass',
+    status: 'failed',
+    startedAt: '2026-05-25T15:04:00.000Z',
+    endedAt: '2026-05-25T15:05:00.000Z',
+    headSha: 'old-head',
+  });
+  seedFreshReconcile(rootDir);
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    config: { queueStarvationMaxAgeMs: 10 * 60 * 1000 },
+  });
+
+  assert.equal(snapshot.firstPassQueue.firstPassPrs.length, 1);
+  assert.equal(snapshot.firstPassQueue.oldestFirstPass.prNumber, 6842);
+  assert.equal(snapshot.firstPassQueue.oldestFirstPass.reviewerClaimStarts, 0);
+  assert.equal(snapshot.firstPassQueue.oldestFirstPass.claimedAndReleased, false);
 });
 
 test('lane-share supermajority requires a non-empty verified first-pass backlog after filtering', () => {

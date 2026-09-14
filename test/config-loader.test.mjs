@@ -5321,6 +5321,16 @@ test('quota_probe cadence defaults resolve to 3600 when unset', () => {
   }
 });
 
+test('quota_probe evidence_ttl_seconds default resolves to 86400 when unset', () => {
+  const tmp = freshTmp();
+  try {
+    const cfg = loadConfig({ topPath: join(tmp, 'missing.yaml'), env: {} });
+    assert.equal(cfg.get('roles.quota_probe.evidence_ttl_seconds'), 86400);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('AgentOSConfigError normalizes derived envName tokens', () => {
   assert.equal(new AgentOSConfigError('broken', { source: 'env:' }).envName, null);
   assert.equal(
@@ -6076,6 +6086,32 @@ test('quota_probe exhausted_unknown_tick_seconds enforces HRR-02a range bounds',
   }
 });
 
+test('quota_probe evidence_ttl_seconds enforces HRR-02b range bounds', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    for (const value of [3599, 604801]) {
+      writeFile(top, `
+        version: 1
+        roles:
+          quota_probe:
+            evidence_ttl_seconds: ${value}
+      `);
+      assert.throws(
+        () => loadConfig({ topPath: top, env: {} }),
+        (err) => {
+          assert.ok(err instanceof AgentOSConfigError);
+          assert.equal(err.key, 'roles.quota_probe.evidence_ttl_seconds');
+          assert.equal(err.got, value);
+          return true;
+        },
+      );
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('quota_probe cadence env overrides are honored', () => {
   const tmp = freshTmp();
   try {
@@ -6088,6 +6124,21 @@ test('quota_probe cadence env overrides are honored', () => {
     });
     assert.equal(cfg.get('roles.quota_probe.ok_tick_seconds'), 4200);
     assert.equal(cfg.get('roles.quota_probe.exhausted_unknown_tick_seconds'), 1800);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('quota_probe evidence_ttl_seconds env override is honored', () => {
+  const tmp = freshTmp();
+  try {
+    const cfg = loadConfig({
+      topPath: join(tmp, 'missing.yaml'),
+      env: {
+        AGENT_OS_ROLES_QUOTA_PROBE_EVIDENCE_TTL_SECONDS: '7200',
+      },
+    });
+    assert.equal(cfg.get('roles.quota_probe.evidence_ttl_seconds'), 7200);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

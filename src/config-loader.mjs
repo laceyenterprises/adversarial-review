@@ -2037,6 +2037,9 @@ function schemaV1() {
                 __max: 21600,
               },
               evidence_ttl_seconds: {
+                // Accepted config range only: cwp_quota_probe floors the
+                // effective runtime TTL at ok_tick_seconds so evidence is
+                // never older than one scheduler tick.
                 __type: TYPE_INT,
                 __default: 86400,
                 __min: 3600,

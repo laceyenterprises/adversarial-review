@@ -233,6 +233,13 @@ test('conflicting open PRs are grouped by merge-tree conflict paths', () => {
         },
       ]);
     }
+    if (command === 'git' && args[0] === 'init') {
+      return '';
+    }
+    if (command === 'git' && args[0] === 'remote') {
+      assert.deepEqual(args, ['remote', 'add', 'origin', 'https://github.com/laceyenterprises/agent-os.git']);
+      return '';
+    }
     if (command === 'git' && args[0] === 'cat-file') {
       return '';
     }
@@ -305,7 +312,8 @@ test('conflicting open PRs are grouped by merge-tree conflict paths', () => {
   assert.equal(calls.filter((call) => call.command === 'git' && isGitMergeTree(call.args)).length, 2);
   assert.ok(calls.filter((call) => call.command === 'git' && isGitFetch(call.args))
     .every((call) => call.args.includes('--no-auto-maintenance') && call.args.includes('--no-write-fetch-head')));
-  assert.ok(calls.filter((call) => call.command === 'git').every((call) => call.cwd === '/repo/agent-os'));
+  assert.ok(calls.filter((call) => call.command === 'git' && call.args[0] !== 'init')
+    .every((call) => call.cwd !== '/repo/agent-os'));
 });
 
 test('conflicting open PR diagnostic only finds shared conflict paths', () => {
@@ -321,6 +329,9 @@ test('conflicting open PR diagnostic only finds shared conflict paths', () => {
           isDraft: false,
         },
       ]);
+    }
+    if (command === 'git' && (args[0] === 'init' || args[0] === 'remote')) {
+      return '';
     }
     if (command === 'git' && args[0] === 'cat-file') {
       return '';
@@ -378,6 +389,9 @@ test('conflicting open PR diagnostic treats per-PR probe failures as blind cover
         },
       ]);
     }
+    if (command === 'git' && (args[0] === 'init' || args[0] === 'remote')) {
+      return '';
+    }
     if (command === 'git') {
       const error = new Error('not something we can merge');
       error.stderr = 'fatal: not something we can merge';
@@ -428,6 +442,9 @@ test('conflicting open PR diagnostic treats GitHub-conflicting clean merge-tree 
           isDraft: false,
         },
       ]);
+    }
+    if (command === 'git' && (args[0] === 'init' || args[0] === 'remote')) {
+      return '';
     }
     if (command === 'git' && args[0] === 'cat-file') {
       return '';
@@ -504,7 +521,46 @@ test('conflicting open PR diagnostic treats gh list truncation as blind coverage
   assert.match(renderReviewPipelinePrometheus(snapshot), /^review_pipeline_conflicting_open_prs_collected 0$/m);
 });
 
-test('conflicting open PR diagnostic caps probed PRs and reports unprobed remainder as blind', () => {
+test('conflicting open PR diagnostic treats UNKNOWN mergeability as blind, not clean zero', () => {
+  const rootDir = tempRoot();
+  const execFileSyncImpl = (command, args) => {
+    if (command === 'gh') {
+      return JSON.stringify([
+        {
+          number: 6822,
+          headRefOid: 'head-a',
+          baseRefName: 'main',
+          mergeable: 'UNKNOWN',
+          isDraft: false,
+        },
+      ]);
+    }
+    throw new Error(`unexpected command: ${command} ${args.join(' ')}`);
+  };
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    execFileSyncImpl,
+    sleepSyncImpl: () => {},
+    config: {
+      conflictingPrChecksEnabled: true,
+      conflictingPrRepo: 'laceyenterprises/agent-os',
+      conflictingPrRepoRoot: '/repo/agent-os',
+    },
+  });
+
+  assert.equal(snapshot.conflictingOpenPrs.count, 0);
+  assert.equal(snapshot.conflictingOpenPrs.probedPrs, 0);
+  assert.equal(snapshot.conflictingOpenPrs.unprobedPrs, 1);
+  assert.equal(snapshot.conflictingOpenPrs.collected, false);
+  assert.match(snapshot.conflictingOpenPrs.errors[0], /#6822: unknown-mergeability/);
+  assert.ok(findingCodes(snapshot).includes('review:conflicting_open_prs_unreadable'));
+  assert.match(renderReviewPipelinePrometheus(snapshot), /^review_pipeline_conflicting_open_prs 0$/m);
+  assert.match(renderReviewPipelinePrometheus(snapshot), /^review_pipeline_conflicting_open_prs_collected 0$/m);
+});
+
+test('conflicting open PR diagnostic caps attempted PR probes without marking policy truncation blind', () => {
   const rootDir = tempRoot();
   const execFileSyncImpl = (command, args) => {
     if (command === 'gh') {
@@ -515,6 +571,9 @@ test('conflicting open PR diagnostic caps probed PRs and reports unprobed remain
         mergeable: 'CONFLICTING',
         isDraft: false,
       })));
+    }
+    if (command === 'git' && (args[0] === 'init' || args[0] === 'remote')) {
+      return '';
     }
     if (command === 'git' && args[0] === 'cat-file') {
       return '';
@@ -552,8 +611,59 @@ test('conflicting open PR diagnostic caps probed PRs and reports unprobed remain
   assert.equal(snapshot.conflictingOpenPrs.count, 3);
   assert.equal(snapshot.conflictingOpenPrs.probedPrs, 1);
   assert.equal(snapshot.conflictingOpenPrs.unprobedPrs, 2);
+  assert.equal(snapshot.conflictingOpenPrs.attemptedPrs, 1);
+  assert.equal(snapshot.conflictingOpenPrs.truncated, true);
+  assert.equal(snapshot.conflictingOpenPrs.collected, true);
+  assert.deepEqual(snapshot.conflictingOpenPrs.errors, []);
+  assert.ok(!findingCodes(snapshot).includes('review:conflicting_open_prs_unreadable'));
+});
+
+test('conflicting open PR diagnostic enforces maxProbedPrs on failed probe attempts', () => {
+  const rootDir = tempRoot();
+  const calls = [];
+  const execFileSyncImpl = (command, args, options = {}) => {
+    calls.push({ command, args, cwd: options.cwd || null });
+    if (command === 'gh') {
+      return JSON.stringify([1, 2, 3].map((number) => ({
+        number,
+        headRefOid: `head-${number}`,
+        baseRefName: 'main',
+        mergeable: 'CONFLICTING',
+        isDraft: false,
+      })));
+    }
+    if (command === 'git' && (args[0] === 'init' || args[0] === 'remote')) {
+      return '';
+    }
+    if (command === 'git') {
+      const error = new Error('origin unavailable');
+      error.stderr = 'fatal: unable to access origin';
+      throw error;
+    }
+    throw new Error(`unexpected command: ${command} ${args.join(' ')}`);
+  };
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    execFileSyncImpl,
+    sleepSyncImpl: () => {},
+    config: {
+      conflictingPrChecksEnabled: true,
+      conflictingPrRepo: 'laceyenterprises/agent-os',
+      conflictingPrRepoRoot: '/repo/agent-os',
+      conflictingPrMaxProbedPrs: 1,
+    },
+  });
+
+  assert.equal(snapshot.conflictingOpenPrs.count, 3);
+  assert.equal(snapshot.conflictingOpenPrs.probedPrs, 0);
+  assert.equal(snapshot.conflictingOpenPrs.unprobedPrs, 3);
+  assert.equal(snapshot.conflictingOpenPrs.attemptedPrs, 1);
+  assert.equal(snapshot.conflictingOpenPrs.truncated, true);
   assert.equal(snapshot.conflictingOpenPrs.collected, false);
-  assert.match(snapshot.conflictingOpenPrs.errors.join('\n'), /probe-cap-exhausted/);
+  assert.equal(calls.filter((call) => call.command === 'git' && isGitFetch(call.args)).length, 2);
+  assert.equal(calls.filter((call) => call.command === 'git' && isGitMergeTree(call.args)).length, 0);
   assert.ok(findingCodes(snapshot).includes('review:conflicting_open_prs_unreadable'));
 });
 
@@ -569,6 +679,9 @@ test('conflicting open PR diagnostic stops probing at the wall-clock deadline', 
         mergeable: 'CONFLICTING',
         isDraft: false,
       })));
+    }
+    if (command === 'git' && (args[0] === 'init' || args[0] === 'remote')) {
+      return '';
     }
     if (command === 'git' && args[0] === 'cat-file') {
       return '';
@@ -608,9 +721,11 @@ test('conflicting open PR diagnostic stops probing at the wall-clock deadline', 
   assert.equal(snapshot.conflictingOpenPrs.count, 2);
   assert.equal(snapshot.conflictingOpenPrs.probedPrs, 1);
   assert.equal(snapshot.conflictingOpenPrs.unprobedPrs, 1);
-  assert.equal(snapshot.conflictingOpenPrs.collected, false);
-  assert.match(snapshot.conflictingOpenPrs.errors.join('\n'), /probe-deadline-exhausted/);
-  assert.ok(findingCodes(snapshot).includes('review:conflicting_open_prs_unreadable'));
+  assert.equal(snapshot.conflictingOpenPrs.attemptedPrs, 1);
+  assert.equal(snapshot.conflictingOpenPrs.truncated, true);
+  assert.equal(snapshot.conflictingOpenPrs.collected, true);
+  assert.deepEqual(snapshot.conflictingOpenPrs.errors, []);
+  assert.ok(!findingCodes(snapshot).includes('review:conflicting_open_prs_unreadable'));
 });
 
 test('conflicting open PR diagnostic failure creates a blind finding, not a zero-conflict finding', () => {

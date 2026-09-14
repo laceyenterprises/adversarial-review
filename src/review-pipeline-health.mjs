@@ -189,7 +189,7 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_merge_outcomes_total: 'Current review-ledger PR outcome count by state.',
   review_pipeline_merge_stalled_jobs: 'Current count of clean review-settled jobs still waiting on merge.',
   review_pipeline_conflicting_open_prs: 'Current count of open non-draft PRs GitHub reports as CONFLICTING.',
-  review_pipeline_conflicting_open_prs_collected: 'Whether the conflicting-open-PR collector reached GitHub and completed the configured, non-truncated probe budget without blind spots.',
+  review_pipeline_conflicting_open_prs_collected: 'Whether the conflicting-open-PR collector reached GitHub and completed attempted probes without blind spots; configured cap/deadline truncation is reported separately on the snapshot.',
   review_pipeline_conflicting_open_pr_shared_path_groups: 'Current count of conflict path groups shared by at least the configured minimum PR count.',
   review_pipeline_stale_ama_closer_leases: 'Current count of AMA closer leases for still-open PRs stuck pending or dispatched past the configured age.',
   review_pipeline_zombie_reviewer_passes: 'Current count of reviewer_passes rows stuck running past the configured age.',
@@ -2074,7 +2074,20 @@ function normalizeConflictingPrRow(row) {
   const prNumber = Number(row?.number);
   const mergeable = String(row?.mergeable || '').trim().toUpperCase();
   if (!Number.isInteger(prNumber) || prNumber <= 0) return null;
-  if (row?.isDraft === true || mergeable !== 'CONFLICTING') return null;
+  if (row?.isDraft === true) return null;
+  if (mergeable === 'UNKNOWN') {
+    return {
+      number: prNumber,
+      url: row.url || null,
+      title: row.title || null,
+      headRefName: row.headRefName || null,
+      headRefOid: row.headRefOid || null,
+      baseRefName: row.baseRefName || 'main',
+      mergeable,
+      unknownMergeability: true,
+    };
+  }
+  if (mergeable !== 'CONFLICTING') return null;
   return {
     number: prNumber,
     url: row.url || null,
@@ -2136,8 +2149,34 @@ function ensureCommitPresent(oid, fetchSpec, { repoRoot, execFileSyncImpl, gitEn
       execFileSyncImpl('git', fetchArgs('--no-tags', '--no-write-fetch-head', 'origin', fetchSpec || oid), options);
       return null;
     } catch (error) {
-      return String(error?.stderr || error?.message || 'git fetch commit failed').slice(0, 500);
+      const detail = String(error?.stderr || error?.message || 'git fetch commit failed');
+      if (/HQ_DEPLOY_GUARD_REF_UPDATE_REFUSED|refusing deploy-checkout mutation|Hook: reference-transaction/i.test(detail)) {
+        return `deploy-guard-ref-update-refused: ${detail.slice(0, 450)}`;
+      }
+      return detail.slice(0, 500);
     }
+  }
+}
+
+function initializeConflictProbeRepo({ repo, execFileSyncImpl, timeout }) {
+  const repoRoot = mkdtempSync(join(tmpdir(), 'review-pipeline-health-repo-'));
+  const options = {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    timeout,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  };
+  const remoteUrl = `https://github.com/${repo}.git`;
+  try {
+    execFileSyncImpl('git', ['init', '--quiet'], options);
+    execFileSyncImpl('git', ['remote', 'add', 'origin', remoteUrl], options);
+    return { repoRoot, error: null };
+  } catch (error) {
+    rmSync(repoRoot, { recursive: true, force: true });
+    return {
+      repoRoot: null,
+      error: String(error?.stderr || error?.message || 'git init probe repo failed').slice(0, 500),
+    };
   }
 }
 
@@ -2293,35 +2332,61 @@ function summarizeConflictingOpenPrs({
   const prs = [];
   let probedPrs = 0;
   let unprobedPrs = 0;
+  let attemptedPrs = 0;
+  let truncated = false;
   const maxProbedPrs = config.conflictingPrMaxProbedPrs || DEFAULT_CONFLICTING_PR_MAX_PROBED_PRS;
   const deadlineMs = config.conflictingPrDeadlineMs || DEFAULT_CONFLICTING_PR_DEADLINE_MS;
   const gitTimeoutMs = config.conflictingPrGitTimeoutMs || DEFAULT_CONFLICTING_PR_GIT_TIMEOUT_MS;
   const startedAtMs = nowMsImpl();
   const baseOidCache = new Map();
-  const objectDirectory = mkdtempSync(join(tmpdir(), 'review-pipeline-health-objects-'));
-  const gitEnv = {
-    GIT_OBJECT_DIRECTORY: objectDirectory,
-    GIT_ALTERNATE_OBJECT_DIRECTORIES: join(repoRoot, '.git', 'objects'),
+  let probeRepoRoot = null;
+  let objectDirectory = null;
+  let gitEnv = null;
+  const ensureProbeRepo = () => {
+    if (probeRepoRoot && objectDirectory && gitEnv) return true;
+    const probeRepo = initializeConflictProbeRepo({ repo, execFileSyncImpl, timeout: gitTimeoutMs });
+    if (probeRepo.error) {
+      errors.push(probeRepo.error);
+      return false;
+    }
+    probeRepoRoot = probeRepo.repoRoot;
+    objectDirectory = mkdtempSync(join(tmpdir(), 'review-pipeline-health-objects-'));
+    gitEnv = {
+      GIT_OBJECT_DIRECTORY: objectDirectory,
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: join(repoRoot, '.git', 'objects'),
+    };
+    return true;
   };
   try {
     for (const row of Array.isArray(rows) ? rows : []) {
       const pr = normalizeConflictingPrRow(row);
       if (!pr) continue;
-      if (probedPrs >= maxProbedPrs) {
+      if (pr.unknownMergeability) {
         unprobedPrs += 1;
-        errors.push(`#${pr.number}: probe-cap-exhausted after ${probedPrs}/${maxProbedPrs} PR(s)`);
-        prs.push({ ...pr, conflictingPaths: [], probeOk: false });
+        errors.push(`#${pr.number}: unknown-mergeability`);
+        continue;
+      }
+      if (attemptedPrs >= maxProbedPrs) {
+        unprobedPrs += 1;
+        truncated = true;
+        prs.push({ ...pr, conflictingPaths: [], probeOk: false, truncated: true });
         continue;
       }
       const elapsedMs = nowMsImpl() - startedAtMs;
       if (elapsedMs >= deadlineMs) {
         unprobedPrs += 1;
-        errors.push(`#${pr.number}: probe-deadline-exhausted after ${elapsedMs}/${deadlineMs}ms`);
+        truncated = true;
+        prs.push({ ...pr, conflictingPaths: [], probeOk: false, truncated: true });
+        continue;
+      }
+      attemptedPrs += 1;
+      if (!ensureProbeRepo()) {
+        unprobedPrs += 1;
         prs.push({ ...pr, conflictingPaths: [], probeOk: false });
         continue;
       }
       const conflict = mergeTreeConflictPaths(pr, {
-        repoRoot,
+        repoRoot: probeRepoRoot,
         execFileSyncImpl,
         gitEnv,
         baseOidCache,
@@ -2339,7 +2404,8 @@ function summarizeConflictingOpenPrs({
       }
     }
   } finally {
-    rmSync(objectDirectory, { recursive: true, force: true });
+    if (objectDirectory) rmSync(objectDirectory, { recursive: true, force: true });
+    if (probeRepoRoot) rmSync(probeRepoRoot, { recursive: true, force: true });
   }
 
   const groupedPaths = Array.from(grouped.entries())
@@ -2356,9 +2422,11 @@ function summarizeConflictingOpenPrs({
     repoRoot,
     enabled: true,
     collected: errors.length === 0,
+    truncated,
     count: prs.length,
     probedPrs,
     unprobedPrs,
+    attemptedPrs,
     prs,
     paths: groupedPaths.map((entry) => entry.path),
     groupedPaths,

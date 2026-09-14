@@ -49,10 +49,12 @@ The Grafana dashboard lives at
   unreadable. Page on the specific unreadable-ledger Sentinel finding for the
   exists-but-unopenable case; keep any `collector_up == 0` page scoped to the
   missing-ledger case or downgrade it to avoid double-paging the same incident.
-- `review_pipeline_first_pass_queue_depth`: open PRs waiting in
-  `reviewed_prs.review_status='pending'`.
+- `review_pipeline_first_pass_queue_depth`: open first-pass PRs waiting in
+  `reviewed_prs.review_status='pending'`. The collector also keeps
+  `pendingDepth` in its JSON snapshot as the combined first-pass plus re-review
+  pending population.
 - `review_pipeline_first_pass_wait_seconds`: age in seconds of the oldest
-  pending first-pass/rereview row.
+  pending first-pass row.
 - `review_pipeline_first_pass_oldest_pending_age_seconds`: age of the oldest
   pending first-pass/rereview row.
 - `review_pipeline_rereview_capacity_share`: windowed share of live reviewer
@@ -177,8 +179,10 @@ Its action headline is `Reviews stalled — restore reviewer dispatch`.
 | `review:afh_fallback_edge_supermajority` | one AFH reviewer fallback edge carries >=80% of reviewer selections over 1h with at least 5 selections and 2 distinct PRs, including the edge and grounding reason | ticket | the dominant edge falls below threshold, the sample floor is no longer met, the distinct-PR floor is no longer met, or AFH returns to the primary reviewer |
 | `review:review_lane_share_supermajority` | one reviewer lane carries >=75% of reviewer starts over the capacity window with at least 5 starts, observed concurrency above 1, and at least 2 distinct queued PRs in the opposite lane whose oldest row has reached the queue-starvation age threshold | ticket | the dominant lane falls below threshold, the sample floor is no longer met, observed concurrency is single-slot, or the opposite lane no longer has aged distinct queued work |
 | `review:terminal_review_failure_active` | at least one open PR has terminal reviewer failure evidence in `reviewed_prs` | ticket | the failed review row is retriggered, remediated, or the PR leaves the open population |
-| `review:queue_starvation` | oldest pending first-pass row is >10m old | ticket | no pending row exceeds the age threshold |
+| `review:queue_starvation` | oldest pending first-pass row is >10m old | ticket | no pending first-pass row exceeds the age threshold |
 | `review:rereview_ci_blocked` | one or more open re-reviews are parked at `review_status='ci-blocked'` because external CI failed and no remediation job exists to requeue; same-head CI probes are backoff-gated | ticket | the PR head moves, CI turns green, remediation is requeued, or the PR leaves the open population |
+| `review:rereview_deferred` | pending re-review row remains intentionally deferred behind an active or requeued follow-up job for longer than the queue-starvation threshold (default 10m) | ticket | the follow-up job finishes and re-arms review, the row leaves pending, or the deferral falls below threshold |
+| `review:rereview_queue_wait` | oldest pending re-review row without an active follow-up deferral is older than the queue-starvation threshold (default 10m) | ticket | no pending re-review row without an active follow-up deferral exceeds the age threshold |
 | `review:operational_blocker_human_intervention` | one or more stopped remediation rounds include an operational blocker whose text positively asks for human/manual/operator intervention | ticket | no stopped operational blocker requires human intervention |
 | `review:pr_lifecycle_mirror_unverified` | SEN-02 `blind`: the `reviewed_prs` lifecycle mirror has not reconciled against GitHub inside the staleness window (default 15m), or specific open PRs could not be resolved. Both the queue-starvation and terminal-but-unmerged findings select their population from `pr_state='open'` and then threshold on elapsed age, so an unverified row yields an alert that can never self-clear. Never a health verdict, and never suppresses either finding. | ticket | a sweep resolves every open PR against GitHub inside the staleness window |
 | `review:malformed_pr_title` | one or more open PRs are recorded `review_status='malformed'` | ticket | malformed rows are recreated, explicitly recovered, or no longer open; known bot-authored prefixless PRs are routed to Argus with `review_status='argus-security-queued'` (ASR-04) and do not trigger this alert; neither do legacy `unroutable-bot-author` rows |
@@ -186,6 +190,7 @@ Its action headline is `Reviews stalled — restore reviewer dispatch`.
 | `review:merge_stalled` | a `stopped:review-settled` job remains open for >3 watcher ticks | ticket | the PR is merged/closed or the settled job is no longer past threshold |
 | `review:ttm_budget_breach` | **SLOW** (trend, not alarm): open PR age exceeds a budget DERIVED from the measured merge distribution -- the configured percentile (default p90) of each review-round bucket, weighted-least-squares fitted to `base + review_rounds * per_round` and scaled by measured queue pressure (Little's Law, capped at 3x). Nothing here is a literal; change the distribution and the budget moves. | ticket | the PR merges/closes or falls back under the derived budget |
 | `review:pr_progress_stalled` | **STUCK** (page-worthy): an open PR is not progressing -- a re-review was requested and no reviewer pass has started since, or the reviewer lease expired while the row still claims an in-flight review. Independent of the TTM budget and of elapsed time. | ticket | a reviewer pass starts after the re-review request, or the stale lease is reclaimed/settled |
+| `review:rereview_lane_unfair_share` | one open PR consumes a sustained unfair share of recent re-review starts while queued re-review work exists | ticket | re-review starts are no longer monopolized by one PR, or queued re-review work clears |
 | `review:ttm_budget_model_unreadable` | SEN-02 `blind`: the merged-PR distribution the TTM budget is derived from could not be read, so no budget exists to compare against. The SLOW finding is withheld this tick; the STUCK findings still evaluate. Never a health verdict. | ticket | `reviews.db` `reviewed_prs`/`reviewer_passes` are queryable again |
 | `review:terminal_but_unmerged` | settled/clean PR remains open and unmerged past the terminal threshold | ticket | the PR merges/closes or no longer has a settled clean terminal signature |
 | `review:daemon_merge_parked` | the AMA daemon clean-merge declined the same PR for the same reason for 3+ consecutive ticks (e.g. `worker-identity-unresolved`, `verdict-not-eligible`, `lease-not-held`) | ticket | the PR merges/closes, the daemon's decline reason changes, or the park is not refreshed for two pipeline-health ticks |

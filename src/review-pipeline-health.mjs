@@ -281,6 +281,22 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     thresholdDescription: 'one or more open re-reviews are parked because external CI failed and no remediation job exists to requeue',
   },
   {
+    code: 'review:rereview_deferred',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: 'queueStarvationMaxAgeMs',
+    defaultThreshold: DEFAULT_QUEUE_STARVATION_MAX_AGE_MS,
+    thresholdDescription: 'one or more pending re-reviews have aged while intentionally deferred behind an active or requeued follow-up job',
+  },
+  {
+    code: 'review:rereview_queue_wait',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: 'queueStarvationMaxAgeMs',
+    defaultThreshold: DEFAULT_QUEUE_STARVATION_MAX_AGE_MS,
+    thresholdDescription: 'oldest pending re-review row without an active follow-up deferral exceeds the queue-starvation age threshold',
+  },
+  {
     code: 'review:operational_blocker_human_intervention',
     tier: 'ticket',
     category: 'review-pipeline',
@@ -344,6 +360,16 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
       'an open PR is not progressing: a re-review was requested and no reviewer pass '
       + 'has started since, or the reviewer lease expired while the row still claims an '
       + 'in-flight review. Deliberately independent of the TTM budget and of elapsed time.',
+  },
+  {
+    code: 'review:rereview_lane_unfair_share',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: 'ttm.rereview_lane_share',
+    defaultThreshold: null,
+    thresholdDescription:
+      'one open PR consumes a sustained unfair share of recent re-review starts while '
+      + 'queued re-review work exists',
   },
   {
     code: 'review:ttm_budget_model_unreadable',
@@ -1655,8 +1681,7 @@ function summarizeFirstPassQueue(db, { nowMs }) {
   };
 }
 
-function summarizeDeferredRereviews(db, followUpJobs, { nowMs }) {
-  if (!db) return { count: 0, oldest: null, prs: [] };
+function activeFollowUpJobsByPr(followUpJobs) {
   const activeJobsByPr = new Map();
   for (const entry of followUpJobs || []) {
     if (!['pending', 'in_progress'].includes(entry.state)) continue;
@@ -1669,6 +1694,12 @@ function summarizeDeferredRereviews(db, followUpJobs, { nowMs }) {
       activeJobsByPr.set(key, entry);
     }
   }
+  return activeJobsByPr;
+}
+
+function summarizeDeferredRereviews(db, followUpJobs, { nowMs }) {
+  if (!db) return { count: 0, oldest: null, prs: [] };
+  const activeJobsByPr = activeFollowUpJobsByPr(followUpJobs);
   const rows = safeAll(
     db,
     `SELECT repo,
@@ -1730,8 +1761,9 @@ function summarizeDeferredRereviews(db, followUpJobs, { nowMs }) {
   return { count: prs.length, oldest: prs[0] || null, prs };
 }
 
-function summarizeQueuedRereviews(db, { nowMs }) {
+function summarizeQueuedRereviews(db, followUpJobs, { nowMs }) {
   if (!db) return { count: 0, oldest: null, prs: [] };
+  const activeJobsByPr = activeFollowUpJobsByPr(followUpJobs);
   const rows = safeAll(
     db,
     `SELECT repo,
@@ -1739,6 +1771,9 @@ function summarizeQueuedRereviews(db, { nowMs }) {
             reviewed_at,
             rereview_requested_at,
             last_attempted_at,
+            posted_at,
+            failed_at,
+            failure_message,
             rereview_reason,
             review_attempts,
             reviewer_head_sha,
@@ -1746,14 +1781,28 @@ function summarizeQueuedRereviews(db, { nowMs }) {
        FROM reviewed_prs
       WHERE COALESCE(pr_state, 'open') = 'open'
         AND review_status = 'pending'
-        AND rereview_requested_at IS NOT NULL
-        AND rereview_requested_at <> ''
-      ORDER BY rereview_requested_at ASC, repo ASC, pr_number ASC
-      LIMIT 25`
+      ORDER BY COALESCE(rereview_requested_at, failed_at, last_attempted_at, reviewed_at, posted_at) ASC,
+               repo ASC,
+               pr_number ASC`
   );
-  const prs = rows.map((row) => {
-    const requestedAt = row.rereview_requested_at || row.reviewed_at || row.last_attempted_at || null;
-    return {
+  const prs = [];
+  for (const row of rows) {
+    const passKind = reviewerDispatchPassKind({
+      current: {
+        rereview_requested_at: row.rereview_requested_at,
+        posted_at: row.posted_at,
+      },
+    });
+    if (passKind !== 'rereview') continue;
+    if (activeJobsByPr.has(`${row.repo}#${row.pr_number}`)) continue;
+    const requestedAt =
+      row.rereview_requested_at ||
+      row.failed_at ||
+      row.last_attempted_at ||
+      row.reviewed_at ||
+      row.posted_at ||
+      null;
+    prs.push({
       repo: row.repo,
       prNumber: row.pr_number,
       requestedAt,
@@ -1762,10 +1811,11 @@ function summarizeQueuedRereviews(db, { nowMs }) {
       reviewAttempts: Number(row.review_attempts || 0),
       reviewerHeadSha: row.reviewer_head_sha || null,
       revisionRef: row.revision_ref || null,
-    };
-  });
+      failureMessage: String(row.failure_message || '').slice(0, 300) || null,
+    });
+  }
   return {
-    count: rows.length,
+    count: prs.length,
     oldest: prs[0] || null,
     prs,
   };
@@ -3103,14 +3153,17 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
         depth: snapshot.firstPassQueue.firstPassPrs.length,
         failedCount: snapshot.firstPassQueue.failedCount,
         // Machine-readable so a consumer can filter without parsing prose.
-        prStateMirrorVerified: !oldestUnverified,
+        mirrorVerified: !oldestUnverified,
         mirrorReconciledAt: reconcile?.observedAt || null,
         mirrorUnverifiedCount: reconcile?.unresolvedCount ?? null,
       },
     }));
   }
 
-  if (snapshot.deferredRereviews.count > 0) {
+  if (
+    snapshot.deferredRereviews.count > 0
+    && snapshot.deferredRereviews.oldest?.ageMs > config.queueStarvationMaxAgeMs
+  ) {
     const sample = snapshot.deferredRereviews.oldest || snapshot.deferredRereviews.prs[0];
     findings.push(buildFinding({
       code: 'review:rereview_deferred',
@@ -3754,13 +3807,13 @@ function collectReviewPipelineHealth({
     const ciBlockedRereviews = db
       ? summarizeCiBlockedRereviews(db, { nowMs })
       : { count: 0, oldest: null, prs: [] };
+    const followUpQueues = summarizeFollowUpQueues(rootDir, { nowMs, config });
     const queuedRereviews = db
-      ? summarizeQueuedRereviews(db, { nowMs })
+      ? summarizeQueuedRereviews(db, followUpQueues.jobs, { nowMs })
       : { count: 0, oldest: null, prs: [] };
     const malformedPrTitles = db
       ? summarizeMalformedPrTitles(db)
       : { count: 0, prs: [] };
-    const followUpQueues = summarizeFollowUpQueues(rootDir, { nowMs, config });
     const deferredRereviews = db
       ? summarizeDeferredRereviews(db, followUpQueues.jobs, { nowMs })
       : { count: 0, oldest: null, prs: [] };

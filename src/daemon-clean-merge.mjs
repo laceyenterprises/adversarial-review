@@ -348,6 +348,7 @@ export async function runDaemonCleanMergeAttempt({
   evaluateMovedHeadClobberGuardImpl = evaluateMovedHeadClobberGuard,
   appendAmaAuditAttemptImpl = appendAmaAuditAttempt,
   clobberGuardNowImpl = () => new Date().toISOString(),
+  emitProtectivePredecessorFindingImpl = null,
 } = {}) {
   const base = candidate?.baseBranch;
   const validatedHead = gateSnapshot?.reviewedHeadSha || reviewState?.headSha || null;
@@ -821,6 +822,16 @@ export async function runDaemonCleanMergeAttempt({
     },
     mergeCapabilityEnforcement: cfg?.mergeCapabilityEnforcement || 'observe',
     mergeEnv: env,
+    prBody: String(liveRollup?.body ?? candidate?.body ?? ''),
+    fetchProtectivePredecessorStateImpl: async ({ prNumber: protectorPrNumber }) => {
+      const protector = await fetchRollupImpl(repoPath, protectorPrNumber, { execFileImpl });
+      return {
+        state: protector?.state,
+        prState: protector?.state,
+        isOpen: String(protector?.state || '').trim().toUpperCase() === 'OPEN',
+      };
+    },
+    emitFindingImpl: emitProtectivePredecessorFindingImpl,
     dismissStaleRequestChangesImpl: dismissStaleRequestChangesOnResolved !== false
       ? async () => dismissStandingChangesRequestedReviewsForHead(execFileImpl, repoPath, prNumber, daemonValidatedHead, {
           authoritativeReviewerLogins,

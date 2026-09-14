@@ -6,6 +6,7 @@ import { join } from 'node:path';
 
 import {
   maybeDispatchAmaCloser,
+  resolveAmaCloserDispatchPriority,
   updateAmaCloserDispatchRecord,
 } from '../src/ama/dispatch-closer.mjs';
 import { acquireAmaCloserLease } from '../src/ama/closer-lease.mjs';
@@ -522,4 +523,70 @@ test('LCR: unsupported --priority hq degrades to a flag-less retry (no dispatch 
   assert.ok(calls[0].args.includes('--priority'), 'first attempt carries --priority');
   assert.ok(!calls[1].args.includes('--priority'), 'retry drops --priority');
   assert.equal(flagValue(calls[1].args, '--task-kind'), 'merge', 'retry preserves the merge dispatch');
+});
+
+test('MERGEORDER-01: protector named by a merged dependent is promoted to critical priority', () => {
+  const decision = resolveAmaCloserDispatchPriority({
+    useHammerTerminalRemediationPrompt: true,
+    repo: 'acme/repo',
+    prNumber: 6767,
+    mergedProtectiveDependents: [
+      {
+        repo: 'acme/repo',
+        prNumber: 6760,
+        state: 'MERGED',
+        protectivePredecessor: { protectorPrNumber: 6767 },
+      },
+    ],
+  });
+
+  assert.equal(decision.priority, 'critical');
+  assert.equal(decision.reason, 'protective-predecessor-for-merged-dependent');
+  assert.equal(decision.protectiveBoost.dependentPrNumber, 6760);
+});
+
+test('MERGEORDER-01: ordinary terminal remediation priority is unchanged without protective evidence', () => {
+  const decision = resolveAmaCloserDispatchPriority({
+    useHammerTerminalRemediationPrompt: true,
+    repo: 'acme/repo',
+    prNumber: 6767,
+    mergedProtectiveDependents: [],
+  });
+
+  assert.equal(decision.priority, 'normal');
+  assert.equal(decision.protectiveBoost, null);
+});
+
+test('MERGEORDER-01: dispatch boost emits a finding naming dependent and protector', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'mergeorder-protective-boost-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const deps = testDeps();
+  const findings = [];
+
+  const result = await maybeDispatchAmaCloser({
+    ...findingsRemediationArgs(rootDir, {
+      prMetadata: { prNumber: 6767 },
+      dispatchContext: {
+        prUrl: 'https://github.com/acme/repo/pull/6767',
+        mergedProtectiveDependents: [
+          {
+            repo: 'acme/repo',
+            prNumber: 6760,
+            state: 'MERGED',
+            protectivePredecessor: { protectorPrNumber: 6767 },
+          },
+        ],
+      },
+    }),
+    ...deps,
+    emitProtectivePredecessorFindingImpl: async (finding) => findings.push(finding),
+  });
+
+  assert.equal(result.dispatched, true);
+  assert.equal(flagValue(deps.calls[0].args, '--priority'), 'critical');
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].dependentPrNumber, 6760);
+  assert.equal(findings[0].protectorPrNumber, 6767);
+  assert.match(findings[0].reason, /#6760/);
+  assert.match(findings[0].reason, /#6767/);
 });

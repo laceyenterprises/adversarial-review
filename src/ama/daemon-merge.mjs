@@ -53,6 +53,11 @@ import {
 } from './audit.mjs';
 import { evaluateMergeEligibility } from './merge-eligibility.mjs';
 import { evaluateMergeCapabilityEnforcement } from './merge-capability-enforcement.mjs';
+import {
+  isProtectorOpen,
+  protectivePredecessorMergeWindowFinding,
+  resolveProtectivePredecessorDeclaration,
+} from './protective-predecessor.mjs';
 
 /** Bounded-retry defaults, byte-for-byte the MSM-01 hammer merge budget. */
 export const DAEMON_MERGE_DEFAULTS = Object.freeze({
@@ -307,6 +312,8 @@ function priorDaemonPermanentFailure({ readAuditImpl, hqRoot, repo, prNumber, va
  * @param {string} [args.mergeMethod]    `squash` (default) | `merge`.
  * @param {string} args.hqRoot          HQ root for the audit doc.
  * @param {object} [args.auditMetadata] Extra top-level audit fields (reviewer, risk).
+ * @param {string=} [args.prBody]       PR body, used only for explicit
+ *                                      protective-predecessor trailers.
  *
  * Injected collaborators (all required for the merge path; defaulted for audit):
  * @param {() => Promise<object>} args.fetchLiveGateImpl  Re-read live head+gate.
@@ -345,6 +352,10 @@ export async function attemptDaemonCleanMerge({
   mergeEnv = process.env,
   hqRoot,
   auditMetadata = {},
+  prBody = '',
+  protectivePredecessor = null,
+  fetchProtectivePredecessorStateImpl = null,
+  emitFindingImpl = null,
   strictMode = flags.strictMode ?? true,
   allowHamTerminalRemediation = false,
   allowHeadCloserCertifiedNonBlocking = false,
@@ -373,6 +384,52 @@ export async function attemptDaemonCleanMerge({
     auditWritten: false,
     ...extra,
   });
+
+  const protectiveDeclaration = resolveProtectivePredecessorDeclaration({
+    prBody,
+    explicit: protectivePredecessor,
+  });
+  if (protectiveDeclaration) {
+    let protectorState = null;
+    try {
+      protectorState = typeof fetchProtectivePredecessorStateImpl === 'function'
+        ? await fetchProtectivePredecessorStateImpl({
+            repo,
+            prNumber: protectiveDeclaration.protectorPrNumber,
+            dependentPrNumber: prNumber,
+          })
+        : null;
+    } catch (err) {
+      logger?.warn?.(
+        `[daemon-merge] protective predecessor read failed for ${repo}#${prNumber} ` +
+          `protector #${protectiveDeclaration.protectorPrNumber}; holding merge: ${err?.message || err}`,
+      );
+      return notTaken('protective-predecessor-state-unreadable', {
+        protectivePredecessor: protectiveDeclaration,
+      });
+    }
+    if (isProtectorOpen(protectorState)) {
+      const finding = protectivePredecessorMergeWindowFinding({
+        repo,
+        dependentPrNumber: prNumber,
+        protectorPrNumber: protectiveDeclaration.protectorPrNumber,
+      });
+      if (typeof emitFindingImpl === 'function') {
+        try {
+          await emitFindingImpl(finding);
+        } catch (err) {
+          logger?.warn?.(
+            `[daemon-merge] protective predecessor finding emit failed for ${repo}#${prNumber}: ` +
+              `${err?.message || err}`,
+          );
+        }
+      }
+      return notTaken('protective-predecessor-open', {
+        protectivePredecessor: protectiveDeclaration,
+        finding,
+      });
+    }
+  }
 
   // ── Gate 1: STRICT clean-only. Any finding (or unknown classification) routes
   // to the hammer. When strict mode is explicitly off, known non-blocking

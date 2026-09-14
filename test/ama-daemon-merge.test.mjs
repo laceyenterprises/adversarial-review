@@ -652,3 +652,58 @@ test('__testables__ exposes the permanent-reason set', () => {
   assert.ok(__testables__.PERMANENT_TERMINAL_REASONS.includes('permanent-merge-rejection'));
   assert.ok(!__testables__.PERMANENT_TERMINAL_REASONS.includes('merge-retry-budget-exhausted'));
 });
+
+test('protective predecessor: dependent with open protector is held before lease and emits finding', async () => {
+  const h = makeHarness();
+  const findings = [];
+  const result = await attemptDaemonCleanMerge(baseArgs(h, {
+    prBody: [
+      'Implements wider reaping.',
+      '',
+      'Protects-Against-Unsafe-Merge-Until-PR: #6767',
+    ].join('\n'),
+    fetchProtectivePredecessorStateImpl: async ({ prNumber }) => ({
+      prNumber,
+      state: 'OPEN',
+    }),
+    emitFindingImpl: async (finding) => findings.push(finding),
+  }));
+
+  assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.NOT_TAKEN);
+  assert.equal(result.reason, 'protective-predecessor-open');
+  assert.equal(h.calls.acquire, 0);
+  assert.equal(h.calls.merge, 0);
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].dependentPrNumber, 7);
+  assert.equal(findings[0].protectorPrNumber, 6767);
+  assert.match(findings[0].reason, /#7/);
+  assert.match(findings[0].reason, /#6767/);
+});
+
+test('protective predecessor: closed protector allows the ordinary daemon path', async () => {
+  const h = makeHarness();
+  const result = await attemptDaemonCleanMerge(baseArgs(h, {
+    prBody: 'Protects-Against-Unsafe-Merge-Until-PR: #6767',
+    fetchProtectivePredecessorStateImpl: async () => ({ state: 'MERGED' }),
+  }));
+
+  assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+  assert.equal(h.calls.acquire, 1);
+  assert.equal(h.calls.merge, 1);
+});
+
+test('protective predecessor: no declaration leaves common-case merge behavior untouched', async () => {
+  const h = makeHarness();
+  let protectorReads = 0;
+  const result = await attemptDaemonCleanMerge(baseArgs(h, {
+    prBody: 'ordinary PR body',
+    fetchProtectivePredecessorStateImpl: async () => {
+      protectorReads += 1;
+      return { state: 'OPEN' };
+    },
+  }));
+
+  assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+  assert.equal(protectorReads, 0);
+  assert.equal(h.calls.merge, 1);
+});

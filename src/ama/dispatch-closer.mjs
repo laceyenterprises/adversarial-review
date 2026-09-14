@@ -87,6 +87,10 @@ import { resolveRequiredCheckContextsFromCfg } from './required-check-contexts.m
 import { resolveCloserDispatchHarness } from './harness-fallback.mjs';
 import { acquireMergeLease, releaseMergeLease } from './merge-lease.mjs';
 import {
+  hasMergedDependentProtectingPr,
+  protectivePredecessorMergeWindowFinding,
+} from './protective-predecessor.mjs';
+import {
   HAMMER_RETRY_CAP_EXHAUSTED_REASON,
   HAMMER_RETRY_CAP_LIFETIME_EXHAUSTED_REASON,
   HAMMER_RETRY_CAP_LIFETIME_SUPPRESSION_STATE,
@@ -241,6 +245,35 @@ export const DEFAULT_COMMENT_ONLY_HAMMER_TERMINAL_MS = 10 * 60 * 1000;
 
 function hasStrictNonBlockingRefusalReason(reasons = []) {
   return reasons.some((reason) => STRICT_NON_BLOCKING_REFUSAL_REASONS.has(reason));
+}
+
+export function resolveAmaCloserDispatchPriority({
+  useHammerTerminalRemediationPrompt,
+  repo,
+  prNumber,
+  mergedProtectiveDependents = [],
+} = {}) {
+  const protectiveBoost = hasMergedDependentProtectingPr({
+    repo,
+    prNumber,
+    mergedDependents: mergedProtectiveDependents,
+  });
+  if (protectiveBoost) {
+    return {
+      priority: CLOSER_VALIDATE_AND_CLICK_DISPATCH_PRIORITY,
+      reason: 'protective-predecessor-for-merged-dependent',
+      protectiveBoost,
+    };
+  }
+  return {
+    priority: useHammerTerminalRemediationPrompt
+      ? CLOSER_FINDINGS_REMEDIATION_DISPATCH_PRIORITY
+      : CLOSER_VALIDATE_AND_CLICK_DISPATCH_PRIORITY,
+    reason: useHammerTerminalRemediationPrompt
+      ? 'findings-remediation'
+      : 'validate-and-click',
+    protectiveBoost: null,
+  };
 }
 
 function finiteNumberOrNull(value) {
@@ -3523,6 +3556,7 @@ export async function maybeDispatchAmaCloser({
   fetchPullRequestRollupImpl = fetchPullRequestRollup,
   resolveHamTerminalRemediationEvidenceImpl = null,
   deliverAlertImpl = deliverAlert,
+  emitProtectivePredecessorFindingImpl = null,
   logGate = dispatchCloserLogGate,
   logger = console,
   signal = null,
@@ -4177,6 +4211,16 @@ export async function maybeDispatchAmaCloser({
               mergeCapabilityEnforcement: cfg?.mergeCapabilityEnforcement || 'observe',
             },
             mergeCapabilityEnforcement: cfg?.mergeCapabilityEnforcement || 'observe',
+            prBody: String(prMetadata?.body ?? dispatchContext?.prBody ?? ''),
+            fetchProtectivePredecessorStateImpl: async ({ prNumber: protectorPrNumber }) => {
+              const protector = await fetchPullRequestRollupImpl(repo, protectorPrNumber, { execFileImpl });
+              return {
+                state: protector?.state,
+                prState: protector?.state,
+                isOpen: String(protector?.state || '').trim().toUpperCase() === 'OPEN',
+              };
+            },
+            emitFindingImpl: emitProtectivePredecessorFindingImpl,
             allowHamTerminalRemediation: true,
             dismissStaleRequestChangesImpl: dispatchContext.dismissStaleRequestChangesOnResolved !== false
               ? async () => dismissStandingChangesRequestedReviewsForHead(execFileImpl, repo, prNumber, reviewedSha, {
@@ -5255,9 +5299,35 @@ export async function maybeDispatchAmaCloser({
   // cannot occupy the single reserved slot for the minutes it spends remediating
   // findings/checks/mergeability. This is admission routing only — the
   // eligibility gate is unchanged.
-  const dispatchPriority = useHammerTerminalRemediationPrompt
-    ? CLOSER_FINDINGS_REMEDIATION_DISPATCH_PRIORITY
-    : CLOSER_VALIDATE_AND_CLICK_DISPATCH_PRIORITY;
+  const priorityDecision = resolveAmaCloserDispatchPriority({
+    useHammerTerminalRemediationPrompt,
+    repo,
+    prNumber,
+    mergedProtectiveDependents: dispatchContext?.mergedProtectiveDependents || [],
+  });
+  const dispatchPriority = priorityDecision.priority;
+  if (priorityDecision.protectiveBoost) {
+    logAmaCloserDispatchEvent(logger, 'ama_closer.protective_predecessor_priority_boost', {
+      repo,
+      prNumber,
+      dependentPrNumber: priorityDecision.protectiveBoost.dependentPrNumber,
+      reason: priorityDecision.reason,
+    });
+    if (typeof emitProtectivePredecessorFindingImpl === 'function') {
+      try {
+        await emitProtectivePredecessorFindingImpl(protectivePredecessorMergeWindowFinding({
+          repo,
+          dependentPrNumber: priorityDecision.protectiveBoost.dependentPrNumber,
+          protectorPrNumber: prNumber,
+        }));
+      } catch (err) {
+        logger?.warn?.(
+          `[ama-closer] protective predecessor finding emit failed for ${repo}#${prNumber}: ` +
+            `${err?.message || err}`,
+        );
+      }
+    }
+  }
   const argsWithPriority = ['dispatch', '--priority', dispatchPriority, ...args.slice(1)];
   let activeArgs = argsWithPriority;
   let execResult;

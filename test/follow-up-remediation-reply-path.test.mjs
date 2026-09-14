@@ -10,6 +10,7 @@ import {
   buildRemediationPrompt,
   classifyGithubAuthOperationalBlocker,
   consumeNextFollowUpJob,
+  extractCommitShaFromOperationalBlocker,
   preserveUnpushedCommit,
   prepareHqReplyLandingPad,
   reconcileFollowUpJob,
@@ -352,4 +353,115 @@ test('reconcileFollowUpJob prefers the HQ reply path and rejects the legacy fall
     assert.equal(result.job.failure.code, 'invalid-remediation-reply');
     assert.match(result.job.failure.message, /legacy remediation reply path is forbidden/i);
   });
+});
+
+test('GitHub-auth commit extraction does not fall back to the original job head', () => {
+  assert.equal(
+    extractCommitShaFromOperationalBlocker(
+      { category: 'github-auth', finding: 'bad credentials' },
+      { headSha: 'a8d151c82639f6ff67d5a646e34c789f5e066504' },
+    ),
+    null,
+  );
+  assert.equal(
+    extractCommitShaFromOperationalBlocker({
+      category: 'github-auth',
+      finding: 'preserved unpushed commit a8d151c82639f6ff67d5a646e34c789f5e066504 after bad credentials',
+    }),
+    'a8d151c82639f6ff67d5a646e34c789f5e066504',
+  );
+});
+
+test('recoverable GitHub-auth retry routes unmapped worker identities through the canonical remediator class', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = path.join(rootDir, 'hq');
+  const { claimed } = makeQueuedJob(rootDir, {
+    prNumber: 430,
+    builderTag: 'clio-agent',
+    reviewerModel: 'codex',
+  });
+  const job = {
+    ...claimed.job,
+    branch: 'clio-authblock-rescue',
+    headSha: '1111111111111111111111111111111111111111',
+  };
+  writeFileSync(claimed.jobPath, `${JSON.stringify(job, null, 2)}\n`, 'utf8');
+
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  writeFileSync(outputPath, 'worker hit GitHub auth while pushing\n', 'utf8');
+
+  const { replyDir, replyPath } = resolveHqReplyPath({
+    hqRoot,
+    launchRequestId: job.jobId,
+  });
+  mkdirSync(replyDir, { recursive: true });
+  writeValidReply(replyPath, job, {
+    outcome: 'blocked',
+    operationalBlockers: [{
+      title: 'github-auth',
+      category: 'github-auth',
+      finding: 'bad credentials while pushing remediated commit',
+      commitSha: '2222222222222222222222222222222222222222',
+      reasoning: 'token expired',
+    }],
+    reReview: { requested: false, reason: null },
+  });
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-05-04T09:01:00.000Z',
+    worker: {
+      model: 'clio-agent',
+      processId: 9003,
+      state: 'spawned',
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      replyPath,
+    },
+  });
+
+  const execCalls = [];
+  const rereviewCalls = [];
+  await withHqRootEnv(hqRoot, async () => {
+    const result = await reconcileFollowUpJob({
+      rootDir,
+      job: spawned.job,
+      jobPath: spawned.jobPath,
+      now: () => '2026-05-04T09:30:00.000Z',
+      isWorkerRunning: () => false,
+      resolvePRLifecycleImpl: async () => null,
+      requestReviewRereviewImpl: (args) => {
+        rereviewCalls.push(args);
+        return {
+          triggered: true,
+          status: 'pending',
+          reason: 'review-status-reset',
+          reviewRow: { repo: job.repo, pr_number: job.prNumber, pr_state: 'open', review_status: 'pending' },
+        };
+      },
+      execFileImpl: async (command, args, options = {}) => {
+        execCalls.push({ command, args, options });
+        return { stdout: '', stderr: '' };
+      },
+      log: { warn: () => {}, error: () => {} },
+    });
+
+    assert.equal(result.action, 'completed');
+    assert.equal(result.job.operationalBlockerRecovery.retry.pushed, true);
+    assert.equal(result.job.operationalBlockerRecovery.retry.reason, 'push-succeeded');
+  });
+
+  const retryCall = execCalls.find((call) => call.command === 'bash');
+  assert.ok(retryCall, 'expected a GitHub-auth retry push');
+  assert.equal(
+    retryCall.options.env.WORKER_CLASS,
+    'claude-code',
+    'unmapped worker.model must fall through to pickRemediationWorkerClass(job) for retry token resolution',
+  );
+  assert.equal(rereviewCalls.length, 1);
+  assert.equal(rereviewCalls[0].targetRevisionRef, '2222222222222222222222222222222222222222');
 });

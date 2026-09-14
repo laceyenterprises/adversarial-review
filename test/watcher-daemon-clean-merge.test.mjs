@@ -2917,7 +2917,7 @@ test('MERGEORDER-01: candidate body is threaded into closer metadata', async () 
       ...baseArgs(rootDir),
       candidate: {
         ...baseArgs(rootDir).candidate,
-        body: 'Protects-Against-Unsafe-Merge-Until-PR: #299',
+        prBody: 'Protects-Against-Unsafe-Merge-Until-PR: #299',
       },
       runDaemonCleanMergeAttemptImpl: async () => ({
         disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN,

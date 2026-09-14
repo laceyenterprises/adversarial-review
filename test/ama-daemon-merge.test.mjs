@@ -692,6 +692,19 @@ test('protective predecessor: closed protector allows the ordinary daemon path',
   assert.equal(h.calls.merge, 1);
 });
 
+test('protective predecessor: missing protector state fails closed before lease', async () => {
+  const h = makeHarness();
+  const result = await attemptDaemonCleanMerge(baseArgs(h, {
+    prBody: 'Protects-Against-Unsafe-Merge-Until-PR: #6767',
+    fetchProtectivePredecessorStateImpl: async () => ({}),
+  }));
+
+  assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.NOT_TAKEN);
+  assert.equal(result.reason, 'protective-predecessor-state-unreadable');
+  assert.equal(h.calls.acquire, 0);
+  assert.equal(h.calls.merge, 0);
+});
+
 test('protective predecessor: no declaration leaves common-case merge behavior untouched', async () => {
   const h = makeHarness();
   let protectorReads = 0;

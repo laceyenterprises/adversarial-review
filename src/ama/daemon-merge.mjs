@@ -418,6 +418,16 @@ export async function attemptDaemonCleanMerge({
           protectivePredecessor: { ...protectiveDeclaration, protectorPrNumber },
         });
       }
+      const protectorStateText = String(protectorState?.state ?? protectorState?.prState ?? '').trim();
+      if (!protectorStateText && protectorState?.isOpen !== true && protectorState?.isOpen !== false) {
+        logger?.warn?.(
+          `[daemon-merge] protective predecessor state missing for ${repo}#${prNumber} ` +
+            `protector #${protectorPrNumber}; holding merge`,
+        );
+        return notTaken('protective-predecessor-state-unreadable', {
+          protectivePredecessor: { ...protectiveDeclaration, protectorPrNumber },
+        });
+      }
       if (isProtectorOpen(protectorState)) {
         const finding = protectivePredecessorMergeWindowFinding({
           repo,

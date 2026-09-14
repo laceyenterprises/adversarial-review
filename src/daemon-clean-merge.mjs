@@ -822,7 +822,7 @@ export async function runDaemonCleanMergeAttempt({
     },
     mergeCapabilityEnforcement: cfg?.mergeCapabilityEnforcement || 'observe',
     mergeEnv: env,
-    prBody: String(liveRollup?.body ?? candidate?.body ?? ''),
+    prBody: String(liveRollup?.body ?? candidate?.body ?? candidate?.prBody ?? ''),
     fetchProtectivePredecessorStateImpl: async ({ prNumber: protectorPrNumber }) => {
       const protector = await fetchRollupImpl(repoPath, protectorPrNumber, { execFileImpl });
       if (!String(protector?.state || '').trim()) {

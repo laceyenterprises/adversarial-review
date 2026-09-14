@@ -6139,6 +6139,23 @@ test('quota_probe evidence_ttl_seconds env override is honored', () => {
       },
     });
     assert.equal(cfg.get('roles.quota_probe.evidence_ttl_seconds'), 7200);
+
+    for (const value of [3599, 604801]) {
+      assert.throws(
+        () => loadConfig({
+          topPath: join(tmp, 'missing.yaml'),
+          env: {
+            AGENT_OS_ROLES_QUOTA_PROBE_EVIDENCE_TTL_SECONDS: String(value),
+          },
+        }),
+        (err) => {
+          assert.ok(err instanceof AgentOSConfigError);
+          assert.equal(err.key, 'roles.quota_probe.evidence_ttl_seconds');
+          assert.equal(err.got, value);
+          return true;
+        },
+      );
+    }
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

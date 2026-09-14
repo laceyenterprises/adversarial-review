@@ -2020,10 +2020,10 @@ function schemaV1() {
             __type: TYPE_DICT,
             __strict: true,
             __keys: {
-              // Out-of-range values hard-fail at load time. This mirrors
-              // the Python loader's range-bound contract; there is no
-              // silent clamp because operators need misconfigurations in
-              // the startup banner, not hidden boundary rewrites.
+              // Out-of-range values hard-fail in the Node strict loader;
+              // there is no silent clamp because operators need
+              // misconfigurations in the startup banner, not hidden
+              // boundary rewrites.
               ok_tick_seconds: {
                 __type: TYPE_INT,
                 __default: 3600,

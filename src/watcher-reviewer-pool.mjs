@@ -1126,4 +1126,5 @@ export {
   runBoundedReviewerDispatchQueue,
   sortReviewerDispatchCandidates,
   reviewerDispatchIsFirstPass,
+  reviewerDispatchPassKind,
 };

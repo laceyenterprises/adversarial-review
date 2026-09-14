@@ -2826,6 +2826,7 @@ export async function processReviewSubject(entry, ctx) {
                     || `Routing-tier readiness probe reported ${routingTierReadiness.reason}.`,
                 },
                 failureAt: attemptAt,
+                env: process.env,
                 maxRemediationRounds,
               });
               return { dispatched: false, reason: 'routing-tier-not-ready' };
@@ -3041,6 +3042,7 @@ export async function processReviewSubject(entry, ctx) {
                 repoPath,
                 prNumber,
                 result,
+                env: process.env,
                 maxRemediationRounds,
                 // ARC-18: watcher owns the heartbeat singleton; thread it in.
                 markReviewHeartbeat: markWatcherReviewHeartbeat,

@@ -1,5 +1,6 @@
 import { spawnSync as nodeSpawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { readBuildCompletionSignalForPr } from './session-ledger-read-adapter.mjs';
 
 export const DUPLICATE_FAMILY_STATUS_ADVISORY = 'advisory';
@@ -744,6 +745,29 @@ export async function runDuplicateFamilyCensusForWatcher({
     timeout: Math.min(Math.max(1, Number(options.timeout) || 1500), 1500),
   });
   try {
+    for (const explicitLedgerPath of [
+      env.AGENT_OS_SESSION_LEDGER_DB_PATH,
+      env.SESSION_LEDGER_DB_PATH,
+    ]) {
+      if (explicitLedgerPath && !existsSync(explicitLedgerPath)) {
+        throw new Error('Transient provenance failure: missing-ledger-target');
+      }
+    }
+    const probeSubject = (Array.isArray(subjectEntries) ? subjectEntries : [])
+      .map((entry) => entry?.subject || entry || {})
+      .find((subject) => Number.isInteger(Number(subject.number ?? subject.prNumber)));
+    if (probeSubject) {
+      readBuildCompletionSignalForPrImpl({
+        repo: repoPath,
+        prNumber: Number(probeSubject.number ?? probeSubject.prNumber),
+        headSha: normalizeText(probeSubject.headSha || probeSubject.headRefOid || probeSubject.ref?.revisionRef),
+        signalKind: 'pr_opened',
+        rootDir,
+        hqRoot: env.HQ_ROOT || null,
+        env,
+        spawnSyncImpl,
+      });
+    }
     const duplicateCensus = reconcileDuplicateFamiliesForRepo(db, subjectEntries, {
       repoPath,
       rootDir,

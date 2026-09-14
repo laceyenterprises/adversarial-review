@@ -1279,13 +1279,17 @@ function requestReviewRereview({
     if (reviewRow.review_status === 'pending') {
       const normalizedReason = reason || 'Re-review requested from remediation reply.';
       const explicitOperatorRetrigger = isExplicitOperatorRetriggerReason(normalizedReason);
+      const currentRevisionRef = String(reviewRow.revision_ref || reviewRow.reviewer_head_sha || '');
       const pendingRevisionRefMoved =
         normalizedTargetRevisionRef &&
-        String(reviewRow.revision_ref || '') !== normalizedTargetRevisionRef;
+        currentRevisionRef !== normalizedTargetRevisionRef;
       if (explicitOperatorRetrigger || pendingRevisionRefMoved) {
         const pendingAssignments = [
-          'review_attempts = 0',
-          'last_attempted_at = NULL',
+          // RCA 2026-08-17: a lease-released row whose head/revision moved is
+          // a legitimate fresh review and must not inherit the poisoned attempt
+          // budget from the previous commit. Key this on the revision move, not
+          // on which release statement happened to leave reviewer handle fields.
+          ...(pendingRevisionRefMoved ? ['review_attempts = 0', 'last_attempted_at = NULL'] : []),
           'posted_at = NULL',
           'failed_at = NULL',
           'failure_message = NULL',

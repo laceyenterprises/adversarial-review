@@ -67,8 +67,9 @@ function insertReviewRow(rootDir, overrides = {}) {
     db.prepare(
       `INSERT INTO reviewed_prs
          (repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
-          review_attempts, last_attempted_at, posted_at, failed_at, failure_message)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          review_attempts, last_attempted_at, rereview_requested_at, posted_at,
+          failed_at, failure_message)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       overrides.repo || REPO,
       overrides.prNumber || 946,
@@ -78,6 +79,7 @@ function insertReviewRow(rootDir, overrides = {}) {
       overrides.reviewStatus || 'pending',
       overrides.reviewAttempts ?? 0,
       overrides.lastAttemptedAt ?? null,
+      overrides.rereviewRequestedAt ?? null,
       overrides.postedAt ?? null,
       overrides.failedAt ?? null,
       overrides.failureMessage ?? null
@@ -766,6 +768,178 @@ test('reviewer capacity excludes abandoned and stale running passes', () => {
   assert.equal(snapshot.reviewerCapacity.firstPassPasses, 1);
   assert.equal(snapshot.reviewerCapacity.rereviewPasses, 0);
   assert.equal(snapshot.reviewerCapacity.effectiveConcurrency, 1);
+});
+
+test('lane-share supermajority fires when rereviews dominate while first pass waits', () => {
+  const rootDir = tempRoot();
+  seedFreshReconcile(rootDir);
+  insertReviewRow(rootDir, {
+    prNumber: 970,
+    reviewedAt: '2026-05-25T17:50:00.000Z',
+    reviewStatus: 'pending',
+  });
+  insertReviewRow(rootDir, {
+    prNumber: 971,
+    reviewedAt: '2026-05-25T17:49:00.000Z',
+    reviewStatus: 'pending',
+  });
+  for (let index = 0; index < 4; index += 1) {
+    insertReviewerPass(rootDir, {
+      prNumber: 980 + index,
+      attemptNumber: 2,
+      passKind: 'rereview',
+      status: 'completed',
+      startedAt: `2026-05-25T17:${10 + index}:00.000Z`,
+      endedAt: `2026-05-25T17:${20 + index}:00.000Z`,
+    });
+  }
+  insertReviewerPass(rootDir, {
+    prNumber: 984,
+    attemptNumber: 1,
+    passKind: 'first-pass',
+    status: 'completed',
+    startedAt: '2026-05-25T17:20:00.000Z',
+    endedAt: '2026-05-25T17:21:00.000Z',
+  });
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    configOverrides: { reviewLaneShareSupermajorityMinPasses: 5 },
+  });
+  const finding = snapshot.findings.find((item) => item.code === 'review:review_lane_share_supermajority');
+
+  assert.ok(finding, findingCodes(snapshot).join(','));
+  assert.equal(finding.details.dominantLane, 'rereview');
+  assert.equal(finding.details.starvedLane, 'first-pass');
+  assert.equal(finding.details.totalPasses, 5);
+  assert.equal(finding.details.distinctQueuedPrs, 2);
+  assert.equal(finding.details.queuedOtherLane.prNumber, 971);
+});
+
+test('lane-share supermajority stays quiet when opposite-lane work is fresh', () => {
+  const rootDir = tempRoot();
+  seedFreshReconcile(rootDir);
+  insertReviewRow(rootDir, {
+    prNumber: 970,
+    reviewedAt: '2026-05-25T17:59:30.000Z',
+    reviewStatus: 'pending',
+  });
+  insertReviewRow(rootDir, {
+    prNumber: 971,
+    reviewedAt: '2026-05-25T17:59:00.000Z',
+    reviewStatus: 'pending',
+  });
+  for (let index = 0; index < 5; index += 1) {
+    insertReviewerPass(rootDir, {
+      prNumber: 980 + index,
+      attemptNumber: 2,
+      passKind: 'rereview',
+      status: 'completed',
+      startedAt: `2026-05-25T17:${10 + index}:00.000Z`,
+      endedAt: `2026-05-25T17:${20 + index}:00.000Z`,
+    });
+  }
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    configOverrides: { reviewLaneShareSupermajorityMinPasses: 5 },
+  });
+
+  assert.ok(!snapshot.findings.some((item) => item.code === 'review:review_lane_share_supermajority'));
+});
+
+test('lane-share supermajority stays quiet on single-slot reviewer hosts', () => {
+  const rootDir = tempRoot();
+  seedFreshReconcile(rootDir);
+  insertReviewRow(rootDir, {
+    prNumber: 970,
+    reviewedAt: '2026-05-25T17:40:00.000Z',
+    reviewStatus: 'pending',
+  });
+  insertReviewRow(rootDir, {
+    prNumber: 971,
+    reviewedAt: '2026-05-25T17:39:00.000Z',
+    reviewStatus: 'pending',
+  });
+  for (let index = 0; index < 5; index += 1) {
+    insertReviewerPass(rootDir, {
+      prNumber: 980 + index,
+      attemptNumber: 2,
+      passKind: 'rereview',
+      status: 'completed',
+      startedAt: `2026-05-25T17:${10 + (index * 2)}:00.000Z`,
+      endedAt: `2026-05-25T17:${11 + (index * 2)}:00.000Z`,
+    });
+  }
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    configOverrides: { reviewLaneShareSupermajorityMinPasses: 5 },
+  });
+
+  assert.equal(snapshot.reviewerCapacity.effectiveConcurrency, 1);
+  assert.ok(!snapshot.findings.some((item) => item.code === 'review:review_lane_share_supermajority'));
+});
+
+test('lane-share supermajority requires distinct queued PR evidence', () => {
+  const rootDir = tempRoot();
+  seedFreshReconcile(rootDir);
+  insertReviewRow(rootDir, {
+    prNumber: 970,
+    reviewedAt: '2026-05-25T17:40:00.000Z',
+    reviewStatus: 'pending',
+  });
+  for (let index = 0; index < 4; index += 1) {
+    insertReviewerPass(rootDir, {
+      prNumber: 980 + index,
+      attemptNumber: 2,
+      passKind: 'rereview',
+      status: 'completed',
+      startedAt: `2026-05-25T17:${10 + index}:00.000Z`,
+      endedAt: `2026-05-25T17:${20 + index}:00.000Z`,
+    });
+  }
+  insertReviewerPass(rootDir, {
+    prNumber: 984,
+    attemptNumber: 1,
+    passKind: 'first-pass',
+    status: 'completed',
+    startedAt: '2026-05-25T17:20:00.000Z',
+    endedAt: '2026-05-25T17:21:00.000Z',
+  });
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    configOverrides: { reviewLaneShareSupermajorityMinPasses: 5 },
+  });
+
+  assert.ok(!snapshot.findings.some((item) => item.code === 'review:review_lane_share_supermajority'));
+});
+
+test('lane-share supermajority stays quiet when the other lane is empty', () => {
+  const rootDir = tempRoot();
+  for (let index = 0; index < 5; index += 1) {
+    insertReviewerPass(rootDir, {
+      prNumber: 990 + index,
+      attemptNumber: 2,
+      passKind: 'rereview',
+      status: 'completed',
+      startedAt: `2026-05-25T17:${10 + index}:00.000Z`,
+      endedAt: `2026-05-25T17:${11 + index}:00.000Z`,
+    });
+  }
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    configOverrides: { reviewLaneShareSupermajorityMinPasses: 5 },
+  });
+
+  assert.ok(!snapshot.findings.some((item) => item.code === 'review:review_lane_share_supermajority'));
 });
 
 test('reviewer capacity skips degenerate intervals without leaking concurrency', () => {

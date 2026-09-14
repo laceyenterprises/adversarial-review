@@ -37,6 +37,8 @@ const ALL_NEW_FLAT_KEYS = Object.freeze([
   'watcher.stuck_dispatch_alert_debounce_ms',
   'watcher.first_pass_reviewer_pool_max_concurrent_reviewers',
   'watcher.review_lane_first_pass_burst_limit',
+  'watcher.review_lane_min_share',
+  'watcher.review_lane_first_pass_urgent_age_ms',
   'follow_up.hq_worker_tear_down_subprocess_timeout_ms',
   'follow_up.hq_dispatch_subprocess_timeout_ms',
 ]);
@@ -227,6 +229,8 @@ test('schema defaults resolve to documented values when nothing is overridden', 
     'watcher.stuck_dispatch_alert_debounce_ms': 21_600_000,
     'watcher.first_pass_reviewer_pool_max_concurrent_reviewers': null,
     'watcher.review_lane_first_pass_burst_limit': 2,
+    'watcher.review_lane_min_share': 0.25,
+    'watcher.review_lane_first_pass_urgent_age_ms': 300_000,
     'follow_up.hq_worker_tear_down_subprocess_timeout_ms': 60_000,
     'follow_up.hq_dispatch_subprocess_timeout_ms': 90_000,
   };

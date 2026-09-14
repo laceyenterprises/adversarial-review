@@ -2423,6 +2423,7 @@ export async function processReviewSubject(entry, ctx) {
           prNumber,
           headSha: subject?.headSha,
         }),
+        pendingSince: current?.rereview_requested_at || current?.reviewed_at || current?.last_attempted_at || null,
         enqueuedAtMs: Date.now(),
         async run() {
           // REVIEW-DEDUP (idempotency lease): one (pr, head) dispatch per

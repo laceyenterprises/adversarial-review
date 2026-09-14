@@ -8,6 +8,8 @@ import { loadRoleConfig } from './role-config.mjs';
 const DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX = 6;
 const MAX_FIRST_PASS_REVIEWER_POOL_MAX = 12;
 const DEFAULT_REVIEW_LANE_FIRST_PASS_BURST_LIMIT = 2;
+const DEFAULT_REVIEW_LANE_MIN_SHARE = 0.25;
+const DEFAULT_REVIEW_LANE_FIRST_PASS_URGENT_AGE_MS = 5 * 60 * 1000;
 const DEFAULT_REVIEWER_MEMORY_SAMPLE_TTL_MS = 120_000;
 const DEFAULT_REVIEWER_DISPATCH_WAIT_WARN_MS = 15 * 60 * 1000;
 const DEFAULT_SINGLE_WAVE_SETTLE_GRACE_MS = 1000;
@@ -32,6 +34,13 @@ function parsePositiveInteger(value, fallback) {
   if (value === undefined || value === null || value === '') return fallback;
   const parsed = Number.parseInt(String(value), 10);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseBoundedFloat(value, fallback, { min = 0, max = 1 } = {}) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const parsed = Number.parseFloat(String(value));
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
 }
 
 function parsePositiveIntegerWithSource(value, fallback, valueSource, fallbackSource) {
@@ -221,15 +230,26 @@ function resolveReviewLaneConfig({
   modulePaths,
   loaderImpl,
 } = {}) {
-  const raw = loadRoleConfig({
+  const cfg = loadRoleConfig({
     env,
     topPath,
     modulePaths,
     loaderImpl,
-    contextKey: 'watcher.review_lane_first_pass_burst_limit',
-  }).get('watcher.review_lane_first_pass_burst_limit', DEFAULT_REVIEW_LANE_FIRST_PASS_BURST_LIMIT);
+    contextKey: 'watcher.review_lane_min_share',
+  });
+  const burstRaw = cfg.get(
+    'watcher.review_lane_first_pass_burst_limit',
+    DEFAULT_REVIEW_LANE_FIRST_PASS_BURST_LIMIT,
+  );
+  const shareRaw = cfg.get('watcher.review_lane_min_share', DEFAULT_REVIEW_LANE_MIN_SHARE);
+  const urgentRaw = cfg.get(
+    'watcher.review_lane_first_pass_urgent_age_ms',
+    DEFAULT_REVIEW_LANE_FIRST_PASS_URGENT_AGE_MS,
+  );
   return {
-    firstPassBurstLimit: parsePositiveInteger(raw, DEFAULT_REVIEW_LANE_FIRST_PASS_BURST_LIMIT),
+    firstPassBurstLimit: parsePositiveInteger(burstRaw, DEFAULT_REVIEW_LANE_FIRST_PASS_BURST_LIMIT),
+    minShare: parseBoundedFloat(shareRaw, DEFAULT_REVIEW_LANE_MIN_SHARE, { min: 0, max: 0.5 }),
+    firstPassUrgentAgeMs: parsePositiveInteger(urgentRaw, DEFAULT_REVIEW_LANE_FIRST_PASS_URGENT_AGE_MS),
   };
 }
 
@@ -293,11 +313,18 @@ function sortReviewerDispatchCandidates(candidates) {
 
 function createReviewerLaneState({
   firstPassBurstLimit = DEFAULT_REVIEW_LANE_FIRST_PASS_BURST_LIMIT,
+  minShare = DEFAULT_REVIEW_LANE_MIN_SHARE,
+  firstPassUrgentAgeMs = DEFAULT_REVIEW_LANE_FIRST_PASS_URGENT_AGE_MS,
 } = {}) {
   return {
     firstPassBurstLimit: parsePositiveInteger(
       firstPassBurstLimit,
       DEFAULT_REVIEW_LANE_FIRST_PASS_BURST_LIMIT,
+    ),
+    minShare: parseBoundedFloat(minShare, DEFAULT_REVIEW_LANE_MIN_SHARE, { min: 0, max: 0.5 }),
+    firstPassUrgentAgeMs: parsePositiveInteger(
+      firstPassUrgentAgeMs,
+      DEFAULT_REVIEW_LANE_FIRST_PASS_URGENT_AGE_MS,
     ),
     firstPassStartsSinceRereview: 0,
   };
@@ -308,6 +335,8 @@ const PERSISTENT_REVIEWER_LANE_STATE = createReviewerLaneState();
 function refreshPersistentReviewerLaneState() {
   const reviewerLaneConfig = resolveReviewLaneConfig();
   PERSISTENT_REVIEWER_LANE_STATE.firstPassBurstLimit = reviewerLaneConfig.firstPassBurstLimit;
+  PERSISTENT_REVIEWER_LANE_STATE.minShare = reviewerLaneConfig.minShare;
+  PERSISTENT_REVIEWER_LANE_STATE.firstPassUrgentAgeMs = reviewerLaneConfig.firstPassUrgentAgeMs;
   return PERSISTENT_REVIEWER_LANE_STATE;
 }
 
@@ -326,7 +355,92 @@ function pendingLaneCounts(entries) {
   return { firstPass, rereview };
 }
 
-function compareReviewerDispatchEntries(a, b, { laneState = null, laneCounts = null } = {}) {
+function reviewerLaneFloor({
+  concurrencyLimit,
+  minShare,
+} = {}) {
+  const slots = Math.max(1, Number.parseInt(String(concurrencyLimit), 10) || 0);
+  const share = parseBoundedFloat(minShare, DEFAULT_REVIEW_LANE_MIN_SHARE, { min: 0, max: 0.5 });
+  if (share <= 0) return 0;
+  return Math.max(1, Math.min(slots, Math.ceil(slots * share)));
+}
+
+function oldestFirstPassAgeMs(entries, nowMs = Date.now()) {
+  let oldest = null;
+  for (const entry of entries) {
+    if (entry.started || !reviewerDispatchIsFirstPass(entry.candidate)) continue;
+    const age = reviewerDispatchPendingAgeMs(entry.candidate, nowMs)
+      ?? reviewerDispatchAgeMs(entry.candidate, nowMs);
+    if (age === null) continue;
+    oldest = oldest === null ? age : Math.max(oldest, age);
+  }
+  return oldest;
+}
+
+function laneFairnessPreference({
+  a,
+  b,
+  laneState = null,
+  laneCounts = null,
+  laneStarts = null,
+  concurrencyLimit = DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX,
+  pendingFirstPassAgeMs = null,
+} = {}) {
+  const counts = laneCounts || { firstPass: 0, rereview: 0 };
+  if (!(counts.firstPass > 0 && counts.rereview > 0)) return 0;
+  const aFirst = reviewerDispatchIsFirstPass(a.candidate);
+  const bFirst = reviewerDispatchIsFirstPass(b.candidate);
+  if (aFirst === bFirst) return 0;
+
+  const minShare = parseBoundedFloat(
+    laneState?.minShare,
+    DEFAULT_REVIEW_LANE_MIN_SHARE,
+    { min: 0, max: 0.5 },
+  );
+  const baseFloor = reviewerLaneFloor({ concurrencyLimit, minShare });
+  if (baseFloor > 0) {
+    const starts = laneStarts || { firstPass: 0, rereview: 0 };
+    const urgentAgeMs = parsePositiveInteger(
+      laneState?.firstPassUrgentAgeMs,
+      DEFAULT_REVIEW_LANE_FIRST_PASS_URGENT_AGE_MS,
+    );
+    const firstPassAgeMs = Number.isFinite(Number(pendingFirstPassAgeMs))
+      ? Number(pendingFirstPassAgeMs)
+      : null;
+    const firstPassFloor = firstPassAgeMs !== null && firstPassAgeMs >= urgentAgeMs
+      ? Math.min(concurrencyLimit, Math.max(baseFloor, Math.ceil(concurrencyLimit / 2)))
+      : baseFloor;
+    if (starts.firstPass < firstPassFloor && starts.rereview >= baseFloor) {
+      return aFirst ? -1 : 1;
+    }
+    if (starts.rereview < baseFloor && starts.firstPass >= firstPassFloor) {
+      const burstLimit = parsePositiveInteger(
+        laneState?.firstPassBurstLimit,
+        DEFAULT_REVIEW_LANE_FIRST_PASS_BURST_LIMIT,
+      );
+      const persistedStreak =
+        Math.max(0, Number.parseInt(String(laneState?.firstPassStartsSinceRereview || 0), 10) || 0);
+      const admittedStreak =
+        Math.max(0, Number.parseInt(String(starts.firstPass || 0), 10) || 0);
+      if (persistedStreak + admittedStreak < burstLimit) return 0;
+      return aFirst ? 1 : -1;
+    }
+  }
+
+  return 0;
+}
+
+function compareReviewerDispatchEntries(
+  a,
+  b,
+  {
+    laneState = null,
+    laneCounts = null,
+    laneStarts = null,
+    concurrencyLimit = DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX,
+    pendingFirstPassAgeMs = null,
+  } = {},
+) {
   const aWake = a?.candidate?.wakePriority === true;
   const bWake = b?.candidate?.wakePriority === true;
   if (aWake !== bWake) return aWake ? -1 : 1;
@@ -334,6 +448,17 @@ function compareReviewerDispatchEntries(a, b, { laneState = null, laneCounts = n
   const counts = laneCounts || { firstPass: 0, rereview: 0 };
   const bothLanesPending = counts.firstPass > 0 && counts.rereview > 0;
   if (bothLanesPending) {
+    const fairness = laneFairnessPreference({
+      a,
+      b,
+      laneState,
+      laneCounts: counts,
+      laneStarts,
+      concurrencyLimit,
+      pendingFirstPassAgeMs,
+    });
+    if (fairness !== 0) return fairness;
+
     const burstLimit = parsePositiveInteger(
       laneState?.firstPassBurstLimit,
       DEFAULT_REVIEW_LANE_FIRST_PASS_BURST_LIMIT,
@@ -352,9 +477,27 @@ function compareReviewerDispatchEntries(a, b, { laneState = null, laneCounts = n
   return compareReviewerDispatchCandidates(a.candidate, b.candidate);
 }
 
-function orderPendingReviewerDispatchEntries(entries, { laneState = null } = {}) {
+function orderPendingReviewerDispatchEntries(
+  entries,
+  {
+    laneState = null,
+    laneStarts = null,
+    concurrencyLimit = DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX,
+    nowMs = Date.now(),
+  } = {},
+) {
   const laneCounts = pendingLaneCounts(entries);
-  return [...entries].sort((a, b) => compareReviewerDispatchEntries(a, b, { laneState, laneCounts }));
+  const pendingFirstPassAgeMs = oldestFirstPassAgeMs(
+    entries,
+    Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now(),
+  );
+  return [...entries].sort((a, b) => compareReviewerDispatchEntries(a, b, {
+    laneState,
+    laneCounts,
+    laneStarts,
+    concurrencyLimit,
+    pendingFirstPassAgeMs,
+  }));
 }
 
 function recordReviewerLaneStart(candidate, laneState = null) {
@@ -382,6 +525,27 @@ function reviewerDispatchWaitMs(candidate, nowMs = Date.now()) {
   }
   const enqueuedAt = parseSortTimeMs(candidate?.enqueuedAt);
   return enqueuedAt === null ? null : Math.max(0, nowMs - enqueuedAt);
+}
+
+function reviewerDispatchPendingAgeMs(candidate, nowMs = Date.now()) {
+  if (
+    typeof candidate?.pendingSinceMs === 'number'
+    && Number.isFinite(candidate.pendingSinceMs)
+  ) {
+    return Math.max(0, nowMs - candidate.pendingSinceMs);
+  }
+  const pendingSince = parseSortTimeMs(candidate?.pendingSince);
+  if (pendingSince !== null) return Math.max(0, nowMs - pendingSince);
+  return null;
+}
+
+function safeReviewerNowMs(now = () => Date.now()) {
+  try {
+    const currentNowMs = Number(now());
+    return Number.isFinite(currentNowMs) ? currentNowMs : Date.now();
+  } catch {
+    return Date.now();
+  }
 }
 
 function logReviewerDispatchWait(candidate, {
@@ -691,6 +855,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   const active = new Set();
   const activeRecords = new Map();
   const errors = [];
+  const laneStarts = { firstPass: 0, rereview: 0 };
   let maxObservedConcurrency = 0;
   let attempted = 0;
   let dispatched = 0;
@@ -702,6 +867,16 @@ async function runBoundedReviewerDispatchQueue(candidates, {
 
   const dispatchWasSkipped = (result) =>
     result && typeof result === 'object' && result.dispatched === false;
+
+  const recordLaneAdmission = (candidate) => {
+    const key = reviewerDispatchIsFirstPass(candidate) ? 'firstPass' : 'rereview';
+    laneStarts[key] += 1;
+  };
+
+  const refundLaneAdmission = (candidate) => {
+    const key = reviewerDispatchIsFirstPass(candidate) ? 'firstPass' : 'rereview';
+    laneStarts[key] = Math.max(0, laneStarts[key] - 1);
+  };
 
   const countDispatch = (promise) => {
     const record = activeRecords.get(promise);
@@ -739,13 +914,27 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   };
 
   const nextStartableEntry = () => {
+    const counts = pendingLaneCounts(pending);
+    const bothLanesPending = counts.firstPass > 0 && counts.rereview > 0;
     if (active.size >= concurrencyLimit) {
-      for (const entry of orderPendingReviewerDispatchEntries(pending, { laneState: activeLaneState })) {
+      const resolvedNowMs = bothLanesPending ? safeReviewerNowMs(now) : undefined;
+      for (const entry of orderPendingReviewerDispatchEntries(pending, {
+        laneState: activeLaneState,
+        laneStarts,
+        concurrencyLimit,
+        nowMs: resolvedNowMs,
+      })) {
         if (!entry.started) recordDeferredReason(entry, 'reviewer-pool-saturated');
       }
       return null;
     }
-    for (const entry of orderPendingReviewerDispatchEntries(pending, { laneState: activeLaneState })) {
+    const resolvedNowMs = bothLanesPending ? safeReviewerNowMs(now) : undefined;
+    for (const entry of orderPendingReviewerDispatchEntries(pending, {
+      laneState: activeLaneState,
+      laneStarts,
+      concurrencyLimit,
+      nowMs: resolvedNowMs,
+    })) {
       if (entry.started) continue;
       if (isGeminiCandidate(entry.candidate) && activeGemini >= geminiConcurrencyLimit) {
         recordDeferredReason(
@@ -787,6 +976,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
     ) {
       entry.started = true;
       const startedEntry = entry;
+      recordLaneAdmission(startedEntry.candidate);
       const promise = start(startedEntry.candidate);
       if (typeof onCandidateStarted === 'function') {
         try {
@@ -807,11 +997,21 @@ async function runBoundedReviewerDispatchQueue(candidates, {
           recordReviewerLaneStart(startedEntry.candidate, activeLaneState);
           countDispatch(promise);
         }
+        refundLaneAdmission(startedEntry.candidate);
       }).finally(() => {
         active.delete(promise);
         activeRecords.delete(promise);
       });
       maxObservedConcurrency = Math.max(maxObservedConcurrency, active.size);
+      const remainingLaneCounts = pendingLaneCounts(pending);
+      if (
+        concurrencyLimit > 1
+        && remainingLaneCounts.firstPass > 0
+        && remainingLaneCounts.rereview > 0
+      ) {
+        await Promise.resolve();
+        await Promise.resolve();
+      }
     }
     if (singleWave && attempted > attemptedBeforeStart) {
       // The watcher needs a dispatch *wave*, not a full batch drain. Some
@@ -868,7 +1068,12 @@ async function runBoundedReviewerDispatchQueue(candidates, {
     if (errors.length === 1) throw errors[0];
     throw new AggregateError(errors, `${errors.length} reviewer dispatch tasks failed`);
   }
-  const deferredEntries = orderPendingReviewerDispatchEntries(pending, { laneState: activeLaneState })
+  const deferredEntries = orderPendingReviewerDispatchEntries(pending, {
+    laneState: activeLaneState,
+    laneStarts,
+    concurrencyLimit,
+    nowMs: safeReviewerNowMs(now),
+  })
     .filter((entry) => !entry.started);
   const resolvedNowMs = Date.now();
   const deferredReasons = deferredEntries.map((entry) => ({
@@ -898,6 +1103,8 @@ async function runBoundedReviewerDispatchQueue(candidates, {
 export {
   DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX,
   DEFAULT_REVIEW_LANE_FIRST_PASS_BURST_LIMIT,
+  DEFAULT_REVIEW_LANE_FIRST_PASS_URGENT_AGE_MS,
+  DEFAULT_REVIEW_LANE_MIN_SHARE,
   DEFAULT_REVIEWER_DISPATCH_WAIT_WARN_MS,
   MAX_FIRST_PASS_REVIEWER_POOL_MAX,
   DEFAULT_REVIEWER_MEMORY_SAMPLE_TTL_MS,
@@ -915,6 +1122,7 @@ export {
   resolveReviewerMemoryPressureConfig,
   resolveFirstPassReviewerPoolConfig,
   resolveReviewLaneConfig,
+  reviewerLaneFloor,
   runBoundedReviewerDispatchQueue,
   sortReviewerDispatchCandidates,
   reviewerDispatchIsFirstPass,

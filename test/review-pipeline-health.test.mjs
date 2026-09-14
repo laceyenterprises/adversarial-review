@@ -942,6 +942,35 @@ test('lane-share supermajority stays quiet when the other lane is empty', () => 
   assert.ok(!snapshot.findings.some((item) => item.code === 'review:review_lane_share_supermajority'));
 });
 
+test('rereview lane unfair-share definition has an emitted finding path', () => {
+  const rootDir = tempRoot();
+  for (let index = 0; index < 3; index += 1) {
+    insertReviewerPass(rootDir, {
+      prNumber: 990,
+      attemptNumber: index + 2,
+      passKind: 'rereview',
+      status: 'completed',
+      startedAt: `2026-05-25T17:${10 + index}:00.000Z`,
+      endedAt: `2026-05-25T17:${11 + index}:00.000Z`,
+    });
+  }
+  insertReviewerPass(rootDir, {
+    prNumber: 991,
+    attemptNumber: 2,
+    passKind: 'rereview',
+    status: 'completed',
+    startedAt: '2026-05-25T17:20:00.000Z',
+    endedAt: '2026-05-25T17:21:00.000Z',
+  });
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  const finding = snapshot.findings.find((item) => item.code === 'review:rereview_lane_unfair_share');
+
+  assert.ok(finding, findingCodes(snapshot).join(','));
+  assert.equal(finding.details.monopolist.prNumber, 990);
+  assert.equal(finding.details.totalPasses, 4);
+});
+
 test('reviewer capacity skips degenerate intervals without leaking concurrency', () => {
   const rootDir = tempRoot();
   insertReviewerPass(rootDir, {

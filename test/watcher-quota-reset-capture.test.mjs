@@ -419,6 +419,7 @@ test('main-catchup freezeClass deploy outage is requeued without charging review
       rootDir,
       repoPath: REPO,
       prNumber: PR,
+      env: { ...process.env, HQ_ROOT: hqRoot },
       result: {
         ok: false,
         failureClass: 'unknown',
@@ -491,6 +492,7 @@ test('malformed main-catchup outage state fails closed instead of pretending hea
       rootDir,
       repoPath: REPO,
       prNumber: PR,
+      env: { ...process.env, HQ_ROOT: hqRoot },
       result: {
         ok: false,
         failureClass: 'unknown',
@@ -535,6 +537,7 @@ test('unreadable main-catchup outage state fails closed instead of crashing', ()
       rootDir,
       repoPath: REPO,
       prNumber: PR,
+      env: { ...process.env, HQ_ROOT: hqRoot },
       result: {
         ok: false,
         failureClass: 'unknown',

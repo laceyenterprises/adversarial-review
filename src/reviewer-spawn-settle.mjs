@@ -441,7 +441,7 @@ function resolveReviewerOutageSignal({
   failureClass,
   fullOutput = '',
   failureAt,
-  env = process.env,
+  env = null,
   nowMs = Date.now(),
   quotaResetIso = null,
 } = {}) {
@@ -465,7 +465,7 @@ function resolveReviewerOutageSignal({
       ...textSignal,
     };
   }
-  const deploySignal = mainCatchupOutageSignal({ env });
+  const deploySignal = env ? mainCatchupOutageSignal({ env }) : null;
   if (deploySignal) {
     return {
       ...deploySignal,
@@ -1020,6 +1020,7 @@ function settleReviewerAttempt({
   repoPath,
   prNumber,
   result,
+  env = null,
   failureAt = new Date().toISOString(),
   maxRemediationRounds,
   leaseRecoveryEnabled = REVIEWER_LEASE_RECOVERY_ENABLED,
@@ -1224,6 +1225,7 @@ function settleReviewerAttempt({
     failureClass,
     fullOutput: fullFailureOutput,
     failureAt,
+    env,
     quotaResetIso,
   });
   if (outageSignal.active) {

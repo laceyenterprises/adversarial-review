@@ -1,13 +1,13 @@
 # Reviewer passes
 
-**Source of truth:** `migrations/20260518_reviewer_passes.sql`, `migrations/20260810_reviewer_passes_posted_review_freshness_index.sql`, `src/reviewer-pass-tokens.mjs`, and `src/reviewer-spawn-settle.mjs`
+**Source of truth:** `migrations/20260518_reviewer_passes.sql`, `migrations/20260810_reviewer_passes_posted_review_freshness_index.sql`, `src/reviewer-pass-tokens.mjs`, `src/reviewer-spawn-settle.mjs`, and `src/follow-up-jobs.mjs`
 
 ## Ownership
 
 - Store: `data/reviews.db`
 - Table: `reviewer_passes`
 - Schema: `migrations/20260518_reviewer_passes.sql` plus later additive migrations
-- Writers: `src/reviewer-pass-tokens.mjs`, `src/reviewer-spawn-settle.mjs`
+- Writers: `src/reviewer-pass-tokens.mjs`, `src/reviewer-spawn-settle.mjs`, `src/follow-up-jobs.mjs`
 - Repair CLI: `scripts/backfill-reviewer-passes.mjs`
 
 `reviewer_passes` is the durable record of each first-pass, remediation, and
@@ -32,6 +32,7 @@ The `metadata_json` object keeps two different identifiers separate:
 | `reattachToken` | Adapter-owned session, request, or idempotency handle used to resume the reviewer runtime. It is not launch provenance. |
 | `workerRunAttribution` | Durable resolution state for `worker_run_id`, described below. |
 | `afhReviewerFallback` | Present only when AFH reviewer fallback rewrites the selected reviewer for this pass. The object records `fromReviewerModel`, `toReviewerModel`, `reason`, `lastResort`, `builderClass`, `primaryProvider`, `primaryState`, `primaryHardGrounded`, `primarySoftGrounded`, and the ordered `considered[]` candidate audit so the posted pass can be traced back to the grounding decision that changed reviewer identity. |
+| `failureClass` | Present on failed terminal rows, including remediation pass rows finalized by `src/follow-up-jobs.mjs`. It records the bounded failure class used by health and recovery tooling, such as a worker failure code, stopped remediation code, or remediation recovery sentinel. |
 
 `workerRunAttribution.state` is one of:
 

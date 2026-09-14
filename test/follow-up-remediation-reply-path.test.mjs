@@ -407,6 +407,42 @@ test('preserveUnpushedCommit creates a fetchable bundle for a raw commit SHA', a
   assert.equal(fetchedSha, commitSha);
 });
 
+test('preserveUnpushedCommit refuses cross-user HQ rescue writes before creating artifacts', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-github-auth-owner-'));
+  const repoDir = path.join(rootDir, 'repo');
+  const hqRoot = path.join(rootDir, 'hq');
+  mkdirSync(repoDir, { recursive: true });
+  mkdirSync(hqRoot, { recursive: true });
+  const calls = [];
+
+  await assert.rejects(
+    preserveUnpushedCommit({
+      hqRoot,
+      workspaceDir: repoDir,
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 431,
+      jobId: 'job/raw-sha-bundle',
+      commitSha: '4444444444444444444444444444444444444444',
+      observedAt: '2026-05-04T10:00:00.000Z',
+      getuidImpl: () => 502,
+      existsSyncImpl: (candidate) => candidate === hqRoot || candidate === rootDir || candidate === path.dirname(hqRoot),
+      statSyncImpl: () => ({ uid: 501 }),
+      execFileImpl: async (command, args) => {
+        calls.push({ command, args });
+        return { stdout: '', stderr: '' };
+      },
+    }),
+    (err) => {
+      assert.equal(err.code, 'hq-rescue-owner-mismatch');
+      assert.equal(err.ownerPath, hqRoot);
+      return true;
+    },
+  );
+
+  assert.equal(calls.length, 1, 'commit existence probe can run, but bundle creation must not');
+  assert.equal(existsSync(path.join(hqRoot, 'rescues')), false);
+});
+
 test('retryGithubAuthPushOnce retries transient reminted push failures only within the bounded ladder', async () => {
   const transientCalls = [];
   const transientResult = await retryGithubAuthPushOnce({
@@ -445,7 +481,10 @@ test('retryGithubAuthPushOnce retries transient reminted push failures only with
     execFileImpl: async () => {
       terminalCalls.push(true);
       const err = new Error('Command failed: git push');
-      err.stderr = '! [rejected] HEAD -> auth-rescue (stale info)\nerror: failed to push some refs';
+      err.stderr = '! [rejected] HEAD -> auth-rescue (stale info)\n'
+        + 'fatal: https://x-access-token:ghp_1234567890abcdefghijklmnopqrstu@github.com/laceyenterprises/agent-os.git\n'
+        + 'diagnostic token ghp_abcdefghijklmnopqrstuvwx1234567890\n'
+        + 'error: failed to push some refs from /Users/airlock/agent-os-hq/worktrees/auth-rescue';
       throw err;
     },
   });
@@ -455,6 +494,11 @@ test('retryGithubAuthPushOnce retries transient reminted push failures only with
   assert.equal(terminalResult.transient, false);
   assert.equal(terminalResult.attempts, 1);
   assert.equal(terminalCalls.length, 1);
+  assert.doesNotMatch(terminalResult.error, /ghp_1234567890abcdefghijklmnopqrstu/);
+  assert.doesNotMatch(terminalResult.error, /ghp_abcdefghijklmnopqrstuvwx1234567890/);
+  assert.doesNotMatch(terminalResult.error, /\/Users\/airlock/);
+  assert.match(terminalResult.error, /\[REDACTED_GITHUB_TOKEN\]/);
+  assert.match(terminalResult.error, /\[REDACTED_PATH\]/);
 });
 
 test('recoverable GitHub-auth retry routes unmapped worker identities through the canonical remediator class', async () => {

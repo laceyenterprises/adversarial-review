@@ -1821,7 +1821,8 @@ function normalizeOperationalBlockerCategory(blocker) {
   if (!normalized) return 'unknown';
   if (normalized.includes('github-auth')) return 'github-auth';
   if (normalized === 'auth-failure' || normalized === 'missing-auth') return 'github-auth';
-  return normalized;
+  if (normalized === 'unknown') return 'unknown';
+  return 'other';
 }
 
 function jobOperationalBlockers(job) {

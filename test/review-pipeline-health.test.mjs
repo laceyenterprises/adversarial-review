@@ -219,6 +219,30 @@ test('stopped remediation operational blockers surface in pipeline health findin
   assert.match(renderReviewPipelinePrometheus(snapshot), /review_pipeline_operational_blocker_rounds\{category="github-auth"\} 1/);
 });
 
+test('operational blocker metric categories are bounded when worker text is unique', () => {
+  const rootDir = tempRoot();
+  writeJob(rootDir, 'stopped', 'job-unique-blocker', {
+    jobId: 'job-unique-blocker',
+    repo: REPO,
+    prNumber: 6757,
+    stoppedAt: '2026-05-25T17:30:00.000Z',
+    parsedReply: {
+      operationalBlockers: [{
+        finding: 'push failed for commit abc123 at /Users/airlock/agent-os-hq/worktrees/job-unique-blocker',
+        reasoning: 'operator intervention required for this one-off local failure',
+      }],
+    },
+  });
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  const rendered = renderReviewPipelinePrometheus(snapshot);
+
+  assert.equal(snapshot.operationalBlockers.total, 1);
+  assert.equal(snapshot.operationalBlockers.byCategory[0].category, 'other');
+  assert.match(rendered, /review_pipeline_operational_blocker_rounds\{category="other"\} 1/);
+  assert.doesNotMatch(rendered, /abc123|airlock|job-unique-blocker/);
+});
+
 test('operational blocker human-intervention finding ignores explicit no-action text', () => {
   const rootDir = tempRoot();
   writeJob(rootDir, 'stopped', 'job-auth-retrying', {

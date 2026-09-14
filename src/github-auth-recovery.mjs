@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -20,9 +20,47 @@ function githubAuthRecoveryErrorDetail(err) {
     .join('\n');
 }
 
+function redactGithubAuthRecoveryDetail(value) {
+  return String(value || '')
+    .replace(/\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g, '[REDACTED_GITHUB_TOKEN]')
+    .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, '[REDACTED_GITHUB_TOKEN]')
+    .replace(/(https?:\/\/)([^/\s:@]+:)?[^/\s:@]+@/gi, '$1[REDACTED_CREDENTIAL]@')
+    .replace(/(?:\/Users\/|\/private\/var\/|\/var\/folders\/|\/tmp\/|\/Volumes\/)[^\s'")]+/g, '[REDACTED_PATH]');
+}
+
 function isTransientGitPushError(err) {
   const detail = githubAuthRecoveryErrorDetail(err);
   return /(?:unable to access|could not resolve host|failed to connect|connection (?:reset|timed out|closed)|connection refused|network is unreachable|operation timed out|timed out|timeout|TLS|SSL|HTTP 5\d\d|The requested URL returned error: 5\d\d|remote end hung up unexpectedly|early EOF|RPC failed|temporary failure|temporarily unavailable|service unavailable|bad gateway|gateway timeout)/i.test(detail);
+}
+
+function nearestExistingPath(pathValue, { existsSyncImpl = existsSync } = {}) {
+  let candidate = pathValue;
+  while (candidate && candidate !== dirname(candidate)) {
+    if (existsSyncImpl(candidate)) return candidate;
+    candidate = dirname(candidate);
+  }
+  return candidate && existsSyncImpl(candidate) ? candidate : null;
+}
+
+function assertHqRescueWriteOwner({
+  targetDir,
+  statSyncImpl = statSync,
+  existsSyncImpl = existsSync,
+  getuidImpl = () => (typeof process.getuid === 'function' ? process.getuid() : null),
+}) {
+  const uid = getuidImpl();
+  if (uid == null) return;
+  const ownerPath = nearestExistingPath(targetDir, { existsSyncImpl });
+  if (!ownerPath) return;
+  const stat = statSyncImpl(ownerPath);
+  if (stat.uid !== uid) {
+    const err = new Error(`refusing to write GitHub-auth rescue artifact under ${ownerPath}: owner uid ${stat.uid} does not match process uid ${uid}`);
+    err.code = 'hq-rescue-owner-mismatch';
+    err.ownerPath = ownerPath;
+    err.ownerUid = stat.uid;
+    err.processUid = uid;
+    throw err;
+  }
 }
 
 function normalizeOperationalBlockerCategory(blocker) {
@@ -106,6 +144,9 @@ async function preserveUnpushedCommit({
   commitSha,
   observedAt,
   execFileImpl = execFileAsync,
+  statSyncImpl = statSync,
+  existsSyncImpl = existsSync,
+  getuidImpl = () => (typeof process.getuid === 'function' ? process.getuid() : null),
 }) {
   const sha = String(commitSha || '').trim();
   if (!sha) return { preserved: false, reason: 'missing-commit-sha' };
@@ -114,6 +155,7 @@ async function preserveUnpushedCommit({
   const safeJob = String(jobId || `pr-${prNumber}`).replace(/[^A-Za-z0-9_.-]+/g, '_');
   const stamp = String(observedAt || new Date().toISOString()).replace(/[^0-9A-Za-z]+/g, '-');
   const rescueDir = join(hqRoot, 'rescues', 'adversarial-review', 'github-auth', safeRepo, `pr-${prNumber}`);
+  assertHqRescueWriteOwner({ targetDir: rescueDir, statSyncImpl, existsSyncImpl, getuidImpl });
   mkdirSync(rescueDir, { recursive: true });
   const bundlePath = join(rescueDir, `${stamp}-${safeJob}-${sha.slice(0, 12)}.bundle`);
   const rescueRef = `refs/adversarial-review/rescues/${safeJob}/${sha}`;
@@ -197,7 +239,7 @@ git -C "$WORKSPACE_DIR" push origin "$COMMIT_SHA:refs/heads/$TARGET_BRANCH" --fo
       if (!lastTransient || attempt === attempts.length - 1) break;
     }
   }
-  const detail = githubAuthRecoveryErrorDetail(lastError).slice(0, 1200);
+  const detail = redactGithubAuthRecoveryDetail(githubAuthRecoveryErrorDetail(lastError)).slice(0, 1200);
   return {
     retried: true,
     pushed: false,
@@ -242,7 +284,7 @@ async function recoverGithubAuthOperationalBlocker({
       preserved: false,
       reason: 'preserve-failed',
       commitSha,
-      error: String(err?.message || err).slice(0, 600),
+      error: redactGithubAuthRecoveryDetail(String(err?.message || err)).slice(0, 600),
     };
   }
 
@@ -301,6 +343,7 @@ export {
   extractCommitShaFromOperationalBlocker,
   findGithubAuthOperationalBlocker,
   preserveUnpushedCommit,
+  redactGithubAuthRecoveryDetail,
   recoverGithubAuthOperationalBlocker,
   retryGithubAuthPushOnce,
 };

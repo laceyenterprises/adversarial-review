@@ -22,11 +22,11 @@
  * This tool surfaces the same triage information operators had to chase
  * manually, plus a "what would need to be true" hint set for each stuck
  * row. By default it is read-only. With `--apply`, it re-arms the stuck
- * row through a watchdog-only CAS plus a watcher wake, so the next watcher
- * tick can claim it.
- * The automated path uses its own `stuck-rereview-watchdog:` reason
- * prefix, preserves the original rereview timestamp, refreshes only the
- * reason marker, writes a watcher wake, refuses rows that carry
+ * row through a watchdog-only eligibility check plus a watcher wake, so the
+ * next watcher tick can claim it.
+ * The automated path uses a `stuck-rereview-watchdog` watcher-wake reason
+ * while preserving the original rereview timestamp and reason marker,
+ * writes a watcher wake, refuses rows that carry
  * terminal-failure evidence, and caps repeated re-arms per PR/head.
  *
  * Usage:
@@ -54,8 +54,6 @@ const DEFAULT_STUCK_THRESHOLD_MINUTES = 5;
 const DEFAULT_APPLY_LIMIT = 25;
 const DEFAULT_APPLY_MAX_ATTEMPTS = 3;
 const DEFAULT_STATE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
-const APPLY_REASON = 'stuck-rereview-watchdog: stuck rereview detected by diagnose-stuck-rereview --apply';
-
 function parseTimestamp(value) {
   if (value === null || value === undefined || value === '') return null;
   const ms = Date.parse(String(value));
@@ -218,12 +216,6 @@ function classifyRow(row, { now, thresholdMs, jobInfo, reviewPassInfo }) {
   if (row.review_status !== 'pending') {
     return { stuck: false, reason: `review_status=${row.review_status} (not pending)` };
   }
-  if (row.failed_at) {
-    return {
-      stuck: false,
-      reason: 'pending row carries failed_at evidence; terminal-failure retry/finalization path owns it',
-    };
-  }
   const rereviewAtMs = parseTimestamp(row.rereview_requested_at);
   if (rereviewAtMs == null) {
     return { stuck: false, reason: 'no rereview_requested_at; row is fresh-pending awaiting first-pass claim' };
@@ -361,26 +353,32 @@ function rearmBackoffMs(thresholdMs, nextAttempt) {
 }
 
 function isBenignApplyRace(reason) {
-  return ['review-in-flight', 'pr-not-open', 'terminal-failure-evidence-present', 'rereview-cas-no-match'].includes(reason);
+  return [
+    'review-in-flight',
+    'pr-not-open',
+    'terminal-failure-evidence-present',
+    'rereview-cas-no-match',
+    'sqlite-contention',
+  ].includes(reason);
 }
 
-function refreshPendingRereviewRow({ db, row, reason }) {
-  const result = db.prepare(
-    `UPDATE reviewed_prs
-        SET rereview_reason = ?
-      WHERE repo = ?
-        AND pr_number = ?
-        AND pr_state = 'open'
-        AND review_status = 'pending'
-        AND rereview_requested_at = ?
-        AND failed_at IS NULL`
-  ).run(reason, row.repo, row.pr_number, row.rereview_requested_at);
-  if (result.changes === 1) {
-    return { triggered: true, status: 'pending', reason: 'watchdog-rereview-wake-requested' };
-  }
+function isSqliteContention(err) {
+  const code = String(err?.code || err?.name || '').toUpperCase();
+  const message = String(err?.message || '').toUpperCase();
+  return code === 'SQLITE_BUSY'
+    || code === 'SQLITE_LOCKED'
+    || message.includes('SQLITE_BUSY')
+    || message.includes('SQLITE_LOCKED')
+    || message.includes('DATABASE IS LOCKED');
+}
 
+function sameNullableValue(left, right) {
+  return (left ?? null) === (right ?? null);
+}
+
+function refreshPendingRereviewRow({ db, row }) {
   const current = db.prepare(
-    `SELECT review_status, pr_state, failed_at
+    `SELECT review_status, pr_state, failed_at, rereview_requested_at, rereview_reason
        FROM reviewed_prs
       WHERE repo = ? AND pr_number = ?`
   ).get(row.repo, row.pr_number);
@@ -393,6 +391,15 @@ function refreshPendingRereviewRow({ db, row, reason }) {
   }
   if (current.failed_at) {
     return { triggered: false, status: 'blocked', reason: 'terminal-failure-evidence-present' };
+  }
+  const observedReason = Object.hasOwn(row, 'rereview_reason')
+    ? row.rereview_reason
+    : current.rereview_reason;
+  if (
+    sameNullableValue(current.rereview_requested_at, row.rereview_requested_at)
+    && sameNullableValue(current.rereview_reason, observedReason)
+  ) {
+    return { triggered: true, status: 'pending', reason: 'watchdog-rereview-wake-requested' };
   }
   return { triggered: false, status: 'blocked', reason: 'rereview-cas-no-match' };
 }
@@ -420,6 +427,20 @@ function applyStuckRereviewRows({
       : {};
     const attempts = Number.isInteger(prior.attempts) && prior.attempts > 0 ? prior.attempts : 0;
     const nextEligibleAtMs = parseTimestamp(prior.nextEligibleAt);
+
+    if (row.failed_at) {
+      results.push({
+        repo: row.repo,
+        prNumber: row.pr_number,
+        applied: false,
+        skipped: true,
+        status: 'skipped',
+        reason: 'terminal-failure-evidence-present',
+        attempts,
+        nextEligibleAt: prior.nextEligibleAt || null,
+      });
+      continue;
+    }
 
     if (attempts >= maxAttempts) {
       results.push({
@@ -462,9 +483,21 @@ function applyStuckRereviewRows({
       result = refreshPendingRereviewRow({
         db,
         row,
-        reason: APPLY_REASON,
       });
     } catch (err) {
+      if (isSqliteContention(err)) {
+        results.push({
+          repo: row.repo,
+          prNumber: row.pr_number,
+          applied: false,
+          skipped: true,
+          status: 'skipped',
+          reason: 'sqlite-contention',
+          attempts,
+          error: err?.message || String(err),
+        });
+        continue;
+      }
       results.push({
         repo: row.repo,
         prNumber: row.pr_number,
@@ -474,7 +507,7 @@ function applyStuckRereviewRows({
       continue;
     }
 
-    const applied = result.triggered === true || result.status === 'already-pending';
+    const applied = result.triggered === true;
     const skipped = !applied && isBenignApplyRace(result.reason);
     let wake = null;
     if (applied) {
@@ -499,7 +532,7 @@ function applyStuckRereviewRows({
 
     const wakeRequested = wake?.requested === true;
     const finalApplied = applied && wakeRequested;
-    if (finalApplied) {
+    if (applied) {
       const nextAttempts = attempts + 1;
       state.entries[key] = {
         repo: row.repo,
@@ -508,7 +541,8 @@ function applyStuckRereviewRows({
         originalRequestedAt: row.rereview_requested_at || null,
         attempts: nextAttempts,
         lastAppliedAt: requestedAt,
-        lastWakeRequestedAt: wake.payload?.requested_at || requestedAt,
+        lastWakeRequestedAt: wakeRequested ? (wake.payload?.requested_at || requestedAt) : null,
+        lastWakeFailureAt: wakeRequested ? null : requestedAt,
         nextEligibleAt: new Date(requestedAtMs + rearmBackoffMs(thresholdMs, nextAttempts)).toISOString(),
       };
       stateChanged = true;
@@ -521,7 +555,7 @@ function applyStuckRereviewRows({
       skipped,
       status: result.status || null,
       reason: result.reason || null,
-      attempts: finalApplied ? attempts + 1 : attempts,
+      attempts: applied ? attempts + 1 : attempts,
       wakeRequested,
       ...(result.error ? { error: result.error } : {}),
     });
@@ -730,7 +764,6 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 }
 
 export {
-  APPLY_REASON,
   applyStuckRereviewRows,
   main,
 };

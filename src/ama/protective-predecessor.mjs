@@ -8,12 +8,8 @@ function normalizePrNumber(value) {
   return Number.isSafeInteger(prNumber) ? prNumber : null;
 }
 
-function stripFencedCodeBlocks(text) {
-  return String(text || '').replace(/^```[\s\S]*?^```\s*$/gmu, '');
-}
-
 export function parseProtectivePredecessorDeclaration(body) {
-  const text = stripFencedCodeBlocks(String(body || ''));
+  const text = String(body || '');
   if (!text.trim()) return null;
   const pattern = new RegExp(
     `^\\s*${PROTECTIVE_PREDECESSOR_TRAILER}\\s*:\\s*#?([1-9][0-9]*)\\s*$`,
@@ -34,16 +30,33 @@ export function parseProtectivePredecessorDeclaration(body) {
   };
 }
 
+export function findMalformedProtectivePredecessorLines(body) {
+  return String(body || '')
+    .split(/\r?\n/u)
+    .map((line, index) => ({ line, lineNumber: index + 1 }))
+    .filter(({ line }) => (
+      new RegExp(`^\\s*${PROTECTIVE_PREDECESSOR_TRAILER}\\s*:`, 'iu').test(line)
+      && !new RegExp(
+        `^\\s*${PROTECTIVE_PREDECESSOR_TRAILER}\\s*:\\s*#?([1-9][0-9]*)\\s*$`,
+        'iu',
+      ).test(line)
+    ))
+    .map(({ line, lineNumber }) => ({
+      lineNumber,
+      line: String(line || '').slice(0, 300),
+    }));
+}
+
 export function normalizeProtectivePredecessorDeclaration(value) {
   if (!value) return null;
   if (typeof value === 'number' || typeof value === 'string') {
     const prNumber = normalizePrNumber(value);
     return prNumber
       ? {
-        trailer: PROTECTIVE_PREDECESSOR_TRAILER,
-        protectorPrNumber: prNumber,
-        protectorPrNumbers: [prNumber],
-      }
+          trailer: PROTECTIVE_PREDECESSOR_TRAILER,
+          protectorPrNumber: prNumber,
+          protectorPrNumbers: [prNumber],
+        }
       : null;
   }
   if (typeof value !== 'object') return null;
@@ -81,23 +94,41 @@ export function protectivePredecessorMergeWindowFinding({
   protectorPrNumber,
   outcome = 'merged-while-open',
   reason = null,
+  detail = null,
 }) {
   const normalizedOutcome = String(outcome || '').trim() || 'merged-while-open';
   const dependent = Number(dependentPrNumber);
   const protector = Number(protectorPrNumber);
-  const defaultReason = normalizedOutcome === 'held-before-merge'
-    ? `PR #${dependent} declared PR #${protector} as its protective predecessor; merge was held while the protector remained open.`
-    : `PR #${dependent} declared PR #${protector} as its protective predecessor, but the dependent merged while the protector was still open.`;
+  const defaultReason = (() => {
+    if (normalizedOutcome === 'held-before-merge') {
+      return `PR #${dependent} declared PR #${protector} as its protective predecessor; merge was held while the protector remained open.`;
+    }
+    if (normalizedOutcome === 'state-unreadable') {
+      return `PR #${dependent} declared PR #${protector} as its protective predecessor, but the protector state could not be read.`;
+    }
+    if (normalizedOutcome === 'not-found') {
+      return `PR #${dependent} declared PR #${protector} as its protective predecessor, but that protector PR could not be found.`;
+    }
+    if (normalizedOutcome === 'malformed-trailer') {
+      return `PR #${dependent} contains a malformed protective predecessor trailer; merge was held until the body is corrected.`;
+    }
+    return `PR #${dependent} declared PR #${protector} as its protective predecessor, but the dependent merged while the protector was still open.`;
+  })();
   return {
-    kind: normalizedOutcome === 'held-before-merge'
-      ? 'protective-predecessor-open-held-before-merge'
-      : 'protective-predecessor-open-after-dependent-merge',
+    kind: (() => {
+      if (normalizedOutcome === 'held-before-merge') return 'protective-predecessor-open-held-before-merge';
+      if (normalizedOutcome === 'state-unreadable') return 'protective-predecessor-state-unreadable';
+      if (normalizedOutcome === 'not-found') return 'protective-predecessor-not-found';
+      if (normalizedOutcome === 'malformed-trailer') return 'protective-predecessor-malformed-trailer';
+      return 'protective-predecessor-open-after-dependent-merge';
+    })(),
     severity: 'high',
     repo: String(repo || ''),
     dependentPrNumber: dependent,
     protectorPrNumber: protector,
     outcome: normalizedOutcome,
     reason: reason || defaultReason,
+    ...(detail ? { detail } : {}),
   };
 }
 

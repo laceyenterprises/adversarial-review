@@ -194,6 +194,31 @@ function isTransientAmaLiveReviewLookupError(err) {
   );
 }
 
+function isGhPrNotFoundError(err) {
+  const detail = [
+    err?.code,
+    err?.status,
+    err?.statusCode,
+    err?.stderr,
+    err?.stdout,
+    err?.message,
+  ].filter(Boolean).join('\n').toLowerCase();
+  return /\b404\b/.test(detail)
+    || detail.includes('not found')
+    || detail.includes('could not resolve to a pullrequest')
+    || detail.includes('no pull requests found');
+}
+
+function protectivePredecessorStateError(reason, err) {
+  const error = new Error(err?.message || String(err || reason));
+  error.protectivePredecessorReason = reason;
+  error.cause = err;
+  if (err?.stderr) error.stderr = err.stderr;
+  if (err?.stdout) error.stdout = err.stdout;
+  if (err?.code) error.code = err.code;
+  return error;
+}
+
 export async function fetchLatestHeadReviewBodiesWithRetry({
   repoPath,
   prNumber,
@@ -824,15 +849,44 @@ export async function runDaemonCleanMergeAttempt({
     mergeEnv: env,
     prBody: String(liveRollup?.body ?? candidate?.body ?? candidate?.prBody ?? ''),
     fetchProtectivePredecessorStateImpl: async ({ prNumber: protectorPrNumber }) => {
-      const protector = await fetchRollupImpl(repoPath, protectorPrNumber, { execFileImpl });
-      if (!String(protector?.state || '').trim()) {
-        throw new Error(`protector #${protectorPrNumber} state missing`);
+      try {
+        const { stdout } = await execGhWithRetryImpl({
+          execFileImpl,
+          args: [
+            'pr',
+            'view',
+            String(protectorPrNumber),
+            '--repo',
+            repoPath,
+            '--json',
+            'state',
+          ],
+          env,
+          timeoutMs: 30_000,
+          log: logger,
+        });
+        const protector = JSON.parse(String(stdout || '{}'));
+        const state = String(protector?.state || '').trim().toUpperCase();
+        if (!state) {
+          throw protectivePredecessorStateError(
+            'protective-predecessor-state-unreadable',
+            new Error(`protector #${protectorPrNumber} state missing`),
+          );
+        }
+        return {
+          state,
+          prState: state,
+          isOpen: state === 'OPEN',
+        };
+      } catch (err) {
+        if (err?.protectivePredecessorReason) throw err;
+        throw protectivePredecessorStateError(
+          isGhPrNotFoundError(err)
+            ? 'protective-predecessor-not-found'
+            : 'protective-predecessor-state-unreadable',
+          err,
+        );
       }
-      return {
-        state: protector?.state,
-        prState: protector?.state,
-        isOpen: String(protector?.state || '').trim().toUpperCase() === 'OPEN',
-      };
     },
     emitFindingImpl: emitProtectivePredecessorFindingImpl,
     dismissStaleRequestChangesImpl: dismissStaleRequestChangesOnResolved !== false

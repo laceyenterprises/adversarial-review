@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
@@ -11,7 +12,9 @@ import {
 } from '../src/ama/dispatch-closer.mjs';
 import { acquireAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import {
+  findMalformedProtectivePredecessorLines,
   hasMergedDependentProtectingPr,
+  normalizeProtectivePredecessorDeclaration,
   parseProtectivePredecessorDeclaration,
 } from '../src/ama/protective-predecessor.mjs';
 
@@ -608,18 +611,52 @@ test('MERGEORDER-01: protective boost changes terminal remediation priority', ()
   assert.equal(boosted.priority, 'critical');
 });
 
-test('MERGEORDER-01: parser honors multiple trailer lines outside fenced code blocks', () => {
-  const declaration = parseProtectivePredecessorDeclaration([
+test('MERGEORDER-01: parser honors exact full-line trailers consistently across body blocks', () => {
+  const body = [
     'Body text',
     '```',
     'Protects-Against-Unsafe-Merge-Until-PR: #1',
     '```',
     'Protects-Against-Unsafe-Merge-Until-PR: #6766',
     'Protects-Against-Unsafe-Merge-Until-PR: #6767',
-  ].join('\n'));
+  ].join('\n');
+  const declaration = parseProtectivePredecessorDeclaration(body);
 
-  assert.deepEqual(declaration.protectorPrNumbers, [6766, 6767]);
-  assert.equal(declaration.protectorPrNumber, 6766);
+  assert.deepEqual(declaration.protectorPrNumbers, [1, 6766, 6767]);
+  assert.equal(declaration.protectorPrNumber, 1);
+
+  const shell = spawnSync('/bin/sh', ['-c', `
+PROTECTIVE_PREDECESSORS=$(awk '/^[[:space:]]*Protects-Against-Unsafe-Merge-Until-PR[[:space:]]*:/ {print $0}')
+while IFS= read -r predecessor_line; do
+  PROTECTOR_PR=$(printf "%s" "$predecessor_line" | sed -nE 's/^[[:space:]]*Protects-Against-Unsafe-Merge-Until-PR[[:space:]]*:[[:space:]]*#?([1-9][0-9]*)[[:space:]]*$/\\1/p')
+  [ -n "$PROTECTOR_PR" ] || { echo MALFORMED; exit 64; }
+  echo "$PROTECTOR_PR"
+done <<EOF_PROTECTIVE_PREDECESSORS
+$PROTECTIVE_PREDECESSORS
+EOF_PROTECTIVE_PREDECESSORS
+`], { input: body, encoding: 'utf8' });
+  assert.equal(shell.status, 0, shell.stderr);
+  assert.deepEqual(
+    shell.stdout.trim().split('\n').map((value) => Number(value)),
+    declaration.protectorPrNumbers,
+  );
+});
+
+test('MERGEORDER-01: malformed trailers are surfaced and scalar declarations normalize to arrays', () => {
+  assert.deepEqual(
+    findMalformedProtectivePredecessorLines(
+      'Protects-Against-Unsafe-Merge-Until-PR: #6767 (rebase ordering)',
+    ),
+    [{
+      lineNumber: 1,
+      line: 'Protects-Against-Unsafe-Merge-Until-PR: #6767 (rebase ordering)',
+    }],
+  );
+
+  assert.deepEqual(
+    normalizeProtectivePredecessorDeclaration(6767).protectorPrNumbers,
+    [6767],
+  );
 });
 
 test('MERGEORDER-01: merged dependent matching requires explicit declaration and valid dependent PR', () => {

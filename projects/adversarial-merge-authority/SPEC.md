@@ -62,23 +62,25 @@ timeout while it already owns the lease.
 
 ## MERGEORDER-01 protective predecessor trailer
 
-Authors may declare an ordering dependency in the PR body with one or more
-trailer lines:
+Authors may declare an ordering dependency in the PR body with one or more bare
+full-line trailers:
 
-```text
 Protects-Against-Unsafe-Merge-Until-PR: #1234
-```
 
 The value is the predecessor/protector PR that must close before the current PR
 may merge. Multiple trailer lines are allowed and are enforced as a union. A
-self-reference is malformed and must not create a permanent hold.
+self-reference is malformed and must not create a permanent hold. Trailer-looking
+lines that cannot be parsed fail closed with
+`protective-predecessor-malformed-trailer` instead of silently allowing a merge.
 
 Every autonomous merge path that can land a PR must honor the declaration before
 calling GitHub merge: the daemon clean merge path, the HAM terminal inline merge
 path in the closer, the follow-up fast-merge `--admin` path, and the generated
 merge-agent prompt. If any declared protector is still `OPEN`, the merge is held
 with reason `protective-predecessor-open`. If the protector state cannot be read,
-the path fails closed as `protective-predecessor-state-unreadable`.
+the path fails closed as `protective-predecessor-state-unreadable`; if the
+protector PR number does not resolve, the reason is
+`protective-predecessor-not-found`.
 
 Operator-visible evidence is required for a hold. The daemon/closer path writes
 the daemon merge park reason and logs a protective predecessor warning/finding;

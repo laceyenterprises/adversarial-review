@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { parseProtectivePredecessorDeclaration } from '../src/ama/protective-predecessor.mjs';
 
 const SHELL_TRAILER_AWK =
-  '/^[[:space:]]*```/ { in_fence = !in_fence; next } !in_fence && /^[[:space:]]*Protects-Against-Unsafe-Merge-Until-PR[[:space:]]*:/ {print $0}';
+  '/^[[:space:]]*Protects-Against-Unsafe-Merge-Until-PR[[:space:]]*:/ {print $0}';
 const SHELL_TRAILER_SED =
   's/^[[:space:]]*Protects-Against-Unsafe-Merge-Until-PR[[:space:]]*:[[:space:]]*#?([1-9][0-9]*)[[:space:]]*$/\\1/p';
 
@@ -32,7 +32,7 @@ function shellParseProtectivePredecessors(body) {
   return protectors;
 }
 
-test('MERGEORDER-01: JS and generated shell ignore fenced protective predecessor trailers', () => {
+test('MERGEORDER-01: JS and generated shell honor exact full-line trailers across body blocks', () => {
   const body = [
     'Body text',
     '```text',
@@ -45,17 +45,17 @@ test('MERGEORDER-01: JS and generated shell ignore fenced protective predecessor
   const jsDeclaration = parseProtectivePredecessorDeclaration(body);
   const shellProtectors = shellParseProtectivePredecessors(body);
 
-  assert.deepEqual(jsDeclaration.protectorPrNumbers, [6766, 6767]);
+  assert.deepEqual(jsDeclaration.protectorPrNumbers, [1, 6766, 6767]);
   assert.deepEqual(shellProtectors, jsDeclaration.protectorPrNumbers);
 });
 
-test('MERGEORDER-01: JS and generated shell both ignore only-fenced declarations', () => {
+test('MERGEORDER-01: JS and generated shell both honor only-fenced exact declarations', () => {
   const body = [
     '```',
     'Protects-Against-Unsafe-Merge-Until-PR: #1234',
     '```',
   ].join('\n');
 
-  assert.equal(parseProtectivePredecessorDeclaration(body), null);
-  assert.deepEqual(shellParseProtectivePredecessors(body), []);
+  assert.deepEqual(parseProtectivePredecessorDeclaration(body).protectorPrNumbers, [1234]);
+  assert.deepEqual(shellParseProtectivePredecessors(body), [1234]);
 });

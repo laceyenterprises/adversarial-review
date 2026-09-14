@@ -54,6 +54,7 @@ import {
 import { evaluateMergeEligibility } from './merge-eligibility.mjs';
 import { evaluateMergeCapabilityEnforcement } from './merge-capability-enforcement.mjs';
 import {
+  findMalformedProtectivePredecessorLines,
   isProtectorOpen,
   protectivePredecessorMergeWindowFinding,
   resolveProtectivePredecessorDeclaration,
@@ -389,6 +390,33 @@ export async function attemptDaemonCleanMerge({
     prBody,
     explicit: protectivePredecessor,
   });
+  const malformedProtectiveLines = findMalformedProtectivePredecessorLines(prBody);
+  if (!protectivePredecessor && malformedProtectiveLines.length > 0) {
+    const finding = protectivePredecessorMergeWindowFinding({
+      repo,
+      dependentPrNumber: prNumber,
+      protectorPrNumber: 0,
+      outcome: 'malformed-trailer',
+      detail: { malformedLines: malformedProtectiveLines },
+    });
+    logger?.warn?.(
+      `[daemon-merge] malformed protective predecessor trailer for ${repo}#${prNumber}; holding merge`,
+    );
+    if (typeof emitFindingImpl === 'function') {
+      try {
+        await emitFindingImpl(finding);
+      } catch (err) {
+        logger?.warn?.(
+          `[daemon-merge] protective predecessor finding emit failed for ${repo}#${prNumber}: ` +
+            `${err?.message || err}`,
+        );
+      }
+    }
+    return notTaken('protective-predecessor-malformed-trailer', {
+      protectivePredecessor: { malformedLines: malformedProtectiveLines },
+      finding,
+    });
+  }
   if (protectiveDeclaration) {
     const protectorPrNumbers = Array.isArray(protectiveDeclaration.protectorPrNumbers)
       ? protectiveDeclaration.protectorPrNumbers
@@ -410,11 +438,12 @@ export async function attemptDaemonCleanMerge({
             })
           : null;
       } catch (err) {
+        const reason = err?.protectivePredecessorReason || 'protective-predecessor-state-unreadable';
         logger?.warn?.(
           `[daemon-merge] protective predecessor read failed for ${repo}#${prNumber} ` +
-            `protector #${protectorPrNumber}; holding merge: ${err?.message || err}`,
+            `protector #${protectorPrNumber}; holding merge (${reason}): ${err?.message || err}`,
         );
-        return notTaken('protective-predecessor-state-unreadable', {
+        return notTaken(reason, {
           protectivePredecessor: { ...protectiveDeclaration, protectorPrNumber },
         });
       }

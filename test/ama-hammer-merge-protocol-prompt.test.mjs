@@ -76,7 +76,7 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.doesNotMatch(HAMMER_PROMPT, /tr '\\n' ' '/);
   assert.doesNotMatch(HAMMER_PROMPT, /--files \$HAM_PPH_FILES/);
   assert.match(HAMMER_PROMPT, /HAM_PROTECTIVE_PREDECESSORS=/);
-  assert.match(HAMMER_PROMPT, /!in_fence && \/\^\[\[:space:\]\]\*Protects-Against-Unsafe-Merge-Until-PR/);
+  assert.match(HAMMER_PROMPT, /\/\^\[\[:space:\]\]\*Protects-Against-Unsafe-Merge-Until-PR/);
   assert.match(HAMMER_PROMPT, /protective-predecessor-open/);
   assert.match(HAMMER_PROMPT, /--match-head-commit "\$POST_REMEDIATION_SHA"/);
   assert.match(HAMMER_PROMPT, /rebasedOntoBase: \$rebasedOntoBase/);

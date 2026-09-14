@@ -563,14 +563,16 @@ async function runFollowUpDaemonIteration({
     if (stderrChunks.length > 0) {
       logTick('stuck-rereview-apply', `stderr=${JSON.stringify(stderrChunks.join('').trim())}`);
     }
-    if (code !== 0) {
-      throw new Error(`diagnose-stuck-rereview --apply exited ${code}`);
-    }
     logTick(
       'stuck-rereview-apply',
       `candidates=${payload?.totalCandidates ?? 'unknown'} stuck=${payload?.stuckCount ?? 'unknown'} ` +
-      `applied=${payload?.appliedCount ?? 'unknown'} failed=${payload?.failedApplyCount ?? 'unknown'}`
+      `applied=${payload?.appliedCount ?? 'unknown'} skipped=${payload?.skippedApplyCount ?? 'unknown'} ` +
+      `failed=${payload?.failedApplyCount ?? 'unknown'}` +
+      (payload?.applyResults ? ` applyResults=${JSON.stringify(payload.applyResults)}` : '')
     );
+    if (code !== 0) {
+      throw new Error(`diagnose-stuck-rereview --apply exited ${code}`);
+    }
   });
   if (shouldStop()) return;
   if (shouldConsumeAfterReviewerTokenRefresh(reviewerTokenRefreshSummary)) {

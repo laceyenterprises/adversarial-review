@@ -8,6 +8,8 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
+import { isExplicitOperatorReviewRetrigger } from '../src/first-pass-review-suppression.mjs';
+import { APPLY_REASON, applyStuckRereviewRows } from '../src/diagnose-stuck-rereview.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
@@ -42,15 +44,19 @@ function seedReviewedPRsRow(root, fields) {
       rereview_requested_at: null,
       rereview_reason: null,
       reviewer_head_sha: null,
+      revision_ref: null,
+      failed_at: null,
       ...fields,
     };
     db.prepare(
       `INSERT INTO reviewed_prs
         (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts,
-         last_attempted_at, posted_at, rereview_requested_at, rereview_reason, reviewer_head_sha)
+         last_attempted_at, posted_at, rereview_requested_at, rereview_reason, reviewer_head_sha,
+         revision_ref, failed_at)
        VALUES
         (@repo, @pr_number, @reviewed_at, @reviewer, @pr_state, @review_status, @review_attempts,
-         @last_attempted_at, @posted_at, @rereview_requested_at, @rereview_reason, @reviewer_head_sha)`
+         @last_attempted_at, @posted_at, @rereview_requested_at, @rereview_reason, @reviewer_head_sha,
+         @revision_ref, @failed_at)`
     ).run(merged);
   } finally {
     db.close();
@@ -208,7 +214,7 @@ test('stuck when rereview_requested_at is older than threshold and no spawn happ
   assert.ok(payload.rows[0].classification.suggestedAction.includes('npm run retrigger-review'));
 });
 
-test('--apply re-arms stuck pending rereview rows through the retrigger CAS', async (t) => {
+test('--apply re-arms stuck pending rereview rows without operator bypass or destructive reset', async (t) => {
   const root = makeRoot(t);
   const old = '2026-05-29T22:00:00.000Z';
   seedReviewedPRsRow(root, {
@@ -216,6 +222,8 @@ test('--apply re-arms stuck pending rereview rows through the retrigger CAS', as
     rereview_reason: 'worker requested rereview',
     last_attempted_at: '2026-05-29T21:00:00.000Z',
     review_attempts: 3,
+    reviewer_head_sha: 'head-under-review',
+    revision_ref: 'head-under-review',
   });
   seedCompletedJob(root, { completedAt: old, reReviewRequested: true });
 
@@ -229,18 +237,186 @@ test('--apply re-arms stuck pending rereview rows through the retrigger CAS', as
   const db = openReviewStateDb(root);
   try {
     const row = db.prepare(
-      `SELECT review_status, review_attempts, last_attempted_at, rereview_requested_at, rereview_reason
+      `SELECT review_status, review_attempts, last_attempted_at, rereview_requested_at,
+              rereview_reason, reviewer_head_sha
          FROM reviewed_prs
         WHERE repo = ? AND pr_number = ?`
     ).get('laceyenterprises/agent-os', 1000);
     assert.equal(row.review_status, 'pending');
-    assert.equal(row.review_attempts, 0);
-    assert.equal(row.last_attempted_at, null);
+    assert.equal(row.review_attempts, 3);
+    assert.equal(row.last_attempted_at, '2026-05-29T21:00:00.000Z');
+    assert.equal(row.reviewer_head_sha, 'head-under-review');
     assert.notEqual(row.rereview_requested_at, old);
-    assert.equal(
-      row.rereview_reason,
-      'retrigger-review: stuck rereview detected by diagnose-stuck-rereview --apply'
-    );
+    assert.equal(row.rereview_reason, APPLY_REASON);
+    assert.equal(isExplicitOperatorReviewRetrigger(row), false);
+  } finally {
+    db.close();
+  }
+});
+
+test('--apply leaves failed pending rows to terminal-failure finalization', async (t) => {
+  const root = makeRoot(t);
+  const old = '2026-05-29T22:00:00.000Z';
+  seedReviewedPRsRow(root, {
+    rereview_requested_at: old,
+    rereview_reason: 'worker requested rereview',
+    last_attempted_at: '2026-05-29T22:01:00.000Z',
+    review_attempts: 3,
+    reviewer_head_sha: 'failed-head',
+    failed_at: '2026-05-29T22:02:00.000Z',
+  });
+  seedCompletedJob(root, { completedAt: old, reReviewRequested: true });
+  seedReviewerPass(root, {
+    status: 'failed',
+    head_sha: 'failed-head',
+    gh_comment_id: null,
+    verdict: null,
+    body_md: null,
+  });
+
+  const result = await runDiagnose(root, '--threshold-minutes', '5', '--apply');
+  assert.equal(result.code, 0, `expected exit 0; got ${result.code}\nstderr:\n${result.stderr}`);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.stuckCount, 0);
+  assert.equal(payload.appliedCount, 0);
+
+  const db = openReviewStateDb(root);
+  try {
+    const row = db.prepare(
+      `SELECT review_attempts, rereview_requested_at, rereview_reason, failed_at, reviewer_head_sha
+         FROM reviewed_prs
+        WHERE repo = ? AND pr_number = ?`
+    ).get('laceyenterprises/agent-os', 1000);
+    assert.equal(row.review_attempts, 3);
+    assert.equal(row.rereview_requested_at, old);
+    assert.equal(row.rereview_reason, 'worker requested rereview');
+    assert.equal(row.failed_at, '2026-05-29T22:02:00.000Z');
+    assert.equal(row.reviewer_head_sha, 'failed-head');
+  } finally {
+    db.close();
+  }
+});
+
+test('--apply backs off repeated watchdog re-arms per PR head', async (t) => {
+  const root = makeRoot(t);
+  const old = '2026-05-29T22:00:00.000Z';
+  seedReviewedPRsRow(root, {
+    rereview_requested_at: old,
+    rereview_reason: 'worker requested rereview',
+    last_attempted_at: '2026-05-29T21:00:00.000Z',
+    reviewer_head_sha: 'same-head',
+    revision_ref: 'same-head',
+  });
+  seedCompletedJob(root, { completedAt: old, reReviewRequested: true });
+
+  const first = await runDiagnose(root, '--threshold-minutes', '5', '--apply');
+  assert.equal(first.code, 0, `expected first apply exit 0; got ${first.code}\nstderr:\n${first.stderr}`);
+
+  const db = openReviewStateDb(root);
+  try {
+    db.prepare(
+      `UPDATE reviewed_prs
+          SET rereview_requested_at = ?, last_attempted_at = ?
+        WHERE repo = ? AND pr_number = ?`
+    ).run(old, '2026-05-29T21:00:00.000Z', 'laceyenterprises/agent-os', 1000);
+  } finally {
+    db.close();
+  }
+
+  const second = await runDiagnose(root, '--threshold-minutes', '5', '--apply');
+  assert.equal(second.code, 0, `expected backoff skip exit 0; got ${second.code}\nstderr:\n${second.stderr}`);
+  const payload = JSON.parse(second.stdout);
+  assert.equal(payload.stuckCount, 1);
+  assert.equal(payload.appliedCount, 0);
+  assert.equal(payload.skippedApplyCount, 1);
+  assert.equal(payload.failedApplyCount, 0);
+  assert.equal(payload.applyResults[0].reason, 'watchdog-rearm-backoff-active');
+});
+
+test('--apply stops re-arming after the per-head watchdog cap', async (t) => {
+  const root = makeRoot(t);
+  const old = '2026-05-29T22:00:00.000Z';
+  seedReviewedPRsRow(root, {
+    rereview_requested_at: old,
+    rereview_reason: 'worker requested rereview',
+    last_attempted_at: '2026-05-29T21:00:00.000Z',
+    reviewer_head_sha: 'capped-head',
+    revision_ref: 'capped-head',
+  });
+  seedCompletedJob(root, { completedAt: old, reReviewRequested: true });
+  writeFileSync(
+    join(root, 'data', 'follow-up-jobs', 'stuck-rereview-watchdog.json'),
+    JSON.stringify({
+      entries: {
+        'laceyenterprises/agent-os#1000@capped-head': {
+          repo: 'laceyenterprises/agent-os',
+          prNumber: 1000,
+          head: 'capped-head',
+          attempts: 3,
+          lastAppliedAt: '2026-05-29T23:00:00.000Z',
+          nextEligibleAt: '2026-05-30T00:00:00.000Z',
+        },
+      },
+    }, null, 2),
+    'utf8'
+  );
+
+  const result = await runDiagnose(root, '--threshold-minutes', '5', '--apply');
+  assert.equal(result.code, 5, `expected cap exhaustion to alert with exit 5; got ${result.code}`);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.stuckCount, 1);
+  assert.equal(payload.appliedCount, 0);
+  assert.equal(payload.failedApplyCount, 1);
+  assert.equal(payload.applyResults[0].reason, 'watchdog-rearm-cap-exhausted');
+
+  const db = openReviewStateDb(root);
+  try {
+    const row = db.prepare(
+      `SELECT rereview_requested_at, rereview_reason
+         FROM reviewed_prs
+        WHERE repo = ? AND pr_number = ?`
+    ).get('laceyenterprises/agent-os', 1000);
+    assert.equal(row.rereview_requested_at, old);
+    assert.equal(row.rereview_reason, 'worker requested rereview');
+  } finally {
+    db.close();
+  }
+});
+
+test('apply treats a watcher claim race as a skip', async (t) => {
+  const root = makeRoot(t);
+  const old = '2026-05-29T22:00:00.000Z';
+  seedReviewedPRsRow(root, {
+    rereview_requested_at: old,
+    rereview_reason: 'worker requested rereview',
+    last_attempted_at: '2026-05-29T21:00:00.000Z',
+    review_status: 'reviewing',
+    reviewer_head_sha: 'claimed-head',
+    revision_ref: 'claimed-head',
+  });
+
+  const db = openReviewStateDb(root);
+  try {
+    const results = applyStuckRereviewRows({
+      db,
+      rootDir: root,
+      stuckRows: [{
+        row: {
+          repo: 'laceyenterprises/agent-os',
+          pr_number: 1000,
+          review_status: 'pending',
+          rereview_requested_at: old,
+          reviewer_head_sha: 'claimed-head',
+          revision_ref: 'claimed-head',
+        },
+      }],
+      requestedAt: '2026-05-29T23:00:00.000Z',
+      thresholdMs: 5 * 60_000,
+    });
+    assert.equal(results.length, 1);
+    assert.equal(results[0].applied, false);
+    assert.equal(results[0].skipped, true);
+    assert.equal(results[0].reason, 'review-in-flight');
   } finally {
     db.close();
   }

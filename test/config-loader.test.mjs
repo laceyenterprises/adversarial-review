@@ -2269,6 +2269,8 @@ test('main_catchup mirrored defaults match the Python daemon constants', () => {
     assert.equal(cfg.get('main_catchup.submodule_update_timeout_seconds'), 120);
     assert.equal(cfg.get('main_catchup.recovery_max_attempts'), 5);
     assert.equal(cfg.get('main_catchup.bounce_throttle_interval_seconds'), 300);
+    assert.equal(cfg.get('main_catchup.self_heal_stuck_warn_seconds'), 1800);
+    assert.equal(cfg.get('main_catchup.self_heal_max_age_seconds'), 3600);
     assert.equal(cfg.get('main_catchup.adversarial_review_drain_timeout_seconds'), 180);
     assert.equal(cfg.get('main_catchup.adversarial_watcher_drain_bounce_slack_seconds'), 120);
   } finally {
@@ -4710,6 +4712,29 @@ test('validateSchema keeps the canonical config.yaml strict about resident', () 
     (err) => {
       assert.ok(err instanceof AgentOSConfigError);
       assert.match(err.message, /resident/);
+      assert.match(err.message, /unknown key/);
+      return true;
+    },
+  );
+});
+
+test('top-level config.yaml accepts mirrored surface_harness timeout', () => {
+  const out = validateSchema(
+    { version: 1, surface_harness: { timeout_seconds: 96 } },
+    { source: '/tmp/config.yaml', tolerateForeignTopLevelSections: true },
+  );
+  assert.equal(out.surface_harness.timeout_seconds, 96);
+});
+
+test('surface_harness strict mirror rejects unknown nested keys', () => {
+  assert.throws(
+    () => validateSchema(
+      { version: 1, surface_harness: { timeout_seconds: 96, surprise: true } },
+      { source: '/tmp/config.yaml', tolerateForeignTopLevelSections: true },
+    ),
+    (err) => {
+      assert.ok(err instanceof AgentOSConfigError);
+      assert.match(err.message, /surface_harness\.surprise/);
       assert.match(err.message, /unknown key/);
       return true;
     },

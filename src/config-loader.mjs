@@ -288,6 +288,16 @@ function schemaV1() {
     __strict: true,
     __keys: {
       version: { __type: TYPE_INT, __required: true, __enum: [1] },
+      // SRS-03 — parse-only mirror of the Python-owned scheduled surface
+      // harness timeout knob so strict checked-in config.yaml loads stay green.
+      surface_harness: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __default_when_present: true,
+        __keys: {
+          timeout_seconds: { __type: TYPE_INT, __default: 150, __min: 1, __max: 180 },
+        },
+      },
       sharedOwners: {
         __type: TYPE_LIST,
         __item: { __type: TYPE_STRING },
@@ -394,6 +404,20 @@ function schemaV1() {
             __type: TYPE_INT,
             __default: 300,
             __min: 0,
+          },
+          self_heal_stuck_warn_seconds: {
+            __type: TYPE_INT,
+            __default: 1800,
+            __min: 60,
+            __max: 86400,
+            __enforceMax: true,
+          },
+          self_heal_max_age_seconds: {
+            __type: TYPE_INT,
+            __default: 3600,
+            __min: 300,
+            __max: 86400,
+            __enforceMax: true,
           },
           adversarial_review_drain_timeout_seconds: {
             __type: TYPE_INT,

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -118,6 +118,21 @@ async function runDiagnose(root, ...extraArgs) {
   }
 }
 
+function prependFakeGh(t, root, handler) {
+  const bin = join(root, 'bin');
+  mkdirSync(bin, { recursive: true });
+  const log = join(root, 'gh.log');
+  const script = join(bin, 'gh');
+  writeFileSync(script, handler(log), 'utf8');
+  chmodSync(script, 0o755);
+  const priorPath = process.env.PATH || '';
+  process.env.PATH = `${bin}:${priorPath}`;
+  t.after(() => {
+    process.env.PATH = priorPath;
+  });
+  return log;
+}
+
 test('not stuck when no rereview_requested_at is set', async (t) => {
   const root = makeRoot(t);
   seedReviewedPRsRow(root, { rereview_requested_at: null });
@@ -206,6 +221,50 @@ test('stuck when rereview_requested_at is older than threshold and no spawn happ
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.stuckCount, 1);
   assert.ok(payload.rows[0].classification.suggestedAction.includes('npm run retrigger-review'));
+});
+
+test('--apply adds retrigger-review for stuck rows and exits cleanly', async (t) => {
+  const root = makeRoot(t);
+  const old = '2026-05-29T22:00:00.000Z';
+  seedReviewedPRsRow(root, {
+    rereview_requested_at: old,
+    last_attempted_at: '2026-05-29T21:00:00.000Z',
+  });
+  const ghLog = prependFakeGh(t, root, (log) => `#!/bin/sh
+printf '%s\\n' "$*" >> ${JSON.stringify(log)}
+exit 0
+`);
+
+  const result = await runDiagnose(root, '--threshold-minutes', '5', '--apply');
+
+  assert.equal(result.code, 0, `expected apply success exit 0; got ${result.code}\nstderr:\n${result.stderr}`);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.applied, true);
+  assert.equal(payload.stuckCount, 1);
+  assert.equal(payload.rows[0].applyResult.applied, true);
+  assert.match(
+    readFileSync(ghLog, 'utf8'),
+    /pr edit 1000 --repo laceyenterprises\/agent-os --add-label retrigger-review/,
+  );
+});
+
+test('--apply stays actionable when retrigger-review label application fails', async (t) => {
+  const root = makeRoot(t);
+  seedReviewedPRsRow(root, {
+    rereview_requested_at: '2026-05-29T22:00:00.000Z',
+    last_attempted_at: '2026-05-29T21:00:00.000Z',
+  });
+  prependFakeGh(t, root, () => `#!/bin/sh
+echo 'label failed' >&2
+exit 1
+`);
+
+  const result = await runDiagnose(root, '--threshold-minutes', '5', '--apply');
+
+  assert.equal(result.code, 4);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.rows[0].applyResult.applied, false);
+  assert.match(payload.rows[0].applyResult.error, /label failed/);
 });
 
 test('hint surfaced when latest job is not completed', async (t) => {

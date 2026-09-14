@@ -214,6 +214,19 @@ test('watcher active follow-up check tolerates subjects without a ref wrapper', 
   );
 });
 
+test('watcher gates stale posted auto-refresh on green CI before rereview reset', () => {
+  const source = readFileSync(POLLONCE_PHASES_SOURCE, 'utf8');
+  const stalePostedIndex = source.indexOf('} else if (postedReviewHeadMoved) {');
+  const ciAdmissionIndex = source.indexOf('const ciAdmission = await guardRereviewCiBeforeReviewer({', stalePostedIndex);
+  const holdIndex = source.indexOf('Holding stale posted review auto-refresh', ciAdmissionIndex);
+  const resetIndex = source.indexOf('const refreshResult = requestReviewRereview({', ciAdmissionIndex);
+
+  assert.ok(stalePostedIndex > 0, 'stale posted review auto-refresh branch should exist');
+  assert.ok(ciAdmissionIndex > stalePostedIndex, 'stale posted refresh should check CI admission first');
+  assert.ok(holdIndex > ciAdmissionIndex, 'non-green CI should hold the stale posted refresh');
+  assert.ok(resetIndex > holdIndex, 'requestReviewRereview should only run after the CI hold branch');
+});
+
 test('watcher terminal rereview skip releases claim and falls through to close path', () => {
   // ARC-18: the per-PR skip/spawn body lives in processReviewSubject now, while
   // pollOnce (watcher.mjs) still drives that per-PR phase before the

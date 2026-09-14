@@ -1502,6 +1502,159 @@ function buildRereviewResult({ requested, reason, outcome = null }) {
   };
 }
 
+function normalizeOperationalBlockerCategory(blocker) {
+  const raw = blocker && typeof blocker === 'object' && !Array.isArray(blocker)
+    ? (blocker.category || blocker.title || blocker.code || blocker.finding)
+    : blocker;
+  const normalized = String(raw || '')
+    .trim()
+    .toLocaleLowerCase('en-US')
+    .replace(/[_\s]+/g, '-')
+    .replace(/[^a-z0-9.-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  if (!normalized) return 'unknown';
+  if (normalized.includes('github-auth') || normalized === 'auth-failure' || normalized === 'missing-auth') {
+    return 'github-auth';
+  }
+  return normalized;
+}
+
+function operationalBlockerText(blocker) {
+  if (!blocker || typeof blocker !== 'object' || Array.isArray(blocker)) return String(blocker || '');
+  return [
+    blocker.title,
+    blocker.category,
+    blocker.code,
+    blocker.finding,
+    blocker.reasoning,
+    blocker.needsHumanInput,
+    blocker.detail,
+    blocker.message,
+  ].map((value) => String(value || '')).join('\n');
+}
+
+function classifyGithubAuthOperationalBlocker(blocker) {
+  const text = operationalBlockerText(blocker).toLocaleLowerCase('en-US');
+  if (normalizeOperationalBlockerCategory(blocker) !== 'github-auth') return null;
+  if (
+    /revoked entitlement|entitlement revoked|missing app installation|installation (?:not found|missing)|resource not accessible by integration|permission denied|403|forbidden|workflow scope|workflows permission|contents permission/.test(text)
+  ) {
+    return { kind: 'terminal', reason: 'terminal-github-auth' };
+  }
+  if (
+    /expired|invalid|bad credentials|no usable|missing non-interactive|could not fetch|could not push|authentication failed|credential|token|oauth/.test(text)
+  ) {
+    return { kind: 'recoverable', reason: 'recoverable-github-auth' };
+  }
+  return { kind: 'terminal', reason: 'unclassified-github-auth' };
+}
+
+function findGithubAuthOperationalBlocker(reply) {
+  const blockers = Array.isArray(reply?.operationalBlockers) ? reply.operationalBlockers : [];
+  for (const blocker of blockers) {
+    const classification = classifyGithubAuthOperationalBlocker(blocker);
+    if (classification) return { blocker, classification };
+  }
+  return null;
+}
+
+function extractCommitShaFromOperationalBlocker(blocker, job) {
+  const candidates = [
+    blocker?.commitSha,
+    blocker?.commit,
+    blocker?.headSha,
+    blocker?.unpushedSha,
+    blocker?.validatedCommit,
+    job?.headSha,
+  ];
+  for (const candidate of candidates) {
+    const value = String(candidate || '').trim();
+    if (/^[0-9a-f]{7,40}$/i.test(value)) return value;
+  }
+  const match = operationalBlockerText(blocker).match(/\b[0-9a-f]{7,40}\b/i);
+  return match ? match[0] : null;
+}
+
+async function preserveUnpushedCommit({
+  hqRoot,
+  workspaceDir,
+  repo,
+  prNumber,
+  jobId,
+  commitSha,
+  observedAt,
+  execFileImpl = execFileAsync,
+}) {
+  const sha = String(commitSha || '').trim();
+  if (!sha) return { preserved: false, reason: 'missing-commit-sha' };
+  await execFileImpl('git', ['-C', workspaceDir, 'cat-file', '-e', `${sha}^{commit}`]);
+  const safeRepo = String(repo || 'unknown').replace(/[^A-Za-z0-9_.-]+/g, '_');
+  const safeJob = String(jobId || `pr-${prNumber}`).replace(/[^A-Za-z0-9_.-]+/g, '_');
+  const stamp = String(observedAt || new Date().toISOString()).replace(/[^0-9A-Za-z]+/g, '-');
+  const rescueDir = join(hqRoot, 'rescues', 'adversarial-review', 'github-auth', safeRepo, `pr-${prNumber}`);
+  mkdirSync(rescueDir, { recursive: true });
+  const bundlePath = join(rescueDir, `${stamp}-${safeJob}-${sha.slice(0, 12)}.bundle`);
+  await execFileImpl('git', ['-C', workspaceDir, 'bundle', 'create', bundlePath, sha], {
+    maxBuffer: 5 * 1024 * 1024,
+  });
+  return {
+    preserved: true,
+    kind: 'git-bundle',
+    path: bundlePath,
+    commitSha: sha,
+    repo,
+    prNumber,
+    createdAt: observedAt,
+  };
+}
+
+async function retryGithubAuthPushOnce({
+  workspaceDir,
+  workerClass,
+  branch,
+  commitSha,
+  env = process.env,
+  execFileImpl = execFileAsync,
+}) {
+  const targetBranch = String(branch || '').trim();
+  if (!targetBranch) {
+    return { retried: false, pushed: false, reason: 'missing-pr-branch' };
+  }
+  const script = `
+set -euo pipefail
+source "${ROOT}/../../modules/worker-pool/lib/hq-gh.sh"
+unset GH_TOKEN GITHUB_TOKEN HQ_ENTITLEMENT_GH_TOKEN
+hq_resolve_worker_class_gh_token "$WORKER_CLASS"
+token="$HQ_ENTITLEMENT_GH_TOKEN"
+if [[ -z "$token" && -n "\${HQ_ENTITLEMENT_GH_TOKEN_VAR:-}" ]]; then
+  token="\${!HQ_ENTITLEMENT_GH_TOKEN_VAR:-}"
+fi
+[[ -n "$token" ]]
+export GH_TOKEN="$token" GITHUB_TOKEN="$token" GIT_TERMINAL_PROMPT=0
+git -C "$WORKSPACE_DIR" push origin "$COMMIT_SHA:refs/heads/$TARGET_BRANCH" --force-with-lease
+`;
+  try {
+    await execFileImpl('bash', ['-lc', script], {
+      env: {
+        ...env,
+        WORKER_CLASS: workerClass || 'codex',
+        WORKSPACE_DIR: workspaceDir,
+        COMMIT_SHA: commitSha,
+        TARGET_BRANCH: targetBranch,
+      },
+      maxBuffer: 5 * 1024 * 1024,
+    });
+    return { retried: true, pushed: true, reason: 'push-succeeded' };
+  } catch (err) {
+    const detail = [err?.stderr, err?.stdout, err?.message]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)
+      .join('\n')
+      .slice(0, 1200);
+    return { retried: true, pushed: false, reason: 'push-failed-after-remint', error: detail };
+  }
+}
+
 // Resolve the worker class (codex / claude-code) for a reconcile-time
 // comment. Must reuse the same canonical mapping consume uses
 // (`pickRemediationWorkerClass`), because the bot-token map only
@@ -2153,6 +2306,7 @@ async function reconcileFollowUpJob({
     // is not configured for this job, this stays null and the
     // comment body falls back to the action / reReview signal alone.
     let parsedReply = null;
+    let operationalBlockerRecovery = null;
 
     if (replyProbe.state === 'valid') {
       const reply = replyProbe.reply;
@@ -2747,6 +2901,76 @@ async function reconcileFollowUpJob({
           outcome: { status: 'not-requested', reason: 'reply-did-not-request-rereview' },
         });
       }
+
+      if (!rereview.requested) {
+        const authBlocker = findGithubAuthOperationalBlocker(parsedReply);
+        if (authBlocker) {
+          const commitSha = extractCommitShaFromOperationalBlocker(authBlocker.blocker, job);
+          let rescue = null;
+          try {
+            rescue = await preserveUnpushedCommit({
+              hqRoot: resolveHqRoot(process.env),
+              workspaceDir: paths.workspaceDir,
+              repo: job.repo,
+              prNumber: job.prNumber,
+              jobId: job.jobId,
+              commitSha,
+              observedAt: completedAt,
+              execFileImpl,
+            });
+          } catch (err) {
+            rescue = {
+              preserved: false,
+              reason: 'preserve-failed',
+              commitSha,
+              error: String(err?.message || err).slice(0, 600),
+            };
+          }
+
+          let retry = { retried: false, pushed: false, reason: authBlocker.classification.reason };
+          if (authBlocker.classification.kind === 'recoverable' && rescue?.preserved) {
+            retry = await retryGithubAuthPushOnce({
+              workspaceDir: paths.workspaceDir,
+              workerClass: worker.workerClass || worker.model || pickRemediationWorkerClass(job),
+              branch: job.branch,
+              commitSha: rescue.commitSha,
+              env: process.env,
+              execFileImpl,
+            });
+            if (retry.pushed) {
+              const requestedAt = completedAt;
+              const reason = 'Recovered a remediated commit after refreshing the worker GitHub credential.';
+              const rereviewOutcome = requestReviewRereviewImpl({
+                rootDir,
+                repo: job.repo,
+                prNumber: job.prNumber,
+                requestedAt,
+                reason,
+                targetRevisionRef: rescue.commitSha,
+              });
+              rereview = buildRereviewResult({
+                requested: true,
+                reason,
+                outcome: {
+                  ...rereviewOutcome,
+                  requestedAt,
+                },
+              });
+            }
+          }
+          operationalBlockerRecovery = {
+              category: 'github-auth',
+              classification: authBlocker.classification,
+              rescue,
+              retry,
+              recordedAt: completedAt,
+          };
+          job = {
+            ...job,
+            operationalBlockerRecovery,
+          };
+        }
+      }
     }
 
     // Worker-class aware completion metadata. The legacy default is
@@ -2864,6 +3088,8 @@ async function reconcileFollowUpJob({
         reReview: rereview,
         stopReason,
         commentDelivery: noProgressDelivery,
+        passFailureClass: operationalBlockerRecovery ? 'worker-killed-no-resume' : null,
+        jobUpdates: operationalBlockerRecovery ? { operationalBlockerRecovery } : null,
       });
 
       await postReconcileOutcomeCommentSafe({
@@ -2958,6 +3184,7 @@ async function reconcileFollowUpJob({
       remediationReply,
       reReview: rereview,
       commentDelivery: completedDelivery,
+      jobUpdates: operationalBlockerRecovery ? { operationalBlockerRecovery } : null,
     });
 
     await postReconcileOutcomeCommentSafe({
@@ -4502,9 +4729,13 @@ export {
   buildBackpressureLogLine,
   buildDrainSummaryLogLine,
   isDrainQueueIdle,
+  classifyGithubAuthOperationalBlocker,
   classifyHqDispatchFailure,
+  extractCommitShaFromOperationalBlocker,
   createQuotaHoldRevalidator,
   countPendingFollowUpJobsByRetryWindow,
+  preserveUnpushedCommit,
+  retryGithubAuthPushOnce,
   REMEDIATION_LEGACY_UNSTAGE_COMMANDS,
   WORKSPACE_ARTIFACT_EXCLUDE_ENTRY,
   postRemediationCommentWithCapture,

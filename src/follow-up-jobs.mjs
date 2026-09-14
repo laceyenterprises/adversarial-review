@@ -2413,7 +2413,7 @@ function recordRemediationPassStartedSafe({ rootDir, job, worker = {}, spawnedAt
   }
 }
 
-function recordRemediationPassTerminalSafe({ rootDir, job, worker = {}, status, endedAt }) {
+function recordRemediationPassTerminalSafe({ rootDir, job, worker = {}, status, endedAt, failureClass = null }) {
   if (!rootDir || !shouldRecordRemediationPass(job, worker)) return;
   try {
     const launchRequestId = workerLaunchRequestId(job, worker);
@@ -2440,6 +2440,7 @@ function recordRemediationPassTerminalSafe({ rootDir, job, worker = {}, status, 
       metadata: {
         jobId: job.jobId || null,
         launchRequestId,
+        failureClass: failureClass || job?.failure?.code || job?.remediationPlan?.stop?.code || null,
         transcriptPath: usage?.transcriptPath || null,
         transcriptSessionId: usage?.adapterSessionKey || null,
         workerLogPath: usage?.source === 'codex-worker-log' ? usage.transcriptPath : null,
@@ -2539,6 +2540,7 @@ function markFollowUpJobCompleted({
   finishedAt = new Date().toISOString(),
   completionPreview = null,
   commentDelivery = null,
+  jobUpdates = null,
 }) {
   const normalizedCompletedAt = completedAt ?? finishedAt;
   const normalizedCompletion = completion || {
@@ -2579,6 +2581,12 @@ function markFollowUpJobCompleted({
       if (commentDelivery) {
         nextJob.commentDelivery = commentDelivery;
       }
+      if (jobUpdates && typeof jobUpdates === 'object') {
+        nextJob = {
+          ...nextJob,
+          ...jobUpdates,
+        };
+      }
 
       recordRemediationPassTerminalSafe({
         rootDir,
@@ -2605,6 +2613,8 @@ function computeFollowUpJobStoppedState({
   completion,
   failure,
   commentDelivery = null,
+  passFailureClass = null,
+  jobUpdates = null,
 }) {
   const currentRound = Number(currentJob?.remediationPlan?.currentRound || 0);
   const maxRounds = Number(currentJob?.remediationPlan?.maxRounds || DEFAULT_MAX_REMEDIATION_ROUNDS);
@@ -2652,6 +2662,12 @@ function computeFollowUpJobStoppedState({
   if (commentDelivery) {
     nextJob.commentDelivery = commentDelivery;
   }
+  if (jobUpdates && typeof jobUpdates === 'object') {
+    nextJob = {
+      ...nextJob,
+      ...jobUpdates,
+    };
+  }
 
   return nextJob;
 }
@@ -2673,6 +2689,8 @@ function markFollowUpJobStopped({
   completion,
   failure,
   commentDelivery = null,
+  passFailureClass = null,
+  jobUpdates = null,
 }) {
   return moveTerminalJobRecord({
     rootDir,
@@ -2692,6 +2710,8 @@ function markFollowUpJobStopped({
         completion,
         failure,
         commentDelivery,
+        passFailureClass,
+        jobUpdates,
       });
 
       recordRemediationPassTerminalSafe({
@@ -2700,6 +2720,7 @@ function markFollowUpJobStopped({
         worker: nextJob.remediationWorker || {},
         status: 'cancelled',
         endedAt: stoppedAt,
+        failureClass: passFailureClass,
       });
       return nextJob;
     },

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
+import { execFileSync } from 'node:child_process';
 
 import { writePrTerminalReconcileState } from '../src/pr-terminal-reconcile.mjs';
 import {
@@ -181,6 +182,42 @@ function seedFreshReconcile(rootDir, { observedAt = NOW, unresolved = [] } = {})
 function findingCodes(snapshot) {
   return snapshot.findings.map((finding) => finding.code).sort();
 }
+
+test('stopped remediation operational blockers surface in pipeline health findings', () => {
+  const rootDir = tempRoot();
+  writeJob(rootDir, 'stopped', 'job-auth-blocked', {
+    jobId: 'job-auth-blocked',
+    repo: REPO,
+    prNumber: 6755,
+    stoppedAt: '2026-05-25T17:30:00.000Z',
+    parsedReply: {
+      operationalBlockers: [{
+        title: 'github-auth',
+        finding: 'Human intervention required: GitHub credentials were invalid.',
+        reasoning: 'gh auth status reported invalid GH_TOKEN and no non-interactive credential.',
+      }],
+    },
+    operationalBlockerRecovery: {
+      rescue: {
+        kind: 'git-bundle',
+        path: '/tmp/rescue.bundle',
+        commitSha: 'bb3cd479c',
+      },
+    },
+  });
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+
+  assert.equal(snapshot.operationalBlockers.total, 1);
+  assert.equal(snapshot.operationalBlockers.byCategory[0].category, 'github-auth');
+  assert.equal(snapshot.operationalBlockers.byCategory[0].oldest.prNumber, 6755);
+  const finding = snapshot.findings.find(
+    (entry) => entry.code === 'review:operational_blocker_human_intervention'
+  );
+  assert.ok(finding);
+  assert.match(finding.message, /github-auth/);
+  assert.match(renderReviewPipelinePrometheus(snapshot), /review_pipeline_operational_blocker_rounds\{category="github-auth"\} 1/);
+});
 
 test('reviewer death-rate finding fires on a high failed/attempted ratio and clears when passes recover', () => {
   const rootDir = tempRoot();

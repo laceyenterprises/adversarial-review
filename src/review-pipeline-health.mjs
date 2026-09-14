@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { homedir, userInfo } from 'node:os';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { homedir, tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -185,7 +185,7 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_merge_outcomes_total: 'Current review-ledger PR outcome count by state.',
   review_pipeline_merge_stalled_jobs: 'Current count of clean review-settled jobs still waiting on merge.',
   review_pipeline_conflicting_open_prs: 'Current count of open non-draft PRs GitHub reports as CONFLICTING.',
-  review_pipeline_conflicting_open_prs_collected: 'Whether the conflicting-open-PR collector reached GitHub successfully.',
+  review_pipeline_conflicting_open_prs_collected: 'Whether the conflicting-open-PR collector reached GitHub and probed every conflicting PR successfully.',
   review_pipeline_conflicting_open_pr_shared_path_groups: 'Current count of conflict path groups shared by at least the configured minimum PR count.',
   review_pipeline_stale_ama_closer_leases: 'Current count of AMA closer leases for still-open PRs stuck pending or dispatched past the configured age.',
   review_pipeline_zombie_reviewer_passes: 'Current count of reviewer_passes rows stuck running past the configured age.',
@@ -2079,18 +2079,36 @@ function parseConflictPaths(output) {
     .sort((left, right) => left.localeCompare(right));
 }
 
-function mergeTreeConflictPaths(pr, { repoRoot, execFileSyncImpl }) {
+function mergeTreeConflictPaths(pr, { repoRoot, execFileSyncImpl, gitEnv }) {
   if (!pr.headRefOid) return { paths: [], error: 'missing-headRefOid' };
+  const options = {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    timeout: 20_000,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: gitEnv ? { ...process.env, ...gitEnv } : process.env,
+  };
+  try {
+    execFileSyncImpl('git', ['cat-file', '-e', `${pr.headRefOid}^{commit}`], options);
+  } catch {
+    try {
+      execFileSyncImpl('git', ['fetch', '--no-tags', '--no-write-fetch-head', 'origin', pr.headRefOid], options);
+    } catch {
+      try {
+        execFileSyncImpl('git', ['fetch', '--no-tags', '--no-write-fetch-head', 'origin', `refs/pull/${pr.number}/head`], options);
+      } catch (error) {
+        return {
+          paths: [],
+          error: String(error?.stderr || error?.message || 'git fetch PR head failed').slice(0, 500),
+        };
+      }
+    }
+  }
   try {
     const output = execFileSyncImpl(
       'git',
       ['merge-tree', '--write-tree', '--name-only', `origin/${pr.baseRefName || 'main'}`, pr.headRefOid],
-      {
-        cwd: repoRoot,
-        encoding: 'utf8',
-        timeout: 20_000,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      }
+      options
     );
     return { paths: parseConflictPaths(output), error: null };
   } catch (error) {
@@ -2141,12 +2159,12 @@ function ghPrListOpenSync(repo, { execFileSyncImpl, sleepSyncImpl = sleepSyncMs 
 
 function summarizeConflictingOpenPrs({ config, execFileSyncImpl, sleepSyncImpl = sleepSyncMs }) {
   if (!config.conflictingPrChecksEnabled) {
-    return { enabled: false, collected: false, count: 0, prs: [], paths: [], groupedPaths: [], sharedPathGroups: [], errors: [] };
+    return { enabled: false, collected: false, count: 0, probedPrs: 0, unprobedPrs: 0, prs: [], paths: [], groupedPaths: [], sharedPathGroups: [], errors: [] };
   }
   const repo = config.conflictingPrRepo;
   const repoRoot = config.conflictingPrRepoRoot;
   if (!repo || !repoRoot) {
-    return { enabled: true, collected: false, count: 0, prs: [], paths: [], groupedPaths: [], sharedPathGroups: [], errors: ['missing-repo-config'] };
+    return { enabled: true, collected: false, count: 0, probedPrs: 0, unprobedPrs: 0, prs: [], paths: [], groupedPaths: [], sharedPathGroups: [], errors: ['missing-repo-config'] };
   }
 
   let rows;
@@ -2158,6 +2176,8 @@ function summarizeConflictingOpenPrs({ config, execFileSyncImpl, sleepSyncImpl =
       count: 0,
       enabled: true,
       collected: false,
+      probedPrs: 0,
+      unprobedPrs: 0,
       prs: [],
       paths: [],
       groupedPaths: [],
@@ -2169,16 +2189,29 @@ function summarizeConflictingOpenPrs({ config, execFileSyncImpl, sleepSyncImpl =
   const grouped = new Map();
   const prs = [];
   const errors = [];
-  for (const row of Array.isArray(rows) ? rows : []) {
-    const pr = normalizeConflictingPrRow(row);
-    if (!pr) continue;
-    const conflict = mergeTreeConflictPaths(pr, { repoRoot, execFileSyncImpl });
-    if (conflict.error) errors.push(`#${pr.number}: ${conflict.error}`);
-    prs.push({ ...pr, conflictingPaths: conflict.paths });
-    for (const conflictPath of conflict.paths) {
-      if (!grouped.has(conflictPath)) grouped.set(conflictPath, []);
-      grouped.get(conflictPath).push(pr.number);
+  let probedPrs = 0;
+  const objectDirectory = mkdtempSync(join(tmpdir(), 'review-pipeline-health-objects-'));
+  const gitEnv = {
+    GIT_OBJECT_DIRECTORY: objectDirectory,
+    GIT_ALTERNATE_OBJECT_DIRECTORIES: join(repoRoot, '.git', 'objects'),
+  };
+  try {
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const pr = normalizeConflictingPrRow(row);
+      if (!pr) continue;
+      const conflict = mergeTreeConflictPaths(pr, { repoRoot, execFileSyncImpl, gitEnv });
+      const probeOk = !conflict.error;
+      if (probeOk) probedPrs += 1;
+      if (conflict.error) errors.push(`#${pr.number}: ${conflict.error}`);
+      prs.push({ ...pr, conflictingPaths: conflict.paths, probeOk });
+      if (!probeOk) continue;
+      for (const conflictPath of conflict.paths) {
+        if (!grouped.has(conflictPath)) grouped.set(conflictPath, []);
+        grouped.get(conflictPath).push(pr.number);
+      }
     }
+  } finally {
+    rmSync(objectDirectory, { recursive: true, force: true });
   }
 
   const groupedPaths = Array.from(grouped.entries())
@@ -2194,8 +2227,10 @@ function summarizeConflictingOpenPrs({ config, execFileSyncImpl, sleepSyncImpl =
     repo,
     repoRoot,
     enabled: true,
-    collected: true,
+    collected: errors.length === 0,
     count: prs.length,
+    probedPrs,
+    unprobedPrs: prs.length - probedPrs,
     prs,
     paths: groupedPaths.map((entry) => entry.path),
     groupedPaths,
@@ -3322,9 +3357,9 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
       code: 'review:conflicting_open_prs_unreadable',
       tier: 'ticket',
       subject: 'open conflicting PR diagnostics could not be collected',
-      message: `GitHub open-PR listing for ${snapshot.conflictingOpenPrs.repo || 'the configured repo'} failed; this is a blind collector state, not proof that no PRs are conflicting.`,
+      message: `GitHub open-PR listing or local merge-tree probes for ${snapshot.conflictingOpenPrs.repo || 'the configured repo'} failed; this is a blind collector state, not proof that no PRs are conflicting.`,
       evidence: (snapshot.conflictingOpenPrs.errors || []).slice(0, 3),
-      recommendedAction: 'Check gh authentication/network health for the pipeline-health host, then re-run the collector.',
+      recommendedAction: 'Check gh authentication/network health and local git fetch/merge-tree access for the pipeline-health host, then re-run the collector.',
       observedAt,
       details: snapshot.conflictingOpenPrs,
     }));

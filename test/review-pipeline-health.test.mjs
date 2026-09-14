@@ -221,7 +221,10 @@ test('conflicting open PRs are grouped by merge-tree conflict paths', () => {
         },
       ]);
     }
-    if (command === 'git' && args.at(-1) === 'head-a') {
+    if (command === 'git' && args[0] === 'cat-file') {
+      return '';
+    }
+    if (command === 'git' && args[0] === 'merge-tree' && args.at(-1) === 'head-a') {
       return [
         '0fbf96c31adb255b6d545f3ad21fbfe275d62c8d',
         'docs/INDEX.md',
@@ -232,7 +235,7 @@ test('conflicting open PRs are grouped by merge-tree conflict paths', () => {
         '',
       ].join('\n');
     }
-    if (command === 'git' && args.at(-1) === 'head-b') {
+    if (command === 'git' && args[0] === 'merge-tree' && args.at(-1) === 'head-b') {
       const error = new Error('merge-tree conflict');
       error.stdout = [
         '2ce94f3a29f4143ce5f73ea68146df7bca394276',
@@ -281,7 +284,7 @@ test('conflicting open PRs are grouped by merge-tree conflict paths', () => {
   assert.match(renderReviewPipelinePrometheus(snapshot), /^review_pipeline_conflicting_open_prs 2$/m);
   assert.match(renderReviewPipelinePrometheus(snapshot), /^review_pipeline_conflicting_open_prs_collected 1$/m);
   assert.match(renderReviewPipelinePrometheus(snapshot), /^review_pipeline_conflicting_open_pr_shared_path_groups 1$/m);
-  assert.equal(calls.filter((call) => call.command === 'git').length, 2);
+  assert.equal(calls.filter((call) => call.command === 'git' && call.args[0] === 'merge-tree').length, 2);
   assert.ok(calls.filter((call) => call.command === 'git').every((call) => call.cwd === '/repo/agent-os'));
 });
 
@@ -299,7 +302,10 @@ test('conflicting open PR diagnostic only finds shared conflict paths', () => {
         },
       ]);
     }
-    if (command === 'git') {
+    if (command === 'git' && args[0] === 'cat-file') {
+      return '';
+    }
+    if (command === 'git' && args[0] === 'merge-tree') {
       return [
         '0fbf96c31adb255b6d545f3ad21fbfe275d62c8d',
         'docs/INDEX.md',
@@ -328,6 +334,56 @@ test('conflicting open PR diagnostic only finds shared conflict paths', () => {
   assert.equal(snapshot.conflictingOpenPrs.groupedPaths.length, 1);
   assert.equal(snapshot.conflictingOpenPrs.sharedPathGroups.length, 0);
   assert.ok(!findingCodes(snapshot).includes('review:conflicting_open_prs'));
+});
+
+test('conflicting open PR diagnostic treats per-PR probe failures as blind coverage', () => {
+  const rootDir = tempRoot();
+  const calls = [];
+  const execFileSyncImpl = (command, args) => {
+    calls.push({ command, args });
+    if (command === 'gh') {
+      return JSON.stringify([
+        {
+          number: 6818,
+          headRefOid: 'dc90afc7e794821c9290a75f903d45cc76f35ec9',
+          baseRefName: 'main',
+          mergeable: 'CONFLICTING',
+          isDraft: false,
+        },
+      ]);
+    }
+    if (command === 'git') {
+      const error = new Error('not something we can merge');
+      error.stderr = 'fatal: not something we can merge';
+      throw error;
+    }
+    throw new Error(`unexpected command: ${command} ${args.join(' ')}`);
+  };
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    execFileSyncImpl,
+    sleepSyncImpl: () => {},
+    config: {
+      conflictingPrChecksEnabled: true,
+      conflictingPrRepo: 'laceyenterprises/agent-os',
+      conflictingPrRepoRoot: '/repo/agent-os',
+      conflictingPrMinSharedPathCount: 1,
+    },
+  });
+
+  assert.equal(snapshot.conflictingOpenPrs.count, 1);
+  assert.equal(snapshot.conflictingOpenPrs.probedPrs, 0);
+  assert.equal(snapshot.conflictingOpenPrs.unprobedPrs, 1);
+  assert.equal(snapshot.conflictingOpenPrs.collected, false);
+  assert.deepEqual(snapshot.conflictingOpenPrs.sharedPathGroups, []);
+  assert.match(snapshot.conflictingOpenPrs.errors[0], /#6818: fatal: not something we can merge/);
+  assert.ok(!findingCodes(snapshot).includes('review:conflicting_open_prs'));
+  assert.ok(findingCodes(snapshot).includes('review:conflicting_open_prs_unreadable'));
+  assert.match(renderReviewPipelinePrometheus(snapshot), /^review_pipeline_conflicting_open_prs 1$/m);
+  assert.match(renderReviewPipelinePrometheus(snapshot), /^review_pipeline_conflicting_open_prs_collected 0$/m);
+  assert.ok(calls.some((call) => call.command === 'git' && call.args[0] === 'fetch'));
 });
 
 test('conflicting open PR diagnostic failure creates a blind finding, not a zero-conflict finding', () => {

@@ -1799,6 +1799,110 @@ test('a rereview deferred behind active remediation is not first-pass starvation
   assert.match(output, /^review_pipeline_pending_queue_depth 1$/m);
 });
 
+test('a CI-stopped rereview with a released claim is not first-pass starvation', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 6838,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T11:14:00.000Z',
+    lastAttemptedAt: '2026-05-25T16:05:00.000Z',
+    reviewAttempts: 0,
+    failedAt: '2026-05-25T16:05:00.000Z',
+    failureMessage:
+      '[ci-regression-stopped] fast-python-guards=FAILURE, repo-guards=CANCELLED, release-freeze-gate=CANCELLED',
+  });
+  insertReviewerPass(rootDir, {
+    prNumber: 6838,
+    attemptNumber: 1,
+    passKind: 'rereview',
+    status: 'failed',
+    startedAt: '2026-05-25T16:04:00.000Z',
+    endedAt: '2026-05-25T16:05:00.000Z',
+    metadata: { failureClass: 'ci-regression-stopped' },
+  });
+  writeJob(rootDir, 'stopped', 'job-6838', {
+    kind: 'adversarial-review-follow-up',
+    jobId: 'laceyenterprises__agent-os-pr-6838-2026-09-14T16-19-41-000Z',
+    repo: REPO,
+    prNumber: 6838,
+    createdAt: '2026-05-25T15:55:00.000Z',
+    stoppedAt: '2026-05-25T16:05:00.000Z',
+    stopReason: 'ci-regression-stopped',
+    reason: 'Refusing re-review: failed external CI; requeue produced status=stopped',
+  });
+  seedFreshReconcile(rootDir);
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    config: { queueStarvationMaxAgeMs: 10 * 60 * 1000 },
+  });
+
+  assert.ok(!findingCodes(snapshot).includes('review:queue_starvation'));
+  assert.equal(snapshot.firstPassQueue.firstPassPrs.length, 0);
+  assert.equal(snapshot.deferredRereviews.count, 1);
+  assert.equal(snapshot.deferredRereviews.oldest.prNumber, 6838);
+  assert.equal(snapshot.deferredRereviews.oldest.passKind, 'rereview');
+  assert.equal(snapshot.deferredRereviews.oldest.reason, 'ci-regression-stopped');
+  assert.equal(snapshot.deferredRereviews.oldest.reviewAttempts, 0);
+  assert.equal(snapshot.deferredRereviews.oldest.reviewerClaimStarts, 1);
+  assert.equal(snapshot.deferredRereviews.oldest.claimedAndReleased, true);
+  assert.equal(snapshot.queuedRereviews.count, 0);
+});
+
+test('lane-share supermajority requires a non-empty verified first-pass backlog after filtering', () => {
+  const rootDir = tempRoot();
+  seedFreshReconcile(rootDir);
+  insertReviewRow(rootDir, {
+    prNumber: 6838,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T11:14:00.000Z',
+    lastAttemptedAt: '2026-05-25T16:05:00.000Z',
+    reviewAttempts: 0,
+    failedAt: '2026-05-25T16:05:00.000Z',
+    failureMessage:
+      '[ci-regression-stopped] fast-python-guards=FAILURE, repo-guards=CANCELLED, release-freeze-gate=CANCELLED',
+  });
+  insertReviewerPass(rootDir, {
+    prNumber: 6838,
+    attemptNumber: 1,
+    passKind: 'rereview',
+    status: 'failed',
+    startedAt: '2026-05-25T16:04:00.000Z',
+    endedAt: '2026-05-25T16:05:00.000Z',
+    metadata: { failureClass: 'ci-regression-stopped' },
+  });
+  writeJob(rootDir, 'stopped', 'job-6838', {
+    kind: 'adversarial-review-follow-up',
+    jobId: 'laceyenterprises__agent-os-pr-6838-2026-09-14T16-19-41-000Z',
+    repo: REPO,
+    prNumber: 6838,
+    stoppedAt: '2026-05-25T16:05:00.000Z',
+    stopReason: 'ci-regression-stopped',
+    reason: 'Refusing re-review: failed external CI; requeue produced status=stopped',
+  });
+  for (let index = 0; index < 5; index += 1) {
+    insertReviewerPass(rootDir, {
+      prNumber: 6900 + index,
+      attemptNumber: 2,
+      passKind: 'rereview',
+      status: 'completed',
+      startedAt: `2026-05-25T17:${10 + index}:00.000Z`,
+      endedAt: `2026-05-25T17:${20 + index}:00.000Z`,
+    });
+  }
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    configOverrides: { reviewLaneShareSupermajorityMinPasses: 5 },
+  });
+
+  assert.equal(snapshot.firstPassQueue.firstPassPrs.length, 0);
+  assert.ok(!findingCodes(snapshot).includes('review:queue_starvation'));
+  assert.ok(!findingCodes(snapshot).includes('review:review_lane_share_supermajority'));
+});
+
 test('a rereview with a completed remediation job remains visible in the rereview lane', () => {
   const rootDir = tempRoot();
   insertReviewRow(rootDir, {

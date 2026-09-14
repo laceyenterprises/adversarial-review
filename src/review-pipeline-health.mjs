@@ -1661,7 +1661,31 @@ function summarizeFirstPassQueue(db, { nowMs }) {
   const rows = safeAll(
     db,
     `SELECT repo, pr_number, reviewed_at, rereview_requested_at, last_attempted_at, posted_at,
-            failed_at, failure_message, review_attempts
+            failed_at, failure_message, review_attempts,
+            EXISTS (
+              SELECT 1
+                FROM reviewer_passes
+               WHERE reviewer_passes.repo = reviewed_prs.repo
+                 AND reviewer_passes.pr_number = reviewed_prs.pr_number
+                 AND reviewer_passes.pass_kind = 'rereview'
+            ) AS has_rereview_pass,
+            (
+              SELECT pass_kind
+                FROM reviewer_passes
+               WHERE reviewer_passes.repo = reviewed_prs.repo
+                 AND reviewer_passes.pr_number = reviewed_prs.pr_number
+                 AND reviewer_passes.pass_kind IN ('first-pass', 'rereview')
+               ORDER BY COALESCE(started_at, ended_at, '') DESC,
+                        pass_id DESC
+               LIMIT 1
+            ) AS latest_pass_kind,
+            (
+              SELECT COUNT(*)
+                FROM reviewer_passes
+               WHERE reviewer_passes.repo = reviewed_prs.repo
+                 AND reviewer_passes.pr_number = reviewed_prs.pr_number
+                 AND reviewer_passes.pass_kind IN ('first-pass', 'rereview')
+            ) AS reviewer_claim_starts
        FROM reviewed_prs
       WHERE COALESCE(pr_state, 'open') = 'open'
         AND review_status = 'pending'`
@@ -1696,19 +1720,26 @@ function summarizeFirstPassQueue(db, { nowMs }) {
         : null,
       };
     }
-    const passKind = reviewerDispatchPassKind({
+    const derivedPassKind = reviewerDispatchPassKind({
       current: {
         rereview_requested_at: row.rereview_requested_at,
         posted_at: row.posted_at,
       },
     });
-    if (passKind === 'first-pass') {
+    const watcherPassKind = row.has_rereview_pass ? 'rereview' : derivedPassKind;
+    const reviewerClaimStarts = Number(row.reviewer_claim_starts || 0);
+    if (watcherPassKind === 'first-pass') {
       if (reviewerFailed) failedCount += 1;
       const firstPassPr = {
         repo: row.repo,
         prNumber: row.pr_number,
         pendingSince,
         ageMs: pendingAgeMs,
+        passKind: watcherPassKind,
+        derivedPassKind,
+        latestReviewerPassKind: row.latest_pass_kind || null,
+        reviewerClaimStarts,
+        claimedAndReleased: reviewerClaimStarts > Number(row.review_attempts || 0),
         reviewerFailed,
         failedAt: row.failed_at || null,
         reviewAttempts: Number(row.review_attempts || 0),
@@ -1778,6 +1809,35 @@ function terminalFollowUpJobsByPr(followUpJobs) {
   return terminalJobsByPr;
 }
 
+function stoppedCiRegressionJobsByPr(followUpJobs) {
+  const stoppedJobsByPr = new Map();
+  for (const entry of followUpJobs || []) {
+    if (entry.state !== 'stopped') continue;
+    if (!isRereviewDeferringFollowUpJob(entry.job)) continue;
+    const repo = entry.job?.repo || null;
+    const prNumber = entry.job?.prNumber || null;
+    if (!repo || !prNumber) continue;
+    const reason = String(
+      entry.job?.stopReason ||
+      entry.job?.stoppedReason ||
+      entry.job?.reason ||
+      entry.job?.requeueReason ||
+      entry.job?.statusReason ||
+      ''
+    );
+    const serialized = `${reason}\n${JSON.stringify(entry.job || {})}`;
+    if (!/ci-regression|failed external CI/i.test(serialized)) continue;
+    const terminalAt = terminalJobTimestamp(entry.job, entry.stat?.mtimeMs);
+    const terminalAtMs = toMs(terminalAt);
+    const key = `${repo}#${prNumber}`;
+    const existing = stoppedJobsByPr.get(key);
+    if (!existing || (terminalAtMs ?? 0) > (existing.terminalAtMs ?? 0)) {
+      stoppedJobsByPr.set(key, { ...entry, terminalAt, terminalAtMs, deferralReason: 'ci-regression-stopped' });
+    }
+  }
+  return stoppedJobsByPr;
+}
+
 function jobAgeAnchor(entry) {
   return entry?.job?.claimedAt
     || entry?.job?.createdAt
@@ -1803,6 +1863,7 @@ function publicDeferredRereviewDetails(summary) {
 function summarizeDeferredRereviews(db, followUpJobs, { nowMs }) {
   if (!db) return { count: 0, oldest: null, prs: [] };
   const activeJobsByPr = activeFollowUpJobsByPr(followUpJobs);
+  const stoppedCiRegressionJobs = stoppedCiRegressionJobsByPr(followUpJobs);
   const rows = safeAll(
     db,
     `SELECT repo,
@@ -1816,23 +1877,40 @@ function summarizeDeferredRereviews(db, followUpJobs, { nowMs }) {
             review_attempts,
             rereview_reason,
             reviewer_head_sha,
-            revision_ref
+            revision_ref,
+            EXISTS (
+              SELECT 1
+                FROM reviewer_passes
+               WHERE reviewer_passes.repo = reviewed_prs.repo
+                 AND reviewer_passes.pr_number = reviewed_prs.pr_number
+                 AND reviewer_passes.pass_kind = 'rereview'
+            ) AS has_rereview_pass,
+            (
+              SELECT COUNT(*)
+                FROM reviewer_passes
+               WHERE reviewer_passes.repo = reviewed_prs.repo
+                 AND reviewer_passes.pr_number = reviewed_prs.pr_number
+                 AND reviewer_passes.pass_kind IN ('first-pass', 'rereview')
+            ) AS reviewer_claim_starts
        FROM reviewed_prs
       WHERE COALESCE(pr_state, 'open') = 'open'
         AND review_status = 'pending'`
   );
   const prs = [];
   for (const row of rows) {
-    const passKind = reviewerDispatchPassKind({
+    const derivedPassKind = reviewerDispatchPassKind({
       current: {
         rereview_requested_at: row.rereview_requested_at,
         posted_at: row.posted_at,
       },
     });
+    const passKind = row.has_rereview_pass ? 'rereview' : derivedPassKind;
     if (passKind !== 'rereview') continue;
     const key = `${row.repo}#${row.pr_number}`;
     const activeJob = activeJobsByPr.get(key);
-    if (!activeJob) continue;
+    const stoppedCiJob = stoppedCiRegressionJobs.get(key);
+    const deferringJob = activeJob || stoppedCiJob;
+    if (!deferringJob) continue;
     const deferredSince =
       row.failed_at ||
       row.rereview_requested_at ||
@@ -1840,21 +1918,24 @@ function summarizeDeferredRereviews(db, followUpJobs, { nowMs }) {
       row.reviewed_at ||
       row.posted_at ||
       null;
-    const reason = activeJob.state === 'in_progress'
+    const reason = stoppedCiJob?.deferralReason || (activeJob.state === 'in_progress'
       ? 'active-follow-up-job'
-      : 'remediation-requeued';
+      : 'remediation-requeued');
     prs.push({
       repo: row.repo,
       prNumber: row.pr_number,
       passKind,
+      derivedPassKind,
       deferredSince,
       ageMs: ageMs(nowMs, deferredSince),
       reason,
-      jobState: activeJob.state,
-      jobId: activeJob.job?.jobId || null,
-      jobKind: activeJob.job?.kind || null,
-      jobAgeMs: ageMs(nowMs, jobAgeAnchor(activeJob)),
+      jobState: deferringJob.state,
+      jobId: deferringJob.job?.jobId || null,
+      jobKind: deferringJob.job?.kind || null,
+      jobAgeMs: ageMs(nowMs, stoppedCiJob?.terminalAt || jobAgeAnchor(deferringJob)),
       reviewAttempts: Number(row.review_attempts || 0),
+      reviewerClaimStarts: Number(row.reviewer_claim_starts || 0),
+      claimedAndReleased: Number(row.reviewer_claim_starts || 0) > Number(row.review_attempts || 0),
       reviewerHeadSha: row.reviewer_head_sha || null,
       revisionRef: row.revision_ref || null,
       rereviewReason: String(row.rereview_reason || '').slice(0, 300) || null,
@@ -1868,6 +1949,7 @@ function summarizeDeferredRereviews(db, followUpJobs, { nowMs }) {
 function summarizeQueuedRereviews(db, followUpJobs, { nowMs }) {
   if (!db) return { count: 0, oldest: null, prs: [] };
   const activeJobsByPr = activeFollowUpJobsByPr(followUpJobs);
+  const stoppedCiRegressionJobs = stoppedCiRegressionJobsByPr(followUpJobs);
   const terminalJobsByPr = terminalFollowUpJobsByPr(followUpJobs);
   const rows = safeAll(
     db,
@@ -1882,7 +1964,21 @@ function summarizeQueuedRereviews(db, followUpJobs, { nowMs }) {
             rereview_reason,
             review_attempts,
             reviewer_head_sha,
-            revision_ref
+            revision_ref,
+            EXISTS (
+              SELECT 1
+                FROM reviewer_passes
+               WHERE reviewer_passes.repo = reviewed_prs.repo
+                 AND reviewer_passes.pr_number = reviewed_prs.pr_number
+                 AND reviewer_passes.pass_kind = 'rereview'
+            ) AS has_rereview_pass,
+            (
+              SELECT COUNT(*)
+                FROM reviewer_passes
+               WHERE reviewer_passes.repo = reviewed_prs.repo
+                 AND reviewer_passes.pr_number = reviewed_prs.pr_number
+                 AND reviewer_passes.pass_kind IN ('first-pass', 'rereview')
+            ) AS reviewer_claim_starts
        FROM reviewed_prs
       WHERE COALESCE(pr_state, 'open') = 'open'
         AND review_status = 'pending'
@@ -1893,15 +1989,17 @@ function summarizeQueuedRereviews(db, followUpJobs, { nowMs }) {
   const prs = [];
   let oldest = null;
   for (const row of rows) {
-    const passKind = reviewerDispatchPassKind({
+    const derivedPassKind = reviewerDispatchPassKind({
       current: {
         rereview_requested_at: row.rereview_requested_at,
         posted_at: row.posted_at,
       },
     });
+    const passKind = row.has_rereview_pass ? 'rereview' : derivedPassKind;
     if (passKind !== 'rereview') continue;
     const key = `${row.repo}#${row.pr_number}`;
     if (activeJobsByPr.has(key)) continue;
+    if (stoppedCiRegressionJobs.has(key)) continue;
     const candidateTerminalJob = terminalJobsByPr.get(key);
     const failedAtMs = toMs(row.failed_at);
     const terminalJob = candidateTerminalJob
@@ -1926,6 +2024,8 @@ function summarizeQueuedRereviews(db, followUpJobs, { nowMs }) {
       jobKind: terminalJob?.job?.kind || null,
       reason: String(row.rereview_reason || '').slice(0, 300) || null,
       reviewAttempts: Number(row.review_attempts || 0),
+      reviewerClaimStarts: Number(row.reviewer_claim_starts || 0),
+      claimedAndReleased: Number(row.reviewer_claim_starts || 0) > Number(row.review_attempts || 0),
       reviewerHeadSha: row.reviewer_head_sha || null,
       revisionRef: row.revision_ref || null,
       failureMessage: String(row.failure_message || '').slice(0, 300) || null,
@@ -3367,8 +3467,9 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
           message:
             `${dominantLane} took ${dominantPasses}/${totalLanePasses} reviewer pass start(s) in the last `
             + `${Math.round((capacity.windowMs || config.reviewerDeathRateWindowMs) / 60000)}m while `
-            + `${starvedLane} had queued work. Share is the leading starvation signal; age-based findings `
-            + 'should be the lagging alarm, not the first indication.',
+            + `${starvedLane} had verified queued work. This measures realized pass-start share, not `
+            + 'watcher.review_lane_min_share slot-floor allocation; age-based findings should be the '
+            + 'lagging alarm, not the first indication.',
           evidence: [
             `reviewerCapacity total=${totalLanePasses} first_pass=${capacity.firstPassPasses || 0} `
             + `rereview=${capacity.rereviewPasses || 0} rereview_share=${rereviewShare.toFixed(3)} `
@@ -3381,8 +3482,9 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
             + `age_threshold_ms=${config.queueStarvationMaxAgeMs}`,
           ],
           recommendedAction:
-            'Check watcher.review_lane_min_share and the reviewer-pool launch logs. Do not enlarge the pool '
-            + 'for this signal alone: capacity exists, but the shared pool is being allocated unevenly across lanes.',
+            'Check reviewer-pool launch logs and the verified queued lane before changing capacity. '
+            + 'watcher.review_lane_min_share is a slot floor, while this finding reports pass-start share; '
+            + 'those quantities can differ even when the pool is healthy.',
           observedAt,
           details: {
             dominantLane,

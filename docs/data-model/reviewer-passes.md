@@ -1,6 +1,6 @@
 # Reviewer passes
 
-**Source of truth:** `migrations/20260518_reviewer_passes.sql`, `migrations/20260810_reviewer_passes_posted_review_freshness_index.sql`, `src/reviewer-pass-tokens.mjs`, `src/reviewer-spawn-settle.mjs`, and `src/follow-up-jobs.mjs`
+**Source of truth:** `migrations/20260518_reviewer_passes.sql`, `migrations/20260810_reviewer_passes_posted_review_freshness_index.sql`, `migrations/20260914_reviewer_passes_head_sha.sql`, `src/reviewer-pass-tokens.mjs`, `src/reviewer-spawn-settle.mjs`, and `src/follow-up-jobs.mjs`
 
 ## Ownership
 
@@ -21,6 +21,13 @@ watcher's review-freshness pager reads those rows through
 `COALESCE(body_captured_at, ended_at)` normalized to fixed millisecond UTC. This
 keeps rereview/remediation-cycle posts visible after `reviewed_prs.posted_at` is
 reset while avoiding freshness scans over non-posted pass history.
+
+`head_sha` records the PR head reviewed by the pass. It is migration-owned so
+read-only diagnostics such as `bin/review-queue-depth.mjs` can safely prepare
+current-head predicates without opening the writer-side schema convergence path.
+Rows with both `gh_comment_id` and matching `head_sha` are treated as posted
+review evidence for that exact head; older-head posts remain history and do not
+drain the current-head first-pass queue.
 
 ## Launch and reattach identity
 

@@ -66,9 +66,10 @@ the env override after proving that lane healthy.
 
 Depth is **open PRs awaiting first-pass review for their current head**, read
 from `countOpenPrsAwaitingCurrentFirstPassReview` in `review-state-db.mjs` — the
-same predicate as pipeline-health `firstPassQueue.depth`. Defining a second,
-slightly different "queue depth" beside it would give you two numbers that
-disagree during exactly the incident where you read both. Its predicate:
+same predicate as pipeline-health `firstPassQueue.depth`. The health snapshot
+also carries starvation-only fields for aged pending review work, including
+same-head retriggered rows, but those do not arm this spillover lever. Its
+predicate:
 
 - `pr_state = 'open'` (merged/closed PRs are not waiting for anything), **and**
 - `review_status IN ('pending', 'pending-upstream', 'reviewing')`, **and**
@@ -90,6 +91,13 @@ Two things worth stating explicitly, because they decide what threshold to pick:
   but depth `0` — every open PR had already been first-passed for its current
   head, so that backlog was re-review, and the lever correctly would not have
   engaged.
+
+Size the threshold **meaningfully above** the first-pass pool ceiling. A
+threshold at or below the pool ceiling (default 6, max 12) can be satisfied by a
+saturated-but-healthy first-pass lane and pin the break-glass lever on, spending
+fallback-class quota without proving starvation. Because the unit includes
+current-head first passes that are already in flight, use headroom above the
+maximum configured reviewer pool before treating the depth as spillover-worthy.
 
 ## Arming it
 

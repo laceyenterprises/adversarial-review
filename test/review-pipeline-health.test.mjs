@@ -68,8 +68,8 @@ function insertReviewRow(rootDir, overrides = {}) {
       `INSERT INTO reviewed_prs
          (repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
           review_attempts, last_attempted_at, rereview_requested_at, posted_at,
-          failed_at, failure_message)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          failed_at, failure_message, revision_ref)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       overrides.repo || REPO,
       overrides.prNumber || 946,
@@ -82,7 +82,8 @@ function insertReviewRow(rootDir, overrides = {}) {
       overrides.rereviewRequestedAt ?? null,
       overrides.postedAt ?? null,
       overrides.failedAt ?? null,
-      overrides.failureMessage ?? null
+      overrides.failureMessage ?? null,
+      overrides.revisionRef ?? null
     );
   } finally {
     db.close();
@@ -95,8 +96,8 @@ function insertReviewerPass(rootDir, overrides = {}) {
     db.prepare(
       `INSERT INTO reviewer_passes
          (repo, pr_number, attempt_number, reviewer_class, reviewer_model,
-          pass_kind, started_at, ended_at, status, metadata_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          pass_kind, started_at, ended_at, status, metadata_json, gh_comment_id, head_sha)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       overrides.repo || REPO,
       overrides.prNumber || 950,
@@ -107,7 +108,9 @@ function insertReviewerPass(rootDir, overrides = {}) {
       overrides.startedAt || '2026-05-25T17:45:00.000Z',
       overrides.endedAt || '2026-05-25T17:50:00.000Z',
       overrides.status || 'failed',
-      JSON.stringify(overrides.metadata || { failureClass: 'timeout' })
+      JSON.stringify(overrides.metadata || { failureClass: 'timeout' }),
+      overrides.ghCommentId ?? null,
+      overrides.headSha ?? null
     );
   } finally {
     db.close();
@@ -677,6 +680,44 @@ test('queue starvation finding fires on an old pending first-pass row and clears
   assert.ok(!findingCodes(cleared).includes('review:queue_starvation'));
 });
 
+test('queue starvation still sees same-head retriggered rows after a posted pass', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 947,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T17:00:00.000Z',
+    rereviewRequestedAt: '2026-05-25T17:05:00.000Z',
+  });
+  insertReviewerPass(rootDir, {
+    prNumber: 947,
+    passKind: 'first-pass',
+    status: 'completed',
+    startedAt: '2026-05-25T16:50:00.000Z',
+    endedAt: '2026-05-25T16:55:00.000Z',
+    ghCommentId: 'IC_kwDO-review',
+    headSha: 'head-same',
+  });
+  const db = openDb(rootDir);
+  try {
+    db.prepare('UPDATE reviewed_prs SET revision_ref = ? WHERE pr_number = ?')
+      .run('head-same', 947);
+  } finally {
+    db.close();
+  }
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    config: { queueStarvationMaxAgeMs: 10 * 60 * 1000 },
+  });
+  const finding = snapshot.findings.find((item) => item.code === 'review:queue_starvation');
+
+  assert.equal(snapshot.firstPassQueue.depth, 0);
+  assert.equal(snapshot.firstPassQueue.starvationDepth, 1);
+  assert.ok(finding);
+  assert.equal(finding.details.prNumber, 947);
+});
+
 test('collector surfaces first-pass wait, rereview share, and effective reviewer concurrency', () => {
   const rootDir = tempRoot();
   insertReviewRow(rootDir, {
@@ -1171,7 +1212,8 @@ test('queue starvation distinguishes a FAILED reviewer from an unstarted one', (
   assert.equal(finding.details.reviewAttempts, 1);
   assert.equal(finding.details.failedCount, 1);
   // Depth belongs in the subject so the pile-up size is visible at a glance.
-  assert.match(finding.subject, /1 PR\(s\) awaiting first-pass review/);
+  assert.match(finding.subject, /1 pending review-work PR\(s\)/);
+  assert.match(finding.subject, /1 current-head first-pass PR\(s\)/);
 });
 
 test('queue starvation on an unverified mirror row stops blaming reviewer capacity', () => {

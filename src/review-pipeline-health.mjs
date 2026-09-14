@@ -22,7 +22,10 @@ import {
 } from './pr-terminal-reconcile.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
 import { FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT } from './review-queue-depth.mjs';
-import { SQL_SELECT_OPEN_AWAITING_CURRENT_FIRST_PASS_REVIEW } from './review-state-statements.mjs';
+import {
+  CURRENT_FIRST_PASS_QUEUE_WHERE_SQL,
+  SQL_SELECT_OPEN_AWAITING_CURRENT_FIRST_PASS_REVIEW,
+} from './review-state-statements.mjs';
 
 const DEFAULT_REVIEWER_DEATH_RATE_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_REVIEWER_DEATH_RATE_THRESHOLD = 0.5;
@@ -1584,16 +1587,31 @@ function summarizeReviewerDegradation(rootDir, db, { nowMs }) {
 }
 
 function summarizeFirstPassQueue(db, { nowMs }) {
-  const rows = safeAll(
+  const firstPassRows = safeAll(
     db,
     SQL_SELECT_OPEN_AWAITING_CURRENT_FIRST_PASS_REVIEW
+  );
+  const starvationRows = safeAll(
+    db,
+    `SELECT repo, pr_number, reviewed_at, rereview_requested_at, last_attempted_at,
+            failed_at, failure_message, review_attempts, review_status, revision_ref
+       FROM reviewed_prs
+      WHERE COALESCE(pr_state, 'open') = 'open'
+        AND review_status = 'pending'
+        AND (
+          rereview_requested_at IS NOT NULL
+          OR rowid IN (
+            SELECT rowid
+              FROM reviewed_prs
+             WHERE ${CURRENT_FIRST_PASS_QUEUE_WHERE_SQL}
+          )
+        )`
   );
   let oldest = null;
   let oldestFirstPass = null;
   const firstPassPrs = [];
   let failedCount = 0;
-  for (const row of rows) {
-    if (row.review_status !== 'pending') continue;
+  for (const row of starvationRows) {
     const pendingSince = row.rereview_requested_at || row.reviewed_at || row.last_attempted_at;
     const pendingAgeMs = ageMs(nowMs, pendingSince);
     if (pendingAgeMs === null) continue;
@@ -1638,8 +1656,10 @@ function summarizeFirstPassQueue(db, { nowMs }) {
     }
   }
   return {
-    depth: rows.length,
+    depth: firstPassRows.length,
     depthUnit: FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT,
+    starvationDepth: starvationRows.length,
+    starvationDepthUnit: 'open pending review-work rows monitored for queue starvation',
     failedCount,
     oldest,
     oldestFirstPass,
@@ -2966,13 +2986,14 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
 
   const oldest = snapshot.firstPassQueue.oldest;
   if (oldest && oldest.ageMs > config.queueStarvationMaxAgeMs) {
-    // TREC-01: this population is `pr_state='open' AND review_status='pending'`
-    // read from the SQLite mirror, thresholded on elapsed age. When the mirror
-    // has not been reconciled against GitHub the oldest entry may be a PR that
-    // is already closed -- observed 2026-09-07, agent-os#6394 closed at
-    // 05:50:15Z and still `firstPassQueue.oldest` 28.6 minutes later, one of
-    // only three entries. Age only grows, so nothing clears it. The finding is
-    // NOT suppressed (a real starved queue must still page); it is stamped with
+    // TREC-01: starvation is measured over open pending review-work rows, not
+    // just the RSP-01 current-head first-pass depth. Same-head retrigger rows
+    // have already posted a first pass, so depth excludes them, but they still
+    // page here if the operator asked for a rereview and nothing picks it up.
+    // This is still mirror-derived: when the mirror has not been reconciled
+    // against GitHub the oldest entry may be a PR that is already closed --
+    // observed 2026-09-07, agent-os#6394 closed at 05:50:15Z and still
+    // `firstPassQueue.oldest` 28.6 minutes later. The finding is stamped with
     // whether this specific PR's mirror state is verified, so an operator can
     // tell a phantom from a real one without hand-checking GitHub.
     const reconcile = snapshot.lifecycleReconciliation;
@@ -2981,7 +3002,8 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
       code: 'review:queue_starvation',
       tier: 'page',
       subject:
-        `${snapshot.firstPassQueue.depth} PR(s) awaiting first-pass review; oldest is `
+        `${snapshot.firstPassQueue.starvationDepth} pending review-work PR(s); `
+        + `${snapshot.firstPassQueue.depth} current-head first-pass PR(s); oldest is `
         + `${Math.round(oldest.ageMs / 60000)}m old`
         + (oldestUnverified ? ' (mirror state UNVERIFIED against GitHub)' : ''),
       message: oldest.reviewerFailed
@@ -3018,6 +3040,7 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
         ...oldest,
         thresholdMs: config.queueStarvationMaxAgeMs,
         depth: snapshot.firstPassQueue.depth,
+        starvationDepth: snapshot.firstPassQueue.starvationDepth,
         failedCount: snapshot.firstPassQueue.failedCount,
         // Machine-readable so a consumer can filter without parsing prose.
         mirrorVerified: !oldestUnverified,

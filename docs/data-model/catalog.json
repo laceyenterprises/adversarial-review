@@ -33,6 +33,7 @@
       "schemaSurface": "migrations/20260518_reviewer_passes.sql",
       "relatedSchemaSurfaces": [
         "migrations/20260810_reviewer_passes_posted_review_freshness_index.sql",
+        "migrations/20260914_reviewer_passes_head_sha.sql",
         "src/afh-reviewer-fallback.mjs",
         "src/follow-up-jobs.mjs",
         "src/reviewer-spawn-settle.mjs"

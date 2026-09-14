@@ -80,6 +80,18 @@ test('park remedies are a null-prototype dictionary', () => {
   assert.equal(PARK_REMEDIES.toString, undefined);
 });
 
+test('MERGEORDER-01: protective predecessor park reasons carry operator remedies', () => {
+  for (const reason of [
+    'protective-predecessor-open',
+    'protective-predecessor-state-unreadable',
+    'protective-predecessor-not-found',
+    'protective-predecessor-malformed-trailer',
+  ]) {
+    assert.equal(typeof PARK_REMEDIES[reason], 'string', `${reason} needs a remedy`);
+    assert.notEqual(PARK_REMEDIES[reason].trim(), '');
+  }
+});
+
 test('a repeat park with the same reason increments and preserves firstObservedAt', () => {
   withRoot((rootDir) => {
     const args = {

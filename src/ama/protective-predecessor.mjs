@@ -1,4 +1,10 @@
 const PROTECTIVE_PREDECESSOR_TRAILER = 'Protects-Against-Unsafe-Merge-Until-PR';
+export const PROTECTIVE_PREDECESSOR_HOLD_REASONS = Object.freeze(new Set([
+  'protective-predecessor-open',
+  'protective-predecessor-state-unreadable',
+  'protective-predecessor-not-found',
+  'protective-predecessor-malformed-trailer',
+]));
 
 function normalizePrNumber(value) {
   const text = String(value ?? '').trim();
@@ -163,5 +169,6 @@ export function hasMergedDependentProtectingPr({
 
 export const __testables__ = Object.freeze({
   PROTECTIVE_PREDECESSOR_TRAILER,
+  PROTECTIVE_PREDECESSOR_HOLD_REASONS,
   normalizePrNumber,
 });

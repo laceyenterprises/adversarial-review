@@ -3043,6 +3043,38 @@ test('MERGEORDER-01: findings-present protective hold suppresses hammer before d
   }
 });
 
+test('MERGEORDER-01: daemon protective hold reasons do not fall through to hammer', async () => {
+  for (const reason of [
+    'protective-predecessor-open',
+    'protective-predecessor-state-unreadable',
+    'protective-predecessor-not-found',
+    'protective-predecessor-malformed-trailer',
+  ]) {
+    const rootDir = tempRoot();
+    try {
+      let closerCalls = 0;
+      const result = await maybeDispatchAmaClosureFor({
+        ...baseArgs(rootDir),
+        runDaemonCleanMergeAttemptImpl: async () => ({
+          disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN,
+          reason,
+        }),
+        maybeDispatchAmaCloserImpl: async () => {
+          closerCalls += 1;
+          return { dispatched: true };
+        },
+      });
+
+      assert.equal(closerCalls, 0, `${reason} must not dispatch HAM`);
+      assert.equal(result.dispatched, false);
+      assert.equal(result.skipMergeAgent, true);
+      assert.equal(result.reason, reason);
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  }
+});
+
 test('Deliverable 2: daemon fail-closed pr-not-mergeable (conflict) routes to the capped hammer for rebase', async () => {
   const rootDir = tempRoot();
   try {

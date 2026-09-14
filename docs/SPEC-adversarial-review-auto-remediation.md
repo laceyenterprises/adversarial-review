@@ -2047,13 +2047,15 @@ Concrete contract example used by operator docs and regression tests:
 6. If the same `Comment only` review still lists a real blocking issue, the watcher returns `skip-blockers-present` (ARP-06 / #157) and keeps the PR out of the merge path until a fresh structured clean review or a scoped current-head operator override exists.
 
 Protective predecessor declarations are merge-order holds, not advisory text.
-Authors declare them as normal PR-body text outside fenced code blocks with a
-bare trailer such as `Protects-Against-Unsafe-Merge-Until-PR: #1234`. Fenced
-trailer-looking lines are ignored by both parser implementations. Every
-autonomous path that can land a PR must honor a parsed declaration before
-calling GitHub merge: the watcher evaluates it before the daemon/hammer fork,
-and the hammer prompt re-checks it immediately before its lease-guarded
-`gh pr merge` loop.
+Authors declare them with a bare full-line trailer such as
+`Protects-Against-Unsafe-Merge-Until-PR: #1234`. The parser is intentionally
+line-oriented: any exact full-line trailer arms the hold, including inside
+fenced code blocks. Documentation examples must break the trailer name, for
+example `Protects-Against-Unsafe-Merge-Until-PR (example): #1234`, when they
+should not arm a real hold. Every autonomous path that can land a PR must honor
+a parsed declaration before calling GitHub merge: the watcher evaluates it
+before the daemon/hammer fork, and the hammer prompt re-checks it immediately
+before its lease-guarded `gh pr merge` loop.
 
 #### Why a fifth dispatch path exists
 

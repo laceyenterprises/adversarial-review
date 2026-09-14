@@ -72,6 +72,10 @@ may merge. Multiple trailer lines are allowed and are enforced as a union. A
 self-reference is malformed and must not create a permanent hold. Trailer-looking
 lines that cannot be parsed fail closed with
 `protective-predecessor-malformed-trailer` instead of silently allowing a merge.
+The parser is line-oriented and does not strip fenced code blocks; any exact
+full-line trailer arms the hold. Documentation examples must break the trailer
+name, such as `Protects-Against-Unsafe-Merge-Until-PR (example): #1234`, when
+they should not create a real hold.
 
 Every autonomous merge path that can land a PR must honor the declaration before
 calling GitHub merge: the daemon clean merge path, the HAM terminal inline merge

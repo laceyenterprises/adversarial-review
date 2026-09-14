@@ -6060,6 +6060,7 @@ test('fetchMergeAgentCandidate fetches operator label events in parallel', async
 });
 
 test('fetchMergeAgentCandidate returns raw AMA gate fields needed by watcher dispatch', async () => {
+  const prBody = 'Protects-Against-Unsafe-Merge-Until-PR: #400';
   const calls = [];
   const candidate = await fetchMergeAgentCandidate('laceyenterprises/agent-os', 401, {
     env: { GITHUB_TOKEN: 'test-token' },
@@ -6073,7 +6074,7 @@ test('fetchMergeAgentCandidate returns raw AMA gate fields needed by watcher dis
             headRefName: 'feature/pr-401',
             baseRefName: 'main',
             headRefOid: 'abc123',
-            body: '',
+            body: prBody,
             labels: [],
             statusCheckRollup: [
               { __typename: 'CheckRun', name: 'lint', conclusion: 'SUCCESS' },
@@ -6096,6 +6097,7 @@ test('fetchMergeAgentCandidate returns raw AMA gate fields needed by watcher dis
   });
 
   assert.equal(candidate.mergeStateStatus, 'CLEAN');
+  assert.equal(candidate.body, prBody);
   assert.equal(candidate.statusCheckRollup[0].name, 'lint');
   assert.deepEqual(candidate.branchProtection.requiredContexts, ['agent-os/adversarial-gate', 'ci/test']);
   assert.ok(calls.some((args) => args[0] === 'api' && String(args[1]).includes('/branches/main/protection')));

@@ -29,6 +29,7 @@ import {
   findMalformedProtectivePredecessorLines,
   isProtectorOpen,
   parseProtectivePredecessorDeclaration,
+  PROTECTIVE_PREDECESSOR_HOLD_REASONS,
   protectivePredecessorMergeWindowFinding,
   resolveProtectivePredecessorDeclaration,
 } from './ama/protective-predecessor.mjs';
@@ -167,7 +168,7 @@ async function fetchProtectivePredecessorStateForPr({
   }
 }
 
-async function fetchMergedProtectiveDependentsForPr({
+export async function fetchMergedProtectiveDependentsForPr({
   repo,
   prNumber,
   execFileImpl = execFileAsync,
@@ -201,11 +202,7 @@ async function fetchMergedProtectiveDependentsForPr({
       execFileImpl,
       args: [
         'api',
-        'search/issues',
-        '-f',
-        `q=${query}`,
-        '-f',
-        'per_page=50',
+        `search/issues?q=${encodeURIComponent(query)}&per_page=50`,
       ],
       timeoutMs: 30_000,
       log: logger,
@@ -1508,8 +1505,7 @@ export async function maybeDispatchAmaClosureFor({
   if (
     daemonCleanMerge?.disposition === DAEMON_MERGE_DISPOSITION.NOT_TAKEN &&
     (
-      daemonCleanMerge.reason === 'protective-predecessor-open' ||
-      daemonCleanMerge.reason === 'protective-predecessor-state-unreadable'
+      PROTECTIVE_PREDECESSOR_HOLD_REASONS.has(daemonCleanMerge.reason)
     )
   ) {
     const daemonHeadShort = String(gateSnapshot?.reviewedHeadSha || '').slice(0, 12);

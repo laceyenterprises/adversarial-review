@@ -48,6 +48,19 @@ const PARK_REMEDIES = Object.freeze(Object.assign(Object.create(null), {
   'lease-not-held':
     'The daemon could not take the shared merge lease. Check for a stale or orphaned '
     + 'lease under data/merge-leases and the ama-closer lease reaper.',
+  'protective-predecessor-open':
+    'Merge or close the declared protective predecessor PR, or update the dependent PR body '
+    + 'if the declaration names the wrong protector.',
+  'protective-predecessor-state-unreadable':
+    'Retry after GitHub state reads recover. If the failure persists, inspect credentials, '
+    + 'API availability, and whether the protector PR is visible to the merge authority.',
+  'protective-predecessor-not-found':
+    'Fix the dependent PR body so the protective predecessor trailer names an existing PR, '
+    + 'or remove the trailer if the hold is no longer required.',
+  'protective-predecessor-malformed-trailer':
+    'Fix the dependent PR body so each protective predecessor trailer is exactly '
+    + '`Protects-Against-Unsafe-Merge-Until-PR: #<number>`, or break example lines so '
+    + 'they do not start with the trailer name.',
 }));
 
 function repoSlug(repo) {

@@ -1848,6 +1848,97 @@ test('a CI-stopped rereview with a released claim is not first-pass starvation',
   assert.equal(snapshot.deferredRereviews.oldest.reviewerClaimStarts, 1);
   assert.equal(snapshot.deferredRereviews.oldest.claimedAndReleased, true);
   assert.equal(snapshot.queuedRereviews.count, 0);
+  const finding = snapshot.findings.find((item) => item.code === 'review:rereview_deferred');
+  assert.match(finding?.recommended_action, /No follow-up job is running/);
+  assert.match(finding?.recommended_action, /requeue remediation or re-arm re-review manually/);
+});
+
+test('a stopped CI regression job older than the rereview request does not defer the queue', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 6839,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T11:14:00.000Z',
+    lastAttemptedAt: '2026-05-25T12:00:00.000Z',
+    reviewAttempts: 0,
+    failedAt: '2026-05-25T12:00:00.000Z',
+    rereviewRequestedAt: '2026-05-25T16:00:00.000Z',
+    failureMessage:
+      '[ci-regression-stopped] fast-python-guards=FAILURE, repo-guards=CANCELLED',
+  });
+  insertReviewerPass(rootDir, {
+    prNumber: 6839,
+    attemptNumber: 1,
+    passKind: 'rereview',
+    status: 'failed',
+    startedAt: '2026-05-25T11:59:00.000Z',
+    endedAt: '2026-05-25T12:00:00.000Z',
+    metadata: { failureClass: 'ci-regression-stopped' },
+  });
+  writeJob(rootDir, 'stopped', 'job-6839', {
+    kind: 'adversarial-review-follow-up',
+    jobId: 'laceyenterprises__agent-os-pr-6839-2026-09-14T12-00-00-000Z',
+    repo: REPO,
+    prNumber: 6839,
+    createdAt: '2026-05-25T11:50:00.000Z',
+    stoppedAt: '2026-05-25T12:00:00.000Z',
+    stopReason: 'ci-regression-stopped',
+  });
+  seedFreshReconcile(rootDir);
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    config: { queueStarvationMaxAgeMs: 10 * 60 * 1000 },
+  });
+
+  assert.equal(snapshot.deferredRereviews.count, 0);
+  assert.equal(snapshot.queuedRereviews.count, 1);
+  assert.equal(snapshot.queuedRereviews.oldest.prNumber, 6839);
+  assert.equal(snapshot.queuedRereviews.oldest.requestedAt, '2026-05-25T16:00:00.000Z');
+  assert.equal(snapshot.queuedRereviews.oldest.readinessSource, 'rereview-requested');
+});
+
+test('a stopped job only defers CI regression rereviews when stopReason is structured', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 6840,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T11:14:00.000Z',
+    lastAttemptedAt: '2026-05-25T16:05:00.000Z',
+    reviewAttempts: 0,
+    failedAt: '2026-05-25T16:05:00.000Z',
+    failureMessage: '[operator-cancelled] follow-up job stopped by hand',
+  });
+  insertReviewerPass(rootDir, {
+    prNumber: 6840,
+    attemptNumber: 1,
+    passKind: 'rereview',
+    status: 'failed',
+    startedAt: '2026-05-25T16:04:00.000Z',
+    endedAt: '2026-05-25T16:05:00.000Z',
+    metadata: { failureClass: 'operator-cancelled' },
+  });
+  writeJob(rootDir, 'stopped', 'job-6840', {
+    kind: 'adversarial-review-follow-up',
+    jobId: 'laceyenterprises__agent-os-pr-6840-2026-09-14T16-05-00-000Z',
+    repo: REPO,
+    prNumber: 6840,
+    stoppedAt: '2026-05-25T16:05:00.000Z',
+    stopReason: 'operator-cancelled',
+    reviewBody: 'Blocking issue: the ci-regression classifier is wrong here.',
+  });
+  seedFreshReconcile(rootDir);
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    config: { queueStarvationMaxAgeMs: 10 * 60 * 1000 },
+  });
+
+  assert.equal(snapshot.deferredRereviews.count, 0);
+  assert.equal(snapshot.queuedRereviews.count, 1);
+  assert.equal(snapshot.queuedRereviews.oldest.prNumber, 6840);
 });
 
 test('lane-share supermajority requires a non-empty verified first-pass backlog after filtering', () => {
@@ -1895,9 +1986,11 @@ test('lane-share supermajority requires a non-empty verified first-pass backlog 
   const snapshot = collectReviewPipelineHealth({
     rootDir,
     now: () => new Date(NOW),
-    configOverrides: { reviewLaneShareSupermajorityMinPasses: 5 },
+    config: { reviewLaneShareSupermajorityMinPasses: 5 },
   });
 
+  assert.equal(snapshot.reviewerCapacity.totalPasses, 5);
+  assert.equal(snapshot.reviewerCapacity.rereviewPasses, 5);
   assert.equal(snapshot.firstPassQueue.firstPassPrs.length, 0);
   assert.ok(!findingCodes(snapshot).includes('review:queue_starvation'));
   assert.ok(!findingCodes(snapshot).includes('review:review_lane_share_supermajority'));

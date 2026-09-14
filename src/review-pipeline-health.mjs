@@ -297,7 +297,7 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     category: 'review-pipeline',
     thresholdKey: 'queueStarvationMaxAgeMs',
     defaultThreshold: DEFAULT_QUEUE_STARVATION_MAX_AGE_MS,
-    thresholdDescription: 'one or more pending re-reviews have aged while intentionally deferred behind an active or requeued follow-up job',
+    thresholdDescription: 'one or more pending re-reviews have aged while intentionally deferred behind an active, requeued, or CI-regression-stopped follow-up job',
   },
   {
     code: 'review:rereview_queue_wait',
@@ -1817,25 +1817,28 @@ function stoppedCiRegressionJobsByPr(followUpJobs) {
     const repo = entry.job?.repo || null;
     const prNumber = entry.job?.prNumber || null;
     if (!repo || !prNumber) continue;
-    const reason = String(
-      entry.job?.stopReason ||
-      entry.job?.stoppedReason ||
-      entry.job?.reason ||
-      entry.job?.requeueReason ||
-      entry.job?.statusReason ||
-      ''
-    );
-    const serialized = `${reason}\n${JSON.stringify(entry.job || {})}`;
-    if (!/ci-regression|failed external CI/i.test(serialized)) continue;
+    if (entry.job?.stopReason !== 'ci-regression-stopped') continue;
     const terminalAt = terminalJobTimestamp(entry.job, entry.stat?.mtimeMs);
     const terminalAtMs = toMs(terminalAt);
+    if (terminalAtMs === null) continue;
     const key = `${repo}#${prNumber}`;
     const existing = stoppedJobsByPr.get(key);
-    if (!existing || (terminalAtMs ?? 0) > (existing.terminalAtMs ?? 0)) {
+    if (!existing || terminalAtMs > existing.terminalAtMs) {
       stoppedJobsByPr.set(key, { ...entry, terminalAt, terminalAtMs, deferralReason: 'ci-regression-stopped' });
     }
   }
   return stoppedJobsByPr;
+}
+
+function followUpJobIsAtOrAfter(jobEntry, timestamp) {
+  const timestampMs = toMs(timestamp);
+  return timestampMs === null || jobEntry.terminalAtMs >= timestampMs;
+}
+
+function stoppedCiRegressionJobDefersRow(jobEntry, row) {
+  return jobEntry
+    && followUpJobIsAtOrAfter(jobEntry, row.rereview_requested_at)
+    && followUpJobIsAtOrAfter(jobEntry, row.failed_at);
 }
 
 function jobAgeAnchor(entry) {
@@ -1860,10 +1863,10 @@ function publicDeferredRereviewDetails(summary) {
   };
 }
 
-function summarizeDeferredRereviews(db, followUpJobs, { nowMs }) {
+function summarizeDeferredRereviews(db, followUpJobs, { nowMs, stoppedCiRegressionJobs = null }) {
   if (!db) return { count: 0, oldest: null, prs: [] };
   const activeJobsByPr = activeFollowUpJobsByPr(followUpJobs);
-  const stoppedCiRegressionJobs = stoppedCiRegressionJobsByPr(followUpJobs);
+  const stoppedCiJobs = stoppedCiRegressionJobs || stoppedCiRegressionJobsByPr(followUpJobs);
   const rows = safeAll(
     db,
     `SELECT repo,
@@ -1908,7 +1911,9 @@ function summarizeDeferredRereviews(db, followUpJobs, { nowMs }) {
     if (passKind !== 'rereview') continue;
     const key = `${row.repo}#${row.pr_number}`;
     const activeJob = activeJobsByPr.get(key);
-    const stoppedCiJob = stoppedCiRegressionJobs.get(key);
+    const stoppedCiJob = stoppedCiRegressionJobDefersRow(stoppedCiJobs.get(key), row)
+      ? stoppedCiJobs.get(key)
+      : null;
     const deferringJob = activeJob || stoppedCiJob;
     if (!deferringJob) continue;
     const deferredSince =
@@ -1918,9 +1923,9 @@ function summarizeDeferredRereviews(db, followUpJobs, { nowMs }) {
       row.reviewed_at ||
       row.posted_at ||
       null;
-    const reason = stoppedCiJob?.deferralReason || (activeJob.state === 'in_progress'
-      ? 'active-follow-up-job'
-      : 'remediation-requeued');
+    const reason = activeJob
+      ? (activeJob.state === 'in_progress' ? 'active-follow-up-job' : 'remediation-requeued')
+      : stoppedCiJob.deferralReason;
     prs.push({
       repo: row.repo,
       prNumber: row.pr_number,
@@ -1946,10 +1951,10 @@ function summarizeDeferredRereviews(db, followUpJobs, { nowMs }) {
   return { count: prs.length, oldest: prs[0] || null, prs };
 }
 
-function summarizeQueuedRereviews(db, followUpJobs, { nowMs }) {
+function summarizeQueuedRereviews(db, followUpJobs, { nowMs, stoppedCiRegressionJobs = null }) {
   if (!db) return { count: 0, oldest: null, prs: [] };
   const activeJobsByPr = activeFollowUpJobsByPr(followUpJobs);
-  const stoppedCiRegressionJobs = stoppedCiRegressionJobsByPr(followUpJobs);
+  const stoppedCiJobs = stoppedCiRegressionJobs || stoppedCiRegressionJobsByPr(followUpJobs);
   const terminalJobsByPr = terminalFollowUpJobsByPr(followUpJobs);
   const rows = safeAll(
     db,
@@ -1999,7 +2004,7 @@ function summarizeQueuedRereviews(db, followUpJobs, { nowMs }) {
     if (passKind !== 'rereview') continue;
     const key = `${row.repo}#${row.pr_number}`;
     if (activeJobsByPr.has(key)) continue;
-    if (stoppedCiRegressionJobs.has(key)) continue;
+    if (stoppedCiRegressionJobDefersRow(stoppedCiJobs.get(key), row)) continue;
     const candidateTerminalJob = terminalJobsByPr.get(key);
     const failedAtMs = toMs(row.failed_at);
     const terminalJob = candidateTerminalJob
@@ -2019,7 +2024,7 @@ function summarizeQueuedRereviews(db, followUpJobs, { nowMs }) {
       prNumber: row.pr_number,
       requestedAt,
       ageMs: ageMs(nowMs, requestedAt),
-      readinessSource: terminalJob ? 'follow-up-job-terminal' : (row.rereview_requested_at ? 'rereview-requested' : 'reviewer-failure'),
+      readinessSource: row.rereview_requested_at ? 'rereview-requested' : (terminalJob ? 'follow-up-job-terminal' : 'reviewer-failure'),
       jobId: terminalJob?.job?.jobId || null,
       jobKind: terminalJob?.job?.kind || null,
       reason: String(row.rereview_reason || '').slice(0, 300) || null,
@@ -3588,7 +3593,9 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
       )),
       recommendedAction: sample.reason === 'active-follow-up-job'
         ? 'Wait for the active follow-up job to finish or inspect that job if it stalls. Do not bounce watcher or reviewer capacity for this signal alone.'
-        : 'Let the requeued remediation run and re-arm re-review when it completes. Do not treat this as reviewer starvation.',
+        : (sample.reason === 'ci-regression-stopped'
+            ? 'No follow-up job is running. Inspect the failing external CI checks on the PR head, then requeue remediation or re-arm re-review manually after CI is fixed.'
+            : 'Let the requeued remediation run and re-arm re-review when it completes. Do not treat this as reviewer starvation.'),
       observedAt,
       details: {
         ...publicDetails,
@@ -4256,14 +4263,15 @@ function collectReviewPipelineHealth({
       ? summarizeCiBlockedRereviews(db, { nowMs })
       : { count: 0, oldest: null, prs: [] };
     const followUpQueues = summarizeFollowUpQueues(rootDir, { nowMs, config });
+    const stoppedCiRegressionJobs = stoppedCiRegressionJobsByPr(followUpQueues.jobs);
     const queuedRereviews = db
-      ? summarizeQueuedRereviews(db, followUpQueues.jobs, { nowMs })
+      ? summarizeQueuedRereviews(db, followUpQueues.jobs, { nowMs, stoppedCiRegressionJobs })
       : { count: 0, oldest: null, prs: [] };
     const malformedPrTitles = db
       ? summarizeMalformedPrTitles(db)
       : { count: 0, prs: [] };
     const deferredRereviews = db
-      ? summarizeDeferredRereviews(db, followUpQueues.jobs, { nowMs })
+      ? summarizeDeferredRereviews(db, followUpQueues.jobs, { nowMs, stoppedCiRegressionJobs })
       : { count: 0, oldest: null, prs: [] };
     const operationalBlockers = summarizeOperationalBlockers(followUpQueues.jobs, { nowMs });
     const reviewerDegradation = summarizeReviewerDegradation(rootDir, db, { nowMs });

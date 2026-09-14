@@ -2923,9 +2923,10 @@ function schemaV1() {
             __max: 0.5,
           },
           // Pre-alarm first-pass age that temporarily raises the first-pass
-          // floor to half the pool while rereviews are also queued. This uses
-          // the same queue-age signal pipeline-health reports as
-          // oldestFirstPass, but acts before queue_starvation's later page.
+          // floor to half the pool while rereviews are also queued. Production
+          // dispatch candidates carry the same durable pending-since signal
+          // pipeline-health reports as oldestFirstPass, but this acts before
+          // queue_starvation's later page.
           review_lane_first_pass_urgent_age_ms: {
             __type: TYPE_INT,
             __default: 300000,

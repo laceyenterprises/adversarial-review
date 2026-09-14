@@ -29,6 +29,8 @@ function candidate(prNumber, run, createdAt = `2026-05-01T00:00:${String(prNumbe
     reviewerModel: options.reviewerModel,
     subject: { createdAt },
     current: options.current ?? null,
+    pendingSince: options.pendingSince,
+    pendingSinceMs: options.pendingSinceMs,
     enqueuedAtMs: options.enqueuedAtMs,
     wakePriority: options.wakePriority,
     run,
@@ -180,7 +182,10 @@ test('reviewer dispatch raises the first-pass floor when queued first-pass work 
     ...Array.from({ length: 5 }, (_unused, index) => candidate(90 + index, async () => {
       started.push(`first-pass:${90 + index}`);
       await hold;
-    }, `2026-05-01T00:00:${10 + index}.000Z`, { enqueuedAtMs: index * 1000 })),
+    }, `2026-05-01T00:00:${10 + index}.000Z`, {
+      pendingSinceMs: index * 1000,
+      enqueuedAtMs: (6 * 60 * 1000) - 1000,
+    })),
   ];
 
   const runPromise = runBoundedReviewerDispatchQueue(tasks, {
@@ -229,7 +234,10 @@ test('oldest first-pass age raises its floor before the age alarm', async () => 
     ...Array.from({ length: 5 }, (_unused, index) => candidate(90 + index, async () => {
       started.push(`first-pass:${90 + index}`);
       await hold;
-    }, `2026-05-01T00:00:${10 + index}.000Z`, { enqueuedAtMs: index * 1000 })),
+    }, `2026-05-01T00:00:${10 + index}.000Z`, {
+      pendingSince: `2026-05-01T00:00:0${index}.000Z`,
+      enqueuedAtMs: Date.parse('2026-05-01T00:05:59.000Z'),
+    })),
   ];
 
   const runPromise = runBoundedReviewerDispatchQueue(tasks, {
@@ -239,7 +247,7 @@ test('oldest first-pass age raises its floor before the age alarm', async () => 
       firstPassUrgentAgeMs: 5 * 60 * 1000,
     }),
     logger: { error() {}, log() {}, warn() {} },
-    now: () => 6 * 60 * 1000,
+    now: () => Date.parse('2026-05-01T00:06:00.000Z'),
   });
   await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -689,6 +697,45 @@ test('reviewer lane floor is not satisfied by a skipped rereview admission', asy
 
   assert.equal(summary.dispatched, 2);
   assert.deepEqual(events, ['skip:10', 'rereview:11', 'first-pass:90']);
+});
+
+test('single-wave startability probe does not spend lane admission budget', async () => {
+  const events = [];
+  const laneState = createReviewerLaneState({ firstPassBurstLimit: 2, minShare: 0.5 });
+  laneState.firstPassStartsSinceRereview = 2;
+
+  const pendingRereview = (at) => ({
+    posted_at: null,
+    rereview_requested_at: at,
+  });
+  const summary = await runBoundedReviewerDispatchQueue([
+    candidate(10, async () => {
+      events.push('rereview:10');
+      return { dispatched: false, reason: 'head-dispatch-lease-held' };
+    }, '2026-05-01T00:00:00.000Z', {
+      current: pendingRereview('2026-05-01T00:05:00.000Z'),
+    }),
+    candidate(11, async () => {
+      events.push('rereview:11');
+    }, '2026-05-01T00:00:01.000Z', {
+      current: pendingRereview('2026-05-01T00:05:01.000Z'),
+    }),
+    candidate(90, async () => {
+      events.push('first-pass:90');
+    }, '2026-05-09T00:00:00.000Z'),
+    candidate(91, async () => {
+      events.push('first-pass:91');
+    }, '2026-05-10T00:00:00.000Z'),
+  ], {
+    maxConcurrent: 1,
+    singleWave: true,
+    singleWaveSettleGraceMs: 0,
+    laneState,
+    logger: { error() {}, log() {}, warn() {} },
+  });
+
+  assert.equal(summary.dispatched, 1);
+  assert.deepEqual(events, ['rereview:10', 'rereview:11']);
 });
 
 test('reviewer lane state persists across single-slot drain ticks', async () => {

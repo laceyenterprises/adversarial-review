@@ -139,6 +139,18 @@ The Grafana dashboard lives at
   rereview gets the next lane slot. Skipped admissions such as
   `head-dispatch-lease-held`, `already-reviewed-head`, or
   `memory-admission-deferred` do not spend or reset the burst budget.
+- `watcher.review_lane_min_share` (default `0.25`, canonical env
+  `AGENT_OS_WATCHER_REVIEW_LANE_MIN_SHARE`) gives each non-priority lane a
+  ceiling-rounded floor share of effective reviewer concurrency while both
+  first-pass and rereview work are pending. Values are clamped to `0..0.5`;
+  `0` disables the cross-lane floor and leaves only the burst-limit ordering.
+- `watcher.review_lane_first_pass_urgent_age_ms` (default `300000`, canonical
+  env `AGENT_OS_WATCHER_REVIEW_LANE_FIRST_PASS_URGENT_AGE_MS`) raises the
+  first-pass floor to at least half the pool while rereviews are queued and the
+  oldest pending first-pass row has waited past the threshold. The watcher uses
+  the durable pending-since timestamp from `reviewed_prs` (`reviewed_at` or
+  `last_attempted_at` for first-pass rows), matching the `oldestFirstPass` age
+  signal reported by pipeline health rather than the per-tick enqueue time.
 - Keychain-mode Claude reviewer runtime probes use the same unprivileged
   `launchctl asuser <uid> /usr/bin/true` primitive as reviewer spawn.
   Broker-mode Claude reviewer launches bypass launchctl, so the AFH runtime

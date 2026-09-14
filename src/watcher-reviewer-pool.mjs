@@ -384,8 +384,7 @@ function laneFairnessPreference({
   laneCounts = null,
   laneStarts = null,
   concurrencyLimit = DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX,
-  nowMs = Date.now(),
-  pendingEntries = [],
+  pendingFirstPassAgeMs = null,
 } = {}) {
   const counts = laneCounts || { firstPass: 0, rereview: 0 };
   if (!(counts.firstPass > 0 && counts.rereview > 0)) return 0;
@@ -401,12 +400,13 @@ function laneFairnessPreference({
   const baseFloor = reviewerLaneFloor({ concurrencyLimit, minShare });
   if (baseFloor > 0) {
     const starts = laneStarts || { firstPass: 0, rereview: 0 };
-    const effectiveNowMs = Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now();
     const urgentAgeMs = parsePositiveInteger(
       laneState?.firstPassUrgentAgeMs,
       DEFAULT_REVIEW_LANE_FIRST_PASS_URGENT_AGE_MS,
     );
-    const firstPassAgeMs = oldestFirstPassAgeMs(pendingEntries, effectiveNowMs);
+    const firstPassAgeMs = Number.isFinite(Number(pendingFirstPassAgeMs))
+      ? Number(pendingFirstPassAgeMs)
+      : null;
     const firstPassFloor = firstPassAgeMs !== null && firstPassAgeMs >= urgentAgeMs
       ? Math.min(concurrencyLimit, Math.max(baseFloor, Math.ceil(concurrencyLimit / 2)))
       : baseFloor;
@@ -438,8 +438,7 @@ function compareReviewerDispatchEntries(
     laneCounts = null,
     laneStarts = null,
     concurrencyLimit = DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX,
-    nowMs = Date.now(),
-    pendingEntries = [],
+    pendingFirstPassAgeMs = null,
   } = {},
 ) {
   const aWake = a?.candidate?.wakePriority === true;
@@ -456,8 +455,7 @@ function compareReviewerDispatchEntries(
       laneCounts: counts,
       laneStarts,
       concurrencyLimit,
-      nowMs,
-      pendingEntries,
+      pendingFirstPassAgeMs,
     });
     if (fairness !== 0) return fairness;
 
@@ -489,13 +487,16 @@ function orderPendingReviewerDispatchEntries(
   } = {},
 ) {
   const laneCounts = pendingLaneCounts(entries);
+  const pendingFirstPassAgeMs = oldestFirstPassAgeMs(
+    entries,
+    Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now(),
+  );
   return [...entries].sort((a, b) => compareReviewerDispatchEntries(a, b, {
     laneState,
     laneCounts,
     laneStarts,
     concurrencyLimit,
-    nowMs,
-    pendingEntries: entries,
+    pendingFirstPassAgeMs,
   }));
 }
 
@@ -516,6 +517,14 @@ function reviewerDispatchAgeMs(candidate, nowMs = Date.now()) {
 }
 
 function reviewerDispatchWaitMs(candidate, nowMs = Date.now()) {
+  if (
+    typeof candidate?.pendingSinceMs === 'number'
+    && Number.isFinite(candidate.pendingSinceMs)
+  ) {
+    return Math.max(0, nowMs - candidate.pendingSinceMs);
+  }
+  const pendingSince = parseSortTimeMs(candidate?.pendingSince);
+  if (pendingSince !== null) return Math.max(0, nowMs - pendingSince);
   if (
     typeof candidate?.enqueuedAtMs === 'number'
     && Number.isFinite(candidate.enqueuedAtMs)
@@ -932,7 +941,6 @@ async function runBoundedReviewerDispatchQueue(candidates, {
         );
         continue;
       }
-      recordLaneAdmission(entry.candidate);
       return entry;
     }
     return null;
@@ -964,6 +972,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
     ) {
       entry.started = true;
       const startedEntry = entry;
+      recordLaneAdmission(startedEntry.candidate);
       const promise = start(startedEntry.candidate);
       if (typeof onCandidateStarted === 'function') {
         try {

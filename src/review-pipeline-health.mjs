@@ -121,6 +121,7 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_afh_fallback_edge_share',
   'review_pipeline_afh_fallback_supermajority_active',
   'review_pipeline_first_pass_queue_depth',
+  'review_pipeline_pending_queue_depth',
   'review_pipeline_first_pass_wait_seconds',
   'review_pipeline_first_pass_oldest_pending_age_seconds',
   'review_pipeline_rereview_capacity_share',
@@ -165,6 +166,7 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_afh_fallback_edge_share: 'Windowed reviewer-selection share carried by one AFH reviewer fallback edge.',
   review_pipeline_afh_fallback_supermajority_active: 'Whether one AFH reviewer fallback edge carries a sustained configured supermajority of reviewer selections.',
   review_pipeline_first_pass_queue_depth: 'Current count of pending first-pass rows.',
+  review_pipeline_pending_queue_depth: 'Current count of pending first-pass or rereview rows.',
   review_pipeline_first_pass_wait_seconds: 'Wait in seconds of the oldest pending first-pass row, distinct from reviewer pass duration.',
   review_pipeline_first_pass_oldest_pending_age_seconds: 'Age in seconds of the oldest pending first-pass or rereview row (legacy combined queue signal).',
   review_pipeline_rereview_capacity_share: 'Windowed share of reviewer passes consumed by rereviews.',
@@ -1614,17 +1616,19 @@ function summarizeFirstPassQueue(db, { nowMs }) {
     `SELECT repo, pr_number, reviewed_at, rereview_requested_at, last_attempted_at, posted_at,
             failed_at, failure_message, review_attempts
        FROM reviewed_prs
-      WHERE pr_state = 'open'
+      WHERE COALESCE(pr_state, 'open') = 'open'
         AND review_status = 'pending'`
   );
   let oldest = null;
   let oldestFirstPass = null;
   const firstPassPrs = [];
+  let pendingDepth = 0;
   let failedCount = 0;
   for (const row of rows) {
     const pendingSince = row.rereview_requested_at || row.reviewed_at || row.last_attempted_at;
     const pendingAgeMs = ageMs(nowMs, pendingSince);
     if (pendingAgeMs === null) continue;
+    pendingDepth += 1;
     // A row can be pending for two very different reasons, and the operator
     // response differs: nothing ever picked it up (watcher/capacity problem), or
     // a reviewer RAN and exited non-zero, leaving the row pending for retry
@@ -1673,7 +1677,7 @@ function summarizeFirstPassQueue(db, { nowMs }) {
   }
   return {
     depth: firstPassPrs.length,
-    pendingDepth: rows.length,
+    pendingDepth,
     failedCount,
     oldest,
     oldestFirstPass,
@@ -1681,10 +1685,20 @@ function summarizeFirstPassQueue(db, { nowMs }) {
   };
 }
 
+const REREVIEW_DEFERRING_JOB_KINDS = new Set([
+  'adversarial-review-follow-up',
+  'remediation',
+]);
+
+function isRereviewDeferringFollowUpJob(job) {
+  return REREVIEW_DEFERRING_JOB_KINDS.has(String(job?.kind || ''));
+}
+
 function activeFollowUpJobsByPr(followUpJobs) {
   const activeJobsByPr = new Map();
   for (const entry of followUpJobs || []) {
     if (!['pending', 'in_progress'].includes(entry.state)) continue;
+    if (!isRereviewDeferringFollowUpJob(entry.job)) continue;
     const repo = entry.job?.repo || null;
     const prNumber = entry.job?.prNumber || null;
     if (!repo || !prNumber) continue;
@@ -1695,6 +1709,48 @@ function activeFollowUpJobsByPr(followUpJobs) {
     }
   }
   return activeJobsByPr;
+}
+
+function terminalFollowUpJobsByPr(followUpJobs) {
+  const terminalJobsByPr = new Map();
+  for (const entry of followUpJobs || []) {
+    if (!['completed', 'failed', 'stopped'].includes(entry.state)) continue;
+    if (!isRereviewDeferringFollowUpJob(entry.job)) continue;
+    const repo = entry.job?.repo || null;
+    const prNumber = entry.job?.prNumber || null;
+    if (!repo || !prNumber) continue;
+    const terminalAt = terminalJobTimestamp(entry.job, entry.stat?.mtimeMs);
+    const terminalAtMs = toMs(terminalAt);
+    if (terminalAtMs === null) continue;
+    const key = `${repo}#${prNumber}`;
+    const existing = terminalJobsByPr.get(key);
+    if (!existing || terminalAtMs > existing.terminalAtMs) {
+      terminalJobsByPr.set(key, { ...entry, terminalAt, terminalAtMs });
+    }
+  }
+  return terminalJobsByPr;
+}
+
+function jobAgeAnchor(entry) {
+  return entry?.job?.claimedAt
+    || entry?.job?.createdAt
+    || (entry?.stat?.mtimeMs ? new Date(entry.stat.mtimeMs).toISOString() : null);
+}
+
+function omitJobPath(pr) {
+  const copy = { ...pr };
+  delete copy.jobPath;
+  return copy;
+}
+
+function publicDeferredRereviewDetails(summary) {
+  const prs = (summary.prs || []).map(omitJobPath);
+  return {
+    ...summary,
+    oldest: summary.oldest ? omitJobPath(summary.oldest) : null,
+    prs: prs.slice(0, 10),
+    truncatedPrs: Math.max(0, prs.length - 10),
+  };
 }
 
 function summarizeDeferredRereviews(db, followUpJobs, { nowMs }) {
@@ -1749,7 +1805,8 @@ function summarizeDeferredRereviews(db, followUpJobs, { nowMs }) {
       reason,
       jobState: activeJob.state,
       jobId: activeJob.job?.jobId || null,
-      jobPath: activeJob.jobPath || null,
+      jobKind: activeJob.job?.kind || null,
+      jobAgeMs: ageMs(nowMs, jobAgeAnchor(activeJob)),
       reviewAttempts: Number(row.review_attempts || 0),
       reviewerHeadSha: row.reviewer_head_sha || null,
       revisionRef: row.revision_ref || null,
@@ -1764,6 +1821,7 @@ function summarizeDeferredRereviews(db, followUpJobs, { nowMs }) {
 function summarizeQueuedRereviews(db, followUpJobs, { nowMs }) {
   if (!db) return { count: 0, oldest: null, prs: [] };
   const activeJobsByPr = activeFollowUpJobsByPr(followUpJobs);
+  const terminalJobsByPr = terminalFollowUpJobsByPr(followUpJobs);
   const rows = safeAll(
     db,
     `SELECT repo,
@@ -1781,11 +1839,12 @@ function summarizeQueuedRereviews(db, followUpJobs, { nowMs }) {
        FROM reviewed_prs
       WHERE COALESCE(pr_state, 'open') = 'open'
         AND review_status = 'pending'
-      ORDER BY COALESCE(rereview_requested_at, failed_at, last_attempted_at, reviewed_at, posted_at) ASC,
+      ORDER BY COALESCE(NULLIF(rereview_requested_at, ''), failed_at, last_attempted_at, reviewed_at, posted_at) ASC,
                repo ASC,
                pr_number ASC`
   );
   const prs = [];
+  let oldest = null;
   for (const row of rows) {
     const passKind = reviewerDispatchPassKind({
       current: {
@@ -1794,29 +1853,42 @@ function summarizeQueuedRereviews(db, followUpJobs, { nowMs }) {
       },
     });
     if (passKind !== 'rereview') continue;
-    if (activeJobsByPr.has(`${row.repo}#${row.pr_number}`)) continue;
+    const key = `${row.repo}#${row.pr_number}`;
+    if (activeJobsByPr.has(key)) continue;
+    const candidateTerminalJob = terminalJobsByPr.get(key);
+    const failedAtMs = toMs(row.failed_at);
+    const terminalJob = candidateTerminalJob
+      && (failedAtMs === null || candidateTerminalJob.terminalAtMs >= failedAtMs)
+      ? candidateTerminalJob
+      : null;
     const requestedAt =
       row.rereview_requested_at ||
+      terminalJob?.terminalAt ||
       row.failed_at ||
       row.last_attempted_at ||
       row.reviewed_at ||
       row.posted_at ||
       null;
-    prs.push({
+    const pr = {
       repo: row.repo,
       prNumber: row.pr_number,
       requestedAt,
       ageMs: ageMs(nowMs, requestedAt),
+      readinessSource: terminalJob ? 'follow-up-job-terminal' : (row.rereview_requested_at ? 'rereview-requested' : 'reviewer-failure'),
+      jobId: terminalJob?.job?.jobId || null,
+      jobKind: terminalJob?.job?.kind || null,
       reason: String(row.rereview_reason || '').slice(0, 300) || null,
       reviewAttempts: Number(row.review_attempts || 0),
       reviewerHeadSha: row.reviewer_head_sha || null,
       revisionRef: row.revision_ref || null,
       failureMessage: String(row.failure_message || '').slice(0, 300) || null,
-    });
+    };
+    prs.push(pr);
+    if (pr.ageMs !== null && (!oldest || pr.ageMs > oldest.ageMs)) oldest = pr;
   }
   return {
     count: prs.length,
-    oldest: prs[0] || null,
+    oldest,
     prs,
   };
 }
@@ -3165,20 +3237,25 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     && snapshot.deferredRereviews.oldest?.ageMs > config.queueStarvationMaxAgeMs
   ) {
     const sample = snapshot.deferredRereviews.oldest || snapshot.deferredRereviews.prs[0];
+    const publicDetails = publicDeferredRereviewDetails(snapshot.deferredRereviews);
     findings.push(buildFinding({
       code: 'review:rereview_deferred',
       tier: 'ticket',
       subject: `${snapshot.deferredRereviews.count} re-review(s) intentionally deferred`,
       message: `${sample.repo}#${sample.prNumber} is waiting on purpose: ${sample.reason}`
         + (sample.jobId ? ` (${sample.jobId})` : '') + '.',
-      evidence: snapshot.deferredRereviews.prs.map((pr) => (
-        `deferred rereview ${pr.repo}#${pr.prNumber} reason=${pr.reason} job_state=${pr.jobState} attempts=${pr.reviewAttempts}`
+      evidence: snapshot.deferredRereviews.prs.slice(0, 5).map((pr) => (
+        `deferred rereview ${pr.repo}#${pr.prNumber} reason=${pr.reason} job_state=${pr.jobState} `
+        + `job_kind=${pr.jobKind || 'unknown'} job_age=${pr.jobAgeMs ?? 'unknown'}ms attempts=${pr.reviewAttempts}`
       )),
       recommendedAction: sample.reason === 'active-follow-up-job'
         ? 'Wait for the active follow-up job to finish or inspect that job if it stalls. Do not bounce watcher or reviewer capacity for this signal alone.'
         : 'Let the requeued remediation run and re-arm re-review when it completes. Do not treat this as reviewer starvation.',
       observedAt,
-      details: snapshot.deferredRereviews,
+      details: {
+        ...publicDetails,
+        thresholdMs: config.queueStarvationMaxAgeMs,
+      },
     }));
   }
 
@@ -3201,7 +3278,7 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
         `${oldestWaitingRereview.repo}#${oldestWaitingRereview.prNumber} has been queued for `
         + `re-review since ${oldestWaitingRereview.requestedAt || 'unknown'}, but no deferral reason `
         + 'was recorded.',
-      evidence: waitingRereviews.map((pr) => (
+      evidence: waitingRereviews.slice(0, 5).map((pr) => (
         `queued rereview ${pr.repo}#${pr.prNumber} requested=${pr.requestedAt || 'unknown'} attempts=${pr.reviewAttempts}`
       )),
       recommendedAction:
@@ -3212,7 +3289,8 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
       details: {
         count: waitingRereviews.length,
         oldest: oldestWaitingRereview,
-        prs: waitingRereviews,
+        prs: waitingRereviews.slice(0, 10),
+        truncatedPrs: Math.max(0, waitingRereviews.length - 10),
         thresholdMs: config.queueStarvationMaxAgeMs,
       },
     }));
@@ -4056,6 +4134,7 @@ function renderReviewPipelinePrometheus(snapshot) {
     snapshot.afhFallbackSupermajority?.active ? 1 : 0
   );
   pushMetric('review_pipeline_first_pass_queue_depth', {}, snapshot.firstPassQueue.depth);
+  pushMetric('review_pipeline_pending_queue_depth', {}, snapshot.firstPassQueue.pendingDepth);
   pushMetric(
     'review_pipeline_first_pass_wait_seconds',
     {},

@@ -1499,6 +1499,7 @@ test('a rereview deferred behind active remediation is not first-pass starvation
     failureMessage: '[ci-regression-requeued] CFG schema parity=FAILURE, repo-guards=FAILURE',
   });
   writeJob(rootDir, 'in-progress', 'job-6803', {
+    kind: 'adversarial-review-follow-up',
     jobId: 'laceyenterprises__agent-os-pr-6803-2026-09-14T04-27-38-241Z',
     repo: REPO,
     prNumber: 6803,
@@ -1513,9 +1514,13 @@ test('a rereview deferred behind active remediation is not first-pass starvation
   assert.equal(snapshot.deferredRereviews.count, 1);
   assert.equal(snapshot.deferredRereviews.oldest.reason, 'active-follow-up-job');
   assert.equal(snapshot.deferredRereviews.oldest.reviewAttempts, 1);
+  assert.equal(snapshot.deferredRereviews.oldest.jobKind, 'adversarial-review-follow-up');
+  assert.equal(snapshot.deferredRereviews.oldest.jobAgeMs, 108 * 60 * 1000);
   const finding = snapshot.findings.find((item) => item.code === 'review:rereview_deferred');
   assert.equal(finding.tier, 'ticket');
   assert.match(finding.message, /waiting on purpose: active-follow-up-job/);
+  assert.equal(finding.details.prs[0].jobPath, undefined);
+  assert.match(finding.evidence[0], /job_age=6480000ms/);
   assert.match(finding.recommended_action, /active follow-up job/);
   assert.equal(
     /check adversarial-watcher liveness and reviewer capacity/.test(finding.recommended_action),
@@ -1527,6 +1532,9 @@ test('a rereview deferred behind active remediation is not first-pass starvation
       + snapshot.queuedRereviews.count,
     snapshot.firstPassQueue.pendingDepth,
   );
+  const output = renderReviewPipelinePrometheus(snapshot);
+  assert.match(output, /^review_pipeline_first_pass_queue_depth 0$/m);
+  assert.match(output, /^review_pipeline_pending_queue_depth 1$/m);
 });
 
 test('a rereview with a completed remediation job remains visible in the rereview lane', () => {
@@ -1542,10 +1550,12 @@ test('a rereview with a completed remediation job remains visible in the rerevie
     failureMessage: '[ci-regression-requeued] CFG schema parity=FAILURE, repo-guards=FAILURE',
   });
   writeJob(rootDir, 'completed', 'job-6803', {
+    kind: 'adversarial-review-follow-up',
     jobId: 'laceyenterprises__agent-os-pr-6803-2026-09-14T04-27-38-241Z',
     repo: REPO,
     prNumber: 6803,
     createdAt: '2026-05-25T16:10:00.000Z',
+    completedAt: '2026-05-25T17:59:00.000Z',
   });
   seedFreshReconcile(rootDir);
 
@@ -1560,6 +1570,9 @@ test('a rereview with a completed remediation job remains visible in the rerevie
   assert.equal(snapshot.deferredRereviews.count, 0);
   assert.equal(snapshot.queuedRereviews.count, 1);
   assert.equal(snapshot.queuedRereviews.oldest.prNumber, 6803);
+  assert.equal(snapshot.queuedRereviews.oldest.requestedAt, '2026-05-25T17:59:00.000Z');
+  assert.equal(snapshot.queuedRereviews.oldest.ageMs, 60 * 1000);
+  assert.equal(snapshot.queuedRereviews.oldest.readinessSource, 'follow-up-job-terminal');
   assert.equal(snapshot.queuedRereviews.oldest.failureMessage?.startsWith('[ci-regression-requeued]'), true);
   assert.equal(
     snapshot.firstPassQueue.firstPassPrs.length
@@ -1568,8 +1581,69 @@ test('a rereview with a completed remediation job remains visible in the rerevie
     snapshot.firstPassQueue.pendingDepth,
   );
   const finding = snapshot.findings.find((item) => item.code === 'review:rereview_queue_wait');
-  assert.equal(finding.tier, 'ticket');
-  assert.match(finding.message, /queued for re-review/);
+  assert.equal(finding, undefined);
+});
+
+test('queued rereview oldest is selected by materialized age, not SQL empty-string order', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 6805,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T17:50:00.000Z',
+    postedAt: '2026-05-25T17:45:00.000Z',
+    rereviewRequestedAt: '',
+    failedAt: '2026-05-25T17:55:00.000Z',
+    reviewAttempts: 1,
+  });
+  insertReviewRow(rootDir, {
+    prNumber: 6806,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T16:00:00.000Z',
+    postedAt: '2026-05-25T15:45:00.000Z',
+    rereviewRequestedAt: '2026-05-25T16:30:00.000Z',
+    reviewAttempts: 2,
+  });
+  seedFreshReconcile(rootDir);
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    config: { queueStarvationMaxAgeMs: 10 * 60 * 1000 },
+  });
+
+  assert.equal(snapshot.queuedRereviews.count, 2);
+  assert.equal(snapshot.queuedRereviews.oldest.prNumber, 6806);
+});
+
+test('unrelated active follow-up jobs do not defer rereview admission', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 6807,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T16:00:00.000Z',
+    postedAt: '2026-05-25T15:45:00.000Z',
+    rereviewRequestedAt: '2026-05-25T16:30:00.000Z',
+    reviewAttempts: 2,
+  });
+  writeJob(rootDir, 'in-progress', 'job-6807-wake', {
+    kind: 'hammer-wake',
+    jobId: 'unrelated-wake-job',
+    repo: REPO,
+    prNumber: 6807,
+    createdAt: '2026-05-25T16:10:00.000Z',
+    claimedAt: '2026-05-25T16:12:00.000Z',
+  });
+  seedFreshReconcile(rootDir);
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    config: { queueStarvationMaxAgeMs: 10 * 60 * 1000 },
+  });
+
+  assert.equal(snapshot.deferredRereviews.count, 0);
+  assert.equal(snapshot.queuedRereviews.count, 1);
+  assert.equal(snapshot.queuedRereviews.oldest.prNumber, 6807);
 });
 
 test('an old rereview without a deferral reason reports the rereview lane, not first pass', () => {

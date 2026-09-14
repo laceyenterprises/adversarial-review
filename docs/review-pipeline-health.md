@@ -50,9 +50,12 @@ The Grafana dashboard lives at
   exists-but-unopenable case; keep any `collector_up == 0` page scoped to the
   missing-ledger case or downgrade it to avoid double-paging the same incident.
 - `review_pipeline_first_pass_queue_depth`: open first-pass PRs waiting in
-  `reviewed_prs.review_status='pending'`. The collector also keeps
-  `pendingDepth` in its JSON snapshot as the combined first-pass plus re-review
-  pending population.
+  `reviewed_prs.review_status='pending'`.
+- `review_pipeline_pending_queue_depth`: combined open first-pass plus
+  re-review rows waiting in `reviewed_prs.review_status='pending'`. Dashboard
+  panels or alerts that intentionally need the pre-split combined queue depth
+  should migrate to this metric; `review_pipeline_first_pass_queue_depth` is
+  first-pass only.
 - `review_pipeline_first_pass_wait_seconds`: age in seconds of the oldest
   pending first-pass row.
 - `review_pipeline_first_pass_oldest_pending_age_seconds`: age of the oldest

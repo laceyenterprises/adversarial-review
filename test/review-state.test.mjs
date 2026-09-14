@@ -17,7 +17,13 @@ function insertReviewRow(rootDir, overrides = {}) {
   try {
     ensureReviewStateSchema(db);
     db.prepare(
-      'INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, linear_ticket, review_status, review_attempts, last_attempted_at, posted_at, failed_at, failure_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      `INSERT INTO reviewed_prs (
+         repo, pr_number, reviewed_at, reviewer, pr_state, linear_ticket,
+         review_status, review_attempts, last_attempted_at, posted_at, failed_at,
+         failure_message, reviewer_session_uuid, reviewer_pgid, reviewer_started_at,
+         reviewer_head_sha, reviewer_timeout_ms, reviewer_lease_expires_at,
+         quota_reset_at_utc, revision_ref
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       overrides.repo || 'laceyenterprises/adversarial-review',
       overrides.prNumber || 10,
@@ -30,7 +36,15 @@ function insertReviewRow(rootDir, overrides = {}) {
       overrides.lastAttemptedAt ?? '2026-04-24T12:05:00.000Z',
       overrides.postedAt ?? '2026-04-24T12:06:00.000Z',
       overrides.failedAt ?? null,
-      overrides.failureMessage ?? null
+      overrides.failureMessage ?? null,
+      overrides.reviewerSessionUuid ?? null,
+      overrides.reviewerPgid ?? null,
+      overrides.reviewerStartedAt ?? null,
+      overrides.reviewerHeadSha ?? null,
+      overrides.reviewerTimeoutMs ?? null,
+      overrides.reviewerLeaseExpiresAt ?? null,
+      overrides.quotaResetAtUtc ?? null,
+      overrides.revisionRef ?? null
     );
   } finally {
     db.close();
@@ -731,7 +745,7 @@ test('requestReviewRereview preserves attempt history and records rereview metad
   assert.equal(result.reviewRow.rereview_reason, 'Remediation landed and is ready for another adversarial pass.');
 });
 
-test('requestReviewRereview does not erase released pending attempt history', () => {
+test('requestReviewRereview resets moved pending rows independent of reviewer handle residue', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   insertReviewRow(rootDir, {
     reviewStatus: 'pending',
@@ -740,6 +754,11 @@ test('requestReviewRereview does not erase released pending attempt history', ()
     postedAt: '2026-04-24T11:55:00.000Z',
     failedAt: '2026-04-24T12:06:00.000Z',
     failureMessage: 'Released reviewer claim after ci-regression-requeued.',
+    reviewerSessionUuid: 'session-lease-released',
+    reviewerStartedAt: '2026-04-24T12:04:00.000Z',
+    reviewerHeadSha: 'head-before-remediation',
+    reviewerTimeoutMs: 600000,
+    revisionRef: 'head-before-remediation',
   });
 
   const result = requestReviewRereview({
@@ -754,11 +773,51 @@ test('requestReviewRereview does not erase released pending attempt history', ()
   assert.equal(result.triggered, false);
   assert.equal(result.status, 'already-pending');
   assert.equal(result.reviewRow.review_status, 'pending');
-  assert.equal(result.reviewRow.review_attempts, 2);
+  assert.equal(result.reviewRow.review_attempts, 0);
   assert.equal(result.reviewRow.last_attempted_at, null);
   assert.equal(result.reviewRow.failed_at, null);
   assert.equal(result.reviewRow.failure_message, null);
+  assert.equal(result.reviewRow.reviewer_session_uuid, null);
+  assert.equal(result.reviewRow.reviewer_head_sha, null);
+  assert.equal(result.reviewRow.revision_ref, 'head-after-remediation');
   assert.equal(result.reviewRow.rereview_requested_at, '2026-04-24T12:10:00.000Z');
+});
+
+test('requestReviewRereview preserves pending attempt history for same-head operator retrigger', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: 'pending',
+    reviewAttempts: 2,
+    lastAttemptedAt: '2026-04-24T12:05:00.000Z',
+    postedAt: '2026-04-24T11:55:00.000Z',
+    failedAt: '2026-04-24T12:06:00.000Z',
+    failureMessage: 'Released reviewer claim after ci-regression-requeued.',
+    reviewerSessionUuid: 'session-lease-released',
+    reviewerStartedAt: '2026-04-24T12:04:00.000Z',
+    reviewerHeadSha: 'head-current',
+    reviewerTimeoutMs: 600000,
+    revisionRef: 'head-current',
+  });
+
+  const result = requestReviewRereview({
+    rootDir,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 10,
+    requestedAt: '2026-04-24T12:10:00.000Z',
+    targetRevisionRef: 'head-current',
+    reason: 'retrigger-review: retry current head',
+  });
+
+  assert.equal(result.triggered, false);
+  assert.equal(result.status, 'already-pending');
+  assert.equal(result.reviewRow.review_status, 'pending');
+  assert.equal(result.reviewRow.review_attempts, 2);
+  assert.equal(result.reviewRow.last_attempted_at, '2026-04-24T12:05:00.000Z');
+  assert.equal(result.reviewRow.failed_at, null);
+  assert.equal(result.reviewRow.failure_message, null);
+  assert.equal(result.reviewRow.reviewer_session_uuid, null);
+  assert.equal(result.reviewRow.rereview_requested_at, '2026-04-24T12:10:00.000Z');
+  assert.equal(result.reviewRow.rereview_reason, 'retrigger-review: retry current head');
 });
 
 test('requestReviewRereview re-arms CI-blocked rows through the normal reset CAS', () => {

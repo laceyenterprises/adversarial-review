@@ -502,6 +502,78 @@ test('follow-up daemon iteration preserves reconcile and closer reaper on wake-d
   assert.ok(calls.indexOf('retry-comments') > calls.indexOf('closer-worktree-reap'));
 });
 
+test('follow-up daemon iteration skips stuck rereview apply when env kill switch is disabled', async () => {
+  const calls = [];
+
+  await runFollowUpDaemonIteration({
+    env: { ADVERSARIAL_REVIEW_STUCK_REREVIEW_APPLY: '0' },
+    refreshFollowUpGithubTokenImpl: async () => {},
+    refreshReviewerBrokerTokensImpl: async () => ({ handoffSafe: [] }),
+    reconcileInProgressFollowUpJobsImpl: async () => {},
+    emitHeartbeatsForActiveJobsImpl: () => ({ scanned: 0, touched: 0, skipped: 0 }),
+    sweepStuckInProgressClaimsImpl: () => ({
+      scanned: 0,
+      reclaimed: 0,
+      skipped: 0,
+      thresholdMs: 1,
+      signalled: 0,
+      signalFailed: 0,
+      signalSkipped: 0,
+    }),
+    reapFinishedPrFollowUpJobsImpl: () => ({
+      scanned: 0,
+      reaped: 0,
+      released: 0,
+      amaScanned: 0,
+      amaReleased: 0,
+      skippedOpen: 0,
+      skippedUnreadable: 0,
+      skippedAliveWorker: 0,
+      skippedFreshAmaDispatch: 0,
+      skippedNoTarget: 0,
+      skippedCapped: 0,
+      prLookups: 0,
+      lookupCapHit: false,
+      reapedPrs: [],
+      releasedPrs: [],
+      amaReleasedPrs: [],
+    }),
+    diagnoseStuckRereviewImpl: () => {
+      calls.push('stuck-rereview-apply');
+      return 0;
+    },
+    consumeFollowUpJobsUntilCapacityImpl: async () => {
+      calls.push('consume');
+      return {
+        maxConcurrent: 1,
+        activeAtStart: 0,
+        availableAtStart: 0,
+        spawned: 0,
+        stopped: 0,
+        deferredSamePR: 0,
+        capacityRemaining: 1,
+      };
+    },
+    reapCloserHammerWorktreesImpl: async () => ({
+      scanned: 0,
+      reaped: 0,
+      skipped: 0,
+      terminal: 0,
+      prunable: 0,
+      halfRegistered: 0,
+      open: 0,
+      unknown: 0,
+      errors: 0,
+      limit: 0,
+    }),
+    retryFailedCommentDeliveriesImpl: () => {},
+    runStoppedArchiveSweepIfDueImpl: async () => {},
+    shouldStop: () => false,
+  });
+
+  assert.deepEqual(calls, ['consume']);
+});
+
 test('follow-up wake storm on one head does not starve another PR head', async (t) => {
   const rootDir = makeTempDir(t);
   const limiter = createHandoffRateLimiter({

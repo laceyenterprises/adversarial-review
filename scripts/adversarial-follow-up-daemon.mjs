@@ -452,6 +452,11 @@ function resolveTelemetryListenerStartTimeoutMs(env = process.env) {
     : TELEMETRY_LISTENER_START_TIMEOUT_DEFAULT_MS;
 }
 
+function resolveStuckRereviewApplyEnabled(env = process.env) {
+  const raw = String(env.ADVERSARIAL_REVIEW_STUCK_REREVIEW_APPLY || '').trim().toLowerCase();
+  return !['0', 'false', 'off', 'no', 'disabled'].includes(raw);
+}
+
 async function runFollowUpDaemonIteration({
   env = process.env,
   refreshFollowUpGithubTokenImpl = refreshFollowUpGithubToken,
@@ -541,7 +546,10 @@ async function runFollowUpDaemonIteration({
     );
   });
   if (shouldStop()) return;
-  await runStep('stuck-rereview-apply', async () => {
+  if (!resolveStuckRereviewApplyEnabled(env)) {
+    logTick('stuck-rereview-apply', 'disabled by ADVERSARIAL_REVIEW_STUCK_REREVIEW_APPLY');
+  } else {
+    await runStep('stuck-rereview-apply', async () => {
     const stdoutChunks = [];
     const stderrChunks = [];
     const code = diagnoseStuckRereviewImpl([
@@ -573,7 +581,8 @@ async function runFollowUpDaemonIteration({
     if (code !== 0) {
       throw new Error(`diagnose-stuck-rereview --apply exited ${code}`);
     }
-  });
+    });
+  }
   if (shouldStop()) return;
   if (shouldConsumeAfterReviewerTokenRefresh(reviewerTokenRefreshSummary)) {
     await runStep('consume', async () => {
@@ -770,6 +779,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 export {
   main,
   resolveRemediationWorkerTokenMinLifetimeMs,
+  resolveStuckRereviewApplyEnabled,
   resolveTelemetryListenerStartTimeoutMs,
   normalizeMaintenanceSweepState,
   readMaintenanceSweepState,

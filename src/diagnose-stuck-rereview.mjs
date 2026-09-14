@@ -65,7 +65,20 @@ function minutesBetween(laterMs, earlierMs) {
   return Math.round((laterMs - earlierMs) / 60_000);
 }
 
-function readJobsForPR({ rootDir, repo, prNumber }) {
+function readFollowUpJobDirectoryCache(rootDir) {
+  const base = join(rootDir, 'data', 'follow-up-jobs');
+  const buckets = ['pending', 'in-progress', 'completed', 'failed', 'stopped'];
+  const byBucket = {};
+  if (!existsSync(base)) return byBucket;
+  for (const bucket of buckets) {
+    const dir = join(base, bucket);
+    if (!existsSync(dir)) continue;
+    byBucket[bucket] = readdirSync(dir).filter((name) => name.endsWith('.json'));
+  }
+  return byBucket;
+}
+
+function readJobsForPR({ rootDir, repo, prNumber, directoryCache = null }) {
   const base = join(rootDir, 'data', 'follow-up-jobs');
   const result = { latestJob: null, latestJobKey: null, byBucket: {} };
   if (!existsSync(base)) return result;
@@ -75,7 +88,7 @@ function readJobsForPR({ rootDir, repo, prNumber }) {
   for (const bucket of buckets) {
     const dir = join(base, bucket);
     if (!existsSync(dir)) continue;
-    const entries = readdirSync(dir)
+    const entries = (directoryCache?.[bucket] || readdirSync(dir))
       .filter((name) => name.startsWith(filenamePrefix) && name.endsWith('.json'));
     if (!entries.length) continue;
     result.byBucket[bucket] = [];
@@ -708,8 +721,14 @@ function main(argv = process.argv.slice(2), { stdout = process.stdout, stderr = 
       ).all();
     }
     const report = [];
+    const jobDirectoryCache = readFollowUpJobDirectoryCache(rootDir);
     for (const row of rows) {
-      const jobInfo = readJobsForPR({ rootDir, repo: row.repo, prNumber: row.pr_number });
+      const jobInfo = readJobsForPR({
+        rootDir,
+        repo: row.repo,
+        prNumber: row.pr_number,
+        directoryCache: jobDirectoryCache,
+      });
       const reviewPassInfo = readReviewPassInfoAfterRereview({
         db,
         repo: row.repo,

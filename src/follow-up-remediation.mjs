@@ -68,6 +68,7 @@ import { resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
 import { requestWatcherWake } from './watcher-wake.mjs';
 import { requestHammerWakeForSettledReviewStop } from './hammer-wake.mjs';
 import { lifecycleStopDecision, resolveJobPRLifecycleSafe } from './follow-up-lifecycle.mjs';
+import { classifyGithubAuthOperationalBlocker, extractCommitShaFromOperationalBlocker, preserveUnpushedCommit, recoverGithubAuthOperationalBlocker, retryGithubAuthPushOnce } from './github-auth-recovery.mjs';
 import { buildRemediationPrompt } from './remediation-prompt-builder.mjs';
 import {
   applyMergeAgentBrokerEnv,
@@ -1502,29 +1503,8 @@ function buildRereviewResult({ requested, reason, outcome = null }) {
   };
 }
 
-// Resolve the worker class (codex / claude-code) for a reconcile-time
-// comment. Must reuse the same canonical mapping consume uses
-// (`pickRemediationWorkerClass`), because the bot-token map only
-// covers worker classes that actually have dedicated PATs:
-//
-//   WORKER_CLASS_TO_BOT_TOKEN_ENV = { codex, 'claude-code' }
-//
-// The previous implementation returned `worker.model || job.builderTag
-// || 'codex'`. For `[clio-agent]` PRs that produced
-// `workerClass='clio-agent'`, which has no token mapping → the comment
-// poster returned `no-token-mapping`, which the retry path treats as
-// non-retryable → permanent silent loss of the terminal PR comment.
-// (PR #18 R7 blocking #3.)
-//
-// Strategy:
-//   1. If the spawned worker recorded a `.model` AND that model has a
-//      bot-token mapping, trust it (most authoritative for THIS
-//      worker's actual session — claude-code-spawned workers should
-//      post under the claude-code bot regardless of the PR's tag).
-//   2. Otherwise, fall through to `pickRemediationWorkerClass(job)`
-//      which canonically maps `clio-agent → codex` (since clio-agent
-//      has no dedicated worker class today; consume already does this
-//      at spawn time).
+// Reconcile-time GitHub operations must not return unmapped worker
+// identities such as clio-agent; fall through to canonical routing.
 function resolveReconcileWorkerClass(job, worker) {
   const recordedModel = worker?.model;
   if (recordedModel && WORKER_CLASS_TO_BOT_TOKEN_ENV[recordedModel]) {
@@ -1533,14 +1513,7 @@ function resolveReconcileWorkerClass(job, worker) {
   return pickRemediationWorkerClass(job);
 }
 
-// Build the comment body + an owed-delivery stub from the same inputs
-// that `postReconcileOutcomeCommentSafe` will eventually use. The
-// caller threads the owed delivery into `markFollowUpJob*`'s
-// `commentDelivery` parameter so the terminal record lands in
-// completed/stopped/failed with `commentDelivery` already present —
-// closing the crash window between the atomic terminal move and the
-// pre-stamp inside `recordInitialCommentDelivery`. (Reviewer R5
-// blocking #1 — recoverable delivery marker BEFORE the crash window.)
+// Build the comment body + owed-delivery stub before the terminal move.
 function buildReconcileCommentDelivery({
   job,
   worker,
@@ -2153,6 +2126,7 @@ async function reconcileFollowUpJob({
     // is not configured for this job, this stays null and the
     // comment body falls back to the action / reReview signal alone.
     let parsedReply = null;
+    let operationalBlockerRecovery = null;
 
     if (replyProbe.state === 'valid') {
       const reply = replyProbe.reply;
@@ -2747,6 +2721,28 @@ async function reconcileFollowUpJob({
           outcome: { status: 'not-requested', reason: 'reply-did-not-request-rereview' },
         });
       }
+
+      if (!rereview.requested) {
+        const recovery = await recoverGithubAuthOperationalBlocker({
+          reply: parsedReply,
+          hqRoot: resolveHqRoot(process.env),
+          workspaceDir: paths.workspaceDir,
+          job,
+          worker,
+          completedAt,
+          rootDir,
+          resolveWorkerClass: resolveReconcileWorkerClass,
+          buildRereviewResult,
+          requestReviewRereviewImpl,
+          execFileImpl,
+          env: process.env,
+        });
+        if (recovery.operationalBlockerRecovery) {
+          operationalBlockerRecovery = recovery.operationalBlockerRecovery;
+          if (recovery.rereview) rereview = recovery.rereview;
+          job = recovery.job;
+        }
+      }
     }
 
     // Worker-class aware completion metadata. The legacy default is
@@ -2833,10 +2829,6 @@ async function reconcileFollowUpJob({
       const stopReason = stopCode === 'max-rounds-reached'
         ? `Remediation round ${currentRound || 1} finished without a durable re-review request and reached the max remediation rounds cap (${currentRound}/${maxRounds}); stopping the bounded loop.`
         : `No durable re-review request was recorded after remediation round ${currentRound || 1}; stopping to avoid a silent no-progress loop.`;
-      // Pre-build commentDelivery from the projected stopped-job shape
-      // (the actual stop metadata we'll record) so the body the
-      // walker may later reconstruct from this owed stamp matches
-      // what we'd post live.
       const projectedStopJob = {
         ...job,
         status: 'stopped',
@@ -2864,6 +2856,8 @@ async function reconcileFollowUpJob({
         reReview: rereview,
         stopReason,
         commentDelivery: noProgressDelivery,
+        passFailureClass: operationalBlockerRecovery ? 'worker-killed-no-resume' : null,
+        jobUpdates: operationalBlockerRecovery ? { operationalBlockerRecovery } : null,
       });
 
       await postReconcileOutcomeCommentSafe({
@@ -2958,6 +2952,7 @@ async function reconcileFollowUpJob({
       remediationReply,
       reReview: rereview,
       commentDelivery: completedDelivery,
+      jobUpdates: operationalBlockerRecovery ? { operationalBlockerRecovery } : null,
     });
 
     await postReconcileOutcomeCommentSafe({
@@ -4502,9 +4497,13 @@ export {
   buildBackpressureLogLine,
   buildDrainSummaryLogLine,
   isDrainQueueIdle,
+  classifyGithubAuthOperationalBlocker,
   classifyHqDispatchFailure,
+  extractCommitShaFromOperationalBlocker,
   createQuotaHoldRevalidator,
   countPendingFollowUpJobsByRetryWindow,
+  preserveUnpushedCommit,
+  retryGithubAuthPushOnce,
   REMEDIATION_LEGACY_UNSTAGE_COMMANDS,
   WORKSPACE_ARTIFACT_EXCLUDE_ENTRY,
   postRemediationCommentWithCapture,

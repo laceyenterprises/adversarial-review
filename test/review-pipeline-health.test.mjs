@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
+import { execFileSync } from 'node:child_process';
 
 import { writePrTerminalReconcileState } from '../src/pr-terminal-reconcile.mjs';
 import {
@@ -181,6 +182,88 @@ function seedFreshReconcile(rootDir, { observedAt = NOW, unresolved = [] } = {})
 function findingCodes(snapshot) {
   return snapshot.findings.map((finding) => finding.code).sort();
 }
+
+test('stopped remediation operational blockers surface in pipeline health findings', () => {
+  const rootDir = tempRoot();
+  writeJob(rootDir, 'stopped', 'job-auth-blocked', {
+    jobId: 'job-auth-blocked',
+    repo: REPO,
+    prNumber: 6755,
+    stoppedAt: '2026-05-25T17:30:00.000Z',
+    parsedReply: {
+      operationalBlockers: [{
+        title: 'github-auth',
+        finding: 'Human intervention required: GitHub credentials were invalid.',
+        reasoning: 'gh auth status reported invalid GH_TOKEN and no non-interactive credential.',
+      }],
+    },
+    operationalBlockerRecovery: {
+      rescue: {
+        kind: 'git-bundle',
+        path: '/tmp/rescue.bundle',
+        commitSha: 'bb3cd479c',
+      },
+    },
+  });
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+
+  assert.equal(snapshot.operationalBlockers.total, 1);
+  assert.equal(snapshot.operationalBlockers.byCategory[0].category, 'github-auth');
+  assert.equal(snapshot.operationalBlockers.byCategory[0].oldest.prNumber, 6755);
+  const finding = snapshot.findings.find(
+    (entry) => entry.code === 'review:operational_blocker_human_intervention'
+  );
+  assert.ok(finding);
+  assert.match(finding.message, /github-auth/);
+  assert.match(renderReviewPipelinePrometheus(snapshot), /review_pipeline_operational_blocker_rounds\{category="github-auth"\} 1/);
+});
+
+test('operational blocker metric categories are bounded when worker text is unique', () => {
+  const rootDir = tempRoot();
+  writeJob(rootDir, 'stopped', 'job-unique-blocker', {
+    jobId: 'job-unique-blocker',
+    repo: REPO,
+    prNumber: 6757,
+    stoppedAt: '2026-05-25T17:30:00.000Z',
+    parsedReply: {
+      operationalBlockers: [{
+        finding: 'push failed for commit abc123 at /Users/airlock/agent-os-hq/worktrees/job-unique-blocker',
+        reasoning: 'operator intervention required for this one-off local failure',
+      }],
+    },
+  });
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  const rendered = renderReviewPipelinePrometheus(snapshot);
+
+  assert.equal(snapshot.operationalBlockers.total, 1);
+  assert.equal(snapshot.operationalBlockers.byCategory[0].category, 'other');
+  assert.match(rendered, /review_pipeline_operational_blocker_rounds\{category="other"\} 1/);
+  assert.doesNotMatch(rendered, /abc123|airlock|job-unique-blocker/);
+});
+
+test('operational blocker human-intervention finding ignores explicit no-action text', () => {
+  const rootDir = tempRoot();
+  writeJob(rootDir, 'stopped', 'job-auth-retrying', {
+    jobId: 'job-auth-retrying',
+    repo: REPO,
+    prNumber: 6756,
+    stoppedAt: '2026-05-25T17:30:00.000Z',
+    parsedReply: {
+      operationalBlockers: [{
+        title: 'github-auth',
+        finding: 'No human intervention required; credential retry is queued.',
+        reasoning: 'Push is required after the token refresh completes.',
+      }],
+    },
+  });
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+
+  assert.equal(snapshot.operationalBlockers.total, 1);
+  assert.ok(!findingCodes(snapshot).includes('review:operational_blocker_human_intervention'));
+});
 
 test('reviewer death-rate finding fires on a high failed/attempted ratio and clears when passes recover', () => {
   const rootDir = tempRoot();

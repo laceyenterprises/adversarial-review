@@ -369,7 +369,7 @@ function oldestFirstPassAgeMs(entries, nowMs = Date.now()) {
   let oldest = null;
   for (const entry of entries) {
     if (entry.started || !reviewerDispatchIsFirstPass(entry.candidate)) continue;
-    const age = reviewerDispatchWaitMs(entry.candidate, nowMs)
+    const age = reviewerDispatchPendingAgeMs(entry.candidate, nowMs)
       ?? reviewerDispatchAgeMs(entry.candidate, nowMs);
     if (age === null) continue;
     oldest = oldest === null ? age : Math.max(oldest, age);
@@ -518,14 +518,6 @@ function reviewerDispatchAgeMs(candidate, nowMs = Date.now()) {
 
 function reviewerDispatchWaitMs(candidate, nowMs = Date.now()) {
   if (
-    typeof candidate?.pendingSinceMs === 'number'
-    && Number.isFinite(candidate.pendingSinceMs)
-  ) {
-    return Math.max(0, nowMs - candidate.pendingSinceMs);
-  }
-  const pendingSince = parseSortTimeMs(candidate?.pendingSince);
-  if (pendingSince !== null) return Math.max(0, nowMs - pendingSince);
-  if (
     typeof candidate?.enqueuedAtMs === 'number'
     && Number.isFinite(candidate.enqueuedAtMs)
   ) {
@@ -533,6 +525,18 @@ function reviewerDispatchWaitMs(candidate, nowMs = Date.now()) {
   }
   const enqueuedAt = parseSortTimeMs(candidate?.enqueuedAt);
   return enqueuedAt === null ? null : Math.max(0, nowMs - enqueuedAt);
+}
+
+function reviewerDispatchPendingAgeMs(candidate, nowMs = Date.now()) {
+  if (
+    typeof candidate?.pendingSinceMs === 'number'
+    && Number.isFinite(candidate.pendingSinceMs)
+  ) {
+    return Math.max(0, nowMs - candidate.pendingSinceMs);
+  }
+  const pendingSince = parseSortTimeMs(candidate?.pendingSince);
+  if (pendingSince !== null) return Math.max(0, nowMs - pendingSince);
+  return null;
 }
 
 function safeReviewerNowMs(now = () => Date.now()) {
@@ -913,7 +917,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
     const counts = pendingLaneCounts(pending);
     const bothLanesPending = counts.firstPass > 0 && counts.rereview > 0;
     if (active.size >= concurrencyLimit) {
-      const resolvedNowMs = bothLanesPending ? safeReviewerNowMs(now) : null;
+      const resolvedNowMs = bothLanesPending ? safeReviewerNowMs(now) : undefined;
       for (const entry of orderPendingReviewerDispatchEntries(pending, {
         laneState: activeLaneState,
         laneStarts,
@@ -924,7 +928,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
       }
       return null;
     }
-    const resolvedNowMs = bothLanesPending ? safeReviewerNowMs(now) : null;
+    const resolvedNowMs = bothLanesPending ? safeReviewerNowMs(now) : undefined;
     for (const entry of orderPendingReviewerDispatchEntries(pending, {
       laneState: activeLaneState,
       laneStarts,
@@ -999,6 +1003,15 @@ async function runBoundedReviewerDispatchQueue(candidates, {
         activeRecords.delete(promise);
       });
       maxObservedConcurrency = Math.max(maxObservedConcurrency, active.size);
+      const remainingLaneCounts = pendingLaneCounts(pending);
+      if (
+        concurrencyLimit > 1
+        && remainingLaneCounts.firstPass > 0
+        && remainingLaneCounts.rereview > 0
+      ) {
+        await Promise.resolve();
+        await Promise.resolve();
+      }
     }
     if (singleWave && attempted > attemptedBeforeStart) {
       // The watcher needs a dispatch *wave*, not a full batch drain. Some
@@ -1059,6 +1072,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
     laneState: activeLaneState,
     laneStarts,
     concurrencyLimit,
+    nowMs: safeReviewerNowMs(now),
   })
     .filter((entry) => !entry.started);
   const resolvedNowMs = Date.now();

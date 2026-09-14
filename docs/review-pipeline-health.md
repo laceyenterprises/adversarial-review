@@ -139,18 +139,22 @@ The Grafana dashboard lives at
   rereview gets the next lane slot. Skipped admissions such as
   `head-dispatch-lease-held`, `already-reviewed-head`, or
   `memory-admission-deferred` do not spend or reset the burst budget.
-- `watcher.review_lane_min_share` (default `0.25`, canonical env
-  `AGENT_OS_WATCHER_REVIEW_LANE_MIN_SHARE`) gives each non-priority lane a
-  ceiling-rounded floor share of effective reviewer concurrency while both
-  first-pass and rereview work are pending. Values are clamped to `0..0.5`;
-  `0` disables the cross-lane floor and leaves only the burst-limit ordering.
-- `watcher.review_lane_first_pass_urgent_age_ms` (default `300000`, canonical
-  env `AGENT_OS_WATCHER_REVIEW_LANE_FIRST_PASS_URGENT_AGE_MS`) raises the
+- `watcher.review_lane_min_share` (default `0.25`) gives each non-priority lane
+  a ceiling-rounded floor share of the configured reviewer pool size after
+  credential capping while both first-pass and rereview work are pending. Values
+  are clamped to `0..0.5`; `0` disables the cross-lane floor and leaves only the
+  burst-limit ordering. This submodule's Node watcher loader recognizes the
+  key, but operators must not set it in YAML or via canonical env until the
+  superproject Python and shell config-loader mirrors also carry it.
+- `watcher.review_lane_first_pass_urgent_age_ms` (default `300000`) raises the
   first-pass floor to at least half the pool while rereviews are queued and the
   oldest pending first-pass row has waited past the threshold. The watcher uses
   the durable pending-since timestamp from `reviewed_prs` (`reviewed_at` or
   `last_attempted_at` for first-pass rows), matching the `oldestFirstPass` age
   signal reported by pipeline health rather than the per-tick enqueue time.
+  This submodule's Node watcher loader recognizes the key, but operators must
+  not set it in YAML or via canonical env until the superproject Python and
+  shell config-loader mirrors also carry it.
 - Keychain-mode Claude reviewer runtime probes use the same unprivileged
   `launchctl asuser <uid> /usr/bin/true` primitive as reviewer spawn.
   Broker-mode Claude reviewer launches bypass launchctl, so the AFH runtime
@@ -170,7 +174,7 @@ Its action headline is `Reviews stalled — restore reviewer dispatch`.
 | `review:unknown_failure_rate_high` | unknown-classified failures are >30% of failures over 15m, with at least 5 failures and at least 2 distinct PRs contributing unknown failures | ticket | the failure window falls back to threshold or below, the sample floor is no longer met, or unknown failures collapse to fewer than 2 PRs |
 | `review:reviewer_degradation_active` | at least one PR is currently held by `provider-overloaded` transient backoff or `quota-exhausted` quota hold | ticket | no active provider-overload backoff or quota hold remains |
 | `review:afh_fallback_edge_supermajority` | one AFH reviewer fallback edge carries >=80% of reviewer selections over 1h with at least 5 selections and 2 distinct PRs, including the edge and grounding reason | ticket | the dominant edge falls below threshold, the sample floor is no longer met, the distinct-PR floor is no longer met, or AFH returns to the primary reviewer |
-| `review:review_lane_share_supermajority` | one reviewer lane carries >=75% of reviewer starts over the capacity window with at least 5 starts while the opposite lane has queued work | ticket | the dominant lane falls below threshold, the sample floor is no longer met, or the opposite lane no longer has queued work |
+| `review:review_lane_share_supermajority` | one reviewer lane carries >=75% of reviewer starts over the capacity window with at least 5 starts, observed concurrency above 1, and at least 2 distinct queued PRs in the opposite lane whose oldest row has reached the queue-starvation age threshold | ticket | the dominant lane falls below threshold, the sample floor is no longer met, observed concurrency is single-slot, or the opposite lane no longer has aged distinct queued work |
 | `review:terminal_review_failure_active` | at least one open PR has terminal reviewer failure evidence in `reviewed_prs` | ticket | the failed review row is retriggered, remediated, or the PR leaves the open population |
 | `review:queue_starvation` | oldest pending first-pass row is >10m old | ticket | no pending row exceeds the age threshold |
 | `review:rereview_ci_blocked` | one or more open re-reviews are parked at `review_status='ci-blocked'` because external CI failed and no remediation job exists to requeue; same-head CI probes are backoff-gated | ticket | the PR head moves, CI turns green, remediation is requeued, or the PR leaves the open population |

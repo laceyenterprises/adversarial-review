@@ -10,6 +10,7 @@ import {
   resolveReviewerMemoryPressureConfig,
   resolveFirstPassReviewerPoolConfig,
   reserveReviewerMemoryAdmission,
+  logReviewerDispatchWait,
   runBoundedReviewerDispatchQueue,
   sortReviewerDispatchCandidates,
   reviewerDispatchIsFirstPass,
@@ -699,6 +700,55 @@ test('reviewer lane floor is not satisfied by a skipped rereview admission', asy
   assert.deepEqual(events, ['skip:10', 'rereview:11', 'first-pass:90']);
 });
 
+test('reviewer lane floor ignores skipped rereview admissions during a single launch wave', async () => {
+  const events = [];
+  const laneState = createReviewerLaneState({ firstPassBurstLimit: 2, minShare: 0.25 });
+
+  const pendingRereview = (at) => ({
+    posted_at: null,
+    rereview_requested_at: at,
+  });
+  const firstPass = (prNumber) => candidate(prNumber, async () => {
+    events.push(`first-pass:${prNumber}`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }, `2026-05-${String(prNumber - 80).padStart(2, '0')}T00:00:00.000Z`);
+
+  const summary = await runBoundedReviewerDispatchQueue([
+    firstPass(90),
+    firstPass(91),
+    candidate(10, async () => {
+      events.push('skip-rereview:10');
+      return { dispatched: false, reason: 'head-dispatch-lease-held' };
+    }, '2026-05-01T00:00:00.000Z', {
+      current: pendingRereview('2026-05-01T00:05:00.000Z'),
+    }),
+    candidate(11, async () => {
+      events.push('rereview:11');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }, '2026-05-01T00:00:01.000Z', {
+      current: pendingRereview('2026-05-01T00:05:01.000Z'),
+    }),
+    firstPass(92),
+    firstPass(93),
+    firstPass(94),
+  ], {
+    maxConcurrent: 4,
+    singleWave: true,
+    singleWaveSettleGraceMs: 0,
+    laneState,
+    logger: { error() {}, log() {}, warn() {} },
+  });
+
+  assert.equal(summary.dispatched, 0);
+  assert.equal(summary.maxObservedConcurrency, 4);
+  assert.deepEqual(events, [
+    'first-pass:90',
+    'first-pass:91',
+    'skip-rereview:10',
+    'rereview:11',
+  ]);
+});
+
 test('single-wave startability probe does not spend lane admission budget', async () => {
   const events = [];
   const laneState = createReviewerLaneState({ firstPassBurstLimit: 2, minShare: 0.5 });
@@ -736,6 +786,28 @@ test('single-wave startability probe does not spend lane admission budget', asyn
 
   assert.equal(summary.dispatched, 1);
   assert.deepEqual(events, ['rereview:10', 'rereview:11']);
+});
+
+test('reviewer dispatch wait warning remains enqueue-relative when pending age is older', () => {
+  const logs = [];
+  const warnings = [];
+  const nowMs = Date.parse('2026-05-01T01:00:00.000Z');
+
+  logReviewerDispatchWait(candidate(41, async () => {}, '2026-05-01T00:00:00.000Z', {
+    pendingSince: '2026-05-01T00:00:00.000Z',
+    enqueuedAtMs: nowMs - 200,
+  }), {
+    logger: {
+      log(line) { logs.push(line); },
+      warn(line) { warnings.push(line); },
+    },
+    nowMs,
+    waitWarnMs: 15 * 60 * 1000,
+  });
+
+  assert.match(logs[0], /wait_ms=200 /);
+  assert.match(logs[0], /pr_age_ms=3600000 /);
+  assert.deepEqual(warnings, []);
 });
 
 test('reviewer lane state persists across single-slot drain ticks', async () => {

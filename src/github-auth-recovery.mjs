@@ -7,6 +7,23 @@ import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
+const GITHUB_AUTH_PUSH_RETRY_DELAYS_MS = [250, 750];
+
+function sleep(ms) {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+}
+
+function githubAuthRecoveryErrorDetail(err) {
+  return [err?.stderr, err?.stdout, err?.message]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+    .join('\n');
+}
+
+function isTransientGitPushError(err) {
+  const detail = githubAuthRecoveryErrorDetail(err);
+  return /(?:unable to access|could not resolve host|failed to connect|connection (?:reset|timed out|closed)|connection refused|network is unreachable|operation timed out|timed out|timeout|TLS|SSL|HTTP 5\d\d|The requested URL returned error: 5\d\d|remote end hung up unexpectedly|early EOF|RPC failed|temporary failure|temporarily unavailable|service unavailable|bad gateway|gateway timeout)/i.test(detail);
+}
 
 function normalizeOperationalBlockerCategory(blocker) {
   const raw = blocker && typeof blocker === 'object' && !Array.isArray(blocker)
@@ -99,13 +116,27 @@ async function preserveUnpushedCommit({
   const rescueDir = join(hqRoot, 'rescues', 'adversarial-review', 'github-auth', safeRepo, `pr-${prNumber}`);
   mkdirSync(rescueDir, { recursive: true });
   const bundlePath = join(rescueDir, `${stamp}-${safeJob}-${sha.slice(0, 12)}.bundle`);
-  await execFileImpl('git', ['-C', workspaceDir, 'bundle', 'create', bundlePath, sha], {
-    maxBuffer: 5 * 1024 * 1024,
-  });
+  const rescueRef = `refs/adversarial-review/rescues/${safeJob}/${sha}`;
+  try {
+    await execFileImpl('git', ['-C', workspaceDir, 'update-ref', rescueRef, sha]);
+    await execFileImpl('git', ['-C', workspaceDir, 'bundle', 'create', bundlePath, rescueRef], {
+      maxBuffer: 5 * 1024 * 1024,
+    });
+    await execFileImpl('git', ['-C', workspaceDir, 'bundle', 'verify', bundlePath], {
+      maxBuffer: 5 * 1024 * 1024,
+    });
+  } finally {
+    try {
+      await execFileImpl('git', ['-C', workspaceDir, 'update-ref', '-d', rescueRef]);
+    } catch {
+      // Best-effort cleanup; the durable artifact is the verified bundle.
+    }
+  }
   return {
     preserved: true,
     kind: 'git-bundle',
     path: bundlePath,
+    ref: rescueRef,
     commitSha: sha,
     repo,
     prNumber,
@@ -120,6 +151,8 @@ async function retryGithubAuthPushOnce({
   commitSha,
   env = process.env,
   execFileImpl = execFileAsync,
+  retryDelaysMs = GITHUB_AUTH_PUSH_RETRY_DELAYS_MS,
+  sleepImpl = sleep,
 }) {
   const targetBranch = String(branch || '').trim();
   if (!targetBranch) {
@@ -138,26 +171,41 @@ fi
 export GH_TOKEN="$token" GITHUB_TOKEN="$token" GIT_TERMINAL_PROMPT=0
 git -C "$WORKSPACE_DIR" push origin "$COMMIT_SHA:refs/heads/$TARGET_BRANCH" --force-with-lease
 `;
-  try {
-    await execFileImpl('bash', ['-lc', script], {
-      env: {
-        ...env,
-        WORKER_CLASS: workerClass || 'codex',
-        WORKSPACE_DIR: workspaceDir,
-        COMMIT_SHA: commitSha,
-        TARGET_BRANCH: targetBranch,
-      },
-      maxBuffer: 5 * 1024 * 1024,
-    });
-    return { retried: true, pushed: true, reason: 'push-succeeded' };
-  } catch (err) {
-    const detail = [err?.stderr, err?.stdout, err?.message]
-      .map((value) => String(value || '').trim())
-      .filter(Boolean)
-      .join('\n')
-      .slice(0, 1200);
-    return { retried: true, pushed: false, reason: 'push-failed-after-remint', error: detail };
+  const options = {
+    env: {
+      ...env,
+      WORKER_CLASS: workerClass || 'codex',
+      WORKSPACE_DIR: workspaceDir,
+      COMMIT_SHA: commitSha,
+      TARGET_BRANCH: targetBranch,
+    },
+    maxBuffer: 5 * 1024 * 1024,
+  };
+  const attempts = [0, ...retryDelaysMs];
+  let lastError = null;
+  let lastTransient = false;
+  let attemptsMade = 0;
+  for (let attempt = 0; attempt < attempts.length; attempt += 1) {
+    if (attempts[attempt] > 0) await sleepImpl(attempts[attempt]);
+    attemptsMade = attempt + 1;
+    try {
+      await execFileImpl('bash', ['-lc', script], options);
+      return { retried: true, pushed: true, reason: 'push-succeeded', attempts: attemptsMade };
+    } catch (err) {
+      lastError = err;
+      lastTransient = isTransientGitPushError(err);
+      if (!lastTransient || attempt === attempts.length - 1) break;
+    }
   }
+  const detail = githubAuthRecoveryErrorDetail(lastError).slice(0, 1200);
+  return {
+    retried: true,
+    pushed: false,
+    reason: 'push-failed-after-remint',
+    error: detail,
+    attempts: attemptsMade,
+    transient: lastTransient,
+  };
 }
 
 async function recoverGithubAuthOperationalBlocker({

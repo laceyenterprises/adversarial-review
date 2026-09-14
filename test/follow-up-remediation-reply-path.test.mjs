@@ -372,6 +372,91 @@ test('GitHub-auth commit extraction does not fall back to the original job head'
   );
 });
 
+test('preserveUnpushedCommit creates a fetchable bundle for a raw commit SHA', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-github-auth-bundle-'));
+  const repoDir = path.join(rootDir, 'repo');
+  const hqRoot = path.join(rootDir, 'hq');
+  mkdirSync(repoDir, { recursive: true });
+  execFileSync('git', ['init'], { cwd: repoDir, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repoDir, stdio: 'ignore' });
+  writeFileSync(path.join(repoDir, 'rescued.txt'), 'rescued commit\n', 'utf8');
+  execFileSync('git', ['add', 'rescued.txt'], { cwd: repoDir, stdio: 'ignore' });
+  execFileSync('git', ['commit', '-m', 'rescued commit'], { cwd: repoDir, stdio: 'ignore' });
+  const commitSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, encoding: 'utf8' }).trim();
+
+  const rescue = await preserveUnpushedCommit({
+    hqRoot,
+    workspaceDir: repoDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 431,
+    jobId: 'job/raw-sha-bundle',
+    commitSha,
+    observedAt: '2026-05-04T10:00:00.000Z',
+  });
+
+  assert.equal(rescue.preserved, true);
+  assert.equal(existsSync(rescue.path), true);
+  execFileSync('git', ['-C', repoDir, 'bundle', 'verify', rescue.path], { stdio: 'ignore' });
+
+  const fetchedDir = path.join(rootDir, 'fetched');
+  mkdirSync(fetchedDir, { recursive: true });
+  execFileSync('git', ['init'], { cwd: fetchedDir, stdio: 'ignore' });
+  execFileSync('git', ['fetch', rescue.path, `${rescue.ref}:refs/heads/rescued`], { cwd: fetchedDir, stdio: 'ignore' });
+  const fetchedSha = execFileSync('git', ['rev-parse', 'refs/heads/rescued'], { cwd: fetchedDir, encoding: 'utf8' }).trim();
+  assert.equal(fetchedSha, commitSha);
+});
+
+test('retryGithubAuthPushOnce retries transient reminted push failures only within the bounded ladder', async () => {
+  const transientCalls = [];
+  const transientResult = await retryGithubAuthPushOnce({
+    workspaceDir: '/tmp/workspace',
+    workerClass: 'codex-remediation',
+    branch: 'auth-rescue',
+    commitSha: '2222222222222222222222222222222222222222',
+    retryDelaysMs: [1, 1],
+    sleepImpl: async () => {},
+    execFileImpl: async (command, args) => {
+      transientCalls.push({ command, args });
+      if (transientCalls.length < 3) {
+        const err = new Error('Command failed: git push');
+        err.stderr = 'fatal: unable to access https://github.com/laceyenterprises/agent-os.git/: TLS handshake timeout';
+        throw err;
+      }
+      return { stdout: '', stderr: '' };
+    },
+  });
+
+  assert.equal(transientResult.pushed, true);
+  assert.equal(transientResult.reason, 'push-succeeded');
+  assert.equal(transientResult.attempts, 3);
+  assert.equal(transientCalls.length, 3);
+
+  const terminalCalls = [];
+  const terminalResult = await retryGithubAuthPushOnce({
+    workspaceDir: '/tmp/workspace',
+    workerClass: 'codex-remediation',
+    branch: 'auth-rescue',
+    commitSha: '3333333333333333333333333333333333333333',
+    retryDelaysMs: [1, 1],
+    sleepImpl: async () => {
+      throw new Error('non-transient push must not sleep for retry');
+    },
+    execFileImpl: async () => {
+      terminalCalls.push(true);
+      const err = new Error('Command failed: git push');
+      err.stderr = '! [rejected] HEAD -> auth-rescue (stale info)\nerror: failed to push some refs';
+      throw err;
+    },
+  });
+
+  assert.equal(terminalResult.pushed, false);
+  assert.equal(terminalResult.reason, 'push-failed-after-remint');
+  assert.equal(terminalResult.transient, false);
+  assert.equal(terminalResult.attempts, 1);
+  assert.equal(terminalCalls.length, 1);
+});
+
 test('recoverable GitHub-auth retry routes unmapped worker identities through the canonical remediator class', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqRoot = path.join(rootDir, 'hq');

@@ -731,6 +731,36 @@ test('requestReviewRereview preserves attempt history and records rereview metad
   assert.equal(result.reviewRow.rereview_reason, 'Remediation landed and is ready for another adversarial pass.');
 });
 
+test('requestReviewRereview does not erase released pending attempt history', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: 'pending',
+    reviewAttempts: 2,
+    lastAttemptedAt: '2026-04-24T12:05:00.000Z',
+    postedAt: '2026-04-24T11:55:00.000Z',
+    failedAt: '2026-04-24T12:06:00.000Z',
+    failureMessage: 'Released reviewer claim after ci-regression-requeued.',
+  });
+
+  const result = requestReviewRereview({
+    rootDir,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 10,
+    requestedAt: '2026-04-24T12:10:00.000Z',
+    targetRevisionRef: 'head-after-remediation',
+    reason: 'retrigger-review: retry exact head after remediation finished',
+  });
+
+  assert.equal(result.triggered, false);
+  assert.equal(result.status, 'already-pending');
+  assert.equal(result.reviewRow.review_status, 'pending');
+  assert.equal(result.reviewRow.review_attempts, 2);
+  assert.equal(result.reviewRow.last_attempted_at, null);
+  assert.equal(result.reviewRow.failed_at, null);
+  assert.equal(result.reviewRow.failure_message, null);
+  assert.equal(result.reviewRow.rereview_requested_at, '2026-04-24T12:10:00.000Z');
+});
+
 test('requestReviewRereview re-arms CI-blocked rows through the normal reset CAS', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   insertReviewRow(rootDir, {

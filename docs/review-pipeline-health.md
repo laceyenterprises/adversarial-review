@@ -149,7 +149,8 @@ The Grafana dashboard lives at
 - `watcher.review_lane_first_pass_urgent_age_ms` (default `300000`) raises the
   first-pass floor to at least half the pool while rereviews are queued and the
   oldest pending first-pass row has waited past the threshold. The watcher uses
-  the durable pending-since timestamp from `reviewed_prs` (`reviewed_at` or
+  the durable pass-kind state from `reviewed_prs` (`rereview_requested_at` and
+  `posted_at`) plus the pending-since timestamp (`reviewed_at` or
   `last_attempted_at` for first-pass rows), matching the `oldestFirstPass` age
   signal reported by pipeline health rather than the per-tick enqueue time.
   This submodule's Node watcher loader recognizes the key, but operators must

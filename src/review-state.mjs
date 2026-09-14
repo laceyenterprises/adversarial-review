@@ -1284,7 +1284,6 @@ function requestReviewRereview({
         String(reviewRow.revision_ref || '') !== normalizedTargetRevisionRef;
       if (explicitOperatorRetrigger || pendingRevisionRefMoved) {
         const pendingAssignments = [
-          'review_attempts = 0',
           'last_attempted_at = NULL',
           'posted_at = NULL',
           'failed_at = NULL',

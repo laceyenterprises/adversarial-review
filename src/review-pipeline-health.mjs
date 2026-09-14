@@ -21,6 +21,7 @@ import {
   readPrTerminalReconcileState,
 } from './pr-terminal-reconcile.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
+import { reviewerDispatchPassKind } from './watcher-reviewer-pool.mjs';
 
 const DEFAULT_REVIEWER_DEATH_RATE_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_REVIEWER_DEATH_RATE_THRESHOLD = 0.5;
@@ -163,7 +164,7 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_reviewer_degradation_active: 'Active reviewer degradation/backoff PR count by failure class and state.',
   review_pipeline_afh_fallback_edge_share: 'Windowed reviewer-selection share carried by one AFH reviewer fallback edge.',
   review_pipeline_afh_fallback_supermajority_active: 'Whether one AFH reviewer fallback edge carries a sustained configured supermajority of reviewer selections.',
-  review_pipeline_first_pass_queue_depth: 'Current count of pending first-pass or rereview rows (legacy combined queue signal).',
+  review_pipeline_first_pass_queue_depth: 'Current count of pending first-pass rows.',
   review_pipeline_first_pass_wait_seconds: 'Wait in seconds of the oldest pending first-pass row, distinct from reviewer pass duration.',
   review_pipeline_first_pass_oldest_pending_age_seconds: 'Age in seconds of the oldest pending first-pass or rereview row (legacy combined queue signal).',
   review_pipeline_rereview_capacity_share: 'Windowed share of reviewer passes consumed by rereviews.',
@@ -1584,7 +1585,7 @@ function summarizeReviewerDegradation(rootDir, db, { nowMs }) {
 function summarizeFirstPassQueue(db, { nowMs }) {
   const rows = safeAll(
     db,
-    `SELECT repo, pr_number, reviewed_at, rereview_requested_at, last_attempted_at,
+    `SELECT repo, pr_number, reviewed_at, rereview_requested_at, last_attempted_at, posted_at,
             failed_at, failure_message, review_attempts
        FROM reviewed_prs
       WHERE pr_state = 'open'
@@ -1604,7 +1605,6 @@ function summarizeFirstPassQueue(db, { nowMs }) {
     // (reviewer-runtime problem). Carry the distinction into the finding instead
     // of reporting an undifferentiated "pending".
     const reviewerFailed = Boolean(row.failed_at);
-    if (reviewerFailed) failedCount += 1;
     if (!oldest || pendingAgeMs > oldest.ageMs) {
       oldest = {
         repo: row.repo,
@@ -1619,7 +1619,14 @@ function summarizeFirstPassQueue(db, { nowMs }) {
         : null,
       };
     }
-    if (!row.rereview_requested_at) {
+    const passKind = reviewerDispatchPassKind({
+      current: {
+        rereview_requested_at: row.rereview_requested_at,
+        posted_at: row.posted_at,
+      },
+    });
+    if (passKind === 'first-pass') {
+      if (reviewerFailed) failedCount += 1;
       const firstPassPr = {
         repo: row.repo,
         prNumber: row.pr_number,
@@ -1639,12 +1646,88 @@ function summarizeFirstPassQueue(db, { nowMs }) {
     }
   }
   return {
-    depth: rows.length,
+    depth: firstPassPrs.length,
+    pendingDepth: rows.length,
     failedCount,
     oldest,
     oldestFirstPass,
     firstPassPrs,
   };
+}
+
+function summarizeDeferredRereviews(db, followUpJobs, { nowMs }) {
+  if (!db) return { count: 0, oldest: null, prs: [] };
+  const activeJobsByPr = new Map();
+  for (const entry of followUpJobs || []) {
+    if (!['pending', 'in_progress'].includes(entry.state)) continue;
+    const repo = entry.job?.repo || null;
+    const prNumber = entry.job?.prNumber || null;
+    if (!repo || !prNumber) continue;
+    const key = `${repo}#${prNumber}`;
+    const existing = activeJobsByPr.get(key);
+    if (!existing || entry.state === 'in_progress') {
+      activeJobsByPr.set(key, entry);
+    }
+  }
+  const rows = safeAll(
+    db,
+    `SELECT repo,
+            pr_number,
+            reviewed_at,
+            rereview_requested_at,
+            last_attempted_at,
+            posted_at,
+            failed_at,
+            failure_message,
+            review_attempts,
+            rereview_reason,
+            reviewer_head_sha,
+            revision_ref
+       FROM reviewed_prs
+      WHERE COALESCE(pr_state, 'open') = 'open'
+        AND review_status = 'pending'`
+  );
+  const prs = [];
+  for (const row of rows) {
+    const passKind = reviewerDispatchPassKind({
+      current: {
+        rereview_requested_at: row.rereview_requested_at,
+        posted_at: row.posted_at,
+      },
+    });
+    if (passKind !== 'rereview') continue;
+    const key = `${row.repo}#${row.pr_number}`;
+    const activeJob = activeJobsByPr.get(key);
+    if (!activeJob) continue;
+    const deferredSince =
+      row.failed_at ||
+      row.rereview_requested_at ||
+      row.last_attempted_at ||
+      row.reviewed_at ||
+      row.posted_at ||
+      null;
+    const reason = activeJob.state === 'in_progress'
+      ? 'active-follow-up-job'
+      : 'remediation-requeued';
+    prs.push({
+      repo: row.repo,
+      prNumber: row.pr_number,
+      passKind,
+      deferredSince,
+      ageMs: ageMs(nowMs, deferredSince),
+      reason,
+      jobState: activeJob.state,
+      jobId: activeJob.job?.jobId || null,
+      jobPath: activeJob.jobPath || null,
+      reviewAttempts: Number(row.review_attempts || 0),
+      reviewerHeadSha: row.reviewer_head_sha || null,
+      revisionRef: row.revision_ref || null,
+      rereviewReason: String(row.rereview_reason || '').slice(0, 300) || null,
+      failureMessage: String(row.failure_message || '').slice(0, 300) || null,
+    });
+  }
+  prs.sort((left, right) => (right.ageMs || 0) - (left.ageMs || 0));
+  return { count: prs.length, oldest: prs[0] || null, prs };
 }
 
 function summarizeQueuedRereviews(db, { nowMs }) {
@@ -2964,7 +3047,7 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }
   }
 
-  const oldest = snapshot.firstPassQueue.oldest;
+  const oldest = snapshot.firstPassQueue.oldestFirstPass;
   if (oldest && oldest.ageMs > config.queueStarvationMaxAgeMs) {
     // TREC-01: this population is `pr_state='open' AND review_status='pending'`
     // read from the SQLite mirror, thresholded on elapsed age. When the mirror
@@ -2981,7 +3064,7 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
       code: 'review:queue_starvation',
       tier: 'page',
       subject:
-        `${snapshot.firstPassQueue.depth} PR(s) awaiting first-pass review; oldest is `
+        `${snapshot.firstPassQueue.firstPassPrs.length} PR(s) awaiting first-pass review; oldest is `
         + `${Math.round(oldest.ageMs / 60000)}m old`
         + (oldestUnverified ? ' (mirror state UNVERIFIED against GitHub)' : ''),
       message: oldest.reviewerFailed
@@ -3017,12 +3100,67 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
       details: {
         ...oldest,
         thresholdMs: config.queueStarvationMaxAgeMs,
-        depth: snapshot.firstPassQueue.depth,
+        depth: snapshot.firstPassQueue.firstPassPrs.length,
         failedCount: snapshot.firstPassQueue.failedCount,
         // Machine-readable so a consumer can filter without parsing prose.
-        mirrorVerified: !oldestUnverified,
+        prStateMirrorVerified: !oldestUnverified,
         mirrorReconciledAt: reconcile?.observedAt || null,
         mirrorUnverifiedCount: reconcile?.unresolvedCount ?? null,
+      },
+    }));
+  }
+
+  if (snapshot.deferredRereviews.count > 0) {
+    const sample = snapshot.deferredRereviews.oldest || snapshot.deferredRereviews.prs[0];
+    findings.push(buildFinding({
+      code: 'review:rereview_deferred',
+      tier: 'ticket',
+      subject: `${snapshot.deferredRereviews.count} re-review(s) intentionally deferred`,
+      message: `${sample.repo}#${sample.prNumber} is waiting on purpose: ${sample.reason}`
+        + (sample.jobId ? ` (${sample.jobId})` : '') + '.',
+      evidence: snapshot.deferredRereviews.prs.map((pr) => (
+        `deferred rereview ${pr.repo}#${pr.prNumber} reason=${pr.reason} job_state=${pr.jobState} attempts=${pr.reviewAttempts}`
+      )),
+      recommendedAction: sample.reason === 'active-follow-up-job'
+        ? 'Wait for the active follow-up job to finish or inspect that job if it stalls. Do not bounce watcher or reviewer capacity for this signal alone.'
+        : 'Let the requeued remediation run and re-arm re-review when it completes. Do not treat this as reviewer starvation.',
+      observedAt,
+      details: snapshot.deferredRereviews,
+    }));
+  }
+
+  const deferredRereviewKeys = new Set(
+    (snapshot.deferredRereviews.prs || []).map((pr) => `${pr.repo}#${pr.prNumber}`)
+  );
+  const waitingRereviews = (snapshot.queuedRereviews.prs || [])
+    .filter((pr) => !deferredRereviewKeys.has(`${pr.repo}#${pr.prNumber}`));
+  const oldestWaitingRereview = waitingRereviews
+    .slice()
+    .sort((left, right) => (right.ageMs || 0) - (left.ageMs || 0))[0] || null;
+  if (oldestWaitingRereview && oldestWaitingRereview.ageMs > config.queueStarvationMaxAgeMs) {
+    findings.push(buildFinding({
+      code: 'review:rereview_queue_wait',
+      tier: 'ticket',
+      subject:
+        `${waitingRereviews.length} re-review(s) awaiting reviewer admission; oldest is `
+        + `${Math.round(oldestWaitingRereview.ageMs / 60000)}m old`,
+      message:
+        `${oldestWaitingRereview.repo}#${oldestWaitingRereview.prNumber} has been queued for `
+        + `re-review since ${oldestWaitingRereview.requestedAt || 'unknown'}, but no deferral reason `
+        + 'was recorded.',
+      evidence: waitingRereviews.map((pr) => (
+        `queued rereview ${pr.repo}#${pr.prNumber} requested=${pr.requestedAt || 'unknown'} attempts=${pr.reviewAttempts}`
+      )),
+      recommendedAction:
+        'This is a re-review lane wait, not first-pass starvation. Check the watcher claim CAS, '
+        + 'reviewer lane allocation, dispatch drain state, and reviewer-specific capacity caps; if '
+        + 'there is an intentional hold, record the deferral reason instead of guessing.',
+      observedAt,
+      details: {
+        count: waitingRereviews.length,
+        oldest: oldestWaitingRereview,
+        prs: waitingRereviews,
+        thresholdMs: config.queueStarvationMaxAgeMs,
       },
     }));
   }
@@ -3612,7 +3750,7 @@ function collectReviewPipelineHealth({
         };
     const firstPassQueue = db
       ? summarizeFirstPassQueue(db, { nowMs })
-      : { depth: 0, oldest: null };
+      : { depth: 0, pendingDepth: 0, failedCount: 0, oldest: null, oldestFirstPass: null, firstPassPrs: [] };
     const ciBlockedRereviews = db
       ? summarizeCiBlockedRereviews(db, { nowMs })
       : { count: 0, oldest: null, prs: [] };
@@ -3623,6 +3761,9 @@ function collectReviewPipelineHealth({
       ? summarizeMalformedPrTitles(db)
       : { count: 0, prs: [] };
     const followUpQueues = summarizeFollowUpQueues(rootDir, { nowMs, config });
+    const deferredRereviews = db
+      ? summarizeDeferredRereviews(db, followUpQueues.jobs, { nowMs })
+      : { count: 0, oldest: null, prs: [] };
     const operationalBlockers = summarizeOperationalBlockers(followUpQueues.jobs, { nowMs });
     const reviewerDegradation = summarizeReviewerDegradation(rootDir, db, { nowMs });
     const outage = db
@@ -3744,6 +3885,7 @@ function collectReviewPipelineHealth({
       hcpPreflightAborts,
       firstPassQueue,
       queuedRereviews,
+      deferredRereviews,
       ciBlockedRereviews,
       operationalBlockers,
       lifecycleReconciliation,

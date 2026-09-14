@@ -1163,7 +1163,7 @@ test('queue starvation distinguishes a FAILED reviewer from an unstarted one', (
   const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
   const finding = snapshot.findings.find((item) => item.code === 'review:queue_starvation');
   assert.ok(finding, 'expected the starvation finding');
-  assert.equal(finding.details.mirrorVerified, true);
+  assert.equal(finding.details.prStateMirrorVerified, true);
   assert.match(finding.message, /reviewer FAILED/);
   assert.match(finding.message, /Command failed with code 1/);
   assert.match(finding.recommended_action, /reviewer-runtime, not capacity/);
@@ -1201,7 +1201,7 @@ test('queue starvation on an unverified mirror row stops blaming reviewer capaci
   const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
   const finding = snapshot.findings.find((item) => item.code === 'review:queue_starvation');
   assert.ok(finding, 'the finding must NOT be suppressed — a real starved queue still pages');
-  assert.equal(finding.details.mirrorVerified, false);
+  assert.equal(finding.details.prStateMirrorVerified, false);
   assert.match(finding.subject, /mirror state UNVERIFIED against GitHub/);
   assert.match(finding.recommended_action, /may be a PR that is already merged or closed/);
   assert.match(finding.recommended_action, /do not bounce the watcher on this signal alone/);
@@ -1256,7 +1256,7 @@ test('queue starvation reports an unstarted row as capacity, not reviewer failur
   const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
   const finding = snapshot.findings.find((item) => item.code === 'review:queue_starvation');
   assert.ok(finding);
-  assert.equal(finding.details.mirrorVerified, true);
+  assert.equal(finding.details.prStateMirrorVerified, true);
   assert.match(finding.message, /no reviewer has picked it up/);
   assert.match(finding.recommended_action, /Nothing picked this up/);
   assert.equal(finding.details.reviewerFailed, false);
@@ -1484,6 +1484,69 @@ test('CI-blocked rereviews do not count as starvation and get their own finding'
 
   const output = renderReviewPipelinePrometheus(snapshot);
   assert.match(output, /^review_pipeline_ci_blocked_rereviews 1$/m);
+});
+
+test('a rereview deferred behind active remediation is not first-pass starvation', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 6803,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T16:00:00.000Z',
+    lastAttemptedAt: '2026-05-25T16:05:00.000Z',
+    postedAt: '2026-05-25T15:45:00.000Z',
+    reviewAttempts: 1,
+    failedAt: '2026-05-25T16:05:00.000Z',
+    failureMessage: '[ci-regression-requeued] CFG schema parity=FAILURE, repo-guards=FAILURE',
+  });
+  writeJob(rootDir, 'in-progress', 'job-6803', {
+    jobId: 'laceyenterprises__agent-os-pr-6803-2026-09-14T04-27-38-241Z',
+    repo: REPO,
+    prNumber: 6803,
+    createdAt: '2026-05-25T16:10:00.000Z',
+    claimedAt: '2026-05-25T16:12:00.000Z',
+  });
+  seedFreshReconcile(rootDir);
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  assert.ok(!findingCodes(snapshot).includes('review:queue_starvation'));
+  assert.equal(snapshot.firstPassQueue.firstPassPrs.length, 0);
+  assert.equal(snapshot.deferredRereviews.count, 1);
+  assert.equal(snapshot.deferredRereviews.oldest.reason, 'active-follow-up-job');
+  assert.equal(snapshot.deferredRereviews.oldest.reviewAttempts, 1);
+  const finding = snapshot.findings.find((item) => item.code === 'review:rereview_deferred');
+  assert.equal(finding.tier, 'ticket');
+  assert.match(finding.message, /waiting on purpose: active-follow-up-job/);
+  assert.match(finding.recommended_action, /active follow-up job/);
+  assert.equal(
+    /check adversarial-watcher liveness and reviewer capacity/.test(finding.recommended_action),
+    false,
+  );
+});
+
+test('an old rereview without a deferral reason reports the rereview lane, not first pass', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 6804,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T16:00:00.000Z',
+    postedAt: '2026-05-25T15:45:00.000Z',
+    rereviewRequestedAt: '2026-05-25T16:30:00.000Z',
+    reviewAttempts: 2,
+  });
+  seedFreshReconcile(rootDir);
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    config: { queueStarvationMaxAgeMs: 10 * 60 * 1000 },
+  });
+  assert.ok(!findingCodes(snapshot).includes('review:queue_starvation'));
+  assert.equal(snapshot.firstPassQueue.firstPassPrs.length, 0);
+  assert.equal(snapshot.queuedRereviews.count, 1);
+  const finding = snapshot.findings.find((item) => item.code === 'review:rereview_queue_wait');
+  assert.equal(finding.tier, 'ticket');
+  assert.match(finding.message, /queued for re-review/);
+  assert.match(finding.recommended_action, /re-review lane wait, not first-pass starvation/);
 });
 
 test('malformed PR title finding fires for open malformed review rows', () => {

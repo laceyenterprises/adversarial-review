@@ -140,6 +140,7 @@ async function guardRereviewCiBeforeReviewer({
         requestedBy: 'watcher-ci-admission',
         reason,
         revisionRef: reviewerHeadSha || ciGate.headSha || null,
+        stopMetadata: { ciRegression: true },
       });
       const nextStatus = requeued?.job?.status || null;
       if (nextStatus === 'pending') {

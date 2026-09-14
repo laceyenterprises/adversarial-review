@@ -790,8 +790,10 @@ function buildStopMetadata({
   sourceStatus = null,
   currentRound = null,
   maxRounds = null,
+  metadata = null,
 }) {
   return {
+    ...(metadata && typeof metadata === 'object' ? metadata : {}),
     code: typeof code === 'string' && code.trim() ? code : 'stopped',
     reason: typeof reason === 'string' && reason.trim() ? reason : 'Follow-up remediation stopped.',
     stoppedAt: stoppedAt || null,
@@ -2614,6 +2616,7 @@ function computeFollowUpJobStoppedState({
   failure,
   commentDelivery = null,
   passFailureClass = null,
+  stopMetadata = null,
   jobUpdates = null,
 }) {
   const currentRound = Number(currentJob?.remediationPlan?.currentRound || 0);
@@ -2626,6 +2629,7 @@ function computeFollowUpJobStoppedState({
     sourceStatus: sourceStatus || currentJob.status || null,
     currentRound,
     maxRounds,
+    metadata: stopMetadata,
   });
 
   let nextJob = {
@@ -2690,6 +2694,7 @@ function markFollowUpJobStopped({
   failure,
   commentDelivery = null,
   passFailureClass = null,
+  stopMetadata = null,
   jobUpdates = null,
 }) {
   return moveTerminalJobRecord({
@@ -2711,6 +2716,7 @@ function markFollowUpJobStopped({
         failure,
         commentDelivery,
         passFailureClass,
+        stopMetadata,
         jobUpdates,
       });
 
@@ -2743,6 +2749,7 @@ function requeueFollowUpJobForNextRound({
   // `labelEvent.headSha`) pass it via `revisionRef`; callers that don't
   // (the CLI) get the safe fallback below.
   revisionRef = null,
+  stopMetadata = null,
 }) {
   const currentJob = readFollowUpJob(jobPath);
   const currentRound = Number(currentJob?.remediationPlan?.currentRound || 0);
@@ -2778,6 +2785,7 @@ function requeueFollowUpJobForNextRound({
       },
       sourceStatus: currentJob.status,
       stopReason: `Reached max remediation rounds (${currentRound}/${maxRounds}). ${reason}`,
+      stopMetadata,
     });
   }
 

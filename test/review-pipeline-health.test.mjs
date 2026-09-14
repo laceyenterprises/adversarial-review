@@ -18,12 +18,16 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import {
+  buildRereviewCiRegressionReason,
+} from '../src/reviewer-ci-admission.mjs';
+import {
   REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS,
   REVIEW_PIPELINE_HEALTH_METRICS,
   collectReviewPipelineHealth,
   renderReviewPipelinePrometheus,
   summarizeRoundBudgetAnomalies,
   resolveReviewPipelineHealthConfig,
+  stoppedJobIsCiRegressionStopped,
 } from '../src/review-pipeline-health.mjs';
 import { PROVIDER_OVERLOADED_FAILURE_CLASS } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS } from '../src/quota-exhaustion.mjs';
@@ -35,6 +39,26 @@ import { ensureTtmTrackerSchema } from '../src/ttm-tracker.mjs';
 
 const NOW = '2026-05-25T18:00:00.000Z';
 const REPO = 'laceyenterprises/adversarial-review';
+const CI_REGRESSION_GATE = {
+  failedChecks: [
+    { name: 'fast-python-guards', state: 'FAILURE' },
+    { name: 'repo-guards', state: 'CANCELLED' },
+    { name: 'release-freeze-gate', state: 'CANCELLED' },
+  ],
+};
+
+function producerShapedCiRegressionStopReason({
+  repo = REPO,
+  prNumber = 6838,
+  currentRound = 3,
+  maxRounds = 3,
+} = {}) {
+  return `Reached max remediation rounds (${currentRound}/${maxRounds}). ${buildRereviewCiRegressionReason({
+    repo,
+    prNumber,
+    ciGate: CI_REGRESSION_GATE,
+  })}`;
+}
 
 function tempRoot() {
   return mkdtempSync(path.join(tmpdir(), 'review-pipeline-health-'));
@@ -1799,6 +1823,36 @@ test('a rereview deferred behind active remediation is not first-pass starvation
   assert.match(output, /^review_pipeline_pending_queue_depth 1$/m);
 });
 
+test('stopped CI regression classifier matches structured and producer-derived stop metadata', () => {
+  assert.equal(stoppedJobIsCiRegressionStopped({
+    remediationPlan: {
+      stop: {
+        code: 'max-rounds-reached',
+        reason: 'Reached max remediation rounds (3/3). Operator stopped after unrelated failure.',
+        ciRegression: true,
+      },
+    },
+  }), true);
+  assert.equal(stoppedJobIsCiRegressionStopped({
+    reason: producerShapedCiRegressionStopReason(),
+    remediationPlan: {
+      stop: {
+        code: 'max-rounds-reached',
+        reason: producerShapedCiRegressionStopReason(),
+      },
+    },
+  }), true);
+  assert.equal(stoppedJobIsCiRegressionStopped({
+    reason: producerShapedCiRegressionStopReason(),
+    remediationPlan: {
+      stop: {
+        code: 'max-rounds-reached',
+        reason: 'Reached max remediation rounds (3/3). Operator stopped after unrelated failure.',
+      },
+    },
+  }), false);
+});
+
 test('a CI-stopped rereview with a production-shaped stopped job is not first-pass starvation', () => {
   const rootDir = tempRoot();
   insertReviewRow(rootDir, {
@@ -1808,8 +1862,6 @@ test('a CI-stopped rereview with a production-shaped stopped job is not first-pa
     lastAttemptedAt: '2026-05-25T16:05:00.000Z',
     reviewAttempts: 0,
     failedAt: '2026-05-25T16:05:00.000Z',
-    failureMessage:
-      '[ci-regression-stopped] fast-python-guards=FAILURE, repo-guards=CANCELLED, release-freeze-gate=CANCELLED',
   });
   insertReviewerPass(rootDir, {
     prNumber: 6838,
@@ -1830,7 +1882,8 @@ test('a CI-stopped rereview with a production-shaped stopped job is not first-pa
     remediationPlan: {
       stop: {
         code: 'max-rounds-reached',
-        reason: 'Reached max remediation rounds (3/3). Refusing re-review: failed external CI; requeue produced status=stopped.',
+        reason: producerShapedCiRegressionStopReason(),
+        ciRegression: true,
         stoppedAt: '2026-05-25T16:05:00.000Z',
       },
     },
@@ -1868,8 +1921,6 @@ test('a stopped CI regression job older than the rereview request does not defer
     reviewAttempts: 0,
     failedAt: '2026-05-25T12:00:00.000Z',
     rereviewRequestedAt: '2026-05-25T16:00:00.000Z',
-    failureMessage:
-      '[ci-regression-stopped] fast-python-guards=FAILURE, repo-guards=CANCELLED',
   });
   insertReviewerPass(rootDir, {
     prNumber: 6839,
@@ -1890,7 +1941,8 @@ test('a stopped CI regression job older than the rereview request does not defer
     remediationPlan: {
       stop: {
         code: 'max-rounds-reached',
-        reason: 'Reached max remediation rounds (3/3). Refusing re-review: failed external CI; requeue produced status=stopped.',
+        reason: producerShapedCiRegressionStopReason({ prNumber: 6839 }),
+        ciRegression: true,
         stoppedAt: '2026-05-25T12:00:00.000Z',
       },
     },
@@ -2005,8 +2057,6 @@ test('lane-share supermajority requires a non-empty verified first-pass backlog 
     lastAttemptedAt: '2026-05-25T16:05:00.000Z',
     reviewAttempts: 0,
     failedAt: '2026-05-25T16:05:00.000Z',
-    failureMessage:
-      '[ci-regression-stopped] fast-python-guards=FAILURE, repo-guards=CANCELLED, release-freeze-gate=CANCELLED',
   });
   insertReviewerPass(rootDir, {
     prNumber: 6838,
@@ -2026,7 +2076,8 @@ test('lane-share supermajority requires a non-empty verified first-pass backlog 
     remediationPlan: {
       stop: {
         code: 'max-rounds-reached',
-        reason: 'Reached max remediation rounds (3/3). Refusing re-review: failed external CI; requeue produced status=stopped.',
+        reason: producerShapedCiRegressionStopReason(),
+        ciRegression: true,
         stoppedAt: '2026-05-25T16:05:00.000Z',
       },
     },

@@ -194,7 +194,7 @@ GitHub PR opened
 - `max-rounds-reached` when another round would exceed the stored `maxRounds` cap
 - `no-progress` when a remediation round finishes without a durable `reReview.requested = true` signal and the loop would otherwise stall ambiguously
 - `operator-stop` when a human explicitly stops the job
-- Stopped jobs must carry machine-readable stop metadata in addition to human-readable reason text
+- Stopped jobs must carry machine-readable stop metadata in addition to human-readable reason text. When failed external CI blocks a watcher re-review and requeueing the latest follow-up job reaches the stored round cap, the stopped job records `remediationPlan.stop.ciRegression=true` alongside `code=max-rounds-reached`; health tooling uses that marker to classify the pending row as an intentional CI-regression deferral.
 - Manual or scripted requeue is acceptable in this slice; a fully autonomous multi-round loop is intentionally deferred
 
 ### 5.1.1.1 Adversarial gate commit status

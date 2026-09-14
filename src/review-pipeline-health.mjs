@@ -305,7 +305,7 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     category: 'review-pipeline',
     thresholdKey: 'queueStarvationMaxAgeMs',
     defaultThreshold: DEFAULT_QUEUE_STARVATION_MAX_AGE_MS,
-    thresholdDescription: 'oldest pending re-review row without an active follow-up deferral exceeds the queue-starvation age threshold',
+    thresholdDescription: 'oldest pending re-review row without an active, requeued, or CI-regression-stopped follow-up deferral exceeds the queue-starvation age threshold',
   },
   {
     code: 'review:operational_blocker_human_intervention',
@@ -1828,19 +1828,20 @@ function stoppedCiRegressionJobsByPr(followUpJobs) {
 }
 
 function stoppedJobIsCiRegressionStopped(job) {
-  const stopCode = job?.remediationPlan?.stop?.code
-    || job?.remediationPlan?.stopReason
-    || job?.stopReason
-    || null;
+  const stop = job?.remediationPlan?.stop || {};
+  const stopCode = stop?.code || null;
   if (stopCode === 'ci-regression-stopped') return true;
+  if (stop?.ciRegression === true) return true;
   const stopText = [
-    job?.remediationPlan?.stop?.reason,
+    stop?.reason,
     job?.remediationPlan?.stopReason,
     job?.stopReason,
-    job?.reason,
   ].filter(Boolean).join('\n');
   return /\bci-regression-stopped\b/i.test(stopText)
-    || (/failed external CI/i.test(stopText) && /requeue produced status=stopped/i.test(stopText));
+    || (
+      /introduced or left failed CI on the current PR head before re-review/i.test(stopText)
+      && /Requeueing so the next remediation worker fixes CI before re-review/i.test(stopText)
+    );
 }
 
 function followUpJobIsAtOrAfter(jobEntry, timestamp) {
@@ -4657,5 +4658,6 @@ export {
   renderReviewPipelinePrometheus,
   resolveReviewPipelineHealthConfig,
   summarizeRoundBudgetAnomalies,
+  stoppedJobIsCiRegressionStopped,
   summarizeZombieReviewerPasses,
 };

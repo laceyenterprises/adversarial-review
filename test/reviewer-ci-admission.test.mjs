@@ -129,6 +129,7 @@ test('guardRereviewCiBeforeReviewer requeues latest follow-up job on failed exte
   assert.equal(requeueArgs.requestedAt, '2026-09-11T06:50:00.000Z');
   assert.equal(requeueArgs.requestedBy, 'watcher-ci-admission');
   assert.equal(requeueArgs.revisionRef, 'head-red');
+  assert.deepEqual(requeueArgs.stopMetadata, { ciRegression: true });
   assert.match(requeueArgs.reason, /Ruff lint and format baseline=FAILURE/);
 });
 

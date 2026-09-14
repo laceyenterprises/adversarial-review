@@ -25,8 +25,9 @@ import {
 //   - a no-terminal-remediation validate-gate-and-click / mechanical-gate close
 //     resolves to `critical` (lane-eligible);
 //   - a terminal-remediation hammer (post-exhaustion blocking/non-blocking
-//     findings, forced red CI, or mergeability repair) stays `normal` so it
-//     cannot hog the single reserved slot for the minutes it spends remediating;
+//     findings, forced red CI, or mergeability repair) stays `normal` unless a
+//     merged dependent names this PR as its protector, which promotes the safety
+//     window to the reserved lane;
 //   - the `--priority` flag actually carries the resolved value on the dispatch;
 //   - an older/forked `hq` without `--priority` degrades cleanly (retry once
 //     without the flag) instead of failing the dispatch.
@@ -529,7 +530,7 @@ test('LCR: unsupported --priority hq degrades to a flag-less retry (no dispatch 
   assert.equal(flagValue(calls[1].args, '--task-kind'), 'merge', 'retry preserves the merge dispatch');
 });
 
-test('MERGEORDER-01: protector named by a merged dependent marks urgency without promoting terminal HAM', () => {
+test('MERGEORDER-01: protector named by a merged dependent promotes terminal HAM urgency', () => {
   const decision = resolveAmaCloserDispatchPriority({
     useHammerTerminalRemediationPrompt: true,
     repo: 'acme/repo',
@@ -544,7 +545,7 @@ test('MERGEORDER-01: protector named by a merged dependent marks urgency without
     ],
   });
 
-  assert.equal(decision.priority, 'normal');
+  assert.equal(decision.priority, 'critical');
   assert.equal(decision.reason, 'protective-predecessor-for-merged-dependent');
   assert.equal(decision.protectiveBoost.dependentPrNumber, 6760);
 });
@@ -581,6 +582,32 @@ test('MERGEORDER-01: ordinary terminal remediation priority is unchanged without
   assert.equal(decision.protectiveBoost, null);
 });
 
+test('MERGEORDER-01: protective boost changes terminal remediation priority', () => {
+  const unboosted = resolveAmaCloserDispatchPriority({
+    useHammerTerminalRemediationPrompt: true,
+    repo: 'acme/repo',
+    prNumber: 6767,
+    mergedProtectiveDependents: [],
+  });
+  const boosted = resolveAmaCloserDispatchPriority({
+    useHammerTerminalRemediationPrompt: true,
+    repo: 'acme/repo',
+    prNumber: 6767,
+    mergedProtectiveDependents: [
+      {
+        repo: 'acme/repo',
+        prNumber: 6760,
+        state: 'MERGED',
+        protectivePredecessor: { protectorPrNumber: 6767 },
+      },
+    ],
+  });
+
+  assert.notEqual(boosted.priority, unboosted.priority);
+  assert.equal(unboosted.priority, 'normal');
+  assert.equal(boosted.priority, 'critical');
+});
+
 test('MERGEORDER-01: parser honors multiple trailer lines outside fenced code blocks', () => {
   const declaration = parseProtectivePredecessorDeclaration([
     'Body text',
@@ -609,6 +636,25 @@ test('MERGEORDER-01: merged dependent matching requires explicit declaration and
   }), null);
 });
 
+test('MERGEORDER-01: merged dependent scalar declaration matches protector', () => {
+  const match = hasMergedDependentProtectingPr({
+    repo: 'acme/repo',
+    prNumber: 6767,
+    mergedDependents: [
+      {
+        repo: 'acme/repo',
+        prNumber: 6760,
+        state: 'MERGED',
+        protectivePredecessor: 6767,
+      },
+    ],
+  });
+
+  assert.equal(match.dependentPrNumber, 6760);
+  assert.equal(match.protectorPrNumber, 6767);
+  assert.deepEqual(match.declaration.protectorPrNumbers, [6767]);
+});
+
 test('MERGEORDER-01: dispatch boost emits a finding naming dependent and protector', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'mergeorder-protective-boost-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -635,7 +681,7 @@ test('MERGEORDER-01: dispatch boost emits a finding naming dependent and protect
   });
 
   assert.equal(result.dispatched, true);
-  assert.equal(flagValue(deps.calls[0].args, '--priority'), 'normal');
+  assert.equal(flagValue(deps.calls[0].args, '--priority'), 'critical');
   assert.equal(findings.length, 1);
   assert.equal(findings[0].dependentPrNumber, 6760);
   assert.equal(findings[0].protectorPrNumber, 6767);

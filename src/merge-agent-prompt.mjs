@@ -330,7 +330,7 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
         lines.push('  exit 75');
         lines.push('fi');
         lines.push('');
-        lines.push('PROTECTIVE_PREDECESSORS=$(gh pr view "$MERGE_PR" --repo "$MERGE_REPO" --json body --jq \'.body // ""\' | awk \'/^[[:space:]]*Protects-Against-Unsafe-Merge-Until-PR[[:space:]]*:/ {print $0}\')');
+        lines.push("PROTECTIVE_PREDECESSORS=$(gh pr view \"$MERGE_PR\" --repo \"$MERGE_REPO\" --json body --jq '.body // \"\"' | awk '/^[[:space:]]*```/ { in_fence = !in_fence; next } !in_fence && /^[[:space:]]*Protects-Against-Unsafe-Merge-Until-PR[[:space:]]*:/ {print $0}')");
         lines.push('if [ -n "$PROTECTIVE_PREDECESSORS" ]; then');
         lines.push('  while IFS= read -r predecessor_line; do');
         lines.push('    PROTECTOR_PR=$(printf "%s" "$predecessor_line" | sed -nE \'s/^[[:space:]]*Protects-Against-Unsafe-Merge-Until-PR[[:space:]]*:[[:space:]]*#?([1-9][0-9]*)[[:space:]]*$/\\1/p\')');

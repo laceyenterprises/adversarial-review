@@ -1446,6 +1446,33 @@ while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "$HAM_MERGE_ATTEMPTS" 
       ;;
   esac
 
+  HAM_PROTECTIVE_PREDECESSORS="$(gh pr view <<PR_URL>> --json body --jq '.body // ""' | awk '/^[[:space:]]*```/ { in_fence = !in_fence; next } !in_fence && /^[[:space:]]*Protects-Against-Unsafe-Merge-Until-PR[[:space:]]*:/ {print $0}')"
+  if [ -n "$HAM_PROTECTIVE_PREDECESSORS" ]; then
+    while IFS= read -r ham_predecessor_line; do
+      HAM_PROTECTOR_PR="$(printf "%s" "$ham_predecessor_line" | sed -nE 's/^[[:space:]]*Protects-Against-Unsafe-Merge-Until-PR[[:space:]]*:[[:space:]]*#?([1-9][0-9]*)[[:space:]]*$/\1/p')"
+      [ -n "$HAM_PROTECTOR_PR" ] || continue
+      if [ "$HAM_PROTECTOR_PR" = "<<PR_NUMBER>>" ]; then
+        echo "HAM protective predecessor declaration points at this PR; ignoring malformed self-reference" >&2
+        continue
+      fi
+      HAM_PROTECTOR_STATE="$(gh pr view "$HAM_PROTECTOR_PR" --repo <<REPO>> --json state --jq '.state // ""')"
+      if [ -z "$HAM_PROTECTOR_STATE" ]; then
+        echo "HAM hard-blocker: protective predecessor state unreadable for PR #$HAM_PROTECTOR_PR; refusing merge" >&2
+        ham_append_terminal_audit failed-without-merge protective-predecessor-state-unreadable || true
+        ham_release_merge_lease
+        exit 0
+      fi
+      if [ "$HAM_PROTECTOR_STATE" = "OPEN" ]; then
+        echo "HAM hard-blocker: protective predecessor PR #$HAM_PROTECTOR_PR is still open; refusing merge" >&2
+        ham_append_terminal_audit failed-without-merge protective-predecessor-open || true
+        ham_release_merge_lease
+        exit 0
+      fi
+    done <<EOF_HAM_PROTECTIVE_PREDECESSORS
+$HAM_PROTECTIVE_PREDECESSORS
+EOF_HAM_PROTECTIVE_PREDECESSORS
+  fi
+
   gh pr merge <<PR_URL>> \
     --<<MERGE_METHOD>> \
     --match-head-commit "$POST_REMEDIATION_SHA" \

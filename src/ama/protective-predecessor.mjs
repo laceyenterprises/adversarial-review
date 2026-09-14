@@ -39,7 +39,11 @@ export function normalizeProtectivePredecessorDeclaration(value) {
   if (typeof value === 'number' || typeof value === 'string') {
     const prNumber = normalizePrNumber(value);
     return prNumber
-      ? { trailer: PROTECTIVE_PREDECESSOR_TRAILER, protectorPrNumber: prNumber }
+      ? {
+        trailer: PROTECTIVE_PREDECESSOR_TRAILER,
+        protectorPrNumber: prNumber,
+        protectorPrNumbers: [prNumber],
+      }
       : null;
   }
   if (typeof value !== 'object') return null;

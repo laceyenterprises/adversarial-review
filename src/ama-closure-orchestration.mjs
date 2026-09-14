@@ -25,7 +25,11 @@ import { DAEMON_MERGE_DISPOSITION, isDaemonMergeReviewAllowed } from './ama/daem
 import * as amaDispatchCloser from './ama/dispatch-closer.mjs';
 import { isEligibleForAmaClosure, SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
 import { evaluateMergeEligibility } from './ama/merge-eligibility.mjs';
-import { parseProtectivePredecessorDeclaration } from './ama/protective-predecessor.mjs';
+import {
+  isProtectorOpen,
+  parseProtectivePredecessorDeclaration,
+  protectivePredecessorMergeWindowFinding,
+} from './ama/protective-predecessor.mjs';
 import { recordAmaRetain } from './ama-retain-loop-cap.mjs';
 import { amaRetainLoopCapFor } from './kernel/convergence-budget.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
@@ -149,6 +153,106 @@ async function emitProtectivePredecessorFindingToLog(logger, finding) {
     event: 'ama.protective_predecessor.finding',
     ...finding,
   }));
+}
+
+async function fetchProtectivePredecessorStateForPr({
+  repo,
+  prNumber,
+  execFileImpl = execFileAsync,
+} = {}) {
+  const { stdout } = await execFileImpl('gh', [
+    'pr',
+    'view',
+    String(prNumber),
+    '--repo',
+    String(repo || ''),
+    '--json',
+    'state',
+    '--jq',
+    '.state // ""',
+  ], { timeout: 30_000 });
+  const state = String(stdout || '').trim();
+  if (!state) throw new Error(`protector #${prNumber} state missing`);
+  return {
+    state,
+    prState: state,
+    isOpen: state.toUpperCase() === 'OPEN',
+  };
+}
+
+async function evaluateProtectivePredecessorHoldBeforeAmaFork({
+  repo,
+  prNumber,
+  prBody,
+  fetchProtectivePredecessorStateImpl = fetchProtectivePredecessorStateForPr,
+  emitProtectivePredecessorFindingImpl = null,
+  logger = console,
+} = {}) {
+  const declaration = parseProtectivePredecessorDeclaration(prBody);
+  if (!declaration) return null;
+  for (const protectorPrNumber of declaration.protectorPrNumbers || []) {
+    if (Number(protectorPrNumber) === Number(prNumber)) {
+      logger?.warn?.(
+        `[watcher] protective predecessor self-reference for ${repo}#${prNumber}; ignoring malformed declaration`,
+      );
+      continue;
+    }
+    let protectorState = null;
+    try {
+      protectorState = await fetchProtectivePredecessorStateImpl({
+        repo,
+        prNumber: protectorPrNumber,
+        dependentPrNumber: prNumber,
+      });
+    } catch (err) {
+      logger?.warn?.(
+        `[watcher] protective predecessor state unreadable for ${repo}#${prNumber} ` +
+          `protector #${protectorPrNumber}; suppressing autonomous merge dispatch: ${err?.message || err}`,
+      );
+      return {
+        reason: 'protective-predecessor-state-unreadable',
+        protectivePredecessor: { ...declaration, protectorPrNumber },
+      };
+    }
+    const protectorStateText = String(protectorState?.state ?? protectorState?.prState ?? '').trim();
+    if (!protectorStateText && protectorState?.isOpen !== true && protectorState?.isOpen !== false) {
+      logger?.warn?.(
+        `[watcher] protective predecessor state missing for ${repo}#${prNumber} ` +
+          `protector #${protectorPrNumber}; suppressing autonomous merge dispatch`,
+      );
+      return {
+        reason: 'protective-predecessor-state-unreadable',
+        protectivePredecessor: { ...declaration, protectorPrNumber },
+      };
+    }
+    if (!isProtectorOpen(protectorState)) continue;
+    const finding = protectivePredecessorMergeWindowFinding({
+      repo,
+      dependentPrNumber: prNumber,
+      protectorPrNumber,
+      outcome: 'held-before-merge',
+    });
+    logger?.warn?.(
+      `[watcher] protective predecessor open for ${repo}#${prNumber}; ` +
+        `suppressing autonomous merge dispatch until protector #${protectorPrNumber} closes`,
+    );
+    if (typeof emitProtectivePredecessorFindingImpl === 'function') {
+      try {
+        await emitProtectivePredecessorFindingImpl(finding);
+      } catch (err) {
+        logger?.warn?.(
+          `[watcher] protective predecessor finding emit failed for ${repo}#${prNumber}: ` +
+            `${err?.message || err}`,
+        );
+      }
+    }
+    return {
+      reason: 'protective-predecessor-open',
+      protectivePredecessor: { ...declaration, protectorPrNumber },
+      finding,
+    };
+  }
+  return null;
 }
 
 export class AmaCoexistenceAbortError extends Error {
@@ -448,6 +552,7 @@ export async function maybeDispatchAmaClosureFor({
     dismissSupersededBlockingVerdictAtRemediatedHead,
   writeAutonomousMergeDisabledAuditImpl = writeAutonomousMergeDisabledAudit,
   fetchMergedProtectiveDependentsImpl = fetchMergedProtectiveDependentsForPr,
+  fetchProtectivePredecessorStateImpl = fetchProtectivePredecessorStateForPr,
   emitProtectivePredecessorFindingImpl = null,
   env = process.env,
   signal = null,
@@ -1088,6 +1193,41 @@ export async function maybeDispatchAmaClosureFor({
         prNumber,
       },
     );
+  }
+
+  const protectivePredecessorHold = await evaluateProtectivePredecessorHoldBeforeAmaFork({
+    repo: repoPath,
+    prNumber,
+    prBody: String(candidate?.body ?? candidate?.prBody ?? ''),
+    fetchProtectivePredecessorStateImpl,
+    emitProtectivePredecessorFindingImpl: emitProtectivePredecessorFindingImpl
+      || ((finding) => emitProtectivePredecessorFindingToLog(logger, finding)),
+    logger,
+  });
+  if (protectivePredecessorHold) {
+    const daemonHeadShort = String(gateSnapshot?.reviewedHeadSha || currentPrHeadSha || '').slice(0, 12);
+    logger?.warn?.(
+      `[watcher] AMA protective predecessor hold for ${repoPath}#${prNumber}` +
+        `@${daemonHeadShort}: ${protectivePredecessorHold.reason}`,
+    );
+    recordDaemonMergePark({
+      rootDir,
+      repo: repoPath,
+      prNumber,
+      headSha: gateSnapshot?.reviewedHeadSha || currentPrHeadSha || null,
+      reason: protectivePredecessorHold.reason,
+    });
+    return {
+      dispatched: false,
+      skipMergeAgent: true,
+      reason: protectivePredecessorHold.reason,
+      daemonCleanMerge: {
+        disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN,
+        reason: protectivePredecessorHold.reason,
+        protectivePredecessor: protectivePredecessorHold.protectivePredecessor,
+        finding: protectivePredecessorHold.finding,
+      },
+    };
   }
 
   // CI-SETTLEMENT MODEL — read this before hunting for a wait loop; there is

@@ -260,9 +260,7 @@ export function resolveAmaCloserDispatchPriority({
   });
   if (protectiveBoost) {
     return {
-      priority: useHammerTerminalRemediationPrompt
-        ? CLOSER_FINDINGS_REMEDIATION_DISPATCH_PRIORITY
-        : CLOSER_VALIDATE_AND_CLICK_DISPATCH_PRIORITY,
+      priority: CLOSER_VALIDATE_AND_CLICK_DISPATCH_PRIORITY,
       reason: 'protective-predecessor-for-merged-dependent',
       protectiveBoost,
     };

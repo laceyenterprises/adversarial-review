@@ -208,6 +208,44 @@ test('stuck when rereview_requested_at is older than threshold and no spawn happ
   assert.ok(payload.rows[0].classification.suggestedAction.includes('npm run retrigger-review'));
 });
 
+test('--apply re-arms stuck pending rereview rows through the retrigger CAS', async (t) => {
+  const root = makeRoot(t);
+  const old = '2026-05-29T22:00:00.000Z';
+  seedReviewedPRsRow(root, {
+    rereview_requested_at: old,
+    rereview_reason: 'worker requested rereview',
+    last_attempted_at: '2026-05-29T21:00:00.000Z',
+    review_attempts: 3,
+  });
+  seedCompletedJob(root, { completedAt: old, reReviewRequested: true });
+
+  const result = await runDiagnose(root, '--threshold-minutes', '5', '--apply');
+  assert.equal(result.code, 0, `expected exit 0; got ${result.code}\nstderr:\n${result.stderr}`);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.stuckCount, 1);
+  assert.equal(payload.appliedCount, 1);
+  assert.equal(payload.failedApplyCount, 0);
+
+  const db = openReviewStateDb(root);
+  try {
+    const row = db.prepare(
+      `SELECT review_status, review_attempts, last_attempted_at, rereview_requested_at, rereview_reason
+         FROM reviewed_prs
+        WHERE repo = ? AND pr_number = ?`
+    ).get('laceyenterprises/agent-os', 1000);
+    assert.equal(row.review_status, 'pending');
+    assert.equal(row.review_attempts, 0);
+    assert.equal(row.last_attempted_at, null);
+    assert.notEqual(row.rereview_requested_at, old);
+    assert.equal(
+      row.rereview_reason,
+      'retrigger-review: stuck rereview detected by diagnose-stuck-rereview --apply'
+    );
+  } finally {
+    db.close();
+  }
+});
+
 test('hint surfaced when latest job is not completed', async (t) => {
   const root = makeRoot(t);
   const old = '2026-05-29T22:00:00.000Z';

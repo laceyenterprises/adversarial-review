@@ -21,14 +21,16 @@
  *
  * This tool surfaces the same triage information operators had to chase
  * manually, plus a "what would need to be true" hint set for each stuck
- * row. It is read-only — no DB mutations, no spawn attempts. Pair with
- * `npm run retrigger-review` (existing) for the action surface.
+ * row. By default it is read-only. With `--apply`, it re-arms the stuck
+ * row through the same `requestReviewRereview` CAS used by
+ * `npm run retrigger-review`, so the next watcher tick can claim it.
  *
  * Usage:
  *   npm run diagnose-stuck-rereview                  # all open rows
  *   npm run diagnose-stuck-rereview -- --repo X --pr N   # single PR
  *   npm run diagnose-stuck-rereview -- --json        # machine-readable
  *   npm run diagnose-stuck-rereview -- --threshold-minutes 5
+ *   npm run diagnose-stuck-rereview -- --apply
  */
 
 import { parseArgs } from 'node:util';
@@ -38,10 +40,14 @@ import { fileURLToPath } from 'node:url';
 
 import Database from 'better-sqlite3';
 
+import { requestReviewRereview } from './review-state.mjs';
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT = join(__dirname, '..');
 
 const DEFAULT_STUCK_THRESHOLD_MINUTES = 5;
+const DEFAULT_APPLY_LIMIT = 25;
+const APPLY_REASON = 'retrigger-review: stuck rereview detected by diagnose-stuck-rereview --apply';
 
 function parseTimestamp(value) {
   if (value === null || value === undefined || value === '') return null;
@@ -291,20 +297,58 @@ function formatHumanRow({ row, classification, jobInfo, reviewPassInfo }) {
   return lines.join('\n');
 }
 
+function applyStuckRereviewRows({ db, rootDir, stuckRows, requestedAt = new Date().toISOString(), limit = DEFAULT_APPLY_LIMIT }) {
+  const results = [];
+  for (const entry of stuckRows.slice(0, limit)) {
+    const row = entry.row;
+    let result;
+    try {
+      result = requestReviewRereview({
+        db,
+        rootDir,
+        repo: row.repo,
+        prNumber: row.pr_number,
+        requestedAt,
+        reason: APPLY_REASON,
+      });
+    } catch (err) {
+      results.push({
+        repo: row.repo,
+        prNumber: row.pr_number,
+        applied: false,
+        error: err?.message || String(err),
+      });
+      continue;
+    }
+    results.push({
+      repo: row.repo,
+      prNumber: row.pr_number,
+      applied: result.triggered === true || result.status === 'already-pending',
+      status: result.status || null,
+      reason: result.reason || null,
+    });
+  }
+  return results;
+}
+
 // Exit-code contract (for cron / operator alerting; keep stable):
 //   0 = clean — no stuck rows found, or help/usage printed
 //   2 = usage error — invalid flag combination (e.g. --pr without --repo,
 //       --threshold-minutes negative or non-finite)
 //   3 = environment error — reviews.db missing or unreadable
-//   4 = stuck rows found (operator action required)
+//   4 = stuck rows found in read-only mode (operator action required)
+//   5 = --apply found stuck rows but one or more re-arm attempts failed
 // Add a new code only after thinking through every consumer of `npm run
 // diagnose-stuck-rereview` (cron jobs, follow-up alerts, runbook prose).
-function main() {
+function main(argv = process.argv.slice(2), { stdout = process.stdout, stderr = process.stderr } = {}) {
   const args = parseArgs({
+    args: argv,
     options: {
       repo: { type: 'string' },
       pr: { type: 'string' },
       'threshold-minutes': { type: 'string' },
+      apply: { type: 'boolean', default: false },
+      limit: { type: 'string' },
       json: { type: 'boolean', default: false },
       'root-dir': { type: 'string' },
       help: { type: 'boolean', default: false },
@@ -313,21 +357,21 @@ function main() {
   }).values;
 
   if (args.help) {
-    process.stdout.write(`usage: diagnose-stuck-rereview [--repo X --pr N] [--json] [--threshold-minutes N]\n`);
-    process.stdout.write(`  Read-only triage for PRs stuck in review_status=pending after a rereview\n`);
-    process.stdout.write(`  was requested. Default threshold: ${DEFAULT_STUCK_THRESHOLD_MINUTES} minutes.\n`);
+    stdout.write(`usage: diagnose-stuck-rereview [--repo X --pr N] [--json] [--threshold-minutes N] [--apply]\n`);
+    stdout.write(`  Triage PRs stuck in review_status=pending after a rereview was requested.\n`);
+    stdout.write(`  Default threshold: ${DEFAULT_STUCK_THRESHOLD_MINUTES} minutes. --apply re-arms stuck rows.\n`);
     return 0;
   }
 
   if ((args.repo && !args.pr) || (args.pr && !args.repo)) {
-    process.stderr.write(`error: --repo and --pr must be passed together\n`);
+    stderr.write(`error: --repo and --pr must be passed together\n`);
     return 2;
   }
   let prNumber = null;
   if (args.pr !== undefined) {
     const parsedPr = Number(args.pr);
     if (!Number.isInteger(parsedPr) || parsedPr <= 0) {
-      process.stderr.write(`error: --pr must be a positive integer (got ${JSON.stringify(args.pr)})\n`);
+      stderr.write(`error: --pr must be a positive integer (got ${JSON.stringify(args.pr)})\n`);
       return 2;
     }
     prNumber = parsedPr;
@@ -337,10 +381,19 @@ function main() {
   if (args['threshold-minutes'] !== undefined) {
     const parsed = Number(args['threshold-minutes']);
     if (!Number.isFinite(parsed) || parsed < 0) {
-      process.stderr.write(`error: --threshold-minutes must be a non-negative finite number (got ${JSON.stringify(args['threshold-minutes'])})\n`);
+      stderr.write(`error: --threshold-minutes must be a non-negative finite number (got ${JSON.stringify(args['threshold-minutes'])})\n`);
       return 2;
     }
     thresholdMinutes = parsed;
+  }
+  let limit = DEFAULT_APPLY_LIMIT;
+  if (args.limit !== undefined) {
+    const parsed = Number(args.limit);
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+      stderr.write(`error: --limit must be a positive integer (got ${JSON.stringify(args.limit)})\n`);
+      return 2;
+    }
+    limit = parsed;
   }
   const thresholdMs = thresholdMinutes * 60_000;
   const now = Date.now();
@@ -348,7 +401,7 @@ function main() {
   const rootDir = args['root-dir'] || DEFAULT_ROOT;
   const dbPath = join(rootDir, 'data', 'reviews.db');
   if (!existsSync(dbPath)) {
-    process.stderr.write(`error: reviews.db not found at ${dbPath}\n`);
+    stderr.write(`error: reviews.db not found at ${dbPath}\n`);
     return 3;
   }
 
@@ -364,10 +417,17 @@ function main() {
       const fileUid = statSync(dbPath).uid;
       const callerUid = process.getuid();
       if (fileUid !== callerUid) {
-        process.stderr.write(
+        const message =
           `warning: reviews.db is owned by uid=${fileUid} but this process is uid=${callerUid}; ` +
-          `read-only access continues, but verify the rootDir matches the watcher's deploy checkout.\n`
-        );
+          `read-only access continues, but verify the rootDir matches the watcher's deploy checkout.\n`;
+        if (args.apply) {
+          stderr.write(
+            `error: refusing --apply because reviews.db is owned by uid=${fileUid} ` +
+            `but this process is uid=${callerUid}; run under the DB owner.\n`
+          );
+          return 3;
+        }
+        stderr.write(message);
       }
     } catch {
       // best-effort owner probe; do not fail the diagnostic if statSync errors
@@ -376,11 +436,13 @@ function main() {
 
   let db;
   try {
-    db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    db = new Database(dbPath, { readonly: !args.apply, fileMustExist: true });
     db.pragma('busy_timeout = 5000');
-    db.pragma('query_only = 1');
+    if (!args.apply) {
+      db.pragma('query_only = 1');
+    }
   } catch (err) {
-    process.stderr.write(`error: failed to open reviews.db readonly: ${err?.message || err}\n`);
+    stderr.write(`error: failed to open reviews.db ${args.apply ? 'read-write' : 'readonly'}: ${err?.message || err}\n`);
     return 3;
   }
 
@@ -416,13 +478,32 @@ function main() {
       report.push({ row, classification, jobInfo, reviewPassInfo });
     }
     const stuck = report.filter((r) => r.classification.stuck);
+    const applyResults = args.apply
+      ? applyStuckRereviewRows({ db, rootDir, stuckRows: stuck, limit })
+      : [];
+    const appliedCount = applyResults.filter((result) => result.applied).length;
+    const failedApplyCount = applyResults.filter((result) => !result.applied).length;
     if (args.json) {
-      process.stdout.write(JSON.stringify({ thresholdMinutes, stuckCount: stuck.length, totalCandidates: report.length, rows: report }, null, 2) + '\n');
+      stdout.write(JSON.stringify({
+        thresholdMinutes,
+        stuckCount: stuck.length,
+        totalCandidates: report.length,
+        appliedCount,
+        failedApplyCount,
+        applyResults,
+        rows: report,
+      }, null, 2) + '\n');
     } else {
-      process.stdout.write(`scanned ${report.length} candidate row(s); ${stuck.length} stuck (threshold=${thresholdMinutes}min)\n`);
-      for (const entry of report) {
-        process.stdout.write('\n' + formatHumanRow(entry) + '\n');
+      stdout.write(`scanned ${report.length} candidate row(s); ${stuck.length} stuck (threshold=${thresholdMinutes}min)\n`);
+      if (args.apply) {
+        stdout.write(`apply: ${appliedCount} re-armed, ${failedApplyCount} failed (limit=${limit})\n`);
       }
+      for (const entry of report) {
+        stdout.write('\n' + formatHumanRow(entry) + '\n');
+      }
+    }
+    if (args.apply) {
+      return failedApplyCount > 0 ? 5 : 0;
     }
     return stuck.length > 0 ? 4 : 0;
   } finally {
@@ -432,4 +513,12 @@ function main() {
 
 // Use process.exitCode rather than process.exit so non-blocking stdout
 // (e.g. when piped into `jq` or `tee`) drains before the process terminates.
-process.exitCode = main();
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  process.exitCode = main();
+}
+
+export {
+  APPLY_REASON,
+  applyStuckRereviewRows,
+  main,
+};

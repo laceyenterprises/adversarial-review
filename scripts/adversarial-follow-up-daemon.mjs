@@ -76,6 +76,7 @@ import {
   normalizeHandoffMaxPerPrHead,
 } from '../src/handoff-rate-cap.mjs';
 import { acquireDaemonSingleton } from '../src/daemon-singleton.mjs';
+import { main as diagnoseStuckRereviewMain } from '../src/diagnose-stuck-rereview.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -462,6 +463,7 @@ async function runFollowUpDaemonIteration({
   consumeFollowUpJobsUntilCapacityImpl = consumeFollowUpJobsUntilCapacity,
   reapCloserHammerWorktreesImpl = reapCloserHammerWorktrees,
   retryFailedCommentDeliveriesImpl = retryFailedCommentDeliveries,
+  diagnoseStuckRereviewImpl = diagnoseStuckRereviewMain,
   runStoppedArchiveSweepIfDueImpl = runStoppedArchiveSweepIfDue,
   shouldStop = () => stopping,
 } = {}) {
@@ -536,6 +538,38 @@ async function runFollowUpDaemonIteration({
       (reapedPrs ? ` reapedPrs=${reapedPrs}` : '') +
       (releasedPrs ? ` releasedPrs=${releasedPrs}` : '') +
       (amaReleasedPrs ? ` amaReleasedPrs=${amaReleasedPrs}` : '')
+    );
+  });
+  if (shouldStop()) return;
+  await runStep('stuck-rereview-apply', async () => {
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    const code = diagnoseStuckRereviewImpl([
+      '--apply',
+      '--json',
+      '--root-dir',
+      ROOT,
+    ], {
+      stdout: { write(chunk) { stdoutChunks.push(String(chunk)); return true; } },
+      stderr: { write(chunk) { stderrChunks.push(String(chunk)); return true; } },
+    });
+    const stdoutText = stdoutChunks.join('');
+    let payload = null;
+    try {
+      payload = stdoutText ? JSON.parse(stdoutText) : null;
+    } catch {
+      payload = null;
+    }
+    if (stderrChunks.length > 0) {
+      logTick('stuck-rereview-apply', `stderr=${JSON.stringify(stderrChunks.join('').trim())}`);
+    }
+    if (code !== 0) {
+      throw new Error(`diagnose-stuck-rereview --apply exited ${code}`);
+    }
+    logTick(
+      'stuck-rereview-apply',
+      `candidates=${payload?.totalCandidates ?? 'unknown'} stuck=${payload?.stuckCount ?? 'unknown'} ` +
+      `applied=${payload?.appliedCount ?? 'unknown'} failed=${payload?.failedApplyCount ?? 'unknown'}`
     );
   });
   if (shouldStop()) return;

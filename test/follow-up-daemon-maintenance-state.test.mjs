@@ -423,6 +423,37 @@ test('follow-up daemon iteration preserves reconcile and closer reaper on wake-d
         signalSkipped: 0,
       };
     },
+    reapFinishedPrFollowUpJobsImpl: () => {
+      calls.push('reap-finished-pr');
+      return {
+        scanned: 0,
+        reaped: 0,
+        released: 0,
+        amaScanned: 0,
+        amaReleased: 0,
+        skippedOpen: 0,
+        skippedUnreadable: 0,
+        skippedAliveWorker: 0,
+        skippedFreshAmaDispatch: 0,
+        skippedNoTarget: 0,
+        skippedCapped: 0,
+        prLookups: 0,
+        lookupCapHit: false,
+        reapedPrs: [],
+        releasedPrs: [],
+        amaReleasedPrs: [],
+      };
+    },
+    diagnoseStuckRereviewImpl: (args, io) => {
+      calls.push(['stuck-rereview-apply', args]);
+      io.stdout.write(JSON.stringify({
+        totalCandidates: 1,
+        stuckCount: 1,
+        appliedCount: 1,
+        failedApplyCount: 0,
+      }));
+      return 0;
+    },
     consumeFollowUpJobsUntilCapacityImpl: async () => {
       calls.push('consume');
       return {
@@ -462,6 +493,11 @@ test('follow-up daemon iteration preserves reconcile and closer reaper on wake-d
   assert.ok(calls.indexOf('github-token-refresh') > -1);
   assert.ok(calls.indexOf('github-token-refresh') < calls.indexOf('reconcile'));
   assert.ok(calls.indexOf('reconcile') > -1);
+  assert.ok(calls.indexOf('reap-finished-pr') > calls.indexOf('stale-claim-sweep'));
+  const stuckApplyIndex = calls.findIndex((call) => Array.isArray(call) && call[0] === 'stuck-rereview-apply');
+  assert.ok(stuckApplyIndex > calls.indexOf('reap-finished-pr'));
+  assert.ok(stuckApplyIndex < calls.indexOf('consume'));
+  assert.deepEqual(calls[stuckApplyIndex][1].slice(0, 3), ['--apply', '--json', '--root-dir']);
   assert.ok(calls.indexOf('closer-worktree-reap') > calls.indexOf('consume'));
   assert.ok(calls.indexOf('retry-comments') > calls.indexOf('closer-worktree-reap'));
 });

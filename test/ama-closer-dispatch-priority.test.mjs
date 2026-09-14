@@ -10,6 +10,10 @@ import {
   updateAmaCloserDispatchRecord,
 } from '../src/ama/dispatch-closer.mjs';
 import { acquireAmaCloserLease } from '../src/ama/closer-lease.mjs';
+import {
+  hasMergedDependentProtectingPr,
+  parseProtectivePredecessorDeclaration,
+} from '../src/ama/protective-predecessor.mjs';
 
 // LCR — AMA closer dispatch admission-priority routing.
 //
@@ -525,9 +529,29 @@ test('LCR: unsupported --priority hq degrades to a flag-less retry (no dispatch 
   assert.equal(flagValue(calls[1].args, '--task-kind'), 'merge', 'retry preserves the merge dispatch');
 });
 
-test('MERGEORDER-01: protector named by a merged dependent is promoted to critical priority', () => {
+test('MERGEORDER-01: protector named by a merged dependent marks urgency without promoting terminal HAM', () => {
   const decision = resolveAmaCloserDispatchPriority({
     useHammerTerminalRemediationPrompt: true,
+    repo: 'acme/repo',
+    prNumber: 6767,
+    mergedProtectiveDependents: [
+      {
+        repo: 'acme/repo',
+        prNumber: 6760,
+        state: 'MERGED',
+        protectivePredecessor: { protectorPrNumber: 6767 },
+      },
+    ],
+  });
+
+  assert.equal(decision.priority, 'normal');
+  assert.equal(decision.reason, 'protective-predecessor-for-merged-dependent');
+  assert.equal(decision.protectiveBoost.dependentPrNumber, 6760);
+});
+
+test('MERGEORDER-01: protective dependency can promote clean validate-and-click dispatch', () => {
+  const decision = resolveAmaCloserDispatchPriority({
+    useHammerTerminalRemediationPrompt: false,
     repo: 'acme/repo',
     prNumber: 6767,
     mergedProtectiveDependents: [
@@ -557,6 +581,34 @@ test('MERGEORDER-01: ordinary terminal remediation priority is unchanged without
   assert.equal(decision.protectiveBoost, null);
 });
 
+test('MERGEORDER-01: parser honors multiple trailer lines outside fenced code blocks', () => {
+  const declaration = parseProtectivePredecessorDeclaration([
+    'Body text',
+    '```',
+    'Protects-Against-Unsafe-Merge-Until-PR: #1',
+    '```',
+    'Protects-Against-Unsafe-Merge-Until-PR: #6766',
+    'Protects-Against-Unsafe-Merge-Until-PR: #6767',
+  ].join('\n'));
+
+  assert.deepEqual(declaration.protectorPrNumbers, [6766, 6767]);
+  assert.equal(declaration.protectorPrNumber, 6766);
+});
+
+test('MERGEORDER-01: merged dependent matching requires explicit declaration and valid dependent PR', () => {
+  assert.equal(hasMergedDependentProtectingPr({
+    repo: 'acme/repo',
+    prNumber: 6767,
+    mergedDependents: [{ repo: 'acme/repo', prNumber: 6767, state: 'MERGED' }],
+  }), null);
+
+  assert.equal(hasMergedDependentProtectingPr({
+    repo: 'acme/repo',
+    prNumber: 6767,
+    mergedDependents: [{ repo: 'acme/repo', state: 'MERGED', protectivePredecessor: { protectorPrNumber: 6767 } }],
+  }), null);
+});
+
 test('MERGEORDER-01: dispatch boost emits a finding naming dependent and protector', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'mergeorder-protective-boost-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -583,7 +635,7 @@ test('MERGEORDER-01: dispatch boost emits a finding naming dependent and protect
   });
 
   assert.equal(result.dispatched, true);
-  assert.equal(flagValue(deps.calls[0].args, '--priority'), 'critical');
+  assert.equal(flagValue(deps.calls[0].args, '--priority'), 'normal');
   assert.equal(findings.length, 1);
   assert.equal(findings[0].dependentPrNumber, 6760);
   assert.equal(findings[0].protectorPrNumber, 6767);

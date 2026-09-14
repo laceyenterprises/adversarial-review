@@ -260,7 +260,9 @@ export function resolveAmaCloserDispatchPriority({
   });
   if (protectiveBoost) {
     return {
-      priority: CLOSER_VALIDATE_AND_CLICK_DISPATCH_PRIORITY,
+      priority: useHammerTerminalRemediationPrompt
+        ? CLOSER_FINDINGS_REMEDIATION_DISPATCH_PRIORITY
+        : CLOSER_VALIDATE_AND_CLICK_DISPATCH_PRIORITY,
       reason: 'protective-predecessor-for-merged-dependent',
       protectiveBoost,
     };
@@ -4214,6 +4216,9 @@ export async function maybeDispatchAmaCloser({
             prBody: String(prMetadata?.body ?? dispatchContext?.prBody ?? ''),
             fetchProtectivePredecessorStateImpl: async ({ prNumber: protectorPrNumber }) => {
               const protector = await fetchPullRequestRollupImpl(repo, protectorPrNumber, { execFileImpl });
+              if (!String(protector?.state || '').trim()) {
+                throw new Error(`protector #${protectorPrNumber} state missing`);
+              }
               return {
                 state: protector?.state,
                 prState: protector?.state,

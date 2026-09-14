@@ -825,6 +825,9 @@ export async function runDaemonCleanMergeAttempt({
     prBody: String(liveRollup?.body ?? candidate?.body ?? ''),
     fetchProtectivePredecessorStateImpl: async ({ prNumber: protectorPrNumber }) => {
       const protector = await fetchRollupImpl(repoPath, protectorPrNumber, { execFileImpl });
+      if (!String(protector?.state || '').trim()) {
+        throw new Error(`protector #${protectorPrNumber} state missing`);
+      }
       return {
         state: protector?.state,
         prState: protector?.state,

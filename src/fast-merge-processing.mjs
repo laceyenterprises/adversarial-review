@@ -49,6 +49,10 @@ import {
   readAmaCloserLease,
 } from './ama/closer-lease.mjs';
 import { parseRemediatedFindingsTrailer } from './ama/ham-provenance.mjs';
+import {
+  isProtectorOpen,
+  resolveProtectivePredecessorDeclaration,
+} from './ama/protective-predecessor.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -499,6 +503,7 @@ function normalizePrView(parsed = {}) {
     closedAt: parsed.closedAt || null,
     headRefOid: parsed.headRefOid || null,
     labels,
+    body: String(parsed.body || ''),
   };
 }
 
@@ -511,7 +516,7 @@ async function fetchFastMergePrView({ ghClient, repo, prNumber }) {
     '--repo',
     repo,
     '--json',
-    'state,isDraft,mergedAt,closedAt,headRefOid,labels',
+    'state,isDraft,mergedAt,closedAt,headRefOid,labels,body',
   ], {
     maxBuffer: 5 * 1024 * 1024,
     timeout: FAST_MERGE_GH_TIMEOUT_MS,
@@ -536,6 +541,52 @@ async function fetchFastMergeMergeCommit({ ghClient, repo, prNumber }) {
   const parsed = parseGhJson(stdout, {});
   const oid = parsed?.mergeCommit?.oid;
   return oid ? String(oid) : null;
+}
+
+async function fetchFastMergePrState({ ghClient, repo, prNumber }) {
+  const execFileImpl = execFileFromGhClient(ghClient);
+  const { stdout } = await withGhRetry(() => execFileImpl('gh', [
+    'pr',
+    'view',
+    String(prNumber),
+    '--repo',
+    repo,
+    '--json',
+    'state',
+  ], {
+    maxBuffer: 1024 * 1024,
+    timeout: FAST_MERGE_GH_TIMEOUT_MS,
+  }));
+  const parsed = parseGhJson(stdout, {});
+  const state = String(parsed?.state || '').trim().toUpperCase();
+  if (!state) throw new Error(`protector #${prNumber} state missing`);
+  return { state, prState: state, isOpen: state === 'OPEN' };
+}
+
+async function evaluateFastMergeProtectivePredecessorHold({
+  ghClient,
+  repo,
+  prNumber,
+  body,
+  logger = console,
+} = {}) {
+  const declaration = resolveProtectivePredecessorDeclaration({ prBody: body });
+  if (!declaration) return null;
+  const protectorPrNumbers = Array.isArray(declaration.protectorPrNumbers)
+    ? declaration.protectorPrNumbers
+    : [declaration.protectorPrNumber];
+  for (const protectorPrNumber of protectorPrNumbers) {
+    if (Number(protectorPrNumber) === Number(prNumber)) {
+      logger?.warn?.(
+        `[follow-up-merge-agent] fast-merge protective predecessor self-reference for ` +
+          `${repo}#${prNumber}; ignoring malformed declaration`,
+      );
+      continue;
+    }
+    const protectorState = await fetchFastMergePrState({ ghClient, repo, prNumber: protectorPrNumber });
+    if (isProtectorOpen(protectorState)) return { ...declaration, protectorPrNumber };
+  }
+  return null;
 }
 
 async function fetchFastMergeChecks({ ghClient, repo, prNumber }) {
@@ -829,6 +880,7 @@ async function auditAndRequeueFastMerge({
     prNumber,
     authorizedHeadSha,
     currentHeadSha,
+    failureReason: reason,
     headChanged,
     vetoDetected,
     labelRemoved,
@@ -1130,6 +1182,55 @@ async function processFastMergePR({
   }
   if (preMergeChecks.summary.status === 'pending') {
     return { status: 'skipped_still_pending', reason: 'ci-pending-before-merge' };
+  }
+  let protectiveHold;
+  try {
+    protectiveHold = await evaluateFastMergeProtectivePredecessorHold({
+      ghClient,
+      repo,
+      prNumber,
+      body: preMergeView.body,
+      logger,
+    });
+  } catch (err) {
+    logger?.warn?.(
+      `[follow-up-merge-agent] fast-merge protective predecessor read failed for ` +
+        `${repo}#${prNumber}; requeueing normal review: ${err?.message || err}`,
+    );
+    return auditAndRequeueFastMerge({
+      db,
+      rootDir,
+      ghClient,
+      repo,
+      prNumber,
+      authorizedHeadSha: exactHeadSha,
+      currentHeadSha: preMergeView.headRefOid,
+      labels: preMergeView.labels,
+      reason: 'protective-predecessor-state-unreadable',
+      action: 'protective-predecessor-requeued',
+      auditWriter,
+      logger,
+    });
+  }
+  if (protectiveHold) {
+    logger?.warn?.(
+      `[follow-up-merge-agent] fast-merge protective predecessor hold for ` +
+        `${repo}#${prNumber}; protector #${protectiveHold.protectorPrNumber} is open`,
+    );
+    return auditAndRequeueFastMerge({
+      db,
+      rootDir,
+      ghClient,
+      repo,
+      prNumber,
+      authorizedHeadSha: exactHeadSha,
+      currentHeadSha: preMergeView.headRefOid,
+      labels: preMergeView.labels,
+      reason: 'protective-predecessor-open',
+      action: 'protective-predecessor-requeued',
+      auditWriter,
+      logger,
+    });
   }
 
   const mergeCapability = evaluateMergeCapabilityEnforcement({

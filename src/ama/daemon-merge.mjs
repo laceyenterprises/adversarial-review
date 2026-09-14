@@ -390,44 +390,60 @@ export async function attemptDaemonCleanMerge({
     explicit: protectivePredecessor,
   });
   if (protectiveDeclaration) {
-    let protectorState = null;
-    try {
-      protectorState = typeof fetchProtectivePredecessorStateImpl === 'function'
-        ? await fetchProtectivePredecessorStateImpl({
-            repo,
-            prNumber: protectiveDeclaration.protectorPrNumber,
-            dependentPrNumber: prNumber,
-          })
-        : null;
-    } catch (err) {
-      logger?.warn?.(
-        `[daemon-merge] protective predecessor read failed for ${repo}#${prNumber} ` +
-          `protector #${protectiveDeclaration.protectorPrNumber}; holding merge: ${err?.message || err}`,
-      );
-      return notTaken('protective-predecessor-state-unreadable', {
-        protectivePredecessor: protectiveDeclaration,
-      });
-    }
-    if (isProtectorOpen(protectorState)) {
-      const finding = protectivePredecessorMergeWindowFinding({
-        repo,
-        dependentPrNumber: prNumber,
-        protectorPrNumber: protectiveDeclaration.protectorPrNumber,
-      });
-      if (typeof emitFindingImpl === 'function') {
-        try {
-          await emitFindingImpl(finding);
-        } catch (err) {
-          logger?.warn?.(
-            `[daemon-merge] protective predecessor finding emit failed for ${repo}#${prNumber}: ` +
-              `${err?.message || err}`,
-          );
-        }
+    const protectorPrNumbers = Array.isArray(protectiveDeclaration.protectorPrNumbers)
+      ? protectiveDeclaration.protectorPrNumbers
+      : [protectiveDeclaration.protectorPrNumber];
+    for (const protectorPrNumber of protectorPrNumbers) {
+      if (Number(protectorPrNumber) === Number(prNumber)) {
+        logger?.warn?.(
+          `[daemon-merge] protective predecessor self-reference for ${repo}#${prNumber}; ignoring malformed declaration`,
+        );
+        continue;
       }
-      return notTaken('protective-predecessor-open', {
-        protectivePredecessor: protectiveDeclaration,
-        finding,
-      });
+      let protectorState = null;
+      try {
+        protectorState = typeof fetchProtectivePredecessorStateImpl === 'function'
+          ? await fetchProtectivePredecessorStateImpl({
+              repo,
+              prNumber: protectorPrNumber,
+              dependentPrNumber: prNumber,
+            })
+          : null;
+      } catch (err) {
+        logger?.warn?.(
+          `[daemon-merge] protective predecessor read failed for ${repo}#${prNumber} ` +
+            `protector #${protectorPrNumber}; holding merge: ${err?.message || err}`,
+        );
+        return notTaken('protective-predecessor-state-unreadable', {
+          protectivePredecessor: { ...protectiveDeclaration, protectorPrNumber },
+        });
+      }
+      if (isProtectorOpen(protectorState)) {
+        const finding = protectivePredecessorMergeWindowFinding({
+          repo,
+          dependentPrNumber: prNumber,
+          protectorPrNumber,
+          outcome: 'held-before-merge',
+        });
+        logger?.warn?.(
+          `[daemon-merge] protective predecessor open for ${repo}#${prNumber}; ` +
+            `holding merge until protector #${protectorPrNumber} closes`,
+        );
+        if (typeof emitFindingImpl === 'function') {
+          try {
+            await emitFindingImpl(finding);
+          } catch (err) {
+            logger?.warn?.(
+              `[daemon-merge] protective predecessor finding emit failed for ${repo}#${prNumber}: ` +
+                `${err?.message || err}`,
+            );
+          }
+        }
+        return notTaken('protective-predecessor-open', {
+          protectivePredecessor: { ...protectiveDeclaration, protectorPrNumber },
+          finding,
+        });
+      }
     }
   }
 

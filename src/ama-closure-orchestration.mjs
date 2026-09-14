@@ -25,6 +25,7 @@ import { DAEMON_MERGE_DISPOSITION, isDaemonMergeReviewAllowed } from './ama/daem
 import * as amaDispatchCloser from './ama/dispatch-closer.mjs';
 import { isEligibleForAmaClosure, SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
 import { evaluateMergeEligibility } from './ama/merge-eligibility.mjs';
+import { parseProtectivePredecessorDeclaration } from './ama/protective-predecessor.mjs';
 import { recordAmaRetain } from './ama-retain-loop-cap.mjs';
 import { amaRetainLoopCapFor } from './kernel/convergence-budget.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
@@ -80,6 +81,75 @@ const {
   maybeDispatchAmaCloser,
   namedAmaNoDispatchReason,
 } = amaDispatchCloser;
+
+function shellQuoteSearchTerm(value) {
+  return `"${String(value || '').replace(/"/gu, '\\"')}"`;
+}
+
+async function fetchMergedProtectiveDependentsForPr({
+  repo,
+  prNumber,
+  execFileImpl = execFileAsync,
+  logger = console,
+} = {}) {
+  const target = Number(prNumber);
+  if (!repo || !Number.isInteger(target) || target <= 0) return [];
+  const query = [
+    `repo:${repo}`,
+    'is:pr',
+    'is:merged',
+    shellQuoteSearchTerm('Protects-Against-Unsafe-Merge-Until-PR'),
+    String(target),
+  ].join(' ');
+  let stdout;
+  try {
+    ({ stdout } = await execFileImpl('gh', [
+      'api',
+      'search/issues',
+      '-f',
+      `q=${query}`,
+      '-f',
+      'per_page=50',
+    ], {
+      maxBuffer: 5 * 1024 * 1024,
+      timeout: 30_000,
+    }));
+  } catch (err) {
+    logger?.warn?.(
+      `[watcher] protective predecessor dependent lookup failed for ${repo}#${target}: ${err?.message || err}`,
+    );
+    return [];
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(String(stdout || '{}'));
+  } catch (err) {
+    logger?.warn?.(
+      `[watcher] protective predecessor dependent lookup returned invalid JSON for ${repo}#${target}: ${err?.message || err}`,
+    );
+    return [];
+  }
+  return (Array.isArray(parsed?.items) ? parsed.items : [])
+    .map((item) => {
+      const declaration = parseProtectivePredecessorDeclaration(item?.body || '');
+      if (!declaration || !declaration.protectorPrNumbers?.includes(target)) return null;
+      return {
+        repo,
+        prNumber: Number(item?.number),
+        state: 'MERGED',
+        mergedAt: item?.pull_request?.merged_at || item?.closed_at || null,
+        protectivePredecessor: declaration,
+      };
+    })
+    .filter((item) => Number.isInteger(item?.prNumber) && item.prNumber > 0);
+}
+
+async function emitProtectivePredecessorFindingToLog(logger, finding) {
+  logger?.warn?.(JSON.stringify({
+    event: 'ama.protective_predecessor.finding',
+    ...finding,
+  }));
+}
 
 export class AmaCoexistenceAbortError extends Error {
   constructor(reason = 'ama-coexistence-aborted') {
@@ -377,6 +447,8 @@ export async function maybeDispatchAmaClosureFor({
   dismissSupersededBlockingVerdictAtRemediatedHeadImpl =
     dismissSupersededBlockingVerdictAtRemediatedHead,
   writeAutonomousMergeDisabledAuditImpl = writeAutonomousMergeDisabledAudit,
+  fetchMergedProtectiveDependentsImpl = fetchMergedProtectiveDependentsForPr,
+  emitProtectivePredecessorFindingImpl = null,
   env = process.env,
   signal = null,
   operationTimeoutMs = null,
@@ -757,6 +829,7 @@ export async function maybeDispatchAmaClosureFor({
     statusCheckRollup: Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : [],
     branchProtection: { requiredContexts: candidate?.branchProtection?.requiredContexts || [] },
     author: candidate?.prAuthor || null,
+    body: String(candidate?.body || ''),
   };
 
   const strictMode = cfg?.strictMode !== false;
@@ -1071,6 +1144,8 @@ export async function maybeDispatchAmaClosureFor({
       authoritativeReviewerLogins,
       dismissStaleRequestChangesOnResolved,
       hamTerminalRemediationValidated,
+      emitProtectivePredecessorFindingImpl: emitProtectivePredecessorFindingImpl
+        || ((finding) => emitProtectivePredecessorFindingToLog(logger, finding)),
       signal: operationSignal,
     }),
     {
@@ -1190,6 +1265,32 @@ export async function maybeDispatchAmaClosureFor({
       );
     }
   }
+  if (
+    daemonCleanMerge?.disposition === DAEMON_MERGE_DISPOSITION.NOT_TAKEN &&
+    (
+      daemonCleanMerge.reason === 'protective-predecessor-open' ||
+      daemonCleanMerge.reason === 'protective-predecessor-state-unreadable'
+    )
+  ) {
+    const daemonHeadShort = String(gateSnapshot?.reviewedHeadSha || '').slice(0, 12);
+    logger?.warn?.(
+      `[watcher] AMA protective predecessor hold for ${repoPath}#${prNumber}` +
+        `@${daemonHeadShort}: ${daemonCleanMerge.reason}`,
+    );
+    recordDaemonMergePark({
+      rootDir,
+      repo: repoPath,
+      prNumber,
+      headSha: gateSnapshot?.reviewedHeadSha || null,
+      reason: daemonCleanMerge.reason,
+    });
+    return {
+      dispatched: false,
+      skipMergeAgent: true,
+      reason: daemonCleanMerge.reason,
+      daemonCleanMerge,
+    };
+  }
 
   const [owner, name] = repoPath.split('/');
   // HMR-01: how long has this PR been TERMINAL and still unmerged?
@@ -1210,6 +1311,12 @@ export async function maybeDispatchAmaClosureFor({
     if (!Number.isFinite(postedAt)) return null;
     return Math.max(0, Date.now() - postedAt);
   })();
+  const mergedProtectiveDependents = await fetchMergedProtectiveDependentsImpl({
+    repo: repoPath,
+    prNumber,
+    execFileImpl: execFileAsync,
+    logger,
+  });
 
   const dispatchContext = {
     settledCommentOnlyTerminalMs,
@@ -1228,6 +1335,7 @@ export async function maybeDispatchAmaClosureFor({
     reviewer: reviewStateRow?.reviewer || '',
     authoritativeReviewerLogins,
     dismissStaleRequestChangesOnResolved: isDismissStaleRequestChangesOnResolvedEnabled({ env, logger }),
+    mergedProtectiveDependents,
     parentSession: process.env.HQ_PARENT_SESSION || 'session:unknown:airlock+watcher',
     dispatchedAt: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
     orchestrationMode,

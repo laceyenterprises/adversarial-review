@@ -60,6 +60,32 @@ If the holder file has already been written, post-acquire waiter cleanup is
 best-effort: a busy waiter mutation lock must not make the caller report a
 timeout while it already owns the lease.
 
+## MERGEORDER-01 protective predecessor trailer
+
+Authors may declare an ordering dependency in the PR body with one or more
+trailer lines:
+
+```text
+Protects-Against-Unsafe-Merge-Until-PR: #1234
+```
+
+The value is the predecessor/protector PR that must close before the current PR
+may merge. Multiple trailer lines are allowed and are enforced as a union. A
+self-reference is malformed and must not create a permanent hold.
+
+Every autonomous merge path that can land a PR must honor the declaration before
+calling GitHub merge: the daemon clean merge path, the HAM terminal inline merge
+path in the closer, the follow-up fast-merge `--admin` path, and the generated
+merge-agent prompt. If any declared protector is still `OPEN`, the merge is held
+with reason `protective-predecessor-open`. If the protector state cannot be read,
+the path fails closed as `protective-predecessor-state-unreadable`.
+
+Operator-visible evidence is required for a hold. The daemon/closer path writes
+the daemon merge park reason and logs a protective predecessor warning/finding;
+fast-merge requeues the PR to normal review with the same reason in its audit.
+Clearing the hold is intentionally simple: merge or close the protector PR, or
+remove/fix the malformed trailer from the dependent PR body.
+
 The hammer terminal closer is a policy consumer of that CLI surface: it proceeds
 only on `0` plus a non-empty `leaseId`, parks and exits zero on either
 `70`/`parked:true` or `75`/`timedOut:true`, and hard-fails other acquire errors.

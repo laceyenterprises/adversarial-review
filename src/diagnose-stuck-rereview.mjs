@@ -21,14 +21,16 @@
  *
  * This tool surfaces the same triage information operators had to chase
  * manually, plus a "what would need to be true" hint set for each stuck
- * row. It is read-only — no DB mutations, no spawn attempts. Pair with
- * `npm run retrigger-review` (existing) for the action surface.
+ * row. Default mode is read-only — no DB mutations, no spawn attempts.
+ * `--apply` mutates GitHub by adding `retrigger-review` labels; the
+ * fleet-self-repair `stuck-rereview` condition is the automated caller.
  *
  * Usage:
  *   npm run diagnose-stuck-rereview                  # all open rows
  *   npm run diagnose-stuck-rereview -- --repo X --pr N   # single PR
  *   npm run diagnose-stuck-rereview -- --json        # machine-readable
  *   npm run diagnose-stuck-rereview -- --threshold-minutes 5
+ *   npm run diagnose-stuck-rereview -- --apply --max-apply 1
  */
 
 import { execFile } from 'node:child_process';
@@ -43,6 +45,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT = join(__dirname, '..');
 
 const DEFAULT_STUCK_THRESHOLD_MINUTES = 5;
+const DEFAULT_MAX_APPLY = 1;
 const APPLY_REASON = 'stuck rereview detected by diagnose-stuck-rereview';
 const APPLY_TIMEOUT_MS = 30_000;
 const execFileAsync = promisify(execFile);
@@ -333,7 +336,9 @@ function formatHumanRow({ row, classification, jobInfo, reviewPassInfo }) {
 //   2 = usage error — invalid flag combination (e.g. --pr without --repo,
 //       --threshold-minutes negative or non-finite)
 //   3 = environment error — reviews.db missing or unreadable
-//   4 = stuck rows found (operator action required)
+//   4 = stuck rows found (operator action required), or --apply could not
+//       label every selected row. Apply-mode success returns 0 even when rows
+//       were stuck before labels were applied.
 // Add a new code only after thinking through every consumer of `npm run
 // diagnose-stuck-rereview` (cron jobs, follow-up alerts, runbook prose).
 async function main() {
@@ -344,6 +349,7 @@ async function main() {
       'threshold-minutes': { type: 'string' },
       json: { type: 'boolean', default: false },
       apply: { type: 'boolean', default: false },
+      'max-apply': { type: 'string' },
       'root-dir': { type: 'string' },
       help: { type: 'boolean', default: false },
     },
@@ -351,9 +357,10 @@ async function main() {
   }).values;
 
   if (args.help) {
-    process.stdout.write(`usage: diagnose-stuck-rereview [--repo X --pr N] [--json] [--threshold-minutes N] [--apply]\n`);
+    process.stdout.write(`usage: diagnose-stuck-rereview [--repo X --pr N] [--json] [--threshold-minutes N] [--apply] [--max-apply N]\n`);
     process.stdout.write(`  Triage for PRs stuck in review_status=pending after a rereview was requested.\n`);
     process.stdout.write(`  Default mode is read-only; --apply adds retrigger-review to stuck PRs.\n`);
+    process.stdout.write(`  Default --max-apply: ${DEFAULT_MAX_APPLY} row(s) per run.\n`);
     process.stdout.write(`  Default threshold: ${DEFAULT_STUCK_THRESHOLD_MINUTES} minutes.\n`);
     return 0;
   }
@@ -382,6 +389,15 @@ async function main() {
     thresholdMinutes = parsed;
   }
   const thresholdMs = thresholdMinutes * 60_000;
+  let maxApply = DEFAULT_MAX_APPLY;
+  if (args['max-apply'] !== undefined) {
+    const parsed = Number(args['max-apply']);
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+      process.stderr.write(`error: --max-apply must be a positive integer (got ${JSON.stringify(args['max-apply'])})\n`);
+      return 2;
+    }
+    maxApply = parsed;
+  }
   const now = Date.now();
 
   const rootDir = args['root-dir'] || DEFAULT_ROOT;
@@ -455,15 +471,16 @@ async function main() {
       report.push({ row, classification, jobInfo, reviewPassInfo });
     }
     const stuck = report.filter((r) => r.classification.stuck);
+    const selectedForApply = args.apply ? stuck.slice(0, maxApply) : [];
     if (args.apply) {
-      for (const entry of stuck) {
+      for (const entry of selectedForApply) {
         entry.applyResult = await applyRetriggerReviewLabel(entry.row);
       }
     }
     if (args.json) {
-      process.stdout.write(JSON.stringify({ thresholdMinutes, applied: !!args.apply, stuckCount: stuck.length, totalCandidates: report.length, rows: report }, null, 2) + '\n');
+      process.stdout.write(JSON.stringify({ thresholdMinutes, applied: !!args.apply, maxApply, appliedCount: selectedForApply.length, stuckCount: stuck.length, totalCandidates: report.length, rows: report }, null, 2) + '\n');
     } else {
-      process.stdout.write(`scanned ${report.length} candidate row(s); ${stuck.length} stuck (threshold=${thresholdMinutes}min${args.apply ? ', apply=true' : ''})\n`);
+      process.stdout.write(`scanned ${report.length} candidate row(s); ${stuck.length} stuck (threshold=${thresholdMinutes}min${args.apply ? `, apply=true, maxApply=${maxApply}` : ''})\n`);
       for (const entry of report) {
         process.stdout.write('\n' + formatHumanRow(entry) + '\n');
         if (entry.applyResult) {

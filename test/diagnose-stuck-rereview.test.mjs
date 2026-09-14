@@ -248,6 +248,35 @@ exit 0
   );
 });
 
+test('--apply caps retrigger-review labels with --max-apply', async (t) => {
+  const root = makeRoot(t);
+  const old = '2026-05-29T22:00:00.000Z';
+  seedReviewedPRsRow(root, {
+    pr_number: 1000,
+    rereview_requested_at: old,
+    last_attempted_at: '2026-05-29T21:00:00.000Z',
+  });
+  seedReviewedPRsRow(root, {
+    pr_number: 1001,
+    rereview_requested_at: old,
+    last_attempted_at: '2026-05-29T21:00:00.000Z',
+  });
+  const ghLog = prependFakeGh(t, root, (log) => `#!/bin/sh
+printf '%s\\n' "$*" >> ${JSON.stringify(log)}
+exit 0
+`);
+
+  const result = await runDiagnose(root, '--threshold-minutes', '5', '--apply', '--max-apply', '1');
+
+  assert.equal(result.code, 0, `expected apply success exit 0; got ${result.code}\nstderr:\n${result.stderr}`);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.stuckCount, 2);
+  assert.equal(payload.maxApply, 1);
+  assert.equal(payload.appliedCount, 1);
+  assert.equal(payload.rows.filter((row) => row.applyResult).length, 1);
+  assert.equal(readFileSync(ghLog, 'utf8').trim().split('\n').length, 1);
+});
+
 test('--apply stays actionable when retrigger-review label application fails', async (t) => {
   const root = makeRoot(t);
   seedReviewedPRsRow(root, {

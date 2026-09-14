@@ -1799,7 +1799,7 @@ test('a rereview deferred behind active remediation is not first-pass starvation
   assert.match(output, /^review_pipeline_pending_queue_depth 1$/m);
 });
 
-test('a CI-stopped rereview with a released claim is not first-pass starvation', () => {
+test('a CI-stopped rereview with a production-shaped stopped job is not first-pass starvation', () => {
   const rootDir = tempRoot();
   insertReviewRow(rootDir, {
     prNumber: 6838,
@@ -1827,8 +1827,13 @@ test('a CI-stopped rereview with a released claim is not first-pass starvation',
     prNumber: 6838,
     createdAt: '2026-05-25T15:55:00.000Z',
     stoppedAt: '2026-05-25T16:05:00.000Z',
-    stopReason: 'ci-regression-stopped',
-    reason: 'Refusing re-review: failed external CI; requeue produced status=stopped',
+    remediationPlan: {
+      stop: {
+        code: 'max-rounds-reached',
+        reason: 'Reached max remediation rounds (3/3). Refusing re-review: failed external CI; requeue produced status=stopped.',
+        stoppedAt: '2026-05-25T16:05:00.000Z',
+      },
+    },
   });
   seedFreshReconcile(rootDir);
 
@@ -1882,7 +1887,13 @@ test('a stopped CI regression job older than the rereview request does not defer
     prNumber: 6839,
     createdAt: '2026-05-25T11:50:00.000Z',
     stoppedAt: '2026-05-25T12:00:00.000Z',
-    stopReason: 'ci-regression-stopped',
+    remediationPlan: {
+      stop: {
+        code: 'max-rounds-reached',
+        reason: 'Reached max remediation rounds (3/3). Refusing re-review: failed external CI; requeue produced status=stopped.',
+        stoppedAt: '2026-05-25T12:00:00.000Z',
+      },
+    },
   });
   seedFreshReconcile(rootDir);
 
@@ -1899,7 +1910,7 @@ test('a stopped CI regression job older than the rereview request does not defer
   assert.equal(snapshot.queuedRereviews.oldest.readinessSource, 'rereview-requested');
 });
 
-test('a stopped job only defers CI regression rereviews when stopReason is structured', () => {
+test('a stopped job without CI evidence stays in the watcher lane', () => {
   const rootDir = tempRoot();
   insertReviewRow(rootDir, {
     prNumber: 6840,
@@ -1925,7 +1936,13 @@ test('a stopped job only defers CI regression rereviews when stopReason is struc
     repo: REPO,
     prNumber: 6840,
     stoppedAt: '2026-05-25T16:05:00.000Z',
-    stopReason: 'operator-cancelled',
+    remediationPlan: {
+      stop: {
+        code: 'operator-cancelled',
+        reason: 'Stopped by operator request.',
+        stoppedAt: '2026-05-25T16:05:00.000Z',
+      },
+    },
     reviewBody: 'Blocking issue: the ci-regression classifier is wrong here.',
   });
   seedFreshReconcile(rootDir);
@@ -1937,8 +1954,45 @@ test('a stopped job only defers CI regression rereviews when stopReason is struc
   });
 
   assert.equal(snapshot.deferredRereviews.count, 0);
-  assert.equal(snapshot.queuedRereviews.count, 1);
-  assert.equal(snapshot.queuedRereviews.oldest.prNumber, 6840);
+  assert.equal(snapshot.queuedRereviews.count, 0);
+  assert.equal(snapshot.firstPassQueue.firstPassPrs.length, 1);
+  assert.equal(snapshot.firstPassQueue.oldestFirstPass.prNumber, 6840);
+  assert.ok(findingCodes(snapshot).includes('review:queue_starvation'));
+});
+
+test('prior rereview pass history does not relabel watcher first-pass rows', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 6841,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T16:00:00.000Z',
+    lastAttemptedAt: '2026-05-25T16:05:00.000Z',
+    postedAt: null,
+    rereviewRequestedAt: null,
+    reviewAttempts: 0,
+  });
+  insertReviewerPass(rootDir, {
+    prNumber: 6841,
+    attemptNumber: 4,
+    passKind: 'rereview',
+    status: 'completed',
+    startedAt: '2026-05-25T15:04:00.000Z',
+    endedAt: '2026-05-25T15:05:00.000Z',
+  });
+  seedFreshReconcile(rootDir);
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    config: { queueStarvationMaxAgeMs: 10 * 60 * 1000 },
+  });
+
+  assert.equal(snapshot.firstPassQueue.firstPassPrs.length, 1);
+  assert.equal(snapshot.firstPassQueue.oldestFirstPass.prNumber, 6841);
+  assert.equal(snapshot.firstPassQueue.oldestFirstPass.passKind, 'first-pass');
+  assert.equal(snapshot.firstPassQueue.oldestFirstPass.latestReviewerPassKind, 'rereview');
+  assert.equal(snapshot.queuedRereviews.count, 0);
+  assert.ok(findingCodes(snapshot).includes('review:queue_starvation'));
 });
 
 test('lane-share supermajority requires a non-empty verified first-pass backlog after filtering', () => {
@@ -1969,8 +2023,13 @@ test('lane-share supermajority requires a non-empty verified first-pass backlog 
     repo: REPO,
     prNumber: 6838,
     stoppedAt: '2026-05-25T16:05:00.000Z',
-    stopReason: 'ci-regression-stopped',
-    reason: 'Refusing re-review: failed external CI; requeue produced status=stopped',
+    remediationPlan: {
+      stop: {
+        code: 'max-rounds-reached',
+        reason: 'Reached max remediation rounds (3/3). Refusing re-review: failed external CI; requeue produced status=stopped.',
+        stoppedAt: '2026-05-25T16:05:00.000Z',
+      },
+    },
   });
   for (let index = 0; index < 5; index += 1) {
     insertReviewerPass(rootDir, {

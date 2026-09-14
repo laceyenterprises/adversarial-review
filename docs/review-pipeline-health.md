@@ -49,10 +49,14 @@ The Grafana dashboard lives at
   unreadable. Page on the specific unreadable-ledger Sentinel finding for the
   exists-but-unopenable case; keep any `collector_up == 0` page scoped to the
   missing-ledger case or downgrade it to avoid double-paging the same incident.
-- `review_pipeline_first_pass_queue_depth`: open first-pass PRs waiting in
-  `reviewed_prs.review_status='pending'`.
+- `review_pipeline_first_pass_queue_depth`: open pending PRs whose durable
+  watcher dispatch state is first-pass (`rereview_requested_at` is empty and
+  no review has been posted yet), excluding rows with a current
+  CI-regression-stopped follow-up deferral. Historical `reviewer_passes`
+  rows are evidence only; they do not relabel the watcher lane.
 - `review_pipeline_pending_queue_depth`: combined open first-pass plus
-  re-review rows waiting in `reviewed_prs.review_status='pending'`. Dashboard
+  re-review rows waiting in `reviewed_prs.review_status='pending'`, before
+  active/requeued/CI-regression-stopped deferrals are split out. Dashboard
   panels or alerts that intentionally need the pre-split combined queue depth
   should migrate to this metric; `review_pipeline_first_pass_queue_depth` is
   first-pass only.
@@ -193,9 +197,9 @@ Its action headline is `Reviews stalled — restore reviewer dispatch`.
 | `review:afh_fallback_edge_supermajority` | one AFH reviewer fallback edge carries >=80% of reviewer selections over 1h with at least 5 selections and 2 distinct PRs, including the edge and grounding reason | ticket | the dominant edge falls below threshold, the sample floor is no longer met, the distinct-PR floor is no longer met, or AFH returns to the primary reviewer |
 | `review:review_lane_share_supermajority` | one reviewer lane carries >=75% of reviewer starts over the capacity window with at least 5 starts, observed concurrency above 1, and at least 2 distinct queued PRs in the opposite lane whose oldest row has reached the queue-starvation age threshold | ticket | the dominant lane falls below threshold, the sample floor is no longer met, observed concurrency is single-slot, or the opposite lane no longer has aged distinct queued work |
 | `review:terminal_review_failure_active` | at least one open PR has terminal reviewer failure evidence in `reviewed_prs` | ticket | the failed review row is retriggered, remediated, or the PR leaves the open population |
-| `review:queue_starvation` | oldest pending first-pass row is >10m old | ticket | no pending first-pass row exceeds the age threshold |
+| `review:queue_starvation` | oldest pending row in the watcher first-pass lane is >10m old, excluding rows with a current CI-regression-stopped follow-up deferral | ticket | no pending first-pass row exceeds the age threshold |
 | `review:rereview_ci_blocked` | one or more open re-reviews are parked at `review_status='ci-blocked'` because external CI failed and no remediation job exists to requeue; same-head CI probes are backoff-gated | ticket | the PR head moves, CI turns green, remediation is requeued, or the PR leaves the open population |
-| `review:rereview_deferred` | pending re-review row remains intentionally deferred behind an active, requeued, or CI-regression-stopped follow-up job for longer than the queue-starvation threshold (default 10m) | ticket | the active/requeued follow-up job finishes and re-arms review, the stopped CI-regression job ages out of the 24h stopped-job archive, the row leaves pending, or the deferral falls below threshold |
+| `review:rereview_deferred` | pending re-review row remains intentionally deferred behind an active, requeued, or CI-regression-stopped follow-up job for longer than the queue-starvation threshold (default 10m); CI-regression stopped deferrals are matched from persisted `remediationPlan.stop` metadata and last only while the stopped-job archive is retained (normally 24h) | ticket | the active/requeued follow-up job finishes and re-arms review, the stopped CI-regression job ages out of the 24h stopped-job archive, the row leaves pending, or the deferral falls below threshold |
 | `review:rereview_queue_wait` | oldest pending re-review row without an active, requeued, or current CI-regression-stopped follow-up deferral is older than the queue-starvation threshold (default 10m) | ticket | no pending re-review row without one of those current follow-up deferrals exceeds the age threshold |
 | `review:operational_blocker_human_intervention` | one or more stopped remediation rounds include an operational blocker whose text positively asks for human/manual/operator intervention | ticket | no stopped operational blocker requires human intervention |
 | `review:pr_lifecycle_mirror_unverified` | SEN-02 `blind`: the `reviewed_prs` lifecycle mirror has not reconciled against GitHub inside the staleness window (default 15m), or specific open PRs could not be resolved. Both the queue-starvation and terminal-but-unmerged findings select their population from `pr_state='open'` and then threshold on elapsed age, so an unverified row yields an alert that can never self-clear. Never a health verdict, and never suppresses either finding. | ticket | a sweep resolves every open PR against GitHub inside the staleness window |

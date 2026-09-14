@@ -1657,18 +1657,11 @@ function summarizeReviewerDegradation(rootDir, db, { nowMs }) {
   };
 }
 
-function summarizeFirstPassQueue(db, { nowMs }) {
+function summarizeFirstPassQueue(db, { nowMs, stoppedCiRegressionJobs = null }) {
   const rows = safeAll(
     db,
     `SELECT repo, pr_number, reviewed_at, rereview_requested_at, last_attempted_at, posted_at,
             failed_at, failure_message, review_attempts,
-            EXISTS (
-              SELECT 1
-                FROM reviewer_passes
-               WHERE reviewer_passes.repo = reviewed_prs.repo
-                 AND reviewer_passes.pr_number = reviewed_prs.pr_number
-                 AND reviewer_passes.pass_kind = 'rereview'
-            ) AS has_rereview_pass,
             (
               SELECT pass_kind
                 FROM reviewer_passes
@@ -1726,7 +1719,11 @@ function summarizeFirstPassQueue(db, { nowMs }) {
         posted_at: row.posted_at,
       },
     });
-    const watcherPassKind = row.has_rereview_pass ? 'rereview' : derivedPassKind;
+    const stoppedCiJob = stoppedCiRegressionJobDefersRow(
+      stoppedCiRegressionJobs?.get(`${row.repo}#${row.pr_number}`),
+      row,
+    );
+    const watcherPassKind = stoppedCiJob ? 'rereview' : derivedPassKind;
     const reviewerClaimStarts = Number(row.reviewer_claim_starts || 0);
     if (watcherPassKind === 'first-pass') {
       if (reviewerFailed) failedCount += 1;
@@ -1817,7 +1814,7 @@ function stoppedCiRegressionJobsByPr(followUpJobs) {
     const repo = entry.job?.repo || null;
     const prNumber = entry.job?.prNumber || null;
     if (!repo || !prNumber) continue;
-    if (entry.job?.stopReason !== 'ci-regression-stopped') continue;
+    if (!stoppedJobIsCiRegressionStopped(entry.job)) continue;
     const terminalAt = terminalJobTimestamp(entry.job, entry.stat?.mtimeMs);
     const terminalAtMs = toMs(terminalAt);
     if (terminalAtMs === null) continue;
@@ -1830,15 +1827,32 @@ function stoppedCiRegressionJobsByPr(followUpJobs) {
   return stoppedJobsByPr;
 }
 
+function stoppedJobIsCiRegressionStopped(job) {
+  const stopCode = job?.remediationPlan?.stop?.code
+    || job?.remediationPlan?.stopReason
+    || job?.stopReason
+    || null;
+  if (stopCode === 'ci-regression-stopped') return true;
+  const stopText = [
+    job?.remediationPlan?.stop?.reason,
+    job?.remediationPlan?.stopReason,
+    job?.stopReason,
+    job?.reason,
+  ].filter(Boolean).join('\n');
+  return /\bci-regression-stopped\b/i.test(stopText)
+    || (/failed external CI/i.test(stopText) && /requeue produced status=stopped/i.test(stopText));
+}
+
 function followUpJobIsAtOrAfter(jobEntry, timestamp) {
   const timestampMs = toMs(timestamp);
   return timestampMs === null || jobEntry.terminalAtMs >= timestampMs;
 }
 
 function stoppedCiRegressionJobDefersRow(jobEntry, row) {
+  const anchors = [row?.rereview_requested_at, row?.failed_at].filter((timestamp) => toMs(timestamp) !== null);
   return jobEntry
-    && followUpJobIsAtOrAfter(jobEntry, row.rereview_requested_at)
-    && followUpJobIsAtOrAfter(jobEntry, row.failed_at);
+    && anchors.length > 0
+    && anchors.every((timestamp) => followUpJobIsAtOrAfter(jobEntry, timestamp));
 }
 
 function jobAgeAnchor(entry) {
@@ -1881,13 +1895,6 @@ function summarizeDeferredRereviews(db, followUpJobs, { nowMs, stoppedCiRegressi
             rereview_reason,
             reviewer_head_sha,
             revision_ref,
-            EXISTS (
-              SELECT 1
-                FROM reviewer_passes
-               WHERE reviewer_passes.repo = reviewed_prs.repo
-                 AND reviewer_passes.pr_number = reviewed_prs.pr_number
-                 AND reviewer_passes.pass_kind = 'rereview'
-            ) AS has_rereview_pass,
             (
               SELECT COUNT(*)
                 FROM reviewer_passes
@@ -1907,13 +1914,13 @@ function summarizeDeferredRereviews(db, followUpJobs, { nowMs, stoppedCiRegressi
         posted_at: row.posted_at,
       },
     });
-    const passKind = row.has_rereview_pass ? 'rereview' : derivedPassKind;
-    if (passKind !== 'rereview') continue;
     const key = `${row.repo}#${row.pr_number}`;
     const activeJob = activeJobsByPr.get(key);
     const stoppedCiJob = stoppedCiRegressionJobDefersRow(stoppedCiJobs.get(key), row)
       ? stoppedCiJobs.get(key)
       : null;
+    const passKind = stoppedCiJob ? 'rereview' : derivedPassKind;
+    if (passKind !== 'rereview') continue;
     const deferringJob = activeJob || stoppedCiJob;
     if (!deferringJob) continue;
     const deferredSince =
@@ -1970,13 +1977,6 @@ function summarizeQueuedRereviews(db, followUpJobs, { nowMs, stoppedCiRegression
             review_attempts,
             reviewer_head_sha,
             revision_ref,
-            EXISTS (
-              SELECT 1
-                FROM reviewer_passes
-               WHERE reviewer_passes.repo = reviewed_prs.repo
-                 AND reviewer_passes.pr_number = reviewed_prs.pr_number
-                 AND reviewer_passes.pass_kind = 'rereview'
-            ) AS has_rereview_pass,
             (
               SELECT COUNT(*)
                 FROM reviewer_passes
@@ -2000,7 +2000,7 @@ function summarizeQueuedRereviews(db, followUpJobs, { nowMs, stoppedCiRegression
         posted_at: row.posted_at,
       },
     });
-    const passKind = row.has_rereview_pass ? 'rereview' : derivedPassKind;
+    const passKind = derivedPassKind;
     if (passKind !== 'rereview') continue;
     const key = `${row.repo}#${row.pr_number}`;
     if (activeJobsByPr.has(key)) continue;
@@ -4256,14 +4256,14 @@ function collectReviewPipelineHealth({
           dominant: null,
           edges: [],
         };
+    const followUpQueues = summarizeFollowUpQueues(rootDir, { nowMs, config });
+    const stoppedCiRegressionJobs = stoppedCiRegressionJobsByPr(followUpQueues.jobs);
     const firstPassQueue = db
-      ? summarizeFirstPassQueue(db, { nowMs })
+      ? summarizeFirstPassQueue(db, { nowMs, stoppedCiRegressionJobs })
       : { depth: 0, pendingDepth: 0, failedCount: 0, oldest: null, oldestFirstPass: null, firstPassPrs: [] };
     const ciBlockedRereviews = db
       ? summarizeCiBlockedRereviews(db, { nowMs })
       : { count: 0, oldest: null, prs: [] };
-    const followUpQueues = summarizeFollowUpQueues(rootDir, { nowMs, config });
-    const stoppedCiRegressionJobs = stoppedCiRegressionJobsByPr(followUpQueues.jobs);
     const queuedRereviews = db
       ? summarizeQueuedRereviews(db, followUpQueues.jobs, { nowMs, stoppedCiRegressionJobs })
       : { count: 0, oldest: null, prs: [] };

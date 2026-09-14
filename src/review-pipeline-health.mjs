@@ -87,6 +87,10 @@ const DEFAULT_DAG_AUTOWALK_MAX_LOG_AGE_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_DISPATCH_SPAWN_FAILURE_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_HAMMER_DISPATCH_STALL_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_CONFLICTING_PR_MIN_SHARED_PATH_COUNT = 5;
+const DEFAULT_CONFLICTING_PR_LIST_LIMIT = 100;
+const DEFAULT_CONFLICTING_PR_MAX_PROBED_PRS = 25;
+const DEFAULT_CONFLICTING_PR_DEADLINE_MS = 120 * 1000;
+const DEFAULT_CONFLICTING_PR_GIT_TIMEOUT_MS = 5 * 1000;
 const DEFAULT_LAUNCHD_TIMEOUT_MS = 2_000;
 const DEFAULT_LAUNCHD_TRANSIENT_RETRY_DELAYS_MS = Object.freeze([50, 150]);
 const DEFAULT_GH_TERMINAL_STATE_RETRY_DELAYS_MS = Object.freeze([100, 250]);
@@ -185,7 +189,7 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_merge_outcomes_total: 'Current review-ledger PR outcome count by state.',
   review_pipeline_merge_stalled_jobs: 'Current count of clean review-settled jobs still waiting on merge.',
   review_pipeline_conflicting_open_prs: 'Current count of open non-draft PRs GitHub reports as CONFLICTING.',
-  review_pipeline_conflicting_open_prs_collected: 'Whether the conflicting-open-PR collector reached GitHub and probed every conflicting PR successfully.',
+  review_pipeline_conflicting_open_prs_collected: 'Whether the conflicting-open-PR collector reached GitHub and completed the configured, non-truncated probe budget without blind spots.',
   review_pipeline_conflicting_open_pr_shared_path_groups: 'Current count of conflict path groups shared by at least the configured minimum PR count.',
   review_pipeline_stale_ama_closer_leases: 'Current count of AMA closer leases for still-open PRs stuck pending or dispatched past the configured age.',
   review_pipeline_zombie_reviewer_passes: 'Current count of reviewer_passes rows stuck running past the configured age.',
@@ -656,6 +660,21 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
       overrides.conflictingPrMinSharedPathCount
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_MIN_SHARED_PATH_COUNT,
       DEFAULT_CONFLICTING_PR_MIN_SHARED_PATH_COUNT
+    ),
+    conflictingPrMaxProbedPrs: parsePositiveInteger(
+      overrides.conflictingPrMaxProbedPrs
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_MAX_PROBED_PRS,
+      DEFAULT_CONFLICTING_PR_MAX_PROBED_PRS
+    ),
+    conflictingPrDeadlineMs: parsePositiveInteger(
+      overrides.conflictingPrDeadlineMs
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_DEADLINE_MS,
+      DEFAULT_CONFLICTING_PR_DEADLINE_MS
+    ),
+    conflictingPrGitTimeoutMs: parsePositiveInteger(
+      overrides.conflictingPrGitTimeoutMs
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_GIT_TIMEOUT_MS,
+      DEFAULT_CONFLICTING_PR_GIT_TIMEOUT_MS
     ),
     launchdTimeoutMs: parsePositiveInteger(
       overrides.launchdTimeoutMs
@@ -2079,38 +2098,111 @@ function parseConflictPaths(output) {
     .sort((left, right) => left.localeCompare(right));
 }
 
-function mergeTreeConflictPaths(pr, { repoRoot, execFileSyncImpl, gitEnv }) {
-  if (!pr.headRefOid) return { paths: [], error: 'missing-headRefOid' };
+function fetchArgs(...args) {
+  return ['-c', 'gc.auto=0', 'fetch', '--no-auto-maintenance', ...args];
+}
+
+function gitRemoteHeadOid(refName, { repoRoot, execFileSyncImpl, gitEnv, timeout }) {
+  const safeRef = String(refName || 'main').replace(/^refs\/heads\//, '');
   const options = {
     cwd: repoRoot,
     encoding: 'utf8',
-    timeout: 20_000,
+    timeout,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: gitEnv ? { ...process.env, ...gitEnv } : process.env,
+  };
+  const output = execFileSyncImpl('git', ['ls-remote', '--heads', 'origin', safeRef], options);
+  const line = String(output || '').split(/\r?\n/).find((entry) => entry.trim());
+  const oid = line?.trim().split(/\s+/)[0] || '';
+  if (!/^[0-9a-f]{40}$/i.test(oid)) {
+    throw new Error(`base ref not found on origin: ${safeRef}`);
+  }
+  return oid;
+}
+
+function ensureCommitPresent(oid, fetchSpec, { repoRoot, execFileSyncImpl, gitEnv, timeout }) {
+  const options = {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    timeout,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: gitEnv ? { ...process.env, ...gitEnv } : process.env,
   };
   try {
-    execFileSyncImpl('git', ['cat-file', '-e', `${pr.headRefOid}^{commit}`], options);
+    execFileSyncImpl('git', ['cat-file', '-e', `${oid}^{commit}`], options);
+    return null;
   } catch {
     try {
-      execFileSyncImpl('git', ['fetch', '--no-tags', '--no-write-fetch-head', 'origin', pr.headRefOid], options);
-    } catch {
-      try {
-        execFileSyncImpl('git', ['fetch', '--no-tags', '--no-write-fetch-head', 'origin', `refs/pull/${pr.number}/head`], options);
-      } catch (error) {
-        return {
-          paths: [],
-          error: String(error?.stderr || error?.message || 'git fetch PR head failed').slice(0, 500),
-        };
-      }
+      execFileSyncImpl('git', fetchArgs('--no-tags', '--no-write-fetch-head', 'origin', fetchSpec || oid), options);
+      return null;
+    } catch (error) {
+      return String(error?.stderr || error?.message || 'git fetch commit failed').slice(0, 500);
     }
   }
+}
+
+function mergeTreeConflictPaths(pr, { repoRoot, execFileSyncImpl, gitEnv, baseOidCache, timeout }) {
+  if (!pr.headRefOid) return { paths: [], error: 'missing-headRefOid' };
+  const options = {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    timeout,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: gitEnv ? { ...process.env, ...gitEnv } : process.env,
+  };
+  let headFetchError = ensureCommitPresent(
+    pr.headRefOid,
+    pr.headRefOid,
+    { repoRoot, execFileSyncImpl, gitEnv, timeout }
+  );
+  if (headFetchError) {
+    headFetchError = ensureCommitPresent(
+      pr.headRefOid,
+      `refs/pull/${pr.number}/head`,
+      { repoRoot, execFileSyncImpl, gitEnv, timeout }
+    );
+    if (headFetchError) {
+      return { paths: [], error: headFetchError };
+    }
+  }
+
+  const baseRefName = pr.baseRefName || 'main';
+  let baseOid = baseOidCache?.get(baseRefName);
+  try {
+    if (!baseOid) {
+      baseOid = gitRemoteHeadOid(baseRefName, { repoRoot, execFileSyncImpl, gitEnv, timeout });
+      baseOidCache?.set(baseRefName, baseOid);
+    }
+  } catch (error) {
+    return {
+      paths: [],
+      error: String(error?.stderr || error?.message || 'git ls-remote base failed').slice(0, 500),
+    };
+  }
+
+  const baseFetchError = ensureCommitPresent(
+    baseOid,
+    baseOid,
+    { repoRoot, execFileSyncImpl, gitEnv, timeout }
+  );
+  if (baseFetchError) {
+    return { paths: [], error: `base ${baseRefName}: ${baseFetchError}` };
+  }
+
   try {
     const output = execFileSyncImpl(
       'git',
-      ['merge-tree', '--write-tree', '--name-only', `origin/${pr.baseRefName || 'main'}`, pr.headRefOid],
+      ['merge-tree', '--write-tree', '--name-only', baseOid, pr.headRefOid],
       options
     );
-    return { paths: parseConflictPaths(output), error: null };
+    const paths = parseConflictPaths(output);
+    if (paths.length === 0 && pr.mergeable === 'CONFLICTING') {
+      return {
+        paths,
+        error: `github reports CONFLICTING but local merge-tree was clean against ${baseRefName}@${baseOid}`,
+      };
+    }
+    return { paths, error: null };
   } catch (error) {
     const paths = parseConflictPaths(error?.stdout || '');
     if (paths.length > 0) {
@@ -2124,6 +2216,7 @@ function mergeTreeConflictPaths(pr, { repoRoot, execFileSyncImpl, gitEnv }) {
 }
 
 function ghPrListOpenSync(repo, { execFileSyncImpl, sleepSyncImpl = sleepSyncMs }) {
+  const requestedLimit = DEFAULT_CONFLICTING_PR_LIST_LIMIT + 1;
   const args = [
     'pr',
     'list',
@@ -2132,7 +2225,7 @@ function ghPrListOpenSync(repo, { execFileSyncImpl, sleepSyncImpl = sleepSyncMs 
     '--state',
     'open',
     '--limit',
-    '100',
+    String(requestedLimit),
     '--json',
     'number,url,title,headRefName,headRefOid,baseRefName,mergeable,isDraft',
   ];
@@ -2157,7 +2250,12 @@ function ghPrListOpenSync(repo, { execFileSyncImpl, sleepSyncImpl = sleepSyncMs 
   throw lastError;
 }
 
-function summarizeConflictingOpenPrs({ config, execFileSyncImpl, sleepSyncImpl = sleepSyncMs }) {
+function summarizeConflictingOpenPrs({
+  config,
+  execFileSyncImpl,
+  sleepSyncImpl = sleepSyncMs,
+  nowMsImpl = Date.now,
+}) {
   if (!config.conflictingPrChecksEnabled) {
     return { enabled: false, collected: false, count: 0, probedPrs: 0, unprobedPrs: 0, prs: [], paths: [], groupedPaths: [], sharedPathGroups: [], errors: [] };
   }
@@ -2168,9 +2266,14 @@ function summarizeConflictingOpenPrs({ config, execFileSyncImpl, sleepSyncImpl =
   }
 
   let rows;
+  const errors = [];
   try {
     const output = ghPrListOpenSync(repo, { execFileSyncImpl, sleepSyncImpl });
     rows = JSON.parse(output || '[]');
+    if (Array.isArray(rows) && rows.length >= DEFAULT_CONFLICTING_PR_LIST_LIMIT + 1) {
+      errors.push(`listing-truncated: gh returned ${rows.length} row(s) for requested limit ${DEFAULT_CONFLICTING_PR_LIST_LIMIT + 1}`);
+      rows = rows.slice(0, DEFAULT_CONFLICTING_PR_LIST_LIMIT);
+    }
   } catch (error) {
     return {
       count: 0,
@@ -2188,8 +2291,13 @@ function summarizeConflictingOpenPrs({ config, execFileSyncImpl, sleepSyncImpl =
 
   const grouped = new Map();
   const prs = [];
-  const errors = [];
   let probedPrs = 0;
+  let unprobedPrs = 0;
+  const maxProbedPrs = config.conflictingPrMaxProbedPrs || DEFAULT_CONFLICTING_PR_MAX_PROBED_PRS;
+  const deadlineMs = config.conflictingPrDeadlineMs || DEFAULT_CONFLICTING_PR_DEADLINE_MS;
+  const gitTimeoutMs = config.conflictingPrGitTimeoutMs || DEFAULT_CONFLICTING_PR_GIT_TIMEOUT_MS;
+  const startedAtMs = nowMsImpl();
+  const baseOidCache = new Map();
   const objectDirectory = mkdtempSync(join(tmpdir(), 'review-pipeline-health-objects-'));
   const gitEnv = {
     GIT_OBJECT_DIRECTORY: objectDirectory,
@@ -2199,9 +2307,29 @@ function summarizeConflictingOpenPrs({ config, execFileSyncImpl, sleepSyncImpl =
     for (const row of Array.isArray(rows) ? rows : []) {
       const pr = normalizeConflictingPrRow(row);
       if (!pr) continue;
-      const conflict = mergeTreeConflictPaths(pr, { repoRoot, execFileSyncImpl, gitEnv });
+      if (probedPrs >= maxProbedPrs) {
+        unprobedPrs += 1;
+        errors.push(`#${pr.number}: probe-cap-exhausted after ${probedPrs}/${maxProbedPrs} PR(s)`);
+        prs.push({ ...pr, conflictingPaths: [], probeOk: false });
+        continue;
+      }
+      const elapsedMs = nowMsImpl() - startedAtMs;
+      if (elapsedMs >= deadlineMs) {
+        unprobedPrs += 1;
+        errors.push(`#${pr.number}: probe-deadline-exhausted after ${elapsedMs}/${deadlineMs}ms`);
+        prs.push({ ...pr, conflictingPaths: [], probeOk: false });
+        continue;
+      }
+      const conflict = mergeTreeConflictPaths(pr, {
+        repoRoot,
+        execFileSyncImpl,
+        gitEnv,
+        baseOidCache,
+        timeout: gitTimeoutMs,
+      });
       const probeOk = !conflict.error;
       if (probeOk) probedPrs += 1;
+      else unprobedPrs += 1;
       if (conflict.error) errors.push(`#${pr.number}: ${conflict.error}`);
       prs.push({ ...pr, conflictingPaths: conflict.paths, probeOk });
       if (!probeOk) continue;
@@ -2230,12 +2358,15 @@ function summarizeConflictingOpenPrs({ config, execFileSyncImpl, sleepSyncImpl =
     collected: errors.length === 0,
     count: prs.length,
     probedPrs,
-    unprobedPrs: prs.length - probedPrs,
+    unprobedPrs,
     prs,
     paths: groupedPaths.map((entry) => entry.path),
     groupedPaths,
     sharedPathGroups,
     minSharedPathCount,
+    maxProbedPrs,
+    deadlineMs,
+    gitTimeoutMs,
     errors,
   };
 }
@@ -3824,6 +3955,7 @@ function collectReviewPipelineHealth({
   fetchPRTerminalStateSyncImpl = fetchPRTerminalStateSync,
   execFileSyncImpl = execFileSync,
   sleepSyncImpl = sleepSyncMs,
+  nowMsImpl = Date.now,
 } = {}) {
   const observedAt = toIso(now);
   const nowMs = Date.parse(observedAt);
@@ -3918,6 +4050,7 @@ function collectReviewPipelineHealth({
       config,
       execFileSyncImpl,
       sleepSyncImpl,
+      nowMsImpl,
     });
     const amaCloserLeases = readAmaCloserLeases(rootDir, { nowMs, config, reviewRows });
     const daemonMergeParks = readDaemonMergeParks({

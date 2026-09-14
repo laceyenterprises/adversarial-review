@@ -82,14 +82,32 @@ The Grafana dashboard lives at
 - `review_pipeline_conflicting_open_prs`: open non-draft PRs GitHub reports as
   `CONFLICTING`.
 - `review_pipeline_conflicting_open_prs_collected`: 1 when the GitHub open-PR
-  listing for the conflicting-PR diagnostic was collected successfully and every
-  conflicting PR's local merge-tree probe completed, 0 when the snapshot is
-  blind. A blind snapshot is not equivalent to zero conflicts.
+  listing for the conflicting-PR diagnostic was collected without truncation and
+  the configured local merge-tree probe budget completed without blind spots, 0
+  when the snapshot is blind. A blind snapshot is not equivalent to zero
+  conflicts.
 - `review_pipeline_conflicting_open_pr_shared_path_groups`: local
   `git merge-tree --write-tree --name-only` conflict path groups shared by at
   least `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_MIN_SHARED_PATH_COUNT`
   PRs (default 5), so repeated generated-file or prompt-stamp collisions are
   visible without ticketing on ordinary isolated conflicts.
+
+Conflicting-open-PR diagnostics are off by default in the library and can be
+enabled with `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_CHECKS=1`; the
+superproject production tick may override that default. The collector reads
+GitHub with `gh pr list --limit 101` so a full page is treated as blind
+conflicting-open-PR evidence instead of partial coverage.
+It resolves each base ref through `git ls-remote`, fetches any missing head/base
+objects into a scratch object directory with auto-maintenance disabled, and
+merges against the fetched base OID rather than a local remote-tracking ref.
+`ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_REPO` and
+`ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_REPO_ROOT` select the target
+repo and checkout. `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_MAX_PROBED_PRS`
+(default 25), `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_DEADLINE_MS`
+(default 120000), and
+`ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_GIT_TIMEOUT_MS` (default
+5000) bound the work inside the 300s production job budget; skipped PRs are
+recorded as unprobed blind evidence.
 - `review_pipeline_stale_ama_closer_leases`: AMA closer leases in
   `pending`/`dispatched` with no terminal outcome past the age threshold.
 - `review_pipeline_zombie_reviewer_passes`: `reviewer_passes` rows still
@@ -195,7 +213,7 @@ Its action headline is `Reviews stalled — restore reviewer dispatch`.
 | `review:remediation_backlog` | `follow-up-jobs/pending` has >5 jobs | ticket | pending job count returns to threshold or below |
 | `review:merge_stalled` | a `stopped:review-settled` job remains open for >3 watcher ticks | ticket | the PR is merged/closed or the settled job is no longer past threshold |
 | `review:conflicting_open_prs` | GitHub reports open non-draft PRs as `CONFLICTING`, and at least one local `git merge-tree --write-tree --name-only` conflict path group is shared by the configured minimum PR count (default 5) | ticket | no conflict path group meets the shared-path threshold |
-| `review:conflicting_open_prs_unreadable` | SEN-02 `blind`: the GitHub open-PR listing or one or more per-PR merge-tree probes for conflicting-PR diagnostics could not be collected, so the snapshot cannot distinguish "zero conflicts" from "not fully measured". Never a health verdict. | ticket | the GitHub listing and every per-PR probe are collected again |
+| `review:conflicting_open_prs_unreadable` | SEN-02 `blind`: the GitHub open-PR listing was unavailable or truncated, one or more per-PR merge-tree probes could not be collected, GitHub reported `CONFLICTING` while the fresh-base local merge-tree was clean, or the configured probe cap/deadline left PRs unprobed. The snapshot cannot distinguish "zero conflicts" from "not fully measured". Never a health verdict. | ticket | the GitHub listing is non-truncated and the configured per-PR probe budget completes without blind spots |
 | `review:ttm_budget_breach` | **SLOW** (trend, not alarm): open PR age exceeds a budget DERIVED from the measured merge distribution -- the configured percentile (default p90) of each review-round bucket, weighted-least-squares fitted to `base + review_rounds * per_round` and scaled by measured queue pressure (Little's Law, capped at 3x). Nothing here is a literal; change the distribution and the budget moves. | ticket | the PR merges/closes or falls back under the derived budget |
 | `review:pr_progress_stalled` | **STUCK** (page-worthy): an open PR is not progressing -- a re-review was requested and no reviewer pass has started since, or the reviewer lease expired while the row still claims an in-flight review. Independent of the TTM budget and of elapsed time. | ticket | a reviewer pass starts after the re-review request, or the stale lease is reclaimed/settled |
 | `review:ttm_budget_model_unreadable` | SEN-02 `blind`: the merged-PR distribution the TTM budget is derived from could not be read, so no budget exists to compare against. The SLOW finding is withheld this tick; the STUCK findings still evaluate. Never a health verdict. | ticket | `reviews.db` `reviewed_prs`/`reviewer_passes` are queryable again |

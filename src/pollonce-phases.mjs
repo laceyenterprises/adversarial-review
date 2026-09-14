@@ -1227,21 +1227,39 @@ export async function processReviewSubject(entry, ctx) {
         );
       } else if (postedReviewHeadMoved) {
         try {
-          const refreshResult = requestReviewRereview({
+          const ciAdmission = await guardRereviewCiBeforeReviewer({
             rootDir: ROOT,
             repo: repoPath,
             prNumber,
-            reason: `auto-refresh: posted review on stale head ${existing.reviewer_head_sha.slice(0, 12)}; current head is ${subject.headSha.slice(0, 12)}`,
+            passKind: 'rereview',
+            reviewerHeadSha: subject.headSha,
+            execFileImpl: execFileAsync,
+            env: process.env,
+            log: console,
+            cfg: domainAdapterSet?.domainConfig,
           });
-          if (refreshResult.triggered) {
+          if (!ciAdmission.proceed) {
             console.log(
-              `[watcher] auto-refresh stale posted review for ${repoPath}#${prNumber}: ` +
-                `${existing.reviewer_head_sha.slice(0, 12)} → ${subject.headSha.slice(0, 12)}`
+              `[watcher] Holding stale posted review auto-refresh for ${repoPath}#${prNumber}: ` +
+                `${ciAdmission.reason}; reviewer admission requires green external CI.`
             );
-            // Re-read the row so the rest of the iteration sees the
-            // reset state; fall through to the spawn path below
-            // (status is now 'pending' and the CAS will claim it).
-            existing = stmtGetReviewRow.get(repoPath, prNumber);
+          } else {
+            const refreshResult = requestReviewRereview({
+              rootDir: ROOT,
+              repo: repoPath,
+              prNumber,
+              reason: `auto-refresh: posted review on stale head ${existing.reviewer_head_sha.slice(0, 12)}; current head is ${subject.headSha.slice(0, 12)}`,
+            });
+            if (refreshResult.triggered) {
+              console.log(
+                `[watcher] auto-refresh stale posted review for ${repoPath}#${prNumber}: ` +
+                  `${existing.reviewer_head_sha.slice(0, 12)} → ${subject.headSha.slice(0, 12)}`
+              );
+              // Re-read the row so the rest of the iteration sees the
+              // reset state; fall through to the spawn path below
+              // (status is now 'pending' and the CAS will claim it).
+              existing = stmtGetReviewRow.get(repoPath, prNumber);
+            }
           }
         } catch (err) {
           console.error(

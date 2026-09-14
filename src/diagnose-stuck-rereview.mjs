@@ -31,7 +31,8 @@
  *   npm run diagnose-stuck-rereview -- --threshold-minutes 5
  */
 
-import { parseArgs } from 'node:util';
+import { execFile } from 'node:child_process';
+import { parseArgs, promisify } from 'node:util';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -42,6 +43,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT = join(__dirname, '..');
 
 const DEFAULT_STUCK_THRESHOLD_MINUTES = 5;
+const APPLY_REASON = 'stuck rereview detected by diagnose-stuck-rereview';
+const APPLY_TIMEOUT_MS = 30_000;
+const execFileAsync = promisify(execFile);
 
 function parseTimestamp(value) {
   if (value === null || value === undefined || value === '') return null;
@@ -229,7 +233,7 @@ function classifyRow(row, { now, thresholdMs, jobInfo, reviewPassInfo }) {
       stuck: true,
       ageMinutes: minutesBetween(now, rereviewAtMs),
       hints: buildStuckHints(row, { jobInfo, reviewPassInfo }),
-      suggestedAction: `npm run retrigger-review -- --repo ${row.repo} --pr ${row.pr_number} --reason "stuck rereview detected by diagnose-stuck-rereview"`,
+      suggestedAction: suggestedActionFor(row),
     };
   }
   const ageMs = now - rereviewAtMs;
@@ -244,8 +248,41 @@ function classifyRow(row, { now, thresholdMs, jobInfo, reviewPassInfo }) {
     stuck: true,
     ageMinutes: minutesBetween(now, rereviewAtMs),
     hints: buildStuckHints(row, { jobInfo, reviewPassInfo }),
-    suggestedAction: `npm run retrigger-review -- --repo ${row.repo} --pr ${row.pr_number} --reason "stuck rereview detected by diagnose-stuck-rereview"`,
+    suggestedAction: suggestedActionFor(row),
   };
+}
+
+function suggestedActionFor(row) {
+  return `npm run retrigger-review -- --repo ${row.repo} --pr ${row.pr_number} --reason "${APPLY_REASON}"`;
+}
+
+async function applyRetriggerReviewLabel(row, { execFileImpl = execFileAsync } = {}) {
+  try {
+    await execFileImpl('gh', [
+      'pr',
+      'edit',
+      String(row.pr_number),
+      '--repo',
+      row.repo,
+      '--add-label',
+      'retrigger-review',
+    ], {
+      maxBuffer: 5 * 1024 * 1024,
+      timeout: APPLY_TIMEOUT_MS,
+    });
+    return {
+      applied: true,
+      label: 'retrigger-review',
+      reason: APPLY_REASON,
+    };
+  } catch (err) {
+    return {
+      applied: false,
+      label: 'retrigger-review',
+      reason: err?.killed === true ? 'gh-cli-timeout' : 'gh-cli-failure',
+      error: err?.message || String(err),
+    };
+  }
 }
 
 function formatHumanRow({ row, classification, jobInfo, reviewPassInfo }) {
@@ -299,13 +336,14 @@ function formatHumanRow({ row, classification, jobInfo, reviewPassInfo }) {
 //   4 = stuck rows found (operator action required)
 // Add a new code only after thinking through every consumer of `npm run
 // diagnose-stuck-rereview` (cron jobs, follow-up alerts, runbook prose).
-function main() {
+async function main() {
   const args = parseArgs({
     options: {
       repo: { type: 'string' },
       pr: { type: 'string' },
       'threshold-minutes': { type: 'string' },
       json: { type: 'boolean', default: false },
+      apply: { type: 'boolean', default: false },
       'root-dir': { type: 'string' },
       help: { type: 'boolean', default: false },
     },
@@ -313,9 +351,10 @@ function main() {
   }).values;
 
   if (args.help) {
-    process.stdout.write(`usage: diagnose-stuck-rereview [--repo X --pr N] [--json] [--threshold-minutes N]\n`);
-    process.stdout.write(`  Read-only triage for PRs stuck in review_status=pending after a rereview\n`);
-    process.stdout.write(`  was requested. Default threshold: ${DEFAULT_STUCK_THRESHOLD_MINUTES} minutes.\n`);
+    process.stdout.write(`usage: diagnose-stuck-rereview [--repo X --pr N] [--json] [--threshold-minutes N] [--apply]\n`);
+    process.stdout.write(`  Triage for PRs stuck in review_status=pending after a rereview was requested.\n`);
+    process.stdout.write(`  Default mode is read-only; --apply adds retrigger-review to stuck PRs.\n`);
+    process.stdout.write(`  Default threshold: ${DEFAULT_STUCK_THRESHOLD_MINUTES} minutes.\n`);
     return 0;
   }
 
@@ -416,15 +455,25 @@ function main() {
       report.push({ row, classification, jobInfo, reviewPassInfo });
     }
     const stuck = report.filter((r) => r.classification.stuck);
-    if (args.json) {
-      process.stdout.write(JSON.stringify({ thresholdMinutes, stuckCount: stuck.length, totalCandidates: report.length, rows: report }, null, 2) + '\n');
-    } else {
-      process.stdout.write(`scanned ${report.length} candidate row(s); ${stuck.length} stuck (threshold=${thresholdMinutes}min)\n`);
-      for (const entry of report) {
-        process.stdout.write('\n' + formatHumanRow(entry) + '\n');
+    if (args.apply) {
+      for (const entry of stuck) {
+        entry.applyResult = await applyRetriggerReviewLabel(entry.row);
       }
     }
-    return stuck.length > 0 ? 4 : 0;
+    if (args.json) {
+      process.stdout.write(JSON.stringify({ thresholdMinutes, applied: !!args.apply, stuckCount: stuck.length, totalCandidates: report.length, rows: report }, null, 2) + '\n');
+    } else {
+      process.stdout.write(`scanned ${report.length} candidate row(s); ${stuck.length} stuck (threshold=${thresholdMinutes}min${args.apply ? ', apply=true' : ''})\n`);
+      for (const entry of report) {
+        process.stdout.write('\n' + formatHumanRow(entry) + '\n');
+        if (entry.applyResult) {
+          process.stdout.write(`  apply result          : ${entry.applyResult.applied ? 'applied' : 'failed'}${entry.applyResult.error ? ` - ${entry.applyResult.error}` : ''}\n`);
+        }
+      }
+    }
+    const failedApply = stuck.some((entry) => entry.applyResult && entry.applyResult.applied !== true);
+    if (failedApply) return 4;
+    return stuck.length > 0 && !args.apply ? 4 : 0;
   } finally {
     try { db.close(); } catch { /* best-effort */ }
   }
@@ -432,4 +481,4 @@ function main() {
 
 // Use process.exitCode rather than process.exit so non-blocking stdout
 // (e.g. when piped into `jq` or `tee`) drains before the process terminates.
-process.exitCode = main();
+process.exitCode = await main();

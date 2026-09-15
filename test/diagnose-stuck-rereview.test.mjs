@@ -9,7 +9,11 @@ import { fileURLToPath } from 'node:url';
 
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 import { isExplicitOperatorReviewRetrigger } from '../src/first-pass-review-suppression.mjs';
-import { applyStuckRereviewRows } from '../src/diagnose-stuck-rereview.mjs';
+import {
+  applyStuckRereviewRows,
+  buildFollowUpJobFilenameIndex,
+  readJobsForPR,
+} from '../src/diagnose-stuck-rereview.mjs';
 import { collectReviewLatencyReport } from '../src/review-latency-report.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -493,6 +497,79 @@ test('--apply stops re-arming after the per-head watchdog cap', async (t) => {
   }
 });
 
+test('--apply delegates the terminal PR decision to the watcher claim guard', async (t) => {
+  // `reviewed_prs.pr_state` is a locally cached value the
+  // `adversarial-pipeline.no-action-on-terminal-pr` scars record as unreliable
+  // in both directions, so it can serve a merged PR as `open`. This pins the
+  // contract that makes that safe here: for a stale-`open` row the watchdog's
+  // ENTIRE effect is a watcher wake — it mutates no `reviewed_prs` column and
+  // spawns nothing — and the per-(repo, pr, head) re-arm budget bounds how many
+  // wakes a stale-open row can ever burn. The authoritative-live merged/closed
+  // decision stays with the watcher's claim guard.
+  const root = makeRoot(t);
+  const old = '2026-05-29T22:00:00.000Z';
+  // Locally `open`, but the PR is actually terminal upstream. The watchdog has
+  // no live view and must not try to make that call.
+  seedReviewedPRsRow(root, {
+    pr_state: 'open',
+    rereview_requested_at: old,
+    rereview_reason: 'auto-refresh: posted review on stale head',
+    last_attempted_at: '2026-05-29T21:00:00.000Z',
+    reviewer_head_sha: 'stale-open-head',
+    revision_ref: 'stale-open-head',
+  });
+  seedCompletedJob(root, { completedAt: old, reReviewRequested: true });
+
+  const readRow = () => {
+    const db = openReviewStateDb(root);
+    try {
+      return db.prepare(
+        `SELECT repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts,
+                last_attempted_at, posted_at, rereview_requested_at, rereview_reason,
+                reviewer_head_sha, revision_ref, failed_at
+           FROM reviewed_prs
+          WHERE repo = ? AND pr_number = ?`
+      ).get('laceyenterprises/agent-os', 1000);
+    } finally {
+      db.close();
+    }
+  };
+
+  const before = readRow();
+  const applied = await runDiagnose(root, '--threshold-minutes', '5', '--apply');
+  assert.equal(applied.code, 0, `expected apply exit 0; got ${applied.code}\nstderr:\n${applied.stderr}`);
+  const appliedPayload = JSON.parse(applied.stdout);
+  assert.equal(appliedPayload.appliedCount, 1);
+  assert.equal(appliedPayload.applyResults[0].wakeRequested, true);
+
+  // The whole mutation surface is the wake file, never the review row.
+  assert.deepEqual(readRow(), before);
+
+  // Bounded: once the per-head cap is spent, a stale-open row stops costing
+  // wakes instead of being re-armed forever.
+  const state = JSON.parse(
+    readFileSync(join(root, 'data', 'follow-up-jobs', 'stuck-rereview-watchdog.json'), 'utf8')
+  );
+  const key = 'laceyenterprises/agent-os#1000@stale-open-head';
+  assert.equal(state.entries[key].attempts, 1);
+  state.entries[key].attempts = 3;
+  state.entries[key].nextEligibleAt = new Date(Date.now() - 60_000).toISOString();
+  writeFileSync(
+    join(root, 'data', 'follow-up-jobs', 'stuck-rereview-watchdog.json'),
+    JSON.stringify(state, null, 2),
+    'utf8'
+  );
+
+  const capped = await runDiagnose(root, '--threshold-minutes', '5', '--apply');
+  assert.equal(capped.code, 0, `expected cap exhaustion exit 0; got ${capped.code}\nstderr:\n${capped.stderr}`);
+  const cappedPayload = JSON.parse(capped.stdout);
+  assert.equal(cappedPayload.appliedCount, 0);
+  assert.equal(cappedPayload.skippedApplyCount, 1);
+  assert.equal(cappedPayload.applyResults[0].reason, 'watchdog-rearm-cap-exhausted');
+  assert.notEqual(cappedPayload.applyResults[0].wakeRequested, true);
+  assert.deepEqual(readRow(), before);
+});
+
 test('--apply prunes stale watchdog state entries on write', async (t) => {
   const root = makeRoot(t);
   const old = '2026-05-29T22:00:00.000Z';
@@ -669,6 +746,105 @@ test('apply treats rereview CAS miss as a benign race', async (t) => {
   } finally {
     db.close();
   }
+});
+
+test('job buckets are scanned once per invocation, not once per candidate row', async (t) => {
+  // `main()` is fully synchronous and the live `completed` bucket grows
+  // monotonically, so a per-row directory scan costs
+  // (candidate rows x bucket size) reads inside the daemon tick. The index is
+  // built once from the candidate set; an indexed read must therefore answer
+  // entirely from memory and never touch the job directories again.
+  const root = makeRoot(t);
+  const subjects = [
+    { repo: 'laceyenterprises/agent-os', prNumber: 1000 },
+    { repo: 'laceyenterprises/agent-os', prNumber: 1001 },
+    { repo: 'laceyenterprises/adversarial-review', prNumber: 1000 },
+  ];
+  for (const subject of subjects) {
+    seedCompletedJob(root, {
+      repo: subject.repo,
+      prNumber: subject.prNumber,
+      revisionRef: `rev-${subject.repo.replace('/', '__')}-${subject.prNumber}`,
+    });
+  }
+  // Unrelated bucket noise the index must ignore, mirroring the live bucket.
+  seedCompletedJob(root, { repo: 'laceyenterprises/other', prNumber: 4242 });
+
+  const index = buildFollowUpJobFilenameIndex({ rootDir: root, subjects });
+  const completed = index.buckets.get('completed');
+  assert.equal(completed.size, subjects.length, 'index groups exactly the requested subjects');
+  assert.equal(completed.has('laceyenterprises__other-pr-4242-'), false);
+
+  const manySubjects = Array.from({ length: 250 }, (_, i) => ({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 2000 + i,
+  }));
+  for (let i = 0; i < 500; i += 1) {
+    seedCompletedJob(root, {
+      repo: 'laceyenterprises/unrelated',
+      prNumber: 5000 + i,
+      revisionRef: `noise-${i}`,
+    });
+  }
+  const originalStartsWith = String.prototype.startsWith;
+  let startsWithCalls = 0;
+  String.prototype.startsWith = function instrumentedStartsWith(...args) {
+    startsWithCalls += 1;
+    return originalStartsWith.apply(this, args);
+  };
+  try {
+    buildFollowUpJobFilenameIndex({ rootDir: root, subjects: manySubjects });
+  } finally {
+    String.prototype.startsWith = originalStartsWith;
+  }
+  assert.equal(
+    startsWithCalls,
+    0,
+    'index construction must not compare every bucket filename against every candidate prefix'
+  );
+
+  for (const subject of subjects) {
+    const direct = readJobsForPR({ rootDir: root, ...subject });
+    const indexed = readJobsForPR({ rootDir: root, ...subject, jobIndex: index });
+    assert.deepEqual(indexed, direct, `indexed read must match the direct scan for ${subject.repo}#${subject.prNumber}`);
+    assert.equal(indexed.latestJob.revisionRef, `rev-${subject.repo.replace('/', '__')}-${subject.prNumber}`);
+  }
+
+  // The load-bearing property: an indexed read does no directory listing of its
+  // own. Add a newer matching job file AFTER the index was built — the direct
+  // (unindexed) read rescans and sees it, the indexed read does not, which is
+  // only possible if the per-row `readdirSync` is gone.
+  writeFileSync(
+    join(root, 'data', 'follow-up-jobs', 'completed',
+      'laceyenterprises__agent-os-pr-1000-2026-05-30T09-00-00-000Z.json'),
+    JSON.stringify({
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 1000,
+      status: 'completed',
+      completedAt: '2026-05-30T09:00:00.000Z',
+      revisionRef: 'rev-written-after-index',
+      reReview: { requested: true, requestedAt: '2026-05-30T09:00:00.000Z', reason: 'fixture' },
+    }, null, 2),
+    'utf8'
+  );
+  const subject = subjects[0];
+  assert.equal(
+    readJobsForPR({ rootDir: root, ...subject }).latestJob.revisionRef,
+    'rev-written-after-index',
+    'the unindexed path rescans the bucket on every read'
+  );
+  assert.equal(
+    readJobsForPR({ rootDir: root, ...subject, jobIndex: index }).latestJob.revisionRef,
+    'rev-laceyenterprises__agent-os-1000',
+    'the indexed path must answer from the single up-front listing, not a per-row rescan'
+  );
+});
+
+test('an empty candidate set does not index any bucket', (t) => {
+  const root = makeRoot(t);
+  seedCompletedJob(root, { prNumber: 1000 });
+  const index = buildFollowUpJobFilenameIndex({ rootDir: root, subjects: [] });
+  assert.equal(index.buckets.size, 0);
 });
 
 test('hint surfaced when latest job is not completed', async (t) => {

@@ -29,6 +29,19 @@
  * writes a watcher wake, refuses rows that carry
  * terminal-failure evidence, and caps repeated re-arms per PR/head.
  *
+ * Terminal-PR decision boundary: this tool deliberately does NOT make the
+ * merged/closed decision. `reviewed_prs.pr_state` is a locally cached value
+ * that the `adversarial-pipeline.no-action-on-terminal-pr` scars record as
+ * unreliable in both directions, so the `pr_state = 'open'` predicate in the
+ * candidate query and in the wake eligibility check is a cheap pre-filter
+ * only, never an authority. The authoritative-live terminal decision is owned
+ * by the watcher's claim guard, which derives merged/closed state live before
+ * it spawns anything. That is safe here because the watchdog's entire effect
+ * on a stale-open row is a watcher wake: it mutates no `reviewed_prs` column,
+ * spawns no reviewer, and the per-(repo, pr, head) re-arm budget bounds a
+ * stale-open row to at most `DEFAULT_APPLY_MAX_ATTEMPTS` wakes before it parks. See the
+ * "delegates the terminal PR decision to the watcher claim guard" test.
+ *
  * Usage:
  *   npm run diagnose-stuck-rereview                  # all open rows
  *   npm run diagnose-stuck-rereview -- --repo X --pr N   # single PR
@@ -65,18 +78,73 @@ function minutesBetween(laterMs, earlierMs) {
   return Math.round((laterMs - earlierMs) / 60_000);
 }
 
-function readJobsForPR({ rootDir, repo, prNumber }) {
+const FOLLOW_UP_JOB_BUCKETS = ['pending', 'in-progress', 'completed', 'failed', 'stopped'];
+
+function followUpJobFilenamePrefix(repo, prNumber) {
+  return `${String(repo).replace('/', '__')}-pr-${prNumber}-`;
+}
+
+function followUpJobFilenamePrefixesFromName(name) {
+  if (!name.endsWith('.json')) return [];
+  const prefixes = [];
+  const marker = /-pr-\d+-/g;
+  for (let match = marker.exec(name); match; match = marker.exec(name)) {
+    prefixes.push(name.slice(0, match.index + match[0].length));
+  }
+  return prefixes;
+}
+
+// One `readdirSync` per bucket per invocation, not one per candidate row.
+// `main()` is fully synchronous and the live `completed` bucket grows
+// monotonically (6,769 files and counting), so scanning every bucket for every
+// candidate cost (candidate rows x bucket size) work inside the follow-up
+// daemon's event loop — the exact stall class the tick's step-deadline
+// instrumentation exists to catch. Indexing once up front derives each job
+// filename's possible PR keys once, then checks set membership, keeping both
+// directory and prefix-comparison cost independent of candidate count.
+function buildFollowUpJobFilenameIndex({ rootDir, subjects = [] }) {
+  const base = join(rootDir, 'data', 'follow-up-jobs');
+  const index = { buckets: new Map() };
+  if (!existsSync(base)) return index;
+  const prefixes = new Set(
+    subjects.map(({ repo, prNumber }) => followUpJobFilenamePrefix(repo, prNumber))
+  );
+  if (prefixes.size === 0) return index;
+  for (const bucket of FOLLOW_UP_JOB_BUCKETS) {
+    const dir = join(base, bucket);
+    if (!existsSync(dir)) continue;
+    const byPrefix = new Map();
+    for (const name of readdirSync(dir)) {
+      for (const prefix of followUpJobFilenamePrefixesFromName(name)) {
+        if (!prefixes.has(prefix)) continue;
+        if (!byPrefix.has(prefix)) byPrefix.set(prefix, []);
+        byPrefix.get(prefix).push(name);
+      }
+    }
+    index.buckets.set(bucket, byPrefix);
+  }
+  return index;
+}
+
+function readJobsForPR({ rootDir, repo, prNumber, jobIndex = null }) {
   const base = join(rootDir, 'data', 'follow-up-jobs');
   const result = { latestJob: null, latestJobKey: null, byBucket: {} };
-  if (!existsSync(base)) return result;
-  const buckets = ['pending', 'in-progress', 'completed', 'failed', 'stopped'];
-  const filenamePrefix = `${repo.replace('/', '__')}-pr-${prNumber}-`;
+  const filenamePrefix = followUpJobFilenamePrefix(repo, prNumber);
+  // A prebuilt index already carries every matching filename, so an indexed
+  // read must not re-stat or re-scan the job directories at all.
+  if (!jobIndex && !existsSync(base)) return result;
+  const buckets = FOLLOW_UP_JOB_BUCKETS;
   let latestTs = '';
   for (const bucket of buckets) {
     const dir = join(base, bucket);
-    if (!existsSync(dir)) continue;
-    const entries = readdirSync(dir)
-      .filter((name) => name.startsWith(filenamePrefix) && name.endsWith('.json'));
+    let entries;
+    if (jobIndex) {
+      entries = jobIndex.buckets.get(bucket)?.get(filenamePrefix) ?? [];
+    } else {
+      if (!existsSync(dir)) continue;
+      entries = readdirSync(dir)
+        .filter((name) => name.startsWith(filenamePrefix) && name.endsWith('.json'));
+    }
     if (!entries.length) continue;
     result.byBucket[bucket] = [];
     for (const filename of entries) {
@@ -386,6 +454,10 @@ function refreshPendingRereviewRow({ db, row }) {
   if (current.review_status === 'reviewing') {
     return { triggered: false, status: 'blocked', reason: 'review-in-flight' };
   }
+  // Pre-filter only, not the terminal decision — see the "Terminal-PR decision
+  // boundary" note in the file header. A locally stale `open` row costs at most
+  // the bounded re-arm budget in wakes; the watcher's claim guard derives the
+  // authoritative-live merged/closed state before anything is spawned.
   if (current.pr_state !== 'open') {
     return { triggered: false, status: 'blocked', reason: 'pr-not-open' };
   }
@@ -699,6 +771,9 @@ function main(argv = process.argv.slice(2), { stdout = process.stdout, stderr = 
                 posted_at, rereview_requested_at, rereview_reason, reviewer_head_sha,
                 revision_ref, failed_at
            FROM reviewed_prs
+          -- pr_state is the locally cached value; it is a candidate pre-filter,
+          -- not the authoritative-live terminal decision. See the
+          -- "Terminal-PR decision boundary" note in the file header.
           WHERE pr_state = 'open'
             AND review_status = 'pending'
             AND rereview_requested_at IS NOT NULL
@@ -708,8 +783,12 @@ function main(argv = process.argv.slice(2), { stdout = process.stdout, stderr = 
       ).all();
     }
     const report = [];
+    const jobIndex = buildFollowUpJobFilenameIndex({
+      rootDir,
+      subjects: rows.map((row) => ({ repo: row.repo, prNumber: row.pr_number })),
+    });
     for (const row of rows) {
-      const jobInfo = readJobsForPR({ rootDir, repo: row.repo, prNumber: row.pr_number });
+      const jobInfo = readJobsForPR({ rootDir, repo: row.repo, prNumber: row.pr_number, jobIndex });
       const reviewPassInfo = readReviewPassInfoAfterRereview({
         db,
         repo: row.repo,
@@ -765,5 +844,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 
 export {
   applyStuckRereviewRows,
+  buildFollowUpJobFilenameIndex,
   main,
+  readJobsForPR,
 };

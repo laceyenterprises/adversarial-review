@@ -9,7 +9,11 @@ import { fileURLToPath } from 'node:url';
 
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 import { isExplicitOperatorReviewRetrigger } from '../src/first-pass-review-suppression.mjs';
-import { applyStuckRereviewRows } from '../src/diagnose-stuck-rereview.mjs';
+import {
+  applyStuckRereviewRows,
+  buildFollowUpJobFilenameIndex,
+  readJobsForPR,
+} from '../src/diagnose-stuck-rereview.mjs';
 import { collectReviewLatencyReport } from '../src/review-latency-report.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -742,6 +746,77 @@ test('apply treats rereview CAS miss as a benign race', async (t) => {
   } finally {
     db.close();
   }
+});
+
+test('job buckets are scanned once per invocation, not once per candidate row', async (t) => {
+  // `main()` is fully synchronous and the live `completed` bucket grows
+  // monotonically, so a per-row directory scan costs
+  // (candidate rows x bucket size) reads inside the daemon tick. The index is
+  // built once from the candidate set; an indexed read must therefore answer
+  // entirely from memory and never touch the job directories again.
+  const root = makeRoot(t);
+  const subjects = [
+    { repo: 'laceyenterprises/agent-os', prNumber: 1000 },
+    { repo: 'laceyenterprises/agent-os', prNumber: 1001 },
+    { repo: 'laceyenterprises/adversarial-review', prNumber: 1000 },
+  ];
+  for (const subject of subjects) {
+    seedCompletedJob(root, {
+      repo: subject.repo,
+      prNumber: subject.prNumber,
+      revisionRef: `rev-${subject.repo.replace('/', '__')}-${subject.prNumber}`,
+    });
+  }
+  // Unrelated bucket noise the index must ignore, mirroring the live bucket.
+  seedCompletedJob(root, { repo: 'laceyenterprises/other', prNumber: 4242 });
+
+  const index = buildFollowUpJobFilenameIndex({ rootDir: root, subjects });
+  const completed = index.buckets.get('completed');
+  assert.equal(completed.size, subjects.length, 'index groups exactly the requested subjects');
+  assert.equal(completed.has('laceyenterprises__other-pr-4242-'), false);
+
+  for (const subject of subjects) {
+    const direct = readJobsForPR({ rootDir: root, ...subject });
+    const indexed = readJobsForPR({ rootDir: root, ...subject, jobIndex: index });
+    assert.deepEqual(indexed, direct, `indexed read must match the direct scan for ${subject.repo}#${subject.prNumber}`);
+    assert.equal(indexed.latestJob.revisionRef, `rev-${subject.repo.replace('/', '__')}-${subject.prNumber}`);
+  }
+
+  // The load-bearing property: an indexed read does no directory listing of its
+  // own. Add a newer matching job file AFTER the index was built — the direct
+  // (unindexed) read rescans and sees it, the indexed read does not, which is
+  // only possible if the per-row `readdirSync` is gone.
+  writeFileSync(
+    join(root, 'data', 'follow-up-jobs', 'completed',
+      'laceyenterprises__agent-os-pr-1000-2026-05-30T09-00-00-000Z.json'),
+    JSON.stringify({
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 1000,
+      status: 'completed',
+      completedAt: '2026-05-30T09:00:00.000Z',
+      revisionRef: 'rev-written-after-index',
+      reReview: { requested: true, requestedAt: '2026-05-30T09:00:00.000Z', reason: 'fixture' },
+    }, null, 2),
+    'utf8'
+  );
+  const subject = subjects[0];
+  assert.equal(
+    readJobsForPR({ rootDir: root, ...subject }).latestJob.revisionRef,
+    'rev-written-after-index',
+    'the unindexed path rescans the bucket on every read'
+  );
+  assert.equal(
+    readJobsForPR({ rootDir: root, ...subject, jobIndex: index }).latestJob.revisionRef,
+    'rev-laceyenterprises__agent-os-1000',
+    'the indexed path must answer from the single up-front listing, not a per-row rescan'
+  );
+});
+
+test('an empty candidate set does not index any bucket', (t) => {
+  const root = makeRoot(t);
+  seedCompletedJob(root, { prNumber: 1000 });
+  const index = buildFollowUpJobFilenameIndex({ rootDir: root, subjects: [] });
+  assert.equal(index.buckets.size, 0);
 });
 
 test('hint surfaced when latest job is not completed', async (t) => {

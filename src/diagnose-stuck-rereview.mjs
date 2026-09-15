@@ -78,18 +78,65 @@ function minutesBetween(laterMs, earlierMs) {
   return Math.round((laterMs - earlierMs) / 60_000);
 }
 
-function readJobsForPR({ rootDir, repo, prNumber }) {
+const FOLLOW_UP_JOB_BUCKETS = ['pending', 'in-progress', 'completed', 'failed', 'stopped'];
+
+function followUpJobFilenamePrefix(repo, prNumber) {
+  return `${String(repo).replace('/', '__')}-pr-${prNumber}-`;
+}
+
+// One `readdirSync` per bucket per invocation, not one per candidate row.
+// `main()` is fully synchronous and the live `completed` bucket grows
+// monotonically (6,769 files and counting), so scanning every bucket for every
+// candidate cost (candidate rows x bucket size) directory reads inside the
+// follow-up daemon's event loop — the exact stall class the tick's step-deadline
+// instrumentation exists to catch. Indexing once up front, keyed by the exact
+// filename prefixes the candidate rows need, keeps the lookup semantics
+// identical while making the directory cost independent of candidate count.
+function buildFollowUpJobFilenameIndex({ rootDir, subjects = [] }) {
+  const base = join(rootDir, 'data', 'follow-up-jobs');
+  const index = { buckets: new Map() };
+  if (!existsSync(base)) return index;
+  const prefixes = new Set(
+    subjects.map(({ repo, prNumber }) => followUpJobFilenamePrefix(repo, prNumber))
+  );
+  if (prefixes.size === 0) return index;
+  for (const bucket of FOLLOW_UP_JOB_BUCKETS) {
+    const dir = join(base, bucket);
+    if (!existsSync(dir)) continue;
+    const byPrefix = new Map();
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith('.json')) continue;
+      for (const prefix of prefixes) {
+        if (!name.startsWith(prefix)) continue;
+        if (!byPrefix.has(prefix)) byPrefix.set(prefix, []);
+        byPrefix.get(prefix).push(name);
+        break;
+      }
+    }
+    index.buckets.set(bucket, byPrefix);
+  }
+  return index;
+}
+
+function readJobsForPR({ rootDir, repo, prNumber, jobIndex = null }) {
   const base = join(rootDir, 'data', 'follow-up-jobs');
   const result = { latestJob: null, latestJobKey: null, byBucket: {} };
-  if (!existsSync(base)) return result;
-  const buckets = ['pending', 'in-progress', 'completed', 'failed', 'stopped'];
-  const filenamePrefix = `${repo.replace('/', '__')}-pr-${prNumber}-`;
+  const filenamePrefix = followUpJobFilenamePrefix(repo, prNumber);
+  // A prebuilt index already carries every matching filename, so an indexed
+  // read must not re-stat or re-scan the job directories at all.
+  if (!jobIndex && !existsSync(base)) return result;
+  const buckets = FOLLOW_UP_JOB_BUCKETS;
   let latestTs = '';
   for (const bucket of buckets) {
     const dir = join(base, bucket);
-    if (!existsSync(dir)) continue;
-    const entries = readdirSync(dir)
-      .filter((name) => name.startsWith(filenamePrefix) && name.endsWith('.json'));
+    let entries;
+    if (jobIndex) {
+      entries = jobIndex.buckets.get(bucket)?.get(filenamePrefix) ?? [];
+    } else {
+      if (!existsSync(dir)) continue;
+      entries = readdirSync(dir)
+        .filter((name) => name.startsWith(filenamePrefix) && name.endsWith('.json'));
+    }
     if (!entries.length) continue;
     result.byBucket[bucket] = [];
     for (const filename of entries) {
@@ -728,8 +775,12 @@ function main(argv = process.argv.slice(2), { stdout = process.stdout, stderr = 
       ).all();
     }
     const report = [];
+    const jobIndex = buildFollowUpJobFilenameIndex({
+      rootDir,
+      subjects: rows.map((row) => ({ repo: row.repo, prNumber: row.pr_number })),
+    });
     for (const row of rows) {
-      const jobInfo = readJobsForPR({ rootDir, repo: row.repo, prNumber: row.pr_number });
+      const jobInfo = readJobsForPR({ rootDir, repo: row.repo, prNumber: row.pr_number, jobIndex });
       const reviewPassInfo = readReviewPassInfoAfterRereview({
         db,
         repo: row.repo,
@@ -785,5 +836,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 
 export {
   applyStuckRereviewRows,
+  buildFollowUpJobFilenameIndex,
   main,
+  readJobsForPR,
 };

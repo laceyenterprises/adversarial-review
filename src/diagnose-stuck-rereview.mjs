@@ -84,14 +84,24 @@ function followUpJobFilenamePrefix(repo, prNumber) {
   return `${String(repo).replace('/', '__')}-pr-${prNumber}-`;
 }
 
+function followUpJobFilenamePrefixesFromName(name) {
+  if (!name.endsWith('.json')) return [];
+  const prefixes = [];
+  const marker = /-pr-\d+-/g;
+  for (let match = marker.exec(name); match; match = marker.exec(name)) {
+    prefixes.push(name.slice(0, match.index + match[0].length));
+  }
+  return prefixes;
+}
+
 // One `readdirSync` per bucket per invocation, not one per candidate row.
 // `main()` is fully synchronous and the live `completed` bucket grows
 // monotonically (6,769 files and counting), so scanning every bucket for every
-// candidate cost (candidate rows x bucket size) directory reads inside the
-// follow-up daemon's event loop — the exact stall class the tick's step-deadline
-// instrumentation exists to catch. Indexing once up front, keyed by the exact
-// filename prefixes the candidate rows need, keeps the lookup semantics
-// identical while making the directory cost independent of candidate count.
+// candidate cost (candidate rows x bucket size) work inside the follow-up
+// daemon's event loop — the exact stall class the tick's step-deadline
+// instrumentation exists to catch. Indexing once up front derives each job
+// filename's possible PR keys once, then checks set membership, keeping both
+// directory and prefix-comparison cost independent of candidate count.
 function buildFollowUpJobFilenameIndex({ rootDir, subjects = [] }) {
   const base = join(rootDir, 'data', 'follow-up-jobs');
   const index = { buckets: new Map() };
@@ -105,12 +115,10 @@ function buildFollowUpJobFilenameIndex({ rootDir, subjects = [] }) {
     if (!existsSync(dir)) continue;
     const byPrefix = new Map();
     for (const name of readdirSync(dir)) {
-      if (!name.endsWith('.json')) continue;
-      for (const prefix of prefixes) {
-        if (!name.startsWith(prefix)) continue;
+      for (const prefix of followUpJobFilenamePrefixesFromName(name)) {
+        if (!prefixes.has(prefix)) continue;
         if (!byPrefix.has(prefix)) byPrefix.set(prefix, []);
         byPrefix.get(prefix).push(name);
-        break;
       }
     }
     index.buckets.set(bucket, byPrefix);

@@ -775,6 +775,34 @@ test('job buckets are scanned once per invocation, not once per candidate row', 
   assert.equal(completed.size, subjects.length, 'index groups exactly the requested subjects');
   assert.equal(completed.has('laceyenterprises__other-pr-4242-'), false);
 
+  const manySubjects = Array.from({ length: 250 }, (_, i) => ({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 2000 + i,
+  }));
+  for (let i = 0; i < 500; i += 1) {
+    seedCompletedJob(root, {
+      repo: 'laceyenterprises/unrelated',
+      prNumber: 5000 + i,
+      revisionRef: `noise-${i}`,
+    });
+  }
+  const originalStartsWith = String.prototype.startsWith;
+  let startsWithCalls = 0;
+  String.prototype.startsWith = function instrumentedStartsWith(...args) {
+    startsWithCalls += 1;
+    return originalStartsWith.apply(this, args);
+  };
+  try {
+    buildFollowUpJobFilenameIndex({ rootDir: root, subjects: manySubjects });
+  } finally {
+    String.prototype.startsWith = originalStartsWith;
+  }
+  assert.equal(
+    startsWithCalls,
+    0,
+    'index construction must not compare every bucket filename against every candidate prefix'
+  );
+
   for (const subject of subjects) {
     const direct = readJobsForPR({ rootDir: root, ...subject });
     const indexed = readJobsForPR({ rootDir: root, ...subject, jobIndex: index });

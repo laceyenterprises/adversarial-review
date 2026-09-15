@@ -563,7 +563,7 @@ async function runFollowUpDaemonIteration({
     );
   });
   if (shouldStop()) return;
-  if (resolveStuckRereviewApplyEnabled()) {
+  if (resolveStuckRereviewApplyEnabled(env)) {
     await runStep('stuck-rereview-apply', async () => {
       const stdoutChunks = [];
       const stderrChunks = [];
@@ -601,7 +601,7 @@ async function runFollowUpDaemonIteration({
     logTick(
       'stuck-rereview-apply',
       `skipped disarmed via ${STUCK_REREVIEW_APPLY_ENABLED_ENV}=`
-      + JSON.stringify(process.env[STUCK_REREVIEW_APPLY_ENABLED_ENV] ?? '')
+      + JSON.stringify(env?.[STUCK_REREVIEW_APPLY_ENABLED_ENV] ?? '')
     );
   }
   if (shouldStop()) return;

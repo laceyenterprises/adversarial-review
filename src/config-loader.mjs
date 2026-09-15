@@ -2020,10 +2020,10 @@ function schemaV1() {
             __type: TYPE_DICT,
             __strict: true,
             __keys: {
-              // Out-of-range values hard-fail at load time. This mirrors
-              // the Python loader's range-bound contract; there is no
-              // silent clamp because operators need misconfigurations in
-              // the startup banner, not hidden boundary rewrites.
+              // Out-of-range values hard-fail in the Node strict loader;
+              // there is no silent clamp because operators need
+              // misconfigurations in the startup banner, not hidden
+              // boundary rewrites.
               ok_tick_seconds: {
                 __type: TYPE_INT,
                 __default: 3600,
@@ -2035,6 +2035,15 @@ function schemaV1() {
                 __default: 3600,
                 __min: 600,
                 __max: 21600,
+              },
+              evidence_ttl_seconds: {
+                // Accepted config range only: cwp_quota_probe floors the
+                // effective runtime TTL at ok_tick_seconds so evidence is
+                // never older than one scheduler tick.
+                __type: TYPE_INT,
+                __default: 86400,
+                __min: 3600,
+                __max: 604800,
               },
             },
           },
@@ -3512,6 +3521,10 @@ export const ENV_ALIASES = {
   },
   'roles.quota_probe.exhausted_unknown_tick_seconds': {
     canonical: 'AGENT_OS_ROLES_QUOTA_PROBE_EXHAUSTED_UNKNOWN_TICK_SECONDS',
+    aliases: [],
+  },
+  'roles.quota_probe.evidence_ttl_seconds': {
+    canonical: 'AGENT_OS_ROLES_QUOTA_PROBE_EVIDENCE_TTL_SECONDS',
     aliases: [],
   },
   'oauth_broker.watchdog.portforward_self_heal_max_cycles': {

@@ -493,6 +493,79 @@ test('--apply stops re-arming after the per-head watchdog cap', async (t) => {
   }
 });
 
+test('--apply delegates the terminal PR decision to the watcher claim guard', async (t) => {
+  // `reviewed_prs.pr_state` is a locally cached value the
+  // `adversarial-pipeline.no-action-on-terminal-pr` scars record as unreliable
+  // in both directions, so it can serve a merged PR as `open`. This pins the
+  // contract that makes that safe here: for a stale-`open` row the watchdog's
+  // ENTIRE effect is a watcher wake — it mutates no `reviewed_prs` column and
+  // spawns nothing — and the per-(repo, pr, head) re-arm budget bounds how many
+  // wakes a stale-open row can ever burn. The authoritative-live merged/closed
+  // decision stays with the watcher's claim guard.
+  const root = makeRoot(t);
+  const old = '2026-05-29T22:00:00.000Z';
+  // Locally `open`, but the PR is actually terminal upstream. The watchdog has
+  // no live view and must not try to make that call.
+  seedReviewedPRsRow(root, {
+    pr_state: 'open',
+    rereview_requested_at: old,
+    rereview_reason: 'auto-refresh: posted review on stale head',
+    last_attempted_at: '2026-05-29T21:00:00.000Z',
+    reviewer_head_sha: 'stale-open-head',
+    revision_ref: 'stale-open-head',
+  });
+  seedCompletedJob(root, { completedAt: old, reReviewRequested: true });
+
+  const readRow = () => {
+    const db = openReviewStateDb(root);
+    try {
+      return db.prepare(
+        `SELECT repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts,
+                last_attempted_at, posted_at, rereview_requested_at, rereview_reason,
+                reviewer_head_sha, revision_ref, failed_at
+           FROM reviewed_prs
+          WHERE repo = ? AND pr_number = ?`
+      ).get('laceyenterprises/agent-os', 1000);
+    } finally {
+      db.close();
+    }
+  };
+
+  const before = readRow();
+  const applied = await runDiagnose(root, '--threshold-minutes', '5', '--apply');
+  assert.equal(applied.code, 0, `expected apply exit 0; got ${applied.code}\nstderr:\n${applied.stderr}`);
+  const appliedPayload = JSON.parse(applied.stdout);
+  assert.equal(appliedPayload.appliedCount, 1);
+  assert.equal(appliedPayload.applyResults[0].wakeRequested, true);
+
+  // The whole mutation surface is the wake file, never the review row.
+  assert.deepEqual(readRow(), before);
+
+  // Bounded: once the per-head cap is spent, a stale-open row stops costing
+  // wakes instead of being re-armed forever.
+  const state = JSON.parse(
+    readFileSync(join(root, 'data', 'follow-up-jobs', 'stuck-rereview-watchdog.json'), 'utf8')
+  );
+  const key = 'laceyenterprises/agent-os#1000@stale-open-head';
+  assert.equal(state.entries[key].attempts, 1);
+  state.entries[key].attempts = 3;
+  state.entries[key].nextEligibleAt = new Date(Date.now() - 60_000).toISOString();
+  writeFileSync(
+    join(root, 'data', 'follow-up-jobs', 'stuck-rereview-watchdog.json'),
+    JSON.stringify(state, null, 2),
+    'utf8'
+  );
+
+  const capped = await runDiagnose(root, '--threshold-minutes', '5', '--apply');
+  assert.equal(capped.code, 0, `expected cap exhaustion exit 0; got ${capped.code}\nstderr:\n${capped.stderr}`);
+  const cappedPayload = JSON.parse(capped.stdout);
+  assert.equal(cappedPayload.appliedCount, 0);
+  assert.equal(cappedPayload.skippedApplyCount, 1);
+  assert.equal(cappedPayload.applyResults[0].reason, 'watchdog-rearm-cap-exhausted');
+  assert.notEqual(cappedPayload.applyResults[0].wakeRequested, true);
+  assert.deepEqual(readRow(), before);
+});
+
 test('--apply prunes stale watchdog state entries on write', async (t) => {
   const root = makeRoot(t);
   const old = '2026-05-29T22:00:00.000Z';

@@ -112,6 +112,28 @@ const STOPPED_ARCHIVE_FAILURE_RETRY_SECONDS = positiveNumberEnv(
 const STOPPED_ARCHIVE_FAILURE_RETRY_MS = STOPPED_ARCHIVE_FAILURE_RETRY_SECONDS * 1000;
 const MAINTENANCE_SWEEP_STATE_PATH = join(ROOT, 'data', 'follow-up-jobs', 'maintenance-sweeps.json');
 
+// Kill switch for the `stuck-rereview-apply` tick step. That step is the only
+// part of the tick that writes review-pipeline state on behalf of a stuck row
+// (a bounded watcher wake plus its per-(repo, pr, head) re-arm budget), so it
+// needs the same sub-minute disarm every other autonomous behavior in this
+// pipeline has (merge authority, strict mode). Without it the only rollback is
+// a submodule revert plus a daemon bounce.
+//
+// DEFAULT enabled: a stuck rereview is otherwise invisible until an operator
+// hand-reads `reviews.db`. Set ADVERSARIAL_STUCK_REREVIEW_APPLY_ENABLED=0 (or
+// `false`/`no`/`off`) and bounce the daemon to disarm it; the read-only
+// diagnostic and its exit-code contract are unaffected. Unset or empty keeps
+// the default.
+export const STUCK_REREVIEW_APPLY_ENABLED_ENV = 'ADVERSARIAL_STUCK_REREVIEW_APPLY_ENABLED';
+
+function resolveStuckRereviewApplyEnabled(env = process.env) {
+  const raw = env?.[STUCK_REREVIEW_APPLY_ENABLED_ENV];
+  if (raw === undefined || raw === null) return true;
+  const normalized = String(raw).trim().toLowerCase();
+  if (normalized === '') return true;
+  return !['0', 'false', 'no', 'off'].includes(normalized);
+}
+
 function ts() {
   return new Date().toISOString();
 }
@@ -541,39 +563,47 @@ async function runFollowUpDaemonIteration({
     );
   });
   if (shouldStop()) return;
-  await runStep('stuck-rereview-apply', async () => {
-    const stdoutChunks = [];
-    const stderrChunks = [];
-    const code = diagnoseStuckRereviewImpl([
-      '--apply',
-      '--json',
-      '--root-dir',
-      ROOT,
-    ], {
-      stdout: { write(chunk) { stdoutChunks.push(String(chunk)); return true; } },
-      stderr: { write(chunk) { stderrChunks.push(String(chunk)); return true; } },
+  if (resolveStuckRereviewApplyEnabled()) {
+    await runStep('stuck-rereview-apply', async () => {
+      const stdoutChunks = [];
+      const stderrChunks = [];
+      const code = diagnoseStuckRereviewImpl([
+        '--apply',
+        '--json',
+        '--root-dir',
+        ROOT,
+      ], {
+        stdout: { write(chunk) { stdoutChunks.push(String(chunk)); return true; } },
+        stderr: { write(chunk) { stderrChunks.push(String(chunk)); return true; } },
+      });
+      const stdoutText = stdoutChunks.join('');
+      let payload = null;
+      try {
+        payload = stdoutText ? JSON.parse(stdoutText) : null;
+      } catch {
+        payload = null;
+      }
+      if (stderrChunks.length > 0) {
+        logTick('stuck-rereview-apply', `stderr=${JSON.stringify(stderrChunks.join('').trim())}`);
+      }
+      logTick(
+        'stuck-rereview-apply',
+        `candidates=${payload?.totalCandidates ?? 'unknown'} stuck=${payload?.stuckCount ?? 'unknown'} ` +
+        `applied=${payload?.appliedCount ?? 'unknown'} skipped=${payload?.skippedApplyCount ?? 'unknown'} ` +
+        `failed=${payload?.failedApplyCount ?? 'unknown'}` +
+        (payload?.applyResults ? ` applyResults=${JSON.stringify(payload.applyResults)}` : '')
+      );
+      if (code !== 0) {
+        throw new Error(`diagnose-stuck-rereview --apply exited ${code}`);
+      }
     });
-    const stdoutText = stdoutChunks.join('');
-    let payload = null;
-    try {
-      payload = stdoutText ? JSON.parse(stdoutText) : null;
-    } catch {
-      payload = null;
-    }
-    if (stderrChunks.length > 0) {
-      logTick('stuck-rereview-apply', `stderr=${JSON.stringify(stderrChunks.join('').trim())}`);
-    }
+  } else {
     logTick(
       'stuck-rereview-apply',
-      `candidates=${payload?.totalCandidates ?? 'unknown'} stuck=${payload?.stuckCount ?? 'unknown'} ` +
-      `applied=${payload?.appliedCount ?? 'unknown'} skipped=${payload?.skippedApplyCount ?? 'unknown'} ` +
-      `failed=${payload?.failedApplyCount ?? 'unknown'}` +
-      (payload?.applyResults ? ` applyResults=${JSON.stringify(payload.applyResults)}` : '')
+      `skipped disarmed via ${STUCK_REREVIEW_APPLY_ENABLED_ENV}=`
+      + JSON.stringify(process.env[STUCK_REREVIEW_APPLY_ENABLED_ENV] ?? '')
     );
-    if (code !== 0) {
-      throw new Error(`diagnose-stuck-rereview --apply exited ${code}`);
-    }
-  });
+  }
   if (shouldStop()) return;
   if (shouldConsumeAfterReviewerTokenRefresh(reviewerTokenRefreshSummary)) {
     await runStep('consume', async () => {
@@ -770,6 +800,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 export {
   main,
   resolveRemediationWorkerTokenMinLifetimeMs,
+  resolveStuckRereviewApplyEnabled,
   resolveTelemetryListenerStartTimeoutMs,
   normalizeMaintenanceSweepState,
   readMaintenanceSweepState,

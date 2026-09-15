@@ -29,6 +29,19 @@
  * writes a watcher wake, refuses rows that carry
  * terminal-failure evidence, and caps repeated re-arms per PR/head.
  *
+ * Terminal-PR decision boundary: this tool deliberately does NOT make the
+ * merged/closed decision. `reviewed_prs.pr_state` is a locally cached value
+ * that the `adversarial-pipeline.no-action-on-terminal-pr` scars record as
+ * unreliable in both directions, so the `pr_state = 'open'` predicate in the
+ * candidate query and in the wake eligibility check is a cheap pre-filter
+ * only, never an authority. The authoritative-live terminal decision is owned
+ * by the watcher's claim guard, which derives merged/closed state live before
+ * it spawns anything. That is safe here because the watchdog's entire effect
+ * on a stale-open row is a watcher wake: it mutates no `reviewed_prs` column,
+ * spawns no reviewer, and the per-(repo, pr, head) re-arm budget bounds a
+ * stale-open row to at most `DEFAULT_APPLY_MAX_ATTEMPTS` wakes before it parks. See the
+ * "delegates the terminal PR decision to the watcher claim guard" test.
+ *
  * Usage:
  *   npm run diagnose-stuck-rereview                  # all open rows
  *   npm run diagnose-stuck-rereview -- --repo X --pr N   # single PR
@@ -386,6 +399,10 @@ function refreshPendingRereviewRow({ db, row }) {
   if (current.review_status === 'reviewing') {
     return { triggered: false, status: 'blocked', reason: 'review-in-flight' };
   }
+  // Pre-filter only, not the terminal decision — see the "Terminal-PR decision
+  // boundary" note in the file header. A locally stale `open` row costs at most
+  // the bounded re-arm budget in wakes; the watcher's claim guard derives the
+  // authoritative-live merged/closed state before anything is spawned.
   if (current.pr_state !== 'open') {
     return { triggered: false, status: 'blocked', reason: 'pr-not-open' };
   }
@@ -699,6 +716,9 @@ function main(argv = process.argv.slice(2), { stdout = process.stdout, stderr = 
                 posted_at, rereview_requested_at, rereview_reason, reviewer_head_sha,
                 revision_ref, failed_at
            FROM reviewed_prs
+          -- pr_state is the locally cached value; it is a candidate pre-filter,
+          -- not the authoritative-live terminal decision. See the
+          -- "Terminal-PR decision boundary" note in the file header.
           WHERE pr_state = 'open'
             AND review_status = 'pending'
             AND rereview_requested_at IS NOT NULL

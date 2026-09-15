@@ -84,6 +84,39 @@ function openDb(rootDir) {
   return db;
 }
 
+function allowNullReviewerPassMetadata(rootDir) {
+  const db = openDb(rootDir);
+  try {
+    const schema = db.prepare(
+      `SELECT sql
+         FROM sqlite_master
+        WHERE type = 'table'
+          AND name = 'reviewer_passes'`
+    ).get()?.sql;
+    assert.ok(schema);
+    const nullableSchema = schema.replace(
+      /metadata_json\s+TEXT\s+NOT NULL\s+DEFAULT\s+'\{\}'/,
+      `metadata_json        TEXT DEFAULT '{}'`,
+    );
+    assert.notEqual(nullableSchema, schema);
+    const columns = db.prepare('PRAGMA table_info(reviewer_passes)').all().map((column) => column.name);
+    const quotedColumns = columns.map((column) => `"${column.replaceAll('"', '""')}"`).join(', ');
+    db.exec('BEGIN');
+    try {
+      db.exec('ALTER TABLE reviewer_passes RENAME TO reviewer_passes_notnull');
+      db.exec(nullableSchema);
+      db.exec(`INSERT INTO reviewer_passes (${quotedColumns}) SELECT ${quotedColumns} FROM reviewer_passes_notnull`);
+      db.exec('DROP TABLE reviewer_passes_notnull');
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  } finally {
+    db.close();
+  }
+}
+
 function insertReviewRow(rootDir, overrides = {}) {
   const db = openDb(rootDir);
   try {
@@ -132,7 +165,9 @@ function insertReviewerPass(rootDir, overrides = {}) {
       overrides.endedAt || '2026-05-25T17:50:00.000Z',
       overrides.status || 'failed',
       overrides.headSha ?? null,
-      JSON.stringify(overrides.metadata || { failureClass: 'timeout' })
+      Object.hasOwn(overrides, 'metadataJson')
+        ? overrides.metadataJson
+        : JSON.stringify(overrides.metadata || { failureClass: 'timeout' })
     );
   } finally {
     db.close();
@@ -1864,6 +1899,7 @@ test('a CI-stopped rereview with a production-shaped stopped job is not first-pa
     lastAttemptedAt: '2026-05-25T16:05:00.000Z',
     reviewAttempts: 0,
     failedAt: '2026-05-25T16:05:00.000Z',
+    reviewerHeadSha: 'ci-stopped-head',
   });
   insertReviewerPass(rootDir, {
     prNumber: 6838,
@@ -1872,6 +1908,7 @@ test('a CI-stopped rereview with a production-shaped stopped job is not first-pa
     status: 'failed',
     startedAt: '2026-05-25T16:04:00.000Z',
     endedAt: '2026-05-25T16:05:00.000Z',
+    headSha: 'ci-stopped-head',
     metadata: { failureClass: 'ci-regression-stopped' },
   });
   writeJob(rootDir, 'stopped', 'job-6838', {
@@ -1962,6 +1999,118 @@ test('a released ci-head-moved rereview claim is deferred, not first-pass starva
   const finding = snapshot.findings.find((item) => item.code === 'review:rereview_deferred');
   assert.match(finding?.message, /waiting on purpose: ci-head-moved/);
   assert.match(finding?.evidence[0], /attempts=1/);
+});
+
+test('a released rereview claim without metadata is still deferred', () => {
+  const rootDir = tempRoot();
+  allowNullReviewerPassMetadata(rootDir);
+  insertReviewRow(rootDir, {
+    prNumber: 6828,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T01:56:00.000Z',
+    lastAttemptedAt: '2026-05-25T02:01:00.000Z',
+    reviewAttempts: 0,
+    failedAt: '2026-05-25T02:01:00.000Z',
+    failureMessage: 'Released reviewer claim after ci-head-moved.',
+    reviewerHeadSha: '247bc7c2b10e',
+  });
+  insertReviewerPass(rootDir, {
+    prNumber: 6828,
+    attemptNumber: 1,
+    passKind: 'rereview',
+    status: 'failed',
+    startedAt: '2026-05-25T02:00:00.000Z',
+    endedAt: '2026-05-25T02:01:00.000Z',
+    headSha: '247bc7c2b10e',
+    metadataJson: null,
+  });
+  seedFreshReconcile(rootDir);
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    config: { queueStarvationMaxAgeMs: 10 * 60 * 1000 },
+  });
+
+  assert.ok(!findingCodes(snapshot).includes('review:queue_starvation'));
+  assert.equal(snapshot.firstPassQueue.firstPassPrs.length, 0);
+  assert.equal(snapshot.deferredRereviews.count, 1);
+  assert.equal(snapshot.deferredRereviews.oldest.prNumber, 6828);
+  assert.equal(snapshot.deferredRereviews.oldest.passKind, 'rereview');
+  assert.equal(snapshot.deferredRereviews.oldest.reason, 'Released reviewer claim after ci-head-moved.');
+  assert.equal(snapshot.deferredRereviews.oldest.reviewAttempts, 1);
+  assert.equal(snapshot.deferredRereviews.oldest.reviewerClaimStarts, 1);
+  assert.equal(snapshot.deferredRereviews.oldest.claimedAndReleased, true);
+  assert.equal(snapshot.queuedRereviews.count, 0);
+});
+
+test('rereview claim counts are scoped to the current reviewer head', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 6829,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T01:56:00.000Z',
+    lastAttemptedAt: '2026-05-25T02:01:00.000Z',
+    rereviewRequestedAt: '2026-05-25T02:02:00.000Z',
+    reviewAttempts: 1,
+    reviewerHeadSha: 'current-head',
+  });
+  insertReviewRow(rootDir, {
+    prNumber: 6830,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T01:56:00.000Z',
+    lastAttemptedAt: '2026-05-25T02:01:00.000Z',
+    rereviewRequestedAt: '2026-05-25T02:02:00.000Z',
+    reviewAttempts: 1,
+    reviewerHeadSha: 'current-head',
+  });
+  for (const prNumber of [6829, 6830]) {
+    insertReviewerPasses(rootDir, [
+      ...Array.from({ length: 5 }, (_, index) => ({
+        prNumber,
+        attemptNumber: index + 1,
+        passKind: 'rereview',
+        status: 'failed',
+        startedAt: `2026-05-25T01:0${index}:00.000Z`,
+        endedAt: `2026-05-25T01:0${index}:30.000Z`,
+        headSha: 'old-head',
+      })),
+      {
+        prNumber,
+        attemptNumber: 6,
+        passKind: 'rereview',
+        status: 'failed',
+        startedAt: '2026-05-25T02:00:00.000Z',
+        endedAt: '2026-05-25T02:01:00.000Z',
+        headSha: 'current-head',
+      },
+    ]);
+  }
+  writeJob(rootDir, 'pending', 'job-6829', {
+    kind: 'adversarial-review-follow-up',
+    jobId: 'laceyenterprises__agent-os-pr-6829-2026-09-14T16-19-41-000Z',
+    repo: REPO,
+    prNumber: 6829,
+    createdAt: '2026-05-25T02:03:00.000Z',
+  });
+  seedFreshReconcile(rootDir);
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    config: { queueStarvationMaxAgeMs: 10 * 60 * 1000 },
+  });
+
+  assert.equal(snapshot.deferredRereviews.count, 1);
+  assert.equal(snapshot.deferredRereviews.oldest.prNumber, 6829);
+  assert.equal(snapshot.deferredRereviews.oldest.reviewAttempts, 1);
+  assert.equal(snapshot.deferredRereviews.oldest.reviewerClaimStarts, 1);
+  assert.equal(snapshot.deferredRereviews.oldest.claimedAndReleased, false);
+  assert.equal(snapshot.queuedRereviews.count, 1);
+  assert.equal(snapshot.queuedRereviews.oldest.prNumber, 6830);
+  assert.equal(snapshot.queuedRereviews.oldest.reviewAttempts, 1);
+  assert.equal(snapshot.queuedRereviews.oldest.reviewerClaimStarts, 1);
+  assert.equal(snapshot.queuedRereviews.oldest.claimedAndReleased, false);
 });
 
 test('a stopped CI regression job older than the rereview request does not defer the queue', () => {

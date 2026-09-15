@@ -1952,10 +1952,11 @@ function summarizeDeferredRereviews(db, followUpJobs, { nowMs, stoppedCiRegressi
                WHERE reviewer_passes.repo = reviewed_prs.repo
                  AND reviewer_passes.pr_number = reviewed_prs.pr_number
                  AND reviewer_passes.pass_kind IN ('first-pass', 'rereview')
+                 AND reviewer_passes.head_sha = reviewed_prs.reviewer_head_sha
             ) AS reviewer_claim_starts
             ,
             (
-              SELECT metadata_json
+              SELECT COALESCE(metadata_json, '{}')
                 FROM reviewer_passes
                WHERE reviewer_passes.repo = reviewed_prs.repo
                  AND reviewer_passes.pr_number = reviewed_prs.pr_number
@@ -2050,6 +2051,7 @@ function summarizeQueuedRereviews(db, followUpJobs, { nowMs, stoppedCiRegression
                WHERE reviewer_passes.repo = reviewed_prs.repo
                  AND reviewer_passes.pr_number = reviewed_prs.pr_number
                  AND reviewer_passes.pass_kind IN ('first-pass', 'rereview')
+                 AND reviewer_passes.head_sha = reviewed_prs.reviewer_head_sha
             ) AS reviewer_claim_starts
        FROM reviewed_prs
       WHERE COALESCE(pr_state, 'open') = 'open'

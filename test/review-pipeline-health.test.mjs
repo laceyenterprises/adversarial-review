@@ -1904,13 +1904,64 @@ test('a CI-stopped rereview with a production-shaped stopped job is not first-pa
   assert.equal(snapshot.deferredRereviews.oldest.prNumber, 6838);
   assert.equal(snapshot.deferredRereviews.oldest.passKind, 'rereview');
   assert.equal(snapshot.deferredRereviews.oldest.reason, 'ci-regression-stopped');
-  assert.equal(snapshot.deferredRereviews.oldest.reviewAttempts, 0);
+  assert.equal(snapshot.deferredRereviews.oldest.reviewAttempts, 1);
   assert.equal(snapshot.deferredRereviews.oldest.reviewerClaimStarts, 1);
   assert.equal(snapshot.deferredRereviews.oldest.claimedAndReleased, true);
   assert.equal(snapshot.queuedRereviews.count, 0);
   const finding = snapshot.findings.find((item) => item.code === 'review:rereview_deferred');
   assert.match(finding?.recommended_action, /No follow-up job is running/);
   assert.match(finding?.recommended_action, /requeue remediation or re-arm re-review manually/);
+});
+
+test('a released ci-head-moved rereview claim is deferred, not first-pass starvation', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 6827,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T01:56:00.000Z',
+    lastAttemptedAt: '2026-05-25T02:01:00.000Z',
+    reviewAttempts: 0,
+    failedAt: '2026-05-25T02:01:00.000Z',
+    failureMessage: 'Released reviewer claim after ci-head-moved.',
+    reviewerHeadSha: '247bc7c2b10e',
+  });
+  insertReviewerPass(rootDir, {
+    prNumber: 6827,
+    attemptNumber: 1,
+    passKind: 'rereview',
+    status: 'failed',
+    startedAt: '2026-05-25T02:00:00.000Z',
+    endedAt: '2026-05-25T02:01:00.000Z',
+    headSha: '247bc7c2b10e',
+    metadata: {
+      failureClass: 'ci-head-moved',
+      claimedHeadSha: '247bc7c2b10e',
+      observedCiHeadSha: 'a03767026514',
+    },
+  });
+  seedFreshReconcile(rootDir);
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    config: { queueStarvationMaxAgeMs: 10 * 60 * 1000 },
+  });
+
+  assert.ok(!findingCodes(snapshot).includes('review:queue_starvation'));
+  assert.equal(snapshot.firstPassQueue.firstPassPrs.length, 0);
+  assert.equal(snapshot.deferredRereviews.count, 1);
+  assert.equal(snapshot.deferredRereviews.oldest.prNumber, 6827);
+  assert.equal(snapshot.deferredRereviews.oldest.passKind, 'rereview');
+  assert.equal(snapshot.deferredRereviews.oldest.derivedPassKind, 'first-pass');
+  assert.equal(snapshot.deferredRereviews.oldest.reason, 'ci-head-moved');
+  assert.equal(snapshot.deferredRereviews.oldest.reviewAttempts, 1);
+  assert.equal(snapshot.deferredRereviews.oldest.reviewerClaimStarts, 1);
+  assert.equal(snapshot.deferredRereviews.oldest.claimedAndReleased, true);
+  assert.equal(snapshot.deferredRereviews.oldest.jobState, null);
+  assert.equal(snapshot.queuedRereviews.count, 0);
+  const finding = snapshot.findings.find((item) => item.code === 'review:rereview_deferred');
+  assert.match(finding?.message, /waiting on purpose: ci-head-moved/);
+  assert.match(finding?.evidence[0], /attempts=1/);
 });
 
 test('a stopped CI regression job older than the rereview request does not defer the queue', () => {

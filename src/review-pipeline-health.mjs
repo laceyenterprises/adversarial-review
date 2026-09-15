@@ -1681,6 +1681,17 @@ function summarizeFirstPassQueue(db, { nowMs, stoppedCiRegressionJobs = null }) 
                  AND reviewer_passes.pass_kind IN ('first-pass', 'rereview')
                  AND reviewer_passes.head_sha = reviewed_prs.reviewer_head_sha
             ) AS reviewer_claim_starts
+            ,
+            (
+              SELECT COUNT(*)
+                FROM reviewer_passes
+               WHERE reviewer_passes.repo = reviewed_prs.repo
+                 AND reviewer_passes.pr_number = reviewed_prs.pr_number
+                 AND reviewer_passes.pass_kind = 'rereview'
+                 AND reviewed_prs.reviewer_head_sha IS NOT NULL
+                 AND reviewed_prs.reviewer_head_sha <> ''
+                 AND reviewer_passes.head_sha = reviewed_prs.reviewer_head_sha
+            ) AS current_head_rereview_claim_starts
        FROM reviewed_prs
       WHERE COALESCE(pr_state, 'open') = 'open'
         AND review_status = 'pending'`
@@ -1701,6 +1712,8 @@ function summarizeFirstPassQueue(db, { nowMs, stoppedCiRegressionJobs = null }) 
     // (reviewer-runtime problem). Carry the distinction into the finding instead
     // of reporting an undifferentiated "pending".
     const reviewerFailed = Boolean(row.failed_at);
+    const reviewerClaimStarts = Number(row.reviewer_claim_starts || 0);
+    const reviewAttempts = effectiveReviewAttempts(row);
     if (!oldest || pendingAgeMs > oldest.ageMs) {
       oldest = {
         repo: row.repo,
@@ -1709,7 +1722,7 @@ function summarizeFirstPassQueue(db, { nowMs, stoppedCiRegressionJobs = null }) 
         ageMs: pendingAgeMs,
         reviewerFailed,
         failedAt: row.failed_at || null,
-        reviewAttempts: Number(row.review_attempts || 0),
+        reviewAttempts,
         failureMessage: reviewerFailed
           ? String(row.failure_message || '').slice(0, 300) || null
         : null,
@@ -1725,8 +1738,10 @@ function summarizeFirstPassQueue(db, { nowMs, stoppedCiRegressionJobs = null }) 
       stoppedCiRegressionJobs?.get(`${row.repo}#${row.pr_number}`),
       row,
     );
-    const watcherPassKind = stoppedCiJob ? 'rereview' : derivedPassKind;
-    const reviewerClaimStarts = Number(row.reviewer_claim_starts || 0);
+    const currentHeadRereviewClaimStarts = Number(row.current_head_rereview_claim_starts || 0);
+    const watcherPassKind = stoppedCiJob || currentHeadRereviewClaimStarts > 0
+      ? 'rereview'
+      : derivedPassKind;
     if (watcherPassKind === 'first-pass') {
       if (reviewerFailed) failedCount += 1;
       const firstPassPr = {
@@ -1741,7 +1756,7 @@ function summarizeFirstPassQueue(db, { nowMs, stoppedCiRegressionJobs = null }) 
         claimedAndReleased: reviewerClaimStarts > Number(row.review_attempts || 0),
         reviewerFailed,
         failedAt: row.failed_at || null,
-        reviewAttempts: Number(row.review_attempts || 0),
+        reviewAttempts,
         failureMessage: reviewerFailed
           ? String(row.failure_message || '').slice(0, 300) || null
           : null,
@@ -1858,6 +1873,39 @@ function stoppedCiRegressionJobDefersRow(jobEntry, row) {
     && anchors.every((timestamp) => followUpJobIsAtOrAfter(jobEntry, timestamp));
 }
 
+function parseMetadataJson(value) {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function effectiveReviewAttempts(row) {
+  return Math.max(
+    Number(row?.review_attempts || 0),
+    Number(row?.reviewer_claim_starts || 0),
+  );
+}
+
+function releasedRereviewClaimReason(row) {
+  const metadata = parseMetadataJson(row?.latest_rereview_metadata_json);
+  const failureClass = String(metadata.failureClass || metadata.failure_class || '').trim();
+  if (failureClass) return failureClass;
+  const failureMessage = String(row?.failure_message || '').trim();
+  const bracketed = failureMessage.match(/^\[([^\]]+)\]/);
+  if (bracketed) return bracketed[1];
+  return failureMessage ? failureMessage.slice(0, 120) : 'reviewer-claim-released';
+}
+
+function rowHasReleasedReviewerClaim(row) {
+  return Number(row?.reviewer_claim_starts || 0) > Number(row?.review_attempts || 0)
+    && row?.latest_rereview_metadata_json
+    && /\bReleased reviewer claim\b/i.test(String(row?.failure_message || ''));
+}
+
 function jobAgeAnchor(entry) {
   return entry?.job?.claimedAt
     || entry?.job?.createdAt
@@ -1905,6 +1953,20 @@ function summarizeDeferredRereviews(db, followUpJobs, { nowMs, stoppedCiRegressi
                  AND reviewer_passes.pr_number = reviewed_prs.pr_number
                  AND reviewer_passes.pass_kind IN ('first-pass', 'rereview')
             ) AS reviewer_claim_starts
+            ,
+            (
+              SELECT metadata_json
+                FROM reviewer_passes
+               WHERE reviewer_passes.repo = reviewed_prs.repo
+                 AND reviewer_passes.pr_number = reviewed_prs.pr_number
+                 AND reviewer_passes.pass_kind = 'rereview'
+                 AND (reviewed_prs.reviewer_head_sha IS NULL
+                      OR reviewed_prs.reviewer_head_sha = ''
+                      OR reviewer_passes.head_sha = reviewed_prs.reviewer_head_sha)
+               ORDER BY COALESCE(ended_at, started_at, '') DESC,
+                        pass_id DESC
+               LIMIT 1
+            ) AS latest_rereview_metadata_json
        FROM reviewed_prs
       WHERE COALESCE(pr_state, 'open') = 'open'
         AND review_status = 'pending'`
@@ -1922,10 +1984,12 @@ function summarizeDeferredRereviews(db, followUpJobs, { nowMs, stoppedCiRegressi
     const stoppedCiJob = stoppedCiRegressionJobDefersRow(stoppedCiJobs.get(key), row)
       ? stoppedCiJobs.get(key)
       : null;
-    const passKind = stoppedCiJob ? 'rereview' : derivedPassKind;
+    const reviewerClaimStarts = Number(row.reviewer_claim_starts || 0);
+    const releasedRereviewClaim = rowHasReleasedReviewerClaim(row);
+    const passKind = stoppedCiJob || releasedRereviewClaim ? 'rereview' : derivedPassKind;
     if (passKind !== 'rereview') continue;
     const deferringJob = activeJob || stoppedCiJob;
-    if (!deferringJob) continue;
+    if (!deferringJob && !releasedRereviewClaim) continue;
     const deferredSince =
       row.failed_at ||
       row.rereview_requested_at ||
@@ -1935,7 +1999,7 @@ function summarizeDeferredRereviews(db, followUpJobs, { nowMs, stoppedCiRegressi
       null;
     const reason = activeJob
       ? (activeJob.state === 'in_progress' ? 'active-follow-up-job' : 'remediation-requeued')
-      : stoppedCiJob.deferralReason;
+      : (stoppedCiJob?.deferralReason || releasedRereviewClaimReason(row));
     prs.push({
       repo: row.repo,
       prNumber: row.pr_number,
@@ -1944,13 +2008,13 @@ function summarizeDeferredRereviews(db, followUpJobs, { nowMs, stoppedCiRegressi
       deferredSince,
       ageMs: ageMs(nowMs, deferredSince),
       reason,
-      jobState: deferringJob.state,
-      jobId: deferringJob.job?.jobId || null,
-      jobKind: deferringJob.job?.kind || null,
+      jobState: deferringJob?.state || null,
+      jobId: deferringJob?.job?.jobId || null,
+      jobKind: deferringJob?.job?.kind || null,
       jobAgeMs: ageMs(nowMs, stoppedCiJob?.terminalAt || jobAgeAnchor(deferringJob)),
-      reviewAttempts: Number(row.review_attempts || 0),
-      reviewerClaimStarts: Number(row.reviewer_claim_starts || 0),
-      claimedAndReleased: Number(row.reviewer_claim_starts || 0) > Number(row.review_attempts || 0),
+      reviewAttempts: effectiveReviewAttempts(row),
+      reviewerClaimStarts,
+      claimedAndReleased: reviewerClaimStarts > Number(row.review_attempts || 0),
       reviewerHeadSha: row.reviewer_head_sha || null,
       revisionRef: row.revision_ref || null,
       rereviewReason: String(row.rereview_reason || '').slice(0, 300) || null,
@@ -2031,7 +2095,7 @@ function summarizeQueuedRereviews(db, followUpJobs, { nowMs, stoppedCiRegression
       jobId: terminalJob?.job?.jobId || null,
       jobKind: terminalJob?.job?.kind || null,
       reason: String(row.rereview_reason || '').slice(0, 300) || null,
-      reviewAttempts: Number(row.review_attempts || 0),
+      reviewAttempts: effectiveReviewAttempts(row),
       reviewerClaimStarts: Number(row.reviewer_claim_starts || 0),
       claimedAndReleased: Number(row.reviewer_claim_starts || 0) > Number(row.review_attempts || 0),
       reviewerHeadSha: row.reviewer_head_sha || null,

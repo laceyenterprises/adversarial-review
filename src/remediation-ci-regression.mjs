@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { resolveRequiredCheckContextsFromCfg } from './ama/required-check-contexts.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
-import { summarizeChecksConclusion } from './checks-summary.mjs';
+import { latestCheckRollupItems, summarizeChecksConclusion } from './checks-summary.mjs';
 import { execGhWithRetry } from './gh-cli.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -62,7 +62,7 @@ function summarizeExternalChecks(statusCheckRollup, { env = process.env, cfg = n
   const rollupKnown = Array.isArray(statusCheckRollup);
   const conclusion = summarizeChecksConclusion(statusCheckRollup, { env, cfg });
   const items = rollupKnown ? statusCheckRollup : [];
-  const external = items.filter((item) => !isOwnGateItem(item, env));
+  const external = latestCheckRollupItems(items.filter((item) => !isOwnGateItem(item, env)));
   const failedChecks = [];
   const pendingChecks = [];
   const reportedContexts = new Set(

@@ -14,6 +14,51 @@ const PENDING_CHECK_STATES = new Set([
   'REQUESTED',
 ]);
 
+function checkIdentity(item) {
+  return String(item?.context || item?.name || item?.workflowName || '').trim().toLowerCase();
+}
+
+function checkTimestampMs(item) {
+  const values = [
+    item?.completedAt,
+    item?.startedAt,
+    item?.updatedAt,
+    item?.createdAt,
+  ];
+  let latest = null;
+  for (const value of values) {
+    const parsed = Date.parse(String(value || ''));
+    if (!Number.isFinite(parsed)) continue;
+    latest = latest === null ? parsed : Math.max(latest, parsed);
+  }
+  return latest;
+}
+
+function latestCheckRollupItems(items) {
+  if (!Array.isArray(items)) return [];
+  const latestByIdentity = new Map();
+  const result = [];
+  for (const item of items) {
+    const identity = checkIdentity(item);
+    const timestampMs = checkTimestampMs(item);
+    if (!identity || timestampMs === null) {
+      result.push(item);
+      continue;
+    }
+    const prior = latestByIdentity.get(identity);
+    if (!prior) {
+      latestByIdentity.set(identity, { index: result.length, timestampMs });
+      result.push(item);
+      continue;
+    }
+    if (timestampMs >= prior.timestampMs) {
+      result[prior.index] = item;
+      prior.timestampMs = timestampMs;
+    }
+  }
+  return result;
+}
+
 // Identify status-rollup items that belong to the adversarial-review
 // pipeline's own gate. CheckRun names remain external CI surface area even
 // when they reuse the configured context string.
@@ -75,9 +120,9 @@ function summarizeChecksConclusion(statusCheckRollup, { env = process.env, cfg =
     .map(c => String(c).trim().toLowerCase())
     .filter(Boolean);
   const excludeContexts = adversarialOwnCheckContexts(env);
-  const relevant = statusCheckRollup.filter(
+  const relevant = latestCheckRollupItems(statusCheckRollup.filter(
     (item) => !isAdversarialOwnStatusContext(item, excludeContexts)
-  );
+  ));
   if (relevant.length === 0) {
     // Fail closed (LAC-1559): "no external checks reported" is unknown, not green.
     return requiredContexts.length > 0 ? 'PENDING' : null;
@@ -85,7 +130,7 @@ function summarizeChecksConclusion(statusCheckRollup, { env = process.env, cfg =
 
   const reportedContexts = new Set(
     relevant
-      .map(item => String(item?.context || item?.name || '').trim().toLowerCase())
+      .map(checkIdentity)
       .filter(Boolean)
   );
 
@@ -122,4 +167,4 @@ function summarizeChecksConclusion(statusCheckRollup, { env = process.env, cfg =
   return sawPending ? 'PENDING' : 'SUCCESS';
 }
 
-export { summarizeChecksConclusion };
+export { latestCheckRollupItems, summarizeChecksConclusion };

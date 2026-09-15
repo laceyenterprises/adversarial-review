@@ -86,6 +86,32 @@ test('summarizeExternalChecks treats missing required external contexts as pendi
   }]);
 });
 
+test('summarizeExternalChecks ignores stale cancelled duplicates when a newer check succeeded', () => {
+  const summary = summarizeExternalChecks([
+    {
+      __typename: 'CheckRun',
+      name: 'release-freeze-gate',
+      conclusion: 'CANCELLED',
+      workflowName: 'release-freeze-gate',
+      startedAt: '2026-09-15T13:39:10Z',
+      completedAt: '2026-09-15T13:39:10Z',
+    },
+    {
+      __typename: 'CheckRun',
+      name: 'release-freeze-gate',
+      conclusion: 'SUCCESS',
+      workflowName: 'release-freeze-gate',
+      startedAt: '2026-09-15T13:42:07Z',
+      completedAt: '2026-09-15T13:42:19Z',
+    },
+  ], { cfg: EMPTY_CFG });
+
+  assert.equal(summary.conclusion, 'SUCCESS');
+  assert.equal(summary.totalExternalChecks, 1);
+  assert.deepEqual(summary.pendingChecks, []);
+  assert.deepEqual(summary.failedChecks, []);
+});
+
 test('inspectRemediationCiRegression fetches PR checks and returns failed state details', async () => {
   const calls = [];
   const result = await inspectRemediationCiRegression({

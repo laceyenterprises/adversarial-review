@@ -60,23 +60,144 @@ function isTransientWorkspaceNetworkError(err) {
   return /(?:unable to access|could not resolve host|failed to connect|connection (?:reset|timed out)|connection refused|network is unreachable|operation timed out|timed out|timeout|TLS|SSL|HTTP 5\d\d|The requested URL returned error: 5\d\d|remote end hung up unexpectedly|early EOF|RPC failed|temporary failure|temporarily unavailable)/i.test(detail);
 }
 
+// An EXPIRED credential is not a network blip, so it never matched the
+// transient set above and the push threw on the first try with no re-mint.
+// That is how a full remediation round gets burned: the worker inherits a
+// GitHub App installation token at spawn (~36 min TTL on this host), the round
+// runs longer than the remaining life, and the push at the very END fails
+// `push-auth-invalid` with the work committed but unpushed. Observed on
+// adversarial-review#1076: job 04:03:48Z -> 04:43:42Z against a token that
+// expired 04:21:46Z.
+//
+// The `gh` path already solves this (see isGhAuthFailure / remintGhAuth in
+// gh-cli.mjs); the raw-git path did not. Same detection vocabulary, plus the
+// git-specific strings, so the two stay in step.
+function isWorkspaceAuthFailure(err) {
+  const detail = [err?.message, err?.stdout, err?.stderr].filter(Boolean).join('\n');
+  if (!detail) return false;
+  return /\bbad credentials\b/i.test(detail)
+    || /\bhttp\s*401\b/i.test(detail)
+    || /\b401\b[^\n]*\bunauthorized\b/i.test(detail)
+    || /\bunauthorized\b[^\n]*\b401\b/i.test(detail)
+    || /\brequires authentication\b/i.test(detail)
+    || /\bauthentication (?:failed|required)\b/i.test(detail)
+    || /\btoken (?:has )?expired\b/i.test(detail)
+    || /\binvalid username or password\b/i.test(detail)
+    || /\bcould not read (?:Username|Password)\b/i.test(detail)
+    || /\bterminal prompts disabled\b/i.test(detail);
+}
+
+// The useful auth text is almost always on stderr, not message, so an operator
+// reading only err.message would see "push failed" and nothing about why.
+function workspaceAuthDetail(err) {
+  const detail = [err?.stderr, err?.stdout, err?.message].filter(Boolean).join('\n').trim();
+  const line = detail.split(/\r?\n/).find((candidate) => isWorkspaceAuthFailure({ message: candidate }));
+  return (line || detail.split(/\r?\n/)[0] || '').trim().slice(0, 200);
+}
+
+// Force a fresh installation token into env and hand back a rebuilt credential
+// env. Returns null when no NEW credential landed -- retrying with the same
+// rejected token is pointless, so a broker that is off or down short-circuits
+// straight to the auth error (the same reasoning as gh-cli.mjs).
+async function defaultRefreshWorkspaceAuthEnv({
+  env,
+  log,
+  refreshFollowUpGithubTokenImpl,
+  resolveRemediationPushTokenIdentityImpl,
+  withGhGitCredentialEnvImpl,
+} = {}) {
+  const baseEnv = env ?? process.env;
+  let refreshFollowUpGithubToken = refreshFollowUpGithubTokenImpl;
+  let resolveRemediationPushTokenIdentity = resolveRemediationPushTokenIdentityImpl;
+  let withGhGitCredentialEnv = withGhGitCredentialEnvImpl;
+  if (!refreshFollowUpGithubToken || !resolveRemediationPushTokenIdentity || !withGhGitCredentialEnv) {
+    const [brokerRefresh, workflowPushCapability] = await Promise.all([
+      import('./reviewer-broker-refresh.mjs'),
+      import('./remediation-workflow-push-capability.mjs'),
+    ]);
+    refreshFollowUpGithubToken ||= brokerRefresh.refreshFollowUpGithubToken;
+    resolveRemediationPushTokenIdentity ||= workflowPushCapability.resolveRemediationPushTokenIdentity;
+    withGhGitCredentialEnv ||= workflowPushCapability.withGhGitCredentialEnv;
+  }
+
+  const selectedCredential = resolveRemediationPushTokenIdentity(baseEnv);
+  if (selectedCredential?.configured) {
+    return {
+      refreshed: false,
+      detail: `configured remediation push token ${selectedCredential.envName || 'unknown'} was selected; rotate that token or update its broker-managed source`,
+      env: null,
+    };
+  }
+
+  const summary = await refreshFollowUpGithubToken({ env: baseEnv, log, force: true });
+  if (summary?.refreshed !== true) {
+    return { refreshed: false, detail: summary?.skipped || summary?.failed || 'unknown', env: null };
+  }
+  // Rebuild rather than reuse: withGhGitCredentialEnv snapshots the token into
+  // the returned object, so the env captured before the round started still
+  // carries the DEAD token even after a successful re-mint.
+  return { refreshed: true, detail: `role=${summary.role ?? 'unknown'}`, env: withGhGitCredentialEnv(baseEnv) };
+}
+
 async function runWorkspaceNetworkCommandWithTransientRetry({
   execFileImpl,
   command,
   args,
   options,
   retryDelaysMs = WORKSPACE_GIT_RETRY_DELAYS_MS,
+  refreshAuthEnvImpl = defaultRefreshWorkspaceAuthEnv,
+  log = console,
 }) {
   const delays = [0, ...retryDelaysMs];
+  let activeOptions = options;
+  // One re-mint per call. A second rejection after a genuinely NEW credential
+  // is a real authorization problem, not an expiry, and must surface.
+  let remintAttempted = false;
+  let skipNextDelay = false;
   let lastError = null;
   for (let attempt = 0; attempt < delays.length; attempt += 1) {
-    if (delays[attempt] > 0) {
+    if (skipNextDelay) {
+      skipNextDelay = false;
+    } else if (delays[attempt] > 0) {
       await sleep(delays[attempt]);
     }
     try {
-      return await execFileImpl(command, args, options);
+      return await execFileImpl(command, args, activeOptions);
     } catch (err) {
       lastError = err;
+
+      if (isWorkspaceAuthFailure(err) && !remintAttempted) {
+        remintAttempted = true;
+        let refresh = null;
+        try {
+          refresh = await refreshAuthEnvImpl({ env: activeOptions?.env, log });
+        } catch (refreshErr) {
+          err.message = `${err.message}\n[remediation-git] ${command} was rejected by GitHub authentication (${workspaceAuthDetail(err)}); credential re-mint threw: ${refreshErr?.message || refreshErr}`;
+          throw err;
+        }
+        if (refresh?.refreshed === true && refresh.env) {
+          log?.log?.(
+            `[remediation-git] ${command} was rejected by GitHub authentication; retrying once with a freshly minted credential (${refresh.detail})`
+          );
+          activeOptions = { ...activeOptions, env: refresh.env };
+          // Retry immediately: the credential changed, so a backoff would only
+          // burn more of the new token's life.
+          skipNextDelay = true;
+          attempt -= 1;
+          continue;
+        }
+        err.message = `${err.message}\n[remediation-git] ${command} was rejected by GitHub authentication (${workspaceAuthDetail(err)}) and no new credential could be minted (${refresh?.detail || 'unknown'}); the work is committed locally but unpushed.`;
+        throw err;
+      }
+
+      if (isWorkspaceAuthFailure(err) && remintAttempted) {
+        // Rejected again with a credential we know is NEW. That is an
+        // authorization problem (missing scope / revoked install / wrong
+        // account), not an expiry, and no amount of re-minting will fix it.
+        err.message = `${err.message}\n[remediation-git] ${command} was still rejected by GitHub authentication (${workspaceAuthDetail(err)}) AFTER a fresh credential was minted; this is an authorization problem, not an expired token.`;
+        throw err;
+      }
+
       if (!isTransientWorkspaceNetworkError(err) || attempt === delays.length - 1) {
         throw err;
       }
@@ -362,6 +483,8 @@ async function auditWorkspaceForContamination({
 }
 
 export {
+  defaultRefreshWorkspaceAuthEnv,
+  isWorkspaceAuthFailure,
   fetchPRBranchMetadata,
   ensureJobBranchMetadata,
   ensureJobBaseBranch,

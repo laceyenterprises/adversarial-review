@@ -2,11 +2,20 @@
 // normal `gh pr review` command otherwise submits against the current head.
 
 import { normalizeEffectiveReviewVerdict } from './review-verdict.mjs';
+import { parseReviewBody } from './merge-agent-rescue-classifier.mjs';
 
 function exactHeadReviewEventForBody(reviewBody) {
   const verdict = normalizeEffectiveReviewVerdict(reviewBody);
   if (verdict === 'request-changes') return 'REQUEST_CHANGES';
-  if (verdict === 'approved') return 'APPROVE';
+  const { blocking, nonBlocking } = parseReviewBody(reviewBody);
+  if (
+    blocking.missing === false
+    && blocking.count === 0
+    && nonBlocking.missing === false
+    && nonBlocking.count === 0
+  ) {
+    return 'APPROVE';
+  }
   return 'COMMENT';
 }
 

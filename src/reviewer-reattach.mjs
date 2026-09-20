@@ -48,7 +48,6 @@ const OVERDUE_RECOVERY_FAILURE_MESSAGE =
   'Overdue reviewer recovery could not prove the process exited cleanly without a late GitHub review; operator must verify before retrying.';
 const LEASE_RECOVERY_CAP_FAILURE_MESSAGE =
   'Reviewer lease recovery cap exhausted; leaving the review failed for operator inspection.';
-const POSTED_REVIEW_CLEANUP_SIGTERM_GRACE_MS = 5_000;
 const POSTED_REVIEW_CLEANUP_RECHECK_DELAYS_MS = Object.freeze([
   (REVIEW_ARTIFACT_LOOKUP_RETRY_BACKOFF_MS.length + 1) * REVIEW_LOOKUP_TIMEOUT_MS
   + REVIEW_ARTIFACT_LOOKUP_RETRY_BACKOFF_MS.reduce((sum, ms) => sum + ms, 0)
@@ -456,7 +455,6 @@ async function reconcileReviewerSessions({
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   postKillReviewReprobeDelaysMs = [500, 1500, 3000],
   postedReviewCleanupRecheckDelaysMs = POSTED_REVIEW_CLEANUP_RECHECK_DELAYS_MS,
-  postedReviewCleanupSigtermGraceMs = POSTED_REVIEW_CLEANUP_SIGTERM_GRACE_MS,
   onCleanupFinding = null,
 } = {}) {
   const limit = Number.isInteger(Number(maxRows)) && Number(maxRows) >= 0
@@ -973,25 +971,6 @@ async function reconcileReviewerSessions({
           if (!cleanupAlive) break;
         }
         if (cleanupAlive) {
-          killProcessGroup(row.reviewer_pgid, 'SIGTERM');
-          const sigtermGraceMs = Number(postedReviewCleanupSigtermGraceMs);
-          if (sigtermGraceMs > 0) await sleep(sigtermGraceMs);
-          const finalCleanupProbe = typeof probeSession === 'function'
-            ? probeSession(row)
-            : probeReviewerSession({
-              pgid: row.reviewer_pgid,
-              sessionUuid: row.reviewer_session_uuid,
-              probeAlive,
-            });
-          cleanupAlive = typeof finalCleanupProbe === 'boolean'
-            ? finalCleanupProbe
-            : finalCleanupProbe?.alive === true && finalCleanupProbe?.matched !== false;
-          cleanupMatched = typeof finalCleanupProbe === 'boolean'
-            ? cleanupMatched
-            : finalCleanupProbe?.matched ?? cleanupMatched;
-        }
-        if (cleanupAlive) {
-          killProcessGroup(row.reviewer_pgid, 'SIGKILL');
           const finding = {
             id: 'reviewer:posted_process_group_leak',
             severity: 'warning',
@@ -1133,7 +1112,6 @@ export {
   DEFAULT_NULL_PGID_LAUNCH_GRACE_MS,
   PGID_IDENTITY_FAILURE_MESSAGE,
   POSTED_REVIEW_CLEANUP_RECHECK_DELAYS_MS,
-  POSTED_REVIEW_CLEANUP_SIGTERM_GRACE_MS,
   killPgid,
   makeReviewPostedProbe,
   findReviewerProcessBySessionUuid,

@@ -165,6 +165,10 @@ function makeLog() {
   };
 }
 
+function noReviewerProcessFound() {
+  return { found: false };
+}
+
 test('reattaches when pgid is alive, head sha is unchanged, and no review is posted', async () => {
   const db = setupDb();
   seedReviewing(db);
@@ -991,15 +995,11 @@ test('posted review stays successful while a genuinely leaked process group prod
     killProcessGroup: (pgid, signal) => killed.push({ pgid, signal }),
     fetchHeadSha: async () => HEAD_SHA,
     postedReviewCleanupRecheckDelaysMs: [0, 0],
-    postedReviewCleanupSigtermGraceMs: 0,
     onCleanupFinding: async (finding) => findings.push(finding),
   });
 
   assert.equal(readRow(db).review_status, 'posted');
-  assert.deepEqual(killed, [
-    { pgid: 9001, signal: 'SIGTERM' },
-    { pgid: 9001, signal: 'SIGKILL' },
-  ]);
+  assert.deepEqual(killed, []);
   assert.deepEqual(findings, [{
     id: 'reviewer:posted_process_group_leak',
     severity: 'warning',
@@ -1109,6 +1109,7 @@ test('claimed rows with null pgid auto-rearm when no live run-state or GitHub re
     octokit: makeOctokit([]),
     now: new Date(FAILURE_AT),
     log,
+    findReviewerProcess: noReviewerProcessFound,
     fetchHeadSha: async () => HEAD_SHA,
     onTerminalDeadSession: async (event) => settled.push(event),
   });
@@ -1134,6 +1135,7 @@ test('claimed rows with null pgid use quarantine-only failure text when the reco
     octokit: makeOctokit([]),
     now: new Date(FAILURE_AT),
     log,
+    findReviewerProcess: noReviewerProcessFound,
     fetchHeadSha: async () => HEAD_SHA,
   });
 
@@ -1161,6 +1163,7 @@ test('claimed rows with null pgid stay reviewing while launch guard window is ac
     octokit: makeOctokit([]),
     now: new Date(FAILURE_AT),
     log,
+    findReviewerProcess: noReviewerProcessFound,
     fetchHeadSha: async () => {
       headProbeCount += 1;
       return HEAD_SHA;
@@ -1242,6 +1245,7 @@ test('old spawned/null-pgid rows wait the full reviewer timeout before rearm', a
     rootDir,
     now: new Date(FAILURE_AT),
     log,
+    findReviewerProcess: noReviewerProcessFound,
     fetchHeadSha: async () => {
       headProbeCount += 1;
       return HEAD_SHA;
@@ -1290,6 +1294,7 @@ test('terminal/null-pgid rows rearm without waiting for full reviewer timeout', 
     rootDir,
     now: new Date(FAILURE_AT),
     log,
+    findReviewerProcess: noReviewerProcessFound,
     fetchHeadSha: async () => {
       headProbeCount += 1;
       return HEAD_SHA;
@@ -1342,6 +1347,7 @@ test('launching/null-pgid rows wait full reviewer timeout before rearm', async (
     rootDir,
     now: new Date(FAILURE_AT),
     log,
+    findReviewerProcess: noReviewerProcessFound,
     fetchHeadSha: async () => {
       headProbeCount += 1;
       return HEAD_SHA;
@@ -1375,6 +1381,7 @@ test('claimed rows with null pgid reconcile to an already posted current-head re
     octokit: makeOctokit([]),
     now: new Date(FAILURE_AT),
     log,
+    findReviewerProcess: noReviewerProcessFound,
     fetchHeadSha: async () => HEAD_SHA,
     findPostedReview: async () => ({
       user: { login: 'codex-reviewer-lacey' },
@@ -1404,6 +1411,7 @@ test('claimed rows with null pgid retry later when GitHub review probe fails tra
     octokit: makeOctokit([]),
     now: new Date(FAILURE_AT),
     log,
+    findReviewerProcess: noReviewerProcessFound,
     fetchHeadSha: async () => HEAD_SHA,
     findPostedReview: async () => {
       const err = new Error('reviews unavailable');
@@ -1429,6 +1437,7 @@ test('claimed rows with null pgid stay sticky when GitHub review probe fails non
     octokit: makeOctokit([]),
     now: new Date(FAILURE_AT),
     log,
+    findReviewerProcess: noReviewerProcessFound,
     fetchHeadSha: async () => HEAD_SHA,
     findPostedReview: async () => {
       throw new Error('bad credentials');
@@ -1459,6 +1468,7 @@ test('claimed rows with null pgid do not synthesize now as the review lookup sta
     ]),
     now: new Date(FAILURE_AT),
     log,
+    findReviewerProcess: noReviewerProcessFound,
     fetchHeadSha: async () => HEAD_SHA,
   });
 
@@ -1483,6 +1493,7 @@ test('claimed rows with null pgid do not use last_attempted_at as a synthetic re
     octokit: makeOctokit([]),
     now: new Date(FAILURE_AT),
     log,
+    findReviewerProcess: noReviewerProcessFound,
     fetchHeadSha: async () => HEAD_SHA,
     findPostedReview: async (probeRow) => {
       probedRows.push(probeRow);

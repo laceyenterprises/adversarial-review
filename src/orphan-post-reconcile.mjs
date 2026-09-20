@@ -8,17 +8,16 @@ import { withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
 function postedReviewForRow(row, reviews) {
   const aliases = reviewerBotLoginAliases(row.reviewer);
   const startedAt = Date.parse(row.reviewer_started_at || row.last_attempted_at || '');
-  const headSha = String(row.reviewer_head_sha || '');
+  if (!Number.isFinite(startedAt)) return null;
+  const headSha = String(row.reviewer_head_sha || '').trim();
   return reviews
     .filter((review) => aliases.some((alias) => loginsMatch(review?.user?.login, alias)))
     .filter((review) => {
       const submittedAt = Date.parse(review?.submitted_at || '');
-      const commitId = String(review?.commit_id || '');
-      const hasStartedBound = Number.isFinite(startedAt);
-      const hasHeadBound = Boolean(headSha && commitId);
-      return Number.isFinite(submittedAt)
-        && (hasStartedBound ? submittedAt >= startedAt : true)
-        && (hasHeadBound ? commitId === headSha : hasStartedBound);
+      const commitId = String(review?.commit_id || '').trim();
+      return Number.isFinite(submittedAt) &&
+        submittedAt >= startedAt &&
+        (!headSha || !commitId || commitId === headSha);
     })
     .sort((a, b) => Date.parse(b.submitted_at) - Date.parse(a.submitted_at))[0] || null;
 }
@@ -58,6 +57,7 @@ export async function reconcilePostedFailedOrphans({
             failure_message = NULL, reviewer_lease_expires_at = NULL,
             infra_auto_recover_attempts = 0
       WHERE repo = ? AND pr_number = ? AND review_status = 'failed-orphan'
+        AND pr_state = 'open'
         AND COALESCE(reviewer_session_uuid, '') = COALESCE(?, '')`
   );
   const latestPass = db.prepare(
@@ -76,6 +76,7 @@ export async function reconcilePostedFailedOrphans({
             body_md = COALESCE(body_md, ?), gh_comment_id = ?,
             body_captured_at = COALESCE(body_captured_at, ?)
       WHERE pass_id = ? AND (gh_comment_id IS NULL OR gh_comment_id = ?)`
+      + ` AND status = 'running' AND ended_at IS NULL`
   );
   const passByReviewId = db.prepare(
     `SELECT pass_id, repo, pr_number, reviewer_class, reviewer_model, metadata_json, head_sha,
@@ -101,7 +102,7 @@ export async function reconcilePostedFailedOrphans({
       let artifactLinked = false;
       let queueDecision = null;
       if (apply) {
-        changed = withSqliteBusyRetrySync(
+        const applyResult = withSqliteBusyRetrySync(
           () => db.transaction(() => {
             const result = markPosted.run(
               review.submitted_at,
@@ -126,7 +127,7 @@ export async function reconcilePostedFailedOrphans({
             );
             let linkedPass = pass || null;
             if (pass && reviewId && !existingArtifact) {
-              markPassPosted.run(
+              const passResult = markPassPosted.run(
                 review.submitted_at,
                 reviewVerdict(review.state),
                 reviewBodyForStorage(review),
@@ -135,7 +136,7 @@ export async function reconcilePostedFailedOrphans({
                 pass.pass_id,
                 reviewId
               );
-              linkedPass = passById.get(pass.pass_id) || pass;
+              linkedPass = passResult.changes === 1 ? (passById.get(pass.pass_id) || pass) : null;
             }
             if (linkedPass) {
               artifactLinked = Boolean(reviewId && (linkedPass.gh_comment_id || existingArtifact));
@@ -152,15 +153,17 @@ export async function reconcilePostedFailedOrphans({
                 reviewPostedAt: review.submitted_at,
               });
             }
-            return true;
+            return { changed: true, artifactLinked };
           })(),
           { label: 'reconcile-posted-orphans-row' }
         );
+        changed = applyResult.changed === true;
+        artifactLinked = applyResult.artifactLinked === true;
       }
       results.push({
         repo: row.repo,
         prNumber: row.pr_number,
-        action: apply ? (changed ? (artifactLinked ? 'reconciled' : 'posted-no-artifact') : 'cas-miss') : 'would-reconcile',
+        action: apply ? (changed ? (artifactLinked ? 'reconciled' : 'reconciled-row-only') : 'cas-miss') : 'would-reconcile',
         postedAt: review.submitted_at,
         reviewId: review.id,
         verdict: reviewVerdict(review.state),
@@ -176,6 +179,7 @@ export async function reconcilePostedFailedOrphans({
     apply,
     scanned: rows.length,
     reconciled: results.filter((item) => item.action === 'reconciled').length,
+    reconciledRowOnly: results.filter((item) => item.action === 'reconciled-row-only').length,
     wouldReconcile: results.filter((item) => item.action === 'would-reconcile').length,
     firstPassQueue: { before: depthBefore, after: depthAfter },
     results,

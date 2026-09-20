@@ -2491,6 +2491,12 @@ export async function processReviewSubject(entry, ctx) {
         repoPath,
         prNumber,
         reviewerModel: route.reviewerModel,
+        // Active packs are carried as PR labels so capacity scope stays local
+        // to the review subject and requires no host/fleet lookup.
+        activePackIds: prLabelNames.flatMap((label) => {
+          const match = /^(?:active-)?pack:(.+)$/i.exec(label);
+          return match ? [match[1].trim()] : [];
+        }),
         subject,
         current,
         wakePriority: watcherWakeMatchesSubject(wakePayload, {

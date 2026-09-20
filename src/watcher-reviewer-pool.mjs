@@ -4,6 +4,7 @@ import {
   readMemoryPressureSample,
 } from './watcher-memory-pressure.mjs';
 import { loadRoleConfig } from './role-config.mjs';
+import { reviewerBurstCandidateEligible } from './reviewer-burst-lease.mjs';
 
 const DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX = 6;
 const MAX_FIRST_PASS_REVIEWER_POOL_MAX = 12;
@@ -817,6 +818,7 @@ function createDetachedReviewerDispatchTracker({ activeReviewerSpawns } = {}) {
 
 async function runBoundedReviewerDispatchQueue(candidates, {
   maxConcurrent = DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX,
+  burstLease = null,
   availableCredentials = null,
   geminiCredentialConcurrency = null,
   activeReviewerCounts = null,
@@ -831,8 +833,12 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   waitWarnMs = DEFAULT_REVIEWER_DISPATCH_WAIT_WARN_MS,
   splitPostReviewSettlement = false,
 } = {}) {
+  const steadyStateLimit = Math.max(1, Number.parseInt(String(maxConcurrent), 10) || 0);
+  const burstAdditionalSlots = burstLease?.state === 'active'
+    ? Math.max(0, Number.parseInt(String(burstLease.additionalSlots), 10) || 0)
+    : 0;
   const concurrencyLimit = resolveReviewerCredentialConcurrencyLimit({
-    poolSlots: maxConcurrent,
+    poolSlots: Math.min(MAX_FIRST_PASS_REVIEWER_POOL_MAX, steadyStateLimit + burstAdditionalSlots),
     availableCredentials,
   });
   if (concurrencyLimit < 1) {
@@ -1012,6 +1018,13 @@ async function runBoundedReviewerDispatchQueue(candidates, {
     })) {
       if (entry.started) continue;
       if (
+        initiallyActive + active.size >= steadyStateLimit
+        && !reviewerBurstCandidateEligible(entry.candidate, burstLease)
+      ) {
+        recordDeferredReason(entry, 'reviewer-burst-scope-ineligible');
+        continue;
+      }
+      if (
         counts.firstPass > 0
         && rereviewCap > 0
         && reviewerDispatchPassKind(entry.candidate) === 'rereview'
@@ -1043,6 +1056,10 @@ async function runBoundedReviewerDispatchQueue(candidates, {
       return 'gemini-credential-concurrency-saturated';
     }
     if (initialWaveClosed) return 'single-wave-deferred';
+    if (
+      initiallyActive + active.size >= steadyStateLimit
+      && !reviewerBurstCandidateEligible(candidate, burstLease)
+    ) return 'reviewer-burst-scope-ineligible';
     if (initiallyActive + active.size >= concurrencyLimit) return 'reviewer-pool-saturated';
     if (
       pendingLaneCounts(pending).firstPass > 0

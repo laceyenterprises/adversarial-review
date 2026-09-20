@@ -337,6 +337,7 @@ import { makeReviewPostedProbe, reconcileReviewerSessions, reviewerBotLogin } fr
 import { reconcileReviewerCommandFailedBeforeRetry } from './reviewer-command-failed-recovery.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 import { createWatcherHealthProbe } from './health-probe.mjs';
+import { readReviewerBurstLease } from './reviewer-burst-lease.mjs';
 import {
   createWatcherHeartbeat,
   createWatcherStallWatchdog,
@@ -418,7 +419,6 @@ import {
   probeRoutingTierReadiness,
 } from './routing-tier-readiness.mjs';
 const execFileAsync = promisify(execFile);
-
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 
@@ -1278,6 +1278,7 @@ async function pollOnce(
         await resolveGeminiCredentialConcurrencyForDispatchCandidates(candidates);
       const drainResult = await runBoundedReviewerDispatchQueue(candidates, {
         maxConcurrent: reviewerPoolConfig.maxConcurrent,
+        burstLease: readReviewerBurstLease(ROOT),
         geminiCredentialConcurrency,
         activeReviewerCounts: detachedReviewerDispatchTracker.activeCounts(),
         usePersistentReviewerLaneState: true,

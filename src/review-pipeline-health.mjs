@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { PROVIDER_OVERLOADED_FAILURE_CLASS } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { ROUND_BUDGET_BY_RISK_CLASS } from './follow-up-jobs.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS, quotaHoldDecision } from './quota-exhaustion.mjs';
+import { readReviewerBurstLease } from './reviewer-burst-lease.mjs';
 import { infraRecoverableFailureClass } from './reviewer-failure-classification.mjs';
 import {
   DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS,
@@ -5658,6 +5659,7 @@ function collectReviewPipelineHealth({
       terminalReconciliation,
       reviewer,
       reviewerCapacity,
+      reviewerBurst: readReviewerBurstLease(rootDir, { now }),
       reviewerModelSilence,
       afhFallbackSupermajority,
       reviewerDegradation,

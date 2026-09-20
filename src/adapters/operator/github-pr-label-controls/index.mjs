@@ -10,6 +10,10 @@ import { promisify } from 'node:util';
 
 import { fetchLatestLabelEvent } from '../../../github-label-events.mjs';
 import { parseSubjectExternalId } from '../../subject/github-pr/index.mjs';
+import {
+  DUPLICATE_FAMILY_HOLD_LABEL,
+  DUPLICATE_FAMILY_LABEL,
+} from '../../../duplicate-family-gate.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -44,8 +48,6 @@ const MERGE_AGENT_RECOVERY_IN_FLIGHT_LABEL = 'merge-agent-recovery-in-flight';
 // Operator/maintainer hold: the PR must not be merged or otherwise advanced
 // by the autonomous pipeline until the label is cleared.
 const NO_MERGE_HOLD_LABEL = 'no-merge-hold';
-const DUPLICATE_FAMILY_LABEL = 'duplicate-family';
-const DUPLICATE_FAMILY_HOLD_LABEL = 'duplicate-family-hold';
 
 function isoNow() {
   return new Date().toISOString();

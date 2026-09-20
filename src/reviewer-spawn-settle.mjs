@@ -1198,6 +1198,7 @@ function settleReviewerAttempt({
       failedAt: failureAt,
       failureClass,
       failureReason: failureMessage,
+      reviewerModel,
     });
     if (infraRecoverAttempts >= INFRA_AUTO_RECOVER_CAP) {
       const repeatExhaustion = infraRecoverAttempts > INFRA_AUTO_RECOVER_CAP;

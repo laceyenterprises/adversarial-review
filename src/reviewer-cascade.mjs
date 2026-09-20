@@ -147,6 +147,7 @@ function recordCascadeFailure(rootDir, {
   failureClass = 'cascade',
   failureReason = null,
   nextRetryAfter = null,
+  reviewerModel = null,
 } = {}) {
   const previous = readCascadeState(rootDir, { repo, prNumber });
   // SCHEMA SHIM — do not remove while any data/cascade-state/*.json written
@@ -220,9 +221,36 @@ function recordCascadeFailure(rootDir, {
   transientFailureBreakdown[normalizedFailureClass] = Number(
     transientFailureBreakdown[normalizedFailureClass] || 0
   ) + 1;
+  // Per-MODEL counts, alongside the reviewer-agnostic map above.
+  //
+  // The flat `transientFailureBreakdown` is deliberately reviewer-agnostic
+  // because the PR-level HOLD is: a wedged PR should back off against every
+  // eligible reviewer. But `reviewerExecFailureSignal` also reads it to decide
+  // whether to route a SPECIFIC model away, and that is a model-specific
+  // question being answered with model-agnostic data.
+  //
+  // Observed 2026-09-20: claude failed `quota-exhausted` twice on a PR, which
+  // set breakdown['quota-exhausted']=2; the next selection of GEMINI then read
+  // that same 2 against a threshold of 2 and failed gemini out with
+  // `gemini class=quota-exhausted count=2/2`. Gemini was selected 1852 times
+  // and produced ZERO reviews in six hours while claude carried the whole lane.
+  // This is the same cross-model freeze already documented above for the
+  // 2026-08-23 codex-cap incident, arriving through the failure COUNT instead
+  // of the retry TIME that was fixed then.
+  const normalizedModel = String(reviewerModel || '').trim().toLowerCase();
+  const transientFailureBreakdownByModel = previous?.transientFailureBreakdownByModel
+    ? { ...previous.transientFailureBreakdownByModel }
+    : {};
+  if (normalizedModel) {
+    const modelCounts = { ...(transientFailureBreakdownByModel[normalizedModel] || {}) };
+    modelCounts[normalizedFailureClass] = Number(modelCounts[normalizedFailureClass] || 0) + 1;
+    transientFailureBreakdownByModel[normalizedModel] = modelCounts;
+  }
   return writeCascadeState(rootDir, { repo, prNumber }, {
     consecutiveTransientFailures,
     transientFailureBreakdown,
+    transientFailureBreakdownByModel,
+    lastFailureModel: normalizedModel || previous?.lastFailureModel || null,
     lastFailureClass: normalizedFailureClass,
     lastFailureReason: typeof failureReason === 'string' && failureReason.trim()
       ? failureReason.trim()

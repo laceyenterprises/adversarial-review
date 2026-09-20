@@ -1038,6 +1038,10 @@ test('applyPreSpawnLifecycleGate: DIRTY conflict with missing specs escalates wi
   const stoppedPath = path.join(getFollowUpJobDir(rootDir, 'stopped'), path.basename(jobPath));
   const stoppedJob = readJobAtPath(stoppedPath);
   assert.equal(stoppedJob.remediationPlan?.stop?.code, 'dirty-conflict-spec-context-missing');
+  assert.deepEqual(stoppedJob.failure, {
+    code: 'dirty-conflict-spec-context-missing',
+    message: 'Remediation worker did not spawn because DIRTY conflict ownership lacks complete spec context: PR spec missing-project@abc123, modules/unknown SPEC.md.',
+  });
   assert.equal(stoppedJob.remediationWorker?.dirtyMergeResolution?.outcome, 'conflict-spec-context-missing');
   assert.equal(stoppedJob.remediationWorker?.dirtyMergeResolution?.specsConsulted.length, 0);
 });

@@ -1222,6 +1222,10 @@ async function applyPreSpawnLifecycleGate({
         stoppedAt: nowIso,
         stopCode: 'dirty-merge-resolution-failed',
         stopReason: `DIRTY pre-spawn merge resolution failed before worker spawn: ${err?.message || err}`,
+        failure: {
+          code: 'dirty-merge-resolution-failed',
+          message: `Remediation worker did not spawn because DIRTY pre-spawn merge resolution failed: ${err?.message || err}`,
+        },
         sourceStatus: 'in_progress',
         remediationWorker: {
           ...(job?.remediationWorker || {}),
@@ -1279,6 +1283,10 @@ async function applyPreSpawnLifecycleGate({
           stoppedAt: nowIso,
           stopCode: 'dirty-conflict-spec-context-missing',
           stopReason: `DIRTY PR merge conflict could not be assigned to complete spec context; missing: ${specContext.missing.join(', ') || 'spec context'}.`,
+          failure: {
+            code: 'dirty-conflict-spec-context-missing',
+            message: `Remediation worker did not spawn because DIRTY conflict ownership lacks complete spec context: ${specContext.missing.join(', ') || 'spec context'}.`,
+          },
           sourceStatus: 'in_progress',
           remediationWorker: {
             ...(job?.remediationWorker || {}),

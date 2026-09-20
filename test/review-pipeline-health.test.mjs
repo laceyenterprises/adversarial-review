@@ -3307,6 +3307,32 @@ test('remediation backlog finding fires on pending jobs and clears when the back
   assert.ok(!findingCodes(cleared).includes('review:remediation_backlog'));
 });
 
+test('remediation zero-throughput finding fires only when queued work has no in-flight job', () => {
+  const rootDir = tempRoot();
+  writeJob(rootDir, 'pending', 'queued', {
+    jobId: 'queued',
+    repo: REPO,
+    prNumber: 1077,
+    createdAt: '2026-05-25T17:00:00.000Z',
+  });
+
+  const firing = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  const finding = firing.findings.find((item) => item.code === 'review:remediation_zero_throughput');
+  assert.ok(finding);
+  assert.equal(finding.details.pending, 1);
+  assert.equal(finding.details.inProgress, 0);
+  assert.match(finding.subject, /zero in flight/);
+
+  writeJob(rootDir, 'in-progress', 'running', {
+    jobId: 'running',
+    repo: REPO,
+    prNumber: 1078,
+    claimedAt: '2026-05-25T17:30:00.000Z',
+  });
+  const healthy = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  assert.ok(!findingCodes(healthy).includes('review:remediation_zero_throughput'));
+});
+
 test('merge stalled finding fires on an old clean verdict and clears when the PR merges', () => {
   const rootDir = tempRoot();
   insertReviewRow(rootDir, {

@@ -359,6 +359,14 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     thresholdDescription: 'one or more remediation rounds stopped with an operational blocker requiring human intervention',
   },
   {
+    code: 'review:remediation_zero_throughput',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: null,
+    defaultThreshold: null,
+    thresholdDescription: 'one or more remediation jobs are pending while no remediation job is in progress',
+  },
+  {
     code: 'review:pr_lifecycle_mirror_unverified',
     tier: 'ticket',
     category: 'review-pipeline',
@@ -4342,6 +4350,27 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
   }
 
   const pendingRemediation = snapshot.followUpQueues.states.pending || 0;
+  const inProgressRemediation = snapshot.followUpQueues.states.in_progress || 0;
+  if (pendingRemediation > 0 && inProgressRemediation === 0) {
+    findings.push(buildFinding({
+      code: 'review:remediation_zero_throughput',
+      tier: 'ticket',
+      subject: `${pendingRemediation} remediation job(s) are queued with zero in flight`,
+      message: `follow-up-jobs/pending has ${pendingRemediation} job(s) while follow-up-jobs/in-progress is empty.`,
+      evidence: [
+        'data/follow-up-jobs/pending',
+        'data/follow-up-jobs/in-progress',
+      ],
+      recommendedAction: 'Treat this as a remediation-lane outage: inspect the follow-up daemon, the oldest pending job, and pre-spawn admission failures. Preserve terminal job evidence; do not raise concurrency or disable reconciliation.',
+      observedAt,
+      details: {
+        pending: pendingRemediation,
+        inProgress: inProgressRemediation,
+        oldestPending: snapshot.followUpQueues.oldestPending,
+        recentTerminalThroughput: snapshot.followUpQueues.throughput,
+      },
+    }));
+  }
   if (pendingRemediation > config.remediationBacklogThreshold) {
     findings.push(buildFinding({
       code: 'review:remediation_backlog',

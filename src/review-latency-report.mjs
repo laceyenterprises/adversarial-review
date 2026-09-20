@@ -738,12 +738,18 @@ function reviewerSlotState(db, { nowMs }) {
     workerRunId: row.worker_run_id || null,
     metadata: parseJson(row.metadata_json, {}),
   }));
+  const activeReviewKeys = new Set(reviewing.map((row) => `${row.repo}#${row.prNumber}`));
+  const settlementPasses = runningPasses.filter(
+    (row) => !activeReviewKeys.has(`${row.repo}#${row.prNumber}`),
+  );
   return {
     reviewingRows: reviewing.length,
     runningPasses: runningPasses.length,
+    settlementRows: settlementPasses.length,
     nullPgidRows: reviewing.filter((row) => !row.hasDurablePgid).length,
     rows: reviewing,
     passes: runningPasses,
+    settlements: settlementPasses,
   };
 }
 
@@ -875,7 +881,7 @@ function collectReviewLatencyReport({
       topWaitingReasons: topWaitingReasons(queue),
       reviewerSlots: db
         ? reviewerSlotState(db, { nowMs })
-        : { reviewingRows: 0, runningPasses: 0, nullPgidRows: 0, rows: [], passes: [] },
+        : { reviewingRows: 0, runningPasses: 0, settlementRows: 0, nullPgidRows: 0, rows: [], passes: [], settlements: [] },
       agyRouteState: db
         ? agyRouteState(db, { sinceIso })
         : { available: false, reviewerRows: [], recentProbeEvents: [] },
@@ -929,7 +935,9 @@ function renderReviewLatencyReport(report) {
   }
   lines.push(
     `reviewer slots: reviewing=${report.reviewerSlots.reviewingRows} ` +
-    `running_passes=${report.reviewerSlots.runningPasses} null_pgid=${report.reviewerSlots.nullPgidRows}`
+    `running_passes=${report.reviewerSlots.runningPasses} ` +
+    `settlement=${report.reviewerSlots.settlementRows || 0} ` +
+    `null_pgid=${report.reviewerSlots.nullPgidRows}`
   );
   lines.push(`AGY route/probe: ${report.agyRouteState.available ? 'available' : 'unobserved'}`);
   lines.push('');

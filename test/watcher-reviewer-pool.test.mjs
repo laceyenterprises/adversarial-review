@@ -214,6 +214,187 @@ test('reviewer pool starts another PR while an older review is slow', async () =
   await runPromise;
 });
 
+test('split admission releases a slot after durable post while settlement remains slow', async () => {
+  const events = [];
+  let finishSettlement;
+  const settlementHold = new Promise((resolve) => { finishSettlement = resolve; });
+  const tasks = [
+    candidate(1, async function run() {
+      events.push('model:1');
+      events.push('post-durable:1');
+      this.admissionReleaseCapacity();
+      await settlementHold;
+      events.push('settled:1');
+    }),
+    candidate(2, async function run() {
+      events.push('model:2');
+      this.admissionReleaseCapacity();
+    }),
+  ];
+
+  const summary = await runBoundedReviewerDispatchQueue(tasks, {
+    maxConcurrent: 1,
+    splitPostReviewSettlement: true,
+    logger: { error() {} },
+  });
+
+  assert.equal(summary.dispatched, 2);
+  assert.deepEqual(events, ['model:1', 'post-durable:1', 'model:2']);
+  finishSettlement();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(events, ['model:1', 'post-durable:1', 'model:2', 'settled:1']);
+});
+
+test('split admission preserves dispatch failure circuit before release', async () => {
+  const events = [];
+  const failure = new Error('reviewer spawn failed');
+  const tasks = [
+    candidate(1, async () => {
+      events.push('start:1');
+      throw failure;
+    }),
+    candidate(2, async () => {
+      events.push('start:2');
+    }),
+  ];
+
+  await assert.rejects(
+    runBoundedReviewerDispatchQueue(tasks, {
+      maxConcurrent: 1,
+      splitPostReviewSettlement: true,
+      logger: { error() {} },
+    }),
+    failure,
+  );
+  assert.deepEqual(events, ['start:1']);
+});
+
+test('split admission re-enters single-wave drain when admission releases within grace', async () => {
+  const events = [];
+  let finishSettlement;
+  const settlementHold = new Promise((resolve) => { finishSettlement = resolve; });
+  const tasks = [
+    candidate(1, async function run() {
+      events.push('model:1');
+      events.push('post-durable:1');
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      this.admissionReleaseCapacity();
+      await settlementHold;
+      events.push('settled:1');
+    }),
+    candidate(2, async function run() {
+      events.push('model:2');
+      this.admissionReleaseCapacity();
+    }),
+  ];
+
+  const summary = await runBoundedReviewerDispatchQueue(tasks, {
+    maxConcurrent: 1,
+    singleWave: true,
+    singleWaveSettleGraceMs: 50,
+    splitPostReviewSettlement: true,
+    logger: { error() {}, log() {} },
+  });
+
+  assert.equal(summary.dispatched, 2);
+  assert.equal(summary.deferred, 0);
+  assert.deepEqual(events, ['model:1', 'post-durable:1', 'model:2']);
+  finishSettlement();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(events, ['model:1', 'post-durable:1', 'model:2', 'settled:1']);
+});
+
+test('split admission single-wave drain detaches before late admission release', async () => {
+  const events = [];
+  let releaseAdmission;
+  let finishSettlement;
+  const admissionHold = new Promise((resolve) => { releaseAdmission = resolve; });
+  const settlementHold = new Promise((resolve) => { finishSettlement = resolve; });
+  const startedAt = Date.now();
+
+  const summary = await runBoundedReviewerDispatchQueue([
+    candidate(1, async function run() {
+      events.push('model:1');
+      await admissionHold;
+      events.push('post-durable:1');
+      this.admissionReleaseCapacity();
+      await settlementHold;
+      events.push('settled:1');
+    }),
+    candidate(2, async function run() {
+      events.push('model:2');
+      this.admissionReleaseCapacity();
+    }),
+  ], {
+    maxConcurrent: 1,
+    singleWave: true,
+    singleWaveSettleGraceMs: 25,
+    splitPostReviewSettlement: true,
+    logger: { error() {}, log() {} },
+  });
+
+  const elapsedMs = Date.now() - startedAt;
+  assert.ok(elapsedMs < 200, `single-wave drain should return promptly, elapsed=${elapsedMs}ms`);
+  assert.equal(summary.dispatched, 0);
+  assert.equal(summary.deferred, 1);
+  assert.deepEqual(summary.deferredCandidates.map((item) => item.prNumber), [2]);
+  assert.deepEqual(events, ['model:1']);
+
+  releaseAdmission();
+  finishSettlement();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(events, ['model:1', 'post-durable:1', 'settled:1']);
+});
+
+test('legacy serial admission remains available when settlement split is disabled', async () => {
+  const events = [];
+  const tasks = [
+    candidate(1, async () => {
+      events.push('start:1');
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      events.push('settled:1');
+    }),
+    candidate(2, async () => { events.push('start:2'); }),
+  ];
+
+  await runBoundedReviewerDispatchQueue(tasks, {
+    maxConcurrent: 1,
+    splitPostReviewSettlement: false,
+    logger: { error() {} },
+  });
+  assert.deepEqual(events, ['start:1', 'settled:1', 'start:2']);
+});
+
+test('single-wave flag-off re-entry gets a fresh settle grace after skipped wave', async () => {
+  const events = [];
+  let virtualNowMs = 0;
+  const tasks = [
+    candidate(1, async () => {
+      events.push('skip:1');
+      virtualNowMs += 100;
+      return { dispatched: false, reason: 'already-reviewed-head' };
+    }),
+    candidate(2, async () => {
+      events.push('start:2');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      events.push('settled:2');
+    }),
+  ];
+
+  const summary = await runBoundedReviewerDispatchQueue(tasks, {
+    maxConcurrent: 1,
+    singleWave: true,
+    singleWaveSettleGraceMs: 50,
+    splitPostReviewSettlement: false,
+    now: () => virtualNowMs,
+    logger: { error() {}, log() {} },
+  });
+
+  assert.equal(summary.dispatched, 1);
+  assert.equal(summary.deferred, 0);
+  assert.deepEqual(events, ['skip:1', 'start:2', 'settled:2']);
+});
+
 test('reviewer dispatch gives re-reviews their floor after the configured burst at four slots', async () => {
   const started = [];
   let release;

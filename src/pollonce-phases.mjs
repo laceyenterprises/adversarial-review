@@ -646,6 +646,7 @@ export async function processReviewSubject(entry, ctx) {
     normalizeReviewPopulationRetryConfig,
     shouldDeferReviewForActiveFollowUp,
     wakePayload = null,
+    admissionSettlementSplitEnabled = false,
     runDaemonCleanMergeAttemptImpl = runDaemonCleanMergeAttempt,
     findArgusJobImpl = findArgusJob,
     maybeAutoAdjudicateDependencyBotArgusJobImpl = maybeAutoAdjudicateDependencyBotArgusJob,
@@ -2449,6 +2450,7 @@ export async function processReviewSubject(entry, ctx) {
         pendingSince: current?.rereview_requested_at || current?.reviewed_at || current?.last_attempted_at || null,
         enqueuedAtMs: Date.now(),
         async run() {
+          const releaseAdmissionCapacity = this.admissionReleaseCapacity || null;
           // REVIEW-DEDUP (idempotency lease): one (pr, head) dispatch per
           // window. A second pool worker racing the same head is turned away
           // here before it can fetch, claim, or spawn.
@@ -2467,6 +2469,12 @@ export async function processReviewSubject(entry, ctx) {
           }
 
           let reservation = null;
+          let reservationReleased = false;
+          const releaseReviewerReservation = () => {
+            if (!reservation || reservationReleased) return;
+            reservationReleased = true;
+            reservation.release();
+          };
           try {
             // REVIEW-DEDUP (authoritative reviewed-head gate): never dispatch a
             // review for a head that already has a completed review (GitHub
@@ -3040,11 +3048,26 @@ export async function processReviewSubject(entry, ctx) {
                   });
                 },
               };
+              let reviewRowSettled = false;
+              const pipelineEnabled = isPipelineEnabled(domainAdapterSet.domainConfig);
+              if (admissionSettlementSplitEnabled && !pipelineEnabled) spawnReviewerArgs.onPostOperationSettled = (postedResult) => {
+                if (reviewRowSettled) return;
+                settleReviewerAttempt({
+                  rootDir: ROOT,
+                  repoPath,
+                  prNumber,
+                  result: postedResult,
+                  env: process.env,
+                  maxRemediationRounds,
+                  markReviewHeartbeat: markWatcherReviewHeartbeat,
+                });
+                reviewRowSettled = true;
+              };
               // ARC-13: when the domain enables the sequential review pipeline
               // (default OFF), drive the two-stage pipeline instead of a single
               // review and post the Win 2 rollup. Gate-off is byte-identical:
               // the else-branch is the unchanged v1 single `spawnReviewer` call.
-              const result = isPipelineEnabled(domainAdapterSet.domainConfig)
+              const result = pipelineEnabled
                 ? await runWatcherGatedReviewPipeline({
                   domainConfig: domainAdapterSet.domainConfig,
                   domainId,
@@ -3061,39 +3084,46 @@ export async function processReviewSubject(entry, ctx) {
                 healthProbe?.recordSpawn?.(healthTick, { at: attemptAt });
               }
 
-              settleReviewerAttempt({
-                rootDir: ROOT,
-                repoPath,
-                prNumber,
-                result,
-                env: process.env,
-                maxRemediationRounds,
-                // ARC-18: watcher owns the heartbeat singleton; thread it in.
-                markReviewHeartbeat: markWatcherReviewHeartbeat,
-              });
-              await maybeInlineFinalHammerAfterReview({
-                rootDir: ROOT,
-                repoPath,
-                prNumber,
-                result,
-                passKind,
-                completedRemediationRounds,
-                maxRemediationRounds,
-                subjectRef: subject.ref,
-                currentRevisionRef: subject.ref.revisionRef,
-                labelNames: prLabelNames,
-                projectGateStatusSafe,
-                execFileImpl: execFileAsync,
-                operatorSurface,
-                logger: console,
-                handlePostedReviewRowImpl: handlePostedReviewRow,
-              });
+              if (!reviewRowSettled) {
+                settleReviewerAttempt({
+                  rootDir: ROOT,
+                  repoPath,
+                  prNumber,
+                  result,
+                  env: process.env,
+                  maxRemediationRounds,
+                  // ARC-18: watcher owns the heartbeat singleton; thread it in.
+                  markReviewHeartbeat: markWatcherReviewHeartbeat,
+                });
+              }
+              try {
+                await maybeInlineFinalHammerAfterReview({
+                  rootDir: ROOT,
+                  repoPath,
+                  prNumber,
+                  result,
+                  passKind,
+                  completedRemediationRounds,
+                  maxRemediationRounds,
+                  subjectRef: subject.ref,
+                  currentRevisionRef: subject.ref.revisionRef,
+                  labelNames: prLabelNames,
+                  projectGateStatusSafe,
+                  execFileImpl: execFileAsync,
+                  operatorSurface,
+                  logger: console,
+                  handlePostedReviewRowImpl: handlePostedReviewRow,
+                });
+              } finally {
+                releaseAdmissionCapacity?.({ dispatched: true });
+              }
             }
           } finally {
-            if (reservation) reservation.release();
+            releaseReviewerReservation();
             reviewerHeadDispatchLease.release(dispatchLeaseKey);
           }
         },
+        supportsAdmissionSplit: Boolean(admissionSettlementSplitEnabled) && !isPipelineEnabled(domainAdapterSet.domainConfig),
       };
       if (reviewerPoolConfig.enabled) {
         reviewerDispatchCandidates.push(dispatchCandidate);

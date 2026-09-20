@@ -829,6 +829,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   logger = console,
   now = () => Date.now(),
   waitWarnMs = DEFAULT_REVIEWER_DISPATCH_WAIT_WARN_MS,
+  splitPostReviewSettlement = false,
 } = {}) {
   const concurrencyLimit = resolveReviewerCredentialConcurrencyLimit({
     poolSlots: maxConcurrent,
@@ -882,12 +883,16 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   const initiallyActive = activeReviewerCount(activeReviewerCounts, '__total__');
   const initiallyActiveRereviews = activeReviewerCount(activeReviewerCounts, '__lane:rereview');
   let initialWaveClosed = false;
+  let singleWaveDeadlineMs = null;
 
   const isGeminiCandidate = (candidate) =>
     String(candidate?.reviewerModel || '').toLowerCase() === 'gemini';
 
   const dispatchWasSkipped = (result) =>
     result && typeof result === 'object' && result.dispatched === false;
+
+  const candidateSupportsAdmissionSplit = (candidate) =>
+    splitPostReviewSettlement && candidate?.supportsAdmissionSplit !== false;
 
   const recordLaneAdmission = (candidate) => {
     const key = reviewerDispatchIsFirstPass(candidate) ? 'firstPass' : 'rereview';
@@ -913,7 +918,51 @@ async function runBoundedReviewerDispatchQueue(candidates, {
       const currentNowMs = Number(now());
       const resolvedNowMs = Number.isFinite(currentNowMs) ? currentNowMs : Date.now();
       logReviewerDispatchWait(candidate, { logger, nowMs: resolvedNowMs, waitWarnMs });
-      return await candidate.run();
+      if (!candidateSupportsAdmissionSplit(candidate)) return await candidate.run();
+
+      // Admission capacity covers model execution and the durable post
+      // decision, not token accounting, follow-up bookkeeping, or merge
+      // confirmation.  The candidate calls releaseAdmissionCapacity only
+      // after its review row has been durably settled.  Keep the continuation
+      // alive (and observed) while returning the scarce slot immediately.
+      let releaseAdmissionCapacity;
+      let rejectAdmissionCapacity;
+      const admission = new Promise((resolve, reject) => {
+        releaseAdmissionCapacity = resolve;
+        rejectAdmissionCapacity = reject;
+      });
+      let released = false;
+      const release = (value = { dispatched: true }) => {
+        if (released) return;
+        released = true;
+        releaseAdmissionCapacity(value);
+      };
+      candidate.admissionReleaseCapacity = release;
+      const settlement = Promise.resolve()
+        .then(() => candidate.run())
+        .then((result) => {
+          release(result);
+          return result;
+        })
+        .catch((err) => {
+          if (!released) {
+            released = true;
+            rejectAdmissionCapacity(err);
+            return;
+          }
+          logger?.error?.(
+            `[watcher] deferred reviewer settlement failed for ${candidate.repoPath}#${candidate.prNumber}:`,
+            err?.message || err,
+          );
+        })
+        .finally(() => {
+          delete candidate.admissionReleaseCapacity;
+        });
+      // A process-lifetime continuation registry is unnecessary here: the
+      // candidate's own durable row is the restart handle. This catch ensures
+      // a late rejection never becomes unhandled in the current process.
+      settlement.catch(() => {});
+      return await admission;
     } catch (err) {
       errors.push(err);
       logger?.error?.(
@@ -1068,19 +1117,30 @@ async function runBoundedReviewerDispatchQueue(candidates, {
         0,
         Number.parseInt(String(singleWaveSettleGraceMs), 10) || 0,
       );
+      const currentNowMs = Number(now());
+      const resolvedNowMs = Number.isFinite(currentNowMs) ? currentNowMs : Date.now();
+      let remainingSettleGraceMs = settleGraceMs;
+      if (splitPostReviewSettlement) {
+        if (singleWaveDeadlineMs === null) {
+          singleWaveDeadlineMs = resolvedNowMs + settleGraceMs;
+        }
+        remainingSettleGraceMs = Math.max(0, singleWaveDeadlineMs - resolvedNowMs);
+      }
       if (active.size > 0) {
         let settleTimer = null;
         try {
           await Promise.race([
             Promise.all([...active]),
             new Promise((resolve) => {
-              settleTimer = setTimeout(resolve, settleGraceMs);
+              settleTimer = setTimeout(resolve, remainingSettleGraceMs);
             }),
           ]);
         } finally {
           if (settleTimer) clearTimeout(settleTimer);
         }
       }
+      const deadlineNowMs = Number(now());
+      const deadlineResolvedNowMs = Number.isFinite(deadlineNowMs) ? deadlineNowMs : Date.now();
       if (active.size > 0) {
         initialWaveClosed = true;
         for (const entry of pending) {
@@ -1092,7 +1152,14 @@ async function runBoundedReviewerDispatchQueue(candidates, {
         );
         break;
       }
-      if (dispatched > 0) {
+      if (
+        dispatched > 0
+        && (
+          !splitPostReviewSettlement
+          || deadlineResolvedNowMs >= singleWaveDeadlineMs
+          || !pending.some((entry) => !entry.started && candidateSupportsAdmissionSplit(entry.candidate))
+        )
+      ) {
         initialWaveClosed = true;
       }
     }
@@ -1160,6 +1227,7 @@ export {
   createDetachedReviewerDispatchTracker,
   createReviewerLaneState,
   createReviewerMemoryAdmissionSampler,
+  parseBooleanFlag,
   logReviewerDispatchWait,
   reserveReviewerMemoryAdmission,
   fetchGeminiCredentialConcurrency,

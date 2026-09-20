@@ -68,6 +68,56 @@ test('spawnReviewer posts successful adapter-produced review bodies through GitH
   assert.equal(spawnRequests[0]?.subjectContext?.passKind, 'first-pass');
 });
 
+test('spawnReviewer does not fail a posted pass when post-operation callback throws', async () => {
+  const settled = [];
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (message) => warnings.push(String(message));
+  try {
+    const result = await spawnReviewer({
+      rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
+      repo: 'laceyenterprises/demo',
+      prNumber: 15,
+      reviewerModel: 'gemini',
+      botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+      linearTicketId: 'LAC-566',
+      labels: [],
+      builderTag: 'codex',
+      reviewerHeadSha: 'abc123',
+      reviewAttemptNumber: 1,
+      reviewDbAttemptNumber: 4,
+      completedRemediationRounds: 0,
+      passKind: 'first-pass',
+      maxRemediationRounds: 2,
+      reviewerSessionUuid: 'spawn-settle-callback-throws',
+      reviewerRuntimeAdapterOverride: {
+        async spawnReviewer() {
+          return {
+            ok: true,
+            reviewBody: '## Summary\nLooks good.\n\n## Verdict\nComment only',
+            reviewBodyDelivery: 'caller-post',
+            spawnedAt: '2026-07-27T03:00:00.000Z',
+          };
+        },
+      },
+      postGitHubReviewWithCaptureImpl: async () => {},
+      fetchPullRequestHeadAndStateImpl: currentHead('abc123'),
+      onPostOperationSettled: () => {
+        throw new Error('database is locked');
+      },
+      completeReviewerPassImpl: (_root, payload) => settled.push(payload),
+    });
+
+    assert.equal(result.ok, true);
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  assert.equal(settled.length, 1);
+  assert.equal(settled[0].status, 'completed');
+  assert.match(warnings[0] || '', /post-operation settlement callback failed/);
+});
+
 test('failure diagnostics truncation does not leave a dangling surrogate', () => {
   const text = `${'a'.repeat(11999)}😀tail`;
   const truncated = truncateCodePoints(text, 12000);

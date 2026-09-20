@@ -22,6 +22,35 @@ test('fresh context cache hit reuses bundle bytes', async () => {
   assert.deepEqual(events.map(({ event }) => event), ['cache_miss', 'cache_hit']);
 });
 
+test('cache hits report saved load time for latency telemetry', async () => {
+  const ticks = [100, 100, 175, 200];
+  const events = [];
+  const cache = createHotPathCache({
+    name: 'review-context',
+    ttlMs: 500,
+    nowFn: () => ticks.shift() ?? 200,
+    emitEvent: (event) => events.push(event),
+  });
+  assert.equal(await cache.get('key', async () => 'bundle'), 'bundle');
+  assert.equal(await cache.get('key', async () => 'uncalled'), 'bundle');
+  const hit = events.find((event) => event.event === 'cache_hit');
+  assert.equal(hit.savedMs, 75);
+  assert.equal(hit.ageMs, 25);
+});
+
+test('cache evicts oldest entries at its configured size limit', async () => {
+  let now = 0;
+  const cache = createHotPathCache({ name: 'review-context', ttlMs: 1_000, maxEntries: 2, nowFn: () => now });
+  assert.equal(await cache.get('a', async () => 'a'), 'a');
+  now += 1;
+  assert.equal(await cache.get('b', async () => 'b'), 'b');
+  now += 1;
+  assert.equal(await cache.get('c', async () => 'c'), 'c');
+  assert.equal(cache.size(), 2);
+  now += 1;
+  assert.equal(await cache.get('a', async () => 'a-reloaded'), 'a-reloaded');
+});
+
 test('TTL expiry rebuilds a stale bundle', async () => {
   let now = 0;
   let loads = 0;

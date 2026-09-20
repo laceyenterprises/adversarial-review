@@ -1,8 +1,14 @@
 const DEFAULT_TTL_MS = 60_000;
+const DEFAULT_MAX_ENTRIES = 512;
 
 function positiveTtl(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : DEFAULT_TTL_MS;
+}
+
+function positiveMaxEntries(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : DEFAULT_MAX_ENTRIES;
 }
 
 function emit(emitEvent, event, detail = {}) {
@@ -20,19 +26,33 @@ export function reviewContextCacheKey({ repo, prNumber, headSha, baseSha, review
 export function createHotPathCache({
   name,
   ttlMs = DEFAULT_TTL_MS,
+  maxEntries = DEFAULT_MAX_ENTRIES,
   nowFn = Date.now,
   emitEvent = null,
 } = {}) {
   const cacheName = String(name || 'hot-path');
   const ttl = positiveTtl(ttlMs);
+  const limit = positiveMaxEntries(maxEntries);
   const entries = new Map();
+
+  function prune(now = nowFn()) {
+    for (const [entryKey, entry] of entries) {
+      if (now < entry.expiresAt) break;
+      entries.delete(entryKey);
+    }
+    while (entries.size > limit) {
+      const oldestKey = entries.keys().next().value;
+      if (oldestKey === undefined) break;
+      entries.delete(oldestKey);
+    }
+  }
 
   async function get(key, load, detail = {}) {
     const normalizedKey = String(key);
     const now = nowFn();
     const cached = entries.get(normalizedKey);
     if (cached && now < cached.expiresAt) {
-      emit(emitEvent, 'cache_hit', { cache: cacheName, key: normalizedKey, ageMs: now - cached.writtenAt, ...detail });
+      emit(emitEvent, 'cache_hit', { cache: cacheName, key: normalizedKey, ...detail, ageMs: now - cached.writtenAt, savedMs: cached.loadMs });
       return cached.value;
     }
     if (cached) {
@@ -41,11 +61,13 @@ export function createHotPathCache({
     } else {
       emit(emitEvent, 'cache_miss', { cache: cacheName, key: normalizedKey, ...detail });
     }
+    const loadStartedAt = nowFn();
     const value = await load();
     // Failed/unknown probes must remain live. Only cache successful values.
     if (value !== undefined && value !== null && value?.available !== false && value?.cacheable !== false) {
       const writtenAt = nowFn();
-      entries.set(normalizedKey, { value, writtenAt, expiresAt: writtenAt + ttl });
+      entries.set(normalizedKey, { value, writtenAt, expiresAt: writtenAt + ttl, loadMs: Math.max(0, writtenAt - loadStartedAt) });
+      prune(writtenAt);
     }
     return value;
   }
@@ -57,7 +79,7 @@ export function createHotPathCache({
     return removed;
   }
 
-  return Object.freeze({ get, invalidate, size: () => entries.size, ttlMs: ttl });
+  return Object.freeze({ get, invalidate, size: () => entries.size, ttlMs: ttl, maxEntries: limit });
 }
 
 export function invalidationReasonForGrounding(previous, next) {
@@ -74,4 +96,4 @@ export function invalidationReasonForGrounding(previous, next) {
   return null;
 }
 
-export { DEFAULT_TTL_MS };
+export { DEFAULT_MAX_ENTRIES, DEFAULT_TTL_MS };

@@ -13,6 +13,7 @@ import {
 } from './afh-reviewer-fallback.mjs';
 
 const ROUTE_CACHE_TTL_MS = 30_000;
+const ROUTE_CACHE_MAX_ENTRIES = 512;
 const routeCache = new Map();
 
 function routeCacheKey({ subject, baseRoute, rootDir, repoPath, prNumber, currentRow, headSha, afhGrounding, env, cascadeState }) {
@@ -39,6 +40,18 @@ export function invalidateReviewerRouteCache(reason = 'operator-resume', logger 
   routeCache.clear();
   logger?.info?.(`[watcher] cache-event ${JSON.stringify({ event: 'cache_invalidated', cache: 'reviewer-route', reason, removed })}`);
   return removed;
+}
+
+function pruneReviewerRouteCache(now = Date.now()) {
+  for (const [key, entry] of routeCache) {
+    if (now < entry.expiresAt) continue;
+    routeCache.delete(key);
+  }
+  while (routeCache.size > ROUTE_CACHE_MAX_ENTRIES) {
+    const oldestKey = routeCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    routeCache.delete(oldestKey);
+  }
 }
 
 // Quota-exhausted fallback backoff, replicated verbatim from watcher.mjs (its
@@ -426,6 +439,7 @@ export function selectReviewerRouteForAttempt({
   }
   const remember = (route) => {
     routeCache.set(cacheKey, { route, expiresAt: Date.now() + ROUTE_CACHE_TTL_MS });
+    pruneReviewerRouteCache();
     return route;
   };
   const builderClass = subject?.builderClass || baseRoute.builderClass || null;
@@ -526,6 +540,11 @@ export function selectReviewerRouteForAttempt({
     },
   });
 }
+
+export const __test__ = Object.freeze({
+  routeCacheSize: () => routeCache.size,
+  routeCacheMaxEntries: ROUTE_CACHE_MAX_ENTRIES,
+});
 
 export function resolveStaleReviewerReconcilePerPoll(env = process.env) {
   const raw = env.ADVERSARIAL_STALE_REVIEWER_RECONCILE_PER_POLL;

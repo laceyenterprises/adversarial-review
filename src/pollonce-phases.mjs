@@ -1475,7 +1475,7 @@ export async function processReviewSubject(entry, ctx) {
           );
           const groundingInvalidation = invalidationReasonForGrounding(previousAfhGrounding, afhGrounding);
           if (groundingInvalidation) invalidateReviewerRouteCache(groundingInvalidation);
-          if (afhGrounding?.available) previousAfhGrounding = afhGrounding;
+          previousAfhGrounding = afhGrounding;
         } catch (err) {
           afhGrounding = null;
           console.warn(
@@ -1499,7 +1499,7 @@ export async function processReviewSubject(entry, ctx) {
             cache: 'reviewer-route',
             repo: repoPath,
             prNumber,
-            headSha: subject.headSha || subject.ref.revisionRef || null,
+            headSha: subject.headSha || subject.ref?.revisionRef || null,
             fromReviewerModel: afhSelection.decision.fromReviewerModel,
             toReviewerModel: afhSelection.decision.toReviewerModel,
             reason: afhSelection.decision.reason,
@@ -1522,7 +1522,7 @@ export async function processReviewSubject(entry, ctx) {
         repoPath,
         prNumber,
         currentRow: existing,
-        headSha: subject.headSha || subject.ref.revisionRef || null,
+        headSha: subject.headSha || subject.ref?.revisionRef || null,
         afhGrounding,
       });
 

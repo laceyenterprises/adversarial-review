@@ -5,11 +5,15 @@ import { loginsMatch } from './review-body-capture.mjs';
 function postedReviewForRow(row, reviews) {
   const aliases = reviewerBotLoginAliases(row.reviewer);
   const startedAt = Date.parse(row.reviewer_started_at || row.last_attempted_at || '');
+  const headSha = String(row.reviewer_head_sha || '');
   return reviews
     .filter((review) => aliases.some((alias) => loginsMatch(review?.user?.login, alias)))
     .filter((review) => {
       const submittedAt = Date.parse(review?.submitted_at || '');
-      return Number.isFinite(submittedAt) && (!Number.isFinite(startedAt) || submittedAt >= startedAt);
+      const commitId = String(review?.commit_id || '');
+      return Number.isFinite(submittedAt)
+        && (!Number.isFinite(startedAt) || submittedAt >= startedAt)
+        && (!headSha || !commitId || commitId === headSha);
     })
     .sort((a, b) => Date.parse(b.submitted_at) - Date.parse(a.submitted_at))[0] || null;
 }
@@ -23,17 +27,19 @@ function reviewVerdict(state) {
   }[String(state || '').toUpperCase()] || null;
 }
 
-export async function reconcilePostedFailedOrphans({ db, listReviews, apply = false } = {}) {
+export async function reconcilePostedFailedOrphans({ db, listReviews, apply = false, limit = 20 } = {}) {
+  const scanLimit = Number.isInteger(Number(limit)) && Number(limit) > 0 ? Number(limit) : 20;
   const depthBefore = Number(db.prepare(SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW).get()?.n || 0);
   const rows = db.prepare(
-    `SELECT repo, pr_number, reviewer, review_status, last_attempted_at,
+    `SELECT repo, pr_number, reviewer, review_status, review_attempts, last_attempted_at,
             reviewer_started_at, reviewer_session_uuid, reviewer_head_sha,
             infra_auto_recover_attempts
        FROM reviewed_prs
-      WHERE review_status = 'failed-orphan'
-        AND reviewer_started_at IS NOT NULL
-      ORDER BY failed_at, id`
-  ).all();
+      WHERE pr_state = 'open'
+        AND review_status = 'failed-orphan'
+      ORDER BY failed_at, id
+      LIMIT ?`
+  ).all(scanLimit);
   const markPosted = db.prepare(
     `UPDATE reviewed_prs
         SET review_status = 'posted', posted_at = ?, failed_at = NULL,
@@ -46,7 +52,10 @@ export async function reconcilePostedFailedOrphans({ db, listReviews, apply = fa
     `SELECT pass_id FROM reviewer_passes
       WHERE repo = ? AND pr_number = ?
         AND (? IS NULL OR head_sha IS NULL OR head_sha = ?)
-      ORDER BY started_at DESC, pass_id DESC LIMIT 1`
+        AND pass_kind IN ('first-pass', 'rereview')
+        AND status IN ('running', 'abandoned')
+      ORDER BY CASE WHEN attempt_number = ? THEN 0 ELSE 1 END,
+               started_at DESC, pass_id DESC LIMIT 1`
   );
   const markPassPosted = db.prepare(
     `UPDATE reviewer_passes
@@ -89,7 +98,8 @@ export async function reconcilePostedFailedOrphans({ db, listReviews, apply = fa
             row.repo,
             row.pr_number,
             row.reviewer_head_sha || null,
-            row.reviewer_head_sha || null
+            row.reviewer_head_sha || null,
+            row.review_attempts
           );
           if (pass && reviewId && !existingArtifact) {
             markPassPosted.run(

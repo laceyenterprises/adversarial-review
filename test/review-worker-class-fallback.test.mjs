@@ -402,7 +402,7 @@ test('does not let an expired in-flight status read clobber a newer cache result
   assert.equal(thirdResult.workerClass, 'codex');
 });
 
-test('does not retain an unavailable in-flight fleet quota status result in cache', async () => {
+test('shares an unavailable fleet quota status result across nearby subjects', async () => {
   const cache = new Map();
   let calls = 0;
   const errors = [];
@@ -429,9 +429,39 @@ test('does not retain an unavailable in-flight fleet quota status result in cach
   ]);
   await resolveReviewerWorkerClassWithFallback(args);
 
+  assert.equal(calls, 1);
+  assert.equal(cache.size, 1);
+  assert.equal(errors.length, 1);
+});
+
+test('refreshes an unavailable fleet quota status result after its TTL', async () => {
+  const cache = new Map();
+  let calls = 0;
+  let now = 1_000;
+  const execFileImpl = async () => {
+    calls += 1;
+    throw new Error('temporary quota status failure');
+  };
+  const args = {
+    authorClass: 'gemini',
+    primary: 'codex',
+    fallbackWorkerClasses: ['claude-code'],
+    execFileImpl,
+    fleetQuotaStatusCache: cache,
+    fleetQuotaStatusCacheTtlMs: 10_000,
+    retryDelaysMs: [],
+    logger: { error: () => {} },
+    nowMs: () => now,
+  };
+
+  await resolveReviewerWorkerClassWithFallback(args);
+  now += 9_999;
+  await resolveReviewerWorkerClassWithFallback(args);
+  assert.equal(calls, 1);
+
+  now += 2;
+  await resolveReviewerWorkerClassWithFallback(args);
   assert.equal(calls, 2);
-  assert.equal(cache.size, 0);
-  assert.equal(errors.length, 2);
 });
 
 test('does not read fleet quota status when no configured fallback is a viable alternate', async () => {

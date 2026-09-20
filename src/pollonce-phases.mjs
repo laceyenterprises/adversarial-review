@@ -1517,6 +1517,12 @@ export async function processReviewSubject(entry, ctx) {
         fallbackWorkerClasses: reviewWorkerClassFallback(process.env),
         depthPressure: firstPassSpilloverController?.depthPressure?.() ?? null,
         execFileImpl: execFileAsync,
+        ...(reviewerMemoryReservationState?.fleetQuotaStatusCache
+          ? {
+              fleetQuotaStatusCache: reviewerMemoryReservationState.fleetQuotaStatusCache,
+              fleetQuotaStatusCacheTtlMs: Number.MAX_SAFE_INTEGER,
+            }
+          : {}),
       });
 
       if (rwfDecision.fellBack) {

@@ -402,6 +402,67 @@ test('label reconciler does not hold candidates suppressed by the census', async
   }
 });
 
+test('label reconciler releases inactive family hold once and persists label cache', async () => {
+  const db = memoryDb();
+  try {
+    const first = reconcileDuplicateFamiliesForRepo(db, [
+      subject(341, { labels: [] }),
+      subject(342, { labels: [] }),
+    ], {
+      repoPath: REPO,
+      now: '2026-09-11T00:00:00.000Z',
+      readBuildCompletionSignalForPrImpl: provenanceReader({
+        341: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+        342: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+      }),
+    });
+    assert.equal(first.familyIds.length, 1);
+
+    const addCalls = [];
+    const removeCalls = [];
+    const octokit = {
+      rest: {
+        issues: {
+          addLabels: async (payload) => addCalls.push(payload),
+          removeLabel: async (payload) => removeCalls.push(payload),
+        },
+      },
+    };
+
+    await reconcileDuplicateFamilyLabels({ db, octokit, repoPath: REPO, logger: { error() {} } });
+    assert.equal(addCalls.length, 2);
+    assert.deepEqual(addCalls.map((entry) => entry.labels), [
+      ['duplicate-family', 'duplicate-family-hold'],
+      ['duplicate-family', 'duplicate-family-hold'],
+    ]);
+
+    reconcileDuplicateFamiliesForRepo(db, [
+      subject(341, { labels: ['duplicate-family', 'duplicate-family-hold'] }),
+      subject(342, { state: 'MERGED', labels: ['duplicate-family', 'duplicate-family-hold'] }),
+    ], {
+      repoPath: REPO,
+      now: '2026-09-11T00:01:00.000Z',
+      readBuildCompletionSignalForPrImpl: provenanceReader({
+        341: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+        342: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+      }),
+    });
+
+    await reconcileDuplicateFamilyLabels({ db, octokit, repoPath: REPO, logger: { error() {} } });
+    assert.deepEqual(removeCalls.map((entry) => entry.issue_number), [341]);
+
+    await reconcileDuplicateFamilyLabels({ db, octokit, repoPath: REPO, logger: { error() {} } });
+    assert.deepEqual(removeCalls.map((entry) => entry.issue_number), [341]);
+
+    const labels = JSON.parse(db.prepare(
+      'SELECT labels_json FROM duplicate_family_candidates WHERE repo = ? AND pr_number = ?'
+    ).get(REPO, 341).labels_json);
+    assert.deepEqual(labels, ['duplicate-family']);
+  } finally {
+    db.close();
+  }
+});
+
 test('idempotent re-census does not duplicate family, candidates, or transitions', () => {
   const db = memoryDb();
   const entries = [

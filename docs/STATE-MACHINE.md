@@ -479,16 +479,17 @@ down exactly one of two paths:
 | **Daemon inline merge (rare)** | Final review is fully clean — zero blocking AND zero non-blocking findings, both classifications known — plus green required checks, a MERGEABLE PR, and a live head matching the reviewed head | The watcher daemon clicks merge inline through a bounded `gh pr merge --match-head-commit` subprocess under the shared merge lease (`src/ama/daemon-merge.mjs`). No agent is spawned. Dispositions: `merged`, `failed-closed` (no hammer spawned from this path), `deferred` (lease contention; retry next tick), `not-taken` (falls through to the hammer route). |
 
 Hard-stop labels short-circuit both closure paths before the MSM decision. When
-`merge-agent-skip`, `do-not-merge`, `no-merge-hold`,
-`duplicate-family-hold`, or `merge-agent-stuck` produces the
-`operator-skip-label` gate reason, the
+`merge-agent-skip`, `do-not-merge`, `no-merge-hold`, or
+`merge-agent-stuck` produces the `operator-skip-label` gate reason, the
 posted-review handler returns `skip-operator-skip` and keeps ownership of an
 open PR so no daemon merge, hammer, or merge-agent dispatch can close it. If
 the same held PR is already terminal (`merged` or `closed`), the handler clears
 the no-progress lane and drops ownership instead of retaining a permanent row.
 `duplicate-family-hold` is watcher-owned: it is projected from duplicate-family
-census rows and clears on the next census/reconciliation tick after the family
-deactivates or the candidate is suppressed/released.
+census rows, blocks the autonomous merge lanes without making the required
+adversarial-gate status fail by itself, and clears on the next
+census/reconciliation tick after the family deactivates or the candidate is
+suppressed/released.
 
 Key control points:
 

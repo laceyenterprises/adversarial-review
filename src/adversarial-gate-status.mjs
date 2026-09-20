@@ -13,7 +13,6 @@ import {
   normalizeEffectiveReviewVerdict,
   normalizeFollowUpJobStatus,
   OPERATOR_APPROVED_LABEL,
-  OPERATOR_SKIP_LABELS,
 } from './follow-up-merge-agent.mjs';
 import {
   ensureReviewStateSchema,
@@ -39,6 +38,12 @@ import {
 import { isFleetSelfRepairTrailerOnlyRereviewReason } from './fleet-self-repair-rereview.mjs';
 
 const execFileAsync = promisify(execFile);
+const ADVERSARIAL_GATE_OPERATOR_SKIP_LABELS = new Set([
+  'merge-agent-skip',
+  'merge-agent-stuck',
+  'do-not-merge',
+  'no-merge-hold',
+]);
 
 const ADVERSARIAL_GATE_RECORD_DIR = ['data', 'adversarial-gate-status'];
 const DESCRIPTION_MAX_CHARS = 140;
@@ -532,7 +537,7 @@ function pickAdversarialGateStatus({
   const decide = (state, description, reason, extra = null) =>
     makeDecision(state, description, reason, context, extra);
 
-  if (normalizeLabelNames(labels).some((label) => OPERATOR_SKIP_LABELS.has(label))) {
+  if (normalizeLabelNames(labels).some((label) => ADVERSARIAL_GATE_OPERATOR_SKIP_LABELS.has(label))) {
     return decide(
       'failure',
       'Explicit operator skip label blocks adversarial gate.',

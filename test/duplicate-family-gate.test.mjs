@@ -15,29 +15,10 @@ const baseFamily = {
   operator_override_json: null,
 };
 
-test('candidate-scoped ignored override releases only its exact current head', () => {
-  const family = {
-    ...baseFamily,
-    operator_override_json: JSON.stringify({
-      disposition: 'ignored-not-duplicate', candidatePrNumber: 41, candidateHeadSha: 'head-41',
-    }),
-  };
-  assert.equal(evaluateDuplicateFamilyCandidate(family, { prNumber: 41, headSha: 'head-41' }).held, false);
-  assert.equal(evaluateDuplicateFamilyCandidate(family, { prNumber: 42, headSha: 'head-42' }).held, true);
-  assert.equal(evaluateDuplicateFamilyCandidate(family, { prNumber: 41, headSha: 'moved' }).held, true);
-});
-
-test('selected survivor releases only after report path exists; losers and abandoned families stay held', () => {
-  const selected = {
-    ...baseFamily,
-    selected_survivor_pr_number: 41,
-    operator_override_json: JSON.stringify({ disposition: 'survivor-selected' }),
-  };
-  assert.equal(evaluateDuplicateFamilyCandidate(selected, { prNumber: 41, headSha: 'a' }).held, true);
-  selected.report_path = 'docs/research/duplicate.md';
-  assert.equal(evaluateDuplicateFamilyCandidate(selected, { prNumber: 41, headSha: 'a' }).held, false);
-  assert.equal(evaluateDuplicateFamilyCandidate(selected, { prNumber: 42, headSha: 'b' }).held, true);
-  assert.equal(evaluateDuplicateFamilyCandidate({ ...selected, status: 'abandoned' }, { prNumber: 41, headSha: 'a' }).held, true);
+test('only inactive families release the duplicate-family hold', () => {
+  assert.equal(evaluateDuplicateFamilyCandidate(baseFamily, { prNumber: 41, headSha: 'a' }).held, true);
+  assert.equal(evaluateDuplicateFamilyCandidate({ ...baseFamily, status: 'inactive' }, { prNumber: 41, headSha: 'a' }).held, false);
+  assert.equal(evaluateDuplicateFamilyCandidate({ ...baseFamily, status: 'resolved' }, { prNumber: 41, headSha: 'a' }).held, true);
 });
 
 test('shared daemon/hammer predicate emits duplicate-family-unresolved', () => {

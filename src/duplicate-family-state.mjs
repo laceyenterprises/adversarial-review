@@ -43,6 +43,18 @@ function labelNames(labels) {
     .filter(Boolean);
 }
 
+function lowerLabelSet(labels) {
+  return new Set(labelNames(labels).map((name) => name.toLowerCase()));
+}
+
+function labelsFromLowerSet(labels) {
+  return [...labels].sort();
+}
+
+function isNotFoundError(err) {
+  return Number(err?.status || err?.response?.status) === 404;
+}
+
 function extractTicket(value) {
   const match = String(value || '').match(TICKET_RE);
   return match ? match[1].toUpperCase() : null;
@@ -485,6 +497,61 @@ function observedSubjectCandidateKeys(subjectEntries, repoPath) {
   return keys;
 }
 
+function subjectLabelSuppressions(subject) {
+  const labels = labelNames(subject?.labels);
+  const suppressions = [];
+  if (labels.includes(DUPLICATE_FAMILY_SUPPRESSION_LABEL)) {
+    suppressions.push({ kind: 'current-head-exclusion-label', headSha: normalizeText(subject?.headSha || subject?.headRefOid) });
+  }
+  if (labels.some((label) => STACK_LABEL_RE.test(label))) {
+    suppressions.push({ kind: 'stack-or-follow-up-label', headSha: normalizeText(subject?.headSha || subject?.headRefOid) });
+  }
+  return suppressions;
+}
+
+function refreshObservedDuplicateCandidateRows(db, subjectEntries, repoPath, now = new Date().toISOString()) {
+  if (!repoPath) return;
+  const updateObservedCandidate = db.prepare(
+    `UPDATE duplicate_family_candidates
+        SET title = ?,
+            pr_state = ?,
+            base_branch = ?,
+            head_branch = ?,
+            head_sha = ?,
+            base_sha = ?,
+            suppressions_json = ?,
+            labels_json = ?,
+            last_seen_at = ?,
+            updated_at = ?
+      WHERE repo = ?
+        AND pr_number = ?`
+  );
+  const tx = db.transaction(() => {
+    for (const entry of Array.isArray(subjectEntries) ? subjectEntries : []) {
+      const subject = entry?.subject || {};
+      const prNumber = Number(entry?.prNumber ?? subject.number ?? subject.prNumber);
+      if (!Number.isInteger(prNumber) || prNumber <= 0) continue;
+      const repo = normalizeText(entry?.repoPath || entry?.repo || subject.repositoryWithOwner || subject.repo || repoPath);
+      if (!repo) continue;
+      updateObservedCandidate.run(
+        normalizeText(subject.title),
+        subjectPrState(subject, entry?.current),
+        normalizeText(subject.baseRefName || subject.baseBranch || 'main'),
+        normalizeText(subject.headRefName || subject.headBranch),
+        normalizeText(subject.headSha || subject.headRefOid),
+        normalizeText(subject.baseSha || subject.baseRefOid || subject.mergeBaseSha),
+        JSON.stringify(subjectLabelSuppressions(subject)),
+        JSON.stringify(labelNames(subject.labels)),
+        now,
+        now,
+        repo,
+        prNumber,
+      );
+    }
+  });
+  tx();
+}
+
 function familyHasObservedCandidate(db, familyId, observedCandidateKeys) {
   if (!(observedCandidateKeys instanceof Set) || observedCandidateKeys.size === 0) return false;
   const rows = db.prepare(
@@ -713,6 +780,7 @@ export function upsertDuplicateFamilies(db, families, {
 export function reconcileDuplicateFamiliesForRepo(db, subjectEntries, options = {}) {
   ensureDuplicateFamilySchema(db);
   const repoPath = options.repoPath;
+  refreshObservedDuplicateCandidateRows(db, subjectEntries, repoPath, options.now);
   const observedCandidateKeys = observedSubjectCandidateKeys(subjectEntries, repoPath);
   const censusEntries = mergePersistedDuplicateCandidates(db, subjectEntries, repoPath);
   const families = detectDuplicateFamiliesForRepo(censusEntries, options);
@@ -869,6 +937,13 @@ export async function reconcileDuplicateFamilyLabels({ db, octokit, repoPath, lo
       WHERE duplicate_family_candidates.repo = ?
         AND lower(duplicate_family_candidates.pr_state) = 'open'`
   ).all(repoPath);
+  const updateCandidateLabels = db.prepare(
+    `UPDATE duplicate_family_candidates
+        SET labels_json = ?,
+            updated_at = ?
+      WHERE repo = ?
+        AND pr_number = ?`
+  );
   let changed = 0;
   for (const row of rows) {
     const gate = evaluateDuplicateFamilyCandidate(row, {
@@ -877,24 +952,48 @@ export async function reconcileDuplicateFamilyLabels({ db, octokit, repoPath, lo
     });
     const suppressed = parseMaybeJson(row.suppressions_json, []).length > 0;
     const held = gate.held && !suppressed;
-    const current = new Set(labelNames(parseMaybeJson(row.labels_json, [])).map((name) => name.toLowerCase()));
+    const current = lowerLabelSet(parseMaybeJson(row.labels_json, []));
+    const next = new Set(current);
     const wanted = [DUPLICATE_FAMILY_LABEL, ...(held ? [DUPLICATE_FAMILY_HOLD_LABEL] : [])];
     const additions = wanted.filter((name) => !current.has(name));
+    const removeHold = !held && (
+      current.has(DUPLICATE_FAMILY_HOLD_LABEL) ||
+      !current.has(DUPLICATE_FAMILY_LABEL)
+    );
+    let persist = false;
     try {
-      if (additions.length > 0) {
-        await octokit.rest.issues.addLabels({ owner, repo, issue_number: row.pr_number, labels: additions });
-        changed += additions.length;
-      }
-      if (!held && current.has(DUPLICATE_FAMILY_HOLD_LABEL)) {
+      if (removeHold) {
         await octokit.rest.issues.removeLabel({
           owner, repo, issue_number: row.pr_number, name: DUPLICATE_FAMILY_HOLD_LABEL,
         });
         changed += 1;
+        next.delete(DUPLICATE_FAMILY_HOLD_LABEL);
+        persist = true;
+      }
+    } catch (err) {
+      if (isNotFoundError(err)) {
+        next.delete(DUPLICATE_FAMILY_HOLD_LABEL);
+        persist = true;
+      } else {
+        logger?.error?.(
+          `[watcher] duplicate-family hold removal failed for ${repoPath}#${row.pr_number}: ${err?.message || err}`,
+        );
+      }
+    }
+    try {
+      if (additions.length > 0) {
+        await octokit.rest.issues.addLabels({ owner, repo, issue_number: row.pr_number, labels: additions });
+        changed += additions.length;
+        for (const label of additions) next.add(label);
+        persist = true;
       }
     } catch (err) {
       logger?.error?.(
-        `[watcher] duplicate-family label reconciliation failed for ${repoPath}#${row.pr_number}: ${err?.message || err}`,
+        `[watcher] duplicate-family label add failed for ${repoPath}#${row.pr_number}: ${err?.message || err}`,
       );
+    }
+    if (persist) {
+      updateCandidateLabels.run(JSON.stringify(labelsFromLowerSet(next)), new Date().toISOString(), repoPath, row.pr_number);
     }
   }
   return { inspected: rows.length, changed };

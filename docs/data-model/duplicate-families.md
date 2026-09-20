@@ -37,7 +37,7 @@ One row per detected work-identity family.
 | `strongest_signal` | First common strong signal kind shared by active candidates. |
 | `selected_survivor_pr_number` | Optional operator-selected PR number to keep as the survivor. |
 | `report_path` | Optional path to an operator-facing duplicate report artifact. |
-| `operator_override_json` | Operator override/disposition payload. A candidate head move marks matching overrides stale once for the observed head. |
+| `operator_override_json` | Reserved operator override/disposition payload. A candidate head move marks matching overrides stale once for the observed head when a payload is present, but no shipped writer currently makes this a hold-release path. |
 | `transition_log_json` | JSON array of status transitions such as initial detection, reactivation, and deactivation. |
 | `candidate_count` | Count of live open unsuppressed candidates in the current advisory family. |
 | `first_detected_at` | First time the family was recorded. |
@@ -105,11 +105,12 @@ family advisory active. Existing databases created with the older
   active unresolved unsuppressed candidates receive `duplicate-family` and
   `duplicate-family-hold`; suppressed candidates receive only
   `duplicate-family`; inactive families or released candidates have
-  `duplicate-family-hold` removed. The hold releases after the census no longer
-  sees two live unsuppressed candidates, after an operator suppression label is
-  observed for that candidate, or after an out-of-band operator override records
-  `ignored-not-duplicate` or a survivor-selected disposition for the current
-  candidate head.
+  `duplicate-family-hold` removed. Removal is attempted from the evaluated
+  family state rather than from the cached `labels_json`, and successful label
+  writes update `labels_json` so later ticks do not repeat the same GitHub
+  mutation. The hold releases after the census no longer sees two live
+  unsuppressed candidates or after an operator suppression label is observed for
+  that candidate.
 - Operator overrides are not deleted automatically. If the override references
   a candidate whose head moved, the override is marked stale for that observed
   head without regenerating the stale timestamp on later identical polls.

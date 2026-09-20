@@ -29,6 +29,7 @@ function eligibleState(overrides = {}) {
     candidateHead: HEAD,
     validatedHead: HEAD,
     leaseHeld: true,
+    labels: [],
     ...overrides,
   };
 }
@@ -172,7 +173,7 @@ test('reasons are emitted in the stable documented order', () => {
 test('empty/no state → every reason, fail closed', () => {
   const result = evaluateMergeEligibility();
   assert.equal(result.eligible, false);
-  assert.deepEqual(result.reasons, MERGE_ELIGIBILITY_REASONS.filter((reason) => reason !== 'duplicate-family-unresolved'));
+  assert.deepEqual(result.reasons, MERGE_ELIGIBILITY_REASONS);
 });
 
 test('requiredChecks accepts a pre-derived boolean', () => {

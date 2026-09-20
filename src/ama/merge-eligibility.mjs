@@ -254,7 +254,9 @@ export function evaluateMergeEligibility(state = {}) {
   if (!branchProtectionRequiresGate(state)) reasons.push('branch-protection-missing-gate');
   if (!headMatches(state)) reasons.push('stale-head');
   if (state?.leaseHeld !== true) reasons.push('lease-not-held');
-  if (labelsContainDuplicateFamilyHold(state?.labels)) reasons.push(DUPLICATE_FAMILY_UNRESOLVED_REASON);
+  if (!Array.isArray(state?.labels) || labelsContainDuplicateFamilyHold(state.labels)) {
+    reasons.push(DUPLICATE_FAMILY_UNRESOLVED_REASON);
+  }
 
   return { eligible: reasons.length === 0, reasons };
 }

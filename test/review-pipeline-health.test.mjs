@@ -24,7 +24,9 @@ import {
   REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS,
   REVIEW_PIPELINE_HEALTH_METRICS,
   collectReviewPipelineHealth,
+  evaluateReviewPipelineFindings,
   renderReviewPipelinePrometheus,
+  summarizeFirstPassCiOrphans,
   summarizeRoundBudgetAnomalies,
   resolveReviewPipelineHealthConfig,
   stoppedJobIsCiRegressionStopped,
@@ -70,6 +72,215 @@ function launchctlPrintError({ message = 'launchctl print failed', stdout = '', 
   error.stderr = stderr;
   return error;
 }
+
+test('first-pass CI orphan is distinct and suppressed by a live branch worker', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const queue = {
+    firstPassPrs: [{ repo: REPO, prNumber: 6903, reviewAttempts: 0, reviewerFailed: false }],
+  };
+  const prPayload = JSON.stringify({
+    state: 'OPEN',
+    headRefName: 'claude-code/wsb-build-pack',
+    headRefOid: 'abc123',
+  });
+  const execFileSyncImpl = (command, args) => {
+    assert.equal(command, 'gh');
+    assert.ok(!args.includes('--required'));
+    return args.includes('checks')
+      ? JSON.stringify([
+          { name: 'fast-python-guards', state: 'FAILURE', bucket: 'fail' },
+          { name: 'repo-guards', state: 'CANCELLED', bucket: 'cancel' },
+        ])
+      : prPayload;
+  };
+
+  const orphaned = summarizeFirstPassCiOrphans(queue, { rootDir, hqRoot, execFileSyncImpl });
+  assert.equal(orphaned.count, 1, JSON.stringify(orphaned));
+  assert.deepEqual(orphaned.prs[0].failedChecks, ['fast-python-guards', 'repo-guards']);
+
+  const workerDir = path.join(hqRoot, 'workers', 'repair-1');
+  mkdirSync(workerDir, { recursive: true });
+  writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
+    repo: REPO,
+    branch: 'claude-code/wsb-build-pack',
+    launchRequestId: 'lrq-repair',
+  }));
+  const withLiveWorker = summarizeFirstPassCiOrphans(queue, {
+    rootDir,
+    hqRoot,
+    execFileSyncImpl: (command, args) => {
+      if (command === 'hq') return JSON.stringify({ status: 'running' });
+      assert.ok(!args.includes('--required'));
+      if (args.includes('checks')) {
+        return JSON.stringify([{ name: 'fast-python-guards', state: 'FAILURE', bucket: 'fail' }]);
+      }
+      return prPayload;
+    },
+  });
+  assert.equal(withLiveWorker.count, 0);
+});
+
+test('first-pass CI orphan is additive to reviewer queue-starvation attribution', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 6903,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T17:00:00.000Z',
+  });
+  const before = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    config: { queueStarvationMaxAgeMs: 10 * 60 * 1000 },
+  });
+  assert.ok(findingCodes(before).includes('review:queue_starvation'));
+
+  const orphan = {
+    repo: REPO,
+    prNumber: 6903,
+    headRefName: 'claude-code/wsb-build-pack',
+    headSha: 'abc123',
+    failedChecks: ['fast-python-guards'],
+  };
+  const after = {
+    ...before,
+    firstPassCiOrphans: { count: 1, prs: [orphan], errors: [] },
+  };
+  after.findings = evaluateReviewPipelineFindings(after, { observedAt: before.observedAt });
+  assert.ok(findingCodes(after).includes('review:first_pass_ci_orphan'));
+  assert.ok(findingCodes(after).includes('review:queue_starvation'));
+});
+
+test('first-pass CI orphan retries transient GitHub probe failures', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const queue = {
+    firstPassPrs: [{ repo: REPO, prNumber: 6903, reviewAttempts: 0, reviewerFailed: false }],
+  };
+  let viewAttempts = 0;
+  const slept = [];
+  const transient = new Error('net/http: TLS handshake timeout');
+  transient.stderr = 'net/http: TLS handshake timeout';
+  const execFileSyncImpl = (command, args) => {
+    assert.equal(command, 'gh');
+    assert.ok(!args.includes('--required'));
+    if (args.includes('view')) {
+      viewAttempts += 1;
+      if (viewAttempts === 1) throw transient;
+      return JSON.stringify({
+        state: 'OPEN',
+        headRefName: 'claude-code/wsb-build-pack',
+        headRefOid: 'abc123',
+      });
+    }
+    return JSON.stringify([{ name: 'fast-python-guards', state: 'FAILURE', bucket: 'fail' }]);
+  };
+
+  const orphaned = summarizeFirstPassCiOrphans(queue, {
+    rootDir,
+    hqRoot,
+    execFileSyncImpl,
+    sleepSyncImpl: (ms) => slept.push(ms),
+  });
+
+  assert.equal(viewAttempts, 2);
+  assert.deepEqual(slept, [100]);
+  assert.equal(orphaned.count, 1);
+  assert.equal(orphaned.collected, true);
+});
+
+test('first-pass CI orphan does not suppress on terminal worker status', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const queue = {
+    firstPassPrs: [{ repo: REPO, prNumber: 6903, reviewAttempts: 0, reviewerFailed: false }],
+  };
+  const workerDir = path.join(hqRoot, 'workers', 'repair-1');
+  mkdirSync(path.join(hqRoot, '.hq'), { recursive: true });
+  mkdirSync(workerDir, { recursive: true });
+  writeFileSync(path.join(hqRoot, '.hq', 'config.json'), JSON.stringify({ ownerUser: 'airlock' }));
+  writeFileSync(path.join(workerDir, 'launch-provenance.json'), JSON.stringify({
+    repo: REPO,
+    headRefName: 'claude-code/wsb-build-pack',
+    launch_request_id: 'lrq-repair',
+  }));
+  const execFileSyncImpl = (command, args) => {
+    if (command === 'gh') {
+      assert.ok(!args.includes('--required'));
+      return args.includes('checks')
+        ? JSON.stringify([{ name: 'fast-python-guards', state: 'FAILURE', bucket: 'fail' }])
+        : JSON.stringify({
+            state: 'OPEN',
+            headRefName: 'claude-code/wsb-build-pack',
+            headRefOid: 'abc123',
+          });
+    }
+    assert.equal(command, 'hq');
+    assert.deepEqual(args, ['dispatch', 'status', 'lrq-repair', '--json', '--as-owner', 'airlock']);
+    return JSON.stringify({ status: 'succeeded' });
+  };
+
+  const orphaned = summarizeFirstPassCiOrphans(queue, { rootDir, hqRoot, execFileSyncImpl });
+  assert.equal(orphaned.count, 1, JSON.stringify(orphaned));
+  assert.deepEqual(orphaned.prs[0].failedChecks, ['fast-python-guards']);
+  assert.equal(orphaned.errors.length, 0);
+  assert.equal(orphaned.collected, true);
+});
+
+test('first-pass CI orphan marks worker probe timeout as a blind snapshot', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const queue = {
+    firstPassPrs: [{ repo: REPO, prNumber: 6903, reviewAttempts: 0, reviewerFailed: false }],
+  };
+  const workerDir = path.join(hqRoot, 'workers', 'repair-1');
+  mkdirSync(path.join(hqRoot, '.hq'), { recursive: true });
+  mkdirSync(workerDir, { recursive: true });
+  writeFileSync(path.join(hqRoot, '.hq', 'config.json'), JSON.stringify({ ownerUser: 'airlock' }));
+  writeFileSync(path.join(workerDir, 'launch-provenance.json'), JSON.stringify({
+    repo: REPO,
+    headRefName: 'claude-code/wsb-build-pack',
+    launch_request_id: 'lrq-repair',
+  }));
+  const timeout = new Error('spawnSync hq ETIMEDOUT');
+  timeout.code = 'ETIMEDOUT';
+  const execFileSyncImpl = (command, args) => {
+    if (command === 'gh') {
+      assert.ok(!args.includes('--required'));
+      return args.includes('checks')
+        ? JSON.stringify([{ name: 'fast-python-guards', state: 'FAILURE', bucket: 'fail' }])
+        : JSON.stringify({
+            state: 'OPEN',
+            headRefName: 'claude-code/wsb-build-pack',
+            headRefOid: 'abc123',
+          });
+    }
+    assert.equal(command, 'hq');
+    throw timeout;
+  };
+
+  const orphaned = summarizeFirstPassCiOrphans(queue, { rootDir, hqRoot, execFileSyncImpl });
+  assert.equal(orphaned.count, 0);
+  assert.equal(orphaned.collected, false);
+  assert.equal(orphaned.errors.length, 1);
+
+  insertReviewRow(rootDir, {
+    prNumber: 6903,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T17:59:00.000Z',
+  });
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    config: { hostChecksEnabled: false },
+  });
+  const withBlindProbe = {
+    ...snapshot,
+    firstPassCiOrphans: orphaned,
+  };
+  assert.ok(findingCodes({ findings: evaluateReviewPipelineFindings(withBlindProbe, { observedAt: NOW }) })
+    .includes('review:first_pass_ci_orphan_probe_blind'));
+});
 
 test('pipeline Sentinel findings are diagnostics, never pages', () => {
   assert.ok(REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS.length > 0);

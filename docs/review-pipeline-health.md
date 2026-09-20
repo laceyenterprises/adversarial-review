@@ -77,6 +77,18 @@ The Grafana dashboard lives at
   job exists to requeue. The watcher backoff-gates same-head CI rechecks for
   parked rows so the finding remains observable without turning into a GitHub
   polling loop.
+- `review_pipeline_first_pass_ci_orphans`: open first-pass PR heads with a
+  failed GitHub checks bucket, no posted review verdict, and no known live
+  branch worker. The probe is capped by
+  `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_FIRST_PASS_CI_ORPHAN_MAX_PROBED_PRS`
+  (default 25) and
+  `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_FIRST_PASS_CI_ORPHAN_DEADLINE_MS`
+  (default 120s) so this ticket-tier diagnostic cannot starve the hourly
+  health tick.
+- `review_pipeline_first_pass_ci_orphans_collected`: 1 when every eligible
+  first-pass CI orphan candidate was probed successfully, 0 when GitHub checks,
+  worker-liveness probing, or the configured probe budget left the snapshot
+  blind. A blind snapshot is not equivalent to zero orphans.
 - `review_pipeline_remediation_backlog_jobs`: follow-up job counts by queue
   state.
 - `review_pipeline_remediation_oldest_pending_age_seconds`: age of the oldest
@@ -204,6 +216,8 @@ stored timestamp contract cannot silently leave this finding behind.
 | `review:review_lane_share_supermajority` | one reviewer lane carries >=75% of reviewer starts over the capacity window with at least 5 starts, observed concurrency above 1, and at least 2 distinct queued PRs in the opposite lane whose oldest row has reached the queue-starvation age threshold | ticket | the dominant lane falls below threshold, the sample floor is no longer met, observed concurrency is single-slot, or the opposite lane no longer has aged distinct queued work |
 | `review:terminal_review_failure_active` | at least one open PR has terminal reviewer failure evidence in `reviewed_prs` | ticket | the failed review row is retriggered, remediated, or the PR leaves the open population |
 | `review:queue_starvation` | oldest pending row in the watcher first-pass lane is >10m old, excluding rows with a current CI-regression-stopped follow-up deferral | ticket | no pending first-pass row exceeds the age threshold |
+| `review:first_pass_ci_orphan` | open first-pass PR head has failed GitHub checks, no review verdict, and no known live worker on that branch; first-pass review is not CI-gated, so this is additive to queue starvation rather than a replacement | ticket | checks pass, a worker owns the branch, a review verdict posts, or the PR leaves the open population |
+| `review:first_pass_ci_orphan_probe_blind` | `review_pipeline_first_pass_ci_orphans_collected == 0` because GitHub checks, worker-liveness probing, or the configured first-pass CI orphan probe budget prevented a complete snapshot | ticket | every eligible first-pass CI orphan candidate is probed successfully |
 | `review:rereview_ci_blocked` | one or more open re-reviews are parked at `review_status='ci-blocked'` because external CI failed and no remediation job exists to requeue; same-head CI probes are backoff-gated | ticket | the PR head moves, CI turns green, remediation is requeued, or the PR leaves the open population |
 | `review:rereview_deferred` | pending re-review row remains intentionally deferred behind an active, requeued, or CI-regression-stopped follow-up job for longer than the queue-starvation threshold (default 10m); CI-regression stopped deferrals are matched from persisted `remediationPlan.stop.ciRegression=true` metadata and last only while the stopped-job archive is retained (normally 24h) | ticket | the active/requeued follow-up job finishes and re-arms review, the stopped CI-regression job ages out of the 24h stopped-job archive, the row leaves pending, or the deferral falls below threshold |
 | `review:rereview_queue_wait` | oldest pending re-review row without an active, requeued, or current CI-regression-stopped follow-up deferral is older than the queue-starvation threshold (default 10m) | ticket | no pending re-review row without one of those current follow-up deferrals exceeds the age threshold |

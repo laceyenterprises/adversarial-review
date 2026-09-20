@@ -571,6 +571,7 @@ const REVIEWER_WORKER_CLASS_BY_MODEL = Object.freeze({
   codex: 'codex',
   gemini: 'gemini',
 });
+const WATCHER_FLEET_QUOTA_STATUS_CACHE_TTL_MS = 10_000;
 
 function reviewerWorkerClassForRoute(route) {
   const explicit = String(route?.reviewerWorkerClass || route?.workerClass || '').trim().toLowerCase();
@@ -603,6 +604,7 @@ export async function processReviewSubject(entry, ctx) {
     firstPassSpilloverController = null,
     postedReviewHandlers,
     reviewerMemoryReservationState,
+    reviewerTickCaches,
     reviewerMemoryAdmissionSampleForTick,
     getRoutingTierReadinessForTick,
     getHcpHealthzForTick = checkHcpHealthz,
@@ -1517,10 +1519,10 @@ export async function processReviewSubject(entry, ctx) {
         fallbackWorkerClasses: reviewWorkerClassFallback(process.env),
         depthPressure: firstPassSpilloverController?.depthPressure?.() ?? null,
         execFileImpl: execFileAsync,
-        ...(reviewerMemoryReservationState?.fleetQuotaStatusCache
+        ...(reviewerTickCaches?.fleetQuotaStatusCache
           ? {
-              fleetQuotaStatusCache: reviewerMemoryReservationState.fleetQuotaStatusCache,
-              fleetQuotaStatusCacheTtlMs: Number.MAX_SAFE_INTEGER,
+              fleetQuotaStatusCache: reviewerTickCaches.fleetQuotaStatusCache,
+              fleetQuotaStatusCacheTtlMs: WATCHER_FLEET_QUOTA_STATUS_CACHE_TTL_MS,
             }
           : {}),
       });
@@ -1559,6 +1561,11 @@ export async function processReviewSubject(entry, ctx) {
             `workerClass=${rwfDecision.workerClass} reason=${appliedFallback.reason}`
           );
         }
+      } else if (rwfDecision.reason === 'fleet-quota-status-unavailable') {
+        console.warn(
+          `[watcher] review-worker-class-fallback-fail-open repo=${repoPath} pr=${prNumber} ` +
+            `reason=${rwfDecision.reason} source=${rwfDecision.source || 'fresh'}`
+        );
       }
 
       if (route.reviewerModelFallback) {

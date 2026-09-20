@@ -239,6 +239,7 @@ async function readFleetQuotaStatusWithRetry({
   const cacheKey = fleetQuotaStatusCacheKey({ hqPath, hqCwd });
   const now = nowMs();
   const cached = cache?.get(cacheKey);
+  const cachedHadError = Boolean(cached?.error);
   if (cached && now - cached.readAtMs <= cacheTtlMs) {
     if (cached.promise) return cached.promise;
     if (typeof cached.stdout === 'string') return { stdout: cached.stdout, source: 'cache' };
@@ -258,7 +259,7 @@ async function readFleetQuotaStatusWithRetry({
     execFileImpl,
     logger,
     sleepImpl,
-    retryDelaysMs,
+    retryDelaysMs: cachedHadError ? [] : retryDelaysMs,
   });
   cache?.set(cacheKey, { promise, readAtMs: now });
   const result = await promise;
@@ -266,11 +267,11 @@ async function readFleetQuotaStatusWithRetry({
     if (result.error) {
       // WATCHSTARVE-01: an unavailable quota probe is a valid fail-open
       // routing snapshot. Keep that negative result for the same TTL as a
-      // successful read. Deleting it made every PR in the serial discovery
-      // loop repeat three 20s subprocess attempts; a 16-21 PR backlog thereby
-      // blocked poll-counter progress for 16-21 minutes and tripped the
-      // starvation watchdog. The short TTL preserves prompt recovery while
-      // bounding an outage to one probe window instead of one probe per PR.
+      // successful read. Deleting it made every PR in the serial discovery loop
+      // repeat three 20s subprocess attempts; a 16-21 PR backlog thereby
+      // blocked poll-counter progress for 16-21 minutes. Expiry still re-probes
+      // within long polls, and expired-error re-probes skip retries so a wedged
+      // quota command costs one timeout instead of the full retry window.
       cache?.set(cacheKey, {
         error: result.error,
         errorMessage: result.errorMessage,
@@ -419,7 +420,12 @@ export async function resolveReviewerWorkerClassWithFallback({
     nowMs,
   });
   if (quotaStatus.error) {
-    return { ...base, reason: 'fleet-quota-status-unavailable', error: quotaStatus.errorMessage };
+    return {
+      ...base,
+      reason: 'fleet-quota-status-unavailable',
+      error: quotaStatus.errorMessage,
+      source: quotaStatus.source || 'fresh',
+    };
   }
 
   const stdout = quotaStatus.stdout;

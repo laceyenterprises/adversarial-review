@@ -1245,7 +1245,8 @@ async function pollOnce(
   const firstPassSpilloverController = createFirstPassSpilloverController({ rootDir: ROOT, readDepth: countOpenPrsAwaitingFirstPassReview, logger: console }); // RSP-01: disarmed unless CFG arms it
   const postedReviewHandlers = [];
   const postReviewMaintenanceHandlers = [];
-  const reviewerMemoryReservationState = { reservedMb: 0, fleetQuotaStatusCache: new Map() };
+  const reviewerMemoryReservationState = { reservedMb: 0 };
+  const reviewerTickCaches = { fleetQuotaStatusCache: new Map() };
   const reviewerMemoryAdmissionSampleForTick = createReviewerMemoryAdmissionSampler({
     logger: console,
     memoryPressureConfig: reviewerMemoryPressureConfig,
@@ -1421,6 +1422,7 @@ async function pollOnce(
         firstPassSpilloverController,
         postedReviewHandlers,
         reviewerMemoryReservationState,
+        reviewerTickCaches,
         reviewerMemoryAdmissionSampleForTick,
         getRoutingTierReadinessForTick,
         getHcpHealthzForTick,

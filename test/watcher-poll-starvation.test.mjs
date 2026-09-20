@@ -745,6 +745,37 @@ test('WPS-01: processReviewSubject queues posted-review handler with the SUBJECT
   );
 });
 
+test('WATCHSTARVE-01: pollOnce threads one bounded fleet quota cache through the per-PR resolver', () => {
+  const watcherSource = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
+  const pollonceSource = readFileSync(new URL('../src/pollonce-phases.mjs', import.meta.url), 'utf8');
+
+  assert.match(
+    watcherSource,
+    /const reviewerTickCaches = \{ fleetQuotaStatusCache: new Map\(\) \};/,
+    'pollOnce owns a quota cache for the tick',
+  );
+  assert.match(
+    watcherSource,
+    /reviewerTickCaches,/,
+    'pollOnce passes the tick cache into processReviewSubject',
+  );
+  assert.match(
+    pollonceSource,
+    /reviewerTickCaches,\n\s+reviewerMemoryAdmissionSampleForTick,/,
+    'processReviewSubject receives the tick cache separately from memory reservation state',
+  );
+  assert.match(
+    pollonceSource,
+    /fleetQuotaStatusCache: reviewerTickCaches\.fleetQuotaStatusCache,/,
+    'processReviewSubject threads the tick cache into the quota resolver',
+  );
+  assert.doesNotMatch(
+    pollonceSource,
+    /fleetQuotaStatusCacheTtlMs: Number\.MAX_SAFE_INTEGER/,
+    'the watcher quota cache must remain bounded within long polls',
+  );
+});
+
 test('RVHAND-10: Claude runtime probe UID prefers configured admin_uid', async () => {
   let lookups = 0;
   const uid = await resolveClaudeRuntimeProbeUidForWatcher({

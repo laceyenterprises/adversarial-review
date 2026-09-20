@@ -149,6 +149,20 @@ recovery already returns review to `agy` on its own.
   class that cannot boot converts a slow queue into a stalled one.
 - **The quota trigger is unchanged.** A quota-grounded primary still fails over
   at any depth, and does not consume the depth budget. The two triggers compose.
+  The watcher shares one `hq fleet quota status --json` cache across the PRs in
+  a poll, but that cache is bounded to the same 10s freshness window as the
+  resolver default. A failed quota probe is retained for that window so a wedged
+  HCP/quota command does not make every PR repeat the full retry sequence; after
+  expiry, the watcher re-probes inside long polls with retries suppressed for
+  that expired-error refresh. When a PR fails open because quota status is
+  unavailable, grep for:
+
+  ```
+  review-worker-class-fallback-fail-open
+  ```
+
+  The log includes `source=error-cache` when the fail-open decision reused the
+  retained probe failure.
 - **The pool ceiling is untouched.** More concurrent `gemini` reviewers contend
   for the same provider capacity; that is the ceiling this lever escapes, not one
   to raise.

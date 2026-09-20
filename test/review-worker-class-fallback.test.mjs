@@ -464,6 +464,41 @@ test('refreshes an unavailable fleet quota status result after its TTL', async (
   assert.equal(calls, 2);
 });
 
+test('expired unavailable quota status re-probe skips retries', async () => {
+  const cache = new Map();
+  let calls = 0;
+  let now = 1_000;
+  const sleeps = [];
+  const execFileImpl = async () => {
+    calls += 1;
+    throw new Error('wedged quota status');
+  };
+  const args = {
+    authorClass: 'gemini',
+    primary: 'codex',
+    fallbackWorkerClasses: ['claude-code'],
+    execFileImpl,
+    fleetQuotaStatusCache: cache,
+    fleetQuotaStatusCacheTtlMs: 10,
+    retryDelaysMs: [],
+    logger: { error: () => {} },
+    nowMs: () => now,
+  };
+
+  await resolveReviewerWorkerClassWithFallback(args);
+  now += 11;
+  const result = await resolveReviewerWorkerClassWithFallback({
+    ...args,
+    retryDelaysMs: [1, 2],
+    sleepImpl: async (ms) => sleeps.push(ms),
+  });
+
+  assert.equal(result.reason, 'fleet-quota-status-unavailable');
+  assert.equal(result.source, 'fresh');
+  assert.equal(calls, 2);
+  assert.deepEqual(sleeps, []);
+});
+
 test('does not read fleet quota status when no configured fallback is a viable alternate', async () => {
   const result = await resolveReviewerWorkerClassWithFallback({
     authorClass: 'codex',

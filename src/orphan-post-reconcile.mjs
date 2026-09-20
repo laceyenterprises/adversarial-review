@@ -13,6 +13,7 @@ function postedReviewForRow(row, reviews) {
   const startedAt = Number.isFinite(reviewerStartedAt) ? reviewerStartedAt : lastAttemptedAt;
   if (!Number.isFinite(startedAt)) return null;
   const headSha = String(row.reviewer_head_sha || '').trim();
+  if (!headSha) return null;
   const acceptedStates = new Set(['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED']);
   return reviews
     .filter((review) => aliases.some((alias) => loginsMatch(review?.user?.login, alias)))
@@ -113,20 +114,12 @@ export async function reconcilePostedFailedOrphans({
         results.push({ repo: row.repo, prNumber: row.pr_number, action: 'unchanged', reason: 'no-posted-review' });
         continue;
       }
-      let changed = false;
       let artifactLinked = false;
       let queueDecision = null;
-      let followUpPayload = null;
+      let rowMarkedPosted = false;
       if (apply) {
         const applyResult = withSqliteBusyRetrySync(
           () => db.transaction(() => {
-            const result = markPosted.run(
-              review.submitted_at,
-              row.repo,
-              row.pr_number,
-              row.reviewer_session_uuid || ''
-            );
-            if (result.changes !== 1) return false;
             const reviewId = review.id === null || review.id === undefined ? null : String(review.id);
             const reviewIds = [
               reviewId,
@@ -148,7 +141,6 @@ export async function reconcilePostedFailedOrphans({
               row.reviewer_head_sha || null
             );
             let linkedPass = pass || null;
-            let linkedNewArtifact = false;
             if (pass && reviewId && !existingArtifact) {
               const passResult = markPassPosted.run(
                 review.submitted_at,
@@ -160,12 +152,12 @@ export async function reconcilePostedFailedOrphans({
                 reviewId
               );
               linkedPass = passResult.changes === 1 ? (passById.get(pass.pass_id) || pass) : null;
-              linkedNewArtifact = passResult.changes === 1;
             }
-            if (linkedPass) {
-              artifactLinked = Boolean((reviewId || review.node_id) && (linkedPass.gh_comment_id || existingArtifact));
-              if (linkedNewArtifact) {
-                followUpPayload = {
+            const artifactLinked = Boolean(
+              linkedPass && (reviewId || review.node_id) && (linkedPass.gh_comment_id || existingArtifact)
+            );
+            const followUpPayload = artifactLinked
+              ? {
                   rootDir,
                   row: {
                     ...linkedPass,
@@ -176,18 +168,26 @@ export async function reconcilePostedFailedOrphans({
                   },
                   reviewRow: row,
                   reviewPostedAt: review.submitted_at,
-                };
-              }
+                }
+              : null;
+            if (!artifactLinked) {
+              const result = markPosted.run(
+                review.submitted_at,
+                row.repo,
+                row.pr_number,
+                row.reviewer_session_uuid || ''
+              );
+              return { rowMarkedPosted: result.changes === 1, artifactLinked, passFound: Boolean(pass), followUpPayload };
             }
-            return { changed: true, artifactLinked, passFound: Boolean(pass) };
+            return { rowMarkedPosted: false, artifactLinked, passFound: Boolean(pass), followUpPayload };
           })(),
           { label: 'reconcile-posted-orphans-row' }
         );
-        changed = applyResult.changed === true;
+        rowMarkedPosted = applyResult.rowMarkedPosted === true;
         artifactLinked = applyResult.artifactLinked === true;
         const passFound = applyResult.passFound === true;
-        if (changed && artifactLinked && followUpPayload) {
-          const revisionRef = followUpPayload.row.head_sha || row.reviewer_head_sha || null;
+        if (artifactLinked && applyResult.followUpPayload) {
+          const revisionRef = applyResult.followUpPayload.row.head_sha || row.reviewer_head_sha || null;
           const existingFollowUp = findFollowUpJobForRevision(rootDir, {
             repo: row.repo,
             prNumber: row.pr_number,
@@ -200,10 +200,17 @@ export async function reconcilePostedFailedOrphans({
               jobPath: existingFollowUp.jobPath,
             };
           } else {
-            queueDecision = queueFollowUpForRecoveredPostedReviewImpl(followUpPayload);
+            queueDecision = queueFollowUpForRecoveredPostedReviewImpl(applyResult.followUpPayload);
           }
+          const markResult = markPosted.run(
+            review.submitted_at,
+            row.repo,
+            row.pr_number,
+            row.reviewer_session_uuid || ''
+          );
+          rowMarkedPosted = markResult.changes === 1;
         }
-        if (changed && !artifactLinked && !passFound) {
+        if (rowMarkedPosted && !artifactLinked && !passFound) {
           results.push({
             repo: row.repo,
             prNumber: row.pr_number,
@@ -218,7 +225,7 @@ export async function reconcilePostedFailedOrphans({
       results.push({
         repo: row.repo,
         prNumber: row.pr_number,
-        action: apply ? (changed ? (artifactLinked ? 'reconciled' : 'reconciled-row-only') : 'cas-miss') : 'would-reconcile',
+        action: apply ? (rowMarkedPosted ? (artifactLinked ? 'reconciled' : 'reconciled-row-only') : 'cas-miss') : 'would-reconcile',
         postedAt: review.submitted_at,
         reviewId: review.id,
         verdict: reviewVerdict(review.state),

@@ -246,22 +246,22 @@ test('apply links a reaped failed pass and removes it from first-pass depth', as
   db.close();
 });
 
-test('apply accepts a review artifact already linked to another pass for the same PR', async () => {
+test('apply queues follow-up for a review artifact already linked to the same PR before marking posted', async () => {
   const db = fixture();
   db.prepare(
     `UPDATE reviewer_passes SET gh_comment_id = ?, status = 'completed'
       WHERE repo = ? AND pr_number = ?`
   ).run(String(POSTED_REVIEW.id), 'laceyenterprises/adversarial-review', 1078);
+  const queueCalls = [];
   const result = await reconcilePostedFailedOrphans({
     db,
     apply: true,
     listReviews: async () => [POSTED_REVIEW],
-    queueFollowUpForRecoveredPostedReviewImpl: () => {
-      throw new Error('existing posted artifact must not create a duplicate follow-up job');
-    },
+    queueFollowUpForRecoveredPostedReviewImpl: queueStub(queueCalls),
   });
   assert.equal(result.reconciled, 1);
-  assert.equal(result.results[0].followUp, undefined);
+  assert.equal(queueCalls.length, 1);
+  assert.equal(result.results[0].followUp.queued, true);
   assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'posted');
   db.close();
 });
@@ -280,8 +280,35 @@ test('apply recognizes an existing artifact linked by GitHub node id', async () 
     queueFollowUpForRecoveredPostedReviewImpl: queueStub(queueCalls),
   });
   assert.equal(result.reconciled, 1);
-  assert.equal(queueCalls.length, 0);
-  assert.equal(result.results[0].followUp, undefined);
+  assert.equal(queueCalls.length, 1);
+  assert.equal(result.results[0].followUp.queued, true);
+  assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'posted');
+  db.close();
+});
+
+test('apply resumes from a linked pass artifact after follow-up queue failure', async () => {
+  const db = fixture({ attempts: 4, passStatus: 'failed' });
+  await reconcilePostedFailedOrphans({
+    db,
+    apply: true,
+    listReviews: async () => [POSTED_REVIEW],
+    queueFollowUpForRecoveredPostedReviewImpl: () => {
+      throw new Error('disk full while creating follow-up job');
+    },
+  });
+  assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'failed-orphan');
+  assert.equal(db.prepare('SELECT gh_comment_id FROM reviewer_passes').get().gh_comment_id, String(POSTED_REVIEW.id));
+
+  const queueCalls = [];
+  const result = await reconcilePostedFailedOrphans({
+    db,
+    apply: true,
+    listReviews: async () => [POSTED_REVIEW],
+    queueFollowUpForRecoveredPostedReviewImpl: queueStub(queueCalls),
+  });
+  assert.equal(result.reconciled, 1);
+  assert.equal(queueCalls.length, 1);
+  assert.equal(result.results[0].followUp.queued, true);
   assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'posted');
   db.close();
 });
@@ -312,6 +339,23 @@ test('apply skips recovered follow-up queueing when the same revision already ha
   assert.equal(result.results[0].followUp.queued, false);
   assert.equal(result.results[0].followUp.reason, 'existing-follow-up-job');
   assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'posted');
+  db.close();
+});
+
+test('apply refuses rows with no stored reviewer head', async () => {
+  const db = fixture();
+  db.prepare('UPDATE reviewed_prs SET reviewer_head_sha = NULL').run();
+  const result = await reconcilePostedFailedOrphans({
+    db,
+    apply: true,
+    listReviews: async () => [POSTED_REVIEW],
+    queueFollowUpForRecoveredPostedReviewImpl: () => {
+      throw new Error('missing-head rows must not queue follow-up');
+    },
+  });
+  assert.equal(result.results[0].reason, 'no-posted-review');
+  assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'failed-orphan');
+  assert.equal(db.prepare('SELECT gh_comment_id FROM reviewer_passes').get().gh_comment_id, null);
   db.close();
 });
 

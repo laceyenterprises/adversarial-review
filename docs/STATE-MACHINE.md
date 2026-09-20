@@ -281,15 +281,17 @@ new PR
   First, if the watcher or `npm run reconcile-posted-orphans -- --apply`
   proves that the reviewer bot already posted a same-head GitHub review at or
   after the durable reviewer start, it marks the row `posted` without requiring
-  lease expiry or proof that the reviewer process group is dead. The row is no
-  longer a retry candidate; the adversarial gate then follows the actual posted
-  review verdict instead of the orphan-anomaly projection. If that reviewer
-  process group is still alive and still matches the stored reviewer session,
-  the watcher sends `SIGKILL` before settling the runtime run-state and marking
-  the row `posted` with a session-scoped compare-and-swap. It then performs the
-  bounded cleanup probe and writes a durable
-  `data/reviewer-cleanup-findings/<session>.json` record only if that process
-  group remains alive and identity-matched after the kill attempt. Second, the bounded
+  lease expiry or proof that the reviewer process group is dead. A live,
+  identity-matched reviewer that has already posted remains the owner of its
+  completion path: the watcher leaves it `reviewing` so the reviewer can link
+  its own pass artifact and queue its own remediation follow-up after the GitHub
+  post. The manual `reconcile-posted-orphans -- --apply` path is the recovery
+  surface when the original reviewer is no longer available; it links the pass
+  artifact, queues or dedupes the recovered follow-up remediation, and only then
+  commits the `failed-orphan -> posted` compare-and-swap. If follow-up queueing
+  fails, the row stays `failed-orphan` so the same command can resume. Once a
+  row is posted, the adversarial gate follows the actual posted review verdict
+  instead of the orphan-anomaly projection. Second, the bounded
   auto-reclaim path may re-arm a failed-orphan only after its persisted reviewer
   lease expires, the infrastructure recovery cap has room, and the watcher can
   prove the original reviewer is no longer live: either the process group is

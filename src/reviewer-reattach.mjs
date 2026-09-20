@@ -439,8 +439,6 @@ async function reconcileReviewerSessions({
   nullPgidLaunchGraceMs = DEFAULT_NULL_PGID_LAUNCH_GRACE_MS,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   postKillReviewReprobeDelaysMs = [500, 1500, 3000],
-  postedReviewCleanupRecheckDelaysMs = POSTED_REVIEW_CLEANUP_RECHECK_DELAYS_MS,
-  onCleanupFinding = null,
 } = {}) {
   const limit = Number.isInteger(Number(maxRows)) && Number(maxRows) >= 0
     ? Number(maxRows)
@@ -659,12 +657,19 @@ async function reconcileReviewerSessions({
             settledAt: postedReview.submitted_at,
             reason: 'posted-review-recovered-null-pgid',
           });
-          statements.markPosted.run(
+          const markPostedResult = statements.markPosted.run(
             postedReview.submitted_at,
             row.repo,
             row.pr_number,
             row.reviewer_session_uuid || ''
           );
+          if (markPostedResult.changes !== 1) {
+            log.warn(
+              `[watcher] reviewer_reattach_null_pgid_recovered_cas_miss repo=${row.repo} pr=${row.pr_number} ` +
+              `session=${row.reviewer_session_uuid || 'unknown'}`
+            );
+            continue;
+          }
           log.log(
             `[watcher] reviewer_reattach_null_pgid_recovered repo=${row.repo} pr=${row.pr_number} ` +
             `session=${row.reviewer_session_uuid} posted_at=${postedReview.submitted_at}`
@@ -925,74 +930,10 @@ async function reconcileReviewerSessions({
       if (!(await probePostedReviewOrMarkSticky())) continue;
 
       if (postedReview) {
-        killProcessGroup(row.reviewer_pgid, 'SIGKILL');
-        await onTerminalDeadSession({
-          row,
-          state: 'completed',
-          settledAt: postedReview.submitted_at,
-          reason: 'posted-review-recovered-live-killed',
-        });
-        const markPostedResult = statements.markPosted.run(
-          postedReview.submitted_at,
-          row.repo,
-          row.pr_number,
-          row.reviewer_session_uuid || ''
-        );
-        if (markPostedResult.changes !== 1) {
-          log.warn(
-            `[watcher] reviewer_reattach_posted_recovered_cas_miss repo=${row.repo} pr=${row.pr_number} ` +
-            `session=${row.reviewer_session_uuid || 'unknown'} pgid=${row.reviewer_pgid || 'unknown'}`
-          );
-          continue;
-        }
         log.log(
-          `[watcher] reviewer_reattach_posted_recovered repo=${row.repo} pr=${row.pr_number} ` +
+          `[watcher] reviewer_reattach_posted_live_owner_retained repo=${row.repo} pr=${row.pr_number} ` +
           `session=${row.reviewer_session_uuid} pgid=${row.reviewer_pgid} posted_at=${postedReview.submitted_at}`
         );
-
-        let cleanupAlive = false;
-        let cleanupMatched = null;
-        const cleanupRecheckDelays = Array.isArray(postedReviewCleanupRecheckDelaysMs)
-          ? postedReviewCleanupRecheckDelaysMs
-          : [];
-        for (const delay of cleanupRecheckDelays) {
-          const cleanupProbe = typeof probeSession === 'function'
-            ? probeSession(row)
-            : probeReviewerSession({
-              pgid: row.reviewer_pgid,
-              sessionUuid: row.reviewer_session_uuid,
-              probeAlive,
-            });
-          cleanupAlive = typeof cleanupProbe === 'boolean'
-            ? cleanupProbe
-            : cleanupProbe?.alive === true && cleanupProbe?.matched !== false;
-          cleanupMatched = typeof cleanupProbe === 'boolean' ? null : cleanupProbe?.matched ?? null;
-          if (!cleanupAlive) break;
-          if (Number(delay) > 0) await sleep(Number(delay));
-        }
-        if (cleanupAlive) {
-          const finding = {
-            id: 'reviewer:posted_process_group_leak',
-            severity: 'warning',
-            repo: row.repo,
-            prNumber: row.pr_number,
-            reviewerSessionUuid: row.reviewer_session_uuid,
-            reviewerPgid: row.reviewer_pgid,
-            matched: cleanupMatched,
-            postedAt: postedReview.submitted_at,
-          };
-          log.warn(
-            `[watcher] reviewer_posted_process_group_cleanup_finding ${JSON.stringify(finding)}`
-          );
-          try {
-            await onCleanupFinding?.(finding);
-          } catch (err) {
-            log.warn?.(
-              `[watcher] reviewer_posted_process_group_cleanup_finding_write_failed ` +
-              `session=${finding.reviewerSessionUuid} pgid=${finding.reviewerPgid} error=${err?.message || err}`
-            );
-          }
-        }
         continue;
       }
 
@@ -1056,12 +997,19 @@ async function reconcileReviewerSessions({
         settledAt: postedReview.submitted_at,
         reason: 'posted-review-recovered',
       });
-      statements.markPosted.run(
+      const markPostedResult = statements.markPosted.run(
         postedReview.submitted_at,
         row.repo,
         row.pr_number,
         row.reviewer_session_uuid || ''
       );
+      if (markPostedResult.changes !== 1) {
+        log.warn(
+          `[watcher] reviewer_reattach_recovered_cas_miss repo=${row.repo} pr=${row.pr_number} ` +
+          `session=${row.reviewer_session_uuid || 'unknown'} pgid=${row.reviewer_pgid || 'unknown'}`
+        );
+        continue;
+      }
       log.log(
         `[watcher] reviewer_reattach_recovered repo=${row.repo} pr=${row.pr_number} ` +
         `session=${row.reviewer_session_uuid} pgid=${row.reviewer_pgid || 'unknown'} posted_at=${postedReview.submitted_at}`

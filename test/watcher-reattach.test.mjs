@@ -948,11 +948,10 @@ test('pre-existing reviewing rows without reviewer_session_uuid use legacy faile
   assert.match(log.lines.join('\n'), /Orphan reviewer detected/);
 });
 
-test('posted review kills a briefly live process group before marking posted', async () => {
+test('posted review from a live owner is left for the reviewer to finish follow-up queueing', async () => {
   const db = setupDb();
   seedReviewing(db, { reviewer: 'codex' });
   const log = makeLog();
-  let probes = 0;
   const findings = [];
   const killed = [];
 
@@ -963,7 +962,7 @@ test('posted review kills a briefly live process group before marking posted', a
     ]),
     now: new Date(FAILURE_AT),
     log,
-    probeSession: () => ({ alive: probes++ === 0, matched: true }),
+    probeSession: () => ({ alive: true, matched: true }),
     killProcessGroup: (pgid, signal) => killed.push({ pgid, signal }),
     fetchHeadSha: async () => HEAD_SHA,
     postedReviewCleanupRecheckDelaysMs: [0],
@@ -971,19 +970,19 @@ test('posted review kills a briefly live process group before marking posted', a
   });
 
   const row = readRow(db);
-  assert.equal(row.review_status, 'posted');
-  assert.equal(row.review_attempts, 3);
+  assert.equal(row.review_status, 'reviewing');
+  assert.equal(row.review_attempts, 2);
   assert.equal(row.failure_message, null);
   assert.deepEqual(findings, []);
-  assert.deepEqual(killed, [{ pgid: 9001, signal: 'SIGKILL' }]);
-  assert.match(log.lines.join('\n'), /reviewer_reattach_posted_recovered/);
+  assert.deepEqual(killed, []);
+  assert.match(log.lines.join('\n'), /reviewer_reattach_posted_live_owner_retained/);
 });
 
 test('posted review cleanup default budget does not block the watcher poll', () => {
   assert.deepEqual(POSTED_REVIEW_CLEANUP_RECHECK_DELAYS_MS, [0]);
 });
 
-test('posted review stays successful while a process group that survives kill produces a cleanup finding', async () => {
+test('posted review from a still-live owner does not produce a cleanup finding', async () => {
   const db = setupDb();
   seedReviewing(db, { reviewer: 'codex' });
   const findings = [];
@@ -1003,21 +1002,12 @@ test('posted review stays successful while a process group that survives kill pr
     onCleanupFinding: async (finding) => findings.push(finding),
   });
 
-  assert.equal(readRow(db).review_status, 'posted');
-  assert.deepEqual(killed, [{ pgid: 9001, signal: 'SIGKILL' }]);
-  assert.deepEqual(findings, [{
-    id: 'reviewer:posted_process_group_leak',
-    severity: 'warning',
-    repo: REPO,
-    prNumber: PR,
-    reviewerSessionUuid: 'session-70',
-    reviewerPgid: 9001,
-    matched: true,
-    postedAt: '2026-05-11T05:13:09.000Z',
-  }]);
+  assert.equal(readRow(db).review_status, 'reviewing');
+  assert.deepEqual(killed, []);
+  assert.deepEqual(findings, []);
 });
 
-test('posted review cleanup still probes when a same-head pass artifact is already linked', async () => {
+test('posted review with a same-head pass artifact still leaves the live owner running', async () => {
   const db = setupDb();
   seedReviewing(db, { reviewer: 'codex' });
   seedReviewerPassArtifact(db);
@@ -1038,13 +1028,12 @@ test('posted review cleanup still probes when a same-head pass artifact is alrea
     onCleanupFinding: async (finding) => findings.push(finding),
   });
 
-  assert.equal(readRow(db).review_status, 'posted');
-  assert.deepEqual(killed, [{ pgid: 9001, signal: 'SIGKILL' }]);
-  assert.equal(findings.length, 1);
-  assert.equal(findings[0].reviewerSessionUuid, 'session-70');
+  assert.equal(readRow(db).review_status, 'reviewing');
+  assert.deepEqual(killed, []);
+  assert.deepEqual(findings, []);
 });
 
-test('posted review cleanup does not flag a recycled process group', async () => {
+test('posted review with a live owner does not run a recycled-process cleanup probe', async () => {
   const db = setupDb();
   seedReviewing(db, { reviewer: 'codex' });
   const findings = [];
@@ -1065,12 +1054,12 @@ test('posted review cleanup does not flag a recycled process group', async () =>
     onCleanupFinding: async (finding) => findings.push(finding),
   });
 
-  assert.equal(readRow(db).review_status, 'posted');
-  assert.deepEqual(killed, [{ pgid: 9001, signal: 'SIGKILL' }]);
+  assert.equal(readRow(db).review_status, 'reviewing');
+  assert.deepEqual(killed, []);
   assert.deepEqual(findings, []);
 });
 
-test('live posted recovery CAS loses cleanly to the reviewer completion writer', async () => {
+test('dead posted recovery CAS loses cleanly to the reviewer completion writer', async () => {
   const db = setupDb();
   seedReviewing(db, { reviewer: 'codex' });
   const log = makeLog();
@@ -1082,7 +1071,7 @@ test('live posted recovery CAS loses cleanly to the reviewer completion writer',
     ]),
     now: new Date(FAILURE_AT),
     log,
-    probeSession: () => ({ alive: true, matched: true }),
+    probeSession: () => ({ alive: false, matched: true }),
     fetchHeadSha: async () => HEAD_SHA,
     postedReviewCleanupRecheckDelaysMs: [0],
     onTerminalDeadSession: async () => {
@@ -1099,7 +1088,7 @@ test('live posted recovery CAS loses cleanly to the reviewer completion writer',
   const row = readRow(db);
   assert.equal(row.review_status, 'posted');
   assert.equal(row.review_attempts, 3);
-  assert.match(log.lines.join('\n'), /reviewer_reattach_posted_recovered_cas_miss/);
+  assert.match(log.lines.join('\n'), /reviewer_reattach_recovered_cas_miss/);
 });
 
 test('claimed rows with null pgid adopt a live run-state pgid after watcher bounce', async () => {

@@ -1182,23 +1182,24 @@ reviewer-bot GitHub review with `npm run reconcile-posted-orphans -- --root
 `failed-orphan` rows with a parseable reviewer start timestamp or, when that is
 missing or corrupt, a parseable `last_attempted_at` fallback. A match requires
 the reviewer bot login, a review submitted at or after that lower bound, and the
-stored reviewer head when GitHub supplies a `commit_id`. Rows with neither
-timestamp parseable are refused instead of widening the lower bound. The apply
-path is a compare-and-swap against the still-open `failed-orphan` row and the
-stable `reviewer_session_uuid`; it moves only that row to `posted`, clears
-orphan failure evidence and the reviewer lease, resets
-`infra_auto_recover_attempts`, and links the matching reviewer pass to the
-review artifact. When the matching pass had already been reaped as `failed`,
-reconciliation promotes it to `completed` because the GitHub review proves the
-pass posted; bounded failure metadata on the pass is preserved for health and
-recovery consumers. When reconciliation newly links a pass artifact, it may also
-queue the recovered posted review for follow-up remediation, but only if no
-existing follow-up job already targets the same repo, PR, and revision. It does
-not queue duplicate remediation for a pass that already carried a posted-review
-artifact, and it does not mutate closed/merged PR rows, no-parseable-timestamp
-rows, stale-head reviews, unrelated statuses, or pass artifacts already linked
-to a different PR. If the reconciled review is blocking, this deliberately flips
-the adversarial gate from the
+stored reviewer head; rows without a stored reviewer head or without either
+timestamp parseable are refused instead of widening the match. The artifact
+recovery step links the matching reviewer pass to the review artifact before the
+row is committed `posted`. When the matching pass had already been reaped as
+`failed`, reconciliation promotes it to `completed` because the GitHub review
+proves the pass posted; bounded failure metadata on the pass is preserved for
+health and recovery consumers. If the pass artifact is available, the command
+then queues or dedupes the recovered posted review's follow-up remediation and
+only afterwards performs the session-scoped compare-and-swap that moves the
+still-open `failed-orphan` row to `posted`, clears orphan failure evidence and
+the reviewer lease, and resets `infra_auto_recover_attempts`. This ordering is
+intentionally re-entrant: if follow-up job creation fails after the pass artifact
+is linked, the row remains `failed-orphan`, so a second `--apply` resumes from
+the already-linked artifact and retries the missing follow-up work before
+committing `posted`. It does not mutate closed/merged PR rows,
+no-parseable-timestamp rows, missing-head rows, stale-head reviews, unrelated
+statuses, or pass artifacts already linked to a different PR. If the reconciled
+review is blocking, this deliberately flips the adversarial gate from the
 `review-failed-orphan` anomaly success projection to the real `blocking-review`
 verdict.
 

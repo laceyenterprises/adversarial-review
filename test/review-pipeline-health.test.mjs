@@ -78,6 +78,21 @@ test('pipeline Sentinel findings are diagnostics, never pages', () => {
   );
 });
 
+test('alerts mirrors findings so legacy health readers cannot report false green', () => {
+  const rootDir = tempRoot();
+  try {
+    const snapshot = collectReviewPipelineHealth({
+      rootDir,
+      now: () => new Date(NOW),
+      config: { hostChecksEnabled: false },
+    });
+    assert.deepEqual(snapshot.alerts, snapshot.findings);
+    assert.ok(snapshot.alerts.some((finding) => finding.code === 'review:review_state_ledger_unreadable'));
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 function openDb(rootDir) {
   const db = openReviewStateDb(rootDir);
   ensureReviewStateSchema(db);
@@ -177,6 +192,62 @@ function insertReviewerPass(rootDir, overrides = {}) {
 function insertReviewerPasses(rootDir, passes) {
   for (const pass of passes) insertReviewerPass(rootDir, pass);
 }
+
+test('previously-active reviewer model going silent raises its own finding', () => {
+  const rootDir = tempRoot();
+  try {
+    insertReviewerPass(rootDir, {
+      reviewerClass: 'claude',
+      reviewerModel: 'claude',
+      startedAt: '2026-05-23T17:00:00.000Z',
+      endedAt: '2026-05-23T17:10:00.000Z',
+      status: 'completed',
+    });
+    insertReviewerPass(rootDir, {
+      prNumber: 951,
+      reviewerClass: 'gemini',
+      reviewerModel: 'gemini',
+      startedAt: '2026-05-25T17:00:00.000Z',
+      endedAt: '2026-05-25T17:10:00.000Z',
+      status: 'completed',
+    });
+    const db = openDb(rootDir);
+    try {
+      db.prepare(
+        `UPDATE reviewer_passes
+            SET gh_comment_id = ?, body_captured_at = ended_at
+          WHERE reviewer_model = ?`
+      ).run('claude-review-id', 'claude');
+      db.prepare(
+        `UPDATE reviewer_passes
+            SET gh_comment_id = ?, body_captured_at = ended_at
+          WHERE reviewer_model = ?`
+      ).run('gemini-review-id', 'gemini');
+    } finally {
+      db.close();
+    }
+
+    const snapshot = collectReviewPipelineHealth({
+      rootDir,
+      now: () => new Date(NOW),
+      config: {
+        hostChecksEnabled: false,
+        reviewerSilenceThresholdMs: 24 * 60 * 60 * 1000,
+        reviewerActivityLookbackMs: 7 * 24 * 60 * 60 * 1000,
+      },
+    });
+    const finding = snapshot.findings.find((entry) => (
+      entry.code === 'review:reviewer_model_silent' && entry.details.model === 'claude'
+    ));
+    assert.ok(finding);
+    assert.equal(finding.details.lastPostedAt, '2026-05-23T17:10:00.000Z');
+    assert.ok(!snapshot.findings.some((entry) => (
+      entry.code === 'review:reviewer_model_silent' && entry.details.model === 'gemini'
+    )));
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
 
 function insertActiveTtmFlag(rootDir, overrides = {}) {
   const db = openDb(rootDir);

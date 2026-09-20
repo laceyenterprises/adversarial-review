@@ -27,6 +27,8 @@ import { reviewerDispatchPassKind } from './watcher-reviewer-pool.mjs';
 const DEFAULT_REVIEWER_DEATH_RATE_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_REVIEWER_DEATH_RATE_THRESHOLD = 0.5;
 const DEFAULT_REVIEWER_DEATH_RATE_MIN_ATTEMPTS = 3;
+const DEFAULT_REVIEWER_SILENCE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_REVIEWER_ACTIVITY_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_REVIEW_UNKNOWN_RATE_THRESHOLD = 0.30;
 const DEFAULT_REVIEW_UNKNOWN_RATE_WINDOW_MINUTES = 15;
 const DEFAULT_REVIEW_UNKNOWN_RATE_SAMPLE_FLOOR = 5;
@@ -229,6 +231,16 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     defaultThreshold: DEFAULT_REVIEWER_DEATH_RATE_THRESHOLD,
     windowKey: 'reviewerDeathRateWindowMs',
     defaultWindowMs: DEFAULT_REVIEWER_DEATH_RATE_WINDOW_MS,
+  },
+  {
+    code: 'review:reviewer_model_silent',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: 'reviewerSilenceThresholdMs',
+    defaultThreshold: DEFAULT_REVIEWER_SILENCE_THRESHOLD_MS,
+    windowKey: 'reviewerActivityLookbackMs',
+    defaultWindowMs: DEFAULT_REVIEWER_ACTIVITY_LOOKBACK_MS,
+    thresholdDescription: 'a reviewer model that posted during the activity lookback has posted nothing for the silence threshold',
   },
   {
     code: 'review:unknown_failure_rate_high',
@@ -544,6 +556,16 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
       overrides.reviewerDeathRateMinAttempts
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_REVIEWER_DEATH_RATE_MIN_ATTEMPTS,
       DEFAULT_REVIEWER_DEATH_RATE_MIN_ATTEMPTS
+    ),
+    reviewerSilenceThresholdMs: parsePositiveInteger(
+      overrides.reviewerSilenceThresholdMs
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_REVIEWER_SILENCE_THRESHOLD_MS,
+      DEFAULT_REVIEWER_SILENCE_THRESHOLD_MS
+    ),
+    reviewerActivityLookbackMs: parsePositiveInteger(
+      overrides.reviewerActivityLookbackMs
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_REVIEWER_ACTIVITY_LOOKBACK_MS,
+      DEFAULT_REVIEWER_ACTIVITY_LOOKBACK_MS
     ),
     reviewUnknownRateThreshold: parseNumber(
       overrides.reviewUnknownRateThreshold
@@ -1256,6 +1278,47 @@ function summarizeReviewerAttempts(db, { nowMs, config }) {
       distinctPrs: unknownWindowDistinctPrs.size,
       windowMs: config.reviewUnknownRateWindowMs,
     },
+  };
+}
+
+function summarizeReviewerModelSilence(db, { nowMs, config }) {
+  const activityCutoff = new Date(nowMs - config.reviewerActivityLookbackMs).toISOString();
+  const observedAt = new Date(nowMs).toISOString();
+  const rows = safeAll(
+    db,
+    `SELECT CASE
+              WHEN COALESCE(reviewer_model, reviewer_class) = 'claude-code' THEN 'claude'
+              ELSE COALESCE(reviewer_model, reviewer_class)
+            END AS reviewer_model,
+            MAX(COALESCE(body_captured_at, ended_at, started_at)) AS last_posted_at,
+            COUNT(*) AS posted_reviews
+       FROM reviewer_passes
+      WHERE gh_comment_id IS NOT NULL
+        AND COALESCE(body_captured_at, ended_at, started_at) >= ?
+        AND COALESCE(body_captured_at, ended_at, started_at) <= ?
+        AND COALESCE(reviewer_model, reviewer_class) IN ('claude', 'claude-code', 'codex', 'gemini')
+      GROUP BY CASE
+                 WHEN COALESCE(reviewer_model, reviewer_class) = 'claude-code' THEN 'claude'
+                 ELSE COALESCE(reviewer_model, reviewer_class)
+               END`,
+    [activityCutoff, observedAt]
+  );
+  const models = rows.map((row) => {
+    const lastPostedMs = toMs(row.last_posted_at);
+    const ageMs = lastPostedMs === null ? null : Math.max(0, nowMs - lastPostedMs);
+    return {
+      model: row.reviewer_model,
+      lastPostedAt: row.last_posted_at,
+      ageMs,
+      postedReviews: Number(row.posted_reviews || 0),
+      silent: ageMs !== null && ageMs >= config.reviewerSilenceThresholdMs,
+    };
+  });
+  return {
+    thresholdMs: config.reviewerSilenceThresholdMs,
+    activityLookbackMs: config.reviewerActivityLookbackMs,
+    models,
+    silentModels: models.filter((row) => row.silent),
   };
 }
 
@@ -3354,6 +3417,26 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }));
   }
 
+  for (const model of snapshot.reviewerModelSilence?.silentModels || []) {
+    findings.push(buildFinding({
+      code: 'review:reviewer_model_silent',
+      tier: 'page',
+      subject: `Previously-active reviewer model ${model.model} has gone silent`,
+      message: `${model.model} last posted a review at ${model.lastPostedAt}, ${Math.round(model.ageMs / 3600000)}h ago.`,
+      evidence: [
+        `reviews.db reviewer_passes model=${model.model} gh_comment_id IS NOT NULL`,
+        `last_posted_at=${model.lastPostedAt} threshold_ms=${snapshot.reviewerModelSilence.thresholdMs}`,
+      ],
+      recommendedAction: 'Inspect this model\'s selector decisions, OAuth transport, and recent reviewer passes now; do not wait for a failed selection to trigger the death-rate alarm.',
+      observedAt,
+      details: {
+        ...model,
+        thresholdMs: snapshot.reviewerModelSilence.thresholdMs,
+        activityLookbackMs: snapshot.reviewerModelSilence.activityLookbackMs,
+      },
+    }));
+  }
+
   if (
     snapshot.reviewer.unknownRateWindow.totalFailures >= config.reviewUnknownRateSampleFloor
     && snapshot.reviewer.unknownRateWindow.distinctPrs >= config.reviewUnknownRateDistinctPrFloor
@@ -4313,6 +4396,14 @@ function collectReviewPipelineHealth({
           rereviewShare: 0,
           effectiveConcurrency: 0,
         };
+    const reviewerModelSilence = db
+      ? summarizeReviewerModelSilence(db, { nowMs, config })
+      : {
+          thresholdMs: config.reviewerSilenceThresholdMs,
+          activityLookbackMs: config.reviewerActivityLookbackMs,
+          models: [],
+          silentModels: [],
+        };
     const afhFallbackSupermajority = db
       ? summarizeAfhFallbackSupermajority(db, { nowMs, config })
       : {
@@ -4462,6 +4553,7 @@ function collectReviewPipelineHealth({
       terminalReconciliation,
       reviewer,
       reviewerCapacity,
+      reviewerModelSilence,
       afhFallbackSupermajority,
       reviewerDegradation,
       outage,
@@ -4494,9 +4586,14 @@ function collectReviewPipelineHealth({
       hammerDispatchStall,
       dagAutowalk,
     };
+    const findings = evaluateReviewPipelineFindings(snapshot, { observedAt });
     return {
       ...snapshot,
-      findings: evaluateReviewPipelineFindings(snapshot, { observedAt }),
+      findings,
+      // Compatibility for readers that historically looked only at `alerts`.
+      // Keeping two divergent arrays made a non-empty finding set report as
+      // "0 alerts" to Sentinel; both keys now expose the same diagnostics.
+      alerts: findings,
     };
   } finally {
     db?.close();

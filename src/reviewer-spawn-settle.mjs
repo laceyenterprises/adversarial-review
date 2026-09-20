@@ -596,6 +596,7 @@ async function spawnReviewer({
     repo,
     pr: prNumber,
     reviewerModel,
+    passKind,
     identity: reviewerIdentity,
     botTokenEnv,
     reviewerSessionUuid,

@@ -732,11 +732,23 @@ function activeReviewerCountForModel(activeReviewerCounts, model) {
   return 0;
 }
 
+function activeReviewerCount(activeReviewerCounts, key) {
+  if (!activeReviewerCounts) return 0;
+  const value = activeReviewerCounts instanceof Map
+    ? activeReviewerCounts.get(key)
+    : activeReviewerCounts[key];
+  return Math.max(0, Number.parseInt(String(value || 0), 10) || 0);
+}
+
 function countActiveReviewerSpawnsByModel(activeReviewerSpawns) {
   const counts = new Map();
   for (const record of activeReviewerSpawns?.values?.() || []) {
     const model = String(record?.reviewerModel || '').trim().toLowerCase();
     if (model) counts.set(model, (counts.get(model) || 0) + 1);
+    counts.set('__total__', (counts.get('__total__') || 0) + 1);
+    const passKind = record?.passKind === 'rereview' ? 'rereview' : 'first-pass';
+    const laneKey = `__lane:${passKind}`;
+    counts.set(laneKey, (counts.get(laneKey) || 0) + 1);
   }
   return counts;
 }
@@ -752,6 +764,12 @@ function incrementReviewerModelCount(counts, model) {
   const normalizedModel = String(model || '').trim().toLowerCase();
   if (!normalizedModel) return;
   counts.set(normalizedModel, (counts.get(normalizedModel) || 0) + 1);
+}
+
+function incrementReviewerLaneCounts(counts, candidate) {
+  counts.set('__total__', (counts.get('__total__') || 0) + 1);
+  const laneKey = `__lane:${reviewerDispatchPassKind(candidate)}`;
+  counts.set(laneKey, (counts.get(laneKey) || 0) + 1);
 }
 
 function summarizeDeferredReviewerReasons(deferredReasons = []) {
@@ -777,6 +795,7 @@ function createDetachedReviewerDispatchTracker({ activeReviewerSpawns } = {}) {
         const key = reviewerDispatchPrKey({ repo: record?.repo, prNumber: record?.prNumber });
         if (!key || registeredPrKeys.has(key)) continue;
         incrementReviewerModelCount(counts, record?.reviewerModel);
+        incrementReviewerLaneCounts(counts, record?.candidate);
       }
       return counts;
     },
@@ -786,7 +805,7 @@ function createDetachedReviewerDispatchTracker({ activeReviewerSpawns } = {}) {
       const reviewerModel = String(candidate?.reviewerModel || '').trim().toLowerCase();
       if (!repo || !Number.isFinite(prNumber) || !reviewerModel || !promise) return;
       const token = Symbol('detached-reviewer-dispatch');
-      detachedReviewerDispatches.set(token, { repo, prNumber, reviewerModel });
+      detachedReviewerDispatches.set(token, { repo, prNumber, reviewerModel, candidate });
       Promise.resolve(promise)
         .finally(() => {
           detachedReviewerDispatches.delete(token);
@@ -860,6 +879,8 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   let attempted = 0;
   let dispatched = 0;
   let activeGemini = activeReviewerCountForModel(activeReviewerCounts, 'gemini');
+  const initiallyActive = activeReviewerCount(activeReviewerCounts, '__total__');
+  const initiallyActiveRereviews = activeReviewerCount(activeReviewerCounts, '__lane:rereview');
   let initialWaveClosed = false;
 
   const isGeminiCandidate = (candidate) =>
@@ -916,7 +937,22 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   const nextStartableEntry = () => {
     const counts = pendingLaneCounts(pending);
     const bothLanesPending = counts.firstPass > 0 && counts.rereview > 0;
-    if (active.size >= concurrencyLimit) {
+    const rereviewFloor = reviewerLaneFloor({
+      concurrencyLimit,
+      minShare: activeLaneState?.minShare,
+    });
+    const rereviewCap = Math.max(0, concurrencyLimit - rereviewFloor);
+    if (rereviewCap > 0 && counts.firstPass > 0 && initiallyActiveRereviews >= rereviewCap) {
+      for (const entry of pending) {
+        if (
+          !entry.started
+          && reviewerDispatchPassKind(entry.candidate) === 'rereview'
+        ) {
+          recordDeferredReason(entry, 'rereview-cap-reserves-first-pass-capacity');
+        }
+      }
+    }
+    if (initiallyActive + active.size >= concurrencyLimit) {
       const resolvedNowMs = bothLanesPending ? safeReviewerNowMs(now) : undefined;
       for (const entry of orderPendingReviewerDispatchEntries(pending, {
         laneState: activeLaneState,
@@ -936,6 +972,15 @@ async function runBoundedReviewerDispatchQueue(candidates, {
       nowMs: resolvedNowMs,
     })) {
       if (entry.started) continue;
+      if (
+        counts.firstPass > 0
+        && rereviewCap > 0
+        && reviewerDispatchPassKind(entry.candidate) === 'rereview'
+        && initiallyActiveRereviews >= rereviewCap
+      ) {
+        recordDeferredReason(entry, 'rereview-cap-reserves-first-pass-capacity');
+        continue;
+      }
       if (isGeminiCandidate(entry.candidate) && activeGemini >= geminiConcurrencyLimit) {
         recordDeferredReason(
           entry,
@@ -959,7 +1004,18 @@ async function runBoundedReviewerDispatchQueue(candidates, {
       return 'gemini-credential-concurrency-saturated';
     }
     if (initialWaveClosed) return 'single-wave-deferred';
-    if (active.size >= concurrencyLimit) return 'reviewer-pool-saturated';
+    if (initiallyActive + active.size >= concurrencyLimit) return 'reviewer-pool-saturated';
+    if (
+      pendingLaneCounts(pending).firstPass > 0
+      && concurrencyLimit > 1
+      && reviewerDispatchPassKind(candidate) === 'rereview'
+      && initiallyActiveRereviews >= (
+        concurrencyLimit - reviewerLaneFloor({
+          concurrencyLimit,
+          minShare: activeLaneState?.minShare,
+        })
+      )
+    ) return 'rereview-cap-reserves-first-pass-capacity';
     return 'not-started';
   };
 

@@ -2363,6 +2363,56 @@ test('queue starvation reports an unstarted row as capacity, not reviewer failur
   assert.match(finding.message, /no reviewer has picked it up/);
   assert.match(finding.recommended_action, /Nothing picked this up/);
   assert.equal(finding.details.reviewerFailed, false);
+  assert.equal(finding.details.starvationCause, 'no-capacity');
+});
+
+test('queue starvation identifies saturated capacity allocated to rereviews at 0.667 share', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 6912,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T16:03:00.000Z',
+  });
+  for (let index = 0; index < 6; index += 1) {
+    insertReviewerPass(rootDir, {
+      prNumber: 6800 + index,
+      attemptNumber: 1,
+      passKind: 'first-pass',
+      status: 'completed',
+      startedAt: `2026-05-25T17:1${index}:00.000Z`,
+      endedAt: `2026-05-25T17:2${index}:00.000Z`,
+    });
+  }
+  for (let index = 0; index < 12; index += 1) {
+    insertReviewerPass(rootDir, {
+      prNumber: 6850 + index,
+      attemptNumber: 2,
+      passKind: 'rereview',
+      status: 'completed',
+      startedAt: `2026-05-25T17:5${index % 10}:00.000Z`,
+      endedAt: '2026-05-25T18:00:00.000Z',
+    });
+  }
+  seedFreshReconcile(rootDir);
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    config: {
+      queueStarvationAdmissionWindowMs: 15 * 60 * 1000,
+      reviewerPoolMaxConcurrent: 6,
+    },
+  });
+  const finding = snapshot.findings.find((item) => item.code === 'review:queue_starvation');
+
+  assert.ok(finding);
+  assert.equal(snapshot.reviewerCapacity.rereviewShare, 12 / 18);
+  assert.equal(finding.details.recentFirstPassAdmissions, 0);
+  assert.equal(finding.details.recentRereviewAdmissions, 12);
+  assert.ok(finding.details.effectiveConcurrency >= 6);
+  assert.equal(finding.details.starvationCause, 'capacity-allocated-elsewhere');
+  assert.match(finding.message, /zero first passes were admitted/);
+  assert.match(finding.recommended_action, /Capacity exists but is allocated to re-reviews/);
 });
 
 test('terminal reconciliation evicts an out-of-band closed PR from first-pass queue alerts', () => {

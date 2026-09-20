@@ -58,6 +58,59 @@ test('reviewer pool respects the configured concurrency cap', async () => {
   assert.equal(maxActive, 3);
 });
 
+test('detached rereviews reserve a bounded first-pass slot instead of oversubscribing the pool', async () => {
+  const started = [];
+  const firstPass = candidate(6912, async () => {
+    started.push(6912);
+  });
+  const rereview = candidate(6917, async () => {
+    started.push(6917);
+  }, undefined, {
+    current: { rereview_requested_at: '2026-09-20T06:58:00.000Z' },
+  });
+  const saturated = new Map([
+    ['__total__', 6],
+    ['__lane:rereview', 6],
+  ]);
+
+  const blocked = await runBoundedReviewerDispatchQueue([firstPass, rereview], {
+    maxConcurrent: 6,
+    activeReviewerCounts: saturated,
+    laneState: createReviewerLaneState({ minShare: 1 / 6 }),
+    logger: { error() {}, log() {}, warn() {} },
+  });
+  assert.deepEqual(started, []);
+  assert.equal(blocked.deferred, 2);
+  assert.deepEqual(
+    blocked.deferredReasons.map((item) => [item.prNumber, item.reason]),
+    [
+      [6912, 'reviewer-pool-saturated'],
+      [6917, 'rereview-cap-reserves-first-pass-capacity'],
+    ],
+  );
+
+  // The next admission cycle after one bounded reviewer lease completes has
+  // one free slot. The rereview cap keeps that slot for the queued first pass.
+  const oneSlotReleased = new Map([
+    ['__total__', 5],
+    ['__lane:rereview', 5],
+  ]);
+  const admitted = await runBoundedReviewerDispatchQueue([firstPass, rereview], {
+    maxConcurrent: 6,
+    activeReviewerCounts: oneSlotReleased,
+    laneState: createReviewerLaneState({ minShare: 1 / 6 }),
+    singleWave: true,
+    logger: { error() {}, log() {}, warn() {} },
+  });
+
+  assert.deepEqual(started, [6912]);
+  assert.equal(admitted.dispatched, 1);
+  assert.deepEqual(
+    admitted.deferredReasons.map((item) => [item.prNumber, item.reason]),
+    [[6917, 'rereview-cap-reserves-first-pass-capacity']],
+  );
+});
+
 test('reviewer pool caps concurrency at min(pool slots, available credentials)', async () => {
   let active = 0;
   let maxActive = 0;

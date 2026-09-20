@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   defaultRefreshWorkspaceAuthEnv,
@@ -89,7 +92,7 @@ test('default auth refresh preserves process env when a gh call omitted options.
 
     const refresh = await defaultRefreshWorkspaceAuthEnv({
       log: quietLog,
-      refreshWatcherGithubTokenImpl: async ({ env, force }) => {
+      refreshFollowUpGithubTokenImpl: async ({ env, force }) => {
         assert.equal(env, process.env, 'no-env callers must refresh the live process env');
         assert.equal(force, true);
         env.GITHUB_TOKEN = 'fresh-token';
@@ -126,8 +129,52 @@ test('default auth refresh preserves process env when a gh call omitted options.
   }
 });
 
+test('default auth refresh uses the follow-up broker contract in production env', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'remediation-follow-up-broker-'));
+  const secretPath = join(dir, 'secret');
+  writeFileSync(secretPath, 'shared-secret\n');
+  const previousFetch = globalThis.fetch;
+  const env = {
+    GITHUB_TOKEN: 'expired-token',
+    GH_TOKEN: 'expired-token',
+    FOLLOW_UP_GH_AUTH_VIA_BROKER: 'true',
+    FOLLOW_UP_GH_BROKER_ROLE: 'merge-agent',
+    OAUTH_BROKER_URL: 'https://broker.example',
+    OAUTH_BROKER_SHARED_SECRET_FILE: secretPath,
+  };
+  try {
+    globalThis.fetch = async (url, options) => {
+      assert.equal(String(url), 'https://broker.example/token?provider=github-app-merge-agent');
+      assert.equal(options.headers.Authorization, 'Bearer shared-secret');
+      return {
+        ok: true,
+        async json() {
+          return {
+            access_token: 'fresh-follow-up-token',
+            provider: 'github-app-merge-agent',
+            expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+          };
+        },
+      };
+    };
+
+    const refresh = await defaultRefreshWorkspaceAuthEnv({ env, log: quietLog });
+
+    assert.equal(refresh.refreshed, true);
+    assert.equal(refresh.detail, 'role=merge-agent');
+    assert.equal(env.GITHUB_TOKEN, 'fresh-follow-up-token');
+    assert.equal(env.GH_TOKEN, 'fresh-follow-up-token');
+    assert.equal(refresh.env.GITHUB_TOKEN, 'fresh-follow-up-token');
+    assert.equal(refresh.env.GH_TOKEN, 'fresh-follow-up-token');
+    assert.equal(refresh.env.GIT_CONFIG_VALUE_1, '!gh auth git-credential');
+  } finally {
+    globalThis.fetch = previousFetch;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('default auth refresh fails fast when a configured remediation push token is selected', async () => {
-  let watcherRefreshes = 0;
+  let followUpRefreshes = 0;
   let gitEnvRebuilds = 0;
   const refresh = await defaultRefreshWorkspaceAuthEnv({
     env: {
@@ -142,8 +189,8 @@ test('default auth refresh fails fast when a configured remediation push token i
       identity: 'ADVERSARIAL_REMEDIATION_PUSH_TOKEN',
       configured: true,
     }),
-    refreshWatcherGithubTokenImpl: async () => {
-      watcherRefreshes += 1;
+    refreshFollowUpGithubTokenImpl: async () => {
+      followUpRefreshes += 1;
       return { refreshed: true, role: 'merge-agent' };
     },
     withGhGitCredentialEnvImpl: () => {
@@ -156,7 +203,7 @@ test('default auth refresh fails fast when a configured remediation push token i
   assert.equal(refresh.env, null);
   assert.match(refresh.detail, /configured remediation push token ADVERSARIAL_REMEDIATION_PUSH_TOKEN/);
   assert.match(refresh.detail, /rotate that token/);
-  assert.equal(watcherRefreshes, 0, 'must not claim a watcher-token refresh will replace the selected configured token');
+  assert.equal(followUpRefreshes, 0, 'must not claim a follow-up token refresh will replace the selected configured token');
   assert.equal(gitEnvRebuilds, 0, 'must not rebuild a git env that would reselect the same rejected token');
 });
 

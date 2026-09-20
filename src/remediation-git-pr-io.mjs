@@ -102,20 +102,20 @@ function workspaceAuthDetail(err) {
 async function defaultRefreshWorkspaceAuthEnv({
   env,
   log,
-  refreshWatcherGithubTokenImpl,
+  refreshFollowUpGithubTokenImpl,
   resolveRemediationPushTokenIdentityImpl,
   withGhGitCredentialEnvImpl,
 } = {}) {
   const baseEnv = env ?? process.env;
-  let refreshWatcherGithubToken = refreshWatcherGithubTokenImpl;
+  let refreshFollowUpGithubToken = refreshFollowUpGithubTokenImpl;
   let resolveRemediationPushTokenIdentity = resolveRemediationPushTokenIdentityImpl;
   let withGhGitCredentialEnv = withGhGitCredentialEnvImpl;
-  if (!refreshWatcherGithubToken || !resolveRemediationPushTokenIdentity || !withGhGitCredentialEnv) {
+  if (!refreshFollowUpGithubToken || !resolveRemediationPushTokenIdentity || !withGhGitCredentialEnv) {
     const [brokerRefresh, workflowPushCapability] = await Promise.all([
       import('./reviewer-broker-refresh.mjs'),
       import('./remediation-workflow-push-capability.mjs'),
     ]);
-    refreshWatcherGithubToken ||= brokerRefresh.refreshWatcherGithubToken;
+    refreshFollowUpGithubToken ||= brokerRefresh.refreshFollowUpGithubToken;
     resolveRemediationPushTokenIdentity ||= workflowPushCapability.resolveRemediationPushTokenIdentity;
     withGhGitCredentialEnv ||= workflowPushCapability.withGhGitCredentialEnv;
   }
@@ -129,7 +129,7 @@ async function defaultRefreshWorkspaceAuthEnv({
     };
   }
 
-  const summary = await refreshWatcherGithubToken({ env: baseEnv, log, force: true });
+  const summary = await refreshFollowUpGithubToken({ env: baseEnv, log, force: true });
   if (summary?.refreshed !== true) {
     return { refreshed: false, detail: summary?.skipped || summary?.failed || 'unknown', env: null };
   }

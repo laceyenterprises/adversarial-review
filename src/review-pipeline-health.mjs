@@ -362,9 +362,9 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     code: 'review:remediation_zero_throughput',
     tier: 'ticket',
     category: 'review-pipeline',
-    thresholdKey: null,
-    defaultThreshold: null,
-    thresholdDescription: 'one or more remediation jobs are pending while no remediation job is in progress',
+    thresholdKey: 'queueStarvationMaxAgeMs',
+    defaultThreshold: DEFAULT_QUEUE_STARVATION_MAX_AGE_MS,
+    thresholdDescription: 'oldest claimable pending remediation job exceeds the queue-starvation age threshold while no remediation job is in progress',
   },
   {
     code: 'review:pr_lifecycle_mirror_unverified',
@@ -2729,15 +2729,6 @@ function readFollowUpJobs(rootDir) {
   return jobs;
 }
 
-function jobTimestamp(job, fallbackMs) {
-  return job.createdAt
-    || job.claimedAt
-    || job.completedAt
-    || job.failedAt
-    || job.stoppedAt
-    || new Date(fallbackMs).toISOString();
-}
-
 function terminalJobTimestamp(job, fallbackMs) {
   return job.completedAt
     || job.failedAt
@@ -2747,17 +2738,32 @@ function terminalJobTimestamp(job, fallbackMs) {
     || new Date(fallbackMs).toISOString();
 }
 
+function pendingJobRetryDelayed(job, nowMs) {
+  const retryAfterMs = toMs(job?.remediationPlan?.retryAfter);
+  return retryAfterMs !== null && retryAfterMs > nowMs;
+}
+
+function pendingJobTimestamp(job, fallbackMs) {
+  return job.pendingAt
+    || job.createdAt
+    || job.claimedAt
+    || new Date(fallbackMs).toISOString();
+}
+
 function summarizeFollowUpQueues(rootDir, { nowMs, config }) {
   const jobs = readFollowUpJobs(rootDir);
   const states = Object.fromEntries(Object.keys(FOLLOW_UP_JOB_DIRS).map((state) => [state, 0]));
   const throughput = { completed: 0, failed: 0, stopped: 0 };
   let oldestPending = null;
+  let oldestClaimablePending = null;
+  let pendingClaimable = 0;
+  let pendingRetryDelayed = 0;
   const throughputCutoffMs = nowMs - config.remediationThroughputWindowMs;
 
   for (const entry of jobs) {
     states[entry.state] = (states[entry.state] || 0) + 1;
     if (entry.state === 'pending') {
-      const pendingSince = jobTimestamp(entry.job, entry.stat.mtimeMs);
+      const pendingSince = pendingJobTimestamp(entry.job, entry.stat.mtimeMs);
       const pendingAgeMs = ageMs(nowMs, pendingSince);
       if (pendingAgeMs !== null && (!oldestPending || pendingAgeMs > oldestPending.ageMs)) {
         oldestPending = {
@@ -2768,6 +2774,20 @@ function summarizeFollowUpQueues(rootDir, { nowMs, config }) {
           ageMs: pendingAgeMs,
         };
       }
+      if (pendingJobRetryDelayed(entry.job, nowMs)) {
+        pendingRetryDelayed += 1;
+      } else {
+        pendingClaimable += 1;
+        if (pendingAgeMs !== null && (!oldestClaimablePending || pendingAgeMs > oldestClaimablePending.ageMs)) {
+          oldestClaimablePending = {
+            jobId: entry.job.jobId || null,
+            repo: entry.job.repo || null,
+            prNumber: entry.job.prNumber || null,
+            pendingSince,
+            ageMs: pendingAgeMs,
+          };
+        }
+      }
     }
     if (Object.prototype.hasOwnProperty.call(throughput, entry.state)) {
       const endedMs = toMs(terminalJobTimestamp(entry.job, entry.stat.mtimeMs));
@@ -2777,7 +2797,15 @@ function summarizeFollowUpQueues(rootDir, { nowMs, config }) {
     }
   }
 
-  return { jobs, states, throughput, oldestPending };
+  return {
+    jobs,
+    states,
+    throughput,
+    oldestPending,
+    pendingClaimable,
+    pendingRetryDelayed,
+    oldestClaimablePending,
+  };
 }
 
 function normalizeOperationalBlockerCategory(blocker) {
@@ -4350,23 +4378,33 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
   }
 
   const pendingRemediation = snapshot.followUpQueues.states.pending || 0;
+  const claimablePendingRemediation = snapshot.followUpQueues.pendingClaimable || 0;
   const inProgressRemediation = snapshot.followUpQueues.states.in_progress || 0;
-  if (pendingRemediation > 0 && inProgressRemediation === 0) {
+  const oldestClaimablePendingAgeMs = snapshot.followUpQueues.oldestClaimablePending?.ageMs || 0;
+  if (
+    claimablePendingRemediation > 0
+    && inProgressRemediation === 0
+    && oldestClaimablePendingAgeMs > config.queueStarvationMaxAgeMs
+  ) {
     findings.push(buildFinding({
       code: 'review:remediation_zero_throughput',
       tier: 'ticket',
-      subject: `${pendingRemediation} remediation job(s) are queued with zero in flight`,
-      message: `follow-up-jobs/pending has ${pendingRemediation} job(s) while follow-up-jobs/in-progress is empty.`,
+      subject: `${claimablePendingRemediation} claimable remediation job(s) are queued with zero in flight`,
+      message: `follow-up-jobs/pending has ${claimablePendingRemediation} claimable job(s) older than ${Math.round(config.queueStarvationMaxAgeMs / 60000)}m while follow-up-jobs/in-progress is empty.`,
       evidence: [
         'data/follow-up-jobs/pending',
         'data/follow-up-jobs/in-progress',
       ],
-      recommendedAction: 'Treat this as a remediation-lane outage: inspect the follow-up daemon, the oldest pending job, and pre-spawn admission failures. Preserve terminal job evidence; do not raise concurrency or disable reconciliation.',
+      recommendedAction: 'Treat this as a remediation-lane outage only for claimable work: inspect the follow-up daemon, the oldest claimable pending job, and pre-spawn admission failures. Preserve terminal job evidence; do not raise concurrency or disable reconciliation.',
       observedAt,
       details: {
         pending: pendingRemediation,
+        pendingClaimable: claimablePendingRemediation,
+        pendingRetryDelayed: snapshot.followUpQueues.pendingRetryDelayed || 0,
         inProgress: inProgressRemediation,
         oldestPending: snapshot.followUpQueues.oldestPending,
+        oldestClaimablePending: snapshot.followUpQueues.oldestClaimablePending,
+        thresholdMs: config.queueStarvationMaxAgeMs,
         recentTerminalThroughput: snapshot.followUpQueues.throughput,
       },
     }));
@@ -5105,6 +5143,9 @@ function collectReviewPipelineHealth({
         states: followUpQueues.states,
         throughput: followUpQueues.throughput,
         oldestPending: followUpQueues.oldestPending,
+        pendingClaimable: followUpQueues.pendingClaimable,
+        pendingRetryDelayed: followUpQueues.pendingRetryDelayed,
+        oldestClaimablePending: followUpQueues.oldestClaimablePending,
       },
       reviewStateLedger,
       mergeOutcomes,

@@ -263,6 +263,17 @@ provenance still key off the configured logical class). It emits a loud
 
 ## 3. Validating cutover
 
+### GitHub review-state contract
+
+The reviewer keeps its body-level verdict vocabulary (`Request changes` or
+`Comment only`) separate from GitHub's submitted review event. An exact-head
+review with both structured finding sections present and empty is submitted as
+GitHub `APPROVE`, so `reviewDecision` and downstream merge authority receive an
+explicit clean signal. `Comment only` with any non-blocking finding remains a
+GitHub `COMMENT`, and any blocking finding remains `REQUEST_CHANGES`. Missing or
+unparseable finding sections fail closed to `COMMENT`; they are never promoted
+to approval.
+
 Cut a low-risk test PR (any work that would normally trip the
 adversarial-review path, e.g. a docs-only change with a worker-class
 title prefix matching the configured class — `[codex]`, `[claude-code]`,

@@ -6,6 +6,7 @@ import {
   isHammerWorkerClass,
 } from '../src/ama/hammer-worker-class.mjs';
 import { __testables__ } from '../src/ama/dispatch-closer.mjs';
+import { DUPLICATE_FAMILY_UNRESOLVED_REASON } from '../src/duplicate-family-gate.mjs';
 
 // PR #786 added `hammer-claude` (claude-opus-5) as a second closer worker class
 // used when codex quota is exhausted, but the AMA route-engagement gates still
@@ -29,6 +30,13 @@ test('isHammerWorkerClass accepts both hammer classes and rejects everything els
 test('HAMMER_WORKER_CLASSES is the frozen canonical set', () => {
   assert.deepEqual([...HAMMER_WORKER_CLASSES], ['hammer', 'hammer-claude']);
   assert.equal(Object.isFrozen(HAMMER_WORKER_CLASSES), true);
+});
+
+test('duplicate-family unresolved reason structurally blocks hammer route', () => {
+  assert.equal(
+    __testables__.isHammerRouteStructurallyBlocked([DUPLICATE_FAMILY_UNRESOLVED_REASON]),
+    true,
+  );
 });
 
 // Route-gate proof: cleanupHammerCloserWorker's guard (dispatch-closer.mjs) used

@@ -10,7 +10,6 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-
 import { summarizeChecksConclusion } from './checks-summary.mjs';
 import { createLogChangeGate } from './log-change-gate.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';

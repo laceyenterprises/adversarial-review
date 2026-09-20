@@ -247,6 +247,7 @@ function normalizeGateState(live = {}) {
     mergeStateStatus: live.mergeStateStatus,
     prState: String(live.prState ?? live.state ?? '').trim().toUpperCase(),
     merged: Boolean(live.merged) || String(live.prState ?? live.state ?? '').toUpperCase() === 'MERGED',
+    labels: Array.isArray(live.labels) ? live.labels : undefined,
     branchProtectionRequired: live.branchProtectionRequired,
     requiredGateContext: live.requiredGateContext,
     branchProtectionRequiredContexts: Array.isArray(live.branchProtectionRequiredContexts)
@@ -528,6 +529,7 @@ export async function attemptDaemonCleanMerge({
     requiredCheckContexts,
     candidateHead: preLease.candidateHead,
     validatedHead,
+    labels: preLease.labels,
   });
   if (!preEligibility.eligible) {
     return notTaken('not-eligible', { reasons: preEligibility.reasons, liveGate: preLease });
@@ -696,6 +698,7 @@ export async function attemptDaemonCleanMerge({
       requiredCheckContexts,
       candidateHead: live.candidateHead,
       validatedHead,
+      labels: live.labels,
     });
     if (!elig.eligible) {
       terminal = { reason: 'gate-not-eligible', permanent: true, reasons: elig.reasons, liveGate: live };

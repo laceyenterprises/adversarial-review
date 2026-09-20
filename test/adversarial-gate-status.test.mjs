@@ -882,6 +882,18 @@ test('pickAdversarialGateStatus treats no-merge-hold as an explicit skip label',
   assert.equal(decision.reason, 'operator-skip-label');
 });
 
+test('pickAdversarialGateStatus does not red-light watcher-owned duplicate-family holds', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow(),
+    labels: [{ name: 'duplicate-family-hold' }, { name: 'operator-approved' }],
+    operatorApproval: makeOperatorApproval(),
+    headSha: 'abc123',
+  });
+
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'operator-approved');
+});
+
 test('pickAdversarialGateStatus ignores unvalidated operator approvals', () => {
   const decision = pickAdversarialGateStatus({
     reviewRow: makeReviewRow(),

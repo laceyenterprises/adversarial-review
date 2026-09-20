@@ -86,7 +86,7 @@ import {
 import { validateStartupRoleRegistry } from './role-registry.mjs';
 import { validateStartupDeliveryIdentity } from './adapters/comms/github-pr-comments/delivery-identity.mjs';
 import { isPipelineEnabled } from './domain-pipeline.mjs';
-import { runDuplicateFamilyCensusForWatcher } from './duplicate-family-state.mjs';
+import { reconcileDuplicateFamilyLabels, runDuplicateFamilyCensusForWatcher } from './duplicate-family-state.mjs';
 import { checkAgyReviewerAuth } from './agy-reviewer-auth.mjs';
 import { scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 import { createCompositeOperatorSurface } from './adapters/operator/index.mjs';
@@ -416,7 +416,6 @@ import {
   createRoutingTierReadinessProbeCache,
   probeRoutingTierReadiness,
 } from './routing-tier-readiness.mjs';
-
 const execFileAsync = promisify(execFile);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1408,7 +1407,8 @@ async function pollOnce(
       hasReviewRow: (entry) => Boolean('current' in entry ? entry.current : (entry.current = stmtGetReviewRow.get(repoPath, entry.prNumber))),
     });
     subjectEntries = orderSubjectEntriesRereviewOldestFirst(subjectEntries, { repoPath, logger: console });
-    await runDuplicateFamilyCensusForWatcher({ db, subjectEntries, repoPath, rootDir: ROOT, env: process.env });
+    const duplicateFamilyCensus = await runDuplicateFamilyCensusForWatcher({ db, subjectEntries, repoPath, rootDir: ROOT, env: process.env });
+    await reconcileDuplicateFamilyLabels({ db, octokit, repoPath, logger: console, census: duplicateFamilyCensus });
     for (const subjectEntry of subjectEntries) {
       await processReviewSubject(subjectEntry, {
         octokit,

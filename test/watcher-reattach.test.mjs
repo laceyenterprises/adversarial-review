@@ -11,6 +11,7 @@ import {
   LEGACY_ORPHAN_FAILURE_MESSAGE,
   NULL_PGID_FAILURE_MESSAGE,
   POSTED_REVIEW_CLEANUP_RECHECK_DELAYS_MS,
+  findReviewerProcessBySessionUuid,
   makeReviewPostedProbe,
   reconcileReviewerSessions,
 } from '../src/reviewer-reattach.mjs';
@@ -1241,6 +1242,33 @@ test('claimed rows with null pgid adopt a matching process found by session uuid
   assert.equal(row.reviewer_lease_expires_at, '2026-05-11T05:39:00.000Z');
   assert.match(log.lines.join('\n'), /reviewer_reattach_adopted_process_scan/);
   assert.match(log.lines.join('\n'), /reviewer_reattach_alive/);
+});
+
+test('process scan skips incidental session uuid mentions before adopting reviewer processes', () => {
+  const result = findReviewerProcessBySessionUuid('session-70', {
+    execFileSyncImpl: () => [
+      '  8101  8101 zsh -lc rg session-70 src/reviewer-reattach.mjs',
+      '  8102  8102 node --test test/watcher-reattach.test.mjs session-70',
+      '  9101  9101 node src/reviewer.mjs --reviewer-session-uuid session-70',
+    ].join('\n'),
+  });
+
+  assert.deepEqual(result, {
+    found: true,
+    pid: 9101,
+    pgid: 9101,
+    command: 'node src/reviewer.mjs --reviewer-session-uuid session-70',
+  });
+
+  assert.deepEqual(
+    findReviewerProcessBySessionUuid('session-70', {
+      execFileSyncImpl: () => [
+        '  8101  8101 zsh -lc rg session-70 reviewer-runtime',
+        '  8102  8102 node --test test/watcher-reattach.test.mjs session-70',
+      ].join('\n'),
+    }),
+    { found: false }
+  );
 });
 
 test('old spawned/null-pgid rows wait the full reviewer timeout before rearm', async () => {

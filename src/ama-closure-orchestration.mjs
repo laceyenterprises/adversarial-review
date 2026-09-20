@@ -1018,7 +1018,7 @@ export async function maybeDispatchAmaClosureFor({
     isOpen: String(candidate?.prState || 'open').toLowerCase() === 'open',
     isDraft: Boolean(candidate?.isDraft),
     mergeableState: gateSnapshot.mergeableState,
-    labels: Array.isArray(labelNames) ? labelNames : [],
+    labels: Array.isArray(labelNames) ? labelNames : undefined,
     statusCheckRollup: Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : [],
     branchProtection: { requiredContexts: candidate?.branchProtection?.requiredContexts || [] },
     author: candidate?.prAuthor || null,
@@ -1051,6 +1051,7 @@ export async function maybeDispatchAmaClosureFor({
     requiredGateContext,
     branchProtectionRequiredContexts,
     requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
+    labels: Array.isArray(labelNames) ? labelNames : undefined,
     candidateHead: currentPrHeadSha || candidate?.headSha || '',
     validatedHead: reviewState.headSha,
   });

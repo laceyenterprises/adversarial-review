@@ -19,6 +19,7 @@ import {
   NO_MERGE_HOLD_LABEL,
   OPERATOR_APPROVED_LABEL,
 } from './adapters/operator/github-pr-label-controls/index.mjs';
+import { DUPLICATE_FAMILY_HOLD_LABEL } from './duplicate-family-gate.mjs';
 import { MODULE_CONFIG_PATH } from './role-config.mjs';
 import { loadConfigCached } from './config-loader.mjs';
 import { normalizeReviewVerdict } from './review-verdict.mjs';
@@ -325,7 +326,8 @@ function pickMergeAgentDispatchDetail(job, {
 
   const hasUnbypassableSkipLabel = labels.has('merge-agent-skip')
     || labels.has('do-not-merge')
-    || labels.has(NO_MERGE_HOLD_LABEL);
+    || labels.has(NO_MERGE_HOLD_LABEL)
+    || labels.has(DUPLICATE_FAMILY_HOLD_LABEL);
   if (hasUnbypassableSkipLabel) {
     return { decision: 'skip-operator-skip', trigger: null };
   }

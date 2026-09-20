@@ -1024,6 +1024,7 @@ test('same-head terminal HAM remediation auto-merges when structural gates pass'
         headSha: REVIEWED_HEAD,
         mergeable: 'MERGEABLE',
         mergeStateStatus: 'CLEAN',
+        labels: [],
         statusCheckRollup: [
           { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
         ],
@@ -1103,6 +1104,7 @@ test('same-head terminal HAM remediation leaves terminal breadcrumb when merge s
         headSha: REVIEWED_HEAD,
         mergeable: 'MERGEABLE',
         mergeStateStatus: 'CLEAN',
+        labels: [],
         statusCheckRollup: [
           { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
         ],
@@ -1202,6 +1204,7 @@ test('same-head terminal HAM remediation passes canonical live gate shape to dae
     mergeStateStatus: 'CLEAN',
     prState: 'OPEN',
     merged: false,
+    labels: [],
     branchProtectionRequiredContexts: [],
   });
   assert.deepEqual(observedRequiredCheckContexts, ['ci/lint', 'ci/test']);
@@ -1260,6 +1263,7 @@ test('same-head terminal HAM remediation records merged audit before nonfatal cl
         headSha: REVIEWED_HEAD,
         mergeable: 'MERGEABLE',
         mergeStateStatus: 'CLEAN',
+        labels: [],
         statusCheckRollup: [
           { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
         ],

@@ -440,8 +440,8 @@ already accepts same-login evidence.
 | `adversarial-merge-blocked` | AMA-05. Blocks AMA closure unconditionally regardless of other eligibility. | **Accepted** (author may block their own PR). |
 | `merge-agent-requested` | Existing. On AMA-enabled hosts, dispatches merge-agent as the current-head operator-fallback lane WITH the AMA-06A admit-gate bypass (`AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true`). It also serves as the documented `merge-agent-stuck` recovery signal when the current-head evidence is attributable and the label is still present. The live contract is single-operator: the scoped current-head label is the authority, not a distinct non-author actor check. | **Accepted** when the evidence is current-head, attributable, and fresh, including same-login evidence on single-operator hosts. |
 
-For the four other hard-stop labels (`merge-agent-skip`, `do-not-merge`,
-`no-merge-hold`, `merge-agent-stuck`), see SPEC §4.2 #6. They block AMA
+For the five other hard-stop labels (`merge-agent-skip`, `do-not-merge`,
+`no-merge-hold`, `duplicate-family-hold`, `merge-agent-stuck`), see SPEC §4.2 #6. They block AMA
 closure regardless of evidence except for the documented
 `merge-agent-stuck` carve-out above, which requires current-head
 `merge-agent-requested` evidence and does not accept `operator-approved`

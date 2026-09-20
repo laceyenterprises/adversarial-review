@@ -10,6 +10,10 @@ import { promisify } from 'node:util';
 
 import { fetchLatestLabelEvent } from '../../../github-label-events.mjs';
 import { parseSubjectExternalId } from '../../subject/github-pr/index.mjs';
+import {
+  DUPLICATE_FAMILY_HOLD_LABEL,
+  DUPLICATE_FAMILY_LABEL,
+} from '../../../duplicate-family-gate.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -272,6 +276,8 @@ export {
   MERGE_AGENT_REQUESTED_LABEL,
   MERGE_AGENT_STUCK_LABEL,
   NO_MERGE_HOLD_LABEL,
+  DUPLICATE_FAMILY_LABEL,
+  DUPLICATE_FAMILY_HOLD_LABEL,
   OPERATOR_APPROVED_LABEL,
   RAISED_ROUND_CAP_LABEL,
   applyRevisionScopedLabelEvent,

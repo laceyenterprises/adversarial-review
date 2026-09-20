@@ -940,6 +940,7 @@ test('daemon clean merge resolves worker identity via head-independent pr_opened
         mergeable: 'MERGEABLE',
         mergeStateStatus: 'CLEAN',
         prState: 'open',
+        labels: [],
         branchProtection: { requiredContexts: ['agent-os/adversarial-gate'] },
       },
       gateSnapshot: {
@@ -961,6 +962,7 @@ test('daemon clean merge resolves worker identity via head-independent pr_opened
         statusCheckRollup: [{ __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'SUCCESS' }],
         mergeable: 'MERGEABLE',
         mergeStateStatus: 'CLEAN',
+        labels: [],
       }),
       acquireMergeLeaseImpl: () => ({
         acquired: true,
@@ -2220,6 +2222,7 @@ function realRollupHelpers({ rootDir, prNumber = 700, head = 'clean-head' }) {
       mergeable: 'MERGEABLE',
       mergeStateStatus: 'CLEAN',
       prState: 'open',
+      labels: [],
       branchProtection: { requiredContexts: ['agent-os/adversarial-gate'] },
     },
     gateSnapshot: {
@@ -2267,6 +2270,7 @@ test('DCA-01: clean PR with real-contract `checks` rollup now MERGES (was parked
       fetchRollupImpl: async () => ({
         state: 'OPEN',
         headRefOid: 'clean-head',
+        labels: [],
         checks: [
           { name: 'repo-guards', conclusion: 'SUCCESS' },
           { name: 'shellcheck', conclusion: 'SUCCESS' },
@@ -2302,6 +2306,7 @@ test('DCA-01: a check that goes RED between pre-lease and the in-loop re-fetch p
         return {
           state: 'OPEN',
           headRefOid: 'flip-head',
+          labels: [],
           checks: [{ name: 'repo-guards', conclusion }],
           mergeable: 'MERGEABLE',
           mergeStateStatus: 'CLEAN',
@@ -2332,6 +2337,7 @@ test('DCA-01: a live rollup with ZERO checks never merges (LAC-1559 empty-rollup
       fetchRollupImpl: async () => ({
         state: 'OPEN',
         headRefOid: 'nocheck-head',
+        labels: [],
         checks: [],
         mergeable: 'MERGEABLE',
         mergeStateStatus: 'CLEAN',
@@ -2448,6 +2454,7 @@ function unattributedDaemonArgs({ rootDir, prNumber = 900, head = 'operator-pr-h
       branchProtection: { requiredContexts: ['agent-os/adversarial-gate'] },
       prAuthor: 'VirtualPaul',
       headRefName: 'claude-code/infra-fix',
+      labels: [],
     },
     gateSnapshot: { reviewedHeadSha: head, settledReview: { verdict: 'comment-only' } },
     mergeabilityForGate: { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' },
@@ -2462,6 +2469,7 @@ function unattributedDaemonArgs({ rootDir, prNumber = 900, head = 'operator-pr-h
       state: 'OPEN', headRefOid: head,
       checks, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN',
       headRefName: 'claude-code/infra-fix',
+      labels: [],
     }),
     // Identity resolution fails on every path: no build-completion signal, no head
     // attestation, and an HQ_ROOT with no launch-provenance files.

@@ -564,6 +564,9 @@ function normalizeAdapterRollup(payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     throw new Error('GitHub adapter rollup payload must be an object');
   }
+  if (!Object.hasOwn(payload, 'labels')) {
+    throw new Error('GitHub adapter rollup payload missing labels');
+  }
   const normalized = normalizeRollup(payload, {
     labels: normalizeLabels(payload.labels),
     comments: Array.isArray(payload.comments) ? payload.comments.map(normalizeComment) : [],

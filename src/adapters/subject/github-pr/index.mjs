@@ -83,6 +83,9 @@ function normalizePRSnapshot(repoPath, pr) {
     title: String(pr?.title || ''),
     state: String(pr?.state || '').trim().toLowerCase(),
     headSha: headShaFromPR(pr) || undefined,
+    headRefName: pr?.head?.ref || pr?.headRefName || undefined,
+    baseRefName: pr?.base?.ref || pr?.baseRefName || undefined,
+    baseSha: pr?.base?.sha || pr?.baseRefOid || undefined,
     labels: Array.isArray(pr?.labels)
       ? pr.labels
         .map((label) => (typeof label === 'string' ? label : label?.name))
@@ -117,6 +120,10 @@ function stateFromSnapshot(snapshot, {
     createdAt: snapshot.createdAt,
     updatedAt: snapshot.updatedAt,
     headSha: snapshot.headSha,
+    headRefName: snapshot.headRefName,
+    baseRefName: snapshot.baseRefName,
+    baseSha: snapshot.baseSha,
+    state: snapshot.state,
     currentRound,
     completedRemediationRounds,
     maxRemediationRounds,

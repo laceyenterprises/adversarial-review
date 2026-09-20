@@ -71,6 +71,7 @@ export async function runFastMergeClosePathIsolated({
         `merged=${fastMergeSummary.merged} blocked=${fastMergeSummary.blocked} ` +
         `requeued_head_change=${fastMergeSummary.requeued_head_change} ` +
         `requeued_veto=${fastMergeSummary.requeued_veto} ` +
+        `requeued_duplicate_family_hold=${fastMergeSummary.requeued_duplicate_family_hold} ` +
         `pending=${fastMergeSummary.skipped_still_pending}`
       );
     }

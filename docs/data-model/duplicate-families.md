@@ -1,20 +1,24 @@
 # Data Model - Duplicate Families
 
-**Owner:** duplicate-family advisory census
+**Owner:** duplicate-family merge gate
 **Store:** `data/reviews.db`
 **Source of truth:** `src/duplicate-family-state.mjs`
 **Runtime surface:** `src/duplicate-family-state.mjs`, `src/review-state.mjs`, `src/watcher.mjs`
 
 ## Purpose
 
-The duplicate-family census records advisory groups of open PRs that appear to
-represent the same work identity in the same target repo and base branch. The
-watcher updates this state during polling so operator surfaces can see likely
-redundant PRs without blocking the normal adversarial-review state machine.
+The duplicate-family census records groups of open PRs that appear to represent
+the same work identity in the same target repo and base branch. The watcher
+updates this state during polling so operator surfaces can see likely redundant
+PRs and so unresolved duplicate families can block autonomous merge lanes until
+the family is resolved or suppressed.
 
-The census is advisory only. Rows do not merge, close, or reject PRs by
-themselves; they preserve evidence and operator overrides for duplicate-stack
-adjudication.
+Rows do not merge, close, or reject PRs by themselves. For an active unresolved
+family, `reconcileDuplicateFamilyLabels()` projects the store into GitHub by
+applying `duplicate-family` and `duplicate-family-hold`; the hold label is the
+merge-blocking contract consumed by AMA, hammer routing, merge-agent dispatch,
+and fast-merge. Suppressed candidates remain advisory members only and do not
+receive the hold.
 
 ## Tables
 
@@ -33,7 +37,7 @@ One row per detected work-identity family.
 | `strongest_signal` | First common strong signal kind shared by active candidates. |
 | `selected_survivor_pr_number` | Optional operator-selected PR number to keep as the survivor. |
 | `report_path` | Optional path to an operator-facing duplicate report artifact. |
-| `operator_override_json` | Operator override/disposition payload. A candidate head move marks matching overrides stale once for the observed head. |
+| `operator_override_json` | Reserved operator override/disposition payload. A candidate head move marks matching overrides stale once for the observed head when a payload is present, but no shipped writer currently makes this a hold-release path. |
 | `transition_log_json` | JSON array of status transitions such as initial detection, reactivation, and deactivation. |
 | `candidate_count` | Count of live open unsuppressed candidates in the current advisory family. |
 | `first_detected_at` | First time the family was recorded. |
@@ -60,17 +64,18 @@ belong to only one family at a time; reassignment updates the row's
 | `role` | Candidate role, currently `candidate`. |
 | `work_identity_json` | Extracted identity payload and provenance resolution. |
 | `signals_json` | Strong signal evidence used by the detector. |
-| `suppressions_json` | Suppression evidence such as stack/follow-up labels or current-head exclusion labels. |
+| `suppressions_json` | Suppression evidence such as stack/follow-up labels or the PR-wide exclusion label. |
 | `labels_json` | Candidate label names at last census. |
 | `first_seen_at` | First time this PR was persisted for the family. |
 | `last_seen_at` | Last census time this PR was observed for the family. |
 | `updated_at` | Last time this candidate row was refreshed. |
 
 The primary key is `(repo, pr_number)`. The watcher keeps candidate
-rows current for every PR still mapped to an active family, including PRs that
-became merged, closed, or suppressed after the family was first detected. This
-prevents stale `open` candidate state from surviving while sibling PRs keep the
-family advisory active. Existing databases created with the older
+rows current for every PR still mapped to an active family. For candidates that
+leave the open-PR discovery slice, the census joins the authoritative
+`reviewed_prs.pr_state`; a sibling recorded there as merged or closed is
+re-injected with that terminal state and no longer keeps the family active.
+Slice absence by itself is not treated as closure. Existing databases created with the older
 `(family_id, repo, pr_number)` key are migrated in place by
 `ensureDuplicateFamilySchema(db)`.
 
@@ -85,7 +90,9 @@ family advisory active. Existing databases created with the older
   candidates in an orphaned legacy table.
 - `detectDuplicateFamiliesForRepo()` requires at least two open unsuppressed
   candidates with at least two common strong signals before returning an
-  advisory family.
+  advisory family. Candidates carrying suppression evidence, such as
+  `not-a-duplicate-stack`, stack/follow-up labels, or sibling stack-base
+  evidence, are persisted for operator context but are not held.
 - `upsertDuplicateFamilies()` persists all candidates in each returned family,
   while `candidate_count` tracks only the active open unsuppressed subset. If a
   PR is detected in a different family, its existing candidate row is reassigned
@@ -95,10 +102,26 @@ family advisory active. Existing databases created with the older
   no longer returns the family key. Families that are absent solely because all
   candidates fell outside a windowed polling slice remain advisory until a later
   observation proves they no longer have two live unsuppressed candidates.
+  Absence from the watcher slice is never written back as `pr_state='closed'`;
+  only an observed subject state may change the cached PR state.
+- `reconcileDuplicateFamilyLabels()` writes the GitHub labels after each census:
+  active unresolved unsuppressed candidates receive `duplicate-family` and
+  `duplicate-family-hold`; suppressed candidates receive only
+  `duplicate-family`; inactive families have both watcher-owned labels removed,
+  while individually released candidates have `duplicate-family-hold` removed.
+  Removal is attempted from the evaluated
+  family state rather than from the cached `labels_json`, and successful label
+  writes update `labels_json` so later ticks do not repeat the same GitHub
+  mutation. The hold releases after the census no longer sees two live
+  unsuppressed candidates or after an operator suppression label is observed for
+  that candidate.
 - Operator overrides are not deleted automatically. If the override references
   a candidate whose head moved, the override is marked stale for that observed
   head without regenerating the stale timestamp on later identical polls.
 - Missing or transiently unreadable dispatch provenance disables the duplicate
-  census for the tick rather than deactivating existing active families.
+  census for the tick rather than deactivating existing active families. When a
+  census tick fails, label reconciliation refuses to add or re-add
+  watcher-owned duplicate-family labels from unverified persisted state; a later
+  successful census is required before new hold projection resumes.
 - The tables contain no secrets; JSON payloads store PR metadata, labels,
   provenance resolution state, and operator disposition metadata only.

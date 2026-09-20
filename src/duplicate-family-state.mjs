@@ -2,6 +2,11 @@ import { spawnSync as nodeSpawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readBuildCompletionSignalForPr } from './session-ledger-read-adapter.mjs';
+import {
+  DUPLICATE_FAMILY_HOLD_LABEL,
+  DUPLICATE_FAMILY_LABEL,
+  evaluateDuplicateFamilyCandidate,
+} from './duplicate-family-gate.mjs';
 
 export const DUPLICATE_FAMILY_STATUS_ADVISORY = 'advisory';
 export const DUPLICATE_FAMILY_STATUS_INACTIVE = 'inactive';
@@ -36,6 +41,18 @@ function labelNames(labels) {
     .map((label) => (typeof label === 'string' ? label : label?.name || ''))
     .map((name) => String(name || '').trim())
     .filter(Boolean);
+}
+
+function lowerLabelSet(labels) {
+  return new Set(labelNames(labels).map((name) => name.toLowerCase()));
+}
+
+function labelsFromLowerSet(labels) {
+  return [...labels].sort();
+}
+
+function isNotFoundError(err) {
+  return Number(err?.status || err?.response?.status) === 404;
 }
 
 function extractTicket(value) {
@@ -480,6 +497,47 @@ function observedSubjectCandidateKeys(subjectEntries, repoPath) {
   return keys;
 }
 
+function refreshObservedDuplicateCandidateRows(db, subjectEntries, repoPath, now = new Date().toISOString()) {
+  if (!repoPath) return;
+  const updateObservedCandidate = db.prepare(
+    `UPDATE duplicate_family_candidates
+        SET title = ?,
+            pr_state = ?,
+            base_branch = ?,
+            head_branch = ?,
+            head_sha = ?,
+            base_sha = ?,
+            labels_json = ?,
+            last_seen_at = ?,
+            updated_at = ?
+      WHERE repo = ?
+        AND pr_number = ?`
+  );
+  const tx = db.transaction(() => {
+    for (const entry of Array.isArray(subjectEntries) ? subjectEntries : []) {
+      const subject = entry?.subject || {};
+      const prNumber = Number(entry?.prNumber ?? subject.number ?? subject.prNumber);
+      if (!Number.isInteger(prNumber) || prNumber <= 0) continue;
+      const repo = normalizeText(entry?.repoPath || entry?.repo || subject.repositoryWithOwner || subject.repo || repoPath);
+      if (!repo) continue;
+      updateObservedCandidate.run(
+        normalizeText(subject.title),
+        subjectPrState(subject, entry?.current),
+        normalizeText(subject.baseRefName || subject.baseBranch || 'main'),
+        normalizeText(subject.headRefName || subject.headBranch),
+        normalizeText(subject.headSha || subject.headRefOid),
+        normalizeText(subject.baseSha || subject.baseRefOid || subject.mergeBaseSha),
+        JSON.stringify(labelNames(subject.labels)),
+        now,
+        now,
+        repo,
+        prNumber,
+      );
+    }
+  });
+  tx();
+}
+
 function familyHasObservedCandidate(db, familyId, observedCandidateKeys) {
   if (!(observedCandidateKeys instanceof Set) || observedCandidateKeys.size === 0) return false;
   const rows = db.prepare(
@@ -494,11 +552,23 @@ function mergePersistedDuplicateCandidates(db, subjectEntries, repoPath) {
   if (!repoPath) return Array.isArray(subjectEntries) ? subjectEntries : [];
   const merged = Array.isArray(subjectEntries) ? [...subjectEntries] : [];
   const seen = new Set(merged.map((entry) => subjectEntryKey(entry, repoPath)).filter(Boolean));
+  const hasReviewedPrs = Boolean(db.prepare(
+    `SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'reviewed_prs'`
+  ).get());
+  const authoritativeStateSelect = hasReviewedPrs
+    ? ', reviewed_prs.pr_state AS authoritative_pr_state'
+    : ', NULL AS authoritative_pr_state';
+  const authoritativeStateJoin = hasReviewedPrs
+    ? `LEFT JOIN reviewed_prs
+         ON reviewed_prs.repo = duplicate_family_candidates.repo
+        AND reviewed_prs.pr_number = duplicate_family_candidates.pr_number`
+    : '';
   const rows = db.prepare(
-    `SELECT duplicate_family_candidates.*
+    `SELECT duplicate_family_candidates.*${authoritativeStateSelect}
        FROM duplicate_family_candidates
        JOIN duplicate_families
          ON duplicate_families.family_id = duplicate_family_candidates.family_id
+       ${authoritativeStateJoin}
       WHERE duplicate_families.target_repo = ?
         AND duplicate_families.status = ?`
   ).all(repoPath, DUPLICATE_FAMILY_STATUS_ADVISORY);
@@ -514,7 +584,9 @@ function mergePersistedDuplicateCandidates(db, subjectEntries, repoPath) {
       subject: {
         number: row.pr_number,
         title: row.title,
-        state: row.pr_state,
+        state: ['merged', 'closed'].includes(String(row.authoritative_pr_state || '').toLowerCase())
+          ? String(row.authoritative_pr_state).toLowerCase()
+          : row.pr_state,
         baseRefName: row.base_branch,
         headRefName: row.head_branch,
         headSha: row.head_sha,
@@ -708,6 +780,7 @@ export function upsertDuplicateFamilies(db, families, {
 export function reconcileDuplicateFamiliesForRepo(db, subjectEntries, options = {}) {
   ensureDuplicateFamilySchema(db);
   const repoPath = options.repoPath;
+  refreshObservedDuplicateCandidateRows(db, subjectEntries, repoPath, options.now);
   const observedCandidateKeys = observedSubjectCandidateKeys(subjectEntries, repoPath);
   const censusEntries = mergePersistedDuplicateCandidates(db, subjectEntries, repoPath);
   const families = detectDuplicateFamiliesForRepo(censusEntries, options);
@@ -846,4 +919,108 @@ export function duplicateFamilyCandidateRows(db, familyId) {
       WHERE family_id = ?
       ORDER BY pr_number ASC`
   ).all(familyId);
+}
+
+export async function reconcileDuplicateFamilyLabels({ db, octokit, repoPath, logger = console, census = null } = {}) {
+  if (!db || !repoPath) return { inspected: 0, changed: 0, skipped: 'missing-store-or-repo' };
+  if (!octokit) {
+    logger?.log?.(`[watcher] duplicate-family label projection skipped for ${repoPath}: octokit unavailable`);
+    return { inspected: 0, changed: 0, skipped: 'octokit-unavailable' };
+  }
+  const projectionVerified = !census || (!census.error && Array.isArray(census.familyIds));
+  if (!projectionVerified) {
+    logger?.log?.(`[watcher] duplicate-family hold projection skipped for ${repoPath}: census state unverified this tick`);
+  }
+  ensureDuplicateFamilySchema(db);
+  const [owner, repo] = String(repoPath).split('/');
+  if (!owner || !repo) return { inspected: 0, changed: 0 };
+  const rows = db.prepare(
+    `SELECT duplicate_families.*, duplicate_family_candidates.pr_number,
+            duplicate_family_candidates.head_sha AS candidate_head_sha,
+            duplicate_family_candidates.labels_json,
+            duplicate_family_candidates.suppressions_json
+       FROM duplicate_family_candidates
+       JOIN duplicate_families
+         ON duplicate_families.family_id = duplicate_family_candidates.family_id
+      WHERE duplicate_family_candidates.repo = ?
+        AND lower(duplicate_family_candidates.pr_state) = 'open'`
+  ).all(repoPath);
+  const updateCandidateLabels = db.prepare(
+    `UPDATE duplicate_family_candidates
+        SET labels_json = ?,
+            updated_at = ?
+      WHERE repo = ?
+        AND pr_number = ?`
+  );
+  let changed = 0;
+  for (const row of rows) {
+    const gate = evaluateDuplicateFamilyCandidate(row, {
+      prNumber: row.pr_number,
+      headSha: row.candidate_head_sha,
+    });
+    const suppressed = parseMaybeJson(row.suppressions_json, []).length > 0;
+    const held = gate.held && !suppressed;
+    const current = lowerLabelSet(parseMaybeJson(row.labels_json, []));
+    const next = new Set(current);
+    const familyActive = String(row.status || '').toLowerCase() === DUPLICATE_FAMILY_STATUS_ADVISORY;
+    const wanted = familyActive ? [DUPLICATE_FAMILY_LABEL, ...(held ? [DUPLICATE_FAMILY_HOLD_LABEL] : [])] : [];
+    const additions = projectionVerified ? wanted.filter((name) => !current.has(name)) : [];
+    const removeHold = !held && current.has(DUPLICATE_FAMILY_HOLD_LABEL);
+    const removeFamily = !familyActive && current.has(DUPLICATE_FAMILY_LABEL);
+    let persist = false;
+    try {
+      if (removeHold) {
+        await octokit.rest.issues.removeLabel({
+          owner, repo, issue_number: row.pr_number, name: DUPLICATE_FAMILY_HOLD_LABEL,
+        });
+        changed += 1;
+        next.delete(DUPLICATE_FAMILY_HOLD_LABEL);
+        persist = true;
+      }
+    } catch (err) {
+      if (isNotFoundError(err)) {
+        next.delete(DUPLICATE_FAMILY_HOLD_LABEL);
+        persist = true;
+      } else {
+        logger?.error?.(
+          `[watcher] duplicate-family hold removal failed for ${repoPath}#${row.pr_number}: ${err?.message || err}`,
+        );
+      }
+    }
+    try {
+      if (removeFamily) {
+        await octokit.rest.issues.removeLabel({
+          owner, repo, issue_number: row.pr_number, name: DUPLICATE_FAMILY_LABEL,
+        });
+        changed += 1;
+        next.delete(DUPLICATE_FAMILY_LABEL);
+        persist = true;
+      }
+    } catch (err) {
+      if (isNotFoundError(err)) {
+        next.delete(DUPLICATE_FAMILY_LABEL);
+        persist = true;
+      } else {
+        logger?.error?.(
+          `[watcher] duplicate-family label removal failed for ${repoPath}#${row.pr_number}: ${err?.message || err}`,
+        );
+      }
+    }
+    try {
+      if (additions.length > 0) {
+        await octokit.rest.issues.addLabels({ owner, repo, issue_number: row.pr_number, labels: additions });
+        changed += additions.length;
+        for (const label of additions) next.add(label);
+        persist = true;
+      }
+    } catch (err) {
+      logger?.error?.(
+        `[watcher] duplicate-family label add failed for ${repoPath}#${row.pr_number}: ${err?.message || err}`,
+      );
+    }
+    if (persist) {
+      updateCandidateLabels.run(JSON.stringify(labelsFromLowerSet(next)), new Date().toISOString(), repoPath, row.pr_number);
+    }
+  }
+  return { inspected: rows.length, changed };
 }

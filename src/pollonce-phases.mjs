@@ -39,6 +39,7 @@ import {
   routeSubject,
 } from './adapters/subject/github-pr/routing.mjs';
 import { projectAdversarialGateStatus } from './adversarial-gate-status.mjs';
+import { labelsContainDuplicateFamilyHold } from './duplicate-family-gate.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
 import { runDaemonCleanMergeAttempt } from './daemon-clean-merge.mjs';
 import { loadDomainConfig } from './domain-config.mjs';
@@ -1633,7 +1634,8 @@ export async function processReviewSubject(entry, ctx) {
         });
         if (liveLabels) {
           const fastMergeDecision = fastMergeDecisionFromLabels(liveLabels);
-          if (fastMergeDecision.hasFastMergeLabel && !fastMergeDecision.hasVeto) {
+          const duplicateFamilyHeld = labelsContainDuplicateFamilyHold(liveLabels);
+          if (fastMergeDecision.hasFastMergeLabel && !fastMergeDecision.hasVeto && !duplicateFamilyHeld) {
             const authorizedHeadSha = await fetchLivePRHeadSha({
               owner,
               repo,

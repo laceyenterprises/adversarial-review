@@ -22,6 +22,7 @@
  *
  * @module ama/merge-eligibility
  */
+import { labelsContainDuplicateFamilyHold, DUPLICATE_FAMILY_UNRESOLVED_REASON } from '../duplicate-family-gate.mjs';
 
 /**
  * Verdict tokens that clear the verdict gate. `settled-success` is the direct
@@ -47,6 +48,8 @@ export const MERGE_ELIGIBILITY_REASONS = Object.freeze([
   'branch-protection-missing-gate',
   'stale-head',
   'lease-not-held',
+  'labels-unavailable',
+  DUPLICATE_FAMILY_UNRESOLVED_REASON,
 ]);
 
 /**
@@ -109,6 +112,7 @@ export const MERGE_ELIGIBILITY_REASONS = Object.freeze([
  *                                      post-remediation). Mismatch → `stale-head`.
  * @property {boolean=} leaseHeld       True iff the caller holds the `(repo, base)`
  *                                      merge lease. Else `lease-not-held`.
+ * @property {Array<string|{name:string}>=} labels Current live PR labels.
  */
 
 /**
@@ -251,6 +255,11 @@ export function evaluateMergeEligibility(state = {}) {
   if (!branchProtectionRequiresGate(state)) reasons.push('branch-protection-missing-gate');
   if (!headMatches(state)) reasons.push('stale-head');
   if (state?.leaseHeld !== true) reasons.push('lease-not-held');
+  if (!Array.isArray(state?.labels)) {
+    reasons.push('labels-unavailable');
+  } else if (labelsContainDuplicateFamilyHold(state.labels)) {
+    reasons.push(DUPLICATE_FAMILY_UNRESOLVED_REASON);
+  }
 
   return { eligible: reasons.length === 0, reasons };
 }

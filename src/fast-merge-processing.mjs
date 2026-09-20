@@ -54,6 +54,7 @@ import {
   isProtectorOpen,
   resolveProtectivePredecessorDeclaration,
 } from './ama/protective-predecessor.mjs';
+import { labelsContainDuplicateFamilyHold } from './duplicate-family-gate.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -1104,6 +1105,23 @@ async function processFastMergePR({
       logger,
     });
   }
+  if (labelsContainDuplicateFamilyHold(firstView.labels)) {
+    return auditAndRequeueFastMerge({
+      db,
+      rootDir,
+      ghClient,
+      repo,
+      prNumber,
+      authorizedHeadSha: exactHeadSha,
+      currentHeadSha: firstView.headRefOid || null,
+      labels: firstView.labels,
+      reason: 'duplicate-family hold label detected before merge; requeueing normal first-pass review',
+      action: 'duplicate-family-hold-requeued',
+      statusOverride: 'requeued_duplicate_family_hold',
+      auditWriter,
+      logger,
+    });
+  }
 
   if (!hasFastMergeAuthorizationLabel(firstView.labels)) {
     return auditAndRequeueFastMerge({
@@ -1185,6 +1203,23 @@ async function processFastMergePR({
       reason: 'fast-merge veto label detected before merge; requeueing normal first-pass review',
       action: 'veto-requeued',
       vetoDetected: true,
+      auditWriter,
+      logger,
+    });
+  }
+  if (labelsContainDuplicateFamilyHold(preMergeView.labels)) {
+    return auditAndRequeueFastMerge({
+      db,
+      rootDir,
+      ghClient,
+      repo,
+      prNumber,
+      authorizedHeadSha: exactHeadSha,
+      currentHeadSha: preMergeView.headRefOid || null,
+      labels: preMergeView.labels,
+      reason: 'duplicate-family hold label detected before merge; requeueing normal first-pass review',
+      action: 'duplicate-family-hold-requeued',
+      statusOverride: 'requeued_duplicate_family_hold',
       auditWriter,
       logger,
     });
@@ -1495,6 +1530,7 @@ async function pollFastMergeQueue({
     blocked: 0,
     requeued_head_change: 0,
     requeued_veto: 0,
+    requeued_duplicate_family_hold: 0,
     requeued_label_removed: 0,
     skipped_still_pending: 0,
   };
@@ -1517,6 +1553,7 @@ async function pollFastMergeQueue({
       else if (result?.status === 'blocked') summary.blocked += 1;
       else if (result?.status === 'requeued_head_change') summary.requeued_head_change += 1;
       else if (result?.status === 'requeued_veto') summary.requeued_veto += 1;
+      else if (result?.status === 'requeued_duplicate_family_hold') summary.requeued_duplicate_family_hold += 1;
       else if (result?.status === 'requeued_label_removed') summary.requeued_label_removed += 1;
       else if (result?.status === 'skipped_still_pending') summary.skipped_still_pending += 1;
       if (result?.status && result.status !== 'skipped_still_pending') {

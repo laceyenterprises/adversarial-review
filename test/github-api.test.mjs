@@ -1433,6 +1433,32 @@ test('adapter rollup missing mergeability falls back to the legacy implementatio
   assert.equal(legacyExec.calls.length > 0, true);
 });
 
+test('adapter rollup missing labels falls back to the legacy implementation', async () => {
+  const expected = makeExpectedRollup();
+  const mod = await importGithubApiFresh();
+  const legacyExec = makeLegacyExecStub(expected);
+  const calls = [];
+  const { labels: _labels, ...withoutLabels } = expected;
+
+  await withEnv({ GHO_DISABLE_GRAPHQL_ROLLUP: '1' }, async () => {
+    const result = await mod.fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
+      env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+      recordApiCallImpl: () => {},
+      execFileImpl: async (command, args, options) => {
+        calls.push({ command, args: [...args] });
+        if (command === '/fixture/github-adapter') {
+          return { stdout: JSON.stringify({ rollup: withoutLabels }) };
+        }
+        return legacyExec.execFileImpl(command, args, options);
+      },
+    });
+    assert.deepEqual(result, expected);
+  });
+
+  assert.equal(calls[0].command, '/fixture/github-adapter');
+  assert.equal(legacyExec.calls.length > 0, true);
+});
+
 test('adapter-present head/state path preserves existing normalized payload shape', async () => {
   const expected = makeExpectedRollup();
   const mod = await importGithubApiFresh();

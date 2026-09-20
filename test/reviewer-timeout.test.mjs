@@ -134,6 +134,8 @@ test('reapRunningPassTimeouts reaps a stuck running pass older than threshold', 
 
     const result = reapRunningPassTimeouts({ db, rootDir });
     assert.equal(result.reaped, 1);
+    const repeated = reapRunningPassTimeouts({ db, rootDir });
+    assert.equal(repeated.reaped, 0, 'a second sweep must not invent another recovery');
 
     const row = db.prepare(`SELECT status, metadata_json, ended_at FROM reviewer_passes WHERE pr_number = 123`).get();
     assert.equal(row.status, 'failed');
@@ -142,6 +144,10 @@ test('reapRunningPassTimeouts reaps a stuck running pass older than threshold', 
     assert.equal(metadata.failureClass, 'reviewer-timeout');
     assert.equal(metadata.failureReason, 'running-pass-timeout');
     assert.equal(metadata.timeoutThresholdSeconds, 3600);
+    const events = db.prepare(
+      `SELECT event_type, reason FROM review_latency_events WHERE repo = ? AND pr_number = ?`
+    ).all('laceyenterprises/agent-os', 123);
+    assert.deepEqual(events, [{ event_type: 'reviewer_reaped', reason: 'running-pass-timeout' }]);
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

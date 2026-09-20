@@ -20,6 +20,8 @@ const EVENT_TYPES = Object.freeze([
   'reviewer_post_attempt',
   'reviewer_post_success',
   'reviewer_post_failure',
+  'reviewer_reaped',
+  'reviewer_reattached',
   'settlement_completed',
   'follow_up_created',
   'clean_verdict',

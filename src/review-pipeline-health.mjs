@@ -96,6 +96,9 @@ const DEFAULT_DAG_AUTOWALK_MAX_LOG_AGE_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_DISPATCH_SPAWN_FAILURE_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_HAMMER_DISPATCH_STALL_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_CONFLICTING_PR_MIN_SHARED_PATH_COUNT = 5;
+const DEFAULT_FIRST_PASS_CI_ORPHAN_MAX_PROBED_PRS = 25;
+const DEFAULT_FIRST_PASS_CI_ORPHAN_DEADLINE_MS = 120_000;
+const DEFAULT_FIRST_PASS_CI_ORPHAN_WORKER_STATUS_TIMEOUT_MS = 30_000;
 const DEFAULT_LAUNCHD_TIMEOUT_MS = 2_000;
 const DEFAULT_LAUNCHD_TRANSIENT_RETRY_DELAYS_MS = Object.freeze([50, 150]);
 const DEFAULT_GH_TERMINAL_STATE_RETRY_DELAYS_MS = Object.freeze([100, 250]);
@@ -141,6 +144,7 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_queued_rereview_oldest_age_seconds',
   'review_pipeline_ci_blocked_rereviews',
   'review_pipeline_first_pass_ci_orphans',
+  'review_pipeline_first_pass_ci_orphans_collected',
   'review_pipeline_operational_blocker_rounds',
   'review_pipeline_operational_blocker_oldest_age_seconds',
   'review_pipeline_remediation_backlog_jobs',
@@ -190,6 +194,7 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_queued_rereview_oldest_age_seconds: 'Age in seconds of the oldest pending re-review row.',
   review_pipeline_ci_blocked_rereviews: 'Current count of re-reviews parked behind failed external CI.',
   review_pipeline_first_pass_ci_orphans: 'Current count of red first-pass PR heads with no live branch worker and no review verdict.',
+  review_pipeline_first_pass_ci_orphans_collected: 'Whether the first-pass CI orphan collector probed every candidate successfully.',
   review_pipeline_operational_blocker_rounds: 'Current stopped remediation rounds grouped by operational blocker category.',
   review_pipeline_operational_blocker_oldest_age_seconds: 'Age in seconds of the oldest unresolved stopped remediation round for an operational blocker category.',
   review_pipeline_remediation_backlog_jobs: 'Current follow-up remediation job count by state.',
@@ -309,7 +314,15 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     category: 'review-pipeline',
     thresholdKey: null,
     defaultThreshold: null,
-    thresholdDescription: 'an open first-pass PR has failing required checks, no verdict, and no known live worker on its branch',
+    thresholdDescription: 'an open first-pass PR has failing checks, no verdict, and no known live worker on its branch',
+  },
+  {
+    code: 'review:first_pass_ci_orphan_probe_blind',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: 'firstPassCiOrphanDeadlineMs',
+    defaultThreshold: DEFAULT_FIRST_PASS_CI_ORPHAN_DEADLINE_MS,
+    thresholdDescription: 'the first-pass CI orphan collector could not probe every candidate successfully',
   },
   {
     code: 'review:rereview_ci_blocked',
@@ -737,6 +750,21 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
       overrides.conflictingPrMinSharedPathCount
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_MIN_SHARED_PATH_COUNT,
       DEFAULT_CONFLICTING_PR_MIN_SHARED_PATH_COUNT
+    ),
+    firstPassCiOrphanMaxProbedPrs: parsePositiveInteger(
+      overrides.firstPassCiOrphanMaxProbedPrs
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_FIRST_PASS_CI_ORPHAN_MAX_PROBED_PRS,
+      DEFAULT_FIRST_PASS_CI_ORPHAN_MAX_PROBED_PRS
+    ),
+    firstPassCiOrphanDeadlineMs: parsePositiveInteger(
+      overrides.firstPassCiOrphanDeadlineMs
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_FIRST_PASS_CI_ORPHAN_DEADLINE_MS,
+      DEFAULT_FIRST_PASS_CI_ORPHAN_DEADLINE_MS
+    ),
+    firstPassCiOrphanWorkerStatusTimeoutMs: parsePositiveInteger(
+      overrides.firstPassCiOrphanWorkerStatusTimeoutMs
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_FIRST_PASS_CI_ORPHAN_WORKER_STATUS_TIMEOUT_MS,
+      DEFAULT_FIRST_PASS_CI_ORPHAN_WORKER_STATUS_TIMEOUT_MS
     ),
     launchdTimeoutMs: parsePositiveInteger(
       overrides.launchdTimeoutMs
@@ -2011,8 +2039,22 @@ function summarizeFirstPassQueue(db, { nowMs, stoppedCiRegressionJobs = null }) 
 function failedCheckNames(rollup) {
   const failed = new Set();
   for (const check of Array.isArray(rollup) ? rollup : []) {
+    const bucket = String(check?.bucket || '').toLowerCase();
+    if (bucket && !['fail', 'cancel'].includes(bucket)) continue;
+    if (bucket && ['fail', 'cancel'].includes(bucket)) {
+      failed.add(String(check?.name || check?.context || 'unknown'));
+      continue;
+    }
     const result = String(check?.conclusion || check?.state || '').toUpperCase();
-    if (!['FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED'].includes(result)) continue;
+    if (![
+      'FAILURE',
+      'ERROR',
+      'CANCELLED',
+      'TIMED_OUT',
+      'ACTION_REQUIRED',
+      'STARTUP_FAILURE',
+      'STALE',
+    ].includes(result)) continue;
     failed.add(String(check?.name || check?.context || 'unknown'));
   }
   return [...failed].sort();
@@ -2079,7 +2121,12 @@ function workerManifestMatches(manifests, repo, branch) {
     'githubRepo',
     'github_repo',
   ])));
-  return repos.size === 0 || repos.has(repo) || repos.has(repo.replace(/^laceyenterprises\//, ''));
+  return repos.size === 0 || repos.has(repo) || repos.has(bareRepoName(repo));
+}
+
+function bareRepoName(repo) {
+  const text = String(repo || '').trim();
+  return text.includes('/') ? text.split('/').pop() : text;
 }
 
 function workerLaunchRequestId(manifests) {
@@ -2090,27 +2137,44 @@ function workerLaunchRequestId(manifests) {
   ]))[0] || null;
 }
 
-function liveWorkerForBranch(hqRoot, repo, branch, { execFileSyncImpl }) {
+function branchWorkerIndex(hqRoot) {
   const workersDir = join(hqRoot, 'workers');
-  if (!branch || !existsSync(workersDir)) return null;
-  const hqBin = process.env.AGENT_OS_HQ_BIN || process.env.HQ_BIN || 'hq';
-  const ownerUser = readHqOwnerUser(hqRoot);
+  const workers = [];
+  if (!existsSync(workersDir)) return workers;
   for (const workerId of readdirSync(workersDir)) {
     const manifests = readWorkerManifests(join(workersDir, workerId));
+    workers.push({
+      workerId,
+      manifests,
+      launchRequestId: workerLaunchRequestId(manifests),
+    });
+  }
+  return workers;
+}
+
+function liveWorkerForBranch(hqRoot, repo, branch, {
+  execFileSyncImpl,
+  workerIndex = branchWorkerIndex(hqRoot),
+  workerStatusTimeoutMs = DEFAULT_FIRST_PASS_CI_ORPHAN_WORKER_STATUS_TIMEOUT_MS,
+}) {
+  if (!branch) return null;
+  const hqBin = process.env.AGENT_OS_HQ_BIN || process.env.HQ_BIN || 'hq';
+  const ownerUser = readHqOwnerUser(hqRoot);
+  const liveStatuses = new Set(['requested', 'admitted', 'leased', 'starting', 'running']);
+  for (const { workerId, manifests, launchRequestId } of workerIndex) {
     if (!workerManifestMatches(manifests, repo, branch)) continue;
-    const launchRequestId = workerLaunchRequestId(manifests);
-    if (!launchRequestId) {
-      return { status: 'unknown', error: `worker ${workerId} matches ${repo}:${branch} but has no launchRequestId` };
-    }
+    if (!launchRequestId) continue;
     try {
       const args = ['dispatch', 'status', launchRequestId, '--json'];
       if (ownerUser) args.push('--as-owner', ownerUser);
       const output = execFileSyncImpl(
         hqBin, args,
-        { encoding: 'utf8', timeout: 5_000, stdio: ['ignore', 'pipe', 'pipe'] }
+        { encoding: 'utf8', timeout: workerStatusTimeoutMs, stdio: ['ignore', 'pipe', 'pipe'] }
       );
       const status = String(parseJson(output, {})?.status || '').toLowerCase();
-      if (!['completed', 'failed', 'cancelled', 'canceled', 'lease_expired'].includes(status)) {
+      // Keep in sync with session-ledger launch_request_terminal_statuses.py:
+      // only known non-terminal statuses suppress this orphan diagnostic.
+      if (liveStatuses.has(status)) {
         return { workerId, launchRequestId, status: status || 'unknown' };
       }
     } catch (error) {
@@ -2125,38 +2189,76 @@ function liveWorkerForBranch(hqRoot, repo, branch, { execFileSyncImpl }) {
   return null;
 }
 
+function execGhWithTransientRetry(args, {
+  execFileSyncImpl,
+  sleepSyncImpl = sleepSyncMs,
+  timeout = 20_000,
+  acceptStdoutOnError = false,
+}) {
+  const options = {
+    encoding: 'utf8',
+    timeout,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  };
+  let lastError;
+  for (let attempt = 0; attempt <= DEFAULT_GH_TERMINAL_STATE_RETRY_DELAYS_MS.length; attempt += 1) {
+    try {
+      return execFileSyncImpl('gh', args, options);
+    } catch (error) {
+      const stdout = String(error?.stdout || '');
+      if (acceptStdoutOnError && parseJsonArray(stdout).length > 0) return stdout;
+      lastError = error;
+      if (!isTransientGhTerminalStateError(error)
+        || attempt >= DEFAULT_GH_TERMINAL_STATE_RETRY_DELAYS_MS.length) {
+        throw error;
+      }
+      sleepSyncImpl(DEFAULT_GH_TERMINAL_STATE_RETRY_DELAYS_MS[attempt]);
+    }
+  }
+  throw lastError;
+}
+
 function summarizeFirstPassCiOrphans(firstPassQueue, {
   hqRoot,
   execFileSyncImpl,
+  sleepSyncImpl = sleepSyncMs,
+  config = {},
 }) {
   const prs = [];
   const errors = [];
-  for (const queued of firstPassQueue.firstPassPrs || []) {
+  const candidates = (firstPassQueue.firstPassPrs || [])
+    .filter((queued) => queued.reviewAttempts <= 0 && !queued.reviewerFailed);
+  const maxProbedPrs = config.firstPassCiOrphanMaxProbedPrs || DEFAULT_FIRST_PASS_CI_ORPHAN_MAX_PROBED_PRS;
+  const deadlineMs = config.firstPassCiOrphanDeadlineMs || DEFAULT_FIRST_PASS_CI_ORPHAN_DEADLINE_MS;
+  const deadlineAt = Date.now() + deadlineMs;
+  const workerIndex = branchWorkerIndex(hqRoot);
+  let probedPrs = 0;
+  let unprobedPrs = 0;
+  for (const queued of candidates) {
+    if (probedPrs >= maxProbedPrs || Date.now() > deadlineAt) {
+      unprobedPrs += 1;
+      continue;
+    }
+    probedPrs += 1;
     if (queued.reviewAttempts > 0 || queued.reviewerFailed) continue;
     try {
-      const output = execFileSyncImpl(
-        'gh', ['pr', 'view', String(queued.prNumber), '--repo', queued.repo, '--json',
+      const output = execGhWithTransientRetry(
+        ['pr', 'view', String(queued.prNumber), '--repo', queued.repo, '--json',
           'state,headRefName,headRefOid'],
-        { encoding: 'utf8', timeout: 20_000, stdio: ['ignore', 'pipe', 'pipe'] }
+        { execFileSyncImpl, sleepSyncImpl }
       );
       const pr = parseJson(output, {});
-      let checksOutput;
-      try {
-        checksOutput = execFileSyncImpl(
-          'gh', ['pr', 'checks', String(queued.prNumber), '--repo', queued.repo, '--required',
-            '--json', 'name,state'],
-          { encoding: 'utf8', timeout: 20_000, stdio: ['ignore', 'pipe', 'pipe'] }
-        );
-      } catch (error) {
-        // `gh pr checks` deliberately exits non-zero when checks are red while
-        // still returning the requested JSON on stdout. That is data, not a
-        // probe failure; only rethrow when there is no parseable payload.
-        checksOutput = String(error?.stdout || '');
-        if (parseJsonArray(checksOutput).length === 0) throw error;
-      }
+      const checksOutput = execGhWithTransientRetry(
+        ['pr', 'checks', String(queued.prNumber), '--repo', queued.repo, '--json', 'name,state,bucket'],
+        { execFileSyncImpl, sleepSyncImpl, acceptStdoutOnError: true }
+      );
       const failedChecks = failedCheckNames(parseJsonArray(checksOutput));
       if (String(pr.state).toUpperCase() !== 'OPEN' || failedChecks.length === 0) continue;
-      const liveWorker = liveWorkerForBranch(hqRoot, queued.repo, pr.headRefName, { execFileSyncImpl });
+      const liveWorker = liveWorkerForBranch(hqRoot, queued.repo, pr.headRefName, {
+        execFileSyncImpl,
+        workerIndex,
+        workerStatusTimeoutMs: config.firstPassCiOrphanWorkerStatusTimeoutMs,
+      });
       if (liveWorker?.error) {
         errors.push(`${queued.repo}#${queued.prNumber}: ${liveWorker.error}`);
         continue;
@@ -2173,7 +2275,15 @@ function summarizeFirstPassCiOrphans(firstPassQueue, {
       errors.push(`${queued.repo}#${queued.prNumber}: ${String(error?.stderr || error?.message || error).slice(0, 300)}`);
     }
   }
-  return { count: prs.length, prs, errors };
+  return {
+    count: prs.length,
+    collected: errors.length === 0 && unprobedPrs === 0,
+    probedPrs,
+    unprobedPrs,
+    totalCandidates: candidates.length,
+    prs,
+    errors,
+  };
 }
 
 const REREVIEW_DEFERRING_JOB_KINDS = new Set([
@@ -4085,13 +4195,36 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }));
   }
 
+  if (
+    snapshot.firstPassCiOrphans
+    && snapshot.firstPassCiOrphans.collected === false
+    && (
+      (snapshot.firstPassCiOrphans.errors || []).length > 0
+      || Number(snapshot.firstPassCiOrphans.unprobedPrs || 0) > 0
+    )
+  ) {
+    findings.push(buildFinding({
+      code: 'review:first_pass_ci_orphan_probe_blind',
+      tier: 'ticket',
+      subject: 'First-pass CI orphan probe is blind',
+      message: 'GitHub checks, worker-liveness probes, or the configured first-pass CI orphan budget prevented a complete snapshot; this is not proof that no PR heads are orphaned.',
+      evidence: (snapshot.firstPassCiOrphans.errors || []).slice(0, 3),
+      recommendedAction: 'Inspect the probe errors or raise the first-pass CI orphan probe budget before treating the orphan count as clean.',
+      observedAt,
+      details: snapshot.firstPassCiOrphans,
+    }));
+  }
+
   for (const orphan of snapshot.firstPassCiOrphans?.prs || []) {
     findings.push(buildFinding({
       code: 'review:first_pass_ci_orphan',
       tier: 'ticket',
       subject: `${orphan.repo}#${orphan.prNumber} has an unowned red first-pass head`,
-      message: `Head ${orphan.headSha} fails required check(s) ${orphan.failedChecks.join(', ')}; no review verdict or known live worker owns branch ${orphan.headRefName}. First-pass review is not CI-gated, so this diagnostic is additive to queue-starvation findings.`,
-      evidence: [`gh pr view ${orphan.prNumber} --repo ${orphan.repo}`],
+      message: `Head ${orphan.headSha} fails check(s) ${orphan.failedChecks.join(', ')}; no review verdict or known live worker owns branch ${orphan.headRefName}. First-pass review is not CI-gated, so this diagnostic is additive to queue-starvation findings.`,
+      evidence: [
+        `gh pr view ${orphan.prNumber} --repo ${orphan.repo}`,
+        ...(snapshot.firstPassCiOrphans.errors || []).slice(0, 3),
+      ],
       recommendedAction: 'Assign a human or worker to repair the red checks on the existing PR branch; verify it updates this same PR rather than opening another one.',
       observedAt,
       details: orphan,
@@ -4797,8 +4930,14 @@ function collectReviewPipelineHealth({
       ? summarizeCiBlockedRereviews(db, { nowMs })
       : { count: 0, oldest: null, prs: [] };
     const firstPassCiOrphans = config.hostChecksEnabled
-      ? summarizeFirstPassCiOrphans(firstPassQueue, { hqRoot, execFileSyncImpl })
-      : { count: 0, prs: [], errors: [] };
+      ? summarizeFirstPassCiOrphans(firstPassQueue, {
+          hqRoot,
+          execFileSyncImpl,
+          sleepSyncImpl,
+          config,
+          nowMs,
+        })
+      : { count: 0, collected: false, probedPrs: 0, unprobedPrs: 0, totalCandidates: 0, prs: [], errors: [] };
     const queuedRereviews = db
       ? summarizeQueuedRereviews(db, followUpQueues.jobs, { nowMs, stoppedCiRegressionJobs })
       : { count: 0, oldest: null, prs: [] };
@@ -5085,6 +5224,11 @@ function renderReviewPipelinePrometheus(snapshot) {
   );
   pushMetric('review_pipeline_ci_blocked_rereviews', {}, snapshot.ciBlockedRereviews?.count || 0);
   pushMetric('review_pipeline_first_pass_ci_orphans', {}, snapshot.firstPassCiOrphans?.count || 0);
+  pushMetric(
+    'review_pipeline_first_pass_ci_orphans_collected',
+    {},
+    snapshot.firstPassCiOrphans?.collected ? 1 : 0
+  );
   const operationalBlockerCategories = snapshot.operationalBlockers?.byCategory?.length
     ? snapshot.operationalBlockers.byCategory
     : [{ category: 'none', count: 0, oldest: null }];

@@ -205,7 +205,20 @@ import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 import { getStalePostedReviewAutoRereviewSuppression } from './stale-posted-review-rereview.mjs';
 import { computeVocabularyFatigueFindingForPR } from './vocabulary-fatigue.mjs';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
-import { reserveReviewerMemoryAdmission } from './watcher-reviewer-pool.mjs';
+import { createReviewerMemoryAdmissionSampler, reserveReviewerMemoryAdmission } from './watcher-reviewer-pool.mjs';
+
+export function createReviewerTickState({
+  logger = console,
+  memoryPressureConfig,
+} = {}) {
+  return {
+    reviewerTickCaches: { fleetQuotaStatusCache: new Map() },
+    reviewerMemoryAdmissionSampleForTick: createReviewerMemoryAdmissionSampler({
+      logger,
+      memoryPressureConfig,
+    }),
+  };
+}
 import { watcherWakeMatchesSubject } from './watcher-wake.mjs';
 
 const DEFAULT_REVIEWER_MODEL_FALLBACK_ALERT_WINDOW_MS = 10 * 60 * 1000;

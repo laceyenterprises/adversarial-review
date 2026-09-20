@@ -235,7 +235,7 @@ import {
 } from './adversarial-gate-status.mjs';
 import { runTtmTrackerWatcherTick } from './ttm-tracker.mjs';
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
-import { processReviewSubject } from './pollonce-phases.mjs';
+import { createReviewerTickState, processReviewSubject } from './pollonce-phases.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 // MSM-04 — the only agent dispatch left on the AMA surface is the hammer.
 // Fully clean PRs merge through the daemon path; dirty/conflicted/red-CI PRs
@@ -400,7 +400,6 @@ import {
 import {
   compareReviewerDispatchCandidates,
   createDetachedReviewerDispatchTracker,
-  createReviewerMemoryAdmissionSampler,
   reserveReviewerMemoryAdmission, resolveFirstPassReviewerPoolConfig,
   resolveReviewerMemoryPressureConfig,
   runBoundedReviewerDispatchQueue,
@@ -1246,8 +1245,7 @@ async function pollOnce(
   const postedReviewHandlers = [];
   const postReviewMaintenanceHandlers = [];
   const reviewerMemoryReservationState = { reservedMb: 0 };
-  const reviewerTickCaches = { fleetQuotaStatusCache: new Map() };
-  const reviewerMemoryAdmissionSampleForTick = createReviewerMemoryAdmissionSampler({
+  const { reviewerTickCaches, reviewerMemoryAdmissionSampleForTick } = createReviewerTickState({
     logger: console,
     memoryPressureConfig: reviewerMemoryPressureConfig,
   });

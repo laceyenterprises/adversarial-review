@@ -751,8 +751,13 @@ test('WATCHSTARVE-01: pollOnce threads one bounded fleet quota cache through the
 
   assert.match(
     watcherSource,
-    /const reviewerTickCaches = \{ fleetQuotaStatusCache: new Map\(\) \};/,
-    'pollOnce owns a quota cache for the tick',
+    /createReviewerTickState\(\{/,
+    'pollOnce creates per-tick reviewer state through the phase leaf',
+  );
+  assert.match(
+    pollonceSource,
+    /reviewerTickCaches: \{ fleetQuotaStatusCache: new Map\(\) \},/,
+    'the phase leaf owns a quota cache for the tick',
   );
   assert.match(
     watcherSource,

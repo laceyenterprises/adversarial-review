@@ -113,6 +113,7 @@ import {
   POSTED_REVIEW_ARTIFACT_RECOVERY_CLASS,
   reapRunningPassTimeouts,
 } from '../src/reviewer-pass-reaper.mjs';
+import { readCascadeState } from '../src/reviewer-cascade.mjs';
 import { DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS } from '../src/reviewer-lease.mjs';
 
 function setupDb() {
@@ -551,6 +552,14 @@ test('reapRunningPassTimeouts releases matching reviewed_prs claim for retry', (
     assert.match(review.failure_message, /^\[reviewer-timeout\]/);
     assert.equal(review.reviewer_lease_expires_at, null);
     assert.equal(review.infra_auto_recover_attempts, 1);
+
+    const cascadeState = readCascadeState(rootDir, {
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 129,
+    });
+    assert.deepEqual(cascadeState.transientFailureBreakdownByModel, {
+      codex: { 'reviewer-timeout': 1 },
+    });
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

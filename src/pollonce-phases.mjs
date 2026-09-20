@@ -2910,6 +2910,7 @@ export async function processReviewSubject(entry, ctx) {
                 failureAt: attemptAt,
                 env: process.env,
                 maxRemediationRounds,
+                reviewerModel: route.reviewerModel,
               });
               return { dispatched: false, reason: 'routing-tier-not-ready' };
             }
@@ -3110,6 +3111,7 @@ export async function processReviewSubject(entry, ctx) {
                   result: postedResult,
                   env: process.env,
                   maxRemediationRounds,
+                  reviewerModel: route.reviewerModel,
                   markReviewHeartbeat: markWatcherReviewHeartbeat,
                 });
                 reviewRowSettled = true;
@@ -3143,6 +3145,7 @@ export async function processReviewSubject(entry, ctx) {
                   result,
                   env: process.env,
                   maxRemediationRounds,
+                  reviewerModel: route.reviewerModel,
                   // ARC-18: watcher owns the heartbeat singleton; thread it in.
                   markReviewHeartbeat: markWatcherReviewHeartbeat,
                 });

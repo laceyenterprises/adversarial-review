@@ -57,6 +57,42 @@ test('legacy state with no per-model data falls back to the flat map', () => {
   assert.equal(reviewerExecFailureCount(legacy, 'reviewer-timeout', 'claude'), 4);
 });
 
+test('mixed state counts unattributed flat failures after per-model data exists', () => {
+  const cascadeState = {
+    transientFailureBreakdown: {
+      'quota-exhausted': 1,
+      'reviewer-timeout': 2,
+    },
+    transientFailureBreakdownByModel: {
+      claude: { 'quota-exhausted': 1 },
+    },
+    lastFailureClass: 'reviewer-timeout',
+    lastFailureModel: 'claude',
+  };
+  assert.equal(
+    reviewerExecFailureCount(cascadeState, 'quota-exhausted', 'gemini'),
+    0,
+    'gemini must not inherit claude’s attributed quota failure',
+  );
+  assert.equal(
+    reviewerExecFailureCount(cascadeState, 'reviewer-timeout', 'gemini'),
+    2,
+    'gemini must still see flat-only reviewer-timeout failures from unattributed writers',
+  );
+});
+
+test('mixed state adds only the flat-map remainder to a model’s own count', () => {
+  const cascadeState = {
+    transientFailureBreakdown: { 'reviewer-timeout': 3 },
+    transientFailureBreakdownByModel: {
+      gemini: { 'reviewer-timeout': 1 },
+      claude: { 'reviewer-timeout': 1 },
+    },
+  };
+  assert.equal(reviewerExecFailureCount(cascadeState, 'reviewer-timeout', 'gemini'), 2);
+  assert.equal(reviewerExecFailureCount(cascadeState, 'reviewer-timeout', 'codex'), 1);
+});
+
 test('signal does not prioritise a lastFailureClass belonging to a different model', () => {
   const cascadeState = {
     transientFailureBreakdown: { 'quota-exhausted': 2 },

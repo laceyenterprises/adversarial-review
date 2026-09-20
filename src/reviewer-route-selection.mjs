@@ -147,16 +147,27 @@ function reviewerRouteForModel(model) {
 // (`gemini class=quota-exhausted count=2/2`), and gemini produced zero reviews
 // in six hours while being selected 1852 times.
 //
-// Falls back to the flat map ONLY when no per-model data exists for this
-// subject, so cascade-state files written before this change keep their
-// existing (conservative) behaviour instead of resetting counts to zero
-// mid-outage.
+// Falls back to the flat map when no per-model data exists for this subject, so
+// cascade-state files written before this change keep their existing
+// (conservative) behaviour instead of resetting counts to zero mid-outage.
+//
+// Mixed state is possible during rolling upgrades or from writer paths that
+// still lack a model. In that case, charge this model for its own attributed
+// count plus only the flat-map remainder not already accounted for by any
+// model. That keeps claude's known failures from routing gemini away while
+// preserving real fallback-eligible failures written by flat-only callers.
 function reviewerExecFailureCount(cascadeState, failureClass, reviewerModel = null) {
   const byModel = cascadeState?.transientFailureBreakdownByModel;
   if (byModel && typeof byModel === 'object' && Object.keys(byModel).length > 0) {
     const key = String(reviewerModel || '').trim().toLowerCase();
     if (!key) return 0;
-    return Number(byModel?.[key]?.[failureClass] || 0);
+    const modelCount = Number(byModel?.[key]?.[failureClass] || 0);
+    const attributedCount = Object.values(byModel).reduce((sum, counts) => (
+      sum + Number(counts?.[failureClass] || 0)
+    ), 0);
+    const flatCount = Number(cascadeState?.transientFailureBreakdown?.[failureClass] || 0);
+    const unattributedCount = Math.max(0, flatCount - attributedCount);
+    return modelCount + unattributedCount;
   }
   return Number(cascadeState?.transientFailureBreakdown?.[failureClass] || 0);
 }

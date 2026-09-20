@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
   probeHammerWorkerActivity,
+  probeWorkerDirectoryUse,
   reapCloserHammerWorktrees,
   resolveEntryLaunchRequestId,
 } from '../src/ama/closer-worktree-reaper.mjs';
@@ -329,6 +330,120 @@ test('probeHammerWorkerActivity: active status with no pid stays active (cannot 
   assert.equal(out.pid, null);
 });
 
+test('probeWorkerDirectoryUse: same-uid cwd match marks worker active and scopes by pid', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-lsof-active-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const workerDir = join(root, 'hammer-ama-pr-791-active');
+  const worktree = join(workerDir, 'agent-os');
+  mkdirSync(worktree, { recursive: true });
+  const calls = [];
+  const out = await probeWorkerDirectoryUse({
+    workerDir,
+    pid: 4242,
+    timeoutMs: 12345,
+    execFileImpl: async (cmd, args, options) => {
+      calls.push({ cmd, args, options });
+      return { stdout: `p4242\nn${join(worktree, 'subdir')}\n` };
+    },
+  });
+
+  assert.equal(out.state, 'active');
+  assert.equal(out.reason, 'cwd-in-worker-dir');
+  assert.equal(out.matches, 1);
+  assert.deepEqual(calls[0].args, ['-a', '-d', 'cwd', '-Fn', '-p', '4242']);
+  assert.equal(calls[0].options.timeout, 12345);
+});
+
+test('probeWorkerDirectoryUse: same-uid no-match is inactive only after a clean probe', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-lsof-inactive-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const workerDir = join(root, 'hammer-ama-pr-791-inactive');
+  mkdirSync(join(workerDir, 'agent-os'), { recursive: true });
+
+  const out = await probeWorkerDirectoryUse({
+    workerDir,
+    execFileImpl: async () => ({ stdout: `p1\nn${join(root, 'elsewhere')}\n` }),
+  });
+
+  assert.deepEqual(out, { state: 'inactive', reason: 'no-cwd-in-worker-dir', matches: 0 });
+});
+
+test('probeWorkerDirectoryUse: exit-1 without diagnostics is inactive, diagnostics are unknown', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-lsof-exit1-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const workerDir = join(root, 'hammer-ama-pr-791-exit1');
+  mkdirSync(workerDir, { recursive: true });
+
+  const cleanExitOne = await probeWorkerDirectoryUse({
+    workerDir,
+    execFileImpl: async () => {
+      const err = new Error('no files');
+      err.code = 1;
+      err.stderr = '';
+      throw err;
+    },
+  });
+  assert.deepEqual(cleanExitOne, { state: 'inactive', reason: 'no-cwd-in-worker-dir', matches: 0 });
+
+  const diagnosticExitOne = await probeWorkerDirectoryUse({
+    workerDir,
+    execFileImpl: async () => {
+      const err = new Error('permission denied');
+      err.code = 1;
+      err.stderr = 'lsof: WARNING: cannot stat() some file system\n';
+      throw err;
+    },
+  });
+  assert.equal(diagnosticExitOne.state, 'unknown');
+  assert.equal(diagnosticExitOne.reason, 'process-probe-error:1');
+});
+
+test('probeWorkerDirectoryUse: timeout, maxBuffer, and missing lsof are unknown', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-lsof-unknown-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const workerDir = join(root, 'hammer-ama-pr-791-unknown');
+  mkdirSync(workerDir, { recursive: true });
+
+  for (const err of [
+    Object.assign(new Error('timed out'), { killed: true, signal: 'SIGTERM' }),
+    Object.assign(new Error('maxBuffer exceeded'), { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' }),
+    Object.assign(new Error('spawn lsof ENOENT'), { code: 'ENOENT' }),
+  ]) {
+    const out = await probeWorkerDirectoryUse({
+      workerDir,
+      execFileImpl: async () => {
+        throw err;
+      },
+    });
+    assert.equal(out.state, 'unknown');
+    assert.match(out.reason, /^process-probe-error:/);
+  }
+});
+
+test('probeWorkerDirectoryUse: cross-uid worker directory is unobservable and never trusts a negative', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-lsof-cross-uid-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const workerDir = join(root, 'hammer-ama-pr-791-crossuid');
+  mkdirSync(workerDir, { recursive: true });
+  let execCalled = false;
+
+  const out = await probeWorkerDirectoryUse({
+    workerDir,
+    statSyncImpl: () => ({ uid: 501 }),
+    getuidImpl: () => 502,
+    execFileImpl: async () => {
+      execCalled = true;
+      return { stdout: '' };
+    },
+  });
+
+  assert.equal(out.state, 'unknown');
+  assert.equal(out.reason, 'cross-uid-unobservable');
+  assert.equal(out.ownerUid, 501);
+  assert.equal(out.callerUid, 502);
+  assert.equal(execCalled, false);
+});
+
 test('reaper eventually reaps a merged absent-dispatch worktree after repeated unknown probes and no live cwd', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'ama-closer-bounded-unknown-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -417,6 +532,110 @@ test('reaper never reaps a live worker when the dispatch probe repeatedly fails'
   ).at(-1);
   assert.equal(lastDeferred.livenessState, 'unknown');
   assert.equal(lastDeferred.processState, 'active');
+});
+
+test('reaper defers when escalated process probe cannot observe the worker uid', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-closer-cross-uid-unknown-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const hqRoot = join(root, 'hq');
+  const repoPath = join(hqRoot, 'repos', 'adversarial-review');
+  const workerId = 'hammer-ama-pr-791-cross-uid-unknown';
+  const { workerDir } = seedMergedHammer(hqRoot, workerId, {
+    withManifest: true,
+    launchRequestId: 'lrq_cross_uid_791',
+  });
+  const calls = [];
+  const result = await reapCloserHammerWorktrees({
+    hqRoot,
+    cursorPath: join(root, 'cursor.json'),
+    hqPath: '/bin/hq',
+    repoPaths: [repoPath],
+    execFileImpl: mergedRepoWorktreeExecFile({ calls, workerDir }),
+    execGhWithRetryImpl: mergedGh,
+    probeWorkerActivityImpl: async () => ({
+      state: 'unknown', active: false, defer: true, reason: 'probe-error:SIGTERM',
+    }),
+    probeWorkerDirectoryUseImpl: async () => ({
+      state: 'unknown', reason: 'cross-uid-unobservable',
+    }),
+    unknownProbeLimit: 1,
+    limit: 10,
+    logger: { info() {}, warn() {} },
+  });
+
+  assert.equal(result.reaped, 0);
+  assert.equal(result.deferredActiveWorker, 1);
+  assert.equal(tearDownCalled(calls, workerId), false);
+});
+
+test('reaper prunes stale and absent-worker probeFailures before persisting cursor', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-closer-probe-failure-gc-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const hqRoot = join(root, 'hq');
+  const repoPath = join(hqRoot, 'repos', 'adversarial-review');
+  const workerId = 'hammer-ama-pr-791-current';
+  const { workerDir } = seedMergedHammer(hqRoot, workerId, {
+    withManifest: true,
+    launchRequestId: 'lrq_current_791',
+  });
+  mkdirSync(join(hqRoot, 'workers', 'hammer-ama-pr-791-off-page', 'agent-os'), { recursive: true });
+  const cursorPath = join(root, 'cursor.json');
+  writeFileSync(cursorPath, `${JSON.stringify({
+    schemaVersion: 1,
+    probeFailures: {
+      [workerId]: {
+        failureCount: 1,
+        firstFailureAt: '2026-09-20T00:00:00.000Z',
+        lastFailureAt: '2026-09-20T00:00:00.000Z',
+        lastReason: 'probe-error:SIGTERM',
+      },
+      'hammer-ama-pr-791-off-page': {
+        failureCount: 2,
+        firstFailureAt: '2026-09-20T00:00:00.000Z',
+        lastFailureAt: '2026-09-20T00:00:00.000Z',
+        lastReason: 'probe-error:SIGTERM',
+      },
+      'hammer-ama-pr-791-gone': {
+        failureCount: 2,
+        firstFailureAt: '2026-09-20T00:00:00.000Z',
+        lastFailureAt: '2026-09-20T00:00:00.000Z',
+        lastReason: 'probe-error:SIGTERM',
+      },
+      'hammer-ama-pr-791-stale': {
+        failureCount: 2,
+        firstFailureAt: '2026-09-19T00:00:00.000Z',
+        lastFailureAt: '2026-09-19T00:00:00.000Z',
+        lastReason: 'probe-error:SIGTERM',
+      },
+    },
+  }, null, 2)}\n`);
+
+  await reapCloserHammerWorktrees({
+    hqRoot,
+    cursorPath,
+    hqPath: '/bin/hq',
+    repoPaths: [repoPath],
+    execFileImpl: mergedRepoWorktreeExecFile({ calls: [], workerDir }),
+    execGhWithRetryImpl: mergedGh,
+    probeWorkerActivityImpl: async () => ({
+      state: 'active', active: true, defer: false, status: 'running',
+    }),
+    limit: 10,
+    scanLimit: 1,
+    probeFailureTtlMs: 7 * 24 * 60 * 60 * 1000,
+    logger: { info() {}, warn() {} },
+  });
+
+  const persisted = JSON.parse(readFileSync(cursorPath, 'utf8'));
+  assert.equal(persisted.schemaVersion, 2);
+  assert.deepEqual(persisted.probeFailures, {
+    'hammer-ama-pr-791-off-page': {
+      failureCount: 2,
+      firstFailureAt: '2026-09-20T00:00:00.000Z',
+      lastFailureAt: '2026-09-20T00:00:00.000Z',
+      lastReason: 'probe-error:SIGTERM',
+    },
+  });
 });
 
 test('resolveEntryLaunchRequestId: reads launchRequestId; ENOENT untracked; EIO defers', async (t) => {

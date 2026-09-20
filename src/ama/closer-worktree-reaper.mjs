@@ -15,6 +15,9 @@ const DEFAULT_REAP_LIMIT = 8;
 const DEFAULT_REAP_BUDGET_MS = 20_000;
 const DEFAULT_SCAN_LIMIT = 64;
 const DEFAULT_UNKNOWN_PROBE_LIMIT = 3;
+const DEFAULT_PROCESS_PROBE_TIMEOUT_MS = 15_000;
+const DEFAULT_PROBE_FAILURE_TTL_MS = 60 * 60 * 1000;
+const DEFAULT_PROBE_FAILURE_MAX_ENTRIES = 512;
 const DEFAULT_CURSOR_PATH = join(ROOT, 'data', 'ama-closer-worktree-reaper-cursor.json');
 const HAMMER_WORKER_RE = /^hammer-ama-pr-(\d+)(?:-.+)?$/;
 
@@ -33,10 +36,11 @@ const HAMMER_ACTIVE_DISPATCH_STATUSES = new Set(['running', 'starting', 'blocked
 // fd exhaustion, fork pressure, killed-by-timeout) rather than a definitive
 // answer. On any of these — and, fail-safe, on any error we cannot positively
 // classify as definitive — the reaper DEFERS instead of reaping, so a transient
-// blip under load never deletes a live hammer's cwd. Only a positively read
-// terminal/absent status (or a genuinely absent/malformed manifest) permits a
-// reap. The worker-pool orphan reaper is the independent backstop for anything
-// that later leaks, so deferring is always the safe direction.
+// blip under load never deletes a live hammer's cwd. Unknown dispatch probes are
+// bounded by `AMA_CLOSER_WORKTREE_UNKNOWN_PROBE_LIMIT`: once the counter is hit,
+// the reaper may reap only when a same-UID process cwd probe can positively
+// observe that no process is using the worker directory. Cross-UID, timed-out,
+// or diagnostic process probes remain unknown and defer.
 const TRANSIENT_PROBE_ERROR_CODES = new Set([
   'ETIMEDOUT', 'EAGAIN', 'EIO', 'EMFILE', 'ENFILE', 'EBUSY', 'ENOMEM',
   'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ETXTBSY', 'EINTR',
@@ -54,6 +58,11 @@ function isTransientProbeError(err) {
 function normalizePositiveInteger(value, fallback) {
   const parsed = Number.parseInt(String(value ?? ''), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseOptionalPositiveInteger(value) {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
 function parseHammerPrNumber(workerName) {
@@ -133,7 +142,7 @@ async function readScanCursor(cursorPath, logger = console) {
 function persistScanCursor(cursorPath, cursor, logger = console) {
   try {
     writeFileAtomic(cursorPath, `${JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: 2,
       ...cursor,
       updatedAt: new Date().toISOString(),
     }, null, 2)}\n`, { mode: 0o600 });
@@ -146,6 +155,59 @@ function persistScanCursor(cursorPath, cursor, logger = console) {
 
 function recoverableDiscoveryError(err) {
   return ['ENOENT', 'EACCES', 'ENOTDIR'].includes(String(err?.code || ''));
+}
+
+function pruneProbeFailures(probeFailures, {
+  currentWorkerIds = null,
+  maxAgeMs = DEFAULT_PROBE_FAILURE_TTL_MS,
+  maxEntries = DEFAULT_PROBE_FAILURE_MAX_ENTRIES,
+  nowMs = Date.now(),
+} = {}) {
+  if (!probeFailures || typeof probeFailures !== 'object') return {};
+  for (const [workerId, failure] of Object.entries(probeFailures)) {
+    const lastFailureMs = Date.parse(failure?.lastFailureAt || '');
+    const stale = !Number.isFinite(lastFailureMs) || nowMs - lastFailureMs > maxAgeMs;
+    if (currentWorkerIds instanceof Set && !currentWorkerIds.has(workerId)) {
+      delete probeFailures[workerId];
+    } else if (stale) {
+      delete probeFailures[workerId];
+    }
+  }
+  const entries = Object.entries(probeFailures);
+  if (entries.length <= maxEntries) return probeFailures;
+  entries
+    .sort((left, right) => Date.parse(left[1]?.lastFailureAt || '') - Date.parse(right[1]?.lastFailureAt || ''))
+    .slice(0, entries.length - maxEntries)
+    .forEach(([workerId]) => {
+      delete probeFailures[workerId];
+    });
+  return probeFailures;
+}
+
+async function listCurrentHammerWorkerIds(hqRoot, {
+  registeredByWorker = new Map(),
+  readdirImpl = fsPromises.readdir,
+  logger = console,
+} = {}) {
+  const workersDir = join(hqRoot, 'workers');
+  try {
+    const entries = await readdirImpl(workersDir, { withFileTypes: true });
+    const workerIds = new Set(
+      entries
+        .filter((entry) => entry.isDirectory() && HAMMER_WORKER_RE.test(entry.name))
+        .map((entry) => entry.name),
+    );
+    for (const workerId of registeredByWorker.keys()) workerIds.add(workerId);
+    return workerIds;
+  } catch (err) {
+    if (recoverableDiscoveryError(err)) {
+      if (err?.code !== 'ENOENT') {
+        logger?.warn?.(`[closer-worktree-reap] probe-failure-gc-discovery-skipped path=${workersDir} code=${err.code}`);
+      }
+      return null;
+    }
+    throw err;
+  }
 }
 
 async function listHqRepoPaths(hqRoot, {
@@ -357,6 +419,14 @@ function pathTextEquals(leftPath, rightPath) {
   const left = resolve(leftPath);
   const right = resolve(rightPath);
   return process.platform === 'darwin' ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
+
+function pathTextStartsWith(childPath, parentPath) {
+  const child = resolve(childPath);
+  const parent = `${resolve(parentPath)}/`;
+  return process.platform === 'darwin'
+    ? child.toLowerCase().startsWith(parent.toLowerCase())
+    : child.startsWith(parent);
 }
 
 function physicalRemovalTargetForEntry({ hqRoot, entry }) {
@@ -601,27 +671,50 @@ async function probeWorkerDirectoryUse({
   workerDir,
   execFileImpl = execFileAsync,
   env = process.env,
+  pid = null,
+  timeoutMs = normalizePositiveInteger(
+    env.AMA_CLOSER_WORKTREE_PROCESS_PROBE_TIMEOUT_MS,
+    DEFAULT_PROCESS_PROBE_TIMEOUT_MS,
+  ),
+  statSyncImpl = statSync,
+  getuidImpl = () => (typeof process.getuid === 'function' ? process.getuid() : null),
 } = {}) {
   if (!workerDir) return { state: 'unknown', reason: 'no-worker-dir' };
+  let stat;
+  try {
+    stat = statSyncImpl(workerDir);
+  } catch (err) {
+    return { state: 'unknown', reason: `worker-dir-stat-error:${err?.code || 'unknown'}` };
+  }
+  const callerUid = getuidImpl();
+  if (!Number.isInteger(callerUid)) {
+    return { state: 'unknown', reason: 'caller-uid-unobservable' };
+  }
+  if (Number.isInteger(stat?.uid) && stat.uid !== callerUid) {
+    return { state: 'unknown', reason: 'cross-uid-unobservable', ownerUid: stat.uid, callerUid };
+  }
+  const scopedPid = parseOptionalPositiveInteger(pid);
+  const args = ['-a', '-d', 'cwd', '-Fn'];
+  if (scopedPid !== null) args.push('-p', String(scopedPid));
   try {
     const { stdout } = await execFileImpl(
       'lsof',
-      ['-a', '-d', 'cwd', '-Fn'],
-      { env: { ...env }, maxBuffer: 1024 * 1024, timeout: 5_000 },
+      args,
+      { env: { ...env }, maxBuffer: 1024 * 1024, timeout: timeoutMs },
     );
-    const workerPrefix = `${resolve(workerDir)}/`;
+    const workerPath = resolve(workerDir);
     const matches = String(stdout || '').split(/\r?\n/).filter((line) => {
       if (!line.startsWith('n')) return false;
       const cwd = resolve(line.slice(1));
-      return cwd === resolve(workerDir) || cwd.startsWith(workerPrefix);
+      return pathTextEquals(cwd, workerPath) || pathTextStartsWith(cwd, workerPath);
     });
     return matches.length > 0
       ? { state: 'active', reason: 'cwd-in-worker-dir', matches: matches.length }
       : { state: 'inactive', reason: 'no-cwd-in-worker-dir', matches: 0 };
   } catch (err) {
-    // lsof exits 1 when its query matched no open files. That is a definitive
-    // negative result, unlike a timeout/signal/spawn failure.
-    if (Number(err?.code) === 1 && !err?.killed && !err?.signal) {
+    // lsof also exits 1 for diagnostics such as permission failures. Trust it
+    // as a negative only when the same-UID scan completed without diagnostics.
+    if (Number(err?.code) === 1 && !err?.killed && !err?.signal && !String(err?.stderr || '').trim()) {
       return { state: 'inactive', reason: 'no-cwd-in-worker-dir', matches: 0 };
     }
     return {
@@ -649,6 +742,18 @@ async function reapCloserHammerWorktrees({
   unknownProbeLimit = normalizePositiveInteger(
     process.env.AMA_CLOSER_WORKTREE_UNKNOWN_PROBE_LIMIT,
     DEFAULT_UNKNOWN_PROBE_LIMIT,
+  ),
+  processProbeTimeoutMs = normalizePositiveInteger(
+    process.env.AMA_CLOSER_WORKTREE_PROCESS_PROBE_TIMEOUT_MS,
+    DEFAULT_PROCESS_PROBE_TIMEOUT_MS,
+  ),
+  probeFailureTtlMs = normalizePositiveInteger(
+    process.env.AMA_CLOSER_WORKTREE_PROBE_FAILURE_TTL_MS,
+    DEFAULT_PROBE_FAILURE_TTL_MS,
+  ),
+  probeFailureMaxEntries = normalizePositiveInteger(
+    process.env.AMA_CLOSER_WORKTREE_PROBE_FAILURE_MAX_ENTRIES,
+    DEFAULT_PROBE_FAILURE_MAX_ENTRIES,
   ),
   env = process.env,
   logger = console,
@@ -761,6 +866,16 @@ async function reapCloserHammerWorktrees({
   summary.budgetExceeded = false;
   let evaluationCursor = cursor.evaluation;
   const probeFailures = { ...cursor.probeFailures };
+  const currentWorkerIds = await listCurrentHammerWorkerIds(hqRoot, {
+    registeredByWorker,
+    readdirImpl,
+    logger,
+  });
+  pruneProbeFailures(probeFailures, {
+    currentWorkerIds,
+    maxAgeMs: probeFailureTtlMs,
+    maxEntries: probeFailureMaxEntries,
+  });
   for (const entry of evaluationEntries) {
     if (Date.now() - reapStartedAt > budgetMs) {
       // Wall-clock budget: never let the reap phase monopolize the follow-up
@@ -880,6 +995,8 @@ async function reapCloserHammerWorktrees({
         }
         const processProbe = await probeWorkerDirectoryUseImpl({
           workerDir: entry.workerDir,
+          pid: activity.pid || null,
+          timeoutMs: processProbeTimeoutMs,
           execFileImpl,
           env,
         });

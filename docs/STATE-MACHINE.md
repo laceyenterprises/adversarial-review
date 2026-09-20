@@ -256,12 +256,48 @@ new PR
   statuses. The SQL update is a compare-and-swap against the failed row that was
   read, including stable failure/session fields, so concurrent watcher/operator
   changes surface as `state-changed` instead of clearing newer evidence.
+- **Posted-orphan reconcile surface (`bin/reconcile-posted-orphans.mjs`).**
+  Operators can run `npm run reconcile-posted-orphans -- --root <path>` for a
+  read-only scan of open `failed-orphan` rows whose reviewer start timestamp is
+  parseable. The command looks for a reviewer-bot GitHub review submitted at or
+  after the stored reviewer start and on the stored reviewer head. Add `--apply`
+  to CAS the still-open `failed-orphan` row to `posted`, clear orphan failure
+  evidence and the reviewer lease, reset `infra_auto_recover_attempts`, and link
+  the running reviewer pass to the GitHub review artifact when that pass is
+  still running. It does not mutate closed/merged PR rows, rows with corrupt
+  reviewer start timestamps, stale-head reviews, unrelated statuses, or already
+  settled failed pass rows. If the PR has a blocking review, this transition is
+  operator-visible: the adversarial gate changes from the `failed-orphan`
+  anomaly success projection to the real review verdict (`blocking-review`).
 - **Cancellation surface (`src/review-cancel.mjs`).** The canonical CLI for cancelling an in-flight reviewer is `node src/review-cancel.mjs --repo <slug> --pr <n> [--signal SIGTERM] [--allow-status <comma-list>] [reason]`. By default the CLI accepts only rows in `review_status='reviewing'` (the durable claim that a reviewer subprocess is in flight). Supported values for `--allow-status` are `reviewing`, `posted`, `failed`. The flag explicitly excludes `pending` (no subprocess to signal), `failed-orphan` (sticky operator-only recovery; use `npm run retrigger-review` instead), and `malformed` (terminal by design). The canonical surface MUST cover the extended cases so operators do not fall back to `sudo kill -KILL <pgid>` or hand-editing the row to fool the guard.
   - **`--allow-status posted`** covers the **post-merge race** observed 2026-05-30: a prior attempt's row had already transitioned to `posted` while the watcher had re-spawned a retry whose subprocess outlived the PR's own merge.
   - **`--allow-status failed`** covers the **draining-subprocess** shape: the subprocess errored (timeout, cleanup-phase exception) and flipped the row to `failed`, but the OS process is still alive — for example holding a file handle, an open Linear API session, or its own SIGTERM teardown timer. Distinct from `failed-orphan`: a `failed` row preserves the reviewer failure evidence for operator inspection unless it matches the bounded infrastructure-recovery classifier (`cascade`, `reviewer-timeout`, `launchctl-bootstrap`, reviewer-spawn `oauth-broken`, or `reviewer-command-failed` for stored `[unknown] Command failed...` rows). Only that dedicated infra claim may promote `failed → reviewing`; generic failed rows are not re-promoted by `stmtMarkAttemptStarted`. The CLI's PID-identity guard (`verifyPgidIdentity` start-time match) is what makes the kill safe if row state changes during cancellation, and the CLI re-fetches the row on `identity-unconfirmed` to surface the new state so the operator can target the live reviewer instead.
   - **Audit channel.** The cancellation receipt at `data/review-cancellations/<repo>-pr-<n>-<utc>.json` records the source `review.status`, the resolved `result`, and any `postSignalState` snapshot if the row transitioned mid-cancel. This receipt directory — **not** the SQLite row — is the canonical audit trail for cancels: `cancelActiveReview` runs read-only against `reviewed_prs` (`query_only = 1`), so a successful cancel against a `posted` or `failed` row leaves the row state unchanged. To find historical cancels for a PR after the fact: `ls data/review-cancellations/ | grep -F "pr-<n>"`, then read each JSON to see the source status, requestedBy, requestedAt, reason, and signal outcome.
-- `failed-orphan` is intentionally sticky except for posted-review reconciliation and the bounded auto-reclaim path. It covers restart-era sessions where the watcher cannot prove a safe handoff back to automation, including missing launch-time timeout metadata on legacy rows, a reviewer liveness probe whose `ps` session check is unknown, a live PGID without a stored `reviewer_session_uuid`, a live PGID that survives the bounded SIGTERM/SIGKILL recovery loop, or a non-transient GitHub probe failure that prevents safe orphan classification. If a matching GitHub review is already posted on the current head, the watcher may mark the row `posted` even when the matching reviewer PGID is still alive; after a bounded cleanup recheck it sends `SIGKILL` to that confirmed matching process group and logs `reviewer_posted_process_group_cleanup_finding` if the group survived. A late GitHub review discovered during auto-reclaim is also reconciled by marking the row `posted` so the same failed-orphan row does not trigger repeated live GitHub probes. Transient GitHub probe failures such as timeouts, rate limits, and 5xx responses leave the row in `reviewing` so the next watcher tick can retry instead of creating a sticky operator-only row. A failed-orphan row may be auto-reclaimed to `pending` only after its persisted reviewer lease expires, the infrastructure recovery cap has room, and the watcher can prove the original reviewer is no longer live: either the process group is gone or the PGID is now occupied by a command line that does not contain the stored `reviewer_session_uuid`. Missing session UUIDs and transient `ps` failures are treated as unknown liveness and do not reclaim. Manual recovery remains:
-  1. Inspect the GitHub PR. If a review was already posted by the reviewer bot, run `npm run reconcile-posted-orphans -- --apply --limit <n>` to backfill older sticky rows to `posted`.
+- `failed-orphan` is intentionally sticky except for two bounded recovery paths.
+  First, if the watcher or `npm run reconcile-posted-orphans -- --apply`
+  proves that the reviewer bot already posted a same-head GitHub review at or
+  after the durable reviewer start, it marks the row `posted` without requiring
+  lease expiry or proof that the reviewer process group is dead. The row is no
+  longer a retry candidate; the adversarial gate then follows the actual posted
+  review verdict instead of the orphan-anomaly projection. If that reviewer
+  process group is still alive after the post-post cleanup budget, the watcher
+  writes a durable `data/reviewer-cleanup-findings/<session>.json` record and
+  rechecks it on later ticks until the process exits. Second, the bounded
+  auto-reclaim path may re-arm a failed-orphan only after its persisted reviewer
+  lease expires, the infrastructure recovery cap has room, and the watcher can
+  prove the original reviewer is no longer live: either the process group is
+  gone or the PGID is now occupied by a command line that does not contain the
+  stored `reviewer_session_uuid`. The sticky set still includes missing
+  launch-time timeout metadata on legacy rows, reviewer liveness probes whose
+  `ps` session check is unknown, live PGIDs without a stored
+  `reviewer_session_uuid`, live PGIDs that survive the bounded SIGTERM/SIGKILL
+  recovery loop without a proven posted review, and non-transient GitHub probe
+  failures that prevent safe orphan classification. Missing session UUIDs and
+  transient `ps` failures are treated as unknown liveness and do not reclaim.
+  Transient GitHub probe failures such as timeouts, rate limits, and 5xx
+  responses leave the row in `reviewing` so the next watcher tick can retry
+  instead of creating a sticky operator-only row. Manual recovery remains:
+  1. Inspect the GitHub PR. If a same-head review was already posted by the reviewer bot, run `npm run reconcile-posted-orphans -- --apply --limit <n>` and verify the row moved to `posted`.
   2. If no orphan review is present, run `npm run retrigger-review --repo <slug> --pr <n> --reason "verified no orphan review"`. The reset clears the sticky state and re-arms `pending`.
 - With reviewer lease recovery enabled, each proven-dead `reviewing → pending` re-arm increments `infra_auto_recover_attempts`. After three automatic re-arms, another dead session is quarantined in sticky `failed` with `[reviewer-lease-recovery-cap]` evidence instead of returning to `pending`; a successful posted review, intentional re-review re-arm, or superseding PR head resets the counter. This bounds deterministic reviewer crash loops while preserving automatic recovery from transient watcher bounces.
 - Steady-state recovery does not touch a newly claimed row merely because

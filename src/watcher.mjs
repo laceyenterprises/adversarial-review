@@ -315,6 +315,10 @@ import {
   persistReviewerPgid,
 } from './reviewer-orphan-reconcile.mjs';
 import {
+  recheckReviewerCleanupFindings,
+  writeReviewerCleanupFinding,
+} from './reviewer-cleanup-findings.mjs';
+import {
   markFastMergeAuditWritten,
   markFastMergeAuditError,
   retryPendingFastMergeAudits,
@@ -1175,6 +1179,7 @@ async function pollOnce(
     // under incident backlog that sweep can spend minutes enqueueing reviewer
     // work before the adoption phase gets a turn.
     await syncPRLifecycle(octokit, operatorSurface, WATCHER_PRIMARY_DOMAIN_ID);
+    recheckReviewerCleanupFindings({ rootDir: ROOT, log: console });
     const reattach = await reconcileReviewerSessions({
       db,
       octokit,
@@ -1187,6 +1192,7 @@ async function pollOnce(
         state,
         settledAt,
       }),
+      onCleanupFinding: (finding) => writeReviewerCleanupFinding(ROOT, finding),
     });
   if (reattach.skipped > 0) {
     console.log(

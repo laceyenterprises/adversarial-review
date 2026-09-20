@@ -73,6 +73,7 @@ test('apply reconciles a cap-exhausted posted orphan and removes it from first-p
     queueFollowUpForRecoveredPostedReviewImpl: queueStub(queueCalls),
   });
   assert.equal(result.reconciled, 1);
+  assert.equal(result.reconciledRowOnly, 0);
   assert.equal(queueCalls.length, 1);
   assert.equal(queueCalls[0].row.body_md, POSTED_REVIEW.body);
   assert.equal(queueCalls[0].row.head_sha, 'head-1078');
@@ -117,15 +118,40 @@ test('apply reconciles a null-start null-pgid orphan using last_attempted_at', a
   db.close();
 });
 
-test('apply ignores stale-head reviewer posts', async () => {
+test('apply ignores terminal PR rows', async () => {
+  const db = fixture();
+  db.prepare("UPDATE reviewed_prs SET pr_state = 'closed'").run();
+  const result = await reconcilePostedFailedOrphans({
+    db,
+    apply: true,
+    listReviews: async () => [POSTED_REVIEW],
+  });
+  assert.equal(result.scanned, 0);
+  assert.equal(result.reconciled, 0);
+  assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'failed-orphan');
+  db.close();
+});
+
+test('apply skips corrupt reviewer start timestamps instead of matching stale reviews', async () => {
+  const db = fixture();
+  db.prepare("UPDATE reviewed_prs SET reviewer_started_at = 'not-a-date'").run();
+  const result = await reconcilePostedFailedOrphans({
+    db,
+    apply: true,
+    listReviews: async () => [POSTED_REVIEW],
+  });
+  assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'failed-orphan');
+  assert.equal(result.results[0].reason, 'no-posted-review');
+  db.close();
+});
+
+test('apply skips reviews posted for a different head', async () => {
   const db = fixture();
   const result = await reconcilePostedFailedOrphans({
     db,
     apply: true,
-    listReviews: async () => [{ ...POSTED_REVIEW, commit_id: 'old-head' }],
-    queueFollowUpForRecoveredPostedReviewImpl: queueStub(),
+    listReviews: async () => [{ ...POSTED_REVIEW, commit_id: 'stale-head' }],
   });
-  assert.equal(result.reconciled, 0);
   assert.equal(result.results[0].reason, 'no-posted-review');
   assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'failed-orphan');
   db.close();
@@ -142,6 +168,27 @@ test('apply leaves an orphan unchanged when GitHub has no matching reviewer post
   assert.equal(result.reconciled, 0);
   assert.equal(result.results[0].reason, 'no-posted-review');
   assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'failed-orphan');
+  db.close();
+});
+
+test('apply reports row-only reconciliation when no running pass can be linked', async () => {
+  const db = fixture();
+  db.prepare("UPDATE reviewer_passes SET status = 'failed', ended_at = '2026-09-20T06:25:00Z'").run();
+  const result = await reconcilePostedFailedOrphans({
+    db,
+    apply: true,
+    listReviews: async () => [POSTED_REVIEW],
+  });
+  assert.equal(result.reconciled, 0);
+  assert.equal(result.reconciledRowOnly, 1);
+  assert.equal(result.results[0].action, 'reconciled-row-only');
+  assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'posted');
+  const pass = db.prepare('SELECT status, ended_at, gh_comment_id FROM reviewer_passes').get();
+  assert.deepEqual(pass, {
+    status: 'failed',
+    ended_at: '2026-09-20T06:25:00Z',
+    gh_comment_id: null,
+  });
   db.close();
 });
 
@@ -162,7 +209,7 @@ test('apply accepts a review artifact already linked to another pass for the sam
   db.close();
 });
 
-test('apply links a reaped failed pass by identity and queues follow-up', async () => {
+test('apply leaves a reaped failed pass settled and reports row-only reconciliation', async () => {
   const db = fixture({ attempts: 4, passStatus: 'failed' });
   const queueCalls = [];
   const result = await reconcilePostedFailedOrphans({
@@ -171,23 +218,24 @@ test('apply links a reaped failed pass by identity and queues follow-up', async 
     listReviews: async () => [POSTED_REVIEW],
     queueFollowUpForRecoveredPostedReviewImpl: queueStub(queueCalls),
   });
-  assert.equal(result.reconciled, 1);
-  assert.equal(result.results[0].action, 'reconciled');
-  assert.equal(queueCalls.length, 1);
+  assert.equal(result.reconciled, 0);
+  assert.equal(result.reconciledRowOnly, 1);
+  assert.equal(result.results[0].action, 'reconciled-row-only');
+  assert.equal(queueCalls.length, 0);
   const pass = db.prepare(
     'SELECT status, verdict, gh_comment_id, body_md FROM reviewer_passes'
   ).get();
   assert.deepEqual(pass, {
-    status: 'completed',
-    verdict: 'request-changes',
-    gh_comment_id: String(POSTED_REVIEW.id),
-    body_md: POSTED_REVIEW.body,
+    status: 'failed',
+    verdict: null,
+    gh_comment_id: null,
+    body_md: null,
   });
-  assert.deepEqual(result.firstPassQueue, { before: 1, after: 0 });
+  assert.deepEqual(result.firstPassQueue, { before: 1, after: 1 });
   db.close();
 });
 
-test('apply reports posted-no-artifact when no reviewer pass identity exists', async () => {
+test('apply reports row-only reconciliation when no reviewer pass identity exists', async () => {
   const db = fixture({ attempts: 4 });
   db.prepare('DELETE FROM reviewer_passes').run();
   const result = await reconcilePostedFailedOrphans({
@@ -197,7 +245,8 @@ test('apply reports posted-no-artifact when no reviewer pass identity exists', a
     queueFollowUpForRecoveredPostedReviewImpl: queueStub(),
   });
   assert.equal(result.reconciled, 0);
-  assert.equal(result.results[0].action, 'posted-no-artifact');
+  assert.equal(result.reconciledRowOnly, 1);
+  assert.equal(result.results[0].action, 'reconciled-row-only');
   assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'posted');
   db.close();
 });

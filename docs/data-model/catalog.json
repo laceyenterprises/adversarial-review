@@ -134,6 +134,20 @@
       "owner": "agent-runtime cutover readiness"
     },
     {
+      "id": "reviewer-cleanup-findings",
+      "title": "Reviewer Cleanup Findings",
+      "path": "docs/data-model/reviewer-cleanup-findings.md",
+      "store": "data/reviewer-cleanup-findings/",
+      "schemaSurface": "src/reviewer-cleanup-findings.mjs",
+      "relatedSchemaSurfaces": [
+        "src/reviewer-reattach.mjs",
+        "src/watcher.mjs",
+        "src/pollonce-phases.mjs",
+        "src/reviewer-orphan-reconcile.mjs"
+      ],
+      "owner": "reviewer reattach cleanup"
+    },
+    {
       "id": "argus-security-jobs",
       "title": "Argus Security Review Jobs",
       "path": "docs/data-model/argus-security-jobs.md",

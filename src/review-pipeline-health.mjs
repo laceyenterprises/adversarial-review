@@ -33,6 +33,7 @@ const DEFAULT_REVIEWER_DEATH_RATE_THRESHOLD = 0.5;
 const DEFAULT_REVIEWER_DEATH_RATE_MIN_ATTEMPTS = 3;
 const DEFAULT_REVIEWER_SILENCE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_REVIEWER_ACTIVITY_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
+const REVIEWER_MODEL_SILENCE_CLASSES = ['claude', 'codex', 'gemini'];
 const DEFAULT_REVIEW_UNKNOWN_RATE_THRESHOLD = 0.30;
 const DEFAULT_REVIEW_UNKNOWN_RATE_WINDOW_MINUTES = 15;
 const DEFAULT_REVIEW_UNKNOWN_RATE_SAMPLE_FLOOR = 5;
@@ -244,7 +245,7 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     defaultThreshold: DEFAULT_REVIEWER_SILENCE_THRESHOLD_MS,
     windowKey: 'reviewerActivityLookbackMs',
     defaultWindowMs: DEFAULT_REVIEWER_ACTIVITY_LOOKBACK_MS,
-    thresholdDescription: 'a reviewer model that previously posted a review has posted nothing for the silence threshold',
+    thresholdDescription: 'a reviewer class that previously posted a review has posted nothing for the silence threshold while recent started-pass demand exists after that post',
   },
   {
     code: 'review:unknown_failure_rate_high',
@@ -1297,31 +1298,33 @@ function summarizeReviewerAttempts(db, { nowMs, config }) {
 function summarizeReviewerModelSilence(db, { nowMs, config }) {
   const observedAt = new Date(nowMs).toISOString();
   const activityCutoff = new Date(nowMs - config.reviewerActivityLookbackMs).toISOString();
+  const reviewerClassPlaceholders = REVIEWER_MODEL_SILENCE_CLASSES.map(() => '?').join(', ');
   const postedRows = safeAll(
     db,
     `WITH posted_reviews AS (
-       SELECT COALESCE(reviewer_model, reviewer_class) AS reviewer_model,
+       SELECT reviewer_class AS reviewer_model,
               ${REVIEWER_PASS_NORMALIZED_POSTED_AT_SQL} AS posted_at
          FROM reviewer_passes
         WHERE ${REVIEWER_PASS_GENUINE_POSTED_REVIEW_WHERE_SQL}
           AND pass_kind IN ('first-pass', 'rereview')
-          AND COALESCE(reviewer_model, reviewer_class) IN ('claude', 'codex', 'gemini')
+          AND reviewer_class IN (${reviewerClassPlaceholders})
      )
      SELECT reviewer_model,
-            posted_at
+            MAX(posted_at) AS posted_at,
+            COUNT(*) AS posted_reviews
        FROM posted_reviews
       WHERE posted_at IS NOT NULL
         AND posted_at <= ?
-      ORDER BY posted_at DESC`,
-    [observedAt]
+      GROUP BY reviewer_model`,
+    [...REVIEWER_MODEL_SILENCE_CLASSES, observedAt]
   );
   const startedRows = safeAll(
     db,
-    `SELECT COALESCE(reviewer_model, reviewer_class) AS reviewer_model,
+    `SELECT reviewer_class AS reviewer_model,
             started_at
        FROM reviewer_passes
       WHERE pass_kind IN ('first-pass', 'rereview')
-        AND COALESCE(reviewer_model, reviewer_class) IN ('claude', 'codex', 'gemini')
+        AND reviewer_class IN (${reviewerClassPlaceholders})
         AND started_at IS NOT NULL
         AND REPLACE(started_at, ' ', 'T') GLOB '????-??-??T??:??:??*'
         AND strftime(
@@ -1344,24 +1347,19 @@ function summarizeReviewerModelSilence(db, { nowMs, config }) {
                 ELSE REPLACE(started_at, ' ', 'T') || 'Z'
               END
             ) <= strftime('%Y-%m-%dT%H:%M:%fZ', ?)
-      ORDER BY COALESCE(reviewer_model, reviewer_class), started_at`,
-    [activityCutoff, observedAt]
+      ORDER BY reviewer_class, started_at`,
+    [...REVIEWER_MODEL_SILENCE_CLASSES, activityCutoff, observedAt]
   );
   const postedByModel = new Map();
   for (const row of postedRows) {
     const lastPostedMs = parseReviewPostedAtMs(row.posted_at);
     if (lastPostedMs === null) continue;
-    const current = postedByModel.get(row.reviewer_model);
-    if (!current || lastPostedMs > current.lastPostedMs) {
-      postedByModel.set(row.reviewer_model, {
-        model: row.reviewer_model,
-        lastPostedAt: row.posted_at,
-        lastPostedMs,
-        postedReviews: (current?.postedReviews || 0) + 1,
-      });
-    } else {
-      current.postedReviews += 1;
-    }
+    postedByModel.set(row.reviewer_model, {
+      model: row.reviewer_model,
+      lastPostedAt: row.posted_at,
+      lastPostedMs,
+      postedReviews: Number(row.posted_reviews || 0),
+    });
   }
   const startedByModel = new Map();
   for (const row of startedRows) {
@@ -3493,21 +3491,38 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }));
   }
 
-  for (const model of snapshot.reviewerModelSilence?.silentModels || []) {
+  const silentModels = snapshot.reviewerModelSilence?.silentModels || [];
+  if (silentModels.length > 0) {
+    const orderedSilentModels = [...silentModels].sort((left, right) => {
+      const ageDiff = (right.ageMs || 0) - (left.ageMs || 0);
+      if (ageDiff !== 0) return ageDiff;
+      return left.model.localeCompare(right.model);
+    });
+    const modelNames = orderedSilentModels.map((model) => model.model);
+    const longestSilent = orderedSilentModels[0];
+    const modelNoun = `reviewer model${modelNames.length === 1 ? '' : 's'}`;
+    const modelVerb = modelNames.length === 1 ? 'has' : 'have';
+    const lastPostedByModel = orderedSilentModels
+      .map((model) => `${model.model}:${model.lastPostedAt}`)
+      .join(',');
+    const startedPassesByModel = orderedSilentModels
+      .map((model) => `${model.model}:${model.startedPasses}`)
+      .join(',');
     findings.push(buildFinding({
       code: 'review:reviewer_model_silent',
       tier: 'page',
-      subject: `Previously-active reviewer model ${model.model} has gone silent`,
-      message: `${model.model} last posted a review at ${model.lastPostedAt}, ${Math.round(model.ageMs / 3600000)}h ago.`,
+      subject: `Previously-active ${modelNoun} ${modelNames.join(', ')} ${modelVerb} gone silent`,
+      message: `${modelNames.length} ${modelNoun} ${modelVerb} not posted past the silence threshold; longest-silent is ${longestSilent.model}, last posted at ${longestSilent.lastPostedAt}, ${Math.round(longestSilent.ageMs / 3600000)}h ago.`,
       evidence: [
-        `reviews.db reviewer_passes model=${model.model} pass_kind IN first-pass,rereview gh_comment_id non-empty`,
-        `last_posted_at=${model.lastPostedAt} threshold_ms=${snapshot.reviewerModelSilence.thresholdMs}`,
-        `started_passes_in_activity_window=${model.startedPasses}`,
+        `reviews.db reviewer_passes models=${modelNames.join(',')} pass_kind IN first-pass,rereview gh_comment_id non-empty`,
+        `last_posted_at_by_model=${lastPostedByModel} threshold_ms=${snapshot.reviewerModelSilence.thresholdMs}`,
+        `started_passes_in_activity_window_by_model=${startedPassesByModel}`,
       ],
       recommendedAction: 'Inspect this model\'s selector decisions, OAuth transport, and recent reviewer passes now; do not wait for a failed selection to trigger the death-rate alarm.',
       observedAt,
       details: {
-        ...model,
+        models: orderedSilentModels,
+        model: modelNames.length === 1 ? modelNames[0] : null,
         thresholdMs: snapshot.reviewerModelSilence.thresholdMs,
         activityLookbackMs: snapshot.reviewerModelSilence.activityLookbackMs,
       },

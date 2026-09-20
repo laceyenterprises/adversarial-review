@@ -178,6 +178,14 @@ function insertReviewerPasses(rootDir, passes) {
   for (const pass of passes) insertReviewerPass(rootDir, pass);
 }
 
+function reviewerModelSilentFinding(snapshot) {
+  return snapshot.findings.find((entry) => entry.code === 'review:reviewer_model_silent');
+}
+
+function reviewerModelSilentDetails(snapshot, model) {
+  return reviewerModelSilentFinding(snapshot)?.details.models?.find((entry) => entry.model === model);
+}
+
 test('previously-active reviewer model going silent raises its own finding', () => {
   const rootDir = tempRoot();
   try {
@@ -229,15 +237,86 @@ test('previously-active reviewer model going silent raises its own finding', () 
         reviewerActivityLookbackMs: 7 * 24 * 60 * 60 * 1000,
       },
     });
-    const finding = snapshot.findings.find((entry) => (
-      entry.code === 'review:reviewer_model_silent' && entry.details.model === 'claude'
-    ));
+    const finding = reviewerModelSilentFinding(snapshot);
+    const model = reviewerModelSilentDetails(snapshot, 'claude');
     assert.ok(finding);
-    assert.equal(finding.details.lastPostedAt, '2026-05-23T17:10:00.000Z');
-    assert.equal(finding.details.startedPasses, 1);
-    assert.ok(!snapshot.findings.some((entry) => (
-      entry.code === 'review:reviewer_model_silent' && entry.details.model === 'gemini'
-    )));
+    assert.ok(model);
+    assert.equal(model.lastPostedAt, '2026-05-23T17:10:00.000Z');
+    assert.equal(model.startedPasses, 1);
+    assert.equal(reviewerModelSilentDetails(snapshot, 'gemini'), undefined);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reviewer model silence aggregates simultaneous silent models into one finding', () => {
+  const rootDir = tempRoot();
+  try {
+    insertReviewerPass(rootDir, {
+      reviewerClass: 'claude',
+      reviewerModel: 'claude-sonnet',
+      startedAt: '2026-05-23T12:00:00.000Z',
+      endedAt: '2026-05-23T12:10:00.000Z',
+      status: 'completed',
+    });
+    insertReviewerPass(rootDir, {
+      prNumber: 951,
+      reviewerClass: 'codex',
+      reviewerModel: 'gpt-5',
+      startedAt: '2026-05-23T13:00:00.000Z',
+      endedAt: '2026-05-23T13:10:00.000Z',
+      status: 'completed',
+    });
+    insertReviewerPass(rootDir, {
+      prNumber: 952,
+      reviewerClass: 'claude',
+      reviewerModel: 'claude-opus',
+      startedAt: '2026-05-25T17:00:00.000Z',
+      endedAt: '2026-05-25T17:05:00.000Z',
+      status: 'failed',
+    });
+    insertReviewerPass(rootDir, {
+      prNumber: 953,
+      reviewerClass: 'codex',
+      reviewerModel: 'gpt-5',
+      startedAt: '2026-05-25T17:15:00.000Z',
+      endedAt: '2026-05-25T17:20:00.000Z',
+      status: 'failed',
+    });
+    const db = openDb(rootDir);
+    try {
+      db.prepare(
+        `UPDATE reviewer_passes
+            SET gh_comment_id = ?, body_captured_at = ended_at
+          WHERE pr_number = ?`
+      ).run('claude-review-id', 950);
+      db.prepare(
+        `UPDATE reviewer_passes
+            SET gh_comment_id = ?, body_captured_at = ended_at
+          WHERE pr_number = ?`
+      ).run('codex-review-id', 951);
+    } finally {
+      db.close();
+    }
+
+    const snapshot = collectReviewPipelineHealth({
+      rootDir,
+      now: () => new Date(NOW),
+      config: {
+        hostChecksEnabled: false,
+        reviewerSilenceThresholdMs: 24 * 60 * 60 * 1000,
+        reviewerActivityLookbackMs: 7 * 24 * 60 * 60 * 1000,
+      },
+    });
+    const findings = snapshot.findings.filter((entry) => entry.code === 'review:reviewer_model_silent');
+    assert.equal(findings.length, 1);
+    assert.deepEqual(
+      findings[0].details.models.map((entry) => entry.model).sort(),
+      ['claude', 'codex'],
+    );
+    assert.match(findings[0].subject, /claude/);
+    assert.match(findings[0].subject, /codex/);
+    assert.ok(findings[0].evidence.some((entry) => entry.includes('models=claude,codex')));
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -300,12 +379,10 @@ test('reviewer model silence ignores empty comment ids and remediation pass nois
         reviewerActivityLookbackMs: 7 * 24 * 60 * 60 * 1000,
       },
     });
-    const finding = snapshot.findings.find((entry) => (
-      entry.code === 'review:reviewer_model_silent' && entry.details.model === 'claude'
-    ));
-    assert.ok(finding);
-    assert.equal(finding.details.lastPostedAt, '2026-05-23T16:10:00.000Z');
-    assert.equal(finding.details.startedPasses, 1);
+    const model = reviewerModelSilentDetails(snapshot, 'claude');
+    assert.ok(model);
+    assert.equal(model.lastPostedAt, '2026-05-23T16:10:00.000Z');
+    assert.equal(model.startedPasses, 1);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -351,12 +428,10 @@ test('reviewer model silence parses timezone-less SQLite timestamps as UTC', () 
         reviewerActivityLookbackMs: 7 * 24 * 60 * 60 * 1000,
       },
     });
-    const finding = snapshot.findings.find((entry) => (
-      entry.code === 'review:reviewer_model_silent' && entry.details.model === 'claude'
-    ));
-    assert.ok(finding);
-    assert.equal(finding.details.lastPostedAt, '2026-05-24T13:00:00.000Z');
-    assert.equal(Math.round(finding.details.ageMs / 3600000), 29);
+    const model = reviewerModelSilentDetails(snapshot, 'claude');
+    assert.ok(model);
+    assert.equal(model.lastPostedAt, '2026-05-24T13:00:00.000Z');
+    assert.equal(Math.round(model.ageMs / 3600000), 29);
   } finally {
     if (previousTz === undefined) {
       delete process.env.TZ;
@@ -418,12 +493,8 @@ test('reviewer model silence persists beyond lookback only when the lane has rec
         reviewerActivityLookbackMs: 7 * 24 * 60 * 60 * 1000,
       },
     });
-    assert.ok(snapshot.findings.some((entry) => (
-      entry.code === 'review:reviewer_model_silent' && entry.details.model === 'claude'
-    )));
-    assert.ok(!snapshot.findings.some((entry) => (
-      entry.code === 'review:reviewer_model_silent' && entry.details.model === 'gemini'
-    )));
+    assert.ok(reviewerModelSilentDetails(snapshot, 'claude'));
+    assert.equal(reviewerModelSilentDetails(snapshot, 'gemini'), undefined);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -473,11 +544,9 @@ test('reviewer model silence ignores empty comment ids when selecting latest pos
         reviewerActivityLookbackMs: 7 * 24 * 60 * 60 * 1000,
       },
     });
-    const finding = snapshot.findings.find((entry) => (
-      entry.code === 'review:reviewer_model_silent' && entry.details.model === 'claude'
-    ));
-    assert.ok(finding);
-    assert.equal(finding.details.lastPostedAt, '2026-05-23T17:10:00.000Z');
+    const model = reviewerModelSilentDetails(snapshot, 'claude');
+    assert.ok(model);
+    assert.equal(model.lastPostedAt, '2026-05-23T17:10:00.000Z');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -527,11 +596,9 @@ test('reviewer model silence ignores started_at for passes with no posted timest
         reviewerActivityLookbackMs: 7 * 24 * 60 * 60 * 1000,
       },
     });
-    const finding = snapshot.findings.find((entry) => (
-      entry.code === 'review:reviewer_model_silent' && entry.details.model === 'codex'
-    ));
-    assert.ok(finding);
-    assert.equal(finding.details.lastPostedAt, '2026-05-23T17:10:00.000Z');
+    const model = reviewerModelSilentDetails(snapshot, 'codex');
+    assert.ok(model);
+    assert.equal(model.lastPostedAt, '2026-05-23T17:10:00.000Z');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -567,10 +634,7 @@ test('reviewer model silence clears after the activity lookback', () => {
         reviewerActivityLookbackMs: 7 * 24 * 60 * 60 * 1000,
       },
     });
-    const finding = snapshot.findings.find((entry) => (
-      entry.code === 'review:reviewer_model_silent' && entry.details.model === 'claude'
-    ));
-    assert.equal(finding, undefined);
+    assert.equal(reviewerModelSilentFinding(snapshot), undefined);
     const model = snapshot.reviewerModelSilence.models.find((entry) => entry.model === 'claude');
     assert.ok(model);
     assert.equal(model.startedPasses, 0);

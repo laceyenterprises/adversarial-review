@@ -14,6 +14,7 @@ const DEFAULT_HQ_ROOT = '/Users/airlock/agent-os-hq';  // cfg-allowlist(account-
 const DEFAULT_REAP_LIMIT = 8;
 const DEFAULT_REAP_BUDGET_MS = 20_000;
 const DEFAULT_SCAN_LIMIT = 64;
+const DEFAULT_UNKNOWN_PROBE_LIMIT = 3;
 const DEFAULT_CURSOR_PATH = join(ROOT, 'data', 'ama-closer-worktree-reaper-cursor.json');
 const HAMMER_WORKER_RE = /^hammer-ama-pr-(\d+)(?:-.+)?$/;
 
@@ -116,6 +117,9 @@ async function readScanCursor(cursorPath, logger = console) {
         repo: typeof parsed.repo === 'string' ? parsed.repo : null,
         worker: typeof parsed.worker === 'string' ? parsed.worker : null,
         evaluation: typeof parsed.evaluation === 'string' ? parsed.evaluation : null,
+        probeFailures: parsed.probeFailures && typeof parsed.probeFailures === 'object'
+          ? parsed.probeFailures
+          : {},
       };
     }
   } catch (err) {
@@ -123,7 +127,7 @@ async function readScanCursor(cursorPath, logger = console) {
       logger?.warn?.(`[closer-worktree-reap] cursor-read-failed: ${err?.message || err}`);
     }
   }
-  return { repo: null, worker: null, evaluation: null };
+  return { repo: null, worker: null, evaluation: null, probeFailures: {} };
 }
 
 function persistScanCursor(cursorPath, cursor, logger = console) {
@@ -538,7 +542,7 @@ async function probeHammerWorkerActivity({
   maxAttempts = 2,
 } = {}) {
   if (!hqPath || !launchRequestId) {
-    return { active: false, defer: false, status: null, reason: 'no-launch-request-id' };
+    return { state: 'inactive', active: false, defer: false, status: null, reason: 'no-launch-request-id' };
   }
   let lastReason = 'probe-unreadable';
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -556,7 +560,7 @@ async function probeHammerWorkerActivity({
       // a recognized-transient failure, then DEFER (fail-safe for everything else).
       lastReason = `probe-error:${err?.code || err?.signal || 'unknown'}`;
       if (attempt < maxAttempts && isTransientProbeError(err)) continue;
-      return { active: false, defer: true, status: null, reason: lastReason };
+      return { state: 'unknown', active: false, defer: true, status: null, reason: lastReason };
     }
     let parsed;
     try {
@@ -566,7 +570,7 @@ async function probeHammerWorkerActivity({
       // human-readable error, NOT a definitive terminal state. Retry once, DEFER.
       lastReason = 'probe-nonjson';
       if (attempt < maxAttempts) continue;
-      return { active: false, defer: true, status: null, reason: lastReason };
+      return { state: 'unknown', active: false, defer: true, status: null, reason: lastReason };
     }
     const status = typeof parsed?.status === 'string' ? parsed.status.trim().toLowerCase() : null;
     if (status && HAMMER_ACTIVE_DISPATCH_STATUSES.has(status)) {
@@ -575,9 +579,10 @@ async function probeHammerWorkerActivity({
       // closer reconcile will flip it to failed, but we reap here rather than wait.
       const pid = Number(parsed?.pid);
       if (Number.isInteger(pid) && pid > 0 && isPidAliveLocal(pid, processKillImpl) === false) {
-        return { active: false, defer: false, status, reason: 'phantom' };
+        return { state: 'inactive', active: false, defer: false, status, reason: 'phantom' };
       }
       return {
+        state: 'active',
         active: true,
         defer: false,
         status,
@@ -587,9 +592,43 @@ async function probeHammerWorkerActivity({
     }
     // Positively read a terminal/absent status from a successful JSON parse — the
     // ONLY path that permits a reap.
-    return { active: false, defer: false, status, reason: status ? 'terminal' : 'status-absent' };
+    return { state: 'inactive', active: false, defer: false, status, reason: status ? 'terminal' : 'status-absent' };
   }
-  return { active: false, defer: true, status: null, reason: lastReason };
+  return { state: 'unknown', active: false, defer: true, status: null, reason: lastReason };
+}
+
+async function probeWorkerDirectoryUse({
+  workerDir,
+  execFileImpl = execFileAsync,
+  env = process.env,
+} = {}) {
+  if (!workerDir) return { state: 'unknown', reason: 'no-worker-dir' };
+  try {
+    const { stdout } = await execFileImpl(
+      'lsof',
+      ['-a', '-d', 'cwd', '-Fn'],
+      { env: { ...env }, maxBuffer: 1024 * 1024, timeout: 5_000 },
+    );
+    const workerPrefix = `${resolve(workerDir)}/`;
+    const matches = String(stdout || '').split(/\r?\n/).filter((line) => {
+      if (!line.startsWith('n')) return false;
+      const cwd = resolve(line.slice(1));
+      return cwd === resolve(workerDir) || cwd.startsWith(workerPrefix);
+    });
+    return matches.length > 0
+      ? { state: 'active', reason: 'cwd-in-worker-dir', matches: matches.length }
+      : { state: 'inactive', reason: 'no-cwd-in-worker-dir', matches: 0 };
+  } catch (err) {
+    // lsof exits 1 when its query matched no open files. That is a definitive
+    // negative result, unlike a timeout/signal/spawn failure.
+    if (Number(err?.code) === 1 && !err?.killed && !err?.signal) {
+      return { state: 'inactive', reason: 'no-cwd-in-worker-dir', matches: 0 };
+    }
+    return {
+      state: 'unknown',
+      reason: `process-probe-error:${err?.code || err?.signal || 'unknown'}`,
+    };
+  }
 }
 
 async function reapCloserHammerWorktrees({
@@ -606,6 +645,11 @@ async function reapCloserHammerWorktrees({
   rmSyncImpl = rmSync,
   readFileImpl = fsPromises.readFile,
   probeWorkerActivityImpl = probeHammerWorkerActivity,
+  probeWorkerDirectoryUseImpl = probeWorkerDirectoryUse,
+  unknownProbeLimit = normalizePositiveInteger(
+    process.env.AMA_CLOSER_WORKTREE_UNKNOWN_PROBE_LIMIT,
+    DEFAULT_UNKNOWN_PROBE_LIMIT,
+  ),
   env = process.env,
   logger = console,
 } = {}) {
@@ -706,6 +750,7 @@ async function reapCloserHammerWorktrees({
     open: 0,
     unknown: 0,
     deferredActiveWorker: 0,
+    deferredUnknownWorker: 0,
     limit,
     scanLimit,
   };
@@ -715,6 +760,7 @@ async function reapCloserHammerWorktrees({
   summary.budgetMs = budgetMs;
   summary.budgetExceeded = false;
   let evaluationCursor = cursor.evaluation;
+  const probeFailures = { ...cursor.probeFailures };
   for (const entry of evaluationEntries) {
     if (Date.now() - reapStartedAt > budgetMs) {
       // Wall-clock budget: never let the reap phase monopolize the follow-up
@@ -778,8 +824,9 @@ async function reapCloserHammerWorktrees({
     // dispatch is terminal/unreadable/phantom, reap now — and the worker-pool
     // orphan reaper is the independent backstop for any tree that later leaks.
     const manifestProbe = await resolveEntryLaunchRequestId(entry, { readFileImpl });
-    const deferReap = (deferReason, launchRequestId) => {
+    const deferReap = (deferReason, launchRequestId, evidence = {}) => {
       summary.deferredActiveWorker += 1;
+      if (evidence.livenessState === 'unknown') summary.deferredUnknownWorker += 1;
       logger?.info?.(JSON.stringify({
         event: 'closer_worktree_reap.deferred_active_worker',
         workerId: entry.workerId,
@@ -788,12 +835,13 @@ async function reapCloserHammerWorktrees({
         reason: reapReason,
         launchRequestId: launchRequestId || null,
         dispatchStatus: deferReason,
+        ...evidence,
       }));
     };
     if (manifestProbe.defer) {
       // Transient failure reading the worker manifest — cannot prove the hammer
       // is gone, so defer rather than delete a possibly-live tree.
-      deferReap(manifestProbe.reason, null);
+      deferReap(manifestProbe.reason, null, { livenessState: 'unknown' });
       continue;
     }
     if (manifestProbe.launchRequestId) {
@@ -803,12 +851,65 @@ async function reapCloserHammerWorktrees({
         execFileImpl,
         env,
       });
-      // Defer both when the hammer is provably active AND when the probe could
-      // not definitively read a terminal status (transient/unreadable). Only a
-      // positively-terminal (or phantom) probe falls through to the reap.
-      if (activity?.active || activity?.defer) {
-        deferReap(activity.status || activity.reason || null, manifestProbe.launchRequestId);
+      const activityState = activity?.state || (activity?.active ? 'active' : activity?.defer ? 'unknown' : 'inactive');
+      if (activityState === 'active') {
+        delete probeFailures[entry.workerId];
+        deferReap(activity.status || activity.reason || null, manifestProbe.launchRequestId, {
+          livenessState: 'active',
+        });
         continue;
+      }
+      if (activityState === 'unknown') {
+        const previous = probeFailures[entry.workerId] || {};
+        const failureCount = Number(previous.failureCount || 0) + 1;
+        const failure = {
+          failureCount,
+          firstFailureAt: previous.firstFailureAt || new Date().toISOString(),
+          lastFailureAt: new Date().toISOString(),
+          lastReason: activity.reason || 'probe-unreadable',
+        };
+        probeFailures[entry.workerId] = failure;
+        if (failureCount < unknownProbeLimit) {
+          deferReap(activity.reason, manifestProbe.launchRequestId, {
+            livenessState: 'unknown',
+            probeFailureCount: failureCount,
+            probeFailureLimit: unknownProbeLimit,
+            processState: 'not-probed',
+          });
+          continue;
+        }
+        const processProbe = await probeWorkerDirectoryUseImpl({
+          workerDir: entry.workerDir,
+          execFileImpl,
+          env,
+        });
+        if (processProbe?.state !== 'inactive') {
+          deferReap(activity.reason, manifestProbe.launchRequestId, {
+            livenessState: 'unknown',
+            probeFailureCount: failureCount,
+            probeFailureLimit: unknownProbeLimit,
+            processState: processProbe?.state || 'unknown',
+            processReason: processProbe?.reason || null,
+          });
+          continue;
+        }
+        logger?.info?.(JSON.stringify({
+          event: 'closer_worktree_reap.unknown_probe_resolved',
+          workerId: entry.workerId,
+          prNumber: entry.prNumber,
+          repo: entry.githubRepo || null,
+          reason: reapReason,
+          launchRequestId: manifestProbe.launchRequestId,
+          livenessState: 'unknown',
+          dispatchStatus: activity.reason || null,
+          probeFailureCount: failureCount,
+          probeFailureLimit: unknownProbeLimit,
+          processState: 'inactive',
+          processReason: processProbe.reason || null,
+          decision: 'reap',
+        }));
+      } else {
+        delete probeFailures[entry.workerId];
       }
     }
 
@@ -821,6 +922,7 @@ async function reapCloserHammerWorktrees({
       logger,
     });
     if (removal.ok) {
+      delete probeFailures[entry.workerId];
       summary.reaped += 1;
       if (removal.pruned) summary.pruned += 1;
       logger?.info?.(JSON.stringify({
@@ -840,6 +942,7 @@ async function reapCloserHammerWorktrees({
     repo: repoDiscovery.nextCursor,
     worker: workerDiscovery.nextCursor,
     evaluation: evaluationCursor,
+    probeFailures,
   }, logger);
 
   return summary;
@@ -851,6 +954,7 @@ export {
   parseGitWorktreePorcelain,
   parseHammerPrNumber,
   probeHammerWorkerActivity,
+  probeWorkerDirectoryUse,
   reapCloserHammerWorktrees,
   resolveEntryLaunchRequestId,
 };

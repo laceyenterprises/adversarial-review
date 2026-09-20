@@ -235,7 +235,7 @@ test('probeHammerWorkerActivity: active status + live pid => active, not deferre
       assert.equal(sig, 0);
     },
   });
-  assert.deepEqual(out, { active: true, defer: false, status: 'running', reason: 'active', pid: 4242 });
+  assert.deepEqual(out, { state: 'active', active: true, defer: false, status: 'running', reason: 'active', pid: 4242 });
 });
 
 test('probeHammerWorkerActivity: active status + dead pid => phantom (reap allowed)', async () => {
@@ -327,6 +327,96 @@ test('probeHammerWorkerActivity: active status with no pid stays active (cannot 
   assert.equal(out.defer, false);
   assert.equal(out.status, 'starting');
   assert.equal(out.pid, null);
+});
+
+test('reaper eventually reaps a merged absent-dispatch worktree after repeated unknown probes and no live cwd', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-closer-bounded-unknown-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const hqRoot = join(root, 'hq');
+  const repoPath = join(hqRoot, 'repos', 'adversarial-review');
+  const workerId = 'hammer-ama-pr-791-bounded-unknown';
+  const { workerDir } = seedMergedHammer(hqRoot, workerId, {
+    withManifest: true,
+    launchRequestId: 'lrq_absent_791',
+  });
+  const cursorPath = join(root, 'cursor.json');
+  const calls = [];
+  const logs = [];
+  const options = {
+    hqRoot,
+    cursorPath,
+    hqPath: '/bin/hq',
+    repoPaths: [repoPath],
+    execFileImpl: mergedRepoWorktreeExecFile({ calls, workerDir }),
+    execGhWithRetryImpl: mergedGh,
+    probeWorkerActivityImpl: async () => ({
+      state: 'unknown', active: false, defer: true, reason: 'probe-error:SIGTERM',
+    }),
+    probeWorkerDirectoryUseImpl: async () => ({
+      state: 'inactive', reason: 'no-cwd-in-worker-dir', matches: 0,
+    }),
+    unknownProbeLimit: 3,
+    limit: 10,
+    logger: { info(line) { logs.push(line); }, warn() {} },
+  };
+
+  const first = await reapCloserHammerWorktrees(options);
+  const second = await reapCloserHammerWorktrees(options);
+  const third = await reapCloserHammerWorktrees(options);
+
+  assert.equal(first.reaped, 0);
+  assert.equal(second.reaped, 0);
+  assert.equal(third.reaped, 1, 'bounded unknown status plus definitive no-process evidence reaps');
+  const decision = logs.map((line) => JSON.parse(line)).find(
+    (record) => record.event === 'closer_worktree_reap.unknown_probe_resolved',
+  );
+  assert.equal(decision.livenessState, 'unknown');
+  assert.equal(decision.probeFailureCount, 3);
+  assert.equal(decision.processState, 'inactive');
+  assert.equal(decision.decision, 'reap');
+});
+
+test('reaper never reaps a live worker when the dispatch probe repeatedly fails', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-closer-live-unknown-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const hqRoot = join(root, 'hq');
+  const repoPath = join(hqRoot, 'repos', 'adversarial-review');
+  const workerId = 'hammer-ama-pr-791-live-unknown';
+  const { workerDir } = seedMergedHammer(hqRoot, workerId, {
+    withManifest: true,
+    launchRequestId: 'lrq_live_791',
+  });
+  const cursorPath = join(root, 'cursor.json');
+  const calls = [];
+  const logs = [];
+  const options = {
+    hqRoot,
+    cursorPath,
+    hqPath: '/bin/hq',
+    repoPaths: [repoPath],
+    execFileImpl: mergedRepoWorktreeExecFile({ calls, workerDir }),
+    execGhWithRetryImpl: mergedGh,
+    probeWorkerActivityImpl: async () => ({
+      state: 'unknown', active: false, defer: true, reason: 'probe-error:SIGTERM',
+    }),
+    probeWorkerDirectoryUseImpl: async () => ({
+      state: 'active', reason: 'cwd-in-worker-dir', matches: 1,
+    }),
+    unknownProbeLimit: 2,
+    limit: 10,
+    logger: { info(line) { logs.push(line); }, warn() {} },
+  };
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const result = await reapCloserHammerWorktrees(options);
+    assert.equal(result.reaped, 0, `attempt ${attempt + 1} preserves the live worktree`);
+  }
+  assert.equal(tearDownCalled(calls, workerId), false);
+  const lastDeferred = logs.map((line) => JSON.parse(line)).filter(
+    (record) => record.event === 'closer_worktree_reap.deferred_active_worker',
+  ).at(-1);
+  assert.equal(lastDeferred.livenessState, 'unknown');
+  assert.equal(lastDeferred.processState, 'active');
 });
 
 test('resolveEntryLaunchRequestId: reads launchRequestId; ENOENT untracked; EIO defers', async (t) => {

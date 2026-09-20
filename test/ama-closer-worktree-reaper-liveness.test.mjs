@@ -444,6 +444,62 @@ test('probeWorkerDirectoryUse: cross-uid worker directory is unobservable and ne
   assert.equal(execCalled, false);
 });
 
+test('probeWorkerDirectoryUse: caller-owned directory with foreign run-as user is unobservable', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-lsof-run-as-user-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const workerDir = join(root, 'hammer-ama-pr-791-run-as-user');
+  mkdirSync(workerDir, { recursive: true });
+  let execCalled = false;
+
+  const out = await probeWorkerDirectoryUse({
+    workerDir,
+    env: { AGENT_OS_WORKER_RUN_AS_USER: 'agentos-worker' },
+    statSyncImpl: () => ({ uid: 502 }),
+    getuidImpl: () => 502,
+    currentUserImpl: () => 'airlock',
+    execFileImpl: async () => {
+      execCalled = true;
+      return { stdout: '' };
+    },
+  });
+
+  assert.equal(out.state, 'unknown');
+  assert.equal(out.reason, 'run-as-user-unobservable');
+  assert.equal(out.configuredRunAsUser, 'agentos-worker');
+  assert.equal(out.currentUser, 'airlock');
+  assert.equal(execCalled, false);
+});
+
+test('reaper immediately reaps a readable manifest without launchRequestId and skips cwd probing', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-closer-no-launch-id-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const hqRoot = join(root, 'hq');
+  const repoPath = join(hqRoot, 'repos', 'adversarial-review');
+  const workerId = 'hammer-ama-pr-791-no-launch-id';
+  const { workerDir } = seedMergedHammer(hqRoot, workerId, { withManifest: true });
+  const calls = [];
+  let cwdProbeCalled = false;
+
+  const result = await reapCloserHammerWorktrees({
+    hqRoot,
+    cursorPath: join(root, 'cursor.json'),
+    hqPath: '/bin/hq',
+    repoPaths: [repoPath],
+    execFileImpl: mergedRepoWorktreeExecFile({ calls, workerDir }),
+    execGhWithRetryImpl: mergedGh,
+    probeWorkerDirectoryUseImpl: async () => {
+      cwdProbeCalled = true;
+      return { state: 'active' };
+    },
+    limit: 10,
+    logger: { info() {}, warn() {} },
+  });
+
+  assert.equal(result.reaped, 1);
+  assert.equal(cwdProbeCalled, false);
+  assert.equal(tearDownCalled(calls, workerId), true);
+});
+
 test('reaper eventually reaps a merged absent-dispatch worktree after repeated unknown probes and no live cwd', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'ama-closer-bounded-unknown-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));

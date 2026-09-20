@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync, rmSync, statSync, promises as fsPromises } from 'node:fs';
+import { userInfo } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -678,6 +679,7 @@ async function probeWorkerDirectoryUse({
   ),
   statSyncImpl = statSync,
   getuidImpl = () => (typeof process.getuid === 'function' ? process.getuid() : null),
+  currentUserImpl = () => userInfo().username,
 } = {}) {
   if (!workerDir) return { state: 'unknown', reason: 'no-worker-dir' };
   let stat;
@@ -692,6 +694,23 @@ async function probeWorkerDirectoryUse({
   }
   if (Number.isInteger(stat?.uid) && stat.uid !== callerUid) {
     return { state: 'unknown', reason: 'cross-uid-unobservable', ownerUid: stat.uid, callerUid };
+  }
+  const configuredRunAsUser = String(
+    env.AGENT_OS_WORKER_RUN_AS_USER || env.HQ_WORKER_RUN_AS_USER || '',
+  ).trim();
+  let currentUser = '';
+  try {
+    currentUser = String(currentUserImpl() || '').trim();
+  } catch {
+    return { state: 'unknown', reason: 'caller-user-unobservable' };
+  }
+  if (configuredRunAsUser && (!currentUser || configuredRunAsUser !== currentUser)) {
+    return {
+      state: 'unknown',
+      reason: 'run-as-user-unobservable',
+      configuredRunAsUser,
+      currentUser: currentUser || null,
+    };
   }
   const scopedPid = parseOptionalPositiveInteger(pid);
   const args = ['-a', '-d', 'cwd', '-Fn'];
@@ -861,6 +880,17 @@ async function reapCloserHammerWorktrees({
   };
 
   const prStateCache = new Map();
+  let unscopedProcessProbePromise = null;
+  const perTickProcessProbeExecFile = async (command, args, options) => {
+    const unscopedLsof = command === 'lsof'
+      && Array.isArray(args)
+      && !args.includes('-p');
+    if (!unscopedLsof) return execFileImpl(command, args, options);
+    if (!unscopedProcessProbePromise) {
+      unscopedProcessProbePromise = Promise.resolve(execFileImpl(command, args, options));
+    }
+    return unscopedProcessProbePromise;
+  };
   const reapStartedAt = Date.now();
   summary.budgetMs = budgetMs;
   summary.budgetExceeded = false;
@@ -934,10 +964,13 @@ async function reapCloserHammerWorktrees({
     // Liveness gate (2026-08-06 hammer worker_killed cascade fix): a hammer keeps
     // running its long post-merge close sequence AFTER its PR merges. Reaping its
     // worktree here deletes the live worker's cwd and kills it before it records
-    // an exit. Defer while the hammer's dispatch is still active; the next tick
-    // reaps once it terminalizes. Unknown dispatch probes defer until the
-    // bounded counter reaches `unknownProbeLimit`, then reap only after the
-    // process-level cwd oracle positively reports same-UID absence.
+    // an exit. Active dispatches defer; a definitive terminal/absent dispatch,
+    // or a readable manifest with no launchRequestId, reaps immediately.
+    // Unknown dispatch probes defer until the bounded counter reaches
+    // `unknownProbeLimit`, then reap only after the process-level cwd oracle
+    // observes no same-UID cwd or completes a clean no-match scan. The
+    // worker-pool orphan reaper remains the backstop for trees that cannot be
+    // classified safely here.
     const manifestProbe = await resolveEntryLaunchRequestId(entry, { readFileImpl });
     const deferReap = (deferReason, launchRequestId, evidence = {}) => {
       summary.deferredActiveWorker += 1;
@@ -997,7 +1030,7 @@ async function reapCloserHammerWorktrees({
           workerDir: entry.workerDir,
           pid: activity.pid || null,
           timeoutMs: processProbeTimeoutMs,
-          execFileImpl,
+          execFileImpl: perTickProcessProbeExecFile,
           env,
         });
         if (processProbe?.state !== 'inactive') {

@@ -168,6 +168,20 @@ function probeReviewerSession({ pgid, sessionUuid, probeAlive = probePgidAlive }
   }
 }
 
+function commandLooksLikeReviewerProcess(command) {
+  const text = String(command || '').trim();
+  if (!text) return false;
+
+  if (/(?:^|\s)(?:rg|grep|sed|awk|zsh|bash|sh)(?:\s|$)/.test(text)) return false;
+  if (/(?:^|\s)node\s+--test(?:\s|$)/.test(text)) return false;
+  if (/(?:^|\s)npm\s+(?:run\s+)?test(?:\s|$)/.test(text)) return false;
+
+  return /\breviewer\.mjs\b/.test(text) ||
+    /\bREVIEWER_SESSION_UUID=/.test(text) ||
+    /\badversarial-reviewer\b/.test(text) ||
+    /\breviewer-runtime\b/.test(text);
+}
+
 function findReviewerProcessBySessionUuid(sessionUuid, { execFileSyncImpl = execFileSync } = {}) {
   const needle = String(sessionUuid || '').trim();
   if (!needle) return { found: false };
@@ -184,7 +198,9 @@ function findReviewerProcessBySessionUuid(sessionUuid, { execFileSyncImpl = exec
       const pid = parsePositiveInteger(match[1]);
       const pgid = parsePositiveInteger(match[2]);
       if (pid === null || pgid === null) continue;
-      return { found: true, pid, pgid, command: match[3] || '' };
+      const command = match[3] || '';
+      if (!commandLooksLikeReviewerProcess(command)) continue;
+      return { found: true, pid, pgid, command };
     }
     return { found: false };
   } catch (err) {

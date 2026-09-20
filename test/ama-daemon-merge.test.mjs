@@ -28,6 +28,7 @@ function greenGate(overrides = {}) {
     mergeStateStatus: 'CLEAN',
     prState: 'OPEN',
     merged: false,
+    labels: [],
     branchProtectionRequiredContexts: ['agent-os/adversarial-gate'],
     ...overrides,
   };

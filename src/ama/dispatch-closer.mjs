@@ -4194,6 +4194,7 @@ export async function maybeDispatchAmaCloser({
               mergeStateStatus: prMetadata?.mergeStateStatus,
               prState: String(prMetadata?.state || '').trim() || (prMetadata?.isOpen === false ? 'CLOSED' : 'OPEN'),
               merged: String(prMetadata?.state || '').trim().toUpperCase() === 'MERGED',
+              labels: Array.isArray(prMetadata?.labels) ? prMetadata.labels : [],
               branchProtectionRequiredContexts: Array.isArray(prMetadata?.branchProtection?.requiredContexts)
                 ? prMetadata.branchProtection.requiredContexts
                 : [],
@@ -4247,6 +4248,7 @@ export async function maybeDispatchAmaCloser({
                 mergeStateStatus: rollup?.mergeStateStatus,
                 prState: state,
                 merged: state.toUpperCase() === 'MERGED',
+                labels: Array.isArray(rollup?.labels) ? rollup.labels : [],
                 branchProtectionRequiredContexts: Array.isArray(prMetadata?.branchProtection?.requiredContexts)
                   ? prMetadata.branchProtection.requiredContexts
                   : [],

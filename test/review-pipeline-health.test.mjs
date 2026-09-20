@@ -73,7 +73,7 @@ function launchctlPrintError({ message = 'launchctl print failed', stdout = '', 
   return error;
 }
 
-test('first-pass CI orphan is distinct, per-head bounded, and suppressed by a live branch worker', () => {
+test('first-pass CI orphan is distinct and suppressed by a live branch worker', () => {
   const rootDir = tempRoot();
   const hqRoot = tempRoot();
   const queue = {
@@ -97,17 +97,11 @@ test('first-pass CI orphan is distinct, per-head bounded, and suppressed by a li
   const orphaned = summarizeFirstPassCiOrphans(queue, { rootDir, hqRoot, execFileSyncImpl });
   assert.equal(orphaned.count, 1, JSON.stringify(orphaned));
   assert.deepEqual(orphaned.prs[0].failedChecks, ['fast-python-guards', 'repo-guards']);
-  assert.equal(orphaned.prs[0].attempts, 0);
-  assert.equal(orphaned.prs[0].exhausted, false);
-
-  mkdirSync(path.dirname(orphaned.prs[0].statePath), { recursive: true });
-  writeFileSync(orphaned.prs[0].statePath, JSON.stringify({ attempts: 3 }));
-  const exhausted = summarizeFirstPassCiOrphans(queue, { rootDir, hqRoot, execFileSyncImpl });
-  assert.equal(exhausted.prs[0].exhausted, true);
 
   const workerDir = path.join(hqRoot, 'workers', 'repair-1');
   mkdirSync(workerDir, { recursive: true });
   writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
+    repo: REPO,
     branch: 'claude-code/wsb-build-pack',
     launchRequestId: 'lrq-repair',
   }));
@@ -125,7 +119,7 @@ test('first-pass CI orphan is distinct, per-head bounded, and suppressed by a li
   assert.equal(withLiveWorker.count, 0);
 });
 
-test('first-pass CI orphan replaces reviewer queue-starvation attribution', () => {
+test('first-pass CI orphan is additive to reviewer queue-starvation attribution', () => {
   const rootDir = tempRoot();
   insertReviewRow(rootDir, {
     prNumber: 6903,
@@ -145,24 +139,49 @@ test('first-pass CI orphan replaces reviewer queue-starvation attribution', () =
     headRefName: 'claude-code/wsb-build-pack',
     headSha: 'abc123',
     failedChecks: ['fast-python-guards'],
-    attempts: 0,
-    attemptCap: 3,
-    exhausted: false,
-    statePath: path.join(rootDir, 'data', 'first-pass-ci-orphans', 'state.json'),
-    dispatch: null,
   };
   const after = {
     ...before,
-    firstPassCiOrphans: { count: 1, attemptCap: 3, prs: [orphan], errors: [] },
+    firstPassCiOrphans: { count: 1, prs: [orphan], errors: [] },
   };
   after.findings = evaluateReviewPipelineFindings(after, { observedAt: before.observedAt });
   assert.ok(findingCodes(after).includes('review:first_pass_ci_orphan'));
-  assert.ok(!findingCodes(after).includes('review:queue_starvation'));
+  assert.ok(findingCodes(after).includes('review:queue_starvation'));
+});
 
-  const capped = { ...after, firstPassCiOrphans: { ...after.firstPassCiOrphans, prs: [{ ...orphan, attempts: 3, exhausted: true }] } };
-  capped.findings = evaluateReviewPipelineFindings(capped, { observedAt: before.observedAt });
-  assert.ok(findingCodes(capped).includes('review:first_pass_ci_orphan_exhausted'));
-  assert.ok(!findingCodes(capped).includes('review:first_pass_ci_orphan'));
+test('first-pass CI orphan treats unknown worker status as inconclusive', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const queue = {
+    firstPassPrs: [{ repo: REPO, prNumber: 6903, reviewAttempts: 0, reviewerFailed: false }],
+  };
+  const workerDir = path.join(hqRoot, 'workers', 'repair-1');
+  mkdirSync(path.join(hqRoot, '.hq'), { recursive: true });
+  mkdirSync(workerDir, { recursive: true });
+  writeFileSync(path.join(hqRoot, '.hq', 'config.json'), JSON.stringify({ ownerUser: 'airlock' }));
+  writeFileSync(path.join(workerDir, 'launch-provenance.json'), JSON.stringify({
+    repo: REPO,
+    headRefName: 'claude-code/wsb-build-pack',
+    launch_request_id: 'lrq-repair',
+  }));
+  const execFileSyncImpl = (command, args) => {
+    if (command === 'gh') {
+      return args.includes('--required')
+        ? JSON.stringify([{ name: 'fast-python-guards', state: 'FAILURE' }])
+        : JSON.stringify({
+            state: 'OPEN',
+            headRefName: 'claude-code/wsb-build-pack',
+            headRefOid: 'abc123',
+          });
+    }
+    assert.equal(command, 'hq');
+    assert.deepEqual(args, ['dispatch', 'status', 'lrq-repair', '--json', '--as-owner', 'airlock']);
+    throw new Error('hq status unavailable');
+  };
+
+  const orphaned = summarizeFirstPassCiOrphans(queue, { rootDir, hqRoot, execFileSyncImpl });
+  assert.equal(orphaned.count, 0);
+  assert.equal(orphaned.errors.length, 1);
 });
 
 test('pipeline Sentinel findings are diagnostics, never pages', () => {

@@ -63,7 +63,6 @@ const DEFAULT_REVIEW_LANE_SHARE_SUPERMAJORITY_DISTINCT_PR_FLOOR = 2;
 // yet. A first-review SLA measured in tens of minutes does not describe a fleet
 // that reviews within ~3 minutes when healthy.
 const DEFAULT_QUEUE_STARVATION_MAX_AGE_MS = 10 * 60 * 1000;
-const DEFAULT_FIRST_PASS_CI_ORPHAN_ATTEMPT_CAP = 3;
 const DEFAULT_REMEDIATION_BACKLOG_THRESHOLD = 5;
 // A single park is normal: the daemon evaluates every tick and a PR can be
 // legitimately mid-flight. Ticketing starts once the SAME reason repeats, which
@@ -310,15 +309,7 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     category: 'review-pipeline',
     thresholdKey: null,
     defaultThreshold: null,
-    thresholdDescription: 'an open first-pass PR has failing required checks, no verdict, and no live worker on its branch',
-  },
-  {
-    code: 'review:first_pass_ci_orphan_exhausted',
-    tier: 'page',
-    category: 'review-pipeline',
-    thresholdKey: null,
-    defaultThreshold: DEFAULT_FIRST_PASS_CI_ORPHAN_ATTEMPT_CAP,
-    thresholdDescription: 'automatic first-pass CI repair attempts reached the per-head cap',
+    thresholdDescription: 'an open first-pass PR has failing required checks, no verdict, and no known live worker on its branch',
   },
   {
     code: 'review:rereview_ci_blocked',
@@ -2036,52 +2027,107 @@ function parseJsonArray(raw) {
   }
 }
 
-function liveWorkerForBranch(hqRoot, branch, { execFileSyncImpl }) {
+function readHqOwnerUser(hqRoot) {
+  const config = parseJson(readFileIfExists(join(hqRoot, '.hq', 'config.json')), {});
+  const ownerUser = String(config.ownerUser || config.owner_user || '').trim();
+  return ownerUser || null;
+}
+
+function readFileIfExists(path) {
+  try {
+    return existsSync(path) ? readFileSync(path, 'utf8') : '';
+  } catch {
+    return '';
+  }
+}
+
+function collectStringValues(value, keys, output = []) {
+  if (!value || typeof value !== 'object') return output;
+  for (const [key, child] of Object.entries(value)) {
+    if (keys.has(key) && typeof child === 'string' && child.trim()) {
+      output.push(child.trim());
+    } else if (child && typeof child === 'object') {
+      collectStringValues(child, keys, output);
+    }
+  }
+  return output;
+}
+
+function readWorkerManifests(workerDir) {
+  const manifests = [];
+  for (const filename of ['launch-provenance.json', 'run.json', 'workspace.json']) {
+    const manifest = parseJson(readFileIfExists(join(workerDir, filename)), null);
+    if (manifest) manifests.push(manifest);
+  }
+  return manifests;
+}
+
+function workerManifestMatches(manifests, repo, branch) {
+  const branches = new Set(collectStringValues(manifests, new Set([
+    'branch',
+    'headBranch',
+    'headRefName',
+    'head_ref',
+    'head_ref_name',
+  ])));
+  if (!branches.has(branch)) return false;
+  const repos = new Set(collectStringValues(manifests, new Set([
+    'repo',
+    'repository',
+    'repoSlug',
+    'repo_slug',
+    'githubRepo',
+    'github_repo',
+  ])));
+  return repos.size === 0 || repos.has(repo) || repos.has(repo.replace(/^laceyenterprises\//, ''));
+}
+
+function workerLaunchRequestId(manifests) {
+  return collectStringValues(manifests, new Set([
+    'launchRequestId',
+    'launch_request_id',
+    'lrq',
+  ]))[0] || null;
+}
+
+function liveWorkerForBranch(hqRoot, repo, branch, { execFileSyncImpl }) {
   const workersDir = join(hqRoot, 'workers');
   if (!branch || !existsSync(workersDir)) return null;
+  const hqBin = process.env.AGENT_OS_HQ_BIN || process.env.HQ_BIN || 'hq';
+  const ownerUser = readHqOwnerUser(hqRoot);
   for (const workerId of readdirSync(workersDir)) {
-    const manifestPath = join(workersDir, workerId, 'workspace.json');
-    if (!existsSync(manifestPath)) continue;
-    let manifest;
-    try {
-      manifest = parseJson(readFileSync(manifestPath, 'utf8'), null);
-    } catch {
-      continue;
+    const manifests = readWorkerManifests(join(workersDir, workerId));
+    if (!workerManifestMatches(manifests, repo, branch)) continue;
+    const launchRequestId = workerLaunchRequestId(manifests);
+    if (!launchRequestId) {
+      return { status: 'unknown', error: `worker ${workerId} matches ${repo}:${branch} but has no launchRequestId` };
     }
-    if (!manifest || manifest.branch !== branch || !manifest.launchRequestId) continue;
     try {
+      const args = ['dispatch', 'status', launchRequestId, '--json'];
+      if (ownerUser) args.push('--as-owner', ownerUser);
       const output = execFileSyncImpl(
-        'hq', ['dispatch', 'status', manifest.launchRequestId, '--json'],
+        hqBin, args,
         { encoding: 'utf8', timeout: 5_000, stdio: ['ignore', 'pipe', 'pipe'] }
       );
       const status = String(parseJson(output, {})?.status || '').toLowerCase();
       if (!['completed', 'failed', 'cancelled', 'canceled', 'lease_expired'].includes(status)) {
-        return { workerId, launchRequestId: manifest.launchRequestId, status: status || 'unknown' };
+        return { workerId, launchRequestId, status: status || 'unknown' };
       }
-    } catch {
-      // A stale or unreadable run is not proof that a worker is in flight.
+    } catch (error) {
+      return {
+        workerId,
+        launchRequestId,
+        status: 'unknown',
+        error: String(error?.stderr || error?.message || error).slice(0, 300),
+      };
     }
   }
   return null;
 }
 
-function readFirstPassCiOrphanAttempt(rootDir, repo, prNumber, headSha) {
-  const safeRepo = String(repo).replaceAll('/', '__');
-  const statePath = join(rootDir, 'data', 'first-pass-ci-orphans', `${safeRepo}__${prNumber}__${headSha}.json`);
-  if (!existsSync(statePath)) return { statePath, attempts: 0, dispatch: null };
-  try {
-    const state = parseJson(readFileSync(statePath, 'utf8'), {});
-    return { statePath, attempts: Number(state.attempts || 0), dispatch: state.dispatch || null };
-  } catch {
-    return { statePath, attempts: 0, dispatch: null };
-  }
-}
-
 function summarizeFirstPassCiOrphans(firstPassQueue, {
-  rootDir,
   hqRoot,
   execFileSyncImpl,
-  attemptCap = DEFAULT_FIRST_PASS_CI_ORPHAN_ATTEMPT_CAP,
 }) {
   const prs = [];
   const errors = [];
@@ -2110,26 +2156,24 @@ function summarizeFirstPassCiOrphans(firstPassQueue, {
       }
       const failedChecks = failedCheckNames(parseJsonArray(checksOutput));
       if (String(pr.state).toUpperCase() !== 'OPEN' || failedChecks.length === 0) continue;
-      const liveWorker = liveWorkerForBranch(hqRoot, pr.headRefName, { execFileSyncImpl });
+      const liveWorker = liveWorkerForBranch(hqRoot, queued.repo, pr.headRefName, { execFileSyncImpl });
+      if (liveWorker?.error) {
+        errors.push(`${queued.repo}#${queued.prNumber}: ${liveWorker.error}`);
+        continue;
+      }
       if (liveWorker) continue;
-      const attempt = readFirstPassCiOrphanAttempt(rootDir, queued.repo, queued.prNumber, pr.headRefOid);
       prs.push({
         repo: queued.repo,
         prNumber: queued.prNumber,
         headRefName: pr.headRefName,
         headSha: pr.headRefOid,
         failedChecks,
-        attempts: attempt.attempts,
-        attemptCap,
-        exhausted: attempt.attempts >= attemptCap,
-        statePath: attempt.statePath,
-        dispatch: attempt.dispatch,
       });
     } catch (error) {
       errors.push(`${queued.repo}#${queued.prNumber}: ${String(error?.stderr || error?.message || error).slice(0, 300)}`);
     }
   }
-  return { count: prs.length, attemptCap, prs, errors };
+  return { count: prs.length, prs, errors };
 }
 
 const REREVIEW_DEFERRING_JOB_KINDS = new Set([
@@ -3974,11 +4018,7 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }
   }
 
-  const ciOrphanKeys = new Set((snapshot.firstPassCiOrphans?.prs || []).map(
-    (pr) => `${pr.repo}#${pr.prNumber}`
-  ));
-  const starvableFirstPassPrs = (snapshot.firstPassQueue.firstPassPrs || [])
-    .filter((pr) => !ciOrphanKeys.has(`${pr.repo}#${pr.prNumber}`));
+  const starvableFirstPassPrs = snapshot.firstPassQueue.firstPassPrs || [];
   const oldest = starvableFirstPassPrs.reduce(
     (candidate, pr) => (!candidate || pr.ageMs > candidate.ageMs ? pr : candidate),
     null
@@ -4046,16 +4086,13 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
   }
 
   for (const orphan of snapshot.firstPassCiOrphans?.prs || []) {
-    const exhausted = orphan.exhausted;
     findings.push(buildFinding({
-      code: exhausted ? 'review:first_pass_ci_orphan_exhausted' : 'review:first_pass_ci_orphan',
-      tier: exhausted ? 'page' : 'ticket',
-      subject: `${orphan.repo}#${orphan.prNumber} has an unowned red first-pass head${exhausted ? ' and exhausted automatic repair' : ''}`,
-      message: `Head ${orphan.headSha} fails required check(s) ${orphan.failedChecks.join(', ')}; no review verdict or live worker owns branch ${orphan.headRefName}. Automatic repair attempts=${orphan.attempts}/${orphan.attemptCap}.`,
-      evidence: [`gh pr view ${orphan.prNumber} --repo ${orphan.repo}`, orphan.statePath],
-      recommendedAction: exhausted
-        ? `Automatic repair is capped for this PR head. Inspect ${orphan.statePath} and assign a human owner; do not delete the record merely to retry.`
-        : `The pipeline-health tick will dispatch a remediator with --pr ${orphan.prNumber}; verify it updates this same PR rather than opening another one.`,
+      code: 'review:first_pass_ci_orphan',
+      tier: 'ticket',
+      subject: `${orphan.repo}#${orphan.prNumber} has an unowned red first-pass head`,
+      message: `Head ${orphan.headSha} fails required check(s) ${orphan.failedChecks.join(', ')}; no review verdict or known live worker owns branch ${orphan.headRefName}. First-pass review is not CI-gated, so this diagnostic is additive to queue-starvation findings.`,
+      evidence: [`gh pr view ${orphan.prNumber} --repo ${orphan.repo}`],
+      recommendedAction: 'Assign a human or worker to repair the red checks on the existing PR branch; verify it updates this same PR rather than opening another one.',
       observedAt,
       details: orphan,
     }));
@@ -4760,8 +4797,8 @@ function collectReviewPipelineHealth({
       ? summarizeCiBlockedRereviews(db, { nowMs })
       : { count: 0, oldest: null, prs: [] };
     const firstPassCiOrphans = config.hostChecksEnabled
-      ? summarizeFirstPassCiOrphans(firstPassQueue, { rootDir, hqRoot, execFileSyncImpl })
-      : { count: 0, attemptCap: DEFAULT_FIRST_PASS_CI_ORPHAN_ATTEMPT_CAP, prs: [], errors: [] };
+      ? summarizeFirstPassCiOrphans(firstPassQueue, { hqRoot, execFileSyncImpl })
+      : { count: 0, prs: [], errors: [] };
     const queuedRereviews = db
       ? summarizeQueuedRereviews(db, followUpQueues.jobs, { nowMs, stoppedCiRegressionJobs })
       : { count: 0, oldest: null, prs: [] };

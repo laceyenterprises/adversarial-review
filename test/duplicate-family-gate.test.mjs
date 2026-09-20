@@ -15,10 +15,10 @@ const baseFamily = {
   operator_override_json: null,
 };
 
-test('only inactive families release the duplicate-family hold', () => {
+test('inactive and resolved families release the duplicate-family hold', () => {
   assert.equal(evaluateDuplicateFamilyCandidate(baseFamily, { prNumber: 41, headSha: 'a' }).held, true);
   assert.equal(evaluateDuplicateFamilyCandidate({ ...baseFamily, status: 'inactive' }, { prNumber: 41, headSha: 'a' }).held, false);
-  assert.equal(evaluateDuplicateFamilyCandidate({ ...baseFamily, status: 'resolved' }, { prNumber: 41, headSha: 'a' }).held, true);
+  assert.equal(evaluateDuplicateFamilyCandidate({ ...baseFamily, status: 'resolved' }, { prNumber: 41, headSha: 'a' }).held, false);
 });
 
 test('shared daemon/hammer predicate emits duplicate-family-unresolved', () => {

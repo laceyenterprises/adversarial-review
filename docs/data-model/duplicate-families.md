@@ -37,7 +37,7 @@ One row per detected work-identity family.
 | `strongest_signal` | First common strong signal kind shared by active candidates. |
 | `selected_survivor_pr_number` | Optional operator-selected PR number to keep as the survivor. |
 | `report_path` | Optional path to an operator-facing duplicate report artifact. |
-| `operator_override_json` | Reserved operator override/disposition payload. A candidate head move marks matching overrides stale once for the observed head when a payload is present, but no shipped writer currently makes this a hold-release path. |
+| `operator_override_json` | Audited survivor selection and per-candidate `ignored-not-duplicate` dispositions. Every release carries the candidate PR and exact head; head movement marks the matching disposition stale. Survivor selection also records the committed report path, report-verified head, choice, salvage, and validation. |
 | `transition_log_json` | JSON array of status transitions such as initial detection, reactivation, and deactivation. |
 | `candidate_count` | Count of live open unsuppressed candidates in the current advisory family. |
 | `first_detected_at` | First time the family was recorded. |
@@ -61,7 +61,7 @@ belong to only one family at a time; reassignment updates the row's
 | `head_branch` | Candidate head branch. |
 | `head_sha` | Candidate head SHA. |
 | `base_sha` | Candidate base SHA or merge-base evidence when available. |
-| `role` | Candidate role, currently `candidate`. |
+| `role` | `candidate` before adjudication, then exactly one `survivor` and all remaining members `loser`. |
 | `work_identity_json` | Extracted identity payload and provenance resolution. |
 | `signals_json` | Strong signal evidence used by the detector. |
 | `suppressions_json` | Suppression evidence such as stack/follow-up labels or the PR-wide exclusion label. |

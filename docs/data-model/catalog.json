@@ -35,6 +35,7 @@
         "migrations/20260810_reviewer_passes_posted_review_freshness_index.sql",
         "src/afh-reviewer-fallback.mjs",
         "src/follow-up-jobs.mjs",
+        "src/pollonce-phases.mjs",
         "src/reviewer-spawn-settle.mjs"
       ],
       "owner": "reviewer spawn, settle, and token attribution"

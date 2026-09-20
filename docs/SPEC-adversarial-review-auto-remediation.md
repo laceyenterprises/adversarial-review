@@ -2262,6 +2262,13 @@ been released are treated as deferred settlement failures and logged. Under the
 watcher's `singleWave: true` production drain, the split uses admission release
 as the point where the queue may admit a replacement candidate instead of
 detaching solely because the initial launch wave outlived the settle-grace timer.
+The rollout flag accepts the same boolean spellings as sibling watcher flags
+(`1`, `true`, `yes`, `on`; or `0`, `false`, `no`, `off`) and the watcher logs
+the resolved mode once per drain. The single-wave settle grace remains a
+wall-clock bound for the drain: a late admission release defers the remaining
+backlog to the next tick rather than serializing all reviewable PRs inside one
+`pollOnce`. Pipeline-enabled domains keep the legacy cutoff unless they wire an
+early-release callback for their own terminal stage.
 
 When the drain contains Gemini reviewer candidates, the watcher may ask the
 reviewer broker for the live count of non-cooled Gemini credentials and clamp

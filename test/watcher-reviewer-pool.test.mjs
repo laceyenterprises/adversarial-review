@@ -190,7 +190,7 @@ test('split admission preserves dispatch failure circuit before release', async 
   assert.deepEqual(events, ['start:1']);
 });
 
-test('split admission re-enters admission under production single-wave drain', async () => {
+test('split admission re-enters single-wave drain when admission releases within grace', async () => {
   const events = [];
   let finishSettlement;
   const settlementHold = new Promise((resolve) => { finishSettlement = resolve; });
@@ -198,6 +198,7 @@ test('split admission re-enters admission under production single-wave drain', a
     candidate(1, async function run() {
       events.push('model:1');
       events.push('post-durable:1');
+      await new Promise((resolve) => setTimeout(resolve, 5));
       this.admissionReleaseCapacity();
       await settlementHold;
       events.push('settled:1');
@@ -211,7 +212,7 @@ test('split admission re-enters admission under production single-wave drain', a
   const summary = await runBoundedReviewerDispatchQueue(tasks, {
     maxConcurrent: 1,
     singleWave: true,
-    singleWaveSettleGraceMs: 0,
+    singleWaveSettleGraceMs: 50,
     splitPostReviewSettlement: true,
     logger: { error() {}, log() {} },
   });
@@ -222,6 +223,48 @@ test('split admission re-enters admission under production single-wave drain', a
   finishSettlement();
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.deepEqual(events, ['model:1', 'post-durable:1', 'model:2', 'settled:1']);
+});
+
+test('split admission single-wave drain detaches before late admission release', async () => {
+  const events = [];
+  let releaseAdmission;
+  let finishSettlement;
+  const admissionHold = new Promise((resolve) => { releaseAdmission = resolve; });
+  const settlementHold = new Promise((resolve) => { finishSettlement = resolve; });
+  const startedAt = Date.now();
+
+  const summary = await runBoundedReviewerDispatchQueue([
+    candidate(1, async function run() {
+      events.push('model:1');
+      await admissionHold;
+      events.push('post-durable:1');
+      this.admissionReleaseCapacity();
+      await settlementHold;
+      events.push('settled:1');
+    }),
+    candidate(2, async function run() {
+      events.push('model:2');
+      this.admissionReleaseCapacity();
+    }),
+  ], {
+    maxConcurrent: 1,
+    singleWave: true,
+    singleWaveSettleGraceMs: 25,
+    splitPostReviewSettlement: true,
+    logger: { error() {}, log() {} },
+  });
+
+  const elapsedMs = Date.now() - startedAt;
+  assert.ok(elapsedMs < 200, `single-wave drain should return promptly, elapsed=${elapsedMs}ms`);
+  assert.equal(summary.dispatched, 0);
+  assert.equal(summary.deferred, 1);
+  assert.deepEqual(summary.deferredCandidates.map((item) => item.prNumber), [2]);
+  assert.deepEqual(events, ['model:1']);
+
+  releaseAdmission();
+  finishSettlement();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(events, ['model:1', 'post-durable:1', 'settled:1']);
 });
 
 test('legacy serial admission remains available when settlement split is disabled', async () => {

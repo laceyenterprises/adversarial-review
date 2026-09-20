@@ -742,7 +742,14 @@ async function spawnReviewer({
     // transport retry/reconciliation path, so success and failure both have a
     // durable restart-visible disposition at this boundary.
     if (typeof onPostOperationSettled === 'function') {
-      onPostOperationSettled(result);
+      try {
+        onPostOperationSettled(result);
+      } catch (err) {
+        console.warn(
+          `[reviewer] post-operation settlement callback failed for ${repo}#${prNumber}; ` +
+            `deferring to caller settlement path: ${err?.message || err}`
+        );
+      }
     }
     if (result.stdoutTail) console.log(`[reviewer:${prNumber}] ${String(result.stdoutTail).trim()}`);
     if (result.stderrTail) console.error(`[reviewer:${prNumber}] stderr: ${String(result.stderrTail).trim()}`);

@@ -641,6 +641,7 @@ export async function processReviewSubject(entry, ctx) {
     normalizeReviewPopulationRetryConfig,
     shouldDeferReviewForActiveFollowUp,
     wakePayload = null,
+    admissionSettlementSplitEnabled = false,
     runDaemonCleanMergeAttemptImpl = runDaemonCleanMergeAttempt,
     findArgusJobImpl = findArgusJob,
     maybeAutoAdjudicateDependencyBotArgusJobImpl = maybeAutoAdjudicateDependencyBotArgusJob,
@@ -2450,6 +2451,12 @@ export async function processReviewSubject(entry, ctx) {
           }
 
           let reservation = null;
+          let reservationReleased = false;
+          const releaseReviewerReservation = () => {
+            if (!reservation || reservationReleased) return;
+            reservationReleased = true;
+            reservation.release();
+          };
           try {
             // REVIEW-DEDUP (authoritative reviewed-head gate): never dispatch a
             // review for a head that already has a completed review (GitHub
@@ -3024,7 +3031,8 @@ export async function processReviewSubject(entry, ctx) {
               };
               let reviewRowSettled = false;
               const pipelineEnabled = isPipelineEnabled(domainAdapterSet.domainConfig);
-              if (!pipelineEnabled) spawnReviewerArgs.onPostOperationSettled = (postedResult) => {
+              if (admissionSettlementSplitEnabled && !pipelineEnabled) spawnReviewerArgs.onPostOperationSettled = (postedResult) => {
+                if (reviewRowSettled) return;
                 settleReviewerAttempt({
                   rootDir: ROOT,
                   repoPath,
@@ -3035,6 +3043,7 @@ export async function processReviewSubject(entry, ctx) {
                   markReviewHeartbeat: markWatcherReviewHeartbeat,
                 });
                 reviewRowSettled = true;
+                releaseReviewerReservation();
                 releaseAdmissionCapacity?.({ dispatched: true });
               };
               // ARC-13: when the domain enables the sequential review pipeline
@@ -3090,10 +3099,11 @@ export async function processReviewSubject(entry, ctx) {
               });
             }
           } finally {
-            if (reservation) reservation.release();
+            releaseReviewerReservation();
             reviewerHeadDispatchLease.release(dispatchLeaseKey);
           }
         },
+        supportsAdmissionSplit: Boolean(admissionSettlementSplitEnabled) && !isPipelineEnabled(domainAdapterSet.domainConfig),
       };
       if (reviewerPoolConfig.enabled) {
         reviewerDispatchCandidates.push(dispatchCandidate);

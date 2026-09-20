@@ -1,13 +1,13 @@
 # Reviewer passes
 
-**Source of truth:** `migrations/20260518_reviewer_passes.sql`, `migrations/20260810_reviewer_passes_posted_review_freshness_index.sql`, `src/reviewer-pass-tokens.mjs`, `src/reviewer-spawn-settle.mjs`, `src/orphan-post-reconcile.mjs`, and `src/follow-up-jobs.mjs`
+**Source of truth:** `migrations/20260518_reviewer_passes.sql`, `migrations/20260810_reviewer_passes_posted_review_freshness_index.sql`, `src/reviewer-pass-tokens.mjs`, `src/reviewer-spawn-settle.mjs`, `src/pollonce-phases.mjs`, `src/orphan-post-reconcile.mjs`, and `src/follow-up-jobs.mjs`
 
 ## Ownership
 
 - Store: `data/reviews.db`
 - Table: `reviewer_passes`
 - Schema: `migrations/20260518_reviewer_passes.sql` plus later additive migrations
-- Writers: `src/reviewer-pass-tokens.mjs`, `src/reviewer-spawn-settle.mjs`, `src/orphan-post-reconcile.mjs`, `src/follow-up-jobs.mjs`
+- Writers: `src/reviewer-pass-tokens.mjs`, `src/reviewer-spawn-settle.mjs`, `src/pollonce-phases.mjs`, `src/orphan-post-reconcile.mjs`, `src/follow-up-jobs.mjs`
 - Repair CLI: `scripts/backfill-reviewer-passes.mjs`; `bin/reconcile-posted-orphans.mjs` links posted review artifacts for reconciled `failed-orphan` rows
 
 `reviewer_passes` is the durable record of each first-pass, remediation, and
@@ -21,6 +21,26 @@ watcher's review-freshness pager reads those rows through
 `COALESCE(body_captured_at, ended_at)` normalized to fixed millisecond UTC. This
 keeps rereview/remediation-cycle posts visible after `reviewed_prs.posted_at` is
 reset while avoiding freshness scans over non-posted pass history.
+
+## Posted-review settlement split
+
+By default, a successful watcher review completes the `reviewer_passes` row
+before the corresponding `reviewed_prs` row is settled to `posted`. When
+`ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT` is enabled for a non-pipeline
+domain, `src/pollonce-phases.mjs` installs a post-operation callback into
+`src/reviewer-spawn-settle.mjs`. After the GitHub review post or post-failure
+reconciliation reaches a durable result, that callback settles `reviewed_prs`
+and releases reviewer-pool admission capacity before token-ledger attribution,
+artifact writes, inline hammer work, and final `reviewer_passes` completion
+finish.
+
+During that split window, a review can be visible in `reviewed_prs` as posted
+while its `reviewer_passes` row is still `status='running'`. The window is
+intentionally feature-flagged and does not apply to pipeline-enabled domains
+unless they explicitly wire an early-release callback. If the callback's
+bookkeeping write fails, `spawnReviewer` logs the failure and leaves the row for
+the caller's normal post-return settlement path; a posted review must not be
+downgraded to a failed reviewer pass solely because the early callback failed.
 
 ## Launch and reattach identity
 

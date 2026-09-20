@@ -862,12 +862,16 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   let dispatched = 0;
   let activeGemini = activeReviewerCountForModel(activeReviewerCounts, 'gemini');
   let initialWaveClosed = false;
+  let singleWaveDeadlineMs = null;
 
   const isGeminiCandidate = (candidate) =>
     String(candidate?.reviewerModel || '').toLowerCase() === 'gemini';
 
   const dispatchWasSkipped = (result) =>
     result && typeof result === 'object' && result.dispatched === false;
+
+  const candidateSupportsAdmissionSplit = (candidate) =>
+    splitPostReviewSettlement && candidate?.supportsAdmissionSplit !== false;
 
   const recordLaneAdmission = (candidate) => {
     const key = reviewerDispatchIsFirstPass(candidate) ? 'firstPass' : 'rereview';
@@ -893,7 +897,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
       const currentNowMs = Number(now());
       const resolvedNowMs = Number.isFinite(currentNowMs) ? currentNowMs : Date.now();
       logReviewerDispatchWait(candidate, { logger, nowMs: resolvedNowMs, waitWarnMs });
-      if (!splitPostReviewSettlement) return await candidate.run();
+      if (!candidateSupportsAdmissionSplit(candidate)) return await candidate.run();
 
       // Admission capacity covers model execution and the durable post
       // decision, not token accounting, follow-up bookkeeping, or merge
@@ -1058,7 +1062,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
         await Promise.resolve();
       }
     }
-    if (singleWave && !splitPostReviewSettlement && attempted > attemptedBeforeStart) {
+    if (singleWave && attempted > attemptedBeforeStart) {
       // The watcher needs a dispatch *wave*, not a full batch drain. Some
       // runtimes await reviewer completion inside candidate.run(), so admitting
       // a new reviewer every time a slot frees can serialize an entire backlog
@@ -1067,19 +1071,29 @@ async function runBoundedReviewerDispatchQueue(candidates, {
         0,
         Number.parseInt(String(singleWaveSettleGraceMs), 10) || 0,
       );
+      if (singleWaveDeadlineMs === null) {
+        const currentNowMs = Number(now());
+        const resolvedNowMs = Number.isFinite(currentNowMs) ? currentNowMs : Date.now();
+        singleWaveDeadlineMs = resolvedNowMs + settleGraceMs;
+      }
+      const currentNowMs = Number(now());
+      const resolvedNowMs = Number.isFinite(currentNowMs) ? currentNowMs : Date.now();
+      const remainingSettleGraceMs = Math.max(0, singleWaveDeadlineMs - resolvedNowMs);
       if (active.size > 0) {
         let settleTimer = null;
         try {
           await Promise.race([
             Promise.all([...active]),
             new Promise((resolve) => {
-              settleTimer = setTimeout(resolve, settleGraceMs);
+              settleTimer = setTimeout(resolve, remainingSettleGraceMs);
             }),
           ]);
         } finally {
           if (settleTimer) clearTimeout(settleTimer);
         }
       }
+      const deadlineNowMs = Number(now());
+      const deadlineResolvedNowMs = Number.isFinite(deadlineNowMs) ? deadlineNowMs : Date.now();
       if (active.size > 0) {
         initialWaveClosed = true;
         for (const entry of pending) {
@@ -1091,7 +1105,14 @@ async function runBoundedReviewerDispatchQueue(candidates, {
         );
         break;
       }
-      if (dispatched > 0) {
+      if (
+        dispatched > 0
+        && (
+          !splitPostReviewSettlement
+          || deadlineResolvedNowMs >= singleWaveDeadlineMs
+          || !pending.some((entry) => !entry.started && candidateSupportsAdmissionSplit(entry.candidate))
+        )
+      ) {
         initialWaveClosed = true;
       }
     }
@@ -1159,6 +1180,7 @@ export {
   createDetachedReviewerDispatchTracker,
   createReviewerLaneState,
   createReviewerMemoryAdmissionSampler,
+  parseBooleanFlag,
   logReviewerDispatchWait,
   reserveReviewerMemoryAdmission,
   fetchGeminiCredentialConcurrency,

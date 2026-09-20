@@ -402,7 +402,8 @@ import {
   compareReviewerDispatchCandidates,
   createDetachedReviewerDispatchTracker,
   createReviewerMemoryAdmissionSampler,
-  reserveReviewerMemoryAdmission, resolveFirstPassReviewerPoolConfig,
+  reserveReviewerMemoryAdmission,
+  resolveFirstPassReviewerPoolConfig,
   resolveReviewerMemoryPressureConfig,
   runBoundedReviewerDispatchQueue,
   sortReviewerDispatchCandidates,
@@ -1241,6 +1242,8 @@ async function pollOnce(
       10,
     ) || 0,
   ) || undefined;
+  const admissionSettlementSplitEnabled = ['1', 'true', 'yes', 'on'].includes(String(process.env.ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT ?? '').trim().toLowerCase());
+  console.log(`[watcher] reviewer admission settlement split ${admissionSettlementSplitEnabled ? 'enabled' : 'disabled'} (ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT=${process.env.ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT ?? '<unset>'})`);
   const reviewerMemoryPressureConfig = resolveReviewerMemoryPressureConfig();
   const reviewerDispatchCandidates = [];
   const firstPassSpilloverController = createFirstPassSpilloverController({ rootDir: ROOT, readDepth: countOpenPrsAwaitingFirstPassReview, logger: console }); // RSP-01: disarmed unless CFG arms it
@@ -1266,12 +1269,8 @@ async function pollOnce(
       `[watcher] Draining ${candidates.length} reviewer dispatch candidate(s) before ${reason}`
     );
     try {
-      // The reviewer runtime contract is fire-and-return: this drain may wait
-      // for admission, token refresh, and child spawn bookkeeping, but reviewer
-      // subprocess execution is detached and bounded by its own timeout. The
-      // outer safePollOnce deadline still bounds pathological drain wedges.
-      // Cap concurrent GEMINI reviewers at the live broker credential count so
-      // they don't over-dispatch against a single-account pool and lose the
+      // Fire-and-return: the drain waits for admission/spawn bookkeeping only.
+      // Cap GEMINI at the live broker credential count so they don't over-dispatch and lose the
       // checkout-lease race (the "no credential with remaining quota"
       // misdiagnosis). Fail-open: a missing broker URL / secret / endpoint
       // yields null => no gemini cap, so review dispatch never wedges on this.
@@ -1284,7 +1283,7 @@ async function pollOnce(
         usePersistentReviewerLaneState: true,
         singleWave: true,
         singleWaveSettleGraceMs: reviewerDispatchSingleWaveSettleGraceMs,
-        splitPostReviewSettlement: process.env.ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT === '1',
+        splitPostReviewSettlement: admissionSettlementSplitEnabled,
         onCandidateStarted: detachedReviewerDispatchTracker.track,
         logger: console,
       });
@@ -1454,7 +1453,7 @@ async function pollOnce(
         isFastMergeSkipEnabled,
         normalizeReviewPopulationRetryConfig,
         shouldDeferReviewForActiveFollowUp,
-        wakePayload: wakePayloadForPoll(),
+        wakePayload: wakePayloadForPoll(), admissionSettlementSplitEnabled,
       });
       await drainReviewerDispatchCandidatesIfBatchReady('continuing reviewer discovery');
     }

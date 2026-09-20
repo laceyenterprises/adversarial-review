@@ -314,10 +314,7 @@ import {
   autoReclaimFailedOrphans,
   persistReviewerPgid,
 } from './reviewer-orphan-reconcile.mjs';
-import {
-  recheckReviewerCleanupFindings,
-  writeReviewerCleanupFinding,
-} from './reviewer-cleanup-findings.mjs';
+import { recheckReviewerCleanupFindingsForWatcher, writeReviewerCleanupFindingForWatcher } from './reviewer-cleanup-findings.mjs';
 import {
   markFastMergeAuditWritten,
   markFastMergeAuditError,
@@ -1179,7 +1176,7 @@ async function pollOnce(
     // under incident backlog that sweep can spend minutes enqueueing reviewer
     // work before the adoption phase gets a turn.
     await syncPRLifecycle(octokit, operatorSurface, WATCHER_PRIMARY_DOMAIN_ID);
-    recheckReviewerCleanupFindings({ rootDir: ROOT, log: console });
+    recheckReviewerCleanupFindingsForWatcher(ROOT, console);
     const reattach = await reconcileReviewerSessions({
       db,
       octokit,
@@ -1187,12 +1184,10 @@ async function pollOnce(
       shouldReconcileRow: (row, now) => shouldReconcileReviewerSession(row, now),
       leaseRecoveryEnabled: REVIEWER_LEASE_RECOVERY_ENABLED,
       leaseRecoveryMaxAttempts: INFRA_AUTO_RECOVER_CAP,
-      onTerminalDeadSession: ({ row, state, settledAt }) => settleDurableReviewerRunState({
-        sessionUuid: row?.reviewer_session_uuid,
-        state,
-        settledAt,
-      }),
-      onCleanupFinding: (finding) => writeReviewerCleanupFinding(ROOT, finding),
+      onTerminalDeadSession: ({ row, state, settledAt }) => settleDurableReviewerRunState(
+        { sessionUuid: row?.reviewer_session_uuid, state, settledAt },
+      ),
+      onCleanupFinding: (finding) => writeReviewerCleanupFindingForWatcher(ROOT, finding, console),
     });
   if (reattach.skipped > 0) {
     console.log(

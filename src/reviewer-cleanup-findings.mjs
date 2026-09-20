@@ -125,10 +125,20 @@ function recheckReviewerCleanupFindings({
   return { scanned: findings.length, stillAlive, cleared, unknown };
 }
 
+function recheckReviewerCleanupFindingsForWatcher(rootDir, log = console) {
+  return recheckReviewerCleanupFindings({ rootDir, log });
+}
+
+function writeReviewerCleanupFindingForWatcher(rootDir, finding, log = console) {
+  return writeReviewerCleanupFinding(rootDir, finding, { log });
+}
+
 export {
   cleanupFindingPath,
   readReviewerCleanupFindings,
   recheckReviewerCleanupFindings,
+  recheckReviewerCleanupFindingsForWatcher,
   removeReviewerCleanupFinding,
   writeReviewerCleanupFinding,
+  writeReviewerCleanupFindingForWatcher,
 };

@@ -1510,7 +1510,14 @@ function resolveReconcileWorkerClass(job, worker) {
   if (recordedModel && WORKER_CLASS_TO_BOT_TOKEN_ENV[recordedModel]) {
     return recordedModel;
   }
-  return pickRemediationWorkerClass(job);
+  const builderTag = String(job?.builderTag || recordedModel || '').trim().toLowerCase();
+  if (builderTag && Object.prototype.hasOwnProperty.call(REMEDIATION_WORKER_BY_BUILDER_TAG, builderTag)) {
+    return REMEDIATION_WORKER_BY_BUILDER_TAG[builderTag];
+  }
+  return pickRemediationWorkerClass({
+    ...job,
+    builderTag,
+  });
 }
 
 // Build the comment body + owed-delivery stub before the terminal move.

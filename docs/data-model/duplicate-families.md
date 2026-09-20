@@ -1,20 +1,24 @@
 # Data Model - Duplicate Families
 
-**Owner:** duplicate-family advisory census
+**Owner:** duplicate-family merge gate
 **Store:** `data/reviews.db`
 **Source of truth:** `src/duplicate-family-state.mjs`
 **Runtime surface:** `src/duplicate-family-state.mjs`, `src/review-state.mjs`, `src/watcher.mjs`
 
 ## Purpose
 
-The duplicate-family census records advisory groups of open PRs that appear to
-represent the same work identity in the same target repo and base branch. The
-watcher updates this state during polling so operator surfaces can see likely
-redundant PRs without blocking the normal adversarial-review state machine.
+The duplicate-family census records groups of open PRs that appear to represent
+the same work identity in the same target repo and base branch. The watcher
+updates this state during polling so operator surfaces can see likely redundant
+PRs and so unresolved duplicate families can block autonomous merge lanes until
+the family is resolved or suppressed.
 
-The census is advisory only. Rows do not merge, close, or reject PRs by
-themselves; they preserve evidence and operator overrides for duplicate-stack
-adjudication.
+Rows do not merge, close, or reject PRs by themselves. For an active unresolved
+family, `reconcileDuplicateFamilyLabels()` projects the store into GitHub by
+applying `duplicate-family` and `duplicate-family-hold`; the hold label is the
+merge-blocking contract consumed by AMA, hammer routing, merge-agent dispatch,
+and fast-merge. Suppressed candidates remain advisory members only and do not
+receive the hold.
 
 ## Tables
 
@@ -85,7 +89,9 @@ family advisory active. Existing databases created with the older
   candidates in an orphaned legacy table.
 - `detectDuplicateFamiliesForRepo()` requires at least two open unsuppressed
   candidates with at least two common strong signals before returning an
-  advisory family.
+  advisory family. Candidates carrying suppression evidence, such as
+  `not-a-duplicate-stack`, stack/follow-up labels, or sibling stack-base
+  evidence, are persisted for operator context but are not held.
 - `upsertDuplicateFamilies()` persists all candidates in each returned family,
   while `candidate_count` tracks only the active open unsuppressed subset. If a
   PR is detected in a different family, its existing candidate row is reassigned
@@ -95,6 +101,15 @@ family advisory active. Existing databases created with the older
   no longer returns the family key. Families that are absent solely because all
   candidates fell outside a windowed polling slice remain advisory until a later
   observation proves they no longer have two live unsuppressed candidates.
+- `reconcileDuplicateFamilyLabels()` writes the GitHub labels after each census:
+  active unresolved unsuppressed candidates receive `duplicate-family` and
+  `duplicate-family-hold`; suppressed candidates receive only
+  `duplicate-family`; inactive families or released candidates have
+  `duplicate-family-hold` removed. The hold releases after the census no longer
+  sees two live unsuppressed candidates, after an operator suppression label is
+  observed for that candidate, or after an out-of-band operator override records
+  `ignored-not-duplicate` or a survivor-selected disposition for the current
+  candidate head.
 - Operator overrides are not deleted automatically. If the override references
   a candidate whose head moved, the override is marked stale for that observed
   head without regenerating the stale timestamp on later identical polls.

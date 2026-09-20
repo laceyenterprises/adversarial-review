@@ -7,6 +7,7 @@ import {
   ensureDuplicateFamilySchema,
   listDuplicateFamilies,
   readDuplicateFamilyForPr,
+  reconcileDuplicateFamilyLabels,
   reconcileDuplicateFamiliesForRepo,
   runDuplicateFamilyCensusForWatcher,
 } from '../src/duplicate-family-state.mjs';
@@ -353,6 +354,52 @@ test('stack, follow-up, and same-branch remediation candidates are suppressed', 
     }),
   });
   assert.equal(sameBranch.length, 0);
+});
+
+test('label reconciler does not hold candidates suppressed by the census', async () => {
+  const db = memoryDb();
+  try {
+    const result = reconcileDuplicateFamiliesForRepo(db, [
+      subject(331, {}),
+      subject(332, {}),
+      subject(333, { labels: ['stack:depends-on-331'] }),
+    ], {
+      repoPath: REPO,
+      now: '2026-09-11T00:00:00.000Z',
+      readBuildCompletionSignalForPrImpl: provenanceReader({
+        331: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+        332: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+        333: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+      }),
+    });
+    assert.equal(result.familyIds.length, 1);
+    assert.equal(duplicateFamilyCandidateRows(db, result.familyIds[0]).length, 3);
+
+    const labelAdds = [];
+    const octokit = {
+      rest: {
+        issues: {
+          addLabels: async (payload) => labelAdds.push(payload),
+          removeLabel: async () => assert.fail('suppressed candidate must not need hold removal'),
+        },
+      },
+    };
+
+    const labels = await reconcileDuplicateFamilyLabels({
+      db,
+      octokit,
+      repoPath: REPO,
+      logger: { error() {} },
+    });
+
+    assert.equal(labels.inspected, 3);
+    assert.deepEqual(
+      labelAdds.find((entry) => entry.issue_number === 333)?.labels,
+      ['duplicate-family'],
+    );
+  } finally {
+    db.close();
+  }
 });
 
 test('idempotent re-census does not duplicate family, candidates, or transitions', () => {

@@ -861,7 +861,8 @@ export async function reconcileDuplicateFamilyLabels({ db, octokit, repoPath, lo
   const rows = db.prepare(
     `SELECT duplicate_families.*, duplicate_family_candidates.pr_number,
             duplicate_family_candidates.head_sha AS candidate_head_sha,
-            duplicate_family_candidates.labels_json
+            duplicate_family_candidates.labels_json,
+            duplicate_family_candidates.suppressions_json
        FROM duplicate_family_candidates
        JOIN duplicate_families
          ON duplicate_families.family_id = duplicate_family_candidates.family_id
@@ -874,15 +875,17 @@ export async function reconcileDuplicateFamilyLabels({ db, octokit, repoPath, lo
       prNumber: row.pr_number,
       headSha: row.candidate_head_sha,
     });
+    const suppressed = parseMaybeJson(row.suppressions_json, []).length > 0;
+    const held = gate.held && !suppressed;
     const current = new Set(labelNames(parseMaybeJson(row.labels_json, [])).map((name) => name.toLowerCase()));
-    const wanted = [DUPLICATE_FAMILY_LABEL, ...(gate.held ? [DUPLICATE_FAMILY_HOLD_LABEL] : [])];
+    const wanted = [DUPLICATE_FAMILY_LABEL, ...(held ? [DUPLICATE_FAMILY_HOLD_LABEL] : [])];
     const additions = wanted.filter((name) => !current.has(name));
     try {
       if (additions.length > 0) {
         await octokit.rest.issues.addLabels({ owner, repo, issue_number: row.pr_number, labels: additions });
         changed += additions.length;
       }
-      if (!gate.held && current.has(DUPLICATE_FAMILY_HOLD_LABEL)) {
+      if (!held && current.has(DUPLICATE_FAMILY_HOLD_LABEL)) {
         await octokit.rest.issues.removeLabel({
           owner, repo, issue_number: row.pr_number, name: DUPLICATE_FAMILY_HOLD_LABEL,
         });

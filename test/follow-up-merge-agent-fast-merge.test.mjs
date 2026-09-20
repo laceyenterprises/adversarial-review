@@ -810,6 +810,33 @@ test('fast-merge veto racing before merge requeues and never merges', async () =
   assert.equal(claimWithWatcherCas(db, 804).changes, 1);
 });
 
+test('fast-merge duplicate-family hold racing before merge requeues and never merges', async () => {
+  const db = makeDb();
+  seedFastMerge(db, 8042);
+  const audits = [];
+  const gh = makeGhStub({
+    views: [
+      openView('sha-A', [{ name: 'fast-merge:docs' }]),
+      openView('sha-A', [{ name: 'fast-merge:docs' }, { name: 'duplicate-family-hold' }]),
+    ],
+    checks: [successChecks()],
+  });
+
+  const result = await processFastMergePR({
+    db,
+    ghClient: gh,
+    repo: REPO,
+    prNumber: 8042,
+    authorizedHeadSha: 'sha-A',
+    auditWriter: (entry) => audits.push(entry),
+  });
+
+  assert.equal(result.status, 'requeued_duplicate_family_hold');
+  assert.equal(mergeCalls(gh).length, 0);
+  assert.equal(row(db, 8042).review_status, 'pending');
+  assert.equal(audits.at(-1).action, 'duplicate-family-hold-requeued');
+});
+
 test('fast-merge removed authorization label requeues before merge', async () => {
   const db = makeDb();
   seedFastMerge(db, 8041);

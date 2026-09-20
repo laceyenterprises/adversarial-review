@@ -106,6 +106,7 @@ import {
 } from './hammer-retry-cap.mjs';
 import { deliverAlert } from '../alert-delivery.mjs';
 import { isUnsupportedHqPriorityFlagError } from '../merge-agent-hq-exec.mjs';
+import { DUPLICATE_FAMILY_UNRESOLVED_REASON } from '../duplicate-family-gate.mjs';
 import { isHammerWorkerClass } from './hammer-worker-class.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -233,6 +234,7 @@ const HAMMER_ROUTE_STRUCTURAL_BLOCK_REASONS = new Set([
   'pr-is-draft',
   'risk-class-not-permitted',
   'branch-protection-missing-gate',
+  DUPLICATE_FAMILY_UNRESOLVED_REASON,
   'fast-merge-state-unsupported',
 ]);
 const AMA_CLOSER_MERGE_RETRY_CAP = DAEMON_MERGE_DEFAULTS.retryCap;
@@ -2872,6 +2874,7 @@ export const __testables__ = Object.freeze({
   resolveAgentOsPythonBin,
   defaultAmaLivePrProbe,
   normalizeAmaLivePrProbeResult,
+  isHammerRouteStructurallyBlocked,
   fetchMergeCommitShaBestEffort,
   emitWorkerGitMergeSignalBestEffort,
 });

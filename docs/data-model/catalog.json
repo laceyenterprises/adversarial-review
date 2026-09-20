@@ -80,7 +80,7 @@
         "src/review-state.mjs",
         "src/watcher.mjs"
       ],
-      "owner": "duplicate-family advisory census"
+      "owner": "duplicate-family merge gate"
     },
     {
       "id": "watcher-no-progress-lane",

@@ -514,6 +514,7 @@ function reapRunningPassTimeouts({
             prNumber: row.pr_number,
             failedAt: endedAt,
             failureClass: RUNNING_PASS_TIMEOUT_FAILURE_CLASS,
+            reviewerModel: row.reviewer_model || row.reviewer_class || null,
           });
           reviewClaimsReleased++;
         } else if (reviewRow?.review_status === 'failed') {

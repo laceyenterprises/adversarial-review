@@ -1042,6 +1042,7 @@ function settleReviewerAttempt({
   env = null,
   failureAt = new Date().toISOString(),
   maxRemediationRounds,
+  reviewerModel = null,
   leaseRecoveryEnabled = REVIEWER_LEASE_RECOVERY_ENABLED,
   statements = {
     markPosted: stmtMarkPosted,
@@ -1198,6 +1199,7 @@ function settleReviewerAttempt({
       failedAt: failureAt,
       failureClass,
       failureReason: failureMessage,
+      reviewerModel,
     });
     if (infraRecoverAttempts >= INFRA_AUTO_RECOVER_CAP) {
       const repeatExhaustion = infraRecoverAttempts > INFRA_AUTO_RECOVER_CAP;
@@ -1261,6 +1263,7 @@ function settleReviewerAttempt({
       failureClass: outageSignal.failureClass || outageSignal.reason,
       failureReason: failureMessage,
       nextRetryAfter: outageSignal.retryAfter,
+      reviewerModel,
     });
     withSqliteBusyRetrySync(
       () => statements.markOutageTransient.run(

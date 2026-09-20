@@ -207,6 +207,11 @@ new PR
   on `now` rather than throwing inside the failure-settle path, and
   `lastFailureAt` is always written as a parseable ISO-8601 string because
   `review-pipeline-health` republishes it verbatim as `since`.
+  The flat `transientFailureBreakdown` remains the reviewer-agnostic PR-level
+  hold counter. Route selection uses `transientFailureBreakdownByModel` for
+  model-specific fallback decisions, and in mixed old/new state charges a model
+  only for its attributed count plus the flat-map remainder not already
+  attributed to any model.
   Provider-scoped suspension keeps its
   own gates — `reviewed_prs.quota_reset_at_utc` for the `quota-exhausted` hold
   above, and the `hq fleet quota status` provider gate — which block just the

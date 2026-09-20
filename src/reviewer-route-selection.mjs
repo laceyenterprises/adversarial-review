@@ -136,13 +136,57 @@ function reviewerRouteForModel(model) {
   return REVIEWER_TIMEOUT_FALLBACK_ROUTE_BY_MODEL[normalized] || null;
 }
 
-function reviewerExecFailureCount(cascadeState, failureClass) {
+// Count failures of `failureClass` attributable to `reviewerModel`.
+//
+// The routing decision this feeds is model-specific: "has THIS model failed
+// enough that we should route away from it?". The flat
+// `transientFailureBreakdown` cannot answer that — it is reviewer-agnostic by
+// design (it drives the PR-level hold, which correctly applies to every
+// reviewer). Reading it here blamed one model for another's failures: claude
+// failing `quota-exhausted` twice routed GEMINI away on the next selection
+// (`gemini class=quota-exhausted count=2/2`), and gemini produced zero reviews
+// in six hours while being selected 1852 times.
+//
+// Falls back to the flat map when no per-model data exists for this subject, so
+// cascade-state files written before this change keep their existing
+// (conservative) behaviour instead of resetting counts to zero mid-outage.
+//
+// Mixed state is possible during rolling upgrades or from writer paths that
+// still lack a model. In that case, charge this model for its own attributed
+// count plus only the flat-map remainder not already accounted for by any
+// model. That keeps claude's known failures from routing gemini away while
+// preserving real fallback-eligible failures written by flat-only callers.
+function reviewerExecFailureCount(cascadeState, failureClass, reviewerModel = null) {
+  const byModel = cascadeState?.transientFailureBreakdownByModel;
+  if (byModel && typeof byModel === 'object' && Object.keys(byModel).length > 0) {
+    const key = String(reviewerModel || '').trim().toLowerCase();
+    if (!key) return 0;
+    const modelCount = Number(byModel?.[key]?.[failureClass] || 0);
+    const attributedCount = Object.values(byModel).reduce((sum, counts) => (
+      sum + Number(counts?.[failureClass] || 0)
+    ), 0);
+    const flatCount = Number(cascadeState?.transientFailureBreakdown?.[failureClass] || 0);
+    const unattributedCount = Math.max(0, flatCount - attributedCount);
+    return modelCount + unattributedCount;
+  }
   return Number(cascadeState?.transientFailureBreakdown?.[failureClass] || 0);
 }
 
-function reviewerExecFailureSignal({ cascadeState, currentRow }) {
+function reviewerExecFailureSignal({ cascadeState, currentRow, reviewerModel = null }) {
   const candidates = [];
-  const lastFailureClass = REVIEWER_EXEC_FALLBACK_FAILURE_CLASSES.includes(cascadeState?.lastFailureClass)
+  const normalizedModel = String(reviewerModel || '').trim().toLowerCase();
+  const byModel = cascadeState?.transientFailureBreakdownByModel;
+  const hasPerModel = Boolean(byModel && typeof byModel === 'object' && Object.keys(byModel).length > 0);
+  // `lastFailureClass` is only evidence about THIS model when the recorded
+  // failure came from it. With per-model data available, a last failure by a
+  // different model must not prioritise a class against this one.
+  const lastFailureModel = String(cascadeState?.lastFailureModel || '').trim().toLowerCase();
+  const lastFailureBelongsToModel = !hasPerModel
+    || !normalizedModel
+    || !lastFailureModel
+    || lastFailureModel === normalizedModel;
+  const lastFailureClass = lastFailureBelongsToModel
+    && REVIEWER_EXEC_FALLBACK_FAILURE_CLASSES.includes(cascadeState?.lastFailureClass)
     ? cascadeState.lastFailureClass
     : null;
   const rowRecoverableFailureClass = infraRecoverableFailureClass(currentRow);
@@ -163,7 +207,7 @@ function reviewerExecFailureSignal({ cascadeState, currentRow }) {
   }
 
   for (const failureClass of REVIEWER_EXEC_FALLBACK_FAILURE_CLASSES) {
-    const failureCount = reviewerExecFailureCount(cascadeState, failureClass);
+    const failureCount = reviewerExecFailureCount(cascadeState, failureClass, reviewerModel);
     if (failureCount <= 0) continue;
     candidates.push({
       failureClass,
@@ -390,7 +434,11 @@ export function selectReviewerRouteForAttempt({
   const cascadeState = readCascadeState(rootDir, { repo: repoPath, prNumber });
   const builderClass = subject?.builderClass || baseRoute.builderClass || null;
   const execThreshold = resolveReviewerExecFallbackThreshold(env);
-  const execFailureSignal = reviewerExecFailureSignal({ cascadeState, currentRow });
+  const execFailureSignal = reviewerExecFailureSignal({
+    cascadeState,
+    currentRow,
+    reviewerModel: baseRoute?.reviewerModel || null,
+  });
   if (
     execThreshold > 0 &&
     currentRowHeadMatches(currentRow, headSha) &&
@@ -494,3 +542,10 @@ export function resolveStaleReviewerReconcilePerPoll(env = process.env) {
   if (!Number.isInteger(parsed) || parsed < 0) return DEFAULT_STALE_REVIEWER_RECONCILE_PER_POLL;
   return parsed;
 }
+
+// Internal helpers exposed for tests only (repo convention, see
+// src/hq-worker-classes.mjs). Not part of the module's public contract.
+export const __testing = {
+  reviewerExecFailureCount,
+  reviewerExecFailureSignal,
+};

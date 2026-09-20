@@ -77,7 +77,7 @@ import { ensureTtmTrackerSchema } from './ttm-tracker.mjs';
  */
 const DEFAULT_BUSY_TIMEOUT_MS = 100;
 const DEFAULT_LIVE_PR_LOOKUP_TIMEOUT_MS = 15_000;
-const REVIEW_STATE_SCHEMA_VERSION = 10;
+const REVIEW_STATE_SCHEMA_VERSION = 11;
 const REVIEW_STATE_MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
 const execFileAsyncDefault = promisify(execFile);
 const REVIEW_STATE_TABLE_NAMES = new Set([
@@ -176,6 +176,10 @@ function ensureReviewStateSchema(db) {
       reviewer_head_sha TEXT,
       reviewer_timeout_ms INTEGER,
       reviewer_lease_expires_at TEXT,
+      reviewer_admission_state TEXT NOT NULL DEFAULT 'released',
+      review_settlement_status TEXT NOT NULL DEFAULT 'completed',
+      review_settlement_started_at TEXT,
+      review_settlement_completed_at TEXT,
       quota_reset_at_utc TEXT,
       review_population_retry_attempts INTEGER NOT NULL DEFAULT 0,
       review_population_retry_last_at TEXT,
@@ -213,6 +217,10 @@ function ensureReviewStateSchema(db) {
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN reviewer_head_sha TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN reviewer_timeout_ms INTEGER`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN reviewer_lease_expires_at TEXT`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN reviewer_admission_state TEXT NOT NULL DEFAULT 'released'`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN review_settlement_status TEXT NOT NULL DEFAULT 'completed'`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN review_settlement_started_at TEXT`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN review_settlement_completed_at TEXT`);
   // HRR review-lane: durable provider usage-cap reset time. Owned by
   // 20260622_quota_reset_at_utc.sql; kept here too as an idempotent backstop for
   // DBs that briefly existed before the migration sentinel (same rationale as

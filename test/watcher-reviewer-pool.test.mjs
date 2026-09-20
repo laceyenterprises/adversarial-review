@@ -22,6 +22,25 @@ import {
   peakReviewerMemoryMbFor,
   pressureLevelFor,
 } from '../src/watcher-memory-pressure.mjs';
+import { reviewSettlementStatusForResult } from '../src/reviewer-settlement.mjs';
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+test('post outcomes classify successful, retryable, and permanent settlement', () => {
+  assert.equal(reviewSettlementStatusForResult({ ok: true }), 'completed');
+  assert.equal(reviewSettlementStatusForResult({
+    ok: false,
+    failureClass: 'github-review-create-transient',
+  }), 'retry');
+  assert.equal(reviewSettlementStatusForResult({
+    ok: false,
+    failureClass: 'github-review-create-terminal',
+  }), 'failed');
+});
 
 function candidate(prNumber, run, createdAt = `2026-05-01T00:00:${String(prNumber).padStart(2, '0')}.000Z`, options = {}) {
   return {
@@ -56,6 +75,24 @@ test('reviewer pool respects the configured concurrency cap', async () => {
   assert.equal(summary.dispatched, 6);
   assert.equal(summary.maxObservedConcurrency, 3);
   assert.equal(maxActive, 3);
+});
+
+test('slow settlement does not retain the only reviewer slot', async () => {
+  const slowSettlement = deferred();
+  const nextReviewStarted = deferred();
+  const slow = candidate(7010, async () => {
+    void slowSettlement.promise;
+    return { settlementStatus: 'retry' };
+  });
+  const eligible = candidate(7011, async () => nextReviewStarted.resolve());
+
+  const drain = runBoundedReviewerDispatchQueue([slow, eligible], {
+    maxConcurrent: 1,
+    logger: { error() {}, warn() {}, log() {} },
+  });
+  await nextReviewStarted.promise;
+  slowSettlement.resolve();
+  await drain;
 });
 
 test('reviewer pool caps concurrency at min(pool slots, available credentials)', async () => {

@@ -705,7 +705,7 @@ function reviewerSlotState(db, { nowMs }) {
             reviewer_started_at, reviewer_lease_expires_at, reviewer_head_sha
        FROM reviewed_prs
       WHERE COALESCE(pr_state, 'open') = 'open'
-        AND review_status = 'reviewing'
+        AND reviewer_admission_state = 'active'
       ORDER BY reviewer_started_at ASC`
   ).map((row) => ({
     repo: row.repo,
@@ -738,12 +738,38 @@ function reviewerSlotState(db, { nowMs }) {
     workerRunId: row.worker_run_id || null,
     metadata: parseJson(row.metadata_json, {}),
   }));
+  const settlements = safeAll(
+    db,
+    `SELECT repo, pr_number, reviewer, review_status,
+            review_settlement_status, review_settlement_started_at,
+            review_settlement_completed_at, failed_at, failure_message
+       FROM reviewed_prs
+      WHERE COALESCE(pr_state, 'open') = 'open'
+        AND reviewer_admission_state = 'released'
+        AND review_settlement_status IN ('pending', 'retry', 'failed')
+      ORDER BY COALESCE(review_settlement_started_at, failed_at, last_attempted_at) ASC`
+  ).map((row) => {
+    const anchor = row.review_settlement_started_at || row.failed_at || null;
+    return {
+      repo: row.repo,
+      prNumber: Number(row.pr_number),
+      reviewer: row.reviewer || null,
+      reviewStatus: row.review_status,
+      settlementStatus: row.review_settlement_status,
+      startedAt: anchor,
+      completedAt: row.review_settlement_completed_at || null,
+      ageMs: toMs(anchor) === null ? null : Math.max(0, nowMs - toMs(anchor)),
+      failureMessage: row.failure_message || null,
+    };
+  });
   return {
     reviewingRows: reviewing.length,
     runningPasses: runningPasses.length,
     nullPgidRows: reviewing.filter((row) => !row.hasDurablePgid).length,
     rows: reviewing,
     passes: runningPasses,
+    settlementRows: settlements.length,
+    settlements,
   };
 }
 
@@ -875,7 +901,7 @@ function collectReviewLatencyReport({
       topWaitingReasons: topWaitingReasons(queue),
       reviewerSlots: db
         ? reviewerSlotState(db, { nowMs })
-        : { reviewingRows: 0, runningPasses: 0, nullPgidRows: 0, rows: [], passes: [] },
+        : { reviewingRows: 0, runningPasses: 0, nullPgidRows: 0, rows: [], passes: [], settlementRows: 0, settlements: [] },
       agyRouteState: db
         ? agyRouteState(db, { sinceIso })
         : { available: false, reviewerRows: [], recentProbeEvents: [] },
@@ -929,7 +955,8 @@ function renderReviewLatencyReport(report) {
   }
   lines.push(
     `reviewer slots: reviewing=${report.reviewerSlots.reviewingRows} ` +
-    `running_passes=${report.reviewerSlots.runningPasses} null_pgid=${report.reviewerSlots.nullPgidRows}`
+    `running_passes=${report.reviewerSlots.runningPasses} null_pgid=${report.reviewerSlots.nullPgidRows} ` +
+    `settlement=${report.reviewerSlots.settlementRows || 0}`
   );
   lines.push(`AGY route/probe: ${report.agyRouteState.available ? 'available' : 'unobserved'}`);
   lines.push('');

@@ -435,3 +435,37 @@ test('latency report fetches explicit subject history across the window boundary
   assert.equal(admission.sampleCount, 1);
   assert.equal(admission.p50Ms, 48 * 60 * 60 * 1000 + 5 * 60 * 1000);
 });
+
+test('latency report exposes released retry settlement without consuming reviewer capacity', () => {
+  const rootDir = tempRoot();
+  const db = openDb(rootDir);
+  try {
+    db.prepare(`
+      INSERT INTO reviewed_prs (
+        repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+        failed_at, failure_message, reviewer_admission_state,
+        review_settlement_status, review_settlement_started_at
+      ) VALUES (?, ?, ?, ?, 'open', 'pending-upstream', ?, ?, 'released', 'retry', ?)
+    `).run(
+      REPO,
+      7012,
+      '2026-09-19T10:00:00.000Z',
+      'codex',
+      '2026-09-19T10:05:00.000Z',
+      '[github-review-create-transient] retry bounded by infra recovery cap',
+      '2026-09-19T10:04:00.000Z',
+    );
+  } finally {
+    db.close();
+  }
+
+  const report = collectReviewLatencyReport({
+    rootDir,
+    since: '24h',
+    now: () => new Date('2026-09-19T11:00:00.000Z'),
+  });
+  assert.equal(report.reviewerSlots.reviewingRows, 0);
+  assert.equal(report.reviewerSlots.settlementRows, 1);
+  assert.equal(report.reviewerSlots.settlements[0].settlementStatus, 'retry');
+  assert.match(renderReviewLatencyReport(report), /settlement=1/);
+});

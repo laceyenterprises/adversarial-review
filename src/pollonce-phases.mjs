@@ -59,7 +59,11 @@ import {
   markFastMergeAuditError,
   markFastMergeAuditWritten,
 } from './fast-merge-audit-recovery.mjs';
-import { maybeInlineFinalHammerAfterReview } from './final-to-hammer-handoff.mjs';
+import {
+  maybeInlineFinalHammerAfterReview,
+  resolveFinalToHammerHandoffEnabled,
+  shouldInlineFinalHammerAfterReview,
+} from './final-to-hammer-handoff.mjs';
 import {
   applyReviewerWorkerClassFallbackToRoute,
   resolveReviewerWorkerClassWithFallback,
@@ -140,8 +144,11 @@ import {
   stmtMarkReviewCycleCapPaused,
   stmtMarkReviewPopulationRetryAttemptStarted,
   stmtMarkReviewerCommandFailedRecoveredPosted,
+  stmtMarkReviewerAdmissionActive,
   stmtMarkUnknownFailureRetryAttemptStarted,
   stmtReleaseReviewerClaim,
+  stmtReleaseReviewerAdmissionToSettlement,
+  stmtRecordReviewerSettlementLatency,
   stmtRestoreReviewedHeadDedupSuppressedReviewPosted,
   stmtRestoreSameHeadSuppressedReviewPosted,
   stmtUpdateReviewLabels,
@@ -200,6 +207,7 @@ import {
 } from './reviewer-spawn-settle.mjs';
 import { maybeDispatchReviewerTimeoutExhaustedMergeAgent } from './reviewer-timeout-exhausted-dispatch.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
+import { reviewSettlementStatusForResult } from './reviewer-settlement.mjs';
 import { resolveReviewPopulationRetryConfig } from './role-config.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 import { getStalePostedReviewAutoRereviewSuppression } from './stale-posted-review-rereview.mjs';
@@ -2981,6 +2989,17 @@ export async function processReviewSubject(entry, ctx) {
                 repo: repoPath,
                 prNumber,
               });
+              const admissionMarked = stmtMarkReviewerAdmissionActive.run(
+                attemptAt,
+                repoPath,
+                prNumber,
+                reviewerSessionUuid,
+              );
+              if (admissionMarked.changes !== 1) {
+                throw new Error(
+                  `failed to persist reviewer admission phase for ${repoPath}#${prNumber}`
+                );
+              }
               const spawnReviewerArgs = {
                 repo: repoPath,
                 prNumber,
@@ -3047,22 +3066,64 @@ export async function processReviewSubject(entry, ctx) {
                 // ARC-18: watcher owns the heartbeat singleton; thread it in.
                 markReviewHeartbeat: markWatcherReviewHeartbeat,
               });
-              await maybeInlineFinalHammerAfterReview({
-                rootDir: ROOT,
+              const settlementAt = new Date().toISOString();
+              const settlementStatus = reviewSettlementStatusForResult(result);
+              const admissionReleased = stmtReleaseReviewerAdmissionToSettlement.run(
+                settlementStatus,
+                settlementAt,
                 repoPath,
                 prNumber,
-                result,
+                reviewerSessionUuid,
+              );
+              if (admissionReleased.changes !== 1) {
+                throw new Error(
+                  `failed to durably release reviewer admission for ${repoPath}#${prNumber}`
+                );
+              }
+              stmtRecordReviewerSettlementLatency.run(
+                repoPath,
+                prNumber,
+                domainId,
+                subject.ref.subjectExternalId,
+                reviewerHeadSha,
+                settlementAt,
+                reviewerSessionUuid,
+                reviewerSessionUuid,
+                settlementStatus,
+                JSON.stringify({ settlementStatus, reviewerModel: route.reviewerModel }),
+              );
+              // The model result and GitHub-post disposition are now durable.
+              // Follow-up/hammer work below is settlement and must not retain a
+              // scarce reviewer slot.
+              const handoffFinalToHammerEnabled = resolveFinalToHammerHandoffEnabled({ logger: console });
+              if (shouldInlineFinalHammerAfterReview({
+                handoffFinalToHammerEnabled,
                 passKind,
+                result,
                 completedRemediationRounds,
                 maxRemediationRounds,
-                subjectRef: subject.ref,
-                currentRevisionRef: subject.ref.revisionRef,
-                labelNames: prLabelNames,
-                projectGateStatusSafe,
-                execFileImpl: execFileAsync,
-                operatorSurface,
-                logger: console,
-                handlePostedReviewRowImpl: handlePostedReviewRow,
+              })) postedReviewHandlers.push({
+                repoPath,
+                prNumber,
+                headSha: reviewerHeadSha,
+                run: () => maybeInlineFinalHammerAfterReview({
+                  rootDir: ROOT,
+                  repoPath,
+                  prNumber,
+                  result,
+                  passKind,
+                  completedRemediationRounds,
+                  maxRemediationRounds,
+                  subjectRef: subject.ref,
+                  currentRevisionRef: subject.ref.revisionRef,
+                  labelNames: prLabelNames,
+                  projectGateStatusSafe,
+                  execFileImpl: execFileAsync,
+                  operatorSurface,
+                  logger: console,
+                  handoffFinalToHammerEnabled,
+                  handlePostedReviewRowImpl: handlePostedReviewRow,
+                }),
               });
             }
           } finally {

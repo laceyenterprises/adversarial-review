@@ -274,10 +274,10 @@ function prepareStatements(db) {
     ),
     markMergedPendingReviewSkipped: db.prepare(MARK_MERGED_PENDING_REVIEW_SKIPPED_SQL),
     markOrphan: db.prepare(
-      "UPDATE reviewed_prs SET review_status = 'failed-orphan', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
+      "UPDATE reviewed_prs SET review_status = 'failed-orphan', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_admission_state = 'released', review_settlement_status = 'failed', review_settlement_completed_at = datetime('now') WHERE repo = ? AND pr_number = ?"
     ),
     markFailed: db.prepare(
-      "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
+      "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL, reviewer_admission_state = 'released', review_settlement_status = 'failed', review_settlement_completed_at = datetime('now') WHERE repo = ? AND pr_number = ?"
     ),
     releasePending: db.prepare(
       `UPDATE reviewed_prs
@@ -296,6 +296,9 @@ function prepareStatements(db) {
               review_population_retry_attempts = 0,
               review_population_retry_last_at = NULL,
               review_population_retry_head_sha = NULL
+              , reviewer_admission_state = 'released'
+              , review_settlement_status = 'retry'
+              , review_settlement_completed_at = datetime('now')
         WHERE repo = ?
           AND pr_number = ?
           AND review_status = 'reviewing'`
@@ -316,12 +319,15 @@ function prepareStatements(db) {
               review_population_retry_attempts = 0,
               review_population_retry_last_at = NULL,
               review_population_retry_head_sha = NULL
+              , reviewer_admission_state = 'released'
+              , review_settlement_status = 'completed'
+              , review_settlement_completed_at = datetime('now')
         WHERE repo = ?
           AND pr_number = ?
           AND review_status = 'reviewing'`
     ),
     markPosted: db.prepare(
-      "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL, infra_auto_recover_attempts = 0 WHERE repo = ? AND pr_number = ?"
+      "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL, infra_auto_recover_attempts = 0, reviewer_admission_state = 'released', review_settlement_status = 'completed', review_settlement_completed_at = datetime('now') WHERE repo = ? AND pr_number = ?"
     ),
     adoptRunStatePgid: db.prepare(
       `UPDATE reviewed_prs

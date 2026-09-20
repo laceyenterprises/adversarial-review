@@ -121,6 +121,42 @@ test('openReviewStateDb applies a busy timeout and shared schema adds reviewer h
   }
 });
 
+test('review-state migration adopts legacy in-progress rows as active admission', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'review-state-admission-migration-'));
+  const db = openReviewStateDb(rootDir);
+  try {
+    db.exec(`
+      CREATE TABLE reviewed_prs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo TEXT NOT NULL,
+        pr_number INTEGER NOT NULL,
+        reviewed_at TEXT NOT NULL,
+        reviewer TEXT NOT NULL,
+        review_status TEXT NOT NULL,
+        last_attempted_at TEXT,
+        UNIQUE(repo, pr_number)
+      );
+      INSERT INTO reviewed_prs (
+        repo, pr_number, reviewed_at, reviewer, review_status, last_attempted_at
+      ) VALUES (
+        'laceyenterprises/agent-os', 7003, '2026-09-19T01:00:00.000Z',
+        'codex', 'reviewing', '2026-09-19T01:01:00.000Z'
+      );
+    `);
+    ensureReviewStateSchema(db);
+    const row = db.prepare(
+      'SELECT reviewer_admission_state, review_settlement_status, review_settlement_started_at FROM reviewed_prs WHERE pr_number = 7003'
+    ).get();
+    assert.deepEqual(row, {
+      reviewer_admission_state: 'active',
+      review_settlement_status: 'pending',
+      review_settlement_started_at: '2026-09-19T01:01:00.000Z',
+    });
+  } finally {
+    db.close();
+  }
+});
+
 test('review-state migrations upgrade old reviewer_passes schema idempotently', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const db = openReviewStateDb(rootDir);

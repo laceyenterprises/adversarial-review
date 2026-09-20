@@ -280,6 +280,32 @@ export const stmtReleaseReviewerClaim = db.prepare(
       AND pr_number = ?
       AND review_status = 'reviewing'`
 );
+export const stmtMarkReviewerAdmissionActive = db.prepare(
+  `UPDATE reviewed_prs
+      SET reviewer_admission_state = 'active',
+          review_settlement_status = 'pending',
+          review_settlement_started_at = ?,
+          review_settlement_completed_at = NULL
+    WHERE repo = ? AND pr_number = ?
+      AND reviewer_session_uuid = ?
+      AND review_status = 'reviewing'`
+);
+export const stmtReleaseReviewerAdmissionToSettlement = db.prepare(
+  `UPDATE reviewed_prs
+      SET reviewer_admission_state = 'released',
+          review_settlement_status = ?,
+          review_settlement_completed_at = ?
+    WHERE repo = ? AND pr_number = ?
+      AND reviewer_session_uuid = ?
+      AND reviewer_admission_state = 'active'`
+);
+export const stmtRecordReviewerSettlementLatency = db.prepare(
+  `INSERT OR IGNORE INTO review_latency_events (
+     repo, pr_number, domain_id, subject_external_id, revision_ref,
+     event_type, stage, at, source, source_ref, idempotency_key, reason, payload_json
+   ) VALUES (?, ?, ?, ?, ?, 'settlement_completed', 'watcher', ?,
+             'watcher-review-admission', ?, ?, ?, ?)`
+);
 export const stmtMarkPosted = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, quota_reset_at_utc = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL, infra_auto_recover_attempts = 0 WHERE repo = ? AND pr_number = ?"
 );

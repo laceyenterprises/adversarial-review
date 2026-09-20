@@ -1177,6 +1177,66 @@ test('conflicting open PR diagnostic only finds shared conflict paths', () => {
   assert.ok(!findingCodes(snapshot).includes('review:conflicting_open_prs'));
 });
 
+test('CONFLICTOWN-01: host checks always collect the cheap conflicting PR inventory', () => {
+  const rootDir = tempRoot();
+  const execFileSyncImpl = (command, args) => {
+    if (command === 'gh') {
+      assert.deepEqual(args.slice(-2), [
+        '--json',
+        'number,url,title,headRefName,headRefOid,baseRefName,mergeable,isDraft,updatedAt,labels',
+      ]);
+      return JSON.stringify([{ number: 6914, mergeable: 'CONFLICTING', isDraft: false,
+        headRefOid: 'watchstarve', updatedAt: '2026-05-25T15:00:00.000Z' }]);
+    }
+    return 'state = running\nlast exit code = 0\n';
+  };
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot: tempRoot(),
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    config: {
+      conflictingPrChecksEnabled: false,
+      conflictingPrRepo: 'laceyenterprises/agent-os',
+      conflictingPrUnownedMaxAgeMs: 30 * 60 * 1000,
+    },
+    execFileSyncImpl,
+  });
+
+  assert.equal(snapshot.conflictingOpenPrs.enabled, true);
+  assert.equal(snapshot.conflictingOpenPrs.collected, true);
+  assert.equal(snapshot.conflictingOpenPrs.count, 1);
+  assert.equal(snapshot.conflictingOpenPrs.probedPrs, 0);
+  assert.ok(findingCodes(snapshot).includes('review:conflicting_pr_unowned'));
+});
+
+test('CONFLICTOWN-01: current-head ownership marker suppresses the unowned conflict finding', () => {
+  const rootDir = tempRoot();
+  const execFileSyncImpl = (command) => {
+    if (command === 'gh') {
+      return JSON.stringify([{ number: 6914, mergeable: 'CONFLICTING', isDraft: false,
+        headRefOid: 'watchstarve', updatedAt: '2026-05-25T15:00:00.000Z',
+        labels: [{ name: 'merge-agent-dispatched' }] }]);
+    }
+    return 'state = running\nlast exit code = 0\n';
+  };
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot: tempRoot(),
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    config: {
+      conflictingPrChecksEnabled: false,
+      conflictingPrRepo: 'laceyenterprises/agent-os',
+      conflictingPrUnownedMaxAgeMs: 30 * 60 * 1000,
+    },
+    execFileSyncImpl,
+  });
+
+  assert.equal(snapshot.conflictingOpenPrs.prs[0].owned, true);
+  assert.ok(!findingCodes(snapshot).includes('review:conflicting_pr_unowned'));
+});
+
 test('conflicting open PR diagnostic treats per-PR probe failures as blind coverage', () => {
   const rootDir = tempRoot();
   const calls = [];
@@ -4155,6 +4215,24 @@ test('AMAGAP-01: hammer dispatch stall probe is inert when host checks are disab
   assert.ok(!findingCodes(snapshot).includes('review:hammer_dispatch_stalled_with_conflicts'));
   assert.equal(snapshot.hammerDispatchStall.active, false);
   assert.equal(snapshot.hammerDispatchStall.backlog.present, false);
+});
+
+test('CONFLICTOWN-01: missing hammer dispatch log reports blind instead of healthy', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const execFileSyncImpl = (command) => command === 'gh' ? '[]' : 'state = running\nlast exit code = 0\n';
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot,
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    execFileSyncImpl,
+  });
+
+  assert.equal(snapshot.hammerDispatchStall.active, null);
+  assert.equal(snapshot.hammerDispatchStall.blind, true);
+  assert.equal(snapshot.hammerDispatchStall.blindReason, 'dispatch-log-missing');
+  assert.ok(findingCodes(snapshot).includes('review:hammer_dispatch_stall_blind'));
 });
 
 test('dispatch spawn classifier ignores op cache backoff and successful daemon spawns', () => {

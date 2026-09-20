@@ -29,6 +29,7 @@ import {
 } from '../src/review-queue-depth.mjs';
 import {
   applyReviewerWorkerClassFallbackToRoute,
+  FLEET_QUOTA_STATUS_TICK_CACHE_TTL_MS,
   resolveReviewerWorkerClassWithFallback,
   reviewWorkerClassFallback,
   reviewerWorkerClassEntitled,
@@ -653,4 +654,16 @@ test('pollonce-phases passes depth pressure in and charges the cost ledger back'
   );
   // The route swap gets the author so the diversity backstop can refuse.
   assert.match(src, /applyReviewerWorkerClassFallbackToRoute\(\{[^}]*authorClass: reviewerAuthorClass/);
+});
+
+test('pollonce-phases uses a bounded per-tick quota cache TTL', () => {
+  assert.equal(FLEET_QUOTA_STATUS_TICK_CACHE_TTL_MS, 60_000);
+  const watcherSrc = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
+  const pollonceSrc = readFileSync(new URL('../src/pollonce-phases.mjs', import.meta.url), 'utf8');
+  assert.match(watcherSrc, /reviewerTickCaches = \{ fleetQuotaStatus: new Map\(\) \}/);
+  assert.match(watcherSrc, /reviewerFleetQuotaStatusCache: reviewerTickCaches\.fleetQuotaStatus/);
+  assert.match(watcherSrc, /ok=\$\{Boolean\(pollResult\?\.ok\)\} timed_out=\$\{Boolean\(pollResult\?\.timedOut\)\}/);
+  assert.match(pollonceSrc, /fleetQuotaStatusCache: reviewerFleetQuotaStatusCache/);
+  assert.match(pollonceSrc, /fleetQuotaStatusCacheTtlMs: FLEET_QUOTA_STATUS_TICK_CACHE_TTL_MS/);
+  assert.doesNotMatch(pollonceSrc, /fleetQuotaStatusCacheTtlMs: Number\.MAX_SAFE_INTEGER/);
 });

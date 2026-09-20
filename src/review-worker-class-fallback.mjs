@@ -19,7 +19,8 @@ const SUBMODULE_ROOT = resolve(__dirname, '..');
 const AGENT_OS_ROOT = resolve(SUBMODULE_ROOT, '..', '..');
 const FLEET_QUOTA_STATUS_TIMEOUT_MS = 20_000;
 const FLEET_QUOTA_STATUS_RETRY_DELAYS_MS = Object.freeze([250, 1000]);
-const FLEET_QUOTA_STATUS_CACHE_TTL_MS = 10_000;
+export const FLEET_QUOTA_STATUS_CACHE_TTL_MS = 10_000;
+export const FLEET_QUOTA_STATUS_TICK_CACHE_TTL_MS = 60_000;
 const FLEET_QUOTA_STATUS_CACHE_BY_EXEC = new WeakMap();
 
 const DEFAULT_REVIEWER_WORKER_CLASS_FALLBACK = Object.freeze(['codex', 'claude-code']);
@@ -176,6 +177,7 @@ async function executeFleetQuotaStatusWithRetry({
   retryDelaysMs,
 }) {
   const attempts = retryDelaysMs.length + 1;
+  const startedAtMs = Date.now();
   let lastError = null;
   let attemptsMade = 0;
   for (let attemptIndex = 0; attemptIndex < attempts; attemptIndex += 1) {
@@ -188,6 +190,11 @@ async function executeFleetQuotaStatusWithRetry({
         timeout: FLEET_QUOTA_STATUS_TIMEOUT_MS,
       });
       const stdout = typeof result === 'string' ? result : String(result?.stdout || '');
+      const durationMs = Date.now() - startedAtMs;
+      logger?.log?.(
+        `[watcher] review-worker-class-fallback quota-status timing ` +
+        `duration_ms=${durationMs} attempts=${attemptIndex + 1} outcome=success`
+      );
       return { stdout, source: attemptIndex === 0 ? 'exec' : 'exec-retry' };
     } catch (err) {
       lastError = err;
@@ -211,6 +218,10 @@ async function executeFleetQuotaStatusWithRetry({
     `[watcher] review-worker-class-fallback quota-status unavailable ` +
     `attempts=${attemptsMade}/${attempts}; failing open: ${message}`
   );
+  logger?.log?.(
+    `[watcher] review-worker-class-fallback quota-status timing ` +
+    `duration_ms=${Date.now() - startedAtMs} attempts=${attemptsMade} outcome=fail-open`
+  );
   return { error: lastError, errorMessage: message };
 }
 
@@ -232,6 +243,13 @@ async function readFleetQuotaStatusWithRetry({
   if (cached && now - cached.readAtMs <= cacheTtlMs) {
     if (cached.promise) return cached.promise;
     if (typeof cached.stdout === 'string') return { stdout: cached.stdout, source: 'cache' };
+    if (cached.error) {
+      return {
+        error: cached.error,
+        errorMessage: cached.errorMessage,
+        source: 'error-cache',
+      };
+    }
   }
 
   const promise = executeFleetQuotaStatusWithRetry({
@@ -247,7 +265,18 @@ async function readFleetQuotaStatusWithRetry({
   const result = await promise;
   if (!cache || cache.get(cacheKey)?.promise === promise) {
     if (result.error) {
-      cache?.delete(cacheKey);
+      // WATCHSTARVE-01: an unavailable quota probe is a valid fail-open
+      // routing snapshot. Keep that negative result for the same TTL as a
+      // successful read. Deleting it made every PR in the serial discovery
+      // loop repeat three 20s subprocess attempts; a 16-21 PR backlog thereby
+      // blocked poll-counter progress for 16-21 minutes and tripped the
+      // starvation watchdog. The short TTL preserves prompt recovery while
+      // bounding an outage to one probe window instead of one probe per PR.
+      cache?.set(cacheKey, {
+        error: result.error,
+        errorMessage: result.errorMessage,
+        readAtMs: nowMs(),
+      });
     } else {
       cache?.set(cacheKey, { stdout: result.stdout, readAtMs: nowMs() });
     }

@@ -1246,7 +1246,7 @@ async function pollOnce(
   const firstPassSpilloverController = createFirstPassSpilloverController({ rootDir: ROOT, readDepth: countOpenPrsAwaitingFirstPassReview, logger: console }); // RSP-01: disarmed unless CFG arms it
   const postedReviewHandlers = [];
   const postReviewMaintenanceHandlers = [];
-  const reviewerMemoryReservationState = { reservedMb: 0 };
+  const reviewerMemoryReservationState = { reservedMb: 0 }, reviewerTickCaches = { fleetQuotaStatus: new Map() };
   const reviewerMemoryAdmissionSampleForTick = createReviewerMemoryAdmissionSampler({
     logger: console,
     memoryPressureConfig: reviewerMemoryPressureConfig,
@@ -1422,6 +1422,7 @@ async function pollOnce(
         reviewerDispatchCandidates,
         firstPassSpilloverController,
         postedReviewHandlers,
+        reviewerFleetQuotaStatusCache: reviewerTickCaches.fleetQuotaStatus,
         reviewerMemoryReservationState,
         reviewerMemoryAdmissionSampleForTick,
         getRoutingTierReadinessForTick,
@@ -1840,13 +1841,10 @@ async function main() {
     onTimeout: exitForPollDeadline,
     deadlineMs: resolveDeadlineMsForCall,
   });
-  const watcherWakeSource = createWatcherWakeSource({
-    rootDir: ROOT,
-    logger: console,
-    consumeExistingOnStart: true,
-  });
+  const watcherWakeSource = createWatcherWakeSource({ rootDir: ROOT, logger: console, consumeExistingOnStart: true });
   let lastAlertSinkDegradedFingerprint = null;
   async function runHeartbeatPoll(source, pollOptions = undefined) {
+    const pollStartedAtMs = Date.now(); let pollResult = null;
     watcherHeartbeat.markPoll({ source });
     stallWatchdog.beginPoll();
     try {
@@ -1873,11 +1871,12 @@ async function main() {
         console.error(`[watcher] alert delivery sink health unavailable: ${error?.message || error}`);
       }
       await staleStateReaperTicker.tick();
-      const result = await safePollOnce(source, { ...(pollOptions || {}), consumeWakePayload: () => watcherWakeSource.consumeCurrent() });
-      watcherHeartbeat.markPollCompleted({ source, ok: Boolean(result?.ok), timed_out: Boolean(result?.timedOut), error: result?.error ? String(result.error?.message || result.error) : null });
-      return result;
+      pollResult = await safePollOnce(source, { ...(pollOptions || {}), consumeWakePayload: () => watcherWakeSource.consumeCurrent() });
+      watcherHeartbeat.markPollCompleted({ source, ok: Boolean(pollResult?.ok), timed_out: Boolean(pollResult?.timedOut), error: pollResult?.error ? String(pollResult.error?.message || pollResult.error) : null });
+      return pollResult;
     } finally {
       stallWatchdog.endPoll();
+      console.log(`[watcher] poll-cycle timing source="${source}" ok=${Boolean(pollResult?.ok)} timed_out=${Boolean(pollResult?.timedOut)} duration_ms=${Date.now() - pollStartedAtMs}`);
     }
   }
 

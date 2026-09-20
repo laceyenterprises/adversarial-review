@@ -72,11 +72,10 @@ export async function reconcilePostedFailedOrphans({
   );
   const markPassPosted = db.prepare(
     `UPDATE reviewer_passes
-        SET ended_at = COALESCE(ended_at, ?), status = 'completed', verdict = ?,
+        SET ended_at = ?, status = 'completed', verdict = ?,
             body_md = COALESCE(body_md, ?), gh_comment_id = ?,
             body_captured_at = COALESCE(body_captured_at, ?)
       WHERE pass_id = ? AND (gh_comment_id IS NULL OR gh_comment_id = ?)`
-      + ` AND status = 'running' AND ended_at IS NULL`
   );
   const passByReviewId = db.prepare(
     `SELECT pass_id, repo, pr_number, reviewer_class, reviewer_model, metadata_json, head_sha,
@@ -153,12 +152,24 @@ export async function reconcilePostedFailedOrphans({
                 reviewPostedAt: review.submitted_at,
               });
             }
-            return { changed: true, artifactLinked };
+            return { changed: true, artifactLinked, passFound: Boolean(pass) };
           })(),
           { label: 'reconcile-posted-orphans-row' }
         );
         changed = applyResult.changed === true;
         artifactLinked = applyResult.artifactLinked === true;
+        const passFound = applyResult.passFound === true;
+        if (changed && !artifactLinked && !passFound) {
+          results.push({
+            repo: row.repo,
+            prNumber: row.pr_number,
+            action: 'posted-no-artifact',
+            postedAt: review.submitted_at,
+            reviewId: review.id,
+            verdict: reviewVerdict(review.state),
+          });
+          continue;
+        }
       }
       results.push({
         repo: row.repo,

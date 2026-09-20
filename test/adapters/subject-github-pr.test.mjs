@@ -923,6 +923,26 @@ test('stateFromSnapshot always emits a boolean terminal flag', () => {
   assert.equal(typeof state.terminal, 'boolean');
 });
 
+test('stateFromSnapshot preserves branch and base evidence used by duplicate-family suppression', () => {
+  const state = stateFromSnapshot({
+    domainId: 'code-pr',
+    subjectExternalId: 'laceyenterprises/clio#12',
+    revisionRef: 'head-sha',
+    title: 'Example',
+    state: 'open',
+    labels: [],
+    headSha: 'head-sha',
+    headRefName: 'stack/head',
+    baseRefName: 'stack/base',
+    baseSha: 'parent-head-sha',
+  });
+
+  assert.equal(state.state, 'open');
+  assert.equal(state.headRefName, 'stack/head');
+  assert.equal(state.baseRefName, 'stack/base');
+  assert.equal(state.baseSha, 'parent-head-sha');
+});
+
 test('recordRemediationCommit reports commit revision without poisoning cached PR state', async () => {
   let getCalls = 0;
   const octokit = makeOctokitSnapshot();

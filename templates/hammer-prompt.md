@@ -1170,7 +1170,7 @@ const ok = evaluateMergeEligibility({
   mergeStateStatus: rollup.mergeStateStatus,
   requiresUpToDateBranch,
   prState: state,
-  labels: rollup.labels ?? [],
+  labels: rollup.labels,
   candidateHead: rollup.headSha || rollup.headRefOid || '',
   validatedHead: expectedHead,
 }).eligible;

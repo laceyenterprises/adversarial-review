@@ -247,7 +247,7 @@ function normalizeGateState(live = {}) {
     mergeStateStatus: live.mergeStateStatus,
     prState: String(live.prState ?? live.state ?? '').trim().toUpperCase(),
     merged: Boolean(live.merged) || String(live.prState ?? live.state ?? '').toUpperCase() === 'MERGED',
-    labels: Array.isArray(live.labels) ? live.labels : [],
+    labels: Array.isArray(live.labels) ? live.labels : undefined,
     branchProtectionRequired: live.branchProtectionRequired,
     requiredGateContext: live.requiredGateContext,
     branchProtectionRequiredContexts: Array.isArray(live.branchProtectionRequiredContexts)

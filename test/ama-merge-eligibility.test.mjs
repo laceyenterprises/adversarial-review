@@ -170,13 +170,13 @@ test('reasons are emitted in the stable documented order', () => {
     labels: ['duplicate-family-hold'],
   });
   assert.equal(result.eligible, false);
-  assert.deepEqual(result.reasons, [...MERGE_ELIGIBILITY_REASONS]);
+  assert.deepEqual(result.reasons, MERGE_ELIGIBILITY_REASONS.filter((reason) => reason !== 'labels-unavailable'));
 });
 
-test('empty/no state → every reason, fail closed', () => {
+test('empty/no state → fail closed with labels-unavailable rather than a false duplicate claim', () => {
   const result = evaluateMergeEligibility();
   assert.equal(result.eligible, false);
-  assert.deepEqual(result.reasons, MERGE_ELIGIBILITY_REASONS);
+  assert.deepEqual(result.reasons, MERGE_ELIGIBILITY_REASONS.filter((reason) => reason !== 'duplicate-family-unresolved'));
 });
 
 test('requiredChecks accepts a pre-derived boolean', () => {
@@ -306,6 +306,7 @@ test('exported vocabulary is stable and frozen', () => {
     'branch-protection-missing-gate',
     'stale-head',
     'lease-not-held',
+    'labels-unavailable',
     'duplicate-family-unresolved',
   ]);
   assert.throws(() => MERGE_ELIGIBILITY_REASONS.push('nope'));

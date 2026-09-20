@@ -337,6 +337,6 @@ test('daemon clean merge returns the live gate when pre-lease CI is pending', as
 
   assert.equal(result.disposition, 'not-taken');
   assert.equal(result.reason, 'not-eligible');
-  assert.deepEqual(result.reasons, ['ci-not-green']);
+  assert.deepEqual(result.reasons, ['ci-not-green', 'labels-unavailable']);
   assert.deepEqual(result.liveGate.requiredChecks, [pendingCheck]);
 }));

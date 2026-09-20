@@ -78,7 +78,8 @@
       "schemaSurface": "src/duplicate-family-state.mjs",
       "relatedSchemaSurfaces": [
         "src/review-state.mjs",
-        "src/watcher.mjs"
+        "src/watcher.mjs",
+        "src/duplicate-family-gate.mjs"
       ],
       "owner": "duplicate-family merge gate"
     },

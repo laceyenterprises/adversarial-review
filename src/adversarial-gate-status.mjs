@@ -13,6 +13,7 @@ import {
   normalizeEffectiveReviewVerdict,
   normalizeFollowUpJobStatus,
   OPERATOR_APPROVED_LABEL,
+  OPERATOR_SKIP_LABELS,
 } from './follow-up-merge-agent.mjs';
 import {
   ensureReviewStateSchema,
@@ -38,12 +39,10 @@ import {
 import { isFleetSelfRepairTrailerOnlyRereviewReason } from './fleet-self-repair-rereview.mjs';
 
 const execFileAsync = promisify(execFile);
-const ADVERSARIAL_GATE_OPERATOR_SKIP_LABELS = new Set([
-  'merge-agent-skip',
-  'merge-agent-stuck',
-  'do-not-merge',
-  'no-merge-hold',
-]);
+const WATCHER_OWNED_HOLD_LABELS = new Set(['duplicate-family-hold']);
+const ADVERSARIAL_GATE_OPERATOR_SKIP_LABELS = new Set(
+  [...OPERATOR_SKIP_LABELS].filter((label) => !WATCHER_OWNED_HOLD_LABELS.has(label)),
+);
 
 const ADVERSARIAL_GATE_RECORD_DIR = ['data', 'adversarial-gate-status'];
 const DESCRIPTION_MAX_CHARS = 140;

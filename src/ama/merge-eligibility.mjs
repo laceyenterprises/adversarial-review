@@ -48,6 +48,7 @@ export const MERGE_ELIGIBILITY_REASONS = Object.freeze([
   'branch-protection-missing-gate',
   'stale-head',
   'lease-not-held',
+  'labels-unavailable',
   DUPLICATE_FAMILY_UNRESOLVED_REASON,
 ]);
 
@@ -254,7 +255,9 @@ export function evaluateMergeEligibility(state = {}) {
   if (!branchProtectionRequiresGate(state)) reasons.push('branch-protection-missing-gate');
   if (!headMatches(state)) reasons.push('stale-head');
   if (state?.leaseHeld !== true) reasons.push('lease-not-held');
-  if (!Array.isArray(state?.labels) || labelsContainDuplicateFamilyHold(state.labels)) {
+  if (!Array.isArray(state?.labels)) {
+    reasons.push('labels-unavailable');
+  } else if (labelsContainDuplicateFamilyHold(state.labels)) {
     reasons.push(DUPLICATE_FAMILY_UNRESOLVED_REASON);
   }
 

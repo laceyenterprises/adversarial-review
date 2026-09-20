@@ -64,20 +64,18 @@ belong to only one family at a time; reassignment updates the row's
 | `role` | Candidate role, currently `candidate`. |
 | `work_identity_json` | Extracted identity payload and provenance resolution. |
 | `signals_json` | Strong signal evidence used by the detector. |
-| `suppressions_json` | Suppression evidence such as stack/follow-up labels or current-head exclusion labels. |
+| `suppressions_json` | Suppression evidence such as stack/follow-up labels or the PR-wide exclusion label. |
 | `labels_json` | Candidate label names at last census. |
 | `first_seen_at` | First time this PR was persisted for the family. |
 | `last_seen_at` | Last census time this PR was observed for the family. |
 | `updated_at` | Last time this candidate row was refreshed. |
 
 The primary key is `(repo, pr_number)`. The watcher keeps candidate
-rows current for every PR still mapped to an active family, including PRs that
-became merged, closed, or suppressed after the family was first detected. This
-prevents stale `open` candidate state from surviving while sibling PRs keep the
-family advisory active. When at least one member of an advisory family is
-observed in the current open-PR discovery slice, any previously open sibling
-from that same family that is absent from the slice is marked closed before the
-census re-evaluates the family. Existing databases created with the older
+rows current for every PR still mapped to an active family. For candidates that
+leave the open-PR discovery slice, the census joins the authoritative
+`reviewed_prs.pr_state`; a sibling recorded there as merged or closed is
+re-injected with that terminal state and no longer keeps the family active.
+Slice absence by itself is not treated as closure. Existing databases created with the older
 `(family_id, repo, pr_number)` key are migrated in place by
 `ensureDuplicateFamilySchema(db)`.
 
@@ -109,8 +107,9 @@ census re-evaluates the family. Existing databases created with the older
 - `reconcileDuplicateFamilyLabels()` writes the GitHub labels after each census:
   active unresolved unsuppressed candidates receive `duplicate-family` and
   `duplicate-family-hold`; suppressed candidates receive only
-  `duplicate-family`; inactive families or released candidates have
-  `duplicate-family-hold` removed. Removal is attempted from the evaluated
+  `duplicate-family`; inactive families have both watcher-owned labels removed,
+  while individually released candidates have `duplicate-family-hold` removed.
+  Removal is attempted from the evaluated
   family state rather than from the cached `labels_json`, and successful label
   writes update `labels_json` so later ticks do not repeat the same GitHub
   mutation. The hold releases after the census no longer sees two live

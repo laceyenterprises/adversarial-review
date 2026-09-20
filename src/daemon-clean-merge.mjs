@@ -795,7 +795,7 @@ export async function runDaemonCleanMergeAttempt({
       mergeStateStatus: liveRollup?.mergeStateStatus ?? mergeabilityForGate?.mergeStateStatus,
       prState: String(liveRollup?.state || candidate?.prState || 'open').toUpperCase(),
       branchProtectionRequiredContexts,
-      labels: liveRollup?.labels ?? candidate?.labels ?? [],
+      labels: liveRollup?.labels ?? candidate?.labels,
     },
     mergeMethod,
     hqRoot,
@@ -911,7 +911,7 @@ export async function runDaemonCleanMergeAttempt({
         prState: state,
         merged: state.toUpperCase() === 'MERGED',
         branchProtectionRequiredContexts,
-        labels: rollup?.labels ?? [],
+        labels: rollup?.labels,
       };
     },
     // Non-blocking single-shot acquire: contention defers this tick (the watcher

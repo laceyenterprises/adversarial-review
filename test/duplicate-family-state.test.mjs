@@ -451,15 +451,18 @@ test('label reconciler releases inactive family hold once and persists label cac
     });
 
     await reconcileDuplicateFamilyLabels({ db, octokit, repoPath: REPO, logger: { error() {} } });
-    assert.deepEqual(removeCalls.map((entry) => entry.issue_number), [341]);
+    assert.deepEqual(removeCalls.map((entry) => [entry.issue_number, entry.name]), [
+      [341, 'duplicate-family-hold'],
+      [341, 'duplicate-family'],
+    ]);
 
     await reconcileDuplicateFamilyLabels({ db, octokit, repoPath: REPO, logger: { error() {} } });
-    assert.deepEqual(removeCalls.map((entry) => entry.issue_number), [341]);
+    assert.equal(removeCalls.length, 2);
 
     const labels = JSON.parse(db.prepare(
       'SELECT labels_json FROM duplicate_family_candidates WHERE repo = ? AND pr_number = ?'
     ).get(REPO, 341).labels_json);
-    assert.deepEqual(labels, ['duplicate-family']);
+    assert.deepEqual(labels, []);
   } finally {
     db.close();
   }
@@ -513,6 +516,33 @@ test('windowed duplicate-family census does not close unobserved siblings', asyn
     await reconcileDuplicateFamilyLabels({ db, octokit, repoPath: REPO, logger: { error() {} } });
     assert.deepEqual(removeCalls, []);
     assert.deepEqual(addCalls.map((entry) => entry.issue_number), [346]);
+  } finally {
+    db.close();
+  }
+});
+
+test('authoritative reviewed_prs terminal state releases a vanished sibling', () => {
+  const db = memoryDb();
+  const options = {
+    repoPath: REPO,
+    now: '2026-09-11T00:00:00.000Z',
+    readBuildCompletionSignalForPrImpl: provenanceReader({
+      347: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+      348: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+    }),
+  };
+  try {
+    reconcileDuplicateFamiliesForRepo(db, [subject(347), subject(348)], options);
+    db.exec(`CREATE TABLE reviewed_prs (repo TEXT NOT NULL, pr_number INTEGER NOT NULL, pr_state TEXT NOT NULL)`);
+    db.prepare('INSERT INTO reviewed_prs (repo, pr_number, pr_state) VALUES (?, ?, ?)')
+      .run(REPO, 348, 'closed');
+
+    reconcileDuplicateFamiliesForRepo(db, [subject(347)], {
+      ...options,
+      now: '2026-09-11T00:01:00.000Z',
+    });
+
+    assert.equal(listDuplicateFamilies(db)[0].status, 'inactive');
   } finally {
     db.close();
   }
@@ -885,7 +915,7 @@ test('watcher census aborts transient provenance failures without deactivating a
   }
 });
 
-test('head movement ignores current-head suppressions and stales operator overrides', () => {
+test('PR-wide suppression remains label-driven while head movement stales operator overrides', () => {
   const suppressed = detectDuplicateFamiliesForRepo([
     subject(501, { labels: ['not-a-duplicate-stack'], headSha: 'old-head' }),
     subject(502, { headSha: 'sibling-head' }),

@@ -41,6 +41,7 @@ import { ensureTtmTrackerSchema } from '../src/ttm-tracker.mjs';
 
 const NOW = '2026-05-25T18:00:00.000Z';
 const REPO = 'laceyenterprises/adversarial-review';
+const OLD_HEAD_COMMIT = '2026-05-25T15:00:00.000Z';
 const CI_REGRESSION_GATE = {
   failedChecks: [
     { name: 'fast-python-guards', state: 'FAILURE' },
@@ -48,6 +49,18 @@ const CI_REGRESSION_GATE = {
     { name: 'release-freeze-gate', state: 'CANCELLED' },
   ],
 };
+
+function conflictPrFixture(overrides = {}) {
+  return {
+    number: 6822,
+    headRefOid: 'head-a',
+    baseRefName: 'main',
+    mergeable: 'CONFLICTING',
+    isDraft: false,
+    commits: [{ committedDate: OLD_HEAD_COMMIT }],
+    ...overrides,
+  };
+}
 
 function producerShapedCiRegressionStopReason({
   repo = REPO,
@@ -1001,6 +1014,14 @@ function writeJob(rootDir, state, name, job) {
   return filePath;
 }
 
+function writeMergeAgentDispatch(rootDir, name, dispatch) {
+  const dir = path.join(rootDir, 'data', 'follow-up-jobs', 'merge-agent-dispatches');
+  mkdirSync(dir, { recursive: true });
+  const filePath = path.join(dir, `${name}.json`);
+  writeFileSync(filePath, `${JSON.stringify(dispatch, null, 2)}\n`);
+  return filePath;
+}
+
 // TREC-01: both age-based findings that read `pr_state` are now stamped with
 // whether the mirror row was verified against GitHub. Fixtures that are NOT
 // about reconciliation seed a fresh clean sweep so they exercise the
@@ -1033,7 +1054,7 @@ test('conflicting open PRs are grouped by merge-tree conflict paths', () => {
     if (command === 'gh') {
       assert.deepEqual(args.slice(0, 6), ['pr', 'list', '--repo', 'laceyenterprises/agent-os', '--state', 'open']);
       return JSON.stringify([
-        {
+        conflictPrFixture({
           number: 6822,
           url: 'https://github.com/laceyenterprises/agent-os/pull/6822',
           title: '[codex] ACTASSERT-01',
@@ -1042,8 +1063,8 @@ test('conflicting open PRs are grouped by merge-tree conflict paths', () => {
           baseRefName: 'main',
           mergeable: 'CONFLICTING',
           isDraft: false,
-        },
-        {
+        }),
+        conflictPrFixture({
           number: 6826,
           url: 'https://github.com/laceyenterprises/agent-os/pull/6826',
           title: '[codex] PCREPO-01',
@@ -1052,7 +1073,7 @@ test('conflicting open PRs are grouped by merge-tree conflict paths', () => {
           baseRefName: 'main',
           mergeable: 'CONFLICTING',
           isDraft: false,
-        },
+        }),
         {
           number: 6827,
           headRefOid: 'head-c',
@@ -1134,13 +1155,13 @@ test('conflicting open PR diagnostic only finds shared conflict paths', () => {
   const execFileSyncImpl = (command, args) => {
     if (command === 'gh') {
       return JSON.stringify([
-        {
+        conflictPrFixture({
           number: 6822,
           headRefOid: 'head-a',
           baseRefName: 'main',
           mergeable: 'CONFLICTING',
           isDraft: false,
-        },
+        }),
       ]);
     }
     if (command === 'git' && args[0] === 'cat-file') {
@@ -1177,6 +1198,58 @@ test('conflicting open PR diagnostic only finds shared conflict paths', () => {
   assert.ok(!findingCodes(snapshot).includes('review:conflicting_open_prs'));
 });
 
+test('conflicting open PR diagnostic probes repos configured only through the plural env var', () => {
+  const rootDir = tempRoot();
+  const calls = [];
+  const execFileSyncImpl = (command, args, options = {}) => {
+    calls.push({ command, args, cwd: options.cwd });
+    if (command === 'gh') {
+      assert.equal(args[args.indexOf('--repo') + 1], 'laceyenterprises/agent-os');
+      return JSON.stringify([
+        conflictPrFixture({
+          number: 6822,
+          headRefOid: 'head-a',
+          baseRefName: 'main',
+          mergeable: 'CONFLICTING',
+          isDraft: false,
+        }),
+      ]);
+    }
+    if (command === 'git' && args[0] === 'cat-file') {
+      return '';
+    }
+    if (command === 'git' && args[0] === 'merge-tree') {
+      return [
+        '0fbf96c31adb255b6d545f3ad21fbfe275d62c8d',
+        'docs/INDEX.md',
+        '',
+      ].join('\n');
+    }
+    throw new Error(`unexpected command: ${command} ${args.join(' ')}`);
+  };
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    env: {
+      ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_REPOS: 'LaceyEnterprises/agent-os',
+    },
+    execFileSyncImpl,
+    sleepSyncImpl: () => {},
+    config: {
+      conflictingPrChecksEnabled: true,
+      conflictingPrRepoRoot: '/repo/agent-os',
+      conflictingPrMinSharedPathCount: 1,
+    },
+  });
+
+  assert.equal(snapshot.config.conflictingPrRepo, 'laceyenterprises/agent-os');
+  assert.deepEqual(snapshot.config.conflictingPrRepos, ['laceyenterprises/agent-os']);
+  assert.equal(snapshot.conflictingOpenPrs.probedPrs, 1);
+  assert.equal(snapshot.conflictingOpenPrs.collected, true);
+  assert.equal(calls.filter((call) => call.command === 'git' && call.args[0] === 'merge-tree').length, 1);
+});
+
 test('CONFLICTOWN-01: host checks always collect the cheap conflicting PR inventory', () => {
   const rootDir = tempRoot();
   const incidentPrNumbers = [6919, 6918, 6916, 6914, 6909, 1081, 1078];
@@ -1184,12 +1257,10 @@ test('CONFLICTOWN-01: host checks always collect the cheap conflicting PR invent
     if (command === 'gh') {
       assert.deepEqual(args.slice(-2), [
         '--json',
-        'number,url,title,headRefName,headRefOid,baseRefName,mergeable,isDraft,updatedAt,labels',
+        'number,url,title,headRefName,headRefOid,baseRefName,mergeable,isDraft,updatedAt,labels,commits',
       ]);
-      return JSON.stringify(incidentPrNumbers.map((number) => ({
+      return JSON.stringify(incidentPrNumbers.map((number) => conflictPrFixture({
         number,
-        mergeable: 'CONFLICTING',
-        isDraft: false,
         headRefOid: `incident-${number}`,
         updatedAt: '2026-05-25T15:00:00.000Z',
       })));
@@ -1222,12 +1293,18 @@ test('CONFLICTOWN-01: current-head ownership marker suppresses the unowned confl
   const rootDir = tempRoot();
   const execFileSyncImpl = (command) => {
     if (command === 'gh') {
-      return JSON.stringify([{ number: 6914, mergeable: 'CONFLICTING', isDraft: false,
+      return JSON.stringify([conflictPrFixture({ number: 6914,
         headRefOid: 'watchstarve', updatedAt: '2026-05-25T15:00:00.000Z',
-        labels: [{ name: 'merge-agent-dispatched' }] }]);
+        labels: [] })]);
     }
     return 'state = running\nlast exit code = 0\n';
   };
+  writeMergeAgentDispatch(rootDir, 'current-dispatch', {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 6914,
+    headSha: 'watchstarve',
+    dispatchedAt: '2026-05-25T17:45:00.000Z',
+  });
   const snapshot = collectReviewPipelineHealth({
     rootDir,
     hqRoot: tempRoot(),
@@ -1245,6 +1322,215 @@ test('CONFLICTOWN-01: current-head ownership marker suppresses the unowned confl
   assert.ok(!findingCodes(snapshot).includes('review:conflicting_pr_unowned'));
 });
 
+test('CONFLICTOWN-01: stale lifecycle labels do not satisfy current-head ownership', () => {
+  const rootDir = tempRoot();
+  const execFileSyncImpl = (command) => {
+    if (command === 'gh') {
+      return JSON.stringify([conflictPrFixture({ number: 6914,
+        headRefOid: 'new-head', updatedAt: '2026-05-25T15:00:00.000Z',
+        labels: [{ name: 'merge-agent-dispatched' }, { name: 'remediation-in-progress' }] })]);
+    }
+    return 'state = running\nlast exit code = 0\n';
+  };
+  writeMergeAgentDispatch(rootDir, 'old-dispatch', {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 6914,
+    headSha: 'old-head',
+    dispatchedAt: '2026-05-25T15:10:00.000Z',
+  });
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot: tempRoot(),
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    config: {
+      conflictingPrChecksEnabled: false,
+      conflictingPrRepo: 'laceyenterprises/agent-os',
+      conflictingPrUnownedMaxAgeMs: 30 * 60 * 1000,
+    },
+    execFileSyncImpl,
+  });
+
+  assert.equal(snapshot.conflictingOpenPrs.prs[0].owned, false);
+  assert.ok(findingCodes(snapshot).includes('review:conflicting_pr_unowned'));
+});
+
+test('CONFLICTOWN-01: phantom handoff dispatch records do not satisfy current-head ownership', () => {
+  const rootDir = tempRoot();
+  const execFileSyncImpl = (command) => {
+    if (command === 'gh') {
+      return JSON.stringify([conflictPrFixture({
+        number: 6914,
+        headRefOid: 'dead-handoff',
+        labels: [],
+      })]);
+    }
+    return 'state = running\nlast exit code = 0\n';
+  };
+  writeMergeAgentDispatch(rootDir, 'phantom-dispatch', {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 6914,
+    headSha: 'dead-handoff',
+    dispatchedAt: '2026-05-25T17:45:00.000Z',
+    phantomHandoffObservedAt: '2026-05-25T17:50:00.000Z',
+  });
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot: tempRoot(),
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    config: {
+      conflictingPrChecksEnabled: false,
+      conflictingPrRepo: 'laceyenterprises/agent-os',
+      conflictingPrUnownedMaxAgeMs: 30 * 60 * 1000,
+    },
+    execFileSyncImpl,
+  });
+
+  assert.equal(snapshot.conflictingOpenPrs.prs[0].owned, false);
+  assert.ok(findingCodes(snapshot).includes('review:conflicting_pr_unowned'));
+});
+
+test('CONFLICTOWN-01: unowned age uses head commit time instead of GitHub updatedAt', () => {
+  const rootDir = tempRoot();
+  const execFileSyncImpl = (command) => {
+    if (command === 'gh') {
+      return JSON.stringify([conflictPrFixture({
+        number: 6914,
+        headRefOid: 'chatty-head',
+        updatedAt: '2026-05-25T17:59:00.000Z',
+        labels: [],
+      })]);
+    }
+    return 'state = running\nlast exit code = 0\n';
+  };
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot: tempRoot(),
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    config: {
+      conflictingPrChecksEnabled: false,
+      conflictingPrRepo: 'laceyenterprises/agent-os',
+      conflictingPrUnownedMaxAgeMs: 30 * 60 * 1000,
+    },
+    execFileSyncImpl,
+  });
+
+  const finding = snapshot.findings.find(({ code }) => code === 'review:conflicting_pr_unowned');
+  assert.match(finding?.evidence?.[0] || '', /headCommittedAt=2026-05-25T15:00:00.000Z/);
+});
+
+test('CONFLICTOWN-01: stale dispatch records do not satisfy current-head ownership', () => {
+  const rootDir = tempRoot();
+  const execFileSyncImpl = (command) => {
+    if (command === 'gh') {
+      return JSON.stringify([conflictPrFixture({
+        number: 6914,
+        headRefOid: 'stale-dispatch-head',
+        labels: [],
+      })]);
+    }
+    return 'state = running\nlast exit code = 0\n';
+  };
+  const dispatchPath = writeMergeAgentDispatch(rootDir, 'stale-dispatch', {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 6914,
+    headSha: 'stale-dispatch-head',
+    dispatchedAt: '2026-05-25T16:00:00.000Z',
+    prompt: 'large prompt payload should not be indexed',
+  });
+  const oldTime = new Date('2026-05-25T16:00:00.000Z');
+  utimesSync(dispatchPath, oldTime, oldTime);
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot: tempRoot(),
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    config: {
+      conflictingPrChecksEnabled: false,
+      conflictingPrRepo: 'laceyenterprises/agent-os',
+      conflictingPrUnownedMaxAgeMs: 30 * 60 * 1000,
+    },
+    execFileSyncImpl,
+  });
+
+  assert.equal(snapshot.conflictingOpenPrs.prs[0].owned, false);
+  assert.ok(findingCodes(snapshot).includes('review:conflicting_pr_unowned'));
+});
+
+test('CONFLICTOWN-01: operator-parked labels suppress unowned conflict noise', () => {
+  const rootDir = tempRoot();
+  const execFileSyncImpl = (command) => {
+    if (command === 'gh') {
+      return JSON.stringify([conflictPrFixture({ number: 6914,
+        headRefOid: 'parked-head', updatedAt: '2026-05-25T15:00:00.000Z',
+        labels: [{ name: 'merge-agent-stuck' }] })]);
+    }
+    return 'state = running\nlast exit code = 0\n';
+  };
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot: tempRoot(),
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    config: {
+      conflictingPrChecksEnabled: false,
+      conflictingPrRepo: 'laceyenterprises/agent-os',
+      conflictingPrUnownedMaxAgeMs: 30 * 60 * 1000,
+    },
+    execFileSyncImpl,
+  });
+
+  assert.equal(snapshot.conflictingOpenPrs.prs[0].owned, true);
+  assert.deepEqual(snapshot.conflictingOpenPrs.prs[0].suppressingLabels, ['merge-agent-stuck']);
+  assert.ok(!findingCodes(snapshot).includes('review:conflicting_pr_unowned'));
+});
+
+test('CONFLICTOWN-01: default conflicting PR listing does not synthesize the overlay repo', () => {
+  const rootDir = tempRoot();
+  const listedRepos = [];
+  const execFileSyncImpl = (command, args) => {
+    if (command === 'gh') {
+      const repo = args[args.indexOf('--repo') + 1];
+      listedRepos.push(repo);
+      return JSON.stringify([conflictPrFixture({ number: 6919,
+        headRefOid: 'agent-os-head', updatedAt: '2026-05-25T15:00:00.000Z' })]);
+    }
+    return 'state = running\nlast exit code = 0\n';
+  };
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot: tempRoot(),
+    now: () => new Date(NOW),
+    env: {
+      USER: 'fixture',
+      ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1',
+      AGENT_OS_GITHUB_ORG: 'laceyenterprises',
+    },
+    config: {
+      conflictingPrChecksEnabled: false,
+      conflictingPrUnownedMaxAgeMs: 30 * 60 * 1000,
+    },
+    execFileSyncImpl,
+    sleepSyncImpl: () => {},
+  });
+
+  assert.deepEqual(listedRepos, ['laceyenterprises/agent-os']);
+  assert.equal(snapshot.conflictingOpenPrs.collected, true);
+  assert.equal(snapshot.conflictingOpenPrs.count, 1);
+  assert.equal(snapshot.conflictingOpenPrs.prs[0].repo, 'laceyenterprises/agent-os');
+  assert.deepEqual(snapshot.conflictingOpenPrs.errors, []);
+  assert.ok(!findingCodes(snapshot).includes('review:conflicting_open_prs_unreadable'));
+  assert.ok(findingCodes(snapshot).includes('review:conflicting_pr_unowned'));
+});
+
 test('conflicting open PR diagnostic treats per-PR probe failures as blind coverage', () => {
   const rootDir = tempRoot();
   const calls = [];
@@ -1252,13 +1538,13 @@ test('conflicting open PR diagnostic treats per-PR probe failures as blind cover
     calls.push({ command, args });
     if (command === 'gh') {
       return JSON.stringify([
-        {
+        conflictPrFixture({
           number: 6818,
           headRefOid: 'dc90afc7e794821c9290a75f903d45cc76f35ec9',
           baseRefName: 'main',
           mergeable: 'CONFLICTING',
           isDraft: false,
-        },
+        }),
       ]);
     }
     if (command === 'git') {
@@ -1285,13 +1571,15 @@ test('conflicting open PR diagnostic treats per-PR probe failures as blind cover
   assert.equal(snapshot.conflictingOpenPrs.count, 1);
   assert.equal(snapshot.conflictingOpenPrs.probedPrs, 0);
   assert.equal(snapshot.conflictingOpenPrs.unprobedPrs, 1);
-  assert.equal(snapshot.conflictingOpenPrs.collected, false);
+  assert.equal(snapshot.conflictingOpenPrs.collected, true);
+  assert.equal(snapshot.conflictingOpenPrs.probeCoverage, 0);
   assert.deepEqual(snapshot.conflictingOpenPrs.sharedPathGroups, []);
   assert.match(snapshot.conflictingOpenPrs.errors[0], /#6818: fatal: not something we can merge/);
   assert.ok(!findingCodes(snapshot).includes('review:conflicting_open_prs'));
   assert.ok(findingCodes(snapshot).includes('review:conflicting_open_prs_unreadable'));
   assert.match(renderReviewPipelinePrometheus(snapshot), /^review_pipeline_conflicting_open_prs 1$/m);
-  assert.match(renderReviewPipelinePrometheus(snapshot), /^review_pipeline_conflicting_open_prs_collected 0$/m);
+  assert.match(renderReviewPipelinePrometheus(snapshot), /^review_pipeline_conflicting_open_prs_collected 1$/m);
+  assert.match(renderReviewPipelinePrometheus(snapshot), /^review_pipeline_conflicting_open_prs_probe_coverage 0$/m);
   assert.ok(calls.some((call) => call.command === 'git' && call.args[0] === 'fetch'));
 });
 
@@ -4228,6 +4516,15 @@ test('AMAGAP-01: hammer dispatch stall probe is inert when host checks are disab
 test('CONFLICTOWN-01: missing hammer dispatch log reports blind instead of healthy', () => {
   const rootDir = tempRoot();
   const hqRoot = tempRoot();
+  const stateDir = path.join(hqRoot, 'dispatch', '_auto_merge-fixture');
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(path.join(stateDir, 'daemon-state.json'), `${JSON.stringify({
+    dirtyPrBacklog: {
+      dirtyPrCount: 2,
+      recordedAt: '2026-05-25T15:00:00.000Z',
+      signature: ['laceyenterprises/agent-os#6651@aaa'],
+    },
+  }, null, 2)}\n`);
   const execFileSyncImpl = (command) => command === 'gh' ? '[]' : 'state = running\nlast exit code = 0\n';
   const snapshot = collectReviewPipelineHealth({
     rootDir,
@@ -4241,6 +4538,30 @@ test('CONFLICTOWN-01: missing hammer dispatch log reports blind instead of healt
   assert.equal(snapshot.hammerDispatchStall.blind, true);
   assert.equal(snapshot.hammerDispatchStall.blindReason, 'dispatch-log-missing');
   assert.ok(findingCodes(snapshot).includes('review:hammer_dispatch_stall_blind'));
+  assert.ok(!findingCodes(snapshot).includes('review:hammer_dispatch_stalled_with_conflicts'));
+  assert.match(renderReviewPipelinePrometheus(snapshot), /review_pipeline_hammer_dispatch_stall_blind 1/);
+  assert.match(renderReviewPipelinePrometheus(snapshot), /review_pipeline_hammer_dispatch_stalled NaN/);
+});
+
+test('CONFLICTOWN-01: missing hammer dispatch log without backlog is not blind', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const execFileSyncImpl = (command) => command === 'gh' ? '[]' : 'state = running\nlast exit code = 0\n';
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot,
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    execFileSyncImpl,
+  });
+
+  assert.equal(snapshot.hammerDispatchStall.active, false);
+  assert.equal(snapshot.hammerDispatchStall.blind, false);
+  assert.equal(snapshot.hammerDispatchStall.blindReason, null);
+  assert.ok(!findingCodes(snapshot).includes('review:hammer_dispatch_stall_blind'));
+  assert.ok(!findingCodes(snapshot).includes('review:hammer_dispatch_stalled_with_conflicts'));
+  assert.match(renderReviewPipelinePrometheus(snapshot), /review_pipeline_hammer_dispatch_stall_blind 0/);
+  assert.match(renderReviewPipelinePrometheus(snapshot), /review_pipeline_hammer_dispatch_stalled 0/);
 });
 
 test('dispatch spawn classifier ignores op cache backoff and successful daemon spawns', () => {
@@ -4679,7 +5000,10 @@ test('documented Sentinel findings match emitted finding definition codes', () =
 test('documented pipeline-health environment knobs match config resolver references', () => {
   const doc = readFileSync('docs/review-pipeline-health.md', 'utf8');
   const source = readFileSync('src/review-pipeline-health.mjs', 'utf8');
-  const configStart = source.indexOf('function resolveReviewPipelineHealthConfig');
+  const helperStart = source.indexOf('function resolveConflictingPrRepos');
+  const configStart = helperStart >= 0
+    ? helperStart
+    : source.indexOf('function resolveReviewPipelineHealthConfig');
   const configEnd = source.indexOf('\nfunction toIso', configStart);
   assert.ok(configStart >= 0 && configEnd > configStart);
   const configSource = source.slice(configStart, configEnd);

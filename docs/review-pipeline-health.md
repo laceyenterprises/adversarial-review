@@ -101,11 +101,15 @@ The Grafana dashboard lives at
 - `review_pipeline_merge_stalled_jobs`: clean `review-settled` verdict jobs
   whose PR row remains open past the merge-stall tick threshold.
 - `review_pipeline_conflicting_open_prs`: open non-draft PRs GitHub reports as
-  `CONFLICTING`.
+  `CONFLICTING` across the configured repository set.
 - `review_pipeline_conflicting_open_prs_collected`: 1 when the GitHub open-PR
-  listing for the conflicting-PR diagnostic was collected successfully and every
-  conflicting PR's local merge-tree probe completed, 0 when the snapshot is
-  blind. A blind snapshot is not equivalent to zero conflicts.
+  listing for every configured repository in the conflicting-PR diagnostic was
+  collected successfully, 0 when the listing snapshot is blind. A blind snapshot
+  is not equivalent to zero conflicts.
+- `review_pipeline_conflicting_open_prs_probe_coverage`: fraction of listed
+  conflicting PRs whose local `git merge-tree` probe completed successfully.
+  Host-checks-only collection reports `0` when conflicting PRs exist because no
+  local probes were attempted.
 - `review_pipeline_conflicting_open_pr_shared_path_groups`: local
   `git merge-tree --write-tree --name-only` conflict path groups shared by at
   least `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_MIN_SHARED_PATH_COUNT`
@@ -313,6 +317,11 @@ All thresholds are configurable through environment variables:
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_MIN_SHARED_PATH_COUNT`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_FIRST_PASS_CI_ORPHAN_WORKER_STATUS_TIMEOUT_MS`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_LAUNCHD_TIMEOUT_MS`
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_REPOS`
+  (comma-separated repo slugs; when set, this fully replaces the default
+  conflicting-PR repo set)
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_UNOWNED_MAX_AGE_MS`
+  (default `1800000`)
 
 The queue-starvation finding uses `details.starvationCause` to choose operator
 advice. `reviewer-runtime-failure` means a reviewer already ran and failed, so

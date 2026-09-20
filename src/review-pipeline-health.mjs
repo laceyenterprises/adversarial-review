@@ -161,6 +161,7 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_merge_stalled_jobs',
   'review_pipeline_conflicting_open_prs',
   'review_pipeline_conflicting_open_prs_collected',
+  'review_pipeline_conflicting_open_prs_probe_coverage',
   'review_pipeline_conflicting_open_pr_shared_path_groups',
   'review_pipeline_stale_ama_closer_leases',
   'review_pipeline_zombie_reviewer_passes',
@@ -168,6 +169,7 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_launchd_service_up',
   'review_pipeline_dispatch_spawn_failures',
   'review_pipeline_hammer_dispatch_stalled',
+  'review_pipeline_hammer_dispatch_stall_blind',
   'review_pipeline_dag_autowalk_healthy',
   'review_pipeline_ttm_minutes',
   'review_pipeline_ttm_open_budget_breaches',
@@ -210,7 +212,8 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_merge_outcomes_total: 'Current review-ledger PR outcome count by state.',
   review_pipeline_merge_stalled_jobs: 'Current count of clean review-settled jobs still waiting on merge.',
   review_pipeline_conflicting_open_prs: 'Current count of open non-draft PRs GitHub reports as CONFLICTING.',
-  review_pipeline_conflicting_open_prs_collected: 'Whether the conflicting-open-PR collector reached GitHub and probed every conflicting PR successfully.',
+  review_pipeline_conflicting_open_prs_collected: 'Whether the conflicting-open-PR collector reached GitHub for every configured repo.',
+  review_pipeline_conflicting_open_prs_probe_coverage: 'Share of conflicting open PRs whose local merge-tree probe completed successfully.',
   review_pipeline_conflicting_open_pr_shared_path_groups: 'Current count of conflict path groups shared by at least the configured minimum PR count.',
   review_pipeline_stale_ama_closer_leases: 'Current count of AMA closer leases for still-open PRs stuck pending or dispatched past the configured age.',
   review_pipeline_zombie_reviewer_passes: 'Current count of reviewer_passes rows stuck running past the configured age.',
@@ -218,6 +221,7 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_launchd_service_up: 'Whether required local pipeline launchd services are loaded.',
   review_pipeline_dispatch_spawn_failures: 'Recent dispatch daemon stderr lines matching closer/hammer spawn failure patterns.',
   review_pipeline_hammer_dispatch_stalled: 'Whether conflicted PRs exist while no hammer dispatch has been observed within the configured window.',
+  review_pipeline_hammer_dispatch_stall_blind: 'Whether the hammer dispatch stall detector cannot decide because required evidence is missing.',
   review_pipeline_dag_autowalk_healthy: 'Whether the dag-autowalk LaunchAgent has a healthy exit/log recency state.',
   review_pipeline_ttm_minutes: 'Time-to-merge rollup in minutes over the configured window.',
   review_pipeline_ttm_open_budget_breaches: 'Current open PRs exceeding the measured rounds-aware time-to-merge budget (SLOW; trend only).',
@@ -603,12 +607,52 @@ function parseStringList(value, fallback) {
   return parsed.length > 0 ? [...new Set(parsed)] : fallback;
 }
 
+function normalizeRepoSlug(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized.includes('/') ? normalized : '';
+}
+
+function parseRepoSlugList(value, fallback) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const parsed = String(value)
+    .split(',')
+    .map(normalizeRepoSlug)
+    .filter(Boolean);
+  return parsed.length > 0 ? [...new Set(parsed)] : fallback;
+}
+
+function resolveConflictingPrRepos(env, overrides) {
+  const defaultRepo = normalizeRepoSlug(
+    overrides.conflictingPrRepo
+      ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_REPO
+      ?? env.GITHUB_REPOSITORY
+      ?? `${env.AGENT_OS_GITHUB_ORG || 'laceyenterprises'}/agent-os`
+  );
+  const explicitPlural = overrides.conflictingPrRepos
+    ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_REPOS;
+  const singularExplicit = overrides.conflictingPrRepo
+    ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_REPO;
+  const pluralFallback = [defaultRepo].filter(Boolean);
+  const repos = parseRepoSlugList(explicitPlural, pluralFallback);
+  const primaryRepo = singularExplicit
+    ? defaultRepo
+    : (repos[0] || defaultRepo);
+  const withPrimary = primaryRepo && !repos.includes(primaryRepo)
+    ? [primaryRepo, ...repos]
+    : repos;
+  return {
+    repo: primaryRepo,
+    repos: [...new Set(withPrimary)],
+  };
+}
+
 function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
   const ttm = resolveTtmTrackerConfig(env, overrides.ttm || {});
   const reviewerPoolConfig = resolveFirstPassReviewerPoolConfig({
     env,
     logger: overrides.logger || null,
   });
+  const conflictingPrRepoConfig = resolveConflictingPrRepos(env, overrides);
   return {
     hostChecksEnabled: parseBoolean(
       overrides.hostChecksEnabled
@@ -784,23 +828,8 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_UNOWNED_MAX_AGE_MS,
       DEFAULT_CONFLICTING_PR_UNOWNED_MAX_AGE_MS
     ),
-    conflictingPrRepo: String(
-      overrides.conflictingPrRepo
-        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_REPO
-        ?? env.GITHUB_REPOSITORY
-        ?? `${env.AGENT_OS_GITHUB_ORG || 'laceyenterprises'}/agent-os`
-    ).trim(),
-    conflictingPrRepos: parseStringList(
-      overrides.conflictingPrRepos
-        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_REPOS,
-      overrides.conflictingPrRepo || env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_REPO
-        ? [String(overrides.conflictingPrRepo
-          ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_REPO).trim()]
-        : [
-            `${env.AGENT_OS_GITHUB_ORG || 'laceyenterprises'}/agent-os`,
-            `${env.AGENT_OS_GITHUB_ORG || 'laceyenterprises'}/adversarial-review`,
-          ]
-    ),
+    conflictingPrRepo: conflictingPrRepoConfig.repo,
+    conflictingPrRepos: conflictingPrRepoConfig.repos,
     conflictingPrRepoRoot: String(
       overrides.conflictingPrRepoRoot
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_REPO_ROOT
@@ -3046,12 +3075,17 @@ function normalizeConflictingPrRow(row) {
   const mergeable = String(row?.mergeable || '').trim().toUpperCase();
   if (!Number.isInteger(prNumber) || prNumber <= 0) return null;
   if (row?.isDraft === true || mergeable !== 'CONFLICTING') return null;
+  const commitDates = Array.isArray(row.commits)
+    ? row.commits.map((commit) => commit?.committedDate).filter(Boolean)
+    : [];
+  const headCommittedAt = commitDates.length > 0 ? commitDates[commitDates.length - 1] : null;
   return {
     number: prNumber,
     url: row.url || null,
     title: row.title || null,
     headRefName: row.headRefName || null,
     headRefOid: row.headRefOid || null,
+    headCommittedAt,
     baseRefName: row.baseRefName || 'main',
     mergeable,
     updatedAt: row.updatedAt || null,
@@ -3062,13 +3096,95 @@ function normalizeConflictingPrRow(row) {
 }
 
 const CONFLICT_OWNERSHIP_LABELS = new Set([
-  'merge-agent-dispatched',
-  'merge-agent-requested',
-  'remediation-in-progress',
+  'merge-agent-stuck',
+  'no-merge-hold',
+  'reviewer-cycle-cap-reached',
 ]);
 
-function conflictingPrHasOwner(pr) {
-  return (pr.labels || []).some((label) => CONFLICT_OWNERSHIP_LABELS.has(label));
+function conflictPrKey(repo, prNumber, headSha) {
+  const normalizedRepo = normalizeRepoSlug(repo);
+  const normalizedHead = String(headSha || '').trim();
+  const number = Number(prNumber);
+  if (!normalizedRepo || !Number.isInteger(number) || number <= 0 || !normalizedHead) return null;
+  return `${normalizedRepo}#${number}@${normalizedHead}`;
+}
+
+function conflictingPrHasSuppressingLabel(pr) {
+  return (pr.labels || [])
+    .map((label) => String(label || '').trim().toLowerCase())
+    .some((label) => CONFLICT_OWNERSHIP_LABELS.has(label));
+}
+
+function readMergeAgentDispatches(rootDir, { nowMs, maxAgeMs }) {
+  const dir = join(rootDir, 'data', 'follow-up-jobs', 'merge-agent-dispatches');
+  try {
+    return readdirSync(dir)
+      .filter((name) => name.endsWith('.json'))
+      .map((name) => {
+        const filePath = join(dir, name);
+        try {
+          const stat = statSync(filePath);
+          if (Number.isFinite(nowMs) && Number.isFinite(maxAgeMs) && nowMs - stat.mtimeMs > maxAgeMs) {
+            return null;
+          }
+          const parsed = parseJson(readFileSync(filePath, 'utf8'), null);
+          if (!parsed || parsed.phantomHandoffObservedAt) return null;
+          const dispatchedMs = Date.parse(parsed.dispatchedAt || parsed.createdAt || '');
+          if (Number.isFinite(nowMs) && Number.isFinite(maxAgeMs)) {
+            if (!Number.isFinite(dispatchedMs) || nowMs - dispatchedMs > maxAgeMs) return null;
+          }
+          const record = { ...parsed };
+          delete record.prompt;
+          return record;
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function conflictingPrOwnerIndex({ followUpJobs = [], amaCloserLeases, mergeAgentDispatches = [] }) {
+  const owners = new Map();
+  const addOwner = (key, kind) => {
+    if (!key) return;
+    if (!owners.has(key)) owners.set(key, []);
+    owners.get(key).push(kind);
+  };
+  for (const entry of followUpJobs) {
+    if (!['pending', 'in_progress'].includes(entry?.state)) continue;
+    const job = entry.job || {};
+    addOwner(conflictPrKey(job.repo, job.prNumber, job.headSha || job.revisionRef), `follow-up-job:${entry.state}`);
+  }
+  for (const lease of amaCloserLeases?.active ?? []) {
+    addOwner(conflictPrKey(lease.repo, lease.prNumber, lease.headSha), `ama-closer-lease:${lease.status}`);
+  }
+  for (const dispatch of mergeAgentDispatches) {
+    addOwner(conflictPrKey(dispatch.repo, dispatch.prNumber, dispatch.headSha), 'merge-agent-dispatch');
+  }
+  return owners;
+}
+
+function attachConflictingPrOwnership(conflictingOpenPrs, ownerIndex) {
+  if (!conflictingOpenPrs?.prs) return conflictingOpenPrs;
+  return {
+    ...conflictingOpenPrs,
+    prs: conflictingOpenPrs.prs.map((pr) => {
+      const key = conflictPrKey(pr.repo || conflictingOpenPrs.repo, pr.number, pr.headRefOid);
+      const ownerSources = key ? (ownerIndex.get(key) || []) : [];
+      const suppressingLabel = conflictingPrHasSuppressingLabel(pr);
+      return {
+        ...pr,
+        ownerSources,
+        suppressingLabels: (pr.labels || []).filter((label) => (
+          CONFLICT_OWNERSHIP_LABELS.has(String(label).trim().toLowerCase())
+        )),
+        owned: ownerSources.length > 0 || suppressingLabel,
+      };
+    }),
+  };
 }
 
 function parseConflictPaths(output) {
@@ -3138,7 +3254,7 @@ function ghPrListOpenSync(repo, { execFileSyncImpl, sleepSyncImpl = sleepSyncMs 
     '--limit',
     '100',
     '--json',
-    'number,url,title,headRefName,headRefOid,baseRefName,mergeable,isDraft,updatedAt,labels',
+    'number,url,title,headRefName,headRefOid,baseRefName,mergeable,isDraft,updatedAt,labels,commits',
   ];
   const options = {
     encoding: 'utf8',
@@ -3163,7 +3279,7 @@ function ghPrListOpenSync(repo, { execFileSyncImpl, sleepSyncImpl = sleepSyncMs 
 
 function summarizeConflictingOpenPrs({ config, execFileSyncImpl, sleepSyncImpl = sleepSyncMs }) {
   if (!config.hostChecksEnabled && !config.conflictingPrChecksEnabled) {
-    return { enabled: false, collected: false, count: 0, probedPrs: 0, unprobedPrs: 0, prs: [], paths: [], groupedPaths: [], sharedPathGroups: [], errors: [] };
+    return { enabled: false, collected: false, count: 0, probedPrs: 0, unprobedPrs: 0, probeCoverage: 0, prs: [], paths: [], groupedPaths: [], sharedPathGroups: [], errors: [] };
   }
   const configuredRepos = Array.isArray(config.conflictingPrRepos)
     ? config.conflictingPrRepos
@@ -3174,7 +3290,7 @@ function summarizeConflictingOpenPrs({ config, execFileSyncImpl, sleepSyncImpl =
   const repo = config.conflictingPrRepo || repos[0];
   const repoRoot = config.conflictingPrRepoRoot;
   if (!repo) {
-    return { enabled: true, collected: false, count: 0, probedPrs: 0, unprobedPrs: 0, prs: [], paths: [], groupedPaths: [], sharedPathGroups: [], errors: ['missing-repo-config'] };
+    return { enabled: true, collected: false, count: 0, probedPrs: 0, unprobedPrs: 0, probeCoverage: 0, prs: [], paths: [], groupedPaths: [], sharedPathGroups: [], errors: ['missing-repo-config'] };
   }
 
   const rows = [];
@@ -3196,6 +3312,7 @@ function summarizeConflictingOpenPrs({ config, execFileSyncImpl, sleepSyncImpl =
       collected: false,
       probedPrs: 0,
       unprobedPrs: 0,
+      probeCoverage: 0,
       prs: [],
       paths: [],
       groupedPaths: [],
@@ -3209,22 +3326,33 @@ function summarizeConflictingOpenPrs({ config, execFileSyncImpl, sleepSyncImpl =
     const normalized = normalizeConflictingPrRow(row);
     return normalized ? { ...normalized, repo: row.repo } : null;
   }).filter(Boolean);
-  const errors = [];
+  const errors = [...listingErrors];
+  const missingHeadCommittedAt = prs.filter((pr) => !Number.isFinite(Date.parse(pr.headCommittedAt || '')));
+  if (missingHeadCommittedAt.length > 0) {
+    errors.push(
+      ...missingHeadCommittedAt.slice(0, 12).map((pr) => (
+        `${pr.repo || repo}#${pr.number}: missing head commit timestamp`
+      ))
+    );
+  }
   let probedPrs = 0;
   if (!config.conflictingPrChecksEnabled || !repoRoot) {
     return {
-      repo: repos.join(','),
+      repo,
       repos,
       repoRoot,
       enabled: true,
       detailedProbesEnabled: false,
-      collected: true,
+      collected: listingErrors.length === 0 && missingHeadCommittedAt.length === 0,
       count: prs.length,
       probedPrs: 0,
       unprobedPrs: prs.length,
+      probeCoverage: prs.length > 0 ? 0 : 1,
       prs: prs.map((pr) => ({
         ...pr,
-        owned: conflictingPrHasOwner(pr),
+        owned: false,
+        ownerSources: [],
+        suppressingLabels: [],
         conflictingPaths: [],
         probeOk: null,
       })),
@@ -3245,11 +3373,12 @@ function summarizeConflictingOpenPrs({ config, execFileSyncImpl, sleepSyncImpl =
       )).trim();
     } catch (error) {
       return {
-        repo, repoRoot, enabled: true, detailedProbesEnabled: true, collected: false,
+        repo, repos, repoRoot, enabled: true, detailedProbesEnabled: true, collected: listingErrors.length === 0 && missingHeadCommittedAt.length === 0,
         count: prs.length, probedPrs: 0, unprobedPrs: prs.length,
+        probeCoverage: prs.length > 0 ? 0 : 1,
         prs: prs.map((pr) => ({ ...pr, conflictingPaths: [], probeOk: false })),
         paths: [], groupedPaths: [], sharedPathGroups: [],
-        errors: [String(error?.stderr || error?.message || 'git object directory resolution failed').slice(0, 500)],
+        errors: [...errors, String(error?.stderr || error?.message || 'git object directory resolution failed').slice(0, 500)],
       };
     }
   }
@@ -3261,14 +3390,26 @@ function summarizeConflictingOpenPrs({ config, execFileSyncImpl, sleepSyncImpl =
   try {
     for (const pr of prs) {
       if (pr.repo !== repo) {
-        Object.assign(pr, { owned: conflictingPrHasOwner(pr), conflictingPaths: [], probeOk: null });
+        Object.assign(pr, {
+          owned: false,
+          ownerSources: [],
+          suppressingLabels: [],
+          conflictingPaths: [],
+          probeOk: null,
+        });
         continue;
       }
       const conflict = mergeTreeConflictPaths(pr, { repoRoot, execFileSyncImpl, gitEnv });
       const probeOk = !conflict.error;
       if (probeOk) probedPrs += 1;
       if (conflict.error) errors.push(`#${pr.number}: ${conflict.error}`);
-      Object.assign(pr, { owned: conflictingPrHasOwner(pr), conflictingPaths: conflict.paths, probeOk });
+      Object.assign(pr, {
+        owned: false,
+        ownerSources: [],
+        suppressingLabels: [],
+        conflictingPaths: conflict.paths,
+        probeOk,
+      });
       if (!probeOk) continue;
       for (const conflictPath of conflict.paths) {
         if (!grouped.has(conflictPath)) grouped.set(conflictPath, []);
@@ -3290,12 +3431,15 @@ function summarizeConflictingOpenPrs({ config, execFileSyncImpl, sleepSyncImpl =
   const sharedPathGroups = groupedPaths.filter((entry) => entry.count >= minSharedPathCount);
   return {
     repo,
+    repos,
     repoRoot,
     enabled: true,
-    collected: errors.length === 0,
+    detailedProbesEnabled: true,
+    collected: listingErrors.length === 0 && missingHeadCommittedAt.length === 0,
     count: prs.length,
     probedPrs,
     unprobedPrs: prs.length - probedPrs,
+    probeCoverage: prs.length > 0 ? probedPrs / prs.length : 1,
     prs,
     paths: groupedPaths.map((entry) => entry.path),
     groupedPaths,
@@ -3925,10 +4069,11 @@ function summarizeHammerDispatchStall(hqRoot, { env = process.env, nowMs, config
   );
   const dispatchStale = lastHammerDispatchAgeMs === null
     || lastHammerDispatchAgeMs >= config.hammerDispatchStallMaxAgeMs;
+  const logMissingWithBacklog = !log.exists && backlog.present;
   return {
-    active: log.exists ? Boolean(backlogOldEnough && dispatchStale) : null,
-    blind: !log.exists,
-    blindReason: log.exists ? null : 'dispatch-log-missing',
+    active: log.exists ? Boolean(backlogOldEnough && dispatchStale) : (logMissingWithBacklog ? null : false),
+    blind: logMissingWithBacklog,
+    blindReason: logMissingWithBacklog ? 'dispatch-log-missing' : null,
     thresholdMs: config.hammerDispatchStallMaxAgeMs,
     backlog,
     logPath,
@@ -4623,12 +4768,17 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }));
   }
 
-  if (snapshot.conflictingOpenPrs?.enabled && snapshot.conflictingOpenPrs?.collected === false) {
+  const conflictingPrProbeBlind = snapshot.conflictingOpenPrs?.detailedProbesEnabled
+    && (snapshot.conflictingOpenPrs?.probeCoverage ?? 1) < 1;
+  if (snapshot.conflictingOpenPrs?.enabled && (snapshot.conflictingOpenPrs?.collected === false || conflictingPrProbeBlind)) {
+    const configuredRepos = Array.isArray(snapshot.conflictingOpenPrs.repos) && snapshot.conflictingOpenPrs.repos.length > 0
+      ? snapshot.conflictingOpenPrs.repos.join(', ')
+      : (snapshot.conflictingOpenPrs.repo || 'the configured repo');
     findings.push(buildFinding({
       code: 'review:conflicting_open_prs_unreadable',
       tier: 'ticket',
       subject: 'open conflicting PR diagnostics could not be collected',
-      message: `GitHub open-PR listing or local merge-tree probes for ${snapshot.conflictingOpenPrs.repo || 'the configured repo'} failed; this is a blind collector state, not proof that no PRs are conflicting.`,
+      message: `GitHub open-PR listing or local merge-tree probes for ${configuredRepos} failed; this is a blind collector state, not proof that no PRs are conflicting.`,
       evidence: (snapshot.conflictingOpenPrs.errors || []).slice(0, 3),
       recommendedAction: 'Check gh authentication/network health and local git fetch/merge-tree access for the pipeline-health host, then re-run the collector.',
       observedAt,
@@ -4656,10 +4806,10 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
   }
 
   const unownedConflicts = (snapshot.conflictingOpenPrs?.prs || []).filter((pr) => {
-    const updatedMs = Date.parse(pr.updatedAt || '');
+    const headCommittedMs = Date.parse(pr.headCommittedAt || '');
     return pr.owned !== true
-      && Number.isFinite(updatedMs)
-      && Date.parse(observedAt) - updatedMs >= config.conflictingPrUnownedMaxAgeMs;
+      && Number.isFinite(headCommittedMs)
+      && Date.parse(observedAt) - headCommittedMs >= config.conflictingPrUnownedMaxAgeMs;
   });
   if (unownedConflicts.length > 0) {
     findings.push(buildFinding({
@@ -4667,7 +4817,7 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
       tier: 'ticket',
       subject: `${unownedConflicts.length} conflicting PR(s) have no observed owner past the threshold`,
       message: `The monitored repositories have conflicting PRs older than ${Math.round(config.conflictingPrUnownedMaxAgeMs / 60000)}m without a current-head ownership signal.`,
-      evidence: unownedConflicts.map((pr) => `${pr.repo || snapshot.conflictingOpenPrs.repo}#${pr.number}@${pr.headRefOid || 'unknown'} updatedAt=${pr.updatedAt || 'unknown'}`),
+      evidence: unownedConflicts.slice(0, 12).map((pr) => `${pr.repo || snapshot.conflictingOpenPrs.repo}#${pr.number}@${pr.headRefOid || 'unknown'} headCommittedAt=${pr.headCommittedAt || 'unknown'}`),
       recommendedAction: 'Inspect the auto-merge dirty-PR ledger and dispatch a single lease-protected hammer owner for each current head.',
       observedAt,
       details: { thresholdMs: config.conflictingPrUnownedMaxAgeMs, prs: unownedConflicts },
@@ -5079,7 +5229,8 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
       observedAt,
       details: snapshot.hammerDispatchStall,
     }));
-  } else if (snapshot.hammerDispatchStall?.active) {
+  }
+  if (snapshot.hammerDispatchStall?.active && !snapshot.hammerDispatchStall?.blind) {
     const backlog = snapshot.hammerDispatchStall.backlog || {};
     const thresholdMinutes = Math.round(snapshot.hammerDispatchStall.thresholdMs / 60000);
     findings.push(buildFinding({
@@ -5237,12 +5388,25 @@ function collectReviewPipelineHealth({
       nowMs,
       config,
     });
-    const conflictingOpenPrs = summarizeConflictingOpenPrs({
+    const conflictingOpenPrsBase = summarizeConflictingOpenPrs({
       config,
       execFileSyncImpl,
       sleepSyncImpl,
     });
     const amaCloserLeases = readAmaCloserLeases(rootDir, { nowMs, config, reviewRows });
+    const conflictingOpenPrs = attachConflictingPrOwnership(
+      conflictingOpenPrsBase,
+      conflictingPrOwnerIndex({
+        followUpJobs: followUpQueues.jobs,
+        amaCloserLeases,
+        mergeAgentDispatches: conflictingOpenPrsBase.prs?.length > 0
+          ? readMergeAgentDispatches(rootDir, {
+              nowMs,
+              maxAgeMs: config.conflictingPrUnownedMaxAgeMs,
+            })
+          : [],
+      })
+    );
     const daemonMergeParks = readDaemonMergeParks({
       rootDir,
       activeReviewRows: db ? reviewRows : null,
@@ -5538,6 +5702,11 @@ function renderReviewPipelinePrometheus(snapshot) {
     snapshot.conflictingOpenPrs?.collected ? 1 : 0
   );
   pushMetric(
+    'review_pipeline_conflicting_open_prs_probe_coverage',
+    {},
+    withDefault(snapshot.conflictingOpenPrs?.probeCoverage)
+  );
+  pushMetric(
     'review_pipeline_conflicting_open_pr_shared_path_groups',
     {},
     snapshot.conflictingOpenPrs?.sharedPathGroups?.length || 0
@@ -5555,7 +5724,12 @@ function renderReviewPipelinePrometheus(snapshot) {
     }, service.loaded ? 1 : 0);
   }
   pushMetric('review_pipeline_dispatch_spawn_failures', {}, snapshot.dispatchSpawnFailures?.matches?.length || 0);
-  pushMetric('review_pipeline_hammer_dispatch_stalled', {}, snapshot.hammerDispatchStall?.active ? 1 : 0);
+  pushMetric(
+    'review_pipeline_hammer_dispatch_stalled',
+    {},
+    snapshot.hammerDispatchStall?.active === null ? Number.NaN : (snapshot.hammerDispatchStall?.active ? 1 : 0)
+  );
+  pushMetric('review_pipeline_hammer_dispatch_stall_blind', {}, snapshot.hammerDispatchStall?.blind ? 1 : 0);
   pushMetric('review_pipeline_dag_autowalk_healthy', {}, snapshot.dagAutowalk?.healthy ? 1 : 0);
   pushMetric('review_pipeline_ttm_minutes', { quantile: '0.5' }, snapshot.ttm?.rollup?.medianTimeToMergeMinutes || 0);
   pushMetric('review_pipeline_ttm_minutes', { quantile: '0.9' }, snapshot.ttm?.rollup?.p90TimeToMergeMinutes || 0);

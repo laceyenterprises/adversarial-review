@@ -121,6 +121,38 @@ test('review latency event fallback lookup is scoped by generic subject identity
   }
 });
 
+test('latency report makes hot-path cache impact visible', () => {
+  const rootDir = tempRoot();
+  const db = openDb(rootDir);
+  try {
+    for (const [index, eventType, savedMs] of [
+      [1, 'cache_miss', 0],
+      [2, 'cache_hit', 61_000],
+      [3, 'cache_hit', 61_000],
+      [4, 'fallback_route', 0],
+    ]) {
+      recordReviewLatencyEvent(db, {
+        repo: REPO,
+        prNumber: 6699,
+        eventType,
+        at: `2026-09-11T12:0${index}:00.000Z`,
+        source: 'agy-hot-path',
+        idempotencyKey: `cache-${index}`,
+        payload: { cache: 'review-context', savedMs },
+      });
+    }
+  } finally {
+    db.close();
+  }
+  const report = collectReviewLatencyReport({ rootDir, since: '24h', now: () => new Date('2026-09-11T13:00:00.000Z') });
+  assert.equal(report.cacheImpact.cache_hit, 2);
+  assert.equal(report.cacheImpact.cache_miss, 1);
+  assert.equal(report.cacheImpact.fallback_route, 1);
+  assert.equal(report.cacheImpact.hitRate, 2 / 3);
+  assert.equal(report.cacheImpact.savedMs, 122_000);
+  assert.match(renderReviewLatencyReport(report), /hot-path cache: hits=2 misses=1.*hit_rate=67%.*fixture_saved=2m02s/);
+});
+
 test('latency report backfills critical path and queue state from fixtures', () => {
   const rootDir = tempRoot();
   const db = openDb(rootDir);

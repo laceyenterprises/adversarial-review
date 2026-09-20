@@ -499,6 +499,7 @@ export function createAfhReviewerGroundingCache({
   env = process.env,
   hqPath = null,
   logger = console,
+  emitCacheEvent = null,
 } = {}) {
   const cacheByProbeKey = new Map();
 
@@ -511,14 +512,22 @@ export function createAfhReviewerGroundingCache({
     return entry;
   }
 
-  return async function getAfhReviewerGrounding({ claudeRuntimeProbeUid = null } = {}) {
+  const getAfhReviewerGrounding = async function getAfhReviewerGrounding({ claudeRuntimeProbeUid = null } = {}) {
     const runtimeProbeUid = normalizeClaudeRuntimeProbeUid(claudeRuntimeProbeUid);
     const probeKey = runtimeProbeUid === null
       ? AFH_QUOTA_ONLY_CACHE_KEY
       : `claude-runtime-uid:${runtimeProbeUid}`;
     const entry = cacheEntryFor(probeKey);
     const now = nowFn();
-    if (entry.cached && now < entry.cached.expiresAt) return entry.cached.snapshot;
+    if (entry.cached && now < entry.cached.expiresAt) {
+      emitCacheEvent?.({ event: 'cache_hit', cache: 'reviewer-quota', key: probeKey, ageMs: now - entry.cached.readAt });
+      return entry.cached.snapshot;
+    }
+    emitCacheEvent?.({
+      event: entry.cached ? 'cache_stale' : 'cache_miss',
+      cache: 'reviewer-quota',
+      key: probeKey,
+    });
     if (!entry.inFlight) {
       entry.inFlight = (async () => {
         let snapshot;
@@ -549,7 +558,8 @@ export function createAfhReviewerGroundingCache({
             }),
           });
         }
-        entry.cached = { snapshot, expiresAt: nowFn() + ttlMs };
+        const readAt = nowFn();
+        entry.cached = { snapshot, readAt, expiresAt: readAt + ttlMs };
         // Degraded-read breadcrumb, once per refresh window rather than once per
         // PR: a watcher without `hq` on PATH would otherwise log this per subject
         // on every tick forever.
@@ -574,6 +584,21 @@ export function createAfhReviewerGroundingCache({
     }
     return entry.inFlight;
   };
+  getAfhReviewerGrounding.invalidate = ({ reason = 'operator-resume', probeKey = null } = {}) => {
+    const removed = probeKey === null
+      ? cacheByProbeKey.size
+      : Number(cacheByProbeKey.delete(String(probeKey)));
+    if (probeKey === null) cacheByProbeKey.clear();
+    emitCacheEvent?.({
+      event: 'cache_invalidated',
+      cache: 'reviewer-quota',
+      key: probeKey,
+      reason,
+      removed,
+    });
+    return removed;
+  };
+  return getAfhReviewerGrounding;
 }
 
 /**

@@ -182,9 +182,11 @@ import {
   primaryReviewerQuotaCappedForRow,
   resolveGeminiReviewerModeForWatcher,
   reviewPopulationRetryDecision,
+  invalidateReviewerRouteCache,
   selectReviewerRouteForAttempt,
   shouldBypassPrimaryReviewerQuotaHold,
 } from './reviewer-route-selection.mjs';
+import { invalidationReasonForGrounding } from './context/hot-path-cache.mjs';
 import {
   guardRereviewCiBeforeReviewer,
   shouldRecheckCiBlockedRereview,
@@ -519,6 +521,7 @@ export function markUnroutableTitleDisposition({
 // alternate schedulers override it by passing `getAfhReviewerGroundingForTick`
 // in ctx. Disable the whole hop with ADVERSARIAL_AFH_REVIEWER_FALLBACK=0.
 const defaultAfhReviewerGroundingForTick = createAfhReviewerGroundingCache();
+let previousAfhGrounding = null;
 
 // A terminal reviewer failure does NOT always land as review_status='failed'.
 //
@@ -1470,6 +1473,9 @@ export async function processReviewSubject(entry, ctx) {
           afhGrounding = await readAfhGrounding(
             claudeRuntimeProbeUid === null ? {} : { claudeRuntimeProbeUid }
           );
+          const groundingInvalidation = invalidationReasonForGrounding(previousAfhGrounding, afhGrounding);
+          if (groundingInvalidation) invalidateReviewerRouteCache(groundingInvalidation);
+          if (afhGrounding?.available) previousAfhGrounding = afhGrounding;
         } catch (err) {
           afhGrounding = null;
           console.warn(
@@ -1487,6 +1493,18 @@ export async function processReviewSubject(entry, ctx) {
       });
       const afhBaseRoute = afhSelection.route;
       if (afhSelection.decision.applied) {
+        console.warn(
+          `[watcher] cache-event ${JSON.stringify({
+            event: 'fallback_route',
+            cache: 'reviewer-route',
+            repo: repoPath,
+            prNumber,
+            headSha: subject.headSha || subject.ref.revisionRef || null,
+            fromReviewerModel: afhSelection.decision.fromReviewerModel,
+            toReviewerModel: afhSelection.decision.toReviewerModel,
+            reason: afhSelection.decision.reason,
+          })}`
+        );
         console.warn(
           `[watcher] reviewer-selection ${repoPath}#${prNumber} ` +
             `${describeAfhReviewerFallback(afhSelection.decision)}`

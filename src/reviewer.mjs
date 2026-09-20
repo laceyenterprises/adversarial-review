@@ -44,6 +44,7 @@ import {
 } from './follow-up-jobs.mjs';
 import { buildObviousDocsGuidance, fetchLinkedSpecContents } from './prompt-context.mjs';
 import { buildHardeningReviewContext } from './hardening-ledger-context.mjs';
+import { buildCachedReviewerContext } from './context/reviewer-context-cache.mjs';
 import {
   captureReviewerBodyAfterPost,
   findCapturedReviewerBody,
@@ -2073,15 +2074,16 @@ async function main() {
     process.exit(1);
   }
 
-  const extraContext = await buildReviewerExtraContext({
+  const extraContext = await buildCachedReviewerContext({
     repo,
     prNumber,
     prContext,
     diff,
-    advisoryFindings,
+    headSha: reviewerHeadSha, baseSha: prContext?.baseRefOid || prContext?.baseOid || `ref:${prContext?.baseRefName || 'unknown'}`,
+    reviewerProfile: `${reviewerModel}:${reviewerPromptStage}`, advisoryFindings,
     repoRoot: join(ROOT, '..', '..'),
     log: console,
-  });
+  }, buildReviewerExtraContext);
 
   // 2. Run adversarial review (OAuth only — no API key fallback)
   let effectiveModel = reviewerModel;

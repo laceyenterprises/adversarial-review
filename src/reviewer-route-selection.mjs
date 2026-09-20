@@ -12,6 +12,35 @@ import {
   reviewerModelGrounding,
 } from './afh-reviewer-fallback.mjs';
 
+const ROUTE_CACHE_TTL_MS = 30_000;
+const routeCache = new Map();
+
+function routeCacheKey({ subject, baseRoute, rootDir, repoPath, prNumber, currentRow, headSha, afhGrounding, env, cascadeState }) {
+  return JSON.stringify({
+    repo: repoPath,
+    rootDir,
+    prNumber,
+    headSha,
+    builderClass: subject?.builderClass || baseRoute?.builderClass || null,
+    reviewerModel: baseRoute?.reviewerModel || null,
+    currentRow,
+    cascadeState,
+    timeoutFallback: env?.ADVERSARIAL_REVIEW_TIMEOUT_FALLBACK_MODEL || null,
+    timeoutThreshold: env?.ADVERSARIAL_REVIEW_TIMEOUT_FALLBACK_THRESHOLD || null,
+    execThreshold: env?.AGENT_OS_REVIEWER_EXEC_FALLBACK_THRESHOLD
+      ?? env?.ADVERSARIAL_REVIEWER_EXEC_FALLBACK_THRESHOLD
+      ?? null,
+    afhGrounding,
+  });
+}
+
+export function invalidateReviewerRouteCache(reason = 'operator-resume', logger = console) {
+  const removed = routeCache.size;
+  routeCache.clear();
+  logger?.info?.(`[watcher] cache-event ${JSON.stringify({ event: 'cache_invalidated', cache: 'reviewer-route', reason, removed })}`);
+  return removed;
+}
+
 // Quota-exhausted fallback backoff, replicated verbatim from watcher.mjs (its
 // copy stays for the other watcher call sites); a module-load env read, so both
 // resolve identically.
@@ -382,6 +411,23 @@ export function selectReviewerRouteForAttempt({
   afhGrounding = null,
 }) {
   const cascadeState = readCascadeState(rootDir, { repo: repoPath, prNumber });
+  const cacheKey = routeCacheKey({ subject, baseRoute, rootDir, repoPath, prNumber, currentRow, headSha, afhGrounding, env, cascadeState });
+  const now = Date.now();
+  const cached = routeCache.get(cacheKey);
+  if (cached && now < cached.expiresAt) {
+    console.info(`[watcher] cache-event ${JSON.stringify({ event: 'cache_hit', cache: 'reviewer-route', repo: repoPath, prNumber, headSha })}`);
+    return cached.route;
+  }
+  if (cached) {
+    routeCache.delete(cacheKey);
+    console.info(`[watcher] cache-event ${JSON.stringify({ event: 'cache_stale', cache: 'reviewer-route', repo: repoPath, prNumber, headSha })}`);
+  } else {
+    console.info(`[watcher] cache-event ${JSON.stringify({ event: 'cache_miss', cache: 'reviewer-route', repo: repoPath, prNumber, headSha })}`);
+  }
+  const remember = (route) => {
+    routeCache.set(cacheKey, { route, expiresAt: Date.now() + ROUTE_CACHE_TTL_MS });
+    return route;
+  };
   const builderClass = subject?.builderClass || baseRoute.builderClass || null;
   const execThreshold = resolveReviewerExecFallbackThreshold(env);
   const execFailureSignal = reviewerExecFailureSignal({ cascadeState, currentRow });
@@ -405,7 +451,7 @@ export function selectReviewerRouteForAttempt({
       });
       if (fallbackGrounding.grounded) continue;
       const fallbackRoute = reviewerRouteForModel(candidateModel);
-      return {
+      return remember({
         ...baseRoute,
         reviewerModel: fallbackRoute.reviewerModel,
         botTokenEnv: fallbackRoute.botTokenEnv,
@@ -422,9 +468,9 @@ export function selectReviewerRouteForAttempt({
           sameModelAsBuilder: isCrossModelReviewWaived(builderClass, fallbackRoute.reviewerModel),
           lastResort: candidate.sameModelLastResort,
         },
-      };
+      });
     }
-    return {
+    return remember({
       ...baseRoute,
       reviewerModelFallbackSkipped: {
         event: 'reviewer-model-fallback-skipped',
@@ -437,25 +483,25 @@ export function selectReviewerRouteForAttempt({
         builderClass,
         attempted,
       },
-    };
+    });
   }
 
   const threshold = resolveReviewerTimeoutFallbackThreshold(env);
-  if (threshold <= 0) return baseRoute;
+  if (threshold <= 0) return remember(baseRoute);
   const timeoutFailures = Number(cascadeState?.transientFailureBreakdown?.['reviewer-timeout'] || 0);
   if (cascadeState?.lastFailureClass !== 'reviewer-timeout' || timeoutFailures < threshold) {
-    return baseRoute;
+    return remember(baseRoute);
   }
   const fallbackModel = resolveReviewerTimeoutFallbackModel(env);
-  if (!fallbackModel || fallbackModel === baseRoute?.reviewerModel) return baseRoute;
+  if (!fallbackModel || fallbackModel === baseRoute?.reviewerModel) return remember(baseRoute);
   const fallbackRoute = reviewerRouteForModel(fallbackModel);
-  if (!fallbackRoute) return baseRoute;
+  if (!fallbackRoute) return remember(baseRoute);
   // AFH-04: never switch the timeout fallback onto a reviewer whose provider is
   // authoritatively grounded (hard or AFH-02 soft) — that trades a slow reviewer
   // for one that cannot spawn at all. No signal → unchanged behavior.
   const fallbackGrounding = reviewerModelGrounding(afhGrounding, fallbackModel);
   if (fallbackGrounding.grounded) {
-    return {
+    return remember({
       ...baseRoute,
       afhTimeoutFallbackSkipped: {
         candidateReviewerModel: fallbackModel,
@@ -464,9 +510,9 @@ export function selectReviewerRouteForAttempt({
         hardGrounded: fallbackGrounding.hardGrounded,
         softGrounded: fallbackGrounding.softGrounded,
       },
-    };
+    });
   }
-  return {
+  return remember({
     ...baseRoute,
     reviewerModel: fallbackRoute.reviewerModel,
     botTokenEnv: fallbackRoute.botTokenEnv,
@@ -478,7 +524,7 @@ export function selectReviewerRouteForAttempt({
       builderClass,
       sameModelAsBuilder: isCrossModelReviewWaived(builderClass, fallbackRoute.reviewerModel),
     },
-  };
+  });
 }
 
 export function resolveStaleReviewerReconcilePerPoll(env = process.env) {

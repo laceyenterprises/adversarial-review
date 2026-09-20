@@ -28,6 +28,11 @@ const EVENT_TYPES = Object.freeze([
   'merge_completed',
   'deploy_observed',
   'smoke_result',
+  'cache_hit',
+  'cache_miss',
+  'cache_stale',
+  'cache_invalidated',
+  'fallback_route',
 ]);
 
 const STAGE_DEFINITIONS = Object.freeze([
@@ -789,6 +794,31 @@ function agyRouteState(db, { sinceIso }) {
   };
 }
 
+function cacheImpact(db, { sinceIso }) {
+  const rows = safeAll(
+    db,
+    `SELECT event_type, payload_json
+       FROM review_latency_events
+      WHERE at >= ?
+        AND event_type IN ('cache_hit', 'cache_miss', 'cache_stale', 'cache_invalidated', 'fallback_route')`,
+    [sinceIso]
+  );
+  const counts = Object.fromEntries(EVENT_TYPES.filter((value) => value.startsWith('cache_') || value === 'fallback_route')
+    .map((value) => [value, 0]));
+  let savedMs = 0;
+  for (const row of rows) {
+    counts[row.event_type] = (counts[row.event_type] || 0) + 1;
+    if (row.event_type === 'cache_hit') savedMs += Math.max(0, Number(parseJson(row.payload_json, {}).savedMs || 0));
+  }
+  const lookups = counts.cache_hit + counts.cache_miss + counts.cache_stale;
+  return {
+    ...counts,
+    lookups,
+    hitRate: lookups > 0 ? counts.cache_hit / lookups : null,
+    savedMs,
+  };
+}
+
 function recentWakeEvents(subjects) {
   const wakes = [];
   for (const subject of subjects.values()) {
@@ -879,6 +909,10 @@ function collectReviewLatencyReport({
       agyRouteState: db
         ? agyRouteState(db, { sinceIso })
         : { available: false, reviewerRows: [], recentProbeEvents: [] },
+      cacheImpact: db ? cacheImpact(db, { sinceIso }) : {
+        cache_hit: 0, cache_miss: 0, cache_stale: 0, cache_invalidated: 0,
+        fallback_route: 0, lookups: 0, hitRate: null, savedMs: 0,
+      },
       recentWakes: recentWakeEvents(subjects),
       topBottlenecks: topBottlenecks(stages, queue),
     };
@@ -932,6 +966,12 @@ function renderReviewLatencyReport(report) {
     `running_passes=${report.reviewerSlots.runningPasses} null_pgid=${report.reviewerSlots.nullPgidRows}`
   );
   lines.push(`AGY route/probe: ${report.agyRouteState.available ? 'available' : 'unobserved'}`);
+  lines.push(
+    `hot-path cache: hits=${report.cacheImpact.cache_hit} misses=${report.cacheImpact.cache_miss} ` +
+    `stale=${report.cacheImpact.cache_stale} invalidated=${report.cacheImpact.cache_invalidated} ` +
+    `hit_rate=${report.cacheImpact.hitRate === null ? '-' : `${Math.round(report.cacheImpact.hitRate * 100)}%`} ` +
+    `fixture_saved=${formatDuration(report.cacheImpact.savedMs)}`
+  );
   lines.push('');
   lines.push('top waiting reasons:');
   for (const reason of report.topWaitingReasons.slice(0, 5)) {

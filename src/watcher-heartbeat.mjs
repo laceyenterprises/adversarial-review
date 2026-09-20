@@ -291,6 +291,7 @@ function createWatcherStallWatchdog({
   let pollStartCounter = null;
   let starvationChecks = 0;
   let starvationSignalled = false;
+  let lastInPollMarker = null;
 
   function noteProgress() {
     const currentCounter = normalizeCounter(heartbeat.snapshot().poll_counter);
@@ -300,12 +301,29 @@ function createWatcherStallWatchdog({
     }
   }
 
+  // In-poll progress markers. `poll_counter` only advances when a NEW poll
+  // STARTS, so across a single long poll it is static BY CONSTRUCTION -- which
+  // is why starvation detection could not tell a busy poll from a frozen one
+  // and killed a watcher that was demonstrably working. These markers are
+  // written by markReview/markSpawnDecision as the poll walks its subjects, so
+  // they advance every few seconds on a healthy poll and not at all on a frozen
+  // one. Observed 2026-09-20: a poll 29 min in flight was killed while
+  // last_spawn_decision_at was advancing seconds earlier.
+  function inPollProgressMarker(snapshot) {
+    return [
+      snapshot?.last_spawn_decision_at || '',
+      snapshot?.last_review_at || '',
+      normalizeCounter(snapshot?.completed_poll_counter),
+    ].join('|');
+  }
+
   function beginPoll() {
     pollInFlight = true;
     pollStartedMs = nowMs();
     pollStartCounter = normalizeCounter(heartbeat.snapshot().poll_counter);
     starvationChecks = 0;
     starvationSignalled = false;
+    lastInPollMarker = inPollProgressMarker(heartbeat.snapshot());
     noteProgress();
   }
 
@@ -315,6 +333,7 @@ function createWatcherStallWatchdog({
     pollStartCounter = null;
     starvationChecks = 0;
     starvationSignalled = false;
+    lastInPollMarker = null;
     lastProgressMs = nowMs();
     noteProgress();
   }
@@ -335,6 +354,18 @@ function createWatcherStallWatchdog({
       starvationChecks = 0;
       return false;
     }
+    // A poll that is still doing observable work is SLOW, not starved. Killing
+    // it is actively harmful: merge actions run at the END of a poll, so every
+    // kill drops the merges for that tick, the queue grows, the next poll is
+    // longer, and it gets killed sooner -- a self-reinforcing livelock. Only a
+    // poll with no advance on ANY signal is frozen, which is what this
+    // watchdog was built to catch.
+    const currentMarker = inPollProgressMarker(snapshot);
+    if (currentMarker !== lastInPollMarker) {
+      lastInPollMarker = currentMarker;
+      starvationChecks = 0;
+      return false;
+    }
     starvationChecks += 1;
     if (starvationChecks < effectiveStarvationChecks) return false;
     // One signal per poll. Re-arming per check would page on a loop; the
@@ -344,8 +375,11 @@ function createWatcherStallWatchdog({
     starvationSignalled = true;
     logger?.error?.(
       `[watcher] poll starvation: one poll has been in flight for ${Math.round(inFlightMs)}ms ` +
-      `with no poll_counter advance across ${starvationChecks} consecutive checks ` +
-      `(poll_counter=${snapshot.poll_counter}, last_poll_at=${snapshot.last_poll_at || 'null'}); ` +
+      `with NO progress on any signal across ${starvationChecks} consecutive checks ` +
+      `(poll_counter=${snapshot.poll_counter}, completed_poll_counter=${snapshot.completed_poll_counter}, ` +
+      `last_poll_at=${snapshot.last_poll_at || 'null'}, ` +
+      `last_review_at=${snapshot.last_review_at || 'null'}, ` +
+      `last_spawn_decision_at=${snapshot.last_spawn_decision_at || 'null'}); ` +
       'new PRs cannot be discovered until this tick returns',
     );
     onStarvation?.({

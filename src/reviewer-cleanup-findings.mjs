@@ -1,9 +1,11 @@
-import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, opendirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { probeReviewerSession } from './reviewer-reattach.mjs';
 
 const CLEANUP_FINDING_DIR = ['data', 'reviewer-cleanup-findings'];
+const DEFAULT_RECHECK_MAX_ROWS = 20;
+const DEFAULT_RECHECK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 function cleanupFindingDir(rootDir) {
   return join(rootDir, ...CLEANUP_FINDING_DIR);
@@ -66,17 +68,30 @@ function writeReviewerCleanupFinding(rootDir, finding, { now = new Date(), log =
   return merged;
 }
 
-function readReviewerCleanupFindings(rootDir) {
+function readReviewerCleanupFindings(rootDir, { maxRows = Number.POSITIVE_INFINITY } = {}) {
   const dir = cleanupFindingDir(rootDir);
   if (!existsSync(dir)) return [];
   const findings = [];
-  for (const name of readdirSync(dir)) {
-    if (!name.endsWith('.json')) continue;
-    try {
-      findings.push(JSON.parse(readFileSync(join(dir, name), 'utf8')));
-    } catch {
-      // Corrupt durable findings should not block rechecking every other leak.
+  const limit = Number.isInteger(Number(maxRows)) && Number(maxRows) >= 0
+    ? Number(maxRows)
+    : Number.POSITIVE_INFINITY;
+  const handle = opendirSync(dir);
+  try {
+    let entry;
+    while (findings.length < limit && (entry = handle.readSync())) {
+      const name = entry.name;
+      if (!name.endsWith('.json')) continue;
+      if (!entry.isFile() && !entry.isSymbolicLink()) continue;
+      try {
+        findings.push(JSON.parse(readFileSync(join(dir, name), 'utf8')));
+      } catch {
+        // Corrupt durable findings should not block rechecking every other leak.
+      }
     }
+  } finally {
+    try {
+      handle.closeSync();
+    } catch {}
   }
   return findings;
 }
@@ -90,25 +105,45 @@ function recheckReviewerCleanupFindings({
   probeSessionImpl = probeReviewerSession,
   now = new Date(),
   log = console,
+  maxRows = DEFAULT_RECHECK_MAX_ROWS,
+  maxAgeMs = DEFAULT_RECHECK_MAX_AGE_MS,
 } = {}) {
-  const findings = readReviewerCleanupFindings(rootDir);
+  let findings = [];
   let cleared = 0;
   let stillAlive = 0;
   let unknown = 0;
+  try {
+    findings = readReviewerCleanupFindings(rootDir, { maxRows });
+  } catch (err) {
+    log.warn?.(
+      `[watcher] reviewer_cleanup_findings_read_failed error=${err?.message || err}`
+    );
+    return { scanned: 0, stillAlive, cleared, unknown: 1 };
+  }
   for (const finding of findings) {
     try {
+      const firstObservedAt = Date.parse(finding.firstObservedAt || '');
+      if (Number.isFinite(firstObservedAt) && Number.isFinite(Number(maxAgeMs)) &&
+        Number(maxAgeMs) >= 0 && now.getTime() - firstObservedAt > Number(maxAgeMs)) {
+        removeReviewerCleanupFinding(rootDir, finding.reviewerSessionUuid);
+        cleared += 1;
+        continue;
+      }
       const probe = probeSessionImpl({
         pgid: finding.reviewerPgid,
         sessionUuid: finding.reviewerSessionUuid,
       });
-      const alive = typeof probe === 'boolean' ? probe : probe?.alive === true;
+      const alive = typeof probe === 'boolean' ? probe : probe?.alive === true && probe?.matched !== false;
       if (!alive) {
         removeReviewerCleanupFinding(rootDir, finding.reviewerSessionUuid);
         cleared += 1;
         continue;
       }
       stillAlive += 1;
-      writeReviewerCleanupFinding(rootDir, finding, { now, log });
+      writeReviewerCleanupFinding(rootDir, {
+        ...finding,
+        matched: typeof probe === 'boolean' ? finding.matched : probe?.matched ?? null,
+      }, { now, log });
     } catch (err) {
       unknown += 1;
       log.warn?.(
@@ -125,8 +160,13 @@ function recheckReviewerCleanupFindings({
   return { scanned: findings.length, stillAlive, cleared, unknown };
 }
 
-function recheckReviewerCleanupFindingsForWatcher(rootDir, log = console) {
-  return recheckReviewerCleanupFindings({ rootDir, log });
+function recheckReviewerCleanupFindingsForWatcher(rootDir, log = console, options = {}) {
+  try {
+    return recheckReviewerCleanupFindings({ rootDir, log, ...options });
+  } catch (err) {
+    log.warn?.(`[watcher] reviewer_cleanup_findings_recheck_tick_failed error=${err?.message || err}`);
+    return { scanned: 0, stillAlive: 0, cleared: 0, unknown: 1 };
+  }
 }
 
 function writeReviewerCleanupFindingForWatcher(rootDir, finding, log = console) {
@@ -135,6 +175,8 @@ function writeReviewerCleanupFindingForWatcher(rootDir, finding, log = console) 
 
 export {
   cleanupFindingPath,
+  DEFAULT_RECHECK_MAX_AGE_MS,
+  DEFAULT_RECHECK_MAX_ROWS,
   readReviewerCleanupFindings,
   recheckReviewerCleanupFindings,
   recheckReviewerCleanupFindingsForWatcher,

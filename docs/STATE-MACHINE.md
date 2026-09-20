@@ -260,12 +260,14 @@ new PR
   Operators can run `npm run reconcile-posted-orphans -- --root <path>` for a
   read-only scan of open `failed-orphan` rows. The command looks for a
   reviewer-bot GitHub review on the stored reviewer head submitted at or after
-  the stored reviewer start; when that timestamp is missing, it falls back to
-  `last_attempted_at`, and when neither timestamp is parseable it omits the
-  lower time bound. Add `--apply` to CAS the still-open `failed-orphan` row to
+  the stored reviewer start; when that timestamp is missing or corrupt, it falls
+  back to `last_attempted_at`, and when neither timestamp is parseable it
+  refuses the row instead of widening the lower time bound. Add `--apply` to CAS
+  the still-open `failed-orphan` row to
   `posted`, clear orphan failure evidence and the reviewer lease, reset
   `infra_auto_recover_attempts`, and link the matching reviewer pass to the
-  GitHub review artifact when the pass can be safely promoted. It does not
+  GitHub review artifact when the pass can be safely promoted, including a
+  reaped failed pass whose same-head GitHub review proves it posted. It does not
   mutate closed/merged PR rows, stale-head reviews, unrelated statuses, or pass
   artifacts already linked to a different PR. If the PR has a blocking review,
   this transition is operator-visible: the adversarial gate changes from the

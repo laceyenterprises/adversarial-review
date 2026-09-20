@@ -57,7 +57,6 @@ import {
   collectWorkspaceDocContext,
 } from './prompt-context.mjs';
 import {
-  WORKER_CLASS_TO_BOT_TOKEN_ENV,
   buildRemediationOutcomeCommentBody,
   postRemediationOutcomeComment,
 } from './adapters/comms/github-pr-comments/pr-comments.mjs';
@@ -1507,13 +1506,7 @@ function buildRereviewResult({ requested, reason, outcome = null }) {
 // identities such as clio-agent; fall through to canonical routing.
 function resolveReconcileWorkerClass(job, worker) {
   const recordedModel = worker?.model;
-  if (recordedModel && WORKER_CLASS_TO_BOT_TOKEN_ENV[recordedModel]) {
-    return recordedModel;
-  }
   const builderTag = String(job?.builderTag || recordedModel || '').trim().toLowerCase();
-  if (builderTag && Object.prototype.hasOwnProperty.call(REMEDIATION_WORKER_BY_BUILDER_TAG, builderTag)) {
-    return REMEDIATION_WORKER_BY_BUILDER_TAG[builderTag];
-  }
   return pickRemediationWorkerClass({
     ...job,
     builderTag,

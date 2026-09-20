@@ -83,3 +83,72 @@ test('cleanup finding recheck uses the production probe argument shape', async (
     } catch {}
   }
 });
+
+test('cleanup finding recheck clears recycled process groups with mismatched sessions', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewer-cleanup-findings-recycled-'));
+  writeReviewerCleanupFinding(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 6917,
+    reviewerSessionUuid: 'session-recycled',
+    reviewerPgid: 9182,
+    matched: true,
+    postedAt: '2026-09-20T06:29:34Z',
+  });
+
+  const result = recheckReviewerCleanupFindings({
+    rootDir,
+    log: { warn() {} },
+    probeSessionImpl: () => ({ alive: true, matched: false }),
+  });
+
+  assert.deepEqual(result, { scanned: 1, stillAlive: 0, cleared: 1, unknown: 0 });
+  assert.deepEqual(readReviewerCleanupFindings(rootDir), []);
+});
+
+test('cleanup finding recheck honors maxRows cap', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewer-cleanup-findings-cap-'));
+  for (const suffix of ['a', 'b']) {
+    writeReviewerCleanupFinding(rootDir, {
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 6917,
+      reviewerSessionUuid: `session-${suffix}`,
+      reviewerPgid: 9182,
+      postedAt: '2026-09-20T06:29:34Z',
+    });
+  }
+
+  const result = recheckReviewerCleanupFindings({
+    rootDir,
+    maxRows: 1,
+    log: { warn() {} },
+    probeSessionImpl: () => ({ alive: true, matched: true }),
+  });
+
+  assert.equal(result.scanned, 1);
+  assert.equal(result.stillAlive, 1);
+  assert.equal(readReviewerCleanupFindings(rootDir).length, 2);
+});
+
+test('cleanup finding recheck prunes stale findings by first observation age', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewer-cleanup-findings-age-'));
+  writeReviewerCleanupFinding(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 6917,
+    reviewerSessionUuid: 'session-stale',
+    reviewerPgid: 9182,
+    postedAt: '2026-09-20T06:29:34Z',
+  }, {
+    now: new Date('2026-09-20T06:30:00Z'),
+  });
+
+  const result = recheckReviewerCleanupFindings({
+    rootDir,
+    now: new Date('2026-09-20T06:40:01Z'),
+    maxAgeMs: 10 * 60 * 1000,
+    log: { warn() {} },
+    probeSessionImpl: () => ({ alive: true, matched: true }),
+  });
+
+  assert.deepEqual(result, { scanned: 1, stillAlive: 0, cleared: 1, unknown: 0 });
+  assert.deepEqual(readReviewerCleanupFindings(rootDir), []);
+});

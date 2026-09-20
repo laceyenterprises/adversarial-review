@@ -42,9 +42,11 @@ UUID and PGID for rechecks.
 - `writeReviewerCleanupFinding` uses the repository atomic-write helper and
   overwrites by session UUID, preserving `firstObservedAt` while bumping
   `lastObservedAt` and `checks`.
-- `recheckReviewerCleanupFindings` scans every JSON file, probes the stored
+- `recheckReviewerCleanupFindings` scans a bounded batch of JSON files, prunes
+  findings past the configured age window, probes the stored
   process-group/session evidence, removes files whose process group is no
-  longer alive, and rewrites files whose process group remains alive.
+  longer alive or no longer matches the original reviewer session, and rewrites
+  files whose process group remains alive and matching.
 - Corrupt files are skipped so one bad artifact cannot block every other
   cleanup finding from being rechecked.
 - The store contains no credentials or review body content. It records only PR

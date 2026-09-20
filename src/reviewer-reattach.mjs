@@ -1003,7 +1003,14 @@ async function reconcileReviewerSessions({
           log.warn(
             `[watcher] reviewer_posted_process_group_cleanup_finding ${JSON.stringify(finding)}`
           );
-          await onCleanupFinding?.(finding);
+          try {
+            await onCleanupFinding?.(finding);
+          } catch (err) {
+            log.warn?.(
+              `[watcher] reviewer_posted_process_group_cleanup_finding_write_failed ` +
+              `session=${finding.reviewerSessionUuid} pgid=${finding.reviewerPgid} error=${err?.message || err}`
+            );
+          }
         }
         continue;
       }

@@ -1179,16 +1179,21 @@ quota incident as a fresh bounded recovery window.
 Operators may reconcile a `failed-orphan` row that already has a posted
 reviewer-bot GitHub review with `npm run reconcile-posted-orphans -- --root
 <path>` (dry run) and `--apply` (mutating). The scan is limited to open
-`failed-orphan` rows with parseable reviewer start timestamps. A match requires
-the reviewer bot login, a review submitted at or after the durable reviewer
-start, and the stored reviewer head when GitHub supplies a `commit_id`. The
-apply path is a compare-and-swap against the still-open `failed-orphan` row and
-the stable `reviewer_session_uuid`; it moves only that row to `posted`, clears
+`failed-orphan` rows with a parseable reviewer start timestamp or, when that is
+missing or corrupt, a parseable `last_attempted_at` fallback. A match requires
+the reviewer bot login, a review submitted at or after that lower bound, and the
+stored reviewer head when GitHub supplies a `commit_id`. Rows with neither
+timestamp parseable are refused instead of widening the lower bound. The apply
+path is a compare-and-swap against the still-open `failed-orphan` row and the
+stable `reviewer_session_uuid`; it moves only that row to `posted`, clears
 orphan failure evidence and the reviewer lease, resets
-`infra_auto_recover_attempts`, and links the running reviewer pass to the review
-artifact when the pass is still `running` with no `ended_at`. It does not mutate
-closed/merged PR rows, corrupt-timestamp rows, stale-head reviews, unrelated
-statuses, or already-settled failed pass rows. If the reconciled review is
+`infra_auto_recover_attempts`, and links the matching reviewer pass to the
+review artifact. When the matching pass had already been reaped as `failed`,
+reconciliation promotes it to `completed` because the GitHub review proves the
+pass posted; bounded failure metadata on the pass is preserved for health and
+recovery consumers. It does not mutate closed/merged PR rows,
+no-parseable-timestamp rows, stale-head reviews, unrelated statuses, or pass
+artifacts already linked to a different PR. If the reconciled review is
 blocking, this deliberately flips the adversarial gate from the
 `review-failed-orphan` anomaly success projection to the real `blocking-review`
 verdict.
@@ -1853,12 +1858,15 @@ The watcher must project the gate on terminal early-exit paths, including alread
 - `reconcile-posted-orphans --apply` is an operator recovery surface for the
   narrower case where the reviewer actually posted, but the watcher had already
   quarantined the durable row as `failed-orphan`. It must preserve the dry-run
-  default, require an open row and same-session CAS, reject corrupt reviewer
-  start timestamps instead of widening the lower bound, require the GitHub review
-  to match the stored reviewer head when `commit_id` is present, and report
-  `reconciled-row-only` when the `reviewed_prs` row moved to `posted` but no
-  running reviewer pass was linked. It is not a retry surface and must not reset
-  terminal PRs or reopen already-settled failed passes.
+  default, require an open row and same-session CAS, use `last_attempted_at` as
+  the lower-bound fallback when `reviewer_started_at` is missing or corrupt,
+  reject rows where neither timestamp is parseable instead of widening the
+  lower bound, require the GitHub review to match the stored reviewer head when
+  `commit_id` is present, and report `reconciled-row-only` when the
+  `reviewed_prs` row moved to `posted` but no reviewer pass was linked. It is
+  not a retry surface and must not reset terminal PRs; it may promote a matching
+  reaped failed pass to `completed` only when the same-head GitHub review proves
+  the pass actually posted.
 
 For PR-side `retrigger-remediation` labels, a successful budget bump is the durable consumption boundary. Once the bump lands, the watcher must write the label-consumption record and operator-mutation audit before attempting the queue rearm. If requeue then fails, the watcher still removes the label and posts a failure-flavored acknowledgement that names the partial-success state; the same GitHub label event must not authorize another budget bump on retry.
 

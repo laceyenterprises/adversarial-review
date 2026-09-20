@@ -7,7 +7,9 @@ import { withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
 
 function postedReviewForRow(row, reviews) {
   const aliases = reviewerBotLoginAliases(row.reviewer);
-  const startedAt = Date.parse(row.reviewer_started_at || row.last_attempted_at || '');
+  const reviewerStartedAt = Date.parse(row.reviewer_started_at || '');
+  const lastAttemptedAt = Date.parse(row.last_attempted_at || '');
+  const startedAt = Number.isFinite(reviewerStartedAt) ? reviewerStartedAt : lastAttemptedAt;
   if (!Number.isFinite(startedAt)) return null;
   const headSha = String(row.reviewer_head_sha || '').trim();
   const acceptedStates = new Set(['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED']);

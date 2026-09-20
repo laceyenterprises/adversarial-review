@@ -151,9 +151,23 @@ test('apply skips stale-open mirror rows when the live PR is terminal', async ()
   db.close();
 });
 
-test('apply skips corrupt reviewer start timestamps instead of matching stale reviews', async () => {
+test('apply falls back to last-attempt timestamp when reviewer start is corrupt', async () => {
   const db = fixture();
   db.prepare("UPDATE reviewed_prs SET reviewer_started_at = 'not-a-date'").run();
+  const result = await reconcilePostedFailedOrphans({
+    db,
+    apply: true,
+    listReviews: async () => [POSTED_REVIEW],
+    queueFollowUpForRecoveredPostedReviewImpl: queueStub(),
+  });
+  assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'posted');
+  assert.equal(result.results[0].action, 'reconciled');
+  db.close();
+});
+
+test('apply skips rows with no parseable reviewer start or last-attempt timestamp', async () => {
+  const db = fixture();
+  db.prepare("UPDATE reviewed_prs SET reviewer_started_at = 'not-a-date', last_attempted_at = 'also-not-a-date'").run();
   const result = await reconcilePostedFailedOrphans({
     db,
     apply: true,

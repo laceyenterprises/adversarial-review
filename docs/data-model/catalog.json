@@ -50,7 +50,8 @@
         "src/pollonce-phases.mjs",
         "src/review-state.mjs",
         "src/review-latency-event-writer.mjs",
-        "src/review-latency-report.mjs"
+        "src/review-latency-report.mjs",
+        "src/hammer-wake.mjs"
       ],
       "owner": "review latency instrumentation and generic-subject reporting"
     },
@@ -112,6 +113,14 @@
       "store": "data/daemon-merge-parks/",
       "schemaSurface": "src/daemon-merge-park-log.mjs",
       "owner": "AMA daemon clean-merge diagnostics"
+    },
+    {
+      "id": "hammer-wakes",
+      "title": "Hammer Wakes",
+      "path": "docs/data-model/hammer-wakes.md",
+      "store": "data/hammer-wakes/",
+      "schemaSurface": "src/hammer-wake.mjs",
+      "owner": "AMA event-driven hammer wake diagnostics"
     },
     {
       "id": "hammer-retry-cap",

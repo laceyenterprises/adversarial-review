@@ -36,6 +36,7 @@ import {
   resolveFirstPassReviewerPoolConfig,
   reviewerDispatchPassKind,
 } from './watcher-reviewer-pool.mjs';
+import { hammerWakeAuditDir, readHammerWakeAudit } from './hammer-wake.mjs';
 
 const DEFAULT_REVIEWER_DEATH_RATE_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_REVIEWER_DEATH_RATE_THRESHOLD = 0.5;
@@ -5617,6 +5618,25 @@ function collectReviewPipelineHealth({
           lastHammerDispatchAt: null,
           lastHammerDispatchAgeMs: null,
         };
+    const hammerWakeDir = hammerWakeAuditDir(rootDir);
+    const recentHammerWakes = (() => {
+      try {
+        return readdirSync(hammerWakeDir)
+          .filter((name) => name.endsWith('.json'))
+          .map((name) => {
+            const path = join(hammerWakeDir, name);
+            const stat = statSync(path);
+            return { path, mtimeMs: stat.mtimeMs };
+          })
+          .sort((a, b) => b.mtimeMs - a.mtimeMs)
+          .slice(0, 20)
+          .map((entry) => readHammerWakeAudit(entry.path))
+          .filter(Boolean)
+          .sort((a, b) => String(b.requestedAt || b.observedAt || '').localeCompare(String(a.requestedAt || a.observedAt || '')));
+      } catch {
+        return [];
+      }
+    })();
     // TREC-01: both `review:queue_starvation` and `review:terminal_but_unmerged`
     // select their population from `reviewed_prs.pr_state`, so their findings
     // are only as true as the mirror. This reads the lifecycle sweep's
@@ -5674,6 +5694,7 @@ function collectReviewPipelineHealth({
       launchd,
       dispatchSpawnFailures,
       hammerDispatchStall,
+      hammerWakes: { auditDir: hammerWakeDir, recent: recentHammerWakes },
       dagAutowalk,
     };
     const findings = evaluateReviewPipelineFindings(snapshot, { observedAt });

@@ -4,6 +4,8 @@
 // adapters rather than inside the claim loop. Extracting it also pulls
 // follow-up-remediation.mjs back under the ARC-19 R3 line ratchet, which is
 // decrease-only by contract.
+import { createHash } from 'node:crypto';
+import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -13,11 +15,277 @@ import {
 } from './review-state.mjs';
 import { requestWatcherWake } from './watcher-wake.mjs';
 import { writeFollowUpJob } from './follow-up-jobs.mjs';
+import { writeFileAtomic } from './atomic-write.mjs';
 
 // Mirrors the definition in follow-up-remediation.mjs: the repo root is two
 // levels up from this module, not something either file imports.
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
+
+const HAMMER_WAKE_AUDIT_SCHEMA_VERSION = 1;
+const HAMMER_WAKE_ELIGIBILITY_REASON = 'clean-current-head-ci-green-policy-eligible';
+const HAMMER_WAKE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const HAMMER_WAKE_RETENTION_MAX_FILES = 5000;
+const HAMMER_WAKE_RETRY_ATTEMPTS = 3;
+
+function hammerWakeAuditDir(rootDir) {
+  return join(rootDir, 'data', 'hammer-wakes');
+}
+
+function hammerWakeDedupeKey({ repo, prNumber, headSha, eligibilityReason }) {
+  return `${String(repo || '').trim()}#${Number(prNumber)}@${String(headSha || '').trim()}:${String(eligibilityReason || '').trim()}`;
+}
+
+function hammerWakeAuditPath(rootDir, identity) {
+  const digest = createHash('sha256').update(hammerWakeDedupeKey(identity)).digest('hex');
+  return join(hammerWakeAuditDir(rootDir), `${digest}.json`);
+}
+
+function sweepHammerWakeAudits(
+  rootDir,
+  {
+    nowMs = Date.now(),
+    maxAgeMs = HAMMER_WAKE_RETENTION_MS,
+    maxFiles = HAMMER_WAKE_RETENTION_MAX_FILES,
+  } = {}
+) {
+  const dir = hammerWakeAuditDir(rootDir);
+  let entries;
+  try {
+    entries = readdirSync(dir)
+      .filter((name) => name.endsWith('.json'))
+      .map((name) => {
+        const path = join(dir, name);
+        const stat = statSync(path);
+        return { path, mtimeMs: stat.mtimeMs };
+      })
+      .sort((a, b) => b.mtimeMs - a.mtimeMs);
+  } catch {
+    return { removed: 0, retained: null };
+  }
+
+  let removed = 0;
+  const retained = [];
+  for (const entry of entries) {
+    const expired = Number.isFinite(maxAgeMs) && maxAgeMs >= 0 && nowMs - entry.mtimeMs > maxAgeMs;
+    const overLimit = Number.isFinite(maxFiles) && maxFiles >= 0 && retained.length >= maxFiles;
+    if (expired || overLimit) {
+      try {
+        rmSync(entry.path, { force: true });
+        removed += 1;
+      } catch {
+        retained.push(entry);
+      }
+    } else {
+      retained.push(entry);
+    }
+  }
+  return { removed, retained: retained.length };
+}
+
+/**
+ * Reserve and fire the event-driven close-lane wake. This deliberately wakes
+ * the watcher: that watcher owns the existing AMA daemon/Hammer decision and
+ * closer lease, so the hook cannot become a parallel merge authority.
+ */
+function requestEligibleHammerWake({
+  rootDir = ROOT,
+  repo,
+  prNumber,
+  headSha,
+  eligibilityReason = HAMMER_WAKE_ELIGIBILITY_REASON,
+  eligibility = { eligible: false, reasons: ['eligibility-not-observed'] },
+  observedAt = new Date().toISOString(),
+  requestWatcherWakeImpl = requestWatcherWake,
+  log = console,
+  retryAttempt = 0,
+} = {}) {
+  const identity = {
+    repo: String(repo || '').trim(),
+    prNumber: Number(prNumber),
+    headSha: String(headSha || '').trim(),
+    eligibilityReason: String(eligibilityReason || '').trim(),
+  };
+  const eligibilityReasons = Array.isArray(eligibility?.reasons) ? eligibility.reasons : [];
+  let outcome = 'skipped';
+  let reason = eligibilityReasons[0] || 'not-eligible';
+  let auditPath = null;
+  let latencyEvent = { recorded: false, reason: 'not-attempted' };
+
+  if (!identity.repo || !Number.isInteger(identity.prNumber) || identity.prNumber <= 0 || !identity.headSha || !identity.eligibilityReason) {
+    reason = 'invalid-wake-identity';
+  } else if (eligibility?.eligible === true) {
+    try {
+      mkdirSync(hammerWakeAuditDir(rootDir), { recursive: true });
+      sweepHammerWakeAudits(rootDir);
+    } catch (err) {
+      outcome = 'failed';
+      reason = 'wake-audit-dir-unavailable';
+      latencyEvent = { recorded: false, reason: 'not-attempted', error: err?.message || String(err) };
+    }
+    if (outcome !== 'failed') {
+      auditPath = hammerWakeAuditPath(rootDir, identity);
+      const reserved = {
+        schemaVersion: HAMMER_WAKE_AUDIT_SCHEMA_VERSION,
+        event: 'hammer_wake',
+        ...identity,
+        observedAt,
+        outcome: 'reserved',
+        route: 'watcher-ama-merge-authority',
+      };
+      let reservationCreated = false;
+      try {
+        writeFileAtomic(auditPath, `${JSON.stringify(reserved, null, 2)}\n`, { overwrite: false });
+        reservationCreated = true;
+        const wake = requestWatcherWakeImpl({
+          rootDir,
+          reason: 'merge-eligible-hammer-wake',
+          repo: identity.repo,
+          prNumber: identity.prNumber,
+          headSha: identity.headSha,
+          requestedAt: observedAt,
+        });
+        if (wake?.requested !== true) throw new Error('watcher wake did not confirm request');
+        outcome = 'requested';
+        reason = identity.eligibilityReason;
+        const requestedRecord = {
+          ...reserved,
+          outcome,
+          requestId: wake?.payload?.request_id || null,
+          requestedAt: wake?.payload?.requested_at || observedAt,
+        };
+        writeFileAtomic(auditPath, `${JSON.stringify(requestedRecord, null, 2)}\n`);
+        let db = null;
+        try {
+          db = openReviewStateDb(rootDir);
+          ensureReviewStateSchema(db);
+          recordReviewLatencyEvent(db, {
+            repo: identity.repo,
+            prNumber: identity.prNumber,
+            domainId: 'code-pr',
+            subjectExternalId: `${identity.repo}#${identity.prNumber}`,
+            revisionRef: identity.headSha,
+            eventType: 'hammer_wake',
+            at: observedAt,
+            source: 'event-driven-hammer-wake',
+            idempotencyKey: `hammer-wake:${hammerWakeDedupeKey(identity)}`,
+            reason: identity.eligibilityReason,
+            payload: { outcome, route: reserved.route, requestId: wake?.payload?.request_id || null },
+          });
+          latencyEvent = { recorded: true, eventType: 'hammer_wake', wakeOutcome: outcome };
+        } catch (err) {
+          latencyEvent = {
+            recorded: false,
+            reason: 'latency-event-failed',
+            wakeOutcome: outcome,
+            error: err?.message || String(err),
+          };
+          try {
+            writeFileAtomic(auditPath, `${JSON.stringify({
+              ...requestedRecord,
+              latencyEvent,
+            }, null, 2)}\n`);
+          } catch {
+            // The wake has already been delivered and recorded as requested.
+          }
+          log.warn?.(
+            `[hammer-wake] latency event failed for ${identity.repo}#${identity.prNumber}: ` +
+            `${err?.message || err}`
+          );
+        } finally {
+          try {
+            db?.close?.();
+          } catch {
+            // Best-effort cleanup only.
+          }
+        }
+      } catch (err) {
+        if (err?.code === 'EEXIST') {
+          const prior = readHammerWakeAudit(auditPath);
+          if (prior?.outcome === 'failed') {
+            if (retryAttempt + 1 >= HAMMER_WAKE_RETRY_ATTEMPTS) {
+              outcome = 'failed';
+              reason = 'wake-retry-contended';
+            } else {
+              const failedPath = `${auditPath.slice(0, -5)}.failed-${createHash('sha256')
+                .update(`${observedAt}:${process.pid}:${retryAttempt}`)
+                .digest('hex')
+                .slice(0, 12)}.json`;
+              try {
+                // Rename is the retry hand-off CAS: only one caller can archive
+                // the failed reservation, then the ordinary exclusive create
+                // below elects at most one replacement wake for this identity.
+                renameSync(auditPath, failedPath);
+                return requestEligibleHammerWake({
+                  rootDir,
+                  ...identity,
+                  eligibility,
+                  observedAt,
+                  requestWatcherWakeImpl,
+                  log,
+                  retryAttempt: retryAttempt + 1,
+                });
+              } catch (retryErr) {
+                if (retryErr?.code === 'ENOENT') {
+                  return requestEligibleHammerWake({
+                    rootDir,
+                    ...identity,
+                    eligibility,
+                    observedAt,
+                    requestWatcherWakeImpl,
+                    log,
+                    retryAttempt: retryAttempt + 1,
+                  });
+                }
+                outcome = 'failed';
+                reason = 'wake-retry-reservation-failed';
+              }
+            }
+          } else {
+            outcome = 'duplicate';
+            reason = 'wake-already-recorded';
+          }
+        } else {
+          outcome = 'failed';
+          reason = reservationCreated ? 'wake-unavailable' : 'wake-reservation-failed';
+          try {
+            writeFileAtomic(auditPath, `${JSON.stringify({ ...reserved, outcome, reason, error: err?.message || String(err) }, null, 2)}\n`);
+          } catch {
+            // Best-effort audit only.
+          }
+        }
+      }
+    }
+  }
+
+  const event = {
+    schemaVersion: HAMMER_WAKE_AUDIT_SCHEMA_VERSION,
+    event: 'hammer_wake',
+    ...identity,
+    observedAt,
+    outcome,
+    reason,
+    eligibilityReasons,
+    route: 'watcher-ama-merge-authority',
+    retryable: outcome === 'failed',
+    latencyEvent,
+    ...(auditPath ? { auditPath } : {}),
+  };
+  try {
+    log?.log?.(JSON.stringify(event));
+  } catch {
+    // Diagnostic logging cannot make the wake helper throw into AMA closure.
+  }
+  return event;
+}
+
+function readHammerWakeAudit(path) {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    return null;
+  }
+}
 
 function requestHammerWakeForSettledReviewStop({
   rootDir = ROOT,
@@ -144,4 +412,15 @@ function requestHammerWakeForSettledReviewStop({
   return { ...wakeRecord, latencyEvent };
 }
 
-export { requestHammerWakeForSettledReviewStop };
+export {
+  HAMMER_WAKE_ELIGIBILITY_REASON,
+  HAMMER_WAKE_RETENTION_MAX_FILES,
+  HAMMER_WAKE_RETENTION_MS,
+  hammerWakeAuditDir,
+  hammerWakeAuditPath,
+  hammerWakeDedupeKey,
+  readHammerWakeAudit,
+  requestEligibleHammerWake,
+  requestHammerWakeForSettledReviewStop,
+  sweepHammerWakeAudits,
+};

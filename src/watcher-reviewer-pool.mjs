@@ -1071,14 +1071,15 @@ async function runBoundedReviewerDispatchQueue(candidates, {
         0,
         Number.parseInt(String(singleWaveSettleGraceMs), 10) || 0,
       );
-      if (singleWaveDeadlineMs === null) {
-        const currentNowMs = Number(now());
-        const resolvedNowMs = Number.isFinite(currentNowMs) ? currentNowMs : Date.now();
-        singleWaveDeadlineMs = resolvedNowMs + settleGraceMs;
-      }
       const currentNowMs = Number(now());
       const resolvedNowMs = Number.isFinite(currentNowMs) ? currentNowMs : Date.now();
-      const remainingSettleGraceMs = Math.max(0, singleWaveDeadlineMs - resolvedNowMs);
+      let remainingSettleGraceMs = settleGraceMs;
+      if (splitPostReviewSettlement) {
+        if (singleWaveDeadlineMs === null) {
+          singleWaveDeadlineMs = resolvedNowMs + settleGraceMs;
+        }
+        remainingSettleGraceMs = Math.max(0, singleWaveDeadlineMs - resolvedNowMs);
+      }
       if (active.size > 0) {
         let settleTimer = null;
         try {

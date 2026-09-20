@@ -286,6 +286,36 @@ test('legacy serial admission remains available when settlement split is disable
   assert.deepEqual(events, ['start:1', 'settled:1', 'start:2']);
 });
 
+test('single-wave flag-off re-entry gets a fresh settle grace after skipped wave', async () => {
+  const events = [];
+  let virtualNowMs = 0;
+  const tasks = [
+    candidate(1, async () => {
+      events.push('skip:1');
+      virtualNowMs += 100;
+      return { dispatched: false, reason: 'already-reviewed-head' };
+    }),
+    candidate(2, async () => {
+      events.push('start:2');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      events.push('settled:2');
+    }),
+  ];
+
+  const summary = await runBoundedReviewerDispatchQueue(tasks, {
+    maxConcurrent: 1,
+    singleWave: true,
+    singleWaveSettleGraceMs: 50,
+    splitPostReviewSettlement: false,
+    now: () => virtualNowMs,
+    logger: { error() {}, log() {} },
+  });
+
+  assert.equal(summary.dispatched, 1);
+  assert.equal(summary.deferred, 0);
+  assert.deepEqual(events, ['skip:1', 'start:2', 'settled:2']);
+});
+
 test('reviewer dispatch gives re-reviews their floor after the configured burst at four slots', async () => {
   const started = [];
   let release;

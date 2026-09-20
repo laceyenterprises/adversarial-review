@@ -2255,7 +2255,12 @@ warning so the inverse starvation class is observable.
 
 When `ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT=1`, reviewer admission
 capacity is released after the review row is durably settled by the post
-operation, while post-review bookkeeping continues outside the scarce pool slot.
+operation and the inline final-hammer handoff has returned. Token-ledger
+attribution, artifact writes, and final `reviewer_passes` completion continue
+outside the scarce pool slot. Keeping the hammer handoff inside the admission
+boundary preserves the `pollOnce` serialization point for the same PR: the next
+tick cannot enter the posted-review handler for a row whose detached
+continuation is still handing that same row to the inline hammer path.
 Pre-release dispatch failures still feed the normal thrown-failure circuit
 breaker and stop the wave; only failures after the admission slot has already
 been released are treated as deferred settlement failures and logged. Under the
@@ -2264,10 +2269,12 @@ as the point where the queue may admit a replacement candidate instead of
 detaching solely because the initial launch wave outlived the settle-grace timer.
 The rollout flag accepts the same boolean spellings as sibling watcher flags
 (`1`, `true`, `yes`, `on`; or `0`, `false`, `no`, `off`) and the watcher logs
-the resolved mode once per drain. The single-wave settle grace remains a
-wall-clock bound for the drain: a late admission release defers the remaining
-backlog to the next tick rather than serializing all reviewable PRs inside one
-`pollOnce`. Pipeline-enabled domains keep the legacy cutoff unless they wire an
+the resolved mode once per drain. With the flag disabled, each single-wave
+re-entry keeps the legacy full settle grace for that wave. With the flag
+enabled, the single-wave settle grace is one wall-clock bound across split
+admission releases: a late admission release defers the remaining backlog to the
+next tick rather than serializing all reviewable PRs inside one `pollOnce`.
+Pipeline-enabled domains keep the legacy cutoff unless they wire an
 early-release callback for their own terminal stage.
 
 When the drain contains Gemini reviewer candidates, the watcher may ask the

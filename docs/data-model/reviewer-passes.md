@@ -30,9 +30,10 @@ before the corresponding `reviewed_prs` row is settled to `posted`. When
 domain, `src/pollonce-phases.mjs` installs a post-operation callback into
 `src/reviewer-spawn-settle.mjs`. After the GitHub review post or post-failure
 reconciliation reaches a durable result, that callback settles `reviewed_prs`
-and releases reviewer-pool admission capacity before token-ledger attribution,
-artifact writes, inline hammer work, and final `reviewer_passes` completion
-finish.
+early. Reviewer-pool admission capacity is released only after the watcher has
+also run the inline final-hammer handoff for that posted row; token-ledger
+attribution, artifact writes, and final `reviewer_passes` completion can still
+finish after the scarce pool slot is free.
 
 During that split window, a review can be visible in `reviewed_prs` as posted
 while its `reviewer_passes` row is still `status='running'`. The window is

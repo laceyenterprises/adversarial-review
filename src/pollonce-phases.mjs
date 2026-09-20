@@ -3043,8 +3043,6 @@ export async function processReviewSubject(entry, ctx) {
                   markReviewHeartbeat: markWatcherReviewHeartbeat,
                 });
                 reviewRowSettled = true;
-                releaseReviewerReservation();
-                releaseAdmissionCapacity?.({ dispatched: true });
               };
               // ARC-13: when the domain enables the sequential review pipeline
               // (default OFF), drive the two-stage pipeline instead of a single
@@ -3078,25 +3076,28 @@ export async function processReviewSubject(entry, ctx) {
                   // ARC-18: watcher owns the heartbeat singleton; thread it in.
                   markReviewHeartbeat: markWatcherReviewHeartbeat,
                 });
+              }
+              try {
+                await maybeInlineFinalHammerAfterReview({
+                  rootDir: ROOT,
+                  repoPath,
+                  prNumber,
+                  result,
+                  passKind,
+                  completedRemediationRounds,
+                  maxRemediationRounds,
+                  subjectRef: subject.ref,
+                  currentRevisionRef: subject.ref.revisionRef,
+                  labelNames: prLabelNames,
+                  projectGateStatusSafe,
+                  execFileImpl: execFileAsync,
+                  operatorSurface,
+                  logger: console,
+                  handlePostedReviewRowImpl: handlePostedReviewRow,
+                });
+              } finally {
                 releaseAdmissionCapacity?.({ dispatched: true });
               }
-              await maybeInlineFinalHammerAfterReview({
-                rootDir: ROOT,
-                repoPath,
-                prNumber,
-                result,
-                passKind,
-                completedRemediationRounds,
-                maxRemediationRounds,
-                subjectRef: subject.ref,
-                currentRevisionRef: subject.ref.revisionRef,
-                labelNames: prLabelNames,
-                projectGateStatusSafe,
-                execFileImpl: execFileAsync,
-                operatorSurface,
-                logger: console,
-                handlePostedReviewRowImpl: handlePostedReviewRow,
-              });
             }
           } finally {
             releaseReviewerReservation();

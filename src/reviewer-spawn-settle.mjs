@@ -513,6 +513,7 @@ async function spawnReviewer({
   completeReviewerPassImpl = completeReviewerPass,
   fetchPullRequestHeadAndStateImpl = fetchPullRequestHeadAndState,
   freshnessCheckSleepImpl = sleepMs,
+  onPostOperationSettled = null,
 }) {
   const activeReviewerRuntimeAdapter = reviewerRuntimeAdapterOverride || reviewerRuntimeState.adapter;
   const normalizedReviewerClass = normalizeReviewerClass(reviewerModel);
@@ -734,6 +735,14 @@ async function spawnReviewer({
         console.error(`[reviewer] GITHUB POST FAILED for ${repo}#${prNumber}:`, err?.message || err);
         result = resultWithGitHubPostFailure(result, err);
       }
+    }
+    // RPL-02 admission/settlement split. The callback synchronously commits the
+    // reviewed_prs transition before the pool releases scarce reviewer
+    // capacity. postGitHubReviewWithCapture has already completed its bounded
+    // transport retry/reconciliation path, so success and failure both have a
+    // durable restart-visible disposition at this boundary.
+    if (typeof onPostOperationSettled === 'function') {
+      onPostOperationSettled(result);
     }
     if (result.stdoutTail) console.log(`[reviewer:${prNumber}] ${String(result.stdoutTail).trim()}`);
     if (result.stderrTail) console.error(`[reviewer:${prNumber}] stderr: ${String(result.stderrTail).trim()}`);

@@ -1284,6 +1284,7 @@ async function pollOnce(
         usePersistentReviewerLaneState: true,
         singleWave: true,
         singleWaveSettleGraceMs: reviewerDispatchSingleWaveSettleGraceMs,
+        splitPostReviewSettlement: process.env.ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT === '1',
         onCandidateStarted: detachedReviewerDispatchTracker.track,
         logger: console,
       });

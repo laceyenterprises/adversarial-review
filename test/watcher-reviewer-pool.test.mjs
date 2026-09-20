@@ -135,6 +135,56 @@ test('reviewer pool starts another PR while an older review is slow', async () =
   await runPromise;
 });
 
+test('split admission releases a slot after durable post while settlement remains slow', async () => {
+  const events = [];
+  let finishSettlement;
+  const settlementHold = new Promise((resolve) => { finishSettlement = resolve; });
+  const tasks = [
+    candidate(1, async function run() {
+      events.push('model:1');
+      events.push('post-durable:1');
+      this.admissionReleaseCapacity();
+      await settlementHold;
+      events.push('settled:1');
+    }),
+    candidate(2, async function run() {
+      events.push('model:2');
+      this.admissionReleaseCapacity();
+    }),
+  ];
+
+  const summary = await runBoundedReviewerDispatchQueue(tasks, {
+    maxConcurrent: 1,
+    splitPostReviewSettlement: true,
+    logger: { error() {} },
+  });
+
+  assert.equal(summary.dispatched, 2);
+  assert.deepEqual(events, ['model:1', 'post-durable:1', 'model:2']);
+  finishSettlement();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(events, ['model:1', 'post-durable:1', 'model:2', 'settled:1']);
+});
+
+test('legacy serial admission remains available when settlement split is disabled', async () => {
+  const events = [];
+  const tasks = [
+    candidate(1, async () => {
+      events.push('start:1');
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      events.push('settled:1');
+    }),
+    candidate(2, async () => { events.push('start:2'); }),
+  ];
+
+  await runBoundedReviewerDispatchQueue(tasks, {
+    maxConcurrent: 1,
+    splitPostReviewSettlement: false,
+    logger: { error() {} },
+  });
+  assert.deepEqual(events, ['start:1', 'settled:1', 'start:2']);
+});
+
 test('reviewer dispatch gives re-reviews their floor after the configured burst at four slots', async () => {
   const started = [];
   let release;

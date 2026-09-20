@@ -2363,6 +2363,102 @@ test('queue starvation reports an unstarted row as capacity, not reviewer failur
   assert.match(finding.message, /no reviewer has picked it up/);
   assert.match(finding.recommended_action, /Nothing picked this up/);
   assert.equal(finding.details.reviewerFailed, false);
+  assert.equal(finding.details.starvationCause, 'no-capacity');
+});
+
+test('queue starvation identifies saturated capacity allocated to rereviews at 0.667 share', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 6912,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T16:03:00.000Z',
+  });
+  for (let index = 0; index < 6; index += 1) {
+    insertReviewerPass(rootDir, {
+      prNumber: 6800 + index,
+      attemptNumber: 1,
+      passKind: 'first-pass',
+      status: 'completed',
+      startedAt: `2026-05-25T17:1${index}:00.000Z`,
+      endedAt: `2026-05-25T17:2${index}:00.000Z`,
+    });
+  }
+  for (let index = 0; index < 12; index += 1) {
+    insertReviewerPass(rootDir, {
+      prNumber: 6850 + index,
+      attemptNumber: 2,
+      passKind: 'rereview',
+      status: 'completed',
+      startedAt: `2026-05-25T17:5${index % 10}:00.000Z`,
+      endedAt: '2026-05-25T18:00:00.000Z',
+    });
+  }
+  seedFreshReconcile(rootDir);
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    config: {
+      queueStarvationAdmissionWindowMs: 15 * 60 * 1000,
+      reviewerPoolMaxConcurrent: 6,
+    },
+  });
+  const finding = snapshot.findings.find((item) => item.code === 'review:queue_starvation');
+
+  assert.ok(finding);
+  assert.equal(snapshot.reviewerCapacity.rereviewShare, 12 / 18);
+  assert.equal(finding.details.recentFirstPassAdmissions, 0);
+  assert.equal(finding.details.recentRereviewAdmissions, 12);
+  assert.ok(finding.details.effectiveConcurrency >= 6);
+  assert.equal(finding.details.starvationCause, 'capacity-allocated-elsewhere');
+  assert.match(finding.message, /zero first passes were admitted/);
+  assert.match(finding.recommended_action, /Capacity exists but is allocated to re-reviews/);
+});
+
+test('queue starvation ignores stale hourly concurrency peaks outside the admission window', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 6912,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T17:00:00.000Z',
+  });
+  for (let index = 0; index < 6; index += 1) {
+    insertReviewerPass(rootDir, {
+      prNumber: 6800 + index,
+      attemptNumber: 1,
+      passKind: 'first-pass',
+      status: 'completed',
+      startedAt: `2026-05-25T17:05:0${index}.000Z`,
+      endedAt: '2026-05-25T17:15:00.000Z',
+    });
+  }
+  insertReviewerPass(rootDir, {
+    prNumber: 6901,
+    attemptNumber: 2,
+    passKind: 'rereview',
+    status: 'completed',
+    startedAt: '2026-05-25T17:50:00.000Z',
+    endedAt: '2026-05-25T17:55:00.000Z',
+  });
+  seedFreshReconcile(rootDir);
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    config: {
+      queueStarvationAdmissionWindowMs: 15 * 60 * 1000,
+      reviewerPoolMaxConcurrent: 6,
+    },
+  });
+  const finding = snapshot.findings.find((item) => item.code === 'review:queue_starvation');
+
+  assert.ok(finding);
+  assert.equal(finding.details.recentFirstPassAdmissions, 0);
+  assert.equal(finding.details.recentRereviewAdmissions, 1);
+  assert.equal(finding.details.effectiveConcurrency, 6);
+  assert.equal(finding.details.recentEffectiveConcurrency, 1);
+  assert.equal(finding.details.starvationCause, 'no-capacity');
+  assert.match(finding.recommended_action, /Check adversarial-watcher liveness/);
 });
 
 test('terminal reconciliation evicts an out-of-band closed PR from first-pass queue alerts', () => {
@@ -4432,6 +4528,24 @@ test('documented Sentinel findings match emitted finding definition codes', () =
   }
 });
 
+test('documented pipeline-health environment knobs match config resolver references', () => {
+  const doc = readFileSync('docs/review-pipeline-health.md', 'utf8');
+  const source = readFileSync('src/review-pipeline-health.mjs', 'utf8');
+  const configStart = source.indexOf('function resolveReviewPipelineHealthConfig');
+  const configEnd = source.indexOf('\nfunction toIso', configStart);
+  assert.ok(configStart >= 0 && configEnd > configStart);
+  const configSource = source.slice(configStart, configEnd);
+  const documented = Array.from(new Set(Array.from(
+    doc.matchAll(/`(ADVERSARIAL_REVIEW_PIPELINE_HEALTH_[A-Z0-9_]+)`/g),
+    (match) => match[1],
+  ))).sort();
+  const resolved = Array.from(new Set(Array.from(
+    configSource.matchAll(/\benv\.(ADVERSARIAL_REVIEW_PIPELINE_HEALTH_[A-Z0-9_]+)/g),
+    (match) => match[1],
+  ))).sort();
+  assert.deepEqual(documented, resolved);
+});
+
 test('failure-rate/degradation finding definitions match the spec contract and dashboard panels', () => {
   assert.ok(
     REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS.some((definition) => definition.code === 'review:unknown_failure_rate_high')
@@ -4755,6 +4869,13 @@ test('reviewer_pass_zombie default tracks the reaper timeout it is derived from'
     config.runningReviewerPassMaxAgeMs,
     Math.round(DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS * 1000 * 1.5)
   );
+});
+
+test('reviewer pool ceiling default tracks the watcher CFG resolver', () => {
+  const config = resolveReviewPipelineHealthConfig({
+    AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS: '10',
+  });
+  assert.equal(config.reviewerPoolMaxConcurrent, 10);
 });
 
 test('a completed job that overran its round budget is history, not a ticket', () => {

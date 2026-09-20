@@ -207,7 +207,10 @@ import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 import { getStalePostedReviewAutoRereviewSuppression } from './stale-posted-review-rereview.mjs';
 import { computeVocabularyFatigueFindingForPR } from './vocabulary-fatigue.mjs';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
-import { reserveReviewerMemoryAdmission } from './watcher-reviewer-pool.mjs';
+import {
+  reserveReviewerMemoryAdmission,
+  reviewerDispatchPassKind,
+} from './watcher-reviewer-pool.mjs';
 import { watcherWakeMatchesSubject } from './watcher-wake.mjs';
 
 const DEFAULT_REVIEWER_MODEL_FALLBACK_ALERT_WINDOW_MS = 10 * 60 * 1000;
@@ -3001,6 +3004,7 @@ export async function processReviewSubject(entry, ctx) {
                 reviewDbAttemptNumber,
                 completedRemediationRounds,
                 passKind,
+                dispatchPassKind: reviewerDispatchPassKind(dispatchCandidate),
                 maxRemediationRounds,
                 advisoryFindings: vocabularyFatigueFinding ? [vocabularyFatigueFinding] : [],
                 reviewerSessionUuid,

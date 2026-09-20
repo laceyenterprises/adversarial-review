@@ -215,7 +215,7 @@ stored timestamp contract cannot silently leave this finding behind.
 | `review:afh_fallback_edge_supermajority` | one AFH reviewer fallback edge carries >=80% of reviewer selections over 1h with at least 5 selections and 2 distinct PRs, including the edge and grounding reason | ticket | the dominant edge falls below threshold, the sample floor is no longer met, the distinct-PR floor is no longer met, or AFH returns to the primary reviewer |
 | `review:review_lane_share_supermajority` | one reviewer lane carries >=75% of reviewer starts over the capacity window with at least 5 starts, observed concurrency above 1, and at least 2 distinct queued PRs in the opposite lane whose oldest row has reached the queue-starvation age threshold | ticket | the dominant lane falls below threshold, the sample floor is no longer met, observed concurrency is single-slot, or the opposite lane no longer has aged distinct queued work |
 | `review:terminal_review_failure_active` | at least one open PR has terminal reviewer failure evidence in `reviewed_prs` | ticket | the failed review row is retriggered, remediated, or the PR leaves the open population |
-| `review:queue_starvation` | oldest pending row in the watcher first-pass lane is >10m old, excluding rows with a current CI-regression-stopped follow-up deferral | ticket | no pending first-pass row exceeds the age threshold |
+| `review:queue_starvation` | oldest pending row in the watcher first-pass lane is >10m old, excluding rows with a current CI-regression-stopped follow-up deferral; `details.starvationCause` is `reviewer-runtime-failure`, `capacity-allocated-elsewhere`, or `no-capacity` | ticket | no pending first-pass row exceeds the age threshold |
 | `review:first_pass_ci_orphan` | open first-pass PR head has failed GitHub checks, no review verdict, and no known live worker on that branch; first-pass review is not CI-gated, so this is additive to queue starvation rather than a replacement | ticket | checks pass, a worker owns the branch, a review verdict posts, or the PR leaves the open population |
 | `review:first_pass_ci_orphan_probe_blind` | `review_pipeline_first_pass_ci_orphans_collected == 0` because GitHub checks, worker-liveness probing, or the configured first-pass CI orphan probe budget prevented a complete snapshot | ticket | every eligible first-pass CI orphan candidate is probed successfully |
 | `review:rereview_ci_blocked` | one or more open re-reviews are parked at `review_status='ci-blocked'` because external CI failed and no remediation job exists to requeue; same-head CI probes are backoff-gated | ticket | the PR head moves, CI turns green, remediation is requeued, or the PR leaves the open population |
@@ -274,6 +274,9 @@ All thresholds are configurable through environment variables:
   (default `604800000`)
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_REVIEWER_MODEL_SILENCE_CLASSES`
   (default `claude,codex,gemini`)
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_LANE_SHARE_SUPERMAJORITY_THRESHOLD`
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_LANE_SHARE_SUPERMAJORITY_MIN_PASSES`
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_LANE_SHARE_SUPERMAJORITY_DISTINCT_PR_FLOOR`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_AFH_FALLBACK_SUPERMAJORITY_THRESHOLD`
   (default `0.80`)
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_AFH_FALLBACK_SUPERMAJORITY_MIN_SELECTIONS`
@@ -287,8 +290,12 @@ All thresholds are configurable through environment variables:
 - `REVIEW_UNKNOWN_RATE_SAMPLE_FLOOR`
 - `REVIEW_UNKNOWN_RATE_DISTINCT_PR_FLOOR`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_QUEUE_STARVATION_MAX_AGE_MS`
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_QUEUE_STARVATION_ADMISSION_WINDOW_MS`
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_REVIEWER_POOL_MAX_CONCURRENT`
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_LIFECYCLE_RECONCILE_STALE_AFTER_MS`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_REMEDIATION_BACKLOG_THRESHOLD`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_MERGE_STALLED_MAX_TICKS`
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DAEMON_MERGE_PARK_MIN_OBSERVATIONS`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_TICK_INTERVAL_MS`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_REMEDIATION_THROUGHPUT_WINDOW_MS`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS`
@@ -296,7 +303,26 @@ All thresholds are configurable through environment variables:
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_RUNNING_REVIEWER_PASS_MAX_AGE_MS`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DAG_AUTOWALK_MAX_LOG_AGE_MS`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DISPATCH_SPAWN_FAILURE_WINDOW_MS`
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HAMMER_DISPATCH_STALL_MAX_AGE_MS`
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_CHECKS`
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_REPO`
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_REPO_ROOT`
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_MIN_SHARED_PATH_COUNT`
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_FIRST_PASS_CI_ORPHAN_WORKER_STATUS_TIMEOUT_MS`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_LAUNCHD_TIMEOUT_MS`
+
+The queue-starvation finding uses `details.starvationCause` to choose operator
+advice. `reviewer-runtime-failure` means a reviewer already ran and failed, so
+inspect that failure before retriggering. `capacity-allocated-elsewhere` means
+the admission window saw no first-pass starts, at least one re-review start, and
+reviewer concurrency saturated within that same window; inspect lane reservation
+and detached-pass accounting before adding host concurrency. `no-capacity` means
+no saturated alternate-lane capacity was observed; check watcher liveness,
+credential availability, and reviewer degradation first. The admission window is
+controlled by the queue-starvation admission-window env var listed above, and
+the pool ceiling defaults to the watcher
+`watcher.first_pass_reviewer_pool_max_concurrent_reviewers` CFG resolver unless
+the health-specific reviewer-pool env override listed above is set.
 
 Later ARP tracks can extend this collector by adding hq remediation and merge
 dispatch ledgers to the same snapshot. The current version intentionally ships

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  countActiveReviewerSpawnsByModel,
   createDetachedReviewerDispatchTracker,
   createReviewerLaneState,
   createReviewerMemoryAdmissionSampler,
@@ -56,6 +57,84 @@ test('reviewer pool respects the configured concurrency cap', async () => {
   assert.equal(summary.dispatched, 6);
   assert.equal(summary.maxObservedConcurrency, 3);
   assert.equal(maxActive, 3);
+});
+
+test('detached rereviews reserve a bounded first-pass slot instead of oversubscribing the pool', async () => {
+  const started = [];
+  const firstPass = candidate(6912, async () => {
+    started.push(6912);
+  });
+  const rereview = candidate(6917, async () => {
+    started.push(6917);
+  }, undefined, {
+    current: { rereview_requested_at: '2026-09-20T06:58:00.000Z' },
+  });
+  const saturated = new Map([
+    ['__total__', 6],
+    ['__lane:rereview', 6],
+  ]);
+
+  const blocked = await runBoundedReviewerDispatchQueue([firstPass, rereview], {
+    maxConcurrent: 6,
+    activeReviewerCounts: saturated,
+    laneState: createReviewerLaneState({ minShare: 1 / 6 }),
+    logger: { error() {}, log() {}, warn() {} },
+  });
+  assert.deepEqual(started, []);
+  assert.equal(blocked.deferred, 2);
+  assert.deepEqual(
+    blocked.deferredReasons.map((item) => [item.prNumber, item.reason]),
+    [
+      [6912, 'reviewer-pool-saturated'],
+      [6917, 'reviewer-pool-saturated'],
+    ],
+  );
+
+  // The next admission cycle after one bounded reviewer lease completes has
+  // one free slot. The rereview cap keeps that slot for the queued first pass.
+  const oneSlotReleased = new Map([
+    ['__total__', 5],
+    ['__lane:rereview', 5],
+  ]);
+  const admitted = await runBoundedReviewerDispatchQueue([firstPass, rereview], {
+    maxConcurrent: 6,
+    activeReviewerCounts: oneSlotReleased,
+    laneState: createReviewerLaneState({ minShare: 1 / 6 }),
+    singleWave: true,
+    logger: { error() {}, log() {}, warn() {} },
+  });
+
+  assert.deepEqual(started, [6912]);
+  assert.equal(admitted.dispatched, 1);
+  assert.deepEqual(
+    admitted.deferredReasons.map((item) => [item.prNumber, item.reason]),
+    [[6917, 'reviewer-pool-saturated']],
+  );
+});
+
+test('active spawn lane accounting uses dispatch lane, not reviewer attempt pass kind', () => {
+  const activeReviewerSpawns = new Map([
+    ['a', {
+      repo: 'laceyenterprises/agent-os',
+      pr: 6919,
+      reviewerModel: 'claude',
+      passKind: 'rereview',
+      dispatchPassKind: 'first-pass',
+    }],
+    ['b', {
+      repo: 'laceyenterprises/agent-os',
+      pr: 6920,
+      reviewerModel: 'claude',
+      passKind: 'rereview',
+      dispatchPassKind: 'rereview',
+    }],
+  ]);
+
+  const counts = countActiveReviewerSpawnsByModel(activeReviewerSpawns);
+
+  assert.equal(counts.get('__total__'), 2);
+  assert.equal(counts.get('__lane:first-pass'), 1);
+  assert.equal(counts.get('__lane:rereview'), 1);
 });
 
 test('reviewer pool caps concurrency at min(pool slots, available credentials)', async () => {

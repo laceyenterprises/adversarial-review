@@ -28,7 +28,10 @@ import {
   readPrTerminalReconcileState,
 } from './pr-terminal-reconcile.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
-import { reviewerDispatchPassKind } from './watcher-reviewer-pool.mjs';
+import {
+  resolveFirstPassReviewerPoolConfig,
+  reviewerDispatchPassKind,
+} from './watcher-reviewer-pool.mjs';
 
 const DEFAULT_REVIEWER_DEATH_RATE_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_REVIEWER_DEATH_RATE_THRESHOLD = 0.5;
@@ -65,6 +68,7 @@ const DEFAULT_REVIEW_LANE_SHARE_SUPERMAJORITY_DISTINCT_PR_FLOOR = 2;
 // yet. A first-review SLA measured in tens of minutes does not describe a fleet
 // that reviews within ~3 minutes when healthy.
 const DEFAULT_QUEUE_STARVATION_MAX_AGE_MS = 10 * 60 * 1000;
+const DEFAULT_QUEUE_STARVATION_ADMISSION_WINDOW_MS = 15 * 60 * 1000;
 const DEFAULT_REMEDIATION_BACKLOG_THRESHOLD = 5;
 // A single park is normal: the daemon evaluates every tick and a PR can be
 // legitimately mid-flight. Ticketing starts once the SAME reason repeats, which
@@ -576,6 +580,10 @@ function parseStringList(value, fallback) {
 
 function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
   const ttm = resolveTtmTrackerConfig(env, overrides.ttm || {});
+  const reviewerPoolConfig = resolveFirstPassReviewerPoolConfig({
+    env,
+    logger: overrides.logger || null,
+  });
   return {
     hostChecksEnabled: parseBoolean(
       overrides.hostChecksEnabled
@@ -675,6 +683,16 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
       overrides.queueStarvationMaxAgeMs
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_QUEUE_STARVATION_MAX_AGE_MS,
       DEFAULT_QUEUE_STARVATION_MAX_AGE_MS
+    ),
+    queueStarvationAdmissionWindowMs: parsePositiveInteger(
+      overrides.queueStarvationAdmissionWindowMs
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_QUEUE_STARVATION_ADMISSION_WINDOW_MS,
+      DEFAULT_QUEUE_STARVATION_ADMISSION_WINDOW_MS
+    ),
+    reviewerPoolMaxConcurrent: parsePositiveInteger(
+      overrides.reviewerPoolMaxConcurrent
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_REVIEWER_POOL_MAX_CONCURRENT,
+      reviewerPoolConfig.maxConcurrent
     ),
     lifecycleReconcileStaleAfterMs: parsePositiveInteger(
       overrides.lifecycleReconcileStaleAfterMs
@@ -1529,7 +1547,11 @@ function summarizeReviewerCapacity(db, { nowMs, config }) {
   let totalPasses = 0;
   let firstPassPasses = 0;
   let rereviewPasses = 0;
+  let recentFirstPassAdmissions = 0;
+  let recentRereviewAdmissions = 0;
+  const admissionCutoffMs = nowMs - config.queueStarvationAdmissionWindowMs;
   const events = [];
+  const recentEvents = [];
   for (const row of rows) {
     const startedMs = toMs(row.started_at);
     if (startedMs === null) continue;
@@ -1539,22 +1561,37 @@ function summarizeReviewerCapacity(db, { nowMs, config }) {
     totalPasses += 1;
     if (row.pass_kind === 'rereview') rereviewPasses += 1;
     else firstPassPasses += 1;
+    if (startedMs >= admissionCutoffMs) {
+      if (row.pass_kind === 'rereview') recentRereviewAdmissions += 1;
+      else recentFirstPassAdmissions += 1;
+    }
     if (boundedEnd <= boundedStart) continue;
     events.push({ at: boundedStart, delta: 1 });
     events.push({ at: boundedEnd, delta: -1 });
+    const recentStart = Math.max(startedMs, admissionCutoffMs);
+    const recentEnd = Math.max(recentStart, Math.min(endedMs, nowMs));
+    if (recentEnd > recentStart) {
+      recentEvents.push({ at: recentStart, delta: 1 });
+      recentEvents.push({ at: recentEnd, delta: -1 });
+    }
   }
-  events.sort((left, right) => (
-    left.at - right.at
-    // End events at the same timestamp should release before a start at that
-    // timestamp, so adjacent passes do not look concurrent.
-    || left.delta - right.delta
-  ));
-  let active = 0;
-  let maxConcurrent = 0;
-  for (const event of events) {
-    active = Math.max(0, active + event.delta);
-    maxConcurrent = Math.max(maxConcurrent, active);
-  }
+  const maxConcurrentFor = (items) => {
+    items.sort((left, right) => (
+      left.at - right.at
+      // End events at the same timestamp should release before a start at that
+      // timestamp, so adjacent passes do not look concurrent.
+      || left.delta - right.delta
+    ));
+    let active = 0;
+    let maxConcurrent = 0;
+    for (const event of items) {
+      active = Math.max(0, active + event.delta);
+      maxConcurrent = Math.max(maxConcurrent, active);
+    }
+    return maxConcurrent;
+  };
+  const maxConcurrent = maxConcurrentFor(events);
+  const recentEffectiveConcurrency = maxConcurrentFor(recentEvents);
   return {
     windowMs: config.reviewerDeathRateWindowMs,
     totalPasses,
@@ -1562,6 +1599,10 @@ function summarizeReviewerCapacity(db, { nowMs, config }) {
     rereviewPasses,
     rereviewShare: totalPasses > 0 ? rereviewPasses / totalPasses : 0,
     effectiveConcurrency: maxConcurrent,
+    recentEffectiveConcurrency,
+    admissionWindowMs: config.queueStarvationAdmissionWindowMs,
+    recentFirstPassAdmissions,
+    recentRereviewAdmissions,
   };
 }
 
@@ -4137,6 +4178,15 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     // tell a phantom from a real one without hand-checking GitHub.
     const reconcile = snapshot.lifecycleReconciliation;
     const oldestUnverified = isPrUnverified(reconcile, oldest.repo, oldest.prNumber);
+    const capacityAllocatedElsewhere = (
+      Number(snapshot.reviewerCapacity?.recentFirstPassAdmissions || 0) === 0
+      && Number(snapshot.reviewerCapacity?.recentRereviewAdmissions || 0) > 0
+      && Number(snapshot.reviewerCapacity?.recentEffectiveConcurrency || 0)
+        >= config.reviewerPoolMaxConcurrent
+    );
+    const starvationCause = oldest.reviewerFailed
+      ? 'reviewer-runtime-failure'
+      : (capacityAllocatedElsewhere ? 'capacity-allocated-elsewhere' : 'no-capacity');
     findings.push(buildFinding({
       code: 'review:queue_starvation',
       tier: 'page',
@@ -4148,8 +4198,13 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
         ? `${oldest.repo}#${oldest.prNumber} has been pending since ${oldest.pendingSince}; its `
           + `reviewer FAILED at ${oldest.failedAt} after ${oldest.reviewAttempts} attempt(s): `
           + `${oldest.failureMessage || 'no failure message recorded'}`
-        : `${oldest.repo}#${oldest.prNumber} has been pending since ${oldest.pendingSince} and no `
-          + 'reviewer has picked it up.',
+        : capacityAllocatedElsewhere
+          ? `${oldest.repo}#${oldest.prNumber} has been pending since ${oldest.pendingSince}; `
+            + `the pool reached concurrency ${snapshot.reviewerCapacity.recentEffectiveConcurrency} while `
+            + `${snapshot.reviewerCapacity.recentRereviewAdmissions} re-review(s) and zero first `
+            + `passes were admitted in the last ${Math.round(snapshot.reviewerCapacity.admissionWindowMs / 60000)}m.`
+          : `${oldest.repo}#${oldest.prNumber} has been pending since ${oldest.pendingSince} and no `
+            + 'reviewer has picked it up; the measured pool was not saturated by other-lane admissions.',
       evidence: [
         `reviews.db reviewed_prs ${oldest.repo}#${oldest.prNumber}`,
         `pr_state mirror ${oldestUnverified ? 'UNVERIFIED' : 'verified'} against GitHub`
@@ -4170,9 +4225,12 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
           ? 'A reviewer ran and exited non-zero — this is reviewer-runtime, not capacity. Read the '
             + 'failure message and the reviewer log before retriggering; a blind retrigger will '
             + 'reproduce the same exit.'
-          : 'Nothing picked this up — check adversarial-watcher liveness and reviewer capacity '
-            + '(hq harness health, reviewer degradation). Retrigger or bounce only after preserving '
-            + 'failure evidence.',
+          : capacityAllocatedElsewhere
+            ? 'Capacity exists but is allocated to re-reviews. Inspect the reviewer lane reservation '
+              + 'and detached pass accounting; do not add host concurrency or retrigger individual PRs.'
+            : 'Nothing picked this up and no saturated alternate-lane capacity was observed. '
+              + 'Check adversarial-watcher liveness, '
+              + 'credential availability, and reviewer degradation before changing lane allocation.',
       observedAt,
       details: {
         ...oldest,
@@ -4183,6 +4241,16 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
         mirrorVerified: !oldestUnverified,
         mirrorReconciledAt: reconcile?.observedAt || null,
         mirrorUnverifiedCount: reconcile?.unresolvedCount ?? null,
+        starvationCause,
+        recentFirstPassAdmissions:
+          Number(snapshot.reviewerCapacity?.recentFirstPassAdmissions || 0),
+        recentRereviewAdmissions:
+          Number(snapshot.reviewerCapacity?.recentRereviewAdmissions || 0),
+        admissionWindowMs: snapshot.reviewerCapacity?.admissionWindowMs
+          || config.queueStarvationAdmissionWindowMs,
+        effectiveConcurrency: Number(snapshot.reviewerCapacity?.effectiveConcurrency || 0),
+        recentEffectiveConcurrency: Number(snapshot.reviewerCapacity?.recentEffectiveConcurrency || 0),
+        reviewerPoolMaxConcurrent: config.reviewerPoolMaxConcurrent,
       },
     }));
   }

@@ -67,6 +67,37 @@ function findLatestFollowUpJob(rootDir, { repo, prNumber }) {
   return latest;
 }
 
+function findFollowUpJobForRevision(rootDir, { repo, prNumber, revisionRef }) {
+  const revision = String(revisionRef || '').trim();
+  if (!revision) return null;
+  for (const key of FOLLOW_UP_STATUS_KEYS) {
+    const dir = getFollowUpJobDir(rootDir, key);
+    if (!existsSync(dir)) continue;
+
+    for (const name of readdirSync(dir).filter((entry) => entry.endsWith('.json')).sort()) {
+      const jobPath = join(dir, name);
+      let job;
+      try {
+        job = readFollowUpJob(jobPath);
+      } catch (err) {
+        console.error(
+          `[operator-retrigger] Skipping unreadable follow-up job while scanning ${key} for ` +
+            `${repo}#${prNumber}@${revision}: ${jobPath} (${err?.message || err})`
+        );
+        continue;
+      }
+      if (
+        job.repo === repo
+        && Number(job.prNumber) === Number(prNumber)
+        && String(job.revisionRef || '') === revision
+      ) {
+        return { job, jobPath };
+      }
+    }
+  }
+  return null;
+}
+
 function normalizeRiskClass(riskClass) {
   const normalized = String(riskClass ?? '').trim().toLowerCase();
   return Object.prototype.hasOwnProperty.call(ROUND_BUDGET_BY_RISK_CLASS, normalized)
@@ -167,5 +198,6 @@ function bumpRemediationBudget({
 export {
   appendOperatorRetriggerAudit,
   bumpRemediationBudget,
+  findFollowUpJobForRevision,
   findLatestFollowUpJob,
 };

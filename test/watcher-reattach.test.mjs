@@ -948,7 +948,7 @@ test('pre-existing reviewing rows without reviewer_session_uuid use legacy faile
   assert.match(log.lines.join('\n'), /Orphan reviewer detected/);
 });
 
-test('posted review succeeds when its process group is briefly alive', async () => {
+test('posted review kills a briefly live process group before marking posted', async () => {
   const db = setupDb();
   seedReviewing(db, { reviewer: 'codex' });
   const log = makeLog();
@@ -975,7 +975,7 @@ test('posted review succeeds when its process group is briefly alive', async () 
   assert.equal(row.review_attempts, 3);
   assert.equal(row.failure_message, null);
   assert.deepEqual(findings, []);
-  assert.deepEqual(killed, []);
+  assert.deepEqual(killed, [{ pgid: 9001, signal: 'SIGKILL' }]);
   assert.match(log.lines.join('\n'), /reviewer_reattach_posted_recovered/);
 });
 
@@ -983,7 +983,7 @@ test('posted review cleanup default budget does not block the watcher poll', () 
   assert.deepEqual(POSTED_REVIEW_CLEANUP_RECHECK_DELAYS_MS, [0]);
 });
 
-test('posted review stays successful while a genuinely leaked process group produces a cleanup finding', async () => {
+test('posted review stays successful while a process group that survives kill produces a cleanup finding', async () => {
   const db = setupDb();
   seedReviewing(db, { reviewer: 'codex' });
   const findings = [];
@@ -1004,7 +1004,7 @@ test('posted review stays successful while a genuinely leaked process group prod
   });
 
   assert.equal(readRow(db).review_status, 'posted');
-  assert.deepEqual(killed, []);
+  assert.deepEqual(killed, [{ pgid: 9001, signal: 'SIGKILL' }]);
   assert.deepEqual(findings, [{
     id: 'reviewer:posted_process_group_leak',
     severity: 'warning',
@@ -1017,11 +1017,12 @@ test('posted review stays successful while a genuinely leaked process group prod
   }]);
 });
 
-test('posted review cleanup skips finding once the pass artifact is linked', async () => {
+test('posted review cleanup still probes when a same-head pass artifact is already linked', async () => {
   const db = setupDb();
   seedReviewing(db, { reviewer: 'codex' });
   seedReviewerPassArtifact(db);
   const findings = [];
+  const killed = [];
 
   await reconcileReviewerSessions({
     db,
@@ -1031,13 +1032,16 @@ test('posted review cleanup skips finding once the pass artifact is linked', asy
     now: new Date(FAILURE_AT),
     log: makeLog(),
     probeSession: () => ({ alive: true, matched: true }),
+    killProcessGroup: (pgid, signal) => killed.push({ pgid, signal }),
     fetchHeadSha: async () => HEAD_SHA,
     postedReviewCleanupRecheckDelaysMs: [0],
     onCleanupFinding: async (finding) => findings.push(finding),
   });
 
   assert.equal(readRow(db).review_status, 'posted');
-  assert.deepEqual(findings, []);
+  assert.deepEqual(killed, [{ pgid: 9001, signal: 'SIGKILL' }]);
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].reviewerSessionUuid, 'session-70');
 });
 
 test('posted review cleanup does not flag a recycled process group', async () => {
@@ -1062,7 +1066,7 @@ test('posted review cleanup does not flag a recycled process group', async () =>
   });
 
   assert.equal(readRow(db).review_status, 'posted');
-  assert.deepEqual(killed, []);
+  assert.deepEqual(killed, [{ pgid: 9001, signal: 'SIGKILL' }]);
   assert.deepEqual(findings, []);
 });
 

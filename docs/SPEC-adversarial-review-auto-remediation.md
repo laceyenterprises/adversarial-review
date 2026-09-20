@@ -1191,10 +1191,14 @@ orphan failure evidence and the reviewer lease, resets
 review artifact. When the matching pass had already been reaped as `failed`,
 reconciliation promotes it to `completed` because the GitHub review proves the
 pass posted; bounded failure metadata on the pass is preserved for health and
-recovery consumers. It does not mutate closed/merged PR rows,
-no-parseable-timestamp rows, stale-head reviews, unrelated statuses, or pass
-artifacts already linked to a different PR. If the reconciled review is
-blocking, this deliberately flips the adversarial gate from the
+recovery consumers. When reconciliation newly links a pass artifact, it may also
+queue the recovered posted review for follow-up remediation, but only if no
+existing follow-up job already targets the same repo, PR, and revision. It does
+not queue duplicate remediation for a pass that already carried a posted-review
+artifact, and it does not mutate closed/merged PR rows, no-parseable-timestamp
+rows, stale-head reviews, unrelated statuses, or pass artifacts already linked
+to a different PR. If the reconciled review is blocking, this deliberately flips
+the adversarial gate from the
 `review-failed-orphan` anomaly success projection to the real `blocking-review`
 verdict.
 
@@ -1866,7 +1870,9 @@ The watcher must project the gate on terminal early-exit paths, including alread
   `reviewed_prs` row moved to `posted` but no reviewer pass was linked. It is
   not a retry surface and must not reset terminal PRs; it may promote a matching
   reaped failed pass to `completed` only when the same-head GitHub review proves
-  the pass actually posted.
+  the pass actually posted. It queues recovered follow-up remediation only for
+  a newly linked pass artifact and skips queueing when a same-revision follow-up
+  job already exists or the pass already had a posted-review artifact.
 
 For PR-side `retrigger-remediation` labels, a successful budget bump is the durable consumption boundary. Once the bump lands, the watcher must write the label-consumption record and operator-mutation audit before attempting the queue rearm. If requeue then fails, the watcher still removes the label and posts a failure-flavored acknowledgement that names the partial-success state; the same GitHub label event must not authorize another budget bump on retry.
 

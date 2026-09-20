@@ -335,17 +335,6 @@ function prepareStatements(db) {
           AND review_status = 'reviewing'
           AND COALESCE(reviewer_session_uuid, '') = COALESCE(?, '')`
     ),
-    hasPostedReviewArtifact: db.prepare(
-      `SELECT 1 AS found
-         FROM reviewer_passes
-        WHERE repo = ?
-          AND pr_number = ?
-          AND (? IS NULL OR head_sha IS NULL OR head_sha = ?)
-          AND gh_comment_id IS NOT NULL
-          AND TRIM(CAST(gh_comment_id AS TEXT)) <> ''
-        ORDER BY started_at DESC, pass_id DESC
-        LIMIT 1`
-    ),
     adoptRunStatePgid: db.prepare(
       `UPDATE reviewed_prs
           SET reviewer_pgid = ?,
@@ -936,11 +925,12 @@ async function reconcileReviewerSessions({
       if (!(await probePostedReviewOrMarkSticky())) continue;
 
       if (postedReview) {
+        killProcessGroup(row.reviewer_pgid, 'SIGKILL');
         await onTerminalDeadSession({
           row,
           state: 'completed',
           settledAt: postedReview.submitted_at,
-          reason: 'posted-review-recovered-live-cleanup',
+          reason: 'posted-review-recovered-live-killed',
         });
         const markPostedResult = statements.markPosted.run(
           postedReview.submitted_at,
@@ -966,15 +956,6 @@ async function reconcileReviewerSessions({
           ? postedReviewCleanupRecheckDelaysMs
           : [];
         for (const delay of cleanupRecheckDelays) {
-          if (statements.hasPostedReviewArtifact.get(
-            row.repo,
-            row.pr_number,
-            row.reviewer_head_sha || null,
-            row.reviewer_head_sha || null
-          )) {
-            cleanupAlive = false;
-            break;
-          }
           const cleanupProbe = typeof probeSession === 'function'
             ? probeSession(row)
             : probeReviewerSession({

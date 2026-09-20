@@ -1,9 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import Database from 'better-sqlite3';
 
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { reconcilePostedFailedOrphans } from '../src/orphan-post-reconcile.mjs';
+import { createFollowUpJob } from '../src/follow-up-jobs.mjs';
 
 function fixture({
   attempts = 4,
@@ -252,9 +256,12 @@ test('apply accepts a review artifact already linked to another pass for the sam
     db,
     apply: true,
     listReviews: async () => [POSTED_REVIEW],
-    queueFollowUpForRecoveredPostedReviewImpl: queueStub(),
+    queueFollowUpForRecoveredPostedReviewImpl: () => {
+      throw new Error('existing posted artifact must not create a duplicate follow-up job');
+    },
   });
   assert.equal(result.reconciled, 1);
+  assert.equal(result.results[0].followUp, undefined);
   assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'posted');
   db.close();
 });
@@ -273,7 +280,37 @@ test('apply recognizes an existing artifact linked by GitHub node id', async () 
     queueFollowUpForRecoveredPostedReviewImpl: queueStub(queueCalls),
   });
   assert.equal(result.reconciled, 1);
-  assert.equal(queueCalls.length, 1);
+  assert.equal(queueCalls.length, 0);
+  assert.equal(result.results[0].followUp, undefined);
+  assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'posted');
+  db.close();
+});
+
+test('apply skips recovered follow-up queueing when the same revision already has a job', async () => {
+  const db = fixture({ attempts: 4, passStatus: 'failed' });
+  const rootDir = mkdtempSync(join(tmpdir(), 'orphan-post-reconcile-'));
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 1078,
+    revisionRef: 'head-1078',
+    reviewPostedAt: '2026-09-20T06:29:35Z',
+    reviewerModel: 'claude',
+    reviewBody: POSTED_REVIEW.body,
+    critical: true,
+  });
+  const result = await reconcilePostedFailedOrphans({
+    db,
+    rootDir,
+    apply: true,
+    listReviews: async () => [POSTED_REVIEW],
+    queueFollowUpForRecoveredPostedReviewImpl: () => {
+      throw new Error('same-revision existing follow-up job must dedupe recovered queueing');
+    },
+  });
+  assert.equal(result.reconciled, 1);
+  assert.equal(result.results[0].followUp.queued, false);
+  assert.equal(result.results[0].followUp.reason, 'existing-follow-up-job');
   assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'posted');
   db.close();
 });

@@ -1503,14 +1503,14 @@ function buildRereviewResult({ requested, reason, outcome = null }) {
 }
 
 // Reconcile-time GitHub operations must not return unmapped worker
-// identities such as clio-agent; fall through to canonical routing.
+// identities such as clio-agent. A recorded spawned worker model is
+// attribution ground truth, but operator pins still win.
 function resolveReconcileWorkerClass(job, worker) {
-  const recordedModel = worker?.model;
-  const builderTag = String(job?.builderTag || recordedModel || '').trim().toLowerCase();
-  return pickRemediationWorkerClass({
-    ...job,
-    builderTag,
-  });
+  const envOverride = defaultRemediatorWorkerClassFromEnv(process.env);
+  if (envOverride) return envOverride;
+  const recordedModel = normalizeRemediationWorkerClass(worker?.model);
+  if (recordedModel) return recordedModel;
+  return pickRemediationWorkerClass(job);
 }
 
 // Build the comment body + owed-delivery stub before the terminal move.

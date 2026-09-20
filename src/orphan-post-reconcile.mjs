@@ -4,6 +4,7 @@ import { loginsMatch } from './review-body-capture.mjs';
 import { ghReviewStateToVerdict } from './backfill-review-bodies.mjs';
 import { queueFollowUpForRecoveredPostedReview } from './reviewer-pass-reaper.mjs';
 import { withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
+import { findFollowUpJobForRevision } from './operator-retrigger-helpers.mjs';
 
 function postedReviewForRow(row, reviews) {
   const aliases = reviewerBotLoginAliases(row.reviewer);
@@ -147,6 +148,7 @@ export async function reconcilePostedFailedOrphans({
               row.reviewer_head_sha || null
             );
             let linkedPass = pass || null;
+            let linkedNewArtifact = false;
             if (pass && reviewId && !existingArtifact) {
               const passResult = markPassPosted.run(
                 review.submitted_at,
@@ -158,21 +160,24 @@ export async function reconcilePostedFailedOrphans({
                 reviewId
               );
               linkedPass = passResult.changes === 1 ? (passById.get(pass.pass_id) || pass) : null;
+              linkedNewArtifact = passResult.changes === 1;
             }
             if (linkedPass) {
               artifactLinked = Boolean((reviewId || review.node_id) && (linkedPass.gh_comment_id || existingArtifact));
-              followUpPayload = {
-                rootDir,
-                row: {
-                  ...linkedPass,
-                  body_md: linkedPass.body_md ?? reviewBodyForStorage(review),
-                  verdict: linkedPass.verdict ?? reviewVerdict(review.state),
-                  gh_comment_id: linkedPass.gh_comment_id ?? reviewId,
-                  head_sha: linkedPass.head_sha || row.reviewer_head_sha || null,
-                },
-                reviewRow: row,
-                reviewPostedAt: review.submitted_at,
-              };
+              if (linkedNewArtifact) {
+                followUpPayload = {
+                  rootDir,
+                  row: {
+                    ...linkedPass,
+                    body_md: linkedPass.body_md ?? reviewBodyForStorage(review),
+                    verdict: linkedPass.verdict ?? reviewVerdict(review.state),
+                    gh_comment_id: linkedPass.gh_comment_id ?? reviewId,
+                    head_sha: linkedPass.head_sha || row.reviewer_head_sha || null,
+                  },
+                  reviewRow: row,
+                  reviewPostedAt: review.submitted_at,
+                };
+              }
             }
             return { changed: true, artifactLinked, passFound: Boolean(pass) };
           })(),
@@ -182,7 +187,21 @@ export async function reconcilePostedFailedOrphans({
         artifactLinked = applyResult.artifactLinked === true;
         const passFound = applyResult.passFound === true;
         if (changed && artifactLinked && followUpPayload) {
-          queueDecision = queueFollowUpForRecoveredPostedReviewImpl(followUpPayload);
+          const revisionRef = followUpPayload.row.head_sha || row.reviewer_head_sha || null;
+          const existingFollowUp = findFollowUpJobForRevision(rootDir, {
+            repo: row.repo,
+            prNumber: row.pr_number,
+            revisionRef,
+          });
+          if (existingFollowUp) {
+            queueDecision = {
+              queued: false,
+              reason: 'existing-follow-up-job',
+              jobPath: existingFollowUp.jobPath,
+            };
+          } else {
+            queueDecision = queueFollowUpForRecoveredPostedReviewImpl(followUpPayload);
+          }
         }
         if (changed && !artifactLinked && !passFound) {
           results.push({

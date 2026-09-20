@@ -9,10 +9,12 @@
 ## Purpose
 
 Reviewer subprocesses can still be alive after the reviewer bot's GitHub review
-is visible and the `reviewed_prs` row has safely moved from `reviewing` to
-`posted`. The cleanup-finding store keeps that process evidence durable after
-the row leaves the active `reviewing` population, so the watcher does not reduce
-a still-live process group to a single log line.
+is visible. When reviewer reattach confirms the process group still matches the
+stored reviewer session, it sends `SIGKILL` before moving the `reviewed_prs` row
+from `reviewing` to `posted`. The cleanup-finding store records the exceptional
+case where the process group remains alive and identity-matched after that kill
+attempt, so the watcher does not reduce a still-live process group to a single
+log line after the row leaves the active `reviewing` population.
 
 Each JSON file is keyed by `reviewerSessionUuid`. The watcher rewrites the same
 file on later checks while the process group is still alive and removes it once
@@ -27,7 +29,7 @@ the probe proves the process group is gone.
 | `repo` | string | Repository slug for the reviewed PR. |
 | `prNumber` | number | GitHub PR number. |
 | `reviewerSessionUuid` | string | Stable file identity and reviewer process-session matcher. |
-| `reviewerPgid` | number | Positive process-group id that remained alive after posted-review cleanup checks. |
+| `reviewerPgid` | number | Positive process-group id that remained alive after the posted-review kill and cleanup checks. |
 | `matched` | boolean or null | Whether the live process group still matched the original reviewer session identity when the finding was recorded. |
 | `postedAt` | ISO-8601 string or null | GitHub review submission time that caused the row to move to `posted`. |
 | `firstObservedAt` | ISO-8601 string | First time the cleanup finding was persisted. |

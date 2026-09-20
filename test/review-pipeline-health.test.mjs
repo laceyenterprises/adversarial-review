@@ -322,6 +322,65 @@ test('reviewer model silence aggregates simultaneous silent models into one find
   }
 });
 
+test('reviewer model silence stretches threshold to recent model cadence', () => {
+  const rootDir = tempRoot();
+  try {
+    for (const [index, endedAt] of [
+      '2026-05-20T12:00:00.000Z',
+      '2026-05-22T12:00:00.000Z',
+      '2026-05-24T12:00:00.000Z',
+    ].entries()) {
+      insertReviewerPass(rootDir, {
+        prNumber: 960 + index,
+        reviewerClass: 'claude',
+        reviewerModel: 'claude-sonnet',
+        startedAt: endedAt.replace('12:00:00', '11:50:00'),
+        endedAt,
+        status: 'completed',
+      });
+    }
+    insertReviewerPass(rootDir, {
+      prNumber: 963,
+      reviewerClass: 'claude',
+      reviewerModel: 'claude-sonnet',
+      startedAt: '2026-05-25T17:00:00.000Z',
+      endedAt: '2026-05-25T17:05:00.000Z',
+      status: 'failed',
+    });
+    const db = openDb(rootDir);
+    try {
+      for (const prNumber of [960, 961, 962]) {
+        db.prepare(
+          `UPDATE reviewer_passes
+              SET gh_comment_id = ?, body_captured_at = ended_at
+            WHERE pr_number = ?`
+        ).run(`claude-review-id-${prNumber}`, prNumber);
+      }
+    } finally {
+      db.close();
+    }
+
+    const snapshot = collectReviewPipelineHealth({
+      rootDir,
+      now: () => new Date(NOW),
+      config: {
+        hostChecksEnabled: false,
+        reviewerSilenceThresholdMs: 24 * 60 * 60 * 1000,
+        reviewerActivityLookbackMs: 7 * 24 * 60 * 60 * 1000,
+      },
+    });
+    assert.equal(reviewerModelSilentFinding(snapshot), undefined);
+    const model = snapshot.reviewerModelSilence.models.find((entry) => entry.model === 'claude');
+    assert.ok(model);
+    assert.equal(model.thresholdMs, 48 * 60 * 60 * 1000);
+    assert.equal(model.cadenceSampleSize, 2);
+    assert.equal(model.startedPasses, 1);
+    assert.equal(model.silent, false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('reviewer model silence ignores empty comment ids and remediation pass noise', () => {
   const rootDir = tempRoot();
   try {
@@ -442,7 +501,7 @@ test('reviewer model silence parses timezone-less SQLite timestamps as UTC', () 
   }
 });
 
-test('reviewer model silence persists beyond lookback only when the lane has recent demand', () => {
+test('reviewer model silence ages out models with no posted review inside the activity lookback', () => {
   const rootDir = tempRoot();
   try {
     insertReviewerPass(rootDir, {
@@ -493,8 +552,54 @@ test('reviewer model silence persists beyond lookback only when the lane has rec
         reviewerActivityLookbackMs: 7 * 24 * 60 * 60 * 1000,
       },
     });
-    assert.ok(reviewerModelSilentDetails(snapshot, 'claude'));
+    assert.equal(reviewerModelSilentDetails(snapshot, 'claude'), undefined);
     assert.equal(reviewerModelSilentDetails(snapshot, 'gemini'), undefined);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reviewer model silence matches configured classes through reviewer_class before reviewer_model variants', () => {
+  const rootDir = tempRoot();
+  try {
+    insertReviewerPass(rootDir, {
+      reviewerClass: 'claude',
+      reviewerModel: 'hammer-claude',
+      startedAt: '2026-05-23T17:00:00.000Z',
+      endedAt: '2026-05-23T17:10:00.000Z',
+      status: 'completed',
+    });
+    insertReviewerPass(rootDir, {
+      prNumber: 951,
+      reviewerClass: 'claude',
+      reviewerModel: 'hammer-claude',
+      startedAt: '2026-05-25T17:00:00.000Z',
+      endedAt: '2026-05-25T17:05:00.000Z',
+      status: 'failed',
+    });
+    const db = openDb(rootDir);
+    try {
+      db.prepare(
+        `UPDATE reviewer_passes
+            SET gh_comment_id = ?, body_captured_at = ended_at
+          WHERE pr_number = ?`
+      ).run('claude-review-id', 950);
+    } finally {
+      db.close();
+    }
+
+    const snapshot = collectReviewPipelineHealth({
+      rootDir,
+      now: () => new Date(NOW),
+      config: {
+        hostChecksEnabled: false,
+        reviewerSilenceThresholdMs: 24 * 60 * 60 * 1000,
+        reviewerActivityLookbackMs: 7 * 24 * 60 * 60 * 1000,
+        reviewerModelSilenceClasses: ['claude'],
+      },
+    });
+    assert.ok(reviewerModelSilentDetails(snapshot, 'claude'));
+    assert.equal(reviewerModelSilentDetails(snapshot, 'hammer-claude'), undefined);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -636,9 +741,7 @@ test('reviewer model silence clears after the activity lookback', () => {
     });
     assert.equal(reviewerModelSilentFinding(snapshot), undefined);
     const model = snapshot.reviewerModelSilence.models.find((entry) => entry.model === 'claude');
-    assert.ok(model);
-    assert.equal(model.startedPasses, 0);
-    assert.equal(model.silent, false);
+    assert.equal(model, undefined);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -4415,6 +4518,19 @@ test('reviewer_pass_zombie threshold stays above the reaper timeout', () => {
     `zombie threshold ${config.runningReviewerPassMaxAgeMs}ms must exceed the ` +
       `reaper timeout ${reaperTimeoutMs}ms`
   );
+});
+
+test('reviewer model silence defaults and class allowlist are configurable', () => {
+  const defaults = resolveReviewPipelineHealthConfig({});
+  assert.equal(defaults.reviewerSilenceThresholdMs, 24 * 60 * 60 * 1000);
+  assert.equal(defaults.reviewerActivityLookbackMs, 7 * 24 * 60 * 60 * 1000);
+  assert.deepEqual(defaults.reviewerModelSilenceClasses, ['claude', 'codex', 'gemini']);
+
+  const configured = resolveReviewPipelineHealthConfig({
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_REVIEWER_MODEL_SILENCE_CLASSES:
+      ' claude, hammer-claude, claude ',
+  });
+  assert.deepEqual(configured.reviewerModelSilenceClasses, ['claude', 'hammer-claude']);
 });
 
 test('reviewer_pass_zombie default tracks the reaper timeout it is derived from', () => {

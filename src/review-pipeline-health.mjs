@@ -34,6 +34,7 @@ const DEFAULT_REVIEWER_DEATH_RATE_MIN_ATTEMPTS = 3;
 const DEFAULT_REVIEWER_SILENCE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_REVIEWER_ACTIVITY_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 const REVIEWER_MODEL_SILENCE_CLASSES = ['claude', 'codex', 'gemini'];
+const REVIEWER_MODEL_SILENCE_CADENCE_PERCENTILE = 0.95;
 const DEFAULT_REVIEW_UNKNOWN_RATE_THRESHOLD = 0.30;
 const DEFAULT_REVIEW_UNKNOWN_RATE_WINDOW_MINUTES = 15;
 const DEFAULT_REVIEW_UNKNOWN_RATE_SAMPLE_FLOOR = 5;
@@ -539,6 +540,15 @@ function parseBoolean(value, fallback = false) {
   return ['1', 'true', 'yes', 'on'].includes(String(value).trim().toLowerCase());
 }
 
+function parseStringList(value, fallback) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const parsed = String(value)
+    .split(',')
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+  return parsed.length > 0 ? [...new Set(parsed)] : fallback;
+}
+
 function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
   const ttm = resolveTtmTrackerConfig(env, overrides.ttm || {});
   return {
@@ -571,6 +581,11 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
       overrides.reviewerActivityLookbackMs
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_REVIEWER_ACTIVITY_LOOKBACK_MS,
       DEFAULT_REVIEWER_ACTIVITY_LOOKBACK_MS
+    ),
+    reviewerModelSilenceClasses: parseStringList(
+      overrides.reviewerModelSilenceClasses
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_REVIEWER_MODEL_SILENCE_CLASSES,
+      REVIEWER_MODEL_SILENCE_CLASSES
     ),
     reviewUnknownRateThreshold: parseNumber(
       overrides.reviewUnknownRateThreshold
@@ -748,6 +763,13 @@ function parseReviewPostedAtMs(value) {
     : value;
   const parsed = Date.parse(normalized);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function percentileNearestRank(values, percentile) {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((left, right) => left - right);
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(percentile * sorted.length) - 1));
+  return sorted[index];
 }
 
 function ageMs(nowMs, value) {
@@ -1298,33 +1320,64 @@ function summarizeReviewerAttempts(db, { nowMs, config }) {
 function summarizeReviewerModelSilence(db, { nowMs, config }) {
   const observedAt = new Date(nowMs).toISOString();
   const activityCutoff = new Date(nowMs - config.reviewerActivityLookbackMs).toISOString();
-  const reviewerClassPlaceholders = REVIEWER_MODEL_SILENCE_CLASSES.map(() => '?').join(', ');
+  const silenceClasses = config.reviewerModelSilenceClasses || REVIEWER_MODEL_SILENCE_CLASSES;
+  if (silenceClasses.length === 0) {
+    return {
+      thresholdMs: config.reviewerSilenceThresholdMs,
+      activityLookbackMs: config.reviewerActivityLookbackMs,
+      classes: [],
+      models: [],
+      silentModels: [],
+    };
+  }
+  const reviewerClassPlaceholders = silenceClasses.map(() => '?').join(', ');
+  const reviewerClassSql = `CASE
+      WHEN TRIM(LOWER(reviewer_class)) IN (${reviewerClassPlaceholders})
+        THEN TRIM(LOWER(reviewer_class))
+      WHEN TRIM(LOWER(reviewer_model)) IN (${reviewerClassPlaceholders})
+        THEN TRIM(LOWER(reviewer_model))
+      ELSE NULL
+    END`;
+  const reviewerClassParams = [...silenceClasses, ...silenceClasses];
   const postedRows = safeAll(
     db,
     `WITH posted_reviews AS (
-       SELECT reviewer_class AS reviewer_model,
+       SELECT ${reviewerClassSql} AS reviewer_model,
               ${REVIEWER_PASS_NORMALIZED_POSTED_AT_SQL} AS posted_at
          FROM reviewer_passes
         WHERE ${REVIEWER_PASS_GENUINE_POSTED_REVIEW_WHERE_SQL}
           AND pass_kind IN ('first-pass', 'rereview')
-          AND reviewer_class IN (${reviewerClassPlaceholders})
+          AND (
+            TRIM(LOWER(reviewer_class)) IN (${reviewerClassPlaceholders})
+            OR TRIM(LOWER(reviewer_model)) IN (${reviewerClassPlaceholders})
+          )
      )
      SELECT reviewer_model,
-            MAX(posted_at) AS posted_at,
-            COUNT(*) AS posted_reviews
+            posted_at
        FROM posted_reviews
       WHERE posted_at IS NOT NULL
-        AND posted_at <= ?
-      GROUP BY reviewer_model`,
-    [...REVIEWER_MODEL_SILENCE_CLASSES, observedAt]
+        AND reviewer_model IS NOT NULL
+        AND strftime('%Y-%m-%dT%H:%M:%fZ', posted_at) >= strftime('%Y-%m-%dT%H:%M:%fZ', ?)
+        AND strftime('%Y-%m-%dT%H:%M:%fZ', posted_at) <= strftime('%Y-%m-%dT%H:%M:%fZ', ?)
+      ORDER BY reviewer_model, posted_at`,
+    [
+      ...reviewerClassParams,
+      ...silenceClasses,
+      ...silenceClasses,
+      activityCutoff,
+      observedAt,
+    ]
   );
   const startedRows = safeAll(
     db,
-    `SELECT reviewer_class AS reviewer_model,
+    `SELECT ${reviewerClassSql} AS reviewer_model,
             started_at
        FROM reviewer_passes
       WHERE pass_kind IN ('first-pass', 'rereview')
-        AND reviewer_class IN (${reviewerClassPlaceholders})
+        AND (
+          TRIM(LOWER(reviewer_class)) IN (${reviewerClassPlaceholders})
+          OR TRIM(LOWER(reviewer_model)) IN (${reviewerClassPlaceholders})
+        )
         AND started_at IS NOT NULL
         AND REPLACE(started_at, ' ', 'T') GLOB '????-??-??T??:??:??*'
         AND strftime(
@@ -1347,19 +1400,33 @@ function summarizeReviewerModelSilence(db, { nowMs, config }) {
                 ELSE REPLACE(started_at, ' ', 'T') || 'Z'
               END
             ) <= strftime('%Y-%m-%dT%H:%M:%fZ', ?)
-      ORDER BY reviewer_class, started_at`,
-    [...REVIEWER_MODEL_SILENCE_CLASSES, activityCutoff, observedAt]
+      ORDER BY reviewer_model, started_at`,
+    [
+      ...reviewerClassParams,
+      ...silenceClasses,
+      ...silenceClasses,
+      activityCutoff,
+      observedAt,
+    ]
   );
   const postedByModel = new Map();
   for (const row of postedRows) {
     const lastPostedMs = parseReviewPostedAtMs(row.posted_at);
     if (lastPostedMs === null) continue;
-    postedByModel.set(row.reviewer_model, {
+    const entry = postedByModel.get(row.reviewer_model) || {
       model: row.reviewer_model,
-      lastPostedAt: row.posted_at,
-      lastPostedMs,
-      postedReviews: Number(row.posted_reviews || 0),
-    });
+      lastPostedAt: null,
+      lastPostedMs: null,
+      postedReviews: 0,
+      postedReviewTimes: [],
+    };
+    entry.postedReviews += 1;
+    entry.postedReviewTimes.push(lastPostedMs);
+    if (entry.lastPostedMs === null || lastPostedMs > entry.lastPostedMs) {
+      entry.lastPostedAt = row.posted_at;
+      entry.lastPostedMs = lastPostedMs;
+    }
+    postedByModel.set(row.reviewer_model, entry);
   }
   const startedByModel = new Map();
   for (const row of startedRows) {
@@ -1372,6 +1439,19 @@ function summarizeReviewerModelSilence(db, { nowMs, config }) {
   const models = Array.from(postedByModel.values()).map((row) => {
     const lastPostedMs = row.lastPostedMs;
     const ageMs = lastPostedMs === null ? null : Math.max(0, nowMs - lastPostedMs);
+    const cadenceIntervals = row.postedReviewTimes
+      .sort((left, right) => left - right)
+      .slice(1)
+      .map((postedMs, index) => postedMs - row.postedReviewTimes[index])
+      .filter((value) => Number.isFinite(value) && value > 0);
+    const cadenceThresholdMs = percentileNearestRank(
+      cadenceIntervals,
+      REVIEWER_MODEL_SILENCE_CADENCE_PERCENTILE
+    );
+    const thresholdMs = Math.max(
+      config.reviewerSilenceThresholdMs,
+      cadenceThresholdMs || 0
+    );
     const startedPasses = (startedByModel.get(row.model) || []).filter(
       (startedMs) => startedMs > lastPostedMs
     ).length;
@@ -1380,17 +1460,21 @@ function summarizeReviewerModelSilence(db, { nowMs, config }) {
       lastPostedAt: row.lastPostedAt,
       ageMs,
       postedReviews: Number(row.postedReviews || 0),
+      thresholdMs,
+      cadenceThresholdMs,
+      cadenceSampleSize: cadenceIntervals.length,
       startedPasses,
       silent: (
         startedPasses > 0
         && ageMs !== null
-        && ageMs >= config.reviewerSilenceThresholdMs
+        && ageMs >= thresholdMs
       ),
     };
   });
   return {
     thresholdMs: config.reviewerSilenceThresholdMs,
     activityLookbackMs: config.reviewerActivityLookbackMs,
+    classes: silenceClasses,
     models,
     silentModels: models.filter((row) => row.silent),
   };
@@ -3515,8 +3599,8 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
       message: `${modelNames.length} ${modelNoun} ${modelVerb} not posted past the silence threshold; longest-silent is ${longestSilent.model}, last posted at ${longestSilent.lastPostedAt}, ${Math.round(longestSilent.ageMs / 3600000)}h ago.`,
       evidence: [
         `reviews.db reviewer_passes models=${modelNames.join(',')} pass_kind IN first-pass,rereview gh_comment_id non-empty`,
-        `last_posted_at_by_model=${lastPostedByModel} threshold_ms=${snapshot.reviewerModelSilence.thresholdMs}`,
-        `started_passes_in_activity_window_by_model=${startedPassesByModel}`,
+        `last_posted_at_by_model=${lastPostedByModel} threshold_ms_by_model=${orderedSilentModels.map((model) => `${model.model}:${model.thresholdMs}`).join(',')}`,
+        `started_passes_since_last_post_by_model=${startedPassesByModel}`,
       ],
       recommendedAction: 'Inspect this model\'s selector decisions, OAuth transport, and recent reviewer passes now; do not wait for a failed selection to trigger the death-rate alarm.',
       observedAt,
@@ -4493,6 +4577,7 @@ function collectReviewPipelineHealth({
       : {
           thresholdMs: config.reviewerSilenceThresholdMs,
           activityLookbackMs: config.reviewerActivityLookbackMs,
+          classes: config.reviewerModelSilenceClasses,
           models: [],
           silentModels: [],
         };

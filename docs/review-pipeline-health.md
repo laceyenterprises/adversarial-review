@@ -192,7 +192,7 @@ Its action headline is `Reviews stalled — restore reviewer dispatch`.
 |---|---:|---|---|
 | `review:review_state_ledger_unreadable` | `reviews.db` exists but cannot be opened read-only | ticket | the collector can open `reviews.db` read-only again |
 | `review:reviewer_death_rate_high` | failed reviewer attempts are >50% of completed+failed attempts over 1h, with at least 3 completed+failed attempts; `running` and `cancelled` are excluded from the denominator | ticket | the settled-attempt window falls below threshold or the minimum-attempt guard |
-| `review:reviewer_model_silent` | a reviewer class with a previous genuine first-pass/rereview comment has not posted again for 24h while at least one pass for that class started after that comment inside the 7d activity lookback | ticket | the model posts another review inside the silence threshold, or no recent started-pass demand remains after its last posted review |
+| `review:reviewer_model_silent` | a configured reviewer class with a previous genuine first-pass/rereview comment inside the activity lookback has not posted again past the larger of the 24h floor and that class's recent 95th-percentile post cadence, while at least one pass for that class started after that comment | ticket | the model posts another review inside its cadence-derived silence threshold, no recent started-pass demand remains after its last posted review, or the class has no posted review inside the activity lookback |
 | `review:unknown_failure_rate_high` | unknown-classified failures are >30% of failures over 15m, with at least 5 failures and at least 2 distinct PRs contributing unknown failures | ticket | the failure window falls back to threshold or below, the sample floor is no longer met, or unknown failures collapse to fewer than 2 PRs |
 | `review:reviewer_degradation_active` | at least one PR is currently held by `provider-overloaded` transient backoff or `quota-exhausted` quota hold | ticket | no active provider-overload backoff or quota hold remains |
 | `review:afh_fallback_edge_supermajority` | one AFH reviewer fallback edge carries >=80% of reviewer selections over 1h with at least 5 selections and 2 distinct PRs, including the edge and grounding reason | ticket | the dominant edge falls below threshold, the sample floor is no longer met, the distinct-PR floor is no longer met, or AFH returns to the primary reviewer |
@@ -249,9 +249,12 @@ All thresholds are configurable through environment variables:
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_REVIEWER_DEATH_RATE_THRESHOLD`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_REVIEWER_DEATH_RATE_MIN_ATTEMPTS`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_REVIEWER_SILENCE_THRESHOLD_MS`
-  (default `86400000`)
+  (default `86400000`; this is a floor under each model's recent posted-review
+  cadence, not a flat alarm threshold)
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_REVIEWER_ACTIVITY_LOOKBACK_MS`
   (default `604800000`)
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_REVIEWER_MODEL_SILENCE_CLASSES`
+  (default `claude,codex,gemini`)
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_AFH_FALLBACK_SUPERMAJORITY_THRESHOLD`
   (default `0.80`)
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_AFH_FALLBACK_SUPERMAJORITY_MIN_SELECTIONS`

@@ -1,14 +1,14 @@
 # Reviewer passes
 
-**Source of truth:** `migrations/20260518_reviewer_passes.sql`, `migrations/20260810_reviewer_passes_posted_review_freshness_index.sql`, `src/reviewer-pass-tokens.mjs`, `src/reviewer-spawn-settle.mjs`, and `src/follow-up-jobs.mjs`
+**Source of truth:** `migrations/20260518_reviewer_passes.sql`, `migrations/20260810_reviewer_passes_posted_review_freshness_index.sql`, `src/reviewer-pass-tokens.mjs`, `src/reviewer-spawn-settle.mjs`, `src/orphan-post-reconcile.mjs`, and `src/follow-up-jobs.mjs`
 
 ## Ownership
 
 - Store: `data/reviews.db`
 - Table: `reviewer_passes`
 - Schema: `migrations/20260518_reviewer_passes.sql` plus later additive migrations
-- Writers: `src/reviewer-pass-tokens.mjs`, `src/reviewer-spawn-settle.mjs`, `src/follow-up-jobs.mjs`
-- Repair CLI: `scripts/backfill-reviewer-passes.mjs`
+- Writers: `src/reviewer-pass-tokens.mjs`, `src/reviewer-spawn-settle.mjs`, `src/orphan-post-reconcile.mjs`, `src/follow-up-jobs.mjs`
+- Repair CLI: `scripts/backfill-reviewer-passes.mjs`; `bin/reconcile-posted-orphans.mjs` links posted review artifacts for reconciled `failed-orphan` rows
 
 `reviewer_passes` is the durable record of each first-pass, remediation, and
 closer review attempt. Its primary identity is `(repo, pr_number,

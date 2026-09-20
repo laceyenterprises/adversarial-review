@@ -1176,6 +1176,33 @@ row to `pending`, clears `failed_at`, `failure_message`,
 `infra_auto_recover_attempts` to `0` so the next watcher poll treats the next
 quota incident as a fresh bounded recovery window.
 
+Operators may reconcile a `failed-orphan` row that already has a posted
+reviewer-bot GitHub review with `npm run reconcile-posted-orphans -- --root
+<path>` (dry run) and `--apply` (mutating). The scan is limited to open
+`failed-orphan` rows with a parseable reviewer start timestamp or, when that is
+missing or corrupt, a parseable `last_attempted_at` fallback. A match requires
+the reviewer bot login, a review submitted at or after that lower bound, and the
+stored reviewer head; rows without a stored reviewer head or without either
+timestamp parseable are refused instead of widening the match. The artifact
+recovery step links the matching reviewer pass to the review artifact before the
+row is committed `posted`. When the matching pass had already been reaped as
+`failed`, reconciliation promotes it to `completed` because the GitHub review
+proves the pass posted; bounded failure metadata on the pass is preserved for
+health and recovery consumers. If the pass artifact is available, the command
+then queues or dedupes the recovered posted review's follow-up remediation and
+only afterwards performs the session-scoped compare-and-swap that moves the
+still-open `failed-orphan` row to `posted`, clears orphan failure evidence and
+the reviewer lease, and resets `infra_auto_recover_attempts`. This ordering is
+intentionally re-entrant: if follow-up job creation fails after the pass artifact
+is linked, the row remains `failed-orphan`, so a second `--apply` resumes from
+the already-linked artifact and retries the missing follow-up work before
+committing `posted`. It does not mutate closed/merged PR rows,
+no-parseable-timestamp rows, missing-head rows, stale-head reviews, unrelated
+statuses, or pass artifacts already linked to a different PR. If the reconciled
+review is blocking, this deliberately flips the adversarial gate from the
+`review-failed-orphan` anomaly success projection to the real `blocking-review`
+verdict.
+
 The same hard-cap contract applies to follow-up remediation workers that spawn
 direct harness CLIs outside the dispatch lane. Reconcile may move a
 quota-exhausted in-progress remediation job back to `pending` with
@@ -1833,6 +1860,20 @@ The watcher must project the gate on terminal early-exit paths, including alread
 - `retrigger-review` resets the watcher delivery row to `review_status='pending'` so the watcher can post another adversarial review.
 - `retrigger-remediation` bumps the remediation budget and requeues the latest eligible terminal follow-up job. It does not reset `reviews.db` first; the next fresh adversarial review must come from the requeued worker's durable `reReview.requested=true` reply during normal reconciliation. Eligible terminal jobs are `failed`, `completed` with `reReview.requested=true`, or `stopped` with one of `max-rounds-reached`, `round-budget-exhausted`, `daemon-bounce-safety`, `review-settled`, `no-progress`, `stale-review-head`, `revision-superseded`, or `stale-heartbeat`. `stopped:review-settled` is retriggerable because the automatic loop has settled the review as non-blocking, but an explicit operator action can still request a worker pass over the remaining findings. That retrigger is carried durably on `remediationPlan.nextAction={type:'consume-pending-round', operatorOverride:true, requestedAt, requestedBy, operatorVisibility:'explicit'}`; `claimNextFollowUpJob` must suppress the claim-time `review-settled` early-stop for that one claim, then consume the override by rewriting `nextAction` to `worker-spawn`. While the requeued job is `pending` or `inProgress`, the adversarial gate must stay pending rather than projecting the stored Comment-only verdict as settled. `stopped:operator-stop` and `stopped:rereview-blocked` are intentionally not retriggerable through this surface because those states encode operator intent or a watcher refusal that needs human handling.
 - `diagnose-stuck-rereview --apply` is a daemon watchdog for rows that look abandoned after a durable worker rereview request. It is not an operator override: it must not clear reviewer failure evidence or retry counters, must not satisfy the explicit `retrigger-review:` bypass predicate, and must preserve both `rereview_requested_at` and `rereview_reason` as the original FIFO/latency clock and load-bearing marker. On an open pending row without `failed_at`, it may only request a `stuck-rereview-watchdog` watcher wake for the affected repo/PR/head as the retry nudge. Repeated wakes are capped and backed off per `(repo, pr, head)`, state entries older than seven days are pruned on write, cap exhaustion is surfaced as a skipped row rather than an apply failure so capped rows cannot consume the apply window forever, and a wake-write failure after a successful eligibility check still consumes backoff budget. The watchdog does not own the terminal-PR decision: `reviewed_prs.pr_state` is a candidate pre-filter only, and the authoritative-live merged/closed decision stays with the watcher's claim guard, which is safe because a stale-`open` row costs only bounded wakes and no row mutation. The daemon tick step that runs it must be disarmable without a code change: `ADVERSARIAL_STUCK_REREVIEW_APPLY_ENABLED=0` (or `false`/`no`/`off`) plus a daemon bounce skips the step, and unset/empty keeps it armed.
+- `reconcile-posted-orphans --apply` is an operator recovery surface for the
+  narrower case where the reviewer actually posted, but the watcher had already
+  quarantined the durable row as `failed-orphan`. It must preserve the dry-run
+  default, require an open row and same-session CAS, use `last_attempted_at` as
+  the lower-bound fallback when `reviewer_started_at` is missing or corrupt,
+  reject rows where neither timestamp is parseable instead of widening the
+  lower bound, require the GitHub review to match the stored reviewer head when
+  `commit_id` is present, and report `reconciled-row-only` when the
+  `reviewed_prs` row moved to `posted` but no reviewer pass was linked. It is
+  not a retry surface and must not reset terminal PRs; it may promote a matching
+  reaped failed pass to `completed` only when the same-head GitHub review proves
+  the pass actually posted. It queues recovered follow-up remediation only for
+  a newly linked pass artifact and skips queueing when a same-revision follow-up
+  job already exists or the pass already had a posted-review artifact.
 
 For PR-side `retrigger-remediation` labels, a successful budget bump is the durable consumption boundary. Once the bump lands, the watcher must write the label-consumption record and operator-mutation audit before attempting the queue rearm. If requeue then fails, the watcher still removes the label and posts a failure-flavored acknowledgement that names the partial-success state; the same GitHub label event must not authorize another budget bump on retry.
 

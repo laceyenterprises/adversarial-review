@@ -174,6 +174,7 @@ import {
   settleDurableReviewerRunState,
   shouldReconcileReviewerSession,
 } from './reviewer-orphan-reconcile.mjs';
+import { writeReviewerCleanupFinding } from './reviewer-cleanup-findings.mjs';
 import { reconcileReviewerSessions, reviewerBotLogin } from './reviewer-reattach.mjs';
 import {
   applyAfhReviewerRouteForAttempt,
@@ -295,6 +296,7 @@ export async function reconcileEligibleReviewingClaimInline({
   log = console,
   leaseRecoveryMaxAttempts,
   onTerminalDeadSession,
+  onCleanupFinding,
 } = {}) {
   const parsedPrNumber = Number(prNumber);
   if (!repoPath || !Number.isInteger(parsedPrNumber) || parsedPrNumber <= 0) {
@@ -328,6 +330,7 @@ export async function reconcileEligibleReviewingClaimInline({
       reason: event?.reason,
       log,
     })),
+    onCleanupFinding: onCleanupFinding || ((finding) => writeReviewerCleanupFinding(rootDir, finding, { log })),
   });
   const refreshed = reviewDb.prepare(
     'SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'

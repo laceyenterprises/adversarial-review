@@ -41,6 +41,7 @@ const OVERDUE_RECOVERY_FAILURE_MESSAGE =
   'Overdue reviewer recovery could not prove the process exited cleanly without a late GitHub review; operator must verify before retrying.';
 const LEASE_RECOVERY_CAP_FAILURE_MESSAGE =
   'Reviewer lease recovery cap exhausted; leaving the review failed for operator inspection.';
+const POSTED_REVIEW_CLEANUP_RECHECK_DELAYS_MS = Object.freeze([0]);
 
 function splitRepoPath(repoPath) {
   const [owner, repo] = String(repoPath || '').split('/');
@@ -321,7 +322,18 @@ function prepareStatements(db) {
           AND review_status = 'reviewing'`
     ),
     markPosted: db.prepare(
-      "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL, infra_auto_recover_attempts = 0 WHERE repo = ? AND pr_number = ?"
+      `UPDATE reviewed_prs
+          SET review_status = 'posted',
+              posted_at = ?,
+              failed_at = NULL,
+              failure_message = NULL,
+              review_attempts = review_attempts + 1,
+              reviewer_lease_expires_at = NULL,
+              infra_auto_recover_attempts = 0
+        WHERE repo = ?
+          AND pr_number = ?
+          AND review_status = 'reviewing'
+          AND COALESCE(reviewer_session_uuid, '') = COALESCE(?, '')`
     ),
     adoptRunStatePgid: db.prepare(
       `UPDATE reviewed_prs
@@ -645,7 +657,19 @@ async function reconcileReviewerSessions({
             settledAt: postedReview.submitted_at,
             reason: 'posted-review-recovered-null-pgid',
           });
-          statements.markPosted.run(postedReview.submitted_at, row.repo, row.pr_number);
+          const markPostedResult = statements.markPosted.run(
+            postedReview.submitted_at,
+            row.repo,
+            row.pr_number,
+            row.reviewer_session_uuid || ''
+          );
+          if (markPostedResult.changes !== 1) {
+            log.warn(
+              `[watcher] reviewer_reattach_null_pgid_recovered_cas_miss repo=${row.repo} pr=${row.pr_number} ` +
+              `session=${row.reviewer_session_uuid || 'unknown'}`
+            );
+            continue;
+          }
           log.log(
             `[watcher] reviewer_reattach_null_pgid_recovered repo=${row.repo} pr=${row.pr_number} ` +
             `session=${row.reviewer_session_uuid} posted_at=${postedReview.submitted_at}`
@@ -906,14 +930,8 @@ async function reconcileReviewerSessions({
       if (!(await probePostedReviewOrMarkSticky())) continue;
 
       if (postedReview) {
-        statements.markOrphan.run(
-          failureAt,
-          `Reviewer session ${row.reviewer_session_uuid} posted a GitHub review at ${postedReview.submitted_at} but process group ${row.reviewer_pgid} is still alive. Operator must inspect before retrying.`,
-          row.repo,
-          row.pr_number
-        );
-        log.warn(
-          `[watcher] reviewer_reattach_orphan repo=${row.repo} pr=${row.pr_number} ` +
+        log.log(
+          `[watcher] reviewer_reattach_posted_live_owner_retained repo=${row.repo} pr=${row.pr_number} ` +
           `session=${row.reviewer_session_uuid} pgid=${row.reviewer_pgid} posted_at=${postedReview.submitted_at}`
         );
         continue;
@@ -979,7 +997,19 @@ async function reconcileReviewerSessions({
         settledAt: postedReview.submitted_at,
         reason: 'posted-review-recovered',
       });
-      statements.markPosted.run(postedReview.submitted_at, row.repo, row.pr_number);
+      const markPostedResult = statements.markPosted.run(
+        postedReview.submitted_at,
+        row.repo,
+        row.pr_number,
+        row.reviewer_session_uuid || ''
+      );
+      if (markPostedResult.changes !== 1) {
+        log.warn(
+          `[watcher] reviewer_reattach_recovered_cas_miss repo=${row.repo} pr=${row.pr_number} ` +
+          `session=${row.reviewer_session_uuid || 'unknown'} pgid=${row.reviewer_pgid || 'unknown'}`
+        );
+        continue;
+      }
       log.log(
         `[watcher] reviewer_reattach_recovered repo=${row.repo} pr=${row.pr_number} ` +
         `session=${row.reviewer_session_uuid} pgid=${row.reviewer_pgid || 'unknown'} posted_at=${postedReview.submitted_at}`
@@ -1035,6 +1065,7 @@ export {
   NULL_PGID_FAILURE_MESSAGE,
   DEFAULT_NULL_PGID_LAUNCH_GRACE_MS,
   PGID_IDENTITY_FAILURE_MESSAGE,
+  POSTED_REVIEW_CLEANUP_RECHECK_DELAYS_MS,
   killPgid,
   makeReviewPostedProbe,
   findReviewerProcessBySessionUuid,
@@ -1043,5 +1074,6 @@ export {
   reconcileReviewerSessions,
   resolveNullPgidLaunchGraceMs,
   reviewerBotLogin,
+  reviewerBotLoginAliases,
   isTransientGithubProbeError,
 };

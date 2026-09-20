@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { reconcileReviewerSessions } from './reviewer-reattach.mjs';
+import { writeReviewerCleanupFinding } from './reviewer-cleanup-findings.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import {
   DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS,
@@ -80,6 +81,7 @@ export async function reconcileOrphanedReviewing(octokit) {
       state,
       settledAt,
     }),
+    onCleanupFinding: (finding) => writeReviewerCleanupFinding(ROOT, finding),
   });
 }
 

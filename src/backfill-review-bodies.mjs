@@ -690,6 +690,7 @@ async function backfillReviewBodies(rootDir, {
 }
 
 export {
+  GH_REVIEW_STATE_TO_VERDICT,
   GH_LOOKUP_TIMEOUT_MS,
   REMEDIATION_MARKER_REQUIRED_FROM,
   backfillMergeCloseouts,
@@ -698,6 +699,7 @@ export {
   buildCloseoutQuery,
   buildReviewerPassQuery,
   formatSummary,
+  ghReviewStateToVerdict,
   matchReviewerPassArtifact,
   parseLimit,
   parsePassMode,

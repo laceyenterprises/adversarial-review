@@ -10,6 +10,7 @@ import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import {
   LEGACY_ORPHAN_FAILURE_MESSAGE,
   NULL_PGID_FAILURE_MESSAGE,
+  POSTED_REVIEW_CLEANUP_RECHECK_DELAYS_MS,
   makeReviewPostedProbe,
   reconcileReviewerSessions,
 } from '../src/reviewer-reattach.mjs';
@@ -111,6 +112,32 @@ function seedReviewing(db, overrides = {}) {
   }
 }
 
+function seedReviewerPassArtifact(db, overrides = {}) {
+  db.prepare(
+    `INSERT INTO reviewer_passes
+       (repo, pr_number, attempt_number, reviewer_class, reviewer_model, pass_kind,
+        started_at, ended_at, status, head_sha, verdict, body_md, gh_comment_id,
+        body_captured_at, metadata_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    overrides.repo || REPO,
+    overrides.prNumber || PR,
+    overrides.attemptNumber ?? 3,
+    overrides.reviewerClass || 'codex',
+    overrides.reviewerModel || 'codex',
+    overrides.passKind || 'first-pass',
+    overrides.startedAt || STARTED_AT,
+    overrides.endedAt || '2026-05-11T05:13:10.000Z',
+    overrides.status || 'completed',
+    Object.prototype.hasOwnProperty.call(overrides, 'headSha') ? overrides.headSha : HEAD_SHA,
+    overrides.verdict || 'comment-only',
+    overrides.bodyMd || '## Verdict\n\nComment only',
+    overrides.ghCommentId || 'IC_posted',
+    overrides.bodyCapturedAt || '2026-05-11T05:13:10.000Z',
+    overrides.metadataJson || '{}'
+  );
+}
+
 function readRow(db, repo = REPO, prNumber = PR) {
   return db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?').get(repo, prNumber);
 }
@@ -137,6 +164,10 @@ function makeLog() {
     log(message) { lines.push(String(message)); },
     warn(message) { lines.push(String(message)); },
   };
+}
+
+function noReviewerProcessFound() {
+  return { found: false };
 }
 
 test('reattaches when pgid is alive, head sha is unchanged, and no review is posted', async () => {
@@ -917,7 +948,118 @@ test('pre-existing reviewing rows without reviewer_session_uuid use legacy faile
   assert.match(log.lines.join('\n'), /Orphan reviewer detected/);
 });
 
-test('alive matching-head reviewer with an already posted review remains a sticky anomaly', async () => {
+test('posted review from a live owner is left for the reviewer to finish follow-up queueing', async () => {
+  const db = setupDb();
+  seedReviewing(db, { reviewer: 'codex' });
+  const log = makeLog();
+  const findings = [];
+  const killed = [];
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([
+      { user: { login: 'codex-reviewer-lacey' }, submitted_at: '2026-05-11T05:13:09.000Z' },
+    ]),
+    now: new Date(FAILURE_AT),
+    log,
+    probeSession: () => ({ alive: true, matched: true }),
+    killProcessGroup: (pgid, signal) => killed.push({ pgid, signal }),
+    fetchHeadSha: async () => HEAD_SHA,
+    postedReviewCleanupRecheckDelaysMs: [0],
+    onCleanupFinding: async (finding) => findings.push(finding),
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'reviewing');
+  assert.equal(row.review_attempts, 2);
+  assert.equal(row.failure_message, null);
+  assert.deepEqual(findings, []);
+  assert.deepEqual(killed, []);
+  assert.match(log.lines.join('\n'), /reviewer_reattach_posted_live_owner_retained/);
+});
+
+test('posted review cleanup default budget does not block the watcher poll', () => {
+  assert.deepEqual(POSTED_REVIEW_CLEANUP_RECHECK_DELAYS_MS, [0]);
+});
+
+test('posted review from a still-live owner does not produce a cleanup finding', async () => {
+  const db = setupDb();
+  seedReviewing(db, { reviewer: 'codex' });
+  const findings = [];
+  const killed = [];
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([
+      { user: { login: 'codex-reviewer-lacey' }, submitted_at: '2026-05-11T05:13:09.000Z' },
+    ]),
+    now: new Date(FAILURE_AT),
+    log: makeLog(),
+    probeSession: () => ({ alive: true, matched: true }),
+    killProcessGroup: (pgid, signal) => killed.push({ pgid, signal }),
+    fetchHeadSha: async () => HEAD_SHA,
+    postedReviewCleanupRecheckDelaysMs: [0, 0],
+    onCleanupFinding: async (finding) => findings.push(finding),
+  });
+
+  assert.equal(readRow(db).review_status, 'reviewing');
+  assert.deepEqual(killed, []);
+  assert.deepEqual(findings, []);
+});
+
+test('posted review with a same-head pass artifact still leaves the live owner running', async () => {
+  const db = setupDb();
+  seedReviewing(db, { reviewer: 'codex' });
+  seedReviewerPassArtifact(db);
+  const findings = [];
+  const killed = [];
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([
+      { user: { login: 'codex-reviewer-lacey' }, submitted_at: '2026-05-11T05:13:09.000Z' },
+    ]),
+    now: new Date(FAILURE_AT),
+    log: makeLog(),
+    probeSession: () => ({ alive: true, matched: true }),
+    killProcessGroup: (pgid, signal) => killed.push({ pgid, signal }),
+    fetchHeadSha: async () => HEAD_SHA,
+    postedReviewCleanupRecheckDelaysMs: [0],
+    onCleanupFinding: async (finding) => findings.push(finding),
+  });
+
+  assert.equal(readRow(db).review_status, 'reviewing');
+  assert.deepEqual(killed, []);
+  assert.deepEqual(findings, []);
+});
+
+test('posted review with a live owner does not run a recycled-process cleanup probe', async () => {
+  const db = setupDb();
+  seedReviewing(db, { reviewer: 'codex' });
+  const findings = [];
+  const killed = [];
+  let probes = 0;
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([
+      { user: { login: 'codex-reviewer-lacey' }, submitted_at: '2026-05-11T05:13:09.000Z' },
+    ]),
+    now: new Date(FAILURE_AT),
+    log: makeLog(),
+    probeSession: () => ({ alive: true, matched: probes++ === 0 }),
+    killProcessGroup: (pgid, signal) => killed.push({ pgid, signal }),
+    fetchHeadSha: async () => HEAD_SHA,
+    postedReviewCleanupRecheckDelaysMs: [0],
+    onCleanupFinding: async (finding) => findings.push(finding),
+  });
+
+  assert.equal(readRow(db).review_status, 'reviewing');
+  assert.deepEqual(killed, []);
+  assert.deepEqual(findings, []);
+});
+
+test('dead posted recovery CAS loses cleanly to the reviewer completion writer', async () => {
   const db = setupDb();
   seedReviewing(db, { reviewer: 'codex' });
   const log = makeLog();
@@ -929,15 +1071,24 @@ test('alive matching-head reviewer with an already posted review remains a stick
     ]),
     now: new Date(FAILURE_AT),
     log,
-    probeSession: () => ({ alive: true, matched: true }),
+    probeSession: () => ({ alive: false, matched: true }),
     fetchHeadSha: async () => HEAD_SHA,
+    postedReviewCleanupRecheckDelaysMs: [0],
+    onTerminalDeadSession: async () => {
+      db.prepare(
+        `UPDATE reviewed_prs
+            SET review_status = 'posted',
+                posted_at = ?,
+                review_attempts = review_attempts + 1
+          WHERE repo = ? AND pr_number = ?`
+      ).run('2026-05-11T05:13:09.000Z', REPO, PR);
+    },
   });
 
   const row = readRow(db);
-  assert.equal(row.review_status, 'failed-orphan');
+  assert.equal(row.review_status, 'posted');
   assert.equal(row.review_attempts, 3);
-  assert.match(row.failure_message, /posted a GitHub review/);
-  assert.match(log.lines.join('\n'), /reviewer_reattach_orphan/);
+  assert.match(log.lines.join('\n'), /reviewer_reattach_recovered_cas_miss/);
 });
 
 test('claimed rows with null pgid adopt a live run-state pgid after watcher bounce', async () => {
@@ -984,6 +1135,7 @@ test('claimed rows with null pgid auto-rearm when no live run-state or GitHub re
     octokit: makeOctokit([]),
     now: new Date(FAILURE_AT),
     log,
+    findReviewerProcess: noReviewerProcessFound,
     fetchHeadSha: async () => HEAD_SHA,
     onTerminalDeadSession: async (event) => settled.push(event),
   });
@@ -1009,6 +1161,7 @@ test('claimed rows with null pgid use quarantine-only failure text when the reco
     octokit: makeOctokit([]),
     now: new Date(FAILURE_AT),
     log,
+    findReviewerProcess: noReviewerProcessFound,
     fetchHeadSha: async () => HEAD_SHA,
   });
 
@@ -1036,6 +1189,7 @@ test('claimed rows with null pgid stay reviewing while launch guard window is ac
     octokit: makeOctokit([]),
     now: new Date(FAILURE_AT),
     log,
+    findReviewerProcess: noReviewerProcessFound,
     fetchHeadSha: async () => {
       headProbeCount += 1;
       return HEAD_SHA;
@@ -1117,6 +1271,7 @@ test('old spawned/null-pgid rows wait the full reviewer timeout before rearm', a
     rootDir,
     now: new Date(FAILURE_AT),
     log,
+    findReviewerProcess: noReviewerProcessFound,
     fetchHeadSha: async () => {
       headProbeCount += 1;
       return HEAD_SHA;
@@ -1165,6 +1320,7 @@ test('terminal/null-pgid rows rearm without waiting for full reviewer timeout', 
     rootDir,
     now: new Date(FAILURE_AT),
     log,
+    findReviewerProcess: noReviewerProcessFound,
     fetchHeadSha: async () => {
       headProbeCount += 1;
       return HEAD_SHA;
@@ -1217,6 +1373,7 @@ test('launching/null-pgid rows wait full reviewer timeout before rearm', async (
     rootDir,
     now: new Date(FAILURE_AT),
     log,
+    findReviewerProcess: noReviewerProcessFound,
     fetchHeadSha: async () => {
       headProbeCount += 1;
       return HEAD_SHA;
@@ -1250,6 +1407,7 @@ test('claimed rows with null pgid reconcile to an already posted current-head re
     octokit: makeOctokit([]),
     now: new Date(FAILURE_AT),
     log,
+    findReviewerProcess: noReviewerProcessFound,
     fetchHeadSha: async () => HEAD_SHA,
     findPostedReview: async () => ({
       user: { login: 'codex-reviewer-lacey' },
@@ -1279,6 +1437,7 @@ test('claimed rows with null pgid retry later when GitHub review probe fails tra
     octokit: makeOctokit([]),
     now: new Date(FAILURE_AT),
     log,
+    findReviewerProcess: noReviewerProcessFound,
     fetchHeadSha: async () => HEAD_SHA,
     findPostedReview: async () => {
       const err = new Error('reviews unavailable');
@@ -1304,6 +1463,7 @@ test('claimed rows with null pgid stay sticky when GitHub review probe fails non
     octokit: makeOctokit([]),
     now: new Date(FAILURE_AT),
     log,
+    findReviewerProcess: noReviewerProcessFound,
     fetchHeadSha: async () => HEAD_SHA,
     findPostedReview: async () => {
       throw new Error('bad credentials');
@@ -1334,6 +1494,7 @@ test('claimed rows with null pgid do not synthesize now as the review lookup sta
     ]),
     now: new Date(FAILURE_AT),
     log,
+    findReviewerProcess: noReviewerProcessFound,
     fetchHeadSha: async () => HEAD_SHA,
   });
 
@@ -1358,6 +1519,7 @@ test('claimed rows with null pgid do not use last_attempted_at as a synthetic re
     octokit: makeOctokit([]),
     now: new Date(FAILURE_AT),
     log,
+    findReviewerProcess: noReviewerProcessFound,
     fetchHeadSha: async () => HEAD_SHA,
     findPostedReview: async (probeRow) => {
       probedRows.push(probeRow);

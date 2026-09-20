@@ -57,7 +57,6 @@ import {
   collectWorkspaceDocContext,
 } from './prompt-context.mjs';
 import {
-  WORKER_CLASS_TO_BOT_TOKEN_ENV,
   buildRemediationOutcomeCommentBody,
   postRemediationOutcomeComment,
 } from './adapters/comms/github-pr-comments/pr-comments.mjs';
@@ -1504,12 +1503,13 @@ function buildRereviewResult({ requested, reason, outcome = null }) {
 }
 
 // Reconcile-time GitHub operations must not return unmapped worker
-// identities such as clio-agent; fall through to canonical routing.
+// identities such as clio-agent. A recorded spawned worker model is
+// attribution ground truth, but operator pins still win.
 function resolveReconcileWorkerClass(job, worker) {
-  const recordedModel = worker?.model;
-  if (recordedModel && WORKER_CLASS_TO_BOT_TOKEN_ENV[recordedModel]) {
-    return recordedModel;
-  }
+  const envOverride = defaultRemediatorWorkerClassFromEnv(process.env);
+  if (envOverride) return envOverride;
+  const recordedModel = normalizeRemediationWorkerClass(worker?.model);
+  if (recordedModel) return recordedModel;
   return pickRemediationWorkerClass(job);
 }
 

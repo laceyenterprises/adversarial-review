@@ -11259,10 +11259,9 @@ test('reconcile does NOT post when the terminal move was already done by another
 // has no entry in WORKER_CLASS_TO_BOT_TOKEN_ENV → no-token-mapping
 // (NON_RETRYABLE_DELIVERY_REASONS) → permanent silent loss of the
 // terminal PR comment. Fix: resolveReconcileWorkerClass now reuses
-// pickRemediationWorkerClass which canonically maps clio-agent → codex
-// (clio-agent has no dedicated worker class today).
+// pickRemediationWorkerClass which canonically maps clio-agent → claude-code.
 
-test('reconcile routes [clio-agent] PRs through the codex bot, not a non-existent clio-agent bot', async () => {
+test('reconcile routes [clio-agent] PRs through the mapped bot, not a non-existent clio-agent bot', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const { claimed } = makeQueuedJob(rootDir, {
     prNumber: 80,
@@ -11291,11 +11290,12 @@ test('reconcile routes [clio-agent] PRs through the codex bot, not a non-existen
   // Note: spawned worker has no `model` field — represents a legacy
   // job record where consume didn't stamp it. resolveReconcileWorkerClass
   // must fall through to pickRemediationWorkerClass(job), which maps
-  // clio-agent → codex.
+  // clio-agent → claude-code.
   const spawned = markFollowUpJobSpawned({
     jobPath: claimed.jobPath,
     spawnedAt: '2026-04-21T10:01:00.000Z',
     worker: {
+      model: undefined,
       processId: 9701,
       state: 'spawned',
       workspaceDir: path.relative(rootDir, workspaceDir),
@@ -11306,34 +11306,44 @@ test('reconcile routes [clio-agent] PRs through the codex bot, not a non-existen
   });
 
   const commentCalls = [];
-  const result = await withHqRootEnv(hqRoot, async () => reconcileFollowUpJob({
-    rootDir,
-    job: spawned.job,
-    jobPath: spawned.jobPath,
-    now: () => '2026-04-21T10:30:00.000Z',
-    isWorkerRunning: () => false,
-    resolvePRLifecycleImpl: async () => null,
-    postCommentImpl: async (args) => { commentCalls.push(args); return { posted: true }; },
-  }));
+  const previousDefault = process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR;
+  const previousCanonical = process.env.AGENT_OS_ROLES_REMEDIATOR;
+  try {
+    delete process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR;
+    delete process.env.AGENT_OS_ROLES_REMEDIATOR;
+    const result = await withHqRootEnv(hqRoot, async () => reconcileFollowUpJob({
+      rootDir,
+      job: spawned.job,
+      jobPath: spawned.jobPath,
+      now: () => '2026-04-21T10:30:00.000Z',
+      isWorkerRunning: () => false,
+      resolvePRLifecycleImpl: async () => null,
+      postCommentImpl: async (args) => { commentCalls.push(args); return { posted: true }; },
+    }));
 
-  assert.equal(result.action, 'stopped'); // no rereview requested
+    assert.equal(result.action, 'stopped'); // no rereview requested
+  } finally {
+    if (previousDefault === undefined) delete process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR;
+    else process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR = previousDefault;
+    if (previousCanonical === undefined) delete process.env.AGENT_OS_ROLES_REMEDIATOR;
+    else process.env.AGENT_OS_ROLES_REMEDIATOR = previousCanonical;
+  }
   assert.equal(commentCalls.length, 1);
   assert.equal(
-    commentCalls[0].workerClass, 'codex',
-    'clio-agent PR must route to the codex bot — clio-agent has no token mapping and would be permanently undeliverable otherwise'
+    commentCalls[0].workerClass, 'claude-code',
+    'clio-agent PR must route to a real remediation bot — clio-agent has no token mapping and would be permanently undeliverable otherwise'
   );
 });
 
-test('reconcile prefers worker.model when it has a bot-token mapping', async () => {
+test('reconcile routes through the operator remediator pin before worker.model or builderTag', async () => {
   // Spawned worker stamped .model='claude-code' on its metadata.
-  // resolveReconcileWorkerClass must prefer that over the job's
-  // builderTag (which we deliberately set to 'codex' to verify it's
-  // not consulted in this case).
+  // The operator pin still wins, because resolveReconcileWorkerClass
+  // must reuse pickRemediationWorkerClass instead of short-circuiting.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const { claimed } = makeQueuedJob(rootDir, {
     prNumber: 81,
-    builderTag: 'codex',
-    reviewerModel: 'claude',
+    builderTag: 'claude-code',
+    reviewerModel: 'codex',
   });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
@@ -11369,6 +11379,71 @@ test('reconcile prefers worker.model when it has a bot-token mapping', async () 
   });
 
   const commentCalls = [];
+  const previousPin = process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR;
+  try {
+    process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR = 'claude-code';
+    await withHqRootEnv(hqRoot, async () => reconcileFollowUpJob({
+      rootDir,
+      job: spawned.job,
+      jobPath: spawned.jobPath,
+      now: () => '2026-04-21T10:30:00.000Z',
+      isWorkerRunning: () => false,
+      resolvePRLifecycleImpl: async () => null,
+      postCommentImpl: async (args) => { commentCalls.push(args); return { posted: true }; },
+    }));
+  } finally {
+    if (previousPin === undefined) delete process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR;
+    else process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR = previousPin;
+  }
+
+  assert.equal(commentCalls.length, 1);
+  assert.equal(
+    commentCalls[0].workerClass, 'claude-code',
+    'ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR must override reconcile-time worker.model and builderTag routing'
+  );
+});
+
+test('reconcile uses recorded worker.model for attribution when builderTag is absent', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed } = makeQueuedJob(rootDir, {
+    prNumber: 83,
+    builderTag: null,
+    reviewerModel: 'codex',
+  });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  const { hqRoot, replyPath } = prepareCanonicalReply(rootDir, claimed.job);
+  writeFileSync(outputPath, 'Worker output.\n', 'utf8');
+  writeFileSync(replyPath, JSON.stringify({
+    kind: 'adversarial-review-remediation-reply',
+    schemaVersion: 1,
+    jobId: claimed.job.jobId,
+    repo: claimed.job.repo,
+    prNumber: claimed.job.prNumber,
+    outcome: 'completed',
+    summary: 'Done.',
+    validation: ['npm test'],
+    blockers: [],
+    reReview: { requested: false, reason: null },
+  }), 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'claude-code',
+      processId: 9704,
+      state: 'spawned',
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      replyPath,
+    },
+  });
+
+  const commentCalls = [];
   await withHqRootEnv(hqRoot, async () => reconcileFollowUpJob({
     rootDir,
     job: spawned.job,
@@ -11381,8 +11456,9 @@ test('reconcile prefers worker.model when it has a bot-token mapping', async () 
 
   assert.equal(commentCalls.length, 1);
   assert.equal(
-    commentCalls[0].workerClass, 'claude-code',
-    'worker.model with a bot-token mapping must take precedence over builderTag'
+    commentCalls[0].workerClass,
+    'claude-code',
+    'legacy jobs without builderTag must attribute terminal comments to the worker class that actually ran'
   );
 });
 

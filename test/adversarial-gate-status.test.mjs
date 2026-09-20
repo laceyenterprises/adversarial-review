@@ -365,6 +365,19 @@ test('pickAdversarialGateStatus keeps posted rows without a follow-up ledger ent
   assert.equal(decision.reason, 'awaiting-ledger');
 });
 
+test('pickAdversarialGateStatus treats reconciled posted rows with queued follow-up as armed', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow(),
+    latestJob: makeJob({
+      status: 'pending',
+      reviewBody: '## Summary\nStill blocked.\n## Verdict\nRequest changes',
+    }),
+  });
+
+  assert.equal(decision.state, 'pending');
+  assert.equal(decision.reason, 'remediation-queued');
+});
+
 test('pickAdversarialGateStatus settles comment-only posted rows even without a follow-up job', () => {
   const decision = pickAdversarialGateStatus({
     reviewRow: makeReviewRow({

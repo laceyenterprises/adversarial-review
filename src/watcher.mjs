@@ -420,10 +420,8 @@ const execFileAsync = promisify(execFile);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
-
 // writeReviewerTokenUsageArtifactBestEffort moved to
 // ./reviewer-runtime-support.mjs (ARC-18); imported back above.
-
 const config = JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'));
 // Fail fast during watcher bootstrap; a bad gate-context override should not
 // leave reviews running while commit-status publication silently stops later.
@@ -1246,7 +1244,7 @@ async function pollOnce(
   const firstPassSpilloverController = createFirstPassSpilloverController({ rootDir: ROOT, readDepth: countOpenPrsAwaitingFirstPassReview, logger: console }); // RSP-01: disarmed unless CFG arms it
   const postedReviewHandlers = [];
   const postReviewMaintenanceHandlers = [];
-  const reviewerMemoryReservationState = { reservedMb: 0 };
+  const reviewerMemoryReservationState = { reservedMb: 0, fleetQuotaStatusCache: new Map() };
   const reviewerMemoryAdmissionSampleForTick = createReviewerMemoryAdmissionSampler({
     logger: console,
     memoryPressureConfig: reviewerMemoryPressureConfig,
@@ -1847,6 +1845,7 @@ async function main() {
   });
   let lastAlertSinkDegradedFingerprint = null;
   async function runHeartbeatPoll(source, pollOptions = undefined) {
+    const pollStartedAtMs = Date.now();
     watcherHeartbeat.markPoll({ source });
     stallWatchdog.beginPoll();
     try {
@@ -1877,6 +1876,7 @@ async function main() {
       watcherHeartbeat.markPollCompleted({ source, ok: Boolean(result?.ok), timed_out: Boolean(result?.timedOut), error: result?.error ? String(result.error?.message || result.error) : null });
       return result;
     } finally {
+      console.log(`[watcher] poll-cycle timing source="${source}" duration_ms=${Date.now() - pollStartedAtMs}`);
       stallWatchdog.endPoll();
     }
   }

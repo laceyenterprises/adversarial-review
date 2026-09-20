@@ -832,6 +832,32 @@ watcher's Octokit client is constructed without static `auth` in this mode and
 injects the current `process.env.GITHUB_TOKEN` into each request so an expired
 startup token cannot be re-applied by Octokit after the refresh hook runs.
 
+### Remediation Push-Time Git Auth Retry
+
+Raw git/gh commands that prepare or push a remediation workspace use bounded
+transport retries for network failures. Authentication rejection is a separate
+path: when the command fails with GitHub auth vocabulary such as HTTP 401, bad
+credentials, an expired token, or disabled credential prompts, the raw-git
+wrapper may force one broker re-mint and retry the command once.
+
+That retry is credential-source aware. If the selected push credential is the
+ambient watcher credential (`GITHUB_TOKEN` / `GH_TOKEN` / host gh auth state),
+the wrapper calls `refreshWatcherGithubToken({ force: true })`, rebuilds the
+git credential-helper environment, and retries immediately with the new
+environment. If no replacement credential lands, the command fails fast with an
+operator-facing message that the work is committed locally but unpushed. A
+second authentication rejection after a genuinely refreshed ambient credential
+is classified as authorization or permission failure, not as another expiry.
+
+Configured remediation push tokens remain static inputs. When
+`ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN`,
+`ADVERSARIAL_REMEDIATION_PUSH_TOKEN`, `REMEDIATION_PUSH_GITHUB_TOKEN`, or
+`REMEDIATION_PUSH_TOKEN` is the selected credential, the push-time retry does
+not refresh the ambient watcher token and then reuse the same configured token.
+It returns `refreshed:false` with rotation guidance for the selected env key;
+operators must rotate that configured token or update its underlying
+broker-managed source and rerun the remediation path.
+
 ### Reviewer Review-Post Auth Retry
 
 `src/reviewer-broker-refresh.mjs` also exposes `resolveReviewerAppToken(identity,
@@ -1569,6 +1595,14 @@ trusted as the complete failure record.
   workflow`, while configured tokens such as
   `ADVERSARIAL_REMEDIATION_PUSH_TOKEN` instruct operators to rotate/update that
   configured token or its underlying GitHub App permissions.
+- End-of-round remediation pushes have one push-time authentication recovery
+  attempt for the ambient watcher credential only. On raw git/gh auth
+  rejection, the worker forces `refreshWatcherGithubToken`, rebuilds the git
+  credential-helper environment, and retries immediately with the refreshed
+  `GITHUB_TOKEN`/`GH_TOKEN`. When the selected credential is a configured
+  remediation push token such as `ADVERSARIAL_REMEDIATION_PUSH_TOKEN`, the
+  worker does not claim a fresh credential; it fails fast with guidance to
+  rotate that selected token or its broker-managed source.
 - Before honoring `reReview.requested=true`, reconcile runs the same
   branch-contamination audit used by the legacy lane against the HQ-managed git
   workspace. If the dispatch ticket did not provide that path, reconcile must

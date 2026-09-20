@@ -126,6 +126,40 @@ test('default auth refresh preserves process env when a gh call omitted options.
   }
 });
 
+test('default auth refresh fails fast when a configured remediation push token is selected', async () => {
+  let watcherRefreshes = 0;
+  let gitEnvRebuilds = 0;
+  const refresh = await defaultRefreshWorkspaceAuthEnv({
+    env: {
+      GITHUB_TOKEN: 'fresh-ambient-token',
+      GH_TOKEN: 'fresh-ambient-token',
+      ADVERSARIAL_REMEDIATION_PUSH_TOKEN: 'expired-configured-token',
+    },
+    log: quietLog,
+    resolveRemediationPushTokenIdentityImpl: () => ({
+      source: 'configured-token',
+      envName: 'ADVERSARIAL_REMEDIATION_PUSH_TOKEN',
+      identity: 'ADVERSARIAL_REMEDIATION_PUSH_TOKEN',
+      configured: true,
+    }),
+    refreshWatcherGithubTokenImpl: async () => {
+      watcherRefreshes += 1;
+      return { refreshed: true, role: 'merge-agent' };
+    },
+    withGhGitCredentialEnvImpl: () => {
+      gitEnvRebuilds += 1;
+      return { GITHUB_TOKEN: 'expired-configured-token' };
+    },
+  });
+
+  assert.equal(refresh.refreshed, false);
+  assert.equal(refresh.env, null);
+  assert.match(refresh.detail, /configured remediation push token ADVERSARIAL_REMEDIATION_PUSH_TOKEN/);
+  assert.match(refresh.detail, /rotate that token/);
+  assert.equal(watcherRefreshes, 0, 'must not claim a watcher-token refresh will replace the selected configured token');
+  assert.equal(gitEnvRebuilds, 0, 'must not rebuild a git env that would reselect the same rejected token');
+});
+
 test('a re-mint that lands no new credential fails fast instead of retrying the dead token', async () => {
   let calls = 0;
   const execFileImpl = async () => {

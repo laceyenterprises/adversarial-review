@@ -103,19 +103,32 @@ async function defaultRefreshWorkspaceAuthEnv({
   env,
   log,
   refreshWatcherGithubTokenImpl,
+  resolveRemediationPushTokenIdentityImpl,
   withGhGitCredentialEnvImpl,
 } = {}) {
   const baseEnv = env ?? process.env;
   let refreshWatcherGithubToken = refreshWatcherGithubTokenImpl;
+  let resolveRemediationPushTokenIdentity = resolveRemediationPushTokenIdentityImpl;
   let withGhGitCredentialEnv = withGhGitCredentialEnvImpl;
-  if (!refreshWatcherGithubToken || !withGhGitCredentialEnv) {
+  if (!refreshWatcherGithubToken || !resolveRemediationPushTokenIdentity || !withGhGitCredentialEnv) {
     const [brokerRefresh, workflowPushCapability] = await Promise.all([
       import('./reviewer-broker-refresh.mjs'),
       import('./remediation-workflow-push-capability.mjs'),
     ]);
     refreshWatcherGithubToken ||= brokerRefresh.refreshWatcherGithubToken;
+    resolveRemediationPushTokenIdentity ||= workflowPushCapability.resolveRemediationPushTokenIdentity;
     withGhGitCredentialEnv ||= workflowPushCapability.withGhGitCredentialEnv;
   }
+
+  const selectedCredential = resolveRemediationPushTokenIdentity(baseEnv);
+  if (selectedCredential?.configured) {
+    return {
+      refreshed: false,
+      detail: `configured remediation push token ${selectedCredential.envName || 'unknown'} was selected; rotate that token or update its broker-managed source`,
+      env: null,
+    };
+  }
+
   const summary = await refreshWatcherGithubToken({ env: baseEnv, log, force: true });
   if (summary?.refreshed !== true) {
     return { refreshed: false, detail: summary?.skipped || summary?.failed || 'unknown', env: null };
@@ -140,9 +153,12 @@ async function runWorkspaceNetworkCommandWithTransientRetry({
   // One re-mint per call. A second rejection after a genuinely NEW credential
   // is a real authorization problem, not an expiry, and must surface.
   let remintAttempted = false;
+  let skipNextDelay = false;
   let lastError = null;
   for (let attempt = 0; attempt < delays.length; attempt += 1) {
-    if (delays[attempt] > 0) {
+    if (skipNextDelay) {
+      skipNextDelay = false;
+    } else if (delays[attempt] > 0) {
       await sleep(delays[attempt]);
     }
     try {
@@ -166,6 +182,7 @@ async function runWorkspaceNetworkCommandWithTransientRetry({
           activeOptions = { ...activeOptions, env: refresh.env };
           // Retry immediately: the credential changed, so a backoff would only
           // burn more of the new token's life.
+          skipNextDelay = true;
           attempt -= 1;
           continue;
         }

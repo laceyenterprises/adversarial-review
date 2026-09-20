@@ -39,6 +39,28 @@ function fixture() {
   return db;
 }
 
+function closeoutOctokit({ comments = [], closes = [], states = {} } = {}) {
+  return { rest: {
+    issues: {
+      createComment: async (input) => { comments.push(input); },
+      listComments: async (input) => {
+        comments.push({ list: input });
+        return { data: [] };
+      },
+    },
+    pulls: {
+      get: async ({ pull_number: pullNumber }) => ({
+        data: states[pullNumber] || {
+          state: pullNumber === 101 ? 'closed' : 'open',
+          merged: pullNumber === 101,
+          head: { sha: `head-${pullNumber}` },
+        },
+      }),
+      update: async (input) => { closes.push(input); },
+    },
+  } };
+}
+
 function familyFor(db, prNumber) {
   return db.prepare(
     `SELECT duplicate_families.*, duplicate_family_candidates.role AS candidate_role
@@ -84,7 +106,14 @@ test('report enforcement rejects unverified paths and head movement invalidates 
       familyId: FAMILY, survivorPrNumber: 101,
       reportPath: 'docs/research/duplicate-pr-divergence/reports/report.md',
       reportVerifiedHeadSha: 'wrong-head', actor: 'operator', reason: 'choice',
+      salvage: 'kept tests', validation: 'npm test',
     }), /verification must be bound/);
+    assert.throws(() => selectDuplicateFamilySurvivor(db, {
+      familyId: FAMILY, survivorPrNumber: 101,
+      reportPath: 'docs/research/duplicate-pr-divergence/reports/report.md',
+      reportVerifiedHeadSha: 'head-101', actor: 'operator', reason: 'choice',
+      salvage: '', validation: 'npm test',
+    }), /salvage audit text is required/);
     select(db);
     assert.equal(
       evaluateDuplicateFamilyCandidate(familyFor(db, 101), { prNumber: 101, headSha: 'head-101-moved' }).held,
@@ -149,20 +178,87 @@ test('survivor merge closes losers with survivor and committed report links then
   const closes = [];
   try {
     select(db);
-    db.prepare("UPDATE duplicate_family_candidates SET pr_state = 'merged' WHERE pr_number = 101").run();
-    const octokit = { rest: {
-      issues: { createComment: async (input) => { comments.push(input); } },
-      pulls: { update: async (input) => { closes.push(input); } },
-    } };
-    const result = await reconcileDuplicateFamilyCloseouts({ db, octokit, repoPath: REPO });
+    const octokit = closeoutOctokit({ comments, closes });
+    const result = await reconcileDuplicateFamilyCloseouts({
+      db,
+      octokit,
+      repoPath: REPO,
+      cfg: { enabled: true, autonomousMergeExecutionEnabled: true },
+      census: { families: [], familyIds: [FAMILY] },
+    });
     assert.equal(result.closed, 2);
     assert.deepEqual(closes.map((entry) => entry.pull_number), [102, 103]);
-    for (const comment of comments) {
+    for (const comment of comments.filter((entry) => !entry.list)) {
       assert.match(comment.body, /https:\/\/github\.com\/laceyenterprises\/agent-os\/pull\/101/);
       assert.match(comment.body, /blob\/head-101\/docs\/research\/duplicate-pr-divergence\/reports\/2026-09-20-dpa-04\.md/);
     }
     const family = familyFor(db, 101);
     assert.equal(family.status, 'resolved');
     assert.deepEqual(JSON.parse(family.transition_log_json).slice(-2).map((entry) => entry.transition), ['survivor-merged', 'resolved']);
+  } finally { db.close(); }
+});
+
+test('closeout is skipped unless merge authority is armed and census is verified', async () => {
+  const db = fixture();
+  const closes = [];
+  try {
+    select(db);
+    const disabled = await reconcileDuplicateFamilyCloseouts({
+      db,
+      octokit: closeoutOctokit({ closes }),
+      repoPath: REPO,
+      cfg: { enabled: false, autonomousMergeExecutionEnabled: true },
+      census: { families: [], familyIds: [FAMILY] },
+      logger: { log() {}, error() {} },
+    });
+    const unverified = await reconcileDuplicateFamilyCloseouts({
+      db,
+      octokit: closeoutOctokit({ closes }),
+      repoPath: REPO,
+      cfg: { enabled: true, autonomousMergeExecutionEnabled: true },
+      census: { error: new Error('missing-ledger-target') },
+      logger: { log() {}, error() {} },
+    });
+    assert.equal(disabled.skipped, 'merge-authority-disabled');
+    assert.equal(unverified.skipped, 'census-unverified');
+    assert.deepEqual(closes, []);
+  } finally { db.close(); }
+});
+
+test('selection leaves suppressed members unclosed and stale ignores require readjudication', async () => {
+  const db = fixture();
+  const closes = [];
+  const logLines = [];
+  try {
+    db.prepare("UPDATE duplicate_family_candidates SET suppressions_json = ? WHERE pr_number = 103")
+      .run(JSON.stringify([{ reason: 'not-a-duplicate-stack' }]));
+    select(db);
+    assert.deepEqual(
+      db.prepare('SELECT pr_number, role FROM duplicate_family_candidates ORDER BY pr_number').all(),
+      [{ pr_number: 101, role: 'survivor' }, { pr_number: 102, role: 'loser' }, { pr_number: 103, role: 'candidate' }],
+    );
+    ignoreDuplicateFamilyCandidate(db, {
+      familyId: FAMILY, prNumber: 102, candidateHeadSha: 'head-102',
+      actor: 'operator', reason: 'sequential follow-up',
+    });
+    db.prepare("UPDATE duplicate_family_candidates SET head_sha = 'head-102-new' WHERE pr_number = 102").run();
+    const family = db.prepare('SELECT operator_override_json FROM duplicate_families WHERE family_id = ?').get(FAMILY);
+    const override = JSON.parse(family.operator_override_json);
+    override.ignoredCandidates[0].stale = true;
+    db.prepare('UPDATE duplicate_families SET operator_override_json = ? WHERE family_id = ?')
+      .run(JSON.stringify(override), FAMILY);
+
+    const result = await reconcileDuplicateFamilyCloseouts({
+      db,
+      octokit: closeoutOctokit({ closes, states: { 102: { state: 'open', merged: false, head: { sha: 'head-102-new' } } } }),
+      repoPath: REPO,
+      cfg: { enabled: true, autonomousMergeExecutionEnabled: true },
+      census: { families: [], familyIds: [FAMILY] },
+      logger: { log: (line) => logLines.push(line), error() {} },
+    });
+    assert.equal(result.closed, 0);
+    assert.deepEqual(closes, []);
+    assert.match(logLines.join('\n'), /re-adjudication required/);
+    assert.equal(familyFor(db, 101).status, 'survivor-merged');
   } finally { db.close(); }
 });

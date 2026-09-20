@@ -55,6 +55,26 @@ async function verifyCommittedReport({ repo, headSha, reportPath, execFileImpl }
   return true;
 }
 
+function validateReportPath(reportPath) {
+  const normalizedReportPath = String(reportPath || '').trim();
+  if (!normalizedReportPath || normalizedReportPath.startsWith('/') || normalizedReportPath.includes('..')) {
+    throw new Error('report path must be a repository-relative committed path');
+  }
+  if (!/^docs\/research\/duplicate-pr-divergence\/reports\/.+\.md$/i.test(normalizedReportPath)) {
+    throw new Error('report path must name a duplicate-divergence corpus report');
+  }
+  return normalizedReportPath;
+}
+
+async function fetchLivePrHead({ repo, prNumber, execFileImpl }) {
+  const result = await ghJson(execFileImpl, [
+    'pr', 'view', String(prNumber), '--repo', repo, '--json', 'headRefOid',
+  ]);
+  const head = String(result?.headRefOid || '').trim();
+  if (!head) throw new Error(`could not resolve live head for ${repo}#${prNumber}`);
+  return head;
+}
+
 async function postSelectionComment({ repo, prNumber, selection, execFileImpl }) {
   const body = [
     '<!-- adversarial-review:duplicate-family-survivor-selection -->',
@@ -101,17 +121,22 @@ export async function duplicateFamilyWorkflowMain(argv, io = {}) {
       const survivorPrNumber = Number(options.survivorPrNumber);
       const survivor = candidates.find((row) => Number(row.pr_number) === survivorPrNumber);
       if (!survivor || !options.reportPath) throw new Error('select requires a family-member --survivor and --report');
+      options.reportPath = validateReportPath(options.reportPath);
+      const liveHead = await fetchLivePrHead({ repo: family.target_repo, prNumber: survivorPrNumber, execFileImpl });
+      if (liveHead !== survivor.head_sha) {
+        throw new Error(`survivor cached head ${survivor.head_sha || '<missing>'} differs from live head ${liveHead}; wait for the watcher census to refresh`);
+      }
       await verifyCommittedReport({
-        repo: family.target_repo, headSha: survivor.head_sha,
+        repo: family.target_repo, headSha: liveHead,
         reportPath: options.reportPath, execFileImpl,
       });
       const selection = selectDuplicateFamilySurvivor(db, {
-        ...options, survivorPrNumber, reportVerifiedHeadSha: survivor.head_sha,
+        ...options, survivorPrNumber, reportVerifiedHeadSha: liveHead,
       });
       await postSelectionComment({
         repo: family.target_repo, prNumber: survivorPrNumber, selection, execFileImpl,
       });
-      stdout.write(`selected ${family.target_repo}#${survivorPrNumber} as survivor at ${survivor.head_sha}\n`);
+      stdout.write(`selected ${family.target_repo}#${survivorPrNumber} as survivor at ${liveHead}\n`);
     } else if (options.command === 'ignore') {
       const prNumber = Number(options.prNumber);
       const candidate = candidates.find((row) => Number(row.pr_number) === prNumber);
@@ -134,5 +159,7 @@ export async function duplicateFamilyWorkflowMain(argv, io = {}) {
 export {
   parseArgs as parseDuplicateFamilyWorkflowArgs,
   USAGE as DUPLICATE_FAMILY_WORKFLOW_USAGE,
+  fetchLivePrHead,
+  validateReportPath,
   verifyCommittedReport,
 };

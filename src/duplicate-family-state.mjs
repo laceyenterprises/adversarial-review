@@ -10,9 +10,31 @@ import {
 
 export const DUPLICATE_FAMILY_STATUS_ADVISORY = 'advisory';
 export const DUPLICATE_FAMILY_STATUS_INACTIVE = 'inactive';
+export const DUPLICATE_FAMILY_STATUS_SURVIVOR_SELECTED = 'survivor-selected';
+export const DUPLICATE_FAMILY_STATUS_SURVIVOR_MERGED = 'survivor-merged';
+export const DUPLICATE_FAMILY_STATUS_RESOLVED = 'resolved';
+export const DUPLICATE_FAMILY_STATUS_ABANDONED = 'abandoned';
 export const DUPLICATE_FAMILY_SUPPRESSION_LABEL = 'not-a-duplicate-stack';
 export const DUPLICATE_FAMILY_SURVIVOR_LABEL = 'duplicate-family-survivor';
 export const DUPLICATE_FAMILY_LOSER_LABEL = 'duplicate-family-loser';
+
+const REACTIVATABLE_STATUSES = new Set([
+  DUPLICATE_FAMILY_STATUS_INACTIVE,
+  DUPLICATE_FAMILY_STATUS_RESOLVED,
+  DUPLICATE_FAMILY_STATUS_SURVIVOR_MERGED,
+]);
+const DEACTIVATABLE_STATUSES = [
+  DUPLICATE_FAMILY_STATUS_ADVISORY,
+  DUPLICATE_FAMILY_STATUS_SURVIVOR_SELECTED,
+  DUPLICATE_FAMILY_STATUS_SURVIVOR_MERGED,
+  DUPLICATE_FAMILY_STATUS_ABANDONED,
+];
+const PERSISTED_MERGE_STATUSES = [
+  DUPLICATE_FAMILY_STATUS_ADVISORY,
+  DUPLICATE_FAMILY_STATUS_SURVIVOR_SELECTED,
+  DUPLICATE_FAMILY_STATUS_SURVIVOR_MERGED,
+  DUPLICATE_FAMILY_STATUS_ABANDONED,
+];
 
 const TICKET_RE = /\b([A-Z][A-Z0-9]{1,12}-\d{1,6})\b/i;
 const STACK_LABEL_RE = /^(?:stack|stacked|depends-on|follow-up|followup|remediation)(?::|$)/i;
@@ -585,10 +607,10 @@ function mergePersistedDuplicateCandidates(db, subjectEntries, repoPath) {
        FROM duplicate_family_candidates
        JOIN duplicate_families
          ON duplicate_families.family_id = duplicate_family_candidates.family_id
-       ${authoritativeStateJoin}
+      ${authoritativeStateJoin}
       WHERE duplicate_families.target_repo = ?
-        AND duplicate_families.status = ?`
-  ).all(repoPath, DUPLICATE_FAMILY_STATUS_ADVISORY);
+        AND duplicate_families.status IN (${PERSISTED_MERGE_STATUSES.map(() => '?').join(', ')})`
+  ).all(repoPath, ...PERSISTED_MERGE_STATUSES);
   for (const row of rows) {
     const key = `${row.repo}\0${row.pr_number}`;
     if (seen.has(key)) continue;
@@ -654,12 +676,24 @@ export function upsertDuplicateFamilies(db, families, {
        first_detected_at, last_seen_at, updated_at
      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(family_key) DO UPDATE SET
-       status = CASE
-         WHEN duplicate_families.status = 'inactive' THEN excluded.status
+      status = CASE
+         WHEN duplicate_families.status IN ('inactive', 'resolved', 'survivor-merged') THEN excluded.status
          ELSE duplicate_families.status
        END,
+       selected_survivor_pr_number = CASE
+         WHEN duplicate_families.status IN ('inactive', 'resolved', 'survivor-merged') THEN NULL
+         ELSE duplicate_families.selected_survivor_pr_number
+       END,
+       report_path = CASE
+         WHEN duplicate_families.status IN ('inactive', 'resolved', 'survivor-merged') THEN NULL
+         ELSE duplicate_families.report_path
+       END,
+       operator_override_json = CASE
+         WHEN duplicate_families.status IN ('inactive', 'resolved', 'survivor-merged') THEN NULL
+         ELSE duplicate_families.operator_override_json
+       END,
        transition_log_json = CASE
-         WHEN duplicate_families.status = 'inactive' THEN excluded.transition_log_json
+         WHEN duplicate_families.status IN ('inactive', 'resolved', 'survivor-merged') THEN excluded.transition_log_json
          ELSE duplicate_families.transition_log_json
        END,
        strongest_signal = excluded.strongest_signal,
@@ -673,10 +707,10 @@ export function upsertDuplicateFamilies(db, families, {
       WHERE family_key = ?`
   );
   const selectActiveRepoFamilies = db.prepare(
-    `SELECT family_id, family_key, transition_log_json
+    `SELECT family_id, family_key, status, transition_log_json
        FROM duplicate_families
       WHERE target_repo = ?
-        AND status = ?`
+        AND status IN (${DEACTIVATABLE_STATUSES.map(() => '?').join(', ')})`
   );
   const markInactive = db.prepare(
     `UPDATE duplicate_families
@@ -686,7 +720,7 @@ export function upsertDuplicateFamilies(db, families, {
             updated_at = ?,
             last_seen_at = ?
       WHERE family_id = ?
-        AND status = ?`
+        AND status IN (${DEACTIVATABLE_STATUSES.map(() => '?').join(', ')})`
   );
   const upsertCandidate = db.prepare(
     `INSERT INTO duplicate_family_candidates (
@@ -719,7 +753,7 @@ export function upsertDuplicateFamilies(db, families, {
         transition: 'detected-advisory',
         status: DUPLICATE_FAMILY_STATUS_ADVISORY,
       }]);
-      if (existing?.status === DUPLICATE_FAMILY_STATUS_INACTIVE) {
+      if (REACTIVATABLE_STATUSES.has(String(existing?.status || '').toLowerCase())) {
         transitionLog = appendTransitionLog(transitionLog, {
           at: now,
           transition: 'reactivated-advisory',
@@ -771,7 +805,7 @@ export function upsertDuplicateFamilies(db, families, {
     }
     if (deactivateMissing && repoPath) {
       const activeKeys = new Set((Array.isArray(families) ? families : []).map((family) => family.familyKey));
-      for (const row of selectActiveRepoFamilies.all(repoPath, DUPLICATE_FAMILY_STATUS_ADVISORY)) {
+      for (const row of selectActiveRepoFamilies.all(repoPath, ...DEACTIVATABLE_STATUSES)) {
         if (activeKeys.has(row.family_key)) continue;
         if (!familyHasObservedCandidate(db, row.family_id, observedCandidateKeys)) continue;
         markInactive.run(
@@ -785,7 +819,7 @@ export function upsertDuplicateFamilies(db, families, {
           now,
           now,
           row.family_id,
-          DUPLICATE_FAMILY_STATUS_ADVISORY,
+          ...DEACTIVATABLE_STATUSES,
         );
       }
     }
@@ -950,9 +984,11 @@ function duplicateFamilyOverride(family) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
 
-function validateOperatorAudit({ actor, reason }) {
+function validateOperatorAudit({ actor, reason, salvage = true, validation = true } = {}) {
   if (!normalizeText(actor)) throw new Error('operator actor is required');
   if (!normalizeText(reason)) throw new Error('auditable reason is required');
+  if (!normalizeText(salvage)) throw new Error('salvage audit text is required');
+  if (!normalizeText(validation)) throw new Error('validation audit text is required');
 }
 
 export function selectDuplicateFamilySurvivor(db, {
@@ -966,7 +1002,7 @@ export function selectDuplicateFamilySurvivor(db, {
   validation,
   now = new Date().toISOString(),
 } = {}) {
-  validateOperatorAudit({ actor, reason });
+  validateOperatorAudit({ actor, reason, salvage, validation });
   const normalizedReportPath = normalizeText(reportPath);
   if (!normalizedReportPath || normalizedReportPath.startsWith('/') || normalizedReportPath.includes('..')) {
     throw new Error('report path must be a repository-relative committed path');
@@ -975,7 +1011,7 @@ export function selectDuplicateFamilySurvivor(db, {
     throw new Error('report path must name a duplicate-divergence corpus report');
   }
   const family = requireDuplicateFamily(db, familyId);
-  if (['abandoned', 'resolved', 'survivor-merged'].includes(String(family.status).toLowerCase())) {
+  if ([DUPLICATE_FAMILY_STATUS_ABANDONED, DUPLICATE_FAMILY_STATUS_RESOLVED, DUPLICATE_FAMILY_STATUS_SURVIVOR_MERGED].includes(String(family.status).toLowerCase())) {
     throw new Error(`cannot select a survivor from ${family.status} family ${familyId}`);
   }
   const candidates = duplicateFamilyCandidateRows(db, familyId);
@@ -992,8 +1028,8 @@ export function selectDuplicateFamilySurvivor(db, {
     reportVerifiedHeadSha,
     actor: normalizeText(actor),
     reason: normalizeText(reason),
-    salvage: normalizeText(salvage) || 'none',
-    validation: normalizeText(validation) || 'normal adversarial-review and CI gates required',
+    salvage: normalizeText(salvage),
+    validation: normalizeText(validation),
     observedAt: now,
   };
   const override = duplicateFamilyOverride(family);
@@ -1021,11 +1057,18 @@ export function selectDuplicateFamilySurvivor(db, {
       now,
       familyId,
     );
-    db.prepare(
+    const updateRole = db.prepare(
       `UPDATE duplicate_family_candidates
-          SET role = CASE WHEN pr_number = ? THEN 'survivor' ELSE 'loser' END, updated_at = ?
-        WHERE family_id = ?`
-    ).run(selection.candidatePrNumber, now, familyId);
+          SET role = ?, updated_at = ?
+        WHERE family_id = ? AND pr_number = ?`
+    );
+    for (const candidate of candidates) {
+      const suppressed = parseMaybeJson(candidate.suppressions_json, []).length > 0;
+      const role = Number(candidate.pr_number) === selection.candidatePrNumber
+        ? 'survivor'
+        : suppressed ? 'candidate' : 'loser';
+      updateRole.run(role, now, familyId, candidate.pr_number);
+    }
   })();
   return selection;
 }
@@ -1033,7 +1076,7 @@ export function selectDuplicateFamilySurvivor(db, {
 export function ignoreDuplicateFamilyCandidate(db, {
   familyId, prNumber, candidateHeadSha, actor, reason, now = new Date().toISOString(),
 } = {}) {
-  validateOperatorAudit({ actor, reason });
+  validateOperatorAudit({ actor, reason, salvage: true, validation: true });
   const family = requireDuplicateFamily(db, familyId);
   const candidate = duplicateFamilyCandidateRows(db, familyId)
     .find((row) => Number(row.pr_number) === Number(prNumber));
@@ -1072,7 +1115,7 @@ export function ignoreDuplicateFamilyCandidate(db, {
 export function abandonDuplicateFamily(db, {
   familyId, actor, reason, now = new Date().toISOString(),
 } = {}) {
-  validateOperatorAudit({ actor, reason });
+  validateOperatorAudit({ actor, reason, salvage: true, validation: true });
   const family = requireDuplicateFamily(db, familyId);
   const override = duplicateFamilyOverride(family);
   const abandoned = { transition: 'abandoned', actor: normalizeText(actor), reason: normalizeText(reason), observedAt: now };
@@ -1096,8 +1139,34 @@ function reportUrlForSelection(repoPath, selection) {
   return `https://github.com/${repoPath}/blob/${selection.candidateHeadSha}/${encodedPath}`;
 }
 
-export async function reconcileDuplicateFamilyCloseouts({ db, octokit, repoPath, logger = console } = {}) {
+function pullHeadSha(pull) {
+  return String(pull?.head?.sha || pull?.headRefOid || pull?.headSha || '').trim();
+}
+
+function pullMerged(pull) {
+  return pull?.merged === true || Boolean(pull?.merged_at || pull?.mergedAt);
+}
+
+export async function reconcileDuplicateFamilyCloseouts({
+  db,
+  octokit,
+  repoPath,
+  logger = console,
+  cfg = null,
+  census = null,
+} = {}) {
   if (!db || !octokit || !repoPath) return { inspected: 0, closed: 0 };
+  const projectionVerified = !census || (!census.error && Array.isArray(census.familyIds));
+  if (!projectionVerified) {
+    logger?.log?.(`[watcher] duplicate-family closeout skipped for ${repoPath}: census state unverified this tick`);
+    return { inspected: 0, closed: 0, skipped: 'census-unverified' };
+  }
+  if (cfg?.enabled !== true || cfg?.autonomousMergeExecutionEnabled === false) {
+    logger?.log?.(
+      `[watcher] duplicate-family closeout skipped for ${repoPath}: merge authority disabled`,
+    );
+    return { inspected: 0, closed: 0, skipped: 'merge-authority-disabled' };
+  }
   const [owner, repo] = String(repoPath).split('/');
   if (!owner || !repo) return { inspected: 0, closed: 0 };
   const families = db.prepare(
@@ -1109,10 +1178,28 @@ export async function reconcileDuplicateFamilyCloseouts({ db, octokit, repoPath,
     let family = initial;
     const candidates = duplicateFamilyCandidateRows(db, family.family_id);
     const survivor = candidates.find((row) => Number(row.pr_number) === Number(family.selected_survivor_pr_number));
-    if (!survivor || String(survivor.pr_state || '').toLowerCase() !== 'merged') continue;
     const override = duplicateFamilyOverride(family);
     const selection = override.selection;
+    if (!survivor) continue;
     if (!selection || selection.stale || selection.candidateHeadSha !== survivor.head_sha) continue;
+    let survivorPull;
+    try {
+      const response = await octokit.rest.pulls.get({ owner, repo, pull_number: survivor.pr_number });
+      survivorPull = response?.data || response;
+    } catch (err) {
+      logger?.error?.(
+        `[watcher] duplicate-family survivor refresh failed for ${repoPath}#${survivor.pr_number}: ${err?.message || err}`,
+      );
+      continue;
+    }
+    if (pullHeadSha(survivorPull) && pullHeadSha(survivorPull) !== survivor.head_sha) continue;
+    if (!pullMerged(survivorPull)) continue;
+    if (String(survivor.pr_state || '').toLowerCase() !== 'merged') {
+      db.prepare(
+        `UPDATE duplicate_family_candidates SET pr_state = 'merged', updated_at = ?
+          WHERE repo = ? AND pr_number = ? AND head_sha = ?`
+      ).run(new Date().toISOString(), repoPath, survivor.pr_number, survivor.head_sha);
+    }
     const now = new Date().toISOString();
     if (family.status === 'survivor-selected') {
       const nextLog = appendTransitionLog(family.transition_log_json, {
@@ -1129,14 +1216,34 @@ export async function reconcileDuplicateFamilyCloseouts({ db, octokit, repoPath,
     const losers = candidates.filter((row) => (
       row.role === 'loser'
       && String(row.pr_state || '').toLowerCase() === 'open'
-      && !ignored.some((entry) => (
-        entry?.stale !== true
-        && Number(entry?.candidatePrNumber) === Number(row.pr_number)
-        && entry?.candidateHeadSha === row.head_sha
-      ))
+      && parseMaybeJson(row.suppressions_json, []).length === 0
+      && !ignored.some((entry) => Number(entry?.candidatePrNumber) === Number(row.pr_number))
     ));
+    const staleIgnored = ignored.filter((entry) => entry?.stale === true);
+    let needsReadjudication = false;
+    for (const entry of staleIgnored) {
+      if (candidates.some((row) => Number(row.pr_number) === Number(entry?.candidatePrNumber))) {
+        needsReadjudication = true;
+        logger?.log?.(
+          `[watcher] duplicate-family closeout skipped ignored stale candidate ${repoPath}#${entry.candidatePrNumber}: re-adjudication required`,
+        );
+      }
+    }
     let failed = false;
     for (const loser of losers) {
+      let loserPull;
+      try {
+        const response = await octokit.rest.pulls.get({ owner, repo, pull_number: loser.pr_number });
+        loserPull = response?.data || response;
+      } catch (err) {
+        failed = true;
+        logger?.error?.(
+          `[watcher] duplicate-family loser refresh failed for ${repoPath}#${loser.pr_number}: ${err?.message || err}`,
+        );
+        break;
+      }
+      if (String(loserPull?.state || '').toLowerCase() !== 'open') continue;
+      if (pullHeadSha(loserPull) && pullHeadSha(loserPull) !== loser.head_sha) continue;
       const survivorUrl = `https://github.com/${repoPath}/pull/${survivor.pr_number}`;
       const reportUrl = reportUrlForSelection(repoPath, selection);
       const body = [
@@ -1153,6 +1260,7 @@ export async function reconcileDuplicateFamilyCloseouts({ db, octokit, repoPath,
         if (typeof octokit.rest.issues.listComments === 'function') {
           const { data } = await octokit.rest.issues.listComments({
             owner, repo, issue_number: loser.pr_number, per_page: 100,
+            sort: 'created', direction: 'desc',
           });
           alreadyCommented = (Array.isArray(data) ? data : []).some((comment) => (
             String(comment?.body || '').includes('<!-- adversarial-review:duplicate-family-loser-closeout -->')
@@ -1175,7 +1283,7 @@ export async function reconcileDuplicateFamilyCloseouts({ db, octokit, repoPath,
         break;
       }
     }
-    if (!failed) {
+    if (!failed && !needsReadjudication) {
       const resolvedAt = new Date().toISOString();
       db.prepare(
         `UPDATE duplicate_families SET status = 'resolved', transition_log_json = ?, updated_at = ?
@@ -1193,7 +1301,7 @@ export async function reconcileDuplicateFamilyCloseouts({ db, octokit, repoPath,
   return { inspected: families.length, closed };
 }
 
-export async function reconcileDuplicateFamilyLabels({ db, octokit, repoPath, logger = console, census = null } = {}) {
+export async function reconcileDuplicateFamilyLabels({ db, octokit, repoPath, logger = console, census = null, cfg = null } = {}) {
   if (!db || !repoPath) return { inspected: 0, changed: 0, skipped: 'missing-store-or-repo' };
   if (!octokit) {
     logger?.log?.(`[watcher] duplicate-family label projection skipped for ${repoPath}: octokit unavailable`);
@@ -1238,7 +1346,7 @@ export async function reconcileDuplicateFamilyLabels({ db, octokit, repoPath, lo
     const familyActive = !['inactive', 'resolved'].includes(String(row.status || '').toLowerCase());
     const roleLabel = row.candidate_role === 'survivor'
       ? DUPLICATE_FAMILY_SURVIVOR_LABEL
-      : row.candidate_role === 'loser' ? DUPLICATE_FAMILY_LOSER_LABEL : null;
+      : row.candidate_role === 'loser' && !suppressed ? DUPLICATE_FAMILY_LOSER_LABEL : null;
     const wanted = familyActive
       ? [DUPLICATE_FAMILY_LABEL, ...(held ? [DUPLICATE_FAMILY_HOLD_LABEL] : []), ...(roleLabel ? [roleLabel] : [])]
       : [];
@@ -1319,6 +1427,6 @@ export async function reconcileDuplicateFamilyLabels({ db, octokit, repoPath, lo
       updateCandidateLabels.run(JSON.stringify(labelsFromLowerSet(next)), new Date().toISOString(), repoPath, row.pr_number);
     }
   }
-  const closeout = await reconcileDuplicateFamilyCloseouts({ db, octokit, repoPath, logger });
+  const closeout = await reconcileDuplicateFamilyCloseouts({ db, octokit, repoPath, logger, census, cfg });
   return { inspected: rows.length, changed, closeout };
 }

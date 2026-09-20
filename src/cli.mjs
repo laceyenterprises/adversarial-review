@@ -179,6 +179,11 @@ async function main(argv, io = {}) {
     return burstMain(rest, io);
   }
   if (command === 'duplicate-family') {
+    if (rest.length === 0 || rest[0] === '--help' || rest[0] === '-h') {
+      const stdout = io.stdout || process.stdout;
+      stdout.write(USAGE);
+      return 0;
+    }
     if (rest[0] === 'packet') {
       const { duplicateFamilyMain } = await import('./duplicate-family-packet.mjs');
       return duplicateFamilyMain(rest, io);

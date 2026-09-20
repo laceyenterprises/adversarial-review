@@ -13,12 +13,15 @@ updates this state during polling so operator surfaces can see likely redundant
 PRs and so unresolved duplicate families can block autonomous merge lanes until
 the family is resolved or suppressed.
 
-Rows do not merge, close, or reject PRs by themselves. For an active unresolved
-family, `reconcileDuplicateFamilyLabels()` projects the store into GitHub by
-applying `duplicate-family` and `duplicate-family-hold`; the hold label is the
-merge-blocking contract consumed by AMA, hammer routing, merge-agent dispatch,
-and fast-merge. Suppressed candidates remain advisory members only and do not
-receive the hold.
+For an active unresolved family, `reconcileDuplicateFamilyLabels()` projects the
+store into GitHub by applying `duplicate-family` and
+`duplicate-family-hold`; the hold label is the merge-blocking contract consumed
+by AMA, hammer routing, merge-agent dispatch, and fast-merge. After an operator
+selects a survivor and that survivor is observed merged, the watcher may close
+non-suppressed, non-ignored loser PRs from these rows only when merge authority
+is armed (`enabled: true`) and the runtime autonomous merge kill switch remains
+on (`autonomous_merge_execution_enabled: true`). Suppressed candidates remain
+advisory members only and are never closed by duplicate-family closeout.
 
 ## Tables
 
@@ -33,7 +36,7 @@ One row per detected work-identity family.
 | `target_repo` | Repository the duplicate census observed. |
 | `base_branch` | Base branch shared by the active duplicate candidates. |
 | `normalized_work_identity` | Normalized ticket, explicit identity label, or dispatch identity used for grouping. |
-| `status` | `advisory` while at least two live unsuppressed candidates remain; `inactive` after the census no longer sees a duplicate family. |
+| `status` | Family lifecycle status: `advisory` while at least two live unsuppressed candidates remain; `inactive` after the census no longer sees a duplicate family; `survivor-selected` after an operator selects a survivor and verified report; `survivor-merged` after the selected survivor is confirmed merged; `resolved` after all closable losers are closed; `abandoned` after an operator records no safe survivor. A later duplicate census reactivates `inactive`, `resolved`, and `survivor-merged` rows to `advisory` and clears stale survivor-selection fields. |
 | `strongest_signal` | First common strong signal kind shared by active candidates. |
 | `selected_survivor_pr_number` | Optional operator-selected PR number to keep as the survivor. |
 | `report_path` | Optional path to an operator-facing duplicate report artifact. |
@@ -61,7 +64,7 @@ belong to only one family at a time; reassignment updates the row's
 | `head_branch` | Candidate head branch. |
 | `head_sha` | Candidate head SHA. |
 | `base_sha` | Candidate base SHA or merge-base evidence when available. |
-| `role` | `candidate` before adjudication, then exactly one `survivor` and all remaining members `loser`. |
+| `role` | `candidate` before adjudication, then exactly one unsuppressed `survivor`; non-suppressed remaining members become `loser`, while suppressed members stay `candidate`. |
 | `work_identity_json` | Extracted identity payload and provenance resolution. |
 | `signals_json` | Strong signal evidence used by the detector. |
 | `suppressions_json` | Suppression evidence such as stack/follow-up labels or the PR-wide exclusion label. |
@@ -96,8 +99,11 @@ Slice absence by itself is not treated as closure. Existing databases created wi
 - `upsertDuplicateFamilies()` persists all candidates in each returned family,
   while `candidate_count` tracks only the active open unsuppressed subset. If a
   PR is detected in a different family, its existing candidate row is reassigned
-  to the new `family_id`.
-- `deactivateMissing` marks active advisory families inactive only when the
+  to the new `family_id`. A census that sees a duplicate family again
+  reactivates `inactive`, `resolved`, or `survivor-merged` rows and clears the
+  prior `selected_survivor_pr_number`, `report_path`, and
+  `operator_override_json` so stale selections cannot release a new head.
+- `deactivateMissing` marks active advisory or adjudication families inactive only when the
   current census observed at least one persisted candidate from that family and
   no longer returns the family key. Families that are absent solely because all
   candidates fell outside a windowed polling slice remain advisory until a later
@@ -107,14 +113,25 @@ Slice absence by itself is not treated as closure. Existing databases created wi
 - `reconcileDuplicateFamilyLabels()` writes the GitHub labels after each census:
   active unresolved unsuppressed candidates receive `duplicate-family` and
   `duplicate-family-hold`; suppressed candidates receive only
-  `duplicate-family`; inactive families have both watcher-owned labels removed,
-  while individually released candidates have `duplicate-family-hold` removed.
-  Removal is attempted from the evaluated
+  `duplicate-family`; operator-selected survivors receive
+  `duplicate-family-survivor`; non-suppressed losers receive
+  `duplicate-family-loser`; inactive and resolved families have watcher-owned
+  duplicate-family labels removed, while individually released candidates have
+  `duplicate-family-hold` removed. Removal is attempted from the evaluated
   family state rather than from the cached `labels_json`, and successful label
   writes update `labels_json` so later ticks do not repeat the same GitHub
   mutation. The hold releases after the census no longer sees two live
-  unsuppressed candidates or after an operator suppression label is observed for
-  that candidate.
+  unsuppressed candidates, after an operator suppression label is observed for
+  that candidate, after an exact-head `ignored-not-duplicate` override, for the
+  exact selected survivor head, or after the family reaches `resolved`.
+- `reconcileDuplicateFamilyCloseouts()` runs after label reconciliation only
+  when the census for the tick is verified and merge authority is armed. It
+  re-reads the selected survivor and each loser from GitHub before mutating,
+  confirms the survivor is merged at the selected head, skips suppressed
+  candidates and ignored candidates even when an ignore is stale, comments with
+  the survivor/report audit trail, closes only open non-suppressed losers, and
+  marks the family `resolved` only after no stale ignored candidate still needs
+  operator re-adjudication.
 - Operator overrides are not deleted automatically. If the override references
   a candidate whose head moved, the override is marked stale for that observed
   head without regenerating the stale timestamp on later identical polls.

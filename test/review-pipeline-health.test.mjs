@@ -37,6 +37,7 @@ import { parseArgs } from '../src/review-pipeline-health-cli.mjs';
 import { ensureReviewStateSchema, openReviewStateDb, recordReviewLatencyEvent } from '../src/review-state.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from '../src/review-statuses.mjs';
 import { DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS } from '../src/reviewer-pass-reaper.mjs';
+import { LEGACY_ORPHAN_FAILURE_MESSAGE } from '../src/reviewer-reattach.mjs';
 import { ensureTtmTrackerSchema } from '../src/ttm-tracker.mjs';
 
 const NOW = '2026-05-25T18:00:00.000Z';
@@ -335,6 +336,7 @@ test('reviewer slot health exposes every recovery state and a dead row cannot hi
   insert.run(REPO, 109, '2026-05-25T16:00:00.000Z', 'failed', old, null, null, old, null, '[cascade] watcher backoff engaged', 1);
   insert.run(REPO, 110, '2026-05-25T16:00:00.000Z', 'failed-orphan', old, null, null, old, null, '[reviewer-timeout] running pass timeout', 1);
   insert.run(REPO, 111, '2026-05-25T16:00:00.000Z', 'failed', old, null, null, old, null, '[cascade] cap exhausted', 3);
+  insert.run(REPO, 112, '2026-05-25T16:00:00.000Z', 'failed-orphan', old, 's-legacy', null, old, past, LEGACY_ORPHAN_FAILURE_MESSAGE, 0);
   recordReviewLatencyEvent(db, {
     repo: REPO, prNumber: 106, eventType: 'reviewer_reaped',
     at: '2026-05-25T17:30:00.000Z', source: 'test', idempotencyKey: 'reaped-106', reason: 'dead-no-review',
@@ -357,9 +359,9 @@ test('reviewer slot health exposes every recovery state and a dead row cannot hi
   assert.deepEqual(snapshot.reviewerSlots.states, {
     active: 1,
     settling: 1,
-    retryable: 3,
+    retryable: 5,
     stale: 2,
-    impossible: 2,
+    impossible: 1,
     reaped: 1,
     recovered: 1,
   });
@@ -379,9 +381,19 @@ test('reviewer slot health exposes every recovery state and a dead row cannot hi
     'infra failed rows below the auto-recovery cap are still retryable'
   );
   assert.equal(
+    snapshot.reviewerSlots.slots.find((slot) => slot.prNumber === 105).state,
+    'retryable',
+    'under-cap failed-orphan rows are auto-reclaim candidates even without an infra failure class'
+  );
+  assert.equal(
     snapshot.reviewerSlots.slots.find((slot) => slot.prNumber === 110).state,
     'retryable',
     'infra failed-orphan rows below the auto-recovery cap are visible as retryable'
+  );
+  assert.equal(
+    snapshot.reviewerSlots.slots.find((slot) => slot.prNumber === 112).state,
+    'retryable',
+    'legacy failed-orphan rows below the auto-recovery cap stay out of the operator-actionable bucket'
   );
   assert.equal(
     snapshot.reviewerSlots.slots.find((slot) => slot.prNumber === 111).state,

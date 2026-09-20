@@ -145,9 +145,11 @@ The Grafana dashboard lives at
   guard; `recovered` for rows whose current evidence is active and whose latest
   recovery event is a current `reviewer_reattached`; `stale` for `reviewing`
   rows whose pgid or lease evidence is missing or expired; `retryable` for
-  pending/pending-upstream rows, current reaped rows, and infra-class
-  failed/failed-orphan rows still below the auto-recovery cap; `reaped` for
-  rows with a current `reviewer_reaped` event; and `impossible` for rows that
+  pending/pending-upstream rows, infra-class `failed` rows still below the
+  auto-recovery cap, and under-cap `failed-orphan` rows still owned by the
+  failed-orphan auto-reclaim path; `reaped` for rows with a current
+  `reviewer_reaped` event, which takes precedence over `retryable`; and
+  `impossible` for rows that
   cannot be retried automatically, including missing session identity,
   non-infra terminal failures, and infra failures at the cap. This metric is
   derived from `reviewed_prs` plus the latest reviewer recovery event; it is the
@@ -183,6 +185,9 @@ The Grafana dashboard lives at
   403 rate-limit, or exit 65.
 - `review_pipeline_hammer_dispatch_stalled`: conflicted PR backlog exists while
   the dispatch daemon log has no recent hammer spawn.
+- `review_pipeline_hammer_dispatch_stall_blind`: 1 when the hammer-dispatch
+  stall detector cannot decide because its required dispatch log evidence is
+  missing; a blind snapshot is a data gap, not a healthy zero.
 - `review_pipeline_dag_autowalk_healthy`: dag-autowalk LaunchAgent last-exit
   and recent-log health.
 - `review_pipeline_sentinel_finding_active`: 1 when a finding code is currently

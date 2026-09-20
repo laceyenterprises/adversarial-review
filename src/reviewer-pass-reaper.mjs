@@ -470,11 +470,11 @@ function reapRunningPassTimeouts({
           repo: row.repo,
           prNumber: row.pr_number,
           revisionRef: row.head_sha || null,
-          eventType: 'reviewer_reaped',
+          eventType: 'reviewer_reattached',
           at: endedAt,
           source: 'reviewer-pass-reaper',
           sourceRef: String(row.pass_id),
-          idempotencyKey: `reviewer-pass-reaped:${row.pass_id}`,
+          idempotencyKey: `reviewer-pass-reattached:${row.pass_id}`,
           reason: POSTED_REVIEW_ARTIFACT_RECOVERY_REASON,
           payload: { passId: row.pass_id, outcome: 'recovered-posted-review' },
         });

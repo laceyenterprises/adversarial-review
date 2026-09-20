@@ -227,6 +227,13 @@ test('reapRunningPassTimeouts completes stale running pass that already posted a
     assert.equal(review.quota_reset_at_utc, null);
     assert.equal(review.review_attempts, 1);
     assert.equal(review.infra_auto_recover_attempts, 0);
+    const events = db.prepare(
+      `SELECT event_type, reason FROM review_latency_events WHERE repo = ? AND pr_number = ?`
+    ).all('laceyenterprises/agent-os', 133);
+    assert.deepEqual(events, [{
+      event_type: 'reviewer_reattached',
+      reason: 'running-pass-had-github-review-artifact',
+    }]);
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

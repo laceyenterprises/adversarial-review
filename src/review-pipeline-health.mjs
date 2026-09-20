@@ -9,7 +9,10 @@ import { PROVIDER_OVERLOADED_FAILURE_CLASS } from './adapters/reviewer-runtime/c
 import { ROUND_BUDGET_BY_RISK_CLASS } from './follow-up-jobs.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS, quotaHoldDecision } from './quota-exhaustion.mjs';
 import { infraRecoverableFailureClass } from './reviewer-failure-classification.mjs';
-import { DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS } from './reviewer-lease.mjs';
+import {
+  DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS,
+  isReviewerLeaseExpired,
+} from './reviewer-lease.mjs';
 import {
   parseReviewerPassTimestampMs,
   REVIEWER_PASS_GENUINE_POSTED_REVIEW_WHERE_SQL,
@@ -132,6 +135,23 @@ const TOOL_ROOT = fileURLToPath(new URL('..', import.meta.url));
 // above this cap is the exact 2026-08-11 stuck-retry-loop SEV0 state: the
 // watcher's auto-recovery gave up and nothing else is re-arming the review.
 const INFRA_AUTO_RECOVER_CAP = DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS;
+
+function failedOrphanSlotClassification(row, nowMs) {
+  const attempts = Number(row?.infra_auto_recover_attempts || 0);
+  if (attempts >= INFRA_AUTO_RECOVER_CAP) {
+    return { state: 'impossible', reason: 'cap-exhausted' };
+  }
+  if (row?.pr_state && row.pr_state !== 'open') {
+    return { state: 'impossible', reason: 'pr-not-open' };
+  }
+  if (isReviewerLeaseExpired(row, new Date(nowMs))) {
+    return { state: 'retryable', reason: 'failed-orphan-auto-reclaim' };
+  }
+  if (!row?.reviewer_lease_expires_at && !row?.reviewer_timeout_ms) {
+    return { state: 'retryable', reason: 'failed-orphan-auto-reclaim' };
+  }
+  return { state: 'retryable', reason: 'lease-active' };
+}
 
 const FOLLOW_UP_JOB_DIRS = Object.freeze({
   pending: ['data', 'follow-up-jobs', 'pending'],
@@ -3553,9 +3573,10 @@ function summarizeReviewerSlots(db, {
 } = {}) {
   const rows = safeAll(
     db,
-    `SELECT r.repo, r.pr_number, r.review_status, r.reviewer,
+    `SELECT r.repo, r.pr_number, r.pr_state, r.review_status, r.reviewer,
             r.last_attempted_at, r.reviewer_session_uuid, r.reviewer_pgid,
-            r.reviewer_started_at, r.reviewer_head_sha, r.reviewer_lease_expires_at,
+            r.reviewer_started_at, r.reviewer_head_sha, r.reviewer_timeout_ms,
+            r.reviewer_lease_expires_at,
             r.infra_auto_recover_attempts, r.failure_message,
             e.event_type AS recovery_event_type, e.at AS recovery_event_at,
             e.reason AS recovery_reason
@@ -3605,7 +3626,11 @@ function summarizeReviewerSlots(db, {
         state = 'active';
         reason = 'durable-process-and-lease-evidence';
       }
-    } else if (status === 'failed' || status === 'failed-orphan') {
+    } else if (status === 'failed-orphan') {
+      const classification = failedOrphanSlotClassification(row, nowMs);
+      state = classification.state;
+      reason = classification.reason;
+    } else if (status === 'failed') {
       const failureClass = infraRecoverableFailureClass(row);
       if (failureClass && recoveryAttempts < INFRA_AUTO_RECOVER_CAP) {
         state = 'retryable';

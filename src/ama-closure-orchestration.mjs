@@ -53,6 +53,7 @@ import {
   findLiveAmaCloserLease,
   rekeyAmaCloserLease,
 } from './ama/closer-lease.mjs';
+import { requestEligibleHammerWake } from './hammer-wake.mjs';
 import { resolveRoundBudgetForJob, summarizePRRemediationLedger } from './follow-up-jobs.mjs';
 import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
 import { fetchPullRequestMergeability, fetchReviewBodiesForHead } from './github-api.mjs';
@@ -639,6 +640,7 @@ export async function maybeDispatchAmaClosureFor({
   dismissSupersededBlockingVerdictAtRemediatedHeadImpl =
     dismissSupersededBlockingVerdictAtRemediatedHead,
   writeAutonomousMergeDisabledAuditImpl = writeAutonomousMergeDisabledAudit,
+  requestEligibleHammerWakeImpl = requestEligibleHammerWake,
   fetchMergedProtectiveDependentsImpl = fetchMergedProtectiveDependentsForPr,
   fetchProtectivePredecessorStateImpl = fetchProtectivePredecessorStateForPr,
   emitProtectivePredecessorFindingImpl = null,
@@ -1134,6 +1136,18 @@ export async function maybeDispatchAmaClosureFor({
       { amaEnabled: true },
     );
   }
+
+  // RPL-05: wake only after the full policy snapshot has cleared, including
+  // the explicit protective-predecessor/gate-keeper hold above. This is an
+  // edge-trigger into the existing watcher AMA route, not merge authority.
+  requestEligibleHammerWakeImpl({
+    rootDir,
+    repo: repoPath,
+    prNumber,
+    headSha: currentPrHeadSha || candidate?.headSha || '',
+    eligibility: disabledEligibility,
+    log: logger,
+  });
 
   let allowStaleReviewHeadHammerResume = false;
   let hamTerminalRemediationEvidenceOptions = null;

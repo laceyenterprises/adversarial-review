@@ -34,6 +34,7 @@ import {
   resolveAgyPrintTimeoutMs,
   resolveAgyReviewerSubprocessTimeoutMs,
   resolveProgressTimeoutMs,
+  resolveFirstOutputTimeoutMs,
   resolveReviewerTimeoutMs,
 } from './reviewer-timeout.mjs';
 import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
@@ -689,6 +690,7 @@ async function reviewWithClaude(diff, extraContext = '', {
   logger = console,
   platform = process.platform,
   nowMs = () => Date.now(),
+  silentRetryAttempts = 1,
 } = {}) {
   const auth = await assertClaudeOAuthImpl({ resolveClaudeLaunchctlUidImpl, logger, platform });
 
@@ -729,6 +731,7 @@ async function reviewWithClaude(diff, extraContext = '', {
         env: subprocessEnv,
         cwd: reviewerSubprocessCwd,
         timeout: reviewerTimeoutMs,
+        progressTimeout: resolveFirstOutputTimeoutMs(subprocessEnv),
         maxBuffer: 10 * 1024 * 1024,
         ...(authTransport === 'broker' ? { useLaunchctl: false } : { uid: claudeLaunchctlUid }),
       }),
@@ -737,6 +740,25 @@ async function reviewWithClaude(diff, extraContext = '', {
   } catch (err) {
     if (err?.isLaunchctlSessionError) {
       throw err;
+    }
+    if (err?.progressTimedOut && silentRetryAttempts > 0) {
+      logger.warn?.(
+        `[reviewer] Claude emitted no output before the first-output deadline; ` +
+        `retrying claude with freshly prepared credentials (${silentRetryAttempts} retry remaining)`,
+      );
+      return reviewWithClaude(diff, extraContext, {
+        promptStage,
+        reviewerSubprocessCwd,
+        assertClaudeOAuthImpl,
+        spawnClaudeImpl,
+        launchctlRetryDelaysMs,
+        sleepImpl,
+        resolveClaudeLaunchctlUidImpl,
+        logger,
+        platform,
+        nowMs,
+        silentRetryAttempts: silentRetryAttempts - 1,
+      });
     }
     // Detect OAuth expiry in error output
     const msg = (err.message || '') + (err.stderr || '');

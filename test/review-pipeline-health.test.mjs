@@ -871,7 +871,10 @@ test('reviewer model silence ages out models with no posted review inside the ac
         reviewerActivityLookbackMs: 7 * 24 * 60 * 60 * 1000,
       },
     });
-    assert.equal(reviewerModelSilentDetails(snapshot, 'claude'), undefined);
+    const claude = reviewerModelSilentDetails(snapshot, 'claude');
+    assert.ok(claude);
+    assert.equal(claude.lastPostedAt, null);
+    assert.equal(claude.idleForWindow, true);
     assert.equal(reviewerModelSilentDetails(snapshot, 'gemini'), undefined);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -1060,7 +1063,11 @@ test('reviewer model silence clears after the activity lookback', () => {
     });
     assert.equal(reviewerModelSilentFinding(snapshot), undefined);
     const model = snapshot.reviewerModelSilence.models.find((entry) => entry.model === 'claude');
-    assert.equal(model, undefined);
+    assert.ok(model);
+    assert.equal(model.postedReviews, 0);
+    assert.equal(model.startedPasses, 0);
+    assert.equal(model.idleForWindow, true);
+    assert.equal(model.silent, false);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

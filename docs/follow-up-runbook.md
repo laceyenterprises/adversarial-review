@@ -1140,6 +1140,8 @@ Inspect in this order:
 
 ## Bottom line
 
+Claude's non-streaming CLI must emit its first byte within `reviewer.first_output_timeout_ms` (default `120000`, legacy env alias `ADVERSARIAL_REVIEWER_FIRST_OUTPUT_TIMEOUT_MS`). A silent invocation is killed, its slot is released, and Claude is retried once with freshly prepared broker credentials before the existing cross-model fallback policy can apply. Reviewer-model health is computed only from the configured recent activity window; a configured model with zero posts is explicitly reported as `idleForWindow` instead of inheriting healthy-looking lifetime totals.
+
 The system is intentionally conservative.
 
 - review posting is owned by the watcher path

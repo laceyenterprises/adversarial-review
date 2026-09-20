@@ -2730,6 +2730,13 @@ function schemaV1() {
             __nullable: true,
           },
           timeout_ms: { __type: TYPE_INT, __default: 1200000 },
+          // Non-streaming reviewer CLIs must produce their first byte by this
+          // deadline. A silent process is retried with freshly prepared auth.
+          first_output_timeout_ms: {
+            __type: TYPE_INT,
+            __default: 120000,
+            __min: 1000,
+          },
           // The reviewer is also killed if it makes no progress (no output
           // event) for this many ms. Distinct from the total wall-clock
           // timeout above — a 20-min reviewer that keeps producing output
@@ -3133,6 +3140,10 @@ export const ENV_ALIASES = {
   'reviewer.timeout_ms': {
     canonical: 'AGENT_OS_REVIEWER_TIMEOUT_MS',
     aliases: [['ADVERSARIAL_REVIEWER_TIMEOUT_MS', identity]],
+  },
+  'reviewer.first_output_timeout_ms': {
+    canonical: 'AGENT_OS_REVIEWER_FIRST_OUTPUT_TIMEOUT_MS',
+    aliases: [['ADVERSARIAL_REVIEWER_FIRST_OUTPUT_TIMEOUT_MS', identity]],
   },
   'reviewer.quota_check_enabled': {
     canonical: 'AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED',

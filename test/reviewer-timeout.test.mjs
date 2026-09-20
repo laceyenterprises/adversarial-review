@@ -5,10 +5,12 @@ import {
   AGY_PRINT_TIMEOUT_SUBPROCESS_SLACK_MS,
   DEFAULT_AGY_PRINT_TIMEOUT_MS,
   DEFAULT_PROGRESS_TIMEOUT_MS,
+  DEFAULT_FIRST_OUTPUT_TIMEOUT_MS,
   DEFAULT_REVIEWER_TIMEOUT_MS,
   resolveAgyPrintTimeoutMs,
   resolveAgyReviewerSubprocessTimeoutMs,
   resolveProgressTimeoutMs,
+  resolveFirstOutputTimeoutMs,
   resolveReviewerTimeoutMs,
 } from '../src/reviewer-timeout.mjs';
 import { AgentOSConfigError } from '../src/config-loader.mjs';
@@ -50,6 +52,14 @@ test('resolveReviewerTimeoutMs fails loud for non-integer env overrides', () => 
 
 test('default reviewer progress timeout is 15 minutes', () => {
   assert.equal(DEFAULT_PROGRESS_TIMEOUT_MS, 15 * 60 * 1000);
+});
+
+test('Claude first-output deadline defaults to two minutes and is configurable', () => {
+  assert.equal(DEFAULT_FIRST_OUTPUT_TIMEOUT_MS, 120_000);
+  assert.equal(resolveFirstOutputTimeoutMs({}), 120_000);
+  assert.equal(resolveFirstOutputTimeoutMs({
+    ADVERSARIAL_REVIEWER_FIRST_OUTPUT_TIMEOUT_MS: '45000',
+  }), 45_000);
 });
 
 test('resolveProgressTimeoutMs follows the reviewer env override parser shape', () => {

@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 import {
   evaluateMergeEligibility,
@@ -9,6 +11,7 @@ import {
 } from '../src/ama/merge-eligibility.mjs';
 
 const HEAD = 'd1c064df0f16dff999adeb51484fcd0a8a0747b6';
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
 
 // A fully-eligible snapshot: settled-success verdict, two green check-runs, an
 // open MERGEABLE / non-BEHIND PR, matching heads, lease held. Every table case
@@ -306,6 +309,30 @@ test('exported vocabulary is stable and frozen', () => {
     'duplicate-family-unresolved',
   ]);
   assert.throws(() => MERGE_ELIGIBILITY_REASONS.push('nope'));
+});
+
+test('runtime merge-eligibility snapshots pass live labels into the shared predicate', () => {
+  for (const relativePath of [
+    'templates/hammer-prompt.md',
+    'src/ama-closure-orchestration.mjs',
+  ]) {
+    const source = readFileSync(`${ROOT}/${relativePath}`, 'utf8');
+    const callStart = source.indexOf('evaluateMergeEligibility({');
+    assert.notEqual(callStart, -1, `${relativePath} should call evaluateMergeEligibility with an object snapshot`);
+    const resultUseEnd = source.indexOf('}).eligible', callStart);
+    const statementEnd = source.indexOf('});', callStart);
+    const callEnd = resultUseEnd === -1
+      ? statementEnd
+      : statementEnd === -1
+        ? resultUseEnd
+        : Math.min(resultUseEnd, statementEnd);
+    assert.notEqual(callEnd, -1, `${relativePath} should use the merge-eligibility result`);
+    assert.match(
+      source.slice(callStart, callEnd),
+      /\blabels\s*:/,
+      `${relativePath} must provide labels so duplicate-family hold evaluation is explicit`,
+    );
+  }
 });
 
 // The hammer inline gate (MSM-01) required at least one check AND all green;

@@ -74,7 +74,10 @@ The primary key is `(repo, pr_number)`. The watcher keeps candidate
 rows current for every PR still mapped to an active family, including PRs that
 became merged, closed, or suppressed after the family was first detected. This
 prevents stale `open` candidate state from surviving while sibling PRs keep the
-family advisory active. Existing databases created with the older
+family advisory active. When at least one member of an advisory family is
+observed in the current open-PR discovery slice, any previously open sibling
+from that same family that is absent from the slice is marked closed before the
+census re-evaluates the family. Existing databases created with the older
 `(family_id, repo, pr_number)` key are migrated in place by
 `ensureDuplicateFamilySchema(db)`.
 
@@ -115,6 +118,9 @@ family advisory active. Existing databases created with the older
   a candidate whose head moved, the override is marked stale for that observed
   head without regenerating the stale timestamp on later identical polls.
 - Missing or transiently unreadable dispatch provenance disables the duplicate
-  census for the tick rather than deactivating existing active families.
+  census for the tick rather than deactivating existing active families. When a
+  census tick fails, label reconciliation refuses to add or re-add
+  watcher-owned duplicate-family labels from unverified persisted state; a later
+  successful census is required before new hold projection resumes.
 - The tables contain no secrets; JSON payloads store PR metadata, labels,
   provenance resolution state, and operator disposition metadata only.

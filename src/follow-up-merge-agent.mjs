@@ -64,7 +64,6 @@ import {
 import { validateStartupRoleRegistry } from './role-registry.mjs';
 import { validateStartupDeliveryIdentity } from './adapters/comms/github-pr-comments/delivery-identity.mjs';
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from './config-loader.mjs';
-import { DUPLICATE_FAMILY_HOLD_LABEL } from './duplicate-family-gate.mjs';
 import classifyMergeAgentRescue, { parseReviewBody as parseMergeAgentRescueReviewBody } from './merge-agent-rescue-classifier.mjs';
 import {
   classifyBlockingFindings,
@@ -122,7 +121,7 @@ import { isRecordedDispatchAtLeastStuckMinAge } from './merge-agent-stuck-age.mj
 const execFileAsync = promisify(execFile);
 const MERGE_AGENT_DISPATCH_SCHEMA_VERSION = 1;
 const MERGE_AGENT_LIFECYCLE_CLEANUP_SCHEMA_VERSION = 1;
-const OPERATOR_SKIP_LABELS = new Set(['merge-agent-skip', MERGE_AGENT_STUCK_LABEL, 'do-not-merge', NO_MERGE_HOLD_LABEL, DUPLICATE_FAMILY_HOLD_LABEL]);
+const OPERATOR_SKIP_LABELS = new Set(['merge-agent-skip', MERGE_AGENT_STUCK_LABEL, 'do-not-merge', NO_MERGE_HOLD_LABEL]);
 const DEFAULT_HQ_PATH = 'hq';
 const HQ_WORKER_TEAR_DOWN_TIMEOUT_MS = 60_000;
 const HQ_DISPATCH_TIMEOUT_MS = 90_000;

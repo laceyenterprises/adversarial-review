@@ -511,6 +511,7 @@ function subjectLabelSuppressions(subject) {
 
 function refreshObservedDuplicateCandidateRows(db, subjectEntries, repoPath, now = new Date().toISOString()) {
   if (!repoPath) return;
+  const observedCandidateKeys = observedSubjectCandidateKeys(subjectEntries, repoPath);
   const updateObservedCandidate = db.prepare(
     `UPDATE duplicate_family_candidates
         SET title = ?,
@@ -525,6 +526,25 @@ function refreshObservedDuplicateCandidateRows(db, subjectEntries, repoPath, now
             updated_at = ?
       WHERE repo = ?
         AND pr_number = ?`
+  );
+  const selectOpenAdvisoryCandidates = db.prepare(
+    `SELECT duplicate_family_candidates.family_id,
+            duplicate_family_candidates.repo,
+            duplicate_family_candidates.pr_number
+       FROM duplicate_family_candidates
+       JOIN duplicate_families
+         ON duplicate_families.family_id = duplicate_family_candidates.family_id
+      WHERE duplicate_families.target_repo = ?
+        AND duplicate_families.status = ?
+        AND lower(duplicate_family_candidates.pr_state) = 'open'`
+  );
+  const markUnobservedCandidateClosed = db.prepare(
+    `UPDATE duplicate_family_candidates
+        SET pr_state = 'closed',
+            updated_at = ?
+      WHERE repo = ?
+        AND pr_number = ?
+        AND lower(pr_state) = 'open'`
   );
   const tx = db.transaction(() => {
     for (const entry of Array.isArray(subjectEntries) ? subjectEntries : []) {
@@ -547,6 +567,12 @@ function refreshObservedDuplicateCandidateRows(db, subjectEntries, repoPath, now
         repo,
         prNumber,
       );
+    }
+    for (const row of selectOpenAdvisoryCandidates.all(repoPath, DUPLICATE_FAMILY_STATUS_ADVISORY)) {
+      const key = `${row.repo}\0${row.pr_number}`;
+      if (observedCandidateKeys.has(key)) continue;
+      if (!familyHasObservedCandidate(db, row.family_id, observedCandidateKeys)) continue;
+      markUnobservedCandidateClosed.run(now, row.repo, row.pr_number);
     }
   });
   tx();
@@ -921,8 +947,12 @@ export function duplicateFamilyCandidateRows(db, familyId) {
   ).all(familyId);
 }
 
-export async function reconcileDuplicateFamilyLabels({ db, octokit, repoPath, logger = console } = {}) {
+export async function reconcileDuplicateFamilyLabels({ db, octokit, repoPath, logger = console, census = null } = {}) {
   if (!db || !octokit || !repoPath) return { inspected: 0, changed: 0 };
+  const projectionVerified = !census || (!census.error && Array.isArray(census.familyIds));
+  if (!projectionVerified) {
+    logger?.log?.(`[watcher] duplicate-family hold projection skipped for ${repoPath}: census state unverified this tick`);
+  }
   ensureDuplicateFamilySchema(db);
   const [owner, repo] = String(repoPath).split('/');
   if (!owner || !repo) return { inspected: 0, changed: 0 };
@@ -955,11 +985,8 @@ export async function reconcileDuplicateFamilyLabels({ db, octokit, repoPath, lo
     const current = lowerLabelSet(parseMaybeJson(row.labels_json, []));
     const next = new Set(current);
     const wanted = [DUPLICATE_FAMILY_LABEL, ...(held ? [DUPLICATE_FAMILY_HOLD_LABEL] : [])];
-    const additions = wanted.filter((name) => !current.has(name));
-    const removeHold = !held && (
-      current.has(DUPLICATE_FAMILY_HOLD_LABEL) ||
-      !current.has(DUPLICATE_FAMILY_LABEL)
-    );
+    const additions = projectionVerified ? wanted.filter((name) => !current.has(name)) : [];
+    const removeHold = !held && current.has(DUPLICATE_FAMILY_HOLD_LABEL);
     let persist = false;
     try {
       if (removeHold) {

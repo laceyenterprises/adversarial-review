@@ -376,11 +376,12 @@ test('label reconciler does not hold candidates suppressed by the census', async
     assert.equal(duplicateFamilyCandidateRows(db, result.familyIds[0]).length, 3);
 
     const labelAdds = [];
+    const labelRemovals = [];
     const octokit = {
       rest: {
         issues: {
           addLabels: async (payload) => labelAdds.push(payload),
-          removeLabel: async () => assert.fail('suppressed candidate must not need hold removal'),
+          removeLabel: async (payload) => labelRemovals.push(payload),
         },
       },
     };
@@ -397,6 +398,7 @@ test('label reconciler does not hold candidates suppressed by the census', async
       labelAdds.find((entry) => entry.issue_number === 333)?.labels,
       ['duplicate-family'],
     );
+    assert.deepEqual(labelRemovals, []);
   } finally {
     db.close();
   }
@@ -438,13 +440,11 @@ test('label reconciler releases inactive family hold once and persists label cac
 
     reconcileDuplicateFamiliesForRepo(db, [
       subject(341, { labels: ['duplicate-family', 'duplicate-family-hold'] }),
-      subject(342, { state: 'MERGED', labels: ['duplicate-family', 'duplicate-family-hold'] }),
     ], {
       repoPath: REPO,
       now: '2026-09-11T00:01:00.000Z',
       readBuildCompletionSignalForPrImpl: provenanceReader({
         341: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
-        342: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
       }),
     });
 
@@ -458,6 +458,50 @@ test('label reconciler releases inactive family hold once and persists label cac
       'SELECT labels_json FROM duplicate_family_candidates WHERE repo = ? AND pr_number = ?'
     ).get(REPO, 341).labels_json);
     assert.deepEqual(labels, ['duplicate-family']);
+  } finally {
+    db.close();
+  }
+});
+
+test('label reconciler skips hold additions when the census failed this tick', async () => {
+  const db = memoryDb();
+  try {
+    const first = reconcileDuplicateFamiliesForRepo(db, [
+      subject(351, { labels: [] }),
+      subject(352, { labels: [] }),
+    ], {
+      repoPath: REPO,
+      now: '2026-09-11T00:00:00.000Z',
+      readBuildCompletionSignalForPrImpl: provenanceReader({
+        351: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+        352: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+      }),
+    });
+    assert.equal(first.familyIds.length, 1);
+
+    const addCalls = [];
+    const logLines = [];
+    const octokit = {
+      rest: {
+        issues: {
+          addLabels: async (payload) => addCalls.push(payload),
+          removeLabel: async () => {},
+        },
+      },
+    };
+
+    const result = await reconcileDuplicateFamilyLabels({
+      db,
+      octokit,
+      repoPath: REPO,
+      logger: { log: (line) => logLines.push(line), error() {} },
+      census: { families: [], familyIds: [], error: new Error('missing-ledger-target') },
+    });
+
+    assert.equal(result.inspected, 2);
+    assert.equal(result.changed, 0);
+    assert.deepEqual(addCalls, []);
+    assert.match(logLines.join('\n'), /hold projection skipped/);
   } finally {
     db.close();
   }

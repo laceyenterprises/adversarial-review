@@ -1051,6 +1051,7 @@ export async function maybeDispatchAmaClosureFor({
     requiredGateContext,
     branchProtectionRequiredContexts,
     requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
+    labels: Array.isArray(labelNames) ? labelNames : [],
     candidateHead: currentPrHeadSha || candidate?.headSha || '',
     validatedHead: reviewState.headSha,
   });

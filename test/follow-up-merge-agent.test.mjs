@@ -1873,6 +1873,14 @@ test('merge-agent-requested still respects hard stops and active remediation', (
   );
   assert.equal(
     pickMergeAgentDispatch(makeJob({
+      labels: [{ name: 'merge-agent-requested' }, { name: 'duplicate-family-hold' }],
+      mergeAgentRequest: makeMergeAgentRequest(),
+      mergeable: 'CONFLICTING',
+    })),
+    'skip-operator-skip'
+  );
+  assert.equal(
+    pickMergeAgentDispatch(makeJob({
       labels: [{ name: 'merge-agent-requested' }, { name: 'merge-agent-stuck' }],
       mergeAgentRequest: makeMergeAgentRequest(),
       mergeable: 'CONFLICTING',

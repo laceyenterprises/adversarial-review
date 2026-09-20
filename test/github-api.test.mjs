@@ -2166,6 +2166,7 @@ export async function load(url, context, nextLoad) {
         export function listPendingMergeCloseouts() { return []; }
         export function readLatestCompletedReviewerPassEndedAt() { return null; }
         export function readReviewerPassLogins() { return []; }
+        export function recordReviewLatencyEvent() { return null; }
         export function recordMergeCloseout() { return { changes: 0 }; }
         export function recordMergeCloseoutScrapeFailure() { return { changes: 0 }; }
         export function recordReviewLatencyEvent() { return { event_id: 0 }; }

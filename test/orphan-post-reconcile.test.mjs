@@ -171,7 +171,7 @@ test('apply leaves an orphan unchanged when GitHub has no matching reviewer post
   db.close();
 });
 
-test('apply links a reaped failed pass and removes it from first-pass depth', async () => {
+test('apply leaves a reaped failed pass unchanged and reports row-only reconciliation', async () => {
   const db = fixture();
   db.prepare("UPDATE reviewer_passes SET status = 'failed', ended_at = '2026-09-20T06:25:00Z'").run();
   const queueCalls = [];
@@ -181,19 +181,19 @@ test('apply links a reaped failed pass and removes it from first-pass depth', as
     listReviews: async () => [POSTED_REVIEW],
     queueFollowUpForRecoveredPostedReviewImpl: queueStub(queueCalls),
   });
-  assert.equal(result.reconciled, 1);
-  assert.equal(result.reconciledRowOnly, 0);
-  assert.equal(result.results[0].action, 'reconciled');
-  assert.equal(queueCalls.length, 1);
+  assert.equal(result.reconciled, 0);
+  assert.equal(result.reconciledRowOnly, 1);
+  assert.equal(result.results[0].action, 'reconciled-row-only');
+  assert.equal(queueCalls.length, 0);
   assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'posted');
   const pass = db.prepare('SELECT status, ended_at, gh_comment_id, body_md FROM reviewer_passes').get();
   assert.deepEqual(pass, {
-    status: 'completed',
-    ended_at: POSTED_REVIEW.submitted_at,
-    gh_comment_id: String(POSTED_REVIEW.id),
-    body_md: POSTED_REVIEW.body,
+    status: 'failed',
+    ended_at: '2026-09-20T06:25:00Z',
+    gh_comment_id: null,
+    body_md: null,
   });
-  assert.deepEqual(result.firstPassQueue, { before: 1, after: 0 });
+  assert.deepEqual(result.firstPassQueue, { before: 1, after: 1 });
   db.close();
 });
 
@@ -214,7 +214,7 @@ test('apply accepts a review artifact already linked to another pass for the sam
   db.close();
 });
 
-test('apply completes a reaped failed pass and queues follow-up recovery', async () => {
+test('apply leaves a non-running failed pass unchanged', async () => {
   const db = fixture({ attempts: 4, passStatus: 'failed' });
   const queueCalls = [];
   const result = await reconcilePostedFailedOrphans({
@@ -223,21 +223,20 @@ test('apply completes a reaped failed pass and queues follow-up recovery', async
     listReviews: async () => [POSTED_REVIEW],
     queueFollowUpForRecoveredPostedReviewImpl: queueStub(queueCalls),
   });
-  assert.equal(result.reconciled, 1);
-  assert.equal(result.reconciledRowOnly, 0);
-  assert.equal(result.results[0].action, 'reconciled');
-  assert.equal(queueCalls.length, 1);
-  assert.equal(result.results[0].followUp.queued, true);
+  assert.equal(result.reconciled, 0);
+  assert.equal(result.reconciledRowOnly, 1);
+  assert.equal(result.results[0].action, 'reconciled-row-only');
+  assert.equal(queueCalls.length, 0);
   const pass = db.prepare(
     'SELECT status, verdict, gh_comment_id, body_md FROM reviewer_passes'
   ).get();
   assert.deepEqual(pass, {
-    status: 'completed',
-    verdict: 'request-changes',
-    gh_comment_id: String(POSTED_REVIEW.id),
-    body_md: POSTED_REVIEW.body,
+    status: 'failed',
+    verdict: null,
+    gh_comment_id: null,
+    body_md: null,
   });
-  assert.deepEqual(result.firstPassQueue, { before: 1, after: 0 });
+  assert.deepEqual(result.firstPassQueue, { before: 1, after: 1 });
   db.close();
 });
 

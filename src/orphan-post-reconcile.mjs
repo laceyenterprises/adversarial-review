@@ -75,7 +75,8 @@ export async function reconcilePostedFailedOrphans({
         SET ended_at = ?, status = 'completed', verdict = ?,
             body_md = COALESCE(body_md, ?), gh_comment_id = ?,
             body_captured_at = COALESCE(body_captured_at, ?)
-      WHERE pass_id = ? AND (gh_comment_id IS NULL OR gh_comment_id = ?)`
+      WHERE pass_id = ? AND (gh_comment_id IS NULL OR gh_comment_id = ?)
+        AND status = 'running' AND ended_at IS NULL`
   );
   const passByReviewId = db.prepare(
     `SELECT pass_id, repo, pr_number, reviewer_class, reviewer_model, metadata_json, head_sha,

@@ -24,7 +24,9 @@ import {
   REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS,
   REVIEW_PIPELINE_HEALTH_METRICS,
   collectReviewPipelineHealth,
+  evaluateReviewPipelineFindings,
   renderReviewPipelinePrometheus,
+  summarizeFirstPassCiOrphans,
   summarizeRoundBudgetAnomalies,
   resolveReviewPipelineHealthConfig,
   stoppedJobIsCiRegressionStopped,
@@ -70,6 +72,98 @@ function launchctlPrintError({ message = 'launchctl print failed', stdout = '', 
   error.stderr = stderr;
   return error;
 }
+
+test('first-pass CI orphan is distinct, per-head bounded, and suppressed by a live branch worker', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const queue = {
+    firstPassPrs: [{ repo: REPO, prNumber: 6903, reviewAttempts: 0, reviewerFailed: false }],
+  };
+  const prPayload = JSON.stringify({
+    state: 'OPEN',
+    headRefName: 'claude-code/wsb-build-pack',
+    headRefOid: 'abc123',
+  });
+  const execFileSyncImpl = (command, args) => {
+    assert.equal(command, 'gh');
+    return args.includes('--required')
+      ? JSON.stringify([
+          { name: 'fast-python-guards', state: 'FAILURE' },
+          { name: 'repo-guards', state: 'CANCELLED' },
+        ])
+      : prPayload;
+  };
+
+  const orphaned = summarizeFirstPassCiOrphans(queue, { rootDir, hqRoot, execFileSyncImpl });
+  assert.equal(orphaned.count, 1, JSON.stringify(orphaned));
+  assert.deepEqual(orphaned.prs[0].failedChecks, ['fast-python-guards', 'repo-guards']);
+  assert.equal(orphaned.prs[0].attempts, 0);
+  assert.equal(orphaned.prs[0].exhausted, false);
+
+  mkdirSync(path.dirname(orphaned.prs[0].statePath), { recursive: true });
+  writeFileSync(orphaned.prs[0].statePath, JSON.stringify({ attempts: 3 }));
+  const exhausted = summarizeFirstPassCiOrphans(queue, { rootDir, hqRoot, execFileSyncImpl });
+  assert.equal(exhausted.prs[0].exhausted, true);
+
+  const workerDir = path.join(hqRoot, 'workers', 'repair-1');
+  mkdirSync(workerDir, { recursive: true });
+  writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
+    branch: 'claude-code/wsb-build-pack',
+    launchRequestId: 'lrq-repair',
+  }));
+  const withLiveWorker = summarizeFirstPassCiOrphans(queue, {
+    rootDir,
+    hqRoot,
+    execFileSyncImpl: (command, args) => {
+      if (command === 'hq') return JSON.stringify({ status: 'running' });
+      if (args.includes('--required')) {
+        return JSON.stringify([{ name: 'fast-python-guards', state: 'FAILURE' }]);
+      }
+      return prPayload;
+    },
+  });
+  assert.equal(withLiveWorker.count, 0);
+});
+
+test('first-pass CI orphan replaces reviewer queue-starvation attribution', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 6903,
+    reviewStatus: 'pending',
+    reviewedAt: '2026-05-25T17:00:00.000Z',
+  });
+  const before = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    config: { queueStarvationMaxAgeMs: 10 * 60 * 1000 },
+  });
+  assert.ok(findingCodes(before).includes('review:queue_starvation'));
+
+  const orphan = {
+    repo: REPO,
+    prNumber: 6903,
+    headRefName: 'claude-code/wsb-build-pack',
+    headSha: 'abc123',
+    failedChecks: ['fast-python-guards'],
+    attempts: 0,
+    attemptCap: 3,
+    exhausted: false,
+    statePath: path.join(rootDir, 'data', 'first-pass-ci-orphans', 'state.json'),
+    dispatch: null,
+  };
+  const after = {
+    ...before,
+    firstPassCiOrphans: { count: 1, attemptCap: 3, prs: [orphan], errors: [] },
+  };
+  after.findings = evaluateReviewPipelineFindings(after, { observedAt: before.observedAt });
+  assert.ok(findingCodes(after).includes('review:first_pass_ci_orphan'));
+  assert.ok(!findingCodes(after).includes('review:queue_starvation'));
+
+  const capped = { ...after, firstPassCiOrphans: { ...after.firstPassCiOrphans, prs: [{ ...orphan, attempts: 3, exhausted: true }] } };
+  capped.findings = evaluateReviewPipelineFindings(capped, { observedAt: before.observedAt });
+  assert.ok(findingCodes(capped).includes('review:first_pass_ci_orphan_exhausted'));
+  assert.ok(!findingCodes(capped).includes('review:first_pass_ci_orphan'));
+});
 
 test('pipeline Sentinel findings are diagnostics, never pages', () => {
   assert.ok(REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS.length > 0);

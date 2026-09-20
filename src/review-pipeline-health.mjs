@@ -63,6 +63,7 @@ const DEFAULT_REVIEW_LANE_SHARE_SUPERMAJORITY_DISTINCT_PR_FLOOR = 2;
 // yet. A first-review SLA measured in tens of minutes does not describe a fleet
 // that reviews within ~3 minutes when healthy.
 const DEFAULT_QUEUE_STARVATION_MAX_AGE_MS = 10 * 60 * 1000;
+const DEFAULT_FIRST_PASS_CI_ORPHAN_ATTEMPT_CAP = 3;
 const DEFAULT_REMEDIATION_BACKLOG_THRESHOLD = 5;
 // A single park is normal: the daemon evaluates every tick and a PR can be
 // legitimately mid-flight. Ticketing starts once the SAME reason repeats, which
@@ -140,6 +141,7 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_queued_rereviews',
   'review_pipeline_queued_rereview_oldest_age_seconds',
   'review_pipeline_ci_blocked_rereviews',
+  'review_pipeline_first_pass_ci_orphans',
   'review_pipeline_operational_blocker_rounds',
   'review_pipeline_operational_blocker_oldest_age_seconds',
   'review_pipeline_remediation_backlog_jobs',
@@ -188,6 +190,7 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_queued_rereviews: 'Current count of pending re-review rows.',
   review_pipeline_queued_rereview_oldest_age_seconds: 'Age in seconds of the oldest pending re-review row.',
   review_pipeline_ci_blocked_rereviews: 'Current count of re-reviews parked behind failed external CI.',
+  review_pipeline_first_pass_ci_orphans: 'Current count of red first-pass PR heads with no live branch worker and no review verdict.',
   review_pipeline_operational_blocker_rounds: 'Current stopped remediation rounds grouped by operational blocker category.',
   review_pipeline_operational_blocker_oldest_age_seconds: 'Age in seconds of the oldest unresolved stopped remediation round for an operational blocker category.',
   review_pipeline_remediation_backlog_jobs: 'Current follow-up remediation job count by state.',
@@ -300,6 +303,22 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     category: 'review-pipeline',
     thresholdKey: 'queueStarvationMaxAgeMs',
     defaultThreshold: DEFAULT_QUEUE_STARVATION_MAX_AGE_MS,
+  },
+  {
+    code: 'review:first_pass_ci_orphan',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: null,
+    defaultThreshold: null,
+    thresholdDescription: 'an open first-pass PR has failing required checks, no verdict, and no live worker on its branch',
+  },
+  {
+    code: 'review:first_pass_ci_orphan_exhausted',
+    tier: 'page',
+    category: 'review-pipeline',
+    thresholdKey: null,
+    defaultThreshold: DEFAULT_FIRST_PASS_CI_ORPHAN_ATTEMPT_CAP,
+    thresholdDescription: 'automatic first-pass CI repair attempts reached the per-head cap',
   },
   {
     code: 'review:rereview_ci_blocked',
@@ -1996,6 +2015,121 @@ function summarizeFirstPassQueue(db, { nowMs, stoppedCiRegressionJobs = null }) 
     oldestFirstPass,
     firstPassPrs,
   };
+}
+
+function failedCheckNames(rollup) {
+  const failed = new Set();
+  for (const check of Array.isArray(rollup) ? rollup : []) {
+    const result = String(check?.conclusion || check?.state || '').toUpperCase();
+    if (!['FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED'].includes(result)) continue;
+    failed.add(String(check?.name || check?.context || 'unknown'));
+  }
+  return [...failed].sort();
+}
+
+function parseJsonArray(raw) {
+  try {
+    const parsed = JSON.parse(raw || '');
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function liveWorkerForBranch(hqRoot, branch, { execFileSyncImpl }) {
+  const workersDir = join(hqRoot, 'workers');
+  if (!branch || !existsSync(workersDir)) return null;
+  for (const workerId of readdirSync(workersDir)) {
+    const manifestPath = join(workersDir, workerId, 'workspace.json');
+    if (!existsSync(manifestPath)) continue;
+    let manifest;
+    try {
+      manifest = parseJson(readFileSync(manifestPath, 'utf8'), null);
+    } catch {
+      continue;
+    }
+    if (!manifest || manifest.branch !== branch || !manifest.launchRequestId) continue;
+    try {
+      const output = execFileSyncImpl(
+        'hq', ['dispatch', 'status', manifest.launchRequestId, '--json'],
+        { encoding: 'utf8', timeout: 5_000, stdio: ['ignore', 'pipe', 'pipe'] }
+      );
+      const status = String(parseJson(output, {})?.status || '').toLowerCase();
+      if (!['completed', 'failed', 'cancelled', 'canceled', 'lease_expired'].includes(status)) {
+        return { workerId, launchRequestId: manifest.launchRequestId, status: status || 'unknown' };
+      }
+    } catch {
+      // A stale or unreadable run is not proof that a worker is in flight.
+    }
+  }
+  return null;
+}
+
+function readFirstPassCiOrphanAttempt(rootDir, repo, prNumber, headSha) {
+  const safeRepo = String(repo).replaceAll('/', '__');
+  const statePath = join(rootDir, 'data', 'first-pass-ci-orphans', `${safeRepo}__${prNumber}__${headSha}.json`);
+  if (!existsSync(statePath)) return { statePath, attempts: 0, dispatch: null };
+  try {
+    const state = parseJson(readFileSync(statePath, 'utf8'), {});
+    return { statePath, attempts: Number(state.attempts || 0), dispatch: state.dispatch || null };
+  } catch {
+    return { statePath, attempts: 0, dispatch: null };
+  }
+}
+
+function summarizeFirstPassCiOrphans(firstPassQueue, {
+  rootDir,
+  hqRoot,
+  execFileSyncImpl,
+  attemptCap = DEFAULT_FIRST_PASS_CI_ORPHAN_ATTEMPT_CAP,
+}) {
+  const prs = [];
+  const errors = [];
+  for (const queued of firstPassQueue.firstPassPrs || []) {
+    if (queued.reviewAttempts > 0 || queued.reviewerFailed) continue;
+    try {
+      const output = execFileSyncImpl(
+        'gh', ['pr', 'view', String(queued.prNumber), '--repo', queued.repo, '--json',
+          'state,headRefName,headRefOid'],
+        { encoding: 'utf8', timeout: 20_000, stdio: ['ignore', 'pipe', 'pipe'] }
+      );
+      const pr = parseJson(output, {});
+      let checksOutput;
+      try {
+        checksOutput = execFileSyncImpl(
+          'gh', ['pr', 'checks', String(queued.prNumber), '--repo', queued.repo, '--required',
+            '--json', 'name,state'],
+          { encoding: 'utf8', timeout: 20_000, stdio: ['ignore', 'pipe', 'pipe'] }
+        );
+      } catch (error) {
+        // `gh pr checks` deliberately exits non-zero when checks are red while
+        // still returning the requested JSON on stdout. That is data, not a
+        // probe failure; only rethrow when there is no parseable payload.
+        checksOutput = String(error?.stdout || '');
+        if (parseJsonArray(checksOutput).length === 0) throw error;
+      }
+      const failedChecks = failedCheckNames(parseJsonArray(checksOutput));
+      if (String(pr.state).toUpperCase() !== 'OPEN' || failedChecks.length === 0) continue;
+      const liveWorker = liveWorkerForBranch(hqRoot, pr.headRefName, { execFileSyncImpl });
+      if (liveWorker) continue;
+      const attempt = readFirstPassCiOrphanAttempt(rootDir, queued.repo, queued.prNumber, pr.headRefOid);
+      prs.push({
+        repo: queued.repo,
+        prNumber: queued.prNumber,
+        headRefName: pr.headRefName,
+        headSha: pr.headRefOid,
+        failedChecks,
+        attempts: attempt.attempts,
+        attemptCap,
+        exhausted: attempt.attempts >= attemptCap,
+        statePath: attempt.statePath,
+        dispatch: attempt.dispatch,
+      });
+    } catch (error) {
+      errors.push(`${queued.repo}#${queued.prNumber}: ${String(error?.stderr || error?.message || error).slice(0, 300)}`);
+    }
+  }
+  return { count: prs.length, attemptCap, prs, errors };
 }
 
 const REREVIEW_DEFERRING_JOB_KINDS = new Set([
@@ -3840,7 +3974,15 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }
   }
 
-  const oldest = snapshot.firstPassQueue.oldestFirstPass;
+  const ciOrphanKeys = new Set((snapshot.firstPassCiOrphans?.prs || []).map(
+    (pr) => `${pr.repo}#${pr.prNumber}`
+  ));
+  const starvableFirstPassPrs = (snapshot.firstPassQueue.firstPassPrs || [])
+    .filter((pr) => !ciOrphanKeys.has(`${pr.repo}#${pr.prNumber}`));
+  const oldest = starvableFirstPassPrs.reduce(
+    (candidate, pr) => (!candidate || pr.ageMs > candidate.ageMs ? pr : candidate),
+    null
+  );
   if (oldest && oldest.ageMs > config.queueStarvationMaxAgeMs) {
     // TREC-01: this population is `pr_state='open' AND review_status='pending'`
     // read from the SQLite mirror, thresholded on elapsed age. When the mirror
@@ -3857,7 +3999,7 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
       code: 'review:queue_starvation',
       tier: 'page',
       subject:
-        `${snapshot.firstPassQueue.firstPassPrs.length} PR(s) awaiting first-pass review; oldest is `
+        `${starvableFirstPassPrs.length} PR(s) awaiting first-pass review; oldest is `
         + `${Math.round(oldest.ageMs / 60000)}m old`
         + (oldestUnverified ? ' (mirror state UNVERIFIED against GitHub)' : ''),
       message: oldest.reviewerFailed
@@ -3893,13 +4035,29 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
       details: {
         ...oldest,
         thresholdMs: config.queueStarvationMaxAgeMs,
-        depth: snapshot.firstPassQueue.firstPassPrs.length,
+        depth: starvableFirstPassPrs.length,
         failedCount: snapshot.firstPassQueue.failedCount,
         // Machine-readable so a consumer can filter without parsing prose.
         mirrorVerified: !oldestUnverified,
         mirrorReconciledAt: reconcile?.observedAt || null,
         mirrorUnverifiedCount: reconcile?.unresolvedCount ?? null,
       },
+    }));
+  }
+
+  for (const orphan of snapshot.firstPassCiOrphans?.prs || []) {
+    const exhausted = orphan.exhausted;
+    findings.push(buildFinding({
+      code: exhausted ? 'review:first_pass_ci_orphan_exhausted' : 'review:first_pass_ci_orphan',
+      tier: exhausted ? 'page' : 'ticket',
+      subject: `${orphan.repo}#${orphan.prNumber} has an unowned red first-pass head${exhausted ? ' and exhausted automatic repair' : ''}`,
+      message: `Head ${orphan.headSha} fails required check(s) ${orphan.failedChecks.join(', ')}; no review verdict or live worker owns branch ${orphan.headRefName}. Automatic repair attempts=${orphan.attempts}/${orphan.attemptCap}.`,
+      evidence: [`gh pr view ${orphan.prNumber} --repo ${orphan.repo}`, orphan.statePath],
+      recommendedAction: exhausted
+        ? `Automatic repair is capped for this PR head. Inspect ${orphan.statePath} and assign a human owner; do not delete the record merely to retry.`
+        : `The pipeline-health tick will dispatch a remediator with --pr ${orphan.prNumber}; verify it updates this same PR rather than opening another one.`,
+      observedAt,
+      details: orphan,
     }));
   }
 
@@ -4601,6 +4759,9 @@ function collectReviewPipelineHealth({
     const ciBlockedRereviews = db
       ? summarizeCiBlockedRereviews(db, { nowMs })
       : { count: 0, oldest: null, prs: [] };
+    const firstPassCiOrphans = config.hostChecksEnabled
+      ? summarizeFirstPassCiOrphans(firstPassQueue, { rootDir, hqRoot, execFileSyncImpl })
+      : { count: 0, attemptCap: DEFAULT_FIRST_PASS_CI_ORPHAN_ATTEMPT_CAP, prs: [], errors: [] };
     const queuedRereviews = db
       ? summarizeQueuedRereviews(db, followUpQueues.jobs, { nowMs, stoppedCiRegressionJobs })
       : { count: 0, oldest: null, prs: [] };
@@ -4736,6 +4897,7 @@ function collectReviewPipelineHealth({
       outage,
       hcpPreflightAborts,
       firstPassQueue,
+      firstPassCiOrphans,
       queuedRereviews,
       deferredRereviews,
       ciBlockedRereviews,
@@ -4885,6 +5047,7 @@ function renderReviewPipelinePrometheus(snapshot) {
     Math.round((snapshot.queuedRereviews?.oldest?.ageMs || 0) / 1000)
   );
   pushMetric('review_pipeline_ci_blocked_rereviews', {}, snapshot.ciBlockedRereviews?.count || 0);
+  pushMetric('review_pipeline_first_pass_ci_orphans', {}, snapshot.firstPassCiOrphans?.count || 0);
   const operationalBlockerCategories = snapshot.operationalBlockers?.byCategory?.length
     ? snapshot.operationalBlockers.byCategory
     : [{ category: 'none', count: 0, oldest: null }];
@@ -4996,6 +5159,7 @@ export {
   renderReviewPipelinePrometheus,
   resolveReviewPipelineHealthConfig,
   summarizeRoundBudgetAnomalies,
+  summarizeFirstPassCiOrphans,
   stoppedJobIsCiRegressionStopped,
   summarizeZombieReviewerPasses,
 };

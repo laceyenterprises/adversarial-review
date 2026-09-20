@@ -101,11 +101,15 @@ The Grafana dashboard lives at
 - `review_pipeline_merge_stalled_jobs`: clean `review-settled` verdict jobs
   whose PR row remains open past the merge-stall tick threshold.
 - `review_pipeline_conflicting_open_prs`: open non-draft PRs GitHub reports as
-  `CONFLICTING`.
+  `CONFLICTING` across the configured repository set.
 - `review_pipeline_conflicting_open_prs_collected`: 1 when the GitHub open-PR
-  listing for the conflicting-PR diagnostic was collected successfully and every
-  conflicting PR's local merge-tree probe completed, 0 when the snapshot is
-  blind. A blind snapshot is not equivalent to zero conflicts.
+  listing for every configured repository in the conflicting-PR diagnostic was
+  collected successfully, 0 when the listing snapshot is blind. A blind snapshot
+  is not equivalent to zero conflicts.
+- `review_pipeline_conflicting_open_prs_probe_coverage`: fraction of listed
+  conflicting PRs whose local `git merge-tree` probe completed successfully.
+  Host-checks-only collection reports `0` when conflicting PRs exist because no
+  local probes were attempted.
 - `review_pipeline_conflicting_open_pr_shared_path_groups`: local
   `git merge-tree --write-tree --name-only` conflict path groups shared by at
   least `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_MIN_SHARED_PATH_COUNT`
@@ -229,6 +233,7 @@ stored timestamp contract cannot silently leave this finding behind.
 | `review:merge_stalled` | a `stopped:review-settled` job remains open for >3 watcher ticks | ticket | the PR is merged/closed or the settled job is no longer past threshold |
 | `review:conflicting_open_prs` | GitHub reports open non-draft PRs as `CONFLICTING`, and at least one local `git merge-tree --write-tree --name-only` conflict path group is shared by the configured minimum PR count (default 5) | ticket | no conflict path group meets the shared-path threshold |
 | `review:conflicting_open_prs_unreadable` | SEN-02 `blind`: the GitHub open-PR listing or one or more per-PR merge-tree probes for conflicting-PR diagnostics could not be collected, so the snapshot cannot distinguish "zero conflicts" from "not fully measured". Never a health verdict. | ticket | the GitHub listing and every per-PR probe are collected again |
+| `review:conflicting_pr_unowned` | an open conflicting PR has no current-head remediation or merge ownership marker past the unowned-conflict age threshold (default 30m) | ticket | the PR gets a current-head ownership marker, leaves the conflicting/open population, or falls below the age threshold |
 | `review:ttm_budget_breach` | **SLOW** (trend, not alarm): open PR age exceeds a budget DERIVED from the measured merge distribution -- the configured percentile (default p90) of each review-round bucket, weighted-least-squares fitted to `base + review_rounds * per_round` and scaled by measured queue pressure (Little's Law, capped at 3x). Nothing here is a literal; change the distribution and the budget moves. | ticket | the PR merges/closes or falls back under the derived budget |
 | `review:pr_progress_stalled` | **STUCK** (page-worthy): an open PR is not progressing -- a re-review was requested and no reviewer pass has started since, or the reviewer lease expired while the row still claims an in-flight review. Independent of the TTM budget and of elapsed time. | ticket | a reviewer pass starts after the re-review request, or the stale lease is reclaimed/settled |
 | `review:rereview_lane_unfair_share` | one open PR consumes a sustained unfair share of recent re-review starts while queued re-review work exists | ticket | re-review starts are no longer monopolized by one PR, or queued re-review work clears |
@@ -242,6 +247,7 @@ stored timestamp contract cannot silently leave this finding behind.
 | `review:daemon_liveness` | required local pipeline LaunchAgent is not loaded | ticket | adversarial watcher, adversarial follow-up, and dispatch daemon labels are loaded |
 | `review:daemon_probe_failure` | required local pipeline LaunchAgent loaded state cannot be determined | ticket | launchctl probes can determine loaded state for adversarial watcher, adversarial follow-up, dispatch daemon, and dag-autowalk labels |
 | `review:dispatch_spawn_failures` | dispatch daemon stderr has recent closer/hammer spawn-failure signals over 1h | ticket | no matching recent dispatch daemon stderr lines remain |
+| `review:hammer_dispatch_stall_blind` | SEN-02 `blind`: the dispatch daemon log required by the hammer-dispatch stall detector is missing, so the snapshot cannot classify the conflicted backlog as healthy or stalled. Never a health verdict. | ticket | the dispatch daemon log surface is restored or the configured HQ root is corrected |
 | `review:hammer_dispatch_stalled_with_conflicts` | conflicted/dirty PRs are present in auto-merge state and no hammer dispatch has been observed in the dispatch daemon log within 2h | ticket | a hammer dispatch is observed in the dispatch daemon log, the conflicted backlog clears, or the log is outside host-check collection |
 | `review:dag_autowalk_launchd_unhealthy` | dag-autowalk is unloaded, last exit is non-zero, or logs are stale for >2h | ticket | dag-autowalk is loaded with a zero/unknown last exit and fresh logs |
 
@@ -311,6 +317,11 @@ All thresholds are configurable through environment variables:
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_MIN_SHARED_PATH_COUNT`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_FIRST_PASS_CI_ORPHAN_WORKER_STATUS_TIMEOUT_MS`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_LAUNCHD_TIMEOUT_MS`
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_REPOS`
+  (comma-separated repo slugs; when set, this fully replaces the default
+  conflicting-PR repo set)
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_UNOWNED_MAX_AGE_MS`
+  (default `1800000`)
 
 The queue-starvation finding uses `details.starvationCause` to choose operator
 advice. `reviewer-runtime-failure` means a reviewer already ran and failed, so

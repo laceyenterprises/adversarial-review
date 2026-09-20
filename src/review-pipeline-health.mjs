@@ -5623,10 +5623,16 @@ function collectReviewPipelineHealth({
       try {
         return readdirSync(hammerWakeDir)
           .filter((name) => name.endsWith('.json'))
-          .map((name) => readHammerWakeAudit(join(hammerWakeDir, name)))
+          .map((name) => {
+            const path = join(hammerWakeDir, name);
+            const stat = statSync(path);
+            return { path, mtimeMs: stat.mtimeMs };
+          })
+          .sort((a, b) => b.mtimeMs - a.mtimeMs)
+          .slice(0, 20)
+          .map((entry) => readHammerWakeAudit(entry.path))
           .filter(Boolean)
-          .sort((a, b) => String(b.requestedAt || b.observedAt || '').localeCompare(String(a.requestedAt || a.observedAt || '')))
-          .slice(0, 20);
+          .sort((a, b) => String(b.requestedAt || b.observedAt || '').localeCompare(String(a.requestedAt || a.observedAt || '')));
       } catch {
         return [];
       }

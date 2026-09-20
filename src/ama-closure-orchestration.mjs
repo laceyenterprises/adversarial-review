@@ -1140,14 +1140,21 @@ export async function maybeDispatchAmaClosureFor({
   // RPL-05: wake only after the full policy snapshot has cleared, including
   // the explicit protective-predecessor/gate-keeper hold above. This is an
   // edge-trigger into the existing watcher AMA route, not merge authority.
-  requestEligibleHammerWakeImpl({
-    rootDir,
-    repo: repoPath,
-    prNumber,
-    headSha: currentPrHeadSha || candidate?.headSha || '',
-    eligibility: disabledEligibility,
-    log: logger,
-  });
+  try {
+    requestEligibleHammerWakeImpl({
+      rootDir,
+      repo: repoPath,
+      prNumber,
+      headSha: currentPrHeadSha || candidate?.headSha || '',
+      eligibility: disabledEligibility,
+      log: logger,
+    });
+  } catch (err) {
+    logger?.warn?.(
+      `[watcher] eligible hammer wake failed for ${repoPath}#${prNumber}; continuing AMA closure: ` +
+      `${err?.message || err}`,
+    );
+  }
 
   let allowStaleReviewHeadHammerResume = false;
   let hamTerminalRemediationEvidenceOptions = null;

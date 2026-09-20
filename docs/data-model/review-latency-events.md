@@ -68,6 +68,10 @@ can no longer finish. `reviewer_reattached` records durable process adoption or
 successful restart reconciliation. Both use stable idempotency keys so repeated
 watcher sweeps preserve one audit event per recovery transition.
 
+Known `hammer_wake` writers are `source: 'follow-up-remediation'` for the
+settled clean-review handoff and `source: 'event-driven-hammer-wake'` for the
+AMA merge-eligibility watcher wake reservation in `src/hammer-wake.mjs`.
+
 `at` is the event time used for latency calculations. `recorded_at` is the
 database insert time and is diagnostic only. `source` and `source_ref` identify
 where the event came from, `reason` stores a short human-readable explanation,

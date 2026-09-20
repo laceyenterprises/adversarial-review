@@ -1179,14 +1179,20 @@ test('conflicting open PR diagnostic only finds shared conflict paths', () => {
 
 test('CONFLICTOWN-01: host checks always collect the cheap conflicting PR inventory', () => {
   const rootDir = tempRoot();
+  const incidentPrNumbers = [6919, 6918, 6916, 6914, 6909, 1081, 1078];
   const execFileSyncImpl = (command, args) => {
     if (command === 'gh') {
       assert.deepEqual(args.slice(-2), [
         '--json',
         'number,url,title,headRefName,headRefOid,baseRefName,mergeable,isDraft,updatedAt,labels',
       ]);
-      return JSON.stringify([{ number: 6914, mergeable: 'CONFLICTING', isDraft: false,
-        headRefOid: 'watchstarve', updatedAt: '2026-05-25T15:00:00.000Z' }]);
+      return JSON.stringify(incidentPrNumbers.map((number) => ({
+        number,
+        mergeable: 'CONFLICTING',
+        isDraft: false,
+        headRefOid: `incident-${number}`,
+        updatedAt: '2026-05-25T15:00:00.000Z',
+      })));
     }
     return 'state = running\nlast exit code = 0\n';
   };
@@ -1205,9 +1211,11 @@ test('CONFLICTOWN-01: host checks always collect the cheap conflicting PR invent
 
   assert.equal(snapshot.conflictingOpenPrs.enabled, true);
   assert.equal(snapshot.conflictingOpenPrs.collected, true);
-  assert.equal(snapshot.conflictingOpenPrs.count, 1);
+  assert.equal(snapshot.conflictingOpenPrs.count, 7);
   assert.equal(snapshot.conflictingOpenPrs.probedPrs, 0);
-  assert.ok(findingCodes(snapshot).includes('review:conflicting_pr_unowned'));
+  const finding = snapshot.findings.find(({ code }) => code === 'review:conflicting_pr_unowned');
+  assert.match(finding?.subject || '', /^7 conflicting PR\(s\)/);
+  assert.equal(finding?.evidence?.length, 7);
 });
 
 test('CONFLICTOWN-01: current-head ownership marker suppresses the unowned conflict finding', () => {

@@ -160,6 +160,36 @@ test('wake-path failure is retryable without allowing duplicate successful wakes
   assert.equal(calls.length, 1);
 });
 
+test('stale reserved wake reservation is recovered by a later caller', () => {
+  const rootDir = root();
+  const calls = [];
+  const dir = hammerWakeAuditDir(rootDir);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(hammerWakeAuditPath(rootDir, identity), `${JSON.stringify({
+    schemaVersion: 1,
+    event: 'hammer_wake',
+    ...identity,
+    observedAt: '2026-01-01T00:00:00.000Z',
+    outcome: 'reserved',
+    route: 'watcher-ama-merge-authority',
+  }, null, 2)}\n`);
+
+  const recovered = requestEligibleHammerWake({
+    rootDir,
+    ...identity,
+    eligibility: { eligible: true, reasons: [] },
+    observedAt: '2026-01-01T00:11:00.000Z',
+    nowMs: Date.parse('2026-01-01T00:11:00.000Z'),
+    requestWatcherWakeImpl: wakeImpl(calls),
+    log: { log() {} },
+  });
+  const audit = JSON.parse(readFileSync(hammerWakeAuditPath(rootDir, identity), 'utf8'));
+
+  assert.equal(recovered.outcome, 'requested');
+  assert.equal(audit.outcome, 'requested');
+  assert.equal(calls.length, 1);
+});
+
 test('health surface parses only the newest hammer wake audit files', () => {
   const rootDir = root();
   const dir = hammerWakeAuditDir(rootDir);

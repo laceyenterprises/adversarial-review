@@ -27,6 +27,7 @@ const HAMMER_WAKE_ELIGIBILITY_REASON = 'clean-current-head-ci-green-policy-eligi
 const HAMMER_WAKE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const HAMMER_WAKE_RETENTION_MAX_FILES = 5000;
 const HAMMER_WAKE_RETRY_ATTEMPTS = 3;
+const HAMMER_WAKE_STALE_RESERVATION_MS = 10 * 60 * 1000;
 
 function hammerWakeAuditDir(rootDir) {
   return join(rootDir, 'data', 'hammer-wakes');
@@ -39,6 +40,12 @@ function hammerWakeDedupeKey({ repo, prNumber, headSha, eligibilityReason }) {
 function hammerWakeAuditPath(rootDir, identity) {
   const digest = createHash('sha256').update(hammerWakeDedupeKey(identity)).digest('hex');
   return join(hammerWakeAuditDir(rootDir), `${digest}.json`);
+}
+
+function staleHammerWakeReservation(record, nowMs = Date.now(), maxAgeMs = HAMMER_WAKE_STALE_RESERVATION_MS) {
+  if (record?.outcome !== 'reserved') return false;
+  const observedMs = Date.parse(record.observedAt || '');
+  return Number.isFinite(observedMs) && nowMs - observedMs > maxAgeMs;
 }
 
 function sweepHammerWakeAudits(
@@ -96,6 +103,7 @@ function requestEligibleHammerWake({
   eligibilityReason = HAMMER_WAKE_ELIGIBILITY_REASON,
   eligibility = { eligible: false, reasons: ['eligibility-not-observed'] },
   observedAt = new Date().toISOString(),
+  nowMs = Date.now(),
   requestWatcherWakeImpl = requestWatcherWake,
   log = console,
   retryAttempt = 0,
@@ -111,6 +119,7 @@ function requestEligibleHammerWake({
   let reason = eligibilityReasons[0] || 'not-eligible';
   let auditPath = null;
   let latencyEvent = { recorded: false, reason: 'not-attempted' };
+  let retryable = false;
 
   if (!identity.repo || !Number.isInteger(identity.prNumber) || identity.prNumber <= 0 || !identity.headSha || !identity.eligibilityReason) {
     reason = 'invalid-wake-identity';
@@ -121,6 +130,7 @@ function requestEligibleHammerWake({
     } catch (err) {
       outcome = 'failed';
       reason = 'wake-audit-dir-unavailable';
+      retryable = true;
       latencyEvent = { recorded: false, reason: 'not-attempted', error: err?.message || String(err) };
     }
     if (outcome !== 'failed') {
@@ -202,25 +212,27 @@ function requestEligibleHammerWake({
       } catch (err) {
         if (err?.code === 'EEXIST') {
           const prior = readHammerWakeAudit(auditPath);
-          if (prior?.outcome === 'failed') {
+          if (prior?.outcome === 'failed' || staleHammerWakeReservation(prior, nowMs)) {
             if (retryAttempt + 1 >= HAMMER_WAKE_RETRY_ATTEMPTS) {
               outcome = 'failed';
               reason = 'wake-retry-contended';
+              retryable = true;
             } else {
-              const failedPath = `${auditPath.slice(0, -5)}.failed-${createHash('sha256')
+              const archivePath = `${auditPath.slice(0, -5)}.retry-${createHash('sha256')
                 .update(`${observedAt}:${process.pid}:${retryAttempt}`)
                 .digest('hex')
-                .slice(0, 12)}.json`;
+                .slice(0, 12)}.json.archived`;
               try {
                 // Rename is the retry hand-off CAS: only one caller can archive
-                // the failed reservation, then the ordinary exclusive create
+                // the failed or stale reservation, then the ordinary exclusive create
                 // below elects at most one replacement wake for this identity.
-                renameSync(auditPath, failedPath);
+                renameSync(auditPath, archivePath);
                 return requestEligibleHammerWake({
                   rootDir,
                   ...identity,
                   eligibility,
                   observedAt,
+                  nowMs,
                   requestWatcherWakeImpl,
                   log,
                   retryAttempt: retryAttempt + 1,
@@ -232,6 +244,7 @@ function requestEligibleHammerWake({
                     ...identity,
                     eligibility,
                     observedAt,
+                    nowMs,
                     requestWatcherWakeImpl,
                     log,
                     retryAttempt: retryAttempt + 1,
@@ -248,10 +261,12 @@ function requestEligibleHammerWake({
         } else {
           outcome = 'failed';
           reason = reservationCreated ? 'wake-unavailable' : 'wake-reservation-failed';
+          retryable = !reservationCreated;
           try {
             writeFileAtomic(auditPath, `${JSON.stringify({ ...reserved, outcome, reason, error: err?.message || String(err) }, null, 2)}\n`);
+            retryable = true;
           } catch {
-            // Best-effort audit only.
+            reason = reservationCreated ? 'wake-unavailable-audit-update-failed' : reason;
           }
         }
       }
@@ -267,7 +282,7 @@ function requestEligibleHammerWake({
     reason,
     eligibilityReasons,
     route: 'watcher-ama-merge-authority',
-    retryable: outcome === 'failed',
+    retryable,
     latencyEvent,
     ...(auditPath ? { auditPath } : {}),
   };

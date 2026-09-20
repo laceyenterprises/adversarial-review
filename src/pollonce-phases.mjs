@@ -63,6 +63,7 @@ import {
 import { maybeInlineFinalHammerAfterReview } from './final-to-hammer-handoff.mjs';
 import {
   applyReviewerWorkerClassFallbackToRoute,
+  FLEET_QUOTA_STATUS_TICK_CACHE_TTL_MS,
   resolveReviewerWorkerClassWithFallback,
   reviewWorkerClassFallback,
 } from './review-worker-class-fallback.mjs';
@@ -606,6 +607,7 @@ export async function processReviewSubject(entry, ctx) {
     reviewerDispatchCandidates,
     firstPassSpilloverController = null,
     postedReviewHandlers,
+    reviewerFleetQuotaStatusCache,
     reviewerMemoryReservationState,
     reviewerMemoryAdmissionSampleForTick,
     getRoutingTierReadinessForTick,
@@ -1521,13 +1523,20 @@ export async function processReviewSubject(entry, ctx) {
         fallbackWorkerClasses: reviewWorkerClassFallback(process.env),
         depthPressure: firstPassSpilloverController?.depthPressure?.() ?? null,
         execFileImpl: execFileAsync,
-        ...(reviewerMemoryReservationState?.fleetQuotaStatusCache
+        ...(reviewerFleetQuotaStatusCache
           ? {
-              fleetQuotaStatusCache: reviewerMemoryReservationState.fleetQuotaStatusCache,
-              fleetQuotaStatusCacheTtlMs: Number.MAX_SAFE_INTEGER,
+              fleetQuotaStatusCache: reviewerFleetQuotaStatusCache,
+              fleetQuotaStatusCacheTtlMs: FLEET_QUOTA_STATUS_TICK_CACHE_TTL_MS,
             }
           : {}),
       });
+
+      if (rwfDecision.reason === 'fleet-quota-status-unavailable') {
+        console.warn(
+          `[watcher] review-worker-class-fallback-fail-open repo=${repoPath} pr=${prNumber} ` +
+          `source=quota-status error=${JSON.stringify(rwfDecision.error || '')}`
+        );
+      }
 
       if (rwfDecision.fellBack) {
         const appliedFallback = applyReviewerWorkerClassFallbackToRoute({

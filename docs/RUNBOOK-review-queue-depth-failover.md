@@ -128,6 +128,9 @@ Log lines (stable, greppable prefixes):
 [watcher] review-queue-depth-failover disengage depth=… … engagement_spillover_reviews=…
 [watcher] review-queue-depth-spillover repo=… pr=… from=gemini to=codex depth=… slot=1/2 total_spillover_reviews=…
 [watcher] review-worker-class-fallback repo=… pr=… from=… to=… reason=queue-depth-pressure queueDepth=… queueDepthThreshold=…
+[watcher] review-worker-class-fallback quota-status timing duration_ms=… attempts=… outcome=…
+[watcher] review-worker-class-fallback-fail-open repo=… pr=… source=quota-status error=…
+[watcher] poll-cycle timing source="…" ok=… timed_out=… duration_ms=…
 ```
 
 ## Disarming it
@@ -147,6 +150,10 @@ recovery already returns review to `agy` on its own.
 - **Entitlement + quota.** A fallback class is only selected if its GitHub
   reviewer bot token is present *and* its provider has quota. Spilling onto a
   class that cannot boot converts a slow queue into a stalled one.
+- **Quota freshness is bounded.** Within one watcher tick, reviewer worker-class
+  fallback shares `hq fleet quota status --json` results for 60 seconds. That
+  includes fail-open probe errors, which are reused only for that same bounded
+  window and emit `review-worker-class-fallback-fail-open` per affected PR.
 - **The quota trigger is unchanged.** A quota-grounded primary still fails over
   at any depth, and does not consume the depth budget. The two triggers compose.
 - **The pool ceiling is untouched.** More concurrent `gemini` reviewers contend

@@ -41,6 +41,7 @@ const OVERDUE_RECOVERY_FAILURE_MESSAGE =
   'Overdue reviewer recovery could not prove the process exited cleanly without a late GitHub review; operator must verify before retrying.';
 const LEASE_RECOVERY_CAP_FAILURE_MESSAGE =
   'Reviewer lease recovery cap exhausted; leaving the review failed for operator inspection.';
+const POSTED_REVIEW_CLEANUP_RECHECK_DELAYS_MS = Object.freeze([250, 1000]);
 
 function splitRepoPath(repoPath) {
   const [owner, repo] = String(repoPath || '').split('/');
@@ -427,6 +428,8 @@ async function reconcileReviewerSessions({
   nullPgidLaunchGraceMs = DEFAULT_NULL_PGID_LAUNCH_GRACE_MS,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   postKillReviewReprobeDelaysMs = [500, 1500, 3000],
+  postedReviewCleanupRecheckDelaysMs = POSTED_REVIEW_CLEANUP_RECHECK_DELAYS_MS,
+  onCleanupFinding = null,
 } = {}) {
   const limit = Number.isInteger(Number(maxRows)) && Number(maxRows) >= 0
     ? Number(maxRows)
@@ -906,16 +909,48 @@ async function reconcileReviewerSessions({
       if (!(await probePostedReviewOrMarkSticky())) continue;
 
       if (postedReview) {
-        statements.markOrphan.run(
-          failureAt,
-          `Reviewer session ${row.reviewer_session_uuid} posted a GitHub review at ${postedReview.submitted_at} but process group ${row.reviewer_pgid} is still alive. Operator must inspect before retrying.`,
-          row.repo,
-          row.pr_number
-        );
-        log.warn(
-          `[watcher] reviewer_reattach_orphan repo=${row.repo} pr=${row.pr_number} ` +
+        await onTerminalDeadSession({
+          row,
+          state: 'completed',
+          settledAt: postedReview.submitted_at,
+          reason: 'posted-review-recovered-live-cleanup',
+        });
+        statements.markPosted.run(postedReview.submitted_at, row.repo, row.pr_number);
+        log.log(
+          `[watcher] reviewer_reattach_posted_recovered repo=${row.repo} pr=${row.pr_number} ` +
           `session=${row.reviewer_session_uuid} pgid=${row.reviewer_pgid} posted_at=${postedReview.submitted_at}`
         );
+
+        let cleanupAlive = true;
+        for (const delay of postedReviewCleanupRecheckDelaysMs) {
+          if (Number(delay) > 0) await sleep(Number(delay));
+          const cleanupProbe = typeof probeSession === 'function'
+            ? probeSession(row)
+            : probeReviewerSession({
+              pgid: row.reviewer_pgid,
+              sessionUuid: row.reviewer_session_uuid,
+              probeAlive,
+            });
+          cleanupAlive = typeof cleanupProbe === 'boolean'
+            ? cleanupProbe
+            : cleanupProbe?.alive === true;
+          if (!cleanupAlive) break;
+        }
+        if (cleanupAlive) {
+          const finding = {
+            id: 'reviewer:posted_process_group_leak',
+            severity: 'warning',
+            repo: row.repo,
+            prNumber: row.pr_number,
+            reviewerSessionUuid: row.reviewer_session_uuid,
+            reviewerPgid: row.reviewer_pgid,
+            postedAt: postedReview.submitted_at,
+          };
+          log.warn(
+            `[watcher] reviewer_posted_process_group_cleanup_finding ${JSON.stringify(finding)}`
+          );
+          await onCleanupFinding?.(finding);
+        }
         continue;
       }
 
@@ -1035,6 +1070,7 @@ export {
   NULL_PGID_FAILURE_MESSAGE,
   DEFAULT_NULL_PGID_LAUNCH_GRACE_MS,
   PGID_IDENTITY_FAILURE_MESSAGE,
+  POSTED_REVIEW_CLEANUP_RECHECK_DELAYS_MS,
   killPgid,
   makeReviewPostedProbe,
   findReviewerProcessBySessionUuid,
@@ -1043,5 +1079,6 @@ export {
   reconcileReviewerSessions,
   resolveNullPgidLaunchGraceMs,
   reviewerBotLogin,
+  reviewerBotLoginAliases,
   isTransientGithubProbeError,
 };

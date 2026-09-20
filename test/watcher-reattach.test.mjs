@@ -917,10 +917,12 @@ test('pre-existing reviewing rows without reviewer_session_uuid use legacy faile
   assert.match(log.lines.join('\n'), /Orphan reviewer detected/);
 });
 
-test('alive matching-head reviewer with an already posted review remains a sticky anomaly', async () => {
+test('posted review succeeds when its process group is briefly alive', async () => {
   const db = setupDb();
   seedReviewing(db, { reviewer: 'codex' });
   const log = makeLog();
+  let probes = 0;
+  const findings = [];
 
   await reconcileReviewerSessions({
     db,
@@ -929,15 +931,48 @@ test('alive matching-head reviewer with an already posted review remains a stick
     ]),
     now: new Date(FAILURE_AT),
     log,
-    probeSession: () => ({ alive: true, matched: true }),
+    probeSession: () => ({ alive: probes++ === 0, matched: true }),
     fetchHeadSha: async () => HEAD_SHA,
+    postedReviewCleanupRecheckDelaysMs: [0],
+    onCleanupFinding: async (finding) => findings.push(finding),
   });
 
   const row = readRow(db);
-  assert.equal(row.review_status, 'failed-orphan');
+  assert.equal(row.review_status, 'posted');
   assert.equal(row.review_attempts, 3);
-  assert.match(row.failure_message, /posted a GitHub review/);
-  assert.match(log.lines.join('\n'), /reviewer_reattach_orphan/);
+  assert.equal(row.failure_message, null);
+  assert.deepEqual(findings, []);
+  assert.match(log.lines.join('\n'), /reviewer_reattach_posted_recovered/);
+});
+
+test('posted review stays successful while a genuinely leaked process group produces a cleanup finding', async () => {
+  const db = setupDb();
+  seedReviewing(db, { reviewer: 'codex' });
+  const findings = [];
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([
+      { user: { login: 'codex-reviewer-lacey' }, submitted_at: '2026-05-11T05:13:09.000Z' },
+    ]),
+    now: new Date(FAILURE_AT),
+    log: makeLog(),
+    probeSession: () => ({ alive: true, matched: true }),
+    fetchHeadSha: async () => HEAD_SHA,
+    postedReviewCleanupRecheckDelaysMs: [0, 0],
+    onCleanupFinding: async (finding) => findings.push(finding),
+  });
+
+  assert.equal(readRow(db).review_status, 'posted');
+  assert.deepEqual(findings, [{
+    id: 'reviewer:posted_process_group_leak',
+    severity: 'warning',
+    repo: REPO,
+    prNumber: PR,
+    reviewerSessionUuid: 'session-70',
+    reviewerPgid: 9001,
+    postedAt: '2026-05-11T05:13:09.000Z',
+  }]);
 });
 
 test('claimed rows with null pgid adopt a live run-state pgid after watcher bounce', async () => {

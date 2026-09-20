@@ -746,7 +746,7 @@ function countActiveReviewerSpawnsByModel(activeReviewerSpawns) {
     const model = String(record?.reviewerModel || '').trim().toLowerCase();
     if (model) counts.set(model, (counts.get(model) || 0) + 1);
     counts.set('__total__', (counts.get('__total__') || 0) + 1);
-    const passKind = record?.passKind === 'rereview' ? 'rereview' : 'first-pass';
+    const passKind = record?.dispatchPassKind === 'rereview' ? 'rereview' : 'first-pass';
     const laneKey = `__lane:${passKind}`;
     counts.set(laneKey, (counts.get(laneKey) || 0) + 1);
   }
@@ -942,16 +942,6 @@ async function runBoundedReviewerDispatchQueue(candidates, {
       minShare: activeLaneState?.minShare,
     });
     const rereviewCap = Math.max(0, concurrencyLimit - rereviewFloor);
-    if (rereviewCap > 0 && counts.firstPass > 0 && initiallyActiveRereviews >= rereviewCap) {
-      for (const entry of pending) {
-        if (
-          !entry.started
-          && reviewerDispatchPassKind(entry.candidate) === 'rereview'
-        ) {
-          recordDeferredReason(entry, 'rereview-cap-reserves-first-pass-capacity');
-        }
-      }
-    }
     if (initiallyActive + active.size >= concurrencyLimit) {
       const resolvedNowMs = bothLanesPending ? safeReviewerNowMs(now) : undefined;
       for (const entry of orderPendingReviewerDispatchEntries(pending, {

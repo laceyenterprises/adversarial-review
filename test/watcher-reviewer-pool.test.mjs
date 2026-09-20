@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  countActiveReviewerSpawnsByModel,
   createDetachedReviewerDispatchTracker,
   createReviewerLaneState,
   createReviewerMemoryAdmissionSampler,
@@ -85,7 +86,7 @@ test('detached rereviews reserve a bounded first-pass slot instead of oversubscr
     blocked.deferredReasons.map((item) => [item.prNumber, item.reason]),
     [
       [6912, 'reviewer-pool-saturated'],
-      [6917, 'rereview-cap-reserves-first-pass-capacity'],
+      [6917, 'reviewer-pool-saturated'],
     ],
   );
 
@@ -107,8 +108,33 @@ test('detached rereviews reserve a bounded first-pass slot instead of oversubscr
   assert.equal(admitted.dispatched, 1);
   assert.deepEqual(
     admitted.deferredReasons.map((item) => [item.prNumber, item.reason]),
-    [[6917, 'rereview-cap-reserves-first-pass-capacity']],
+    [[6917, 'reviewer-pool-saturated']],
   );
+});
+
+test('active spawn lane accounting uses dispatch lane, not reviewer attempt pass kind', () => {
+  const activeReviewerSpawns = new Map([
+    ['a', {
+      repo: 'laceyenterprises/agent-os',
+      pr: 6919,
+      reviewerModel: 'claude',
+      passKind: 'rereview',
+      dispatchPassKind: 'first-pass',
+    }],
+    ['b', {
+      repo: 'laceyenterprises/agent-os',
+      pr: 6920,
+      reviewerModel: 'claude',
+      passKind: 'rereview',
+      dispatchPassKind: 'rereview',
+    }],
+  ]);
+
+  const counts = countActiveReviewerSpawnsByModel(activeReviewerSpawns);
+
+  assert.equal(counts.get('__total__'), 2);
+  assert.equal(counts.get('__lane:first-pass'), 1);
+  assert.equal(counts.get('__lane:rereview'), 1);
 });
 
 test('reviewer pool caps concurrency at min(pool slots, available credentials)', async () => {

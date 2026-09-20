@@ -375,6 +375,26 @@ async function fetchAdversarialGateBranchProtection({
   };
 }
 
+async function fetchCachedAdversarialGateBranchProtection({
+  cache = null,
+  repoPath,
+  baseBranch = DEFAULT_BASE_BRANCH,
+  execFileImpl = execFileAsync,
+  env = process.env,
+  retryOptions = {},
+} = {}) {
+  if (!cache) {
+    return fetchAdversarialGateBranchProtection({ repoPath, baseBranch, execFileImpl, env, retryOptions });
+  }
+  const key = `${repoPath}\n${String(baseBranch || DEFAULT_BASE_BRANCH)}`;
+  let promise = cache.get(key);
+  if (!promise) {
+    promise = fetchAdversarialGateBranchProtection({ repoPath, baseBranch, execFileImpl, env, retryOptions });
+    cache.set(key, promise);
+  }
+  return promise;
+}
+
 function createBranchProtectionChecker({
   ttlMs = DEFAULT_BRANCH_PROTECTION_CACHE_TTL_MS,
   nowMs = () => Date.now(),
@@ -475,6 +495,7 @@ export {
   deleteBranchProtectionAuditRecord,
   ensureAdversarialGateRequiredContext,
   fetchAdversarialGateBranchProtection,
+  fetchCachedAdversarialGateBranchProtection,
   formatBranchProtectionWarning,
   normalizeRequiredContexts,
   resolveBaseBranchForRepo,

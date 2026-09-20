@@ -13,7 +13,7 @@ import { promisify } from 'node:util';
 import { summarizeChecksConclusion } from './checks-summary.mjs';
 import { createLogChangeGate } from './log-change-gate.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
-import { fetchAdversarialGateBranchProtection } from './branch-protection.mjs';
+import { fetchCachedAdversarialGateBranchProtection } from './branch-protection.mjs';
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
 import {
   FAST_MERGE_GH_TIMEOUT_MS,
@@ -2911,18 +2911,12 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
   let branchProtection = { requiredContexts: [], ok: false, reason: 'branch-protection-check-failed' };
   if (parsed.baseRefName) {
     try {
-      const cacheKey = `${repo}\n${parsed.baseRefName}`;
-      let protectionPromise = branchProtectionCache?.get(cacheKey);
-      if (!protectionPromise) {
-        protectionPromise = fetchAdversarialGateBranchProtection({
-          repoPath: repo,
-          baseBranch: parsed.baseRefName,
-          execFileImpl,
-          env,
-        });
-        branchProtectionCache?.set(cacheKey, protectionPromise);
-      }
-      const protection = await protectionPromise;
+      const protection = await fetchCachedAdversarialGateBranchProtection({
+        cache: branchProtectionCache,
+        repoPath: repo,
+        baseBranch: parsed.baseRefName,
+        execFileImpl, env,
+      });
       branchProtection = {
         requiredContexts: Array.isArray(protection?.requiredContexts) ? protection.requiredContexts : [],
         ok: protection?.ok === true,

@@ -85,17 +85,20 @@ export function createPollStarvationHandler({
       Promise.resolve()
         .then(() => deliverAlertFn(
           `Adversarial watcher poll starved: one tick has been in flight for ` +
-          `${Math.round(roundedMs / 60000)}m with no poll_counter advance. ` +
+          `${Math.round(roundedMs / 60000)}m with no poll_counter or in-poll heartbeat progress. ` +
           'New PRs are not being discovered.',
           {
             event: 'adversarial_review.poll_starved',
             payload: {
-              reason: 'poll-in-flight-past-sla-with-frozen-poll-counter',
+              reason: 'poll-in-flight-past-sla-without-heartbeat-progress',
               in_flight_ms: roundedMs,
               starvation_ms: starvationMs,
               consecutive_checks: checks,
               poll_counter: heartbeat?.poll_counter ?? null,
+              completed_poll_counter: heartbeat?.completed_poll_counter ?? null,
               last_poll_at: heartbeat?.last_poll_at ?? null,
+              last_review_at: heartbeat?.last_review_at ?? null,
+              last_spawn_decision_at: heartbeat?.last_spawn_decision_at ?? null,
             },
           },
         ))
@@ -106,7 +109,7 @@ export function createPollStarvationHandler({
     if (typeof requestRestartFn !== 'function') return;
     try {
       requestRestartFn({
-        reason: 'poll-in-flight-past-sla-with-frozen-poll-counter',
+        reason: 'poll-in-flight-past-sla-without-heartbeat-progress',
         inFlightMs: roundedMs,
         starvationMs,
         checks,

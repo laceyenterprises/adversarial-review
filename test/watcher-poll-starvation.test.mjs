@@ -2723,7 +2723,13 @@ test('poll-starvation handler marks the heartbeat, pages, and requests respawn w
     inFlightMs: 2_400_000,
     starvationMs: 900_000,
     checks: 3,
-    heartbeat: { poll_counter: 41, last_poll_at: '2026-08-25T10:00:00.000Z' },
+    heartbeat: {
+      poll_counter: 41,
+      completed_poll_counter: 7,
+      last_poll_at: '2026-08-25T10:00:00.000Z',
+      last_review_at: '2026-08-25T10:20:00.000Z',
+      last_spawn_decision_at: '2026-08-25T10:30:00.000Z',
+    },
   });
   await new Promise((resolve) => setImmediate(resolve));
 
@@ -2738,10 +2744,15 @@ test('poll-starvation handler marks the heartbeat, pages, and requests respawn w
 
   assert.equal(alerts.length, 1);
   assert.equal(alerts[0].meta.event, 'adversarial_review.poll_starved');
+  assert.match(alerts[0].text, /no poll_counter or in-poll heartbeat progress/);
   assert.equal(alerts[0].meta.payload.poll_counter, 41);
+  assert.equal(alerts[0].meta.payload.completed_poll_counter, 7);
+  assert.equal(alerts[0].meta.payload.last_review_at, '2026-08-25T10:20:00.000Z');
+  assert.equal(alerts[0].meta.payload.last_spawn_decision_at, '2026-08-25T10:30:00.000Z');
+  assert.equal(alerts[0].meta.payload.reason, 'poll-in-flight-past-sla-without-heartbeat-progress');
   assert.match(alerts[0].text, /in flight for 40m/);
   assert.equal(restarts.length, 1);
-  assert.equal(restarts[0].reason, 'poll-in-flight-past-sla-with-frozen-poll-counter');
+  assert.equal(restarts[0].reason, 'poll-in-flight-past-sla-without-heartbeat-progress');
   assert.equal(restarts[0].inFlightMs, 2_400_000);
   assert.equal(restarts[0].heartbeat.poll_counter, 41);
 });

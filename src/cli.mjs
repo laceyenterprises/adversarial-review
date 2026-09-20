@@ -27,6 +27,9 @@ Usage:
   adversarial-review tokens [--since 7d] [--by-pr | --by-reviewer] [--json]
   adversarial-review reviewer-roster [--json]
   adversarial-review duplicate-family packet <family-id> [--root <dir>] [--repo-dir <dir>] [--out <dir>] [--no-github]
+  adversarial-review duplicate-family select <family-id> --survivor <pr> --report <path> --reason <text> --salvage <text> --validation <text>
+  adversarial-review duplicate-family ignore <family-id> --pr <number> --reason <text>
+  adversarial-review duplicate-family abandon <family-id> --reason <text>
   adversarial-review handoff status [--repo <owner/repo>] [--window <24h>] [--root <dir>] [--json]
   adversarial-review handoff trace <owner/repo#pr> [--root <dir>] [--json]
   adversarial-review runtime status [--root <dir>] [--window <24h>] [--json]
@@ -167,8 +170,12 @@ async function main(argv, io = {}) {
     return reviewerRosterMain(rest, io);
   }
   if (command === 'duplicate-family') {
-    const { duplicateFamilyMain } = await import('./duplicate-family-packet.mjs');
-    return duplicateFamilyMain(rest, io);
+    if (rest[0] === 'packet') {
+      const { duplicateFamilyMain } = await import('./duplicate-family-packet.mjs');
+      return duplicateFamilyMain(rest, io);
+    }
+    const { duplicateFamilyWorkflowMain } = await import('./duplicate-family-workflow-cli.mjs');
+    return duplicateFamilyWorkflowMain(rest, io);
   }
   if (command === 'handoff') {
     return handoffMain(rest, io);

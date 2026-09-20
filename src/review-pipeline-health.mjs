@@ -78,6 +78,16 @@ const DEFAULT_MERGE_STALLED_MAX_TICKS = 3;
 const DEFAULT_PIPELINE_TICK_INTERVAL_MS = 5 * 60 * 1000;
 const DEFAULT_REMEDIATION_THROUGHPUT_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_AMA_CLOSER_LEASE_MAX_AGE_MS = 30 * 60 * 1000;
+const DEFAULT_REVIEWER_SLOT_SETTLING_MS = 60 * 1000;
+const REVIEWER_SLOT_STATES = Object.freeze([
+  'active',
+  'settling',
+  'retryable',
+  'stale',
+  'impossible',
+  'reaped',
+  'recovered',
+]);
 // Must stay ABOVE reviewer-pass-reaper's DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS.
 // That reaper is what actually ends a hung pass; this finding exists to catch a
 // reaper that is NOT doing its job. At the previous 30 minutes the ticket fired
@@ -165,6 +175,7 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_conflicting_open_pr_shared_path_groups',
   'review_pipeline_stale_ama_closer_leases',
   'review_pipeline_zombie_reviewer_passes',
+  'review_pipeline_reviewer_slots',
   'review_pipeline_round_budget_anomalies',
   'review_pipeline_launchd_service_up',
   'review_pipeline_dispatch_spawn_failures',
@@ -217,6 +228,7 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_conflicting_open_pr_shared_path_groups: 'Current count of conflict path groups shared by at least the configured minimum PR count.',
   review_pipeline_stale_ama_closer_leases: 'Current count of AMA closer leases for still-open PRs stuck pending or dispatched past the configured age.',
   review_pipeline_zombie_reviewer_passes: 'Current count of reviewer_passes rows stuck running past the configured age.',
+  review_pipeline_reviewer_slots: 'Current reviewer-capacity rows by explicit recovery state.',
   review_pipeline_round_budget_anomalies: 'Current count of remediation jobs whose rounds exceed or misuse their risk-class budget.',
   review_pipeline_launchd_service_up: 'Whether required local pipeline launchd services are loaded.',
   review_pipeline_dispatch_spawn_failures: 'Recent dispatch daemon stderr lines matching closer/hammer spawn failure patterns.',
@@ -3534,6 +3546,93 @@ function summarizeZombieReviewerPasses(db, { nowMs, config }) {
   };
 }
 
+function summarizeReviewerSlots(db, {
+  nowMs,
+  settlingMs = DEFAULT_REVIEWER_SLOT_SETTLING_MS,
+} = {}) {
+  const rows = safeAll(
+    db,
+    `SELECT r.repo, r.pr_number, r.review_status, r.reviewer,
+            r.last_attempted_at, r.reviewer_session_uuid, r.reviewer_pgid,
+            r.reviewer_started_at, r.reviewer_head_sha, r.reviewer_lease_expires_at,
+            r.infra_auto_recover_attempts, r.failure_message,
+            e.event_type AS recovery_event_type, e.at AS recovery_event_at,
+            e.reason AS recovery_reason
+       FROM reviewed_prs r
+       LEFT JOIN review_latency_events e
+         ON e.event_id = (
+           SELECT latest.event_id
+             FROM review_latency_events latest
+            WHERE latest.repo = r.repo
+              AND latest.pr_number = r.pr_number
+              AND latest.event_type IN ('reviewer_reaped', 'reviewer_reattached')
+            ORDER BY latest.at DESC, latest.event_id DESC
+            LIMIT 1
+         )
+      WHERE COALESCE(r.pr_state, 'open') NOT IN ('closed', 'merged')
+        AND r.review_status IN ('reviewing', 'pending', 'pending-upstream', 'failed', 'failed-orphan')
+      ORDER BY r.repo ASC, r.pr_number ASC`
+  );
+  const slots = rows.map((row) => {
+    const status = String(row.review_status || '');
+    const attemptAt = row.reviewer_started_at || row.last_attempted_at;
+    const attemptAgeMs = ageMs(nowMs, attemptAt);
+    const recoveryIsCurrent = Date.parse(row.recovery_event_at || '') >= Date.parse(attemptAt || '');
+    let state;
+    let reason;
+    if (status === 'reviewing') {
+      if (row.recovery_event_type === 'reviewer_reattached' && recoveryIsCurrent) {
+        state = 'recovered';
+        reason = row.recovery_reason || 'reattached';
+      } else if (attemptAgeMs !== null && attemptAgeMs <= settlingMs) {
+        state = 'settling';
+        reason = 'within-launch-guard';
+      } else if (!row.reviewer_session_uuid) {
+        state = 'impossible';
+        reason = 'missing-session-identity';
+      } else if (!row.reviewer_pgid) {
+        state = 'stale';
+        reason = 'missing-pgid';
+      } else if (!row.reviewer_lease_expires_at) {
+        state = 'stale';
+        reason = 'missing-lease';
+      } else if (Date.parse(row.reviewer_lease_expires_at) <= nowMs) {
+        state = 'stale';
+        reason = 'expired-lease';
+      } else {
+        state = 'active';
+        reason = 'durable-process-and-lease-evidence';
+      }
+    } else if (status === 'failed' || status === 'failed-orphan') {
+      state = 'impossible';
+      reason = row.failure_message || status;
+    } else if (row.recovery_event_type === 'reviewer_reaped' && recoveryIsCurrent) {
+      state = 'reaped';
+      reason = row.recovery_reason || 'capacity-released';
+    } else {
+      state = 'retryable';
+      reason = row.failure_message || status;
+    }
+    return {
+      repo: row.repo,
+      prNumber: row.pr_number,
+      state,
+      reason,
+      reviewStatus: status,
+      reviewer: row.reviewer || null,
+      sessionUuid: row.reviewer_session_uuid || null,
+      pgid: row.reviewer_pgid || null,
+      leaseExpiresAt: row.reviewer_lease_expires_at || null,
+      attemptAgeMs,
+      recoveryEventAt: row.recovery_event_at || null,
+      recoveryAttempts: Number(row.infra_auto_recover_attempts || 0),
+    };
+  });
+  const states = Object.fromEntries(REVIEWER_SLOT_STATES.map((state) => [state, 0]));
+  for (const slot of slots) states[slot.state] += 1;
+  return { settlingMs, states, slots };
+}
+
 // Detect PRs stranded in the review retry-loop SEV0 state: review_status='failed'
 // with the infra auto-recovery attempt budget at or over the cap. When the
 // watcher's bounded auto-recovery exhausts (attempts >= cap), it stops re-arming
@@ -5416,6 +5515,13 @@ function collectReviewPipelineHealth({
     const zombieReviewerPasses = db
       ? summarizeZombieReviewerPasses(db, { nowMs, config })
       : { thresholdMs: config.runningReviewerPassMaxAgeMs, rows: [] };
+    const reviewerSlots = db
+      ? summarizeReviewerSlots(db, { nowMs })
+      : {
+          settlingMs: DEFAULT_REVIEWER_SLOT_SETTLING_MS,
+          states: Object.fromEntries(REVIEWER_SLOT_STATES.map((state) => [state, 0])),
+          slots: [],
+        };
     const stuckReviewLoops = db
       ? summarizeStuckRetryLoops(db, { cap: INFRA_AUTO_RECOVER_CAP })
       : { cap: INFRA_AUTO_RECOVER_CAP, prs: [], byFailureClass: [], dominantFailureClass: null };
@@ -5526,6 +5632,7 @@ function collectReviewPipelineHealth({
       amaCloserLeases,
       daemonMergeParks,
       zombieReviewerPasses,
+      reviewerSlots,
       stuckReviewLoops,
       terminalReviewFailures,
       roundBudget,
@@ -5713,6 +5820,9 @@ function renderReviewPipelinePrometheus(snapshot) {
   );
   pushMetric('review_pipeline_stale_ama_closer_leases', {}, snapshot.amaCloserLeases?.stale?.length || 0);
   pushMetric('review_pipeline_zombie_reviewer_passes', {}, snapshot.zombieReviewerPasses?.rows?.length || 0);
+  for (const state of REVIEWER_SLOT_STATES) {
+    pushMetric('review_pipeline_reviewer_slots', { state }, snapshot.reviewerSlots?.states?.[state] || 0);
+  }
   pushMetric('review_pipeline_round_budget_anomalies', {}, snapshot.roundBudget?.anomalies?.length || 0);
   const launchdServices = snapshot.launchd?.services?.length
     ? snapshot.launchd.services
@@ -5787,4 +5897,5 @@ export {
   summarizeFirstPassCiOrphans,
   stoppedJobIsCiRegressionStopped,
   summarizeZombieReviewerPasses,
+  summarizeReviewerSlots,
 };

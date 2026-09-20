@@ -34,7 +34,7 @@ import {
 import { PROVIDER_OVERLOADED_FAILURE_CLASS } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS } from '../src/quota-exhaustion.mjs';
 import { parseArgs } from '../src/review-pipeline-health-cli.mjs';
-import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
+import { ensureReviewStateSchema, openReviewStateDb, recordReviewLatencyEvent } from '../src/review-state.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from '../src/review-statuses.mjs';
 import { DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS } from '../src/reviewer-pass-reaper.mjs';
 import { ensureTtmTrackerSchema } from '../src/ttm-tracker.mjs';
@@ -307,6 +307,59 @@ function openDb(rootDir) {
   ensureReviewStateSchema(db);
   return db;
 }
+
+test('reviewer slot health exposes every recovery state and a dead row cannot hide free capacity', (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const db = openDb(rootDir);
+  const insert = db.prepare(
+    `INSERT INTO reviewed_prs (
+       repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+       last_attempted_at, reviewer_session_uuid, reviewer_pgid,
+       reviewer_started_at, reviewer_lease_expires_at, failure_message
+     ) VALUES (?, ?, ?, 'codex', 'open', ?, ?, ?, ?, ?, ?, ?)`
+  );
+  const old = '2026-05-25T17:00:00.000Z';
+  const fresh = '2026-05-25T17:59:30.000Z';
+  const future = '2026-05-25T19:00:00.000Z';
+  insert.run(REPO, 101, '2026-05-25T16:00:00.000Z', 'reviewing', old, 's-active', 10101, old, future, null);
+  insert.run(REPO, 102, '2026-05-25T16:00:00.000Z', 'reviewing', fresh, 's-settling', null, null, null, null);
+  insert.run(REPO, 103, '2026-05-25T16:00:00.000Z', 'pending', old, null, null, null, null, 'retry me');
+  insert.run(REPO, 104, '2026-05-25T16:00:00.000Z', 'reviewing', old, 's-stale', null, old, null, null);
+  insert.run(REPO, 105, '2026-05-25T16:00:00.000Z', 'failed-orphan', old, 's-bad', null, old, null, 'corrupt identity');
+  insert.run(REPO, 106, '2026-05-25T16:00:00.000Z', 'pending', old, null, null, null, null, 'reaped');
+  insert.run(REPO, 107, '2026-05-25T16:00:00.000Z', 'reviewing', old, 's-recovered', 10701, old, future, null);
+  recordReviewLatencyEvent(db, {
+    repo: REPO, prNumber: 106, eventType: 'reviewer_reaped',
+    at: '2026-05-25T17:30:00.000Z', source: 'test', idempotencyKey: 'reaped-106', reason: 'dead-no-review',
+  });
+  recordReviewLatencyEvent(db, {
+    repo: REPO, prNumber: 107, eventType: 'reviewer_reattached',
+    at: '2026-05-25T17:30:00.000Z', source: 'test', idempotencyKey: 'reattached-107', reason: 'live-process-group',
+  });
+  db.close();
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    config: { hostChecksEnabled: false },
+  });
+  assert.deepEqual(snapshot.reviewerSlots.states, {
+    active: 1,
+    settling: 1,
+    retryable: 1,
+    stale: 1,
+    impossible: 1,
+    reaped: 1,
+    recovered: 1,
+  });
+  assert.equal(
+    snapshot.reviewerSlots.slots.find((slot) => slot.prNumber === 104).reason,
+    'missing-pgid',
+    'the observed dead-row pattern is visible as stale instead of consuming apparent active capacity'
+  );
+  assert.equal(snapshot.reviewerSlots.states.active + snapshot.reviewerSlots.states.recovered, 2);
+});
 
 function allowNullReviewerPassMetadata(rootDir) {
   const db = openDb(rootDir);

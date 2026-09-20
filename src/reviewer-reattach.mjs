@@ -12,6 +12,7 @@ import {
 } from './reviewer-lease.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { MARK_MERGED_PENDING_REVIEW_SKIPPED_SQL } from './review-state-statements.mjs';
+import { recordReviewLatencyEvent } from './review-latency-event-writer.mjs';
 
 const LEGACY_ORPHAN_FAILURE_MESSAGE =
   'Watcher restarted while review subprocess was in flight. ' +
@@ -455,6 +456,7 @@ async function reconcileReviewerSessions({
   nullPgidLaunchGraceMs = DEFAULT_NULL_PGID_LAUNCH_GRACE_MS,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   postKillReviewReprobeDelaysMs = [500, 1500, 3000],
+  recordReviewLatencyEventImpl = recordReviewLatencyEvent,
 } = {}) {
   const limit = Number.isInteger(Number(maxRows)) && Number(maxRows) >= 0
     ? Number(maxRows)
@@ -468,6 +470,30 @@ async function reconcileReviewerSessions({
     ? Number(leaseRecoveryMaxAttempts)
     : DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS;
   const nullPgidGraceMs = resolveNullPgidLaunchGraceMs(nullPgidLaunchGraceMs);
+
+  function recordRecoveryEvent(row, { eventType, reason, at = failureAt, payload = {} }) {
+    try {
+      recordReviewLatencyEventImpl(db, {
+        repo: row.repo,
+        prNumber: row.pr_number,
+        revisionRef: row.reviewer_head_sha || null,
+        eventType,
+        at,
+        source: 'reviewer-reattach',
+        sourceRef: row.reviewer_session_uuid || null,
+        idempotencyKey: `${eventType}:${row.repo}#${row.pr_number}:${row.reviewer_session_uuid || row.last_attempted_at || 'unknown'}:${reason}`,
+        reason,
+        payload: {
+          reviewer: row.reviewer || null,
+          sessionUuid: row.reviewer_session_uuid || null,
+          pgid: parsePositiveInteger(row.reviewer_pgid),
+          ...payload,
+        },
+      });
+    } catch (err) {
+      log.warn(`[watcher] reviewer recovery event write failed repo=${row.repo} pr=${row.pr_number} error=${err?.message || err}`);
+    }
+  }
 
   function recoveryCapAvailable(row) {
     return Number(row.infra_auto_recover_attempts || 0) < recoveryCap;
@@ -583,6 +609,11 @@ async function reconcileReviewerSessions({
           `session=${row.reviewer_session_uuid} token=${adoption.reattachToken || row.reviewer_session_uuid} ` +
           `pgid=${adoption.pgid}`
         );
+        recordRecoveryEvent(row, {
+          eventType: 'reviewer_reattached',
+          reason: adoption.source || 'process-evidence-adopted',
+          payload: { adoptedPgid: adoption.pgid },
+        });
       } else {
         if (processMatch?.found === null) {
           log.warn(
@@ -690,6 +721,12 @@ async function reconcileReviewerSessions({
             `[watcher] reviewer_reattach_null_pgid_recovered repo=${row.repo} pr=${row.pr_number} ` +
             `session=${row.reviewer_session_uuid} posted_at=${postedReview.submitted_at}`
           );
+          recordRecoveryEvent(row, {
+            eventType: 'reviewer_reattached',
+            reason: 'posted-review-recovered-null-pgid',
+            at: postedReview.submitted_at,
+            payload: { outcome: 'posted' },
+          });
           continue;
         }
 
@@ -712,6 +749,11 @@ async function reconcileReviewerSessions({
             `session=${row.reviewer_session_uuid} current_head=${currentHeadSha || 'unknown'} ` +
             `recovery_attempt=${Number(row.infra_auto_recover_attempts || 0) + 1}/${recoveryCap}`
           );
+          recordRecoveryEvent(row, {
+            eventType: 'reviewer_reaped',
+            reason: 'missing-pgid-no-live-reviewer',
+            payload: { outcome: 'requeued' },
+          });
         } else {
           markRecoveryCapFailed(row, NULL_PGID_DIAGNOSTIC_MESSAGE);
         }
@@ -985,6 +1027,11 @@ async function reconcileReviewerSessions({
         `[watcher] reviewer_reattach_alive repo=${row.repo} pr=${row.pr_number} ` +
         `reattached to reviewer session=${row.reviewer_session_uuid} pgid=${row.reviewer_pgid}`
       );
+      recordRecoveryEvent(row, {
+        eventType: 'reviewer_reattached',
+        reason: 'live-process-group',
+        payload: { outcome: 'active' },
+      });
       continue;
     }
 
@@ -1030,6 +1077,12 @@ async function reconcileReviewerSessions({
         `[watcher] reviewer_reattach_recovered repo=${row.repo} pr=${row.pr_number} ` +
         `session=${row.reviewer_session_uuid} pgid=${row.reviewer_pgid || 'unknown'} posted_at=${postedReview.submitted_at}`
       );
+      recordRecoveryEvent(row, {
+        eventType: 'reviewer_reattached',
+        reason: 'posted-review-recovered',
+        at: postedReview.submitted_at,
+        payload: { outcome: 'posted' },
+      });
       continue;
     }
 
@@ -1055,6 +1108,11 @@ async function reconcileReviewerSessions({
         `session=${row.reviewer_session_uuid} pgid=${row.reviewer_pgid || 'unknown'} ` +
         `recovery_attempt=${Number(row.infra_auto_recover_attempts || 0) + 1}/${recoveryCap}`
       );
+      recordRecoveryEvent(row, {
+        eventType: 'reviewer_reaped',
+        reason: 'dead-no-review',
+        payload: { outcome: 'requeued' },
+      });
     } else {
       if (leaseRecoveryEnabled) {
         markRecoveryCapFailed(row, deadNoReviewMessage);

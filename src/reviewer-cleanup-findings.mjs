@@ -29,6 +29,7 @@ function normalizeCleanupFinding(finding = {}, now = new Date()) {
     prNumber: Number(finding.prNumber || finding.pr_number || 0),
     reviewerSessionUuid: String(finding.reviewerSessionUuid || finding.reviewer_session_uuid || ''),
     reviewerPgid: Number(finding.reviewerPgid || finding.reviewer_pgid || 0),
+    matched: finding.matched === true || finding.matched === false ? finding.matched : null,
     postedAt: finding.postedAt ? String(finding.postedAt) : null,
     firstObservedAt: finding.firstObservedAt ? String(finding.firstObservedAt) : observedAt,
     lastObservedAt: observedAt,
@@ -95,12 +96,11 @@ function recheckReviewerCleanupFindings({
   let stillAlive = 0;
   let unknown = 0;
   for (const finding of findings) {
-    const row = {
-      reviewer_pgid: finding.reviewerPgid,
-      reviewer_session_uuid: finding.reviewerSessionUuid,
-    };
     try {
-      const probe = probeSessionImpl(row);
+      const probe = probeSessionImpl({
+        pgid: finding.reviewerPgid,
+        sessionUuid: finding.reviewerSessionUuid,
+      });
       const alive = typeof probe === 'boolean' ? probe : probe?.alive === true;
       if (!alive) {
         removeReviewerCleanupFinding(rootDir, finding.reviewerSessionUuid);

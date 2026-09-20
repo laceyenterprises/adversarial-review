@@ -10,6 +10,7 @@ import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import {
   LEGACY_ORPHAN_FAILURE_MESSAGE,
   NULL_PGID_FAILURE_MESSAGE,
+  POSTED_REVIEW_CLEANUP_RECHECK_DELAYS_MS,
   makeReviewPostedProbe,
   reconcileReviewerSessions,
 } from '../src/reviewer-reattach.mjs';
@@ -978,6 +979,10 @@ test('posted review succeeds when its process group is briefly alive', async () 
   assert.match(log.lines.join('\n'), /reviewer_reattach_posted_recovered/);
 });
 
+test('posted review cleanup default budget does not block the watcher poll', () => {
+  assert.deepEqual(POSTED_REVIEW_CLEANUP_RECHECK_DELAYS_MS, [0]);
+});
+
 test('posted review stays successful while a genuinely leaked process group produces a cleanup finding', async () => {
   const db = setupDb();
   seedReviewing(db, { reviewer: 'codex' });
@@ -1012,12 +1017,11 @@ test('posted review stays successful while a genuinely leaked process group prod
   }]);
 });
 
-test('posted review cleanup skips kill once the pass artifact is linked', async () => {
+test('posted review cleanup skips finding once the pass artifact is linked', async () => {
   const db = setupDb();
   seedReviewing(db, { reviewer: 'codex' });
   seedReviewerPassArtifact(db);
   const findings = [];
-  const killed = [];
 
   await reconcileReviewerSessions({
     db,
@@ -1027,15 +1031,12 @@ test('posted review cleanup skips kill once the pass artifact is linked', async 
     now: new Date(FAILURE_AT),
     log: makeLog(),
     probeSession: () => ({ alive: true, matched: true }),
-    killProcessGroup: (pgid, signal) => killed.push({ pgid, signal }),
     fetchHeadSha: async () => HEAD_SHA,
     postedReviewCleanupRecheckDelaysMs: [0],
-    postedReviewCleanupSigtermGraceMs: 0,
     onCleanupFinding: async (finding) => findings.push(finding),
   });
 
   assert.equal(readRow(db).review_status, 'posted');
-  assert.deepEqual(killed, []);
   assert.deepEqual(findings, []);
 });
 
@@ -1063,6 +1064,38 @@ test('posted review cleanup does not flag a recycled process group', async () =>
   assert.equal(readRow(db).review_status, 'posted');
   assert.deepEqual(killed, []);
   assert.deepEqual(findings, []);
+});
+
+test('live posted recovery CAS loses cleanly to the reviewer completion writer', async () => {
+  const db = setupDb();
+  seedReviewing(db, { reviewer: 'codex' });
+  const log = makeLog();
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([
+      { user: { login: 'codex-reviewer-lacey' }, submitted_at: '2026-05-11T05:13:09.000Z' },
+    ]),
+    now: new Date(FAILURE_AT),
+    log,
+    probeSession: () => ({ alive: true, matched: true }),
+    fetchHeadSha: async () => HEAD_SHA,
+    postedReviewCleanupRecheckDelaysMs: [0],
+    onTerminalDeadSession: async () => {
+      db.prepare(
+        `UPDATE reviewed_prs
+            SET review_status = 'posted',
+                posted_at = ?,
+                review_attempts = review_attempts + 1
+          WHERE repo = ? AND pr_number = ?`
+      ).run('2026-05-11T05:13:09.000Z', REPO, PR);
+    },
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'posted');
+  assert.equal(row.review_attempts, 3);
+  assert.match(log.lines.join('\n'), /reviewer_reattach_posted_recovered_cas_miss/);
 });
 
 test('claimed rows with null pgid adopt a live run-state pgid after watcher bounce', async () => {

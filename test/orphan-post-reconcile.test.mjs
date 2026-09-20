@@ -70,7 +70,11 @@ test('apply reconciles a cap-exhausted posted orphan and removes it from first-p
     db,
     apply: true,
     listReviews: async () => [POSTED_REVIEW],
-    queueFollowUpForRecoveredPostedReviewImpl: queueStub(queueCalls),
+    queueFollowUpForRecoveredPostedReviewImpl: (args) => {
+      assert.equal(db.inTransaction, false);
+      queueCalls.push(args);
+      return { queued: true, jobPath: '/tmp/follow-up-job.json' };
+    },
   });
   assert.equal(result.reconciled, 1);
   assert.equal(result.reconciledRowOnly, 0);
@@ -132,6 +136,21 @@ test('apply ignores terminal PR rows', async () => {
   db.close();
 });
 
+test('apply skips stale-open mirror rows when the live PR is terminal', async () => {
+  const db = fixture();
+  const result = await reconcilePostedFailedOrphans({
+    db,
+    apply: true,
+    getPull: async () => ({ state: 'closed', merged_at: '2026-09-20T07:00:00Z' }),
+    listReviews: async () => {
+      throw new Error('terminal live rows must not fetch reviews');
+    },
+  });
+  assert.equal(result.results[0].action, 'terminal-live');
+  assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'failed-orphan');
+  db.close();
+});
+
 test('apply skips corrupt reviewer start timestamps instead of matching stale reviews', async () => {
   const db = fixture();
   db.prepare("UPDATE reviewed_prs SET reviewer_started_at = 'not-a-date'").run();
@@ -151,6 +170,18 @@ test('apply skips reviews posted for a different head', async () => {
     db,
     apply: true,
     listReviews: async () => [{ ...POSTED_REVIEW, commit_id: 'stale-head' }],
+  });
+  assert.equal(result.results[0].reason, 'no-posted-review');
+  assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'failed-orphan');
+  db.close();
+});
+
+test('apply ignores dismissed reviews at the matching head', async () => {
+  const db = fixture();
+  const result = await reconcilePostedFailedOrphans({
+    db,
+    apply: true,
+    listReviews: async () => [{ ...POSTED_REVIEW, state: 'DISMISSED' }],
   });
   assert.equal(result.results[0].reason, 'no-posted-review');
   assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'failed-orphan');
@@ -210,6 +241,25 @@ test('apply accepts a review artifact already linked to another pass for the sam
     queueFollowUpForRecoveredPostedReviewImpl: queueStub(),
   });
   assert.equal(result.reconciled, 1);
+  assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'posted');
+  db.close();
+});
+
+test('apply recognizes an existing artifact linked by GitHub node id', async () => {
+  const db = fixture();
+  db.prepare(
+    `UPDATE reviewer_passes SET gh_comment_id = ?, status = 'completed'
+      WHERE repo = ? AND pr_number = ?`
+  ).run('PRR_node_1078', 'laceyenterprises/adversarial-review', 1078);
+  const queueCalls = [];
+  const result = await reconcilePostedFailedOrphans({
+    db,
+    apply: true,
+    listReviews: async () => [{ ...POSTED_REVIEW, node_id: 'PRR_node_1078' }],
+    queueFollowUpForRecoveredPostedReviewImpl: queueStub(queueCalls),
+  });
+  assert.equal(result.reconciled, 1);
+  assert.equal(queueCalls.length, 1);
   assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'posted');
   db.close();
 });

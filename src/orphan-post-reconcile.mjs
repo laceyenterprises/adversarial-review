@@ -10,8 +10,10 @@ function postedReviewForRow(row, reviews) {
   const startedAt = Date.parse(row.reviewer_started_at || row.last_attempted_at || '');
   if (!Number.isFinite(startedAt)) return null;
   const headSha = String(row.reviewer_head_sha || '').trim();
+  const acceptedStates = new Set(['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED']);
   return reviews
     .filter((review) => aliases.some((alias) => loginsMatch(review?.user?.login, alias)))
+    .filter((review) => acceptedStates.has(String(review?.state || '').toUpperCase()))
     .filter((review) => {
       const submittedAt = Date.parse(review?.submitted_at || '');
       const commitId = String(review?.commit_id || '').trim();
@@ -31,6 +33,11 @@ function reviewBodyForStorage(review) {
   return String(review.body);
 }
 
+function livePullIsTerminal(pull) {
+  if (!pull) return false;
+  return Boolean(pull.merged_at) || String(pull.state || '').toLowerCase() !== 'open';
+}
+
 export async function reconcilePostedFailedOrphans({
   db,
   listReviews,
@@ -38,6 +45,7 @@ export async function reconcilePostedFailedOrphans({
   limit = 20,
   rootDir = process.cwd(),
   queueFollowUpForRecoveredPostedReviewImpl = queueFollowUpForRecoveredPostedReview,
+  getPull = async () => null,
 } = {}) {
   const scanLimit = Number.isInteger(Number(limit)) && Number(limit) > 0 ? Number(limit) : 20;
   const depthBefore = Number(db.prepare(SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW).get()?.n || 0);
@@ -91,6 +99,11 @@ export async function reconcilePostedFailedOrphans({
 
   for (const row of rows) {
     try {
+      const livePull = await getPull(row);
+      if (livePullIsTerminal(livePull)) {
+        results.push({ repo: row.repo, prNumber: row.pr_number, action: 'terminal-live' });
+        continue;
+      }
       const reviews = await listReviews(row);
       const review = postedReviewForRow(row, reviews);
       if (!review) {
@@ -100,6 +113,7 @@ export async function reconcilePostedFailedOrphans({
       let changed = false;
       let artifactLinked = false;
       let queueDecision = null;
+      let followUpPayload = null;
       if (apply) {
         const applyResult = withSqliteBusyRetrySync(
           () => db.transaction(() => {
@@ -111,11 +125,17 @@ export async function reconcilePostedFailedOrphans({
             );
             if (result.changes !== 1) return false;
             const reviewId = review.id === null || review.id === undefined ? null : String(review.id);
-            const existingArtifact = reviewId ? passByReviewId.get(reviewId) : null;
+            const reviewIds = [
+              reviewId,
+              review.node_id === null || review.node_id === undefined ? null : String(review.node_id),
+            ].filter(Boolean);
+            const existingArtifact = reviewIds
+              .map((candidate) => passByReviewId.get(candidate))
+              .find(Boolean) || null;
             if (existingArtifact && (
               existingArtifact.repo !== row.repo || Number(existingArtifact.pr_number) !== Number(row.pr_number)
             )) {
-              throw new Error(`review ${reviewId} is already linked to another PR`);
+              throw new Error(`review ${reviewId || review.node_id} is already linked to another PR`);
             }
             const pass = existingArtifact || latestPass.get(
               row.repo,
@@ -138,8 +158,8 @@ export async function reconcilePostedFailedOrphans({
               linkedPass = passResult.changes === 1 ? (passById.get(pass.pass_id) || pass) : null;
             }
             if (linkedPass) {
-              artifactLinked = Boolean(reviewId && (linkedPass.gh_comment_id || existingArtifact));
-              queueDecision = queueFollowUpForRecoveredPostedReviewImpl({
+              artifactLinked = Boolean((reviewId || review.node_id) && (linkedPass.gh_comment_id || existingArtifact));
+              followUpPayload = {
                 rootDir,
                 row: {
                   ...linkedPass,
@@ -150,7 +170,7 @@ export async function reconcilePostedFailedOrphans({
                 },
                 reviewRow: row,
                 reviewPostedAt: review.submitted_at,
-              });
+              };
             }
             return { changed: true, artifactLinked, passFound: Boolean(pass) };
           })(),
@@ -159,6 +179,9 @@ export async function reconcilePostedFailedOrphans({
         changed = applyResult.changed === true;
         artifactLinked = applyResult.artifactLinked === true;
         const passFound = applyResult.passFound === true;
+        if (changed && artifactLinked && followUpPayload) {
+          queueDecision = queueFollowUpForRecoveredPostedReviewImpl(followUpPayload);
+        }
         if (changed && !artifactLinked && !passFound) {
           results.push({
             repo: row.repo,

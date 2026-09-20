@@ -3,16 +3,9 @@ import { execFileSync } from 'node:child_process';
 import { readReviewerRunRecord, TERMINAL_RUN_STATES } from './adapters/reviewer-runtime/run-state.mjs';
 import {
   loginsMatch,
-  REVIEW_ARTIFACT_LOOKUP_RETRY_BACKOFF_MS,
-  REVIEW_LOOKUP_TIMEOUT_MS,
   resolveReviewerBotLogin,
   resolveReviewerBotLoginAliases,
 } from './review-body-capture.mjs';
-import {
-  REVIEWED_ATTESTATION_SIGN_MAX_ATTEMPTS,
-  REVIEWED_ATTESTATION_SIGN_RETRY_DELAY_MS,
-  REVIEWED_ATTESTATION_SIGN_TIMEOUT_MS,
-} from './reviewed-attestation.mjs';
 import {
   DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS,
   resolveReviewerLeaseRecoveryEnabled,
@@ -48,15 +41,7 @@ const OVERDUE_RECOVERY_FAILURE_MESSAGE =
   'Overdue reviewer recovery could not prove the process exited cleanly without a late GitHub review; operator must verify before retrying.';
 const LEASE_RECOVERY_CAP_FAILURE_MESSAGE =
   'Reviewer lease recovery cap exhausted; leaving the review failed for operator inspection.';
-const POSTED_REVIEW_CLEANUP_RECHECK_DELAYS_MS = Object.freeze([
-  (REVIEW_ARTIFACT_LOOKUP_RETRY_BACKOFF_MS.length + 1) * REVIEW_LOOKUP_TIMEOUT_MS
-  + REVIEW_ARTIFACT_LOOKUP_RETRY_BACKOFF_MS.reduce((sum, ms) => sum + ms, 0)
-  + REVIEWED_ATTESTATION_SIGN_MAX_ATTEMPTS * REVIEWED_ATTESTATION_SIGN_TIMEOUT_MS
-  + REVIEWED_ATTESTATION_SIGN_RETRY_DELAY_MS
-    * REVIEWED_ATTESTATION_SIGN_MAX_ATTEMPTS
-    * (REVIEWED_ATTESTATION_SIGN_MAX_ATTEMPTS - 1)
-    / 2,
-]);
+const POSTED_REVIEW_CLEANUP_RECHECK_DELAYS_MS = Object.freeze([0]);
 
 function splitRepoPath(repoPath) {
   const [owner, repo] = String(repoPath || '').split('/');
@@ -337,7 +322,18 @@ function prepareStatements(db) {
           AND review_status = 'reviewing'`
     ),
     markPosted: db.prepare(
-      "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL, infra_auto_recover_attempts = 0 WHERE repo = ? AND pr_number = ?"
+      `UPDATE reviewed_prs
+          SET review_status = 'posted',
+              posted_at = ?,
+              failed_at = NULL,
+              failure_message = NULL,
+              review_attempts = review_attempts + 1,
+              reviewer_lease_expires_at = NULL,
+              infra_auto_recover_attempts = 0
+        WHERE repo = ?
+          AND pr_number = ?
+          AND review_status = 'reviewing'
+          AND COALESCE(reviewer_session_uuid, '') = COALESCE(?, '')`
     ),
     hasPostedReviewArtifact: db.prepare(
       `SELECT 1 AS found
@@ -674,7 +670,12 @@ async function reconcileReviewerSessions({
             settledAt: postedReview.submitted_at,
             reason: 'posted-review-recovered-null-pgid',
           });
-          statements.markPosted.run(postedReview.submitted_at, row.repo, row.pr_number);
+          statements.markPosted.run(
+            postedReview.submitted_at,
+            row.repo,
+            row.pr_number,
+            row.reviewer_session_uuid || ''
+          );
           log.log(
             `[watcher] reviewer_reattach_null_pgid_recovered repo=${row.repo} pr=${row.pr_number} ` +
             `session=${row.reviewer_session_uuid} posted_at=${postedReview.submitted_at}`
@@ -935,7 +936,25 @@ async function reconcileReviewerSessions({
       if (!(await probePostedReviewOrMarkSticky())) continue;
 
       if (postedReview) {
-        statements.markPosted.run(postedReview.submitted_at, row.repo, row.pr_number);
+        await onTerminalDeadSession({
+          row,
+          state: 'completed',
+          settledAt: postedReview.submitted_at,
+          reason: 'posted-review-recovered-live-cleanup',
+        });
+        const markPostedResult = statements.markPosted.run(
+          postedReview.submitted_at,
+          row.repo,
+          row.pr_number,
+          row.reviewer_session_uuid || ''
+        );
+        if (markPostedResult.changes !== 1) {
+          log.warn(
+            `[watcher] reviewer_reattach_posted_recovered_cas_miss repo=${row.repo} pr=${row.pr_number} ` +
+            `session=${row.reviewer_session_uuid || 'unknown'} pgid=${row.reviewer_pgid || 'unknown'}`
+          );
+          continue;
+        }
         log.log(
           `[watcher] reviewer_reattach_posted_recovered repo=${row.repo} pr=${row.pr_number} ` +
           `session=${row.reviewer_session_uuid} pgid=${row.reviewer_pgid} posted_at=${postedReview.submitted_at}`
@@ -947,7 +966,6 @@ async function reconcileReviewerSessions({
           ? postedReviewCleanupRecheckDelaysMs
           : [];
         for (const delay of cleanupRecheckDelays) {
-          if (Number(delay) > 0) await sleep(Number(delay));
           if (statements.hasPostedReviewArtifact.get(
             row.repo,
             row.pr_number,
@@ -969,6 +987,7 @@ async function reconcileReviewerSessions({
             : cleanupProbe?.alive === true && cleanupProbe?.matched !== false;
           cleanupMatched = typeof cleanupProbe === 'boolean' ? null : cleanupProbe?.matched ?? null;
           if (!cleanupAlive) break;
+          if (Number(delay) > 0) await sleep(Number(delay));
         }
         if (cleanupAlive) {
           const finding = {
@@ -986,12 +1005,6 @@ async function reconcileReviewerSessions({
           );
           await onCleanupFinding?.(finding);
         }
-        await onTerminalDeadSession({
-          row,
-          state: 'completed',
-          settledAt: postedReview.submitted_at,
-          reason: 'posted-review-recovered-live-cleanup',
-        });
         continue;
       }
 
@@ -1055,7 +1068,12 @@ async function reconcileReviewerSessions({
         settledAt: postedReview.submitted_at,
         reason: 'posted-review-recovered',
       });
-      statements.markPosted.run(postedReview.submitted_at, row.repo, row.pr_number);
+      statements.markPosted.run(
+        postedReview.submitted_at,
+        row.repo,
+        row.pr_number,
+        row.reviewer_session_uuid || ''
+      );
       log.log(
         `[watcher] reviewer_reattach_recovered repo=${row.repo} pr=${row.pr_number} ` +
         `session=${row.reviewer_session_uuid} pgid=${row.reviewer_pgid || 'unknown'} posted_at=${postedReview.submitted_at}`

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -28,6 +29,7 @@ test('posted reviewer cleanup findings persist and clear after a later dead prob
   });
   assert.equal(written.firstObservedAt, '2026-09-20T06:30:00.000Z');
   assert.equal(written.checks, 1);
+  assert.equal(written.matched, null);
   assert.deepEqual(readReviewerCleanupFindings(rootDir).map((item) => item.reviewerSessionUuid), ['session-6917']);
 
   const alive = recheckReviewerCleanupFindings({
@@ -47,4 +49,37 @@ test('posted reviewer cleanup findings persist and clear after a later dead prob
   assert.deepEqual(dead, { scanned: 1, stillAlive: 0, cleared: 1, unknown: 0 });
   assert.deepEqual(readReviewerCleanupFindings(rootDir), []);
   assert.doesNotThrow(() => cleanupFindingPath(rootDir, 'session-6917'));
+});
+
+test('cleanup finding recheck uses the production probe argument shape', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewer-cleanup-findings-live-'));
+  const sessionUuid = `cleanup-finding-${process.pid}-${Date.now()}`;
+  const child = spawn(
+    process.execPath,
+    ['-e', `setTimeout(() => {}, 30_000); // ${sessionUuid}`],
+    { detached: true, stdio: 'ignore' }
+  );
+  child.unref();
+  try {
+    writeReviewerCleanupFinding(rootDir, {
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 6917,
+      reviewerSessionUuid: sessionUuid,
+      reviewerPgid: child.pid,
+      matched: true,
+      postedAt: '2026-09-20T06:29:34Z',
+    });
+
+    const result = recheckReviewerCleanupFindings({
+      rootDir,
+      log: { warn() {} },
+    });
+
+    assert.equal(result.stillAlive, 1);
+    assert.equal(readReviewerCleanupFindings(rootDir)[0].matched, true);
+  } finally {
+    try {
+      process.kill(-child.pid, 'SIGTERM');
+    } catch {}
+  }
 });

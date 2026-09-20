@@ -40,6 +40,15 @@ function listReviewsWithGh(row) {
   return Array.isArray(pages) ? pages.flat() : [];
 }
 
+function getPullWithGh(row) {
+  const output = execFileSync(
+    'gh',
+    ['api', `repos/${row.repo}/pulls/${row.pr_number}`],
+    { encoding: 'utf8', maxBuffer: 5 * 1024 * 1024 }
+  );
+  return JSON.parse(output);
+}
+
 async function main(argv = process.argv.slice(2), io = process) {
   let options;
   try {
@@ -60,9 +69,14 @@ async function main(argv = process.argv.slice(2), io = process) {
       apply: options.apply,
       limit: options.limit,
       listReviews: async (row) => listReviewsWithGh(row),
+      getPull: async (row) => getPullWithGh(row),
     });
     io.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-    return result.results.some((item) => item.action === 'error' || item.action === 'posted-no-artifact') ? 1 : 0;
+    return result.results.some((item) => (
+      item.action === 'error' ||
+      item.action === 'posted-no-artifact' ||
+      item.action === 'reconciled-row-only'
+    )) ? 1 : 0;
   } finally {
     db.close();
   }

@@ -28,6 +28,7 @@ the probe proves the process group is gone.
 | `prNumber` | number | GitHub PR number. |
 | `reviewerSessionUuid` | string | Stable file identity and reviewer process-session matcher. |
 | `reviewerPgid` | number | Positive process-group id that remained alive after posted-review cleanup checks. |
+| `matched` | boolean or null | Whether the live process group still matched the original reviewer session identity when the finding was recorded. |
 | `postedAt` | ISO-8601 string or null | GitHub review submission time that caused the row to move to `posted`. |
 | `firstObservedAt` | ISO-8601 string | First time the cleanup finding was persisted. |
 | `lastObservedAt` | ISO-8601 string | Most recent watcher recheck time. |

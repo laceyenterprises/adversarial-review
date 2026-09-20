@@ -280,9 +280,11 @@ new PR
   lease expiry or proof that the reviewer process group is dead. The row is no
   longer a retry candidate; the adversarial gate then follows the actual posted
   review verdict instead of the orphan-anomaly projection. If that reviewer
-  process group is still alive after the post-post cleanup budget, the watcher
-  writes a durable `data/reviewer-cleanup-findings/<session>.json` record and
-  rechecks it on later ticks until the process exits. Second, the bounded
+  process group is still alive after an immediate artifact check and identity
+  probe, the watcher first settles the runtime run-state, then marks the row
+  `posted` with a session-scoped compare-and-swap, writes a durable
+  `data/reviewer-cleanup-findings/<session>.json` record, and rechecks that
+  record on later ticks until the process exits. Second, the bounded
   auto-reclaim path may re-arm a failed-orphan only after its persisted reviewer
   lease expires, the infrastructure recovery cap has room, and the watcher can
   prove the original reviewer is no longer live: either the process group is

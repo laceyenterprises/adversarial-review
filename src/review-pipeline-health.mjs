@@ -740,6 +740,15 @@ function toMs(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function parseReviewPostedAtMs(value) {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  const normalized = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value)
+    ? `${value.replace(' ', 'T')}Z`
+    : value;
+  const parsed = Date.parse(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function ageMs(nowMs, value) {
   const valueMs = toMs(value);
   if (valueMs === null) return null;
@@ -1287,38 +1296,98 @@ function summarizeReviewerAttempts(db, { nowMs, config }) {
 
 function summarizeReviewerModelSilence(db, { nowMs, config }) {
   const observedAt = new Date(nowMs).toISOString();
-  const lookbackCutoff = new Date(nowMs - config.reviewerActivityLookbackMs).toISOString();
-  const rows = safeAll(
+  const activityCutoff = new Date(nowMs - config.reviewerActivityLookbackMs).toISOString();
+  const postedRows = safeAll(
     db,
     `WITH posted_reviews AS (
-       SELECT CASE
-                WHEN COALESCE(reviewer_model, reviewer_class) = 'claude-code' THEN 'claude'
-                ELSE COALESCE(reviewer_model, reviewer_class)
-              END AS reviewer_model,
+       SELECT COALESCE(reviewer_model, reviewer_class) AS reviewer_model,
               ${REVIEWER_PASS_NORMALIZED_POSTED_AT_SQL} AS posted_at
          FROM reviewer_passes
         WHERE ${REVIEWER_PASS_GENUINE_POSTED_REVIEW_WHERE_SQL}
-          AND COALESCE(reviewer_model, reviewer_class) IN ('claude', 'claude-code', 'codex', 'gemini')
+          AND pass_kind IN ('first-pass', 'rereview')
+          AND COALESCE(reviewer_model, reviewer_class) IN ('claude', 'codex', 'gemini')
      )
      SELECT reviewer_model,
-            MAX(posted_at) AS last_posted_at,
-            COUNT(*) AS posted_reviews
+            posted_at
        FROM posted_reviews
       WHERE posted_at IS NOT NULL
-        AND posted_at >= ?
         AND posted_at <= ?
-      GROUP BY reviewer_model`,
-    [lookbackCutoff, observedAt]
+      ORDER BY posted_at DESC`,
+    [observedAt]
   );
-  const models = rows.map((row) => {
-    const lastPostedMs = toMs(row.last_posted_at);
+  const startedRows = safeAll(
+    db,
+    `SELECT COALESCE(reviewer_model, reviewer_class) AS reviewer_model,
+            started_at
+       FROM reviewer_passes
+      WHERE pass_kind IN ('first-pass', 'rereview')
+        AND COALESCE(reviewer_model, reviewer_class) IN ('claude', 'codex', 'gemini')
+        AND started_at IS NOT NULL
+        AND REPLACE(started_at, ' ', 'T') GLOB '????-??-??T??:??:??*'
+        AND strftime(
+              '%Y-%m-%dT%H:%M:%fZ',
+              CASE
+                WHEN REPLACE(started_at, ' ', 'T') GLOB '*Z'
+                  OR REPLACE(started_at, ' ', 'T') GLOB '*+??:??'
+                  OR REPLACE(started_at, ' ', 'T') GLOB '*-??:??'
+                  THEN REPLACE(started_at, ' ', 'T')
+                ELSE REPLACE(started_at, ' ', 'T') || 'Z'
+              END
+            ) >= strftime('%Y-%m-%dT%H:%M:%fZ', ?)
+        AND strftime(
+              '%Y-%m-%dT%H:%M:%fZ',
+              CASE
+                WHEN REPLACE(started_at, ' ', 'T') GLOB '*Z'
+                  OR REPLACE(started_at, ' ', 'T') GLOB '*+??:??'
+                  OR REPLACE(started_at, ' ', 'T') GLOB '*-??:??'
+                  THEN REPLACE(started_at, ' ', 'T')
+                ELSE REPLACE(started_at, ' ', 'T') || 'Z'
+              END
+            ) <= strftime('%Y-%m-%dT%H:%M:%fZ', ?)
+      ORDER BY COALESCE(reviewer_model, reviewer_class), started_at`,
+    [activityCutoff, observedAt]
+  );
+  const postedByModel = new Map();
+  for (const row of postedRows) {
+    const lastPostedMs = parseReviewPostedAtMs(row.posted_at);
+    if (lastPostedMs === null) continue;
+    const current = postedByModel.get(row.reviewer_model);
+    if (!current || lastPostedMs > current.lastPostedMs) {
+      postedByModel.set(row.reviewer_model, {
+        model: row.reviewer_model,
+        lastPostedAt: row.posted_at,
+        lastPostedMs,
+        postedReviews: (current?.postedReviews || 0) + 1,
+      });
+    } else {
+      current.postedReviews += 1;
+    }
+  }
+  const startedByModel = new Map();
+  for (const row of startedRows) {
+    const startedMs = parseReviewPostedAtMs(row.started_at);
+    if (startedMs === null) continue;
+    const entries = startedByModel.get(row.reviewer_model) || [];
+    entries.push(startedMs);
+    startedByModel.set(row.reviewer_model, entries);
+  }
+  const models = Array.from(postedByModel.values()).map((row) => {
+    const lastPostedMs = row.lastPostedMs;
     const ageMs = lastPostedMs === null ? null : Math.max(0, nowMs - lastPostedMs);
+    const startedPasses = (startedByModel.get(row.model) || []).filter(
+      (startedMs) => startedMs > lastPostedMs
+    ).length;
     return {
-      model: row.reviewer_model,
-      lastPostedAt: row.last_posted_at,
+      model: row.model,
+      lastPostedAt: row.lastPostedAt,
       ageMs,
-      postedReviews: Number(row.posted_reviews || 0),
-      silent: ageMs !== null && ageMs >= config.reviewerSilenceThresholdMs,
+      postedReviews: Number(row.postedReviews || 0),
+      startedPasses,
+      silent: (
+        startedPasses > 0
+        && ageMs !== null
+        && ageMs >= config.reviewerSilenceThresholdMs
+      ),
     };
   });
   return {
@@ -3431,8 +3500,9 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
       subject: `Previously-active reviewer model ${model.model} has gone silent`,
       message: `${model.model} last posted a review at ${model.lastPostedAt}, ${Math.round(model.ageMs / 3600000)}h ago.`,
       evidence: [
-        `reviews.db reviewer_passes model=${model.model} gh_comment_id IS NOT NULL`,
+        `reviews.db reviewer_passes model=${model.model} pass_kind IN first-pass,rereview gh_comment_id non-empty`,
         `last_posted_at=${model.lastPostedAt} threshold_ms=${snapshot.reviewerModelSilence.thresholdMs}`,
+        `started_passes_in_activity_window=${model.startedPasses}`,
       ],
       recommendedAction: 'Inspect this model\'s selector decisions, OAuth transport, and recent reviewer passes now; do not wait for a failed selection to trigger the death-rate alarm.',
       observedAt,

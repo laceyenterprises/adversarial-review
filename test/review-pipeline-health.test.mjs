@@ -196,13 +196,21 @@ test('previously-active reviewer model going silent raises its own finding', () 
       endedAt: '2026-05-25T17:10:00.000Z',
       status: 'completed',
     });
+    insertReviewerPass(rootDir, {
+      prNumber: 952,
+      reviewerClass: 'claude',
+      reviewerModel: 'claude',
+      startedAt: '2026-05-25T17:00:00.000Z',
+      endedAt: '2026-05-25T17:05:00.000Z',
+      status: 'failed',
+    });
     const db = openDb(rootDir);
     try {
       db.prepare(
         `UPDATE reviewer_passes
             SET gh_comment_id = ?, body_captured_at = ended_at
-          WHERE reviewer_model = ?`
-      ).run('claude-review-id', 'claude');
+          WHERE pr_number = ?`
+      ).run('claude-review-id', 950);
       db.prepare(
         `UPDATE reviewer_passes
             SET gh_comment_id = ?, body_captured_at = ended_at
@@ -226,6 +234,193 @@ test('previously-active reviewer model going silent raises its own finding', () 
     ));
     assert.ok(finding);
     assert.equal(finding.details.lastPostedAt, '2026-05-23T17:10:00.000Z');
+    assert.equal(finding.details.startedPasses, 1);
+    assert.ok(!snapshot.findings.some((entry) => (
+      entry.code === 'review:reviewer_model_silent' && entry.details.model === 'gemini'
+    )));
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reviewer model silence ignores empty comment ids and remediation pass noise', () => {
+  const rootDir = tempRoot();
+  try {
+    insertReviewerPass(rootDir, {
+      reviewerClass: 'claude',
+      reviewerModel: 'claude',
+      startedAt: '2026-05-23T16:00:00.000Z',
+      endedAt: '2026-05-23T16:10:00.000Z',
+      status: 'completed',
+    });
+    insertReviewerPass(rootDir, {
+      prNumber: 951,
+      reviewerClass: 'claude',
+      reviewerModel: 'claude',
+      startedAt: '2026-05-25T17:00:00.000Z',
+      endedAt: '2026-05-25T17:05:00.000Z',
+      status: 'completed',
+    });
+    insertReviewerPass(rootDir, {
+      prNumber: 952,
+      reviewerClass: 'claude-code',
+      reviewerModel: 'claude-code',
+      passKind: 'remediation',
+      startedAt: '2026-05-25T17:30:00.000Z',
+      endedAt: '2026-05-25T17:35:00.000Z',
+      status: 'completed',
+    });
+    const db = openDb(rootDir);
+    try {
+      db.prepare(
+        `UPDATE reviewer_passes
+            SET gh_comment_id = ?, body_captured_at = ended_at
+          WHERE pr_number = ?`
+      ).run('claude-old-review-id', 950);
+      db.prepare(
+        `UPDATE reviewer_passes
+            SET gh_comment_id = '', body_captured_at = ended_at
+          WHERE pr_number = ?`
+      ).run(951);
+      db.prepare(
+        `UPDATE reviewer_passes
+            SET gh_comment_id = ?, body_captured_at = ended_at
+          WHERE pr_number = ?`
+      ).run('remediation-comment-id', 952);
+    } finally {
+      db.close();
+    }
+
+    const snapshot = collectReviewPipelineHealth({
+      rootDir,
+      now: () => new Date(NOW),
+      config: {
+        hostChecksEnabled: false,
+        reviewerSilenceThresholdMs: 24 * 60 * 60 * 1000,
+        reviewerActivityLookbackMs: 7 * 24 * 60 * 60 * 1000,
+      },
+    });
+    const finding = snapshot.findings.find((entry) => (
+      entry.code === 'review:reviewer_model_silent' && entry.details.model === 'claude'
+    ));
+    assert.ok(finding);
+    assert.equal(finding.details.lastPostedAt, '2026-05-23T16:10:00.000Z');
+    assert.equal(finding.details.startedPasses, 1);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reviewer model silence parses timezone-less SQLite timestamps as UTC', () => {
+  const previousTz = process.env.TZ;
+  process.env.TZ = 'America/Los_Angeles';
+  const rootDir = tempRoot();
+  try {
+    insertReviewerPass(rootDir, {
+      reviewerClass: 'claude',
+      reviewerModel: 'claude',
+      startedAt: '2026-05-24 12:50:00',
+      endedAt: '2026-05-24 13:00:00',
+      status: 'completed',
+    });
+    insertReviewerPass(rootDir, {
+      prNumber: 951,
+      reviewerClass: 'claude',
+      reviewerModel: 'claude',
+      startedAt: '2026-05-25T17:00:00.000Z',
+      endedAt: '2026-05-25T17:05:00.000Z',
+      status: 'failed',
+    });
+    const db = openDb(rootDir);
+    try {
+      db.prepare(
+        `UPDATE reviewer_passes
+            SET gh_comment_id = ?, body_captured_at = ended_at
+          WHERE pr_number = ?`
+      ).run('claude-review-id', 950);
+    } finally {
+      db.close();
+    }
+
+    const snapshot = collectReviewPipelineHealth({
+      rootDir,
+      now: () => new Date(NOW),
+      config: {
+        hostChecksEnabled: false,
+        reviewerSilenceThresholdMs: 24 * 60 * 60 * 1000,
+        reviewerActivityLookbackMs: 7 * 24 * 60 * 60 * 1000,
+      },
+    });
+    const finding = snapshot.findings.find((entry) => (
+      entry.code === 'review:reviewer_model_silent' && entry.details.model === 'claude'
+    ));
+    assert.ok(finding);
+    assert.equal(finding.details.lastPostedAt, '2026-05-24T13:00:00.000Z');
+    assert.equal(Math.round(finding.details.ageMs / 3600000), 29);
+  } finally {
+    if (previousTz === undefined) {
+      delete process.env.TZ;
+    } else {
+      process.env.TZ = previousTz;
+    }
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reviewer model silence persists beyond lookback only when the lane has recent demand', () => {
+  const rootDir = tempRoot();
+  try {
+    insertReviewerPass(rootDir, {
+      reviewerClass: 'claude',
+      reviewerModel: 'claude',
+      startedAt: '2026-05-17T16:00:00.000Z',
+      endedAt: '2026-05-17T16:10:00.000Z',
+      status: 'completed',
+    });
+    insertReviewerPass(rootDir, {
+      prNumber: 951,
+      reviewerClass: 'claude',
+      reviewerModel: 'claude',
+      startedAt: '2026-05-25T17:00:00.000Z',
+      endedAt: '2026-05-25T17:05:00.000Z',
+      status: 'failed',
+    });
+    insertReviewerPass(rootDir, {
+      prNumber: 952,
+      reviewerClass: 'gemini',
+      reviewerModel: 'gemini',
+      startedAt: '2026-05-17T16:00:00.000Z',
+      endedAt: '2026-05-17T16:10:00.000Z',
+      status: 'completed',
+    });
+    const db = openDb(rootDir);
+    try {
+      db.prepare(
+        `UPDATE reviewer_passes
+            SET gh_comment_id = ?, body_captured_at = ended_at
+          WHERE pr_number = ?`
+      ).run('claude-old-review-id', 950);
+      db.prepare(
+        `UPDATE reviewer_passes
+            SET gh_comment_id = ?, body_captured_at = ended_at
+          WHERE pr_number = ?`
+      ).run('gemini-old-review-id', 952);
+    } finally {
+      db.close();
+    }
+
+    const snapshot = collectReviewPipelineHealth({
+      rootDir,
+      now: () => new Date(NOW),
+      config: {
+        hostChecksEnabled: false,
+        reviewerSilenceThresholdMs: 24 * 60 * 60 * 1000,
+        reviewerActivityLookbackMs: 7 * 24 * 60 * 60 * 1000,
+      },
+    });
+    assert.ok(snapshot.findings.some((entry) => (
+      entry.code === 'review:reviewer_model_silent' && entry.details.model === 'claude'
+    )));
     assert.ok(!snapshot.findings.some((entry) => (
       entry.code === 'review:reviewer_model_silent' && entry.details.model === 'gemini'
     )));
@@ -376,7 +571,10 @@ test('reviewer model silence clears after the activity lookback', () => {
       entry.code === 'review:reviewer_model_silent' && entry.details.model === 'claude'
     ));
     assert.equal(finding, undefined);
-    assert.ok(!snapshot.reviewerModelSilence.models.some((entry) => entry.model === 'claude'));
+    const model = snapshot.reviewerModelSilence.models.find((entry) => entry.model === 'claude');
+    assert.ok(model);
+    assert.equal(model.startedPasses, 0);
+    assert.equal(model.silent, false);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

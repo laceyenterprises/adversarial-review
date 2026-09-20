@@ -2253,6 +2253,16 @@ detached runtime concern bounded by the reviewer timeout and by the outer
 `safePollOnce` deadline. A drain that exceeds the watcher SLA emits an explicit
 warning so the inverse starvation class is observable.
 
+When `ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT=1`, reviewer admission
+capacity is released after the review row is durably settled by the post
+operation, while post-review bookkeeping continues outside the scarce pool slot.
+Pre-release dispatch failures still feed the normal thrown-failure circuit
+breaker and stop the wave; only failures after the admission slot has already
+been released are treated as deferred settlement failures and logged. Under the
+watcher's `singleWave: true` production drain, the split uses admission release
+as the point where the queue may admit a replacement candidate instead of
+detaching solely because the initial launch wave outlived the settle-grace timer.
+
 When the drain contains Gemini reviewer candidates, the watcher may ask the
 reviewer broker for the live count of non-cooled Gemini credentials and clamp
 only Gemini in-flight dispatch to that count. The broker count fetch is skipped

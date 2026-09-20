@@ -166,6 +166,64 @@ test('split admission releases a slot after durable post while settlement remain
   assert.deepEqual(events, ['model:1', 'post-durable:1', 'model:2', 'settled:1']);
 });
 
+test('split admission preserves dispatch failure circuit before release', async () => {
+  const events = [];
+  const failure = new Error('reviewer spawn failed');
+  const tasks = [
+    candidate(1, async () => {
+      events.push('start:1');
+      throw failure;
+    }),
+    candidate(2, async () => {
+      events.push('start:2');
+    }),
+  ];
+
+  await assert.rejects(
+    runBoundedReviewerDispatchQueue(tasks, {
+      maxConcurrent: 1,
+      splitPostReviewSettlement: true,
+      logger: { error() {} },
+    }),
+    failure,
+  );
+  assert.deepEqual(events, ['start:1']);
+});
+
+test('split admission re-enters admission under production single-wave drain', async () => {
+  const events = [];
+  let finishSettlement;
+  const settlementHold = new Promise((resolve) => { finishSettlement = resolve; });
+  const tasks = [
+    candidate(1, async function run() {
+      events.push('model:1');
+      events.push('post-durable:1');
+      this.admissionReleaseCapacity();
+      await settlementHold;
+      events.push('settled:1');
+    }),
+    candidate(2, async function run() {
+      events.push('model:2');
+      this.admissionReleaseCapacity();
+    }),
+  ];
+
+  const summary = await runBoundedReviewerDispatchQueue(tasks, {
+    maxConcurrent: 1,
+    singleWave: true,
+    singleWaveSettleGraceMs: 0,
+    splitPostReviewSettlement: true,
+    logger: { error() {}, log() {} },
+  });
+
+  assert.equal(summary.dispatched, 2);
+  assert.equal(summary.deferred, 0);
+  assert.deepEqual(events, ['model:1', 'post-durable:1', 'model:2']);
+  finishSettlement();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(events, ['model:1', 'post-durable:1', 'model:2', 'settled:1']);
+});
+
 test('legacy serial admission remains available when settlement split is disabled', async () => {
   const events = [];
   const tasks = [

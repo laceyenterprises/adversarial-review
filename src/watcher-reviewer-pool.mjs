@@ -901,8 +901,10 @@ async function runBoundedReviewerDispatchQueue(candidates, {
       // after its review row has been durably settled.  Keep the continuation
       // alive (and observed) while returning the scarce slot immediately.
       let releaseAdmissionCapacity;
-      const admission = new Promise((resolve) => {
+      let rejectAdmissionCapacity;
+      const admission = new Promise((resolve, reject) => {
         releaseAdmissionCapacity = resolve;
+        rejectAdmissionCapacity = reject;
       });
       let released = false;
       const release = (value = { dispatched: true }) => {
@@ -918,7 +920,11 @@ async function runBoundedReviewerDispatchQueue(candidates, {
           return result;
         })
         .catch((err) => {
-          release({ dispatched: false, settlementError: err });
+          if (!released) {
+            released = true;
+            rejectAdmissionCapacity(err);
+            return;
+          }
           logger?.error?.(
             `[watcher] deferred reviewer settlement failed for ${candidate.repoPath}#${candidate.prNumber}:`,
             err?.message || err,
@@ -1052,7 +1058,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
         await Promise.resolve();
       }
     }
-    if (singleWave && attempted > attemptedBeforeStart) {
+    if (singleWave && !splitPostReviewSettlement && attempted > attemptedBeforeStart) {
       // The watcher needs a dispatch *wave*, not a full batch drain. Some
       // runtimes await reviewer completion inside candidate.run(), so admitting
       // a new reviewer every time a slot frees can serialize an entire backlog

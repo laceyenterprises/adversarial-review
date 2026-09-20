@@ -935,9 +935,9 @@ async function reapCloserHammerWorktrees({
     // running its long post-merge close sequence AFTER its PR merges. Reaping its
     // worktree here deletes the live worker's cwd and kills it before it records
     // an exit. Defer while the hammer's dispatch is still active; the next tick
-    // reaps once it terminalizes. Trees with no resolvable dispatch, or whose
-    // dispatch is terminal/unreadable/phantom, reap now — and the worker-pool
-    // orphan reaper is the independent backstop for any tree that later leaks.
+    // reaps once it terminalizes. Unknown dispatch probes defer until the
+    // bounded counter reaches `unknownProbeLimit`, then reap only after the
+    // process-level cwd oracle positively reports same-UID absence.
     const manifestProbe = await resolveEntryLaunchRequestId(entry, { readFileImpl });
     const deferReap = (deferReason, launchRequestId, evidence = {}) => {
       summary.deferredActiveWorker += 1;

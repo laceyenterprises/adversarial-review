@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { PROVIDER_OVERLOADED_FAILURE_CLASS } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { ROUND_BUDGET_BY_RISK_CLASS } from './follow-up-jobs.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS, quotaHoldDecision } from './quota-exhaustion.mjs';
+import { infraRecoverableFailureClass } from './reviewer-failure-classification.mjs';
 import { DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS } from './reviewer-lease.mjs';
 import {
   parseReviewerPassTimestampMs,
@@ -3578,13 +3579,11 @@ function summarizeReviewerSlots(db, {
     const attemptAt = row.reviewer_started_at || row.last_attempted_at;
     const attemptAgeMs = ageMs(nowMs, attemptAt);
     const recoveryIsCurrent = Date.parse(row.recovery_event_at || '') >= Date.parse(attemptAt || '');
+    const recoveryAttempts = Number(row.infra_auto_recover_attempts || 0);
     let state;
     let reason;
     if (status === 'reviewing') {
-      if (row.recovery_event_type === 'reviewer_reattached' && recoveryIsCurrent) {
-        state = 'recovered';
-        reason = row.recovery_reason || 'reattached';
-      } else if (attemptAgeMs !== null && attemptAgeMs <= settlingMs) {
+      if (attemptAgeMs !== null && attemptAgeMs <= settlingMs) {
         state = 'settling';
         reason = 'within-launch-guard';
       } else if (!row.reviewer_session_uuid) {
@@ -3599,13 +3598,22 @@ function summarizeReviewerSlots(db, {
       } else if (Date.parse(row.reviewer_lease_expires_at) <= nowMs) {
         state = 'stale';
         reason = 'expired-lease';
+      } else if (row.recovery_event_type === 'reviewer_reattached' && recoveryIsCurrent) {
+        state = 'recovered';
+        reason = row.recovery_reason || 'reattached';
       } else {
         state = 'active';
         reason = 'durable-process-and-lease-evidence';
       }
     } else if (status === 'failed' || status === 'failed-orphan') {
-      state = 'impossible';
-      reason = row.failure_message || status;
+      const failureClass = infraRecoverableFailureClass(row);
+      if (failureClass && recoveryAttempts < INFRA_AUTO_RECOVER_CAP) {
+        state = 'retryable';
+        reason = failureClass;
+      } else {
+        state = 'impossible';
+        reason = row.failure_message || status;
+      }
     } else if (row.recovery_event_type === 'reviewer_reaped' && recoveryIsCurrent) {
       state = 'reaped';
       reason = row.recovery_reason || 'capacity-released';
@@ -3625,7 +3633,8 @@ function summarizeReviewerSlots(db, {
       leaseExpiresAt: row.reviewer_lease_expires_at || null,
       attemptAgeMs,
       recoveryEventAt: row.recovery_event_at || null,
-      recoveryAttempts: Number(row.infra_auto_recover_attempts || 0),
+      recoveryReason: row.recovery_reason || null,
+      recoveryAttempts,
     };
   });
   const states = Object.fromEntries(REVIEWER_SLOT_STATES.map((state) => [state, 0]));

@@ -99,19 +99,31 @@ function workspaceAuthDetail(err) {
 // env. Returns null when no NEW credential landed -- retrying with the same
 // rejected token is pointless, so a broker that is off or down short-circuits
 // straight to the auth error (the same reasoning as gh-cli.mjs).
-async function defaultRefreshWorkspaceAuthEnv({ env, log }) {
-  const [{ refreshWatcherGithubToken }, { withGhGitCredentialEnv }] = await Promise.all([
-    import('./reviewer-broker-refresh.mjs'),
-    import('./remediation-workflow-push-capability.mjs'),
-  ]);
-  const summary = await refreshWatcherGithubToken({ env, log, force: true });
+async function defaultRefreshWorkspaceAuthEnv({
+  env,
+  log,
+  refreshWatcherGithubTokenImpl,
+  withGhGitCredentialEnvImpl,
+} = {}) {
+  const baseEnv = env ?? process.env;
+  let refreshWatcherGithubToken = refreshWatcherGithubTokenImpl;
+  let withGhGitCredentialEnv = withGhGitCredentialEnvImpl;
+  if (!refreshWatcherGithubToken || !withGhGitCredentialEnv) {
+    const [brokerRefresh, workflowPushCapability] = await Promise.all([
+      import('./reviewer-broker-refresh.mjs'),
+      import('./remediation-workflow-push-capability.mjs'),
+    ]);
+    refreshWatcherGithubToken ||= brokerRefresh.refreshWatcherGithubToken;
+    withGhGitCredentialEnv ||= workflowPushCapability.withGhGitCredentialEnv;
+  }
+  const summary = await refreshWatcherGithubToken({ env: baseEnv, log, force: true });
   if (summary?.refreshed !== true) {
     return { refreshed: false, detail: summary?.skipped || summary?.failed || 'unknown', env: null };
   }
   // Rebuild rather than reuse: withGhGitCredentialEnv snapshots the token into
   // the returned object, so the env captured before the round started still
   // carries the DEAD token even after a successful re-mint.
-  return { refreshed: true, detail: `role=${summary.role ?? 'unknown'}`, env: withGhGitCredentialEnv(env) };
+  return { refreshed: true, detail: `role=${summary.role ?? 'unknown'}`, env: withGhGitCredentialEnv(baseEnv) };
 }
 
 async function runWorkspaceNetworkCommandWithTransientRetry({
@@ -454,6 +466,7 @@ async function auditWorkspaceForContamination({
 }
 
 export {
+  defaultRefreshWorkspaceAuthEnv,
   isWorkspaceAuthFailure,
   fetchPRBranchMetadata,
   ensureJobBranchMetadata,

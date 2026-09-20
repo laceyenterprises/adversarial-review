@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  defaultRefreshWorkspaceAuthEnv,
   isWorkspaceAuthFailure,
   runWorkspaceNetworkCommandWithTransientRetry,
 } from '../src/remediation-git-pr-io.mjs';
@@ -75,6 +76,54 @@ test('an expired credential is re-minted once and the command retried with the N
   assert.equal(result.stdout, 'pushed');
   assert.equal(calls, 2, 'expected exactly one retry');
   assert.deepEqual(seen, ['expired-token', 'fresh-token'], 'retry must use the rebuilt env, not the snapshot');
+});
+
+test('default auth refresh preserves process env when a gh call omitted options.env', async () => {
+  const previousGithubToken = process.env.GITHUB_TOKEN;
+  const previousGhToken = process.env.GH_TOKEN;
+  const previousPath = process.env.PATH;
+  try {
+    process.env.GITHUB_TOKEN = 'expired-token';
+    process.env.GH_TOKEN = 'expired-token';
+    process.env.PATH = '/fixture/bin';
+
+    const refresh = await defaultRefreshWorkspaceAuthEnv({
+      log: quietLog,
+      refreshWatcherGithubTokenImpl: async ({ env, force }) => {
+        assert.equal(env, process.env, 'no-env callers must refresh the live process env');
+        assert.equal(force, true);
+        env.GITHUB_TOKEN = 'fresh-token';
+        env.GH_TOKEN = 'fresh-token';
+        return { refreshed: true, role: 'merge-agent' };
+      },
+      withGhGitCredentialEnvImpl: (baseEnv) => {
+        assert.equal(baseEnv, process.env, 'retry env must be rebuilt from the refreshed process env');
+        return { ...baseEnv, GIT_TERMINAL_PROMPT: '0' };
+      },
+    });
+
+    assert.equal(refresh.refreshed, true);
+    assert.equal(refresh.env.GITHUB_TOKEN, 'fresh-token');
+    assert.equal(refresh.env.GH_TOKEN, 'fresh-token');
+    assert.equal(refresh.env.PATH, '/fixture/bin');
+    assert.equal(refresh.env.GIT_TERMINAL_PROMPT, '0');
+  } finally {
+    if (previousGithubToken === undefined) {
+      delete process.env.GITHUB_TOKEN;
+    } else {
+      process.env.GITHUB_TOKEN = previousGithubToken;
+    }
+    if (previousGhToken === undefined) {
+      delete process.env.GH_TOKEN;
+    } else {
+      process.env.GH_TOKEN = previousGhToken;
+    }
+    if (previousPath === undefined) {
+      delete process.env.PATH;
+    } else {
+      process.env.PATH = previousPath;
+    }
+  }
 });
 
 test('a re-mint that lands no new credential fails fast instead of retrying the dead token', async () => {

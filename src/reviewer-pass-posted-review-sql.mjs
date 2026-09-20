@@ -15,3 +15,14 @@ export const REVIEWER_PASS_GENUINE_POSTED_REVIEW_WHERE_SQL = `gh_comment_id IS N
   AND gh_comment_id <> ''
   AND ${REVIEWER_PASS_POSTED_AT_SOURCE_SQL} IS NOT NULL
   AND REPLACE(${REVIEWER_PASS_POSTED_AT_SOURCE_SQL}, ' ', 'T') GLOB '????-??-??T??:??:??*'`;
+
+export const REVIEWER_MODELS = Object.freeze(['claude', 'codex', 'gemini']);
+
+export function parseReviewerPassTimestampMs(raw) {
+  if (typeof raw !== 'string' || raw.length === 0) return null;
+  const normalized = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(raw)
+    ? `${raw.replace(' ', 'T')}Z`
+    : raw;
+  const ms = Date.parse(normalized);
+  return Number.isFinite(ms) ? ms : null;
+}

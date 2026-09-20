@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import {
+  parseReviewerPassTimestampMs,
   REVIEWER_PASS_GENUINE_POSTED_REVIEW_WHERE_SQL,
   REVIEWER_PASS_NORMALIZED_POSTED_AT_SQL,
   REVIEWER_PASS_POSTED_AT_SOURCE_SQL,
@@ -449,12 +450,7 @@ export const stmtCountOpenPrsAwaitingFirstPassReview = db.prepare(
 // first-pass-review-suppression.mjs's parseReviewTimestamp so the two agree on
 // the same host. Returns null for empty/unparseable input.
 export function parsePostedAtMs(raw) {
-  if (typeof raw !== 'string' || raw.length === 0) return null;
-  const normalized = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(raw)
-    ? `${raw.replace(' ', 'T')}Z`
-    : raw;
-  const ms = Date.parse(normalized);
-  return Number.isFinite(ms) ? ms : null;
+  return parseReviewerPassTimestampMs(raw);
 }
 
 // Freshest genuine posted-review time across all rows (epoch ms), or null if no

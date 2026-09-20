@@ -9,9 +9,20 @@ import { reconcilePostedFailedOrphans } from '../src/orphan-post-reconcile.mjs';
 const DEFAULT_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 function parseArgs(argv) {
-  const options = { root: DEFAULT_ROOT, apply: false };
+  const options = { root: DEFAULT_ROOT, apply: false, limit: 20 };
   for (let index = 0; index < argv.length; index += 1) {
-    if (argv[index] === '--root') options.root = argv[++index];
+    if (argv[index] === '--root') {
+      const value = argv[++index];
+      if (!value || value.startsWith('--')) throw new Error('--root requires a value');
+      options.root = value;
+    }
+    else if (argv[index] === '--limit') {
+      const value = argv[++index];
+      if (!value || value.startsWith('--')) throw new Error('--limit requires a value');
+      const limit = Number(value);
+      if (!Number.isInteger(limit) || limit <= 0) throw new Error('--limit must be a positive integer');
+      options.limit = limit;
+    }
     else if (argv[index] === '--apply') options.apply = true;
     else if (argv[index] === '--help' || argv[index] === '-h') options.help = true;
     else throw new Error(`Unknown argument: ${argv[index]}`);
@@ -38,7 +49,7 @@ async function main(argv = process.argv.slice(2), io = process) {
     return 2;
   }
   if (options.help) {
-    io.stdout.write('Usage: npm run reconcile-posted-orphans -- [--root <adversarial-review-root>] [--apply]\n');
+    io.stdout.write('Usage: npm run reconcile-posted-orphans -- [--root <adversarial-review-root>] [--limit <n>] [--apply]\n');
     return 0;
   }
   const db = new Database(join(options.root, 'data', 'reviews.db'), { readonly: !options.apply });
@@ -46,6 +57,7 @@ async function main(argv = process.argv.slice(2), io = process) {
     const result = await reconcilePostedFailedOrphans({
       db,
       apply: options.apply,
+      limit: options.limit,
       listReviews: async (row) => listReviewsWithGh(row),
     });
     io.stdout.write(`${JSON.stringify(result, null, 2)}\n`);

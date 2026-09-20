@@ -5,7 +5,7 @@ import Database from 'better-sqlite3';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { reconcilePostedFailedOrphans } from '../src/orphan-post-reconcile.mjs';
 
-function fixture({ attempts = 4 } = {}) {
+function fixture({ attempts = 4, reviewerStartedAt = '2026-09-20T06:20:00Z' } = {}) {
   const db = new Database(':memory:');
   ensureReviewStateSchema(db);
   db.prepare(
@@ -16,9 +16,9 @@ function fixture({ attempts = 4 } = {}) {
        failed_at, failure_message)
      VALUES ('laceyenterprises/adversarial-review', 1078, '2026-09-20T06:20:00Z',
        'claude', 'open', 'failed-orphan', '2026-09-20T06:20:00Z',
-       '2026-09-20T06:20:00Z', 'session-1078', 98788, 'head-1078', ?,
+       ?, 'session-1078', 98788, 'head-1078', ?,
        '2026-09-20T06:30:00Z', 'Operator must inspect before retrying.')`
-  ).run(attempts);
+  ).run(reviewerStartedAt, attempts);
   db.prepare(
     `INSERT INTO reviewer_passes
       (repo, pr_number, attempt_number, reviewer_class, reviewer_model,
@@ -79,6 +79,35 @@ test('apply reconciles a cap-exhausted posted orphan and removes it from first-p
     body_md: POSTED_REVIEW.body,
     ended_at: POSTED_REVIEW.submitted_at,
   });
+  db.close();
+});
+
+test('apply reconciles a null-start null-pgid orphan using last_attempted_at', async () => {
+  const db = fixture({ attempts: 4, reviewerStartedAt: null });
+  db.prepare('UPDATE reviewed_prs SET reviewer_pgid = NULL, failure_message = ?')
+    .run('Reviewer session was claimed but its pgid was never persisted.');
+  const result = await reconcilePostedFailedOrphans({
+    db,
+    apply: true,
+    listReviews: async () => [POSTED_REVIEW],
+  });
+  assert.equal(result.scanned, 1);
+  assert.equal(result.reconciled, 1);
+  assert.deepEqual(result.firstPassQueue, { before: 1, after: 0 });
+  assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'posted');
+  db.close();
+});
+
+test('apply ignores stale-head reviewer posts', async () => {
+  const db = fixture();
+  const result = await reconcilePostedFailedOrphans({
+    db,
+    apply: true,
+    listReviews: async () => [{ ...POSTED_REVIEW, commit_id: 'old-head' }],
+  });
+  assert.equal(result.reconciled, 0);
+  assert.equal(result.results[0].reason, 'no-posted-review');
+  assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'failed-orphan');
   db.close();
 });
 

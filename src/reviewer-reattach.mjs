@@ -921,8 +921,12 @@ async function reconcileReviewerSessions({
           `session=${row.reviewer_session_uuid} pgid=${row.reviewer_pgid} posted_at=${postedReview.submitted_at}`
         );
 
-        let cleanupAlive = true;
-        for (const delay of postedReviewCleanupRecheckDelaysMs) {
+        let cleanupAlive = false;
+        let cleanupMatched = null;
+        const cleanupRecheckDelays = Array.isArray(postedReviewCleanupRecheckDelaysMs)
+          ? postedReviewCleanupRecheckDelaysMs
+          : [];
+        for (const delay of cleanupRecheckDelays) {
           if (Number(delay) > 0) await sleep(Number(delay));
           const cleanupProbe = typeof probeSession === 'function'
             ? probeSession(row)
@@ -933,10 +937,12 @@ async function reconcileReviewerSessions({
             });
           cleanupAlive = typeof cleanupProbe === 'boolean'
             ? cleanupProbe
-            : cleanupProbe?.alive === true;
+            : cleanupProbe?.alive === true && cleanupProbe?.matched !== false;
+          cleanupMatched = typeof cleanupProbe === 'boolean' ? null : cleanupProbe?.matched ?? null;
           if (!cleanupAlive) break;
         }
         if (cleanupAlive) {
+          killProcessGroup(row.reviewer_pgid, 'SIGKILL');
           const finding = {
             id: 'reviewer:posted_process_group_leak',
             severity: 'warning',
@@ -944,6 +950,7 @@ async function reconcileReviewerSessions({
             prNumber: row.pr_number,
             reviewerSessionUuid: row.reviewer_session_uuid,
             reviewerPgid: row.reviewer_pgid,
+            matched: cleanupMatched,
             postedAt: postedReview.submitted_at,
           };
           log.warn(

@@ -249,6 +249,47 @@ test('previously-active reviewer model going silent raises its own finding', () 
   }
 });
 
+test('reviewer model silence does not self-clear after the activity lookback', () => {
+  const rootDir = tempRoot();
+  try {
+    insertReviewerPass(rootDir, {
+      reviewerClass: 'claude',
+      reviewerModel: 'claude',
+      startedAt: '2026-05-17 17:00:00',
+      endedAt: '2026-05-17 18:00:00',
+      status: 'completed',
+    });
+    const db = openDb(rootDir);
+    try {
+      db.prepare(
+        `UPDATE reviewer_passes
+            SET gh_comment_id = ?, body_captured_at = ended_at
+          WHERE reviewer_model = ?`
+      ).run('claude-review-id', 'claude');
+    } finally {
+      db.close();
+    }
+
+    const snapshot = collectReviewPipelineHealth({
+      rootDir,
+      now: () => new Date(NOW),
+      config: {
+        hostChecksEnabled: false,
+        reviewerSilenceThresholdMs: 24 * 60 * 60 * 1000,
+        reviewerActivityLookbackMs: 7 * 24 * 60 * 60 * 1000,
+      },
+    });
+    const finding = snapshot.findings.find((entry) => (
+      entry.code === 'review:reviewer_model_silent' && entry.details.model === 'claude'
+    ));
+    assert.ok(finding);
+    assert.equal(finding.details.lastPostedAt, '2026-05-17T18:00:00.000Z');
+    assert.equal(finding.details.ageMs, 8 * 24 * 60 * 60 * 1000);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 function insertActiveTtmFlag(rootDir, overrides = {}) {
   const db = openDb(rootDir);
   try {

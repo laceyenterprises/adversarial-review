@@ -240,7 +240,7 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     defaultThreshold: DEFAULT_REVIEWER_SILENCE_THRESHOLD_MS,
     windowKey: 'reviewerActivityLookbackMs',
     defaultWindowMs: DEFAULT_REVIEWER_ACTIVITY_LOOKBACK_MS,
-    thresholdDescription: 'a reviewer model that posted during the activity lookback has posted nothing for the silence threshold',
+    thresholdDescription: 'a reviewer model that previously posted a review has posted nothing for the silence threshold',
   },
   {
     code: 'review:unknown_failure_rate_high',
@@ -1282,26 +1282,33 @@ function summarizeReviewerAttempts(db, { nowMs, config }) {
 }
 
 function summarizeReviewerModelSilence(db, { nowMs, config }) {
-  const activityCutoff = new Date(nowMs - config.reviewerActivityLookbackMs).toISOString();
   const observedAt = new Date(nowMs).toISOString();
   const rows = safeAll(
     db,
-    `SELECT CASE
-              WHEN COALESCE(reviewer_model, reviewer_class) = 'claude-code' THEN 'claude'
-              ELSE COALESCE(reviewer_model, reviewer_class)
-            END AS reviewer_model,
-            MAX(COALESCE(body_captured_at, ended_at, started_at)) AS last_posted_at,
+    `WITH posted_reviews AS (
+       SELECT CASE
+                WHEN COALESCE(reviewer_model, reviewer_class) = 'claude-code' THEN 'claude'
+                ELSE COALESCE(reviewer_model, reviewer_class)
+              END AS reviewer_model,
+              strftime('%Y-%m-%dT%H:%M:%fZ', CASE
+                WHEN COALESCE(body_captured_at, ended_at, started_at) IS NULL THEN NULL
+                WHEN instr(COALESCE(body_captured_at, ended_at, started_at), 'T') = 0
+                  AND instr(COALESCE(body_captured_at, ended_at, started_at), ' ') > 0
+                  THEN replace(COALESCE(body_captured_at, ended_at, started_at), ' ', 'T') || 'Z'
+                ELSE COALESCE(body_captured_at, ended_at, started_at)
+              END) AS posted_at
+         FROM reviewer_passes
+        WHERE gh_comment_id IS NOT NULL
+          AND COALESCE(reviewer_model, reviewer_class) IN ('claude', 'claude-code', 'codex', 'gemini')
+     )
+     SELECT reviewer_model,
+            MAX(posted_at) AS last_posted_at,
             COUNT(*) AS posted_reviews
-       FROM reviewer_passes
-      WHERE gh_comment_id IS NOT NULL
-        AND COALESCE(body_captured_at, ended_at, started_at) >= ?
-        AND COALESCE(body_captured_at, ended_at, started_at) <= ?
-        AND COALESCE(reviewer_model, reviewer_class) IN ('claude', 'claude-code', 'codex', 'gemini')
-      GROUP BY CASE
-                 WHEN COALESCE(reviewer_model, reviewer_class) = 'claude-code' THEN 'claude'
-                 ELSE COALESCE(reviewer_model, reviewer_class)
-               END`,
-    [activityCutoff, observedAt]
+       FROM posted_reviews
+      WHERE posted_at IS NOT NULL
+        AND posted_at <= ?
+      GROUP BY reviewer_model`,
+    [observedAt]
   );
   const models = rows.map((row) => {
     const lastPostedMs = toMs(row.last_posted_at);
@@ -4590,9 +4597,8 @@ function collectReviewPipelineHealth({
     return {
       ...snapshot,
       findings,
-      // Compatibility for readers that historically looked only at `alerts`.
-      // Keeping two divergent arrays made a non-empty finding set report as
-      // "0 alerts" to Sentinel; both keys now expose the same diagnostics.
+      // Compatibility for external readers that historically looked for `alerts`.
+      // In-tree consumers should use `findings`; both keys expose the same array.
       alerts: findings,
     };
   } finally {

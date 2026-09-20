@@ -111,6 +111,32 @@ function seedReviewing(db, overrides = {}) {
   }
 }
 
+function seedReviewerPassArtifact(db, overrides = {}) {
+  db.prepare(
+    `INSERT INTO reviewer_passes
+       (repo, pr_number, attempt_number, reviewer_class, reviewer_model, pass_kind,
+        started_at, ended_at, status, head_sha, verdict, body_md, gh_comment_id,
+        body_captured_at, metadata_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    overrides.repo || REPO,
+    overrides.prNumber || PR,
+    overrides.attemptNumber ?? 3,
+    overrides.reviewerClass || 'codex',
+    overrides.reviewerModel || 'codex',
+    overrides.passKind || 'first-pass',
+    overrides.startedAt || STARTED_AT,
+    overrides.endedAt || '2026-05-11T05:13:10.000Z',
+    overrides.status || 'completed',
+    Object.prototype.hasOwnProperty.call(overrides, 'headSha') ? overrides.headSha : HEAD_SHA,
+    overrides.verdict || 'comment-only',
+    overrides.bodyMd || '## Verdict\n\nComment only',
+    overrides.ghCommentId || 'IC_posted',
+    overrides.bodyCapturedAt || '2026-05-11T05:13:10.000Z',
+    overrides.metadataJson || '{}'
+  );
+}
+
 function readRow(db, repo = REPO, prNumber = PR) {
   return db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?').get(repo, prNumber);
 }
@@ -965,11 +991,15 @@ test('posted review stays successful while a genuinely leaked process group prod
     killProcessGroup: (pgid, signal) => killed.push({ pgid, signal }),
     fetchHeadSha: async () => HEAD_SHA,
     postedReviewCleanupRecheckDelaysMs: [0, 0],
+    postedReviewCleanupSigtermGraceMs: 0,
     onCleanupFinding: async (finding) => findings.push(finding),
   });
 
   assert.equal(readRow(db).review_status, 'posted');
-  assert.deepEqual(killed, [{ pgid: 9001, signal: 'SIGKILL' }]);
+  assert.deepEqual(killed, [
+    { pgid: 9001, signal: 'SIGTERM' },
+    { pgid: 9001, signal: 'SIGKILL' },
+  ]);
   assert.deepEqual(findings, [{
     id: 'reviewer:posted_process_group_leak',
     severity: 'warning',
@@ -980,6 +1010,33 @@ test('posted review stays successful while a genuinely leaked process group prod
     matched: true,
     postedAt: '2026-05-11T05:13:09.000Z',
   }]);
+});
+
+test('posted review cleanup skips kill once the pass artifact is linked', async () => {
+  const db = setupDb();
+  seedReviewing(db, { reviewer: 'codex' });
+  seedReviewerPassArtifact(db);
+  const findings = [];
+  const killed = [];
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([
+      { user: { login: 'codex-reviewer-lacey' }, submitted_at: '2026-05-11T05:13:09.000Z' },
+    ]),
+    now: new Date(FAILURE_AT),
+    log: makeLog(),
+    probeSession: () => ({ alive: true, matched: true }),
+    killProcessGroup: (pgid, signal) => killed.push({ pgid, signal }),
+    fetchHeadSha: async () => HEAD_SHA,
+    postedReviewCleanupRecheckDelaysMs: [0],
+    postedReviewCleanupSigtermGraceMs: 0,
+    onCleanupFinding: async (finding) => findings.push(finding),
+  });
+
+  assert.equal(readRow(db).review_status, 'posted');
+  assert.deepEqual(killed, []);
+  assert.deepEqual(findings, []);
 });
 
 test('posted review cleanup does not flag a recycled process group', async () => {

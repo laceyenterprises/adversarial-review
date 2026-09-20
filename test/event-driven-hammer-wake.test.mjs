@@ -90,3 +90,28 @@ test('merge-rule refusal does not wake Hammer', () => {
   assert.equal(result.reason, 'branch-protection-missing-gate');
   assert.equal(calls.length, 0);
 });
+
+test('wake-path failure is retryable without allowing duplicate successful wakes', () => {
+  const rootDir = root();
+  const calls = [];
+  const args = {
+    rootDir,
+    ...identity,
+    eligibility: { eligible: true, reasons: [] },
+    log: { log() {} },
+  };
+  const failed = requestEligibleHammerWake({
+    ...args,
+    requestWatcherWakeImpl: () => {
+      throw new Error('wake transport unavailable');
+    },
+  });
+  assert.equal(failed.outcome, 'failed');
+  assert.equal(failed.retryable, true);
+
+  const retried = requestEligibleHammerWake({ ...args, requestWatcherWakeImpl: wakeImpl(calls) });
+  const duplicate = requestEligibleHammerWake({ ...args, requestWatcherWakeImpl: wakeImpl(calls) });
+  assert.equal(retried.outcome, 'requested');
+  assert.equal(duplicate.outcome, 'duplicate');
+  assert.equal(calls.length, 1);
+});

@@ -5,7 +5,7 @@
 // follow-up-remediation.mjs back under the ARC-19 R3 line ratchet, which is
 // decrease-only by contract.
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -124,8 +124,43 @@ function requestEligibleHammerWake({
       }
     } catch (err) {
       if (err?.code === 'EEXIST') {
-        outcome = 'duplicate';
-        reason = 'wake-already-recorded';
+        const prior = readHammerWakeAudit(auditPath);
+        if (prior?.outcome === 'failed') {
+          const failedPath = `${auditPath.slice(0, -5)}.failed-${createHash('sha256')
+            .update(`${observedAt}:${process.pid}`)
+            .digest('hex')
+            .slice(0, 12)}.json`;
+          try {
+            // Rename is the retry hand-off CAS: only one caller can archive
+            // the failed reservation, then the ordinary exclusive create
+            // below elects at most one replacement wake for this identity.
+            renameSync(auditPath, failedPath);
+            return requestEligibleHammerWake({
+              rootDir,
+              ...identity,
+              eligibility,
+              observedAt,
+              requestWatcherWakeImpl,
+              log,
+            });
+          } catch (retryErr) {
+            if (retryErr?.code === 'ENOENT') {
+              return requestEligibleHammerWake({
+                rootDir,
+                ...identity,
+                eligibility,
+                observedAt,
+                requestWatcherWakeImpl,
+                log,
+              });
+            }
+            outcome = 'failed';
+            reason = 'wake-retry-reservation-failed';
+          }
+        } else {
+          outcome = 'duplicate';
+          reason = 'wake-already-recorded';
+        }
       } else {
         outcome = 'failed';
         reason = 'wake-reservation-failed';

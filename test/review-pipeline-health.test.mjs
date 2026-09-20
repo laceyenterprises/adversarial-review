@@ -326,21 +326,24 @@ test('reviewer model silence stretches threshold to recent model cadence', () =>
   const rootDir = tempRoot();
   try {
     for (const [index, endedAt] of [
-      '2026-05-20T12:00:00.000Z',
-      '2026-05-22T12:00:00.000Z',
-      '2026-05-24T12:00:00.000Z',
+      '2026-05-18T18:00:00.000Z',
+      '2026-05-20T06:00:00.000Z',
+      '2026-05-21T18:00:00.000Z',
+      '2026-05-23T06:00:00.000Z',
+      '2026-05-24T18:00:00.000Z',
+      '2026-05-25T06:00:00.000Z',
     ].entries()) {
       insertReviewerPass(rootDir, {
         prNumber: 960 + index,
         reviewerClass: 'claude',
         reviewerModel: 'claude-sonnet',
-        startedAt: endedAt.replace('12:00:00', '11:50:00'),
+        startedAt: new Date(Date.parse(endedAt) - 10 * 60 * 1000).toISOString(),
         endedAt,
         status: 'completed',
       });
     }
     insertReviewerPass(rootDir, {
-      prNumber: 963,
+      prNumber: 966,
       reviewerClass: 'claude',
       reviewerModel: 'claude-sonnet',
       startedAt: '2026-05-25T17:00:00.000Z',
@@ -349,7 +352,7 @@ test('reviewer model silence stretches threshold to recent model cadence', () =>
     });
     const db = openDb(rootDir);
     try {
-      for (const prNumber of [960, 961, 962]) {
+      for (const prNumber of [960, 961, 962, 963, 964, 965]) {
         db.prepare(
           `UPDATE reviewer_passes
               SET gh_comment_id = ?, body_captured_at = ended_at
@@ -372,8 +375,8 @@ test('reviewer model silence stretches threshold to recent model cadence', () =>
     assert.equal(reviewerModelSilentFinding(snapshot), undefined);
     const model = snapshot.reviewerModelSilence.models.find((entry) => entry.model === 'claude');
     assert.ok(model);
-    assert.equal(model.thresholdMs, 48 * 60 * 60 * 1000);
-    assert.equal(model.cadenceSampleSize, 2);
+    assert.equal(model.thresholdMs, 36 * 60 * 60 * 1000);
+    assert.equal(model.cadenceSampleSize, 5);
     assert.equal(model.startedPasses, 1);
     assert.equal(model.silent, false);
   } finally {
@@ -501,7 +504,69 @@ test('reviewer model silence parses timezone-less SQLite timestamps as UTC', () 
   }
 });
 
-test('reviewer model silence ages out models with no posted review inside the activity lookback', () => {
+test('reviewer model silence ignores one anomalous recent gap when detecting subsequent silence', () => {
+  const rootDir = tempRoot();
+  try {
+    for (const [index, endedAt] of [
+      '2026-05-18T18:00:00.000Z',
+      '2026-05-22T18:00:00.000Z',
+      '2026-05-23T00:00:00.000Z',
+      '2026-05-23T06:00:00.000Z',
+      '2026-05-23T12:00:00.000Z',
+      '2026-05-23T18:00:00.000Z',
+      '2026-05-24T02:00:00.000Z',
+    ].entries()) {
+      insertReviewerPass(rootDir, {
+        prNumber: 970 + index,
+        reviewerClass: 'claude',
+        reviewerModel: 'claude-sonnet',
+        startedAt: new Date(Date.parse(endedAt) - 10 * 60 * 1000).toISOString(),
+        endedAt,
+        status: 'completed',
+      });
+    }
+    insertReviewerPass(rootDir, {
+      prNumber: 977,
+      reviewerClass: 'claude',
+      reviewerModel: 'claude-sonnet',
+      startedAt: '2026-05-25T17:00:00.000Z',
+      endedAt: '2026-05-25T17:05:00.000Z',
+      status: 'failed',
+    });
+    const db = openDb(rootDir);
+    try {
+      for (const prNumber of [970, 971, 972, 973, 974, 975, 976]) {
+        db.prepare(
+          `UPDATE reviewer_passes
+              SET gh_comment_id = ?, body_captured_at = ended_at
+            WHERE pr_number = ?`
+        ).run(`claude-review-id-${prNumber}`, prNumber);
+      }
+    } finally {
+      db.close();
+    }
+
+    const snapshot = collectReviewPipelineHealth({
+      rootDir,
+      now: () => new Date(NOW),
+      config: {
+        hostChecksEnabled: false,
+        reviewerSilenceThresholdMs: 24 * 60 * 60 * 1000,
+        reviewerActivityLookbackMs: 7 * 24 * 60 * 60 * 1000,
+      },
+    });
+    const model = reviewerModelSilentDetails(snapshot, 'claude');
+    assert.ok(model);
+    assert.equal(model.cadenceThresholdMs, 8 * 60 * 60 * 1000);
+    assert.equal(model.thresholdMs, 24 * 60 * 60 * 1000);
+    assert.equal(model.cadenceSampleSize, 6);
+    assert.equal(model.silent, true);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reviewer model silence persists beyond lookback only when the lane has recent demand', () => {
   const rootDir = tempRoot();
   try {
     insertReviewerPass(rootDir, {
@@ -552,7 +617,11 @@ test('reviewer model silence ages out models with no posted review inside the ac
         reviewerActivityLookbackMs: 7 * 24 * 60 * 60 * 1000,
       },
     });
-    assert.equal(reviewerModelSilentDetails(snapshot, 'claude'), undefined);
+    const model = reviewerModelSilentDetails(snapshot, 'claude');
+    assert.ok(model);
+    assert.equal(model.lastPostedAt, '2026-05-17T16:10:00.000Z');
+    assert.equal(model.startedPasses, 1);
+    assert.equal(model.silent, true);
     assert.equal(reviewerModelSilentDetails(snapshot, 'gemini'), undefined);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -741,7 +810,9 @@ test('reviewer model silence clears after the activity lookback', () => {
     });
     assert.equal(reviewerModelSilentFinding(snapshot), undefined);
     const model = snapshot.reviewerModelSilence.models.find((entry) => entry.model === 'claude');
-    assert.equal(model, undefined);
+    assert.ok(model);
+    assert.equal(model.startedPasses, 0);
+    assert.equal(model.silent, false);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

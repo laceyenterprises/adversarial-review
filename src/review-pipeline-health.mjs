@@ -34,7 +34,9 @@ const DEFAULT_REVIEWER_DEATH_RATE_MIN_ATTEMPTS = 3;
 const DEFAULT_REVIEWER_SILENCE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_REVIEWER_ACTIVITY_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 const REVIEWER_MODEL_SILENCE_CLASSES = ['claude', 'codex', 'gemini'];
-const REVIEWER_MODEL_SILENCE_CADENCE_PERCENTILE = 0.95;
+const REVIEWER_MODEL_SILENCE_CADENCE_PERCENTILE = 0.75;
+const REVIEWER_MODEL_SILENCE_CADENCE_MIN_INTERVALS = 5;
+const REVIEWER_MODEL_SILENCE_CADENCE_MAX_THRESHOLD_MULTIPLIER = 2;
 const DEFAULT_REVIEW_UNKNOWN_RATE_THRESHOLD = 0.30;
 const DEFAULT_REVIEW_UNKNOWN_RATE_WINDOW_MINUTES = 15;
 const DEFAULT_REVIEW_UNKNOWN_RATE_SAMPLE_FLOOR = 5;
@@ -1323,7 +1325,7 @@ function summarizeReviewerModelSilence(db, { nowMs, config }) {
   const silenceClasses = config.reviewerModelSilenceClasses || REVIEWER_MODEL_SILENCE_CLASSES;
   if (silenceClasses.length === 0) {
     return {
-      thresholdMs: config.reviewerSilenceThresholdMs,
+      thresholdFloorMs: config.reviewerSilenceThresholdMs,
       activityLookbackMs: config.reviewerActivityLookbackMs,
       classes: [],
       models: [],
@@ -1339,6 +1341,35 @@ function summarizeReviewerModelSilence(db, { nowMs, config }) {
       ELSE NULL
     END`;
   const reviewerClassParams = [...silenceClasses, ...silenceClasses];
+  const lastPostedRows = safeAll(
+    db,
+    `WITH posted_reviews AS (
+       SELECT ${reviewerClassSql} AS reviewer_model,
+              ${REVIEWER_PASS_NORMALIZED_POSTED_AT_SQL} AS posted_at
+         FROM reviewer_passes
+        WHERE ${REVIEWER_PASS_GENUINE_POSTED_REVIEW_WHERE_SQL}
+          AND pass_kind IN ('first-pass', 'rereview')
+          AND (
+            TRIM(LOWER(reviewer_class)) IN (${reviewerClassPlaceholders})
+            OR TRIM(LOWER(reviewer_model)) IN (${reviewerClassPlaceholders})
+          )
+     )
+     SELECT reviewer_model,
+            MAX(posted_at) AS last_posted_at,
+            COUNT(*) AS posted_reviews
+       FROM posted_reviews
+      WHERE posted_at IS NOT NULL
+        AND reviewer_model IS NOT NULL
+        AND posted_at <= ?
+      GROUP BY reviewer_model
+      ORDER BY reviewer_model`,
+    [
+      ...reviewerClassParams,
+      ...silenceClasses,
+      ...silenceClasses,
+      observedAt,
+    ]
+  );
   const postedRows = safeAll(
     db,
     `WITH posted_reviews AS (
@@ -1357,8 +1388,8 @@ function summarizeReviewerModelSilence(db, { nowMs, config }) {
        FROM posted_reviews
       WHERE posted_at IS NOT NULL
         AND reviewer_model IS NOT NULL
-        AND strftime('%Y-%m-%dT%H:%M:%fZ', posted_at) >= strftime('%Y-%m-%dT%H:%M:%fZ', ?)
-        AND strftime('%Y-%m-%dT%H:%M:%fZ', posted_at) <= strftime('%Y-%m-%dT%H:%M:%fZ', ?)
+        AND posted_at >= ?
+        AND posted_at <= ?
       ORDER BY reviewer_model, posted_at`,
     [
       ...reviewerClassParams,
@@ -1410,23 +1441,23 @@ function summarizeReviewerModelSilence(db, { nowMs, config }) {
     ]
   );
   const postedByModel = new Map();
+  for (const row of lastPostedRows) {
+    const lastPostedMs = parseReviewPostedAtMs(row.last_posted_at);
+    if (lastPostedMs === null) continue;
+    postedByModel.set(row.reviewer_model, {
+      model: row.reviewer_model,
+      lastPostedAt: row.last_posted_at,
+      lastPostedMs,
+      postedReviews: Number(row.posted_reviews || 0),
+      postedReviewTimes: [],
+    });
+  }
   for (const row of postedRows) {
     const lastPostedMs = parseReviewPostedAtMs(row.posted_at);
     if (lastPostedMs === null) continue;
-    const entry = postedByModel.get(row.reviewer_model) || {
-      model: row.reviewer_model,
-      lastPostedAt: null,
-      lastPostedMs: null,
-      postedReviews: 0,
-      postedReviewTimes: [],
-    };
-    entry.postedReviews += 1;
+    const entry = postedByModel.get(row.reviewer_model);
+    if (!entry) continue;
     entry.postedReviewTimes.push(lastPostedMs);
-    if (entry.lastPostedMs === null || lastPostedMs > entry.lastPostedMs) {
-      entry.lastPostedAt = row.posted_at;
-      entry.lastPostedMs = lastPostedMs;
-    }
-    postedByModel.set(row.reviewer_model, entry);
   }
   const startedByModel = new Map();
   for (const row of startedRows) {
@@ -1439,15 +1470,21 @@ function summarizeReviewerModelSilence(db, { nowMs, config }) {
   const models = Array.from(postedByModel.values()).map((row) => {
     const lastPostedMs = row.lastPostedMs;
     const ageMs = lastPostedMs === null ? null : Math.max(0, nowMs - lastPostedMs);
-    const cadenceIntervals = row.postedReviewTimes
-      .sort((left, right) => left - right)
+    const sortedPostedReviewTimes = [...row.postedReviewTimes].sort((left, right) => left - right);
+    const cadenceIntervals = sortedPostedReviewTimes
       .slice(1)
-      .map((postedMs, index) => postedMs - row.postedReviewTimes[index])
+      .map((postedMs, index) => postedMs - sortedPostedReviewTimes[index])
       .filter((value) => Number.isFinite(value) && value > 0);
-    const cadenceThresholdMs = percentileNearestRank(
-      cadenceIntervals,
-      REVIEWER_MODEL_SILENCE_CADENCE_PERCENTILE
+    const rawCadenceThresholdMs = cadenceIntervals.length >= REVIEWER_MODEL_SILENCE_CADENCE_MIN_INTERVALS
+      ? percentileNearestRank(cadenceIntervals, REVIEWER_MODEL_SILENCE_CADENCE_PERCENTILE)
+      : null;
+    const cadenceThresholdCapMs = (
+      config.reviewerSilenceThresholdMs
+      * REVIEWER_MODEL_SILENCE_CADENCE_MAX_THRESHOLD_MULTIPLIER
     );
+    const cadenceThresholdMs = rawCadenceThresholdMs === null
+      ? null
+      : Math.min(rawCadenceThresholdMs, cadenceThresholdCapMs);
     const thresholdMs = Math.max(
       config.reviewerSilenceThresholdMs,
       cadenceThresholdMs || 0
@@ -1472,7 +1509,7 @@ function summarizeReviewerModelSilence(db, { nowMs, config }) {
     };
   });
   return {
-    thresholdMs: config.reviewerSilenceThresholdMs,
+    thresholdFloorMs: config.reviewerSilenceThresholdMs,
     activityLookbackMs: config.reviewerActivityLookbackMs,
     classes: silenceClasses,
     models,
@@ -3607,7 +3644,7 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
       details: {
         models: orderedSilentModels,
         model: modelNames.length === 1 ? modelNames[0] : null,
-        thresholdMs: snapshot.reviewerModelSilence.thresholdMs,
+        thresholdFloorMs: snapshot.reviewerModelSilence.thresholdFloorMs,
         activityLookbackMs: snapshot.reviewerModelSilence.activityLookbackMs,
       },
     }));
@@ -4575,7 +4612,7 @@ function collectReviewPipelineHealth({
     const reviewerModelSilence = db
       ? summarizeReviewerModelSilence(db, { nowMs, config })
       : {
-          thresholdMs: config.reviewerSilenceThresholdMs,
+          thresholdFloorMs: config.reviewerSilenceThresholdMs,
           activityLookbackMs: config.reviewerActivityLookbackMs,
           classes: config.reviewerModelSilenceClasses,
           models: [],

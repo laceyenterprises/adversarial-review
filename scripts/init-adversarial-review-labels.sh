@@ -54,6 +54,7 @@ declare -a LABELS=(
   "no-merge-hold|Operator hold: block merge-agent and adversarial gate.|D93F0B"
   "duplicate-family|Member of a detected duplicate PR family.|5319E7"
   "duplicate-family-hold|Unresolved duplicate family: autonomous merge blocked.|D93F0B"
+  "not-a-duplicate-stack|Release duplicate-family hold for distinct PRs.|5319E7"
   "merge-agent-stuck|Merge-agent output: operator attention required before retry.|D93F0B"
   "stale-drift|PR drift helper flagged stale branch; refresh before more review.|C5DEF5"
   "pr-class: additive-only|Initial PR diff was additive-only; scope expansion requires approval.|B7E4C7"

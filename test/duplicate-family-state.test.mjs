@@ -440,11 +440,13 @@ test('label reconciler releases inactive family hold once and persists label cac
 
     reconcileDuplicateFamiliesForRepo(db, [
       subject(341, { labels: ['duplicate-family', 'duplicate-family-hold'] }),
+      subject(342, { state: 'CLOSED', labels: ['duplicate-family', 'duplicate-family-hold'] }),
     ], {
       repoPath: REPO,
       now: '2026-09-11T00:01:00.000Z',
       readBuildCompletionSignalForPrImpl: provenanceReader({
         341: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+        342: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
       }),
     });
 
@@ -458,6 +460,59 @@ test('label reconciler releases inactive family hold once and persists label cac
       'SELECT labels_json FROM duplicate_family_candidates WHERE repo = ? AND pr_number = ?'
     ).get(REPO, 341).labels_json);
     assert.deepEqual(labels, ['duplicate-family']);
+  } finally {
+    db.close();
+  }
+});
+
+test('windowed duplicate-family census does not close unobserved siblings', async () => {
+  const db = memoryDb();
+  try {
+    const first = reconcileDuplicateFamiliesForRepo(db, [
+      subject(345, { labels: [] }),
+      subject(346, { labels: [] }),
+    ], {
+      repoPath: REPO,
+      now: '2026-09-11T00:00:00.000Z',
+      readBuildCompletionSignalForPrImpl: provenanceReader({
+        345: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+        346: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+      }),
+    });
+    assert.equal(first.familyIds.length, 1);
+
+    const second = reconcileDuplicateFamiliesForRepo(db, [
+      subject(345, { labels: ['duplicate-family', 'duplicate-family-hold'] }),
+    ], {
+      repoPath: REPO,
+      now: '2026-09-11T00:01:00.000Z',
+      readBuildCompletionSignalForPrImpl: provenanceReader({
+        345: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+        346: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+      }),
+    });
+
+    assert.deepEqual(second.familyIds, first.familyIds);
+    const family = listDuplicateFamilies(db)[0];
+    assert.equal(family.status, 'advisory');
+    const sibling = db.prepare(
+      'SELECT pr_state FROM duplicate_family_candidates WHERE repo = ? AND pr_number = ?'
+    ).get(REPO, 346);
+    assert.equal(sibling.pr_state, 'open');
+
+    const addCalls = [];
+    const removeCalls = [];
+    const octokit = {
+      rest: {
+        issues: {
+          addLabels: async (payload) => addCalls.push(payload),
+          removeLabel: async (payload) => removeCalls.push(payload),
+        },
+      },
+    };
+    await reconcileDuplicateFamilyLabels({ db, octokit, repoPath: REPO, logger: { error() {} } });
+    assert.deepEqual(removeCalls, []);
+    assert.deepEqual(addCalls.map((entry) => entry.issue_number), [346]);
   } finally {
     db.close();
   }
@@ -775,6 +830,10 @@ test('windowed census preserves active families when no candidate is observed', 
     assert.deepEqual(JSON.parse(family.transition_log_json).map((entry) => entry.transition), [
       'detected-advisory',
     ]);
+    const preserved = db.prepare(
+      'SELECT pr_state FROM duplicate_family_candidates WHERE repo = ? AND pr_number = ?'
+    ).all(REPO, 701).map((row) => row.pr_state);
+    assert.deepEqual(preserved, ['open']);
   } finally {
     db.close();
   }
@@ -817,6 +876,10 @@ test('watcher census aborts transient provenance failures without deactivating a
     assert.deepEqual(JSON.parse(family.transition_log_json).map((entry) => entry.transition), [
       'detected-advisory',
     ]);
+    const sibling = db.prepare(
+      'SELECT pr_state FROM duplicate_family_candidates WHERE repo = ? AND pr_number = ?'
+    ).get(REPO, 482);
+    assert.equal(sibling.pr_state, 'open');
   } finally {
     db.close();
   }

@@ -104,6 +104,8 @@ census re-evaluates the family. Existing databases created with the older
   no longer returns the family key. Families that are absent solely because all
   candidates fell outside a windowed polling slice remain advisory until a later
   observation proves they no longer have two live unsuppressed candidates.
+  Absence from the watcher slice is never written back as `pr_state='closed'`;
+  only an observed subject state may change the cached PR state.
 - `reconcileDuplicateFamilyLabels()` writes the GitHub labels after each census:
   active unresolved unsuppressed candidates receive `duplicate-family` and
   `duplicate-family-hold`; suppressed candidates receive only

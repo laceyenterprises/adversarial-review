@@ -27,6 +27,7 @@ declare -a LABELS=(
   "no-merge-hold|Operator hold: block merge-agent and adversarial gate.|D93F0B"
   "duplicate-family|Member of a detected duplicate PR family.|5319E7"
   "duplicate-family-hold|Unresolved duplicate family: autonomous merge blocked.|D93F0B"
+  "not-a-duplicate-stack|Release duplicate-family hold for distinct PRs.|5319E7"
 )
 
 description_length() {

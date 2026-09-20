@@ -497,21 +497,8 @@ function observedSubjectCandidateKeys(subjectEntries, repoPath) {
   return keys;
 }
 
-function subjectLabelSuppressions(subject) {
-  const labels = labelNames(subject?.labels);
-  const suppressions = [];
-  if (labels.includes(DUPLICATE_FAMILY_SUPPRESSION_LABEL)) {
-    suppressions.push({ kind: 'current-head-exclusion-label', headSha: normalizeText(subject?.headSha || subject?.headRefOid) });
-  }
-  if (labels.some((label) => STACK_LABEL_RE.test(label))) {
-    suppressions.push({ kind: 'stack-or-follow-up-label', headSha: normalizeText(subject?.headSha || subject?.headRefOid) });
-  }
-  return suppressions;
-}
-
 function refreshObservedDuplicateCandidateRows(db, subjectEntries, repoPath, now = new Date().toISOString()) {
   if (!repoPath) return;
-  const observedCandidateKeys = observedSubjectCandidateKeys(subjectEntries, repoPath);
   const updateObservedCandidate = db.prepare(
     `UPDATE duplicate_family_candidates
         SET title = ?,
@@ -520,31 +507,11 @@ function refreshObservedDuplicateCandidateRows(db, subjectEntries, repoPath, now
             head_branch = ?,
             head_sha = ?,
             base_sha = ?,
-            suppressions_json = ?,
             labels_json = ?,
             last_seen_at = ?,
             updated_at = ?
       WHERE repo = ?
         AND pr_number = ?`
-  );
-  const selectOpenAdvisoryCandidates = db.prepare(
-    `SELECT duplicate_family_candidates.family_id,
-            duplicate_family_candidates.repo,
-            duplicate_family_candidates.pr_number
-       FROM duplicate_family_candidates
-       JOIN duplicate_families
-         ON duplicate_families.family_id = duplicate_family_candidates.family_id
-      WHERE duplicate_families.target_repo = ?
-        AND duplicate_families.status = ?
-        AND lower(duplicate_family_candidates.pr_state) = 'open'`
-  );
-  const markUnobservedCandidateClosed = db.prepare(
-    `UPDATE duplicate_family_candidates
-        SET pr_state = 'closed',
-            updated_at = ?
-      WHERE repo = ?
-        AND pr_number = ?
-        AND lower(pr_state) = 'open'`
   );
   const tx = db.transaction(() => {
     for (const entry of Array.isArray(subjectEntries) ? subjectEntries : []) {
@@ -560,19 +527,12 @@ function refreshObservedDuplicateCandidateRows(db, subjectEntries, repoPath, now
         normalizeText(subject.headRefName || subject.headBranch),
         normalizeText(subject.headSha || subject.headRefOid),
         normalizeText(subject.baseSha || subject.baseRefOid || subject.mergeBaseSha),
-        JSON.stringify(subjectLabelSuppressions(subject)),
         JSON.stringify(labelNames(subject.labels)),
         now,
         now,
         repo,
         prNumber,
       );
-    }
-    for (const row of selectOpenAdvisoryCandidates.all(repoPath, DUPLICATE_FAMILY_STATUS_ADVISORY)) {
-      const key = `${row.repo}\0${row.pr_number}`;
-      if (observedCandidateKeys.has(key)) continue;
-      if (!familyHasObservedCandidate(db, row.family_id, observedCandidateKeys)) continue;
-      markUnobservedCandidateClosed.run(now, row.repo, row.pr_number);
     }
   });
   tx();

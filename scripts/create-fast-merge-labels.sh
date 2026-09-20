@@ -25,6 +25,8 @@ declare -a LABELS=(
   "fast-merge-veto|Operator override: forces normal adversarial review.|D93F0B"
   "ticket-pipeline-paused|Pause adversarial-review Linear ticket pipeline sync.|F9D0C4"
   "no-merge-hold|Operator hold: block merge-agent and adversarial gate.|D93F0B"
+  "duplicate-family|Member of a detected duplicate PR family.|5319E7"
+  "duplicate-family-hold|Unresolved duplicate family: autonomous merge blocked.|D93F0B"
 )
 
 description_length() {

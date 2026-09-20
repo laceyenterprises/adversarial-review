@@ -2,6 +2,11 @@ import { spawnSync as nodeSpawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readBuildCompletionSignalForPr } from './session-ledger-read-adapter.mjs';
+import {
+  DUPLICATE_FAMILY_HOLD_LABEL,
+  DUPLICATE_FAMILY_LABEL,
+  evaluateDuplicateFamilyCandidate,
+} from './duplicate-family-gate.mjs';
 
 export const DUPLICATE_FAMILY_STATUS_ADVISORY = 'advisory';
 export const DUPLICATE_FAMILY_STATUS_INACTIVE = 'inactive';
@@ -846,4 +851,48 @@ export function duplicateFamilyCandidateRows(db, familyId) {
       WHERE family_id = ?
       ORDER BY pr_number ASC`
   ).all(familyId);
+}
+
+export async function reconcileDuplicateFamilyLabels({ db, octokit, repoPath, logger = console } = {}) {
+  if (!db || !octokit || !repoPath) return { inspected: 0, changed: 0 };
+  ensureDuplicateFamilySchema(db);
+  const [owner, repo] = String(repoPath).split('/');
+  if (!owner || !repo) return { inspected: 0, changed: 0 };
+  const rows = db.prepare(
+    `SELECT duplicate_families.*, duplicate_family_candidates.pr_number,
+            duplicate_family_candidates.head_sha AS candidate_head_sha,
+            duplicate_family_candidates.labels_json
+       FROM duplicate_family_candidates
+       JOIN duplicate_families
+         ON duplicate_families.family_id = duplicate_family_candidates.family_id
+      WHERE duplicate_family_candidates.repo = ?
+        AND lower(duplicate_family_candidates.pr_state) = 'open'`
+  ).all(repoPath);
+  let changed = 0;
+  for (const row of rows) {
+    const gate = evaluateDuplicateFamilyCandidate(row, {
+      prNumber: row.pr_number,
+      headSha: row.candidate_head_sha,
+    });
+    const current = new Set(labelNames(parseMaybeJson(row.labels_json, [])).map((name) => name.toLowerCase()));
+    const wanted = [DUPLICATE_FAMILY_LABEL, ...(gate.held ? [DUPLICATE_FAMILY_HOLD_LABEL] : [])];
+    const additions = wanted.filter((name) => !current.has(name));
+    try {
+      if (additions.length > 0) {
+        await octokit.rest.issues.addLabels({ owner, repo, issue_number: row.pr_number, labels: additions });
+        changed += additions.length;
+      }
+      if (!gate.held && current.has(DUPLICATE_FAMILY_HOLD_LABEL)) {
+        await octokit.rest.issues.removeLabel({
+          owner, repo, issue_number: row.pr_number, name: DUPLICATE_FAMILY_HOLD_LABEL,
+        });
+        changed += 1;
+      }
+    } catch (err) {
+      logger?.error?.(
+        `[watcher] duplicate-family label reconciliation failed for ${repoPath}#${row.pr_number}: ${err?.message || err}`,
+      );
+    }
+  }
+  return { inspected: rows.length, changed };
 }

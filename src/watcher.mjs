@@ -86,7 +86,7 @@ import {
 import { validateStartupRoleRegistry } from './role-registry.mjs';
 import { validateStartupDeliveryIdentity } from './adapters/comms/github-pr-comments/delivery-identity.mjs';
 import { isPipelineEnabled } from './domain-pipeline.mjs';
-import { runDuplicateFamilyCensusForWatcher } from './duplicate-family-state.mjs';
+import { reconcileDuplicateFamilyLabels, runDuplicateFamilyCensusForWatcher } from './duplicate-family-state.mjs';
 import { checkAgyReviewerAuth } from './agy-reviewer-auth.mjs';
 import { scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 import { createCompositeOperatorSurface } from './adapters/operator/index.mjs';
@@ -1409,6 +1409,7 @@ async function pollOnce(
     });
     subjectEntries = orderSubjectEntriesRereviewOldestFirst(subjectEntries, { repoPath, logger: console });
     await runDuplicateFamilyCensusForWatcher({ db, subjectEntries, repoPath, rootDir: ROOT, env: process.env });
+    await reconcileDuplicateFamilyLabels({ db, octokit, repoPath, logger: console });
     for (const subjectEntry of subjectEntries) {
       await processReviewSubject(subjectEntry, {
         octokit,

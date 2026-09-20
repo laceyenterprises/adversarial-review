@@ -29,6 +29,7 @@ import {
   parseRemediatedFindingsTrailer,
 } from './ham-provenance.mjs';
 import { normalizeCoverageTitle } from '../kernel/remediation-reply.mjs';
+import { DUPLICATE_FAMILY_HOLD_LABEL, DUPLICATE_FAMILY_UNRESOLVED_REASON } from '../duplicate-family-gate.mjs';
 
 const OPERATOR_APPROVED_LABEL = 'operator-approved';
 const MERGE_AGENT_REQUESTED_LABEL = 'merge-agent-requested';
@@ -48,6 +49,7 @@ const HARD_STOP_LABELS = Object.freeze([
   'merge-agent-skip',
   'do-not-merge',
   'no-merge-hold',
+  DUPLICATE_FAMILY_HOLD_LABEL,
   'merge-agent-stuck',
   ADVERSARIAL_MERGE_BLOCKED_LABEL,
 ]);
@@ -1143,7 +1145,9 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     adversarialMergeBlockedEvidence,
   );
   for (const label of blockingLabels) {
-    reasons.push(`label-${label}`);
+    reasons.push(label === DUPLICATE_FAMILY_HOLD_LABEL
+      ? DUPLICATE_FAMILY_UNRESOLVED_REASON
+      : `label-${label}`);
   }
 
   // SPEC §4.2 #8 — AMA must fail closed when a PR is already in an FML

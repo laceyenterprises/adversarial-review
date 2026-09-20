@@ -1711,6 +1711,7 @@ test('__testables__ hard-stop label set matches SPEC §4.2 #6', () => {
       'merge-agent-skip',
       'do-not-merge',
       'no-merge-hold',
+      'duplicate-family-hold',
       'merge-agent-stuck',
       'adversarial-merge-blocked',
     ],

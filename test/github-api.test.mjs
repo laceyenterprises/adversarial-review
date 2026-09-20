@@ -2168,6 +2168,7 @@ export async function load(url, context, nextLoad) {
         export function readReviewerPassLogins() { return []; }
         export function recordMergeCloseout() { return { changes: 0 }; }
         export function recordMergeCloseoutScrapeFailure() { return { changes: 0 }; }
+        export function recordReviewLatencyEvent() { return { event_id: 0 }; }
         export function requestReviewRereview() { return { changes: 0 }; }
         // Imported by src/follow-up-stuck-claim-sweep.mjs. Exported inertly so
         // this handwritten stub stays a superset of the real module's

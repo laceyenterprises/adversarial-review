@@ -149,7 +149,10 @@ import {
   stmtUpdateReviewLabels,
   stmtUpdateReviewRouting,
 } from './review-state-db.mjs';
-import { requestReviewRereview } from './review-state.mjs';
+import {
+  recordReviewLatencyEvent,
+  requestReviewRereview,
+} from './review-state.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
 import {
   buildDuplicateReviewSkipAudit,
@@ -183,9 +186,11 @@ import {
   primaryReviewerQuotaCappedForRow,
   resolveGeminiReviewerModeForWatcher,
   reviewPopulationRetryDecision,
+  invalidateReviewerRouteCache,
   selectReviewerRouteForAttempt,
   shouldBypassPrimaryReviewerQuotaHold,
 } from './reviewer-route-selection.mjs';
+import { invalidationReasonForGrounding } from './context/hot-path-cache.mjs';
 import {
   guardRereviewCiBeforeReviewer,
   shouldRecheckCiBlockedRereview,
@@ -522,7 +527,32 @@ export function markUnroutableTitleDisposition({
 // than growing watcher.mjs, which is under a hard ARC-18 line ratchet. Tests and
 // alternate schedulers override it by passing `getAfhReviewerGroundingForTick`
 // in ctx. Disable the whole hop with ADVERSARIAL_AFH_REVIEWER_FALLBACK=0.
-const defaultAfhReviewerGroundingForTick = createAfhReviewerGroundingCache();
+function emitReviewCacheLatencyEvent(event, { reviewDb = db, logger = console } = {}) {
+  if (!event?.event) return;
+  try {
+    const eventAt = event.at || new Date().toISOString();
+    const minuteBucket = String(eventAt).slice(0, 16);
+    const cache = event.cache || 'unknown';
+    recordReviewLatencyEvent(reviewDb, {
+      repo: event.repo || null,
+      prNumber: event.prNumber ?? null,
+      eventType: event.event,
+      at: eventAt,
+      source: 'watcher-cache',
+      sourceRef: cache,
+      idempotencyKey: `watcher-cache:${cache}:${event.event}:${minuteBucket}`,
+      reason: event.reason || null,
+      payload: event,
+    });
+  } catch (err) {
+    logger?.warn?.(`[watcher] cache-event-write-failed ${event.event}: ${err?.message || err}`);
+  }
+}
+
+const defaultAfhReviewerGroundingForTick = createAfhReviewerGroundingCache({
+  emitCacheEvent: (event) => emitReviewCacheLatencyEvent(event),
+});
+const previousAfhGroundingByProbeKey = new Map();
 
 // A terminal reviewer failure does NOT always land as review_status='failed'.
 //
@@ -1463,21 +1493,31 @@ export async function processReviewSubject(entry, ctx) {
       // is keyed by the configured operator/admin UID resolved here, not guessed
       // inside the module-scope cache. It can never throw here.
       let afhGrounding = null;
+      const emitCacheEvent = (event) => emitReviewCacheLatencyEvent(event);
       {
         const readAfhGrounding = typeof getAfhReviewerGroundingForTick === 'function'
           ? getAfhReviewerGroundingForTick
           : defaultAfhReviewerGroundingForTick;
+        let groundingProbeKey = 'quota-only';
         try {
           const claudeRuntimeProbeUid = await resolveClaudeRuntimeProbeUidForWatcher({
             execFileImpl: execFileAsync,
             env: process.env,
             logger: console,
           });
+          groundingProbeKey = claudeRuntimeProbeUid === null
+            ? 'quota-only'
+            : `claude-runtime-uid:${claudeRuntimeProbeUid}`;
           afhGrounding = await readAfhGrounding(
             claudeRuntimeProbeUid === null ? {} : { claudeRuntimeProbeUid }
           );
+          const previousAfhGrounding = previousAfhGroundingByProbeKey.get(groundingProbeKey) || null;
+          const groundingInvalidation = invalidationReasonForGrounding(previousAfhGrounding, afhGrounding);
+          if (groundingInvalidation) invalidateReviewerRouteCache(groundingInvalidation, console, emitCacheEvent);
+          previousAfhGroundingByProbeKey.set(groundingProbeKey, afhGrounding);
         } catch (err) {
           afhGrounding = null;
+          previousAfhGroundingByProbeKey.set(groundingProbeKey, null);
           console.warn(
             `[watcher] afh-reviewer-grounding read failed for ${repoPath}#${prNumber}: ` +
               `${err?.message || err}; failing open to the configured reviewer route`
@@ -1493,6 +1533,16 @@ export async function processReviewSubject(entry, ctx) {
       });
       const afhBaseRoute = afhSelection.route;
       if (afhSelection.decision.applied) {
+        emitCacheEvent({
+          event: 'fallback_route',
+          cache: 'reviewer-route',
+          repo: repoPath,
+          prNumber,
+          headSha: subject.headSha || subject.ref?.revisionRef || null,
+          fromReviewerModel: afhSelection.decision.fromReviewerModel,
+          toReviewerModel: afhSelection.decision.toReviewerModel,
+          reason: afhSelection.decision.reason,
+        });
         console.warn(
           `[watcher] reviewer-selection ${repoPath}#${prNumber} ` +
             `${describeAfhReviewerFallback(afhSelection.decision)}`
@@ -1510,8 +1560,9 @@ export async function processReviewSubject(entry, ctx) {
         repoPath,
         prNumber,
         currentRow: existing,
-        headSha: subject.headSha || subject.ref.revisionRef || null,
+        headSha: subject.headSha || subject.ref?.revisionRef || null,
         afhGrounding,
+        emitCacheEvent,
       });
 
       // RWF-01: review-dispatch worker-class fallback (quota trigger)

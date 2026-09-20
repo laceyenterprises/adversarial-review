@@ -47,6 +47,7 @@
       "store": "data/reviews.db",
       "schemaSurface": "migrations/20260911_review_latency_events.sql",
       "relatedSchemaSurfaces": [
+        "src/pollonce-phases.mjs",
         "src/review-state.mjs",
         "src/review-latency-report.mjs"
       ],

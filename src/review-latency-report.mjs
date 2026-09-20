@@ -28,6 +28,12 @@ const EVENT_TYPES = Object.freeze([
   'merge_completed',
   'deploy_observed',
   'smoke_result',
+  'cache_hit',
+  'cache_miss',
+  'cache_stale',
+  'cache_coalesced',
+  'cache_invalidated',
+  'fallback_route',
 ]);
 
 const STAGE_DEFINITIONS = Object.freeze([
@@ -245,12 +251,14 @@ function addExplicitEvents(db, subjects, { sinceIso }) {
           AND pr_number IS ?
           AND domain_id IS ?
           AND subject_external_id IS ?
+          AND at >= ?
         ORDER BY at ASC, event_id ASC`,
       [
         activeSubject.repo,
         activeSubject.pr_number,
         activeSubject.domain_id,
         activeSubject.subject_external_id,
+        sinceIso,
       ]
     );
     for (const row of rows) {
@@ -795,6 +803,47 @@ function agyRouteState(db, { sinceIso }) {
   };
 }
 
+function cacheImpact(db, { sinceIso }) {
+  const rows = safeAll(
+    db,
+    `SELECT event_type, source_ref, payload_json
+       FROM review_latency_events
+      WHERE at >= ?
+        AND event_type IN ('cache_hit', 'cache_miss', 'cache_stale', 'cache_coalesced', 'cache_invalidated', 'fallback_route')`,
+    [sinceIso]
+  );
+  const cacheEventTypes = EVENT_TYPES.filter((value) => value.startsWith('cache_') || value === 'fallback_route');
+  const emptyCounts = () => Object.fromEntries(cacheEventTypes.map((value) => [value, 0]));
+  const counts = emptyCounts();
+  const byCache = new Map();
+  for (const row of rows) {
+    counts[row.event_type] = (counts[row.event_type] || 0) + 1;
+    const payload = parseJson(row.payload_json, {});
+    const cache = row.source_ref || payload.cache || 'unknown';
+    if (!byCache.has(cache)) byCache.set(cache, emptyCounts());
+    const cacheCounts = byCache.get(cache);
+    cacheCounts[row.event_type] = (cacheCounts[row.event_type] || 0) + 1;
+  }
+  const lookups = counts.cache_hit + counts.cache_miss + counts.cache_stale;
+  const cacheRows = [...byCache.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([cache, cacheCounts]) => {
+      const cacheLookups = cacheCounts.cache_hit + cacheCounts.cache_miss + cacheCounts.cache_stale;
+      return {
+        cache,
+        ...cacheCounts,
+        lookups: cacheLookups,
+        hitRate: cacheLookups > 0 ? cacheCounts.cache_hit / cacheLookups : null,
+      };
+    });
+  return {
+    ...counts,
+    lookups,
+    hitRate: lookups > 0 ? counts.cache_hit / lookups : null,
+    byCache: cacheRows,
+  };
+}
+
 function recentWakeEvents(subjects) {
   const wakes = [];
   for (const subject of subjects.values()) {
@@ -885,6 +934,10 @@ function collectReviewLatencyReport({
       agyRouteState: db
         ? agyRouteState(db, { sinceIso })
         : { available: false, reviewerRows: [], recentProbeEvents: [] },
+      cacheImpact: db ? cacheImpact(db, { sinceIso }) : {
+        cache_hit: 0, cache_miss: 0, cache_stale: 0, cache_coalesced: 0, cache_invalidated: 0,
+        fallback_route: 0, lookups: 0, hitRate: null, byCache: [],
+      },
       recentWakes: recentWakeEvents(subjects),
       topBottlenecks: topBottlenecks(stages, queue),
     };
@@ -940,6 +993,20 @@ function renderReviewLatencyReport(report) {
     `null_pgid=${report.reviewerSlots.nullPgidRows}`
   );
   lines.push(`AGY route/probe: ${report.agyRouteState.available ? 'available' : 'unobserved'}`);
+  lines.push(
+    `hot-path cache: hits=${report.cacheImpact.cache_hit} misses=${report.cacheImpact.cache_miss} ` +
+    `stale=${report.cacheImpact.cache_stale} coalesced=${report.cacheImpact.cache_coalesced || 0} ` +
+    `invalidated=${report.cacheImpact.cache_invalidated} ` +
+    `hit_rate=${report.cacheImpact.hitRate === null ? '-' : `${Math.round(report.cacheImpact.hitRate * 100)}%`}`
+  );
+  for (const cache of report.cacheImpact.byCache || []) {
+    lines.push(
+      `  ${cache.cache}: hits=${cache.cache_hit} misses=${cache.cache_miss} ` +
+      `stale=${cache.cache_stale} coalesced=${cache.cache_coalesced || 0} ` +
+      `invalidated=${cache.cache_invalidated} fallback=${cache.fallback_route} ` +
+      `hit_rate=${cache.hitRate === null ? '-' : `${Math.round(cache.hitRate * 100)}%`}`
+    );
+  }
   lines.push('');
   lines.push('top waiting reasons:');
   for (const reason of report.topWaitingReasons.slice(0, 5)) {

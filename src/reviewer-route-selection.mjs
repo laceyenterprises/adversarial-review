@@ -12,6 +12,12 @@ import {
   reviewerModelGrounding,
 } from './afh-reviewer-fallback.mjs';
 
+export function invalidateReviewerRouteCache(reason = 'operator-resume', logger = console) {
+  const removed = 0;
+  logger?.info?.(`[watcher] reviewer-route-cache invalidated reason=${reason} removed=0 disabled=true`);
+  return removed;
+}
+
 // Quota-exhausted fallback backoff, replicated verbatim from watcher.mjs (its
 // copy stays for the other watcher call sites); a module-load env read, so both
 // resolve identically.
@@ -441,15 +447,15 @@ export function selectReviewerRouteForAttempt({
   }
 
   const threshold = resolveReviewerTimeoutFallbackThreshold(env);
-  if (threshold <= 0) return baseRoute;
+  if (threshold <= 0) return { ...baseRoute };
   const timeoutFailures = Number(cascadeState?.transientFailureBreakdown?.['reviewer-timeout'] || 0);
   if (cascadeState?.lastFailureClass !== 'reviewer-timeout' || timeoutFailures < threshold) {
-    return baseRoute;
+    return { ...baseRoute };
   }
   const fallbackModel = resolveReviewerTimeoutFallbackModel(env);
-  if (!fallbackModel || fallbackModel === baseRoute?.reviewerModel) return baseRoute;
+  if (!fallbackModel || fallbackModel === baseRoute?.reviewerModel) return { ...baseRoute };
   const fallbackRoute = reviewerRouteForModel(fallbackModel);
-  if (!fallbackRoute) return baseRoute;
+  if (!fallbackRoute) return { ...baseRoute };
   // AFH-04: never switch the timeout fallback onto a reviewer whose provider is
   // authoritatively grounded (hard or AFH-02 soft) — that trades a slow reviewer
   // for one that cannot spawn at all. No signal → unchanged behavior.

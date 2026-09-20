@@ -819,6 +819,12 @@ const REVIEW_LATENCY_EVENT_TYPES = Object.freeze(new Set([
   'merge_completed',
   'deploy_observed',
   'smoke_result',
+  'cache_hit',
+  'cache_miss',
+  'cache_stale',
+  'cache_coalesced',
+  'cache_invalidated',
+  'fallback_route',
 ]));
 
 const REVIEW_LATENCY_EVENT_STAGE_BY_TYPE = Object.freeze({
@@ -838,6 +844,12 @@ const REVIEW_LATENCY_EVENT_STAGE_BY_TYPE = Object.freeze({
   merge_completed: 'merge',
   deploy_observed: 'deploy',
   smoke_result: 'smoke',
+  cache_hit: 'diagnostics',
+  cache_miss: 'diagnostics',
+  cache_stale: 'diagnostics',
+  cache_coalesced: 'diagnostics',
+  cache_invalidated: 'diagnostics',
+  fallback_route: 'diagnostics',
 });
 
 function normalizeLatencyEventType(eventType) {

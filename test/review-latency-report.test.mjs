@@ -17,6 +17,7 @@ import {
   openReviewStateDb,
   recordReviewLatencyEvent,
 } from '../src/review-state.mjs';
+import { createAfhReviewerGroundingCache } from '../src/afh-reviewer-fallback.mjs';
 
 const REPO = 'laceyenterprises/agent-os';
 
@@ -119,6 +120,68 @@ test('review latency event fallback lookup is scoped by generic subject identity
   } finally {
     db.close();
   }
+});
+
+test('latency report makes cache impact visible from real cache emitters', async () => {
+  const rootDir = tempRoot();
+  const db = openDb(rootDir);
+  try {
+    const getGrounding = createAfhReviewerGroundingCache({
+      readImpl: async () => ({ available: true, providers: { openai: { hardGrounded: false } } }),
+      ttlMs: 60_000,
+      nowFn: () => Date.parse('2026-09-11T12:01:00.000Z'),
+      emitCacheEvent: (event) => {
+        recordReviewLatencyEvent(db, {
+          repo: REPO,
+          prNumber: 6699,
+          eventType: event.event,
+          at: '2026-09-11T12:01:00.000Z',
+          source: 'watcher-cache',
+          idempotencyKey: `cache-${event.event}-${event.cache}`,
+          payload: event,
+        });
+      },
+    });
+    await getGrounding();
+    await getGrounding();
+    for (const [index, eventType] of [
+      [3, 'fallback_route'],
+      [4, 'cache_invalidated'],
+    ]) {
+      recordReviewLatencyEvent(db, {
+        repo: REPO,
+        prNumber: 6699,
+        eventType,
+        at: `2026-09-11T12:0${index}:00.000Z`,
+        source: 'watcher-cache',
+        idempotencyKey: `cache-${index}`,
+        payload: { cache: 'reviewer-route' },
+      });
+    }
+  } finally {
+    db.close();
+  }
+  const report = collectReviewLatencyReport({ rootDir, since: '24h', now: () => new Date('2026-09-11T13:00:00.000Z') });
+  assert.equal(report.cacheImpact.cache_hit, 1);
+  assert.equal(report.cacheImpact.cache_miss, 1);
+  assert.equal(report.cacheImpact.fallback_route, 1);
+  assert.equal(report.cacheImpact.cache_invalidated, 1);
+  assert.equal(report.cacheImpact.hitRate, 1 / 2);
+  assert.deepEqual(
+    report.cacheImpact.byCache.map(({ cache, cache_hit, cache_miss, fallback_route }) => ({
+      cache,
+      cache_hit,
+      cache_miss,
+      fallback_route,
+    })),
+    [
+      { cache: 'reviewer-quota', cache_hit: 1, cache_miss: 1, fallback_route: 0 },
+      { cache: 'reviewer-route', cache_hit: 0, cache_miss: 0, fallback_route: 1 },
+    ]
+  );
+  assert.match(renderReviewLatencyReport(report), /hot-path cache: hits=1 misses=1.*hit_rate=50%/);
+  assert.match(renderReviewLatencyReport(report), /reviewer-quota: hits=1 misses=1/);
+  assert.doesNotMatch(renderReviewLatencyReport(report), /fixture_saved=/);
 });
 
 test('latency report backfills critical path and queue state from fixtures', () => {
@@ -400,7 +463,7 @@ test('latency report does not coerce missing PR numbers into PR zero', () => {
   assert.equal(reviewerRuntime.p50Ms, null);
 });
 
-test('latency report fetches explicit subject history across the window boundary', () => {
+test('latency report bounds explicit subject history to the report window', () => {
   const rootDir = tempRoot();
   const db = openDb(rootDir);
   try {
@@ -430,8 +493,8 @@ test('latency report fetches explicit subject history across the window boundary
     now: () => new Date('2026-09-11T13:00:00.000Z'),
   });
 
-  assert.equal(report.surfaces.explicitEvents, 2);
+  assert.equal(report.surfaces.explicitEvents, 1);
   const admission = report.stages.find((stage) => stage.key === 'review_eligible_to_row_claimed');
-  assert.equal(admission.sampleCount, 1);
-  assert.equal(admission.p50Ms, 48 * 60 * 60 * 1000 + 5 * 60 * 1000);
+  assert.equal(admission.sampleCount, 0);
+  assert.equal(admission.p50Ms, null);
 });

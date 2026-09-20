@@ -1,6 +1,6 @@
 # Review latency events
 
-**Source of truth:** `migrations/20260911_review_latency_events.sql`, `src/review-state.mjs`, and `src/review-latency-report.mjs`
+**Source of truth:** `migrations/20260911_review_latency_events.sql`, `src/review-state.mjs`, `src/review-latency-event-writer.mjs`, and `src/review-latency-report.mjs`
 
 ## Ownership
 
@@ -8,7 +8,9 @@
 - Table: `review_latency_events`
 - Schema: `migrations/20260911_review_latency_events.sql` plus the idempotent
   schema-convergence path in `src/review-state.mjs`
-- Writer API: `recordReviewLatencyEvent` in `src/review-state.mjs`
+- Writer API: `recordReviewLatencyEvent` in
+  `src/review-latency-event-writer.mjs`; `src/review-state.mjs` re-exports it
+  for existing callers
 - Readers: `src/review-latency-report.mjs` and `src/review-latency-cli.mjs`
 
 `review_latency_events` is the durable explicit-event ledger for the review
@@ -39,6 +41,8 @@ reported by `collectReviewLatencyReport`:
 - `reviewer_post_attempt`
 - `reviewer_post_success`
 - `reviewer_post_failure`
+- `reviewer_reaped`
+- `reviewer_reattached`
 - `settlement_completed`
 - `follow_up_created`
 - `clean_verdict`
@@ -58,6 +62,11 @@ The `cache_*` and `fallback_route` event types are diagnostic events emitted by
 watcher hot-path instrumentation. They are durable so latency reports can show
 whether cache and reviewer-fallback behavior is actually being observed, but
 they are not latency-boundary events for critical-path duration calculations.
+
+`reviewer_reaped` records a bounded capacity release after the owning process
+can no longer finish. `reviewer_reattached` records durable process adoption or
+successful restart reconciliation. Both use stable idempotency keys so repeated
+watcher sweeps preserve one audit event per recovery transition.
 
 `at` is the event time used for latency calculations. `recorded_at` is the
 database insert time and is diagnostic only. `source` and `source_ref` identify

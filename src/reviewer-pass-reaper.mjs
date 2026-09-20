@@ -9,6 +9,7 @@ import {
   summarizePRRemediationLedger,
 } from './follow-up-jobs.mjs';
 import { getConfig } from './config-loader.mjs';
+import { recordReviewLatencyEvent } from './review-latency-event-writer.mjs';
 import {
   resolveHandoffConfig,
   signalFollowUpDaemonWake,
@@ -224,6 +225,8 @@ function reapRunningPassTimeouts({
   resolveHandoffConfigImpl = () => resolveHandoffConfig({ getConfigImpl: getConfig }),
   signalFollowUpDaemonWakeImpl = signalFollowUpDaemonWake,
   reviewBodyHasScopeViolationFindingImpl = reviewBodyHasScopeViolationFinding,
+  recordReviewLatencyEventImpl = recordReviewLatencyEvent,
+  now = () => new Date(),
 } = {}) {
   const thresholdSeconds = resolveRunningPassTimeoutSeconds();
   const rows = db.prepare(
@@ -377,16 +380,29 @@ function reapRunningPassTimeouts({
   let postedReviewArtifactFollowUpsQueued = 0;
   let postedReviewArtifactFollowUpsSkipped = 0;
   let postedReviewArtifactFollowUpsFailed = 0;
+  function recordReapEvent(row, event) {
+    try {
+      recordReviewLatencyEventImpl(db, event);
+    } catch (err) {
+      // Recovery must never be rolled back or retried merely because its
+      // observability write failed. The pass/status CAS remains authoritative.
+      log.warn?.(
+        `[watcher] reviewer-pass reap event write failed ${row.repo}#${row.pr_number} ` +
+        `pass_id=${row.pass_id}: ${err?.message || err}`
+      );
+    }
+  }
   for (const row of rows) {
     try {
       const startedMs = parseTimestampMs(row.started_at);
       if (startedMs == null) continue;
       const postedReviewArtifact = hasPostedReviewArtifact(row);
       const bodyCapturedMs = parseTimestampMs(row.body_captured_at);
+      const observedNow = now();
       const endedAt = postedReviewArtifact && bodyCapturedMs != null
         ? new Date(bodyCapturedMs).toISOString()
-        : new Date().toISOString();
-      const ageSeconds = Math.floor((Date.now() - startedMs) / 1000);
+        : observedNow.toISOString();
+      const ageSeconds = Math.floor((observedNow.getTime() - startedMs) / 1000);
       if (postedReviewArtifact) {
         const metadata = {
           ...parseMetadataJson(row.metadata_json),
@@ -450,6 +466,18 @@ function reapRunningPassTimeouts({
         }
         reaped++;
         postedReviewArtifactsRecovered++;
+        recordReapEvent(row, {
+          repo: row.repo,
+          prNumber: row.pr_number,
+          revisionRef: row.head_sha || null,
+          eventType: 'reviewer_reattached',
+          at: endedAt,
+          source: 'reviewer-pass-reaper',
+          sourceRef: String(row.pass_id),
+          idempotencyKey: `reviewer-pass-reattached:${row.pass_id}`,
+          reason: POSTED_REVIEW_ARTIFACT_RECOVERY_REASON,
+          payload: { passId: row.pass_id, outcome: 'recovered-posted-review' },
+        });
         continue;
       }
       const failureMessage = buildTimeoutFailureMessage({ thresholdSeconds, ageSeconds });
@@ -498,6 +526,18 @@ function reapRunningPassTimeouts({
         `          age=${ageSeconds}s threshold=${thresholdSeconds}s review_claim=${result.reviewChanged ? 'settled' : 'unchanged'}`
       );
       reaped++;
+      recordReapEvent(row, {
+        repo: row.repo,
+        prNumber: row.pr_number,
+        revisionRef: row.head_sha || null,
+        eventType: 'reviewer_reaped',
+        at: endedAt,
+        source: 'reviewer-pass-reaper',
+        sourceRef: String(row.pass_id),
+        idempotencyKey: `reviewer-pass-reaped:${row.pass_id}`,
+        reason: RUNNING_PASS_TIMEOUT_FAILURE_REASON,
+        payload: { passId: row.pass_id, outcome: result.reviewChanged ? 'capacity-released' : 'pass-only' },
+      });
     } catch (err) {
       log.error(`[watcher] reviewer-pass reaper failed for ${row.repo}#${row.pr_number}:`, err);
     }

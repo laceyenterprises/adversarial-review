@@ -49,6 +49,7 @@
       "relatedSchemaSurfaces": [
         "src/pollonce-phases.mjs",
         "src/review-state.mjs",
+        "src/review-latency-event-writer.mjs",
         "src/review-latency-report.mjs"
       ],
       "owner": "review latency instrumentation and generic-subject reporting"

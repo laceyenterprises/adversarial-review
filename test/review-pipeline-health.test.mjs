@@ -34,9 +34,10 @@ import {
 import { PROVIDER_OVERLOADED_FAILURE_CLASS } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS } from '../src/quota-exhaustion.mjs';
 import { parseArgs } from '../src/review-pipeline-health-cli.mjs';
-import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
+import { ensureReviewStateSchema, openReviewStateDb, recordReviewLatencyEvent } from '../src/review-state.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from '../src/review-statuses.mjs';
 import { DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS } from '../src/reviewer-pass-reaper.mjs';
+import { LEGACY_ORPHAN_FAILURE_MESSAGE } from '../src/reviewer-reattach.mjs';
 import { ensureTtmTrackerSchema } from '../src/ttm-tracker.mjs';
 
 const NOW = '2026-05-25T18:00:00.000Z';
@@ -307,6 +308,100 @@ function openDb(rootDir) {
   ensureReviewStateSchema(db);
   return db;
 }
+
+test('reviewer slot health exposes every recovery state and a dead row cannot hide free capacity', (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const db = openDb(rootDir);
+  const insert = db.prepare(
+    `INSERT INTO reviewed_prs (
+       repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+       last_attempted_at, reviewer_session_uuid, reviewer_pgid,
+       reviewer_started_at, reviewer_lease_expires_at, failure_message,
+       infra_auto_recover_attempts
+     ) VALUES (?, ?, ?, 'codex', 'open', ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  const old = '2026-05-25T17:00:00.000Z';
+  const fresh = '2026-05-25T17:59:30.000Z';
+  const future = '2026-05-25T19:00:00.000Z';
+  const past = '2026-05-25T17:30:00.000Z';
+  insert.run(REPO, 101, '2026-05-25T16:00:00.000Z', 'reviewing', old, 's-active', 10101, old, future, null, 0);
+  insert.run(REPO, 102, '2026-05-25T16:00:00.000Z', 'reviewing', fresh, 's-settling', null, null, null, null, 0);
+  insert.run(REPO, 103, '2026-05-25T16:00:00.000Z', 'pending', old, null, null, null, null, 'retry me', 0);
+  insert.run(REPO, 104, '2026-05-25T16:00:00.000Z', 'reviewing', old, 's-stale', null, old, null, null, 0);
+  insert.run(REPO, 105, '2026-05-25T16:00:00.000Z', 'failed-orphan', old, 's-bad', null, old, null, 'corrupt identity', 0);
+  insert.run(REPO, 106, '2026-05-25T16:00:00.000Z', 'pending', old, null, null, null, null, 'reaped', 0);
+  insert.run(REPO, 107, '2026-05-25T16:00:00.000Z', 'reviewing', old, 's-recovered', 10701, old, future, null, 0);
+  insert.run(REPO, 108, '2026-05-25T16:00:00.000Z', 'reviewing', old, 's-expired', 10801, old, past, null, 0);
+  insert.run(REPO, 109, '2026-05-25T16:00:00.000Z', 'failed', old, null, null, old, null, '[cascade] watcher backoff engaged', 1);
+  insert.run(REPO, 110, '2026-05-25T16:00:00.000Z', 'failed-orphan', old, null, null, old, null, '[reviewer-timeout] running pass timeout', 1);
+  insert.run(REPO, 111, '2026-05-25T16:00:00.000Z', 'failed', old, null, null, old, null, '[cascade] cap exhausted', 3);
+  insert.run(REPO, 112, '2026-05-25T16:00:00.000Z', 'failed-orphan', old, 's-legacy', null, old, past, LEGACY_ORPHAN_FAILURE_MESSAGE, 0);
+  recordReviewLatencyEvent(db, {
+    repo: REPO, prNumber: 106, eventType: 'reviewer_reaped',
+    at: '2026-05-25T17:30:00.000Z', source: 'test', idempotencyKey: 'reaped-106', reason: 'dead-no-review',
+  });
+  recordReviewLatencyEvent(db, {
+    repo: REPO, prNumber: 107, eventType: 'reviewer_reattached',
+    at: '2026-05-25T17:30:00.000Z', source: 'test', idempotencyKey: 'reattached-107', reason: 'live-process-group',
+  });
+  recordReviewLatencyEvent(db, {
+    repo: REPO, prNumber: 108, eventType: 'reviewer_reattached',
+    at: '2026-05-25T17:30:00.000Z', source: 'test', idempotencyKey: 'reattached-108', reason: 'live-process-group',
+  });
+  db.close();
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    config: { hostChecksEnabled: false },
+  });
+  assert.deepEqual(snapshot.reviewerSlots.states, {
+    active: 1,
+    settling: 1,
+    retryable: 5,
+    stale: 2,
+    impossible: 1,
+    reaped: 1,
+    recovered: 1,
+  });
+  assert.equal(
+    snapshot.reviewerSlots.slots.find((slot) => slot.prNumber === 104).reason,
+    'missing-pgid',
+    'the observed dead-row pattern is visible as stale instead of consuming apparent active capacity'
+  );
+  assert.equal(
+    snapshot.reviewerSlots.slots.find((slot) => slot.prNumber === 108).reason,
+    'expired-lease',
+    'a stale lease stays authoritative even when the row has a current reattach event'
+  );
+  assert.equal(
+    snapshot.reviewerSlots.slots.find((slot) => slot.prNumber === 109).state,
+    'retryable',
+    'infra failed rows below the auto-recovery cap are still retryable'
+  );
+  assert.equal(
+    snapshot.reviewerSlots.slots.find((slot) => slot.prNumber === 105).state,
+    'retryable',
+    'under-cap failed-orphan rows are auto-reclaim candidates even without an infra failure class'
+  );
+  assert.equal(
+    snapshot.reviewerSlots.slots.find((slot) => slot.prNumber === 110).state,
+    'retryable',
+    'infra failed-orphan rows below the auto-recovery cap are visible as retryable'
+  );
+  assert.equal(
+    snapshot.reviewerSlots.slots.find((slot) => slot.prNumber === 112).state,
+    'retryable',
+    'legacy failed-orphan rows below the auto-recovery cap stay out of the operator-actionable bucket'
+  );
+  assert.equal(
+    snapshot.reviewerSlots.slots.find((slot) => slot.prNumber === 111).state,
+    'impossible',
+    'cap-exhausted infra rows remain operator-actionable'
+  );
+  assert.equal(snapshot.reviewerSlots.states.active + snapshot.reviewerSlots.states.recovered, 2);
+});
 
 function allowNullReviewerPassMetadata(rootDir) {
   const db = openDb(rootDir);
@@ -4979,6 +5074,12 @@ test('Grafana dashboard JSON references only exported review pipeline metric nam
     Array.from(referenced).filter((name) => !metricNames.has(name)),
     []
   );
+});
+
+test('review pipeline metric catalog documents every exported metric name', () => {
+  const doc = readFileSync('docs/review-pipeline-health.md', 'utf8');
+  const missing = REVIEW_PIPELINE_HEALTH_METRICS.filter((name) => !doc.includes(`\`${name}\``));
+  assert.deepEqual(missing, []);
 });
 
 test('documented Sentinel findings match emitted finding definition codes', () => {

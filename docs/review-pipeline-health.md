@@ -44,6 +44,10 @@ The Grafana dashboard lives at
   failures.
 - `review_pipeline_outage_attempts_not_charged`: count of current reviewer
   failures whose attempt budget was preserved by the outage controller.
+- `review_pipeline_hcp_preflight_aborted_passes`: current open reviews parked
+  before reviewer dispatch because the HCP healthz preflight failed.
+- `review_pipeline_hcp_preflight_aborted_reviewer_minutes_lost`: estimated
+  reviewer minutes tied to those open HCP preflight-aborted passes.
 - `review_pipeline_health_collector_up`: 1 when the collector can open
   `reviews.db` read-only, 0 when the review-state ledger is missing or
   unreadable. Page on the specific unreadable-ledger Sentinel finding for the
@@ -72,6 +76,10 @@ The Grafana dashboard lives at
   reviewer passes observed inside the reviewer health window. It carries the
   same `window` label and excludes the zombie/abandoned rows reported by
   `review_pipeline_zombie_reviewer_passes`.
+- `review_pipeline_queued_rereviews`: open pending rows that are waiting for a
+  re-review rather than a first-pass review.
+- `review_pipeline_queued_rereview_oldest_age_seconds`: age in seconds of the
+  oldest queued re-review row.
 - `review_pipeline_ci_blocked_rereviews`: open re-reviews parked at
   `review_status='ci-blocked'` because external CI failed and no remediation
   job exists to requeue. The watcher backoff-gates same-head CI rechecks for
@@ -89,6 +97,10 @@ The Grafana dashboard lives at
   first-pass CI orphan candidate was probed successfully, 0 when GitHub checks,
   worker-liveness probing, or the configured probe budget left the snapshot
   blind. A blind snapshot is not equivalent to zero orphans.
+- `review_pipeline_operational_blocker_rounds`: current stopped remediation
+  rounds grouped by operational-blocker category.
+- `review_pipeline_operational_blocker_oldest_age_seconds`: age in seconds of
+  the oldest unresolved stopped remediation round for each blocker category.
 - `review_pipeline_remediation_backlog_jobs`: follow-up job counts by queue
   state.
 - `review_pipeline_remediation_oldest_pending_age_seconds`: age of the oldest
@@ -126,6 +138,24 @@ The Grafana dashboard lives at
   transient `pending-upstream` timeout path. Matching prefers pass metadata
   `reviewerSessionUuid`; legacy pass rows missing that field can match by same
   head plus a pass start at or after the durable claim start.
+- `review_pipeline_reviewer_slots`: current open `reviewed_prs` rows in
+  reviewer-capacity states, grouped by `state`. The state vocabulary is:
+  `active` for `reviewing` rows with a session UUID, pgid, and unexpired lease;
+  `settling` for newly launched `reviewing` rows still inside the 60s launch
+  guard; `recovered` for rows whose current evidence is active and whose latest
+  recovery event is a current `reviewer_reattached`; `stale` for `reviewing`
+  rows whose pgid or lease evidence is missing or expired; `retryable` for
+  pending/pending-upstream rows, infra-class `failed` rows still below the
+  auto-recovery cap, and under-cap `failed-orphan` rows still owned by the
+  failed-orphan auto-reclaim path; `reaped` for rows with a current
+  `reviewer_reaped` event, which takes precedence over `retryable`; and
+  `impossible` for rows that
+  cannot be retried automatically, including missing session identity,
+  non-infra terminal failures, and infra failures at the cap. This metric is
+  derived from `reviewed_prs` plus the latest reviewer recovery event; it is the
+  slot-level complement to `review_pipeline_zombie_reviewer_passes` (stale pass
+  ledger rows) and `review_pipeline_first_pass_queue_depth` (pending first-pass
+  backlog), not a replacement for either.
 - `review_pipeline_round_budget_anomalies`: follow-up jobs whose remediation
   rounds exceed the risk-class budget, or final-pass jobs stuck
   `awaiting-rereview` after the budget is exhausted.
@@ -141,6 +171,8 @@ The Grafana dashboard lives at
   When the budget model is blind, these and
   `review_pipeline_ttm_open_budget_breaches` emit `NaN` so dashboards show a
   data gap rather than a false-clean zero.
+- `review_pipeline_ttm_terminal_clean_rereview_blocked_open`: current open PRs
+  whose clean terminal re-review is blocked from closeout.
 - `review_pipeline_ttm_terminal_unmerged_stalls_12h`: terminal-but-unmerged
   stall events observed in the last 12h.
 - `review_pipeline_ttm_terminal_unmerged_duration_minutes_12h`: max and total
@@ -153,6 +185,9 @@ The Grafana dashboard lives at
   403 rate-limit, or exit 65.
 - `review_pipeline_hammer_dispatch_stalled`: conflicted PR backlog exists while
   the dispatch daemon log has no recent hammer spawn.
+- `review_pipeline_hammer_dispatch_stall_blind`: 1 when the hammer-dispatch
+  stall detector cannot decide because its required dispatch log evidence is
+  missing; a blind snapshot is a data gap, not a healthy zero.
 - `review_pipeline_dag_autowalk_healthy`: dag-autowalk LaunchAgent last-exit
   and recent-log health.
 - `review_pipeline_sentinel_finding_active`: 1 when a finding code is currently

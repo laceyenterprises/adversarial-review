@@ -1150,6 +1150,25 @@ test('claimed rows with null pgid auto-rearm when no live run-state or GitHub re
     [{ state: 'cancelled', reason: 'missing-pgid-no-live-reviewer' }]
   );
   assert.match(log.lines.join('\n'), /reviewer_reattach_null_pgid_requeued/);
+  assert.deepEqual(
+    db.prepare(
+      `SELECT event_type, reason FROM review_latency_events WHERE repo = ? AND pr_number = ?`
+    ).all(REPO, PR),
+    [{ event_type: 'reviewer_reaped', reason: 'missing-pgid-no-live-reviewer' }]
+  );
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    now: new Date(FAILURE_AT),
+    log,
+    fetchHeadSha: async () => HEAD_SHA,
+  });
+  assert.equal(
+    db.prepare(`SELECT COUNT(*) AS count FROM review_latency_events WHERE event_type = 'reviewer_reaped'`).get().count,
+    1,
+    'repeat reconciliation is idempotent'
+  );
 });
 
 test('claimed rows with null pgid use quarantine-only failure text when the recovery cap is exhausted', async () => {

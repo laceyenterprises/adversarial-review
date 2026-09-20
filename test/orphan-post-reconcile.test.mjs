@@ -5,28 +5,40 @@ import Database from 'better-sqlite3';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { reconcilePostedFailedOrphans } from '../src/orphan-post-reconcile.mjs';
 
-function fixture({ attempts = 4, reviewerStartedAt = '2026-09-20T06:20:00Z' } = {}) {
+function fixture({
+  attempts = 4,
+  reviewerStartedAt = '2026-09-20T06:20:00Z',
+  passStatus = 'running',
+} = {}) {
   const db = new Database(':memory:');
   ensureReviewStateSchema(db);
   db.prepare(
     `INSERT INTO reviewed_prs
       (repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+       review_attempts,
        last_attempted_at, reviewer_started_at, reviewer_session_uuid,
        reviewer_pgid, reviewer_head_sha, infra_auto_recover_attempts,
        failed_at, failure_message)
      VALUES ('laceyenterprises/adversarial-review', 1078, '2026-09-20T06:20:00Z',
-       'claude', 'open', 'failed-orphan', '2026-09-20T06:20:00Z',
+       'claude', 'open', 'failed-orphan', ?, '2026-09-20T06:20:00Z',
        ?, 'session-1078', 98788, 'head-1078', ?,
        '2026-09-20T06:30:00Z', 'Operator must inspect before retrying.')`
-  ).run(reviewerStartedAt, attempts);
+  ).run(attempts, reviewerStartedAt, attempts);
   db.prepare(
     `INSERT INTO reviewer_passes
       (repo, pr_number, attempt_number, reviewer_class, reviewer_model,
        pass_kind, started_at, status, metadata_json, head_sha)
-     VALUES ('laceyenterprises/adversarial-review', 1078, 1, 'claude-code',
-       'claude', 'first-pass', '2026-09-20T06:20:00Z', 'running', '{}', 'head-1078')`
-  ).run();
+     VALUES ('laceyenterprises/adversarial-review', 1078, ?, 'claude-code',
+       'claude', 'first-pass', '2026-09-20T06:20:00Z', ?, '{}', 'head-1078')`
+  ).run(attempts, passStatus);
   return db;
+}
+
+function queueStub(calls = []) {
+  return (args) => {
+    calls.push(args);
+    return { queued: true, jobPath: '/tmp/follow-up-job.json' };
+  };
 }
 
 const POSTED_REVIEW = {
@@ -53,12 +65,18 @@ test('dry run reports a posted orphan without mutating either ledger', async () 
 
 test('apply reconciles a cap-exhausted posted orphan and removes it from first-pass depth', async () => {
   const db = fixture({ attempts: 4 });
+  const queueCalls = [];
   const result = await reconcilePostedFailedOrphans({
     db,
     apply: true,
     listReviews: async () => [POSTED_REVIEW],
+    queueFollowUpForRecoveredPostedReviewImpl: queueStub(queueCalls),
   });
   assert.equal(result.reconciled, 1);
+  assert.equal(queueCalls.length, 1);
+  assert.equal(queueCalls[0].row.body_md, POSTED_REVIEW.body);
+  assert.equal(queueCalls[0].row.head_sha, 'head-1078');
+  assert.equal(result.results[0].followUp.queued, true);
   assert.deepEqual(result.firstPassQueue, { before: 1, after: 0 });
   const row = db.prepare(
     'SELECT review_status, posted_at, failure_message, infra_auto_recover_attempts FROM reviewed_prs'
@@ -90,6 +108,7 @@ test('apply reconciles a null-start null-pgid orphan using last_attempted_at', a
     db,
     apply: true,
     listReviews: async () => [POSTED_REVIEW],
+    queueFollowUpForRecoveredPostedReviewImpl: queueStub(),
   });
   assert.equal(result.scanned, 1);
   assert.equal(result.reconciled, 1);
@@ -104,6 +123,7 @@ test('apply ignores stale-head reviewer posts', async () => {
     db,
     apply: true,
     listReviews: async () => [{ ...POSTED_REVIEW, commit_id: 'old-head' }],
+    queueFollowUpForRecoveredPostedReviewImpl: queueStub(),
   });
   assert.equal(result.reconciled, 0);
   assert.equal(result.results[0].reason, 'no-posted-review');
@@ -117,6 +137,7 @@ test('apply leaves an orphan unchanged when GitHub has no matching reviewer post
     db,
     apply: true,
     listReviews: async () => [],
+    queueFollowUpForRecoveredPostedReviewImpl: queueStub(),
   });
   assert.equal(result.reconciled, 0);
   assert.equal(result.results[0].reason, 'no-posted-review');
@@ -134,8 +155,49 @@ test('apply accepts a review artifact already linked to another pass for the sam
     db,
     apply: true,
     listReviews: async () => [POSTED_REVIEW],
+    queueFollowUpForRecoveredPostedReviewImpl: queueStub(),
   });
   assert.equal(result.reconciled, 1);
+  assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'posted');
+  db.close();
+});
+
+test('apply links a reaped failed pass by identity and queues follow-up', async () => {
+  const db = fixture({ attempts: 4, passStatus: 'failed' });
+  const queueCalls = [];
+  const result = await reconcilePostedFailedOrphans({
+    db,
+    apply: true,
+    listReviews: async () => [POSTED_REVIEW],
+    queueFollowUpForRecoveredPostedReviewImpl: queueStub(queueCalls),
+  });
+  assert.equal(result.reconciled, 1);
+  assert.equal(result.results[0].action, 'reconciled');
+  assert.equal(queueCalls.length, 1);
+  const pass = db.prepare(
+    'SELECT status, verdict, gh_comment_id, body_md FROM reviewer_passes'
+  ).get();
+  assert.deepEqual(pass, {
+    status: 'completed',
+    verdict: 'request-changes',
+    gh_comment_id: String(POSTED_REVIEW.id),
+    body_md: POSTED_REVIEW.body,
+  });
+  assert.deepEqual(result.firstPassQueue, { before: 1, after: 0 });
+  db.close();
+});
+
+test('apply reports posted-no-artifact when no reviewer pass identity exists', async () => {
+  const db = fixture({ attempts: 4 });
+  db.prepare('DELETE FROM reviewer_passes').run();
+  const result = await reconcilePostedFailedOrphans({
+    db,
+    apply: true,
+    listReviews: async () => [POSTED_REVIEW],
+    queueFollowUpForRecoveredPostedReviewImpl: queueStub(),
+  });
+  assert.equal(result.reconciled, 0);
+  assert.equal(result.results[0].action, 'posted-no-artifact');
   assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'posted');
   db.close();
 });

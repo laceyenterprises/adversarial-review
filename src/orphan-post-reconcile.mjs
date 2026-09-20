@@ -1,6 +1,9 @@
 import { SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW } from './review-state-statements.mjs';
 import { reviewerBotLoginAliases } from './reviewer-reattach.mjs';
 import { loginsMatch } from './review-body-capture.mjs';
+import { ghReviewStateToVerdict } from './backfill-review-bodies.mjs';
+import { queueFollowUpForRecoveredPostedReview } from './reviewer-pass-reaper.mjs';
+import { withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
 
 function postedReviewForRow(row, reviews) {
   const aliases = reviewerBotLoginAliases(row.reviewer);
@@ -11,23 +14,32 @@ function postedReviewForRow(row, reviews) {
     .filter((review) => {
       const submittedAt = Date.parse(review?.submitted_at || '');
       const commitId = String(review?.commit_id || '');
+      const hasStartedBound = Number.isFinite(startedAt);
+      const hasHeadBound = Boolean(headSha && commitId);
       return Number.isFinite(submittedAt)
-        && (!Number.isFinite(startedAt) || submittedAt >= startedAt)
-        && (!headSha || !commitId || commitId === headSha);
+        && (hasStartedBound ? submittedAt >= startedAt : true)
+        && (hasHeadBound ? commitId === headSha : hasStartedBound);
     })
     .sort((a, b) => Date.parse(b.submitted_at) - Date.parse(a.submitted_at))[0] || null;
 }
 
 function reviewVerdict(state) {
-  return {
-    APPROVED: 'approved',
-    CHANGES_REQUESTED: 'request-changes',
-    COMMENTED: 'comment-only',
-    DISMISSED: 'dismissed',
-  }[String(state || '').toUpperCase()] || null;
+  return ghReviewStateToVerdict(state);
 }
 
-export async function reconcilePostedFailedOrphans({ db, listReviews, apply = false, limit = 20 } = {}) {
+function reviewBodyForStorage(review) {
+  if (review?.body === null || review?.body === undefined) return null;
+  return String(review.body);
+}
+
+export async function reconcilePostedFailedOrphans({
+  db,
+  listReviews,
+  apply = false,
+  limit = 20,
+  rootDir = process.cwd(),
+  queueFollowUpForRecoveredPostedReviewImpl = queueFollowUpForRecoveredPostedReview,
+} = {}) {
   const scanLimit = Number.isInteger(Number(limit)) && Number(limit) > 0 ? Number(limit) : 20;
   const depthBefore = Number(db.prepare(SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW).get()?.n || 0);
   const rows = db.prepare(
@@ -49,13 +61,14 @@ export async function reconcilePostedFailedOrphans({ db, listReviews, apply = fa
         AND COALESCE(reviewer_session_uuid, '') = COALESCE(?, '')`
   );
   const latestPass = db.prepare(
-    `SELECT pass_id FROM reviewer_passes
+    `SELECT pass_id, repo, pr_number, reviewer_class, reviewer_model, metadata_json, head_sha,
+            verdict, body_md, gh_comment_id
+       FROM reviewer_passes
       WHERE repo = ? AND pr_number = ?
-        AND (? IS NULL OR head_sha IS NULL OR head_sha = ?)
+        AND attempt_number = ?
         AND pass_kind IN ('first-pass', 'rereview')
-        AND status IN ('running', 'abandoned')
-      ORDER BY CASE WHEN attempt_number = ? THEN 0 ELSE 1 END,
-               started_at DESC, pass_id DESC LIMIT 1`
+        AND (? IS NULL OR head_sha IS NULL OR head_sha = ?)
+      ORDER BY started_at DESC, pass_id DESC LIMIT 1`
   );
   const markPassPosted = db.prepare(
     `UPDATE reviewer_passes
@@ -65,7 +78,14 @@ export async function reconcilePostedFailedOrphans({ db, listReviews, apply = fa
       WHERE pass_id = ? AND (gh_comment_id IS NULL OR gh_comment_id = ?)`
   );
   const passByReviewId = db.prepare(
-    'SELECT pass_id, repo, pr_number FROM reviewer_passes WHERE gh_comment_id = ?'
+    `SELECT pass_id, repo, pr_number, reviewer_class, reviewer_model, metadata_json, head_sha,
+            verdict, body_md, gh_comment_id
+       FROM reviewer_passes WHERE gh_comment_id = ?`
+  );
+  const passById = db.prepare(
+    `SELECT pass_id, repo, pr_number, reviewer_class, reviewer_model, metadata_json, head_sha,
+            verdict, body_md, gh_comment_id
+       FROM reviewer_passes WHERE pass_id = ?`
   );
   const results = [];
 
@@ -78,50 +98,73 @@ export async function reconcilePostedFailedOrphans({ db, listReviews, apply = fa
         continue;
       }
       let changed = false;
+      let artifactLinked = false;
+      let queueDecision = null;
       if (apply) {
-        changed = db.transaction(() => {
-          const result = markPosted.run(
-            review.submitted_at,
-            row.repo,
-            row.pr_number,
-            row.reviewer_session_uuid || ''
-          );
-          if (result.changes !== 1) return false;
-          const reviewId = review.id === null || review.id === undefined ? null : String(review.id);
-          const existingArtifact = reviewId ? passByReviewId.get(reviewId) : null;
-          if (existingArtifact && (
-            existingArtifact.repo !== row.repo || Number(existingArtifact.pr_number) !== Number(row.pr_number)
-          )) {
-            throw new Error(`review ${reviewId} is already linked to another PR`);
-          }
-          const pass = existingArtifact || latestPass.get(
-            row.repo,
-            row.pr_number,
-            row.reviewer_head_sha || null,
-            row.reviewer_head_sha || null,
-            row.review_attempts
-          );
-          if (pass && reviewId && !existingArtifact) {
-            markPassPosted.run(
+        changed = withSqliteBusyRetrySync(
+          () => db.transaction(() => {
+            const result = markPosted.run(
               review.submitted_at,
-              reviewVerdict(review.state),
-              review.body || '',
-              reviewId,
-              review.submitted_at,
-              pass.pass_id,
-              reviewId
+              row.repo,
+              row.pr_number,
+              row.reviewer_session_uuid || ''
             );
-          }
-          return true;
-        })();
+            if (result.changes !== 1) return false;
+            const reviewId = review.id === null || review.id === undefined ? null : String(review.id);
+            const existingArtifact = reviewId ? passByReviewId.get(reviewId) : null;
+            if (existingArtifact && (
+              existingArtifact.repo !== row.repo || Number(existingArtifact.pr_number) !== Number(row.pr_number)
+            )) {
+              throw new Error(`review ${reviewId} is already linked to another PR`);
+            }
+            const pass = existingArtifact || latestPass.get(
+              row.repo,
+              row.pr_number,
+              row.review_attempts,
+              row.reviewer_head_sha || null,
+              row.reviewer_head_sha || null
+            );
+            let linkedPass = pass || null;
+            if (pass && reviewId && !existingArtifact) {
+              markPassPosted.run(
+                review.submitted_at,
+                reviewVerdict(review.state),
+                reviewBodyForStorage(review),
+                reviewId,
+                review.submitted_at,
+                pass.pass_id,
+                reviewId
+              );
+              linkedPass = passById.get(pass.pass_id) || pass;
+            }
+            if (linkedPass) {
+              artifactLinked = Boolean(reviewId && (linkedPass.gh_comment_id || existingArtifact));
+              queueDecision = queueFollowUpForRecoveredPostedReviewImpl({
+                rootDir,
+                row: {
+                  ...linkedPass,
+                  body_md: linkedPass.body_md ?? reviewBodyForStorage(review),
+                  verdict: linkedPass.verdict ?? reviewVerdict(review.state),
+                  gh_comment_id: linkedPass.gh_comment_id ?? reviewId,
+                  head_sha: linkedPass.head_sha || row.reviewer_head_sha || null,
+                },
+                reviewRow: row,
+                reviewPostedAt: review.submitted_at,
+              });
+            }
+            return true;
+          })(),
+          { label: 'reconcile-posted-orphans-row' }
+        );
       }
       results.push({
         repo: row.repo,
         prNumber: row.pr_number,
-        action: apply ? (changed ? 'reconciled' : 'cas-miss') : 'would-reconcile',
+        action: apply ? (changed ? (artifactLinked ? 'reconciled' : 'posted-no-artifact') : 'cas-miss') : 'would-reconcile',
         postedAt: review.submitted_at,
         reviewId: review.id,
         verdict: reviewVerdict(review.state),
+        ...(queueDecision ? { followUp: queueDecision } : {}),
       });
     } catch (err) {
       results.push({ repo: row.repo, prNumber: row.pr_number, action: 'error', error: err?.message || String(err) });

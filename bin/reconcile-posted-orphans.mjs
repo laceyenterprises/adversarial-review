@@ -2,9 +2,9 @@
 import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import Database from 'better-sqlite3';
 
 import { reconcilePostedFailedOrphans } from '../src/orphan-post-reconcile.mjs';
+import { openReviewStateDb } from '../src/review-state.mjs';
 
 const DEFAULT_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -52,16 +52,17 @@ async function main(argv = process.argv.slice(2), io = process) {
     io.stdout.write('Usage: npm run reconcile-posted-orphans -- [--root <adversarial-review-root>] [--limit <n>] [--apply]\n');
     return 0;
   }
-  const db = new Database(join(options.root, 'data', 'reviews.db'), { readonly: !options.apply });
+  const db = openReviewStateDb(options.root);
   try {
     const result = await reconcilePostedFailedOrphans({
       db,
+      rootDir: options.root,
       apply: options.apply,
       limit: options.limit,
       listReviews: async (row) => listReviewsWithGh(row),
     });
     io.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-    return result.results.some((item) => item.action === 'error') ? 1 : 0;
+    return result.results.some((item) => item.action === 'error' || item.action === 'posted-no-artifact') ? 1 : 0;
   } finally {
     db.close();
   }

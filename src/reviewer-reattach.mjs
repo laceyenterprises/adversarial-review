@@ -3,9 +3,16 @@ import { execFileSync } from 'node:child_process';
 import { readReviewerRunRecord, TERMINAL_RUN_STATES } from './adapters/reviewer-runtime/run-state.mjs';
 import {
   loginsMatch,
+  REVIEW_ARTIFACT_LOOKUP_RETRY_BACKOFF_MS,
+  REVIEW_LOOKUP_TIMEOUT_MS,
   resolveReviewerBotLogin,
   resolveReviewerBotLoginAliases,
 } from './review-body-capture.mjs';
+import {
+  REVIEWED_ATTESTATION_SIGN_MAX_ATTEMPTS,
+  REVIEWED_ATTESTATION_SIGN_RETRY_DELAY_MS,
+  REVIEWED_ATTESTATION_SIGN_TIMEOUT_MS,
+} from './reviewed-attestation.mjs';
 import {
   DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS,
   resolveReviewerLeaseRecoveryEnabled,
@@ -41,7 +48,16 @@ const OVERDUE_RECOVERY_FAILURE_MESSAGE =
   'Overdue reviewer recovery could not prove the process exited cleanly without a late GitHub review; operator must verify before retrying.';
 const LEASE_RECOVERY_CAP_FAILURE_MESSAGE =
   'Reviewer lease recovery cap exhausted; leaving the review failed for operator inspection.';
-const POSTED_REVIEW_CLEANUP_RECHECK_DELAYS_MS = Object.freeze([250, 1000]);
+const POSTED_REVIEW_CLEANUP_SIGTERM_GRACE_MS = 5_000;
+const POSTED_REVIEW_CLEANUP_RECHECK_DELAYS_MS = Object.freeze([
+  (REVIEW_ARTIFACT_LOOKUP_RETRY_BACKOFF_MS.length + 1) * REVIEW_LOOKUP_TIMEOUT_MS
+  + REVIEW_ARTIFACT_LOOKUP_RETRY_BACKOFF_MS.reduce((sum, ms) => sum + ms, 0)
+  + REVIEWED_ATTESTATION_SIGN_MAX_ATTEMPTS * REVIEWED_ATTESTATION_SIGN_TIMEOUT_MS
+  + REVIEWED_ATTESTATION_SIGN_RETRY_DELAY_MS
+    * REVIEWED_ATTESTATION_SIGN_MAX_ATTEMPTS
+    * (REVIEWED_ATTESTATION_SIGN_MAX_ATTEMPTS - 1)
+    / 2,
+]);
 
 function splitRepoPath(repoPath) {
   const [owner, repo] = String(repoPath || '').split('/');
@@ -324,6 +340,17 @@ function prepareStatements(db) {
     markPosted: db.prepare(
       "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL, infra_auto_recover_attempts = 0 WHERE repo = ? AND pr_number = ?"
     ),
+    hasPostedReviewArtifact: db.prepare(
+      `SELECT 1 AS found
+         FROM reviewer_passes
+        WHERE repo = ?
+          AND pr_number = ?
+          AND (? IS NULL OR head_sha IS NULL OR head_sha = ?)
+          AND gh_comment_id IS NOT NULL
+          AND TRIM(CAST(gh_comment_id AS TEXT)) <> ''
+        ORDER BY started_at DESC, pass_id DESC
+        LIMIT 1`
+    ),
     adoptRunStatePgid: db.prepare(
       `UPDATE reviewed_prs
           SET reviewer_pgid = ?,
@@ -429,6 +456,7 @@ async function reconcileReviewerSessions({
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   postKillReviewReprobeDelaysMs = [500, 1500, 3000],
   postedReviewCleanupRecheckDelaysMs = POSTED_REVIEW_CLEANUP_RECHECK_DELAYS_MS,
+  postedReviewCleanupSigtermGraceMs = POSTED_REVIEW_CLEANUP_SIGTERM_GRACE_MS,
   onCleanupFinding = null,
 } = {}) {
   const limit = Number.isInteger(Number(maxRows)) && Number(maxRows) >= 0
@@ -909,12 +937,6 @@ async function reconcileReviewerSessions({
       if (!(await probePostedReviewOrMarkSticky())) continue;
 
       if (postedReview) {
-        await onTerminalDeadSession({
-          row,
-          state: 'completed',
-          settledAt: postedReview.submitted_at,
-          reason: 'posted-review-recovered-live-cleanup',
-        });
         statements.markPosted.run(postedReview.submitted_at, row.repo, row.pr_number);
         log.log(
           `[watcher] reviewer_reattach_posted_recovered repo=${row.repo} pr=${row.pr_number} ` +
@@ -928,6 +950,15 @@ async function reconcileReviewerSessions({
           : [];
         for (const delay of cleanupRecheckDelays) {
           if (Number(delay) > 0) await sleep(Number(delay));
+          if (statements.hasPostedReviewArtifact.get(
+            row.repo,
+            row.pr_number,
+            row.reviewer_head_sha || null,
+            row.reviewer_head_sha || null
+          )) {
+            cleanupAlive = false;
+            break;
+          }
           const cleanupProbe = typeof probeSession === 'function'
             ? probeSession(row)
             : probeReviewerSession({
@@ -940,6 +971,24 @@ async function reconcileReviewerSessions({
             : cleanupProbe?.alive === true && cleanupProbe?.matched !== false;
           cleanupMatched = typeof cleanupProbe === 'boolean' ? null : cleanupProbe?.matched ?? null;
           if (!cleanupAlive) break;
+        }
+        if (cleanupAlive) {
+          killProcessGroup(row.reviewer_pgid, 'SIGTERM');
+          const sigtermGraceMs = Number(postedReviewCleanupSigtermGraceMs);
+          if (sigtermGraceMs > 0) await sleep(sigtermGraceMs);
+          const finalCleanupProbe = typeof probeSession === 'function'
+            ? probeSession(row)
+            : probeReviewerSession({
+              pgid: row.reviewer_pgid,
+              sessionUuid: row.reviewer_session_uuid,
+              probeAlive,
+            });
+          cleanupAlive = typeof finalCleanupProbe === 'boolean'
+            ? finalCleanupProbe
+            : finalCleanupProbe?.alive === true && finalCleanupProbe?.matched !== false;
+          cleanupMatched = typeof finalCleanupProbe === 'boolean'
+            ? cleanupMatched
+            : finalCleanupProbe?.matched ?? cleanupMatched;
         }
         if (cleanupAlive) {
           killProcessGroup(row.reviewer_pgid, 'SIGKILL');
@@ -958,6 +1007,12 @@ async function reconcileReviewerSessions({
           );
           await onCleanupFinding?.(finding);
         }
+        await onTerminalDeadSession({
+          row,
+          state: 'completed',
+          settledAt: postedReview.submitted_at,
+          reason: 'posted-review-recovered-live-cleanup',
+        });
         continue;
       }
 
@@ -1078,6 +1133,7 @@ export {
   DEFAULT_NULL_PGID_LAUNCH_GRACE_MS,
   PGID_IDENTITY_FAILURE_MESSAGE,
   POSTED_REVIEW_CLEANUP_RECHECK_DELAYS_MS,
+  POSTED_REVIEW_CLEANUP_SIGTERM_GRACE_MS,
   killPgid,
   makeReviewPostedProbe,
   findReviewerProcessBySessionUuid,

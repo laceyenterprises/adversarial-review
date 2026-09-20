@@ -12,47 +12,10 @@ import {
   reviewerModelGrounding,
 } from './afh-reviewer-fallback.mjs';
 
-const ROUTE_CACHE_TTL_MS = 30_000;
-const ROUTE_CACHE_MAX_ENTRIES = 512;
-const routeCache = new Map();
-
-function routeCacheKey({ subject, baseRoute, rootDir, repoPath, prNumber, currentRow, headSha, afhGrounding, env, cascadeState }) {
-  return JSON.stringify({
-    repo: repoPath,
-    rootDir,
-    prNumber,
-    headSha,
-    builderClass: subject?.builderClass || baseRoute?.builderClass || null,
-    reviewerModel: baseRoute?.reviewerModel || null,
-    currentRow,
-    cascadeState,
-    timeoutFallback: env?.ADVERSARIAL_REVIEW_TIMEOUT_FALLBACK_MODEL || null,
-    timeoutThreshold: env?.ADVERSARIAL_REVIEW_TIMEOUT_FALLBACK_THRESHOLD || null,
-    execThreshold: env?.AGENT_OS_REVIEWER_EXEC_FALLBACK_THRESHOLD
-      ?? env?.ADVERSARIAL_REVIEWER_EXEC_FALLBACK_THRESHOLD
-      ?? null,
-    afhGrounding,
-  });
-}
-
-export function invalidateReviewerRouteCache(reason = 'operator-resume', logger = console, emitCacheEvent = null) {
-  const removed = routeCache.size;
-  routeCache.clear();
-  emitCacheEvent?.({ event: 'cache_invalidated', cache: 'reviewer-route', reason, removed });
-  logger?.info?.(`[watcher] reviewer-route-cache invalidated reason=${reason} removed=${removed}`);
+export function invalidateReviewerRouteCache(reason = 'operator-resume', logger = console) {
+  const removed = 0;
+  logger?.info?.(`[watcher] reviewer-route-cache invalidated reason=${reason} removed=0 disabled=true`);
   return removed;
-}
-
-function pruneReviewerRouteCache(now = Date.now()) {
-  for (const [key, entry] of routeCache) {
-    if (now < entry.expiresAt) continue;
-    routeCache.delete(key);
-  }
-  while (routeCache.size > ROUTE_CACHE_MAX_ENTRIES) {
-    const oldestKey = routeCache.keys().next().value;
-    if (oldestKey === undefined) break;
-    routeCache.delete(oldestKey);
-  }
 }
 
 // Quota-exhausted fallback backoff, replicated verbatim from watcher.mjs (its
@@ -423,27 +386,8 @@ export function selectReviewerRouteForAttempt({
   headSha = null,
   env = process.env,
   afhGrounding = null,
-  emitCacheEvent = null,
 }) {
   const cascadeState = readCascadeState(rootDir, { repo: repoPath, prNumber });
-  const cacheKey = routeCacheKey({ subject, baseRoute, rootDir, repoPath, prNumber, currentRow, headSha, afhGrounding, env, cascadeState });
-  const now = Date.now();
-  const cached = routeCache.get(cacheKey);
-  if (cached && now < cached.expiresAt) {
-    emitCacheEvent?.({ event: 'cache_hit', cache: 'reviewer-route', repo: repoPath, prNumber, headSha });
-    return cached.route;
-  }
-  if (cached) {
-    routeCache.delete(cacheKey);
-    emitCacheEvent?.({ event: 'cache_stale', cache: 'reviewer-route', repo: repoPath, prNumber, headSha });
-  } else {
-    emitCacheEvent?.({ event: 'cache_miss', cache: 'reviewer-route', repo: repoPath, prNumber, headSha });
-  }
-  const remember = (route) => {
-    routeCache.set(cacheKey, { route, expiresAt: Date.now() + ROUTE_CACHE_TTL_MS });
-    pruneReviewerRouteCache();
-    return route;
-  };
   const builderClass = subject?.builderClass || baseRoute.builderClass || null;
   const execThreshold = resolveReviewerExecFallbackThreshold(env);
   const execFailureSignal = reviewerExecFailureSignal({ cascadeState, currentRow });
@@ -467,7 +411,7 @@ export function selectReviewerRouteForAttempt({
       });
       if (fallbackGrounding.grounded) continue;
       const fallbackRoute = reviewerRouteForModel(candidateModel);
-      return remember({
+      return {
         ...baseRoute,
         reviewerModel: fallbackRoute.reviewerModel,
         botTokenEnv: fallbackRoute.botTokenEnv,
@@ -484,9 +428,9 @@ export function selectReviewerRouteForAttempt({
           sameModelAsBuilder: isCrossModelReviewWaived(builderClass, fallbackRoute.reviewerModel),
           lastResort: candidate.sameModelLastResort,
         },
-      });
+      };
     }
-    return remember({
+    return {
       ...baseRoute,
       reviewerModelFallbackSkipped: {
         event: 'reviewer-model-fallback-skipped',
@@ -499,25 +443,25 @@ export function selectReviewerRouteForAttempt({
         builderClass,
         attempted,
       },
-    });
+    };
   }
 
   const threshold = resolveReviewerTimeoutFallbackThreshold(env);
-  if (threshold <= 0) return remember(baseRoute);
+  if (threshold <= 0) return { ...baseRoute };
   const timeoutFailures = Number(cascadeState?.transientFailureBreakdown?.['reviewer-timeout'] || 0);
   if (cascadeState?.lastFailureClass !== 'reviewer-timeout' || timeoutFailures < threshold) {
-    return remember(baseRoute);
+    return { ...baseRoute };
   }
   const fallbackModel = resolveReviewerTimeoutFallbackModel(env);
-  if (!fallbackModel || fallbackModel === baseRoute?.reviewerModel) return remember(baseRoute);
+  if (!fallbackModel || fallbackModel === baseRoute?.reviewerModel) return { ...baseRoute };
   const fallbackRoute = reviewerRouteForModel(fallbackModel);
-  if (!fallbackRoute) return remember(baseRoute);
+  if (!fallbackRoute) return { ...baseRoute };
   // AFH-04: never switch the timeout fallback onto a reviewer whose provider is
   // authoritatively grounded (hard or AFH-02 soft) — that trades a slow reviewer
   // for one that cannot spawn at all. No signal → unchanged behavior.
   const fallbackGrounding = reviewerModelGrounding(afhGrounding, fallbackModel);
   if (fallbackGrounding.grounded) {
-    return remember({
+    return {
       ...baseRoute,
       afhTimeoutFallbackSkipped: {
         candidateReviewerModel: fallbackModel,
@@ -526,9 +470,9 @@ export function selectReviewerRouteForAttempt({
         hardGrounded: fallbackGrounding.hardGrounded,
         softGrounded: fallbackGrounding.softGrounded,
       },
-    });
+    };
   }
-  return remember({
+  return {
     ...baseRoute,
     reviewerModel: fallbackRoute.reviewerModel,
     botTokenEnv: fallbackRoute.botTokenEnv,
@@ -540,13 +484,8 @@ export function selectReviewerRouteForAttempt({
       builderClass,
       sameModelAsBuilder: isCrossModelReviewWaived(builderClass, fallbackRoute.reviewerModel),
     },
-  });
+  };
 }
-
-export const __test__ = Object.freeze({
-  routeCacheSize: () => routeCache.size,
-  routeCacheMaxEntries: ROUTE_CACHE_MAX_ENTRIES,
-});
 
 export function resolveStaleReviewerReconcilePerPoll(env = process.env) {
   const raw = env.ADVERSARIAL_STALE_REVIEWER_RECONCILE_PER_POLL;

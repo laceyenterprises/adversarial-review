@@ -148,7 +148,10 @@ import {
   stmtUpdateReviewLabels,
   stmtUpdateReviewRouting,
 } from './review-state-db.mjs';
-import * as reviewState from './review-state.mjs';
+import {
+  recordReviewLatencyEvent,
+  requestReviewRereview,
+} from './review-state.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
 import {
   buildDuplicateReviewSkipAudit,
@@ -522,15 +525,18 @@ export function markUnroutableTitleDisposition({
 // in ctx. Disable the whole hop with ADVERSARIAL_AFH_REVIEWER_FALLBACK=0.
 function emitReviewCacheLatencyEvent(event, { reviewDb = db, logger = console } = {}) {
   if (!event?.event) return;
-  if (typeof reviewState.recordReviewLatencyEvent !== 'function') return;
   try {
-    reviewState.recordReviewLatencyEvent(reviewDb, {
+    const eventAt = event.at || new Date().toISOString();
+    const minuteBucket = String(eventAt).slice(0, 16);
+    const cache = event.cache || 'unknown';
+    recordReviewLatencyEvent(reviewDb, {
       repo: event.repo || null,
       prNumber: event.prNumber ?? null,
       eventType: event.event,
-      at: event.at || new Date().toISOString(),
+      at: eventAt,
       source: 'watcher-cache',
-      sourceRef: event.cache || null,
+      sourceRef: cache,
+      idempotencyKey: `watcher-cache:${cache}:${event.event}:${minuteBucket}`,
       reason: event.reason || null,
       payload: event,
     });
@@ -542,7 +548,7 @@ function emitReviewCacheLatencyEvent(event, { reviewDb = db, logger = console } 
 const defaultAfhReviewerGroundingForTick = createAfhReviewerGroundingCache({
   emitCacheEvent: (event) => emitReviewCacheLatencyEvent(event),
 });
-let previousAfhGrounding = null;
+const previousAfhGroundingByProbeKey = new Map();
 
 // A terminal reviewer failure does NOT always land as review_status='failed'.
 //
@@ -1255,7 +1261,7 @@ export async function processReviewSubject(entry, ctx) {
         );
       } else if (postedReviewHeadMoved) {
         try {
-          const refreshResult = reviewState.requestReviewRereview({
+          const refreshResult = requestReviewRereview({
             rootDir: ROOT,
             repo: repoPath,
             prNumber,
@@ -1486,20 +1492,26 @@ export async function processReviewSubject(entry, ctx) {
         const readAfhGrounding = typeof getAfhReviewerGroundingForTick === 'function'
           ? getAfhReviewerGroundingForTick
           : defaultAfhReviewerGroundingForTick;
+        let groundingProbeKey = 'quota-only';
         try {
           const claudeRuntimeProbeUid = await resolveClaudeRuntimeProbeUidForWatcher({
             execFileImpl: execFileAsync,
             env: process.env,
             logger: console,
           });
+          groundingProbeKey = claudeRuntimeProbeUid === null
+            ? 'quota-only'
+            : `claude-runtime-uid:${claudeRuntimeProbeUid}`;
           afhGrounding = await readAfhGrounding(
             claudeRuntimeProbeUid === null ? {} : { claudeRuntimeProbeUid }
           );
+          const previousAfhGrounding = previousAfhGroundingByProbeKey.get(groundingProbeKey) || null;
           const groundingInvalidation = invalidationReasonForGrounding(previousAfhGrounding, afhGrounding);
           if (groundingInvalidation) invalidateReviewerRouteCache(groundingInvalidation, console, emitCacheEvent);
-          previousAfhGrounding = afhGrounding;
+          previousAfhGroundingByProbeKey.set(groundingProbeKey, afhGrounding);
         } catch (err) {
           afhGrounding = null;
+          previousAfhGroundingByProbeKey.set(groundingProbeKey, null);
           console.warn(
             `[watcher] afh-reviewer-grounding read failed for ${repoPath}#${prNumber}: ` +
               `${err?.message || err}; failing open to the configured reviewer route`
@@ -1836,7 +1848,7 @@ export async function processReviewSubject(entry, ctx) {
       ) {
         try {
           const beforeRevisionRef = current.revision_ref || null;
-          const refreshResult = reviewState.requestReviewRereview({
+          const refreshResult = requestReviewRereview({
             rootDir: ROOT,
             repo: repoPath,
             prNumber,
@@ -1875,7 +1887,7 @@ export async function processReviewSubject(entry, ctx) {
           String(blockedHeadSha) !== String(pendingRevisionRef);
         if (blockedHeadMoved) {
           try {
-            const refreshResult = reviewState.requestReviewRereview({
+            const refreshResult = requestReviewRereview({
               rootDir: ROOT,
               repo: repoPath,
               prNumber,
@@ -1951,7 +1963,7 @@ export async function processReviewSubject(entry, ctx) {
           });
           if (ciAdmission.proceed) {
             try {
-              const refreshResult = reviewState.requestReviewRereview({
+              const refreshResult = requestReviewRereview({
                 rootDir: ROOT,
                 repo: repoPath,
                 prNumber,

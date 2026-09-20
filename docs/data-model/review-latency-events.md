@@ -23,6 +23,8 @@ owning subsystem for display and diagnosis. `recordReviewLatencyEvent` derives
 the stage from the event type when callers do not pass one explicitly.
 The latency report preserves those generic subject identifiers when building
 timelines, so unrelated non-PR subjects cannot be paired across domains.
+Diagnostic cache and fallback events use the `diagnostics` stage; they are
+shown in report summaries but do not define latency-stage boundaries.
 
 ## Event contract
 
@@ -48,6 +50,7 @@ reported by `collectReviewLatencyReport`:
 - `cache_hit`
 - `cache_miss`
 - `cache_stale`
+- `cache_coalesced`
 - `cache_invalidated`
 - `fallback_route`
 
@@ -66,7 +69,9 @@ JSON as a report-time data-quality problem.
 ## Idempotency and indexes
 
 Callers that can provide a stable event identity should set
-`idempotency_key`. The partial unique index
+`idempotency_key`. Watcher hot-path cache diagnostics must use minute-bucketed
+idempotency keys of the form `watcher-cache:<cache>:<event>:<YYYY-MM-DDTHH:mm>`
+so per-subject poll loops cannot grow durable rows without bound. The partial unique index
 `review_latency_events_idempotency_unique` deduplicates by
 `(event_type, idempotency_key)` while still allowing events without an
 idempotency key.

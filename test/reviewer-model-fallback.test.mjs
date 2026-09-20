@@ -6,7 +6,6 @@ import path from 'node:path';
 
 import { recordCascadeFailure } from '../src/reviewer-cascade.mjs';
 import {
-  __test__ as reviewerRouteSelectionTest,
   invalidateReviewerRouteCache,
   selectReviewerRouteForAttempt,
 } from '../src/reviewer-route-selection.mjs';
@@ -90,13 +89,12 @@ test('reviewer exec fallback does not switch on the first transient failure', ()
   assert.equal(route.reviewerModelFallback, undefined);
 });
 
-test('reviewer route cache remains bounded when route keys churn', () => {
+test('reviewer route selection does not retain a route cache', () => {
   invalidateReviewerRouteCache('test-reset', { info() {} });
-  const maxEntries = reviewerRouteSelectionTest.routeCacheMaxEntries;
   const originalInfo = console.info;
   console.info = () => {};
   try {
-    for (let i = 0; i < maxEntries + 20; i += 1) {
+    for (let i = 0; i < 20; i += 1) {
       const route = selectReviewerRouteForAttempt({
         rootDir: '/nonexistent-reviewer-route-cache-root',
         repoPath: 'laceyenterprises/agent-os',
@@ -116,8 +114,7 @@ test('reviewer route cache remains bounded when route keys churn', () => {
   } finally {
     console.info = originalInfo;
   }
-  assert.equal(reviewerRouteSelectionTest.routeCacheSize(), maxEntries);
-  invalidateReviewerRouteCache('test-reset', { info() {} });
+  assert.equal(invalidateReviewerRouteCache('test-reset', { info() {} }), 0);
 });
 
 test('reviewer exec fallback switches after repeated same-model failures on the same head', () => {

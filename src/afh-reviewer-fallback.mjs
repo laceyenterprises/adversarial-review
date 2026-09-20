@@ -523,12 +523,12 @@ export function createAfhReviewerGroundingCache({
       emitCacheEvent?.({ event: 'cache_hit', cache: 'reviewer-quota', key: probeKey, ageMs: now - entry.cached.readAt });
       return entry.cached.snapshot;
     }
-    emitCacheEvent?.({
-      event: entry.cached ? 'cache_stale' : 'cache_miss',
-      cache: 'reviewer-quota',
-      key: probeKey,
-    });
     if (!entry.inFlight) {
+      emitCacheEvent?.({
+        event: entry.cached ? 'cache_stale' : 'cache_miss',
+        cache: 'reviewer-quota',
+        key: probeKey,
+      });
       entry.inFlight = (async () => {
         let snapshot;
         try {
@@ -581,14 +581,23 @@ export function createAfhReviewerGroundingCache({
       })().finally(() => {
         entry.inFlight = null;
       });
+    } else {
+      emitCacheEvent?.({ event: 'cache_coalesced', cache: 'reviewer-quota', key: probeKey });
     }
     return entry.inFlight;
   };
   getAfhReviewerGrounding.invalidate = ({ reason = 'operator-resume', probeKey = null } = {}) => {
-    const removed = probeKey === null
-      ? cacheByProbeKey.size
-      : Number(cacheByProbeKey.delete(String(probeKey)));
-    if (probeKey === null) cacheByProbeKey.clear();
+    let removed = 0;
+    if (probeKey === null) {
+      for (const entry of cacheByProbeKey.values()) {
+        if (entry.cached) removed += 1;
+        entry.cached = null;
+      }
+    } else {
+      const entry = cacheByProbeKey.get(String(probeKey));
+      if (entry?.cached) removed = 1;
+      if (entry) entry.cached = null;
+    }
     emitCacheEvent?.({
       event: 'cache_invalidated',
       cache: 'reviewer-quota',

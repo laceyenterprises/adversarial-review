@@ -35,11 +35,19 @@ for (const entry of catalog.entries) {
 
 const reviewLatencyDocPath = resolve(root, 'docs/data-model/review-latency-events.md');
 const reviewStatePath = resolve(root, 'src/review-state.mjs');
+const reviewLatencyReportPath = resolve(root, 'src/review-latency-report.mjs');
 const reviewLatencyDoc = readFileSync(reviewLatencyDocPath, 'utf8');
 const reviewStateSource = readFileSync(reviewStatePath, 'utf8');
+const reviewLatencyReportSource = readFileSync(reviewLatencyReportPath, 'utf8');
 const eventTypesMatch = reviewStateSource.match(/const REVIEW_LATENCY_EVENT_TYPES = Object\.freeze\(new Set\(\[([\s\S]*?)\]\)\);/);
 assert.ok(eventTypesMatch, 'REVIEW_LATENCY_EVENT_TYPES set must be parseable');
 const codeEventTypes = [...eventTypesMatch[1].matchAll(/'([^']+)'/g)].map((match) => match[1]);
+const reportEventTypesMatch = reviewLatencyReportSource.match(/const EVENT_TYPES = Object\.freeze\(\[([\s\S]*?)\]\);/);
+assert.ok(reportEventTypesMatch, 'review-latency-report EVENT_TYPES list must be parseable');
+const reportEventTypes = [...reportEventTypesMatch[1].matchAll(/'([^']+)'/g)].map((match) => match[1]);
+const stageMapMatch = reviewStateSource.match(/const REVIEW_LATENCY_EVENT_STAGE_BY_TYPE = Object\.freeze\(\{([\s\S]*?)\}\);/);
+assert.ok(stageMapMatch, 'REVIEW_LATENCY_EVENT_STAGE_BY_TYPE map must be parseable');
+const stageMapEventTypes = [...stageMapMatch[1].matchAll(/^\s*([a-zA-Z0-9_]+):\s*'[^']+',?$/gm)].map((match) => match[1]);
 const eventContractMatch = reviewLatencyDoc.match(/## Event contract[\s\S]*?reported by `collectReviewLatencyReport`:\n\n([\s\S]*?)\n\n/);
 assert.ok(eventContractMatch, 'review-latency-events.md Event contract list must be parseable');
 const docEventTypes = [...eventContractMatch[1].matchAll(/^- `([^`]+)`$/gm)].map((match) => match[1]);
@@ -47,6 +55,16 @@ assert.deepEqual(
   docEventTypes,
   codeEventTypes,
   'review-latency-events.md event type list must match REVIEW_LATENCY_EVENT_TYPES'
+);
+assert.deepEqual(
+  reportEventTypes,
+  codeEventTypes,
+  'review-latency-report EVENT_TYPES must match REVIEW_LATENCY_EVENT_TYPES'
+);
+assert.deepEqual(
+  stageMapEventTypes,
+  codeEventTypes,
+  'REVIEW_LATENCY_EVENT_STAGE_BY_TYPE keys must match REVIEW_LATENCY_EVENT_TYPES'
 );
 
 console.log(`validated ${catalog.entries.length} data-model catalog entries`);

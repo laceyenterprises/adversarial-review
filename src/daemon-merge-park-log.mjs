@@ -48,6 +48,11 @@ const PARK_REMEDIES = Object.freeze(Object.assign(Object.create(null), {
   'lease-not-held':
     'The daemon could not take the shared merge lease. Check for a stale or orphaned '
     + 'lease under data/merge-leases and the ama-closer lease reaper.',
+  'duplicate-family-unresolved':
+    'The PR is in an unresolved duplicate family. Close or suppress the redundant '
+    + 'candidate with `not-a-duplicate-stack`; the watcher clears the hold on the '
+    + 'next duplicate-family census/reconciliation tick once fewer than two live '
+    + 'unsuppressed candidates remain.',
   'protective-predecessor-open':
     'Merge or close the declared protective predecessor PR, or update the dependent PR body '
     + 'if the declaration names the wrong protector.',

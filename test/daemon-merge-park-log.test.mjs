@@ -92,6 +92,11 @@ test('MERGEORDER-01: protective predecessor park reasons carry operator remedies
   }
 });
 
+test('duplicate-family park reason carries the release lever', () => {
+  assert.match(PARK_REMEDIES['duplicate-family-unresolved'], /not-a-duplicate-stack/);
+  assert.match(PARK_REMEDIES['duplicate-family-unresolved'], /fewer than two live unsuppressed candidates/);
+});
+
 test('a repeat park with the same reason increments and preserves firstObservedAt', () => {
   withRoot((rootDir) => {
     const args = {

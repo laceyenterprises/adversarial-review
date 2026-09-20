@@ -534,6 +534,8 @@ async function retryPendingReviewedAttestations({
   log = console,
   now = () => new Date().toISOString(),
   maxEntriesPerRun = Number.POSITIVE_INFINITY,
+  maxMillisPerRun = Number.POSITIVE_INFINITY,
+  monotonicNow = () => Date.now(),
 } = {}) {
   const pending = await readPendingReviewedAttestations(rootDir);
   if (pending.length === 0) {
@@ -596,7 +598,18 @@ async function retryPendingReviewedAttestations({
     }
     if (attemptable.length < entryLimit) attemptable.push(entry);
   }
+  const runStartedAtMs = monotonicNow();
+  const millisBudget = Number.isFinite(maxMillisPerRun)
+    ? Math.max(0, maxMillisPerRun)
+    : Number.POSITIVE_INFINITY;
+  let attemptedCount = 0;
   for (const entry of attemptable) {
+    // Bound the wall-clock cost this drain adds to a watcher tick. The watcher
+    // treats a slow poll as a stalled poll, so an unbounded drain can trip the
+    // poll-starvation self-kill. Always attempt at least one entry so the queue
+    // still makes forward progress when a single retry exceeds the whole budget.
+    if (attemptedCount > 0 && monotonicNow() - runStartedAtMs >= millisBudget) break;
+    attemptedCount += 1;
     try {
       const signed = await signReviewedAttestation({
         payload: entry.payload,
@@ -645,7 +658,7 @@ async function retryPendingReviewedAttestations({
   }
   await replaceProcessedReviewedAttestations(rootDir, processed);
   const result = {
-    attempted: attemptable.length,
+    attempted: attemptedCount,
     consumed: consumed.length,
     remaining: pending.length - consumed.length - terminal.length,
   };

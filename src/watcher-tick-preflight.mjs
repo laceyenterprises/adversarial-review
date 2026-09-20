@@ -48,7 +48,13 @@ async function refreshWatcherAuthenticationForTick({
 // it every few minutes is cheap: it only re-fetches when the token is actually
 // near expiry.
 const WATCHER_AUTH_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
-const WATCHER_REVIEWED_ATTESTATION_RETRY_MAX_ENTRIES_PER_TICK = 1;
+// One retry per tick cannot keep up with the arrival rate of failed signings:
+// the queue was observed oscillating between 9 and 29 entries for hours while
+// draining at attempted=1 per tick, so reviewed verdicts sat unattested and
+// merge authority saw no verdict at all. Drain up to a batch per tick, bounded
+// by a wall-clock budget so a slow tick never trips poll-starvation detection.
+const WATCHER_REVIEWED_ATTESTATION_RETRY_MAX_ENTRIES_PER_TICK = 25;
+const WATCHER_REVIEWED_ATTESTATION_RETRY_MAX_MILLIS_PER_TICK = 10_000;
 
 function startWatcherAuthenticationRefreshTimer({
   log = console,
@@ -99,6 +105,7 @@ async function retryPendingReviewedAttestationQueueForWatcher({
   log = console,
   retryPendingReviewedAttestationsImpl = retryPendingReviewedAttestations,
   maxEntriesPerTick = WATCHER_REVIEWED_ATTESTATION_RETRY_MAX_ENTRIES_PER_TICK,
+  maxMillisPerTick = WATCHER_REVIEWED_ATTESTATION_RETRY_MAX_MILLIS_PER_TICK,
 } = {}) {
   try {
     const retryResult = await retryPendingReviewedAttestationsImpl({
@@ -108,6 +115,7 @@ async function retryPendingReviewedAttestationQueueForWatcher({
       env,
       log,
       maxEntriesPerRun: maxEntriesPerTick,
+      maxMillisPerRun: maxMillisPerTick,
     });
     if (retryResult.attempted > 0 || retryResult.terminal > 0) {
       const terminalSuffix = retryResult.terminal > 0 ? ` terminal=${retryResult.terminal}` : '';
@@ -126,6 +134,7 @@ async function retryPendingReviewedAttestationQueueForWatcher({
 export {
   WATCHER_AUTH_REFRESH_INTERVAL_MS,
   WATCHER_REVIEWED_ATTESTATION_RETRY_MAX_ENTRIES_PER_TICK,
+  WATCHER_REVIEWED_ATTESTATION_RETRY_MAX_MILLIS_PER_TICK,
   createTickHcpHealthzProbe,
   startWatcherAuthenticationRefreshTimer,
   refreshWatcherAuthenticationForTick,

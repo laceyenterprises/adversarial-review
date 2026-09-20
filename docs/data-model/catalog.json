@@ -75,6 +75,19 @@
       "owner": "review-freshness liveness alert"
     },
     {
+      "id": "cascade-state",
+      "title": "Reviewer Cascade State",
+      "path": "docs/data-model/cascade-state.md",
+      "store": "data/cascade-state/",
+      "schemaSurface": "src/reviewer-cascade.mjs",
+      "relatedSchemaSurfaces": [
+        "src/watcher.mjs",
+        "src/reviewer-route-selection.mjs",
+        "src/review-pipeline-health.mjs"
+      ],
+      "owner": "reviewer transient-failure backoff and route selection"
+    },
+    {
       "id": "duplicate-families",
       "title": "Duplicate Families",
       "path": "docs/data-model/duplicate-families.md",

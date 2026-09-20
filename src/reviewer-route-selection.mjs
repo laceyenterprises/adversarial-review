@@ -35,10 +35,11 @@ function routeCacheKey({ subject, baseRoute, rootDir, repoPath, prNumber, curren
   });
 }
 
-export function invalidateReviewerRouteCache(reason = 'operator-resume', logger = console) {
+export function invalidateReviewerRouteCache(reason = 'operator-resume', logger = console, emitCacheEvent = null) {
   const removed = routeCache.size;
   routeCache.clear();
-  logger?.info?.(`[watcher] cache-event ${JSON.stringify({ event: 'cache_invalidated', cache: 'reviewer-route', reason, removed })}`);
+  emitCacheEvent?.({ event: 'cache_invalidated', cache: 'reviewer-route', reason, removed });
+  logger?.info?.(`[watcher] reviewer-route-cache invalidated reason=${reason} removed=${removed}`);
   return removed;
 }
 
@@ -422,20 +423,21 @@ export function selectReviewerRouteForAttempt({
   headSha = null,
   env = process.env,
   afhGrounding = null,
+  emitCacheEvent = null,
 }) {
   const cascadeState = readCascadeState(rootDir, { repo: repoPath, prNumber });
   const cacheKey = routeCacheKey({ subject, baseRoute, rootDir, repoPath, prNumber, currentRow, headSha, afhGrounding, env, cascadeState });
   const now = Date.now();
   const cached = routeCache.get(cacheKey);
   if (cached && now < cached.expiresAt) {
-    console.info(`[watcher] cache-event ${JSON.stringify({ event: 'cache_hit', cache: 'reviewer-route', repo: repoPath, prNumber, headSha })}`);
+    emitCacheEvent?.({ event: 'cache_hit', cache: 'reviewer-route', repo: repoPath, prNumber, headSha });
     return cached.route;
   }
   if (cached) {
     routeCache.delete(cacheKey);
-    console.info(`[watcher] cache-event ${JSON.stringify({ event: 'cache_stale', cache: 'reviewer-route', repo: repoPath, prNumber, headSha })}`);
+    emitCacheEvent?.({ event: 'cache_stale', cache: 'reviewer-route', repo: repoPath, prNumber, headSha });
   } else {
-    console.info(`[watcher] cache-event ${JSON.stringify({ event: 'cache_miss', cache: 'reviewer-route', repo: repoPath, prNumber, headSha })}`);
+    emitCacheEvent?.({ event: 'cache_miss', cache: 'reviewer-route', repo: repoPath, prNumber, headSha });
   }
   const remember = (route) => {
     routeCache.set(cacheKey, { route, expiresAt: Date.now() + ROUTE_CACHE_TTL_MS });

@@ -148,7 +148,7 @@ import {
   stmtUpdateReviewLabels,
   stmtUpdateReviewRouting,
 } from './review-state-db.mjs';
-import { requestReviewRereview } from './review-state.mjs';
+import * as reviewState from './review-state.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
 import {
   buildDuplicateReviewSkipAudit,
@@ -520,7 +520,28 @@ export function markUnroutableTitleDisposition({
 // than growing watcher.mjs, which is under a hard ARC-18 line ratchet. Tests and
 // alternate schedulers override it by passing `getAfhReviewerGroundingForTick`
 // in ctx. Disable the whole hop with ADVERSARIAL_AFH_REVIEWER_FALLBACK=0.
-const defaultAfhReviewerGroundingForTick = createAfhReviewerGroundingCache();
+function emitReviewCacheLatencyEvent(event, { reviewDb = db, logger = console } = {}) {
+  if (!event?.event) return;
+  if (typeof reviewState.recordReviewLatencyEvent !== 'function') return;
+  try {
+    reviewState.recordReviewLatencyEvent(reviewDb, {
+      repo: event.repo || null,
+      prNumber: event.prNumber ?? null,
+      eventType: event.event,
+      at: event.at || new Date().toISOString(),
+      source: 'watcher-cache',
+      sourceRef: event.cache || null,
+      reason: event.reason || null,
+      payload: event,
+    });
+  } catch (err) {
+    logger?.warn?.(`[watcher] cache-event-write-failed ${event.event}: ${err?.message || err}`);
+  }
+}
+
+const defaultAfhReviewerGroundingForTick = createAfhReviewerGroundingCache({
+  emitCacheEvent: (event) => emitReviewCacheLatencyEvent(event),
+});
 let previousAfhGrounding = null;
 
 // A terminal reviewer failure does NOT always land as review_status='failed'.
@@ -1234,7 +1255,7 @@ export async function processReviewSubject(entry, ctx) {
         );
       } else if (postedReviewHeadMoved) {
         try {
-          const refreshResult = requestReviewRereview({
+          const refreshResult = reviewState.requestReviewRereview({
             rootDir: ROOT,
             repo: repoPath,
             prNumber,
@@ -1460,6 +1481,7 @@ export async function processReviewSubject(entry, ctx) {
       // is keyed by the configured operator/admin UID resolved here, not guessed
       // inside the module-scope cache. It can never throw here.
       let afhGrounding = null;
+      const emitCacheEvent = (event) => emitReviewCacheLatencyEvent(event);
       {
         const readAfhGrounding = typeof getAfhReviewerGroundingForTick === 'function'
           ? getAfhReviewerGroundingForTick
@@ -1474,7 +1496,7 @@ export async function processReviewSubject(entry, ctx) {
             claudeRuntimeProbeUid === null ? {} : { claudeRuntimeProbeUid }
           );
           const groundingInvalidation = invalidationReasonForGrounding(previousAfhGrounding, afhGrounding);
-          if (groundingInvalidation) invalidateReviewerRouteCache(groundingInvalidation);
+          if (groundingInvalidation) invalidateReviewerRouteCache(groundingInvalidation, console, emitCacheEvent);
           previousAfhGrounding = afhGrounding;
         } catch (err) {
           afhGrounding = null;
@@ -1493,18 +1515,16 @@ export async function processReviewSubject(entry, ctx) {
       });
       const afhBaseRoute = afhSelection.route;
       if (afhSelection.decision.applied) {
-        console.warn(
-          `[watcher] cache-event ${JSON.stringify({
-            event: 'fallback_route',
-            cache: 'reviewer-route',
-            repo: repoPath,
-            prNumber,
-            headSha: subject.headSha || subject.ref?.revisionRef || null,
-            fromReviewerModel: afhSelection.decision.fromReviewerModel,
-            toReviewerModel: afhSelection.decision.toReviewerModel,
-            reason: afhSelection.decision.reason,
-          })}`
-        );
+        emitCacheEvent({
+          event: 'fallback_route',
+          cache: 'reviewer-route',
+          repo: repoPath,
+          prNumber,
+          headSha: subject.headSha || subject.ref?.revisionRef || null,
+          fromReviewerModel: afhSelection.decision.fromReviewerModel,
+          toReviewerModel: afhSelection.decision.toReviewerModel,
+          reason: afhSelection.decision.reason,
+        });
         console.warn(
           `[watcher] reviewer-selection ${repoPath}#${prNumber} ` +
             `${describeAfhReviewerFallback(afhSelection.decision)}`
@@ -1524,6 +1544,7 @@ export async function processReviewSubject(entry, ctx) {
         currentRow: existing,
         headSha: subject.headSha || subject.ref?.revisionRef || null,
         afhGrounding,
+        emitCacheEvent,
       });
 
       // RWF-01: review-dispatch worker-class fallback (quota trigger)
@@ -1815,7 +1836,7 @@ export async function processReviewSubject(entry, ctx) {
       ) {
         try {
           const beforeRevisionRef = current.revision_ref || null;
-          const refreshResult = requestReviewRereview({
+          const refreshResult = reviewState.requestReviewRereview({
             rootDir: ROOT,
             repo: repoPath,
             prNumber,
@@ -1854,7 +1875,7 @@ export async function processReviewSubject(entry, ctx) {
           String(blockedHeadSha) !== String(pendingRevisionRef);
         if (blockedHeadMoved) {
           try {
-            const refreshResult = requestReviewRereview({
+            const refreshResult = reviewState.requestReviewRereview({
               rootDir: ROOT,
               repo: repoPath,
               prNumber,
@@ -1930,7 +1951,7 @@ export async function processReviewSubject(entry, ctx) {
           });
           if (ciAdmission.proceed) {
             try {
-              const refreshResult = requestReviewRereview({
+              const refreshResult = reviewState.requestReviewRereview({
                 rootDir: ROOT,
                 repo: repoPath,
                 prNumber,

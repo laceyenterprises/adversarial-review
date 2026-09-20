@@ -33,4 +33,20 @@ for (const entry of catalog.entries) {
   }
 }
 
+const reviewLatencyDocPath = resolve(root, 'docs/data-model/review-latency-events.md');
+const reviewStatePath = resolve(root, 'src/review-state.mjs');
+const reviewLatencyDoc = readFileSync(reviewLatencyDocPath, 'utf8');
+const reviewStateSource = readFileSync(reviewStatePath, 'utf8');
+const eventTypesMatch = reviewStateSource.match(/const REVIEW_LATENCY_EVENT_TYPES = Object\.freeze\(new Set\(\[([\s\S]*?)\]\)\);/);
+assert.ok(eventTypesMatch, 'REVIEW_LATENCY_EVENT_TYPES set must be parseable');
+const codeEventTypes = [...eventTypesMatch[1].matchAll(/'([^']+)'/g)].map((match) => match[1]);
+const eventContractMatch = reviewLatencyDoc.match(/## Event contract[\s\S]*?reported by `collectReviewLatencyReport`:\n\n([\s\S]*?)\n\n/);
+assert.ok(eventContractMatch, 'review-latency-events.md Event contract list must be parseable');
+const docEventTypes = [...eventContractMatch[1].matchAll(/^- `([^`]+)`$/gm)].map((match) => match[1]);
+assert.deepEqual(
+  docEventTypes,
+  codeEventTypes,
+  'review-latency-events.md event type list must match REVIEW_LATENCY_EVENT_TYPES'
+);
+
 console.log(`validated ${catalog.entries.length} data-model catalog entries`);

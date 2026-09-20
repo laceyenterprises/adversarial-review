@@ -17,6 +17,7 @@ import {
   openReviewStateDb,
   recordReviewLatencyEvent,
 } from '../src/review-state.mjs';
+import { createAfhReviewerGroundingCache } from '../src/afh-reviewer-fallback.mjs';
 
 const REPO = 'laceyenterprises/agent-os';
 
@@ -121,36 +122,52 @@ test('review latency event fallback lookup is scoped by generic subject identity
   }
 });
 
-test('latency report makes hot-path cache impact visible', () => {
+test('latency report makes cache impact visible from real cache emitters', async () => {
   const rootDir = tempRoot();
   const db = openDb(rootDir);
   try {
-    for (const [index, eventType, savedMs] of [
-      [1, 'cache_miss', 0],
-      [2, 'cache_hit', 61_000],
-      [3, 'cache_hit', 61_000],
-      [4, 'fallback_route', 0],
+    const getGrounding = createAfhReviewerGroundingCache({
+      readImpl: async () => ({ available: true, providers: { openai: { hardGrounded: false } } }),
+      ttlMs: 60_000,
+      nowFn: () => Date.parse('2026-09-11T12:01:00.000Z'),
+      emitCacheEvent: (event) => {
+        recordReviewLatencyEvent(db, {
+          repo: REPO,
+          prNumber: 6699,
+          eventType: event.event,
+          at: '2026-09-11T12:01:00.000Z',
+          source: 'watcher-cache',
+          idempotencyKey: `cache-${event.event}-${event.cache}`,
+          payload: event,
+        });
+      },
+    });
+    await getGrounding();
+    await getGrounding();
+    for (const [index, eventType] of [
+      [3, 'fallback_route'],
+      [4, 'cache_invalidated'],
     ]) {
       recordReviewLatencyEvent(db, {
         repo: REPO,
         prNumber: 6699,
         eventType,
         at: `2026-09-11T12:0${index}:00.000Z`,
-        source: 'agy-hot-path',
+        source: 'watcher-cache',
         idempotencyKey: `cache-${index}`,
-        payload: { cache: 'review-context', savedMs },
+        payload: { cache: 'reviewer-route' },
       });
     }
   } finally {
     db.close();
   }
   const report = collectReviewLatencyReport({ rootDir, since: '24h', now: () => new Date('2026-09-11T13:00:00.000Z') });
-  assert.equal(report.cacheImpact.cache_hit, 2);
+  assert.equal(report.cacheImpact.cache_hit, 1);
   assert.equal(report.cacheImpact.cache_miss, 1);
   assert.equal(report.cacheImpact.fallback_route, 1);
-  assert.equal(report.cacheImpact.hitRate, 2 / 3);
-  assert.equal(report.cacheImpact.savedMs, 122_000);
-  assert.match(renderReviewLatencyReport(report), /hot-path cache: hits=2 misses=1.*hit_rate=67%.*fixture_saved=2m02s/);
+  assert.equal(report.cacheImpact.cache_invalidated, 1);
+  assert.equal(report.cacheImpact.hitRate, 1 / 2);
+  assert.match(renderReviewLatencyReport(report), /hot-path cache: hits=1 misses=1.*hit_rate=50%/);
 });
 
 test('latency report backfills critical path and queue state from fixtures', () => {

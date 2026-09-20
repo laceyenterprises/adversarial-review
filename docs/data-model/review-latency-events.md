@@ -45,6 +45,16 @@ reported by `collectReviewLatencyReport`:
 - `merge_completed`
 - `deploy_observed`
 - `smoke_result`
+- `cache_hit`
+- `cache_miss`
+- `cache_stale`
+- `cache_invalidated`
+- `fallback_route`
+
+The `cache_*` and `fallback_route` event types are diagnostic events emitted by
+watcher hot-path instrumentation. They are durable so latency reports can show
+whether cache and reviewer-fallback behavior is actually being observed, but
+they are not latency-boundary events for critical-path duration calculations.
 
 `at` is the event time used for latency calculations. `recorded_at` is the
 database insert time and is diagnostic only. `source` and `source_ref` identify

@@ -843,11 +843,11 @@ const REVIEW_LATENCY_EVENT_STAGE_BY_TYPE = Object.freeze({
   merge_completed: 'merge',
   deploy_observed: 'deploy',
   smoke_result: 'smoke',
-  cache_hit: 'reviewer-runtime',
-  cache_miss: 'reviewer-runtime',
-  cache_stale: 'reviewer-runtime',
-  cache_invalidated: 'reviewer-runtime',
-  fallback_route: 'reviewer-runtime',
+  cache_hit: 'diagnostics',
+  cache_miss: 'diagnostics',
+  cache_stale: 'diagnostics',
+  cache_invalidated: 'diagnostics',
+  fallback_route: 'diagnostics',
 });
 
 function normalizeLatencyEventType(eventType) {

@@ -10,8 +10,10 @@ import { ROUND_BUDGET_BY_RISK_CLASS } from './follow-up-jobs.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS, quotaHoldDecision } from './quota-exhaustion.mjs';
 import { DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS } from './reviewer-lease.mjs';
 import {
+  parseReviewerPassTimestampMs,
   REVIEWER_PASS_GENUINE_POSTED_REVIEW_WHERE_SQL,
   REVIEWER_PASS_NORMALIZED_POSTED_AT_SQL,
+  REVIEWER_MODELS,
 } from './reviewer-pass-posted-review-sql.mjs';
 import { DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS } from './reviewer-pass-reaper.mjs';
 import {
@@ -33,7 +35,7 @@ const DEFAULT_REVIEWER_DEATH_RATE_THRESHOLD = 0.5;
 const DEFAULT_REVIEWER_DEATH_RATE_MIN_ATTEMPTS = 3;
 const DEFAULT_REVIEWER_SILENCE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_REVIEWER_ACTIVITY_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
-const REVIEWER_MODEL_SILENCE_CLASSES = ['claude', 'codex', 'gemini'];
+const REVIEWER_MODEL_SILENCE_CLASSES = REVIEWER_MODELS;
 const REVIEWER_MODEL_SILENCE_CADENCE_PERCENTILE = 0.95;
 const DEFAULT_REVIEW_UNKNOWN_RATE_THRESHOLD = 0.30;
 const DEFAULT_REVIEW_UNKNOWN_RATE_WINDOW_MINUTES = 15;
@@ -756,22 +758,12 @@ function toMs(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function parseReviewPostedAtMs(value) {
-  if (typeof value !== 'string' || value.length === 0) return null;
-  const normalized = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value)
-    ? `${value.replace(' ', 'T')}Z`
-    : value;
-  const parsed = Date.parse(normalized);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
 function percentileNearestRank(values, percentile) {
   if (values.length === 0) return null;
   const sorted = [...values].sort((left, right) => left - right);
   const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(percentile * sorted.length) - 1));
   return sorted[index];
 }
-
 function ageMs(nowMs, value) {
   const valueMs = toMs(value);
   if (valueMs === null) return null;
@@ -1411,7 +1403,7 @@ function summarizeReviewerModelSilence(db, { nowMs, config }) {
   );
   const postedByModel = new Map();
   for (const row of postedRows) {
-    const lastPostedMs = parseReviewPostedAtMs(row.posted_at);
+    const lastPostedMs = parseReviewerPassTimestampMs(row.posted_at);
     if (lastPostedMs === null) continue;
     const entry = postedByModel.get(row.reviewer_model) || {
       model: row.reviewer_model,
@@ -1430,7 +1422,7 @@ function summarizeReviewerModelSilence(db, { nowMs, config }) {
   }
   const startedByModel = new Map();
   for (const row of startedRows) {
-    const startedMs = parseReviewPostedAtMs(row.started_at);
+    const startedMs = parseReviewerPassTimestampMs(row.started_at);
     if (startedMs === null) continue;
     const entries = startedByModel.get(row.reviewer_model) || [];
     entries.push(startedMs);

@@ -50,6 +50,7 @@ import {
 } from './remediation-oauth-preflight.mjs';
 import { resolveClaudeReviewerOAuthTransport } from './claude-reviewer-oauth-transport.mjs';
 import { REVIEWER_TOKEN_POST_SLACK_MS } from './reviewer-broker-refresh.mjs';
+import { REVIEWER_MODELS } from './reviewer-pass-posted-review-sql.mjs';
 import {
   AGY_KEYCHAIN_ACCOUNT,
   AGY_KEYCHAIN_REMEDIATION,
@@ -2551,20 +2552,12 @@ async function reviewWithGemini(diff, extraContext = '', {
 
 // ── Reviewer-model selection ──────────────────────────────────────────────────
 
-const REVIEWER_ROUTE_BY_MODEL = Object.freeze({
-  claude: {
-    reviewerModel: 'claude',
-    botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
-  },
-  codex: {
-    reviewerModel: 'codex',
-    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
-  },
-  gemini: {
-    reviewerModel: 'gemini',
-    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-  },
-});
+const REVIEWER_ROUTE_BY_MODEL = Object.freeze(Object.fromEntries(
+  REVIEWER_MODELS.map((reviewerModel) => [reviewerModel, {
+    reviewerModel,
+    botTokenEnv: `GH_${reviewerModel.toUpperCase()}_REVIEWER_TOKEN`,
+  }])
+));
 
 const CROSS_MODEL_PRIMARY_BY_BUILDER_CLASS = Object.freeze({
   codex: 'claude',

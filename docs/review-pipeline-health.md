@@ -188,6 +188,11 @@ page is `adversarial_review.reviewer_stalled`: published reviews have stopped
 past the freshness window while at least one open PR awaits first-pass review.
 Its action headline is `Reviews stalled — restore reviewer dispatch`.
 
+The reviewer-silence collector shares `REVIEWER_MODELS` and timestamp
+normalization from `src/reviewer-pass-posted-review-sql.mjs` with reviewer
+routing and review-state readers, so adding a routable model or changing the
+stored timestamp contract cannot silently leave this finding behind.
+
 | Code | Default threshold | Tier | Clears when |
 |---|---:|---|---|
 | `review:review_state_ledger_unreadable` | `reviews.db` exists but cannot be opened read-only | ticket | the collector can open `reviews.db` read-only again |

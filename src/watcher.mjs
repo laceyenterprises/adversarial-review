@@ -1248,6 +1248,10 @@ async function pollOnce(
   const reviewerDispatchCandidates = [];
   const firstPassSpilloverController = createFirstPassSpilloverController({ rootDir: ROOT, readDepth: countOpenPrsAwaitingFirstPassReview, logger: console }); // RSP-01: disarmed unless CFG arms it
   const postedReviewHandlers = [];
+  // Branch protection is scoped to a repo/base branch, not a PR. Share the
+  // in-flight/result promise only within this poll so a slow REST read is paid
+  // once per target branch without carrying stale policy into the next poll.
+  const mergeAgentCandidateBranchProtectionCache = new Map();
   const postReviewMaintenanceHandlers = [];
   const reviewerMemoryReservationState = { reservedMb: 0 }, reviewerTickCaches = { fleetQuotaStatus: new Map() };
   const reviewerMemoryAdmissionSampleForTick = createReviewerMemoryAdmissionSampler({
@@ -1422,6 +1426,7 @@ async function pollOnce(
         reviewerDispatchCandidates,
         firstPassSpilloverController,
         postedReviewHandlers,
+        mergeAgentCandidateBranchProtectionCache,
         reviewerFleetQuotaStatusCache: reviewerTickCaches.fleetQuotaStatus,
         reviewerMemoryReservationState,
         reviewerMemoryAdmissionSampleForTick,

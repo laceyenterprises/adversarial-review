@@ -2880,6 +2880,7 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
   execFileImpl = execFileAsync, env = process.env,
   operatorApprovalEvent = undefined,
   mergeAgentRequestEvent = undefined, signal = null,
+  branchProtectionCache = null,
 } = {}) {
   const { stdout } = await execFileImpl(
     'gh',
@@ -2910,12 +2911,18 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
   let branchProtection = { requiredContexts: [], ok: false, reason: 'branch-protection-check-failed' };
   if (parsed.baseRefName) {
     try {
-      const protection = await fetchAdversarialGateBranchProtection({
-        repoPath: repo,
-        baseBranch: parsed.baseRefName,
-        execFileImpl,
-        env,
-      });
+      const cacheKey = `${repo}\n${parsed.baseRefName}`;
+      let protectionPromise = branchProtectionCache?.get(cacheKey);
+      if (!protectionPromise) {
+        protectionPromise = fetchAdversarialGateBranchProtection({
+          repoPath: repo,
+          baseBranch: parsed.baseRefName,
+          execFileImpl,
+          env,
+        });
+        branchProtectionCache?.set(cacheKey, protectionPromise);
+      }
+      const protection = await protectionPromise;
       branchProtection = {
         requiredContexts: Array.isArray(protection?.requiredContexts) ? protection.requiredContexts : [],
         ok: protection?.ok === true,

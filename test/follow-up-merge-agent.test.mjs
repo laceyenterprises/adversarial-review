@@ -6067,6 +6067,67 @@ test('fetchMergeAgentCandidate fetches operator label events in parallel', async
   assert.equal(candidate.mergeAgentRequestEvent.label, 'merge-agent-requested');
 });
 
+test('fetchMergeAgentCandidate shares one branch-protection read per poll repo/base', async () => {
+  const branchProtectionCache = new Map();
+  let protectionReads = 0;
+  let releaseProtection;
+  const protectionBlocked = new Promise((resolve) => {
+    releaseProtection = resolve;
+  });
+  const execFileImpl = async (_cmd, args) => {
+    if (args[0] === 'pr') {
+      return {
+        stdout: JSON.stringify({
+          mergeable: 'MERGEABLE',
+          headRefName: `feature/pr-${args[2]}`,
+          baseRefName: 'main',
+          headRefOid: `head-${args[2]}`,
+          body: '',
+          labels: [],
+          statusCheckRollup: [],
+          state: 'OPEN',
+          updatedAt: '2026-09-20T12:00:00.000Z',
+          author: { login: 'builder-bot' },
+        }),
+      };
+    }
+    assert.equal(args[0], 'api');
+    assert.match(String(args[1]), /\/branches\/main\/protection$/);
+    protectionReads += 1;
+    await protectionBlocked;
+    return {
+      stdout: JSON.stringify({
+        required_status_checks: { contexts: ['agent-os/adversarial-gate'] },
+      }),
+    };
+  };
+
+  const candidates = [401, 402, 403].map((prNumber) => fetchMergeAgentCandidate(
+    'laceyenterprises/agent-os',
+    prNumber,
+    {
+      env: { GITHUB_TOKEN: 'test-token' },
+      execFileImpl,
+      branchProtectionCache,
+    },
+  ));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(protectionReads, 1, 'concurrent candidates reuse the in-flight REST read');
+  releaseProtection();
+
+  const resolved = await Promise.all(candidates);
+  assert.equal(protectionReads, 1);
+  assert.equal(branchProtectionCache.size, 1);
+  assert.deepEqual(
+    resolved.map((candidate) => candidate.branchProtection.requiredContexts),
+    [
+      ['agent-os/adversarial-gate'],
+      ['agent-os/adversarial-gate'],
+      ['agent-os/adversarial-gate'],
+    ],
+  );
+});
+
 test('fetchMergeAgentCandidate returns raw AMA gate fields needed by watcher dispatch', async () => {
   const prBody = 'Protects-Against-Unsafe-Merge-Until-PR: #400';
   const calls = [];

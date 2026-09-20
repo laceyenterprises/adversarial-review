@@ -640,6 +640,7 @@ export async function processReviewSubject(entry, ctx) {
     reviewerDispatchCandidates,
     firstPassSpilloverController = null,
     postedReviewHandlers,
+    mergeAgentCandidateBranchProtectionCache = null,
     reviewerFleetQuotaStatusCache,
     reviewerMemoryReservationState,
     reviewerMemoryAdmissionSampleForTick,
@@ -1304,6 +1305,7 @@ export async function processReviewSubject(entry, ctx) {
           execFileImpl: execFileAsync,
           operatorSurface,
           domainId,
+          branchProtectionCache: mergeAgentCandidateBranchProtectionCache,
         });
         postedReviewHandlers.push({
           repoPath,

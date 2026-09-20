@@ -11,6 +11,10 @@ import { duplicateFamilySchemaTableNames, ensureDuplicateFamilySchema } from './
 import { withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
 import { isExplicitOperatorRetriggerReason } from './retrigger-review-reason.mjs';
 import { ensureTtmTrackerSchema } from './ttm-tracker.mjs';
+import {
+  REVIEWER_PASS_GENUINE_POSTED_REVIEW_WHERE_SQL,
+  REVIEWER_PASS_NORMALIZED_POSTED_AT_SQL,
+} from './reviewer-pass-posted-review-sql.mjs';
 
 /**
  * AUTHORITATIVE `reviewed_prs.review_status` GRAPH (schema version 10).
@@ -300,21 +304,9 @@ function ensureReviewStateSchema(db) {
 
     CREATE INDEX IF NOT EXISTS idx_reviewer_passes_posted_review_freshness
       ON reviewer_passes(
-        strftime(
-          '%Y-%m-%dT%H:%M:%fZ',
-          CASE
-            WHEN REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') GLOB '*Z'
-              OR REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') GLOB '*+??:??'
-              OR REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') GLOB '*-??:??'
-              THEN REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T')
-            ELSE REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') || 'Z'
-          END
-        )
+        ${REVIEWER_PASS_NORMALIZED_POSTED_AT_SQL}
       )
-      WHERE gh_comment_id IS NOT NULL
-        AND gh_comment_id <> ''
-        AND COALESCE(body_captured_at, ended_at) IS NOT NULL
-        AND REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') GLOB '????-??-??T??:??:??*';
+      WHERE ${REVIEWER_PASS_GENUINE_POSTED_REVIEW_WHERE_SQL};
 
     CREATE UNIQUE INDEX IF NOT EXISTS reviewed_prs_identity_round_kind_unique
       ON reviewed_prs(domain_id, subject_external_id, revision_ref);

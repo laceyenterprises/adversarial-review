@@ -11,6 +11,11 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
+import {
+  REVIEWER_PASS_GENUINE_POSTED_REVIEW_WHERE_SQL,
+  REVIEWER_PASS_NORMALIZED_POSTED_AT_SQL,
+  REVIEWER_PASS_POSTED_AT_SOURCE_SQL,
+} from './reviewer-pass-posted-review-sql.mjs';
 import { withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
 import {
   BACKFILL_UNROUTABLE_BOT_TO_ARGUS_QUEUED_SQL,
@@ -427,22 +432,10 @@ const LATEST_GENUINE_POSTED_REVIEW_CANDIDATE_LIMIT = 64;
 // UTC so the index order is stable. Node still performs the final chronological
 // comparison below, avoiding correctness dependence on lexical SQL MAX().
 export const stmtLatestGenuinePostedReviewAt = db.prepare(
-  `SELECT COALESCE(body_captured_at, ended_at) AS posted_at
+  `SELECT ${REVIEWER_PASS_POSTED_AT_SOURCE_SQL} AS posted_at
      FROM reviewer_passes
-    WHERE gh_comment_id IS NOT NULL
-      AND gh_comment_id <> ''
-      AND COALESCE(body_captured_at, ended_at) IS NOT NULL
-      AND REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') GLOB '????-??-??T??:??:??*'
-    ORDER BY strftime(
-              '%Y-%m-%dT%H:%M:%fZ',
-              CASE
-                WHEN REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') GLOB '*Z'
-                  OR REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') GLOB '*+??:??'
-                  OR REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') GLOB '*-??:??'
-                  THEN REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T')
-                ELSE REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') || 'Z'
-              END
-            ) DESC
+    WHERE ${REVIEWER_PASS_GENUINE_POSTED_REVIEW_WHERE_SQL}
+    ORDER BY ${REVIEWER_PASS_NORMALIZED_POSTED_AT_SQL} DESC
     LIMIT ${LATEST_GENUINE_POSTED_REVIEW_CANDIDATE_LIMIT}`
 );
 export const stmtCountOpenPrsAwaitingFirstPassReview = db.prepare(

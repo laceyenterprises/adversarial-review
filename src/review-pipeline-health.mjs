@@ -9,6 +9,10 @@ import { PROVIDER_OVERLOADED_FAILURE_CLASS } from './adapters/reviewer-runtime/c
 import { ROUND_BUDGET_BY_RISK_CLASS } from './follow-up-jobs.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS, quotaHoldDecision } from './quota-exhaustion.mjs';
 import { DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS } from './reviewer-lease.mjs';
+import {
+  REVIEWER_PASS_GENUINE_POSTED_REVIEW_WHERE_SQL,
+  REVIEWER_PASS_NORMALIZED_POSTED_AT_SQL,
+} from './reviewer-pass-posted-review-sql.mjs';
 import { DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS } from './reviewer-pass-reaper.mjs';
 import {
   evaluateTtmFromDb,
@@ -1283,6 +1287,7 @@ function summarizeReviewerAttempts(db, { nowMs, config }) {
 
 function summarizeReviewerModelSilence(db, { nowMs, config }) {
   const observedAt = new Date(nowMs).toISOString();
+  const lookbackCutoff = new Date(nowMs - config.reviewerActivityLookbackMs).toISOString();
   const rows = safeAll(
     db,
     `WITH posted_reviews AS (
@@ -1290,15 +1295,9 @@ function summarizeReviewerModelSilence(db, { nowMs, config }) {
                 WHEN COALESCE(reviewer_model, reviewer_class) = 'claude-code' THEN 'claude'
                 ELSE COALESCE(reviewer_model, reviewer_class)
               END AS reviewer_model,
-              strftime('%Y-%m-%dT%H:%M:%fZ', CASE
-                WHEN COALESCE(body_captured_at, ended_at, started_at) IS NULL THEN NULL
-                WHEN instr(COALESCE(body_captured_at, ended_at, started_at), 'T') = 0
-                  AND instr(COALESCE(body_captured_at, ended_at, started_at), ' ') > 0
-                  THEN replace(COALESCE(body_captured_at, ended_at, started_at), ' ', 'T') || 'Z'
-                ELSE COALESCE(body_captured_at, ended_at, started_at)
-              END) AS posted_at
+              ${REVIEWER_PASS_NORMALIZED_POSTED_AT_SQL} AS posted_at
          FROM reviewer_passes
-        WHERE gh_comment_id IS NOT NULL
+        WHERE ${REVIEWER_PASS_GENUINE_POSTED_REVIEW_WHERE_SQL}
           AND COALESCE(reviewer_model, reviewer_class) IN ('claude', 'claude-code', 'codex', 'gemini')
      )
      SELECT reviewer_model,
@@ -1306,9 +1305,10 @@ function summarizeReviewerModelSilence(db, { nowMs, config }) {
             COUNT(*) AS posted_reviews
        FROM posted_reviews
       WHERE posted_at IS NOT NULL
+        AND posted_at >= ?
         AND posted_at <= ?
       GROUP BY reviewer_model`,
-    [observedAt]
+    [lookbackCutoff, observedAt]
   );
   const models = rows.map((row) => {
     const lastPostedMs = toMs(row.last_posted_at);
@@ -4597,9 +4597,6 @@ function collectReviewPipelineHealth({
     return {
       ...snapshot,
       findings,
-      // Compatibility for external readers that historically looked for `alerts`.
-      // In-tree consumers should use `findings`; both keys expose the same array.
-      alerts: findings,
     };
   } finally {
     db?.close();

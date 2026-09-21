@@ -37,6 +37,7 @@ import {
   reviewerDispatchPassKind,
 } from './watcher-reviewer-pool.mjs';
 import { hammerWakeAuditDir, readHammerWakeAudit } from './hammer-wake.mjs';
+import { summarizeReviewerBurst } from './reviewer-burst-lease.mjs';
 
 const DEFAULT_REVIEWER_DEATH_RATE_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_REVIEWER_DEATH_RATE_THRESHOLD = 0.5;
@@ -198,6 +199,10 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_stale_ama_closer_leases',
   'review_pipeline_zombie_reviewer_passes',
   'review_pipeline_reviewer_slots',
+  'review_pipeline_reviewer_burst_active',
+  'review_pipeline_reviewer_burst_slots',
+  'review_pipeline_reviewer_burst_reviews_granted',
+  'review_pipeline_reviewer_burst_ttl_remaining_seconds',
   'review_pipeline_round_budget_anomalies',
   'review_pipeline_launchd_service_up',
   'review_pipeline_dispatch_spawn_failures',
@@ -250,6 +255,10 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_conflicting_open_pr_shared_path_groups: 'Current count of conflict path groups shared by at least the configured minimum PR count.',
   review_pipeline_stale_ama_closer_leases: 'Current count of AMA closer leases for still-open PRs stuck pending or dispatched past the configured age.',
   review_pipeline_zombie_reviewer_passes: 'Current count of reviewer_passes rows stuck running past the configured age.',
+  review_pipeline_reviewer_burst_active: 'Whether an operator burst reviewer-capacity lease is currently active.',
+  review_pipeline_reviewer_burst_slots: 'Additional first-pass reviewer slots granted by the active burst lease (0 in steady state).',
+  review_pipeline_reviewer_burst_reviews_granted: 'Non-primary reviews the active burst lease has bought so far, against its cap.',
+  review_pipeline_reviewer_burst_ttl_remaining_seconds: 'Seconds until the active burst lease decays back to steady-state capacity.',
   review_pipeline_reviewer_slots: 'Current reviewer-capacity rows by explicit recovery state.',
   review_pipeline_round_budget_anomalies: 'Current count of remediation jobs whose rounds exceed or misuse their risk-class budget.',
   review_pipeline_launchd_service_up: 'Whether required local pipeline launchd services are loaded.',
@@ -289,6 +298,17 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     defaultThreshold: DEFAULT_REVIEWER_DEATH_RATE_THRESHOLD,
     windowKey: 'reviewerDeathRateWindowMs',
     defaultWindowMs: DEFAULT_REVIEWER_DEATH_RATE_WINDOW_MS,
+  },
+  {
+    code: 'review:reviewer_burst_lease_active',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: null,
+    defaultThreshold: null,
+    thresholdDescription:
+      'an operator burst reviewer-capacity lease is active, so the pipeline is spending above its '
+      + 'AGY-first steady state; reported for the life of the lease and clears on its own when the '
+      + 'lease decays',
   },
   {
     code: 'review:reviewer_model_silent',
@@ -4529,6 +4549,47 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }));
   }
 
+  // RPL-07 — an active burst lease is ELEVATED SPEND, and elevated spend that
+  // is invisible on the operator surface is exactly the "hidden global
+  // concurrency knob" the RPL spec forbids. This is reported for the life of
+  // the lease and clears on its own the moment the lease decays, so it is a
+  // state annunciator rather than an alarm about a defect.
+  const burst = snapshot.reviewerBurst || {};
+  if (burst.active === true) {
+    const ttlRemainingMinutes = Number.isFinite(Number(burst.ttlRemainingMs))
+      ? Math.max(0, Math.round(Number(burst.ttlRemainingMs) / 60000))
+      : null;
+    findings.push(buildFinding({
+      code: 'review:reviewer_burst_lease_active',
+      tier: 'ticket',
+      subject:
+        `burst reviewer capacity lease active: +${burst.slots} slot(s) for `
+        + `${burst.repos.join(', ') || 'no repo'}`,
+      message:
+        `An operator burst lease is adding ${burst.slots} reviewer slot(s) beyond the AGY-first `
+        + `steady state (${burst.steadyAgySlots} AGY slot) for reason "${burst.reason || 'unstated'}". `
+        + `It expires at ${burst.expiresAt || 'an unreadable time'}`
+        + (ttlRemainingMinutes === null ? '' : ` (~${ttlRemainingMinutes}m remaining)`)
+        + ' and decays automatically; no action is required to return to steady state.',
+      evidence: [
+        `lease_id=${burst.leaseId || '-'} slots=${burst.slots} steady_agy_slots=${burst.steadyAgySlots} `
+        + `repos=${burst.repos.join('|') || '-'} packs=${burst.packs.join('|') || '*'}`,
+        `burst_reviews_granted=${burst.burstReviewsGranted}/${burst.maxBurstReviews} `
+        + `budget_usd=${burst.budgetUsd ?? '-'} `
+        + `observed_spend_usd=${burst.spendReadable ? burst.spendUsd : 'unreadable'}`,
+        `requested_by=${burst.requestedBy || '-'} degraded=${burst.degraded} `
+        + `degrade_reasons=${(burst.degradeReasons || []).join(',') || '-'}`,
+      ],
+      recommendedAction:
+        'This is operator-initiated spend, not a defect. Let it decay, or end it early with '
+        + '`adversarial-review burst revoke`. Do NOT respond by raising steady-state reviewer '
+        + 'concurrency: the whole point of the lease is that elevated capacity is temporary, scoped, '
+        + 'and budgeted. If the burst itself looks wrong, read the lease record named in the details.',
+      observedAt,
+      details: burst,
+    }));
+  }
+
   const capacity = snapshot.reviewerCapacity || {};
   const totalLanePasses = Number(capacity.totalPasses || 0);
   if (
@@ -5645,6 +5706,10 @@ function collectReviewPipelineHealth({
           lastHammerDispatchAt: null,
           lastHammerDispatchAgeMs: null,
         };
+    // RPL-07: read from the durable lease record, not from watcher memory, so
+    // the health surface reports a live burst even when it is collected from a
+    // different process than the watcher holding the capacity.
+    const reviewerBurst = summarizeReviewerBurst(rootDir, { nowMs });
     const hammerWakeDir = hammerWakeAuditDir(rootDir);
     const recentHammerWakes = (() => {
       try {
@@ -5714,6 +5779,7 @@ function collectReviewPipelineHealth({
       daemonMergeParks,
       zombieReviewerPasses,
       reviewerSlots,
+      reviewerBurst,
       stuckReviewLoops,
       terminalReviewFailures,
       roundBudget,
@@ -5905,6 +5971,22 @@ function renderReviewPipelinePrometheus(snapshot) {
   for (const state of REVIEWER_SLOT_STATES) {
     pushMetric('review_pipeline_reviewer_slots', { state }, snapshot.reviewerSlots?.states?.[state] || 0);
   }
+  const reviewerBurst = snapshot.reviewerBurst || {};
+  const burstLabels = { state: reviewerBurst.state || 'inactive' };
+  pushMetric('review_pipeline_reviewer_burst_active', burstLabels, reviewerBurst.active ? 1 : 0);
+  pushMetric('review_pipeline_reviewer_burst_slots', burstLabels, reviewerBurst.slots || 0);
+  pushMetric(
+    'review_pipeline_reviewer_burst_reviews_granted',
+    burstLabels,
+    reviewerBurst.burstReviewsGranted || 0
+  );
+  pushMetric(
+    'review_pipeline_reviewer_burst_ttl_remaining_seconds',
+    burstLabels,
+    reviewerBurst.active && Number.isFinite(Number(reviewerBurst.ttlRemainingMs))
+      ? Math.max(0, Math.round(Number(reviewerBurst.ttlRemainingMs) / 1000))
+      : 0
+  );
   pushMetric('review_pipeline_round_budget_anomalies', {}, snapshot.roundBudget?.anomalies?.length || 0);
   const launchdServices = snapshot.launchd?.services?.length
     ? snapshot.launchd.services

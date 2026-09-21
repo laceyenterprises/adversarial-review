@@ -138,6 +138,23 @@ The Grafana dashboard lives at
   transient `pending-upstream` timeout path. Matching prefers pass metadata
   `reviewerSessionUuid`; legacy pass rows missing that field can match by same
   head plus a pass start at or after the durable claim start.
+- `review_pipeline_reviewer_burst_active`: `1` while an operator burst reviewer
+  capacity lease (RPL-07) is active, `0` otherwise. The `state` label carries
+  the live lease state (`inactive`, `active`, `expired`, `revoked`). This is
+  derived from the durable lease record at `data/reviewer-burst-lease.json`, so
+  it is correct even when the health collector runs in a different process from
+  the watcher that holds the capacity.
+- `review_pipeline_reviewer_burst_slots`: additional first-pass reviewer slots
+  the active lease grants on top of the AGY-first steady state. `0` in steady
+  state, and `0` again the moment the lease decays — there is no knob that stays
+  elevated after a burst.
+- `review_pipeline_reviewer_burst_reviews_granted`: non-primary reviews the
+  active lease has bought so far. Compare against the lease's `maxBurstReviews`
+  in the finding details; this is the always-enforceable limb of the budget
+  guard and it bounds the burst even when cost telemetry is missing.
+- `review_pipeline_reviewer_burst_ttl_remaining_seconds`: seconds until the
+  active lease decays back to steady-state capacity, `0` when no lease is
+  active. See `docs/reviewer-burst-lease.md`.
 - `review_pipeline_reviewer_slots`: current open `reviewed_prs` rows in
   reviewer-capacity states, grouped by `state`. The state vocabulary is:
   `active` for `reviewing` rows with a session UUID, pgid, and unexpired lease;
@@ -267,6 +284,7 @@ can distinguish "never posted in window" from a null/corrupt timestamp column.
 |---|---:|---|---|
 | `review:review_state_ledger_unreadable` | `reviews.db` exists but cannot be opened read-only | ticket | the collector can open `reviews.db` read-only again |
 | `review:reviewer_death_rate_high` | failed reviewer attempts are >50% of completed+failed attempts over 1h, with at least 3 completed+failed attempts; `running` and `cancelled` are excluded from the denominator | ticket | the settled-attempt window falls below threshold or the minimum-attempt guard |
+| `review:reviewer_burst_lease_active` | an operator burst reviewer-capacity lease (RPL-07) is active, so the pipeline is spending above its AGY-first steady state. Reported for the life of the lease; it is a state annunciator, not an alarm about a defect | ticket | the lease decays on its own (TTL, review cap, or budget) or an operator runs `adversarial-review burst revoke` |
 | `review:reviewer_model_silent` | a configured reviewer class has started-pass demand but no genuine first-pass/rereview comment past the larger of the 24h floor and that class's recent 95th-percentile post cadence. Two cases qualify: a class with a previous genuine comment inside the activity lookback that has not posted since, with at least one pass started after that comment; or a class with **no** posted review inside the lookback whose **oldest** qualifying started pass is itself older than that threshold. The elapsed gate applies to both, so a healthy in-flight pass can never trip this finding | ticket | the model posts another review inside its cadence-derived silence threshold, or no started-pass demand older than the threshold remains |
 | `review:unknown_failure_rate_high` | unknown-classified failures are >30% of failures over 15m, with at least 5 failures and at least 2 distinct PRs contributing unknown failures | ticket | the failure window falls back to threshold or below, the sample floor is no longer met, or unknown failures collapse to fewer than 2 PRs |
 | `review:reviewer_degradation_active` | at least one PR is currently held by `provider-overloaded` transient backoff or `quota-exhausted` quota hold | ticket | no active provider-overload backoff or quota hold remains |

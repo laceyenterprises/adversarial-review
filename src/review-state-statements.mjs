@@ -1,4 +1,5 @@
 import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
+import { REVIEWER_PASS_NORMALIZED_STARTED_AT_SQL } from './reviewer-pass-posted-review-sql.mjs';
 
 export const MARK_ATTEMPT_STARTED_SQL = `UPDATE reviewed_prs
      SET review_status = 'reviewing',
@@ -313,3 +314,35 @@ export const SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW =
   "    AND reviewer_passes.gh_comment_id IS NOT NULL " +
   "    AND reviewer_passes.gh_comment_id <> ''" +
   ")";
+
+// RPL-07 — observed reviewer spend inside a burst-lease window, in
+// `BURST_SPEND_UNIT` (see `reviewer-burst-lease.mjs`): summed
+// `reviewer_passes.token_cost_usd` for passes STARTED at or after the lease
+// activation timestamp, restricted to the repos the lease is scoped to.
+//
+// This is deliberately the burst WINDOW cost in the burst REPOS rather than an
+// attempt to attribute individual passes to the lease. Attribution would need a
+// per-pass "this pass exists because of the burst" flag that nothing writes,
+// and guessing it would give the operator a dollar number that disagrees with
+// their provider bill. The window figure is the one an operator can act on:
+// "what did review cost while the burst was up, where the burst applied".
+//
+// Both sides of the window predicate go through
+// REVIEWER_PASS_NORMALIZED_STARTED_AT_SQL, because `reviewer_passes.started_at`
+// carries BOTH the JS `toISOString()` shape and SQLite's space-separated
+// `CURRENT_TIMESTAMP` shape, and ' ' sorts before 'T'. A raw compare against an
+// ISO bound silently drops same-day rows written in the other shape — which for
+// a budget guard is the UNSAFE direction (spend under-reported, lease outlives
+// its budget). An unparseable `started_at` normalizes to NULL and is excluded.
+//
+// `repoCount` parameterizes the repo IN-list; the caller binds
+// `[activatedAt, ...repos]` in that order. A zero-repo lease cannot exist (the
+// request path refuses a repo-less burst), so the caller is expected to guard.
+export function sqlSumReviewerPassSpendSince(repoCount) {
+  const placeholders = Array.from({ length: Math.max(1, Number(repoCount) || 1) }, () => '?').join(', ');
+  return 'SELECT COALESCE(SUM(token_cost_usd), 0) AS spend_usd, COUNT(*) AS pass_count, '
+    + 'SUM(CASE WHEN token_cost_usd IS NULL THEN 1 ELSE 0 END) AS uncosted_pass_count '
+    + 'FROM reviewer_passes '
+    + `WHERE ${REVIEWER_PASS_NORMALIZED_STARTED_AT_SQL} >= strftime('%Y-%m-%dT%H:%M:%fZ', ?) `
+    + `AND LOWER(repo) IN (${placeholders})`;
+}

@@ -67,6 +67,7 @@ import {
   resolveReviewerWorkerClassWithFallback,
   reviewWorkerClassFallback,
 } from './review-worker-class-fallback.mjs';
+import { packTokensForSubject } from './reviewer-burst-lease.mjs';
 import {
   fetchReviewsForHeadForDedup,
   getStalePostedReviewBudgetSuppression,
@@ -639,6 +640,7 @@ export async function processReviewSubject(entry, ctx) {
     reviewerMemoryPressureConfig,
     reviewerDispatchCandidates,
     firstPassSpilloverController = null,
+    reviewerBurstController = null,
     postedReviewHandlers,
     mergeAgentCandidateBranchProtectionCache = null,
     reviewerFleetQuotaStatusCache,
@@ -1572,6 +1574,10 @@ export async function processReviewSubject(entry, ctx) {
       // armed and this tick still has spill budget. `depthPressure()` is
       // `{ engaged: false }` on every host that has not armed it, which makes
       // the resolver take its pre-RSP-01 path unchanged.
+      // RPL-07: plus the operator burst lease, scoped to this subject's repo and
+      // (optionally) its pack. `pressure()` is `{ engaged: false }` whenever no
+      // lease is active or this subject is out of its scope, which is every
+      // subject on a host with no lease.
       const reviewerAuthorClass = subject.builderClass || route.builderClass;
       const primaryReviewerWorkerClass = reviewerWorkerClassForRoute(route);
       const rwfDecision = await resolveReviewerWorkerClassWithFallback({
@@ -1579,6 +1585,16 @@ export async function processReviewSubject(entry, ctx) {
         primary: primaryReviewerWorkerClass,
         fallbackWorkerClasses: reviewWorkerClassFallback(process.env),
         depthPressure: firstPassSpilloverController?.depthPressure?.() ?? null,
+        burstPressure: reviewerBurstController?.pressure?.({
+          repo: repoPath,
+          // Thunk: only a repo-in-scope, pack-scoped lease ever pays for this.
+          packTokens: () => packTokensForSubject({
+            labels: prLabelNames,
+            linearTicketId,
+            title: prTitle,
+            branch: subject.headRefName || '',
+          }),
+        }) ?? null,
         execFileImpl: execFileAsync,
         ...(reviewerFleetQuotaStatusCache
           ? {
@@ -1615,13 +1631,27 @@ export async function processReviewSubject(entry, ctx) {
               toWorkerClass: rwfDecision.to,
             });
           }
+          // Same contract for the burst lease: charge the lease only for the
+          // reviews it actually BOUGHT, so its review cap and its audit trail
+          // both count landed spills rather than attempts.
+          if (rwfDecision.reason === 'burst-lease-pressure') {
+            reviewerBurstController?.recordBurstAdmission?.({
+              repo: repoPath,
+              prNumber,
+              fromWorkerClass: rwfDecision.from,
+              toWorkerClass: rwfDecision.to,
+            });
+          }
           console.warn(
             `[watcher] review-worker-class-fallback repo=${repoPath} pr=${prNumber} ` +
             `from=${rwfDecision.from} to=${rwfDecision.to} reason=${rwfDecision.reason} ` +
             `primaryState=${rwfDecision.primaryState}` +
             (rwfDecision.queueDepth === undefined
               ? ''
-              : ` queueDepth=${rwfDecision.queueDepth} queueDepthThreshold=${rwfDecision.queueDepthThreshold}`)
+              : ` queueDepth=${rwfDecision.queueDepth} queueDepthThreshold=${rwfDecision.queueDepthThreshold}`) +
+            (rwfDecision.burstLeaseId === undefined
+              ? ''
+              : ` burstLeaseId=${rwfDecision.burstLeaseId} burstSlots=${rwfDecision.burstSlots}`)
           );
         } else {
           console.warn(

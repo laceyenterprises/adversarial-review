@@ -277,12 +277,26 @@ function createWatcherWakeSource({
   }
 
   function wait(timeoutMs) {
-    if (closed || timeoutMs <= 0) {
-      return Promise.resolve({ woken: false, reason: closed ? 'closed' : 'timeout' });
+    if (closed) {
+      return Promise.resolve({ woken: false, reason: 'closed' });
     }
+    // Check the wake file BEFORE honouring a zero/negative timeout. The poll loop
+    // computes its sleep as `Math.max(0, nextStart - Date.now())`, so any poll that
+    // overruns the poll interval makes every subsequent call `wait(0)`. Returning
+    // early on `timeoutMs <= 0` without reading the file meant a slow poll blinded
+    // the wake path entirely — not "woke late", never woke at all, because the file
+    // was never opened and `lastSeen` never advanced.
+    //
+    // Observed 2026-09-21: 64 subjects stranded in the wake file with zero
+    // `wake pollOnce` entries in the watcher log, so every clean PR that requested
+    // a hammer wake sat unmerged. A zero-length wait must still mean "check once,
+    // do not block" — the non-blocking contract below is preserved.
     const immediatePayload = consumeIfChanged();
     if (immediatePayload) {
       return Promise.resolve({ woken: true, reason: 'wake-file', payload: immediatePayload });
+    }
+    if (timeoutMs <= 0) {
+      return Promise.resolve({ woken: false, reason: 'timeout' });
     }
 
     return new Promise((resolve) => {

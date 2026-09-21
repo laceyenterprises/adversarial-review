@@ -289,3 +289,58 @@ test('watcher main loop does not gate wake-file sleeps behind handoff config', (
     /if\s*\(\s*resolveWatcherHandoffEnabled\([^)]*\)\s*\)\s*{\s*const wake = await watcherWakeSource\.wait\(sleepMs\);/s,
   );
 });
+
+// The poll loop computes its sleep as `Math.max(0, nextStart - Date.now())`, so a
+// poll that overruns the poll interval makes every subsequent call `wait(0)`. If a
+// zero-length wait returns without reading the wake file, a slow poll blinds the
+// wake path permanently: the file is never opened, `lastSeen` never advances, and
+// pending subjects accumulate forever. Observed on the reference host as 64
+// stranded subjects with zero `wake pollOnce` entries in the watcher log.
+test('a zero-length wait still observes a pending wake (overrunning poll must not blind the wake path)', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'watcher-wake-zero-'));
+  const wakeSource = createWatcherWakeSource({
+    rootDir,
+    logger: { warn() {} },
+    pollMs: 100,
+  });
+
+  try {
+    requestWatcherWake({
+      rootDir,
+      reason: 'clean-verdict-to-hammer',
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 6943,
+      requestedAt: '2026-09-21T02:49:38.501Z',
+      requestId: 'zero-timeout-wake',
+    });
+
+    const result = await wakeSource.wait(0);
+
+    assert.equal(result.woken, true, 'wait(0) must still observe a pending wake');
+    assert.equal(result.reason, 'wake-file');
+    assert.equal(result.payload?.pr_number, 6943);
+  } finally {
+    wakeSource.close();
+  }
+});
+
+test('a zero-length wait does not block when there is no pending wake', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'watcher-wake-zero-none-'));
+  const wakeSource = createWatcherWakeSource({
+    rootDir,
+    logger: { warn() {} },
+    pollMs: 100,
+  });
+
+  try {
+    const startedAt = Date.now();
+    const result = await wakeSource.wait(0);
+    const elapsedMs = Date.now() - startedAt;
+
+    assert.equal(result.woken, false);
+    assert.equal(result.reason, 'timeout');
+    assert.ok(elapsedMs < 1_000, `wait(0) must not block, took ${elapsedMs}ms`);
+  } finally {
+    wakeSource.close();
+  }
+});

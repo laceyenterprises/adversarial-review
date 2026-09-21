@@ -10,11 +10,27 @@
 import { formatAdvisoryFindingsContext } from './prompt-context.mjs';
 import { recordReviewModeSelected } from './review-mode-latency.mjs';
 import {
+  REVIEW_MODE,
+  SLIM_REVIEW_REFUSAL,
   buildSlimReviewContextBanner,
   evaluateSlimReviewEligibilityForDiff,
   resolveSlimReviewPolicy,
   summarizeReviewModeDecision,
 } from './slim-review-eligibility.mjs';
+
+// What this function returns when anything inside it goes wrong. It is the
+// shape of "classify nothing, change nothing": full mode, today's context
+// bundle, today's behaviour.
+function fullModeFallback(reason) {
+  return {
+    mode: REVIEW_MODE.FULL,
+    slim: false,
+    forcedBy: null,
+    refusals: [{ code: SLIM_REVIEW_REFUSAL.CHANGED_FILES_UNKNOWN, detail: reason }],
+    lowRiskClasses: [],
+    stats: { files: 0, added: 0, removed: 0, changedLines: 0 },
+  };
+}
 
 /**
  * Classify the PR, log the decision, and record it durably.
@@ -23,8 +39,13 @@ import {
  * round trip is added to the review hot path — spending latency to decide
  * whether to save latency would defeat the ticket.
  *
- * Neither the structured log nor the durable record can fail the review: the
- * record is best-effort by construction, and the log is a console write.
+ * NOTHING in here can fail the review. The predicate is pure table lookups and
+ * the durable record is best-effort, so a throw should be impossible — but this
+ * runs between "diff fetched" and "review generated", and a throw at that point
+ * costs the PR its gate while still burning attempt budget. That is the
+ * `adversarial-review.pipeline-availability` failure class, and it is not worth
+ * risking for a latency optimisation. Any error degrades to full mode, which is
+ * exactly the behaviour that shipped before RPL-08.
  *
  * @param {object} params
  * @param {string} params.rootDir                    Repository root (for `data/reviews.db`).
@@ -59,33 +80,51 @@ export function selectReviewMode({
   recordReviewModeSelectedImpl = recordReviewModeSelected,
   log = console,
 } = {}) {
-  const decision = evaluateSlimReviewEligibilityForDiff({
-    diff,
-    labels,
-    author,
-    policy: resolveSlimReviewPolicy(env),
-  });
-  const summary = summarizeReviewModeDecision(decision);
+  let decision;
+  try {
+    decision = evaluateSlimReviewEligibilityForDiff({
+      diff,
+      labels,
+      author,
+      policy: resolveSlimReviewPolicy(env),
+    });
+  } catch (err) {
+    log?.warn?.(
+      `[reviewer] WARN: review-mode classification failed for ${repo}#${prNumber}; ` +
+      `falling back to full review: ${err?.message || err}`
+    );
+    return fullModeFallback('classification-failed');
+  }
 
-  logStructuredEventImpl?.(log, {
-    event: 'review-mode-selection',
-    level: 'info',
-    repo,
-    prNumber,
-    headSha,
-    reviewerModel,
-    promptStage,
-    mode: summary.mode,
-    forcedBy: summary.forcedBy,
-    lowRiskClasses: summary.lowRiskClasses,
-    refusals: summary.refusals,
-    changedFiles: summary.stats.files,
-    changedLines: summary.stats.changedLines,
-  });
+  try {
+    const summary = summarizeReviewModeDecision(decision);
+    logStructuredEventImpl?.(log, {
+      event: 'review-mode-selection',
+      level: 'info',
+      repo,
+      prNumber,
+      headSha,
+      reviewerModel,
+      promptStage,
+      mode: summary.mode,
+      forcedBy: summary.forcedBy,
+      lowRiskClasses: summary.lowRiskClasses,
+      refusals: summary.refusals,
+      changedFiles: summary.stats.files,
+      changedLines: summary.stats.changedLines,
+    });
 
-  recordReviewModeSelectedImpl({
-    rootDir, repo, prNumber, headSha, attemptNumber, reviewerModel, decision, log,
-  });
+    recordReviewModeSelectedImpl({
+      rootDir, repo, prNumber, headSha, attemptNumber, reviewerModel, decision, log,
+    });
+  } catch (err) {
+    // The decision itself is sound; only its observability failed. Keep it —
+    // downgrading a correct classification because a log write threw would
+    // trade real latency for nothing.
+    log?.warn?.(
+      `[reviewer] WARN: review-mode telemetry failed for ${repo}#${prNumber}: ${err?.message || err}`
+    );
+  }
 
   return decision;
 }

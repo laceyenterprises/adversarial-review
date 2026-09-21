@@ -255,6 +255,45 @@ test('selectReviewMode honours the kill switch from its own env argument', () =>
   assert.deepEqual(decision.refusals.map((item) => item.code), ['slim-mode-disabled']);
 });
 
+test('a classification failure degrades to full mode instead of failing the review', () => {
+  // This runs between "diff fetched" and "review generated". A throw here
+  // would cost the PR its gate while still burning attempt budget, so the only
+  // acceptable failure is the behaviour that shipped before RPL-08.
+  const warnings = [];
+  const decision = selectReviewMode({
+    rootDir: '/nonexistent-root',
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 1,
+    // Throwing from inside the diff parse stands in for any future classifier
+    // defect; `parseDiffFiles` coerces with `String(diffText ?? '')`.
+    diff: { toString() { throw new Error('diff parse exploded'); } },
+    env: {},
+    recordReviewModeSelectedImpl: () => ({ recorded: false }),
+    log: { warn: (message) => warnings.push(message) },
+  });
+  assert.equal(decision.mode, REVIEW_MODE.FULL);
+  assert.equal(decision.slim, false);
+  assert.match(warnings.join('\n'), /falling back to full review/);
+});
+
+test('a telemetry failure keeps the decision it was reporting on', () => {
+  // Downgrading a correct classification because a log write threw would trade
+  // real latency for nothing.
+  const warnings = [];
+  const decision = selectReviewMode({
+    rootDir: '/nonexistent-root',
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 1,
+    diff: DOCS_DIFF,
+    env: {},
+    logStructuredEventImpl: () => { throw new Error('log sink exploded'); },
+    recordReviewModeSelectedImpl: () => ({ recorded: false }),
+    log: { warn: (message) => warnings.push(message) },
+  });
+  assert.equal(decision.mode, REVIEW_MODE.SLIM);
+  assert.match(warnings.join('\n'), /review-mode telemetry failed/);
+});
+
 test('selectReviewMode works with no logger seam supplied', () => {
   // `reviewer.mjs` passes one, but a caller that does not must not crash: this
   // runs before the review and a throw here would cost the PR its gate.

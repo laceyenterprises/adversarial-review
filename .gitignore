@@ -1,4 +1,10 @@
 node_modules/
+# Bare form matters: `node_modules/` matches a DIRECTORY only. A SYMLINK named
+# node_modules is not a directory, so the trailing-slash rule does not match it
+# and `git add -A` will happily stage it. That is exactly how a self-referential
+# node_modules symlink reached main in 8bb50571 and took every reviewer spawn
+# down with ERR_MODULE_NOT_FOUND: Cannot find package 'js-yaml'.
+node_modules
 .env
 tools/adversarial-review/adversarial-review.env
 data/

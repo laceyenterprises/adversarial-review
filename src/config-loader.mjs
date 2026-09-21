@@ -2730,6 +2730,21 @@ function schemaV1() {
             __nullable: true,
           },
           timeout_ms: { __type: TYPE_INT, __default: 1200000 },
+          // One-shot first-byte deadline for a reviewer subprocess: armed once
+          // before the child runs, cleared permanently on the first byte, never
+          // re-armed. 0 (the default) DISABLES it.
+          //
+          // Default off because the cli-direct reviewers are non-streaming --
+          // `claude --print --output-format json` writes a single document at the
+          // end of the turn, so any first-output deadline caps a healthy review
+          // instead of bounding a wedged launch. Enable this only for a reviewer
+          // launched with a streaming output format. Do NOT implement it with
+          // `progress_timeout_ms`, which is a ROLLING no-output watchdog.
+          first_output_timeout_ms: {
+            __type: TYPE_INT,
+            __default: 0,
+            __min: 0,
+          },
           // The reviewer is also killed if it makes no progress (no output
           // event) for this many ms. Distinct from the total wall-clock
           // timeout above — a 20-min reviewer that keeps producing output
@@ -3133,6 +3148,10 @@ export const ENV_ALIASES = {
   'reviewer.timeout_ms': {
     canonical: 'AGENT_OS_REVIEWER_TIMEOUT_MS',
     aliases: [['ADVERSARIAL_REVIEWER_TIMEOUT_MS', identity]],
+  },
+  'reviewer.first_output_timeout_ms': {
+    canonical: 'AGENT_OS_REVIEWER_FIRST_OUTPUT_TIMEOUT_MS',
+    aliases: [['ADVERSARIAL_REVIEWER_FIRST_OUTPUT_TIMEOUT_MS', identity]],
   },
   'reviewer.quota_check_enabled': {
     canonical: 'AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED',

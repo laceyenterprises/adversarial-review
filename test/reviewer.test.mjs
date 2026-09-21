@@ -3452,6 +3452,55 @@ test('reviewWithClaude reuses broker auth env and skips launchctl', async () => 
   assert.equal(calls[0].options.env.ANTHROPIC_AUTH_TOKEN, 'broker-oauth-token');
 });
 
+test('reviewWithClaude retries one silent invocation on claude with freshly prepared auth', async () => {
+  let authCalls = 0;
+  let spawnCalls = 0;
+  const result = await reviewWithClaude('+diff\n', '', {
+    assertClaudeOAuthImpl: async () => ({
+      transport: 'broker',
+      env: { ANTHROPIC_AUTH_TOKEN: `token-${++authCalls}` },
+      expiresAt: '2026-09-10T18:00:00Z',
+    }),
+    spawnClaudeImpl: async (_args, options) => {
+      spawnCalls += 1;
+      if (spawnCalls === 1) {
+        // The retry must key on the ONE-SHOT first-output signal, not the rolling
+        // no-output watchdog. `progressTimedOut` on a non-streaming reviewer means
+        // a healthy quiet turn was killed, and retrying that just burns it twice.
+        const error = new Error('Command no first output for 120000ms');
+        error.firstOutputTimedOut = true;
+        throw error;
+      }
+      assert.equal(options.env.ANTHROPIC_AUTH_TOKEN, 'token-2');
+      return { stdout: JSON.stringify({ result: '## Verdict\nComment only' }), stderr: '' };
+    },
+    nowMs: Date.parse('2026-09-10T17:20:00Z'),
+    logger: { warn() {} },
+  });
+  assert.equal(result.reviewText, '## Verdict\nComment only');
+  assert.equal(authCalls, 2);
+  assert.equal(spawnCalls, 2);
+});
+
+test('reviewWithClaude surfaces a second silent failure for normal fallback handling', async () => {
+  let authCalls = 0;
+  await assert.rejects(() => reviewWithClaude('+diff\n', '', {
+    assertClaudeOAuthImpl: async () => ({
+      transport: 'broker',
+      env: { ANTHROPIC_AUTH_TOKEN: `token-${++authCalls}` },
+      expiresAt: '2026-09-10T18:00:00Z',
+    }),
+    spawnClaudeImpl: async () => {
+      const error = new Error('Command no first output for 120000ms');
+      error.firstOutputTimedOut = true;
+      throw error;
+    },
+    nowMs: Date.parse('2026-09-10T17:20:00Z'),
+    logger: { warn() {} },
+  }), /no first output/);
+  assert.equal(authCalls, 2);
+});
+
 test('reviewWithClaude rechecks broker bearer lifetime at subprocess handoff', async () => {
   await assert.rejects(
     () => reviewWithClaude('+diff\n', '', {

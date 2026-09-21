@@ -1140,6 +1140,8 @@ Inspect in this order:
 
 ## Bottom line
 
+`reviewer.first_output_timeout_ms` (legacy env alias `ADVERSARIAL_REVIEWER_FIRST_OUTPUT_TIMEOUT_MS`) arms a one-shot first-byte deadline on a reviewer subprocess. **It defaults to `0`, meaning disabled**, because Claude's cli-direct CLI is non-streaming: `--print --output-format json` writes a single document at the end of the turn, so any first-output deadline would cap a healthy review rather than bound a wedged launch. Enable it only for a reviewer launched with a streaming output format; wedged non-streaming invocations are bounded by the hard `reviewer.timeout_ms` and surfaced by the reviewer-silence signal. When it IS enabled: A silent invocation has its subprocess killed and re-launched once with freshly prepared broker credentials, before the existing cross-model fallback policy can apply. The retry happens in-process under the SAME reviewer pass: the `reviews.db` `reviewing` claim and the concurrency slot are held across it, and no new pass row is created — do not expect a freed slot or a second pass row between the two attempts. The retry is recorded durably so per-model exec-failure accounting still sees both invocations. Reviewer-model health is computed only from the configured recent activity window; a configured model with zero posts is explicitly reported as `idleForWindow` instead of inheriting healthy-looking lifetime totals.
+
 The system is intentionally conservative.
 
 - review posting is owned by the watcher path

@@ -364,3 +364,51 @@ test('without reapGroupOnExit a leaked grandchild stalls capture until the timeo
     rmSync(fixtureDir, { recursive: true, force: true });
   }
 });
+
+// REVHANG-02 regression. `progressTimeout` is a ROLLING no-output watchdog: it is
+// re-armed on every chunk, so using it as a first-byte deadline caps the total
+// quiet compute of a non-streaming CLI. `firstOutputTimeout` is armed once and
+// retired permanently on the first byte, so a child that speaks early and then
+// thinks in silence runs to its hard timeout.
+test('firstOutputTimeout is retired by the first byte and never re-arms', async () => {
+  const firstOutputTimeout = 300;
+  // Writes immediately, then stays silent far longer than the deadline.
+  const script = 'process.stdout.write("hello"); setTimeout(() => { process.stdout.write("{\\"ok\\":true}"); process.exit(0); }, 1200);';
+  const result = await spawnCapturedProcessGroup(process.execPath, ['-e', script], {
+    firstOutputTimeout,
+    timeout: 10_000,
+  });
+  assert.equal(result.code, 0);
+  assert.match(result.stdout, /\{"ok":true\}/);
+});
+
+test('firstOutputTimeout still kills a child that never writes a byte', async () => {
+  const firstOutputTimeout = 300;
+  const script = 'setTimeout(() => process.exit(0), 10_000);';
+  await assert.rejects(
+    () => spawnCapturedProcessGroup(process.execPath, ['-e', script], {
+      firstOutputTimeout,
+      timeout: 10_000,
+    }),
+    (err) => {
+      assert.equal(err.firstOutputTimedOut, true, 'must raise firstOutputTimedOut');
+      assert.equal(err.progressTimedOut, false, 'must NOT be confused with the rolling watchdog');
+      assert.match(err.message, /no first output for 300ms/);
+      return true;
+    },
+  );
+});
+
+test('a silent non-streaming child succeeds when no first-output deadline is armed', async () => {
+  // This is the shipped claude reviewer shape: zero bytes for the whole turn,
+  // then one JSON document at the end. With first_output_timeout_ms defaulting
+  // to 0 (disabled) it must run to completion, bounded only by the hard timeout.
+  const script = 'setTimeout(() => { process.stdout.write("{\\"ok\\":true}"); process.exit(0); }, 900);';
+  const result = await spawnCapturedProcessGroup(process.execPath, ['-e', script], {
+    firstOutputTimeout: 0,
+    progressTimeout: 0,
+    timeout: 10_000,
+  });
+  assert.equal(result.code, 0);
+  assert.match(result.stdout, /\{"ok":true\}/);
+});

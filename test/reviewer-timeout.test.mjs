@@ -5,10 +5,12 @@ import {
   AGY_PRINT_TIMEOUT_SUBPROCESS_SLACK_MS,
   DEFAULT_AGY_PRINT_TIMEOUT_MS,
   DEFAULT_PROGRESS_TIMEOUT_MS,
+  DEFAULT_FIRST_OUTPUT_TIMEOUT_MS,
   DEFAULT_REVIEWER_TIMEOUT_MS,
   resolveAgyPrintTimeoutMs,
   resolveAgyReviewerSubprocessTimeoutMs,
   resolveProgressTimeoutMs,
+  resolveFirstOutputTimeoutMs,
   resolveReviewerTimeoutMs,
 } from '../src/reviewer-timeout.mjs';
 import { AgentOSConfigError } from '../src/config-loader.mjs';
@@ -50,6 +52,23 @@ test('resolveReviewerTimeoutMs fails loud for non-integer env overrides', () => 
 
 test('default reviewer progress timeout is 15 minutes', () => {
   assert.equal(DEFAULT_PROGRESS_TIMEOUT_MS, 15 * 60 * 1000);
+});
+
+// The default is OFF, and that is load-bearing. The cli-direct reviewers are
+// non-streaming (`claude --print --output-format json` writes one document at the
+// end of the turn), so a first-output deadline armed by default would cap every
+// healthy review instead of bounding a wedged launch — the behaviour this PR's
+// review blocked on. Enabling it is an opt-in for streaming reviewers only.
+test('Claude first-output deadline is disabled by default and opt-in configurable', () => {
+  assert.equal(DEFAULT_FIRST_OUTPUT_TIMEOUT_MS, 0);
+  assert.equal(resolveFirstOutputTimeoutMs({}), 0);
+  assert.equal(resolveFirstOutputTimeoutMs({
+    ADVERSARIAL_REVIEWER_FIRST_OUTPUT_TIMEOUT_MS: '45000',
+  }), 45_000);
+  // An explicit 0 must survive the positive-int guard rather than falling back.
+  assert.equal(resolveFirstOutputTimeoutMs({
+    ADVERSARIAL_REVIEWER_FIRST_OUTPUT_TIMEOUT_MS: '0',
+  }), 0);
 });
 
 test('resolveProgressTimeoutMs follows the reviewer env override parser shape', () => {

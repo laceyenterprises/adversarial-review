@@ -34,6 +34,7 @@ import {
   resolveAgyPrintTimeoutMs,
   resolveAgyReviewerSubprocessTimeoutMs,
   resolveProgressTimeoutMs,
+  resolveFirstOutputTimeoutMs,
   resolveReviewerTimeoutMs,
 } from './reviewer-timeout.mjs';
 import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
@@ -689,7 +690,12 @@ async function reviewWithClaude(diff, extraContext = '', {
   logger = console,
   platform = process.platform,
   nowMs = () => Date.now(),
+  silentRetryAttempts = 1,
+  onSilentRetry = null,
+  reviewerDeadlineMs = null,
 } = {}) {
+  const readNowMs = () => (typeof nowMs === 'function' ? nowMs() : Date.now());
+  const claudeStartedAtMs = readNowMs();
   const auth = await assertClaudeOAuthImpl({ resolveClaudeLaunchctlUidImpl, logger, platform });
 
   const promptPrefix = buildReviewerPromptPrefix({ stage: promptStage });
@@ -703,7 +709,15 @@ async function reviewWithClaude(diff, extraContext = '', {
   const env = hasAuthEnv ? auth.env : scrubOAuthFallbackEnv(process.env).env;
   const subprocessEnv = withReviewerSubprocessCwdEnv(env, reviewerSubprocessCwd);
   const authTransport = hasAuthEnv ? (auth?.transport || resolveClaudeReviewerOAuthTransport(subprocessEnv)) : 'keychain';
-  const reviewerTimeoutMs = resolveReviewerTimeoutMs(subprocessEnv);
+  // The retry runs inside the SAME reviewer pass, so it must share that pass's
+  // wall-clock budget. Without this a silent first attempt plus a fresh full
+  // timeout could exceed the budget the recovery paths reason about.
+  const resolvedReviewerTimeoutMs = resolveReviewerTimeoutMs(subprocessEnv);
+  const reviewerBudgetDeadlineMs = reviewerDeadlineMs ?? (claudeStartedAtMs + resolvedReviewerTimeoutMs);
+  const reviewerTimeoutMs = Math.max(
+    1_000,
+    Math.min(resolvedReviewerTimeoutMs, reviewerBudgetDeadlineMs - readNowMs()),
+  );
   const claudeLaunchctlUid = authTransport === 'broker'
     ? null
     : await resolveClaudeLaunchctlUidForSpawn({
@@ -729,6 +743,13 @@ async function reviewWithClaude(diff, extraContext = '', {
         env: subprocessEnv,
         cwd: reviewerSubprocessCwd,
         timeout: reviewerTimeoutMs,
+        // First-output-only deadline. NOT progressTimeout: that is a rolling
+        // no-output watchdog, and `claude --print --output-format json` emits a
+        // single JSON document at the END of the turn, so a rolling watchdog
+        // would cap a healthy review at this value instead of bounding a wedged
+        // launch. See docs/SPEC-adversarial-review-auto-remediation.md
+        // section Reviewer Runtime Recovery Contract.
+        firstOutputTimeout: resolveFirstOutputTimeoutMs(subprocessEnv),
         maxBuffer: 10 * 1024 * 1024,
         ...(authTransport === 'broker' ? { useLaunchctl: false } : { uid: claudeLaunchctlUid }),
       }),
@@ -737,6 +758,39 @@ async function reviewWithClaude(diff, extraContext = '', {
   } catch (err) {
     if (err?.isLaunchctlSessionError) {
       throw err;
+    }
+    if (err?.firstOutputTimedOut && silentRetryAttempts > 0) {
+      // Durable trace: a silent invocation that is retried in-process is
+      // invisible to per-model exec-failure accounting and to
+      // review-pipeline-health unless it is recorded here. Without this a
+      // claude CLI wedged one time in two looks half as unhealthy as it is.
+      onSilentRetry?.({
+        reason: 'first-output-timeout',
+        attemptsRemaining: silentRetryAttempts - 1,
+        elapsedMs: readNowMs() - claudeStartedAtMs,
+        firstOutputTimeoutMs: resolveFirstOutputTimeoutMs(subprocessEnv),
+      });
+      logger.warn?.(
+        `[reviewer] Claude emitted no output before the first-output deadline; ` +
+        `retrying claude under the same reviewer pass with freshly prepared ` +
+        `credentials (${silentRetryAttempts} retry remaining)`,
+      );
+      return reviewWithClaude(diff, extraContext, {
+        promptStage,
+        reviewerSubprocessCwd,
+        assertClaudeOAuthImpl,
+        spawnClaudeImpl,
+        launchctlRetryDelaysMs,
+        sleepImpl,
+        resolveClaudeLaunchctlUidImpl,
+        logger,
+        platform,
+        nowMs,
+        onSilentRetry,
+        // Carry the ORIGINAL pass deadline into the retry.
+        reviewerDeadlineMs: reviewerBudgetDeadlineMs,
+        silentRetryAttempts: silentRetryAttempts - 1,
+      });
     }
     // Detect OAuth expiry in error output
     const msg = (err.message || '') + (err.stderr || '');

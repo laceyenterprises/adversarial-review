@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { closeSync, openSync, readSync, statSync } from 'node:fs';
 
 import { resolveProgressTimeoutMs } from './reviewer-timeout.mjs';
-import { PROGRESS_TIMEOUT_REASON_PREFIX } from './reviewer-timeout-reason.mjs';
+import { PROGRESS_TIMEOUT_REASON_PREFIX, FIRST_OUTPUT_TIMEOUT_REASON_PREFIX } from './reviewer-timeout-reason.mjs';
 
 const DEFAULT_KILL_GRACE_MS = 5_000;
 const DEFAULT_FAILURE_TAIL_BYTES = 8 * 1024;
@@ -12,6 +12,7 @@ const SUPPORTED_OPTIONS = new Set([
   'cwd',
   'env',
   'failureTailBytes',
+  'firstOutputTimeout',
   'input',
   'killGraceMs',
   'maxBuffer',
@@ -127,6 +128,12 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
     input = null,
     timeout = 0,
     progressTimeout = resolveProgressTimeoutMs(env),
+    // One-shot deadline for the FIRST byte on either pipe. Unlike
+    // progressTimeout this is armed once and cleared permanently on first
+    // output, never re-armed — so it bounds a wedged launch without capping
+    // the runtime of a non-streaming CLI that legitimately writes nothing
+    // until the end of its turn (claude --print --output-format json).
+    firstOutputTimeout = 0,
     killGraceMs = DEFAULT_KILL_GRACE_MS,
     maxBuffer = 10 * 1024 * 1024,
     onSpawn,
@@ -161,6 +168,8 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
     let killTimer = null;
     let wallTimer = null;
     let progressTimer = null;
+    let firstOutputTimer = null;
+    let sawFirstOutput = false;
     let fileProgressTimer = null;
     let lastStdoutSize = 0;
     let lastStderrSize = 0;
@@ -170,10 +179,12 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
       if (killTimer) clearTimeout(killTimer);
       if (wallTimer) clearTimeout(wallTimer);
       if (progressTimer) clearTimeout(progressTimer);
+      if (firstOutputTimer) clearTimeout(firstOutputTimer);
       if (fileProgressTimer) clearInterval(fileProgressTimer);
       killTimer = null;
       wallTimer = null;
       progressTimer = null;
+      firstOutputTimer = null;
       fileProgressTimer = null;
       if (signal && abortListenerAttached) {
         signal.removeEventListener('abort', onAbort);
@@ -206,6 +217,24 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
           requestKill(`${PROGRESS_TIMEOUT_REASON_PREFIX} ${progressTimeout}ms`);
         }, progressTimeout);
       }
+    };
+
+    // Fires at most once, and only before any output has been seen.
+    const armFirstOutputTimer = () => {
+      if (firstOutputTimeout > 0 && !sawFirstOutput) {
+        firstOutputTimer = setTimeout(() => {
+          requestKill(`${FIRST_OUTPUT_TIMEOUT_REASON_PREFIX} ${firstOutputTimeout}ms`);
+        }, firstOutputTimeout);
+      }
+    };
+
+    // Permanent: once the child has written a byte, the first-output deadline
+    // is retired for the life of the process. It is never re-armed.
+    const noteFirstOutput = () => {
+      if (sawFirstOutput) return;
+      sawFirstOutput = true;
+      if (firstOutputTimer) clearTimeout(firstOutputTimer);
+      firstOutputTimer = null;
     };
 
     const statSize = (filePath) => {
@@ -278,6 +307,7 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
       }, timeout);
     }
     armProgressTimer();
+    armFirstOutputTimer();
     // Only poll side-channel sizes when there's a reason to: either we need
     // to re-arm the no-progress kill (progressTimeout > 0) or we need to
     // enforce maxBuffer mid-flight (Number.isFinite(maxBuffer)). When both
@@ -300,6 +330,7 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
         if (stdoutSize !== lastStdoutSize || stderrSize !== lastStderrSize) {
           lastStdoutSize = stdoutSize;
           lastStderrSize = stderrSize;
+          noteFirstOutput();
           armProgressTimer();
         }
       }, intervalMs);
@@ -323,6 +354,7 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
 
     child.stdout?.on('data', (data) => {
       if (settled) return;
+      noteFirstOutput();
       armProgressTimer();
       const next = appendChecked(stdout, stdoutBytes, data);
       if (next !== null) {
@@ -333,6 +365,7 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
 
     child.stderr?.on('data', (data) => {
       if (settled) return;
+      noteFirstOutput();
       armProgressTimer();
       const next = appendChecked(stderr, stderrBytes, data);
       if (next !== null) {
@@ -391,6 +424,7 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
       err.killed = closeSignal != null || timeoutReason !== null;
       err.timedOut = timeoutReason?.startsWith('timed out') || false;
       err.progressTimedOut = timeoutReason?.startsWith(PROGRESS_TIMEOUT_REASON_PREFIX) || false;
+      err.firstOutputTimedOut = timeoutReason?.startsWith(FIRST_OUTPUT_TIMEOUT_REASON_PREFIX) || false;
       err.aborted = timeoutReason === 'aborted';
       err.stdout = stdout;
       err.stderr = stderr;
@@ -412,6 +446,7 @@ export {
   DEFAULT_FAILURE_TAIL_BYTES,
   DEFAULT_KILL_GRACE_MS,
   PROGRESS_TIMEOUT_REASON_PREFIX,
+  FIRST_OUTPUT_TIMEOUT_REASON_PREFIX,
   formatCapturedFailureDetails,
   spawnCapturedProcessGroup,
 };

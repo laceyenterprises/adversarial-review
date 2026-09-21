@@ -10,7 +10,8 @@
   schema-convergence path in `src/review-state.mjs`
 - Writer API: `recordReviewLatencyEvent` in
   `src/review-latency-event-writer.mjs`; `src/review-state.mjs` re-exports it
-  for existing callers
+  for existing callers, and `src/review-mode-latency.mjs` wraps it for the
+  RPL-08 `review_mode_selected` event
 - Readers: `src/review-latency-report.mjs` and `src/review-latency-cli.mjs`
 
 `review_latency_events` is the durable explicit-event ledger for the review
@@ -57,11 +58,24 @@ reported by `collectReviewLatencyReport`:
 - `cache_coalesced`
 - `cache_invalidated`
 - `fallback_route`
+- `review_mode_selected`
 
 The `cache_*` and `fallback_route` event types are diagnostic events emitted by
 watcher hot-path instrumentation. They are durable so latency reports can show
 whether cache and reviewer-fallback behavior is actually being observed, but
 they are not latency-boundary events for critical-path duration calculations.
+
+`review_mode_selected` is the RPL-08 record of which review path a reviewer
+pass took. It is written by `src/review-mode-latency.mjs` with
+`source: 'reviewer'`, `source_ref` set to the reviewer model, and
+`reason` set to the mode — one of `slim`, `full`, or `forced-full`. `full` and
+`forced-full` are distinct on purpose: `full` means the low-risk predicate in
+`src/slim-review-eligibility.mjs` refused the PR, while `forced-full` means an
+operator overrode the predicate with the `operator-approved: full-review` label
+or the `ADVERSARIAL_REVIEW_FORCE_FULL_REVIEW` environment variable. The payload
+carries `mode`, `slim`, `forcedBy`, `lowRiskClasses`, `refusalCodes`, and diff
+`stats`, which `collectReviewLatencyReport` folds into the `reviewModes`
+summary. Like the other diagnostic types it is not a latency-boundary event.
 
 `reviewer_reaped` records a bounded capacity release after the owning process
 can no longer finish. `reviewer_reattached` records durable process adoption or
@@ -84,7 +98,10 @@ JSON as a report-time data-quality problem.
 Callers that can provide a stable event identity should set
 `idempotency_key`. Watcher hot-path cache diagnostics must use minute-bucketed
 idempotency keys of the form `watcher-cache:<cache>:<event>:<YYYY-MM-DDTHH:mm>`
-so per-subject poll loops cannot grow durable rows without bound. The partial unique index
+so per-subject poll loops cannot grow durable rows without bound.
+`review_mode_selected` keys on `review-mode:<repo>#<pr>:<head>:<attempt>` so a
+restarted or reattached reviewer writes one row per attempt while a genuine
+re-review on a new head still records its own mode. The partial unique index
 `review_latency_events_idempotency_unique` deduplicates by
 `(event_type, idempotency_key)` while still allowing events without an
 idempotency key.

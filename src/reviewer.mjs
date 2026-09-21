@@ -42,8 +42,18 @@ import {
   resolveRoundBudgetForJob,
   summarizePRRemediationLedger,
 } from './follow-up-jobs.mjs';
-import { buildObviousDocsGuidance, fetchLinkedSpecContents } from './prompt-context.mjs';
+import { buildObviousDocsGuidance, fetchLinkedSpecContents, formatAdvisoryFindingsContext } from './prompt-context.mjs';
 import { buildHardeningReviewContext } from './hardening-ledger-context.mjs';
+import { buildReviewModeAuditBlock, buildSlimReviewerExtraContext, selectReviewMode } from './review-mode-selection.mjs';
+import {
+  VERDICT_MODE_ADVISORY_ONLY,
+  VERDICT_MODE_ENFORCE,
+  buildReviewCommentBody,
+  buildReviewCommentHeader,
+  classifyReviewCommentHeader,
+  normalizeVerdictMode,
+  startsWithReviewCommentHeader,
+} from './review-comment-body.mjs';
 import {
   captureReviewerBodyAfterPost,
   findCapturedReviewerBody,
@@ -167,11 +177,6 @@ const REVIEW_ADAPTER_ENV_KEYS = [
 
 const execFileAsync = promisify(execFile);
 const ADVISORY_ONLY_REVIEW_LABEL = 'operator-approved: advisory-only-review';
-const VERDICT_MODE_ENFORCE = 'enforce';
-const VERDICT_MODE_ADVISORY_ONLY = 'advisory-only';
-const ENFORCE_REVIEW_HEADER_RE = /^## Adversarial Review — .+ \(.+\)$/;
-const ADVISORY_ONLY_REVIEW_HEADER_RE = /^## Adversarial Review \(advisory-only\) — .+ \(.+\)$/;
-const ANY_ADVERSARIAL_REVIEW_HEADER_RE = /^##\s+Adversarial Review\b.*$/;
 
 const REVIEWER_IDENTITY_BY_BOT_TOKEN_ENV = Object.freeze({
   GH_CLAUDE_REVIEWER_TOKEN: 'claude-reviewer-lacey',
@@ -252,12 +257,6 @@ function hasLabel(labels, labelName) {
 
 function hasLocalReviewShadowLabel(labels) {
   return hasLabel(labels, LOCAL_REVIEW_SHADOW_LABEL);
-}
-
-function normalizeVerdictMode(mode) {
-  return String(mode || '').trim() === VERDICT_MODE_ADVISORY_ONLY
-    ? VERDICT_MODE_ADVISORY_ONLY
-    : VERDICT_MODE_ENFORCE;
 }
 
 function resolveVerdictModeForHead({
@@ -365,78 +364,6 @@ async function fetchCurrentHeadVerdictMode({
       error: err?.message || String(err),
     };
   }
-}
-
-function buildReviewCommentHeader({ reviewerMetadata, verdictMode }) {
-  const mode = normalizeVerdictMode(verdictMode);
-  if (mode === VERDICT_MODE_ADVISORY_ONLY) {
-    // Keep the canonical `## Adversarial Review` marker heading and displayName in
-    // advisory mode so the same heuristic used to locate enforce reviews still finds
-    // advisory-only reviews; append the advisory disclaimer beneath it.
-    return `## Adversarial Review (advisory-only) — ${reviewerMetadata.displayName} (${reviewerMetadata.reviewerIdentity})\n\n` +
-      `**Advisory-only review** — findings below are informational; no automated remediation will run.\n\n`;
-  }
-  return `## Adversarial Review — ${reviewerMetadata.displayName} (${reviewerMetadata.reviewerIdentity})\n\n`;
-}
-
-function classifyReviewCommentHeader(reviewBody) {
-  const [firstLine = ''] = String(reviewBody || '').split(/\r?\n/, 1);
-  if (ADVISORY_ONLY_REVIEW_HEADER_RE.test(firstLine)) {
-    return {
-      isAdversarialReview: true,
-      verdictMode: VERDICT_MODE_ADVISORY_ONLY,
-      advisoryOnly: true,
-    };
-  }
-  if (ENFORCE_REVIEW_HEADER_RE.test(firstLine)) {
-    return {
-      isAdversarialReview: true,
-      verdictMode: VERDICT_MODE_ENFORCE,
-      advisoryOnly: false,
-    };
-  }
-  return {
-    isAdversarialReview: false,
-    verdictMode: null,
-    advisoryOnly: false,
-  };
-}
-
-function startsWithReviewCommentHeader(reviewBody) {
-  const [firstLine = ''] = String(reviewBody || '').trimStart().split(/\r?\n/, 1);
-  return ANY_ADVERSARIAL_REVIEW_HEADER_RE.test(firstLine.trim());
-}
-
-function insertAfterExistingReviewHeader(reviewBody, insertText) {
-  const text = String(reviewBody || '').trimStart();
-  const block = String(insertText || '');
-  if (!block) return text;
-
-  const lineBreakMatch = text.match(/\r?\n/);
-  if (!lineBreakMatch) {
-    return `${text}\n\n${block}`;
-  }
-
-  const headerLine = text.slice(0, lineBreakMatch.index);
-  const rest = text
-    .slice(lineBreakMatch.index + lineBreakMatch[0].length)
-    .replace(/^(?:[ \t]*\r?\n)+/, '');
-  return `${headerLine}\n\n${block}${rest}`;
-}
-
-function buildReviewCommentBody({
-  reviewerMetadata,
-  verdictMode,
-  waiverAuditBlock = '',
-  reviewText,
-}) {
-  const text = String(reviewText || '');
-  if (startsWithReviewCommentHeader(text)) {
-    return insertAfterExistingReviewHeader(text, waiverAuditBlock);
-  }
-
-  const header = buildReviewCommentHeader({ reviewerMetadata, verdictMode });
-  return header + String(waiverAuditBlock || '') + text;
 }
 
 function normalizeReviewerFamily(reviewerModel) {
@@ -655,29 +582,13 @@ function buildLocalReviewShadowPrompt({ hostedReviewText, diff, extraContext = '
   ].filter(Boolean).join('\n');
 }
 
-function formatAdvisoryFindingsContext(advisoryFindings = []) {
-  const findings = (Array.isArray(advisoryFindings) ? advisoryFindings : [])
-    .filter((finding) => finding && typeof finding === 'object');
-  if (findings.length === 0) return '';
-  return [
-    '',
-    '## Watcher Advisory Findings',
-    '',
-    'These findings are informational context from the watcher. Do not place them in `## Blocking Issues`, and do not change the verdict solely because of them.',
-    '',
-    '```json',
-    JSON.stringify(findings, null, 2),
-    '```',
-    '',
-  ].join('\n');
-}
-
 async function buildReviewerExtraContext({
   repo,
   prNumber,
   prContext = null,
   diff = '',
   advisoryFindings = [],
+  reviewModeDecision = null,
   repoRoot = join(ROOT, '..', '..'),
   fetchLinkedSpecContentsImpl = fetchLinkedSpecContents,
   buildHardeningReviewContextImpl = buildHardeningReviewContext,
@@ -685,6 +596,12 @@ async function buildReviewerExtraContext({
   execFileImpl = execFileAsync,
   log = console,
 } = {}) {
+  // RPL-08: slim mode trims context, never the review contract. See
+  // buildSlimReviewerExtraContext for what is dropped and why.
+  if (reviewModeDecision?.slim) {
+    return buildSlimReviewerExtraContext({ repo, prNumber, decision: reviewModeDecision, advisoryFindings, log });
+  }
+
   let extraContext = buildObviousDocsGuidance();
   try {
     const linkedContext = await fetchLinkedSpecContentsImpl(repo, prNumber, {
@@ -2073,12 +1990,28 @@ async function main() {
     process.exit(1);
   }
 
+  // RPL-08: classify from the diff already in hand — no extra GitHub round trip
+  // on the review hot path, or the lane would spend the latency it saves.
+  const reviewModeDecision = selectReviewMode({
+    rootDir: ROOT, repo, prNumber, diff, labels,
+    author: prContext?.author || null,
+    headSha: reviewerHeadSha || null,
+    attemptNumber: Number.isFinite(Number(reviewDbAttemptNumber))
+      ? Number(reviewDbAttemptNumber)
+      : Number(reviewAttemptNumber),
+    reviewerModel,
+    promptStage: reviewerPromptStage,
+    logStructuredEventImpl: logStructuredEvent,
+    log: console,
+  });
+
   const extraContext = await buildReviewerExtraContext({
     repo,
     prNumber,
     prContext,
     diff,
     advisoryFindings,
+    reviewModeDecision,
     repoRoot: join(ROOT, '..', '..'),
     log: console,
   });
@@ -2298,6 +2231,7 @@ async function main() {
     reviewerMetadata,
     verdictMode,
     waiverAuditBlock,
+    reviewModeAuditBlock: buildReviewModeAuditBlock(reviewModeDecision),
     reviewText: reviewTextForPost,
   });
   const localShadowEligibility = evaluateLocalReviewShadowEligibility({

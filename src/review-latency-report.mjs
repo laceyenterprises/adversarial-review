@@ -36,7 +36,13 @@ const EVENT_TYPES = Object.freeze([
   'cache_coalesced',
   'cache_invalidated',
   'fallback_route',
+  'review_mode_selected',
 ]);
+
+// RPL-08 review modes, in report order. `full` and `forced-full` are counted
+// separately so an operator can tell a fast lane the rules refuse from a fast
+// lane an operator switched off.
+const REVIEW_MODES = Object.freeze(['slim', 'full', 'forced-full']);
 
 const STAGE_DEFINITIONS = Object.freeze([
   {
@@ -846,6 +852,69 @@ function cacheImpact(db, { sinceIso }) {
   };
 }
 
+/**
+ * RPL-08 review-mode mix: how many reviews took the slim lane, how many did
+ * not, and which rule refused the ones that did not.
+ *
+ * `topRefusals` is the operationally useful half. "70% full" says the fast lane
+ * is not paying off; "70% full, all `gate-keeper-path`" says it is working
+ * exactly as designed on a gate-keeper repo, and "70% full, all
+ * `changed-files-unknown`" says the diff parse is broken.
+ */
+function reviewModeMix(db, { sinceIso }) {
+  const rows = safeAll(
+    db,
+    `SELECT reason, payload_json
+       FROM review_latency_events
+      WHERE at >= ?
+        AND event_type = 'review_mode_selected'`,
+    [sinceIso]
+  );
+  const counts = Object.fromEntries(REVIEW_MODES.map((mode) => [mode, 0]));
+  const refusalCounts = new Map();
+  const lowRiskClassCounts = new Map();
+  let unknownMode = 0;
+  for (const row of rows) {
+    const payload = parseJson(row.payload_json, {});
+    const mode = String(payload.mode || row.reason || '').trim();
+    if (Object.prototype.hasOwnProperty.call(counts, mode)) counts[mode] += 1;
+    else unknownMode += 1;
+    for (const code of Array.isArray(payload.refusalCodes) ? payload.refusalCodes : []) {
+      refusalCounts.set(code, (refusalCounts.get(code) || 0) + 1);
+    }
+    for (const klass of Array.isArray(payload.lowRiskClasses) ? payload.lowRiskClasses : []) {
+      lowRiskClassCounts.set(klass, (lowRiskClassCounts.get(klass) || 0) + 1);
+    }
+  }
+  const total = rows.length;
+  const sortByCountThenName = ([leftName, leftCount], [rightName, rightCount]) => (
+    rightCount - leftCount || leftName.localeCompare(rightName)
+  );
+  return {
+    total,
+    ...counts,
+    unknownMode,
+    slimRate: total > 0 ? counts.slim / total : null,
+    topRefusals: [...refusalCounts.entries()]
+      .sort(sortByCountThenName)
+      .map(([code, count]) => ({ code, count })),
+    lowRiskClasses: [...lowRiskClassCounts.entries()]
+      .sort(sortByCountThenName)
+      .map(([lowRiskClass, count]) => ({ lowRiskClass, count })),
+  };
+}
+
+function emptyReviewModeMix() {
+  return {
+    total: 0,
+    ...Object.fromEntries(REVIEW_MODES.map((mode) => [mode, 0])),
+    unknownMode: 0,
+    slimRate: null,
+    topRefusals: [],
+    lowRiskClasses: [],
+  };
+}
+
 function recentWakeEvents(subjects) {
   const wakes = [];
   for (const subject of subjects.values()) {
@@ -940,6 +1009,7 @@ function collectReviewLatencyReport({
         cache_hit: 0, cache_miss: 0, cache_stale: 0, cache_coalesced: 0, cache_invalidated: 0,
         fallback_route: 0, lookups: 0, hitRate: null, byCache: [],
       },
+      reviewModes: db ? reviewModeMix(db, { sinceIso }) : emptyReviewModeMix(),
       recentWakes: recentWakeEvents(subjects),
       topBottlenecks: topBottlenecks(stages, queue),
     };
@@ -1007,6 +1077,18 @@ function renderReviewLatencyReport(report) {
       `stale=${cache.cache_stale} coalesced=${cache.cache_coalesced || 0} ` +
       `invalidated=${cache.cache_invalidated} fallback=${cache.fallback_route} ` +
       `hit_rate=${cache.hitRate === null ? '-' : `${Math.round(cache.hitRate * 100)}%`}`
+    );
+  }
+  const modes = report.reviewModes || emptyReviewModeMix();
+  lines.push(
+    `review modes: slim=${modes.slim} full=${modes.full} forced_full=${modes['forced-full']} ` +
+    `slim_rate=${modes.slimRate === null ? '-' : `${Math.round(modes.slimRate * 100)}%`}`
+  );
+  if (modes.topRefusals.length > 0) {
+    lines.push(
+      `  slim refused by: ${modes.topRefusals.slice(0, 5)
+        .map((item) => `${item.code}=${item.count}`)
+        .join(' ')}`
     );
   }
   lines.push('');

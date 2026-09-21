@@ -144,4 +144,33 @@ export function collectWorkspaceDocContext(workspaceDir, {
   return `\n\n## Additional Governing Repo Docs\nUse these as governing context when relevant before making architectural judgments or remediation changes.\n\n${picked.join('\n\n')}`;
 }
 
+/**
+ * Watcher advisory findings, rendered as reviewer context.
+ *
+ * ARC-10: lives here rather than in `reviewer.mjs` because it is context
+ * assembly, not review orchestration, and both the full and the RPL-08 slim
+ * context paths need it — advisory findings are the watcher telling the
+ * reviewer something about THIS PR, so no context budget saves anything by
+ * dropping them.
+ *
+ * @param {Array<object>} [advisoryFindings]
+ * @returns {string}  Empty when there is nothing to say.
+ */
+export function formatAdvisoryFindingsContext(advisoryFindings = []) {
+  const findings = (Array.isArray(advisoryFindings) ? advisoryFindings : [])
+    .filter((finding) => finding && typeof finding === 'object');
+  if (findings.length === 0) return '';
+  return [
+    '',
+    '## Watcher Advisory Findings',
+    '',
+    'These findings are informational context from the watcher. Do not place them in `## Blocking Issues`, and do not change the verdict solely because of them.',
+    '',
+    '```json',
+    JSON.stringify(findings, null, 2),
+    '```',
+    '',
+  ].join('\n');
+}
+
 export { buildMarkdownFence, formatFencedBlock };

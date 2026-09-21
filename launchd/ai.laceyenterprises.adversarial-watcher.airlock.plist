@@ -75,6 +75,23 @@
         <string>2700000</string>
         <key>ADVERSARIAL_WATCHER_POLL_STARVATION_MS</key>
         <string>2700000</string>
+        <!-- Broker App-token mint bound, raised from the 5s code default.
+             REVIEWER_TOKEN_FETCH_TIMEOUT_MS bounds the per-tick reviewer token
+             refresh so a wedged broker cannot hang the poll loop; on timeout the
+             refresh fails safe and KEEPS THE OLD TOKEN. That fail-safe is the
+             problem at 5s on this host: measured 2026-09-21 over one log window,
+             9 of 39 refreshes aborted (~23%, claude-reviewer worst at 5), each
+             leaving a stale token that later surfaces as class=oauth-broken. Two
+             of those freeze the model out of the reviewer pool -- observed as
+             21x `reviewer-model-fallback from=claude to=gemini`, which with the
+             OpenAI primary exhausted left gemini as the only reviewer and the
+             lane reporting starvationCause=no-capacity.
+
+             30s is ~6x the observed headroom and negligible against a poll pass.
+             Revisit alongside the stall thresholds above once #1099 has been live
+             long enough to measure real pass duration. -->
+        <key>REVIEWER_TOKEN_FETCH_TIMEOUT_MS</key>
+        <string>30000</string>
         <key>AGENT_OS_SESSION_LEDGER_DSN</key>
         <string>postgresql://airlock@127.0.0.1:6432/agent_os_ledger</string>
         <key>AGENT_OS_SESSION_LEDGER_TARGET</key>

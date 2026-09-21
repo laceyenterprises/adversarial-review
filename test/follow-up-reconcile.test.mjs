@@ -231,7 +231,17 @@ test('reconcileFollowUpJob resets watcher review state when remediation reply re
   assert.equal(reviewRow.last_attempted_at, null);
   assert.equal(reviewRow.review_attempts, 1);
   assert.equal(reviewRow.posted_at, null);
-  assert.equal(reconciled.job.reReview.wake, undefined);
+  // RPL-04: the rereview wake is no longer gated on handoff.remediation_to_rereview
+  // (which defaulted OFF, so this was `undefined` in production). A successful
+  // closeout always enqueues a durable wake.
+  assert.deepEqual(reconciled.job.reReview.wake, {
+    requested: true,
+    reason: 'remediation-closeout',
+    requestedAt: '2026-04-21T10:05:00.000Z',
+    outcome: 'requested',
+    detail: 'wake-enqueued',
+    watcherWoken: true,
+  });
 });
 
 test('reconcileFollowUpJob waits for external CI before requesting re-review', async () => {
@@ -391,8 +401,7 @@ test('reconcileFollowUpJob requeues remediation when the pushed head has failed 
   assert.match(latestRetry.retryReason, /\.\.\. \(\+2 more\)/);
 });
 
-test('reconcileFollowUpJob wakes watcher when handoff.remediation_to_rereview is enabled', async () => {
-  process.env.ADVERSARIAL_HANDOFF_REMEDIATION_TO_REREVIEW = '1';
+test('reconcileFollowUpJob wakes the watcher on remediation closeout', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   writeReviewRow(rootDir);
   createFollowUpJob(makeJobInput(rootDir));
@@ -468,14 +477,20 @@ test('reconcileFollowUpJob wakes watcher when handoff.remediation_to_rereview is
   });
   assert.deepEqual(reconciled.job.reReview.wake, {
     requested: true,
-    reason: 'remediation-to-rereview',
+    reason: 'remediation-closeout',
     requestedAt: '2026-04-21T10:05:00.000Z',
+    outcome: 'requested',
+    detail: 'wake-enqueued',
+    watcherWoken: true,
   });
 });
 
-test('reconcileFollowUpJob loads handoff.remediation_to_rereview from the repo config root', async () => {
+// RPL-04 regression: the retired handoff.remediation_to_rereview flag defaulted
+// OFF and shipped OFF, which is precisely why remediated PRs sat for a full poll
+// interval. An explicitly-false config must NOT resurrect that suppression.
+test('reconcileFollowUpJob wakes the watcher even with the retired handoff flag set false', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  writeFileSync(path.join(rootDir, 'config.yaml'), 'version: 1\nhandoff:\n  remediation_to_rereview: true\n', 'utf8');
+  writeFileSync(path.join(rootDir, 'config.yaml'), 'version: 1\nhandoff:\n  remediation_to_rereview: false\n', 'utf8');
   writeReviewRow(rootDir);
   createFollowUpJob(makeJobInput(rootDir));
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
@@ -550,13 +565,15 @@ test('reconcileFollowUpJob loads handoff.remediation_to_rereview from the repo c
   });
   assert.deepEqual(reconciled.job.reReview.wake, {
     requested: true,
-    reason: 'remediation-to-rereview',
+    reason: 'remediation-closeout',
     requestedAt: '2026-04-21T10:05:00.000Z',
+    outcome: 'requested',
+    detail: 'wake-enqueued',
+    watcherWoken: true,
   });
 });
 
 test('reconcileFollowUpJob wakes watcher when re-review was already pending', async () => {
-  process.env.ADVERSARIAL_HANDOFF_REMEDIATION_TO_REREVIEW = '1';
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createFollowUpJob(makeJobInput(rootDir));
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
@@ -643,8 +660,11 @@ test('reconcileFollowUpJob wakes watcher when re-review was already pending', as
   });
   assert.deepEqual(reconciled.job.reReview.wake, {
     requested: true,
-    reason: 'remediation-to-rereview',
+    reason: 'remediation-closeout',
     requestedAt: '2026-04-21T10:05:00.000Z',
+    outcome: 'requested',
+    detail: 'wake-enqueued',
+    watcherWoken: true,
   });
 });
 

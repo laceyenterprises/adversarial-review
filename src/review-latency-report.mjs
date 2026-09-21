@@ -2,6 +2,8 @@ import Database from 'better-sqlite3';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { rereviewWakeBacklog } from './rereview-wake.mjs';
+
 const DEFAULT_SINCE_MS = 24 * 60 * 60 * 1000;
 const FOLLOW_UP_JOB_DIRS = Object.freeze({
   pending: ['data', 'follow-up-jobs', 'pending'],
@@ -73,6 +75,16 @@ const STAGE_DEFINITIONS = Object.freeze([
     owner: 'follow-up',
     from: ['reviewer_post_success', 'gh_post'],
     to: ['follow_up_created'],
+  },
+  {
+    // RPL-04: how long a rereview wake waits before admission claims the row.
+    // This is the stage the spec's "rereview queue wait: agent-os#6603 waited
+    // 198m after rereview_requested" bottleneck line is measuring.
+    key: 'rereview_wake_to_row_claimed',
+    label: 'rereview_wake -> row_claimed',
+    owner: 'rereview',
+    from: ['rereview_wake'],
+    to: ['row_claimed'],
   },
   {
     key: 'clean_verdict_to_hammer_wake',
@@ -846,6 +858,28 @@ function cacheImpact(db, { sinceIso }) {
   };
 }
 
+// Fail-open: an unreadable wake queue degrades the report to "unavailable"
+// rather than failing the whole latency report, which is the only surface an
+// operator has during an incident.
+function readRereviewWakeBacklog(rootDir, { nowMs }) {
+  try {
+    return { available: true, ...rereviewWakeBacklog({ rootDir, nowMs }) };
+  } catch (err) {
+    return {
+      available: false,
+      error: err?.message || String(err),
+      pending: 0,
+      claimed: 0,
+      unclaimed: 0,
+      oldest: null,
+      oldestAgeMs: null,
+      byReason: [],
+      byHoldReason: [],
+      entries: [],
+    };
+  }
+}
+
 function recentWakeEvents(subjects) {
   const wakes = [];
   for (const subject of subjects.values()) {
@@ -941,6 +975,10 @@ function collectReviewLatencyReport({
         fallback_route: 0, lookups: 0, hitRate: null, byCache: [],
       },
       recentWakes: recentWakeEvents(subjects),
+      // RPL-04: the wake QUEUE, not the wake history. `recentWakes` answers
+      // "what fired"; this answers "what is still waiting and for how long" —
+      // the number that distinguishes a quiet pipeline from a stalled one.
+      rereviewWakeQueue: readRereviewWakeBacklog(rootDir, { nowMs }),
       topBottlenecks: topBottlenecks(stages, queue),
     };
   } finally {
@@ -1015,6 +1053,23 @@ function renderReviewLatencyReport(report) {
     lines.push(`- ${reason.reason}: ${reason.count} oldest=${formatDuration(reason.oldestAgeMs)}`);
   }
   if (report.topWaitingReasons.length === 0) lines.push('- none');
+  lines.push('');
+  const wakeQueue = report.rereviewWakeQueue || {};
+  lines.push(
+    `rereview wake queue: pending=${wakeQueue.pending ?? 0} `
+    + `unclaimed=${wakeQueue.unclaimed ?? 0} claimed=${wakeQueue.claimed ?? 0} `
+    + `oldest=${formatDuration(wakeQueue.oldestAgeMs ?? null)}`
+    + `${wakeQueue.available === false ? ' (unavailable)' : ''}`
+  );
+  if (wakeQueue.oldest) {
+    lines.push(
+      `  oldest wake: ${wakeQueue.oldest.repo}#${wakeQueue.oldest.prNumber} `
+      + `${wakeQueue.oldest.reason}${wakeQueue.oldest.holdReason ? ` held=${wakeQueue.oldest.holdReason}` : ''}`
+    );
+  }
+  for (const row of wakeQueue.byHoldReason || []) {
+    lines.push(`  held ${row.reason}: ${row.count}`);
+  }
   lines.push('');
   lines.push('recent wakes:');
   for (const wake of report.recentWakes.slice(0, 10)) {

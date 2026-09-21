@@ -155,6 +155,11 @@ import {
 } from './review-state.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
 import {
+  REREVIEW_WAKE_REASONS,
+  consumeRereviewWakes,
+  requestRereviewWake,
+} from './rereview-wake.mjs';
+import {
   buildDuplicateReviewSkipAudit,
   headDispatchLeaseKey,
   resolveAlreadyReviewedHeadDedup,
@@ -678,6 +683,8 @@ export async function processReviewSubject(entry, ctx) {
     shouldDeferReviewForActiveFollowUp,
     wakePayload = null,
     admissionSettlementSplitEnabled = false,
+    consumeRereviewWakesImpl = consumeRereviewWakes,
+    requestRereviewWakeImpl = requestRereviewWake,
     runDaemonCleanMergeAttemptImpl = runDaemonCleanMergeAttempt,
     findArgusJobImpl = findArgusJob,
     maybeAutoAdjudicateDependencyBotArgusJobImpl = maybeAutoAdjudicateDependencyBotArgusJob,
@@ -685,6 +692,34 @@ export async function processReviewSubject(entry, ctx) {
 
       const prTitle = subject.title || '';
       const effectiveDomainId = domainId || entry.domainId || subject.domainId || WATCHER_PRIMARY_DOMAIN_ID || 'code-pr';
+      // RPL-04: a CI state transition that releases a parked re-review is an
+      // eligibility EDGE, not a poll result. Enqueuing a durable wake here is
+      // what lets the next tick start immediately instead of at the next poll
+      // interval, and it leaves a record an operator can read afterwards. It
+      // fires only when the transition actually re-armed the row, so a refused
+      // reset never produces a phantom wake.
+      const requestCiTransitionRereviewWake = ({ repoPath: wakeRepo, prNumber: wakePr, headSha, armed, detail }) => {
+        if (!armed) return null;
+        try {
+          return requestRereviewWakeImpl({
+            rootDir: ROOT,
+            repo: wakeRepo,
+            prNumber: wakePr,
+            headSha: headSha || null,
+            reason: REREVIEW_WAKE_REASONS.CI_TRANSITION,
+            source: 'watcher-ci-admission',
+            sourceRef: detail,
+            domainId: effectiveDomainId,
+            log: console,
+          });
+        } catch (err) {
+          console.error(
+            `[watcher] CI-transition rereview wake for ${wakeRepo}#${wakePr} failed:`,
+            err?.message || err
+          );
+          return null;
+        }
+      };
       const linearTicketId = operatorSurface.extractLinearTicketId(prTitle);
       const staleDriftSkip = shouldSkipReviewerForStaleDrift({
         number: prNumber,
@@ -1861,6 +1896,29 @@ export async function processReviewSubject(entry, ctx) {
 
       let current = stmtGetReviewRow.get(repoPath, prNumber);
       const pendingRevisionRef = subject.ref?.revisionRef || subject.headSha || null;
+      // RPL-04: drain this PR's durable rereview wake requests here, in the
+      // admission lane, because this is the first point in the tick where the
+      // review row and the live head are both known. The drain records what
+      // admission found — it never mutates review state, so it cannot claim a
+      // row, spawn a reviewer, or re-drive a terminal PR. A request the drain
+      // cannot settle stays pending with a named hold reason and is retried on
+      // the next tick; ordinary polling remains the fallback either way.
+      try {
+        consumeRereviewWakesImpl({
+          rootDir: ROOT,
+          repo: repoPath,
+          prNumber,
+          reviewRow: current,
+          currentHeadSha: pendingRevisionRef,
+          subjectTerminal: Boolean(subject.terminal),
+          log: console,
+        });
+      } catch (err) {
+        console.error(
+          `[watcher] rereview wake drain for ${repoPath}#${prNumber} failed:`,
+          err?.message || err
+        );
+      }
       if (
         current?.review_status === 'pending' &&
         pendingRevisionRef &&
@@ -1925,6 +1983,13 @@ export async function processReviewSubject(entry, ctx) {
                   `${String(blockedHeadSha).slice(0, 12)} -> ${String(pendingRevisionRef).slice(0, 12)}`
               );
             }
+            requestCiTransitionRereviewWake({
+              repoPath,
+              prNumber,
+              headSha: pendingRevisionRef,
+              armed: refreshResult.triggered || current?.review_status === 'pending',
+              detail: 'ci-blocked-head-moved',
+            });
           } catch (err) {
             console.error(
               `[watcher] CI-blocked re-review head refresh for ${repoPath}#${prNumber} failed:`,
@@ -1999,6 +2064,13 @@ export async function processReviewSubject(entry, ctx) {
                   `[watcher] re-armed CI-blocked re-review for ${repoPath}#${prNumber}: external CI is green`
                 );
               }
+              requestCiTransitionRereviewWake({
+                repoPath,
+                prNumber,
+                headSha: pendingRevisionRef || blockedHeadSha,
+                armed: refreshResult.triggered || current?.review_status === 'pending',
+                detail: 'ci-green-on-parked-head',
+              });
             } catch (err) {
               console.error(
                 `[watcher] CI-blocked re-review green-CI refresh for ${repoPath}#${prNumber} failed:`,

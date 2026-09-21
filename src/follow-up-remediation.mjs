@@ -65,6 +65,7 @@ import { deliverAlert } from './alert-delivery.mjs';
 import { captureRemediationBodyAfterPost } from './review-body-capture.mjs';
 import { resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
 import { requestWatcherWake } from './watcher-wake.mjs';
+import { REREVIEW_WAKE_REASONS, requestRereviewWake } from './rereview-wake.mjs';
 import { requestHammerWakeForSettledReviewStop } from './hammer-wake.mjs';
 import { lifecycleStopDecision, resolveJobPRLifecycleSafe } from './follow-up-lifecycle.mjs';
 import { classifyGithubAuthOperationalBlocker, extractCommitShaFromOperationalBlocker, preserveUnpushedCommit, recoverGithubAuthOperationalBlocker, retryGithubAuthPushOnce } from './github-auth-recovery.mjs';
@@ -210,24 +211,6 @@ function parseBooleanEnvFlag(value) {
   if (normalized === '1' || normalized === 'true') return true;
   if (normalized === '' || normalized === '0' || normalized === 'false') return false;
   return null;
-}
-
-function isRemediationToRereviewHandoffEnabled(env = process.env, options = {}) {
-  const envValue = env.ADVERSARIAL_HANDOFF_REMEDIATION_TO_REREVIEW
-    ?? env.AGENT_OS_HANDOFF_REMEDIATION_TO_REREVIEW;
-  const parsedEnv = envValue === undefined ? null : parseBooleanEnvFlag(envValue);
-  if (parsedEnv !== null) return parsedEnv;
-  try {
-    return loadRoleConfig({
-      env,
-      topPath: options.topPath,
-      modulePaths: options.modulePaths,
-      loaderImpl: options.loaderImpl,
-      contextKey: 'handoff.remediation_to_rereview',
-    }).get('handoff.remediation_to_rereview', false) === true;
-  } catch {
-    return false;
-  }
 }
 
 // Kill-switch for the fail-closed harness-identity assert at the remediation
@@ -1752,6 +1735,7 @@ async function reconcileFollowUpJob({
   postCommentImpl = postRemediationOutcomeComment,
   requestReviewRereviewImpl = requestReviewRereview,
   requestWatcherWakeImpl = requestWatcherWake,
+  requestRereviewWakeImpl = requestRereviewWake,
   resolvePRLifecycleImpl = resolvePRLifecycle,
   auditWorkspaceForContaminationImpl = auditWorkspaceForContamination,
   inspectRemediationCiRegressionImpl = inspectRemediationCiRegression,
@@ -2783,41 +2767,38 @@ async function reconcileFollowUpJob({
     );
     const rereviewBlocked = rereview.requested && !rereviewAccepted;
 
-    if (
-      rereviewAccepted &&
-      isRemediationToRereviewHandoffEnabled(process.env, { topPath: join(rootDir, 'config.yaml') })
-    ) {
-      try {
-        const wakeHeadSha =
+    if (rereviewAccepted) {
+      const wake = requestRereviewWakeImpl({
+        rootDir,
+        repo: job.repo,
+        prNumber: job.prNumber,
+        headSha:
           rereview.reviewRow?.revisionRef ||
           rereview.reviewRow?.reviewerHeadSha ||
           job.headSha ||
           job.revisionRef ||
-          null;
-        const wake = requestWatcherWakeImpl({
-          rootDir,
-          reason: 'remediation-to-rereview',
-          repo: job.repo,
-          prNumber: job.prNumber,
-          ...(wakeHeadSha ? { headSha: wakeHeadSha } : {}),
-          requestedAt: completedAt,
-        });
-        rereview.wake = {
-          requested: wake?.requested === true,
-          reason: wake?.payload?.reason || 'remediation-to-rereview',
-          requestedAt: wake?.payload?.requested_at || completedAt,
-        };
-      } catch (err) {
-        rereview.wake = {
-          requested: false,
-          reason: 'wake-failed',
-          error: err?.message || String(err),
-        };
-        log.warn?.(
-          `[follow-up-remediation] watcher wake failed after re-review reset for ` +
-          `${job.repo}#${job.prNumber}: ${err?.message || err}`
-        );
-      }
+          null,
+        reason: REREVIEW_WAKE_REASONS.REMEDIATION_CLOSEOUT,
+        source: 'follow-up-remediation',
+        sourceRef: job.jobId || null,
+        domainId: job.domainId || null,
+        subjectExternalId: job.subjectExternalId || null,
+        requestedAt: completedAt,
+        requestWatcherWakeImpl,
+        log,
+      });
+      // Project the queue result down to what belongs in the job record. The
+      // full result carries an absolute record path and telemetry status that
+      // are queue-internal; the job file is an operator/PR-comment surface and
+      // stays a stable four-field shape.
+      rereview.wake = {
+        requested: wake?.requested === true,
+        reason: wake?.wakeReason || REREVIEW_WAKE_REASONS.REMEDIATION_CLOSEOUT,
+        requestedAt: wake?.requestedAt || completedAt,
+        outcome: wake?.outcome || 'failed',
+        detail: wake?.reason || null,
+        watcherWoken: wake?.watcherWake?.requested === true,
+      };
     }
 
     if (!rereview.requested) {

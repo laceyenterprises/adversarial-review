@@ -92,6 +92,27 @@
              long enough to measure real pass duration. -->
         <key>REVIEWER_TOKEN_FETCH_TIMEOUT_MS</key>
         <string>30000</string>
+        <!-- Posted-review handler budget, raised from the 180s code default.
+             The AMA hammer-dispatch step budget is DERIVED from this, not set
+             directly: (handlerTimeout - headroom) / stepCount = (180000-5000)/2
+             = 87500 ms. The direct override
+             ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS is
+             wrapped in Math.min against that derived value, so it can only LOWER
+             the deadline -- this is the only knob that raises it.
+
+             Measured 2026-09-21: 16 of 24 watcher step-deadline exceedances were
+             `in_flight_operation=ama-hammer-dispatch`, with elapsed 87505, 87508,
+             93394, 140568 and 146244 ms against the 87500 ms budget. Each
+             exceedance abandons the hammer dispatch mid-flight, so a PR with a
+             clean verdict never reaches autonomous merge and waits for an
+             operator hand-merge.
+
+             360000 yields a step budget of (360000-5000)/2 = 177500 ms, ~21%
+             above the worst observed. The bound still exists; a genuinely wedged
+             coexistence resolve is still abandoned. Revisit with the other
+             latency bounds once #1099 has been live long enough to measure. -->
+        <key>ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS</key>
+        <string>360000</string>
         <key>AGENT_OS_SESSION_LEDGER_DSN</key>
         <string>postgresql://airlock@127.0.0.1:6432/agent_os_ledger</string>
         <key>AGENT_OS_SESSION_LEDGER_TARGET</key>

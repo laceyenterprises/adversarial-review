@@ -30,6 +30,14 @@ operator-only cleanup.
   replacing only the queue IDs it read at the start of the pass.
 - Watcher startup and poll preflight cap subprocess-backed retry attempts per
   tick so attestation maintenance cannot starve first-pass or rereview dispatch.
+  The cap has two dimensions: a maximum entry count per tick, and a wall-clock
+  budget after which the drain stops starting new entries. The budget is measured
+  against a monotonic clock (`performance.now()`), never `Date.now()`, so a
+  backwards NTP step cannot make elapsed time negative and disable the guard.
+  Exactly one entry is always attempted even when the budget is zero or already
+  spent, so a single slow retry cannot stall queue progress. Entries left
+  unattempted stay in `pending.jsonl` untouched -- not consumed, quarantined, or
+  dropped -- and the reported `attempted` count reflects attempts actually made.
 - `hcp-unavailable` and transient subprocess failures stay in `pending.jsonl` for
   later retry. When the transient signal depends on an error code such as `EIO`
   or `ECONNRESET`, or on an exec timeout that killed the child process, retry

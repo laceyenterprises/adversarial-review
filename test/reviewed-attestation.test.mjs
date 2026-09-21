@@ -1125,3 +1125,184 @@ test('reviewed attestation code does not define a Node-local signing canonicaliz
   const source = readFileSync(new URL('../src/reviewed-attestation.mjs', import.meta.url), 'utf8');
   assert.doesNotMatch(source, /canonical/i);
 });
+
+test('queued reviewed attestation retry stops starting entries once the tick wall-clock budget is spent', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewed-attestation-queue-budget-'));
+  try {
+    const payloadArgsFor = (prNumber) => ({
+      repo: 'laceyenterprises/demo',
+      prNumber,
+      headSha: `head-sha-${prNumber}`,
+      reviewerIdentity: 'codex-reviewer-lacey',
+      verdict: 'comment-only',
+      findingsCount: 0,
+    });
+    for (const prNumber of [41, 42, 43]) {
+      await enqueuePendingReviewedAttestation(
+        rootDir,
+        payloadArgsFor(prNumber),
+        Object.assign(new Error('transient'), { code: 'EIO' }),
+      );
+    }
+    assert.equal((await readPendingReviewedAttestations(rootDir)).length, 3);
+
+    // Each retry "costs" 6s of the 10s budget, so the second attempt starts
+    // (elapsed 6s < 10s) and the third does not (elapsed 12s >= 10s).
+    let clock = 0;
+    const result = await retryPendingReviewedAttestations({
+      rootDir,
+      execFileImpl: (command, args) => {
+        if (args[1] === 'record') {
+          clock += 6_000;
+          return {
+            child: { stdin: { end() {} } },
+            then(resolve) { resolve({ stdout: '{"recorded":true}' }); },
+            catch() { return this; },
+          };
+        }
+        const payloadJson = JSON.parse(args[args.indexOf('--payload-json') + 1]);
+        const prNumber = Number(args[args.indexOf('--pr') + 1]);
+        return Promise.resolve({
+          stdout: JSON.stringify({
+            ...buildReviewedAttestationPayload(payloadArgsFor(prNumber)),
+            payload: payloadJson,
+            ts: args[args.indexOf('--ts') + 1],
+            signature: signatureFor('codex-reviewer-lacey'),
+          }),
+        });
+      },
+      env: {},
+      log: { log() {} },
+      maxEntriesPerRun: 25,
+      maxMillisPerRun: 10_000,
+      monotonicNow: () => clock,
+    });
+
+    assert.equal(result.attempted, 2, 'third entry must not be started past the budget');
+    assert.equal(result.consumed, 2);
+    assert.equal(result.remaining, 1);
+    // The unattempted entry stays queued rather than being dropped or quarantined.
+    const stillPending = await readPendingReviewedAttestations(rootDir);
+    assert.equal(stillPending.length, 1);
+    assert.equal(stillPending[0].payload.pr_number, 43);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('queued reviewed attestation retry always attempts one entry even with a zero budget', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewed-attestation-queue-zero-budget-'));
+  try {
+    const payloadArgs = {
+      repo: 'laceyenterprises/demo',
+      prNumber: 51,
+      headSha: 'head-sha-51',
+      reviewerIdentity: 'codex-reviewer-lacey',
+      verdict: 'comment-only',
+      findingsCount: 0,
+    };
+    await enqueuePendingReviewedAttestation(
+      rootDir,
+      payloadArgs,
+      Object.assign(new Error('transient'), { code: 'EIO' }),
+    );
+
+    const result = await retryPendingReviewedAttestations({
+      rootDir,
+      execFileImpl: (command, args) => {
+        if (args[1] === 'record') {
+          return {
+            child: { stdin: { end() {} } },
+            then(resolve) { resolve({ stdout: '{"recorded":true}' }); },
+            catch() { return this; },
+          };
+        }
+        const payloadJson = JSON.parse(args[args.indexOf('--payload-json') + 1]);
+        return Promise.resolve({
+          stdout: JSON.stringify({
+            ...buildReviewedAttestationPayload(payloadArgs),
+            payload: payloadJson,
+            ts: args[args.indexOf('--ts') + 1],
+            signature: signatureFor('codex-reviewer-lacey'),
+          }),
+        });
+      },
+      env: {},
+      log: { log() {} },
+      maxEntriesPerRun: 25,
+      maxMillisPerRun: 0,
+      monotonicNow: () => 0,
+    });
+
+    assert.deepEqual(result, { attempted: 1, consumed: 1, remaining: 0 });
+    assert.equal((await readPendingReviewedAttestations(rootDir)).length, 0);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('queued reviewed attestation retry budget survives a backwards wall-clock step', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewed-attestation-queue-clock-'));
+  const realDateNow = Date.now;
+  try {
+    const payloadArgsFor = (prNumber) => ({
+      repo: 'laceyenterprises/demo',
+      prNumber,
+      headSha: `head-sha-${prNumber}`,
+      reviewerIdentity: 'codex-reviewer-lacey',
+      verdict: 'comment-only',
+      findingsCount: 0,
+    });
+    for (const prNumber of [61, 62, 63]) {
+      await enqueuePendingReviewedAttestation(
+        rootDir,
+        payloadArgsFor(prNumber),
+        Object.assign(new Error('transient'), { code: 'EIO' }),
+      );
+    }
+
+    // Simulate NTP stepping the wall clock backwards during the drain. A
+    // Date.now()-based budget would compute negative elapsed time, fail the
+    // `elapsed >= budget` guard, and drain the whole queue in one tick.
+    let fakeWall = realDateNow();
+    Date.now = () => { fakeWall -= 60_000; return fakeWall; };
+
+    const result = await retryPendingReviewedAttestations({
+      rootDir,
+      execFileImpl: (command, args) => {
+        if (args[1] === 'record') {
+          return {
+            child: { stdin: { end() {} } },
+            then(resolve) { resolve({ stdout: '{"recorded":true}' }); },
+            catch() { return this; },
+          };
+        }
+        const payloadJson = JSON.parse(args[args.indexOf('--payload-json') + 1]);
+        const prNumber = Number(args[args.indexOf('--pr') + 1]);
+        return Promise.resolve({
+          stdout: JSON.stringify({
+            ...buildReviewedAttestationPayload(payloadArgsFor(prNumber)),
+            payload: payloadJson,
+            ts: args[args.indexOf('--ts') + 1],
+            signature: signatureFor('codex-reviewer-lacey'),
+          }),
+        });
+      },
+      env: {},
+      log: { log() {} },
+      maxEntriesPerRun: 25,
+      maxMillisPerRun: 0,
+      // monotonicNow intentionally not injected: exercise the real default.
+    });
+
+    assert.equal(
+      result.attempted,
+      1,
+      'budget guard must hold when the wall clock steps backwards',
+    );
+    assert.equal((await readPendingReviewedAttestations(rootDir)).length, 2);
+  } finally {
+    Date.now = realDateNow;
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});

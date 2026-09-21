@@ -5,6 +5,8 @@ import {
   applyReviewerWorkerClassFallbackToRoute,
   resolveReviewerWorkerClassWithFallback,
   reviewWorkerClassFallback,
+  FLEET_QUOTA_STATUS_CACHE_TTL_MS,
+  FLEET_QUOTA_STATUS_TIMEOUT_MS,
 } from '../src/review-worker-class-fallback.mjs';
 
 function fleetStatusStub(rows) {
@@ -587,4 +589,48 @@ test('does not apply or claim fallback success when the worker class has no mode
   assert.equal(result.applied, false);
   assert.equal(result.reason, 'fallback-route-unavailable');
   assert.equal(result.route, route);
+});
+
+// A cache cannot serve a hit if its TTL expires before the call it caches can
+// even return. The shipped pairing was TTL=10s against a bound of 20s, so a slow
+// read (measured median 18s on the reference host) guaranteed a miss for the next
+// caller — the watcher re-read fleet quota status once per PR, 76 reads and
+// 38.3 minutes of wall clock in one poll window, and polls stopped completing.
+// Keep the ordering explicit so neither constant can be retuned back into it.
+test('quota-status cache TTL outlives the quota-status timeout', () => {
+  assert.ok(
+    FLEET_QUOTA_STATUS_CACHE_TTL_MS > FLEET_QUOTA_STATUS_TIMEOUT_MS,
+    `cache TTL (${FLEET_QUOTA_STATUS_CACHE_TTL_MS}ms) must exceed the read timeout ` +
+      `(${FLEET_QUOTA_STATUS_TIMEOUT_MS}ms), or a slow read always expires its own cache entry`,
+  );
+});
+
+test('a second PR in the same poll reuses the cached quota read across per-PR work', async () => {
+  let execCount = 0;
+  const cache = new Map();
+  let clock = 0;
+  const execFileImpl = async () => {
+    execCount += 1;
+    clock += 18_000; // the read itself: measured median on the reference host
+    return { stdout: JSON.stringify({ providerStatuses: CODEX_EXHAUSTED_CLAUDE_OK }) };
+  };
+  const call = () => resolveReviewerWorkerClassWithFallback({
+    authorClass: 'gemini',
+    primary: 'codex',
+    fallbackWorkerClasses: ['claude-code'],
+    execFileImpl,
+    fleetQuotaStatusCache: cache,
+    nowMs: () => clock,
+  });
+
+  const first = await call();
+  // A watcher poll does substantial per-PR work between quota reads (GitHub
+  // reads, gate evaluation, spawn decisions). That gap, not the read latency,
+  // is what expired the old 10s entry and forced one re-read per PR.
+  clock += 30_000;
+  const second = await call();
+
+  assert.equal(first.workerClass, 'claude-code');
+  assert.equal(second.workerClass, 'claude-code');
+  assert.equal(execCount, 1, 'second PR must reuse the cached quota snapshot, not re-read it');
 });

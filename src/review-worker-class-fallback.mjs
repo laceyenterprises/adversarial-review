@@ -17,9 +17,28 @@ const execFileAsync = promisify(execFileCb);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SUBMODULE_ROOT = resolve(__dirname, '..');
 const AGENT_OS_ROOT = resolve(SUBMODULE_ROOT, '..', '..');
-const FLEET_QUOTA_STATUS_TIMEOUT_MS = 20_000;
+// Measured on the reference host 2026-09-21: `hq fleet quota status --json` runs
+// 5-7s standalone but 10-100s (median 18.0s) inside a loaded watcher poll, so a
+// 20s bound killed 31 of 76 reads (41%). Each kill costs the full bound plus two
+// retries and then fails open, which silently drops the reviewer-routing signal
+// this call exists to provide. 45s clears the observed median with headroom while
+// still bounding a genuinely wedged read.
+export const FLEET_QUOTA_STATUS_TIMEOUT_MS = 45_000;
 const FLEET_QUOTA_STATUS_RETRY_DELAYS_MS = Object.freeze([250, 1000]);
-export const FLEET_QUOTA_STATUS_CACHE_TTL_MS = 10_000;
+// This cache exists so one watcher poll reads fleet quota status once, not once
+// per PR. At a 10s TTL it never achieved that: a poll does substantial per-PR work
+// between reads (GitHub reads, gate evaluation, spawn decisions), so the entry was
+// always expired by the time the next PR needed it. Measured on the reference host
+// 2026-09-21: 76 reads and 38.3 minutes of wall clock inside a single poll window,
+// against a 45-minute stall budget — which is what kept `last_completed_poll_at`
+// from ever advancing and left the review lane starved.
+//
+// The cached value is a provider quota snapshot the probe daemon refreshes about
+// hourly and marks fresh for 7200s, so holding it for one poll interval (300s) is
+// well inside its own freshness contract. The TTL must also stay above
+// FLEET_QUOTA_STATUS_TIMEOUT_MS, or a read that consumes its full bound expires
+// its own entry before any caller can use it.
+export const FLEET_QUOTA_STATUS_CACHE_TTL_MS = 300_000;
 export const FLEET_QUOTA_STATUS_TICK_CACHE_TTL_MS = 60_000;
 const FLEET_QUOTA_STATUS_CACHE_BY_EXEC = new WeakMap();
 

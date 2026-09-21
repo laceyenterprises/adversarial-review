@@ -401,3 +401,46 @@ test('apply reports posted-no-artifact when no reviewer pass identity exists', a
   assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'posted');
   db.close();
 });
+
+// A reviewer pass can post its review to GitHub and then never reach
+// settleReviewerAttempt() — watcher restart, process death, or a non-ok
+// classification after the post already landed. The row is left at `pending`
+// while the pass carries a real gh_comment_id, and a pending row stays eligible
+// for review, so the SAME PR gets reviewed again. Measured on the reference host
+// 2026-09-21: 32 of 99 posted reviews in 24h were unsettled and #6928 was
+// reviewed six times. Scanning only 'failed-orphan' made the reconciler report
+// scanned:0 against all of them.
+test('apply reconciles a still-pending row whose review is already posted on GitHub', async () => {
+  const db = fixture();
+  db.prepare("UPDATE reviewed_prs SET review_status = 'pending', posted_at = NULL, failed_at = NULL").run();
+
+  const result = await reconcilePostedFailedOrphans({
+    db,
+    apply: true,
+    listReviews: async () => [POSTED_REVIEW],
+  });
+
+  assert.equal(result.scanned, 1, 'a pending row with a posted review must be scanned');
+  const row = db.prepare('SELECT review_status, posted_at FROM reviewed_prs').get();
+  assert.equal(row.review_status, 'posted', 'the row must settle so the PR is not reviewed again');
+  assert.ok(row.posted_at, 'posted_at must be restored from the GitHub review');
+  db.close();
+});
+
+test('a pending row is NOT settled when GitHub has no matching review', async () => {
+  const db = fixture();
+  db.prepare("UPDATE reviewed_prs SET review_status = 'pending', posted_at = NULL, failed_at = NULL").run();
+
+  const result = await reconcilePostedFailedOrphans({
+    db,
+    apply: true,
+    listReviews: async () => [],
+  });
+
+  // Widening the scan must never settle a row without real posted evidence —
+  // doing so would suppress a review the PR still needs.
+  assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'pending');
+  assert.equal(db.prepare('SELECT posted_at FROM reviewed_prs').get().posted_at, null);
+  assert.equal(result.reconciled, 0);
+  db.close();
+});

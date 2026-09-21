@@ -53,14 +53,35 @@ export async function reconcilePostedFailedOrphans({
 } = {}) {
   const scanLimit = Number.isInteger(Number(limit)) && Number(limit) > 0 ? Number(limit) : 20;
   const depthBefore = Number(db.prepare(SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW).get()?.n || 0);
+  // Scan BOTH terminal-orphan and still-pending rows.
+  //
+  // A reviewer pass can post its review to GitHub and then never reach
+  // settleReviewerAttempt() — the watcher is restarted, the process dies, or the
+  // result is classified non-ok after the post already landed. The row is left at
+  // `pending` with `posted_at` NULL while `reviewer_passes` carries a real
+  // `gh_comment_id`. Remediation re-entry legitimately resets `posted_at` to NULL
+  // as well (see the RVFRESH-01 note in review-state-db.mjs), so a pending row
+  // with a posted review is reachable by more than one route.
+  //
+  // Left alone that row stays eligible for review, so the SAME PR is reviewed
+  // again. Measured on the reference host 2026-09-21: 32 of 99 posted reviews in
+  // 24h had not settled (32%), and #6928 and #6926 were each reviewed SIX times.
+  // The wasted slots then surface as `review:queue_starvation` and a rising
+  // `review:rereview_queue_wait`, which point at capacity rather than at the
+  // unsettled row.
+  //
+  // Restricting this scan to 'failed-orphan' meant a live dry run reported
+  // `scanned: 0` against those 32 rows. Widening is safe because nothing below
+  // marks a row posted without a real GitHub review: markPosted is only ever
+  // called with `review.submitted_at` from the PR's reviews API.
   const rows = db.prepare(
     `SELECT repo, pr_number, reviewer, review_status, review_attempts, last_attempted_at,
             reviewer_started_at, reviewer_session_uuid, reviewer_head_sha,
             infra_auto_recover_attempts
        FROM reviewed_prs
       WHERE pr_state = 'open'
-        AND review_status = 'failed-orphan'
-      ORDER BY failed_at, id
+        AND review_status IN ('failed-orphan', 'pending')
+      ORDER BY COALESCE(failed_at, last_attempted_at), id
       LIMIT ?`
   ).all(scanLimit);
   const markPosted = db.prepare(
@@ -68,7 +89,7 @@ export async function reconcilePostedFailedOrphans({
         SET review_status = 'posted', posted_at = ?, failed_at = NULL,
             failure_message = NULL, reviewer_lease_expires_at = NULL,
             infra_auto_recover_attempts = 0
-      WHERE repo = ? AND pr_number = ? AND review_status = 'failed-orphan'
+      WHERE repo = ? AND pr_number = ? AND review_status IN ('failed-orphan', 'pending')
         AND pr_state = 'open'
         AND COALESCE(reviewer_session_uuid, '') = COALESCE(?, '')`
   );

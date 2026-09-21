@@ -50,6 +50,31 @@
 
     <key>EnvironmentVariables</key>
     <dict>
+        <!-- Watchdog thresholds raised from the code defaults (stall 10m,
+             starvation 15m) to 45m. A single watcher poll legitimately exceeds
+             the defaults on this host: each pass reads provider quota status,
+             and that read was measured at 13s to 200s (one sample 200,797 ms)
+             while the OpenAI primary was exhausted and reviewer routing fell
+             back. The stall watchdog was firing on a watcher that was slow, not
+             wedged, SIGTERM-ing it mid review (launchd reported exit code 143
+             with the run count climbing) and losing the pass.
+
+             These were applied as an uncommitted hotpatch to this file on the
+             deploy host on 2026-09-20. That left tools/adversarial-review dirty
+             in the parent deploy checkout, which froze main-catchup on
+             freezeClass=non-absorbable-dirt and blocked every deploy, including
+             PRs #1098 and #1099, the two commits that actually reduce the
+             latency this hotpatch was compensating for. Committing the values is
+             what lets the deploy unwedge and carry those fixes to the host.
+
+             Revisit once #1099 (quota-status cached per poll instead of per PR)
+             has been live long enough to measure: if pass duration drops back
+             under the code defaults, lower these again rather than leaving a 45m
+             blind spot in stall detection. -->
+        <key>ADVERSARIAL_WATCHER_STALL_WATCHDOG_MS</key>
+        <string>2700000</string>
+        <key>ADVERSARIAL_WATCHER_POLL_STARVATION_MS</key>
+        <string>2700000</string>
         <key>AGENT_OS_SESSION_LEDGER_DSN</key>
         <string>postgresql://airlock@127.0.0.1:6432/agent_os_ledger</string>
         <key>AGENT_OS_SESSION_LEDGER_TARGET</key>

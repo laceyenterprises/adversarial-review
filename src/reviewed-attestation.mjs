@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { isDeepStrictEqual, promisify } from 'node:util';
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -535,7 +536,9 @@ async function retryPendingReviewedAttestations({
   now = () => new Date().toISOString(),
   maxEntriesPerRun = Number.POSITIVE_INFINITY,
   maxMillisPerRun = Number.POSITIVE_INFINITY,
-  monotonicNow = () => Date.now(),
+  // Monotonic: a backwards wall-clock step (NTP) would make elapsed negative
+  // and silently disable the budget guard below.
+  monotonicNow = () => performance.now(),
 } = {}) {
   const pending = await readPendingReviewedAttestations(rootDir);
   if (pending.length === 0) {

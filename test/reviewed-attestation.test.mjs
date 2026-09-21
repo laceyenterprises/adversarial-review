@@ -1240,3 +1240,69 @@ test('queued reviewed attestation retry always attempts one entry even with a ze
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
+
+test('queued reviewed attestation retry budget survives a backwards wall-clock step', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewed-attestation-queue-clock-'));
+  const realDateNow = Date.now;
+  try {
+    const payloadArgsFor = (prNumber) => ({
+      repo: 'laceyenterprises/demo',
+      prNumber,
+      headSha: `head-sha-${prNumber}`,
+      reviewerIdentity: 'codex-reviewer-lacey',
+      verdict: 'comment-only',
+      findingsCount: 0,
+    });
+    for (const prNumber of [61, 62, 63]) {
+      await enqueuePendingReviewedAttestation(
+        rootDir,
+        payloadArgsFor(prNumber),
+        Object.assign(new Error('transient'), { code: 'EIO' }),
+      );
+    }
+
+    // Simulate NTP stepping the wall clock backwards during the drain. A
+    // Date.now()-based budget would compute negative elapsed time, fail the
+    // `elapsed >= budget` guard, and drain the whole queue in one tick.
+    let fakeWall = realDateNow();
+    Date.now = () => { fakeWall -= 60_000; return fakeWall; };
+
+    const result = await retryPendingReviewedAttestations({
+      rootDir,
+      execFileImpl: (command, args) => {
+        if (args[1] === 'record') {
+          return {
+            child: { stdin: { end() {} } },
+            then(resolve) { resolve({ stdout: '{"recorded":true}' }); },
+            catch() { return this; },
+          };
+        }
+        const payloadJson = JSON.parse(args[args.indexOf('--payload-json') + 1]);
+        const prNumber = Number(args[args.indexOf('--pr') + 1]);
+        return Promise.resolve({
+          stdout: JSON.stringify({
+            ...buildReviewedAttestationPayload(payloadArgsFor(prNumber)),
+            payload: payloadJson,
+            ts: args[args.indexOf('--ts') + 1],
+            signature: signatureFor('codex-reviewer-lacey'),
+          }),
+        });
+      },
+      env: {},
+      log: { log() {} },
+      maxEntriesPerRun: 25,
+      maxMillisPerRun: 0,
+      // monotonicNow intentionally not injected: exercise the real default.
+    });
+
+    assert.equal(
+      result.attempted,
+      1,
+      'budget guard must hold when the wall clock steps backwards',
+    );
+    assert.equal((await readPendingReviewedAttestations(rootDir)).length, 2);
+  } finally {
+    Date.now = realDateNow;
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});

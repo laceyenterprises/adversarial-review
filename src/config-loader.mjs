@@ -2730,12 +2730,20 @@ function schemaV1() {
             __nullable: true,
           },
           timeout_ms: { __type: TYPE_INT, __default: 1200000 },
-          // Non-streaming reviewer CLIs must produce their first byte by this
-          // deadline. A silent process is retried with freshly prepared auth.
+          // One-shot first-byte deadline for a reviewer subprocess: armed once
+          // before the child runs, cleared permanently on the first byte, never
+          // re-armed. 0 (the default) DISABLES it.
+          //
+          // Default off because the cli-direct reviewers are non-streaming --
+          // `claude --print --output-format json` writes a single document at the
+          // end of the turn, so any first-output deadline caps a healthy review
+          // instead of bounding a wedged launch. Enable this only for a reviewer
+          // launched with a streaming output format. Do NOT implement it with
+          // `progress_timeout_ms`, which is a ROLLING no-output watchdog.
           first_output_timeout_ms: {
             __type: TYPE_INT,
-            __default: 120000,
-            __min: 1000,
+            __default: 0,
+            __min: 0,
           },
           // The reviewer is also killed if it makes no progress (no output
           // event) for this many ms. Distinct from the total wall-clock

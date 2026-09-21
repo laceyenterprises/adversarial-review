@@ -54,12 +54,21 @@ test('default reviewer progress timeout is 15 minutes', () => {
   assert.equal(DEFAULT_PROGRESS_TIMEOUT_MS, 15 * 60 * 1000);
 });
 
-test('Claude first-output deadline defaults to two minutes and is configurable', () => {
-  assert.equal(DEFAULT_FIRST_OUTPUT_TIMEOUT_MS, 120_000);
-  assert.equal(resolveFirstOutputTimeoutMs({}), 120_000);
+// The default is OFF, and that is load-bearing. The cli-direct reviewers are
+// non-streaming (`claude --print --output-format json` writes one document at the
+// end of the turn), so a first-output deadline armed by default would cap every
+// healthy review instead of bounding a wedged launch — the behaviour this PR's
+// review blocked on. Enabling it is an opt-in for streaming reviewers only.
+test('Claude first-output deadline is disabled by default and opt-in configurable', () => {
+  assert.equal(DEFAULT_FIRST_OUTPUT_TIMEOUT_MS, 0);
+  assert.equal(resolveFirstOutputTimeoutMs({}), 0);
   assert.equal(resolveFirstOutputTimeoutMs({
     ADVERSARIAL_REVIEWER_FIRST_OUTPUT_TIMEOUT_MS: '45000',
   }), 45_000);
+  // An explicit 0 must survive the positive-int guard rather than falling back.
+  assert.equal(resolveFirstOutputTimeoutMs({
+    ADVERSARIAL_REVIEWER_FIRST_OUTPUT_TIMEOUT_MS: '0',
+  }), 0);
 });
 
 test('resolveProgressTimeoutMs follows the reviewer env override parser shape', () => {

@@ -1610,9 +1610,16 @@ function summarizeReviewerModelSilence(db, { nowMs, config }) {
       config.reviewerSilenceThresholdMs,
       cadenceThresholdMs || 0
     );
-    const startedPasses = (startedByModel.get(row.model) || []).filter(
+    const qualifyingStarts = (startedByModel.get(row.model) || []).filter(
       (startedMs) => lastPostedMs === null || startedMs > lastPostedMs
-    ).length;
+    );
+    const startedPasses = qualifyingStarts.length;
+    // Oldest qualifying start, so the never-posted branch can require real
+    // elapsed evidence instead of firing on the existence of a started pass.
+    const oldestStartedMs = qualifyingStarts.length ? Math.min(...qualifyingStarts) : null;
+    const oldestStartedAgeMs = oldestStartedMs === null
+      ? null
+      : Math.max(0, nowMs - oldestStartedMs);
     return {
       model: row.model,
       lastPostedAt: row.lastPostedAt,
@@ -1622,10 +1629,23 @@ function summarizeReviewerModelSilence(db, { nowMs, config }) {
       cadenceThresholdMs,
       cadenceSampleSize: cadenceIntervals.length,
       startedPasses,
+      oldestStartedAgeMs,
+      // Pure reporting: "this class posted nothing inside the activity
+      // lookback". Deliberately decoupled from `silent` so the runbook's
+      // idle-reporting contract does not imply an alert.
       idleForWindow: row.postedReviews === 0,
       silent: (
         startedPasses > 0
-        && (lastPostedMs === null || ageMs >= thresholdMs)
+        && (
+          lastPostedMs === null
+            // Never posted in the window: demand elapsed evidence. Firing on
+            // the mere existence of a started pass alerted on a HEALTHY
+            // in-flight first pass and advertised a thresholdMs it never
+            // consulted. thresholdMs is at least the 24h floor, well beyond
+            // reviewer.timeout_ms, so an in-flight pass can never qualify.
+            ? oldestStartedAgeMs !== null && oldestStartedAgeMs >= thresholdMs
+            : ageMs >= thresholdMs
+        )
       ),
     };
   });
@@ -4339,7 +4359,7 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     const modelNoun = `reviewer model${modelNames.length === 1 ? '' : 's'}`;
     const modelVerb = modelNames.length === 1 ? 'has' : 'have';
     const lastPostedByModel = orderedSilentModels
-      .map((model) => `${model.model}:${model.lastPostedAt}`)
+      .map((model) => `${model.model}:${model.lastPostedAt || 'none in window'}`)
       .join(',');
     const startedPassesByModel = orderedSilentModels
       .map((model) => `${model.model}:${model.startedPasses}`)
@@ -4352,6 +4372,7 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
       evidence: [
         `reviews.db reviewer_passes models=${modelNames.join(',')} pass_kind IN first-pass,rereview gh_comment_id non-empty`,
         `last_posted_at_by_model=${lastPostedByModel} threshold_ms_by_model=${orderedSilentModels.map((model) => `${model.model}:${model.thresholdMs}`).join(',')}`,
+        `idle_for_window_by_model=${orderedSilentModels.map((model) => `${model.model}:${model.idleForWindow === true}`).join(',')} oldest_started_age_ms_by_model=${orderedSilentModels.map((model) => `${model.model}:${model.oldestStartedAgeMs ?? 'none'}`).join(',')}`,
         `started_passes_since_last_post_by_model=${startedPassesByModel}`,
       ],
       recommendedAction: 'Inspect this model\'s selector decisions, OAuth transport, and recent reviewer passes now; do not wait for a failed selection to trigger the death-rate alarm.',

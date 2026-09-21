@@ -820,7 +820,7 @@ test('reviewer model silence parses timezone-less SQLite timestamps as UTC', () 
   }
 });
 
-test('reviewer model silence ages out models with no posted review inside the activity lookback', () => {
+test('a class with no posted review in the lookback is reported idleForWindow without alerting', () => {
   const rootDir = tempRoot();
   try {
     insertReviewerPass(rootDir, {
@@ -871,11 +871,17 @@ test('reviewer model silence ages out models with no posted review inside the ac
         reviewerActivityLookbackMs: 7 * 24 * 60 * 60 * 1000,
       },
     });
-    const claude = reviewerModelSilentDetails(snapshot, 'claude');
-    assert.ok(claude);
+    // Reported: the class is materialized in the snapshot even with zero posts,
+    // so an idle class cannot vanish from the surface.
+    const claude = snapshot.reviewerModelSilence.models.find((entry) => entry.model === 'claude');
+    assert.ok(claude, 'claude must be materialized even with no posted review in the window');
     assert.equal(claude.lastPostedAt, null);
     assert.equal(claude.idleForWindow, true);
-    assert.equal(reviewerModelSilentDetails(snapshot, 'gemini'), undefined);
+    // NOT alerting: the only qualifying started pass is far younger than the 24h
+    // threshold, so there is no elapsed evidence of silence. Firing here would
+    // page an operator about a reviewer that is running normally.
+    assert.equal(claude.silent, false, 'a fresh started pass is not evidence of silence');
+    assert.equal(reviewerModelSilentFinding(snapshot), undefined);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

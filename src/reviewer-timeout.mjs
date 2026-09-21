@@ -13,7 +13,17 @@ import { loadRoleConfig } from './role-config.mjs';
 
 const DEFAULT_REVIEWER_TIMEOUT_MS = 20 * 60 * 1000;
 const DEFAULT_PROGRESS_TIMEOUT_MS = 15 * 60 * 1000;
-const DEFAULT_FIRST_OUTPUT_TIMEOUT_MS = 2 * 60 * 1000;
+// DISABLED by default, and that is the contract, not an oversight.
+// `claude --print --output-format json` emits a single JSON document at the END
+// of the turn, so ANY first-output deadline — even a correct one-shot one — caps
+// a healthy review at that value rather than bounding a wedged launch. The
+// governing SPEC records this: cli-direct reviewer subprocesses are non-streaming
+// and rely on the hard reviewer timeout for bounding runtime.
+// Enabling this (reviewer.first_output_timeout_ms > 0) is only safe for a reviewer
+// launched with a streaming output format, where silence genuinely means wedged.
+// Wedged non-streaming invocations are observed instead by the reviewer-silence
+// health signal plus the hard `reviewer.timeout_ms`.
+const DEFAULT_FIRST_OUTPUT_TIMEOUT_MS = 0;
 const DEFAULT_AGY_PRINT_TIMEOUT_MS = 19 * 60 * 1000;
 const AGY_PRINT_TIMEOUT_SUBPROCESS_SLACK_MS = 30 * 1000;
 
@@ -58,6 +68,10 @@ function resolveFirstOutputTimeoutMs(env = process.env, options = {}) {
     loaderImpl: options.loaderImpl,
     contextKey: 'reviewer.first_output_timeout_ms',
   }).get('reviewer.first_output_timeout_ms', DEFAULT_FIRST_OUTPUT_TIMEOUT_MS);
+  // 0 is a meaningful value here (deadline disabled), so it must survive the
+  // positive-int guard that the other resolvers use to reject junk.
+  const parsed = Number(cfgValue);
+  if (Number.isFinite(parsed) && parsed === 0) return 0;
   return _resolvePositiveInt(cfgValue, DEFAULT_FIRST_OUTPUT_TIMEOUT_MS);
 }
 

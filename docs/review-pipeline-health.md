@@ -244,11 +244,30 @@ normalization from `src/reviewer-pass-posted-review-sql.mjs` with reviewer
 routing and review-state readers, so adding a routable model or changing the
 stored timestamp contract cannot silently leave this finding behind.
 
+Every configured class is materialized in `models` even with zero posted reviews
+in the lookback window, so a class cannot disappear from the surface by being
+idle. Two fields separate reporting from alerting, and they are deliberately
+decoupled:
+
+- `idleForWindow` — pure reporting. `true` when the class posted nothing inside
+  the activity lookback. It never on its own raises the silence finding.
+- `silent` — the alerting field. Requires started-pass demand **and** elapsed
+  evidence past `thresholdMs`. For a class that never posted in the window the
+  evidence is `oldestStartedAgeMs`, the age of the oldest qualifying started
+  pass; because `thresholdMs` is at least the 24h floor and `reviewer.timeout_ms`
+  is minutes, an in-flight pass can never satisfy it.
+
+`startedPasses` counts qualifying starts (those after the last genuine post, or
+all starts in the window when the class never posted). `oldestStartedAgeMs` is
+`null` when there is no qualifying start. Both appear in the finding evidence as
+`idle_for_window_by_model` and `oldest_started_age_ms_by_model`, so an operator
+can distinguish "never posted in window" from a null/corrupt timestamp column.
+
 | Code | Default threshold | Tier | Clears when |
 |---|---:|---|---|
 | `review:review_state_ledger_unreadable` | `reviews.db` exists but cannot be opened read-only | ticket | the collector can open `reviews.db` read-only again |
 | `review:reviewer_death_rate_high` | failed reviewer attempts are >50% of completed+failed attempts over 1h, with at least 3 completed+failed attempts; `running` and `cancelled` are excluded from the denominator | ticket | the settled-attempt window falls below threshold or the minimum-attempt guard |
-| `review:reviewer_model_silent` | a configured reviewer class with a previous genuine first-pass/rereview comment inside the activity lookback has not posted again past the larger of the 24h floor and that class's recent 95th-percentile post cadence, while at least one pass for that class started after that comment | ticket | the model posts another review inside its cadence-derived silence threshold, no recent started-pass demand remains after its last posted review, or the class has no posted review inside the activity lookback |
+| `review:reviewer_model_silent` | a configured reviewer class has started-pass demand but no genuine first-pass/rereview comment past the larger of the 24h floor and that class's recent 95th-percentile post cadence. Two cases qualify: a class with a previous genuine comment inside the activity lookback that has not posted since, with at least one pass started after that comment; or a class with **no** posted review inside the lookback whose **oldest** qualifying started pass is itself older than that threshold. The elapsed gate applies to both, so a healthy in-flight pass can never trip this finding | ticket | the model posts another review inside its cadence-derived silence threshold, or no started-pass demand older than the threshold remains |
 | `review:unknown_failure_rate_high` | unknown-classified failures are >30% of failures over 15m, with at least 5 failures and at least 2 distinct PRs contributing unknown failures | ticket | the failure window falls back to threshold or below, the sample floor is no longer met, or unknown failures collapse to fewer than 2 PRs |
 | `review:reviewer_degradation_active` | at least one PR is currently held by `provider-overloaded` transient backoff or `quota-exhausted` quota hold | ticket | no active provider-overload backoff or quota hold remains |
 | `review:afh_fallback_edge_supermajority` | one AFH reviewer fallback edge carries >=80% of reviewer selections over 1h with at least 5 selections and 2 distinct PRs, including the edge and grounding reason | ticket | the dominant edge falls below threshold, the sample floor is no longer met, the distinct-PR floor is no longer met, or AFH returns to the primary reviewer |

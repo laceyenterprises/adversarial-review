@@ -3464,8 +3464,11 @@ test('reviewWithClaude retries one silent invocation on claude with freshly prep
     spawnClaudeImpl: async (_args, options) => {
       spawnCalls += 1;
       if (spawnCalls === 1) {
-        const error = new Error('Command no output for 120000ms');
-        error.progressTimedOut = true;
+        // The retry must key on the ONE-SHOT first-output signal, not the rolling
+        // no-output watchdog. `progressTimedOut` on a non-streaming reviewer means
+        // a healthy quiet turn was killed, and retrying that just burns it twice.
+        const error = new Error('Command no first output for 120000ms');
+        error.firstOutputTimedOut = true;
         throw error;
       }
       assert.equal(options.env.ANTHROPIC_AUTH_TOKEN, 'token-2');
@@ -3488,13 +3491,13 @@ test('reviewWithClaude surfaces a second silent failure for normal fallback hand
       expiresAt: '2026-09-10T18:00:00Z',
     }),
     spawnClaudeImpl: async () => {
-      const error = new Error('Command no output for 120000ms');
-      error.progressTimedOut = true;
+      const error = new Error('Command no first output for 120000ms');
+      error.firstOutputTimedOut = true;
       throw error;
     },
     nowMs: Date.parse('2026-09-10T17:20:00Z'),
     logger: { warn() {} },
-  }), /no output/);
+  }), /no first output/);
   assert.equal(authCalls, 2);
 });
 

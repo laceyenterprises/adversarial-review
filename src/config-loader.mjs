@@ -731,6 +731,18 @@ function schemaV1() {
                 __min: 0.0,
                 __max: 3600.0,
               },
+              bridge_startup_grace_seconds: {
+                __type: TYPE_FLOAT,
+                __default: 180.0,
+                __min: 0.0,
+                __max: 3600.0,
+              },
+              bridge_recovery_timeout_seconds: {
+                __type: TYPE_FLOAT,
+                __default: 135.0,
+                __min: 1.0,
+                __max: 1800.0,
+              },
               credential_decay_warn_after_seconds: {
                 __type: TYPE_FLOAT,
                 __default: 300.0,
@@ -3563,6 +3575,14 @@ export const ENV_ALIASES = {
   'oauth_broker.watchdog.broker_standby_container_name': {
     canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_STANDBY_CONTAINER_NAME',
     aliases: [['OAUTH_BROKER_WATCHDOG_STANDBY_CONTAINER_NAME', identity]],
+  },
+  'oauth_broker.watchdog.bridge_startup_grace_seconds': {
+    canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_BRIDGE_STARTUP_GRACE_SECONDS',
+    aliases: [['OAUTH_BROKER_WATCHDOG_BRIDGE_STARTUP_GRACE_SECONDS', Number]],
+  },
+  'oauth_broker.watchdog.bridge_recovery_timeout_seconds': {
+    canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_BRIDGE_RECOVERY_TIMEOUT_SECONDS',
+    aliases: [['OAUTH_BROKER_WATCHDOG_BRIDGE_RECOVERY_TIMEOUT_SECONDS', Number]],
   },
   'oauth_broker.watchdog.credential_decay_warn_after_seconds': {
     canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_WARN_AFTER_SECONDS',

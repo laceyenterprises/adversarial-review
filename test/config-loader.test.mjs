@@ -6544,6 +6544,8 @@ test('top-level config.yaml accepts mirrored oauth_broker watchdog BPR-05 keys',
           portforward_self_heal_max_cycles: 3
           broker_standby_readyz_url: ""
           broker_standby_container_name: litellm-oauth-broker-standby-1
+          bridge_startup_grace_seconds: 181
+          bridge_recovery_timeout_seconds: 136
           credential_decay_warn_after_seconds: 301
           credential_decay_crit_after_seconds: 3601
           credential_decay_last_good_crit_expiry_margin_seconds: 1801
@@ -6556,6 +6558,8 @@ test('top-level config.yaml accepts mirrored oauth_broker watchdog BPR-05 keys',
       cfg.get('oauth_broker.watchdog.broker_standby_container_name'),
       'litellm-oauth-broker-standby-1',
     );
+    assert.equal(cfg.get('oauth_broker.watchdog.bridge_startup_grace_seconds'), 181);
+    assert.equal(cfg.get('oauth_broker.watchdog.bridge_recovery_timeout_seconds'), 136);
     assert.equal(cfg.get('oauth_broker.watchdog.credential_decay_warn_after_seconds'), 301);
     assert.equal(cfg.get('oauth_broker.watchdog.credential_decay_crit_after_seconds'), 3601);
     assert.equal(
@@ -6568,7 +6572,9 @@ test('top-level config.yaml accepts mirrored oauth_broker watchdog BPR-05 keys',
       topPath: top,
       env: {
         OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_WARN_AFTER_SECONDS: '60',
+        OAUTH_BROKER_WATCHDOG_BRIDGE_STARTUP_GRACE_SECONDS: '180',
         OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_CRIT_AFTER_SECONDS: '2400',
+        AGENT_OS_OAUTH_BROKER_WATCHDOG_BRIDGE_RECOVERY_TIMEOUT_SECONDS: '135',
         OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_LAST_GOOD_CRIT_EXPIRY_MARGIN_SECONDS:
           '600',
         OAUTH_BROKER_WATCHDOG_REFRESH_WEDGE_THRESHOLD_SECONDS: '300',
@@ -6579,8 +6585,16 @@ test('top-level config.yaml accepts mirrored oauth_broker watchdog BPR-05 keys',
       60,
     );
     assert.equal(
+      credentialEnvCfg.get('oauth_broker.watchdog.bridge_startup_grace_seconds'),
+      180,
+    );
+    assert.equal(
       credentialEnvCfg.get('oauth_broker.watchdog.credential_decay_crit_after_seconds'),
       2400,
+    );
+    assert.equal(
+      credentialEnvCfg.get('oauth_broker.watchdog.bridge_recovery_timeout_seconds'),
+      135,
     );
     assert.equal(
       credentialEnvCfg.get(

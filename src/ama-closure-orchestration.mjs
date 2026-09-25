@@ -1649,52 +1649,79 @@ export async function maybeDispatchAmaClosureFor({
     logger,
   };
   throwIfAborted(signal);
+  // HAMASYNC-01: in background mode a PR@head alternates between submitting a
+  // closer run and applying that run's settled outcome. The outcome goes through
+  // the same result handling as an inline call below, so a terminal rejection
+  // from the closer's own gates (retry cap, ineligibility) still reaches the
+  // merge-agent fallback and alerting, one tick later.
+  let backgroundSettled = null;
   if (resolveAmaHammerDispatchModeImpl({ env, logger }) === 'background') {
     const backgroundKey = amaHammerBackgroundKey({
       repo: repoPath,
       prNumber,
       headSha: dispatchContext.targetRemediationSha,
     });
-    const submission = amaHammerBackgroundQueueImpl().submit({
-      key: backgroundKey,
-      // Detached from this step's deadline on purpose: the whole point is that
-      // the posted-review phase stops waiting. `hq dispatch` stays bounded by the
-      // closer's own dispatch timeout (resolveAmaDispatchTimeoutMs).
-      run: () => maybeDispatchAmaCloserImpl({ ...closerArgs, signal: null }),
-      onSettled: ({ ok, result: settledResult, error, elapsedMs }) => {
-        logger?.log?.(
-          `[watcher] AMA hammer background dispatch settled for ${backgroundKey}: ` +
-            (ok
-              ? `dispatched=${Boolean(settledResult?.dispatched)} reason=${settledResult?.reason || 'none'}`
-              : `error=${error?.message || error}`) +
-            ` elapsed_ms=${elapsedMs}`,
-        );
-      },
-    });
-    logger?.log?.(
-      `[watcher] AMA hammer dispatch ${submission.state} in background for ${backgroundKey}; ` +
-        `posted-review phase continues`,
-    );
-    return withAmaDispatchMetadata(
-      {
-        dispatched: false,
-        skipMergeAgent: true,
-        reason: AMA_HAMMER_BACKGROUND_REASON,
-        backgroundDispatch: { key: backgroundKey, state: submission.state },
-        ...(hamTerminalRemediationValidated ? { hamTerminalRemediationValidated: true } : {}),
-      },
-      { amaEnabled: true },
-    );
+    const backgroundQueue = amaHammerBackgroundQueueImpl();
+    backgroundSettled = backgroundQueue.takeSettled?.(backgroundKey) || null;
+    if (!backgroundSettled) {
+      const submission = backgroundQueue.submit({
+        key: backgroundKey,
+        // Detached from this step's deadline on purpose: the whole point is that
+        // the posted-review phase stops waiting. `hq dispatch` stays bounded by the
+        // closer's own dispatch timeout (resolveAmaDispatchTimeoutMs). No `signal`
+        // key: the closer's default applies.
+        run: () => maybeDispatchAmaCloserImpl({ ...closerArgs }),
+        onSettled: ({ ok, result: settledResult, error, elapsedMs }) => {
+          logger?.log?.(
+            `[watcher] AMA hammer background dispatch settled for ${backgroundKey}: ` +
+              (ok
+                ? `dispatched=${Boolean(settledResult?.dispatched)} reason=${settledResult?.reason || 'none'}`
+                : `error=${error?.message || error}`) +
+              ` elapsed_ms=${elapsedMs}`,
+          );
+        },
+      });
+      logger?.log?.(
+        `[watcher] AMA hammer dispatch ${submission.state} in background for ${backgroundKey}; ` +
+          `posted-review phase continues`,
+      );
+      return withAmaDispatchMetadata(
+        {
+          dispatched: false,
+          skipMergeAgent: true,
+          reason: AMA_HAMMER_BACKGROUND_REASON,
+          backgroundDispatch: { key: backgroundKey, state: submission.state },
+          ...(hamTerminalRemediationValidated ? { hamTerminalRemediationValidated: true } : {}),
+        },
+        { amaEnabled: true },
+      );
+    }
   }
 
   let result;
   try {
     throwIfAborted(signal);
-    const stopTracking = trackCoexistenceOperation(operationTracker, 'ama-hammer-dispatch');
-    try {
-      result = await maybeDispatchAmaCloserImpl({ ...closerArgs, signal });
-    } finally {
-      stopTracking();
+    if (backgroundSettled) {
+      logger?.log?.(
+        `[watcher] AMA hammer background outcome applied for ${repoPath}#${prNumber}: ` +
+          (backgroundSettled.ok
+            ? `dispatched=${Boolean(backgroundSettled.result?.dispatched)} ` +
+              `reason=${backgroundSettled.result?.reason || 'none'}`
+            : `error=${backgroundSettled.error?.message || backgroundSettled.error}`),
+      );
+      if (!backgroundSettled.ok) {
+        throw backgroundSettled.error instanceof Error
+          ? backgroundSettled.error
+          : new Error(String(backgroundSettled.error || 'background AMA dispatch failed'));
+      }
+      result = backgroundSettled.result;
+    } else {
+      const stopTracking = trackCoexistenceOperation(operationTracker, 'ama-hammer-dispatch');
+      try {
+        result = await maybeDispatchAmaCloserImpl({ ...closerArgs, signal });
+      } finally {
+        stopTracking();
+      }
     }
     throwIfAborted(signal);
   } catch (err) {

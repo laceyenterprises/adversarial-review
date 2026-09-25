@@ -167,7 +167,7 @@ test('inline mode (default) still awaits the closer and returns its result', asy
 test('background mode: a slow hammer dispatch no longer holds the caller, and PR@head is not re-dispatched while in flight', async () => {
   const queue = createAmaHammerBackgroundQueue({ maxConcurrent: 2 });
   const hqDispatch = deferred(); // stands in for a 150 s `hq dispatch`
-  const seenSignals = [];
+  const seenPayloads = [];
   let calls = 0;
   const logs = [];
   const args = closureArgs({
@@ -176,7 +176,7 @@ test('background mode: a slow hammer dispatch no longer holds the caller, and PR
     amaHammerBackgroundQueueImpl: () => queue,
     maybeDispatchAmaCloserImpl: async (payload) => {
       calls += 1;
-      seenSignals.push(payload.signal);
+      seenPayloads.push(payload);
       return hqDispatch.promise;
     },
   });
@@ -189,7 +189,11 @@ test('background mode: a slow hammer dispatch no longer holds the caller, and PR
   assert.equal(first.backgroundDispatch.state, 'started');
   assert.equal(first.backgroundDispatch.key, `laceyenterprises/adversarial-review#265@${HEAD}`);
   assert.equal(calls, 1);
-  assert.equal(seenSignals[0], null, 'background run is detached from the posted-review step deadline');
+  assert.equal(
+    'signal' in seenPayloads[0],
+    false,
+    'background run is detached from the step deadline and passes no signal key (closer default applies)',
+  );
 
   // Next tick, same PR@head, dispatch still running: no second `hq dispatch`.
   const second = await maybeDispatchAmaClosureFor(args);
@@ -202,4 +206,81 @@ test('background mode: a slow hammer dispatch no longer holds the caller, and PR
     logs.some((line) => /AMA hammer background dispatch settled for .*#265@abc123: dispatched=true/.test(line)),
     'settle outcome is logged with the PR@head key',
   );
+
+  // The tick after it settles applies the outcome instead of dispatching again.
+  const third = await maybeDispatchAmaClosureFor(args);
+  assert.equal(calls, 1, 'a settled outcome is applied, not re-dispatched');
+  assert.equal(third.dispatched, true);
+  assert.equal(third.launchRequestId, 'lrq_bg');
+});
+
+test('queue reports a coalesced submit as queued while its entry still waits for a slot', async () => {
+  const queue = createAmaHammerBackgroundQueue({ maxConcurrent: 1 });
+  const gate = deferred();
+  queue.submit({ key: 'A', run: () => gate.promise });
+  assert.equal(queue.submit({ key: 'B', run: async () => ({}) }).state, 'queued');
+  assert.equal(queue.submit({ key: 'B', run: async () => ({}) }).state, 'queued');
+  assert.equal(queue.submit({ key: 'A', run: async () => ({}) }).state, 'in-flight');
+  gate.resolve({});
+  await queue.drain();
+});
+
+test('takeSettled hands each outcome over once and drops stale ones', async () => {
+  let now = 1_000;
+  const queue = createAmaHammerBackgroundQueue({ nowMs: () => now, settledTtlMs: 500 });
+  queue.submit({ key: 'k', run: async () => ({ dispatched: false, reason: 'x' }) });
+  await queue.drain();
+  const outcome = queue.takeSettled('k');
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.result.reason, 'x');
+  assert.equal(queue.takeSettled('k'), null, 'consumed once');
+
+  queue.submit({ key: 'old', run: async () => ({}) });
+  await queue.drain();
+  now += 501;
+  assert.equal(queue.takeSettled('old'), null, 'older than the TTL is dropped');
+});
+
+test('background mode: a terminal closer rejection reaches the caller on the next tick exactly as inline returns it', async () => {
+  // e.g. the hammer retry cap: the closer declines without dispatching and the
+  // watcher must be free to fall through to merge-agent / alerting.
+  const rejection = { dispatched: false, reason: 'hammer-retry-cap-exhausted' };
+  const inline = await maybeDispatchAmaClosureFor(closureArgs({
+    resolveAmaHammerDispatchModeImpl: () => 'inline',
+    maybeDispatchAmaCloserImpl: async () => ({ ...rejection }),
+  }));
+
+  const queue = createAmaHammerBackgroundQueue();
+  let calls = 0;
+  const args = closureArgs({
+    resolveAmaHammerDispatchModeImpl: () => 'background',
+    amaHammerBackgroundQueueImpl: () => queue,
+    maybeDispatchAmaCloserImpl: async () => {
+      calls += 1;
+      return { ...rejection };
+    },
+  });
+  const first = await maybeDispatchAmaClosureFor(args);
+  assert.equal(first.reason, AMA_HAMMER_BACKGROUND_REASON);
+  await queue.drain();
+  const second = await maybeDispatchAmaClosureFor(args);
+  assert.equal(calls, 1);
+  assert.deepEqual(second, inline, 'applied outcome is byte-identical to the inline result');
+  assert.notEqual(second.skipMergeAgent, true, 'the merge-agent fallback is reachable again');
+});
+
+test('background mode: a closer that throws is applied next tick as ama-dispatch-failed, like inline', async () => {
+  const queue = createAmaHammerBackgroundQueue();
+  const args = closureArgs({
+    resolveAmaHammerDispatchModeImpl: () => 'background',
+    amaHammerBackgroundQueueImpl: () => queue,
+    maybeDispatchAmaCloserImpl: async () => {
+      throw new Error('hq dispatch exploded');
+    },
+  });
+  await maybeDispatchAmaClosureFor(args);
+  await queue.drain();
+  const second = await maybeDispatchAmaClosureFor(args);
+  assert.equal(second.dispatched, false);
+  assert.equal(second.reason, 'ama-dispatch-failed');
 });

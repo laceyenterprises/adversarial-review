@@ -18,6 +18,14 @@
 // `ama-closer-launch-in-progress` without re-dispatching. This module adds only
 // what the phase can no longer provide once it stops awaiting: one in-flight
 // dispatch per PR@head, a global concurrency bound, and settle logging.
+//
+// It also hands each run's outcome back to the phase. A run can end in a
+// terminal rejection from the closer's own gates (retry cap, ineligibility) that
+// the phase must act on — fall through to merge-agent, alert — exactly as it
+// would inline. The queue keeps the settled outcome per PR@head, and the next
+// tick for that PR@head consumes it through the unchanged inline result path
+// instead of submitting again. Rejections therefore reach the phase one tick
+// later, never silently.
 
 import { loadRoleConfig } from './role-config.mjs';
 
@@ -29,6 +37,10 @@ export const DEFAULT_AMA_HAMMER_DISPATCH_MODE = 'inline';
 // whose admission is already the bottleneck.
 export const DEFAULT_AMA_HAMMER_BACKGROUND_MAX_CONCURRENT = 2;
 export const AMA_HAMMER_BACKGROUND_REASON = 'ama-closer-dispatch-backgrounded';
+// A settled outcome is only meaningful to the next tick or two for that PR@head.
+// Past this age the PR has moved on (new head, closed) and the outcome is dropped.
+export const DEFAULT_AMA_HAMMER_SETTLED_TTL_MS = 60 * 60 * 1000;
+export const DEFAULT_AMA_HAMMER_SETTLED_MAX_ENTRIES = 256;
 
 /**
  * Resolve the dispatch mode. Any config error, unknown value, or missing key
@@ -61,18 +73,30 @@ export function amaHammerBackgroundKey({ repo, prNumber, headSha }) {
 
 /**
  * A bounded background runner. One entry per key (PR@head); at most
- * `maxConcurrent` runs at once, the rest wait FIFO. Entries leave the map when
- * their run settles, so a later tick can dispatch the same PR@head again if the
- * closer decides it should (e.g. after a genuine failure).
+ * `maxConcurrent` runs at once, the rest wait FIFO. When a run settles its entry
+ * leaves the map and its outcome is kept for `takeSettled(key)`, so the next
+ * tick applies it instead of dispatching again.
  */
 export function createAmaHammerBackgroundQueue({
   maxConcurrent = DEFAULT_AMA_HAMMER_BACKGROUND_MAX_CONCURRENT,
   nowMs = () => Date.now(),
+  settledTtlMs = DEFAULT_AMA_HAMMER_SETTLED_TTL_MS,
+  settledMaxEntries = DEFAULT_AMA_HAMMER_SETTLED_MAX_ENTRIES,
 } = {}) {
   const limit = Math.max(1, Number.parseInt(String(maxConcurrent), 10) || 1);
   const entries = new Map();
+  const settled = new Map();
   const waiting = [];
   let running = 0;
+
+  function recordSettled(key, outcome) {
+    settled.delete(key);
+    settled.set(key, { ...outcome, settledAtMs: nowMs() });
+    // Map iteration is insertion order, so the first key is the oldest.
+    while (settled.size > Math.max(1, settledMaxEntries)) {
+      settled.delete(settled.keys().next().value);
+    }
+  }
 
   function launch(entry) {
     running += 1;
@@ -87,10 +111,12 @@ export function createAmaHammerBackgroundQueue({
     entry.promise = settled
       .then(
         (result) => {
+          recordSettled(entry.key, { ok: true, result });
           entry.onSettled?.({ ok: true, result, elapsedMs: nowMs() - entry.startedAtMs });
           return result;
         },
         (error) => {
+          recordSettled(entry.key, { ok: false, error });
           entry.onSettled?.({ ok: false, error, elapsedMs: nowMs() - entry.startedAtMs });
           return null;
         },
@@ -110,7 +136,13 @@ export function createAmaHammerBackgroundQueue({
     submit({ key, run, onSettled = null }) {
       const existing = entries.get(key);
       if (existing) {
-        return { state: 'in-flight', key, queuedAtMs: existing.queuedAtMs };
+        // Report what the existing entry is actually doing: still waiting for a
+        // slot reads as `queued`, a started run as `in-flight`.
+        return {
+          state: existing.state === 'running' ? 'in-flight' : 'queued',
+          key,
+          queuedAtMs: existing.queuedAtMs,
+        };
       }
       const entry = { key, run, onSettled, state: 'queued', queuedAtMs: nowMs(), promise: null };
       entries.set(key, entry);
@@ -121,12 +153,25 @@ export function createAmaHammerBackgroundQueue({
       waiting.push(entry);
       return { state: 'queued', key, queuedAtMs: entry.queuedAtMs };
     },
+    /**
+     * Remove and return the settled outcome for `key`
+     * (`{ ok, result | error, settledAtMs }`), or null when there is none or it
+     * is older than `settledTtlMs`.
+     */
+    takeSettled(key) {
+      const outcome = settled.get(key);
+      if (!outcome) return null;
+      settled.delete(key);
+      if (nowMs() - outcome.settledAtMs > settledTtlMs) return null;
+      return outcome;
+    },
     snapshot() {
       return {
         running,
         waiting: waiting.length,
         limit,
         keys: [...entries.keys()],
+        settledKeys: [...settled.keys()],
       };
     },
     /** Test/shutdown helper: resolves once every submitted run has settled. */

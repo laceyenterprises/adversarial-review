@@ -239,9 +239,17 @@ The control is `watcher.ama_hammer_dispatch_mode`, with env override
 The queue is process-local, bounded, and keyed by PR@head
 (`<owner>/<repo>#<pr>@<head>`). It starts at most two hammer `hq dispatch`
 subprocesses concurrently, runs waiters FIFO, and coalesces duplicate
-submissions for the same PR@head while one is queued or running. Once an entry
-settles it leaves the queue, so a later tick may submit the same PR@head again
-only if the normal closer logic still decides that is allowed. The durable
+submissions for the same PR@head while one is queued or running.
+
+When a run settles, the queue keeps its outcome for that PR@head (at most 256
+outcomes, dropped after an hour). The next tick for that PR@head **applies the
+outcome instead of submitting again**: the result goes through the same handling
+as an inline call. A terminal rejection from the closer's own gates (hammer retry
+cap, structural ineligibility) or a thrown error (`ama-dispatch-failed`) reaches
+the watcher exactly as it would inline, one tick later, so the merge-agent
+fallback and alerting are still reachable. In steady state a PR@head alternates
+between a submitting tick and an applying tick, and the tick after that may
+submit again only if the normal closer logic still allows it. The durable
 guards remain the safety boundary: `maybeDispatchAmaCloser` writes
 `state: dispatching` and acquires the per-PR closer lease before shelling out,
 and later ticks see that active dispatch/lease as
@@ -254,6 +262,7 @@ Expected watcher logs:
 [watcher] AMA hammer dispatch queued in background for <repo>#<pr>@<head>; posted-review phase continues
 [watcher] AMA hammer dispatch in-flight in background for <repo>#<pr>@<head>; posted-review phase continues
 [watcher] AMA hammer background dispatch settled for <repo>#<pr>@<head>: dispatched=<true|false> reason=<reason> elapsed_ms=<n>
+[watcher] AMA hammer background outcome applied for <repo>#<pr>: dispatched=<true|false> reason=<reason>
 ```
 
 Validation after enabling `background`:
@@ -263,15 +272,20 @@ Validation after enabling `background`:
 # fail safe to inline and log "watcher.ama_hammer_dispatch_mode unreadable; using inline".
 AGENT_OS_WATCHER_AMA_HAMMER_DISPATCH_MODE=background npm test -- test/ama-hammer-background-dispatch.test.mjs
 
-# On a live closeout, watch for the PR@head key and retained ownership:
-log stream --style compact --predicate 'eventMessage CONTAINS "AMA hammer dispatch"'
+# On a live closeout, watch for the PR@head key and retained ownership. The
+# watcher writes to its launchd StandardOutPath file, not the unified log, so
+# `log stream` shows nothing:
+tail -F ~/Library/Logs/adversarial-watcher.log | grep --line-buffered "AMA hammer"
 ```
 
 For a live PR that needs hammer closure, the first tick should log `started` or
 `queued` and the posted-review row should retain ownership as `ama-pending`
 instead of blocking the whole serial closeout phase on `hq dispatch`. A
-subsequent tick for the same PR@head while the dispatch is still running should
-log `in-flight` and must not create a second closer launch.
+subsequent tick for the same PR@head while the dispatch is still waiting for a
+slot logs `queued`, and while it runs logs `in-flight`; neither creates a second
+closer launch. The first tick after it settles logs `outcome applied` and returns
+the closer's own result: a hammer that launched, or a rejection the watcher then
+handles as it would inline.
 
 2. Bounce the dispatch daemon per the standard procedure:
 

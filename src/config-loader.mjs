@@ -1081,6 +1081,13 @@ function schemaV1() {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
+          memory_gateway: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              install_root: { __type: TYPE_STRING, __default: null, __nullable: true },
+            },
+          },
           ports: {
             __type: TYPE_DICT,
             __strict: true,

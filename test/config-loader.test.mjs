@@ -337,6 +337,18 @@ test('services.hcp loads through strict Node schema', () => {
   }
 });
 
+test('services.memory_gateway install root loads through strict Node schema', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFileSync(top, 'version: 1\nservices:\n  memory_gateway:\n    install_root: /opt/agent-os/memory-gateway\n');
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('services.memory_gateway.install_root'), '/opt/agent-os/memory-gateway');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('sharedOwners loads through strict Node schema and rejects invalid values', () => {
   const tmp = freshTmp();
   try {

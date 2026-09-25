@@ -8,6 +8,7 @@ import {
   createRoutingTierReadinessProbeCache,
   probeRoutingTierReadiness,
   probeRoutingTierReadinessWithRetry,
+  resolveRoutingTierReadinessTimeoutMs,
 } from '../src/routing-tier-readiness.mjs';
 import { PROVIDER_OVERLOADED_FAILURE_CLASS } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 
@@ -215,4 +216,10 @@ test('WATCHER_ROUTING_TIER_READINESS_TIMEOUT_MS env var is honored', async () =>
   });
   assert.equal(result.ready, true);
   assert.ok(signalSeen, 'fetch should receive an AbortSignal regardless of timeout value');
+});
+
+test('readiness timeout defaults to 5 s so a busy event loop does not fake a proxy outage', () => {
+  assert.equal(resolveRoutingTierReadinessTimeoutMs({}), 5000);
+  assert.equal(resolveRoutingTierReadinessTimeoutMs({ WATCHER_ROUTING_TIER_READINESS_TIMEOUT_MS: '0' }), 5000);
+  assert.equal(resolveRoutingTierReadinessTimeoutMs({ WATCHER_ROUTING_TIER_READINESS_TIMEOUT_MS: '750' }), 750);
 });

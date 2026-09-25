@@ -2045,6 +2045,12 @@ function schemaV1() {
                 __min: 3600,
                 __max: 604800,
               },
+              operator_suspend_default_seconds: {
+                __type: TYPE_INT,
+                __default: 86400,
+                __min: 3600,
+                __max: 604800,
+              },
             },
           },
         },

@@ -5331,6 +5331,16 @@ test('quota_probe evidence_ttl_seconds default resolves to 86400 when unset', ()
   }
 });
 
+test('quota_probe operator_suspend_default_seconds defaults to 86400', () => {
+  const tmp = freshTmp();
+  try {
+    const cfg = loadConfig({ topPath: join(tmp, 'missing.yaml'), env: {} });
+    assert.equal(cfg.get('roles.quota_probe.operator_suspend_default_seconds'), 86400);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('AgentOSConfigError normalizes derived envName tokens', () => {
   assert.equal(new AgentOSConfigError('broken', { source: 'env:' }).envName, null);
   assert.equal(

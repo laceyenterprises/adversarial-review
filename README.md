@@ -349,6 +349,14 @@ two-path merge model** (operational reference:
   (blocking, or non-blocking under the default strict posture), the PR
   needs a rebase, or CI needs repair, the watcher dispatches exactly one
   hammer terminal-remediation worker (`templates/hammer-prompt.md`). The
+  default `watcher.ama_hammer_dispatch_mode: inline` contract waits for
+  that `hq dispatch` inside the posted-review phase. Operators may set
+  `watcher.ama_hammer_dispatch_mode` /
+  `AGENT_OS_WATCHER_AMA_HAMMER_DISPATCH_MODE` to `background` to submit
+  the same closer call to a bounded process-local PR@head queue and
+  return retained ownership (`ama-pending`,
+  `ama-closer-dispatch-backgrounded`) immediately; the closer lease and
+  dispatch record still prevent duplicate launches on later ticks. The
   hammer remediates the findings, rebases onto the current base, holds
   the merge bar of required checks plus changed-surface tests, waits out
   GitHub required checks on the exact post-remediation head within a
@@ -383,7 +391,9 @@ checks, non-mergeable state, and stale heads. The hard kill switch is
 `roles.adversarial.merge_authority.autonomous_merge_execution_enabled:
 false` followed by a watcher bounce: with it off, neither path executes;
 the watcher writes a fail-closed audit and leaves the PR for manual
-operator intervention.
+operator intervention. To roll back only background hammer dispatch, return
+`watcher.ama_hammer_dispatch_mode` to `inline` or unset the environment
+override; unknown or unreadable values fail safe to inline.
 
 Two autonomous-close lanes keep a fail-closed daemon attempt from parking
 for manual merge, without ever loosening a safety gate:

@@ -137,6 +137,10 @@ dispatcher debugging), see
          enabled: true
          worker_class: hammer    # default; operators may pin codex, claude-code, hammer-claude, or gemini
          # worker_class_fallback: [hammer-claude]  # HHR harness-fallback (default-on; see §2a)
+         # AMA hammer dispatch stays inline by default. To keep the serial
+         # posted-review phase from waiting on slow `hq dispatch` calls, set
+         # watcher.ama_hammer_dispatch_mode / AGENT_OS_WATCHER_AMA_HAMMER_DISPATCH_MODE
+         # to background; see §2b before enabling.
          merge_method: squash    # or merge — never rebase (SPEC §4.4)
          strict_non_blocking_remediation: true  # default; require known-zero non-blocking findings for direct close
          eligibility:
@@ -214,6 +218,60 @@ provenance still key off the configured logical class). It emits a loud
 - **Scope:** this protects the AMA closer/hammer path (the one that stalls PR
   closure fleet-wide). Extending the same harness-fallback to the dag-walker's
   ticket dispatch is a documented follow-up, not built here.
+
+### 2b. HAMASYNC-01 background hammer dispatch
+
+This is a v1 bug-fix/operational mitigation under the freeze above, not a new
+merge authority lane. The MSM decision tree is unchanged: a PR that needs the
+hammer still goes through `maybeDispatchAmaCloser`, the same closer lease,
+dispatch record, retry cap, prompt, and merge-under-lease contract. Only the
+posted-review watcher phase's wait behavior changes.
+
+The control is `watcher.ama_hammer_dispatch_mode`, with env override
+`AGENT_OS_WATCHER_AMA_HAMMER_DISPATCH_MODE` and legacy alias
+`ADVERSARIAL_AMA_HAMMER_DISPATCH_MODE`:
+
+| Mode | Contract |
+|---|---|
+| `inline` (default) | The posted-review phase awaits the hammer `hq dispatch` attempt before moving to the next row. This is the historical behavior and the fail-safe fallback for missing, unreadable, or unknown config values. |
+| `background` | The posted-review phase submits the hammer dispatch to the in-process AMA hammer background queue and immediately returns retained ownership (`ama-pending`) with reason `ama-closer-dispatch-backgrounded`. The watcher does not fall through to merge-agent. The background run calls `maybeDispatchAmaCloser` with the same closer args, detached from the posted-review step deadline. |
+
+The queue is process-local, bounded, and keyed by PR@head
+(`<owner>/<repo>#<pr>@<head>`). It starts at most two hammer `hq dispatch`
+subprocesses concurrently, runs waiters FIFO, and coalesces duplicate
+submissions for the same PR@head while one is queued or running. Once an entry
+settles it leaves the queue, so a later tick may submit the same PR@head again
+only if the normal closer logic still decides that is allowed. The durable
+guards remain the safety boundary: `maybeDispatchAmaCloser` writes
+`state: dispatching` and acquires the per-PR closer lease before shelling out,
+and later ticks see that active dispatch/lease as
+`ama-closer-launch-in-progress` instead of launching a duplicate closer.
+
+Expected watcher logs:
+
+```text
+[watcher] AMA hammer dispatch started in background for <repo>#<pr>@<head>; posted-review phase continues
+[watcher] AMA hammer dispatch queued in background for <repo>#<pr>@<head>; posted-review phase continues
+[watcher] AMA hammer dispatch in-flight in background for <repo>#<pr>@<head>; posted-review phase continues
+[watcher] AMA hammer background dispatch settled for <repo>#<pr>@<head>: dispatched=<true|false> reason=<reason> elapsed_ms=<n>
+```
+
+Validation after enabling `background`:
+
+```bash
+# Confirm the watcher is reading the intended mode. Unknown/unreadable values
+# fail safe to inline and log "watcher.ama_hammer_dispatch_mode unreadable; using inline".
+AGENT_OS_WATCHER_AMA_HAMMER_DISPATCH_MODE=background npm test -- test/ama-hammer-background-dispatch.test.mjs
+
+# On a live closeout, watch for the PR@head key and retained ownership:
+log stream --style compact --predicate 'eventMessage CONTAINS "AMA hammer dispatch"'
+```
+
+For a live PR that needs hammer closure, the first tick should log `started` or
+`queued` and the posted-review row should retain ownership as `ama-pending`
+instead of blocking the whole serial closeout phase on `hq dispatch`. A
+subsequent tick for the same PR@head while the dispatch is still running should
+log `in-flight` and must not create a second closer launch.
 
 2. Bounce the dispatch daemon per the standard procedure:
 
@@ -407,6 +465,10 @@ The cutover is fully reversible per SPEC §6 AC#9.
    `roles.adversarial.merge_authority.hammer_lifetime_ceiling: 0`. The watcher
    then skips hammer dispatch without entering the lifetime-exhaustion alert
    path, and daemon clean merges continue to use their independent retry budget.
+   To roll back only HAMASYNC-01 background dispatch while keeping hammer
+   closure enabled, set `watcher.ama_hammer_dispatch_mode: inline` or unset
+   `AGENT_OS_WATCHER_AMA_HAMMER_DISPATCH_MODE`; unreadable or unknown values
+   also fail safe to `inline`.
 
 2. Bounce the dispatch daemon + watcher (same commands as §2 steps 2-3).
 

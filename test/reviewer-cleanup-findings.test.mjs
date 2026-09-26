@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -51,7 +51,12 @@ test('posted reviewer cleanup findings persist and clear after a later dead prob
   assert.doesNotThrow(() => cleanupFindingPath(rootDir, 'session-6917'));
 });
 
-test('cleanup finding recheck uses the production probe argument shape', async () => {
+test('cleanup finding recheck uses the production probe argument shape', async (t) => {
+  const psProbe = spawnSync('/bin/ps', ['-p', String(process.pid), '-o', 'command='], { encoding: 'utf8' });
+  if (psProbe.error || psProbe.status !== 0 || !psProbe.stdout?.trim()) {
+    t.skip('worker sandbox blocks process introspection required by the production probe');
+    return;
+  }
   const rootDir = mkdtempSync(join(tmpdir(), 'reviewer-cleanup-findings-live-'));
   const sessionUuid = `cleanup-finding-${process.pid}-${Date.now()}`;
   const child = spawn(

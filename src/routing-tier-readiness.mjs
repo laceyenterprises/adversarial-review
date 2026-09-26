@@ -23,9 +23,16 @@ function resolveRoutingTierReadinessUrl(env = process.env) {
     : 'http://127.0.0.1:4000/health/readiness';
 }
 
+// 5 s, not 2 s: the timer and the response race on the watcher's event loop,
+// so a loop that is busy (or CPU-starved) for 2 s reports a healthy proxy as
+// `readiness_timeout` and skips the reviewer. A proxy that is really down
+// refuses the connection at once, so the longer bound only costs time when the
+// proxy hangs. WATCHQOS-01, 2026-09-25.
+const DEFAULT_ROUTING_TIER_READINESS_TIMEOUT_MS = 5000;
+
 function resolveRoutingTierReadinessTimeoutMs(env = process.env) {
   const v = Number(env.WATCHER_ROUTING_TIER_READINESS_TIMEOUT_MS);
-  return Number.isFinite(v) && v > 0 ? v : 2000;
+  return Number.isFinite(v) && v > 0 ? v : DEFAULT_ROUTING_TIER_READINESS_TIMEOUT_MS;
 }
 
 function isRoutingTierReadinessProbeDisabled(env = process.env) {

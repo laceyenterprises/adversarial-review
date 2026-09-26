@@ -23,3 +23,14 @@ test('airlock adversarial daemons run under the airlock account', () => {
     assertStringKey(readLaunchdPlist(name), 'UserName', 'airlock');
   }
 });
+
+test('the watcher runs Interactive so a loaded host cannot starve its event loop', () => {
+  // WATCHQOS-01: with no ProcessType launchd runs the watcher at PRI 20; at
+  // load 120 its readiness probe and `hq attest sign` children timed out.
+  for (const name of [
+    'ai.laceyenterprises.adversarial-watcher.airlock.plist',
+    'ai.laceyenterprises.adversarial-watcher.placey.plist',
+  ]) {
+    assertStringKey(readLaunchdPlist(name), 'ProcessType', 'Interactive');
+  }
+});

@@ -404,6 +404,45 @@ test('label reconciler does not hold candidates suppressed by the census', async
   }
 });
 
+test('label reconciler removes loser role label from suppressed candidates', async () => {
+  const db = memoryDb();
+  try {
+    const result = reconcileDuplicateFamiliesForRepo(db, [
+      subject(334, {}),
+      subject(335, {}),
+      subject(336, { labels: ['stack:depends-on-334', 'duplicate-family-loser'] }),
+    ], {
+      repoPath: REPO,
+      now: '2026-09-11T00:00:00.000Z',
+      readBuildCompletionSignalForPrImpl: provenanceReader({
+        334: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+        335: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+        336: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+      }),
+    });
+    db.prepare("UPDATE duplicate_family_candidates SET role = 'loser', labels_json = ? WHERE pr_number = 336")
+      .run(JSON.stringify(['duplicate-family', 'duplicate-family-loser']));
+
+    const removeCalls = [];
+    await reconcileDuplicateFamilyLabels({
+      db,
+      repoPath: REPO,
+      logger: { error() {} },
+      octokit: { rest: { issues: {
+        addLabels: async () => {},
+        removeLabel: async (payload) => removeCalls.push(payload),
+      } } },
+      census: { families: [], familyIds: result.familyIds },
+    });
+
+    assert.deepEqual(removeCalls.map((entry) => [entry.issue_number, entry.name]), [
+      [336, 'duplicate-family-loser'],
+    ]);
+  } finally {
+    db.close();
+  }
+});
+
 test('label reconciler releases inactive family hold once and persists label cache', async () => {
   const db = memoryDb();
   try {
@@ -587,6 +626,144 @@ test('label reconciler skips hold additions when the census failed this tick', a
     assert.equal(result.changed, 0);
     assert.deepEqual(addCalls, []);
     assert.match(logLines.join('\n'), /hold projection skipped/);
+  } finally {
+    db.close();
+  }
+});
+
+test('resolved family reactivates and clears stale survivor selection on a fresh duplicate census', () => {
+  const db = memoryDb();
+  try {
+    const first = reconcileDuplicateFamiliesForRepo(db, [
+      subject(361, { headSha: 'old-head-361' }),
+      subject(362, { headSha: 'old-head-362' }),
+    ], {
+      repoPath: REPO,
+      now: '2026-09-11T00:00:00.000Z',
+      readBuildCompletionSignalForPrImpl: provenanceReader({
+        361: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+        362: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+      }),
+    });
+    const familyId = first.familyIds[0];
+    db.prepare(
+      `UPDATE duplicate_families
+          SET status = 'resolved',
+              selected_survivor_pr_number = 361,
+              report_path = 'docs/research/duplicate-pr-divergence/reports/old.md',
+              operator_override_json = ?
+        WHERE family_id = ?`
+    ).run(JSON.stringify({ selection: { candidatePrNumber: 361, candidateHeadSha: 'old-head-361' } }), familyId);
+
+    reconcileDuplicateFamiliesForRepo(db, [
+      subject(363, { headSha: 'new-head-363' }),
+      subject(364, { headSha: 'new-head-364' }),
+    ], {
+      repoPath: REPO,
+      now: '2026-09-11T00:01:00.000Z',
+      readBuildCompletionSignalForPrImpl: provenanceReader({
+        363: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+        364: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+      }),
+    });
+
+    const family = listDuplicateFamilies(db)[0];
+    assert.equal(family.status, 'advisory');
+    assert.equal(family.selected_survivor_pr_number, null);
+    assert.equal(family.report_path, null);
+    assert.equal(family.operator_override_json, null);
+    assert.equal(JSON.parse(family.transition_log_json).at(-1).transition, 'reactivated-advisory');
+  } finally {
+    db.close();
+  }
+});
+
+test('survivor-merged family does not reactivate while loser closeout is unfinished', () => {
+  const db = memoryDb();
+  try {
+    const first = reconcileDuplicateFamiliesForRepo(db, [
+      subject(367, { headSha: 'survivor-head' }),
+      subject(368, { headSha: 'loser-head' }),
+    ], {
+      repoPath: REPO,
+      now: '2026-09-11T00:00:00.000Z',
+      readBuildCompletionSignalForPrImpl: provenanceReader({
+        367: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+        368: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+      }),
+    });
+    const familyId = first.familyIds[0];
+    const override = {
+      selection: {
+        candidatePrNumber: 367,
+        candidateHeadSha: 'survivor-head',
+        reportPath: 'docs/research/duplicate-pr-divergence/reports/old.md',
+        reportVerifiedHeadSha: 'survivor-head',
+      },
+    };
+    db.prepare(
+      `UPDATE duplicate_families
+          SET status = 'survivor-merged',
+              selected_survivor_pr_number = 367,
+              report_path = 'docs/research/duplicate-pr-divergence/reports/old.md',
+              operator_override_json = ?
+        WHERE family_id = ?`
+    ).run(JSON.stringify(override), familyId);
+
+    reconcileDuplicateFamiliesForRepo(db, [
+      subject(367, { headSha: 'survivor-head', state: 'MERGED' }),
+      subject(368, { headSha: 'loser-head' }),
+    ], {
+      repoPath: REPO,
+      now: '2026-09-11T00:01:00.000Z',
+      readBuildCompletionSignalForPrImpl: provenanceReader({
+        367: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+        368: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+      }),
+    });
+
+    const family = listDuplicateFamilies(db)[0];
+    assert.equal(family.status, 'survivor-merged');
+    assert.equal(family.selected_survivor_pr_number, 367);
+    assert.equal(family.report_path, 'docs/research/duplicate-pr-divergence/reports/old.md');
+    assert.deepEqual(JSON.parse(family.operator_override_json), override);
+    assert.notEqual(JSON.parse(family.transition_log_json).at(-1).transition, 'reactivated-advisory');
+  } finally {
+    db.close();
+  }
+});
+
+test('adjudicated family deactivates when an observed census no longer has duplicates', () => {
+  const db = memoryDb();
+  try {
+    const first = reconcileDuplicateFamiliesForRepo(db, [
+      subject(365),
+      subject(366),
+    ], {
+      repoPath: REPO,
+      now: '2026-09-11T00:00:00.000Z',
+      readBuildCompletionSignalForPrImpl: provenanceReader({
+        365: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+        366: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+      }),
+    });
+    db.prepare("UPDATE duplicate_families SET status = 'abandoned' WHERE family_id = ?").run(first.familyIds[0]);
+
+    reconcileDuplicateFamiliesForRepo(db, [
+      subject(365),
+      subject(366, { state: 'CLOSED' }),
+    ], {
+      repoPath: REPO,
+      now: '2026-09-11T00:01:00.000Z',
+      readBuildCompletionSignalForPrImpl: provenanceReader({
+        365: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+        366: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+      }),
+    });
+
+    const family = listDuplicateFamilies(db)[0];
+    assert.equal(family.status, 'inactive');
+    assert.equal(JSON.parse(family.transition_log_json).at(-1).transition, 'census-no-longer-duplicate');
   } finally {
     db.close();
   }

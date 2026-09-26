@@ -164,6 +164,49 @@ test('reconcileFollowUpJob stops a finished spawned round for no-progress when n
   assert.equal(reconciled.job.remediationWorker.processId, 8123);
 });
 
+test('reconcileFollowUpJob holds a Claude account 429 from the final artifact when the log is empty', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob({ ...makeJobInput(rootDir), maxRemediationRounds: 2 });
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  const logPath = path.join(artifactDir, 'codex-worker.log');
+  writeFileSync(outputPath, "API Error: Request rejected (429) · This request would exceed your account's rate limit. Please try again later.\n");
+  writeFileSync(logPath, '');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'claude-code',
+      processId: 8123,
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, logPath),
+      promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
+    },
+  });
+
+  const reconciled = await reconcileFollowUpJob({
+    rootDir,
+    jobPath: spawned.jobPath,
+    now: () => '2026-04-21T10:05:00.000Z',
+    isProcessAliveImpl: () => false,
+    resolvePRLifecycleImpl: async () => null,
+  });
+
+  assert.equal(reconciled.reconciled, false);
+  assert.equal(reconciled.reason, 'quota-exhausted');
+  assert.equal(reconciled.job.status, 'pending');
+  const latestRetry = reconciled.job.remediationPlan.retryHistory.at(-1);
+  assert.equal(latestRetry.retryMetadata.code, 'quota-exhausted');
+  assert.equal(latestRetry.retryMetadata.harness, 'claude');
+  assert.equal(reconciled.job.remediationPlan.transientRetries, 1);
+});
+
 test('reconcileFollowUpJob resets watcher review state when remediation reply requests re-review', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   writeReviewRow(rootDir);

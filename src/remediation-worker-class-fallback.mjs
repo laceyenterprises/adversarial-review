@@ -30,11 +30,14 @@ import {
 const execFileAsync = promisify(execFileCb);
 const FLEET_QUOTA_STATUS_TIMEOUT_MS = 20_000;
 
-// Default fallback chain when the routed remediator harness is grounded: drop to
-// claude-code (AFH). Operator-tunable via a comma-separated env override; `[]`
+// Default fallback chain when the routed remediator harness is grounded: use
+// the other supported remediation harness. Candidate availability is checked
+// against fleet quota before selection, so a grounded Claude route can recover
+// on Codex and the normal cross-model route returns when Claude recovers.
+// Operator-tunable via a comma-separated env override; `[]`
 // (or a single empty value) disables the fallback and restores the pre-2026-08-19
 // behavior (a capped remediator quota-holds instead of falling back).
-const DEFAULT_REMEDIATION_WORKER_CLASS_FALLBACK = Object.freeze(['claude-code']);
+const DEFAULT_REMEDIATION_WORKER_CLASS_FALLBACK = Object.freeze(['claude-code', 'codex']);
 
 export function remediationWorkerClassFallback(env = process.env) {
   const raw = env?.ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK;

@@ -2114,7 +2114,10 @@ async function reconcileFollowUpJob({
     };
   }
 
-  if (hasNonEmptyNarrative || replyProbe.state === 'valid') {
+  const quotaLogText = `worker=${worker?.model || 'unknown'}\n${readWorkerStderrLogSafe(paths.logPath)}\n${finalMessage.text || ''}`;
+  const quotaSignal = detectQuotaExhaustion(quotaLogText);
+
+  if (replyProbe.state === 'valid' || (hasNonEmptyNarrative && !quotaSignal.isQuotaExhausted)) {
     let remediationReply = {
       ...job?.remediationReply,
       state: job?.remediationReply?.path ? 'awaiting-worker-write' : 'not-configured',
@@ -3070,8 +3073,6 @@ async function reconcileFollowUpJob({
   // future tick re-spawns the remediation worker. Bounded by the shared
   // transient-retry budget so a persistent cap eventually becomes terminal.
   // Applies to both harnesses we know the shape for (codex / claude).
-  const quotaLogText = readWorkerStderrLogSafe(paths.logPath);
-  const quotaSignal = detectQuotaExhaustion(quotaLogText);
   if (quotaSignal.isQuotaExhausted) {
     const parsedCompletedAtMs = Date.parse(String(completedAt || ''));
     const completedAtMs = Number.isNaN(parsedCompletedAtMs) ? Date.now() : parsedCompletedAtMs;

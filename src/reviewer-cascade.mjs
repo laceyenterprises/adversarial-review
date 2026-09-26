@@ -151,7 +151,11 @@ function recordReviewerCredentialFailure(rootDir, {
     reason: `reviewer-credential:${model}`,
     startedAt: active ? (previous?.startedAt || new Date(anchorMs).toISOString()) : null,
     nextProbeAt: active
-      ? (previous?.nextProbeAt || new Date(anchorMs + CREDENTIAL_OUTAGE_PROBE_INTERVAL_MS).toISOString())
+      ? (
+        Date.parse(previous?.nextProbeAt) > anchorMs
+          ? previous.nextProbeAt
+          : new Date(anchorMs + CREDENTIAL_OUTAGE_PROBE_INTERVAL_MS).toISOString()
+      )
       : null,
     failures,
     distinctPrCount,
@@ -164,28 +168,68 @@ function clearReviewerCredentialOutage(rootDir, reviewerModel) {
   return state;
 }
 
-function shouldPauseReviewerModel(rootDir, reviewerModel, { now = new Date(), reserve = true } = {}) {
+function parseInstantMs(value) {
+  if (typeof value === 'number') return value;
+  return Date.parse(value);
+}
+
+function latestReviewerCredentialHoldMs(state) {
+  const holdTimes = Array.isArray(state?.failures)
+    ? state.failures
+      .map((entry) => parseInstantMs(entry?.failedAt))
+      .filter(Number.isFinite)
+    : [];
+  const startedAtMs = parseInstantMs(state?.startedAt);
+  if (Number.isFinite(startedAtMs)) holdTimes.push(startedAtMs);
+  const lastProbeAtMs = parseInstantMs(state?.lastProbeAt);
+  if (Number.isFinite(lastProbeAtMs)) holdTimes.push(lastProbeAtMs);
+  return holdTimes.length > 0 ? Math.max(...holdTimes) : null;
+}
+
+function shouldPauseReviewerModel(rootDir, reviewerModel, {
+  now = new Date(),
+  reserve = true,
+  probeIntervalMs = CREDENTIAL_OUTAGE_PROBE_INTERVAL_MS,
+} = {}) {
   const state = readReviewerCredentialOutage(rootDir, reviewerModel);
   if (!state?.active) return { paused: false, state };
-  const nowMs = new Date(now).getTime();
-  if (!Number.isFinite(nowMs)) throw new TypeError('Invalid credential outage probe time');
-  const persistedDueMs = Date.parse(state.nextProbeAt);
-  const startedMs = Date.parse(state.startedAt);
-  const dueMs = Number.isFinite(persistedDueMs)
-    ? persistedDueMs
-    : Number.isFinite(startedMs)
-      ? startedMs + CREDENTIAL_OUTAGE_PROBE_INTERVAL_MS
+
+  const nowMs = parseInstantMs(now);
+  if (!Number.isFinite(nowMs)) {
+    return { paused: true, state, nextProbeAfter: null };
+  }
+
+  const intervalMs = Number(probeIntervalMs);
+  const boundedIntervalMs = Number.isFinite(intervalMs) && intervalMs > 0
+    ? intervalMs
+    : CREDENTIAL_OUTAGE_PROBE_INTERVAL_MS;
+  const persistedProbeMs = parseInstantMs(state.nextProbeAt);
+  const latestHoldMs = latestReviewerCredentialHoldMs(state);
+  const nextProbeMs = Number.isFinite(persistedProbeMs)
+    ? persistedProbeMs
+    : Number.isFinite(latestHoldMs)
+      ? latestHoldMs + boundedIntervalMs
       : nowMs;
-  if (nowMs < dueMs) return { paused: true, state };
-  if (!reserve) return { paused: false, probeDue: true, state };
-  // Reserve one attempt before spawning, so later PRs in the same watcher
-  // poll remain parked even when the credential is still broken.
-  const probingState = writeReviewerCredentialOutage(rootDir, reviewerModel, {
-    ...state,
-    lastProbeAt: new Date(nowMs).toISOString(),
-    nextProbeAt: new Date(nowMs + CREDENTIAL_OUTAGE_PROBE_INTERVAL_MS).toISOString(),
-  });
-  return { paused: false, probe: true, state: probingState };
+  const nextProbeAfter = isRepresentableInstant(nextProbeMs)
+    ? new Date(nextProbeMs).toISOString()
+    : null;
+
+  if (!isRepresentableInstant(nextProbeMs) || nowMs >= nextProbeMs) {
+    if (!reserve) {
+      return { paused: false, state, probe: true, probeDue: true, nextProbeAfter };
+    }
+    const reservedUntilMs = nowMs + boundedIntervalMs;
+    const probeState = writeReviewerCredentialOutage(rootDir, reviewerModel, {
+      ...state,
+      lastProbeAt: new Date(nowMs).toISOString(),
+      nextProbeAt: isRepresentableInstant(reservedUntilMs)
+        ? new Date(reservedUntilMs).toISOString()
+        : null,
+    });
+    return { paused: false, state: probeState, probe: true, probeDue: true, nextProbeAfter };
+  }
+
+  return { paused: true, state, nextProbeAfter };
 }
 
 function resolveCascadeBackoffMinutes(consecutiveCascadeFailures) {

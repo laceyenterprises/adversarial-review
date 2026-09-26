@@ -1760,6 +1760,61 @@ test('oauth-broken across distinct PRs opens a model outage and success re-arms 
   }
 });
 
+test('active reviewer credential outage allows a periodic recovery probe', () => {
+  const { rootDir, db } = setupFixture();
+  try {
+    const repo = 'laceyenterprises/adversarial-review';
+
+    recordReviewerCredentialFailure(rootDir, {
+      reviewerModel: 'claude',
+      repo,
+      prNumber: 195,
+      failedAt: '2026-09-25T18:01:00.000Z',
+    });
+    recordReviewerCredentialFailure(rootDir, {
+      reviewerModel: 'claude',
+      repo,
+      prNumber: 196,
+      failedAt: '2026-09-25T18:05:00.000Z',
+    });
+
+    const held = shouldPauseReviewerModel(rootDir, 'claude', {
+      now: '2026-09-25T18:09:59.999Z',
+    });
+    assert.equal(held.paused, true);
+    assert.equal(held.nextProbeAfter, '2026-09-25T18:10:00.000Z');
+
+    const due = shouldPauseReviewerModel(rootDir, 'claude', {
+      now: '2026-09-25T18:10:00.000Z',
+    });
+    assert.equal(due.paused, false);
+    assert.equal(due.probe, true);
+    assert.equal(due.nextProbeAfter, '2026-09-25T18:10:00.000Z');
+
+    const reservedProbeHold = shouldPauseReviewerModel(rootDir, 'claude', {
+      now: '2026-09-25T18:10:00.001Z',
+    });
+    assert.equal(reservedProbeHold.paused, true);
+    assert.equal(reservedProbeHold.nextProbeAfter, '2026-09-25T18:15:00.000Z');
+
+    recordReviewerCredentialFailure(rootDir, {
+      reviewerModel: 'claude',
+      repo,
+      prNumber: 197,
+      failedAt: '2026-09-25T18:10:01.000Z',
+    });
+    const refreshedHold = shouldPauseReviewerModel(rootDir, 'claude', {
+      now: '2026-09-25T18:10:02.000Z',
+    });
+    assert.equal(refreshedHold.paused, true);
+    assert.equal(refreshedHold.nextProbeAfter, '2026-09-25T18:15:00.000Z');
+    assert.equal(readReviewerCredentialOutage(rootDir, 'claude').active, true);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('settleReviewerAttempt records provider overload without burning attempts', () => {
   const { rootDir, db } = setupFixture();
   try {

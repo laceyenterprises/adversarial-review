@@ -17,6 +17,7 @@ function fixtureEnv(overrides = {}) {
     GH_CODEX_REVIEWER_TOKEN: '',
     GH_GEMINI_REVIEWER_TOKEN: '',
     AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'false',
+    ADVERSARIAL_REVIEW_REVIEWER_WORKER_CLASS_FALLBACK: '',
     AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS: '6',
     ADVERSARIAL_REVIEWER_DISPATCH_SINGLE_WAVE_SETTLE_GRACE_MS: '60000',
     ADVERSARIAL_AFH_REVIEWER_FALLBACK: 'false',
@@ -88,6 +89,7 @@ function buildLoaderSource({
     [fileUrl('src', 'health-probe.mjs')]: 'fixture:health-probe',
     [fileUrl('src', 'hcp-health.mjs')]: 'fixture:hcp-health',
     [fileUrl('src', 'gh-cli.mjs')]: 'fixture:gh-cli',
+    [fileUrl('src', 'head-closer-commit-suppression.mjs')]: 'fixture:head-closer-commit-suppression',
     [fileUrl('src', 'ama', 'ham-provenance.mjs')]: 'fixture:ama-ham-provenance',
   };
 
@@ -271,6 +273,7 @@ export async function load(url, context, nextLoad) {
     'fixture:health-probe': "export function createWatcherHealthProbe() { return { beginTick() { return {}; }, recordOpenPending() {}, recordSpawn() {}, async finishTick() {} }; }",
     'fixture:hcp-health': "export async function checkHcpHealthz() { return { ready: true, reason: 'fixture' }; }",
     'fixture:gh-cli': "export const GH_LOOKUP_MAX_BUFFER = 26214400; export const GH_LOOKUP_TIMEOUT_MS = 30000; export function buildAllowlistedGhEnv(env = process.env) { return { ...env }; } export async function execGhWithRetry({ execFileImpl, args } = {}) { return execFileImpl('gh', args); } export function isTransientGhError() { return false; } export function parseDate(value) { return value ? new Date(value) : null; } export function parseJsonLines(stdout) { return String(stdout || '').split('\\\\n').filter(Boolean).map((line) => JSON.parse(line)); }",
+    'fixture:head-closer-commit-suppression': "import { existsSync } from 'node:fs'; import path from 'node:path'; export function createHeadCloserCommitSuppressionResolver() { return async () => ({ suppressed: false, reason: 'fixture' }); } export async function getHeadCloserCommitSuppression() { return { suppressed: false, reason: 'fixture' }; } export async function getHeadCloserCommitSuppressionWithBoundedRetry() { return { suppressed: false, reason: 'fixture' }; } export async function fetchHeadCloserVerifiedCommit() { return null; } export async function fetchVerifiedCommitFromLocalGit({ repoPath, headSha, hqRoot } = {}) { const checkout = await resolveLocalRepoCheckout(repoPath, hqRoot); return checkout ? { sha: headSha, message: 'Fixture commit' } : null; } export function buildNonReviewableHeadDeltaEvidence() { return { status: 'not-applicable', reason: 'fixture' }; } export function isTerminalCloserCommitIdentity() { return false; } export function isTransientLocalGitError() { return false; } export async function resolveLocalRepoCheckout(repoPath, hqRoot) { const repoName = String(repoPath || '').split('/').pop(); const root = String(hqRoot || '').trim(); if (!repoName || !root) return null; const checkout = path.join(root, 'repos', repoName); return existsSync(path.join(checkout, '.git')) ? checkout : null; }",
     'fixture:ama-ham-provenance': "export const HAM_AUDIT_COMMENT_AUTHOR_LOGINS = new Set(); export function hamAuditCommentAuthorMatches() { return false; } export function parseCommitTrailers() { return {}; } export function parseRemediatedFindingsTrailer() { return null; }",
   };
   if (Object.prototype.hasOwnProperty.call(simpleStubs, url)) {

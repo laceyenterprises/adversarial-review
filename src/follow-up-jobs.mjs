@@ -148,6 +148,20 @@ const RETRIGGERABLE_STOP_CODES = Object.freeze([
   //     lifecycle states; the PR is gone, retriggering has no target.
 ]);
 const RETRIGGERABLE_STOP_CODE_SET = new Set(RETRIGGERABLE_STOP_CODES);
+const SETTLED_CLEAN_STOP_CODES = Object.freeze([
+  'review-settled',
+  'no-remediation-required',
+]);
+const SETTLED_CLEAN_STOP_REASON_TO_CODE = new Map([
+  [
+    'Latest adversarial review verdict is non-blocking; no remediation worker required.',
+    'review-settled',
+  ],
+  [
+    'Latest adversarial review is settled cleanly; no remediation worker required.',
+    'no-remediation-required',
+  ],
+]);
 
 // Canonical set of follow-up job `status` field values that indicate
 // the job is still being worked. A second invocation that intends to
@@ -483,6 +497,22 @@ function isSettledReviewJob(job, options = {}) {
   if (nextAction?.operatorOverride === true) return false;
 
   return isSettledCleanClassification(classifyFollowUpCriticality(job?.reviewBody), options);
+}
+
+function isSettledCleanStopCode(code) {
+  return SETTLED_CLEAN_STOP_CODES.includes(code);
+}
+
+function resolveSettledCleanStopCode(job) {
+  const stop = job?.remediationPlan?.stop;
+  for (const code of [stop?.code, job?.stopCode]) {
+    if (isSettledCleanStopCode(code)) return code;
+  }
+  for (const reason of [stop?.reason, job?.remediationPlan?.stopReason, job?.stopReason]) {
+    const code = SETTLED_CLEAN_STOP_REASON_TO_CODE.get(reason);
+    if (code) return code;
+  }
+  return null;
 }
 
 function handleClaimedStopFailure({ pendingPath, inProgressPath, stopCode, err }) {
@@ -2981,6 +3011,7 @@ export {
   getFollowUpJobDir,
   isActiveFollowUpJobStatus,
   isRetriggerableStoppedFollowUpJob,
+  isSettledCleanStopCode,
   isSettledCleanClassification,
   isSettledReviewJob,
   listFollowUpJobsInDir,
@@ -2998,6 +3029,7 @@ export {
   readFollowUpJob,
   remediationAttemptNumber,
   resolveRoundBudgetForJob,
+  resolveSettledCleanStopCode,
   requeueFollowUpJobForNextRound,
   stopFollowUpJob,
   summarizePRRemediationLedger,

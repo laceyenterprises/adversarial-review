@@ -3,6 +3,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { rereviewWakeBacklog } from './rereview-wake.mjs';
+import { resolveSettledCleanStopCode } from './follow-up-jobs.mjs';
 
 const DEFAULT_SINCE_MS = 24 * 60 * 60 * 1000;
 const FOLLOW_UP_JOB_DIRS = Object.freeze({
@@ -519,12 +520,6 @@ function addReviewerPassInferredEvents(db, subjects, { sinceIso }) {
   return rows.length;
 }
 
-function isCleanVerdictJob(job) {
-  return job?.remediationPlan?.stop?.code === 'review-settled'
-    || job?.stopCode === 'review-settled'
-    || job?.stopReason === 'Latest adversarial review verdict is non-blocking; no remediation worker required.';
-}
-
 function readFollowUpJobs(rootDir) {
   const jobs = [];
   for (const [state, parts] of Object.entries(FOLLOW_UP_JOB_DIRS)) {
@@ -583,7 +578,8 @@ function addFollowUpInferredEvents(rootDir, subjects, { sinceMs }) {
         revisionRef: job.revisionRef || null,
       },
     });
-    if (isCleanVerdictJob(job)) {
+    const cleanVerdictStopCode = resolveSettledCleanStopCode(job);
+    if (cleanVerdictStopCode) {
       addSubjectEvent(subjects, {
         repo,
         prNumber,
@@ -591,7 +587,7 @@ function addFollowUpInferredEvents(rootDir, subjects, { sinceMs }) {
         at: stoppedAt,
         source: `follow-up-jobs/${entry.state}`,
         inferred: true,
-        reason: 'review-settled',
+        reason: cleanVerdictStopCode,
       });
     }
   }

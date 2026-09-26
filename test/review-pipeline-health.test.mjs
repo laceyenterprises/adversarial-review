@@ -40,6 +40,7 @@ import { DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS } from '../src/reviewer-pass-reape
 import { LEGACY_ORPHAN_FAILURE_MESSAGE } from '../src/reviewer-reattach.mjs';
 import { ensureTtmTrackerSchema } from '../src/ttm-tracker.mjs';
 import { ensureDuplicateFamilySchema } from '../src/duplicate-family-state.mjs';
+import { stopPendingNoRemediationJobs } from '../src/follow-up-jobs.mjs';
 
 const NOW = '2026-05-25T18:00:00.000Z';
 const REPO = 'laceyenterprises/adversarial-review';
@@ -51,6 +52,20 @@ const CI_REGRESSION_GATE = {
     { name: 'release-freeze-gate', state: 'CANCELLED' },
   ],
 };
+const CLEAN_COMMENT_ONLY_REVIEW = `## Adversarial Review - Test
+
+## Summary
+Synthetic clean review.
+
+## Blocking issues
+- None.
+
+## Non-blocking issues
+- None.
+
+## Verdict
+Comment only
+`;
 
 function conflictPrFixture(overrides = {}) {
   return {
@@ -4115,6 +4130,38 @@ test('merge stalled finding fires on an old clean verdict and clears when the PR
     config: { mergeStalledMaxTicks: 1, pipelineTickIntervalMs: 5 * 60 * 1000 },
   });
   assert.ok(!findingCodes(cleared).includes('review:merge_stalled'));
+});
+
+test('merge stalled finding recognizes no-remediation-required clean stops from the drain', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 950,
+    prState: 'open',
+    reviewStatus: 'posted',
+    postedAt: '2026-05-25T17:00:00.000Z',
+  });
+  writeJob(rootDir, 'pending', 'clean-verdict-drain', {
+    jobId: 'clean-verdict-drain',
+    repo: REPO,
+    prNumber: 950,
+    status: 'pending',
+    createdAt: '2026-05-25T17:00:00.000Z',
+    reviewBody: CLEAN_COMMENT_ONLY_REVIEW,
+  });
+  const stopped = stopPendingNoRemediationJobs({
+    rootDir,
+    stoppedAt: '2026-05-25T17:15:00.000Z',
+  });
+  assert.equal(stopped.length, 1);
+  assert.equal(stopped[0].job.remediationPlan.stop.code, 'no-remediation-required');
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    config: { mergeStalledMaxTicks: 1, pipelineTickIntervalMs: 5 * 60 * 1000 },
+  });
+  assert.ok(findingCodes(snapshot).includes('review:merge_stalled'));
+  assert.equal(snapshot.mergeStalls.candidates[0].jobId, 'clean-verdict-drain');
 });
 
 test('merge stalled finding skips settled jobs with no review row', () => {

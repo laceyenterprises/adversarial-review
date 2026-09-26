@@ -1190,6 +1190,11 @@ async function prepareWorkspaceForJob({
   const workspaceRootDir = resolveRemediationWorkspaceRoot({ rootDir, env });
   const workspaceDir = join(workspaceRootDir, job.jobId);
   ensureWorkspaceRootDir(workspaceRootDir, env);
+  let prBranchMetadataPromise = null;
+  const loadPRBranchMetadata = () => {
+    prBranchMetadataPromise ||= fetchPRBranchMetadata({ repo, prNumber: job.prNumber, execFileImpl });
+    return prBranchMetadataPromise;
+  };
   const workspaceState = await inspectWorkspaceState({
     workspaceDir,
     expectedRepo: repo,
@@ -1211,8 +1216,9 @@ async function prepareWorkspaceForJob({
     // GITHUB_TOKEN even on a host where `gh auth setup-git` was never run; no
     // token is passed on argv or written into .git/config. Verified to succeed
     // even when the token's GraphQL budget is fully exhausted.
+    const { baseBranch } = await loadPRBranchMetadata();
     cloneSource = await cloneRemediationWorkspace({
-      rootDir, repo, domainId: job.domainId || 'code-pr', baseBranch: job.baseBranch, workspaceDir, resetWorkspaceDir, log,
+      rootDir, repo, domainId: job.domainId || 'code-pr', baseBranch, workspaceDir, resetWorkspaceDir, log,
       clone: args => runWorkspaceGitWithTransientRetry(args, {
         execFileImpl,
         options: { maxBuffer: 10 * 1024 * 1024, env: withGhGitCredentialEnv(env) },
@@ -1257,11 +1263,7 @@ async function prepareWorkspaceForJob({
   // branch not on origin) fall back to `gh pr checkout`, which handles the
   // fork remote wiring; forks are not part of this fleet's hot path, so the
   // rare GraphQL call there is acceptable.
-  const { baseBranch, branch: headRef, headRepo } = await fetchPRBranchMetadata({
-    repo,
-    prNumber: job.prNumber,
-    execFileImpl,
-  });
+  const { baseBranch, branch: headRef, headRepo } = await loadPRBranchMetadata();
   const isSameRepo = !headRepo || headRepo === repo;
   if (isSameRepo && headRef) {
     // --single-branch configures origin to track only the base. The worker's

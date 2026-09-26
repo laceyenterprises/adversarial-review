@@ -80,6 +80,7 @@ import {
   validateStartupRemediationConfig,
 } from '../src/follow-up-remediation.mjs';
 import { cancelLocalRemediationWorker } from '../src/adapters/agent-runtime/local/remediation.mjs';
+import { cloneRemediationWorkspace } from '../src/remediation-workspace-clone.mjs';
 import {
   assertClaudeCodeBrokerOAuth,
   resolveClaudeCodeOAuthTransport,
@@ -1329,10 +1330,10 @@ test('prepareWorkspaceForJob clones missing repos and checks out the PR branch',
   assert.match(preparationLogs[0], /source=network clone_fetch_ms=\d+ checkout_ms=\d+/);
   assert.deepEqual(result.workspaceState, { action: 'reused', reason: 'missing' });
   assert.deepEqual(calls.map((call) => [call.command, ...call.args]), [
+    ['gh', 'api', 'repos/laceyenterprises/clio/pulls/7'],
     ['git', 'clone', '--no-checkout', '--single-branch', '--branch', 'main', 'https://github.com/laceyenterprises/clio.git', result.workspaceDir],
     ['git', '-C', result.workspaceDir, 'config', 'user.name', 'Codex Remediation Worker'],
     ['git', '-C', result.workspaceDir, 'config', 'user.email', 'codex-remediation-worker@laceyenterprises.com'],
-    ['gh', 'api', 'repos/laceyenterprises/clio/pulls/7'],
     ['git', '-C', result.workspaceDir, 'remote', 'set-branches', '--add', 'origin', 'clio-feature'],
     ['git', '-C', result.workspaceDir, 'fetch', 'origin', '+refs/heads/clio-feature:refs/remotes/origin/clio-feature', '+refs/heads/main:refs/remotes/origin/main'],
     ['git', '-C', result.workspaceDir, 'checkout', '-B', 'clio-feature', 'origin/clio-feature'],
@@ -1345,6 +1346,116 @@ test('prepareWorkspaceForJob clones missing repos and checks out the PR branch',
     (c) => c.command === 'git' && c.args.includes('checkout'),
   );
   assert.ok(sameRepoCheckout, 'expected a git checkout call');
+});
+
+test('prepareWorkspaceForJob clones against the live REST base branch when the saved job base is stale', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const calls = [];
+
+  const result = await prepareWorkspaceForJob({
+    rootDir,
+    job: makeJob({ baseBranch: 'stack/already-merged' }),
+    env: {},
+    execFileImpl: async (command, args) => {
+      calls.push([command, ...args]);
+      if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+        return {
+          stdout: JSON.stringify({
+            base: { ref: 'main' },
+            head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+          }),
+          stderr: '',
+        };
+      }
+      if (command === 'git' && args[0] === 'clone') {
+        mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
+      }
+      return { stdout: '', stderr: '' };
+    },
+  });
+
+  const cloneCall = calls.find(call => call[0] === 'git' && call[1] === 'clone');
+  assert.deepEqual(cloneCall, [
+    'git',
+    'clone',
+    '--no-checkout',
+    '--single-branch',
+    '--branch',
+    'main',
+    'https://github.com/laceyenterprises/clio.git',
+    result.workspaceDir,
+  ]);
+  assert.equal(calls.filter(call => call[0] === 'gh' && call[1] === 'api').length, 1);
+  assert.ok(!cloneCall.includes('stack/already-merged'));
+});
+
+test('cloneRemediationWorkspace retries without branch narrowing when the remote branch is missing', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const workspaceDir = path.join(rootDir, 'workspace');
+  const calls = [];
+  const resets = [];
+  const warnings = [];
+
+  const source = await cloneRemediationWorkspace({
+    rootDir,
+    repo: 'laceyenterprises/clio',
+    baseBranch: 'stack/already-merged',
+    workspaceDir,
+    resetWorkspaceDir: (dir) => {
+      resets.push(dir);
+      rmSync(dir, { recursive: true, force: true });
+    },
+    log: { warn: line => warnings.push(line) },
+    clone: async (args) => {
+      calls.push(args);
+      if (calls.length === 1) {
+        const err = new Error('fatal: Remote branch stack/already-merged not found in upstream origin');
+        err.stderr = err.message;
+        throw err;
+      }
+      mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
+      return { stdout: '', stderr: '' };
+    },
+  });
+
+  assert.equal(source, 'network');
+  assert.deepEqual(calls, [
+    ['clone', '--no-checkout', '--single-branch', '--branch', 'stack/already-merged', 'https://github.com/laceyenterprises/clio.git', workspaceDir],
+    ['clone', '--no-checkout', 'https://github.com/laceyenterprises/clio.git', workspaceDir],
+  ]);
+  assert.deepEqual(resets, [workspaceDir]);
+  assert.ok(warnings.some(line => /retrying clone without --single-branch/.test(line)));
+});
+
+test('cloneRemediationWorkspace warns when a configured reference is ignored', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-reference-'));
+  const workspaceDir = path.join(rootDir, 'workspace');
+  const calls = [];
+  const warnings = [];
+  mkdirSync(path.join(rootDir, 'domains'), { recursive: true });
+  writeFileSync(path.join(rootDir, 'domains', 'code-pr.json'), JSON.stringify({
+    remediationCloneReferences: { 'laceyenterprises/clio': 'relative-reference' },
+  }));
+
+  await cloneRemediationWorkspace({
+    rootDir,
+    repo: 'laceyenterprises/clio',
+    baseBranch: 'main',
+    workspaceDir,
+    resetWorkspaceDir: dir => rmSync(dir, { recursive: true, force: true }),
+    log: { warn: line => warnings.push(line) },
+    clone: async (args) => {
+      calls.push(args);
+      mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
+      return { stdout: '', stderr: '' };
+    },
+  });
+
+  assert.deepEqual(calls, [
+    ['clone', '--no-checkout', '--single-branch', '--branch', 'main', 'https://github.com/laceyenterprises/clio.git', workspaceDir],
+  ]);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /clone reference ignored repo=laceyenterprises\/clio reason=relative-path/);
 });
 
 test('configured local reference dissociates; failed reference falls back and reports durations', async () => {
@@ -2769,10 +2880,10 @@ test('prepareWorkspaceForJob reclones stale workspaces with the wrong repo remot
   assert.deepEqual(calls.map((call) => [call.command, ...call.args]), [
     ['git', 'config', '--get', 'remote.origin.url'],
     ['git', 'status', '--short'],
+    ['gh', 'api', 'repos/laceyenterprises/clio/pulls/7'],
     ['git', 'clone', '--no-checkout', '--single-branch', '--branch', 'main', 'https://github.com/laceyenterprises/clio.git', result.workspaceDir],
     ['git', '-C', result.workspaceDir, 'config', 'user.name', 'Codex Remediation Worker'],
     ['git', '-C', result.workspaceDir, 'config', 'user.email', 'codex-remediation-worker@laceyenterprises.com'],
-    ['gh', 'api', 'repos/laceyenterprises/clio/pulls/7'],
     ['git', '-C', result.workspaceDir, 'remote', 'set-branches', '--add', 'origin', 'clio-feature'],
     ['git', '-C', result.workspaceDir, 'fetch', 'origin', '+refs/heads/clio-feature:refs/remotes/origin/clio-feature', '+refs/heads/main:refs/remotes/origin/main'],
     ['git', '-C', result.workspaceDir, 'checkout', '-B', 'clio-feature', 'origin/clio-feature'],

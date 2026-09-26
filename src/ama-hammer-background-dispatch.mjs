@@ -27,8 +27,6 @@
 // instead of submitting again. Rejections therefore reach the phase one tick
 // later, never silently.
 
-import { loadRoleConfig } from './role-config.mjs';
-
 export const AMA_HAMMER_DISPATCH_MODE_CFG_KEY = 'watcher.ama_hammer_dispatch_mode';
 export const AMA_HAMMER_DISPATCH_MODES = Object.freeze(['inline', 'background']);
 export const DEFAULT_AMA_HAMMER_DISPATCH_MODE = 'inline';
@@ -48,13 +46,11 @@ export const DEFAULT_AMA_HAMMER_SETTLED_MAX_ENTRIES = 256;
  * silently change how merges are dispatched.
  */
 export function resolveAmaHammerDispatchMode({
-  env = process.env,
-  loadRoleConfigImpl = loadRoleConfig,
+  cfg,
   logger = null,
 } = {}) {
   let raw;
   try {
-    const cfg = loadRoleConfigImpl({ env, contextKey: AMA_HAMMER_DISPATCH_MODE_CFG_KEY });
     raw = cfg?.get?.(AMA_HAMMER_DISPATCH_MODE_CFG_KEY, DEFAULT_AMA_HAMMER_DISPATCH_MODE);
   } catch (err) {
     logger?.warn?.(

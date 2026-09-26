@@ -1,6 +1,6 @@
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
@@ -44,9 +44,18 @@ function fixture({
 // branch (6 failures on any second run; a fresh CI clone always passes), and
 // run from the deploy checkout it would enqueue a real remediation job. Every
 // call gets a throwaway root; a test that passes rootDir keeps its own.
+const temporaryRoots = new Set();
+function temporaryRoot() {
+  const rootDir = mkdtempSync(join(tmpdir(), 'orphan-post-reconcile-'));
+  temporaryRoots.add(rootDir);
+  return rootDir;
+}
+after(() => {
+  for (const rootDir of temporaryRoots) rmSync(rootDir, { recursive: true, force: true });
+});
 function reconcile(args) {
   return reconcilePostedFailedOrphans({
-    rootDir: mkdtempSync(join(tmpdir(), 'orphan-post-reconcile-')),
+    rootDir: temporaryRoot(),
     ...args,
   });
 }
@@ -328,7 +337,7 @@ test('apply resumes from a linked pass artifact after follow-up queue failure', 
 
 test('apply skips recovered follow-up queueing when the same revision already has a job', async () => {
   const db = fixture({ attempts: 4, passStatus: 'failed' });
-  const rootDir = mkdtempSync(join(tmpdir(), 'orphan-post-reconcile-'));
+  const rootDir = temporaryRoot();
   createFollowUpJob({
     rootDir,
     repo: 'laceyenterprises/adversarial-review',

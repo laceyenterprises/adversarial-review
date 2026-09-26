@@ -659,12 +659,13 @@ export async function maybeDispatchAmaClosureFor({
 }) {
   throwIfAborted(signal);
   let cfg;
+  let loadedConfig;
   let orchestrationMode;
   try {
     // Load the adversarial config.yaml as a module so merge-authority values
     // (notably lha.consume_attestations, which gates autonomous merge) come from
     // the reviewed file, not the shell env export that mis-resolves nested keys.
-    const loadedConfig = loadConfigImpl({ modulePaths: WATCHER_MERGE_AUTHORITY_CONFIG_MODULES });
+    loadedConfig = loadConfigImpl({ modulePaths: WATCHER_MERGE_AUTHORITY_CONFIG_MODULES });
     cfg = resolveMergeAuthorityConfigFromDomain(
       loadDomainConfig(rootDir, domainId || 'code-pr'),
       loadedConfig.getMergeAuthorityConfig(),
@@ -1655,7 +1656,7 @@ export async function maybeDispatchAmaClosureFor({
   // from the closer's own gates (retry cap, ineligibility) still reaches the
   // merge-agent fallback and alerting, one tick later.
   let backgroundSettled = null;
-  if (resolveAmaHammerDispatchModeImpl({ env, logger }) === 'background') {
+  if (resolveAmaHammerDispatchModeImpl({ cfg: loadedConfig, logger }) === 'background') {
     const backgroundKey = amaHammerBackgroundKey({
       repo: repoPath,
       prNumber,

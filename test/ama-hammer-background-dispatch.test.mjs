@@ -10,7 +10,7 @@ import {
 import { maybeDispatchAmaClosureFor } from '../src/ama-closure-orchestration.mjs';
 
 function cfgReturning(value) {
-  return () => ({ get: (key, fallback) => (value === undefined ? fallback : value) });
+  return { get: (key, fallback) => (value === undefined ? fallback : value) };
 }
 
 function deferred() {
@@ -24,21 +24,19 @@ function deferred() {
 }
 
 test('dispatch mode defaults to inline when the key is unset', () => {
-  assert.equal(resolveAmaHammerDispatchMode({ loadRoleConfigImpl: cfgReturning(undefined) }), 'inline');
+  assert.equal(resolveAmaHammerDispatchMode({ cfg: cfgReturning(undefined) }), 'inline');
 });
 
 test('dispatch mode resolves background when configured', () => {
-  assert.equal(resolveAmaHammerDispatchMode({ loadRoleConfigImpl: cfgReturning('background') }), 'background');
-  assert.equal(resolveAmaHammerDispatchMode({ loadRoleConfigImpl: cfgReturning(' Background ') }), 'background');
+  assert.equal(resolveAmaHammerDispatchMode({ cfg: cfgReturning('background') }), 'background');
+  assert.equal(resolveAmaHammerDispatchMode({ cfg: cfgReturning(' Background ') }), 'background');
 });
 
 test('dispatch mode fails safe to inline on an unknown value or a config error', () => {
-  assert.equal(resolveAmaHammerDispatchMode({ loadRoleConfigImpl: cfgReturning('async') }), 'inline');
+  assert.equal(resolveAmaHammerDispatchMode({ cfg: cfgReturning('async') }), 'inline');
   const warnings = [];
   const mode = resolveAmaHammerDispatchMode({
-    loadRoleConfigImpl: () => {
-      throw new Error('config.yaml unreadable');
-    },
+    cfg: { get() { throw new Error('config.yaml unreadable'); } },
     logger: { warn: (line) => warnings.push(line) },
   });
   assert.equal(mode, 'inline');
@@ -152,14 +150,21 @@ function closureArgs(overrides = {}) {
 
 test('inline mode (default) still awaits the closer and returns its result', async () => {
   let calls = 0;
+  let configLoads = 0;
+  const cachedConfig = { getMergeAuthorityConfig: () => ({ enabled: true }) };
   const result = await maybeDispatchAmaClosureFor(closureArgs({
-    resolveAmaHammerDispatchModeImpl: () => 'inline',
+    loadConfigImpl: () => { configLoads += 1; return cachedConfig; },
+    resolveAmaHammerDispatchModeImpl: ({ cfg }) => {
+      assert.equal(cfg, cachedConfig);
+      return 'inline';
+    },
     maybeDispatchAmaCloserImpl: async () => {
       calls += 1;
       return { dispatched: true, reason: 'dispatched', launchRequestId: 'lrq_inline' };
     },
   }));
   assert.equal(calls, 1);
+  assert.equal(configLoads, 1);
   assert.equal(result.dispatched, true);
   assert.equal(result.launchRequestId, 'lrq_inline');
 });

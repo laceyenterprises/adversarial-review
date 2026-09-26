@@ -3,6 +3,7 @@ import {
   REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS,
   ATTESTATION_SIGN_FAILED_FAILURE_CLASS,
   HCP_UNAVAILABLE_FAILURE_CLASS,
+  TOKEN_REFRESH_PENDING_FAILURE_CLASS,
   classifyReviewerFailure,
 } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS } from './quota-exhaustion.mjs';
@@ -38,7 +39,7 @@ function reviewerFailureClassFromStoredRow(reviewRow) {
   const rawMessage = storedRowFailureSignal(reviewRow);
   const message = rawMessage.toLowerCase();
   const tagMatch = message.match(
-    /^\[(reviewer-timeout|launchctl-bootstrap|cascade|quota-exhausted|provider-overloaded|reviewer-empty-output|reviewer-output|oauth-broken|attestation-sign-failed|hcp-unavailable|dispatch-failed|adapter_spawn_timeout)\]/
+    /^\[(reviewer-timeout|launchctl-bootstrap|cascade|quota-exhausted|provider-overloaded|reviewer-empty-output|reviewer-output|oauth-broken|token-refresh-pending|attestation-sign-failed|hcp-unavailable|dispatch-failed|adapter_spawn_timeout)\]/
   );
   if (tagMatch) return tagMatch[1];
   const legacyClass = classifyReviewerFailure(rawMessage, null);
@@ -52,6 +53,7 @@ function reviewerFailureClassFromStoredRow(reviewRow) {
     || legacyClass === REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS
     || legacyClass === ATTESTATION_SIGN_FAILED_FAILURE_CLASS
     || legacyClass === HCP_UNAVAILABLE_FAILURE_CLASS
+    || legacyClass === TOKEN_REFRESH_PENDING_FAILURE_CLASS
   ) {
     return legacyClass;
   }

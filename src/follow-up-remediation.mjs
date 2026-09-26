@@ -114,7 +114,8 @@ import {
 import { validateStartupRoleRegistry } from './role-registry.mjs';
 import { validateStartupDeliveryIdentity } from './adapters/comms/github-pr-comments/delivery-identity.mjs';
 import { applyPreSpawnLifecycleGate } from './follow-up-stuck-claim-sweep.mjs';
-import { detectQuotaExhaustion, parseQuotaResetAt } from './quota-exhaustion.mjs';
+import { parseQuotaResetAt } from './quota-exhaustion.mjs';
+import { detectRemediationQuotaEvidence } from './remediation-quota-evidence.mjs';
 import { remediationWorkerClassFallback } from './remediation-worker-class-fallback.mjs';
 import {
   DEFAULT_REPLIES_ROOT,
@@ -2036,12 +2037,12 @@ async function reconcileFollowUpJob({
     };
   }
   const hasNonEmptyNarrative = finalMessage.exists && Boolean(String(finalMessage.text).trim());
+  const { quotaLogText, quotaSignal } = detectRemediationQuotaEvidence({
+    model: worker?.model, stderrText: readWorkerStderrLogSafe(paths.logPath), finalMessageText: finalMessage.text,
+  });
 
-  // Invalid reply is a distinct artifact failure regardless of whether
-  // stdout is empty or non-empty. Route it directly to
-  // `invalid-remediation-reply` so the operator gets the real cause
-  // instead of a misleading `artifact-empty-completion`.
-  //
+  // Without confirmed quota, an invalid reply fails as
+  // `invalid-remediation-reply`, even when the worker wrote a narrative.
   // Salvage path: even though strict validation rejected the reply,
   // the file may still contain a renderable summary / addressed[] /
   // pushback[] / blockers[]. Pull those out and pass them into the
@@ -2052,7 +2053,9 @@ async function reconcileFollowUpJob({
   // worker actually did instead of just "did not produce a usable
   // remediation reply". The salvaged reply is best-effort and not
   // persisted to the job record.
-  if (replyProbe.state === 'invalid') {
+  // A provider cap may interrupt a reply.json write, leaving partial JSON.
+  // Let that case reach the bounded quota hold below.
+  if (replyProbe.state === 'invalid' && !quotaSignal.isQuotaExhausted) {
     const err = replyProbe.error;
     const invalidReplyFailure = { code: 'invalid-remediation-reply', message: err.message };
     const salvagePath = replyProbe.fallbackPath || paths.replyPath;
@@ -2098,7 +2101,7 @@ async function reconcileFollowUpJob({
     };
   }
 
-  if (hasNonEmptyNarrative || replyProbe.state === 'valid') {
+  if (replyProbe.state === 'valid' || (hasNonEmptyNarrative && !quotaSignal.isQuotaExhausted)) {
     let remediationReply = {
       ...job?.remediationReply,
       state: job?.remediationReply?.path ? 'awaiting-worker-write' : 'not-configured',
@@ -3051,8 +3054,6 @@ async function reconcileFollowUpJob({
   // future tick re-spawns the remediation worker. Bounded by the shared
   // transient-retry budget so a persistent cap eventually becomes terminal.
   // Applies to both harnesses we know the shape for (codex / claude).
-  const quotaLogText = readWorkerStderrLogSafe(paths.logPath);
-  const quotaSignal = detectQuotaExhaustion(quotaLogText);
   if (quotaSignal.isQuotaExhausted) {
     const parsedCompletedAtMs = Date.parse(String(completedAt || ''));
     const completedAtMs = Number.isNaN(parsedCompletedAtMs) ? Date.now() : parsedCompletedAtMs;

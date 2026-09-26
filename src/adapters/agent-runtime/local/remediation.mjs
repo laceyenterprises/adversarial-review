@@ -595,6 +595,10 @@ function withReplyContext(env, { replyPath = null, hqRoot, launchRequestId, now,
   const replyContext = requireWorkerReplyContext({ replyPath, hqRoot, launchRequestId });
   const next = {
     ...env,
+    // Detached workers have no terminal for git rebase --continue's editor.
+    GIT_EDITOR: 'true',
+    GIT_SEQUENCE_EDITOR: 'true',
+    GIT_TERMINAL_PROMPT: '0',
     WORKER_CLASS: workerClass,
     WORKER_RUN_AT: now(),
     ADV_REPLY_DIR: replyContext.replyDir,

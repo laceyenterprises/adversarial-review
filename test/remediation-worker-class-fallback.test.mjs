@@ -81,8 +81,22 @@ test('fail-open: an unreadable fleet-quota status keeps the primary (never guess
   assert.equal(result.reason, 'fleet-quota-status-unavailable');
 });
 
-test('remediationWorkerClassFallback defaults to [claude-code] and honors the env override', () => {
-  assert.deepEqual(remediationWorkerClassFallback({}), ['claude-code']);
+test('falls back claude-code -> codex when Claude is grounded and Codex is available', async () => {
+  const result = await resolveRemediationWorkerClassWithFallback({
+    primary: 'claude-code',
+    fallbackWorkerClasses: remediationWorkerClassFallback({}),
+    execFileImpl: fleetStatusStub([
+      { provider: 'openai', authPath: 'oauth', state: 'ok' },
+      { provider: 'anthropic', authPath: 'oauth', state: 'exhausted' },
+    ]),
+  });
+  assert.equal(result.workerClass, 'codex');
+  assert.equal(result.fellBack, true);
+  assert.equal(result.primaryState, 'exhausted');
+});
+
+test('remediationWorkerClassFallback defaults to both harnesses and honors the env override', () => {
+  assert.deepEqual(remediationWorkerClassFallback({}), ['claude-code', 'codex']);
   assert.deepEqual(
     remediationWorkerClassFallback({ ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK: 'claude-code, gemini' }),
     ['claude-code', 'gemini'],

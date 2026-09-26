@@ -45,21 +45,11 @@ const CONFIG_DRIFT_ALARM_MS = 10 * 60 * 1000;
 function summarizeConfigSignatureDrift(hqRoot, { nowMs }) {
   const candidates = [
     ['adversarial-follow-up', join(hqRoot, '.adversarial-follow-up', 'config-status.json')],
-    ...(() => {
-      const dir = join(hqRoot, 'dispatch', '_daemon');
-      try {
-        return readdirSync(dir)
-          .filter((name) => /^status-.+\.json$/.test(name))
-          .map((name) => [`dispatch:${name.slice(7, -5)}`, join(dir, name)]);
-      } catch {
-        return [];
-      }
-    })(),
   ];
   const daemons = candidates.map(([daemon, path]) => {
     try {
       const raw = JSON.parse(readFileSync(path, 'utf8'));
-      const status = daemon === 'adversarial-follow-up' ? raw : raw?.configSignature;
+      const status = raw;
       const observedMs = Date.parse(status?.driftSince || status?.observedAt || '') || statSync(path).mtimeMs;
       const inSync = status?.inSync ?? null;
       const driftMs = inSync === false ? Math.max(0, nowMs - observedMs) : 0;
@@ -607,9 +597,9 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     thresholdDescription: 'remediation round count exceeds the risk-class budget or final-pass awaiting-rereview persists after budget exhaustion',
   },
   {
-    code: 'substrate:config_signature_drift',
-    tier: 'page',
-    category: 'substrate',
+    code: 'review:config_signature_drift',
+    tier: 'ticket',
+    category: 'review-pipeline',
     thresholdKey: null,
     defaultThreshold: CONFIG_DRIFT_ALARM_MS,
     thresholdDescription: 'a long-lived daemon loaded signature differs from disk for more than 10 minutes',
@@ -4352,8 +4342,8 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
 
   for (const drift of snapshot.configSignatureDrift?.alarmed || []) {
     findings.push(buildFinding({
-      code: 'substrate:config_signature_drift',
-      tier: 'page',
+      code: 'review:config_signature_drift',
+      tier: 'ticket',
       subject: `${drift.daemon} has used stale config for more than 10 minutes`,
       message: `Loaded config signature differs from disk for ${Math.round(drift.driftMs / 60000)} minute(s).`,
       evidence: [

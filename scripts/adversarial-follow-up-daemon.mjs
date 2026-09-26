@@ -55,7 +55,7 @@ import {
 } from '../src/reviewer-broker-refresh.mjs';
 import { reapCloserHammerWorktrees } from '../src/ama/closer-worktree-reaper.mjs';
 import { configSignatureStatus, loadConfigCached } from '../src/config-loader.mjs';
-import { DEFAULT_ROLE_TOP_PATH, MODULE_CONFIG_PATH } from '../src/role-config.mjs';
+import { DEFAULT_ROLE_TOP_PATH, MODULE_CONFIG_PATH, pruneBlankRoleEnvVars } from '../src/role-config.mjs';
 import { archiveStoppedFollowUpJobs, reapTerminalFollowUpWorkspaces } from '../src/follow-up-jobs.mjs';
 import {
   emitHeartbeatsForActiveJobs,
@@ -169,10 +169,11 @@ function resolveDaemonMaxConcurrentJobs(env = process.env) {
 function writeConfigSignatureStatus({ env = process.env, now = () => new Date() } = {}) {
   const hqRoot = env.HQ_ROOT;
   if (!hqRoot) return null;
+  const envForConfig = pruneBlankRoleEnvVars(env);
   const status = configSignatureStatus({
-    topPath: env.AGENT_OS_CONFIG_PATH || DEFAULT_ROLE_TOP_PATH,
+    topPath: envForConfig.AGENT_OS_CONFIG_PATH || DEFAULT_ROLE_TOP_PATH,
     modulePaths: [MODULE_CONFIG_PATH],
-    env,
+    env: envForConfig,
   });
   const path = join(hqRoot, '.adversarial-follow-up', 'config-status.json');
   let prior = null;
@@ -518,16 +519,23 @@ async function runFollowUpDaemonIteration({
   diagnoseStuckRereviewImpl = diagnoseStuckRereviewMain,
   runStoppedArchiveSweepIfDueImpl = runStoppedArchiveSweepIfDue,
   resolveMaxConcurrentJobsImpl = resolveDaemonMaxConcurrentJobs,
+  writeConfigSignatureStatusImpl = writeConfigSignatureStatus,
   shouldStop = () => stopping,
 } = {}) {
-  const maxConcurrentJobs = resolveMaxConcurrentJobsImpl(env);
-  const configStatus = writeConfigSignatureStatus({ env });
-  if (configStatus) {
-    logTick(
-      'config-signature',
-      `loaded=${configStatus.loadedSignature} disk=${configStatus.diskSignature} inSync=${configStatus.inSync}`
-    );
-  }
+  let maxConcurrentJobs = null;
+  await runStep('config-signature', async () => {
+    const configStatus = writeConfigSignatureStatusImpl({ env });
+    if (configStatus) {
+      logTick(
+        'config-signature',
+        `loaded=${configStatus.loadedSignature} disk=${configStatus.diskSignature} inSync=${configStatus.inSync}`
+      );
+    }
+  });
+  await runStep('resolve-capacity', async () => {
+    maxConcurrentJobs = resolveMaxConcurrentJobsImpl(env);
+    logTick('resolve-capacity', `maxConcurrent=${maxConcurrentJobs}`);
+  });
   await runStep('github-token-refresh', async () => {
     await refreshFollowUpGithubTokenImpl({ env, log: console });
   });
@@ -644,7 +652,9 @@ async function runFollowUpDaemonIteration({
     );
   }
   if (shouldStop()) return;
-  if (shouldConsumeAfterReviewerTokenRefresh(reviewerTokenRefreshSummary)) {
+  if (maxConcurrentJobs === null) {
+    logTick('consume', 'skipped unresolved remediation capacity; will retry next tick');
+  } else if (shouldConsumeAfterReviewerTokenRefresh(reviewerTokenRefreshSummary)) {
     await runStep('consume', async () => {
       const result = await consumeFollowUpJobsUntilCapacityImpl({
         // CFGSTALE-01: resolve inside every long-lived iteration. The old

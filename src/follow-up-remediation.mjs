@@ -114,7 +114,8 @@ import {
 import { validateStartupRoleRegistry } from './role-registry.mjs';
 import { validateStartupDeliveryIdentity } from './adapters/comms/github-pr-comments/delivery-identity.mjs';
 import { applyPreSpawnLifecycleGate } from './follow-up-stuck-claim-sweep.mjs';
-import { detectQuotaExhaustion, parseQuotaResetAt } from './quota-exhaustion.mjs';
+import { parseQuotaResetAt } from './quota-exhaustion.mjs';
+import { detectRemediationQuotaEvidence } from './remediation-quota-evidence.mjs';
 import { remediationWorkerClassFallback } from './remediation-worker-class-fallback.mjs';
 import {
   DEFAULT_REPLIES_ROOT,
@@ -2036,20 +2037,12 @@ async function reconcileFollowUpJob({
     };
   }
   const hasNonEmptyNarrative = finalMessage.exists && Boolean(String(finalMessage.text).trim());
-  // The final artifact can contain the worker's prose or echoed source code.
-  // Only the observed provider-owned 429 wrapper is quota evidence there;
-  // stderr remains the direct provider-output signal.
-  const providerQuotaArtifact = /^API Error: Request rejected \(429\)\s*[·:—-]\s*This request would exceed your account['’]s rate limit\b/i.test(String(finalMessage.text || '').trimStart())
-    ? String(finalMessage.text).trim()
-    : '';
-  const quotaLogText = `worker=${worker?.model || 'unknown'}\n${readWorkerStderrLogSafe(paths.logPath)}\n${providerQuotaArtifact}`;
-  const quotaSignal = detectQuotaExhaustion(quotaLogText);
+  const { quotaLogText, quotaSignal } = detectRemediationQuotaEvidence({
+    model: worker?.model, stderrText: readWorkerStderrLogSafe(paths.logPath), finalMessageText: finalMessage.text,
+  });
 
-  // An invalid reply without a confirmed provider cap is a distinct
-  // artifact failure regardless of whether stdout is empty or non-empty.
-  // Route it to `invalid-remediation-reply` so the operator gets the real
-  // cause instead of a misleading `artifact-empty-completion`.
-  //
+  // Without confirmed quota, an invalid reply fails as
+  // `invalid-remediation-reply`, even when the worker wrote a narrative.
   // Salvage path: even though strict validation rejected the reply,
   // the file may still contain a renderable summary / addressed[] /
   // pushback[] / blockers[]. Pull those out and pass them into the

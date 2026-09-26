@@ -83,6 +83,12 @@ test('cascade / reviewer-timeout / launchctl-bootstrap / provider degradation re
     infraRecoverableFailureClass({ failure_message: '[hcp-unavailable] HCP healthz timed out' }),
     'hcp-unavailable'
   );
+  assert.equal(
+    infraRecoverableFailureClass({
+      failure_message: '[token-refresh-pending] broker Claude reviewer token expires too soon for subprocess handoff',
+    }),
+    'token-refresh-pending'
+  );
 });
 
 test('forbidden-fallback is NOT infra-recoverable (security must stay terminal)', () => {

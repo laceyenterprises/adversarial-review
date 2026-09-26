@@ -85,6 +85,7 @@ import {
   REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS,
   ATTESTATION_SIGN_FAILED_FAILURE_CLASS,
   HCP_UNAVAILABLE_FAILURE_CLASS,
+  TOKEN_REFRESH_PENDING_FAILURE_CLASS,
 } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS, resolveQuotaResetIso } from './quota-exhaustion.mjs';
 import { classifyGitHubReviewCreateFailure } from './reviewer-failure-classification.mjs';
@@ -1157,6 +1158,7 @@ function settleReviewerAttempt({
   const transientFailureClasses = new Set([
     'cascade',
     'oauth-broken',
+    TOKEN_REFRESH_PENDING_FAILURE_CLASS,
     'reviewer-timeout',
     'launchctl-bootstrap',
     'daemon-bounce',
@@ -1173,6 +1175,7 @@ function settleReviewerAttempt({
     [REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS]: 'Reviewer runtime returned empty output before posting; watcher backoff engaged.',
     'quota-exhausted': 'Reviewer hit a hard provider usage cap; holding until the cap window clears (HRR graceful degradation).',
     'oauth-broken': 'Reviewer OAuth credentials are unavailable; watcher backoff engaged until credentials recover.',
+    [TOKEN_REFRESH_PENDING_FAILURE_CLASS]: 'Claude reviewer token refresh is pending; watcher short backoff engaged.',
     'reviewer-timeout': 'Reviewer command timed out before posting; watcher backoff engaged.',
     'launchctl-bootstrap': 'Claude launchctl session bootstrap failed; watcher backoff engaged.',
     'daemon-bounce': 'Reviewer runtime could not reattach after daemon bounce; watcher backoff engaged.',

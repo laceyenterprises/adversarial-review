@@ -306,8 +306,7 @@ function assertClaudeBrokerTokenHandoffLifetime({
     (reviewerTimeoutMs ?? resolveReviewerTimeoutMs(env)) + postSlackMs;
   const remainingMs = expiresAtMs - nowMs;
   if (remainingMs <= requiredLifetimeMs) {
-    throw new OAuthError(
-      'claude',
+    throw new TokenRefreshPendingError(
       `broker Claude reviewer token expires too soon for subprocess handoff: ` +
       `remaining=${remainingMs}ms minimum=${requiredLifetimeMs}ms`
     );
@@ -599,6 +598,14 @@ class OAuthError extends Error {
     super(`[OAuth] ${model} credentials unavailable: ${reason}`);
     this.model = model;
     this.isOAuthError = true;
+  }
+}
+
+class TokenRefreshPendingError extends Error {
+  constructor(reason) {
+    super(reason);
+    this.name = 'TokenRefreshPendingError';
+    this.failureClass = 'token-refresh-pending';
   }
 }
 
@@ -3071,6 +3078,7 @@ const __test__ = {
   LaunchctlSessionError,
   MAINTAINER_ACPX_CLI,
   OAuthError,
+  TokenRefreshPendingError,
   REVIEWER_METADATA_BY_MODEL,
   REVIEWER_ROUTE_BY_MODEL,
   acquireGeminiFallbackLock,

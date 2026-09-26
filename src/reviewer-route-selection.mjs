@@ -81,6 +81,7 @@ const REVIEWER_EXEC_FALLBACK_FAILURE_CLASSES = Object.freeze([
   'launchctl-bootstrap',
   'reviewer-command-failed',
   'oauth-broken',
+  'token-refresh-pending',
   'quota-exhausted',
   'provider-overloaded',
 ]);

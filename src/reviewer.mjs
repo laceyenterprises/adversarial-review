@@ -2132,6 +2132,12 @@ async function main() {
     }
     console.error(`[reviewer] DEBUG: review completed (${reviewText.length} bytes)`);
   } catch (err) {
+    if (err.failureClass === 'token-refresh-pending') {
+      // The bridge is the sole Claude refresh owner. A too-short token means
+      // refresh is pending, not that an operator must re-authenticate.
+      console.error(`[token-refresh-pending] ${err.message}`);
+      process.exit(1);
+    }
     if (err.isOAuthError) {
       // OAuth failure — stop work and alert Paul
       await alertClioOAuthFailure(reviewerModel, repo, prNumber, err.message);

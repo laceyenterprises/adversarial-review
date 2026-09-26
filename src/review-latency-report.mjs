@@ -947,6 +947,7 @@ function emptyReviewModeMix() {
     topRefusals: [],
     lowRiskClasses: [],
   };
+}
 
 function recentWakeEvents(subjects) {
   const wakes = [];

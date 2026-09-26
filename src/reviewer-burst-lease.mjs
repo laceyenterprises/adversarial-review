@@ -77,6 +77,10 @@ const LEASE_RELATIVE_PATH = ['data', 'reviewer-burst-lease.json'];
 const RECORD_SCHEMA_VERSION = 1;
 const MAX_RETAINED_EVENTS = 50;
 const MAX_RETAINED_HISTORY = 10;
+const BURST_SPEND_REFRESH_MS = 60 * 1000;
+// The controller is constructed per watcher tick. Keep the last read in this
+// process so unchanged spend needs neither another table query nor a disk write.
+let lastSpendRead = null;
 
 // System ceilings. An operator request is clamped to these; the CLI cannot
 // exceed them and says so when it clamps.
@@ -1003,38 +1007,43 @@ export function createReviewerBurstController({
       record = settled.record;
       let state = settled.state;
       if (state.active && typeof readSpendUsd === 'function') {
-        // Refresh the observed-spend limb once per tick, then re-derive: a
-        // lease that has burned its dollars must stop THIS tick, not after the
-        // TTL runs out.
         const lease = record.lease;
-        let spend = null;
-        try {
-          const value = Number(readSpendUsd({ lease }));
-          spend = Number.isFinite(value) && value >= 0 ? value : null;
-        } catch (err) {
-          logger?.warn?.(
-            `[reviewer-burst-lease] observed-spend read failed; review-count cap still applies: ${err?.message || err}`
-          );
-          spend = null;
-        }
-        lease.usage.spendUsd = spend;
-        lease.usage.spendReadable = spend !== null;
-        lease.usage.spendObservedAt = at;
-        state = evaluateLeaseState(lease, { nowMs });
-        if (!state.active) {
-          const expiry = expireReviewerBurstLeaseIfDue(rootDir, {
-            record,
-            now: () => new Date(at),
-            readFileImpl,
-            writeFileImpl,
-            logger,
-          });
-          record = expiry.record;
-          state = expiry.state;
-        } else {
-          if (!persistRecord(rootDir, record, { writeFileImpl, logger })) {
-            throw new Error('lease-write-failed');
+        const cachedAt = lastSpendRead?.rootDir === rootDir && lastSpendRead?.leaseId === lease.leaseId
+          ? lastSpendRead.atMs
+          : Date.parse(lease.usage.spendObservedAt || '');
+        if (!Number.isFinite(cachedAt) || nowMs < cachedAt || nowMs - cachedAt >= BURST_SPEND_REFRESH_MS) {
+          // The review-count cap still bounds admissions between dollar reads.
+          let spend = null;
+          try {
+            const value = readSpendUsd({ lease });
+            const numeric = value === null || value === undefined ? NaN : Number(value);
+            spend = Number.isFinite(numeric) && numeric >= 0 ? numeric : null;
+          } catch (err) {
+            logger?.warn?.(
+              `[reviewer-burst-lease] observed-spend read failed; review-count cap still applies: ${err?.message || err}`
+            );
           }
+          const changed = lease.usage.spendUsd !== spend || lease.usage.spendReadable !== (spend !== null);
+          if (changed) {
+            lease.usage.spendUsd = spend;
+            lease.usage.spendReadable = spend !== null;
+            lease.usage.spendObservedAt = at;
+            state = evaluateLeaseState(lease, { nowMs });
+            if (!state.active) {
+              const expiry = expireReviewerBurstLeaseIfDue(rootDir, {
+                record,
+                now: () => new Date(at),
+                readFileImpl,
+                writeFileImpl,
+                logger,
+              });
+              record = expiry.record;
+              state = expiry.state;
+            } else if (!persistRecord(rootDir, record, { writeFileImpl, logger })) {
+              throw new Error('lease-write-failed');
+            }
+          }
+          lastSpendRead = { rootDir, leaseId: lease.leaseId, atMs: nowMs };
         }
       }
       evaluated = { at, nowMs, state, lease: state.active ? record.lease : null };

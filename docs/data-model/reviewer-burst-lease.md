@@ -114,6 +114,10 @@ Only one of them is always measurable, so there are two:
   need a per-pass flag nothing writes, and guessing it would produce a number
   that disagrees with the provider bill. The exact unit string is exported as
   `BURST_SPEND_UNIT` and printed in the lease record.
+  The watcher refreshes this figure at most once per minute while a lease is
+  active. An unchanged reading does not rewrite the lease file; the review-count
+  cap bounds admissions between dollar reads. A fresh lease with no passes has
+  a measured `$0` spend, while passes with no cost telemetry remain unreadable.
 
 If cost telemetry is unreadable the status prints
 `observed_spend: unreadable (review-count cap still applies)` and the lease is

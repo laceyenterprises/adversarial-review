@@ -495,7 +495,7 @@ export function countOpenPrsAwaitingFirstPassReview(handle = db) {
 // production ledger every other cost surface reads.
 //
 // Returns `null` — NOT zero — when the lease is unusable for a spend read or
-// when NO pass in the window carries a cost. `null` means "unreadable", and the
+// when passes exist but NONE carries a cost. `null` means "unreadable", and the
 // burst controller degrades to its always-enforceable review-count cap rather
 // than concluding a burst has spent nothing. Reporting an unknown spend as $0
 // would let a lease with broken cost telemetry run to its TTL against a budget
@@ -512,12 +512,15 @@ export function readBurstScopedReviewerSpendUsd({ lease } = {}, handle = db) {
     : [];
   const activatedAt = lease?.activatedAt || lease?.requestedAt || null;
   if (repos.length === 0 || !activatedAt) return null;
-  const row = handle.prepare(sqlSumReviewerPassSpendSince(repos.length)).get(activatedAt, ...repos);
+  const spaceBound = String(activatedAt).replace('T', ' ').slice(0, 19);
+  const isoDayPrefix = `${String(activatedAt).slice(0, 10)}T`;
+  const row = handle.prepare(sqlSumReviewerPassSpendSince(repos.length)).get(
+    activatedAt, spaceBound, isoDayPrefix, ...repos
+  );
   const passCount = Number(row?.pass_count || 0);
   const uncosted = Number(row?.uncosted_pass_count || 0);
-  // Every pass in the window lacking a cost is indistinguishable from no
-  // telemetry at all, so say "unreadable" instead of "$0.00".
-  if (passCount === 0 || uncosted >= passCount) return null;
+  // No passes means measured $0. Passes with no cost are an unreadable ledger.
+  if (passCount > 0 && uncosted >= passCount) return null;
   const spend = Number(row?.spend_usd);
   return Number.isFinite(spend) && spend >= 0 ? spend : null;
 }

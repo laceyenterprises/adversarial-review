@@ -327,22 +327,21 @@ export const SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW =
 // their provider bill. The window figure is the one an operator can act on:
 // "what did review cost while the burst was up, where the burst applied".
 //
-// Both sides of the window predicate go through
-// REVIEWER_PASS_NORMALIZED_STARTED_AT_SQL, because `reviewer_passes.started_at`
-// carries BOTH the JS `toISOString()` shape and SQLite's space-separated
-// `CURRENT_TIMESTAMP` shape, and ' ' sorts before 'T'. A raw compare against an
-// ISO bound silently drops same-day rows written in the other shape — which for
-// a budget guard is the UNSAFE direction (spend under-reported, lease outlives
-// its budget). An unparseable `started_at` normalizes to NULL and is excluded.
+// `started_at` carries both ISO and SQLite CURRENT_TIMESTAMP shapes. The first
+// range includes all later dates plus same-day ISO rows. The second includes
+// same-day space-separated rows from activation up to the day's ISO prefix.
+// Both ranges stay raw so (repo, started_at) can be indexed. The space bound
+// rounds activation down to a second; counting a pass from that same second
+// conservatively is safer for a budget guard than dropping it.
 //
 // `repoCount` parameterizes the repo IN-list; the caller binds
-// `[activatedAt, ...repos]` in that order. A zero-repo lease cannot exist (the
+// `[activatedAt, spaceBound, isoDayPrefix, ...repos]` in that order. A zero-repo lease cannot exist (the
 // request path refuses a repo-less burst), so the caller is expected to guard.
 export function sqlSumReviewerPassSpendSince(repoCount) {
   const placeholders = Array.from({ length: Math.max(1, Number(repoCount) || 1) }, () => '?').join(', ');
   return 'SELECT COALESCE(SUM(token_cost_usd), 0) AS spend_usd, COUNT(*) AS pass_count, '
     + 'SUM(CASE WHEN token_cost_usd IS NULL THEN 1 ELSE 0 END) AS uncosted_pass_count '
     + 'FROM reviewer_passes '
-    + `WHERE ${REVIEWER_PASS_NORMALIZED_STARTED_AT_SQL} >= strftime('%Y-%m-%dT%H:%M:%fZ', ?) `
-    + `AND LOWER(repo) IN (${placeholders})`;
+    + 'WHERE (started_at >= ? OR (started_at >= ? AND started_at < ?)) '
+    + `AND repo COLLATE NOCASE IN (${placeholders})`;
 }

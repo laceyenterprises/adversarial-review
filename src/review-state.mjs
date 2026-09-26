@@ -303,6 +303,9 @@ function ensureReviewStateSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_reviewer_passes_head
       ON reviewer_passes(repo, pr_number, pass_kind, head_sha);
 
+    CREATE INDEX IF NOT EXISTS idx_reviewer_passes_repo_started_at
+      ON reviewer_passes(repo COLLATE NOCASE, started_at);
+
     CREATE INDEX IF NOT EXISTS idx_reviewer_passes_posted_review_freshness
       ON reviewer_passes(
         ${REVIEWER_PASS_NORMALIZED_POSTED_AT_SQL}

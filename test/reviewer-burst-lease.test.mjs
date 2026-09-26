@@ -48,6 +48,7 @@ import {
   renderReviewPipelinePrometheus,
 } from '../src/review-pipeline-health.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
+import { readBurstScopedReviewerSpendUsd } from '../src/review-state-db.mjs';
 import { sqlSumReviewerPassSpendSince } from '../src/review-state-statements.mjs';
 import { resetRoleConfigCache } from '../src/role-config.mjs';
 
@@ -635,6 +636,23 @@ test('spend under budget keeps the lease and records the observation', () => {
   rmSync(root, { recursive: true, force: true });
 });
 
+test('unchanged spend is read at most once a minute and does not rewrite the lease', () => {
+  const root = tempRoot();
+  grantLease(root, { budgetUsd: 20 });
+  let reads = 0;
+  let writes = 0;
+  const deps = {
+    readSpendUsd: () => { reads += 1; return 3.25; },
+    writeFileImpl: (filePath, data) => { writes += 1; writeFileSync(filePath, data); },
+  };
+  assert.equal(controllerAt(root, new Date(T0_MS + 60_000).toISOString(), deps).slots(), 2);
+  assert.equal(controllerAt(root, new Date(T0_MS + 80_000).toISOString(), deps).slots(), 2);
+  assert.equal(controllerAt(root, new Date(T0_MS + 121_000).toISOString(), deps).slots(), 2);
+  assert.equal(reads, 2);
+  assert.equal(writes, 1);
+  rmSync(root, { recursive: true, force: true });
+});
+
 test('an unreadable or throwing spend reader degrades to the review-count cap, not to $0', () => {
   const root = tempRoot();
   grantLease(root, { budgetUsd: 20 });
@@ -656,7 +674,14 @@ function spendFixtureDb(rows) {
     started_at TEXT, token_cost_usd REAL);`);
   const insert = db.prepare('INSERT INTO reviewer_passes (repo, pr_number, started_at, token_cost_usd) VALUES (?, ?, ?, ?)');
   rows.forEach((row, index) => insert.run(row.repo, index + 1, row.startedAt, row.cost));
+  db.exec('CREATE INDEX idx_reviewer_passes_repo_started_at ON reviewer_passes(repo COLLATE NOCASE, started_at)');
   return db;
+}
+
+function spendRow(db) {
+  return db.prepare(sqlSumReviewerPassSpendSince(1)).get(
+    T0, T0.replace('T', ' ').slice(0, 19), `${T0.slice(0, 10)}T`, REPO
+  );
 }
 
 test('an unreadable spend can neither pass nor trip the dollar guard', () => {
@@ -677,10 +702,11 @@ test('the observed-spend SQL sums reviewer pass cost since activation, scoped to
     { repo: REPO, startedAt: '2026-09-21T12:10:00.000Z', cost: 1.5 },
     { repo: REPO, startedAt: '2026-09-21T12:20:00.000Z', cost: 2.5 },
     { repo: 'laceyenterprises/other', startedAt: '2026-09-21T12:30:00.000Z', cost: 50.0 }, // out of scope
+    { repo: REPO.toUpperCase(), startedAt: '2026-09-21T12:25:00.000Z', cost: 1.0 },
   ]);
-  const row = db.prepare(sqlSumReviewerPassSpendSince(1)).get(T0, REPO);
-  assert.equal(row.spend_usd, 4.0);
-  assert.equal(row.pass_count, 2);
+  const row = spendRow(db);
+  assert.equal(row.spend_usd, 5.0);
+  assert.equal(row.pass_count, 3);
   assert.equal(row.uncosted_pass_count, 0);
   db.close();
 });
@@ -694,7 +720,7 @@ test('the observed-spend window matches SQLite CURRENT_TIMESTAMP rows, not just 
     { repo: REPO, startedAt: '2026-09-21 11:30:00', cost: 99.0 }, // before activation, SQLite shape
     { repo: REPO, startedAt: '2026-09-21T12:40:00.000Z', cost: 1.0 },
   ]);
-  const row = db.prepare(sqlSumReviewerPassSpendSince(1)).get(T0, REPO);
+  const row = spendRow(db);
   assert.equal(row.spend_usd, 7.0, 'the space-separated in-window row must be counted');
   assert.equal(row.pass_count, 2, 'and the space-separated out-of-window row must not be');
   db.close();
@@ -705,10 +731,33 @@ test('uncosted in-flight passes are reported so a partial sum is never mistaken 
     { repo: REPO, startedAt: '2026-09-21T12:10:00.000Z', cost: 2.0 },
     { repo: REPO, startedAt: '2026-09-21T12:20:00.000Z', cost: null }, // still running
   ]);
-  const row = db.prepare(sqlSumReviewerPassSpendSince(1)).get(T0, REPO);
+  const row = spendRow(db);
   assert.equal(row.spend_usd, 2.0);
   assert.equal(row.pass_count, 2);
   assert.equal(row.uncosted_pass_count, 1, 'the caller returns null only when coverage is ZERO');
+  db.close();
+});
+
+test('a fresh lease with no reviewer passes reports measured zero spend', () => {
+  const db = spendFixtureDb([]);
+  assert.equal(readBurstScopedReviewerSpendUsd({ lease: { repos: [REPO], activatedAt: T0 } }, db), 0);
+  db.close();
+});
+
+test('passes without any cost remain unreadable rather than appearing free', () => {
+  const db = spendFixtureDb([{ repo: REPO, startedAt: '2026-09-21T12:10:00.000Z', cost: null }]);
+  assert.equal(readBurstScopedReviewerSpendUsd({ lease: { repos: [REPO], activatedAt: T0 } }, db), null);
+  db.close();
+});
+
+test('observed-spend query uses the repo and timestamp index', () => {
+  const db = spendFixtureDb([]);
+  const plan = db.prepare(`EXPLAIN QUERY PLAN ${sqlSumReviewerPassSpendSince(1)}`).all(
+    T0, T0.replace('T', ' ').slice(0, 19), `${T0.slice(0, 10)}T`, REPO
+  );
+  assert.ok(plan.some((row) => (
+    row.detail.includes('idx_reviewer_passes_repo_started_at') && row.detail.includes('started_at>?')
+  )), JSON.stringify(plan));
   db.close();
 });
 

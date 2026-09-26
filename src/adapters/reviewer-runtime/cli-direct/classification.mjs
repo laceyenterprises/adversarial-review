@@ -83,6 +83,7 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
   const mentionsReal429 =
     /\b429\b|too many requests|http\s*429/.test(lower);
   const mentionsProviderOverloaded = hasProviderOverloadedSignal(lower);
+  const mentionsStreamDisconnect = /stream disconnected|reconnecting\.\.\.\s*\d+\/\d+/.test(lower);
   const mentionsGeminiCredentialPoolBusy = GEMINI_CREDENTIAL_POOL_BUSY_RE.test(lower);
   const mentionsReviewerEmptyOutput = REVIEWER_EMPTY_OUTPUT_RE.test(lower);
   const mentionsAttestationSign =
@@ -212,7 +213,7 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     return 'oauth-broken';
   }
 
-  if (mentionsGeminiCredentialPoolBusy || mentionsProviderOverloaded) {
+  if (mentionsGeminiCredentialPoolBusy || mentionsProviderOverloaded || mentionsStreamDisconnect) {
     return PROVIDER_OVERLOADED_FAILURE_CLASS;
   }
 

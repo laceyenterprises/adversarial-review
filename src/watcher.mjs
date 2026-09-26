@@ -365,7 +365,7 @@ import {
 } from './conditional-request.mjs';
 import { reviewBodyHasScopeViolationFinding } from './additive-only-scope.mjs';
 import { sweepEtagCache } from './etag-cache.mjs';
-import { refreshWatcherAuthenticationForTick, startWatcherAuthenticationRefreshTimer, createTickHcpHealthzProbe, retryPendingReviewedAttestationQueueForWatcher } from './watcher-tick-preflight.mjs';
+import { refreshWatcherAuthenticationForTick, startWatcherAuthenticationRefreshTimer, createTickHcpHealthzProbe, startPendingReviewedAttestationRetryForWatcher } from './watcher-tick-preflight.mjs';
 import {
   fetchPullRequestHeadAndState,
   fetchPullRequestMergeability,
@@ -418,7 +418,6 @@ import {
   probeRoutingTierReadiness,
 } from './routing-tier-readiness.mjs';
 const execFileAsync = promisify(execFile);
-
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 
@@ -1161,7 +1160,7 @@ async function pollOnce(
   const healthTick = healthProbe?.beginTick?.();
   try {
     maybeSweepConditionalRequestCache({ rootDir: ROOT, logger: console });
-    await retryPendingReviewedAttestationQueueForWatcher({
+    startPendingReviewedAttestationRetryForWatcher({
       rootDir: ROOT,
       hqPath: process.env.HQ_BIN || 'hq',
       execFileImpl: execFileAsync,
@@ -1457,6 +1456,7 @@ async function pollOnce(
         shouldDeferReviewForActiveFollowUp,
         wakePayload: wakePayloadForPoll(), admissionSettlementSplitEnabled,
       });
+      firstPassSpilloverController.refundPendingSpill({ repo: repoPath, prNumber: subjectEntry.prNumber });
       await drainReviewerDispatchCandidatesIfBatchReady('continuing reviewer discovery');
     }
 

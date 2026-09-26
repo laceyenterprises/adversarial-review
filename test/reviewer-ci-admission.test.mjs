@@ -157,6 +157,32 @@ test('guardRereviewCiBeforeReviewer refuses failed-CI rereview when there is no 
   assert.match(result.failureMessage, /repo-guards=FAILURE/);
 });
 
+test('guardRereviewCiBeforeReviewer treats a vanished stopped job as nothing to requeue', async () => {
+  const result = await guardRereviewCiBeforeReviewer({
+    rootDir: '/tmp/adversarial-review-fixture',
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 6946,
+    passKind: 'rereview',
+    reviewerHeadSha: 'head-red',
+    log: silentLog(),
+    inspectCiImpl: async () => ({
+      state: 'failed',
+      headSha: 'head-red',
+      failedChecks: [{ name: 'repo-guards', state: 'FAILURE' }],
+    }),
+    latestJobFinder: () => ({
+      jobPath: '/fixture/follow-up-jobs/stopped/gone.json',
+      job: { status: 'stopped' },
+    }),
+    requeueImpl: () => { throw Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' }); },
+  });
+
+  assert.equal(result.proceed, false);
+  assert.equal(result.reason, 'ci-regression-no-job');
+  assert.equal(result.parkReview, true);
+  assert.equal(result.error, undefined);
+});
+
 test('buildRereviewCiBlockedFailureMessage explains the parked recovery path', () => {
   const message = buildRereviewCiBlockedFailureMessage({
     repo: 'laceyenterprises/agent-os',

@@ -794,7 +794,7 @@ async function reviewWithClaude(diff, extraContext = '', {
     }
     // Detect OAuth expiry in error output
     const msg = (err.message || '') + (err.stderr || '');
-    if (msg.includes('401') || msg.includes('Unauthorized') || msg.includes('oauth') || msg.includes('login')) {
+    if (/\b(?:401|403)\b|invalid_grant|refresh_token|not logged in|\blogin\b/i.test(msg)) {
       throw new OAuthError('claude', `CLI returned auth error: ${msg.substring(0, 200)}`);
     }
     throw err;
@@ -1092,7 +1092,7 @@ async function reviewWithCodex(diff, extraContext = '', {
       stdout = err.stdout || '';
       stderr = err.stderr || '';
       const msg = `${err.message || ''}\n${stdout}\n${stderr}`;
-      if (/401|unauthorized|oauth|login required|not logged in/i.test(msg)) {
+      if (/\b(?:401|403)\b|invalid_grant|refresh_token|not logged in|\blogin\b/i.test(msg)) {
         throw new OAuthError('codex', `CLI returned auth error: ${msg.substring(0, 200)}`);
       }
       if (shouldRecoverCodexWithOAuth(err, codexExecOverrides.modelProvider)) {
@@ -2545,7 +2545,7 @@ async function reviewWithGemini(diff, extraContext = '', {
     if (!subprocessStarted) {
       throw err;
     }
-    if (/401|unauthorized|oauth|login required|not logged in/i.test(msg)) {
+    if (/\b(?:401|403)\b|invalid_grant|refresh_token|not logged in|\blogin\b/i.test(msg)) {
       throw new OAuthError('gemini', `CLI returned auth error: ${msg.substring(0, 200)}`);
     }
     throw new Error(`Gemini exec failed: ${msg.substring(0, 800)}`);

@@ -558,6 +558,11 @@ test('OAuth-adjacent reviewer failures classify as oauth-broken near stderr end'
   );
 });
 
+test('Codex reconnect exhaustion is transport failure, not oauth-broken', () => {
+  const exactStdout = '{"type":"error","message":"Reconnecting... 2/5 (stream disconnected …"}';
+  assert.equal(classifyReviewerFailure(exactStdout, 1), 'provider-overloaded');
+});
+
 test('OAuth detection is anchored to auth context across the full stderr', () => {
   assert.equal(
     classifyReviewerFailure(

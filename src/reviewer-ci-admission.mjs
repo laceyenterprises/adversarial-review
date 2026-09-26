@@ -170,6 +170,21 @@ async function guardRereviewCiBeforeReviewer({
         job: requeued?.job || latest.job || null,
       };
     } catch (err) {
+      if (err?.code === 'ENOENT') {
+        log.warn?.(
+          `[watcher] Refusing re-review for ${repo}#${prNumber}: failed external CI ` +
+            `(${formatCiCheckList(ciGate.failedChecks)}) but the stopped follow-up job no longer exists. ` +
+            'Nothing remains to requeue.'
+        );
+        return {
+          proceed: false,
+          reason: 'ci-regression-no-job',
+          ciGate,
+          parkReview: true,
+          parkReviewStatus: REREVIEW_CI_BLOCKED_STATUS,
+          failureMessage: buildRereviewCiBlockedFailureMessage({ repo, prNumber, ciGate }),
+        };
+      }
       log.warn?.(
         `[watcher] Refusing re-review for ${repo}#${prNumber}: failed external CI ` +
           `(${formatCiCheckList(ciGate.failedChecks)}) and requeue failed: ${err?.message || err}`

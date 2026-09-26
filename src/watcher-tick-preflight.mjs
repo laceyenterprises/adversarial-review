@@ -51,10 +51,11 @@ const WATCHER_AUTH_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 // One retry per tick cannot keep up with the arrival rate of failed signings:
 // the queue was observed oscillating between 9 and 29 entries for hours while
 // draining at attempted=1 per tick, so reviewed verdicts sat unattested and
-// merge authority saw no verdict at all. Drain up to a batch per tick, bounded
-// by a wall-clock budget so a slow tick never trips poll-starvation detection.
+// merge authority saw no verdict at all. Drain a batch in a single-flight
+// background task so slow local signing never extends the poll's critical path.
 const WATCHER_REVIEWED_ATTESTATION_RETRY_MAX_ENTRIES_PER_TICK = 25;
-const WATCHER_REVIEWED_ATTESTATION_RETRY_MAX_MILLIS_PER_TICK = 10_000;
+const WATCHER_REVIEWED_ATTESTATION_RETRY_MAX_CONCURRENT_TASKS = 1;
+let reviewedAttestationRetryInFlight = null;
 
 function startWatcherAuthenticationRefreshTimer({
   log = console,
@@ -105,7 +106,7 @@ async function retryPendingReviewedAttestationQueueForWatcher({
   log = console,
   retryPendingReviewedAttestationsImpl = retryPendingReviewedAttestations,
   maxEntriesPerTick = WATCHER_REVIEWED_ATTESTATION_RETRY_MAX_ENTRIES_PER_TICK,
-  maxMillisPerTick = WATCHER_REVIEWED_ATTESTATION_RETRY_MAX_MILLIS_PER_TICK,
+  maxMillisPerTick = Number.POSITIVE_INFINITY,
 } = {}) {
   try {
     const retryResult = await retryPendingReviewedAttestationsImpl({
@@ -131,12 +132,33 @@ async function retryPendingReviewedAttestationQueueForWatcher({
   }
 }
 
+function startPendingReviewedAttestationRetryForWatcher(options = {}) {
+  if (reviewedAttestationRetryInFlight) {
+    return { started: false, reason: 'in-flight', promise: reviewedAttestationRetryInFlight };
+  }
+  reviewedAttestationRetryInFlight = Promise.resolve()
+    .then(() => retryPendingReviewedAttestationQueueForWatcher(options))
+    .finally(() => {
+      reviewedAttestationRetryInFlight = null;
+    });
+  // Attach a rejection consumer even though the helper normally converts
+  // failures to results. An injected implementation must not crash the daemon.
+  reviewedAttestationRetryInFlight.catch(() => {});
+  return { started: true, promise: reviewedAttestationRetryInFlight };
+}
+
+async function drainPendingReviewedAttestationRetryForTests() {
+  await reviewedAttestationRetryInFlight;
+}
+
 export {
   WATCHER_AUTH_REFRESH_INTERVAL_MS,
   WATCHER_REVIEWED_ATTESTATION_RETRY_MAX_ENTRIES_PER_TICK,
-  WATCHER_REVIEWED_ATTESTATION_RETRY_MAX_MILLIS_PER_TICK,
+  WATCHER_REVIEWED_ATTESTATION_RETRY_MAX_CONCURRENT_TASKS,
   createTickHcpHealthzProbe,
   startWatcherAuthenticationRefreshTimer,
   refreshWatcherAuthenticationForTick,
   retryPendingReviewedAttestationQueueForWatcher,
+  startPendingReviewedAttestationRetryForWatcher,
+  drainPendingReviewedAttestationRetryForTests,
 };

@@ -1605,6 +1605,7 @@ export async function processReviewSubject(entry, ctx) {
         afhGrounding,
         emitCacheEvent,
       });
+      let depthSpillReserved = false;
 
       // RWF-01: review-dispatch worker-class fallback (quota trigger)
       // RSP-01: plus the queue-depth trigger, when the break-glass lever is
@@ -1677,12 +1678,12 @@ export async function processReviewSubject(entry, ctx) {
             // really landed on a route — the operator is owed the number of
             // non-primary reviews the lever BOUGHT, not the number it attempted.
             if (rwfDecision.reason === 'queue-depth-pressure') {
-              firstPassSpilloverController?.recordSpill?.({
+              depthSpillReserved = firstPassSpilloverController?.recordSpill?.({
                 repo: repoPath,
                 prNumber,
                 fromWorkerClass: rwfDecision.from,
                 toWorkerClass: rwfDecision.to,
-              });
+              }) === true;
             }
             console.warn(
               `[watcher] review-worker-class-fallback repo=${repoPath} pr=${prNumber} ` +
@@ -2946,6 +2947,15 @@ export async function processReviewSubject(entry, ctx) {
               cfg: domainAdapterSet?.domainConfig,
             });
             if (!ciAdmission.proceed) {
+              if (depthSpillReserved) {
+                firstPassSpilloverController?.refundSpill?.({
+                  repo: repoPath,
+                  prNumber,
+                  toWorkerClass: reviewerWorkerClassForRoute(route),
+                  reason: ciAdmission.reason,
+                });
+                depthSpillReserved = false;
+              }
               if (ciAdmission.parkReview && ciAdmission.parkReviewStatus === REREVIEW_CI_BLOCKED_STATUS) {
                 const failureMessage = ciAdmission.failureMessage
                   || `[ci-regression-no-job] Re-review for ${repoPath}#${prNumber} is parked because external CI failed and no follow-up job exists to requeue.`;
@@ -2998,35 +3008,6 @@ export async function processReviewSubject(entry, ctx) {
                   `stem=${vocabularyFatigueFinding.stem} ` +
                   `count=${vocabularyFatigueFinding.count}/${vocabularyFatigueFinding.window}`
               );
-            }
-
-            // Pre-spawn routing-tier readiness probe. Successful probes are
-            // cached for the rest of the tick; failed probes get bounded
-            // retries plus a very short cache so later PRs can re-check after
-            // a brief proxy bounce instead of inheriting a whole-tick outage.
-            const routingTierReadiness = await getRoutingTierReadinessForTick();
-            if (!routingTierReadiness.ready) {
-              console.log(
-                `[watcher] Skipping reviewer spawn for ${repoPath}#${prNumber}: ` +
-                `routing tier (LiteLLM proxy) not ready (${routingTierReadiness.reason}). ` +
-                `Deferring via transient-failure backoff; no attempt budget consumed.`
-              );
-              settleReviewerAttempt({
-                rootDir: ROOT,
-                repoPath,
-                prNumber,
-                result: {
-                  ok: false,
-                  failureClass: routingTierReadiness.failureClass || 'cascade',
-                  error: routingTierReadiness.failureMessage
-                    || `Routing-tier readiness probe reported ${routingTierReadiness.reason}.`,
-                },
-                failureAt: attemptAt,
-                env: process.env,
-                maxRemediationRounds,
-                reviewerModel: route.reviewerModel,
-              });
-              return { dispatched: false, reason: 'routing-tier-not-ready' };
             }
 
             const hcpPrecheck = await enforceHcpPreSpawnReadiness({
@@ -3235,6 +3216,10 @@ export async function processReviewSubject(entry, ctx) {
               // review and post the Win 2 rollup. Gate-off is byte-identical:
               // the else-branch is the unchanged v1 single `spawnReviewer` call.
               reviewerSpawned = true;
+              if (depthSpillReserved) {
+                firstPassSpilloverController?.commitSpill?.({ repo: repoPath, prNumber });
+                depthSpillReserved = false;
+              }
               const result = pipelineEnabled
                 ? await runWatcherGatedReviewPipeline({
                   domainConfig: domainAdapterSet.domainConfig,
@@ -3288,6 +3273,15 @@ export async function processReviewSubject(entry, ctx) {
               }
             }
           } finally {
+            if (depthSpillReserved) {
+              firstPassSpilloverController?.refundSpill?.({
+                repo: repoPath,
+                prNumber,
+                toWorkerClass: reviewerWorkerClassForRoute(route),
+                reason: 'reviewer-not-spawned',
+              });
+              depthSpillReserved = false;
+            }
             releaseReviewerReservation();
             reviewerHeadDispatchLease.release(dispatchLeaseKey);
             if (reviewerPoolConfig.enabled && reviewerSpawned) {
@@ -3303,6 +3297,9 @@ export async function processReviewSubject(entry, ctx) {
         },
         supportsAdmissionSplit: Boolean(admissionSettlementSplitEnabled) && !isPipelineEnabled(domainAdapterSet.domainConfig),
       };
+      if (depthSpillReserved) {
+        firstPassSpilloverController?.handoffSpill?.({ repo: repoPath, prNumber });
+      }
       if (reviewerPoolConfig.enabled) {
         reviewerDispatchCandidates.push(dispatchCandidate);
       } else {

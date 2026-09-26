@@ -14,6 +14,7 @@ import {
   rmSync,
   statSync,
   unlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -22,6 +23,7 @@ import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 const SNAPSHOT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const AUDIT_DIRNAME = 'reviewer-workspace-audit';
+const GIT_AUDIT_MAX_BUFFER = 64 * 1024 * 1024;
 let activeAuditContext = null;
 const GIT_TRANSIENT_MAX_ATTEMPTS = 3;
 const GIT_TRANSIENT_BASE_DELAY_MS = 100;
@@ -172,6 +174,13 @@ function validateSnapshot(snapshotDir, expectedSha) {
   }
 }
 
+function touchSnapshot(snapshotDir, nowMs) {
+  const now = new Date(nowMs);
+  utimesSync(snapshotDir, now, now);
+  const markerPath = join(snapshotDir, '.reviewer-snapshot.json');
+  if (existsSync(markerPath)) utimesSync(markerPath, now, now);
+}
+
 function validateSnapshotLinks(snapshotDir, currentDir = snapshotDir) {
   for (const entry of readdirSync(currentDir)) {
     const path = join(currentDir, entry);
@@ -221,6 +230,30 @@ function garbageCollectSnapshots(repoCacheDir, currentSha, {
   return removed;
 }
 
+function removeInvalidSnapshot(snapshotDir, headSha) {
+  if (validateSnapshot(snapshotDir, headSha)) return false;
+  makeTreeWritable(snapshotDir);
+  rmSync(snapshotDir, { recursive: true, force: true });
+  return true;
+}
+
+function promoteSnapshotBuild(buildDir, snapshotDir, headSha) {
+  try {
+    renameSync(buildDir, snapshotDir);
+    return;
+  } catch (err) {
+    if (!existsSync(snapshotDir) && !['EEXIST', 'ENOTEMPTY'].includes(err?.code)) throw err;
+    if (validateSnapshot(snapshotDir, headSha)) return;
+    removeInvalidSnapshot(snapshotDir, headSha);
+  }
+
+  try {
+    renameSync(buildDir, snapshotDir);
+  } catch (err) {
+    if (!['EEXIST', 'ENOTEMPTY'].includes(err?.code) || !validateSnapshot(snapshotDir, headSha)) throw err;
+  }
+}
+
 async function prepareReviewerSnapshot({
   repo,
   checkoutDir,
@@ -250,10 +283,8 @@ async function prepareReviewerSnapshot({
       writeFileSync(join(buildDir, '.reviewer-snapshot.json'), `${JSON.stringify({ schemaVersion: 1, repo, headSha })}\n`, { mode: 0o444 });
       chmodSync(buildDir, 0o555);
       await execFileImpl('chmod', ['-R', 'a-w', buildDir]);
-      try {
-        renameSync(buildDir, snapshotDir);
-      } catch (err) {
-        if (!['EEXIST', 'ENOTEMPTY'].includes(err?.code) || !validateSnapshot(snapshotDir, headSha)) throw err;
+      promoteSnapshotBuild(buildDir, snapshotDir, headSha);
+      if (existsSync(buildDir)) {
         makeTreeWritable(buildDir);
         rmSync(buildDir, { recursive: true, force: true });
       }
@@ -266,6 +297,7 @@ async function prepareReviewerSnapshot({
     }
   }
   if (!validateSnapshot(snapshotDir, headSha)) throw new Error(`reviewer snapshot validation failed for ${repo}@${headSha}`);
+  if (reused) touchSnapshot(snapshotDir, nowMs);
   garbageCollectSnapshots(repoCacheDir, headSha, { nowMs, maxAgeMs });
   return { checkoutDir: resolve(checkoutDir), headSha, snapshotDir, reused };
 }
@@ -274,19 +306,95 @@ function configureReviewerWorkspaceAudit(context) {
   activeAuditContext = context ? { ...context, checkoutDir: resolve(context.checkoutDir), stateDir: resolve(context.stateDir) } : null;
 }
 
-async function checkoutStatus(checkoutDir) {
+async function checkoutIndex(checkoutDir) {
   const { stdout } = await execFileAsync('git', [
-    '--no-optional-locks', 'status', '--porcelain=v1', '--untracked-files=all', '--ignore-submodules=all',
-  ], { cwd: checkoutDir, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 });
-  return String(stdout || '').split('\n').filter(Boolean);
+    '--no-optional-locks', 'ls-files', '-s', '-z',
+  ], { cwd: checkoutDir, encoding: 'utf8', maxBuffer: GIT_AUDIT_MAX_BUFFER });
+  return String(stdout || '').split('\0').filter(Boolean);
+}
+
+function statusPathsFromPorcelainZ(output) {
+  const fields = String(output || '').split('\0').filter(Boolean);
+  const paths = new Set();
+  for (let i = 0; i < fields.length; i += 1) {
+    const field = fields[i];
+    if (field.length < 4) continue;
+    const status = field.slice(0, 2);
+    paths.add(field.slice(3));
+    if (/[RC]/.test(status)) {
+      i += 1;
+      if (i < fields.length) paths.add(fields[i]);
+    }
+  }
+  return paths;
+}
+
+async function checkoutStatusZ(checkoutDir) {
+  const { stdout } = await execFileAsync('git', [
+    '--no-optional-locks', 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=all',
+  ], { cwd: checkoutDir, encoding: 'utf8', maxBuffer: GIT_AUDIT_MAX_BUFFER });
+  return String(stdout || '');
+}
+
+function pathContentSignature(checkoutDir, path) {
+  const absolutePath = join(checkoutDir, path);
+  let stat;
+  try {
+    stat = lstatSync(absolutePath);
+  } catch (err) {
+    if (err?.code === 'ENOENT') return 'missing';
+    return `stat-error:${err.code || err.message}`;
+  }
+  if (stat.isSymbolicLink()) {
+    try {
+      return `symlink:${readlinkSync(absolutePath)}`;
+    } catch (err) {
+      return `symlink-error:${err.code || err.message}`;
+    }
+  }
+  if (stat.isFile()) {
+    const hash = createHash('sha256').update(readFileSync(absolutePath)).digest('hex');
+    return `file:${stat.mode & 0o7777}:${stat.size}:${hash}`;
+  }
+  if (stat.isDirectory()) return `dir:${stat.mode & 0o7777}`;
+  return `other:${stat.mode & 0o7777}:${stat.size}`;
+}
+
+async function checkoutState(checkoutDir) {
+  const [indexEntries, statusBody] = await Promise.all([
+    checkoutIndex(checkoutDir),
+    checkoutStatusZ(checkoutDir),
+  ]);
+  const state = new Map();
+  for (const entry of indexEntries) {
+    const tabIndex = entry.indexOf('\t');
+    if (tabIndex === -1) continue;
+    state.set(entry.slice(tabIndex + 1), [`index:${entry.slice(0, tabIndex)}`]);
+  }
+  for (const path of statusPathsFromPorcelainZ(statusBody)) {
+    const signatures = state.get(path) || [];
+    signatures.push(`worktree:${pathContentSignature(checkoutDir, path)}`);
+    state.set(path, signatures);
+  }
+  return state;
+}
+
+function changedCheckoutPaths(before, after) {
+  const paths = new Set([...before.keys(), ...after.keys()]);
+  return [...paths].filter((path) => {
+    const beforeSignature = (before.get(path) || []).join('\n');
+    const afterSignature = (after.get(path) || []).join('\n');
+    return beforeSignature !== afterSignature;
+  }).sort();
 }
 
 function changedStatusPaths(before, after) {
   const beforeSet = new Set(before);
   const changed = after.filter((line) => !beforeSet.has(line));
   return [...new Set(changed.flatMap((line) => {
+    const status = line.slice(0, 2);
     const body = line.slice(3);
-    return body.includes(' -> ') ? body.split(' -> ') : [body];
+    return /[RC]/.test(status) && body.includes(' -> ') ? body.split(' -> ') : [body];
   }))].sort();
 }
 
@@ -314,9 +422,9 @@ function liveReviewerPids(auditDir, currentPid) {
 async function auditReviewerSubprocess(spawnOperation) {
   if (!activeAuditContext) return spawnOperation({ onSpawn: null });
   const context = activeAuditContext;
-  let before = [];
-  try { before = await checkoutStatus(context.checkoutDir); } catch (err) {
-    console.error(`[reviewer] workspace escape pre-spawn status probe failed: ${err.message}`);
+  let before = new Map();
+  try { before = await checkoutState(context.checkoutDir); } catch (err) {
+    console.error(`[reviewer] workspace escape pre-spawn state probe failed: ${err.message}`);
   }
   const startedAt = new Date().toISOString();
   const auditDir = join(context.stateDir, AUDIT_DIRNAME);
@@ -348,11 +456,11 @@ async function auditReviewerSubprocess(spawnOperation) {
     return result;
   } finally {
     const endedAt = new Date().toISOString();
-    let after = [];
-    try { after = await checkoutStatus(context.checkoutDir); } catch (err) {
-      console.error(`[reviewer] workspace escape status probe failed: ${err.message}`);
+    let after = new Map();
+    try { after = await checkoutState(context.checkoutDir); } catch (err) {
+      console.error(`[reviewer] workspace escape state probe failed: ${err.message}`);
     }
-    const paths = changedStatusPaths(before, after);
+    const paths = changedCheckoutPaths(before, after);
     if (paths.length > 0) {
       const event = {
         event: 'reviewer_workspace_escape',

@@ -18,6 +18,7 @@ import test from 'node:test';
 
 import {
   auditReviewerSubprocess,
+  changedStatusPaths,
   configureReviewerWorkspaceAudit,
   prepareReviewerSnapshot,
   resolveCheckoutHead,
@@ -177,10 +178,23 @@ test('snapshot cache reuses a HEAD, builds a new HEAD, and garbage-collects stal
       repo: 'laceyenterprises/agent-os', checkoutDir, stateDir,
       extractArchiveImpl: async (source, destination) => { builds += 1; execFileSync('sh', ['-c', 'git --no-optional-locks archive --format=tar HEAD | tar -x -C "$1"', '_', destination], { cwd: source }); },
     });
+    const reuseNowMs = Date.UTC(2026, 0, 2, 3, 4, 5);
+    utimesSync(first.snapshotDir, new Date(0), new Date(0));
+    utimesSync(join(first.snapshotDir, '.reviewer-snapshot.json'), new Date(0), new Date(0));
     const second = await prepareReviewerSnapshot({ repo: 'laceyenterprises/agent-os', checkoutDir, stateDir });
     assert.equal(second.snapshotDir, first.snapshotDir);
     assert.equal(second.reused, true);
     assert.equal(builds, 1);
+    const touched = await prepareReviewerSnapshot({
+      repo: 'laceyenterprises/agent-os',
+      checkoutDir,
+      stateDir,
+      nowMs: reuseNowMs,
+    });
+    assert.equal(touched.snapshotDir, first.snapshotDir);
+    assert.equal(touched.reused, true);
+    assert.ok(Math.abs(statSync(first.snapshotDir).mtimeMs - reuseNowMs) < 1500);
+    assert.ok(Math.abs(statSync(join(first.snapshotDir, '.reviewer-snapshot.json')).mtimeMs - reuseNowMs) < 1500);
 
     writeFileSync(join(checkoutDir, 'tracked.txt'), 'next\n');
     git(checkoutDir, 'add', 'tracked.txt');
@@ -190,6 +204,43 @@ test('snapshot cache reuses a HEAD, builds a new HEAD, and garbage-collects stal
     const third = await prepareReviewerSnapshot({ repo: 'laceyenterprises/agent-os', checkoutDir, stateDir, maxAgeMs: 1 });
     assert.notEqual(third.snapshotDir, first.snapshotDir);
     assert.equal(existsSync(first.snapshotDir), false);
+  } finally {
+    removeFixture(root);
+  }
+});
+
+test('snapshot build recovers from an invalid existing cache directory', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'reviewer-workspace-invalid-cache-'));
+  try {
+    const checkoutDir = makeRepo(root, 'repo');
+    const stateDir = join(root, 'state');
+    let builds = 0;
+    const extractArchiveImpl = async (source, destination) => {
+      builds += 1;
+      execFileSync('sh', ['-c', 'git --no-optional-locks archive --format=tar HEAD | tar -x -C "$1"', '_', destination], { cwd: source });
+    };
+    const first = await prepareReviewerSnapshot({
+      repo: 'laceyenterprises/agent-os',
+      checkoutDir,
+      stateDir,
+      extractArchiveImpl,
+    });
+    execFileSync('chmod', ['-R', 'u+w', first.snapshotDir]);
+    writeFileSync(join(first.snapshotDir, '.reviewer-snapshot.json'), `${JSON.stringify({ schemaVersion: 1, headSha: 'legacy' })}\n`);
+    execFileSync('chmod', ['-R', 'a-w', first.snapshotDir]);
+
+    const recovered = await prepareReviewerSnapshot({
+      repo: 'laceyenterprises/agent-os',
+      checkoutDir,
+      stateDir,
+      extractArchiveImpl,
+    });
+    const marker = JSON.parse(readFileSync(join(recovered.snapshotDir, '.reviewer-snapshot.json'), 'utf8'));
+    assert.equal(recovered.snapshotDir, first.snapshotDir);
+    assert.equal(recovered.reused, false);
+    assert.equal(builds, 2);
+    assert.equal(marker.headSha, recovered.headSha);
+    assert.equal(readFileSync(join(recovered.snapshotDir, 'tracked.txt'), 'utf8'), 'base\n');
   } finally {
     removeFixture(root);
   }
@@ -233,6 +284,31 @@ test('workspace escape audit preserves EPERM live pid records', async () => {
   }
 });
 
+test('workspace escape audit detects writes to an already-dirty tracked file', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'reviewer-workspace-dirty-escape-'));
+  try {
+    const checkoutDir = makeRepo(root, 'repo');
+    const stateDir = join(root, 'state');
+    writeFileSync(join(checkoutDir, 'tracked.txt'), 'dirty before\n');
+    assert.match(git(checkoutDir, '--no-optional-locks', 'status', '--porcelain=v1', '--untracked-files=all', '--ignore-submodules=all'), /tracked\.txt/);
+    configureReviewerWorkspaceAudit({
+      repo: 'laceyenterprises/agent-os', prNumber: 7028, reviewerModel: 'gemini',
+      headSha: 'abc125', checkoutDir, stateDir,
+    });
+    await auditReviewerSubprocess(async ({ onSpawn }) => {
+      onSpawn({ pid: process.pid });
+      writeFileSync(join(checkoutDir, 'tracked.txt'), 'dirty after\n');
+      return { stdout: 'done' };
+    });
+    const log = readFileSync(join(stateDir, 'reviewer-workspace-audit', 'reviewer-workspace-escapes.jsonl'), 'utf8');
+    const event = JSON.parse(log.trim());
+    assert.deepEqual(event.paths, ['tracked.txt']);
+  } finally {
+    configureReviewerWorkspaceAudit(null);
+    removeFixture(root);
+  }
+});
+
 test('checkout writes during a model subprocess produce a durable reviewer_workspace_escape event', async () => {
   const root = mkdtempSync(join(tmpdir(), 'reviewer-workspace-escape-'));
   try {
@@ -258,4 +334,9 @@ test('checkout writes during a model subprocess produce a durable reviewer_works
     configureReviewerWorkspaceAudit(null);
     removeFixture(root);
   }
+});
+
+test('changedStatusPaths only splits arrow notation for rename or copy status lines', () => {
+  assert.deepEqual(changedStatusPaths([], ['?? added -> file.txt']), ['added -> file.txt']);
+  assert.deepEqual(changedStatusPaths([], ['R  old.txt -> new.txt']), ['new.txt', 'old.txt']);
 });

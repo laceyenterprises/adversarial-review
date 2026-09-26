@@ -279,11 +279,44 @@ git status --short --ignore-submodules=none
 git add <changed files>   # never a submodule path, never `git add -f`/`--force`
 # The hammer never moves a submodule pointer: submodule fixes land as a PR in the
 # submodule's own repo (mandate 2b). Unstage any gitlink before committing.
-HAM_STAGED_GITLINKS=$(git diff --cached --raw --ignore-submodules=none | awk '$2 == "160000" {print $NF}')
-if [ -n "$HAM_STAGED_GITLINKS" ]; then
-  echo "HAM: unstaging submodule gitlink change(s), the hammer never moves a pointer: $HAM_STAGED_GITLINKS" >&2
-  git restore --staged -- $HAM_STAGED_GITLINKS
+ham_staged_gitlinks() {
+  git diff --cached --raw -z --ignore-submodules=none |
+    perl -we '
+      my @fields = split /\0/, do { local $/; <STDIN> };
+      for (my $i = 0; $i < @fields;) {
+        my $meta = $fields[$i++];
+        next if !defined($meta) || $meta eq "";
+        my $path = $fields[$i++] // "";
+        my $new_path = $path;
+        next unless $meta =~ /^:([0-7]{6}) ([0-7]{6}) [0-9a-f]+ [0-9a-f]+ ([A-Z])\d*$/;
+        my ($old_mode, $new_mode, $status) = ($1, $2, $3);
+        if ($status eq "R" || $status eq "C") {
+          $new_path = $fields[$i++] // "";
+        }
+        next unless $old_mode eq "160000" || $new_mode eq "160000";
+        print $path, "\0" if length $path;
+        print $new_path, "\0" if length $new_path && $new_path ne $path;
+      }
+    '
+}
+ham_print_nul_paths() {
+  perl -0ne 'chomp; print "  $_\n" if length'
+}
+HAM_STAGED_GITLINKS_FILE=$(mktemp "${TMPDIR:-/tmp}/ham-staged-gitlinks.XXXXXX") || exit 1
+ham_staged_gitlinks > "$HAM_STAGED_GITLINKS_FILE"
+if [ -s "$HAM_STAGED_GITLINKS_FILE" ]; then
+  echo "HAM: unstaging submodule gitlink change(s); the hammer never moves a pointer:" >&2
+  ham_print_nul_paths < "$HAM_STAGED_GITLINKS_FILE" >&2
+  git restore --staged --pathspec-from-file="$HAM_STAGED_GITLINKS_FILE" --pathspec-file-nul
 fi
+ham_staged_gitlinks > "$HAM_STAGED_GITLINKS_FILE"
+if [ -s "$HAM_STAGED_GITLINKS_FILE" ]; then
+  echo "HAM hard-blocker: staged submodule gitlink change(s) remain after unstage attempt; refusing commit" >&2
+  ham_print_nul_paths < "$HAM_STAGED_GITLINKS_FILE" >&2
+  rm -f "$HAM_STAGED_GITLINKS_FILE"
+  exit 1
+fi
+rm -f "$HAM_STAGED_GITLINKS_FILE"
 # HSC-01: pass the trailers as ONE `-m`, not one `-m` each. Git renders every
 # `-m` as its own paragraph, so `-m A -m B` produces blank-line-separated
 # trailers -- which is NOT a git trailer block. The closer's provenance verifier
@@ -652,7 +685,19 @@ if ! git rebase "origin/$BASE_BRANCH"; then
   :
 fi
 # SUBSYNC-01: the rebase moved gitlinks but not submodule checkouts.
-/usr/bin/perl -e 'alarm shift; exec @ARGV' 120 git submodule update --recursive
+HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT=1
+while true; do
+  if /usr/bin/perl -e 'alarm shift; exec @ARGV' 120 git submodule update --recursive; then
+    break
+  fi
+  if [ "$HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT" -ge "$HAM_UPDATE_BRANCH_RETRY_CAP" ]; then
+    echo "HAM hard-blocker: submodule update failed after conflict rebase; refusing force-push with stale submodule checkout" >&2
+    exit 1
+  fi
+  echo "HAM: submodule update failed after conflict rebase; retrying ${HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT}/${HAM_UPDATE_BRANCH_RETRY_CAP}" >&2
+  sleep $((HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT * 2))
+  HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT=$((HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT + 1))
+done
 git push --force-with-lease
 ```
 

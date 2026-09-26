@@ -1,12 +1,116 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
 const HAMMER_PROMPT = readFileSync(join(REPO_ROOT, 'templates', 'hammer-prompt.md'), 'utf8');
+
+function run(command, args, options = {}) {
+  const result = spawnSync(command, args, {
+    cwd: options.cwd,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      GIT_TERMINAL_PROMPT: '0',
+      ...(options.env ?? {}),
+    },
+  });
+  assert.ifError(result.error);
+  assert.equal(
+    result.status,
+    0,
+    `${command} ${args.join(' ')} failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+  );
+  return result;
+}
+
+function git(cwd, args) {
+  return run('git', args, { cwd });
+}
+
+function configureGitIdentity(cwd) {
+  git(cwd, ['config', 'user.name', 'Hammer Prompt Test']);
+  git(cwd, ['config', 'user.email', 'hammer-prompt-test@example.invalid']);
+}
+
+function createSuperprojectWithSpaceSubmodule(t) {
+  const root = mkdtempSync(join(tmpdir(), 'hammer-gitlink-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  const upstream = join(root, 'upstream module');
+  mkdirSync(upstream, { recursive: true });
+  git(upstream, ['init', '-q']);
+  configureGitIdentity(upstream);
+  writeFileSync(join(upstream, 'README.md'), 'one\n');
+  git(upstream, ['add', 'README.md']);
+  git(upstream, ['commit', '-q', '-m', 'initial upstream']);
+
+  const superproject = join(root, 'super project');
+  mkdirSync(superproject, { recursive: true });
+  git(superproject, ['init', '-q']);
+  configureGitIdentity(superproject);
+  git(superproject, [
+    '-c',
+    'protocol.file.allow=always',
+    'submodule',
+    'add',
+    '-q',
+    upstream,
+    'modules/review module',
+  ]);
+  git(superproject, ['commit', '-q', '-m', 'add submodule']);
+
+  return {
+    upstream,
+    superproject,
+    submodulePath: join(superproject, 'modules', 'review module'),
+  };
+}
+
+function hammerStagedGitlinkGuardScript() {
+  const commitBlockStart = HAMMER_PROMPT.indexOf('Commit the remediation:');
+  assert.notEqual(commitBlockStart, -1, 'expected commit block in hammer prompt');
+  const guardStart = HAMMER_PROMPT.indexOf('ham_staged_gitlinks()', commitBlockStart);
+  assert.notEqual(guardStart, -1, 'expected staged gitlink guard in hammer prompt');
+  const guardEnd = HAMMER_PROMPT.indexOf('# HSC-01:', guardStart);
+  assert.notEqual(guardEnd, -1, 'expected HSC-01 marker after staged gitlink guard');
+  return HAMMER_PROMPT.slice(guardStart, guardEnd).trim();
+}
+
+function runHammerStagedGitlinkGuard(cwd) {
+  return run('bash', ['-lc', hammerStagedGitlinkGuardScript()], { cwd });
+}
+
+function stagedGitlinkPaths(cwd) {
+  const raw = git(cwd, ['diff', '--cached', '--raw', '-z', '--ignore-submodules=none']).stdout;
+  const fields = raw.split('\0');
+  const paths = [];
+  for (let index = 0; index < fields.length;) {
+    const meta = fields[index++];
+    if (!meta) {
+      continue;
+    }
+    const match = meta.match(/^:([0-7]{6}) ([0-7]{6}) [0-9a-f]+ [0-9a-f]+ ([A-Z])\d*$/);
+    const path = fields[index++] ?? '';
+    let newPath = path;
+    if (match?.[3] === 'R' || match?.[3] === 'C') {
+      newPath = fields[index++] ?? '';
+    }
+    if (!match || (match[1] !== '160000' && match[2] !== '160000')) {
+      continue;
+    }
+    paths.push(path);
+    if (newPath && newPath !== path) {
+      paths.push(newPath);
+    }
+  }
+  return paths;
+}
 
 test('hammer prompt enforces the lease guarded GitHub-required-gate merge protocol (no local battery)', () => {
   assert.match(HAMMER_PROMPT, /do not\s+restart remediation/i);
@@ -263,11 +367,15 @@ test('hammer never moves a submodule pointer: re-syncs checkouts and unstages gi
   );
   assert.match(commitBlock, /alarm shift; exec @ARGV' 120 git submodule update --recursive/);
   assert.match(commitBlock, /git status --short --ignore-submodules=none/);
+  assert.match(commitBlock, /git diff --cached --raw -z --ignore-submodules=none/);
+  assert.match(commitBlock, /\$old_mode eq "160000" \|\| \$new_mode eq "160000"/);
   assert.match(
     commitBlock,
-    /HAM_STAGED_GITLINKS=\$\(git diff --cached --raw --ignore-submodules=none \| awk '\$2 == "160000" \{print \$NF\}'\)/,
+    /git restore --staged --pathspec-from-file="\$HAM_STAGED_GITLINKS_FILE" --pathspec-file-nul/,
   );
-  assert.match(commitBlock, /git restore --staged -- \$HAM_STAGED_GITLINKS/);
+  assert.match(commitBlock, /staged submodule gitlink change\(s\) remain after unstage attempt/);
+  assert.doesNotMatch(commitBlock, /awk '\$2 == "160000"/);
+  assert.doesNotMatch(commitBlock, /print \$NF/);
   assert.ok(
     commitBlock.indexOf('git submodule update --recursive') < commitBlock.indexOf('git add <changed files>'),
     'submodules must be re-synced before staging',
@@ -278,6 +386,45 @@ test('hammer never moves a submodule pointer: re-syncs checkouts and unstages gi
   const pushAt = conflictBlock.indexOf('git push --force-with-lease');
   const syncAt = conflictBlock.indexOf('git submodule update --recursive');
   assert.ok(rebaseAt >= 0 && syncAt > rebaseAt && syncAt < pushAt, 'conflict rebase must re-sync submodules before pushing');
+  assert.match(conflictBlock, /HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT=1/);
+  assert.match(conflictBlock, /submodule update failed after conflict rebase; refusing force-push/);
 
   assert.match(HAMMER_PROMPT, /No submodule gitlink changes in HAM commits \(SUBSYNC-01, agent-os#7092\)/);
+});
+
+test('hammer staged gitlink guard unstages a staged submodule deletion with real git', (t) => {
+  const { superproject } = createSuperprojectWithSpaceSubmodule(t);
+
+  git(superproject, ['update-index', '--force-remove', '--', 'modules/review module']);
+
+  assert.deepEqual(stagedGitlinkPaths(superproject), ['modules/review module']);
+
+  runHammerStagedGitlinkGuard(superproject);
+
+  assert.deepEqual(stagedGitlinkPaths(superproject), []);
+  assert.equal(
+    git(superproject, ['diff', '--cached', '--name-only', '--', 'modules/review module']).stdout,
+    '',
+  );
+});
+
+test('hammer staged gitlink guard preserves a staged submodule path containing spaces', (t) => {
+  const { upstream, superproject, submodulePath } = createSuperprojectWithSpaceSubmodule(t);
+
+  writeFileSync(join(upstream, 'README.md'), 'two\n');
+  git(upstream, ['commit', '-q', '-am', 'second upstream']);
+  const nextSha = git(upstream, ['rev-parse', 'HEAD']).stdout.trim();
+  git(submodulePath, ['fetch', '-q', 'origin']);
+  git(submodulePath, ['checkout', '-q', nextSha]);
+  git(superproject, ['add', '--', 'modules/review module']);
+
+  assert.deepEqual(stagedGitlinkPaths(superproject), ['modules/review module']);
+
+  runHammerStagedGitlinkGuard(superproject);
+
+  assert.deepEqual(stagedGitlinkPaths(superproject), []);
+  assert.equal(
+    git(superproject, ['diff', '--cached', '--name-only', '--', 'modules/review module']).stdout,
+    '',
+  );
 });

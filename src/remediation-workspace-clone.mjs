@@ -5,9 +5,9 @@ import { loadDomainConfig } from './domain-config.mjs';
 // Domain config is local to this repository, so a per-repo path can be set
 // without adding a key to the shared agent-os config.yaml schemas.
 export async function cloneRemediationWorkspace({
-  rootDir, repo, baseBranch, workspaceDir, clone, resetWorkspaceDir, log,
+  rootDir, repo, domainId = 'code-pr', baseBranch, workspaceDir, clone, resetWorkspaceDir, log,
 }) {
-  const configured = loadDomainConfig(rootDir, 'code-pr')?.remediationCloneReferences?.[repo];
+  const configured = loadDomainConfig(rootDir, domainId || 'code-pr')?.remediationCloneReferences?.[repo];
   const referenceRelativeToWorkspace = typeof configured === 'string'
     ? relative(workspaceDir, configured) : '';
   const referenceInsideWorkspace = referenceRelativeToWorkspace === '' ||

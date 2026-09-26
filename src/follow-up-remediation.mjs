@@ -1212,7 +1212,7 @@ async function prepareWorkspaceForJob({
     // token is passed on argv or written into .git/config. Verified to succeed
     // even when the token's GraphQL budget is fully exhausted.
     cloneSource = await cloneRemediationWorkspace({
-      rootDir, repo, baseBranch: job.baseBranch, workspaceDir, resetWorkspaceDir, log,
+      rootDir, repo, domainId: job.domainId || 'code-pr', baseBranch: job.baseBranch, workspaceDir, resetWorkspaceDir, log,
       clone: args => runWorkspaceGitWithTransientRetry(args, {
         execFileImpl,
         options: { maxBuffer: 10 * 1024 * 1024, env: withGhGitCredentialEnv(env) },
@@ -1266,9 +1266,7 @@ async function prepareWorkspaceForJob({
   if (isSameRepo && headRef) {
     // --single-branch configures origin to track only the base. The worker's
     // force-with-lease push also needs the PR head recorded as a tracked ref.
-    await execFileImpl('git', ['-C', workspaceDir, 'remote', 'set-branches', '--add', 'origin', headRef], {
-      maxBuffer: 1 * 1024 * 1024,
-    });
+    await runWorkspaceGitWithTransientRetry(['-C', workspaceDir, 'remote', 'set-branches', '--add', 'origin', headRef], { execFileImpl, options: { maxBuffer: 1 * 1024 * 1024 } });
     const fetchRefs = [`+refs/heads/${headRef}:refs/remotes/origin/${headRef}`];
     if (baseBranch !== headRef) {
       fetchRefs.push(`+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`);

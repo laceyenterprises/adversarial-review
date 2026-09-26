@@ -931,6 +931,7 @@ test('auditWorkspaceForContamination refuses to guess a missing base branch', as
 test('prepareWorkspaceForJob retries transient same-repo git fetch failures before checkout', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const calls = [];
+  let setBranchesAttempts = 0;
   let fetchAttempts = 0;
 
   const result = await prepareWorkspaceForJob({
@@ -951,6 +952,16 @@ test('prepareWorkspaceForJob retries transient same-repo git fetch failures befo
           stderr: '',
         };
       }
+      if (command === 'git' && args[2] === 'remote' && args[3] === 'set-branches') {
+        setBranchesAttempts += 1;
+        if (setBranchesAttempts === 1) {
+          const err = new Error('git remote set-branches failed');
+          err.code = 'EIO';
+          err.stderr = 'fatal: unable to create .git/config.lock: File exists';
+          throw err;
+        }
+        return { stdout: '', stderr: '' };
+      }
       if (
         command === 'git'
         && args[2] === 'fetch'
@@ -969,6 +980,7 @@ test('prepareWorkspaceForJob retries transient same-repo git fetch failures befo
     },
   });
 
+  assert.equal(setBranchesAttempts, 2);
   assert.equal(fetchAttempts, 2);
   assert.ok(result.workspaceDir.endsWith(path.join('workspaces', makeJob().jobId)));
   assert.ok(
@@ -1368,6 +1380,43 @@ test('configured local reference dissociates; failed reference falls back and re
     assert.equal(calls.filter(call => call[1] === 'clone').length, failReference ? 2 : 1);
     assert.match(lines.at(-1), new RegExp(`source=${failReference ? 'network' : 'reference'} clone_fetch_ms=\\d+ checkout_ms=\\d+`));
   }
+});
+
+test('configured local reference uses the job domain configuration', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-domain-reference-'));
+  const codePrReference = path.join(rootDir, 'code-pr-reference');
+  const securityReference = path.join(rootDir, 'security-reference');
+  mkdirSync(path.join(codePrReference, '.git', 'objects'), { recursive: true });
+  mkdirSync(path.join(securityReference, '.git', 'objects'), { recursive: true });
+  mkdirSync(path.join(rootDir, 'domains'), { recursive: true });
+  writeFileSync(path.join(rootDir, 'domains', 'code-pr.json'), JSON.stringify({
+    remediationCloneReferences: { 'laceyenterprises/clio': codePrReference },
+  }));
+  writeFileSync(path.join(rootDir, 'domains', 'code-pr-security.json'), JSON.stringify({
+    remediationCloneReferences: { 'laceyenterprises/clio': securityReference },
+  }));
+  const calls = [];
+
+  await prepareWorkspaceForJob({
+    rootDir,
+    job: makeJob({ domainId: 'code-pr-security' }),
+    log: { info() {}, warn() {} },
+    execFileImpl: async (command, args) => {
+      calls.push([command, ...args]);
+      if (command === 'git' && args[0] === 'clone') {
+        mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
+      }
+      if (command === 'gh' && args[0] === 'api') return {
+        stdout: JSON.stringify({ base: { ref: 'main' }, head: { ref: 'feature', repo: { full_name: 'laceyenterprises/clio' } } }),
+      };
+      return { stdout: '', stderr: '' };
+    },
+  });
+
+  const referenceClone = calls.find(call => call[1] === 'clone');
+  assert.ok(referenceClone.includes('--reference'));
+  assert.ok(referenceClone.includes(securityReference));
+  assert.equal(referenceClone.includes(codePrReference), false);
 });
 
 test('prepareWorkspaceForJob authenticates git clone/fetch via the inline gh credential helper (no global git config assumed)', async () => {

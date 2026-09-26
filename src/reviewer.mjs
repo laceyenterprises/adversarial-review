@@ -78,6 +78,7 @@ import {
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import {
   configureReviewerWorkspaceAudit,
+  formatReviewerSnapshotPayloadReview,
   isReviewerSnapshotPayloadError,
   prepareReviewerSnapshot,
 } from './reviewer-workspace.mjs';
@@ -211,47 +212,6 @@ function pinReviewerGhIdentity(env, botTokenEnv) {
     return { pinned: true, botTokenEnv };
   }
   return { pinned: false, botTokenEnv };
-}
-
-function safeReviewScalar(value, fallback = 'unknown') {
-  const text = String(value ?? '')
-    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return (text || fallback).slice(0, 500);
-}
-
-function formatReviewerSnapshotPayloadReview({
-  repo,
-  prNumber,
-  headSha = null,
-  error,
-}) {
-  const subject = safeReviewScalar(`${repo}#${prNumber}`);
-  const revision = safeReviewScalar(headSha || error?.headSha || 'unknown head');
-  const linkPath = safeReviewScalar(error?.linkPath, 'unknown symlink path');
-  const linkTarget = safeReviewScalar(error?.linkTarget, 'unknown target');
-
-  return [
-    '## Summary',
-    `Reviewer workspace preparation rejected ${subject} before model execution because the PR payload contains a symbolic link that escapes the isolated snapshot.`,
-    '',
-    '## Blocking issues',
-    '- **Unsafe symlink escapes reviewer snapshot**',
-    `  - **File:** ${linkPath}`,
-    `  - **Problem:** The PR contains a symbolic link from ${linkPath} to ${linkTarget}, which resolves outside the reviewer snapshot for ${revision}.`,
-    '  - **Why it matters:** Reviewer subprocesses run against the snapshot as a trust boundary; a PR-authored symlink that crosses that boundary can expose paths outside the review workspace.',
-    '  - **Recommended fix:** Remove the symlink or change it to point at a path that stays inside the repository tree.',
-    '',
-    '## Non-blocking issues',
-    '- None.',
-    '',
-    '## Suggested fixes',
-    '- Remove the escaping symlink or replace it with a regular file or an in-repository relative link.',
-    '',
-    '## Verdict',
-    'Request changes',
-  ].join('\n');
 }
 
 // ── Local OSS shadow review (opt-in, non-gating) ────────────────────────────

@@ -480,8 +480,12 @@ down exactly one of two paths:
 
 | Path | When | What happens |
 |---|---|---|
-| **Hammer (common)** | Final review carries findings (blocking, or non-blocking under the default strict posture), the PR needs a rebase, or CI needs repair | The watcher dispatches exactly one hammer terminal-remediation worker (`templates/hammer-prompt.md`, via `src/ama/dispatch-closer.mjs`). The hammer remediates, rebases at least once onto a recent current base, holds the required-checks-plus-changed-surface-tests merge bar, waits out GitHub required checks on the exact post-remediation head inside a bounded remote-CI window, and merges under its own lease with `--match-head-commit`. If the target branch does not require strict up-to-date heads (`required_status_checks.strict=false` or no strict rule), a post-validation `BEHIND` state caused only by unrelated base movement does not force another rebase when the PR remains `MERGEABLE` and the newer base has no changed-file overlap with this PR. |
+| **Hammer (common)** | Final review carries findings (blocking, or non-blocking under the default strict posture), the PR needs a rebase, or CI needs repair | The watcher dispatches exactly one hammer terminal-remediation worker (`templates/hammer-prompt.md`, via `src/ama/dispatch-closer.mjs`). In the default `watcher.ama_hammer_dispatch_mode: inline` mode, the posted-review phase awaits that `hq dispatch` attempt. In `background` mode, the phase submits the same closer call to a bounded in-process queue keyed by PR@head, returns retained ownership (`ama-pending`) with reason `ama-closer-dispatch-backgrounded`, and lets the closer's lease/dispatch-record guards prevent duplicate launches on later ticks. The hammer remediates, rebases at least once onto a recent current base, holds the required-checks-plus-changed-surface-tests merge bar, waits out GitHub required checks on the exact post-remediation head inside a bounded remote-CI window, and merges under its own lease with `--match-head-commit`. If the target branch does not require strict up-to-date heads (`required_status_checks.strict=false` or no strict rule), a post-validation `BEHIND` state caused only by unrelated base movement does not force another rebase when the PR remains `MERGEABLE` and the newer base has no changed-file overlap with this PR. |
 | **Daemon inline merge (rare)** | Final review is fully clean — zero blocking AND zero non-blocking findings, both classifications known — plus green required checks, a MERGEABLE PR, and a live head matching the reviewed head | The watcher daemon clicks merge inline through a bounded `gh pr merge --match-head-commit` subprocess under the shared merge lease (`src/ama/daemon-merge.mjs`). No agent is spawned. Dispositions: `merged`, `failed-closed` (no hammer spawned from this path), `deferred` (lease contention; retry next tick), `not-taken` (falls through to the hammer route). |
+
+The background hammer queue rechecks the live PR state, head, draft flag, and
+mergeability when each queued entry gets a slot. Changed or unreadable state
+settles without launching a hammer; the next tick applies that outcome.
 
 Hard-stop labels short-circuit both closure paths before the MSM decision. When
 `merge-agent-skip`, `do-not-merge`, `no-merge-hold`, or
@@ -517,6 +521,14 @@ Key control points:
   `worker_class`/review-cycle exhaustion plus the hammer-remediable
   miss-reason classification. The key remains schema-accepted so existing
   configs validate.
+- **`watcher.ama_hammer_dispatch_mode`** (default `inline`): controls only
+  whether the posted-review phase waits for the hammer `hq dispatch` call.
+  `background` keeps the same MSM hammer path but submits it to a process-local
+  queue with one entry per PR@head, at most two concurrent dispatches, and FIFO
+  waiters. The watcher logs `AMA hammer dispatch <started|queued|in-flight> in
+  background...`, then a settle log, while the review row remains `ama-pending`
+  instead of falling through to merge-agent. Unknown or unreadable values fail
+  safe to `inline`.
 - **Kill switch.** `autonomous_merge_execution_enabled: false` (followed by
   an adversarial-watcher bounce) disables BOTH paths: the watcher writes a
   fail-closed `autonomous-merge-execution-disabled` audit recording which

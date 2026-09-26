@@ -153,6 +153,9 @@ const ENUM_IMM_MODE = ['observe', 'enforce'];
 // adapters/subject/github-pr/routing.mjs.
 const ENUM_REVIEWER_GEMINI_MODE = ['off', 'fallback', 'always-on'];
 const ENUM_REVIEWER_GEMINI_RUNTIME = ['cli', 'antigravity'];
+// HAMASYNC-01 — where AMA's hammer dispatch runs relative to the posted-review
+// phase (`watcher.ama_hammer_dispatch_mode`); see ama-hammer-background-dispatch.mjs.
+const ENUM_WATCHER_AMA_HAMMER_DISPATCH_MODE = ['inline', 'background'];
 const FOREIGN_TOP_LEVEL_SECTIONS = new Set([
   // LOADER-CONTRACT §2 permits each reader to ignore only root sections
   // explicitly foreign to that reader in top-level config.local.yaml.
@@ -2967,6 +2970,18 @@ function schemaV1() {
             __nullable: true,
             __min: 1,
           },
+          // HAMASYNC-01. `inline` (default) awaits AMA's `hq dispatch` for a
+          // hammer inside the serial posted-review phase, so one 120-165 s
+          // dispatch holds every later PR's merge click behind it. `background`
+          // starts that dispatch in a bounded background queue (one per
+          // PR@head) and returns `ama-pending` at once; the closer's own
+          // lease / dispatch-record / active-launch guards make the next tick
+          // skip a launch that is still in flight.
+          ama_hammer_dispatch_mode: {
+            __type: TYPE_STRING,
+            __default: 'inline',
+            __enum: ENUM_WATCHER_AMA_HAMMER_DISPATCH_MODE,
+          },
           // REVFAIR-01 lane share. While both first-pass and rereview work are
           // pending, admit at most this many first-pass starts before giving the
           // oldest rereview a floor slot. Default 2 keeps first-pass as the
@@ -3446,6 +3461,10 @@ export const ENV_ALIASES = {
   'watcher.first_pass_review_queue_depth_failover_threshold': {
     canonical: 'AGENT_OS_WATCHER_FIRST_PASS_REVIEW_QUEUE_DEPTH_FAILOVER_THRESHOLD',
     aliases: [['ADVERSARIAL_REVIEW_FIRST_PASS_QUEUE_DEPTH_FAILOVER_THRESHOLD', identity]],
+  },
+  'watcher.ama_hammer_dispatch_mode': {
+    canonical: 'AGENT_OS_WATCHER_AMA_HAMMER_DISPATCH_MODE',
+    aliases: [['ADVERSARIAL_AMA_HAMMER_DISPATCH_MODE', identity]],
   },
   'watcher.review_lane_first_pass_burst_limit': {
     canonical: 'AGENT_OS_WATCHER_REVIEW_LANE_FIRST_PASS_BURST_LIMIT',

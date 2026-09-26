@@ -226,14 +226,20 @@ export async function duplicateFamilyWorkflowMain(argv, io = {}) {
       const survivor = candidates.find((row) => Number(row.pr_number) === survivorPrNumber);
       if (!survivor || !options.reportPath) throw new Error('select requires a family-member --survivor and --report');
       options.reportPath = validateReportPath(options.reportPath);
-      const liveHead = await fetchLivePrHead({ repo: family.target_repo, prNumber: survivorPrNumber, execFileImpl });
+      const liveHead = await withTransientRetry(
+        () => fetchLivePrHead({ repo: family.target_repo, prNumber: survivorPrNumber, execFileImpl }),
+        { attempts: 3, baseDelayMs: 250, sleepImpl },
+      );
       if (liveHead !== survivor.head_sha) {
         throw new Error(`survivor cached head ${survivor.head_sha || '<missing>'} differs from live head ${liveHead}; wait for the watcher census to refresh`);
       }
-      await verifyCommittedReport({
-        repo: family.target_repo, headSha: liveHead,
-        reportPath: options.reportPath, execFileImpl,
-      });
+      await withTransientRetry(
+        () => verifyCommittedReport({
+          repo: family.target_repo, headSha: liveHead,
+          reportPath: options.reportPath, execFileImpl,
+        }),
+        { attempts: 3, baseDelayMs: 250, sleepImpl },
+      );
       const selectionSnapshot = snapshotSelectionState(db, options.familyId, candidates);
       let selection;
       try {

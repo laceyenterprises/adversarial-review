@@ -361,6 +361,57 @@ test('workflow retries transient selection comment failures before committing su
   close();
 });
 
+test('workflow retries transient survivor head and report verification failures', async () => {
+  const db = fixture();
+  const close = db.close.bind(db);
+  db.close = () => {};
+  let viewAttempts = 0;
+  let reportAttempts = 0;
+  const code = await duplicateFamilyWorkflowMain([
+    'select', FAMILY,
+    '--survivor', '101',
+    '--report', 'docs/research/duplicate-pr-divergence/reports/2026-09-20-dpa-04.md',
+    '--reason', 'best ownership boundary',
+    '--salvage', 'ported the narrow parser test from #102',
+    '--validation', 'lint, full test, typecheck, walkthrough',
+    '--actor', 'operator',
+  ], {
+    openReviewStateDbImpl: () => db,
+    stdout: { write() {} },
+    stderr: { write() {} },
+    sleepImpl: async () => {},
+    execFileImpl: async (command, args) => {
+      if (args[0] === 'pr' && args[1] === 'view') {
+        viewAttempts += 1;
+        if (viewAttempts < 3) {
+          const err = new Error('TLS handshake timeout');
+          err.code = 'EIO';
+          throw err;
+        }
+        return { stdout: JSON.stringify({ headRefOid: 'head-101' }) };
+      }
+      if (args[0] === 'api') {
+        reportAttempts += 1;
+        if (reportAttempts < 2) {
+          const err = new Error('secondary rate limit');
+          err.status = 429;
+          throw err;
+        }
+        return { stdout: JSON.stringify({ type: 'file', sha: 'blob-sha' }) };
+      }
+      if (args[0] === 'pr' && args[1] === 'comment') {
+        return { stdout: '' };
+      }
+      throw new Error(`unexpected gh call: ${command} ${args.join(' ')}`);
+    },
+  });
+  assert.equal(code, 0);
+  assert.equal(viewAttempts, 3);
+  assert.equal(reportAttempts, 2);
+  assert.equal(familyFor(db, 101).status, 'survivor-selected');
+  close();
+});
+
 test('workflow rolls back survivor selection when audit comment cannot be posted', async () => {
   const db = fixture();
   const close = db.close.bind(db);

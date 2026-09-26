@@ -4,6 +4,7 @@
 // transient cascade path rather than silently releasing the claim.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   createRoutingTierReadinessProbeCache,
   probeRoutingTierReadiness,
@@ -176,6 +177,12 @@ test('WATCHER_ROUTING_TIER_READINESS_PROBE_DISABLED=1 short-circuits to ready: t
   assert.equal(result.ready, true);
   assert.equal(result.skipped, true);
   assert.equal(fetchCalled, false);
+});
+
+test('OAuth CLI reviewer spawns are not globally gated on LiteLLM readiness', () => {
+  const source = readFileSync(new URL('../src/pollonce-phases.mjs', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /Skipping reviewer spawn[^`]*routing tier \(LiteLLM proxy\)/);
+  assert.match(source, /const infraRecoveryReadiness = await getRoutingTierReadinessForTick\(\)/);
 });
 
 test('WATCHER_ROUTING_TIER_READINESS_URL env var is honored', async () => {

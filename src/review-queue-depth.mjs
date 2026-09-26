@@ -264,6 +264,7 @@ export function createFirstPassSpilloverController({
   let plan = null;
   let remaining = 0;
   let granted = 0;
+  const reservations = new Map();
   let report = null;
 
   function persist() {
@@ -346,6 +347,30 @@ export function createFirstPassSpilloverController({
     return plan;
   }
 
+  function refundSpill({ repo = null, prNumber = null, toWorkerClass = null, reason = 'spawn-not-admitted' } = {}) {
+    const reservationKey = `${repo}#${prNumber}`;
+    const reservation = reservations.get(reservationKey);
+    if (!reservation || granted <= 0) return false;
+    const current = evaluate();
+    reservations.delete(reservationKey);
+    remaining += 1;
+    granted -= 1;
+    report.cost.spilloverReviewsTotal = Math.max(0, Number(report.cost.spilloverReviewsTotal || 0) - 1);
+    const to = String(toWorkerClass || reservation.toWorkerClass || 'unknown').trim().toLowerCase() || 'unknown';
+    report.cost.byWorkerClass[to] = Math.max(0, Number(report.cost.byWorkerClass[to] || 0) - 1);
+    report.cost.currentEngagementSpilloverReviews = Math.max(
+      0,
+      Number(report.cost.currentEngagementSpilloverReviews || 0) - 1,
+    );
+    report.updatedAt = now().toISOString();
+    logger?.warn?.(
+      `[watcher] review-queue-depth-spillover-refund repo=${repo} pr=${prNumber} `
+      + `reason=${reason} remaining=${remaining}/${current.spillSlots}`
+    );
+    persist();
+    return true;
+  }
+
   return {
     /** Memoized per-tick plan. */
     plan() {
@@ -377,6 +402,7 @@ export function createFirstPassSpilloverController({
       remaining -= 1;
       granted += 1;
       const to = String(toWorkerClass || 'unknown').trim().toLowerCase() || 'unknown';
+      reservations.set(`${repo}#${prNumber}`, { state: 'pending', toWorkerClass: to });
       report.cost.spilloverReviewsTotal = Number(report.cost.spilloverReviewsTotal || 0) + 1;
       report.cost.byWorkerClass[to] = Number(report.cost.byWorkerClass[to] || 0) + 1;
       report.cost.currentEngagementSpilloverReviews =
@@ -391,6 +417,26 @@ export function createFirstPassSpilloverController({
       );
       persist();
       return true;
+    },
+    /**
+     * Return a reserved slot when a later admission gate refuses the spawn.
+     * The watcher processes admission results serially, so the returned unit is
+     * immediately available to the next admissible PR in this tick.
+     */
+    refundSpill,
+    handoffSpill({ repo = null, prNumber = null } = {}) {
+      const reservation = reservations.get(`${repo}#${prNumber}`);
+      if (!reservation) return false;
+      reservation.state = 'handed-off';
+      return true;
+    },
+    commitSpill({ repo = null, prNumber = null } = {}) {
+      return reservations.delete(`${repo}#${prNumber}`);
+    },
+    refundPendingSpill({ repo = null, prNumber = null, reason = 'pre-dispatch-refusal' } = {}) {
+      const reservation = reservations.get(`${repo}#${prNumber}`);
+      if (!reservation || reservation.state !== 'pending') return false;
+      return refundSpill({ repo, prNumber, reason });
     },
     /** Test/observability accessor: slots consumed so far this tick. */
     granted() {

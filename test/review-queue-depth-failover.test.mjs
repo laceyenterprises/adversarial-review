@@ -650,10 +650,33 @@ test('pollonce-phases passes depth pressure in and charges the cost ledger back'
   // for the depth trigger — a quota fallback must not spend the depth budget.
   assert.match(
     src,
-    /rwfDecision\.reason === 'queue-depth-pressure'\)\s*\{\s*firstPassSpilloverController\?\.recordSpill/
+    /rwfDecision\.reason === 'queue-depth-pressure'\)\s*\{\s*depthSpillReserved = firstPassSpilloverController\?\.recordSpill/
   );
   // The route swap gets the author so the diversity backstop can refuse.
   assert.match(src, /applyReviewerWorkerClassFallbackToRoute\(\{[^}]*authorClass: reviewerAuthorClass/);
+  assert.match(src, /firstPassSpilloverController\?\.refundSpill\?\.\(\{/);
+});
+
+test('CI-red reservations are refunded so spill slots reach later admissible PRs', () => {
+  const root = tempRoot('rsp01-refund-');
+  try {
+    const ctl = controller({ root, depth: 100, threshold: 10 });
+    const spillSlots = ctl.plan().spillSlots;
+    for (let index = 0; index < spillSlots; index += 1) {
+      assert.equal(ctl.recordSpill({ prNumber: 6900 + index, toWorkerClass: 'codex' }), true);
+      assert.equal(ctl.refundSpill({
+        prNumber: 6900 + index,
+        toWorkerClass: 'codex',
+        reason: 'ci-regression-requeued',
+      }), true);
+    }
+    const admitted = Array.from({ length: spillSlots }, (_, index) =>
+      ctl.recordSpill({ prNumber: 7000 + index, toWorkerClass: 'codex' }));
+    assert.deepEqual(admitted, Array(spillSlots).fill(true));
+    assert.equal(ctl.depthPressure().engaged, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('pollonce-phases uses a bounded per-tick quota cache TTL', () => {

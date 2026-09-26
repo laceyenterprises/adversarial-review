@@ -21,12 +21,10 @@ export const DUPLICATE_FAMILY_LOSER_LABEL = 'duplicate-family-loser';
 const REACTIVATABLE_STATUSES = new Set([
   DUPLICATE_FAMILY_STATUS_INACTIVE,
   DUPLICATE_FAMILY_STATUS_RESOLVED,
-  DUPLICATE_FAMILY_STATUS_SURVIVOR_MERGED,
 ]);
 const DEACTIVATABLE_STATUSES = [
   DUPLICATE_FAMILY_STATUS_ADVISORY,
   DUPLICATE_FAMILY_STATUS_SURVIVOR_SELECTED,
-  DUPLICATE_FAMILY_STATUS_SURVIVOR_MERGED,
   DUPLICATE_FAMILY_STATUS_ABANDONED,
 ];
 const PERSISTED_MERGE_STATUSES = [
@@ -677,23 +675,23 @@ export function upsertDuplicateFamilies(db, families, {
      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(family_key) DO UPDATE SET
       status = CASE
-         WHEN duplicate_families.status IN ('inactive', 'resolved', 'survivor-merged') THEN excluded.status
+         WHEN duplicate_families.status IN ('inactive', 'resolved') THEN excluded.status
          ELSE duplicate_families.status
        END,
        selected_survivor_pr_number = CASE
-         WHEN duplicate_families.status IN ('inactive', 'resolved', 'survivor-merged') THEN NULL
+         WHEN duplicate_families.status IN ('inactive', 'resolved') THEN NULL
          ELSE duplicate_families.selected_survivor_pr_number
        END,
        report_path = CASE
-         WHEN duplicate_families.status IN ('inactive', 'resolved', 'survivor-merged') THEN NULL
+         WHEN duplicate_families.status IN ('inactive', 'resolved') THEN NULL
          ELSE duplicate_families.report_path
        END,
        operator_override_json = CASE
-         WHEN duplicate_families.status IN ('inactive', 'resolved', 'survivor-merged') THEN NULL
+         WHEN duplicate_families.status IN ('inactive', 'resolved') THEN NULL
          ELSE duplicate_families.operator_override_json
        END,
        transition_log_json = CASE
-         WHEN duplicate_families.status IN ('inactive', 'resolved', 'survivor-merged') THEN excluded.transition_log_json
+         WHEN duplicate_families.status IN ('inactive', 'resolved') THEN excluded.transition_log_json
          ELSE duplicate_families.transition_log_json
        END,
        strongest_signal = excluded.strongest_signal,
@@ -984,6 +982,15 @@ function duplicateFamilyOverride(family) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
 
+function isActiveIgnoredCandidate(override, candidate) {
+  const ignored = Array.isArray(override?.ignoredCandidates) ? override.ignoredCandidates : [];
+  return ignored.some((entry) => (
+    Number(entry?.candidatePrNumber) === Number(candidate?.pr_number)
+    && String(entry?.candidateHeadSha || '') === String(candidate?.head_sha || '')
+    && entry?.stale !== true
+  ));
+}
+
 function validateOperatorAudit({ actor, reason, salvage = true, validation = true } = {}) {
   if (!normalizeText(actor)) throw new Error('operator actor is required');
   if (!normalizeText(reason)) throw new Error('auditable reason is required');
@@ -1066,7 +1073,7 @@ export function selectDuplicateFamilySurvivor(db, {
       const suppressed = parseMaybeJson(candidate.suppressions_json, []).length > 0;
       const role = Number(candidate.pr_number) === selection.candidatePrNumber
         ? 'survivor'
-        : suppressed ? 'candidate' : 'loser';
+        : (suppressed || isActiveIgnoredCandidate(override, candidate)) ? 'candidate' : 'loser';
       updateRole.run(role, now, familyId, candidate.pr_number);
     }
   })();

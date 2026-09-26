@@ -39,7 +39,7 @@ export function evaluateDuplicateFamilyCandidate(family = null, {
     override.transition === 'survivor-selected' ? override : null
   );
   if (
-    status === 'survivor-selected'
+    (status === 'survivor-selected' || status === 'survivor-merged')
     && Number(family.selected_survivor_pr_number) === Number(prNumber)
     && Number(selection?.candidatePrNumber) === Number(prNumber)
     && String(selection?.candidateHeadSha || '') === String(headSha || '')
@@ -47,7 +47,7 @@ export function evaluateDuplicateFamilyCandidate(family = null, {
     && String(selection?.reportPath || family.report_path || '').trim()
     && selection?.stale !== true
   ) {
-    return { member: true, held: false, reason: null, release: 'survivor-selected' };
+    return { member: true, held: false, reason: null, release: status };
   }
 
   return {

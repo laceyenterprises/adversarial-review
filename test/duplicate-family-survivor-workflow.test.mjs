@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
 
 import { evaluateDuplicateFamilyCandidate } from '../src/duplicate-family-gate.mjs';
-import { verifyCommittedReport } from '../src/duplicate-family-workflow-cli.mjs';
+import {
+  duplicateFamilyWorkflowMain,
+  verifyCommittedReport,
+} from '../src/duplicate-family-workflow-cli.mjs';
 import {
   abandonDuplicateFamily,
   ensureDuplicateFamilySchema,
@@ -99,6 +102,19 @@ test('exactly one selected survivor releases while every loser stays held', () =
   } finally { db.close(); }
 });
 
+test('merged survivor remains released while loser closeout is still in progress', () => {
+  const db = fixture();
+  try {
+    select(db);
+    db.prepare("UPDATE duplicate_families SET status = 'survivor-merged' WHERE family_id = ?").run(FAMILY);
+    const survivor = evaluateDuplicateFamilyCandidate(familyFor(db, 101), { prNumber: 101, headSha: 'head-101' });
+    const loser = evaluateDuplicateFamilyCandidate(familyFor(db, 102), { prNumber: 102, headSha: 'head-102' });
+    assert.equal(survivor.held, false);
+    assert.equal(survivor.release, 'survivor-merged');
+    assert.equal(loser.held, true);
+  } finally { db.close(); }
+});
+
 test('report enforcement rejects unverified paths and head movement invalidates selection', () => {
   const db = fixture();
   try {
@@ -158,6 +174,41 @@ test('current-head ignored-not-duplicate releases only that loser', () => {
     assert.equal(evaluateDuplicateFamilyCandidate(familyFor(db, 102), { prNumber: 102, headSha: 'head-102' }).held, false);
     assert.equal(evaluateDuplicateFamilyCandidate(familyFor(db, 103), { prNumber: 103, headSha: 'head-103' }).held, true);
     assert.equal(evaluateDuplicateFamilyCandidate(familyFor(db, 102), { prNumber: 102, headSha: 'head-102-moved' }).held, true);
+  } finally { db.close(); }
+});
+
+test('survivor selection preserves active ignored candidates as candidates', () => {
+  const db = fixture();
+  try {
+    ignoreDuplicateFamilyCandidate(db, {
+      familyId: FAMILY, prNumber: 102, candidateHeadSha: 'head-102',
+      actor: 'operator', reason: 'not duplicate work',
+    });
+    select(db);
+    assert.deepEqual(
+      db.prepare('SELECT pr_number, role FROM duplicate_family_candidates ORDER BY pr_number').all(),
+      [{ pr_number: 101, role: 'survivor' }, { pr_number: 102, role: 'candidate' }, { pr_number: 103, role: 'loser' }],
+    );
+  } finally { db.close(); }
+});
+
+test('stale ignored candidates are still loser candidates after survivor selection', () => {
+  const db = fixture();
+  try {
+    ignoreDuplicateFamilyCandidate(db, {
+      familyId: FAMILY, prNumber: 102, candidateHeadSha: 'head-102',
+      actor: 'operator', reason: 'not duplicate work',
+    });
+    const family = db.prepare('SELECT operator_override_json FROM duplicate_families WHERE family_id = ?').get(FAMILY);
+    const override = JSON.parse(family.operator_override_json);
+    override.ignoredCandidates[0].stale = true;
+    db.prepare('UPDATE duplicate_families SET operator_override_json = ? WHERE family_id = ?')
+      .run(JSON.stringify(override), FAMILY);
+    select(db);
+    assert.equal(
+      db.prepare('SELECT role FROM duplicate_family_candidates WHERE pr_number = 102').get().role,
+      'loser',
+    );
   } finally { db.close(); }
 });
 
@@ -261,4 +312,92 @@ test('selection leaves suppressed members unclosed and stale ignores require rea
     assert.match(logLines.join('\n'), /re-adjudication required/);
     assert.equal(familyFor(db, 101).status, 'survivor-merged');
   } finally { db.close(); }
+});
+
+test('workflow retries transient selection comment failures before committing success', async () => {
+  const db = fixture();
+  const close = db.close.bind(db);
+  db.close = () => {};
+  const calls = [];
+  const stderr = { write: (text) => calls.push(['stderr', text]) };
+  const stdout = { write: (text) => calls.push(['stdout', text]) };
+  let commentAttempts = 0;
+  const code = await duplicateFamilyWorkflowMain([
+    'select', FAMILY,
+    '--survivor', '101',
+    '--report', 'docs/research/duplicate-pr-divergence/reports/2026-09-20-dpa-04.md',
+    '--reason', 'best ownership boundary',
+    '--salvage', 'ported the narrow parser test from #102',
+    '--validation', 'lint, full test, typecheck, walkthrough',
+    '--actor', 'operator',
+  ], {
+    openReviewStateDbImpl: () => db,
+    stdout,
+    stderr,
+    sleepImpl: async () => {},
+    execFileImpl: async (command, args) => {
+      calls.push([command, args]);
+      if (args[0] === 'pr' && args[1] === 'view') {
+        return { stdout: JSON.stringify({ headRefOid: 'head-101' }) };
+      }
+      if (args[0] === 'api') {
+        return { stdout: JSON.stringify({ type: 'file', sha: 'blob-sha' }) };
+      }
+      if (args[0] === 'pr' && args[1] === 'comment') {
+        commentAttempts += 1;
+        if (commentAttempts < 3) {
+          const err = new Error('TLS handshake timeout');
+          err.code = 'EIO';
+          throw err;
+        }
+        return { stdout: '' };
+      }
+      throw new Error(`unexpected gh call: ${command} ${args.join(' ')}`);
+    },
+  });
+  assert.equal(code, 0);
+  assert.equal(commentAttempts, 3);
+  assert.equal(familyFor(db, 101).status, 'survivor-selected');
+  close();
+});
+
+test('workflow rolls back survivor selection when audit comment cannot be posted', async () => {
+  const db = fixture();
+  const close = db.close.bind(db);
+  db.close = () => {};
+  const code = await duplicateFamilyWorkflowMain([
+    'select', FAMILY,
+    '--survivor', '101',
+    '--report', 'docs/research/duplicate-pr-divergence/reports/2026-09-20-dpa-04.md',
+    '--reason', 'best ownership boundary',
+    '--salvage', 'ported the narrow parser test from #102',
+    '--validation', 'lint, full test, typecheck, walkthrough',
+    '--actor', 'operator',
+  ], {
+    openReviewStateDbImpl: () => db,
+    stdout: { write() {} },
+    stderr: { write() {} },
+    sleepImpl: async () => {},
+    execFileImpl: async (command, args) => {
+      if (args[0] === 'pr' && args[1] === 'view') {
+        return { stdout: JSON.stringify({ headRefOid: 'head-101' }) };
+      }
+      if (args[0] === 'api') {
+        return { stdout: JSON.stringify({ type: 'file', sha: 'blob-sha' }) };
+      }
+      if (args[0] === 'pr' && args[1] === 'comment') {
+        const err = new Error('TLS handshake timeout');
+        err.code = 'EIO';
+        throw err;
+      }
+      throw new Error(`unexpected gh call: ${command} ${args.join(' ')}`);
+    },
+  });
+  assert.equal(code, 2);
+  assert.equal(familyFor(db, 101).status, 'advisory');
+  assert.deepEqual(
+    db.prepare('SELECT pr_number, role FROM duplicate_family_candidates ORDER BY pr_number').all(),
+    [{ pr_number: 101, role: 'candidate' }, { pr_number: 102, role: 'candidate' }, { pr_number: 103, role: 'candidate' }],
+  );
+  close();
 });

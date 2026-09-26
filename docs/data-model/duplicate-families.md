@@ -36,7 +36,7 @@ One row per detected work-identity family.
 | `target_repo` | Repository the duplicate census observed. |
 | `base_branch` | Base branch shared by the active duplicate candidates. |
 | `normalized_work_identity` | Normalized ticket, explicit identity label, or dispatch identity used for grouping. |
-| `status` | Family lifecycle status: `advisory` while at least two live unsuppressed candidates remain; `inactive` after the census no longer sees a duplicate family; `survivor-selected` after an operator selects a survivor and verified report; `survivor-merged` after the selected survivor is confirmed merged; `resolved` after all closable losers are closed; `abandoned` after an operator records no safe survivor. A later duplicate census reactivates `inactive`, `resolved`, and `survivor-merged` rows to `advisory` and clears stale survivor-selection fields. |
+| `status` | Family lifecycle status: `advisory` while at least two live unsuppressed candidates remain; `inactive` after the census no longer sees a duplicate family; `survivor-selected` after an operator selects a survivor and verified report; `survivor-merged` after the selected survivor is confirmed merged and loser closeout is still in progress; `resolved` after all closable losers are closed; `abandoned` after an operator records no safe survivor. A later duplicate census reactivates only `inactive` and `resolved` rows to `advisory` and clears stale survivor-selection fields. |
 | `strongest_signal` | First common strong signal kind shared by active candidates. |
 | `selected_survivor_pr_number` | Optional operator-selected PR number to keep as the survivor. |
 | `report_path` | Optional path to an operator-facing duplicate report artifact. |
@@ -64,7 +64,7 @@ belong to only one family at a time; reassignment updates the row's
 | `head_branch` | Candidate head branch. |
 | `head_sha` | Candidate head SHA. |
 | `base_sha` | Candidate base SHA or merge-base evidence when available. |
-| `role` | `candidate` before adjudication, then exactly one unsuppressed `survivor`; non-suppressed remaining members become `loser`, while suppressed members stay `candidate`. |
+| `role` | `candidate` before adjudication, then exactly one unsuppressed `survivor`; non-suppressed remaining members become `loser`, while suppressed members and exact-head `ignored-not-duplicate` overrides stay `candidate`. |
 | `work_identity_json` | Extracted identity payload and provenance resolution. |
 | `signals_json` | Strong signal evidence used by the detector. |
 | `suppressions_json` | Suppression evidence such as stack/follow-up labels or the PR-wide exclusion label. |
@@ -100,14 +100,19 @@ Slice absence by itself is not treated as closure. Existing databases created wi
   while `candidate_count` tracks only the active open unsuppressed subset. If a
   PR is detected in a different family, its existing candidate row is reassigned
   to the new `family_id`. A census that sees a duplicate family again
-  reactivates `inactive`, `resolved`, or `survivor-merged` rows and clears the
-  prior `selected_survivor_pr_number`, `report_path`, and
-  `operator_override_json` so stale selections cannot release a new head.
+  reactivates only `inactive` and `resolved` rows and clears the prior
+  `selected_survivor_pr_number`, `report_path`, and `operator_override_json` so
+  stale selections cannot release a new head. `survivor-merged` rows are not
+  reactivated by a repeated duplicate census because loser closeout may still be
+  in progress for the already-merged survivor.
 - `deactivateMissing` marks active advisory or adjudication families inactive only when the
   current census observed at least one persisted candidate from that family and
   no longer returns the family key. Families that are absent solely because all
   candidates fell outside a windowed polling slice remain advisory until a later
   observation proves they no longer have two live unsuppressed candidates.
+  `survivor-merged` families remain active until
+  `reconcileDuplicateFamilyCloseouts()` resolves them, even if the census no
+  longer returns the family key while loser closeout is in progress.
   Absence from the watcher slice is never written back as `pr_state='closed'`;
   only an observed subject state may change the cached PR state.
 - `reconcileDuplicateFamilyLabels()` writes the GitHub labels after each census:

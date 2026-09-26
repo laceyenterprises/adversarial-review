@@ -678,6 +678,61 @@ test('resolved family reactivates and clears stale survivor selection on a fresh
   }
 });
 
+test('survivor-merged family does not reactivate while loser closeout is unfinished', () => {
+  const db = memoryDb();
+  try {
+    const first = reconcileDuplicateFamiliesForRepo(db, [
+      subject(367, { headSha: 'survivor-head' }),
+      subject(368, { headSha: 'loser-head' }),
+    ], {
+      repoPath: REPO,
+      now: '2026-09-11T00:00:00.000Z',
+      readBuildCompletionSignalForPrImpl: provenanceReader({
+        367: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+        368: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+      }),
+    });
+    const familyId = first.familyIds[0];
+    const override = {
+      selection: {
+        candidatePrNumber: 367,
+        candidateHeadSha: 'survivor-head',
+        reportPath: 'docs/research/duplicate-pr-divergence/reports/old.md',
+        reportVerifiedHeadSha: 'survivor-head',
+      },
+    };
+    db.prepare(
+      `UPDATE duplicate_families
+          SET status = 'survivor-merged',
+              selected_survivor_pr_number = 367,
+              report_path = 'docs/research/duplicate-pr-divergence/reports/old.md',
+              operator_override_json = ?
+        WHERE family_id = ?`
+    ).run(JSON.stringify(override), familyId);
+
+    reconcileDuplicateFamiliesForRepo(db, [
+      subject(367, { headSha: 'survivor-head', state: 'MERGED' }),
+      subject(368, { headSha: 'loser-head' }),
+    ], {
+      repoPath: REPO,
+      now: '2026-09-11T00:01:00.000Z',
+      readBuildCompletionSignalForPrImpl: provenanceReader({
+        367: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+        368: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+      }),
+    });
+
+    const family = listDuplicateFamilies(db)[0];
+    assert.equal(family.status, 'survivor-merged');
+    assert.equal(family.selected_survivor_pr_number, 367);
+    assert.equal(family.report_path, 'docs/research/duplicate-pr-divergence/reports/old.md');
+    assert.deepEqual(JSON.parse(family.operator_override_json), override);
+    assert.notEqual(JSON.parse(family.transition_log_json).at(-1).transition, 'reactivated-advisory');
+  } finally {
+    db.close();
+  }
+});
+
 test('adjudicated family deactivates when an observed census no longer has duplicates', () => {
   const db = memoryDb();
   try {

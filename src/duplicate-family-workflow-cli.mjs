@@ -92,6 +92,109 @@ async function postSelectionComment({ repo, prNumber, selection, execFileImpl })
   });
 }
 
+function isTransientSubprocessError(err) {
+  const code = String(err?.code || err?.cause?.code || '').toUpperCase();
+  if (['EAGAIN', 'EBUSY', 'ECONNRESET', 'EHOSTUNREACH', 'EIO', 'ENETDOWN', 'ENETRESET', 'ENETUNREACH', 'ETIMEDOUT'].includes(code)) {
+    return true;
+  }
+  const status = Number(err?.status || err?.exitCode || err?.signalCode || 0);
+  if (status === 429 || (status >= 500 && status <= 599)) return true;
+  const text = [
+    err?.message,
+    err?.stderr,
+    err?.stdout,
+  ].map((value) => String(value || '')).join('\n').toLowerCase();
+  return [
+    'resource temporarily unavailable',
+    'operation timed out',
+    'connection reset',
+    'connection refused',
+    'tls handshake timeout',
+    'ssl',
+    'early eof',
+    'rpc failed',
+    'remote end hung up unexpectedly',
+    'http 429',
+    'rate limit',
+    'secondary rate limit',
+    'http 500',
+    'http 502',
+    'http 503',
+    'http 504',
+  ].some((needle) => text.includes(needle));
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withTransientRetry(operation, {
+  attempts = 3,
+  baseDelayMs = 250,
+  sleepImpl = sleep,
+} = {}) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await operation(attempt);
+    } catch (err) {
+      lastError = err;
+      if (attempt >= attempts || !isTransientSubprocessError(err)) throw err;
+      await sleepImpl(baseDelayMs * attempt);
+    }
+  }
+  throw lastError;
+}
+
+function snapshotSelectionState(db, familyId, candidates) {
+  return {
+    family: db.prepare(
+      `SELECT status, selected_survivor_pr_number, report_path, operator_override_json,
+              transition_log_json, updated_at
+         FROM duplicate_families
+        WHERE family_id = ?`
+    ).get(familyId),
+    candidates: candidates.map((candidate) => ({
+      repo: candidate.repo,
+      pr_number: candidate.pr_number,
+      role: candidate.role,
+      updated_at: candidate.updated_at,
+    })),
+  };
+}
+
+function restoreSelectionState(db, familyId, snapshot) {
+  if (!snapshot?.family) return;
+  db.transaction(() => {
+    db.prepare(
+      `UPDATE duplicate_families
+          SET status = ?,
+              selected_survivor_pr_number = ?,
+              report_path = ?,
+              operator_override_json = ?,
+              transition_log_json = ?,
+              updated_at = ?
+        WHERE family_id = ?`
+    ).run(
+      snapshot.family.status,
+      snapshot.family.selected_survivor_pr_number,
+      snapshot.family.report_path,
+      snapshot.family.operator_override_json,
+      snapshot.family.transition_log_json,
+      snapshot.family.updated_at,
+      familyId,
+    );
+    const restoreCandidate = db.prepare(
+      `UPDATE duplicate_family_candidates
+          SET role = ?, updated_at = ?
+        WHERE repo = ? AND pr_number = ?`
+    );
+    for (const candidate of snapshot.candidates || []) {
+      restoreCandidate.run(candidate.role, candidate.updated_at, candidate.repo, candidate.pr_number);
+    }
+  })();
+}
+
 export async function duplicateFamilyWorkflowMain(argv, io = {}) {
   const stdout = io.stdout || process.stdout;
   const stderr = io.stderr || process.stderr;
@@ -112,6 +215,7 @@ export async function duplicateFamilyWorkflowMain(argv, io = {}) {
   }
   const openDbImpl = io.openReviewStateDbImpl || openReviewStateDb;
   const execFileImpl = io.execFileImpl || execFileDefault;
+  const sleepImpl = io.sleepImpl || sleep;
   const db = openDbImpl(options.rootDir);
   try {
     const family = db.prepare('SELECT * FROM duplicate_families WHERE family_id = ?').get(options.familyId);
@@ -130,12 +234,22 @@ export async function duplicateFamilyWorkflowMain(argv, io = {}) {
         repo: family.target_repo, headSha: liveHead,
         reportPath: options.reportPath, execFileImpl,
       });
-      const selection = selectDuplicateFamilySurvivor(db, {
-        ...options, survivorPrNumber, reportVerifiedHeadSha: liveHead,
-      });
-      await postSelectionComment({
-        repo: family.target_repo, prNumber: survivorPrNumber, selection, execFileImpl,
-      });
+      const selectionSnapshot = snapshotSelectionState(db, options.familyId, candidates);
+      let selection;
+      try {
+        selection = selectDuplicateFamilySurvivor(db, {
+          ...options, survivorPrNumber, reportVerifiedHeadSha: liveHead,
+        });
+        await withTransientRetry(
+          () => postSelectionComment({
+            repo: family.target_repo, prNumber: survivorPrNumber, selection, execFileImpl,
+          }),
+          { attempts: 3, baseDelayMs: 250, sleepImpl },
+        );
+      } catch (err) {
+        restoreSelectionState(db, options.familyId, selectionSnapshot);
+        throw err;
+      }
       stdout.write(`selected ${family.target_repo}#${survivorPrNumber} as survivor at ${liveHead}\n`);
     } else if (options.command === 'ignore') {
       const prNumber = Number(options.prNumber);
@@ -160,6 +274,8 @@ export {
   parseArgs as parseDuplicateFamilyWorkflowArgs,
   USAGE as DUPLICATE_FAMILY_WORKFLOW_USAGE,
   fetchLivePrHead,
+  isTransientSubprocessError,
   validateReportPath,
   verifyCommittedReport,
+  withTransientRetry,
 };

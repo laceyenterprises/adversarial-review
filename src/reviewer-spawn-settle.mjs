@@ -1207,33 +1207,36 @@ function settleReviewerAttempt({
   const baseFailureMessage = String(result.error || '').trim() || defaultFailureMessages[failureClass] || defaultFailureMessages.unknown;
   const failureMessage = appendFailureDiagnostics(baseFailureMessage, result);
   const classifiedMessage = `[${failureClass}] ${failureMessage}`;
+  let oauthCredentialState = null;
   if (failureClass === 'oauth-broken') {
-    const credentialState = recordReviewerCredentialFailure(rootDir, {
+    oauthCredentialState = recordReviewerCredentialFailure(rootDir, {
       reviewerModel,
       repo: repoPath,
       prNumber,
       failedAt: failureAt,
     });
-    const outageMessage = credentialState.active
-      ? `[outage-transient:${credentialState.reason}] ${classifiedMessage}`
-      : classifiedMessage;
-    const markCredentialOutage = statements.markReviewerCredentialOutage || statements.markOutageTransient;
-    withSqliteBusyRetrySync(
-      () => markCredentialOutage.run(failureAt, outageMessage, ...(statements.markReviewerCredentialOutage ? [] : [null]), repoPath, prNumber),
-      { label: `reviewer-settle-credential-hold:${repoPath}#${prNumber}`, log }
-    );
-    if (credentialState.active && typeof statements.promoteReviewerCredentialOutage?.run === 'function') {
+    if (oauthCredentialState.active) {
+      const outageMessage = `[outage-transient:${oauthCredentialState.reason}] ${classifiedMessage}`;
+      const markCredentialOutage = statements.markReviewerCredentialOutage || statements.markOutageTransient;
       withSqliteBusyRetrySync(
-        () => statements.promoteReviewerCredentialOutage.run(outageMessage, credentialState.reviewerModel),
-        { label: `reviewer-credential-outage-promote:${credentialState.reviewerModel}`, log }
+        () => markCredentialOutage.run(failureAt, outageMessage, ...(statements.markReviewerCredentialOutage ? [] : [null]), repoPath, prNumber),
+        { label: `reviewer-settle-credential-hold:${repoPath}#${prNumber}`, log }
       );
+      if (typeof statements.promoteReviewerCredentialOutage?.run === 'function') {
+        withSqliteBusyRetrySync(
+          () => statements.promoteReviewerCredentialOutage.run(outageMessage, oauthCredentialState.reviewerModel),
+          { label: `reviewer-credential-outage-promote:${oauthCredentialState.reviewerModel}`, log }
+        );
+      }
+      recordCascadeFailure(rootDir, {
+        repo: repoPath, prNumber, failedAt: failureAt, failureClass, failureReason: failureMessage, reviewerModel,
+      });
+      log.warn(
+        `[watcher] Reviewer oauth-broken failure on #${prNumber}; model-scoped credential outage active across ` +
+        `${oauthCredentialState.distinctPrCount} PRs; holding without charging infra recovery`
+      );
+      return;
     }
-    recordCascadeFailure(rootDir, {
-      repo: repoPath, prNumber, failedAt: failureAt, failureClass, failureReason: failureMessage, reviewerModel,
-    });
-    log.warn(`[watcher] Reviewer oauth-broken failure on #${prNumber}; holding without charging infra recovery` +
-      (credentialState.active ? `; ${credentialState.reason} outage active across ${credentialState.distinctPrCount} PRs` : ''));
-    return;
   }
   if (transientFailureClasses.has(failureClass)) {
     if (typeof statements.getReviewRow?.get !== 'function') {
@@ -1278,6 +1281,12 @@ function settleReviewerAttempt({
       `[watcher] PR #${prNumber} marked pending-upstream after ${cascadeState.consecutiveTransientFailures} transient reviewer failures (${breakdown}); ` +
       `infra auto-recovery ${infraRecoverAttempts + 1}/${INFRA_AUTO_RECOVER_CAP}; will resume when the reviewer lane recovers`
     );
+    if (oauthCredentialState) {
+      log.warn(
+        `[watcher] Reviewer oauth-broken failure on #${prNumber}; credential outage threshold not met ` +
+        `(${oauthCredentialState.distinctPrCount} distinct PRs), charging infra recovery`
+      );
+    }
     log.warn(
       `[watcher] Reviewer ${failureClass} failure on #${prNumber} (consecutiveTransient=${cascadeState.consecutiveTransientFailures}); backing off ${cascadeState.backoffMinutes}m`
     );

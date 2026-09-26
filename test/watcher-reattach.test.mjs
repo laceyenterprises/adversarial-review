@@ -381,6 +381,43 @@ test('closed reviewer remains live when GitHub state cannot be verified', async 
   assert.deepEqual(killed, []);
 });
 
+for (const [label, fetchLivePrState] of [
+  ['GitHub state fetch fails', async () => { throw new Error('GitHub unavailable'); }],
+  ['GitHub state is unknown', async () => ({ state: 'UNKNOWN' })],
+]) {
+  test(`expired closed reviewer releases its slot when ${label}`, async () => {
+    const db = setupDb();
+    seedReviewing(db, {
+      prState: 'closed',
+      closedAt: '2026-05-11T05:19:00.000Z',
+      reviewerLeaseExpiresAt: '2026-05-11T05:19:30.000Z',
+    });
+    const killed = [];
+    const settled = [];
+
+    await reconcileReviewerSessions({
+      db,
+      octokit: makeOctokit([]),
+      now: new Date(FAILURE_AT),
+      log: makeLog(),
+      fetchLivePrState,
+      fetchHeadSha: async () => { throw new Error('unverified terminal row must not probe GitHub heads'); },
+      findPostedReview: async () => { throw new Error('unverified terminal row must not probe GitHub reviews'); },
+      probeSession: () => ({ alive: true, matched: true }),
+      killProcessGroup: (pgid, signal) => { killed.push({ pgid, signal }); return true; },
+      onTerminalDeadSession: async (event) => settled.push(event),
+    });
+
+    const row = readRow(db);
+    assert.equal(row.pr_state, 'closed');
+    assert.equal(row.review_status, 'failed-orphan');
+    assert.deepEqual(killed, [{ pgid: 9001, signal: 'SIGKILL' }]);
+    assert.deepEqual(settled.map(({ state, reason }) => ({ state, reason })), [
+      { state: 'failed', reason: 'closed-pr-state-unverified-lease-expired' },
+    ]);
+  });
+}
+
 test('terminal reviewer claims take priority under the per-poll reconcile cap', async () => {
   const db = setupDb();
   seedReviewing(db, { prNumber: 69 });

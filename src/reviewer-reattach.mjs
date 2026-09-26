@@ -560,6 +560,7 @@ async function reconcileReviewerSessions({
     let row = listedRow;
     let terminalState = String(row.pr_state || '').trim().toLowerCase();
     let terminalConfirmed = terminalState === 'merged';
+    let closedPrStateUnverified = false;
     if (terminalState === 'closed') {
       // Unlike a merge, a close can be reversed while this watcher is down.
       // Startup reconciliation runs before lifecycle sync, so confirm the
@@ -569,24 +570,64 @@ async function reconcileReviewerSessions({
         live = livePrLifecycle(await fetchLivePrState(row));
       } catch (err) {
         log.warn(`[watcher] reviewer_reattach_closed_pr_state_unverified repo=${row.repo} pr=${row.pr_number} error=${err?.message || err}`);
-        continue;
+        closedPrStateUnverified = true;
       }
-      if (live.state === 'open') {
+      if (!closedPrStateUnverified && live.state === 'open') {
         statements.reopenClosedReviewing.run(row.repo, row.pr_number);
         row = { ...row, pr_state: 'open', closed_at: null };
         log.warn(`[watcher] reviewer_reattach_reopened_pr_restored repo=${row.repo} pr=${row.pr_number}`);
-      } else if (live.state === 'merged') {
+      } else if (!closedPrStateUnverified && live.state === 'merged') {
         const mergedAt = live.mergedAt || failureAt;
         statements.markClosedReviewingMerged.run(live.mergedAt, mergedAt, row.repo, row.pr_number);
         row = { ...row, pr_state: 'merged', merged_at: mergedAt, closed_at: null };
         terminalState = 'merged';
         terminalConfirmed = true;
-      } else if (live.state === 'closed') {
+      } else if (!closedPrStateUnverified && live.state === 'closed') {
         terminalConfirmed = true;
-      } else {
+      } else if (!closedPrStateUnverified) {
         log.warn(`[watcher] reviewer_reattach_closed_pr_state_unverified repo=${row.repo} pr=${row.pr_number} state=${live.state || 'unknown'}`);
-        continue;
+        closedPrStateUnverified = true;
       }
+    }
+    if (closedPrStateUnverified) {
+      // An unreadable PR cannot be safely classified as terminal. Keep a live
+      // reviewer through its lease, but do not let a permanent GitHub failure
+      // pin the scarce credential slot forever after that lease expires.
+      const startedAtMs = parseTime(row.reviewer_started_at) ?? parseTime(row.last_attempted_at);
+      const leaseExpiresAtMs = parseTime(row.reviewer_lease_expires_at)
+        ?? (startedAtMs === null ? null : startedAtMs + reviewerRunTimeoutMs(row, reviewerDeadlineMs));
+      if (leaseExpiresAtMs === null || now.getTime() < leaseExpiresAtMs) continue;
+
+      let pgid = parsePositiveInteger(row.reviewer_pgid);
+      if (pgid === null && row.reviewer_session_uuid && typeof findReviewerProcess === 'function') {
+        pgid = parsePositiveInteger(findReviewerProcess(row.reviewer_session_uuid)?.pgid);
+      }
+      let killSent = false;
+      if (pgid !== null) {
+        const sessionRow = { ...row, reviewer_pgid: pgid };
+        const sessionProbe = typeof probeSession === 'function'
+          ? probeSession(sessionRow)
+          : probeReviewerSession({ pgid, sessionUuid: row.reviewer_session_uuid, probeAlive });
+        const alive = typeof sessionProbe === 'boolean' ? sessionProbe : sessionProbe?.alive === true;
+        const matched = typeof sessionProbe === 'boolean' ? sessionProbe : sessionProbe?.matched === true;
+        if (alive && matched) killSent = killProcessGroup(pgid, 'SIGKILL');
+      }
+      await onTerminalDeadSession({
+        row,
+        state: 'failed',
+        settledAt: failureAt,
+        reason: 'closed-pr-state-unverified-lease-expired',
+      });
+      markStickyOrphan({
+        statements,
+        row,
+        failureAt,
+        message: `${PROBE_FAILURE_MESSAGE} Closed PR state remained unverified after reviewer lease expiry.`,
+        log,
+        event: 'reviewer_reattach_closed_pr_unverified_lease_expired',
+      });
+      log.warn(`[watcher] reviewer_reattach_closed_pr_unverified_cleanup repo=${row.repo} pr=${row.pr_number} pgid=${pgid || 'unknown'} kill_sent=${killSent ? 'true' : 'false'}`);
+      continue;
     }
     if (terminalConfirmed) {
       const settledAt = (terminalState === 'merged' ? row.merged_at : row.closed_at) || failureAt;

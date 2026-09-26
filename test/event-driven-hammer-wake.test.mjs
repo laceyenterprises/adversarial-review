@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -8,6 +8,7 @@ import {
   hammerWakeAuditDir,
   hammerWakeAuditPath,
   requestEligibleHammerWake,
+  sweepHammerWakeAudits,
 } from '../src/hammer-wake.mjs';
 import { collectReviewPipelineHealth } from '../src/review-pipeline-health.mjs';
 
@@ -158,6 +159,104 @@ test('wake-path failure is retryable without allowing duplicate successful wakes
   assert.equal(retried.outcome, 'requested');
   assert.equal(duplicate.outcome, 'duplicate');
   assert.equal(calls.length, 1);
+});
+
+test('stale reserved wake reservation is recovered by a later caller', () => {
+  const rootDir = root();
+  const calls = [];
+  const dir = hammerWakeAuditDir(rootDir);
+  const nowMs = Date.now();
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(hammerWakeAuditPath(rootDir, identity), `${JSON.stringify({
+    schemaVersion: 1,
+    event: 'hammer_wake',
+    ...identity,
+    observedAt: new Date(nowMs - 11 * 60 * 1000).toISOString(),
+    outcome: 'reserved',
+    route: 'watcher-ama-merge-authority',
+  }, null, 2)}\n`);
+
+  const recovered = requestEligibleHammerWake({
+    rootDir,
+    ...identity,
+    eligibility: { eligible: true, reasons: [] },
+    observedAt: new Date(nowMs).toISOString(),
+    nowMs,
+    requestWatcherWakeImpl: wakeImpl(calls),
+    log: { log() {} },
+  });
+  const audit = JSON.parse(readFileSync(hammerWakeAuditPath(rootDir, identity), 'utf8'));
+
+  assert.equal(recovered.outcome, 'requested');
+  assert.equal(audit.outcome, 'requested');
+  assert.equal(calls.length, 1);
+  assert.ok(readdirSync(dir).some((name) => name.includes('.retry-')));
+});
+
+test('malformed reservation time recovers from the audit file mtime', () => {
+  const rootDir = root();
+  const dir = hammerWakeAuditDir(rootDir);
+  const nowMs = Date.now();
+  mkdirSync(dir, { recursive: true });
+  const path = hammerWakeAuditPath(rootDir, identity);
+  writeFileSync(path, `${JSON.stringify({
+    schemaVersion: 1,
+    event: 'hammer_wake',
+    ...identity,
+    observedAt: 'invalid-time',
+    outcome: 'reserved',
+  })}\n`);
+  const staleTime = new Date(nowMs - 11 * 60 * 1000);
+  utimesSync(path, staleTime, staleTime);
+
+  const calls = [];
+  const recovered = requestEligibleHammerWake({
+    rootDir,
+    ...identity,
+    eligibility: { eligible: true, reasons: [] },
+    nowMs,
+    requestWatcherWakeImpl: wakeImpl(calls),
+    log: { log() {} },
+  });
+  assert.equal(recovered.outcome, 'requested');
+  assert.equal(calls.length, 1);
+  assert.ok(readdirSync(dir).some((name) => name.includes('.retry-')));
+});
+
+test('retry archives remain inside the age and file-count retention bounds', () => {
+  const rootDir = root();
+  const args = {
+    rootDir,
+    ...identity,
+    eligibility: { eligible: true, reasons: [] },
+    requestWatcherWakeImpl: () => { throw new Error('watcher unavailable'); },
+    log: { log() {} },
+  };
+  assert.equal(requestEligibleHammerWake(args).outcome, 'failed');
+  assert.equal(requestEligibleHammerWake(args).outcome, 'failed');
+  const dir = hammerWakeAuditDir(rootDir);
+  const archives = readdirSync(dir).filter((name) => name.includes('.retry-'));
+  assert.ok(archives.length > 0);
+  assert.ok(archives.every((name) => name.endsWith('.json')));
+  const health = collectReviewPipelineHealth({ rootDir, config: { hostChecksEnabled: false } });
+  assert.equal(health.hammerWakes.recent.length, 1);
+
+  const oldTime = new Date('2026-01-01T00:00:00.000Z');
+  for (const name of archives) utimesSync(join(dir, name), oldTime, oldTime);
+  const swept = sweepHammerWakeAudits(rootDir, {
+    nowMs: Date.parse('2026-02-02T00:00:00.000Z'),
+    maxAgeMs: 30 * 24 * 60 * 60 * 1000,
+    maxFiles: 1,
+  });
+  assert.ok(swept.removed >= archives.length);
+  assert.equal(readdirSync(dir).length, 1);
+
+  for (let index = 0; index < 3; index += 1) {
+    writeFileSync(join(dir, `manual.retry-${index}.json`), '{}\n');
+  }
+  const countBound = sweepHammerWakeAudits(rootDir, { maxAgeMs: Infinity, maxFiles: 1 });
+  assert.equal(countBound.removed, 3);
+  assert.equal(countBound.retained, 1);
 });
 
 test('health surface parses only the newest hammer wake audit files', () => {

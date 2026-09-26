@@ -5714,7 +5714,7 @@ function collectReviewPipelineHealth({
     const recentHammerWakes = (() => {
       try {
         return readdirSync(hammerWakeDir)
-          .filter((name) => name.endsWith('.json'))
+          .filter((name) => name.endsWith('.json') && !/\.(?:retry|failed)-[a-f0-9]{12}\.json$/.test(name))
           .map((name) => {
             const path = join(hammerWakeDir, name);
             const stat = statSync(path);

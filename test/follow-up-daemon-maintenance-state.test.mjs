@@ -9,6 +9,7 @@ import {
   REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS_ENV,
   normalizeMaintenanceSweepState,
   readMaintenanceSweepState,
+  resolveDaemonMaxConcurrentJobs,
   runFollowUpDaemonIteration,
   resolveRemediationWorkerTokenMinLifetimeMs,
   resolveTelemetryListenerStartTimeoutMs,
@@ -18,8 +19,11 @@ import {
   sleepForNextFollowUpDaemonIteration,
   startFollowUpTelemetryListener,
   writeMaintenanceSweepState,
+  writeConfigSignatureStatus,
 } from '../scripts/adversarial-follow-up-daemon.mjs';
+import { resetConfigCache } from '../src/config-loader.mjs';
 import { createHandoffRateLimiter, HANDOFF_RATE_CAP_AUDIT_EVENT } from '../src/handoff-rate-cap.mjs';
+import { summarizeConfigSignatureDrift } from '../src/review-pipeline-health.mjs';
 
 function makeTempDir(t) {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-daemon-'));
@@ -397,8 +401,10 @@ test('follow-up daemon kill-switch disabled uses timer sleep instead of wake wai
 
 test('follow-up daemon iteration preserves reconcile and closer reaper on wake-driven passes', async () => {
   const calls = [];
+  let observedMaxConcurrent = null;
 
   await runFollowUpDaemonIteration({
+    env: {},
     refreshFollowUpGithubTokenImpl: async () => {
       calls.push('github-token-refresh');
       return { refreshed: true };
@@ -454,7 +460,10 @@ test('follow-up daemon iteration preserves reconcile and closer reaper on wake-d
       }));
       return 0;
     },
-    consumeFollowUpJobsUntilCapacityImpl: async () => {
+    resolveMaxConcurrentJobsImpl: () => 8,
+    writeConfigSignatureStatusImpl: () => null,
+    consumeFollowUpJobsUntilCapacityImpl: async ({ maxConcurrent }) => {
+      observedMaxConcurrent = maxConcurrent;
       calls.push('consume');
       return {
         maxConcurrent: 1,
@@ -490,6 +499,8 @@ test('follow-up daemon iteration preserves reconcile and closer reaper on wake-d
     shouldStop: () => false,
   });
 
+  assert.equal(observedMaxConcurrent, 8, 'each daemon iteration must pass the freshly resolved cap');
+
   assert.ok(calls.indexOf('github-token-refresh') > -1);
   assert.ok(calls.indexOf('github-token-refresh') < calls.indexOf('reconcile'));
   assert.ok(calls.indexOf('reconcile') > -1);
@@ -500,6 +511,148 @@ test('follow-up daemon iteration preserves reconcile and closer reaper on wake-d
   assert.deepEqual(calls[stuckApplyIndex][1].slice(0, 3), ['--apply', '--json', '--root-dir']);
   assert.ok(calls.indexOf('closer-worktree-reap') > calls.indexOf('consume'));
   assert.ok(calls.indexOf('retry-comments') > calls.indexOf('closer-worktree-reap'));
+});
+
+test('follow-up daemon iteration keeps config drift after per-tick cache reset', async (t) => {
+  const rootDir = makeTempDir(t);
+  const hqRoot = path.join(rootDir, 'hq');
+  const configPath = path.join(rootDir, 'config.yaml');
+  const env = {
+    ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: '',
+    AGENT_OS_CONFIG_PATH: configPath,
+    HQ_ROOT: hqRoot,
+  };
+  const calls = [];
+
+  t.after(() => resetConfigCache());
+
+  writeFileSync(configPath, `version: 1
+remediation:
+  max_concurrent_jobs: 2
+  max_concurrent_jobs_ceiling: 5
+`);
+  assert.equal(resolveDaemonMaxConcurrentJobs(env), 2);
+  writeFileSync(configPath, `version: 1
+remediation:
+  max_concurrent_jobs: [
+`);
+
+  let nowIso = '2026-05-25T17:49:00.000Z';
+  const iterationOptions = () => ({
+    env,
+    writeConfigSignatureStatusImpl: (args) => writeConfigSignatureStatus({
+      ...args,
+      now: () => new Date(nowIso),
+    }),
+    refreshFollowUpGithubTokenImpl: async () => {
+      calls.push('github-token-refresh');
+      return { refreshed: true };
+    },
+    refreshReviewerBrokerTokensImpl: async () => ({ handoffSafe: [] }),
+    reconcileInProgressFollowUpJobsImpl: async () => {
+      calls.push('reconcile');
+      resetConfigCache();
+    },
+    emitHeartbeatsForActiveJobsImpl: () => {
+      calls.push('heartbeat');
+      return { scanned: 0, touched: 0, skipped: 0 };
+    },
+    sweepStuckInProgressClaimsImpl: () => {
+      calls.push('stale-claim-sweep');
+      return {
+        scanned: 0,
+        reclaimed: 0,
+        skipped: 0,
+        thresholdMs: 1,
+        signalled: 0,
+        signalFailed: 0,
+        signalSkipped: 0,
+      };
+    },
+    reapFinishedPrFollowUpJobsImpl: () => {
+      calls.push('reap-finished-pr');
+      return {
+        scanned: 0,
+        reaped: 0,
+        released: 0,
+        amaScanned: 0,
+        amaReleased: 0,
+        skippedOpen: 0,
+        skippedUnreadable: 0,
+        skippedAliveWorker: 0,
+        skippedFreshAmaDispatch: 0,
+        skippedNoTarget: 0,
+        skippedCapped: 0,
+        prLookups: 0,
+        lookupCapHit: false,
+        reapedPrs: [],
+        releasedPrs: [],
+        amaReleasedPrs: [],
+      };
+    },
+    diagnoseStuckRereviewImpl: (_args, io) => {
+      calls.push('stuck-rereview-apply');
+      io.stdout.write(JSON.stringify({
+        totalCandidates: 0,
+        stuckCount: 0,
+        appliedCount: 0,
+        failedApplyCount: 0,
+      }));
+      return 0;
+    },
+    consumeFollowUpJobsUntilCapacityImpl: async () => {
+      calls.push('consume');
+      throw new Error('consume should be skipped when capacity cannot resolve');
+    },
+    reapCloserHammerWorktreesImpl: async () => {
+      calls.push('closer-worktree-reap');
+      return {
+        scanned: 0,
+        reaped: 0,
+        skipped: 0,
+        terminal: 0,
+        prunable: 0,
+        halfRegistered: 0,
+        open: 0,
+        unknown: 0,
+        errors: 0,
+        limit: 0,
+      };
+    },
+    retryFailedCommentDeliveriesImpl: () => {
+      calls.push('retry-comments');
+    },
+    runStoppedArchiveSweepIfDueImpl: async () => {
+      calls.push('maintenance-sweep');
+    },
+    shouldStop: () => false,
+  });
+
+  await runFollowUpDaemonIteration(iterationOptions());
+  const firstStatus = JSON.parse(
+    readFileSync(path.join(hqRoot, '.adversarial-follow-up', 'config-status.json'), 'utf8')
+  );
+
+  nowIso = '2026-05-25T17:51:00.000Z';
+  await runFollowUpDaemonIteration(iterationOptions());
+
+  const status = JSON.parse(
+    readFileSync(path.join(hqRoot, '.adversarial-follow-up', 'config-status.json'), 'utf8')
+  );
+  assert.equal(status.inSync, false);
+  assert.equal(status.driftSince, firstStatus.driftSince);
+  assert.ok(status.loadedSignature);
+  assert.ok(status.diskSignature);
+  assert.notEqual(status.loadedSignature, status.diskSignature);
+  const drift = summarizeConfigSignatureDrift(hqRoot, {
+    nowMs: Date.parse('2026-05-25T17:59:00.001Z'),
+  });
+  assert.equal(drift.alarmed.length, 1);
+  assert.equal(drift.alarmed[0].daemon, 'adversarial-follow-up');
+  assert.ok(calls.includes('reconcile'));
+  assert.ok(calls.includes('heartbeat'));
+  assert.ok(calls.includes('retry-comments'));
+  assert.equal(calls.includes('consume'), false);
 });
 
 test('follow-up wake storm on one head does not starve another PR head', async (t) => {

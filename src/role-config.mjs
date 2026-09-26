@@ -175,7 +175,7 @@ const ROLE_ENV_NAMES_TO_BLANK_PRUNE = new Set([
   'ADVERSARIAL_REVIEW_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS',
 ]);
 
-function pruneBlankRoleEnvVars(env) {
+export function pruneBlankRoleEnvVars(env) {
   let pruned = null;
   for (const name of ROLE_ENV_NAMES_TO_BLANK_PRUNE) {
     if (Object.prototype.hasOwnProperty.call(env, name)) {
@@ -202,9 +202,9 @@ function pruneBlankRoleEnvVars(env) {
 // through `loadConfigCached` in `config-loader.mjs`. That keeps cache
 // slots per (topPath, modulePaths, declared env aliases) shape and
 // invalidates when any watched file (top + top.local + each module +
-// each module.local) changes mtime/inode. Callers still reset at their
-// per-tick / per-job boundary, but explicit env overlays now get their
-// own cache slots so aliases and conflict checks remain env-scoped.
+// each module.local) changes mtime/inode/size/content signature. Callers
+// still reset at their per-tick / per-job boundary, but explicit env overlays
+// now get their own cache slots so aliases and conflict checks remain env-scoped.
 // This is the documented contract from CFG-09 (`LOADER-CONTRACT.md`
 // §Cache invalidation), not a regression of the failed naive cache
 // attempted in the CFG-02 round-1 remediation.

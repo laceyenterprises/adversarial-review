@@ -23,6 +23,7 @@
 // agent-os side so the divergences narrow back to zero.
 
 import { readFileSync, existsSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, basename, join } from 'node:path';
 import { homedir } from 'node:os';
 import { isDeepStrictEqual } from 'node:util';
@@ -5609,9 +5610,14 @@ function _currentSignature({ topPath, modulePaths, env }) {
   for (const path of watched) {
     try {
       const st = statSync(path);
-      parts.push(`${path}|${st.mtimeMs}|${st.ino}`);
+      // CFGSTALE-01: metadata alone is not a content identity. Restore tools
+      // can write in place and restore the original timestamps, leaving both
+      // inode and mtime unchanged while the bytes differ. Hash the bytes so a
+      // long-lived daemon cannot retain the pre-restore config indefinitely.
+      const digest = createHash('sha256').update(readFileSync(path)).digest('hex');
+      parts.push(`${path}|${st.mtimeMs}|${st.ino}|${st.size}|${digest}`);
     } catch {
-      parts.push(`${path}|null|null`);
+      parts.push(`${path}|null|null|null|null`);
     }
   }
   return parts.join('::');
@@ -5710,4 +5716,16 @@ export function resolutionTrace(key) {
 export function resetConfigCache() {
   _configCache.clear();
   _configSignatures.clear();
+}
+
+export function configSignatureStatus({ topPath, modulePaths, env } = {}) {
+  const cacheKey = _cacheKeyFor({ topPath, modulePaths, env });
+  const diskSignature = _currentSignature({ topPath, modulePaths, env });
+  const loadedSignature = _configSignatures.get(cacheKey) ?? null;
+  return {
+    algorithm: 'sha256',
+    loadedSignature,
+    diskSignature,
+    inSync: loadedSignature === null ? null : loadedSignature === diskSignature,
+  };
 }

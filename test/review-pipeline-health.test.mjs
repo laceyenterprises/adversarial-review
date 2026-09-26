@@ -27,10 +27,12 @@ import {
   evaluateReviewPipelineFindings,
   renderReviewPipelinePrometheus,
   summarizeFirstPassCiOrphans,
+  summarizeConfigSignatureDrift,
   summarizeRoundBudgetAnomalies,
   resolveReviewPipelineHealthConfig,
   stoppedJobIsCiRegressionStopped,
 } from '../src/review-pipeline-health.mjs';
+
 import { PROVIDER_OVERLOADED_FAILURE_CLASS } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS } from '../src/quota-exhaustion.mjs';
 import { parseArgs } from '../src/review-pipeline-health-cli.mjs';
@@ -79,6 +81,27 @@ function producerShapedCiRegressionStopReason({
 function tempRoot() {
   return mkdtempSync(path.join(tmpdir(), 'review-pipeline-health-'));
 }
+
+test('CFGSTALE-01 config drift alarms only after ten minutes', () => {
+  const hqRoot = tempRoot();
+  try {
+    const statusDir = path.join(hqRoot, '.adversarial-follow-up');
+    mkdirSync(statusDir, { recursive: true });
+    writeFileSync(path.join(statusDir, 'config-status.json'), JSON.stringify({
+      observedAt: '2026-05-25T17:49:00.000Z',
+      driftSince: '2026-05-25T17:49:00.000Z',
+      loadedSignature: 'sha256:old',
+      diskSignature: 'sha256:new',
+      inSync: false,
+    }));
+
+    const summary = summarizeConfigSignatureDrift(hqRoot, { nowMs: Date.parse(NOW) });
+    assert.equal(summary.alarmed.length, 1);
+    assert.equal(summary.alarmed[0].daemon, 'adversarial-follow-up');
+  } finally {
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
 
 function launchctlPrintError({ message = 'launchctl print failed', stdout = '', stderr = '' } = {}) {
   const error = new Error(message);

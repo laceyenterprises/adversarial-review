@@ -40,6 +40,26 @@ import { hammerWakeAuditDir, readHammerWakeAudit } from './hammer-wake.mjs';
 import { summarizeReviewerBurst } from './reviewer-burst-lease.mjs';
 
 const DEFAULT_REVIEWER_DEATH_RATE_WINDOW_MS = 60 * 60 * 1000;
+const CONFIG_DRIFT_ALARM_MS = 10 * 60 * 1000;
+
+function summarizeConfigSignatureDrift(hqRoot, { nowMs }) {
+  const candidates = [
+    ['adversarial-follow-up', join(hqRoot, '.adversarial-follow-up', 'config-status.json')],
+  ];
+  const daemons = candidates.map(([daemon, path]) => {
+    try {
+      const raw = JSON.parse(readFileSync(path, 'utf8'));
+      const status = raw;
+      const observedMs = Date.parse(status?.driftSince || status?.observedAt || '') || statSync(path).mtimeMs;
+      const inSync = status?.inSync ?? null;
+      const driftMs = inSync === false ? Math.max(0, nowMs - observedMs) : 0;
+      return { daemon, path, ...status, driftMs, alarm: driftMs > CONFIG_DRIFT_ALARM_MS };
+    } catch (err) {
+      return { daemon, path, loadedSignature: null, diskSignature: null, inSync: null, driftMs: 0, alarm: false, error: err?.message || String(err) };
+    }
+  });
+  return { thresholdMs: CONFIG_DRIFT_ALARM_MS, daemons, alarmed: daemons.filter((entry) => entry.alarm) };
+}
 const DEFAULT_REVIEWER_DEATH_RATE_THRESHOLD = 0.5;
 const DEFAULT_REVIEWER_DEATH_RATE_MIN_ATTEMPTS = 3;
 const DEFAULT_REVIEWER_SILENCE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
@@ -575,6 +595,14 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     thresholdKey: null,
     defaultThreshold: null,
     thresholdDescription: 'remediation round count exceeds the risk-class budget or final-pass awaiting-rereview persists after budget exhaustion',
+  },
+  {
+    code: 'review:config_signature_drift',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: null,
+    defaultThreshold: CONFIG_DRIFT_ALARM_MS,
+    thresholdDescription: 'a long-lived daemon loaded signature differs from disk for more than 10 minutes',
   },
   {
     code: 'review:daemon_liveness',
@@ -4311,6 +4339,21 @@ function buildFinding({ code, tier, subject, message, evidence, recommendedActio
 
 function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
   const findings = [];
+
+  for (const drift of snapshot.configSignatureDrift?.alarmed || []) {
+    findings.push(buildFinding({
+      code: 'review:config_signature_drift',
+      tier: 'ticket',
+      subject: `${drift.daemon} has used stale config for more than 10 minutes`,
+      message: `Loaded config signature differs from disk for ${Math.round(drift.driftMs / 60000)} minute(s).`,
+      evidence: [
+        `${drift.path} loaded=${drift.loadedSignature || 'unknown'} disk=${drift.diskSignature || 'unknown'}`,
+      ],
+      recommendedAction: 'Inspect the daemon config-refresh path; restart only as immediate containment after preserving the stale-signature evidence.',
+      observedAt,
+      details: drift,
+    }));
+  }
   const { config } = snapshot;
 
   // An ABSENT ledger is reported alongside an unreadable one. Previously this
@@ -5742,6 +5785,7 @@ function collectReviewPipelineHealth({
     const dagAutowalk = config.hostChecksEnabled
       ? summarizeDagAutowalkHealth({ env, hqRoot, nowMs, config, launchd })
       : { hqRoot, label: null, loaded: true, lastExitCode: 0, errLogPath: null, outLogPath: null, logAgeMs: null, thresholdMs: config.dagAutowalkMaxLogAgeMs, healthy: true };
+    const configSignatureDrift = summarizeConfigSignatureDrift(hqRoot, { nowMs });
     const snapshot = {
       observedAt,
       rootDir,
@@ -5789,6 +5833,7 @@ function collectReviewPipelineHealth({
       hammerDispatchStall,
       hammerWakes: { auditDir: hammerWakeDir, recent: recentHammerWakes },
       dagAutowalk,
+      configSignatureDrift,
     };
     const findings = evaluateReviewPipelineFindings(snapshot, { observedAt });
     return {
@@ -6062,4 +6107,5 @@ export {
   stoppedJobIsCiRegressionStopped,
   summarizeZombieReviewerPasses,
   summarizeReviewerSlots,
+  summarizeConfigSignatureDrift,
 };

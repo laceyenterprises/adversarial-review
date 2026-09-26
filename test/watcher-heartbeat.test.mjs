@@ -93,6 +93,31 @@ test('watcher heartbeat persists poll counter and review timestamps', async () =
   }
 });
 
+test('watcher heartbeat includes live status-provider fields on every event', async () => {
+  const rootDir = tempRoot();
+  try {
+    const heartbeat = createWatcherHeartbeat({
+      rootDir,
+      statusProvider: () => ({
+        detached_reviewer_dispatches: [{
+          repo: 'laceyenterprises/agent-os',
+          pr: 6980,
+          model: 'gemini',
+          started_at: '2026-09-25T19:29:53.000Z',
+        }],
+      }),
+      logger: { warn() {} },
+    });
+
+    heartbeat.markPoll({ source: 'test' });
+    const persisted = readJson(watcherHeartbeatPath(rootDir));
+    assert.equal(persisted.detached_reviewer_dispatches[0].pr, 6980);
+    assert.equal(persisted.detached_reviewer_dispatches[0].model, 'gemini');
+  } finally {
+    cleanup(rootDir);
+  }
+});
+
 test('watcher heartbeat debounces review persistence within a tick', async () => {
   const rootDir = tempRoot();
   const writes = [];

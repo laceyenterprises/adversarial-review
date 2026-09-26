@@ -4,6 +4,7 @@ import {
   readMemoryPressureSample,
 } from './watcher-memory-pressure.mjs';
 import { loadRoleConfig } from './role-config.mjs';
+import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 
 const DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX = 6;
 const MAX_FIRST_PASS_REVIEWER_POOL_MAX = 12;
@@ -13,6 +14,7 @@ const DEFAULT_REVIEW_LANE_FIRST_PASS_URGENT_AGE_MS = 5 * 60 * 1000;
 const DEFAULT_REVIEWER_MEMORY_SAMPLE_TTL_MS = 120_000;
 const DEFAULT_REVIEWER_DISPATCH_WAIT_WARN_MS = 15 * 60 * 1000;
 const DEFAULT_SINGLE_WAVE_SETTLE_GRACE_MS = 1000;
+const DEFAULT_DETACHED_REVIEWER_DISPATCH_GRACE_MS = 60 * 1000;
 const DEFAULT_REVIEWER_MEMORY_PRESSURE_CONFIG = Object.freeze({
   projectedHeadroomFloorMb: 1024,
   elevatedAvailableMb: 2048,
@@ -804,17 +806,59 @@ function summarizeDeferredReviewerReasons(deferredReasons = []) {
   return [...counts.entries()].map(([reason, count]) => `${reason}:${count}`).join(',');
 }
 
-function createDetachedReviewerDispatchTracker({ activeReviewerSpawns } = {}) {
+function createDetachedReviewerDispatchTracker({
+  activeReviewerSpawns,
+  timeoutMs = resolveReviewerTimeoutMs(),
+  graceMs = DEFAULT_DETACHED_REVIEWER_DISPATCH_GRACE_MS,
+  now = () => Date.now(),
+  isProcessAlive = null,
+  logger = console,
+} = {}) {
   const detachedReviewerDispatches = new Map();
+  const expiryMs = Math.max(0, Number(timeoutMs) || resolveReviewerTimeoutMs())
+    + Math.max(0, Number(graceMs) || 0);
+
+  function knownPid(record) {
+    const value = record?.candidate?.pid ?? record?.candidate?.reviewerPid;
+    const pid = Number(value);
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  }
+
+  function pruneAndList() {
+    const nowMs = now();
+    const live = [];
+    for (const [token, record] of detachedReviewerDispatches.entries()) {
+      const pid = knownPid(record);
+      const expired = nowMs - record.startedAt > expiryMs;
+      const processGone = pid !== null && typeof isProcessAlive === 'function' && !isProcessAlive(pid);
+      if (expired || processGone) {
+        detachedReviewerDispatches.delete(token);
+        logger?.warn?.(JSON.stringify({
+          event: 'detached_reviewer_dispatch_expired',
+          repo: record.repo,
+          pr: record.prNumber,
+          model: record.reviewerModel,
+          reason: processGone ? 'pid-gone' : 'timeout',
+          ...(pid === null ? {} : { pid }),
+          age_ms: Math.max(0, nowMs - record.startedAt),
+        }));
+        continue;
+      }
+      live.push(record);
+    }
+    return live;
+  }
+
   return {
     activeCounts() {
+      const liveDetached = pruneAndList();
       const counts = countActiveReviewerSpawnsByModel(activeReviewerSpawns);
       const registeredPrKeys = new Set();
       for (const record of activeReviewerSpawns?.values?.() || []) {
         const key = reviewerDispatchPrKey({ repo: record?.repo, prNumber: record?.pr });
         if (key) registeredPrKeys.add(key);
       }
-      for (const record of detachedReviewerDispatches.values()) {
+      for (const record of liveDetached) {
         const key = reviewerDispatchPrKey({ repo: record?.repo, prNumber: record?.prNumber });
         if (!key || registeredPrKeys.has(key)) continue;
         incrementReviewerModelCount(counts, record?.reviewerModel);
@@ -822,13 +866,27 @@ function createDetachedReviewerDispatchTracker({ activeReviewerSpawns } = {}) {
       }
       return counts;
     },
+    liveEntries() {
+      return pruneAndList().map((record) => {
+        const pid = knownPid(record);
+        return {
+          repo: record.repo,
+          pr: record.prNumber,
+          model: record.reviewerModel,
+          started_at: new Date(record.startedAt).toISOString(),
+          ...(pid === null ? {} : { pid }),
+        };
+      });
+    },
     track({ candidate, promise } = {}) {
       const repo = String(candidate?.repoPath || '').trim();
       const prNumber = Number(candidate?.prNumber);
       const reviewerModel = String(candidate?.reviewerModel || '').trim().toLowerCase();
       if (!repo || !Number.isFinite(prNumber) || !reviewerModel || !promise) return;
       const token = Symbol('detached-reviewer-dispatch');
-      detachedReviewerDispatches.set(token, { repo, prNumber, reviewerModel, candidate });
+      detachedReviewerDispatches.set(token, {
+        repo, prNumber, reviewerModel, candidate, startedAt: now(),
+      });
       Promise.resolve(promise)
         .finally(() => {
           detachedReviewerDispatches.delete(token);
@@ -1238,6 +1296,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
 
 export {
   DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX,
+  DEFAULT_DETACHED_REVIEWER_DISPATCH_GRACE_MS,
   DEFAULT_REVIEW_LANE_FIRST_PASS_BURST_LIMIT,
   DEFAULT_REVIEW_LANE_FIRST_PASS_URGENT_AGE_MS,
   DEFAULT_REVIEW_LANE_MIN_SHARE,

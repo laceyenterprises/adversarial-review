@@ -43,6 +43,7 @@ const REPO = 'acme/myrepo';
 const PR_NUMBER = 3116;
 const REVIEWED_HEAD = 'a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0';
 const ADVANCED_HEAD = 'b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1';
+const MERGE_COMMIT = 'c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2';
 const REVIEWED_HAMMER_WORKER_ID = `hammer-ama-pr-${PR_NUMBER}-${REVIEWED_HEAD.slice(0, 12)}`;
 const ADVANCED_HAMMER_WORKER_ID = `hammer-ama-pr-${PR_NUMBER}-${ADVANCED_HEAD.slice(0, 12)}`;
 const CURRENT_USER = userInfo().username || process.env.USER || process.env.LOGNAME || 'unknown';
@@ -1810,7 +1811,7 @@ test('fresh succeeded current-head hammer releases hold when merged-signal read 
   assert.equal(currentRecord.lastError, null);
 });
 
-test('fresh succeeded current-head hammer releases hold when direct PR merged-signal is known', async (t) => {
+test('fresh succeeded hammer accepts a producer-realistic merge-commit signal for its PR', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'hammer-success-direct-signal-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const hqRoot = join(rootDir, 'hq-root');
@@ -1871,11 +1872,17 @@ test('fresh succeeded current-head hammer releases hold when direct PR merged-si
         }
         return { stdout: JSON.stringify({ dispatchId: 'dispatch_retry', launchRequestId: 'lrq_retry' }), stderr: '' };
       },
-      readBuildCompletionSignalForPrImpl: () => ({
-        ok: true,
-        row: { signal_kind: 'merged', head_sha: ADVANCED_HEAD },
-        target: { repo: REPO, prNumber: PR_NUMBER },
-      }),
+      readBuildCompletionSignalForPrImpl: (args) => {
+        assert.equal(args.repo, REPO);
+        assert.equal(args.prNumber, PR_NUMBER);
+        assert.equal(args.signalKind, 'merged');
+        assert.equal(args.headSha, undefined, 'merge rows store merge commits, not reviewed PR heads');
+        return {
+          ok: true,
+          row: { repo: REPO, pr_number: PR_NUMBER, signal_kind: 'merged', head_sha: MERGE_COMMIT },
+          target: { repo: REPO, prNumber: PR_NUMBER },
+        };
+      },
       readBuildCompletionProducerEvidenceImpl: () => ({
         ok: false,
         reason: 'missing-build-completion-producer-evidence',
@@ -1885,6 +1892,8 @@ test('fresh succeeded current-head hammer releases hold when direct PR merged-si
 
   assert.equal(result.dispatched, false);
   assert.equal(result.reason, 'merged-signal-present');
+  assert.equal(result.mergedSignalHeadShaMatchesReviewed, false);
+  assert.equal(result.mergedSignalProducerHeadSha, MERGE_COMMIT);
   assert.equal(result.dispatchId, 'dispatch_current_head');
   assert.equal(result.launchRequestId, 'lrq_current_head');
   assert.equal(execCalls.filter((call) => call.args[0] === 'dispatch').length, 0);

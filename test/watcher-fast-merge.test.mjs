@@ -353,6 +353,7 @@ exit 1
         env: {
           ...process.env,
           GITHUB_TOKEN: 'fixture-token',
+          AGENT_OS_HQ_BIN: '/usr/bin/false',
           FML_WATCHER_SKIP_ENABLED: skipEnabled ? 'true' : 'false',
           PATH: `${tmp}${path.delimiter}${process.env.PATH || ''}`,
           AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'false',
@@ -721,7 +722,7 @@ exit 0
       const result = spawnSync('bash', ['scripts/create-fast-merge-labels.sh', REPO], {
         cwd: REPO_ROOT,
         encoding: 'utf8',
-        env: { ...process.env, PATH: `${tmp}${path.delimiter}${process.env.PATH || ''}` },
+        env: { ...process.env, PATH: `${tmp}${path.delimiter}${process.env.PATH || ''}`, AGENT_OS_HQ_BIN: '/usr/bin/false' },
       });
       assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
     }
@@ -754,7 +755,7 @@ exit 0
     const result = spawnSync('bash', ['scripts/create-fast-merge-labels.sh'], {
       cwd: REPO_ROOT,
       encoding: 'utf8',
-      env: { ...process.env, PATH: `${tmp}${path.delimiter}${process.env.PATH || ''}` },
+      env: { ...process.env, PATH: `${tmp}${path.delimiter}${process.env.PATH || ''}`, AGENT_OS_HQ_BIN: '/usr/bin/false' },
     });
     assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
     const log = readFileSync(logPath, 'utf8');

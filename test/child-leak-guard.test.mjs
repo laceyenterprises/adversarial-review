@@ -6,7 +6,8 @@ const guard = new URL('./helpers/child-leak-guard.mjs', import.meta.url).pathnam
 const fixture = new URL('./fixtures/leaked-child.test.mjs', import.meta.url).pathname;
 
 test('suite guard reports and kills a deliberately leaked process group', () => {
-  const { NODE_TEST_CONTEXT: _testContext, ...env } = process.env;
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
   const result = spawnSync(process.execPath, ['--import', guard, '--test', fixture], {
     encoding: 'utf8', timeout: 10_000, env,
   });

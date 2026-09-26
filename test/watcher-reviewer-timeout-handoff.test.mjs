@@ -254,6 +254,7 @@ test('watcher pollOnce routes reviewer-timeout exhaustion through merge-agent in
         env: {
           ...process.env,
           GITHUB_TOKEN: 'fixture-token',
+          AGENT_OS_HQ_BIN: '/usr/bin/false',
           ADVERSARIAL_AFH_REVIEWER_FALLBACK: 'false',
           FIXTURE_ORCHESTRATION_MODE: 'agentos',
         },
@@ -300,6 +301,7 @@ test('watcher pollOnce parks reviewer-timeout exhaustion when AMA is enabled wit
         env: {
           ...process.env,
           GITHUB_TOKEN: 'fixture-token',
+          AGENT_OS_HQ_BIN: '/usr/bin/false',
           ADVERSARIAL_AFH_REVIEWER_FALLBACK: 'false',
           FIXTURE_AMA_ENABLED: '1',
           FIXTURE_AMA_REASON: 'not-eligible',
@@ -342,6 +344,7 @@ test('watcher pollOnce recovers reviewer-timeout exhaustion when AMA dispatch fa
         env: {
           ...process.env,
           GITHUB_TOKEN: 'fixture-token',
+          AGENT_OS_HQ_BIN: '/usr/bin/false',
           ADVERSARIAL_AFH_REVIEWER_FALLBACK: 'false',
           FIXTURE_AMA_ENABLED: '1',
           FIXTURE_AMA_REASON: 'dispatch-failed',
@@ -385,6 +388,7 @@ test('watcher pollOnce uses the AMA operator-fallback env on reviewer-timeout ex
         env: {
           ...process.env,
           GITHUB_TOKEN: 'fixture-token',
+          AGENT_OS_HQ_BIN: '/usr/bin/false',
           ADVERSARIAL_AFH_REVIEWER_FALLBACK: 'false',
           FIXTURE_AMA_ENABLED: '1',
           FIXTURE_AMA_REASON: 'not-eligible',
@@ -431,6 +435,7 @@ test('watcher pollOnce honors a fresh timeout fallback request even when the tic
         env: {
           ...process.env,
           GITHUB_TOKEN: 'fixture-token',
+          AGENT_OS_HQ_BIN: '/usr/bin/false',
           ADVERSARIAL_AFH_REVIEWER_FALLBACK: 'false',
           FIXTURE_AMA_ENABLED: '1',
           FIXTURE_AMA_REASON: 'not-eligible',

@@ -154,7 +154,7 @@ The Grafana dashboard lives at
   guard and it bounds the burst even when cost telemetry is missing.
 - `review_pipeline_reviewer_burst_ttl_remaining_seconds`: seconds until the
   active lease decays back to steady-state capacity, `0` when no lease is
-  active. See `docs/reviewer-burst-lease.md`.
+  active. See `docs/data-model/reviewer-burst-lease.md`.
 - `review_pipeline_reviewer_slots`: current open `reviewed_prs` rows in
   reviewer-capacity states, grouped by `state`. The state vocabulary is:
   `active` for `reviewing` rows with a session UUID, pgid, and unexpired lease;

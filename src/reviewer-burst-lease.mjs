@@ -772,7 +772,17 @@ export function requestReviewerBurstLease({
     budgetUsd: budget,
     update,
   });
-  persistRecord(rootDir, record, { writeFileImpl, logger });
+  if (!persistRecord(rootDir, record, { writeFileImpl, logger })) {
+    return {
+      ok: false,
+      state: 'write-failed',
+      blockers: ['lease-write-failed'],
+      warnings: verdict.warnings,
+      lease: null,
+      record,
+      update,
+    };
+  }
   logEvent(logger, activated);
   return {
     ok: true,
@@ -822,7 +832,9 @@ export function revokeReviewerBurstLease({
     burstReviewsGranted: lease.usage?.burstReviewsGranted || 0,
     spendUsd: lease.usage?.spendUsd ?? null,
   });
-  persistRecord(rootDir, record, { writeFileImpl, logger });
+  if (!persistRecord(rootDir, record, { writeFileImpl, logger })) {
+    return { ok: false, state: 'write-failed', reason: 'lease-write-failed', record };
+  }
   logEvent(logger, event);
   return { ok: true, state: 'revoked', lease, record };
 }
@@ -1013,7 +1025,9 @@ export function createReviewerBurstController({
           record = expiry.record;
           state = expiry.state;
         } else {
-          persistRecord(rootDir, record, { writeFileImpl, logger });
+          if (!persistRecord(rootDir, record, { writeFileImpl, logger })) {
+            throw new Error('lease-write-failed');
+          }
         }
       }
       evaluated = { at, nowMs, state, lease: state.active ? record.lease : null };
@@ -1110,7 +1124,12 @@ export function createReviewerBurstController({
       lease.usage.byRepo[repoKey] = Number(lease.usage.byRepo[repoKey] || 0) + 1;
       lease.usage.byWorkerClass[to] = Number(lease.usage.byWorkerClass[to] || 0) + 1;
       record.updatedAt = current.at;
-      persistRecord(rootDir, record, { writeFileImpl, logger });
+      if (!persistRecord(rootDir, record, { writeFileImpl, logger })) {
+        logger?.error?.(
+          `[reviewer-burst-lease] CRITICAL: burst admission cannot be charged; refusing unaccounted review repo=${repo} pr=${prNumber}`
+        );
+        throw new Error('lease-write-failed: burst admission was not recorded');
+      }
       logger?.warn?.(
         `[reviewer-burst-lease] burst-admission lease_id=${lease.leaseId} repo=${repo} pr=${prNumber} `
         + `from=${fromWorkerClass} to=${to} `

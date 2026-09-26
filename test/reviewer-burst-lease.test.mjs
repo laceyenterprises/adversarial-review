@@ -42,7 +42,7 @@ import {
   resolveReviewerWorkerClassWithFallback,
 } from '../src/review-worker-class-fallback.mjs';
 import { resolveFirstPassReviewerPoolConfig } from '../src/watcher-reviewer-pool.mjs';
-import { burstMain, collectBurstQuotaSignal, parseDurationArg } from '../src/reviewer-burst-cli.mjs';
+import { burstMain, checkBurstMutationOwner, collectBurstQuotaSignal, parseDurationArg } from '../src/reviewer-burst-cli.mjs';
 import {
   collectReviewPipelineHealth,
   renderReviewPipelinePrometheus,
@@ -964,6 +964,70 @@ test('the quota signal asks the same entitled+available question routing will as
     execFileSyncImpl: () => { throw new Error('hq: command not found'); },
   });
   assert.equal(unreadable.readable, false);
+});
+
+test('a transient quota-status failure retries with bounded backoff', () => {
+  const env = { ...ENTITLED_ENV, ADVERSARIAL_REVIEW_WORKER_CLASS_FALLBACK: 'codex' };
+  let attempts = 0;
+  const waits = [];
+  const signal = collectBurstQuotaSignal({
+    env,
+    execFileSyncImpl: () => {
+      attempts += 1;
+      if (attempts < 3) throw Object.assign(new Error('temporary timeout'), { code: 'ETIMEDOUT' });
+      return JSON.stringify({ providerStatuses: CODEX_OK_CLAUDE_OK });
+    },
+    sleepImpl: (ms) => waits.push(ms),
+  });
+  assert.equal(signal.readable, true);
+  assert.equal(attempts, 3);
+  assert.deepEqual(waits, [100, 250]);
+});
+
+test('lease writes fail closed for activation, revoke, and admission', () => {
+  const root = tempRoot();
+  const failedWrite = () => { throw new Error('EACCES'); };
+  const activation = grantLease(root, { writeFileImpl: failedWrite });
+  assert.equal(activation.ok, false);
+  assert.deepEqual(activation.blockers, ['lease-write-failed']);
+  assert.equal(collectReviewerBurstStatus(root).active, false);
+
+  assert.equal(grantLease(root).ok, true);
+  const revoked = revokeReviewerBurstLease({
+    rootDir: root,
+    now: () => new Date(T0_MS + 1000),
+    writeFileImpl: failedWrite,
+    logger: silentLogger,
+  });
+  assert.equal(revoked.ok, false);
+  assert.equal(revoked.reason, 'lease-write-failed');
+  assert.equal(readReviewerBurstRecord(root).lease.state, 'active');
+
+  const controller = controllerAt(root, T0, { writeFileImpl: failedWrite });
+  assert.throws(
+    () => controller.recordBurstAdmission({ repo: REPO, prNumber: 1, toWorkerClass: 'codex' }),
+    /lease-write-failed/,
+  );
+  assert.equal(readReviewerBurstRecord(root).lease.usage.burstReviewsGranted, 0);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('CLI refuses a cross-user lease replacement before reading safety signals', async () => {
+  const root = tempRoot();
+  const ownership = checkBurstMutationOwner(root, { uid: process.getuid() + 1 });
+  assert.equal(ownership.ok, false);
+  let safetyRead = false;
+  const stderr = [];
+  const code = await burstMain(['request', '--root', root, '--repo', REPO, '--reason', 'demo'], {
+    stderr: { write: (chunk) => stderr.push(chunk) },
+    stdout: { write() {} },
+    ownerCheckImpl: () => ownership,
+    collectHealthImpl: () => { safetyRead = true; return {}; },
+  });
+  assert.equal(code, 1);
+  assert.equal(safetyRead, false);
+  assert.match(stderr.join(''), /data owner/);
+  rmSync(root, { recursive: true, force: true });
 });
 
 test('the rendered status carries every field the SPEC mockup names', () => {

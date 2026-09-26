@@ -3,6 +3,14 @@
 **Source of truth:** `src/reviewer-burst-lease.mjs`, `src/reviewer-burst-cli.mjs`,
 and the lease record at `data/reviewer-burst-lease.json`.
 
+The canonical store entry is `reviewer-burst-lease` in
+`docs/data-model/catalog.json`. Its single JSON record has `schemaVersion: 1`,
+the current `lease`, bounded `history` and `events` arrays, and `updatedAt`.
+The lease carries scope (`repos`, `packs`), timestamps (`activatedAt`,
+`expiresAt`), granted slots, review and dollar budgets, and cumulative usage.
+The record's owner is the review daemon's data owner; request and revoke refuse
+cross-user writes rather than replacing its file under another UID.
+
 ## What this is
 
 The steady-state review posture is AGY-first and deliberately cheap: one

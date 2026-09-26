@@ -22,6 +22,8 @@
 //   4  runtime error (could not read the ledger the safety check needs)
 
 import { execFileSync } from 'node:child_process';
+import { existsSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -31,6 +33,7 @@ import {
   renderReviewerBurstStatus,
   requestReviewerBurstLease,
   revokeReviewerBurstLease,
+  reviewerBurstLeasePath,
 } from './reviewer-burst-lease.mjs';
 import { collectReviewPipelineHealth } from './review-pipeline-health.mjs';
 import {
@@ -50,6 +53,27 @@ const EXIT_OK = 0;
 const EXIT_REFUSED = 1;
 const EXIT_USAGE = 2;
 const EXIT_RUNTIME = 4;
+
+export function checkBurstMutationOwner(rootDir, {
+  uid = process.getuid?.(),
+  existsImpl = existsSync,
+  statImpl = statSync,
+} = {}) {
+  if (!Number.isInteger(uid)) return { ok: false, reason: 'caller uid is unavailable' };
+  const dataDir = join(rootDir, 'data');
+  const leasePath = reviewerBurstLeasePath(rootDir);
+  try {
+    for (const target of [dataDir, ...(existsImpl(leasePath) ? [leasePath] : [])]) {
+      const ownerUid = statImpl(target).uid;
+      if (ownerUid !== uid) {
+        return { ok: false, reason: `${target} is owned by uid ${ownerUid}; caller uid ${uid} cannot replace the owner-owned lease` };
+      }
+    }
+  } catch (err) {
+    return { ok: false, reason: `cannot verify lease owner: ${err?.message || err}` };
+  }
+  return { ok: true };
+}
 
 const USAGE = `\
 Usage:
@@ -71,6 +95,12 @@ exactly what this invocation passes, not a union with the previous ones.
 
 const DURATION_RE = /^(\d+(?:\.\d+)?)\s*(ms|s|m|h)?$/i;
 const DURATION_MULTIPLIER_MS = { ms: 1, s: 1000, m: 60_000, h: 3_600_000 };
+const QUOTA_RETRY_BACKOFF_MS = [100, 250];
+const TRANSIENT_QUOTA_ERROR = /ETIMEDOUT|EAGAIN|ECONNRESET|ECONNREFUSED|ENETUNREACH|timed?\s*out|temporar|status\s*[:=]?\s*5\d\d/i;
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
 
 export function parseDurationArg(value) {
   const match = DURATION_RE.exec(String(value || '').trim());
@@ -149,27 +179,36 @@ export function parseBurstArgs(argv) {
  */
 export function collectBurstQuotaSignal({
   env = process.env,
-  execFileSyncImpl,
+  execFileSyncImpl = execFileSync,
   hqPath = null,
+  sleepImpl = sleepSync,
 } = {}) {
   const fallbacks = reviewWorkerClassFallback(env).filter((candidate) => providerForQuotaHarness(candidate));
   if (fallbacks.length === 0) {
     return { readable: true, availableClasses: [], groundedClasses: [], reason: 'no-fallback-configured' };
   }
   let statuses;
-  try {
-    const stdout = execFileSyncImpl(hqPath || resolveHqPath(env), ['fleet', 'quota', 'status', '--json'], {
-      encoding: 'utf8',
-      timeout: 20_000,
-    });
-    statuses = parseHqFleetQuotaStatus(stdout);
-  } catch (err) {
-    return {
-      readable: false,
-      availableClasses: [],
-      groundedClasses: [],
-      reason: `fleet-quota-status-unavailable: ${err?.message || err}`,
-    };
+  for (let attempt = 0; attempt <= QUOTA_RETRY_BACKOFF_MS.length; attempt += 1) {
+    try {
+      const stdout = execFileSyncImpl(hqPath || resolveHqPath(env), ['fleet', 'quota', 'status', '--json'], {
+        encoding: 'utf8',
+        timeout: 20_000,
+      });
+      statuses = parseHqFleetQuotaStatus(stdout);
+      break;
+    } catch (err) {
+      const transient = TRANSIENT_QUOTA_ERROR.test(`${err?.code || ''} ${err?.message || err}`);
+      if (transient && attempt < QUOTA_RETRY_BACKOFF_MS.length) {
+        sleepImpl(QUOTA_RETRY_BACKOFF_MS[attempt]);
+        continue;
+      }
+      return {
+        readable: false,
+        availableClasses: [],
+        groundedClasses: [],
+        reason: `fleet-quota-status-unavailable: ${err?.message || err}`,
+      };
+    }
   }
   const availableClasses = [];
   const groundedClasses = [];
@@ -208,7 +247,12 @@ async function runStatus(options, { stdout }) {
   return EXIT_OK;
 }
 
-async function runRequest(options, { stdout, stderr, collectHealthImpl, collectQuotaImpl }) {
+async function runRequest(options, { stdout, stderr, collectHealthImpl, collectQuotaImpl, ownerCheckImpl }) {
+  const ownership = ownerCheckImpl(options.rootDir);
+  if (!ownership.ok) {
+    stderr.write(`error: ${ownership.reason}; run burst request as the data owner\n`);
+    return EXIT_REFUSED;
+  }
   let healthSnapshot;
   try {
     healthSnapshot = collectHealthImpl({ rootDir: options.rootDir });
@@ -258,7 +302,12 @@ async function runRequest(options, { stdout, stderr, collectHealthImpl, collectQ
   return EXIT_OK;
 }
 
-async function runRevoke(options, { stdout, stderr }) {
+async function runRevoke(options, { stdout, stderr, ownerCheckImpl }) {
+  const ownership = ownerCheckImpl(options.rootDir);
+  if (!ownership.ok) {
+    stderr.write(`error: ${ownership.reason}; run burst revoke as the data owner\n`);
+    return EXIT_REFUSED;
+  }
   const result = revokeReviewerBurstLease({
     rootDir: options.rootDir,
     reason: options.reason || 'operator-revoked',
@@ -287,6 +336,7 @@ export async function burstMain(argv, io = {}) {
   const collectHealthImpl = io.collectHealthImpl || collectReviewPipelineHealth;
   const collectQuotaImpl = io.collectQuotaImpl
     || ((args) => collectBurstQuotaSignal({ ...args, execFileSyncImpl: io.execFileSyncImpl || execFileSync }));
+  const ownerCheckImpl = io.ownerCheckImpl || checkBurstMutationOwner;
   let options;
   try {
     options = parseBurstArgs(argv);
@@ -301,9 +351,9 @@ export async function burstMain(argv, io = {}) {
   try {
     if (options.subcommand === 'status') return await runStatus(options, { stdout, stderr });
     if (options.subcommand === 'request') {
-      return await runRequest(options, { stdout, stderr, collectHealthImpl, collectQuotaImpl });
+      return await runRequest(options, { stdout, stderr, collectHealthImpl, collectQuotaImpl, ownerCheckImpl });
     }
-    if (options.subcommand === 'revoke') return await runRevoke(options, { stdout, stderr });
+    if (options.subcommand === 'revoke') return await runRevoke(options, { stdout, stderr, ownerCheckImpl });
   } catch (err) {
     stderr.write(`error: ${err?.message || err}\n`);
     return EXIT_RUNTIME;

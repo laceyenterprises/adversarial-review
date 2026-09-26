@@ -1980,9 +1980,15 @@ function summarizeOutage(db) {
     }
   }
   const active = rows.length > 0;
+  const startedAt = rows
+    .map((row) => row.failed_at || row.last_attempted_at || null)
+    .filter(Boolean)
+    .sort()[0] || null;
   return {
     active,
     reason: rows.length === 0 ? null : (reasons.size === 1 ? Array.from(reasons.keys())[0] : 'multiple'),
+    started_at: startedAt,
+    parked_pr_count: rows.length,
     reviews_paused: rows.length > 0,
     attempts_not_charged: rows.length,
     reasons: Array.from(reasons, ([reason, count]) => ({ reason, count }))
@@ -5735,6 +5741,8 @@ function collectReviewPipelineHealth({
       : {
           active: false,
           reason: null,
+          started_at: null,
+          parked_pr_count: 0,
           reviews_paused: false,
           attempts_not_charged: 0,
           reasons: [],

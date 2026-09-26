@@ -173,6 +173,7 @@ import {
   markOperatorDecisionRequiredAlerted,
   recordCascadeFailure,
   shouldBackoffReviewerSpawn,
+  shouldPauseReviewerModel,
 } from './reviewer-cascade.mjs';
 import { reconcileReviewerCommandFailedBeforeRetry } from './reviewer-command-failed-recovery.mjs';
 import {
@@ -2151,6 +2152,17 @@ export async function processReviewSubject(entry, ctx) {
             (activeFollowUp.jobId ? ` ${activeFollowUp.jobId}` : '') +
             ` is ${activeFollowUp.latestJobStatus}`
         );
+        return;
+      }
+      const credentialOutageGate = shouldPauseReviewerModel(ROOT, route.reviewerModel);
+      if (credentialOutageGate.paused) {
+        markWatcherSpawnDecision({
+          repo: repoPath,
+          pr_number: prNumber,
+          decision: 'reviewer-credential-outage-hold',
+          failure_class: 'oauth-broken',
+          next_retry_after: null,
+        });
         return;
       }
       const cascadeGate = shouldBackoffReviewerSpawn(ROOT, {

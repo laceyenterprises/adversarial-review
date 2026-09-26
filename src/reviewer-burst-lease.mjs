@@ -230,6 +230,7 @@ export function packTokensForSubject({
 function emptyUsage() {
   return {
     burstReviewsGranted: 0,
+    chargedSubjects: [],
     byRepo: {},
     byWorkerClass: {},
     spendUsd: null,
@@ -274,7 +275,13 @@ function normalizeLease(raw) {
     endedAt: raw.endedAt || null,
     endedReason: raw.endedReason ? String(raw.endedReason) : null,
     revokedBy: raw.revokedBy ? String(raw.revokedBy) : null,
-    usage: { ...emptyUsage(), ...usage },
+    usage: {
+      ...emptyUsage(),
+      ...usage,
+      chargedSubjects: Array.isArray(usage.chargedSubjects)
+        ? usage.chargedSubjects.filter((value) => typeof value === 'string')
+        : [],
+    },
   };
 }
 
@@ -1107,24 +1114,28 @@ export function createReviewerBurstController({
       };
     },
     /**
-     * Charge the lease for a burst-bought review. Call ONLY once a burst-driven
-     * fallback has actually been applied to a route — the operator is owed the
-     * number of non-primary reviews the lease BOUGHT, not the number it
-     * attempted.
+     * Reserve one review-count unit per routed PR head. A transient dispatch
+     * failure can re-enter routing on the next tick; the same head must not
+     * drain another unit before a reviewer pass exists.
      */
-    recordBurstAdmission({ repo = null, prNumber = null, fromWorkerClass = null, toWorkerClass = null } = {}) {
+    recordBurstAdmission({ repo = null, prNumber = null, headSha = null, fromWorkerClass = null, toWorkerClass = null } = {}) {
       const current = evaluate();
       const lease = current.lease;
       if (!lease) return false;
+      const repoKey = normalizeRepoScopeEntry(repo) || 'unknown';
+      const subjectKey = JSON.stringify([repoKey, String(prNumber ?? ''), String(headSha || '').toLowerCase()]);
+      if (lease.usage.chargedSubjects.includes(subjectKey)) return true;
       const granted = Number(lease.usage?.burstReviewsGranted || 0);
       if (lease.maxBurstReviews > 0 && granted >= lease.maxBurstReviews) return false;
       const to = normalizePackScopeEntry(toWorkerClass) || 'unknown';
-      const repoKey = normalizeRepoScopeEntry(repo) || 'unknown';
       lease.usage.burstReviewsGranted = granted + 1;
+      lease.usage.chargedSubjects.push(subjectKey);
       lease.usage.byRepo[repoKey] = Number(lease.usage.byRepo[repoKey] || 0) + 1;
       lease.usage.byWorkerClass[to] = Number(lease.usage.byWorkerClass[to] || 0) + 1;
       record.updatedAt = current.at;
       if (!persistRecord(rootDir, record, { writeFileImpl, logger })) {
+        evaluated = null;
+        record = null;
         logger?.error?.(
           `[reviewer-burst-lease] CRITICAL: burst admission cannot be charged; refusing unaccounted review repo=${repo} pr=${prNumber}`
         );

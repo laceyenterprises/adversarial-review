@@ -1631,13 +1631,13 @@ export async function processReviewSubject(entry, ctx) {
               toWorkerClass: rwfDecision.to,
             });
           }
-          // Same contract for the burst lease: charge the lease only for the
-          // reviews it actually BOUGHT, so its review cap and its audit trail
-          // both count landed spills rather than attempts.
+          // Reserve one burst review-count unit per routed PR head. A retry
+          // after a transient dispatch failure must reuse that reservation.
           if (rwfDecision.reason === 'burst-lease-pressure') {
             reviewerBurstController?.recordBurstAdmission?.({
               repo: repoPath,
               prNumber,
+              headSha: subject.headSha || subject.ref?.revisionRef || null,
               fromWorkerClass: rwfDecision.from,
               toWorkerClass: rwfDecision.to,
             });

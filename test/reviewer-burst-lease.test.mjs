@@ -582,6 +582,21 @@ test('the review-count cap bounds a burst even with no cost telemetry at all', (
   rmSync(root, { recursive: true, force: true });
 });
 
+test('a rerouted PR head consumes one burst review even after transient dispatch retries', () => {
+  const root = tempRoot();
+  grantLease(root, { slots: 1, maxBurstReviews: 3 });
+  const first = controllerAt(root, T0);
+  assert.equal(first.recordBurstAdmission({ repo: REPO, prNumber: 42, headSha: 'a'.repeat(40), toWorkerClass: 'codex' }), true);
+  const retry = controllerAt(root, new Date(T0_MS + 1000).toISOString());
+  assert.equal(retry.recordBurstAdmission({ repo: REPO, prNumber: 42, headSha: 'a'.repeat(40), toWorkerClass: 'codex' }), true);
+  assert.equal(readReviewerBurstRecord(root).lease.usage.burstReviewsGranted, 1);
+  assert.equal(retry.recordBurstAdmission({ repo: REPO, prNumber: 42, headSha: 'b'.repeat(40), toWorkerClass: 'codex' }), true);
+  const usage = readReviewerBurstRecord(root).lease.usage;
+  assert.equal(usage.burstReviewsGranted, 2);
+  assert.equal(usage.chargedSubjects.length, 2);
+  rmSync(root, { recursive: true, force: true });
+});
+
 test('the default review cap is derived from the granted slots, not the requested ones', () => {
   const root = tempRoot();
   const granted = grantLease(root, {
@@ -1009,6 +1024,26 @@ test('lease writes fail closed for activation, revoke, and admission', () => {
     /lease-write-failed/,
   );
   assert.equal(readReviewerBurstRecord(root).lease.usage.burstReviewsGranted, 0);
+  let failOnce = true;
+  const retryableController = controllerAt(root, T0, {
+    writeFileImpl: (filePath, data) => {
+      if (failOnce) {
+        failOnce = false;
+        throw new Error('temporary write failure');
+      }
+      writeFileSync(filePath, data);
+    },
+  });
+  assert.throws(
+    () => retryableController.recordBurstAdmission({ repo: REPO, prNumber: 2, headSha: 'c'.repeat(40), toWorkerClass: 'codex' }),
+    /lease-write-failed/,
+  );
+  assert.equal(
+    retryableController.recordBurstAdmission({ repo: REPO, prNumber: 2, headSha: 'c'.repeat(40), toWorkerClass: 'codex' }),
+    true,
+    'a failed write must not leave a cached dedupe key that permits an uncharged retry',
+  );
+  assert.equal(readReviewerBurstRecord(root).lease.usage.burstReviewsGranted, 1);
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -1104,6 +1139,7 @@ test('pollonce-phases passes burst pressure in and charges the lease back', () =
     /rwfDecision\.reason === 'burst-lease-pressure'\)\s*\{\s*reviewerBurstController\?\.recordBurstAdmission/,
     'the lease is charged only for a spill that actually landed on a route',
   );
+  assert.match(src, /recordBurstAdmission\?\.\(\{[^}]*headSha: subject\.headSha/s);
 });
 
 test('the health surface reports burst state, a metric, and a finding', () => {

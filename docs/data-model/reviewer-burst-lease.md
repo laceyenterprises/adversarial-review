@@ -8,6 +8,11 @@ The canonical store entry is `reviewer-burst-lease` in
 the current `lease`, bounded `history` and `events` arrays, and `updatedAt`.
 The lease carries scope (`repos`, `packs`), timestamps (`activatedAt`,
 `expiresAt`), granted slots, review and dollar budgets, and cumulative usage.
+`usage.chargedSubjects` stores a JSON-encoded `(repo, PR number, head SHA)` key
+for each review-count reservation. Re-entering routing for the same head after
+a transient dispatch failure leaves `burstReviewsGranted` unchanged; a new head
+can consume a new unit. Older records without this array load with an empty
+array and retain their existing cumulative count.
 The record's owner is the review daemon's data owner; request and revoke refuse
 cross-user writes rather than replacing its file under another UID.
 
@@ -98,9 +103,10 @@ change — the multi-loader-parity failure that crash-looped the watcher on
 
 Only one of them is always measurable, so there are two:
 
-- **Review count** (`maxBurstReviews`) — always enforceable. A lease can only
-  buy this many non-primary reviews, counted when a burst-driven fallback
-  actually lands on a route (not when one is merely attempted).
+- **Review count** (`maxBurstReviews`) — always enforceable. A lease reserves at
+  most one count unit per PR head when a burst-driven fallback lands on a route.
+  Repeated routing of that head does not consume more units after a transient
+  dispatch failure.
 - **Observed dollars** (`budgetUsd`) — checked against
   `reviewer_passes.token_cost_usd` for passes started at or after activation in
   the lease-scoped repos. This is the burst *window* cost in the burst *repos*,

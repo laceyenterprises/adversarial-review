@@ -281,6 +281,8 @@ test('stale closed row is restored when GitHub says the PR reopened', async () =
     now: new Date(FAILURE_AT),
     log,
     fetchLivePrState: async () => 'open',
+    fetchHeadSha: async () => HEAD_SHA,
+    findPostedReview: async () => null,
     probeSession: () => ({ alive: true, matched: true }),
     killProcessGroup: (pgid, signal) => { killed.push({ pgid, signal }); return true; },
   });
@@ -292,6 +294,37 @@ test('stale closed row is restored when GitHub says the PR reopened', async () =
   assert.equal(row.reviewer_session_uuid, 'session-70');
   assert.deepEqual(killed, []);
   assert.match(log.lines.join('\n'), /reviewer_reattach_reopened_pr_restored/);
+});
+
+test('reopened PR with a new head kills the stale reviewer and requeues review', async () => {
+  const db = setupDb();
+  seedReviewing(db, { prState: 'closed', closedAt: '2026-05-11T05:19:00.000Z' });
+  const killed = [];
+  const settled = [];
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    now: new Date(FAILURE_AT),
+    log: makeLog(),
+    fetchLivePrState: async () => 'open',
+    fetchHeadSha: async () => 'new-head-sha',
+    probeSession: () => ({ alive: true, matched: true }),
+    killProcessGroup: (pgid, signal) => { killed.push({ pgid, signal }); return true; },
+    findPostedReview: async () => { throw new Error('stale head must not probe reviews'); },
+    onTerminalDeadSession: async (event) => settled.push(event),
+  });
+
+  const row = readRow(db);
+  assert.equal(row.pr_state, 'open');
+  assert.equal(row.closed_at, null);
+  assert.equal(row.review_status, 'pending');
+  assert.equal(row.reviewer_session_uuid, null);
+  assert.equal(row.reviewer_head_sha, null);
+  assert.deepEqual(killed, [{ pgid: 9001, signal: 'SIGKILL' }]);
+  assert.deepEqual(settled.map(({ state, reason }) => ({ state, reason })), [
+    { state: 'cancelled', reason: 'stale-head-superseded' },
+  ]);
 });
 
 test('closed reviewer remains live when GitHub state cannot be verified', async () => {

@@ -543,28 +543,30 @@ async function reconcileReviewerSessions({
   for (const listedRow of rows) {
     let row = listedRow;
     const terminalState = String(row.pr_state || '').trim().toLowerCase();
-    if (terminalState === 'merged' || terminalState === 'closed') {
-      if (terminalState === 'closed') {
-        // Unlike a merge, a close can be reversed while this watcher is down.
-        // Startup reconciliation runs before lifecycle sync, so confirm the
-        // live PR before killing a reviewer or making its claim terminal.
-        let liveState;
-        try {
-          liveState = String(await fetchLivePrState(row) || '').trim().toLowerCase();
-        } catch (err) {
-          log.warn(`[watcher] reviewer_reattach_closed_pr_state_unverified repo=${row.repo} pr=${row.pr_number} error=${err?.message || err}`);
-          continue;
-        }
-        if (liveState === 'open') {
-          statements.reopenClosedReviewing.run(row.repo, row.pr_number);
-          log.warn(`[watcher] reviewer_reattach_reopened_pr_restored repo=${row.repo} pr=${row.pr_number}`);
-          continue;
-        }
-        if (liveState !== 'closed') {
-          log.warn(`[watcher] reviewer_reattach_closed_pr_state_unverified repo=${row.repo} pr=${row.pr_number} state=${liveState || 'unknown'}`);
-          continue;
-        }
+    let terminalConfirmed = terminalState === 'merged';
+    if (terminalState === 'closed') {
+      // Unlike a merge, a close can be reversed while this watcher is down.
+      // Startup reconciliation runs before lifecycle sync, so confirm the
+      // live PR before killing a reviewer or making its claim terminal.
+      let liveState;
+      try {
+        liveState = String(await fetchLivePrState(row) || '').trim().toLowerCase();
+      } catch (err) {
+        log.warn(`[watcher] reviewer_reattach_closed_pr_state_unverified repo=${row.repo} pr=${row.pr_number} error=${err?.message || err}`);
+        continue;
       }
+      if (liveState === 'open') {
+        statements.reopenClosedReviewing.run(row.repo, row.pr_number);
+        row = { ...row, pr_state: 'open', closed_at: null };
+        log.warn(`[watcher] reviewer_reattach_reopened_pr_restored repo=${row.repo} pr=${row.pr_number}`);
+      } else if (liveState === 'closed') {
+        terminalConfirmed = true;
+      } else {
+        log.warn(`[watcher] reviewer_reattach_closed_pr_state_unverified repo=${row.repo} pr=${row.pr_number} state=${liveState || 'unknown'}`);
+        continue;
+      }
+    }
+    if (terminalConfirmed) {
       const settledAt = (terminalState === 'merged' ? row.merged_at : row.closed_at) || failureAt;
       let killResult = false;
       let terminalPgid = parsePositiveInteger(row.reviewer_pgid);

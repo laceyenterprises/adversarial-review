@@ -117,6 +117,7 @@ import { resolveGeminiRuntime } from './role-config.mjs';
 import {
   alertClioOAuthFailure,
   alertClioOversizedAgyFailure,
+  alertReviewerSnapshotBaseFailure,
 } from './reviewer-alerts.mjs';
 import {
   REVIEW_POST_RETRY_DELAYS_MS,
@@ -2097,6 +2098,11 @@ async function main() {
       ? 'invalid base checkout snapshot'
       : 'reviewer workspace snapshot unavailable';
     console.error(`[reviewer] infrastructure error: ${kind} for ${repo}#${prNumber}: ${err.message}`);
+    if (err instanceof ReviewerSnapshotBaseError) {
+      await alertReviewerSnapshotBaseFailure({
+        repo, prNumber, headSha: err.headSha, linkPath: err.linkPath, reason: err.message,
+      });
+    }
     process.exit(1);
   }
 

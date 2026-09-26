@@ -11,7 +11,7 @@
 // inert `[]`.
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   db,
@@ -410,7 +410,10 @@ export async function syncPRLifecycle(octokit, operatorSurface, primaryDomainId 
 
 function persistReconcileAttestation(summary) {
   try {
-    writePrTerminalReconcileState(ROOT, summary);
+    const stateRoot = process.env.ADVERSARIAL_REVIEW_STATE_DIR
+      ? dirname(resolve(process.env.ADVERSARIAL_REVIEW_STATE_DIR))
+      : ROOT;
+    writePrTerminalReconcileState(stateRoot, summary);
   } catch (err) {
     // The attestation is diagnostic. Failing to write it must not fail the
     // sync that already did the real work; the health surface will read the

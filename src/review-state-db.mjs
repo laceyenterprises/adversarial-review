@@ -34,7 +34,10 @@ import {
   sqlSumReviewerPassSpendSince,
 } from './review-state-statements.mjs';
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const MODULE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const ROOT = process.env.ADVERSARIAL_REVIEW_STATE_DIR
+  ? dirname(process.env.ADVERSARIAL_REVIEW_STATE_DIR)
+  : MODULE_ROOT;
 
 export const db = openReviewStateDb(ROOT);
 // The schema bootstrap is the first write this process makes, and it runs at

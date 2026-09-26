@@ -1841,6 +1841,7 @@ async function postGitHubReviewWithCapture({
 
 // ── Linear integration (LAC-13) ──────────────────────────────────────────────
 const linearTriage = createLinearTriageAdapter({
+  rootDir: dirname(resolveAdversarialReviewStateDir(ROOT, process.env)),
   logger: console,
   criticalWords: CRITICAL_WORDS,
 });

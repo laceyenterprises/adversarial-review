@@ -1537,6 +1537,7 @@ async function pollOnce(
   }
 
   await runQueuedReviewAdoptionPhase({
+    rootDir: dirname(ADVERSARIAL_REVIEW_STATE_DIR),
     drainReviewerDispatchCandidates,
     postedReviewHandlers,
     postReviewMaintenanceHandlers,

@@ -767,6 +767,7 @@ exit 0
 
 test('fast-merge migration adds authorization column and rereview helper requeues skipped rows idempotently', () => {
   const db = new Database(':memory:');
+  const stateRoot = mkdtempSync(path.join(tmpdir(), 'watcher-fast-merge-rereview-'));
   try {
     ensureReviewStateSchema(db);
     ensureReviewStateSchema(db);
@@ -781,7 +782,7 @@ test('fast-merge migration adds authorization column and rereview helper requeue
        VALUES (?, ?, ?, ?, ?, ?, 0, ?)`
     ).run(REPO, 808, '2026-05-20T12:00:00.000Z', 'claude', 'fast_merge_skipped', 'fast_merge_skipped', 'sha-live-808');
     const result = requestReviewRereview({
-      rootDir: REPO_ROOT,
+      rootDir: stateRoot,
       repo: REPO,
       prNumber: 808,
       reason: 'test fast-merge veto',
@@ -796,5 +797,6 @@ test('fast-merge migration adds authorization column and rereview helper requeue
     assert.equal(row.posted_at, null);
   } finally {
     db.close();
+    rmSync(stateRoot, { recursive: true, force: true });
   }
 });

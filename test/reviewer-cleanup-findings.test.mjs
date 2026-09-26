@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -51,37 +50,32 @@ test('posted reviewer cleanup findings persist and clear after a later dead prob
   assert.doesNotThrow(() => cleanupFindingPath(rootDir, 'session-6917'));
 });
 
-test('cleanup finding recheck uses the production probe argument shape', async () => {
+test('cleanup finding recheck uses the production probe argument shape', () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'reviewer-cleanup-findings-live-'));
   const sessionUuid = `cleanup-finding-${process.pid}-${Date.now()}`;
-  const child = spawn(
-    process.execPath,
-    ['-e', `setTimeout(() => {}, 30_000); // ${sessionUuid}`],
-    { detached: true, stdio: 'ignore' }
-  );
-  child.unref();
-  try {
-    writeReviewerCleanupFinding(rootDir, {
-      repo: 'laceyenterprises/agent-os',
-      prNumber: 6917,
-      reviewerSessionUuid: sessionUuid,
-      reviewerPgid: child.pid,
-      matched: true,
-      postedAt: '2026-09-20T06:29:34Z',
-    });
+  const reviewerPgid = 12345;
+  const probes = [];
+  writeReviewerCleanupFinding(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 6917,
+    reviewerSessionUuid: sessionUuid,
+    reviewerPgid,
+    matched: true,
+    postedAt: '2026-09-20T06:29:34Z',
+  });
 
-    const result = recheckReviewerCleanupFindings({
-      rootDir,
-      log: { warn() {} },
-    });
+  const result = recheckReviewerCleanupFindings({
+    rootDir,
+    log: { warn() {} },
+    probeSessionImpl: (args) => {
+      probes.push(args);
+      return { alive: true, matched: true };
+    },
+  });
 
-    assert.equal(result.stillAlive, 1);
-    assert.equal(readReviewerCleanupFindings(rootDir)[0].matched, true);
-  } finally {
-    try {
-      process.kill(-child.pid, 'SIGTERM');
-    } catch {}
-  }
+  assert.equal(result.stillAlive, 1);
+  assert.deepEqual(probes, [{ pgid: reviewerPgid, sessionUuid }]);
+  assert.equal(readReviewerCleanupFindings(rootDir)[0].matched, true);
 });
 
 test('cleanup finding recheck clears recycled process groups with mismatched sessions', () => {

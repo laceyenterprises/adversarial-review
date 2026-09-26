@@ -128,6 +128,7 @@ async function runResearchFindingFixtureKernel({ rootDir }) {
     now: () => new Date(NOW),
   });
   const operator = createLinearTriageAdapter({
+    rootDir,
     linearClientProvider: async () => null,
     logger: { log() {}, warn() {}, error() {} },
   });

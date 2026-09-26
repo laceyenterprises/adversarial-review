@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -19,10 +19,10 @@ import {
   createFollowUpJob,
 } from '../src/follow-up-jobs.mjs';
 import {
-  handlePostedReviewRow,
-  maybeDispatchAmaClosureFor,
-  maybeInlineFinalHammerAfterReview,
-  resolveMergeAgentCoexistenceForWatcher,
+  handlePostedReviewRow as handlePostedReviewRowImpl,
+  maybeDispatchAmaClosureFor as maybeDispatchAmaClosureForImpl,
+  maybeInlineFinalHammerAfterReview as maybeInlineFinalHammerAfterReviewImpl,
+  resolveMergeAgentCoexistenceForWatcher as resolveMergeAgentCoexistenceForWatcherImpl,
   shouldInlineFinalHammerAfterReview,
 } from '../src/watcher.mjs';
 import {
@@ -34,6 +34,15 @@ import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { HANDOFF_EVENTS } from '../src/handoff-telemetry.mjs';
 import { normalizeReviewVerdict as normalizeReviewVerdictCompat } from '../src/review-verdict.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from '../src/review-statuses.mjs';
+
+const withWatcherRoot = (fn) => (options) => fn({
+  rootDir: mkdtempSync(path.join(tmpdir(), 'adversarial-gate-status-watcher-')),
+  ...options,
+});
+const handlePostedReviewRow = withWatcherRoot(handlePostedReviewRowImpl);
+const maybeDispatchAmaClosureFor = withWatcherRoot(maybeDispatchAmaClosureForImpl);
+const maybeInlineFinalHammerAfterReview = withWatcherRoot(maybeInlineFinalHammerAfterReviewImpl);
+const resolveMergeAgentCoexistenceForWatcher = withWatcherRoot(resolveMergeAgentCoexistenceForWatcherImpl);
 
 // Pin AMA enabled/disabled for a test body regardless of the host's live
 // config.local.yaml (which may set roles.adversarial.merge_authority.enabled).
@@ -1684,15 +1693,20 @@ test('RVHAND-06: maybeDispatchAmaClosureFor does not re-sample classified non-me
   assert.equal(mergeAttempt.mergeabilityForGate.mergeStateStatus, 'BEHIND');
 });
 
-test('maybeDispatchAmaClosureFor resolves risk class from the remediation ledger when neither candidate nor review row carries it', async () => {
+test('maybeDispatchAmaClosureFor resolves risk class from the remediation ledger when neither candidate nor review row carries it', async (t) => {
   // Root cause of "AMA closed 0 PRs ever": fetchMergeAgentCandidate never sets
   // candidate.riskClass and reviewed_prs has no risk_class column, so the
   // eligibility riskClass fell back to 'unknown' (always two-key) for EVERY PR.
   // It must instead use the remediation ledger's latestRiskClass
   // (DEFAULT_RISK_CLASS = 'medium' for a PR with no jobs) — the same class the
   // round-budget path already computes.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-gate-domain-'));
+  mkdirSync(path.join(rootDir, 'domains'));
+  copyFileSync(new URL('../domains/code-pr.json', import.meta.url), path.join(rootDir, 'domains', 'code-pr.json'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   let observed = null;
   await maybeDispatchAmaClosureFor({
+    rootDir,
     reviewStateRow: makeReviewRow({
       last_verdict: 'Comment only',
       // risk_class explicitly NULL — production reviewed_prs has no such column.

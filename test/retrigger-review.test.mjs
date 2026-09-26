@@ -330,6 +330,7 @@ test('retrigger-review treats pending review rows as already-pending success and
     '--pr', '238',
     '--reason', 'retry',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], { stdout: out, stderr: makeCaptureStream(), fetchCurrentHeadShaImpl: fakeCurrentHeadSha });
 
   assert.equal(rc, 0);
@@ -376,6 +377,7 @@ test('retrigger-review bumps pending timestamp even when explicit reason is unch
     '--pr', '238',
     '--reason', 'retry',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
     '--no-bump-budget',
   ], { stdout: makeCaptureStream(), stderr: makeCaptureStream() });
 
@@ -448,6 +450,7 @@ test('retrigger-review exact-head-now scrubs stale reviewer handles on already-p
     '--exact-head-now',
     '--head-sha', 'head-current-238',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
     '--no-bump-budget',
   ], { stdout: makeCaptureStream(), stderr: makeCaptureStream() });
 
@@ -540,6 +543,7 @@ test('retrigger-review exact-head-now leaves the explicit operator marker used f
     '--exact-head-now',
     '--no-bump-budget',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], { stdout: out, stderr: makeCaptureStream(), fetchCurrentHeadShaImpl: fakeCurrentHeadSha });
 
   assert.equal(rc, 0);
@@ -573,6 +577,7 @@ test('retrigger-review preserves pending-upstream evidence without exact-head-no
     '--reason', 'retry after provider recovery',
     '--no-bump-budget',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], { stdout: makeCaptureStream(), stderr: err });
 
   assert.equal(rc, 1);
@@ -606,6 +611,7 @@ test('retrigger-review exact-head-now re-arms pending-upstream review', async ()
     '--exact-head-now',
     '--no-bump-budget',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], { stdout: out, stderr: makeCaptureStream(), fetchCurrentHeadShaImpl: fakeCurrentHeadSha });
 
   assert.equal(rc, 0);
@@ -660,6 +666,7 @@ test('retrigger-review preserves failed-review evidence unless allow-failed-rese
     '--pr', '238',
     '--reason', 'retry',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], { stdout: makeCaptureStream(), stderr: err });
 
   assert.equal(rc, 1);
@@ -682,6 +689,7 @@ test('retrigger-review allows failed reset when explicitly requested', async () 
     '--reason', 'retry',
     '--allow-failed-reset',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], { stdout: out, stderr: makeCaptureStream() });
 
   assert.equal(rc, 0);
@@ -702,6 +710,7 @@ test('retrigger-review allows failed-orphan reset when explicitly requested', as
     '--pr', '238',
     '--reason', 'verified no orphan review posted',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], { stdout: makeCaptureStream(), stderr: err });
 
   assert.equal(blocked, 1);
@@ -714,6 +723,7 @@ test('retrigger-review allows failed-orphan reset when explicitly requested', as
     '--reason', 'verified no orphan review posted',
     '--allow-failed-reset',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], { stdout: out, stderr: makeCaptureStream() });
 
   assert.equal(rc, 0);
@@ -741,6 +751,7 @@ test('retrigger-review explains reviewing recovery path', async () => {
     '--pr', '238',
     '--reason', 'retry',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], { stdout: makeCaptureStream(), stderr: err });
 
   assert.equal(rc, 1);
@@ -765,6 +776,7 @@ test('retrigger-review exact-head-now still refuses active reviewers by default'
     '--reason', 'retry',
     '--exact-head-now',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], { stdout: makeCaptureStream(), stderr: err });
 
   assert.equal(rc, 1);
@@ -790,6 +802,7 @@ test('retrigger-review exact-head-now can cancel and reset an active reviewer', 
     '--cancel-active-review',
     '--no-bump-budget',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], {
     stdout: out,
     stderr: makeCaptureStream(),
@@ -837,6 +850,7 @@ test('retrigger-review exact-head-now reports active-review cancellation refusal
     '--exact-head-now',
     '--cancel-active-review',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], {
     stdout: makeCaptureStream(),
     stderr: err,
@@ -868,6 +882,7 @@ test('retrigger-review exact-head-now refuses when cancelled reviewer remains al
     '--exact-head-now',
     '--cancel-active-review',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], {
     stdout: makeCaptureStream(),
     stderr: err,
@@ -900,6 +915,7 @@ test('retrigger-review keeps wait failures inside the runtime exit-code contract
     '--exact-head-now',
     '--cancel-active-review',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], {
     stdout: makeCaptureStream(),
     stderr: err,
@@ -933,6 +949,7 @@ test('retrigger-review allow-active-review-reset refuses a live process group', 
     '--exact-head-now',
     '--allow-active-review-reset',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], {
     stdout: makeCaptureStream(),
     stderr: err,
@@ -961,6 +978,7 @@ test('retrigger-review allow-active-review-reset resets a dead process group', a
     '--allow-active-review-reset',
     '--no-bump-budget',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], {
     stdout: out,
     stderr: makeCaptureStream(),
@@ -1004,6 +1022,7 @@ test('retrigger-review allow-active-review-reset preserves a null pgid guard', a
     '--allow-active-review-reset',
     '--no-bump-budget',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], {
     stdout: out,
     stderr: makeCaptureStream(),
@@ -1045,6 +1064,7 @@ test('retrigger-review cancel recovery tolerates watcher reconciliation to faile
     '--cancel-active-review',
     '--no-bump-budget',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], {
     stdout: out,
     stderr: makeCaptureStream(),
@@ -1108,6 +1128,7 @@ test('retrigger-review cancel recovery resets a real failed-orphan row with a nu
     '--cancel-active-review',
     '--no-bump-budget',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], {
     stdout: out,
     stderr: makeCaptureStream(),
@@ -1181,6 +1202,7 @@ test('retrigger-review exact-head-now stops a stale active follow-up before re-a
     '--exact-head-now',
     '--no-bump-budget',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], {
     stdout: out,
     stderr: makeCaptureStream(),
@@ -1236,6 +1258,7 @@ test('retrigger-review exact-head recovery binds a posted row to the requested h
     '--head-sha', 'head-current-238',
     '--no-bump-budget',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], {
     stdout: out,
     stderr: makeCaptureStream(),
@@ -1271,6 +1294,7 @@ test('retrigger-review exact-head recovery refreshes an already-pending row revi
     '--head-sha', 'head-current-238',
     '--no-bump-budget',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], {
     stdout: out,
     stderr: makeCaptureStream(),
@@ -1310,6 +1334,7 @@ test('retrigger-review refuses when a stale active follow-up survives the stop o
     '--exact-head-now',
     '--no-bump-budget',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], {
     stdout: makeCaptureStream(),
     stderr: err,
@@ -1346,6 +1371,7 @@ test('retrigger-review returns runtime exit code when a refusal-path audit appen
     '--pr', '238',
     '--reason', 'retry',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], {
     stdout: makeCaptureStream(),
     stderr: err,
@@ -1370,6 +1396,7 @@ test('retrigger-review keeps reviewing rows blocked even with --allow-failed-res
     '--reason', 'retry',
     '--allow-failed-reset',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], { stdout: makeCaptureStream(), stderr: err });
 
   assert.equal(rc, 1);
@@ -1419,6 +1446,7 @@ test('retrigger-review reads reason from file', async () => {
     '--pr', '238',
     '--reason-file', reasonFile,
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], { stdout: out, stderr: makeCaptureStream() });
 
   assert.equal(rc, 0);
@@ -1435,6 +1463,7 @@ test('retrigger-review reads --reason-stdin via injected reader', async () => {
     '--pr', '238',
     '--reason-stdin',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], {
     stdout: out,
     stderr: makeCaptureStream(),
@@ -1456,6 +1485,7 @@ test('retrigger-review --quiet suppresses informational output', async () => {
     '--reason', 'retry',
     '--quiet',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], { stdout: out, stderr: makeCaptureStream() });
 
   assert.equal(rc, 0);
@@ -1471,6 +1501,7 @@ test('retrigger-review writes the audit ledger under data/operator-mutations by 
     '--pr', '238',
     '--reason', 'retry',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], { stdout: makeCaptureStream(), stderr: makeCaptureStream() });
 
   assert.equal(rc, 0);
@@ -1486,6 +1517,7 @@ test('retrigger-review re-evaluates retries after a refused row with the same id
     '--reason', 'retry',
     '--idempotency-key', 'shared-key',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ];
 
   const firstErr = makeCaptureStream();
@@ -1542,6 +1574,7 @@ test('retrigger-review returns runtime exit code with concise stderr when termin
     '--pr', '238',
     '--reason', 'retry',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], {
     stdout: makeCaptureStream(),
     stderr: err,

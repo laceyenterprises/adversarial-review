@@ -1010,6 +1010,19 @@ test('orderSubjectEntriesRereviewOldestFirst is stable outside pending re-review
   );
 });
 
+test('re-review FIFO does not undo first-pass discovery ordering', () => {
+  const entries = [
+    { prNumber: 1117, current: null },
+    { prNumber: 1110, current: { review_status: 'pending', rereview_requested_at: '2026-09-26T05:00:00.000Z' } },
+    { prNumber: 7013, current: null },
+    { prNumber: 1093, current: { review_status: 'pending', rereview_requested_at: '2026-09-26T04:00:00.000Z' } },
+  ];
+  assert.deepEqual(
+    orderSubjectEntriesRereviewOldestFirst(entries, { logger: silentLogger }).map((entry) => entry.prNumber),
+    [1117, 7013, 1093, 1110],
+  );
+});
+
 // ── Posted-review phase budget + per-handler deadline ────────────────────────
 
 test('runPostedReviewHandlersFairly defers the tail when the budget runs out and rotates it next tick', async () => {

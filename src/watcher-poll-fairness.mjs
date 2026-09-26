@@ -292,10 +292,8 @@ function pendingRereviewRequestedAt(entry) {
  * Stable partition for within-lane re-review fairness.
  *
  * Pending re-review rows are reviewer work the pipeline has already promised.
- * Walk them oldest-first so the queue drains FIFO and no job can be starved by
- * a steady stream of fast remediation churn from one PR. Everything else keeps
- * its incoming relative order, so first-pass discovery and posted-row handling
- * retain their existing policy.
+ * Walk them oldest-first without undoing the no-row first-pass promotion that
+ * orderSubjectEntriesDiscoveryFirst already applied. Posted rows follow.
  */
 export function orderSubjectEntriesRereviewOldestFirst(entries, {
   repoPath = null,
@@ -303,18 +301,23 @@ export function orderSubjectEntriesRereviewOldestFirst(entries, {
 } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) return entries ?? [];
 
+  const undiscovered = [];
   const rereviews = [];
   const rest = [];
   entries.forEach((entry, index) => {
+    if (!entry?.current) {
+      undiscovered.push(entry);
+      return;
+    }
     const requestedAtMs = pendingRereviewRequestedAt(entry);
     if (requestedAtMs === null) {
-      rest.push({ entry, index });
+      rest.push(entry);
       return;
     }
     rereviews.push({ entry, index, requestedAtMs });
   });
 
-  if (rereviews.length <= 1) return entries;
+  if (rereviews.length <= 1 && undiscovered.length === 0) return entries;
 
   rereviews.sort((a, b) => (
     a.requestedAtMs - b.requestedAtMs
@@ -329,8 +332,9 @@ export function orderSubjectEntriesRereviewOldestFirst(entries, {
       ')',
   );
   return [
+    ...undiscovered,
     ...rereviews.map(({ entry }) => entry),
-    ...rest.map(({ entry }) => entry),
+    ...rest,
   ];
 }
 

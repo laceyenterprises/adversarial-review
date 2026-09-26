@@ -129,6 +129,7 @@ import {
   stmtCreateReviewRow,
   stmtFinalizePendingTerminalFailure,
   stmtGetReviewRow,
+  stmtHasPostedReview,
   stmtMarkAttemptStarted,
   stmtMarkClosed,
   stmtMarkInfraAutoRecoveryAttemptStarted,
@@ -223,7 +224,7 @@ import {
   reserveReviewerMemoryAdmission,
   reviewerDispatchPassKind,
 } from './watcher-reviewer-pool.mjs';
-import { watcherWakeMatchesSubject } from './watcher-wake.mjs';
+import { requestWatcherWake, watcherWakeMatchesSubject } from './watcher-wake.mjs';
 
 const DEFAULT_REVIEWER_MODEL_FALLBACK_ALERT_WINDOW_MS = 10 * 60 * 1000;
 const DEFAULT_REVIEWER_MODEL_FALLBACK_ALERT_THRESHOLD = 5;
@@ -683,6 +684,7 @@ export async function processReviewSubject(entry, ctx) {
     isFastMergeSkipEnabled,
     normalizeReviewPopulationRetryConfig,
     shouldDeferReviewForActiveFollowUp,
+    requestWatcherWakeImpl = requestWatcherWake,
     wakePayload = null,
     admissionSettlementSplitEnabled = false,
     consumeRereviewWakesImpl = consumeRereviewWakes,
@@ -2603,6 +2605,7 @@ export async function processReviewSubject(entry, ctx) {
         reviewerModel: route.reviewerModel,
         subject,
         current,
+        hasPriorPostedReview: entry.hasPriorPostedReview ?? Boolean(stmtHasPostedReview.get(repoPath, prNumber)),
         wakePriority: watcherWakeMatchesSubject(wakePayload, {
           repoPath,
           prNumber,
@@ -2631,6 +2634,7 @@ export async function processReviewSubject(entry, ctx) {
 
           let reservation = null;
           let reservationReleased = false;
+          let reviewerSpawned = false;
           const releaseReviewerReservation = () => {
             if (!reservation || reservationReleased) return;
             reservationReleased = true;
@@ -3230,6 +3234,7 @@ export async function processReviewSubject(entry, ctx) {
               // (default OFF), drive the two-stage pipeline instead of a single
               // review and post the Win 2 rollup. Gate-off is byte-identical:
               // the else-branch is the unchanged v1 single `spawnReviewer` call.
+              reviewerSpawned = true;
               const result = pipelineEnabled
                 ? await runWatcherGatedReviewPipeline({
                   domainConfig: domainAdapterSet.domainConfig,
@@ -3285,6 +3290,15 @@ export async function processReviewSubject(entry, ctx) {
           } finally {
             releaseReviewerReservation();
             reviewerHeadDispatchLease.release(dispatchLeaseKey);
+            if (reviewerPoolConfig.enabled && reviewerSpawned) {
+              // The slot is free after settlement or a failed spawn. Fill it
+              // without waiting for the next five-minute scheduled poll.
+              try {
+                requestWatcherWakeImpl({ rootDir: ROOT, reason: 'reviewer-capacity-freed' });
+              } catch (wakeError) {
+                console.warn(`[watcher] reviewer capacity wake failed: ${wakeError?.message || wakeError}`);
+              }
+            }
           }
         },
         supportsAdmissionSplit: Boolean(admissionSettlementSplitEnabled) && !isPipelineEnabled(domainAdapterSet.domainConfig),

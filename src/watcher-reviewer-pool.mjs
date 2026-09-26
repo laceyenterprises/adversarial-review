@@ -302,6 +302,9 @@ function reviewerDispatchSortTimeMs(candidate) {
 // watcher.review_lane_first_pass_burst_limit gives rereviews a floor after the
 // configured number of real first-pass dispatches.
 function reviewerDispatchIsFirstPass(candidate) {
+  // posted_at and rereview_requested_at may both be cleared when a queued PR's
+  // head moves. Use durable posted-pass evidence before trusting the row state.
+  if (candidate?.hasPriorPostedReview === true) return false;
   const current = candidate?.current;
   if (!current) return true;
   // Rereview requests clear posted_at while waiting for the next reviewer pass,

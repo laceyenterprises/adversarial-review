@@ -118,7 +118,7 @@ import { acquireDaemonSingleton } from './daemon-singleton.mjs';
 // helpers keep referencing the same shared handles.
 import {
   db,
-  stmtGetReviewRow,
+  stmtGetReviewRow, stmtHasPostedReview,
   stmtGetLatestPostedReviewBody,
   stmtCreateReviewRow,
   stmtCreateFastMergeSkippedReviewRow,
@@ -402,7 +402,7 @@ import {
   compareReviewerDispatchCandidates,
   createDetachedReviewerDispatchTracker,
   createReviewerMemoryAdmissionSampler,
-  reserveReviewerMemoryAdmission,
+  reserveReviewerMemoryAdmission, reviewerDispatchIsFirstPass,
   resolveFirstPassReviewerPoolConfig,
   resolveReviewerMemoryPressureConfig,
   runBoundedReviewerDispatchQueue,
@@ -1317,10 +1317,10 @@ async function pollOnce(
     if (reviewerDispatchCandidates.length < reviewerDiscoveryDrainBatchSize) {
       return { dispatched: 0, maxObservedConcurrency: 0, deferred: 0 };
     }
+    if (reviewerDispatchCandidates.every((candidate) => !reviewerDispatchIsFirstPass(candidate)) && countOpenPrsAwaitingFirstPassReview() > 0) return { dispatched: 0, maxObservedConcurrency: 0, deferred: 0 };
     reviewerDiscoveryDrainUsed = true;
     return drainReviewerDispatchCandidates(reason);
   }
-
   // ARC-03: pump every enabled domain through its own adapter set instead of
   // assuming a single hardcoded `code-pr` domain. Each enabled domain resolves
   // its own reviewer-runtime adapter (isolated from other domains); the primary
@@ -1394,7 +1394,7 @@ async function pollOnce(
     subjectEntries = subjectEntries
       .map((entry) => ({
         ...entry,
-        current: stmtGetReviewRow.get(repoPath, entry.prNumber),
+        current: stmtGetReviewRow.get(repoPath, entry.prNumber), hasPriorPostedReview: Boolean(stmtHasPostedReview.get(repoPath, entry.prNumber)),
       }))
       .sort((a, b) =>
         compareWatcherWakeSubjectEntries(wakePayloadForPoll(), repoPath, a, b, compareReviewerDispatchCandidates)

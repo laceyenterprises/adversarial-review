@@ -31,6 +31,7 @@ function candidate(prNumber, run, createdAt = `2026-05-01T00:00:${String(prNumbe
     reviewerModel: options.reviewerModel,
     subject: { createdAt },
     current: options.current ?? null,
+    hasPriorPostedReview: options.hasPriorPostedReview,
     pendingSince: options.pendingSince,
     pendingSinceMs: options.pendingSinceMs,
     enqueuedAtMs: options.enqueuedAtMs,
@@ -877,6 +878,20 @@ test('pending rereviews do not masquerade as first-pass work when posted_at is c
   ]);
 
   assert.deepEqual(sorted.map((item) => item.prNumber), [90, 10]);
+});
+
+test('a head-refresh rereview stays behind a genuine first pass after row markers clear', () => {
+  const oldRereview = candidate(1093, async () => {}, '2026-09-20T00:00:00.000Z', {
+    current: { review_status: 'pending', posted_at: null, rereview_requested_at: null },
+    hasPriorPostedReview: true,
+  });
+  const newFirstPass = candidate(1117, async () => {}, '2026-09-26T04:00:00.000Z', {
+    current: { review_status: 'pending', posted_at: null, rereview_requested_at: null },
+    hasPriorPostedReview: false,
+  });
+  assert.equal(reviewerDispatchIsFirstPass(oldRereview), false);
+  assert.equal(reviewerDispatchIsFirstPass(newFirstPass), true);
+  assert.deepEqual(sortReviewerDispatchCandidates([oldRereview, newFirstPass]).map((item) => item.prNumber), [1117, 1093]);
 });
 
 test('reviewer lane gives rereview a floor after the configured first-pass burst', async () => {

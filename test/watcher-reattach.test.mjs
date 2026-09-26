@@ -418,6 +418,29 @@ for (const [label, fetchLivePrState] of [
   });
 }
 
+test('unverified expired closed reviewer never kills an unmatched process group', async () => {
+  const db = setupDb();
+  seedReviewing(db, {
+    prState: 'closed',
+    closedAt: '2026-05-11T05:19:00.000Z',
+    reviewerLeaseExpiresAt: '2026-05-11T05:19:30.000Z',
+  });
+  const killed = [];
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    now: new Date(FAILURE_AT),
+    log: makeLog(),
+    fetchLivePrState: async () => { throw new Error('GitHub unavailable'); },
+    probeSession: () => ({ alive: true, matched: false }),
+    killProcessGroup: (pgid, signal) => { killed.push({ pgid, signal }); return true; },
+  });
+
+  assert.equal(readRow(db).review_status, 'failed-orphan');
+  assert.deepEqual(killed, []);
+});
+
 test('terminal reviewer claims take priority under the per-poll reconcile cap', async () => {
   const db = setupDb();
   seedReviewing(db, { prNumber: 69 });

@@ -19,6 +19,7 @@
  * torn JSON that would (fail-closed) park the PR.
  */
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import {
   PROVIDER_OVERLOADED_FAILURE_CLASS,
@@ -49,6 +50,7 @@ const CREDENTIAL_OUTAGE_STATE_DIR = ['data', 'reviewer-credential-outages'];
 const CREDENTIAL_OUTAGE_WINDOW_MS = 15 * 60_000;
 const CREDENTIAL_OUTAGE_DISTINCT_PR_THRESHOLD = 2;
 const CREDENTIAL_OUTAGE_PROBE_INTERVAL_MS = 5 * 60_000;
+const CREDENTIAL_OUTAGE_FAILED_PROBE_CAP = 3;
 
 function getCascadeStateDir(rootDir) {
   return join(rootDir, ...CASCADE_STATE_DIR);
@@ -118,15 +120,20 @@ function writeReviewerCredentialOutage(rootDir, reviewerModel, state) {
   const directory = join(rootDir, ...CREDENTIAL_OUTAGE_STATE_DIR);
   mkdirSync(directory, { recursive: true });
   const path = credentialOutagePath(rootDir, reviewerModel);
-  const tmpPath = `${path}.tmp`;
-  const fd = openSync(tmpPath, 'w');
+  const tmpPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  const fd = openSync(tmpPath, 'wx');
   try {
     writeFileSync(fd, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
     fsyncSync(fd);
   } finally {
     closeSync(fd);
   }
-  renameSync(tmpPath, path);
+  try {
+    renameSync(tmpPath, path);
+  } catch (error) {
+    rmSync(tmpPath, { force: true });
+    throw error;
+  }
   return state;
 }
 
@@ -146,12 +153,18 @@ function recordReviewerCredentialFailure(rootDir, {
     .filter((entry) => !(entry.repo === repo && Number(entry.prNumber) === Number(prNumber)));
   failures.push({ repo, prNumber: Number(prNumber), failedAt: new Date(anchorMs).toISOString() });
   const distinctPrCount = new Set(failures.map((entry) => `${entry.repo}#${entry.prNumber}`)).size;
-  const active = Boolean(previous?.active) || distinctPrCount >= CREDENTIAL_OUTAGE_DISTINCT_PR_THRESHOLD;
+  const lastProbeMs = Date.parse(previous?.lastProbeAt);
+  const failedProbe = Boolean(previous?.active) && Number.isFinite(lastProbeMs) && anchorMs >= lastProbeMs;
+  const probeFailures = Number(previous?.probeFailures || 0) + (failedProbe ? 1 : 0);
+  const exhausted = Boolean(previous?.exhausted) || probeFailures >= CREDENTIAL_OUTAGE_FAILED_PROBE_CAP;
+  const active = !exhausted && (Boolean(previous?.active) || distinctPrCount >= CREDENTIAL_OUTAGE_DISTINCT_PR_THRESHOLD);
   return writeReviewerCredentialOutage(rootDir, model, {
     reviewerModel: model,
     active,
+    exhausted,
+    probeFailures,
     reason: `reviewer-credential:${model}`,
-    startedAt: active ? (previous?.startedAt || new Date(anchorMs).toISOString()) : null,
+    startedAt: (active || exhausted) ? (previous?.startedAt || new Date(anchorMs).toISOString()) : null,
     nextProbeAt: active
       ? (
         Date.parse(previous?.nextProbeAt) > anchorMs
@@ -162,6 +175,19 @@ function recordReviewerCredentialFailure(rootDir, {
     failures,
     distinctPrCount,
   });
+}
+
+function releaseReviewerCredentialProbe(rootDir, reviewerModel, reservation) {
+  if (!reservation?.probe || !reservation.state?.lastProbeAt) return false;
+  const state = readReviewerCredentialOutage(rootDir, reviewerModel);
+  if (!state?.active || state.lastProbeAt !== reservation.state.lastProbeAt ||
+      state.nextProbeAt !== reservation.state.nextProbeAt) return false;
+  writeReviewerCredentialOutage(rootDir, reviewerModel, {
+    ...state,
+    lastProbeAt: null,
+    nextProbeAt: reservation.nextProbeAfter,
+  });
+  return true;
 }
 
 function clearReviewerCredentialOutage(rootDir, reviewerModel) {
@@ -528,6 +554,7 @@ export {
   readReviewerCredentialOutage,
   recordCascadeFailure,
   recordReviewerCredentialFailure,
+  releaseReviewerCredentialProbe,
   resolveCascadeBackoffMinutes,
   shouldBackoffReviewerSpawn,
   shouldPauseReviewerModel,

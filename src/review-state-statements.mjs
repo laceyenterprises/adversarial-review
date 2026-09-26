@@ -178,16 +178,18 @@ export const FINALIZE_PENDING_TERMINAL_FAILURE_SQL =
 export const MARK_REVIEWER_CREDENTIAL_OUTAGE_SQL =
   `UPDATE reviewed_prs
       SET review_status = 'pending-upstream', failed_at = ?, failure_message = ?,
-          quota_reset_at_utc = NULL, reviewer_lease_expires_at = NULL
+          quota_reset_at_utc = NULL, reviewer_lease_expires_at = NULL,
+          reviewer_session_uuid = NULL, reviewer_pgid = NULL
     WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'`;
 
 export const PROMOTE_REVIEWER_CREDENTIAL_OUTAGE_SQL =
   `UPDATE reviewed_prs
       SET review_status = 'pending-upstream', failure_message = ?,
-          infra_auto_recover_attempts = 0, reviewer_lease_expires_at = NULL
+          reviewer_lease_expires_at = NULL
     WHERE COALESCE(pr_state, 'open') = 'open'
       AND review_status = 'pending-upstream'
       AND reviewer_lease_expires_at IS NULL
+      AND reviewer_session_uuid IS NULL
       AND lower(COALESCE(reviewer, '')) = ?
       AND lower(COALESCE(failure_message, '')) LIKE '[oauth-broken]%'`;
 
@@ -199,7 +201,7 @@ export const REARM_REVIEWER_CREDENTIAL_OUTAGE_SQL =
     WHERE COALESCE(pr_state, 'open') = 'open'
       AND review_status IN ('pending', 'pending-upstream')
       AND reviewer_lease_expires_at IS NULL
-      AND lower(COALESCE(reviewer, '')) = ?
+      AND reviewer_session_uuid IS NULL
       AND lower(COALESCE(failure_message, '')) LIKE ?`;
 
 // This also matches review_status='reviewing', so every reviewer_* lease field

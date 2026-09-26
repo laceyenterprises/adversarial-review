@@ -110,7 +110,7 @@
         "src/pollonce-phases.mjs",
         "src/reviewer-spawn-settle.mjs"
       ],
-      "owner": "reviewer OAuth credential outage suppression"
+      "owner": "reviewer OAuth credential outage suppression with a durable three-probe limit"
     },
     {
       "id": "duplicate-families",

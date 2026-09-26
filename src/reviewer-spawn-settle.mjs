@@ -1073,13 +1073,16 @@ function settleReviewerAttempt({
 }) {
   if (result.ok) {
     const postedAt = new Date().toISOString();
-    const recoveredOutage = reviewerModel
-      ? clearReviewerCredentialOutage(rootDir, reviewerModel)
-      : null;
-    if (recoveredOutage?.active && typeof statements.rearmReviewerCredentialOutage?.run === 'function') {
+    let recoveredOutage = null;
+    try {
+      recoveredOutage = reviewerModel ? clearReviewerCredentialOutage(rootDir, reviewerModel) : null;
+    } catch (error) {
+      log?.warn?.(`[watcher] Credential outage clear failed for ${reviewerModel}: ${error?.message || error}`);
+    }
+    if ((recoveredOutage?.active || recoveredOutage?.exhausted) &&
+        typeof statements.rearmReviewerCredentialOutage?.run === 'function') {
       withSqliteBusyRetrySync(
         () => statements.rearmReviewerCredentialOutage.run(
-          String(reviewerModel).toLowerCase(),
           `[outage-transient:reviewer-credential:${String(reviewerModel).toLowerCase()}]%`
         ),
         { label: `reviewer-credential-outage-rearm:${reviewerModel}`, log }
@@ -1212,13 +1215,17 @@ function settleReviewerAttempt({
   const classifiedMessage = `[${failureClass}] ${failureMessage}`;
   let oauthCredentialState = null;
   if (failureClass === 'oauth-broken') {
-    oauthCredentialState = recordReviewerCredentialFailure(rootDir, {
-      reviewerModel,
-      repo: repoPath,
-      prNumber,
-      failedAt: failureAt,
-    });
-    if (oauthCredentialState.active) {
+    try {
+      oauthCredentialState = recordReviewerCredentialFailure(rootDir, {
+        reviewerModel,
+        repo: repoPath,
+        prNumber,
+        failedAt: failureAt,
+      });
+    } catch (error) {
+      log?.warn?.(`[watcher] Credential outage write failed for ${reviewerModel}: ${error?.message || error}; charging normal infra recovery`);
+    }
+    if (oauthCredentialState?.active) {
       const outageMessage = `[outage-transient:${oauthCredentialState.reason}] ${classifiedMessage}`;
       const markCredentialOutage = statements.markReviewerCredentialOutage || statements.markOutageTransient;
       withSqliteBusyRetrySync(
@@ -1286,8 +1293,11 @@ function settleReviewerAttempt({
     );
     if (oauthCredentialState) {
       log.warn(
-        `[watcher] Reviewer oauth-broken failure on #${prNumber}; credential outage threshold not met ` +
-        `(${oauthCredentialState.distinctPrCount} distinct PRs), charging infra recovery`
+        `[watcher] Reviewer oauth-broken failure on #${prNumber}; ` +
+        (oauthCredentialState.exhausted
+          ? `credential outage probe cap exhausted (${oauthCredentialState.probeFailures} failed probes)`
+          : `credential outage threshold not met (${oauthCredentialState.distinctPrCount} distinct PRs)`) +
+        ', charging infra recovery'
       );
     }
     log.warn(

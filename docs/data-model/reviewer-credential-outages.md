@@ -22,14 +22,16 @@ Directory: `data/reviewer-credential-outages/`
 
 | File | Shape | Contract |
 |---|---|---|
-| `<encodeURIComponent(model)>.json` | Credential outage state object | Durable per-model outage state. The writer uses tmp+fsync+rename so readers never rely on a torn JSON file. Missing or unreadable files are treated as no credential outage state. |
+| `<encodeURIComponent(model)>.json` | Credential outage state object | Durable per-model outage state. The writer uses a unique per-write tmp file, fsync, and rename so readers never rely on a torn JSON file. Missing or unreadable files are treated as no credential outage state. |
 
 ## State Object
 
 | Field | Shape | Contract |
 |---|---|---|
 | `reviewerModel` | string | Normalized reviewer model name that owns the outage file. |
-| `active` | boolean | `true` once OAuth failures have crossed the distinct-PR threshold, or after a previously active outage records another failed probe. |
+| `active` | boolean | `true` after the distinct-PR threshold until a successful review or the failed-probe cap. |
+| `exhausted` | boolean | Sticky marker after three failed recovery probes. Suppresses another model-wide hold until a successful review clears the file. |
+| `probeFailures` | number | Failed recovery probes since activation; reaching three ends the model-wide hold. |
 | `reason` | string | Stable outage reason in the form `reviewer-credential:<model>`, used in parked-row failure messages. |
 | `startedAt` | string or null | ISO-8601 timestamp from the first failure that activated the outage. Preserved while the outage remains active. |
 | `nextProbeAt` | string or null | ISO-8601 timestamp when the next recovery probe may be reserved. This is advanced by the pre-spawn reservation path and may be preserved by a failed probe when the reservation already set the next window. |
@@ -40,9 +42,10 @@ Directory: `data/reviewer-credential-outages/`
 ## Operational Contract
 
 - `recordReviewerCredentialFailure` opens the outage only after OAuth failures
-  hit the distinct-PR threshold inside the rolling credential window. Once
-  active, later failed probes keep the outage active even if only one fresh PR
-  remains in the rolling window.
+  hit the distinct-PR threshold inside the rolling credential window. Three
+  failed probes exhaust the model-wide hold; later failures use the normal
+  per-PR infrastructure recovery cap and leave terminal evidence when exhausted.
+  Promotion preserves each PR's existing infrastructure recovery count.
 - `shouldPauseReviewerModel` holds reviewer spawns for an active model outage
   until `nextProbeAt`. The watcher first calls it with `reserve: false` as a
   read-only admission check, then calls it with reservation enabled immediately
@@ -52,7 +55,7 @@ Directory: `data/reviewer-credential-outages/`
   recovered. Later spawns remain held until the next probe window. A successful
   reviewer attempt clears the outage; a failed `oauth-broken` probe records a
   fresh failure while preserving the reserved retry window when it is still in
-  the future.
+  the future. A reservation is released if dispatch aborts before process start.
 - The helper returns `nextProbeAfter` from persisted timestamps for watcher
   spawn-decision logs; the persisted source is `nextProbeAt`.
 - `clearReviewerCredentialOutage` removes the model file after a successful

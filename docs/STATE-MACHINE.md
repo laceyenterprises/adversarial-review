@@ -191,13 +191,16 @@ new PR
   threshold. That preflight hold parks further spawns for the affected model
   until the file's `nextProbeAt`, then records a fresh probe reservation and
   lets one normal reviewer attempt through as a recovery probe. Once this
-  model-wide outage is active, failed OAuth probes record fresh evidence with
-  the outage-transient marker without incrementing `infra_auto_recover_attempts`;
-  the outage file's probe window is the recovery gate. Rows parked before the
+  model-wide outage is active, the first two failed OAuth probes record fresh
+  evidence with the outage-transient marker without incrementing
+  `infra_auto_recover_attempts`. The third failed probe exhausts the model hold;
+  subsequent failures charge each PR's bounded infrastructure recovery budget.
+  Promotion preserves the existing budget. Rows parked before the
   outage threshold are promoted to the outage marker only while they are still
   open, lease-free `pending-upstream` rows. A successful probe clears the outage
   and re-arms only open, lease-free `pending` / `pending-upstream` rows parked
-  with that outage-transient marker; in-flight `reviewing` rows and terminal
+  with that outage-transient marker even if their reviewer route changed;
+  in-flight `reviewing` rows and terminal
   `failed` evidence are not rewritten.
   `provider-overloaded` preserves HTTP 529/backend capacity failures separately
   from generic `cascade` so pipeline health can report provider instability

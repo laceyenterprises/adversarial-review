@@ -38,6 +38,7 @@ import {
 } from './watcher-reviewer-pool.mjs';
 import { hammerWakeAuditDir, readHammerWakeAudit } from './hammer-wake.mjs';
 import { summarizeReviewerBurst } from './reviewer-burst-lease.mjs';
+import { readReviewerCredentialOutage } from './reviewer-cascade.mjs';
 
 const DEFAULT_REVIEWER_DEATH_RATE_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_REVIEWER_DEATH_RATE_THRESHOLD = 0.5;
@@ -1961,7 +1962,7 @@ function outageReasonFromMessage(message) {
   return match?.[1] || 'unknown';
 }
 
-function summarizeOutage(db) {
+function summarizeOutage(db, rootDir) {
   const rows = readOutageTransientRows(db);
   const reasons = new Map();
   const examples = [];
@@ -1980,10 +1981,15 @@ function summarizeOutage(db) {
     }
   }
   const active = rows.length > 0;
-  const startedAt = rows
+  const rowStartedAt = rows
     .map((row) => row.failed_at || row.last_attempted_at || null)
     .filter(Boolean)
     .sort()[0] || null;
+  const credentialStarts = Array.from(reasons.keys())
+    .filter((reason) => reason.startsWith('reviewer-credential:'))
+    .map((reason) => readReviewerCredentialOutage(rootDir, reason.slice('reviewer-credential:'.length))?.startedAt)
+    .filter((value) => Number.isFinite(Date.parse(value)));
+  const startedAt = [...credentialStarts, rowStartedAt].filter(Boolean).sort()[0] || null;
   return {
     active,
     reason: rows.length === 0 ? null : (reasons.size === 1 ? Array.from(reasons.keys())[0] : 'multiple'),
@@ -5737,7 +5743,7 @@ function collectReviewPipelineHealth({
     const operationalBlockers = summarizeOperationalBlockers(followUpQueues.jobs, { nowMs });
     const reviewerDegradation = summarizeReviewerDegradation(rootDir, db, { nowMs });
     const outage = db
-      ? summarizeOutage(db)
+      ? summarizeOutage(db, rootDir)
       : {
           active: false,
           reason: null,

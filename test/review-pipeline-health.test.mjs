@@ -5172,6 +5172,11 @@ test('health output surfaces outage pause and attempts not charged', () => {
 
 test('health output names a model credential outage', () => {
   const rootDir = tempRoot();
+  const outageDir = path.join(rootDir, 'data', 'reviewer-credential-outages');
+  mkdirSync(outageDir, { recursive: true });
+  writeFileSync(path.join(outageDir, 'claude.json'), JSON.stringify({
+    active: true, startedAt: '2026-09-25T18:00:00.000Z',
+  }));
   insertReviewRow(rootDir, {
     prNumber: 779,
     reviewStatus: 'pending-upstream',
@@ -5182,7 +5187,7 @@ test('health output names a model credential outage', () => {
 
   const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
   assert.equal(snapshot.outage.reason, 'reviewer-credential:claude');
-  assert.equal(snapshot.outage.started_at, '2026-09-25T18:05:00.000Z');
+  assert.equal(snapshot.outage.started_at, '2026-09-25T18:00:00.000Z');
   assert.equal(snapshot.outage.parked_pr_count, 1);
 });
 

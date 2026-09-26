@@ -172,7 +172,9 @@ import {
   markCascadeCapExhaustedAlerted,
   markOperatorDecisionRequiredAlerted,
   recordCascadeFailure,
+  releaseReviewerCredentialProbe,
   shouldBackoffReviewerSpawn,
+  shouldPauseReviewerModel,
 } from './reviewer-cascade.mjs';
 import { reconcileReviewerCommandFailedBeforeRetry } from './reviewer-command-failed-recovery.mjs';
 import {
@@ -2167,6 +2169,21 @@ export async function processReviewSubject(entry, ctx) {
         });
         return;
       }
+      const credentialOutagePreflight = shouldPauseReviewerModel(ROOT, route.reviewerModel, {
+        reserve: false,
+      });
+      if (credentialOutagePreflight.paused) {
+        markWatcherSpawnDecision({
+          repo: repoPath,
+          pr_number: prNumber,
+          decision: 'reviewer-credential-outage-hold',
+          failure_class: 'oauth-broken',
+          next_retry_after: credentialOutagePreflight.nextProbeAfter ||
+            credentialOutagePreflight.state?.nextProbeAt ||
+            null,
+        });
+        return;
+      }
       const cascadeRetryDue = Boolean(cascadeGate.state?.nextRetryAfter);
       const timeoutExhaustionHandoff = await maybeDispatchReviewerTimeoutExhaustedMergeAgent({
         rootDir: ROOT,
@@ -2636,6 +2653,8 @@ export async function processReviewSubject(entry, ctx) {
           let reservation = null;
           let reservationReleased = false;
           let reviewerSpawned = false;
+          let credentialProbeReservation = null;
+          let reviewerProcessStarted = false;
           const releaseReviewerReservation = () => {
             if (!reservation || reservationReleased) return;
             reservationReleased = true;
@@ -3150,6 +3169,28 @@ export async function processReviewSubject(entry, ctx) {
               declineFleetSelfRepairRereview(skipReviewerSpawnReason);
               return { dispatched: false, reason: skipReviewerSpawnReason };
             } else {
+              const credentialOutageGate = shouldPauseReviewerModel(ROOT, route.reviewerModel);
+              if (credentialOutageGate.probe) credentialProbeReservation = credentialOutageGate;
+              if (credentialOutageGate.paused) {
+                stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
+                markWatcherSpawnDecision({
+                  repo: repoPath,
+                  pr_number: prNumber,
+                  decision: 'reviewer-credential-outage-hold',
+                  failure_class: 'oauth-broken',
+                  next_retry_after: credentialOutageGate.nextProbeAfter ||
+                    credentialOutageGate.state?.nextProbeAt ||
+                    null,
+                });
+                return { dispatched: false, reason: 'reviewer-credential-outage-hold' };
+              }
+              if (credentialOutageGate.probe) {
+                console.log(
+                  `[watcher] Allowing reviewer credential outage probe for ${repoPath}#${prNumber}: ` +
+                  `${route.reviewerModel} hold expired` +
+                  (credentialOutageGate.nextProbeAfter ? ` at ${credentialOutageGate.nextProbeAfter}` : '')
+                );
+              }
               // Count only work that made it through defer, budget, dedupe,
               // claim, freshness, and routing checks and is about to enter the
               // actual spawn path.  Pending rows held by an active follow-up,
@@ -3184,6 +3225,7 @@ export async function processReviewSubject(entry, ctx) {
                 afhReviewerFallback: route.afhReviewerFallback || null,
                 reviewerRuntimeAdapterOverride: domainReviewerRuntimeAdapter,
                 onReviewerPgid: ({ pgid, spawnedAt }) => {
+                  reviewerProcessStarted = true;
                   persistReviewerPgid({
                     pgid,
                     reviewerSessionUuid,
@@ -3220,19 +3262,38 @@ export async function processReviewSubject(entry, ctx) {
                 firstPassSpilloverController?.commitSpill?.({ repo: repoPath, prNumber });
                 depthSpillReserved = false;
               }
-              const result = pipelineEnabled
-                ? await runWatcherGatedReviewPipeline({
-                  domainConfig: domainAdapterSet.domainConfig,
-                  domainId,
-                  repoPath,
-                  prNumber,
-                  reviewerHeadSha,
-                  riskClass: ledger.latestRiskClass,
-                  reviewAttemptNumber,
-                  spawnReviewerArgs,
-                  stageStates: parsePipelineStageStates(ledger.pipeline_stage_states_json),
-                })
-                : await spawnReviewer(spawnReviewerArgs);
+              let result;
+              try {
+                result = pipelineEnabled
+                  ? await runWatcherGatedReviewPipeline({
+                    domainConfig: domainAdapterSet.domainConfig,
+                    domainId,
+                    repoPath,
+                    prNumber,
+                    reviewerHeadSha,
+                    riskClass: ledger.latestRiskClass,
+                    reviewAttemptNumber,
+                    spawnReviewerArgs,
+                    stageStates: parsePipelineStageStates(ledger.pipeline_stage_states_json),
+                  })
+                  : await spawnReviewer(spawnReviewerArgs);
+              } catch (error) {
+                if (credentialProbeReservation?.probe && !reviewerProcessStarted) {
+                  try {
+                    releaseReviewerCredentialProbe(ROOT, route.reviewerModel, credentialProbeReservation);
+                  } catch (releaseError) {
+                    console.warn(`[watcher] Credential probe release failed: ${releaseError?.message || releaseError}`);
+                  }
+                }
+                throw error;
+              }
+              if (!result.ok && credentialProbeReservation?.probe && !reviewerProcessStarted) {
+                try {
+                  releaseReviewerCredentialProbe(ROOT, route.reviewerModel, credentialProbeReservation);
+                } catch (releaseError) {
+                  console.warn(`[watcher] Credential probe release failed: ${releaseError?.message || releaseError}`);
+                }
+              }
               if (result.ok) {
                 healthProbe?.recordSpawn?.(healthTick, { at: attemptAt });
               }
@@ -3273,6 +3334,13 @@ export async function processReviewSubject(entry, ctx) {
               }
             }
           } finally {
+            if (credentialProbeReservation?.probe && !reviewerSpawned) {
+              try {
+                releaseReviewerCredentialProbe(ROOT, route.reviewerModel, credentialProbeReservation);
+              } catch (releaseError) {
+                console.warn(`[watcher] Credential probe release failed: ${releaseError?.message || releaseError}`);
+              }
+            }
             if (depthSpillReserved) {
               firstPassSpilloverController?.refundSpill?.({
                 repo: repoPath,

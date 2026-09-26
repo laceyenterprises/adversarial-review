@@ -290,6 +290,14 @@ export const stmtReleaseReviewerClaim = db.prepare(
 export const stmtMarkPosted = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, quota_reset_at_utc = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL, infra_auto_recover_attempts = 0 WHERE repo = ? AND pr_number = ?"
 );
+// Head refresh clears reviewed_prs.posted_at. The pass ledger keeps durable
+// evidence that a prior review actually reached GitHub for this PR.
+export const stmtHasPostedReview = db.prepare(
+  `SELECT 1 FROM reviewer_passes
+    WHERE repo = ? AND pr_number = ?
+      AND gh_comment_id IS NOT NULL AND gh_comment_id <> ''
+    LIMIT 1`
+);
 export const stmtRestoreSameHeadSuppressedReviewPosted = db.prepare(
   `UPDATE reviewed_prs
       SET review_status = 'posted',

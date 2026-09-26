@@ -129,6 +129,7 @@ import {
   stmtCreateReviewRow,
   stmtFinalizePendingTerminalFailure,
   stmtGetReviewRow,
+  stmtHasPostedReview,
   stmtMarkAttemptStarted,
   stmtMarkClosed,
   stmtMarkInfraAutoRecoveryAttemptStarted,
@@ -2603,6 +2604,7 @@ export async function processReviewSubject(entry, ctx) {
         reviewerModel: route.reviewerModel,
         subject,
         current,
+        hasPriorPostedReview: entry.hasPriorPostedReview ?? Boolean(stmtHasPostedReview.get(repoPath, prNumber)),
         wakePriority: watcherWakeMatchesSubject(wakePayload, {
           repoPath,
           prNumber,

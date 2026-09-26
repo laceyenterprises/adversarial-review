@@ -190,6 +190,7 @@ function watcherWakeDispatchCandidate(payload, repoPath, entry) {
     prNumber: entry.prNumber,
     subject: entry.subject,
     current: entry.current,
+    hasPriorPostedReview: entry.hasPriorPostedReview,
     wakePriority: watcherWakeMatchesSubject(payload, {
       repoPath,
       prNumber: entry.prNumber,

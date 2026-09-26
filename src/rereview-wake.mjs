@@ -138,7 +138,7 @@ function queueOwnerMatchesCaller(rootDir) {
     try {
       if (statSync(path).uid !== uid) return false;
     } catch (err) {
-      if (err?.code !== 'ENOENT') return false;
+      if (path === rootDir || err?.code !== 'ENOENT') return false;
     }
   }
   return true;

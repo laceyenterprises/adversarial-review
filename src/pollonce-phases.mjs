@@ -1606,6 +1606,10 @@ export async function processReviewSubject(entry, ctx) {
         emitCacheEvent,
       });
       let depthSpillReserved = false;
+      const depthPassKind = reviewerDispatchPassKind({
+        current: existing,
+        hasPriorPostedReview: entry.hasPriorPostedReview,
+      });
 
       // RWF-01: review-dispatch worker-class fallback (quota trigger)
       // RSP-01: plus the queue-depth trigger, when the break-glass lever is
@@ -1622,7 +1626,7 @@ export async function processReviewSubject(entry, ctx) {
         authorClass: reviewerAuthorClass,
         primary: primaryReviewerWorkerClass,
         fallbackWorkerClasses: reviewWorkerClassFallback(process.env),
-        depthPressure: firstPassSpilloverController?.depthPressure?.() ?? null,
+        depthPressure: firstPassSpilloverController?.depthPressure?.(depthPassKind) ?? null,
         burstPressure: reviewerBurstController?.pressure?.({
           repo: repoPath,
           // Thunk: only a repo-in-scope, pack-scoped lease ever pays for this.
@@ -1683,6 +1687,7 @@ export async function processReviewSubject(entry, ctx) {
                 prNumber,
                 fromWorkerClass: rwfDecision.from,
                 toWorkerClass: rwfDecision.to,
+                passKind: depthPassKind,
               }) === true;
             }
             console.warn(

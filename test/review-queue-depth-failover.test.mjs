@@ -20,11 +20,13 @@ import path from 'node:path';
 import {
   FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT,
   REVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY,
+  REREVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY,
   createFirstPassSpilloverController,
   firstPassSpilloverPlan,
   readFirstPassReviewQueueDepth,
   readReviewQueueDepthFailoverReport,
   resolveFirstPassReviewQueueDepthFailoverThreshold,
+  resolveRereviewQueueDepthFailoverThreshold,
   reviewQueueDepthFailoverReportPath,
 } from '../src/review-queue-depth.mjs';
 import {
@@ -547,6 +549,50 @@ test('the knob arms from the canonical env alone (no shared config.yaml edit nee
   );
 });
 
+test('rereview threshold inherits first-pass, has an env mirror, and zero disables', () => {
+  assert.equal(resolveRereviewQueueDepthFailoverThreshold({ env: {}, firstPassThreshold: 2 }), 2);
+  assert.equal(resolveRereviewQueueDepthFailoverThreshold({
+    env: { AGENT_OS_WATCHER_REREVIEW_QUEUE_DEPTH_FAILOVER_THRESHOLD: '3' },
+    topPath: '/dev/null',
+    firstPassThreshold: 2,
+  }), 3);
+  assert.equal(resolveRereviewQueueDepthFailoverThreshold({
+    env: { AGENT_OS_WATCHER_REREVIEW_QUEUE_DEPTH_FAILOVER_THRESHOLD: '0' },
+    topPath: '/dev/null',
+    firstPassThreshold: 2,
+  }), null);
+  assert.equal(REREVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY, 'watcher.rereview_queue_depth_failover_threshold');
+  assert.equal(
+    ENV_ALIASES[REREVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY]?.canonical,
+    'AGENT_OS_WATCHER_REREVIEW_QUEUE_DEPTH_FAILOVER_THRESHOLD'
+  );
+});
+
+test('17 mixed deferred reviews at threshold 2 grant 8 lane-correct spill slots', () => {
+  const root = tempRoot('rsprereview-mixed-');
+  try {
+    const ctl = createFirstPassSpilloverController({
+      rootDir: root,
+      readDepth: () => 9,
+      readRereviewDepth: () => 8,
+      resolveThresholdImpl: () => 2,
+      resolveRereviewThresholdImpl: () => 2,
+      logger: { warn() {} },
+    });
+    assert.equal(ctl.plan('first-pass').spillSlots, 4);
+    assert.equal(ctl.plan('rereview').spillSlots, 4);
+    for (let index = 0; index < 4; index += 1) {
+      assert.equal(ctl.recordSpill({ repo: 'o/r', prNumber: index, passKind: 'first-pass' }), true);
+      assert.equal(ctl.recordSpill({ repo: 'o/r', prNumber: 100 + index, passKind: 'rereview' }), true);
+    }
+    assert.equal(ctl.granted(), 8);
+    assert.equal(ctl.depthPressure('first-pass').engaged, false);
+    assert.equal(ctl.depthPressure('rereview').engaged, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('an empty report reads back as a well-formed disarmed report', () => {
   const root = tempRoot();
   try {
@@ -597,15 +643,18 @@ test('the lever thresholds on the production countOpenPrsAwaitingFirstPassReview
     seed('open', 'pending');
     seed('open', 'pending');
     seed('open', 'reviewing');
+    // Failed attempts are still awaiting a completed first review and count.
+    seed('open', 'failed');
+    seed('open', 'oauth-broken');
     // Noise that must NOT inflate the depth.
     seed('merged', 'pending');
     seed('closed', 'pending');
     seed('open', 'malformed');
     seed('open', 'argus-security-queued');
 
-    assert.equal(countOpenPrsAwaitingFirstPassReview(db), 3);
+    assert.equal(countOpenPrsAwaitingFirstPassReview(db), 5);
     const engagedPlan = ctl().plan();
-    assert.equal(engagedPlan.depth, 3);
+    assert.equal(engagedPlan.depth, 5);
     assert.equal(engagedPlan.engaged, true);
     assert.equal(engagedPlan.spillSlots, 1);
 
@@ -617,7 +666,7 @@ test('the lever thresholds on the production countOpenPrsAwaitingFirstPassReview
       + ' pass_kind, started_at, ended_at, status, body_md, gh_comment_id)'
       + " VALUES (?, ?, 1, 'gemini', 'gemini', 'first-pass', ?, ?, 'completed', 'body', 'RV_1')"
     ).run('laceyenterprises/agent-os', delivered, '2026-09-06T00:00:00.000Z', '2026-09-06T00:10:00.000Z');
-    db.prepare('DELETE FROM reviewed_prs WHERE pr_number IN (9000, 9001)').run();
+    db.prepare('DELETE FROM reviewed_prs WHERE pr_number IN (9000, 9001, 9003, 9004)').run();
 
     assert.equal(countOpenPrsAwaitingFirstPassReview(db), 1);
     assert.equal(ctl().plan().engaged, false, 'depth recovered => lever disengages, review returns to agy');
@@ -625,6 +674,37 @@ test('the lever thresholds on the production countOpenPrsAwaitingFirstPassReview
     db.close();
     rmSync(dbRoot, { recursive: true, force: true });
     rmSync(reportRoot, { recursive: true, force: true });
+  }
+});
+
+test('production rereview depth counts only open, eligible, durably requested rereviews', async () => {
+  const { ensureReviewStateSchema, openReviewStateDb } = await import('../src/review-state.mjs');
+  const { countOpenPrsAwaitingRereview } = await import('../src/review-state-db.mjs');
+  const dbRoot = tempRoot('rsprereview-db-');
+  const db = openReviewStateDb(dbRoot);
+  try {
+    ensureReviewStateSchema(db);
+    const seed = (prNumber, { state = 'open', status = 'pending', requested = true, posted = null } = {}) => {
+      db.prepare(
+        'INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, rereview_requested_at, posted_at)'
+        + ' VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+      ).run('o/r', prNumber, '2026-09-26T00:00:00Z', 'gemini', state, status,
+        requested ? '2026-09-26T00:10:00Z' : null, posted);
+      db.prepare(
+        'INSERT INTO reviewer_passes (repo, pr_number, attempt_number, reviewer_class, reviewer_model,'
+        + ' pass_kind, started_at, ended_at, status, body_md, gh_comment_id)'
+        + " VALUES (?, ?, 1, 'gemini', 'gemini', 'first-pass', ?, ?, 'completed', 'body', ?)"
+      ).run('o/r', prNumber, '2026-09-26T00:00:00Z', '2026-09-26T00:05:00Z', `RV_${prNumber}`);
+    };
+    seed(1);
+    seed(2, { state: 'merged' });
+    seed(3, { requested: false, posted: '2026-09-26T00:05:00Z' });
+    seed(4, { status: 'argus-security-queued' });
+    seed(5, { requested: false }); // head-refresh path: posted_at was cleared
+    assert.equal(countOpenPrsAwaitingRereview(db), 2);
+  } finally {
+    db.close();
+    rmSync(dbRoot, { recursive: true, force: true });
   }
 });
 
@@ -637,15 +717,17 @@ test('the lever thresholds on the production countOpenPrsAwaitingFirstPassReview
 // mode would be an armed knob that does nothing, which is indistinguishable from
 // the monoculture it replaces.
 
-test('watcher.mjs builds the per-tick controller from the production depth counter', () => {
+test('watcher.mjs builds the per-tick controller from both production depth counters', () => {
   const src = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
   assert.match(src, /createFirstPassSpilloverController\(\{[^}]*readDepth: countOpenPrsAwaitingFirstPassReview/);
+  assert.match(src, /readRereviewDepth: countOpenPrsAwaitingRereview/);
   assert.match(src, /^\s*firstPassSpilloverController,$/m, 'controller must be threaded into the per-PR ctx');
 });
 
 test('pollonce-phases passes depth pressure in and charges the cost ledger back', () => {
   const src = readFileSync(new URL('../src/pollonce-phases.mjs', import.meta.url), 'utf8');
-  assert.match(src, /depthPressure: firstPassSpilloverController\?\.depthPressure\?\.\(\) \?\? null/);
+  assert.match(src, /depthPressure: firstPassSpilloverController\?\.depthPressure\?\.\(depthPassKind\) \?\? null/);
+  assert.match(src, /passKind: depthPassKind/);
   // Cost is charged only for a spill that actually landed on a route, and only
   // for the depth trigger — a quota fallback must not spend the depth budget.
   assert.match(

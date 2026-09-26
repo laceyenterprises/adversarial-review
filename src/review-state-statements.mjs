@@ -310,6 +310,28 @@ export const SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW =
   "  SELECT 1 FROM reviewer_passes " +
   "  WHERE reviewer_passes.repo = reviewed_prs.repo " +
   "    AND reviewer_passes.pr_number = reviewed_prs.pr_number " +
+  "    AND reviewer_passes.pass_kind = 'first-pass' " +
+  "    AND reviewer_passes.status = 'completed' " +
+  "    AND reviewer_passes.gh_comment_id IS NOT NULL " +
+  "    AND reviewer_passes.gh_comment_id <> ''" +
+  ")";
+
+// Open PRs currently waiting for a re-review. A genuine completed first pass
+// establishes that this is the re-review lane; rereview_requested_at is the
+// durable wake marker retained while the candidate waits for reviewer
+// admission (including Gemini credential saturation). Head-refresh re-reviews
+// can clear that marker, so posted_at=NULL is the companion pending signal.
+export const SQL_COUNT_OPEN_AWAITING_REREVIEW =
+  "SELECT COUNT(*) AS n FROM reviewed_prs " +
+  "WHERE pr_state = 'open' " +
+  "AND (rereview_requested_at IS NOT NULL OR posted_at IS NULL) " +
+  `AND (review_status IS NULL OR review_status NOT IN ('malformed', 'unroutable-bot-author', 'argus-security-queued', '${REREVIEW_CI_BLOCKED_STATUS}')) ` +
+  "AND EXISTS ( " +
+  "  SELECT 1 FROM reviewer_passes " +
+  "  WHERE reviewer_passes.repo = reviewed_prs.repo " +
+  "    AND reviewer_passes.pr_number = reviewed_prs.pr_number " +
+  "    AND reviewer_passes.pass_kind = 'first-pass' " +
+  "    AND reviewer_passes.status = 'completed' " +
   "    AND reviewer_passes.gh_comment_id IS NOT NULL " +
   "    AND reviewer_passes.gh_comment_id <> ''" +
   ")";

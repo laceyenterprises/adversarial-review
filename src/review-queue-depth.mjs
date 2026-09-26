@@ -96,6 +96,8 @@ export const FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT =
 
 export const REVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY =
   'watcher.first_pass_review_queue_depth_failover_threshold';
+export const REREVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY =
+  'watcher.rereview_queue_depth_failover_threshold';
 
 const REPORT_RELATIVE_PATH = ['data', 'review-queue-depth-failover.json'];
 const REPORT_SCHEMA_VERSION = 1;
@@ -157,6 +159,29 @@ export function resolveFirstPassReviewQueueDepthFailoverThreshold({
     contextKey: REVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY,
   }).get(REVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY, null);
   if (raw === undefined || raw === null || raw === '') return null;
+  const parsed = Number.parseInt(String(raw), 10);
+  return Number.isInteger(parsed) && parsed >= 1 ? parsed : null;
+}
+
+export function resolveRereviewQueueDepthFailoverThreshold({
+  env = process.env,
+  topPath,
+  modulePaths,
+  loaderImpl,
+  firstPassThreshold,
+} = {}) {
+  const raw = loadRoleConfig({
+    env,
+    topPath,
+    modulePaths,
+    loaderImpl,
+    contextKey: REREVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY,
+  }).get(REREVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY, null);
+  if (raw === undefined || raw === null || raw === '') {
+    return firstPassThreshold === undefined
+      ? resolveFirstPassReviewQueueDepthFailoverThreshold({ env, topPath, modulePaths, loaderImpl })
+      : firstPassThreshold;
+  }
   const parsed = Number.parseInt(String(raw), 10);
   return Number.isInteger(parsed) && parsed >= 1 ? parsed : null;
 }
@@ -252,17 +277,20 @@ export function readReviewQueueDepthFailoverReport(rootDir, { readFileImpl = rea
  */
 export function createFirstPassSpilloverController({
   readDepth = null,
+  readRereviewDepth = null,
   env = process.env,
   rootDir,
   logger = console,
   now = () => new Date(),
   readDepthImpl = readFirstPassReviewQueueDepth,
   resolveThresholdImpl = resolveFirstPassReviewQueueDepthFailoverThreshold,
+  resolveRereviewThresholdImpl = resolveRereviewQueueDepthFailoverThreshold,
   readReportImpl = readReviewQueueDepthFailoverReport,
   writeFileImpl = writeFileAtomic,
 } = {}) {
-  let plan = null;
-  let remaining = 0;
+  const plans = new Map();
+  const remainingByKind = new Map();
+  const grantedByKind = new Map();
   let granted = 0;
   const reservations = new Map();
   let report = null;
@@ -278,11 +306,15 @@ export function createFirstPassSpilloverController({
     }
   }
 
-  function evaluate() {
-    if (plan) return plan;
+  function evaluate(passKind = 'first-pass') {
+    const kind = passKind === 'rereview' ? 'rereview' : 'first-pass';
+    if (plans.has(kind)) return plans.get(kind);
     let threshold = null;
     try {
-      threshold = resolveThresholdImpl({ env });
+      const firstPassThreshold = resolveThresholdImpl({ env });
+      threshold = kind === 'rereview'
+        ? resolveRereviewThresholdImpl({ env, firstPassThreshold })
+        : firstPassThreshold;
     } catch (err) {
       logger?.warn?.(
         `[watcher] review-queue-depth-failover threshold unreadable; staying disarmed: ${err?.message || err}`
@@ -290,16 +322,20 @@ export function createFirstPassSpilloverController({
       threshold = null;
     }
     // Disarmed is the overwhelmingly common case; do not pay a SQL count for it.
-    const depth = threshold === null ? null : readDepthImpl(readDepth, { logger });
-    plan = firstPassSpilloverPlan({ depth, threshold });
-    remaining = plan.spillSlots;
-    granted = 0;
+    const depthReader = kind === 'rereview' ? readRereviewDepth : readDepth;
+    const depth = threshold === null ? null : readDepthImpl(depthReader, { logger });
+    const plan = firstPassSpilloverPlan({ depth, threshold });
+    plans.set(kind, plan);
+    remainingByKind.set(kind, plan.spillSlots);
+    grantedByKind.set(kind, 0);
 
     report = readReportImpl(rootDir);
     const at = now().toISOString();
     const wasEngaged = report.engaged === true;
     report.schemaVersion = REPORT_SCHEMA_VERSION;
-    report.knob = REVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY;
+    report.knob = kind === 'rereview'
+      ? REREVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY
+      : REVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY;
     report.depthUnit = FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT;
     report.armed = plan.armed;
     report.engaged = plan.engaged;
@@ -351,10 +387,12 @@ export function createFirstPassSpilloverController({
     const reservationKey = `${repo}#${prNumber}`;
     const reservation = reservations.get(reservationKey);
     if (!reservation || granted <= 0) return false;
-    const current = evaluate();
+    const passKind = reservation.passKind || 'first-pass';
+    const current = evaluate(passKind);
     reservations.delete(reservationKey);
-    remaining += 1;
+    remainingByKind.set(passKind, (remainingByKind.get(passKind) || 0) + 1);
     granted -= 1;
+    grantedByKind.set(passKind, Math.max(0, (grantedByKind.get(passKind) || 0) - 1));
     report.cost.spilloverReviewsTotal = Math.max(0, Number(report.cost.spilloverReviewsTotal || 0) - 1);
     const to = String(toWorkerClass || reservation.toWorkerClass || 'unknown').trim().toLowerCase() || 'unknown';
     report.cost.byWorkerClass[to] = Math.max(0, Number(report.cost.byWorkerClass[to] || 0) - 1);
@@ -365,7 +403,7 @@ export function createFirstPassSpilloverController({
     report.updatedAt = now().toISOString();
     logger?.warn?.(
       `[watcher] review-queue-depth-spillover-refund repo=${repo} pr=${prNumber} `
-      + `reason=${reason} remaining=${remaining}/${current.spillSlots}`
+      + `pass_kind=${passKind} reason=${reason} remaining=${remainingByKind.get(passKind)}/${current.spillSlots}`
     );
     persist();
     return true;
@@ -373,8 +411,8 @@ export function createFirstPassSpilloverController({
 
   return {
     /** Memoized per-tick plan. */
-    plan() {
-      return evaluate();
+    plan(passKind = 'first-pass') {
+      return evaluate(passKind);
     },
     /**
      * Snapshot handed to `resolveReviewerWorkerClassWithFallback`. `engaged` is
@@ -382,8 +420,10 @@ export function createFirstPassSpilloverController({
      * tick's spill budget is spent — in all three cases the resolver takes its
      * pre-RSP-01 path unchanged.
      */
-    depthPressure() {
-      const current = evaluate();
+    depthPressure(passKind = 'first-pass') {
+      const kind = passKind === 'rereview' ? 'rereview' : 'first-pass';
+      const current = evaluate(kind);
+      const remaining = remainingByKind.get(kind) || 0;
       return {
         engaged: current.engaged && remaining > 0,
         depth: current.depth,
@@ -396,13 +436,17 @@ export function createFirstPassSpilloverController({
      * Consume one slot and charge the cost ledger. Call ONLY once a depth-driven
      * fallback has actually been applied to a route.
      */
-    recordSpill({ repo = null, prNumber = null, fromWorkerClass = null, toWorkerClass = null } = {}) {
-      const current = evaluate();
+    recordSpill({ repo = null, prNumber = null, fromWorkerClass = null, toWorkerClass = null, passKind = 'first-pass' } = {}) {
+      const kind = passKind === 'rereview' ? 'rereview' : 'first-pass';
+      const current = evaluate(kind);
+      let remaining = remainingByKind.get(kind) || 0;
       if (!current.engaged || remaining <= 0) return false;
       remaining -= 1;
+      remainingByKind.set(kind, remaining);
       granted += 1;
+      grantedByKind.set(kind, (grantedByKind.get(kind) || 0) + 1);
       const to = String(toWorkerClass || 'unknown').trim().toLowerCase() || 'unknown';
-      reservations.set(`${repo}#${prNumber}`, { state: 'pending', toWorkerClass: to });
+      reservations.set(`${repo}#${prNumber}`, { state: 'pending', toWorkerClass: to, passKind: kind });
       report.cost.spilloverReviewsTotal = Number(report.cost.spilloverReviewsTotal || 0) + 1;
       report.cost.byWorkerClass[to] = Number(report.cost.byWorkerClass[to] || 0) + 1;
       report.cost.currentEngagementSpilloverReviews =
@@ -410,8 +454,8 @@ export function createFirstPassSpilloverController({
       report.updatedAt = now().toISOString();
       logger?.warn?.(
         `[watcher] review-queue-depth-spillover repo=${repo} pr=${prNumber} `
-        + `from=${fromWorkerClass} to=${to} depth=${current.depth} threshold=${current.threshold} `
-        + `slot=${granted}/${current.spillSlots} `
+        + `from=${fromWorkerClass} to=${to} pass_kind=${kind} depth=${current.depth} threshold=${current.threshold} `
+        + `slot=${grantedByKind.get(kind)}/${current.spillSlots} `
         + `engagement_spillover_reviews=${report.cost.currentEngagementSpilloverReviews} `
         + `total_spillover_reviews=${report.cost.spilloverReviewsTotal}`
       );

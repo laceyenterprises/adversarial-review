@@ -28,8 +28,11 @@ import {
   prepareMarkInfraAutoRecoveryAttemptStarted,
   prepareMarkAttemptStarted,
   prepareMarkMergedPendingReviewSkipped,
+  prepareMarkReviewerCredentialOutage,
+  preparePromoteReviewerCredentialOutage,
   prepareMarkRereviewCiBlocked,
   prepareMarkRereviewCiBlockedRecheck,
+  prepareRearmReviewerCredentialOutage,
   prepareMarkReviewerCommandFailedRecoveredPosted,
   sqlSumReviewerPassSpendSince,
 } from './review-state-statements.mjs';
@@ -362,29 +365,9 @@ export const stmtReleaseReviewLeaseQuota = db.prepare(
 export const stmtMarkOutageTransient = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'pending-upstream', failed_at = ?, failure_message = ?, quota_reset_at_utc = ?, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
 );
-export const stmtMarkReviewerCredentialOutage = db.prepare(
-  `UPDATE reviewed_prs
-      SET review_status = 'pending-upstream', failed_at = ?, failure_message = ?,
-          quota_reset_at_utc = NULL, reviewer_lease_expires_at = NULL
-    WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'`
-);
-export const stmtPromoteReviewerCredentialOutage = db.prepare(
-  `UPDATE reviewed_prs
-      SET review_status = 'pending-upstream', failure_message = ?,
-          infra_auto_recover_attempts = 0, reviewer_lease_expires_at = NULL
-    WHERE COALESCE(pr_state, 'open') = 'open'
-      AND lower(COALESCE(reviewer, '')) = ?
-      AND lower(COALESCE(failure_message, '')) LIKE '[oauth-broken]%'`
-);
-export const stmtRearmReviewerCredentialOutage = db.prepare(
-  `UPDATE reviewed_prs
-      SET review_status = 'pending', failed_at = NULL, failure_message = NULL,
-          quota_reset_at_utc = NULL, reviewer_lease_expires_at = NULL,
-          infra_auto_recover_attempts = 0
-    WHERE COALESCE(pr_state, 'open') = 'open'
-      AND lower(COALESCE(reviewer, '')) = ?
-      AND lower(COALESCE(failure_message, '')) LIKE ?`
-);
+export const stmtMarkReviewerCredentialOutage = prepareMarkReviewerCredentialOutage(db);
+export const stmtPromoteReviewerCredentialOutage = preparePromoteReviewerCredentialOutage(db);
+export const stmtRearmReviewerCredentialOutage = prepareRearmReviewerCredentialOutage(db);
 export const stmtMarkCascadeFailed = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
 );

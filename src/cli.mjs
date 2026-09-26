@@ -26,6 +26,9 @@ Usage:
   adversarial-review reset-pr <owner/repo> <pr-number> [options]
   adversarial-review tokens [--since 7d] [--by-pr | --by-reviewer] [--json]
   adversarial-review reviewer-roster [--json]
+  adversarial-review burst status [--root <dir>] [--json]
+  adversarial-review burst request --repo <owner/repo> --reason <text> [--ttl 30m] [--slots <n>] [--budget <usd>] [--pack <token>]
+  adversarial-review burst revoke [--reason <text>] [--root <dir>] [--json]
   adversarial-review duplicate-family packet <family-id> [--root <dir>] [--repo-dir <dir>] [--out <dir>] [--no-github]
   adversarial-review handoff status [--repo <owner/repo>] [--window <24h>] [--root <dir>] [--json]
   adversarial-review handoff trace <owner/repo#pr> [--root <dir>] [--json]
@@ -165,6 +168,12 @@ async function main(argv, io = {}) {
   }
   if (command === 'reviewer-roster') {
     return reviewerRosterMain(rest, io);
+  }
+  if (command === 'burst') {
+    // Lazy import: the burst surface pulls in the pipeline-health collector for
+    // its safety check, and unrelated commands must not pay for that graph.
+    const { burstMain } = await import('./reviewer-burst-cli.mjs');
+    return burstMain(rest, io);
   }
   if (command === 'duplicate-family') {
     const { duplicateFamilyMain } = await import('./duplicate-family-packet.mjs');

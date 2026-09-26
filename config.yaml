@@ -105,6 +105,7 @@ roles:
       # cadence; later HOM tickets enable each step independently.
       enabled: false
       review_to_remediation: false
+      # Retired by RPL-04; see the top-level handoff.remediation_to_rereview note.
       remediation_to_rereview: false
       final_to_hammer: false
       max_per_pr_head: 20
@@ -207,11 +208,12 @@ feature_flags:
   allow_missing_alert_to: false
 
 handoff:
-  # When a remediation reply successfully resets a review row to pending,
-  # wake the watcher immediately instead of waiting for the next scheduled poll.
-  # Env override:
-  #   ADVERSARIAL_HANDOFF_REMEDIATION_TO_REREVIEW /
-  #     AGENT_OS_HANDOFF_REMEDIATION_TO_REREVIEW
+  # RETIRED by RPL-04 and now inert. The remediation -> re-review wake is always
+  # on and runs through the durable queue in src/rereview-wake.mjs; its kill
+  # switch is the ADVERSARIAL_REREVIEW_WAKE env var (default on), not this key.
+  # The key is kept because config.yaml is validated by three strict loaders in
+  # two repositories and removing it from one ahead of the others crash-loops
+  # the daemon that reads it first.
   remediation_to_rereview: false
   # HOM-04 final handoff is intentionally default-off. Operators enable this
   # last, after earlier handoffs prove safe.

@@ -839,6 +839,95 @@ Stop behavior:
 
 ---
 
+## Event-driven re-review wakes (RPL-04)
+
+A remediation closeout or a CI state transition no longer waits for the next
+scheduled watcher poll. It enqueues a durable re-review wake and nudges the
+watcher to start a tick now.
+
+### What a wake is and is not
+
+A wake is a **scheduling request**, not an admission decision. It does not reset
+a review row, claim one, or spawn a reviewer; the producer has already armed the
+re-review via `requestReviewRereview` before enqueueing. Every existing gate —
+CI admission, active-follow-up defer, cascade backoff, review-cycle caps,
+terminal-PR guards — still runs unchanged. If the queue is empty, wrong, or
+disabled, the ordinary poll still picks the PR up.
+
+### How a producer fires one
+
+Remediation closeout fires it automatically in `reconcileFollowUpJob` once the
+re-review reset is accepted; the result lands on the job as `reReview.wake`.
+A hammer, remediator, CI hook, or operator fires one the same way from the CLI:
+
+```bash
+npm run rereview-wake -- request \
+  --repo laceyenterprises/agent-os --pr 6603 \
+  --head-sha <head> --reason operator
+```
+
+Valid `--reason` values are `remediation-closeout`, `ci-transition`,
+`follow-up-eligible`, and `operator`. Requests coalesce on
+`(repo, PR, head SHA, reason)`, so re-running the command is safe and exits
+zero — a coalesced duplicate prints `duplicate` and fires no second wake.
+
+From a script that is not inside this checkout, call `bin/rereview-wake.mjs`
+directly with `--root-dir <adversarial-review root>`.
+
+### How an operator inspects the queue
+
+```bash
+npm run rereview-wake -- status                      # whole queue
+npm run rereview-wake -- status --repo <owner/name>  # scoped to one repo
+npm run rereview-wake -- status --json               # machine-readable
+```
+
+`status` reports backlog depth, the oldest request and its age, a per-reason
+breakdown, and — the number to read first — a per-**hold**-reason breakdown.
+A hold reason names what admission found that stopped it settling the request:
+
+- `ci-blocked`: external CI is red on the parked head. This is expected and is
+  the case the queue deliberately keeps pending rather than dropping.
+- `awaiting-admission:<status>`: the row exists but is in some other
+  non-admitting status; read `review_status` for that PR next.
+
+Scoping with `--repo`/`--pr` filters the entries but deliberately leaves the
+aggregate counts fleet-wide, so a scoped lookup never makes a large backlog look
+small.
+
+The latency report carries the same numbers alongside the rest of the pipeline:
+
+```bash
+npm run latency:report -- --since 24h
+```
+
+Look for the `rereview wake queue:` line and the
+`rereview_wake -> row_claimed` stage. A growing `pending` with a rising
+`oldest` is the fingerprint of stalled admission, not of a quiet queue.
+
+### On disk
+
+- `data/rereview-wakes/pending/` — outstanding requests
+- `data/rereview-wakes/settled/` — terminal records, `.completed.json` or
+  `.skipped.json`
+- `review_latency_events` rows of type `rereview_wake` — one per state
+  transition (`requested`, `claimed`, `completed`, `skipped`)
+
+See `docs/data-model/rereview-wakes.md` for the record schema and the full
+settle-reason table.
+
+### Kill switch
+
+`ADVERSARIAL_REREVIEW_WAKE=0` on the watcher and follow-up plists disables the
+queue. Disabling degrades re-review latency to the poll cadence — the
+pre-RPL-04 behaviour — and never stops the pipeline. The retired
+`handoff.remediation_to_rereview` config key no longer gates this path; it is
+kept in `config.yaml` only because three strict loaders in two repositories
+validate that file and removing a key from one ahead of the others crash-loops
+whichever daemon reads it first.
+
+---
+
 ## Durable metadata operators should read
 
 ### In the follow-up job JSON

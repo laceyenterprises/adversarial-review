@@ -180,6 +180,17 @@ function resolveFirstPassReviewerPoolConfig({
   modulePaths,
   loaderImpl,
   logger = console,
+  // RPL-07: additional slots granted by an active operator burst lease. 0 (the
+  // default, and the value on every host with no lease) leaves this function
+  // byte-identical to pre-RPL-07. Burst slots are added to the CONFIGURED
+  // ceiling and then re-clamped to the same system maximum, so a burst can
+  // never lift the pool past the bound a non-burst host is already held to.
+  //
+  // Note what this does NOT do: it does not raise the Gemini/AGY in-flight cap,
+  // which stays pinned to the live credential count by
+  // resolveGeminiDispatchConcurrencyLimit. These slots exist so the entitled
+  // fallback reviewers a burst lease admits have somewhere to run.
+  burstSlots = 0,
 } = {}) {
   const configuredEnabled = watcherConfig.firstPassReviewerPoolEnabled
     ?? watcherConfig.reviewerPoolEnabled
@@ -210,7 +221,7 @@ function resolveFirstPassReviewerPoolConfig({
     configuredMaxSource = 'watcherConfig.reviewerPoolMaxConcurrent';
   }
   const cfgMax = _resolveFirstPassPoolMaxFromCfg(env, { topPath, modulePaths, loaderImpl });
-  const maxConcurrent = normalizeFirstPassReviewerPoolMax(
+  const steadyMaxConcurrent = normalizeFirstPassReviewerPoolMax(
     cfgMax,
     {
       fallback: parsePositiveInteger(configuredMax, DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX),
@@ -218,6 +229,15 @@ function resolveFirstPassReviewerPoolConfig({
       logger,
     }
   );
+  const burst = Math.max(0, Math.trunc(Number(burstSlots) || 0));
+  const maxConcurrent = burst > 0
+    ? Math.min(MAX_FIRST_PASS_REVIEWER_POOL_MAX, steadyMaxConcurrent + burst)
+    : steadyMaxConcurrent;
+  // The returned SHAPE is deliberately unchanged: several suites assert this
+  // object with deepStrictEqual, and the burst posture is already reported —
+  // authoritatively, from the durable lease record — by `burst status` and the
+  // review-pipeline health surface. Widening this return with a second, derived
+  // copy of that state would add a number that can disagree with the lease.
   return {
     enabled,
     maxConcurrent: enabled ? maxConcurrent : 1,
@@ -282,6 +302,9 @@ function reviewerDispatchSortTimeMs(candidate) {
 // watcher.review_lane_first_pass_burst_limit gives rereviews a floor after the
 // configured number of real first-pass dispatches.
 function reviewerDispatchIsFirstPass(candidate) {
+  // posted_at and rereview_requested_at may both be cleared when a queued PR's
+  // head moves. Use durable posted-pass evidence before trusting the row state.
+  if (candidate?.hasPriorPostedReview === true) return false;
   const current = candidate?.current;
   if (!current) return true;
   // Rereview requests clear posted_at while waiting for the next reviewer pass,

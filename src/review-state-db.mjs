@@ -31,6 +31,7 @@ import {
   prepareMarkRereviewCiBlocked,
   prepareMarkRereviewCiBlockedRecheck,
   prepareMarkReviewerCommandFailedRecoveredPosted,
+  sqlSumReviewerPassSpendSince,
 } from './review-state-statements.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -289,6 +290,14 @@ export const stmtReleaseReviewerClaim = db.prepare(
 export const stmtMarkPosted = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, quota_reset_at_utc = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL, infra_auto_recover_attempts = 0 WHERE repo = ? AND pr_number = ?"
 );
+// Head refresh clears reviewed_prs.posted_at. The pass ledger keeps durable
+// evidence that a prior review actually reached GitHub for this PR.
+export const stmtHasPostedReview = db.prepare(
+  `SELECT 1 FROM reviewer_passes
+    WHERE repo = ? AND pr_number = ?
+      AND gh_comment_id IS NOT NULL AND gh_comment_id <> ''
+    LIMIT 1`
+);
 export const stmtRestoreSameHeadSuppressedReviewPosted = db.prepare(
   `UPDATE reviewed_prs
       SET review_status = 'posted',
@@ -486,4 +495,40 @@ export function countOpenPrsAwaitingFirstPassReview(handle = db) {
       : handle.prepare(SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW);
   const n = stmt.get()?.n;
   return Number.isFinite(n) ? n : 0;
+}
+
+// RPL-07 — observed reviewer spend inside an active burst-lease window, in
+// `BURST_SPEND_UNIT`. Supplied to `createReviewerBurstController` as
+// `readSpendUsd` so the dollar limb of the burst budget guard reads the same
+// production ledger every other cost surface reads.
+//
+// Returns `null` — NOT zero — when the lease is unusable for a spend read or
+// when passes exist but NONE carries a cost. `null` means "unreadable", and the
+// burst controller degrades to its always-enforceable review-count cap rather
+// than concluding a burst has spent nothing. Reporting an unknown spend as $0
+// would let a lease with broken cost telemetry run to its TTL against a budget
+// it was silently never checked against.
+//
+// PARTIAL coverage (some passes costed, some not) returns the partial sum. That
+// is the common case and it is not a defect: `token_cost_usd` is written when a
+// pass ENDS, so every in-flight reviewer is legitimately uncosted. The figure
+// therefore trails real spend by the passes still running, which is why the
+// review-count cap — not this number — is the limb that guarantees a bound.
+export function readBurstScopedReviewerSpendUsd({ lease } = {}, handle = db) {
+  const repos = Array.isArray(lease?.repos)
+    ? lease.repos.map((repo) => String(repo || '').trim().toLowerCase()).filter(Boolean)
+    : [];
+  const activatedAt = lease?.activatedAt || lease?.requestedAt || null;
+  if (repos.length === 0 || !activatedAt) return null;
+  const spaceBound = String(activatedAt).replace('T', ' ').slice(0, 19);
+  const isoDayPrefix = `${String(activatedAt).slice(0, 10)}T`;
+  const row = handle.prepare(sqlSumReviewerPassSpendSince(repos.length)).get(
+    activatedAt, spaceBound, isoDayPrefix, ...repos
+  );
+  const passCount = Number(row?.pass_count || 0);
+  const uncosted = Number(row?.uncosted_pass_count || 0);
+  // No passes means measured $0. Passes with no cost are an unreadable ledger.
+  if (passCount > 0 && uncosted >= passCount) return null;
+  const spend = Number(row?.spend_usd);
+  return Number.isFinite(spend) && spend >= 0 ? spend : null;
 }

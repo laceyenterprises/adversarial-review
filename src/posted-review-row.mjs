@@ -45,6 +45,7 @@ import { retryPendingTriageSyncs } from './pending-triage-sync.mjs';
 import { retryPendingRetriggerAckComments } from './follow-up-retrigger-label.mjs';
 import { retryPendingRetriggerReviewAckComments } from './follow-up-retrigger-review-label.mjs';
 import { db, stmtGetLatestPostedReviewBody, stmtGetReviewRow } from './review-state-db.mjs';
+import { rereviewWakeBacklog, sweepRereviewWakeQueue } from './rereview-wake.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import {
   evaluateNoProgressLane,
@@ -1068,6 +1069,8 @@ export async function runQueuedReviewAdoptionPhase({
   noProgressLaneGate = createNoProgressLaneGate({ rootDir, logger }),
   runPostedReviewHandlersFairlyImpl = runPostedReviewHandlersFairly,
   postedReviewPriorityTargets = [],
+  sweepRereviewWakeQueueImpl = sweepRereviewWakeQueue,
+  rereviewWakeBacklogImpl = rereviewWakeBacklog,
 } = {}) {
   if (typeof drainReviewerDispatchCandidates !== 'function') {
     throw new TypeError('runQueuedReviewAdoptionPhase requires drainReviewerDispatchCandidates');
@@ -1088,6 +1091,38 @@ export async function runQueuedReviewAdoptionPhase({
   const reviewerDispatchCount = Number(reviewerDrainResult?.dispatched || 0);
   const reviewerDeferredCount = Number(reviewerDrainResult?.deferred || 0);
   const reviewerPressure = reviewerDispatchCount > 0 || reviewerDeferredCount > 0;
+
+  // RPL-04 backstop. The admission lane settles rereview wakes for the PRs it
+  // visits; this sweep covers the ones it cannot reach — a PR that dropped out
+  // of the open listing, a repo removed from the watch set, a request written
+  // for a PR this watcher has never seen. Without it those records would sit in
+  // the backlog until retention age and make the operator backlog number
+  // meaningless.
+  //
+  // Placement is deliberate: AFTER the lifecycle sync above, so the mirrored
+  // `pr_state` it classifies against is this tick's truth rather than the
+  // previous tick's (a merged PR whose mirror still read 'open' would be held
+  // instead of retired); and AFTER the reviewer drain, so a filesystem scan can
+  // never sit in front of a reviewer launch. Bounded per tick and fail-open — a
+  // sweep fault must never stop the adoption phase.
+  try {
+    const wakeSweep = sweepRereviewWakeQueueImpl({
+      rootDir,
+      lookupReviewRow: (repo, prNumber) => stmtGetReviewRow.get(repo, prNumber) || null,
+      log: logger,
+    });
+    const backlog = rereviewWakeBacklogImpl({ rootDir });
+    if (wakeSweep.scanned > 0 || backlog.pending > 0) {
+      logger?.log?.(
+        `[watcher] rereview-wake queue: pending=${backlog.pending} `
+        + `unclaimed=${backlog.unclaimed} oldest_age_ms=${backlog.oldestAgeMs ?? 'none'} `
+        + `swept=${wakeSweep.scanned} completed=${wakeSweep.completed} skipped=${wakeSweep.skipped} `
+        + `held=${wakeSweep.held}`
+      );
+    }
+  } catch (err) {
+    logger?.error?.(`[watcher] rereview wake backlog sweep raised: ${err?.message || err}`);
+  }
   const boundedReviewerPressurePhaseBudgetMs = reviewerPressure
     ? Math.min(
         postedReviewPhaseBudgetMs,

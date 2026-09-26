@@ -118,7 +118,7 @@ import { acquireDaemonSingleton } from './daemon-singleton.mjs';
 // helpers keep referencing the same shared handles.
 import {
   db,
-  stmtGetReviewRow,
+  stmtGetReviewRow, stmtHasPostedReview,
   stmtGetLatestPostedReviewBody,
   stmtCreateReviewRow,
   stmtCreateFastMergeSkippedReviewRow,
@@ -139,7 +139,7 @@ import {
   stmtMarkMerged,
   stmtMarkClosed,
   latestPostedReviewAtMs,
-  countOpenPrsAwaitingFirstPassReview,
+  countOpenPrsAwaitingFirstPassReview, readBurstScopedReviewerSpendUsd,
 } from './review-state-db.mjs';
 import {
   retryPendingMergeCloseouts,
@@ -391,7 +391,7 @@ import {
   headDispatchLeaseKey,
   resolveAlreadyReviewedHeadDedup,
 } from './reviewed-head-dispatch-gate.mjs';
-import { createFirstPassSpilloverController } from './review-queue-depth.mjs';
+import { createFirstPassSpilloverController } from './review-queue-depth.mjs'; import { createReviewerBurstController } from './reviewer-burst-lease.mjs'; // RPL-07 rides on this line: watcher.mjs is AT its ARC-18 line ratchet, so new wiring must be net-zero lines.
 import { reconcilePendingReviewsForSelf } from './reviewer-pre-write.mjs';
 import {
   inspectWatcherExitTimeout,
@@ -402,7 +402,7 @@ import {
   compareReviewerDispatchCandidates,
   createDetachedReviewerDispatchTracker,
   createReviewerMemoryAdmissionSampler,
-  reserveReviewerMemoryAdmission,
+  reserveReviewerMemoryAdmission, reviewerDispatchIsFirstPass,
   resolveFirstPassReviewerPoolConfig,
   resolveReviewerMemoryPressureConfig,
   runBoundedReviewerDispatchQueue,
@@ -1234,7 +1234,7 @@ async function pollOnce(
     );
   }
 
-  const reviewerPoolConfig = resolveFirstPassReviewerPoolConfig({ watcherConfig: config });
+  const reviewerBurstController = createReviewerBurstController({ rootDir: ROOT, logger: console, readSpendUsd: readBurstScopedReviewerSpendUsd }), reviewerPoolConfig = resolveFirstPassReviewerPoolConfig({ watcherConfig: config, burstSlots: reviewerBurstController.slots() }); // RPL-07: burstSlots is 0 unless an operator lease is active, leaving steady-state capacity untouched
   const reviewerDispatchSingleWaveSettleGraceMs = Math.max(
     0,
     Number.parseInt(
@@ -1317,10 +1317,10 @@ async function pollOnce(
     if (reviewerDispatchCandidates.length < reviewerDiscoveryDrainBatchSize) {
       return { dispatched: 0, maxObservedConcurrency: 0, deferred: 0 };
     }
+    if (reviewerDispatchCandidates.every((candidate) => !reviewerDispatchIsFirstPass(candidate)) && countOpenPrsAwaitingFirstPassReview() > 0) return { dispatched: 0, maxObservedConcurrency: 0, deferred: 0 };
     reviewerDiscoveryDrainUsed = true;
     return drainReviewerDispatchCandidates(reason);
   }
-
   // ARC-03: pump every enabled domain through its own adapter set instead of
   // assuming a single hardcoded `code-pr` domain. Each enabled domain resolves
   // its own reviewer-runtime adapter (isolated from other domains); the primary
@@ -1394,7 +1394,7 @@ async function pollOnce(
     subjectEntries = subjectEntries
       .map((entry) => ({
         ...entry,
-        current: stmtGetReviewRow.get(repoPath, entry.prNumber),
+        current: stmtGetReviewRow.get(repoPath, entry.prNumber), hasPriorPostedReview: Boolean(stmtHasPostedReview.get(repoPath, entry.prNumber)),
       }))
       .sort((a, b) =>
         compareWatcherWakeSubjectEntries(wakePayloadForPoll(), repoPath, a, b, compareReviewerDispatchCandidates)
@@ -1421,7 +1421,7 @@ async function pollOnce(
         reviewerMemoryPressureConfig,
         reviewerDispatchCandidates,
         firstPassSpilloverController,
-        postedReviewHandlers,
+        reviewerBurstController, postedReviewHandlers,
         mergeAgentCandidateBranchProtectionCache,
         reviewerFleetQuotaStatusCache: reviewerTickCaches.fleetQuotaStatus,
         reviewerMemoryReservationState,

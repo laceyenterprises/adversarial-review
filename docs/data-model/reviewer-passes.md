@@ -1,6 +1,6 @@
 # Reviewer passes
 
-**Source of truth:** `migrations/20260518_reviewer_passes.sql`, `migrations/20260810_reviewer_passes_posted_review_freshness_index.sql`, `src/reviewer-pass-tokens.mjs`, `src/reviewer-spawn-settle.mjs`, `src/pollonce-phases.mjs`, `src/orphan-post-reconcile.mjs`, and `src/follow-up-jobs.mjs`
+**Source of truth:** `migrations/20260518_reviewer_passes.sql`, `migrations/20260810_reviewer_passes_posted_review_freshness_index.sql`, `src/review-state.mjs`, `src/reviewer-pass-tokens.mjs`, `src/reviewer-spawn-settle.mjs`, `src/pollonce-phases.mjs`, `src/orphan-post-reconcile.mjs`, and `src/follow-up-jobs.mjs`
 
 ## Ownership
 
@@ -21,6 +21,10 @@ watcher's review-freshness pager reads those rows through
 `COALESCE(body_captured_at, ended_at)` normalized to fixed millisecond UTC. This
 keeps rereview/remediation-cycle posts visible after `reviewed_prs.posted_at` is
 reset while avoiding freshness scans over non-posted pass history.
+
+`idx_reviewer_passes_repo_started_at` on `(repo COLLATE NOCASE, started_at)` supports the
+burst lease's scoped cost sum. Its query uses raw ISO and SQLite timestamp
+ranges so the index can be used without applying string functions to every row.
 
 ## Posted-review settlement split
 

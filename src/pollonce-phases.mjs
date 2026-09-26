@@ -67,6 +67,7 @@ import {
   resolveReviewerWorkerClassWithFallback,
   reviewWorkerClassFallback,
 } from './review-worker-class-fallback.mjs';
+import { packTokensForSubject } from './reviewer-burst-lease.mjs';
 import {
   fetchReviewsForHeadForDedup,
   getStalePostedReviewBudgetSuppression,
@@ -128,6 +129,7 @@ import {
   stmtCreateReviewRow,
   stmtFinalizePendingTerminalFailure,
   stmtGetReviewRow,
+  stmtHasPostedReview,
   stmtMarkAttemptStarted,
   stmtMarkClosed,
   stmtMarkInfraAutoRecoveryAttemptStarted,
@@ -154,6 +156,11 @@ import {
   requestReviewRereview,
 } from './review-state.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
+import {
+  REREVIEW_WAKE_REASONS,
+  consumeRereviewWakes,
+  requestRereviewWake,
+} from './rereview-wake.mjs';
 import {
   buildDuplicateReviewSkipAudit,
   headDispatchLeaseKey,
@@ -217,7 +224,7 @@ import {
   reserveReviewerMemoryAdmission,
   reviewerDispatchPassKind,
 } from './watcher-reviewer-pool.mjs';
-import { watcherWakeMatchesSubject } from './watcher-wake.mjs';
+import { requestWatcherWake, watcherWakeMatchesSubject } from './watcher-wake.mjs';
 
 const DEFAULT_REVIEWER_MODEL_FALLBACK_ALERT_WINDOW_MS = 10 * 60 * 1000;
 const DEFAULT_REVIEWER_MODEL_FALLBACK_ALERT_THRESHOLD = 5;
@@ -639,6 +646,7 @@ export async function processReviewSubject(entry, ctx) {
     reviewerMemoryPressureConfig,
     reviewerDispatchCandidates,
     firstPassSpilloverController = null,
+    reviewerBurstController = null,
     postedReviewHandlers,
     mergeAgentCandidateBranchProtectionCache = null,
     reviewerFleetQuotaStatusCache,
@@ -676,8 +684,11 @@ export async function processReviewSubject(entry, ctx) {
     isFastMergeSkipEnabled,
     normalizeReviewPopulationRetryConfig,
     shouldDeferReviewForActiveFollowUp,
+    requestWatcherWakeImpl = requestWatcherWake,
     wakePayload = null,
     admissionSettlementSplitEnabled = false,
+    consumeRereviewWakesImpl = consumeRereviewWakes,
+    requestRereviewWakeImpl = requestRereviewWake,
     runDaemonCleanMergeAttemptImpl = runDaemonCleanMergeAttempt,
     findArgusJobImpl = findArgusJob,
     maybeAutoAdjudicateDependencyBotArgusJobImpl = maybeAutoAdjudicateDependencyBotArgusJob,
@@ -685,6 +696,34 @@ export async function processReviewSubject(entry, ctx) {
 
       const prTitle = subject.title || '';
       const effectiveDomainId = domainId || entry.domainId || subject.domainId || WATCHER_PRIMARY_DOMAIN_ID || 'code-pr';
+      // RPL-04: a CI state transition that releases a parked re-review is an
+      // eligibility EDGE, not a poll result. Enqueuing a durable wake here is
+      // what lets the next tick start immediately instead of at the next poll
+      // interval, and it leaves a record an operator can read afterwards. It
+      // fires only when the transition actually re-armed the row, so a refused
+      // reset never produces a phantom wake.
+      const requestCiTransitionRereviewWake = ({ repoPath: wakeRepo, prNumber: wakePr, headSha, armed, detail }) => {
+        if (!armed) return null;
+        try {
+          return requestRereviewWakeImpl({
+            rootDir: ROOT,
+            repo: wakeRepo,
+            prNumber: wakePr,
+            headSha: headSha || null,
+            reason: REREVIEW_WAKE_REASONS.CI_TRANSITION,
+            source: 'watcher-ci-admission',
+            sourceRef: detail,
+            domainId: effectiveDomainId,
+            log: console,
+          });
+        } catch (err) {
+          console.error(
+            `[watcher] CI-transition rereview wake for ${wakeRepo}#${wakePr} failed:`,
+            err?.message || err
+          );
+          return null;
+        }
+      };
       const linearTicketId = operatorSurface.extractLinearTicketId(prTitle);
       const staleDriftSkip = shouldSkipReviewerForStaleDrift({
         number: prNumber,
@@ -1572,6 +1611,10 @@ export async function processReviewSubject(entry, ctx) {
       // armed and this tick still has spill budget. `depthPressure()` is
       // `{ engaged: false }` on every host that has not armed it, which makes
       // the resolver take its pre-RSP-01 path unchanged.
+      // RPL-07: plus the operator burst lease, scoped to this subject's repo and
+      // (optionally) its pack. `pressure()` is `{ engaged: false }` whenever no
+      // lease is active or this subject is out of its scope, which is every
+      // subject on a host with no lease.
       const reviewerAuthorClass = subject.builderClass || route.builderClass;
       const primaryReviewerWorkerClass = reviewerWorkerClassForRoute(route);
       const rwfDecision = await resolveReviewerWorkerClassWithFallback({
@@ -1579,6 +1622,16 @@ export async function processReviewSubject(entry, ctx) {
         primary: primaryReviewerWorkerClass,
         fallbackWorkerClasses: reviewWorkerClassFallback(process.env),
         depthPressure: firstPassSpilloverController?.depthPressure?.() ?? null,
+        burstPressure: reviewerBurstController?.pressure?.({
+          repo: repoPath,
+          // Thunk: only a repo-in-scope, pack-scoped lease ever pays for this.
+          packTokens: () => packTokensForSubject({
+            labels: prLabelNames,
+            linearTicketId,
+            title: prTitle,
+            branch: subject.headRefName || '',
+          }),
+        }) ?? null,
         execFileImpl: execFileAsync,
         ...(reviewerFleetQuotaStatusCache
           ? {
@@ -1603,26 +1656,46 @@ export async function processReviewSubject(entry, ctx) {
           authorClass: reviewerAuthorClass,
         });
         if (appliedFallback.applied) {
-          route = appliedFallback.route;
-          // Charge the depth lever's budget/cost ledger only for a spill that
-          // really landed on a route — the operator is owed the number of
-          // non-primary reviews the lever BOUGHT, not the number it attempted.
-          if (rwfDecision.reason === 'queue-depth-pressure') {
-            firstPassSpilloverController?.recordSpill?.({
+          // Pressure is only a snapshot. Another PR in this poll can consume
+          // the last unit before this one commits its fallback route.
+          const burstAdmitted = rwfDecision.reason !== 'burst-lease-pressure'
+            || reviewerBurstController?.recordBurstAdmission?.({
               repo: repoPath,
               prNumber,
+              headSha: subject.headSha || subject.ref?.revisionRef || null,
               fromWorkerClass: rwfDecision.from,
               toWorkerClass: rwfDecision.to,
-            });
+            }) === true;
+          if (!burstAdmitted) {
+            console.warn(
+              `[watcher] review-worker-class-fallback-skipped repo=${repoPath} pr=${prNumber} ` +
+              'reason=burst-review-cap-exhausted'
+            );
+          } else {
+            route = appliedFallback.route;
+            // Charge the depth lever's budget/cost ledger only for a spill that
+            // really landed on a route — the operator is owed the number of
+            // non-primary reviews the lever BOUGHT, not the number it attempted.
+            if (rwfDecision.reason === 'queue-depth-pressure') {
+              firstPassSpilloverController?.recordSpill?.({
+                repo: repoPath,
+                prNumber,
+                fromWorkerClass: rwfDecision.from,
+                toWorkerClass: rwfDecision.to,
+              });
+            }
+            console.warn(
+              `[watcher] review-worker-class-fallback repo=${repoPath} pr=${prNumber} ` +
+              `from=${rwfDecision.from} to=${rwfDecision.to} reason=${rwfDecision.reason} ` +
+              `primaryState=${rwfDecision.primaryState}` +
+              (rwfDecision.queueDepth === undefined
+                ? ''
+                : ` queueDepth=${rwfDecision.queueDepth} queueDepthThreshold=${rwfDecision.queueDepthThreshold}`) +
+              (rwfDecision.burstLeaseId === undefined
+                ? ''
+                : ` burstLeaseId=${rwfDecision.burstLeaseId} burstSlots=${rwfDecision.burstSlots}`)
+            );
           }
-          console.warn(
-            `[watcher] review-worker-class-fallback repo=${repoPath} pr=${prNumber} ` +
-            `from=${rwfDecision.from} to=${rwfDecision.to} reason=${rwfDecision.reason} ` +
-            `primaryState=${rwfDecision.primaryState}` +
-            (rwfDecision.queueDepth === undefined
-              ? ''
-              : ` queueDepth=${rwfDecision.queueDepth} queueDepthThreshold=${rwfDecision.queueDepthThreshold}`)
-          );
         } else {
           console.warn(
             `[watcher] review-worker-class-fallback-skipped repo=${repoPath} pr=${prNumber} ` +
@@ -1861,6 +1934,29 @@ export async function processReviewSubject(entry, ctx) {
 
       let current = stmtGetReviewRow.get(repoPath, prNumber);
       const pendingRevisionRef = subject.ref?.revisionRef || subject.headSha || null;
+      // RPL-04: drain this PR's durable rereview wake requests here, in the
+      // admission lane, because this is the first point in the tick where the
+      // review row and the live head are both known. The drain records what
+      // admission found — it never mutates review state, so it cannot claim a
+      // row, spawn a reviewer, or re-drive a terminal PR. A request the drain
+      // cannot settle stays pending with a named hold reason and is retried on
+      // the next tick; ordinary polling remains the fallback either way.
+      try {
+        consumeRereviewWakesImpl({
+          rootDir: ROOT,
+          repo: repoPath,
+          prNumber,
+          reviewRow: current,
+          currentHeadSha: pendingRevisionRef,
+          subjectTerminal: Boolean(subject.terminal),
+          log: console,
+        });
+      } catch (err) {
+        console.error(
+          `[watcher] rereview wake drain for ${repoPath}#${prNumber} failed:`,
+          err?.message || err
+        );
+      }
       if (
         current?.review_status === 'pending' &&
         pendingRevisionRef &&
@@ -1925,6 +2021,13 @@ export async function processReviewSubject(entry, ctx) {
                   `${String(blockedHeadSha).slice(0, 12)} -> ${String(pendingRevisionRef).slice(0, 12)}`
               );
             }
+            requestCiTransitionRereviewWake({
+              repoPath,
+              prNumber,
+              headSha: pendingRevisionRef,
+              armed: refreshResult.triggered || current?.review_status === 'pending',
+              detail: 'ci-blocked-head-moved',
+            });
           } catch (err) {
             console.error(
               `[watcher] CI-blocked re-review head refresh for ${repoPath}#${prNumber} failed:`,
@@ -1999,6 +2102,13 @@ export async function processReviewSubject(entry, ctx) {
                   `[watcher] re-armed CI-blocked re-review for ${repoPath}#${prNumber}: external CI is green`
                 );
               }
+              requestCiTransitionRereviewWake({
+                repoPath,
+                prNumber,
+                headSha: pendingRevisionRef || blockedHeadSha,
+                armed: refreshResult.triggered || current?.review_status === 'pending',
+                detail: 'ci-green-on-parked-head',
+              });
             } catch (err) {
               console.error(
                 `[watcher] CI-blocked re-review green-CI refresh for ${repoPath}#${prNumber} failed:`,
@@ -2495,6 +2605,7 @@ export async function processReviewSubject(entry, ctx) {
         reviewerModel: route.reviewerModel,
         subject,
         current,
+        hasPriorPostedReview: entry.hasPriorPostedReview ?? Boolean(stmtHasPostedReview.get(repoPath, prNumber)),
         wakePriority: watcherWakeMatchesSubject(wakePayload, {
           repoPath,
           prNumber,
@@ -2523,6 +2634,7 @@ export async function processReviewSubject(entry, ctx) {
 
           let reservation = null;
           let reservationReleased = false;
+          let reviewerSpawned = false;
           const releaseReviewerReservation = () => {
             if (!reservation || reservationReleased) return;
             reservationReleased = true;
@@ -3122,6 +3234,7 @@ export async function processReviewSubject(entry, ctx) {
               // (default OFF), drive the two-stage pipeline instead of a single
               // review and post the Win 2 rollup. Gate-off is byte-identical:
               // the else-branch is the unchanged v1 single `spawnReviewer` call.
+              reviewerSpawned = true;
               const result = pipelineEnabled
                 ? await runWatcherGatedReviewPipeline({
                   domainConfig: domainAdapterSet.domainConfig,
@@ -3177,6 +3290,15 @@ export async function processReviewSubject(entry, ctx) {
           } finally {
             releaseReviewerReservation();
             reviewerHeadDispatchLease.release(dispatchLeaseKey);
+            if (reviewerPoolConfig.enabled && reviewerSpawned) {
+              // The slot is free after settlement or a failed spawn. Fill it
+              // without waiting for the next five-minute scheduled poll.
+              try {
+                requestWatcherWakeImpl({ rootDir: ROOT, reason: 'reviewer-capacity-freed' });
+              } catch (wakeError) {
+                console.warn(`[watcher] reviewer capacity wake failed: ${wakeError?.message || wakeError}`);
+              }
+            }
           }
         },
         supportsAdmissionSplit: Boolean(admissionSettlementSplitEnabled) && !isPipelineEnabled(domainAdapterSet.domainConfig),

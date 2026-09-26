@@ -44,7 +44,7 @@ prompt/audit files already named by this run; do not fall back to broad host
 scans.
 
 For Git synchronization, use the `ham_bounded_git_sync` command provided below.
-It applies the load-aware timeout and retries once. Do not wrap `git fetch` (or
+It applies the load-aware timeout and retries once only for transient failures. Do not wrap `git fetch` (or
 any other git synchronization command) in your own fixed alarm: killing git in
 the middle of a shared worker-base ref update can orphan a lock and poison every
 later retry.
@@ -428,12 +428,42 @@ ham_bounded_git_sync() {
   while [ "$ham_git_sync_attempt" -le 2 ]; do
     ham_git_sync_timeout=$("$HAM_NODE_BIN" <<ROOT_DIR>>/bin/load-aware-timeout.mjs "$HAM_GIT_SYNC_NOMINAL_SECONDS" 2>/dev/null || true)
     case "$ham_git_sync_timeout" in
-      ''|*[!0-9]*) ham_git_sync_timeout="$HAM_GIT_SYNC_NOMINAL_SECONDS" ;;
+      ''|*[!0-9]*|0) ham_git_sync_timeout="$HAM_GIT_SYNC_NOMINAL_SECONDS" ;;
     esac
-    if /usr/bin/perl -e '$t = shift || 120; alarm $t; exec @ARGV' \
-      "$ham_git_sync_timeout" git fetch --prune origin "$@"; then
+    ham_git_sync_stderr=$(mktemp "${TMPDIR:-/tmp}/ham-git-sync-<<PR_NUMBER>>.XXXXXX") || return 1
+    if /usr/bin/perl -e '
+      use Errno qw(EINTR);
+      my $seconds = shift;
+      my $child = fork();
+      die "git fetch fork failed: $!" unless defined $child;
+      if ($child == 0) { exec @ARGV or die "git fetch exec failed: $!"; }
+      my $timed_out = 0;
+      $SIG{ALRM} = sub {
+        $timed_out = 1;
+        kill "TERM", $child;
+        alarm 5;
+        $SIG{ALRM} = sub { kill "KILL", $child; };
+      };
+      alarm $seconds;
+      my $waited;
+      do { $waited = waitpid($child, 0); } while ($waited == -1 && $! == EINTR);
+      my $status = $?;
+      alarm 0;
+      exit($timed_out ? 124 : ($status & 127 ? 128 + ($status & 127) : $status >> 8));
+    ' "$ham_git_sync_timeout" git fetch --prune origin "$@" 2>"$ham_git_sync_stderr"; then
+      rm -f "$ham_git_sync_stderr"
       return 0
+    else
+      ham_git_sync_exit=$?
     fi
+    cat "$ham_git_sync_stderr" >&2
+    if [ "$ham_git_sync_exit" -eq 124 ]; then
+      echo "git fetch timed out after ${ham_git_sync_timeout}s; SIGTERM cleanup completed" >&2
+    elif ! ham_update_branch_transient "$ham_git_sync_stderr"; then
+      rm -f "$ham_git_sync_stderr"
+      return 1
+    fi
+    rm -f "$ham_git_sync_stderr"
     if [ "$ham_git_sync_attempt" -ge 2 ]; then
       return 1
     fi

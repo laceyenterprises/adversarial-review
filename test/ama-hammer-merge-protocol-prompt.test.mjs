@@ -91,6 +91,24 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.match(HAMMER_PROMPT, /Closed-By: hammer \(adversarial-pipe-mode\)/);
 });
 
+test('hammer prompt requires bounded post-rebase sync and one truthful no-merge comment', () => {
+  assert.match(HAMMER_PROMPT, /ham_bounded_git_sync\(\)/);
+  assert.match(
+    HAMMER_PROMPT,
+    /load-aware-timeout\.mjs "\$HAM_GIT_SYNC_NOMINAL_SECONDS"/,
+  );
+  assert.match(HAMMER_PROMPT, /while \[ "\$ham_git_sync_attempt" -le 2 \]/);
+  assert.match(HAMMER_PROMPT, /ham_bounded_git_sync "\$BASE_BRANCH" "\$HEAD_BRANCH"/);
+  assert.match(HAMMER_PROMPT, /Do not wrap `git fetch`[\s\S]*in your own fixed alarm/);
+  assert.match(HAMMER_PROMPT, /A run that does not merge must say so exactly once on the PR/);
+  assert.match(
+    HAMMER_PROMPT,
+    /what the run completed[\s\S]*exact[\s\S]*where it stopped[\s\S]*whether the merge lease was released[\s\S]*what happens next/,
+  );
+  assert.match(HAMMER_PROMPT, /single in-lease audit comment[\s\S]*successful merge path/);
+  assert.match(HAMMER_PROMPT, /edit it in place[\s\S]*do not leave the audit and add a second comment/);
+});
+
 test('hammer fires watcher wake only after durable eligible audit append', () => {
   const wakeFunctionIdx = HAMMER_PROMPT.indexOf('ham_fire_watcher_merge_wake()');
   const remoteGreenIdx = HAMMER_PROMPT.indexOf('HAM_REMOTE_CI_STATUS=remote-ci-green');

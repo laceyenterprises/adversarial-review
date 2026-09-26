@@ -106,6 +106,8 @@ import {
 } from './remediation-prompt.mjs';
 import { OAUTH_ENV_STRIP_LIST } from './secret-source/env.mjs';
 import { loadDomainConfig } from './domain-config.mjs';
+import { cloneRemediationWorkspace } from './remediation-workspace-clone.mjs';
+import { drainRemediationJobs } from './remediation-parallel-drain.mjs';
 import { resolveRemediatorWorkerClassFromDomain } from './domain-policy.mjs';
 import {
   loadRoleConfig,
@@ -1179,8 +1181,12 @@ async function prepareWorkspaceForJob({
   workerClass = DEFAULT_REMEDIATION_WORKER_CLASS,
   env = process.env,
   execFileImpl = execFileAsync,
+  log = console,
 }) {
   const repo = assertValidRepoSlug(job.repo);
+  const startedAt = Date.now();
+  let checkoutStartedAt = startedAt;
+  let cloneSource = 'reused';
   const workspaceRootDir = resolveRemediationWorkspaceRoot({ rootDir, env });
   const workspaceDir = join(workspaceRootDir, job.jobId);
   ensureWorkspaceRootDir(workspaceRootDir, env);
@@ -1205,16 +1211,13 @@ async function prepareWorkspaceForJob({
     // GITHUB_TOKEN even on a host where `gh auth setup-git` was never run; no
     // token is passed on argv or written into .git/config. Verified to succeed
     // even when the token's GraphQL budget is fully exhausted.
-    await runWorkspaceGitWithTransientRetry(
-      ['clone', `https://github.com/${repo}.git`, workspaceDir],
-      {
+    cloneSource = await cloneRemediationWorkspace({
+      rootDir, repo, baseBranch: job.baseBranch, workspaceDir, resetWorkspaceDir, log,
+      clone: args => runWorkspaceGitWithTransientRetry(args, {
         execFileImpl,
-        options: {
-          maxBuffer: 10 * 1024 * 1024,
-          env: withGhGitCredentialEnv(env),
-        },
-      }
-    );
+        options: { maxBuffer: 10 * 1024 * 1024, env: withGhGitCredentialEnv(env) },
+      }),
+    });
   }
 
   // Set local git identity *before* the PR checkout so the very first
@@ -1254,15 +1257,24 @@ async function prepareWorkspaceForJob({
   // branch not on origin) fall back to `gh pr checkout`, which handles the
   // fork remote wiring; forks are not part of this fleet's hot path, so the
   // rare GraphQL call there is acceptable.
-  const { branch: headRef, headRepo } = await fetchPRBranchMetadata({
+  const { baseBranch, branch: headRef, headRepo } = await fetchPRBranchMetadata({
     repo,
     prNumber: job.prNumber,
     execFileImpl,
   });
   const isSameRepo = !headRepo || headRepo === repo;
   if (isSameRepo && headRef) {
+    // --single-branch configures origin to track only the base. The worker's
+    // force-with-lease push also needs the PR head recorded as a tracked ref.
+    await execFileImpl('git', ['-C', workspaceDir, 'remote', 'set-branches', '--add', 'origin', headRef], {
+      maxBuffer: 1 * 1024 * 1024,
+    });
+    const fetchRefs = [`+refs/heads/${headRef}:refs/remotes/origin/${headRef}`];
+    if (baseBranch !== headRef) {
+      fetchRefs.push(`+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`);
+    }
     await runWorkspaceGitWithTransientRetry(
-      ['-C', workspaceDir, 'fetch', 'origin', `+refs/heads/${headRef}:refs/remotes/origin/${headRef}`],
+      ['-C', workspaceDir, 'fetch', 'origin', ...fetchRefs],
       {
         execFileImpl,
         options: {
@@ -1271,6 +1283,7 @@ async function prepareWorkspaceForJob({
         },
       }
     );
+    checkoutStartedAt = Date.now();
     await runWorkspaceGitWithTransientRetry(
       ['-C', workspaceDir, 'checkout', '-B', headRef, `origin/${headRef}`],
       {
@@ -1281,6 +1294,7 @@ async function prepareWorkspaceForJob({
       }
     );
   } else {
+    checkoutStartedAt = Date.now();
     await runWorkspaceNetworkCommandWithTransientRetry({
       execFileImpl,
       command: 'gh',
@@ -1291,6 +1305,8 @@ async function prepareWorkspaceForJob({
       },
     });
   }
+
+  log.info?.(`[follow-up-remediation] workspace preparation repo=${repo} jobId=${job.jobId} source=${cloneSource} clone_fetch_ms=${checkoutStartedAt - startedAt} checkout_ms=${Date.now() - checkoutStartedAt}`);
 
   return {
     workspaceDir,
@@ -3443,6 +3459,7 @@ async function consumeNextFollowUpJob({
   onExcludedRepoPrKey = null,
   delayedPendingPaths = null,
   onDelayedPendingJob = null,
+  onClaim = null,
   quotaHoldRevalidator = null,
   resolveRemediationWorkerClassImpl = null,
   mintClaudeCodeRemediationTokenImpl = null,
@@ -3504,6 +3521,8 @@ async function consumeNextFollowUpJob({
       jobPath: claimed.jobPath,
     };
   }
+
+  onClaim?.(claimed.job);
 
   // Lifecycle gate: stop the bounded loop on any non-open PR state. If
   // the operator already merged or closed the PR there's nothing for
@@ -3738,6 +3757,7 @@ async function consumeNextFollowUpJob({
         rootDir,
         job: claimed.job,
         execFileImpl,
+        log,
       });
       workspaceDir = prepared.workspaceDir;
       workspaceState = hqDispatchEnabled
@@ -4127,9 +4147,6 @@ async function consumeFollowUpJobsUntilCapacity({
 } = {}) {
   const concurrencyCap = normalizeMaxConcurrentFollowUpJobs(maxConcurrent);
   const { activeJobs, blockedRepoPrKeys } = buildFollowUpClaimReservations({ rootDir, now: now(), log });
-  const results = [];
-  let spawned = 0;
-  let stopped = 0;
   const deferredSamePRPaths = new Set();
   const delayedPendingPaths = new Set();
   const pendingCountsAtStart = countPendingFollowUpJobsByRetryWindow(rootDir, now());
@@ -4141,11 +4158,18 @@ async function consumeFollowUpJobsUntilCapacity({
       nowMs: Date.parse(prefetchNow),
     });
   }
-  stopped += shouldStop() ? 0 : drainPendingNoRemediationJobs({ rootDir, now, requestWatcherWakeImpl, log, results, excludedRepoPrKeys: blockedRepoPrKeys, shouldStop });
-  while (!shouldStop() && (activeJobs.length + spawned) < concurrencyCap) {
-    let result;
-    try {
-      result = await consumeNextFollowUpJob({
+  const noRemediationResults = [];
+  const noRemediationStopped = shouldStop() ? 0 : drainPendingNoRemediationJobs({
+    rootDir, now, requestWatcherWakeImpl, log,
+    results: noRemediationResults,
+    excludedRepoPrKeys: blockedRepoPrKeys,
+    shouldStop,
+  });
+  const drained = await drainRemediationJobs({
+    capacity: concurrencyCap,
+    activeAtStart: activeJobs.length,
+    shouldStop,
+    run: () => consumeNextFollowUpJob({
         rootDir,
         execFileImpl,
         spawnImpl,
@@ -4159,6 +4183,7 @@ async function consumeFollowUpJobsUntilCapacity({
         onExcludedRepoPrKey: (pendingPath) => {
           deferredSamePRPaths.add(String(pendingPath));
         },
+        onClaim: (job) => blockedRepoPrKeys.add(followUpJobRepoPrKey(job)),
         delayedPendingPaths,
         onDelayedPendingJob: () => {
         },
@@ -4167,8 +4192,8 @@ async function consumeFollowUpJobsUntilCapacity({
         mintClaudeCodeRemediationTokenImpl,
         deliverAlertImpl,
         log,
-      });
-    } catch (err) {
+      }),
+    onError: (err) => {
       if (!err?.followUpJobPath) {
         throw err;
       }
@@ -4184,27 +4209,11 @@ async function consumeFollowUpJobsUntilCapacity({
       log.warn?.(
         `[follow-up-remediation] continuing drain after failed spawn preparation${jobIdTag}${jobPathTag}: ${detail}`
       );
-      continue;
-    }
-    results.push(result);
-
-    if (result.consumed) {
-      spawned += 1;
-      blockedRepoPrKeys.add(followUpJobRepoPrKey(result.job));
-      continue;
-    }
-
-    if (result.reason === 'no-pending-jobs') {
-      break;
-    }
-
-    if (result.job) {
-      stopped += 1;
-      continue;
-    }
-
-    break;
-  }
+    },
+  });
+  const results = [...noRemediationResults, ...drained.results];
+  const { spawned } = drained;
+  const stopped = noRemediationStopped + drained.stopped;
 
   return {
     maxConcurrent: concurrencyCap,

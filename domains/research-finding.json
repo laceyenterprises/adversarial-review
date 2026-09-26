@@ -13,6 +13,7 @@
     "principal": "research-finding-attestor"
   },
   "promptSet": "research-finding",
+  "remediationCloneReferences": {},
   "riskClasses": {
     "low": {
       "maxRemediationRounds": 1

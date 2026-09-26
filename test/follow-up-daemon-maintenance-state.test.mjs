@@ -515,6 +515,63 @@ test('follow-up daemon iteration preserves reconcile and closer reaper on wake-d
   assert.ok(calls.indexOf('retry-comments') > calls.indexOf('closer-worktree-reap'));
 });
 
+test('follow-up daemon writes config signature after capacity refreshes cache', async (t) => {
+  const rootDir = makeTempDir(t);
+  const hqRoot = path.join(rootDir, 'hq');
+  const configPath = path.join(rootDir, 'config.yaml');
+  const env = {
+    ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: '',
+    AGENT_OS_CONFIG_PATH: configPath,
+    HQ_ROOT: hqRoot,
+  };
+  const calls = [];
+
+  resetConfigCache();
+  t.after(() => resetConfigCache());
+
+  writeFileSync(configPath, `version: 1
+remediation:
+  max_concurrent_jobs: 2
+  max_concurrent_jobs_ceiling: 5
+`);
+  assert.equal(resolveDaemonMaxConcurrentJobs(env), 2);
+
+  writeFileSync(configPath, `version: 1
+remediation:
+  max_concurrent_jobs: 3
+  max_concurrent_jobs_ceiling: 5
+# force a same-tick content signature change
+`);
+
+  await runFollowUpDaemonIteration({
+    env,
+    resolveMaxConcurrentJobsImpl: (iterationEnv) => {
+      calls.push('resolve-capacity');
+      return resolveDaemonMaxConcurrentJobs(iterationEnv);
+    },
+    writeConfigSignatureStatusImpl: (args) => {
+      calls.push('config-signature');
+      return writeConfigSignatureStatus({
+        ...args,
+        now: () => new Date('2026-05-25T17:49:00.000Z'),
+      });
+    },
+    refreshFollowUpGithubTokenImpl: async () => {
+      calls.push('github-token-refresh');
+      return { refreshed: true };
+    },
+    shouldStop: () => true,
+  });
+
+  const status = JSON.parse(
+    readFileSync(path.join(hqRoot, '.adversarial-follow-up', 'config-status.json'), 'utf8')
+  );
+  assert.deepEqual(calls, ['resolve-capacity', 'config-signature', 'github-token-refresh']);
+  assert.equal(status.inSync, true);
+  assert.equal(status.driftSince, null);
+  assert.equal(status.loadedSignature, status.diskSignature);
+});
+
 test('follow-up daemon iteration keeps config drift after per-tick cache reset', async (t) => {
   const rootDir = makeTempDir(t);
   const hqRoot = path.join(rootDir, 'hq');

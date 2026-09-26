@@ -579,15 +579,6 @@ async function runFollowUpDaemonIteration({
   shouldStop = () => stopping,
 } = {}) {
   let maxConcurrentJobs = null;
-  await runStep('config-signature', async () => {
-    const configStatus = writeConfigSignatureStatusImpl({ env });
-    if (configStatus) {
-      logTick(
-        'config-signature',
-        `loaded=${configStatus.loadedSignature} disk=${configStatus.diskSignature} inSync=${configStatus.inSync}`
-      );
-    }
-  });
   await runStep('resolve-capacity', async () => {
     maxConcurrentJobs = resolveMaxConcurrentJobsImpl(env);
     recordDaemonMaxConcurrentJobs({ env, maxConcurrentJobs });
@@ -602,6 +593,15 @@ async function runFollowUpDaemonIteration({
       );
     }
   }
+  await runStep('config-signature', async () => {
+    const configStatus = writeConfigSignatureStatusImpl({ env });
+    if (configStatus) {
+      logTick(
+        'config-signature',
+        `loaded=${configStatus.loadedSignature} disk=${configStatus.diskSignature} inSync=${configStatus.inSync}`
+      );
+    }
+  });
   await runStep('github-token-refresh', async () => {
     await refreshFollowUpGithubTokenImpl({ env, log: console });
   });

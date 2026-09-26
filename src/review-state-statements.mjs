@@ -276,12 +276,13 @@ export function prepareMarkMergedPendingReviewSkipped(db) {
   return db.prepare(MARK_MERGED_PENDING_REVIEW_SKIPPED_SQL);
 }
 
-// Depth of the first-pass review queue: OPEN PRs that have never received a
-// first-pass review. Lives in this side-effect-free statements leaf (rather than
-// beside its prepared statement in review-state-db.mjs) so tests, the RSP-01
-// queue-depth lever, and the `review-queue-depth` operator CLI can all read the
-// EXACT SQL production issues without importing the process-wide singleton DB
-// handle — the same reason every other statement here was extracted.
+// Depth of the first-pass review queue: OPEN PRs that have never received any
+// delivered reviewer pass. Lives in this side-effect-free statements leaf
+// (rather than beside its prepared statement in review-state-db.mjs) so tests,
+// the RSP-01 queue-depth lever, and the `review-queue-depth` operator CLI can
+// all read the EXACT SQL production issues without importing the process-wide
+// singleton DB handle — the same reason every other statement here was
+// extracted.
 export const SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW =
   "SELECT COUNT(*) AS n FROM reviewed_prs " +
   "WHERE pr_state = 'open' " +
@@ -313,16 +314,14 @@ export const SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW =
   "  SELECT 1 FROM reviewer_passes " +
   "  WHERE reviewer_passes.repo = reviewed_prs.repo " +
   "    AND reviewer_passes.pr_number = reviewed_prs.pr_number " +
+  "    AND reviewer_passes.pass_kind IN ('first-pass', 'rereview') " +
   "    AND reviewer_passes.status = 'completed' " +
   "    AND reviewer_passes.gh_comment_id IS NOT NULL " +
   "    AND reviewer_passes.gh_comment_id <> ''" +
   ")";
 
-// Open PRs currently waiting for a re-review. A genuine completed first pass
-// establishes that this is the re-review lane. Legacy rows can retain only a
-// later completed rereview artifact, which is equally conclusive evidence that
-// a first review preceded it, so the artifact predicate intentionally accepts
-// either review pass kind. rereview_requested_at is the
+// Open PRs currently waiting for a re-review. A genuine delivered reviewer pass
+// establishes that this is the re-review lane; rereview_requested_at is the
 // durable wake marker retained while the candidate waits for reviewer
 // admission (including Gemini credential saturation). Head-refresh re-reviews
 // can clear that marker, so posted_at=NULL is the companion pending signal.
@@ -331,10 +330,14 @@ export const SQL_COUNT_OPEN_AWAITING_REREVIEW =
   "WHERE pr_state = 'open' " +
   "AND (rereview_requested_at IS NOT NULL OR posted_at IS NULL) " +
   `AND (review_status IS NULL OR review_status NOT IN ('malformed', 'unroutable-bot-author', 'argus-security-queued', '${REREVIEW_CI_BLOCKED_STATUS}')) ` +
+  "AND (review_status IS NULL OR review_status <> 'reviewing') " +
+  "AND (review_status IS NULL OR review_status <> 'failed-orphan') " +
+  "AND (review_status IS NULL OR review_status <> 'failed' OR failure_message IS NULL OR failure_message NOT LIKE '[review-cycle-cap]%') " +
   "AND EXISTS ( " +
   "  SELECT 1 FROM reviewer_passes " +
   "  WHERE reviewer_passes.repo = reviewed_prs.repo " +
   "    AND reviewer_passes.pr_number = reviewed_prs.pr_number " +
+  "    AND reviewer_passes.pass_kind IN ('first-pass', 'rereview') " +
   "    AND reviewer_passes.status = 'completed' " +
   "    AND reviewer_passes.gh_comment_id IS NOT NULL " +
   "    AND reviewer_passes.gh_comment_id <> ''" +

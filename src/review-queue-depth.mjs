@@ -60,10 +60,11 @@ import { loadRoleConfig } from './role-config.mjs';
 // during exactly the incident where both get read. Its predicate, verbatim from
 // that module:
 //   - `pr_state = 'open'` — merged/closed PRs are not waiting for anything.
-//   - NO `reviewer_passes` row with a non-empty `gh_comment_id` — that is
-//     GitHub-artifact evidence that a review really landed, deliberately chosen
-//     over `reviewed_prs.posted_at`/`review_status` because those are maskable
-//     by a stale success claim and are reset on re-entry.
+//   - NO completed `reviewer_passes` row with `pass_kind IN ('first-pass',
+//     'rereview')` and a non-empty `gh_comment_id` — that is GitHub-artifact
+//     evidence that a review really landed, deliberately chosen over
+//     `reviewed_prs.posted_at`/`review_status` because those are maskable by a
+//     stale success claim and are reset on re-entry.
 //   - `review_status NOT IN ('malformed','unroutable-bot-author',
 //     'argus-security-queued')` — work the dispatch loop explicitly refuses. It
 //     will never get a first pass, so more reviewers cannot drain it.
@@ -91,7 +92,8 @@ import { loadRoleConfig } from './role-config.mjs';
 export const FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT =
   'open PRs that have never received a first-pass review '
   + '(review-state-db.countOpenPrsAwaitingFirstPassReview: pr_state open, no reviewer_passes row '
-  + 'with a gh_comment_id, excluding malformed/unroutable-bot/argus-queued; '
+  + "with pass_kind IN ('first-pass','rereview'), status completed, and a gh_comment_id, "
+  + 'excluding malformed/unroutable-bot/argus-queued; '
   + 'INCLUDES first passes currently in flight)';
 
 export const REVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY =
@@ -102,6 +104,7 @@ export const REREVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY =
 const REPORT_RELATIVE_PATH = ['data', 'review-queue-depth-failover.json'];
 const REPORT_SCHEMA_VERSION = 1;
 const MAX_RETAINED_TRANSITIONS = 20;
+const REPORT_LANES = Object.freeze(['first-pass', 'rereview']);
 
 export function reviewQueueDepthFailoverReportPath(rootDir) {
   return join(rootDir, ...REPORT_RELATIVE_PATH);
@@ -220,11 +223,50 @@ export function firstPassSpilloverPlan({ depth = null, threshold = null } = {}) 
   };
 }
 
-function emptyReport() {
+function knobForLane(passKind) {
+  return passKind === 'rereview'
+    ? REREVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY
+    : REVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY;
+}
+
+function emptyCost() {
   return {
-    schemaVersion: REPORT_SCHEMA_VERSION,
-    knob: REVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY,
-    depthUnit: FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT,
+    spilloverReviewsTotal: 0,
+    byWorkerClass: {},
+    currentEngagementSpilloverReviews: 0,
+    lastEngagementSpilloverReviews: null,
+  };
+}
+
+function normalizeWorkerClassCosts(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  return Object.fromEntries(Object.entries(raw)
+    .map(([key, value]) => [key, Math.max(0, Number(value) || 0)])
+    .filter(([key]) => String(key || '').length > 0));
+}
+
+function normalizeCost(raw = {}) {
+  const base = emptyCost();
+  const current = raw && typeof raw === 'object' ? raw : {};
+  const lastEngagement = Number(current.lastEngagementSpilloverReviews);
+  return {
+    ...base,
+    spilloverReviewsTotal: Math.max(0, Number(current.spilloverReviewsTotal || 0)),
+    byWorkerClass: normalizeWorkerClassCosts(current.byWorkerClass),
+    currentEngagementSpilloverReviews: Math.max(
+      0,
+      Number(current.currentEngagementSpilloverReviews || 0),
+    ),
+    lastEngagementSpilloverReviews: Number.isFinite(lastEngagement)
+      ? Math.max(0, lastEngagement)
+      : null,
+  };
+}
+
+function emptyLane(passKind) {
+  return {
+    passKind,
+    knob: knobForLane(passKind),
     armed: false,
     engaged: false,
     depth: null,
@@ -235,26 +277,110 @@ function emptyReport() {
     updatedAt: null,
     lastTransition: null,
     transitions: [],
-    cost: {
-      spilloverReviewsTotal: 0,
-      byWorkerClass: {},
-      currentEngagementSpilloverReviews: 0,
-      lastEngagementSpilloverReviews: null,
-    },
+    cost: emptyCost(),
   };
+}
+
+function normalizeLane(passKind, raw = {}) {
+  const base = emptyLane(passKind);
+  const current = raw && typeof raw === 'object' ? raw : {};
+  return {
+    ...base,
+    ...current,
+    passKind,
+    knob: knobForLane(passKind),
+    transitions: Array.isArray(current.transitions) ? current.transitions : [],
+    cost: normalizeCost(current.cost),
+  };
+}
+
+function latestTransition(lanes) {
+  const transitions = lanes
+    .flatMap((lane) => Array.isArray(lane.transitions) ? lane.transitions : [])
+    .filter((transition) => transition && typeof transition === 'object')
+    .sort((a, b) => String(a.at || '').localeCompare(String(b.at || '')));
+  return {
+    lastTransition: transitions[transitions.length - 1] || null,
+    transitions: transitions.slice(-MAX_RETAINED_TRANSITIONS),
+  };
+}
+
+function aggregateCost(lanes) {
+  const cost = emptyCost();
+  let lastEngagementTotal = 0;
+  let sawLastEngagement = false;
+  for (const lane of lanes) {
+    cost.spilloverReviewsTotal += Number(lane.cost.spilloverReviewsTotal || 0);
+    cost.currentEngagementSpilloverReviews += Number(lane.cost.currentEngagementSpilloverReviews || 0);
+    if (lane.cost.lastEngagementSpilloverReviews !== null
+      && lane.cost.lastEngagementSpilloverReviews !== undefined) {
+      sawLastEngagement = true;
+      lastEngagementTotal += Number(lane.cost.lastEngagementSpilloverReviews || 0);
+    }
+    for (const [workerClass, count] of Object.entries(lane.cost.byWorkerClass || {})) {
+      cost.byWorkerClass[workerClass] = Number(cost.byWorkerClass[workerClass] || 0) + Number(count || 0);
+    }
+  }
+  cost.lastEngagementSpilloverReviews = sawLastEngagement ? lastEngagementTotal : null;
+  return cost;
+}
+
+function summarizeReport(report) {
+  const lanes = REPORT_LANES.map((passKind) => report.lanes[passKind]);
+  const firstPassLane = report.lanes['first-pass'];
+  const activeLane = lanes.find((lane) => lane.engaged) || firstPassLane;
+  const { lastTransition, transitions } = latestTransition(lanes);
+  const updatedAt = lanes
+    .map((lane) => lane.updatedAt)
+    .filter(Boolean)
+    .sort()
+    .at(-1) || null;
+  return {
+    ...report,
+    schemaVersion: REPORT_SCHEMA_VERSION,
+    knob: REVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY,
+    depthUnit: FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT,
+    armed: lanes.some((lane) => lane.armed),
+    engaged: lanes.some((lane) => lane.engaged),
+    depth: firstPassLane.depth,
+    threshold: firstPassLane.threshold,
+    spillSlots: firstPassLane.spillSlots,
+    engagedSince: activeLane?.engagedSince || null,
+    engagedAtDepth: activeLane?.engagedAtDepth ?? null,
+    updatedAt,
+    lastTransition,
+    transitions,
+    cost: aggregateCost(lanes),
+  };
+}
+
+function emptyReport() {
+  return summarizeReport({
+    schemaVersion: REPORT_SCHEMA_VERSION,
+    depthUnit: FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT,
+    lanes: Object.fromEntries(REPORT_LANES.map((passKind) => [passKind, emptyLane(passKind)])),
+  });
+}
+
+function normalizeReport(raw = {}) {
+  const parsed = raw && typeof raw === 'object' ? raw : {};
+  const parsedLanes = parsed.lanes && typeof parsed.lanes === 'object' ? parsed.lanes : null;
+  const lanes = Object.fromEntries(REPORT_LANES.map((passKind) => [
+    passKind,
+    normalizeLane(passKind, parsedLanes ? parsedLanes[passKind] : (passKind === 'first-pass' ? parsed : {})),
+  ]));
+  return summarizeReport({
+    ...parsed,
+    schemaVersion: REPORT_SCHEMA_VERSION,
+    depthUnit: FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT,
+    lanes,
+  });
 }
 
 export function readReviewQueueDepthFailoverReport(rootDir, { readFileImpl = readFileSync } = {}) {
   try {
     const parsed = JSON.parse(String(readFileImpl(reviewQueueDepthFailoverReportPath(rootDir), 'utf8')));
-    if (!parsed || typeof parsed !== 'object') return emptyReport();
-    const base = emptyReport();
-    return {
-      ...base,
-      ...parsed,
-      cost: { ...base.cost, ...(parsed.cost && typeof parsed.cost === 'object' ? parsed.cost : {}) },
-      transitions: Array.isArray(parsed.transitions) ? parsed.transitions : [],
-    };
+    return normalizeReport(parsed);
   } catch {
     return emptyReport();
   }
@@ -331,23 +457,20 @@ export function createFirstPassSpilloverController({
 
     report = readReportImpl(rootDir);
     const at = now().toISOString();
-    const wasEngaged = report.engaged === true;
-    report.schemaVersion = REPORT_SCHEMA_VERSION;
-    report.knob = kind === 'rereview'
-      ? REREVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY
-      : REVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY;
-    report.depthUnit = FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT;
-    report.armed = plan.armed;
-    report.engaged = plan.engaged;
-    report.depth = plan.depth;
-    report.threshold = plan.threshold;
-    report.spillSlots = plan.spillSlots;
-    report.updatedAt = at;
+    const lane = normalizeLane(kind, report.lanes?.[kind]);
+    const wasEngaged = lane.engaged === true;
+    lane.armed = plan.armed;
+    lane.engaged = plan.engaged;
+    lane.depth = plan.depth;
+    lane.threshold = plan.threshold;
+    lane.spillSlots = plan.spillSlots;
+    lane.updatedAt = at;
 
     if (plan.engaged !== wasEngaged) {
       const event = plan.engaged ? 'engage' : 'disengage';
       const transition = {
         event,
+        passKind: kind,
         at,
         depth: plan.depth,
         threshold: plan.threshold,
@@ -356,28 +479,32 @@ export function createFirstPassSpilloverController({
         // actually bought in non-primary reviews.
         engagementSpilloverReviews: plan.engaged
           ? 0
-          : Number(report.cost.currentEngagementSpilloverReviews || 0),
+          : Number(lane.cost.currentEngagementSpilloverReviews || 0),
       };
       if (plan.engaged) {
-        report.engagedSince = at;
-        report.engagedAtDepth = plan.depth;
-        report.cost.currentEngagementSpilloverReviews = 0;
+        lane.engagedSince = at;
+        lane.engagedAtDepth = plan.depth;
+        lane.cost.currentEngagementSpilloverReviews = 0;
       } else {
-        report.cost.lastEngagementSpilloverReviews = transition.engagementSpilloverReviews;
-        report.cost.currentEngagementSpilloverReviews = 0;
-        report.engagedSince = null;
-        report.engagedAtDepth = null;
+        lane.cost.lastEngagementSpilloverReviews = transition.engagementSpilloverReviews;
+        lane.cost.currentEngagementSpilloverReviews = 0;
+        lane.engagedSince = null;
+        lane.engagedAtDepth = null;
       }
-      report.lastTransition = transition;
-      report.transitions = [...report.transitions, transition].slice(-MAX_RETAINED_TRANSITIONS);
+      lane.lastTransition = transition;
+      lane.transitions = [...lane.transitions, transition].slice(-MAX_RETAINED_TRANSITIONS);
+      report.lanes[kind] = lane;
+      report = summarizeReport(report);
       logger?.warn?.(
-        `[watcher] review-queue-depth-failover ${event} `
+        `[watcher] review-queue-depth-failover ${event} pass_kind=${kind} `
         + `depth=${plan.depth} threshold=${plan.threshold} spill_slots=${plan.spillSlots} `
         + `engagement_spillover_reviews=${transition.engagementSpilloverReviews} `
         + `unit="${FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT}"`
       );
       persist();
     } else if (plan.engaged) {
+      report.lanes[kind] = lane;
+      report = summarizeReport(report);
       persist();
     }
     return plan;
@@ -389,18 +516,21 @@ export function createFirstPassSpilloverController({
     if (!reservation || granted <= 0) return false;
     const passKind = reservation.passKind || 'first-pass';
     const current = evaluate(passKind);
+    const lane = normalizeLane(passKind, report.lanes?.[passKind]);
     reservations.delete(reservationKey);
     remainingByKind.set(passKind, (remainingByKind.get(passKind) || 0) + 1);
     granted -= 1;
     grantedByKind.set(passKind, Math.max(0, (grantedByKind.get(passKind) || 0) - 1));
-    report.cost.spilloverReviewsTotal = Math.max(0, Number(report.cost.spilloverReviewsTotal || 0) - 1);
     const to = String(toWorkerClass || reservation.toWorkerClass || 'unknown').trim().toLowerCase() || 'unknown';
-    report.cost.byWorkerClass[to] = Math.max(0, Number(report.cost.byWorkerClass[to] || 0) - 1);
-    report.cost.currentEngagementSpilloverReviews = Math.max(
+    lane.cost.spilloverReviewsTotal = Math.max(0, Number(lane.cost.spilloverReviewsTotal || 0) - 1);
+    lane.cost.byWorkerClass[to] = Math.max(0, Number(lane.cost.byWorkerClass[to] || 0) - 1);
+    lane.cost.currentEngagementSpilloverReviews = Math.max(
       0,
-      Number(report.cost.currentEngagementSpilloverReviews || 0) - 1,
+      Number(lane.cost.currentEngagementSpilloverReviews || 0) - 1,
     );
-    report.updatedAt = now().toISOString();
+    lane.updatedAt = now().toISOString();
+    report.lanes[passKind] = lane;
+    report = summarizeReport(report);
     logger?.warn?.(
       `[watcher] review-queue-depth-spillover-refund repo=${repo} pr=${prNumber} `
       + `pass_kind=${passKind} reason=${reason} remaining=${remainingByKind.get(passKind)}/${current.spillSlots}`
@@ -446,17 +576,20 @@ export function createFirstPassSpilloverController({
       granted += 1;
       grantedByKind.set(kind, (grantedByKind.get(kind) || 0) + 1);
       const to = String(toWorkerClass || 'unknown').trim().toLowerCase() || 'unknown';
+      const lane = normalizeLane(kind, report.lanes?.[kind]);
       reservations.set(`${repo}#${prNumber}`, { state: 'pending', toWorkerClass: to, passKind: kind });
-      report.cost.spilloverReviewsTotal = Number(report.cost.spilloverReviewsTotal || 0) + 1;
-      report.cost.byWorkerClass[to] = Number(report.cost.byWorkerClass[to] || 0) + 1;
-      report.cost.currentEngagementSpilloverReviews =
-        Number(report.cost.currentEngagementSpilloverReviews || 0) + 1;
-      report.updatedAt = now().toISOString();
+      lane.cost.spilloverReviewsTotal = Number(lane.cost.spilloverReviewsTotal || 0) + 1;
+      lane.cost.byWorkerClass[to] = Number(lane.cost.byWorkerClass[to] || 0) + 1;
+      lane.cost.currentEngagementSpilloverReviews =
+        Number(lane.cost.currentEngagementSpilloverReviews || 0) + 1;
+      lane.updatedAt = now().toISOString();
+      report.lanes[kind] = lane;
+      report = summarizeReport(report);
       logger?.warn?.(
         `[watcher] review-queue-depth-spillover repo=${repo} pr=${prNumber} `
         + `from=${fromWorkerClass} to=${to} pass_kind=${kind} depth=${current.depth} threshold=${current.threshold} `
         + `slot=${grantedByKind.get(kind)}/${current.spillSlots} `
-        + `engagement_spillover_reviews=${report.cost.currentEngagementSpilloverReviews} `
+        + `engagement_spillover_reviews=${lane.cost.currentEngagementSpilloverReviews} `
         + `total_spillover_reviews=${report.cost.spilloverReviewsTotal}`
       );
       persist();

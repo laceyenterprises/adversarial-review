@@ -459,7 +459,11 @@ test('the engage and disengage transitions are recorded with the depth that caus
     assert.equal(report.lastTransition.event, 'engage');
     assert.equal(report.lastTransition.depth, 14, 'the transition names the depth that caused it');
     assert.equal(report.lastTransition.at, '2026-09-06T18:00:00.000Z');
+    assert.equal(report.lastTransition.passKind, 'first-pass');
+    assert.equal(report.lanes['first-pass'].engaged, true);
+    assert.equal(report.lanes.rereview.engaged, false);
     assert.equal(report.cost.spilloverReviewsTotal, 1);
+    assert.equal(report.lanes['first-pass'].cost.spilloverReviewsTotal, 1);
     assert.deepEqual(report.cost.byWorkerClass, { codex: 1 });
     assert.equal(report.knob, REVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY);
     assert.equal(report.depthUnit, FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT);
@@ -476,8 +480,10 @@ test('the engage and disengage transitions are recorded with the depth that caus
     assert.equal(report.engaged, false);
     assert.equal(report.lastTransition.event, 'disengage');
     assert.equal(report.lastTransition.depth, 3);
+    assert.equal(report.lastTransition.passKind, 'first-pass');
     assert.equal(report.lastTransition.engagementSpilloverReviews, 1, 'the cost of the engagement that ended');
     assert.equal(report.cost.lastEngagementSpilloverReviews, 1);
+    assert.equal(report.lanes['first-pass'].cost.lastEngagementSpilloverReviews, 1);
     assert.equal(report.cost.spilloverReviewsTotal, 1, 'lifetime cost survives disengage');
     assert.deepEqual(report.transitions.map((t) => t.event), ['engage', 'disengage']);
   } finally {
@@ -498,6 +504,7 @@ test('the transition log is emitted with the depth and the cost', () => {
     }).plan();
     assert.equal(warnings.length, 1);
     assert.match(warnings[0], /review-queue-depth-failover engage/);
+    assert.match(warnings[0], /pass_kind=first-pass/);
     assert.match(warnings[0], /depth=25/);
     assert.match(warnings[0], /threshold=10/);
     assert.match(warnings[0], /spill_slots=2/);
@@ -627,7 +634,42 @@ test('an empty report reads back as a well-formed disarmed report', () => {
     const report = readReviewQueueDepthFailoverReport(root);
     assert.equal(report.engaged, false);
     assert.equal(report.cost.spilloverReviewsTotal, 0);
+    assert.deepEqual(Object.keys(report.lanes).sort(), ['first-pass', 'rereview']);
     assert.deepEqual(report.transitions, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('lane report state does not flap when only first-pass spillover is engaged', () => {
+  const root = tempRoot('rsprereview-lanes-');
+  const warnings = [];
+  const makeController = (now) => createFirstPassSpilloverController({
+    rootDir: root,
+    readDepth: () => 12,
+    readRereviewDepth: () => 0,
+    resolveThresholdImpl: () => 10,
+    resolveRereviewThresholdImpl: () => null,
+    logger: { warn: (message) => warnings.push(String(message)) },
+    now,
+  });
+  try {
+    const firstTick = makeController(() => new Date('2026-09-26T01:00:00.000Z'));
+    assert.equal(firstTick.plan('first-pass').engaged, true);
+    assert.equal(firstTick.plan('rereview').engaged, false);
+
+    const secondTick = makeController(() => new Date('2026-09-26T01:01:00.000Z'));
+    assert.equal(secondTick.plan('first-pass').engaged, true);
+    assert.equal(secondTick.plan('rereview').engaged, false);
+
+    const report = JSON.parse(readFileSync(reviewQueueDepthFailoverReportPath(root), 'utf8'));
+    assert.equal(report.engaged, true);
+    assert.equal(report.lanes['first-pass'].engaged, true);
+    assert.equal(report.lanes.rereview.engaged, false);
+    assert.deepEqual(report.lanes['first-pass'].transitions.map((t) => t.event), ['engage']);
+    assert.deepEqual(report.lanes.rereview.transitions, []);
+    assert.deepEqual(report.transitions.map((t) => `${t.passKind}:${t.event}`), ['first-pass:engage']);
+    assert.equal(warnings.filter((line) => /review-queue-depth-failover/.test(line)).length, 1);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -679,6 +721,17 @@ test('the lever thresholds on the production countOpenPrsAwaitingFirstPassReview
     seed('closed', 'pending');
     seed('open', 'malformed');
     seed('open', 'argus-security-queued');
+    const deliveredAsRereview = seed('open', 'pending');
+    db.prepare(
+      'INSERT INTO reviewer_passes (repo, pr_number, attempt_number, reviewer_class, reviewer_model,'
+      + ' pass_kind, started_at, ended_at, status, body_md, gh_comment_id)'
+      + " VALUES (?, ?, 1, 'gemini', 'gemini', 'rereview', ?, ?, 'completed', 'body', 'RV_rereview_first_delivery')"
+    ).run(
+      'laceyenterprises/agent-os',
+      deliveredAsRereview,
+      '2026-09-06T00:00:00.000Z',
+      '2026-09-06T00:10:00.000Z',
+    );
 
     assert.equal(countOpenPrsAwaitingFirstPassReview(db), 5);
     const engagedPlan = ctl().plan();
@@ -712,24 +765,40 @@ test('production rereview depth counts only open, eligible, durably requested re
   const db = openReviewStateDb(dbRoot);
   try {
     ensureReviewStateSchema(db);
-    const seed = (prNumber, { state = 'open', status = 'pending', requested = true, posted = null } = {}) => {
+    const seed = (
+      prNumber,
+      {
+        state = 'open',
+        status = 'pending',
+        requested = true,
+        posted = null,
+        priorPassKind = 'first-pass',
+        failureMessage = null,
+      } = {},
+    ) => {
       db.prepare(
-        'INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, rereview_requested_at, posted_at)'
-        + ' VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+        'INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, rereview_requested_at, posted_at, failure_message)'
+        + ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
       ).run('o/r', prNumber, '2026-09-26T00:00:00Z', 'gemini', state, status,
-        requested ? '2026-09-26T00:10:00Z' : null, posted);
+        requested ? '2026-09-26T00:10:00Z' : null, posted, failureMessage);
       db.prepare(
         'INSERT INTO reviewer_passes (repo, pr_number, attempt_number, reviewer_class, reviewer_model,'
         + ' pass_kind, started_at, ended_at, status, body_md, gh_comment_id)'
-        + " VALUES (?, ?, 1, 'gemini', 'gemini', 'first-pass', ?, ?, 'completed', 'body', ?)"
-      ).run('o/r', prNumber, '2026-09-26T00:00:00Z', '2026-09-26T00:05:00Z', `RV_${prNumber}`);
+        + " VALUES (?, ?, 1, 'gemini', 'gemini', ?, ?, ?, 'completed', 'body', ?)"
+      ).run('o/r', prNumber, priorPassKind, '2026-09-26T00:00:00Z', '2026-09-26T00:05:00Z', `RV_${prNumber}`);
     };
     seed(1);
     seed(2, { state: 'merged' });
     seed(3, { requested: false, posted: '2026-09-26T00:05:00Z' });
     seed(4, { status: 'argus-security-queued' });
     seed(5, { requested: false }); // head-refresh path: posted_at was cleared
-    assert.equal(countOpenPrsAwaitingRereview(db), 2);
+    seed(6, { priorPassKind: 'rereview' }); // first delivered review was stored as rereview
+    seed(7, { status: 'reviewing' }); // already admitted; not awaiting admission
+    seed(8, {
+      status: 'failed',
+      failureMessage: '[review-cycle-cap] automatic review paused',
+    });
+    assert.equal(countOpenPrsAwaitingRereview(db), 3);
   } finally {
     db.close();
     rmSync(dbRoot, { recursive: true, force: true });
@@ -750,6 +819,14 @@ test('watcher.mjs builds the per-tick controller from both production depth coun
   assert.match(src, /createFirstPassSpilloverController\(\{[^}]*readDepth: countOpenPrsAwaitingFirstPassReview/);
   assert.match(src, /readRereviewDepth: countOpenPrsAwaitingRereview/);
   assert.match(src, /^\s*firstPassSpilloverController,$/m, 'controller must be threaded into the per-PR ctx');
+});
+
+test('watcher REVSLOT gate uses the delivered-pass-aware first-pass depth counter', () => {
+  const src = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
+  assert.match(
+    src,
+    /reviewerDispatchCandidates\.every\(\(candidate\) => !reviewerDispatchIsFirstPass\(candidate\)\) && countOpenPrsAwaitingFirstPassReview\(\) > 0/,
+  );
 });
 
 test('pollonce-phases passes depth pressure in and charges the cost ledger back', () => {

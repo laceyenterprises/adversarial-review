@@ -2605,13 +2605,15 @@ export async function processReviewSubject(entry, ctx) {
         return;
       }
 
+      const dispatchHasPriorPostedReview =
+        entry.hasPriorPostedReview ?? Boolean(stmtHasPostedReview.get(repoPath, prNumber));
       const dispatchCandidate = {
         repoPath,
         prNumber,
         reviewerModel: route.reviewerModel,
         subject,
         current,
-        hasPriorPostedReview: entry.hasPriorPostedReview ?? Boolean(stmtHasPostedReview.get(repoPath, prNumber)),
+        hasPriorPostedReview: dispatchHasPriorPostedReview,
         wakePriority: watcherWakeMatchesSubject(wakePayload, {
           repoPath,
           prNumber,
@@ -2931,9 +2933,10 @@ export async function processReviewSubject(entry, ctx) {
             const completedRemediationRounds = Number.isFinite(Number(ledger.completedRoundsForPR))
               ? Math.max(0, Math.floor(Number(ledger.completedRoundsForPR)))
               : 0;
-            const passKind = reviewAttemptNumber > 1 || current?.rereview_requested_at
-              ? 'rereview'
-              : 'first-pass';
+            const passKind = reviewerDispatchPassKind({
+              current,
+              hasPriorPostedReview: dispatchHasPriorPostedReview,
+            });
             const reviewDbAttemptNumber = nextReviewerPassAttemptNumber(ROOT, {
               repo: repoPath,
               prNumber,

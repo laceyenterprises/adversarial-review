@@ -296,6 +296,8 @@ export const stmtMarkPosted = db.prepare(
 export const stmtHasPostedReview = db.prepare(
   `SELECT 1 FROM reviewer_passes
     WHERE repo = ? AND pr_number = ?
+      AND pass_kind IN ('first-pass', 'rereview')
+      AND status = 'completed'
       AND gh_comment_id IS NOT NULL AND gh_comment_id <> ''
     LIMIT 1`
 );

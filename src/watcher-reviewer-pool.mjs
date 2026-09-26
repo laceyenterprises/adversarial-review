@@ -307,10 +307,11 @@ function reviewerDispatchIsFirstPass(candidate) {
   // posted_at and rereview_requested_at may both be cleared when a queued PR's
   // head moves. Use durable posted-pass evidence before trusting the row state.
   if (candidate?.hasPriorPostedReview === true) return false;
+  if (candidate?.hasPriorPostedReview === false) return true;
   const current = candidate?.current;
   if (!current) return true;
-  // Rereview requests clear posted_at while waiting for the next reviewer pass,
-  // so rereview_requested_at owns the lane decision for those pending rows.
+  // Legacy/test callers without the durable evidence flag keep the older row
+  // marker fallback. Production candidates always provide the flag above.
   if (current.rereview_requested_at) return false;
   // A non-rereview row can exist before anything is posted (claimed, retrying,
   // failed). `posted_at` is what marks a first-pass review as delivered.

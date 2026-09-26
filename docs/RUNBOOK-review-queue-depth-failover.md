@@ -59,9 +59,11 @@ Re-reviews use the parallel key
 `watcher.rereview_queue_depth_failover_threshold` and canonical env
 `AGENT_OS_WATCHER_REREVIEW_QUEUE_DEPTH_FAILOVER_THRESHOLD`. When absent it
 inherits the first-pass threshold; `0` disables only re-review spillover. Its
-depth is open PRs with a completed, posted first pass and a durable
-`rereview_requested_at` wake (or cleared `posted_at` after a head refresh) still
-awaiting admission.
+depth is open PRs with a completed, posted reviewer pass (`pass_kind` in
+`first-pass` or `rereview`) and a durable `rereview_requested_at` wake (or
+cleared `posted_at` after a head refresh) still awaiting admission. Rows already
+in `reviewing`, sticky `failed-orphan`, or paused by the review-cycle cap are not
+awaiting admission and do not count.
 
 The classes it may spill to are the pre-existing
 `ADVERSARIAL_REVIEW_REVIEWER_WORKER_CLASS_FALLBACK` list (default `['codex']`)
@@ -79,10 +81,11 @@ different "queue depth" beside it would give you two numbers that disagree durin
 exactly the incident where you read both. Its predicate:
 
 - `pr_state = 'open'` (merged/closed PRs are not waiting for anything), **and**
-- no `reviewer_passes` row with a non-empty `gh_comment_id` — GitHub-artifact
-  evidence that a review really landed, deliberately preferred over
-  `reviewed_prs.posted_at`/`review_status`, which are maskable by a stale success
-  claim and are reset on re-entry, **and**
+- no completed `reviewer_passes` row with `pass_kind IN ('first-pass',
+  'rereview')` and a non-empty `gh_comment_id` — GitHub-artifact evidence that a
+  review really landed, deliberately preferred over `reviewed_prs.posted_at` /
+  `review_status`, which are maskable by a stale success claim and are reset on
+  re-entry, **and**
 - `review_status NOT IN ('malformed', 'unroutable-bot-author',
   'argus-security-queued')` — work the dispatch loop explicitly refuses and no
   number of reviewers can drain.
@@ -125,13 +128,16 @@ npm run review-queue-depth -- --json  # machine
 ```
 
 Prints live depth, threshold, armed/engaged state, graded spill slots, and the
-cost ledger. The durable report is `data/review-queue-depth-failover.json`.
+cost ledger. The durable report is `data/review-queue-depth-failover.json`; it
+keeps independent `lanes["first-pass"]` and `lanes.rereview` engagement state,
+transitions, and current-engagement cost, with top-level fields retained as a
+compatibility summary.
 
 Log lines (stable, greppable prefixes):
 
 ```
-[watcher] review-queue-depth-failover engage depth=… threshold=… spill_slots=… engagement_spillover_reviews=…
-[watcher] review-queue-depth-failover disengage depth=… … engagement_spillover_reviews=…
+[watcher] review-queue-depth-failover engage pass_kind=… depth=… threshold=… spill_slots=… engagement_spillover_reviews=…
+[watcher] review-queue-depth-failover disengage pass_kind=… depth=… threshold=… spill_slots=… engagement_spillover_reviews=…
 [watcher] review-queue-depth-spillover repo=… pr=… from=gemini to=codex pass_kind=… depth=… slot=1/2 total_spillover_reviews=…
 [watcher] review-worker-class-fallback repo=… pr=… from=… to=… reason=queue-depth-pressure queueDepth=… queueDepthThreshold=…
 [watcher] review-worker-class-fallback quota-status timing duration_ms=… attempts=… outcome=…

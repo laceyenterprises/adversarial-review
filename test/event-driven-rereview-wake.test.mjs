@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -37,6 +37,18 @@ function collectingWake(calls) {
     return { requested: true, payload: { request_id: 'watcher-wake-1', requested_at: args.requestedAt, reason: args.reason } };
   };
 }
+
+test('a producer with the wrong UID refuses before creating queue or SQLite files', (t) => {
+  const rootDir = root();
+  if (process.getuid === undefined) return;
+  t.mock.method(process, 'getuid', () => 10_000_000);
+  const result = requestRereviewWake({
+    rootDir, repo: REPO, prNumber: PR, reason: REREVIEW_WAKE_REASONS.OPERATOR,
+  });
+  assert.equal(result.outcome, 'failed');
+  assert.equal(result.reason, 'wake-queue-owner-mismatch');
+  assert.equal(existsSync(join(rootDir, 'data')), false);
+});
 
 function latencyRows(rootDir) {
   const db = openReviewStateDb(rootDir);
@@ -657,6 +669,56 @@ test('status scoping filters entries without lying about the fleet-wide backlog'
   assert.equal(status.pending, 2);
   assert.equal(status.entries.length, 1);
   assert.equal(status.entries[0].repo, REPO);
+});
+
+test('a large backlog is sampled and the per-tick sweep rotates across records', () => {
+  const rootDir = root();
+  const dir = join(rootDir, 'data', 'rereview-wakes', 'pending');
+  mkdirSync(dir, { recursive: true });
+  for (let n = 0; n < 201; n += 1) {
+    writeFileSync(join(dir, `wake-${String(n).padStart(3, '0')}.json`), JSON.stringify({
+      repo: REPO, prNumber: n + 1, reason: REREVIEW_WAKE_REASONS.OPERATOR,
+      state: 'requested', requestedAt: '2026-09-21T01:00:00.000Z',
+    }));
+  }
+  const backlog = rereviewWakeBacklog({ rootDir });
+  assert.equal(backlog.pending, 201);
+  assert.equal(backlog.truncated, true);
+  assert.equal(backlog.entries.length, 200);
+  assert.equal(backlog.claimed, null);
+  assert.equal(backlog.unclaimed, null);
+
+  const first = listPendingRereviewWakes(rootDir, { limit: 200, roundRobin: true });
+  const second = listPendingRereviewWakes(rootDir, { limit: 200, roundRobin: true });
+  assert.equal(new Set([...first, ...second].map((record) => record.prNumber)).size, 201);
+});
+
+test('settled retention runs off the enqueue path and at most every ten minutes', () => {
+  const rootDir = root();
+  const settled = join(rootDir, 'data', 'rereview-wakes', 'settled');
+  mkdirSync(settled, { recursive: true });
+  const nowMs = Date.parse('2026-09-21T12:00:00.000Z');
+  const writeOld = (name) => {
+    const file = join(settled, name);
+    writeFileSync(file, '{}');
+    const old = new Date(nowMs - 31 * 24 * 60 * 60 * 1000);
+    utimesSync(file, old, old);
+    return file;
+  };
+  const first = writeOld('old-a.json');
+  requestRereviewWake({ rootDir, repo: REPO, prNumber: PR, reason: REREVIEW_WAKE_REASONS.OPERATOR,
+    requestWatcherWakeImpl: collectingWake([]), log: { warn() {} } });
+  assert.equal(existsSync(first), true, 'request must not scan settled files');
+  sweepRereviewWakeQueue({ rootDir, at: new Date(nowMs).toISOString(), lookupReviewRow: () => null,
+    log: { warn() {} } });
+  assert.equal(existsSync(first), false);
+  const second = writeOld('old-b.json');
+  sweepRereviewWakeQueue({ rootDir, at: new Date(nowMs + 60_000).toISOString(), lookupReviewRow: () => null,
+    log: { warn() {} } });
+  assert.equal(existsSync(second), true);
+  sweepRereviewWakeQueue({ rootDir, at: new Date(nowMs + 11 * 60_000).toISOString(), lookupReviewRow: () => null,
+    log: { warn() {} } });
+  assert.equal(existsSync(second), false);
 });
 
 test('the pending path is stable for a given dedupe identity', () => {

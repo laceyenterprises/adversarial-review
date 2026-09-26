@@ -1057,7 +1057,7 @@ function renderReviewLatencyReport(report) {
   const wakeQueue = report.rereviewWakeQueue || {};
   lines.push(
     `rereview wake queue: pending=${wakeQueue.pending ?? 0} `
-    + `unclaimed=${wakeQueue.unclaimed ?? 0} claimed=${wakeQueue.claimed ?? 0} `
+    + `unclaimed=${wakeQueue.unclaimed ?? 'unknown'} claimed=${wakeQueue.claimed ?? 'unknown'} `
     + `oldest=${formatDuration(wakeQueue.oldestAgeMs ?? null)}`
     + `${wakeQueue.available === false ? ' (unavailable)' : ''}`
   );

@@ -102,6 +102,9 @@ const REREVIEW_WAKE_RETENTION_MAX_FILES = 5000;
 // Per-tick drain bound: a backlog must never turn one watcher tick into an
 // unbounded filesystem walk.
 const REREVIEW_WAKE_SWEEP_LIMIT = 200;
+const REREVIEW_WAKE_SETTLED_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
+let lastSettledSweep = null;
+const pendingScanCursorByRoot = new Map();
 
 // Review statuses that mean admission has taken the rereview: either it is
 // queued for a reviewer or a reviewer already holds it.
@@ -126,6 +129,19 @@ function rereviewWakePendingDir(rootDir) {
 
 function rereviewWakeSettledDir(rootDir) {
   return join(rereviewWakeDir(rootDir), 'settled');
+}
+
+function queueOwnerMatchesCaller(rootDir) {
+  const uid = process.getuid?.();
+  if (uid === undefined) return true;
+  for (const path of [rootDir, join(rootDir, 'data'), join(rootDir, 'data', 'reviews.db')]) {
+    try {
+      if (statSync(path).uid !== uid) return false;
+    } catch (err) {
+      if (err?.code !== 'ENOENT') return false;
+    }
+  }
+  return true;
 }
 
 function parseBooleanFlag(value) {
@@ -395,6 +411,11 @@ function requestRereviewWake({
   if (!isRereviewWakeEnabled(env)) {
     return { requested: false, outcome: 'disabled', reason: 'rereview-wake-disabled', wakeReason, ...subject };
   }
+  // Producers may run as operators or workers. Refuse before mkdir, the wake
+  // file, or reviews.db can be replaced under a UID different from the daemon.
+  if (!queueOwnerMatchesCaller(rootDir)) {
+    return { requested: false, outcome: 'failed', reason: 'wake-queue-owner-mismatch', wakeReason, ...subject };
+  }
 
   const recordPath = rereviewWakePendingPath(rootDir, identity);
   const record = {
@@ -431,7 +452,6 @@ function requestRereviewWake({
       ...subject,
     };
   }
-  sweepSettledRereviewWakes(rootDir);
 
   // A record that settled moments ago means this head+reason has just run its
   // course; re-enqueueing would re-wake a PR whose re-review already completed.
@@ -522,7 +542,7 @@ function requestRereviewWake({
   };
 }
 
-function listPendingRereviewWakes(rootDir, { repo = null, prNumber = null, limit = null } = {}) {
+function listPendingRereviewWakes(rootDir, { repo = null, prNumber = null, limit = null, roundRobin = false } = {}) {
   let names;
   try {
     names = readdirSync(rereviewWakePendingDir(rootDir)).filter((name) => name.endsWith('.json'));
@@ -537,6 +557,14 @@ function listPendingRereviewWakes(rootDir, { repo = null, prNumber = null, limit
   const namePrefix = wantRepo && hasPrFilter
     ? `${rereviewWakeSubjectSlug({ repo: wantRepo, prNumber: wantPr })}__`
     : null;
+  if (roundRobin && !namePrefix && Number.isInteger(limit) && limit > 0 && names.length > limit) {
+    names.sort();
+    const totalNames = names.length;
+    const cursor = pendingScanCursorByRoot.get(rootDir) || 0;
+    const start = cursor % totalNames;
+    names = [...names.slice(start, start + limit), ...names.slice(0, Math.max(0, start + limit - totalNames))];
+    pendingScanCursorByRoot.set(rootDir, (start + limit) % totalNames);
+  }
   const records = [];
   for (const name of names) {
     if (namePrefix && !name.startsWith(namePrefix)) continue;
@@ -546,6 +574,7 @@ function listPendingRereviewWakes(rootDir, { repo = null, prNumber = null, limit
     if (wantRepo && String(record.repo || '') !== wantRepo) continue;
     if (hasPrFilter && Number(record.prNumber) !== wantPr) continue;
     records.push({ ...record, recordPath: path });
+    if (Number.isInteger(limit) && limit > 0 && records.length >= limit) break;
   }
   records.sort((a, b) => (toMs(a.requestedAt) || 0) - (toMs(b.requestedAt) || 0));
   return Number.isInteger(limit) && limit > 0 ? records.slice(0, limit) : records;
@@ -784,15 +813,21 @@ function sweepRereviewWakeQueue({
 } = {}) {
   const summary = { scanned: 0, completed: 0, skipped: 0, held: 0 };
   if (typeof lookupReviewRow !== 'function') return summary;
+  const nowMs = toMs(at) ?? Date.now();
+  if (!lastSettledSweep || lastSettledSweep.rootDir !== rootDir
+      || nowMs < lastSettledSweep.atMs
+      || nowMs - lastSettledSweep.atMs >= REREVIEW_WAKE_SETTLED_SWEEP_INTERVAL_MS) {
+    sweepSettledRereviewWakes(rootDir, { nowMs });
+    lastSettledSweep = { rootDir, atMs: nowMs };
+  }
   let pending;
   try {
-    pending = listPendingRereviewWakes(rootDir, { limit });
+    pending = listPendingRereviewWakes(rootDir, { limit, roundRobin: true });
   } catch (err) {
     log?.warn?.(`[rereview-wake] backlog sweep could not list wakes: ${err?.message || err}`);
     return summary;
   }
   if (pending.length === 0) return summary;
-  const nowMs = toMs(at) ?? Date.now();
   const maxAgeMs = resolveRereviewWakeMaxAgeMs(env);
   return withReviewStateHandle(rootDir, db, (handle) => {
     for (const record of pending) {
@@ -839,7 +874,15 @@ function sweepRereviewWakeQueue({
  * holding them.
  */
 function rereviewWakeBacklog({ rootDir = ROOT, nowMs = Date.now(), limit = null } = {}) {
-  const pending = listPendingRereviewWakes(rootDir, { limit });
+  const sampleLimit = Number.isInteger(limit) && limit > 0 ? limit : REREVIEW_WAKE_SWEEP_LIMIT;
+  let pendingFiles = 0;
+  try {
+    pendingFiles = readdirSync(rereviewWakePendingDir(rootDir)).filter((name) => name.endsWith('.json')).length;
+  } catch {
+    // The queue may not have been created yet.
+  }
+  const pending = listPendingRereviewWakes(rootDir, { limit: sampleLimit });
+  const truncated = pendingFiles > pending.length;
   const byReason = new Map();
   const byHoldReason = new Map();
   let oldest = null;
@@ -874,9 +917,11 @@ function rereviewWakeBacklog({ rootDir = ROOT, nowMs = Date.now(), limit = null 
     .map(([key, count]) => ({ reason: key, count }))
     .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason));
   return {
-    pending: entries.length,
-    claimed,
-    unclaimed: entries.length - claimed,
+    pending: truncated ? pendingFiles : entries.length,
+    claimed: truncated ? null : claimed,
+    unclaimed: truncated ? null : entries.length - claimed,
+    sampledEntries: entries.length,
+    truncated,
     oldest,
     oldestAgeMs: oldest ? oldest.ageMs : null,
     byReason: toSortedCounts(byReason),

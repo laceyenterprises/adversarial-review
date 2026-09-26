@@ -90,7 +90,8 @@ function formatAge(ms) {
 function renderStatus(backlog) {
   const lines = [
     `rereview wake backlog: ${backlog.pending} pending `
-    + `(${backlog.unclaimed} unclaimed, ${backlog.claimed} claimed)`,
+    + `(${backlog.unclaimed ?? 'unknown'} unclaimed, ${backlog.claimed ?? 'unknown'} claimed)`,
+    ...(backlog.truncated ? [`sampled ${backlog.sampledEntries} pending records; details below are partial`] : []),
     `oldest: ${backlog.oldest
       ? `${backlog.oldest.repo}#${backlog.oldest.prNumber} ${formatAge(backlog.oldestAgeMs)} `
         + `${backlog.oldest.reason}${backlog.oldest.holdReason ? ` held=${backlog.oldest.holdReason}` : ''}`

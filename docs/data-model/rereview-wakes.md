@@ -79,12 +79,20 @@ emitting a second terminal latency event.
 - Every write is best-effort and synchronous. A dir, write, transport, or
   telemetry failure is recorded and returned; it never throws into remediation
   closeout or the watcher tick.
+- A producer whose UID differs from the queue root, data directory, or
+  `reviews.db` owner is refused before creating directories or opening SQLite.
+  Run the operator CLI as the daemon owner when targeting the live queue.
 - Each state transition emits one `rereview_wake` row in `review_latency_events`
   with `payload.state` set to `requested`, `claimed`, `completed`, or `skipped`,
   keyed `rereview-wake:<state>:<dedupe key>` so replays collapse.
 - The per-PR drain runs in the watcher's admission lane; a once-per-tick sweep
   in the adoption phase covers PRs the admission lane cannot reach. Both are
-  bounded at 200 records per pass.
+  bounded at 200 records per pass. The fleet sweep rotates through directory
+  entries so a held first batch cannot starve later records. Settled-file
+  retention scans run at most once per ten minutes, outside the enqueue path.
+- Fleet backlog reads parse at most 200 records. Above that bound, `pending`
+  reports the directory's JSON file count, `truncated` is true, claimed and
+  unclaimed counts are unknown, and oldest/reason details are a partial sample.
 - A record that settled within the last 10 minutes suppresses a fresh request
   for the same key. The guard is time-bounded on purpose: a head does not always
   move between remediation rounds, and an unbounded guard would silently disable

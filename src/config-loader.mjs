@@ -23,6 +23,7 @@
 // agent-os side so the divergences narrow back to zero.
 
 import { readFileSync, existsSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, basename, join } from 'node:path';
 import { homedir } from 'node:os';
 import { isDeepStrictEqual } from 'node:util';
@@ -5586,8 +5587,10 @@ function isEmptyDoc(doc) {
 // a full YAML parse, but not free. Don't call in tight inner loops
 // outside the documented per-tick / per-job hot paths.
 const _CACHE_MAX_SLOTS = 16;
+const _SIGNATURE_HASH_TTL_MS = 1000;
 const _configCache = new Map();
 const _configSignatures = new Map();
+const _signatureFileCache = new Map();
 
 function _watchedPathsForCall({ topPath, modulePaths, env }) {
   const envView = env || process.env;
@@ -5603,15 +5606,42 @@ function _watchedPathsForCall({ topPath, modulePaths, env }) {
   return watched;
 }
 
-function _currentSignature({ topPath, modulePaths, env }) {
+function _statIdentity(st) {
+  return `${st.mtimeMs}|${st.ino}|${st.size}|${st.ctimeMs}`;
+}
+
+function _contentDigestForPath(path, st, { forceHash = false, nowMs = Date.now() } = {}) {
+  const identity = _statIdentity(st);
+  const cached = _signatureFileCache.get(path);
+  const cacheFresh =
+    cached
+    && cached.identity === identity
+    && Number.isFinite(cached.hashedAtMs)
+    && nowMs - cached.hashedAtMs < _SIGNATURE_HASH_TTL_MS;
+  if (!forceHash && cacheFresh) return cached.digest;
+
+  const digest = createHash('sha256').update(readFileSync(path)).digest('hex');
+  _signatureFileCache.set(path, { identity, digest, hashedAtMs: nowMs });
+  return digest;
+}
+
+function _currentSignature({ topPath, modulePaths, env }, options = {}) {
   const watched = _watchedPathsForCall({ topPath, modulePaths, env });
   const parts = [];
   for (const path of watched) {
     try {
       const st = statSync(path);
-      parts.push(`${path}|${st.mtimeMs}|${st.ino}`);
+      // CFGSTALE-01: metadata alone is not a content identity. Restore tools
+      // can write in place and restore the original timestamps, leaving both
+      // inode and mtime unchanged while the bytes differ. Hash the bytes so a
+      // long-lived daemon cannot retain the pre-restore config indefinitely.
+      // Cache hits reuse that digest until metadata changes or this short TTL
+      // expires, keeping ordinary config reads at stat-cost.
+      const digest = _contentDigestForPath(path, st, options);
+      parts.push(`${path}|${st.mtimeMs}|${st.ino}|${st.size}|${st.ctimeMs}|${digest}`);
     } catch {
-      parts.push(`${path}|null|null`);
+      _signatureFileCache.delete(path);
+      parts.push(`${path}|null|null|null|null|null`);
     }
   }
   return parts.join('::');
@@ -5710,4 +5740,20 @@ export function resolutionTrace(key) {
 export function resetConfigCache() {
   _configCache.clear();
   _configSignatures.clear();
+  _signatureFileCache.clear();
+}
+
+export function configSignatureStatus({ topPath, modulePaths, env } = {}) {
+  const cacheKey = _cacheKeyFor({ topPath, modulePaths, env });
+  const diskSignature = _currentSignature(
+    { topPath, modulePaths, env },
+    { forceHash: true }
+  );
+  const loadedSignature = _configSignatures.get(cacheKey) ?? null;
+  return {
+    algorithm: 'sha256',
+    loadedSignature,
+    diskSignature,
+    inSync: loadedSignature === null ? null : loadedSignature === diskSignature,
+  };
 }

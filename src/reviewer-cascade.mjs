@@ -19,6 +19,7 @@
  * torn JSON that would (fail-closed) park the PR.
  */
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import {
   PROVIDER_OVERLOADED_FAILURE_CLASS,
@@ -45,6 +46,11 @@ const CASCADE_BACKOFF_MINUTES = [1, 2, 4, 8, 15];
 // delays that escalation.
 const CASCADE_FAILURE_CAP = 5;
 const CASCADE_STATE_DIR = ['data', 'cascade-state'];
+const CREDENTIAL_OUTAGE_STATE_DIR = ['data', 'reviewer-credential-outages'];
+const CREDENTIAL_OUTAGE_WINDOW_MS = 15 * 60_000;
+const CREDENTIAL_OUTAGE_DISTINCT_PR_THRESHOLD = 2;
+const CREDENTIAL_OUTAGE_PROBE_INTERVAL_MS = 5 * 60_000;
+const CREDENTIAL_OUTAGE_FAILED_PROBE_CAP = 3;
 
 function getCascadeStateDir(rootDir) {
   return join(rootDir, ...CASCADE_STATE_DIR);
@@ -94,6 +100,164 @@ function writeCascadeState(rootDir, { repo, prNumber }, state) {
 
 function clearCascadeState(rootDir, { repo, prNumber }) {
   rmSync(getCascadeStatePath(rootDir, { repo, prNumber }), { force: true });
+}
+
+function credentialOutagePath(rootDir, reviewerModel) {
+  const model = String(reviewerModel || '').trim().toLowerCase();
+  if (!model) throw new TypeError('Reviewer model is required for credential outage state');
+  return join(rootDir, ...CREDENTIAL_OUTAGE_STATE_DIR, `${encodeURIComponent(model)}.json`);
+}
+
+function readReviewerCredentialOutage(rootDir, reviewerModel) {
+  try {
+    return JSON.parse(readFileSync(credentialOutagePath(rootDir, reviewerModel), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function writeReviewerCredentialOutage(rootDir, reviewerModel, state) {
+  const directory = join(rootDir, ...CREDENTIAL_OUTAGE_STATE_DIR);
+  mkdirSync(directory, { recursive: true });
+  const path = credentialOutagePath(rootDir, reviewerModel);
+  const tmpPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  const fd = openSync(tmpPath, 'wx');
+  try {
+    writeFileSync(fd, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  try {
+    renameSync(tmpPath, path);
+  } catch (error) {
+    rmSync(tmpPath, { force: true });
+    throw error;
+  }
+  return state;
+}
+
+function recordReviewerCredentialFailure(rootDir, {
+  reviewerModel,
+  repo,
+  prNumber,
+  failedAt = new Date().toISOString(),
+} = {}) {
+  const model = String(reviewerModel || '').trim().toLowerCase();
+  if (!model) return { active: false, reviewerModel: null, failures: [] };
+  const failedAtMs = Date.parse(failedAt);
+  const anchorMs = Number.isFinite(failedAtMs) ? failedAtMs : Date.now();
+  const previous = readReviewerCredentialOutage(rootDir, model);
+  const failures = (Array.isArray(previous?.failures) ? previous.failures : [])
+    .filter((entry) => anchorMs - Date.parse(entry.failedAt) <= CREDENTIAL_OUTAGE_WINDOW_MS)
+    .filter((entry) => !(entry.repo === repo && Number(entry.prNumber) === Number(prNumber)));
+  failures.push({ repo, prNumber: Number(prNumber), failedAt: new Date(anchorMs).toISOString() });
+  const distinctPrCount = new Set(failures.map((entry) => `${entry.repo}#${entry.prNumber}`)).size;
+  const lastProbeMs = Date.parse(previous?.lastProbeAt);
+  const failedProbe = Boolean(previous?.active) && Number.isFinite(lastProbeMs) && anchorMs >= lastProbeMs;
+  const probeFailures = Number(previous?.probeFailures || 0) + (failedProbe ? 1 : 0);
+  const exhausted = Boolean(previous?.exhausted) || probeFailures >= CREDENTIAL_OUTAGE_FAILED_PROBE_CAP;
+  const active = !exhausted && (Boolean(previous?.active) || distinctPrCount >= CREDENTIAL_OUTAGE_DISTINCT_PR_THRESHOLD);
+  return writeReviewerCredentialOutage(rootDir, model, {
+    reviewerModel: model,
+    active,
+    exhausted,
+    probeFailures,
+    reason: `reviewer-credential:${model}`,
+    startedAt: (active || exhausted) ? (previous?.startedAt || new Date(anchorMs).toISOString()) : null,
+    nextProbeAt: active
+      ? (
+        Date.parse(previous?.nextProbeAt) > anchorMs
+          ? previous.nextProbeAt
+          : new Date(anchorMs + CREDENTIAL_OUTAGE_PROBE_INTERVAL_MS).toISOString()
+      )
+      : null,
+    failures,
+    distinctPrCount,
+  });
+}
+
+function releaseReviewerCredentialProbe(rootDir, reviewerModel, reservation) {
+  if (!reservation?.probe || !reservation.state?.lastProbeAt) return false;
+  const state = readReviewerCredentialOutage(rootDir, reviewerModel);
+  if (!state?.active || state.lastProbeAt !== reservation.state.lastProbeAt ||
+      state.nextProbeAt !== reservation.state.nextProbeAt) return false;
+  writeReviewerCredentialOutage(rootDir, reviewerModel, {
+    ...state,
+    lastProbeAt: null,
+    nextProbeAt: reservation.nextProbeAfter,
+  });
+  return true;
+}
+
+function clearReviewerCredentialOutage(rootDir, reviewerModel) {
+  const state = readReviewerCredentialOutage(rootDir, reviewerModel);
+  if (state) rmSync(credentialOutagePath(rootDir, reviewerModel), { force: true });
+  return state;
+}
+
+function parseInstantMs(value) {
+  if (typeof value === 'number') return value;
+  return Date.parse(value);
+}
+
+function latestReviewerCredentialHoldMs(state) {
+  const holdTimes = Array.isArray(state?.failures)
+    ? state.failures
+      .map((entry) => parseInstantMs(entry?.failedAt))
+      .filter(Number.isFinite)
+    : [];
+  const startedAtMs = parseInstantMs(state?.startedAt);
+  if (Number.isFinite(startedAtMs)) holdTimes.push(startedAtMs);
+  const lastProbeAtMs = parseInstantMs(state?.lastProbeAt);
+  if (Number.isFinite(lastProbeAtMs)) holdTimes.push(lastProbeAtMs);
+  return holdTimes.length > 0 ? Math.max(...holdTimes) : null;
+}
+
+function shouldPauseReviewerModel(rootDir, reviewerModel, {
+  now = new Date(),
+  reserve = true,
+  probeIntervalMs = CREDENTIAL_OUTAGE_PROBE_INTERVAL_MS,
+} = {}) {
+  const state = readReviewerCredentialOutage(rootDir, reviewerModel);
+  if (!state?.active) return { paused: false, state };
+
+  const nowMs = parseInstantMs(now);
+  if (!Number.isFinite(nowMs)) {
+    return { paused: true, state, nextProbeAfter: null };
+  }
+
+  const intervalMs = Number(probeIntervalMs);
+  const boundedIntervalMs = Number.isFinite(intervalMs) && intervalMs > 0
+    ? intervalMs
+    : CREDENTIAL_OUTAGE_PROBE_INTERVAL_MS;
+  const persistedProbeMs = parseInstantMs(state.nextProbeAt);
+  const latestHoldMs = latestReviewerCredentialHoldMs(state);
+  const nextProbeMs = Number.isFinite(persistedProbeMs)
+    ? persistedProbeMs
+    : Number.isFinite(latestHoldMs)
+      ? latestHoldMs + boundedIntervalMs
+      : nowMs;
+  const nextProbeAfter = isRepresentableInstant(nextProbeMs)
+    ? new Date(nextProbeMs).toISOString()
+    : null;
+
+  if (!isRepresentableInstant(nextProbeMs) || nowMs >= nextProbeMs) {
+    if (!reserve) {
+      return { paused: false, state, probe: true, probeDue: true, nextProbeAfter };
+    }
+    const reservedUntilMs = nowMs + boundedIntervalMs;
+    const probeState = writeReviewerCredentialOutage(rootDir, reviewerModel, {
+      ...state,
+      lastProbeAt: new Date(nowMs).toISOString(),
+      nextProbeAt: isRepresentableInstant(reservedUntilMs)
+        ? new Date(reservedUntilMs).toISOString()
+        : null,
+    });
+    return { paused: false, state: probeState, probe: true, probeDue: true, nextProbeAfter };
+  }
+
+  return { paused: true, state, nextProbeAfter };
 }
 
 function resolveCascadeBackoffMinutes(consecutiveCascadeFailures) {
@@ -379,6 +543,7 @@ export {
   REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS,
   classifyReviewerFailure,
   clearCascadeState,
+  clearReviewerCredentialOutage,
   formatTransientFailureBreakdown,
   getCascadeStatePath,
   hasOperatorDecisionRequiredAlerted,
@@ -386,7 +551,11 @@ export {
   markOperatorDecisionRequiredAlerted,
   isReviewerSubprocessTimeout,
   readCascadeState,
+  readReviewerCredentialOutage,
   recordCascadeFailure,
+  recordReviewerCredentialFailure,
+  releaseReviewerCredentialProbe,
   resolveCascadeBackoffMinutes,
   shouldBackoffReviewerSpawn,
+  shouldPauseReviewerModel,
 };

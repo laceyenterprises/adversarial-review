@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -577,6 +577,16 @@ test('test runner cannot write config status to a live HQ root', () => {
   assert.ok(process.env.NODE_TEST_CONTEXT);
   assert.throws(
     () => writeConfigSignatureStatus({ env: { HQ_ROOT: '/Users/airlock/agent-os-hq' } }),
+    /outside temporary HQ_ROOT/
+  );
+});
+
+test('test runner cannot write config status through a temporary symlink', (t) => {
+  const tempRoot = makeTempDir(t);
+  const hqRootAlias = path.join(tempRoot, 'hq-alias');
+  symlinkSync(process.cwd(), hqRootAlias, 'dir');
+  assert.throws(
+    () => writeConfigSignatureStatus({ env: { HQ_ROOT: hqRootAlias } }),
     /outside temporary HQ_ROOT/
   );
 });

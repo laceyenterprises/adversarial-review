@@ -33,7 +33,7 @@
 // behavior — only the daemon's own subprocess churn.
 
 import { setTimeout as sleep } from 'node:timers/promises';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -232,7 +232,18 @@ function writeConfigSignatureStatus({ env = process.env, now = () => new Date() 
   const hqRoot = env.HQ_ROOT;
   if (!hqRoot) return null;
   if (process.env.NODE_TEST_CONTEXT) {
-    const fromTemp = relative(resolve(tmpdir()), resolve(hqRoot));
+    // Resolve symlinks too: a temporary alias must not redirect a test write
+    // into the live HQ status file. The HQ directory may be created by the
+    // writer, so resolve the nearest existing ancestor first.
+    const requestedRoot = resolve(hqRoot);
+    let existingAncestor = requestedRoot;
+    while (!existsSync(existingAncestor)) {
+      const parent = dirname(existingAncestor);
+      if (parent === existingAncestor) break;
+      existingAncestor = parent;
+    }
+    const actualRoot = resolve(realpathSync(existingAncestor), relative(existingAncestor, requestedRoot));
+    const fromTemp = relative(realpathSync(tmpdir()), actualRoot);
     if (fromTemp.startsWith('..') || isAbsolute(fromTemp)) {
       throw new Error('test runner refused config-signature status write outside temporary HQ_ROOT');
     }

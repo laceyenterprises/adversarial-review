@@ -478,7 +478,7 @@ test('readLatestWorkerRunStatusFromLedger returns a timeout failure when psql ex
   assert.match(result.detail, /timed out after 30000ms/);
 });
 
-test('readBuildCompletionSignalForPr reads the newest merged signal for a PR', () => {
+test('readBuildCompletionSignalForPr reads merge-commit signals without a reviewed-head filter', () => {
   const rootDir = tempRoot();
   const ledgerDb = path.join(rootDir, 'ledger.db');
   const db = new Database(ledgerDb);
@@ -551,7 +551,9 @@ test('readBuildCompletionSignalForPr reads the newest merged signal for a PR', (
   assert.equal(headScoped.ok, true);
   assert.equal(headScoped.row.completion_id, 'bcmp_old');
 
-  const missingHead = readBuildCompletionSignalForPr({
+  // Agent OS writes merge commits into merged.head_sha. The reviewed PR head
+  // is a different SHA, so a head-scoped merged lookup must not be used by AMA.
+  const reviewedPrHeadLookup = readBuildCompletionSignalForPr({
     repo: 'acme/myrepo',
     prNumber: 1234,
     headSha: 'c'.repeat(40),
@@ -560,8 +562,8 @@ test('readBuildCompletionSignalForPr reads the newest merged signal for a PR', (
     env: HERMETIC_CONFIG_ENV,
   });
 
-  assert.equal(missingHead.ok, false);
-  assert.equal(missingHead.reason, 'missing-build-completion-signal');
+  assert.equal(reviewedPrHeadLookup.ok, false);
+  assert.equal(reviewedPrHeadLookup.reason, 'missing-build-completion-signal');
 });
 
 test('readBuildCompletionProducerEvidence proves repo-level merged-signal producer presence', () => {

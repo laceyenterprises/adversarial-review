@@ -165,12 +165,13 @@ test('stale reserved wake reservation is recovered by a later caller', () => {
   const rootDir = root();
   const calls = [];
   const dir = hammerWakeAuditDir(rootDir);
+  const nowMs = Date.now();
   mkdirSync(dir, { recursive: true });
   writeFileSync(hammerWakeAuditPath(rootDir, identity), `${JSON.stringify({
     schemaVersion: 1,
     event: 'hammer_wake',
     ...identity,
-    observedAt: '2026-01-01T00:00:00.000Z',
+    observedAt: new Date(nowMs - 11 * 60 * 1000).toISOString(),
     outcome: 'reserved',
     route: 'watcher-ama-merge-authority',
   }, null, 2)}\n`);
@@ -179,8 +180,8 @@ test('stale reserved wake reservation is recovered by a later caller', () => {
     rootDir,
     ...identity,
     eligibility: { eligible: true, reasons: [] },
-    observedAt: '2026-01-01T00:11:00.000Z',
-    nowMs: Date.parse('2026-01-01T00:11:00.000Z'),
+    observedAt: new Date(nowMs).toISOString(),
+    nowMs,
     requestWatcherWakeImpl: wakeImpl(calls),
     log: { log() {} },
   });
@@ -189,6 +190,37 @@ test('stale reserved wake reservation is recovered by a later caller', () => {
   assert.equal(recovered.outcome, 'requested');
   assert.equal(audit.outcome, 'requested');
   assert.equal(calls.length, 1);
+  assert.ok(readdirSync(dir).some((name) => name.includes('.retry-')));
+});
+
+test('malformed reservation time recovers from the audit file mtime', () => {
+  const rootDir = root();
+  const dir = hammerWakeAuditDir(rootDir);
+  const nowMs = Date.now();
+  mkdirSync(dir, { recursive: true });
+  const path = hammerWakeAuditPath(rootDir, identity);
+  writeFileSync(path, `${JSON.stringify({
+    schemaVersion: 1,
+    event: 'hammer_wake',
+    ...identity,
+    observedAt: 'invalid-time',
+    outcome: 'reserved',
+  })}\n`);
+  const staleTime = new Date(nowMs - 11 * 60 * 1000);
+  utimesSync(path, staleTime, staleTime);
+
+  const calls = [];
+  const recovered = requestEligibleHammerWake({
+    rootDir,
+    ...identity,
+    eligibility: { eligible: true, reasons: [] },
+    nowMs,
+    requestWatcherWakeImpl: wakeImpl(calls),
+    log: { log() {} },
+  });
+  assert.equal(recovered.outcome, 'requested');
+  assert.equal(calls.length, 1);
+  assert.ok(readdirSync(dir).some((name) => name.includes('.retry-')));
 });
 
 test('retry archives remain inside the age and file-count retention bounds', () => {
@@ -206,6 +238,8 @@ test('retry archives remain inside the age and file-count retention bounds', () 
   const archives = readdirSync(dir).filter((name) => name.includes('.retry-'));
   assert.ok(archives.length > 0);
   assert.ok(archives.every((name) => name.endsWith('.json')));
+  const health = collectReviewPipelineHealth({ rootDir, config: { hostChecksEnabled: false } });
+  assert.equal(health.hammerWakes.recent.length, 1);
 
   const oldTime = new Date('2026-01-01T00:00:00.000Z');
   for (const name of archives) utimesSync(join(dir, name), oldTime, oldTime);

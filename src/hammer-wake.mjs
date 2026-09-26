@@ -42,9 +42,16 @@ function hammerWakeAuditPath(rootDir, identity) {
   return join(hammerWakeAuditDir(rootDir), `${digest}.json`);
 }
 
-function staleHammerWakeReservation(record, nowMs = Date.now(), maxAgeMs = HAMMER_WAKE_STALE_RESERVATION_MS) {
+function staleHammerWakeReservation(record, auditPath, nowMs = Date.now(), maxAgeMs = HAMMER_WAKE_STALE_RESERVATION_MS) {
   if (record?.outcome !== 'reserved') return false;
-  const observedMs = Date.parse(record.observedAt || '');
+  let observedMs = Date.parse(record.observedAt || '');
+  if (!Number.isFinite(observedMs)) {
+    try {
+      observedMs = statSync(auditPath).mtimeMs;
+    } catch {
+      return false;
+    }
+  }
   return Number.isFinite(observedMs) && nowMs - observedMs > maxAgeMs;
 }
 
@@ -212,7 +219,7 @@ function requestEligibleHammerWake({
       } catch (err) {
         if (err?.code === 'EEXIST') {
           const prior = readHammerWakeAudit(auditPath);
-          if (prior?.outcome === 'failed' || staleHammerWakeReservation(prior, nowMs)) {
+          if (prior?.outcome === 'failed' || staleHammerWakeReservation(prior, auditPath, nowMs)) {
             if (retryAttempt + 1 >= HAMMER_WAKE_RETRY_ATTEMPTS) {
               outcome = 'failed';
               reason = 'wake-retry-contended';
@@ -223,9 +230,10 @@ function requestEligibleHammerWake({
                 .digest('hex')
                 .slice(0, 12)}.json`;
               try {
-                // Rename is the retry hand-off CAS: only one caller can archive
-                // the failed or stale reservation, then the ordinary exclusive create
-                // below elects at most one replacement wake for this identity.
+                // Rename hands off the path, but is not a content CAS: another
+                // process may replace the record between read and rename. The
+                // watcher wake is an at-least-once edge trigger; merge authority
+                // remains with the watcher after any overlapping retry.
                 renameSync(auditPath, archivePath);
                 return requestEligibleHammerWake({
                   rootDir,
@@ -286,6 +294,7 @@ function requestEligibleHammerWake({
     reason,
     eligibilityReasons,
     route: 'watcher-ama-merge-authority',
+    // Diagnostic only: the caller relies on a later watcher tick, not this flag.
     retryable,
     latencyEvent,
     ...(auditPath ? { auditPath } : {}),

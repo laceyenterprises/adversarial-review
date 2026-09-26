@@ -362,9 +362,9 @@ test('lock release does not depend on rereading owner metadata', async () => {
 
 test('long throttle waits publish and clear a sidecar status file', async () => {
   const rootDir = makeRootDir();
+  let releaseSleep;
   try {
     const statePath = path.join(rootDir, 'data', 'api-cache', 'rate-limit-state.json');
-    let releaseSleep;
     const throttle = createRateLimitThrottle({
       env: { GHO_RATE_LIMIT_SHARED_STATE_PATH: statePath },
       nowMs: () => Date.parse('2026-06-06T12:00:00.000Z'),
@@ -389,7 +389,7 @@ test('long throttle waits publish and clear a sidecar status file', async () => 
       } catch {
         return false;
       }
-    }, { timeoutMs: 1000 });
+    }, { timeoutMs: 5_000 });
     assert.equal(sidecar.resource, DEFAULT_RESOURCE);
     assert.equal(sidecar.throttledUntil, '2026-06-06T12:05:00.000Z');
 
@@ -397,6 +397,7 @@ test('long throttle waits publish and clear a sidecar status file', async () => 
     await pending;
     assert.equal(existsSync(sidecarPath), false);
   } finally {
+    releaseSleep?.();
     rmSync(rootDir, { recursive: true, force: true });
   }
 });

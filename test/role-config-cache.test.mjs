@@ -24,7 +24,9 @@ import { loadRoleConfig, resetRoleConfigCache } from '../src/role-config.mjs';
 import { routeSubject } from '../src/adapters/subject/github-pr/routing.mjs';
 
 function makeTmp() {
-  return mkdtempSync(join(tmpdir(), 'cfg-09-cache-'));
+  const tmp = mkdtempSync(join(tmpdir(), 'cfg-09-cache-'));
+  writeFileSync(join(tmp, 'top.yaml'), '');
+  return tmp;
 }
 
 function writeYaml(path, body) {
@@ -48,9 +50,9 @@ test('CFG-09 per-tick reset: two ticks with different env both resolve env value
     const cfg1 = loadRoleConfig({
       env: {
         AGENT_OS_ROLES_REMEDIATOR: 'codex',
-        AGENT_OS_CONFIG_PATH: '/dev/null',
+        AGENT_OS_CONFIG_PATH: join(tmp, 'top.yaml'),
       },
-      topPath: '/dev/null',
+      topPath: join(tmp, 'top.yaml'),
       modulePaths: [modulePath],
     });
     assert.equal(cfg1.get('roles.remediator'), 'codex');
@@ -60,9 +62,9 @@ test('CFG-09 per-tick reset: two ticks with different env both resolve env value
     const cfg2 = loadRoleConfig({
       env: {
         AGENT_OS_ROLES_REMEDIATOR: 'claude-code',
-        AGENT_OS_CONFIG_PATH: '/dev/null',
+        AGENT_OS_CONFIG_PATH: join(tmp, 'top.yaml'),
       },
-      topPath: '/dev/null',
+      topPath: join(tmp, 'top.yaml'),
       modulePaths: [modulePath],
     });
     assert.equal(cfg2.get('roles.remediator'), 'claude-code');
@@ -83,8 +85,8 @@ test('CFG-09 cache hit: repeated loadRoleConfig within a tick does not re-parse'
 
     resetRoleConfigCache();
     const callArgs = {
-      env: { AGENT_OS_CONFIG_PATH: '/dev/null' },
-      topPath: '/dev/null',
+      env: { AGENT_OS_CONFIG_PATH: join(tmp, 'top.yaml') },
+      topPath: join(tmp, 'top.yaml'),
       modulePaths: [modulePath],
     };
     // Prime the cache.
@@ -140,9 +142,9 @@ test('CFG-09 env mutation without reset resolves from the changed env alias slot
     const cfg1 = loadRoleConfig({
       env: {
         AGENT_OS_ROLES_REMEDIATOR: 'codex',
-        AGENT_OS_CONFIG_PATH: '/dev/null',
+        AGENT_OS_CONFIG_PATH: join(tmp, 'top.yaml'),
       },
-      topPath: '/dev/null',
+      topPath: join(tmp, 'top.yaml'),
       modulePaths: [modulePath],
     });
     assert.equal(cfg1.get('roles.remediator'), 'codex');
@@ -152,9 +154,9 @@ test('CFG-09 env mutation without reset resolves from the changed env alias slot
     const cfg2 = loadRoleConfig({
       env: {
         AGENT_OS_ROLES_REMEDIATOR: 'claude-code',
-        AGENT_OS_CONFIG_PATH: '/dev/null',
+        AGENT_OS_CONFIG_PATH: join(tmp, 'top.yaml'),
       },
-      topPath: '/dev/null',
+      topPath: join(tmp, 'top.yaml'),
       modulePaths: [modulePath],
     });
     assert.equal(
@@ -168,9 +170,9 @@ test('CFG-09 env mutation without reset resolves from the changed env alias slot
     const cfg3 = loadRoleConfig({
       env: {
         AGENT_OS_ROLES_REMEDIATOR: 'claude-code',
-        AGENT_OS_CONFIG_PATH: '/dev/null',
+        AGENT_OS_CONFIG_PATH: join(tmp, 'top.yaml'),
       },
-      topPath: '/dev/null',
+      topPath: join(tmp, 'top.yaml'),
       modulePaths: [modulePath],
     });
     assert.equal(cfg3.get('roles.remediator'), 'claude-code');
@@ -186,11 +188,11 @@ test('CFG-09 N2 hot path: routeSubject parses once per tick across 10 PRs', (t) 
   try {
     const modulePath = join(tmp, 'config.yaml');
     writeYaml(modulePath, 'roles:\n  reviewer: claude\n');
-    // Pin `topPath` to `/dev/null` and `modulePaths` to this test's
-    // private module config so full-suite YAML parsing in other files
+    // Pin `topPath` and `modulePaths` to this test's private files so
+    // full-suite YAML parsing in other files
     // cannot leak into the spy count.
-    const env = { AGENT_OS_CONFIG_PATH: '/dev/null' };
-    const callOpts = { env, topPath: '/dev/null', modulePaths: [modulePath] };
+    const env = { AGENT_OS_CONFIG_PATH: join(tmp, 'top.yaml') };
+    const callOpts = { env, topPath: join(tmp, 'top.yaml'), modulePaths: [modulePath] };
     const subjects = [];
     for (let i = 0; i < 10; i++) {
       subjects.push({ builderClass: i % 2 === 0 ? 'codex' : 'claude-code' });
@@ -230,7 +232,7 @@ test('CFG-09 N2 hot path: routeSubject parses once per tick across 10 PRs', (t) 
         const parseCountAfterBackToBackProof = yamlLoadCountFor(yamlLoadSpy, modulePath);
         assert.ok(
           parseCountAfterBackToBackProof - parseCountAfterBackToBackRefresh <= 1,
-          `tick ${tick}: back-to-back routeSubject calls may see at most one concurrent cache reset`,
+          `tick ${tick}: back-to-back routeSubject calls may see at most one concurrent cache reset; saw ${parseCountAfterBackToBackProof - parseCountAfterBackToBackRefresh} parses`,
         );
       } finally {
         yamlLoadSpy.mock.restore();
@@ -251,8 +253,8 @@ test('CFG-09 module-file edit invalidates cache without explicit reset', () => {
 
     resetRoleConfigCache();
     const callArgs = {
-      env: { AGENT_OS_CONFIG_PATH: '/dev/null' },
-      topPath: '/dev/null',
+      env: { AGENT_OS_CONFIG_PATH: join(tmp, 'top.yaml') },
+      topPath: join(tmp, 'top.yaml'),
       modulePaths: [modulePath],
     };
     const cfg1 = loadRoleConfig(callArgs);
@@ -290,8 +292,8 @@ test('CFGSTALE-01 restored bytes invalidate cache even when inode and mtime are 
     utimesSync(modulePath, stableTime, stableTime);
     const originalTimes = statSync(modulePath);
     const callArgs = {
-      env: { AGENT_OS_CONFIG_PATH: '/dev/null' },
-      topPath: '/dev/null',
+      env: { AGENT_OS_CONFIG_PATH: join(tmp, 'top.yaml') },
+      topPath: join(tmp, 'top.yaml'),
       modulePaths: [modulePath],
     };
 

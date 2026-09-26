@@ -4549,6 +4549,9 @@ test('spawnCodexRemediationWorker launches detached codex exec with stdin prompt
     assert.equal(spawnCalls[0].options.env.CODEX_AUTH_PATH, authPath);
     assert.equal(spawnCalls[0].options.env.CODEX_HOME, codexHome);
     assert.equal(spawnCalls[0].options.env.HOME, workspaceDir);
+    assert.equal(spawnCalls[0].options.env.GIT_EDITOR, 'true');
+    assert.equal(spawnCalls[0].options.env.GIT_SEQUENCE_EDITOR, 'true');
+    assert.equal(spawnCalls[0].options.env.GIT_TERMINAL_PROMPT, '0');
     assert.equal(spawnCalls[0].options.env.OPENAI_API_KEY, undefined);
     assert.match(worker.startupEvidence.sanitizedEnv.stripped.join(','), /(^|,)OPENAI_API_KEY(,|$)/);
     assert.match(spawnCalls[0].options.env.PATH, /\/custom\/bin/);

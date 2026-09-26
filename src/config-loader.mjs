@@ -2979,6 +2979,15 @@ function schemaV1() {
             __nullable: true,
             __min: 1,
           },
+          // RSPREREVIEW-01. Re-review counterpart to the first-pass depth
+          // lever. Null inherits the first-pass threshold; zero/invalid env
+          // input resolves disabled in review-queue-depth.mjs.
+          rereview_queue_depth_failover_threshold: {
+            __type: TYPE_INT,
+            __default: null,
+            __nullable: true,
+            __min: 0,
+          },
           // HAMASYNC-01. `inline` (default) awaits AMA's `hq dispatch` for a
           // hammer inside the serial posted-review phase, so one 120-165 s
           // dispatch holds every later PR's merge click behind it. `background`
@@ -3470,6 +3479,10 @@ export const ENV_ALIASES = {
   'watcher.first_pass_review_queue_depth_failover_threshold': {
     canonical: 'AGENT_OS_WATCHER_FIRST_PASS_REVIEW_QUEUE_DEPTH_FAILOVER_THRESHOLD',
     aliases: [['ADVERSARIAL_REVIEW_FIRST_PASS_QUEUE_DEPTH_FAILOVER_THRESHOLD', identity]],
+  },
+  'watcher.rereview_queue_depth_failover_threshold': {
+    canonical: 'AGENT_OS_WATCHER_REREVIEW_QUEUE_DEPTH_FAILOVER_THRESHOLD',
+    aliases: [['ADVERSARIAL_REVIEW_REREVIEW_QUEUE_DEPTH_FAILOVER_THRESHOLD', identity]],
   },
   'watcher.ama_hammer_dispatch_mode': {
     canonical: 'AGENT_OS_WATCHER_AMA_HAMMER_DISPATCH_MODE',

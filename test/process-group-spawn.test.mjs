@@ -372,9 +372,9 @@ test('without reapGroupOnExit a leaked grandchild stalls capture until the timeo
 // thinks in silence runs to its hard timeout.
 test('firstOutputTimeout is retired by the first byte and never re-arms', async () => {
   const firstOutputTimeout = 300;
-  // Writes immediately, then stays silent far longer than the deadline.
-  const script = 'process.stdout.write("hello"); setTimeout(() => { process.stdout.write("{\\"ok\\":true}"); process.exit(0); }, 1200);';
-  const result = await spawnCapturedProcessGroup(process.execPath, ['-e', script], {
+  // Use /bin/sh so this checks first-byte retirement, not fresh Node startup latency.
+  const script = 'printf hello; sleep 1.2; printf \'{"ok":true}\'';
+  const result = await spawnCapturedProcessGroup('/bin/sh', ['-c', script], {
     firstOutputTimeout,
     timeout: 10_000,
   });

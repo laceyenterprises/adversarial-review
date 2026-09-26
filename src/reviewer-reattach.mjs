@@ -301,6 +301,12 @@ function prepareStatements(db) {
         WHERE repo = ? AND pr_number = ? AND pr_state IN ('merged', 'closed')
           AND review_status = 'reviewing'`
     ),
+    reopenClosedReviewing: db.prepare(
+      `UPDATE reviewed_prs
+          SET pr_state = 'open', closed_at = NULL
+        WHERE repo = ? AND pr_number = ?
+          AND pr_state = 'closed' AND review_status = 'reviewing'`
+    ),
     markOrphan: db.prepare(
       "UPDATE reviewed_prs SET review_status = 'failed-orphan', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
     ),
@@ -456,6 +462,11 @@ async function reconcileReviewerSessions({
   findReviewerProcess = findReviewerProcessBySessionUuid,
   killProcessGroup = killPgid,
   fetchHeadSha = (row) => fetchCurrentHeadSha(octokit, row),
+  fetchLivePrState = async (row) => {
+    const { owner, repo } = splitRepoPath(row.repo);
+    const { data } = await octokit.rest.pulls.get({ owner, repo, pull_number: row.pr_number });
+    return data?.state || null;
+  },
   findPostedReview = makeReviewPostedProbe(octokit),
   shouldReconcileRow = () => true,
   onTerminalDeadSession = async () => {},
@@ -533,6 +544,27 @@ async function reconcileReviewerSessions({
     let row = listedRow;
     const terminalState = String(row.pr_state || '').trim().toLowerCase();
     if (terminalState === 'merged' || terminalState === 'closed') {
+      if (terminalState === 'closed') {
+        // Unlike a merge, a close can be reversed while this watcher is down.
+        // Startup reconciliation runs before lifecycle sync, so confirm the
+        // live PR before killing a reviewer or making its claim terminal.
+        let liveState;
+        try {
+          liveState = String(await fetchLivePrState(row) || '').trim().toLowerCase();
+        } catch (err) {
+          log.warn(`[watcher] reviewer_reattach_closed_pr_state_unverified repo=${row.repo} pr=${row.pr_number} error=${err?.message || err}`);
+          continue;
+        }
+        if (liveState === 'open') {
+          statements.reopenClosedReviewing.run(row.repo, row.pr_number);
+          log.warn(`[watcher] reviewer_reattach_reopened_pr_restored repo=${row.repo} pr=${row.pr_number}`);
+          continue;
+        }
+        if (liveState !== 'closed') {
+          log.warn(`[watcher] reviewer_reattach_closed_pr_state_unverified repo=${row.repo} pr=${row.pr_number} state=${liveState || 'unknown'}`);
+          continue;
+        }
+      }
       const settledAt = (terminalState === 'merged' ? row.merged_at : row.closed_at) || failureAt;
       let killResult = false;
       let terminalPgid = parsePositiveInteger(row.reviewer_pgid);

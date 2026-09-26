@@ -37,6 +37,7 @@ import {
   writeAdapterCommitStatus,
 } from './github-adapter-client.mjs';
 import { isFleetSelfRepairTrailerOnlyRereviewReason } from './fleet-self-repair-rereview.mjs';
+import { isSettledReviewJob } from './follow-up-jobs.mjs';
 
 const execFileAsync = promisify(execFile);
 const WATCHER_OWNED_HOLD_LABELS = new Set(['duplicate-family-hold']);
@@ -818,6 +819,9 @@ function pickAdversarialGateStatus({
   }
 
   if (latestJobStatus === 'pending') {
+    if (isSettledReviewJob(latestJob)) {
+      return decide('success', 'Non-blocking adversarial review is settled.', 'review-settled');
+    }
     return decide('pending', 'Remediation is queued.', 'remediation-queued');
   }
   if (latestJobStatus === 'in-progress') {

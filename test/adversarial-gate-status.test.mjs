@@ -17,6 +17,7 @@ const ADVERSARIAL_GATE_CONTEXT = DEFAULT_ADVERSARIAL_GATE_CONTEXT;
 import {
   claimNextFollowUpJob,
   createFollowUpJob,
+  isSettledReviewJob,
 } from '../src/follow-up-jobs.mjs';
 import {
   handlePostedReviewRow,
@@ -398,6 +399,22 @@ test('pickAdversarialGateStatus keeps pending clean verdict-carrier jobs queued'
 
   assert.equal(decision.state, 'pending');
   assert.equal(decision.reason, 'remediation-queued');
+});
+
+test('pickAdversarialGateStatus settles a pending job identified by the shared no-remediation predicate', () => {
+  const latestJob = makeJob({
+    status: 'pending',
+    reviewBody: '## Summary\nClean.\n\n## Blocking Issues\n- None.\n\n## Non-blocking Issues\n- None.\n\n## Verdict\nComment only',
+  });
+
+  assert.equal(isSettledReviewJob(latestJob), true);
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow(),
+    latestJob,
+  });
+
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'review-settled');
 });
 
 test('pickAdversarialGateStatus returns pending while remediation is active', () => {

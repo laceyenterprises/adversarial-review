@@ -85,6 +85,7 @@ import {
   resolveClaudeCodeOAuthTransport,
 } from '../src/remediation-oauth-preflight.mjs';
 import { openReviewStateDb } from '../src/review-state.mjs';
+import { pickAdversarialGateStatus } from '../src/adversarial-gate-status.mjs';
 
 function greenCiGate() {
   return {
@@ -6123,7 +6124,7 @@ test('consumeFollowUpJobsUntilCapacity does not charge claim-time terminal trans
   assert.equal(spawnCalls.length, 2);
   assert.deepEqual(
     result.results.map((entry) => entry.reason || (entry.consumed ? 'spawned' : 'unknown')),
-    ['review-settled', 'spawned', 'spawned']
+    ['no-remediation-required', 'spawned', 'spawned']
   );
   assert.deepEqual(wakeCalls, [{
     rootDir,
@@ -6173,6 +6174,45 @@ test('consumeFollowUpJobsUntilCapacity does not charge claim-time terminal trans
   } finally {
     db.close();
   }
+});
+
+test('consumeFollowUpJobsUntilCapacity finishes no-remediation jobs while at full capacity and releases the gate', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  markActiveInProgressJob(rootDir, {
+    prNumber: 6,
+    reviewPostedAt: '2026-04-21T07:58:00.000Z',
+  });
+  createPendingRemediationJob(rootDir, {
+    prNumber: 7,
+    revisionRef: 'clean-head-sha',
+    critical: false,
+    reviewBody: '## Summary\nClean.\n\n## Blocking Issues\n- None.\n\n## Non-blocking Issues\n- None.\n\n## Verdict\nComment only',
+    reviewPostedAt: '2026-04-21T07:59:00.000Z',
+  });
+
+  const spawnCalls = [];
+  const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity(
+    drainerTestOptions(rootDir, spawnCalls, { maxConcurrent: 1 })
+  ));
+
+  assert.equal(result.activeAtStart, 1);
+  assert.equal(result.availableAtStart, 0);
+  assert.equal(result.stopped, 1);
+  assert.equal(result.spawned, 0);
+  assert.equal(spawnCalls.length, 0);
+  assert.equal(result.results[0].reason, 'no-remediation-required');
+  assert.equal(result.results[0].job.remediationPlan.stop.code, 'no-remediation-required');
+
+  const decision = pickAdversarialGateStatus({
+    reviewRow: {
+      review_status: 'posted',
+      reviewer_head_sha: 'clean-head-sha',
+    },
+    latestJob: result.results[0].job,
+    headSha: 'clean-head-sha',
+  });
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'review-settled');
 });
 
 test('consumeFollowUpJobsUntilCapacity continues filling capacity after one job fails to spawn', async () => {

@@ -39,6 +39,7 @@ import { REREVIEW_CI_BLOCKED_STATUS } from '../src/review-statuses.mjs';
 import { DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS } from '../src/reviewer-pass-reaper.mjs';
 import { LEGACY_ORPHAN_FAILURE_MESSAGE } from '../src/reviewer-reattach.mjs';
 import { ensureTtmTrackerSchema } from '../src/ttm-tracker.mjs';
+import { ensureDuplicateFamilySchema } from '../src/duplicate-family-state.mjs';
 
 const NOW = '2026-05-25T18:00:00.000Z';
 const REPO = 'laceyenterprises/adversarial-review';
@@ -308,6 +309,147 @@ function openDb(rootDir) {
   ensureReviewStateSchema(db);
   return db;
 }
+
+function insertDuplicateFamily(db, {
+  familyId,
+  status = 'advisory',
+  firstDetectedAt = '2026-05-25T17:00:00.000Z',
+  selectedSurvivorPrNumber = null,
+  reportPath = null,
+  ignoredCandidates = [],
+  candidates = [],
+}) {
+  ensureDuplicateFamilySchema(db);
+  db.prepare(
+    `INSERT INTO duplicate_families (
+       family_id, family_key, target_repo, base_branch, normalized_work_identity,
+       status, selected_survivor_pr_number, report_path, operator_override_json,
+       candidate_count, first_detected_at, last_seen_at, updated_at
+     ) VALUES (?, ?, ?, 'main', ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    familyId, `key-${familyId}`, REPO, `work-${familyId}`, status,
+    selectedSurvivorPrNumber, reportPath, JSON.stringify({ ignoredCandidates }),
+    candidates.length, firstDetectedAt, NOW, NOW,
+  );
+  const insert = db.prepare(
+    `INSERT INTO duplicate_family_candidates (
+       family_id, repo, pr_number, title, pr_state, head_sha, role,
+       work_identity_json, signals_json, suppressions_json, labels_json,
+       first_seen_at, last_seen_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, '{}', '[]', ?, '[]', ?, ?, ?)`
+  );
+  for (const candidate of candidates) {
+    insert.run(
+      familyId, REPO, candidate.prNumber, candidate.title || `PR ${candidate.prNumber}`,
+      candidate.prState || 'open', candidate.headSha || `head-${candidate.prNumber}`,
+      candidate.role || 'candidate', JSON.stringify(candidate.suppressions || []),
+      firstDetectedAt, NOW, NOW,
+    );
+  }
+}
+
+test('duplicate-family health is deterministic, bounded, and excludes inactive outcomes', (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const db = openDb(rootDir);
+  insertDuplicateFamily(db, {
+    familyId: 'family-stale',
+    status: 'survivor-selected',
+    firstDetectedAt: '2026-05-23T18:00:00.000Z',
+    selectedSurvivorPrNumber: 701,
+    reportPath: 'docs/research/duplicate-pr-divergence/reports/family-stale.md',
+    candidates: [
+      { prNumber: 701, role: 'survivor' },
+      { prNumber: 702, role: 'loser' },
+    ],
+  });
+  insertDuplicateFamily(db, {
+    familyId: 'family-ignored',
+    ignoredCandidates: [{ candidatePrNumber: 703, candidateHeadSha: 'head-703' }],
+    candidates: [{ prNumber: 703 }],
+  });
+  for (const [familyId, status, prNumber] of [
+    ['family-resolved', 'resolved', 704],
+    ['family-inactive', 'inactive', 705],
+    ['family-abandoned', 'abandoned', 706],
+  ]) insertDuplicateFamily(db, { familyId, status, candidates: [{ prNumber }] });
+  db.close();
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    config: { duplicateFamilyHeldMaxAgeMs: 60 * 60 * 1000 },
+  });
+  assert.deepEqual(snapshot.duplicateFamilies, {
+    activeHeldCount: 1,
+    unresolvedMemberCount: 2,
+    oldestHeldAgeMs: 172_800_000,
+    staleHeldCount: 1,
+    outcomes: { 'survivor-selected': 1, abandoned: 1, advisory: 1, inactive: 1, resolved: 1 },
+    examples: [{
+      familyId: 'family-stale', targetRepo: REPO, baseBranch: 'main',
+      workIdentity: 'work-family-stale', status: 'survivor-selected', ageMs: 172_800_000,
+      firstDetectedAt: '2026-05-23T18:00:00.000Z', lastSeenAt: NOW,
+      selectedSurvivorPrNumber: 701,
+      reportPath: 'docs/research/duplicate-pr-divergence/reports/family-stale.md',
+      unresolvedMemberCount: 2,
+      unresolvedMembers: [
+        { repo: REPO, prNumber: 701, title: 'PR 701', headSha: 'head-701', role: 'survivor' },
+        { repo: REPO, prNumber: 702, title: 'PR 702', headSha: 'head-702', role: 'loser' },
+      ],
+    }],
+    staleExamples: [{
+      familyId: 'family-stale', targetRepo: REPO, baseBranch: 'main',
+      workIdentity: 'work-family-stale', status: 'survivor-selected', ageMs: 172_800_000,
+      firstDetectedAt: '2026-05-23T18:00:00.000Z', lastSeenAt: NOW,
+      selectedSurvivorPrNumber: 701,
+      reportPath: 'docs/research/duplicate-pr-divergence/reports/family-stale.md',
+      unresolvedMemberCount: 2,
+      unresolvedMembers: [
+        { repo: REPO, prNumber: 701, title: 'PR 701', headSha: 'head-701', role: 'survivor' },
+        { repo: REPO, prNumber: 702, title: 'PR 702', headSha: 'head-702', role: 'loser' },
+      ],
+    }],
+  });
+  const findings = evaluateReviewPipelineFindings(snapshot, { observedAt: NOW })
+    .filter((finding) => finding.code === 'review:duplicate_family_held_too_long');
+  assert.equal(findings.length, 1);
+  assert.deepEqual(findings[0].evidence, ['duplicate-family:family-stale']);
+  assert.equal(findings[0].details.evidenceFingerprint, 'duplicate-family:family-stale');
+
+  const prometheus = renderReviewPipelinePrometheus({ ...snapshot, findings });
+  assert.match(prometheus, /^review_pipeline_duplicate_families_held 1$/m);
+  assert.match(prometheus, /^review_pipeline_duplicate_family_oldest_held_age_seconds 172800$/m);
+  assert.doesNotMatch(prometheus, /family-stale/);
+});
+
+test('duplicate-family threshold parsing falls back to the positive default', () => {
+  const fallback = resolveReviewPipelineHealthConfig({
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DUPLICATE_FAMILY_HELD_MAX_AGE_MS: 'invalid',
+  });
+  const configured = resolveReviewPipelineHealthConfig({
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DUPLICATE_FAMILY_HELD_MAX_AGE_MS: '3600000',
+  });
+  assert.equal(fallback.duplicateFamilyHeldMaxAgeMs, 24 * 60 * 60 * 1000);
+  assert.equal(configured.duplicateFamilyHeldMaxAgeMs, 3_600_000);
+});
+
+test('duplicate-family health exposes documented zeros when no families exist', (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  openDb(rootDir).close();
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  assert.deepEqual(snapshot.duplicateFamilies, {
+    activeHeldCount: 0,
+    unresolvedMemberCount: 0,
+    oldestHeldAgeMs: 0,
+    staleHeldCount: 0,
+    outcomes: {},
+    examples: [],
+    staleExamples: [],
+  });
+  assert.ok(!findingCodes(snapshot).includes('review:duplicate_family_held_too_long'));
+});
 
 test('reviewer slot health exposes every recovery state and a dead row cannot hide free capacity', (t) => {
   const rootDir = tempRoot();

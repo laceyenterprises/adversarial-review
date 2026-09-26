@@ -119,6 +119,8 @@ const DEFAULT_DISPATCH_SPAWN_FAILURE_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_HAMMER_DISPATCH_STALL_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_CONFLICTING_PR_UNOWNED_MAX_AGE_MS = 30 * 60 * 1000;
 const DEFAULT_CONFLICTING_PR_MIN_SHARED_PATH_COUNT = 5;
+const DEFAULT_DUPLICATE_FAMILY_HELD_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const DUPLICATE_FAMILY_EXAMPLE_LIMIT = 10;
 const DEFAULT_FIRST_PASS_CI_ORPHAN_MAX_PROBED_PRS = 25;
 const DEFAULT_FIRST_PASS_CI_ORPHAN_DEADLINE_MS = 120_000;
 const DEFAULT_FIRST_PASS_CI_ORPHAN_WORKER_STATUS_TIMEOUT_MS = 30_000;
@@ -196,6 +198,8 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_conflicting_open_prs_collected',
   'review_pipeline_conflicting_open_prs_probe_coverage',
   'review_pipeline_conflicting_open_pr_shared_path_groups',
+  'review_pipeline_duplicate_families_held',
+  'review_pipeline_duplicate_family_oldest_held_age_seconds',
   'review_pipeline_stale_ama_closer_leases',
   'review_pipeline_zombie_reviewer_passes',
   'review_pipeline_reviewer_slots',
@@ -253,6 +257,8 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_conflicting_open_prs_collected: 'Whether the conflicting-open-PR collector reached GitHub for every configured repo.',
   review_pipeline_conflicting_open_prs_probe_coverage: 'Share of conflicting open PRs whose local merge-tree probe completed successfully.',
   review_pipeline_conflicting_open_pr_shared_path_groups: 'Current count of conflict path groups shared by at least the configured minimum PR count.',
+  review_pipeline_duplicate_families_held: 'Current count of active duplicate families with held members.',
+  review_pipeline_duplicate_family_oldest_held_age_seconds: 'Age in seconds of the oldest active duplicate-family hold.',
   review_pipeline_stale_ama_closer_leases: 'Current count of AMA closer leases for still-open PRs stuck pending or dispatched past the configured age.',
   review_pipeline_zombie_reviewer_passes: 'Current count of reviewer_passes rows stuck running past the configured age.',
   review_pipeline_reviewer_burst_active: 'Whether an operator burst reviewer-capacity lease is currently active.',
@@ -486,6 +492,14 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     thresholdKey: 'conflictingPrUnownedMaxAgeMs',
     defaultThreshold: DEFAULT_CONFLICTING_PR_UNOWNED_MAX_AGE_MS,
     thresholdDescription: 'an open conflicting PR has no current-head remediation/merge ownership marker past the age threshold',
+  },
+  {
+    code: 'review:duplicate_family_held_too_long',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: 'duplicateFamilyHeldMaxAgeMs',
+    defaultThreshold: DEFAULT_DUPLICATE_FAMILY_HELD_MAX_AGE_MS,
+    thresholdDescription: 'an active duplicate family remains held past the configured age threshold',
   },
   {
     code: 'review:ttm_budget_breach',
@@ -894,6 +908,11 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
       overrides.conflictingPrMinSharedPathCount
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_MIN_SHARED_PATH_COUNT,
       DEFAULT_CONFLICTING_PR_MIN_SHARED_PATH_COUNT
+    ),
+    duplicateFamilyHeldMaxAgeMs: parsePositiveInteger(
+      overrides.duplicateFamilyHeldMaxAgeMs
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DUPLICATE_FAMILY_HELD_MAX_AGE_MS,
+      DEFAULT_DUPLICATE_FAMILY_HELD_MAX_AGE_MS
     ),
     firstPassCiOrphanMaxProbedPrs: parsePositiveInteger(
       overrides.firstPassCiOrphanMaxProbedPrs
@@ -4292,6 +4311,111 @@ function summarizeDagAutowalkHealth({ env, hqRoot, nowMs, config, launchd }) {
   };
 }
 
+function summarizeDuplicateFamilies(db, { nowMs, config }) {
+  const empty = {
+    activeHeldCount: 0,
+    unresolvedMemberCount: 0,
+    oldestHeldAgeMs: 0,
+    staleHeldCount: 0,
+    outcomes: {},
+    examples: [],
+    staleExamples: [],
+  };
+  if (!db) return empty;
+  const tables = new Set(db.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('duplicate_families', 'duplicate_family_candidates')"
+  ).all().map((row) => row.name));
+  if (tables.size !== 2) return empty;
+  const familyColumns = new Set(db.prepare('PRAGMA table_info(duplicate_families)').all().map((row) => row.name));
+  const candidateColumns = new Set(db.prepare('PRAGMA table_info(duplicate_family_candidates)').all().map((row) => row.name));
+  const requiredFamilyColumns = [
+    'family_id', 'target_repo', 'base_branch', 'normalized_work_identity', 'status',
+    'selected_survivor_pr_number', 'report_path', 'operator_override_json',
+    'first_detected_at', 'last_seen_at', 'updated_at',
+  ];
+  const requiredCandidateColumns = [
+    'family_id', 'repo', 'pr_number', 'title', 'pr_state', 'head_sha', 'role', 'suppressions_json',
+  ];
+  if (
+    requiredFamilyColumns.some((column) => !familyColumns.has(column))
+    || requiredCandidateColumns.some((column) => !candidateColumns.has(column))
+  ) return empty;
+
+  const families = db.prepare(
+    `SELECT family_id, target_repo, base_branch, normalized_work_identity, status,
+            selected_survivor_pr_number, report_path, operator_override_json,
+            first_detected_at, last_seen_at, updated_at
+       FROM duplicate_families
+      ORDER BY first_detected_at ASC, family_id ASC`
+  ).all();
+  const candidatesByFamily = new Map();
+  for (const row of db.prepare(
+    `SELECT family_id, repo, pr_number, title, pr_state, head_sha, role,
+            suppressions_json
+       FROM duplicate_family_candidates
+      ORDER BY family_id ASC, pr_number ASC`
+  ).all()) {
+    const rows = candidatesByFamily.get(row.family_id) || [];
+    rows.push(row);
+    candidatesByFamily.set(row.family_id, rows);
+  }
+  const outcomes = {};
+  const activeStatuses = new Set(['advisory', 'survivor-selected', 'survivor-merged']);
+  const active = [];
+  for (const family of families) {
+    const status = String(family.status || 'unknown').toLowerCase();
+    outcomes[status] = (outcomes[status] || 0) + 1;
+    if (!activeStatuses.has(status)) continue;
+    let override = {};
+    try { override = JSON.parse(family.operator_override_json || '{}') || {}; } catch { override = {}; }
+    const ignored = new Set((Array.isArray(override.ignoredCandidates) ? override.ignoredCandidates : [])
+      .filter((entry) => entry?.stale !== true)
+      .map((entry) => `${Number(entry?.candidatePrNumber)}\0${String(entry?.candidateHeadSha || '')}`));
+    const unresolvedMembers = (candidatesByFamily.get(family.family_id) || []).filter((candidate) => {
+      let suppressions = [];
+      try { suppressions = JSON.parse(candidate.suppressions_json || '[]'); } catch { suppressions = []; }
+      return String(candidate.pr_state || '').toLowerCase() === 'open'
+        && (!Array.isArray(suppressions) || suppressions.length === 0)
+        && !ignored.has(`${Number(candidate.pr_number)}\0${String(candidate.head_sha || '')}`);
+    }).map((candidate) => ({
+      repo: candidate.repo,
+      prNumber: Number(candidate.pr_number),
+      title: candidate.title || null,
+      headSha: candidate.head_sha || null,
+      role: candidate.role,
+    }));
+    if (unresolvedMembers.length === 0) continue;
+    const heldSinceMs = Date.parse(family.first_detected_at);
+    const ageMs = Number.isFinite(heldSinceMs) ? Math.max(0, nowMs - heldSinceMs) : 0;
+    active.push({
+      familyId: family.family_id,
+      targetRepo: family.target_repo,
+      baseBranch: family.base_branch,
+      workIdentity: family.normalized_work_identity,
+      status,
+      ageMs,
+      firstDetectedAt: family.first_detected_at,
+      lastSeenAt: family.last_seen_at,
+      selectedSurvivorPrNumber: family.selected_survivor_pr_number === null
+        ? null : Number(family.selected_survivor_pr_number),
+      reportPath: family.report_path || null,
+      unresolvedMemberCount: unresolvedMembers.length,
+      unresolvedMembers,
+    });
+  }
+  return {
+    activeHeldCount: active.length,
+    unresolvedMemberCount: active.reduce((sum, row) => sum + row.unresolvedMemberCount, 0),
+    oldestHeldAgeMs: active.reduce((max, row) => Math.max(max, row.ageMs), 0),
+    staleHeldCount: active.filter((row) => row.ageMs >= config.duplicateFamilyHeldMaxAgeMs).length,
+    outcomes,
+    examples: active.slice(0, DUPLICATE_FAMILY_EXAMPLE_LIMIT),
+    staleExamples: active
+      .filter((row) => row.ageMs >= config.duplicateFamilyHeldMaxAgeMs)
+      .slice(0, DUPLICATE_FAMILY_EXAMPLE_LIMIT),
+  };
+}
+
 function buildFinding({ code, tier, subject, message, evidence, recommendedAction, observedAt, details = {} }) {
   return {
     agent_id: 'sentinel',
@@ -4341,6 +4465,23 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
       observedAt,
       details: {
         ...snapshot.reviewStateLedger,
+      },
+    }));
+  }
+
+  for (const family of snapshot.duplicateFamilies?.staleExamples || []) {
+    findings.push(buildFinding({
+      code: 'review:duplicate_family_held_too_long',
+      tier: 'ticket',
+      subject: `Duplicate family ${family.familyId} has been held too long`,
+      message: `${family.targetRepo} duplicate family ${family.familyId} has ${family.unresolvedMemberCount} unresolved member(s) and has remained active for ${Math.round(family.ageMs / 60000)}m.`,
+      evidence: [`duplicate-family:${family.familyId}`],
+      recommendedAction: 'Inspect the duplicate-family packet, select and validate a survivor with its committed report, suppress false-positive members, or explicitly abandon the family.',
+      observedAt,
+      details: {
+        ...family,
+        thresholdMs: config.duplicateFamilyHeldMaxAgeMs,
+        evidenceFingerprint: `duplicate-family:${family.familyId}`,
       },
     }));
   }
@@ -5604,6 +5745,7 @@ function collectReviewPipelineHealth({
       : { active: 0, reviewerMinutesLost: 0, examples: [] };
     const mergeOutcomes = db ? summarizeMergeOutcomes(db) : [];
     const reviewRows = db ? reviewRowsByRepoPr(db) : new Map();
+    const duplicateFamilies = summarizeDuplicateFamilies(db, { nowMs, config });
     const mergeStalls = summarizeMergeStalls({
       followUpJobs: followUpQueues.jobs,
       reviewRows,
@@ -5773,6 +5915,7 @@ function collectReviewPipelineHealth({
       },
       reviewStateLedger,
       mergeOutcomes,
+      duplicateFamilies,
       mergeStalls,
       conflictingOpenPrs,
       amaCloserLeases,
@@ -5965,6 +6108,12 @@ function renderReviewPipelinePrometheus(snapshot) {
     'review_pipeline_conflicting_open_pr_shared_path_groups',
     {},
     snapshot.conflictingOpenPrs?.sharedPathGroups?.length || 0
+  );
+  pushMetric('review_pipeline_duplicate_families_held', {}, snapshot.duplicateFamilies?.activeHeldCount || 0);
+  pushMetric(
+    'review_pipeline_duplicate_family_oldest_held_age_seconds',
+    {},
+    Math.round((snapshot.duplicateFamilies?.oldestHeldAgeMs || 0) / 1000)
   );
   pushMetric('review_pipeline_stale_ama_closer_leases', {}, snapshot.amaCloserLeases?.stale?.length || 0);
   pushMetric('review_pipeline_zombie_reviewer_passes', {}, snapshot.zombieReviewerPasses?.rows?.length || 0);

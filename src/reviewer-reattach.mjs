@@ -11,7 +11,6 @@ import {
   resolveReviewerLeaseRecoveryEnabled,
 } from './reviewer-lease.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
-import { MARK_MERGED_PENDING_REVIEW_SKIPPED_SQL } from './review-state-statements.mjs';
 import { recordReviewLatencyEvent } from './review-latency-event-writer.mjs';
 
 const LEGACY_ORPHAN_FAILURE_MESSAGE =
@@ -43,10 +42,50 @@ const OVERDUE_RECOVERY_FAILURE_MESSAGE =
 const LEASE_RECOVERY_CAP_FAILURE_MESSAGE =
   'Reviewer lease recovery cap exhausted; leaving the review failed for operator inspection.';
 const POSTED_REVIEW_CLEANUP_RECHECK_DELAYS_MS = Object.freeze([0]);
+const reconcileOrderByDb = new WeakMap();
+
+function selectReconcileRows(db, matchingRows, limit) {
+  const terminal = matchingRows.filter((row) => ['merged', 'closed'].includes(String(row.pr_state).toLowerCase()));
+  const other = matchingRows.filter((row) => !['merged', 'closed'].includes(String(row.pr_state).toLowerCase()));
+  if (!Number.isFinite(limit) || matchingRows.length <= limit) return [...terminal, ...other];
+
+  // A capped poll must make progress in both lanes. Rotate within each lane so
+  // an unreadable closed PR cannot occupy the same terminal slot every poll.
+  const order = reconcileOrderByDb.get(db) || { terminalCursor: 0, otherCursor: 0, terminalTurn: true };
+  const selected = [];
+  let terminalTaken = 0;
+  let otherTaken = 0;
+  while (selected.length < limit && (terminalTaken < terminal.length || otherTaken < other.length)) {
+    const takeTerminal = terminalTaken < terminal.length
+      && (order.terminalTurn || otherTaken >= other.length);
+    if (takeTerminal) {
+      selected.push(terminal[(order.terminalCursor + terminalTaken) % terminal.length]);
+      terminalTaken += 1;
+    } else {
+      selected.push(other[(order.otherCursor + otherTaken) % other.length]);
+      otherTaken += 1;
+    }
+    order.terminalTurn = !takeTerminal;
+  }
+  if (terminal.length > 0) order.terminalCursor = (order.terminalCursor + terminalTaken) % terminal.length;
+  if (other.length > 0) order.otherCursor = (order.otherCursor + otherTaken) % other.length;
+  reconcileOrderByDb.set(db, order);
+  return selected;
+}
 
 function splitRepoPath(repoPath) {
   const [owner, repo] = String(repoPath || '').split('/');
   return { owner, repo };
+}
+
+function livePrLifecycle(payload) {
+  if (typeof payload === 'string') return { state: payload.toLowerCase(), mergedAt: null };
+  if (!payload || typeof payload !== 'object') return { state: null, mergedAt: null };
+  const mergedAt = payload.mergedAt || payload.merged_at || null;
+  const state = mergedAt || payload.merged === true
+    ? 'merged'
+    : String(payload.state || payload.prState || '').trim().toLowerCase();
+  return { state, mergedAt };
 }
 
 // The canonical reviewer-login table lives in `./review-body-capture.mjs`.
@@ -290,7 +329,30 @@ function prepareStatements(db) {
          FROM reviewed_prs
         WHERE review_status = 'reviewing'`
     ),
-    markMergedPendingReviewSkipped: db.prepare(MARK_MERGED_PENDING_REVIEW_SKIPPED_SQL),
+    markTerminalReviewingSkipped: db.prepare(
+      `UPDATE reviewed_prs
+          SET review_status = 'skipped', failed_at = NULL, failure_message = ?,
+              quota_reset_at_utc = NULL, reviewer_session_uuid = NULL,
+              reviewer_head_sha = NULL, reviewer_timeout_ms = NULL,
+              reviewer_lease_expires_at = NULL, reviewer_started_at = NULL,
+              reviewer_pgid = NULL,
+              merged_at = CASE WHEN pr_state = 'merged' THEN COALESCE(merged_at, ?) ELSE merged_at END,
+              closed_at = CASE WHEN pr_state = 'closed' THEN COALESCE(closed_at, ?) ELSE closed_at END
+        WHERE repo = ? AND pr_number = ? AND pr_state IN ('merged', 'closed')
+          AND review_status = 'reviewing'`
+    ),
+    markClosedReviewingMerged: db.prepare(
+      `UPDATE reviewed_prs
+          SET pr_state = 'merged', merged_at = COALESCE(?, merged_at, ?), closed_at = NULL
+        WHERE repo = ? AND pr_number = ?
+          AND pr_state = 'closed' AND review_status = 'reviewing'`
+    ),
+    reopenClosedReviewing: db.prepare(
+      `UPDATE reviewed_prs
+          SET pr_state = 'open', closed_at = NULL
+        WHERE repo = ? AND pr_number = ?
+          AND pr_state = 'closed' AND review_status = 'reviewing'`
+    ),
     markOrphan: db.prepare(
       "UPDATE reviewed_prs SET review_status = 'failed-orphan', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
     ),
@@ -446,6 +508,11 @@ async function reconcileReviewerSessions({
   findReviewerProcess = findReviewerProcessBySessionUuid,
   killProcessGroup = killPgid,
   fetchHeadSha = (row) => fetchCurrentHeadSha(octokit, row),
+  fetchLivePrState = async (row) => {
+    const { owner, repo } = splitRepoPath(row.repo);
+    const { data } = await octokit.rest.pulls.get({ owner, repo, pull_number: row.pr_number });
+    return data || null;
+  },
   findPostedReview = makeReviewPostedProbe(octokit),
   shouldReconcileRow = () => true,
   onTerminalDeadSession = async () => {},
@@ -462,7 +529,9 @@ async function reconcileReviewerSessions({
     ? Number(maxRows)
     : Number.POSITIVE_INFINITY;
   const matchingRows = statements.listReviewing.all().filter((row) => shouldReconcileRow(row, now));
-  const rows = matchingRows.slice(0, limit);
+  // Lifecycle sync may have just closed a PR whose reviewer is still live.
+  // Start with terminal claims, then share a capped poll with stale open rows.
+  const rows = selectReconcileRows(db, matchingRows, limit);
   if (rows.length === 0) return { reconciled: 0, skipped: matchingRows.length };
 
   const failureAt = now.toISOString();
@@ -516,8 +585,79 @@ async function reconcileReviewerSessions({
 
   for (const listedRow of rows) {
     let row = listedRow;
-    if (String(row.pr_state || '').trim().toLowerCase() === 'merged') {
-      const settledAt = row.merged_at || failureAt;
+    let terminalState = String(row.pr_state || '').trim().toLowerCase();
+    let terminalConfirmed = terminalState === 'merged';
+    let closedPrStateUnverified = false;
+    if (terminalState === 'closed') {
+      // Unlike a merge, a close can be reversed while this watcher is down.
+      // Startup reconciliation runs before lifecycle sync, so confirm the
+      // live PR before killing a reviewer or making its claim terminal.
+      let live;
+      try {
+        live = livePrLifecycle(await fetchLivePrState(row));
+      } catch (err) {
+        log.warn(`[watcher] reviewer_reattach_closed_pr_state_unverified repo=${row.repo} pr=${row.pr_number} error=${err?.message || err}`);
+        closedPrStateUnverified = true;
+      }
+      if (!closedPrStateUnverified && live.state === 'open') {
+        statements.reopenClosedReviewing.run(row.repo, row.pr_number);
+        row = { ...row, pr_state: 'open', closed_at: null };
+        log.warn(`[watcher] reviewer_reattach_reopened_pr_restored repo=${row.repo} pr=${row.pr_number}`);
+      } else if (!closedPrStateUnverified && live.state === 'merged') {
+        const mergedAt = live.mergedAt || failureAt;
+        statements.markClosedReviewingMerged.run(live.mergedAt, mergedAt, row.repo, row.pr_number);
+        row = { ...row, pr_state: 'merged', merged_at: mergedAt, closed_at: null };
+        terminalState = 'merged';
+        terminalConfirmed = true;
+      } else if (!closedPrStateUnverified && live.state === 'closed') {
+        terminalConfirmed = true;
+      } else if (!closedPrStateUnverified) {
+        log.warn(`[watcher] reviewer_reattach_closed_pr_state_unverified repo=${row.repo} pr=${row.pr_number} state=${live.state || 'unknown'}`);
+        closedPrStateUnverified = true;
+      }
+    }
+    if (closedPrStateUnverified) {
+      // An unreadable PR cannot be safely classified as terminal. Keep a live
+      // reviewer through its lease, but do not let a permanent GitHub failure
+      // pin the scarce credential slot forever after that lease expires.
+      const startedAtMs = parseTime(row.reviewer_started_at) ?? parseTime(row.last_attempted_at);
+      const leaseExpiresAtMs = parseTime(row.reviewer_lease_expires_at)
+        ?? (startedAtMs === null ? null : startedAtMs + reviewerRunTimeoutMs(row, reviewerDeadlineMs));
+      if (leaseExpiresAtMs === null || now.getTime() < leaseExpiresAtMs) continue;
+
+      let pgid = parsePositiveInteger(row.reviewer_pgid);
+      if (pgid === null && row.reviewer_session_uuid && typeof findReviewerProcess === 'function') {
+        pgid = parsePositiveInteger(findReviewerProcess(row.reviewer_session_uuid)?.pgid);
+      }
+      let killSent = false;
+      if (pgid !== null) {
+        const sessionRow = { ...row, reviewer_pgid: pgid };
+        const sessionProbe = typeof probeSession === 'function'
+          ? probeSession(sessionRow)
+          : probeReviewerSession({ pgid, sessionUuid: row.reviewer_session_uuid, probeAlive });
+        const alive = typeof sessionProbe === 'boolean' ? sessionProbe : sessionProbe?.alive === true;
+        const matched = typeof sessionProbe === 'boolean' ? sessionProbe : sessionProbe?.matched === true;
+        if (alive && matched) killSent = killProcessGroup(pgid, 'SIGKILL');
+      }
+      await onTerminalDeadSession({
+        row,
+        state: 'failed',
+        settledAt: failureAt,
+        reason: 'closed-pr-state-unverified-lease-expired',
+      });
+      markStickyOrphan({
+        statements,
+        row,
+        failureAt,
+        message: `${PROBE_FAILURE_MESSAGE} Closed PR state remained unverified after reviewer lease expiry.`,
+        log,
+        event: 'reviewer_reattach_closed_pr_unverified_lease_expired',
+      });
+      log.warn(`[watcher] reviewer_reattach_closed_pr_unverified_cleanup repo=${row.repo} pr=${row.pr_number} pgid=${pgid || 'unknown'} kill_sent=${killSent ? 'true' : 'false'}`);
+      continue;
+    }
+    if (terminalConfirmed) {
+      const settledAt = (terminalState === 'merged' ? row.merged_at : row.closed_at) || failureAt;
       let killResult = false;
       let terminalPgid = parsePositiveInteger(row.reviewer_pgid);
       if (terminalPgid === null && row.reviewer_session_uuid && typeof findReviewerProcess === 'function') {
@@ -546,16 +686,17 @@ async function reconcileReviewerSessions({
         row,
         state: 'cancelled',
         settledAt,
-        reason: 'merged-pr-reviewer-claim-cleared',
+        reason: `${terminalState}-pr-reviewer-claim-cleared`,
       });
-      statements.markMergedPendingReviewSkipped.run(
-        'Skipped reviewer spawn because PR is already merged.',
+      statements.markTerminalReviewingSkipped.run(
+        `Cancelled active reviewer because PR is already ${terminalState}.`,
+        settledAt,
         settledAt,
         row.repo,
         row.pr_number
       );
       log.warn(
-        `[watcher] reviewer_reattach_merged_claim_cleared repo=${row.repo} pr=${row.pr_number} ` +
+        `[watcher] reviewer_reattach_terminal_claim_cleared state=${terminalState} repo=${row.repo} pr=${row.pr_number} ` +
         `session=${row.reviewer_session_uuid || 'unknown'} pgid=${terminalPgid || row.reviewer_pgid || 'unknown'} ` +
         `kill_sent=${killResult ? 'true' : 'false'}`
       );

@@ -9,6 +9,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  truncateSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -17,13 +18,13 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import {
-  ReviewerSnapshotPayloadError,
+  ReviewerSnapshotBaseError,
   auditReviewerSubprocess,
   changedStatusPaths,
   configureReviewerWorkspaceAudit,
   extractArchiveOnce,
   garbageCollectSnapshots,
-  isReviewerSnapshotPayloadError,
+  isReviewerSnapshotBaseError,
   prepareReviewerSnapshot,
   resolveCheckoutHead,
 } from '../src/reviewer-workspace.mjs';
@@ -114,8 +115,8 @@ test('snapshot build cleanup does not chmod or traverse symlink targets', async 
         },
       }),
       (err) => {
-        assert.equal(err instanceof ReviewerSnapshotPayloadError, true);
-        assert.equal(isReviewerSnapshotPayloadError(err), true);
+        assert.equal(err instanceof ReviewerSnapshotBaseError, true);
+        assert.equal(isReviewerSnapshotBaseError(err), true);
         assert.equal(err.linkPath, 'escape');
         assert.equal(err.linkTarget, outsideDir);
         assert.match(err.message, /snapshot contains link escaping its root/);
@@ -125,6 +126,30 @@ test('snapshot build cleanup does not chmod or traverse symlink targets', async 
 
     assert.equal(statSync(outsideDir).mode & 0o777, 0o755);
     assert.equal(statSync(outsideFile).mode & 0o777, 0o644);
+  } finally {
+    removeFixture(root);
+  }
+});
+
+test('escaping symlink in the base checkout is an infrastructure error, not a PR verdict', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'reviewer-workspace-base-link-'));
+  try {
+    const checkoutDir = makeRepo(root, 'repo');
+    symlinkSync('../outside', join(checkoutDir, 'escape'));
+    git(checkoutDir, 'add', 'escape');
+    git(checkoutDir, 'commit', '-qm', 'base symlink');
+    const baseHead = git(checkoutDir, 'rev-parse', 'HEAD');
+    await assert.rejects(
+      prepareReviewerSnapshot({ repo: 'laceyenterprises/agent-os', checkoutDir, stateDir: join(root, 'state') }),
+      (err) => {
+        assert.equal(err instanceof ReviewerSnapshotBaseError, true);
+        assert.equal(err.failureClass, 'reviewer-snapshot-base-invalid');
+        assert.equal(err.headSha, baseHead);
+        assert.equal(err.linkPath, 'escape');
+        assert.equal(err.prNumber, undefined);
+        return true;
+      },
+    );
   } finally {
     removeFixture(root);
   }
@@ -272,6 +297,28 @@ test('snapshot garbage collection ignores entries concurrently removed before st
   }
 });
 
+test('snapshot garbage collection logs an inaccessible stale entry and preserves review availability', () => {
+  const root = mkdtempSync(join(tmpdir(), 'reviewer-workspace-gc-permission-'));
+  try {
+    const staleDir = join(root, 'stale-head');
+    mkdirSync(staleDir);
+    const warnings = [];
+    const removed = garbageCollectSnapshots(root, 'current-head', {
+      statSyncImpl() {
+        const err = new Error('permission denied');
+        err.code = 'EPERM';
+        throw err;
+      },
+      log: { warn: (message) => warnings.push(message) },
+    });
+    assert.deepEqual(removed, []);
+    assert.equal(existsSync(staleDir), true);
+    assert.match(warnings[0], /snapshot cache cleanup failed.*permission denied/);
+  } finally {
+    removeFixture(root);
+  }
+});
+
 test('snapshot build recovers from an invalid existing cache directory', async () => {
   const root = mkdtempSync(join(tmpdir(), 'reviewer-workspace-invalid-cache-'));
   try {
@@ -341,6 +388,61 @@ test('workspace escape audit records post-probe errors without false escape path
     assert.ok(errors.some((line) => line.includes('workspace escape state probe failed')));
   } finally {
     console.error = originalConsoleError;
+    configureReviewerWorkspaceAudit(null);
+    removeFixture(root);
+  }
+});
+
+test('checkout HEAD movement makes a workspace escape audit event ambiguous', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'reviewer-workspace-head-move-'));
+  try {
+    const checkoutDir = makeRepo(root, 'repo');
+    const stateDir = join(root, 'state');
+    const beforeHead = git(checkoutDir, 'rev-parse', 'HEAD');
+    configureReviewerWorkspaceAudit({
+      repo: 'laceyenterprises/agent-os', prNumber: 1129, reviewerModel: 'claude',
+      headSha: 'pr-head', checkoutDir, stateDir,
+    });
+    await auditReviewerSubprocess(async ({ onSpawn }) => {
+      onSpawn({ pid: process.pid });
+      writeFileSync(join(checkoutDir, 'tracked.txt'), 'main-catchup update\n');
+      git(checkoutDir, 'add', 'tracked.txt');
+      git(checkoutDir, 'commit', '-qm', 'main-catchup update');
+    });
+    const event = JSON.parse(readFileSync(join(stateDir, 'reviewer-workspace-audit', 'reviewer-workspace-escapes.jsonl'), 'utf8').trim());
+    assert.equal(event.checkoutHeadBefore, beforeHead);
+    assert.equal(event.checkoutHeadAfter, git(checkoutDir, 'rev-parse', 'HEAD'));
+    assert.equal(event.ambiguous, true);
+    assert.equal(event.attribution, 'checkout-head-moved');
+    assert.deepEqual(event.paths, ['tracked.txt']);
+  } finally {
+    configureReviewerWorkspaceAudit(null);
+    removeFixture(root);
+  }
+});
+
+test('workspace audit bounds reads of large untracked files', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'reviewer-workspace-large-file-'));
+  try {
+    const checkoutDir = makeRepo(root, 'repo');
+    const stateDir = join(root, 'state');
+    const largePath = join(checkoutDir, 'large.bin');
+    writeFileSync(largePath, 'x');
+    truncateSync(largePath, 9 * 1024 * 1024);
+    chmodSync(largePath, 0o000);
+    configureReviewerWorkspaceAudit({
+      repo: 'laceyenterprises/agent-os', prNumber: 1129, reviewerModel: 'claude',
+      headSha: 'pr-head', checkoutDir, stateDir,
+    });
+    await auditReviewerSubprocess(async ({ onSpawn }) => {
+      onSpawn({ pid: process.pid });
+      chmodSync(largePath, 0o600);
+    });
+    const auditDir = join(stateDir, 'reviewer-workspace-audit');
+    const event = JSON.parse(readFileSync(join(auditDir, 'reviewer-workspace-escapes.jsonl'), 'utf8').trim());
+    assert.deepEqual(event.paths, ['large.bin']);
+    assert.equal(existsSync(join(auditDir, 'reviewer-workspace-audit-errors.jsonl')), false);
+  } finally {
     configureReviewerWorkspaceAudit(null);
     removeFixture(root);
   }

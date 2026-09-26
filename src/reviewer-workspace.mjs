@@ -24,6 +24,9 @@ const execFileAsync = promisify(execFile);
 const SNAPSHOT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const AUDIT_DIRNAME = 'reviewer-workspace-audit';
 const GIT_AUDIT_MAX_BUFFER = 64 * 1024 * 1024;
+const AUDIT_HASH_MAX_BYTES = 8 * 1024 * 1024;
+// reviewer.mjs handles one PR per process. A multi-PR process must pass this
+// context explicitly per spawn instead of sharing this mutable slot.
 let activeAuditContext = null;
 const GIT_TRANSIENT_MAX_ATTEMPTS = 3;
 const GIT_TRANSIENT_BASE_DELAY_MS = 100;
@@ -51,7 +54,7 @@ const TRANSIENT_GIT_ERROR_PATTERNS = [
   /index\.lock/i,
 ];
 
-class ReviewerSnapshotPayloadError extends Error {
+class ReviewerSnapshotBaseError extends Error {
   constructor(message, {
     linkPath = null,
     linkTarget = null,
@@ -60,9 +63,8 @@ class ReviewerSnapshotPayloadError extends Error {
     headSha = null,
   } = {}) {
     super(message);
-    this.name = 'ReviewerSnapshotPayloadError';
-    this.failureClass = 'reviewer-snapshot-payload-invalid';
-    this.payloadValidation = true;
+    this.name = 'ReviewerSnapshotBaseError';
+    this.failureClass = 'reviewer-snapshot-base-invalid';
     this.linkPath = linkPath;
     this.linkTarget = linkTarget;
     this.snapshotDir = snapshotDir;
@@ -71,52 +73,10 @@ class ReviewerSnapshotPayloadError extends Error {
   }
 }
 
-function isReviewerSnapshotPayloadError(err) {
-  return err instanceof ReviewerSnapshotPayloadError
-    || err?.name === 'ReviewerSnapshotPayloadError'
-    || err?.failureClass === 'reviewer-snapshot-payload-invalid'
-    || err?.payloadValidation === true;
-}
-
-function safeReviewScalar(value, fallback = 'unknown') {
-  const text = String(value ?? '')
-    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return (text || fallback).slice(0, 500);
-}
-
-function formatReviewerSnapshotPayloadReview({
-  repo,
-  prNumber,
-  headSha = null,
-  error,
-}) {
-  const subject = safeReviewScalar(`${repo}#${prNumber}`);
-  const revision = safeReviewScalar(headSha || error?.headSha || 'unknown head');
-  const linkPath = safeReviewScalar(error?.linkPath, 'unknown symlink path');
-  const linkTarget = safeReviewScalar(error?.linkTarget, 'unknown target');
-
-  return [
-    '## Summary',
-    `Reviewer workspace preparation rejected ${subject} before model execution because the PR payload contains a symbolic link that escapes the isolated snapshot.`,
-    '',
-    '## Blocking issues',
-    '- **Unsafe symlink escapes reviewer snapshot**',
-    `  - **File:** ${linkPath}`,
-    `  - **Problem:** The PR contains a symbolic link from ${linkPath} to ${linkTarget}, which resolves outside the reviewer snapshot for ${revision}.`,
-    '  - **Why it matters:** Reviewer subprocesses run against the snapshot as a trust boundary; a PR-authored symlink that crosses that boundary can expose paths outside the review workspace.',
-    '  - **Recommended fix:** Remove the symlink or change it to point at a path that stays inside the repository tree.',
-    '',
-    '## Non-blocking issues',
-    '- None.',
-    '',
-    '## Suggested fixes',
-    '- Remove the escaping symlink or replace it with a regular file or an in-repository relative link.',
-    '',
-    '## Verdict',
-    'Request changes',
-  ].join('\n');
+function isReviewerSnapshotBaseError(err) {
+  return err instanceof ReviewerSnapshotBaseError
+    || err?.name === 'ReviewerSnapshotBaseError'
+    || err?.failureClass === 'reviewer-snapshot-base-invalid';
 }
 
 function safeRepoName(repo) {
@@ -283,7 +243,7 @@ function validateSnapshotLinks(snapshotDir, currentDir = snapshotDir) {
       const target = readlinkSync(path);
       if (!isInside(resolve(currentDir, target), snapshotDir)) {
         const linkPath = relative(snapshotDir, path) || entry;
-        throw new ReviewerSnapshotPayloadError(`snapshot contains link escaping its root: ${linkPath} -> ${target}`, {
+        throw new ReviewerSnapshotBaseError(`snapshot contains link escaping its root: ${linkPath} -> ${target}`, {
           linkPath,
           linkTarget: target,
           snapshotDir,
@@ -316,24 +276,31 @@ function garbageCollectSnapshots(repoCacheDir, currentSha, {
   nowMs = Date.now(),
   maxAgeMs = SNAPSHOT_MAX_AGE_MS,
   statSyncImpl = statSync,
+  log = console,
 } = {}) {
   if (!existsSync(repoCacheDir)) return [];
   const removed = [];
-  for (const entry of readdirSync(repoCacheDir, { withFileTypes: true })) {
+  let entries;
+  try {
+    entries = readdirSync(repoCacheDir, { withFileTypes: true });
+  } catch (err) {
+    if (err?.code !== 'ENOENT') log.warn(`[reviewer] snapshot cache listing failed: ${err.message}`);
+    return removed;
+  }
+  for (const entry of entries) {
     if (!entry.isDirectory() || entry.name === currentSha) continue;
     const entryPath = join(repoCacheDir, entry.name);
-    let entryStat;
     try {
-      entryStat = statSyncImpl(entryPath);
+      const entryStat = statSyncImpl(entryPath);
+      if (!entryStat.isDirectory()) continue;
+      if (nowMs - entryStat.mtimeMs <= maxAgeMs) continue;
+      makeTreeWritable(entryPath);
+      rmSync(entryPath, { recursive: true, force: true });
+      removed.push(entryPath);
     } catch (err) {
       if (err?.code === 'ENOENT') continue;
-      throw err;
+      log.warn(`[reviewer] snapshot cache cleanup failed path=${entryPath}: ${err.message}`);
     }
-    if (!entryStat.isDirectory()) continue;
-    if (nowMs - entryStat.mtimeMs <= maxAgeMs) continue;
-    makeTreeWritable(entryPath);
-    rmSync(entryPath, { recursive: true, force: true });
-    removed.push(entryPath);
   }
   return removed;
 }
@@ -401,7 +368,7 @@ async function prepareReviewerSnapshot({
         makeTreeWritable(buildDir);
         rmSync(buildDir, { recursive: true, force: true });
       }
-      if (isReviewerSnapshotPayloadError(err)) {
+      if (isReviewerSnapshotBaseError(err)) {
         err.repo = repo;
         err.headSha = headSha;
         throw err;
@@ -466,6 +433,9 @@ function pathContentSignature(checkoutDir, path) {
     }
   }
   if (stat.isFile()) {
+    if (stat.size > AUDIT_HASH_MAX_BYTES) {
+      return `file-large:${stat.mode & 0o7777}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+    }
     const hash = createHash('sha256').update(readFileSync(absolutePath)).digest('hex');
     return `file:${stat.mode & 0o7777}:${stat.size}:${hash}`;
   }
@@ -571,8 +541,12 @@ async function auditReviewerSubprocess(spawnOperation) {
   if (!activeAuditContext) return spawnOperation({ onSpawn: null });
   const context = activeAuditContext;
   let before = null;
+  let checkoutHeadBefore = null;
   let beforeProbeError = null;
-  try { before = await checkoutState(context.checkoutDir); } catch (err) {
+  try {
+    checkoutHeadBefore = await resolveCheckoutHead(context.checkoutDir);
+    before = await checkoutState(context.checkoutDir);
+  } catch (err) {
     beforeProbeError = err;
     console.error(`[reviewer] workspace escape pre-spawn state probe failed: ${err.message}`);
   }
@@ -607,8 +581,12 @@ async function auditReviewerSubprocess(spawnOperation) {
   } finally {
     const endedAt = new Date().toISOString();
     let after = null;
+    let checkoutHeadAfter = null;
     let afterProbeError = null;
-    try { after = await checkoutState(context.checkoutDir); } catch (err) {
+    try {
+      after = await checkoutState(context.checkoutDir);
+      checkoutHeadAfter = await resolveCheckoutHead(context.checkoutDir);
+    } catch (err) {
       afterProbeError = err;
       console.error(`[reviewer] workspace escape state probe failed: ${err.message}`);
     }
@@ -628,6 +606,7 @@ async function auditReviewerSubprocess(spawnOperation) {
     } else {
       const paths = changedCheckoutPaths(before, after);
       if (paths.length > 0) {
+        const ambiguous = checkoutHeadBefore !== checkoutHeadAfter;
         const event = {
           event: 'reviewer_workspace_escape',
           ts: endedAt,
@@ -638,6 +617,10 @@ async function auditReviewerSubprocess(spawnOperation) {
           subprocessPid,
           agyConversationId: context.agyConversationId || result?.conversationId || result?.conversation_id || null,
           window: { startedAt, endedAt },
+          checkoutHeadBefore,
+          checkoutHeadAfter,
+          ambiguous,
+          attribution: ambiguous ? 'checkout-head-moved' : 'unattributed',
           otherLiveReviewerPids: auditDirReady ? liveReviewerPids(auditDir, subprocessPid) : [],
           paths,
         };
@@ -658,14 +641,13 @@ async function auditReviewerSubprocess(spawnOperation) {
 
 export {
   SNAPSHOT_MAX_AGE_MS,
-  ReviewerSnapshotPayloadError,
+  ReviewerSnapshotBaseError,
   auditReviewerSubprocess,
-  formatReviewerSnapshotPayloadReview,
   changedStatusPaths,
   configureReviewerWorkspaceAudit,
   extractArchiveOnce,
   garbageCollectSnapshots,
-  isReviewerSnapshotPayloadError,
+  isReviewerSnapshotBaseError,
   prepareReviewerSnapshot,
   resolveCheckoutHead,
 };

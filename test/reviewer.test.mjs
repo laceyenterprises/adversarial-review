@@ -4571,7 +4571,7 @@ test('reviewWithGemini antigravity runtime uses agy print, stdin prompt, env scr
   assert.match(spawnCalls[0].prompt, /Review the PROVIDED diff/);
   assert.match(spawnCalls[0].prompt, /Do not re-list the repository/);
   assert.match(spawnCalls[0].prompt, /Never search absolute host paths/);
-  assert.match(spawnCalls[0].prompt, /workspace is a read-only snapshot of the base revision/);
+  assert.match(spawnCalls[0].prompt, /workspace is a read-only snapshot of the repository default checkout at review time/);
   assert.match(spawnCalls[0].prompt, /Do not apply the diff, write files, or run tests/);
   assert.match(spawnCalls[0].prompt, /Emit ONLY the final Markdown review block/);
   assert.match(spawnCalls[0].prompt, /```diff\n\+diff/);

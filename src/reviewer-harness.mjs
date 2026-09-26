@@ -89,7 +89,7 @@ function withReviewerSubprocessCwdEnv(env, cwd) {
 }
 
 function withSnapshotBoundaryPrompt(promptPrefix) {
-  const boundary = '- Your workspace is a read-only snapshot of the base revision. Do not apply the diff, write files, or run tests.';
+  const boundary = '- Your workspace is a read-only snapshot of the repository default checkout at review time. Do not apply the diff, write files, or run tests.';
   const lines = String(promptPrefix || '').split('\n');
   const lookupIndex = lines.findIndex((line) => line.startsWith('- Use at most one narrowly targeted lookup'));
   lines.splice(lookupIndex >= 0 ? lookupIndex + 1 : lines.length, 0, boundary);

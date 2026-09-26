@@ -40,7 +40,7 @@ One row per detected work-identity family.
 | `strongest_signal` | First common strong signal kind shared by active candidates. |
 | `selected_survivor_pr_number` | Optional operator-selected PR number to keep as the survivor. |
 | `report_path` | Optional path to an operator-facing duplicate report artifact. |
-| `operator_override_json` | Audited survivor selection and per-candidate `ignored-not-duplicate` dispositions. Every release carries the candidate PR and exact head; head movement marks the matching disposition stale. Survivor selection also records the committed report path, report-verified head, choice, salvage, and validation. |
+| `operator_override_json` | Audited survivor selection and per-candidate `ignored-not-duplicate` dispositions. Every release carries the candidate PR and exact head; head movement marks the matching disposition stale. Survivor selection also records the committed report path, report-verified head, choice, salvage, validation, and `auditPending` until its GitHub audit comment is posted. |
 | `transition_log_json` | JSON array of status transitions such as initial detection, reactivation, and deactivation. |
 | `candidate_count` | Count of live open unsuppressed candidates in the current advisory family. |
 | `first_detected_at` | First time the family was recorded. |
@@ -132,11 +132,15 @@ Slice absence by itself is not treated as closure. Existing databases created wi
 - `reconcileDuplicateFamilyCloseouts()` runs after label reconciliation only
   when the census for the tick is verified and merge authority is armed. It
   re-reads the selected survivor and each loser from GitHub before mutating,
-  confirms the survivor is merged at the selected head, skips suppressed
+  confirms the survivor is merged at the selected head, skips selections whose
+  audit comment remains pending, skips suppressed
   candidates and ignored candidates even when an ignore is stale, comments with
   the survivor/report audit trail, closes only open non-suppressed losers, and
-  marks the family `resolved` only after no stale ignored candidate still needs
-  operator re-adjudication.
+  marks the family `resolved` only after no stale ignored, unadjudicated, or
+  moved-head candidate still needs operator re-adjudication. Comment dedupe
+  reads every page of loser comments. A failed selection audit comment leaves
+  the selection pending for an exact-head CLI retry and never restores an old
+  database snapshot over concurrent watcher updates.
 - Operator overrides are not deleted automatically. If the override references
   a candidate whose head moved, the override is marked stale for that observed
   head without regenerating the stale timestamp on later identical polls.

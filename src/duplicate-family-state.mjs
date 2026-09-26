@@ -1007,6 +1007,7 @@ export function selectDuplicateFamilySurvivor(db, {
   reason,
   salvage,
   validation,
+  auditPending = false,
   now = new Date().toISOString(),
 } = {}) {
   validateOperatorAudit({ actor, reason, salvage, validation });
@@ -1037,6 +1038,7 @@ export function selectDuplicateFamilySurvivor(db, {
     reason: normalizeText(reason),
     salvage: normalizeText(salvage),
     validation: normalizeText(validation),
+    auditPending: auditPending === true,
     observedAt: now,
   };
   const override = duplicateFamilyOverride(family);
@@ -1188,6 +1190,12 @@ export async function reconcileDuplicateFamilyCloseouts({
     const override = duplicateFamilyOverride(family);
     const selection = override.selection;
     if (!survivor) continue;
+    if (selection?.auditPending === true) {
+      logger?.log?.(
+        `[watcher] duplicate-family closeout skipped ${repoPath}#${survivor.pr_number}: survivor selection audit comment pending`,
+      );
+      continue;
+    }
     if (!selection || selection.stale || selection.candidateHeadSha !== survivor.head_sha) continue;
     let survivorPull;
     try {
@@ -1228,6 +1236,16 @@ export async function reconcileDuplicateFamilyCloseouts({
     ));
     const staleIgnored = ignored.filter((entry) => entry?.stale === true);
     let needsReadjudication = false;
+    for (const candidate of candidates) {
+      if (String(candidate.pr_state || '').toLowerCase() !== 'open'
+          || parseMaybeJson(candidate.suppressions_json, []).length > 0
+          || isActiveIgnoredCandidate(override, candidate)
+          || ['survivor', 'loser'].includes(candidate.role)) continue;
+      needsReadjudication = true;
+      logger?.log?.(
+        `[watcher] duplicate-family closeout skipped unadjudicated candidate ${repoPath}#${candidate.pr_number}: re-adjudication required`,
+      );
+    }
     for (const entry of staleIgnored) {
       if (candidates.some((row) => Number(row.pr_number) === Number(entry?.candidatePrNumber))) {
         needsReadjudication = true;
@@ -1250,7 +1268,13 @@ export async function reconcileDuplicateFamilyCloseouts({
         break;
       }
       if (String(loserPull?.state || '').toLowerCase() !== 'open') continue;
-      if (pullHeadSha(loserPull) && pullHeadSha(loserPull) !== loser.head_sha) continue;
+      if (pullHeadSha(loserPull) && pullHeadSha(loserPull) !== loser.head_sha) {
+        needsReadjudication = true;
+        logger?.log?.(
+          `[watcher] duplicate-family closeout skipped moved loser ${repoPath}#${loser.pr_number}: re-adjudication required`,
+        );
+        continue;
+      }
       const survivorUrl = `https://github.com/${repoPath}/pull/${survivor.pr_number}`;
       const reportUrl = reportUrlForSelection(repoPath, selection);
       const body = [
@@ -1265,13 +1289,17 @@ export async function reconcileDuplicateFamilyCloseouts({
       try {
         let alreadyCommented = false;
         if (typeof octokit.rest.issues.listComments === 'function') {
-          const { data } = await octokit.rest.issues.listComments({
-            owner, repo, issue_number: loser.pr_number, per_page: 100,
-            sort: 'created', direction: 'desc',
-          });
-          alreadyCommented = (Array.isArray(data) ? data : []).some((comment) => (
-            String(comment?.body || '').includes('<!-- adversarial-review:duplicate-family-loser-closeout -->')
-          ));
+          for (let page = 1; !alreadyCommented; page += 1) {
+            const { data } = await octokit.rest.issues.listComments({
+              owner, repo, issue_number: loser.pr_number, per_page: 100, page,
+              sort: 'created', direction: 'desc',
+            });
+            const comments = Array.isArray(data) ? data : [];
+            alreadyCommented = comments.some((comment) => (
+              String(comment?.body || '').includes('<!-- adversarial-review:duplicate-family-loser-closeout -->')
+            ));
+            if (comments.length < 100) break;
+          }
         }
         if (!alreadyCommented) {
           await octokit.rest.issues.createComment({ owner, repo, issue_number: loser.pr_number, body });

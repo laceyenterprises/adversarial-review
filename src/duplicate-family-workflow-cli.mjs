@@ -146,52 +146,33 @@ async function withTransientRetry(operation, {
   throw lastError;
 }
 
-function snapshotSelectionState(db, familyId, candidates) {
-  return {
-    family: db.prepare(
-      `SELECT status, selected_survivor_pr_number, report_path, operator_override_json,
-              transition_log_json, updated_at
-         FROM duplicate_families
-        WHERE family_id = ?`
-    ).get(familyId),
-    candidates: candidates.map((candidate) => ({
-      repo: candidate.repo,
-      pr_number: candidate.pr_number,
-      role: candidate.role,
-      updated_at: candidate.updated_at,
-    })),
-  };
+function persistedPendingSelection(db, familyId, survivorPrNumber, headSha, reportPath) {
+  const family = db.prepare(
+    'SELECT status, operator_override_json FROM duplicate_families WHERE family_id = ?'
+  ).get(familyId);
+  if (family?.status !== 'survivor-selected') return null;
+  const selection = JSON.parse(family.operator_override_json || '{}')?.selection;
+  return selection?.auditPending === true
+    && Number(selection.candidatePrNumber) === Number(survivorPrNumber)
+    && selection.candidateHeadSha === headSha
+    && selection.reportPath === reportPath ? selection : null;
 }
 
-function restoreSelectionState(db, familyId, snapshot) {
-  if (!snapshot?.family) return;
+function confirmSelectionAudit(db, familyId, selection) {
   db.transaction(() => {
-    db.prepare(
-      `UPDATE duplicate_families
-          SET status = ?,
-              selected_survivor_pr_number = ?,
-              report_path = ?,
-              operator_override_json = ?,
-              transition_log_json = ?,
-              updated_at = ?
-        WHERE family_id = ?`
-    ).run(
-      snapshot.family.status,
-      snapshot.family.selected_survivor_pr_number,
-      snapshot.family.report_path,
-      snapshot.family.operator_override_json,
-      snapshot.family.transition_log_json,
-      snapshot.family.updated_at,
-      familyId,
-    );
-    const restoreCandidate = db.prepare(
-      `UPDATE duplicate_family_candidates
-          SET role = ?, updated_at = ?
-        WHERE repo = ? AND pr_number = ?`
-    );
-    for (const candidate of snapshot.candidates || []) {
-      restoreCandidate.run(candidate.role, candidate.updated_at, candidate.repo, candidate.pr_number);
+    const family = db.prepare(
+      'SELECT status, operator_override_json FROM duplicate_families WHERE family_id = ?'
+    ).get(familyId);
+    const override = JSON.parse(family?.operator_override_json || '{}');
+    const current = override.selection;
+    if (family?.status !== 'survivor-selected'
+        || current?.auditPending !== true
+        || current?.observedAt !== selection.observedAt
+        || current?.candidateHeadSha !== selection.candidateHeadSha) {
+      throw new Error('survivor selection changed while posting the audit comment; inspect the current family before retrying');
     }
+    db.prepare('UPDATE duplicate_families SET operator_override_json = ?, updated_at = ? WHERE family_id = ?')
+      .run(JSON.stringify({ ...override, selection: { ...current, auditPending: false } }), new Date().toISOString(), familyId);
   })();
 }
 
@@ -240,21 +221,26 @@ export async function duplicateFamilyWorkflowMain(argv, io = {}) {
         }),
         { attempts: 3, baseDelayMs: 250, sleepImpl },
       );
-      const selectionSnapshot = snapshotSelectionState(db, options.familyId, candidates);
-      let selection;
+      const selection = persistedPendingSelection(
+        db, options.familyId, survivorPrNumber, liveHead, options.reportPath,
+      ) || selectDuplicateFamilySurvivor(db, {
+        ...options, survivorPrNumber, reportVerifiedHeadSha: liveHead, auditPending: true,
+      });
       try {
-        selection = selectDuplicateFamilySurvivor(db, {
-          ...options, survivorPrNumber, reportVerifiedHeadSha: liveHead,
-        });
         await withTransientRetry(
           () => postSelectionComment({
             repo: family.target_repo, prNumber: survivorPrNumber, selection, execFileImpl,
           }),
           { attempts: 3, baseDelayMs: 250, sleepImpl },
         );
+        confirmSelectionAudit(db, options.familyId, selection);
       } catch (err) {
-        restoreSelectionState(db, options.familyId, selectionSnapshot);
-        throw err;
+        // The watcher can update this family while the network call runs.
+        // Keep the durable selection and return a distinct repair path rather
+        // than overwriting concurrent state with a pre-call snapshot.
+        const failure = new Error(`selection pending audit confirmation: ${err?.message || err}; retry the select command to post the audit comment`);
+        failure.exitCode = 3;
+        throw failure;
       }
       stdout.write(`selected ${family.target_repo}#${survivorPrNumber} as survivor at ${liveHead}\n`);
     } else if (options.command === 'ignore') {
@@ -270,7 +256,7 @@ export async function duplicateFamilyWorkflowMain(argv, io = {}) {
     return 0;
   } catch (err) {
     stderr.write(`error: ${err?.message || err}\n`);
-    return 2;
+    return err?.exitCode || 2;
   } finally {
     db.close?.();
   }

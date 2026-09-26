@@ -42,6 +42,17 @@ function fixture() {
   return db;
 }
 
+function addLateCandidate(db, prNumber = 104) {
+  db.prepare(
+    `INSERT INTO duplicate_family_candidates (
+       family_id, repo, pr_number, title, pr_state, base_branch, head_branch,
+       head_sha, base_sha, role, work_identity_json, signals_json,
+       suppressions_json, labels_json, first_seen_at, last_seen_at, updated_at
+     ) VALUES (?, ?, ?, ?, 'open', 'main', ?, ?, 'base', 'candidate', '{}', '[]', '[]', '[]', ?, ?, ?)`
+  ).run(FAMILY, REPO, prNumber, `DPA-04 ${prNumber}`, `branch-${prNumber}`, `head-${prNumber}`,
+    '2026-09-20T12:10:00.000Z', '2026-09-20T12:10:00.000Z', '2026-09-20T12:10:00.000Z');
+}
+
 function closeoutOctokit({ comments = [], closes = [], states = {} } = {}) {
   return { rest: {
     issues: {
@@ -314,6 +325,70 @@ test('selection leaves suppressed members unclosed and stale ignores require rea
   } finally { db.close(); }
 });
 
+test('late unadjudicated candidate keeps the family held after survivor merge', async () => {
+  const db = fixture();
+  const closes = [];
+  const logs = [];
+  try {
+    select(db);
+    addLateCandidate(db);
+    const result = await reconcileDuplicateFamilyCloseouts({
+      db, octokit: closeoutOctokit({ closes }), repoPath: REPO,
+      cfg: { enabled: true, autonomousMergeExecutionEnabled: true },
+      census: { familyIds: [FAMILY] }, logger: { log: (line) => logs.push(line), error() {} },
+    });
+    assert.equal(result.closed, 2);
+    assert.deepEqual(closes.map((entry) => entry.pull_number), [102, 103]);
+    assert.equal(familyFor(db, 104).status, 'survivor-merged');
+    assert.equal(evaluateDuplicateFamilyCandidate(familyFor(db, 104), { prNumber: 104, headSha: 'head-104' }).held, true);
+    assert.match(logs.join('\n'), /unadjudicated candidate.*re-adjudication required/);
+  } finally { db.close(); }
+});
+
+test('moved loser head keeps the family unresolved and held', async () => {
+  const db = fixture();
+  const closes = [];
+  const logs = [];
+  try {
+    select(db);
+    const result = await reconcileDuplicateFamilyCloseouts({
+      db, octokit: closeoutOctokit({ closes, states: {
+        102: { state: 'open', merged: false, head: { sha: 'head-102-new' } },
+      } }), repoPath: REPO,
+      cfg: { enabled: true, autonomousMergeExecutionEnabled: true },
+      census: { familyIds: [FAMILY] }, logger: { log: (line) => logs.push(line), error() {} },
+    });
+    assert.equal(result.closed, 1);
+    assert.deepEqual(closes.map((entry) => entry.pull_number), [103]);
+    assert.equal(familyFor(db, 102).status, 'survivor-merged');
+    assert.equal(evaluateDuplicateFamilyCandidate(familyFor(db, 102), { prNumber: 102, headSha: 'head-102-new' }).held, true);
+    assert.match(logs.join('\n'), /moved loser.*re-adjudication required/);
+  } finally { db.close(); }
+});
+
+test('closeout comment dedupe reads later pages before posting', async () => {
+  const db = fixture();
+  const comments = [];
+  const closes = [];
+  try {
+    select(db);
+    const octokit = closeoutOctokit({ comments, closes });
+    octokit.rest.issues.listComments = async ({ issue_number: issueNumber, page }) => ({
+      data: issueNumber === 102 && page === 1
+        ? Array.from({ length: 100 }, () => ({ body: 'ordinary comment' }))
+        : issueNumber === 102 && page === 2
+          ? [{ body: '<!-- adversarial-review:duplicate-family-loser-closeout -->' }]
+          : [],
+    });
+    const result = await reconcileDuplicateFamilyCloseouts({
+      db, octokit, repoPath: REPO,
+      cfg: { enabled: true, autonomousMergeExecutionEnabled: true }, census: { familyIds: [FAMILY] },
+    });
+    assert.equal(result.closed, 2);
+    assert.deepEqual(comments.filter((entry) => !entry.list).map((entry) => entry.issue_number), [103]);
+  } finally { db.close(); }
+});
+
 test('workflow retries transient selection comment failures before committing success', async () => {
   const db = fixture();
   const close = db.close.bind(db);
@@ -412,11 +487,11 @@ test('workflow retries transient survivor head and report verification failures'
   close();
 });
 
-test('workflow rolls back survivor selection when audit comment cannot be posted', async () => {
+test('failed audit comment keeps concurrent changes and blocks closeout until an exact-head retry', async () => {
   const db = fixture();
   const close = db.close.bind(db);
   db.close = () => {};
-  const code = await duplicateFamilyWorkflowMain([
+  const args = [
     'select', FAMILY,
     '--survivor', '101',
     '--report', 'docs/research/duplicate-pr-divergence/reports/2026-09-20-dpa-04.md',
@@ -424,7 +499,8 @@ test('workflow rolls back survivor selection when audit comment cannot be posted
     '--salvage', 'ported the narrow parser test from #102',
     '--validation', 'lint, full test, typecheck, walkthrough',
     '--actor', 'operator',
-  ], {
+  ];
+  const code = await duplicateFamilyWorkflowMain(args, {
     openReviewStateDbImpl: () => db,
     stdout: { write() {} },
     stderr: { write() {} },
@@ -437,6 +513,9 @@ test('workflow rolls back survivor selection when audit comment cannot be posted
         return { stdout: JSON.stringify({ type: 'file', sha: 'blob-sha' }) };
       }
       if (args[0] === 'pr' && args[1] === 'comment') {
+        const family = db.prepare('SELECT operator_override_json FROM duplicate_families WHERE family_id = ?').get(FAMILY);
+        db.prepare('UPDATE duplicate_families SET operator_override_json = ? WHERE family_id = ?')
+          .run(JSON.stringify({ ...JSON.parse(family.operator_override_json), concurrentUpdate: true }), FAMILY);
         const err = new Error('TLS handshake timeout');
         err.code = 'EIO';
         throw err;
@@ -444,11 +523,37 @@ test('workflow rolls back survivor selection when audit comment cannot be posted
       throw new Error(`unexpected gh call: ${command} ${args.join(' ')}`);
     },
   });
-  assert.equal(code, 2);
-  assert.equal(familyFor(db, 101).status, 'advisory');
+  assert.equal(code, 3);
+  assert.equal(familyFor(db, 101).status, 'survivor-selected');
+  const persisted = db.prepare('SELECT operator_override_json, transition_log_json FROM duplicate_families WHERE family_id = ?').get(FAMILY);
+  assert.equal(JSON.parse(persisted.operator_override_json).concurrentUpdate, true);
+  assert.equal(JSON.parse(persisted.operator_override_json).selection.auditPending, true);
   assert.deepEqual(
     db.prepare('SELECT pr_number, role FROM duplicate_family_candidates ORDER BY pr_number').all(),
-    [{ pr_number: 101, role: 'candidate' }, { pr_number: 102, role: 'candidate' }, { pr_number: 103, role: 'candidate' }],
+    [{ pr_number: 101, role: 'survivor' }, { pr_number: 102, role: 'loser' }, { pr_number: 103, role: 'loser' }],
   );
+  const closes = [];
+  const held = await reconcileDuplicateFamilyCloseouts({
+    db, octokit: closeoutOctokit({ closes }), repoPath: REPO,
+    cfg: { enabled: true, autonomousMergeExecutionEnabled: true }, census: { familyIds: [FAMILY] },
+    logger: { log() {}, error() {} },
+  });
+  assert.equal(held.closed, 0);
+  assert.deepEqual(closes, []);
+  const retried = await duplicateFamilyWorkflowMain(args, {
+    openReviewStateDbImpl: () => db,
+    stdout: { write() {} }, stderr: { write() {} },
+    execFileImpl: async (command, ghArgs) => {
+      if (ghArgs[0] === 'pr' && ghArgs[1] === 'view') return { stdout: JSON.stringify({ headRefOid: 'head-101' }) };
+      if (ghArgs[0] === 'api') return { stdout: JSON.stringify({ type: 'file', sha: 'blob-sha' }) };
+      if (ghArgs[0] === 'pr' && ghArgs[1] === 'comment') return { stdout: '' };
+      throw new Error(`unexpected gh call: ${command} ${ghArgs.join(' ')}`);
+    },
+  });
+  assert.equal(retried, 0);
+  const confirmed = db.prepare('SELECT operator_override_json, transition_log_json FROM duplicate_families WHERE family_id = ?').get(FAMILY);
+  assert.equal(JSON.parse(confirmed.operator_override_json).selection.auditPending, false);
+  assert.equal(JSON.parse(confirmed.operator_override_json).concurrentUpdate, true);
+  assert.equal(confirmed.transition_log_json, persisted.transition_log_json);
   close();
 });

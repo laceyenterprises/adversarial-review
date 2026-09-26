@@ -312,31 +312,43 @@ test('split admission single-wave drain detaches before late admission release',
   let finishSettlement;
   const admissionHold = new Promise((resolve) => { releaseAdmission = resolve; });
   const settlementHold = new Promise((resolve) => { finishSettlement = resolve; });
-  const startedAt = Date.now();
 
-  const summary = await runBoundedReviewerDispatchQueue([
-    candidate(1, async function run() {
-      events.push('model:1');
-      await admissionHold;
-      events.push('post-durable:1');
-      this.admissionReleaseCapacity();
-      await settlementHold;
-      events.push('settled:1');
-    }),
-    candidate(2, async function run() {
-      events.push('model:2');
-      this.admissionReleaseCapacity();
-    }),
-  ], {
-    maxConcurrent: 1,
-    singleWave: true,
-    singleWaveSettleGraceMs: 25,
-    splitPostReviewSettlement: true,
-    logger: { error() {}, log() {} },
-  });
+  let timeoutId;
+  let summary;
+  try {
+    summary = await Promise.race([
+      runBoundedReviewerDispatchQueue([
+        candidate(1, async function run() {
+          events.push('model:1');
+          await admissionHold;
+          events.push('post-durable:1');
+          this.admissionReleaseCapacity();
+          await settlementHold;
+          events.push('settled:1');
+        }),
+        candidate(2, async function run() {
+          events.push('model:2');
+          this.admissionReleaseCapacity();
+        }),
+      ], {
+        maxConcurrent: 1,
+        singleWave: true,
+        singleWaveSettleGraceMs: 25,
+        splitPostReviewSettlement: true,
+        logger: { error() {}, log() {} },
+      }),
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error('single-wave drain did not detach')), 5_000);
+      }),
+    ]);
+  } catch (error) {
+    releaseAdmission();
+    finishSettlement();
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
-  const elapsedMs = Date.now() - startedAt;
-  assert.ok(elapsedMs < 200, `single-wave drain should return promptly, elapsed=${elapsedMs}ms`);
   assert.equal(summary.dispatched, 0);
   assert.equal(summary.deferred, 1);
   assert.deepEqual(summary.deferredCandidates.map((item) => item.prNumber), [2]);

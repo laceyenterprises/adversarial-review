@@ -292,7 +292,8 @@ test('split admission re-enters single-wave drain when admission releases within
   const summary = await runBoundedReviewerDispatchQueue(tasks, {
     maxConcurrent: 1,
     singleWave: true,
-    singleWaveSettleGraceMs: 50,
+    // The release is asynchronous; allow scheduling slack under fleet contention.
+    singleWaveSettleGraceMs: 500,
     splitPostReviewSettlement: true,
     logger: { error() {}, log() {} },
   });

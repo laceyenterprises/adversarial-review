@@ -98,6 +98,8 @@ test('follow-up daemon iteration disarms stuck-rereview apply through injected e
     diagnoseStuckRereviewImpl: () => {
       throw new Error('stuck-rereview apply should be skipped');
     },
+    resolveMaxConcurrentJobsImpl: () => 1,
+    writeConfigSignatureStatusImpl: () => null,
     consumeFollowUpJobsUntilCapacityImpl: async () => {
       calls.push('consume');
       return {

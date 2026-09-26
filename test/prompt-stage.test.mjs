@@ -83,6 +83,22 @@ test('reviewer prompts default stale-doc findings to doc updates, not rollbacks'
   }
 });
 
+test('reviewer prompts scope session-ledger portability guidance to multi-backend read paths', () => {
+  for (const stage of ['first', 'middle', 'last']) {
+    const prompt = loadStagePrompt({
+      rootDir: ROOT,
+      promptSet: 'code-pr',
+      actor: 'reviewer',
+      stage,
+    });
+
+    assert.match(prompt, /Session-ledger read paths that can resolve to either backend must stay backend-agnostic/);
+    assert.match(prompt, /When reviewing ledger read paths that can resolve to either backend/);
+    assert.match(prompt, /SQLite-specific introspection inside SQLite-only branches and SQLite migration guards/);
+    assert.doesNotMatch(prompt, /When reviewing ledger changes, do not accept SQLite-only path heuristics/);
+  }
+});
+
 test('reviewer prompts check data-model and module explainer doc currency', () => {
   for (const stage of ['first', 'middle', 'last']) {
     const prompt = loadStagePrompt({

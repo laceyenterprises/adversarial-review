@@ -1183,12 +1183,10 @@ test('pollonce-phases passes burst pressure in and charges the lease back', () =
   const src = readFileSync(new URL('../src/pollonce-phases.mjs', import.meta.url), 'utf8');
   assert.match(src, /burstPressure: reviewerBurstController\?\.pressure\?\.\(\{/);
   assert.match(src, /packTokens: \(\) => packTokensForSubject\(\{/, 'derived lazily, not on every subject');
-  assert.match(
-    src,
-    /rwfDecision\.reason === 'burst-lease-pressure'\)\s*\{\s*reviewerBurstController\?\.recordBurstAdmission/,
-    'the lease is charged only for a spill that actually landed on a route',
-  );
+  assert.match(src, /const burstAdmitted = rwfDecision\.reason !== 'burst-lease-pressure'\s*\|\| reviewerBurstController\?\.recordBurstAdmission/s);
   assert.match(src, /recordBurstAdmission\?\.\(\{[^}]*headSha: subject\.headSha/s);
+  assert.match(src, /if \(!burstAdmitted\)\s*\{[\s\S]*?\}\s*else\s*\{\s*route = appliedFallback\.route/,
+    'a refused reservation must keep the original reviewer route');
 });
 
 test('the health surface reports burst state, a metric, and a finding', () => {

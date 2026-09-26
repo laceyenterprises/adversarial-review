@@ -1,5 +1,4 @@
 import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
-import { REVIEWER_PASS_NORMALIZED_STARTED_AT_SQL } from './reviewer-pass-posted-review-sql.mjs';
 
 export const MARK_ATTEMPT_STARTED_SQL = `UPDATE reviewed_prs
      SET review_status = 'reviewing',

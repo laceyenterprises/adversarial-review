@@ -263,6 +263,33 @@ test('writer diversity holds under spillover even when it is the only way to sat
   }
 });
 
+test('writer diversity also holds for rereview depth spillover', async () => {
+  const root = tempRoot('rsprereview-diversity-');
+  try {
+    const ctl = createFirstPassSpilloverController({
+      rootDir: root,
+      readRereviewDepth: () => 17,
+      resolveThresholdImpl: () => 2,
+      resolveRereviewThresholdImpl: () => 2,
+      logger: { warn() {} },
+    });
+    const result = await resolveReviewerWorkerClassWithFallback({
+      authorClass: 'claude-code',
+      primary: 'gemini',
+      fallbackWorkerClasses: ['claude-code'],
+      depthPressure: ctl.depthPressure('rereview'),
+      execFileImpl: fleetStatusStub(CODEX_OK_CLAUDE_OK),
+      env: ENTITLED_ENV,
+    });
+    assert.equal(result.fellBack, false);
+    assert.equal(result.workerClass, 'gemini');
+    assert.equal(result.reason, 'no-available-fallback');
+    assert.equal(ctl.granted(), 0, 'a rejected same-writer route must not spend a spill slot');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('writer diversity is writer-FAMILY aware, not a worker-class string compare', async () => {
   // clio-agent dispatches codex workers, so codex reviewing a clio-agent PR is
   // codex reviewing codex — string-unequal, diversity-dead.
@@ -550,6 +577,7 @@ test('the knob arms from the canonical env alone (no shared config.yaml edit nee
 });
 
 test('rereview threshold inherits first-pass, has an env mirror, and zero disables', () => {
+  assert.equal(resolveRereviewQueueDepthFailoverThreshold({ env: {}, firstPassThreshold: null }), null);
   assert.equal(resolveRereviewQueueDepthFailoverThreshold({ env: {}, firstPassThreshold: 2 }), 2);
   assert.equal(resolveRereviewQueueDepthFailoverThreshold({
     env: { AGENT_OS_WATCHER_REREVIEW_QUEUE_DEPTH_FAILOVER_THRESHOLD: '3' },

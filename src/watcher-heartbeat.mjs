@@ -107,6 +107,7 @@ function createWatcherHeartbeat({
   logger = console,
   ownerGuardRootDir = rootDir,
   ownerGuardOptions,
+  statusProvider = () => ({}),
 } = {}) {
   if (!filePath) {
     throw new TypeError('createWatcherHeartbeat requires rootDir or filePath');
@@ -192,6 +193,7 @@ function createWatcherHeartbeat({
       poll_counter: pollCounter,
       completed_poll_counter: completedPollCounter,
       event,
+      ...statusProvider(),
       ...extra,
     };
   }

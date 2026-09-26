@@ -332,7 +332,7 @@ import {
   resolveOperatorMergeAccountability,
   AMA_LIVE_REVIEW_LOOKUP_RETRY_DELAYS_MS,
 } from './daemon-clean-merge.mjs';
-import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
+import { resolveAgyReviewerSubprocessTimeoutMs, resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { makeReviewPostedProbe, reconcileReviewerSessions, reviewerBotLogin } from './reviewer-reattach.mjs';
 import { reconcileReviewerCommandFailedBeforeRetry } from './reviewer-command-failed-recovery.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
@@ -1031,8 +1031,7 @@ function normalizeReviewPopulationRetryConfig(config = {}) {
 // pool race that the CAS alone cannot (both workers read `pending`, both fetch,
 // both claim in sequence).
 const reviewerHeadDispatchLease = createHeadDispatchLease();
-const detachedReviewerDispatchTracker = createDetachedReviewerDispatchTracker({ activeReviewerSpawns });
-
+const detachedReviewerDispatchTracker = createDetachedReviewerDispatchTracker({ activeReviewerSpawns, timeoutMs: () => Math.max(resolveReviewerTimeoutMs(), resolveAgyReviewerSubprocessTimeoutMs()), isProcessAlive, logger: console });
 // ── Operator surface ─────────────────────────────────────────────────────────
 
 function createWatcherOperatorSurface() {
@@ -1787,6 +1786,7 @@ async function main() {
     filePath: heartbeatPath,
     ownerGuardRootDir: heartbeatOwnerGuardRootDir,
     logger: console,
+    statusProvider: () => ({ detached_reviewer_dispatches: detachedReviewerDispatchTracker.liveEntries() }),
   });
   watcherHeartbeat.persist('startup');
   const stallWatchdog = createWatcherStallWatchdog({

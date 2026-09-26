@@ -730,6 +730,75 @@ test('single-wave reviewer drain exposes detached launches for pre-registration 
   assert.equal(tracker.activeCounts().get('gemini') || 0, 0);
 });
 
+test('expired never-settling detached gemini dispatch releases its slot for a deferred candidate', async () => {
+  let nowMs = Date.parse('2026-09-25T19:29:53.000Z');
+  const warnings = [];
+  const tracker = createDetachedReviewerDispatchTracker({
+    activeReviewerSpawns: new Map(),
+    timeoutMs: 100,
+    graceMs: 20,
+    now: () => nowMs,
+    logger: { warn(message) { warnings.push(JSON.parse(message)); } },
+  });
+  const neverSettles = new Promise(() => {});
+  tracker.track({
+    candidate: candidate(6980, async () => neverSettles, undefined, { reviewerModel: 'gemini' }),
+    promise: neverSettles,
+  });
+
+  const deferredCandidate = candidate(6982, async () => {}, undefined, { reviewerModel: 'gemini' });
+  const deferred = await runBoundedReviewerDispatchQueue([deferredCandidate], {
+    maxConcurrent: 2,
+    geminiCredentialConcurrency: 1,
+    activeReviewerCounts: tracker.activeCounts(),
+    singleWave: true,
+    singleWaveSettleGraceMs: 0,
+    logger: { error() {}, log() {}, warn() {} },
+  });
+  assert.equal(deferred.dispatched, 0);
+  assert.equal(deferred.deferred, 1);
+  assert.equal(tracker.liveEntries().length, 1);
+
+  nowMs += 121;
+  const dispatched = await runBoundedReviewerDispatchQueue([deferredCandidate], {
+    maxConcurrent: 2,
+    geminiCredentialConcurrency: 1,
+    activeReviewerCounts: tracker.activeCounts(),
+    singleWave: true,
+    singleWaveSettleGraceMs: 0,
+    logger: { error() {}, log() {}, warn() {} },
+  });
+
+  assert.equal(dispatched.dispatched, 1);
+  assert.equal(dispatched.deferred, 0);
+  assert.deepEqual(tracker.liveEntries(), []);
+  assert.deepEqual(warnings, [{
+    event: 'detached_reviewer_dispatch_expired',
+    repo: 'laceyenterprises/adversarial-review',
+    pr: 6980,
+    model: 'gemini',
+    reason: 'timeout',
+    age_ms: 121,
+  }]);
+});
+
+test('detached reviewer tracker drops an entry when its known pid is gone', () => {
+  const warnings = [];
+  const tracker = createDetachedReviewerDispatchTracker({
+    activeReviewerSpawns: new Map(),
+    isProcessAlive: (pid) => pid !== 4242,
+    logger: { warn(message) { warnings.push(JSON.parse(message)); } },
+  });
+  tracker.track({
+    candidate: { ...candidate(6988, async () => {}, undefined, { reviewerModel: 'gemini' }), pid: 4242 },
+    promise: new Promise(() => {}),
+  });
+
+  assert.equal(tracker.activeCounts().get('gemini') || 0, 0);
+  assert.equal(warnings[0].reason, 'pid-gone');
+  assert.equal(warnings[0].pid, 4242);
+});
+
 test('single-wave reviewer drain skips externally capped gemini and still starts another reviewer class', async () => {
   const events = [];
   const summary = await runBoundedReviewerDispatchQueue([

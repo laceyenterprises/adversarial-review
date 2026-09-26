@@ -114,6 +114,10 @@ export const MARK_INFRA_AUTO_RECOVERY_ATTEMPT_STARTED_SQL =
         lower(COALESCE(failure_message, '')) LIKE '%401%unauthorized%' OR
         lower(COALESCE(failure_message, '')) LIKE '%requires authentication%'
       )
+       WHEN 'token-refresh-pending' THEN (
+         lower(COALESCE(failure_message, '')) LIKE '[token-refresh-pending]%' OR
+         lower(COALESCE(failure_message, '')) LIKE '%broker claude reviewer token expires too soon for subprocess handoff%'
+       )
        WHEN 'quota-exhausted' THEN lower(COALESCE(failure_message, '')) LIKE '[quota-exhausted]%'
        WHEN 'reviewer-command-failed' THEN (
          (

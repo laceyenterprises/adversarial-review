@@ -11,6 +11,7 @@ const PROVIDER_OVERLOADED_FAILURE_CLASS = 'provider-overloaded';
 const REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS = 'reviewer-empty-output';
 const ATTESTATION_SIGN_FAILED_FAILURE_CLASS = 'attestation-sign-failed';
 const HCP_UNAVAILABLE_FAILURE_CLASS = 'hcp-unavailable';
+const TOKEN_REFRESH_PENDING_FAILURE_CLASS = 'token-refresh-pending';
 const REVIEWER_TIMEOUT_MESSAGE_RE = /command timed out after \d+ms/;
 const REVIEWER_PROGRESS_TIMEOUT_MESSAGE_RE = new RegExp(
   `command ${escapeRegExp(PROGRESS_TIMEOUT_REASON_PREFIX)} \\d+ms`
@@ -86,6 +87,9 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
   const mentionsStreamDisconnect = /stream disconnected|reconnecting\.\.\.\s*\d+\/\d+/.test(lower);
   const mentionsGeminiCredentialPoolBusy = GEMINI_CREDENTIAL_POOL_BUSY_RE.test(lower);
   const mentionsReviewerEmptyOutput = REVIEWER_EMPTY_OUTPUT_RE.test(lower);
+  const mentionsTokenRefreshPending =
+    /\[token-refresh-pending\]/.test(lower) ||
+    /broker claude reviewer token expires too soon for subprocess handoff/.test(lower);
   const mentionsAttestationSign =
     /\bhq attest sign\b/.test(lower) ||
     /\battestation sign failed\b/.test(lower) ||
@@ -173,6 +177,10 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
 
   if (launchctlBootstrap) {
     return 'launchctl-bootstrap';
+  }
+
+  if (mentionsTokenRefreshPending) {
+    return TOKEN_REFRESH_PENDING_FAILURE_CLASS;
   }
 
   if (mentionsHcpUnavailable) {
@@ -288,6 +296,7 @@ export {
   HCP_UNAVAILABLE_FAILURE_CLASS,
   PROVIDER_OVERLOADED_FAILURE_CLASS,
   REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS,
+  TOKEN_REFRESH_PENDING_FAILURE_CLASS,
   classifyReviewerFailure,
   hasProviderOverloadedSignal,
   isReviewerSubprocessTimeout,

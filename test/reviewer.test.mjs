@@ -3349,7 +3349,12 @@ test('prepareClaudeOAuthEnv rejects broker bearers too short for reviewer handof
       reviewerTimeoutMs: 20 * 60 * 1000,
       postSlackMs: 2 * 60 * 1000,
     }),
-    /expires too soon for subprocess handoff/,
+    (err) => {
+      assert.equal(err.failureClass, 'token-refresh-pending');
+      assert.equal(err.isOAuthError, undefined);
+      assert.match(err.message, /expires too soon for subprocess handoff/);
+      return true;
+    },
   );
   assert.deepEqual(
     assertClaudeBrokerTokenHandoffLifetime({

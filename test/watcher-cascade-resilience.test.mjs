@@ -1654,6 +1654,57 @@ test('settleReviewerAttempt records oauth-broken without burning attempts', () =
   }
 });
 
+test('settleReviewerAttempt retries token-refresh-pending without burning attempts or requesting re-authentication', () => {
+  const { rootDir, db } = setupFixture();
+  try {
+    const repo = 'laceyenterprises/adversarial-review';
+    const prNumber = 195;
+    const warnings = [];
+    const statements = {
+      markPosted: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
+      ),
+      markFailed: stmtMarkBugFailed(db),
+      releaseReviewLease: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
+      ),
+      markCascadeFailed: stmtMarkCascadeFailed(db),
+      markPendingUpstream: stmtMarkPendingUpstream(db),
+      getReviewRow: db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'),
+    };
+
+    settleReviewerAttempt({
+      rootDir,
+      repoPath: repo,
+      prNumber,
+      result: {
+        ok: false,
+        error: 'broker Claude reviewer token expires too soon for subprocess handoff',
+        failureClass: 'token-refresh-pending',
+      },
+      failureAt: '2026-09-26T08:00:00.000Z',
+      maxRemediationRounds: 2,
+      statements,
+      log: { warn: (line) => warnings.push(line) },
+    });
+
+    const row = db.prepare(
+      'SELECT review_status, review_attempts, failure_message FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get(repo, prNumber);
+    const state = readCascadeState(rootDir, { repo, prNumber });
+
+    assert.equal(row.review_status, 'pending-upstream');
+    assert.equal(row.review_attempts, 0);
+    assert.match(row.failure_message, /^\[token-refresh-pending\]/);
+    assert.equal(state.backoffMinutes, 1);
+    assert.equal(state.lastFailureClass, 'token-refresh-pending');
+    assert.doesNotMatch(warnings.join('\n'), /re-authenticate|credentials unavailable/i);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('settleReviewerAttempt records provider overload without burning attempts', () => {
   const { rootDir, db } = setupFixture();
   try {

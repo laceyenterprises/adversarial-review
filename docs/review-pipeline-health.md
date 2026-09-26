@@ -110,6 +110,13 @@ The Grafana dashboard lives at
 - `review_pipeline_merge_outcomes_total`: `reviewed_prs.pr_state` counts.
   The Prometheus output declares this as a gauge because rows can move between
   states.
+- `review_pipeline_duplicate_families_held`: active duplicate families that
+  still contain at least one open, unsuppressed, non-ignored member. It has no
+  family or PR labels; those bounded details live under
+  `snapshot.duplicateFamilies.examples` in JSON.
+- `review_pipeline_duplicate_family_oldest_held_age_seconds`: age of the oldest
+  active duplicate-family hold, or zero when none are active. This metric also
+  has no high-cardinality labels.
 - `review_pipeline_merge_stalled_jobs`: clean `review-settled` verdict jobs
   whose PR row remains open past the merge-stall tick threshold.
 - `review_pipeline_conflicting_open_prs`: open non-draft PRs GitHub reports as
@@ -306,6 +313,7 @@ can distinguish "never posted in window" from a null/corrupt timestamp column.
 | `review:conflicting_open_prs` | GitHub reports open non-draft PRs as `CONFLICTING`, and at least one local `git merge-tree --write-tree --name-only` conflict path group is shared by the configured minimum PR count (default 5) | ticket | no conflict path group meets the shared-path threshold |
 | `review:conflicting_open_prs_unreadable` | SEN-02 `blind`: the GitHub open-PR listing or one or more per-PR merge-tree probes for conflicting-PR diagnostics could not be collected, so the snapshot cannot distinguish "zero conflicts" from "not fully measured". Never a health verdict. | ticket | the GitHub listing and every per-PR probe are collected again |
 | `review:conflicting_pr_unowned` | an open conflicting PR has no current-head remediation or merge ownership marker past the unowned-conflict age threshold (default 30m) | ticket | the PR gets a current-head ownership marker, leaves the conflicting/open population, or falls below the age threshold |
+| `review:duplicate_family_held_too_long` | one finding per active duplicate family older than 24h, capped at 10 oldest families per snapshot; evidence and `details.evidenceFingerprint` are stable on family ID for Sentinel dedupe | ticket | the family is adjudicated/closed, abandoned, becomes inactive, all remaining members are suppressed or ignored, or its age falls below the configured threshold |
 | `review:ttm_budget_breach` | **SLOW** (trend, not alarm): open PR age exceeds a budget DERIVED from the measured merge distribution -- the configured percentile (default p90) of each review-round bucket, weighted-least-squares fitted to `base + review_rounds * per_round` and scaled by measured queue pressure (Little's Law, capped at 3x). Nothing here is a literal; change the distribution and the budget moves. | ticket | the PR merges/closes or falls back under the derived budget |
 | `review:pr_progress_stalled` | **STUCK** (page-worthy): an open PR is not progressing -- a re-review was requested and no reviewer pass has started since, or the reviewer lease expired while the row still claims an in-flight review. Independent of the TTM budget and of elapsed time. | ticket | a reviewer pass starts after the re-review request, or the stale lease is reclaimed/settled |
 | `review:rereview_lane_unfair_share` | one open PR consumes a sustained unfair share of recent re-review starts while queued re-review work exists | ticket | re-review starts are no longer monopolized by one PR, or queued re-review work clears |
@@ -394,6 +402,8 @@ All thresholds are configurable through environment variables:
   conflicting-PR repo set)
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_UNOWNED_MAX_AGE_MS`
   (default `1800000`)
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DUPLICATE_FAMILY_HELD_MAX_AGE_MS`
+  (default `86400000`)
 
 The queue-starvation finding uses `details.starvationCause` to choose operator
 advice. `reviewer-runtime-failure` means a reviewer already ran and failed, so

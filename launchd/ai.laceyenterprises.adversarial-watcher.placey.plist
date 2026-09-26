@@ -38,6 +38,17 @@
     <key>StandardErrorPath</key>
     <string>/Users/placey/Library/Logs/adversarial-watcher.log</string>
 
+    <!-- WATCHQOS-01: without ProcessType launchd gives the watcher the
+         Standard class (PRI 20). On a loaded host (load 120 on 18 cores,
+         2026-09-25) that starved its event loop, so the 2 s LiteLLM readiness
+         fetch timed out against a proxy answering in 13 ms and spill-over
+         reviewers were skipped, and its `hq attest sign` children ran past
+         their 15 s timeout (2.6 s at PRI 31, 9 s clamped to utility). The HCP
+         (2026-09-04) and keychain bridge (2026-09-25) daemons needed the same
+         fix. -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
     <key>ThrottleInterval</key>
     <integer>30</integer>
 

@@ -153,6 +153,9 @@ const ENUM_IMM_MODE = ['observe', 'enforce'];
 // adapters/subject/github-pr/routing.mjs.
 const ENUM_REVIEWER_GEMINI_MODE = ['off', 'fallback', 'always-on'];
 const ENUM_REVIEWER_GEMINI_RUNTIME = ['cli', 'antigravity'];
+// HAMASYNC-01 — where AMA's hammer dispatch runs relative to the posted-review
+// phase (`watcher.ama_hammer_dispatch_mode`); see ama-hammer-background-dispatch.mjs.
+const ENUM_WATCHER_AMA_HAMMER_DISPATCH_MODE = ['inline', 'background'];
 const FOREIGN_TOP_LEVEL_SECTIONS = new Set([
   // LOADER-CONTRACT §2 permits each reader to ignore only root sections
   // explicitly foreign to that reader in top-level config.local.yaml.
@@ -730,6 +733,18 @@ function schemaV1() {
                 __default: 30.0,
                 __min: 0.0,
                 __max: 3600.0,
+              },
+              bridge_startup_grace_seconds: {
+                __type: TYPE_FLOAT,
+                __default: 180.0,
+                __min: 0.0,
+                __max: 3600.0,
+              },
+              bridge_recovery_timeout_seconds: {
+                __type: TYPE_FLOAT,
+                __default: 135.0,
+                __min: 1.0,
+                __max: 1800.0,
               },
               credential_decay_warn_after_seconds: {
                 __type: TYPE_FLOAT,
@@ -2045,6 +2060,12 @@ function schemaV1() {
                 __min: 3600,
                 __max: 604800,
               },
+              operator_suspend_default_seconds: {
+                __type: TYPE_INT,
+                __default: 86400,
+                __min: 3600,
+                __max: 604800,
+              },
             },
           },
         },
@@ -2949,6 +2970,18 @@ function schemaV1() {
             __nullable: true,
             __min: 1,
           },
+          // HAMASYNC-01. `inline` (default) awaits AMA's `hq dispatch` for a
+          // hammer inside the serial posted-review phase, so one 120-165 s
+          // dispatch holds every later PR's merge click behind it. `background`
+          // starts that dispatch in a bounded background queue (one per
+          // PR@head) and returns `ama-pending` at once; the closer's own
+          // lease / dispatch-record / active-launch guards make the next tick
+          // skip a launch that is still in flight.
+          ama_hammer_dispatch_mode: {
+            __type: TYPE_STRING,
+            __default: 'inline',
+            __enum: ENUM_WATCHER_AMA_HAMMER_DISPATCH_MODE,
+          },
           // REVFAIR-01 lane share. While both first-pass and rereview work are
           // pending, admit at most this many first-pass starts before giving the
           // oldest rereview a floor slot. Default 2 keeps first-pass as the
@@ -3429,6 +3462,10 @@ export const ENV_ALIASES = {
     canonical: 'AGENT_OS_WATCHER_FIRST_PASS_REVIEW_QUEUE_DEPTH_FAILOVER_THRESHOLD',
     aliases: [['ADVERSARIAL_REVIEW_FIRST_PASS_QUEUE_DEPTH_FAILOVER_THRESHOLD', identity]],
   },
+  'watcher.ama_hammer_dispatch_mode': {
+    canonical: 'AGENT_OS_WATCHER_AMA_HAMMER_DISPATCH_MODE',
+    aliases: [['ADVERSARIAL_AMA_HAMMER_DISPATCH_MODE', identity]],
+  },
   'watcher.review_lane_first_pass_burst_limit': {
     canonical: 'AGENT_OS_WATCHER_REVIEW_LANE_FIRST_PASS_BURST_LIMIT',
     aliases: [['ADVERSARIAL_REVIEW_LANE_FIRST_PASS_BURST_LIMIT', identity]],
@@ -3557,6 +3594,14 @@ export const ENV_ALIASES = {
   'oauth_broker.watchdog.broker_standby_container_name': {
     canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_STANDBY_CONTAINER_NAME',
     aliases: [['OAUTH_BROKER_WATCHDOG_STANDBY_CONTAINER_NAME', identity]],
+  },
+  'oauth_broker.watchdog.bridge_startup_grace_seconds': {
+    canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_BRIDGE_STARTUP_GRACE_SECONDS',
+    aliases: [['OAUTH_BROKER_WATCHDOG_BRIDGE_STARTUP_GRACE_SECONDS', Number]],
+  },
+  'oauth_broker.watchdog.bridge_recovery_timeout_seconds': {
+    canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_BRIDGE_RECOVERY_TIMEOUT_SECONDS',
+    aliases: [['OAUTH_BROKER_WATCHDOG_BRIDGE_RECOVERY_TIMEOUT_SECONDS', Number]],
   },
   'oauth_broker.watchdog.credential_decay_warn_after_seconds': {
     canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_WARN_AFTER_SECONDS',

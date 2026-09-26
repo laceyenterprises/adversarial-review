@@ -1,6 +1,6 @@
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
@@ -38,6 +38,28 @@ function fixture({
   return db;
 }
 
+// reconcilePostedFailedOrphans defaults rootDir to process.cwd(). A test that
+// reaches the real follow-up queue then writes a pending job into the checkout's
+// data/ dir: every later run finds it and takes the existing-follow-up-job
+// branch (6 failures on any second run; a fresh CI clone always passes), and
+// run from the deploy checkout it would enqueue a real remediation job. Every
+// call gets a throwaway root; a test that passes rootDir keeps its own.
+const temporaryRoots = new Set();
+function temporaryRoot() {
+  const rootDir = mkdtempSync(join(tmpdir(), 'orphan-post-reconcile-'));
+  temporaryRoots.add(rootDir);
+  return rootDir;
+}
+after(() => {
+  for (const rootDir of temporaryRoots) rmSync(rootDir, { recursive: true, force: true });
+});
+function reconcile(args) {
+  return reconcilePostedFailedOrphans({
+    rootDir: temporaryRoot(),
+    ...args,
+  });
+}
+
 function queueStub(calls = []) {
   return (args) => {
     calls.push(args);
@@ -56,7 +78,7 @@ const POSTED_REVIEW = {
 
 test('dry run reports a posted orphan without mutating either ledger', async () => {
   const db = fixture();
-  const result = await reconcilePostedFailedOrphans({
+  const result = await reconcile({
     db,
     listReviews: async () => [POSTED_REVIEW],
   });
@@ -70,7 +92,7 @@ test('dry run reports a posted orphan without mutating either ledger', async () 
 test('apply reconciles a cap-exhausted posted orphan and removes it from first-pass depth', async () => {
   const db = fixture({ attempts: 4 });
   const queueCalls = [];
-  const result = await reconcilePostedFailedOrphans({
+  const result = await reconcile({
     db,
     apply: true,
     listReviews: async () => [POSTED_REVIEW],
@@ -113,7 +135,7 @@ test('apply reconciles a null-start null-pgid orphan using last_attempted_at', a
   const db = fixture({ attempts: 4, reviewerStartedAt: null });
   db.prepare('UPDATE reviewed_prs SET reviewer_pgid = NULL, failure_message = ?')
     .run('Reviewer session was claimed but its pgid was never persisted.');
-  const result = await reconcilePostedFailedOrphans({
+  const result = await reconcile({
     db,
     apply: true,
     listReviews: async () => [POSTED_REVIEW],
@@ -129,7 +151,7 @@ test('apply reconciles a null-start null-pgid orphan using last_attempted_at', a
 test('apply ignores terminal PR rows', async () => {
   const db = fixture();
   db.prepare("UPDATE reviewed_prs SET pr_state = 'closed'").run();
-  const result = await reconcilePostedFailedOrphans({
+  const result = await reconcile({
     db,
     apply: true,
     listReviews: async () => [POSTED_REVIEW],
@@ -142,7 +164,7 @@ test('apply ignores terminal PR rows', async () => {
 
 test('apply skips stale-open mirror rows when the live PR is terminal', async () => {
   const db = fixture();
-  const result = await reconcilePostedFailedOrphans({
+  const result = await reconcile({
     db,
     apply: true,
     getPull: async () => ({ state: 'closed', merged_at: '2026-09-20T07:00:00Z' }),
@@ -158,7 +180,7 @@ test('apply skips stale-open mirror rows when the live PR is terminal', async ()
 test('apply falls back to last-attempt timestamp when reviewer start is corrupt', async () => {
   const db = fixture();
   db.prepare("UPDATE reviewed_prs SET reviewer_started_at = 'not-a-date'").run();
-  const result = await reconcilePostedFailedOrphans({
+  const result = await reconcile({
     db,
     apply: true,
     listReviews: async () => [POSTED_REVIEW],
@@ -172,7 +194,7 @@ test('apply falls back to last-attempt timestamp when reviewer start is corrupt'
 test('apply skips rows with no parseable reviewer start or last-attempt timestamp', async () => {
   const db = fixture();
   db.prepare("UPDATE reviewed_prs SET reviewer_started_at = 'not-a-date', last_attempted_at = 'also-not-a-date'").run();
-  const result = await reconcilePostedFailedOrphans({
+  const result = await reconcile({
     db,
     apply: true,
     listReviews: async () => [POSTED_REVIEW],
@@ -184,7 +206,7 @@ test('apply skips rows with no parseable reviewer start or last-attempt timestam
 
 test('apply skips reviews posted for a different head', async () => {
   const db = fixture();
-  const result = await reconcilePostedFailedOrphans({
+  const result = await reconcile({
     db,
     apply: true,
     listReviews: async () => [{ ...POSTED_REVIEW, commit_id: 'stale-head' }],
@@ -196,7 +218,7 @@ test('apply skips reviews posted for a different head', async () => {
 
 test('apply ignores dismissed reviews at the matching head', async () => {
   const db = fixture();
-  const result = await reconcilePostedFailedOrphans({
+  const result = await reconcile({
     db,
     apply: true,
     listReviews: async () => [{ ...POSTED_REVIEW, state: 'DISMISSED' }],
@@ -208,7 +230,7 @@ test('apply ignores dismissed reviews at the matching head', async () => {
 
 test('apply leaves an orphan unchanged when GitHub has no matching reviewer post', async () => {
   const db = fixture();
-  const result = await reconcilePostedFailedOrphans({
+  const result = await reconcile({
     db,
     apply: true,
     listReviews: async () => [],
@@ -224,7 +246,7 @@ test('apply links a reaped failed pass and removes it from first-pass depth', as
   const db = fixture();
   db.prepare("UPDATE reviewer_passes SET status = 'failed', ended_at = '2026-09-20T06:25:00Z'").run();
   const queueCalls = [];
-  const result = await reconcilePostedFailedOrphans({
+  const result = await reconcile({
     db,
     apply: true,
     listReviews: async () => [POSTED_REVIEW],
@@ -253,7 +275,7 @@ test('apply queues follow-up for a review artifact already linked to the same PR
       WHERE repo = ? AND pr_number = ?`
   ).run(String(POSTED_REVIEW.id), 'laceyenterprises/adversarial-review', 1078);
   const queueCalls = [];
-  const result = await reconcilePostedFailedOrphans({
+  const result = await reconcile({
     db,
     apply: true,
     listReviews: async () => [POSTED_REVIEW],
@@ -273,7 +295,7 @@ test('apply recognizes an existing artifact linked by GitHub node id', async () 
       WHERE repo = ? AND pr_number = ?`
   ).run('PRR_node_1078', 'laceyenterprises/adversarial-review', 1078);
   const queueCalls = [];
-  const result = await reconcilePostedFailedOrphans({
+  const result = await reconcile({
     db,
     apply: true,
     listReviews: async () => [{ ...POSTED_REVIEW, node_id: 'PRR_node_1078' }],
@@ -288,7 +310,7 @@ test('apply recognizes an existing artifact linked by GitHub node id', async () 
 
 test('apply resumes from a linked pass artifact after follow-up queue failure', async () => {
   const db = fixture({ attempts: 4, passStatus: 'failed' });
-  await reconcilePostedFailedOrphans({
+  await reconcile({
     db,
     apply: true,
     listReviews: async () => [POSTED_REVIEW],
@@ -300,7 +322,7 @@ test('apply resumes from a linked pass artifact after follow-up queue failure', 
   assert.equal(db.prepare('SELECT gh_comment_id FROM reviewer_passes').get().gh_comment_id, String(POSTED_REVIEW.id));
 
   const queueCalls = [];
-  const result = await reconcilePostedFailedOrphans({
+  const result = await reconcile({
     db,
     apply: true,
     listReviews: async () => [POSTED_REVIEW],
@@ -315,7 +337,7 @@ test('apply resumes from a linked pass artifact after follow-up queue failure', 
 
 test('apply skips recovered follow-up queueing when the same revision already has a job', async () => {
   const db = fixture({ attempts: 4, passStatus: 'failed' });
-  const rootDir = mkdtempSync(join(tmpdir(), 'orphan-post-reconcile-'));
+  const rootDir = temporaryRoot();
   createFollowUpJob({
     rootDir,
     repo: 'laceyenterprises/adversarial-review',
@@ -326,7 +348,7 @@ test('apply skips recovered follow-up queueing when the same revision already ha
     reviewBody: POSTED_REVIEW.body,
     critical: true,
   });
-  const result = await reconcilePostedFailedOrphans({
+  const result = await reconcile({
     db,
     rootDir,
     apply: true,
@@ -345,7 +367,7 @@ test('apply skips recovered follow-up queueing when the same revision already ha
 test('apply refuses rows with no stored reviewer head', async () => {
   const db = fixture();
   db.prepare('UPDATE reviewed_prs SET reviewer_head_sha = NULL').run();
-  const result = await reconcilePostedFailedOrphans({
+  const result = await reconcile({
     db,
     apply: true,
     listReviews: async () => [POSTED_REVIEW],
@@ -362,7 +384,7 @@ test('apply refuses rows with no stored reviewer head', async () => {
 test('apply completes a reaped failed pass and queues follow-up recovery', async () => {
   const db = fixture({ attempts: 4, passStatus: 'failed' });
   const queueCalls = [];
-  const result = await reconcilePostedFailedOrphans({
+  const result = await reconcile({
     db,
     apply: true,
     listReviews: async () => [POSTED_REVIEW],
@@ -389,7 +411,7 @@ test('apply completes a reaped failed pass and queues follow-up recovery', async
 test('apply reports posted-no-artifact when no reviewer pass identity exists', async () => {
   const db = fixture({ attempts: 4 });
   db.prepare('DELETE FROM reviewer_passes').run();
-  const result = await reconcilePostedFailedOrphans({
+  const result = await reconcile({
     db,
     apply: true,
     listReviews: async () => [POSTED_REVIEW],
@@ -399,5 +421,48 @@ test('apply reports posted-no-artifact when no reviewer pass identity exists', a
   assert.equal(result.reconciledRowOnly, 0);
   assert.equal(result.results[0].action, 'posted-no-artifact');
   assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'posted');
+  db.close();
+});
+
+// A reviewer pass can post its review to GitHub and then never reach
+// settleReviewerAttempt() — watcher restart, process death, or a non-ok
+// classification after the post already landed. The row is left at `pending`
+// while the pass carries a real gh_comment_id, and a pending row stays eligible
+// for review, so the SAME PR gets reviewed again. Measured on the reference host
+// 2026-09-21: 32 of 99 posted reviews in 24h were unsettled and #6928 was
+// reviewed six times. Scanning only 'failed-orphan' made the reconciler report
+// scanned:0 against all of them.
+test('apply reconciles a still-pending row whose review is already posted on GitHub', async () => {
+  const db = fixture();
+  db.prepare("UPDATE reviewed_prs SET review_status = 'pending', posted_at = NULL, failed_at = NULL").run();
+
+  const result = await reconcile({
+    db,
+    apply: true,
+    listReviews: async () => [POSTED_REVIEW],
+  });
+
+  assert.equal(result.scanned, 1, 'a pending row with a posted review must be scanned');
+  const row = db.prepare('SELECT review_status, posted_at FROM reviewed_prs').get();
+  assert.equal(row.review_status, 'posted', 'the row must settle so the PR is not reviewed again');
+  assert.ok(row.posted_at, 'posted_at must be restored from the GitHub review');
+  db.close();
+});
+
+test('a pending row is NOT settled when GitHub has no matching review', async () => {
+  const db = fixture();
+  db.prepare("UPDATE reviewed_prs SET review_status = 'pending', posted_at = NULL, failed_at = NULL").run();
+
+  const result = await reconcile({
+    db,
+    apply: true,
+    listReviews: async () => [],
+  });
+
+  // Widening the scan must never settle a row without real posted evidence —
+  // doing so would suppress a review the PR still needs.
+  assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'pending');
+  assert.equal(db.prepare('SELECT posted_at FROM reviewed_prs').get().posted_at, null);
+  assert.equal(result.reconciled, 0);
   db.close();
 });

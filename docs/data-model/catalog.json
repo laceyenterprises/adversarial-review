@@ -136,6 +136,19 @@
       "owner": "AMA event-driven hammer wake diagnostics"
     },
     {
+      "id": "rereview-wakes",
+      "title": "Rereview Wakes",
+      "path": "docs/data-model/rereview-wakes.md",
+      "store": "data/rereview-wakes/",
+      "schemaSurface": "src/rereview-wake.mjs",
+      "relatedSchemaSurfaces": [
+        "src/pollonce-phases.mjs",
+        "src/posted-review-row.mjs",
+        "bin/rereview-wake.mjs"
+      ],
+      "owner": "RPL-04 event-driven rereview wake queue"
+    },
+    {
       "id": "hammer-retry-cap",
       "title": "Hammer Retry Cap Ledger",
       "path": "docs/data-model/hammer-retry-cap.md",

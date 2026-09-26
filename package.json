@@ -24,6 +24,7 @@
     "review:cancel": "node src/review-cancel.mjs",
     "pipeline-health": "node src/review-pipeline-health-cli.mjs",
     "latency:report": "node src/review-latency-cli.mjs report",
+    "rereview-wake": "node bin/rereview-wake.mjs",
     "hard-shutdown": "node src/adversarial-hard-shutdown.mjs",
     "merge-agent:cancel": "node src/merge-agent-cancel.mjs",
     "no-merge:hold": "node src/no-merge-hold.mjs",

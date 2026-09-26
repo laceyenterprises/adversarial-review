@@ -67,6 +67,7 @@ import { resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
 import { requestWatcherWake } from './watcher-wake.mjs';
 import { REREVIEW_WAKE_REASONS, requestRereviewWake } from './rereview-wake.mjs';
 import { requestHammerWakeForSettledReviewStop } from './hammer-wake.mjs';
+import { drainPendingNoRemediationJobs } from './no-remediation-follow-up.mjs';
 import { lifecycleStopDecision, resolveJobPRLifecycleSafe } from './follow-up-lifecycle.mjs';
 import { classifyGithubAuthOperationalBlocker, extractCommitShaFromOperationalBlocker, preserveUnpushedCommit, recoverGithubAuthOperationalBlocker, retryGithubAuthPushOnce } from './github-auth-recovery.mjs';
 import { buildRemediationPrompt } from './remediation-prompt-builder.mjs';
@@ -196,9 +197,7 @@ import {
   resolveRemediationRuntimeMode,
   persistRemediationDispatchPath,
 } from './remediation-dispatch-mode.mjs';
-
 const execFileAsync = promisify(execFile);
-
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 const REMEDIATION_LEGACY_UNSTAGE_COMMANDS = [
@@ -4141,7 +4140,7 @@ async function consumeFollowUpJobsUntilCapacity({
       nowMs: Date.parse(prefetchNow),
     });
   }
-
+  stopped += drainPendingNoRemediationJobs({ rootDir, now, requestWatcherWakeImpl, log, results });
   while (!shouldStop() && (activeJobs.length + spawned) < concurrencyCap) {
     let result;
     try {

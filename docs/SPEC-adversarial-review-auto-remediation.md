@@ -2354,3 +2354,14 @@ The C5 uninstall closure path must synchronously invoke TEL-11 standing detectio
 Activation records are written under `data/runtime-cutover/c5-tel11-activations/` with `kind: "adversarial-review-c5-tel11-activation"` and include the C5 `runId`, C5 `deployId`, optional removal artifact, TEL-11 live status, detector reference, findings, rollback/hold decision, and the RCD-G7A consumer metadata. A non-live TEL-11 response is a fail-closed C5 closure result: the producer writes a non-live record, returns `accepted: false`, sets `holdClosure: true` / `rollbackRequired: true`, and emits the runtime-cutover alert event `runtime_cutover.c5_tel11_activation_blocked`.
 
 After a live activation, standing detections remain the TEL-owned guard for reintroduced OpenClaw package/config dependencies. `enforceTel11StandingDetectionsAfterActivation` consumes the activation record, invokes TEL-11 with phase `post-activation-openclaw-reintroduction-check`, and emits `runtime_cutover.tel11_openclaw_reintroduction` when TEL-11 reports a non-live state or any finding. That is the fail-loud/page path; adversarial-review only performs the binding and alert delivery.
+### Pending clean review fast path
+
+A pending follow-up job with an empty blocking and non-blocking issue set may
+be stopped before capacity is available, with stop code
+`no-remediation-required`. The same code is emitted if the claim path reaches
+the job first. This settlement predicate is intentionally strict regardless
+of the host's relaxed non-blocking remediation setting. A same-PR in-progress
+remediation job or AMA closer reserves the PR: the drain leaves the pending
+job queued, and the adversarial gate remains pending while remediation is
+in progress. Shutdown prevents further drain transitions. Readers continue
+to accept the historical `review-settled` stop code.

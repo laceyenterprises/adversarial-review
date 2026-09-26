@@ -2138,18 +2138,18 @@ function claimNextFollowUpJob({
           rootDir,
           jobPath: inProgressPath,
           stoppedAt: claimedAt,
-          stopCode: 'review-settled',
+          stopCode: 'no-remediation-required',
           sourceStatus: job.status,
-          stopReason: 'Latest adversarial review verdict is non-blocking; no remediation worker required.',
+          stopReason: 'Latest adversarial review is settled cleanly; no remediation worker required.',
           completion: {
-            preview: 'Latest adversarial review verdict is non-blocking; no remediation worker required.',
+            preview: 'Latest adversarial review is settled cleanly; no remediation worker required.',
           },
         });
       } catch (err) {
         handleClaimedStopFailure({
           pendingPath,
           inProgressPath,
-          stopCode: 'review-settled',
+          stopCode: 'no-remediation-required',
           err,
         });
       }
@@ -2158,7 +2158,7 @@ function claimNextFollowUpJob({
           job: stopped.job,
           jobPath: stopped.jobPath,
           stopped: true,
-          reason: 'review-settled',
+          reason: 'no-remediation-required',
         };
       }
       continue;
@@ -2248,11 +2248,17 @@ function stopPendingNoRemediationJobs({
   rootDir,
   stoppedAt = new Date().toISOString(),
   markStoppedImpl = markFollowUpJobStopped,
+  excludedRepoPrKeys = new Set(),
+  shouldStop = () => false,
 } = {}) {
   ensureFollowUpJobDirs(rootDir);
   const stoppedJobs = [];
+  const excluded = new Set(
+    Array.from(excludedRepoPrKeys || [], (key) => String(key || '').toLowerCase())
+  );
 
   for (const pendingPath of listPendingFollowUpJobPaths(rootDir)) {
+    if (shouldStop()) break;
     let job;
     try {
       job = readFollowUpJob(pendingPath);
@@ -2261,7 +2267,7 @@ function stopPendingNoRemediationJobs({
       throw err;
     }
 
-    if (!isSettledReviewJob(job)) continue;
+    if (excluded.has(followUpJobRepoPrKey(job)) || !isSettledReviewJob(job)) continue;
 
     const inProgressPath = join(getFollowUpJobDir(rootDir, 'inProgress'), basename(pendingPath));
     try {

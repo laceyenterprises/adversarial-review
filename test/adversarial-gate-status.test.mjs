@@ -366,6 +366,33 @@ test('pickAdversarialGateStatus keeps posted rows without a follow-up ledger ent
   assert.equal(decision.reason, 'awaiting-ledger');
 });
 
+test('a newer clean pending job cannot release the gate over same-PR active remediation', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-gate-'));
+  const base = path.join(rootDir, 'data', 'follow-up-jobs');
+  mkdirSync(path.join(base, 'in-progress'), { recursive: true });
+  mkdirSync(path.join(base, 'pending'), { recursive: true });
+  writeFileSync(path.join(base, 'in-progress', 'active.json'), JSON.stringify(makeJob({
+    status: 'in_progress',
+    claimedAt: '2026-04-21T08:00:00.000Z',
+  })));
+  writeFileSync(path.join(base, 'pending', 'new-clean.json'), JSON.stringify(makeJob({
+    status: 'pending',
+    createdAt: '2026-04-21T09:00:00.000Z',
+    reviewBody: '## Summary\nClean.\n## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nComment only',
+  })));
+  const snapshot = await buildAdversarialGateSnapshot(rootDir, {
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 53,
+    headSha: 'abc123',
+    reviewRow: makeReviewRow({ reviewer_head_sha: 'abc123' }),
+  });
+  assert.equal(snapshot.latestJob.status, 'pending');
+  assert.equal(snapshot.hasActiveSamePrRemediation, true);
+  const decision = pickAdversarialGateStatus(snapshot);
+  assert.equal(decision.state, 'pending');
+  assert.equal(decision.reason, 'remediation-in-progress');
+});
+
 test('pickAdversarialGateStatus treats reconciled posted rows with queued follow-up as armed', () => {
   const decision = pickAdversarialGateStatus({
     reviewRow: makeReviewRow(),
@@ -549,7 +576,7 @@ test('pickAdversarialGateStatus settles clean re-review jobs after remediation i
   });
 
   assert.equal(cleanJob.stopped, true);
-  assert.equal(cleanJob.reason, 'review-settled');
+  assert.equal(cleanJob.reason, 'no-remediation-required');
   assert.equal(decision.state, 'success');
   assert.equal(decision.reason, 'review-settled');
 });

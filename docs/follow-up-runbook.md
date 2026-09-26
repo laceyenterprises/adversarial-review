@@ -1241,3 +1241,16 @@ The system is intentionally conservative.
 - explicit operator actions keep the loop bounded and debuggable
 
 That conservatism is the feature. It keeps the service from silently spinning or fabricating progress.
+## Pending clean review fast path
+
+The pre-capacity drain stops a pending job only when its review is strictly
+settled clean: both blocking and non-blocking issue sections are empty. This
+check stays strict even if the host's non-blocking remediation setting is
+relaxed, so a Comment-only review with actionable findings still gets a
+worker. The drain skips any PR reserved by an in-progress remediation worker
+or AMA closer, and stops making transitions when daemon shutdown begins. The
+gate also remains pending while any same-PR remediation job is in progress.
+
+Both the drain and claim-time early stop now write `no-remediation-required`.
+`review-settled` remains a readable historical stop code for retrigger,
+latency, and hammer-wake recovery.

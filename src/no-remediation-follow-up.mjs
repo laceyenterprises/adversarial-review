@@ -7,8 +7,15 @@ function drainPendingNoRemediationJobs({
   requestWatcherWakeImpl,
   log,
   results,
+  excludedRepoPrKeys,
+  shouldStop,
 }) {
-  const stopped = stopPendingNoRemediationJobs({ rootDir, stoppedAt: now() });
+  const stopped = stopPendingNoRemediationJobs({
+    rootDir,
+    stoppedAt: now(),
+    excludedRepoPrKeys,
+    shouldStop,
+  });
   for (const result of stopped) {
     requestHammerWakeForSettledReviewStop({
       rootDir,

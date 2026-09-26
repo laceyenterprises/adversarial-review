@@ -6215,6 +6215,39 @@ test('consumeFollowUpJobsUntilCapacity finishes no-remediation jobs while at ful
   assert.equal(decision.reason, 'review-settled');
 });
 
+test('clean pending job stays queued while the same PR has an in-progress worker', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  markActiveInProgressJob(rootDir, { prNumber: 6, reviewPostedAt: '2026-04-21T07:58:00.000Z' });
+  const pending = createPendingRemediationJob(rootDir, {
+    prNumber: 6,
+    revisionRef: 'new-clean-head',
+    reviewBody: '## Summary\nClean.\n## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nComment only',
+    reviewPostedAt: '2026-04-21T08:02:00.000Z',
+  });
+  const wakes = [];
+  const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity(
+    drainerTestOptions(rootDir, [], {
+      maxConcurrent: 1,
+      requestWatcherWakeImpl: (args) => { wakes.push(args); return { requested: true }; },
+    })
+  ));
+  assert.equal(result.stopped, 0);
+  assert.equal(existsSync(pending.jobPath), true);
+  assert.deepEqual(wakes, []);
+});
+
+test('shutdown leaves settled pending jobs untouched', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const pending = createPendingRemediationJob(rootDir, {
+    reviewBody: '## Summary\nClean.\n## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nComment only',
+  });
+  const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity(
+    drainerTestOptions(rootDir, [], { shouldStop: () => true })
+  ));
+  assert.equal(result.stopped, 0);
+  assert.equal(existsSync(pending.jobPath), true);
+});
+
 test('consumeFollowUpJobsUntilCapacity continues filling capacity after one job fails to spawn', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createPendingRemediationJob(rootDir, {

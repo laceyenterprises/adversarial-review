@@ -37,7 +37,7 @@ import {
   writeAdapterCommitStatus,
 } from './github-adapter-client.mjs';
 import { isFleetSelfRepairTrailerOnlyRereviewReason } from './fleet-self-repair-rereview.mjs';
-import { isSettledReviewJob } from './follow-up-jobs.mjs';
+import { isSettledReviewJob, listFollowUpJobsInDir } from './follow-up-jobs.mjs';
 
 const execFileAsync = promisify(execFile);
 const WATCHER_OWNED_HOLD_LABELS = new Set(['duplicate-family-hold']);
@@ -532,6 +532,7 @@ function pickAdversarialGateStatus({
   argusVerdict = null,
   env = process.env,
   settledReview = null,
+  hasActiveSamePrRemediation = false,
 } = {}) {
   const context = resolveGateStatusContext(env);
   const decide = (state, description, reason, extra = null) =>
@@ -615,6 +616,9 @@ function pickAdversarialGateStatus({
   }
 
   const latestJobStatus = normalizeFollowUpJobStatus(latestJob?.status);
+  if (hasActiveSamePrRemediation) {
+    return decide('pending', 'Remediation is in progress for this PR.', 'remediation-in-progress');
+  }
 
   if (reviewStatus === 'pending') {
     if (completedHeadChangeRereviewIsSettledClean({ latestJob, latestJobStatus, reviewRow, headSha })) {
@@ -897,6 +901,8 @@ async function buildAdversarialGateSnapshot(rootDir, {
 } = {}) {
   const resolvedRow = reviewRow || await readReviewRowForGate(rootDir, { repo, prNumber });
   const latestJob = findLatestFollowUpJobForPR(rootDir, { repo, prNumber });
+  const hasActiveSamePrRemediation = listFollowUpJobsInDir(rootDir, 'inProgress')
+    .some(({ job }) => job?.repo === repo && Number(job?.prNumber) === Number(prNumber));
   // ASR-06. Resolved for EVERY gated head, not only for rows Argus owns,
   // because a `high` finding blocks a routable PR too: a human PR that touches a
   // dependency manifest gets its normal adversarial review AND an Argus review,
@@ -940,6 +946,7 @@ async function buildAdversarialGateSnapshot(rootDir, {
   return {
     reviewRow: resolvedRow,
     latestJob,
+    hasActiveSamePrRemediation,
     operatorApproval,
     labels,
     headSha,

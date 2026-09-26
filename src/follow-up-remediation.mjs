@@ -20,6 +20,7 @@ import {
   claimNextFollowUpJob,
   MAX_QUOTA_HOLD_WINDOW_MS,
   getFollowUpJobDir,
+  isSettledCleanStopCode,
   listInProgressFollowUpJobs,
   markFollowUpJobCompleted,
   markFollowUpJobFailed,
@@ -3486,7 +3487,7 @@ async function consumeNextFollowUpJob({
         decision: 'deny',
       });
     }
-    if (claimed.reason === 'review-settled') {
+    if (isSettledCleanStopCode(claimed.reason)) {
       requestHammerWakeForSettledReviewStop({
         rootDir,
         job: claimed.job,
@@ -4140,7 +4141,11 @@ async function consumeFollowUpJobsUntilCapacity({
       nowMs: Date.parse(prefetchNow),
     });
   }
-  stopped += drainPendingNoRemediationJobs({ rootDir, now, requestWatcherWakeImpl, log, results });
+  if (!shouldStop()) {
+    stopped += drainPendingNoRemediationJobs({
+      rootDir, now, requestWatcherWakeImpl, log, results, excludedRepoPrKeys: blockedRepoPrKeys, shouldStop,
+    });
+  }
   while (!shouldStop() && (activeJobs.length + spawned) < concurrencyCap) {
     let result;
     try {

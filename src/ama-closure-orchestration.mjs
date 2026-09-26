@@ -55,6 +55,12 @@ import {
 } from './ama/closer-lease.mjs';
 import { requestEligibleHammerWake } from './hammer-wake.mjs';
 import { resolveRoundBudgetForJob, summarizePRRemediationLedger } from './follow-up-jobs.mjs';
+import {
+  AMA_HAMMER_BACKGROUND_REASON,
+  amaHammerBackgroundKey,
+  amaHammerBackgroundQueue,
+  resolveAmaHammerDispatchMode,
+} from './ama-hammer-background-dispatch.mjs';
 import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
 import { fetchPullRequestMergeability, fetchReviewBodiesForHead } from './github-api.mjs';
 import { normalizeGithubMergeability, resolveMergeabilityWithSampling } from './github-mergeability.mjs';
@@ -167,6 +173,31 @@ async function fetchProtectivePredecessorStateForPr({
       err,
     );
   }
+}
+
+async function fetchCurrentPrStateForBackgroundDispatch({
+  repo,
+  prNumber,
+  execFileImpl = execFileAsync,
+  execGhWithRetryImpl = execGhWithRetry,
+  logger = console,
+} = {}) {
+  const { stdout } = await execGhWithRetryImpl({
+    execFileImpl,
+    args: [
+      'pr', 'view', String(prNumber), '--repo', repo,
+      '--json', 'state,headRefOid,isDraft,mergeable',
+    ],
+    timeoutMs: 30_000,
+    log: logger,
+  });
+  const parsed = JSON.parse(String(stdout || '{}'));
+  return {
+    state: String(parsed?.state || '').trim().toUpperCase(),
+    headSha: String(parsed?.headRefOid || '').trim(),
+    isDraft: parsed?.isDraft === true,
+    mergeable: String(parsed?.mergeable || '').trim().toUpperCase(),
+  };
 }
 
 export async function fetchMergedProtectiveDependentsForPr({
@@ -628,6 +659,9 @@ export async function maybeDispatchAmaClosureFor({
   logger,
   loadConfigImpl = loadConfigCached,
   maybeDispatchAmaCloserImpl = maybeDispatchAmaCloser,
+  resolveAmaHammerDispatchModeImpl = resolveAmaHammerDispatchMode,
+  amaHammerBackgroundQueueImpl = amaHammerBackgroundQueue,
+  fetchCurrentPrStateImpl = fetchCurrentPrStateForBackgroundDispatch,
   fetchLatestHeadReviewBodiesImpl = (repo, pr, head, options = {}) =>
     fetchReviewBodiesForHead(execFileAsync, repo, pr, head, options),
   liveReviewRetryDelaysMs = AMA_LIVE_REVIEW_LOOKUP_RETRY_DELAYS_MS,
@@ -651,12 +685,13 @@ export async function maybeDispatchAmaClosureFor({
 }) {
   throwIfAborted(signal);
   let cfg;
+  let loadedConfig;
   let orchestrationMode;
   try {
     // Load the adversarial config.yaml as a module so merge-authority values
     // (notably lha.consume_attestations, which gates autonomous merge) come from
     // the reviewed file, not the shell env export that mis-resolves nested keys.
-    const loadedConfig = loadConfigImpl({ modulePaths: WATCHER_MERGE_AUTHORITY_CONFIG_MODULES });
+    loadedConfig = loadConfigImpl({ modulePaths: WATCHER_MERGE_AUTHORITY_CONFIG_MODULES });
     cfg = resolveMergeAuthorityConfigFromDomain(
       loadDomainConfig(rootDir, domainId || 'code-pr'),
       loadedConfig.getMergeAuthorityConfig(),
@@ -1606,46 +1641,136 @@ export async function maybeDispatchAmaClosureFor({
     orchestrationMode,
   };
 
+  // HAMASYNC-01: the closer arguments are built once so the inline and the
+  // background paths hand `maybeDispatchAmaCloser` byte-identical inputs.
+  const closerArgs = {
+    reviewState,
+    prMetadata,
+    cfg,
+    options: {
+      env: process.env,
+      ...(nonReviewableHeadDeltaEvidence
+        ? { nonReviewableHeadDelta: nonReviewableHeadDeltaEvidence }
+        : {}),
+      ...(hamTerminalRemediationEvidenceOptions || {}),
+      adversarialMergeRequested: adversarialMergeRequestedEvent
+        ? {
+            applied: true,
+            observedRevisionRef:
+              adversarialMergeRequestedEvent.headSha ||
+              adversarialMergeRequestedEvent.head_sha ||
+              null,
+            actor: adversarialMergeRequestedEvent.actor || null,
+            eventId:
+              adversarialMergeRequestedEvent.id ||
+              adversarialMergeRequestedEvent.nodeId ||
+              null,
+            observedAt:
+              adversarialMergeRequestedEvent.createdAt ||
+              adversarialMergeRequestedEvent.created_at ||
+              null,
+          }
+        : null,
+    },
+    dispatchContext,
+    logger,
+  };
+  throwIfAborted(signal);
+  // HAMASYNC-01: in background mode a PR@head alternates between submitting a
+  // closer run and applying that run's settled outcome. The outcome goes through
+  // the same result handling as an inline call below, so a terminal rejection
+  // from the closer's own gates (retry cap, ineligibility) still reaches the
+  // merge-agent fallback and alerting, one tick later.
+  let backgroundSettled = null;
+  if (resolveAmaHammerDispatchModeImpl({ cfg: loadedConfig, logger }) === 'background') {
+    const backgroundKey = amaHammerBackgroundKey({
+      repo: repoPath,
+      prNumber,
+      headSha: dispatchContext.targetRemediationSha,
+    });
+    const backgroundQueue = amaHammerBackgroundQueueImpl();
+    backgroundSettled = backgroundQueue.takeSettled?.(backgroundKey) || null;
+    if (!backgroundSettled) {
+      const submission = backgroundQueue.submit({
+        key: backgroundKey,
+        // Detached from this step's deadline on purpose: the whole point is that
+        // the posted-review phase stops waiting. `hq dispatch` stays bounded by the
+        // closer's own dispatch timeout (resolveAmaDispatchTimeoutMs). No `signal`
+        // key: the closer's default applies.
+        run: async () => {
+          // A saturated queue can hold this closure across several watcher
+          // ticks. Recheck live state at launch, after it gets a queue slot.
+          let live;
+          try {
+            live = await fetchCurrentPrStateImpl({ repo: repoPath, prNumber, logger });
+          } catch (err) {
+            logger?.warn?.(
+              `[watcher] AMA hammer background pre-dispatch PR probe failed for ${backgroundKey}: ` +
+                `${err?.message || err}`,
+            );
+            return { dispatched: false, reason: 'background-pr-state-unavailable' };
+          }
+          if (
+            live?.state !== 'OPEN' ||
+            live?.headSha !== dispatchContext.targetRemediationSha ||
+            live?.isDraft ||
+            live?.mergeable !== 'MERGEABLE'
+          ) {
+            return { dispatched: false, reason: 'background-pr-state-changed' };
+          }
+          return maybeDispatchAmaCloserImpl({ ...closerArgs });
+        },
+        onSettled: ({ ok, result: settledResult, error, elapsedMs }) => {
+          logger?.log?.(
+            `[watcher] AMA hammer background dispatch settled for ${backgroundKey}: ` +
+              (ok
+                ? `dispatched=${Boolean(settledResult?.dispatched)} reason=${settledResult?.reason || 'none'}`
+                : `error=${error?.message || error}`) +
+              ` elapsed_ms=${elapsedMs}`,
+          );
+        },
+      });
+      logger?.log?.(
+        `[watcher] AMA hammer dispatch ${submission.state} in background for ${backgroundKey}; ` +
+          `posted-review phase continues`,
+      );
+      return withAmaDispatchMetadata(
+        {
+          dispatched: false,
+          skipMergeAgent: true,
+          reason: AMA_HAMMER_BACKGROUND_REASON,
+          backgroundDispatch: { key: backgroundKey, state: submission.state },
+          ...(hamTerminalRemediationValidated ? { hamTerminalRemediationValidated: true } : {}),
+        },
+        { amaEnabled: true },
+      );
+    }
+  }
+
   let result;
   try {
     throwIfAborted(signal);
-    const stopTracking = trackCoexistenceOperation(operationTracker, 'ama-hammer-dispatch');
-    try {
-      result = await maybeDispatchAmaCloserImpl({
-        reviewState,
-        prMetadata,
-        cfg,
-        options: {
-          env: process.env,
-          ...(nonReviewableHeadDeltaEvidence
-            ? { nonReviewableHeadDelta: nonReviewableHeadDeltaEvidence }
-            : {}),
-          ...(hamTerminalRemediationEvidenceOptions || {}),
-          adversarialMergeRequested: adversarialMergeRequestedEvent
-            ? {
-                applied: true,
-                observedRevisionRef:
-                  adversarialMergeRequestedEvent.headSha ||
-                  adversarialMergeRequestedEvent.head_sha ||
-                  null,
-                actor: adversarialMergeRequestedEvent.actor || null,
-                eventId:
-                  adversarialMergeRequestedEvent.id ||
-                  adversarialMergeRequestedEvent.nodeId ||
-                  null,
-                observedAt:
-                  adversarialMergeRequestedEvent.createdAt ||
-                  adversarialMergeRequestedEvent.created_at ||
-                  null,
-              }
-            : null,
-        },
-        dispatchContext,
-        logger,
-        signal,
-      });
-    } finally {
-      stopTracking();
+    if (backgroundSettled) {
+      logger?.log?.(
+        `[watcher] AMA hammer background outcome applied for ${repoPath}#${prNumber}: ` +
+          (backgroundSettled.ok
+            ? `dispatched=${Boolean(backgroundSettled.result?.dispatched)} ` +
+              `reason=${backgroundSettled.result?.reason || 'none'}`
+            : `error=${backgroundSettled.error?.message || backgroundSettled.error}`),
+      );
+      if (!backgroundSettled.ok) {
+        throw backgroundSettled.error instanceof Error
+          ? backgroundSettled.error
+          : new Error(String(backgroundSettled.error || 'background AMA dispatch failed'));
+      }
+      result = backgroundSettled.result;
+    } else {
+      const stopTracking = trackCoexistenceOperation(operationTracker, 'ama-hammer-dispatch');
+      try {
+        result = await maybeDispatchAmaCloserImpl({ ...closerArgs, signal });
+      } finally {
+        stopTracking();
+      }
     }
     throwIfAborted(signal);
   } catch (err) {

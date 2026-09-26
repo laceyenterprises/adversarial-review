@@ -12,7 +12,7 @@ that have already cleared the AMA merge-eligibility snapshot. The files are a
 reservation and audit trail for a latency optimization only: they do not grant
 merge authority, bypass the watcher, or replace the normal poll path.
 
-The health collector reads the newest audit records so an operator can see
+The health collector reads the newest current audit records so an operator can see
 whether an eligible PR head was skipped as a duplicate, successfully woke the
 watcher, or failed before the wake could be delivered.
 
@@ -23,7 +23,7 @@ Directory: `data/hammer-wakes/`
 | File | Shape | Contract |
 |---|---|---|
 | `<sha256>.json` | Current wake audit | One current reservation per `(repo, PR, head SHA, eligibility reason)`. The filename is the SHA-256 digest of `<repo>#<pr>@<head>:<eligibilityReason>`. |
-| `<sha256>.failed-<12hex>.json` | Archived failed wake audit | A failed current reservation moved aside by the retry election path. The suffix is diagnostic uniqueness derived from the retry observation. |
+| `<sha256>.retry-<12hex>.json` | Archived retry hand-off audit | A failed current record or a `reserved` record abandoned for more than 10 minutes, moved aside by the retry election path. The suffix is diagnostic uniqueness derived from the retry observation. Older `.failed-<12hex>.json` archives remain under retention. |
 
 ## Wake Audit Record
 
@@ -55,11 +55,21 @@ Directory: `data/hammer-wakes/`
   partially written JSON at the final reservation path.
 - A current `requested` record suppresses duplicate wakes for the same
   `(repo, PR, head SHA, eligibility reason)`. A current `failed` record may be
-  archived and retried by a bounded retry election.
+  archived and retried by a bounded retry election. A `reserved` record whose
+  `observedAt` is more than 10 minutes old takes the same path; if that field
+  is missing or malformed, the audit file's mtime supplies the age. A rename
+  hand-off is not a content compare-and-swap between processes, and a wake may
+  already have been delivered before its `requested` write. Stale takeover
+  therefore provides at-least-once wake delivery; watcher merge authority and
+  its own dedupe remain the safety boundary.
+- The returned event's `retryable` value describes whether the persisted
+  state lets a later watcher tick resume. It is diagnostic only; the AMA caller
+  does not consume it as a retry instruction.
 - Retention is enforced by `src/hammer-wake.mjs`: eligible wake attempts sweep
   `.json` audit records older than 30 days and then retain only the newest 5000
-  files by filesystem mtime. Failed archives follow the same retention rule.
-- The health collector sorts audit files by mtime and parses only the newest 20
-  records before rendering the health surface, so directory size does not make
-  every watcher tick parse every historical wake.
+  files by filesystem mtime. Both `.retry-` and legacy `.failed-` archives
+  follow the same retention rule.
+- The health collector excludes retry and legacy failed archives, sorts the
+  current audit files by mtime, and parses only the newest 20 records before
+  rendering the health surface.
 - Records contain no secrets, review bodies, or remediation payloads.

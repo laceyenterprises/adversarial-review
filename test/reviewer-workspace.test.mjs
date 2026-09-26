@@ -8,6 +8,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -19,6 +20,7 @@ import {
   auditReviewerSubprocess,
   configureReviewerWorkspaceAudit,
   prepareReviewerSnapshot,
+  resolveCheckoutHead,
 } from '../src/reviewer-workspace.mjs';
 
 function git(cwd, ...args) {
@@ -84,6 +86,87 @@ test('snapshot build failure is fail-closed and does not produce a cache entry',
   }
 });
 
+test('snapshot build cleanup does not chmod or traverse symlink targets', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'reviewer-workspace-symlink-cleanup-'));
+  try {
+    const checkoutDir = makeRepo(root, 'repo');
+    const stateDir = join(root, 'state');
+    const outsideDir = join(root, 'outside-target');
+    const outsideFile = join(outsideDir, 'secret.txt');
+    mkdirSync(outsideDir);
+    writeFileSync(outsideFile, 'secret\n');
+    chmodSync(outsideDir, 0o755);
+    chmodSync(outsideFile, 0o644);
+
+    await assert.rejects(
+      prepareReviewerSnapshot({
+        repo: 'laceyenterprises/agent-os',
+        checkoutDir,
+        stateDir,
+        extractArchiveImpl: async (source, destination) => {
+          assert.equal(source, checkoutDir);
+          symlinkSync(outsideDir, join(destination, 'escape'));
+        },
+      }),
+      /snapshot contains link escaping its root/,
+    );
+
+    assert.equal(statSync(outsideDir).mode & 0o777, 0o755);
+    assert.equal(statSync(outsideFile).mode & 0o777, 0o644);
+  } finally {
+    removeFixture(root);
+  }
+});
+
+test('resolveCheckoutHead retries transient git failures', async () => {
+  const sha = '0123456789abcdef0123456789abcdef01234567';
+  let attempts = 0;
+  const result = await resolveCheckoutHead('/tmp/transient-checkout', async (cmd, args, options) => {
+    attempts += 1;
+    assert.equal(cmd, 'git');
+    assert.deepEqual(args, ['--no-optional-locks', 'rev-parse', '--verify', 'HEAD']);
+    assert.equal(options.cwd, '/tmp/transient-checkout');
+    if (attempts === 1) {
+      const err = new Error('fatal: unable to access repository: Input/output error');
+      err.code = 'EIO';
+      err.stderr = 'fatal: unable to access repository: Input/output error';
+      throw err;
+    }
+    return { stdout: `${sha}\n` };
+  });
+
+  assert.equal(result, sha);
+  assert.equal(attempts, 2);
+});
+
+test('snapshot archive extraction retries transient git failures', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'reviewer-workspace-archive-retry-'));
+  try {
+    const checkoutDir = makeRepo(root, 'repo');
+    const stateDir = join(root, 'state');
+    let attempts = 0;
+    const snapshot = await prepareReviewerSnapshot({
+      repo: 'laceyenterprises/agent-os',
+      checkoutDir,
+      stateDir,
+      extractArchiveImpl: async (source, destination) => {
+        attempts += 1;
+        if (attempts === 1) {
+          const err = new Error('git archive snapshot failed: EIO');
+          err.code = 'EIO';
+          throw err;
+        }
+        execFileSync('sh', ['-c', 'git --no-optional-locks archive --format=tar HEAD | tar -x -C "$1"', '_', destination], { cwd: source });
+      },
+    });
+
+    assert.equal(attempts, 2);
+    assert.equal(readFileSync(join(snapshot.snapshotDir, 'tracked.txt'), 'utf8'), 'base\n');
+  } finally {
+    removeFixture(root);
+  }
+});
+
 test('snapshot cache reuses a HEAD, builds a new HEAD, and garbage-collects stale snapshots', async () => {
   const root = mkdtempSync(join(tmpdir(), 'reviewer-workspace-cache-'));
   try {
@@ -108,6 +191,44 @@ test('snapshot cache reuses a HEAD, builds a new HEAD, and garbage-collects stal
     assert.notEqual(third.snapshotDir, first.snapshotDir);
     assert.equal(existsSync(first.snapshotDir), false);
   } finally {
+    removeFixture(root);
+  }
+});
+
+test('workspace escape audit preserves EPERM live pid records', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'reviewer-workspace-eperm-audit-'));
+  const originalKill = process.kill;
+  const otherPid = 987654;
+  try {
+    const checkoutDir = makeRepo(root, 'repo');
+    const stateDir = join(root, 'state');
+    const auditDir = join(stateDir, 'reviewer-workspace-audit');
+    mkdirSync(auditDir, { recursive: true });
+    writeFileSync(join(auditDir, `live-${otherPid}`), '{}\n');
+    process.kill = (pid, signal) => {
+      if (pid === otherPid && signal === 0) {
+        const err = new Error('operation not permitted');
+        err.code = 'EPERM';
+        throw err;
+      }
+      return originalKill(pid, signal);
+    };
+    configureReviewerWorkspaceAudit({
+      repo: 'laceyenterprises/agent-os', prNumber: 7027, reviewerModel: 'gemini',
+      headSha: 'abc124', checkoutDir, stateDir,
+    });
+    await auditReviewerSubprocess(async ({ onSpawn }) => {
+      onSpawn({ pid: process.pid });
+      writeFileSync(join(checkoutDir, 'escaped.txt'), 'escape\n');
+      return { stdout: 'done' };
+    });
+    const log = readFileSync(join(auditDir, 'reviewer-workspace-escapes.jsonl'), 'utf8');
+    const event = JSON.parse(log.trim());
+    assert.deepEqual(event.otherLiveReviewerPids, [otherPid]);
+    assert.equal(existsSync(join(auditDir, `live-${otherPid}`)), true);
+  } finally {
+    process.kill = originalKill;
+    configureReviewerWorkspaceAudit(null);
     removeFixture(root);
   }
 });

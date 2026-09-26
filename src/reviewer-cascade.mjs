@@ -46,6 +46,7 @@ const CASCADE_STATE_DIR = ['data', 'cascade-state'];
 const CREDENTIAL_OUTAGE_STATE_DIR = ['data', 'reviewer-credential-outages'];
 const CREDENTIAL_OUTAGE_WINDOW_MS = 15 * 60_000;
 const CREDENTIAL_OUTAGE_DISTINCT_PR_THRESHOLD = 2;
+const CREDENTIAL_OUTAGE_PROBE_INTERVAL_MS = 5 * 60_000;
 
 function getCascadeStateDir(rootDir) {
   return join(rootDir, ...CASCADE_STATE_DIR);
@@ -149,6 +150,9 @@ function recordReviewerCredentialFailure(rootDir, {
     active,
     reason: `reviewer-credential:${model}`,
     startedAt: active ? (previous?.startedAt || new Date(anchorMs).toISOString()) : null,
+    nextProbeAt: active
+      ? (previous?.nextProbeAt || new Date(anchorMs + CREDENTIAL_OUTAGE_PROBE_INTERVAL_MS).toISOString())
+      : null,
     failures,
     distinctPrCount,
   });
@@ -160,9 +164,28 @@ function clearReviewerCredentialOutage(rootDir, reviewerModel) {
   return state;
 }
 
-function shouldPauseReviewerModel(rootDir, reviewerModel) {
+function shouldPauseReviewerModel(rootDir, reviewerModel, { now = new Date(), reserve = true } = {}) {
   const state = readReviewerCredentialOutage(rootDir, reviewerModel);
-  return { paused: Boolean(state?.active), state };
+  if (!state?.active) return { paused: false, state };
+  const nowMs = new Date(now).getTime();
+  if (!Number.isFinite(nowMs)) throw new TypeError('Invalid credential outage probe time');
+  const persistedDueMs = Date.parse(state.nextProbeAt);
+  const startedMs = Date.parse(state.startedAt);
+  const dueMs = Number.isFinite(persistedDueMs)
+    ? persistedDueMs
+    : Number.isFinite(startedMs)
+      ? startedMs + CREDENTIAL_OUTAGE_PROBE_INTERVAL_MS
+      : nowMs;
+  if (nowMs < dueMs) return { paused: true, state };
+  if (!reserve) return { paused: false, probeDue: true, state };
+  // Reserve one attempt before spawning, so later PRs in the same watcher
+  // poll remain parked even when the credential is still broken.
+  const probingState = writeReviewerCredentialOutage(rootDir, reviewerModel, {
+    ...state,
+    lastProbeAt: new Date(nowMs).toISOString(),
+    nextProbeAt: new Date(nowMs + CREDENTIAL_OUTAGE_PROBE_INTERVAL_MS).toISOString(),
+  });
+  return { paused: false, probe: true, state: probingState };
 }
 
 function resolveCascadeBackoffMinutes(consecutiveCascadeFailures) {

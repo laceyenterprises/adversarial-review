@@ -19,6 +19,7 @@ import {
   markCascadeCapExhaustedAlerted,
   readCascadeState,
   recordCascadeFailure,
+  recordReviewerCredentialFailure,
   shouldBackoffReviewerSpawn,
   shouldPauseReviewerModel,
 } from '../src/reviewer-cascade.mjs';
@@ -1711,7 +1712,29 @@ test('oauth-broken across distinct PRs opens a model outage and success re-arms 
     assert.equal(outage.active, true);
     assert.equal(outage.reason, 'reviewer-credential:claude');
     assert.equal(outage.distinctPrCount, 2);
-    assert.equal(shouldPauseReviewerModel(rootDir, 'claude').paused, true);
+    assert.equal(outage.nextProbeAt, '2026-09-25T18:10:00.000Z');
+    assert.equal(shouldPauseReviewerModel(rootDir, 'claude', {
+      now: '2026-09-25T18:09:59.000Z',
+    }).paused, true);
+    assert.equal(shouldPauseReviewerModel(rootDir, 'claude', {
+      now: '2026-09-25T18:10:00.000Z', reserve: false,
+    }).probeDue, true);
+    assert.equal(readReviewerCredentialOutage(rootDir, 'claude').lastProbeAt, undefined);
+    assert.equal(shouldPauseReviewerModel(rootDir, 'claude', {
+      now: '2026-09-25T18:10:00.000Z',
+    }).probe, true);
+    assert.equal(shouldPauseReviewerModel(rootDir, 'claude', {
+      now: '2026-09-25T18:10:01.000Z',
+    }).paused, true, 'only one PR can probe during the interval');
+    recordReviewerCredentialFailure(rootDir, {
+      reviewerModel: 'claude', repo, prNumber: 196,
+      failedAt: '2026-09-25T18:10:10.000Z',
+    });
+    assert.equal(readReviewerCredentialOutage(rootDir, 'claude').nextProbeAt,
+      '2026-09-25T18:15:00.000Z', 'a failed probe must retain the next recovery window');
+    assert.equal(shouldPauseReviewerModel(rootDir, 'claude', {
+      now: '2026-09-25T18:15:00.000Z',
+    }).probe, true, 'a later retry can discover recovered credentials');
     const parked = db.prepare(
       'SELECT pr_number, review_status, infra_auto_recover_attempts, failure_message FROM reviewed_prs ORDER BY pr_number'
     ).all();

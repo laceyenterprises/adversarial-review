@@ -103,6 +103,7 @@ const RETRIGGERABLE_STOP_CODES = Object.freeze([
   // A settled review stops the automatic loop, but an explicit operator
   // retrigger label/CLI call means "address the remaining non-blocking flags."
   'review-settled',
+  'no-remediation-required',
   // The silent-no-progress guard auto-stops when a remediation round
   // completes without setting `reReview.requested = true`. The guard
   // prevents an automatic loop where remediation keeps "completing"
@@ -2213,6 +2214,64 @@ function claimNextFollowUpJob({
   return null;
 }
 
+function stopPendingNoRemediationJobs({
+  rootDir,
+  stoppedAt = new Date().toISOString(),
+  markStoppedImpl = markFollowUpJobStopped,
+} = {}) {
+  ensureFollowUpJobDirs(rootDir);
+  const stoppedJobs = [];
+
+  for (const pendingPath of listPendingFollowUpJobPaths(rootDir)) {
+    let job;
+    try {
+      job = readFollowUpJob(pendingPath);
+    } catch (err) {
+      if (err?.code === 'ENOENT') continue;
+      throw err;
+    }
+
+    if (!isSettledReviewJob(job)) continue;
+
+    const inProgressPath = join(getFollowUpJobDir(rootDir, 'inProgress'), basename(pendingPath));
+    try {
+      renameSync(pendingPath, inProgressPath);
+    } catch (err) {
+      if (err?.code === 'ENOENT') continue;
+      throw err;
+    }
+
+    try {
+      const stopped = markStoppedImpl({
+        rootDir,
+        jobPath: inProgressPath,
+        stoppedAt,
+        stopCode: 'no-remediation-required',
+        sourceStatus: job.status,
+        stopReason: 'Latest adversarial review is settled cleanly; no remediation worker required.',
+        completion: {
+          preview: 'Latest adversarial review is settled cleanly; no remediation worker required.',
+        },
+      });
+      stoppedJobs.push({
+        job: stopped.job,
+        jobPath: stopped.jobPath,
+        stopped: true,
+        reason: 'no-remediation-required',
+      });
+    } catch (err) {
+      handleClaimedStopFailure({
+        pendingPath,
+        inProgressPath,
+        stopCode: 'no-remediation-required',
+        err,
+      });
+    }
+  }
+
+  return stoppedJobs;
+}
+
 function markFollowUpJobSpawned({
   rootDir = null,
   jobPath,
@@ -2942,6 +3001,7 @@ export {
   requeueFollowUpJobForNextRound,
   stopFollowUpJob,
   summarizePRRemediationLedger,
+  stopPendingNoRemediationJobs,
   validateRemediationReply,
   writeFollowUpJob,
 };

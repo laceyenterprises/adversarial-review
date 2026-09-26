@@ -284,6 +284,10 @@ test('CFGSTALE-01 restored bytes invalidate cache even when inode and mtime are 
     // Equal-length values keep size unchanged too. This reproduces an
     // in-place restore that preserves every metadata field the old cache used.
     writeYaml(modulePath, 'roles:\n  remediator: codex      \n');
+    // Establish a representable timestamp first. A newly written file may
+    // have sub-microsecond precision that utimesSync cannot round-trip on CI.
+    const stableTime = Math.floor(Date.now() / 1000) - 60;
+    utimesSync(modulePath, stableTime, stableTime);
     const originalTimes = statSync(modulePath);
     const callArgs = {
       env: { AGENT_OS_CONFIG_PATH: '/dev/null' },

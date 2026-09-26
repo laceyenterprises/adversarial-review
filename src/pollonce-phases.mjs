@@ -173,6 +173,7 @@ import {
   markOperatorDecisionRequiredAlerted,
   recordCascadeFailure,
   shouldBackoffReviewerSpawn,
+  shouldPauseReviewerModel,
 } from './reviewer-cascade.mjs';
 import { reconcileReviewerCommandFailedBeforeRetry } from './reviewer-command-failed-recovery.mjs';
 import {
@@ -2167,6 +2168,21 @@ export async function processReviewSubject(entry, ctx) {
         });
         return;
       }
+      const credentialOutagePreflight = shouldPauseReviewerModel(ROOT, route.reviewerModel, {
+        reserve: false,
+      });
+      if (credentialOutagePreflight.paused) {
+        markWatcherSpawnDecision({
+          repo: repoPath,
+          pr_number: prNumber,
+          decision: 'reviewer-credential-outage-hold',
+          failure_class: 'oauth-broken',
+          next_retry_after: credentialOutagePreflight.nextProbeAfter ||
+            credentialOutagePreflight.state?.nextProbeAt ||
+            null,
+        });
+        return;
+      }
       const cascadeRetryDue = Boolean(cascadeGate.state?.nextRetryAfter);
       const timeoutExhaustionHandoff = await maybeDispatchReviewerTimeoutExhaustedMergeAgent({
         rootDir: ROOT,
@@ -3150,6 +3166,27 @@ export async function processReviewSubject(entry, ctx) {
               declineFleetSelfRepairRereview(skipReviewerSpawnReason);
               return { dispatched: false, reason: skipReviewerSpawnReason };
             } else {
+              const credentialOutageGate = shouldPauseReviewerModel(ROOT, route.reviewerModel);
+              if (credentialOutageGate.paused) {
+                stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
+                markWatcherSpawnDecision({
+                  repo: repoPath,
+                  pr_number: prNumber,
+                  decision: 'reviewer-credential-outage-hold',
+                  failure_class: 'oauth-broken',
+                  next_retry_after: credentialOutageGate.nextProbeAfter ||
+                    credentialOutageGate.state?.nextProbeAt ||
+                    null,
+                });
+                return { dispatched: false, reason: 'reviewer-credential-outage-hold' };
+              }
+              if (credentialOutageGate.probe) {
+                console.log(
+                  `[watcher] Allowing reviewer credential outage probe for ${repoPath}#${prNumber}: ` +
+                  `${route.reviewerModel} hold expired` +
+                  (credentialOutageGate.nextProbeAfter ? ` at ${credentialOutageGate.nextProbeAfter}` : '')
+                );
+              }
               // Count only work that made it through defer, budget, dedupe,
               // claim, freshness, and routing checks and is about to enter the
               // actual spawn path.  Pending rows held by an active follow-up,

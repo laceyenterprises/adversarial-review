@@ -292,7 +292,7 @@ test('split admission re-enters single-wave drain when admission releases within
   const summary = await runBoundedReviewerDispatchQueue(tasks, {
     maxConcurrent: 1,
     singleWave: true,
-    singleWaveSettleGraceMs: 50,
+    singleWaveSettleGraceMs: 500,
     splitPostReviewSettlement: true,
     logger: { error() {}, log() {} },
   });

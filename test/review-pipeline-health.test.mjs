@@ -5019,11 +5019,29 @@ test('health output surfaces outage pause and attempts not charged', () => {
   assert.equal(snapshot.outage.reason, 'quota-outage');
   assert.equal(snapshot.outage.reviews_paused, true);
   assert.equal(snapshot.outage.attempts_not_charged, 1);
+  assert.equal(snapshot.outage.started_at, '2026-05-25T17:55:00.000Z');
+  assert.equal(snapshot.outage.parked_pr_count, 1);
   assert.deepEqual(snapshot.outage.reasons, [{ reason: 'quota-outage', count: 1 }]);
 
   const output = renderReviewPipelinePrometheus(snapshot);
   assert.match(output, /^review_pipeline_outage_active 1$/m);
   assert.match(output, /^review_pipeline_outage_attempts_not_charged 1$/m);
+});
+
+test('health output names a model credential outage', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 779,
+    reviewStatus: 'pending-upstream',
+    reviewAttempts: 0,
+    failedAt: '2026-09-25T18:05:00.000Z',
+    failureMessage: '[outage-transient:reviewer-credential:claude] [oauth-broken] mint returned 503',
+  });
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  assert.equal(snapshot.outage.reason, 'reviewer-credential:claude');
+  assert.equal(snapshot.outage.started_at, '2026-09-25T18:05:00.000Z');
+  assert.equal(snapshot.outage.parked_pr_count, 1);
 });
 
 test('health output names aborted HCP preflights and estimated reviewer minutes lost', () => {

@@ -101,6 +101,18 @@
       "owner": "reviewer transient-failure backoff and route selection"
     },
     {
+      "id": "reviewer-credential-outages",
+      "title": "Reviewer Credential Outages",
+      "path": "docs/data-model/reviewer-credential-outages.md",
+      "store": "data/reviewer-credential-outages/",
+      "schemaSurface": "src/reviewer-cascade.mjs",
+      "relatedSchemaSurfaces": [
+        "src/pollonce-phases.mjs",
+        "src/reviewer-spawn-settle.mjs"
+      ],
+      "owner": "reviewer OAuth credential outage suppression"
+    },
+    {
       "id": "duplicate-families",
       "title": "Duplicate Families",
       "path": "docs/data-model/duplicate-families.md",

@@ -165,8 +165,9 @@ new PR
   `stmtMarkAttemptStarted`. That atomic claim is the point where failure
   evidence is cleared because a replacement review pass is now durably
   `reviewing`.
-- Fresh transient reviewer failures (`cascade`, `provider-overloaded`,
-  `reviewer-timeout`, `launchctl-bootstrap`, and `daemon-bounce`) settle
+- Fresh transient reviewer failures (`cascade`, PR-local `oauth-broken`,
+  `provider-overloaded`, `reviewer-timeout`, `launchctl-bootstrap`, and
+  `daemon-bounce`) settle
   directly to `pending-upstream`, increment `infra_auto_recover_attempts`, and
   resume when the reviewer lane/routing tier recovers; they intentionally do
   not pass through the `failed` compare-and-swap recovery claim. Legacy or
@@ -185,6 +186,19 @@ new PR
   claim is attempted: the watcher prefers
   `quota_reset_at_utc`, falls back to parsing the tagged `failure_message`, then
   falls back to a fixed window anchored to `failed_at` / `last_attempted_at`.
+  `oauth-broken` also maintains a model-scoped outage file under
+  `data/reviewer-credential-outages/` after failures hit the distinct-PR
+  threshold. That preflight hold parks further spawns for the affected model
+  until the file's `nextProbeAt`, then records a fresh probe reservation and
+  lets one normal reviewer attempt through as a recovery probe. Once this
+  model-wide outage is active, failed OAuth probes record fresh evidence with
+  the outage-transient marker without incrementing `infra_auto_recover_attempts`;
+  the outage file's probe window is the recovery gate. Rows parked before the
+  outage threshold are promoted to the outage marker only while they are still
+  open, lease-free `pending-upstream` rows. A successful probe clears the outage
+  and re-arms only open, lease-free `pending` / `pending-upstream` rows parked
+  with that outage-transient marker; in-flight `reviewing` rows and terminal
+  `failed` evidence are not rewritten.
   `provider-overloaded` preserves HTTP 529/backend capacity failures separately
   from generic `cascade` so pipeline health can report provider instability
   without burning the normal review attempt budget.

@@ -54,7 +54,8 @@ import {
   refreshReviewerBrokerTokens,
 } from '../src/reviewer-broker-refresh.mjs';
 import { reapCloserHammerWorktrees } from '../src/ama/closer-worktree-reaper.mjs';
-import { loadConfigCached } from '../src/config-loader.mjs';
+import { configSignatureStatus, loadConfigCached } from '../src/config-loader.mjs';
+import { DEFAULT_ROLE_TOP_PATH, MODULE_CONFIG_PATH } from '../src/role-config.mjs';
 import { archiveStoppedFollowUpJobs, reapTerminalFollowUpWorkspaces } from '../src/follow-up-jobs.mjs';
 import {
   emitHeartbeatsForActiveJobs,
@@ -155,13 +156,42 @@ function positiveNumberEnv(name, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-const MAX_CONCURRENT_REMEDIATION_JOBS = resolveRemediationMaxConcurrentJobs(process.env, {
-  onClamp: ({ requested, clamped }) => {
-    logInfo(
-      `clamped ${REMEDIATION_MAX_CONCURRENT_JOBS_ENV}=${requested} to ${clamped} to avoid runaway worker fan-out`
-    );
-  },
-});
+function resolveDaemonMaxConcurrentJobs(env = process.env) {
+  return resolveRemediationMaxConcurrentJobs(env, {
+    onClamp: ({ requested, clamped }) => {
+      logInfo(
+        `clamped ${REMEDIATION_MAX_CONCURRENT_JOBS_ENV}=${requested} to ${clamped} to avoid runaway worker fan-out`
+      );
+    },
+  });
+}
+
+function writeConfigSignatureStatus({ env = process.env, now = () => new Date() } = {}) {
+  const hqRoot = env.HQ_ROOT;
+  if (!hqRoot) return null;
+  const status = configSignatureStatus({
+    topPath: env.AGENT_OS_CONFIG_PATH || DEFAULT_ROLE_TOP_PATH,
+    modulePaths: [MODULE_CONFIG_PATH],
+    env,
+  });
+  const path = join(hqRoot, '.adversarial-follow-up', 'config-status.json');
+  let prior = null;
+  try {
+    prior = JSON.parse(readFileSync(path, 'utf8'));
+  } catch {}
+  const observedAt = now().toISOString();
+  const driftSince = status.inSync === false
+    ? (prior?.inSync === false ? prior.driftSince || prior.observedAt : observedAt)
+    : null;
+  const payload = {
+    ...status,
+    observedAt,
+    driftSince,
+    daemon: 'adversarial-follow-up',
+  };
+  writeFileAtomic(path, `${JSON.stringify(payload, null, 2)}\n`);
+  return payload;
+}
 
 function resolveRemediationWorkerTokenMinLifetimeMs(env = process.env) {
   const raw = env?.[REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS_ENV];
@@ -487,8 +517,17 @@ async function runFollowUpDaemonIteration({
   retryFailedCommentDeliveriesImpl = retryFailedCommentDeliveries,
   diagnoseStuckRereviewImpl = diagnoseStuckRereviewMain,
   runStoppedArchiveSweepIfDueImpl = runStoppedArchiveSweepIfDue,
+  resolveMaxConcurrentJobsImpl = resolveDaemonMaxConcurrentJobs,
   shouldStop = () => stopping,
 } = {}) {
+  const maxConcurrentJobs = resolveMaxConcurrentJobsImpl(env);
+  const configStatus = writeConfigSignatureStatus({ env });
+  if (configStatus) {
+    logTick(
+      'config-signature',
+      `loaded=${configStatus.loadedSignature} disk=${configStatus.diskSignature} inSync=${configStatus.inSync}`
+    );
+  }
   await runStep('github-token-refresh', async () => {
     await refreshFollowUpGithubTokenImpl({ env, log: console });
   });
@@ -608,7 +647,10 @@ async function runFollowUpDaemonIteration({
   if (shouldConsumeAfterReviewerTokenRefresh(reviewerTokenRefreshSummary)) {
     await runStep('consume', async () => {
       const result = await consumeFollowUpJobsUntilCapacityImpl({
-        maxConcurrent: MAX_CONCURRENT_REMEDIATION_JOBS,
+        // CFGSTALE-01: resolve inside every long-lived iteration. The old
+        // module-level constant froze whatever overlay existed at process
+        // startup even though loadRoleConfig itself refreshed correctly.
+        maxConcurrent: maxConcurrentJobs,
         resolveRemediationWorkerClassImpl: resolveRemediationWorkerClassWithFallback,
         mintClaudeCodeRemediationTokenImpl: mintClaudeCodeRemediationBrokerToken,
         shouldStop,
@@ -748,7 +790,7 @@ async function main() {
   const telemetryListener = await startFollowUpTelemetryListener();
   logInfo(
     `startup complete; entering tick loop (interval=${TICK_INTERVAL_SECONDS}s ` +
-    `${REMEDIATION_MAX_CONCURRENT_JOBS_ENV}=${MAX_CONCURRENT_REMEDIATION_JOBS})`
+    `${REMEDIATION_MAX_CONCURRENT_JOBS_ENV}=${resolveDaemonMaxConcurrentJobs(process.env)})`
   );
 
   const handoffRateLimiter = createHandoffRateLimiter({ rootDir: ROOT, logger: console });
@@ -800,6 +842,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 export {
   main,
   resolveRemediationWorkerTokenMinLifetimeMs,
+  resolveDaemonMaxConcurrentJobs,
   resolveStuckRereviewApplyEnabled,
   resolveTelemetryListenerStartTimeoutMs,
   normalizeMaintenanceSweepState,
@@ -813,4 +856,5 @@ export {
   shouldConsumeAfterReviewerTokenRefresh,
   startFollowUpTelemetryListener,
   writeMaintenanceSweepState,
+  writeConfigSignatureStatus,
 };

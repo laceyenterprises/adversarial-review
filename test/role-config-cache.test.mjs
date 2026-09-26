@@ -3,7 +3,7 @@
 // These tests exercise the documented cache-invalidation contract:
 //
 //   - The role-config cascade cache is keyed by (topPath, modulePaths,
-//     declared env aliases) and watches file mtime/inode. Repeated calls
+//     declared env aliases) and watches file content. Repeated calls
 //     with the same call shape are cache hits; file edits and env-alias
 //     changes invalidate the slot.
 //   - Callers still reset at per-tick / per-job boundaries, but explicit
@@ -15,7 +15,7 @@
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -272,6 +272,32 @@ test('CFG-09 module-file edit invalidates cache without explicit reset', () => {
       'claude-code',
       'module-file mtime change should auto-invalidate cache',
     );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('CFGSTALE-01 restored bytes invalidate cache even when inode and mtime are preserved', () => {
+  const tmp = makeTmp();
+  try {
+    const modulePath = join(tmp, 'config.yaml');
+    // Equal-length values keep size unchanged too. This reproduces an
+    // in-place restore that preserves every metadata field the old cache used.
+    writeYaml(modulePath, 'roles:\n  remediator: codex      \n');
+    const originalTimes = statSync(modulePath);
+    const callArgs = {
+      env: { AGENT_OS_CONFIG_PATH: '/dev/null' },
+      topPath: '/dev/null',
+      modulePaths: [modulePath],
+    };
+
+    resetRoleConfigCache();
+    assert.equal(loadRoleConfig(callArgs).get('roles.remediator'), 'codex');
+
+    writeYaml(modulePath, 'roles:\n  remediator: gemini     \n');
+    utimesSync(modulePath, originalTimes.atime, originalTimes.mtime);
+
+    assert.equal(loadRoleConfig(callArgs).get('roles.remediator'), 'gemini');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

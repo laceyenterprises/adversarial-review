@@ -4141,11 +4141,7 @@ async function consumeFollowUpJobsUntilCapacity({
       nowMs: Date.parse(prefetchNow),
     });
   }
-  if (!shouldStop()) {
-    stopped += drainPendingNoRemediationJobs({
-      rootDir, now, requestWatcherWakeImpl, log, results, excludedRepoPrKeys: blockedRepoPrKeys, shouldStop,
-    });
-  }
+  stopped += shouldStop() ? 0 : drainPendingNoRemediationJobs({ rootDir, now, requestWatcherWakeImpl, log, results, excludedRepoPrKeys: blockedRepoPrKeys, shouldStop });
   while (!shouldStop() && (activeJobs.length + spawned) < concurrencyCap) {
     let result;
     try {

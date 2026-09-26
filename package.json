@@ -23,6 +23,7 @@
     "follow-up:cancel-worker": "node src/follow-up-worker-cancel.mjs",
     "review:cancel": "node src/review-cancel.mjs",
     "pipeline-health": "node src/review-pipeline-health-cli.mjs",
+    "burst": "node src/cli.mjs burst",
     "latency:report": "node src/review-latency-cli.mjs report",
     "rereview-wake": "node bin/rereview-wake.mjs",
     "hard-shutdown": "node src/adversarial-hard-shutdown.mjs",

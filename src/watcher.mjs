@@ -139,7 +139,7 @@ import {
   stmtMarkMerged,
   stmtMarkClosed,
   latestPostedReviewAtMs,
-  countOpenPrsAwaitingFirstPassReview,
+  countOpenPrsAwaitingFirstPassReview, readBurstScopedReviewerSpendUsd,
 } from './review-state-db.mjs';
 import {
   retryPendingMergeCloseouts,
@@ -391,7 +391,7 @@ import {
   headDispatchLeaseKey,
   resolveAlreadyReviewedHeadDedup,
 } from './reviewed-head-dispatch-gate.mjs';
-import { createFirstPassSpilloverController } from './review-queue-depth.mjs';
+import { createFirstPassSpilloverController } from './review-queue-depth.mjs'; import { createReviewerBurstController } from './reviewer-burst-lease.mjs'; // RPL-07 rides on this line: watcher.mjs is AT its ARC-18 line ratchet, so new wiring must be net-zero lines.
 import { reconcilePendingReviewsForSelf } from './reviewer-pre-write.mjs';
 import {
   inspectWatcherExitTimeout,
@@ -1234,7 +1234,7 @@ async function pollOnce(
     );
   }
 
-  const reviewerPoolConfig = resolveFirstPassReviewerPoolConfig({ watcherConfig: config });
+  const reviewerBurstController = createReviewerBurstController({ rootDir: ROOT, logger: console, readSpendUsd: readBurstScopedReviewerSpendUsd }), reviewerPoolConfig = resolveFirstPassReviewerPoolConfig({ watcherConfig: config, burstSlots: reviewerBurstController.slots() }); // RPL-07: burstSlots is 0 unless an operator lease is active, leaving steady-state capacity untouched
   const reviewerDispatchSingleWaveSettleGraceMs = Math.max(
     0,
     Number.parseInt(
@@ -1421,7 +1421,7 @@ async function pollOnce(
         reviewerMemoryPressureConfig,
         reviewerDispatchCandidates,
         firstPassSpilloverController,
-        postedReviewHandlers,
+        reviewerBurstController, postedReviewHandlers,
         mergeAgentCandidateBranchProtectionCache,
         reviewerFleetQuotaStatusCache: reviewerTickCaches.fleetQuotaStatus,
         reviewerMemoryReservationState,

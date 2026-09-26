@@ -59,7 +59,7 @@ export function reviewWorkerClassFallback(env = process.env) {
     .filter(Boolean);
 }
 
-function resolveHqPath(env = process.env) {
+export function resolveHqPath(env = process.env) {
   return String(env?.AGENT_OS_HQ_BIN || env?.HQ_BIN || 'hq').trim() || 'hq';
 }
 
@@ -338,10 +338,14 @@ export function applyReviewerWorkerClassFallbackToRoute({
         reason: decision.reason,
         ...(decision.lastResort ? { lastResort: true } : {}),
         // Depth provenance rides along only for a depth-triggered spill, so the
-        // quota-triggered shape stays exactly what it was.
+        // quota-triggered shape stays exactly what it was. Burst provenance is
+        // the same deal for a lease-triggered spill.
         ...(decision.queueDepth === undefined
           ? {}
           : { queueDepth: decision.queueDepth, queueDepthThreshold: decision.queueDepthThreshold }),
+        ...(decision.burstLeaseId === undefined
+          ? {}
+          : { burstLeaseId: decision.burstLeaseId, burstSlots: decision.burstSlots }),
       },
     },
   };
@@ -366,15 +370,25 @@ export function applyReviewerWorkerClassFallbackToRoute({
  *   Absent / `engaged: false` (the default, and the case on any host that has
  *   not armed the lever) makes this function behave exactly as it did before
  *   RSP-01, down to the returned reason strings.
+ * @param {Object=} args.burstPressure — RPL-07 operator burst-lease snapshot
+ *   `{ engaged, leaseId, slots }` from the per-tick burst controller. The
+ *   SECOND elevated-spend trigger, beside depth: same widening, different
+ *   authority (an operator's explicit TTL-bound lease rather than an automatic
+ *   backlog threshold). Absent / `engaged: false` — the default, and the case
+ *   on every host with no active lease — is byte-identical to pre-RPL-07.
+ *   Depth takes precedence when both are engaged, so an armed depth lever keeps
+ *   its exact reason string and cost accounting.
  * @returns {Promise<{ workerClass: string, fellBack: boolean, reason: string,
  *   from?: string, to?: string, primaryState?: string, error?: string,
- *   queueDepth?: number, queueDepthThreshold?: number }>}
+ *   queueDepth?: number, queueDepthThreshold?: number,
+ *   burstLeaseId?: string, burstSlots?: number }>}
  */
 export async function resolveReviewerWorkerClassWithFallback({
   authorClass,
   primary,
   fallbackWorkerClasses,
   depthPressure = null,
+  burstPressure = null,
   env = process.env,
   hqPath = resolveHqPath(env),
   execFileImpl = execFileAsync,
@@ -396,10 +410,24 @@ export async function resolveReviewerWorkerClassWithFallback({
   // `depthEngaged` only widens what this function is allowed to consider; every
   // pre-existing branch below is reached on exactly the conditions it was
   // before when the lever is disarmed.
+  //
+  // RPL-07 adds a second such trigger: an operator burst lease. The two are
+  // deliberately OR'd into one `elevatedSpendEngaged` predicate rather than
+  // given separate branches, because the DECISION they widen is identical
+  // ("a healthy primary may yield to an entitled, quota-available fallback").
+  // Only the provenance differs, and provenance lives in the reason string and
+  // the ride-along fields so each lever's cost ledger stays its own. Depth
+  // wins the attribution when both are live so an armed depth lever's
+  // behaviour — including its reason string — is unchanged by this ticket.
   const depthEngaged = depthPressure?.engaged === true;
+  const burstEngaged = !depthEngaged && burstPressure?.engaged === true;
+  const elevatedSpendEngaged = depthEngaged || burstEngaged;
   const depthFields = depthEngaged
     ? { queueDepth: depthPressure.depth ?? null, queueDepthThreshold: depthPressure.threshold ?? null }
-    : {};
+    : (burstEngaged
+      ? { burstLeaseId: burstPressure.leaseId ?? null, burstSlots: burstPressure.slots ?? null }
+      : {});
+  const elevatedSpendReason = depthEngaged ? 'queue-depth-pressure' : 'burst-lease-pressure';
 
   if (!primaryClass || fallbacks.length === 0) {
     return { ...base, reason: 'no-fallback-configured' };
@@ -410,7 +438,7 @@ export async function resolveReviewerWorkerClassWithFallback({
   // anthropic only). That is precisely why a saturated-but-healthy gemini never
   // yielded. Depth does not need a primary provider state to be meaningful, so
   // an armed+engaged lever is allowed past this gate; a disarmed one is not.
-  if (!providerForQuotaHarness(primaryClass) && !depthEngaged) {
+  if (!providerForQuotaHarness(primaryClass) && !elevatedSpendEngaged) {
     return { ...base, reason: 'primary-provider-untracked' };
   }
   const quotaTrackedFallbacks = fallbacks.filter((candidate) => (
@@ -452,11 +480,13 @@ export async function resolveReviewerWorkerClassWithFallback({
       ? quotaAvailableFromFleetStatus(stdout, { harness: primaryClass })
       : { available: true, state: 'untracked-quota-harness' };
     if (!isGroundedProviderState(primaryAvail.state)) {
-      // ── RSP-01 depth trigger ──────────────────────────────────────────────
-      // Reached ONLY when the lever is armed, the queue is at/above threshold,
-      // and this tick still has spill budget. The primary is healthy; we are
-      // choosing to spend build quota to drain a backlog.
-      if (depthEngaged) {
+      // ── Elevated-spend trigger (RSP-01 depth / RPL-07 burst lease) ────────
+      // Reached ONLY when one of the two levers says so: the depth lever is
+      // armed, at/above threshold, and still has spill budget this tick; or an
+      // operator burst lease is active, in scope for this subject, and still
+      // inside its review cap. The primary is healthy; we are choosing to spend
+      // build quota to drain a backlog or to make a named pack go fast.
+      if (elevatedSpendEngaged) {
         for (const candidate of viableFallbacks) {
           // Entitled AND quota-available, in that order — both are "can this
           // class actually boot and post", and failing either makes the spill a
@@ -468,7 +498,7 @@ export async function resolveReviewerWorkerClassWithFallback({
             fellBack: true,
             from: primaryClass,
             to: candidate,
-            reason: 'queue-depth-pressure',
+            reason: elevatedSpendReason,
             primaryState: primaryAvail.state,
             ...depthFields,
           };

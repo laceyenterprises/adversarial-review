@@ -269,6 +269,40 @@ test('closed reviewing rows cancel a verified live reviewer and clear its claim'
   assert.match(log.lines.join('\n'), /reviewer_reattach_terminal_claim_cleared state=closed/);
 });
 
+test('live merged PR takes precedence over a stale closed row before cancelling its reviewer', async () => {
+  const db = setupDb();
+  seedReviewing(db, { prState: 'closed', closedAt: '2026-05-11T05:19:00.000Z' });
+  const mergedAt = '2026-05-11T05:19:30.000Z';
+  const killed = [];
+  const settled = [];
+  const octokit = makeOctokit([]);
+  octokit.rest.pulls.get = async () => ({ data: {
+    state: 'closed', merged: true, merged_at: mergedAt,
+  } });
+
+  await reconcileReviewerSessions({
+    db,
+    octokit,
+    now: new Date(FAILURE_AT),
+    log: makeLog(),
+    probeSession: () => ({ alive: true, matched: true }),
+    killProcessGroup: (pgid, signal) => { killed.push({ pgid, signal }); return true; },
+    fetchHeadSha: async () => { throw new Error('merged rows must not probe GitHub heads'); },
+    findPostedReview: async () => { throw new Error('merged rows must not probe GitHub reviews'); },
+    onTerminalDeadSession: async (event) => settled.push(event),
+  });
+
+  const row = readRow(db);
+  assert.equal(row.pr_state, 'merged');
+  assert.equal(row.merged_at, mergedAt);
+  assert.equal(row.closed_at, null);
+  assert.equal(row.review_status, 'skipped');
+  assert.deepEqual(killed, [{ pgid: 9001, signal: 'SIGKILL' }]);
+  assert.deepEqual(settled.map(({ state, settledAt, reason }) => ({ state, settledAt, reason })), [
+    { state: 'cancelled', settledAt: mergedAt, reason: 'merged-pr-reviewer-claim-cleared' },
+  ]);
+});
+
 test('stale closed row is restored when GitHub says the PR reopened', async () => {
   const db = setupDb();
   seedReviewing(db, { prState: 'closed', closedAt: '2026-05-11T05:19:00.000Z' });

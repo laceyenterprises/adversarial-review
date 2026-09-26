@@ -295,7 +295,12 @@ test('CFGSTALE-01 restored bytes invalidate cache even when inode and mtime are 
     assert.equal(loadRoleConfig(callArgs).get('roles.remediator'), 'codex');
 
     writeYaml(modulePath, 'roles:\n  remediator: gemini     \n');
-    utimesSync(modulePath, originalTimes.atime, originalTimes.mtime);
+    utimesSync(modulePath, originalTimes.atimeMs / 1000, originalTimes.mtimeMs / 1000);
+
+    const restoredTimes = statSync(modulePath);
+    assert.equal(restoredTimes.ino, originalTimes.ino, 'test setup must preserve inode');
+    assert.equal(restoredTimes.size, originalTimes.size, 'test setup must preserve size');
+    assert.equal(restoredTimes.mtimeMs, originalTimes.mtimeMs, 'test setup must preserve mtime');
 
     assert.equal(loadRoleConfig(callArgs).get('roles.remediator'), 'gemini');
   } finally {

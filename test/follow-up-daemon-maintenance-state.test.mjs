@@ -399,12 +399,14 @@ test('follow-up daemon kill-switch disabled uses timer sleep instead of wake wai
   assert.equal(timerSleepMs, 123);
 });
 
-test('follow-up daemon iteration preserves reconcile and closer reaper on wake-driven passes', async () => {
+test('follow-up daemon iteration preserves reconcile and closer reaper on wake-driven passes', async (t) => {
+  const rootDir = makeTempDir(t);
+  const env = { AGENT_OS_CONFIG_PATH: path.join(rootDir, 'config.yaml') };
   const calls = [];
   let observedMaxConcurrent = null;
 
   await runFollowUpDaemonIteration({
-    env: {},
+    env,
     refreshFollowUpGithubTokenImpl: async () => {
       calls.push('github-token-refresh');
       return { refreshed: true };
@@ -523,6 +525,7 @@ test('follow-up daemon iteration keeps config drift after per-tick cache reset',
     HQ_ROOT: hqRoot,
   };
   const calls = [];
+  const consumedMaxConcurrent = [];
 
   t.after(() => resetConfigCache());
 
@@ -600,9 +603,18 @@ remediation:
       }));
       return 0;
     },
-    consumeFollowUpJobsUntilCapacityImpl: async () => {
+    consumeFollowUpJobsUntilCapacityImpl: async ({ maxConcurrent }) => {
       calls.push('consume');
-      throw new Error('consume should be skipped when capacity cannot resolve');
+      consumedMaxConcurrent.push(maxConcurrent);
+      return {
+        maxConcurrent,
+        activeAtStart: 0,
+        availableAtStart: 0,
+        spawned: 0,
+        stopped: 0,
+        deferredSamePR: 0,
+        capacityRemaining: maxConcurrent,
+      };
     },
     reapCloserHammerWorktreesImpl: async () => {
       calls.push('closer-worktree-reap');
@@ -652,7 +664,11 @@ remediation:
   assert.ok(calls.includes('reconcile'));
   assert.ok(calls.includes('heartbeat'));
   assert.ok(calls.includes('retry-comments'));
-  assert.equal(calls.includes('consume'), false);
+  assert.deepEqual(
+    consumedMaxConcurrent,
+    [2, 2],
+    'bad config should keep consuming with the last successfully resolved cap'
+  );
 });
 
 test('follow-up wake storm on one head does not starve another PR head', async (t) => {

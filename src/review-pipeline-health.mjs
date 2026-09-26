@@ -41,25 +41,60 @@ import { summarizeReviewerBurst } from './reviewer-burst-lease.mjs';
 import { readReviewerCredentialOutage } from './reviewer-cascade.mjs';
 
 const DEFAULT_REVIEWER_DEATH_RATE_WINDOW_MS = 60 * 60 * 1000;
-const CONFIG_DRIFT_ALARM_MS = 10 * 60 * 1000;
+const DEFAULT_CONFIG_SIGNATURE_DRIFT_ALARM_MS = 10 * 60 * 1000;
+const DEFAULT_CONFIG_SIGNATURE_STATUS_STALE_MS = 6 * 60 * 1000;
 
-function summarizeConfigSignatureDrift(hqRoot, { nowMs }) {
+function summarizeConfigSignatureDrift(
+  hqRoot,
+  {
+    nowMs = Date.now(),
+    thresholdMs = DEFAULT_CONFIG_SIGNATURE_DRIFT_ALARM_MS,
+    freshnessMs = DEFAULT_CONFIG_SIGNATURE_STATUS_STALE_MS,
+  } = {}
+) {
   const candidates = [
     ['adversarial-follow-up', join(hqRoot, '.adversarial-follow-up', 'config-status.json')],
   ];
   const daemons = candidates.map(([daemon, path]) => {
     try {
+      const fileStat = statSync(path);
       const raw = JSON.parse(readFileSync(path, 'utf8'));
       const status = raw;
-      const observedMs = Date.parse(status?.driftSince || status?.observedAt || '') || statSync(path).mtimeMs;
-      const inSync = status?.inSync ?? null;
-      const driftMs = inSync === false ? Math.max(0, nowMs - observedMs) : 0;
-      return { daemon, path, ...status, driftMs, alarm: driftMs > CONFIG_DRIFT_ALARM_MS };
+      const parsedObservedMs = Date.parse(status?.observedAt || '');
+      const observedMs = Number.isFinite(parsedObservedMs)
+        ? parsedObservedMs
+        : fileStat.mtimeMs;
+      const parsedDriftSinceMs = Date.parse(status?.driftSince || '');
+      const driftSinceMs = Number.isFinite(parsedDriftSinceMs)
+        ? parsedDriftSinceMs
+        : observedMs;
+      const statusAgeMs = Math.max(0, nowMs - observedMs);
+      const statusStale = statusAgeMs > freshnessMs;
+      const reportedInSync = status?.inSync ?? null;
+      const inSync = statusStale ? null : reportedInSync;
+      const driftMs = inSync === false ? Math.max(0, nowMs - driftSinceMs) : 0;
+      return {
+        daemon,
+        path,
+        ...status,
+        reportedInSync,
+        inSync,
+        statusAgeMs,
+        statusStale,
+        freshnessMs,
+        driftMs,
+        alarm: statusStale || driftMs > thresholdMs,
+      };
     } catch (err) {
       return { daemon, path, loadedSignature: null, diskSignature: null, inSync: null, driftMs: 0, alarm: false, error: err?.message || String(err) };
     }
   });
-  return { thresholdMs: CONFIG_DRIFT_ALARM_MS, daemons, alarmed: daemons.filter((entry) => entry.alarm) };
+  return {
+    thresholdMs,
+    freshnessMs,
+    daemons,
+    alarmed: daemons.filter((entry) => entry.alarm),
+  };
 }
 const DEFAULT_REVIEWER_DEATH_RATE_THRESHOLD = 0.5;
 const DEFAULT_REVIEWER_DEATH_RATE_MIN_ATTEMPTS = 3;
@@ -615,9 +650,10 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     code: 'review:config_signature_drift',
     tier: 'ticket',
     category: 'review-pipeline',
-    thresholdKey: null,
-    defaultThreshold: CONFIG_DRIFT_ALARM_MS,
-    thresholdDescription: 'a long-lived daemon loaded signature differs from disk for more than 10 minutes',
+    thresholdKey: 'configSignatureDriftAlarmMs',
+    defaultThreshold: DEFAULT_CONFIG_SIGNATURE_DRIFT_ALARM_MS,
+    thresholdDescription:
+      'a long-lived daemon loaded signature differs from disk, or its status file stops updating',
   },
   {
     code: 'review:daemon_liveness',
@@ -864,6 +900,16 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
       overrides.lifecycleReconcileStaleAfterMs
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_LIFECYCLE_RECONCILE_STALE_AFTER_MS,
       DEFAULT_RECONCILE_STALE_AFTER_MS
+    ),
+    configSignatureDriftAlarmMs: parsePositiveInteger(
+      overrides.configSignatureDriftAlarmMs
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFIG_SIGNATURE_DRIFT_ALARM_MS,
+      DEFAULT_CONFIG_SIGNATURE_DRIFT_ALARM_MS
+    ),
+    configSignatureStatusStaleMs: parsePositiveInteger(
+      overrides.configSignatureStatusStaleMs
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFIG_SIGNATURE_STATUS_STALE_MS,
+      DEFAULT_CONFIG_SIGNATURE_STATUS_STALE_MS
     ),
     remediationBacklogThreshold: parsePositiveInteger(
       overrides.remediationBacklogThreshold
@@ -4475,22 +4521,39 @@ function buildFinding({ code, tier, subject, message, evidence, recommendedActio
 
 function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
   const findings = [];
-
-  for (const drift of snapshot.configSignatureDrift?.alarmed || []) {
-    findings.push(buildFinding({
-      code: 'review:config_signature_drift',
-      tier: 'ticket',
-      subject: `${drift.daemon} has used stale config for more than 10 minutes`,
-      message: `Loaded config signature differs from disk for ${Math.round(drift.driftMs / 60000)} minute(s).`,
-      evidence: [
-        `${drift.path} loaded=${drift.loadedSignature || 'unknown'} disk=${drift.diskSignature || 'unknown'}`,
-      ],
-      recommendedAction: 'Inspect the daemon config-refresh path; restart only as immediate containment after preserving the stale-signature evidence.',
-      observedAt,
-      details: drift,
-    }));
-  }
   const { config } = snapshot;
+
+  if (config?.hostChecksEnabled !== false) {
+    for (const drift of snapshot.configSignatureDrift?.alarmed || []) {
+      const statusStale = drift.statusStale === true;
+      const subject = statusStale
+        ? `${drift.daemon} config signature status is stale`
+        : `${drift.daemon} has used stale config for more than 10 minutes`;
+      const message = statusStale
+        ? `Config signature status has not updated for ${Math.round((drift.statusAgeMs || 0) / 60000)} minute(s).`
+        : `Loaded config signature differs from disk for ${Math.round(drift.driftMs / 60000)} minute(s).`;
+      const evidence = statusStale
+        ? `${drift.path} observedAt=${drift.observedAt || 'unknown'} ` +
+          `ageMs=${drift.statusAgeMs ?? 'unknown'} ` +
+          `thresholdMs=${drift.freshnessMs ?? 'unknown'} ` +
+          `lastInSync=${drift.reportedInSync ?? 'unknown'}`
+        : `${drift.path} loaded=${drift.loadedSignature || 'unknown'} ` +
+          `disk=${drift.diskSignature || 'unknown'}`;
+      const recommendedAction = statusStale
+        ? 'Inspect follow-up daemon liveness and config-status write failures before trusting the cached config-signature state.'
+        : 'Inspect the daemon config-refresh path; restart only as immediate containment after preserving the stale-signature evidence.';
+      findings.push(buildFinding({
+        code: 'review:config_signature_drift',
+        tier: 'ticket',
+        subject,
+        message,
+        evidence: [evidence],
+        recommendedAction,
+        observedAt,
+        details: drift,
+      }));
+    }
+  }
 
   // An ABSENT ledger is reported alongside an unreadable one. Previously this
   // required `exists === true`, so a collector pointed at a root with no
@@ -5941,7 +6004,18 @@ function collectReviewPipelineHealth({
     const dagAutowalk = config.hostChecksEnabled
       ? summarizeDagAutowalkHealth({ env, hqRoot, nowMs, config, launchd })
       : { hqRoot, label: null, loaded: true, lastExitCode: 0, errLogPath: null, outLogPath: null, logAgeMs: null, thresholdMs: config.dagAutowalkMaxLogAgeMs, healthy: true };
-    const configSignatureDrift = summarizeConfigSignatureDrift(hqRoot, { nowMs });
+    const configSignatureDrift = config.hostChecksEnabled
+      ? summarizeConfigSignatureDrift(hqRoot, {
+          nowMs,
+          thresholdMs: config.configSignatureDriftAlarmMs,
+          freshnessMs: config.configSignatureStatusStaleMs,
+        })
+      : {
+          thresholdMs: config.configSignatureDriftAlarmMs,
+          freshnessMs: config.configSignatureStatusStaleMs,
+          daemons: [],
+          alarmed: [],
+        };
     const snapshot = {
       observedAt,
       rootDir,

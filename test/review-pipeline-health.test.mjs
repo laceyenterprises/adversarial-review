@@ -89,7 +89,7 @@ test('CFGSTALE-01 config drift alarms only after ten minutes', () => {
     const statusDir = path.join(hqRoot, '.adversarial-follow-up');
     mkdirSync(statusDir, { recursive: true });
     writeFileSync(path.join(statusDir, 'config-status.json'), JSON.stringify({
-      observedAt: '2026-05-25T17:49:00.000Z',
+      observedAt: '2026-05-25T17:59:00.000Z',
       driftSince: '2026-05-25T17:49:00.000Z',
       loadedSignature: 'sha256:old',
       diskSignature: 'sha256:new',
@@ -100,6 +100,80 @@ test('CFGSTALE-01 config drift alarms only after ten minutes', () => {
     assert.equal(summary.alarmed.length, 1);
     assert.equal(summary.alarmed[0].daemon, 'adversarial-follow-up');
   } finally {
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('CFGSTALE-01 config drift treats stale status files as unknown', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  try {
+    const statusDir = path.join(hqRoot, '.adversarial-follow-up');
+    mkdirSync(statusDir, { recursive: true });
+    writeFileSync(path.join(statusDir, 'config-status.json'), JSON.stringify({
+      observedAt: '2026-05-25T17:50:00.000Z',
+      driftSince: null,
+      loadedSignature: 'sha256:same',
+      diskSignature: 'sha256:same',
+      inSync: true,
+    }));
+
+    const summary = summarizeConfigSignatureDrift(hqRoot, { nowMs: Date.parse(NOW) });
+    assert.equal(summary.alarmed.length, 1);
+    assert.equal(summary.alarmed[0].statusStale, true);
+    assert.equal(summary.alarmed[0].reportedInSync, true);
+    assert.equal(summary.alarmed[0].inSync, null);
+
+    const snapshot = collectReviewPipelineHealth({
+      rootDir,
+      hqRoot,
+      now: () => new Date(NOW),
+      config: { hostChecksEnabled: false },
+    });
+    const findings = evaluateReviewPipelineFindings({
+      ...snapshot,
+      config: { ...snapshot.config, hostChecksEnabled: true },
+      configSignatureDrift: summary,
+    }, { observedAt: NOW });
+    const finding = findings.find((entry) => entry.code === 'review:config_signature_drift');
+    assert.ok(finding);
+    assert.match(finding.message, /has not updated/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('CFGSTALE-01 config drift is host-check gated', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  try {
+    const statusDir = path.join(hqRoot, '.adversarial-follow-up');
+    mkdirSync(statusDir, { recursive: true });
+    writeFileSync(path.join(statusDir, 'config-status.json'), JSON.stringify({
+      observedAt: '2026-05-25T17:59:00.000Z',
+      driftSince: '2026-05-25T17:49:00.000Z',
+      loadedSignature: 'sha256:old',
+      diskSignature: 'sha256:new',
+      inSync: false,
+    }));
+
+    const snapshot = collectReviewPipelineHealth({
+      rootDir,
+      hqRoot,
+      now: () => new Date(NOW),
+      config: { hostChecksEnabled: false },
+    });
+    assert.deepEqual(snapshot.configSignatureDrift.alarmed, []);
+    assert.ok(!findingCodes(snapshot).includes('review:config_signature_drift'));
+
+    const findings = evaluateReviewPipelineFindings({
+      ...snapshot,
+      configSignatureDrift: summarizeConfigSignatureDrift(hqRoot, { nowMs: Date.parse(NOW) }),
+    }, { observedAt: NOW });
+    assert.ok(!findingCodes({ findings }).includes('review:config_signature_drift'));
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
     rmSync(hqRoot, { recursive: true, force: true });
   }
 });
@@ -5630,6 +5704,19 @@ test('reviewer model silence defaults and class allowlist are configurable', () 
       ' claude, hammer-claude, claude ',
   });
   assert.deepEqual(configured.reviewerModelSilenceClasses, ['claude', 'hammer-claude']);
+});
+
+test('config signature drift thresholds are configurable', () => {
+  const defaults = resolveReviewPipelineHealthConfig({});
+  assert.equal(defaults.configSignatureDriftAlarmMs, 10 * 60 * 1000);
+  assert.equal(defaults.configSignatureStatusStaleMs, 6 * 60 * 1000);
+
+  const configured = resolveReviewPipelineHealthConfig({
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFIG_SIGNATURE_DRIFT_ALARM_MS: '120000',
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFIG_SIGNATURE_STATUS_STALE_MS: '30000',
+  });
+  assert.equal(configured.configSignatureDriftAlarmMs, 120000);
+  assert.equal(configured.configSignatureStatusStaleMs, 30000);
 });
 
 test('reviewer_pass_zombie default tracks the reaper timeout it is derived from', () => {

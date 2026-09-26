@@ -157,6 +157,7 @@ function positiveNumberEnv(name, fallback) {
 }
 
 const lastSuccessfulDaemonConfigSignatures = new Map();
+const lastSuccessfulDaemonMaxConcurrentJobs = new Map();
 
 function daemonConfigSignatureOptions(env = process.env) {
   const envForConfig = pruneBlankRoleEnvVars(env);
@@ -180,6 +181,21 @@ function recordDaemonConfigLoadSuccess({ env = process.env } = {}) {
       status.loadedSignature
     );
   }
+}
+
+function recordDaemonMaxConcurrentJobs({ env = process.env, maxConcurrentJobs } = {}) {
+  if (!Number.isFinite(maxConcurrentJobs) || maxConcurrentJobs <= 0) return;
+  lastSuccessfulDaemonMaxConcurrentJobs.set(
+    daemonConfigSignatureStateKey(daemonConfigSignatureOptions(env)),
+    maxConcurrentJobs
+  );
+}
+
+function lastSuccessfulDaemonMaxConcurrentJobsFor(env = process.env) {
+  const value = lastSuccessfulDaemonMaxConcurrentJobs.get(
+    daemonConfigSignatureStateKey(daemonConfigSignatureOptions(env))
+  );
+  return Number.isFinite(value) && value > 0 ? value : null;
 }
 
 function daemonConfigSignatureStatus({ env = process.env } = {}) {
@@ -207,6 +223,7 @@ function resolveDaemonMaxConcurrentJobs(env = process.env) {
     },
   });
   recordDaemonConfigLoadSuccess({ env });
+  recordDaemonMaxConcurrentJobs({ env, maxConcurrentJobs });
   return maxConcurrentJobs;
 }
 
@@ -573,8 +590,18 @@ async function runFollowUpDaemonIteration({
   });
   await runStep('resolve-capacity', async () => {
     maxConcurrentJobs = resolveMaxConcurrentJobsImpl(env);
+    recordDaemonMaxConcurrentJobs({ env, maxConcurrentJobs });
     logTick('resolve-capacity', `maxConcurrent=${maxConcurrentJobs}`);
   });
+  if (maxConcurrentJobs === null) {
+    const fallbackMaxConcurrentJobs = lastSuccessfulDaemonMaxConcurrentJobsFor(env);
+    if (fallbackMaxConcurrentJobs !== null) {
+      maxConcurrentJobs = fallbackMaxConcurrentJobs;
+      logError(
+        `resolve-capacity failed; using last successful remediation capacity maxConcurrent=${maxConcurrentJobs}`
+      );
+    }
+  }
   await runStep('github-token-refresh', async () => {
     await refreshFollowUpGithubTokenImpl({ env, log: console });
   });

@@ -82,7 +82,7 @@
              problem at 5s on this host: measured 2026-09-21 over one log window,
              9 of 39 refreshes aborted (~23%, claude-reviewer worst at 5), each
              leaving a stale token that later surfaces as class=oauth-broken. Two
-             of those freeze the model out of the reviewer pool -- observed as
+             of those freeze the model out of the reviewer pool; observed as
              21x `reviewer-model-fallback from=claude to=gemini`, which with the
              OpenAI primary exhausted left gemini as the only reviewer and the
              lane reporting starvationCause=no-capacity.
@@ -98,7 +98,7 @@
              = 87500 ms. The direct override
              ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS is
              wrapped in Math.min against that derived value, so it can only LOWER
-             the deadline -- this is the only knob that raises it.
+             the deadline; this is the only knob that raises it.
 
              Measured 2026-09-21: 16 of 24 watcher step-deadline exceedances were
              `in_flight_operation=ama-hammer-dispatch`, with elapsed 87505, 87508,

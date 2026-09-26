@@ -1032,7 +1032,7 @@ function normalizeReviewPopulationRetryConfig(config = {}) {
 // pool race that the CAS alone cannot (both workers read `pending`, both fetch,
 // both claim in sequence).
 const reviewerHeadDispatchLease = createHeadDispatchLease();
-const detachedReviewerDispatchTracker = createDetachedReviewerDispatchTracker({ activeReviewerSpawns, timeoutMs: Math.max(resolveReviewerTimeoutMs(), resolveAgyReviewerSubprocessTimeoutMs()), isProcessAlive, logger: console });
+const detachedReviewerDispatchTracker = createDetachedReviewerDispatchTracker({ activeReviewerSpawns, timeoutMs: () => Math.max(resolveReviewerTimeoutMs(), resolveAgyReviewerSubprocessTimeoutMs()), isProcessAlive, logger: console });
 // ── Operator surface ─────────────────────────────────────────────────────────
 
 function createWatcherOperatorSurface() {

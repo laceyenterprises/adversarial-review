@@ -815,7 +815,8 @@ function createDetachedReviewerDispatchTracker({
   logger = console,
 } = {}) {
   const detachedReviewerDispatches = new Map();
-  const expiryMs = Math.max(0, Number(timeoutMs) || resolveReviewerTimeoutMs())
+  // A function defers config resolution until startup validation has run.
+  const expiryMs = () => Math.max(0, Number(typeof timeoutMs === 'function' ? timeoutMs() : timeoutMs) || resolveReviewerTimeoutMs())
     + Math.max(0, Number(graceMs) || 0);
 
   function knownPid(record) {
@@ -829,7 +830,7 @@ function createDetachedReviewerDispatchTracker({
     const live = [];
     for (const [token, record] of detachedReviewerDispatches.entries()) {
       const pid = knownPid(record);
-      const expired = nowMs - record.startedAt > expiryMs;
+      const expired = nowMs - record.startedAt > expiryMs();
       const processGone = pid !== null && typeof isProcessAlive === 'function' && !isProcessAlive(pid);
       if (expired || processGone) {
         detachedReviewerDispatches.delete(token);

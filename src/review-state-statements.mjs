@@ -114,6 +114,10 @@ export const MARK_INFRA_AUTO_RECOVERY_ATTEMPT_STARTED_SQL =
         lower(COALESCE(failure_message, '')) LIKE '%401%unauthorized%' OR
         lower(COALESCE(failure_message, '')) LIKE '%requires authentication%'
       )
+       WHEN 'token-refresh-pending' THEN (
+         lower(COALESCE(failure_message, '')) LIKE '[token-refresh-pending]%' OR
+         lower(COALESCE(failure_message, '')) LIKE '%broker claude reviewer token expires too soon for subprocess handoff%'
+       )
        WHEN 'quota-exhausted' THEN lower(COALESCE(failure_message, '')) LIKE '[quota-exhausted]%'
        WHEN 'reviewer-command-failed' THEN (
          (
@@ -170,6 +174,35 @@ export const FINALIZE_PENDING_TERMINAL_FAILURE_SQL =
       AND failed_at = ?
       AND failure_message IS ?
       AND reviewer_head_sha = ?`;
+
+export const MARK_REVIEWER_CREDENTIAL_OUTAGE_SQL =
+  `UPDATE reviewed_prs
+      SET review_status = 'pending-upstream', failed_at = ?, failure_message = ?,
+          quota_reset_at_utc = NULL, reviewer_lease_expires_at = NULL,
+          reviewer_session_uuid = NULL, reviewer_pgid = NULL
+    WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'`;
+
+export const PROMOTE_REVIEWER_CREDENTIAL_OUTAGE_SQL =
+  `UPDATE reviewed_prs
+      SET review_status = 'pending-upstream', failure_message = ?,
+          reviewer_lease_expires_at = NULL
+    WHERE COALESCE(pr_state, 'open') = 'open'
+      AND review_status = 'pending-upstream'
+      AND reviewer_lease_expires_at IS NULL
+      AND reviewer_session_uuid IS NULL
+      AND lower(COALESCE(reviewer, '')) = ?
+      AND lower(COALESCE(failure_message, '')) LIKE '[oauth-broken]%'`;
+
+export const REARM_REVIEWER_CREDENTIAL_OUTAGE_SQL =
+  `UPDATE reviewed_prs
+      SET review_status = 'pending', failed_at = NULL, failure_message = NULL,
+          quota_reset_at_utc = NULL, reviewer_lease_expires_at = NULL,
+          infra_auto_recover_attempts = 0
+    WHERE COALESCE(pr_state, 'open') = 'open'
+      AND review_status IN ('pending', 'pending-upstream')
+      AND reviewer_lease_expires_at IS NULL
+      AND reviewer_session_uuid IS NULL
+      AND lower(COALESCE(failure_message, '')) LIKE ?`;
 
 // This also matches review_status='reviewing', so every reviewer_* lease field
 // must be cleared when the merged PR is terminalized to skipped.
@@ -270,6 +303,18 @@ export function prepareMarkReviewerCommandFailedRecoveredPosted(db) {
 
 export function prepareFinalizePendingTerminalFailure(db) {
   return db.prepare(FINALIZE_PENDING_TERMINAL_FAILURE_SQL);
+}
+
+export function prepareMarkReviewerCredentialOutage(db) {
+  return db.prepare(MARK_REVIEWER_CREDENTIAL_OUTAGE_SQL);
+}
+
+export function preparePromoteReviewerCredentialOutage(db) {
+  return db.prepare(PROMOTE_REVIEWER_CREDENTIAL_OUTAGE_SQL);
+}
+
+export function prepareRearmReviewerCredentialOutage(db) {
+  return db.prepare(REARM_REVIEWER_CREDENTIAL_OUTAGE_SQL);
 }
 
 export function prepareMarkMergedPendingReviewSkipped(db) {

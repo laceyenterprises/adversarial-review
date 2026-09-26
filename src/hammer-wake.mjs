@@ -397,7 +397,7 @@ function requestHammerWakeForSettledReviewStop({
       payload: {
         jobId: job?.jobId || null,
         jobPath,
-        stopCode: job?.remediationPlan?.stop?.code || 'review-settled',
+        stopCode: job?.remediationPlan?.stop?.code || 'no-remediation-required',
         wakeOutcome,
         wake: wakeRecord,
       },

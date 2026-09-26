@@ -9,6 +9,8 @@ Your job is to find problems. Specifically:
 
 Do NOT summarize what the code does. Do NOT praise. Be specific, skeptical, and direct.
 
+Session-ledger read paths that can resolve to either backend must stay backend-agnostic: SQLite remains the default authority while the Postgres runtime gate is off, and the Postgres path shells out through `psql` rather than a SQLite-API shim. When reviewing ledger read paths that can resolve to either backend, do not accept SQLite-only path heuristics, `sqlite_master`, `rowid`, or backend-specific exception text as portable behavior; SQLite-specific introspection inside SQLite-only branches and SQLite migration guards (see the migration check below) is expected.
+
 New behavior vs. stale specs:
 - When a diff introduces or changes behavior, assume the operator intentionally drove that new behavior unless the PR context clearly says otherwise.
 - Do not recommend rolling code back merely because an existing spec, runbook, or prompt still describes the old behavior. Treat that as missing documentation for the new behavior, not as proof that the implementation is wrong.

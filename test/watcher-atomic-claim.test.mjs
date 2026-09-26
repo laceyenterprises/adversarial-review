@@ -271,6 +271,27 @@ test('infra auto-recovery claim atomically promotes and increments the failed ro
   assert.equal(row.infra_auto_recover_attempts, 1);
 });
 
+test('infra auto-recovery claim reclaims token-refresh-pending after backoff', () => {
+  const db = setupDb();
+  seedReviewRow(db, {
+    reviewStatus: 'failed',
+    failureMessage: '[token-refresh-pending] broker Claude reviewer token expires too soon for subprocess handoff',
+  });
+
+  assert.equal(infraRecoverableFailureClass(readRow(db)), 'token-refresh-pending');
+  const claim = runInfraRecoveryClaim(
+    db,
+    '2026-09-26T08:01:00.000Z',
+    'token-refresh-pending'
+  );
+
+  assert.equal(claim.changes, 1);
+  const row = readRow(db);
+  assert.equal(row.review_status, 'reviewing');
+  assert.equal(row.failure_message, null);
+  assert.equal(row.infra_auto_recover_attempts, 1);
+});
+
 test('infra auto-recovery claim accepts untagged GitHub bad-credentials oauth failures', () => {
   const db = setupDb();
   seedReviewRow(db, {

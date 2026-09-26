@@ -38,6 +38,7 @@ import {
   resolveReviewerTimeoutMs,
 } from './reviewer-timeout.mjs';
 import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
+import { auditReviewerSubprocess } from './reviewer-workspace.mjs';
 import {
   extractReviewVerdict,
   looksLikeRuntimeJunk,
@@ -87,6 +88,14 @@ function withReviewerSubprocessCwdEnv(env, cwd) {
   return { ...env, PWD: cwd };
 }
 
+function withSnapshotBoundaryPrompt(promptPrefix) {
+  const boundary = '- Your workspace is a read-only snapshot of the base revision. Do not apply the diff, write files, or run tests.';
+  const lines = String(promptPrefix || '').split('\n');
+  const lookupIndex = lines.findIndex((line) => line.startsWith('- Use at most one narrowly targeted lookup'));
+  lines.splice(lookupIndex >= 0 ? lookupIndex + 1 : lines.length, 0, boundary);
+  return lines.join('\n');
+}
+
 async function spawnWithInput(command, args, {
   env,
   cwd,
@@ -98,7 +107,7 @@ async function spawnWithInput(command, args, {
   signal,
   reapGroupOnExit = false,
 } = {}) {
-  return spawnCapturedProcessGroup(command, args, {
+  return auditReviewerSubprocess(({ onSpawn }) => spawnCapturedProcessGroup(command, args, {
     env,
     cwd,
     input,
@@ -108,7 +117,8 @@ async function spawnWithInput(command, args, {
     maxBuffer,
     signal,
     reapGroupOnExit,
-  });
+    onSpawn,
+  }));
 }
 
 async function spawnCaptured(command, args, {
@@ -405,38 +415,40 @@ async function spawnClaude(args, options = {}) {
     ...execOptions
   } = options;
 
-  if (platform === 'darwin' && useLaunchctl) {
-    if (!Number.isInteger(uid) || uid <= 0) {
-      throw new Error('Cannot resolve a non-root user uid for launchctl asuser');
+  return auditReviewerSubprocess(async ({ onSpawn }) => {
+    if (platform === 'darwin' && useLaunchctl) {
+      if (!Number.isInteger(uid) || uid <= 0) {
+        throw new Error('Cannot resolve a non-root user uid for launchctl asuser');
+      }
+
+      try {
+        const command = LAUNCHCTL;
+        const commandArgs = [
+          'asuser',
+          String(uid),
+          ENV_BIN,
+          ...CLAUDE_STRIPPED_ENV_VARS.flatMap((name) => ['-u', name]),
+          CLAUDE_CLI,
+          ...args,
+        ];
+        if (execFileImpl === execFileAsync) {
+          return await spawnCapturedProcessGroup(command, commandArgs, { ...execOptions, onSpawn });
+        }
+        return await execFileImpl(command, commandArgs, execOptions);
+      } catch (err) {
+        const details = formatChildProcessFailureDetails(err);
+        if (!isClaudeLoggedOutStatus(details) && isLaunchctlSessionFailure(details)) {
+          throw new LaunchctlSessionError(details.trim(), { cause: err, stdout: err?.stdout, stderr: err?.stderr });
+        }
+        throw err;
+      }
     }
 
-    try {
-      const command = LAUNCHCTL;
-      const commandArgs = [
-        'asuser',
-        String(uid),
-        ENV_BIN,
-        ...CLAUDE_STRIPPED_ENV_VARS.flatMap((name) => ['-u', name]),
-        CLAUDE_CLI,
-        ...args,
-      ];
-      if (execFileImpl === execFileAsync) {
-        return await spawnCapturedProcessGroup(command, commandArgs, execOptions);
-      }
-      return await execFileImpl(command, commandArgs, execOptions);
-    } catch (err) {
-      const details = formatChildProcessFailureDetails(err);
-      if (!isClaudeLoggedOutStatus(details) && isLaunchctlSessionFailure(details)) {
-        throw new LaunchctlSessionError(details.trim(), { cause: err, stdout: err?.stdout, stderr: err?.stderr });
-      }
-      throw err;
+    if (execFileImpl === execFileAsync) {
+      return spawnCapturedProcessGroup(CLAUDE_CLI, args, { ...execOptions, onSpawn });
     }
-  }
-
-  if (execFileImpl === execFileAsync) {
-    return spawnCapturedProcessGroup(CLAUDE_CLI, args, execOptions);
-  }
-  return execFileImpl(CLAUDE_CLI, args, execOptions);
+    return execFileImpl(CLAUDE_CLI, args, execOptions);
+  });
 }
 
 function resolveCodexAuthPath() {
@@ -698,7 +710,7 @@ async function reviewWithClaude(diff, extraContext = '', {
   const claudeStartedAtMs = readNowMs();
   const auth = await assertClaudeOAuthImpl({ resolveClaudeLaunchctlUidImpl, logger, platform });
 
-  const promptPrefix = buildReviewerPromptPrefix({ stage: promptStage });
+  const promptPrefix = withSnapshotBoundaryPrompt(buildReviewerPromptPrefix({ stage: promptStage }));
   const prompt = buildReviewerPrompt({ promptPrefix, extraContext, diff });
 
   // Strip API key from env — Claude CLI falls back to OAuth when it's absent
@@ -1046,7 +1058,7 @@ async function reviewWithCodex(diff, extraContext = '', {
     throw new Error(`Codex CLI not found at ${CODEX_CLI}`);
   }
 
-  const promptPrefix = buildReviewerPromptPrefix({ stage: promptStage });
+  const promptPrefix = withSnapshotBoundaryPrompt(buildReviewerPromptPrefix({ stage: promptStage }));
   const prompt = buildReviewerPrompt({ promptPrefix, extraContext, diff });
   const authPath = resolveCodexAuthPath();
   // Per-worker codex credential (burst OAuth-cascade fix). Each reviewer spawn
@@ -2480,9 +2492,9 @@ async function reviewWithGemini(diff, extraContext = '', {
     }
     console.error('[reviewWithGemini] OAuth OK');
 
-    const promptPrefix = runtime === 'antigravity'
+    const promptPrefix = withSnapshotBoundaryPrompt(runtime === 'antigravity'
       ? buildAgyReviewerPromptPrefix({ stage: promptStage })
-      : buildReviewerPromptPrefix({ stage: promptStage });
+      : buildReviewerPromptPrefix({ stage: promptStage }));
     const prompt = buildReviewerPrompt({ promptPrefix, extraContext, diff });
     // Runtime-aware model token. The token FORMATS differ and are NOT
     // interchangeable: the gemini-CLI path expects a slug (gemini-2.5-pro);

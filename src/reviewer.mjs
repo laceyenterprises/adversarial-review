@@ -78,6 +78,7 @@ import {
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import {
   configureReviewerWorkspaceAudit,
+  isReviewerSnapshotPayloadError,
   prepareReviewerSnapshot,
 } from './reviewer-workspace.mjs';
 import { normalizeEffectiveReviewVerdict, sanitizeCodexReviewPayload } from './kernel/verdict.mjs';
@@ -210,6 +211,47 @@ function pinReviewerGhIdentity(env, botTokenEnv) {
     return { pinned: true, botTokenEnv };
   }
   return { pinned: false, botTokenEnv };
+}
+
+function safeReviewScalar(value, fallback = 'unknown') {
+  const text = String(value ?? '')
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return (text || fallback).slice(0, 500);
+}
+
+function formatReviewerSnapshotPayloadReview({
+  repo,
+  prNumber,
+  headSha = null,
+  error,
+}) {
+  const subject = safeReviewScalar(`${repo}#${prNumber}`);
+  const revision = safeReviewScalar(headSha || error?.headSha || 'unknown head');
+  const linkPath = safeReviewScalar(error?.linkPath, 'unknown symlink path');
+  const linkTarget = safeReviewScalar(error?.linkTarget, 'unknown target');
+
+  return [
+    '## Summary',
+    `Reviewer workspace preparation rejected ${subject} before model execution because the PR payload contains a symbolic link that escapes the isolated snapshot.`,
+    '',
+    '## Blocking issues',
+    '- **Unsafe symlink escapes reviewer snapshot**',
+    `  - **File:** ${linkPath}`,
+    `  - **Problem:** The PR contains a symbolic link from ${linkPath} to ${linkTarget}, which resolves outside the reviewer snapshot for ${revision}.`,
+    '  - **Why it matters:** Reviewer subprocesses run against the snapshot as a trust boundary; a PR-authored symlink that crosses that boundary can expose paths outside the review workspace.',
+    '  - **Recommended fix:** Remove the symlink or change it to point at a path that stays inside the repository tree.',
+    '',
+    '## Non-blocking issues',
+    '- None.',
+    '',
+    '## Suggested fixes',
+    '- Remove the escaping symlink or replace it with a regular file or an in-repository relative link.',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n');
 }
 
 // ── Local OSS shadow review (opt-in, non-gating) ────────────────────────────
@@ -2071,6 +2113,7 @@ async function main() {
   const reviewerStateDir = resolveAdversarialReviewStateDir(ROOT, process.env);
   let reviewerSubprocessCwd;
   let reviewerWorkspaceHeadSha;
+  let snapshotPayloadReviewText = null;
   try {
     const snapshot = await prepareReviewerSnapshot({
       repo,
@@ -2092,115 +2135,130 @@ async function main() {
     );
   } catch (err) {
     configureReviewerWorkspaceAudit(null);
-    console.error(
-      `[reviewer] retryable infrastructure error: failed to prepare reviewer workspace snapshot for ` +
-      `${repo}#${prNumber}: ${err.message}`
-    );
-    process.exit(1);
-  }
-
-  let reviewText;
-  let rawReviewText;
-  let tokenUsage = null;
-  try {
-    console.error(`[reviewer] DEBUG: starting ${effectiveModel} review...`);
-    // Single selection site (GMW-01): claude / gemini / codex. gemini routes
-    // to reviewWithGemini and never falls through to codex.
-    let dispatch;
-    try {
-      dispatch = useAgyChunkFallback
-        ? await reviewAgyOversizedInChunks(diff, extraContext, {
-            promptStage: reviewerPromptStage,
-            reviewerSubprocessCwd,
-            promptBytes: oversizedAgyRoute?.promptBytes,
-            maxBytes: oversizedAgyRoute?.maxBytes,
-          })
-        : await dispatchReviewerModel(effectiveModel, diff, extraContext, {
-            promptStage: reviewerPromptStage,
-            reviewerSubprocessCwd,
-          });
-    } catch (firstErr) {
-      if (!oversizedAgyRoute?.oversized || useAgyChunkFallback) throw firstErr;
-      console.warn(
-        `[reviewer] oversized agy routed reviewer unavailable for ${repo}#${prNumber}: ` +
-          `${firstErr?.message || firstErr}; falling back to bounded agy chunks`
-      );
-      effectiveModel = 'gemini';
-      effectiveBotTokenEnv = 'GH_GEMINI_REVIEWER_TOKEN';
-      configureReviewerWorkspaceAudit({
+    if (isReviewerSnapshotPayloadError(err)) {
+      reviewerWorkspaceHeadSha = reviewerHeadSha || err.headSha || null;
+      snapshotPayloadReviewText = formatReviewerSnapshotPayloadReview({
         repo,
         prNumber,
-        reviewerModel: effectiveModel,
         headSha: reviewerWorkspaceHeadSha,
-        checkoutDir: reviewerCheckoutDir,
-        stateDir: reviewerStateDir,
+        error: err,
       });
-      dispatch = await reviewAgyOversizedInChunks(diff, extraContext, {
-        promptStage: reviewerPromptStage,
-        reviewerSubprocessCwd,
-        promptBytes: oversizedAgyRoute.promptBytes,
-        maxBytes: oversizedAgyRoute.maxBytes,
-      });
-    }
-    rawReviewText = dispatch.rawReviewText;
-    tokenUsage = dispatch.tokenUsage;
-    if (dispatch.needsSanitize) {
-      console.error(`[reviewer] DEBUG: raw Codex review length=${rawReviewText.length}; preview=${previewText(rawReviewText)}`);
-      try {
-        reviewText = sanitizeCodexReviewPayload(rawReviewText);
-      } catch (sanitizeErr) {
-        console.error(`[reviewer] SANITIZE FAILED: ${sanitizeErr.message}`);
-        console.error(`[reviewer] SANITIZE INPUT PREVIEW: ${previewText(rawReviewText, 400)}`);
-        // LAC-545: forensic preservation. Persist the rejected raw codex
-        // output so a future fix to the sanitizer / prompt / codex CLI
-        // can be diagnosed without re-triggering the failure. Before
-        // this, every rejection was lost — the codex output file was
-        // unlinked inside reviewWithCodex and the watcher's classifier
-        // silenced the stderr. Truncate to 50 KB to bound disk usage.
-        try {
-          persistRejectedCodexOutput({
-            repo,
-            prNumber,
-            rejectionReason: sanitizeErr.message,
-            rawReviewText,
-          });
-        } catch (persistErr) {
-          console.error(`[reviewer] WARN: failed to persist rejected codex output: ${persistErr.message}`);
-        }
-        throw sanitizeErr;
-      }
+      console.error(`[reviewer] unsafe PR payload rejected for ${repo}#${prNumber}: ${err.message}`);
     } else {
-      reviewText = dispatch.reviewText;
-    }
-    console.error(`[reviewer] DEBUG: review completed (${reviewText.length} bytes)`);
-  } catch (err) {
-    if (err.failureClass === 'token-refresh-pending') {
-      // The bridge is the sole Claude refresh owner. A too-short token means
-      // refresh is pending, not that an operator must re-authenticate.
-      console.error(`[token-refresh-pending] ${err.message}`);
+      console.error(
+        `[reviewer] retryable infrastructure error: failed to prepare reviewer workspace snapshot for ` +
+        `${repo}#${prNumber}: ${err.message}`
+      );
       process.exit(1);
     }
-    if (err.isOAuthError) {
-      // OAuth failure — stop work and alert Paul
-      await alertClioOAuthFailure(reviewerModel, repo, prNumber, err.message);
-      console.error(`[reviewer] Stopped: OAuth credentials unavailable for ${reviewerModel}`);
-      process.exit(2); // exit code 2 = auth failure (distinct from other errors)
-    }
-    if (oversizedAgyRoute?.oversized) {
-      await alertClioOversizedAgyFailure({
-        repo,
-        prNumber,
-        promptBytes: oversizedAgyRoute.promptBytes,
-        maxBytes: oversizedAgyRoute.maxBytes,
-        reason: err.message || String(err),
-      });
-    }
-    console.error(`[reviewer] AI review failed for ${repo}#${prNumber}:`, err.message);
-    console.error(`[reviewer] ERROR STACK: ${err.stack}`);
-    process.exit(1);
   }
 
-  if (!tokenUsage && effectiveModel === 'gemini') {
+  let reviewText = snapshotPayloadReviewText;
+  let rawReviewText;
+  let tokenUsage = null;
+  if (reviewText) {
+    console.error(`[reviewer] snapshot payload validation review generated (${reviewText.length} bytes)`);
+  } else {
+    try {
+      console.error(`[reviewer] DEBUG: starting ${effectiveModel} review...`);
+      // Single selection site (GMW-01): claude / gemini / codex. gemini routes
+      // to reviewWithGemini and never falls through to codex.
+      let dispatch;
+      try {
+        dispatch = useAgyChunkFallback
+          ? await reviewAgyOversizedInChunks(diff, extraContext, {
+              promptStage: reviewerPromptStage,
+              reviewerSubprocessCwd,
+              promptBytes: oversizedAgyRoute?.promptBytes,
+              maxBytes: oversizedAgyRoute?.maxBytes,
+            })
+          : await dispatchReviewerModel(effectiveModel, diff, extraContext, {
+              promptStage: reviewerPromptStage,
+              reviewerSubprocessCwd,
+            });
+      } catch (firstErr) {
+        if (!oversizedAgyRoute?.oversized || useAgyChunkFallback) throw firstErr;
+        console.warn(
+          `[reviewer] oversized agy routed reviewer unavailable for ${repo}#${prNumber}: ` +
+            `${firstErr?.message || firstErr}; falling back to bounded agy chunks`
+        );
+        effectiveModel = 'gemini';
+        effectiveBotTokenEnv = 'GH_GEMINI_REVIEWER_TOKEN';
+        configureReviewerWorkspaceAudit({
+          repo,
+          prNumber,
+          reviewerModel: effectiveModel,
+          headSha: reviewerWorkspaceHeadSha,
+          checkoutDir: reviewerCheckoutDir,
+          stateDir: reviewerStateDir,
+        });
+        dispatch = await reviewAgyOversizedInChunks(diff, extraContext, {
+          promptStage: reviewerPromptStage,
+          reviewerSubprocessCwd,
+          promptBytes: oversizedAgyRoute.promptBytes,
+          maxBytes: oversizedAgyRoute.maxBytes,
+        });
+      }
+      rawReviewText = dispatch.rawReviewText;
+      tokenUsage = dispatch.tokenUsage;
+      if (dispatch.needsSanitize) {
+        console.error(`[reviewer] DEBUG: raw Codex review length=${rawReviewText.length}; preview=${previewText(rawReviewText)}`);
+        try {
+          reviewText = sanitizeCodexReviewPayload(rawReviewText);
+        } catch (sanitizeErr) {
+          console.error(`[reviewer] SANITIZE FAILED: ${sanitizeErr.message}`);
+          console.error(`[reviewer] SANITIZE INPUT PREVIEW: ${previewText(rawReviewText, 400)}`);
+          // LAC-545: forensic preservation. Persist the rejected raw codex
+          // output so a future fix to the sanitizer / prompt / codex CLI
+          // can be diagnosed without re-triggering the failure. Before
+          // this, every rejection was lost — the codex output file was
+          // unlinked inside reviewWithCodex and the watcher's classifier
+          // silenced the stderr. Truncate to 50 KB to bound disk usage.
+          try {
+            persistRejectedCodexOutput({
+              repo,
+              prNumber,
+              rejectionReason: sanitizeErr.message,
+              rawReviewText,
+            });
+          } catch (persistErr) {
+            console.error(`[reviewer] WARN: failed to persist rejected codex output: ${persistErr.message}`);
+          }
+          throw sanitizeErr;
+        }
+      } else {
+        reviewText = dispatch.reviewText;
+      }
+      console.error(`[reviewer] DEBUG: review completed (${reviewText.length} bytes)`);
+    } catch (err) {
+      if (err.failureClass === 'token-refresh-pending') {
+        // The bridge is the sole Claude refresh owner. A too-short token means
+        // refresh is pending, not that an operator must re-authenticate.
+        console.error(`[token-refresh-pending] ${err.message}`);
+        process.exit(1);
+      }
+      if (err.isOAuthError) {
+        // OAuth failure — stop work and alert Paul
+        await alertClioOAuthFailure(reviewerModel, repo, prNumber, err.message);
+        console.error(`[reviewer] Stopped: OAuth credentials unavailable for ${reviewerModel}`);
+        process.exit(2); // exit code 2 = auth failure (distinct from other errors)
+      }
+      if (oversizedAgyRoute?.oversized) {
+        await alertClioOversizedAgyFailure({
+          repo,
+          prNumber,
+          promptBytes: oversizedAgyRoute.promptBytes,
+          maxBytes: oversizedAgyRoute.maxBytes,
+          reason: err.message || String(err),
+        });
+      }
+      console.error(`[reviewer] AI review failed for ${repo}#${prNumber}:`, err.message);
+      console.error(`[reviewer] ERROR STACK: ${err.stack}`);
+      process.exit(1);
+    }
+  }
+
+  if (!snapshotPayloadReviewText && !tokenUsage && effectiveModel === 'gemini') {
     // Antigravity (agy) reviewers emit no local token usage (server-side
     // conversations, no JSON surface). Persist a heuristic LOWER-BOUND estimate
     // from the prompt (diff + context) and the review body, tagged distinctly so
@@ -2471,6 +2529,7 @@ const __test__ = {
   fetchPRDiffFromFilesApi,
   formatAdvisoryFindingsContext,
   formatLocalReviewShadowArtifact,
+  formatReviewerSnapshotPayloadReview,
   hasLocalReviewShadowLabel,
   isRetryableGhTransportError,
   isReviewerPostAuthFailure,

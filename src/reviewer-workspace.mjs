@@ -51,6 +51,33 @@ const TRANSIENT_GIT_ERROR_PATTERNS = [
   /index\.lock/i,
 ];
 
+class ReviewerSnapshotPayloadError extends Error {
+  constructor(message, {
+    linkPath = null,
+    linkTarget = null,
+    snapshotDir = null,
+    repo = null,
+    headSha = null,
+  } = {}) {
+    super(message);
+    this.name = 'ReviewerSnapshotPayloadError';
+    this.failureClass = 'reviewer-snapshot-payload-invalid';
+    this.payloadValidation = true;
+    this.linkPath = linkPath;
+    this.linkTarget = linkTarget;
+    this.snapshotDir = snapshotDir;
+    this.repo = repo;
+    this.headSha = headSha;
+  }
+}
+
+function isReviewerSnapshotPayloadError(err) {
+  return err instanceof ReviewerSnapshotPayloadError
+    || err?.name === 'ReviewerSnapshotPayloadError'
+    || err?.failureClass === 'reviewer-snapshot-payload-invalid'
+    || err?.payloadValidation === true;
+}
+
 function safeRepoName(repo) {
   const value = String(repo || 'unknown');
   const label = value.replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 80);
@@ -125,12 +152,23 @@ function extractArchiveOnce(checkoutDir, destination) {
     const tar = spawn('tar', ['-x', '-C', destination], {
       stdio: ['pipe', 'ignore', 'pipe'],
     });
-    git.stdout.pipe(tar.stdin);
     let gitStderr = '';
     let tarStderr = '';
-    let gitCode = null;
-    let tarCode = null;
+    let gitClosed = false;
+    let tarClosed = false;
+    let gitStatus = null;
+    let tarStatus = null;
     let settled = false;
+    const closeStatus = (code, signal) => (signal ? `signal:${signal}` : code);
+    const statusLabel = (closed, status) => (closed ? status : 'pending');
+    const archiveFailureError = () => {
+      const err = new Error(
+        `git archive snapshot failed (git=${statusLabel(gitClosed, gitStatus)}, ` +
+        `tar=${statusLabel(tarClosed, tarStatus)}): ${gitStderr}${tarStderr}`.trim()
+      );
+      err.stderr = `${gitStderr}${tarStderr}`;
+      return err;
+    };
     const rejectOnce = (err) => {
       if (settled) return;
       settled = true;
@@ -141,20 +179,35 @@ function extractArchiveOnce(checkoutDir, destination) {
     };
     git.stderr.on('data', (chunk) => { gitStderr += chunk; });
     tar.stderr.on('data', (chunk) => { tarStderr += chunk; });
+    git.stdout.on('error', (err) => {
+      if (err?.code === 'EPIPE') rejectOnce(archiveFailureError());
+      else rejectOnce(err);
+    });
+    tar.stdin.on('error', (err) => {
+      if (err?.code === 'EPIPE') rejectOnce(archiveFailureError());
+      else rejectOnce(err);
+    });
+    git.stdout.pipe(tar.stdin);
     const finish = () => {
-      if (settled || gitCode === null || tarCode === null) return;
+      if (settled || !gitClosed || !tarClosed) return;
       settled = true;
-      if (gitCode === 0 && tarCode === 0) resolvePromise();
-      else {
-        const err = new Error(`git archive snapshot failed (git=${gitCode}, tar=${tarCode}): ${gitStderr}${tarStderr}`.trim());
-        err.stderr = `${gitStderr}${tarStderr}`;
-        reject(err);
-      }
+      if (gitStatus === 0 && tarStatus === 0) resolvePromise();
+      else reject(archiveFailureError());
     };
     git.on('error', rejectOnce);
     tar.on('error', rejectOnce);
-    git.on('close', (code) => { gitCode = code; finish(); });
-    tar.on('close', (code) => { tarCode = code; finish(); });
+    git.on('close', (code, signal) => {
+      gitClosed = true;
+      gitStatus = closeStatus(code, signal);
+      if (gitStatus !== 0) rejectOnce(archiveFailureError());
+      else finish();
+    });
+    tar.on('close', (code, signal) => {
+      tarClosed = true;
+      tarStatus = closeStatus(code, signal);
+      if (tarStatus !== 0) rejectOnce(archiveFailureError());
+      else finish();
+    });
   });
 }
 
@@ -188,7 +241,12 @@ function validateSnapshotLinks(snapshotDir, currentDir = snapshotDir) {
     if (stat.isSymbolicLink()) {
       const target = readlinkSync(path);
       if (!isInside(resolve(currentDir, target), snapshotDir)) {
-        throw new Error(`snapshot contains link escaping its root: ${path} -> ${target}`);
+        const linkPath = relative(snapshotDir, path) || entry;
+        throw new ReviewerSnapshotPayloadError(`snapshot contains link escaping its root: ${linkPath} -> ${target}`, {
+          linkPath,
+          linkTarget: target,
+          snapshotDir,
+        });
       }
     } else if (stat.isDirectory()) {
       validateSnapshotLinks(snapshotDir, path);
@@ -216,13 +274,22 @@ function makeTreeWritable(path) {
 function garbageCollectSnapshots(repoCacheDir, currentSha, {
   nowMs = Date.now(),
   maxAgeMs = SNAPSHOT_MAX_AGE_MS,
+  statSyncImpl = statSync,
 } = {}) {
   if (!existsSync(repoCacheDir)) return [];
   const removed = [];
   for (const entry of readdirSync(repoCacheDir, { withFileTypes: true })) {
     if (!entry.isDirectory() || entry.name === currentSha) continue;
     const entryPath = join(repoCacheDir, entry.name);
-    if (nowMs - statSync(entryPath).mtimeMs <= maxAgeMs) continue;
+    let entryStat;
+    try {
+      entryStat = statSyncImpl(entryPath);
+    } catch (err) {
+      if (err?.code === 'ENOENT') continue;
+      throw err;
+    }
+    if (!entryStat.isDirectory()) continue;
+    if (nowMs - entryStat.mtimeMs <= maxAgeMs) continue;
     makeTreeWritable(entryPath);
     rmSync(entryPath, { recursive: true, force: true });
     removed.push(entryPath);
@@ -292,6 +359,11 @@ async function prepareReviewerSnapshot({
       if (existsSync(buildDir)) {
         makeTreeWritable(buildDir);
         rmSync(buildDir, { recursive: true, force: true });
+      }
+      if (isReviewerSnapshotPayloadError(err)) {
+        err.repo = repo;
+        err.headSha = headSha;
+        throw err;
       }
       throw new Error(`reviewer snapshot unavailable for ${repo}@${headSha}: ${err.message}`, { cause: err });
     }
@@ -419,11 +491,48 @@ function liveReviewerPids(auditDir, currentPid) {
   return pids.sort((a, b) => a - b);
 }
 
+function recordWorkspaceAuditProbeError({
+  context,
+  auditDir,
+  auditDirReady,
+  subprocessPid,
+  result,
+  startedAt,
+  endedAt,
+  phase,
+  err,
+}) {
+  const event = {
+    event: 'reviewer_workspace_escape_audit_error',
+    ts: endedAt,
+    repo: context.repo,
+    prNumber: context.prNumber,
+    reviewerModel: context.reviewerModel,
+    headSha: context.headSha,
+    subprocessPid,
+    agyConversationId: context.agyConversationId || result?.conversationId || result?.conversation_id || null,
+    window: { startedAt, endedAt },
+    phase,
+    error: err?.message || String(err || 'unknown audit probe failure'),
+  };
+  const line = JSON.stringify(event);
+  console.error(line);
+  if (auditDirReady) {
+    try {
+      appendFileSync(join(auditDir, 'reviewer-workspace-audit-errors.jsonl'), `${line}\n`, { mode: 0o600 });
+    } catch (writeErr) {
+      console.error(`[reviewer] workspace escape audit error durable record failed: ${writeErr.message}`);
+    }
+  }
+}
+
 async function auditReviewerSubprocess(spawnOperation) {
   if (!activeAuditContext) return spawnOperation({ onSpawn: null });
   const context = activeAuditContext;
-  let before = new Map();
+  let before = null;
+  let beforeProbeError = null;
   try { before = await checkoutState(context.checkoutDir); } catch (err) {
+    beforeProbeError = err;
     console.error(`[reviewer] workspace escape pre-spawn state probe failed: ${err.message}`);
   }
   const startedAt = new Date().toISOString();
@@ -456,32 +565,49 @@ async function auditReviewerSubprocess(spawnOperation) {
     return result;
   } finally {
     const endedAt = new Date().toISOString();
-    let after = new Map();
+    let after = null;
+    let afterProbeError = null;
     try { after = await checkoutState(context.checkoutDir); } catch (err) {
+      afterProbeError = err;
       console.error(`[reviewer] workspace escape state probe failed: ${err.message}`);
     }
-    const paths = changedCheckoutPaths(before, after);
-    if (paths.length > 0) {
-      const event = {
-        event: 'reviewer_workspace_escape',
-        ts: endedAt,
-        repo: context.repo,
-        prNumber: context.prNumber,
-        reviewerModel: context.reviewerModel,
-        headSha: context.headSha,
+    const probeError = beforeProbeError || afterProbeError;
+    if (probeError) {
+      recordWorkspaceAuditProbeError({
+        context,
+        auditDir,
+        auditDirReady,
         subprocessPid,
-        agyConversationId: context.agyConversationId || result?.conversationId || result?.conversation_id || null,
-        window: { startedAt, endedAt },
-        otherLiveReviewerPids: auditDirReady ? liveReviewerPids(auditDir, subprocessPid) : [],
-        paths,
-      };
-      const line = JSON.stringify(event);
-      console.error(line);
-      if (auditDirReady) {
-        try {
-          appendFileSync(join(auditDir, 'reviewer-workspace-escapes.jsonl'), `${line}\n`, { mode: 0o600 });
-        } catch (err) {
-          console.error(`[reviewer] workspace escape durable record failed: ${err.message}`);
+        result,
+        startedAt,
+        endedAt,
+        phase: beforeProbeError ? 'pre' : 'post',
+        err: probeError,
+      });
+    } else {
+      const paths = changedCheckoutPaths(before, after);
+      if (paths.length > 0) {
+        const event = {
+          event: 'reviewer_workspace_escape',
+          ts: endedAt,
+          repo: context.repo,
+          prNumber: context.prNumber,
+          reviewerModel: context.reviewerModel,
+          headSha: context.headSha,
+          subprocessPid,
+          agyConversationId: context.agyConversationId || result?.conversationId || result?.conversation_id || null,
+          window: { startedAt, endedAt },
+          otherLiveReviewerPids: auditDirReady ? liveReviewerPids(auditDir, subprocessPid) : [],
+          paths,
+        };
+        const line = JSON.stringify(event);
+        console.error(line);
+        if (auditDirReady) {
+          try {
+            appendFileSync(join(auditDir, 'reviewer-workspace-escapes.jsonl'), `${line}\n`, { mode: 0o600 });
+          } catch (err) {
+            console.error(`[reviewer] workspace escape durable record failed: ${err.message}`);
+          }
         }
       }
     }
@@ -491,10 +617,13 @@ async function auditReviewerSubprocess(spawnOperation) {
 
 export {
   SNAPSHOT_MAX_AGE_MS,
+  ReviewerSnapshotPayloadError,
   auditReviewerSubprocess,
   changedStatusPaths,
   configureReviewerWorkspaceAudit,
+  extractArchiveOnce,
   garbageCollectSnapshots,
+  isReviewerSnapshotPayloadError,
   prepareReviewerSnapshot,
   resolveCheckoutHead,
 };

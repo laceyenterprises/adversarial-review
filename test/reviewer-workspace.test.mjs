@@ -17,9 +17,13 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import {
+  ReviewerSnapshotPayloadError,
   auditReviewerSubprocess,
   changedStatusPaths,
   configureReviewerWorkspaceAudit,
+  extractArchiveOnce,
+  garbageCollectSnapshots,
+  isReviewerSnapshotPayloadError,
   prepareReviewerSnapshot,
   resolveCheckoutHead,
 } from '../src/reviewer-workspace.mjs';
@@ -109,11 +113,43 @@ test('snapshot build cleanup does not chmod or traverse symlink targets', async 
           symlinkSync(outsideDir, join(destination, 'escape'));
         },
       }),
-      /snapshot contains link escaping its root/,
+      (err) => {
+        assert.equal(err instanceof ReviewerSnapshotPayloadError, true);
+        assert.equal(isReviewerSnapshotPayloadError(err), true);
+        assert.equal(err.linkPath, 'escape');
+        assert.equal(err.linkTarget, outsideDir);
+        assert.match(err.message, /snapshot contains link escaping its root/);
+        return true;
+      },
     );
 
     assert.equal(statSync(outsideDir).mode & 0o777, 0o755);
     assert.equal(statSync(outsideFile).mode & 0o777, 0o644);
+  } finally {
+    removeFixture(root);
+  }
+});
+
+test('archive extraction rejects instead of hanging when a child exits via signal', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'reviewer-workspace-archive-signal-'));
+  try {
+    const checkoutDir = makeRepo(root, 'repo');
+    const largePath = join(checkoutDir, 'large.bin');
+    writeFileSync(largePath, Buffer.alloc(8 * 1024 * 1024, 1));
+    git(checkoutDir, 'add', 'large.bin');
+    git(checkoutDir, 'commit', '-qm', 'large payload');
+    const badDestination = join(root, 'not-a-directory');
+    writeFileSync(badDestination, 'nope\n');
+
+    const result = await Promise.race([
+      extractArchiveOnce(checkoutDir, badDestination)
+        .then(() => ({ status: 'resolved' }), (err) => ({ status: 'rejected', err })),
+      new Promise((resolve) => { setTimeout(() => resolve({ status: 'timeout' }), 2000); }),
+    ]);
+
+    assert.equal(result.status, 'rejected');
+    assert.match(result.err.message, /git archive snapshot failed/);
+    assert.doesNotMatch(result.err.message, /git=null|tar=null/);
   } finally {
     removeFixture(root);
   }
@@ -209,6 +245,33 @@ test('snapshot cache reuses a HEAD, builds a new HEAD, and garbage-collects stal
   }
 });
 
+test('snapshot garbage collection ignores entries concurrently removed before stat', () => {
+  const root = mkdtempSync(join(tmpdir(), 'reviewer-workspace-gc-race-'));
+  try {
+    const repoCacheDir = join(root, 'repo-cache');
+    const staleDir = join(repoCacheDir, 'stale-head');
+    const currentDir = join(repoCacheDir, 'current-head');
+    mkdirSync(staleDir, { recursive: true });
+    mkdirSync(currentDir, { recursive: true });
+    const removed = garbageCollectSnapshots(repoCacheDir, 'current-head', {
+      nowMs: Date.UTC(2026, 0, 2),
+      maxAgeMs: 1,
+      statSyncImpl(entryPath) {
+        if (entryPath === staleDir) {
+          const err = new Error('concurrently removed');
+          err.code = 'ENOENT';
+          throw err;
+        }
+        return statSync(entryPath);
+      },
+    });
+
+    assert.deepEqual(removed, []);
+  } finally {
+    removeFixture(root);
+  }
+});
+
 test('snapshot build recovers from an invalid existing cache directory', async () => {
   const root = mkdtempSync(join(tmpdir(), 'reviewer-workspace-invalid-cache-'));
   try {
@@ -242,6 +305,43 @@ test('snapshot build recovers from an invalid existing cache directory', async (
     assert.equal(marker.headSha, recovered.headSha);
     assert.equal(readFileSync(join(recovered.snapshotDir, 'tracked.txt'), 'utf8'), 'base\n');
   } finally {
+    removeFixture(root);
+  }
+});
+
+test('workspace escape audit records post-probe errors without false escape paths', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'reviewer-workspace-post-probe-failure-'));
+  const originalConsoleError = console.error;
+  const errors = [];
+  try {
+    const checkoutDir = makeRepo(root, 'repo');
+    const stateDir = join(root, 'state');
+    const auditDir = join(stateDir, 'reviewer-workspace-audit');
+    console.error = (...args) => { errors.push(args.map(String).join(' ')); };
+    configureReviewerWorkspaceAudit({
+      repo: 'laceyenterprises/agent-os', prNumber: 7029, reviewerModel: 'gemini',
+      headSha: 'abc126', checkoutDir, stateDir,
+    });
+
+    await auditReviewerSubprocess(async ({ onSpawn }) => {
+      onSpawn({ pid: process.pid });
+      rmSync(checkoutDir, { recursive: true, force: true });
+      return { conversationId: 'agy-post-probe-failure' };
+    });
+
+    assert.equal(existsSync(join(auditDir, 'reviewer-workspace-escapes.jsonl')), false);
+    const auditErrors = readFileSync(join(auditDir, 'reviewer-workspace-audit-errors.jsonl'), 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    assert.equal(auditErrors.length, 1);
+    assert.equal(auditErrors[0].event, 'reviewer_workspace_escape_audit_error');
+    assert.equal(auditErrors[0].phase, 'post');
+    assert.equal(auditErrors[0].agyConversationId, 'agy-post-probe-failure');
+    assert.ok(errors.some((line) => line.includes('workspace escape state probe failed')));
+  } finally {
+    console.error = originalConsoleError;
+    configureReviewerWorkspaceAudit(null);
     removeFixture(root);
   }
 });

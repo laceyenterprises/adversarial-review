@@ -18,8 +18,23 @@ import {
   recordReviewLatencyEvent,
 } from '../src/review-state.mjs';
 import { createAfhReviewerGroundingCache } from '../src/afh-reviewer-fallback.mjs';
+import { stopPendingNoRemediationJobs } from '../src/follow-up-jobs.mjs';
 
 const REPO = 'laceyenterprises/agent-os';
+const CLEAN_COMMENT_ONLY_REVIEW = `## Adversarial Review - Test
+
+## Summary
+Synthetic clean review.
+
+## Blocking issues
+- None.
+
+## Non-blocking issues
+- None.
+
+## Verdict
+Comment only
+`;
 
 function tempRoot() {
   return mkdtempSync(path.join(tmpdir(), 'review-latency-report-'));
@@ -385,6 +400,48 @@ test('latency report includes reviewer passes and follow-up jobs ending in the w
   const reviewerPost = report.stages.find((stage) => stage.key === 'reviewer_first_output_to_gh_post');
   assert.equal(reviewerPost.sampleCount, 1);
   assert.equal(reviewerPost.p50Ms, 4.5 * 60 * 1000);
+  const cleanToWake = report.stages.find((stage) => stage.key === 'clean_verdict_to_hammer_wake');
+  assert.equal(cleanToWake.sampleCount, 1);
+  assert.equal(cleanToWake.p50Ms, 60 * 1000);
+});
+
+test('latency report infers clean verdicts from no-remediation-required drain stops', () => {
+  const rootDir = tempRoot();
+  const db = openDb(rootDir);
+  try {
+    recordReviewLatencyEvent(db, {
+      repo: REPO,
+      prNumber: 6612,
+      eventType: 'hammer_wake',
+      at: '2026-09-11T12:16:00.000Z',
+      source: 'test-hammer',
+      idempotencyKey: 'hammer-6612',
+    });
+  } finally {
+    db.close();
+  }
+  writeJob(rootDir, 'pending', 'job-6612', {
+    jobId: 'job-6612',
+    repo: REPO,
+    prNumber: 6612,
+    status: 'pending',
+    createdAt: '2026-09-11T12:09:00.000Z',
+    reviewBody: CLEAN_COMMENT_ONLY_REVIEW,
+  });
+  const stopped = stopPendingNoRemediationJobs({
+    rootDir,
+    stoppedAt: '2026-09-11T12:15:00.000Z',
+  });
+  assert.equal(stopped.length, 1);
+  assert.equal(stopped[0].job.remediationPlan.stop.code, 'no-remediation-required');
+
+  const report = collectReviewLatencyReport({
+    rootDir,
+    since: '24h',
+    now: () => new Date('2026-09-11T13:00:00.000Z'),
+  });
+
+  assert.equal(report.surfaces.followUpJobs, 1);
   const cleanToWake = report.stages.find((stage) => stage.key === 'clean_verdict_to_hammer_wake');
   assert.equal(cleanToWake.sampleCount, 1);
   assert.equal(cleanToWake.p50Ms, 60 * 1000);

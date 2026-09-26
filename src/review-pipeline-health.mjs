@@ -6,7 +6,10 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { PROVIDER_OVERLOADED_FAILURE_CLASS } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
-import { ROUND_BUDGET_BY_RISK_CLASS } from './follow-up-jobs.mjs';
+import {
+  ROUND_BUDGET_BY_RISK_CLASS,
+  resolveSettledCleanStopCode,
+} from './follow-up-jobs.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS, quotaHoldDecision } from './quota-exhaustion.mjs';
 import { infraRecoverableFailureClass } from './reviewer-failure-classification.mjs';
 import {
@@ -3232,9 +3235,7 @@ function reviewRowsByRepoPr(db) {
 }
 
 function isReviewSettledStop(job) {
-  return job?.remediationPlan?.stop?.code === 'review-settled'
-    || job?.stopCode === 'review-settled'
-    || job?.stopReason === 'Latest adversarial review verdict is non-blocking; no remediation worker required.';
+  return Boolean(resolveSettledCleanStopCode(job));
 }
 
 function summarizeMergeStalls({ followUpJobs, reviewRows, nowMs, config }) {

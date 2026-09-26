@@ -1654,40 +1654,46 @@ export async function processReviewSubject(entry, ctx) {
           authorClass: reviewerAuthorClass,
         });
         if (appliedFallback.applied) {
-          route = appliedFallback.route;
-          // Charge the depth lever's budget/cost ledger only for a spill that
-          // really landed on a route — the operator is owed the number of
-          // non-primary reviews the lever BOUGHT, not the number it attempted.
-          if (rwfDecision.reason === 'queue-depth-pressure') {
-            firstPassSpilloverController?.recordSpill?.({
-              repo: repoPath,
-              prNumber,
-              fromWorkerClass: rwfDecision.from,
-              toWorkerClass: rwfDecision.to,
-            });
-          }
-          // Reserve one burst review-count unit per routed PR head. A retry
-          // after a transient dispatch failure must reuse that reservation.
-          if (rwfDecision.reason === 'burst-lease-pressure') {
-            reviewerBurstController?.recordBurstAdmission?.({
+          // Pressure is only a snapshot. Another PR in this poll can consume
+          // the last unit before this one commits its fallback route.
+          const burstAdmitted = rwfDecision.reason !== 'burst-lease-pressure'
+            || reviewerBurstController?.recordBurstAdmission?.({
               repo: repoPath,
               prNumber,
               headSha: subject.headSha || subject.ref?.revisionRef || null,
               fromWorkerClass: rwfDecision.from,
               toWorkerClass: rwfDecision.to,
-            });
+            }) === true;
+          if (!burstAdmitted) {
+            console.warn(
+              `[watcher] review-worker-class-fallback-skipped repo=${repoPath} pr=${prNumber} ` +
+              'reason=burst-review-cap-exhausted'
+            );
+          } else {
+            route = appliedFallback.route;
+            // Charge the depth lever's budget/cost ledger only for a spill that
+            // really landed on a route — the operator is owed the number of
+            // non-primary reviews the lever BOUGHT, not the number it attempted.
+            if (rwfDecision.reason === 'queue-depth-pressure') {
+              firstPassSpilloverController?.recordSpill?.({
+                repo: repoPath,
+                prNumber,
+                fromWorkerClass: rwfDecision.from,
+                toWorkerClass: rwfDecision.to,
+              });
+            }
+            console.warn(
+              `[watcher] review-worker-class-fallback repo=${repoPath} pr=${prNumber} ` +
+              `from=${rwfDecision.from} to=${rwfDecision.to} reason=${rwfDecision.reason} ` +
+              `primaryState=${rwfDecision.primaryState}` +
+              (rwfDecision.queueDepth === undefined
+                ? ''
+                : ` queueDepth=${rwfDecision.queueDepth} queueDepthThreshold=${rwfDecision.queueDepthThreshold}`) +
+              (rwfDecision.burstLeaseId === undefined
+                ? ''
+                : ` burstLeaseId=${rwfDecision.burstLeaseId} burstSlots=${rwfDecision.burstSlots}`)
+            );
           }
-          console.warn(
-            `[watcher] review-worker-class-fallback repo=${repoPath} pr=${prNumber} ` +
-            `from=${rwfDecision.from} to=${rwfDecision.to} reason=${rwfDecision.reason} ` +
-            `primaryState=${rwfDecision.primaryState}` +
-            (rwfDecision.queueDepth === undefined
-              ? ''
-              : ` queueDepth=${rwfDecision.queueDepth} queueDepthThreshold=${rwfDecision.queueDepthThreshold}`) +
-            (rwfDecision.burstLeaseId === undefined
-              ? ''
-              : ` burstLeaseId=${rwfDecision.burstLeaseId} burstSlots=${rwfDecision.burstSlots}`)
-          );
         } else {
           console.warn(
             `[watcher] review-worker-class-fallback-skipped repo=${repoPath} pr=${prNumber} ` +

@@ -252,3 +252,32 @@ test('hammer prompt reads the entitled hammer token from HAMMER_LACEY_GH_TOKEN (
     'all three audit-comment gh calls (lookup, PATCH, comment) must use HAM_GH_TOKEN',
   );
 });
+
+test('hammer never moves a submodule pointer: re-syncs checkouts and unstages gitlinks (SUBSYNC-01, agent-os#7092)', () => {
+  // A rebase/update-branch moves the gitlink but not the submodule checkout, and
+  // `.gitmodules` `ignore = all` hides the stale checkout; agent-os#7092 carried
+  // two HAM commits that rewound tools/adversarial-review that way.
+  const commitBlock = HAMMER_PROMPT.slice(
+    HAMMER_PROMPT.indexOf('Commit the remediation:'),
+    HAMMER_PROMPT.indexOf('git commit -m "HAM remediate final adversarial findings"'),
+  );
+  assert.match(commitBlock, /alarm shift; exec @ARGV' 120 git submodule update --recursive/);
+  assert.match(commitBlock, /git status --short --ignore-submodules=none/);
+  assert.match(
+    commitBlock,
+    /HAM_STAGED_GITLINKS=\$\(git diff --cached --raw --ignore-submodules=none \| awk '\$2 == "160000" \{print \$NF\}'\)/,
+  );
+  assert.match(commitBlock, /git restore --staged -- \$HAM_STAGED_GITLINKS/);
+  assert.ok(
+    commitBlock.indexOf('git submodule update --recursive') < commitBlock.indexOf('git add <changed files>'),
+    'submodules must be re-synced before staging',
+  );
+
+  const conflictBlock = HAMMER_PROMPT.slice(HAMMER_PROMPT.indexOf('## Resolving merge conflicts'));
+  const rebaseAt = conflictBlock.indexOf('if ! git rebase "origin/$BASE_BRANCH"; then');
+  const pushAt = conflictBlock.indexOf('git push --force-with-lease');
+  const syncAt = conflictBlock.indexOf('git submodule update --recursive');
+  assert.ok(rebaseAt >= 0 && syncAt > rebaseAt && syncAt < pushAt, 'conflict rebase must re-sync submodules before pushing');
+
+  assert.match(HAMMER_PROMPT, /No submodule gitlink changes in HAM commits \(SUBSYNC-01, agent-os#7092\)/);
+});

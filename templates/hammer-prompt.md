@@ -267,8 +267,23 @@ hard-blocker report and stop.
 Commit the remediation:
 
 ```bash
-git status --short
-git add <changed files>
+# SUBSYNC-01 (agent-os#7092): after ANY local head move (fetching and resetting
+# to a server-side `gh pr update-branch --rebase` head, `git rebase`, `git pull`),
+# the gitlink moves but the submodule CHECKOUT does not, and `.gitmodules`
+# `ignore = all` hides that stale checkout from `git status`/`git diff`. Staging
+# it rewinds the submodule on merge (agent-os#7092 would have rolled
+# adversarial-review back past two merged fixes). Re-sync initialized
+# submodules to the recorded commits first; uninitialized ones are untouched.
+/usr/bin/perl -e 'alarm shift; exec @ARGV' 120 git submodule update --recursive
+git status --short --ignore-submodules=none
+git add <changed files>   # never a submodule path, never `git add -f`/`--force`
+# The hammer never moves a submodule pointer: submodule fixes land as a PR in the
+# submodule's own repo (mandate 2b). Unstage any gitlink before committing.
+HAM_STAGED_GITLINKS=$(git diff --cached --raw --ignore-submodules=none | awk '$2 == "160000" {print $NF}')
+if [ -n "$HAM_STAGED_GITLINKS" ]; then
+  echo "HAM: unstaging submodule gitlink change(s), the hammer never moves a pointer: $HAM_STAGED_GITLINKS" >&2
+  git restore --staged -- $HAM_STAGED_GITLINKS
+fi
 # HSC-01: pass the trailers as ONE `-m`, not one `-m` each. Git renders every
 # `-m` as its own paragraph, so `-m A -m B` produces blank-line-separated
 # trailers -- which is NOT a git trailer block. The closer's provenance verifier
@@ -636,6 +651,8 @@ if ! git rebase "origin/$BASE_BRANCH"; then
   # `git rebase --abort`, emit ONE hard-blocker report, and stop.
   :
 fi
+# SUBSYNC-01: the rebase moved gitlinks but not submodule checkouts.
+/usr/bin/perl -e 'alarm shift; exec @ARGV' 120 git submodule update --recursive
 git push --force-with-lease
 ```
 
@@ -1700,6 +1717,11 @@ hard-blocker report, and do not re-dispatch.
   lives in another repo/submodule must have a linked subrepo PR, or the
   hard-blocker/audit comment must name the exact owed repo/path/change and why
   the subrepo PR could not be opened.
+- No submodule gitlink changes in HAM commits (SUBSYNC-01, agent-os#7092): never
+  stage a submodule path, never `git add -f`/`--force`, and run
+  `git submodule update --recursive` after any local head move. A stale
+  submodule checkout is invisible under `ignore = all` and rewinds the
+  submodule on merge.
 - No superproject pointer-bump PRs for submodule fixes. Main-catchup auto-floats
   submodule gitlinks after the submodule PR merges; wait for or rebase onto the
   floated current main instead of creating a gitlink-only PR.

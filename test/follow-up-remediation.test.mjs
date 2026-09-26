@@ -1,6 +1,7 @@
 import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { killFixtureChild } from './helpers/fixture-child.mjs';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -6724,18 +6725,18 @@ test('consumeFollowUpJobsUntilCapacity blocks same-PR retries after a spawn-prep
 });
 
 test('killDetachedWorkerProcessGroup terminates detached remediation workers by process group', async () => {
-  const child = spawn('bash', ['-c', 'trap "" TERM; while :; do sleep 1; done'], {
+  const child = spawn('bash', ['-c', 'parent=$PPID; end=$((SECONDS+30)); trap "" TERM; while (( SECONDS < end )) && (( PPID == parent )); do sleep 1; done'], {
     detached: true,
     stdio: 'ignore',
   });
-  child.unref();
-
-  const closed = new Promise((resolve) => child.once('close', resolve));
-  child.ref();
-  assert.equal(killDetachedWorkerProcessGroup(child.pid), true);
-
-  await closed;
-  assert.equal(killDetachedWorkerProcessGroup(child.pid), false);
+  try {
+    const closed = new Promise((resolve) => child.once('close', resolve));
+    assert.equal(killDetachedWorkerProcessGroup(child.pid), true);
+    await closed;
+    assert.equal(killDetachedWorkerProcessGroup(child.pid), false);
+  } finally {
+    await killFixtureChild(child);
+  }
 });
 
 test('killDetachedWorkerProcessGroup refuses to target the daemon pid', () => {

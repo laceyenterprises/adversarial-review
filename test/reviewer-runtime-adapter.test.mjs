@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { fixtureLifetime, killFixtureChild } from './helpers/fixture-child.mjs';
 import Database from 'better-sqlite3';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -2577,7 +2578,7 @@ test('cli-direct reattach adopts a cancelled record only when its process identi
 
 test('cli-direct reattach does NOT kill a recycled detached pgid (identity mismatch)', async () => {
   const rootDir = makeRoot();
-  const sleeper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000);'], {
+  const sleeper = spawn(process.execPath, ['-e', `${fixtureLifetime} setInterval(() => {}, 1000);`], {
     detached: true,
     stdio: 'ignore',
   });
@@ -2617,11 +2618,7 @@ test('cli-direct reattach does NOT kill a recycled detached pgid (identity misma
     // Bystander must survive: identity probe rejected, so no SIGTERM/SIGKILL.
     assert.doesNotThrow(() => process.kill(sleeper.pid, 0));
   } finally {
-    try {
-      process.kill(-sleeper.pid, 'SIGKILL');
-    } catch (err) {
-      if (err?.code !== 'ESRCH') throw err;
-    }
+    await killFixtureChild(sleeper);
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
@@ -2943,12 +2940,14 @@ test('acpx cancellation does not let heartbeat overwrite the cancelled state', a
 test('reviewer run-state remains parseable after SIGKILL during repeated heartbeat writes', async () => {
   const rootDir = makeRoot();
   const runStateUrl = new URL('../src/adapters/reviewer-runtime/run-state.mjs', import.meta.url).href;
+  let child;
   try {
-    const child = spawn(process.execPath, [
+    child = spawn(process.execPath, [
       '--input-type=module',
       '-e',
       `
         import { updateReviewerRunRecord, writeReviewerRunRecord } from ${JSON.stringify(runStateUrl)};
+        ${fixtureLifetime}
         const rootDir = ${JSON.stringify(rootDir)};
         let tick = 0;
         let record = writeReviewerRunRecord(rootDir, {
@@ -2966,25 +2965,33 @@ test('reviewer run-state remains parseable after SIGKILL during repeated heartbe
             state: 'heartbeating',
             lastHeartbeatAt: new Date(Date.UTC(2026, 4, 11, 20, 0, tick++)).toISOString(),
           });
-        }, 1);
-        setInterval(() => {}, 1000);
+        }, 20);
       `,
     ], { detached: true, stdio: 'ignore' });
 
-    for (let attempt = 0; attempt < 200; attempt += 1) {
+    for (let attempt = 0; attempt < 2_000; attempt += 1) {
       if (existsSync(reviewerRunStatePath(rootDir, 'sigkill-heartbeat-session'))) break;
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     assert.equal(existsSync(reviewerRunStatePath(rootDir, 'sigkill-heartbeat-session')), true);
+    let heartbeatSeen = false;
+    for (let attempt = 0; attempt < 2_000; attempt += 1) {
+      if (readReviewerRunRecord(rootDir, 'sigkill-heartbeat-session')?.state === 'heartbeating') {
+        heartbeatSeen = true;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(heartbeatSeen, true);
 
-    process.kill(child.pid, 'SIGKILL');
-    await new Promise((resolve) => child.once('close', resolve));
+    await killFixtureChild(child);
 
     const raw = readFileSync(reviewerRunStatePath(rootDir, 'sigkill-heartbeat-session'), 'utf8');
     const parsed = JSON.parse(raw);
     assert.equal(parsed.sessionUuid, 'sigkill-heartbeat-session');
     assert.match(raw, /\n$/);
   } finally {
+    await killFixtureChild(child);
     rmSync(rootDir, { recursive: true, force: true });
   }
 });

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
+import { fixtureLifetime, killFixtureChild } from './helpers/fixture-child.mjs';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -261,10 +262,11 @@ test('follow-up-stop CLI records cancellation receipt before stopping spawned jo
 });
 
 test('follow-up-stop CLI signals a live spawned worker before stopping', async (t) => {
-  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000);'], {
+  const child = spawn(process.execPath, ['-e', `${fixtureLifetime} setInterval(() => {}, 1000);`], {
     detached: true,
     stdio: 'ignore',
   });
+  t.after(() => killFixtureChild(child));
   assert.equal(await waitForDetachedProcessGroup(child.pid), true);
   const inProgressDir = path.join(ROOT, 'data', 'follow-up-jobs', 'in-progress');
   const stoppedDir = path.join(ROOT, 'data', 'follow-up-jobs', 'stopped');
@@ -276,9 +278,6 @@ test('follow-up-stop CLI signals a live spawned worker before stopping', async (
   rmSync(stoppedPath, { force: true });
   let receiptPath = null;
   t.after(() => {
-    try {
-      process.kill(-child.pid, 'SIGKILL');
-    } catch {}
     rmSync(jobPath, { force: true });
     rmSync(stoppedPath, { force: true });
     if (receiptPath) rmSync(receiptPath, { force: true });

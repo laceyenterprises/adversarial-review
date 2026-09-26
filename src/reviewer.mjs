@@ -76,6 +76,10 @@ import {
   resolveSigtermFenceGraceSeconds,
 } from './reviewer-fence.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
+import {
+  configureReviewerWorkspaceAudit,
+  prepareReviewerSnapshot,
+} from './reviewer-workspace.mjs';
 import { normalizeEffectiveReviewVerdict, sanitizeCodexReviewPayload } from './kernel/verdict.mjs';
 import { pickReviewerStage } from './kernel/prompt-stage.mjs';
 import { createLinearTriageAdapter } from './adapters/operator/linear-triage/index.mjs';
@@ -2063,7 +2067,37 @@ async function main() {
     oversizedAgyPromptBytes: oversizedAgyRoute?.oversized ? oversizedAgyRoute.promptBytes : null,
     oversizedAgyBudgetBytes: oversizedAgyRoute?.oversized ? oversizedAgyRoute.maxBytes : null,
   });
-  const reviewerSubprocessCwd = resolveReviewerSubprocessCwd({ repo, rootDir: ROOT });
+  const reviewerCheckoutDir = resolveReviewerSubprocessCwd({ repo, rootDir: ROOT });
+  const reviewerStateDir = resolveAdversarialReviewStateDir(ROOT, process.env);
+  let reviewerSubprocessCwd;
+  let reviewerWorkspaceHeadSha;
+  try {
+    const snapshot = await prepareReviewerSnapshot({
+      repo,
+      checkoutDir: reviewerCheckoutDir,
+      stateDir: reviewerStateDir,
+    });
+    reviewerSubprocessCwd = snapshot.snapshotDir;
+    reviewerWorkspaceHeadSha = reviewerHeadSha || snapshot.headSha;
+    configureReviewerWorkspaceAudit({
+      repo,
+      prNumber,
+      reviewerModel: effectiveModel,
+      headSha: reviewerWorkspaceHeadSha,
+      checkoutDir: reviewerCheckoutDir,
+      stateDir: reviewerStateDir,
+    });
+    console.error(
+      `[reviewer] reviewer workspace snapshot repo=${repo} sourceHead=${snapshot.headSha} cwd=${snapshot.snapshotDir}`
+    );
+  } catch (err) {
+    configureReviewerWorkspaceAudit(null);
+    console.error(
+      `[reviewer] retryable infrastructure error: failed to prepare reviewer workspace snapshot for ` +
+      `${repo}#${prNumber}: ${err.message}`
+    );
+    process.exit(1);
+  }
 
   let reviewText;
   let rawReviewText;
@@ -2093,6 +2127,14 @@ async function main() {
       );
       effectiveModel = 'gemini';
       effectiveBotTokenEnv = 'GH_GEMINI_REVIEWER_TOKEN';
+      configureReviewerWorkspaceAudit({
+        repo,
+        prNumber,
+        reviewerModel: effectiveModel,
+        headSha: reviewerWorkspaceHeadSha,
+        checkoutDir: reviewerCheckoutDir,
+        stateDir: reviewerStateDir,
+      });
       dispatch = await reviewAgyOversizedInChunks(diff, extraContext, {
         promptStage: reviewerPromptStage,
         reviewerSubprocessCwd,

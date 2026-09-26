@@ -232,7 +232,62 @@ test('merged reviewing rows are skipped and their live reviewer process is cance
     settled.map(({ state, reason }) => ({ state, reason })),
     [{ state: 'cancelled', reason: 'merged-pr-reviewer-claim-cleared' }]
   );
-  assert.match(log.lines.join('\n'), /reviewer_reattach_merged_claim_cleared/);
+  assert.match(log.lines.join('\n'), /reviewer_reattach_terminal_claim_cleared state=merged/);
+});
+
+test('closed reviewing rows cancel a verified live reviewer and clear its claim', async () => {
+  const db = setupDb();
+  seedReviewing(db, { prState: 'closed', closedAt: '2026-05-11T05:19:00.000Z' });
+  const killed = [];
+  const settled = [];
+  const log = makeLog();
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    now: new Date(FAILURE_AT),
+    log,
+    probeSession: () => ({ alive: true, matched: true }),
+    killProcessGroup: (pgid, signal) => { killed.push({ pgid, signal }); return true; },
+    fetchHeadSha: async () => { throw new Error('closed rows must not probe GitHub heads'); },
+    findPostedReview: async () => { throw new Error('closed rows must not probe GitHub reviews'); },
+    onTerminalDeadSession: async (event) => settled.push(event),
+  });
+
+  const row = readRow(db);
+  assert.equal(row.pr_state, 'closed');
+  assert.equal(row.closed_at, '2026-05-11T05:19:00.000Z');
+  assert.equal(row.review_status, 'skipped');
+  assert.equal(row.reviewer_session_uuid, null);
+  assert.equal(row.reviewer_pgid, null);
+  assert.deepEqual(killed, [{ pgid: 9001, signal: 'SIGKILL' }]);
+  assert.deepEqual(
+    settled.map(({ state, reason }) => ({ state, reason })),
+    [{ state: 'cancelled', reason: 'closed-pr-reviewer-claim-cleared' }]
+  );
+  assert.match(log.lines.join('\n'), /reviewer_reattach_terminal_claim_cleared state=closed/);
+});
+
+test('terminal reviewer claims take priority under the per-poll reconcile cap', async () => {
+  const db = setupDb();
+  seedReviewing(db, { prNumber: 69 });
+  seedReviewing(db, { prNumber: 70, prState: 'closed', closedAt: '2026-05-11T05:19:00.000Z' });
+  const killed = [];
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    now: new Date(FAILURE_AT),
+    maxRows: 1,
+    shouldReconcileRow: () => true,
+    probeSession: () => ({ alive: true, matched: true }),
+    killProcessGroup: (pgid, signal) => { killed.push({ pgid, signal }); return true; },
+    log: makeLog(),
+  });
+
+  assert.equal(readRow(db, REPO, 70).review_status, 'skipped');
+  assert.equal(readRow(db, REPO, 69).review_status, 'reviewing');
+  assert.deepEqual(killed, [{ pgid: 9001, signal: 'SIGKILL' }]);
 });
 
 test('merged reviewing rows are skipped without killing an unmatched process group', async () => {

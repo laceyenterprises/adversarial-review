@@ -182,6 +182,9 @@ export function shouldReconcileAdoptedReviewerSession(row, {
 }
 
 export function shouldReconcileReviewerSession(row, now, options = {}) {
+  // A terminal PR no longer needs its active reviewer. Do not wait for the
+  // reviewer lease to expire before reclaiming the model slot.
+  if (['merged', 'closed'].includes(String(row?.pr_state || '').toLowerCase())) return true;
   return shouldReconcileStaleReviewerSession(row, now, options) ||
     shouldReconcileAdoptedReviewerSession(row, options);
 }

@@ -111,6 +111,18 @@ async function makeDeadPgid() {
   return pid;
 }
 
+test('terminal PRs reconcile active reviewers immediately despite a live lease', () => {
+  const now = new Date('2026-08-08T21:19:26.000Z');
+  for (const prState of ['closed', 'merged']) {
+    assert.equal(shouldReconcileReviewerSession({
+      pr_state: prState,
+      reviewer_pgid: 9001,
+      reviewer_started_at: '2026-08-08T21:19:20.000Z',
+      reviewer_lease_expires_at: '2026-08-08T21:39:20.000Z',
+    }, now, { probeGroupAliveImpl: () => true }), true, prState);
+  }
+});
+
 test('shouldReconcileReviewerSession fast-paths a provably-dead reviewer before lease expiry', async () => {
   const now = new Date('2026-08-08T21:19:26.000Z'); // #5059: re-review start that then hung
   const startedAt = new Date(now.getTime() - (GRACE_MS + 1000)).toISOString();

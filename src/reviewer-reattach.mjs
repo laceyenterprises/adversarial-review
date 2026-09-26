@@ -11,7 +11,6 @@ import {
   resolveReviewerLeaseRecoveryEnabled,
 } from './reviewer-lease.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
-import { MARK_MERGED_PENDING_REVIEW_SKIPPED_SQL } from './review-state-statements.mjs';
 import { recordReviewLatencyEvent } from './review-latency-event-writer.mjs';
 
 const LEGACY_ORPHAN_FAILURE_MESSAGE =
@@ -290,7 +289,18 @@ function prepareStatements(db) {
          FROM reviewed_prs
         WHERE review_status = 'reviewing'`
     ),
-    markMergedPendingReviewSkipped: db.prepare(MARK_MERGED_PENDING_REVIEW_SKIPPED_SQL),
+    markTerminalReviewingSkipped: db.prepare(
+      `UPDATE reviewed_prs
+          SET review_status = 'skipped', failed_at = NULL, failure_message = ?,
+              quota_reset_at_utc = NULL, reviewer_session_uuid = NULL,
+              reviewer_head_sha = NULL, reviewer_timeout_ms = NULL,
+              reviewer_lease_expires_at = NULL, reviewer_started_at = NULL,
+              reviewer_pgid = NULL,
+              merged_at = CASE WHEN pr_state = 'merged' THEN COALESCE(merged_at, ?) ELSE merged_at END,
+              closed_at = CASE WHEN pr_state = 'closed' THEN COALESCE(closed_at, ?) ELSE closed_at END
+        WHERE repo = ? AND pr_number = ? AND pr_state IN ('merged', 'closed')
+          AND review_status = 'reviewing'`
+    ),
     markOrphan: db.prepare(
       "UPDATE reviewed_prs SET review_status = 'failed-orphan', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
     ),
@@ -462,7 +472,12 @@ async function reconcileReviewerSessions({
     ? Number(maxRows)
     : Number.POSITIVE_INFINITY;
   const matchingRows = statements.listReviewing.all().filter((row) => shouldReconcileRow(row, now));
-  const rows = matchingRows.slice(0, limit);
+  // Lifecycle sync may have just closed a PR whose reviewer is still live.
+  // Reclaim terminal slots before stale open claims when the per-poll cap binds.
+  const rows = matchingRows.sort((a, b) =>
+    Number(['merged', 'closed'].includes(String(b.pr_state).toLowerCase()))
+    - Number(['merged', 'closed'].includes(String(a.pr_state).toLowerCase()))
+  ).slice(0, limit);
   if (rows.length === 0) return { reconciled: 0, skipped: matchingRows.length };
 
   const failureAt = now.toISOString();
@@ -516,8 +531,9 @@ async function reconcileReviewerSessions({
 
   for (const listedRow of rows) {
     let row = listedRow;
-    if (String(row.pr_state || '').trim().toLowerCase() === 'merged') {
-      const settledAt = row.merged_at || failureAt;
+    const terminalState = String(row.pr_state || '').trim().toLowerCase();
+    if (terminalState === 'merged' || terminalState === 'closed') {
+      const settledAt = (terminalState === 'merged' ? row.merged_at : row.closed_at) || failureAt;
       let killResult = false;
       let terminalPgid = parsePositiveInteger(row.reviewer_pgid);
       if (terminalPgid === null && row.reviewer_session_uuid && typeof findReviewerProcess === 'function') {
@@ -546,16 +562,17 @@ async function reconcileReviewerSessions({
         row,
         state: 'cancelled',
         settledAt,
-        reason: 'merged-pr-reviewer-claim-cleared',
+        reason: `${terminalState}-pr-reviewer-claim-cleared`,
       });
-      statements.markMergedPendingReviewSkipped.run(
-        'Skipped reviewer spawn because PR is already merged.',
+      statements.markTerminalReviewingSkipped.run(
+        `Cancelled active reviewer because PR is already ${terminalState}.`,
+        settledAt,
         settledAt,
         row.repo,
         row.pr_number
       );
       log.warn(
-        `[watcher] reviewer_reattach_merged_claim_cleared repo=${row.repo} pr=${row.pr_number} ` +
+        `[watcher] reviewer_reattach_terminal_claim_cleared state=${terminalState} repo=${row.repo} pr=${row.pr_number} ` +
         `session=${row.reviewer_session_uuid || 'unknown'} pgid=${terminalPgid || row.reviewer_pgid || 'unknown'} ` +
         `kill_sent=${killResult ? 'true' : 'false'}`
       );

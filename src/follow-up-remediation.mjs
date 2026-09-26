@@ -2052,11 +2052,19 @@ async function reconcileFollowUpJob({
     };
   }
   const hasNonEmptyNarrative = finalMessage.exists && Boolean(String(finalMessage.text).trim());
+  // The final artifact can contain the worker's prose or echoed source code.
+  // Only the observed provider-owned 429 wrapper is quota evidence there;
+  // stderr remains the direct provider-output signal.
+  const providerQuotaArtifact = /^API Error: Request rejected \(429\)\s*[·:—-]\s*This request would exceed your account['’]s rate limit\b/i.test(String(finalMessage.text || '').trimStart())
+    ? String(finalMessage.text).trim()
+    : '';
+  const quotaLogText = `worker=${worker?.model || 'unknown'}\n${readWorkerStderrLogSafe(paths.logPath)}\n${providerQuotaArtifact}`;
+  const quotaSignal = detectQuotaExhaustion(quotaLogText);
 
-  // Invalid reply is a distinct artifact failure regardless of whether
-  // stdout is empty or non-empty. Route it directly to
-  // `invalid-remediation-reply` so the operator gets the real cause
-  // instead of a misleading `artifact-empty-completion`.
+  // An invalid reply without a confirmed provider cap is a distinct
+  // artifact failure regardless of whether stdout is empty or non-empty.
+  // Route it to `invalid-remediation-reply` so the operator gets the real
+  // cause instead of a misleading `artifact-empty-completion`.
   //
   // Salvage path: even though strict validation rejected the reply,
   // the file may still contain a renderable summary / addressed[] /
@@ -2068,7 +2076,9 @@ async function reconcileFollowUpJob({
   // worker actually did instead of just "did not produce a usable
   // remediation reply". The salvaged reply is best-effort and not
   // persisted to the job record.
-  if (replyProbe.state === 'invalid') {
+  // A provider cap may interrupt a reply.json write, leaving partial JSON.
+  // Let that case reach the bounded quota hold below.
+  if (replyProbe.state === 'invalid' && !quotaSignal.isQuotaExhausted) {
     const err = replyProbe.error;
     const invalidReplyFailure = { code: 'invalid-remediation-reply', message: err.message };
     const salvagePath = replyProbe.fallbackPath || paths.replyPath;
@@ -2113,9 +2123,6 @@ async function reconcileFollowUpJob({
       jobPath: failed.jobPath,
     };
   }
-
-  const quotaLogText = `worker=${worker?.model || 'unknown'}\n${readWorkerStderrLogSafe(paths.logPath)}\n${finalMessage.text || ''}`;
-  const quotaSignal = detectQuotaExhaustion(quotaLogText);
 
   if (replyProbe.state === 'valid' || (hasNonEmptyNarrative && !quotaSignal.isQuotaExhausted)) {
     let remediationReply = {

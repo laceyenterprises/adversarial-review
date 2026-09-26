@@ -156,25 +156,64 @@ function positiveNumberEnv(name, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+const lastSuccessfulDaemonConfigSignatures = new Map();
+
+function daemonConfigSignatureOptions(env = process.env) {
+  const envForConfig = pruneBlankRoleEnvVars(env);
+  return {
+    topPath: envForConfig.AGENT_OS_CONFIG_PATH || DEFAULT_ROLE_TOP_PATH,
+    modulePaths: [MODULE_CONFIG_PATH],
+    env: envForConfig,
+  };
+}
+
+function daemonConfigSignatureStateKey({ topPath, modulePaths }) {
+  return JSON.stringify({ topPath, modulePaths });
+}
+
+function recordDaemonConfigLoadSuccess({ env = process.env } = {}) {
+  const options = daemonConfigSignatureOptions(env);
+  const status = configSignatureStatus(options);
+  if (status.loadedSignature !== null) {
+    lastSuccessfulDaemonConfigSignatures.set(
+      daemonConfigSignatureStateKey(options),
+      status.loadedSignature
+    );
+  }
+}
+
+function daemonConfigSignatureStatus({ env = process.env } = {}) {
+  const options = daemonConfigSignatureOptions(env);
+  const status = configSignatureStatus(options);
+  const stateKey = daemonConfigSignatureStateKey(options);
+  const loadedSignature =
+    status.loadedSignature ?? lastSuccessfulDaemonConfigSignatures.get(stateKey) ?? null;
+  if (status.loadedSignature !== null) {
+    lastSuccessfulDaemonConfigSignatures.set(stateKey, status.loadedSignature);
+  }
+  return {
+    ...status,
+    loadedSignature,
+    inSync: loadedSignature === null ? null : loadedSignature === status.diskSignature,
+  };
+}
+
 function resolveDaemonMaxConcurrentJobs(env = process.env) {
-  return resolveRemediationMaxConcurrentJobs(env, {
+  const maxConcurrentJobs = resolveRemediationMaxConcurrentJobs(env, {
     onClamp: ({ requested, clamped }) => {
       logInfo(
         `clamped ${REMEDIATION_MAX_CONCURRENT_JOBS_ENV}=${requested} to ${clamped} to avoid runaway worker fan-out`
       );
     },
   });
+  recordDaemonConfigLoadSuccess({ env });
+  return maxConcurrentJobs;
 }
 
 function writeConfigSignatureStatus({ env = process.env, now = () => new Date() } = {}) {
   const hqRoot = env.HQ_ROOT;
   if (!hqRoot) return null;
-  const envForConfig = pruneBlankRoleEnvVars(env);
-  const status = configSignatureStatus({
-    topPath: envForConfig.AGENT_OS_CONFIG_PATH || DEFAULT_ROLE_TOP_PATH,
-    modulePaths: [MODULE_CONFIG_PATH],
-    env: envForConfig,
-  });
+  const status = daemonConfigSignatureStatus({ env });
   const path = join(hqRoot, '.adversarial-follow-up', 'config-status.json');
   let prior = null;
   try {

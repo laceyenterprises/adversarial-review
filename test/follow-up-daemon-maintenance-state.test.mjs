@@ -19,9 +19,11 @@ import {
   sleepForNextFollowUpDaemonIteration,
   startFollowUpTelemetryListener,
   writeMaintenanceSweepState,
+  writeConfigSignatureStatus,
 } from '../scripts/adversarial-follow-up-daemon.mjs';
 import { resetConfigCache } from '../src/config-loader.mjs';
 import { createHandoffRateLimiter, HANDOFF_RATE_CAP_AUDIT_EVENT } from '../src/handoff-rate-cap.mjs';
+import { summarizeConfigSignatureDrift } from '../src/review-pipeline-health.mjs';
 
 function makeTempDir(t) {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-daemon-'));
@@ -511,7 +513,7 @@ test('follow-up daemon iteration preserves reconcile and closer reaper on wake-d
   assert.ok(calls.indexOf('retry-comments') > calls.indexOf('closer-worktree-reap'));
 });
 
-test('follow-up daemon iteration records config drift before failed reload and keeps maintenance alive', async (t) => {
+test('follow-up daemon iteration keeps config drift after per-tick cache reset', async (t) => {
   const rootDir = makeTempDir(t);
   const hqRoot = path.join(rootDir, 'hq');
   const configPath = path.join(rootDir, 'config.yaml');
@@ -535,8 +537,13 @@ remediation:
   max_concurrent_jobs: [
 `);
 
-  await runFollowUpDaemonIteration({
+  let nowIso = '2026-05-25T17:49:00.000Z';
+  const iterationOptions = () => ({
     env,
+    writeConfigSignatureStatusImpl: (args) => writeConfigSignatureStatus({
+      ...args,
+      now: () => new Date(nowIso),
+    }),
     refreshFollowUpGithubTokenImpl: async () => {
       calls.push('github-token-refresh');
       return { refreshed: true };
@@ -544,6 +551,7 @@ remediation:
     refreshReviewerBrokerTokensImpl: async () => ({ handoffSafe: [] }),
     reconcileInProgressFollowUpJobsImpl: async () => {
       calls.push('reconcile');
+      resetConfigCache();
     },
     emitHeartbeatsForActiveJobsImpl: () => {
       calls.push('heartbeat');
@@ -620,13 +628,27 @@ remediation:
     shouldStop: () => false,
   });
 
+  await runFollowUpDaemonIteration(iterationOptions());
+  const firstStatus = JSON.parse(
+    readFileSync(path.join(hqRoot, '.adversarial-follow-up', 'config-status.json'), 'utf8')
+  );
+
+  nowIso = '2026-05-25T17:51:00.000Z';
+  await runFollowUpDaemonIteration(iterationOptions());
+
   const status = JSON.parse(
     readFileSync(path.join(hqRoot, '.adversarial-follow-up', 'config-status.json'), 'utf8')
   );
   assert.equal(status.inSync, false);
+  assert.equal(status.driftSince, firstStatus.driftSince);
   assert.ok(status.loadedSignature);
   assert.ok(status.diskSignature);
   assert.notEqual(status.loadedSignature, status.diskSignature);
+  const drift = summarizeConfigSignatureDrift(hqRoot, {
+    nowMs: Date.parse('2026-05-25T17:59:00.001Z'),
+  });
+  assert.equal(drift.alarmed.length, 1);
+  assert.equal(drift.alarmed[0].daemon, 'adversarial-follow-up');
   assert.ok(calls.includes('reconcile'));
   assert.ok(calls.includes('heartbeat'));
   assert.ok(calls.includes('retry-comments'));

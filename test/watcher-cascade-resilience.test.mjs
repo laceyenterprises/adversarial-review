@@ -13,12 +13,14 @@ import {
   REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS,
   classifyReviewerFailure,
   clearCascadeState,
+  readReviewerCredentialOutage,
   getCascadeStatePath,
   isReviewerSubprocessTimeout,
   markCascadeCapExhaustedAlerted,
   readCascadeState,
   recordCascadeFailure,
   shouldBackoffReviewerSpawn,
+  shouldPauseReviewerModel,
 } from '../src/reviewer-cascade.mjs';
 import { prepareMarkInfraAutoRecoveryAttemptStarted } from '../src/review-state-statements.mjs';
 import {
@@ -1619,6 +1621,9 @@ test('settleReviewerAttempt records oauth-broken without burning attempts', () =
       ),
       markCascadeFailed: stmtMarkCascadeFailed(db),
       markPendingUpstream: stmtMarkPendingUpstream(db),
+      markReviewerCredentialOutage: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'pending-upstream', failed_at = ?, failure_message = ? WHERE repo = ? AND pr_number = ?"
+      ),
       getReviewRow: db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'),
     };
 
@@ -1648,6 +1653,84 @@ test('settleReviewerAttempt records oauth-broken without burning attempts', () =
     assert.equal(state.lastFailureClass, 'oauth-broken');
     assert.deepEqual(state.transientFailureBreakdown, { 'oauth-broken': 1 });
     assert.match(warnings.join('\n'), /Reviewer oauth-broken failure/);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('oauth-broken across distinct PRs opens a model outage and success re-arms parked PRs', () => {
+  const { rootDir, db } = setupFixture();
+  try {
+    const repo = 'laceyenterprises/adversarial-review';
+    db.prepare(
+      'UPDATE reviewed_prs SET reviewer = ?, review_status = ?, infra_auto_recover_attempts = ? WHERE repo = ? AND pr_number = ?'
+    ).run('claude', 'reviewing', 2, repo, 195);
+    db.prepare(
+      'INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts, infra_auto_recover_attempts) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(repo, 196, '2026-09-25T18:00:00.000Z', 'claude', 'open', 'reviewing', 0, 0);
+
+    const statements = {
+      markPosted: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
+      ),
+      markFailed: stmtMarkBugFailed(db),
+      releaseReviewLease: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
+      ),
+      markCascadeFailed: stmtMarkCascadeFailed(db),
+      markPendingUpstream: stmtMarkPendingUpstream(db),
+      markReviewerCredentialOutage: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'pending-upstream', failed_at = ?, failure_message = ? WHERE repo = ? AND pr_number = ?"
+      ),
+      promoteReviewerCredentialOutage: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'pending-upstream', failure_message = ?, infra_auto_recover_attempts = 0 WHERE reviewer = ? AND failure_message LIKE '[oauth-broken]%'"
+      ),
+      rearmReviewerCredentialOutage: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'pending', failed_at = NULL, failure_message = NULL, infra_auto_recover_attempts = 0 WHERE reviewer = ? AND failure_message LIKE ?"
+      ),
+      getReviewRow: db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'),
+    };
+    const fail = (prNumber, failureAt) => settleReviewerAttempt({
+      rootDir,
+      repoPath: repo,
+      prNumber,
+      reviewerModel: 'claude',
+      result: { ok: false, failureClass: 'oauth-broken', error: 'credential mint returned 503' },
+      failureAt,
+      maxRemediationRounds: 2,
+      statements,
+      log: { warn() {} },
+    });
+
+    fail(195, '2026-09-25T18:01:00.000Z');
+    assert.equal(shouldPauseReviewerModel(rootDir, 'claude').paused, false);
+    fail(196, '2026-09-25T18:05:00.000Z');
+
+    const outage = readReviewerCredentialOutage(rootDir, 'claude');
+    assert.equal(outage.active, true);
+    assert.equal(outage.reason, 'reviewer-credential:claude');
+    assert.equal(outage.distinctPrCount, 2);
+    assert.equal(shouldPauseReviewerModel(rootDir, 'claude').paused, true);
+    const parked = db.prepare(
+      'SELECT pr_number, review_status, infra_auto_recover_attempts, failure_message FROM reviewed_prs ORDER BY pr_number'
+    ).all();
+    assert.deepEqual(parked.map((row) => row.infra_auto_recover_attempts), [0, 0]);
+    assert.ok(parked.every((row) => row.review_status === 'pending-upstream'));
+    assert.ok(parked.every((row) => row.failure_message.startsWith('[outage-transient:reviewer-credential:claude]')));
+
+    settleReviewerAttempt({
+      rootDir,
+      repoPath: repo,
+      prNumber: 196,
+      reviewerModel: 'claude',
+      result: { ok: true },
+      statements,
+      log: { warn() {} },
+    });
+    assert.equal(shouldPauseReviewerModel(rootDir, 'claude').paused, false);
+    assert.equal(db.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number = 195').get().review_status, 'pending');
+    assert.equal(db.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number = 196').get().review_status, 'posted');
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

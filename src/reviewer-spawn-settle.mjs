@@ -64,6 +64,9 @@ import {
   stmtMarkFailedQuota,
   stmtReleaseReviewLeaseQuota,
   stmtMarkOutageTransient,
+  stmtMarkReviewerCredentialOutage,
+  stmtPromoteReviewerCredentialOutage,
+  stmtRearmReviewerCredentialOutage,
   stmtMarkCascadeFailed,
   stmtMarkPendingUpstream,
   stmtGetReviewRow,
@@ -77,8 +80,10 @@ import { recordSuccessfulReviewCycleVerdict } from './review-cycle-cap-actions.m
 import { withSqliteBusyRetry, withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
 import {
   clearCascadeState,
+  clearReviewerCredentialOutage,
   formatTransientFailureBreakdown,
   recordCascadeFailure,
+  recordReviewerCredentialFailure,
 } from './reviewer-cascade.mjs';
 import {
   PROVIDER_OVERLOADED_FAILURE_CLASS,
@@ -1052,6 +1057,9 @@ function settleReviewerAttempt({
     markFailedQuota: stmtMarkFailedQuota,
     releaseReviewLeaseQuota: stmtReleaseReviewLeaseQuota,
     markOutageTransient: stmtMarkOutageTransient,
+    markReviewerCredentialOutage: stmtMarkReviewerCredentialOutage,
+    promoteReviewerCredentialOutage: stmtPromoteReviewerCredentialOutage,
+    rearmReviewerCredentialOutage: stmtRearmReviewerCredentialOutage,
     markCascadeFailed: stmtMarkCascadeFailed,
     markPendingUpstream: stmtMarkPendingUpstream,
     getReviewRow: stmtGetReviewRow,
@@ -1064,6 +1072,18 @@ function settleReviewerAttempt({
 }) {
   if (result.ok) {
     const postedAt = new Date().toISOString();
+    const recoveredOutage = reviewerModel
+      ? clearReviewerCredentialOutage(rootDir, reviewerModel)
+      : null;
+    if (recoveredOutage?.active && typeof statements.rearmReviewerCredentialOutage?.run === 'function') {
+      withSqliteBusyRetrySync(
+        () => statements.rearmReviewerCredentialOutage.run(
+          String(reviewerModel).toLowerCase(),
+          `[outage-transient:reviewer-credential:${String(reviewerModel).toLowerCase()}]%`
+        ),
+        { label: `reviewer-credential-outage-rearm:${reviewerModel}`, log }
+      );
+    }
     withSqliteBusyRetrySync(() => {
       statements.markPosted.run(postedAt, repoPath, prNumber);
     }, { label: `reviewer-settle-posted:${repoPath}#${prNumber}`, log });
@@ -1187,6 +1207,34 @@ function settleReviewerAttempt({
   const baseFailureMessage = String(result.error || '').trim() || defaultFailureMessages[failureClass] || defaultFailureMessages.unknown;
   const failureMessage = appendFailureDiagnostics(baseFailureMessage, result);
   const classifiedMessage = `[${failureClass}] ${failureMessage}`;
+  if (failureClass === 'oauth-broken') {
+    const credentialState = recordReviewerCredentialFailure(rootDir, {
+      reviewerModel,
+      repo: repoPath,
+      prNumber,
+      failedAt: failureAt,
+    });
+    const outageMessage = credentialState.active
+      ? `[outage-transient:${credentialState.reason}] ${classifiedMessage}`
+      : classifiedMessage;
+    const markCredentialOutage = statements.markReviewerCredentialOutage || statements.markOutageTransient;
+    withSqliteBusyRetrySync(
+      () => markCredentialOutage.run(failureAt, outageMessage, ...(statements.markReviewerCredentialOutage ? [] : [null]), repoPath, prNumber),
+      { label: `reviewer-settle-credential-hold:${repoPath}#${prNumber}`, log }
+    );
+    if (credentialState.active && typeof statements.promoteReviewerCredentialOutage?.run === 'function') {
+      withSqliteBusyRetrySync(
+        () => statements.promoteReviewerCredentialOutage.run(outageMessage, credentialState.reviewerModel),
+        { label: `reviewer-credential-outage-promote:${credentialState.reviewerModel}`, log }
+      );
+    }
+    recordCascadeFailure(rootDir, {
+      repo: repoPath, prNumber, failedAt: failureAt, failureClass, failureReason: failureMessage, reviewerModel,
+    });
+    log.warn(`[watcher] Reviewer oauth-broken failure on #${prNumber}; holding without charging infra recovery` +
+      (credentialState.active ? `; ${credentialState.reason} outage active across ${credentialState.distinctPrCount} PRs` : ''));
+    return;
+  }
   if (transientFailureClasses.has(failureClass)) {
     if (typeof statements.getReviewRow?.get !== 'function') {
       throw new Error('settleReviewerAttempt requires statements.getReviewRow.get for transient infra cap enforcement');

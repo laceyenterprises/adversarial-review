@@ -43,6 +43,9 @@ const CASCADE_BACKOFF_MINUTES = [1, 2, 4, 8, 15];
 // delays that escalation.
 const CASCADE_FAILURE_CAP = 5;
 const CASCADE_STATE_DIR = ['data', 'cascade-state'];
+const CREDENTIAL_OUTAGE_STATE_DIR = ['data', 'reviewer-credential-outages'];
+const CREDENTIAL_OUTAGE_WINDOW_MS = 15 * 60_000;
+const CREDENTIAL_OUTAGE_DISTINCT_PR_THRESHOLD = 2;
 
 function getCascadeStateDir(rootDir) {
   return join(rootDir, ...CASCADE_STATE_DIR);
@@ -92,6 +95,74 @@ function writeCascadeState(rootDir, { repo, prNumber }, state) {
 
 function clearCascadeState(rootDir, { repo, prNumber }) {
   rmSync(getCascadeStatePath(rootDir, { repo, prNumber }), { force: true });
+}
+
+function credentialOutagePath(rootDir, reviewerModel) {
+  const model = String(reviewerModel || '').trim().toLowerCase();
+  if (!model) throw new TypeError('Reviewer model is required for credential outage state');
+  return join(rootDir, ...CREDENTIAL_OUTAGE_STATE_DIR, `${encodeURIComponent(model)}.json`);
+}
+
+function readReviewerCredentialOutage(rootDir, reviewerModel) {
+  try {
+    return JSON.parse(readFileSync(credentialOutagePath(rootDir, reviewerModel), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function writeReviewerCredentialOutage(rootDir, reviewerModel, state) {
+  const directory = join(rootDir, ...CREDENTIAL_OUTAGE_STATE_DIR);
+  mkdirSync(directory, { recursive: true });
+  const path = credentialOutagePath(rootDir, reviewerModel);
+  const tmpPath = `${path}.tmp`;
+  const fd = openSync(tmpPath, 'w');
+  try {
+    writeFileSync(fd, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmpPath, path);
+  return state;
+}
+
+function recordReviewerCredentialFailure(rootDir, {
+  reviewerModel,
+  repo,
+  prNumber,
+  failedAt = new Date().toISOString(),
+} = {}) {
+  const model = String(reviewerModel || '').trim().toLowerCase();
+  if (!model) return { active: false, reviewerModel: null, failures: [] };
+  const failedAtMs = Date.parse(failedAt);
+  const anchorMs = Number.isFinite(failedAtMs) ? failedAtMs : Date.now();
+  const previous = readReviewerCredentialOutage(rootDir, model);
+  const failures = (Array.isArray(previous?.failures) ? previous.failures : [])
+    .filter((entry) => anchorMs - Date.parse(entry.failedAt) <= CREDENTIAL_OUTAGE_WINDOW_MS)
+    .filter((entry) => !(entry.repo === repo && Number(entry.prNumber) === Number(prNumber)));
+  failures.push({ repo, prNumber: Number(prNumber), failedAt: new Date(anchorMs).toISOString() });
+  const distinctPrCount = new Set(failures.map((entry) => `${entry.repo}#${entry.prNumber}`)).size;
+  const active = Boolean(previous?.active) || distinctPrCount >= CREDENTIAL_OUTAGE_DISTINCT_PR_THRESHOLD;
+  return writeReviewerCredentialOutage(rootDir, model, {
+    reviewerModel: model,
+    active,
+    reason: `reviewer-credential:${model}`,
+    startedAt: active ? (previous?.startedAt || new Date(anchorMs).toISOString()) : null,
+    failures,
+    distinctPrCount,
+  });
+}
+
+function clearReviewerCredentialOutage(rootDir, reviewerModel) {
+  const state = readReviewerCredentialOutage(rootDir, reviewerModel);
+  if (state) rmSync(credentialOutagePath(rootDir, reviewerModel), { force: true });
+  return state;
+}
+
+function shouldPauseReviewerModel(rootDir, reviewerModel) {
+  const state = readReviewerCredentialOutage(rootDir, reviewerModel);
+  return { paused: Boolean(state?.active), state };
 }
 
 function resolveCascadeBackoffMinutes(consecutiveCascadeFailures) {
@@ -376,6 +447,7 @@ export {
   REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS,
   classifyReviewerFailure,
   clearCascadeState,
+  clearReviewerCredentialOutage,
   formatTransientFailureBreakdown,
   getCascadeStatePath,
   hasOperatorDecisionRequiredAlerted,
@@ -383,7 +455,10 @@ export {
   markOperatorDecisionRequiredAlerted,
   isReviewerSubprocessTimeout,
   readCascadeState,
+  readReviewerCredentialOutage,
   recordCascadeFailure,
+  recordReviewerCredentialFailure,
   resolveCascadeBackoffMinutes,
   shouldBackoffReviewerSpawn,
+  shouldPauseReviewerModel,
 };

@@ -59,6 +59,14 @@ if (process.env.NODE_TEST_CONTEXT) {
     const leaked = [];
     for (const [pid, entry] of children) {
       const { child, detached, stack } = entry;
+      // Some adapters reject on a buffer limit before their SIGKILL has
+      // delivered the child's close event. Let in-flight teardown finish.
+      if (child.exitCode === null && child.signalCode === null) {
+        await Promise.race([
+          new Promise((resolve) => child.once('close', resolve)),
+          new Promise((resolve) => setTimeout(resolve, 500)),
+        ]);
+      }
       let alive = false;
       try {
         process.kill(detached ? -pid : pid, 0);

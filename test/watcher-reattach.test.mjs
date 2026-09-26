@@ -464,6 +464,42 @@ test('terminal reviewer claims take priority under the per-poll reconcile cap', 
   assert.deepEqual(killed, [{ pgid: 9001, signal: 'SIGKILL' }]);
 });
 
+test('capped reconciliation rotates unreadable closed claims and gives open claims a turn', async () => {
+  const db = setupDb();
+  seedReviewing(db, { prNumber: 69 });
+  seedReviewing(db, { prNumber: 70, prState: 'closed', closedAt: '2026-05-11T05:19:00.000Z' });
+  seedReviewing(db, { prNumber: 71, prState: 'closed', closedAt: '2026-05-11T05:19:00.000Z' });
+  const probedClosed = [];
+  const probedOpen = [];
+  const options = {
+    db,
+    octokit: makeOctokit([]),
+    now: new Date(FAILURE_AT),
+    maxRows: 1,
+    shouldReconcileRow: () => true,
+    fetchLivePrState: async (row) => {
+      probedClosed.push(row.pr_number);
+      throw new Error('GitHub unavailable');
+    },
+    fetchHeadSha: async (row) => { probedOpen.push(row.pr_number); return HEAD_SHA; },
+    findPostedReview: async () => null,
+    probeSession: () => ({ alive: true, matched: true }),
+    log: makeLog(),
+  };
+
+  await reconcileReviewerSessions(options);
+  assert.deepEqual(probedClosed, [70]);
+  assert.deepEqual(probedOpen, []);
+  await reconcileReviewerSessions(options);
+  assert.deepEqual(probedClosed, [70]);
+  assert.deepEqual(probedOpen, [69]);
+  await reconcileReviewerSessions(options);
+  assert.deepEqual(probedClosed, [70, 71]);
+  assert.equal(readRow(db, REPO, 69).review_status, 'reviewing');
+  assert.equal(readRow(db, REPO, 70).review_status, 'reviewing');
+  assert.equal(readRow(db, REPO, 71).review_status, 'reviewing');
+});
+
 test('merged reviewing rows are skipped without killing an unmatched process group', async () => {
   const db = setupDb();
   seedReviewing(db, {

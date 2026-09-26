@@ -42,6 +42,36 @@ const OVERDUE_RECOVERY_FAILURE_MESSAGE =
 const LEASE_RECOVERY_CAP_FAILURE_MESSAGE =
   'Reviewer lease recovery cap exhausted; leaving the review failed for operator inspection.';
 const POSTED_REVIEW_CLEANUP_RECHECK_DELAYS_MS = Object.freeze([0]);
+const reconcileOrderByDb = new WeakMap();
+
+function selectReconcileRows(db, matchingRows, limit) {
+  const terminal = matchingRows.filter((row) => ['merged', 'closed'].includes(String(row.pr_state).toLowerCase()));
+  const other = matchingRows.filter((row) => !['merged', 'closed'].includes(String(row.pr_state).toLowerCase()));
+  if (!Number.isFinite(limit) || matchingRows.length <= limit) return [...terminal, ...other];
+
+  // A capped poll must make progress in both lanes. Rotate within each lane so
+  // an unreadable closed PR cannot occupy the same terminal slot every poll.
+  const order = reconcileOrderByDb.get(db) || { terminalCursor: 0, otherCursor: 0, terminalTurn: true };
+  const selected = [];
+  let terminalTaken = 0;
+  let otherTaken = 0;
+  while (selected.length < limit && (terminalTaken < terminal.length || otherTaken < other.length)) {
+    const takeTerminal = terminalTaken < terminal.length
+      && (order.terminalTurn || otherTaken >= other.length);
+    if (takeTerminal) {
+      selected.push(terminal[(order.terminalCursor + terminalTaken) % terminal.length]);
+      terminalTaken += 1;
+    } else {
+      selected.push(other[(order.otherCursor + otherTaken) % other.length]);
+      otherTaken += 1;
+    }
+    order.terminalTurn = !takeTerminal;
+  }
+  if (terminal.length > 0) order.terminalCursor = (order.terminalCursor + terminalTaken) % terminal.length;
+  if (other.length > 0) order.otherCursor = (order.otherCursor + otherTaken) % other.length;
+  reconcileOrderByDb.set(db, order);
+  return selected;
+}
 
 function splitRepoPath(repoPath) {
   const [owner, repo] = String(repoPath || '').split('/');
@@ -500,11 +530,8 @@ async function reconcileReviewerSessions({
     : Number.POSITIVE_INFINITY;
   const matchingRows = statements.listReviewing.all().filter((row) => shouldReconcileRow(row, now));
   // Lifecycle sync may have just closed a PR whose reviewer is still live.
-  // Reclaim terminal slots before stale open claims when the per-poll cap binds.
-  const rows = matchingRows.sort((a, b) =>
-    Number(['merged', 'closed'].includes(String(b.pr_state).toLowerCase()))
-    - Number(['merged', 'closed'].includes(String(a.pr_state).toLowerCase()))
-  ).slice(0, limit);
+  // Start with terminal claims, then share a capped poll with stale open rows.
+  const rows = selectReconcileRows(db, matchingRows, limit);
   if (rows.length === 0) return { reconciled: 0, skipped: matchingRows.length };
 
   const failureAt = now.toISOString();

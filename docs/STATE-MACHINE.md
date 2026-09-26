@@ -165,8 +165,9 @@ new PR
   `stmtMarkAttemptStarted`. That atomic claim is the point where failure
   evidence is cleared because a replacement review pass is now durably
   `reviewing`.
-- Fresh transient reviewer failures (`cascade`, `provider-overloaded`,
-  `reviewer-timeout`, `launchctl-bootstrap`, and `daemon-bounce`) settle
+- Fresh transient reviewer failures (`cascade`, `oauth-broken`,
+  `provider-overloaded`, `reviewer-timeout`, `launchctl-bootstrap`, and
+  `daemon-bounce`) settle
   directly to `pending-upstream`, increment `infra_auto_recover_attempts`, and
   resume when the reviewer lane/routing tier recovers; they intentionally do
   not pass through the `failed` compare-and-swap recovery claim. Legacy or
@@ -185,6 +186,14 @@ new PR
   claim is attempted: the watcher prefers
   `quota_reset_at_utc`, falls back to parsing the tagged `failure_message`, then
   falls back to a fixed window anchored to `failed_at` / `last_attempted_at`.
+  `oauth-broken` also maintains a model-scoped outage file under
+  `data/reviewer-credential-outages/` after failures hit the distinct-PR
+  threshold. That preflight hold parks further spawns for the affected model
+  until the file's `nextProbeAt`, then records a fresh probe reservation and
+  lets one normal reviewer attempt through as a recovery probe. A successful
+  probe clears the outage and re-arms rows parked with the outage-transient
+  marker; a failed OAuth probe records fresh evidence while preserving the
+  reserved retry window when it is still in the future.
   `provider-overloaded` preserves HTTP 529/backend capacity failures separately
   from generic `cascade` so pipeline health can report provider instability
   without burning the normal review attempt budget.

@@ -2177,7 +2177,9 @@ export async function processReviewSubject(entry, ctx) {
           pr_number: prNumber,
           decision: 'reviewer-credential-outage-hold',
           failure_class: 'oauth-broken',
-          next_retry_after: credentialOutagePreflight.state?.nextProbeAt || null,
+          next_retry_after: credentialOutagePreflight.nextProbeAfter ||
+            credentialOutagePreflight.state?.nextProbeAt ||
+            null,
         });
         return;
       }
@@ -3172,9 +3174,18 @@ export async function processReviewSubject(entry, ctx) {
                   pr_number: prNumber,
                   decision: 'reviewer-credential-outage-hold',
                   failure_class: 'oauth-broken',
-                  next_retry_after: credentialOutageGate.state?.nextProbeAt || null,
+                  next_retry_after: credentialOutageGate.nextProbeAfter ||
+                    credentialOutageGate.state?.nextProbeAt ||
+                    null,
                 });
                 return { dispatched: false, reason: 'reviewer-credential-outage-hold' };
+              }
+              if (credentialOutageGate.probe) {
+                console.log(
+                  `[watcher] Allowing reviewer credential outage probe for ${repoPath}#${prNumber}: ` +
+                  `${route.reviewerModel} hold expired` +
+                  (credentialOutageGate.nextProbeAfter ? ` at ${credentialOutageGate.nextProbeAfter}` : '')
+                );
               }
               // Count only work that made it through defer, budget, dedupe,
               // claim, freshness, and routing checks and is about to enter the

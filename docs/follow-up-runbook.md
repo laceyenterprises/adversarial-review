@@ -25,6 +25,7 @@ Use this when a review has already been posted to GitHub and you need to inspect
 
 - This is a **bounded loop** with operator override. It is not an unbounded autonomous retry daemon.
 - The **watcher owns review posting**. Follow-up remediation does not post GitHub reviews directly.
+- A reviewer-model credential outage parks new review spawns after failures on two distinct PRs. The watcher admits one eligible reviewer probe for that model every five minutes; a successful review clears the outage and re-arms parked PRs, while a failed probe preserves the next probe deadline. Per-PR cascade backoff is checked before reserving the model probe.
 - The watcher also projects the durable adversarial-review state onto the PR head SHA as the commit status context `agent-os/adversarial-gate` by default. Do not rely on GitHub-native merge or auto-merge until that context is required in branch protection for the target branch. Deployments may opt into a different context with `ADV_GATE_STATUS_CONTEXT`, but the override must be applied consistently to every watcher and branch-protection probe.
 - The remediation worker works on the **existing PR branch**, commits changes, and pushes that branch.
 - The remediation worker does **not** open a new PR and does **not** merge the PR.

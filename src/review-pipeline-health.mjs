@@ -50,6 +50,7 @@ function summarizeConfigSignatureDrift(
     nowMs = Date.now(),
     thresholdMs = DEFAULT_CONFIG_SIGNATURE_DRIFT_ALARM_MS,
     freshnessMs = DEFAULT_CONFIG_SIGNATURE_STATUS_STALE_MS,
+    daemonLoaded = false,
   } = {}
 ) {
   const candidates = [
@@ -69,7 +70,11 @@ function summarizeConfigSignatureDrift(
         ? parsedDriftSinceMs
         : observedMs;
       const statusAgeMs = Math.max(0, nowMs - observedMs);
-      const statusStale = statusAgeMs > freshnessMs;
+      const expectedIntervalMs = Number(status?.expectedIntervalMs);
+      const effectiveFreshnessMs = Number.isFinite(expectedIntervalMs) && expectedIntervalMs > 0
+        ? Math.max(freshnessMs, 3 * expectedIntervalMs)
+        : freshnessMs;
+      const statusStale = statusAgeMs > effectiveFreshnessMs;
       const reportedInSync = status?.inSync ?? null;
       const inSync = statusStale ? null : reportedInSync;
       const driftMs = inSync === false ? Math.max(0, nowMs - driftSinceMs) : 0;
@@ -81,12 +86,19 @@ function summarizeConfigSignatureDrift(
         inSync,
         statusAgeMs,
         statusStale,
-        freshnessMs,
+        freshnessMs: effectiveFreshnessMs,
+        thresholdMs,
         driftMs,
         alarm: statusStale || driftMs > thresholdMs,
       };
     } catch (err) {
-      return { daemon, path, loadedSignature: null, diskSignature: null, inSync: null, driftMs: 0, alarm: false, error: err?.message || String(err) };
+      const errorCode = err?.code || (err instanceof SyntaxError ? 'invalid-json' : 'read-error');
+      return {
+        daemon, path, loadedSignature: null, diskSignature: null,
+        inSync: null, driftMs: 0, thresholdMs,
+        alarm: errorCode !== 'ENOENT' || daemonLoaded,
+        errorCode, error: err?.message || String(err),
+      };
     }
   });
   return {
@@ -4525,21 +4537,28 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
 
   if (config?.hostChecksEnabled !== false) {
     for (const drift of snapshot.configSignatureDrift?.alarmed || []) {
+      const statusUnavailable = Boolean(drift.error);
       const statusStale = drift.statusStale === true;
-      const subject = statusStale
-        ? `${drift.daemon} config signature status is stale`
-        : `${drift.daemon} has used stale config for more than 10 minutes`;
-      const message = statusStale
-        ? `Config signature status has not updated for ${Math.round((drift.statusAgeMs || 0) / 60000)} minute(s).`
-        : `Loaded config signature differs from disk for ${Math.round(drift.driftMs / 60000)} minute(s).`;
-      const evidence = statusStale
-        ? `${drift.path} observedAt=${drift.observedAt || 'unknown'} ` +
-          `ageMs=${drift.statusAgeMs ?? 'unknown'} ` +
-          `thresholdMs=${drift.freshnessMs ?? 'unknown'} ` +
-          `lastInSync=${drift.reportedInSync ?? 'unknown'}`
-        : `${drift.path} loaded=${drift.loadedSignature || 'unknown'} ` +
-          `disk=${drift.diskSignature || 'unknown'}`;
-      const recommendedAction = statusStale
+      const subject = statusUnavailable
+        ? `${drift.daemon} config signature status is unavailable`
+        : statusStale
+          ? `${drift.daemon} config signature status is stale`
+          : `${drift.daemon} has used stale config for more than ${Math.round((drift.thresholdMs ?? config.configSignatureDriftAlarmMs ?? DEFAULT_CONFIG_SIGNATURE_DRIFT_ALARM_MS) / 60000)} minutes`;
+      const message = statusUnavailable
+        ? `Config signature status cannot be read: ${drift.error}`
+        : statusStale
+          ? `Config signature status has not updated for ${Math.round((drift.statusAgeMs || 0) / 60000)} minute(s).`
+          : `Loaded config signature differs from disk for ${Math.round(drift.driftMs / 60000)} minute(s).`;
+      const evidence = statusUnavailable
+        ? `${drift.path} error=${drift.errorCode || 'unknown'}`
+        : statusStale
+          ? `${drift.path} observedAt=${drift.observedAt || 'unknown'} ` +
+            `ageMs=${drift.statusAgeMs ?? 'unknown'} ` +
+            `thresholdMs=${drift.freshnessMs ?? 'unknown'} ` +
+            `lastInSync=${drift.reportedInSync ?? 'unknown'}`
+          : `${drift.path} loaded=${drift.loadedSignature || 'unknown'} ` +
+            `disk=${drift.diskSignature || 'unknown'}`;
+      const recommendedAction = statusUnavailable || statusStale
         ? 'Inspect follow-up daemon liveness and config-status write failures before trusting the cached config-signature state.'
         : 'Inspect the daemon config-refresh path; restart only as immediate containment after preserving the stale-signature evidence.';
       findings.push(buildFinding({
@@ -6009,6 +6028,7 @@ function collectReviewPipelineHealth({
           nowMs,
           thresholdMs: config.configSignatureDriftAlarmMs,
           freshnessMs: config.configSignatureStatusStaleMs,
+          daemonLoaded: launchd.services.some((service) => service.name === 'adversarial-follow-up' && service.loaded === true),
         })
       : {
           thresholdMs: config.configSignatureDriftAlarmMs,

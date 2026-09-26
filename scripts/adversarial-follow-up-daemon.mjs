@@ -34,7 +34,8 @@
 
 import { setTimeout as sleep } from 'node:timers/promises';
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -230,6 +231,12 @@ function resolveDaemonMaxConcurrentJobs(env = process.env) {
 function writeConfigSignatureStatus({ env = process.env, now = () => new Date() } = {}) {
   const hqRoot = env.HQ_ROOT;
   if (!hqRoot) return null;
+  if (process.env.NODE_TEST_CONTEXT) {
+    const fromTemp = relative(resolve(tmpdir()), resolve(hqRoot));
+    if (fromTemp.startsWith('..') || isAbsolute(fromTemp)) {
+      throw new Error('test runner refused config-signature status write outside temporary HQ_ROOT');
+    }
+  }
   const status = daemonConfigSignatureStatus({ env });
   const path = join(hqRoot, '.adversarial-follow-up', 'config-status.json');
   let prior = null;
@@ -245,6 +252,9 @@ function writeConfigSignatureStatus({ env = process.env, now = () => new Date() 
     observedAt,
     driftSince,
     daemon: 'adversarial-follow-up',
+    expectedIntervalMs: Number.isFinite(Number(env.TICK_INTERVAL_SECONDS)) && Number(env.TICK_INTERVAL_SECONDS) > 0
+      ? Number(env.TICK_INTERVAL_SECONDS) * 1000
+      : TICK_INTERVAL_MS,
   };
   writeFileAtomic(path, `${JSON.stringify(payload, null, 2)}\n`);
   return payload;
@@ -864,9 +874,15 @@ async function main() {
   }
   installSignalHandlers();
   const telemetryListener = await startFollowUpTelemetryListener();
+  let startupCapacity = 'unresolved';
+  try {
+    startupCapacity = resolveDaemonMaxConcurrentJobs(process.env);
+  } catch (err) {
+    logError(`startup remediation capacity unresolved; iteration will retry: ${err?.message || err}`);
+  }
   logInfo(
     `startup complete; entering tick loop (interval=${TICK_INTERVAL_SECONDS}s ` +
-    `${REMEDIATION_MAX_CONCURRENT_JOBS_ENV}=${resolveDaemonMaxConcurrentJobs(process.env)})`
+    `${REMEDIATION_MAX_CONCURRENT_JOBS_ENV}=${startupCapacity})`
   );
 
   const handoffRateLimiter = createHandoffRateLimiter({ rootDir: ROOT, logger: console });

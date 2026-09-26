@@ -570,6 +570,15 @@ remediation:
   assert.equal(status.inSync, true);
   assert.equal(status.driftSince, null);
   assert.equal(status.loadedSignature, status.diskSignature);
+  assert.equal(status.expectedIntervalMs, 120000);
+});
+
+test('test runner cannot write config status to a live HQ root', () => {
+  assert.ok(process.env.NODE_TEST_CONTEXT);
+  assert.throws(
+    () => writeConfigSignatureStatus({ env: { HQ_ROOT: '/Users/airlock/agent-os-hq' } }),
+    /outside temporary HQ_ROOT/
+  );
 });
 
 test('follow-up daemon iteration keeps config drift after per-tick cache reset', async (t) => {

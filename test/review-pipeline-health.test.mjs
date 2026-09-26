@@ -144,6 +144,58 @@ test('CFGSTALE-01 config drift treats stale status files as unknown', () => {
   }
 });
 
+test('CFGSTALE-01 missing and malformed status distinguish unloaded from unsafe', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  try {
+    const nowMs = Date.parse(NOW);
+    const unloaded = summarizeConfigSignatureDrift(hqRoot, { nowMs, daemonLoaded: false });
+    assert.equal(unloaded.alarmed.length, 0);
+    const loaded = summarizeConfigSignatureDrift(hqRoot, { nowMs, daemonLoaded: true });
+    assert.equal(loaded.alarmed.length, 1);
+    assert.equal(loaded.alarmed[0].errorCode, 'ENOENT');
+    const statusDir = path.join(hqRoot, '.adversarial-follow-up');
+    mkdirSync(statusDir, { recursive: true });
+    writeFileSync(path.join(statusDir, 'config-status.json'), '{broken');
+    const malformed = summarizeConfigSignatureDrift(hqRoot, { nowMs, daemonLoaded: false });
+    assert.equal(malformed.alarmed.length, 1);
+    assert.equal(malformed.alarmed[0].errorCode, 'invalid-json');
+    const snapshot = collectReviewPipelineHealth({
+      rootDir,
+      hqRoot,
+      now: () => new Date(NOW),
+      config: { hostChecksEnabled: false },
+    });
+    const findings = evaluateReviewPipelineFindings({
+      ...snapshot,
+      config: { ...snapshot.config, hostChecksEnabled: true },
+      configSignatureDrift: malformed,
+    }, { observedAt: NOW });
+    assert.match(findings.find((entry) => entry.code === 'review:config_signature_drift').subject, /unavailable/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('CFGSTALE-01 status freshness follows the daemon cadence', () => {
+  const hqRoot = tempRoot();
+  try {
+    const statusDir = path.join(hqRoot, '.adversarial-follow-up');
+    mkdirSync(statusDir, { recursive: true });
+    writeFileSync(path.join(statusDir, 'config-status.json'), JSON.stringify({
+      observedAt: '2026-05-25T17:52:00.000Z',
+      inSync: true,
+      expectedIntervalMs: 5 * 60 * 1000,
+    }));
+    const summary = summarizeConfigSignatureDrift(hqRoot, { nowMs: Date.parse(NOW) });
+    assert.equal(summary.alarmed.length, 0);
+    assert.equal(summary.daemons[0].freshnessMs, 15 * 60 * 1000);
+  } finally {
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
 test('CFGSTALE-01 config drift is host-check gated', () => {
   const rootDir = tempRoot();
   const hqRoot = tempRoot();

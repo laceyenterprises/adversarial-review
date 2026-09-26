@@ -397,6 +397,7 @@ test('follow-up daemon kill-switch disabled uses timer sleep instead of wake wai
 
 test('follow-up daemon iteration preserves reconcile and closer reaper on wake-driven passes', async () => {
   const calls = [];
+  let observedMaxConcurrent = null;
 
   await runFollowUpDaemonIteration({
     refreshFollowUpGithubTokenImpl: async () => {
@@ -454,7 +455,9 @@ test('follow-up daemon iteration preserves reconcile and closer reaper on wake-d
       }));
       return 0;
     },
-    consumeFollowUpJobsUntilCapacityImpl: async () => {
+    resolveMaxConcurrentJobsImpl: () => 8,
+    consumeFollowUpJobsUntilCapacityImpl: async ({ maxConcurrent }) => {
+      observedMaxConcurrent = maxConcurrent;
       calls.push('consume');
       return {
         maxConcurrent: 1,
@@ -489,6 +492,8 @@ test('follow-up daemon iteration preserves reconcile and closer reaper on wake-d
     },
     shouldStop: () => false,
   });
+
+  assert.equal(observedMaxConcurrent, 8, 'each daemon iteration must pass the freshly resolved cap');
 
   assert.ok(calls.indexOf('github-token-refresh') > -1);
   assert.ok(calls.indexOf('github-token-refresh') < calls.indexOf('reconcile'));

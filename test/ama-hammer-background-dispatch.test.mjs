@@ -98,6 +98,18 @@ test('a failing background dispatch is reported and does not wedge the queue', a
   assert.equal(ranAfter, true);
 });
 
+test('a throwing settle callback cannot leave a rejected background promise', async () => {
+  const queue = createAmaHammerBackgroundQueue();
+  queue.submit({
+    key: 'logger-failure',
+    run: async () => ({ dispatched: true }),
+    onSettled: () => { throw new Error('logger failed'); },
+  });
+  await queue.drain();
+  assert.equal(queue.takeSettled('logger-failure')?.result?.dispatched, true);
+  assert.deepEqual(queue.snapshot().keys, []);
+});
+
 // --- End to end through maybeDispatchAmaClosureFor --------------------------
 
 const HEAD = 'abc123';
@@ -139,6 +151,9 @@ function closureArgs(overrides = {}) {
     currentRevisionRef: HEAD,
     logger: { log() {}, warn() {} },
     fetchLatestHeadReviewBodiesImpl: async () => [SETTLED_BODY],
+    fetchCurrentPrStateImpl: async () => ({
+      state: 'OPEN', headSha: HEAD, isDraft: false, mergeable: 'MERGEABLE',
+    }),
     loadConfigImpl: () => ({
       getMergeAuthorityConfig() {
         return { enabled: true };
@@ -217,6 +232,35 @@ test('background mode: a slow hammer dispatch no longer holds the caller, and PR
   assert.equal(calls, 1, 'a settled outcome is applied, not re-dispatched');
   assert.equal(third.dispatched, true);
   assert.equal(third.launchRequestId, 'lrq_bg');
+});
+
+test('queued hammer dispatch rechecks live PR state and head before launching', async () => {
+  for (const liveState of [
+    { state: 'CLOSED', headSha: HEAD, isDraft: false, mergeable: 'MERGEABLE' },
+    { state: 'OPEN', headSha: 'new-head', isDraft: false, mergeable: 'MERGEABLE' },
+  ]) {
+    const queue = createAmaHammerBackgroundQueue({ maxConcurrent: 1 });
+    const blocker = deferred();
+    queue.submit({ key: 'earlier-pr', run: () => blocker.promise });
+    let closerCalls = 0;
+    const args = closureArgs({
+      resolveAmaHammerDispatchModeImpl: () => 'background',
+      amaHammerBackgroundQueueImpl: () => queue,
+      fetchCurrentPrStateImpl: async () => liveState,
+      maybeDispatchAmaCloserImpl: async () => {
+        closerCalls += 1;
+        return { dispatched: true };
+      },
+    });
+    const queued = await maybeDispatchAmaClosureFor(args);
+    assert.equal(queued.backgroundDispatch.state, 'queued');
+    blocker.resolve();
+    await queue.drain();
+    assert.equal(closerCalls, 0);
+    const settled = await maybeDispatchAmaClosureFor(args);
+    assert.equal(settled.dispatched, false);
+    assert.equal(settled.reason, 'background-pr-state-changed');
+  }
 });
 
 test('queue reports a coalesced submit as queued while its entry still waits for a slot', async () => {

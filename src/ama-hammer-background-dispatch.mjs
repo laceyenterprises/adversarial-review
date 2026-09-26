@@ -122,7 +122,11 @@ export function createAmaHammerBackgroundQueue({
         entries.delete(entry.key);
         const next = waiting.shift();
         if (next) launch(next);
-      });
+      })
+      // A settle logger is caller-supplied and can throw. The outcome was
+      // already retained above; consume that final rejection so a background
+      // callback cannot crash the watcher with an unhandled promise rejection.
+      .catch(() => null);
   }
 
   return {

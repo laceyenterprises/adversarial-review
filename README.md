@@ -356,7 +356,8 @@ two-path merge model** (operational reference:
   the same closer call to a bounded process-local PR@head queue and
   return retained ownership (`ama-pending`,
   `ama-closer-dispatch-backgrounded`) immediately; the closer lease and
-  dispatch record still prevent duplicate launches on later ticks. The
+  dispatch record still prevent duplicate launches on later ticks. A queued
+  entry checks the live PR state and head again before it launches. The
   hammer remediates the findings, rebases onto the current base, holds
   the merge bar of required checks plus changed-surface tests, waits out
   GitHub required checks on the exact post-remediation head within a

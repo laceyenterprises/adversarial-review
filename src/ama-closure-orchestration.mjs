@@ -175,6 +175,31 @@ async function fetchProtectivePredecessorStateForPr({
   }
 }
 
+async function fetchCurrentPrStateForBackgroundDispatch({
+  repo,
+  prNumber,
+  execFileImpl = execFileAsync,
+  execGhWithRetryImpl = execGhWithRetry,
+  logger = console,
+} = {}) {
+  const { stdout } = await execGhWithRetryImpl({
+    execFileImpl,
+    args: [
+      'pr', 'view', String(prNumber), '--repo', repo,
+      '--json', 'state,headRefOid,isDraft,mergeable',
+    ],
+    timeoutMs: 30_000,
+    log: logger,
+  });
+  const parsed = JSON.parse(String(stdout || '{}'));
+  return {
+    state: String(parsed?.state || '').trim().toUpperCase(),
+    headSha: String(parsed?.headRefOid || '').trim(),
+    isDraft: parsed?.isDraft === true,
+    mergeable: String(parsed?.mergeable || '').trim().toUpperCase(),
+  };
+}
+
 export async function fetchMergedProtectiveDependentsForPr({
   repo,
   prNumber,
@@ -636,6 +661,7 @@ export async function maybeDispatchAmaClosureFor({
   maybeDispatchAmaCloserImpl = maybeDispatchAmaCloser,
   resolveAmaHammerDispatchModeImpl = resolveAmaHammerDispatchMode,
   amaHammerBackgroundQueueImpl = amaHammerBackgroundQueue,
+  fetchCurrentPrStateImpl = fetchCurrentPrStateForBackgroundDispatch,
   fetchLatestHeadReviewBodiesImpl = (repo, pr, head, options = {}) =>
     fetchReviewBodiesForHead(execFileAsync, repo, pr, head, options),
   liveReviewRetryDelaysMs = AMA_LIVE_REVIEW_LOOKUP_RETRY_DELAYS_MS,
@@ -1671,7 +1697,29 @@ export async function maybeDispatchAmaClosureFor({
         // the posted-review phase stops waiting. `hq dispatch` stays bounded by the
         // closer's own dispatch timeout (resolveAmaDispatchTimeoutMs). No `signal`
         // key: the closer's default applies.
-        run: () => maybeDispatchAmaCloserImpl({ ...closerArgs }),
+        run: async () => {
+          // A saturated queue can hold this closure across several watcher
+          // ticks. Recheck live state at launch, after it gets a queue slot.
+          let live;
+          try {
+            live = await fetchCurrentPrStateImpl({ repo: repoPath, prNumber, logger });
+          } catch (err) {
+            logger?.warn?.(
+              `[watcher] AMA hammer background pre-dispatch PR probe failed for ${backgroundKey}: ` +
+                `${err?.message || err}`,
+            );
+            return { dispatched: false, reason: 'background-pr-state-unavailable' };
+          }
+          if (
+            live?.state !== 'OPEN' ||
+            live?.headSha !== dispatchContext.targetRemediationSha ||
+            live?.isDraft ||
+            live?.mergeable !== 'MERGEABLE'
+          ) {
+            return { dispatched: false, reason: 'background-pr-state-changed' };
+          }
+          return maybeDispatchAmaCloserImpl({ ...closerArgs });
+        },
         onSettled: ({ ok, result: settledResult, error, elapsedMs }) => {
           logger?.log?.(
             `[watcher] AMA hammer background dispatch settled for ${backgroundKey}: ` +

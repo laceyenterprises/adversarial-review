@@ -240,6 +240,13 @@ The queue is process-local, bounded, and keyed by PR@head
 (`<owner>/<repo>#<pr>@<head>`). It starts at most two hammer `hq dispatch`
 subprocesses concurrently, runs waiters FIFO, and coalesces duplicate
 submissions for the same PR@head while one is queued or running.
+When a queued entry gets a slot, the watcher fetches the live PR state,
+head, draft flag, and mergeability before calling the closer. A closed,
+updated, draft, or unmergeable PR yields `background-pr-state-changed` without
+launching a hammer; an unreadable live state yields
+`background-pr-state-unavailable`. Both results are retained for the next tick
+to apply through the normal inline result path. A settle-log failure cannot
+leave an unhandled background promise rejection.
 
 When a run settles, the queue keeps its outcome for that PR@head (at most 256
 outcomes, dropped after an hour). The next tick for that PR@head **applies the

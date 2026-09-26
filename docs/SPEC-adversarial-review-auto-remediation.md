@@ -557,6 +557,14 @@ dispatcher can spawn. The follow-up daemon validates the override during
 startup and exits before claiming work if the value is invalid. Consume-time
 worker selection also runs inside the claimed-job failure handler so
 direct/helper callers cannot strand a job in `in-progress/` on a bad override.
+On each follow-up consume, the routed worker remains primary unless HQ fleet
+quota status authoritatively grounds its provider as exhausted or suspended.
+When grounded, the consumer tries the ordered
+`ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK` classes (default
+`claude-code, codex`) and selects the first with confirmed available quota.
+This availability fallback may select the PR builder's family as a remediator;
+the normal builder-tag route resumes automatically when its provider recovers.
+Unknown, degraded, and unreadable quota states do not authorize fallback.
 
 Code-PR reviewer and remediator stage prompts share the same canonical
 doc-currency contract. Reviewer stages must flag stale in-repo data-model docs
@@ -1225,6 +1233,13 @@ pending job as `quotaHoldRevalidatedErroredAt` and
 operators have durable evidence for why the live wakeup did not clear the hold.
 That hold does not request re-review and does not consume the PR's normal
 remediation round by itself; it is a delayed retry of the same worker round.
+Reconcile checks quota evidence before treating an invalid or partial
+`remediation-reply.json` as terminal. Worker stderr is quota evidence, as is a
+final-message artifact beginning with the known provider-owned account 429
+wrapper; arbitrary narrative or quoted source-code quota words are not.
+Confirmed quota evidence places the same round on the bounded quota hold even
+when its reply artifact is incomplete. Without that evidence, invalid replies
+retain their terminal validation failure.
 If the remediation job exhausts its bounded quota retry budget before the
 provider window clears or the worker can produce a valid remediation reply, it
 must become terminal with `quota-exhausted-budget-exhausted` so operators see a

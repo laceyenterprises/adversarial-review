@@ -601,6 +601,14 @@ the adapter class is `merge-agent` while the commit trailer retains the physical
 remediation harness. The kill switch keeps the physical harness entitlement in
 both the direct worker and auth recovery.
 
+Expected App and installation pins follow the provider the worker was given.
+A merge-agent provider (workflow-push escalation or the merge-agent fallback)
+always uses `OAUTH_BROKER_MERGE_AGENT_EXPECTED_*`, even when per-harness pins
+are configured. Only a harness-keyed provider uses
+`OAUTH_BROKER_REMEDIATION_<CLASS>_EXPECTED_*`. Pairing a per-harness pin with
+a merge-agent token failed every workflow-file remediation push (SEV0
+GHPIN-01, 2026-09-27).
+
 Direct remediation workers put the agent-os `gh` and `git-safe` shims first on
 PATH when those shims are available. The agent-os root is `HQ_REPO_ROOT` when it
 is set; only when it is unset is the root inferred as the superproject that

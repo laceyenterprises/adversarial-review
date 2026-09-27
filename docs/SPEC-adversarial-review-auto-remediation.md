@@ -1307,6 +1307,21 @@ provider window clears or the worker can produce a valid remediation reply, it
 must become terminal with `quota-exhausted-budget-exhausted` so operators see a
 loud stop instead of an endless suspended loop.
 
+For a missing or empty final-message artifact that cannot resume from its
+workspace, reconcile inspects the worker log's final failure. A terminal
+provider-capacity signal (HTTP 429, 503, or 529,
+or an overload diagnostic) requeues the same remediation round as
+`provider-capacity` when the shared `remediationPlan.transientRetries` budget
+allows it. The pending job uses the normal exponential transient backoff,
+starting at five minutes; `retryHistory[]` records the capacity reason. A later
+successful turn or ordinary log progress prevents an earlier recovered capacity
+error from triggering this retry. An HQ dispatch classified as unsuccessful
+continues through its HQ failure classification instead. Once the transient
+budget is exhausted, a terminal capacity failure records
+`failure.code = "provider-capacity"`; other missing or empty artifacts retain
+their artifact failure codes. This hold does not advance the remediation round
+or request re-review.
+
 Live wakeups between workers and daemons use marker files under
 `data/handoff-wake/` only as a latency optimization. The native marker writer
 must assert that the current UID is the canonical owner of the existing wake

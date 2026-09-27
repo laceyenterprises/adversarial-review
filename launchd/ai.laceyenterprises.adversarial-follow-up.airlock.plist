@@ -180,6 +180,17 @@
     <key>StandardErrorPath</key>
     <string>/Users/airlock/Library/Logs/adversarial-follow-up.log</string>
 
+    <!-- FOLLOWQOS-01: without ProcessType launchd starts this daemon as a
+         standard daemon (spawn type daemon (3), PRI 20, the utility band),
+         and every remediation codex session it spawns inherits that class.
+         agent-os SEV1 2026-09-27 (BOOTQOS-01) measured the same tax on the
+         dispatch daemon's workers: identical work ran 3.3-3.7x slower, and
+         boot work fell from p50 87 s to 23 s once it ran Interactive. The
+         watcher (WATCHQOS-01), HCP and the dispatch daemon already run
+         Interactive. -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
     <key>ThrottleInterval</key>
     <integer>30</integer>
 

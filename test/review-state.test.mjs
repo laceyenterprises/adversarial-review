@@ -84,6 +84,7 @@ test('openReviewStateDb applies a busy timeout and shared schema adds reviewer h
     const passColumns = db.prepare('PRAGMA table_info(reviewer_passes)').all().map((column) => column.name);
     assert.ok(passColumns.includes('ended_at'));
     assert.ok(passColumns.includes('reviewer_model'));
+    assert.ok(passColumns.includes('reasoning_effort'));
     assert.ok(passColumns.includes('verdict'));
     assert.ok(passColumns.includes('body_md'));
     assert.ok(passColumns.includes('gh_comment_id'));

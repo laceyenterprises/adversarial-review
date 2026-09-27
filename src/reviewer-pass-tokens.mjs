@@ -183,6 +183,7 @@ function beginReviewerPass(rootDir, {
   attemptNumber,
   reviewerClass,
   reviewerModel = null,
+  reasoningEffort = null,
   passKind,
   workerRunId = null,
   workspacePath = null,
@@ -206,15 +207,16 @@ function beginReviewerPass(rootDir, {
     const reviewerClassNormalized = normalizeReviewerClass(model || reviewerClass);
     const insertResult = db.prepare(
       `INSERT OR IGNORE INTO reviewer_passes (
-         repo, pr_number, attempt_number, reviewer_class, reviewer_model, pass_kind,
+         repo, pr_number, attempt_number, reviewer_class, reviewer_model, reasoning_effort, pass_kind,
          worker_run_id, workspace_path, started_at, status, head_sha, metadata_json
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)`
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)`
     ).run(
       key.repo,
       key.prNumber,
       key.attemptNumber,
       reviewerClassNormalized,
       model,
+      reasoningEffort,
       key.passKind,
       workerRunId || null,
       workspacePath || null,
@@ -258,6 +260,7 @@ function beginReviewerPass(rootDir, {
       `UPDATE reviewer_passes
           SET reviewer_class = COALESCE(?, reviewer_class),
               reviewer_model = COALESCE(?, reviewer_model),
+              reasoning_effort = COALESCE(?, reasoning_effort),
               worker_run_id = COALESCE(?, worker_run_id),
               workspace_path = CASE WHEN ? THEN ? ELSE COALESCE(?, workspace_path) END,
               started_at = CASE WHEN ? THEN ? ELSE started_at END,
@@ -273,6 +276,7 @@ function beginReviewerPass(rootDir, {
     ).run(
       reviewerClassNormalized,
       model,
+      reasoningEffort,
       requestedWorkerRunId,
       takingOwnership ? 1 : 0,
       workspacePath || null,
@@ -435,7 +439,7 @@ function completeReviewerPass(rootDir, {
     ).run(
       endedAt,
       normalizePassStatus(status),
-      normalizeReviewerModel(usage?.model),
+      normalizeReviewerModel(existingMeta.reviewerExecution?.model ? null : usage?.model),
       workerRunId || null,
       writeTokenUsage,
       usage?.input ?? null,

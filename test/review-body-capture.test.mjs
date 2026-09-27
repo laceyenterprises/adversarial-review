@@ -6,7 +6,7 @@ import path from 'node:path';
 
 import { extractReviewVerdict, normalizeReviewVerdict } from '../src/kernel/verdict.mjs';
 import { postRemediationCommentWithCapture } from '../src/follow-up-remediation.mjs';
-import { beginReviewerPass } from '../src/reviewer-pass-tokens.mjs';
+import { beginReviewerPass, completeReviewerPass } from '../src/reviewer-pass-tokens.mjs';
 import { __test__ as reviewerTest } from '../src/reviewer.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 import {
@@ -15,7 +15,30 @@ import {
   findCapturedReviewerBody,
   resolveReviewerBotLogin,
   resolveReviewerBotLoginAliases,
+  updateReviewerPassBodyCapture,
 } from '../src/review-body-capture.mjs';
+
+test('posted review capture persists the harness model and effort through token settlement', () => {
+  const rootDir = makeRootDir();
+  seedPass(rootDir);
+  updateReviewerPassBodyCapture(rootDir, {
+    repo: 'laceyenterprises/adversarial-review', prNumber: 42, attemptNumber: 1,
+    passKind: 'first-pass', verdict: 'comment-only',
+    bodyMd: '## Adversarial Review — Codex (codex-reviewer-lacey)\n\n> Reviewer: codex · gpt-6-sol · high\n\n## Verdict\nComment only',
+    execution: { harness: 'codex', model: 'gpt-6-sol', effort: 'high' },
+  });
+  completeReviewerPass(rootDir, {
+    repo: 'laceyenterprises/adversarial-review', prNumber: 42, attemptNumber: 1,
+    passKind: 'first-pass', status: 'completed', tokenUsage: { model: 'transcript-alias', input: 1, output: 1 },
+  });
+  const db = openReviewStateDb(rootDir);
+  try {
+    const row = db.prepare('SELECT reviewer_model, reasoning_effort FROM reviewer_passes WHERE pr_number = 42').get();
+    assert.deepEqual(row, { reviewer_model: 'gpt-6-sol', reasoning_effort: 'high' });
+  } finally {
+    db.close();
+  }
+});
 
 const { postGitHubReviewWithCapture } = reviewerTest;
 

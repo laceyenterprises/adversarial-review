@@ -1802,6 +1802,21 @@ function schemaV1() {
             __type: TYPE_DICT,
             __strict: true,
             __keys: {
+              remediation: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  non_blocking: {
+                    __type: TYPE_DICT,
+                    __strict: true,
+                    __keys: {
+                      model: { __type: TYPE_STRING, __default: 'gpt-6-sol' },
+                      reasoning_effort: { __type: TYPE_STRING, __default: 'low' },
+                      max_rounds: { __type: TYPE_INT, __default: 1, __min: 1 },
+                    },
+                  },
+                },
+              },
               orchestration_mode: {
                 __type: TYPE_STRING,
                 __default: 'native',

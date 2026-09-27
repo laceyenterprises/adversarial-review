@@ -10,6 +10,7 @@ import {
 import { userInfo } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
+import { loadRoleConfig } from './role-config.mjs';
 import {
   DEFAULT_RISK_CLASS,
   DEFAULT_ROUND_BUDGET_BY_RISK,
@@ -1571,11 +1572,12 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
   const targetRepo = String(repo ?? '');
   const targetPr = Number(prNumber);
   if (!targetRepo || !Number.isFinite(targetPr)) {
-    return { completedRoundsForPR: 0, latestMaxRounds: null, latestJobId: null };
+    return { completedRoundsForPR: 0, consecutiveNonBlockingRounds: 0, latestMaxRounds: null, latestJobId: null };
   }
 
   let completedRoundsForPR = 0;
   const completedRoundTimestamps = [];
+  const completedRoundTriggers = [];
   const completedRemediationRevisionRefs = new Set();
   let latestJob = null;
   let latestTimestamp = '';
@@ -1653,6 +1655,9 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
           const terminalAt = job?.completedAt || job?.failedAt || job?.stoppedAt || null;
           if (Number.isFinite(cur) && cur >= 0 && terminalAt) {
             completedRoundTimestamps.push({ round: cur, terminalAt });
+            if (cur > 0) {
+              completedRoundTriggers.push({ round: cur, terminalAt, nonBlockingOnly: job.nonBlockingOnly === true });
+            }
             const revisionRef = String(job?.revisionRef || '').trim();
             if (revisionRef) completedRemediationRevisionRefs.add(revisionRef);
           }
@@ -1676,6 +1681,16 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
   }
 
   const latestMaxRoundsRaw = Number(latestJob?.remediationPlan?.maxRounds);
+  const latestTriggerByRound = new Map();
+  for (const entry of completedRoundTriggers) {
+    const prior = latestTriggerByRound.get(entry.round);
+    if (!prior || entry.terminalAt > prior.terminalAt) latestTriggerByRound.set(entry.round, entry);
+  }
+  const orderedTriggers = [...latestTriggerByRound.values()].sort((a, b) => a.round - b.round);
+  let consecutiveNonBlockingRounds = 0;
+  for (const entry of orderedTriggers) {
+    consecutiveNonBlockingRounds = entry.nonBlockingOnly ? consecutiveNonBlockingRounds + 1 : 0;
+  }
   const latestMaxRounds = Number.isFinite(latestMaxRoundsRaw) && latestMaxRoundsRaw > 0
     ? latestMaxRoundsRaw
     : null;
@@ -1689,6 +1704,7 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
 
   return {
     completedRoundsForPR,
+    consecutiveNonBlockingRounds,
     latestMaxRounds,
     latestRiskClass,
     latestJobId: latestJob?.jobId || null,
@@ -1850,6 +1866,11 @@ function buildFollowUpJob({
     },
   };
   const classification = resolveDurableFollowUpClassification(reviewBody, critical);
+  const nonBlockingOnly = classification.blockingFindingState === 'known'
+    && classification.blockingFindingCount === 0
+    && classification.nonBlockingFindingState === 'known'
+    && classification.nonBlockingFindingCount > 0
+    && classification.critical === false;
 
   return {
     schemaVersion: FOLLOW_UP_JOB_SCHEMA_VERSION,
@@ -1878,6 +1899,7 @@ function buildFollowUpJob({
     // builder→remediator routing deterministic.
     builderTag: builderTag || null,
     critical: classification.critical,
+    nonBlockingOnly,
     reviewSummary: extractReviewSummary(reviewBody),
     reviewBody,
     // Advisory-only reviews short-circuit before job creation; persisted jobs
@@ -1903,6 +1925,15 @@ function buildFollowUpJob({
 
 function createFollowUpJob({ rootDir, ...jobInput }) {
   const baseJob = buildFollowUpJob(jobInput);
+  const priorNonBlockingRounds = baseJob.nonBlockingOnly
+    ? summarizePRRemediationLedger(rootDir, baseJob).consecutiveNonBlockingRounds
+    : 0;
+  const configuredNonBlockingMax = baseJob.nonBlockingOnly
+    ? loadRoleConfig({ contextKey: 'roles.adversarial.remediation.non_blocking.max_rounds' })
+      .get('roles.adversarial.remediation.non_blocking.max_rounds', 1)
+    : 1;
+  const nonBlockingMaxRounds = Number.isInteger(configuredNonBlockingMax) && configuredNonBlockingMax > 0
+    ? configuredNonBlockingMax : 1;
   const { riskClass, roundBudget } = resolveRoundBudgetForJob(baseJob, {
     rootDir,
     preferPersisted: Number.isInteger(jobInput.maxRemediationRounds) && jobInput.maxRemediationRounds > 0,
@@ -1915,6 +1946,10 @@ function createFollowUpJob({ rootDir, ...jobInput }) {
   // wrote them.
   const resolvedJob = {
     ...baseJob,
+    ...(baseJob.nonBlockingOnly ? {
+      nonBlockingRoundsBefore: priorNonBlockingRounds,
+      nonBlockingMaxRounds,
+    } : {}),
     riskClass,
     recommendedFollowUpAction: {
       ...baseJob.recommendedFollowUpAction,
@@ -2168,7 +2203,10 @@ function claimNextFollowUpJob({
 
     const currentRound = Number(job?.remediationPlan?.currentRound || 0);
     const maxRounds = Number(job?.remediationPlan?.maxRounds || DEFAULT_MAX_REMEDIATION_ROUNDS);
-    if (currentRound >= maxRounds) {
+    const nonBlockingCapReached = job.nonBlockingOnly === true
+      && job?.remediationPlan?.nextAction?.operatorOverride !== true
+      && Number(job.nonBlockingRoundsBefore || 0) >= Number(job.nonBlockingMaxRounds || 1);
+    if (currentRound >= maxRounds || nonBlockingCapReached) {
       let stopped = null;
       try {
         stopped = markStoppedImpl({
@@ -2177,7 +2215,9 @@ function claimNextFollowUpJob({
           stoppedAt: claimedAt,
           stopCode: 'max-rounds-reached',
           sourceStatus: job.status,
-          stopReason: `Reached max remediation rounds (${currentRound}/${maxRounds}) before claim.`,
+          stopReason: nonBlockingCapReached
+            ? `Reached non-blocking remediation rounds (${job.nonBlockingRoundsBefore}/${job.nonBlockingMaxRounds}) before claim.`
+            : `Reached max remediation rounds (${currentRound}/${maxRounds}) before claim.`,
         });
       } catch (err) {
         handleClaimedStopFailure({
@@ -2505,6 +2545,10 @@ function recordRemediationPassStartedSafe({ rootDir, job, worker = {}, spawnedAt
       metadata: {
         jobId: job.jobId || null,
         launchRequestId: workerLaunchRequestId(job, worker),
+        nonBlockingOnly: job.nonBlockingOnly === true,
+        model: worker.resolvedModel || worker.model || null,
+        reasoningEffort: worker.resolvedReasoningLevel || null,
+        roundNumber: job?.remediationPlan?.currentRound || null,
       },
     });
   } catch (err) {
@@ -2539,6 +2583,10 @@ function recordRemediationPassTerminalSafe({ rootDir, job, worker = {}, status, 
       metadata: {
         jobId: job.jobId || null,
         launchRequestId,
+        nonBlockingOnly: job.nonBlockingOnly === true,
+        model: worker.resolvedModel || worker.model || null,
+        reasoningEffort: worker.resolvedReasoningLevel || null,
+        roundNumber: job?.remediationPlan?.currentRound || null,
         failureClass: failureClass || job?.failure?.code || job?.remediationPlan?.stop?.code || null,
         transcriptPath: usage?.transcriptPath || null,
         transcriptSessionId: usage?.adapterSessionKey || null,

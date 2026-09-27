@@ -84,6 +84,7 @@ import {
   resolveCodexAuthPath,
   resolveCodexCliPath,
   resolveCodexRemediationModel,
+  resolveNonBlockingCodexModel,
   resolveGeminiCliPath,
   resolveGeminiRemediationModel,
   spawnClaudeCodeRemediationWorker,
@@ -597,6 +598,7 @@ function createRemediationRuntime({
         replyPath: request.replyPath,
         launchRequestId: request.launchRequestId,
         jobId: request.jobId,
+        modelResolution: workerClass === 'codex' ? request.modelResolution : null,
         requiresWorkflowPush: Boolean(request.requiresWorkflowPush),
         execFileImpl,
         env,
@@ -715,6 +717,7 @@ async function dispatchRemediationViaHq({
   replyPath,
   launchRequestId,
   jobId,
+  modelResolution = null,
   requiresWorkflowPush = false,
   execFileImpl = execFileAsync,
   env = process.env,
@@ -733,6 +736,10 @@ async function dispatchRemediationViaHq({
   const ticketRef = String(jobId || launchRequestId || `PR-${prNumber}`).trim();
   const requestId = String(jobId || launchRequestId || ticketRef).trim();
   const appMode = resolveAdversarialReviewAppMode(env);
+  // The App Contract endpoint currently omits model/reasoning overrides when
+  // translating to hq dispatch. Use the existing direct transport only for
+  // explicitly pinned non-blocking Codex rounds so the override takes effect.
+  const useAppContract = appMode === 'agent-os' && !modelResolution;
   const hqBin = resolveHqBin(env);
   const dispatchEnv = { ...env };
   const workflowPushBrokerEvidence = requiresWorkflowPush
@@ -749,7 +756,8 @@ async function dispatchRemediationViaHq({
     project,
     hqRoot,
   });
-  const ticket = appMode === 'agent-os'
+  if (modelResolution) legacyHqArgs.push('--model', modelResolution.resolvedModel, '--reasoning-level', modelResolution.resolvedReasoningLevel);
+  const ticket = useAppContract
     ? await (async () => {
         const connect = await loadAppSdkConnect();
         const os = await withAppContractTransientRetry(() => connect({
@@ -818,7 +826,7 @@ async function dispatchRemediationViaHq({
   // (the App Contract ticket carries no workspace_dir) and is re-resolved later
   // at reconcile via `hq dispatch status <dispatchId>`. This non-obvious
   // dependency is load-bearing for branch-contamination audits.
-  const workspaceDir = appMode === 'agent-os'
+  const workspaceDir = useAppContract
     ? ticketWorkspaceDir
     : await resolveHqWorkerWorkspace({
         worker: {
@@ -830,6 +838,7 @@ async function dispatchRemediationViaHq({
       });
   return {
     model: workerClass,
+    ...(modelResolution || {}),
     workerClass,
     state: 'spawned',
     spawnedAt: now(),
@@ -3564,6 +3573,7 @@ async function consumeNextFollowUpJob({
   let spawnedWorker = null;
   let workflowPushPreflight = null;
   let claudeModelResolution = null;
+  let codexModelResolution = null;
   const jobEnv = { ...process.env };
 
   try {
@@ -3590,6 +3600,15 @@ async function consumeNextFollowUpJob({
             `auto-reverts when the routed harness recovers`
         );
       }
+    }
+    if (claimed.job.nonBlockingOnly === true && workerClass === 'codex') {
+      const config = loadRoleConfig({ env: jobEnv, contextKey: 'roles.adversarial.remediation.non_blocking' });
+      codexModelResolution = resolveNonBlockingCodexModel({
+        model: config.get('roles.adversarial.remediation.non_blocking.model', 'gpt-6-sol'),
+        reasoningEffort: config.get('roles.adversarial.remediation.non_blocking.reasoning_effort', 'low'),
+        env: jobEnv,
+        hqRoot: jobEnv.HQ_ROOT,
+      });
     }
     const remediationMode = resolveRemediationRuntimeMode(claimed.job, {
       healthRouter,
@@ -3892,7 +3911,7 @@ async function consumeNextFollowUpJob({
       hqRoot,
       launchRequestId: replyStorageKey,
       jobId: claimed.job.jobId,
-      modelResolution: claudeModelResolution,
+      modelResolution: codexModelResolution || claudeModelResolution,
       requiresWorkflowPush: Boolean(workflowPushPreflight?.workflowTouch?.touches),
     });
     const worker = runHandle.worker;

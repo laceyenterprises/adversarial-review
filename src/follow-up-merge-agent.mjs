@@ -3004,7 +3004,14 @@ function buildMergeAgentDispatchJob(rootDir, candidate, { reviewStateDb = null }
     latestFollowUpJobStatus: normalizeFollowUpJobStatus(latestJob?.status),
     latestFollowUpReReviewRequested: latestJob?.reReview?.requested === true,
     remediationCurrentRound: Number(latestJob?.remediationPlan?.currentRound || 0),
-    remediationMaxRounds: Number(latestJob?.remediationPlan?.maxRounds || 0),
+    // A non-blocking-only round can exhaust its own smaller cap before the
+    // PR-wide risk budget. Present the effective cap to the final closer so
+    // it takes the same terminal path as normal maxRounds exhaustion.
+    remediationMaxRounds: latestJob?.nonBlockingOnly === true
+      && Number(latestJob?.nonBlockingRoundsBefore || 0) >= Number(latestJob?.nonBlockingMaxRounds || 1)
+      && latestJob?.remediationPlan?.stop?.code === 'max-rounds-reached'
+      ? Number(latestJob?.remediationPlan?.currentRound || 0)
+      : Number(latestJob?.remediationPlan?.maxRounds || 0),
     reviewFailureClass: reviewFailureState.reviewFailureClass,
     reviewFailureExhausted: reviewFailureState.reviewFailureExhausted,
     operatorApproval: buildScopedOperatorApproval(candidate, latestJob),

@@ -1519,7 +1519,7 @@ async function reapFinishedPrFollowUpJobs({
   const withinBudget = () => clock() - startedMs < budgetMs;
   const afterCursor = (entries, key, field) => {
     const sorted = [...entries].sort((a, b) => key(a).localeCompare(key(b)));
-    const index = sorted.findIndex((entry) => key(entry) > (cursor[field] || ''));
+    const index = sorted.findIndex((entry) => key(entry).localeCompare(cursor[field] || '') > 0);
     return index < 0 ? sorted : [...sorted.slice(index), ...sorted.slice(0, index)];
   };
   const nowIso = now();

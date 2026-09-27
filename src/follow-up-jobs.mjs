@@ -11,6 +11,7 @@ import { userInfo } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
+import { isHeldAmaCloserLease } from './ama/closer-lease.mjs';
 import { ensureWorkspaceTrashDir, launchWorkspaceTrashDeleter, workspaceTrashDir } from './follow-up-workspace-trash.mjs';
 import { loadRoleConfig } from './role-config.mjs';
 import {
@@ -2216,6 +2217,15 @@ function claimNextFollowUpJob({
       }
     }
 
+    if (pendingJob?.revisionRef && isHeldAmaCloserLease(rootDir, {
+      repo: pendingJob.repo,
+      prNumber: pendingJob.prNumber,
+      headSha: pendingJob.revisionRef,
+    }, { now: claimedAt })) {
+      console.log(`[follow-up] deferred ${pendingJob.repo}#${pendingJob.prNumber}: closer lease held on ${pendingJob.revisionRef}`);
+      continue;
+    }
+
     const inProgressPath = join(getFollowUpJobDir(rootDir, 'inProgress'), basename(pendingPath));
 
     try {
@@ -2223,6 +2233,15 @@ function claimNextFollowUpJob({
     } catch (err) {
       if (err?.code === 'ENOENT') continue;
       throw err;
+    }
+
+    // The closer can acquire between the pre-check and our atomic claim.
+    if (pendingJob?.revisionRef && isHeldAmaCloserLease(rootDir, {
+      repo: pendingJob.repo, prNumber: pendingJob.prNumber, headSha: pendingJob.revisionRef,
+    }, { now: claimedAt })) {
+      renameSync(inProgressPath, pendingPath);
+      console.log(`[follow-up] deferred ${pendingJob.repo}#${pendingJob.prNumber}: closer lease acquired during claim`);
+      continue;
     }
 
     const job = pendingJob;

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 
@@ -150,3 +150,22 @@ for (const repo of [
     assert.equal(args.includes('--pr'), true, '--pr drives the head-branch inference this test is about');
   });
 }
+
+test('AMA defers closer dispatch while a remediation job is pending or in progress', async (t) => {
+  for (const [bucket, status] of [['pending', 'pending'], ['in-progress', 'in_progress']]) {
+    const rootDir = mkdtempSync(join(tmpdir(), 'ama-active-remediation-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const dir = join(rootDir, 'data', 'follow-up-jobs', bucket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'job.json'), JSON.stringify({
+      jobId: 'job', repo: 'laceyenterprises/finch', prNumber: 2, status,
+    }));
+    const deps = testDeps();
+    const result = await maybeDispatchAmaCloser({
+      ...closerArgs(rootDir, 'laceyenterprises/finch'), ...deps,
+    });
+    assert.equal(result.dispatched, false);
+    assert.equal(result.reason, 'active-remediation-job');
+    assert.equal(deps.calls.length, 0);
+  }
+});

@@ -148,6 +148,18 @@ export function readAmaCloserLease(rootDir, identity) {
   return readLeaseFile(amaCloserLeaseFilePath(rootDir, identity));
 }
 
+/** A current-head closer blocks a remediation claim until its existing lease expiry. */
+export function isHeldAmaCloserLease(rootDir, identity, {
+  now = new Date().toISOString(), pendingExpiryMs = 60 * 60 * 1000,
+  dispatchedExpiryMs = 30 * 60 * 1000,
+} = {}) {
+  const lease = readAmaCloserLease(rootDir, identity);
+  if (!lease || lease.status === TERMINAL) return false;
+  const age = Date.parse(now) - Date.parse(lease.updatedAt || lease.acquiredAt);
+  const expiry = lease.status === PENDING ? pendingExpiryMs : dispatchedExpiryMs;
+  return !Number.isFinite(age) || age < expiry;
+}
+
 /**
  * Delete the durable lease file for a `(repo, prNumber, headSha)` tuple.
  * Used only by watcher-side repair once another durable record proves

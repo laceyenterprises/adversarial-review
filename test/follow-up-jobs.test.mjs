@@ -684,11 +684,13 @@ test('reapTerminalFollowUpWorkspaces removes eligible completed, failed, and arc
   const failedWorkspaceDir = writeWorkspace(failedJobId);
   const archivedWorkspaceDir = writeWorkspace(archivedStoppedJobId);
   const freshWorkspaceDir = writeWorkspace(freshJobId);
+  const launchedTrashDirs = [];
 
   const result = reapTerminalFollowUpWorkspaces({
     rootDir,
     workspaceRootDir,
     nowMs,
+    launchTrashDeleterImpl: ({ trashDir }) => launchedTrashDirs.push(trashDir),
   });
 
   assert.equal(result.scanned, 4);
@@ -698,6 +700,9 @@ test('reapTerminalFollowUpWorkspaces removes eligible completed, failed, and arc
   assert.equal(existsSync(failedWorkspaceDir), false);
   assert.equal(existsSync(archivedWorkspaceDir), false);
   assert.equal(existsSync(freshWorkspaceDir), true);
+  assert.equal(launchedTrashDirs.length, 1);
+  assert.equal(path.dirname(launchedTrashDirs[0]), path.dirname(workspaceRootDir));
+  assert.equal(readdirSync(launchedTrashDirs[0]).length, 3);
   assert.deepEqual(
     result.reapedPaths.slice().sort(),
     [completedWorkspaceDir, failedWorkspaceDir, archivedWorkspaceDir].sort()
@@ -969,13 +974,13 @@ test('reapTerminalFollowUpWorkspaces continues after a per-workspace delete fail
     rootDir,
     workspaceRootDir,
     nowMs,
-    rmSyncImpl: (targetPath, options) => {
+    renameSyncImpl: (targetPath, destination) => {
       if (targetPath === blockedWorkspaceDir) {
         const err = new Error('resource busy');
         err.code = 'EBUSY';
         throw err;
       }
-      rmSync(targetPath, options);
+      renameSync(targetPath, destination);
     },
     logErrorImpl: (...args) => {
       errors.push(args.map((entry) => String(entry)).join(' '));
@@ -1032,8 +1037,8 @@ test('reapTerminalFollowUpWorkspaces logs permission context when a delete failu
       rootDir,
       workspaceRootDir,
       nowMs,
-      rmSyncImpl: (targetPath, options) => {
-        rmSync(targetPath, options);
+      renameSyncImpl: (targetPath, destination) => {
+        renameSync(targetPath, destination);
         const err = new Error('permission denied');
         err.code = 'EACCES';
         throw err;
@@ -1092,7 +1097,7 @@ test('reapTerminalFollowUpWorkspaces records a structured anomaly for permission
     rootDir,
     workspaceRootDir,
     nowMs,
-    rmSyncImpl: () => {
+    renameSyncImpl: () => {
       const err = new Error('permission denied');
       err.code = 'EACCES';
       throw err;

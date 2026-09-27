@@ -2528,6 +2528,44 @@ test('Deliverable 1: operator-approved at the current head substitutes for worke
   }
 });
 
+test('current-head operator approval routes an older request-changes review to daemon merge', async () => {
+  const rootDir = tempRoot();
+  try {
+    const head = 'remediated-head';
+    const prior = 'reviewed-head';
+    const args = unattributedDaemonArgs({ rootDir, prNumber: 901, head });
+    const event = operatorApprovedEventAt(head);
+    let mergeArgs = null;
+    const result = await runDaemonCleanMergeAttempt({
+      ...args,
+      cfg: { ...args.cfg, operatorLogins: ['VirtualPaul'], operatorLabelActorEnforcement: 'enforce' },
+      candidate: { ...args.candidate, labels: ['operator-approved'] },
+      fetchRollupImpl: async () => ({
+        state: 'OPEN', headRefOid: head, checks: args.candidate.statusCheckRollup,
+        mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', labels: ['operator-approved'],
+      }),
+      gateSnapshot: { reviewedHeadSha: prior, settledReview: { verdict: 'request-changes' } },
+      reviewState: {
+        ...args.reviewState, headSha: prior, blockingFindingCount: 1,
+        operatorApprovedEvidence: {
+          applied: true, observedRevisionRef: head, actor: event.actor,
+          eventId: event.id, observedAt: event.createdAt,
+        },
+      },
+      operatorApprovalEvent: event,
+      attemptDaemonCleanMergeImpl: async (input) => {
+        mergeArgs = input;
+        return { disposition: DAEMON_MERGE_DISPOSITION.MERGED, merged: true };
+      },
+    });
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+    assert.equal(mergeArgs.validatedHead, head);
+    assert.equal(mergeArgs.verdict, 'request-changes');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('SEV1: clean stale-head closer commit with unknown worker identity merges under merge-agent accountability without operator-approved', async () => {
   const rootDir = tempRoot();
   try {
@@ -3102,7 +3140,7 @@ test('Deliverable 2: daemon fail-closed pr-not-mergeable (conflict) routes to th
   }
 });
 
-test('Deliverable 2: daemon fail-closed with a NON-remediable co-occurring gate (verdict-not-eligible) still parks', async () => {
+test('daemon route disagreement hands off to the capped hammer and names failing gates', async () => {
   const rootDir = tempRoot();
   try {
     const logs = [];
@@ -3117,11 +3155,11 @@ test('Deliverable 2: daemon fail-closed with a NON-remediable co-occurring gate 
       }),
       maybeDispatchAmaCloserImpl: async () => { closerCalls += 1; return { dispatched: true }; },
     });
-    assert.equal(closerCalls, 0, 'a co-occurring non-remediable gate must park, not hammer');
-    assert.equal(result.skipMergeAgent, true);
+    assert.equal(closerCalls, 1, 'a failed selected route must hand off');
+    assert.equal(result.dispatched, true);
     const parsed = logs.map((l) => { try { return JSON.parse(l); } catch { return null; } });
-    assert.equal(parsed.find((d) => d?.event === 'ama.daemon_clean_fail_closed.hammer_fallback'), undefined);
-    assert.ok(parsed.find((d) => d?.event === 'ama.daemon_clean_park.manual_close_required'), 'a park signal fires');
+    assert.deepEqual(parsed.find((d) => d?.event === 'ama.daemon_clean_fail_closed.hammer_fallback')?.reasons,
+      ['ci-not-green', 'verdict-not-eligible']);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -3145,7 +3183,7 @@ test('daemon fail-closed on branch-protection-missing-gate parks for operator cl
         reasons: ['branch-protection-missing-gate'],
         merged: false,
         attempts: 1,
-        manualCloseRequired: true,
+        manualCloseRequired: false,
       }),
       maybeDispatchAmaCloserImpl: async () => { closerCalls += 1; return { dispatched: true }; },
     });
@@ -3154,7 +3192,7 @@ test('daemon fail-closed on branch-protection-missing-gate parks for operator cl
     assert.equal(result.skipMergeAgent, true);
     const parsed = logs.map((l) => { try { return JSON.parse(l); } catch { return null; } });
     const parkEvent = parsed.find((d) => d?.event === 'ama.daemon_clean_park.manual_close_required');
-    assert.ok(parkEvent);
+    assert.ok(parkEvent, 'a route that cannot hand off alerts even without a clean-review marker');
     assert.deepEqual(parkEvent.reasons, ['branch-protection-missing-gate']);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -3227,7 +3265,7 @@ test('isDaemonFailClosedHammerRemediable classifies remediable vs non-remediable
   assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-not-eligible', ['ci-not-green', 'pr-not-mergeable', 'stale-head'])), true);
   // Non-remediable
   assert.equal(isDaemonFailClosedHammerRemediable(fc('worker-identity-unresolved', ['missing-build-completion-signal'])), false);
-  assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-not-eligible', ['ci-not-green', 'verdict-not-eligible'])), false);
+  assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-not-eligible', ['ci-not-green', 'verdict-not-eligible'])), true);
   assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-not-eligible', ['branch-protection-missing-gate'])), false);
   assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-not-eligible', ['lease-not-held'])), false);
   assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-not-eligible', [])), false);
@@ -3245,6 +3283,10 @@ test('resolveOperatorMergeAccountability requires a head-scoped, attributable, p
   const approved = { id: 'e1', label: 'operator-approved', actor: 'VirtualPaul', createdAt: 't', headSha: head };
   // Happy path
   assert.equal(resolveOperatorMergeAccountability({ operatorApprovalEvent: approved, mergeHeadSha: head }).label, 'operator-approved');
+  assert.equal(resolveOperatorMergeAccountability({
+    operatorApprovalEvent: { ...approved, actor: 'bot' }, mergeHeadSha: head,
+    operatorLogins: ['VirtualPaul'], operatorLabelActorEnforcement: 'enforce',
+  }), null);
   // Stale head → null (no carryover)
   assert.equal(resolveOperatorMergeAccountability({ operatorApprovalEvent: { ...approved, headSha: 'other' }, mergeHeadSha: head }), null);
   // Non-attributable → null

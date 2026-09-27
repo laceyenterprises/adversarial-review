@@ -695,6 +695,7 @@ async function suppressHammerRetryCapExhaustion({
   workerClass,
   existingRecord,
   alertAlreadyEmitted,
+  gateReasons = [],
   deliverAlertImpl,
   logger,
   now,
@@ -752,6 +753,7 @@ async function suppressHammerRetryCapExhaustion({
     const text =
       `Adversarial-review ${suppressionReason} for ${repo}#${prNumber} `
       + `(head ${shortHead}, ${attemptTotal}/${effectiveCap} hammer terminal-remediation dispatches). `
+      + (gateReasons.length ? `Daemon failing gates: ${gateReasons.join(', ')}. ` : '')
       + 'PR not closing — operator intervention required; further hammer dispatch '
       + 'suppressed to protect quota.';
     try {
@@ -4846,7 +4848,8 @@ export async function maybeDispatchAmaCloser({
     });
   }
 
-  if (verdict.eligible && eligibleHammerRouteReasons.length === 0) {
+  if (verdict.eligible && eligibleHammerRouteReasons.length === 0
+    && dispatchContext?.forceHammerAfterDaemonFailure !== true) {
     return noAmaDispatch({
       dispatched: false,
       skipMergeAgent: true,
@@ -4923,6 +4926,7 @@ export async function maybeDispatchAmaCloser({
           : hammerTargetCapExhausted
           ? hammerRetryCapDecision.targetAlertAlreadyEmitted
           : hammerRetryCapDecision.seriesAlertAlreadyEmitted,
+        gateReasons: dispatchContext?.daemonFailureReasons || [],
         deliverAlertImpl,
         logger,
         now: dispatchContext.dispatchedAt,

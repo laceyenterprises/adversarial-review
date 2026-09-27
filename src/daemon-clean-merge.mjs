@@ -10,7 +10,7 @@ import {
   isDaemonMergeReviewAllowed,
   resolveDaemonMergeUncleanReason,
 } from './ama/daemon-merge.mjs';
-import { SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
+import { SETTLED_SUCCESS_VERDICTS, hasOperatorApprovedOverride } from './ama/eligibility.mjs';
 import { appendAmaAuditAttempt, readAmaAuditEntry } from './ama/audit.mjs';
 import { clobberGuardBlocks, evaluateMovedHeadClobberGuard } from './ama/clobber-guard.mjs';
 import { getHeadCloserCommitSuppression } from './head-closer-commit-suppression.mjs';
@@ -79,6 +79,8 @@ export function resolveOperatorMergeAccountability({
   operatorApprovalEvent = null,
   mergeAgentRequestEvent = null,
   mergeHeadSha,
+  operatorLogins = [],
+  operatorLabelActorEnforcement = 'observe',
 } = {}) {
   const head = String(mergeHeadSha || '').trim();
   if (!head) return null;
@@ -88,6 +90,17 @@ export function resolveOperatorMergeAccountability({
   ];
   for (const { label, event } of candidates) {
     if (!event || typeof event !== 'object') continue;
+    if (label === OPERATOR_APPROVED_LABEL && !hasOperatorApprovedOverride({
+      operatorApprovedEvidence: {
+        applied: true,
+        observedRevisionRef: event.headSha || event.head_sha || event.observedRevisionRef,
+        actor: event.actor,
+        eventId: event.id || event.nodeId || event.eventId,
+        observedAt: event.createdAt || event.created_at || event.observedAt,
+      },
+      operatorLogins,
+      operatorLabelActorEnforcement,
+    }, { headSha: head, labels: [OPERATOR_APPROVED_LABEL] })) continue;
     const eventHead = String(
       event.headSha || event.head_sha || event.observedRevisionRef || '',
     ).trim();
@@ -430,7 +443,13 @@ export async function runDaemonCleanMergeAttempt({
   let headCloserCertifiedNonBlocking = false;
   let cleanCloserCommitAccountability = null;
   let cleanCloserCommitSuppression = null;
-  if (!isDaemonMergeReviewAllowed(reviewState, { strictMode })) {
+  const operatorApprovedEvidence = reviewState?.operatorApprovedEvidence || null;
+  const snapshotOperatorOverride = hasOperatorApprovedOverride({
+    operatorApprovedEvidence,
+    operatorLogins: cfg?.operatorLogins,
+    operatorLabelActorEnforcement: cfg?.operatorLabelActorEnforcement,
+  }, { headSha: hamAuditHead, labels: candidate?.labels });
+  if (!snapshotOperatorOverride && !isDaemonMergeReviewAllowed(reviewState, { strictMode })) {
     const uncleanReason =
       resolveDaemonMergeUncleanReason(reviewState, { strictMode }) || 'findings-unknown';
     hamTerminalRemediationHead =
@@ -522,6 +541,14 @@ export async function runDaemonCleanMergeAttempt({
       snapshotHead,
       liveHead,
     };
+  }
+  const liveOperatorOverride = hasOperatorApprovedOverride({
+    operatorApprovedEvidence,
+    operatorLogins: cfg?.operatorLogins,
+    operatorLabelActorEnforcement: cfg?.operatorLabelActorEnforcement,
+  }, { headSha: liveHead, labels: liveRollup?.labels });
+  if (snapshotOperatorOverride && !liveOperatorOverride) {
+    return NOT_TAKEN('operator-approval-no-longer-current');
   }
   if (
     cfg?.autonomousCloserCommitCleanMergeEnabled !== false &&
@@ -646,9 +673,9 @@ export async function runDaemonCleanMergeAttempt({
   // explicit, head-scoped operator label IS the accountability that stands in
   // for worker identity so the clean daemon merge can proceed under an
   // operator-accountable lease instead of parking `worker-identity-unresolved`.
-  // Every other gate is UNCHANGED: `attemptDaemonCleanMerge` still requires a
-  // settled-success verdict, a strict zero-finding review, green required
-  // checks + a mergeable PR, and a live head that matches the validated head.
+  // The shared merge predicate accepts current-head operator approval for the
+  // verdict and reviewed-head gates. Green checks, mergeability, and the exact
+  // live merge head remain mandatory.
   // The label must be pinned to the EXACT head being merged (`liveHead`).
   let operatorMergeAccountability = null;
   let autonomousAccountabilitySubstituted = false;
@@ -657,6 +684,8 @@ export async function runDaemonCleanMergeAttempt({
       operatorApprovalEvent,
       mergeAgentRequestEvent,
       mergeHeadSha: liveHead,
+      operatorLogins: cfg?.operatorLogins,
+      operatorLabelActorEnforcement: cfg?.operatorLabelActorEnforcement,
     });
     if (cleanCloserCommitAccountability) {
       operatorMergeAccountability = cleanCloserCommitAccountability;
@@ -760,7 +789,9 @@ export async function runDaemonCleanMergeAttempt({
   // executor rather than a HAM audit head that may be absent or stale.
   const certifiedNonCleanHead = hamTerminalRemediationHead || headCloserCertifiedNonBlocking;
   const autonomousCloserCommitCleanHead = Boolean(cleanCloserCommitAccountability);
-  const daemonValidatedHead = autonomousCloserCommitCleanHead
+  const daemonValidatedHead = liveOperatorOverride
+    ? liveHead
+    : autonomousCloserCommitCleanHead
     ? liveHead
     : certifiedNonCleanHead
       ? hamAuditHead
@@ -774,6 +805,9 @@ export async function runDaemonCleanMergeAttempt({
     base,
     validatedHead: daemonValidatedHead,
     verdict: daemonVerdict,
+    operatorApprovedEvidence,
+    operatorLogins: cfg?.operatorLogins,
+    operatorLabelActorEnforcement: cfg?.operatorLabelActorEnforcement,
     allowHamTerminalRemediation: hamTerminalRemediationHead,
     allowHeadCloserCertifiedNonBlocking: headCloserCertifiedNonBlocking,
     reviewState: {
@@ -795,7 +829,7 @@ export async function runDaemonCleanMergeAttempt({
       mergeStateStatus: liveRollup?.mergeStateStatus ?? mergeabilityForGate?.mergeStateStatus,
       prState: String(liveRollup?.state || candidate?.prState || 'open').toUpperCase(),
       branchProtectionRequiredContexts,
-      labels: liveRollup?.labels ?? candidate?.labels,
+      labels: liveRollup?.labels,
     },
     mergeMethod,
     hqRoot,

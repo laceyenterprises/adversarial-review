@@ -192,7 +192,7 @@ export const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
  * @param {PrMetadata}  prMetadata
  * @returns {boolean}
  */
-function hasOperatorApprovedOverride(reviewState, prMetadata) {
+export function hasOperatorApprovedOverride(reviewState, prMetadata) {
   const evidence = reviewState?.operatorApprovedEvidence;
   if (!hasValidScopedOperatorApprovalEvidence(evidence, prMetadata)) return false;
   if (!hasCurrentLabel(prMetadata, OPERATOR_APPROVED_LABEL)) return false;

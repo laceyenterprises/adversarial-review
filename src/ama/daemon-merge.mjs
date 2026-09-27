@@ -52,6 +52,7 @@ import {
   writeAmaAuditEntry,
 } from './audit.mjs';
 import { evaluateMergeEligibility } from './merge-eligibility.mjs';
+import { hasOperatorApprovedOverride } from './eligibility.mjs';
 import { evaluateMergeCapabilityEnforcement } from './merge-capability-enforcement.mjs';
 import {
   findMalformedProtectivePredecessorLines,
@@ -341,6 +342,9 @@ export async function attemptDaemonCleanMerge({
   base,
   validatedHead,
   verdict,
+  operatorApprovedEvidence = null,
+  operatorLogins = [],
+  operatorLabelActorEnforcement = 'observe',
   reviewState = {},
   liveGate = {},
   branchProtectionRequired = true,
@@ -501,9 +505,15 @@ export async function attemptDaemonCleanMerge({
   const headCloserCertifiedBypass =
     allowHeadCloserCertifiedNonBlocking === true &&
     isDaemonMergeReviewAllowed(reviewState, { strictMode: false });
+  const initialOperatorOverride = hasOperatorApprovedOverride({
+    operatorApprovedEvidence,
+    operatorLogins,
+    operatorLabelActorEnforcement,
+  }, { headSha: liveGate?.candidateHead, labels: liveGate?.labels });
   if (
     !(allowHamTerminalRemediation === true && hamTerminalVerdict) &&
     !headCloserCertifiedBypass &&
+    !initialOperatorOverride &&
     !isDaemonMergeReviewAllowed(reviewState, { strictMode })
   ) {
     return notTaken(uncleanReason(reviewState, { strictMode }) || 'findings-unknown');
@@ -515,6 +525,9 @@ export async function attemptDaemonCleanMerge({
   const preLease = normalizeGateState(liveGate);
   const preEligibility = evaluateEligibilityImpl({
     verdict,
+    operatorApprovedEvidence,
+    operatorLogins,
+    operatorLabelActorEnforcement,
     leaseHeld: true,
     requiredChecks: preLease.requiredChecks,
     mergeable: preLease.mergeable,
@@ -684,6 +697,9 @@ export async function attemptDaemonCleanMerge({
     // could have been closed, mergeable could have flipped).
     const elig = evaluateEligibilityImpl({
       verdict,
+      operatorApprovedEvidence,
+      operatorLogins,
+      operatorLabelActorEnforcement,
       leaseHeld: true,
       requiredChecks: live.requiredChecks,
       mergeable: live.mergeable,

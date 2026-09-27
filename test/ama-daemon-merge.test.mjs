@@ -261,6 +261,31 @@ test('clean + eligible → daemon merges inline; daemon-merge audit; no local CI
   assert.equal(h.lastMergeCtx.mergeMethod, 'squash');
 });
 
+test('current-head operator approval merges an older request-changes verdict', async () => {
+  const approval = {
+    applied: true, observedRevisionRef: HEAD, actor: 'operator',
+    eventId: 'label-1', observedAt: '2026-09-26T19:03:00Z',
+  };
+  const gate = greenGate({ labels: ['operator-approved'] });
+  const h = makeHarness({ liveGate: gate });
+  const result = await attemptDaemonCleanMerge(baseArgs(h, {
+    verdict: 'request-changes', liveGate: gate,
+    operatorApprovedEvidence: approval, operatorLogins: ['operator'],
+    operatorLabelActorEnforcement: 'enforce',
+    reviewState: cleanReview({ blockingFindingCount: 1 }),
+  }));
+  assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+  assert.equal(h.lastMergeCtx.head, HEAD);
+  const stale = makeHarness({ liveGate: gate });
+  const staleResult = await attemptDaemonCleanMerge(baseArgs(stale, {
+    verdict: 'request-changes', liveGate: gate,
+    operatorApprovedEvidence: { ...approval, observedRevisionRef: OTHER_HEAD },
+    operatorLogins: ['operator'], operatorLabelActorEnforcement: 'enforce',
+  }));
+  assert.equal(staleResult.disposition, DAEMON_MERGE_DISPOSITION.NOT_TAKEN);
+  assert.equal(stale.calls.merge, 0);
+});
+
 test('builder token cannot merge in enforce mode', async () => {
   const h = makeHarness({ mergeResults: [{ exitCode: 0 }] });
   const warnings = [];

@@ -2622,6 +2622,7 @@ test('maybeDispatchAmaCloser suppresses after lifetime ceiling and emits operato
   const result = await maybeDispatchAmaCloser({
     ...hammerDispatchArgs(rootDir, {
       cfg: { hammerLifetimeDispatchCeiling: 3 },
+      dispatchContext: { daemonFailureReasons: ['verdict-not-eligible', 'stale-head'] },
     }),
     ...deps,
   });
@@ -2635,6 +2636,7 @@ test('maybeDispatchAmaCloser suppresses after lifetime ceiling and emits operato
   assert.equal(alertCalls.length, 1);
   assert.equal(alertCalls[0].opts.event, 'hammer_lifetime_ceiling_reached');
   assert.match(alertCalls[0].text, /6\/3 hammer terminal-remediation dispatches/);
+  assert.match(alertCalls[0].text, /Daemon failing gates: verdict-not-eligible, stale-head/);
   assert.equal(alertCalls[0].opts.payload.cap, 3);
   assert.equal(
     infoLogs.filter((entry) => entry.event === 'hammer_lifetime_ceiling_reached').length,

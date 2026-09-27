@@ -58,6 +58,34 @@ test('ham_terminal_remediation_validated verdict is also eligible', () => {
   assert.deepEqual(result, { eligible: true, reasons: [] });
 });
 
+test('current-head operator approval authorizes an older request-changes review', () => {
+  const currentHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const evidence = {
+    applied: true,
+    observedRevisionRef: currentHead,
+    actor: 'operator',
+    eventId: 'label-1',
+    observedAt: '2026-09-26T19:03:00Z',
+  };
+  const state = eligibleState({
+    verdict: 'request-changes',
+    candidateHead: currentHead,
+    labels: ['operator-approved'],
+    operatorApprovedEvidence: evidence,
+    operatorLogins: ['operator'],
+    operatorLabelActorEnforcement: 'enforce',
+  });
+  assert.deepEqual(evaluateMergeEligibility(state), { eligible: true, reasons: [] });
+  assert.deepEqual(evaluateMergeEligibility({
+    ...state,
+    candidateHead: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+  }).reasons, ['verdict-not-eligible', 'stale-head']);
+  assert.deepEqual(evaluateMergeEligibility({
+    ...state,
+    operatorApprovedEvidence: { ...evidence, actor: 'merge-bot' },
+  }).reasons, ['verdict-not-eligible', 'stale-head']);
+});
+
 // Table-driven: each single missing precondition → exactly the expected reason.
 const SINGLE_MISS_CASES = [
   {

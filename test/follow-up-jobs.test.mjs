@@ -4967,6 +4967,7 @@ test('mount-root rename fallback moves the workspace to in-root trash without re
   const workspaceDir = path.join(workspaceRootDir, jobId);
   mkdirSync(workspaceDir);
   const launched = [];
+  const errors = [];
   const result = reapTerminalFollowUpWorkspaces({
     rootDir, workspaceRootDir, nowMs: Date.parse('2026-06-03T12:00:00.000Z'),
     renameSyncImpl: (source, destination) => {
@@ -4976,11 +4977,13 @@ test('mount-root rename fallback moves the workspace to in-root trash without re
       renameSync(source, destination);
     },
     launchTrashDeleterImpl: ({ trashDir }) => launched.push(trashDir),
+    logErrorImpl: (message) => errors.push(message),
   });
   assert.equal(result.reaped, 1);
   assert.equal(existsSync(workspaceDir), false);
   assert.ok(readdirSync(path.join(workspaceRootDir, '.reap-trash')).some((entry) => entry.startsWith(jobId)));
   assert.ok(launched.includes(path.join(workspaceRootDir, '.reap-trash')));
+  assert.match(errors.join('\n'), /in-root trash.*EXDEV/);
 });
 
 test('sibling trash creation failure falls back to in-root trash', (t) => {
@@ -4998,14 +5001,17 @@ test('sibling trash creation failure falls back to in-root trash', (t) => {
   mkdirSync(path.join(workspaceRootDir, jobId));
   writeFileSync(`${realpathSync(workspaceRootDir)}.trash`, 'blocks sibling mkdir');
   const launched = [];
+  const errors = [];
   const result = reapTerminalFollowUpWorkspaces({
     rootDir, workspaceRootDir, nowMs: Date.parse('2026-06-03T12:00:00.000Z'),
     launchTrashDeleterImpl: ({ trashDir }) => launched.push(trashDir),
+    logErrorImpl: (message) => errors.push(message),
   });
   assert.equal(result.reaped, 1);
   assert.equal(existsSync(path.join(workspaceRootDir, jobId)), false);
   assert.ok(readdirSync(path.join(workspaceRootDir, '.reap-trash')).some((entry) => entry.startsWith(jobId)));
   assert.ok(launched.includes(path.join(workspaceRootDir, '.reap-trash')));
+  assert.match(errors.join('\n'), /in-root trash.*EEXIST/);
 });
 
 test('reapTerminalFollowUpWorkspaces reports permission errors and preserves a workspace if both rename targets refuse', (t) => {
@@ -5043,7 +5049,8 @@ test('reapTerminalFollowUpWorkspaces reports permission errors and preserves a w
     assert.equal(result.errors, 1, code);
     assert.equal(existsSync(path.join(workspaceRootDir, jobId)), true, code);
     assert.equal(result.anomalyPaths.length, code === 'EXDEV' ? 0 : 1, code);
-    assert.equal(errors.length, 1, code);
+    assert.equal(errors.length, code === 'EXDEV' ? 2 : 1, code);
+    if (code === 'EXDEV') assert.match(errors[0], /in-root trash.*EXDEV/);
   }
 });
 

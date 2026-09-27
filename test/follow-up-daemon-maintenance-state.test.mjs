@@ -20,6 +20,7 @@ import {
   startFollowUpTelemetryListener,
   writeMaintenanceSweepState,
   writeConfigSignatureStatus,
+  writeFollowUpTickMetrics,
 } from '../scripts/adversarial-follow-up-daemon.mjs';
 import { resetConfigCache } from '../src/config-loader.mjs';
 import { createHandoffRateLimiter, HANDOFF_RATE_CAP_AUDIT_EVENT } from '../src/handoff-rate-cap.mjs';
@@ -609,6 +610,24 @@ test('a new daemon process discards stale consume interval from the status file'
   assert.equal(status.consumeIntervalMs, null);
   assert.equal(status.consumeSkippedReason, null);
   assert.notEqual(status.daemonStartedAt, 'older-process');
+});
+
+test('tick metrics discard a prior process consume timestamp if signature write did not run', (t) => {
+  const rootDir = makeTempDir(t);
+  const hqRoot = path.join(rootDir, 'hq');
+  const statusDir = path.join(hqRoot, '.adversarial-follow-up');
+  mkdirSync(statusDir, { recursive: true });
+  const statusPath = path.join(statusDir, 'config-status.json');
+  writeFileSync(statusPath, JSON.stringify({
+    inSync: true, daemonStartedAt: 'older-process',
+    lastConsumeAt: '2026-05-25T17:00:00.000Z', consumeIntervalMs: 3600000,
+  }));
+  writeFollowUpTickMetrics({ env: { HQ_ROOT: hqRoot }, tickDurationMs: 10, consumeSkippedReason: 'capacity' });
+  const status = JSON.parse(readFileSync(statusPath, 'utf8'));
+  assert.notEqual(status.daemonStartedAt, 'older-process');
+  assert.equal(status.lastConsumeAt, null);
+  assert.equal(status.consumeIntervalMs, null);
+  assert.equal(status.consumeSkippedReason, 'capacity');
 });
 
 test('follow-up daemon iteration keeps config drift after per-tick cache reset', async (t) => {

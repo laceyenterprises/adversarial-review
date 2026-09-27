@@ -291,11 +291,13 @@ function writeFollowUpTickMetrics({ env, tickDurationMs, consumeAt = null, consu
   let prior;
   try { prior = JSON.parse(readFileSync(path, 'utf8')); } catch { return; }
   if (!prior || typeof prior !== 'object' || !('inSync' in prior)) return;
+  const sameProcess = prior.daemonStartedAt === daemonStartedAt;
   const payload = {
     ...prior,
+    daemonStartedAt,
     tickDurationMs,
     tickCompletedAt: new Date().toISOString(),
-    lastConsumeAt: consumeAt || prior.lastConsumeAt || null,
+    lastConsumeAt: consumeAt || (sameProcess ? prior.lastConsumeAt : null) || null,
     consumeIntervalMs,
     consumeSkippedReason,
   };
@@ -1027,4 +1029,5 @@ export {
   startFollowUpTelemetryListener,
   writeMaintenanceSweepState,
   writeConfigSignatureStatus,
+  writeFollowUpTickMetrics,
 };

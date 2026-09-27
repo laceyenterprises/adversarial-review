@@ -84,6 +84,34 @@ test('aged PID lock stays held for a verified deleter or an inconclusive process
   assert.equal(readFileSync(lockPath, 'utf8'), String(process.pid));
 });
 
+test('aged PID lock is retried when its PID belongs to another uid', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'follow-up-trash-eperm-lock-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const trashDir = workspaceTrashDir(join(root, 'workspaces'));
+  mkdirSync(trashDir);
+  const lockPath = `${trashDir}.delete.lock`;
+  writeFileSync(lockPath, '12345');
+  const child = Object.assign(new EventEmitter(), { pid: process.pid, unref() {} });
+  const warnings = [];
+  const killImpl = () => { throw Object.assign(new Error('different uid'), { code: 'EPERM' }); };
+  assert.equal(launchWorkspaceTrashDeleter({
+    trashDir, killImpl,
+    spawnImpl: () => { throw new Error('recent lock must stay held'); },
+    logger: { warn: (message) => warnings.push(message) },
+  }), false);
+  const old = new Date(Date.now() - 7 * 60 * 60 * 1000);
+  utimesSync(lockPath, old, old);
+  assert.equal(launchWorkspaceTrashDeleter({
+    trashDir,
+    killImpl,
+    spawnImpl: () => child,
+    probeImpl: () => ({ status: 0 }),
+    logger: { warn: (message) => warnings.push(message) },
+  }), true);
+  assert.match(warnings.join('\n'), /removing stale deleter lock/);
+  assert.equal(readFileSync(lockPath, 'utf8'), String(process.pid));
+});
+
 test('workspace trash spawn error is handled and releases its PID lock', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'follow-up-trash-spawn-error-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));

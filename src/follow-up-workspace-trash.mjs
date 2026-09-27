@@ -11,7 +11,7 @@ export function workspaceTrashDir(workspaceRootDir) {
   return join(dirname(physicalRoot), `${basename(physicalRoot)}.trash`);
 }
 
-export function launchWorkspaceTrashDeleter({ trashDir, rootDir, workspaceRootDir, spawnImpl = spawn, probeImpl = spawnSync, logger = console } = {}) {
+export function launchWorkspaceTrashDeleter({ trashDir, rootDir, workspaceRootDir, spawnImpl = spawn, probeImpl = spawnSync, killImpl = process.kill, logger = console } = {}) {
   if (!existsSync(trashDir)) return false;
   const lockPath = `${trashDir}.delete.lock`;
   let fd;
@@ -25,7 +25,7 @@ export function launchWorkspaceTrashDeleter({ trashDir, rootDir, workspaceRootDi
     try { ageMs = Math.max(0, Date.now() - statSync(lockPath).mtimeMs); } catch { /* retry below */ }
     if (pid > 0) {
       try {
-        process.kill(pid, 0);
+        killImpl(pid, 0);
         if (ageMs < MAX_DELETER_LOCK_AGE_MS) {
           logger?.warn?.(`[follow-up-workspace-trash] deleter-lock-held pid=${pid} ageMs=${Math.round(ageMs)}`);
           return false;
@@ -43,7 +43,9 @@ export function launchWorkspaceTrashDeleter({ trashDir, rootDir, workspaceRootDi
           return false;
         }
       } catch (probeErr) {
-        if (probeErr.code !== 'ESRCH') {
+        // The deleter runs as this daemon's uid. EPERM means this PID now
+        // belongs to a different uid, so an aged lock cannot be its lock.
+        if (probeErr.code !== 'ESRCH' && !(probeErr.code === 'EPERM' && Number.isFinite(ageMs) && ageMs >= MAX_DELETER_LOCK_AGE_MS)) {
           logger?.warn?.(`[follow-up-workspace-trash] deleter-lock-unverifiable pid=${pid} ageMs=${Math.round(ageMs)}`);
           return false;
         }
@@ -54,7 +56,7 @@ export function launchWorkspaceTrashDeleter({ trashDir, rootDir, workspaceRootDi
     }
     logger?.warn?.(`[follow-up-workspace-trash] removing stale deleter lock pid=${pid || 'unknown'} ageMs=${Math.round(ageMs)}`);
     try { unlinkSync(lockPath); } catch { return false; }
-    return launchWorkspaceTrashDeleter({ trashDir, rootDir, workspaceRootDir, spawnImpl, probeImpl, logger });
+    return launchWorkspaceTrashDeleter({ trashDir, rootDir, workspaceRootDir, spawnImpl, probeImpl, killImpl, logger });
   }
   try {
     const script = fileURLToPath(new URL('./follow-up-workspace-trash-delete.mjs', import.meta.url));

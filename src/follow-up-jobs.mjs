@@ -1482,6 +1482,12 @@ function reapTerminalFollowUpWorkspaces({
   let deferredForBudget = 0;
   let trashDir = null;
   const inRootTrashDir = join(workspaceRootDir, '.reap-trash');
+  let loggedInRootFallback = false;
+  const logInRootFallback = (reason) => {
+    if (loggedInRootFallback) return;
+    loggedInRootFallback = true;
+    logErrorImpl(`[follow-up-jobs] Using in-root trash ${inRootTrashDir}: ${reason}`);
+  };
   const startedMs = clockImpl();
 
   for (const entry of readdirSync(workspaceRootDir, { withFileTypes: true })) {
@@ -1534,7 +1540,8 @@ function reapTerminalFollowUpWorkspaces({
         let destination = trashDir;
         if (!destination) {
           try { destination = ensureWorkspaceTrashDir(workspaceRootDir); }
-          catch {
+          catch (trashErr) {
+            logInRootFallback(`sibling trash creation failed (${trashErr?.code || trashErr?.message || trashErr})`);
             destination = inRootTrashDir;
             mkdirSync(destination, { recursive: true });
           }
@@ -1543,6 +1550,7 @@ function reapTerminalFollowUpWorkspaces({
           renameSyncImpl(workspacePath, join(destination, `${entry.name}-${randomUUID()}`));
         } catch (renameErr) {
           if (renameErr?.code !== 'EXDEV') throw renameErr;
+          logInRootFallback('sibling trash rename failed (EXDEV)');
           destination = inRootTrashDir;
           mkdirSync(destination, { recursive: true });
           renameSyncImpl(workspacePath, join(destination, `${entry.name}-${randomUUID()}`));

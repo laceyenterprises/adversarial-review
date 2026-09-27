@@ -3568,6 +3568,11 @@ test('remediation runtime local mode preserves the claude-code-remediation prove
   let invokedArgs;
   let invokedEnv;
   const handle = await createRemediationRuntime({
+    env: {
+      PATH: process.env.PATH,
+      HOME: workspaceDir,
+      AGENT_OS_DEPLOY_CHECKOUT: path.join(workspaceDir, 'missing-seed'),
+    },
     spawnImpl: (cmd, args, options) => {
       invokedCli = cmd;
       invokedArgs = args;
@@ -3593,6 +3598,8 @@ test('remediation runtime local mode preserves the claude-code-remediation prove
     '--permission-mode',
     'acceptEdits',
     '--dangerously-skip-permissions',
+    '--model',
+    'claude-opus-5-5',
   ]);
 });
 
@@ -4021,7 +4028,8 @@ test('buildRemediationPrompt defaults the provenance trailer to codex-remediatio
 });
 
 test('resolveGeminiRemediationModel defaults to gemini-2.5-pro and honors overrides', () => {
-  assert.equal(resolveGeminiRemediationModel({}), 'gemini-2.5-pro');
+  const noRegistryEnv = { AGENT_OS_DEPLOY_CHECKOUT: path.join(tmpdir(), 'missing-agent-os-checkout') };
+  assert.equal(resolveGeminiRemediationModel(noRegistryEnv), 'gemini-2.5-pro');
   assert.equal(
     resolveGeminiRemediationModel({ GEMINI_MODEL: 'gemini-2.5-flash' }),
     'gemini-2.5-flash'
@@ -4036,12 +4044,26 @@ test('resolveGeminiRemediationModel defaults to gemini-2.5-pro and honors overri
   );
 });
 
+test('resolveGeminiRemediationModel honors explicit hqRoot for display parity with worker spawn', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'adversarial-review-model-helper-'));
+  try {
+    mkdirSync(path.join(root, 'registry'), { recursive: true });
+    writeFileSync(path.join(root, 'registry', 'worker-classes.json'), JSON.stringify({ classes: {
+      'remediator-gemini': { defaultModel: 'gemini-3-pro' },
+    } }));
+    assert.equal(resolveGeminiRemediationModel({}, { hqRoot: root }), 'gemini-3-pro');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('SEV0: resolveCodexRemediationModel pins gpt-5.5 by default and honors overrides (never rides the codex server-default)', () => {
   // Regression for the 2026-07-19 SEV0: riding codex's server-default model
   // routed remediation through the code_mode_only tool-host that times out at
   // handshake, so the worker could not run any command and never wrote its
   // reply. Remediation MUST pin an explicit model.
-  assert.equal(resolveCodexRemediationModel({}), 'gpt-5.5');
+  const noRegistryEnv = { AGENT_OS_DEPLOY_CHECKOUT: path.join(tmpdir(), 'missing-agent-os-checkout') };
+  assert.equal(resolveCodexRemediationModel(noRegistryEnv), 'gpt-5.5');
   assert.equal(resolveCodexRemediationModel({ CODEX_MODEL_ID: 'gpt-5.4' }), 'gpt-5.4');
   // The remediation-specific pin wins over the generic CODEX_MODEL_ID.
   assert.equal(
@@ -4051,6 +4073,19 @@ test('SEV0: resolveCodexRemediationModel pins gpt-5.5 by default and honors over
     }),
     'gpt-5.3-codex'
   );
+});
+
+test('resolveCodexRemediationModel honors explicit hqRoot for display parity with worker spawn', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'adversarial-review-model-helper-'));
+  try {
+    mkdirSync(path.join(root, 'registry'), { recursive: true });
+    writeFileSync(path.join(root, 'registry', 'worker-classes.json'), JSON.stringify({ classes: {
+      'remediator-codex': { defaultModel: 'gpt-6-sol' },
+    } }));
+    assert.equal(resolveCodexRemediationModel({}, { hqRoot: root }), 'gpt-6-sol');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('assertRemediationWorkerOAuth routes gemini to the gemini OAuth pre-flight', async () => {

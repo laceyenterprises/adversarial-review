@@ -116,6 +116,24 @@ test('broker mode mints a claude-code token and sends the shared secret as a Bea
   assert.equal(seen.auth, 'Bearer sekret');
 });
 
+test('broker token mint uses the resolved spawn model over a generic broker model env', async () => {
+  let tokenUrl;
+  await mintClaudeCodeRemediationBrokerToken({
+    env: {
+      OAUTH_BROKER_SHARED_SECRET: 'sekret',
+      OAUTH_BROKER_URL: 'http://broker.test',
+      CLAUDE_MODEL_ID: 'broker-default',
+    },
+    model: 'claude-remediation-governed',
+    fetchImpl: async (url) => {
+      tokenUrl = url;
+      return jsonResponse({ access_token: 'brk-tok', provider: 'claude-code' });
+    },
+  });
+  assert.match(tokenUrl, /model=claude-remediation-governed/);
+  assert.doesNotMatch(tokenUrl, /broker-default/);
+});
+
 test('broker mode falls over to the standby endpoint when the primary fails', async () => {
   const r = await mintClaudeCodeRemediationBrokerToken({
     env: {

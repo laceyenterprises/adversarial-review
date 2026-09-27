@@ -80,6 +80,7 @@ import {
   prepareCodexRemediationStartupEnv,
   prepareGeminiRemediationStartupEnv,
   resolveClaudeCodeCliPath,
+  resolveClaudeRemediationModel,
   resolveCodexAuthPath,
   resolveCodexCliPath,
   resolveCodexRemediationModel,
@@ -663,6 +664,7 @@ function createRemediationRuntime({
         hqRoot: request.hqRoot,
         launchRequestId: request.launchRequestId,
         jobId: request.jobId,
+        modelResolution: request.modelResolution,
         requiresWorkflowPush: Boolean(request.requiresWorkflowPush),
         enforceHarnessIdentity,
         auditSink: harnessIdentityAuditSink,
@@ -3560,6 +3562,7 @@ async function consumeNextFollowUpJob({
   let spawnAttempted = false;
   let spawnedWorker = null;
   let workflowPushPreflight = null;
+  let claudeModelResolution = null;
   const jobEnv = { ...process.env };
 
   try {
@@ -3687,9 +3690,14 @@ async function consumeNextFollowUpJob({
     // consume hot path stays network-free under test. Keychain transport or an
     // already-present token is left untouched by the mint helper.
     if (!hqDispatchEnabled && workerClass === 'claude-code' && mintClaudeCodeRemediationTokenImpl) {
+      claudeModelResolution = resolveClaudeRemediationModel(jobEnv);
       // Pass `log` so the mint's bounded transient-retry ladder surfaces a
       // broker bounce in the daemon log instead of retrying silently.
-      const brokerToken = await mintClaudeCodeRemediationTokenImpl({ env: jobEnv, log });
+      const brokerToken = await mintClaudeCodeRemediationTokenImpl({
+        env: jobEnv,
+        model: claudeModelResolution.resolvedModel,
+        log,
+      });
       if (brokerToken?.injected && brokerToken.token) {
         jobEnv.ANTHROPIC_AUTH_TOKEN = brokerToken.token;
         log.info?.(
@@ -3883,6 +3891,7 @@ async function consumeNextFollowUpJob({
       hqRoot,
       launchRequestId: replyStorageKey,
       jobId: claimed.job.jobId,
+      modelResolution: claudeModelResolution,
       requiresWorkflowPush: Boolean(workflowPushPreflight?.workflowTouch?.touches),
     });
     const worker = runHandle.worker;

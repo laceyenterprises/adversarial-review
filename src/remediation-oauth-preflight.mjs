@@ -478,6 +478,7 @@ async function attemptBrokerClaudeCodeTokenFetch({ base, secret, model, fetchImp
 // `timeoutMs`, so a wedged broker can never hang the remediation drain.
 async function mintClaudeCodeRemediationBrokerToken({
   env = process.env,
+  model = String(env.CLAUDE_MODEL_ID || env.CLAUDE_CODE_MODEL_ID || '').trim(),
   fetchImpl = globalThis.fetch,
   timeoutMs = BROKER_TOKEN_TIMEOUT_MS,
   retryDelaysMs = BROKER_TOKEN_RETRY_DELAYS_MS,
@@ -515,7 +516,6 @@ async function mintClaudeCodeRemediationBrokerToken({
       'OAUTH_BROKER_SHARED_SECRET(_FILE) is not configured; cannot mint a broker claude-code token'
     );
   }
-  const model = String(env.CLAUDE_MODEL_ID || env.CLAUDE_CODE_MODEL_ID || '').trim();
   const delays = Array.isArray(retryDelaysMs) ? retryDelaysMs : BROKER_TOKEN_RETRY_DELAYS_MS;
   const failures = [];
   for (const base of resolveBrokerReadyzUrls(env)) {

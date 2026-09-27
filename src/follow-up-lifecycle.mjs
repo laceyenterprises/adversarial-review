@@ -105,6 +105,18 @@ function lifecycleStopDecision(lifecycle, { repo, prNumber, site, job = null }) 
   };
 }
 
+// True only when git proves the commit is absent (`rev-parse --verify --quiet` exits 1).
+// A broken or unreadable workspace (exit 128, spawn errors) is not proof of anything.
+async function workspaceLacksCommit(execFileImpl, workspaceDir, sha) {
+  if (!sha) return false;
+  try {
+    await execFileImpl('git', ['-C', workspaceDir, 'rev-parse', '--verify', '--quiet', `${sha}^{commit}`]);
+    return false;
+  } catch (err) {
+    return err?.code === 1;
+  }
+}
+
 async function activeRemediationStopDecision({
   lifecycle, liveness, job, rootDir, execFileImpl,
   buildReconciliationPathsImpl, parseHqWorkerWorkspaceFromPayloadImpl,
@@ -125,6 +137,9 @@ async function activeRemediationStopDecision({
         : buildReconciliationPathsImpl(rootDir, job).workspaceDir;
       if (!workspaceDir || !existsSync(join(workspaceDir, '.git'))) {
         stop = null;
+      } else if (await workspaceLacksCommit(execFileImpl, workspaceDir, lifecycle.headSha)) {
+        // The worker's own push always exists in its workspace. A head the workspace has never
+        // seen came from someone else, so the stop stands.
       } else {
         try {
           await execFileImpl('git', ['-C', workspaceDir, 'merge-base', '--is-ancestor', lifecycle.headSha, 'HEAD']);

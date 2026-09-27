@@ -10292,10 +10292,58 @@ test('reconcileFollowUpJob cancels an active worker for an external newer head',
     },
     sendWorkerSignalImpl: async () => { signals += 1; return { signalled: true }; },
   });
-  assert.deepEqual(gitCalls, [['git', '-C', workspaceDir, 'merge-base', '--is-ancestor', 'external-head', 'HEAD']]);
+  // The workspace never fetched the external head: rev-parse proves absence (exit 1), so the
+  // stop stands without an ancestry probe.
+  assert.deepEqual(gitCalls, [['git', '-C', workspaceDir, 'rev-parse', '--verify', '--quiet', 'external-head^{commit}']]);
   assert.equal(result.action, 'stopped');
   assert.equal(result.job.remediationPlan.stop.code, 'stale-review-head');
   assert.equal(signals, 1);
+});
+
+async function reconcileActiveOnMovedHead(t, { prNumber, headSha, execFileImpl }) {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'remwaste-head-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber, revisionRef: 'reviewed-head' });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: { model: 'codex', state: 'spawned', processId: 9600 + prNumber, processGroupId: 9600 + prNumber,
+      workspaceRoot: path.dirname(workspaceDir), workspaceDir },
+  });
+  let signals = 0;
+  const result = await reconcileFollowUpJob({
+    rootDir, job: spawned.job, jobPath: spawned.jobPath,
+    isWorkerRunning: () => true,
+    now: () => '2026-04-21T10:15:00.000Z',
+    resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha }),
+    execFileImpl: (command, args) => execFileImpl(command, args, workspaceDir),
+    sendWorkerSignalImpl: async () => { signals += 1; return { signalled: true }; },
+  });
+  return { result, signals };
+}
+
+test('reconcileFollowUpJob cancels an active worker when a fetched external head diverges', async (t) => {
+  const { result, signals } = await reconcileActiveOnMovedHead(t, {
+    prNumber: 81, headSha: 'diverged-head',
+    execFileImpl: async (command, args) => {
+      if (args.includes('rev-parse')) return { stdout: 'diverged-head\n' };
+      throw Object.assign(new Error('not an ancestor'), { code: 1 });
+    },
+  });
+  assert.equal(result.action, 'stopped');
+  assert.equal(result.job.remediationPlan.stop.code, 'stale-review-head');
+  assert.equal(signals, 1);
+});
+
+test('reconcileFollowUpJob keeps an active worker when git cannot read its workspace', async (t) => {
+  const { result, signals } = await reconcileActiveOnMovedHead(t, {
+    prNumber: 82, headSha: 'unknown-head',
+    execFileImpl: async () => { throw Object.assign(new Error('fatal: not a git repository'), { code: 128 }); },
+  });
+  assert.equal(result.action, 'active');
+  assert.equal(signals, 0);
 });
 
 test('reconcileFollowUpJob keeps an active worker after its push and another local commit', async () => {
@@ -10316,6 +10364,10 @@ test('reconcileFollowUpJob keeps an active worker after its push and another loc
     now: () => '2026-04-21T10:15:00.000Z',
     resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: 'worker-pushed-head' }),
     execFileImpl: async (command, args) => {
+      if (args.includes('rev-parse')) {
+        assert.deepEqual([command, ...args], ['git', '-C', workspaceDir, 'rev-parse', '--verify', '--quiet', 'worker-pushed-head^{commit}']);
+        return { stdout: 'worker-pushed-head\n' };
+      }
       assert.deepEqual([command, ...args], ['git', '-C', workspaceDir, 'merge-base', '--is-ancestor', 'worker-pushed-head', 'HEAD']);
       return { stdout: '' };
     },

@@ -261,6 +261,103 @@ test('clean + eligible → daemon merges inline; daemon-merge audit; no local CI
   assert.equal(h.lastMergeCtx.mergeMethod, 'squash');
 });
 
+test('current-head operator approval merges an older request-changes verdict', async () => {
+  const approval = {
+    applied: true, observedRevisionRef: HEAD, actor: 'operator',
+    eventId: 'label-1', observedAt: '2026-09-26T19:03:00Z',
+  };
+  const gate = greenGate({ labels: ['operator-approved'] });
+  const h = makeHarness({ liveGate: gate });
+  const result = await attemptDaemonCleanMerge(baseArgs(h, {
+    verdict: 'request-changes', liveGate: gate,
+    operatorApprovedEvidence: approval, operatorLogins: ['operator'],
+    operatorLabelActorEnforcement: 'enforce',
+    reviewState: cleanReview({ blockingFindingCount: 1 }),
+  }));
+  assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+  assert.equal(h.lastMergeCtx.head, HEAD);
+  const stale = makeHarness({ liveGate: gate });
+  const staleResult = await attemptDaemonCleanMerge(baseArgs(stale, {
+    verdict: 'request-changes', liveGate: gate,
+    operatorApprovedEvidence: { ...approval, observedRevisionRef: OTHER_HEAD },
+    operatorLogins: ['operator'], operatorLabelActorEnforcement: 'enforce',
+  }));
+  assert.equal(staleResult.disposition, DAEMON_MERGE_DISPOSITION.NOT_TAKEN);
+  assert.equal(stale.calls.merge, 0);
+});
+
+test('operator approval removed inside the lease holds the override without a merge', async () => {
+  const approval = {
+    applied: true, observedRevisionRef: HEAD, actor: 'operator',
+    eventId: 'label-1', observedAt: '2026-09-26T19:03:00Z',
+  };
+  const h = makeHarness({ liveGate: greenGate({ labels: [] }) });
+  const result = await attemptDaemonCleanMerge(baseArgs(h, {
+    verdict: 'request-changes',
+    reviewState: cleanReview({ blockingFindingCount: 1 }),
+    liveGate: greenGate({ labels: ['operator-approved'] }),
+    operatorApprovedEvidence: approval,
+    operatorLogins: ['operator'],
+    operatorLabelActorEnforcement: 'enforce',
+  }));
+  assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED);
+  assert.equal(result.reason, 'operator-approval-no-longer-current');
+  assert.equal(h.calls.merge, 0);
+  assert.equal(h.calls.release, 1);
+  assert.equal(h.auditStore.get('o/r#7@' + HEAD).attempts.at(-1).reason,
+    'operator-approval-no-longer-current');
+
+  const clean = makeHarness({ liveGate: greenGate({ labels: [] }) });
+  const cleanResult = await attemptDaemonCleanMerge(baseArgs(clean, {
+    liveGate: greenGate({ labels: ['operator-approved'] }),
+    operatorApprovedEvidence: approval,
+    operatorLogins: ['operator'],
+    operatorLabelActorEnforcement: 'enforce',
+  }));
+  assert.equal(cleanResult.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+  assert.equal(clean.calls.merge, 1, 'a redundant approval cannot hold a clean review');
+
+  const accountable = makeHarness({ liveGate: greenGate({ labels: [] }) });
+  const accountableResult = await attemptDaemonCleanMerge(baseArgs(accountable, {
+    liveGate: greenGate({ labels: ['operator-approved'] }),
+    operatorApprovedEvidence: approval,
+    operatorLogins: ['operator'],
+    operatorLabelActorEnforcement: 'enforce',
+    auditMetadata: { closureAuthority: 'daemon-operator-approved-override' },
+  }));
+  assert.equal(accountableResult.reason, 'operator-approval-no-longer-current');
+  assert.equal(accountable.calls.merge, 0, 'operator-accountable merge needs a live label');
+});
+
+test('clean older-head review cannot merge after its required approval is removed in lease', async () => {
+  const approval = {
+    applied: true, observedRevisionRef: HEAD, actor: 'operator',
+    eventId: 'label-stale-head', observedAt: '2026-09-26T19:03:00Z',
+  };
+  const h = makeHarness({ liveGate: greenGate({ labels: [] }) });
+  const result = await attemptDaemonCleanMerge(baseArgs(h, {
+    liveGate: greenGate({ labels: ['operator-approved'] }),
+    operatorApprovedEvidence: approval,
+    operatorLogins: ['operator'],
+    operatorLabelActorEnforcement: 'enforce',
+    auditMetadata: { closureAuthority: 'daemon-operator-approved-override' },
+  }));
+  assert.equal(result.reason, 'operator-approval-no-longer-current');
+  assert.equal(h.calls.merge, 0);
+  assert.equal(h.calls.release, 1);
+});
+
+test('labels unavailable inside the lease is a transient read failure without a manual-close marker', async () => {
+  const h = makeHarness({ liveGate: greenGate({ labels: undefined }) });
+  const result = await attemptDaemonCleanMerge(baseArgs(h));
+  assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED);
+  assert.equal(result.reason, 'gate-read-failed');
+  assert.deepEqual(result.reasons, ['labels-unavailable']);
+  assert.equal(result.permanent, false);
+  assert.equal(result.manualCloseRequired, false);
+  assert.equal(h.calls.merge, 0);
+});
+
 test('builder token cannot merge in enforce mode', async () => {
   const h = makeHarness({ mergeResults: [{ exitCode: 0 }] });
   const warnings = [];
@@ -418,6 +515,7 @@ test('permanent merge rejection → fail closed with no retry; lease released; r
   assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED);
   assert.equal(result.merged, false);
   assert.equal(result.reason, 'permanent-merge-rejection');
+  assert.equal(result.permanent, true);
   assert.equal(h.calls.merge, 1, 'no retry for permanent failure');
   assert.equal(h.calls.sleeps.length, 0);
   assert.equal(h.calls.release, 1, 'lease released');
@@ -453,6 +551,7 @@ test('missing fresh candidate head is treated as transient gate-read failure', a
 
   assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED);
   assert.equal(result.reason, 'gate-read-failed');
+  assert.equal(result.permanent, false);
   assert.equal(result.attempts, 1);
   assert.equal(h.calls.merge, 0, 'never merges without a fresh head');
   assert.equal(h.calls.release, 1);

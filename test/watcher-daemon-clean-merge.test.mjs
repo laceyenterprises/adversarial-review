@@ -499,7 +499,7 @@ test('daemon clean-park fail-closed emits an operator-visible manual-close signa
   }
 });
 
-test('daemon fail-closed with findings present does NOT emit the clean-park signal', async () => {
+test('transient daemon gate-read failure without manual-close requirement does not page', async () => {
   const rootDir = tempRoot();
   try {
     const logs = [];
@@ -508,10 +508,10 @@ test('daemon fail-closed with findings present does NOT emit the clean-park sign
       logger: { log: (m) => logs.push(String(m)), warn() {} },
       runDaemonCleanMergeAttemptImpl: async () => ({
         disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
-        reason: 'permanent-merge-rejection',
+        reason: 'gate-read-failed',
         merged: false,
         attempts: 1,
-        // Not a clean park (daemon reported it did not qualify as manual-close).
+        // A later tick can retry this read.
         manualCloseRequired: false,
       }),
       maybeDispatchAmaCloserImpl: async () => ({ dispatched: true }),
@@ -522,6 +522,31 @@ test('daemon fail-closed with findings present does NOT emit the clean-park sign
       .map((line) => { try { return JSON.parse(line); } catch { return null; } })
       .find((doc) => doc?.event === 'ama.daemon_clean_park.manual_close_required');
     assert.equal(parkEvent, undefined, 'no clean-park signal when manualCloseRequired is false');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('permanent daemon failure pages even without a clean-review marker', async () => {
+  const rootDir = tempRoot();
+  try {
+    const logs = [];
+    await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      logger: { log: (message) => logs.push(String(message)), warn() {} },
+      runDaemonCleanMergeAttemptImpl: async () => ({
+        disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+        reason: 'permanent-merge-rejection', permanent: true,
+        manualCloseRequired: false,
+      }),
+      maybeDispatchAmaCloserImpl: async () => {
+        throw new Error('permanent daemon failure must not dispatch a hammer');
+      },
+    });
+    const parkEvent = logs
+      .map((line) => { try { return JSON.parse(line); } catch { return null; } })
+      .find((doc) => doc?.event === 'ama.daemon_clean_park.manual_close_required');
+    assert.equal(parkEvent?.reason, 'permanent-merge-rejection');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -2528,6 +2553,295 @@ test('Deliverable 1: operator-approved at the current head substitutes for worke
   }
 });
 
+test('current-head operator approval routes an older request-changes review to daemon merge', async () => {
+  const rootDir = tempRoot();
+  try {
+    const head = 'remediated-head';
+    const prior = 'reviewed-head';
+    const args = unattributedDaemonArgs({ rootDir, prNumber: 901, head });
+    const event = operatorApprovedEventAt(head);
+    let mergeArgs = null;
+    const result = await runDaemonCleanMergeAttempt({
+      ...args,
+      cfg: { ...args.cfg, operatorLogins: ['VirtualPaul'], operatorLabelActorEnforcement: 'enforce' },
+      candidate: { ...args.candidate, labels: ['operator-approved'] },
+      fetchRollupImpl: async () => ({
+        state: 'OPEN', headRefOid: head, checks: args.candidate.statusCheckRollup,
+        mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', labels: ['operator-approved'],
+      }),
+      gateSnapshot: { reviewedHeadSha: prior, settledReview: { verdict: 'request-changes' } },
+      reviewState: {
+        ...args.reviewState, headSha: prior, blockingFindingCount: 1,
+        operatorApprovedEvidence: {
+          applied: true, observedRevisionRef: head, actor: event.actor,
+          eventId: event.id, observedAt: event.createdAt,
+        },
+      },
+      operatorApprovalEvent: event,
+      attemptDaemonCleanMergeImpl: async (input) => {
+        mergeArgs = input;
+        return { disposition: DAEMON_MERGE_DISPOSITION.MERGED, merged: true };
+      },
+    });
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+    assert.equal(mergeArgs.validatedHead, head);
+    assert.equal(mergeArgs.verdict, 'request-changes');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('operator override on an attributed worker records approval instead of worker identity', async () => {
+  const rootDir = tempRoot();
+  try {
+    const head = 'attributed-override-head';
+    const event = operatorApprovedEventAt(head);
+    const args = unattributedDaemonArgs({ rootDir, prNumber: 915, head });
+    const logs = [];
+    let mergeArgs;
+    const result = await runDaemonCleanMergeAttempt({
+      ...args,
+      cfg: { ...args.cfg, operatorLogins: ['VirtualPaul'], operatorLabelActorEnforcement: 'enforce' },
+      candidate: { ...args.candidate, labels: ['operator-approved'] },
+      fetchRollupImpl: async () => ({
+        state: 'OPEN', headRefOid: head, checks: args.candidate.statusCheckRollup,
+        mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', labels: ['operator-approved'],
+      }),
+      gateSnapshot: { reviewedHeadSha: head, settledReview: { verdict: 'request-changes' } },
+      reviewState: {
+        ...args.reviewState, blockingFindingCount: 1,
+        operatorApprovedEvidence: {
+          applied: true, observedRevisionRef: head, actor: event.actor,
+          eventId: event.id, observedAt: event.createdAt,
+        },
+      },
+      readBuildCompletionSignalForPrImpl: () => ({
+        ok: true,
+        row: { launch_request_id: 'worker-915', worker_class: 'codex', head_sha: head },
+      }),
+      logger: { warn() {}, log: (line) => logs.push(String(line)) },
+      attemptDaemonCleanMergeImpl: async (input) => {
+        mergeArgs = input;
+        return { disposition: DAEMON_MERGE_DISPOSITION.MERGED, merged: true };
+      },
+    });
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+    assert.equal(mergeArgs.workerIdentity.ok, true);
+    assert.equal(mergeArgs.auditMetadata.closureAuthority, 'daemon-operator-approved-override');
+    assert.equal(mergeArgs.auditMetadata.mergeAccountability, 'operator-approval');
+    assert.deepEqual(mergeArgs.auditMetadata.operatorApproval, {
+      label: 'operator-approved', actor: 'VirtualPaul', eventId: event.id,
+      observedAt: event.createdAt, headSha: head,
+    });
+    const overrideEvent = logs.map((line) => { try { return JSON.parse(line); } catch { return null; } })
+      .find((doc) => doc?.event === 'ama.daemon_clean_merge.operator_override_merge');
+    assert.equal(overrideEvent.actor, 'VirtualPaul');
+    assert.equal(overrideEvent.eventId, event.id);
+    assert.equal(overrideEvent.headSha, head);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('clean older-head review records approval as the head authority', async () => {
+  const rootDir = tempRoot();
+  try {
+    const head = 'approved-new-head';
+    const event = operatorApprovedEventAt(head);
+    const args = realRollupHelpers({ rootDir, prNumber: 919, head });
+    let mergeArgs;
+    const result = await runDaemonCleanMergeAttempt({
+      ...args,
+      cfg: { ...args.cfg, operatorLogins: ['VirtualPaul'] },
+      candidate: { ...args.candidate, labels: ['operator-approved'] },
+      gateSnapshot: { reviewedHeadSha: 'older-reviewed-head', settledReview: { verdict: 'comment-only' } },
+      reviewState: {
+        ...args.reviewState,
+        operatorApprovedEvidence: {
+          applied: true, observedRevisionRef: head, actor: event.actor,
+          eventId: event.id, observedAt: event.createdAt,
+        },
+      },
+      operatorApprovalEvent: event,
+      fetchRollupImpl: async () => ({
+        state: 'OPEN', headRefOid: head, checks: [{ name: 'repo-guards', conclusion: 'SUCCESS' }],
+        mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', labels: ['operator-approved'],
+      }),
+      attemptDaemonCleanMergeImpl: async (input) => {
+        mergeArgs = input;
+        return { disposition: DAEMON_MERGE_DISPOSITION.MERGED, merged: true };
+      },
+    });
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+    assert.equal(mergeArgs.validatedHead, head);
+    assert.equal(mergeArgs.auditMetadata.closureAuthority, 'daemon-operator-approved-override');
+    assert.equal(mergeArgs.auditMetadata.mergeAccountability, 'operator-approval');
+    assert.equal(mergeArgs.auditMetadata.operatorApproval.eventId, event.id);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('non-allowlisted actor cannot clear blocking findings in daemon observe mode', async () => {
+  const rootDir = tempRoot();
+  try {
+    const head = 'unlisted-actor-head';
+    const event = operatorApprovedEventAt(head, { actor: 'BuilderBot' });
+    const args = unattributedDaemonArgs({ rootDir, prNumber: 920, head });
+    let mergeAttempted = false;
+    const result = await runDaemonCleanMergeAttempt({
+      ...args,
+      cfg: { ...args.cfg, operatorLogins: ['VirtualPaul'], operatorLabelActorEnforcement: 'observe' },
+      candidate: { ...args.candidate, labels: ['operator-approved'] },
+      gateSnapshot: { reviewedHeadSha: head, settledReview: { verdict: 'request-changes' } },
+      reviewState: {
+        ...args.reviewState,
+        blockingFindingCount: 1,
+        operatorApprovedEvidence: {
+          applied: true, observedRevisionRef: head, actor: event.actor,
+          eventId: event.id, observedAt: event.createdAt,
+        },
+      },
+      operatorApprovalEvent: event,
+      attemptDaemonCleanMergeImpl: async () => { mergeAttempted = true; },
+    });
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.NOT_TAKEN);
+    assert.equal(mergeAttempted, false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('revoked operator approval holds the tick instead of dispatching a hammer from snapshot labels', async () => {
+  const rootDir = tempRoot();
+  try {
+    const head = 'approval-revoked-head';
+    const event = operatorApprovedEventAt(head);
+    const args = unattributedDaemonArgs({ rootDir, prNumber: 902, head });
+    const daemonResult = await runDaemonCleanMergeAttempt({
+      ...args,
+      candidate: { ...args.candidate, labels: ['operator-approved'] },
+      reviewState: {
+        ...args.reviewState,
+        operatorApprovedEvidence: {
+          applied: true, observedRevisionRef: head, actor: event.actor,
+          eventId: event.id, observedAt: event.createdAt,
+        },
+      },
+      operatorApprovalEvent: event,
+      // The head has not moved; only the live operator label was removed.
+      fetchRollupImpl: async () => ({
+        state: 'OPEN', headRefOid: head, checks: args.candidate.statusCheckRollup,
+        mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', labels: [],
+      }),
+    });
+    assert.equal(daemonResult.disposition, DAEMON_MERGE_DISPOSITION.NOT_TAKEN);
+    assert.equal(daemonResult.reason, 'operator-approval-no-longer-current');
+
+    let closerCalls = 0;
+    const snapshot = baseArgs(rootDir);
+    const result = await maybeDispatchAmaClosureFor({
+      ...snapshot,
+      candidate: { ...snapshot.candidate, labels: ['operator-approved'] },
+      labelNames: ['operator-approved'],
+      operatorApprovalEvent: operatorApprovedEventAt('head-live'),
+      runDaemonCleanMergeAttemptImpl: async () => daemonResult,
+      maybeDispatchAmaCloserImpl: async () => {
+        closerCalls += 1;
+        return { dispatched: true };
+      },
+    });
+    assert.equal(closerCalls, 0);
+    assert.equal(result.skipMergeAgent, true);
+    assert.equal(result.reason, 'operator-approval-no-longer-current');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('redundant approval removed before the live read leaves a worker-attributed clean merge eligible', async () => {
+  const rootDir = tempRoot();
+  try {
+    const head = 'clean-approval-removed-head';
+    const event = operatorApprovedEventAt(head);
+    const args = realRollupHelpers({ rootDir, prNumber: 917, head });
+    let mergeArgs = null;
+    const result = await runDaemonCleanMergeAttempt({
+      ...args,
+      candidate: { ...args.candidate, labels: ['operator-approved'] },
+      operatorApprovalEvent: event,
+      reviewState: {
+        ...args.reviewState,
+        operatorApprovedEvidence: {
+          applied: true, observedRevisionRef: head, actor: event.actor,
+          eventId: event.id, observedAt: event.createdAt,
+        },
+      },
+      fetchRollupImpl: async () => ({
+        state: 'OPEN', headRefOid: head, checks: [
+          { name: 'repo-guards', conclusion: 'SUCCESS' },
+        ],
+        mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', labels: [],
+      }),
+      attemptDaemonCleanMergeImpl: async (options) => {
+        mergeArgs = options;
+        return { disposition: DAEMON_MERGE_DISPOSITION.MERGED, merged: true };
+      },
+    });
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+    assert.equal(mergeArgs.auditMetadata.mergeAccountability, 'worker-identity');
+    assert.notEqual(mergeArgs.auditMetadata.closureAuthority, 'daemon-operator-approved-override');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('approval removed in the lease returns the same protective hold to orchestration', async () => {
+  const rootDir = tempRoot();
+  try {
+    const head = 'in-lease-revoked-head';
+    const event = operatorApprovedEventAt(head);
+    const args = unattributedDaemonArgs({ rootDir, prNumber: 916, head });
+    const daemonResult = await runDaemonCleanMergeAttempt({
+      ...args,
+      candidate: { ...args.candidate, labels: ['operator-approved'] },
+      operatorApprovalEvent: event,
+      reviewState: {
+        ...args.reviewState,
+        operatorApprovedEvidence: {
+          applied: true, observedRevisionRef: head, actor: event.actor,
+          eventId: event.id, observedAt: event.createdAt,
+        },
+      },
+      fetchRollupImpl: async () => ({
+        state: 'OPEN', headRefOid: head, checks: args.candidate.statusCheckRollup,
+        mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', labels: ['operator-approved'],
+      }),
+      attemptDaemonCleanMergeImpl: async () => ({
+        disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+        reason: 'operator-approval-no-longer-current',
+      }),
+    });
+    assert.equal(daemonResult.disposition, DAEMON_MERGE_DISPOSITION.NOT_TAKEN);
+    assert.equal(daemonResult.reason, 'operator-approval-no-longer-current');
+
+    let closerCalls = 0;
+    const snapshot = baseArgs(rootDir);
+    const result = await maybeDispatchAmaClosureFor({
+      ...snapshot,
+      candidate: { ...snapshot.candidate, labels: ['operator-approved'] },
+      labelNames: ['operator-approved'],
+      operatorApprovalEvent: operatorApprovedEventAt('head-live'),
+      runDaemonCleanMergeAttemptImpl: async () => daemonResult,
+      maybeDispatchAmaCloserImpl: async () => { closerCalls += 1; return { dispatched: true }; },
+    });
+    assert.equal(closerCalls, 0);
+    assert.equal(result.reason, 'operator-approval-no-longer-current');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('SEV1: clean stale-head closer commit with unknown worker identity merges under merge-agent accountability without operator-approved', async () => {
   const rootDir = tempRoot();
   try {
@@ -3102,7 +3416,7 @@ test('Deliverable 2: daemon fail-closed pr-not-mergeable (conflict) routes to th
   }
 });
 
-test('Deliverable 2: daemon fail-closed with a NON-remediable co-occurring gate (verdict-not-eligible) still parks', async () => {
+test('daemon route disagreement hands off to the capped hammer and names failing gates', async () => {
   const rootDir = tempRoot();
   try {
     const logs = [];
@@ -3117,11 +3431,11 @@ test('Deliverable 2: daemon fail-closed with a NON-remediable co-occurring gate 
       }),
       maybeDispatchAmaCloserImpl: async () => { closerCalls += 1; return { dispatched: true }; },
     });
-    assert.equal(closerCalls, 0, 'a co-occurring non-remediable gate must park, not hammer');
-    assert.equal(result.skipMergeAgent, true);
+    assert.equal(closerCalls, 1, 'a failed selected route must hand off');
+    assert.equal(result.dispatched, true);
     const parsed = logs.map((l) => { try { return JSON.parse(l); } catch { return null; } });
-    assert.equal(parsed.find((d) => d?.event === 'ama.daemon_clean_fail_closed.hammer_fallback'), undefined);
-    assert.ok(parsed.find((d) => d?.event === 'ama.daemon_clean_park.manual_close_required'), 'a park signal fires');
+    assert.deepEqual(parsed.find((d) => d?.event === 'ama.daemon_clean_fail_closed.hammer_fallback')?.reasons,
+      ['ci-not-green', 'verdict-not-eligible']);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -3145,7 +3459,7 @@ test('daemon fail-closed on branch-protection-missing-gate parks for operator cl
         reasons: ['branch-protection-missing-gate'],
         merged: false,
         attempts: 1,
-        manualCloseRequired: true,
+        manualCloseRequired: false,
       }),
       maybeDispatchAmaCloserImpl: async () => { closerCalls += 1; return { dispatched: true }; },
     });
@@ -3154,8 +3468,32 @@ test('daemon fail-closed on branch-protection-missing-gate parks for operator cl
     assert.equal(result.skipMergeAgent, true);
     const parsed = logs.map((l) => { try { return JSON.parse(l); } catch { return null; } });
     const parkEvent = parsed.find((d) => d?.event === 'ama.daemon_clean_park.manual_close_required');
-    assert.ok(parkEvent);
+    assert.ok(parkEvent, 'a route that cannot hand off alerts even without a clean-review marker');
     assert.deepEqual(parkEvent.reasons, ['branch-protection-missing-gate']);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('labels-only eligibility read failure holds without a manual-close page', async () => {
+  const rootDir = tempRoot();
+  try {
+    const logs = [];
+    let closerCalls = 0;
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      logger: { log: (message) => logs.push(String(message)), warn() {} },
+      runDaemonCleanMergeAttemptImpl: async () => ({
+        disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+        reason: 'gate-not-eligible', reasons: ['labels-unavailable'],
+        permanent: true, manualCloseRequired: true, merged: false, attempts: 1,
+      }),
+      maybeDispatchAmaCloserImpl: async () => { closerCalls += 1; return { dispatched: true }; },
+    });
+    assert.equal(result.skipMergeAgent, true);
+    assert.equal(closerCalls, 0);
+    const events = logs.map((message) => { try { return JSON.parse(message); } catch { return null; } });
+    assert.equal(events.some((event) => event?.event === 'ama.daemon_clean_park.manual_close_required'), false);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -3227,7 +3565,7 @@ test('isDaemonFailClosedHammerRemediable classifies remediable vs non-remediable
   assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-not-eligible', ['ci-not-green', 'pr-not-mergeable', 'stale-head'])), true);
   // Non-remediable
   assert.equal(isDaemonFailClosedHammerRemediable(fc('worker-identity-unresolved', ['missing-build-completion-signal'])), false);
-  assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-not-eligible', ['ci-not-green', 'verdict-not-eligible'])), false);
+  assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-not-eligible', ['ci-not-green', 'verdict-not-eligible'])), true);
   assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-not-eligible', ['branch-protection-missing-gate'])), false);
   assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-not-eligible', ['lease-not-held'])), false);
   assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-not-eligible', [])), false);
@@ -3245,6 +3583,14 @@ test('resolveOperatorMergeAccountability requires a head-scoped, attributable, p
   const approved = { id: 'e1', label: 'operator-approved', actor: 'VirtualPaul', createdAt: 't', headSha: head };
   // Happy path
   assert.equal(resolveOperatorMergeAccountability({ operatorApprovalEvent: approved, mergeHeadSha: head }).label, 'operator-approved');
+  assert.equal(resolveOperatorMergeAccountability({
+    operatorApprovalEvent: { ...approved, id: null, nodeId: null, labelEventNodeId: 'legacy-e1' },
+    mergeHeadSha: head, operatorLogins: ['VirtualPaul'], operatorLabelActorEnforcement: 'enforce',
+  })?.label, 'operator-approved');
+  assert.equal(resolveOperatorMergeAccountability({
+    operatorApprovalEvent: { ...approved, actor: 'bot' }, mergeHeadSha: head,
+    operatorLogins: ['VirtualPaul'], operatorLabelActorEnforcement: 'enforce',
+  }), null);
   // Stale head → null (no carryover)
   assert.equal(resolveOperatorMergeAccountability({ operatorApprovalEvent: { ...approved, headSha: 'other' }, mergeHeadSha: head }), null);
   // Non-attributable → null

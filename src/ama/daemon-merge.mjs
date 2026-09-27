@@ -52,6 +52,7 @@ import {
   writeAmaAuditEntry,
 } from './audit.mjs';
 import { evaluateMergeEligibility } from './merge-eligibility.mjs';
+import { hasOperatorApprovedOverride } from './eligibility.mjs';
 import { evaluateMergeCapabilityEnforcement } from './merge-capability-enforcement.mjs';
 import {
   findMalformedProtectivePredecessorLines,
@@ -333,7 +334,7 @@ function priorDaemonPermanentFailure({ readAuditImpl, hqRoot, repo, prNumber, va
  * @param {object} [args.logger]
  * @param {number} [args.retryCap]
  * @param {number} [args.backoffBaseMs]
- * @returns {Promise<object>} `{ disposition, reason, merged, attempts, leaseAcquired, auditWritten, reasons, liveGate }`.
+ * @returns {Promise<object>} `{ disposition, reason, permanent, merged, attempts, leaseAcquired, auditWritten, manualCloseRequired, reasons, liveGate }`.
  */
 export async function attemptDaemonCleanMerge({
   repo,
@@ -341,6 +342,9 @@ export async function attemptDaemonCleanMerge({
   base,
   validatedHead,
   verdict,
+  operatorApprovedEvidence = null,
+  operatorLogins = [],
+  operatorLabelActorEnforcement = 'observe',
   reviewState = {},
   liveGate = {},
   branchProtectionRequired = true,
@@ -501,9 +505,15 @@ export async function attemptDaemonCleanMerge({
   const headCloserCertifiedBypass =
     allowHeadCloserCertifiedNonBlocking === true &&
     isDaemonMergeReviewAllowed(reviewState, { strictMode: false });
+  const initialOperatorOverride = hasOperatorApprovedOverride({
+    operatorApprovedEvidence,
+    operatorLogins,
+    operatorLabelActorEnforcement,
+  }, { headSha: liveGate?.candidateHead, labels: liveGate?.labels });
   if (
     !(allowHamTerminalRemediation === true && hamTerminalVerdict) &&
     !headCloserCertifiedBypass &&
+    !initialOperatorOverride &&
     !isDaemonMergeReviewAllowed(reviewState, { strictMode })
   ) {
     return notTaken(uncleanReason(reviewState, { strictMode }) || 'findings-unknown');
@@ -515,6 +525,9 @@ export async function attemptDaemonCleanMerge({
   const preLease = normalizeGateState(liveGate);
   const preEligibility = evaluateEligibilityImpl({
     verdict,
+    operatorApprovedEvidence,
+    operatorLogins,
+    operatorLabelActorEnforcement,
     leaseHeld: true,
     requiredChecks: preLease.requiredChecks,
     mergeable: preLease.mergeable,
@@ -680,10 +693,27 @@ export async function attemptDaemonCleanMerge({
       terminal = { reason: 'stale-head', permanent: true };
       break;
     }
+    // A clean, worker-attributed merge does not depend on a redundant approval.
+    // The wrapper marks operator-accountable merges explicitly in audit metadata.
+    const approvalRequired =
+      !isDaemonMergeReviewAllowed(reviewState, { strictMode }) ||
+      String(verdict || '').trim().toLowerCase() !== 'settled-success' ||
+      auditMetadata.closureAuthority === 'daemon-operator-approved-override';
+    if (initialOperatorOverride && approvalRequired && !hasOperatorApprovedOverride({
+      operatorApprovedEvidence,
+      operatorLogins,
+      operatorLabelActorEnforcement,
+    }, { headSha: live.candidateHead, labels: live.labels })) {
+      terminal = { reason: 'operator-approval-no-longer-current', permanent: false };
+      break;
+    }
     // Re-verify the full gate on the fresh read (CI could have gone red, the PR
     // could have been closed, mergeable could have flipped).
     const elig = evaluateEligibilityImpl({
       verdict,
+      operatorApprovedEvidence,
+      operatorLogins,
+      operatorLabelActorEnforcement,
       leaseHeld: true,
       requiredChecks: live.requiredChecks,
       mergeable: live.mergeable,
@@ -701,7 +731,14 @@ export async function attemptDaemonCleanMerge({
       labels: live.labels,
     });
     if (!elig.eligible) {
-      terminal = { reason: 'gate-not-eligible', permanent: true, reasons: elig.reasons, liveGate: live };
+      const labelsOnlyReadFailure = elig.reasons.length > 0 &&
+        elig.reasons.every((reason) => reason === 'labels-unavailable');
+      terminal = {
+        reason: labelsOnlyReadFailure ? 'gate-read-failed' : 'gate-not-eligible',
+        permanent: !labelsOnlyReadFailure,
+        reasons: elig.reasons,
+        liveGate: live,
+      };
       break;
     }
 
@@ -831,7 +868,8 @@ export async function attemptDaemonCleanMerge({
   // operator-visible "manual close required" signal so the superproject
   // observability layer (ARR-02) can page on it instead of it being a silent
   // failed-without-merge. This does NOT change the merge decision.
-  const cleanParkManualCloseRequired = !merged && isFullyCleanSettledReview(reviewState);
+  const cleanParkManualCloseRequired =
+    !merged && terminal?.reason !== 'gate-read-failed' && isFullyCleanSettledReview(reviewState);
   let auditWritten = false;
   try {
     if (merged) {
@@ -910,6 +948,7 @@ export async function attemptDaemonCleanMerge({
   return {
     disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
     reason: terminal.reason,
+    permanent: Boolean(terminal.permanent),
     merged: false,
     attempts,
     leaseAcquired: true,

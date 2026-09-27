@@ -687,15 +687,33 @@ identity** (the operator-approval auto-close lane). Apply either:
 - `operator-approved` — the canonical operator override, or
 - `merge-agent-requested` — the operator-fallback signal,
 
-**on the current head**. The daemon then merges the clean PR under an
-operator-accountable lease (the audit records `mergeAccountability:
-operator-approval` with the label, actor, and event id). This substitutes for
-worker identity ONLY: every other gate stays in force — the review must be
-settled-success and strict-clean (zero findings), required checks must be green,
-the PR mergeable, and the live head must match the reviewed head. A red gate
-never merges, and an approval applied at an older head (a stale approval) is
-refused — there is no carryover. Observability: the substitution emits an
-`ama.daemon_clean_merge.operator_accountability_substituted` event.
+**on the current head**. The daemon merges under an operator-accountable lease
+(the audit records `mergeAccountability: operator-approval` with the label,
+actor, and event id). `merge-agent-requested` substitutes for worker identity
+only; it still needs a settled-success, strict-clean review. Current-head
+`operator-approved` also overrides the verdict and finding-count gates, so a
+`Request changes` review with blocking findings can use the daemon lane even
+when worker identity resolves. When the live label is present, the audit records
+`closureAuthority: daemon-operator-approved-override`,
+`mergeAccountability: operator-approval`, and `operatorApproval` with the
+actor, event id, observation time, and approved head. A successful merge emits
+`ama.daemon_clean_merge.operator_override_merge` with the same provenance. The
+daemon re-reads the live label and head before merging. Its validated head is
+the live, approved head, which must still match the head at the merge attempt.
+When the approval substitutes a newer head for an older clean review, the audit
+also records operator approval and the in-lease read must still find that label.
+An inline override that clears a verdict or findings gate requires an allowlisted
+operator actor even when actor enforcement is configured as `observe`.
+Required checks, branch protection, mergeability, and the merge lease remain
+mandatory. An older-head approval or a label removed before the live read or
+inside the merge lease is refused with no carryover when the override is needed
+for review eligibility or operator accountability. A fully clean, settled review
+with resolved worker identity continues through the ordinary daemon gates when
+the label is removed; a required approval holds dispatch until the next tick
+reads fresh labels. Actor provenance is mandatory. For ordinary clean reviews,
+default `observe` enforcement honors a known actor even if that actor is not
+allowlisted; `enforce` requires an allowlisted operator login. The substitution emits
+`ama.daemon_clean_merge.operator_accountability_substituted`.
 
 ### Daemon fail-closed on a hammer-remediable gate → capped hammer fallback
 
@@ -708,6 +726,7 @@ under its own lease. Remediable gates:
 | Daemon fail-closed reason | Hammer action |
 |---|---|
 | `stale-head` | the reviewed head moved; a fresh review head gets its own hammer |
+| `gate-not-eligible` with `verdict-not-eligible` | a selected daemon route disagreed with the live verdict gate; the hammer re-validates the verdict before merge |
 | `gate-not-eligible` with `ci-not-green` | the hammer repairs the failing required checks, then merges |
 | `gate-not-eligible` with `pr-not-mergeable` | the hammer rebases onto base / resolves the conflict, then merges |
 
@@ -717,11 +736,17 @@ fails **loud** via a GBI operator alert and suppresses further dispatch; it is
 never an uncapped re-dispatch. The fallback emits an
 `ama.daemon_clean_fail_closed.hammer_fallback` event.
 
-**Non-remediable gates still park** (fail closed — no blind merge-clicker):
+**Non-remediable gates still hold** (fail closed — no blind merge-clicker):
 `worker-identity-unresolved` (use the operator-approval lane above),
-`verdict-not-eligible`, and `lease-not-held`, plus permanent/unclassified merge
-rejections and transient budget/read exhaustion. A park emits the
-`ama.daemon_clean_park.manual_close_required` event as before.
+`lease-not-held`, and permanent or unclassified merge rejections. Transient
+budget/read exhaustion may retry on a later tick. The watcher emits
+`ama.daemon_clean_park.manual_close_required` only when the daemon marks
+`manualCloseRequired`, a permanent failure, or a non-remediable identity or
+eligibility gate requiring operator action. Missing live labels alone produce a
+transient `gate-read-failed` with no manual-close marker or page; the daemon can
+retry on a later tick. A hammer-remediable failure instead emits
+`ama.daemon_clean_fail_closed.hammer_fallback`. A removed `operator-approved`
+label is a protective hold, not a hammer handoff.
 
 ### `merge-agent-skipped-ama-enabled`
 

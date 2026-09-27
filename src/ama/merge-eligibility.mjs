@@ -23,6 +23,7 @@
  * @module ama/merge-eligibility
  */
 import { labelsContainDuplicateFamilyHold, DUPLICATE_FAMILY_UNRESOLVED_REASON } from '../duplicate-family-gate.mjs';
+import { hasOperatorApprovedOverride } from './eligibility.mjs';
 
 /**
  * Verdict tokens that clear the verdict gate. `settled-success` is the direct
@@ -248,8 +249,13 @@ function headMatches(state) {
  */
 export function evaluateMergeEligibility(state = {}) {
   const reasons = [];
+  const operatorOverride = hasOperatorApprovedOverride({
+    operatorApprovedEvidence: state.operatorApprovedEvidence,
+    operatorLogins: state.operatorLogins,
+    operatorLabelActorEnforcement: state.operatorLabelActorEnforcement,
+  }, { headSha: state.candidateHead, labels: state.labels });
 
-  if (!verdictEligible(state?.verdict)) reasons.push('verdict-not-eligible');
+  if (!verdictEligible(state?.verdict) && !operatorOverride) reasons.push('verdict-not-eligible');
   if (!requiredChecksGreen(state?.requiredChecks, state?.requiredCheckContexts)) reasons.push('ci-not-green');
   if (!prMergeable(state)) reasons.push('pr-not-mergeable');
   if (!branchProtectionRequiresGate(state)) reasons.push('branch-protection-missing-gate');

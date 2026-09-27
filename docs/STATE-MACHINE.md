@@ -498,7 +498,7 @@ down exactly one of two paths:
 | Path | When | What happens |
 |---|---|---|
 | **Hammer (common)** | Final review carries findings (blocking, or non-blocking under the default strict posture), the PR needs a rebase, or CI needs repair | The watcher dispatches exactly one hammer terminal-remediation worker (`templates/hammer-prompt.md`, via `src/ama/dispatch-closer.mjs`). In the default `watcher.ama_hammer_dispatch_mode: inline` mode, the posted-review phase awaits that `hq dispatch` attempt. In `background` mode, the phase submits the same closer call to a bounded in-process queue keyed by PR@head, returns retained ownership (`ama-pending`) with reason `ama-closer-dispatch-backgrounded`, and lets the closer's lease/dispatch-record guards prevent duplicate launches on later ticks. The hammer remediates, rebases at least once onto a recent current base, holds the required-checks-plus-changed-surface-tests merge bar, waits out GitHub required checks on the exact post-remediation head inside a bounded remote-CI window, and merges under its own lease with `--match-head-commit`. If the target branch does not require strict up-to-date heads (`required_status_checks.strict=false` or no strict rule), a post-validation `BEHIND` state caused only by unrelated base movement does not force another rebase when the PR remains `MERGEABLE` and the newer base has no changed-file overlap with this PR. |
-| **Daemon inline merge (rare)** | Final review is fully clean — zero blocking AND zero non-blocking findings, both classifications known — plus green required checks, a MERGEABLE PR, and a live head matching the reviewed head | The watcher daemon clicks merge inline through a bounded `gh pr merge --match-head-commit` subprocess under the shared merge lease (`src/ama/daemon-merge.mjs`). No agent is spawned. Dispositions: `merged`, `failed-closed` (no hammer spawned from this path), `deferred` (lease contention; retry next tick), `not-taken` (falls through to the hammer route). |
+| **Daemon inline merge (rare)** | Final review is fully clean — zero blocking AND zero non-blocking findings, both classifications known — or a current-head `operator-approved` overrides the verdict and finding gates; green required checks, a MERGEABLE PR, and a live validated head remain mandatory | The watcher daemon clicks merge inline through a bounded `gh pr merge --match-head-commit` subprocess under the shared merge lease (`src/ama/daemon-merge.mjs`). An approval override records operator evidence and distinct closure authority in the audit. No agent is spawned. Dispositions: `merged`, `failed-closed` (hammer-remediable gate failures can hand off to the capped hammer), `deferred` (lease contention; retry next tick), `not-taken` (falls through to the hammer route, except a revoked approval needed for eligibility or accountability holds the tick). |
 
 The background hammer queue rechecks the live PR state, head, draft flag, and
 mergeability when each queued entry gets a slot. Changed or unreadable state
@@ -528,10 +528,11 @@ Key control points:
   recent hammer rebase/validation exists, the PR is not `MERGEABLE`, or the
   newer base touches files changed by this PR. Only the hammer's documented
   no-strict up-to-date lane may merge a `BEHIND` head after those guards pass.
-- **`strict_mode`** (default `true`): the daemon may inline-merge only
-  zero-finding reviews. Explicitly setting it `false` permits daemon merge
-  over *known non-blocking* findings only; blocking or unknown finding state
-  still routes to the hammer.
+- **`strict_mode`** (default `true`): the ordinary daemon lane requires a
+  zero-finding review. Explicitly setting it `false` permits daemon merge
+  over *known non-blocking* findings. A current-head `operator-approved`
+  overrides the verdict and finding gates; the daemon verifies the approval
+  again inside the merge lease and holds the tick if it was removed.
 - **`auto_hammer_on_eligibility_miss`** (default `false`): historical.
   It gated the auto-hammer dispatch when it was introduced, but since MSM-04
   the runtime no longer reads it — the hammer route keys on the configured

@@ -63,6 +63,8 @@ try {
     '--preserve-symlinks',
     '--preserve-symlinks-main',
     '--import',
+    path.join(testDir, 'helpers', 'child-leak-guard.mjs'),
+    '--import',
     path.join(testDir, 'helpers', 'rate-limit-state-isolation.mjs'),
     '--test',
     '--test-concurrency=8',

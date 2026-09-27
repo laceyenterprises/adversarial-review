@@ -2965,7 +2965,7 @@ test('reviewer run-state remains parseable after SIGKILL during repeated heartbe
             state: 'heartbeating',
             lastHeartbeatAt: new Date(Date.UTC(2026, 4, 11, 20, 0, tick++)).toISOString(),
           });
-        }, 20);
+        }, 2);
       `,
     ], { detached: true, stdio: 'ignore' });
 
@@ -2974,15 +2974,17 @@ test('reviewer run-state remains parseable after SIGKILL during repeated heartbe
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     assert.equal(existsSync(reviewerRunStatePath(rootDir, 'sigkill-heartbeat-session')), true);
-    let heartbeatSeen = false;
+    let repeatedHeartbeatsSeen = false;
     for (let attempt = 0; attempt < 2_000; attempt += 1) {
-      if (readReviewerRunRecord(rootDir, 'sigkill-heartbeat-session')?.state === 'heartbeating') {
-        heartbeatSeen = true;
+      const record = readReviewerRunRecord(rootDir, 'sigkill-heartbeat-session');
+      if (record?.state === 'heartbeating'
+        && record.lastHeartbeatAt >= new Date(Date.UTC(2026, 4, 11, 20, 0, 5)).toISOString()) {
+        repeatedHeartbeatsSeen = true;
         break;
       }
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
-    assert.equal(heartbeatSeen, true);
+    assert.equal(repeatedHeartbeatsSeen, true);
 
     await killFixtureChild(child);
 

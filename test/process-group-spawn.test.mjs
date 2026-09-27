@@ -45,6 +45,7 @@ test('progress watchdog escalates SIGTERM-ignoring children to process-group SIG
   // Leave enough startup time for the shell to install its TERM trap under load.
   const progressTimeout = 2_000;
   const killGraceMs = 250;
+  const startedAt = Date.now();
 
   await assert.rejects(
     () => spawnCapturedProcessGroup(
@@ -57,9 +58,12 @@ test('progress watchdog escalates SIGTERM-ignoring children to process-group SIG
       }
     ),
     (err) => {
+      const elapsed = Date.now() - startedAt;
       assert.equal(err.progressTimedOut, true);
       assert.equal(err.killed, true);
       assert.equal(err.signal, 'SIGKILL');
+      assert.ok(elapsed < progressTimeout + killGraceMs + 3_000,
+        `elapsed ${elapsed}ms exceeded watchdog escalation budget`);
       assert.match(err.message, /no output/);
       assert.match(err.message, /auth probe failed: token expired/);
       assert.match(err.stderr, /auth probe failed: token expired/);

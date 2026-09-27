@@ -75,18 +75,24 @@ test('cleanup finding recheck passes the live process group and session to its p
       postedAt: '2026-09-20T06:29:34Z',
     });
 
-    let canUseProductionProbe = false;
+    let psCommand;
+    let probeSessionImpl;
     try {
-      canUseProductionProbe = execFileSync('ps', ['-p', String(child.pid), '-o', 'command='], {
+      psCommand = execFileSync('ps', ['-p', String(child.pid), '-o', 'command='], {
         encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-      }).includes(sessionUuid);
-    } catch { /* This host may restrict ps in test sandboxes. */ }
-    const probeSessionImpl = canUseProductionProbe ? undefined : ({ pgid, sessionUuid: probedSession }) => {
-      assert.equal(pgid, child.pid);
-      assert.equal(probedSession, sessionUuid);
-      process.kill(child.pid, 0);
-      return { alive: true, matched: true };
-    };
+      });
+    } catch {
+      // Only sandbox failures to execute ps use the injected probe.
+      probeSessionImpl = ({ pgid, sessionUuid: probedSession }) => {
+        assert.equal(pgid, child.pid);
+        assert.equal(probedSession, sessionUuid);
+        process.kill(child.pid, 0);
+        return { alive: true, matched: true };
+      };
+    }
+    if (psCommand !== undefined) {
+      assert.ok(psCommand.includes(sessionUuid), 'ps omitted the child session UUID');
+    }
     const result = recheckReviewerCleanupFindings({
       rootDir,
       log: { warn() {} },

@@ -1,5 +1,8 @@
 // Preloaded in each node:test worker. Track children at spawn time so a test
 // failure cannot silently leave a detached fixture running after the file ends.
+// This preload registers its root after hook before the test module does.
+// Tests must stop shared children in their own test cleanup (or finally), not
+// in a file-level after hook, which would run after this leak check.
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { readFileSync } from 'node:fs';
@@ -26,10 +29,25 @@ if (process.env.NODE_TEST_CONTEXT) {
   const children = new Map();
   function recordChild(child, args, stack) {
     if (!child?.pid) return;
+    const pid = child.pid;
     const detached = args.some((arg) => arg?.detached === true);
-    children.set(child.pid, { child, detached, stack });
+    const entry = { child, detached, stack };
+    children.set(pid, entry);
     child.once('close', () => {
-      if (!detached) children.delete(child.pid);
+      if (children.get(pid) !== entry) return;
+      if (!detached) {
+        children.delete(pid);
+        return;
+      }
+      // A detached leader can leave grandchildren behind. Retain it only
+      // while its original process group still exists, reducing the window
+      // in which a recycled pgid could point at another test's fixture.
+      try {
+        process.kill(-pid, 0);
+      } catch (error) {
+        if (error.code === 'ESRCH') children.delete(pid);
+        else if (error.code !== 'EPERM') throw error;
+      }
     });
   }
 

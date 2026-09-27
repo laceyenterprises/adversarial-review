@@ -34,6 +34,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { captureLocalReviewerUsage } from './reviewer-pass-tokens.mjs';
+import { normalizeReviewerFamily } from './reviewer-family.mjs';
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
 import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
 import { resolveGitHubAppBotLogin } from './github-app-identity.mjs';
@@ -234,13 +235,6 @@ const LOCAL_REVIEW_SHADOW_MODEL_FAMILY_BY_MODEL = Object.freeze({
   'openai/gpt-oss-20b': 'openai-oss',
 });
 
-const REVIEW_FAMILY_BY_REVIEWER_MODEL = Object.freeze({
-  claude: 'claude',
-  'claude-code': 'claude',
-  codex: 'codex',
-  gemini: 'gemini',
-});
-
 function logStructuredEvent(log = console, event) {
   const payload = {
     ts: new Date().toISOString(),
@@ -372,11 +366,6 @@ async function fetchCurrentHeadVerdictMode({
       error: err?.message || String(err),
     };
   }
-}
-
-function normalizeReviewerFamily(reviewerModel) {
-  const key = String(reviewerModel || '').trim().toLowerCase();
-  return REVIEW_FAMILY_BY_REVIEWER_MODEL[key] || null;
 }
 
 function resolveLocalReviewShadowModel(env = process.env) {

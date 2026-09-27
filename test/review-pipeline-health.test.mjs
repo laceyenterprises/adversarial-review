@@ -119,6 +119,34 @@ test('CFGSTALE-01 config drift alarms only after ten minutes', () => {
   }
 });
 
+test('follow-up consume interval over five minutes appears on pipeline health', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  try {
+    const statusDir = path.join(hqRoot, '.adversarial-follow-up');
+    mkdirSync(statusDir, { recursive: true });
+    writeFileSync(path.join(statusDir, 'config-status.json'), JSON.stringify({
+      observedAt: NOW,
+      inSync: true,
+      lastConsumeAt: '2026-05-25T17:53:00.000Z',
+      consumeIntervalMs: 6 * 60 * 1000,
+      tickDurationMs: 16_000,
+    }));
+    const snapshot = collectReviewPipelineHealth({
+      rootDir, hqRoot, now: () => new Date(NOW), config: { hostChecksEnabled: false },
+    });
+    const findings = evaluateReviewPipelineFindings({
+      ...snapshot,
+      config: { ...snapshot.config, hostChecksEnabled: true },
+      configSignatureDrift: summarizeConfigSignatureDrift(hqRoot, { nowMs: Date.parse(NOW) }),
+    }, { observedAt: NOW });
+    assert.ok(findings.some((finding) => finding.code === 'review:follow_up_consume_interval_slow'));
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
 test('CFGSTALE-01 config drift treats stale status files as unknown', () => {
   const rootDir = tempRoot();
   const hqRoot = tempRoot();

@@ -2666,6 +2666,7 @@ test('workflow-touching remediation with workflow-capable push token proceeds to
     drainerTestOptions(rootDir, spawnCalls, {
       maxConcurrent: 1,
       log: {
+        info: (line) => logs.push(line),
         log: (line) => logs.push(line),
         warn: (line) => logs.push(line),
         error: (line) => logs.push(line),
@@ -2694,6 +2695,7 @@ test('workflow-touching remediation with workflow-capable push token proceeds to
   assert.equal(result.spawned, 1);
   assert.equal(spawnCalls.length, 1);
   assert.match(logs.join('\n'), /workflow=yes/);
+  assert.match(logs.join('\n'), /spawn-preparation jobId=.*env_ms=\d+ workspace_ms=\d+ pre_spawn_total_ms=\d+ runtime_spawn_ms=\d+/);
 });
 
 test('non-workflow remediation proceeds when the push token lacks workflow scope', async () => {
@@ -3419,9 +3421,13 @@ test('spawnCodexRemediationWorker keeps the legacy provenance class when HQ_REPO
   const prevHome = process.env.HOME;
   const prevCodexHome = process.env.CODEX_HOME;
   const prevAuthPath = process.env.CODEX_AUTH_PATH;
+  const prevTrailerClass = process.env.WORKER_TRAILER_CLASS;
+  const prevEntitlementVar = process.env.HQ_ENTITLEMENT_GH_TOKEN_VAR;
   process.env.HOME = workspaceDir;
   process.env.CODEX_HOME = codexHome;
   process.env.CODEX_AUTH_PATH = authPath;
+  delete process.env.WORKER_TRAILER_CLASS;
+  delete process.env.HQ_ENTITLEMENT_GH_TOKEN_VAR;
   let capturedEnv;
   try {
     spawnCodexRemediationWorker({
@@ -3444,6 +3450,10 @@ test('spawnCodexRemediationWorker keeps the legacy provenance class when HQ_REPO
     else process.env.CODEX_HOME = prevCodexHome;
     if (prevAuthPath === undefined) delete process.env.CODEX_AUTH_PATH;
     else process.env.CODEX_AUTH_PATH = prevAuthPath;
+    if (prevTrailerClass === undefined) delete process.env.WORKER_TRAILER_CLASS;
+    else process.env.WORKER_TRAILER_CLASS = prevTrailerClass;
+    if (prevEntitlementVar === undefined) delete process.env.HQ_ENTITLEMENT_GH_TOKEN_VAR;
+    else process.env.HQ_ENTITLEMENT_GH_TOKEN_VAR = prevEntitlementVar;
   }
   assert.equal(capturedEnv.WORKER_CLASS, REMEDIATION_WORKER_TRAILER_CLASS);
   assert.equal(capturedEnv.WORKER_TRAILER_CLASS, undefined);

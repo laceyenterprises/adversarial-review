@@ -3515,10 +3515,7 @@ async function consumeNextFollowUpJob({
     };
   }
 
-  // Track whether spawn was actually attempted. If the catch below
-  // fires before this flips to true, we mark the failed record as
-  // never-spawned so the PR-wide ledger does not count this round —
-  // an OAuth/workspace-prep failure burned no remediation budget.
+  // A pre-spawn failure burns no remediation round.
   let workerClass = null;
   let spawnAttempted = false;
   let spawnedWorker = null;
@@ -3526,6 +3523,7 @@ async function consumeNextFollowUpJob({
   let claudeModelResolution = null;
   let codexModelResolution = null;
   const jobEnv = { ...process.env };
+  const preparationStartedMs = Date.now(); let envPreparationMs = 0; let workspacePreparationMs = 0;
 
   try {
     const routedWorkerClass = pickRemediationWorkerClass(claimed.job);
@@ -3672,6 +3670,7 @@ async function consumeNextFollowUpJob({
       }
     }
     const shouldApplyOssReadinessBeforeSpawn = jobHasOssReadinessAuditFailure(claimed.job);
+    envPreparationMs = Date.now() - preparationStartedMs;
     const workspaceRootDir = resolveRemediationWorkspaceRoot({ rootDir, env: jobEnv });
     const artifactWorkspaceDir = join(workspaceRootDir, claimed.job.jobId);
     let workspaceDir = artifactWorkspaceDir;
@@ -3680,6 +3679,7 @@ async function consumeNextFollowUpJob({
       reason: hqDispatchEnabled ? 'worker-pool-managed' : 'missing',
     };
     if (!hqDispatchEnabled || shouldApplyOssReadinessBeforeSpawn) {
+      const workspaceStartedMs = Date.now();
       const prepared = await prepareWorkspaceForJob({
         rootDir,
         job: claimed.job,
@@ -3691,6 +3691,7 @@ async function consumeNextFollowUpJob({
         ? { action: 'hq-dispatch-prepared', reason: 'oss-readiness-preflight', prepared: prepared.workspaceState }
         : prepared.workspaceState;
       await ensureWorkspaceArtifactExclude(workspaceDir, { execFileImpl });
+      workspacePreparationMs = Date.now() - workspaceStartedMs;
     }
 
     const artifactDir = join(workspaceDir, '.adversarial-follow-up');
@@ -3832,18 +3833,15 @@ async function consumeNextFollowUpJob({
       return { consumed: false, reason: 'shutting-down', job: requeued.job, jobPath: requeued.jobPath };
     }
 
-    // ARC-08: one AgentRuntime port call, routed by the health router. The
-    // runtime's `os` mode performs the app-contract / hq dispatch and `local`
-    // mode the model-specific CLI self-spawn; both return the same worker
-    // descriptor shape the reconcile pass reads. Workspace prep stayed with the
-    // subject adapter above (`prepareWorkspaceForJob`) — the runtime never
-    // touches git mechanics.
+    // ARC-08: the health-routed AgentRuntime handles OS or local dispatch and
+    // returns the worker descriptor. The subject adapter owns git workspace prep.
     const remediationRuntime = createRemediationRuntime({
       execFileImpl,
       spawnImpl,
       env: jobEnv,
       now,
     });
+    const runtimeStartedMs = Date.now();
     const runHandle = await remediationRuntime.run({
       mode: remediationMode,
       role: { kind: 'remediator', workerClass },
@@ -3862,6 +3860,7 @@ async function consumeNextFollowUpJob({
       modelResolution: codexModelResolution || claudeModelResolution,
       requiresWorkflowPush: Boolean(workflowPushPreflight?.workflowTouch?.touches),
     });
+    log.info?.(`[follow-up-remediation] spawn-preparation jobId=${claimed.job.jobId} env_ms=${envPreparationMs} workspace_ms=${workspacePreparationMs} pre_spawn_total_ms=${runtimeStartedMs - preparationStartedMs} runtime_spawn_ms=${Date.now() - runtimeStartedMs}`);
     const worker = runHandle.worker;
     spawnedWorker = worker;
 

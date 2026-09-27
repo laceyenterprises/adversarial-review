@@ -326,12 +326,20 @@ can distinguish "never posted in window" from a null/corrupt timestamp column.
 | `review:stuck_retry_loop` | one or more open PRs remain `review_status='failed'` after infra auto-recovery exhausted its attempt cap (`infra_auto_recover_attempts` at/over the cap, default 3); when the dominant `failure_class` is `diff-too-large`, the failure is deterministic because GitHub refused to serve the PR diff | ticket | no open PR remains failed at/over the infra auto-recovery cap (the review reposts/succeeds, the oversized PR is split or otherwise reviewable by file list, or the PR merges/closes) |
 | `review:round_budget_anomaly` | remediation round count exceeds the risk-class budget, or a final-pass job remains `awaiting-rereview` after budget exhaustion | ticket | no follow-up job violates the risk-class round budget |
 | `review:config_signature_drift` | a long-lived daemon's last successfully loaded config signature differs from disk beyond the configured drift threshold, including failed reloads after the shared config cache has been reset; also fires when a loaded daemon's config-status file is missing, any status read is malformed or denied, or the status stops updating for longer than the greater of six minutes and three expected daemon ticks | ticket | the daemon reloads the changed config successfully, the disk config is restored to the loaded signature, or the status file is readable, fresh, and reports the daemon back in sync |
+| `review:follow_up_consume_interval_slow` | the follow-up daemon's last observed consume interval or time since its last consume pass exceeds five minutes; `config-status.json` also records `tickDurationMs`, `consumeIntervalMs`, and `lastConsumeAt` | ticket | a consume pass runs within five minutes of the prior pass and the daemon remains current |
 | `review:daemon_liveness` | required local pipeline LaunchAgent is not loaded | ticket | adversarial watcher, adversarial follow-up, and dispatch daemon labels are loaded |
 | `review:daemon_probe_failure` | required local pipeline LaunchAgent loaded state cannot be determined | ticket | launchctl probes can determine loaded state for adversarial watcher, adversarial follow-up, dispatch daemon, and dag-autowalk labels |
 | `review:dispatch_spawn_failures` | dispatch daemon stderr has recent closer/hammer spawn-failure signals over 1h | ticket | no matching recent dispatch daemon stderr lines remain |
 | `review:hammer_dispatch_stall_blind` | SEN-02 `blind`: the dispatch daemon log required by the hammer-dispatch stall detector is missing, so the snapshot cannot classify the conflicted backlog as healthy or stalled. Never a health verdict. | ticket | the dispatch daemon log surface is restored or the configured HQ root is corrected |
 | `review:hammer_dispatch_stalled_with_conflicts` | conflicted/dirty PRs are present in auto-merge state and no hammer dispatch has been observed in the dispatch daemon log within 2h | ticket | a hammer dispatch is observed in the dispatch daemon log, the conflicted backlog clears, or the log is outside host-check collection |
 | `review:dag_autowalk_launchd_unhealthy` | dag-autowalk is unloaded, last exit is non-zero, or logs are stale for >2h | ticket | dag-autowalk is loaded with a zero/unknown last exit and fresh logs |
+
+The follow-up daemon gives both reapers a 15-second scan budget through
+`ADVERSARIAL_FOLLOW_UP_REAPER_BUDGET_MS`. The closer worktree reaper runs every
+five ticks by default (`ADVERSARIAL_FOLLOW_UP_CLOSER_REAP_EVERY_TICKS`), with
+its cursor preserved between runs. Its Git worktree removal and worker
+teardown are single operations that cannot safely be interrupted halfway
+through; the cadence keeps those operations off most consume intervals.
 
 ## Configuration
 

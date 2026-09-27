@@ -113,6 +113,7 @@ const STOPPED_ARCHIVE_FAILURE_RETRY_SECONDS = positiveNumberEnv(
 );
 const STOPPED_ARCHIVE_FAILURE_RETRY_MS = STOPPED_ARCHIVE_FAILURE_RETRY_SECONDS * 1000;
 const MAINTENANCE_SWEEP_STATE_PATH = join(ROOT, 'data', 'follow-up-jobs', 'maintenance-sweeps.json');
+const closerReapTicksByEnv = new WeakMap();
 
 // Kill switch for the `stuck-rereview-apply` tick step. That step is the only
 // part of the tick that writes review-pipeline state on behalf of a stuck row
@@ -228,9 +229,7 @@ function resolveDaemonMaxConcurrentJobs(env = process.env) {
   return maxConcurrentJobs;
 }
 
-function writeConfigSignatureStatus({ env = process.env, now = () => new Date() } = {}) {
-  const hqRoot = env.HQ_ROOT;
-  if (!hqRoot) return null;
+function assertSafeTestStatusRoot(hqRoot) {
   if (process.env.NODE_TEST_CONTEXT) {
     // Resolve symlinks too: a temporary alias must not redirect a test write
     // into the live HQ status file. The HQ directory may be created by the
@@ -248,6 +247,12 @@ function writeConfigSignatureStatus({ env = process.env, now = () => new Date() 
       throw new Error('test runner refused config-signature status write outside temporary HQ_ROOT');
     }
   }
+}
+
+function writeConfigSignatureStatus({ env = process.env, now = () => new Date() } = {}) {
+  const hqRoot = env.HQ_ROOT;
+  if (!hqRoot) return null;
+  assertSafeTestStatusRoot(hqRoot);
   const status = daemonConfigSignatureStatus({ env });
   const path = join(hqRoot, '.adversarial-follow-up', 'config-status.json');
   let prior = null;
@@ -260,6 +265,9 @@ function writeConfigSignatureStatus({ env = process.env, now = () => new Date() 
     : null;
   const payload = {
     ...status,
+    lastConsumeAt: prior?.lastConsumeAt || null,
+    consumeIntervalMs: prior?.consumeIntervalMs ?? null,
+    tickDurationMs: prior?.tickDurationMs ?? null,
     observedAt,
     driftSince,
     daemon: 'adversarial-follow-up',
@@ -269,6 +277,23 @@ function writeConfigSignatureStatus({ env = process.env, now = () => new Date() 
   };
   writeFileAtomic(path, `${JSON.stringify(payload, null, 2)}\n`);
   return payload;
+}
+
+function writeFollowUpTickMetrics({ env, tickDurationMs, consumeAt = null, consumeIntervalMs = null }) {
+  if (!env.HQ_ROOT) return;
+  assertSafeTestStatusRoot(env.HQ_ROOT);
+  const path = join(env.HQ_ROOT, '.adversarial-follow-up', 'config-status.json');
+  let prior;
+  try { prior = JSON.parse(readFileSync(path, 'utf8')); } catch { return; }
+  if (!prior || typeof prior !== 'object' || !('inSync' in prior)) return;
+  const payload = {
+    ...prior,
+    tickDurationMs,
+    tickCompletedAt: new Date().toISOString(),
+    lastConsumeAt: consumeAt || prior.lastConsumeAt || null,
+    consumeIntervalMs: consumeIntervalMs ?? prior.consumeIntervalMs ?? null,
+  };
+  writeFileAtomic(path, `${JSON.stringify(payload, null, 2)}\n`);
 }
 
 function resolveRemediationWorkerTokenMinLifetimeMs(env = process.env) {
@@ -598,8 +623,17 @@ async function runFollowUpDaemonIteration({
   runStoppedArchiveSweepIfDueImpl = runStoppedArchiveSweepIfDue,
   resolveMaxConcurrentJobsImpl = resolveDaemonMaxConcurrentJobs,
   writeConfigSignatureStatusImpl = writeConfigSignatureStatus,
+  writeFollowUpTickMetricsImpl = writeFollowUpTickMetrics,
+  clock = Date.now,
   shouldStop = () => stopping,
 } = {}) {
+  const tickStartedMs = clock();
+  let consumeAt = null;
+  let consumeIntervalMs = null;
+  try {
+  const reaperBudgetMs = Number.isSafeInteger(Number(env.ADVERSARIAL_FOLLOW_UP_REAPER_BUDGET_MS))
+    && Number(env.ADVERSARIAL_FOLLOW_UP_REAPER_BUDGET_MS) > 0
+    ? Number(env.ADVERSARIAL_FOLLOW_UP_REAPER_BUDGET_MS) : 15_000;
   let maxConcurrentJobs = null;
   await runStep('resolve-capacity', async () => {
     maxConcurrentJobs = resolveMaxConcurrentJobsImpl(env);
@@ -671,6 +705,7 @@ async function runFollowUpDaemonIteration({
   await runStep('reap-finished-pr', async () => {
     const result = await reapFinishedPrFollowUpJobsImpl({
       rootDir: ROOT,
+      budgetMs: reaperBudgetMs,
       isWorkerAlive: isWorkerProcessRunning,
       listActiveAmaCloserDispatchesImpl: listActiveAmaCloserDispatches,
       updateAmaCloserDispatchRecordImpl: updateAmaCloserDispatchRecord,
@@ -691,7 +726,7 @@ async function runFollowUpDaemonIteration({
       `skippedOpen=${result.skippedOpen} skippedUnreadable=${result.skippedUnreadable} ` +
       `skippedAliveWorker=${result.skippedAliveWorker} skippedFreshAmaDispatch=${result.skippedFreshAmaDispatch} ` +
       `skippedNoTarget=${result.skippedNoTarget} skippedCapped=${result.skippedCapped} ` +
-      `prLookups=${result.prLookups} lookupCapHit=${result.lookupCapHit}` +
+      `prLookups=${result.prLookups} lookupCapHit=${result.lookupCapHit} budgetExceeded=${result.budgetExceeded}` +
       (reapedPrs ? ` reapedPrs=${reapedPrs}` : '') +
       (releasedPrs ? ` releasedPrs=${releasedPrs}` : '') +
       (amaReleasedPrs ? ` amaReleasedPrs=${amaReleasedPrs}` : '')
@@ -744,6 +779,18 @@ async function runFollowUpDaemonIteration({
     logTick('consume', 'skipped unresolved remediation capacity; will retry next tick');
   } else if (shouldConsumeAfterReviewerTokenRefresh(reviewerTokenRefreshSummary)) {
     await runStep('consume', async () => {
+      const consumeStartedMs = clock();
+      let lastConsumeMs = null;
+      if (env.HQ_ROOT) {
+        try {
+          const prior = JSON.parse(readFileSync(join(env.HQ_ROOT, '.adversarial-follow-up', 'config-status.json'), 'utf8'));
+          lastConsumeMs = Date.parse(prior.lastConsumeAt);
+        } catch { /* first consume pass */ }
+      }
+      consumeAt = new Date(consumeStartedMs).toISOString();
+      consumeIntervalMs = Number.isFinite(lastConsumeMs) ? consumeStartedMs - lastConsumeMs : null;
+      logTick('consume-interval', `intervalMs=${consumeIntervalMs ?? 'first-pass'}`);
+      if (consumeIntervalMs > 300_000) logError(`consume interval exceeded 5 minutes: ${consumeIntervalMs}ms`);
       const result = await consumeFollowUpJobsUntilCapacityImpl({
         // CFGSTALE-01: resolve inside every long-lived iteration. The old
         // module-level constant froze whatever overlay existed at process
@@ -768,21 +815,35 @@ async function runFollowUpDaemonIteration({
     );
   }
   if (shouldStop()) return;
-  await runStep('closer-worktree-reap', async () => {
-    const result = await reapCloserHammerWorktreesImpl({ logger: console });
+  const closerCadence = Number.isSafeInteger(Number(env.ADVERSARIAL_FOLLOW_UP_CLOSER_REAP_EVERY_TICKS))
+    && Number(env.ADVERSARIAL_FOLLOW_UP_CLOSER_REAP_EVERY_TICKS) > 0
+    ? Number(env.ADVERSARIAL_FOLLOW_UP_CLOSER_REAP_EVERY_TICKS) : 5;
+  const closerTick = (closerReapTicksByEnv.get(env) || 0) + 1;
+  closerReapTicksByEnv.set(env, closerTick);
+  if ((closerTick - 1) % closerCadence === 0) await runStep('closer-worktree-reap', async () => {
+    const result = await reapCloserHammerWorktreesImpl({ logger: console, budgetMs: reaperBudgetMs });
     logTick(
       'closer-worktree-reap',
       `scanned=${result.scanned} reaped=${result.reaped} skipped=${result.skipped} ` +
       `terminal=${result.terminal} prunable=${result.prunable} ` +
       `halfRegistered=${result.halfRegistered} open=${result.open} ` +
       `unknown=${result.unknown} deferredActiveWorker=${result.deferredActiveWorker} ` +
-      `errors=${result.errors} limit=${result.limit}`
+      `registrationIncomplete=${result.registrationIncomplete} registrationFailedRepos=${result.registrationFailedRepos} ` +
+      `deferredIncompleteRegistration=${result.deferredIncompleteRegistration} ` +
+      `errors=${result.errors} limit=${result.limit} budgetExceeded=${result.budgetExceeded}`
     );
   });
+  else logTick('closer-worktree-reap', `deferred cadenceTick=${closerTick} everyTicks=${closerCadence}`);
   if (shouldStop()) return;
   await runStep('retry-comments', () => retryFailedCommentDeliveriesImpl());
   if (shouldStop()) return;
   await runStoppedArchiveSweepIfDueImpl();
+  } finally {
+    const tickDurationMs = clock() - tickStartedMs;
+    logTick('tick-duration', `durationMs=${tickDurationMs}`);
+    try { writeFollowUpTickMetricsImpl({ env, tickDurationMs, consumeAt, consumeIntervalMs }); }
+    catch (err) { logError(`tick metric write failed: ${err?.message || err}`); }
+  }
 }
 
 async function sleepForNextFollowUpDaemonIteration({

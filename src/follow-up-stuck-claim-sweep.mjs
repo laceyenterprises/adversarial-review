@@ -43,7 +43,8 @@
 
 import { existsSync, mkdtempSync, promises as fsPromises, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { writeFileAtomic } from './atomic-write.mjs';
 import {
   computeFollowUpJobStoppedState,
   listFollowUpJobsInDir,
@@ -1507,8 +1508,20 @@ async function reapFinishedPrFollowUpJobs({
   updateAmaCloserDispatchRecordImpl = null,
   maxPrLookups = resolveReapMaxPrLookups(),
   amaCloserMinStaleMs = resolveReapAmaCloserMinStaleMs(),
+  budgetMs = 15_000,
+  cursorPath = join(rootDir, 'data', 'follow-up-jobs', 'finished-pr-reap-cursor.json'),
+  clock = Date.now,
   log = console,
 } = {}) {
+  const startedMs = clock();
+  let cursor = {};
+  try { cursor = JSON.parse(readFileSync(cursorPath, 'utf8')); } catch { /* first pass */ }
+  const withinBudget = () => clock() - startedMs < budgetMs;
+  const afterCursor = (entries, key, field) => {
+    const sorted = [...entries].sort((a, b) => key(a).localeCompare(key(b)));
+    const index = sorted.findIndex((entry) => key(entry).localeCompare(cursor[field] || '') > 0);
+    return index < 0 ? sorted : [...sorted.slice(index), ...sorted.slice(0, index)];
+  };
   const nowIso = now();
   const nowMs = parseTimestampMs(nowIso) ?? Date.now();
   const lifecycleByKey = new Map();
@@ -1529,6 +1542,7 @@ async function reapFinishedPrFollowUpJobs({
     skippedCapped: 0,
     prLookups: 0,
     lookupCapHit: false,
+    budgetExceeded: false,
     reapedPrs: [],
     releasedPrs: [],
     amaReleasedPrs: [],
@@ -1614,7 +1628,9 @@ async function reapFinishedPrFollowUpJobs({
     }
   }
 
-  for (const candidate of jobCandidates) {
+  for (const candidate of afterCursor(jobCandidates, (entry) => entry.jobPath, 'job')) {
+    if (!withinBudget()) { counters.budgetExceeded = true; break; }
+    cursor.job = candidate.jobPath;
     counters.scanned += 1;
     const { job, jobPath, fromStatus, kind } = candidate;
 
@@ -1688,7 +1704,8 @@ async function reapFinishedPrFollowUpJobs({
 
   // ---- (B2) orphaned AMA closer dispatch reservations ----
   const amaEnabled = typeof listActiveAmaCloserDispatchesImpl === 'function'
-    && typeof updateAmaCloserDispatchRecordImpl === 'function';
+    && typeof updateAmaCloserDispatchRecordImpl === 'function'
+    && withinBudget();
   if (amaEnabled) {
     let amaDispatches = [];
     try {
@@ -1697,7 +1714,10 @@ async function reapFinishedPrFollowUpJobs({
       log.warn?.(`[follow-up-tick ${nowIso}] reap-ama-list-failed: ${err?.message || err}`);
       amaDispatches = [];
     }
-    for (const amaRecord of amaDispatches) {
+    for (const amaRecord of afterCursor(amaDispatches, (entry) =>
+      `${entry.repo}#${entry.prNumber}#${entry.headSha || ''}`, 'ama')) {
+      if (!withinBudget()) { counters.budgetExceeded = true; break; }
+      cursor.ama = `${amaRecord.repo}#${amaRecord.prNumber}#${amaRecord.headSha || ''}`;
       counters.amaScanned += 1;
       const candidate = { kind: 'ama-dispatch', repo: amaRecord?.repo, prNumber: amaRecord?.prNumber, amaRecord };
       const terminal = await resolveTerminalStopFor(candidate, {
@@ -1757,6 +1777,8 @@ async function reapFinishedPrFollowUpJobs({
 
   counters.prLookups = liveLookups;
   counters.lookupCapHit = lookupCapHit;
+  try { writeFileAtomic(cursorPath, `${JSON.stringify(cursor)}\n`); }
+  catch (err) { log.warn?.(`[follow-up-tick ${nowIso}] reap-cursor-write-failed: ${err?.message || err}`); }
   return counters;
 }
 

@@ -461,6 +461,86 @@ test('reaper: is idempotent — a second pass reaps nothing', async () => {
   assert.equal(countInDir(rootDir, 'stopped'), 1);
 });
 
+test('reaper: budget yields before the next candidate and resumes from its cursor', async () => {
+  const rootDir = makeRoot();
+  for (const prNumber of [101, 102, 103]) {
+    seedJob(rootDir, 'pending', { jobId: `budget-${prNumber}`, prNumber });
+  }
+  const observed = [];
+  let amaListings = 0;
+  let elapsed = 0;
+  const opts = {
+    rootDir,
+    budgetMs: 15,
+    clock: () => elapsed,
+    listActiveAmaCloserDispatchesImpl: () => { amaListings += 1; return []; },
+    updateAmaCloserDispatchRecordImpl: () => {},
+    resolvePRLifecycleImpl: async (_root, { prNumber }) => {
+      observed.push(prNumber);
+      elapsed += 16;
+      return liveOpen;
+    },
+  };
+  const first = await reapFinishedPrFollowUpJobs(opts);
+  assert.equal(first.budgetExceeded, true);
+  assert.deepEqual(observed, [101]);
+  elapsed = 0;
+  const second = await reapFinishedPrFollowUpJobs(opts);
+  assert.equal(second.budgetExceeded, true);
+  assert.deepEqual(observed, [101, 102]);
+  assert.equal(amaListings, 0, 'AMA listing also yields when the budget is exhausted');
+});
+
+test('reaper: job cursor resumes in locale order across mixed-case IDs', async () => {
+  const rootDir = makeRoot();
+  seedJob(rootDir, 'pending', { jobId: 'a-a', prNumber: 101 });
+  seedJob(rootDir, 'pending', { jobId: 'a-B', prNumber: 102 });
+  const observed = [];
+  let elapsed = 0;
+  const opts = {
+    rootDir,
+    budgetMs: 15,
+    clock: () => elapsed,
+    resolvePRLifecycleImpl: async (_root, { prNumber }) => {
+      observed.push(prNumber);
+      elapsed += 16;
+      return liveOpen;
+    },
+  };
+  assert.equal((await reapFinishedPrFollowUpJobs(opts)).budgetExceeded, true);
+  assert.deepEqual(observed, [101]);
+  elapsed = 0;
+  assert.equal((await reapFinishedPrFollowUpJobs(opts)).budgetExceeded, true);
+  assert.deepEqual(observed, [101, 102]);
+});
+
+test('reaper: AMA cursor resumes in locale order across mixed-case repositories', async () => {
+  const rootDir = makeRoot();
+  const ama = makeAmaImpls([
+    { repo: 'laceyenterprises/a-a', prNumber: 101, headSha: 'abc' },
+    { repo: 'laceyenterprises/a-B', prNumber: 102, headSha: 'def' },
+  ]);
+  const observed = [];
+  let elapsed = 0;
+  const opts = {
+    rootDir,
+    budgetMs: 15,
+    clock: () => elapsed,
+    listActiveAmaCloserDispatchesImpl: ama.listActiveAmaCloserDispatchesImpl,
+    updateAmaCloserDispatchRecordImpl: ama.updateAmaCloserDispatchRecordImpl,
+    resolvePRLifecycleImpl: async (_root, { repo }) => {
+      observed.push(repo);
+      elapsed += 16;
+      return liveOpen;
+    },
+  };
+  assert.equal((await reapFinishedPrFollowUpJobs(opts)).budgetExceeded, true);
+  assert.deepEqual(observed, ['laceyenterprises/a-a']);
+  elapsed = 0;
+  assert.equal((await reapFinishedPrFollowUpJobs(opts)).budgetExceeded, true);
+  assert.deepEqual(observed, ['laceyenterprises/a-a', 'laceyenterprises/a-B']);
+});
+
 test('reaper: dedups by PR and caps distinct GitHub lookups per tick', async () => {
   const rootDir = makeRoot();
   seedJob(rootDir, 'pending', { jobId: 'j-100a', prNumber: 100 });

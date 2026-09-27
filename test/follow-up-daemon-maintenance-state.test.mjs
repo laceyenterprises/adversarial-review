@@ -617,8 +617,10 @@ remediation:
 `);
 
   let nowIso = '2026-05-25T17:49:00.000Z';
+  let tickClockMs = Date.parse(nowIso);
   const iterationOptions = () => ({
     env,
+    clock: () => tickClockMs,
     writeConfigSignatureStatusImpl: (args) => writeConfigSignatureStatus({
       ...args,
       now: () => new Date(nowIso),
@@ -722,12 +724,17 @@ remediation:
   );
 
   nowIso = '2026-05-25T17:51:00.000Z';
+  tickClockMs += 6 * 60 * 1000;
   await runFollowUpDaemonIteration(iterationOptions());
 
   const status = JSON.parse(
     readFileSync(path.join(hqRoot, '.adversarial-follow-up', 'config-status.json'), 'utf8')
   );
   assert.equal(status.inSync, false);
+  assert.equal(status.consumeIntervalMs, 6 * 60 * 1000);
+  assert.equal(status.tickDurationMs, 0);
+  assert.equal(status.lastConsumeAt, new Date(tickClockMs).toISOString());
+  assert.equal(calls.filter((call) => call === 'closer-worktree-reap').length, 1);
   assert.equal(status.driftSince, firstStatus.driftSince);
   assert.ok(status.loadedSignature);
   assert.ok(status.diskSignature);

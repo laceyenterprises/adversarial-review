@@ -682,6 +682,14 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
       'a long-lived daemon loaded signature differs from disk, or its status file stops updating',
   },
   {
+    code: 'review:follow_up_consume_interval_slow',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: null,
+    defaultThreshold: 300_000,
+    thresholdDescription: 'time since the previous follow-up consume pass exceeds five minutes',
+  },
+  {
     code: 'review:daemon_liveness',
     tier: 'ticket',
     category: 'review-pipeline',
@@ -4551,6 +4559,23 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
   const { config } = snapshot;
 
   if (config?.hostChecksEnabled !== false) {
+    for (const daemon of snapshot.configSignatureDrift?.daemons || []) {
+      const lastConsumeMs = Date.parse(daemon.lastConsumeAt || '');
+      const observedMs = Date.parse(observedAt);
+      const elapsedMs = Number.isFinite(lastConsumeMs) ? Math.max(0, observedMs - lastConsumeMs) : 0;
+      const intervalMs = Math.max(Number(daemon.consumeIntervalMs) || 0, elapsedMs);
+      if (daemon.daemon !== 'adversarial-follow-up' || intervalMs <= 300_000) continue;
+      findings.push(buildFinding({
+        code: 'review:follow_up_consume_interval_slow',
+        tier: 'ticket',
+        subject: 'Follow-up remediation consume interval exceeds 5 minutes',
+        message: `The follow-up daemon has gone ${Math.round(intervalMs / 1000)} seconds between consume passes.`,
+        evidence: [`${daemon.path} consumeIntervalMs=${daemon.consumeIntervalMs ?? 'unknown'} lastConsumeAt=${daemon.lastConsumeAt}`],
+        recommendedAction: 'Inspect follow-up tick duration and maintenance reaper logs for a stalled phase.',
+        observedAt,
+        details: { intervalMs, tickDurationMs: daemon.tickDurationMs ?? null },
+      }));
+    }
     for (const drift of snapshot.configSignatureDrift?.alarmed || []) {
       const statusUnavailable = Boolean(drift.error);
       const statusStale = drift.statusStale === true;

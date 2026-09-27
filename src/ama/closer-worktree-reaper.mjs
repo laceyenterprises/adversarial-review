@@ -13,7 +13,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const DEFAULT_HQ_PATH = '/Users/airlock/.local/bin/hq';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
 const DEFAULT_HQ_ROOT = '/Users/airlock/agent-os-hq';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
 const DEFAULT_REAP_LIMIT = 8;
-const DEFAULT_REAP_BUDGET_MS = 20_000;
+const DEFAULT_REAP_BUDGET_MS = 15_000;
 const DEFAULT_SCAN_LIMIT = 64;
 const DEFAULT_UNKNOWN_PROBE_LIMIT = 3;
 const DEFAULT_PROCESS_PROBE_TIMEOUT_MS = 15_000;
@@ -218,11 +218,15 @@ async function listHqRepoPaths(hqRoot, {
   logger = console,
 } = {}) {
   const entries = [];
+  let complete = true;
+  let failedRoots = 0;
   for (const rootName of ['repos', 'worker-base']) {
     const reposDir = join(hqRoot, rootName);
     const rootEntries = await readdirImpl(reposDir, { withFileTypes: true }).catch((err) => {
       if (recoverableDiscoveryError(err)) {
         if (err?.code !== 'ENOENT') {
+          complete = false;
+          failedRoots += 1;
           logger?.warn?.(`[closer-worktree-reap] repo-discovery-skipped path=${reposDir} code=${err.code}`);
         }
         return [];
@@ -244,6 +248,8 @@ async function listHqRepoPaths(hqRoot, {
   return {
     paths: discovery.page.map((entry) => entry.path),
     nextCursor: discovery.nextCursor,
+    complete,
+    failedRoots,
   };
 }
 
@@ -349,13 +355,13 @@ async function execGit({ repoPath, args, execFileImpl = execFileAsync, timeout =
   });
 }
 
-async function remoteRepoForPath(repoPath, execFileImpl) {
+async function remoteRepoForPath(repoPath, execFileImpl, timeout = 10_000) {
   try {
     const { stdout } = await execGit({
       repoPath,
       args: ['remote', 'get-url', 'origin'],
       execFileImpl,
-      timeout: 10_000,
+      timeout,
     });
     return parseGitHubRepoFromRemote(stdout);
   } catch {
@@ -363,13 +369,28 @@ async function remoteRepoForPath(repoPath, execFileImpl) {
   }
 }
 
-async function registeredWorktreesByPath({ repoPaths, execFileImpl, logger = console }) {
+async function registeredWorktreesByPath({ repoPaths, execFileImpl, logger = console, deadlineMs = Infinity }) {
   const byPath = new Map();
-  for (const repoPath of repoPaths) {
+  let failedRepos = 0;
+  for (let index = 0; index < repoPaths.length; index += 1) {
+    const repoPath = repoPaths[index];
+    if (Date.now() >= deadlineMs) return { byPath, complete: false, failedRepos: failedRepos + repoPaths.length - index };
+    const timeout = Math.max(1, Math.min(30_000, deadlineMs - Date.now()));
+    try {
+      await execGit({ repoPath, args: ['rev-parse', '--git-dir'], execFileImpl, timeout });
+    } catch (err) {
+      if (!/not a git repository/iu.test(`${err?.stderr || ''} ${err?.message || ''}`)) {
+        failedRepos += 1;
+        logger?.warn?.(`[closer-worktree-reap] repo-probe-failed repoPath=${repoPath}: ${err?.message || err}`);
+        continue;
+      }
+      logger?.warn?.(`[closer-worktree-reap] non-git-directory-skipped repoPath=${repoPath}`);
+      continue;
+    }
     try {
       const [{ stdout }, githubRepo] = await Promise.all([
-        execGit({ repoPath, args: ['worktree', 'list', '--porcelain'], execFileImpl }),
-        remoteRepoForPath(repoPath, execFileImpl),
+        execGit({ repoPath, args: ['worktree', 'list', '--porcelain'], execFileImpl, timeout }),
+        remoteRepoForPath(repoPath, execFileImpl, Math.min(10_000, timeout)),
       ]);
       for (const record of parseGitWorktreePorcelain(stdout)) {
         const workerId = basename(dirname(record.path));
@@ -390,9 +411,10 @@ async function registeredWorktreesByPath({ repoPaths, execFileImpl, logger = con
       logger?.warn?.(
         `[closer-worktree-reap] worktree-list-failed repoPath=${repoPath}: ${err?.message || err}`
       );
+      failedRepos += 1;
     }
   }
-  return byPath;
+  return { byPath, complete: failedRepos === 0, failedRepos };
 }
 
 function classifyPrTerminal(pr) {
@@ -748,6 +770,7 @@ async function reapCloserHammerWorktrees({
   hqPath = process.env.HQ_PATH || DEFAULT_HQ_PATH,
   limit = normalizePositiveInteger(process.env.AMA_CLOSER_WORKTREE_REAP_LIMIT, DEFAULT_REAP_LIMIT),
   budgetMs = normalizePositiveInteger(process.env.AMA_CLOSER_WORKTREE_REAP_BUDGET_MS, DEFAULT_REAP_BUDGET_MS),
+  registrationBudgetMs = normalizePositiveInteger(process.env.AMA_CLOSER_WORKTREE_REGISTRATION_BUDGET_MS, DEFAULT_REAP_BUDGET_MS),
   scanLimit = normalizePositiveInteger(process.env.AMA_CLOSER_WORKTREE_SCAN_LIMIT, DEFAULT_SCAN_LIMIT),
   cursorPath = process.env.AMA_CLOSER_WORKTREE_CURSOR_PATH || DEFAULT_CURSOR_PATH,
   repoPaths = null,
@@ -779,19 +802,26 @@ async function reapCloserHammerWorktrees({
 } = {}) {
   const cursor = await readScanCursor(cursorPath, logger);
   const repoDiscovery = Array.isArray(repoPaths)
-    ? { paths: repoPaths, nextCursor: cursor.repo }
+    ? { paths: repoPaths }
     : await listHqRepoPaths(hqRoot, {
-        scanLimit,
-        lastName: cursor.repo,
+        // A registration map is safe only when it covers every discovered repo.
+        scanLimit: Infinity,
+        lastName: null,
         readdirImpl,
         logger,
       });
   const effectiveRepoPaths = repoDiscovery.paths;
-  const registered = await registeredWorktreesByPath({
+  const registrationStartedAt = Date.now();
+  const registrationScan = await registeredWorktreesByPath({
     repoPaths: effectiveRepoPaths,
     execFileImpl,
     logger,
+    deadlineMs: registrationStartedAt + registrationBudgetMs,
   });
+  const registrationFailedRepos = registrationScan.failedRepos + (repoDiscovery.failedRoots || 0);
+  const registrationIncomplete = !registrationScan.complete || repoDiscovery.complete === false;
+  const reapStartedAt = Date.now();
+  const registered = registrationScan.byPath;
   const workerDiscovery = await listHammerWorkerDirs(hqRoot, {
     scanLimit,
     lastName: cursor.worker,
@@ -875,6 +905,9 @@ async function reapCloserHammerWorktrees({
     unknown: 0,
     deferredActiveWorker: 0,
     deferredUnknownWorker: 0,
+    deferredIncompleteRegistration: 0,
+    registrationIncomplete,
+    registrationFailedRepos,
     limit,
     scanLimit,
   };
@@ -891,7 +924,6 @@ async function reapCloserHammerWorktrees({
     }
     return unscopedProcessProbePromise;
   };
-  const reapStartedAt = Date.now();
   summary.budgetMs = budgetMs;
   summary.budgetExceeded = false;
   let evaluationCursor = cursor.evaluation;
@@ -922,6 +954,11 @@ async function reapCloserHammerWorktrees({
 
     let reapReason = null;
     if (entry.halfRegistered) {
+      if (registrationIncomplete) {
+        summary.deferredIncompleteRegistration += 1;
+        summary.skipped += 1;
+        continue;
+      }
       reapReason = 'half-registered';
       summary.halfRegistered += 1;
     } else if (entry.prunable) {
@@ -1089,7 +1126,7 @@ async function reapCloserHammerWorktrees({
   }
 
   summary.cursorPersisted = persistScanCursor(cursorPath, {
-    repo: repoDiscovery.nextCursor,
+    repo: null,
     worker: workerDiscovery.nextCursor,
     evaluation: evaluationCursor,
     probeFailures,

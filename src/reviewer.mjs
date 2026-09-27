@@ -80,6 +80,7 @@ import {
   configureReviewerWorkspaceAudit,
   ReviewerSnapshotBaseError,
   prepareReviewerSnapshot,
+  resolveReviewerWorkspaceStateDir,
 } from './reviewer-workspace.mjs';
 import { normalizeEffectiveReviewVerdict, sanitizeCodexReviewPayload } from './kernel/verdict.mjs';
 import { pickReviewerStage } from './kernel/prompt-stage.mjs';
@@ -2071,13 +2072,18 @@ async function main() {
   });
   const reviewerCheckoutDir = resolveReviewerSubprocessCwd({ repo, rootDir: ROOT });
   const reviewerStateDir = resolveAdversarialReviewStateDir(ROOT, process.env);
+  let reviewerWorkspaceStateDir;
   let reviewerSubprocessCwd;
   let reviewerWorkspaceHeadSha;
   try {
+    reviewerWorkspaceStateDir = resolveReviewerWorkspaceStateDir({
+      stateDir: reviewerStateDir,
+      checkoutDir: reviewerCheckoutDir,
+    });
     const snapshot = await prepareReviewerSnapshot({
       repo,
       checkoutDir: reviewerCheckoutDir,
-      stateDir: reviewerStateDir,
+      stateDir: reviewerWorkspaceStateDir,
     });
     reviewerSubprocessCwd = snapshot.snapshotDir;
     reviewerWorkspaceHeadSha = reviewerHeadSha || snapshot.headSha;
@@ -2087,7 +2093,7 @@ async function main() {
       reviewerModel: effectiveModel,
       headSha: reviewerWorkspaceHeadSha,
       checkoutDir: reviewerCheckoutDir,
-      stateDir: reviewerStateDir,
+      stateDir: reviewerWorkspaceStateDir,
     });
     console.error(
       `[reviewer] reviewer workspace snapshot repo=${repo} sourceHead=${snapshot.headSha} cwd=${snapshot.snapshotDir}`
@@ -2140,7 +2146,7 @@ async function main() {
         reviewerModel: effectiveModel,
         headSha: reviewerWorkspaceHeadSha,
         checkoutDir: reviewerCheckoutDir,
-        stateDir: reviewerStateDir,
+        stateDir: reviewerWorkspaceStateDir,
       });
       dispatch = await reviewAgyOversizedInChunks(diff, extraContext, {
         promptStage: reviewerPromptStage,

@@ -18,6 +18,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { homedir } from 'node:os';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -92,6 +93,28 @@ function isInside(candidate, parent) {
   const relativePath = relative(resolvedParent, resolvedCandidate);
   return relativePath === ''
     || (relativePath !== '..' && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath));
+}
+
+// The review ledger may live under the source checkout for compatibility, but
+// immutable snapshots and subprocess audit records must live outside it.
+function resolveReviewerWorkspaceStateDir({
+  stateDir,
+  checkoutDir,
+  env = process.env,
+  homeDir = homedir(),
+} = {}) {
+  if (!stateDir || !checkoutDir) throw new Error('reviewer workspace requires stateDir and checkoutDir');
+  const configured = String(env.ADVERSARIAL_REVIEW_WORKSPACE_STATE_DIR || '').trim();
+  const hqRoot = String(env.HQ_ROOT || '').trim();
+  const selected = configured || (!isInside(stateDir, checkoutDir)
+    ? stateDir
+    : hqRoot
+      ? join(hqRoot, 'adversarial-review', 'reviewer-workspace')
+      : join(homeDir, '.agent-os', 'adversarial-review', 'reviewer-workspace'));
+  if (isInside(selected, checkoutDir)) {
+    throw new Error('reviewer workspace state must be outside the source checkout');
+  }
+  return resolve(selected);
 }
 
 function gitErrorText(err) {
@@ -650,4 +673,5 @@ export {
   isReviewerSnapshotBaseError,
   prepareReviewerSnapshot,
   resolveCheckoutHead,
+  resolveReviewerWorkspaceStateDir,
 };

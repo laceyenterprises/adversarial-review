@@ -612,7 +612,12 @@ function buildRemediationOutcomeCommentBody({
   // GitHub markdown so this is invisible to PR readers.
   lines.push(`<!-- ${marker} -->`);
   lines.push(`## Remediation Worker (${headerClass}) — round ${roundLabel}`);
-  const execution = worker || job?.remediationWorker || {};
+  const execution = {
+    workerClass: worker?.workerClass ?? job?.remediationWorker?.workerClass,
+    resolvedModel: worker?.resolvedModel ?? job?.remediationWorker?.resolvedModel,
+    model: worker?.model ?? job?.remediationWorker?.model,
+    resolvedReasoningLevel: worker?.resolvedReasoningLevel ?? job?.remediationWorker?.resolvedReasoningLevel,
+  };
   const harness = String(workerClass || execution.workerClass || 'unknown').replace(/^remediator-/, '');
   lines.push(`> Remediator: ${harness} · ${execution.resolvedModel || execution.model || 'unknown'} · ${execution.resolvedReasoningLevel || 'none'}`);
   lines.push('');

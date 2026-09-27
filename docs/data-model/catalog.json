@@ -59,6 +59,7 @@
         "migrations/20260810_reviewer_passes_posted_review_freshness_index.sql",
         "src/review-state.mjs",
         "src/afh-reviewer-fallback.mjs",
+        "src/review-body-capture.mjs",
         "src/follow-up-jobs.mjs",
         "src/pollonce-phases.mjs",
         "src/reviewer-pass-tokens.mjs",

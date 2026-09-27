@@ -966,7 +966,8 @@ function readCodexConfigTopLevelValues(keys, {
 }
 
 function resolveReviewerExecution(harness, { env = process.env, fallbackModel = null, fallbackEffort = null, log = console } = {}) {
-  const resolution = resolveRemediationModel(`${harness}-reviewer`, { env, fallbackModel });
+  const pin = harness === 'gemini' ? env.GEMINI_REVIEWER_MODEL : '';
+  const resolution = resolveRemediationModel(`${harness}-reviewer`, { env, pin, fallbackModel });
   const model = resolution.modelSource === 'fallback-constant' ? fallbackModel : resolution.resolvedModel;
   const effort = resolution.resolvedReasoningLevel || fallbackEffort;
   const modelSource = resolution.modelSource === 'fallback-constant' ? (fallbackModel ? 'host-config' : 'cli-default') : resolution.modelSource;

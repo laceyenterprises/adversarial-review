@@ -2485,6 +2485,7 @@ the App Contract endpoint currently omits those overrides. TOKCAP-01 will
 select the model after quota measurements.
 
 Reviewer harnesses resolve their model and supported effort from the
+explicit `GEMINI_REVIEWER_MODEL` process override for Gemini, then the
 `codex-reviewer`, `claude-reviewer`, or `gemini-reviewer` worker-class entry in
 the HQ registry mirror, then the repo seed. Missing values fall back to the
 host harness configuration with the source logged. Posted review and

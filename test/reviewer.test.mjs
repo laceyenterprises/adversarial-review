@@ -5725,6 +5725,26 @@ test('reviewWithGemini cli runtime does not call agy auth or agy spawn', async (
   assert.deepEqual(calls[0].args, ['-m', 'gemini-2.5-pro', '-o', 'json', '--prompt', '']);
 });
 
+test('reviewWithGemini honors the process model override at the spawn boundary', async () => {
+  const previous = process.env.GEMINI_REVIEWER_MODEL;
+  process.env.GEMINI_REVIEWER_MODEL = 'gemini-2.5-flash';
+  try {
+    let selectedModel;
+    await reviewWithGemini('+diff\n', '', {
+      resolveGeminiRuntimeImpl: () => 'cli',
+      assertOAuthImpl: async () => {},
+      spawnGeminiReviewImpl: async ({ model }) => {
+        selectedModel = model;
+        return { stdout: 'CLI review', stderr: '' };
+      },
+    });
+    assert.equal(selectedModel, 'gemini-2.5-flash');
+  } finally {
+    if (previous === undefined) delete process.env.GEMINI_REVIEWER_MODEL;
+    else process.env.GEMINI_REVIEWER_MODEL = previous;
+  }
+});
+
 test('reviewWithGemini antigravity auth missing fails closed before spawning a review', async () => {
   const spawnCalls = [];
   await assert.rejects(

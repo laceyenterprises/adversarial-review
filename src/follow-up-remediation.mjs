@@ -172,12 +172,12 @@ import {
   fetchPRBranchMetadata,
   inspectWorkspaceState,
   inspectWorkspaceForRetry,
-  inspectLostRemediationWorkspace,
   preserveInvalidResumeWorkspace,
   resetWorkspaceDir,
   runWorkspaceGitWithTransientRetry,
 } from './remediation-git-pr-io.mjs';
 import { inspectRemediationCiRegression } from './remediation-ci-regression.mjs';
+import { requeueForWorkspaceResume, resumeLostRemediationWorker } from './remediation-worker-resume.mjs';
 import { formatCiCheckList } from './ci-check-format.mjs';
 import {
   cancelHqDispatch,
@@ -2763,15 +2763,11 @@ async function reconcileFollowUpJob({
     }
 
     if (!rereview.requested) {
-      if (operationalBlockerRecovery?.rescue?.preserved && worker.dispatchMode !== 'hq'
-        && Number(job?.remediationPlan?.transientRetries || 0) < resolveMaxTransientRemediationRetries()) {
-        const requeued = requeueInProgressFollowUpJobForRetry({
-          rootDir, jobPath, requeuedAt: completedAt, allowDirectWorkerRetry: true,
-          retryReason: 'Preserved remediation commit after worker credential failure; resuming the same workspace.',
-          retryMetadata: { code: 'worker-killed-resume', rescue: operationalBlockerRecovery.rescue },
-        });
-        return { action: 'requeued', reason: 'worker-killed-resume', job: requeued.job, jobPath: requeued.jobPath };
-      }
+      const resumed = operationalBlockerRecovery?.rescue?.preserved && worker.dispatchMode !== 'hq' && requeueForWorkspaceResume({
+        rootDir, jobPath, job, requeuedAt: completedAt, retryMetadata: { rescue: operationalBlockerRecovery.rescue },
+        retryReason: 'Preserved remediation commit after worker credential failure; resuming the same workspace.',
+      });
+      if (resumed) return resumed;
       const currentRound = Number(job?.remediationPlan?.currentRound || 0);
       const maxRounds = Number(job?.remediationPlan?.maxRounds || 0);
       const stopCode = maxRounds > 0 && currentRound >= maxRounds
@@ -3116,21 +3112,10 @@ async function reconcileFollowUpJob({
     };
   }
 
-  const resume = worker?.dispatchMode === 'hq'
-    ? { resumeImpossible: 'worker-pool-workspace-not-reusable' }
-    : await inspectLostRemediationWorkspace({ workspaceDir: paths?.workspaceDir, job, execFileImpl });
-  let resumeImpossible = resume.resumeImpossible;
-  if (!resumeImpossible) {
-    if (Number(job?.remediationPlan?.transientRetries || 0) < resolveMaxTransientRemediationRetries()) {
-      const requeued = requeueInProgressFollowUpJobForRetry({
-        rootDir, jobPath, requeuedAt: completedAt, allowDirectWorkerRetry: true,
-        retryReason: 'Lost remediation worker left commits or edits; resume its preserved workspace.',
-        retryMetadata: { code: 'worker-killed-resume', ...resume },
-      });
-      return { action: 'requeued', reason: 'worker-killed-resume', job: requeued.job, jobPath: requeued.jobPath };
-    }
-    resumeImpossible = 'retry-budget-exhausted';
-  }
+  const { requeued: resumeRequeued, resumeImpossible } = await resumeLostRemediationWorker({
+    rootDir, jobPath, job, worker, workspaceDir: paths?.workspaceDir, requeuedAt: completedAt, execFileImpl,
+  });
+  if (resumeRequeued) return resumeRequeued;
 
   const failureCode = worker?.dispatchMode === 'hq' && !HQ_SUCCESS_STATUSES.has(String(liveness?.dispatchStatus?.status || ''))
     ? 'hq-dispatch-failed'

@@ -33,7 +33,7 @@ import {
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { captureLocalReviewerUsage } from './reviewer-pass-tokens.mjs';
+import { beginReviewerPass, captureLocalReviewerUsage } from './reviewer-pass-tokens.mjs';
 import { normalizeReviewerFamily } from './reviewer-family.mjs';
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
 import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
@@ -2154,6 +2154,28 @@ async function main() {
     rawReviewText = dispatch.rawReviewText;
     tokenUsage = dispatch.tokenUsage;
     reviewerExecution = dispatch.execution || null;
+    // Persist the resolved harness model and effort before the best-effort
+    // GitHub body capture. The watcher already opened this pass; beginReviewerPass
+    // updates that running row and keeps its original ownership and metadata.
+    if (reviewerExecution?.model) {
+      try {
+        beginReviewerPass(ROOT, {
+          repo,
+          prNumber,
+          attemptNumber: Number.isFinite(Number(reviewDbAttemptNumber))
+            ? Number(reviewDbAttemptNumber)
+            : Number(reviewAttemptNumber),
+          reviewerClass: effectiveModel,
+          reviewerModel: reviewerExecution.model,
+          reasoningEffort: reviewerExecution.effort || null,
+          passKind,
+          headSha: reviewerHeadSha || null,
+          metadata: { reviewerExecution },
+        });
+      } catch (err) {
+        console.warn(`[reviewer] reviewer execution pass write failed for ${repo}#${prNumber}: ${err?.message || err}`);
+      }
+    }
     if (effectiveModel === 'claude' && !tokenUsage) tokenUsage = captureLocalReviewerUsage({ tokenUsage, model: effectiveModel, workspacePath: reviewerSubprocessCwd, startedAt: reviewerStartedAt, rootDir: ROOT });
     if (dispatch.needsSanitize) {
       console.error(`[reviewer] DEBUG: raw Codex review length=${rawReviewText.length}; preview=${previewText(rawReviewText)}`);

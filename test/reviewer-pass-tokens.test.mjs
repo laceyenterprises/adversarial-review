@@ -100,6 +100,28 @@ test('remediation pass stores the resolved model and effort at launch', () => {
   assert.equal(pass.reasoning_effort, 'high');
 });
 
+test('hosted pass keeps resolved execution when body capture does not run', () => {
+  const rootDir = tempRoot();
+  const key = { repo: 'laceyenterprises/agent-os', prNumber: 44, attemptNumber: 2, passKind: 'rereview' };
+  beginReviewerPass(rootDir, {
+    ...key, reviewerClass: 'codex', reviewerModel: 'codex', headSha: 'reviewed-head',
+    metadata: { reviewerSessionUuid: 'session-44' },
+  });
+  beginReviewerPass(rootDir, {
+    ...key, reviewerClass: 'codex', reviewerModel: 'gpt-6-sol', reasoningEffort: 'high',
+    headSha: 'reviewed-head',
+    metadata: { reviewerExecution: { harness: 'codex', model: 'gpt-6-sol', effort: 'high' } },
+  });
+  const row = completeReviewerPass(rootDir, {
+    ...key, status: 'completed', tokenUsage: { model: 'gpt-5.5', input: 10, output: 2 },
+  });
+  assert.equal(countReviewerPasses(rootDir), 1);
+  assert.equal(row.reviewer_model, 'gpt-6-sol');
+  assert.equal(row.reasoning_effort, 'high');
+  assert.equal(JSON.parse(row.metadata_json).reviewerSessionUuid, 'session-44');
+  assert.equal(JSON.parse(row.metadata_json).reviewerExecution.model, 'gpt-6-sol');
+});
+
 test('schema convergence preserves historical provider totals without backfilling missing totals', () => {
   const rootDir = tempRoot();
   const db = openReviewStateDb(rootDir);

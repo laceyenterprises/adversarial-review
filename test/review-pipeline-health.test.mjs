@@ -154,7 +154,23 @@ test('follow-up consume interval over five minutes appears on pipeline health', 
       config: { ...snapshot.config, hostChecksEnabled: true },
       configSignatureDrift: skipped,
     }, { observedAt: NOW });
-    assert.equal(skippedFindings.some((finding) => finding.code === 'review:follow_up_consume_interval_slow'), false);
+    assert.ok(skippedFindings.some((finding) => finding.code === 'review:follow_up_consume_interval_slow'));
+    writeFileSync(path.join(statusDir, 'config-status.json'), JSON.stringify({
+      observedAt: NOW,
+      inSync: true,
+      daemonStartedAt: '2026-05-25T17:53:00.000Z',
+      lastConsumeAt: null,
+      consumeIntervalMs: null,
+      consumeSkippedReason: 'unsafe-reviewer-token-handoff',
+    }));
+    const repeatedSkips = summarizeConfigSignatureDrift(hqRoot, { nowMs: Date.parse(NOW) });
+    const skipFindings = evaluateReviewPipelineFindings({
+      ...snapshot,
+      config: { ...snapshot.config, hostChecksEnabled: true },
+      configSignatureDrift: repeatedSkips,
+    }, { observedAt: NOW });
+    assert.match(skipFindings.find((finding) => finding.code === 'review:follow_up_consume_interval_slow').evidence[0],
+      /unsafe-reviewer-token-handoff/);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
     rmSync(hqRoot, { recursive: true, force: true });

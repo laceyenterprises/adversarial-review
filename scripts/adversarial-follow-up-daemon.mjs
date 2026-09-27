@@ -844,7 +844,6 @@ async function runFollowUpDaemonIteration({
   if (shouldStop()) return;
   await runStoppedArchiveSweepIfDueImpl();
   } finally {
-    if (consumeAt === null) lastConsumeStartedByRoot.delete(env.HQ_ROOT);
     const tickDurationMs = clock() - tickStartedMs;
     logTick('tick-duration', `durationMs=${tickDurationMs}`);
     try { writeFollowUpTickMetricsImpl({ env, tickDurationMs, consumeAt, consumeIntervalMs, consumeSkippedReason }); }

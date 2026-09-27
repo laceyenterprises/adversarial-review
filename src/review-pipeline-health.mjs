@@ -4560,17 +4560,19 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
 
   if (config?.hostChecksEnabled !== false) {
     for (const daemon of snapshot.configSignatureDrift?.daemons || []) {
-      const intervalMs = Number(daemon.consumeIntervalMs) || 0;
-      if (daemon.daemon !== 'adversarial-follow-up'
-        || daemon.consumeSkippedReason
-        || intervalMs <= 300_000) continue;
+      const lastConsumeMs = Date.parse(daemon.lastConsumeAt || daemon.daemonStartedAt);
+      const observedMs = Date.parse(daemon.observedAt);
+      const elapsedMs = Number.isFinite(lastConsumeMs) && Number.isFinite(observedMs)
+        ? Math.max(0, observedMs - lastConsumeMs) : 0;
+      const intervalMs = Math.max(Number(daemon.consumeIntervalMs) || 0, elapsedMs);
+      if (daemon.daemon !== 'adversarial-follow-up' || intervalMs <= 300_000) continue;
       findings.push(buildFinding({
         code: 'review:follow_up_consume_interval_slow',
         tier: 'ticket',
         subject: 'Follow-up remediation consume interval exceeds 5 minutes',
-        message: `The follow-up daemon has gone ${Math.round(intervalMs / 1000)} seconds between consume passes.`,
-        evidence: [`${daemon.path} consumeIntervalMs=${daemon.consumeIntervalMs ?? 'unknown'} lastConsumeAt=${daemon.lastConsumeAt}`],
-        recommendedAction: 'Inspect follow-up tick duration and maintenance reaper logs for a stalled phase.',
+        message: `The follow-up daemon has gone ${Math.round(intervalMs / 1000)} seconds without a consume pass.`,
+        evidence: [`${daemon.path} consumeIntervalMs=${daemon.consumeIntervalMs ?? 'unknown'} lastConsumeAt=${daemon.lastConsumeAt ?? 'none'} consumeSkippedReason=${daemon.consumeSkippedReason ?? 'none'}`],
+        recommendedAction: 'Inspect the consume skip reason, follow-up tick duration, and maintenance reaper logs.',
         observedAt,
         details: { intervalMs, tickDurationMs: daemon.tickDurationMs ?? null },
       }));

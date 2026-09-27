@@ -4983,6 +4983,31 @@ test('mount-root rename fallback moves the workspace to in-root trash without re
   assert.ok(launched.includes(path.join(workspaceRootDir, '.reap-trash')));
 });
 
+test('sibling trash creation failure falls back to in-root trash', (t) => {
+  const rootDir = makeTempRoot(t);
+  const completedDir = getFollowUpJobDir(rootDir, 'completed');
+  const workspaceRootDir = path.join(rootDir, 'workspaces');
+  mkdirSync(completedDir, { recursive: true });
+  mkdirSync(workspaceRootDir);
+  const jobId = 'laceyenterprises__agent-os-pr-1403-2026-06-01T10-00-00-000Z';
+  writeFileSync(path.join(completedDir, `${jobId}.json`), JSON.stringify({
+    ...buildFollowUpJob({ repo: 'laceyenterprises/agent-os', prNumber: 1403,
+      reviewerModel: 'codex', reviewBody: 'Done', reviewPostedAt: '2026-06-01T10:00:00.000Z', critical: false }),
+    jobId, status: 'completed', completedAt: '2026-06-02T10:00:00.000Z',
+  }));
+  mkdirSync(path.join(workspaceRootDir, jobId));
+  writeFileSync(`${realpathSync(workspaceRootDir)}.trash`, 'blocks sibling mkdir');
+  const launched = [];
+  const result = reapTerminalFollowUpWorkspaces({
+    rootDir, workspaceRootDir, nowMs: Date.parse('2026-06-03T12:00:00.000Z'),
+    launchTrashDeleterImpl: ({ trashDir }) => launched.push(trashDir),
+  });
+  assert.equal(result.reaped, 1);
+  assert.equal(existsSync(path.join(workspaceRootDir, jobId)), false);
+  assert.ok(readdirSync(path.join(workspaceRootDir, '.reap-trash')).some((entry) => entry.startsWith(jobId)));
+  assert.ok(launched.includes(path.join(workspaceRootDir, '.reap-trash')));
+});
+
 test('reapTerminalFollowUpWorkspaces reports permission errors and preserves a workspace if both rename targets refuse', (t) => {
   for (const code of ['EACCES', 'EPERM', 'EXDEV']) {
     const rootDir = makeTempRoot(t);

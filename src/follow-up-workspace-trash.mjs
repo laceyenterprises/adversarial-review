@@ -32,14 +32,18 @@ export function launchWorkspaceTrashDeleter({ trashDir, rootDir, workspaceRootDi
         }
         // A genuinely long-running deleter keeps its lock. Age alone only
         // breaks a lock whose PID now belongs to something else or is unknown.
-        const owner = probeImpl('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8', timeout: 5_000 });
+        const owner = probeImpl('ps', ['-ww', '-p', String(pid), '-o', 'command='], { encoding: 'utf8', timeout: 5_000 });
+        if (owner.status !== 0 || owner.error) {
+          logger?.warn?.(`[follow-up-workspace-trash] deleter-lock-unverifiable pid=${pid} ageMs=${Math.round(ageMs)}`);
+          return false;
+        }
         if (owner.status === 0 && String(owner.stdout || '').includes('follow-up-workspace-trash-delete.mjs')
           && String(owner.stdout || '').includes(trashDir)) {
           logger?.warn?.(`[follow-up-workspace-trash] long-running deleter-lock-held pid=${pid} ageMs=${Math.round(ageMs)}`);
           return false;
         }
       } catch (probeErr) {
-        if (probeErr.code !== 'ESRCH' && ageMs < MAX_DELETER_LOCK_AGE_MS) {
+        if (probeErr.code !== 'ESRCH') {
           logger?.warn?.(`[follow-up-workspace-trash] deleter-lock-unverifiable pid=${pid} ageMs=${Math.round(ageMs)}`);
           return false;
         }

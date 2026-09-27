@@ -622,6 +622,7 @@ test('follow-up daemon iteration keeps config drift after per-tick cache reset',
   };
   const calls = [];
   const consumedMaxConcurrent = [];
+  let handoffSafe = [];
 
   t.after(() => resetConfigCache());
 
@@ -649,7 +650,7 @@ remediation:
       calls.push('github-token-refresh');
       return { refreshed: true };
     },
-    refreshReviewerBrokerTokensImpl: async () => ({ handoffSafe: [] }),
+    refreshReviewerBrokerTokensImpl: async () => ({ handoffSafe }),
     reconcileInProgressFollowUpJobsImpl: async () => {
       calls.push('reconcile');
       resetConfigCache();
@@ -772,6 +773,18 @@ remediation:
     [2, 2],
     'bad config should keep consuming with the last successfully resolved cap'
   );
+
+  handoffSafe = [{ role: 'claude', safe: false }];
+  tickClockMs += 6 * 60 * 1000;
+  await runFollowUpDaemonIteration(iterationOptions());
+  const skippedStatus = JSON.parse(readFileSync(path.join(hqRoot, '.adversarial-follow-up', 'config-status.json'), 'utf8'));
+  assert.equal(skippedStatus.consumeSkippedReason, 'unsafe-reviewer-token-handoff');
+  assert.equal(skippedStatus.lastConsumeAt, status.lastConsumeAt);
+  handoffSafe = [];
+  tickClockMs += 6 * 60 * 1000;
+  await runFollowUpDaemonIteration(iterationOptions());
+  const resumedStatus = JSON.parse(readFileSync(path.join(hqRoot, '.adversarial-follow-up', 'config-status.json'), 'utf8'));
+  assert.equal(resumedStatus.consumeIntervalMs, 12 * 60 * 1000);
 });
 
 test('follow-up wake storm on one head does not starve another PR head', async (t) => {

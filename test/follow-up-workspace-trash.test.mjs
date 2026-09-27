@@ -57,6 +57,33 @@ test('aged PID lock is retried even when its PID has been reused by a live proce
   assert.equal(Number(readFileSync(lockPath, 'utf8')), process.pid);
 });
 
+test('aged PID lock stays held for a verified deleter or an inconclusive process probe', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'follow-up-trash-live-lock-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const trashDir = workspaceTrashDir(join(root, 'workspaces'));
+  mkdirSync(trashDir);
+  const lockPath = `${trashDir}.delete.lock`;
+  writeFileSync(lockPath, String(process.pid));
+  const old = new Date(Date.now() - 7 * 60 * 60 * 1000);
+  utimesSync(lockPath, old, old);
+  let spawned = false;
+  const spawnImpl = () => { spawned = true; throw new Error('unexpected spawn'); };
+  const probes = [];
+  assert.equal(launchWorkspaceTrashDeleter({
+    trashDir, spawnImpl,
+    probeImpl: (command, args) => {
+      probes.push({ command, args });
+      return { status: 0, stdout: `node follow-up-workspace-trash-delete.mjs ${trashDir}` };
+    },
+  }), false);
+  assert.deepEqual(probes[0], { command: 'ps', args: ['-ww', '-p', String(process.pid), '-o', 'command='] });
+  assert.equal(launchWorkspaceTrashDeleter({
+    trashDir, spawnImpl, probeImpl: () => ({ status: null, error: new Error('timeout') }),
+  }), false);
+  assert.equal(spawned, false);
+  assert.equal(readFileSync(lockPath, 'utf8'), String(process.pid));
+});
+
 test('workspace trash spawn error is handled and releases its PID lock', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'follow-up-trash-spawn-error-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));

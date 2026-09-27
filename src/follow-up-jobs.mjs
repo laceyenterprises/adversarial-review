@@ -1481,12 +1481,11 @@ function reapTerminalFollowUpWorkspaces({
   const anomalyPaths = [];
   let deferredForBudget = 0;
   let trashDir = null;
-  const legacyTrashDir = join(workspaceRootDir, '.reap-trash');
+  const inRootTrashDir = join(workspaceRootDir, '.reap-trash');
   const startedMs = clockImpl();
 
   for (const entry of readdirSync(workspaceRootDir, { withFileTypes: true })) {
-    // The previous release stored pending deletion batches here. The same
-    // in-root directory is also the safe fallback for a mount-point root.
+    // The in-root trash is an active fallback and may contain pending batches.
     if (!entry.isDirectory() || entry.name === '.reap-trash') continue;
     scanned += 1;
     const workspacePath = join(workspaceRootDir, entry.name);
@@ -1535,9 +1534,8 @@ function reapTerminalFollowUpWorkspaces({
         let destination = trashDir;
         if (!destination) {
           try { destination = ensureWorkspaceTrashDir(workspaceRootDir); }
-          catch (dirErr) {
-            if (!['EACCES', 'EPERM'].includes(dirErr?.code)) throw dirErr;
-            destination = legacyTrashDir;
+          catch {
+            destination = inRootTrashDir;
             mkdirSync(destination, { recursive: true });
           }
         }
@@ -1545,7 +1543,7 @@ function reapTerminalFollowUpWorkspaces({
           renameSyncImpl(workspacePath, join(destination, `${entry.name}-${randomUUID()}`));
         } catch (renameErr) {
           if (renameErr?.code !== 'EXDEV') throw renameErr;
-          destination = legacyTrashDir;
+          destination = inRootTrashDir;
           mkdirSync(destination, { recursive: true });
           renameSyncImpl(workspacePath, join(destination, `${entry.name}-${randomUUID()}`));
         }
@@ -1579,7 +1577,7 @@ function reapTerminalFollowUpWorkspaces({
     }
   }
 
-  for (const pendingTrashDir of new Set([trashDir, workspaceTrashDir(workspaceRootDir), legacyTrashDir])) {
+  for (const pendingTrashDir of new Set([trashDir, workspaceTrashDir(workspaceRootDir), inRootTrashDir])) {
     if (!pendingTrashDir || !existsSync(pendingTrashDir)) continue;
     try { launchTrashDeleterImpl({ trashDir: pendingTrashDir, rootDir, workspaceRootDir }); }
     catch (err) { logErrorImpl(`[follow-up-jobs] Failed to launch workspace trash deleter: ${err?.message || err}`); }

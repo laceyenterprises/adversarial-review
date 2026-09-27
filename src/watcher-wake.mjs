@@ -300,11 +300,6 @@ function createWatcherWakeSource({
     if (!nextSeen || nextSeen.key === lastSeen) return null;
     lastSeen = nextSeen.key;
     try {
-      writeConsumedReceipt(consumedPath, nextSeen.key);
-    } catch (err) {
-      logger?.warn?.(`[watcher] wake receipt write failed; carrying subjects until next consume: ${err?.message || err}`);
-    }
-    try {
       const cfg = loadConfigImpl({ env }).getHandoffConfig();
       rateLimiter?.setMaxPerPrHead?.(normalizeHandoffMaxPerPrHead(cfg.maxPerPrHead));
     } catch (err) {
@@ -315,21 +310,59 @@ function createWatcherWakeSource({
       startedAtMs,
       wakeSubjectTtlMs(env),
     );
-    const cap = rateLimiter?.inspect?.(payload);
-    if (cap?.accepted === false) {
-      return null;
+    const topLevel = wakeSubjectKeyParts({
+      repo: payload.repo,
+      prNumber: payload.pr_number ?? payload.prNumber,
+      headSha: payload.head_sha ?? payload.headSha,
+      requestedAt: payload.requested_at ?? payload.requestedAt,
+    });
+    const subjects = dedupeWakeSubjects([
+      ...(Array.isArray(payload.pending_subjects) ? payload.pending_subjects : []),
+      topLevel,
+    ].map((subject) => wakeSubjectKeyParts({
+      repo: subject?.repo,
+      prNumber: subject?.pr_number ?? subject?.prNumber,
+      headSha: subject?.head_sha ?? subject?.headSha,
+      requestedAt: subject?.requested_at ?? subject?.requestedAt,
+    })));
+    const accepted = subjects.filter((subject) => rateLimiter?.inspect?.({
+      ...subject,
+      reason: payload.reason,
+    })?.accepted !== false);
+    // Do not acknowledge an all-capped snapshot: a later writer must still
+    // carry its pending subjects, which may include a different PR head.
+    if (subjects.length > 0 && accepted.length === 0) return null;
+    const topLevelAccepted = topLevel && accepted.some((subject) =>
+      wakeSubjectKey(subject) === wakeSubjectKey(topLevel));
+    const promoted = topLevelAccepted ? null : accepted.at(-1);
+    const delivered = {
+      ...payload,
+      ...(promoted ? {
+        repo: promoted.repo,
+        pr_number: promoted.pr_number,
+        prNumber: null,
+        head_sha: promoted.head_sha ?? null,
+        headSha: null,
+        requested_at: promoted.requested_at ?? payload.requested_at,
+      } : {}),
+      pending_subjects: accepted,
+    };
+    try {
+      writeConsumedReceipt(consumedPath, nextSeen.key);
+    } catch (err) {
+      logger?.warn?.(`[watcher] wake receipt write failed; carrying subjects until next consume: ${err?.message || err}`);
     }
     try {
       recordHandoffWakeEventsImpl({
         rootDir,
-        payload,
+        payload: delivered,
         target: 'watcher',
         wokeAt: new Date().toISOString(),
       });
     } catch {
       // Telemetry is best-effort and must not block the watcher wake path.
     }
-    return payload;
+    return delivered;
   }
 
   function notifyIfChanged() {

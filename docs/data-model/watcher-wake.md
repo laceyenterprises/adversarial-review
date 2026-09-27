@@ -18,7 +18,7 @@ newest 64 subjects.
 | Path | Shape | Contract |
 |---|---|---|
 | `data/watcher-wake.json` | JSON object | The current wake. `request_id` identifies a write; `requested_at` timestamps it; `reason` and top-level `repo`, `pr_number`, optional `head_sha` describe the newest request. `pending_subjects` holds the carried subjects, each with `repo`, `pr_number`, optional `head_sha`, and `requested_at`. |
-| `data/watcher-wake-consumed.json` | JSON object | `consumed_key` is the last snapshot key observed by the watcher: `request_id:<id>` or a `content:<sha256>` fallback for legacy files without a request ID. The watcher atomically replaces this receipt after reading a changed wake. |
+| `data/watcher-wake-consumed.json` | JSON object | `consumed_key` is the last delivered snapshot key: `request_id:<id>` or a `content:<sha256>` fallback for legacy files without a request ID. The watcher atomically replaces this receipt after accepting at least one subject (or a subjectless wake). |
 
 ## Consumption and expiry
 
@@ -26,15 +26,23 @@ newest 64 subjects.
   from the receipt. A missing or unreadable receipt leaves subjects unconsumed.
   A failed receipt write does not stop the wake; later writes may carry its
   subjects until another read succeeds.
-- The watcher always consumes the wake signal. It strips subject priority from
+- The watcher reads each changed wake signal. It strips subject priority from
   entries older than `ADVERSARIAL_WATCHER_WAKE_SUBJECT_TTL_MS` (default 30
   minutes) **at watcher startup**. Subjects requested after startup remain
   eligible until that watcher reads them, even if its poll runs past the TTL.
   This includes the top-level subject. Legacy list entries without their own
   time inherit the wake file's time; entries with unreadable times have no
   priority on read.
+- The watcher applies the per-PR-head rate cap to each distinct fresh subject.
+  A capped subject is omitted from the delivered payload. If the newest
+  top-level subject is capped, the latest accepted subject takes its place in
+  the delivered payload's legacy top-level fields. If every subject is capped,
+  the watcher leaves the snapshot unacknowledged so a later write carries its
+  pending subjects. A different eligible head in the same snapshot can still
+  wake the watcher and receives priority.
 - An invalid time in a carried entry is stamped with the current write time.
-  The CLI rejects an invalid `--requested-at` value. Re-waking the same
+  The CLI requires an ISO `--requested-at` timestamp with a timezone.
+  Re-waking the same
   repo/PR/head refreshes its time and position. The 64-subject cap still drops
   oldest entries during a burst.
 - The receipt identifies a consumed snapshot, not a per-subject claim. If a

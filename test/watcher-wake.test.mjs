@@ -318,6 +318,50 @@ test('watcher wake caps one PR head without starving another PR head', async () 
   }
 });
 
+test('a capped top-level head cannot discard another pending head', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'watcher-wake-'));
+  const wakeSource = createWatcherWakeSource({
+    rootDir,
+    logger: { warn() {} },
+    rateLimiter: createHandoffRateLimiter({ rootDir, maxPerPrHead: 1, logger: { warn() {} } }),
+    loadConfigImpl: () => ({ getHandoffConfig: () => ({ maxPerPrHead: 1 }) }),
+  });
+  const wake = (prNumber, headSha, requestId) => requestWatcherWake({
+    rootDir, repo: 'o/r', prNumber, headSha, requestId,
+  });
+  const matches = (payload, prNumber, headSha) => watcherWakeMatchesSubject(payload, {
+    repoPath: 'o/r', prNumber, headSha,
+  });
+
+  try {
+    wake(1, 'head-a', 'a-1');
+    assert.equal((await wakeSource.wait(0)).woken, true);
+
+    wake(1, 'head-a', 'a-2');
+    assert.equal((await wakeSource.wait(0)).woken, false);
+    assert.deepEqual(
+      JSON.parse(readFileSync(path.join(rootDir, 'data', 'watcher-wake-consumed.json'), 'utf8')),
+      { consumed_key: 'request_id:a-1' },
+      'all-capped wake must remain unacknowledged',
+    );
+
+    wake(2, 'head-b', 'b-1');
+    wake(1, 'head-a', 'a-3');
+    const result = await wakeSource.wait(0);
+    assert.equal(result.woken, true);
+    assert.equal(matches(result.payload, 2, 'head-b'), true);
+    assert.equal(matches(result.payload, 1, 'head-a'), false);
+    assert.equal(result.payload.pr_number, 2, 'eligible B should occupy the legacy top-level fields');
+
+    wake(3, 'head-c', 'c-1');
+    const next = JSON.parse(readFileSync(watcherWakePath(rootDir), 'utf8'));
+    assert.equal(matches(next, 2, 'head-b'), false, 'delivered B should be acknowledged');
+    assert.equal(matches(next, 3, 'head-c'), true);
+  } finally {
+    wakeSource.close();
+  }
+});
+
 test('watcher main loop does not gate wake-file sleeps behind handoff config', () => {
   const watcherSource = readFileSync(
     new URL('../src/watcher.mjs', import.meta.url),

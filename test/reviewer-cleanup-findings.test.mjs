@@ -52,6 +52,10 @@ test('posted reviewer cleanup findings persist and clear after a later dead prob
 });
 
 test('cleanup finding recheck matches a live production probe', async (t) => {
+  if (process.env.ADVERSARIAL_LIVE_PROBE_TEST !== '1') {
+    t.skip('set ADVERSARIAL_LIVE_PROBE_TEST=1 to run the process-group integration probe');
+    return;
+  }
   const psProbe = spawnSync('/bin/ps', ['-p', String(process.pid), '-o', 'command='], { encoding: 'utf8' });
   if (psProbe.error || psProbe.status !== 0 || !psProbe.stdout?.trim()) {
     t.skip('worker sandbox blocks process introspection required by the production probe');

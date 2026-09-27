@@ -98,6 +98,9 @@ function main(argv = process.argv.slice(2), deps = {}) {
   if (!reason || /[\r\n]/.test(reason)) {
     return usageError(stderr, '--reason must be a single non-empty line');
   }
+  if (requestedAt && !Number.isFinite(Date.parse(requestedAt))) {
+    return usageError(stderr, '--requested-at must be an ISO timestamp');
+  }
 
   try {
     const result = requestWatcherWakeImpl({

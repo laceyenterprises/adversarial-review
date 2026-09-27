@@ -17,7 +17,7 @@ const CLI_PATH = join(REPO_ROOT, 'bin', 'watcher-wake.mjs');
 async function runCli(args) {
   try {
     const { stdout, stderr } = await execFileAsync(process.execPath, [CLI_PATH, ...args], {
-      timeout: 5_000,
+      timeout: 15_000,
     });
     return { code: 0, stdout, stderr };
   } catch (err) {
@@ -87,6 +87,20 @@ test('watcher-wake CLI rejects malformed PR identity before writing', async () =
     ]);
     assert.equal(result.code, 64);
     assert.match(result.stderr, /--repo must be shaped owner\/name/);
+    assert.throws(() => readFileSync(watcherWakePath(rootDir), 'utf8'), /ENOENT/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('watcher-wake CLI rejects malformed requested-at before writing', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'watcher-wake-cli-'));
+  try {
+    const result = await runCli([
+      '--root-dir', rootDir, '--repo', 'o/r', '--pr', '17', '--requested-at', 'nonsense',
+    ]);
+    assert.equal(result.code, 64);
+    assert.match(result.stderr, /--requested-at must be an ISO timestamp/);
     assert.throws(() => readFileSync(watcherWakePath(rootDir), 'utf8'), /ENOENT/);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

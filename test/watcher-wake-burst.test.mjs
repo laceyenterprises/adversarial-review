@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { requestWatcherWake, watcherWakeMatchesSubject } from "../src/watcher-wake.mjs";
+import { createWatcherWakeSource, requestWatcherWake, watcherWakeMatchesSubject } from "../src/watcher-wake.mjs";
 
 // The wake file is one slot that renameSync overwrites. Before this fix, a
 // burst of settled-clean PRs kept only the last wake, so with N clean PRs
@@ -65,25 +65,28 @@ test("the carried list is bounded", () => {
   assert.equal(watcherWakeMatchesSubject(payload, { repoPath: "o/r", prNumber: 80 }), true);
 });
 
-// The watcher never writes back what it consumed, so without an age bound the
-// carried list was "the last 64 wakes": on 2026-09-27 it held 64 entries for
-// 34 PRs, 57 of them merged or closed, and four open PRs kept tier-0 wake
-// priority long after their wake was served.
+// Unconsumed subjects survive a long poll. Once consumed, the watcher writes a
+// receipt so later wakes do not carry subjects that already had priority.
 
 const T0 = Date.parse("2026-09-27T16:00:00.000Z");
 const at = (minutes) => new Date(T0 + minutes * 60_000).toISOString();
 
-test("carried subjects older than the TTL are dropped on the next wake", () => {
+test("two wakes during a poll longer than the TTL are both delivered, then acknowledged", async () => {
   const root = mkdtempSync(join(tmpdir(), "wake-ttl-"));
-  requestWatcherWake({ rootDir: root, reason: "r", repo: "o/r", prNumber: 101, requestedAt: at(0) });
-  requestWatcherWake({ rootDir: root, reason: "r", repo: "o/r", prNumber: 102, requestedAt: at(25) });
-  requestWatcherWake({ rootDir: root, reason: "r", repo: "o/r", prNumber: 103, requestedAt: at(31) });
-  const payload = wakePayload(root);
-  assert.equal(watcherWakeMatchesSubject(payload, { repoPath: "o/r", prNumber: 101 }), false);
-  assert.equal(watcherWakeMatchesSubject(payload, { repoPath: "o/r", prNumber: 102 }), true);
-  assert.equal(watcherWakeMatchesSubject(payload, { repoPath: "o/r", prNumber: 103 }), true);
-  for (const subject of payload.pending_subjects) {
-    assert.ok(subject.requested_at, `unstamped subject ${JSON.stringify(subject)}`);
+  const source = createWatcherWakeSource({ rootDir: root, now: () => T0 - 1, logger: { warn() {} } });
+  try {
+    requestWatcherWake({ rootDir: root, reason: "r", repo: "o/r", prNumber: 101, requestedAt: at(0) });
+    requestWatcherWake({ rootDir: root, reason: "r", repo: "o/r", prNumber: 102, requestedAt: at(31) });
+    const payload = (await source.wait(0)).payload;
+    assert.equal(watcherWakeMatchesSubject(payload, { repoPath: "o/r", prNumber: 101 }), true);
+    assert.equal(watcherWakeMatchesSubject(payload, { repoPath: "o/r", prNumber: 102 }), true);
+    requestWatcherWake({ rootDir: root, reason: "r", repo: "o/r", prNumber: 103, requestedAt: at(32) });
+    const next = wakePayload(root);
+    assert.equal(watcherWakeMatchesSubject(next, { repoPath: "o/r", prNumber: 101 }), false);
+    assert.equal(watcherWakeMatchesSubject(next, { repoPath: "o/r", prNumber: 102 }), false);
+    assert.equal(watcherWakeMatchesSubject(next, { repoPath: "o/r", prNumber: 103 }), true);
+  } finally {
+    source.close();
   }
 });
 
@@ -99,7 +102,7 @@ test("a re-wake refreshes a subject's time instead of keeping the stale one", ()
   assert.equal(entries[0].requested_at, at(20));
 });
 
-test("legacy untimed subjects inherit the file time and age out", () => {
+test("legacy untimed subjects inherit the file time and expire at watcher startup", async () => {
   const root = mkdtempSync(join(tmpdir(), "wake-legacy-"));
   mkdirSync(join(root, "data"), { recursive: true });
   writeFileSync(
@@ -120,19 +123,44 @@ test("legacy untimed subjects inherit the file time and age out", () => {
   requestWatcherWake({ rootDir: root, reason: "r", repo: "o/r", prNumber: 101, requestedAt: at(5) });
   let payload = wakePayload(root);
   assert.equal(watcherWakeMatchesSubject(payload, { repoPath: "o/r", prNumber: 99 }), true);
-  requestWatcherWake({ rootDir: root, reason: "r", repo: "o/r", prNumber: 102, requestedAt: at(33) });
-  payload = wakePayload(root);
-  assert.equal(watcherWakeMatchesSubject(payload, { repoPath: "o/r", prNumber: 99 }), false);
-  assert.equal(watcherWakeMatchesSubject(payload, { repoPath: "o/r", prNumber: 100 }), false);
-  assert.equal(watcherWakeMatchesSubject(payload, { repoPath: "o/r", prNumber: 101 }), true);
+  const source = createWatcherWakeSource({ rootDir: root, now: () => T0 + 33 * 60_000, consumeExistingOnStart: true, logger: { warn() {} } });
+  try {
+    payload = (await source.wait(0)).payload;
+    assert.equal(watcherWakeMatchesSubject(payload, { repoPath: "o/r", prNumber: 99 }), false);
+    assert.equal(watcherWakeMatchesSubject(payload, { repoPath: "o/r", prNumber: 100 }), false);
+    assert.equal(watcherWakeMatchesSubject(payload, { repoPath: "o/r", prNumber: 101 }), true);
+  } finally {
+    source.close();
+  }
 });
 
-test("the subject TTL honours the env override", () => {
+test("the subject TTL honours the env override at watcher startup", async () => {
   const root = mkdtempSync(join(tmpdir(), "wake-ttl-env-"));
   const env = { ADVERSARIAL_WATCHER_WAKE_SUBJECT_TTL_MS: String(5 * 60_000) };
-  requestWatcherWake({ rootDir: root, reason: "r", repo: "o/r", prNumber: 101, requestedAt: at(0), env });
-  requestWatcherWake({ rootDir: root, reason: "r", repo: "o/r", prNumber: 102, requestedAt: at(6), env });
+  requestWatcherWake({ rootDir: root, reason: "r", repo: "o/r", prNumber: 101, requestedAt: at(0) });
+  requestWatcherWake({ rootDir: root, reason: "r", repo: "o/r", prNumber: 102, requestedAt: at(6) });
+  const source = createWatcherWakeSource({ rootDir: root, now: () => T0 + 6 * 60_000, env, consumeExistingOnStart: true, logger: { warn() {} } });
+  try {
+    const payload = (await source.wait(0)).payload;
+    assert.equal(watcherWakeMatchesSubject(payload, { repoPath: "o/r", prNumber: 101 }), false);
+    assert.equal(watcherWakeMatchesSubject(payload, { repoPath: "o/r", prNumber: 102 }), true);
+  } finally {
+    source.close();
+  }
+});
+
+test("malformed carried timestamps are stamped before the next write", () => {
+  const root = mkdtempSync(join(tmpdir(), "wake-bad-time-"));
+  mkdirSync(join(root, "data"), { recursive: true });
+  writeFileSync(join(root, "data", "watcher-wake.json"), JSON.stringify({
+    request_id: "old", requested_at: "nonsense", repo: "o/r", pr_number: 101,
+    pending_subjects: [{ repo: "o/r", pr_number: 100, requested_at: "nonsense" }],
+  }));
+  const before = Date.now();
+  requestWatcherWake({ rootDir: root, reason: "r", repo: "o/r", prNumber: 102, requestedAt: at(5) });
   const payload = wakePayload(root);
-  assert.equal(watcherWakeMatchesSubject(payload, { repoPath: "o/r", prNumber: 101 }), false);
-  assert.equal(watcherWakeMatchesSubject(payload, { repoPath: "o/r", prNumber: 102 }), true);
+  for (const prNumber of [100, 101]) {
+    const stampedAt = Date.parse(payload.pending_subjects.find((entry) => entry.pr_number === prNumber).requested_at);
+    assert.ok(stampedAt >= before && stampedAt <= Date.now());
+  }
 });

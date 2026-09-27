@@ -7,10 +7,15 @@ import { loadConfigCached } from './config-loader.mjs';
 import { recordHandoffWakeEvents } from './handoff-telemetry.mjs';
 
 const WATCHER_WAKE_FILE = 'watcher-wake.json';
+const WATCHER_WAKE_CONSUMED_FILE = 'watcher-wake-consumed.json';
 const DEFAULT_WAKE_POLL_MS = 1000;
 
 function watcherWakePath(rootDir) {
   return join(rootDir, 'data', WATCHER_WAKE_FILE);
+}
+
+function watcherWakeConsumedPath(rootDir) {
+  return join(rootDir, 'data', WATCHER_WAKE_CONSUMED_FILE);
 }
 
 function readWakeSnapshot(filePath) {
@@ -40,13 +45,9 @@ function readWakeSnapshot(filePath) {
 // have already been picked up by an ordinary poll.
 const MAX_PENDING_WAKE_SUBJECTS = 64;
 
-// The watcher never writes back which subjects it consumed, so "carried"
-// used to mean "the last 64 wakes": a PR woken hours earlier kept tier-0
-// wake priority until its head moved, and a head-less entry kept it forever,
-// diluting the lane a fresh wake exists to jump. Each subject now carries its
-// own request time and is dropped once it is older than this window. The
-// window is generous against poll latency so an un-consumed wake on a busy
-// watcher still survives until the next pass.
+// Subjects from before watcher startup expire at this boundary. Subjects
+// requested during a running watcher stay eligible until it consumes the wake,
+// even if a poll lasts longer than the TTL.
 const DEFAULT_WAKE_SUBJECT_TTL_MS = 30 * 60 * 1000;
 
 function wakeSubjectTtlMs(env = process.env) {
@@ -87,14 +88,11 @@ function dedupeWakeSubjects(subjects) {
 
 function wakeSubjectIsFresh(subject, nowMs, ttlMs) {
   const requestedMs = Date.parse(subject?.requested_at || '');
-  // A subject whose time cannot be read is treated as fresh once; the carry
-  // step stamps it with the current request time, so it ages out one window
-  // later instead of never.
-  if (!Number.isFinite(requestedMs)) return true;
+  if (!Number.isFinite(requestedMs)) return false;
   return nowMs - requestedMs <= ttlMs;
 }
 
-function carriedWakeSubjects(filePath) {
+function carriedWakeSubjects(filePath, consumedPath, requestedAt) {
   // Best-effort: an unreadable or malformed wake file must never block a new
   // wake, so a failure here degrades to "no carried subjects" rather than
   // throwing into the caller's claim loop.
@@ -102,9 +100,15 @@ function carriedWakeSubjects(filePath) {
     const snapshot = readWakeSnapshot(filePath);
     const payload = snapshot?.payload;
     if (!payload || typeof payload !== 'object') return [];
+    try {
+      const consumed = JSON.parse(readFileSync(consumedPath, 'utf8'));
+      if (consumed?.consumed_key === snapshot.key) return [];
+    } catch {
+      // A missing or unreadable receipt leaves the wake unconsumed.
+    }
     const listed = Array.isArray(payload.pending_subjects) ? payload.pending_subjects : [];
     // Subjects written before per-subject times existed inherit the time of
-    // the write that carried them, so they age out one window after upgrade.
+    // the write that carried them. Invalid times are stamped on this carry.
     const inheritedAt = payload.requested_at ?? payload.requestedAt ?? null;
     const normalized = listed
       .map((entry) => wakeSubjectKeyParts({
@@ -113,17 +117,45 @@ function carriedWakeSubjects(filePath) {
         headSha: entry?.head_sha ?? entry?.headSha,
         requestedAt: entry?.requested_at ?? entry?.requestedAt ?? inheritedAt,
       }))
-      .filter(Boolean);
+      .filter(Boolean)
+      .map((entry) => Number.isFinite(Date.parse(entry.requested_at || ''))
+        ? entry : { ...entry, requested_at: requestedAt });
     const previous = wakeSubjectKeyParts({
       repo: payload.repo,
       prNumber: payload.pr_number ?? payload.prNumber,
       headSha: payload.head_sha ?? payload.headSha,
       requestedAt: inheritedAt,
     });
-    return dedupeWakeSubjects(previous ? [...normalized, previous] : normalized);
+    const stampedPrevious = previous && !Number.isFinite(Date.parse(previous.requested_at || ''))
+      ? { ...previous, requested_at: requestedAt } : previous;
+    return dedupeWakeSubjects(stampedPrevious ? [...normalized, stampedPrevious] : normalized);
   } catch {
     return [];
   }
+}
+
+function freshWakePayload(payload, startedAtMs, ttlMs) {
+  if (!payload || typeof payload !== 'object') return payload;
+  const inheritedAt = payload.requested_at ?? payload.requestedAt;
+  const pendingSubjects = Array.isArray(payload.pending_subjects)
+    ? payload.pending_subjects.filter((entry) => wakeSubjectIsFresh({
+      requested_at: entry?.requested_at ?? entry?.requestedAt ?? inheritedAt,
+    }, startedAtMs, ttlMs))
+    : [];
+  const topLevelFresh = wakeSubjectIsFresh({ requested_at: inheritedAt }, startedAtMs, ttlMs);
+  return {
+    ...payload,
+    ...(topLevelFresh ? {} : {
+      repo: null, pr_number: null, prNumber: null, head_sha: null, headSha: null,
+    }),
+    pending_subjects: pendingSubjects,
+  };
+}
+
+function writeConsumedReceipt(filePath, key) {
+  const tmpPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  writeFileSync(tmpPath, `${JSON.stringify({ consumed_key: key })}\n`, 'utf8');
+  renameSync(tmpPath, filePath);
 }
 
 function requestWatcherWake({
@@ -134,12 +166,12 @@ function requestWatcherWake({
   headSha = null,
   requestedAt = new Date().toISOString(),
   requestId = randomUUID(),
-  env = process.env,
 } = {}) {
   if (!rootDir) {
     throw new Error('requestWatcherWake requires rootDir');
   }
   const filePath = watcherWakePath(rootDir);
+  const consumedPath = watcherWakeConsumedPath(rootDir);
   mkdirSync(dirname(filePath), { recursive: true });
   // The wake file is a single slot that `renameSync` overwrites, so a burst of
   // wakes used to keep only the last one: with N clean PRs settling in one
@@ -150,20 +182,17 @@ function requestWatcherWake({
   // `head_sha` still describe the newest request, so any reader that predates
   // `pending_subjects` behaves exactly as before; readers that understand the
   // list match any subject in it.
-  const requestedMs = Date.parse(requestedAt);
-  const nowMs = Number.isFinite(requestedMs) ? requestedMs : Date.now();
-  const ttlMs = wakeSubjectTtlMs(env);
-  const carried = carriedWakeSubjects(filePath)
-    .filter((entry) => wakeSubjectIsFresh(entry, nowMs, ttlMs))
-    .map((entry) => (entry.requested_at ? entry : { ...entry, requested_at: requestedAt }));
-  const subject = wakeSubjectKeyParts({ repo, prNumber, headSha, requestedAt });
+  const writtenAt = new Date().toISOString();
+  const stampedAt = Number.isFinite(Date.parse(requestedAt)) ? requestedAt : writtenAt;
+  const carried = carriedWakeSubjects(filePath, consumedPath, writtenAt);
+  const subject = wakeSubjectKeyParts({ repo, prNumber, headSha, requestedAt: stampedAt });
   const pendingSubjects = subject
     ? dedupeWakeSubjects([...carried, subject]).slice(-MAX_PENDING_WAKE_SUBJECTS)
     : carried.slice(-MAX_PENDING_WAKE_SUBJECTS);
   const payload = {
     schema_version: 1,
     request_id: requestId,
-    requested_at: requestedAt,
+    requested_at: stampedAt,
     reason,
     repo,
     pr_number: prNumber,
@@ -251,14 +280,17 @@ function createWatcherWakeSource({
   env = process.env,
   recordHandoffWakeEventsImpl = recordHandoffWakeEvents,
   consumeExistingOnStart = false,
+  now = Date.now,
 } = {}) {
   if (!rootDir) {
     throw new Error('createWatcherWakeSource requires rootDir');
   }
   const filePath = watcherWakePath(rootDir);
+  const consumedPath = watcherWakeConsumedPath(rootDir);
   const dirPath = dirname(filePath);
   mkdirSync(dirPath, { recursive: true });
 
+  const startedAtMs = now();
   let lastSeen = consumeExistingOnStart ? null : (readWakeSnapshot(filePath)?.key || null);
   let closed = false;
   const waiters = new Set();
@@ -268,12 +300,21 @@ function createWatcherWakeSource({
     if (!nextSeen || nextSeen.key === lastSeen) return null;
     lastSeen = nextSeen.key;
     try {
+      writeConsumedReceipt(consumedPath, nextSeen.key);
+    } catch (err) {
+      logger?.warn?.(`[watcher] wake receipt write failed; carrying subjects until next consume: ${err?.message || err}`);
+    }
+    try {
       const cfg = loadConfigImpl({ env }).getHandoffConfig();
       rateLimiter?.setMaxPerPrHead?.(normalizeHandoffMaxPerPrHead(cfg.maxPerPrHead));
     } catch (err) {
       logger?.warn?.(`[watcher] handoff rate-cap config load failed; using current cap: ${err?.message || err}`);
     }
-    const payload = nextSeen.payload || { reason: 'unreadable-wake-file' };
+    const payload = freshWakePayload(
+      nextSeen.payload || { reason: 'unreadable-wake-file' },
+      startedAtMs,
+      wakeSubjectTtlMs(env),
+    );
     const cap = rateLimiter?.inspect?.(payload);
     if (cap?.accepted === false) {
       return null;

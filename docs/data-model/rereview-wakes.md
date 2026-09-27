@@ -9,10 +9,11 @@
 
 `data/rereview-wakes/` is the durable, idempotent queue of "this PR became
 eligible for re-review — look at it now" requests. It exists because the
-ordinary watcher wake (`data/watcher-wake.json`) is a single overwritable slot
-that is consumed once and forgotten: if the watcher was mid-poll, bouncing, or
-rate-capped when a remediation push landed, the wake evaporated and the PR
-waited a full poll interval with nothing recorded about why.
+ordinary watcher wake (`data/watcher-wake.json`) is a best-effort, single-slot
+latency signal. Its subjects are carried until a watcher consumption receipt,
+but the slot and receipt do not track per-PR admission: a watcher bounce,
+rate cap, or subject-list cap can still leave a PR waiting for ordinary polling
+with no durable record of why.
 
 A record in this queue answers three operator questions that the wake file
 cannot: *was a re-review ever asked for*, *when did the watcher pick it up*, and

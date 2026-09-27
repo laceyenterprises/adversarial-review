@@ -1421,12 +1421,12 @@ function workspaceReapPermissionAnomaly(
 // node_modules) took ~4 min each on a loaded host on 2026-09-27, and this step
 // runs inside the follow-up daemon tick: `reap-workspaces` held ticks for
 // 10-16 min, so remediation slots freed mid-tick sat idle until the next
-// `consume`. Removal now renames the workspace into a sibling trash directory
-// (same volume, instant) and a detached, niced `rm -rf` does the slow part off
+// `consume`. Removal now renames the workspace into a trash directory inside
+// the managed workspace root (same volume, instant). A detached, niced `rm -rf` does the slow part off
 // the tick. A wall-clock budget bounds whatever work remains on the tick.
 const DEFAULT_WORKSPACE_REAP_BUDGET_MS = 30_000;
 const WORKSPACE_REAP_BUDGET_MS_ENV = 'ADVERSARIAL_FOLLOW_UP_WORKSPACE_REAP_BUDGET_MS';
-const WORKSPACE_REAP_TRASH_SUFFIX = '.reap-trash';
+const WORKSPACE_REAP_TRASH_DIR = '.reap-trash';
 // A trash batch older than this whose background removal apparently died is
 // handed to the next background removal.
 const WORKSPACE_REAP_TRASH_ORPHAN_MS = 10 * 60 * 1000;
@@ -1507,7 +1507,7 @@ function reapTerminalFollowUpWorkspaces({
   // A caller that injects its own remover (tests simulating EBUSY/EACCES)
   // keeps the synchronous contract; production uses trash + background rm.
   const useTrash = rmSyncImpl === rmSync;
-  const trashRootDir = `${workspaceRootDir}${WORKSPACE_REAP_TRASH_SUFFIX}`;
+  const trashRootDir = join(workspaceRootDir, WORKSPACE_REAP_TRASH_DIR);
   const trashBatch = `batch-${nowMs}-${process.pid}`;
   const trashBatchDir = join(trashRootDir, trashBatch);
   let trashed = 0;
@@ -1515,6 +1515,7 @@ function reapTerminalFollowUpWorkspaces({
 
   for (const entry of readdirSync(workspaceRootDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
+    if (entry.name === WORKSPACE_REAP_TRASH_DIR) continue;
     scanned += 1;
     const workspacePath = join(workspaceRootDir, entry.name);
     try {
@@ -1566,7 +1567,7 @@ function reapTerminalFollowUpWorkspaces({
         } catch (renameErr) {
           // A cross-device or otherwise unrenameable workspace falls back to the
           // synchronous removal below; permission errors surface there too.
-          if (renameErr?.code !== 'EXDEV' && renameErr?.code !== 'ENOTSUP') throw renameErr;
+          if (!['EXDEV', 'ENOTSUP', 'EACCES', 'EPERM'].includes(renameErr?.code)) throw renameErr;
         }
       }
       if (!removed) rmSyncImpl(workspacePath, { recursive: true, force: true });

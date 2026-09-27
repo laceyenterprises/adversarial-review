@@ -584,7 +584,7 @@ test('test runner cannot write config status to a live HQ root', () => {
 test('test runner cannot write config status through a temporary symlink', (t) => {
   const tempRoot = makeTempDir(t);
   const hqRootAlias = path.join(tempRoot, 'hq-alias');
-  symlinkSync('/Users/airlock/agent-os-hq', hqRootAlias, 'dir');
+  symlinkSync(path.parse(tempRoot).root, hqRootAlias, 'dir');
   assert.throws(
     () => writeConfigSignatureStatus({ env: { HQ_ROOT: hqRootAlias } }),
     /outside temporary HQ_ROOT/

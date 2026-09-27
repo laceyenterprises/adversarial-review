@@ -1427,6 +1427,29 @@ test('cloneRemediationWorkspace retries without branch narrowing when the remote
   assert.ok(warnings.some(line => /retrying clone without --single-branch/.test(line)));
 });
 
+test('prepareWorkspaceForJob fetches only the PR head if the live base disappears after clone', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-base-fetch-race-'));
+  const fetches = [];
+  const warnings = [];
+  await prepareWorkspaceForJob({
+    rootDir, job: makeJob(), env: {}, log: { info() {}, warn: line => warnings.push(line) },
+    execFileImpl: async (command, args) => {
+      if (command === 'gh' && args[0] === 'api') return {
+        stdout: JSON.stringify({ base: { ref: 'main' }, head: { ref: 'feature', repo: { full_name: 'laceyenterprises/clio' } } }),
+      };
+      if (command === 'git' && args[0] === 'clone') mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
+      if (command === 'git' && args.includes('fetch')) {
+        fetches.push(args);
+        if (fetches.length === 1) throw new Error("fatal: couldn't find remote ref refs/heads/main");
+      }
+      return { stdout: '', stderr: '' };
+    },
+  });
+  assert.equal(fetches.length, 2);
+  assert.equal(fetches[1].some(arg => String(arg).includes('refs/heads/main')), false);
+  assert.match(warnings[0], /base branch disappeared during fetch/);
+});
+
 test('cloneRemediationWorkspace warns when a configured reference is ignored', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-reference-'));
   const workspaceDir = path.join(rootDir, 'workspace');
@@ -6600,7 +6623,7 @@ test('killDetachedWorkerProcessGroup refuses to target the daemon pid', () => {
   assert.equal(killDetachedWorkerProcessGroup(process.pid), false);
 });
 
-test('consumeFollowUpJobsUntilCapacity finishes claimed preparations when shutdown flips mid-tick', async () => {
+test('consumeFollowUpJobsUntilCapacity requeues claimed jobs that finish preparation after shutdown', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createPendingRemediationJob(rootDir, { prNumber: 7, reviewPostedAt: '2026-04-21T08:00:00.000Z' });
   createPendingRemediationJob(rootDir, { prNumber: 8, reviewPostedAt: '2026-04-21T08:01:00.000Z' });
@@ -6621,9 +6644,33 @@ test('consumeFollowUpJobsUntilCapacity finishes claimed preparations when shutdo
     })
   ));
 
-  assert.equal(result.spawned, 2);
-  assert.equal(spawnCalls.length, 2);
-  assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'pending')).filter((name) => name.endsWith('.json')).length, 1);
+  assert.ok(result.spawned <= 1);
+  assert.ok(spawnCalls.length <= 1);
+  assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'pending')).filter((name) => name.endsWith('.json')).length, 3 - spawnCalls.length);
+});
+
+test('shutdown during workspace preparation returns the claimed job to pending without a round charge', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-stop-prep-'));
+  createPendingRemediationJob(rootDir);
+  const spawns = [];
+  let stopping = false;
+  const defaults = drainerTestOptions(rootDir, spawns);
+  const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity({
+    ...defaults,
+    maxConcurrent: 1,
+    shouldStop: () => stopping,
+    execFileImpl: async (command, args, options) => {
+      const outcome = await defaults.execFileImpl(command, args, options);
+      if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) stopping = true;
+      return outcome;
+    },
+  }));
+  assert.equal(spawns.length, 0);
+  assert.equal(result.results[0].reason, 'shutting-down');
+  const pendingNames = readdirSync(getFollowUpJobDir(rootDir, 'pending')).filter(name => name.endsWith('.json'));
+  assert.equal(pendingNames.length, 1);
+  const job = JSON.parse(readFileSync(path.join(getFollowUpJobDir(rootDir, 'pending'), pendingNames[0]), 'utf8'));
+  assert.equal(job.remediationPlan.currentRound, 0);
 });
 
 test('resolveRemediationMaxConcurrentJobs clamps runaway env values', () => {

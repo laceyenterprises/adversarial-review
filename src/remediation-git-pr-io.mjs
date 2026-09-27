@@ -59,7 +59,7 @@ function isTransientWorkspaceNetworkError(err) {
   const code = String(err?.code || '').toUpperCase();
   if (['EAGAIN', 'EBUSY', 'EIO', 'EMFILE', 'ENFILE', 'ETIMEDOUT'].includes(code)) return true;
   const detail = [err?.message, err?.stdout, err?.stderr].filter(Boolean).join('\n');
-  return /(?:unable to access|could not resolve host|failed to connect|connection (?:reset|timed out)|connection refused|network is unreachable|operation timed out|timed out|timeout|TLS|SSL|HTTP 5\d\d|The requested URL returned error: 5\d\d|remote end hung up unexpectedly|early EOF|RPC failed|temporary failure|temporarily unavailable|resource temporarily unavailable|input\/output error|i\/o error|try again|index\.lock|config\.lock|could not lock|unable to create [^\n]*\.lock|lock file exists)/i.test(detail);
+  return /(?:unable to access|could not resolve host|failed to connect|connection (?:reset|timed out)|connection refused|network is unreachable|operation timed out|timed out|timeout|TLS|SSL|HTTP 5\d\d|The requested URL returned error: 5\d\d|remote end hung up unexpectedly|early EOF|RPC failed|temporary failure|temporarily unavailable|resource temporarily unavailable|input\/output error|i\/o error)/i.test(detail);
 }
 
 // An EXPIRED credential is not a network blip, so it never matched the

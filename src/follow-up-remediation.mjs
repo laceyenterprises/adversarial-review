@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -108,6 +108,7 @@ import { OAUTH_ENV_STRIP_LIST } from './secret-source/env.mjs';
 import { loadDomainConfig } from './domain-config.mjs';
 import { cloneRemediationWorkspace } from './remediation-workspace-clone.mjs';
 import { drainRemediationJobs } from './remediation-parallel-drain.mjs';
+import { requeueClaimedFollowUpJobBeforeSpawn } from './remediation-claimed-requeue.mjs';
 import { resolveRemediatorWorkerClassFromDomain } from './domain-policy.mjs';
 import {
   loadRoleConfig,
@@ -556,56 +557,6 @@ function pickRemediationWorkerClass(job, { env = process.env, topPath, loaderImp
     return REMEDIATION_WORKER_BY_BUILDER_TAG[builderTag];
   }
   return resolveRoleRegistryRemediator({ env, topPath, loaderImpl, domainId: job?.domainId || 'code-pr' });
-}
-
-function requeueClaimedFollowUpJobAfterConfigFailure({
-  rootDir,
-  jobPath,
-  error,
-  requeuedAt = new Date().toISOString(),
-}) {
-  const currentJob = JSON.parse(readFileSync(jobPath, 'utf8'));
-  const currentPlan = currentJob.remediationPlan || {};
-  const currentRound = Number(currentPlan.currentRound || 0);
-  const rounds = Array.isArray(currentPlan.rounds) ? [...currentPlan.rounds] : [];
-  const lastRound = rounds.at(-1);
-  let nextCurrentRound = currentRound;
-
-  if (
-    lastRound
-    && Number(lastRound.round) === currentRound
-    && lastRound.state === 'claimed'
-  ) {
-    rounds.pop();
-    nextCurrentRound = Math.max(0, currentRound - 1);
-  }
-
-  const nextJob = {
-    ...currentJob,
-    status: 'pending',
-    pendingAt: requeuedAt,
-    claimedAt: null,
-    claimedBy: null,
-    remediationWorker: null,
-    failure: null,
-    lastConfigValidationFailure: {
-      code: 'config-validation-failure',
-      key: error.configKey || DEFAULT_REMEDIATOR_ENV,
-      message: error.message,
-      recoverable: true,
-      recordedAt: requeuedAt,
-    },
-    remediationPlan: {
-      ...currentPlan,
-      currentRound: nextCurrentRound,
-      rounds,
-      nextAction: null,
-    },
-  };
-  writeFollowUpJob(jobPath, nextJob);
-  const pendingPath = join(getFollowUpJobDir(rootDir, 'pending'), basename(jobPath));
-  renameSync(jobPath, pendingPath);
-  return { job: nextJob, jobPath: pendingPath };
 }
 
 // ARC-08: the remediation AgentRuntime facade. Collapses the former
@@ -1273,16 +1224,18 @@ async function prepareWorkspaceForJob({
     if (baseBranch !== headRef) {
       fetchRefs.push(`+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`);
     }
-    await runWorkspaceGitWithTransientRetry(
-      ['-C', workspaceDir, 'fetch', 'origin', ...fetchRefs],
-      {
-        execFileImpl,
-        options: {
-          maxBuffer: 10 * 1024 * 1024,
-          env: withGhGitCredentialEnv(env),
-        },
-      }
-    );
+    const fetchOptions = {
+      execFileImpl,
+      options: { maxBuffer: 10 * 1024 * 1024, env: withGhGitCredentialEnv(env) },
+    };
+    try {
+      await runWorkspaceGitWithTransientRetry(['-C', workspaceDir, 'fetch', 'origin', ...fetchRefs], fetchOptions);
+    } catch (err) {
+      const detail = [err?.message, err?.stderr].filter(Boolean).join('\n');
+      if (fetchRefs.length < 2 || !/(?:couldn.t find remote ref|remote ref .+ not found)/i.test(detail)) throw err;
+      log.warn?.(`[follow-up-remediation] base branch disappeared during fetch repo=${repo} branch=${baseBranch}; fetching PR head only`);
+      await runWorkspaceGitWithTransientRetry(['-C', workspaceDir, 'fetch', 'origin', fetchRefs[0]], fetchOptions);
+    }
     checkoutStartedAt = Date.now();
     await runWorkspaceGitWithTransientRetry(
       ['-C', workspaceDir, 'checkout', '-B', headRef, `origin/${headRef}`],
@@ -3460,6 +3413,7 @@ async function consumeNextFollowUpJob({
   delayedPendingPaths = null,
   onDelayedPendingJob = null,
   onClaim = null,
+  shouldStop = () => false,
   quotaHoldRevalidator = null,
   resolveRemediationWorkerClassImpl = null,
   mintClaudeCodeRemediationTokenImpl = null,
@@ -3893,6 +3847,15 @@ async function consumeNextFollowUpJob({
       claimed.job = prTerminalCheck.job;
     }
 
+    // A stop may arrive during OAuth or workspace preparation. Return the
+    // claimed job to pending before a worker is dispatched.
+    if (shouldStop()) {
+      const requeued = requeueClaimedFollowUpJobBeforeSpawn({
+        rootDir, jobPath: claimed.jobPath, requeuedAt: now(),
+      });
+      return { consumed: false, reason: 'shutting-down', job: requeued.job, jobPath: requeued.jobPath };
+    }
+
     // ARC-08: one AgentRuntime port call, routed by the health router. The
     // runtime's `os` mode performs the app-contract / hq dispatch and `local`
     // mode the model-specific CLI self-spawn; both return the same worker
@@ -4013,7 +3976,7 @@ async function consumeNextFollowUpJob({
     }
 
     if (err.isRemediationConfigError) {
-      const requeued = requeueClaimedFollowUpJobAfterConfigFailure({
+      const requeued = requeueClaimedFollowUpJobBeforeSpawn({
         rootDir,
         jobPath: claimed.jobPath,
         error: err,
@@ -4169,6 +4132,7 @@ async function consumeFollowUpJobsUntilCapacity({
     capacity: concurrencyCap,
     activeAtStart: activeJobs.length,
     shouldStop,
+    log,
     run: () => consumeNextFollowUpJob({
         rootDir,
         execFileImpl,
@@ -4184,6 +4148,7 @@ async function consumeFollowUpJobsUntilCapacity({
           deferredSamePRPaths.add(String(pendingPath));
         },
         onClaim: (job) => blockedRepoPrKeys.add(followUpJobRepoPrKey(job)),
+        shouldStop,
         delayedPendingPaths,
         onDelayedPendingJob: () => {
         },

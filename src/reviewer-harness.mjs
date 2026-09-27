@@ -2570,7 +2570,14 @@ async function reviewWithGemini(diff, extraContext = '', {
       ? resolveGeminiAntigravityModel({ env: reviewEnv })
       : resolveGeminiReviewerModel(reviewEnv);
     const reviewerExecution = resolveReviewerExecution('gemini', { env: reviewEnv, fallbackModel, log });
-    const model = reviewerExecution.model;
+    // agy requires a display-name token; the registry's Gemini CLI slug is
+    // invalid for that runtime and would silently select its persisted default.
+    const model = runtime === 'antigravity' && !/^Gemini\s/u.test(reviewerExecution.model || '')
+      ? fallbackModel
+      : reviewerExecution.model;
+    if (model !== reviewerExecution.model) {
+      log.info?.(`[reviewer-harness] gemini agy model=${model} source=runtime-display-token`);
+    }
     selectedModel = model;
 
     console.error(`[reviewWithGemini] invoking Gemini reviewer CLI (model=${model}, runtime=${runtime})`);
@@ -3124,10 +3131,12 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
     );
   }
   const chunkReviews = [];
+  let execution = null;
   for (let index = 0; index < split.chunks.length; index += 1) {
     const chunk = split.chunks[index];
     const chunkContext = `${extraContext}${agyOversizedChunkContextSuffix(index + 1, split.chunks.length)}`;
     const result = await reviewWithGeminiImpl(chunk.diff, chunkContext, { promptStage, reviewerSubprocessCwd });
+    execution ||= result.execution || null;
     chunkReviews.push({
       index: index + 1,
       promptBytes: chunk.promptBytes,
@@ -3143,6 +3152,7 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
     rawReviewText: mergedReviewText,
     reviewText: mergedReviewText,
     tokenUsage: null,
+    execution,
     needsSanitize: false,
     chunked: true,
     chunks: split.chunks,

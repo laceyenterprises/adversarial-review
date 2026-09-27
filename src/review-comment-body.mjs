@@ -85,6 +85,7 @@ function insertAfterExistingReviewHeader(reviewBody, insertText) {
 function buildReviewCommentBody({
   reviewerMetadata,
   verdictMode,
+  execution = null,
   waiverAuditBlock = '',
   reviewModeAuditBlock = '',
   reviewText,
@@ -93,7 +94,10 @@ function buildReviewCommentBody({
   // Blockquote lines only, never headings: the verdict and blocking-finding
   // parsers key on `## Verdict` / `## Blocking issues`, and a heading inserted
   // above them has broken parsing before (adversarial-review#521).
-  const auditBlocks = `${String(waiverAuditBlock || '')}${String(reviewModeAuditBlock || '')}`;
+  const stamp = execution
+    ? `> Reviewer: ${execution.harness || reviewerMetadata?.displayName?.toLowerCase() || 'unknown'} · ${execution.model || 'unknown'} · ${execution.effort || 'none'}\n\n`
+    : '';
+  const auditBlocks = `${stamp}${String(waiverAuditBlock || '')}${String(reviewModeAuditBlock || '')}`;
   if (startsWithReviewCommentHeader(text)) {
     return insertAfterExistingReviewHeader(text, auditBlocks);
   }

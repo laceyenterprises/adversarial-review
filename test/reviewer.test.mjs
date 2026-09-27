@@ -8,6 +8,8 @@ import { CLAUDE_CLI, GEMINI_CLI, AGY_CLI, __test__ } from '../src/reviewer.mjs';
 import { buildObviousDocsGuidance, extractLinkedRepoDocs, fetchLinkedSpecContents, parseGitHubBlobPath } from '../src/prompt-context.mjs';
 import { AgentOSConfigError } from '../src/config-loader.mjs';
 import { beginReviewerPass } from '../src/reviewer-pass-tokens.mjs';
+import { extractReviewVerdict } from '../src/kernel/verdict.mjs';
+import { parseReviewBody as parseRescueReviewBody } from '../src/merge-agent-rescue-classifier.mjs';
 import { readPendingReviewedAttestations } from '../src/reviewed-attestation.mjs';
 import {
   AGY_TRANSIENT_REMEDIATION,
@@ -1689,6 +1691,19 @@ test('review comment body prepends canonical header when reviewer output has non
     '## Adversarial Review — Gemini (gemini-reviewer-lacey)\n\n' +
       '## Summary\nClean.\n\n## Verdict\nComment only',
   );
+});
+
+test('stamped review preserves header, verdict and finding parsing', () => {
+  const body = buildReviewCommentBody({
+    reviewerMetadata: { displayName: 'Codex', reviewerIdentity: 'codex-reviewer-lacey' },
+    verdictMode: VERDICT_MODE_ENFORCE,
+    execution: { harness: 'codex', model: 'gpt-6-sol', effort: 'high' },
+    reviewText: '## Summary\nClean.\n\n## Blocking issues\n- None.\n\n## Verdict\nComment only',
+  });
+  assert.match(body, /^## Adversarial Review — Codex \(codex-reviewer-lacey\)\n\n> Reviewer: codex · gpt-6-sol · high\n\n/);
+  assert.equal(classifyReviewCommentHeader(body).verdictMode, VERDICT_MODE_ENFORCE);
+  assert.equal(extractReviewVerdict(body), 'Comment only');
+  assert.equal(parseRescueReviewBody(body).verdict, 'Comment only');
 });
 
 test('review comment body skips prepending when reviewer output already has a title', () => {

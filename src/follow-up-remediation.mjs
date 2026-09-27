@@ -1457,6 +1457,7 @@ function buildReconcileCommentDelivery({
   const workerClass = resolveReconcileWorkerClass(job, worker);
   const body = buildRemediationOutcomeCommentBody({
     workerClass,
+    worker,
     action,
     job,
     reply,
@@ -1511,6 +1512,7 @@ async function postReconcileOutcomeCommentSafe({
     const workerClass = resolveReconcileWorkerClass(job, worker);
     const body = buildRemediationOutcomeCommentBody({
       workerClass,
+      worker,
       action,
       job,
       reply,

@@ -2118,6 +2118,7 @@ async function main() {
   let reviewText;
   let rawReviewText;
   let tokenUsage = null;
+  let reviewerExecution = null;
   const reviewerStartedAt = new Date().toISOString();
   try {
     console.error(`[reviewer] DEBUG: starting ${effectiveModel} review...`);
@@ -2161,6 +2162,7 @@ async function main() {
     }
     rawReviewText = dispatch.rawReviewText;
     tokenUsage = dispatch.tokenUsage;
+    reviewerExecution = dispatch.execution || null;
     if (effectiveModel === 'claude' && !tokenUsage) tokenUsage = captureLocalReviewerUsage({ tokenUsage, model: effectiveModel, workspacePath: reviewerSubprocessCwd, startedAt: reviewerStartedAt, rootDir: ROOT });
     if (dispatch.needsSanitize) {
       console.error(`[reviewer] DEBUG: raw Codex review length=${rawReviewText.length}; preview=${previewText(rawReviewText)}`);
@@ -2297,6 +2299,7 @@ async function main() {
   const fullComment = buildReviewCommentBody({
     reviewerMetadata,
     verdictMode,
+    execution: reviewerExecution,
     waiverAuditBlock,
     reviewModeAuditBlock: buildReviewModeAuditBlock(reviewModeDecision),
     reviewText: reviewTextForPost,

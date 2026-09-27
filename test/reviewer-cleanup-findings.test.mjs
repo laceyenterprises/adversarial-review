@@ -51,7 +51,7 @@ test('posted reviewer cleanup findings persist and clear after a later dead prob
   assert.doesNotThrow(() => cleanupFindingPath(rootDir, 'session-6917'));
 });
 
-test('cleanup finding recheck uses the production probe argument shape', async (t) => {
+test('cleanup finding recheck matches a live production probe', async (t) => {
   const psProbe = spawnSync('/bin/ps', ['-p', String(process.pid), '-o', 'command='], { encoding: 'utf8' });
   if (psProbe.error || psProbe.status !== 0 || !psProbe.stdout?.trim()) {
     t.skip('worker sandbox blocks process introspection required by the production probe');
@@ -87,6 +87,34 @@ test('cleanup finding recheck uses the production probe argument shape', async (
       process.kill(-child.pid, 'SIGTERM');
     } catch {}
   }
+});
+
+test('cleanup finding recheck uses the production probe argument shape', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewer-cleanup-findings-args-'));
+  const sessionUuid = `cleanup-finding-${process.pid}-${Date.now()}`;
+  const pgid = 12345;
+  const probes = [];
+  writeReviewerCleanupFinding(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 6917,
+    reviewerSessionUuid: sessionUuid,
+    reviewerPgid: pgid,
+    matched: true,
+    postedAt: '2026-09-20T06:29:34Z',
+  });
+
+  const result = recheckReviewerCleanupFindings({
+    rootDir,
+    log: { warn() {} },
+    probeSessionImpl: args => {
+      probes.push(args);
+      return { alive: true, matched: true };
+    },
+  });
+
+  assert.equal(result.stillAlive, 1);
+  assert.deepEqual(probes, [{ pgid, sessionUuid }]);
+  assert.equal(readReviewerCleanupFindings(rootDir)[0].matched, true);
 });
 
 test('cleanup finding recheck clears recycled process groups with mismatched sessions', () => {

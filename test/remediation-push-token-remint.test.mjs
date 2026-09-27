@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import {
   defaultRefreshWorkspaceAuthEnv,
   isWorkspaceAuthFailure,
+  runWorkspaceGitWithTransientRetry,
   runWorkspaceNetworkCommandWithTransientRetry,
 } from '../src/remediation-git-pr-io.mjs';
 
@@ -23,6 +24,19 @@ import {
 // merge-agent token that expired 04:21:46Z.
 
 const quietLog = { log() {} };
+
+test('local Git lock contention is not retried as a network failure', async () => {
+  let attempts = 0;
+  await assert.rejects(runWorkspaceGitWithTransientRetry(['fetch', 'origin'], {
+    execFileImpl: async () => {
+      attempts += 1;
+      throw new Error('fatal: Unable to create .git/index.lock: File exists');
+    },
+    options: {},
+    retryDelaysMs: [0, 0],
+  }), /index\.lock/);
+  assert.equal(attempts, 1);
+});
 
 test('isWorkspaceAuthFailure matches the git and gh auth vocabularies', () => {
   const authFailures = [

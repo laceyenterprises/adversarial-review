@@ -13,6 +13,7 @@
     "provider": "github-commit-status"
   },
   "promptSet": "code-pr-security",
+  "remediationCloneReferences": {},
   "riskClasses": {
     "low": {
       "maxRemediationRounds": 1

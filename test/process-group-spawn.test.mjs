@@ -371,10 +371,11 @@ test('without reapGroupOnExit a leaked grandchild stalls capture until the timeo
 // retired permanently on the first byte, so a child that speaks early and then
 // thinks in silence runs to its hard timeout.
 test('firstOutputTimeout is retired by the first byte and never re-arms', async () => {
-  // Allow a saturated worker time to schedule the shell's first write. The
-  // later quiet gap remains longer than this deadline and tests retirement.
+  // Use the shell's built-in printf: Node child startup can exceed this
+  // deadline when the offline suite runs in parallel.
   const firstOutputTimeout = 1_500;
-  const script = 'printf hello; sleep 2.2; printf \'{"ok":true}\'';
+  // Writes immediately, then stays silent far longer than the deadline.
+  const script = `printf hello; sleep 3; printf '{"ok":true}'`;
   const result = await spawnCapturedProcessGroup('/bin/sh', ['-c', script], {
     firstOutputTimeout,
     timeout: 10_000,

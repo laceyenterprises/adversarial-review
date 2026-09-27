@@ -2141,9 +2141,11 @@ function schemaV1() {
       // worker_pool.dispatch.op_hammer_alerts.*,
       // worker_pool.dispatch.substrate.*,
       // worker_pool.hardening_ledger.*,
-      // worker_pool.memory.dynamic.*, worker_pool.memory_injection.*,
+      // worker_pool.mcp.*, worker_pool.memory.dynamic.*,
+      // worker_pool.memory_injection.*,
       // worker_pool.memory_retention.*, worker_pool.secrets.op_read_cache.*,
-      // worker_pool.secrets_bus.*, and worker_pool.shr.* —
+      // worker_pool.oss_dispatch.*, worker_pool.secrets_bus.*,
+      // and worker_pool.shr.* —
       // Python-owned (canonical schema at platform/agent-os-config).
       // PARTIAL mirror, same rationale as the
       // sentinel block below: this Node reader does not consume the values, but
@@ -2166,6 +2168,13 @@ function schemaV1() {
                 __default: 25,
                 __min: 0.01,
               },
+            },
+          },
+          mcp: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              required_servers_mode: { __type: TYPE_STRING, __default: 'warn', __enum: ['warn', 'enforce'] },
             },
           },
           comms: {

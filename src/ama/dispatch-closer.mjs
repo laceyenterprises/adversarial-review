@@ -4079,6 +4079,7 @@ export async function maybeDispatchAmaCloser({
     let releaseUnprovenTerminalHoldError = null;
     let releaseUnprovenTerminalHoldMerged = false;
     let advancedTerminalDispatchSuperseded = false;
+    let hammerEndedWithoutMerge = false;
     throwIfAborted(signal);
     const statusProbe = await probeAmaCloserDispatchStatus({
       hqPath,
@@ -4142,6 +4143,55 @@ export async function maybeDispatchAmaCloser({
     }
     if (AMA_CLOSER_ACTIVE_STATUSES.has(status) || AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)) {
       if (
+        AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)
+        && auditTerminalOutcome !== 'succeeded'
+        && !(currentHeadFinalHammerTerminalRemediation && validatedHamTerminalRemediation)
+      ) {
+        const terminalLivePr = await probeAmaLivePrForMergeDispatch({
+          dispatchContext,
+          execFileImpl,
+          repo,
+          prNumber,
+          signal,
+        });
+        throwIfAborted(signal);
+        if (terminalLivePr?.state === 'OPEN') {
+          // A successful worker process is not a successful closer. The live PR
+          // is authoritative: if it is still open, count the hammer as failed
+          // even when its remediation commit advanced the head. Treating that
+          // head advance as supersession hid the failed closure attempt and
+          // bypassed the bounded hammer retry/alert path (HAMSYNC-01).
+          hammerEndedWithoutMerge = true;
+          status = 'failed';
+          existingDispatchStatus = status;
+          finalizeAmaCloserLeaseBestEffort({
+            rootDir,
+            leaseIdentity: existingRecordLeaseIdentity,
+            terminalOutcome: 'failed-without-merge',
+            now: dispatchContext.dispatchedAt,
+            logger,
+            repo,
+            prNumber,
+          });
+          updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+            ...(current || existingRecord),
+            lastObservedStatus: 'succeeded',
+            lastObservedAt: dispatchContext.dispatchedAt,
+            lastError: 'hammer-ended-without-merge',
+          }));
+          logAmaCloserDispatchEvent(logger, 'ama_closer.hammer_ended_without_merge', {
+            repo,
+            prNumber,
+            headSha: existingRecordLeaseIdentity.headSha,
+            launchRequestId: existingRecord.launchRequestId,
+            dispatchId: existingRecord.dispatchId || null,
+            observedWorkerStatus: 'succeeded',
+            classification: 'hammer-ended-without-merge',
+          }, { level: 'warn' });
+        }
+      }
+      if (
+        !hammerEndedWithoutMerge &&
         existingDispatchHeadAdvanced &&
         AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)
       ) {
@@ -4432,6 +4482,8 @@ export async function maybeDispatchAmaCloser({
         });
       }
       if (
+        !hammerEndedWithoutMerge
+        &&
         !advancedTerminalDispatchSuperseded
         && !existingDispatchHeadAdvanced
         &&
@@ -4447,6 +4499,8 @@ export async function maybeDispatchAmaCloser({
         return retainExistingAmaCloserDispatch(existingRecord, workerClass, status);
       }
       if (
+        !hammerEndedWithoutMerge
+        &&
         !advancedTerminalDispatchSuperseded
         && !existingDispatchHeadAdvanced
         && mergedSignalUnknown
@@ -4464,7 +4518,11 @@ export async function maybeDispatchAmaCloser({
         }));
         return retainExistingAmaCloserDispatch(existingRecord, workerClass, status);
       }
-      if (!advancedTerminalDispatchSuperseded && auditTerminalOutcome === 'succeeded') {
+      if (
+        !hammerEndedWithoutMerge
+        && !advancedTerminalDispatchSuperseded
+        && auditTerminalOutcome === 'succeeded'
+      ) {
         existingDispatchStatus = 'unverified-terminal-success';
         releaseUnprovenTerminalHold = true;
         releaseUnprovenTerminalHoldError = 'audit-succeeded-without-merged-signal';
@@ -4479,6 +4537,8 @@ export async function maybeDispatchAmaCloser({
           prNumber,
         });
       } else if (
+        !hammerEndedWithoutMerge
+        &&
         !advancedTerminalDispatchSuperseded
         && !mergedSignalUnknown
         && AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)
@@ -4497,6 +4557,8 @@ export async function maybeDispatchAmaCloser({
           prNumber,
         });
       } else if (
+        !hammerEndedWithoutMerge
+        &&
         !advancedTerminalDispatchSuperseded
         &&
         auditTerminalOutcome
@@ -4515,7 +4577,11 @@ export async function maybeDispatchAmaCloser({
           repo,
           prNumber,
         });
-      } else if (!advancedTerminalDispatchSuperseded && AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)) {
+      } else if (
+        !hammerEndedWithoutMerge
+        && !advancedTerminalDispatchSuperseded
+        && AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)
+      ) {
         existingDispatchStatus = 'failed';
         releaseUnprovenTerminalHold = true;
         releaseUnprovenTerminalHoldError = 'terminal-success-status-without-audit-or-merged-signal';
@@ -4530,7 +4596,7 @@ export async function maybeDispatchAmaCloser({
           repo,
           prNumber,
         });
-      } else if (!advancedTerminalDispatchSuperseded) {
+      } else if (!advancedTerminalDispatchSuperseded && !hammerEndedWithoutMerge) {
         updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
           ...(current || existingRecord),
           lastObservedStatus: status,
@@ -4699,7 +4765,9 @@ export async function maybeDispatchAmaCloser({
       finalizeAmaCloserLeaseBestEffort({
         rootDir,
         leaseIdentity: existingRecordLeaseIdentity,
-        terminalOutcome: existingDispatchHeadAdvanced ? 'superseded' : 'failed-without-merge',
+        terminalOutcome: existingDispatchHeadAdvanced && !hammerEndedWithoutMerge
+          ? 'superseded'
+          : 'failed-without-merge',
         now: dispatchContext.dispatchedAt,
         logger,
         repo,

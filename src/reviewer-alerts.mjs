@@ -63,7 +63,24 @@ async function alertClioOversizedAgyFailure({
   }
 }
 
+async function alertReviewerSnapshotBaseFailure({ repo, prNumber, headSha, linkPath, reason }, {
+  deliverAlertImpl = deliverAlert,
+} = {}) {
+  const msg = `Adversarial reviewer stopped: the default checkout snapshot is unsafe.\n\nRepo: ${repo} PR #${prNumber}\nCheckout HEAD: ${headSha || 'unknown'}\nLink: ${linkPath || 'unknown'}\nReason: ${reason}\n\nRepair the base checkout; this is not a PR-authored finding.`;
+  console.error(`[reviewer] ALERT: ${msg}`);
+  try {
+    return await deliverAlertImpl(msg, {
+      event: 'reviewer.snapshot_base_invalid',
+      payload: { repo, prNumber, headSha, linkPath, reason },
+    });
+  } catch (err) {
+    console.error('[reviewer] Failed to queue snapshot-base alert:', err.message);
+    return null;
+  }
+}
+
 export {
   alertClioOAuthFailure,
   alertClioOversizedAgyFailure,
+  alertReviewerSnapshotBaseFailure,
 };

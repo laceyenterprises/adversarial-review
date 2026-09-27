@@ -1530,6 +1530,24 @@ mis-resolved workspace tree. Workspace-root provisioning failures must surface a
 structured error that names both `HQ_ROOT` and the runtime user so first-deploy
 permission drift is diagnosable without reading a raw stack trace.
 
+Workspace preparation resolves live PR branch metadata through the REST pulls
+endpoint before cloning. The clone uses GitHub's current `base.ref`, not the
+job's persisted `baseBranch`, so stacked PRs that are retargeted after their
+old base merges do not fail on a deleted branch. Same-repo workspaces clone over
+git smart-HTTP with `--no-checkout --single-branch --branch <liveBaseBranch>`,
+then fetch the PR head and live base ref explicitly before `checkout -B`. If
+the narrowed clone reports that the remote branch is missing, the daemon
+retries the clone without `--single-branch --branch` before failing workspace
+preparation.
+
+Domain configs may define `remediationCloneReferences` as a map from repo slug
+to an absolute local clone path. A valid reference must live outside the
+per-job remediation workspace and expose either `objects/` or `.git/objects/`;
+valid references are used with `--reference <path> --dissociate` so the worker
+workspace never depends on the reference after clone. Relative paths,
+workspace-contained paths, and paths without objects are ignored with a warning
+and the daemon falls back to a normal network clone.
+
 ### HQ Branch-Push Remediation Lane
 
 When `ADV_WITH_HQ_INTEGRATION=1` or

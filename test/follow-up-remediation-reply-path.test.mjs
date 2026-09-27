@@ -194,7 +194,7 @@ test('consumeNextFollowUpJob exports the canonical reply env, pre-creates the HQ
       now: () => '2026-05-04T09:30:00.000Z',
       execFileImpl: async (command, args) => {
         if (command === 'git' && args[0] === 'clone') {
-          mkdirSync(path.join(args[2], '.git'), { recursive: true });
+          mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
         }
         if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
           return {

@@ -693,7 +693,13 @@ export async function attemptDaemonCleanMerge({
       terminal = { reason: 'stale-head', permanent: true };
       break;
     }
-    if (initialOperatorOverride && !hasOperatorApprovedOverride({
+    // A clean, worker-attributed merge does not depend on a redundant approval.
+    // The wrapper marks operator-accountable merges explicitly in audit metadata.
+    const approvalRequired =
+      !isDaemonMergeReviewAllowed(reviewState, { strictMode }) ||
+      String(verdict || '').trim().toLowerCase() !== 'settled-success' ||
+      auditMetadata.closureAuthority === 'daemon-operator-approved-override';
+    if (initialOperatorOverride && approvalRequired && !hasOperatorApprovedOverride({
       operatorApprovedEvidence,
       operatorLogins,
       operatorLabelActorEnforcement,
@@ -725,7 +731,14 @@ export async function attemptDaemonCleanMerge({
       labels: live.labels,
     });
     if (!elig.eligible) {
-      terminal = { reason: 'gate-not-eligible', permanent: true, reasons: elig.reasons, liveGate: live };
+      const labelsOnlyReadFailure = elig.reasons.length > 0 &&
+        elig.reasons.every((reason) => reason === 'labels-unavailable');
+      terminal = {
+        reason: labelsOnlyReadFailure ? 'gate-read-failed' : 'gate-not-eligible',
+        permanent: !labelsOnlyReadFailure,
+        reasons: elig.reasons,
+        liveGate: live,
+      };
       break;
     }
 
@@ -855,7 +868,8 @@ export async function attemptDaemonCleanMerge({
   // operator-visible "manual close required" signal so the superproject
   // observability layer (ARR-02) can page on it instead of it being a silent
   // failed-without-merge. This does NOT change the merge decision.
-  const cleanParkManualCloseRequired = !merged && isFullyCleanSettledReview(reviewState);
+  const cleanParkManualCloseRequired =
+    !merged && terminal?.reason !== 'gate-read-failed' && isFullyCleanSettledReview(reviewState);
   let auditWritten = false;
   try {
     if (merged) {

@@ -444,6 +444,9 @@ export async function runDaemonCleanMergeAttempt({
   let cleanCloserCommitAccountability = null;
   let cleanCloserCommitSuppression = null;
   const operatorApprovedEvidence = reviewState?.operatorApprovedEvidence || null;
+  const ordinaryReviewAllowed =
+    SETTLED_SUCCESS_VERDICTS.has(gateSnapshot?.settledReview?.verdict) &&
+    isDaemonMergeReviewAllowed(reviewState, { strictMode });
   const snapshotOperatorOverride = hasOperatorApprovedOverride({
     operatorApprovedEvidence,
     operatorLogins: cfg?.operatorLogins,
@@ -547,7 +550,7 @@ export async function runDaemonCleanMergeAttempt({
     operatorLogins: cfg?.operatorLogins,
     operatorLabelActorEnforcement: cfg?.operatorLabelActorEnforcement,
   }, { headSha: liveHead, labels: liveRollup?.labels });
-  if (snapshotOperatorOverride && !liveOperatorOverride) {
+  if (snapshotOperatorOverride && !liveOperatorOverride && !ordinaryReviewAllowed) {
     return NOT_TAKEN('operator-approval-no-longer-current');
   }
   if (
@@ -592,6 +595,11 @@ export async function runDaemonCleanMergeAttempt({
     consumeHeadAttestations: cfg?.lha?.consumeAttestations === true,
     logger,
   });
+  // A clean review can use the ordinary lane only when worker identity also
+  // resolves. Otherwise the operator label is still the merge accountability.
+  if (snapshotOperatorOverride && !liveOperatorOverride && !workerIdentity.ok) {
+    return NOT_TAKEN('operator-approval-no-longer-current');
+  }
   cleanCloserCommitAccountability = resolveAutonomousCloserCommitAccountabilityImpl({
     enabled: cfg?.autonomousCloserCommitCleanMergeEnabled,
     reviewedHeadSha: validatedHead,
@@ -792,7 +800,7 @@ export async function runDaemonCleanMergeAttempt({
   const daemonVerdict = hamTerminalRemediationHead
     ? 'ham_terminal_remediation_validated'
     : settledVerdict;
-  const operatorOverrideUsed = liveOperatorOverride;
+  const operatorOverrideUsed = liveOperatorOverride && (!ordinaryReviewAllowed || !workerIdentity.ok);
   const overrideApproval = operatorOverrideUsed ? {
     label: OPERATOR_APPROVED_LABEL,
     actor: operatorApprovedEvidence.actor,

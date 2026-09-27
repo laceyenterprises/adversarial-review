@@ -2690,6 +2690,43 @@ test('revoked operator approval holds the tick instead of dispatching a hammer f
   }
 });
 
+test('redundant approval removed before the live read leaves a worker-attributed clean merge eligible', async () => {
+  const rootDir = tempRoot();
+  try {
+    const head = 'clean-approval-removed-head';
+    const event = operatorApprovedEventAt(head);
+    const args = realRollupHelpers({ rootDir, prNumber: 917, head });
+    let mergeArgs = null;
+    const result = await runDaemonCleanMergeAttempt({
+      ...args,
+      candidate: { ...args.candidate, labels: ['operator-approved'] },
+      operatorApprovalEvent: event,
+      reviewState: {
+        ...args.reviewState,
+        operatorApprovedEvidence: {
+          applied: true, observedRevisionRef: head, actor: event.actor,
+          eventId: event.id, observedAt: event.createdAt,
+        },
+      },
+      fetchRollupImpl: async () => ({
+        state: 'OPEN', headRefOid: head, checks: [
+          { name: 'repo-guards', conclusion: 'SUCCESS' },
+        ],
+        mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', labels: [],
+      }),
+      attemptDaemonCleanMergeImpl: async (options) => {
+        mergeArgs = options;
+        return { disposition: DAEMON_MERGE_DISPOSITION.MERGED, merged: true };
+      },
+    });
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+    assert.equal(mergeArgs.auditMetadata.mergeAccountability, 'worker-identity');
+    assert.notEqual(mergeArgs.auditMetadata.closureAuthority, 'daemon-operator-approved-override');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('approval removed in the lease returns the same protective hold to orchestration', async () => {
   const rootDir = tempRoot();
   try {
@@ -3364,6 +3401,30 @@ test('daemon fail-closed on branch-protection-missing-gate parks for operator cl
     const parkEvent = parsed.find((d) => d?.event === 'ama.daemon_clean_park.manual_close_required');
     assert.ok(parkEvent, 'a route that cannot hand off alerts even without a clean-review marker');
     assert.deepEqual(parkEvent.reasons, ['branch-protection-missing-gate']);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('labels-only eligibility read failure holds without a manual-close page', async () => {
+  const rootDir = tempRoot();
+  try {
+    const logs = [];
+    let closerCalls = 0;
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      logger: { log: (message) => logs.push(String(message)), warn() {} },
+      runDaemonCleanMergeAttemptImpl: async () => ({
+        disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+        reason: 'gate-not-eligible', reasons: ['labels-unavailable'],
+        permanent: true, manualCloseRequired: true, merged: false, attempts: 1,
+      }),
+      maybeDispatchAmaCloserImpl: async () => { closerCalls += 1; return { dispatched: true }; },
+    });
+    assert.equal(result.skipMergeAgent, true);
+    assert.equal(closerCalls, 0);
+    const events = logs.map((message) => { try { return JSON.parse(message); } catch { return null; } });
+    assert.equal(events.some((event) => event?.event === 'ama.daemon_clean_park.manual_close_required'), false);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

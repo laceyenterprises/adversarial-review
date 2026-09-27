@@ -1517,8 +1517,14 @@ export async function maybeDispatchAmaClosureFor({
       // A selected daemon route that cannot hand off needs an operator signal,
       // including approval overrides whose review was not fully clean. The
       // superproject observability layer pages on this existing event.
+      const transientEligibilityRead =
+        daemonCleanMerge.reason === 'gate-not-eligible' &&
+        Array.isArray(daemonCleanMerge.reasons) &&
+        daemonCleanMerge.reasons.length > 0 &&
+        daemonCleanMerge.reasons.every((reason) => reason === 'labels-unavailable');
       if (
         daemonFailedClosed &&
+        !transientEligibilityRead &&
         (daemonCleanMerge.manualCloseRequired === true ||
           daemonCleanMerge.permanent === true ||
           ['worker-identity-unresolved', 'gate-not-eligible'].includes(daemonCleanMerge.reason))

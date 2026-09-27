@@ -702,8 +702,11 @@ daemon re-reads the live label and head before merging. Its validated head is
 the live, approved head, which must still match the head at the merge attempt.
 Required checks, branch protection, mergeability, and the merge lease remain
 mandatory. An older-head approval or a label removed before the live read or
-inside the merge lease is refused with no carryover; removal holds dispatch
-until the next tick reads fresh labels. Actor provenance is mandatory; the
+inside the merge lease is refused with no carryover when the override is needed
+for review eligibility or operator accountability. A fully clean, settled review
+with resolved worker identity continues through the ordinary daemon gates when
+the label is removed; a required approval holds dispatch until the next tick
+reads fresh labels. Actor provenance is mandatory; the
 default `observe` enforcement
 honors a known actor even if that actor is not allowlisted, while `enforce`
 requires an allowlisted operator login. The substitution emits
@@ -736,8 +739,9 @@ never an uncapped re-dispatch. The fallback emits an
 budget/read exhaustion may retry on a later tick. The watcher emits
 `ama.daemon_clean_park.manual_close_required` only when the daemon marks
 `manualCloseRequired`, a permanent failure, or a non-remediable identity or
-eligibility gate requiring operator action; transient `gate-read-failed` without that marker does
-not page. A hammer-remediable failure instead emits
+eligibility gate requiring operator action. Missing live labels alone produce a
+transient `gate-read-failed` with no manual-close marker or page; the daemon can
+retry on a later tick. A hammer-remediable failure instead emits
 `ama.daemon_clean_fail_closed.hammer_fallback`. A removed `operator-approved`
 label is a protective hold, not a hammer handoff.
 

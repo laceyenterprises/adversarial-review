@@ -777,8 +777,8 @@ function insertReviewerPass(rootDir, overrides = {}) {
     db.prepare(
       `INSERT INTO reviewer_passes
          (repo, pr_number, attempt_number, reviewer_class, reviewer_model,
-          pass_kind, started_at, ended_at, status, head_sha, metadata_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          pass_kind, started_at, ended_at, status, head_sha, metadata_json, gh_comment_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       overrides.repo || REPO,
       overrides.prNumber || 950,
@@ -792,7 +792,8 @@ function insertReviewerPass(rootDir, overrides = {}) {
       overrides.headSha ?? null,
       Object.hasOwn(overrides, 'metadataJson')
         ? overrides.metadataJson
-        : JSON.stringify(overrides.metadata || { failureClass: 'timeout' })
+        : JSON.stringify(overrides.metadata || { failureClass: 'timeout' }),
+      overrides.ghCommentId ?? null
     );
   } finally {
     db.close();
@@ -801,6 +802,16 @@ function insertReviewerPass(rootDir, overrides = {}) {
 
 function insertReviewerPasses(rootDir, passes) {
   for (const pass of passes) insertReviewerPass(rootDir, pass);
+}
+
+function insertDeliveredReviewPass(rootDir, prNumber) {
+  insertReviewerPass(rootDir, {
+    prNumber,
+    attemptNumber: 1,
+    passKind: 'first-pass',
+    status: 'completed',
+    ghCommentId: `RV_${prNumber}`,
+  });
 }
 
 function reviewerModelSilentFinding(snapshot) {
@@ -3467,6 +3478,7 @@ test('a rereview deferred behind active remediation is not first-pass starvation
     failedAt: '2026-05-25T16:05:00.000Z',
     failureMessage: '[ci-regression-requeued] CFG schema parity=FAILURE, repo-guards=FAILURE',
   });
+  insertDeliveredReviewPass(rootDir, 6803);
   writeJob(rootDir, 'in-progress', 'job-6803', {
     kind: 'adversarial-review-follow-up',
     jobId: 'laceyenterprises__agent-os-pr-6803-2026-09-14T04-27-38-241Z',
@@ -3711,6 +3723,7 @@ test('rereview claim counts are scoped to the current reviewer head', () => {
     reviewerHeadSha: 'current-head',
   });
   for (const prNumber of [6829, 6830]) {
+    insertDeliveredReviewPass(rootDir, prNumber);
     insertReviewerPasses(rootDir, [
       ...Array.from({ length: 5 }, (_, index) => ({
         prNumber,
@@ -3770,6 +3783,7 @@ test('a stopped CI regression job older than the rereview request does not defer
     failedAt: '2026-05-25T12:00:00.000Z',
     rereviewRequestedAt: '2026-05-25T16:00:00.000Z',
   });
+  insertDeliveredReviewPass(rootDir, 6839);
   insertReviewerPass(rootDir, {
     prNumber: 6839,
     attemptNumber: 1,
@@ -4001,6 +4015,7 @@ test('a rereview with a completed remediation job remains visible in the rerevie
     failedAt: '2026-05-25T16:05:00.000Z',
     failureMessage: '[ci-regression-requeued] CFG schema parity=FAILURE, repo-guards=FAILURE',
   });
+  insertDeliveredReviewPass(rootDir, 6803);
   writeJob(rootDir, 'completed', 'job-6803', {
     kind: 'adversarial-review-follow-up',
     jobId: 'laceyenterprises__agent-os-pr-6803-2026-09-14T04-27-38-241Z',
@@ -4055,6 +4070,8 @@ test('queued rereview oldest is selected by materialized age, not SQL empty-stri
     rereviewRequestedAt: '2026-05-25T16:30:00.000Z',
     reviewAttempts: 2,
   });
+  insertDeliveredReviewPass(rootDir, 6805);
+  insertDeliveredReviewPass(rootDir, 6806);
   seedFreshReconcile(rootDir);
 
   const snapshot = collectReviewPipelineHealth({
@@ -4077,6 +4094,7 @@ test('unrelated active follow-up jobs do not defer rereview admission', () => {
     rereviewRequestedAt: '2026-05-25T16:30:00.000Z',
     reviewAttempts: 2,
   });
+  insertDeliveredReviewPass(rootDir, 6807);
   writeJob(rootDir, 'in-progress', 'job-6807-wake', {
     kind: 'hammer-wake',
     jobId: 'unrelated-wake-job',
@@ -4108,6 +4126,7 @@ test('an old rereview without a deferral reason reports the rereview lane, not f
     rereviewRequestedAt: '2026-05-25T16:30:00.000Z',
     reviewAttempts: 2,
   });
+  insertDeliveredReviewPass(rootDir, 6804);
   seedFreshReconcile(rootDir);
 
   const snapshot = collectReviewPipelineHealth({

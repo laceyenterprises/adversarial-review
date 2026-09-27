@@ -1090,6 +1090,25 @@ test('watcher pollOnce skips stale terminal rereview pass keys', () => {
         db.prepare(
           \`INSERT INTO reviewer_passes
              (repo, pr_number, attempt_number, reviewer_class, reviewer_model,
+              pass_kind, started_at, ended_at, status, head_sha, metadata_json, gh_comment_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\`
+        ).run(
+          'laceyenterprises/adversarial-review',
+          101,
+          1,
+          'gemini',
+          'gemini',
+          'first-pass',
+          '2026-08-22T03:32:00.000Z',
+          '2026-08-22T03:37:00.000Z',
+          'completed',
+          'reviewed-head',
+          '{}',
+          'review-101-1'
+        );
+        db.prepare(
+          \`INSERT INTO reviewer_passes
+             (repo, pr_number, attempt_number, reviewer_class, reviewer_model,
               pass_kind, started_at, ended_at, status, head_sha, metadata_json)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\`
         ).run(
@@ -1134,6 +1153,7 @@ test('watcher pollOnce skips stale terminal rereview pass keys', () => {
         .filter((row) => row.pr_number === 101)
         .map((row) => [row.attempt_number, row.pass_kind, row.status]),
       [
+        [1, 'first-pass', 'completed'],
         [2, 'rereview', 'failed'],
         [3, 'rereview', 'completed'],
       ]
@@ -1683,13 +1703,13 @@ function fsrPrePollSetup({ reviewed, live }) {
         const insertPass = db.prepare(
           \`INSERT INTO reviewer_passes
              (repo, pr_number, attempt_number, reviewer_class, reviewer_model,
-              pass_kind, started_at, ended_at, status, head_sha, metadata_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\`
+              pass_kind, started_at, ended_at, status, head_sha, metadata_json, gh_comment_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\`
         );
         insertPass.run('laceyenterprises/adversarial-review', 101, 1, 'codex', 'codex', 'rereview',
-          '2026-09-02T13:00:00.000Z', '2026-09-02T13:10:00.000Z', 'completed', ${JSON.stringify(live)}, '{}');
+          '2026-09-02T13:00:00.000Z', '2026-09-02T13:10:00.000Z', 'completed', ${JSON.stringify(live)}, '{}', 'review-101-1');
         insertPass.run('laceyenterprises/adversarial-review', 101, 2, 'codex', 'codex', 'rereview',
-          '2026-09-02T14:00:00.000Z', '2026-09-02T14:10:00.000Z', 'completed', ${JSON.stringify(live)}, '{}');
+          '2026-09-02T14:00:00.000Z', '2026-09-02T14:10:00.000Z', 'completed', ${JSON.stringify(live)}, '{}', 'review-101-2');
   `;
 }
 

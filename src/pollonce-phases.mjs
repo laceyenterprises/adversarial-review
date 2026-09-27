@@ -129,6 +129,7 @@ import {
   stmtCreateReviewRow,
   stmtFinalizePendingTerminalFailure,
   stmtGetReviewRow,
+  stmtHasCompletedReview,
   stmtHasPostedReview,
   stmtMarkAttemptStarted,
   stmtMarkClosed,
@@ -225,6 +226,7 @@ import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import {
   reserveReviewerMemoryAdmission,
   reviewerDispatchPassKind,
+  reviewerSafetyPassKind,
 } from './watcher-reviewer-pool.mjs';
 import { requestWatcherWake, watcherWakeMatchesSubject } from './watcher-wake.mjs';
 
@@ -1608,6 +1610,10 @@ export async function processReviewSubject(entry, ctx) {
         emitCacheEvent,
       });
       let depthSpillReserved = false;
+      const depthPassKind = reviewerDispatchPassKind({
+        current: existing,
+        hasPriorPostedReview: entry.hasPriorPostedReview,
+      });
 
       // RWF-01: review-dispatch worker-class fallback (quota trigger)
       // RSP-01: plus the queue-depth trigger, when the break-glass lever is
@@ -1624,7 +1630,7 @@ export async function processReviewSubject(entry, ctx) {
         authorClass: reviewerAuthorClass,
         primary: primaryReviewerWorkerClass,
         fallbackWorkerClasses: reviewWorkerClassFallback(process.env),
-        depthPressure: firstPassSpilloverController?.depthPressure?.() ?? null,
+        depthPressure: firstPassSpilloverController?.depthPressure?.(depthPassKind) ?? null,
         burstPressure: reviewerBurstController?.pressure?.({
           repo: repoPath,
           // Thunk: only a repo-in-scope, pack-scoped lease ever pays for this.
@@ -1685,6 +1691,7 @@ export async function processReviewSubject(entry, ctx) {
                 prNumber,
                 fromWorkerClass: rwfDecision.from,
                 toWorkerClass: rwfDecision.to,
+                passKind: depthPassKind,
               }) === true;
             }
             console.warn(
@@ -2617,13 +2624,15 @@ export async function processReviewSubject(entry, ctx) {
         return;
       }
 
+      const dispatchHasPriorPostedReview =
+        entry.hasPriorPostedReview ?? Boolean(stmtHasPostedReview.get(repoPath, prNumber));
       const dispatchCandidate = {
         repoPath,
         prNumber,
         reviewerModel: route.reviewerModel,
         subject,
         current,
-        hasPriorPostedReview: entry.hasPriorPostedReview ?? Boolean(stmtHasPostedReview.get(repoPath, prNumber)),
+        hasPriorPostedReview: dispatchHasPriorPostedReview,
         wakePriority: watcherWakeMatchesSubject(wakePayload, {
           repoPath,
           prNumber,
@@ -2945,9 +2954,12 @@ export async function processReviewSubject(entry, ctx) {
             const completedRemediationRounds = Number.isFinite(Number(ledger.completedRoundsForPR))
               ? Math.max(0, Math.floor(Number(ledger.completedRoundsForPR)))
               : 0;
-            const passKind = reviewAttemptNumber > 1 || current?.rereview_requested_at
-              ? 'rereview'
-              : 'first-pass';
+            const passKind = reviewerSafetyPassKind({
+              current,
+              hasPriorPostedReview: dispatchHasPriorPostedReview,
+              hasPriorCompletedReview: Boolean(stmtHasCompletedReview.get(repoPath, prNumber)),
+              completedRemediationRounds,
+            });
             const reviewDbAttemptNumber = nextReviewerPassAttemptNumber(ROOT, {
               repo: repoPath,
               prNumber,
@@ -3215,6 +3227,9 @@ export async function processReviewSubject(entry, ctx) {
                 reviewDbAttemptNumber,
                 completedRemediationRounds,
                 passKind,
+                // Queue admission uses delivered-comment evidence for fair
+                // depth accounting; passKind above conservatively retains
+                // rereview safety gates when capture lost the comment id.
                 dispatchPassKind: reviewerDispatchPassKind(dispatchCandidate),
                 maxRemediationRounds,
                 advisoryFindings: vocabularyFatigueFinding ? [vocabularyFatigueFinding] : [],

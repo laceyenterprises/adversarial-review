@@ -24,6 +24,9 @@ import {
   RECORD_ARGUS_CLASSIFIED_HEAD_SQL,
   SELECT_OPEN_UNROUTABLE_BOT_ROWS_SQL,
   SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW,
+  SQL_COUNT_OPEN_AWAITING_REREVIEW,
+  SQL_HAS_COMPLETED_REVIEW_FOR_PR,
+  SQL_HAS_GENUINE_POSTED_REVIEW_FOR_PR,
   prepareFinalizePendingTerminalFailure,
   prepareMarkInfraAutoRecoveryAttemptStarted,
   prepareMarkAttemptStarted,
@@ -295,12 +298,8 @@ export const stmtMarkPosted = db.prepare(
 );
 // Head refresh clears reviewed_prs.posted_at. The pass ledger keeps durable
 // evidence that a prior review actually reached GitHub for this PR.
-export const stmtHasPostedReview = db.prepare(
-  `SELECT 1 FROM reviewer_passes
-    WHERE repo = ? AND pr_number = ?
-      AND gh_comment_id IS NOT NULL AND gh_comment_id <> ''
-    LIMIT 1`
-);
+export const stmtHasPostedReview = db.prepare(SQL_HAS_GENUINE_POSTED_REVIEW_FOR_PR);
+export const stmtHasCompletedReview = db.prepare(SQL_HAS_COMPLETED_REVIEW_FOR_PR);
 export const stmtRestoreSameHeadSuppressedReviewPosted = db.prepare(
   `UPDATE reviewed_prs
       SET review_status = 'posted',
@@ -457,6 +456,7 @@ export const stmtLatestGenuinePostedReviewAt = db.prepare(
 export const stmtCountOpenPrsAwaitingFirstPassReview = db.prepare(
   SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW
 );
+export const stmtCountOpenPrsAwaitingRereview = db.prepare(SQL_COUNT_OPEN_AWAITING_REREVIEW);
 
 // Normalize a reviewed_prs timestamp to epoch ms. SQLite CURRENT_TIMESTAMP is
 // space-separated and tz-less, and a JS toISOString() value may have lost its
@@ -499,6 +499,14 @@ export function countOpenPrsAwaitingFirstPassReview(handle = db) {
     handle === db
       ? stmtCountOpenPrsAwaitingFirstPassReview
       : handle.prepare(SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW);
+  const n = stmt.get()?.n;
+  return Number.isFinite(n) ? n : 0;
+}
+
+export function countOpenPrsAwaitingRereview(handle = db) {
+  const stmt = handle === db
+    ? stmtCountOpenPrsAwaitingRereview
+    : handle.prepare(SQL_COUNT_OPEN_AWAITING_REREVIEW);
   const n = stmt.get()?.n;
   return Number.isFinite(n) ? n : 0;
 }

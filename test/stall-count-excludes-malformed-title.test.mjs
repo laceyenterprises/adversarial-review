@@ -33,7 +33,7 @@ function freshDb() {
       repo TEXT, pr_number INTEGER, pr_state TEXT, review_status TEXT
     );
     CREATE TABLE reviewer_passes (
-      repo TEXT, pr_number INTEGER, gh_comment_id TEXT
+      repo TEXT, pr_number INTEGER, pass_kind TEXT, status TEXT, gh_comment_id TEXT
     );
   `);
   return db;
@@ -43,8 +43,8 @@ function addPr(db, { pr, state = 'open', status = 'pending', commentId = null })
   db.prepare('INSERT INTO reviewed_prs (repo, pr_number, pr_state, review_status) VALUES (?,?,?,?)')
     .run('laceyenterprises/agent-os', pr, state, status);
   if (commentId !== null) {
-    db.prepare('INSERT INTO reviewer_passes (repo, pr_number, gh_comment_id) VALUES (?,?,?)')
-      .run('laceyenterprises/agent-os', pr, commentId);
+    db.prepare('INSERT INTO reviewer_passes (repo, pr_number, pass_kind, status, gh_comment_id) VALUES (?,?,?,?,?)')
+      .run('laceyenterprises/agent-os', pr, 'first-pass', 'completed', commentId);
   }
 }
 

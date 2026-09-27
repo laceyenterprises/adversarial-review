@@ -3284,6 +3284,10 @@ test('resolveOperatorMergeAccountability requires a head-scoped, attributable, p
   // Happy path
   assert.equal(resolveOperatorMergeAccountability({ operatorApprovalEvent: approved, mergeHeadSha: head }).label, 'operator-approved');
   assert.equal(resolveOperatorMergeAccountability({
+    operatorApprovalEvent: { ...approved, id: null, nodeId: null, labelEventNodeId: 'legacy-e1' },
+    mergeHeadSha: head, operatorLogins: ['VirtualPaul'], operatorLabelActorEnforcement: 'enforce',
+  })?.label, 'operator-approved');
+  assert.equal(resolveOperatorMergeAccountability({
     operatorApprovalEvent: { ...approved, actor: 'bot' }, mergeHeadSha: head,
     operatorLogins: ['VirtualPaul'], operatorLabelActorEnforcement: 'enforce',
   }), null);

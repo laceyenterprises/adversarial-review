@@ -95,7 +95,7 @@ export function resolveOperatorMergeAccountability({
         applied: true,
         observedRevisionRef: event.headSha || event.head_sha || event.observedRevisionRef,
         actor: event.actor,
-        eventId: event.id || event.nodeId || event.eventId,
+        eventId: event.id || event.nodeId || event.eventId || event.labelEventId || event.labelEventNodeId,
         observedAt: event.createdAt || event.created_at || event.observedAt,
       },
       operatorLogins,

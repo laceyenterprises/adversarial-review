@@ -459,6 +459,10 @@ function schemaV1() {
             __type: TYPE_BOOL,
             __default: false,
           },
+          shadow_only: {
+            __type: TYPE_BOOL,
+            __default: true,
+          },
           spawn_timeout_seconds: {
             __type: TYPE_INT,
             __default: 180,
@@ -470,6 +474,12 @@ function schemaV1() {
             __default: 300,
             __min: 0,
             __max: 3600,
+          },
+          reminder_seconds: {
+            __type: TYPE_INT,
+            __default: 21600,
+            __min: 60,
+            __max: 604800,
           },
         },
       },
@@ -3413,6 +3423,10 @@ export const ENV_ALIASES = {
     canonical: 'AGENT_OS_POST_DEPLOY_VERIFY_ENABLED',
     aliases: [['HQ_POST_DEPLOY_VERIFY_ENABLED', identity]],
   },
+  'post_deploy_verify.shadow_only': {
+    canonical: 'AGENT_OS_POST_DEPLOY_VERIFY_SHADOW_ONLY',
+    aliases: [['HQ_POST_DEPLOY_VERIFY_SHADOW_ONLY', identity]],
+  },
   'post_deploy_verify.spawn_timeout_seconds': {
     canonical: 'AGENT_OS_POST_DEPLOY_VERIFY_SPAWN_TIMEOUT_SECONDS',
     aliases: [['HQ_POST_DEPLOY_VERIFY_SPAWN_TIMEOUT_SECONDS', identity]],
@@ -3420,6 +3434,10 @@ export const ENV_ALIASES = {
   'post_deploy_verify.boot_window_seconds': {
     canonical: 'AGENT_OS_POST_DEPLOY_VERIFY_BOOT_WINDOW_SECONDS',
     aliases: [['HQ_POST_DEPLOY_VERIFY_BOOT_WINDOW_SECONDS', identity]],
+  },
+  'post_deploy_verify.reminder_seconds': {
+    canonical: 'AGENT_OS_POST_DEPLOY_VERIFY_REMINDER_SECONDS',
+    aliases: [['HQ_POST_DEPLOY_VERIFY_REMINDER_SECONDS', identity]],
   },
   'deploy.post_merge_activation.enabled': {
     canonical: 'AGENT_OS_POST_MERGE_ACTIVATION_ENABLED',

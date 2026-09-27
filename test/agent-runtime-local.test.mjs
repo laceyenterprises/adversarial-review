@@ -432,6 +432,7 @@ test('remediation spawners use governed models and reasoning from the HQ mirror'
       const record = spawn(shared);
       assert.deepEqual(record.command, calls.at(-1));
       assert.equal(record.modelSource, 'registry-mirror');
+      assert.equal(record.reasoningSource, 'registry-mirror');
     }
     assert.deepEqual(calls[0].slice(1, 6), ['exec', '--model', 'gpt-6-sol', '-c', 'model_reasoning_effort=xhigh']);
     assert.deepEqual(calls[1].slice(-4), ['--model', 'claude-opus-5-5', '--effort', 'xhigh']);
@@ -445,7 +446,40 @@ test('remediation spawners use governed models and reasoning from the HQ mirror'
     });
     assert.equal(pinned.resolvedModel, 'gpt-pinned');
     assert.equal(pinned.modelSource, 'env');
-    assert.ok(pinned.command.includes('model_reasoning_effort=xhigh'));
+    assert.equal(pinned.resolvedReasoningLevel, null);
+    assert.equal(pinned.reasoningSource, 'none');
+    assert.ok(!pinned.command.includes('model_reasoning_effort=xhigh'));
+
+    const pinnedWithReasoning = spawnCodexRemediationWorker({
+      ...shared,
+      sourceEnv: {
+        ...shared.sourceEnv,
+        ADVERSARIAL_REMEDIATION_CODEX_MODEL: 'gpt-pinned',
+        ADVERSARIAL_REMEDIATION_CODEX_REASONING_LEVEL: 'high',
+      },
+    });
+    assert.equal(pinnedWithReasoning.reasoningSource, 'env');
+    assert.ok(pinnedWithReasoning.command.includes('model_reasoning_effort=high'));
+
+    const pinnedClaude = spawnClaudeCodeRemediationWorker({
+      ...shared,
+      sourceEnv: { ...shared.sourceEnv, CLAUDE_REMEDIATION_MODEL: 'claude-pinned' },
+    });
+    assert.equal(pinnedClaude.resolvedModel, 'claude-pinned');
+    assert.equal(pinnedClaude.modelSource, 'env');
+    assert.equal(pinnedClaude.resolvedReasoningLevel, null);
+    assert.deepEqual(pinnedClaude.command.slice(-2), ['--model', 'claude-pinned']);
+
+    const pinnedClaudeWithReasoning = spawnClaudeCodeRemediationWorker({
+      ...shared,
+      sourceEnv: {
+        ...shared.sourceEnv,
+        CLAUDE_REMEDIATION_MODEL: 'claude-pinned',
+        CLAUDE_REMEDIATION_REASONING_LEVEL: 'max',
+      },
+    });
+    assert.equal(pinnedClaudeWithReasoning.reasoningSource, 'env');
+    assert.deepEqual(pinnedClaudeWithReasoning.command.slice(-4), ['--model', 'claude-pinned', '--effort', 'max']);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -464,14 +498,17 @@ test('remediation registry prefers mirror, uses seed, and warns on constant fall
     'remediator-codex': { defaultModel: 'seed' },
     gemini: { defaultModel: 'gemini-seed' },
   } }));
-  const env = { HQ_ROOT: mirror, AGENT_OS_DEPLOY_CHECKOUT: join(root, 'agent-os') };
+  const env = { HQ_ROOT: mirror, AGENT_OS_REPO_ROOT: join(root, 'agent-os') };
   const options = { env, fallbackModel: 'constant' };
   const originalWarn = console.warn;
   const warnings = [];
   console.warn = (message) => warnings.push(message);
   try {
     assert.deepEqual(resolveRemediationModel('remediator-codex', options), {
-      resolvedModel: 'mirror', resolvedReasoningLevel: null, modelSource: 'registry-mirror',
+      resolvedModel: 'mirror',
+      resolvedReasoningLevel: null,
+      modelSource: 'registry-mirror',
+      reasoningSource: 'none',
     });
     rmSync(mirrorPath);
     assert.equal(resolveRemediationModel('remediator-codex', { ...options, nowMs: Date.now() + 61_000 }).modelSource, 'registry-seed');
@@ -479,7 +516,10 @@ test('remediation registry prefers mirror, uses seed, and warns on constant fall
     writeFileSync(seedPath, '{bad json');
     const fallback = resolveRemediationModel('remediator-codex', { ...options, nowMs: Date.now() + 122_000 });
     assert.deepEqual(fallback, {
-      resolvedModel: 'constant', resolvedReasoningLevel: null, modelSource: 'fallback-constant',
+      resolvedModel: 'constant',
+      resolvedReasoningLevel: null,
+      modelSource: 'fallback-constant',
+      reasoningSource: 'none',
     });
     assert.match(warnings.at(-1), /remediator-codex.*unparsable JSON/);
     resolveRemediationModel('remediator-codex', { ...options, nowMs: Date.now() + 122_000 });
@@ -488,6 +528,50 @@ test('remediation registry prefers mirror, uses seed, and warns on constant fall
     const missing = resolveRemediationModel('remediator-codex', { ...options, nowMs: Date.now() + 183_000 });
     assert.equal(missing.modelSource, 'fallback-constant');
     assert.match(warnings.at(-1), /remediator-codex.*missing file/);
+  } finally {
+    console.warn = originalWarn;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('remediation model resolver keeps legacy seed override and validates cli-specific effort levels', () => {
+  const root = makeRoot();
+  const mirror = join(root, 'hq', 'registry');
+  const seed = join(root, 'agent-os', 'modules', 'worker-pool');
+  mkdirSync(mirror, { recursive: true });
+  mkdirSync(seed, { recursive: true });
+  writeFileSync(join(mirror, 'worker-classes.json'), JSON.stringify({ classes: {
+    'remediator-claude': { defaultModel: 'claude-opus-5-5', defaultReasoningLevel: 'extra' },
+    'remediator-test-invalid': { defaultModel: '-not-a-model' },
+  } }));
+  writeFileSync(join(seed, 'worker-classes.json'), JSON.stringify({
+    'remediator-test-invalid': { defaultModel: '-also-not-a-model' },
+  }));
+  const originalWarn = console.warn;
+  const warnings = [];
+  console.warn = (message) => warnings.push(message);
+  try {
+    const claude = resolveRemediationModel('remediator-claude', {
+      env: { HQ_ROOT: join(root, 'hq'), AGENT_OS_DEPLOY_CHECKOUT: join(root, 'agent-os') },
+      fallbackModel: 'claude-fallback',
+    });
+    assert.equal(claude.resolvedModel, 'claude-opus-5-5');
+    assert.equal(claude.resolvedReasoningLevel, null);
+    assert.equal(claude.reasoningSource, 'invalid-registry-mirror');
+    assert.match(warnings.at(-1), /remediator-claude.*invalid reasoning level.*extra/);
+
+    const invalidModel = resolveRemediationModel('remediator-test-invalid', {
+      env: { HQ_ROOT: join(root, 'hq'), AGENT_OS_DEPLOY_CHECKOUT: join(root, 'agent-os') },
+      fallbackModel: 'constant',
+      nowMs: Date.now() + 61_000,
+    });
+    assert.deepEqual(invalidModel, {
+      resolvedModel: 'constant',
+      resolvedReasoningLevel: null,
+      modelSource: 'fallback-constant',
+      reasoningSource: 'none',
+    });
+    assert.match(warnings.at(-1), /remediator-test-invalid.*invalid defaultModel/);
   } finally {
     console.warn = originalWarn;
     rmSync(root, { recursive: true, force: true });

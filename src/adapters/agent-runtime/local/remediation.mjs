@@ -2,7 +2,6 @@ import { execFile } from 'node:child_process';
 import { closeSync, existsSync, openSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { spawnDetachedCli } from '../../reviewer-runtime/cli-direct/process.mjs';
 import { isPgidAlive, verifyPgidIdentity } from '../../../process-group-identity.mjs';
@@ -15,6 +14,7 @@ import {
 } from '../../../remediation-worker-provenance.mjs';
 import { requireWorkerReplyContext } from '../../../remediation-reply-paths.mjs';
 import { scrubOAuthFallbackEnv, OAUTH_ENV_STRIP_LIST } from '../../../secret-source/env.mjs';
+import { resolveRosterPath as resolveWorkerClassRosterPath } from '../../../hq-worker-classes.mjs';
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_PATH_PREFIX = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
@@ -22,7 +22,8 @@ const DEFAULT_GEMINI_REMEDIATION_MODEL = 'gemini-2.5-pro';
 const DEFAULT_CODEX_REMEDIATION_MODEL = 'gpt-5.5';
 const DEFAULT_CLAUDE_REMEDIATION_MODEL = 'claude-opus-5-5';
 const REGISTRY_TTL_MS = 60_000;
-const REGISTRY_SEED_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../../../../..');
+const CODEX_REASONING_LEVELS = Object.freeze(new Set(['low', 'medium', 'high', 'xhigh']));
+const CLAUDE_REASONING_LEVELS = Object.freeze(new Set(['low', 'medium', 'high', 'xhigh', 'max']));
 const registryCache = new Map();
 const fallbackWarnings = new Map();
 const DEFAULT_POLL_MS = 250;
@@ -298,6 +299,94 @@ function assertHarnessIdentityMatch({
   return result;
 }
 
+function nonEmptyModelString(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.startsWith('-')) return null;
+  return trimmed;
+}
+
+function firstNonEmptyEnv(env, names) {
+  for (const name of names) {
+    const value = String(env?.[name] ?? '').trim();
+    if (value) return value;
+  }
+  return '';
+}
+
+function codexModelPin(env = process.env) {
+  return firstNonEmptyEnv(env, [
+    'ADVERSARIAL_REMEDIATION_CODEX_MODEL',
+    'CODEX_REMEDIATION_MODEL',
+    'CODEX_MODEL_ID',
+  ]);
+}
+
+function claudeModelPin(env = process.env) {
+  return firstNonEmptyEnv(env, [
+    'ADVERSARIAL_REMEDIATION_CLAUDE_MODEL',
+    'CLAUDE_REMEDIATION_MODEL',
+    'CLAUDE_CODE_REMEDIATION_MODEL',
+    'CLAUDE_MODEL_ID',
+    'CLAUDE_CODE_MODEL_ID',
+  ]);
+}
+
+function geminiModelPin(env = process.env) {
+  return firstNonEmptyEnv(env, ['GEMINI_REMEDIATION_MODEL', 'GEMINI_MODEL']);
+}
+
+function codexReasoningPin(env = process.env) {
+  return firstNonEmptyEnv(env, [
+    'ADVERSARIAL_REMEDIATION_CODEX_REASONING_LEVEL',
+    'CODEX_REMEDIATION_REASONING_LEVEL',
+  ]);
+}
+
+function claudeReasoningPin(env = process.env) {
+  return firstNonEmptyEnv(env, [
+    'ADVERSARIAL_REMEDIATION_CLAUDE_REASONING_LEVEL',
+    'CLAUDE_REMEDIATION_REASONING_LEVEL',
+    'CLAUDE_CODE_REMEDIATION_REASONING_LEVEL',
+  ]);
+}
+
+function allowedReasoningLevelsForClass(className) {
+  if (className === 'remediator-codex') return CODEX_REASONING_LEVELS;
+  if (className === 'remediator-claude') return CLAUDE_REASONING_LEVELS;
+  return null;
+}
+
+function warnRateLimited(key, nowMs, message) {
+  if (nowMs - (fallbackWarnings.get(key) ?? -Infinity) < REGISTRY_TTL_MS) return;
+  console.warn(message);
+  fallbackWarnings.set(key, nowMs);
+}
+
+function normalizeReasoningLevel(className, value, source, nowMs) {
+  const level = String(value ?? '').trim();
+  if (!level) return { resolvedReasoningLevel: null, reasoningSource: 'none' };
+  const allowed = allowedReasoningLevelsForClass(className);
+  if (allowed && !allowed.has(level)) {
+    warnRateLimited(
+      `invalid-reasoning:${className}:${source}:${level}`,
+      nowMs,
+      `[follow-up-remediation] ${className}: ignoring invalid reasoning level ${JSON.stringify(level)} from ${source}`,
+    );
+    return { resolvedReasoningLevel: null, reasoningSource: `invalid-${source}` };
+  }
+  return { resolvedReasoningLevel: level, reasoningSource: source };
+}
+
+function registrySeedCandidates(env = process.env) {
+  const explicitSeedRoot = String(env?.AGENT_OS_DEPLOY_CHECKOUT ?? '').trim();
+  if (explicitSeedRoot) {
+    return [[join(resolve(explicitSeedRoot), 'modules', 'worker-pool', 'worker-classes.json'), 'registry-seed']];
+  }
+  const rosterPath = resolveWorkerClassRosterPath({ env });
+  return rosterPath ? [[rosterPath, 'registry-seed']] : [];
+}
+
 function readWorkerClasses(path, nowMs) {
   const cached = registryCache.get(path);
   if (cached && nowMs - cached.readAt < REGISTRY_TTL_MS) return cached;
@@ -324,14 +413,33 @@ function resolveRemediationModel(className, {
   env = process.env,
   hqRoot = env.HQ_ROOT,
   pin = '',
+  reasoningPin = '',
   fallbackModel,
   nowMs = Date.now(),
 } = {}) {
+  const rawModelPin = String(pin ?? '').trim();
+  const modelPin = rawModelPin ? nonEmptyModelString(rawModelPin) : '';
+  const hasReasoningPin = String(reasoningPin ?? '').trim() !== '';
+  const pinnedReasoning = normalizeReasoningLevel(className, reasoningPin, 'env', nowMs);
+  if (rawModelPin && !modelPin) {
+    warnRateLimited(
+      `invalid-model:${className}:env:${rawModelPin}`,
+      nowMs,
+      `[follow-up-remediation] ${className}: ignoring invalid model pin ${JSON.stringify(rawModelPin)} from env`,
+    );
+  }
+  if (modelPin) {
+    return {
+      resolvedModel: modelPin,
+      resolvedReasoningLevel: pinnedReasoning.resolvedReasoningLevel,
+      modelSource: 'env',
+      reasoningSource: pinnedReasoning.reasoningSource,
+    };
+  }
   const mirrorPath = hqRoot && join(resolve(hqRoot), 'registry', 'worker-classes.json');
-  const seedRoot = env.AGENT_OS_DEPLOY_CHECKOUT || REGISTRY_SEED_ROOT;
   const candidates = [
     mirrorPath && [mirrorPath, 'registry-mirror'],
-    [join(resolve(seedRoot), 'modules', 'worker-pool', 'worker-classes.json'), 'registry-seed'],
+    ...registrySeedCandidates(env),
   ].filter(Boolean);
   const names = className === 'remediator-gemini' ? [className, 'gemini'] : [className];
   let reason = 'missing file';
@@ -347,38 +455,50 @@ function resolveRemediationModel(className, {
       continue;
     }
     const spec = registry.classes[selected];
+    const registryModel = nonEmptyModelString(spec.defaultModel);
+    if (!registryModel) {
+      reason = 'invalid defaultModel';
+      continue;
+    }
+    const reasoning = hasReasoningPin
+      ? pinnedReasoning
+      : normalizeReasoningLevel(className, spec.defaultReasoningLevel, source, nowMs);
     return {
-      resolvedModel: String(pin).trim() || spec.defaultModel,
-      resolvedReasoningLevel: spec.defaultReasoningLevel || null,
-      modelSource: String(pin).trim() ? 'env' : source,
+      resolvedModel: registryModel,
+      resolvedReasoningLevel: reasoning.resolvedReasoningLevel,
+      modelSource: source,
+      reasoningSource: reasoning.reasoningSource,
     };
   }
-  if (!String(pin).trim()) {
-    const warningKey = `${className}:${candidates.map(([path]) => path).join(':')}`;
-    if (nowMs - (fallbackWarnings.get(warningKey) ?? -Infinity) >= REGISTRY_TTL_MS) {
-      console.warn(`[follow-up-remediation] ${className}: using fallback model constant (${reason})`);
-      fallbackWarnings.set(warningKey, nowMs);
-    }
-  }
+  const warningKey = `${className}:${candidates.map(([path]) => path).join(':')}`;
+  warnRateLimited(
+    warningKey,
+    nowMs,
+    `[follow-up-remediation] ${className}: using fallback model constant (${reason})`,
+  );
   return {
-    resolvedModel: String(pin).trim() || fallbackModel,
-    resolvedReasoningLevel: null,
-    modelSource: String(pin).trim() ? 'env' : 'fallback-constant',
+    resolvedModel: fallbackModel,
+    resolvedReasoningLevel: pinnedReasoning.resolvedReasoningLevel,
+    modelSource: 'fallback-constant',
+    reasoningSource: pinnedReasoning.reasoningSource,
   };
 }
 
-function resolveGeminiRemediationModel(env = process.env) {
+function resolveGeminiRemediationModel(env = process.env, { hqRoot = env.HQ_ROOT } = {}) {
   return resolveRemediationModel('remediator-gemini', {
     env,
-    pin: env.GEMINI_REMEDIATION_MODEL || env.GEMINI_MODEL,
+    hqRoot,
+    pin: geminiModelPin(env),
     fallbackModel: DEFAULT_GEMINI_REMEDIATION_MODEL,
   }).resolvedModel;
 }
 
-function resolveCodexRemediationModel(env = process.env) {
+function resolveCodexRemediationModel(env = process.env, { hqRoot = env.HQ_ROOT } = {}) {
   return resolveRemediationModel('remediator-codex', {
     env,
-    pin: env.ADVERSARIAL_REMEDIATION_CODEX_MODEL || env.CODEX_REMEDIATION_MODEL || env.CODEX_MODEL_ID,
+    hqRoot,
+    pin: codexModelPin(env),
+    reasoningPin: codexReasoningPin(env),
     fallbackModel: DEFAULT_CODEX_REMEDIATION_MODEL,
   }).resolvedModel;
 }
@@ -740,8 +860,10 @@ function spawnClaudeCodeRemediationWorker({
     jobId,
   });
   const modelResolution = resolveRemediationModel('remediator-claude', {
-    env: sourceEnv,
+    env,
     hqRoot: hqRoot || sourceEnv.HQ_ROOT,
+    pin: claudeModelPin(env),
+    reasoningPin: claudeReasoningPin(env),
     fallbackModel: DEFAULT_CLAUDE_REMEDIATION_MODEL,
   });
   const claudeArgs = [
@@ -843,7 +965,7 @@ function spawnGeminiRemediationWorker({
   const modelResolution = resolveRemediationModel('remediator-gemini', {
     env,
     hqRoot: hqRoot || sourceEnv.HQ_ROOT,
-    pin: env.GEMINI_REMEDIATION_MODEL || env.GEMINI_MODEL,
+    pin: geminiModelPin(env),
     fallbackModel: DEFAULT_GEMINI_REMEDIATION_MODEL,
   });
   const geminiArgs = ['--approval-mode', 'yolo', '--skip-trust', '-m', modelResolution.resolvedModel];
@@ -942,7 +1064,8 @@ function spawnCodexRemediationWorker({
   const modelResolution = resolveRemediationModel('remediator-codex', {
     env,
     hqRoot: hqRoot || sourceEnv.HQ_ROOT,
-    pin: env.ADVERSARIAL_REMEDIATION_CODEX_MODEL || env.CODEX_REMEDIATION_MODEL || env.CODEX_MODEL_ID,
+    pin: codexModelPin(env),
+    reasoningPin: codexReasoningPin(env),
     fallbackModel: DEFAULT_CODEX_REMEDIATION_MODEL,
   });
   const codexArgs = [

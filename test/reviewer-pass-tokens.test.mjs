@@ -202,16 +202,21 @@ test('Claude transcript deduplicates repeated cumulative usage for one message',
   writeFileSync(path.join(projects, 'session.jsonl'), [
     JSON.stringify({ timestamp: '2026-09-27T02:00:00Z', cwd: workspace,
       sessionId: 'claude-1', message: { id: 'msg-1', model: 'claude-sonnet-4-6',
-        usage: { input_tokens: 10, output_tokens: 2 } } }),
+        usage: { input_tokens: 10, output_tokens: 2, reasoning_output_tokens: 3, tool_context_tokens: 2 } } }),
     JSON.stringify({ timestamp: '2026-09-27T02:00:01Z', cwd: workspace,
       sessionId: 'claude-1', message: { id: 'msg-1', model: 'claude-sonnet-4-6',
-        usage: { input_tokens: 10, output_tokens: 5 } } }),
+        usage: { input_tokens: 10, output_tokens: 5, reasoning_output_tokens: 7, tool_context_tokens: 1 } } }),
+    JSON.stringify({ timestamp: '2026-09-27T02:00:02Z', cwd: workspace,
+      sessionId: 'claude-1', message: { id: 'msg-2', model: 'claude-sonnet-4-6',
+        usage: { input_tokens: 4, output_tokens: 3, reasoning_output_tokens: 2, tool_context_tokens: 5 } } }),
   ].join('\n'));
   const usage = readClaudeTranscriptTokenUsage({ workspacePath: workspace,
     startedAt: '2026-09-27T02:00:00Z', endedAt: '2026-09-27T02:01:00Z',
     sessionRoots: [projects] });
-  assert.equal(usage.input, 10);
-  assert.equal(usage.output, 5);
+  assert.equal(usage.input, 14);
+  assert.equal(usage.output, 8);
+  assert.equal(usage.reasoning, 9);
+  assert.equal(usage.toolContext, 7);
   assert.equal(usage.model, 'claude-sonnet-4-6');
 });
 
@@ -1481,7 +1486,8 @@ test('claude transcript fallback aggregates split files for one logical workspac
       timestamp: '2026-06-04T10:01:00.000Z',
       cwd: workspace,
       sessionId: 'claude-reviewer',
-      message: { usage: { input_tokens: 10, output_tokens: 20, cache_creation_input_tokens: 1, cache_read_input_tokens: 2 } },
+      message: { usage: { input_tokens: 10, output_tokens: 20, cache_creation_input_tokens: 1, cache_read_input_tokens: 2,
+        reasoning_output_tokens: 3, tool_context_tokens: 4 } },
     }),
     '',
   ].join('\n'), 'utf8');
@@ -1499,7 +1505,8 @@ test('claude transcript fallback aggregates split files for one logical workspac
       timestamp: '2026-06-04T11:02:00.000Z',
       cwd: workspace,
       sessionId: 'claude-reviewer',
-      message: { usage: { input_tokens: 100, output_tokens: 200, cache_creation_input_tokens: 3, cache_read_input_tokens: 4 } },
+      message: { usage: { input_tokens: 100, output_tokens: 200, cache_creation_input_tokens: 3, cache_read_input_tokens: 4,
+        reasoning_output_tokens: 5, tool_context_tokens: 6 } },
     }),
     '',
   ].join('\n'), 'utf8');
@@ -1520,7 +1527,9 @@ test('claude transcript fallback aggregates split files for one logical workspac
   assert.equal(usage.output, 220);
   assert.equal(usage.cacheRead, 6);
   assert.equal(usage.cacheWrite, 4);
-  assert.equal(usage.total, 330);
+  assert.equal(usage.reasoning, 8);
+  assert.equal(usage.toolContext, 10);
+  assert.equal(usage.total, 338);
 });
 
 test('claude transcript fallback prefers a session-key match over a workspace-only match', () => {

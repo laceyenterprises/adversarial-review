@@ -1025,6 +1025,8 @@ function groupClaudeTranscriptMatches(matches, {
         output: (combined.usage?.output || 0) + (match.usage?.output || 0),
         cacheRead: (combined.usage?.cacheRead || 0) + (match.usage?.cacheRead || 0),
         cacheWrite: (combined.usage?.cacheWrite || 0) + (match.usage?.cacheWrite || 0),
+        reasoning: (combined.usage?.reasoning || 0) + (match.usage?.reasoning || 0),
+        toolContext: (combined.usage?.toolContext || 0) + (match.usage?.toolContext || 0),
         total: (combined.usage?.total || 0) + (match.usage?.total || 0),
         costUSD: (combined.usage?.costUSD || 0) + (match.usage?.costUSD || 0),
         source: 'claude-transcript',
@@ -1286,6 +1288,8 @@ function readClaudeTranscriptSummary(transcriptPath) {
             output: Math.max(previous.output || 0, normalized.output || 0),
             cacheRead: Math.max(previous.cacheRead || 0, normalized.cacheRead || 0),
             cacheWrite: Math.max(previous.cacheWrite || 0, normalized.cacheWrite || 0),
+            reasoning: Math.max(previous.reasoning || 0, normalized.reasoning || 0),
+            toolContext: Math.max(previous.toolContext || 0, normalized.toolContext || 0),
           } : normalized);
         }
       }
@@ -1298,6 +1302,8 @@ function readClaudeTranscriptSummary(transcriptPath) {
     totals.output += usage.output || 0;
     totals.cacheRead += usage.cacheRead || 0;
     totals.cacheWrite += usage.cacheWrite || 0;
+    totals.reasoning += usage.reasoning || 0;
+    totals.toolContext += usage.toolContext || 0;
   }
   const tokenUsage = sawUsage
     ? normalizeTokenUsage({
@@ -1329,6 +1335,8 @@ function tokenUsageFromClaudeUsage(usage) {
     output: usage.output_tokens,
     cacheRead: usage.cache_read_input_tokens,
     cacheWrite: usage.cache_creation_input_tokens,
+    reasoning: usage.reasoning_output_tokens ?? usage.reasoning_tokens ?? usage.reasoning,
+    toolContext: usage.tool_context_tokens ?? usage.tool_use_prompt_tokens ?? usage.toolContext,
     total: usage.total_tokens,
     source: 'claude-transcript',
   });

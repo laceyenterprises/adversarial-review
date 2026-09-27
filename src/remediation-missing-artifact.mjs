@@ -40,6 +40,8 @@ export async function settleMissingRemediationArtifact({
     error: new Error(failureMessage),
     remediationWorker: { ...workerState, state: 'failed' },
     failure: {
+      ...(capacity ? { transientRetryBudget: { attempted: nextRetry - 1, max: maxRetries,
+        currentRound: Number(job?.remediationPlan?.currentRound || 0) } } : {}),
       resumeImpossible,
       finalMessagePath: worker.outputPath || null,
       finalMessageBytes: finalMessage.bytes,

@@ -80,6 +80,7 @@ test('capacity after transient budget exhaustion fails with provider-capacity', 
   assert.equal(result.reconciled, true);
   assert.equal(result.outcome, 'failed');
   assert.equal(result.job.failure.code, 'provider-capacity');
+  assert.deepEqual(result.job.failure.transientRetryBudget, { attempted: 0, max: 0, currentRound: 1 });
 });
 
 test('missing artifact without capacity still fails as artifact-missing-completion', async () => {
@@ -95,6 +96,28 @@ test('recovered Codex capacity error followed by turn completion remains an arti
   );
   assert.equal(result.reconciled, true);
   assert.equal(result.job.failure.code, 'artifact-missing-completion');
+});
+
+test('Codex progress after a capacity error closes the terminal scan', async () => {
+  const { result } = await reconcileDeadWorker(
+    '{"type":"error","message":"unexpected status 503 from provider"}\n'
+      + '{"type":"item.completed","item":{"type":"agent_message","text":"working"}}\n'
+  );
+  assert.equal(result.job.failure.code, 'artifact-missing-completion');
+});
+
+test('tool item errors do not count as provider capacity', async () => {
+  const { result } = await reconcileDeadWorker(
+    '{"type":"item.completed","item":{"type":"function_call","error":{"message":"HTTP 429 from external API"}}}\n'
+  );
+  assert.equal(result.job.failure.code, 'artifact-missing-completion');
+});
+
+test('plain trailer after JSONL capacity failure does not hide it', async () => {
+  const { result } = await reconcileDeadWorker(
+    '{"type":"turn.failed","error":{"message":"backend overloaded"}}\nworker exited with code 1\n'
+  );
+  assert.equal(result.reason, 'provider-capacity');
 });
 
 test('retried Claude capacity error followed by normal output remains an artifact failure', async () => {

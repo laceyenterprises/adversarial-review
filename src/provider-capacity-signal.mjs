@@ -20,19 +20,26 @@ export function hasProviderCapacitySignal(value, { httpStatuses = [529], allowBa
 // Examine the tail only so an earlier recovered turn does not control a later exit.
 export function hasTerminalProviderCapacitySignal(logText) {
   const lines = String(logText || '').slice(-64 * 1024).split(/\r?\n/).slice(-100);
+  const jsonl = lines.some((line) => { try { return typeof JSON.parse(line) === 'object'; } catch { return false; } });
   for (const line of lines.reverse()) {
     if (!line.trim()) continue;
     let event;
     try { event = JSON.parse(line); } catch { event = null; }
     if (event && typeof event === 'object') {
-      if (event.type === 'turn.completed' || (event.type === 'result' && event.is_error === false)) return false;
-      if (event.type === 'turn.failed' || event.type === 'error' || event.error
+      if (event.type === 'turn.failed' || event.type === 'error'
         || (event.type === 'result' && event.is_error === true)) {
-        const diagnostic = JSON.stringify(event);
+        const diagnostic = [event.message, typeof event.error === 'string' ? event.error : event.error?.message,
+          event.error?.code,
+          event.error?.status == null ? null : `status ${event.error.status}`,
+          event.status == null ? null : `status ${event.status}`,
+          event.code == null ? null : `code ${event.code}`]
+          .filter((value) => value !== undefined && value !== null).join(' ');
         return hasProviderCapacitySignal(diagnostic, { httpStatuses: [429, 503, 529], allowBare529: false })
           || /\b(?:at capacity|overloaded)\b/i.test(diagnostic);
       }
+      return false;
     } else {
+      if (jsonl) continue;
       return hasProviderCapacitySignal(line, { httpStatuses: [429, 503, 529], allowBare529: false });
     }
   }

@@ -18,8 +18,8 @@
 // remediation-oss-readiness.mjs / fast-merge-processing.mjs precedent.
 
 import { execFile } from 'node:child_process';
-import { existsSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { writeFollowUpJob } from './follow-up-jobs.mjs';
 
@@ -258,15 +258,6 @@ async function fetchPRBranchMetadata({
   return { baseBranch, branch, headRepo };
 }
 
-async function fetchPRBaseBranch({
-  repo,
-  prNumber,
-  execFileImpl = execFileAsync,
-} = {}) {
-  const metadata = await fetchPRBranchMetadata({ repo, prNumber, execFileImpl });
-  return metadata.baseBranch;
-}
-
 async function ensureJobBranchMetadata({
   job,
   jobPath,
@@ -384,6 +375,79 @@ function resetWorkspaceDir(workspaceDir) {
   rmSync(workspaceDir, { recursive: true, force: true });
 }
 
+async function checkoutWorkspaceForRemediation({
+  workspaceDir, workspaceRootDir, job, repo, baseBranch, headRef, headRepo,
+  resumeRequested, fetchEnv, execFileImpl = execFileAsync, log = console,
+}) {
+  if ((headRepo && headRepo !== repo) || !headRef) {
+    if (resumeRequested) {
+      throw new Error(`resume-impossible: fork or missing PR head cannot safely reuse the preserved workspace at ${workspaceDir}`);
+    }
+    await runWorkspaceNetworkCommandWithTransientRetry({
+      execFileImpl, command: 'gh', args: ['pr', 'checkout', String(job.prNumber)],
+      options: { cwd: workspaceDir, maxBuffer: 10 * 1024 * 1024 },
+    });
+    return { resumed: false, resumePatchPath: null };
+  }
+  await runWorkspaceGitWithTransientRetry(['-C', workspaceDir, 'remote', 'set-branches', '--add', 'origin', headRef], {
+    execFileImpl, options: { maxBuffer: 1 * 1024 * 1024 },
+  });
+  const fetchRefs = [`+refs/heads/${headRef}:refs/remotes/origin/${headRef}`];
+  if (baseBranch !== headRef) fetchRefs.push(`+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`);
+  const fetchOptions = { execFileImpl, options: { maxBuffer: 10 * 1024 * 1024, env: fetchEnv } };
+  try {
+    await runWorkspaceGitWithTransientRetry(['-C', workspaceDir, 'fetch', 'origin', ...fetchRefs], fetchOptions);
+  } catch (err) {
+    const detail = [err?.message, err?.stderr].filter(Boolean).join('\n');
+    if (fetchRefs.length < 2 || !/(?:couldn.t find remote ref|remote ref .+ not found)/i.test(detail)) throw err;
+    log.warn?.(`[follow-up-remediation] base branch disappeared during fetch repo=${repo} branch=${baseBranch}; fetching PR head only`);
+    await runWorkspaceGitWithTransientRetry(['-C', workspaceDir, 'fetch', 'origin', fetchRefs[0]], fetchOptions);
+  }
+  if (!resumeRequested) {
+    await runWorkspaceGitWithTransientRetry(['-C', workspaceDir, 'checkout', '-B', headRef, `origin/${headRef}`], {
+      execFileImpl, options: { maxBuffer: 10 * 1024 * 1024 },
+    });
+    return { resumed: false, resumePatchPath: null };
+  }
+  const branch = (await execFileImpl('git', ['-C', workspaceDir, 'symbolic-ref', '--quiet', '--short', 'HEAD'])).stdout.trim();
+  if (branch !== headRef) throw new Error(`resume-impossible: workspace branch ${branch} differs from PR branch ${headRef}; workspace preserved at ${workspaceDir}`);
+  try {
+    await execFileImpl('git', ['-C', workspaceDir, 'merge-base', '--is-ancestor', `origin/${headRef}`, 'HEAD']);
+  } catch {
+    throw new Error(`resume-impossible: PR head is not an ancestor of the preserved workspace; workspace preserved at ${workspaceDir}`);
+  }
+  const patch = (await execFileImpl('git', ['-C', workspaceDir, 'diff', '--binary', 'HEAD'], {
+    maxBuffer: 20 * 1024 * 1024,
+  })).stdout;
+  const resumePatchPath = patch ? join(workspaceRootDir, `${job.jobId}.resume.patch`) : null;
+  if (resumePatchPath) writeFileSync(resumePatchPath, patch);
+  return { resumed: true, resumePatchPath };
+}
+
+async function inspectLostRemediationWorkspace({ workspaceDir, job, execFileImpl = execFileAsync }) {
+  if (!workspaceDir || !existsSync(join(workspaceDir, '.git'))) {
+    return { resumeImpossible: 'workspace-unavailable' };
+  }
+  try {
+    const [statusResult, commitsResult] = await Promise.all([
+      execFileImpl('git', ['-C', workspaceDir, 'status', '--porcelain', '--untracked-files=all']),
+      execFileImpl('git', ['-C', workspaceDir, 'rev-list', '--count', 'HEAD', '--not', '--remotes=origin']),
+    ]);
+    const changed = String(statusResult.stdout || '').split('\n').some((line) =>
+      line && !line.includes('.adversarial-follow-up/'));
+    const localCommits = Number(commitsResult.stdout || 0);
+    if (!changed && localCommits <= 0) return { resumeImpossible: 'workspace-has-no-commits-or-edits' };
+    const patch = (await execFileImpl('git', ['-C', workspaceDir, 'diff', '--binary', 'HEAD'], {
+      maxBuffer: 20 * 1024 * 1024,
+    })).stdout;
+    const resumePatchPath = patch ? join(dirname(workspaceDir), `${job.jobId}.resume.patch`) : null;
+    if (resumePatchPath) writeFileSync(resumePatchPath, patch);
+    return { changed, localCommits, resumePatchPath, resumeImpossible: null };
+  } catch (err) {
+    return { resumeImpossible: `workspace-inspection-failed: ${err.message}` };
+  }
+}
+
 /**
  * Audit a remediation workspace for branch contamination — commits on HEAD
  * that are patch-equivalent to commits already on `origin/<baseBranch>`.
@@ -494,6 +558,8 @@ export {
   runWorkspaceNetworkCommandWithTransientRetry,
   runWorkspaceGitWithTransientRetry,
   inspectWorkspaceState,
+  checkoutWorkspaceForRemediation,
+  inspectLostRemediationWorkspace,
   resetWorkspaceDir,
   auditWorkspaceForContamination,
 };

@@ -95,7 +95,46 @@ function lifecycleStopDecision(lifecycle, { repo, prNumber, site, job = null }) 
   };
 }
 
+async function activeRemediationStopDecision({
+  lifecycle, liveness, job, rootDir, execFileImpl,
+  buildReconciliationPathsImpl, parseHqWorkerWorkspaceFromPayloadImpl,
+}) {
+  let stop = lifecycleStopDecision(lifecycle, {
+    repo: job.repo,
+    prNumber: job.prNumber,
+    site: liveness.state === 'active' ? 'reconcile-active' : 'reconcile',
+    job,
+  });
+  // A worker's own push moves the reviewed head. Compare it with its local
+  // HEAD before classifying the move as external supersession.
+  if (liveness.state === 'active' && stop?.stopCode === 'stale-review-head') {
+    try {
+      const paths = buildReconciliationPathsImpl(rootDir, job);
+      const hqWorkspace = job?.remediationWorker?.dispatchMode === 'hq'
+        ? parseHqWorkerWorkspaceFromPayloadImpl(liveness?.dispatchStatus || {})
+        : null;
+      const localHead = (await execFileImpl('git', ['-C', hqWorkspace || paths.workspaceDir, 'rev-parse', 'HEAD'])).stdout.trim();
+      if (localHead && localHead === lifecycle?.headSha) stop = null;
+    } catch {
+      // Unknown ownership of a new head fails closed.
+    }
+  }
+  const currentRound = Number(job?.remediationPlan?.currentRound || 0);
+  const maxRounds = Number(job?.remediationPlan?.maxRounds || 0);
+  if (!stop && (job?.remediationPlan?.stop?.code === 'max-rounds-reached'
+    || (maxRounds > 0 && currentRound > maxRounds))) {
+    stop = {
+      stopCode: 'max-rounds-reached',
+      actionReason: 'max-rounds-reached',
+      workerState: 'cancelled-max-rounds',
+      stopReason: `Remediation round ${currentRound} exceeds the current cap of ${maxRounds}; cancelling the active worker.`,
+    };
+  }
+  return stop;
+}
+
 export {
+  activeRemediationStopDecision,
   lifecycleStopDecision,
   resolveJobPRLifecycleSafe,
 };

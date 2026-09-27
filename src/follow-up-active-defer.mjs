@@ -268,7 +268,7 @@ function stopStaleInProgressFollowUpJob({
   }
   const session = resolveWorkerSessionProgressMs(rootDir, job);
   if (session.sourceMs !== null && nowMs - session.sourceMs <= thresholdMs) return null;
-  if (readWorkerCpuPercent(job) > 0) return null;
+  if (ageMs < thresholdMs * 3 && readWorkerCpuPercent(job) > 0) return null;
   const stoppedAt = new Date(nowMs).toISOString();
   const jobId = job?.jobId || basename(latest.jobPath);
   const stopReason =

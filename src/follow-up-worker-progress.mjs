@@ -71,12 +71,20 @@ function resolveWorkerSessionProgressMs(rootDir, job) {
   }
 }
 
-function readWorkerCpuPercent(job) {
-  const pid = Number(job?.remediationWorker?.processId);
-  if (!Number.isInteger(pid) || pid <= 0) return 0;
+function readWorkerCpuPercent(job, { execFileSyncImpl = execFileSync } = {}) {
+  const worker = job?.remediationWorker || {};
+  const pid = Number(worker.processId);
+  const pgid = Number(worker.processGroupId);
+  const spawnedMs = Date.parse(worker.spawnedAt || '');
+  if (!Number.isInteger(pid) || pid <= 0 || !Number.isInteger(pgid) || pgid <= 0 || !Number.isFinite(spawnedMs)) return 0;
   try {
-    const value = execFileSync('ps', ['-p', String(pid), '-o', '%cpu='], { encoding: 'utf8', timeout: 2000 });
-    return Number.parseFloat(value.trim()) || 0;
+    const value = execFileSyncImpl('ps', ['-p', String(pid), '-o', 'pgid=', '-o', 'lstart=', '-o', '%cpu='], { encoding: 'utf8', timeout: 2000 });
+    const fields = String(value).trim().split(/\s+/);
+    const observedPgid = Number(fields.shift());
+    const cpu = Number.parseFloat(fields.pop());
+    const observedStartMs = Date.parse(fields.join(' '));
+    if (observedPgid !== pgid || !Number.isFinite(observedStartMs) || Math.abs(observedStartMs - spawnedMs) > 5000) return 0;
+    return cpu || 0;
   } catch {
     return 0;
   }

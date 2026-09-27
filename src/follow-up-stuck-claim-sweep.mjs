@@ -938,7 +938,9 @@ async function sweepStuckInProgressClaims({
       skipped += 1;
       continue;
     }
-    if (readWorkerCpuImpl(job) > 0) {
+    // CPU is only a short grace signal after durable progress stops. A hot
+    // loop must not reserve a remediation slot indefinitely.
+    if (ageMs < thresholdMs * 3 && readWorkerCpuImpl(job) > 0) {
       skipped += 1;
       continue;
     }

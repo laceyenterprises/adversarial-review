@@ -52,6 +52,12 @@ remain unchanged.
 SQLite considers NULLs distinct for this key, so observations with a missing
 `limit_id` or `window_kind` are not deduplicated by that constraint.
 
+For remediation passes, `attempt_number` is the next unused remediation
+attempt for the PR (`MAX(attempt_number) + 1`), assigned when the worker is
+spawned. It is monotonic across retries and is not the bounded remediation
+round number. Older jobs without a stored worker pass attempt retain the
+round-number fallback for terminal settlement.
+
 Rows with a non-empty `gh_comment_id` are genuine posted-review artifacts. The
 watcher's review-freshness pager reads those rows through
 `idx_reviewer_passes_posted_review_freshness`, a partial expression index over
@@ -94,7 +100,7 @@ The `metadata_json` object keeps two different identifiers separate:
 | `reattachToken` | Adapter-owned session, request, or idempotency handle used to resume the reviewer runtime. It is not launch provenance. |
 | `workerRunAttribution` | Durable resolution state for `worker_run_id`, described below. |
 | `afhReviewerFallback` | Present only when AFH reviewer fallback rewrites the selected reviewer for this pass. The object records `fromReviewerModel`, `toReviewerModel`, `reason`, `lastResort`, `builderClass`, `primaryProvider`, `primaryState`, `primaryHardGrounded`, `primarySoftGrounded`, and the ordered `considered[]` candidate audit so the posted pass can be traced back to the grounding decision that changed reviewer identity. |
-| `failureClass` | Present on failed terminal rows, including remediation pass rows finalized by `src/follow-up-jobs.mjs`. It records the bounded failure class used by health and recovery tooling, such as a worker failure code, stopped remediation code, or remediation recovery sentinel. |
+| `failureClass` | Present on failed or cancelled terminal remediation rows finalized by `src/follow-up-jobs.mjs` when a failure or stop code is available. It records the bounded failure class used by health and recovery tooling, such as a worker failure code, stopped remediation code, or remediation recovery sentinel. |
 
 `workerRunAttribution.state` is one of:
 

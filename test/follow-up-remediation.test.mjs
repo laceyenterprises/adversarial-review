@@ -1394,7 +1394,7 @@ test('prepareWorkspaceForJob resumes a lost worker with local commits and a dirt
       ...base,
       remediationPlan: {
         ...base.remediationPlan,
-        retryHistory: [{ worker: { workspaceDir, processId: 12345 }, retryMetadata: { code: 'stale-heartbeat' } }],
+        retryHistory: [{ worker: { workspaceDir, processId: 12345 }, retryMetadata: { code: 'worker-killed-resume' } }],
       },
     },
     env: {},
@@ -1415,6 +1415,59 @@ test('prepareWorkspaceForJob resumes a lost worker with local commits and a dirt
   assert.equal(readFileSync(result.workspaceState.resumePatchPath, 'utf8'), 'diff --git a/file.txt b/file.txt\n');
   assert.equal(calls.some((call) => call.includes('checkout') || call.includes('clone')), false);
   assert.equal(calls.some((call) => call.includes('merge-base')), true);
+});
+
+test('prepareWorkspaceForJob re-clones a missing workspace on an ordinary stale-heartbeat retry', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-retry-'));
+  const base = makeJob();
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', base.jobId);
+  const calls = [];
+  const result = await prepareWorkspaceForJob({
+    rootDir,
+    job: { ...base, remediationPlan: { ...base.remediationPlan,
+      retryHistory: [{ worker: { workspaceDir }, retryMetadata: { code: 'stale-heartbeat' } }],
+    } },
+    env: {},
+    execFileImpl: async (command, args) => {
+      calls.push([command, ...args]);
+      if (command === 'git' && args[0] === 'clone') mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
+      if (command === 'gh') return { stdout: JSON.stringify({ base: { ref: 'main' }, head: { ref: 'feature', repo: { full_name: base.repo } } }) };
+      return { stdout: '' };
+    },
+  });
+  assert.equal(result.workspaceState.action, 'reused');
+  assert.ok(calls.some((call) => call.includes('clone')));
+  assert.ok(calls.some((call) => call.includes('checkout')));
+});
+
+test('prepareWorkspaceForJob backs up an invalid lost-worker resume before fresh checkout', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-resume-fallback-'));
+  const base = makeJob();
+  const workspaceRootDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces');
+  const workspaceDir = path.join(workspaceRootDir, base.jobId);
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  writeFileSync(path.join(workspaceDir, 'local-edit.txt'), 'preserve me');
+  const calls = [];
+  const result = await prepareWorkspaceForJob({
+    rootDir,
+    job: { ...base, remediationPlan: { ...base.remediationPlan,
+      retryHistory: [{ worker: { workspaceDir }, retryMetadata: { code: 'worker-killed-resume' } }],
+    } },
+    env: {},
+    execFileImpl: async (command, args) => {
+      calls.push([command, ...args]);
+      if (command === 'gh') return { stdout: JSON.stringify({ base: { ref: 'main' }, head: { ref: 'feature', repo: { full_name: base.repo } } }) };
+      if (args[0] === 'config' && args[1] === '--get') return { stdout: `https://github.com/${base.repo}.git\n` };
+      if (args[0] === 'status') return { stdout: '?? local-edit.txt\n' };
+      if (args[2] === 'symbolic-ref') return { stdout: 'other-branch\n' };
+      if (args[0] === 'clone') mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
+      return { stdout: '' };
+    },
+  });
+  assert.notEqual(result.workspaceState.action, 'resumed');
+  assert.ok(calls.some((call) => call.includes('clone')));
+  const backup = readdirSync(workspaceRootDir).find((name) => name.startsWith(`${base.jobId}.resume-backup-`));
+  assert.equal(readFileSync(path.join(workspaceRootDir, backup, 'local-edit.txt'), 'utf8'), 'preserve me');
 });
 
 test('prepareWorkspaceForJob clones against the live REST base branch when the saved job base is stale', async () => {
@@ -2797,7 +2850,10 @@ test('prepareWorkspaceForJob falls back to gh pr checkout for fork PRs', async (
   const calls = [];
   await prepareWorkspaceForJob({
     rootDir,
-    job: makeJob(),
+    job: { ...makeJob(), remediationPlan: {
+      ...makeJob().remediationPlan,
+      retryHistory: [{ worker: { workspaceDir: '/missing/old-workspace' }, retryMetadata: { code: 'stale-heartbeat' } }],
+    } },
     env: {},
     execFileImpl: async (command, args) => {
       calls.push({ command, args });

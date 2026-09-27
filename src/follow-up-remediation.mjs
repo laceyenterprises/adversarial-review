@@ -171,7 +171,9 @@ import {
   ensureJobBranchMetadata,
   fetchPRBranchMetadata,
   inspectWorkspaceState,
+  inspectWorkspaceForRetry,
   inspectLostRemediationWorkspace,
+  preserveInvalidResumeWorkspace,
   resetWorkspaceDir,
   runWorkspaceGitWithTransientRetry,
 } from './remediation-git-pr-io.mjs';
@@ -1155,26 +1157,15 @@ async function prepareWorkspaceForJob({
   const workspaceRootDir = resolveRemediationWorkspaceRoot({ rootDir, env });
   const workspaceDir = join(workspaceRootDir, job.jobId);
   ensureWorkspaceRootDir(workspaceRootDir, env);
+  const retryHistory = job?.remediationPlan?.retryHistory || [];
   let prBranchMetadataPromise = null;
   const loadPRBranchMetadata = () => {
     prBranchMetadataPromise ||= fetchPRBranchMetadata({ repo, prNumber: job.prNumber, execFileImpl });
     return prBranchMetadataPromise;
   };
-  const workspaceState = await inspectWorkspaceState({
-    workspaceDir,
-    expectedRepo: repo,
-    allowDirty: Boolean(job?.remediationPlan?.retryHistory?.at(-1)?.worker?.workspaceDir),
-    execFileImpl,
+  const { workspaceState, resumeEligible } = await inspectWorkspaceForRetry({
+    workspaceDir, workspaceRootDir, jobId: job.jobId, expectedRepo: repo, retryHistory, execFileImpl, log,
   });
-
-  if (job?.remediationPlan?.retryHistory?.at(-1)?.worker?.workspaceDir
-    && (workspaceState.reason === 'missing' || workspaceState.reset)) {
-    throw new Error(`resume-impossible: preserved workspace failed validation (${workspaceState.reason}); workspace preserved at ${workspaceDir}`);
-  }
-
-  if (workspaceState.reset) {
-    resetWorkspaceDir(workspaceDir);
-  }
 
   if (!existsSync(join(workspaceDir, '.git'))) {
     // Clone with plain `git` over HTTPS rather than `gh repo clone`. `gh repo
@@ -1226,12 +1217,24 @@ async function prepareWorkspaceForJob({
   installWorkerProvenanceHook(workspaceDir);
 
   const { baseBranch, branch: headRef, headRepo } = await loadPRBranchMetadata();
-  const resumeRequested = Boolean(job?.remediationPlan?.retryHistory?.at(-1)?.worker?.workspaceDir && !workspaceState.reset);
+  const resumeRequested = resumeEligible && !workspaceState.reset && workspaceState.reason !== 'missing';
   checkoutStartedAt = Date.now();
-  const { resumed, resumePatchPath } = await checkoutWorkspaceForRemediation({
-    workspaceDir, workspaceRootDir, job, repo, baseBranch, headRef, headRepo, resumeRequested,
-    fetchEnv: withGhGitCredentialEnv(env), execFileImpl, log,
-  });
+  let checkout;
+  try {
+    checkout = await checkoutWorkspaceForRemediation({
+      workspaceDir, workspaceRootDir, job, repo, baseBranch, headRef, headRepo, resumeRequested,
+      fetchEnv: withGhGitCredentialEnv(env), execFileImpl, log,
+    });
+  } catch (err) {
+    if (!resumeRequested || !String(err?.message).startsWith('resume-impossible:')) throw err;
+    preserveInvalidResumeWorkspace({ workspaceDir, workspaceRootDir, jobId: job.jobId, reason: err.message, log });
+    return prepareWorkspaceForJob({
+      rootDir,
+      job: { ...job, remediationPlan: { ...job.remediationPlan, retryHistory: retryHistory.slice(0, -1) } },
+      workerClass, env, execFileImpl, log,
+    });
+  }
+  const { resumed, resumePatchPath } = checkout;
   log.info?.(`[follow-up-remediation] workspace preparation repo=${repo} jobId=${job.jobId} source=${cloneSource} clone_fetch_ms=${checkoutStartedAt - startedAt} checkout_ms=${Date.now() - checkoutStartedAt}`);
   return {
     workspaceDir,

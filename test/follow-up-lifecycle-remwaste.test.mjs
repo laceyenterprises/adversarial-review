@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { lifecycleStopDecision, resolveJobPRLifecycleSafe } from '../src/follow-up-lifecycle.mjs';
@@ -22,7 +22,7 @@ test('lifecycle stops merged and closed PRs before spawn', () => {
   }
 });
 
-test('a pending newer review prevents remediation even on the same head', async () => {
+test('only a pending review on a newer head prevents consume; reconcile continues after a worker push', async () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'remwaste-lifecycle-'));
   mkdirSync(join(rootDir, 'data'), { recursive: true });
   const db = openReviewStateDb(rootDir);
@@ -38,5 +38,30 @@ test('a pending newer review prevents remediation even on the same head', async 
     job,
     resolvePRLifecycleImpl: async () => ({ prState: 'open', source: 'live', headSha: job.revisionRef }),
   });
-  assert.equal(lifecycleStopDecision(lifecycle, { ...job, job, site: 'consume' }).stopCode, 'newer-review-pending');
+  assert.equal(lifecycleStopDecision(lifecycle, { ...job, job, site: 'consume' }), null);
+  const db2 = openReviewStateDb(rootDir);
+  try {
+    db2.prepare('UPDATE reviewed_prs SET revision_ref = ? WHERE repo = ? AND pr_number = ?')
+      .run('worker-pushed-head', job.repo, job.prNumber);
+  } finally {
+    db2.close();
+  }
+  const pushed = await resolveJobPRLifecycleSafe({
+    rootDir, job,
+    resolvePRLifecycleImpl: async () => ({ prState: 'open', source: 'live', headSha: 'worker-pushed-head' }),
+  });
+  assert.equal(lifecycleStopDecision(pushed, { ...job, job, site: 'consume' }).stopCode, 'newer-review-pending');
+  assert.equal(lifecycleStopDecision(pushed, { ...job, job, site: 'reconcile' }), null);
+  assert.equal(lifecycleStopDecision(pushed, { ...job, job, site: 'reconcile-active' }).stopCode, 'stale-review-head');
+});
+
+test('review database failure preserves a resolved merged lifecycle', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'remwaste-lifecycle-db-'));
+  mkdirSync(join(rootDir, 'data'), { recursive: true });
+  writeFileSync(join(rootDir, 'data', 'reviews.db'), 'invalid sqlite');
+  const lifecycle = await resolveJobPRLifecycleSafe({
+    rootDir, job, log: { warn() {}, error() {} },
+    resolvePRLifecycleImpl: async () => ({ prState: 'merged', source: 'live' }),
+  });
+  assert.equal(lifecycleStopDecision(lifecycle, { ...job, job, site: 'consume' }).stopCode, 'operator-merged-pr');
 });

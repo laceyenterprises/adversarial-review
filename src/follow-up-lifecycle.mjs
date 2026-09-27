@@ -16,14 +16,24 @@ async function resolveJobPRLifecycleSafe({
       prNumber: job.prNumber,
       execFileImpl,
     });
-    if (!existsSync(join(rootDir, 'data', 'reviews.db'))) return lifecycle;
-    const db = openReviewStateDb(rootDir);
     try {
-      const row = getReviewRow(db, { repo: job.repo, prNumber: job.prNumber });
-      const newerReviewPending = Boolean(row && ['pending', 'reviewing', 'pending-upstream'].includes(row.review_status));
+      if (!existsSync(join(rootDir, 'data', 'reviews.db'))) return lifecycle;
+      const db = openReviewStateDb(rootDir);
+      let row;
+      try {
+        row = getReviewRow(db, { repo: job.repo, prNumber: job.prNumber });
+      } finally {
+        db.close();
+      }
+      const pendingHead = String(row?.revision_ref || row?.reviewer_head_sha || '').trim();
+      const newerReviewPending = Boolean(
+        ['pending', 'reviewing', 'pending-upstream'].includes(row?.review_status)
+        && pendingHead && pendingHead !== job.revisionRef && pendingHead === lifecycle?.headSha
+      );
       return lifecycle ? { ...lifecycle, newerReviewPending } : { prState: null, newerReviewPending };
-    } finally {
-      db.close();
+    } catch (err) {
+      log.warn?.(`[follow-up-remediation] review state lookup failed for ${job.repo}#${job.prNumber} (non-fatal): ${err.message}`);
+      return lifecycle;
     }
   } catch (err) {
     log.error?.(
@@ -43,7 +53,7 @@ function lifecycleStopDecision(lifecycle, { repo, prNumber, site, job = null }) 
   if (!lifecycle) return null;
   const staleDriftStop = staleDriftStopDecision(lifecycle, { prNumber, site });
   if (lifecycle.prState !== 'merged' && lifecycle.prState !== 'closed') {
-    if (lifecycle.newerReviewPending) {
+    if (site === 'consume' && lifecycle.newerReviewPending) {
       return {
         stopCode: 'newer-review-pending',
         actionReason: 'newer-review-pending',

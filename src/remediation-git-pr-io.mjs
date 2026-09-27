@@ -18,7 +18,7 @@
 // remediation-oss-readiness.mjs / fast-merge-processing.mjs precedent.
 
 import { execFile } from 'node:child_process';
-import { existsSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { writeFollowUpJob } from './follow-up-jobs.mjs';
@@ -375,6 +375,27 @@ function resetWorkspaceDir(workspaceDir) {
   rmSync(workspaceDir, { recursive: true, force: true });
 }
 
+function preserveInvalidResumeWorkspace({ workspaceDir, workspaceRootDir, jobId, reason, log }) {
+  if (!existsSync(workspaceDir)) return;
+  const backupDir = join(workspaceRootDir, `${jobId}.resume-backup-${Date.now()}-${process.pid}`);
+  renameSync(workspaceDir, backupDir);
+  log.warn?.(`[follow-up-remediation] resume validation failed (${reason}); preserved workspace at ${backupDir}; preparing a fresh checkout`);
+}
+
+async function inspectWorkspaceForRetry({ workspaceDir, workspaceRootDir, jobId, expectedRepo, retryHistory, execFileImpl, log }) {
+  const resumeEligible = retryHistory.at(-1)?.retryMetadata?.code === 'worker-killed-resume'
+    && Boolean(retryHistory.at(-1)?.worker?.workspaceDir);
+  const workspaceState = await inspectWorkspaceState({ workspaceDir, expectedRepo, allowDirty: resumeEligible, execFileImpl });
+  if (resumeEligible && workspaceState.reason === 'missing') {
+    log.warn?.(`[follow-up-remediation] resume workspace missing at ${workspaceDir}; preparing a fresh checkout`);
+  }
+  if (workspaceState.reset) {
+    if (resumeEligible) preserveInvalidResumeWorkspace({ workspaceDir, workspaceRootDir, jobId, reason: workspaceState.reason, log });
+    else resetWorkspaceDir(workspaceDir);
+  }
+  return { workspaceState, resumeEligible };
+}
+
 async function checkoutWorkspaceForRemediation({
   workspaceDir, workspaceRootDir, job, repo, baseBranch, headRef, headRepo,
   resumeRequested, fetchEnv, execFileImpl = execFileAsync, log = console,
@@ -558,8 +579,10 @@ export {
   runWorkspaceNetworkCommandWithTransientRetry,
   runWorkspaceGitWithTransientRetry,
   inspectWorkspaceState,
+  inspectWorkspaceForRetry,
   checkoutWorkspaceForRemediation,
   inspectLostRemediationWorkspace,
+  preserveInvalidResumeWorkspace,
   resetWorkspaceDir,
   auditWorkspaceForContamination,
 };

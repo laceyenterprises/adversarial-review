@@ -4884,7 +4884,7 @@ test('stopFollowUpJob moves a non-terminal job to stopped with operator-visible 
 // On 2026-09-27 the synchronous rmSync of each workspace (~4 min apiece on a
 // loaded host) held `reap-workspaces` for 10-16 min per follow-up tick, so
 // remediation slots freed mid-tick waited for the next consume. Removal now
-// renames into a trash directory inside the workspace root and deletes it in the background.
+// renames into a sibling trash directory and deletes it in the background.
 test('reapTerminalFollowUpWorkspaces moves eligible workspaces to trash and removes them in the background', (t) => {
   const rootDir = makeTempRoot(t);
   const completedDir = getFollowUpJobDir(rootDir, 'completed');
@@ -4912,36 +4912,33 @@ test('reapTerminalFollowUpWorkspaces moves eligible workspaces to trash and remo
   );
   const workspaceDir = path.join(workspaceRootDir, jobId);
   mkdirSync(path.join(workspaceDir, '.adversarial-follow-up'), { recursive: true });
-  const backgroundCalls = [];
+  const launchedTrashDirs = [];
 
   const result = reapTerminalFollowUpWorkspaces({
     rootDir,
     workspaceRootDir,
     nowMs,
-    removeInBackgroundImpl: (paths) => backgroundCalls.push(paths),
+    launchTrashDeleterImpl: ({ trashDir }) => launchedTrashDirs.push(trashDir),
   });
 
   assert.equal(result.reaped, 1);
   assert.equal(existsSync(workspaceDir), false);
   assert.deepEqual(result.reapedPaths, [workspaceDir]);
-  assert.equal(backgroundCalls.length, 1);
-  assert.equal(backgroundCalls[0].length, 1);
-  const batchDir = backgroundCalls[0][0];
-  assert.ok(batchDir.startsWith(`${path.join(workspaceRootDir, '.reap-trash')}${path.sep}batch-`), batchDir);
-  assert.equal(existsSync(path.join(batchDir, jobId)), true);
-  assert.deepEqual(readdirSync(workspaceRootDir), ['.reap-trash']);
+  assert.deepEqual(launchedTrashDirs, [`${workspaceRootDir}.trash`]);
+  assert.equal(readdirSync(launchedTrashDirs[0]).some((entry) => entry.startsWith(`${jobId}-`)), true);
+  assert.deepEqual(readdirSync(workspaceRootDir), []);
   const nextPass = reapTerminalFollowUpWorkspaces({
     rootDir,
     workspaceRootDir,
     nowMs,
-    removeInBackgroundImpl: () => {},
+    launchTrashDeleterImpl: () => {},
   });
   assert.equal(nextPass.scanned, 0);
   assert.equal(nextPass.missingTerminalJob, 0);
 });
 
-test('reapTerminalFollowUpWorkspaces falls back to synchronous removal on rename permission errors', (t) => {
-  for (const code of ['EACCES', 'EPERM']) {
+test('reapTerminalFollowUpWorkspaces reports permission errors and falls back on EXDEV', (t) => {
+  for (const code of ['EACCES', 'EPERM', 'EXDEV']) {
     const rootDir = makeTempRoot(t);
     const completedDir = getFollowUpJobDir(rootDir, 'completed');
     const workspaceRootDir = path.join(rootDir, 'follow-up-workspaces');
@@ -4962,21 +4959,20 @@ test('reapTerminalFollowUpWorkspaces falls back to synchronous removal on rename
       completedAt: '2026-06-02T10:00:00.000Z',
     });
     const errors = [];
-    const backgroundCalls = [];
     const result = reapTerminalFollowUpWorkspaces({
       rootDir,
       workspaceRootDir,
       nowMs: Date.parse('2026-06-03T12:00:00.000Z'),
       renameSyncImpl: () => { throw Object.assign(new Error('permission denied'), { code }); },
-      removeInBackgroundImpl: (paths) => backgroundCalls.push(paths),
+      launchTrashDeleterImpl: () => {},
       logErrorImpl: (message) => errors.push(message),
     });
 
-    assert.equal(result.reaped, 1, code);
-    assert.equal(result.errors, 0, code);
-    assert.equal(existsSync(path.join(workspaceRootDir, jobId)), false, code);
-    assert.deepEqual(backgroundCalls, [[]], code);
-    assert.deepEqual(errors, [], code);
+    assert.equal(result.reaped, code === 'EXDEV' ? 1 : 0, code);
+    assert.equal(result.errors, code === 'EXDEV' ? 0 : 1, code);
+    assert.equal(existsSync(path.join(workspaceRootDir, jobId)), code !== 'EXDEV', code);
+    assert.equal(result.anomalyPaths.length, code === 'EXDEV' ? 0 : 1, code);
+    assert.equal(errors.length, code === 'EXDEV' ? 0 : 1, code);
   }
 });
 
@@ -5016,6 +5012,7 @@ test('reapTerminalFollowUpWorkspaces defers removals once its wall-clock budget 
     budgetMs: 1000,
     // Each removal advances the clock past the budget.
     clockImpl: () => clock,
+    launchTrashDeleterImpl: () => {},
     renameSyncImpl: (from, to) => {
       clock += 5000;
       renameSync(from, to);
@@ -5028,21 +5025,19 @@ test('reapTerminalFollowUpWorkspaces defers removals once its wall-clock budget 
   assert.equal(readdirSync(workspaceRootDir).filter((entry) => entry !== '.reap-trash').length, 2);
 });
 
-test('reapTerminalFollowUpWorkspaces hands orphaned trash batches to the next background removal', (t) => {
+test('reapTerminalFollowUpWorkspaces relaunches the deleter for pending trash', (t) => {
   const rootDir = makeTempRoot(t);
   const workspaceRootDir = path.join(rootDir, 'hq', 'adversarial-review', 'follow-up-workspaces');
   mkdirSync(workspaceRootDir, { recursive: true });
-  const orphanBatch = path.join(workspaceRootDir, '.reap-trash', 'batch-1-1');
-  mkdirSync(orphanBatch, { recursive: true });
-  const old = new Date(Date.now() - 60 * 60 * 1000);
-  utimesSync(orphanBatch, old, old);
+  const trashDir = `${workspaceRootDir}.trash`;
+  mkdirSync(path.join(trashDir, 'pending'), { recursive: true });
   const backgroundCalls = [];
 
   reapTerminalFollowUpWorkspaces({
     rootDir,
     workspaceRootDir,
-    removeInBackgroundImpl: (paths) => backgroundCalls.push(paths),
+    launchTrashDeleterImpl: ({ trashDir: target }) => backgroundCalls.push(target),
   });
 
-  assert.deepEqual(backgroundCalls, [[orphanBatch]]);
+  assert.deepEqual(backgroundCalls, [trashDir]);
 });

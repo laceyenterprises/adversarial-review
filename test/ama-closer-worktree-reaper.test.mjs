@@ -1229,7 +1229,7 @@ test('closer worktree reaper does not let active matching workers shield later s
   assert.equal(halfRegistered, 1);
 });
 
-test('closer worktree reaper never evaluates registrations from a partial or failed repo scan', async (t) => {
+test('closer worktree reaper defers only half-registered cleanup on a partial repo scan', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'ama-closer-reap-repos-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const hqRoot = join(root, 'hq');
@@ -1264,18 +1264,22 @@ test('closer worktree reaper never evaluates registrations from a partial or fai
     },
     logger: { info() {}, warn() {} },
   };
-  const first = await reapCloserHammerWorktrees({ ...options, budgetMs: 5 });
-  assert.equal(first.scanned, 0);
-  assert.equal(first.budgetExceeded, true);
+  const first = await reapCloserHammerWorktrees({ ...options, budgetMs: 1000, registrationBudgetMs: 5 });
+  assert.equal(first.registrationIncomplete, true);
+  assert.equal(first.budgetExceeded, false);
+  assert.equal(first.open, 1);
   pass = 1;
   const second = await reapCloserHammerWorktrees({ ...options, budgetMs: 1000 });
   assert.equal(second.open, 1);
+  assert.equal(second.registrationIncomplete, false);
   assert.equal(second.halfRegistered, 0);
   pass = 2;
   const third = await reapCloserHammerWorktrees({ ...options, budgetMs: 1000 });
-  assert.equal(third.scanned, 0);
+  assert.equal(third.open, 1);
+  assert.equal(third.registrationIncomplete, true);
+  assert.equal(third.registrationFailedRepos, 1);
   assert.equal(third.halfRegistered, 0);
-  assert.equal(ghCalls, 1);
+  assert.equal(ghCalls, 3);
   assert.equal(existsSync(worktreePath), true);
 });
 
@@ -1295,10 +1299,59 @@ test('closer worktree discovery skips unreadable or non-directory roots', async 
   });
 
   assert.equal(result.scanned, 0);
-  assert.equal(result.budgetExceeded, true);
+  assert.equal(result.budgetExceeded, false);
+  assert.equal(result.registrationIncomplete, true);
+  assert.equal(result.registrationFailedRepos, 2);
   assert.equal(result.cursorPersisted, true);
   assert.equal(warnings.some((message) => message.includes('code=EACCES')), true);
   assert.equal(warnings.some((message) => message.includes('code=ENOTDIR')), true);
+});
+
+test('failed repo listing still permits terminal cleanup from a healthy repo', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-closer-reap-partial-terminal-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const hqRoot = join(root, 'hq');
+  const goodRepo = join(hqRoot, 'repos', 'good');
+  const badRepo = join(hqRoot, 'repos', 'bad');
+  const worktreePath = join(hqRoot, 'workers', 'hammer-ama-pr-4242-done', 'agent-os');
+  mkdirSync(worktreePath, { recursive: true });
+  const result = await reapCloserHammerWorktrees({
+    hqRoot, repoPaths: [goodRepo, badRepo], cursorPath: join(root, 'cursor.json'),
+    execFileImpl: async (cmd, args) => {
+      if (cmd === 'git' && args.includes('list')) {
+        if (args[1] === badRepo) throw new Error('bad repo listing');
+        return { stdout: `worktree ${worktreePath}\n\n`, stderr: '' };
+      }
+      if (cmd === 'git' && args.includes('get-url')) return { stdout: 'https://github.com/x/y.git\n', stderr: '' };
+      return { stdout: '', stderr: '' };
+    },
+    execGhWithRetryImpl: async () => ({ stdout: '{"state":"MERGED","mergedAt":"2026-07-04T12:00:00Z"}' }),
+    logger: { info() {}, warn() {} },
+  });
+  assert.equal(result.registrationIncomplete, true);
+  assert.equal(result.registrationFailedRepos, 1);
+  assert.equal(result.terminal, 1);
+  assert.equal(result.reaped, 1);
+});
+
+test('non-git directories are skipped without marking registration incomplete', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-closer-reap-nongit-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const repoPath = join(root, 'not-a-repo');
+  mkdirSync(repoPath);
+  let listed = false;
+  const result = await reapCloserHammerWorktrees({
+    hqRoot: root, repoPaths: [repoPath], cursorPath: join(root, 'cursor.json'),
+    execFileImpl: async (_cmd, args) => {
+      if (args.includes('rev-parse')) throw new Error('not a git repository');
+      if (args.includes('list')) listed = true;
+      return { stdout: '', stderr: '' };
+    },
+    logger: { info() {}, warn() {} },
+  });
+  assert.equal(listed, false);
+  assert.equal(result.registrationIncomplete, false);
+  assert.equal(result.registrationFailedRepos, 0);
 });
 
 test('closer worktree parser handles porcelain and GitHub remote URLs', () => {

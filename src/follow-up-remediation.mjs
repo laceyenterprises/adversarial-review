@@ -3875,12 +3875,8 @@ async function consumeNextFollowUpJob({
       return { consumed: false, reason: 'shutting-down', job: requeued.job, jobPath: requeued.jobPath };
     }
 
-    // ARC-08: one AgentRuntime port call, routed by the health router. The
-    // runtime's `os` mode performs the app-contract / hq dispatch and `local`
-    // mode the model-specific CLI self-spawn; both return the same worker
-    // descriptor shape the reconcile pass reads. Workspace prep stayed with the
-    // subject adapter above (`prepareWorkspaceForJob`) — the runtime never
-    // touches git mechanics.
+    // ARC-08: the health-routed AgentRuntime handles OS or local dispatch and
+    // returns the worker descriptor. The subject adapter owns git workspace prep.
     const remediationRuntime = createRemediationRuntime({
       execFileImpl,
       spawnImpl,

@@ -828,6 +828,8 @@ async function runFollowUpDaemonIteration({
       `terminal=${result.terminal} prunable=${result.prunable} ` +
       `halfRegistered=${result.halfRegistered} open=${result.open} ` +
       `unknown=${result.unknown} deferredActiveWorker=${result.deferredActiveWorker} ` +
+      `registrationIncomplete=${result.registrationIncomplete} registrationFailedRepos=${result.registrationFailedRepos} ` +
+      `deferredIncompleteRegistration=${result.deferredIncompleteRegistration} ` +
       `errors=${result.errors} limit=${result.limit} budgetExceeded=${result.budgetExceeded}`
     );
   });

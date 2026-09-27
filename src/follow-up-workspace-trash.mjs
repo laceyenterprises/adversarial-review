@@ -1,14 +1,15 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // The trash is a sibling of the workspace root so rename stays on one volume.
 export function workspaceTrashDir(workspaceRootDir) {
-  return join(dirname(workspaceRootDir), `${basename(workspaceRootDir)}.trash`);
+  const physicalRoot = existsSync(workspaceRootDir) ? realpathSync(workspaceRootDir) : workspaceRootDir;
+  return join(dirname(physicalRoot), `${basename(physicalRoot)}.trash`);
 }
 
-export function launchWorkspaceTrashDeleter({ trashDir, spawnImpl = spawn, probeImpl = spawnSync, logger = console } = {}) {
+export function launchWorkspaceTrashDeleter({ trashDir, rootDir, workspaceRootDir, spawnImpl = spawn, probeImpl = spawnSync, logger = console } = {}) {
   if (!existsSync(trashDir)) return false;
   const lockPath = `${trashDir}.delete.lock`;
   let fd;
@@ -27,11 +28,11 @@ export function launchWorkspaceTrashDeleter({ trashDir, spawnImpl = spawn, probe
       try { if (Date.now() - statSync(lockPath).mtimeMs < 60_000) return false; } catch { return false; }
     }
     try { unlinkSync(lockPath); } catch { return false; }
-    return launchWorkspaceTrashDeleter({ trashDir, spawnImpl, probeImpl, logger });
+    return launchWorkspaceTrashDeleter({ trashDir, rootDir, workspaceRootDir, spawnImpl, probeImpl, logger });
   }
   try {
     const script = fileURLToPath(new URL('./follow-up-workspace-trash-delete.mjs', import.meta.url));
-    const args = [process.execPath, script, trashDir, lockPath];
+    const args = [process.execPath, script, trashDir, lockPath, rootDir || '', workspaceRootDir || ''];
     const taskpolicy = process.platform === 'darwin'
       && probeImpl('taskpolicy', ['-h'], { stdio: 'ignore' }).error?.code !== 'ENOENT';
     const command = taskpolicy ? 'taskpolicy' : 'nice';

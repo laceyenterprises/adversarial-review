@@ -255,6 +255,17 @@
       "store": "data/argus-security-jobs/",
       "schemaSurface": "src/argus-security-queue.mjs",
       "owner": "ASR-03 Argus security review queue"
+    },
+    {
+      "id": "archive-anomalies",
+      "title": "Archive Anomalies",
+      "path": "docs/data-model/archive-anomalies.md",
+      "store": "data/archive-anomalies/",
+      "schemaSurface": "src/follow-up-jobs.mjs",
+      "relatedSchemaSurfaces": [
+        "src/follow-up-workspace-trash-delete.mjs"
+      ],
+      "owner": "follow-up archive and terminal workspace maintenance"
     }
   ]
 }

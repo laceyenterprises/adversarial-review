@@ -1850,10 +1850,10 @@ async function postGitHubReviewWithCapture({
 }
 
 // ── Linear integration (LAC-13) ──────────────────────────────────────────────
-const linearTriage = createLinearTriageAdapter({
-  logger: console,
-  criticalWords: CRITICAL_WORDS,
-});
+let linearTriage;
+function getLinearTriage() {
+  return linearTriage ||= createLinearTriageAdapter({ logger: console, criticalWords: CRITICAL_WORDS });
+}
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 async function main() {
@@ -1943,7 +1943,7 @@ async function main() {
 
   if (reviewerHeadSha) {
     try {
-      await linearTriage.recordReviewerEngagement({
+      await getLinearTriage().recordReviewerEngagement({
         domainId: 'code-pr',
         subjectExternalId: `${repo}#${prNumber}`,
         revisionRef: reviewerHeadSha,
@@ -2441,7 +2441,7 @@ async function main() {
   // 4. Update Linear (LAC-13)
   try {
     console.error(`[reviewer] DEBUG: updating Linear ticket ${linearTicketId || '<none>'}; critical=${critical}`);
-    await linearTriage.recordReviewCompleted({
+    await getLinearTriage().recordReviewCompleted({
       domainId: 'code-pr',
       subjectExternalId: `${repo}#${prNumber}`,
       revisionRef: reviewerHeadSha || null,

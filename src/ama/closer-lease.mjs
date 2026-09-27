@@ -51,6 +51,10 @@ const VALID_TERMINAL_OUTCOMES = new Set([
   'failed-without-merge',
   'deferred',
   'superseded',
+  'pr-merged-externally',
+  'pr-closed-externally',
+  'no-merge:concurrent-writer',
+  'no-merge:pr-merged-externally',
 ]);
 
 function supersededHeadsFor(lease) {

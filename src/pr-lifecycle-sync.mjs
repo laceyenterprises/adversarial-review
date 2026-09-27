@@ -41,6 +41,7 @@ import {
   attemptPendingTriageSync,
   queuePendingTriageSync,
 } from './pending-triage-sync.mjs';
+import { cancelCloserForTerminalPr } from './ama/closer-terminal-cancel.mjs';
 
 const execFileAsync = promisify(execFile);
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -333,6 +334,7 @@ export async function syncPRLifecycle(octokit, operatorSurface, primaryDomainId 
     // A throw defers the mark, keeping the row eligible next tick — dropping
     // the mark is the only way these obligations get retried.
     onBeforeMark: async ({ repo, prNumber, transition, live }) => {
+      await cancelCloserForTerminalPr({ rootDir: ROOT, repo, prNumber, transition });
       const queuedMergeAgentCleanup = queueMergeAgentLifecycleCleanup({
         pr: live, repo, prNumber, transition,
       });

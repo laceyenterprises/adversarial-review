@@ -218,11 +218,13 @@ async function listHqRepoPaths(hqRoot, {
   logger = console,
 } = {}) {
   const entries = [];
+  let complete = true;
   for (const rootName of ['repos', 'worker-base']) {
     const reposDir = join(hqRoot, rootName);
     const rootEntries = await readdirImpl(reposDir, { withFileTypes: true }).catch((err) => {
       if (recoverableDiscoveryError(err)) {
         if (err?.code !== 'ENOENT') {
+          complete = false;
           logger?.warn?.(`[closer-worktree-reap] repo-discovery-skipped path=${reposDir} code=${err.code}`);
         }
         return [];
@@ -244,6 +246,7 @@ async function listHqRepoPaths(hqRoot, {
   return {
     paths: discovery.page.map((entry) => entry.path),
     nextCursor: discovery.nextCursor,
+    complete,
   };
 }
 
@@ -365,9 +368,8 @@ async function remoteRepoForPath(repoPath, execFileImpl, timeout = 10_000) {
 
 async function registeredWorktreesByPath({ repoPaths, execFileImpl, logger = console, deadlineMs = Infinity }) {
   const byPath = new Map();
-  let lastRepoPath = null;
   for (const repoPath of repoPaths) {
-    if (Date.now() >= deadlineMs) break;
+    if (Date.now() >= deadlineMs) return { byPath, complete: false };
     const timeout = Math.max(1, Math.min(30_000, deadlineMs - Date.now()));
     try {
       const [{ stdout }, githubRepo] = await Promise.all([
@@ -393,10 +395,10 @@ async function registeredWorktreesByPath({ repoPaths, execFileImpl, logger = con
       logger?.warn?.(
         `[closer-worktree-reap] worktree-list-failed repoPath=${repoPath}: ${err?.message || err}`
       );
+      return { byPath, complete: false };
     }
-    lastRepoPath = repoPath;
   }
-  return { byPath, lastRepoPath, complete: lastRepoPath === repoPaths.at(-1) || repoPaths.length === 0 };
+  return { byPath, complete: true };
 }
 
 function classifyPrTerminal(pr) {
@@ -785,15 +787,16 @@ async function reapCloserHammerWorktrees({
   const deadlineMs = reapStartedAt + budgetMs;
   const cursor = await readScanCursor(cursorPath, logger);
   const repoDiscovery = Array.isArray(repoPaths)
-    ? { paths: repoPaths, nextCursor: cursor.repo }
+    ? { paths: repoPaths }
     : await listHqRepoPaths(hqRoot, {
-        scanLimit,
-        lastName: cursor.repo,
+        // A registration map is safe only when it covers every discovered repo.
+        scanLimit: Infinity,
+        lastName: null,
         readdirImpl,
         logger,
       });
   const effectiveRepoPaths = repoDiscovery.paths;
-  const registrationScan = await registeredWorktreesByPath({
+  const registrationScan = repoDiscovery.complete === false ? { complete: false } : await registeredWorktreesByPath({
     repoPaths: effectiveRepoPaths,
     execFileImpl,
     logger,
@@ -801,17 +804,13 @@ async function reapCloserHammerWorktrees({
   });
   if (!registrationScan.complete) {
     // Registration is the safety oracle for half-registered worktrees. Never
-    // evaluate a partial scan. Save only the repos completed so the next tick
-    // continues discovery without misclassifying a live registration.
-    const repo = registrationScan.lastRepoPath
-      ? registrationScan.lastRepoPath.slice(hqRoot.length + 1)
-      : cursor.repo;
-    persistScanCursor(cursorPath, { ...cursor, repo }, logger);
+    // evaluate a partial scan. Retry the full set on the next tick.
+    const cursorPersisted = persistScanCursor(cursorPath, { ...cursor, repo: null }, logger);
     return {
       scanned: 0, reaped: 0, pruned: 0, skipped: 0, errors: 0,
       terminal: 0, prunable: 0, halfRegistered: 0, open: 0, unknown: 0,
       deferredActiveWorker: 0, deferredUnknownWorker: 0,
-      limit, scanLimit, budgetMs, budgetExceeded: true,
+      limit, scanLimit, budgetMs, budgetExceeded: true, cursorPersisted,
     };
   }
   const registered = registrationScan.byPath;
@@ -1111,7 +1110,7 @@ async function reapCloserHammerWorktrees({
   }
 
   summary.cursorPersisted = persistScanCursor(cursorPath, {
-    repo: repoDiscovery.nextCursor,
+    repo: null,
     worker: workerDiscovery.nextCursor,
     evaluation: evaluationCursor,
     probeFailures,

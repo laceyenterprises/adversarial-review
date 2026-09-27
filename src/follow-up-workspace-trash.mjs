@@ -8,7 +8,7 @@ export function workspaceTrashDir(workspaceRootDir) {
   return join(dirname(workspaceRootDir), `${basename(workspaceRootDir)}.trash`);
 }
 
-export function launchWorkspaceTrashDeleter({ trashDir, spawnImpl = spawn, probeImpl = spawnSync } = {}) {
+export function launchWorkspaceTrashDeleter({ trashDir, spawnImpl = spawn, probeImpl = spawnSync, logger = console } = {}) {
   if (!existsSync(trashDir)) return false;
   const lockPath = `${trashDir}.delete.lock`;
   let fd;
@@ -27,7 +27,7 @@ export function launchWorkspaceTrashDeleter({ trashDir, spawnImpl = spawn, probe
       try { if (Date.now() - statSync(lockPath).mtimeMs < 60_000) return false; } catch { return false; }
     }
     try { unlinkSync(lockPath); } catch { return false; }
-    return launchWorkspaceTrashDeleter({ trashDir, spawnImpl, probeImpl });
+    return launchWorkspaceTrashDeleter({ trashDir, spawnImpl, probeImpl, logger });
   }
   try {
     const script = fileURLToPath(new URL('./follow-up-workspace-trash-delete.mjs', import.meta.url));
@@ -38,6 +38,16 @@ export function launchWorkspaceTrashDeleter({ trashDir, spawnImpl = spawn, probe
     const child = spawnImpl(command, taskpolicy ? ['-b', ...args] : ['-n', '10', ...args], {
       detached: true, stdio: 'ignore',
     });
+    child.once('error', (err) => {
+      logger?.warn?.(`[follow-up-workspace-trash] deleter-spawn-failed: ${err?.message || err}`);
+      try {
+        if (Number(readFileSync(lockPath, 'utf8')) === child.pid) unlinkSync(lockPath);
+      } catch { /* a later sweep can retry */ }
+    });
+    if (!Number.isSafeInteger(child.pid) || child.pid <= 0) {
+      try { unlinkSync(lockPath); } catch { /* a later sweep can retry */ }
+      return false;
+    }
     writeFileSync(fd, String(child.pid));
     child.unref();
     return true;

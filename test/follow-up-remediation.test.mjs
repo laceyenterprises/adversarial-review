@@ -3421,9 +3421,13 @@ test('spawnCodexRemediationWorker keeps the legacy provenance class when HQ_REPO
   const prevHome = process.env.HOME;
   const prevCodexHome = process.env.CODEX_HOME;
   const prevAuthPath = process.env.CODEX_AUTH_PATH;
+  const prevTrailerClass = process.env.WORKER_TRAILER_CLASS;
+  const prevEntitlementVar = process.env.HQ_ENTITLEMENT_GH_TOKEN_VAR;
   process.env.HOME = workspaceDir;
   process.env.CODEX_HOME = codexHome;
   process.env.CODEX_AUTH_PATH = authPath;
+  delete process.env.WORKER_TRAILER_CLASS;
+  delete process.env.HQ_ENTITLEMENT_GH_TOKEN_VAR;
   let capturedEnv;
   try {
     spawnCodexRemediationWorker({
@@ -3446,6 +3450,10 @@ test('spawnCodexRemediationWorker keeps the legacy provenance class when HQ_REPO
     else process.env.CODEX_HOME = prevCodexHome;
     if (prevAuthPath === undefined) delete process.env.CODEX_AUTH_PATH;
     else process.env.CODEX_AUTH_PATH = prevAuthPath;
+    if (prevTrailerClass === undefined) delete process.env.WORKER_TRAILER_CLASS;
+    else process.env.WORKER_TRAILER_CLASS = prevTrailerClass;
+    if (prevEntitlementVar === undefined) delete process.env.HQ_ENTITLEMENT_GH_TOKEN_VAR;
+    else process.env.HQ_ENTITLEMENT_GH_TOKEN_VAR = prevEntitlementVar;
   }
   assert.equal(capturedEnv.WORKER_CLASS, REMEDIATION_WORKER_TRAILER_CLASS);
   assert.equal(capturedEnv.WORKER_TRAILER_CLASS, undefined);

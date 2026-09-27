@@ -1229,6 +1229,56 @@ test('closer worktree reaper does not let active matching workers shield later s
   assert.equal(halfRegistered, 1);
 });
 
+test('closer worktree reaper never evaluates registrations from a partial or failed repo scan', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-closer-reap-repos-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const hqRoot = join(root, 'hq');
+  const repoA = join(hqRoot, 'repos', 'a');
+  const repoB = join(hqRoot, 'repos', 'b');
+  const worktreePath = join(hqRoot, 'workers', 'hammer-ama-pr-4242-live', 'agent-os');
+  mkdirSync(repoA, { recursive: true });
+  mkdirSync(repoB, { recursive: true });
+  mkdirSync(worktreePath, { recursive: true });
+  let pass = 0;
+  let ghCalls = 0;
+  const options = {
+    hqRoot,
+    cursorPath: join(root, 'cursor.json'),
+    scanLimit: 1,
+    execFileImpl: async (cmd, args) => {
+      if (cmd === 'git' && args.includes('get-url')) {
+        return { stdout: 'https://github.com/x/y.git\n', stderr: '' };
+      }
+      if (cmd === 'git' && args.includes('list')) {
+        if (pass === 0 && args[1] === repoA) {
+          await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+        }
+        if (pass === 2 && args[1] === repoB) throw new Error('worktree list timed out');
+        return { stdout: args[1] === repoA ? `worktree ${worktreePath}\n\n` : '', stderr: '' };
+      }
+      return { stdout: '{}', stderr: '' };
+    },
+    execGhWithRetryImpl: async () => {
+      ghCalls += 1;
+      return { stdout: JSON.stringify({ state: 'OPEN', mergedAt: null, closedAt: null }) };
+    },
+    logger: { info() {}, warn() {} },
+  };
+  const first = await reapCloserHammerWorktrees({ ...options, budgetMs: 5 });
+  assert.equal(first.scanned, 0);
+  assert.equal(first.budgetExceeded, true);
+  pass = 1;
+  const second = await reapCloserHammerWorktrees({ ...options, budgetMs: 1000 });
+  assert.equal(second.open, 1);
+  assert.equal(second.halfRegistered, 0);
+  pass = 2;
+  const third = await reapCloserHammerWorktrees({ ...options, budgetMs: 1000 });
+  assert.equal(third.scanned, 0);
+  assert.equal(third.halfRegistered, 0);
+  assert.equal(ghCalls, 1);
+  assert.equal(existsSync(worktreePath), true);
+});
+
 test('closer worktree discovery skips unreadable or non-directory roots', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'ama-closer-reap-unreadable-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -1245,6 +1295,7 @@ test('closer worktree discovery skips unreadable or non-directory roots', async 
   });
 
   assert.equal(result.scanned, 0);
+  assert.equal(result.budgetExceeded, true);
   assert.equal(result.cursorPersisted, true);
   assert.equal(warnings.some((message) => message.includes('code=EACCES')), true);
   assert.equal(warnings.some((message) => message.includes('code=ENOTDIR')), true);

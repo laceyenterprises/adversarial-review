@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,7 +17,7 @@ test('workspace trash launches one detached low-priority deleter while its PID l
   const calls = [];
   const spawnImpl = (command, args, options) => {
     calls.push({ command, args, options });
-    return { pid: process.pid, unref() {} };
+    return Object.assign(new EventEmitter(), { pid: process.pid, unref() {} });
   };
   assert.equal(launchWorkspaceTrashDeleter({ trashDir, spawnImpl, probeImpl: () => ({ status: 0 }) }), true);
   assert.equal(launchWorkspaceTrashDeleter({ trashDir, spawnImpl }), false);
@@ -25,6 +26,35 @@ test('workspace trash launches one detached low-priority deleter while its PID l
   assert.equal(calls[0].options.detached, true);
   assert.equal(calls[0].options.stdio, 'ignore');
   assert.equal(Number(readFileSync(`${trashDir}.delete.lock`, 'utf8')), process.pid);
+});
+
+test('workspace trash spawn error is handled and releases its PID lock', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'follow-up-trash-spawn-error-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const trashDir = workspaceTrashDir(join(root, 'workspaces'));
+  mkdirSync(trashDir);
+  const child = Object.assign(new EventEmitter(), { pid: process.pid, unref() {} });
+  const warnings = [];
+  assert.equal(launchWorkspaceTrashDeleter({
+    trashDir,
+    spawnImpl: () => child,
+    probeImpl: () => ({ status: 0 }),
+    logger: { warn: (message) => warnings.push(message) },
+  }), true);
+  child.emit('error', Object.assign(new Error('spawn EAGAIN'), { code: 'EAGAIN' }));
+  assert.equal(existsSync(`${trashDir}.delete.lock`), false);
+  assert.match(warnings[0], /spawn EAGAIN/);
+});
+
+test('workspace trash rejects a spawn without a PID', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'follow-up-trash-no-pid-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const trashDir = workspaceTrashDir(join(root, 'workspaces'));
+  mkdirSync(trashDir);
+  const child = Object.assign(new EventEmitter(), { unref() {} });
+  assert.equal(launchWorkspaceTrashDeleter({ trashDir, spawnImpl: () => child }), false);
+  assert.equal(existsSync(`${trashDir}.delete.lock`), false);
+  assert.doesNotThrow(() => child.emit('error', new Error('spawn ENOENT')));
 });
 
 test('workspace trash child deletes only entries placed in the trash directory', (t) => {

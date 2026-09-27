@@ -852,6 +852,7 @@ test('reapTerminalFollowUpWorkspaces lets a parseable duplicate timestamp beat a
     rootDir,
     workspaceRootDir,
     nowMs,
+    launchTrashDeleterImpl: () => {},
     logErrorImpl: (...args) => {
       errors.push(args.map((entry) => String(entry)).join(' '));
     },
@@ -937,6 +938,7 @@ test('reapTerminalFollowUpWorkspaces falls back to archived jobs when an active 
     rootDir,
     workspaceRootDir,
     nowMs,
+    launchTrashDeleterImpl: () => {},
     logErrorImpl: (...args) => {
       errors.push(args.map((entry) => String(entry)).join(' '));
     },
@@ -995,6 +997,7 @@ test('reapTerminalFollowUpWorkspaces continues after a per-workspace delete fail
     rootDir,
     workspaceRootDir,
     nowMs,
+    launchTrashDeleterImpl: () => {},
     renameSyncImpl: (targetPath, destination) => {
       if (targetPath === blockedWorkspaceDir) {
         const err = new Error('resource busy');
@@ -1058,6 +1061,7 @@ test('reapTerminalFollowUpWorkspaces logs permission context when a delete failu
       rootDir,
       workspaceRootDir,
       nowMs,
+      launchTrashDeleterImpl: () => {},
       renameSyncImpl: (targetPath, destination) => {
         renameSync(targetPath, destination);
         const err = new Error('permission denied');
@@ -1118,6 +1122,7 @@ test('reapTerminalFollowUpWorkspaces records a structured anomaly for permission
     rootDir,
     workspaceRootDir,
     nowMs,
+    launchTrashDeleterImpl: () => {},
     renameSyncImpl: () => {
       const err = new Error('permission denied');
       err.code = 'EACCES';

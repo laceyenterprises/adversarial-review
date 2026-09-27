@@ -33,6 +33,7 @@ import {
   writeReviewerTokenUsageArtifact,
 } from '../src/reviewer-pass-tokens.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
+import { persistHostedReviewerExecution } from '../src/reviewer-execution-pass.mjs';
 
 const HERMETIC_CONFIG_ENV = { AGENT_OS_CONFIG_PATH: '/dev/null' };
 
@@ -107,11 +108,12 @@ test('hosted pass keeps resolved execution when body capture does not run', () =
     ...key, reviewerClass: 'codex', reviewerModel: 'codex', headSha: 'reviewed-head',
     metadata: { reviewerSessionUuid: 'session-44' },
   });
-  beginReviewerPass(rootDir, {
-    ...key, reviewerClass: 'codex', reviewerModel: 'gpt-6-sol', reasoningEffort: 'high',
-    headSha: 'reviewed-head',
-    metadata: { reviewerExecution: { harness: 'codex', model: 'gpt-6-sol', effort: 'high' } },
-  });
+  assert.equal(persistHostedReviewerExecution({
+    rootDir, repo: key.repo, prNumber: key.prNumber,
+    reviewDbAttemptNumber: key.attemptNumber, reviewAttemptNumber: 1,
+    reviewerClass: 'codex', passKind: key.passKind, headSha: 'reviewed-head',
+    execution: { harness: 'codex', model: 'gpt-6-sol', effort: 'high' },
+  }), true);
   const row = completeReviewerPass(rootDir, {
     ...key, status: 'completed', tokenUsage: { model: 'gpt-5.5', input: 10, output: 2 },
   });

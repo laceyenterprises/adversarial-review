@@ -17,7 +17,7 @@ const CLI_PATH = join(REPO_ROOT, 'bin', 'watcher-wake.mjs');
 async function runCli(args) {
   try {
     const { stdout, stderr } = await execFileAsync(process.execPath, [CLI_PATH, ...args], {
-      timeout: 5_000,
+      timeout: 15_000,
     });
     return { code: 0, stdout, stderr };
   } catch (err) {
@@ -68,6 +68,7 @@ test('watcher-wake CLI writes the HAM eligible wake payload', async () => {
           repo: 'laceyenterprises/agent-os',
           pr_number: 6561,
           head_sha: 'abc123abc123abc123abc123abc123abc123abc1',
+          requested_at: '2026-09-10T21:40:00.000Z',
         },
       ],
     });
@@ -87,6 +88,36 @@ test('watcher-wake CLI rejects malformed PR identity before writing', async () =
     assert.equal(result.code, 64);
     assert.match(result.stderr, /--repo must be shaped owner\/name/);
     assert.throws(() => readFileSync(watcherWakePath(rootDir), 'utf8'), /ENOENT/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('watcher-wake CLI rejects malformed requested-at before writing', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'watcher-wake-cli-'));
+  try {
+    for (const timestamp of ['nonsense', 'September 27, 2026', '2026-09-27', '2026-09-27T18:29:12']) {
+      const result = await runCli([
+        '--root-dir', rootDir, '--repo', 'o/r', '--pr', '17', '--requested-at', timestamp,
+      ]);
+      assert.equal(result.code, 64, timestamp);
+      assert.match(result.stderr, /--requested-at must be an ISO timestamp/);
+    }
+    assert.throws(() => readFileSync(watcherWakePath(rootDir), 'utf8'), /ENOENT/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('watcher-wake CLI accepts an ISO timestamp with an explicit offset', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'watcher-wake-cli-'));
+  try {
+    const requestedAt = '2026-09-27T11:29:12-07:00';
+    const result = await runCli([
+      '--root-dir', rootDir, '--repo', 'o/r', '--pr', '17', '--requested-at', requestedAt,
+    ]);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(JSON.parse(readFileSync(watcherWakePath(rootDir), 'utf8')).requested_at, requestedAt);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

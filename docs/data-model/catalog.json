@@ -186,6 +186,18 @@
       "owner": "AMA event-driven hammer wake diagnostics"
     },
     {
+      "id": "watcher-wake",
+      "title": "Watcher Wake",
+      "path": "docs/data-model/watcher-wake.md",
+      "store": "data/watcher-wake.json, data/watcher-wake-consumed.json",
+      "schemaSurface": "src/watcher-wake.mjs",
+      "relatedSchemaSurfaces": [
+        "src/watcher.mjs",
+        "bin/watcher-wake.mjs"
+      ],
+      "owner": "watcher wake transport and subject priority"
+    },
+    {
       "id": "rereview-wakes",
       "title": "Rereview Wakes",
       "path": "docs/data-model/rereview-wakes.md",

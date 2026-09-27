@@ -28,7 +28,7 @@ test('watcher wake interrupts scheduled wait in under five seconds', async () =>
         reason: 'remediation-to-rereview',
         repo: 'laceyenterprises/clio',
         prNumber: 7,
-        requestedAt: '2026-04-21T10:05:00.000Z',
+        requestedAt: new Date().toISOString(),
         requestId: 'test-wake',
       });
     }, 50);
@@ -86,6 +86,47 @@ test('watcher wake can consume the latest file on daemon startup', async () => {
     assert.equal(result.payload.request_id, 'startup-wake');
     assert.equal(result.payload.repo, 'laceyenterprises/agent-os');
     assert.equal(result.payload.pr_number, 6654);
+  } finally {
+    wakeSource.close();
+  }
+});
+
+test('startup consumes an expired wake signal without granting its top-level subject priority', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'watcher-wake-expired-'));
+  requestWatcherWake({
+    rootDir, reason: 'hammer-pr-eligible', repo: 'o/r', prNumber: 17,
+    requestedAt: '2026-09-27T16:00:00.000Z',
+  });
+  const wakeSource = createWatcherWakeSource({
+    rootDir, consumeExistingOnStart: true,
+    now: () => Date.parse('2026-09-27T17:00:00.000Z'),
+    logger: { warn() {} },
+  });
+  try {
+    const result = await wakeSource.wait(0);
+    assert.equal(result.woken, true);
+    assert.equal(result.payload.reason, 'hammer-pr-eligible');
+    assert.equal(watcherWakeMatchesSubject(result.payload, { repoPath: 'o/r', prNumber: 17 }), false);
+  } finally {
+    wakeSource.close();
+  }
+});
+
+test('startup does not grant priority to malformed wake timestamps', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'watcher-wake-malformed-'));
+  const filePath = watcherWakePath(rootDir);
+  requestWatcherWake({ rootDir, reason: 'setup' });
+  writeFileSync(filePath, JSON.stringify({
+    request_id: 'malformed', requested_at: 'nonsense', reason: 'hammer-pr-eligible',
+    repo: 'o/r', pr_number: 17,
+    pending_subjects: [{ repo: 'o/r', pr_number: 18, requested_at: 'nonsense' }],
+  }));
+  const wakeSource = createWatcherWakeSource({ rootDir, consumeExistingOnStart: true, logger: { warn() {} } });
+  try {
+    const result = await wakeSource.wait(0);
+    assert.equal(result.woken, true);
+    assert.equal(watcherWakeMatchesSubject(result.payload, { repoPath: 'o/r', prNumber: 17 }), false);
+    assert.equal(watcherWakeMatchesSubject(result.payload, { repoPath: 'o/r', prNumber: 18 }), false);
   } finally {
     wakeSource.close();
   }
@@ -186,7 +227,7 @@ test('watcher wake dedupes request_id-less payloads by content hash', async () =
     filePath,
     JSON.stringify({
       schema_version: 1,
-      requested_at: '2026-04-21T10:05:00.000Z',
+      requested_at: new Date().toISOString(),
       reason: 'remediation-to-rereview',
       repo: 'laceyenterprises/clio',
       pr_number: 8,
@@ -205,7 +246,7 @@ test('watcher wake dedupes request_id-less payloads by content hash', async () =
       filePath,
       JSON.stringify({
         schema_version: 1,
-        requested_at: '2026-04-21T10:05:00.000Z',
+        requested_at: new Date().toISOString(),
         reason: 'remediation-to-rereview',
         repo: 'laceyenterprises/clio',
         pr_number: 9,
@@ -277,6 +318,50 @@ test('watcher wake caps one PR head without starving another PR head', async () 
   }
 });
 
+test('a capped top-level head cannot discard another pending head', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'watcher-wake-'));
+  const wakeSource = createWatcherWakeSource({
+    rootDir,
+    logger: { warn() {} },
+    rateLimiter: createHandoffRateLimiter({ rootDir, maxPerPrHead: 1, logger: { warn() {} } }),
+    loadConfigImpl: () => ({ getHandoffConfig: () => ({ maxPerPrHead: 1 }) }),
+  });
+  const wake = (prNumber, headSha, requestId) => requestWatcherWake({
+    rootDir, repo: 'o/r', prNumber, headSha, requestId,
+  });
+  const matches = (payload, prNumber, headSha) => watcherWakeMatchesSubject(payload, {
+    repoPath: 'o/r', prNumber, headSha,
+  });
+
+  try {
+    wake(1, 'head-a', 'a-1');
+    assert.equal((await wakeSource.wait(0)).woken, true);
+
+    wake(1, 'head-a', 'a-2');
+    assert.equal((await wakeSource.wait(0)).woken, false);
+    assert.deepEqual(
+      JSON.parse(readFileSync(path.join(rootDir, 'data', 'watcher-wake-consumed.json'), 'utf8')),
+      { consumed_key: 'request_id:a-1' },
+      'all-capped wake must remain unacknowledged',
+    );
+
+    wake(2, 'head-b', 'b-1');
+    wake(1, 'head-a', 'a-3');
+    const result = await wakeSource.wait(0);
+    assert.equal(result.woken, true);
+    assert.equal(matches(result.payload, 2, 'head-b'), true);
+    assert.equal(matches(result.payload, 1, 'head-a'), false);
+    assert.equal(result.payload.pr_number, 2, 'eligible B should occupy the legacy top-level fields');
+
+    wake(3, 'head-c', 'c-1');
+    const next = JSON.parse(readFileSync(watcherWakePath(rootDir), 'utf8'));
+    assert.equal(matches(next, 2, 'head-b'), false, 'delivered B should be acknowledged');
+    assert.equal(matches(next, 3, 'head-c'), true);
+  } finally {
+    wakeSource.close();
+  }
+});
+
 test('watcher main loop does not gate wake-file sleeps behind handoff config', () => {
   const watcherSource = readFileSync(
     new URL('../src/watcher.mjs', import.meta.url),
@@ -310,7 +395,7 @@ test('a zero-length wait still observes a pending wake (overrunning poll must no
       reason: 'clean-verdict-to-hammer',
       repo: 'laceyenterprises/agent-os',
       prNumber: 6943,
-      requestedAt: '2026-09-21T02:49:38.501Z',
+      requestedAt: new Date().toISOString(),
       requestId: 'zero-timeout-wake',
     });
 

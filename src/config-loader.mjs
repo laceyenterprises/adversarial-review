@@ -397,6 +397,11 @@ function schemaV1() {
             __default: 120,
             __min: 1,
           },
+          pull_retry_delays_seconds: {
+            __type: TYPE_LIST,
+            __default: [5, 15],
+            __item: { __type: TYPE_INT, __min: 0, __max: 30, __enforceMax: true },
+          },
           recovery_max_attempts: {
             __type: TYPE_INT,
             __default: 5,
@@ -3175,6 +3180,63 @@ function schemaV1() {
                 __type: TYPE_STRING,
                 __default: 'codex',
                 __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS,
+              },
+            },
+          },
+        },
+      },
+      // Parse-only mirror of the Python-owned MCP call metering policy. This
+      // root is checked into the shared config, so strict Node loads need it.
+      mcp_metering: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          enabled: { __type: TYPE_BOOL, __default: true },
+          surfaces: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              dispatched: { __type: TYPE_BOOL, __default: false },
+              host: { __type: TYPE_BOOL, __default: false },
+            },
+          },
+          policy: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              mode: { __type: TYPE_STRING, __enum: ['observe', 'enforce'], __default: 'observe' },
+              rules: {
+                __type: TYPE_LIST,
+                __default: [],
+                __item: {
+                  __type: TYPE_DICT,
+                  __strict: true,
+                  __keys: {
+                    name: { __type: TYPE_STRING, __required: true },
+                    agent: { __type: TYPE_STRING },
+                    worker_class: { __type: TYPE_STRING },
+                    surface: { __type: TYPE_STRING },
+                    server: { __type: TYPE_STRING },
+                    tool: { __type: TYPE_STRING },
+                    action: {
+                      __type: TYPE_STRING,
+                      __required: true,
+                      __enum: ['deny', 'max_calls_per_run', 'max_cost_usd_per_run', 'rate_limit'],
+                    },
+                    mode: { __type: TYPE_STRING, __enum: ['observe', 'enforce'] },
+                    max_calls_per_run: { __type: TYPE_INT },
+                    max_cost_usd_per_run: { __type: TYPE_FLOAT },
+                    cost_bound_usd_per_call: { __type: TYPE_FLOAT },
+                    rate_limit: {
+                      __type: TYPE_DICT,
+                      __strict: true,
+                      __keys: {
+                        calls: { __type: TYPE_INT },
+                        window_seconds: { __type: TYPE_INT },
+                      },
+                    },
+                  },
+                },
               },
             },
           },

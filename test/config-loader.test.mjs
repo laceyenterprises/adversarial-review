@@ -118,6 +118,32 @@ function captureWarns(fn) {
   return warnings;
 }
 
+test('strict loader accepts the shared MCP metering policy root', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      mcp_metering:
+        enabled: true
+        surfaces:
+          dispatched: false
+          host: false
+        policy:
+          mode: observe
+          rules:
+            - name: cap
+              action: max_calls_per_run
+              mode: enforce
+              max_calls_per_run: 3
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('mcp_metering.policy.rules')[0].max_calls_per_run, 3);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 // -------- §1 + §8 rows 1-4, 12-14 ------------------------------------------
 
 test('missing file returns defaults', () => {

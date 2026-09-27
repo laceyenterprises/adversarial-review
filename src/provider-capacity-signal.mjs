@@ -20,14 +20,14 @@ export function hasProviderCapacitySignal(value, { httpStatuses = [529] } = {}) 
 // Examine the tail only so an earlier recovered turn does not control a later exit.
 export function hasTerminalProviderCapacitySignal(logText) {
   const lines = String(logText || '').slice(-64 * 1024).split(/\r?\n/).slice(-100);
-  for (const line of lines) {
+  for (const line of lines.reverse()) {
     let event;
     try { event = JSON.parse(line); } catch { event = null; }
     if (event && typeof event === 'object') {
       if (event.type === 'turn.failed' || event.type === 'error' || event.error) {
         const diagnostic = JSON.stringify(event);
-        if (hasProviderCapacitySignal(diagnostic, { httpStatuses: [429, 503, 529] })
-          || /\b(?:at capacity|overloaded)\b/i.test(diagnostic)) return true;
+        return hasProviderCapacitySignal(diagnostic, { httpStatuses: [429, 503, 529] })
+          || /\b(?:at capacity|overloaded)\b/i.test(diagnostic);
       }
     } else if (hasProviderCapacitySignal(line, { httpStatuses: [429, 503, 529] })) {
       return true;

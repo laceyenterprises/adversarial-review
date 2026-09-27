@@ -7,6 +7,7 @@ import {
   rmSync,
   statSync,
 } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { userInfo } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
@@ -1421,6 +1422,50 @@ function workspaceReapPermissionAnomaly(
   return anomaly;
 }
 
+// A synchronous `rmSync` of a follow-up workspace (a full checkout, often with
+// node_modules) took ~4 min each on a loaded host on 2026-09-27, and this step
+// runs inside the follow-up daemon tick: `reap-workspaces` held ticks for
+// 10-16 min, so remediation slots freed mid-tick sat idle until the next
+// `consume`. Removal now renames the workspace into a trash directory inside
+// the managed workspace root (same volume, instant). A detached, niced `rm -rf` does the slow part off
+// the tick. A wall-clock budget bounds whatever work remains on the tick.
+const DEFAULT_WORKSPACE_REAP_BUDGET_MS = 30_000;
+const WORKSPACE_REAP_BUDGET_MS_ENV = 'ADVERSARIAL_FOLLOW_UP_WORKSPACE_REAP_BUDGET_MS';
+const WORKSPACE_REAP_TRASH_DIR = '.reap-trash';
+// A trash batch older than this whose background removal apparently died is
+// handed to the next background removal.
+const WORKSPACE_REAP_TRASH_ORPHAN_MS = 10 * 60 * 1000;
+
+function resolveWorkspaceReapBudgetMs(env = process.env) {
+  const parsed = Number(env?.[WORKSPACE_REAP_BUDGET_MS_ENV]);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : DEFAULT_WORKSPACE_REAP_BUDGET_MS;
+}
+
+function removeTrashInBackground(paths, { spawnImpl = spawn } = {}) {
+  if (!paths.length) return;
+  const child = spawnImpl('/usr/bin/nice', ['-n', '15', '/bin/rm', '-rf', ...paths], {
+    detached: true,
+    stdio: 'ignore',
+  });
+  child?.on?.('error', () => {});
+  child?.unref?.();
+}
+
+function orphanedTrashBatches(trashRootDir, { nowMs, currentBatch }) {
+  if (!existsSync(trashRootDir)) return [];
+  const out = [];
+  for (const entry of readdirSync(trashRootDir, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name === currentBatch) continue;
+    const batchPath = join(trashRootDir, entry.name);
+    try {
+      if (nowMs - statSync(batchPath).mtimeMs >= WORKSPACE_REAP_TRASH_ORPHAN_MS) out.push(batchPath);
+    } catch {
+      // Already being removed by an earlier background pass.
+    }
+  }
+  return out;
+}
+
 function reapTerminalFollowUpWorkspaces({
   rootDir,
   workspaceRootDir,
@@ -1428,8 +1473,12 @@ function reapTerminalFollowUpWorkspaces({
   ttlMs = 24 * 60 * 60 * 1000,
   readFollowUpJobImpl = readFollowUpJob,
   rmSyncImpl = rmSync,
+  renameSyncImpl = renameSync,
+  removeInBackgroundImpl = removeTrashInBackground,
+  clockImpl = Date.now,
   logErrorImpl = console.error,
   env = process.env,
+  budgetMs = resolveWorkspaceReapBudgetMs(env),
 } = {}) {
   if (!workspaceRootDir || !existsSync(workspaceRootDir)) {
     return {
@@ -1441,6 +1490,7 @@ function reapTerminalFollowUpWorkspaces({
       missingTerminalTimestamp: 0,
       recentTerminalJob: 0,
       unreadableJobRecords: 0,
+      deferredForBudget: 0,
       missingTerminalTimestampPaths: [],
       reapedPaths: [],
       anomalyPaths: [],
@@ -1458,9 +1508,19 @@ function reapTerminalFollowUpWorkspaces({
   const missingTerminalTimestampPaths = [];
   const reapedPaths = [];
   const anomalyPaths = [];
+  let deferredForBudget = 0;
+  // A caller that injects its own remover (tests simulating EBUSY/EACCES)
+  // keeps the synchronous contract; production uses trash + background rm.
+  const useTrash = rmSyncImpl === rmSync;
+  const trashRootDir = join(workspaceRootDir, WORKSPACE_REAP_TRASH_DIR);
+  const trashBatch = `batch-${nowMs}-${process.pid}`;
+  const trashBatchDir = join(trashRootDir, trashBatch);
+  let trashed = 0;
+  const startedMs = clockImpl();
 
   for (const entry of readdirSync(workspaceRootDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
+    if (entry.name === WORKSPACE_REAP_TRASH_DIR) continue;
     scanned += 1;
     const workspacePath = join(workspaceRootDir, entry.name);
     try {
@@ -1497,7 +1557,25 @@ function reapTerminalFollowUpWorkspaces({
         continue;
       }
 
-      rmSyncImpl(workspacePath, { recursive: true, force: true });
+      if (clockImpl() - startedMs > budgetMs) {
+        skipped += 1;
+        deferredForBudget += 1;
+        continue;
+      }
+      let removed = false;
+      if (useTrash) {
+        try {
+          mkdirSync(trashBatchDir, { recursive: true });
+          renameSyncImpl(workspacePath, join(trashBatchDir, entry.name));
+          trashed += 1;
+          removed = true;
+        } catch (renameErr) {
+          // A cross-device or otherwise unrenameable workspace falls back to the
+          // synchronous removal below; permission errors surface there too.
+          if (!['EXDEV', 'ENOTSUP', 'EACCES', 'EPERM'].includes(renameErr?.code)) throw renameErr;
+        }
+      }
+      if (!removed) rmSyncImpl(workspacePath, { recursive: true, force: true });
       reaped += 1;
       reapedPaths.push(workspacePath);
     } catch (err) {
@@ -1526,6 +1604,19 @@ function reapTerminalFollowUpWorkspaces({
     }
   }
 
+  if (useTrash) {
+    try {
+      const batches = orphanedTrashBatches(trashRootDir, { nowMs: clockImpl(), currentBatch: trashBatch });
+      if (trashed > 0) batches.push(trashBatchDir);
+      removeInBackgroundImpl(batches);
+    } catch (err) {
+      logErrorImpl(
+        `[follow-up-jobs] Failed to start background removal of reaped workspaces under ${trashRootDir}: ` +
+          `${err?.message || err}`,
+      );
+    }
+  }
+
   return {
     scanned,
     reaped,
@@ -1535,6 +1626,7 @@ function reapTerminalFollowUpWorkspaces({
     missingTerminalTimestamp,
     recentTerminalJob,
     unreadableJobRecords,
+    deferredForBudget,
     missingTerminalTimestampPaths,
     reapedPaths,
     anomalyPaths,

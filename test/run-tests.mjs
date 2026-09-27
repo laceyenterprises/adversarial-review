@@ -1,8 +1,8 @@
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { tmpdir } from 'node:os';
+import { constants, tmpdir } from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
@@ -55,13 +55,18 @@ function testFiles() {
 
 const checkoutDataExistedBefore = existsSync(checkoutDataDir);
 const checkoutDataBefore = listFiles(checkoutDataDir);
+const signalHandlers = new Map();
+let timeout;
+let forceKillTimeout;
+let receivedSignal;
+let timedOut = false;
 
 try {
   const testPaths = testFiles().map((file, index) => {
     const root = makeWorkerRoot(index);
     return path.join(root, path.relative(repoRoot, file));
   });
-  const result = spawnSync(process.execPath, [
+  const child = spawn(process.execPath, [
     '--preserve-symlinks',
     '--preserve-symlinks-main',
     '--import',
@@ -83,19 +88,46 @@ try {
       NODE_OPTIONS: [process.env.NODE_OPTIONS, '--preserve-symlinks', '--preserve-symlinks-main'].filter(Boolean).join(' '),
     },
     stdio: 'inherit',
-    timeout: 900_000,
   });
+  const childExit = new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', (status, signal) => resolve({ status, signal }));
+  });
+
+  function terminateChild(signal) {
+    child.kill(signal);
+    forceKillTimeout ??= setTimeout(() => child.kill('SIGKILL'), 5_000);
+  }
+
+  for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+    const handler = () => {
+      receivedSignal ??= signal;
+      terminateChild(signal);
+    };
+    signalHandlers.set(signal, handler);
+    process.on(signal, handler);
+  }
+  timeout = setTimeout(() => {
+    timedOut = true;
+    terminateChild('SIGTERM');
+  }, 900_000);
+  const result = await childExit;
 
   const checkoutDataAfter = listFiles(checkoutDataDir);
   const leakedFiles = [...checkoutDataAfter].filter(([file, hash]) => checkoutDataBefore.get(file) !== hash).map(([file]) => file);
   if (leakedFiles.length > 0 || (!checkoutDataExistedBefore && existsSync(checkoutDataDir))) {
     console.error(`Test suite wrote into the checkout data directory:\n${leakedFiles.join('\n') || '(directory created)'}`);
     process.exitCode = 1;
-  } else if (result.error) {
-    throw result.error;
+  } else if (receivedSignal) {
+    process.exitCode = 128 + constants.signals[receivedSignal];
+  } else if (timedOut) {
+    throw Object.assign(new Error('Test suite timed out after 900 seconds'), { code: 'ETIMEDOUT' });
   } else {
     process.exitCode = result.status ?? 1;
   }
 } finally {
+  clearTimeout(timeout);
+  clearTimeout(forceKillTimeout);
+  for (const [signal, handler] of signalHandlers) process.off(signal, handler);
   rmSync(sandboxRoot, { recursive: true, force: true });
 }

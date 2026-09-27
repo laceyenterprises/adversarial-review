@@ -447,10 +447,15 @@ export async function runDaemonCleanMergeAttempt({
   const ordinaryReviewAllowed =
     SETTLED_SUCCESS_VERDICTS.has(gateSnapshot?.settledReview?.verdict) &&
     isDaemonMergeReviewAllowed(reviewState, { strictMode });
+  // Clearing a verdict or findings gate in the inline lane requires an
+  // allowlisted operator even when the broader closer policy is observing.
+  const daemonOperatorActorEnforcement = ordinaryReviewAllowed
+    ? cfg?.operatorLabelActorEnforcement
+    : 'enforce';
   const snapshotOperatorOverride = hasOperatorApprovedOverride({
     operatorApprovedEvidence,
     operatorLogins: cfg?.operatorLogins,
-    operatorLabelActorEnforcement: cfg?.operatorLabelActorEnforcement,
+    operatorLabelActorEnforcement: daemonOperatorActorEnforcement,
   }, { headSha: hamAuditHead, labels: candidate?.labels });
   if (!snapshotOperatorOverride && !isDaemonMergeReviewAllowed(reviewState, { strictMode })) {
     const uncleanReason =
@@ -548,7 +553,7 @@ export async function runDaemonCleanMergeAttempt({
   const liveOperatorOverride = hasOperatorApprovedOverride({
     operatorApprovedEvidence,
     operatorLogins: cfg?.operatorLogins,
-    operatorLabelActorEnforcement: cfg?.operatorLabelActorEnforcement,
+    operatorLabelActorEnforcement: daemonOperatorActorEnforcement,
   }, { headSha: liveHead, labels: liveRollup?.labels });
   if (snapshotOperatorOverride && !liveOperatorOverride && !ordinaryReviewAllowed) {
     return NOT_TAKEN('operator-approval-no-longer-current');
@@ -800,7 +805,10 @@ export async function runDaemonCleanMergeAttempt({
   const daemonVerdict = hamTerminalRemediationHead
     ? 'ham_terminal_remediation_validated'
     : settledVerdict;
-  const operatorOverrideUsed = liveOperatorOverride && (!ordinaryReviewAllowed || !workerIdentity.ok);
+  // A clean verdict still needs approval when it is scoped to an older head.
+  // Record that authority so the in-lease read must see the approval again.
+  const operatorOverrideUsed = liveOperatorOverride &&
+    (!ordinaryReviewAllowed || !workerIdentity.ok || validatedHead !== liveHead);
   const overrideApproval = operatorOverrideUsed ? {
     label: OPERATOR_APPROVED_LABEL,
     actor: operatorApprovedEvidence.actor,
@@ -823,7 +831,7 @@ export async function runDaemonCleanMergeAttempt({
     verdict: daemonVerdict,
     operatorApprovedEvidence,
     operatorLogins: cfg?.operatorLogins,
-    operatorLabelActorEnforcement: cfg?.operatorLabelActorEnforcement,
+    operatorLabelActorEnforcement: daemonOperatorActorEnforcement,
     allowHamTerminalRemediation: hamTerminalRemediationHead,
     allowHeadCloserCertifiedNonBlocking: headCloserCertifiedNonBlocking,
     reviewState: {

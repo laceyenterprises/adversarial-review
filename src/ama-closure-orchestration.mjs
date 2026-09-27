@@ -1581,13 +1581,15 @@ export async function maybeDispatchAmaClosureFor({
       `[watcher] AMA protective predecessor hold for ${repoPath}#${prNumber}` +
         `@${daemonHeadShort}: ${daemonCleanMerge.reason}`,
     );
-    recordDaemonMergePark({
-      rootDir,
-      repo: repoPath,
-      prNumber,
-      headSha: gateSnapshot?.reviewedHeadSha || null,
-      reason: daemonCleanMerge.reason,
-    });
+    if (daemonCleanMerge.reason !== 'operator-approval-no-longer-current') {
+      recordDaemonMergePark({
+        rootDir,
+        repo: repoPath,
+        prNumber,
+        headSha: gateSnapshot?.reviewedHeadSha || null,
+        reason: daemonCleanMerge.reason,
+      });
+    }
     return {
       dispatched: false,
       skipMergeAgent: true,
@@ -1630,8 +1632,7 @@ export async function maybeDispatchAmaClosureFor({
     : [];
 
   const dispatchContext = {
-    forceHammerAfterDaemonFailure:
-      daemonCleanMerge?.disposition === DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+    forceHammerAfterDaemonFailure: isDaemonFailClosedHammerRemediable(daemonCleanMerge),
     daemonFailureReasons: Array.isArray(daemonCleanMerge?.reasons)
       ? daemonCleanMerge.reasons
       : [daemonCleanMerge?.reason].filter(Boolean),

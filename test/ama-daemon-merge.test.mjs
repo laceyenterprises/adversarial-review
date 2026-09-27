@@ -329,6 +329,24 @@ test('operator approval removed inside the lease holds the override without a me
   assert.equal(accountable.calls.merge, 0, 'operator-accountable merge needs a live label');
 });
 
+test('clean older-head review cannot merge after its required approval is removed in lease', async () => {
+  const approval = {
+    applied: true, observedRevisionRef: HEAD, actor: 'operator',
+    eventId: 'label-stale-head', observedAt: '2026-09-26T19:03:00Z',
+  };
+  const h = makeHarness({ liveGate: greenGate({ labels: [] }) });
+  const result = await attemptDaemonCleanMerge(baseArgs(h, {
+    liveGate: greenGate({ labels: ['operator-approved'] }),
+    operatorApprovedEvidence: approval,
+    operatorLogins: ['operator'],
+    operatorLabelActorEnforcement: 'enforce',
+    auditMetadata: { closureAuthority: 'daemon-operator-approved-override' },
+  }));
+  assert.equal(result.reason, 'operator-approval-no-longer-current');
+  assert.equal(h.calls.merge, 0);
+  assert.equal(h.calls.release, 1);
+});
+
 test('labels unavailable inside the lease is a transient read failure without a manual-close marker', async () => {
   const h = makeHarness({ liveGate: greenGate({ labels: undefined }) });
   const result = await attemptDaemonCleanMerge(baseArgs(h));

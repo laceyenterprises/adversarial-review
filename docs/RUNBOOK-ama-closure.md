@@ -700,16 +700,19 @@ actor, event id, observation time, and approved head. A successful merge emits
 `ama.daemon_clean_merge.operator_override_merge` with the same provenance. The
 daemon re-reads the live label and head before merging. Its validated head is
 the live, approved head, which must still match the head at the merge attempt.
+When the approval substitutes a newer head for an older clean review, the audit
+also records operator approval and the in-lease read must still find that label.
+An inline override that clears a verdict or findings gate requires an allowlisted
+operator actor even when actor enforcement is configured as `observe`.
 Required checks, branch protection, mergeability, and the merge lease remain
 mandatory. An older-head approval or a label removed before the live read or
 inside the merge lease is refused with no carryover when the override is needed
 for review eligibility or operator accountability. A fully clean, settled review
 with resolved worker identity continues through the ordinary daemon gates when
 the label is removed; a required approval holds dispatch until the next tick
-reads fresh labels. Actor provenance is mandatory; the
-default `observe` enforcement
-honors a known actor even if that actor is not allowlisted, while `enforce`
-requires an allowlisted operator login. The substitution emits
+reads fresh labels. Actor provenance is mandatory. For ordinary clean reviews,
+default `observe` enforcement honors a known actor even if that actor is not
+allowlisted; `enforce` requires an allowlisted operator login. The substitution emits
 `ama.daemon_clean_merge.operator_accountability_substituted`.
 
 ### Daemon fail-closed on a hammer-remediable gate → capped hammer fallback

@@ -2643,6 +2643,75 @@ test('operator override on an attributed worker records approval instead of work
   }
 });
 
+test('clean older-head review records approval as the head authority', async () => {
+  const rootDir = tempRoot();
+  try {
+    const head = 'approved-new-head';
+    const event = operatorApprovedEventAt(head);
+    const args = realRollupHelpers({ rootDir, prNumber: 919, head });
+    let mergeArgs;
+    const result = await runDaemonCleanMergeAttempt({
+      ...args,
+      cfg: { ...args.cfg, operatorLogins: ['VirtualPaul'] },
+      candidate: { ...args.candidate, labels: ['operator-approved'] },
+      gateSnapshot: { reviewedHeadSha: 'older-reviewed-head', settledReview: { verdict: 'comment-only' } },
+      reviewState: {
+        ...args.reviewState,
+        operatorApprovedEvidence: {
+          applied: true, observedRevisionRef: head, actor: event.actor,
+          eventId: event.id, observedAt: event.createdAt,
+        },
+      },
+      operatorApprovalEvent: event,
+      fetchRollupImpl: async () => ({
+        state: 'OPEN', headRefOid: head, checks: [{ name: 'repo-guards', conclusion: 'SUCCESS' }],
+        mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', labels: ['operator-approved'],
+      }),
+      attemptDaemonCleanMergeImpl: async (input) => {
+        mergeArgs = input;
+        return { disposition: DAEMON_MERGE_DISPOSITION.MERGED, merged: true };
+      },
+    });
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+    assert.equal(mergeArgs.validatedHead, head);
+    assert.equal(mergeArgs.auditMetadata.closureAuthority, 'daemon-operator-approved-override');
+    assert.equal(mergeArgs.auditMetadata.mergeAccountability, 'operator-approval');
+    assert.equal(mergeArgs.auditMetadata.operatorApproval.eventId, event.id);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('non-allowlisted actor cannot clear blocking findings in daemon observe mode', async () => {
+  const rootDir = tempRoot();
+  try {
+    const head = 'unlisted-actor-head';
+    const event = operatorApprovedEventAt(head, { actor: 'BuilderBot' });
+    const args = unattributedDaemonArgs({ rootDir, prNumber: 920, head });
+    let mergeAttempted = false;
+    const result = await runDaemonCleanMergeAttempt({
+      ...args,
+      cfg: { ...args.cfg, operatorLogins: ['VirtualPaul'], operatorLabelActorEnforcement: 'observe' },
+      candidate: { ...args.candidate, labels: ['operator-approved'] },
+      gateSnapshot: { reviewedHeadSha: head, settledReview: { verdict: 'request-changes' } },
+      reviewState: {
+        ...args.reviewState,
+        blockingFindingCount: 1,
+        operatorApprovedEvidence: {
+          applied: true, observedRevisionRef: head, actor: event.actor,
+          eventId: event.id, observedAt: event.createdAt,
+        },
+      },
+      operatorApprovalEvent: event,
+      attemptDaemonCleanMergeImpl: async () => { mergeAttempted = true; },
+    });
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.NOT_TAKEN);
+    assert.equal(mergeAttempted, false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('revoked operator approval holds the tick instead of dispatching a hammer from snapshot labels', async () => {
   const rootDir = tempRoot();
   try {

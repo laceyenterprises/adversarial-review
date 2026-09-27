@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -17,6 +17,7 @@ import { main as tokensMain } from '../src/tokens-cli.mjs';
 import {
   backfillReviewerPasses,
   beginReviewerPass,
+  captureLocalReviewerUsage,
   completeReviewerPass,
   foldReviewerTokenUsageArtifact,
   nextReviewerPassAttemptNumber,
@@ -220,6 +221,65 @@ test('Claude transcript deduplicates repeated cumulative usage for one message',
   assert.equal(usage.reasoning, 9);
   assert.equal(usage.toolContext, 7);
   assert.equal(usage.model, 'claude-sonnet-4-6');
+});
+
+test('Claude JSON usage bypasses local transcript capture', () => {
+  const rootDir = tempRoot();
+  const pathCache = new Map();
+  const summaryCache = new Map();
+  const usage = { input: 12, output: 3, model: 'claude-sonnet-4-6', source: 'claude-json' };
+  const result = captureLocalReviewerUsage({
+    tokenUsage: usage, model: 'claude', workspacePath: rootDir,
+    startedAt: new Date().toISOString(),
+    env: { CLAUDE_CONFIG_DIR: path.join(rootDir, 'missing-claude-home') },
+    transcriptPathCache: pathCache, transcriptSummaryCache: summaryCache,
+  });
+  assert.equal(result, usage);
+  assert.equal(pathCache.size, 0);
+  assert.equal(summaryCache.size, 0);
+});
+
+test('Claude failure capture reads only recent transcripts in its cwd project', () => {
+  const rootDir = tempRoot();
+  const workspace = path.join(rootDir, 'review-snapshot');
+  const claudeHome = path.join(rootDir, 'claude-home');
+  const projects = path.join(claudeHome, 'projects');
+  const projectDir = path.join(projects, workspace.replace(/[^A-Za-z0-9]/g, '-'));
+  const otherProjectDir = path.join(projects, '-other-project');
+  mkdirSync(projectDir, { recursive: true });
+  mkdirSync(otherProjectDir, { recursive: true });
+  const startedAt = new Date(Date.now() - 60_000).toISOString();
+  const transcript = (input, sessionId) => [
+    JSON.stringify({ timestamp: startedAt, cwd: workspace, sessionId }),
+    JSON.stringify({ timestamp: new Date().toISOString(), cwd: workspace, sessionId,
+      message: { id: 'msg-1', model: 'claude-sonnet-4-6',
+        usage: { input_tokens: input, output_tokens: 2 } } }),
+  ].join('\n');
+  const recentPath = path.join(projectDir, 'recent.jsonl');
+  const oldPath = path.join(projectDir, 'old.jsonl');
+  writeFileSync(recentPath, transcript(11, 'recent'));
+  writeFileSync(oldPath, transcript(99, 'old'));
+  writeFileSync(path.join(otherProjectDir, 'unrelated.jsonl'), transcript(77, 'unrelated'));
+  const oldTime = new Date(Date.parse(startedAt) - 60_000);
+  utimesSync(oldPath, oldTime, oldTime);
+  const emitted = [];
+  const pathCache = new Map();
+  const summaryCache = new Map();
+  const result = captureLocalReviewerUsage({ model: 'claude', workspacePath: workspace,
+    startedAt, failed: true, env: { CLAUDE_CONFIG_DIR: claudeHome },
+    transcriptPathCache: pathCache, transcriptSummaryCache: summaryCache,
+    emit: (line) => emitted.push(JSON.parse(line)) });
+  assert.equal(result, null);
+  assert.equal(emitted.length, 1);
+  assert.equal(emitted[0].type, 'reviewer.token_usage');
+  assert.equal(emitted[0].tokenUsage.input, 11);
+  assert.equal(emitted[0].tokenUsage.partial, true);
+  assert.deepEqual([...summaryCache.keys()], [recentPath]);
+  assert.equal(pathCache.size, 1);
+  const fallback = captureLocalReviewerUsage({ model: 'claude', workspacePath: workspace,
+    startedAt, env: { CLAUDE_CONFIG_DIR: claudeHome } });
+  assert.equal(fallback.input, 11);
+  assert.equal(fallback.partial, undefined);
 });
 
 test('reviewer pass writer inserts running row, completes it, and unique key prevents duplicates', () => {

@@ -2161,7 +2161,7 @@ async function main() {
     }
     rawReviewText = dispatch.rawReviewText;
     tokenUsage = dispatch.tokenUsage;
-    if (effectiveModel === 'codex' || effectiveModel === 'claude') tokenUsage = captureLocalReviewerUsage({ tokenUsage, model: effectiveModel, workspacePath: reviewerSubprocessCwd, startedAt: reviewerStartedAt, rootDir: ROOT });
+    if (effectiveModel === 'claude' && !tokenUsage) tokenUsage = captureLocalReviewerUsage({ tokenUsage, model: effectiveModel, workspacePath: reviewerSubprocessCwd, startedAt: reviewerStartedAt, rootDir: ROOT });
     if (dispatch.needsSanitize) {
       console.error(`[reviewer] DEBUG: raw Codex review length=${rawReviewText.length}; preview=${previewText(rawReviewText)}`);
       try {
@@ -2192,7 +2192,7 @@ async function main() {
     }
     console.error(`[reviewer] DEBUG: review completed (${reviewText.length} bytes)`);
   } catch (err) {
-    captureLocalReviewerUsage({ model: effectiveModel, workspacePath: reviewerSubprocessCwd, startedAt: reviewerStartedAt, rootDir: ROOT, failed: true });
+    if (effectiveModel === 'claude') captureLocalReviewerUsage({ model: effectiveModel, workspacePath: reviewerSubprocessCwd, startedAt: reviewerStartedAt, rootDir: ROOT, failed: true });
     if (err.failureClass === 'token-refresh-pending') {
       // The bridge is the sole Claude refresh owner. A too-short token means
       // refresh is pending, not that an operator must re-authenticate.

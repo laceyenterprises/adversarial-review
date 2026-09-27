@@ -921,13 +921,14 @@ function readClaudeTranscriptTokenUsage({
   sessionRoots = [],
   transcriptSummaryCache = null,
   transcriptPathCache = null,
+  minMtime = null,
   rootDir = process.cwd(),
 } = {}) {
   const keys = new Set([adapterSessionKey, ...sessionKeys].filter(Boolean).map(String));
   const workspacePaths = normalizedWorkspacePaths(workspacePath, rootDir);
   if (keys.size === 0 && workspacePaths.length === 0) return null;
   if (sessionRoots.length === 0) return null;
-  const transcriptPaths = listClaudeTranscriptPaths(sessionRoots, transcriptPathCache);
+  const transcriptPaths = listClaudeTranscriptPaths(sessionRoots, transcriptPathCache, minMtime);
   const matches = [];
   for (const transcriptPath of transcriptPaths) {
     const summary = readCachedClaudeTranscriptSummary(transcriptPath, transcriptSummaryCache);
@@ -967,25 +968,30 @@ function readClaudeTranscriptTokenUsage({
 }
 
 function readLocalReviewerTranscriptUsage({ model, workspacePath, startedAt, endedAt,
-  rootDir = process.cwd(), env = process.env } = {}) {
-  if (model === 'codex') {
-    const home = env.CODEX_HOME || join(env.HOME || homedir(), '.codex');
-    return readCodexTranscriptTokenUsage({ workspacePath, startedAt, endedAt,
-      sessionRoots: [join(home, 'sessions')], rootDir });
-  }
+  rootDir = process.cwd(), env = process.env,
+  transcriptPathCache = new Map(), transcriptSummaryCache = new Map() } = {}) {
   if (model === 'claude') {
+    const [workspace] = normalizedWorkspacePaths(workspacePath, rootDir);
+    if (!workspace || !parseDate(startedAt)) return null;
     const home = env.CLAUDE_CONFIG_DIR || join(env.HOME || homedir(), '.claude');
+    // Claude stores each cwd under a project slug. A reviewer snapshot has its
+    // own cwd, so never enumerate every project on the host's Claude account.
+    const projectDir = join(home, 'projects', workspace.replace(/[^A-Za-z0-9]/g, '-'));
     return readClaudeTranscriptTokenUsage({ workspacePath, startedAt, endedAt,
-      sessionRoots: [join(home, 'projects')], rootDir });
+      sessionRoots: [projectDir], minMtime: startedAt,
+      transcriptPathCache, transcriptSummaryCache, rootDir });
   }
   return null;
 }
 
 function captureLocalReviewerUsage({ tokenUsage = null, model, workspacePath, startedAt,
-  rootDir = process.cwd(), failed = false, emit = console.log } = {}) {
+  rootDir = process.cwd(), failed = false, emit = console.log, env = process.env,
+  transcriptPathCache = new Map(), transcriptSummaryCache = new Map() } = {}) {
+  if (model !== 'claude' || (tokenUsage && !failed)) return tokenUsage;
   try {
     const captured = readLocalReviewerTranscriptUsage({ model, workspacePath, startedAt,
-      endedAt: new Date().toISOString(), rootDir });
+      endedAt: new Date().toISOString(), rootDir, env,
+      transcriptPathCache, transcriptSummaryCache });
     if (!captured) return tokenUsage;
     if (failed) {
       emit(JSON.stringify({ type: 'reviewer.token_usage', tokenUsage: { ...captured, partial: true } }));
@@ -1126,9 +1132,10 @@ function listCodexTranscriptPaths(sessionRoots, { startedAt = null, endedAt = nu
   return paths;
 }
 
-function listClaudeTranscriptPaths(sessionRoots, cache = null) {
+function listClaudeTranscriptPaths(sessionRoots, cache = null, minMtime = null) {
+  const minMtimeMs = minMtime ? Date.parse(minMtime) : null;
   const cacheKey = cache
-    ? JSON.stringify({ roots: sessionRoots.map((root) => resolve(String(root))) })
+    ? JSON.stringify({ roots: sessionRoots.map((root) => resolve(String(root))), minMtime })
     : null;
   if (cacheKey && cache.has(cacheKey)) return cache.get(cacheKey);
   const paths = [];
@@ -1137,8 +1144,13 @@ function listClaudeTranscriptPaths(sessionRoots, cache = null) {
     if (!root) continue;
     addJsonlFilesRecursively(resolve(String(root)), paths, seen);
   }
-  if (cacheKey) cache.set(cacheKey, paths);
-  return paths;
+  const recentPaths = Number.isFinite(minMtimeMs)
+    ? paths.filter((path) => {
+      try { return statSync(path).mtimeMs >= minMtimeMs; } catch { return false; }
+    })
+    : paths;
+  if (cacheKey) cache.set(cacheKey, recentPaths);
+  return recentPaths;
 }
 
 function dayKey(value) {

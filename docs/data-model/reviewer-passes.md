@@ -26,6 +26,11 @@ rollout evidence keeps its available counts and records
 When ledger counts are authoritative, transcript model and quota details are
 attached only if the transcript session key matches the ledger session key;
 otherwise the configured reviewer model is retained.
+Successful Claude reviewer JSON supplies usage directly, without a local
+transcript scan. If JSON usage is absent or the Claude reviewer fails, local
+fallback inspects only the project directory for that review's snapshot cwd
+and transcript files modified since the attempt began. Codex reviewer rollout
+capture remains inside its harness while the per-worker session home exists.
 
 `token_total` preserves a provider-reported total when present. Without one,
 Codex uses input + output because reasoning is included in output; Claude uses

@@ -9,6 +9,8 @@ const testDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.dirname(testDir);
 const checkoutDataDir = path.join(repoRoot, 'data');
 const sandboxRoot = realpathSync(mkdtempSync(path.join(tmpdir(), 'adversarial-review-tests-')));
+const sandboxTmpDir = path.join(sandboxRoot, 'tmp');
+mkdirSync(sandboxTmpDir);
 
 function makeWorkerRoot(index) {
   const root = path.join(sandboxRoot, `file-${index}`);
@@ -74,6 +76,9 @@ try {
     env: {
       ...process.env,
       ADVERSARIAL_REVIEW_TEST_SANDBOX_ROOT: sandboxRoot,
+      TMPDIR: sandboxTmpDir,
+      TMP: sandboxTmpDir,
+      TEMP: sandboxTmpDir,
       PATH: [path.dirname(process.execPath), process.env.PATH].filter(Boolean).join(path.delimiter),
       NODE_OPTIONS: [process.env.NODE_OPTIONS, '--preserve-symlinks', '--preserve-symlinks-main'].filter(Boolean).join(' '),
     },

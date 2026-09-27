@@ -6725,7 +6725,7 @@ test('consumeFollowUpJobsUntilCapacity blocks same-PR retries after a spawn-prep
 });
 
 test('killDetachedWorkerProcessGroup terminates detached remediation workers by process group', async () => {
-  const child = spawn('bash', ['-c', 'parent=$PPID; end=$((SECONDS+30)); trap "" TERM; while (( SECONDS < end )) && (( PPID == parent )); do sleep 1; done'], {
+  const child = spawn('bash', ['-c', 'parent=$PPID; end=$((SECONDS+30)); trap "" TERM; while (( SECONDS < end )) && kill -0 "$parent" 2>/dev/null; do sleep 1; done'], {
     detached: true,
     stdio: 'ignore',
   });

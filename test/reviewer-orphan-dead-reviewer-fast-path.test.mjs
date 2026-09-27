@@ -94,13 +94,13 @@ function makeLog() {
 // A detached child is its own process-group leader (setsid), so child.pid == pgid
 // and probeReviewerProcessGroupAlive(child.pid) exercises the real kill(-pgid,0).
 function spawnAlivePgid(t) {
-  const child = spawn('bash', ['-c', 'parent=$PPID; end=$((SECONDS+30)); while (( SECONDS < end )) && (( PPID == parent )); do sleep 0.25; done'], { detached: true, stdio: 'ignore' });
+  const child = spawn('bash', ['-c', 'parent=$PPID; end=$((SECONDS+30)); while (( SECONDS < end )) && kill -0 "$parent" 2>/dev/null; do sleep 0.25; done'], { detached: true, stdio: 'ignore' });
   t.after(() => killFixtureChild(child));
   return child.pid;
 }
 
 async function makeDeadPgid() {
-  const child = spawn('bash', ['-c', 'parent=$PPID; end=$((SECONDS+30)); while (( SECONDS < end )) && (( PPID == parent )); do sleep 0.25; done'], { detached: true, stdio: 'ignore' });
+  const child = spawn('bash', ['-c', 'parent=$PPID; end=$((SECONDS+30)); while (( SECONDS < end )) && kill -0 "$parent" 2>/dev/null; do sleep 0.25; done'], { detached: true, stdio: 'ignore' });
   try {
     await killFixtureChild(child);
     return child.pid;

@@ -9,7 +9,7 @@ import { spawnCapturedProcessGroup } from '../src/process-group-spawn.mjs';
 import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 
 function boundedTermIgnoringShell(beforeLoop = '') {
-  return `parent=$PPID; end=$((SECONDS+30)); trap "" TERM; ${beforeLoop} while (( SECONDS < end )) && (( PPID == parent )); do sleep 1; done`;
+  return `parent=$PPID; end=$((SECONDS+30)); trap "" TERM; ${beforeLoop} while (( SECONDS < end )) && kill -0 "$parent" 2>/dev/null; do sleep 1; done`;
 }
 
 function processExists(pid) {

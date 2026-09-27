@@ -314,9 +314,8 @@ test('split admission single-wave drain detaches before late admission release',
   const settlementHold = new Promise((resolve) => { finishSettlement = resolve; });
 
   let timeoutId;
-  let summary;
   try {
-    summary = await Promise.race([
+    const summary = await Promise.race([
       runBoundedReviewerDispatchQueue([
         candidate(1, async function run() {
           events.push('model:1');
@@ -341,22 +340,17 @@ test('split admission single-wave drain detaches before late admission release',
         timeoutId = setTimeout(() => reject(new Error('single-wave drain did not detach')), 5_000);
       }),
     ]);
-  } catch (error) {
-    releaseAdmission();
-    finishSettlement();
-    throw error;
+    assert.equal(summary.dispatched, 0);
+    assert.equal(summary.deferred, 1);
+    assert.deepEqual(summary.deferredCandidates.map((item) => item.prNumber), [2]);
+    assert.deepEqual(events, ['model:1']);
   } finally {
     clearTimeout(timeoutId);
+    releaseAdmission();
+    finishSettlement();
+    await new Promise((resolve) => setTimeout(resolve, 0));
   }
 
-  assert.equal(summary.dispatched, 0);
-  assert.equal(summary.deferred, 1);
-  assert.deepEqual(summary.deferredCandidates.map((item) => item.prNumber), [2]);
-  assert.deepEqual(events, ['model:1']);
-
-  releaseAdmission();
-  finishSettlement();
-  await new Promise((resolve) => setTimeout(resolve, 0));
   assert.deepEqual(events, ['model:1', 'post-durable:1', 'settled:1']);
 });
 

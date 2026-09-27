@@ -150,20 +150,24 @@ function parseMergeAgentBrokerFlag(value) {
 // against. The pin MUST match the RESOLVED provider, never a stale merge-agent
 // pin — validating a per-harness token against merge-agent's app id would fail
 // closed and break the push (the #5058 fix must never make the default "push
-// fails"). Precedence: an explicit per-harness pin
-// (OAUTH_BROKER_REMEDIATION_<CLASS>_EXPECTED_<KIND>) wins; the legacy
-// OAUTH_BROKER_MERGE_AGENT_EXPECTED_<KIND> pin is honored ONLY when the provider
-// actually resolved to the merge-agent fallback.
+// fails"). The pin follows the provider the worker was actually given:
+// a merge-agent provider (workflow-push escalation or the merge-agent fallback)
+// always takes OAUTH_BROKER_MERGE_AGENT_EXPECTED_<KIND>, even when a per-harness
+// pin exists. Only a harness-keyed provider (physical-harness, or a
+// harness-override, which is configured together with its per-harness pin)
+// takes OAUTH_BROKER_REMEDIATION_<CLASS>_EXPECTED_<KIND>. Pairing a per-harness
+// pin with the merge-agent token failed every workflow-file push closed (SEV0
+// GHPIN-01, 2026-09-27: app_id 3978009 validated against codex's 3977955).
+const MERGE_AGENT_PROVIDER_SOURCES = new Set(['merge-agent-fallback', 'workflow-push-merge-agent']);
+
 function resolveHarnessExpectedPin(sourceEnv, workerClass, resolvedProvider, kind) {
-  const suffix = String(workerClass || '').toUpperCase().replace(/-/g, '_');
-  const perHarness = suffix
-    ? String(sourceEnv[`OAUTH_BROKER_REMEDIATION_${suffix}_EXPECTED_${kind}`] || '').trim()
-    : '';
-  if (perHarness) return perHarness;
-  if (resolvedProvider.source === 'merge-agent-fallback' || resolvedProvider.source === 'workflow-push-merge-agent') {
+  if (MERGE_AGENT_PROVIDER_SOURCES.has(resolvedProvider.source)) {
     return String(sourceEnv[`OAUTH_BROKER_MERGE_AGENT_EXPECTED_${kind}`] || '').trim() || '';
   }
-  return '';
+  const suffix = String(workerClass || '').toUpperCase().replace(/-/g, '_');
+  return suffix
+    ? String(sourceEnv[`OAUTH_BROKER_REMEDIATION_${suffix}_EXPECTED_${kind}`] || '').trim()
+    : '';
 }
 
 // Inject the broker env a remediation worker's git push / gh calls authenticate

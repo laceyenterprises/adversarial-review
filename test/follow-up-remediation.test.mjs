@@ -5364,19 +5364,50 @@ test('applyMergeAgentBrokerEnv routes workflow-file worker pushes through merge-
   const env = {};
   const evidence = applyMergeAgentBrokerEnv(env, {
     MERGE_AGENT_AUTH_VIA_BROKER: 'true',
-    OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID: '3977955',
+    OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID: '3978009',
     OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID: '138360282',
   }, { workerClass: 'codex', requiresWorkflowPush: true });
 
   assert.equal(env.OAUTH_BROKER_MERGE_AGENT_PROVIDER, 'github-app-merge-agent');
-  assert.equal(env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID, '3977955');
+  assert.equal(env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID, '3978009');
   assert.equal(env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID, '138360282');
   assert.equal(evidence.provider, 'github-app-merge-agent');
   assert.equal(evidence.providerSource, 'workflow-push-merge-agent');
   assert.equal(evidence.requiresWorkflowPush, true);
   assert.equal(evidence.fellBack, false);
-  assert.equal(evidence.expectedAppId, '3977955');
+  assert.equal(evidence.expectedAppId, '3978009');
   assert.equal(evidence.expectedInstallationId, '138360282');
+});
+
+test('workflow-push escalation pins the merge-agent App even when per-harness pins are configured (SEV0 GHPIN-01)', () => {
+  // Production shape: the follow-up daemon exports every harness's pins AND the
+  // merge-agent pins. Escalation hands the worker a merge-agent token, so the
+  // pin must be merge-agent's; the per-harness pin fails the push closed.
+  const daemonEnv = {
+    MERGE_AGENT_AUTH_VIA_BROKER: 'true',
+    OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID: '3978009',
+    OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID: '138360282',
+    OAUTH_BROKER_REMEDIATION_CODEX_EXPECTED_APP_ID: '3977955',
+    OAUTH_BROKER_REMEDIATION_CODEX_EXPECTED_INSTALLATION_ID: '138360400',
+    OAUTH_BROKER_REMEDIATION_CLAUDE_CODE_EXPECTED_APP_ID: '3977993',
+    OAUTH_BROKER_REMEDIATION_CLAUDE_CODE_EXPECTED_INSTALLATION_ID: '138360332',
+    OAUTH_BROKER_REMEDIATION_GEMINI_EXPECTED_APP_ID: '3978217',
+    OAUTH_BROKER_REMEDIATION_GEMINI_EXPECTED_INSTALLATION_ID: '138360999',
+  };
+  for (const workerClass of ['codex', 'claude-code', 'gemini']) {
+    const env = {};
+    const evidence = applyMergeAgentBrokerEnv(env, daemonEnv, { workerClass, requiresWorkflowPush: true });
+    assert.equal(env.OAUTH_BROKER_MERGE_AGENT_PROVIDER, 'github-app-merge-agent', workerClass);
+    assert.equal(env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID, '3978009', `${workerClass} escalated push pins merge-agent`);
+    assert.equal(env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID, '138360282', workerClass);
+    assert.equal(evidence.expectedAppId, '3978009', workerClass);
+  }
+  // Without escalation the same daemon env keeps each harness on its own App pin.
+  for (const [workerClass, appId] of [['codex', '3977955'], ['claude-code', '3977993'], ['gemini', '3978217']]) {
+    const env = {};
+    applyMergeAgentBrokerEnv(env, daemonEnv, { workerClass });
+    assert.equal(env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID, appId, `${workerClass} keeps its harness pin`);
+  }
 });
 
 test('applyMergeAgentBrokerEnv evidence preserves workflow-push requirement resolved from source env', () => {

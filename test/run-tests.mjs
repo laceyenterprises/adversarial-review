@@ -8,7 +8,9 @@ import { fileURLToPath } from 'node:url';
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.dirname(testDir);
 const checkoutDataDir = path.join(repoRoot, 'data');
-const sandboxRoot = realpathSync(mkdtempSync(path.join(tmpdir(), 'adversarial-review-tests-')));
+// Leave room under the macOS 104-byte Unix socket path limit for nested fixtures.
+const tempBase = Buffer.byteLength(realpathSync(tmpdir())) > 60 ? '/tmp' : tmpdir();
+const sandboxRoot = realpathSync(mkdtempSync(path.join(tempBase, 'art-')));
 const sandboxTmpDir = path.join(sandboxRoot, 'tmp');
 mkdirSync(sandboxTmpDir);
 

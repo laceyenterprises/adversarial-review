@@ -2140,6 +2140,20 @@ test('versioned config.local.yaml tolerates unknown nested worker_pool keys and 
   }
 });
 
+test('checked-in worker_pool.mcp required server mode matches the Python CFG enum', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\nworker_pool:\n  mcp:\n    required_servers_mode: enforce\n');
+    assert.equal(loadConfig({ topPath: top, env: {} }).get('worker_pool.mcp.required_servers_mode'), 'enforce');
+
+    writeFile(top, 'version: 1\nworker_pool:\n  mcp:\n    required_servers_mode: ignore\n');
+    assert.throws(() => loadConfig({ topPath: top, env: {} }), AgentOSConfigError);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('unversioned config.local.yaml tolerates unknown nested worker_pool keys', () => {
   const tmp = freshTmp();
   try {

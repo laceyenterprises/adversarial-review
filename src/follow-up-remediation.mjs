@@ -1818,7 +1818,8 @@ async function reconcileFollowUpJob({
   }
   const currentRound = Number(job?.remediationPlan?.currentRound || 0);
   const maxRounds = Number(job?.remediationPlan?.maxRounds || 0);
-  if (!lifecycleStop && maxRounds > 0 && currentRound > maxRounds) {
+  if (!lifecycleStop && (job?.remediationPlan?.stop?.code === 'max-rounds-reached'
+    || (maxRounds > 0 && currentRound > maxRounds))) {
     lifecycleStop = {
       stopCode: 'max-rounds-reached',
       actionReason: 'max-rounds-reached',

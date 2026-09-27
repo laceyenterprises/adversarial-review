@@ -10202,7 +10202,7 @@ test('reconcileFollowUpJob cancels an active worker for an external newer head',
   assert.equal(signals, 1);
 });
 
-test('reconcileFollowUpJob cancels an active round after its cap is lowered', async () => {
+test('reconcileFollowUpJob cancels an active round when max-rounds-reached is decided', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'remwaste-cap-cancel-'));
   const { claimed } = makeQueuedJob(rootDir, { prNumber: 77 });
   const spawned = markFollowUpJobSpawned({
@@ -10211,7 +10211,12 @@ test('reconcileFollowUpJob cancels an active round after its cap is lowered', as
   });
   const capped = {
     ...spawned.job,
-    remediationPlan: { ...spawned.job.remediationPlan, currentRound: 2, maxRounds: 1 },
+    remediationPlan: {
+      ...spawned.job.remediationPlan,
+      currentRound: 1,
+      maxRounds: 1,
+      stop: { code: 'max-rounds-reached', reason: 'Operator lowered the cap.' },
+    },
   };
   writeFollowUpJob(spawned.jobPath, capped);
   let signals = 0;

@@ -33,6 +33,7 @@ import {
   writeReviewerTokenUsageArtifact,
 } from '../src/reviewer-pass-tokens.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
+import { persistHostedReviewerExecution } from '../src/reviewer-execution-pass.mjs';
 
 const HERMETIC_CONFIG_ENV = { AGENT_OS_CONFIG_PATH: '/dev/null' };
 
@@ -98,6 +99,29 @@ test('remediation pass stores the resolved model and effort at launch', () => {
   });
   assert.equal(pass.reviewer_model, 'gpt-6-sol');
   assert.equal(pass.reasoning_effort, 'high');
+});
+
+test('hosted pass keeps resolved execution when body capture does not run', () => {
+  const rootDir = tempRoot();
+  const key = { repo: 'laceyenterprises/agent-os', prNumber: 44, attemptNumber: 2, passKind: 'rereview' };
+  beginReviewerPass(rootDir, {
+    ...key, reviewerClass: 'codex', reviewerModel: 'codex', headSha: 'reviewed-head',
+    metadata: { reviewerSessionUuid: 'session-44' },
+  });
+  assert.equal(persistHostedReviewerExecution({
+    rootDir, repo: key.repo, prNumber: key.prNumber,
+    reviewDbAttemptNumber: key.attemptNumber, reviewAttemptNumber: 1,
+    reviewerClass: 'codex', passKind: key.passKind, headSha: 'reviewed-head',
+    execution: { harness: 'codex', model: 'gpt-6-sol', effort: 'high' },
+  }), true);
+  const row = completeReviewerPass(rootDir, {
+    ...key, status: 'completed', tokenUsage: { model: 'gpt-5.5', input: 10, output: 2 },
+  });
+  assert.equal(countReviewerPasses(rootDir), 1);
+  assert.equal(row.reviewer_model, 'gpt-6-sol');
+  assert.equal(row.reasoning_effort, 'high');
+  assert.equal(JSON.parse(row.metadata_json).reviewerSessionUuid, 'session-44');
+  assert.equal(JSON.parse(row.metadata_json).reviewerExecution.model, 'gpt-6-sol');
 });
 
 test('schema convergence preserves historical provider totals without backfilling missing totals', () => {

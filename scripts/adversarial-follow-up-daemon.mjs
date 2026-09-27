@@ -600,6 +600,9 @@ async function runFollowUpDaemonIteration({
   writeConfigSignatureStatusImpl = writeConfigSignatureStatus,
   shouldStop = () => stopping,
 } = {}) {
+  const reaperBudgetMs = Number.isSafeInteger(Number(env.ADVERSARIAL_FOLLOW_UP_REAPER_BUDGET_MS))
+    && Number(env.ADVERSARIAL_FOLLOW_UP_REAPER_BUDGET_MS) > 0
+    ? Number(env.ADVERSARIAL_FOLLOW_UP_REAPER_BUDGET_MS) : 15_000;
   let maxConcurrentJobs = null;
   await runStep('resolve-capacity', async () => {
     maxConcurrentJobs = resolveMaxConcurrentJobsImpl(env);
@@ -671,6 +674,7 @@ async function runFollowUpDaemonIteration({
   await runStep('reap-finished-pr', async () => {
     const result = await reapFinishedPrFollowUpJobsImpl({
       rootDir: ROOT,
+      budgetMs: reaperBudgetMs,
       isWorkerAlive: isWorkerProcessRunning,
       listActiveAmaCloserDispatchesImpl: listActiveAmaCloserDispatches,
       updateAmaCloserDispatchRecordImpl: updateAmaCloserDispatchRecord,
@@ -691,7 +695,7 @@ async function runFollowUpDaemonIteration({
       `skippedOpen=${result.skippedOpen} skippedUnreadable=${result.skippedUnreadable} ` +
       `skippedAliveWorker=${result.skippedAliveWorker} skippedFreshAmaDispatch=${result.skippedFreshAmaDispatch} ` +
       `skippedNoTarget=${result.skippedNoTarget} skippedCapped=${result.skippedCapped} ` +
-      `prLookups=${result.prLookups} lookupCapHit=${result.lookupCapHit}` +
+      `prLookups=${result.prLookups} lookupCapHit=${result.lookupCapHit} budgetExceeded=${result.budgetExceeded}` +
       (reapedPrs ? ` reapedPrs=${reapedPrs}` : '') +
       (releasedPrs ? ` releasedPrs=${releasedPrs}` : '') +
       (amaReleasedPrs ? ` amaReleasedPrs=${amaReleasedPrs}` : '')
@@ -769,14 +773,14 @@ async function runFollowUpDaemonIteration({
   }
   if (shouldStop()) return;
   await runStep('closer-worktree-reap', async () => {
-    const result = await reapCloserHammerWorktreesImpl({ logger: console });
+    const result = await reapCloserHammerWorktreesImpl({ logger: console, budgetMs: reaperBudgetMs });
     logTick(
       'closer-worktree-reap',
       `scanned=${result.scanned} reaped=${result.reaped} skipped=${result.skipped} ` +
       `terminal=${result.terminal} prunable=${result.prunable} ` +
       `halfRegistered=${result.halfRegistered} open=${result.open} ` +
       `unknown=${result.unknown} deferredActiveWorker=${result.deferredActiveWorker} ` +
-      `errors=${result.errors} limit=${result.limit}`
+      `errors=${result.errors} limit=${result.limit} budgetExceeded=${result.budgetExceeded}`
     );
   });
   if (shouldStop()) return;

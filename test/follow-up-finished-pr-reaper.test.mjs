@@ -461,6 +461,32 @@ test('reaper: is idempotent — a second pass reaps nothing', async () => {
   assert.equal(countInDir(rootDir, 'stopped'), 1);
 });
 
+test('reaper: budget yields before the next candidate and resumes from its cursor', async () => {
+  const rootDir = makeRoot();
+  for (const prNumber of [101, 102, 103]) {
+    seedJob(rootDir, 'pending', { jobId: `budget-${prNumber}`, prNumber });
+  }
+  const observed = [];
+  let elapsed = 0;
+  const opts = {
+    rootDir,
+    budgetMs: 15,
+    clock: () => elapsed,
+    resolvePRLifecycleImpl: async (_root, { prNumber }) => {
+      observed.push(prNumber);
+      elapsed += 16;
+      return liveOpen;
+    },
+  };
+  const first = await reapFinishedPrFollowUpJobs(opts);
+  assert.equal(first.budgetExceeded, true);
+  assert.deepEqual(observed, [101]);
+  elapsed = 0;
+  const second = await reapFinishedPrFollowUpJobs(opts);
+  assert.equal(second.budgetExceeded, true);
+  assert.deepEqual(observed, [101, 102]);
+});
+
 test('reaper: dedups by PR and caps distinct GitHub lookups per tick', async () => {
   const rootDir = makeRoot();
   seedJob(rootDir, 'pending', { jobId: 'j-100a', prNumber: 100 });

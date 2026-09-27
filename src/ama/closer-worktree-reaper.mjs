@@ -13,7 +13,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const DEFAULT_HQ_PATH = '/Users/airlock/.local/bin/hq';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
 const DEFAULT_HQ_ROOT = '/Users/airlock/agent-os-hq';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
 const DEFAULT_REAP_LIMIT = 8;
-const DEFAULT_REAP_BUDGET_MS = 20_000;
+const DEFAULT_REAP_BUDGET_MS = 15_000;
 const DEFAULT_SCAN_LIMIT = 64;
 const DEFAULT_UNKNOWN_PROBE_LIMIT = 3;
 const DEFAULT_PROCESS_PROBE_TIMEOUT_MS = 15_000;
@@ -349,13 +349,13 @@ async function execGit({ repoPath, args, execFileImpl = execFileAsync, timeout =
   });
 }
 
-async function remoteRepoForPath(repoPath, execFileImpl) {
+async function remoteRepoForPath(repoPath, execFileImpl, timeout = 10_000) {
   try {
     const { stdout } = await execGit({
       repoPath,
       args: ['remote', 'get-url', 'origin'],
       execFileImpl,
-      timeout: 10_000,
+      timeout,
     });
     return parseGitHubRepoFromRemote(stdout);
   } catch {
@@ -363,13 +363,16 @@ async function remoteRepoForPath(repoPath, execFileImpl) {
   }
 }
 
-async function registeredWorktreesByPath({ repoPaths, execFileImpl, logger = console }) {
+async function registeredWorktreesByPath({ repoPaths, execFileImpl, logger = console, deadlineMs = Infinity }) {
   const byPath = new Map();
+  let lastRepoPath = null;
   for (const repoPath of repoPaths) {
+    if (Date.now() >= deadlineMs) break;
+    const timeout = Math.max(1, Math.min(30_000, deadlineMs - Date.now()));
     try {
       const [{ stdout }, githubRepo] = await Promise.all([
-        execGit({ repoPath, args: ['worktree', 'list', '--porcelain'], execFileImpl }),
-        remoteRepoForPath(repoPath, execFileImpl),
+        execGit({ repoPath, args: ['worktree', 'list', '--porcelain'], execFileImpl, timeout }),
+        remoteRepoForPath(repoPath, execFileImpl, Math.min(10_000, timeout)),
       ]);
       for (const record of parseGitWorktreePorcelain(stdout)) {
         const workerId = basename(dirname(record.path));
@@ -391,8 +394,9 @@ async function registeredWorktreesByPath({ repoPaths, execFileImpl, logger = con
         `[closer-worktree-reap] worktree-list-failed repoPath=${repoPath}: ${err?.message || err}`
       );
     }
+    lastRepoPath = repoPath;
   }
-  return byPath;
+  return { byPath, lastRepoPath, complete: lastRepoPath === repoPaths.at(-1) || repoPaths.length === 0 };
 }
 
 function classifyPrTerminal(pr) {
@@ -777,6 +781,8 @@ async function reapCloserHammerWorktrees({
   env = process.env,
   logger = console,
 } = {}) {
+  const reapStartedAt = Date.now();
+  const deadlineMs = reapStartedAt + budgetMs;
   const cursor = await readScanCursor(cursorPath, logger);
   const repoDiscovery = Array.isArray(repoPaths)
     ? { paths: repoPaths, nextCursor: cursor.repo }
@@ -787,11 +793,28 @@ async function reapCloserHammerWorktrees({
         logger,
       });
   const effectiveRepoPaths = repoDiscovery.paths;
-  const registered = await registeredWorktreesByPath({
+  const registrationScan = await registeredWorktreesByPath({
     repoPaths: effectiveRepoPaths,
     execFileImpl,
     logger,
+    deadlineMs,
   });
+  if (!registrationScan.complete) {
+    // Registration is the safety oracle for half-registered worktrees. Never
+    // evaluate a partial scan. Save only the repos completed so the next tick
+    // continues discovery without misclassifying a live registration.
+    const repo = registrationScan.lastRepoPath
+      ? registrationScan.lastRepoPath.slice(hqRoot.length + 1)
+      : cursor.repo;
+    persistScanCursor(cursorPath, { ...cursor, repo }, logger);
+    return {
+      scanned: 0, reaped: 0, pruned: 0, skipped: 0, errors: 0,
+      terminal: 0, prunable: 0, halfRegistered: 0, open: 0, unknown: 0,
+      deferredActiveWorker: 0, deferredUnknownWorker: 0,
+      limit, scanLimit, budgetMs, budgetExceeded: true,
+    };
+  }
+  const registered = registrationScan.byPath;
   const workerDiscovery = await listHammerWorkerDirs(hqRoot, {
     scanLimit,
     lastName: cursor.worker,
@@ -891,7 +914,6 @@ async function reapCloserHammerWorktrees({
     }
     return unscopedProcessProbePromise;
   };
-  const reapStartedAt = Date.now();
   summary.budgetMs = budgetMs;
   summary.budgetExceeded = false;
   let evaluationCursor = cursor.evaluation;

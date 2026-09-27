@@ -58,10 +58,10 @@ export const OPERATOR_MERGE_ACCOUNTABILITY_LABELS = Object.freeze([
  * `claude-code/*` branches, e.g. agent-os #4022/#4023/#4024). An operator's
  * explicit, head-scoped label IS the accountability that stands in for the
  * missing worker identity: the operator vouches for the merge on the record. It
- * NEVER relaxes any other daemon gate — `attemptDaemonCleanMerge` still requires
- * a settled-success verdict, a zero-finding (strict) review, green required
- * checks, and a live head that matches the validated head, and merges only under
- * the merge lease.
+ * For `operator-approved`, current-head authority can also replace the settled
+ * verdict and strict-clean review gates. It does not waive green required
+ * checks, mergeability, or the live-head match, and merges only under the merge
+ * lease. `merge-agent-requested` substitutes for identity only.
  *
  * HEAD-SCOPING (hard invariant): the label event MUST be pinned to the EXACT
  * head the daemon is about to merge (`mergeHeadSha`). A label applied at an

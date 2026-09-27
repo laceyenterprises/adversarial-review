@@ -443,6 +443,7 @@ test('permanent merge rejection → fail closed with no retry; lease released; r
   assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED);
   assert.equal(result.merged, false);
   assert.equal(result.reason, 'permanent-merge-rejection');
+  assert.equal(result.permanent, true);
   assert.equal(h.calls.merge, 1, 'no retry for permanent failure');
   assert.equal(h.calls.sleeps.length, 0);
   assert.equal(h.calls.release, 1, 'lease released');
@@ -478,6 +479,7 @@ test('missing fresh candidate head is treated as transient gate-read failure', a
 
   assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED);
   assert.equal(result.reason, 'gate-read-failed');
+  assert.equal(result.permanent, false);
   assert.equal(result.attempts, 1);
   assert.equal(h.calls.merge, 0, 'never merges without a fresh head');
   assert.equal(h.calls.release, 1);

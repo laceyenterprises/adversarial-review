@@ -499,7 +499,7 @@ test('daemon clean-park fail-closed emits an operator-visible manual-close signa
   }
 });
 
-test('daemon fail-closed with findings present does NOT emit the clean-park signal', async () => {
+test('transient daemon gate-read failure without manual-close requirement does not page', async () => {
   const rootDir = tempRoot();
   try {
     const logs = [];
@@ -508,10 +508,10 @@ test('daemon fail-closed with findings present does NOT emit the clean-park sign
       logger: { log: (m) => logs.push(String(m)), warn() {} },
       runDaemonCleanMergeAttemptImpl: async () => ({
         disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
-        reason: 'permanent-merge-rejection',
+        reason: 'gate-read-failed',
         merged: false,
         attempts: 1,
-        // Not a clean park (daemon reported it did not qualify as manual-close).
+        // A later tick can retry this read.
         manualCloseRequired: false,
       }),
       maybeDispatchAmaCloserImpl: async () => ({ dispatched: true }),
@@ -522,6 +522,31 @@ test('daemon fail-closed with findings present does NOT emit the clean-park sign
       .map((line) => { try { return JSON.parse(line); } catch { return null; } })
       .find((doc) => doc?.event === 'ama.daemon_clean_park.manual_close_required');
     assert.equal(parkEvent, undefined, 'no clean-park signal when manualCloseRequired is false');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('permanent daemon failure pages even without a clean-review marker', async () => {
+  const rootDir = tempRoot();
+  try {
+    const logs = [];
+    await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      logger: { log: (message) => logs.push(String(message)), warn() {} },
+      runDaemonCleanMergeAttemptImpl: async () => ({
+        disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+        reason: 'permanent-merge-rejection', permanent: true,
+        manualCloseRequired: false,
+      }),
+      maybeDispatchAmaCloserImpl: async () => {
+        throw new Error('permanent daemon failure must not dispatch a hammer');
+      },
+    });
+    const parkEvent = logs
+      .map((line) => { try { return JSON.parse(line); } catch { return null; } })
+      .find((doc) => doc?.event === 'ama.daemon_clean_park.manual_close_required');
+    assert.equal(parkEvent?.reason, 'permanent-merge-rejection');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -2561,6 +2586,53 @@ test('current-head operator approval routes an older request-changes review to d
     assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
     assert.equal(mergeArgs.validatedHead, head);
     assert.equal(mergeArgs.verdict, 'request-changes');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('revoked operator approval holds the tick instead of dispatching a hammer from snapshot labels', async () => {
+  const rootDir = tempRoot();
+  try {
+    const head = 'approval-revoked-head';
+    const event = operatorApprovedEventAt(head);
+    const args = unattributedDaemonArgs({ rootDir, prNumber: 902, head });
+    const daemonResult = await runDaemonCleanMergeAttempt({
+      ...args,
+      candidate: { ...args.candidate, labels: ['operator-approved'] },
+      reviewState: {
+        ...args.reviewState,
+        operatorApprovedEvidence: {
+          applied: true, observedRevisionRef: head, actor: event.actor,
+          eventId: event.id, observedAt: event.createdAt,
+        },
+      },
+      operatorApprovalEvent: event,
+      // The head has not moved; only the live operator label was removed.
+      fetchRollupImpl: async () => ({
+        state: 'OPEN', headRefOid: head, checks: args.candidate.statusCheckRollup,
+        mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', labels: [],
+      }),
+    });
+    assert.equal(daemonResult.disposition, DAEMON_MERGE_DISPOSITION.NOT_TAKEN);
+    assert.equal(daemonResult.reason, 'operator-approval-no-longer-current');
+
+    let closerCalls = 0;
+    const snapshot = baseArgs(rootDir);
+    const result = await maybeDispatchAmaClosureFor({
+      ...snapshot,
+      candidate: { ...snapshot.candidate, labels: ['operator-approved'] },
+      labelNames: ['operator-approved'],
+      operatorApprovalEvent: operatorApprovedEventAt('head-live'),
+      runDaemonCleanMergeAttemptImpl: async () => daemonResult,
+      maybeDispatchAmaCloserImpl: async () => {
+        closerCalls += 1;
+        return { dispatched: true };
+      },
+    });
+    assert.equal(closerCalls, 0);
+    assert.equal(result.skipMergeAgent, true);
+    assert.equal(result.reason, 'operator-approval-no-longer-current');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

@@ -70,6 +70,7 @@ test('current-head operator approval authorizes an older request-changes review'
   const state = eligibleState({
     verdict: 'request-changes',
     candidateHead: currentHead,
+    validatedHead: currentHead,
     labels: ['operator-approved'],
     operatorApprovedEvidence: evidence,
     operatorLogins: ['operator'],
@@ -78,12 +79,16 @@ test('current-head operator approval authorizes an older request-changes review'
   assert.deepEqual(evaluateMergeEligibility(state), { eligible: true, reasons: [] });
   assert.deepEqual(evaluateMergeEligibility({
     ...state,
+    validatedHead: 'cccccccccccccccccccccccccccccccccccccccc',
+  }).reasons, ['stale-head']);
+  assert.deepEqual(evaluateMergeEligibility({
+    ...state,
     candidateHead: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
   }).reasons, ['verdict-not-eligible', 'stale-head']);
   assert.deepEqual(evaluateMergeEligibility({
     ...state,
     operatorApprovedEvidence: { ...evidence, actor: 'merge-bot' },
-  }).reasons, ['verdict-not-eligible', 'stale-head']);
+  }).reasons, ['verdict-not-eligible']);
 });
 
 // Table-driven: each single missing precondition → exactly the expected reason.

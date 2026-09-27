@@ -334,7 +334,7 @@ function priorDaemonPermanentFailure({ readAuditImpl, hqRoot, repo, prNumber, va
  * @param {object} [args.logger]
  * @param {number} [args.retryCap]
  * @param {number} [args.backoffBaseMs]
- * @returns {Promise<object>} `{ disposition, reason, merged, attempts, leaseAcquired, auditWritten, reasons, liveGate }`.
+ * @returns {Promise<object>} `{ disposition, reason, permanent, merged, attempts, leaseAcquired, auditWritten, manualCloseRequired, reasons, liveGate }`.
  */
 export async function attemptDaemonCleanMerge({
   repo,
@@ -926,6 +926,7 @@ export async function attemptDaemonCleanMerge({
   return {
     disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
     reason: terminal.reason,
+    permanent: Boolean(terminal.permanent),
     merged: false,
     attempts,
     leaseAcquired: true,

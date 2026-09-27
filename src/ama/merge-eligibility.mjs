@@ -259,7 +259,7 @@ export function evaluateMergeEligibility(state = {}) {
   if (!requiredChecksGreen(state?.requiredChecks, state?.requiredCheckContexts)) reasons.push('ci-not-green');
   if (!prMergeable(state)) reasons.push('pr-not-mergeable');
   if (!branchProtectionRequiresGate(state)) reasons.push('branch-protection-missing-gate');
-  if (!headMatches(state) && !operatorOverride) reasons.push('stale-head');
+  if (!headMatches(state)) reasons.push('stale-head');
   if (state?.leaseHeld !== true) reasons.push('lease-not-held');
   if (!Array.isArray(state?.labels)) {
     reasons.push('labels-unavailable');

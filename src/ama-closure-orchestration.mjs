@@ -1405,17 +1405,15 @@ export async function maybeDispatchAmaClosureFor({
   // CI wait here: a single tick must stay bounded or one slow PR head-blocks
   // every other PR in the poll.
   //
-  // MSM-03 — daemon clean-path merge ("Path B"). Before the hammer
-  // dispatch, attempt an inline daemon merge for a FULLY-CLEAN settled review
-  // (zero blocking AND zero non-blocking findings) that GitHub reports green +
-  // mergeable. STRICT (default on): any finding — or an unknown finding
-  // classification — declines this path so the tick falls through to the
-  // hammer dispatch below (MSM-04). No agent is spawned here; the daemon
-  // clicks the button through the shared bounded merge-subprocess runner under
-  // its own lease. Anything but `not-taken` means the daemon owns this tick:
+  // MSM-03 — daemon clean-path merge ("Path B"). A fully clean settled review,
+  // or a current-head operator-approved override, may enter this lane when
+  // GitHub reports green checks and mergeability. The daemon re-reads the live
+  // label and head before merging under its lease. Without the override, strict
+  // mode declines findings and falls through to the hammer (MSM-04).
+  // Dispositions other than `not-taken` normally own this tick:
   //   - merged        → PR landed, `daemon-merge` audit written, lease released.
-  //   - failed-closed → took the path, failed closed; audit written, lease
-  //                     released; NO hammer spawned (retry path never hammers).
+  //   - failed-closed → audit written and lease released; hammer-remediable
+  //                     eligibility gates hand off to the capped hammer.
   //   - deferred      → lease contention / audit bootstrap failure; retry next
   //                     tick with no double-merge.
   throwIfAborted(signal);
@@ -1488,8 +1486,8 @@ export async function maybeDispatchAmaClosureFor({
     // post-remediation head and merges under its own lease, and every hammer
     // dispatch is bounded by the per-PR hammer-retry-cap (loud GBI operator alert
     // at the ceiling — never an uncapped re-dispatch). NON-remediable gates
-    // (worker-identity-unresolved, verdict-not-eligible, lease-not-held) and
-    // permanent/transient merge failures still park below.
+    // (worker-identity-unresolved, lease-not-held) and permanent/transient
+    // merge failures still hold below.
     const daemonFailedClosed =
       daemonCleanMerge.disposition === DAEMON_MERGE_DISPOSITION.FAILED_CLOSED;
     const hammerRemediableFallback =
@@ -1519,7 +1517,12 @@ export async function maybeDispatchAmaClosureFor({
       // A selected daemon route that cannot hand off needs an operator signal,
       // including approval overrides whose review was not fully clean. The
       // superproject observability layer pages on this existing event.
-      if (daemonFailedClosed) {
+      if (
+        daemonFailedClosed &&
+        (daemonCleanMerge.manualCloseRequired === true ||
+          daemonCleanMerge.permanent === true ||
+          ['worker-identity-unresolved', 'gate-not-eligible'].includes(daemonCleanMerge.reason))
+      ) {
         // Surface the exact eligibility gate(s) that tripped (a stable subset of
         // {verdict-not-eligible|ci-not-green|pr-not-mergeable|stale-head|
         // lease-not-held}) so the operator page names WHY the clean PR could not
@@ -1563,7 +1566,8 @@ export async function maybeDispatchAmaClosureFor({
   if (
     daemonCleanMerge?.disposition === DAEMON_MERGE_DISPOSITION.NOT_TAKEN &&
     (
-      PROTECTIVE_PREDECESSOR_HOLD_REASONS.has(daemonCleanMerge.reason)
+      PROTECTIVE_PREDECESSOR_HOLD_REASONS.has(daemonCleanMerge.reason) ||
+      daemonCleanMerge.reason === 'operator-approval-no-longer-current'
     )
   ) {
     const daemonHeadShort = String(gateSnapshot?.reviewedHeadSha || '').slice(0, 12);
@@ -1621,8 +1625,7 @@ export async function maybeDispatchAmaClosureFor({
 
   const dispatchContext = {
     forceHammerAfterDaemonFailure:
-      daemonCleanMerge?.disposition === DAEMON_MERGE_DISPOSITION.FAILED_CLOSED ||
-      daemonCleanMerge?.reason === 'operator-approval-no-longer-current',
+      daemonCleanMerge?.disposition === DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
     daemonFailureReasons: Array.isArray(daemonCleanMerge?.reasons)
       ? daemonCleanMerge.reasons
       : [daemonCleanMerge?.reason].filter(Boolean),

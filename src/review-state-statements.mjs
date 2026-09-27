@@ -175,6 +175,35 @@ export const FINALIZE_PENDING_TERMINAL_FAILURE_SQL =
       AND failure_message IS ?
       AND reviewer_head_sha = ?`;
 
+export const MARK_REVIEWER_CREDENTIAL_OUTAGE_SQL =
+  `UPDATE reviewed_prs
+      SET review_status = 'pending-upstream', failed_at = ?, failure_message = ?,
+          quota_reset_at_utc = NULL, reviewer_lease_expires_at = NULL,
+          reviewer_session_uuid = NULL, reviewer_pgid = NULL
+    WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'`;
+
+export const PROMOTE_REVIEWER_CREDENTIAL_OUTAGE_SQL =
+  `UPDATE reviewed_prs
+      SET review_status = 'pending-upstream', failure_message = ?,
+          reviewer_lease_expires_at = NULL
+    WHERE COALESCE(pr_state, 'open') = 'open'
+      AND review_status = 'pending-upstream'
+      AND reviewer_lease_expires_at IS NULL
+      AND reviewer_session_uuid IS NULL
+      AND lower(COALESCE(reviewer, '')) = ?
+      AND lower(COALESCE(failure_message, '')) LIKE '[oauth-broken]%'`;
+
+export const REARM_REVIEWER_CREDENTIAL_OUTAGE_SQL =
+  `UPDATE reviewed_prs
+      SET review_status = 'pending', failed_at = NULL, failure_message = NULL,
+          quota_reset_at_utc = NULL, reviewer_lease_expires_at = NULL,
+          infra_auto_recover_attempts = 0
+    WHERE COALESCE(pr_state, 'open') = 'open'
+      AND review_status IN ('pending', 'pending-upstream')
+      AND reviewer_lease_expires_at IS NULL
+      AND reviewer_session_uuid IS NULL
+      AND lower(COALESCE(failure_message, '')) LIKE ?`;
+
 // This also matches review_status='reviewing', so every reviewer_* lease field
 // must be cleared when the merged PR is terminalized to skipped.
 export const MARK_MERGED_PENDING_REVIEW_SKIPPED_SQL = `UPDATE reviewed_prs
@@ -276,16 +305,29 @@ export function prepareFinalizePendingTerminalFailure(db) {
   return db.prepare(FINALIZE_PENDING_TERMINAL_FAILURE_SQL);
 }
 
+export function prepareMarkReviewerCredentialOutage(db) {
+  return db.prepare(MARK_REVIEWER_CREDENTIAL_OUTAGE_SQL);
+}
+
+export function preparePromoteReviewerCredentialOutage(db) {
+  return db.prepare(PROMOTE_REVIEWER_CREDENTIAL_OUTAGE_SQL);
+}
+
+export function prepareRearmReviewerCredentialOutage(db) {
+  return db.prepare(REARM_REVIEWER_CREDENTIAL_OUTAGE_SQL);
+}
+
 export function prepareMarkMergedPendingReviewSkipped(db) {
   return db.prepare(MARK_MERGED_PENDING_REVIEW_SKIPPED_SQL);
 }
 
-// Depth of the first-pass review queue: OPEN PRs that have never received a
-// first-pass review. Lives in this side-effect-free statements leaf (rather than
-// beside its prepared statement in review-state-db.mjs) so tests, the RSP-01
-// queue-depth lever, and the `review-queue-depth` operator CLI can all read the
-// EXACT SQL production issues without importing the process-wide singleton DB
-// handle — the same reason every other statement here was extracted.
+// Depth of the first-pass review queue: OPEN PRs that have never received any
+// delivered reviewer pass. Lives in this side-effect-free statements leaf
+// (rather than beside its prepared statement in review-state-db.mjs) so tests,
+// the RSP-01 queue-depth lever, and the `review-queue-depth` operator CLI can
+// all read the EXACT SQL production issues without importing the process-wide
+// singleton DB handle — the same reason every other statement here was
+// extracted.
 export const SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW =
   "SELECT COUNT(*) AS n FROM reviewed_prs " +
   "WHERE pr_state = 'open' " +
@@ -309,11 +351,58 @@ export const SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW =
   // SQLite's `NOT IN` drops NULL, so keep the null-safe shape explicit: exclude
   // terminal refused states while still counting rows with no status yet -- the
   // exact rows most likely to be genuinely awaiting a first pass.
+  // A completed rereview is also proof that a first review already happened;
+  // accepting either review pass kind preserves migrated/legacy histories that
+  // retained the later artifact but not the original first-pass row.
   `AND (review_status IS NULL OR review_status NOT IN ('malformed', 'unroutable-bot-author', 'argus-security-queued', '${REREVIEW_CI_BLOCKED_STATUS}')) ` +
   "AND NOT EXISTS ( " +
   "  SELECT 1 FROM reviewer_passes " +
   "  WHERE reviewer_passes.repo = reviewed_prs.repo " +
   "    AND reviewer_passes.pr_number = reviewed_prs.pr_number " +
+  "    AND reviewer_passes.pass_kind IN ('first-pass', 'rereview') " +
+  "    AND reviewer_passes.status = 'completed' " +
+  "    AND reviewer_passes.gh_comment_id IS NOT NULL " +
+  "    AND reviewer_passes.gh_comment_id <> ''" +
+  ")";
+
+// Open PRs currently waiting for a re-review. A genuine delivered reviewer pass
+// establishes that this is the re-review lane; rereview_requested_at is the
+// durable wake marker retained while the candidate waits for reviewer
+// admission (including Gemini credential saturation). Head-refresh re-reviews
+// can clear that marker, so posted_at=NULL is the companion pending signal.
+// Delivered-comment evidence drives queue-depth accounting; completed-pass
+// evidence additionally protects rereview safety gates when body capture left
+// gh_comment_id empty. Keep the predicates distinct.
+export const SQL_HAS_GENUINE_POSTED_REVIEW_FOR_PR =
+  "SELECT 1 FROM reviewer_passes WHERE repo = ? AND pr_number = ? " +
+  "AND pass_kind IN ('first-pass', 'rereview') AND status = 'completed' " +
+  "AND gh_comment_id IS NOT NULL AND gh_comment_id <> '' LIMIT 1";
+
+export const SQL_HAS_COMPLETED_REVIEW_FOR_PR =
+  "SELECT 1 FROM reviewer_passes WHERE repo = ? AND pr_number = ? " +
+  "AND pass_kind IN ('first-pass', 'rereview') AND status = 'completed' LIMIT 1";
+
+export const SQL_COUNT_OPEN_AWAITING_REREVIEW =
+  "SELECT COUNT(*) AS n FROM reviewed_prs " +
+  "WHERE pr_state = 'open' " +
+  // Only rows awaiting reviewer admission contribute pressure. Failed and
+  // artifact/terminal states cannot spend a reviewer slot until rearmed.
+  "AND review_status = 'pending' " +
+  "AND (rereview_requested_at IS NOT NULL OR posted_at IS NULL) " +
+  "AND EXISTS ( " +
+  "  SELECT 1 FROM reviewer_passes " +
+  "  WHERE reviewer_passes.repo = reviewed_prs.repo " +
+  "    AND reviewer_passes.pr_number = reviewed_prs.pr_number " +
+  "    AND reviewer_passes.pass_kind IN ('first-pass', 'rereview') " +
+  "    AND reviewer_passes.status = 'completed' " +
+  "    AND reviewer_passes.gh_comment_id IS NOT NULL " +
+  "    AND reviewer_passes.gh_comment_id <> ''" +
+  ") AND NOT EXISTS ( " +
+  "  SELECT 1 FROM reviewer_passes " +
+  "  WHERE reviewer_passes.repo = reviewed_prs.repo " +
+  "    AND reviewer_passes.pr_number = reviewed_prs.pr_number " +
+  "    AND reviewer_passes.head_sha = reviewed_prs.revision_ref " +
+  "    AND reviewer_passes.status = 'completed' " +
   "    AND reviewer_passes.gh_comment_id IS NOT NULL " +
   "    AND reviewer_passes.gh_comment_id <> ''" +
   ")";

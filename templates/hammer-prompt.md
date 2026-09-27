@@ -43,6 +43,12 @@ such as `gh api repos/<<REPO>>/pulls/<<PR_NUMBER>>/reviews` or the dispatch
 prompt/audit files already named by this run; do not fall back to broad host
 scans.
 
+For Git synchronization, use the `ham_bounded_git_sync` command provided below.
+It applies the load-aware timeout and retries once only for transient failures. Do not wrap `git fetch` (or
+any other git synchronization command) in your own fixed alarm: killing git in
+the middle of a shared worker-base ref update can orphan a lock and poison every
+later retry.
+
 ## Snapshot
 
 - **PR:** <<PR_URL>>
@@ -63,6 +69,17 @@ scans.
    restart remediation. Refresh the live PR head, reacquire the merge lease,
    rerun only the required fail-closed live-head validation described below, and
    complete the merge/closing-comment sequence idempotently.
+0b. **A run that does not merge must say so exactly once on the PR.** Before the
+   run ends for any reason with the PR still open and unmerged, post exactly one
+   HAM-authored closing-status comment. State what the run completed, the exact
+   step and blocker where it stopped, whether the merge lease was released, and
+   what happens next (automatic bounded retry or operator escalation). This is
+   distinct from the existing single in-lease audit comment, which remains the
+   only comment for the successful merge path. If that audit was already posted
+   before a later merge failure, edit it in place into the required no-merge
+   closing-status comment; do not leave the audit and add a second comment. Do
+   not post the no-merge comment if the PR merged, and do not report success
+   merely because remediation or a rebase completed.
 1. Read the FINAL adversarial review on `<<REVIEWED_SHA>>`. These are the
    freshest findings.
 2. Remediate ALL final comments, blocking and non-blocking. Make real fixes for
@@ -267,8 +284,56 @@ hard-blocker report and stop.
 Commit the remediation:
 
 ```bash
-git status --short
-git add <changed files>
+# SUBSYNC-01 (agent-os#7092): after ANY local head move (fetching and resetting
+# to a server-side `gh pr update-branch --rebase` head, `git rebase`, `git pull`),
+# the gitlink moves but the submodule CHECKOUT does not, and `.gitmodules`
+# `ignore = all` hides that stale checkout from `git status`/`git diff`. Staging
+# it rewinds the submodule on merge (agent-os#7092 would have rolled
+# adversarial-review back past two merged fixes). Re-sync initialized
+# submodules to the recorded commits first; uninitialized ones are untouched.
+/usr/bin/perl -e 'alarm shift; exec @ARGV' 120 git submodule update --recursive
+git status --short --ignore-submodules=none
+git add <changed files>   # never a submodule path, never `git add -f`/`--force`
+# The hammer never moves a submodule pointer: submodule fixes land as a PR in the
+# submodule's own repo (mandate 2b). Unstage any gitlink before committing.
+ham_staged_gitlinks() {
+  git diff --cached --raw -z --ignore-submodules=none |
+    perl -we '
+      my @fields = split /\0/, do { local $/; <STDIN> };
+      for (my $i = 0; $i < @fields;) {
+        my $meta = $fields[$i++];
+        next if !defined($meta) || $meta eq "";
+        my $path = $fields[$i++] // "";
+        my $new_path = $path;
+        next unless $meta =~ /^:([0-7]{6}) ([0-7]{6}) [0-9a-f]+ [0-9a-f]+ ([A-Z])\d*$/;
+        my ($old_mode, $new_mode, $status) = ($1, $2, $3);
+        if ($status eq "R" || $status eq "C") {
+          $new_path = $fields[$i++] // "";
+        }
+        next unless $old_mode eq "160000" || $new_mode eq "160000";
+        print $path, "\0" if length $path;
+        print $new_path, "\0" if length $new_path && $new_path ne $path;
+      }
+    '
+}
+ham_print_nul_paths() {
+  perl -0ne 'chomp; print "  $_\n" if length'
+}
+HAM_STAGED_GITLINKS_FILE=$(mktemp "${TMPDIR:-/tmp}/ham-staged-gitlinks.XXXXXX") || exit 1
+ham_staged_gitlinks > "$HAM_STAGED_GITLINKS_FILE"
+if [ -s "$HAM_STAGED_GITLINKS_FILE" ]; then
+  echo "HAM: unstaging submodule gitlink change(s); the hammer never moves a pointer:" >&2
+  ham_print_nul_paths < "$HAM_STAGED_GITLINKS_FILE" >&2
+  git restore --staged --pathspec-from-file="$HAM_STAGED_GITLINKS_FILE" --pathspec-file-nul
+fi
+ham_staged_gitlinks > "$HAM_STAGED_GITLINKS_FILE"
+if [ -s "$HAM_STAGED_GITLINKS_FILE" ]; then
+  echo "HAM hard-blocker: staged submodule gitlink change(s) remain after unstage attempt; refusing commit" >&2
+  ham_print_nul_paths < "$HAM_STAGED_GITLINKS_FILE" >&2
+  rm -f "$HAM_STAGED_GITLINKS_FILE"
+  exit 1
+fi
+rm -f "$HAM_STAGED_GITLINKS_FILE"
 # HSC-01: pass the trailers as ONE `-m`, not one `-m` each. Git renders every
 # `-m` as its own paragraph, so `-m A -m B` produces blank-line-separated
 # trailers -- which is NOT a git trailer block. The closer's provenance verifier
@@ -405,22 +470,61 @@ ham_is_full_sha() {
   printf '%s' "$1" | grep -Eiq '^[0-9a-f]{40}$'
 }
 
-ham_fetch_base_with_retries() {
-  ham_fetch_attempt=1
-  while [ "$ham_fetch_attempt" -le "$HAM_UPDATE_BRANCH_RETRY_CAP" ]; do
-    if git fetch origin "$BASE_BRANCH" > /tmp/ham-<<PR_NUMBER>>-fetch-base.stdout 2> /tmp/ham-<<PR_NUMBER>>-fetch-base.stderr; then
+HAM_GIT_SYNC_NOMINAL_SECONDS="${HAM_GIT_SYNC_NOMINAL_SECONDS:-120}"
+ham_bounded_git_sync() {
+  ham_git_sync_attempt=1
+  while [ "$ham_git_sync_attempt" -le 2 ]; do
+    ham_git_sync_timeout=$("$HAM_NODE_BIN" <<ROOT_DIR>>/bin/load-aware-timeout.mjs "$HAM_GIT_SYNC_NOMINAL_SECONDS" 2>/dev/null || true)
+    case "$ham_git_sync_timeout" in
+      ''|*[!0-9]*|0) ham_git_sync_timeout="$HAM_GIT_SYNC_NOMINAL_SECONDS" ;;
+    esac
+    ham_git_sync_stderr=$(mktemp "${TMPDIR:-/tmp}/ham-git-sync-<<PR_NUMBER>>.XXXXXX") || return 1
+    if /usr/bin/perl -e '
+      use Errno qw(EINTR);
+      my $seconds = shift;
+      my $child = fork();
+      die "git fetch fork failed: $!" unless defined $child;
+      if ($child == 0) { exec @ARGV or die "git fetch exec failed: $!"; }
+      my $timed_out = 0;
+      $SIG{ALRM} = sub {
+        $timed_out = 1;
+        kill "TERM", $child;
+        alarm 5;
+        $SIG{ALRM} = sub { kill "KILL", $child; };
+      };
+      alarm $seconds;
+      my $waited;
+      do { $waited = waitpid($child, 0); } while ($waited == -1 && $! == EINTR);
+      my $status = $?;
+      alarm 0;
+      exit($timed_out ? 124 : ($status & 127 ? 128 + ($status & 127) : $status >> 8));
+    ' "$ham_git_sync_timeout" git fetch --prune origin "$@" 2>"$ham_git_sync_stderr"; then
+      rm -f "$ham_git_sync_stderr"
       return 0
+    else
+      ham_git_sync_exit=$?
     fi
-    if ! ham_update_branch_transient /tmp/ham-<<PR_NUMBER>>-fetch-base.stderr; then
+    cat "$ham_git_sync_stderr" >&2
+    if [ "$ham_git_sync_exit" -eq 124 ]; then
+      echo "git fetch timed out after ${ham_git_sync_timeout}s; SIGTERM cleanup completed" >&2
+    elif ! ham_update_branch_transient "$ham_git_sync_stderr"; then
+      rm -f "$ham_git_sync_stderr"
       return 1
     fi
-    if [ "$ham_fetch_attempt" -ge "$HAM_UPDATE_BRANCH_RETRY_CAP" ]; then
+    rm -f "$ham_git_sync_stderr"
+    if [ "$ham_git_sync_attempt" -ge 2 ]; then
       return 1
     fi
-    sleep $((ham_fetch_attempt * 5))
-    ham_fetch_attempt=$((ham_fetch_attempt + 1))
+    sleep 5
+    ham_git_sync_attempt=$((ham_git_sync_attempt + 1))
   done
   return 1
+}
+
+ham_fetch_base_with_retries() {
+  ham_bounded_git_sync "$BASE_BRANCH" \
+    > /tmp/ham-<<PR_NUMBER>>-fetch-base.stdout \
+    2> /tmp/ham-<<PR_NUMBER>>-fetch-base.stderr
 }
 
 ham_capture_current_base_sha() {
@@ -458,7 +562,7 @@ ham_base_touches_pr_files() {
   # last validated against; returns 1 (disjoint → the validated head is safe to
   # merge without another rebase). Fail closed to 0 (overlap) on any fetch/diff
   # error so an undeterminable diff never lets us skip a rebase semantics needs.
-  git fetch origin "$BASE_BRANCH" >/dev/null 2>&1 || return 0
+  ham_bounded_git_sync "$BASE_BRANCH" >/dev/null 2>&1 || return 0
   [ -n "$HAM_VALIDATION_BASE_SHA" ] || return 0
   local current_base_sha pr_files base_files
   current_base_sha=$(git rev-parse FETCH_HEAD 2>/dev/null) || return 0
@@ -622,7 +726,7 @@ after `ham_release_merge_lease` has completed:
 ```bash
 BASE_BRANCH=$(jq -r '.baseRefName' /tmp/ham-<<PR_NUMBER>>-pr-after.json)
 HEAD_BRANCH=$(gh pr view <<PR_URL>> --json headRefName --jq '.headRefName')
-git fetch origin "$BASE_BRANCH" "$HEAD_BRANCH"
+ham_bounded_git_sync "$BASE_BRANCH" "$HEAD_BRANCH"
 git checkout "$HEAD_BRANCH"
 if ! git rebase "origin/$BASE_BRANCH"; then
   # For EACH conflicted file: open it, resolve the conflict markers using your
@@ -636,6 +740,23 @@ if ! git rebase "origin/$BASE_BRANCH"; then
   # `git rebase --abort`, emit ONE hard-blocker report, and stop.
   :
 fi
+# SUBSYNC-01: the rebase moved gitlinks but not submodule checkouts.
+# This block can run in a fresh shell, so default the cap here: an unset cap makes
+# `[ n -ge "" ]` error out as false and the retry loop would never stop.
+HAM_CONFLICT_SUBMODULE_SYNC_CAP="${HAM_UPDATE_BRANCH_RETRY_CAP:-3}"
+HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT=1
+while true; do
+  if /usr/bin/perl -e 'alarm shift; exec @ARGV' 120 git submodule update --recursive; then
+    break
+  fi
+  if [ "$HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT" -ge "$HAM_CONFLICT_SUBMODULE_SYNC_CAP" ]; then
+    echo "HAM hard-blocker: submodule update failed after conflict rebase; refusing force-push with stale submodule checkout" >&2
+    exit 1
+  fi
+  echo "HAM: submodule update failed after conflict rebase; retrying ${HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT}/${HAM_CONFLICT_SUBMODULE_SYNC_CAP}" >&2
+  sleep $((HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT * 2))
+  HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT=$((HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT + 1))
+done
 git push --force-with-lease
 ```
 
@@ -1700,6 +1821,11 @@ hard-blocker report, and do not re-dispatch.
   lives in another repo/submodule must have a linked subrepo PR, or the
   hard-blocker/audit comment must name the exact owed repo/path/change and why
   the subrepo PR could not be opened.
+- No submodule gitlink changes in HAM commits (SUBSYNC-01, agent-os#7092): never
+  stage a submodule path, never `git add -f`/`--force`, and run
+  `git submodule update --recursive` after any local head move. A stale
+  submodule checkout is invisible under `ignore = all` and rewinds the
+  submodule on merge.
 - No superproject pointer-bump PRs for submodule fixes. Main-catchup auto-floats
   submodule gitlinks after the submodule PR merges; wait for or rebase onto the
   floated current main instead of creating a gitlink-only PR.

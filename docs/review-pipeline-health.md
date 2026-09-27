@@ -117,8 +117,9 @@ The Grafana dashboard lives at
 - `review_pipeline_duplicate_family_oldest_held_age_seconds`: age of the oldest
   active duplicate-family hold, or zero when none are active. This metric also
   has no high-cardinality labels.
-- `review_pipeline_merge_stalled_jobs`: clean `review-settled` verdict jobs
-  whose PR row remains open past the merge-stall tick threshold.
+- `review_pipeline_merge_stalled_jobs`: clean `review-settled` or
+  `no-remediation-required` verdict jobs whose PR row remains open past the
+  merge-stall tick threshold.
 - `review_pipeline_conflicting_open_prs`: open non-draft PRs GitHub reports as
   `CONFLICTING` across the configured repository set.
 - `review_pipeline_conflicting_open_prs_collected`: 1 when the GitHub open-PR
@@ -309,7 +310,7 @@ can distinguish "never posted in window" from a null/corrupt timestamp column.
 | `review:pr_lifecycle_mirror_unverified` | SEN-02 `blind`: the `reviewed_prs` lifecycle mirror has not reconciled against GitHub inside the staleness window (default 15m), or specific open PRs could not be resolved. Both the queue-starvation and terminal-but-unmerged findings select their population from `pr_state='open'` and then threshold on elapsed age, so an unverified row yields an alert that can never self-clear. Never a health verdict, and never suppresses either finding. | ticket | a sweep resolves every open PR against GitHub inside the staleness window |
 | `review:malformed_pr_title` | one or more open PRs are recorded `review_status='malformed'` | ticket | malformed rows are recreated, explicitly recovered, or no longer open; known bot-authored prefixless PRs are routed to Argus with `review_status='argus-security-queued'` (ASR-04) and do not trigger this alert; neither do legacy `unroutable-bot-author` rows |
 | `review:remediation_backlog` | `follow-up-jobs/pending` has >5 jobs | ticket | pending job count returns to threshold or below |
-| `review:merge_stalled` | a `stopped:review-settled` job remains open for >3 watcher ticks | ticket | the PR is merged/closed or the settled job is no longer past threshold |
+| `review:merge_stalled` | a `stopped:review-settled` or `stopped:no-remediation-required` job remains open for >3 watcher ticks | ticket | the PR is merged/closed or the settled job is no longer past threshold |
 | `review:conflicting_open_prs` | GitHub reports open non-draft PRs as `CONFLICTING`, and at least one local `git merge-tree --write-tree --name-only` conflict path group is shared by the configured minimum PR count (default 5) | ticket | no conflict path group meets the shared-path threshold |
 | `review:conflicting_open_prs_unreadable` | SEN-02 `blind`: the GitHub open-PR listing or one or more per-PR merge-tree probes for conflicting-PR diagnostics could not be collected, so the snapshot cannot distinguish "zero conflicts" from "not fully measured". Never a health verdict. | ticket | the GitHub listing and every per-PR probe are collected again |
 | `review:conflicting_pr_unowned` | an open conflicting PR has no current-head remediation or merge ownership marker past the unowned-conflict age threshold (default 30m) | ticket | the PR gets a current-head ownership marker, leaves the conflicting/open population, or falls below the age threshold |
@@ -324,6 +325,7 @@ can distinguish "never posted in window" from a null/corrupt timestamp column.
 | `review:reviewer_pass_zombie` | `reviewer_passes.status='running'` row is older than the zombie threshold (default 90m: reviewer-pass-reaper's `DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS` of 3600s plus 50% grace, so the finding only fires once the reaper itself has failed) | ticket | no running reviewer pass exceeds the age threshold; the watcher timeout sweep should settle parseably aged rows as `failed` / `reviewer-timeout` |
 | `review:stuck_retry_loop` | one or more open PRs remain `review_status='failed'` after infra auto-recovery exhausted its attempt cap (`infra_auto_recover_attempts` at/over the cap, default 3); when the dominant `failure_class` is `diff-too-large`, the failure is deterministic because GitHub refused to serve the PR diff | ticket | no open PR remains failed at/over the infra auto-recovery cap (the review reposts/succeeds, the oversized PR is split or otherwise reviewable by file list, or the PR merges/closes) |
 | `review:round_budget_anomaly` | remediation round count exceeds the risk-class budget, or a final-pass job remains `awaiting-rereview` after budget exhaustion | ticket | no follow-up job violates the risk-class round budget |
+| `review:config_signature_drift` | a long-lived daemon's last successfully loaded config signature differs from disk beyond the configured drift threshold, including failed reloads after the shared config cache has been reset; also fires when a loaded daemon's config-status file is missing, any status read is malformed or denied, or the status stops updating for longer than the greater of six minutes and three expected daemon ticks | ticket | the daemon reloads the changed config successfully, the disk config is restored to the loaded signature, or the status file is readable, fresh, and reports the daemon back in sync |
 | `review:daemon_liveness` | required local pipeline LaunchAgent is not loaded | ticket | adversarial watcher, adversarial follow-up, and dispatch daemon labels are loaded |
 | `review:daemon_probe_failure` | required local pipeline LaunchAgent loaded state cannot be determined | ticket | launchctl probes can determine loaded state for adversarial watcher, adversarial follow-up, dispatch daemon, and dag-autowalk labels |
 | `review:dispatch_spawn_failures` | dispatch daemon stderr has recent closer/hammer spawn-failure signals over 1h | ticket | no matching recent dispatch daemon stderr lines remain |
@@ -380,6 +382,10 @@ All thresholds are configurable through environment variables:
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_QUEUE_STARVATION_ADMISSION_WINDOW_MS`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_REVIEWER_POOL_MAX_CONCURRENT`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_LIFECYCLE_RECONCILE_STALE_AFTER_MS`
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFIG_SIGNATURE_DRIFT_ALARM_MS`
+  (default `600000`)
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFIG_SIGNATURE_STATUS_STALE_MS`
+  (default `360000`)
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_REMEDIATION_BACKLOG_THRESHOLD`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_MERGE_STALLED_MAX_TICKS`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DAEMON_MERGE_PARK_MIN_OBSERVATIONS`

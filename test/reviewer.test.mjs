@@ -3030,7 +3030,7 @@ test('Claude review invocation passes prompt as argv in cli-direct shape', async
   ]);
 });
 
-test('Codex review invocation passes prompt as argv in cli-direct shape', async () => {
+test('Codex review invocation uses the reviewer snapshot cwd and passes prompt as argv', async () => {
   const calls = [];
   const prompt = 'review this codex diff';
   const outputPath = '/tmp/codex-last-message.md';
@@ -3045,7 +3045,7 @@ test('Codex review invocation passes prompt as argv in cli-direct shape', async 
       { key: 'model_reasoning_effort', value: 'high' },
     ],
     env: { HOME: '/tmp/home', PATH: process.env.PATH },
-    cwd: '/tmp/repo',
+    cwd: '/tmp/reviewer-state/reviewer-snapshots/agent-os/head-sha',
     timeout: 12_345,
     maxBuffer: 999,
     spawnCapturedImpl: async (command, args, options) => {
@@ -3068,7 +3068,7 @@ test('Codex review invocation passes prompt as argv in cli-direct shape', async 
       }),
       options: {
         env: { HOME: '/tmp/home', PATH: process.env.PATH },
-        cwd: '/tmp/repo',
+        cwd: '/tmp/reviewer-state/reviewer-snapshots/agent-os/head-sha',
         timeout: 12_345,
         maxBuffer: 999,
       },
@@ -4581,6 +4581,8 @@ test('reviewWithGemini antigravity runtime uses agy print, stdin prompt, env scr
   assert.match(spawnCalls[0].prompt, /Review the PROVIDED diff/);
   assert.match(spawnCalls[0].prompt, /Do not re-list the repository/);
   assert.match(spawnCalls[0].prompt, /Never search absolute host paths/);
+  assert.match(spawnCalls[0].prompt, /workspace is a read-only snapshot of the repository default checkout at review time/);
+  assert.match(spawnCalls[0].prompt, /Do not apply the diff, write files, or run tests/);
   assert.match(spawnCalls[0].prompt, /Emit ONLY the final Markdown review block/);
   assert.match(spawnCalls[0].prompt, /```diff\n\+diff/);
   assert.strictEqual(authCalls[0].env, spawnCalls[0].env);
@@ -4591,10 +4593,10 @@ test('reviewWithGemini antigravity runtime uses agy print, stdin prompt, env scr
   assert.equal(spawnCalls[0].env.GEMINI_ANTIGRAVITY_ACCOUNT, undefined);
 });
 
-test('reviewWithGemini antigravity scopes reviewer subprocess cwd to the repo checkout', async () => {
+test('reviewWithGemini antigravity scopes reviewer subprocess cwd and PWD to the read-only snapshot', async () => {
   const homeRoot = mkdtempSync(join(tmpdir(), 'agy-home-cwd-'));
-  const repoRoot = join(homeRoot, 'agent-os');
-  mkdirSync(repoRoot, { recursive: true });
+  const snapshotRoot = join(homeRoot, 'reviewer-state', 'reviewer-snapshots', 'agent-os', 'head-sha');
+  mkdirSync(snapshotRoot, { recursive: true });
   const originalCwd = process.cwd();
   const spawnCalls = [];
   const validAgyReview = '## Adversarial Review — Gemini (gemini-reviewer-lacey)\n\n## Summary\nClean.\n\n## Verdict\nComment only';
@@ -4606,7 +4608,7 @@ test('reviewWithGemini antigravity scopes reviewer subprocess cwd to the repo ch
       PWD: homeRoot,
     }, () => reviewWithGemini('+diff\n', '', {
       promptStage: 'first',
-      reviewerSubprocessCwd: repoRoot,
+      reviewerSubprocessCwd: snapshotRoot,
       resolveGeminiRuntimeImpl: () => 'antigravity',
       checkoutGeminiCredentialImpl: async () => ({ checkoutId: 'co_1', credentialId: 'cred_1', oauthCreds: { access_token: 'token-1' } }),
       materializeGeminiCheckoutSessionImpl: ({ env }) => ({ env, cleanup() {} }),
@@ -4619,14 +4621,14 @@ test('reviewWithGemini antigravity scopes reviewer subprocess cwd to the repo ch
     }));
 
     assert.equal(result.reviewText, validAgyReview);
-    assert.deepEqual(spawnCalls, [{ cwd: repoRoot, pwd: repoRoot, home: homeRoot }]);
+    assert.deepEqual(spawnCalls, [{ cwd: snapshotRoot, pwd: snapshotRoot, home: homeRoot }]);
   } finally {
     process.chdir(originalCwd);
     rmSync(homeRoot, { recursive: true, force: true });
   }
 });
 
-test('resolveReviewerSubprocessCwd selects the owning checkout instead of ambient HOME', () => {
+test('resolveReviewerSubprocessCwd selects the snapshot source checkout instead of ambient HOME', () => {
   assert.equal(
     resolveReviewerSubprocessCwd({
       repo: 'laceyenterprises/agent-os',

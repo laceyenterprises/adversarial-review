@@ -80,11 +80,13 @@ import {
   validateStartupRemediationConfig,
 } from '../src/follow-up-remediation.mjs';
 import { cancelLocalRemediationWorker } from '../src/adapters/agent-runtime/local/remediation.mjs';
+import { cloneRemediationWorkspace } from '../src/remediation-workspace-clone.mjs';
 import {
   assertClaudeCodeBrokerOAuth,
   resolveClaudeCodeOAuthTransport,
 } from '../src/remediation-oauth-preflight.mjs';
 import { openReviewStateDb } from '../src/review-state.mjs';
+import { pickAdversarialGateStatus } from '../src/adversarial-gate-status.mjs';
 
 function greenCiGate() {
   return {
@@ -930,6 +932,7 @@ test('auditWorkspaceForContamination refuses to guess a missing base branch', as
 test('prepareWorkspaceForJob retries transient same-repo git fetch failures before checkout', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const calls = [];
+  let setBranchesAttempts = 0;
   let fetchAttempts = 0;
 
   const result = await prepareWorkspaceForJob({
@@ -938,7 +941,7 @@ test('prepareWorkspaceForJob retries transient same-repo git fetch failures befo
     execFileImpl: async (command, args) => {
       calls.push([command, ...args]);
       if (command === 'git' && args[0] === 'clone') {
-        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+        mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
         return { stdout: '', stderr: '' };
       }
       if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
@@ -949,6 +952,16 @@ test('prepareWorkspaceForJob retries transient same-repo git fetch failures befo
           }),
           stderr: '',
         };
+      }
+      if (command === 'git' && args[2] === 'remote' && args[3] === 'set-branches') {
+        setBranchesAttempts += 1;
+        if (setBranchesAttempts === 1) {
+          const err = new Error('git remote set-branches failed');
+          err.code = 'EIO';
+          err.stderr = 'fatal: unable to create .git/config.lock: File exists';
+          throw err;
+        }
+        return { stdout: '', stderr: '' };
       }
       if (
         command === 'git'
@@ -968,6 +981,7 @@ test('prepareWorkspaceForJob retries transient same-repo git fetch failures befo
     },
   });
 
+  assert.equal(setBranchesAttempts, 2);
   assert.equal(fetchAttempts, 2);
   assert.ok(result.workspaceDir.endsWith(path.join('workspaces', makeJob().jobId)));
   assert.ok(
@@ -1010,6 +1024,7 @@ test('same-repo fetch refspec creates and refreshes origin head refs', () => {
   );
 
   const refspec = '+refs/heads/feature:refs/remotes/origin/feature';
+  execFileSync('git', ['-C', workspaceDir, 'remote', 'set-branches', '--add', 'origin', 'feature'], { stdio: 'ignore' });
   execFileSync('git', ['-C', workspaceDir, 'fetch', 'origin', refspec], { stdio: 'ignore' });
   const firstFetched = execFileSync('git', ['-C', workspaceDir, 'rev-parse', 'refs/remotes/origin/feature'], {
     encoding: 'utf8',
@@ -1030,6 +1045,24 @@ test('same-repo fetch refspec creates and refreshes origin head refs', () => {
     secondFetched,
     execFileSync('git', ['-C', seedDir, 'rev-parse', 'feature'], { encoding: 'utf8' }).trim()
   );
+
+  // The narrowed clone still has the two refs needed for the worker's
+  // checkout, base rebase, and force-with-lease PR push.
+  execFileSync('git', ['-C', seedDir, 'checkout', 'main'], { stdio: 'ignore' });
+  writeFileSync(path.join(seedDir, 'base.txt'), 'new base\n', 'utf8');
+  execFileSync('git', ['-C', seedDir, 'add', 'base.txt'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'commit', '-m', 'advance base'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'push', 'origin', 'main'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', workspaceDir, 'fetch', 'origin', '+refs/heads/main:refs/remotes/origin/main'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', workspaceDir, 'checkout', '-B', 'feature', 'origin/feature'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', workspaceDir, 'config', 'user.name', 'Test User'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', workspaceDir, 'config', 'user.email', 'test@example.com'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', workspaceDir, 'rebase', 'origin/main'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', workspaceDir, 'push', '--force-with-lease', 'origin', 'HEAD:refs/heads/feature'], { stdio: 'ignore' });
+  assert.equal(
+    execFileSync('git', ['-C', workspaceDir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
+    execFileSync('git', ['-C', originDir, 'rev-parse', 'refs/heads/feature'], { encoding: 'utf8' }).trim()
+  );
 });
 
 test('prepareWorkspaceForJob retries transient REST metadata lookup failures', async () => {
@@ -1042,7 +1075,7 @@ test('prepareWorkspaceForJob retries transient REST metadata lookup failures', a
     env: {},
     execFileImpl: async (command, args) => {
       if (command === 'git' && args[0] === 'clone') {
-        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+        mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
       }
       if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
         apiAttempts += 1;
@@ -1082,7 +1115,7 @@ test('prepareWorkspaceForJob retries transient git clone failures', async () => 
           err.stderr = 'fatal: unable to access https://github.com/laceyenterprises/clio.git/: HTTP 503';
           throw err;
         }
-        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+        mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
       }
       if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
         return {
@@ -1110,7 +1143,7 @@ test('prepareWorkspaceForJob retries transient fork checkout failures', async ()
     env: {},
     execFileImpl: async (command, args) => {
       if (command === 'git' && args[0] === 'clone') {
-        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+        mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
       }
       if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
         return {
@@ -1269,15 +1302,17 @@ test('resolveWorkerStoredPath allows absolute worker artifacts only under the wo
 test('prepareWorkspaceForJob clones missing repos and checks out the PR branch', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const calls = [];
+  const preparationLogs = [];
 
   const result = await prepareWorkspaceForJob({
     rootDir,
     job: makeJob(),
     env: {},
+    log: { info: line => preparationLogs.push(line) },
     execFileImpl: async (command, args, options = {}) => {
       calls.push({ command, args, options });
       if (command === 'git' && args[0] === 'clone') {
-        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+        mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
       }
       if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
         return {
@@ -1293,13 +1328,15 @@ test('prepareWorkspaceForJob clones missing repos and checks out the PR branch',
   });
 
   assert.equal(existsSync(path.join(result.workspaceDir, '.git')), true);
+  assert.match(preparationLogs[0], /source=network clone_fetch_ms=\d+ checkout_ms=\d+/);
   assert.deepEqual(result.workspaceState, { action: 'reused', reason: 'missing' });
   assert.deepEqual(calls.map((call) => [call.command, ...call.args]), [
-    ['git', 'clone', 'https://github.com/laceyenterprises/clio.git', result.workspaceDir],
+    ['gh', 'api', 'repos/laceyenterprises/clio/pulls/7'],
+    ['git', 'clone', '--no-checkout', '--single-branch', '--branch', 'main', 'https://github.com/laceyenterprises/clio.git', result.workspaceDir],
     ['git', '-C', result.workspaceDir, 'config', 'user.name', 'Codex Remediation Worker'],
     ['git', '-C', result.workspaceDir, 'config', 'user.email', 'codex-remediation-worker@laceyenterprises.com'],
-    ['gh', 'api', 'repos/laceyenterprises/clio/pulls/7'],
-    ['git', '-C', result.workspaceDir, 'fetch', 'origin', '+refs/heads/clio-feature:refs/remotes/origin/clio-feature'],
+    ['git', '-C', result.workspaceDir, 'remote', 'set-branches', '--add', 'origin', 'clio-feature'],
+    ['git', '-C', result.workspaceDir, 'fetch', 'origin', '+refs/heads/clio-feature:refs/remotes/origin/clio-feature', '+refs/heads/main:refs/remotes/origin/main'],
     ['git', '-C', result.workspaceDir, 'checkout', '-B', 'clio-feature', 'origin/clio-feature'],
   ]);
   // The whole workspace-prep path is GraphQL-free now: git clone over the
@@ -1310,6 +1347,211 @@ test('prepareWorkspaceForJob clones missing repos and checks out the PR branch',
     (c) => c.command === 'git' && c.args.includes('checkout'),
   );
   assert.ok(sameRepoCheckout, 'expected a git checkout call');
+});
+
+test('prepareWorkspaceForJob clones against the live REST base branch when the saved job base is stale', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const calls = [];
+
+  const result = await prepareWorkspaceForJob({
+    rootDir,
+    job: makeJob({ baseBranch: 'stack/already-merged' }),
+    env: {},
+    execFileImpl: async (command, args) => {
+      calls.push([command, ...args]);
+      if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+        return {
+          stdout: JSON.stringify({
+            base: { ref: 'main' },
+            head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+          }),
+          stderr: '',
+        };
+      }
+      if (command === 'git' && args[0] === 'clone') {
+        mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
+      }
+      return { stdout: '', stderr: '' };
+    },
+  });
+
+  const cloneCall = calls.find(call => call[0] === 'git' && call[1] === 'clone');
+  assert.deepEqual(cloneCall, [
+    'git',
+    'clone',
+    '--no-checkout',
+    '--single-branch',
+    '--branch',
+    'main',
+    'https://github.com/laceyenterprises/clio.git',
+    result.workspaceDir,
+  ]);
+  assert.equal(calls.filter(call => call[0] === 'gh' && call[1] === 'api').length, 1);
+  assert.ok(!cloneCall.includes('stack/already-merged'));
+});
+
+test('cloneRemediationWorkspace retries without branch narrowing when the remote branch is missing', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const workspaceDir = path.join(rootDir, 'workspace');
+  const calls = [];
+  const resets = [];
+  const warnings = [];
+
+  const source = await cloneRemediationWorkspace({
+    rootDir,
+    repo: 'laceyenterprises/clio',
+    baseBranch: 'stack/already-merged',
+    workspaceDir,
+    resetWorkspaceDir: (dir) => {
+      resets.push(dir);
+      rmSync(dir, { recursive: true, force: true });
+    },
+    log: { warn: line => warnings.push(line) },
+    clone: async (args) => {
+      calls.push(args);
+      if (calls.length === 1) {
+        const err = new Error('fatal: Remote branch stack/already-merged not found in upstream origin');
+        err.stderr = err.message;
+        throw err;
+      }
+      mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
+      return { stdout: '', stderr: '' };
+    },
+  });
+
+  assert.equal(source, 'network');
+  assert.deepEqual(calls, [
+    ['clone', '--no-checkout', '--single-branch', '--branch', 'stack/already-merged', 'https://github.com/laceyenterprises/clio.git', workspaceDir],
+    ['clone', '--no-checkout', 'https://github.com/laceyenterprises/clio.git', workspaceDir],
+  ]);
+  assert.deepEqual(resets, [workspaceDir]);
+  assert.ok(warnings.some(line => /retrying clone without --single-branch/.test(line)));
+});
+
+test('prepareWorkspaceForJob fetches only the PR head if the live base disappears after clone', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-base-fetch-race-'));
+  const fetches = [];
+  const warnings = [];
+  await prepareWorkspaceForJob({
+    rootDir, job: makeJob(), env: {}, log: { info() {}, warn: line => warnings.push(line) },
+    execFileImpl: async (command, args) => {
+      if (command === 'gh' && args[0] === 'api') return {
+        stdout: JSON.stringify({ base: { ref: 'main' }, head: { ref: 'feature', repo: { full_name: 'laceyenterprises/clio' } } }),
+      };
+      if (command === 'git' && args[0] === 'clone') mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
+      if (command === 'git' && args.includes('fetch')) {
+        fetches.push(args);
+        if (fetches.length === 1) throw new Error("fatal: couldn't find remote ref refs/heads/main");
+      }
+      return { stdout: '', stderr: '' };
+    },
+  });
+  assert.equal(fetches.length, 2);
+  assert.equal(fetches[1].some(arg => String(arg).includes('refs/heads/main')), false);
+  assert.match(warnings[0], /base branch disappeared during fetch/);
+});
+
+test('cloneRemediationWorkspace warns when a configured reference is ignored', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-reference-'));
+  const workspaceDir = path.join(rootDir, 'workspace');
+  const calls = [];
+  const warnings = [];
+  mkdirSync(path.join(rootDir, 'domains'), { recursive: true });
+  writeFileSync(path.join(rootDir, 'domains', 'code-pr.json'), JSON.stringify({
+    remediationCloneReferences: { 'laceyenterprises/clio': 'relative-reference' },
+  }));
+
+  await cloneRemediationWorkspace({
+    rootDir,
+    repo: 'laceyenterprises/clio',
+    baseBranch: 'main',
+    workspaceDir,
+    resetWorkspaceDir: dir => rmSync(dir, { recursive: true, force: true }),
+    log: { warn: line => warnings.push(line) },
+    clone: async (args) => {
+      calls.push(args);
+      mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
+      return { stdout: '', stderr: '' };
+    },
+  });
+
+  assert.deepEqual(calls, [
+    ['clone', '--no-checkout', '--single-branch', '--branch', 'main', 'https://github.com/laceyenterprises/clio.git', workspaceDir],
+  ]);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /clone reference ignored repo=laceyenterprises\/clio reason=relative-path/);
+});
+
+test('configured local reference dissociates; failed reference falls back and reports durations', async () => {
+  for (const failReference of [false, true]) {
+    const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-reference-'));
+    const reference = path.join(rootDir, 'reference');
+    mkdirSync(path.join(reference, '.git', 'objects'), { recursive: true });
+    mkdirSync(path.join(rootDir, 'domains'), { recursive: true });
+    writeFileSync(path.join(rootDir, 'domains', 'code-pr.json'), JSON.stringify({
+      remediationCloneReferences: { 'laceyenterprises/clio': reference },
+    }));
+    const calls = [];
+    const lines = [];
+    await prepareWorkspaceForJob({
+      rootDir,
+      job: makeJob(),
+      log: { info: line => lines.push(line), warn: line => lines.push(line) },
+      execFileImpl: async (command, args) => {
+        calls.push([command, ...args]);
+        if (command === 'git' && args[0] === 'clone') {
+          if (args.includes('--reference') && failReference) throw new Error('bad reference');
+          mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
+        }
+        if (command === 'gh' && args[0] === 'api') return {
+          stdout: JSON.stringify({ base: { ref: 'main' }, head: { ref: 'feature', repo: { full_name: 'laceyenterprises/clio' } } }),
+        };
+        return { stdout: '', stderr: '' };
+      },
+    });
+    const referenceClone = calls.find(call => call[1] === 'clone');
+    assert.ok(referenceClone.includes('--reference'));
+    assert.ok(referenceClone.includes('--dissociate'));
+    assert.equal(calls.filter(call => call[1] === 'clone').length, failReference ? 2 : 1);
+    assert.match(lines.at(-1), new RegExp(`source=${failReference ? 'network' : 'reference'} clone_fetch_ms=\\d+ checkout_ms=\\d+`));
+  }
+});
+
+test('configured local reference uses the job domain configuration', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-domain-reference-'));
+  const codePrReference = path.join(rootDir, 'code-pr-reference');
+  const securityReference = path.join(rootDir, 'security-reference');
+  mkdirSync(path.join(codePrReference, '.git', 'objects'), { recursive: true });
+  mkdirSync(path.join(securityReference, '.git', 'objects'), { recursive: true });
+  mkdirSync(path.join(rootDir, 'domains'), { recursive: true });
+  writeFileSync(path.join(rootDir, 'domains', 'code-pr.json'), JSON.stringify({
+    remediationCloneReferences: { 'laceyenterprises/clio': codePrReference },
+  }));
+  writeFileSync(path.join(rootDir, 'domains', 'code-pr-security.json'), JSON.stringify({
+    remediationCloneReferences: { 'laceyenterprises/clio': securityReference },
+  }));
+  const calls = [];
+
+  await prepareWorkspaceForJob({
+    rootDir,
+    job: makeJob({ domainId: 'code-pr-security' }),
+    log: { info() {}, warn() {} },
+    execFileImpl: async (command, args) => {
+      calls.push([command, ...args]);
+      if (command === 'git' && args[0] === 'clone') {
+        mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
+      }
+      if (command === 'gh' && args[0] === 'api') return {
+        stdout: JSON.stringify({ base: { ref: 'main' }, head: { ref: 'feature', repo: { full_name: 'laceyenterprises/clio' } } }),
+      };
+      return { stdout: '', stderr: '' };
+    },
+  });
+
+  const referenceClone = calls.find(call => call[1] === 'clone');
+  assert.ok(referenceClone.includes('--reference'));
+  assert.ok(referenceClone.includes(securityReference));
+  assert.equal(referenceClone.includes(codePrReference), false);
 });
 
 test('prepareWorkspaceForJob authenticates git clone/fetch via the inline gh credential helper (no global git config assumed)', async () => {
@@ -1328,7 +1570,7 @@ test('prepareWorkspaceForJob authenticates git clone/fetch via the inline gh cre
     execFileImpl: async (command, args, options = {}) => {
       calls.push({ command, args, options });
       if (command === 'git' && args[0] === 'clone') {
-        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+        mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
       }
       if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
         return {
@@ -2290,7 +2532,7 @@ test('workflow-touching remediation with workflow-capable push token proceeds to
           };
         }
         if (command === 'git' && args[0] === 'clone') {
-          mkdirSync(path.join(args[2], '.git'), { recursive: true });
+          mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
         }
         return { stdout: '', stderr: '' };
       },
@@ -2329,7 +2571,7 @@ test('non-workflow remediation proceeds when the push token lacks workflow scope
           };
         }
         if (command === 'git' && args[0] === 'clone') {
-          mkdirSync(path.join(args[2], '.git'), { recursive: true });
+          mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
         }
         return { stdout: '', stderr: '' };
       },
@@ -2357,7 +2599,7 @@ test('configured remediation push token overrides ambient gh token for git clone
     execFileImpl: async (command, args, options = {}) => {
       calls.push({ command, args, options });
       if (command === 'git' && args[0] === 'clone') {
-        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+        mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
       }
       if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
         return {
@@ -2399,7 +2641,7 @@ test('prepareWorkspaceForJob rejects a malformed PR number before building a RES
       env: {},
       execFileImpl: async (command, args) => {
         if (command === 'git' && args[0] === 'clone') {
-          mkdirSync(path.join(args[2], '.git'), { recursive: true });
+          mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
         }
         return { stdout: '', stderr: '' };
       },
@@ -2418,7 +2660,7 @@ test('prepareWorkspaceForJob normalizes a numeric-string PR number into the REST
     execFileImpl: async (command, args) => {
       calls.push({ command, args });
       if (command === 'git' && args[0] === 'clone') {
-        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+        mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
       }
       if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
         return {
@@ -2454,7 +2696,7 @@ test('prepareWorkspaceForJob issues no GraphQL-backed gh commands (rate-limit we
     execFileImpl: async (command, args) => {
       calls.push({ command, args });
       if (command === 'git' && args[0] === 'clone') {
-        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+        mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
       }
       if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
         return {
@@ -2492,7 +2734,7 @@ test('prepareWorkspaceForJob falls back to gh pr checkout for fork PRs', async (
     execFileImpl: async (command, args) => {
       calls.push({ command, args });
       if (command === 'git' && args[0] === 'clone') {
-        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+        mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
       }
       if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
         return {
@@ -2531,7 +2773,7 @@ test('prepareWorkspaceForJob hydrates production workspaces under HQ_ROOT', asyn
     execFileImpl: async (command, args, options = {}) => {
       calls.push({ command, args, options });
       if (command === 'git' && args[0] === 'clone') {
-        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+        mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
       }
       if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
         return {
@@ -2643,7 +2885,7 @@ test('prepareWorkspaceForJob reclones stale workspaces with the wrong repo remot
         return { stdout: '', stderr: '' };
       }
       if (command === 'git' && args[0] === 'clone') {
-        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+        mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
       }
       if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
         return {
@@ -2662,11 +2904,12 @@ test('prepareWorkspaceForJob reclones stale workspaces with the wrong repo remot
   assert.deepEqual(calls.map((call) => [call.command, ...call.args]), [
     ['git', 'config', '--get', 'remote.origin.url'],
     ['git', 'status', '--short'],
-    ['git', 'clone', 'https://github.com/laceyenterprises/clio.git', result.workspaceDir],
+    ['gh', 'api', 'repos/laceyenterprises/clio/pulls/7'],
+    ['git', 'clone', '--no-checkout', '--single-branch', '--branch', 'main', 'https://github.com/laceyenterprises/clio.git', result.workspaceDir],
     ['git', '-C', result.workspaceDir, 'config', 'user.name', 'Codex Remediation Worker'],
     ['git', '-C', result.workspaceDir, 'config', 'user.email', 'codex-remediation-worker@laceyenterprises.com'],
-    ['gh', 'api', 'repos/laceyenterprises/clio/pulls/7'],
-    ['git', '-C', result.workspaceDir, 'fetch', 'origin', '+refs/heads/clio-feature:refs/remotes/origin/clio-feature'],
+    ['git', '-C', result.workspaceDir, 'remote', 'set-branches', '--add', 'origin', 'clio-feature'],
+    ['git', '-C', result.workspaceDir, 'fetch', 'origin', '+refs/heads/clio-feature:refs/remotes/origin/clio-feature', '+refs/heads/main:refs/remotes/origin/main'],
     ['git', '-C', result.workspaceDir, 'checkout', '-B', 'clio-feature', 'origin/clio-feature'],
   ]);
 });
@@ -2704,7 +2947,7 @@ test('prepareWorkspaceForJob uses the claude-code identity when workerClass="cla
     execFileImpl: async (command, args, options = {}) => {
       calls.push({ command, args });
       if (command === 'git' && args[0] === 'clone') {
-        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+        mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
       }
       if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
         return {
@@ -2908,7 +3151,7 @@ test('prepareWorkspaceForJob installs the worker-provenance hook in the workspac
     env: {},
     execFileImpl: async (command, args, options = {}) => {
       if (command === 'git' && args[0] === 'clone') {
-        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+        mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
       }
       if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
         return {
@@ -2940,7 +3183,7 @@ test('prepareWorkspaceForJob does not pre-create remediation-reply.json in the w
     env: {},
     execFileImpl: async (command, args) => {
       if (command === 'git' && args[0] === 'clone') {
-        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+        mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
       }
       if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
         return {
@@ -3326,6 +3569,11 @@ test('remediation runtime local mode preserves the claude-code-remediation prove
   let invokedArgs;
   let invokedEnv;
   const handle = await createRemediationRuntime({
+    env: {
+      PATH: process.env.PATH,
+      HOME: workspaceDir,
+      AGENT_OS_DEPLOY_CHECKOUT: path.join(workspaceDir, 'missing-seed'),
+    },
     spawnImpl: (cmd, args, options) => {
       invokedCli = cmd;
       invokedArgs = args;
@@ -3351,6 +3599,8 @@ test('remediation runtime local mode preserves the claude-code-remediation prove
     '--permission-mode',
     'acceptEdits',
     '--dangerously-skip-permissions',
+    '--model',
+    'claude-opus-5-5',
   ]);
 });
 
@@ -3779,7 +4029,8 @@ test('buildRemediationPrompt defaults the provenance trailer to codex-remediatio
 });
 
 test('resolveGeminiRemediationModel defaults to gemini-2.5-pro and honors overrides', () => {
-  assert.equal(resolveGeminiRemediationModel({}), 'gemini-2.5-pro');
+  const noRegistryEnv = { AGENT_OS_DEPLOY_CHECKOUT: path.join(tmpdir(), 'missing-agent-os-checkout') };
+  assert.equal(resolveGeminiRemediationModel(noRegistryEnv), 'gemini-2.5-pro');
   assert.equal(
     resolveGeminiRemediationModel({ GEMINI_MODEL: 'gemini-2.5-flash' }),
     'gemini-2.5-flash'
@@ -3794,12 +4045,26 @@ test('resolveGeminiRemediationModel defaults to gemini-2.5-pro and honors overri
   );
 });
 
+test('resolveGeminiRemediationModel honors explicit hqRoot for display parity with worker spawn', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'adversarial-review-model-helper-'));
+  try {
+    mkdirSync(path.join(root, 'registry'), { recursive: true });
+    writeFileSync(path.join(root, 'registry', 'worker-classes.json'), JSON.stringify({ classes: {
+      'remediator-gemini': { defaultModel: 'gemini-3-pro' },
+    } }));
+    assert.equal(resolveGeminiRemediationModel({}, { hqRoot: root }), 'gemini-3-pro');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('SEV0: resolveCodexRemediationModel pins gpt-5.5 by default and honors overrides (never rides the codex server-default)', () => {
   // Regression for the 2026-07-19 SEV0: riding codex's server-default model
   // routed remediation through the code_mode_only tool-host that times out at
   // handshake, so the worker could not run any command and never wrote its
   // reply. Remediation MUST pin an explicit model.
-  assert.equal(resolveCodexRemediationModel({}), 'gpt-5.5');
+  const noRegistryEnv = { AGENT_OS_DEPLOY_CHECKOUT: path.join(tmpdir(), 'missing-agent-os-checkout') };
+  assert.equal(resolveCodexRemediationModel(noRegistryEnv), 'gpt-5.5');
   assert.equal(resolveCodexRemediationModel({ CODEX_MODEL_ID: 'gpt-5.4' }), 'gpt-5.4');
   // The remediation-specific pin wins over the generic CODEX_MODEL_ID.
   assert.equal(
@@ -3809,6 +4074,19 @@ test('SEV0: resolveCodexRemediationModel pins gpt-5.5 by default and honors over
     }),
     'gpt-5.3-codex'
   );
+});
+
+test('resolveCodexRemediationModel honors explicit hqRoot for display parity with worker spawn', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'adversarial-review-model-helper-'));
+  try {
+    mkdirSync(path.join(root, 'registry'), { recursive: true });
+    writeFileSync(path.join(root, 'registry', 'worker-classes.json'), JSON.stringify({ classes: {
+      'remediator-codex': { defaultModel: 'gpt-6-sol' },
+    } }));
+    assert.equal(resolveCodexRemediationModel({}, { hqRoot: root }), 'gpt-6-sol');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('assertRemediationWorkerOAuth routes gemini to the gemini OAuth pre-flight', async () => {
@@ -5637,7 +5915,7 @@ function drainerTestOptions(rootDir, spawnCalls, overrides = {}) {
     resolvePRLifecycleImpl: async () => null,
     execFileImpl: async (command, args) => {
       if (command === 'git' && args[0] === 'clone') {
-        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+        mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
       }
       if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
         return {
@@ -5658,6 +5936,44 @@ function drainerTestOptions(rootDir, spawnCalls, overrides = {}) {
     ...overrides,
   };
 }
+
+test('a slow workspace does not hold another remediation spawn at the concurrency cap', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-parallel-'));
+  createPendingRemediationJob(rootDir, { prNumber: 7, reviewPostedAt: '2026-04-21T08:00:00.000Z' });
+  createPendingRemediationJob(rootDir, { prNumber: 8, reviewPostedAt: '2026-04-21T08:01:00.000Z' });
+  const spawnCalls = [];
+  let releaseSlow;
+  const slowClone = new Promise(resolve => { releaseSlow = resolve; });
+  let secondSpawn;
+  const secondSpawned = new Promise(resolve => { secondSpawn = resolve; });
+  const defaults = drainerTestOptions(rootDir, spawnCalls);
+  const drain = withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity({
+    ...defaults,
+    maxConcurrent: 2,
+    execFileImpl: async (command, args, options) => {
+      if (command === 'git' && args[0] === 'clone' && args.at(-1).includes('-pr-7-')) {
+        await slowClone;
+      }
+      return defaults.execFileImpl(command, args, options);
+    },
+    spawnImpl: (...args) => {
+      const worker = defaults.spawnImpl(...args);
+      secondSpawn();
+      return worker;
+    },
+  }));
+  try {
+    await Promise.race([
+      secondSpawned,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('second job waited on slow clone')), 2000)),
+    ]);
+    assert.equal(spawnCalls.length, 1);
+  } finally {
+    releaseSlow();
+    await drain;
+  }
+  assert.equal(spawnCalls.length, 2);
+});
 
 test('review-to-remediation wake lets daemon consume a queued job within five seconds', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-handoff-'));
@@ -5755,7 +6071,7 @@ test('consumeNextFollowUpJob hydrates legacy jobs without baseBranch before spaw
           };
         }
         if (command === 'git' && args[0] === 'clone') {
-          mkdirSync(path.join(args[2], '.git'), { recursive: true });
+          mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
         }
         return { stdout: '', stderr: '' };
       },
@@ -6124,7 +6440,7 @@ test('consumeFollowUpJobsUntilCapacity does not charge claim-time terminal trans
   assert.equal(spawnCalls.length, 2);
   assert.deepEqual(
     result.results.map((entry) => entry.reason || (entry.consumed ? 'spawned' : 'unknown')),
-    ['review-settled', 'spawned', 'spawned']
+    ['no-remediation-required', 'spawned', 'spawned']
   );
   assert.deepEqual(wakeCalls, [{
     rootDir,
@@ -6174,6 +6490,78 @@ test('consumeFollowUpJobsUntilCapacity does not charge claim-time terminal trans
   } finally {
     db.close();
   }
+});
+
+test('consumeFollowUpJobsUntilCapacity finishes no-remediation jobs while at full capacity and releases the gate', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  markActiveInProgressJob(rootDir, {
+    prNumber: 6,
+    reviewPostedAt: '2026-04-21T07:58:00.000Z',
+  });
+  createPendingRemediationJob(rootDir, {
+    prNumber: 7,
+    revisionRef: 'clean-head-sha',
+    critical: false,
+    reviewBody: '## Summary\nClean.\n\n## Blocking Issues\n- None.\n\n## Non-blocking Issues\n- None.\n\n## Verdict\nComment only',
+    reviewPostedAt: '2026-04-21T07:59:00.000Z',
+  });
+
+  const spawnCalls = [];
+  const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity(
+    drainerTestOptions(rootDir, spawnCalls, { maxConcurrent: 1 })
+  ));
+
+  assert.equal(result.activeAtStart, 1);
+  assert.equal(result.availableAtStart, 0);
+  assert.equal(result.stopped, 1);
+  assert.equal(result.spawned, 0);
+  assert.equal(spawnCalls.length, 0);
+  assert.equal(result.results[0].reason, 'no-remediation-required');
+  assert.equal(result.results[0].job.remediationPlan.stop.code, 'no-remediation-required');
+
+  const decision = pickAdversarialGateStatus({
+    reviewRow: {
+      review_status: 'posted',
+      reviewer_head_sha: 'clean-head-sha',
+    },
+    latestJob: result.results[0].job,
+    headSha: 'clean-head-sha',
+  });
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'review-settled');
+});
+
+test('clean pending job stays queued while the same PR has an in-progress worker', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  markActiveInProgressJob(rootDir, { prNumber: 6, reviewPostedAt: '2026-04-21T07:58:00.000Z' });
+  const pending = createPendingRemediationJob(rootDir, {
+    prNumber: 6,
+    revisionRef: 'new-clean-head',
+    reviewBody: '## Summary\nClean.\n## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nComment only',
+    reviewPostedAt: '2026-04-21T08:02:00.000Z',
+  });
+  const wakes = [];
+  const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity(
+    drainerTestOptions(rootDir, [], {
+      maxConcurrent: 1,
+      requestWatcherWakeImpl: (args) => { wakes.push(args); return { requested: true }; },
+    })
+  ));
+  assert.equal(result.stopped, 0);
+  assert.equal(existsSync(pending.jobPath), true);
+  assert.deepEqual(wakes, []);
+});
+
+test('shutdown leaves settled pending jobs untouched', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const pending = createPendingRemediationJob(rootDir, {
+    reviewBody: '## Summary\nClean.\n## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nComment only',
+  });
+  const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity(
+    drainerTestOptions(rootDir, [], { shouldStop: () => true })
+  ));
+  assert.equal(result.stopped, 0);
+  assert.equal(existsSync(pending.jobPath), true);
 });
 
 test('consumeFollowUpJobsUntilCapacity continues filling capacity after one job fails to spawn', async () => {
@@ -6271,10 +6659,11 @@ test('killDetachedWorkerProcessGroup refuses to target the daemon pid', () => {
   assert.equal(killDetachedWorkerProcessGroup(process.pid), false);
 });
 
-test('consumeFollowUpJobsUntilCapacity stops draining when shutdown flips mid-tick', async () => {
+test('consumeFollowUpJobsUntilCapacity requeues claimed jobs that finish preparation after shutdown', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createPendingRemediationJob(rootDir, { prNumber: 7, reviewPostedAt: '2026-04-21T08:00:00.000Z' });
   createPendingRemediationJob(rootDir, { prNumber: 8, reviewPostedAt: '2026-04-21T08:01:00.000Z' });
+  createPendingRemediationJob(rootDir, { prNumber: 9, reviewPostedAt: '2026-04-21T08:02:00.000Z' });
 
   const spawnCalls = [];
   let stopping = false;
@@ -6291,9 +6680,33 @@ test('consumeFollowUpJobsUntilCapacity stops draining when shutdown flips mid-ti
     })
   ));
 
-  assert.equal(result.spawned, 1);
-  assert.equal(spawnCalls.length, 1);
-  assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'pending')).filter((name) => name.endsWith('.json')).length, 1);
+  assert.ok(result.spawned <= 1);
+  assert.ok(spawnCalls.length <= 1);
+  assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'pending')).filter((name) => name.endsWith('.json')).length, 3 - spawnCalls.length);
+});
+
+test('shutdown during workspace preparation returns the claimed job to pending without a round charge', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-stop-prep-'));
+  createPendingRemediationJob(rootDir);
+  const spawns = [];
+  let stopping = false;
+  const defaults = drainerTestOptions(rootDir, spawns);
+  const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity({
+    ...defaults,
+    maxConcurrent: 1,
+    shouldStop: () => stopping,
+    execFileImpl: async (command, args, options) => {
+      const outcome = await defaults.execFileImpl(command, args, options);
+      if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) stopping = true;
+      return outcome;
+    },
+  }));
+  assert.equal(spawns.length, 0);
+  assert.equal(result.results[0].reason, 'shutting-down');
+  const pendingNames = readdirSync(getFollowUpJobDir(rootDir, 'pending')).filter(name => name.endsWith('.json'));
+  assert.equal(pendingNames.length, 1);
+  const job = JSON.parse(readFileSync(path.join(getFollowUpJobDir(rootDir, 'pending'), pendingNames[0]), 'utf8'));
+  assert.equal(job.remediationPlan.currentRound, 0);
 });
 
 test('resolveRemediationMaxConcurrentJobs clamps runaway env values', () => {
@@ -6361,7 +6774,7 @@ test('consumeNextFollowUpJob lifts stale medium maxRounds=2 jobs to the current 
     now: () => '2026-04-21T10:30:00.000Z',
     execFileImpl: async (command, args) => {
       if (command === 'git' && args[0] === 'clone') {
-        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+        mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
       }
       if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
         return {
@@ -6436,7 +6849,7 @@ test('consumeNextFollowUpJob still spawns when a high-risk job enters round 3 wi
     now: () => '2026-04-21T10:31:00.000Z',
     execFileImpl: async (command, args, options = {}) => {
       if (command === 'git' && args[0] === 'clone') {
-        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+        mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
       }
       if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
         return {
@@ -6987,7 +7400,7 @@ test('consumeNextFollowUpJob threads claimed jobId through to the spawned worker
         execFileImpl: async (command, args) => {
           if (command === 'git' && args[0] === 'clone') {
             // Simulate the clone: drop a `.git` dir at the workspace.
-            mkdirSync(path.join(args[2], '.git'), { recursive: true });
+            mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
             return { stdout: '', stderr: '' };
           }
           if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
@@ -7086,7 +7499,7 @@ test('consumeNextFollowUpJob invokes oss-readiness --apply once, commits the mec
         execFileImpl: async (command, args, options = {}) => {
           calls.push([command, ...args]);
           if (command === 'git' && args[0] === 'clone') {
-            mkdirSync(path.join(args[2], '.git', 'info'), { recursive: true });
+            mkdirSync(path.join(args.at(-1), '.git', 'info'), { recursive: true });
             return { stdout: '', stderr: '' };
           }
           if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
@@ -7188,7 +7601,7 @@ test('consumeNextFollowUpJob surfaces unfixable oss-readiness baseline bumps wit
           execFileImpl: async (command, args) => {
             calls.push([command, ...args]);
             if (command === 'git' && args[0] === 'clone') {
-              mkdirSync(path.join(args[2], '.git', 'info'), { recursive: true });
+              mkdirSync(path.join(args.at(-1), '.git', 'info'), { recursive: true });
               return { stdout: '', stderr: '' };
             }
             if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
@@ -7276,7 +7689,7 @@ test('consumeNextFollowUpJob rolls back workspace when oss-readiness apply crash
           execFileImpl: async (command, args) => {
             calls.push([command, ...args]);
             if (command === 'git' && args[0] === 'clone') {
-              mkdirSync(path.join(args[2], '.git', 'info'), { recursive: true });
+              mkdirSync(path.join(args.at(-1), '.git', 'info'), { recursive: true });
               return { stdout: '', stderr: '' };
             }
             if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
@@ -7356,7 +7769,7 @@ test('consumeNextFollowUpJob skips oss-readiness --apply when the audit did not 
             applyCalls += 1;
           }
           if (command === 'git' && args[0] === 'clone') {
-            mkdirSync(path.join(args[2], '.git', 'info'), { recursive: true });
+            mkdirSync(path.join(args.at(-1), '.git', 'info'), { recursive: true });
             return { stdout: '', stderr: '' };
           }
           if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
@@ -7551,7 +7964,7 @@ test('consumeNextFollowUpJob applies and pushes oss-readiness remediation before
         execFileImpl: async (command, args, options = {}) => {
           commands.push([command, ...args]);
           if (command === 'git' && args[0] === 'clone') {
-            mkdirSync(path.join(args[2], '.git', 'info'), { recursive: true });
+            mkdirSync(path.join(args.at(-1), '.git', 'info'), { recursive: true });
             return { stdout: '', stderr: '' };
           }
           if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
@@ -7679,7 +8092,7 @@ test('consumeNextFollowUpJob rolls back local oss-readiness commit when pre-disp
           execFileImpl: async (command, args, options = {}) => {
             commands.push([command, ...args]);
             if (command === 'git' && args[0] === 'clone') {
-              mkdirSync(path.join(args[2], '.git', 'info'), { recursive: true });
+              mkdirSync(path.join(args.at(-1), '.git', 'info'), { recursive: true });
               return { stdout: '', stderr: '' };
             }
             if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
@@ -8746,7 +9159,7 @@ test('consumeNextFollowUpJob falls back to the legacy local spawner when HQ disp
           };
         }
         if (command === 'git' && args[0] === 'clone') {
-          mkdirSync(path.join(args[2], '.git'), { recursive: true });
+          mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
           return { stdout: '', stderr: '' };
         }
         return { stdout: '', stderr: '' };
@@ -9311,7 +9724,7 @@ test('consumeNextFollowUpJob keeps native remediation on the bare spawner withou
             };
           }
           if (command === 'git' && args[0] === 'clone') {
-            mkdirSync(path.join(args[2], '.git'), { recursive: true });
+            mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
             return { stdout: '', stderr: '' };
           }
           return { stdout: '', stderr: '' };
@@ -10354,7 +10767,7 @@ test('consumeNextFollowUpJob keeps post-spawn cleanup failures budget-neutral wh
         resolvePRLifecycleImpl: async () => null,
         execFileImpl: async (command, args) => {
           if (command === 'git' && args[0] === 'clone') {
-            mkdirSync(path.join(args[2], '.git'), { recursive: true });
+            mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
           }
           if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
             return {

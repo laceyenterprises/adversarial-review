@@ -1530,6 +1530,24 @@ mis-resolved workspace tree. Workspace-root provisioning failures must surface a
 structured error that names both `HQ_ROOT` and the runtime user so first-deploy
 permission drift is diagnosable without reading a raw stack trace.
 
+Workspace preparation resolves live PR branch metadata through the REST pulls
+endpoint before cloning. The clone uses GitHub's current `base.ref`, not the
+job's persisted `baseBranch`, so stacked PRs that are retargeted after their
+old base merges do not fail on a deleted branch. Same-repo workspaces clone over
+git smart-HTTP with `--no-checkout --single-branch --branch <liveBaseBranch>`,
+then fetch the PR head and live base ref explicitly before `checkout -B`. If
+the narrowed clone reports that the remote branch is missing, the daemon
+retries the clone without `--single-branch --branch` before failing workspace
+preparation.
+
+Domain configs may define `remediationCloneReferences` as a map from repo slug
+to an absolute local clone path. A valid reference must live outside the
+per-job remediation workspace and expose either `objects/` or `.git/objects/`;
+valid references are used with `--reference <path> --dissociate` so the worker
+workspace never depends on the reference after clone. Relative paths,
+workspace-contained paths, and paths without objects are ignored with a warning
+and the daemon falls back to a normal network clone.
+
 ### HQ Branch-Push Remediation Lane
 
 When `ADV_WITH_HQ_INTEGRATION=1` or
@@ -1873,7 +1891,7 @@ The watcher must project the gate on terminal early-exit paths, including alread
 `retrigger-review` and `retrigger-remediation` are separate operator surfaces:
 
 - `retrigger-review` resets the watcher delivery row to `review_status='pending'` so the watcher can post another adversarial review.
-- `retrigger-remediation` bumps the remediation budget and requeues the latest eligible terminal follow-up job. It does not reset `reviews.db` first; the next fresh adversarial review must come from the requeued worker's durable `reReview.requested=true` reply during normal reconciliation. Eligible terminal jobs are `failed`, `completed` with `reReview.requested=true`, or `stopped` with one of `max-rounds-reached`, `round-budget-exhausted`, `daemon-bounce-safety`, `review-settled`, `no-progress`, `stale-review-head`, `revision-superseded`, or `stale-heartbeat`. `stopped:review-settled` is retriggerable because the automatic loop has settled the review as non-blocking, but an explicit operator action can still request a worker pass over the remaining findings. That retrigger is carried durably on `remediationPlan.nextAction={type:'consume-pending-round', operatorOverride:true, requestedAt, requestedBy, operatorVisibility:'explicit'}`; `claimNextFollowUpJob` must suppress the claim-time `review-settled` early-stop for that one claim, then consume the override by rewriting `nextAction` to `worker-spawn`. While the requeued job is `pending` or `inProgress`, the adversarial gate must stay pending rather than projecting the stored Comment-only verdict as settled. `stopped:operator-stop` and `stopped:rereview-blocked` are intentionally not retriggerable through this surface because those states encode operator intent or a watcher refusal that needs human handling.
+- `retrigger-remediation` bumps the remediation budget and requeues the latest eligible terminal follow-up job. It does not reset `reviews.db` first; the next fresh adversarial review must come from the requeued worker's durable `reReview.requested=true` reply during normal reconciliation. Eligible terminal jobs are `failed`, `completed` with `reReview.requested=true`, or `stopped` with one of `max-rounds-reached`, `round-budget-exhausted`, `daemon-bounce-safety`, `review-settled`, `no-remediation-required`, `no-progress`, `stale-review-head`, `revision-superseded`, or `stale-heartbeat`. `stopped:review-settled` and `stopped:no-remediation-required` are retriggerable because the automatic loop has settled the review as non-blocking, but an explicit operator action can still request a worker pass over the remaining findings. That retrigger is carried durably on `remediationPlan.nextAction={type:'consume-pending-round', operatorOverride:true, requestedAt, requestedBy, operatorVisibility:'explicit'}`; `claimNextFollowUpJob` must suppress the claim-time settled-review early-stop for that one claim, then consume the override by rewriting `nextAction` to `worker-spawn`. While the requeued job is `pending` or `inProgress`, the adversarial gate must stay pending rather than projecting the stored Comment-only verdict as settled. `stopped:operator-stop` and `stopped:rereview-blocked` are intentionally not retriggerable through this surface because those states encode operator intent or a watcher refusal that needs human handling.
 - `diagnose-stuck-rereview --apply` is a daemon watchdog for rows that look abandoned after a durable worker rereview request. It is not an operator override: it must not clear reviewer failure evidence or retry counters, must not satisfy the explicit `retrigger-review:` bypass predicate, and must preserve both `rereview_requested_at` and `rereview_reason` as the original FIFO/latency clock and load-bearing marker. On an open pending row without `failed_at`, it may only request a `stuck-rereview-watchdog` watcher wake for the affected repo/PR/head as the retry nudge. Repeated wakes are capped and backed off per `(repo, pr, head)`, state entries older than seven days are pruned on write, cap exhaustion is surfaced as a skipped row rather than an apply failure so capped rows cannot consume the apply window forever, and a wake-write failure after a successful eligibility check still consumes backoff budget. The watchdog does not own the terminal-PR decision: `reviewed_prs.pr_state` is a candidate pre-filter only, and the authoritative-live merged/closed decision stays with the watcher's claim guard, which is safe because a stale-`open` row costs only bounded wakes and no row mutation. The daemon tick step that runs it must be disarmable without a code change: `ADVERSARIAL_STUCK_REREVIEW_APPLY_ENABLED=0` (or `false`/`no`/`off`) plus a daemon bounce skips the step, and unset/empty keeps it armed.
 - `reconcile-posted-orphans --apply` is an operator recovery surface for the
   narrower case where the reviewer actually posted, but the watcher had already
@@ -2354,3 +2372,14 @@ The C5 uninstall closure path must synchronously invoke TEL-11 standing detectio
 Activation records are written under `data/runtime-cutover/c5-tel11-activations/` with `kind: "adversarial-review-c5-tel11-activation"` and include the C5 `runId`, C5 `deployId`, optional removal artifact, TEL-11 live status, detector reference, findings, rollback/hold decision, and the RCD-G7A consumer metadata. A non-live TEL-11 response is a fail-closed C5 closure result: the producer writes a non-live record, returns `accepted: false`, sets `holdClosure: true` / `rollbackRequired: true`, and emits the runtime-cutover alert event `runtime_cutover.c5_tel11_activation_blocked`.
 
 After a live activation, standing detections remain the TEL-owned guard for reintroduced OpenClaw package/config dependencies. `enforceTel11StandingDetectionsAfterActivation` consumes the activation record, invokes TEL-11 with phase `post-activation-openclaw-reintroduction-check`, and emits `runtime_cutover.tel11_openclaw_reintroduction` when TEL-11 reports a non-live state or any finding. That is the fail-loud/page path; adversarial-review only performs the binding and alert delivery.
+### Pending clean review fast path
+
+A pending follow-up job with an empty blocking and non-blocking issue set may
+be stopped before capacity is available, with stop code
+`no-remediation-required`. The same code is emitted if the claim path reaches
+the job first. This settlement predicate is intentionally strict regardless
+of the host's relaxed non-blocking remediation setting. A same-PR in-progress
+remediation job or AMA closer reserves the PR: the drain leaves the pending
+job queued, and the adversarial gate remains pending while remediation is
+in progress. Shutdown prevents further drain transitions. Readers continue
+to accept the historical `review-settled` stop code.

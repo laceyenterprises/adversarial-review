@@ -58,14 +58,15 @@ function insertPass(db, row) {
   db.prepare(
     `INSERT INTO reviewer_passes
        (repo, pr_number, attempt_number, reviewer_class, reviewer_model,
-        pass_kind, started_at, ended_at, status, verdict, body_md, metadata_json)
-     VALUES (?, ?, ?, 'codex', 'gpt-5', ?, ?, ?, ?, ?, ?, '{}')`
+        pass_kind, started_at, ended_at, status, verdict, body_md, metadata_json, gh_comment_id)
+     VALUES (?, ?, ?, 'codex', 'gpt-5', ?, ?, ?, ?, ?, ?, '{}', ?)`
   ).run(
     REPO, row.prNumber, row.attemptNumber ?? 1,
     (row.attemptNumber ?? 1) > 1 ? 'rereview' : 'first-pass',
     row.startedAt, row.endedAt, row.status ?? 'completed',
     row.verdict ?? 'request-changes',
-    row.bodyMd !== undefined ? row.bodyMd : CLEAN_REVIEW_BODY
+    row.bodyMd !== undefined ? row.bodyMd : CLEAN_REVIEW_BODY,
+    row.ghCommentId === undefined ? `RV_${row.prNumber}_${row.attemptNumber ?? 1}` : row.ghCommentId
   );
 }
 
@@ -126,7 +127,7 @@ test('a stalled PR emits pr_progress_stalled, and a merely slow one emits only t
 
     // SLOW: no stall of any kind, just over the derived budget.
     insertPr(db, { prNumber: 9002, reviewedAt: iso(400), reviewStatus: 'pending' });
-    insertPass(db, { prNumber: 9002, attemptNumber: 1, startedAt: iso(398), endedAt: iso(20) });
+    insertPass(db, { prNumber: 9002, attemptNumber: 1, startedAt: iso(398), endedAt: iso(20), ghCommentId: null });
   } finally {
     db.close();
   }

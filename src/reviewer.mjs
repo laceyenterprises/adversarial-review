@@ -76,6 +76,12 @@ import {
   resolveSigtermFenceGraceSeconds,
 } from './reviewer-fence.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
+import {
+  configureReviewerWorkspaceAudit,
+  ReviewerSnapshotBaseError,
+  prepareReviewerSnapshot,
+  resolveReviewerWorkspaceStateDir,
+} from './reviewer-workspace.mjs';
 import { normalizeEffectiveReviewVerdict, sanitizeCodexReviewPayload } from './kernel/verdict.mjs';
 import { pickReviewerStage } from './kernel/prompt-stage.mjs';
 import { createLinearTriageAdapter } from './adapters/operator/linear-triage/index.mjs';
@@ -112,6 +118,7 @@ import { resolveGeminiRuntime } from './role-config.mjs';
 import {
   alertClioOAuthFailure,
   alertClioOversizedAgyFailure,
+  alertReviewerSnapshotBaseFailure,
 } from './reviewer-alerts.mjs';
 import {
   REVIEW_POST_RETRY_DELAYS_MS,
@@ -2064,7 +2071,47 @@ async function main() {
     oversizedAgyPromptBytes: oversizedAgyRoute?.oversized ? oversizedAgyRoute.promptBytes : null,
     oversizedAgyBudgetBytes: oversizedAgyRoute?.oversized ? oversizedAgyRoute.maxBytes : null,
   });
-  const reviewerSubprocessCwd = resolveReviewerSubprocessCwd({ repo, rootDir: ROOT });
+  const reviewerCheckoutDir = resolveReviewerSubprocessCwd({ repo, rootDir: ROOT });
+  const reviewerStateDir = resolveAdversarialReviewStateDir(ROOT, process.env);
+  let reviewerWorkspaceStateDir;
+  let reviewerSubprocessCwd;
+  let reviewerWorkspaceHeadSha;
+  try {
+    reviewerWorkspaceStateDir = resolveReviewerWorkspaceStateDir({
+      stateDir: reviewerStateDir,
+      checkoutDir: reviewerCheckoutDir,
+    });
+    const snapshot = await prepareReviewerSnapshot({
+      repo,
+      checkoutDir: reviewerCheckoutDir,
+      stateDir: reviewerWorkspaceStateDir,
+    });
+    reviewerSubprocessCwd = snapshot.snapshotDir;
+    reviewerWorkspaceHeadSha = reviewerHeadSha || snapshot.headSha;
+    configureReviewerWorkspaceAudit({
+      repo,
+      prNumber,
+      reviewerModel: effectiveModel,
+      headSha: reviewerWorkspaceHeadSha,
+      checkoutDir: reviewerCheckoutDir,
+      stateDir: reviewerWorkspaceStateDir,
+    });
+    console.error(
+      `[reviewer] reviewer workspace snapshot repo=${repo} sourceHead=${snapshot.headSha} cwd=${snapshot.snapshotDir}`
+    );
+  } catch (err) {
+    configureReviewerWorkspaceAudit(null);
+    const kind = err instanceof ReviewerSnapshotBaseError
+      ? 'invalid base checkout snapshot'
+      : 'reviewer workspace snapshot unavailable';
+    console.error(`[reviewer] infrastructure error: ${kind} for ${repo}#${prNumber}: ${err.message}`);
+    if (err instanceof ReviewerSnapshotBaseError) {
+      await alertReviewerSnapshotBaseFailure({
+        repo, prNumber, headSha: err.headSha, linkPath: err.linkPath, reason: err.message,
+      });
+    }
+    process.exit(1);
+  }
 
   let reviewText;
   let rawReviewText;
@@ -2094,6 +2141,14 @@ async function main() {
       );
       effectiveModel = 'gemini';
       effectiveBotTokenEnv = 'GH_GEMINI_REVIEWER_TOKEN';
+      configureReviewerWorkspaceAudit({
+        repo,
+        prNumber,
+        reviewerModel: effectiveModel,
+        headSha: reviewerWorkspaceHeadSha,
+        checkoutDir: reviewerCheckoutDir,
+        stateDir: reviewerWorkspaceStateDir,
+      });
       dispatch = await reviewAgyOversizedInChunks(diff, extraContext, {
         promptStage: reviewerPromptStage,
         reviewerSubprocessCwd,

@@ -103,6 +103,7 @@ const RETRIGGERABLE_STOP_CODES = Object.freeze([
   // A settled review stops the automatic loop, but an explicit operator
   // retrigger label/CLI call means "address the remaining non-blocking flags."
   'review-settled',
+  'no-remediation-required',
   // The silent-no-progress guard auto-stops when a remediation round
   // completes without setting `reReview.requested = true`. The guard
   // prevents an automatic loop where remediation keeps "completing"
@@ -147,6 +148,20 @@ const RETRIGGERABLE_STOP_CODES = Object.freeze([
   //     lifecycle states; the PR is gone, retriggering has no target.
 ]);
 const RETRIGGERABLE_STOP_CODE_SET = new Set(RETRIGGERABLE_STOP_CODES);
+const SETTLED_CLEAN_STOP_CODES = Object.freeze([
+  'review-settled',
+  'no-remediation-required',
+]);
+const SETTLED_CLEAN_STOP_REASON_TO_CODE = new Map([
+  [
+    'Latest adversarial review verdict is non-blocking; no remediation worker required.',
+    'review-settled',
+  ],
+  [
+    'Latest adversarial review is settled cleanly; no remediation worker required.',
+    'no-remediation-required',
+  ],
+]);
 
 // Canonical set of follow-up job `status` field values that indicate
 // the job is still being worked. A second invocation that intends to
@@ -482,6 +497,22 @@ function isSettledReviewJob(job, options = {}) {
   if (nextAction?.operatorOverride === true) return false;
 
   return isSettledCleanClassification(classifyFollowUpCriticality(job?.reviewBody), options);
+}
+
+function isSettledCleanStopCode(code) {
+  return SETTLED_CLEAN_STOP_CODES.includes(code);
+}
+
+function resolveSettledCleanStopCode(job) {
+  const stop = job?.remediationPlan?.stop;
+  for (const code of [stop?.code, job?.stopCode]) {
+    if (isSettledCleanStopCode(code)) return code;
+  }
+  for (const reason of [stop?.reason, job?.remediationPlan?.stopReason, job?.stopReason]) {
+    const code = SETTLED_CLEAN_STOP_REASON_TO_CODE.get(reason);
+    if (code) return code;
+  }
+  return null;
 }
 
 function handleClaimedStopFailure({ pendingPath, inProgressPath, stopCode, err }) {
@@ -2107,18 +2138,18 @@ function claimNextFollowUpJob({
           rootDir,
           jobPath: inProgressPath,
           stoppedAt: claimedAt,
-          stopCode: 'review-settled',
+          stopCode: 'no-remediation-required',
           sourceStatus: job.status,
-          stopReason: 'Latest adversarial review verdict is non-blocking; no remediation worker required.',
+          stopReason: 'Latest adversarial review is settled cleanly; no remediation worker required.',
           completion: {
-            preview: 'Latest adversarial review verdict is non-blocking; no remediation worker required.',
+            preview: 'Latest adversarial review is settled cleanly; no remediation worker required.',
           },
         });
       } catch (err) {
         handleClaimedStopFailure({
           pendingPath,
           inProgressPath,
-          stopCode: 'review-settled',
+          stopCode: 'no-remediation-required',
           err,
         });
       }
@@ -2127,7 +2158,7 @@ function claimNextFollowUpJob({
           job: stopped.job,
           jobPath: stopped.jobPath,
           stopped: true,
-          reason: 'review-settled',
+          reason: 'no-remediation-required',
         };
       }
       continue;
@@ -2211,6 +2242,70 @@ function claimNextFollowUpJob({
   }
 
   return null;
+}
+
+function stopPendingNoRemediationJobs({
+  rootDir,
+  stoppedAt = new Date().toISOString(),
+  markStoppedImpl = markFollowUpJobStopped,
+  excludedRepoPrKeys = new Set(),
+  shouldStop = () => false,
+} = {}) {
+  ensureFollowUpJobDirs(rootDir);
+  const stoppedJobs = [];
+  const excluded = new Set(
+    Array.from(excludedRepoPrKeys || [], (key) => String(key || '').toLowerCase())
+  );
+
+  for (const pendingPath of listPendingFollowUpJobPaths(rootDir)) {
+    if (shouldStop()) break;
+    let job;
+    try {
+      job = readFollowUpJob(pendingPath);
+    } catch (err) {
+      if (err?.code === 'ENOENT') continue;
+      throw err;
+    }
+
+    if (excluded.has(followUpJobRepoPrKey(job)) || !isSettledReviewJob(job)) continue;
+
+    const inProgressPath = join(getFollowUpJobDir(rootDir, 'inProgress'), basename(pendingPath));
+    try {
+      renameSync(pendingPath, inProgressPath);
+    } catch (err) {
+      if (err?.code === 'ENOENT') continue;
+      throw err;
+    }
+
+    try {
+      const stopped = markStoppedImpl({
+        rootDir,
+        jobPath: inProgressPath,
+        stoppedAt,
+        stopCode: 'no-remediation-required',
+        sourceStatus: job.status,
+        stopReason: 'Latest adversarial review is settled cleanly; no remediation worker required.',
+        completion: {
+          preview: 'Latest adversarial review is settled cleanly; no remediation worker required.',
+        },
+      });
+      stoppedJobs.push({
+        job: stopped.job,
+        jobPath: stopped.jobPath,
+        stopped: true,
+        reason: 'no-remediation-required',
+      });
+    } catch (err) {
+      handleClaimedStopFailure({
+        pendingPath,
+        inProgressPath,
+        stopCode: 'no-remediation-required',
+        err,
+      });
+    }
+  }
+
+  return stoppedJobs;
 }
 
 function markFollowUpJobSpawned({
@@ -2922,6 +3017,7 @@ export {
   getFollowUpJobDir,
   isActiveFollowUpJobStatus,
   isRetriggerableStoppedFollowUpJob,
+  isSettledCleanStopCode,
   isSettledCleanClassification,
   isSettledReviewJob,
   listFollowUpJobsInDir,
@@ -2939,9 +3035,11 @@ export {
   readFollowUpJob,
   remediationAttemptNumber,
   resolveRoundBudgetForJob,
+  resolveSettledCleanStopCode,
   requeueFollowUpJobForNextRound,
   stopFollowUpJob,
   summarizePRRemediationLedger,
+  stopPendingNoRemediationJobs,
   validateRemediationReply,
   writeFollowUpJob,
 };

@@ -570,6 +570,7 @@ If you're running this against the maintainer's hosted environment (or
 reproducing it), the operator docs are:
 
 - [`docs/follow-up-runbook.md`](docs/follow-up-runbook.md) — the day-to-day operator runbook
+- [`docs/RUNBOOK-reviewer-workspace.md`](docs/RUNBOOK-reviewer-workspace.md) — reviewer snapshot and audit state
 - [`docs/SPEC-adversarial-review-auto-remediation.md`](docs/SPEC-adversarial-review-auto-remediation.md) — the living contract
 - [`docs/STATE-MACHINE.md`](docs/STATE-MACHINE.md) — the two durable state machines
 - [`docs/MACOS-TCC.md`](docs/MACOS-TCC.md) — TCC popup handling on macOS hosts

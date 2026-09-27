@@ -38,6 +38,18 @@
       "owner": "RPL-07 controlled reviewer burst capacity"
     },
     {
+      "id": "review-queue-depth-failover",
+      "title": "Review Queue-depth Failover Report",
+      "path": "docs/data-model/review-queue-depth-failover.md",
+      "store": "data/review-queue-depth-failover.json",
+      "schemaSurface": "src/review-queue-depth.mjs",
+      "relatedSchemaSurfaces": [
+        "bin/review-queue-depth.mjs",
+        "src/review-state-statements.mjs"
+      ],
+      "owner": "RSP-01 / RSPREREVIEW queue-depth spillover"
+    },
+    {
       "id": "reviewer-passes",
       "title": "Reviewer Passes",
       "path": "docs/data-model/reviewer-passes.md",
@@ -99,6 +111,18 @@
         "src/review-pipeline-health.mjs"
       ],
       "owner": "reviewer transient-failure backoff and route selection"
+    },
+    {
+      "id": "reviewer-credential-outages",
+      "title": "Reviewer Credential Outages",
+      "path": "docs/data-model/reviewer-credential-outages.md",
+      "store": "data/reviewer-credential-outages/",
+      "schemaSurface": "src/reviewer-cascade.mjs",
+      "relatedSchemaSurfaces": [
+        "src/pollonce-phases.mjs",
+        "src/reviewer-spawn-settle.mjs"
+      ],
+      "owner": "reviewer OAuth credential outage suppression with a durable three-probe limit"
     },
     {
       "id": "duplicate-families",

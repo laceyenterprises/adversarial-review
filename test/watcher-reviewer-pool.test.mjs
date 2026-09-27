@@ -292,7 +292,8 @@ test('split admission re-enters single-wave drain when admission releases within
   const summary = await runBoundedReviewerDispatchQueue(tasks, {
     maxConcurrent: 1,
     singleWave: true,
-    singleWaveSettleGraceMs: 50,
+    // The release is asynchronous; allow scheduling slack under fleet contention.
+    singleWaveSettleGraceMs: 500,
     splitPostReviewSettlement: true,
     logger: { error() {}, log() {} },
   });
@@ -936,6 +937,7 @@ test('pending rereviews do not masquerade as first-pass work when posted_at is c
   const firstPassCandidate = candidate(90, async () => {}, '2026-05-09T00:00:00.000Z');
   const rereviewCandidate = candidate(10, async () => {}, '2026-05-01T00:00:00.000Z', {
     current: pendingRereview,
+    hasPriorPostedReview: true,
   });
 
   assert.equal(reviewerDispatchIsFirstPass(firstPassCandidate), true);
@@ -961,6 +963,19 @@ test('a head-refresh rereview stays behind a genuine first pass after row marker
   assert.equal(reviewerDispatchIsFirstPass(oldRereview), false);
   assert.equal(reviewerDispatchIsFirstPass(newFirstPass), true);
   assert.deepEqual(sortReviewerDispatchCandidates([oldRereview, newFirstPass]).map((item) => item.prNumber), [1117, 1093]);
+});
+
+test('a rereview marker before any posted reviewer pass stays in the first-pass lane', () => {
+  const requestedBeforeDelivery = candidate(1131, async () => {}, '2026-09-26T04:00:00.000Z', {
+    current: {
+      review_status: 'pending',
+      posted_at: null,
+      rereview_requested_at: '2026-09-26T04:05:00.000Z',
+    },
+    hasPriorPostedReview: false,
+  });
+
+  assert.equal(reviewerDispatchIsFirstPass(requestedBeforeDelivery), true);
 });
 
 test('reviewer lane gives rereview a floor after the configured first-pass burst', async () => {

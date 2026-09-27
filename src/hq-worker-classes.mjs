@@ -54,7 +54,7 @@ function snapshotPath(rootDir) {
 // from the module directory looking for the roster file. Returns the resolved
 // worker-classes.json path, or null when no checkout is reachable (the caller
 // then degrades to the snapshot).
-function resolveRosterPath({ env = process.env, moduleRoot = MODULE_ROOT } = {}) {
+export function resolveRosterPath({ env = process.env, moduleRoot = MODULE_ROOT } = {}) {
   const fromEnv = String(env?.AGENT_OS_REPO_ROOT ?? '').trim();
   if (fromEnv) {
     const candidate = join(fromEnv, WORKER_CLASSES_REL_PATH);

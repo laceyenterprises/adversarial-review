@@ -129,6 +129,7 @@ import {
   stmtCreateReviewRow,
   stmtFinalizePendingTerminalFailure,
   stmtGetReviewRow,
+  stmtHasCompletedReview,
   stmtHasPostedReview,
   stmtMarkAttemptStarted,
   stmtMarkClosed,
@@ -172,7 +173,9 @@ import {
   markCascadeCapExhaustedAlerted,
   markOperatorDecisionRequiredAlerted,
   recordCascadeFailure,
+  releaseReviewerCredentialProbe,
   shouldBackoffReviewerSpawn,
+  shouldPauseReviewerModel,
 } from './reviewer-cascade.mjs';
 import { reconcileReviewerCommandFailedBeforeRetry } from './reviewer-command-failed-recovery.mjs';
 import {
@@ -223,6 +226,7 @@ import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import {
   reserveReviewerMemoryAdmission,
   reviewerDispatchPassKind,
+  reviewerSafetyPassKind,
 } from './watcher-reviewer-pool.mjs';
 import { requestWatcherWake, watcherWakeMatchesSubject } from './watcher-wake.mjs';
 
@@ -1607,6 +1611,10 @@ export async function processReviewSubject(entry, ctx) {
         emitCacheEvent,
       });
       let depthSpillReserved = false;
+      const depthPassKind = reviewerDispatchPassKind({
+        current: existing,
+        hasPriorPostedReview: entry.hasPriorPostedReview,
+      });
 
       // RWF-01: review-dispatch worker-class fallback (quota trigger)
       // RSP-01: plus the queue-depth trigger, when the break-glass lever is
@@ -1623,7 +1631,7 @@ export async function processReviewSubject(entry, ctx) {
         authorClass: reviewerAuthorClass,
         primary: primaryReviewerWorkerClass,
         fallbackWorkerClasses: reviewWorkerClassFallback(process.env),
-        depthPressure: firstPassSpilloverController?.depthPressure?.() ?? null,
+        depthPressure: firstPassSpilloverController?.depthPressure?.(depthPassKind) ?? null,
         burstPressure: reviewerBurstController?.pressure?.({
           repo: repoPath,
           // Thunk: only a repo-in-scope, pack-scoped lease ever pays for this.
@@ -1684,6 +1692,7 @@ export async function processReviewSubject(entry, ctx) {
                 prNumber,
                 fromWorkerClass: rwfDecision.from,
                 toWorkerClass: rwfDecision.to,
+                passKind: depthPassKind,
               }) === true;
             }
             console.warn(
@@ -2168,6 +2177,21 @@ export async function processReviewSubject(entry, ctx) {
         });
         return;
       }
+      const credentialOutagePreflight = shouldPauseReviewerModel(ROOT, route.reviewerModel, {
+        reserve: false,
+      });
+      if (credentialOutagePreflight.paused) {
+        markWatcherSpawnDecision({
+          repo: repoPath,
+          pr_number: prNumber,
+          decision: 'reviewer-credential-outage-hold',
+          failure_class: 'oauth-broken',
+          next_retry_after: credentialOutagePreflight.nextProbeAfter ||
+            credentialOutagePreflight.state?.nextProbeAt ||
+            null,
+        });
+        return;
+      }
       const cascadeRetryDue = Boolean(cascadeGate.state?.nextRetryAfter);
       const timeoutExhaustionHandoff = await maybeDispatchReviewerTimeoutExhaustedMergeAgent({
         rootDir: ROOT,
@@ -2601,13 +2625,15 @@ export async function processReviewSubject(entry, ctx) {
         return;
       }
 
+      const dispatchHasPriorPostedReview =
+        entry.hasPriorPostedReview ?? Boolean(stmtHasPostedReview.get(repoPath, prNumber));
       const dispatchCandidate = {
         repoPath,
         prNumber,
         reviewerModel: route.reviewerModel,
         subject,
         current,
-        hasPriorPostedReview: entry.hasPriorPostedReview ?? Boolean(stmtHasPostedReview.get(repoPath, prNumber)),
+        hasPriorPostedReview: dispatchHasPriorPostedReview,
         wakePriority: watcherWakeMatchesSubject(wakePayload, {
           repoPath,
           prNumber,
@@ -2637,6 +2663,8 @@ export async function processReviewSubject(entry, ctx) {
           let reservation = null;
           let reservationReleased = false;
           let reviewerSpawned = false;
+          let credentialProbeReservation = null;
+          let reviewerProcessStarted = false;
           const releaseReviewerReservation = () => {
             if (!reservation || reservationReleased) return;
             reservationReleased = true;
@@ -2927,9 +2955,12 @@ export async function processReviewSubject(entry, ctx) {
             const completedRemediationRounds = Number.isFinite(Number(ledger.completedRoundsForPR))
               ? Math.max(0, Math.floor(Number(ledger.completedRoundsForPR)))
               : 0;
-            const passKind = reviewAttemptNumber > 1 || current?.rereview_requested_at
-              ? 'rereview'
-              : 'first-pass';
+            const passKind = reviewerSafetyPassKind({
+              current,
+              hasPriorPostedReview: dispatchHasPriorPostedReview,
+              hasPriorCompletedReview: Boolean(stmtHasCompletedReview.get(repoPath, prNumber)),
+              completedRemediationRounds,
+            });
             const reviewDbAttemptNumber = nextReviewerPassAttemptNumber(ROOT, {
               repo: repoPath,
               prNumber,
@@ -3151,6 +3182,28 @@ export async function processReviewSubject(entry, ctx) {
               declineFleetSelfRepairRereview(skipReviewerSpawnReason);
               return { dispatched: false, reason: skipReviewerSpawnReason };
             } else {
+              const credentialOutageGate = shouldPauseReviewerModel(ROOT, route.reviewerModel);
+              if (credentialOutageGate.probe) credentialProbeReservation = credentialOutageGate;
+              if (credentialOutageGate.paused) {
+                stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
+                markWatcherSpawnDecision({
+                  repo: repoPath,
+                  pr_number: prNumber,
+                  decision: 'reviewer-credential-outage-hold',
+                  failure_class: 'oauth-broken',
+                  next_retry_after: credentialOutageGate.nextProbeAfter ||
+                    credentialOutageGate.state?.nextProbeAt ||
+                    null,
+                });
+                return { dispatched: false, reason: 'reviewer-credential-outage-hold' };
+              }
+              if (credentialOutageGate.probe) {
+                console.log(
+                  `[watcher] Allowing reviewer credential outage probe for ${repoPath}#${prNumber}: ` +
+                  `${route.reviewerModel} hold expired` +
+                  (credentialOutageGate.nextProbeAfter ? ` at ${credentialOutageGate.nextProbeAfter}` : '')
+                );
+              }
               // Count only work that made it through defer, budget, dedupe,
               // claim, freshness, and routing checks and is about to enter the
               // actual spawn path.  Pending rows held by an active follow-up,
@@ -3175,6 +3228,9 @@ export async function processReviewSubject(entry, ctx) {
                 reviewDbAttemptNumber,
                 completedRemediationRounds,
                 passKind,
+                // Queue admission uses delivered-comment evidence for fair
+                // depth accounting; passKind above conservatively retains
+                // rereview safety gates when capture lost the comment id.
                 dispatchPassKind: reviewerDispatchPassKind(dispatchCandidate),
                 maxRemediationRounds,
                 advisoryFindings: vocabularyFatigueFinding ? [vocabularyFatigueFinding] : [],
@@ -3185,6 +3241,7 @@ export async function processReviewSubject(entry, ctx) {
                 afhReviewerFallback: route.afhReviewerFallback || null,
                 reviewerRuntimeAdapterOverride: domainReviewerRuntimeAdapter,
                 onReviewerPgid: ({ pgid, spawnedAt }) => {
+                  reviewerProcessStarted = true;
                   persistReviewerPgid({
                     pgid,
                     reviewerSessionUuid,
@@ -3221,19 +3278,38 @@ export async function processReviewSubject(entry, ctx) {
                 firstPassSpilloverController?.commitSpill?.({ repo: repoPath, prNumber });
                 depthSpillReserved = false;
               }
-              const result = pipelineEnabled
-                ? await runWatcherGatedReviewPipeline({
-                  domainConfig: domainAdapterSet.domainConfig,
-                  domainId,
-                  repoPath,
-                  prNumber,
-                  reviewerHeadSha,
-                  riskClass: ledger.latestRiskClass,
-                  reviewAttemptNumber,
-                  spawnReviewerArgs,
-                  stageStates: parsePipelineStageStates(ledger.pipeline_stage_states_json),
-                })
-                : await spawnReviewer(spawnReviewerArgs);
+              let result;
+              try {
+                result = pipelineEnabled
+                  ? await runWatcherGatedReviewPipeline({
+                    domainConfig: domainAdapterSet.domainConfig,
+                    domainId,
+                    repoPath,
+                    prNumber,
+                    reviewerHeadSha,
+                    riskClass: ledger.latestRiskClass,
+                    reviewAttemptNumber,
+                    spawnReviewerArgs,
+                    stageStates: parsePipelineStageStates(ledger.pipeline_stage_states_json),
+                  })
+                  : await spawnReviewer(spawnReviewerArgs);
+              } catch (error) {
+                if (credentialProbeReservation?.probe && !reviewerProcessStarted) {
+                  try {
+                    releaseReviewerCredentialProbe(ROOT, route.reviewerModel, credentialProbeReservation);
+                  } catch (releaseError) {
+                    console.warn(`[watcher] Credential probe release failed: ${releaseError?.message || releaseError}`);
+                  }
+                }
+                throw error;
+              }
+              if (!result.ok && credentialProbeReservation?.probe && !reviewerProcessStarted) {
+                try {
+                  releaseReviewerCredentialProbe(ROOT, route.reviewerModel, credentialProbeReservation);
+                } catch (releaseError) {
+                  console.warn(`[watcher] Credential probe release failed: ${releaseError?.message || releaseError}`);
+                }
+              }
               if (result.ok) {
                 healthProbe?.recordSpawn?.(healthTick, { at: attemptAt });
               }
@@ -3274,6 +3350,13 @@ export async function processReviewSubject(entry, ctx) {
               }
             }
           } finally {
+            if (credentialProbeReservation?.probe && !reviewerSpawned) {
+              try {
+                releaseReviewerCredentialProbe(ROOT, route.reviewerModel, credentialProbeReservation);
+              } catch (releaseError) {
+                console.warn(`[watcher] Credential probe release failed: ${releaseError?.message || releaseError}`);
+              }
+            }
             if (depthSpillReserved) {
               firstPassSpilloverController?.refundSpill?.({
                 repo: repoPath,

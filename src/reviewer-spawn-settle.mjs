@@ -64,6 +64,9 @@ import {
   stmtMarkFailedQuota,
   stmtReleaseReviewLeaseQuota,
   stmtMarkOutageTransient,
+  stmtMarkReviewerCredentialOutage,
+  stmtPromoteReviewerCredentialOutage,
+  stmtRearmReviewerCredentialOutage,
   stmtMarkCascadeFailed,
   stmtMarkPendingUpstream,
   stmtGetReviewRow,
@@ -77,8 +80,10 @@ import { recordSuccessfulReviewCycleVerdict } from './review-cycle-cap-actions.m
 import { withSqliteBusyRetry, withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
 import {
   clearCascadeState,
+  clearReviewerCredentialOutage,
   formatTransientFailureBreakdown,
   recordCascadeFailure,
+  recordReviewerCredentialFailure,
 } from './reviewer-cascade.mjs';
 import {
   PROVIDER_OVERLOADED_FAILURE_CLASS,
@@ -1053,6 +1058,9 @@ function settleReviewerAttempt({
     markFailedQuota: stmtMarkFailedQuota,
     releaseReviewLeaseQuota: stmtReleaseReviewLeaseQuota,
     markOutageTransient: stmtMarkOutageTransient,
+    markReviewerCredentialOutage: stmtMarkReviewerCredentialOutage,
+    promoteReviewerCredentialOutage: stmtPromoteReviewerCredentialOutage,
+    rearmReviewerCredentialOutage: stmtRearmReviewerCredentialOutage,
     markCascadeFailed: stmtMarkCascadeFailed,
     markPendingUpstream: stmtMarkPendingUpstream,
     getReviewRow: stmtGetReviewRow,
@@ -1065,6 +1073,21 @@ function settleReviewerAttempt({
 }) {
   if (result.ok) {
     const postedAt = new Date().toISOString();
+    let recoveredOutage = null;
+    try {
+      recoveredOutage = reviewerModel ? clearReviewerCredentialOutage(rootDir, reviewerModel) : null;
+    } catch (error) {
+      log?.warn?.(`[watcher] Credential outage clear failed for ${reviewerModel}: ${error?.message || error}`);
+    }
+    if ((recoveredOutage?.active || recoveredOutage?.exhausted) &&
+        typeof statements.rearmReviewerCredentialOutage?.run === 'function') {
+      withSqliteBusyRetrySync(
+        () => statements.rearmReviewerCredentialOutage.run(
+          `[outage-transient:reviewer-credential:${String(reviewerModel).toLowerCase()}]%`
+        ),
+        { label: `reviewer-credential-outage-rearm:${reviewerModel}`, log }
+      );
+    }
     withSqliteBusyRetrySync(() => {
       statements.markPosted.run(postedAt, repoPath, prNumber);
     }, { label: `reviewer-settle-posted:${repoPath}#${prNumber}`, log });
@@ -1190,6 +1213,41 @@ function settleReviewerAttempt({
   const baseFailureMessage = String(result.error || '').trim() || defaultFailureMessages[failureClass] || defaultFailureMessages.unknown;
   const failureMessage = appendFailureDiagnostics(baseFailureMessage, result);
   const classifiedMessage = `[${failureClass}] ${failureMessage}`;
+  let oauthCredentialState = null;
+  if (failureClass === 'oauth-broken') {
+    try {
+      oauthCredentialState = recordReviewerCredentialFailure(rootDir, {
+        reviewerModel,
+        repo: repoPath,
+        prNumber,
+        failedAt: failureAt,
+      });
+    } catch (error) {
+      log?.warn?.(`[watcher] Credential outage write failed for ${reviewerModel}: ${error?.message || error}; charging normal infra recovery`);
+    }
+    if (oauthCredentialState?.active) {
+      const outageMessage = `[outage-transient:${oauthCredentialState.reason}] ${classifiedMessage}`;
+      const markCredentialOutage = statements.markReviewerCredentialOutage || statements.markOutageTransient;
+      withSqliteBusyRetrySync(
+        () => markCredentialOutage.run(failureAt, outageMessage, ...(statements.markReviewerCredentialOutage ? [] : [null]), repoPath, prNumber),
+        { label: `reviewer-settle-credential-hold:${repoPath}#${prNumber}`, log }
+      );
+      if (typeof statements.promoteReviewerCredentialOutage?.run === 'function') {
+        withSqliteBusyRetrySync(
+          () => statements.promoteReviewerCredentialOutage.run(outageMessage, oauthCredentialState.reviewerModel),
+          { label: `reviewer-credential-outage-promote:${oauthCredentialState.reviewerModel}`, log }
+        );
+      }
+      recordCascadeFailure(rootDir, {
+        repo: repoPath, prNumber, failedAt: failureAt, failureClass, failureReason: failureMessage, reviewerModel,
+      });
+      log.warn(
+        `[watcher] Reviewer oauth-broken failure on #${prNumber}; model-scoped credential outage active across ` +
+        `${oauthCredentialState.distinctPrCount} PRs; holding without charging infra recovery`
+      );
+      return;
+    }
+  }
   if (transientFailureClasses.has(failureClass)) {
     if (typeof statements.getReviewRow?.get !== 'function') {
       throw new Error('settleReviewerAttempt requires statements.getReviewRow.get for transient infra cap enforcement');
@@ -1233,6 +1291,15 @@ function settleReviewerAttempt({
       `[watcher] PR #${prNumber} marked pending-upstream after ${cascadeState.consecutiveTransientFailures} transient reviewer failures (${breakdown}); ` +
       `infra auto-recovery ${infraRecoverAttempts + 1}/${INFRA_AUTO_RECOVER_CAP}; will resume when the reviewer lane recovers`
     );
+    if (oauthCredentialState) {
+      log.warn(
+        `[watcher] Reviewer oauth-broken failure on #${prNumber}; ` +
+        (oauthCredentialState.exhausted
+          ? `credential outage probe cap exhausted (${oauthCredentialState.probeFailures} failed probes)`
+          : `credential outage threshold not met (${oauthCredentialState.distinctPrCount} distinct PRs)`) +
+        ', charging infra recovery'
+      );
+    }
     log.warn(
       `[watcher] Reviewer ${failureClass} failure on #${prNumber} (consecutiveTransient=${cascadeState.consecutiveTransientFailures}); backing off ${cascadeState.backoffMinutes}m`
     );

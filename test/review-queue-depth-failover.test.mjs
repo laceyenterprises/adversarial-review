@@ -20,11 +20,13 @@ import path from 'node:path';
 import {
   FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT,
   REVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY,
+  REREVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY,
   createFirstPassSpilloverController,
   firstPassSpilloverPlan,
   readFirstPassReviewQueueDepth,
   readReviewQueueDepthFailoverReport,
   resolveFirstPassReviewQueueDepthFailoverThreshold,
+  resolveRereviewQueueDepthFailoverThreshold,
   reviewQueueDepthFailoverReportPath,
 } from '../src/review-queue-depth.mjs';
 import {
@@ -37,6 +39,14 @@ import {
 } from '../src/review-worker-class-fallback.mjs';
 import { ENV_ALIASES } from '../src/config-loader.mjs';
 import { resetRoleConfigCache } from '../src/role-config.mjs';
+import {
+  SQL_HAS_COMPLETED_REVIEW_FOR_PR,
+  SQL_HAS_GENUINE_POSTED_REVIEW_FOR_PR,
+} from '../src/review-state-statements.mjs';
+import {
+  reviewerDispatchPassKind,
+  reviewerSafetyPassKind,
+} from '../src/watcher-reviewer-pool.mjs';
 
 test.afterEach(() => {
   resetRoleConfigCache();
@@ -261,6 +271,33 @@ test('writer diversity holds under spillover even when it is the only way to sat
   }
 });
 
+test('writer diversity also holds for rereview depth spillover', async () => {
+  const root = tempRoot('rsprereview-diversity-');
+  try {
+    const ctl = createFirstPassSpilloverController({
+      rootDir: root,
+      readRereviewDepth: () => 17,
+      resolveThresholdImpl: () => 2,
+      resolveRereviewThresholdImpl: () => 2,
+      logger: { warn() {} },
+    });
+    const result = await resolveReviewerWorkerClassWithFallback({
+      authorClass: 'claude-code',
+      primary: 'gemini',
+      fallbackWorkerClasses: ['claude-code'],
+      depthPressure: ctl.depthPressure('rereview'),
+      execFileImpl: fleetStatusStub(CODEX_OK_CLAUDE_OK),
+      env: ENTITLED_ENV,
+    });
+    assert.equal(result.fellBack, false);
+    assert.equal(result.workerClass, 'gemini');
+    assert.equal(result.reason, 'no-available-fallback');
+    assert.equal(ctl.granted(), 0, 'a rejected same-writer route must not spend a spill slot');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('writer diversity is writer-FAMILY aware, not a worker-class string compare', async () => {
   // clio-agent dispatches codex workers, so codex reviewing a clio-agent PR is
   // codex reviewing codex — string-unequal, diversity-dead.
@@ -430,7 +467,11 @@ test('the engage and disengage transitions are recorded with the depth that caus
     assert.equal(report.lastTransition.event, 'engage');
     assert.equal(report.lastTransition.depth, 14, 'the transition names the depth that caused it');
     assert.equal(report.lastTransition.at, '2026-09-06T18:00:00.000Z');
+    assert.equal(report.lastTransition.passKind, 'first-pass');
+    assert.equal(report.lanes['first-pass'].engaged, true);
+    assert.equal(report.lanes.rereview.engaged, false);
     assert.equal(report.cost.spilloverReviewsTotal, 1);
+    assert.equal(report.lanes['first-pass'].cost.spilloverReviewsTotal, 1);
     assert.deepEqual(report.cost.byWorkerClass, { codex: 1 });
     assert.equal(report.knob, REVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY);
     assert.equal(report.depthUnit, FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT);
@@ -447,8 +488,10 @@ test('the engage and disengage transitions are recorded with the depth that caus
     assert.equal(report.engaged, false);
     assert.equal(report.lastTransition.event, 'disengage');
     assert.equal(report.lastTransition.depth, 3);
+    assert.equal(report.lastTransition.passKind, 'first-pass');
     assert.equal(report.lastTransition.engagementSpilloverReviews, 1, 'the cost of the engagement that ended');
     assert.equal(report.cost.lastEngagementSpilloverReviews, 1);
+    assert.equal(report.lanes['first-pass'].cost.lastEngagementSpilloverReviews, 1);
     assert.equal(report.cost.spilloverReviewsTotal, 1, 'lifetime cost survives disengage');
     assert.deepEqual(report.transitions.map((t) => t.event), ['engage', 'disengage']);
   } finally {
@@ -469,6 +512,7 @@ test('the transition log is emitted with the depth and the cost', () => {
     }).plan();
     assert.equal(warnings.length, 1);
     assert.match(warnings[0], /review-queue-depth-failover engage/);
+    assert.match(warnings[0], /pass_kind=first-pass/);
     assert.match(warnings[0], /depth=25/);
     assert.match(warnings[0], /threshold=10/);
     assert.match(warnings[0], /spill_slots=2/);
@@ -547,13 +591,125 @@ test('the knob arms from the canonical env alone (no shared config.yaml edit nee
   );
 });
 
+test('rereview threshold inherits first-pass, has an env mirror, and zero disables', () => {
+  assert.equal(resolveRereviewQueueDepthFailoverThreshold({ env: {}, firstPassThreshold: null }), null);
+  const inherited = [];
+  assert.equal(resolveRereviewQueueDepthFailoverThreshold({
+    env: {}, firstPassThreshold: 2, onInherited: (threshold) => inherited.push(threshold),
+  }), 2);
+  assert.deepEqual(inherited, [2]);
+  assert.equal(resolveRereviewQueueDepthFailoverThreshold({
+    env: { AGENT_OS_WATCHER_REREVIEW_QUEUE_DEPTH_FAILOVER_THRESHOLD: '3' },
+    topPath: '/dev/null',
+    firstPassThreshold: 2,
+  }), 3);
+  assert.equal(resolveRereviewQueueDepthFailoverThreshold({
+    env: { AGENT_OS_WATCHER_REREVIEW_QUEUE_DEPTH_FAILOVER_THRESHOLD: '0' },
+    topPath: '/dev/null',
+    firstPassThreshold: 2,
+  }), null);
+  assert.equal(REREVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY, 'watcher.rereview_queue_depth_failover_threshold');
+  assert.equal(
+    ENV_ALIASES[REREVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY]?.canonical,
+    'AGENT_OS_WATCHER_REREVIEW_QUEUE_DEPTH_FAILOVER_THRESHOLD'
+  );
+});
+
+test('a failed first-lane report write does not erase its in-memory cost on the second lane', () => {
+  const root = tempRoot('rsprereview-persist-');
+  let writes = 0;
+  let saved = null;
+  try {
+    const ctl = createFirstPassSpilloverController({
+      rootDir: root,
+      readDepth: () => 2,
+      readRereviewDepth: () => 2,
+      resolveThresholdImpl: () => 2,
+      resolveRereviewThresholdImpl: () => 2,
+      writeFileImpl(_path, data) {
+        writes += 1;
+        if (writes === 1) throw new Error('temporary disk failure');
+        saved = JSON.parse(data);
+      },
+      logger: { warn() {} },
+    });
+    ctl.plan('first-pass');
+    ctl.plan('rereview');
+    assert.equal(saved.lanes['first-pass'].engaged, true);
+    assert.equal(saved.lanes.rereview.engaged, true);
+    assert.deepEqual(saved.transitions.map(({ passKind }) => passKind), ['first-pass', 'rereview']);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('17 mixed deferred reviews at threshold 2 grant 8 lane-correct spill slots', () => {
+  const root = tempRoot('rsprereview-mixed-');
+  try {
+    const ctl = createFirstPassSpilloverController({
+      rootDir: root,
+      readDepth: () => 9,
+      readRereviewDepth: () => 8,
+      resolveThresholdImpl: () => 2,
+      resolveRereviewThresholdImpl: () => 2,
+      logger: { warn() {} },
+    });
+    assert.equal(ctl.plan('first-pass').spillSlots, 4);
+    assert.equal(ctl.plan('rereview').spillSlots, 4);
+    for (let index = 0; index < 4; index += 1) {
+      assert.equal(ctl.recordSpill({ repo: 'o/r', prNumber: index, passKind: 'first-pass' }), true);
+      assert.equal(ctl.recordSpill({ repo: 'o/r', prNumber: 100 + index, passKind: 'rereview' }), true);
+    }
+    assert.equal(ctl.granted(), 8);
+    assert.equal(ctl.depthPressure('first-pass').engaged, false);
+    assert.equal(ctl.depthPressure('rereview').engaged, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('an empty report reads back as a well-formed disarmed report', () => {
   const root = tempRoot();
   try {
     const report = readReviewQueueDepthFailoverReport(root);
     assert.equal(report.engaged, false);
     assert.equal(report.cost.spilloverReviewsTotal, 0);
+    assert.deepEqual(Object.keys(report.lanes).sort(), ['first-pass', 'rereview']);
     assert.deepEqual(report.transitions, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('lane report state does not flap when only first-pass spillover is engaged', () => {
+  const root = tempRoot('rsprereview-lanes-');
+  const warnings = [];
+  const makeController = (now) => createFirstPassSpilloverController({
+    rootDir: root,
+    readDepth: () => 12,
+    readRereviewDepth: () => 0,
+    resolveThresholdImpl: () => 10,
+    resolveRereviewThresholdImpl: () => null,
+    logger: { warn: (message) => warnings.push(String(message)) },
+    now,
+  });
+  try {
+    const firstTick = makeController(() => new Date('2026-09-26T01:00:00.000Z'));
+    assert.equal(firstTick.plan('first-pass').engaged, true);
+    assert.equal(firstTick.plan('rereview').engaged, false);
+
+    const secondTick = makeController(() => new Date('2026-09-26T01:01:00.000Z'));
+    assert.equal(secondTick.plan('first-pass').engaged, true);
+    assert.equal(secondTick.plan('rereview').engaged, false);
+
+    const report = JSON.parse(readFileSync(reviewQueueDepthFailoverReportPath(root), 'utf8'));
+    assert.equal(report.engaged, true);
+    assert.equal(report.lanes['first-pass'].engaged, true);
+    assert.equal(report.lanes.rereview.engaged, false);
+    assert.deepEqual(report.lanes['first-pass'].transitions.map((t) => t.event), ['engage']);
+    assert.deepEqual(report.lanes.rereview.transitions, []);
+    assert.deepEqual(report.transitions.map((t) => `${t.passKind}:${t.event}`), ['first-pass:engage']);
+    assert.equal(warnings.filter((line) => /review-queue-depth-failover/.test(line)).length, 1);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -597,15 +753,29 @@ test('the lever thresholds on the production countOpenPrsAwaitingFirstPassReview
     seed('open', 'pending');
     seed('open', 'pending');
     seed('open', 'reviewing');
+    // Failed attempts are still awaiting a completed first review and count.
+    seed('open', 'failed');
+    seed('open', 'oauth-broken');
     // Noise that must NOT inflate the depth.
     seed('merged', 'pending');
     seed('closed', 'pending');
     seed('open', 'malformed');
     seed('open', 'argus-security-queued');
+    const deliveredAsRereview = seed('open', 'pending');
+    db.prepare(
+      'INSERT INTO reviewer_passes (repo, pr_number, attempt_number, reviewer_class, reviewer_model,'
+      + ' pass_kind, started_at, ended_at, status, body_md, gh_comment_id)'
+      + " VALUES (?, ?, 1, 'gemini', 'gemini', 'rereview', ?, ?, 'completed', 'body', 'RV_rereview_first_delivery')"
+    ).run(
+      'laceyenterprises/agent-os',
+      deliveredAsRereview,
+      '2026-09-06T00:00:00.000Z',
+      '2026-09-06T00:10:00.000Z',
+    );
 
-    assert.equal(countOpenPrsAwaitingFirstPassReview(db), 3);
+    assert.equal(countOpenPrsAwaitingFirstPassReview(db), 5);
     const engagedPlan = ctl().plan();
-    assert.equal(engagedPlan.depth, 3);
+    assert.equal(engagedPlan.depth, 5);
     assert.equal(engagedPlan.engaged, true);
     assert.equal(engagedPlan.spillSlots, 1);
 
@@ -617,7 +787,7 @@ test('the lever thresholds on the production countOpenPrsAwaitingFirstPassReview
       + ' pass_kind, started_at, ended_at, status, body_md, gh_comment_id)'
       + " VALUES (?, ?, 1, 'gemini', 'gemini', 'first-pass', ?, ?, 'completed', 'body', 'RV_1')"
     ).run('laceyenterprises/agent-os', delivered, '2026-09-06T00:00:00.000Z', '2026-09-06T00:10:00.000Z');
-    db.prepare('DELETE FROM reviewed_prs WHERE pr_number IN (9000, 9001)').run();
+    db.prepare('DELETE FROM reviewed_prs WHERE pr_number IN (9000, 9001, 9003, 9004)').run();
 
     assert.equal(countOpenPrsAwaitingFirstPassReview(db), 1);
     assert.equal(ctl().plan().engaged, false, 'depth recovered => lever disengages, review returns to agy');
@@ -625,6 +795,86 @@ test('the lever thresholds on the production countOpenPrsAwaitingFirstPassReview
     db.close();
     rmSync(dbRoot, { recursive: true, force: true });
     rmSync(reportRoot, { recursive: true, force: true });
+  }
+});
+
+test('production rereview depth counts only open, eligible, durably requested rereviews', async () => {
+  const { ensureReviewStateSchema, openReviewStateDb } = await import('../src/review-state.mjs');
+  const { countOpenPrsAwaitingRereview } = await import('../src/review-state-db.mjs');
+  const dbRoot = tempRoot('rsprereview-db-');
+  const db = openReviewStateDb(dbRoot);
+  try {
+    ensureReviewStateSchema(db);
+    const seed = (
+      prNumber,
+      {
+        state = 'open',
+        status = 'pending',
+        requested = true,
+        posted = null,
+        priorPassKind = 'first-pass',
+        failureMessage = null,
+      } = {},
+    ) => {
+      db.prepare(
+        'INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, rereview_requested_at, posted_at, failure_message)'
+        + ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      ).run('o/r', prNumber, '2026-09-26T00:00:00Z', 'gemini', state, status,
+        requested ? '2026-09-26T00:10:00Z' : null, posted, failureMessage);
+      db.prepare(
+        'INSERT INTO reviewer_passes (repo, pr_number, attempt_number, reviewer_class, reviewer_model,'
+        + ' pass_kind, started_at, ended_at, status, body_md, gh_comment_id)'
+        + " VALUES (?, ?, 1, 'gemini', 'gemini', ?, ?, ?, 'completed', 'body', ?)"
+      ).run('o/r', prNumber, priorPassKind, '2026-09-26T00:00:00Z', '2026-09-26T00:05:00Z', `RV_${prNumber}`);
+    };
+    seed(1);
+    seed(2, { state: 'merged' });
+    seed(3, { requested: false, posted: '2026-09-26T00:05:00Z' });
+    seed(4, { status: 'argus-security-queued' });
+    seed(5, { requested: false }); // head-refresh path: posted_at was cleared
+    seed(6, { priorPassKind: 'rereview' }); // first delivered review was stored as rereview
+    seed(7, { status: 'reviewing' }); // already admitted; not awaiting admission
+    seed(8, {
+      status: 'failed',
+      failureMessage: '[review-cycle-cap] automatic review paused',
+    });
+    seed(9, { status: 'failed', failureMessage: 'reviewer command failed' });
+    seed(10, { status: 'pending-github-artifact' });
+    seed(11, { status: 'posted', posted: null });
+    seed(12); // a delivered review already exists on the current head
+    db.prepare("UPDATE reviewed_prs SET revision_ref = 'current-head' WHERE repo = 'o/r' AND pr_number = 12").run();
+    db.prepare("UPDATE reviewer_passes SET head_sha = 'current-head' WHERE repo = 'o/r' AND pr_number = 12").run();
+    assert.equal(countOpenPrsAwaitingRereview(db), 3);
+  } finally {
+    db.close();
+    rmSync(dbRoot, { recursive: true, force: true });
+  }
+});
+
+test('an uncaptured completed pass still keeps rereview safety gates armed', async () => {
+  const { ensureReviewStateSchema, openReviewStateDb } = await import('../src/review-state.mjs');
+  const dbRoot = tempRoot('rsprereview-safety-');
+  const db = openReviewStateDb(dbRoot);
+  try {
+    ensureReviewStateSchema(db);
+    db.prepare(
+      "INSERT INTO reviewer_passes (repo, pr_number, attempt_number, reviewer_class, reviewer_model, pass_kind, started_at, ended_at, status, body_md, gh_comment_id) "
+      + "VALUES ('o/r', 12, 1, 'claude', 'claude', 'first-pass', '2026-09-26T00:00:00Z', '2026-09-26T00:05:00Z', 'completed', 'posted but capture missed', NULL)"
+    ).run();
+    const hasPriorPostedReview = Boolean(db.prepare(SQL_HAS_GENUINE_POSTED_REVIEW_FOR_PR).get('o/r', 12));
+    const hasPriorCompletedReview = Boolean(db.prepare(SQL_HAS_COMPLETED_REVIEW_FOR_PR).get('o/r', 12));
+    const candidate = {
+      current: { posted_at: null, rereview_requested_at: null },
+      hasPriorPostedReview,
+      hasPriorCompletedReview,
+      completedRemediationRounds: 1,
+    };
+    assert.equal(reviewerDispatchPassKind(candidate), 'first-pass', 'admission depth still requires delivery proof');
+    assert.equal(reviewerSafetyPassKind(candidate), 'rereview', 'closer-head and ceiling gates must remain armed');
+    assert.equal(reviewerSafetyPassKind({ ...candidate, completedRemediationRounds: 0 }), 'rereview');
+  } finally {
+    db.close();
+    rmSync(dbRoot, { recursive: true, force: true });
   }
 });
 
@@ -637,15 +887,25 @@ test('the lever thresholds on the production countOpenPrsAwaitingFirstPassReview
 // mode would be an armed knob that does nothing, which is indistinguishable from
 // the monoculture it replaces.
 
-test('watcher.mjs builds the per-tick controller from the production depth counter', () => {
+test('watcher.mjs builds the per-tick controller from both production depth counters', () => {
   const src = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
   assert.match(src, /createFirstPassSpilloverController\(\{[^}]*readDepth: countOpenPrsAwaitingFirstPassReview/);
+  assert.match(src, /readRereviewDepth: countOpenPrsAwaitingRereview/);
   assert.match(src, /^\s*firstPassSpilloverController,$/m, 'controller must be threaded into the per-PR ctx');
+});
+
+test('watcher REVSLOT gate uses the delivered-pass-aware first-pass depth counter', () => {
+  const src = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
+  assert.match(
+    src,
+    /reviewerDispatchCandidates\.every\(\(candidate\) => !reviewerDispatchIsFirstPass\(candidate\)\) && countOpenPrsAwaitingFirstPassReview\(\) > 0/,
+  );
 });
 
 test('pollonce-phases passes depth pressure in and charges the cost ledger back', () => {
   const src = readFileSync(new URL('../src/pollonce-phases.mjs', import.meta.url), 'utf8');
-  assert.match(src, /depthPressure: firstPassSpilloverController\?\.depthPressure\?\.\(\) \?\? null/);
+  assert.match(src, /depthPressure: firstPassSpilloverController\?\.depthPressure\?\.\(depthPassKind\) \?\? null/);
+  assert.match(src, /passKind: depthPassKind/);
   // Cost is charged only for a spill that actually landed on a route, and only
   // for the depth trigger — a quota fallback must not spend the depth budget.
   assert.match(
@@ -655,6 +915,13 @@ test('pollonce-phases passes depth pressure in and charges the cost ledger back'
   // The route swap gets the author so the diversity backstop can refuse.
   assert.match(src, /applyReviewerWorkerClassFallbackToRoute\(\{[^}]*authorClass: reviewerAuthorClass/);
   assert.match(src, /firstPassSpilloverController\?\.refundSpill\?\.\(\{/);
+});
+
+test('pollonce-phases keeps rereview safety independent from queue-depth admission', () => {
+  const src = readFileSync(new URL('../src/pollonce-phases.mjs', import.meta.url), 'utf8');
+  assert.match(src, /const depthPassKind = reviewerDispatchPassKind\(/);
+  assert.match(src, /const passKind = reviewerSafetyPassKind\(\{[\s\S]*?hasPriorCompletedReview: Boolean\(stmtHasCompletedReview\.get\(repoPath, prNumber\)\)/);
+  assert.match(src, /if \(passKind === 'rereview'\) \{[\s\S]*?getHeadCloserCommitSuppressionWithBoundedRetry\(/);
 });
 
 test('CI-red reservations are refunded so spill slots reach later admissible PRs', () => {

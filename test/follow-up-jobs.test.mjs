@@ -1518,9 +1518,9 @@ test('claimNextFollowUpJob records clean review jobs without spawning remediatio
 
   assert.ok(claimed);
   assert.equal(claimed.stopped, true);
-  assert.equal(claimed.reason, 'review-settled');
+  assert.equal(claimed.reason, 'no-remediation-required');
   assert.equal(claimed.job.status, 'stopped');
-  assert.equal(claimed.job.remediationPlan.stop.code, 'review-settled');
+  assert.equal(claimed.job.remediationPlan.stop.code, 'no-remediation-required');
   assert.equal(claimed.job.remediationPlan.currentRound, 0);
   assert.equal(claimed.job.remediationWorker, null);
   assert.match(claimed.jobPath, /data\/follow-up-jobs\/stopped\/.+\.json$/);
@@ -1640,7 +1640,7 @@ test('claimNextFollowUpJob logs and retries settled jobs when stopped-marking fa
 
   assert.equal(existsSync(settled.jobPath), true);
   assert.equal(errors.length, 1);
-  assert.match(String(errors[0][0]), /failed to mark review-settled job stopped/);
+  assert.match(String(errors[0][0]), /failed to mark no-remediation-required job stopped/);
 });
 
 test('claimNextFollowUpJob skips exhausted pending jobs after moving them to stopped', () => {

@@ -6,7 +6,10 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { PROVIDER_OVERLOADED_FAILURE_CLASS } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
-import { ROUND_BUDGET_BY_RISK_CLASS } from './follow-up-jobs.mjs';
+import {
+  ROUND_BUDGET_BY_RISK_CLASS,
+  resolveSettledCleanStopCode,
+} from './follow-up-jobs.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS, quotaHoldDecision } from './quota-exhaustion.mjs';
 import { infraRecoverableFailureClass } from './reviewer-failure-classification.mjs';
 import {
@@ -32,14 +35,93 @@ import {
   readPrTerminalReconcileState,
 } from './pr-terminal-reconcile.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
+import { SQL_HAS_GENUINE_POSTED_REVIEW_FOR_PR } from './review-state-statements.mjs';
 import {
   resolveFirstPassReviewerPoolConfig,
   reviewerDispatchPassKind,
 } from './watcher-reviewer-pool.mjs';
 import { hammerWakeAuditDir, readHammerWakeAudit } from './hammer-wake.mjs';
 import { summarizeReviewerBurst } from './reviewer-burst-lease.mjs';
+import { readReviewerCredentialOutage } from './reviewer-cascade.mjs';
 
 const DEFAULT_REVIEWER_DEATH_RATE_WINDOW_MS = 60 * 60 * 1000;
+const DEFAULT_CONFIG_SIGNATURE_DRIFT_ALARM_MS = 10 * 60 * 1000;
+const DEFAULT_CONFIG_SIGNATURE_STATUS_STALE_MS = 6 * 60 * 1000;
+const postedReviewEvidenceStatements = new WeakMap();
+
+function hasGenuinePostedReview(db, row) {
+  let statement = postedReviewEvidenceStatements.get(db);
+  if (!statement) {
+    statement = db.prepare(SQL_HAS_GENUINE_POSTED_REVIEW_FOR_PR);
+    postedReviewEvidenceStatements.set(db, statement);
+  }
+  return Boolean(statement.get(row.repo, row.pr_number));
+}
+
+function summarizeConfigSignatureDrift(
+  hqRoot,
+  {
+    nowMs = Date.now(),
+    thresholdMs = DEFAULT_CONFIG_SIGNATURE_DRIFT_ALARM_MS,
+    freshnessMs = DEFAULT_CONFIG_SIGNATURE_STATUS_STALE_MS,
+    daemonLoaded = false,
+  } = {}
+) {
+  const candidates = [
+    ['adversarial-follow-up', join(hqRoot, '.adversarial-follow-up', 'config-status.json')],
+  ];
+  const daemons = candidates.map(([daemon, path]) => {
+    try {
+      const fileStat = statSync(path);
+      const raw = JSON.parse(readFileSync(path, 'utf8'));
+      const status = raw;
+      const parsedObservedMs = Date.parse(status?.observedAt || '');
+      const observedMs = Number.isFinite(parsedObservedMs)
+        ? parsedObservedMs
+        : fileStat.mtimeMs;
+      const parsedDriftSinceMs = Date.parse(status?.driftSince || '');
+      const driftSinceMs = Number.isFinite(parsedDriftSinceMs)
+        ? parsedDriftSinceMs
+        : observedMs;
+      const statusAgeMs = Math.max(0, nowMs - observedMs);
+      const expectedIntervalMs = Number(status?.expectedIntervalMs);
+      const effectiveFreshnessMs = Number.isFinite(expectedIntervalMs) && expectedIntervalMs > 0
+        ? Math.max(freshnessMs, 3 * expectedIntervalMs)
+        : freshnessMs;
+      const statusStale = statusAgeMs > effectiveFreshnessMs;
+      const reportedInSync = status?.inSync ?? null;
+      const inSync = statusStale ? null : reportedInSync;
+      const driftMs = inSync === false ? Math.max(0, nowMs - driftSinceMs) : 0;
+      return {
+        daemon,
+        path,
+        ...status,
+        reportedInSync,
+        inSync,
+        statusAgeMs,
+        statusStale,
+        freshnessMs: effectiveFreshnessMs,
+        thresholdMs,
+        driftMs,
+        alarm: statusStale || driftMs > thresholdMs,
+      };
+    } catch (err) {
+      const errorCode = err?.code || (err instanceof SyntaxError ? 'invalid-json' : 'read-error');
+      return {
+        daemon, path, loadedSignature: null, diskSignature: null,
+        inSync: null, driftMs: 0, thresholdMs,
+        alarm: errorCode !== 'ENOENT' || daemonLoaded,
+        errorCode, error: err?.message || String(err),
+      };
+    }
+  });
+  return {
+    thresholdMs,
+    freshnessMs,
+    daemons,
+    alarmed: daemons.filter((entry) => entry.alarm),
+  };
+}
 const DEFAULT_REVIEWER_DEATH_RATE_THRESHOLD = 0.5;
 const DEFAULT_REVIEWER_DEATH_RATE_MIN_ATTEMPTS = 3;
 const DEFAULT_REVIEWER_SILENCE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
@@ -591,6 +673,15 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     thresholdDescription: 'remediation round count exceeds the risk-class budget or final-pass awaiting-rereview persists after budget exhaustion',
   },
   {
+    code: 'review:config_signature_drift',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: 'configSignatureDriftAlarmMs',
+    defaultThreshold: DEFAULT_CONFIG_SIGNATURE_DRIFT_ALARM_MS,
+    thresholdDescription:
+      'a long-lived daemon loaded signature differs from disk, or its status file stops updating',
+  },
+  {
     code: 'review:daemon_liveness',
     tier: 'ticket',
     category: 'review-pipeline',
@@ -835,6 +926,16 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
       overrides.lifecycleReconcileStaleAfterMs
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_LIFECYCLE_RECONCILE_STALE_AFTER_MS,
       DEFAULT_RECONCILE_STALE_AFTER_MS
+    ),
+    configSignatureDriftAlarmMs: parsePositiveInteger(
+      overrides.configSignatureDriftAlarmMs
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFIG_SIGNATURE_DRIFT_ALARM_MS,
+      DEFAULT_CONFIG_SIGNATURE_DRIFT_ALARM_MS
+    ),
+    configSignatureStatusStaleMs: parsePositiveInteger(
+      overrides.configSignatureStatusStaleMs
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFIG_SIGNATURE_STATUS_STALE_MS,
+      DEFAULT_CONFIG_SIGNATURE_STATUS_STALE_MS
     ),
     remediationBacklogThreshold: parsePositiveInteger(
       overrides.remediationBacklogThreshold
@@ -1961,7 +2062,7 @@ function outageReasonFromMessage(message) {
   return match?.[1] || 'unknown';
 }
 
-function summarizeOutage(db) {
+function summarizeOutage(db, rootDir) {
   const rows = readOutageTransientRows(db);
   const reasons = new Map();
   const examples = [];
@@ -1980,9 +2081,20 @@ function summarizeOutage(db) {
     }
   }
   const active = rows.length > 0;
+  const rowStartedAt = rows
+    .map((row) => row.failed_at || row.last_attempted_at || null)
+    .filter(Boolean)
+    .sort()[0] || null;
+  const credentialStarts = Array.from(reasons.keys())
+    .filter((reason) => reason.startsWith('reviewer-credential:'))
+    .map((reason) => readReviewerCredentialOutage(rootDir, reason.slice('reviewer-credential:'.length))?.startedAt)
+    .filter((value) => Number.isFinite(Date.parse(value)));
+  const startedAt = [...credentialStarts, rowStartedAt].filter(Boolean).sort()[0] || null;
   return {
     active,
     reason: rows.length === 0 ? null : (reasons.size === 1 ? Array.from(reasons.keys())[0] : 'multiple'),
+    started_at: startedAt,
+    parked_pr_count: rows.length,
     reviews_paused: rows.length > 0,
     attempts_not_charged: rows.length,
     reasons: Array.from(reasons, ([reason, count]) => ({ reason, count }))
@@ -2190,6 +2302,7 @@ function summarizeFirstPassQueue(db, { nowMs, stoppedCiRegressionJobs = null }) 
       };
     }
     const derivedPassKind = reviewerDispatchPassKind({
+      hasPriorPostedReview: hasGenuinePostedReview(db, row),
       current: {
         rereview_requested_at: row.rereview_requested_at,
         posted_at: row.posted_at,
@@ -2686,6 +2799,7 @@ function summarizeDeferredRereviews(db, followUpJobs, { nowMs, stoppedCiRegressi
   const prs = [];
   for (const row of rows) {
     const derivedPassKind = reviewerDispatchPassKind({
+      hasPriorPostedReview: hasGenuinePostedReview(db, row),
       current: {
         rereview_requested_at: row.rereview_requested_at,
         posted_at: row.posted_at,
@@ -2775,6 +2889,7 @@ function summarizeQueuedRereviews(db, followUpJobs, { nowMs, stoppedCiRegression
   let oldest = null;
   for (const row of rows) {
     const derivedPassKind = reviewerDispatchPassKind({
+      hasPriorPostedReview: hasGenuinePostedReview(db, row),
       current: {
         rereview_requested_at: row.rereview_requested_at,
         posted_at: row.posted_at,
@@ -3134,9 +3249,7 @@ function reviewRowsByRepoPr(db) {
 }
 
 function isReviewSettledStop(job) {
-  return job?.remediationPlan?.stop?.code === 'review-settled'
-    || job?.stopCode === 'review-settled'
-    || job?.stopReason === 'Latest adversarial review verdict is non-blocking; no remediation worker required.';
+  return Boolean(resolveSettledCleanStopCode(job));
 }
 
 function summarizeMergeStalls({ followUpJobs, reviewRows, nowMs, config }) {
@@ -4437,6 +4550,45 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
   const findings = [];
   const { config } = snapshot;
 
+  if (config?.hostChecksEnabled !== false) {
+    for (const drift of snapshot.configSignatureDrift?.alarmed || []) {
+      const statusUnavailable = Boolean(drift.error);
+      const statusStale = drift.statusStale === true;
+      const subject = statusUnavailable
+        ? `${drift.daemon} config signature status is unavailable`
+        : statusStale
+          ? `${drift.daemon} config signature status is stale`
+          : `${drift.daemon} has used stale config for more than ${Math.round((drift.thresholdMs ?? config.configSignatureDriftAlarmMs ?? DEFAULT_CONFIG_SIGNATURE_DRIFT_ALARM_MS) / 60000)} minutes`;
+      const message = statusUnavailable
+        ? `Config signature status cannot be read: ${drift.error}`
+        : statusStale
+          ? `Config signature status has not updated for ${Math.round((drift.statusAgeMs || 0) / 60000)} minute(s).`
+          : `Loaded config signature differs from disk for ${Math.round(drift.driftMs / 60000)} minute(s).`;
+      const evidence = statusUnavailable
+        ? `${drift.path} error=${drift.errorCode || 'unknown'}`
+        : statusStale
+          ? `${drift.path} observedAt=${drift.observedAt || 'unknown'} ` +
+            `ageMs=${drift.statusAgeMs ?? 'unknown'} ` +
+            `thresholdMs=${drift.freshnessMs ?? 'unknown'} ` +
+            `lastInSync=${drift.reportedInSync ?? 'unknown'}`
+          : `${drift.path} loaded=${drift.loadedSignature || 'unknown'} ` +
+            `disk=${drift.diskSignature || 'unknown'}`;
+      const recommendedAction = statusUnavailable || statusStale
+        ? 'Inspect follow-up daemon liveness and config-status write failures before trusting the cached config-signature state.'
+        : 'Inspect the daemon config-refresh path; restart only as immediate containment after preserving the stale-signature evidence.';
+      findings.push(buildFinding({
+        code: 'review:config_signature_drift',
+        tier: 'ticket',
+        subject,
+        message,
+        evidence: [evidence],
+        recommendedAction,
+        observedAt,
+        details: drift,
+      }));
+    }
+  }
+
   // An ABSENT ledger is reported alongside an unreadable one. Previously this
   // required `exists === true`, so a collector pointed at a root with no
   // reviews.db emitted zero findings over an all-zero snapshot — a false CLEAN
@@ -5731,10 +5883,12 @@ function collectReviewPipelineHealth({
     const operationalBlockers = summarizeOperationalBlockers(followUpQueues.jobs, { nowMs });
     const reviewerDegradation = summarizeReviewerDegradation(rootDir, db, { nowMs });
     const outage = db
-      ? summarizeOutage(db)
+      ? summarizeOutage(db, rootDir)
       : {
           active: false,
           reason: null,
+          started_at: null,
+          parked_pr_count: 0,
           reviews_paused: false,
           attempts_not_charged: 0,
           reasons: [],
@@ -5884,6 +6038,19 @@ function collectReviewPipelineHealth({
     const dagAutowalk = config.hostChecksEnabled
       ? summarizeDagAutowalkHealth({ env, hqRoot, nowMs, config, launchd })
       : { hqRoot, label: null, loaded: true, lastExitCode: 0, errLogPath: null, outLogPath: null, logAgeMs: null, thresholdMs: config.dagAutowalkMaxLogAgeMs, healthy: true };
+    const configSignatureDrift = config.hostChecksEnabled
+      ? summarizeConfigSignatureDrift(hqRoot, {
+          nowMs,
+          thresholdMs: config.configSignatureDriftAlarmMs,
+          freshnessMs: config.configSignatureStatusStaleMs,
+          daemonLoaded: launchd.services.some((service) => service.name === 'adversarial-follow-up' && service.loaded === true),
+        })
+      : {
+          thresholdMs: config.configSignatureDriftAlarmMs,
+          freshnessMs: config.configSignatureStatusStaleMs,
+          daemons: [],
+          alarmed: [],
+        };
     const snapshot = {
       observedAt,
       rootDir,
@@ -5932,6 +6099,7 @@ function collectReviewPipelineHealth({
       hammerDispatchStall,
       hammerWakes: { auditDir: hammerWakeDir, recent: recentHammerWakes },
       dagAutowalk,
+      configSignatureDrift,
     };
     const findings = evaluateReviewPipelineFindings(snapshot, { observedAt });
     return {
@@ -6211,4 +6379,5 @@ export {
   stoppedJobIsCiRegressionStopped,
   summarizeZombieReviewerPasses,
   summarizeReviewerSlots,
+  summarizeConfigSignatureDrift,
 };

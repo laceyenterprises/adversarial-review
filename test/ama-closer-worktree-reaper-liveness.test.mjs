@@ -625,6 +625,8 @@ test('reaper defers when escalated process probe cannot observe the worker uid',
 });
 
 test('reaper prunes stale and absent-worker probeFailures before persisting cursor', async (t) => {
+  const currentFailureAt = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const staleFailureAt = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
   const root = mkdtempSync(join(tmpdir(), 'ama-closer-probe-failure-gc-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const hqRoot = join(root, 'hq');
@@ -641,26 +643,26 @@ test('reaper prunes stale and absent-worker probeFailures before persisting curs
     probeFailures: {
       [workerId]: {
         failureCount: 1,
-        firstFailureAt: '2026-09-20T00:00:00.000Z',
-        lastFailureAt: '2026-09-20T00:00:00.000Z',
+        firstFailureAt: currentFailureAt,
+        lastFailureAt: currentFailureAt,
         lastReason: 'probe-error:SIGTERM',
       },
       'hammer-ama-pr-791-off-page': {
         failureCount: 2,
-        firstFailureAt: '2026-09-20T00:00:00.000Z',
-        lastFailureAt: '2026-09-20T00:00:00.000Z',
+        firstFailureAt: currentFailureAt,
+        lastFailureAt: currentFailureAt,
         lastReason: 'probe-error:SIGTERM',
       },
       'hammer-ama-pr-791-gone': {
         failureCount: 2,
-        firstFailureAt: '2026-09-20T00:00:00.000Z',
-        lastFailureAt: '2026-09-20T00:00:00.000Z',
+        firstFailureAt: currentFailureAt,
+        lastFailureAt: currentFailureAt,
         lastReason: 'probe-error:SIGTERM',
       },
       'hammer-ama-pr-791-stale': {
         failureCount: 2,
-        firstFailureAt: '2026-09-19T00:00:00.000Z',
-        lastFailureAt: '2026-09-19T00:00:00.000Z',
+        firstFailureAt: staleFailureAt,
+        lastFailureAt: staleFailureAt,
         lastReason: 'probe-error:SIGTERM',
       },
     },
@@ -687,8 +689,8 @@ test('reaper prunes stale and absent-worker probeFailures before persisting curs
   assert.deepEqual(persisted.probeFailures, {
     'hammer-ama-pr-791-off-page': {
       failureCount: 2,
-      firstFailureAt: '2026-09-20T00:00:00.000Z',
-      lastFailureAt: '2026-09-20T00:00:00.000Z',
+      firstFailureAt: currentFailureAt,
+      lastFailureAt: currentFailureAt,
       lastReason: 'probe-error:SIGTERM',
     },
   });

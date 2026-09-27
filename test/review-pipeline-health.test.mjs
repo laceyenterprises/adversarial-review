@@ -27,10 +27,12 @@ import {
   evaluateReviewPipelineFindings,
   renderReviewPipelinePrometheus,
   summarizeFirstPassCiOrphans,
+  summarizeConfigSignatureDrift,
   summarizeRoundBudgetAnomalies,
   resolveReviewPipelineHealthConfig,
   stoppedJobIsCiRegressionStopped,
 } from '../src/review-pipeline-health.mjs';
+
 import { PROVIDER_OVERLOADED_FAILURE_CLASS } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS } from '../src/quota-exhaustion.mjs';
 import { parseArgs } from '../src/review-pipeline-health-cli.mjs';
@@ -40,6 +42,7 @@ import { DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS } from '../src/reviewer-pass-reape
 import { LEGACY_ORPHAN_FAILURE_MESSAGE } from '../src/reviewer-reattach.mjs';
 import { ensureTtmTrackerSchema } from '../src/ttm-tracker.mjs';
 import { ensureDuplicateFamilySchema } from '../src/duplicate-family-state.mjs';
+import { stopPendingNoRemediationJobs } from '../src/follow-up-jobs.mjs';
 
 const NOW = '2026-05-25T18:00:00.000Z';
 const REPO = 'laceyenterprises/adversarial-review';
@@ -51,6 +54,20 @@ const CI_REGRESSION_GATE = {
     { name: 'release-freeze-gate', state: 'CANCELLED' },
   ],
 };
+const CLEAN_COMMENT_ONLY_REVIEW = `## Adversarial Review - Test
+
+## Summary
+Synthetic clean review.
+
+## Blocking issues
+- None.
+
+## Non-blocking issues
+- None.
+
+## Verdict
+Comment only
+`;
 
 function conflictPrFixture(overrides = {}) {
   return {
@@ -80,6 +97,153 @@ function producerShapedCiRegressionStopReason({
 function tempRoot() {
   return mkdtempSync(path.join(tmpdir(), 'review-pipeline-health-'));
 }
+
+test('CFGSTALE-01 config drift alarms only after ten minutes', () => {
+  const hqRoot = tempRoot();
+  try {
+    const statusDir = path.join(hqRoot, '.adversarial-follow-up');
+    mkdirSync(statusDir, { recursive: true });
+    writeFileSync(path.join(statusDir, 'config-status.json'), JSON.stringify({
+      observedAt: '2026-05-25T17:59:00.000Z',
+      driftSince: '2026-05-25T17:49:00.000Z',
+      loadedSignature: 'sha256:old',
+      diskSignature: 'sha256:new',
+      inSync: false,
+    }));
+
+    const summary = summarizeConfigSignatureDrift(hqRoot, { nowMs: Date.parse(NOW) });
+    assert.equal(summary.alarmed.length, 1);
+    assert.equal(summary.alarmed[0].daemon, 'adversarial-follow-up');
+  } finally {
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('CFGSTALE-01 config drift treats stale status files as unknown', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  try {
+    const statusDir = path.join(hqRoot, '.adversarial-follow-up');
+    mkdirSync(statusDir, { recursive: true });
+    writeFileSync(path.join(statusDir, 'config-status.json'), JSON.stringify({
+      observedAt: '2026-05-25T17:50:00.000Z',
+      driftSince: null,
+      loadedSignature: 'sha256:same',
+      diskSignature: 'sha256:same',
+      inSync: true,
+    }));
+
+    const summary = summarizeConfigSignatureDrift(hqRoot, { nowMs: Date.parse(NOW) });
+    assert.equal(summary.alarmed.length, 1);
+    assert.equal(summary.alarmed[0].statusStale, true);
+    assert.equal(summary.alarmed[0].reportedInSync, true);
+    assert.equal(summary.alarmed[0].inSync, null);
+
+    const snapshot = collectReviewPipelineHealth({
+      rootDir,
+      hqRoot,
+      now: () => new Date(NOW),
+      config: { hostChecksEnabled: false },
+    });
+    const findings = evaluateReviewPipelineFindings({
+      ...snapshot,
+      config: { ...snapshot.config, hostChecksEnabled: true },
+      configSignatureDrift: summary,
+    }, { observedAt: NOW });
+    const finding = findings.find((entry) => entry.code === 'review:config_signature_drift');
+    assert.ok(finding);
+    assert.match(finding.message, /has not updated/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('CFGSTALE-01 missing and malformed status distinguish unloaded from unsafe', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  try {
+    const nowMs = Date.parse(NOW);
+    const unloaded = summarizeConfigSignatureDrift(hqRoot, { nowMs, daemonLoaded: false });
+    assert.equal(unloaded.alarmed.length, 0);
+    const loaded = summarizeConfigSignatureDrift(hqRoot, { nowMs, daemonLoaded: true });
+    assert.equal(loaded.alarmed.length, 1);
+    assert.equal(loaded.alarmed[0].errorCode, 'ENOENT');
+    const statusDir = path.join(hqRoot, '.adversarial-follow-up');
+    mkdirSync(statusDir, { recursive: true });
+    writeFileSync(path.join(statusDir, 'config-status.json'), '{broken');
+    const malformed = summarizeConfigSignatureDrift(hqRoot, { nowMs, daemonLoaded: false });
+    assert.equal(malformed.alarmed.length, 1);
+    assert.equal(malformed.alarmed[0].errorCode, 'invalid-json');
+    const snapshot = collectReviewPipelineHealth({
+      rootDir,
+      hqRoot,
+      now: () => new Date(NOW),
+      config: { hostChecksEnabled: false },
+    });
+    const findings = evaluateReviewPipelineFindings({
+      ...snapshot,
+      config: { ...snapshot.config, hostChecksEnabled: true },
+      configSignatureDrift: malformed,
+    }, { observedAt: NOW });
+    assert.match(findings.find((entry) => entry.code === 'review:config_signature_drift').subject, /unavailable/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('CFGSTALE-01 status freshness follows the daemon cadence', () => {
+  const hqRoot = tempRoot();
+  try {
+    const statusDir = path.join(hqRoot, '.adversarial-follow-up');
+    mkdirSync(statusDir, { recursive: true });
+    writeFileSync(path.join(statusDir, 'config-status.json'), JSON.stringify({
+      observedAt: '2026-05-25T17:52:00.000Z',
+      inSync: true,
+      expectedIntervalMs: 5 * 60 * 1000,
+    }));
+    const summary = summarizeConfigSignatureDrift(hqRoot, { nowMs: Date.parse(NOW) });
+    assert.equal(summary.alarmed.length, 0);
+    assert.equal(summary.daemons[0].freshnessMs, 15 * 60 * 1000);
+  } finally {
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('CFGSTALE-01 config drift is host-check gated', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  try {
+    const statusDir = path.join(hqRoot, '.adversarial-follow-up');
+    mkdirSync(statusDir, { recursive: true });
+    writeFileSync(path.join(statusDir, 'config-status.json'), JSON.stringify({
+      observedAt: '2026-05-25T17:59:00.000Z',
+      driftSince: '2026-05-25T17:49:00.000Z',
+      loadedSignature: 'sha256:old',
+      diskSignature: 'sha256:new',
+      inSync: false,
+    }));
+
+    const snapshot = collectReviewPipelineHealth({
+      rootDir,
+      hqRoot,
+      now: () => new Date(NOW),
+      config: { hostChecksEnabled: false },
+    });
+    assert.deepEqual(snapshot.configSignatureDrift.alarmed, []);
+    assert.ok(!findingCodes(snapshot).includes('review:config_signature_drift'));
+
+    const findings = evaluateReviewPipelineFindings({
+      ...snapshot,
+      configSignatureDrift: summarizeConfigSignatureDrift(hqRoot, { nowMs: Date.parse(NOW) }),
+    }, { observedAt: NOW });
+    assert.ok(!findingCodes({ findings }).includes('review:config_signature_drift'));
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
 
 function launchctlPrintError({ message = 'launchctl print failed', stdout = '', stderr = '' } = {}) {
   const error = new Error(message);
@@ -613,8 +777,8 @@ function insertReviewerPass(rootDir, overrides = {}) {
     db.prepare(
       `INSERT INTO reviewer_passes
          (repo, pr_number, attempt_number, reviewer_class, reviewer_model,
-          pass_kind, started_at, ended_at, status, head_sha, metadata_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          pass_kind, started_at, ended_at, status, head_sha, metadata_json, gh_comment_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       overrides.repo || REPO,
       overrides.prNumber || 950,
@@ -628,7 +792,8 @@ function insertReviewerPass(rootDir, overrides = {}) {
       overrides.headSha ?? null,
       Object.hasOwn(overrides, 'metadataJson')
         ? overrides.metadataJson
-        : JSON.stringify(overrides.metadata || { failureClass: 'timeout' })
+        : JSON.stringify(overrides.metadata || { failureClass: 'timeout' }),
+      overrides.ghCommentId ?? null
     );
   } finally {
     db.close();
@@ -637,6 +802,16 @@ function insertReviewerPass(rootDir, overrides = {}) {
 
 function insertReviewerPasses(rootDir, passes) {
   for (const pass of passes) insertReviewerPass(rootDir, pass);
+}
+
+function insertDeliveredReviewPass(rootDir, prNumber) {
+  insertReviewerPass(rootDir, {
+    prNumber,
+    attemptNumber: 1,
+    passKind: 'first-pass',
+    status: 'completed',
+    ghCommentId: `RV_${prNumber}`,
+  });
 }
 
 function reviewerModelSilentFinding(snapshot) {
@@ -3303,6 +3478,7 @@ test('a rereview deferred behind active remediation is not first-pass starvation
     failedAt: '2026-05-25T16:05:00.000Z',
     failureMessage: '[ci-regression-requeued] CFG schema parity=FAILURE, repo-guards=FAILURE',
   });
+  insertDeliveredReviewPass(rootDir, 6803);
   writeJob(rootDir, 'in-progress', 'job-6803', {
     kind: 'adversarial-review-follow-up',
     jobId: 'laceyenterprises__agent-os-pr-6803-2026-09-14T04-27-38-241Z',
@@ -3547,6 +3723,7 @@ test('rereview claim counts are scoped to the current reviewer head', () => {
     reviewerHeadSha: 'current-head',
   });
   for (const prNumber of [6829, 6830]) {
+    insertDeliveredReviewPass(rootDir, prNumber);
     insertReviewerPasses(rootDir, [
       ...Array.from({ length: 5 }, (_, index) => ({
         prNumber,
@@ -3606,6 +3783,7 @@ test('a stopped CI regression job older than the rereview request does not defer
     failedAt: '2026-05-25T12:00:00.000Z',
     rereviewRequestedAt: '2026-05-25T16:00:00.000Z',
   });
+  insertDeliveredReviewPass(rootDir, 6839);
   insertReviewerPass(rootDir, {
     prNumber: 6839,
     attemptNumber: 1,
@@ -3837,6 +4015,7 @@ test('a rereview with a completed remediation job remains visible in the rerevie
     failedAt: '2026-05-25T16:05:00.000Z',
     failureMessage: '[ci-regression-requeued] CFG schema parity=FAILURE, repo-guards=FAILURE',
   });
+  insertDeliveredReviewPass(rootDir, 6803);
   writeJob(rootDir, 'completed', 'job-6803', {
     kind: 'adversarial-review-follow-up',
     jobId: 'laceyenterprises__agent-os-pr-6803-2026-09-14T04-27-38-241Z',
@@ -3891,6 +4070,8 @@ test('queued rereview oldest is selected by materialized age, not SQL empty-stri
     rereviewRequestedAt: '2026-05-25T16:30:00.000Z',
     reviewAttempts: 2,
   });
+  insertDeliveredReviewPass(rootDir, 6805);
+  insertDeliveredReviewPass(rootDir, 6806);
   seedFreshReconcile(rootDir);
 
   const snapshot = collectReviewPipelineHealth({
@@ -3913,6 +4094,7 @@ test('unrelated active follow-up jobs do not defer rereview admission', () => {
     rereviewRequestedAt: '2026-05-25T16:30:00.000Z',
     reviewAttempts: 2,
   });
+  insertDeliveredReviewPass(rootDir, 6807);
   writeJob(rootDir, 'in-progress', 'job-6807-wake', {
     kind: 'hammer-wake',
     jobId: 'unrelated-wake-job',
@@ -3944,6 +4126,7 @@ test('an old rereview without a deferral reason reports the rereview lane, not f
     rereviewRequestedAt: '2026-05-25T16:30:00.000Z',
     reviewAttempts: 2,
   });
+  insertDeliveredReviewPass(rootDir, 6804);
   seedFreshReconcile(rootDir);
 
   const snapshot = collectReviewPipelineHealth({
@@ -4115,6 +4298,38 @@ test('merge stalled finding fires on an old clean verdict and clears when the PR
     config: { mergeStalledMaxTicks: 1, pipelineTickIntervalMs: 5 * 60 * 1000 },
   });
   assert.ok(!findingCodes(cleared).includes('review:merge_stalled'));
+});
+
+test('merge stalled finding recognizes no-remediation-required clean stops from the drain', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 950,
+    prState: 'open',
+    reviewStatus: 'posted',
+    postedAt: '2026-05-25T17:00:00.000Z',
+  });
+  writeJob(rootDir, 'pending', 'clean-verdict-drain', {
+    jobId: 'clean-verdict-drain',
+    repo: REPO,
+    prNumber: 950,
+    status: 'pending',
+    createdAt: '2026-05-25T17:00:00.000Z',
+    reviewBody: CLEAN_COMMENT_ONLY_REVIEW,
+  });
+  const stopped = stopPendingNoRemediationJobs({
+    rootDir,
+    stoppedAt: '2026-05-25T17:15:00.000Z',
+  });
+  assert.equal(stopped.length, 1);
+  assert.equal(stopped[0].job.remediationPlan.stop.code, 'no-remediation-required');
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    config: { mergeStalledMaxTicks: 1, pipelineTickIntervalMs: 5 * 60 * 1000 },
+  });
+  assert.ok(findingCodes(snapshot).includes('review:merge_stalled'));
+  assert.equal(snapshot.mergeStalls.candidates[0].jobId, 'clean-verdict-drain');
 });
 
 test('merge stalled finding skips settled jobs with no review row', () => {
@@ -5161,11 +5376,34 @@ test('health output surfaces outage pause and attempts not charged', () => {
   assert.equal(snapshot.outage.reason, 'quota-outage');
   assert.equal(snapshot.outage.reviews_paused, true);
   assert.equal(snapshot.outage.attempts_not_charged, 1);
+  assert.equal(snapshot.outage.started_at, '2026-05-25T17:55:00.000Z');
+  assert.equal(snapshot.outage.parked_pr_count, 1);
   assert.deepEqual(snapshot.outage.reasons, [{ reason: 'quota-outage', count: 1 }]);
 
   const output = renderReviewPipelinePrometheus(snapshot);
   assert.match(output, /^review_pipeline_outage_active 1$/m);
   assert.match(output, /^review_pipeline_outage_attempts_not_charged 1$/m);
+});
+
+test('health output names a model credential outage', () => {
+  const rootDir = tempRoot();
+  const outageDir = path.join(rootDir, 'data', 'reviewer-credential-outages');
+  mkdirSync(outageDir, { recursive: true });
+  writeFileSync(path.join(outageDir, 'claude.json'), JSON.stringify({
+    active: true, startedAt: '2026-09-25T18:00:00.000Z',
+  }));
+  insertReviewRow(rootDir, {
+    prNumber: 779,
+    reviewStatus: 'pending-upstream',
+    reviewAttempts: 0,
+    failedAt: '2026-09-25T18:05:00.000Z',
+    failureMessage: '[outage-transient:reviewer-credential:claude] [oauth-broken] mint returned 503',
+  });
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  assert.equal(snapshot.outage.reason, 'reviewer-credential:claude');
+  assert.equal(snapshot.outage.started_at, '2026-09-25T18:00:00.000Z');
+  assert.equal(snapshot.outage.parked_pr_count, 1);
 });
 
 test('health output names aborted HCP preflights and estimated reviewer minutes lost', () => {
@@ -5584,6 +5822,19 @@ test('reviewer model silence defaults and class allowlist are configurable', () 
       ' claude, hammer-claude, claude ',
   });
   assert.deepEqual(configured.reviewerModelSilenceClasses, ['claude', 'hammer-claude']);
+});
+
+test('config signature drift thresholds are configurable', () => {
+  const defaults = resolveReviewPipelineHealthConfig({});
+  assert.equal(defaults.configSignatureDriftAlarmMs, 10 * 60 * 1000);
+  assert.equal(defaults.configSignatureStatusStaleMs, 6 * 60 * 1000);
+
+  const configured = resolveReviewPipelineHealthConfig({
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFIG_SIGNATURE_DRIFT_ALARM_MS: '120000',
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFIG_SIGNATURE_STATUS_STALE_MS: '30000',
+  });
+  assert.equal(configured.configSignatureDriftAlarmMs, 120000);
+  assert.equal(configured.configSignatureStatusStaleMs, 30000);
 });
 
 test('reviewer_pass_zombie default tracks the reaper timeout it is derived from', () => {

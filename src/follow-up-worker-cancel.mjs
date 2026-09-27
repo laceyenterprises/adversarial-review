@@ -243,7 +243,17 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   main();
 }
 
+
+// Cancellation results that leave nothing we can (or should) signal: the process group is gone,
+// the PID may belong to another process, or the job never recorded a handle. The lifecycle stop
+// can settle without a signal. Any other error is a real failure to stop a live worker.
+const SIGNAL_NOT_NEEDED_ERRORS = new Set(['process-group-not-found', 'identity-unconfirmed', 'missing-worker-process-handle']);
+function cancellationSettlesStop(cancellation) {
+  return Boolean(cancellation?.signalled) || SIGNAL_NOT_NEEDED_ERRORS.has(cancellation?.error);
+}
+
 export {
+  cancellationSettlesStop,
   cancelFollowUpWorker,
   parseArgs,
   parseSignal,

@@ -53,24 +53,29 @@ function lifecycleStopDecision(lifecycle, { repo, prNumber, site, job = null }) 
   if (!lifecycle) return null;
   const staleDriftStop = staleDriftStopDecision(lifecycle, { prNumber, site });
   if (lifecycle.prState !== 'merged' && lifecycle.prState !== 'closed') {
-    if (site === 'consume' && lifecycle.newerReviewPending) {
-      return {
-        stopCode: 'newer-review-pending',
-        actionReason: 'newer-review-pending',
-        workerState: site === 'consume' ? 'never-spawned' : 'cancelled-newer-review',
-        stopReason: `A newer review is pending for ${repo}#${prNumber}; cancelling remediation for the prior verdict.`,
-      };
-    }
     const jobRevisionRef = typeof job?.revisionRef === 'string' ? job.revisionRef.trim() : '';
     const currentHeadSha = typeof lifecycle.headSha === 'string' ? lifecycle.headSha.trim() : '';
+    // stale-review-head is evaluated first: it is the retriggerable stop for a moved head, and a
+    // newer pending review on that head is detail, not a different (terminal) outcome.
     if (site !== 'reconcile' && jobRevisionRef && currentHeadSha && jobRevisionRef !== currentHeadSha) {
       const sourceTag = lifecycle.source ? ` source=${lifecycle.source}` : '';
+      const pendingTag = lifecycle.newerReviewPending ? ' (a review of the new head is pending)' : '';
       return {
         stopCode: 'stale-review-head',
         actionReason: 'stale-review-head',
         workerState: site === 'consume' ? 'never-spawned' : 'completed-stale-review-head',
         stopReason: `Review follow-up for ${repo}#${prNumber} was created for head ${jobRevisionRef}` +
-          ` but the current PR head is ${currentHeadSha}${sourceTag}; stopping instead of racing a stale remediation job.`,
+          ` but the current PR head is ${currentHeadSha}${sourceTag}${pendingTag}; stopping instead of racing a stale remediation job.`,
+      };
+    }
+    // Only a job without a revisionRef needs the pending-review signal: the stale-head check
+    // above cannot see that it was superseded.
+    if (site === 'consume' && !jobRevisionRef && lifecycle.newerReviewPending) {
+      return {
+        stopCode: 'newer-review-pending',
+        actionReason: 'newer-review-pending',
+        workerState: 'never-spawned',
+        stopReason: `A newer review is pending for ${repo}#${prNumber}; cancelling remediation for the prior verdict.`,
       };
     }
     return staleDriftStop;

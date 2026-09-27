@@ -50,7 +50,14 @@ test('only a pending review on a newer head prevents consume; reconcile continue
     rootDir, job,
     resolvePRLifecycleImpl: async () => ({ prState: 'open', source: 'live', headSha: 'worker-pushed-head' }),
   });
-  assert.equal(lifecycleStopDecision(pushed, { ...job, job, site: 'consume' }).stopCode, 'newer-review-pending');
+  // A moved head with a revisionRef stays the retriggerable stale-review-head, even with a
+  // newer review pending; the pending review is recorded in the stop reason.
+  const consumeStop = lifecycleStopDecision(pushed, { ...job, job, site: 'consume' });
+  assert.equal(consumeStop.stopCode, 'stale-review-head');
+  assert.match(consumeStop.stopReason, /review of the new head is pending/);
+  // Only a job without a revisionRef (invisible to the stale-head check) gets newer-review-pending.
+  const refless = { ...job, revisionRef: '' };
+  assert.equal(lifecycleStopDecision(pushed, { ...refless, job: refless, site: 'consume' }).stopCode, 'newer-review-pending');
   assert.equal(lifecycleStopDecision(pushed, { ...job, job, site: 'reconcile' }), null);
   assert.equal(lifecycleStopDecision(pushed, { ...job, job, site: 'reconcile-active' }).stopCode, 'stale-review-head');
 });

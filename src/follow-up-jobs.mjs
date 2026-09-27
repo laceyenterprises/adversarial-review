@@ -128,6 +128,10 @@ const RETRIGGERABLE_STOP_CODES = Object.freeze([
   // stale-head recovery shape as `stale-review-head`; the requeue path refreshes
   // or clears `revisionRef` before the next consume tick.
   'revision-superseded',
+  // A job without a revisionRef whose PR already has a newer review pending.
+  // Same stale-verdict shape as `stale-review-head`, so an operator retrigger
+  // against the current head races nothing.
+  'newer-review-pending',
   // The stuck-claim sweep reclaims orphaned in-progress jobs into a
   // durable stop state. That reclamation is a transient recovery path,
   // so the normal operator retrigger surfaces must be able to requeue it.

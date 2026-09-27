@@ -10337,6 +10337,42 @@ test('reconcileFollowUpJob cancels an active worker when a fetched external head
   assert.equal(signals, 1);
 });
 
+async function reconcileExternalHeadWithCancel(t, prNumber, cancellation) {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'remwaste-cancel-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber, revisionRef: 'reviewed-head' });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: { model: 'codex', state: 'spawned', processId: 9700 + prNumber, processGroupId: 9700 + prNumber,
+      workspaceRoot: path.dirname(workspaceDir), workspaceDir },
+  });
+  return reconcileFollowUpJob({
+    rootDir, job: spawned.job, jobPath: spawned.jobPath,
+    isWorkerRunning: () => true,
+    now: () => '2026-04-21T10:15:00.000Z',
+    resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: 'external-head' }),
+    execFileImpl: async () => { throw Object.assign(new Error('unknown revision'), { code: 1 }); },
+    sendWorkerSignalImpl: async () => cancellation,
+    postCommentImpl: async () => ({ posted: true }),
+  });
+}
+
+test('reconcileFollowUpJob stops the job when the PID cannot be confirmed as our worker', async (t) => {
+  const result = await reconcileExternalHeadWithCancel(t, 91, { signalled: false, error: 'identity-unconfirmed' });
+  assert.equal(result.action, 'stopped');
+  assert.equal(result.job.remediationPlan.stop.code, 'stale-review-head');
+});
+
+test('reconcileFollowUpJob fails, never wedges active, when signalling a live worker fails', async (t) => {
+  const result = await reconcileExternalHeadWithCancel(t, 92, { signalled: false, error: 'kill-failed' });
+  assert.notEqual(result.action, 'active');
+  assert.equal(result.job.status, 'failed');
+  assert.equal(result.job.failure?.code ?? result.job.remediationPlan?.failure?.code, 'worker-cancellation-failed');
+});
+
 test('reconcileFollowUpJob keeps an active worker when git cannot read its workspace', async (t) => {
   const { result, signals } = await reconcileActiveOnMovedHead(t, {
     prNumber: 82, headSha: 'unknown-head',

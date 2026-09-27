@@ -70,7 +70,7 @@ import { REREVIEW_WAKE_REASONS, requestRereviewWake } from './rereview-wake.mjs'
 import { requestHammerWakeForSettledReviewStop } from './hammer-wake.mjs';
 import { drainPendingNoRemediationJobs } from './no-remediation-follow-up.mjs';
 import { activeRemediationStopDecision, lifecycleStopDecision, resolveJobPRLifecycleSafe } from './follow-up-lifecycle.mjs';
-import { sendWorkerSignal, workerCancelHandle } from './follow-up-worker-cancel.mjs';
+import { cancellationSettlesStop, sendWorkerSignal, workerCancelHandle } from './follow-up-worker-cancel.mjs';
 import { classifyGithubAuthOperationalBlocker, extractCommitShaFromOperationalBlocker, preserveUnpushedCommit, recoverGithubAuthOperationalBlocker, retryGithubAuthPushOnce } from './github-auth-recovery.mjs';
 import { buildRemediationPrompt } from './remediation-prompt-builder.mjs';
 import {
@@ -1622,9 +1622,9 @@ async function failFollowUpJobForHqCancel({
   log,
 }) {
   const failure = {
-    code: 'hq-dispatch-cancel-failed',
-    message: [
-      `Failed to cancel HQ remediation dispatch ${worker?.dispatchId || '(missing dispatchId)'} before moving the job to ${action}.`,
+    code: worker?.dispatchMode === 'hq' ? 'hq-dispatch-cancel-failed' : 'worker-cancellation-failed',
+    message: [worker?.dispatchMode === 'hq' ? `Failed to cancel HQ remediation dispatch ${worker?.dispatchId || '(missing dispatchId)'} before moving the job to ${action}.`
+      : `Failed to signal remediation worker pgid ${worker?.processGroupId ?? worker?.processId ?? '(unknown)'} before moving the job to ${action}.`,
       cancellation?.error || 'hq dispatch cancel failed',
     ].join('\n'),
   };
@@ -1639,7 +1639,7 @@ async function failFollowUpJobForHqCancel({
     rootDir,
     jobPath,
     failedAt,
-    failureCode: 'hq-dispatch-cancel-failed',
+    failureCode: failure.code,
     error: new Error(failure.message),
     remediationWorker: {
       ...workerState,
@@ -1667,7 +1667,7 @@ async function failFollowUpJobForHqCancel({
 
   return {
     action: 'failed',
-    reason: 'hq-dispatch-cancel-failed',
+    reason: failure.code,
     job: failed.job,
     jobPath: failed.jobPath,
   };
@@ -1774,10 +1774,10 @@ async function reconcileFollowUpJob({
         signal: 'SIGTERM',
         execFileImpl,
       });
-      if (!cancellation.signalled && cancellation.error !== 'process-group-not-found') {
+      if (!cancellationSettlesStop(cancellation)) {
         log.warn?.(`[follow-up-remediation] lifecycle cancellation failed job=${job.jobId} reason=${cancellation.error}`);
-        return { action: 'active', reason: 'worker-cancellation-failed', job, jobPath };
-      }
+        return failFollowUpJobForHqCancel({ rootDir, job, jobPath, worker, workerState, failedAt: lifecycleStoppedAt,
+          cancellation, action: lifecycleStop.stopCode, postCommentImpl, now, log }); }
       workerState.cancellation = cancellation;
     }
     const stopped = markFollowUpJobStopped({

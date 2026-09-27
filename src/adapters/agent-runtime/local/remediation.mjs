@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { closeSync, existsSync, openSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { spawnDetachedCli } from '../../reviewer-runtime/cli-direct/process.mjs';
 import { isPgidAlive, verifyPgidIdentity } from '../../../process-group-identity.mjs';
@@ -19,6 +20,11 @@ const execFileAsync = promisify(execFile);
 const DEFAULT_PATH_PREFIX = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
 const DEFAULT_GEMINI_REMEDIATION_MODEL = 'gemini-2.5-pro';
 const DEFAULT_CODEX_REMEDIATION_MODEL = 'gpt-5.5';
+const DEFAULT_CLAUDE_REMEDIATION_MODEL = 'claude-opus-5-5';
+const REGISTRY_TTL_MS = 60_000;
+const REGISTRY_SEED_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../../../../..');
+const registryCache = new Map();
+const fallbackWarnings = new Map();
 const DEFAULT_POLL_MS = 250;
 const IDENTITY_PROBE_RETRY_DELAYS_MS = Object.freeze([50, 100, 200]);
 const TRANSIENT_IDENTITY_PROBE_RE = /ps probe failed.*(?:EIO|EAGAIN|ETIMEDOUT|timeout|timed out|resource temporarily unavailable|input\/output error)/i;
@@ -292,19 +298,89 @@ function assertHarnessIdentityMatch({
   return result;
 }
 
+function readWorkerClasses(path, nowMs) {
+  const cached = registryCache.get(path);
+  if (cached && nowMs - cached.readAt < REGISTRY_TTL_MS) return cached;
+  let entry;
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8'));
+    const classes = parsed?.classes || parsed;
+    if (!classes || typeof classes !== 'object' || Array.isArray(classes)) {
+      throw new SyntaxError('registry root is not an object');
+    }
+    entry = { classes, readAt: nowMs, reason: null };
+  } catch (error) {
+    entry = {
+      classes: null,
+      readAt: nowMs,
+      reason: error.code === 'ENOENT' ? 'missing file' : 'unparsable JSON',
+    };
+  }
+  registryCache.set(path, entry);
+  return entry;
+}
+
+function resolveRemediationModel(className, {
+  env = process.env,
+  hqRoot = env.HQ_ROOT,
+  pin = '',
+  fallbackModel,
+  nowMs = Date.now(),
+} = {}) {
+  const mirrorPath = hqRoot && join(resolve(hqRoot), 'registry', 'worker-classes.json');
+  const seedRoot = env.AGENT_OS_DEPLOY_CHECKOUT || REGISTRY_SEED_ROOT;
+  const candidates = [
+    mirrorPath && [mirrorPath, 'registry-mirror'],
+    [join(resolve(seedRoot), 'modules', 'worker-pool', 'worker-classes.json'), 'registry-seed'],
+  ].filter(Boolean);
+  const names = className === 'remediator-gemini' ? [className, 'gemini'] : [className];
+  let reason = 'missing file';
+  for (const [path, source] of candidates) {
+    const registry = readWorkerClasses(path, nowMs);
+    if (!registry.classes) {
+      reason = registry.reason;
+      continue;
+    }
+    const selected = names.find((name) => registry.classes[name]?.defaultModel);
+    if (!selected) {
+      reason = 'class absent';
+      continue;
+    }
+    const spec = registry.classes[selected];
+    return {
+      resolvedModel: String(pin).trim() || spec.defaultModel,
+      resolvedReasoningLevel: spec.defaultReasoningLevel || null,
+      modelSource: String(pin).trim() ? 'env' : source,
+    };
+  }
+  if (!String(pin).trim()) {
+    const warningKey = `${className}:${candidates.map(([path]) => path).join(':')}`;
+    if (nowMs - (fallbackWarnings.get(warningKey) ?? -Infinity) >= REGISTRY_TTL_MS) {
+      console.warn(`[follow-up-remediation] ${className}: using fallback model constant (${reason})`);
+      fallbackWarnings.set(warningKey, nowMs);
+    }
+  }
+  return {
+    resolvedModel: String(pin).trim() || fallbackModel,
+    resolvedReasoningLevel: null,
+    modelSource: String(pin).trim() ? 'env' : 'fallback-constant',
+  };
+}
+
 function resolveGeminiRemediationModel(env = process.env) {
-  const pinned = String(env.GEMINI_REMEDIATION_MODEL || env.GEMINI_MODEL || '').trim();
-  return pinned || DEFAULT_GEMINI_REMEDIATION_MODEL;
+  return resolveRemediationModel('remediator-gemini', {
+    env,
+    pin: env.GEMINI_REMEDIATION_MODEL || env.GEMINI_MODEL,
+    fallbackModel: DEFAULT_GEMINI_REMEDIATION_MODEL,
+  }).resolvedModel;
 }
 
 function resolveCodexRemediationModel(env = process.env) {
-  const pinned = String(
-    env.ADVERSARIAL_REMEDIATION_CODEX_MODEL
-      || env.CODEX_REMEDIATION_MODEL
-      || env.CODEX_MODEL_ID
-      || ''
-  ).trim();
-  return pinned || DEFAULT_CODEX_REMEDIATION_MODEL;
+  return resolveRemediationModel('remediator-codex', {
+    env,
+    pin: env.ADVERSARIAL_REMEDIATION_CODEX_MODEL || env.CODEX_REMEDIATION_MODEL || env.CODEX_MODEL_ID,
+    fallbackModel: DEFAULT_CODEX_REMEDIATION_MODEL,
+  }).resolvedModel;
 }
 
 function resolveGeminiAuthPath(env = process.env) {
@@ -663,6 +739,16 @@ function spawnClaudeCodeRemediationWorker({
     workerClass,
     jobId,
   });
+  const modelResolution = resolveRemediationModel('remediator-claude', {
+    env: sourceEnv,
+    hqRoot: hqRoot || sourceEnv.HQ_ROOT,
+    fallbackModel: DEFAULT_CLAUDE_REMEDIATION_MODEL,
+  });
+  const claudeArgs = [
+    '--print', '--permission-mode', 'acceptEdits', '--dangerously-skip-permissions',
+    '--model', modelResolution.resolvedModel,
+    ...(modelResolution.resolvedReasoningLevel ? ['--effort', modelResolution.resolvedReasoningLevel] : []),
+  ];
   let promptFd;
   let stdoutFd;
   let stderrFd;
@@ -672,7 +758,7 @@ function spawnClaudeCodeRemediationWorker({
     stderrFd = openSyncImpl(logPath, 'a');
     const child = spawnDetachedCli(
       claudeCli,
-      ['--print', '--permission-mode', 'acceptEdits', '--dangerously-skip-permissions'],
+      claudeArgs,
       {
         cwd: workspaceDir,
         env,
@@ -694,7 +780,8 @@ function spawnClaudeCodeRemediationWorker({
       launchRequestId: replyContext.launchRequestId,
       gitIdentity,
       startupEvidence,
-      command: [claudeCli, '--print', '--permission-mode', 'acceptEdits', '--dangerously-skip-permissions'],
+      ...modelResolution,
+      command: [claudeCli, ...claudeArgs],
       child,
     };
   } finally {
@@ -753,7 +840,13 @@ function spawnGeminiRemediationWorker({
   // Resolve from the exact sanitized environment handed to the child. This
   // keeps model selection aligned with future per-worker env overrides rather
   // than reaching back into ambient daemon state.
-  const model = resolveGeminiRemediationModel(env);
+  const modelResolution = resolveRemediationModel('remediator-gemini', {
+    env,
+    hqRoot: hqRoot || sourceEnv.HQ_ROOT,
+    pin: env.GEMINI_REMEDIATION_MODEL || env.GEMINI_MODEL,
+    fallbackModel: DEFAULT_GEMINI_REMEDIATION_MODEL,
+  });
+  const geminiArgs = ['--approval-mode', 'yolo', '--skip-trust', '-m', modelResolution.resolvedModel];
   let promptFd;
   let stdoutFd;
   let stderrFd;
@@ -763,7 +856,7 @@ function spawnGeminiRemediationWorker({
     stderrFd = openSyncImpl(logPath, 'a');
     const child = spawnDetachedCli(
       geminiCli,
-      ['--approval-mode', 'yolo', '--skip-trust', '-m', model],
+      geminiArgs,
       {
         cwd: workspaceDir,
         env,
@@ -786,7 +879,8 @@ function spawnGeminiRemediationWorker({
       launchRequestId: replyContext.launchRequestId,
       gitIdentity,
       startupEvidence,
-      command: [geminiCli, '--approval-mode', 'yolo', '--skip-trust', '-m', model],
+      ...modelResolution,
+      command: [geminiCli, ...geminiArgs],
       child,
     };
   } finally {
@@ -845,7 +939,25 @@ function spawnCodexRemediationWorker({
     workerClass: REMEDIATION_WORKER_TRAILER_CLASS,
     jobId,
   });
-  const codexModel = resolveCodexRemediationModel(env);
+  const modelResolution = resolveRemediationModel('remediator-codex', {
+    env,
+    hqRoot: hqRoot || sourceEnv.HQ_ROOT,
+    pin: env.ADVERSARIAL_REMEDIATION_CODEX_MODEL || env.CODEX_REMEDIATION_MODEL || env.CODEX_MODEL_ID,
+    fallbackModel: DEFAULT_CODEX_REMEDIATION_MODEL,
+  });
+  const codexArgs = [
+    'exec',
+    '--model', modelResolution.resolvedModel,
+    ...(['low', 'medium', 'high', 'xhigh'].includes(modelResolution.resolvedReasoningLevel)
+      ? ['-c', `model_reasoning_effort=${modelResolution.resolvedReasoningLevel}`]
+      : []),
+    '--dangerously-bypass-approvals-and-sandbox',
+    '--ephemeral',
+    '--json',
+    '--output-last-message',
+    outputPath,
+    '-',
+  ];
   let promptFd;
   let stdoutFd;
   let stderrFd;
@@ -855,17 +967,7 @@ function spawnCodexRemediationWorker({
     stderrFd = openSyncImpl(logPath, 'a');
     const child = spawnDetachedCli(
       codexCli,
-      [
-        'exec',
-        '--model',
-        codexModel,
-        '--dangerously-bypass-approvals-and-sandbox',
-        '--ephemeral',
-        '--json',
-        '--output-last-message',
-        outputPath,
-        '-',
-      ],
+      codexArgs,
       {
         cwd: workspaceDir,
         env,
@@ -888,18 +990,8 @@ function spawnCodexRemediationWorker({
       launchRequestId: replyContext.launchRequestId,
       gitIdentity,
       startupEvidence,
-      command: [
-        codexCli,
-        'exec',
-        '--model',
-        codexModel,
-        '--dangerously-bypass-approvals-and-sandbox',
-        '--ephemeral',
-        '--json',
-        '--output-last-message',
-        outputPath,
-        '-',
-      ],
+      ...modelResolution,
+      command: [codexCli, ...codexArgs],
       child,
     };
   } finally {
@@ -1072,6 +1164,7 @@ export {
   resolveCodexRemediationModel,
   resolveGeminiCliPath,
   resolveGeminiRemediationModel,
+  resolveRemediationModel,
   spawnClaudeCodeRemediationWorker,
   spawnCodexRemediationWorker,
   spawnGeminiRemediationWorker,

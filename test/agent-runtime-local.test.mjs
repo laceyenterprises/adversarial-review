@@ -18,6 +18,7 @@ import {
 import {
   cancelLocalRemediationWorker,
   prepareCodexRemediationStartupEnv,
+  resolveRemediationModel,
   spawnClaudeCodeRemediationWorker,
   spawnCodexRemediationWorker,
   spawnGeminiRemediationWorker,
@@ -387,6 +388,109 @@ test('local remediation spawners retain reply bookkeeping on worker records', ()
     assert.equal(codex.launchRequestId, 'lrq_local_reply_state');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('remediation spawners use governed models and reasoning from the HQ mirror', () => {
+  const root = makeRoot();
+  const registryDir = join(root, 'registry');
+  mkdirSync(registryDir);
+  writeFileSync(join(registryDir, 'worker-classes.json'), JSON.stringify({ classes: {
+    'remediator-codex': { defaultModel: 'gpt-6-sol', defaultReasoningLevel: 'xhigh' },
+    'remediator-claude': { defaultModel: 'claude-opus-5-5', defaultReasoningLevel: 'xhigh' },
+    'remediator-gemini': { defaultModel: 'gemini-3-pro', defaultReasoningLevel: 'high' },
+  } }));
+  const promptPath = join(root, 'prompt.md');
+  writeFileSync(promptPath, 'fix the PR');
+  const calls = [];
+  const shared = {
+    workspaceDir: root,
+    promptPath,
+    outputPath: join(root, 'out.txt'),
+    logPath: join(root, 'worker.log'),
+    hqRoot: root,
+    replyPath: join(root, 'reply.json'),
+    launchRequestId: 'lrq_model_fixture',
+    sourceEnv: {
+      HQ_ROOT: root,
+      HOME: root,
+      CODEX_AUTH_PATH: join(root, '.codex', 'auth.json'),
+      CODEX_HOME: join(root, '.codex'),
+    },
+    enforceHarnessIdentity: false,
+    spawnImpl: (command, args) => {
+      calls.push([command, ...args]);
+      return { pid: 4141, unref() {} };
+    },
+  };
+  try {
+    for (const spawn of [
+      spawnCodexRemediationWorker,
+      spawnClaudeCodeRemediationWorker,
+      spawnGeminiRemediationWorker,
+    ]) {
+      const record = spawn(shared);
+      assert.deepEqual(record.command, calls.at(-1));
+      assert.equal(record.modelSource, 'registry-mirror');
+    }
+    assert.deepEqual(calls[0].slice(1, 6), ['exec', '--model', 'gpt-6-sol', '-c', 'model_reasoning_effort=xhigh']);
+    assert.deepEqual(calls[1].slice(-4), ['--model', 'claude-opus-5-5', '--effort', 'xhigh']);
+    assert.deepEqual(calls[2].slice(-2), ['-m', 'gemini-3-pro']);
+    assert.equal(resolveRemediationModel('remediator-codex', {
+      env: { HQ_ROOT: root }, pin: 'gpt-pinned', fallbackModel: 'old',
+    }).modelSource, 'env');
+    const pinned = spawnCodexRemediationWorker({
+      ...shared,
+      sourceEnv: { ...shared.sourceEnv, ADVERSARIAL_REMEDIATION_CODEX_MODEL: 'gpt-pinned' },
+    });
+    assert.equal(pinned.resolvedModel, 'gpt-pinned');
+    assert.equal(pinned.modelSource, 'env');
+    assert.ok(pinned.command.includes('model_reasoning_effort=xhigh'));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('remediation registry prefers mirror, uses seed, and warns on constant fallback', () => {
+  const root = makeRoot();
+  const mirror = join(root, 'hq');
+  const seed = join(root, 'agent-os', 'modules', 'worker-pool');
+  mkdirSync(join(mirror, 'registry'), { recursive: true });
+  mkdirSync(seed, { recursive: true });
+  const mirrorPath = join(mirror, 'registry', 'worker-classes.json');
+  const seedPath = join(seed, 'worker-classes.json');
+  writeFileSync(mirrorPath, JSON.stringify({ 'remediator-codex': { defaultModel: 'mirror' } }));
+  writeFileSync(seedPath, JSON.stringify({ classes: {
+    'remediator-codex': { defaultModel: 'seed' },
+    gemini: { defaultModel: 'gemini-seed' },
+  } }));
+  const env = { HQ_ROOT: mirror, AGENT_OS_DEPLOY_CHECKOUT: join(root, 'agent-os') };
+  const options = { env, fallbackModel: 'constant' };
+  const originalWarn = console.warn;
+  const warnings = [];
+  console.warn = (message) => warnings.push(message);
+  try {
+    assert.deepEqual(resolveRemediationModel('remediator-codex', options), {
+      resolvedModel: 'mirror', resolvedReasoningLevel: null, modelSource: 'registry-mirror',
+    });
+    rmSync(mirrorPath);
+    assert.equal(resolveRemediationModel('remediator-codex', { ...options, nowMs: Date.now() + 61_000 }).modelSource, 'registry-seed');
+    assert.equal(resolveRemediationModel('remediator-gemini', options).resolvedModel, 'gemini-seed');
+    writeFileSync(seedPath, '{bad json');
+    const fallback = resolveRemediationModel('remediator-codex', { ...options, nowMs: Date.now() + 122_000 });
+    assert.deepEqual(fallback, {
+      resolvedModel: 'constant', resolvedReasoningLevel: null, modelSource: 'fallback-constant',
+    });
+    assert.match(warnings.at(-1), /remediator-codex.*unparsable JSON/);
+    resolveRemediationModel('remediator-codex', { ...options, nowMs: Date.now() + 122_000 });
+    assert.equal(warnings.length, 1);
+    rmSync(seedPath);
+    const missing = resolveRemediationModel('remediator-codex', { ...options, nowMs: Date.now() + 183_000 });
+    assert.equal(missing.modelSource, 'fallback-constant');
+    assert.match(warnings.at(-1), /remediator-codex.*missing file/);
+  } finally {
+    console.warn = originalWarn;
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

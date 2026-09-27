@@ -15,10 +15,8 @@ const tempBase = Buffer.byteLength(realpathSync(callerTmpDir)) > 60 ? '/tmp' : c
 const sandboxRoot = realpathSync(mkdtempSync(path.join(tempBase, 'art-')));
 const sandboxTmpDir = path.join(sandboxRoot, 'tmp');
 mkdirSync(sandboxTmpDir);
-const fixturePrefixes = [
-  'adversarial-review-', 'hammer-', 'watcher-', 'reaper-', 'reviewer-',
-  'run-ledger-', 'diagnose-stuck-rereview-',
-];
+// Include this run's random sandbox name so concurrent suites cannot trip the guard.
+const fixtureProbePrefix = `adversarial-review-tmp-probe-${path.basename(sandboxRoot)}-`;
 
 function makeWorkerRoot(index) {
   const root = path.join(sandboxRoot, `file-${index}`);
@@ -81,6 +79,8 @@ try {
     path.join(testDir, 'helpers', 'child-leak-guard.mjs'),
     '--import',
     path.join(testDir, 'helpers', 'rate-limit-state-isolation.mjs'),
+    '--import',
+    path.join(testDir, 'helpers', 'temp-sandbox-guard.mjs'),
     '--test',
     '--test-concurrency=8',
     ...testPaths,
@@ -89,6 +89,7 @@ try {
     env: {
       ...process.env,
       ADVERSARIAL_REVIEW_TEST_SANDBOX_ROOT: sandboxRoot,
+      ADVERSARIAL_REVIEW_TEST_TMP_PROBE_PREFIX: fixtureProbePrefix,
       TMPDIR: sandboxTmpDir,
       TMP: sandboxTmpDir,
       TEMP: sandboxTmpDir,
@@ -122,7 +123,7 @@ try {
   const result = await childExit;
 
   const leakedTempEntries = readdirSync(callerTmpDir).filter((name) =>
-    !callerTmpBefore.has(name) && fixturePrefixes.some((prefix) => name.startsWith(prefix)));
+    !callerTmpBefore.has(name) && name.startsWith(fixtureProbePrefix));
   if (leakedTempEntries.length > 0) {
     console.error(`Test suite wrote fixture directories into caller TMPDIR:\n${leakedTempEntries.join('\n')}`);
     process.exitCode = 1;

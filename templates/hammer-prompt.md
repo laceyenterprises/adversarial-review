@@ -685,16 +685,19 @@ if ! git rebase "origin/$BASE_BRANCH"; then
   :
 fi
 # SUBSYNC-01: the rebase moved gitlinks but not submodule checkouts.
+# This block can run in a fresh shell, so default the cap here: an unset cap makes
+# `[ n -ge "" ]` error out as false and the retry loop would never stop.
+HAM_CONFLICT_SUBMODULE_SYNC_CAP="${HAM_UPDATE_BRANCH_RETRY_CAP:-3}"
 HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT=1
 while true; do
   if /usr/bin/perl -e 'alarm shift; exec @ARGV' 120 git submodule update --recursive; then
     break
   fi
-  if [ "$HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT" -ge "$HAM_UPDATE_BRANCH_RETRY_CAP" ]; then
+  if [ "$HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT" -ge "$HAM_CONFLICT_SUBMODULE_SYNC_CAP" ]; then
     echo "HAM hard-blocker: submodule update failed after conflict rebase; refusing force-push with stale submodule checkout" >&2
     exit 1
   fi
-  echo "HAM: submodule update failed after conflict rebase; retrying ${HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT}/${HAM_UPDATE_BRANCH_RETRY_CAP}" >&2
+  echo "HAM: submodule update failed after conflict rebase; retrying ${HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT}/${HAM_CONFLICT_SUBMODULE_SYNC_CAP}" >&2
   sleep $((HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT * 2))
   HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT=$((HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT + 1))
 done

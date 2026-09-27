@@ -387,6 +387,9 @@ test('hammer never moves a submodule pointer: re-syncs checkouts and unstages gi
   const syncAt = conflictBlock.indexOf('git submodule update --recursive');
   assert.ok(rebaseAt >= 0 && syncAt > rebaseAt && syncAt < pushAt, 'conflict rebase must re-sync submodules before pushing');
   assert.match(conflictBlock, /HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT=1/);
+  // The conflict block may run in a fresh shell: the retry cap must default locally.
+  assert.match(conflictBlock, /HAM_CONFLICT_SUBMODULE_SYNC_CAP="\$\{HAM_UPDATE_BRANCH_RETRY_CAP:-3\}"/);
+  assert.match(conflictBlock, /-ge "\$HAM_CONFLICT_SUBMODULE_SYNC_CAP"/);
   assert.match(conflictBlock, /submodule update failed after conflict rebase; refusing force-push/);
 
   assert.match(HAMMER_PROMPT, /No submodule gitlink changes in HAM commits \(SUBSYNC-01, agent-os#7092\)/);

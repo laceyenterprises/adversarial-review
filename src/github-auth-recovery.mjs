@@ -190,19 +190,42 @@ async function retryGithubAuthPushOnce({
   workspaceDir,
   workerClass,
   branch,
+  repo,
+  prNumber,
   commitSha,
   env = process.env,
   execFileImpl = execFileAsync,
   retryDelaysMs = GITHUB_AUTH_PUSH_RETRY_DELAYS_MS,
   sleepImpl = sleep,
 }) {
-  const targetBranch = String(branch || '').trim();
+  const agentOsRoot = [join(ROOT, '../..'), env.HQ_REPO_ROOT].find((candidate) => candidate && existsSync(join(candidate, 'modules/worker-pool/lib/hq-gh.sh')));
+  if (!agentOsRoot) return { retried: false, pushed: false, reason: 'missing-gh-adapter' };
+  let targetBranch = String(branch || '').trim();
+  if (!targetBranch) {
+    try {
+      const checkedOut = await execFileImpl('git', ['-C', workspaceDir, 'rev-parse', '--abbrev-ref', 'HEAD']);
+      targetBranch = String(checkedOut.stdout || '').trim();
+      if (targetBranch === 'HEAD') targetBranch = '';
+    } catch { /* Detached or unavailable workspace. */ }
+  }
+  if (!targetBranch && repo && prNumber) {
+    try {
+      const viewScript = `set -euo pipefail
+source "${agentOsRoot}/modules/worker-pool/lib/hq-gh.sh"
+unset GH_TOKEN GITHUB_TOKEN HQ_ENTITLEMENT_GH_TOKEN
+hq_resolve_worker_class_gh_token "$WORKER_CLASS"
+export GH_TOKEN="$HQ_ENTITLEMENT_GH_TOKEN" GITHUB_TOKEN="$HQ_ENTITLEMENT_GH_TOKEN"
+"${agentOsRoot}/modules/worker-pool/lib/shims/gh" pr view "$PR_NUMBER" --repo "$PR_REPO" --json headRefName --jq .headRefName`;
+      const viewed = await execFileImpl('bash', ['-c', viewScript], { env: { ...env, WORKER_CLASS: workerClass, PR_NUMBER: String(prNumber), PR_REPO: repo } });
+      targetBranch = String(viewed.stdout || '').trim();
+    } catch { /* Report missing branch below. */ }
+  }
   if (!targetBranch) {
     return { retried: false, pushed: false, reason: 'missing-pr-branch' };
   }
   const script = `
 set -euo pipefail
-source "${ROOT}/../../modules/worker-pool/lib/hq-gh.sh"
+source "${agentOsRoot}/modules/worker-pool/lib/hq-gh.sh"
 unset GH_TOKEN GITHUB_TOKEN HQ_ENTITLEMENT_GH_TOKEN
 hq_resolve_worker_class_gh_token "$WORKER_CLASS"
 token="$HQ_ENTITLEMENT_GH_TOKEN"
@@ -211,7 +234,9 @@ if [[ -z "$token" && -n "\${HQ_ENTITLEMENT_GH_TOKEN_VAR:-}" ]]; then
 fi
 [[ -n "$token" ]]
 export GH_TOKEN="$token" GITHUB_TOKEN="$token" GIT_TERMINAL_PROMPT=0
-git -C "$WORKSPACE_DIR" push origin "$COMMIT_SHA:refs/heads/$TARGET_BRANCH" --force-with-lease
+git -C "$WORKSPACE_DIR" fetch origin "refs/heads/$TARGET_BRANCH"
+git -C "$WORKSPACE_DIR" merge-base --is-ancestor FETCH_HEAD "$COMMIT_SHA" || exit 42
+"${agentOsRoot}/modules/worker-pool/bin/git-safe" -C "$WORKSPACE_DIR" push origin "$COMMIT_SHA:refs/heads/$TARGET_BRANCH"
 `;
   const options = {
     env: {
@@ -231,9 +256,20 @@ git -C "$WORKSPACE_DIR" push origin "$COMMIT_SHA:refs/heads/$TARGET_BRANCH" --fo
     if (attempts[attempt] > 0) await sleepImpl(attempts[attempt]);
     attemptsMade = attempt + 1;
     try {
-      await execFileImpl('bash', ['-lc', script], options);
+      await execFileImpl('bash', ['-c', script], options);
       return { retried: true, pushed: true, reason: 'push-succeeded', attempts: attemptsMade };
     } catch (err) {
+      if (err?.code === 42) return { retried: true, pushed: false, reason: 'pr-head-moved', attempts: attemptsMade };
+      if (/non-fast-forward|fetch first|stale info/i.test(githubAuthRecoveryErrorDetail(err))) {
+        return {
+          retried: true,
+          pushed: false,
+          reason: 'pr-head-moved',
+          attempts: attemptsMade,
+          transient: false,
+          error: redactGithubAuthRecoveryDetail(githubAuthRecoveryErrorDetail(err)).slice(0, 1200),
+        };
+      }
       lastError = err;
       lastTransient = isTransientGitPushError(err);
       if (!lastTransient || attempt === attempts.length - 1) break;
@@ -293,8 +329,13 @@ async function recoverGithubAuthOperationalBlocker({
   if (authBlocker.classification.kind === 'recoverable' && rescue?.preserved) {
     retry = await retryGithubAuthPushOnce({
       workspaceDir,
-      workerClass: resolveWorkerClass(job, worker),
+      workerClass: worker?.pushTokenCapability?.workflowTouch?.touches
+        || worker?.startupEvidence?.mergeAgentBroker?.requiresWorkflowPush
+        ? 'merge-agent'
+        : resolveWorkerClass(job, worker),
       branch: job.branch,
+      repo: job.repo,
+      prNumber: job.prNumber,
       commitSha: rescue.commitSha,
       env,
       execFileImpl,

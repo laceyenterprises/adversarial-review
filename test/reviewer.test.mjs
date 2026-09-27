@@ -1466,6 +1466,11 @@ function queueWithFakes(reviewText, overrides = {}) {
   return { result, created };
 }
 
+test('review handoff records the known PR head branch on its job', () => {
+  const { created } = queueWithFakes('## Verdict\nRequest changes', { branch: 'feature/auth-fix' });
+  assert.equal(created[0].branch, 'feature/auth-fix');
+});
+
 test('VirtualPaul PR without advisory-only override label stays enforce mode', async () => {
   const resolved = await fetchCurrentHeadVerdictMode({
     repo: 'laceyenterprises/adversarial-review',

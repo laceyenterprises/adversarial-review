@@ -490,7 +490,7 @@ test('retryGithubAuthPushOnce retries transient reminted push failures only with
   });
 
   assert.equal(terminalResult.pushed, false);
-  assert.equal(terminalResult.reason, 'push-failed-after-remint');
+  assert.equal(terminalResult.reason, 'pr-head-moved');
   assert.equal(terminalResult.transient, false);
   assert.equal(terminalResult.attempts, 1);
   assert.equal(terminalCalls.length, 1);

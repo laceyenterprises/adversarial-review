@@ -592,9 +592,19 @@ worker-provenance commits with the `gemini-remediation` trailer class. In HQ
 dispatch, the daemon sends `hq dispatch --worker-class gemini` and lets the
 worker-pool Gemini adapter own broker-backed OAuth seeding (`broker-oauth`);
 the HQ path must not require an operator-local `~/.gemini/oauth_creds.json`
-before dispatch. The remediation prompt still carries
-`WORKER_CLASS=gemini-remediation` so the broker-backed worker stamps the same
-provenance trailer as the direct path.
+before dispatch. The direct worker carries `WORKER_CLASS=gemini` for the GitHub
+adapter and `WORKER_TRAILER_CLASS=gemini-remediation` for commit provenance.
+The same split applies to Codex and Claude Code remediation. When workflow
+files require the merge-agent App, the adapter class is `merge-agent` while
+the commit trailer retains the physical remediation harness.
+
+Direct remediation workers put the agent-os `gh` and `git-safe` shims first on
+PATH. `git-safe push` refreshes the worker entitlement at push time; the
+remediation prompt requires that command. Follow-up jobs retain the PR head
+branch from reviewer metadata. GitHub-auth recovery can recover a missing
+branch from the checkout or `gh pr view`, refreshes the adapter token, and
+pushes only when the remote head is an ancestor of the rescued commit. A moved
+head keeps the rescue bundle for operator recovery.
 
 Claude Code remediation resolves its model credential by transport. With no
 explicit override the transport AUTO-DETECTS: `broker` when this host is wired

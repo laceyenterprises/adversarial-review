@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { closeSync, existsSync, openSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { spawnDetachedCli } from '../../reviewer-runtime/cli-direct/process.mjs';
 import { isPgidAlive, verifyPgidIdentity } from '../../../process-group-identity.mjs';
@@ -18,6 +19,8 @@ import { resolveRosterPath as resolveWorkerClassRosterPath } from '../../../hq-w
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_PATH_PREFIX = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../../..');
+let warnedMissingWorkerShims = false;
 const DEFAULT_GEMINI_REMEDIATION_MODEL = 'gemini-2.5-pro';
 const DEFAULT_CODEX_REMEDIATION_MODEL = 'gpt-5.5';
 const DEFAULT_CLAUDE_REMEDIATION_MODEL = 'claude-opus-5-5';
@@ -58,6 +61,31 @@ function sleep(ms) {
 function buildInheritedPath(currentPath = process.env.PATH || '') {
   const segments = [...DEFAULT_PATH_PREFIX, ...String(currentPath).split(':').filter(Boolean)];
   return [...new Set(segments)].join(':');
+}
+
+function installWorkerAdapterEnv(env, sourceEnv, physicalClass, trailerClass, repo, log = console, requiresWorkflowPush = false) {
+  const candidates = [join(ROOT, '../..'), sourceEnv.HQ_REPO_ROOT].filter(Boolean);
+  const agentOsRoot = candidates.find((candidate) =>
+    existsSync(join(candidate, 'modules/worker-pool/lib/shims/gh'))
+    && existsSync(join(candidate, 'modules/worker-pool/lib/shims/git-safe')));
+  if (!agentOsRoot) {
+    if (!warnedMissingWorkerShims) {
+      warnedMissingWorkerShims = true;
+      log?.warn?.('[follow-up-remediation] agent-os worker shims unavailable; using inherited PATH');
+    }
+    return;
+  }
+  const shimDir = join(agentOsRoot, 'modules/worker-pool/lib/shims');
+  env.PATH = [shimDir, join(agentOsRoot, 'modules/worker-pool/bin'), env.PATH].join(':');
+  env.HQ_REPO_ROOT = agentOsRoot;
+  if (repo) env.GITHUB_REPOSITORY = repo;
+  if (!env.GH_TOKEN && env.GITHUB_TOKEN) env.GH_TOKEN = env.GITHUB_TOKEN;
+  env.WORKER_CLASS = requiresWorkflowPush ? 'merge-agent' : physicalClass;
+  env.HQ_ENTITLEMENT_GH_TOKEN_VAR = requiresWorkflowPush
+    ? 'MERGE_AGENT_GH_TOKEN'
+    : ({ codex: 'CODEX_WORKER_GH_TOKEN', 'claude-code': 'CLAUDE_WORKER_GH_TOKEN', gemini: 'GEMINI_WORKER_GH_TOKEN' })[physicalClass];
+  env.WORKER_TRAILER_CLASS = trailerClass;
+  env.HQ_WORKER_TOKEN_MINTED_AT = new Date().toISOString();
 }
 
 function resolveCodexCliPath(env = process.env) {
@@ -822,6 +850,7 @@ function withReplyContext(env, { replyPath = null, hqRoot, launchRequestId, now,
 
 function spawnClaudeCodeRemediationWorker({
   workspaceDir,
+  repo = null,
   promptPath,
   outputPath,
   logPath,
@@ -871,6 +900,7 @@ function spawnClaudeCodeRemediationWorker({
     workerClass,
     jobId,
   });
+  installWorkerAdapterEnv(env, sourceEnv, 'claude-code', workerClass, repo, log, requiresWorkflowPush);
   const modelResolution = requestedModelResolution || resolveClaudeRemediationModel(env, {
     hqRoot: hqRoot || sourceEnv.HQ_ROOT,
   });
@@ -923,6 +953,7 @@ function spawnClaudeCodeRemediationWorker({
 
 function spawnGeminiRemediationWorker({
   workspaceDir,
+  repo = null,
   promptPath,
   outputPath,
   logPath,
@@ -967,6 +998,7 @@ function spawnGeminiRemediationWorker({
     workerClass: GEMINI_REMEDIATION_WORKER_TRAILER_CLASS,
     jobId,
   });
+  installWorkerAdapterEnv(env, sourceEnv, 'gemini', GEMINI_REMEDIATION_WORKER_TRAILER_CLASS, repo, log, requiresWorkflowPush);
   // Resolve from the exact sanitized environment handed to the child. This
   // keeps model selection aligned with future per-worker env overrides rather
   // than reaching back into ambient daemon state.
@@ -1022,6 +1054,7 @@ function spawnGeminiRemediationWorker({
 
 function spawnCodexRemediationWorker({
   workspaceDir,
+  repo = null,
   promptPath,
   outputPath,
   logPath,
@@ -1069,6 +1102,7 @@ function spawnCodexRemediationWorker({
     workerClass: REMEDIATION_WORKER_TRAILER_CLASS,
     jobId,
   });
+  installWorkerAdapterEnv(env, sourceEnv, workerClass, REMEDIATION_WORKER_TRAILER_CLASS, repo, log, requiresWorkflowPush);
   const modelResolution = resolveRemediationModel('remediator-codex', {
     env,
     hqRoot: hqRoot || sourceEnv.HQ_ROOT,
@@ -1284,6 +1318,7 @@ export {
   applyMergeAgentBrokerEnv,
   assertHarnessIdentityMatch,
   buildInheritedPath,
+  installWorkerAdapterEnv,
   cancelLocalRemediationWorker,
   createLocalRemediationHandle,
   prepareClaudeCodeRemediationStartupEnv,

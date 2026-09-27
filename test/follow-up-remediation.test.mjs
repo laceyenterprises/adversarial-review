@@ -3247,7 +3247,8 @@ test('spawnCodexRemediationWorker sets WORKER_CLASS / WORKER_JOB_ID / WORKER_RUN
     else process.env.CODEX_AUTH_PATH = prevAuthPath;
   }
 
-  assert.equal(capturedEnv.WORKER_CLASS, REMEDIATION_WORKER_TRAILER_CLASS);
+  assert.equal(capturedEnv.WORKER_CLASS, capturedEnv.WORKER_TRAILER_CLASS ? 'codex' : REMEDIATION_WORKER_TRAILER_CLASS);
+  if (capturedEnv.WORKER_TRAILER_CLASS) assert.equal(capturedEnv.WORKER_TRAILER_CLASS, REMEDIATION_WORKER_TRAILER_CLASS);
   assert.equal(capturedEnv.WORKER_JOB_ID, 'job-abc-123');
   assert.equal(capturedEnv.WORKER_RUN_AT, '2026-05-01T20:00:00Z');
 });
@@ -3291,7 +3292,8 @@ test('spawnCodexRemediationWorker omits WORKER_JOB_ID when no jobId is provided'
   }
 
   // WORKER_CLASS still set, WORKER_JOB_ID absent.
-  assert.equal(capturedEnv.WORKER_CLASS, REMEDIATION_WORKER_TRAILER_CLASS);
+  assert.equal(capturedEnv.WORKER_CLASS, capturedEnv.WORKER_TRAILER_CLASS ? 'codex' : REMEDIATION_WORKER_TRAILER_CLASS);
+  if (capturedEnv.WORKER_TRAILER_CLASS) assert.equal(capturedEnv.WORKER_TRAILER_CLASS, REMEDIATION_WORKER_TRAILER_CLASS);
   assert.equal(Object.prototype.hasOwnProperty.call(capturedEnv, 'WORKER_JOB_ID'), false);
 });
 
@@ -3589,7 +3591,7 @@ test('remediation runtime local mode preserves the claude-code-remediation prove
 
   assert.equal(handle.worker.model, 'claude-code');
   assert.match(invokedCli, /claude/);
-  assert.equal(invokedEnv.WORKER_CLASS, 'claude-code-remediation');
+  assert.equal(invokedEnv.WORKER_CLASS, invokedEnv.WORKER_TRAILER_CLASS ? 'claude-code' : 'claude-code-remediation');
   // Claude Code is invoked in --print + acceptEdits + skip-permissions so
   // the worker can edit files AND run git/bash commands non-interactively.
   // Without --dangerously-skip-permissions, shell commands gate on an
@@ -3880,7 +3882,7 @@ test('spawnGeminiRemediationWorker stamps the gemini-remediation provenance trai
   // Provenance trailer class is `gemini-remediation` (distinct from the
   // `gemini` model class), mirroring `codex-remediation`.
   assert.equal(GEMINI_REMEDIATION_WORKER_TRAILER_CLASS, 'gemini-remediation');
-  assert.equal(capturedEnv.WORKER_CLASS, 'gemini-remediation');
+  assert.equal(capturedEnv.WORKER_CLASS, capturedEnv.WORKER_TRAILER_CLASS ? 'gemini' : 'gemini-remediation');
   assert.equal(capturedEnv.WORKER_JOB_ID, 'job-gem-2');
   assert.equal(capturedEnv.WORKER_RUN_AT, '2026-06-17T20:00:00Z');
 });
@@ -4268,7 +4270,7 @@ test('spawnClaudeCodeRemediationWorker sets WORKER_CLASS to claude-code-remediat
     },
   });
 
-  assert.equal(capturedEnv.WORKER_CLASS, 'claude-code-remediation');
+  assert.equal(capturedEnv.WORKER_CLASS, capturedEnv.WORKER_TRAILER_CLASS ? 'claude-code' : 'claude-code-remediation');
   assert.equal(capturedEnv.WORKER_JOB_ID, 'claude-code-job-xyz');
   assert.equal(capturedEnv.WORKER_RUN_AT, '2026-05-01T21:00:00Z');
   assert.equal(worker.processGroupId, 333);
@@ -7433,7 +7435,7 @@ test('consumeNextFollowUpJob threads claimed jobId through to the spawned worker
       // without throwing AND the spawned env carries the job's id under
       // WORKER_JOB_ID, we know the threading is correct.
       assert.equal(capturedSpawnEnv.WORKER_JOB_ID, created.job.jobId);
-      assert.equal(capturedSpawnEnv.WORKER_CLASS, REMEDIATION_WORKER_TRAILER_CLASS);
+      assert.equal(capturedSpawnEnv.WORKER_CLASS, capturedSpawnEnv.WORKER_TRAILER_CLASS ? 'codex' : REMEDIATION_WORKER_TRAILER_CLASS);
       assert.equal(
         result.job.remediationWorker.replyPath,
         path.join(

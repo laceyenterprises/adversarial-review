@@ -4564,7 +4564,7 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
       const observedMs = Date.parse(observedAt);
       const elapsedMs = Number.isFinite(lastConsumeMs) ? Math.max(0, observedMs - lastConsumeMs) : 0;
       const intervalMs = Math.max(Number(daemon.consumeIntervalMs) || 0, elapsedMs);
-      if (daemon.daemon !== 'adversarial-follow-up' || intervalMs <= 300_000 || daemon.statusStale) continue;
+      if (daemon.daemon !== 'adversarial-follow-up' || intervalMs <= 300_000) continue;
       findings.push(buildFinding({
         code: 'review:follow_up_consume_interval_slow',
         tier: 'ticket',

@@ -703,6 +703,12 @@ test('reapTerminalFollowUpWorkspaces removes eligible completed, failed, and arc
   assert.equal(launchedTrashDirs.length, 1);
   assert.equal(path.dirname(launchedTrashDirs[0]), path.dirname(workspaceRootDir));
   assert.equal(readdirSync(launchedTrashDirs[0]).length, 3);
+  const trashedCompleted = readdirSync(launchedTrashDirs[0]).find((name) => name.startsWith(completedJobId));
+  assert.equal(
+    readFileSync(path.join(launchedTrashDirs[0], trashedCompleted, '.adversarial-follow-up', 'codex-last-message.md'), 'utf8'),
+    'done\n',
+    'the tick left recursive deletion to the background deleter',
+  );
   assert.deepEqual(
     result.reapedPaths.slice().sort(),
     [completedWorkspaceDir, failedWorkspaceDir, archivedWorkspaceDir].sort()

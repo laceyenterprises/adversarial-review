@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 import {
   AMA_HAMMER_BACKGROUND_REASON,
@@ -118,6 +121,7 @@ const SETTLED_BODY =
 
 function closureArgs(overrides = {}) {
   return {
+    rootDir: mkdtempSync(path.join(tmpdir(), 'ama-hammer-background-')),
     reviewStateRow: {
       repo: 'laceyenterprises/adversarial-review',
       pr_number: 265,

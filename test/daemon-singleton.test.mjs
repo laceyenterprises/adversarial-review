@@ -3,7 +3,6 @@ import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
 import test from 'node:test';
 
@@ -63,7 +62,7 @@ test('acquireDaemonSingleton writes a holder record and releases cleanly', () =>
 test('acquireDaemonSingleton rejects a second process for the same daemon', async () => {
   const rootDir = makeRootDir('daemon-singleton-cross-process-');
   const stateDir = join(rootDir, 'state');
-  const helperUrl = pathToFileURL(join(process.cwd(), 'src', 'daemon-singleton.mjs')).href;
+  const helperUrl = new URL('../src/daemon-singleton.mjs', import.meta.url).href;
   const childCode = `
     import { acquireDaemonSingleton } from ${JSON.stringify(helperUrl)};
     const singleton = acquireDaemonSingleton({

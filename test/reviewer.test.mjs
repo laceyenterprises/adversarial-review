@@ -118,7 +118,7 @@ const {
   reviewWithGemini,
   dispatchReviewerModel,
   formatAdvisoryFindingsContext,
-  postGitHubReview,
+  postGitHubReview: postGitHubReviewImpl,
   postGitHubReviewWithCapture,
   LOCAL_REVIEW_SHADOW_LABEL,
   hasLocalReviewShadowLabel,
@@ -132,6 +132,16 @@ const {
   formatLocalReviewShadowArtifact,
   readJsonFileIfExists,
 } = __test__;
+
+const reviewPostRoot = mkdtempSync(join(tmpdir(), 'reviewer-post-tests-'));
+test.after(() => rmSync(reviewPostRoot, { recursive: true, force: true }));
+
+function postGitHubReview(repo, prNumber, body, botTokenEnv, execFileImpl, options = {}) {
+  return postGitHubReviewImpl(repo, prNumber, body, botTokenEnv, execFileImpl, {
+    rootDir: reviewPostRoot,
+    ...options,
+  });
+}
 
 const LOCAL_SHADOW_TEST_ENV = {
   ADVERSARIAL_REVIEW_LOCAL_SHADOW_MODEL: 'litellm-local/qwen3-coder',

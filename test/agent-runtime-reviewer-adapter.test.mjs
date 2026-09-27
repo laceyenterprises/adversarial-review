@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   createAgentRuntimeReviewerRuntimeAdapter,
@@ -1133,11 +1134,11 @@ test('agent-runtime reviewer adapter cancels spawned handle when run-state updat
 });
 
 test('production code-pr domain declares the settle-proven agent-runtime reviewer path', () => {
-  const config = loadDomainConfig(process.cwd(), 'code-pr');
+  const config = loadDomainConfig(fileURLToPath(new URL('..', import.meta.url)), 'code-pr');
   assert.equal(config.reviewerRuntime, 'agent-runtime');
 });
 
 test('production code-pr-security domain declares the settle-proven agent-runtime reviewer path', () => {
-  const config = loadDomainConfig(process.cwd(), 'code-pr-security');
+  const config = loadDomainConfig(fileURLToPath(new URL('..', import.meta.url)), 'code-pr-security');
   assert.equal(config.reviewerRuntime, 'agent-runtime');
 });

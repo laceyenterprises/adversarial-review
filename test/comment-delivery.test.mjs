@@ -460,6 +460,7 @@ test('recordInitialCommentDelivery synthesizes a failure record when the poster 
   writeFileSync(jobPath, JSON.stringify({ jobId: 'job-throw', status: 'completed' }, null, 2), 'utf8');
 
   await recordInitialCommentDelivery({
+    rootDir,
     jobPath,
     body: 'b',
     repo: 'laceyenterprises/demo',

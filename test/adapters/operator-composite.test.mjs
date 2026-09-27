@@ -1,14 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { createCompositeOperatorSurface } from '../../src/adapters/operator/index.mjs';
 
 const HERMETIC_CONFIG = { env: {}, topPath: '/dev/null' };
 
-test('composite operator surface forwards controls and triage calls through the right adapters', async () => {
+test('composite operator surface forwards controls and triage calls through the right adapters', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'operator-composite-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const labelCalls = [];
   const linearCalls = [];
   const surface = createCompositeOperatorSurface({
+    rootDir,
     ...HERMETIC_CONFIG,
     controls: {
       fetchLatestLabelEventImpl: async (repo, prNumber, labelName, { execFileImpl }) => {

@@ -14,7 +14,11 @@ import {
   waitForSignalledWorkerExit,
 } from '../src/follow-up-stop.mjs';
 
-const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+const REPO_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+const ROOT = process.env.ADVERSARIAL_REVIEW_TEST_CWD || mkdtempSync(path.join(tmpdir(), 'follow-up-stop-tests-'));
+if (!process.env.ADVERSARIAL_REVIEW_TEST_CWD) {
+  test.after(() => rmSync(ROOT, { recursive: true, force: true }));
+}
 
 function makeJobFile(relativeDir, name = 'job.json') {
   const dir = path.join(ROOT, relativeDir);
@@ -186,8 +190,8 @@ test('follow-up-stop CLI moves an in-progress job into stopped with operator rea
 
   const stdout = execFileSync(
     process.execPath,
-    [path.join(ROOT, 'src', 'follow-up-stop.mjs'), path.relative(ROOT, jobPath), 'Need manual operator handling.'],
-    { cwd: ROOT, encoding: 'utf8' }
+    [path.join(REPO_ROOT, 'src', 'follow-up-stop.mjs'), path.relative(ROOT, jobPath), 'Need manual operator handling.'],
+    { cwd: ROOT, encoding: 'utf8', env: { ...process.env, ADVERSARIAL_REVIEW_STATE_DIR: path.join(ROOT, 'data') } }
   );
 
   const stopped = JSON.parse(readFileSync(stoppedPath, 'utf8'));
@@ -242,8 +246,8 @@ test('follow-up-stop CLI records cancellation receipt before stopping spawned jo
 
   const stdout = execFileSync(
     process.execPath,
-    [path.join(ROOT, 'src', 'follow-up-stop.mjs'), path.relative(ROOT, jobPath), 'Need manual operator handling.'],
-    { cwd: ROOT, encoding: 'utf8' }
+    [path.join(REPO_ROOT, 'src', 'follow-up-stop.mjs'), path.relative(ROOT, jobPath), 'Need manual operator handling.'],
+    { cwd: ROOT, encoding: 'utf8', env: { ...process.env, ADVERSARIAL_REVIEW_STATE_DIR: path.join(ROOT, 'data') } }
   );
   receiptPath = stdout.match(/receipt=(\S+)/)?.[1] || null;
 
@@ -309,8 +313,8 @@ test('follow-up-stop CLI signals a live spawned worker before stopping', async (
 
   const stdout = execFileSync(
     process.execPath,
-    [path.join(ROOT, 'src', 'follow-up-stop.mjs'), path.relative(ROOT, jobPath), 'Need manual operator handling.'],
-    { cwd: ROOT, encoding: 'utf8' }
+    [path.join(REPO_ROOT, 'src', 'follow-up-stop.mjs'), path.relative(ROOT, jobPath), 'Need manual operator handling.'],
+    { cwd: ROOT, encoding: 'utf8', env: { ...process.env, ADVERSARIAL_REVIEW_STATE_DIR: path.join(ROOT, 'data') } }
   );
   receiptPath = stdout.match(/receipt=(\S+)/)?.[1] || null;
 

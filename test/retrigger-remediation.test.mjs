@@ -105,6 +105,7 @@ test('retrigger-remediation returns runtime exit code when refused-path audit ap
     '--pr', '238',
     '--reason', 'extra round',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], {
     stdout: makeCaptureStream(),
     stderr: err,
@@ -243,6 +244,7 @@ test('retrigger-remediation writes the audit ledger under data/operator-mutation
     '--pr', '238',
     '--reason', 'grant one more round',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], { stdout: makeCaptureStream(), stderr: makeCaptureStream() });
 
   assert.equal(rc, 0);
@@ -257,6 +259,7 @@ test('retrigger-remediation re-evaluates retries after a refused row with the sa
     '--reason', 'extra round',
     '--idempotency-key', 'shared-key',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ];
 
   const firstErr = makeCaptureStream();
@@ -339,6 +342,7 @@ test('retrigger-remediation returns runtime exit code with concise stderr when t
     '--pr', '238',
     '--reason', 'grant one more round',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], {
     stdout: makeCaptureStream(),
     stderr: err,
@@ -374,6 +378,7 @@ test('retrigger-remediation treats same-key replay after a lost terminal audit r
     '--reason', 'grant one more round',
     '--idempotency-key', 'shared-key',
     '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ];
 
   assert.equal(main(args, {

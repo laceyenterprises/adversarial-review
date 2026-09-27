@@ -731,7 +731,7 @@ test('remediator stage prompt snippets abort on unresolved rebase conflicts', ()
     'prompts/code-pr/remediator.middle.md',
     'prompts/code-pr/remediator.last.md',
   ]) {
-    const prompt = readFileSync(path.resolve(file), 'utf8');
+    const prompt = readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
     assert.match(prompt, /git -C "\$PR_WORKTREE" rebase --abort 2>\/dev\/null \|\| true\n  exit 78/);
     assert.doesNotMatch(prompt, /resolve here, then git rebase --continue/);
   }
@@ -802,7 +802,7 @@ test('remediator stage prompt snippets include the stale-head publish replay con
     'prompts/code-pr/remediator.middle.md',
     'prompts/code-pr/remediator.last.md',
   ]) {
-    const prompt = readFileSync(path.resolve(file), 'utf8');
+    const prompt = readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
     assert.match(prompt, /Publish contract — moved PR heads are normal optimistic concurrency/);
     assert.match(prompt, /git format-patch --stdout "\$REMEDIATION_BASE_HEAD"\.\.HEAD/);
     assert.match(prompt, /git am --3way/);
@@ -1233,10 +1233,11 @@ test('resolveHqRoot defaults under the current home directory and can require an
     () => resolveHqRoot({}),
     /HQ_ROOT must be set/
   );
-  assert.equal(resolveLocalRepliesRoot({}), path.join(process.cwd(), 'data', 'replies'));
+  const repoRoot = new URL('..', import.meta.url).pathname;
+  assert.equal(resolveLocalRepliesRoot({}), path.join(repoRoot, 'data', 'replies'));
   const target = resolveRemediationReplyTarget({});
   assert.equal(target.mode, 'local');
-  assert.equal(target.root, path.join(process.cwd(), 'data', 'replies'));
+  assert.equal(target.root, path.join(repoRoot, 'data', 'replies'));
   assert.throws(
     () => resolveHqRoot({ HQ_ROOT: path.join(tmpdir(), 'missing-hq-root-does-not-exist') }, { requireExists: true }),
     /HQ remediation root does not exist/
@@ -6002,7 +6003,7 @@ test('review-to-remediation wake lets daemon consume a queued job within five se
 });
 
 test('follow-up daemon falls back to timer sleep when handoff wake watcher fails', () => {
-  const source = readFileSync(path.join(process.cwd(), 'scripts', 'adversarial-follow-up-daemon.mjs'), 'utf8');
+  const source = readFileSync(new URL('../scripts/adversarial-follow-up-daemon.mjs', import.meta.url), 'utf8');
   assert.match(source, /handoff-wake[\s\S]*falling back to timer/);
   assert.match(source, /await sleep\(TICK_INTERVAL_MS, undefined, \{ signal: ac\.signal \}\)/);
   assert.match(source, /sleepErr\?\.name !== 'AbortError'/);

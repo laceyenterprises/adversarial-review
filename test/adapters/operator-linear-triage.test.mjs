@@ -57,6 +57,10 @@ function subjectRef() {
   };
 }
 
+function adapterRoot() {
+  return mkdtempSync(path.join(tmpdir(), 'adversarial-review-linear-adapter-'));
+}
+
 test('routePR returns builder class and Linear ticket id for representative titles', () => {
   assert.deepEqual(routePR('[codex] LAC-181: tighten watcher', null, ALWAYS_ON_ROUTE_OPTIONS), {
     builderClass: 'codex',
@@ -89,6 +93,7 @@ test('routePR returns builder class and Linear ticket id for representative titl
 test('syncTriageStatus moves Linear to In Review on first review post', async () => {
   const { linear, updates } = makeLinearFixture();
   const adapter = createLinearTriageAdapter({
+    rootDir: adapterRoot(),
     linearClientProvider: async () => linear,
     logger: {},
   });
@@ -103,6 +108,7 @@ test('syncTriageStatus moves Linear to In Review on first review post', async ()
 test('recordReviewCompleted moves Linear to Done on review completion', async () => {
   const { linear, updates } = makeLinearFixture();
   const adapter = createLinearTriageAdapter({
+    rootDir: adapterRoot(),
     linearClientProvider: async () => linear,
     logger: {},
   });
@@ -120,6 +126,7 @@ test('recordReviewCompleted moves Linear to Done on review completion', async ()
 test('recordReviewCompleted posts critical flag comments for critical reviews', async () => {
   const { linear, updates, comments } = makeLinearFixture();
   const adapter = createLinearTriageAdapter({
+    rootDir: adapterRoot(),
     linearClientProvider: async () => linear,
     logger: {},
   });
@@ -141,6 +148,7 @@ test('recordReviewCompleted posts critical flag comments for critical reviews', 
 test('recordReviewCompleted does not post a critical flag for a clean comment-only review body', async () => {
   const { linear, updates, comments } = makeLinearFixture();
   const adapter = createLinearTriageAdapter({
+    rootDir: adapterRoot(),
     linearClientProvider: async () => linear,
     logger: {},
   });
@@ -172,6 +180,7 @@ test('recordReviewCompleted does not post a critical flag for a clean comment-on
 test('recordReviewCompleted still posts a critical flag when the review body carries blocking findings', async () => {
   const { linear, updates, comments } = makeLinearFixture();
   const adapter = createLinearTriageAdapter({
+    rootDir: adapterRoot(),
     linearClientProvider: async () => linear,
     logger: {},
   });
@@ -206,6 +215,7 @@ test('ticket-pipeline-paused PR label suppresses Linear updates and comments', a
   let providerCalls = 0;
   const logs = [];
   const adapter = createLinearTriageAdapter({
+    rootDir: adapterRoot(),
     linearClientProvider: async () => {
       providerCalls += 1;
       return linear;

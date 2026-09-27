@@ -1436,6 +1436,7 @@ async function pollOnce(
         activeMergeAgentPRs,
         currentRepoPRs,
         ROOT,
+        STATE_ROOT: dirname(ADVERSARIAL_REVIEW_STATE_DIR),
         execFileAsync,
         WATCHER_PRIMARY_DOMAIN_ID,
         reviewerHeadDispatchLease,

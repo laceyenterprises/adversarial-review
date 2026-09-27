@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import {
   fetchCurrentPrHeadSha,
-  main,
+  main as retriggerReviewMain,
   normalizeOperatorRetriggerReason,
   parseArgs,
   waitForReviewerExit,
@@ -18,6 +18,16 @@ import {
 } from '../src/review-state.mjs';
 import { createFollowUpJob, getFollowUpJobDir, writeFollowUpJob } from '../src/follow-up-jobs.mjs';
 import { isExplicitOperatorReviewRetrigger } from '../src/first-pass-review-suppression.mjs';
+
+const isolatedAuditRoot = mkdtempSync(path.join(tmpdir(), 'retrigger-review-audit-'));
+test.after(() => rmSync(isolatedAuditRoot, { recursive: true, force: true }));
+
+function main(args, options) {
+  const isolatedArgs = args.includes('--audit-root-dir')
+    ? args
+    : [...args, '--audit-root-dir', isolatedAuditRoot];
+  return retriggerReviewMain(isolatedArgs, options);
+}
 
 function makeCaptureStream() {
   const chunks = [];

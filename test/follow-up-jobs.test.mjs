@@ -715,6 +715,21 @@ test('reapTerminalFollowUpWorkspaces removes eligible completed, failed, and arc
   );
 });
 
+test('reapTerminalFollowUpWorkspaces restarts deletion of pending trash without newly eligible workspaces', (t) => {
+  const rootDir = makeTempRoot(t);
+  const workspaceRootDir = path.join(rootDir, 'workspaces');
+  const trashDir = `${workspaceRootDir}.trash`;
+  mkdirSync(workspaceRootDir);
+  mkdirSync(path.join(trashDir, 'leftover'), { recursive: true });
+  const launched = [];
+  const result = reapTerminalFollowUpWorkspaces({
+    rootDir, workspaceRootDir,
+    launchTrashDeleterImpl: ({ trashDir: target }) => launched.push(target),
+  });
+  assert.equal(result.reaped, 0);
+  assert.deepEqual(launched, [trashDir]);
+});
+
 test('reapTerminalFollowUpWorkspaces logs unreadable job records, skips missing timestamps, and prefers the latest duplicate terminal record', (t) => {
   const rootDir = makeTempRoot(t);
   const completedDir = getFollowUpJobDir(rootDir, 'completed');

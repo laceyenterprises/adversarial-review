@@ -228,9 +228,7 @@ function resolveDaemonMaxConcurrentJobs(env = process.env) {
   return maxConcurrentJobs;
 }
 
-function writeConfigSignatureStatus({ env = process.env, now = () => new Date() } = {}) {
-  const hqRoot = env.HQ_ROOT;
-  if (!hqRoot) return null;
+function assertSafeTestStatusRoot(hqRoot) {
   if (process.env.NODE_TEST_CONTEXT) {
     // Resolve symlinks too: a temporary alias must not redirect a test write
     // into the live HQ status file. The HQ directory may be created by the
@@ -248,6 +246,12 @@ function writeConfigSignatureStatus({ env = process.env, now = () => new Date() 
       throw new Error('test runner refused config-signature status write outside temporary HQ_ROOT');
     }
   }
+}
+
+function writeConfigSignatureStatus({ env = process.env, now = () => new Date() } = {}) {
+  const hqRoot = env.HQ_ROOT;
+  if (!hqRoot) return null;
+  assertSafeTestStatusRoot(hqRoot);
   const status = daemonConfigSignatureStatus({ env });
   const path = join(hqRoot, '.adversarial-follow-up', 'config-status.json');
   let prior = null;
@@ -276,9 +280,11 @@ function writeConfigSignatureStatus({ env = process.env, now = () => new Date() 
 
 function writeFollowUpTickMetrics({ env, tickDurationMs, consumeAt = null, consumeIntervalMs = null }) {
   if (!env.HQ_ROOT) return;
+  assertSafeTestStatusRoot(env.HQ_ROOT);
   const path = join(env.HQ_ROOT, '.adversarial-follow-up', 'config-status.json');
   let prior;
-  try { prior = JSON.parse(readFileSync(path, 'utf8')); } catch { prior = {}; }
+  try { prior = JSON.parse(readFileSync(path, 'utf8')); } catch { return; }
+  if (!prior || typeof prior !== 'object' || !('inSync' in prior)) return;
   const payload = {
     ...prior,
     tickDurationMs,

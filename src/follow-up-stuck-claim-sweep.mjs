@@ -1704,7 +1704,8 @@ async function reapFinishedPrFollowUpJobs({
 
   // ---- (B2) orphaned AMA closer dispatch reservations ----
   const amaEnabled = typeof listActiveAmaCloserDispatchesImpl === 'function'
-    && typeof updateAmaCloserDispatchRecordImpl === 'function';
+    && typeof updateAmaCloserDispatchRecordImpl === 'function'
+    && withinBudget();
   if (amaEnabled) {
     let amaDispatches = [];
     try {

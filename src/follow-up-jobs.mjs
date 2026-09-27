@@ -12,7 +12,7 @@ import { userInfo } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
-import { ensureWorkspaceTrashDir, launchWorkspaceTrashDeleter } from './follow-up-workspace-trash.mjs';
+import { ensureWorkspaceTrashDir, launchWorkspaceTrashDeleter, workspaceTrashDir } from './follow-up-workspace-trash.mjs';
 import { loadRoleConfig } from './role-config.mjs';
 import {
   DEFAULT_RISK_CLASS,
@@ -1579,8 +1579,9 @@ function reapTerminalFollowUpWorkspaces({
     }
   }
 
-  if (trashDir) {
-    try { launchTrashDeleterImpl({ trashDir }); }
+  const pendingTrashDir = trashDir || workspaceTrashDir(workspaceRootDir);
+  if (existsSync(pendingTrashDir)) {
+    try { launchTrashDeleterImpl({ trashDir: pendingTrashDir }); }
     catch (err) { logErrorImpl(`[follow-up-jobs] Failed to launch workspace trash deleter: ${err?.message || err}`); }
   }
 

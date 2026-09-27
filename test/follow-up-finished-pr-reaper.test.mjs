@@ -467,11 +467,14 @@ test('reaper: budget yields before the next candidate and resumes from its curso
     seedJob(rootDir, 'pending', { jobId: `budget-${prNumber}`, prNumber });
   }
   const observed = [];
+  let amaListings = 0;
   let elapsed = 0;
   const opts = {
     rootDir,
     budgetMs: 15,
     clock: () => elapsed,
+    listActiveAmaCloserDispatchesImpl: () => { amaListings += 1; return []; },
+    updateAmaCloserDispatchRecordImpl: () => {},
     resolvePRLifecycleImpl: async (_root, { prNumber }) => {
       observed.push(prNumber);
       elapsed += 16;
@@ -485,6 +488,7 @@ test('reaper: budget yields before the next candidate and resumes from its curso
   const second = await reapFinishedPrFollowUpJobs(opts);
   assert.equal(second.budgetExceeded, true);
   assert.deepEqual(observed, [101, 102]);
+  assert.equal(amaListings, 0, 'AMA listing also yields when the budget is exhausted');
 });
 
 test('reaper: dedups by PR and caps distinct GitHub lookups per tick', async () => {

@@ -383,8 +383,8 @@ function claudeReasoningPin(env = process.env) {
 }
 
 function allowedReasoningLevelsForClass(className) {
-  if (className === 'remediator-codex') return CODEX_REASONING_LEVELS;
-  if (className === 'remediator-claude') return CLAUDE_REASONING_LEVELS;
+  if (className === 'remediator-codex' || className === 'codex-reviewer') return CODEX_REASONING_LEVELS;
+  if (className === 'remediator-claude' || className === 'claude-reviewer') return CLAUDE_REASONING_LEVELS;
   return null;
 }
 

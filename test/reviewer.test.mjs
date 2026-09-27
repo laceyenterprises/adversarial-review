@@ -3108,13 +3108,16 @@ test('resolveCodexExecOverrides preserves top-level model settings when user con
   );
 
   try {
-    const overrides = withEnv({ CODEX_HOME: codexHome, HOME: rootDir }, () => resolveCodexExecOverrides());
+    const overrides = withEnv({ CODEX_HOME: codexHome, HOME: rootDir, HQ_ROOT: rootDir, AGENT_OS_DEPLOY_CHECKOUT: rootDir }, () => resolveCodexExecOverrides());
     assert.deepEqual(overrides, {
       model: 'gpt-5.4',
       modelProvider: 'openai',
       configOverrides: [
         { key: 'model_provider', value: 'openai' },
       ],
+      reasoningEffort: null,
+      modelSource: 'host-config',
+      effortSource: 'none',
     });
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -3139,7 +3142,7 @@ test('resolveCodexExecOverrides preserves allowed scalar model tuning without fo
   );
 
   try {
-    const overrides = withEnv({ CODEX_HOME: codexHome, HOME: rootDir }, () => resolveCodexExecOverrides());
+    const overrides = withEnv({ CODEX_HOME: codexHome, HOME: rootDir, HQ_ROOT: rootDir, AGENT_OS_DEPLOY_CHECKOUT: rootDir }, () => resolveCodexExecOverrides());
     assert.deepEqual(overrides, {
       model: 'gpt-5.5',
       modelProvider: 'openai',
@@ -3147,6 +3150,9 @@ test('resolveCodexExecOverrides preserves allowed scalar model tuning without fo
         { key: 'model_provider', value: 'openai' },
         { key: 'model_reasoning_effort', value: 'high' },
       ],
+      reasoningEffort: 'high',
+      modelSource: 'host-config',
+      effortSource: 'host-config',
     });
     assert.deepEqual(
       buildCodexReviewArgs({
@@ -3157,6 +3163,33 @@ test('resolveCodexExecOverrides preserves allowed scalar model tuning without fo
       }).filter((value, index, args) => args[index - 1] === '--config'),
       ['model_provider="openai"', 'model_reasoning_effort="high"'],
     );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reviewer model and effort use HQ mirror before seed and host config', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewer-registry-'));
+  const codexHome = join(rootDir, '.codex');
+  mkdirSync(codexHome, { recursive: true });
+  mkdirSync(join(rootDir, 'registry'), { recursive: true });
+  mkdirSync(join(rootDir, 'modules', 'worker-pool'), { recursive: true });
+  writeFileSync(join(codexHome, 'config.toml'), 'model = "gpt-host"\nmodel_reasoning_effort = "xhigh"\n');
+  writeFileSync(join(rootDir, 'registry', 'worker-classes.json'), JSON.stringify({
+    'codex-reviewer': { defaultModel: 'gpt-mirror', defaultReasoningLevel: 'high' },
+  }));
+  writeFileSync(join(rootDir, 'modules', 'worker-pool', 'worker-classes.json'), JSON.stringify({
+    'codex-reviewer': { defaultModel: 'gpt-seed', defaultReasoningLevel: 'medium' },
+  }));
+  const logs = [];
+  try {
+    const overrides = withEnv({ CODEX_HOME: codexHome, HOME: rootDir, HQ_ROOT: rootDir,
+      AGENT_OS_DEPLOY_CHECKOUT: rootDir }, () => resolveCodexExecOverrides({ log: { info: (line) => logs.push(line) } }));
+    assert.equal(overrides.model, 'gpt-mirror');
+    assert.equal(overrides.reasoningEffort, 'high');
+    assert.equal(overrides.modelSource, 'registry-mirror');
+    assert.deepEqual(overrides.configOverrides, [{ key: 'model_reasoning_effort', value: 'high' }]);
+    assert.match(logs[0], /source=registry-mirror.*source=registry-mirror/);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

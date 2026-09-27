@@ -62,6 +62,7 @@ import {
   resolveAgyAuthProbeTimeoutMs,
 } from './agy-reviewer-auth.mjs';
 import { resolveGeminiRuntime, resolveGeminiAntigravityModel } from './role-config.mjs';
+import { resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
 import {
   REVIEW_POST_RETRY_DELAYS_MS,
   WAKE_HOOK_RETRY_DELAYS_MS,
@@ -728,6 +729,7 @@ async function reviewWithClaude(diff, extraContext = '', {
   }
   const env = hasAuthEnv ? auth.env : scrubOAuthFallbackEnv(process.env).env;
   const subprocessEnv = withReviewerSubprocessCwdEnv(env, reviewerSubprocessCwd);
+  const reviewerExecution = resolveReviewerExecution('claude', { env: subprocessEnv, log: logger });
   const authTransport = hasAuthEnv ? (auth?.transport || resolveClaudeReviewerOAuthTransport(subprocessEnv)) : 'keychain';
   // The retry runs inside the SAME reviewer pass, so it must share that pass's
   // wall-clock budget. Without this a silent first attempt plus a fresh full
@@ -759,7 +761,7 @@ async function reviewWithClaude(diff, extraContext = '', {
   let stdout, stderr;
   try {
     ({ stdout, stderr } = await withClaudeLaunchctlRetry(
-      () => spawnClaudeImpl(buildClaudeReviewArgs(prompt), {
+      () => spawnClaudeImpl(buildClaudeReviewArgs(prompt, reviewerExecution), {
         env: subprocessEnv,
         cwd: reviewerSubprocessCwd,
         timeout: reviewerTimeoutMs,
@@ -833,7 +835,8 @@ async function reviewWithClaude(diff, extraContext = '', {
   // not post a raw CLI payload as a GitHub review.
   const raw = stdout.trim();
   const parsed = parseClaudeJsonOutput(raw);
-  return { reviewText: parsed.reviewText, tokenUsage: parsed.tokenUsage };
+  return { reviewText: parsed.reviewText, tokenUsage: parsed.tokenUsage,
+    execution: { harness: 'claude', model: reviewerExecution.model, effort: reviewerExecution.effort } };
 }
 
 function parseClaudeJsonOutput(raw) {
@@ -888,8 +891,9 @@ function mapClaudeJsonUsage(usage) {
   };
 }
 
-function buildClaudeReviewArgs(prompt) {
-  return ['--print', '--output-format', 'json', '--permission-mode', 'bypassPermissions', prompt];
+function buildClaudeReviewArgs(prompt, { model = null, effort = null } = {}) {
+  return ['--print', '--output-format', 'json', '--permission-mode', 'bypassPermissions',
+    ...(model ? ['--model', model] : []), ...(effort ? ['--effort', effort] : []), prompt];
 }
 
 const CODEX_EXEC_CONFIG_FORWARD_KEYS = [
@@ -961,15 +965,32 @@ function readCodexConfigTopLevelValues(keys, {
   return values;
 }
 
-function resolveCodexExecOverrides() {
+function resolveReviewerExecution(harness, { env = process.env, fallbackModel = null, fallbackEffort = null, log = console } = {}) {
+  const resolution = resolveRemediationModel(`${harness}-reviewer`, { env, fallbackModel });
+  const model = resolution.modelSource === 'fallback-constant' ? fallbackModel : resolution.resolvedModel;
+  const effort = resolution.resolvedReasoningLevel || fallbackEffort;
+  const modelSource = resolution.modelSource === 'fallback-constant' ? 'host-config' : resolution.modelSource;
+  const effortSource = resolution.resolvedReasoningLevel ? resolution.reasoningSource : (fallbackEffort ? 'host-config' : 'none');
+  log.info?.(`[reviewer-harness] ${harness} model=${model || 'default'} source=${modelSource}; effort=${effort || 'none'} source=${effortSource}`);
+  return { model, effort, modelSource, effortSource };
+}
+
+function resolveCodexExecOverrides({ env = process.env, log = console } = {}) {
   const values = readCodexConfigTopLevelValues(CODEX_EXEC_CONFIG_FORWARD_KEYS);
+  const resolved = resolveReviewerExecution('codex', {
+    env, fallbackModel: values.model || null, fallbackEffort: values.model_reasoning_effort || null, log,
+  });
   const configOverrides = Object.entries(values)
-    .filter(([key]) => key !== 'model')
+    .filter(([key]) => key !== 'model' && key !== 'model_reasoning_effort')
     .map(([key, value]) => ({ key, value }));
+  if (resolved.effort) configOverrides.push({ key: 'model_reasoning_effort', value: resolved.effort });
   return {
-    model: values.model || null,
+    model: resolved.model,
     modelProvider: values.model_provider || null,
     configOverrides,
+    reasoningEffort: resolved.effort,
+    modelSource: resolved.modelSource,
+    effortSource: resolved.effortSource,
   };
 }
 
@@ -1127,13 +1148,14 @@ async function reviewWithCodex(diff, extraContext = '', {
         try {
           const reasoningEffort = codexExecOverrides.configOverrides
             .find((override) => override.key === 'model_reasoning_effort')?.value || 'high';
-          return await reviewWithCodexOAuthResponses(prompt, {
+          const recovered = await reviewWithCodexOAuthResponses(prompt, {
             authPath: effectiveAuthPath,
             model: codexExecOverrides.model || 'gpt-5.5',
             reasoningEffort,
             timeoutMs: resolveReviewerTimeoutMs(env),
             idleTimeoutMs: Math.max(resolveProgressTimeoutMs(env), 3 * 60 * 1000),
           });
+          return { ...recovered, execution: { harness: 'codex', model: codexExecOverrides.model || 'gpt-5.5', effort: reasoningEffort } };
         } catch (fallbackErr) {
           throw new Error(
             `Native Codex made no progress and OAuth Responses recovery failed: `
@@ -1198,6 +1220,7 @@ async function reviewWithCodex(diff, extraContext = '', {
     return {
       reviewText: combined,
       tokenUsage,
+      execution: { harness: 'codex', model: codexExecOverrides.model, effort: codexExecOverrides.reasoningEffort },
     };
   } finally {
     // Always remove the codex temp file — including when spawnCodexReview throws
@@ -2543,9 +2566,11 @@ async function reviewWithGemini(diff, extraContext = '', {
     // (e.g. "Gemini 3.1 Pro (High)"). Feeding the cli slug to agy is the bug
     // that previously left the model unbound — agy ignores an unknown token and
     // falls back to its persisted default (Flash).
-    const model = runtime === 'antigravity'
+    const fallbackModel = runtime === 'antigravity'
       ? resolveGeminiAntigravityModel({ env: reviewEnv })
       : resolveGeminiReviewerModel(reviewEnv);
+    const reviewerExecution = resolveReviewerExecution('gemini', { env: reviewEnv, fallbackModel, log });
+    const model = reviewerExecution.model;
     selectedModel = model;
 
     console.error(`[reviewWithGemini] invoking Gemini reviewer CLI (model=${model}, runtime=${runtime})`);
@@ -2682,7 +2707,8 @@ async function reviewWithGemini(diff, extraContext = '', {
     : reviewPayload;
   if (!reviewText.trim()) throw new Error('Gemini returned empty response.');
 
-  return { reviewText, tokenUsage: geminiUsage };
+  return { reviewText, tokenUsage: geminiUsage,
+    execution: { harness: 'gemini', model: selectedModel, effort: null } };
 }
 
 // ── Reviewer-model selection ──────────────────────────────────────────────────
@@ -3053,7 +3079,8 @@ async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
     // codex sanitize, but non-`##` canonical headings still break the verdict/
     // blocking-finding parsers the cap + closer depend on. Promote them here
     // (never throws; falls back to the raw body).
-    return { rawReviewText: text, reviewText: sanitizeReviewPayloadBestEffort(text), tokenUsage, needsSanitize: false };
+    return { rawReviewText: text, reviewText: sanitizeReviewPayloadBestEffort(text), tokenUsage,
+      execution: typeof claudeResult === 'string' ? null : claudeResult?.execution, needsSanitize: false };
   }
   if (effectiveModel === 'gemini') {
     const result = await reviewWithGeminiImpl(diff, extraContext, { promptStage, reviewerSubprocessCwd });
@@ -3061,6 +3088,7 @@ async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
       rawReviewText: result.reviewText,
       reviewText: sanitizeReviewPayloadBestEffort(result.reviewText),
       tokenUsage: result.tokenUsage ?? null,
+      execution: result.execution ?? null,
       needsSanitize: false,
     };
   }
@@ -3069,6 +3097,7 @@ async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
     rawReviewText: codexResult.reviewText,
     reviewText: null,
     tokenUsage: codexResult.tokenUsage,
+    execution: codexResult.execution ?? null,
     needsSanitize: true,
   };
 }

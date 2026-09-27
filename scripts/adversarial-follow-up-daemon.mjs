@@ -531,7 +531,8 @@ async function runStoppedArchiveSweepIfDue({
         `missingTerminalTimestamp=${result.missingTerminalTimestamp} ` +
         `missingTerminalTimestampSamples=${JSON.stringify(result.missingTerminalTimestampPaths)} ` +
         `recentTerminalJob=${result.recentTerminalJob} ` +
-        `unreadableJobRecords=${result.unreadableJobRecords} errors=${result.errors}`
+        `unreadableJobRecords=${result.unreadableJobRecords} ` +
+        `deferredForBudget=${result.deferredForBudget ?? 0} errors=${result.errors}`
       );
     });
     if (reapOk) {

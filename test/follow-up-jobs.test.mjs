@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { openReviewStateDb } from '../src/review-state.mjs';
@@ -4806,4 +4806,123 @@ test('stopFollowUpJob moves a non-terminal job to stopped with operator-visible 
   assert.equal(stopped.job.remediationPlan.stop.stoppedBy.requestedBy, 'paul');
   assert.equal(stopped.job.remediationPlan.rounds[0].state, 'stopped');
   assert.equal(stopped.job.remediationPlan.rounds[0].stop.code, 'operator-stop');
+});
+
+// On 2026-09-27 the synchronous rmSync of each workspace (~4 min apiece on a
+// loaded host) held `reap-workspaces` for 10-16 min per follow-up tick, so
+// remediation slots freed mid-tick waited for the next consume. Removal now
+// renames into a sibling trash directory and deletes it in the background.
+test('reapTerminalFollowUpWorkspaces moves eligible workspaces to trash and removes them in the background', (t) => {
+  const rootDir = makeTempRoot(t);
+  const completedDir = getFollowUpJobDir(rootDir, 'completed');
+  const workspaceRootDir = path.join(rootDir, 'hq', 'adversarial-review', 'follow-up-workspaces');
+  mkdirSync(completedDir, { recursive: true });
+  mkdirSync(workspaceRootDir, { recursive: true });
+  const nowMs = Date.parse('2026-06-03T12:00:00.000Z');
+  const jobId = 'laceyenterprises__agent-os-pr-1401-2026-06-01T10-00-00-000Z';
+  writeFileSync(
+    path.join(completedDir, `${jobId}.json`),
+    `${JSON.stringify({
+      ...buildFollowUpJob({
+        repo: 'laceyenterprises/agent-os',
+        prNumber: 1401,
+        reviewerModel: 'codex',
+        reviewBody: '## Summary\nCompleted job',
+        reviewPostedAt: '2026-06-01T10:00:00.000Z',
+        critical: false,
+      }),
+      jobId,
+      status: 'completed',
+      completedAt: '2026-06-02T10:00:00.000Z',
+    }, null, 2)}\n`,
+    'utf8'
+  );
+  const workspaceDir = path.join(workspaceRootDir, jobId);
+  mkdirSync(path.join(workspaceDir, '.adversarial-follow-up'), { recursive: true });
+  const backgroundCalls = [];
+
+  const result = reapTerminalFollowUpWorkspaces({
+    rootDir,
+    workspaceRootDir,
+    nowMs,
+    removeInBackgroundImpl: (paths) => backgroundCalls.push(paths),
+  });
+
+  assert.equal(result.reaped, 1);
+  assert.equal(existsSync(workspaceDir), false);
+  assert.deepEqual(result.reapedPaths, [workspaceDir]);
+  assert.equal(backgroundCalls.length, 1);
+  assert.equal(backgroundCalls[0].length, 1);
+  const batchDir = backgroundCalls[0][0];
+  assert.ok(batchDir.startsWith(`${workspaceRootDir}.reap-trash${path.sep}batch-`), batchDir);
+  assert.equal(existsSync(path.join(batchDir, jobId)), true);
+  // The trash directory sits beside, not inside, the scanned root.
+  assert.equal(readdirSync(workspaceRootDir).length, 0);
+});
+
+test('reapTerminalFollowUpWorkspaces defers removals once its wall-clock budget is spent', (t) => {
+  const rootDir = makeTempRoot(t);
+  const completedDir = getFollowUpJobDir(rootDir, 'completed');
+  const workspaceRootDir = path.join(rootDir, 'hq', 'adversarial-review', 'follow-up-workspaces');
+  mkdirSync(completedDir, { recursive: true });
+  mkdirSync(workspaceRootDir, { recursive: true });
+  const nowMs = Date.parse('2026-06-03T12:00:00.000Z');
+  for (const n of [1411, 1412, 1413]) {
+    const jobId = `laceyenterprises__agent-os-pr-${n}-2026-06-01T10-00-00-000Z`;
+    writeFileSync(
+      path.join(completedDir, `${jobId}.json`),
+      `${JSON.stringify({
+        ...buildFollowUpJob({
+          repo: 'laceyenterprises/agent-os',
+          prNumber: n,
+          reviewerModel: 'codex',
+          reviewBody: '## Summary\nCompleted job',
+          reviewPostedAt: '2026-06-01T10:00:00.000Z',
+          critical: false,
+        }),
+        jobId,
+        status: 'completed',
+        completedAt: '2026-06-02T10:00:00.000Z',
+      }, null, 2)}\n`,
+      'utf8'
+    );
+    mkdirSync(path.join(workspaceRootDir, jobId), { recursive: true });
+  }
+  let clock = 0;
+  const result = reapTerminalFollowUpWorkspaces({
+    rootDir,
+    workspaceRootDir,
+    nowMs,
+    budgetMs: 1000,
+    // Each removal advances the clock past the budget.
+    clockImpl: () => clock,
+    renameSyncImpl: (from, to) => {
+      clock += 5000;
+      renameSync(from, to);
+    },
+    removeInBackgroundImpl: () => {},
+  });
+
+  assert.equal(result.reaped, 1);
+  assert.equal(result.deferredForBudget, 2);
+  assert.equal(readdirSync(workspaceRootDir).length, 2);
+});
+
+test('reapTerminalFollowUpWorkspaces hands orphaned trash batches to the next background removal', (t) => {
+  const rootDir = makeTempRoot(t);
+  const workspaceRootDir = path.join(rootDir, 'hq', 'adversarial-review', 'follow-up-workspaces');
+  mkdirSync(workspaceRootDir, { recursive: true });
+  const orphanBatch = path.join(`${workspaceRootDir}.reap-trash`, 'batch-1-1');
+  mkdirSync(orphanBatch, { recursive: true });
+  const old = new Date(Date.now() - 60 * 60 * 1000);
+  utimesSync(orphanBatch, old, old);
+  const backgroundCalls = [];
+
+  reapTerminalFollowUpWorkspaces({
+    rootDir,
+    workspaceRootDir,
+    removeInBackgroundImpl: (paths) => backgroundCalls.push(paths),
+  });
+
+  assert.deepEqual(backgroundCalls, [[orphanBatch]]);
 });

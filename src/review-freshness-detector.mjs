@@ -28,10 +28,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 export const REVIEW_STALL_THRESHOLD_MS = 20 * 60 * 1000;
 // Re-page at most this often while the stall persists.
 export const REVIEW_STALL_ALERT_DEBOUNCE_MS = 30 * 60 * 1000;
-export const REVIEW_FRESHNESS_STATE_DIR = join(
-  process.env.ADVERSARIAL_REVIEW_STATE_DIR || join(ROOT, 'data'),
-  'review-freshness',
-);
+export const REVIEW_FRESHNESS_STATE_DIR = join(ROOT, 'data', 'review-freshness');
 
 const LAST_POSTED_FILE = 'last-posted-review.json';
 const LAST_ALERT_FILE = 'last-stall-alert.json';

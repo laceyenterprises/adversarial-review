@@ -1436,7 +1436,6 @@ async function pollOnce(
         activeMergeAgentPRs,
         currentRepoPRs,
         ROOT,
-        STATE_ROOT: dirname(ADVERSARIAL_REVIEW_STATE_DIR),
         execFileAsync,
         WATCHER_PRIMARY_DOMAIN_ID,
         reviewerHeadDispatchLease,
@@ -1538,7 +1537,6 @@ async function pollOnce(
   }
 
   await runQueuedReviewAdoptionPhase({
-    rootDir: dirname(ADVERSARIAL_REVIEW_STATE_DIR),
     drainReviewerDispatchCandidates,
     postedReviewHandlers,
     postReviewMaintenanceHandlers,

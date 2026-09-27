@@ -669,7 +669,6 @@ export async function processReviewSubject(entry, ctx) {
     activeMergeAgentPRs,
     currentRepoPRs,
     ROOT,
-    STATE_ROOT = ROOT,
     execFileAsync,
     WATCHER_PRIMARY_DOMAIN_ID,
     reviewerHeadDispatchLease,
@@ -1313,7 +1312,7 @@ export async function processReviewSubject(entry, ctx) {
       } else if (postedReviewHeadMoved) {
         try {
           const refreshResult = requestReviewRereview({
-            rootDir: STATE_ROOT,
+            rootDir: ROOT,
             repo: repoPath,
             prNumber,
             reason: `auto-refresh: posted review on stale head ${existing.reviewer_head_sha.slice(0, 12)}; current head is ${subject.headSha.slice(0, 12)}`,
@@ -1977,7 +1976,7 @@ export async function processReviewSubject(entry, ctx) {
         try {
           const beforeRevisionRef = current.revision_ref || null;
           const refreshResult = requestReviewRereview({
-            rootDir: STATE_ROOT,
+            rootDir: ROOT,
             repo: repoPath,
             prNumber,
             targetRevisionRef: pendingRevisionRef,
@@ -2016,7 +2015,7 @@ export async function processReviewSubject(entry, ctx) {
         if (blockedHeadMoved) {
           try {
             const refreshResult = requestReviewRereview({
-              rootDir: STATE_ROOT,
+              rootDir: ROOT,
               repo: repoPath,
               prNumber,
               targetRevisionRef: pendingRevisionRef,
@@ -2099,7 +2098,7 @@ export async function processReviewSubject(entry, ctx) {
           if (ciAdmission.proceed) {
             try {
               const refreshResult = requestReviewRereview({
-                rootDir: STATE_ROOT,
+                rootDir: ROOT,
                 repo: repoPath,
                 prNumber,
                 targetRevisionRef: pendingRevisionRef,

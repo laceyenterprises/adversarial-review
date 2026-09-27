@@ -3,10 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 
-const MODULE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const ROOT = process.env.ADVERSARIAL_REVIEW_STATE_DIR
-  ? dirname(process.env.ADVERSARIAL_REVIEW_STATE_DIR)
-  : MODULE_ROOT;
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 // ARC-18: process-wide shared review-state connection, opened the same way the
 // watcher opens its singleton. `closeOwnedReviewStateDb` compares against this

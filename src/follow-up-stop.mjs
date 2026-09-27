@@ -6,9 +6,7 @@ import { cancelFollowUpWorker, parseSignal } from './follow-up-worker-cancel.mjs
 import { isPgidAlive } from './process-group-identity.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const ROOT = process.env.ADVERSARIAL_REVIEW_STATE_DIR
-  ? dirname(resolve(process.env.ADVERSARIAL_REVIEW_STATE_DIR))
-  : join(__dirname, '..');
+const ROOT = join(__dirname, '..');
 const DEFAULT_WORKER_EXIT_WAIT_MS = 5_000;
 const DEFAULT_WORKER_EXIT_POLL_MS = 250;
 const SAFE_UNSIGNALLED_STOP_ERRORS = new Set([

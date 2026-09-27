@@ -1,37 +1,23 @@
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { mkdtempSync, readdirSync, symlinkSync } from 'node:fs';
 
+// Each test file enters through its own symlinked repository root. Production
+// modules resolve their normal ROOT under that root with --preserve-symlinks.
+// Child processes inherit that root but keep the cwd their caller requested.
+const testFile = process.argv[1];
 const sandboxRoot = process.env.ADVERSARIAL_REVIEW_TEST_SANDBOX_ROOT;
-const isTestWorker = Boolean(process.env.NODE_TEST_CONTEXT && process.argv[1]?.endsWith('.test.mjs'));
-let testCwd = process.env.ADVERSARIAL_REVIEW_TEST_CWD || sandboxRoot;
-
-if (sandboxRoot && isTestWorker) {
-  const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
-  testCwd = mkdtempSync(path.join(sandboxRoot, 'worker-'));
-  for (const entry of readdirSync(repoRoot, { withFileTypes: true })) {
-    if (entry.name === 'data' || entry.name === '.git') continue;
-    symlinkSync(path.join(repoRoot, entry.name), path.join(testCwd, entry.name),
-      entry.isDirectory() ? 'dir' : 'file');
+if (!sandboxRoot) {
+  throw new Error('run tests through test/run-tests.mjs so state stays outside the checkout');
+}
+const isTestWorker = Boolean(process.env.NODE_TEST_CONTEXT && testFile?.endsWith('.test.mjs'));
+if (isTestWorker) {
+  const testDir = path.dirname(testFile);
+  const workerRoot = path.dirname(path.basename(testDir) === 'adapters' ? path.dirname(testDir) : testDir);
+  const relative = path.relative(sandboxRoot, workerRoot);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new Error(`test file escaped the test sandbox: ${testFile}`);
   }
-  process.env.ADVERSARIAL_REVIEW_TEST_CWD = testCwd;
+  process.env.ADVERSARIAL_REVIEW_TEST_CWD = workerRoot;
+  process.env.ADVERSARIAL_REVIEW_STATE_DIR = path.join(workerRoot, 'data');
+  process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = path.join(workerRoot, 'data', 'api-cache', 'rate-limit-state.json');
+  process.chdir(workerRoot);
 }
-
-if (!testCwd) {
-  throw new Error('test/run-tests.mjs must set the test sandbox root');
-}
-
-process.chdir(testCwd);
-if (isTestWorker || !process.env.ADVERSARIAL_REVIEW_STATE_DIR) {
-  process.env.ADVERSARIAL_REVIEW_STATE_DIR = path.join(testCwd, 'data');
-}
-const preloadOption = `--import=${fileURLToPath(import.meta.url)}`;
-if (!String(process.env.NODE_OPTIONS || '').includes(preloadOption)) {
-  process.env.NODE_OPTIONS = [process.env.NODE_OPTIONS, preloadOption].filter(Boolean).join(' ');
-}
-process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = path.join(
-  testCwd,
-  'data',
-  'api-cache',
-  'rate-limit-state.json',
-);

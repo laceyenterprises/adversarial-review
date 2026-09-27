@@ -1468,6 +1468,29 @@ test('top-level config.yaml accepts mirrored worker_pool.dispatch.goal_lineage k
   }
 });
 
+test('codex exec budgets and class overrides parse under the strict Node mirror', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFileSync(top, `
+      version: 1
+      worker_pool:
+        dispatch:
+          codex_exec_timeout_seconds: 7200
+          codex_exec_stall_timeout_seconds: 600
+          codex_exec_timeout_by_worker_class:
+            codex: 9000
+          codex_exec_stall_timeout_by_worker_class:
+            codex: 900
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('worker_pool.dispatch.codex_exec_timeout_seconds'), 7200);
+    assert.equal(cfg.get('worker_pool.dispatch.codex_exec_stall_timeout_by_worker_class.codex'), 900);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('top-level config.yaml accepts mirrored worker_pool.dispatch.fleet_launch_health keys', () => {
   // Fleet-launch-health is Python-owned, but these checked-in keys live in
   // shared config.yaml and must parse under the watcher strict schema.

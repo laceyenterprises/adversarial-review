@@ -37,6 +37,11 @@ import {
   writeFollowUpJob,
 } from '../src/follow-up-jobs.mjs';
 
+test('follow-up job retains the PR head branch for auth recovery', () => {
+  const job = buildFollowUpJob({ repo: 'example/repo', prNumber: 42, branch: 'feature/auth-fix', reviewerModel: 'claude', reviewBody: 'Request changes' });
+  assert.equal(job.branch, 'feature/auth-fix');
+});
+
 function makeJobInput(rootDir) {
   return {
     rootDir,

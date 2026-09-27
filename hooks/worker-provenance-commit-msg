@@ -73,8 +73,9 @@ require_safe_trailer_value() {
   esac
 }
 
-require_safe_trailer_value "WORKER_CLASS" "$WORKER_CLASS"
-TRAILERS=("--trailer" "Worker-Class: $WORKER_CLASS")
+trailer_class="${WORKER_TRAILER_CLASS:-$WORKER_CLASS}"
+require_safe_trailer_value "WORKER_TRAILER_CLASS" "$trailer_class"
+TRAILERS=("--trailer" "Worker-Class: $trailer_class")
 if [[ -n "${PERSONA:-}" ]]; then
   require_safe_trailer_value "PERSONA" "$PERSONA"
   TRAILERS+=("--trailer" "Persona: $PERSONA")

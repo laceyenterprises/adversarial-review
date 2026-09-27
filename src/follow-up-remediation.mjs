@@ -657,6 +657,7 @@ function createRemediationRuntime({
       };
       const spawnedWorker = worker({
         workspaceDir: request.workspaceDir,
+        repo: request.repo,
         promptPath: request.promptPath,
         outputPath: request.outputPath,
         logPath: request.logPath,

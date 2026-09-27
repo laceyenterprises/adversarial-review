@@ -141,6 +141,20 @@ test('follow-up consume interval over five minutes appears on pipeline health', 
       configSignatureDrift: summarizeConfigSignatureDrift(hqRoot, { nowMs: Date.parse(NOW) }),
     }, { observedAt: NOW });
     assert.ok(findings.some((finding) => finding.code === 'review:follow_up_consume_interval_slow'));
+    writeFileSync(path.join(statusDir, 'config-status.json'), JSON.stringify({
+      observedAt: NOW,
+      inSync: true,
+      lastConsumeAt: '2026-05-25T17:53:00.000Z',
+      consumeIntervalMs: 6 * 60 * 1000,
+      consumeSkippedReason: 'unresolved-capacity',
+    }));
+    const skipped = summarizeConfigSignatureDrift(hqRoot, { nowMs: Date.parse(NOW) });
+    const skippedFindings = evaluateReviewPipelineFindings({
+      ...snapshot,
+      config: { ...snapshot.config, hostChecksEnabled: true },
+      configSignatureDrift: skipped,
+    }, { observedAt: NOW });
+    assert.equal(skippedFindings.some((finding) => finding.code === 'review:follow_up_consume_interval_slow'), false);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
     rmSync(hqRoot, { recursive: true, force: true });

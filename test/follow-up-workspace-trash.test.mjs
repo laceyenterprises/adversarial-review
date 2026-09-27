@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { launchWorkspaceTrashDeleter, workspaceTrashDir } from '../src/follow-up-workspace-trash.mjs';
@@ -36,6 +36,25 @@ test('workspace trash resolves a symlinked workspace root to its physical volume
   const link = join(root, 'workspaces-link');
   symlinkSync(physicalRoot, link);
   assert.equal(workspaceTrashDir(link), join(realpathSync(join(root, 'volume')), 'workspaces.trash'));
+});
+
+test('aged PID lock is retried even when its PID has been reused by a live process', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'follow-up-trash-stale-lock-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const trashDir = workspaceTrashDir(join(root, 'workspaces'));
+  mkdirSync(trashDir);
+  const lockPath = `${trashDir}.delete.lock`;
+  writeFileSync(lockPath, String(process.pid));
+  const old = new Date(Date.now() - 7 * 60 * 60 * 1000);
+  utimesSync(lockPath, old, old);
+  const warnings = [];
+  const child = Object.assign(new EventEmitter(), { pid: process.pid, unref() {} });
+  assert.equal(launchWorkspaceTrashDeleter({
+    trashDir, spawnImpl: () => child, probeImpl: () => ({ status: 0 }),
+    logger: { warn: (message) => warnings.push(message) },
+  }), true);
+  assert.match(warnings.join('\n'), /removing stale deleter lock/);
+  assert.equal(Number(readFileSync(lockPath, 'utf8')), process.pid);
 });
 
 test('workspace trash spawn error is handled and releases its PID lock', (t) => {

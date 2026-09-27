@@ -3,6 +3,8 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync,
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+const MAX_DELETER_LOCK_AGE_MS = 6 * 60 * 60 * 1000;
+
 // The trash is a sibling of the workspace root so rename stays on one volume.
 export function workspaceTrashDir(workspaceRootDir) {
   const physicalRoot = existsSync(workspaceRootDir) ? realpathSync(workspaceRootDir) : workspaceRootDir;
@@ -19,14 +21,34 @@ export function launchWorkspaceTrashDeleter({ trashDir, rootDir, workspaceRootDi
     if (err.code !== 'EEXIST') throw err;
     let pid = 0;
     try { pid = Number(readFileSync(lockPath, 'utf8')); } catch { /* retry below */ }
+    let ageMs = Infinity;
+    try { ageMs = Math.max(0, Date.now() - statSync(lockPath).mtimeMs); } catch { /* retry below */ }
     if (pid > 0) {
-      try { process.kill(pid, 0); return false; } catch (probeErr) {
-        if (probeErr.code !== 'ESRCH') return false;
+      try {
+        process.kill(pid, 0);
+        if (ageMs < MAX_DELETER_LOCK_AGE_MS) {
+          logger?.warn?.(`[follow-up-workspace-trash] deleter-lock-held pid=${pid} ageMs=${Math.round(ageMs)}`);
+          return false;
+        }
+        // A genuinely long-running deleter keeps its lock. Age alone only
+        // breaks a lock whose PID now belongs to something else or is unknown.
+        const owner = probeImpl('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8', timeout: 5_000 });
+        if (owner.status === 0 && String(owner.stdout || '').includes('follow-up-workspace-trash-delete.mjs')
+          && String(owner.stdout || '').includes(trashDir)) {
+          logger?.warn?.(`[follow-up-workspace-trash] long-running deleter-lock-held pid=${pid} ageMs=${Math.round(ageMs)}`);
+          return false;
+        }
+      } catch (probeErr) {
+        if (probeErr.code !== 'ESRCH' && ageMs < MAX_DELETER_LOCK_AGE_MS) {
+          logger?.warn?.(`[follow-up-workspace-trash] deleter-lock-unverifiable pid=${pid} ageMs=${Math.round(ageMs)}`);
+          return false;
+        }
       }
     } else {
       // Give a launcher time to write its child PID before treating the lock as stale.
-      try { if (Date.now() - statSync(lockPath).mtimeMs < 60_000) return false; } catch { return false; }
+      if (ageMs < 60_000) return false;
     }
+    logger?.warn?.(`[follow-up-workspace-trash] removing stale deleter lock pid=${pid || 'unknown'} ageMs=${Math.round(ageMs)}`);
     try { unlinkSync(lockPath); } catch { return false; }
     return launchWorkspaceTrashDeleter({ trashDir, rootDir, workspaceRootDir, spawnImpl, probeImpl, logger });
   }

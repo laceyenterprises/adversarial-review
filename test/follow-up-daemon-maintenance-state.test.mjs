@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -589,6 +589,26 @@ test('test runner cannot write config status through a temporary symlink', (t) =
     () => writeConfigSignatureStatus({ env: { HQ_ROOT: hqRootAlias } }),
     /outside temporary HQ_ROOT/
   );
+});
+
+test('a new daemon process discards stale consume interval from the status file', (t) => {
+  const rootDir = makeTempDir(t);
+  const hqRoot = path.join(rootDir, 'hq');
+  const statusDir = path.join(hqRoot, '.adversarial-follow-up');
+  const configPath = path.join(rootDir, 'config.yaml');
+  mkdirSync(statusDir, { recursive: true });
+  writeFileSync(configPath, 'version: 1\n');
+  writeFileSync(path.join(statusDir, 'config-status.json'), JSON.stringify({
+    daemonStartedAt: 'older-process', lastConsumeAt: '2026-05-25T17:00:00.000Z',
+    consumeIntervalMs: 3600000, consumeSkippedReason: null,
+  }));
+  const status = writeConfigSignatureStatus({
+    env: { HQ_ROOT: hqRoot, AGENT_OS_CONFIG_PATH: configPath },
+  });
+  assert.equal(status.lastConsumeAt, null);
+  assert.equal(status.consumeIntervalMs, null);
+  assert.equal(status.consumeSkippedReason, null);
+  assert.notEqual(status.daemonStartedAt, 'older-process');
 });
 
 test('follow-up daemon iteration keeps config drift after per-tick cache reset', async (t) => {

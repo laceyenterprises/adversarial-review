@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
@@ -701,7 +701,7 @@ test('reapTerminalFollowUpWorkspaces removes eligible completed, failed, and arc
   assert.equal(existsSync(archivedWorkspaceDir), false);
   assert.equal(existsSync(freshWorkspaceDir), true);
   assert.equal(launchedTrashDirs.length, 1);
-  assert.equal(path.dirname(launchedTrashDirs[0]), path.dirname(workspaceRootDir));
+  assert.equal(path.dirname(launchedTrashDirs[0]), realpathSync(path.dirname(workspaceRootDir)));
   assert.equal(readdirSync(launchedTrashDirs[0]).length, 3);
   const trashedCompleted = readdirSync(launchedTrashDirs[0]).find((name) => name.startsWith(completedJobId));
   assert.equal(
@@ -727,7 +727,22 @@ test('reapTerminalFollowUpWorkspaces restarts deletion of pending trash without 
     launchTrashDeleterImpl: ({ trashDir: target }) => launched.push(target),
   });
   assert.equal(result.reaped, 0);
-  assert.deepEqual(launched, [trashDir]);
+  assert.deepEqual(launched.map((target) => realpathSync(target)), [realpathSync(trashDir)]);
+});
+
+test('legacy in-root trash is skipped as a workspace and handed to the deleter', (t) => {
+  const rootDir = makeTempRoot(t);
+  const workspaceRootDir = path.join(rootDir, 'workspaces');
+  const legacyTrashDir = path.join(workspaceRootDir, '.reap-trash');
+  mkdirSync(path.join(legacyTrashDir, 'batch-old'), { recursive: true });
+  const launched = [];
+  const result = reapTerminalFollowUpWorkspaces({
+    rootDir, workspaceRootDir,
+    launchTrashDeleterImpl: ({ trashDir }) => launched.push(trashDir),
+  });
+  assert.equal(result.scanned, 0);
+  assert.equal(result.missingTerminalJob, 0);
+  assert.deepEqual(launched, [legacyTrashDir]);
 });
 
 test('reapTerminalFollowUpWorkspaces logs unreadable job records, skips missing timestamps, and prefers the latest duplicate terminal record', (t) => {
@@ -4924,7 +4939,7 @@ test('reapTerminalFollowUpWorkspaces moves eligible workspaces to trash and remo
   assert.equal(result.reaped, 1);
   assert.equal(existsSync(workspaceDir), false);
   assert.deepEqual(result.reapedPaths, [workspaceDir]);
-  assert.deepEqual(launchedTrashDirs, [`${workspaceRootDir}.trash`]);
+  assert.deepEqual(launchedTrashDirs.map((target) => realpathSync(target)), [realpathSync(`${workspaceRootDir}.trash`)]);
   assert.equal(readdirSync(launchedTrashDirs[0]).some((entry) => entry.startsWith(`${jobId}-`)), true);
   assert.deepEqual(readdirSync(workspaceRootDir), []);
   const nextPass = reapTerminalFollowUpWorkspaces({
@@ -4937,7 +4952,38 @@ test('reapTerminalFollowUpWorkspaces moves eligible workspaces to trash and remo
   assert.equal(nextPass.missingTerminalJob, 0);
 });
 
-test('reapTerminalFollowUpWorkspaces reports permission errors and falls back on EXDEV', (t) => {
+test('mount-root rename fallback moves the workspace to in-root trash without recursive deletion', (t) => {
+  const rootDir = makeTempRoot(t);
+  const completedDir = getFollowUpJobDir(rootDir, 'completed');
+  const workspaceRootDir = path.join(rootDir, 'workspaces');
+  mkdirSync(completedDir, { recursive: true });
+  mkdirSync(workspaceRootDir, { recursive: true });
+  const jobId = 'laceyenterprises__agent-os-pr-1402-2026-06-01T10-00-00-000Z';
+  writeFileSync(path.join(completedDir, `${jobId}.json`), JSON.stringify({
+    ...buildFollowUpJob({ repo: 'laceyenterprises/agent-os', prNumber: 1402,
+      reviewerModel: 'codex', reviewBody: 'Done', reviewPostedAt: '2026-06-01T10:00:00.000Z', critical: false }),
+    jobId, status: 'completed', completedAt: '2026-06-02T10:00:00.000Z',
+  }));
+  const workspaceDir = path.join(workspaceRootDir, jobId);
+  mkdirSync(workspaceDir);
+  const launched = [];
+  const result = reapTerminalFollowUpWorkspaces({
+    rootDir, workspaceRootDir, nowMs: Date.parse('2026-06-03T12:00:00.000Z'),
+    renameSyncImpl: (source, destination) => {
+      if (path.basename(path.dirname(destination)) === 'workspaces.trash') {
+        const err = new Error('mount boundary'); err.code = 'EXDEV'; throw err;
+      }
+      renameSync(source, destination);
+    },
+    launchTrashDeleterImpl: ({ trashDir }) => launched.push(trashDir),
+  });
+  assert.equal(result.reaped, 1);
+  assert.equal(existsSync(workspaceDir), false);
+  assert.ok(readdirSync(path.join(workspaceRootDir, '.reap-trash')).some((entry) => entry.startsWith(jobId)));
+  assert.ok(launched.includes(path.join(workspaceRootDir, '.reap-trash')));
+});
+
+test('reapTerminalFollowUpWorkspaces reports permission errors and preserves a workspace if both rename targets refuse', (t) => {
   for (const code of ['EACCES', 'EPERM', 'EXDEV']) {
     const rootDir = makeTempRoot(t);
     const completedDir = getFollowUpJobDir(rootDir, 'completed');
@@ -4968,11 +5014,11 @@ test('reapTerminalFollowUpWorkspaces reports permission errors and falls back on
       logErrorImpl: (message) => errors.push(message),
     });
 
-    assert.equal(result.reaped, code === 'EXDEV' ? 1 : 0, code);
-    assert.equal(result.errors, code === 'EXDEV' ? 0 : 1, code);
-    assert.equal(existsSync(path.join(workspaceRootDir, jobId)), code !== 'EXDEV', code);
+    assert.equal(result.reaped, 0, code);
+    assert.equal(result.errors, 1, code);
+    assert.equal(existsSync(path.join(workspaceRootDir, jobId)), true, code);
     assert.equal(result.anomalyPaths.length, code === 'EXDEV' ? 0 : 1, code);
-    assert.equal(errors.length, code === 'EXDEV' ? 0 : 1, code);
+    assert.equal(errors.length, 1, code);
   }
 });
 
@@ -5039,5 +5085,5 @@ test('reapTerminalFollowUpWorkspaces relaunches the deleter for pending trash', 
     launchTrashDeleterImpl: ({ trashDir: target }) => backgroundCalls.push(target),
   });
 
-  assert.deepEqual(backgroundCalls, [trashDir]);
+  assert.deepEqual(backgroundCalls.map((target) => realpathSync(target)), [realpathSync(trashDir)]);
 });

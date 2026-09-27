@@ -160,6 +160,8 @@ function positiveNumberEnv(name, fallback) {
 
 const lastSuccessfulDaemonConfigSignatures = new Map();
 const lastSuccessfulDaemonMaxConcurrentJobs = new Map();
+const daemonStartedAt = new Date().toISOString();
+const lastConsumeStartedByRoot = new Map();
 
 function daemonConfigSignatureOptions(env = process.env) {
   const envForConfig = pruneBlankRoleEnvVars(env);
@@ -260,14 +262,17 @@ function writeConfigSignatureStatus({ env = process.env, now = () => new Date() 
     prior = JSON.parse(readFileSync(path, 'utf8'));
   } catch {}
   const observedAt = now().toISOString();
+  const sameProcess = prior?.daemonStartedAt === daemonStartedAt;
   const driftSince = status.inSync === false
     ? (prior?.inSync === false ? prior.driftSince || prior.observedAt : observedAt)
     : null;
   const payload = {
     ...status,
-    lastConsumeAt: prior?.lastConsumeAt || null,
-    consumeIntervalMs: prior?.consumeIntervalMs ?? null,
-    tickDurationMs: prior?.tickDurationMs ?? null,
+    daemonStartedAt,
+    lastConsumeAt: sameProcess ? prior?.lastConsumeAt || null : null,
+    consumeIntervalMs: sameProcess ? prior?.consumeIntervalMs ?? null : null,
+    consumeSkippedReason: sameProcess ? prior?.consumeSkippedReason ?? null : null,
+    tickDurationMs: sameProcess ? prior?.tickDurationMs ?? null : null,
     observedAt,
     driftSince,
     daemon: 'adversarial-follow-up',
@@ -279,7 +284,7 @@ function writeConfigSignatureStatus({ env = process.env, now = () => new Date() 
   return payload;
 }
 
-function writeFollowUpTickMetrics({ env, tickDurationMs, consumeAt = null, consumeIntervalMs = null }) {
+function writeFollowUpTickMetrics({ env, tickDurationMs, consumeAt = null, consumeIntervalMs = null, consumeSkippedReason = null }) {
   if (!env.HQ_ROOT) return;
   assertSafeTestStatusRoot(env.HQ_ROOT);
   const path = join(env.HQ_ROOT, '.adversarial-follow-up', 'config-status.json');
@@ -291,7 +296,8 @@ function writeFollowUpTickMetrics({ env, tickDurationMs, consumeAt = null, consu
     tickDurationMs,
     tickCompletedAt: new Date().toISOString(),
     lastConsumeAt: consumeAt || prior.lastConsumeAt || null,
-    consumeIntervalMs: consumeIntervalMs ?? prior.consumeIntervalMs ?? null,
+    consumeIntervalMs,
+    consumeSkippedReason,
   };
   writeFileAtomic(path, `${JSON.stringify(payload, null, 2)}\n`);
 }
@@ -630,6 +636,7 @@ async function runFollowUpDaemonIteration({
   const tickStartedMs = clock();
   let consumeAt = null;
   let consumeIntervalMs = null;
+  let consumeSkippedReason = 'tick-stopped-before-consume';
   try {
   const reaperBudgetMs = Number.isSafeInteger(Number(env.ADVERSARIAL_FOLLOW_UP_REAPER_BUDGET_MS))
     && Number(env.ADVERSARIAL_FOLLOW_UP_REAPER_BUDGET_MS) > 0
@@ -776,19 +783,16 @@ async function runFollowUpDaemonIteration({
   }
   if (shouldStop()) return;
   if (maxConcurrentJobs === null) {
+    consumeSkippedReason = 'unresolved-capacity';
     logTick('consume', 'skipped unresolved remediation capacity; will retry next tick');
   } else if (shouldConsumeAfterReviewerTokenRefresh(reviewerTokenRefreshSummary)) {
     await runStep('consume', async () => {
       const consumeStartedMs = clock();
-      let lastConsumeMs = null;
-      if (env.HQ_ROOT) {
-        try {
-          const prior = JSON.parse(readFileSync(join(env.HQ_ROOT, '.adversarial-follow-up', 'config-status.json'), 'utf8'));
-          lastConsumeMs = Date.parse(prior.lastConsumeAt);
-        } catch { /* first consume pass */ }
-      }
+      const lastConsumeMs = lastConsumeStartedByRoot.get(env.HQ_ROOT);
       consumeAt = new Date(consumeStartedMs).toISOString();
       consumeIntervalMs = Number.isFinite(lastConsumeMs) ? consumeStartedMs - lastConsumeMs : null;
+      lastConsumeStartedByRoot.set(env.HQ_ROOT, consumeStartedMs);
+      consumeSkippedReason = null;
       logTick('consume-interval', `intervalMs=${consumeIntervalMs ?? 'first-pass'}`);
       if (consumeIntervalMs > 300_000) logError(`consume interval exceeded 5 minutes: ${consumeIntervalMs}ms`);
       const result = await consumeFollowUpJobsUntilCapacityImpl({
@@ -809,6 +813,7 @@ async function runFollowUpDaemonIteration({
       );
     });
   } else {
+    consumeSkippedReason = 'unsafe-reviewer-token-handoff';
     logTick(
       'consume',
       `skipped unsafe reviewer token handoff roles=${describeUnsafeReviewerTokenHandoff(reviewerTokenRefreshSummary)}`
@@ -839,9 +844,10 @@ async function runFollowUpDaemonIteration({
   if (shouldStop()) return;
   await runStoppedArchiveSweepIfDueImpl();
   } finally {
+    if (consumeAt === null) lastConsumeStartedByRoot.delete(env.HQ_ROOT);
     const tickDurationMs = clock() - tickStartedMs;
     logTick('tick-duration', `durationMs=${tickDurationMs}`);
-    try { writeFollowUpTickMetricsImpl({ env, tickDurationMs, consumeAt, consumeIntervalMs }); }
+    try { writeFollowUpTickMetricsImpl({ env, tickDurationMs, consumeAt, consumeIntervalMs, consumeSkippedReason }); }
     catch (err) { logError(`tick metric write failed: ${err?.message || err}`); }
   }
 }

@@ -232,12 +232,10 @@ function resolveProgressTimeoutForModel(model, env) {
   return 0;
 }
 
-// Reviewer stdout token usage is parsed for codex (native token_count/
-// turn.completed) AND gemini (usageMetadata, or the antigravity estimate the
-// reviewer emits as reviewer.token_usage). Claude usage is recovered separately
-// from its transcript, so it is intentionally not parsed from stdout here.
+// reviewer.mjs emits reviewer.token_usage for every model, including Claude's
+// JSON result. Parse it before the subprocess output can be discarded.
 function shouldParseStdoutTokenUsage(model) {
-  return isCodexModel(model) || isGeminiModel(model);
+  return isCodexModel(model) || isGeminiModel(model) || String(model || '').toLowerCase().includes('claude');
 }
 
 function resolveCodexReviewerEnv(reviewerEnv) {
@@ -351,9 +349,15 @@ async function terminateTerminalSpawnedPgid(pgid, {
 function readSideChannelTails(rootDir, sessionUuid) {
   const { stdoutPath, stderrPath } = reviewerRunSideChannelPaths(rootDir, sessionUuid);
   return {
-    stdoutTail: readTailFile(stdoutPath),
+    stdoutTail: tokenFreeStdoutTail(readTailFile(stdoutPath)),
     stderrTail: readTailFile(stderrPath),
   };
+}
+
+function tokenFreeStdoutTail(value) {
+  return String(value || '').split('\n').filter((line) =>
+    !/reviewer\.token_usage|"token_count"|"turn\.completed"|"usageMetadata"/.test(line)
+  ).join('\n');
 }
 
 function readSideChannelTailsBestEffort(rootDir, sessionUuid) {
@@ -553,7 +557,7 @@ function createCliDirectReviewerRuntimeAdapter({
             spawnedAt: record.spawnedAt,
             failureClass: 'bug',
             stderrTail: [terminalMessage, killFailureMessage].join('\n'),
-            stdoutTail: tailText(stdout),
+            stdoutTail: tokenFreeStdoutTail(tailText(stdout)),
             pgid: record.pgid,
             reattachToken: record.reattachToken,
             preventLeaseRecovery: true,
@@ -565,7 +569,7 @@ function createCliDirectReviewerRuntimeAdapter({
           spawnedAt: record.spawnedAt,
           failureClass: 'daemon-bounce',
           stderrTail: terminalMessage,
-          stdoutTail: tailText(stdout),
+          stdoutTail: tokenFreeStdoutTail(tailText(stdout)),
           pgid: record.pgid,
           reattachToken: record.reattachToken,
           tokenUsage: shouldParseStdoutTokenUsage(req.model)
@@ -583,7 +587,7 @@ function createCliDirectReviewerRuntimeAdapter({
       return emptyResult({
         ok: true,
         spawnedAt: record.spawnedAt,
-        stdoutTail: tailText(stdout),
+        stdoutTail: tokenFreeStdoutTail(tailText(stdout)),
         stderrTail: stripped.length > 0
           ? [`stripped forbidden fallback env: ${stripped.join(', ')}`, tailText(stderr)].filter(Boolean).join('\n')
           : tailText(stderr),
@@ -599,7 +603,7 @@ function createCliDirectReviewerRuntimeAdapter({
         : null;
       const effectiveErr = terminalSpawnTerminationError || err;
       const timedOut = isReviewerSubprocessTimeout(effectiveErr, { killSignal: 'SIGTERM' });
-      const detail = [effectiveErr.message, effectiveErr.stdout, effectiveErr.stderr]
+      const detail = [effectiveErr.message, tokenFreeStdoutTail(effectiveErr.stdout), effectiveErr.stderr]
         .filter(Boolean)
         .join('\n')
         .trim()
@@ -609,7 +613,7 @@ function createCliDirectReviewerRuntimeAdapter({
         : (Number.isInteger(effectiveErr?.code) ? effectiveErr.code : null);
       const errorCode = typeof effectiveErr?.code === 'string' ? effectiveErr.code : null;
       const stderrTail = tailText(effectiveErr?.stderr || detail || '');
-      const stdoutTail = tailText(effectiveErr?.stdout || '');
+      const stdoutTail = tokenFreeStdoutTail(tailText(effectiveErr?.stdout || ''));
       const failureTokenEvidence = shouldParseStdoutTokenUsage(req.model)
         ? parseCodexJsonTokenUsageFromFailureStdout(effectiveErr?.stdout || '')
         : { tokenUsage: null, tokenUsageNoUsageReason: null };

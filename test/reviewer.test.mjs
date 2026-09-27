@@ -3212,7 +3212,7 @@ test('Codex JSON token parser captures reasoning + gemini usageMetadata (full fi
     }),
   );
   assert.equal(gemini.input, 800);
-  assert.equal(gemini.output, 20 + 15);
+  assert.equal(gemini.output, 20);
   assert.equal(gemini.reasoning, 15);
   assert.equal(gemini.cacheRead, 200);
   assert.equal(gemini.toolContext, 5);
@@ -3742,10 +3742,18 @@ test('resolveGeminiRuntime defaults to cli and honors config/env selection', () 
 
 test('buildGeminiReviewArgs enters headless mode without carrying the prompt body', () => {
   const args = buildGeminiReviewArgs({ model: 'gemini-2.5-pro' });
-  assert.deepEqual(args, ['-m', 'gemini-2.5-pro', '-o', 'text', '--prompt', '']);
+  assert.deepEqual(args, ['-m', 'gemini-2.5-pro', '-o', 'json', '--prompt', '']);
   // The prompt flag is intentionally empty: it enables non-interactive stdin
   // handling without putting prompt/diff content in argv.
   assert.equal(args[args.indexOf('--prompt') + 1], '');
+});
+
+test('isolated Codex reviewer home persists a rollout for quota capture', () => {
+  const args = buildCodexReviewArgs({ outputPath: '/tmp/review.md', prompt: 'review',
+    model: 'gpt-6-sol', persistSession: true });
+  assert.equal(args.includes('--ephemeral'), false);
+  assert.deepEqual(args.slice(0, 4), ['exec', '--ignore-user-config',
+    '--dangerously-bypass-approvals-and-sandbox', '--json']);
 });
 
 test('buildAgyReviewArgs binds --model before --print and carries the prompt as the --print value', () => {
@@ -3821,7 +3829,7 @@ test('spawnGeminiReview feeds the prompt over stdin and keeps it out of argv', a
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].command, '/usr/local/bin/gemini');
-  assert.deepEqual(calls[0].args, ['-m', 'gemini-2.5-pro', '-o', 'text', '--prompt', '']);
+  assert.deepEqual(calls[0].args, ['-m', 'gemini-2.5-pro', '-o', 'json', '--prompt', '']);
   // The prompt (and the diff body inside it) is observed ONLY on stdin.
   assert.equal(calls[0].options.input, prompt);
   for (const arg of calls[0].args) {
@@ -4457,7 +4465,7 @@ test('resolveGeminiAntigravityModel: agy uses the display-name token while the c
   // And buildGeminiReviewArgs (cli path) is untouched.
   assert.deepEqual(
     buildGeminiReviewArgs({ model: 'gemini-2.5-pro' }),
-    ['-m', 'gemini-2.5-pro', '-o', 'text', '--prompt', ''],
+    ['-m', 'gemini-2.5-pro', '-o', 'json', '--prompt', ''],
   );
 });
 
@@ -4524,11 +4532,30 @@ test('reviewWithGemini cli runtime keeps native binary, argv, env scrub, and cre
   assert.deepEqual(asserted, [join('/tmp/gemini-home', '.gemini', 'oauth_creds.json')]);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].geminiCli, GEMINI_CLI);
-  assert.deepEqual(calls[0].args, ['-m', 'gemini-2.5-pro', '-o', 'text', '--prompt', '']);
+  assert.deepEqual(calls[0].args, ['-m', 'gemini-2.5-pro', '-o', 'json', '--prompt', '']);
   assert.equal(calls[0].env.HOME, '/tmp/gemini-home');
   assert.equal(calls[0].env.GEMINI_API_KEY, undefined);
   assert.equal(calls[0].env.GOOGLE_API_KEY, undefined);
   assert.equal(calls[0].env.GEMINI_OAUTH_ACCESS_TOKEN, undefined);
+});
+
+test('reviewWithGemini captures JSON response and per-model token statistics', async () => {
+  const result = await reviewWithGemini('+diff\n', '', {
+    resolveGeminiRuntimeImpl: () => 'cli',
+    assertOAuthImpl: async () => {},
+    spawnGeminiReviewImpl: async () => ({ stdout: JSON.stringify({
+      response: '## Verdict\nComment only',
+      stats: { models: { 'gemini-2.5-pro': { tokens: {
+        prompt: 100, candidates: 20, thoughts: 5, cached: 30, tool: 2,
+      } } } },
+    }), stderr: '' }),
+  });
+  assert.equal(result.reviewText, '## Verdict\nComment only');
+  assert.equal(result.tokenUsage.model, 'gemini-2.5-pro');
+  assert.equal(result.tokenUsage.input, 100);
+  assert.equal(result.tokenUsage.output, 20);
+  assert.equal(result.tokenUsage.reasoning, 5);
+  assert.equal(result.tokenUsage.cacheRead, 30);
 });
 
 test('reviewWithGemini antigravity runtime uses agy print, stdin prompt, env scrub, and agy auth', async () => {
@@ -5645,7 +5672,7 @@ test('reviewWithGemini cli runtime does not call agy auth or agy spawn', async (
 
   assert.equal(result.reviewText, 'CLI review');
   assert.equal(calls[0].geminiCli, GEMINI_CLI);
-  assert.deepEqual(calls[0].args, ['-m', 'gemini-2.5-pro', '-o', 'text', '--prompt', '']);
+  assert.deepEqual(calls[0].args, ['-m', 'gemini-2.5-pro', '-o', 'json', '--prompt', '']);
 });
 
 test('reviewWithGemini antigravity auth missing fails closed before spawning a review', async () => {

@@ -58,6 +58,7 @@ import {
 import {
   beginReviewerPass,
   completeReviewerPass,
+  readBestReviewerEvidenceTokenUsage,
   readWorkerRunTokenUsageResult,
 } from '../reviewer-pass-tokens.mjs';
 import {
@@ -3183,7 +3184,7 @@ async function recordAmaCloserReviewerPassTokens({
   if (!record?.launchRequestId && !record?.dispatchId) return null;
   const attemptNumber = normalizeCloserAttemptNumber(record);
   const launchRequestId = record.launchRequestId || record.dispatchId || null;
-  const usage = await readCloserWorkerRunUsageAfterRollup({
+  const rolledUpUsage = await readCloserWorkerRunUsageAfterRollup({
     rootDir,
     hqRoot,
     workerRunId: record.workerRunId || null,
@@ -3193,6 +3194,30 @@ async function recordAmaCloserReviewerPassTokens({
     env,
     pollDelaysMs,
   });
+  let usage = rolledUpUsage;
+  try {
+    const evidence = readBestReviewerEvidenceTokenUsage({
+      workerRunId: record.workerRunId || null,
+      launchRequestId,
+      workspacePath: record.workspacePath || null,
+      startedAt: record.dispatchedAt || record.lastAttemptedAt || null,
+      endedAt: observedAt || record.lastObservedAt || null,
+      reviewerModel: record.dispatchWorkerClass || record.workerClass || 'codex',
+      workerLogPath: record.logPath || null,
+      codexSessionRoots: record.codexSessionRoot ? [record.codexSessionRoot] : null,
+      claudeSessionRoots: record.claudeSessionRoot ? [record.claudeSessionRoot] : null,
+      rootDir,
+      env,
+      ledgerTarget,
+      ledgerDbPath,
+    });
+    if (evidence) usage = rolledUpUsage
+      ? { ...rolledUpUsage, model: evidence.model || rolledUpUsage.model,
+          rateLimits: evidence.rateLimits || [], partial: evidence.partial || false }
+      : evidence;
+  } catch {
+    // Usage evidence must never block merge-state reconciliation.
+  }
   const missingUsage = !usage;
   if (!usage) {
     logger.warn?.(
@@ -3217,8 +3242,8 @@ async function recordAmaCloserReviewerPassTokens({
     repo,
     prNumber,
     attemptNumber,
-    reviewerClass: record.workerClass || 'codex',
-    reviewerModel: record.workerClass || 'codex',
+    reviewerClass: record.dispatchWorkerClass || record.workerClass || 'codex',
+    reviewerModel: usage?.model || record.resolvedModel || record.model || record.dispatchWorkerClass || record.workerClass || 'codex',
     passKind: 'closer',
     workerRunId,
     workspacePath: record.workspacePath || null,

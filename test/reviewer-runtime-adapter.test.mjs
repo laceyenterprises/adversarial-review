@@ -1930,6 +1930,34 @@ test('cli-direct returns Codex JSON token usage from reviewer stdout', async () 
   }
 });
 
+test('cli-direct carries Claude JSON-result usage from reviewer stdout', async () => {
+  const rootDir = makeRoot();
+  try {
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      preflightImpl: noopPreflight,
+      spawnCapturedImpl: async (_command, _args, options) => {
+        options.onSpawn({ pgid: 5153 });
+        return { stdout: JSON.stringify({ type: 'reviewer.token_usage', tokenUsage: {
+          input: 10, output: 4, cacheRead: 8, cacheWrite: 2,
+          model: 'claude-sonnet-4-6', source: 'claude-json',
+        } }), stderr: '' };
+      },
+    });
+    const result = await adapter.spawnReviewer({
+      model: 'claude', prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 4 },
+      timeoutMs: 100, sessionUuid: 'claude-json-token-session', forbiddenFallbacks: ['api-key'],
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.tokenUsage.model, 'claude-sonnet-4-6');
+    assert.equal(result.tokenUsage.source, 'claude-json');
+    assert.doesNotMatch(result.stdoutTail, /token_usage/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('cli-direct returns Codex JSON token usage from failed reviewer stdout', async () => {
   const rootDir = makeRoot();
   try {
@@ -2010,7 +2038,7 @@ test('cli-direct records typed no-usage reason for unparseable failed Codex stdo
     assert.equal(result.ok, false);
     assert.equal(result.tokenUsage, null);
     assert.equal(result.tokenUsageNoUsageReason, 'unparseable-stdout');
-    assert.match(result.stdoutTail, /turn\.completed/);
+    assert.doesNotMatch(result.stdoutTail, /turn\.completed/);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

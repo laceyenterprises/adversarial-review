@@ -784,7 +784,7 @@ async function spawnReviewer({
       let workerRunAttribution = null;
       try {
         let rawTokenUsage = result.tokenUsage || null;
-        if (!rawTokenUsage?.workerRunId) {
+        if (!rawTokenUsage?.workerRunId || !rawTokenUsage?.rateLimits?.length || !rawTokenUsage?.model) {
           const ledgerLookup = await readReviewerLedgerEvidenceWithRetry({
             readImpl: readBestReviewerEvidenceTokenUsageImpl,
             sleepImpl: ledgerLookupSleepImpl,
@@ -817,6 +817,10 @@ async function spawnReviewer({
               ? {
                   ...rawTokenUsage,
                   workerRunId: rawTokenUsage.workerRunId || ledgerTokenUsage.workerRunId || null,
+                  model: rawTokenUsage.model || ledgerTokenUsage.model || null,
+                  rateLimits: rawTokenUsage.rateLimits?.length
+                    ? rawTokenUsage.rateLimits : (ledgerTokenUsage.rateLimits || []),
+                  partial: rawTokenUsage.partial || ledgerTokenUsage.partial || false,
                 }
               : ledgerTokenUsage;
           }

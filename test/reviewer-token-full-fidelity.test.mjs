@@ -48,7 +48,7 @@ test('gemini reviewer usageMetadata is captured with full breakdown', () => {
   });
   const usage = parseCodexJsonTokenUsage(line);
   assert.equal(usage.input, 8000);
-  assert.equal(usage.output, 120 + 90, 'inclusive output = candidates + thoughts');
+  assert.equal(usage.output, 120, 'visible output excludes separately reported thoughts');
   assert.equal(usage.reasoning, 90);
   assert.equal(usage.cacheRead, 2000);
   assert.equal(usage.toolContext, 40, 'tool-use tokens captured');
@@ -60,6 +60,18 @@ test('gemini reviewer usageMetadata is captured with full breakdown', () => {
 test('reviewer usage parser skips non-object JSON lines', () => {
   const usage = parseCodexJsonTokenUsage(JSON.stringify('usageMetadata'));
   assert.equal(usage, null);
+});
+
+test('Claude reviewer JSON result emitted on stdout preserves usage and actual model', () => {
+  const usage = parseCodexJsonTokenUsage(JSON.stringify({
+    type: 'reviewer.token_usage',
+    tokenUsage: { input: 12, output: 4, cacheRead: 9, cacheWrite: 2,
+      model: 'claude-sonnet-4-6', source: 'claude-json' },
+  }));
+  const normalized = normalizeTokenUsage(usage);
+  assert.equal(normalized.model, 'claude-sonnet-4-6');
+  assert.equal(normalized.total, 16);
+  assert.equal(normalized.cacheRead, 9);
 });
 
 test('normalizeTokenUsage carries reasoning + toolContext through', () => {

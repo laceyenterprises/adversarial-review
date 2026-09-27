@@ -352,7 +352,7 @@ test('spawnReviewer resolves worker_run_id from os-dispatch launch_request_id wh
   assert.equal(settled[0].metadata.launchRequestId, 'lrq_wcw_attribution');
 });
 
-test('spawnReviewer enriches adapter token usage with ledger worker_run_id without replacing counters', async () => {
+test('spawnReviewer enriches adapter usage with worker_run_id and recomputes total', async () => {
   const settled = [];
   const result = await spawnReviewer({
     rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
@@ -418,8 +418,8 @@ test('spawnReviewer enriches adapter token usage with ledger worker_run_id witho
     cacheWrite: 7,
     reasoning: 9,
     toolContext: 5,
-    total: 182,
-    guardrail: 182,
+    total: 159,
+    guardrail: 159,
     costUSD: 0.25,
     usageTag: 'guardrail',
     source: 'adapter',

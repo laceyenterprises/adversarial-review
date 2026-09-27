@@ -257,12 +257,37 @@ function ensureReviewStateSchema(db) {
   // migration runner became the canonical path.
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN ended_at TEXT`);
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN reviewer_model TEXT`);
+  addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN token_input INTEGER`);
+  addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN token_output INTEGER`);
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN token_total INTEGER`);
+  // TOKCAP-01 reads this table from data/reviews.db for fleet quota projection.
+  db.exec(`CREATE TABLE IF NOT EXISTS reviewer_rate_limit_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pass_id INTEGER NOT NULL REFERENCES reviewer_passes(pass_id),
+    observed_at TEXT NOT NULL,
+    limit_id TEXT,
+    model TEXT,
+    window_kind TEXT,
+    used_percent REAL,
+    window_minutes INTEGER,
+    resets_at TEXT,
+    plan_type TEXT,
+    rate_limit_reached_type TEXT,
+    UNIQUE(pass_id, observed_at, limit_id, window_kind)
+  )`);
+  addColumnIfMissing(db, `ALTER TABLE reviewer_rate_limit_snapshots ADD COLUMN window_kind TEXT`);
   // Full-fidelity token breakdown parity with the session ledger
   // (token_usage_reasoning / token_usage_tool_context): reviewer passes must
   // record reasoning and tool-use tokens, not just input/output/cache.
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN token_reasoning INTEGER`);
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN token_tool_context INTEGER`);
+  const tokenBackfillId = '20260927_tokcap02_token_total';
+  if (!db.prepare('SELECT 1 FROM schema_migrations WHERE id = ?').get(tokenBackfillId)) {
+    db.exec(`UPDATE reviewer_passes
+      SET token_total = COALESCE(token_input, 0) + COALESCE(token_output, 0) + COALESCE(token_reasoning, 0)
+      WHERE token_input IS NOT NULL OR token_output IS NOT NULL OR token_reasoning IS NOT NULL`);
+    db.prepare('INSERT OR IGNORE INTO schema_migrations(id) VALUES (?)').run(tokenBackfillId);
+  }
   // LAC-1559: head SHA a reviewer pass reviewed, so the completed-rereview
   // budget counter can key per (repo, pr, head). Keep this in the idempotent
   // schema-convergence path because SQLite has no ADD COLUMN IF NOT EXISTS.

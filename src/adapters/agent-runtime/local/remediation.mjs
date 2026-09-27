@@ -850,7 +850,7 @@ function prepareCodexRemediationStartupEnv({
   }
 
   startupEvidence.mergeAgentBroker = applyMergeAgentBrokerEnv(env, sourceEnv, { workerClass, requiresWorkflowPush });
-  return { authPath, env, startupEvidence };
+  return { authPath, env, startupEvidence, isolatedCodexHome: perWorkerAuth?.codexHome || null };
 }
 
 function withReplyContext(env, { replyPath = null, hqRoot, launchRequestId, now, workerClass, jobId }) {
@@ -1104,7 +1104,7 @@ function spawnCodexRemediationWorker({
   const codexCli = resolveCodexCliPath(sourceEnv);
   // For codex, `workerClass` IS the physical harness class ('codex').
   const gitIdentity = remediationWorkerGitIdentity(workerClass);
-  const { env: baseEnv, startupEvidence } = prepareCodexRemediationStartupEnv({
+  const { env: baseEnv, startupEvidence, isolatedCodexHome } = prepareCodexRemediationStartupEnv({
     gitIdentity,
     perWorkerKey: jobId || launchRequestId || null,
     workerClass,
@@ -1145,7 +1145,7 @@ function spawnCodexRemediationWorker({
       ? ['-c', `model_reasoning_effort=${modelResolution.resolvedReasoningLevel}`]
       : []),
     '--dangerously-bypass-approvals-and-sandbox',
-    '--ephemeral',
+    ...(!isolatedCodexHome ? ['--ephemeral'] : []),
     '--json',
     '--output-last-message',
     outputPath,
@@ -1184,6 +1184,7 @@ function spawnCodexRemediationWorker({
       gitIdentity,
       startupEvidence,
       ...modelResolution,
+      codexSessionRoot: isolatedCodexHome ? join(isolatedCodexHome, 'sessions') : null,
       command: [codexCli, ...codexArgs],
       child,
     };

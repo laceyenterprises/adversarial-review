@@ -29,6 +29,7 @@ import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { promisify } from 'node:util';
 import { materializePerWorkerCodexAuth } from './codex-per-worker-auth.mjs';
+import { readCodexTranscriptTokenUsage } from './reviewer-pass-tokens.mjs';
 import { reviewWithCodexOAuthResponses } from './codex-oauth-responses.mjs';
 import {
   resolveAgyPrintTimeoutMs,
@@ -852,7 +853,8 @@ function parseClaudeJsonOutput(raw) {
   if (!doc.result.trim()) {
     throw new Error("Claude JSON output contains empty 'result' field");
   }
-  return { reviewText: doc.result, tokenUsage: mapClaudeJsonUsage(doc.usage) };
+  const tokenUsage = mapClaudeJsonUsage(doc.usage);
+  return { reviewText: doc.result, tokenUsage: tokenUsage ? { ...tokenUsage, model: doc.model || null } : null };
 }
 
 function extractClaudeJsonText(raw) {
@@ -981,12 +983,13 @@ function buildCodexReviewArgs({
   model = null,
   modelProvider = null,
   configOverrides = null,
+  persistSession = false,
 }) {
   const args = [
     'exec',
     '--ignore-user-config',
     '--dangerously-bypass-approvals-and-sandbox',
-    '--ephemeral',
+    ...(!persistSession ? ['--ephemeral'] : []),
     '--json',
   ];
   if (model) args.push('--model', model);
@@ -1026,6 +1029,7 @@ async function spawnCodexReview({
   model = null,
   modelProvider = null,
   configOverrides = null,
+  persistSession = false,
   env,
   cwd = process.cwd(),
   timeout = resolveReviewerTimeoutMs(env),
@@ -1034,7 +1038,7 @@ async function spawnCodexReview({
 }) {
   return spawnCapturedImpl(
     codexCli,
-    buildCodexReviewArgs({ outputPath, prompt, model, modelProvider, configOverrides }),
+    buildCodexReviewArgs({ outputPath, prompt, model, modelProvider, configOverrides, persistSession }),
     {
       env,
       cwd,
@@ -1077,13 +1081,16 @@ async function reviewWithCodex(diff, extraContext = '', {
     key: `reviewer-${process.pid}-${Date.now()}`,
   });
   const effectiveAuthPath = perWorkerAuth?.authPath || authPath;
+  const codexSessionHome = perWorkerAuth?.codexHome || process.env.CODEX_HOME || null;
   const outputPath = join(tmpdir(), `codex-review-${process.pid}-${Date.now()}.md`);
   const codexExecOverrides = resolveCodexExecOverrides();
+  const startedAt = new Date().toISOString();
 
   const { env } = scrubOAuthFallbackEnv({
     ...process.env,
     PATH: '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
     CODEX_AUTH_PATH: effectiveAuthPath,
+    ...(perWorkerAuth ? { CODEX_HOME: perWorkerAuth.codexHome } : {}),
     HOME: process.env.HOME || homedir(),
   });
   const subprocessEnv = withReviewerSubprocessCwdEnv(env, reviewerSubprocessCwd);
@@ -1100,6 +1107,7 @@ async function reviewWithCodex(diff, extraContext = '', {
         model: codexExecOverrides.model,
         modelProvider: codexExecOverrides.modelProvider,
         configOverrides: codexExecOverrides.configOverrides,
+        persistSession: Boolean(perWorkerAuth),
         env: subprocessEnv,
         cwd: reviewerSubprocessCwd,
         timeout: resolveReviewerTimeoutMs(subprocessEnv),
@@ -1112,7 +1120,7 @@ async function reviewWithCodex(diff, extraContext = '', {
       stderr = err.stderr || '';
       const msg = `${err.message || ''}\n${stdout}\n${stderr}`;
       if (/\b(?:401|403)\b|invalid_grant|refresh_token|not logged in|\blogin\b/i.test(msg)) {
-        throw new OAuthError('codex', `CLI returned auth error: ${msg.substring(0, 200)}`);
+        throw new OAuthError('codex', `CLI returned auth error: ${String(err.message || stderr || '').substring(0, 200)}`);
       }
       if (shouldRecoverCodexWithOAuth(err, codexExecOverrides.modelProvider)) {
         console.error('[reviewWithCodex] native CLI made no progress; retrying through OAuth Responses transport');
@@ -1133,7 +1141,18 @@ async function reviewWithCodex(diff, extraContext = '', {
           );
         }
       }
-      throw new Error(`Native Codex exec failed: ${msg.substring(0, 800)}`);
+      try {
+        const rollout = codexSessionHome && readCodexTranscriptTokenUsage({
+          workspacePath: reviewerSubprocessCwd, startedAt, endedAt: new Date().toISOString(),
+          sessionRoots: [join(codexSessionHome, 'sessions')],
+        });
+        const failedUsage = rollout || parseCodexJsonTokenUsage(stdout);
+        if (failedUsage) console.log(JSON.stringify({ type: 'reviewer.token_usage',
+          tokenUsage: { ...failedUsage, partial: true } }));
+      } catch {
+        // Failure telemetry is best effort.
+      }
+      throw new Error(`Native Codex exec failed: ${String(err.message || stderr || '').substring(0, 800)}`);
     }
 
     let fileOutput = '';
@@ -1143,10 +1162,24 @@ async function reviewWithCodex(diff, extraContext = '', {
     }
 
   console.error(`[reviewWithCodex] native Codex returned stdout length=${stdout.length}; stderr length=${stderr.length}; file exists=${outputFileExists}; file length=${fileOutput.length}`);
-  console.error(`[reviewWithCodex] stdout preview: ${previewText(stdout)}`);
-  console.error(`[reviewWithCodex] stderr preview: ${previewText(stderr)}`);
+  // Usage events can contain token counters; keep them out of diagnostics.
   console.error(`[reviewWithCodex] file preview: ${previewText(fileOutput)}`);
-  const tokenUsage = parseCodexJsonTokenUsage(stdout);
+  const parsedTokenUsage = parseCodexJsonTokenUsage(stdout);
+  let tokenUsage = parsedTokenUsage
+    ? { ...parsedTokenUsage, model: codexExecOverrides.model || null }
+    : null;
+  try {
+    const rollout = codexSessionHome && readCodexTranscriptTokenUsage({
+      workspacePath: reviewerSubprocessCwd, startedAt, endedAt: new Date().toISOString(),
+      sessionRoots: [join(codexSessionHome, 'sessions')],
+    });
+    if (rollout) tokenUsage = tokenUsage
+      ? { ...tokenUsage, model: rollout.model || tokenUsage.model,
+          rateLimits: rollout.rateLimits || [], partial: rollout.partial }
+      : rollout;
+  } catch {
+    // Session files may be absent if isolated auth could not be materialized.
+  }
 
   const cleanedStdout = stripCodexRuntimeNoise(stdout);
   const cleanedStderr = stripCodexRuntimeNoise(stderr);
@@ -2121,7 +2154,7 @@ function resolveReviewerMetadata(reviewerModel) {
  * interactive mode so stdin is consumed as headless prompt content.
  */
 function buildGeminiReviewArgs({ model }) {
-  return ['-m', model, '-o', 'text', '--prompt', ''];
+  return ['-m', model, '-o', 'json', '--prompt', ''];
 }
 
 function formatAgyPrintTimeout(timeoutMs) {
@@ -2400,7 +2433,7 @@ async function spawnAgyReview({
  * Run adversarial review using the native Gemini CLI (OAuth only).
  * GEMINI_API_KEY / GOOGLE_API_KEY are scrubbed from the env so Gemini uses
  * its stored OAuth credentials only. The prompt is fed over stdin (never
- * argv). Gemini token-usage parsing is out of scope, so tokenUsage is null.
+ * argv). Structured JSON output carries the review and per-model usage.
  */
 async function reviewWithGemini(diff, extraContext = '', {
   promptStage = 'first',
@@ -2489,6 +2522,7 @@ async function reviewWithGemini(diff, extraContext = '', {
 
   let stdout = '';
   let stderr = '';
+  let selectedModel = null;
   let subprocessStarted = false;
   try {
     reviewEnv = withReviewerSubprocessCwdEnv(reviewEnv, reviewerSubprocessCwd);
@@ -2512,6 +2546,7 @@ async function reviewWithGemini(diff, extraContext = '', {
     const model = runtime === 'antigravity'
       ? resolveGeminiAntigravityModel({ env: reviewEnv })
       : resolveGeminiReviewerModel(reviewEnv);
+    selectedModel = model;
 
     console.error(`[reviewWithGemini] invoking Gemini reviewer CLI (model=${model}, runtime=${runtime})`);
     subprocessStarted = true;
@@ -2565,9 +2600,9 @@ async function reviewWithGemini(diff, extraContext = '', {
       throw err;
     }
     if (/\b(?:401|403)\b|invalid_grant|refresh_token|not logged in|\blogin\b/i.test(msg)) {
-      throw new OAuthError('gemini', `CLI returned auth error: ${msg.substring(0, 200)}`);
+      throw new OAuthError('gemini', `CLI returned auth error: ${String(err.message || stderr || '').substring(0, 200)}`);
     }
-    throw new Error(`Gemini exec failed: ${msg.substring(0, 800)}`);
+    throw new Error(`Gemini exec failed: ${String(err.message || stderr || '').substring(0, 800)}`);
   } finally {
     if (runtime === 'antigravity') {
       if (checkout?.credentialId && !quotaSignal && !spendReported && subprocessStarted) {
@@ -2605,8 +2640,7 @@ async function reviewWithGemini(diff, extraContext = '', {
   }
 
   console.error(`[reviewWithGemini] gemini returned stdout length=${stdout.length}; stderr length=${stderr.length}`);
-  console.error(`[reviewWithGemini] stdout preview: ${previewText(stdout)}`);
-  console.error(`[reviewWithGemini] stderr preview: ${previewText(stderr)}`);
+  // Provider output may contain usage counters; lengths above are sufficient.
 
   const combined = normalizeWhitespace(stdout || stderr || '');
   if (!combined) {
@@ -2616,11 +2650,39 @@ async function reviewWithGemini(diff, extraContext = '', {
     throw new Error(`Gemini returned empty output.${hint}`);
   }
 
+  let geminiUsage = null;
+  let reviewPayload = combined;
+  if (runtime !== 'antigravity' && combined.startsWith('{')) {
+    try {
+      const doc = JSON.parse(combined);
+      if (typeof doc.response === 'string') {
+        reviewPayload = doc.response;
+        const models = doc.stats?.models;
+        const metrics = models && typeof models === 'object' ? Object.entries(models) : [];
+        const figures = { input: 0, output: 0, reasoning: 0, cacheRead: 0, toolContext: 0 };
+        for (const [, metric] of metrics) {
+          const tokens = metric?.tokens || {};
+          figures.input += Number(tokens.prompt ?? tokens.input ?? 0) || 0;
+          figures.output += Number(tokens.candidates ?? 0) || 0;
+          figures.reasoning += Number(tokens.thoughts ?? 0) || 0;
+          figures.cacheRead += Number(tokens.cached ?? 0) || 0;
+          figures.toolContext += Number(tokens.tool ?? 0) || 0;
+        }
+        if (metrics.length > 0) geminiUsage = {
+          ...figures, model: metrics.length === 1 ? metrics[0][0] : selectedModel,
+          source: 'gemini-json',
+        };
+      }
+    } catch {
+      // Older CLI output can still be plain text; preserve review delivery.
+    }
+  }
   const reviewText = runtime === 'antigravity'
     ? sanitizeAgyReviewOutput(combined)
-    : combined;
+    : reviewPayload;
+  if (!reviewText.trim()) throw new Error('Gemini returned empty response.');
 
-  return { reviewText, tokenUsage: null };
+  return { reviewText, tokenUsage: geminiUsage };
 }
 
 // ── Reviewer-model selection ──────────────────────────────────────────────────

@@ -86,6 +86,135 @@ test('reviewer_passes schema migrates existing tables to reviewer_model', () => 
   }
 });
 
+test('schema backfills totals from input output and reasoning without adding cache twice', () => {
+  const rootDir = tempRoot();
+  const db = openReviewStateDb(rootDir);
+  try {
+    db.exec(`CREATE TABLE reviewer_passes (
+      pass_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      repo TEXT NOT NULL, pr_number INTEGER NOT NULL, attempt_number INTEGER NOT NULL,
+      reviewer_class TEXT NOT NULL, pass_kind TEXT NOT NULL, started_at TEXT NOT NULL,
+      status TEXT NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}',
+      token_input INTEGER, token_output INTEGER, token_cache_read INTEGER,
+      token_reasoning INTEGER, token_total INTEGER,
+      UNIQUE(repo, pr_number, attempt_number, pass_kind)
+    )`);
+    db.prepare(`INSERT INTO reviewer_passes
+      (repo, pr_number, attempt_number, reviewer_class, pass_kind, started_at, status,
+       token_input, token_output, token_reasoning, token_cache_read, token_total)
+      VALUES ('example/repo', 1, 1, 'codex', 'remediation', '2026-09-27T00:00:00Z', 'cancelled', 100, 20, 5, 80, 0)`).run();
+    db.prepare(`INSERT INTO reviewer_passes
+      (repo, pr_number, attempt_number, reviewer_class, pass_kind, started_at, status,
+       token_input, token_output, token_cache_read)
+      VALUES ('example/repo', 2, 1, 'claude', 'first-pass', '2026-09-27T00:00:00Z', 'completed', 12, 3, 9)`).run();
+    db.prepare(`INSERT INTO reviewer_passes
+      (repo, pr_number, attempt_number, reviewer_class, pass_kind, started_at, status,
+       token_input, token_output, token_reasoning, token_total)
+      VALUES ('example/repo', 3, 1, 'codex', 'rereview', '2026-09-27T00:00:00Z', 'completed', 10, 2, 1, 12)`).run();
+    ensureReviewStateSchema(db);
+    assert.deepEqual(db.prepare('SELECT token_total FROM reviewer_passes ORDER BY pr_number').all()
+      .map((row) => row.token_total), [125, 15, 13]);
+  } finally {
+    db.close();
+  }
+});
+
+test('cancelled codex pass records partial rollout usage model and quota snapshots', () => {
+  const rootDir = tempRoot();
+  const workspace = path.join(rootDir, 'workspace');
+  const sessions = path.join(rootDir, 'codex', 'sessions');
+  const day = path.join(sessions, '2026', '09', '27');
+  mkdirSync(workspace, { recursive: true });
+  mkdirSync(day, { recursive: true });
+  writeFileSync(path.join(day, 'rollout.jsonl'), [
+    JSON.stringify({ timestamp: '2026-09-27T01:00:00Z', type: 'session_meta', payload: { id: 'session-1', cwd: workspace } }),
+    JSON.stringify({ timestamp: '2026-09-27T01:00:01Z', type: 'turn_context', payload: { model: 'gpt-6-sol' } }),
+    JSON.stringify({ timestamp: '2026-09-27T01:00:02Z', type: 'event_msg', payload: {
+      type: 'token_count', info: { total_token_usage: { input_tokens: 100, output_tokens: 20, cached_input_tokens: 60, reasoning_output_tokens: 5 } },
+      rate_limits: { limit_id: 'gpt-6-sol', plan_type: 'pro', rate_limit_reached_type: null,
+        primary: { used_percent: 42.5, window_minutes: 300, resets_at: 1790470800 } },
+    } }),
+  ].join('\n'));
+  beginReviewerPass(rootDir, { repo: 'example/repo', prNumber: 2, attemptNumber: 1,
+    reviewerClass: 'codex', passKind: 'remediation', startedAt: '2026-09-27T01:00:00Z' });
+  const usage = readCodexTranscriptTokenUsage({ workspacePath: workspace,
+    startedAt: '2026-09-27T01:00:00Z', endedAt: '2026-09-27T01:01:00Z', sessionRoots: [sessions] });
+  assert.equal(usage.partial, true);
+  assert.equal(readCodexTranscriptTokenUsage({ adapterSessionKey: 'session-1',
+    startedAt: '2026-09-27T01:00:00Z', endedAt: '2026-09-27T01:01:00Z',
+    sessionRoots: [sessions] }).model, 'gpt-6-sol');
+  completeReviewerPass(rootDir, { repo: 'example/repo', prNumber: 2, attemptNumber: 1,
+    passKind: 'remediation', status: 'cancelled', tokenUsage: usage });
+  const db = openReviewStateDb(rootDir);
+  try {
+    const row = db.prepare('SELECT * FROM reviewer_passes WHERE pr_number = 2').get();
+    const snapshot = db.prepare('SELECT * FROM reviewer_rate_limit_snapshots WHERE pass_id = ?').get(row.pass_id);
+    assert.equal(row.reviewer_model, 'gpt-6-sol');
+    assert.equal(row.token_total, 125);
+    assert.equal(row.token_cache_read, 60);
+    assert.equal(JSON.parse(row.metadata_json).tokenUsageState, 'partial');
+    assert.equal(snapshot.limit_id, 'gpt-6-sol');
+    assert.equal(snapshot.window_kind, 'primary');
+    assert.equal(snapshot.used_percent, 42.5);
+    assert.equal(snapshot.window_minutes, 300);
+    assert.equal(snapshot.plan_type, 'pro');
+  } finally {
+    db.close();
+  }
+});
+
+test('cancelled remediation reads the durable relative worker log', () => {
+  const rootDir = tempRoot();
+  mkdirSync(path.join(rootDir, 'data'), { recursive: true });
+  writeFileSync(path.join(rootDir, 'data', 'worker.jsonl'), [
+    JSON.stringify({ type: 'turn_context', payload: { model: 'gpt-6-sol' } }),
+    JSON.stringify({ type: 'turn.completed', usage: {
+      input_tokens: 200, output_tokens: 30, cached_input_tokens: 150, reasoning_output_tokens: 10,
+    } }),
+    JSON.stringify({ timestamp: '2026-09-27T03:00:00Z', type: 'event_msg', payload: {
+      type: 'token_count', info: { total_token_usage: {
+        input_tokens: 200, output_tokens: 30, cached_input_tokens: 150, reasoning_output_tokens: 10,
+      } }, rate_limits: { limit_id: 'gpt-6-sol', plan_type: 'pro',
+        primary: { used_percent: 50, window_minutes: 300, resets_at: 1790470800 } },
+    } }),
+  ].join('\n'));
+  const usage = readBestReviewerEvidenceTokenUsage({ rootDir,
+    reviewerModel: 'codex', workerLogPath: 'data/worker.jsonl', transcriptFallback: false });
+  assert.equal(usage.model, 'gpt-6-sol');
+  assert.ok(usage.rateLimits?.length, JSON.stringify(usage));
+  assert.equal(usage.rateLimits[0].usedPercent, 50);
+  beginReviewerPass(rootDir, { repo: 'example/repo', prNumber: 3, attemptNumber: 1,
+    reviewerClass: 'codex', passKind: 'remediation' });
+  const row = completeReviewerPass(rootDir, { repo: 'example/repo', prNumber: 3,
+    attemptNumber: 1, passKind: 'remediation', status: 'cancelled', tokenUsage: usage });
+  assert.equal(row.status, 'cancelled');
+  assert.equal(row.token_total, 240);
+  assert.equal(row.token_cache_read, 150);
+  assert.equal(row.reviewer_model, 'gpt-6-sol');
+});
+
+test('Claude transcript deduplicates repeated cumulative usage for one message', () => {
+  const rootDir = tempRoot();
+  const workspace = path.join(rootDir, 'workspace');
+  const projects = path.join(rootDir, 'claude-projects');
+  mkdirSync(workspace, { recursive: true });
+  mkdirSync(projects, { recursive: true });
+  writeFileSync(path.join(projects, 'session.jsonl'), [
+    JSON.stringify({ timestamp: '2026-09-27T02:00:00Z', cwd: workspace,
+      sessionId: 'claude-1', message: { id: 'msg-1', model: 'claude-sonnet-4-6',
+        usage: { input_tokens: 10, output_tokens: 2 } } }),
+    JSON.stringify({ timestamp: '2026-09-27T02:00:01Z', cwd: workspace,
+      sessionId: 'claude-1', message: { id: 'msg-1', model: 'claude-sonnet-4-6',
+        usage: { input_tokens: 10, output_tokens: 5 } } }),
+  ].join('\n'));
+  const usage = readClaudeTranscriptTokenUsage({ workspacePath: workspace,
+    startedAt: '2026-09-27T02:00:00Z', endedAt: '2026-09-27T02:01:00Z',
+    sessionRoots: [projects] });
+  assert.equal(usage.input, 10);
+  assert.equal(usage.output, 5);
+  assert.equal(usage.model, 'claude-sonnet-4-6');
+});
+
 test('reviewer pass writer inserts running row, completes it, and unique key prevents duplicates', () => {
   const rootDir = tempRoot();
   beginReviewerPass(rootDir, {
@@ -1202,7 +1331,7 @@ test('codex transcript fallback links token counts by workspace cwd and launch w
     assert.equal(row.token_input, 321);
     assert.equal(row.token_output, 45);
     assert.equal(row.token_cache_read, 123);
-    assert.equal(row.token_total, 366);
+    assert.equal(row.token_total, 373);
     assert.equal(row.token_source, 'codex-transcript');
     assert.equal(metadata.transcriptSessionId, 'codex-session-1');
     assert.equal(metadata.transcriptPath, transcriptPath);
@@ -1232,6 +1361,7 @@ test('claude transcript fallback links input output and cache token counts', () 
       cwd: workspace,
       sessionId: 'claude-session-1',
       message: {
+        model: 'claude-sonnet-4-6',
         usage: {
           input_tokens: 10,
           cache_creation_input_tokens: 20,
@@ -1268,7 +1398,7 @@ test('claude transcript fallback links input output and cache token counts', () 
   assert.equal(direct.output, 44);
   assert.equal(direct.cacheRead, 33);
   assert.equal(direct.cacheWrite, 22);
-  assert.equal(direct.total, 110);
+  assert.equal(direct.total, 55);
   assert.equal(direct.source, 'claude-transcript');
 
   const preferred = readBestReviewerEvidenceTokenUsage({
@@ -1316,12 +1446,12 @@ test('claude transcript fallback links input output and cache token counts', () 
     ensureReviewStateSchema(db);
     const row = db.prepare('SELECT * FROM reviewer_passes WHERE pr_number = 49').get();
     const metadata = JSON.parse(row.metadata_json);
-    assert.equal(row.reviewer_model, 'claude-code');
+    assert.equal(row.reviewer_model, 'claude-sonnet-4-6');
     assert.equal(row.token_input, 11);
     assert.equal(row.token_output, 44);
     assert.equal(row.token_cache_read, 33);
     assert.equal(row.token_cache_write, 22);
-    assert.equal(row.token_total, 110);
+    assert.equal(row.token_total, 55);
     assert.equal(row.token_source, 'claude-transcript');
     assert.equal(metadata.transcriptSessionId, 'claude-session-1');
     assert.equal(metadata.transcriptPath, transcriptPath);
@@ -1390,7 +1520,7 @@ test('claude transcript fallback aggregates split files for one logical workspac
   assert.equal(usage.output, 220);
   assert.equal(usage.cacheRead, 6);
   assert.equal(usage.cacheWrite, 4);
-  assert.equal(usage.total, 340);
+  assert.equal(usage.total, 330);
 });
 
 test('claude transcript fallback prefers a session-key match over a workspace-only match', () => {

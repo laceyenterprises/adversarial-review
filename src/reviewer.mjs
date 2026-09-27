@@ -33,6 +33,7 @@ import {
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { captureLocalReviewerUsage } from './reviewer-pass-tokens.mjs';
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
 import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
 import { resolveGitHubAppBotLogin } from './github-app-identity.mjs';
@@ -2117,6 +2118,7 @@ async function main() {
   let reviewText;
   let rawReviewText;
   let tokenUsage = null;
+  const reviewerStartedAt = new Date().toISOString();
   try {
     console.error(`[reviewer] DEBUG: starting ${effectiveModel} review...`);
     // Single selection site (GMW-01): claude / gemini / codex. gemini routes
@@ -2159,6 +2161,7 @@ async function main() {
     }
     rawReviewText = dispatch.rawReviewText;
     tokenUsage = dispatch.tokenUsage;
+    if (effectiveModel === 'codex' || effectiveModel === 'claude') tokenUsage = captureLocalReviewerUsage({ tokenUsage, model: effectiveModel, workspacePath: reviewerSubprocessCwd, startedAt: reviewerStartedAt, rootDir: ROOT });
     if (dispatch.needsSanitize) {
       console.error(`[reviewer] DEBUG: raw Codex review length=${rawReviewText.length}; preview=${previewText(rawReviewText)}`);
       try {
@@ -2189,6 +2192,7 @@ async function main() {
     }
     console.error(`[reviewer] DEBUG: review completed (${reviewText.length} bytes)`);
   } catch (err) {
+    captureLocalReviewerUsage({ model: effectiveModel, workspacePath: reviewerSubprocessCwd, startedAt: reviewerStartedAt, rootDir: ROOT, failed: true });
     if (err.failureClass === 'token-refresh-pending') {
       // The bridge is the sole Claude refresh owner. A too-short token means
       // refresh is pending, not that an operator must re-authenticate.

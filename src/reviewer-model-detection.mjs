@@ -44,15 +44,15 @@ function parseCodexJsonTokenUsage(stdout) {
       continue;
     }
     // Gemini (usageMetadata shape, e.g. from gemini-cli -o json). candidates are
-    // the visible output; thoughts are reasoning (inclusive output = candidates
-    // + thoughts); cached maps to cacheRead; toolUse to tool context.
+    // visible output; thoughts are a separate reasoning bucket. Cached prompt
+    // tokens map to cacheRead and toolUse to tool context.
     const gemini = item.usageMetadata ?? item.usage_metadata ?? item.payload?.usageMetadata;
     if (gemini && typeof gemini === 'object') {
       const num = (v) => (Number.isFinite(Number(v)) ? Math.trunc(Number(v)) : null);
       const prompt = num(gemini.promptTokenCount);
       const candidates = num(gemini.candidatesTokenCount);
       const thoughts = num(gemini.thoughtsTokenCount);
-      const output = candidates === null && thoughts === null ? null : (candidates || 0) + (thoughts || 0);
+      const output = candidates;
       tokenUsage = {
         input: prompt,
         output,

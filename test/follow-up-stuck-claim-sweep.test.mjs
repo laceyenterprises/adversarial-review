@@ -24,6 +24,7 @@ import {
   attemptDirtyMerge,
   emitHeartbeatsForActiveJobs,
   normalizeWorkerArtifactProgressMs,
+  readWorkerCpuPercent,
   pushDirtyMergeWithRetry,
   resolveDirtyConflictSpecContext,
   resolveInProgressStuckThresholdMs,
@@ -490,6 +491,63 @@ test('emitHeartbeatsForActiveJobs before sweep preserves a live detached worker 
   assert.equal(job.lastHeartbeatAt, '2026-06-01T05:34:59.000Z');
   assert.equal(job.lastWorkerArtifactProgressAt, '2026-06-01T05:34:30.000Z');
   assert.equal(job.lastWorkerArtifactProgressSource, 'remediationWorker.logPath');
+});
+
+test('sweep consults advancing transcript even when the persisted heartbeat is stale', async () => {
+  const rootDir = makeRoot();
+  const transcriptPath = path.join(rootDir, 'session-events.jsonl');
+  writeFileSync(transcriptPath, '{"event":"progress"}\n');
+  const recent = new Date('2026-06-01T05:34:30.000Z');
+  utimesSync(transcriptPath, recent, recent);
+  const { jobPath } = seedInProgressJob(rootDir, {
+    lastHeartbeatAt: '2026-06-01T05:00:00.000Z',
+    worker: { sessionEventsPath: transcriptPath },
+  });
+  const result = await sweepStuckInProgressClaims({
+    rootDir,
+    nowMs: Date.parse('2026-06-01T05:35:00.000Z'),
+    readWorkerCpuImpl: () => 0,
+  });
+  assert.equal(result.reclaimed, 0);
+  assert.equal(existsSync(jobPath), true);
+});
+
+test('sweep retains a CPU-active worker but reclaims it when CPU and artifacts stop', async () => {
+  const rootDir = makeRoot();
+  const { jobPath } = seedInProgressJob(rootDir, {
+    lastHeartbeatAt: '2026-06-01T05:00:00.000Z',
+  });
+  const nowMs = Date.parse('2026-06-01T05:20:00.000Z');
+  const active = await sweepStuckInProgressClaims({ rootDir, nowMs, readWorkerCpuImpl: () => 4 });
+  assert.equal(active.reclaimed, 0);
+  const idle = await sweepStuckInProgressClaims({
+    rootDir, nowMs, readWorkerCpuImpl: () => 0, sendWorkerSignalImpl: successfulStaleSignal,
+  });
+  assert.equal(idle.reclaimed, 1);
+  assertStaleJobRequeued(rootDir, jobPath);
+});
+
+test('sweep reclaims a CPU-active worker after the bounded progress grace period', async () => {
+  const rootDir = makeRoot();
+  const { jobPath } = seedInProgressJob(rootDir, { lastHeartbeatAt: '2026-06-01T05:00:00.000Z' });
+  const result = await sweepStuckInProgressClaims({
+    rootDir,
+    nowMs: Date.parse('2026-06-01T06:00:00.000Z'),
+    readWorkerCpuImpl: () => 100,
+    sendWorkerSignalImpl: successfulStaleSignal,
+  });
+  assert.equal(result.reclaimed, 1);
+  assertStaleJobRequeued(rootDir, jobPath);
+});
+
+test('CPU probe ignores a reused PID with the wrong process identity', () => {
+  const job = { remediationWorker: {
+    processId: 123, processGroupId: 123, spawnedAt: new Date(Date.parse('Mon Jun  1 05:00:00 2026')).toISOString(),
+  } };
+  const probe = (output) => readWorkerCpuPercent(job, { execFileSyncImpl: () => output });
+  assert.equal(probe('123 Mon Jun  1 05:00:00 2026 84.0'), 84);
+  assert.equal(probe('456 Mon Jun  1 05:00:00 2026 84.0'), 0);
+  assert.equal(probe('123 Mon Jun  1 06:00:00 2026 84.0'), 0);
 });
 
 test('emitHeartbeatsForActiveJobs does not refresh a silent alive worker with empty artifacts', async () => {

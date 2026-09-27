@@ -775,7 +775,8 @@ non-JSON stdout falls through to a parse-error retry.
 | `operator-stop` | human explicitly stopped the job |
 | `no-progress` | worker did not leave a durable rereview request |
 | `max-rounds-reached` | bounded loop cap hit |
-| `stale-review-head` | consume-time stale-job guard: the PR head moved before this worker spawned |
+| `stale-review-head` | consume-time stale-job guard, or active-worker stop when a known workspace proves the new PR head is outside the worker's local history |
+| `newer-review-pending` | consume-time stop for a job with no `revisionRef` when a newer review is already pending on the PR; retriggerable (same shape as `stale-review-head`, which takes precedence whenever the job has a `revisionRef`) |
 | `revision-superseded` | pending-job stale-head release: a newer PR head exists before this job can spawn |
 
 ### Common failure classes

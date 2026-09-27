@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { loadAppSdkConnect } from './app-sdk-loader.mjs';
@@ -69,7 +69,8 @@ import { requestWatcherWake } from './watcher-wake.mjs';
 import { REREVIEW_WAKE_REASONS, requestRereviewWake } from './rereview-wake.mjs';
 import { requestHammerWakeForSettledReviewStop } from './hammer-wake.mjs';
 import { drainPendingNoRemediationJobs } from './no-remediation-follow-up.mjs';
-import { lifecycleStopDecision, resolveJobPRLifecycleSafe } from './follow-up-lifecycle.mjs';
+import { activeRemediationStopDecision, lifecycleStopDecision, resolveJobPRLifecycleSafe } from './follow-up-lifecycle.mjs';
+import { cancellationSettlesStop, sendWorkerSignal, workerCancelHandle } from './follow-up-worker-cancel.mjs';
 import { classifyGithubAuthOperationalBlocker, extractCommitShaFromOperationalBlocker, preserveUnpushedCommit, recoverGithubAuthOperationalBlocker, retryGithubAuthPushOnce } from './github-auth-recovery.mjs';
 import { buildRemediationPrompt } from './remediation-prompt-builder.mjs';
 import {
@@ -165,15 +166,18 @@ import {
 } from './remediation-workflow-push-capability.mjs';
 import {
   auditWorkspaceForContamination,
+  checkoutWorkspaceForRemediation,
   ensureJobBaseBranch,
   ensureJobBranchMetadata,
   fetchPRBranchMetadata,
   inspectWorkspaceState,
+  inspectWorkspaceForRetry,
+  preserveInvalidResumeWorkspace,
   resetWorkspaceDir,
   runWorkspaceGitWithTransientRetry,
-  runWorkspaceNetworkCommandWithTransientRetry,
 } from './remediation-git-pr-io.mjs';
 import { inspectRemediationCiRegression } from './remediation-ci-regression.mjs';
+import { requeueForWorkspaceResume, resumeLostRemediationWorker } from './remediation-worker-resume.mjs';
 import { formatCiCheckList } from './ci-check-format.mjs';
 import {
   cancelHqDispatch,
@@ -1153,20 +1157,15 @@ async function prepareWorkspaceForJob({
   const workspaceRootDir = resolveRemediationWorkspaceRoot({ rootDir, env });
   const workspaceDir = join(workspaceRootDir, job.jobId);
   ensureWorkspaceRootDir(workspaceRootDir, env);
+  const retryHistory = job?.remediationPlan?.retryHistory || [];
   let prBranchMetadataPromise = null;
   const loadPRBranchMetadata = () => {
     prBranchMetadataPromise ||= fetchPRBranchMetadata({ repo, prNumber: job.prNumber, execFileImpl });
     return prBranchMetadataPromise;
   };
-  const workspaceState = await inspectWorkspaceState({
-    workspaceDir,
-    expectedRepo: repo,
-    execFileImpl,
+  const { workspaceState, resumeEligible } = await inspectWorkspaceForRetry({
+    workspaceDir, workspaceRootDir, jobId: job.jobId, expectedRepo: repo, retryHistory, execFileImpl, log,
   });
-
-  if (workspaceState.reset) {
-    resetWorkspaceDir(workspaceDir);
-  }
 
   if (!existsSync(join(workspaceDir, '.git'))) {
     // Clone with plain `git` over HTTPS rather than `gh repo clone`. `gh repo
@@ -1217,65 +1216,31 @@ async function prepareWorkspaceForJob({
   // the version checked into this branch.
   installWorkerProvenanceHook(workspaceDir);
 
-  // Check out the PR head branch without `gh pr checkout` (which goes through
-  // GraphQL and so fails under the same rate-limit exhaustion as the clone).
-  // For a same-repo PR the head branch lives on origin, so a plain
-  // `git fetch` + `checkout -B` reproduces what `gh pr checkout` sets up —
-  // including the local branch name the remediation worker later
-  // force-with-lease pushes back to (HEAD:refs/heads/<branch>). Fork PRs (head
-  // branch not on origin) fall back to `gh pr checkout`, which handles the
-  // fork remote wiring; forks are not part of this fleet's hot path, so the
-  // rare GraphQL call there is acceptable.
   const { baseBranch, branch: headRef, headRepo } = await loadPRBranchMetadata();
-  const isSameRepo = !headRepo || headRepo === repo;
-  if (isSameRepo && headRef) {
-    // --single-branch configures origin to track only the base. The worker's
-    // force-with-lease push also needs the PR head recorded as a tracked ref.
-    await runWorkspaceGitWithTransientRetry(['-C', workspaceDir, 'remote', 'set-branches', '--add', 'origin', headRef], { execFileImpl, options: { maxBuffer: 1 * 1024 * 1024 } });
-    const fetchRefs = [`+refs/heads/${headRef}:refs/remotes/origin/${headRef}`];
-    if (baseBranch !== headRef) {
-      fetchRefs.push(`+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`);
-    }
-    const fetchOptions = {
-      execFileImpl,
-      options: { maxBuffer: 10 * 1024 * 1024, env: withGhGitCredentialEnv(env) },
-    };
-    try {
-      await runWorkspaceGitWithTransientRetry(['-C', workspaceDir, 'fetch', 'origin', ...fetchRefs], fetchOptions);
-    } catch (err) {
-      const detail = [err?.message, err?.stderr].filter(Boolean).join('\n');
-      if (fetchRefs.length < 2 || !/(?:couldn.t find remote ref|remote ref .+ not found)/i.test(detail)) throw err;
-      log.warn?.(`[follow-up-remediation] base branch disappeared during fetch repo=${repo} branch=${baseBranch}; fetching PR head only`);
-      await runWorkspaceGitWithTransientRetry(['-C', workspaceDir, 'fetch', 'origin', fetchRefs[0]], fetchOptions);
-    }
-    checkoutStartedAt = Date.now();
-    await runWorkspaceGitWithTransientRetry(
-      ['-C', workspaceDir, 'checkout', '-B', headRef, `origin/${headRef}`],
-      {
-        execFileImpl,
-        options: {
-          maxBuffer: 10 * 1024 * 1024,
-        },
-      }
-    );
-  } else {
-    checkoutStartedAt = Date.now();
-    await runWorkspaceNetworkCommandWithTransientRetry({
-      execFileImpl,
-      command: 'gh',
-      args: ['pr', 'checkout', String(job.prNumber)],
-      options: {
-        cwd: workspaceDir,
-        maxBuffer: 10 * 1024 * 1024,
-      },
+  const resumeRequested = resumeEligible && !workspaceState.reset && workspaceState.reason !== 'missing';
+  checkoutStartedAt = Date.now();
+  let checkout;
+  try {
+    checkout = await checkoutWorkspaceForRemediation({
+      workspaceDir, workspaceRootDir, job, repo, baseBranch, headRef, headRepo, resumeRequested,
+      fetchEnv: withGhGitCredentialEnv(env), execFileImpl, log,
+    });
+  } catch (err) {
+    if (!resumeRequested || !String(err?.message).startsWith('resume-impossible:')) throw err;
+    preserveInvalidResumeWorkspace({ workspaceDir, workspaceRootDir, jobId: job.jobId, reason: err.message, log });
+    return prepareWorkspaceForJob({
+      rootDir,
+      job: { ...job, remediationPlan: { ...job.remediationPlan, retryHistory: retryHistory.slice(0, -1) } },
+      workerClass, env, execFileImpl, log,
     });
   }
-
+  const { resumed, resumePatchPath } = checkout;
   log.info?.(`[follow-up-remediation] workspace preparation repo=${repo} jobId=${job.jobId} source=${cloneSource} clone_fetch_ms=${checkoutStartedAt - startedAt} checkout_ms=${Date.now() - checkoutStartedAt}`);
-
   return {
     workspaceDir,
-    workspaceState: workspaceState.reset
+    workspaceState: resumed
+      ? { action: 'resumed', reason: 'preserved-local-commits-and-diff', resumePatchPath }
+      : workspaceState.reset
       ? { action: 'recloned', reason: workspaceState.reason }
       : { action: 'reused', reason: workspaceState.reason },
   };
@@ -1657,9 +1622,9 @@ async function failFollowUpJobForHqCancel({
   log,
 }) {
   const failure = {
-    code: 'hq-dispatch-cancel-failed',
-    message: [
-      `Failed to cancel HQ remediation dispatch ${worker?.dispatchId || '(missing dispatchId)'} before moving the job to ${action}.`,
+    code: worker?.dispatchMode === 'hq' ? 'hq-dispatch-cancel-failed' : 'worker-cancellation-failed',
+    message: [worker?.dispatchMode === 'hq' ? `Failed to cancel HQ remediation dispatch ${worker?.dispatchId || '(missing dispatchId)'} before moving the job to ${action}.`
+      : `Failed to signal remediation worker pgid ${worker?.processGroupId ?? worker?.processId ?? '(unknown)'} before moving the job to ${action}.`,
       cancellation?.error || 'hq dispatch cancel failed',
     ].join('\n'),
   };
@@ -1674,7 +1639,7 @@ async function failFollowUpJobForHqCancel({
     rootDir,
     jobPath,
     failedAt,
-    failureCode: 'hq-dispatch-cancel-failed',
+    failureCode: failure.code,
     error: new Error(failure.message),
     remediationWorker: {
       ...workerState,
@@ -1702,7 +1667,7 @@ async function failFollowUpJobForHqCancel({
 
   return {
     action: 'failed',
-    reason: 'hq-dispatch-cancel-failed',
+    reason: failure.code,
     job: failed.job,
     jobPath: failed.jobPath,
   };
@@ -1723,6 +1688,7 @@ async function reconcileFollowUpJob({
   inspectRemediationCiRegressionImpl = inspectRemediationCiRegression,
   execFileImpl = execFileAsync,
   workerTerminalEvent = null,
+  sendWorkerSignalImpl = sendWorkerSignal,
   log = console,
 } = {}) {
   const worker = job?.remediationWorker;
@@ -1760,11 +1726,10 @@ async function reconcileFollowUpJob({
     execFileImpl,
     log,
   });
-  const lifecycleStop = lifecycleStopDecision(lifecycle, {
-    repo: job.repo,
-    prNumber: job.prNumber,
-    site: 'reconcile',
-    job,
+  const lifecycleStop = await activeRemediationStopDecision({
+    lifecycle, liveness, job, rootDir, execFileImpl,
+    buildReconciliationPathsImpl: buildReconciliationPaths,
+    parseHqWorkerWorkspaceFromPayloadImpl: parseHqWorkerWorkspaceFromPayload,
   });
   if (liveness.state === 'active' && !lifecycleStop) {
     return {
@@ -1801,6 +1766,18 @@ async function reconcileFollowUpJob({
           log,
         });
       }
+      workerState.cancellation = cancellation;
+    } else {
+      const handle = workerCancelHandle(job);
+      const cancellation = await sendWorkerSignalImpl({
+        ...handle,
+        signal: 'SIGTERM',
+        execFileImpl,
+      });
+      if (!cancellationSettlesStop(cancellation)) {
+        log.warn?.(`[follow-up-remediation] lifecycle cancellation failed job=${job.jobId} reason=${cancellation.error}`);
+        return failFollowUpJobForHqCancel({ rootDir, job, jobPath, worker, workerState, failedAt: lifecycleStoppedAt,
+          cancellation, action: lifecycleStop.stopCode, postCommentImpl, now, log }); }
       workerState.cancellation = cancellation;
     }
     const stopped = markFollowUpJobStopped({
@@ -2786,6 +2763,11 @@ async function reconcileFollowUpJob({
     }
 
     if (!rereview.requested) {
+      const resumed = operationalBlockerRecovery?.rescue?.preserved && worker.dispatchMode !== 'hq' && requeueForWorkspaceResume({
+        rootDir, jobPath, job, requeuedAt: completedAt, retryMetadata: { rescue: operationalBlockerRecovery.rescue },
+        retryReason: 'Preserved remediation commit after worker credential failure; resuming the same workspace.',
+      });
+      if (resumed) return resumed;
       const currentRound = Number(job?.remediationPlan?.currentRound || 0);
       const maxRounds = Number(job?.remediationPlan?.maxRounds || 0);
       const stopCode = maxRounds > 0 && currentRound >= maxRounds
@@ -2822,6 +2804,11 @@ async function reconcileFollowUpJob({
         stopReason,
         commentDelivery: noProgressDelivery,
         passFailureClass: operationalBlockerRecovery ? 'worker-killed-no-resume' : null,
+        stopMetadata: operationalBlockerRecovery ? {
+          resumeImpossible: operationalBlockerRecovery.rescue?.preserved
+            ? (worker.dispatchMode === 'hq' ? 'worker-pool-workspace-not-reusable' : 'retry-budget-exhausted')
+            : operationalBlockerRecovery.rescue?.reason || 'commit-not-preserved',
+        } : null,
         jobUpdates: operationalBlockerRecovery ? { operationalBlockerRecovery } : null,
       });
 
@@ -3125,6 +3112,11 @@ async function reconcileFollowUpJob({
     };
   }
 
+  const { requeued: resumeRequeued, resumeImpossible } = await resumeLostRemediationWorker({
+    rootDir, jobPath, job, worker, workspaceDir: paths?.workspaceDir, requeuedAt: completedAt, execFileImpl,
+  });
+  if (resumeRequeued) return resumeRequeued;
+
   const failureCode = worker?.dispatchMode === 'hq' && !HQ_SUCCESS_STATUSES.has(String(liveness?.dispatchStatus?.status || ''))
     ? 'hq-dispatch-failed'
     : (finalMessage.exists ? 'artifact-empty-completion' : 'artifact-missing-completion');
@@ -3148,6 +3140,7 @@ async function reconcileFollowUpJob({
       state: 'failed',
     },
     failure: {
+      resumeImpossible,
       finalMessagePath: worker.outputPath || null,
       finalMessageBytes: finalMessage.bytes,
       logPath: worker.logPath || null,
@@ -3836,7 +3829,10 @@ async function consumeNextFollowUpJob({
       // remediation is attributed correctly instead of defaulting to codex.
       workerTrailerClass: remediationWorkerTrailerClass(workerClass),
     });
-    writeFileSync(promptPath, `${prompt}\n`, 'utf8');
+    const resumeInstruction = workspaceState.action === 'resumed'
+      ? `\n\n## Resume preserved work\nContinue from the existing local commits and uncommitted changes in this workspace. Do not reset the branch. The tracked diff was backed up at ${workspaceState.resumePatchPath || '(no tracked diff)'}.\n`
+      : '';
+    writeFileSync(promptPath, `${prompt}${resumeInstruction}\n`, 'utf8');
 
     // LAC-957: rerun the canonical consume-time lifecycle gate just
     // before spawn. The first gate ran before OAuth pre-flight +

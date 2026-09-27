@@ -5,6 +5,7 @@ import { basename, dirname, join } from 'node:path';
 import * as followUpJobs from './follow-up-jobs.mjs';
 import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 import { currentProcessGroupId, isPgidAlive } from './process-group-identity.mjs';
+import { readWorkerCpuPercent, resolveWorkerArtifactProgressMs, resolveWorkerSessionProgressMs } from './follow-up-worker-progress.mjs';
 
 const IN_PROGRESS_STUCK_THRESHOLD_MS_ENV = 'ADVERSARIAL_FOLLOW_UP_IN_PROGRESS_STUCK_THRESHOLD_MS';
 const DEFAULT_IN_PROGRESS_STUCK_THRESHOLD_MS = 10 * 60 * 1000;
@@ -254,7 +255,10 @@ function stopStaleInProgressFollowUpJob({
   if (worker?.dispatchMode === 'hq') {
     return null;
   }
-  const { sourceMs, source } = resolveLatestFollowUpObservedAtMs(latest);
+  const recorded = resolveLatestFollowUpObservedAtMs(latest);
+  const artifact = resolveWorkerArtifactProgressMs(rootDir, job);
+  const { sourceMs, source } = artifact.sourceMs !== null && artifact.sourceMs > (recorded.sourceMs ?? 0)
+    ? artifact : recorded;
   if (sourceMs === null) {
     return null;
   }
@@ -262,6 +266,9 @@ function stopStaleInProgressFollowUpJob({
   if (ageMs <= thresholdMs) {
     return null;
   }
+  const session = resolveWorkerSessionProgressMs(rootDir, job);
+  if (session.sourceMs !== null && nowMs - session.sourceMs <= thresholdMs) return null;
+  if (ageMs < thresholdMs * 3 && readWorkerCpuPercent(job) > 0) return null;
   const stoppedAt = new Date(nowMs).toISOString();
   const jobId = job?.jobId || basename(latest.jobPath);
   const stopReason =

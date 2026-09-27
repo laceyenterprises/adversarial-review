@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import Database from 'better-sqlite3';
 import { openReviewStateDb } from '../src/review-state.mjs';
 import {
   DEFAULT_MAX_REMEDIATION_ROUNDS,
@@ -4582,6 +4583,47 @@ test('requeueInProgressFollowUpJobForRetry drops the active round entry so re-cl
   assert.equal(completed.job.remediationPlan.rounds[0].state, 'completed');
   assert.equal(completed.job.remediationPlan.rounds[0].completion.preview, 'Retry landed cleanly.');
   assert.equal(completed.job.remediationPlan.retryHistory[0].retryReason, 'Transient HQ remediation dispatch failure: memory pressure');
+});
+
+test('retry closes the cancelled remediation pass with its cause before log replacement', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'remwaste-pass-'));
+  createFollowUpJob({ ...makeJobInput(rootDir), maxRemediationRounds: 2 });
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+  const spawned = markFollowUpJobSpawned({
+    rootDir,
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: { model: 'codex', state: 'spawned', processId: 99123, workspaceDir: path.join(rootDir, 'workspace') },
+  });
+  requeueInProgressFollowUpJobForRetry({
+    rootDir, jobPath: spawned.jobPath, requeuedAt: '2026-04-21T10:05:00.000Z',
+    allowDirectWorkerRetry: true, retryMetadata: { code: 'worker-killed-resume' },
+  });
+  const db = new Database(path.join(rootDir, 'data', 'reviews.db'), { readonly: true });
+  try {
+    const pass = db.prepare("SELECT status, ended_at, metadata_json FROM reviewer_passes WHERE pass_kind = 'remediation'").get();
+    assert.equal(pass.status, 'cancelled');
+    assert.equal(pass.ended_at, '2026-04-21T10:05:00.000Z');
+    assert.equal(JSON.parse(pass.metadata_json).failureClass, 'worker-killed-resume');
+  } finally {
+    db.close();
+  }
+  const reclaimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:10:00.000Z' });
+  assert.equal(reclaimed.job.remediationPlan.currentRound, 1);
+  const resumed = markFollowUpJobSpawned({
+    rootDir, jobPath: reclaimed.jobPath, spawnedAt: '2026-04-21T10:11:00.000Z',
+    worker: { model: 'codex', state: 'spawned', processId: 99124, workspaceDir: path.join(rootDir, 'workspace') },
+  });
+  assert.equal(resumed.job.remediationWorker.passAttemptNumber, 2);
+  const after = new Database(path.join(rootDir, 'data', 'reviews.db'), { readonly: true });
+  try {
+    assert.deepEqual(after.prepare("SELECT attempt_number, status FROM reviewer_passes WHERE pass_kind='remediation' ORDER BY attempt_number").all(), [
+      { attempt_number: 1, status: 'cancelled' },
+      { attempt_number: 2, status: 'running' },
+    ]);
+  } finally {
+    after.close();
+  }
 });
 
 test('claimNextFollowUpJob skips transiently requeued jobs until retryAfter elapses', () => {

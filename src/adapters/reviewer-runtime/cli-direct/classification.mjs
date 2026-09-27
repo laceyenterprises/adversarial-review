@@ -1,4 +1,5 @@
 import { PROGRESS_TIMEOUT_REASON_PREFIX } from '../../../reviewer-timeout-reason.mjs';
+import { hasProviderCapacitySignal } from '../../../provider-capacity-signal.mjs';
 import {
   QUOTA_EXHAUSTED_FAILURE_CLASS,
   detectQuotaExhaustion,
@@ -19,14 +20,6 @@ const REVIEWER_PROGRESS_TIMEOUT_MESSAGE_RE = new RegExp(
 const REVIEWER_EMPTY_OUTPUT_RE = /\b(?:returned|produced)\s+empty output\b/;
 const LAUNCHCTL_BOOTSTRAP_ERROR_RE =
   /bootstrap failed|could not find domain|could not switch to audit session|input\/output error|not privileged to set domain/;
-const PROVIDER_CONTEXT_RE =
-  /\b(?:provider|model|backend|upstream|server|service|anthropic|claude|openai|codex|gemini|api)\b/;
-const PROVIDER_OVERLOADED_FORWARD_RE =
-  /\b(?:provider|model|backend|upstream|server|service|anthropic|claude|openai|codex|gemini|api)\b[\s\S]{0,160}\boverloaded\b/;
-const PROVIDER_OVERLOADED_REVERSE_RE =
-  /\boverloaded\b[\s\S]{0,160}\b(?:provider|model|backend|upstream|server|service|anthropic|claude|openai|codex|gemini|api)\b/;
-const PROVIDER_CAPACITY_RE =
-  /\b(?:api|service|server|backend|provider|model)\s+(?:is\s+)?(?:at|over)\s+capacity\b/;
 const GEMINI_CREDENTIAL_POOL_BUSY_RE =
   /gemini credential checkout (?:busy|unavailable:\s*broker returned http 409)|shared credential lease still busy|checkout conflict/;
 
@@ -49,23 +42,7 @@ function isReviewerSubprocessTimeout(error, { killSignal = 'SIGTERM' } = {}) {
 }
 
 function hasProviderOverloadedSignal(value) {
-  const lower = String(value || '').toLowerCase();
-  if (
-    !lower.includes('529') &&
-    !lower.includes('overloaded') &&
-    !lower.includes('capacity')
-  ) {
-    return false;
-  }
-  return (
-    /\b529\b/.test(lower) ||
-    /\boverloaded[_ -]?error\b/.test(lower) ||
-    PROVIDER_OVERLOADED_FORWARD_RE.test(lower) ||
-    PROVIDER_OVERLOADED_REVERSE_RE.test(lower) ||
-    PROVIDER_CAPACITY_RE.test(lower) ||
-    (/\btemporarily\s+overloaded\b/.test(lower) && PROVIDER_CONTEXT_RE.test(lower)) ||
-    /\bover\s+capacity\b/.test(lower)
-  );
+  return hasProviderCapacitySignal(value);
 }
 
 function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {}) {

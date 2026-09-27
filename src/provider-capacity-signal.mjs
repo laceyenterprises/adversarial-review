@@ -1,6 +1,7 @@
 const PROVIDER_CONTEXT_RE = /\b(?:provider|model|backend|upstream|server|service|anthropic|claude|openai|codex|gemini|api)\b/i;
-const OVERLOAD_RE = /\boverloaded(?:[_ -]?error)?\b/i;
-const CAPACITY_RE = /\b(?:at|over) capacity\b/i;
+const OVERLOAD_FORWARD_RE = /\b(?:provider|model|backend|upstream|server|service|anthropic|claude|openai|codex|gemini|api)\b[\s\S]{0,160}\boverloaded\b/i;
+const OVERLOAD_REVERSE_RE = /\boverloaded\b[\s\S]{0,160}\b(?:provider|model|backend|upstream|server|service|anthropic|claude|openai|codex|gemini|api)\b/i;
+const CAPACITY_RE = /\b(?:api|service|server|backend|provider|model)\s+(?:is\s+)?(?:at|over)\s+capacity\b/i;
 
 export function hasProviderCapacitySignal(value, { httpStatuses = [529] } = {}) {
   const text = String(value || '');
@@ -8,8 +9,11 @@ export function hasProviderCapacitySignal(value, { httpStatuses = [529] } = {}) 
   return statusPattern.test(text)
     || (httpStatuses.includes(529) && /\b529\b/.test(text))
     || /\boverloaded[_ -]?error\b/i.test(text)
-    || (OVERLOAD_RE.test(text) && PROVIDER_CONTEXT_RE.test(text))
-    || (CAPACITY_RE.test(text) && PROVIDER_CONTEXT_RE.test(text));
+    || OVERLOAD_FORWARD_RE.test(text)
+    || OVERLOAD_REVERSE_RE.test(text)
+    || CAPACITY_RE.test(text)
+    || (/\btemporarily\s+overloaded\b/i.test(text) && PROVIDER_CONTEXT_RE.test(text))
+    || /\bover\s+capacity\b/i.test(text);
 }
 
 // Worker logs are JSONL for Codex and may be plain stderr for Claude/Gemini.

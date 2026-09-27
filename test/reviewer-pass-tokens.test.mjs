@@ -20,6 +20,7 @@ import {
   completeReviewerPass,
   foldReviewerTokenUsageArtifact,
   nextReviewerPassAttemptNumber,
+  normalizeTokenUsage,
   readBestReviewerEvidenceTokenUsage,
   readClaudeTranscriptTokenUsage,
   readCodexTranscriptTokenUsage,
@@ -745,6 +746,53 @@ test('best evidence reader forwards injected env to ledger readers', () => {
   assert.equal(usage.workerRunId, 'wr_1');
   assert.equal(usage.input, 120);
   assert.equal(usage.source, 'session-ledger');
+});
+
+test('ledger usage keeps reviewer provider for cache-inclusive fallback totals', () => {
+  const rootDir = tempRoot();
+  const ledgerDb = path.join(rootDir, 'ledger.db');
+  createSessionLedgerDb(ledgerDb);
+  const usage = readBestReviewerEvidenceTokenUsage({
+    workerRunId: 'wr_1', reviewerModel: 'claude-code', rootDir,
+    env: { ...HERMETIC_CONFIG_ENV, AGENT_OS_SESSION_LEDGER_TARGET: `sqlite://${ledgerDb}` },
+    transcriptFallback: false,
+  });
+  assert.equal(usage.model, 'claude-code');
+  assert.equal(normalizeTokenUsage(usage).total, 183);
+});
+
+test('ledger usage ignores model and quota from an unrelated workspace transcript', () => {
+  const rootDir = tempRoot();
+  const workspace = path.join(rootDir, 'workspace');
+  const sessions = path.join(rootDir, 'sessions');
+  const ledgerDb = path.join(rootDir, 'ledger.db');
+  mkdirSync(workspace, { recursive: true });
+  mkdirSync(sessions, { recursive: true });
+  createSessionLedgerDb(ledgerDb);
+  const transcriptPath = path.join(sessions, 'rollout.jsonl');
+  const rollout = (id) => [
+    JSON.stringify({ timestamp: '2026-05-18T01:00:00Z', type: 'session_meta',
+      payload: { id, cwd: workspace } }),
+    JSON.stringify({ timestamp: '2026-05-18T01:01:00Z', type: 'turn_context',
+      payload: { model: 'gpt-transcript' } }),
+    JSON.stringify({ timestamp: '2026-05-18T01:02:00Z', type: 'event_msg', payload: {
+      type: 'token_count', info: { total_token_usage: { input_tokens: 10, output_tokens: 2 } },
+      rate_limits: { limit_id: 'unrelated', primary: { used_percent: 50, window_minutes: 300 } },
+    } }),
+  ].join('\n');
+  const read = () => readBestReviewerEvidenceTokenUsage({
+    workerRunId: 'wr_1', reviewerModel: 'codex', workspacePath: workspace,
+    startedAt: '2026-05-18T00:59:00Z', endedAt: '2026-05-18T01:03:00Z',
+    rootDir, codexSessionRoots: [sessions], claudeSessionRoots: [],
+    env: { ...HERMETIC_CONFIG_ENV, AGENT_OS_SESSION_LEDGER_TARGET: `sqlite://${ledgerDb}` },
+  });
+  writeFileSync(transcriptPath, rollout('stranger'));
+  assert.equal(read().model, 'codex');
+  assert.deepEqual(read().rateLimits, []);
+  writeFileSync(transcriptPath, rollout('rs_1'));
+  const matched = read();
+  assert.equal(matched.model, 'gpt-transcript');
+  assert.equal(matched.rateLimits[0].limitId, 'unrelated');
 });
 
 test('token reader fails loud when a legacy ledger path conflicts with postgres configuration', () => {

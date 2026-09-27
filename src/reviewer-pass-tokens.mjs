@@ -514,13 +514,19 @@ function normalizeTokenUsage(tokenUsage) {
   // Codex (reasoning is in output) and differ for Claude (cache is separate).
   const source = String(tokenUsage.source || '').toLowerCase();
   const model = String(tokenUsage.model || '').toLowerCase();
+  const provider = source.includes('codex') ? 'codex'
+    : source.includes('claude') ? 'claude'
+      : source.includes('gemini') ? 'gemini'
+        : model.includes('gpt') || model.includes('codex') ? 'codex'
+          : model.includes('claude') ? 'claude'
+            : model.includes('gemini') ? 'gemini' : null;
   let fallbackTotal = null;
   if (input !== null || output !== null || reasoning !== null || cacheRead !== null || cacheWrite !== null || toolContext !== null) {
-    if (source.includes('codex') || model.includes('gpt') || model.includes('codex')) {
+    if (provider === 'codex') {
       fallbackTotal = (input || 0) + (output || 0);
-    } else if (source.includes('claude') || model.includes('claude')) {
+    } else if (provider === 'claude') {
       fallbackTotal = (input || 0) + (output || 0) + (cacheRead || 0) + (cacheWrite || 0);
-    } else if (source.includes('gemini') || model.includes('gemini')) {
+    } else if (provider === 'gemini') {
       fallbackTotal = (input || 0) + (output || 0) + (reasoning || 0) + (toolContext || 0);
     } else {
       fallbackTotal = (input || 0) + (output || 0) + (reasoning || 0);
@@ -1532,11 +1538,15 @@ function readBestReviewerEvidenceTokenUsage({
     ledgerUsage.cacheWrite, ledgerUsage.costUSD].some((value) => value !== null && value !== undefined);
   const selected = (ledgerHasCounts ? ledgerUsage : null) || transcriptUsage || workerLogUsage;
   if (!selected) return null;
+  const matchingTranscript = (!ledgerHasCounts || (
+    ledgerUsage.adapterSessionKey && transcriptUsage?.adapterSessionKey
+      && ledgerUsage.adapterSessionKey === transcriptUsage.adapterSessionKey
+  )) ? transcriptUsage : null;
   return {
     ...selected,
-    model: transcriptUsage?.model || selected.model || null,
-    rateLimits: transcriptUsage?.rateLimits?.length
-      ? transcriptUsage.rateLimits : (selected.rateLimits || []),
+    model: matchingTranscript?.model || selected.model || reviewerModel || null,
+    rateLimits: matchingTranscript?.rateLimits?.length
+      ? matchingTranscript.rateLimits : (selected.rateLimits || []),
   };
 }
 

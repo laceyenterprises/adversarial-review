@@ -23,6 +23,9 @@ Schema convergence in `src/review-state.mjs` adds `token_input` and
 non-empty model reported by the usage source. A cancelled pass with incomplete
 rollout evidence keeps its available counts and records
 `metadata_json.tokenUsageState = 'partial'`.
+When ledger counts are authoritative, transcript model and quota details are
+attached only if the transcript session key matches the ledger session key;
+otherwise the configured reviewer model is retained.
 
 `token_total` preserves a provider-reported total when present. Without one,
 Codex uses input + output because reasoning is included in output; Claude uses

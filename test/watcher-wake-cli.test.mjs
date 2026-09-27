@@ -68,6 +68,7 @@ test('watcher-wake CLI writes the HAM eligible wake payload', async () => {
           repo: 'laceyenterprises/agent-os',
           pr_number: 6561,
           head_sha: 'abc123abc123abc123abc123abc123abc123abc1',
+          requested_at: '2026-09-10T21:40:00.000Z',
         },
       ],
     });

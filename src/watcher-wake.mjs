@@ -40,15 +40,31 @@ function readWakeSnapshot(filePath) {
 // have already been picked up by an ordinary poll.
 const MAX_PENDING_WAKE_SUBJECTS = 64;
 
-function wakeSubjectKeyParts({ repo, prNumber, headSha = null }) {
+// The watcher never writes back which subjects it consumed, so "carried"
+// used to mean "the last 64 wakes": a PR woken hours earlier kept tier-0
+// wake priority until its head moved, and a head-less entry kept it forever,
+// diluting the lane a fresh wake exists to jump. Each subject now carries its
+// own request time and is dropped once it is older than this window. The
+// window is generous against poll latency so an un-consumed wake on a busy
+// watcher still survives until the next pass.
+const DEFAULT_WAKE_SUBJECT_TTL_MS = 30 * 60 * 1000;
+
+function wakeSubjectTtlMs(env = process.env) {
+  const raw = Number(env?.ADVERSARIAL_WATCHER_WAKE_SUBJECT_TTL_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_WAKE_SUBJECT_TTL_MS;
+}
+
+function wakeSubjectKeyParts({ repo, prNumber, headSha = null, requestedAt = null }) {
   const normalizedRepo = String(repo || '').trim();
   const normalizedPr = normalizeWakePrNumber(prNumber);
   if (!normalizedRepo || normalizedPr === null) return null;
   const normalizedHead = String(headSha || '').trim();
+  const normalizedRequestedAt = String(requestedAt || '').trim();
   return {
     repo: normalizedRepo,
     pr_number: normalizedPr,
     ...(normalizedHead ? { head_sha: normalizedHead } : {}),
+    ...(normalizedRequestedAt ? { requested_at: normalizedRequestedAt } : {}),
   };
 }
 
@@ -57,16 +73,25 @@ function wakeSubjectKey(subject) {
 }
 
 function dedupeWakeSubjects(subjects) {
-  const seen = new Set();
-  const out = [];
+  // Keep the LAST occurrence of each subject so a re-wake refreshes its
+  // request time (and its position) instead of keeping the stale first one.
+  const byKey = new Map();
   for (const subject of subjects) {
     if (!subject) continue;
     const key = wakeSubjectKey(subject);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(subject);
+    byKey.delete(key);
+    byKey.set(key, subject);
   }
-  return out;
+  return [...byKey.values()];
+}
+
+function wakeSubjectIsFresh(subject, nowMs, ttlMs) {
+  const requestedMs = Date.parse(subject?.requested_at || '');
+  // A subject whose time cannot be read is treated as fresh once; the carry
+  // step stamps it with the current request time, so it ages out one window
+  // later instead of never.
+  if (!Number.isFinite(requestedMs)) return true;
+  return nowMs - requestedMs <= ttlMs;
 }
 
 function carriedWakeSubjects(filePath) {
@@ -78,17 +103,22 @@ function carriedWakeSubjects(filePath) {
     const payload = snapshot?.payload;
     if (!payload || typeof payload !== 'object') return [];
     const listed = Array.isArray(payload.pending_subjects) ? payload.pending_subjects : [];
+    // Subjects written before per-subject times existed inherit the time of
+    // the write that carried them, so they age out one window after upgrade.
+    const inheritedAt = payload.requested_at ?? payload.requestedAt ?? null;
     const normalized = listed
       .map((entry) => wakeSubjectKeyParts({
         repo: entry?.repo,
         prNumber: entry?.pr_number ?? entry?.prNumber,
         headSha: entry?.head_sha ?? entry?.headSha,
+        requestedAt: entry?.requested_at ?? entry?.requestedAt ?? inheritedAt,
       }))
       .filter(Boolean);
     const previous = wakeSubjectKeyParts({
       repo: payload.repo,
       prNumber: payload.pr_number ?? payload.prNumber,
       headSha: payload.head_sha ?? payload.headSha,
+      requestedAt: inheritedAt,
     });
     return dedupeWakeSubjects(previous ? [...normalized, previous] : normalized);
   } catch {
@@ -104,6 +134,7 @@ function requestWatcherWake({
   headSha = null,
   requestedAt = new Date().toISOString(),
   requestId = randomUUID(),
+  env = process.env,
 } = {}) {
   if (!rootDir) {
     throw new Error('requestWatcherWake requires rootDir');
@@ -119,8 +150,13 @@ function requestWatcherWake({
   // `head_sha` still describe the newest request, so any reader that predates
   // `pending_subjects` behaves exactly as before; readers that understand the
   // list match any subject in it.
-  const carried = carriedWakeSubjects(filePath);
-  const subject = wakeSubjectKeyParts({ repo, prNumber, headSha });
+  const requestedMs = Date.parse(requestedAt);
+  const nowMs = Number.isFinite(requestedMs) ? requestedMs : Date.now();
+  const ttlMs = wakeSubjectTtlMs(env);
+  const carried = carriedWakeSubjects(filePath)
+    .filter((entry) => wakeSubjectIsFresh(entry, nowMs, ttlMs))
+    .map((entry) => (entry.requested_at ? entry : { ...entry, requested_at: requestedAt }));
+  const subject = wakeSubjectKeyParts({ repo, prNumber, headSha, requestedAt });
   const pendingSubjects = subject
     ? dedupeWakeSubjects([...carried, subject]).slice(-MAX_PENDING_WAKE_SUBJECTS)
     : carried.slice(-MAX_PENDING_WAKE_SUBJECTS);

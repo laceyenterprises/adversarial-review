@@ -334,6 +334,13 @@ can distinguish "never posted in window" from a null/corrupt timestamp column.
 | `review:hammer_dispatch_stalled_with_conflicts` | conflicted/dirty PRs are present in auto-merge state and no hammer dispatch has been observed in the dispatch daemon log within 2h | ticket | a hammer dispatch is observed in the dispatch daemon log, the conflicted backlog clears, or the log is outside host-check collection |
 | `review:dag_autowalk_launchd_unhealthy` | dag-autowalk is unloaded, last exit is non-zero, or logs are stale for >2h | ticket | dag-autowalk is loaded with a zero/unknown last exit and fresh logs |
 
+The follow-up daemon gives both reapers a 15-second scan budget through
+`ADVERSARIAL_FOLLOW_UP_REAPER_BUDGET_MS`. The closer worktree reaper runs every
+five ticks by default (`ADVERSARIAL_FOLLOW_UP_CLOSER_REAP_EVERY_TICKS`), with
+its cursor preserved between runs. Its Git worktree removal and worker
+teardown are single operations that cannot safely be interrupted halfway
+through; the cadence keeps those operations off most consume intervals.
+
 ## Configuration
 
 ### Stuck retry-loop failure classes

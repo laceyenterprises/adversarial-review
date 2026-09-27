@@ -113,6 +113,7 @@ const STOPPED_ARCHIVE_FAILURE_RETRY_SECONDS = positiveNumberEnv(
 );
 const STOPPED_ARCHIVE_FAILURE_RETRY_MS = STOPPED_ARCHIVE_FAILURE_RETRY_SECONDS * 1000;
 const MAINTENANCE_SWEEP_STATE_PATH = join(ROOT, 'data', 'follow-up-jobs', 'maintenance-sweeps.json');
+const closerReapTicksByEnv = new WeakMap();
 
 // Kill switch for the `stuck-rereview-apply` tick step. That step is the only
 // part of the tick that writes review-pipeline state on behalf of a stuck row
@@ -814,7 +815,12 @@ async function runFollowUpDaemonIteration({
     );
   }
   if (shouldStop()) return;
-  await runStep('closer-worktree-reap', async () => {
+  const closerCadence = Number.isSafeInteger(Number(env.ADVERSARIAL_FOLLOW_UP_CLOSER_REAP_EVERY_TICKS))
+    && Number(env.ADVERSARIAL_FOLLOW_UP_CLOSER_REAP_EVERY_TICKS) > 0
+    ? Number(env.ADVERSARIAL_FOLLOW_UP_CLOSER_REAP_EVERY_TICKS) : 5;
+  const closerTick = (closerReapTicksByEnv.get(env) || 0) + 1;
+  closerReapTicksByEnv.set(env, closerTick);
+  if ((closerTick - 1) % closerCadence === 0) await runStep('closer-worktree-reap', async () => {
     const result = await reapCloserHammerWorktreesImpl({ logger: console, budgetMs: reaperBudgetMs });
     logTick(
       'closer-worktree-reap',
@@ -825,6 +831,7 @@ async function runFollowUpDaemonIteration({
       `errors=${result.errors} limit=${result.limit} budgetExceeded=${result.budgetExceeded}`
     );
   });
+  else logTick('closer-worktree-reap', `deferred cadenceTick=${closerTick} everyTicks=${closerCadence}`);
   if (shouldStop()) return;
   await runStep('retry-comments', () => retryFailedCommentDeliveriesImpl());
   if (shouldStop()) return;

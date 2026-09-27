@@ -734,6 +734,7 @@ remediation:
   assert.equal(status.consumeIntervalMs, 6 * 60 * 1000);
   assert.equal(status.tickDurationMs, 0);
   assert.equal(status.lastConsumeAt, new Date(tickClockMs).toISOString());
+  assert.equal(calls.filter((call) => call === 'closer-worktree-reap').length, 1);
   assert.equal(status.driftSince, firstStatus.driftSince);
   assert.ok(status.loadedSignature);
   assert.ok(status.diskSignature);

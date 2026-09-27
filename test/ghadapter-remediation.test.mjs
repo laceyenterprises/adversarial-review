@@ -52,6 +52,26 @@ test('each remediation harness resolves gh and git-safe from the agent-os shims'
   assert.equal(workflowEnv.WORKER_TRAILER_CLASS, 'codex-remediation');
 });
 
+test('worker git-safe push replaces an expired spawn token through the credential helper', () => {
+  const { root, shims } = fakeAgentOs();
+  const helper = join(root, 'mock-push-credential');
+  const pushed = join(root, 'pushed');
+  writeFileSync(helper, '#!/bin/sh\n[ "$WORKER_CLASS" = codex ] || exit 75\nprintf "export GH_TOKEN=fresh-token\\nexport GITHUB_TOKEN=fresh-token\\n"\n');
+  chmodSync(helper, 0o755);
+  writeFileSync(join(shims, 'git-safe'), '#!/bin/sh\nplan=$("$AGENT_OS_WORKER_PUSH_CREDENTIAL_HELPER") || exit 75\neval "$plan"\n[ "$GH_TOKEN" = fresh-token ] || exit 76\n[ "$GITHUB_TOKEN" = fresh-token ] || exit 77\ntouch "$PUSH_MARKER"\n');
+  chmodSync(join(shims, 'git-safe'), 0o755);
+  const env = {
+    ...process.env,
+    GH_TOKEN: 'expired-token',
+    GITHUB_TOKEN: 'expired-token',
+    AGENT_OS_WORKER_PUSH_CREDENTIAL_HELPER: helper,
+    PUSH_MARKER: pushed,
+  };
+  installWorkerAdapterEnv(env, { HQ_REPO_ROOT: root }, 'codex', 'codex-remediation', 'example/repo');
+  execFileSync('git-safe', ['push', 'origin', 'HEAD'], { env });
+  assert.equal(existsSync(pushed), true);
+});
+
 test('expired spawn token is replaced before recovery push and missing branch comes from workspace', async () => {
   const { root, bin } = fakeAgentOs();
   const push = join(bin, 'git-safe');

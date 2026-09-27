@@ -693,6 +693,14 @@ export async function attemptDaemonCleanMerge({
       terminal = { reason: 'stale-head', permanent: true };
       break;
     }
+    if (initialOperatorOverride && !hasOperatorApprovedOverride({
+      operatorApprovedEvidence,
+      operatorLogins,
+      operatorLabelActorEnforcement,
+    }, { headSha: live.candidateHead, labels: live.labels })) {
+      terminal = { reason: 'operator-approval-no-longer-current', permanent: false };
+      break;
+    }
     // Re-verify the full gate on the fresh read (CI could have gone red, the PR
     // could have been closed, mergeable could have flipped).
     const elig = evaluateEligibilityImpl({

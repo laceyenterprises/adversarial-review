@@ -286,6 +286,38 @@ test('current-head operator approval merges an older request-changes verdict', a
   assert.equal(stale.calls.merge, 0);
 });
 
+test('operator approval removed inside the lease holds the override without a merge', async () => {
+  const approval = {
+    applied: true, observedRevisionRef: HEAD, actor: 'operator',
+    eventId: 'label-1', observedAt: '2026-09-26T19:03:00Z',
+  };
+  const h = makeHarness({ liveGate: greenGate({ labels: [] }) });
+  const result = await attemptDaemonCleanMerge(baseArgs(h, {
+    verdict: 'request-changes',
+    reviewState: cleanReview({ blockingFindingCount: 1 }),
+    liveGate: greenGate({ labels: ['operator-approved'] }),
+    operatorApprovedEvidence: approval,
+    operatorLogins: ['operator'],
+    operatorLabelActorEnforcement: 'enforce',
+  }));
+  assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED);
+  assert.equal(result.reason, 'operator-approval-no-longer-current');
+  assert.equal(h.calls.merge, 0);
+  assert.equal(h.calls.release, 1);
+  assert.equal(h.auditStore.get('o/r#7@' + HEAD).attempts.at(-1).reason,
+    'operator-approval-no-longer-current');
+
+  const clean = makeHarness({ liveGate: greenGate({ labels: [] }) });
+  const cleanResult = await attemptDaemonCleanMerge(baseArgs(clean, {
+    liveGate: greenGate({ labels: ['operator-approved'] }),
+    operatorApprovedEvidence: approval,
+    operatorLogins: ['operator'],
+    operatorLabelActorEnforcement: 'enforce',
+  }));
+  assert.equal(cleanResult.reason, 'operator-approval-no-longer-current');
+  assert.equal(clean.calls.merge, 0);
+});
+
 test('builder token cannot merge in enforce mode', async () => {
   const h = makeHarness({ mergeResults: [{ exitCode: 0 }] });
   const warnings = [];

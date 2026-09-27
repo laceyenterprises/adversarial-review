@@ -692,13 +692,19 @@ identity** (the operator-approval auto-close lane). Apply either:
 actor, and event id). `merge-agent-requested` substitutes for worker identity
 only; it still needs a settled-success, strict-clean review. Current-head
 `operator-approved` also overrides the verdict and finding-count gates, so a
-`Request changes` review with blocking findings can use the daemon lane. The
+`Request changes` review with blocking findings can use the daemon lane even
+when worker identity resolves. When the live label is present, the audit records
+`closureAuthority: daemon-operator-approved-override`,
+`mergeAccountability: operator-approval`, and `operatorApproval` with the
+actor, event id, observation time, and approved head. A successful merge emits
+`ama.daemon_clean_merge.operator_override_merge` with the same provenance. The
 daemon re-reads the live label and head before merging. Its validated head is
 the live, approved head, which must still match the head at the merge attempt.
 Required checks, branch protection, mergeability, and the merge lease remain
-mandatory. An older-head approval or a label removed before the live read is
-refused with no carryover; removal holds dispatch until the next tick reads
-fresh labels. Actor provenance is mandatory; the default `observe` enforcement
+mandatory. An older-head approval or a label removed before the live read or
+inside the merge lease is refused with no carryover; removal holds dispatch
+until the next tick reads fresh labels. Actor provenance is mandatory; the
+default `observe` enforcement
 honors a known actor even if that actor is not allowlisted, while `enforce`
 requires an allowlisted operator login. The substitution emits
 `ama.daemon_clean_merge.operator_accountability_substituted`.

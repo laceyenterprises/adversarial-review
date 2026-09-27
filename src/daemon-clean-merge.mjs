@@ -789,6 +789,17 @@ export async function runDaemonCleanMergeAttempt({
   // executor rather than a HAM audit head that may be absent or stale.
   const certifiedNonCleanHead = hamTerminalRemediationHead || headCloserCertifiedNonBlocking;
   const autonomousCloserCommitCleanHead = Boolean(cleanCloserCommitAccountability);
+  const daemonVerdict = hamTerminalRemediationHead
+    ? 'ham_terminal_remediation_validated'
+    : settledVerdict;
+  const operatorOverrideUsed = liveOperatorOverride;
+  const overrideApproval = operatorOverrideUsed ? {
+    label: OPERATOR_APPROVED_LABEL,
+    actor: operatorApprovedEvidence.actor,
+    eventId: operatorApprovedEvidence.eventId,
+    observedAt: operatorApprovedEvidence.observedAt,
+    headSha: liveHead,
+  } : null;
   const daemonValidatedHead = liveOperatorOverride
     ? liveHead
     : autonomousCloserCommitCleanHead
@@ -796,9 +807,6 @@ export async function runDaemonCleanMergeAttempt({
     : certifiedNonCleanHead
       ? hamAuditHead
       : validatedHead;
-  const daemonVerdict = hamTerminalRemediationHead
-    ? 'ham_terminal_remediation_validated'
-    : settledVerdict;
   const daemonResult = await attemptDaemonCleanMergeImpl({
     repo: repoPath,
     prNumber,
@@ -836,10 +844,11 @@ export async function runDaemonCleanMergeAttempt({
     auditMetadata: {
       reviewer: reviewStateRow?.reviewer || '',
       riskClass: reviewState?.riskClass || 'unknown',
-      // Distinguish a HAM terminal-remediation daemon re-merge from a normal
-      // zero-finding clean daemon merge in the audit doc's closure authority.
-      ...(hamTerminalRemediationHead
-        ? { closureAuthority: 'daemon-ham-terminal-remediation' }
+      // Name the authority that cleared the review gate in the audit doc.
+      ...(operatorOverrideUsed
+        ? { closureAuthority: 'daemon-operator-approved-override' }
+        : hamTerminalRemediationHead
+          ? { closureAuthority: 'daemon-ham-terminal-remediation' }
         : autonomousCloserCommitCleanHead
           ? { closureAuthority: 'daemon-autonomous-closer-commit-clean' }
           : headCloserCertifiedNonBlocking
@@ -849,18 +858,22 @@ export async function runDaemonCleanMergeAttempt({
       // identity (the normal path) or an explicit head-scoped operator label
       // (Deliverable 1 substitution). The audit doc thus always names WHO the
       // merge authority rests on.
-      mergeAccountability: cleanCloserCommitAccountability
-        ? 'autonomous-closer-commit'
-        : workerIdentity.ok
-          ? 'worker-identity'
-          : autonomousAccountabilitySubstituted
-            ? 'autonomous-accountability'
-            : 'operator-approval',
-      ...(operatorMergeAccountability
-        && !cleanCloserCommitAccountability
-        && !autonomousAccountabilitySubstituted
-        ? { operatorApproval: operatorMergeAccountability }
-        : {}),
+      mergeAccountability: operatorOverrideUsed
+        ? 'operator-approval'
+        : cleanCloserCommitAccountability
+          ? 'autonomous-closer-commit'
+          : workerIdentity.ok
+            ? 'worker-identity'
+            : autonomousAccountabilitySubstituted
+              ? 'autonomous-accountability'
+              : 'operator-approval',
+      ...(overrideApproval
+        ? { operatorApproval: overrideApproval }
+        : operatorMergeAccountability
+          && !cleanCloserCommitAccountability
+          && !autonomousAccountabilitySubstituted
+          ? { operatorApproval: operatorMergeAccountability }
+          : {}),
       ...(autonomousAccountabilitySubstituted
         ? { autonomousMergeAccountability: operatorMergeAccountability }
         : {}),
@@ -994,6 +1007,9 @@ export async function runDaemonCleanMergeAttempt({
     },
     logger,
   });
+  if (daemonResult?.reason === 'operator-approval-no-longer-current') {
+    return NOT_TAKEN('operator-approval-no-longer-current');
+  }
   if (
     (hamTerminalRemediationHead || headCloserCertifiedNonBlocking) &&
     daemonResult?.disposition === DAEMON_MERGE_DISPOSITION.FAILED_CLOSED
@@ -1007,6 +1023,17 @@ export async function runDaemonCleanMergeAttempt({
       ? 'ham-terminal-remediation'
       : 'head-closer-certified';
     return NOT_TAKEN(`${failedClosedLane}-daemon-${daemonResult.reason || 'failed-closed'}`);
+  }
+  if (operatorOverrideUsed && daemonResult?.disposition === DAEMON_MERGE_DISPOSITION.MERGED) {
+    logger?.log?.(JSON.stringify({
+      schemaVersion: 1,
+      event: 'ama.daemon_clean_merge.operator_override_merge',
+      repo: repoPath,
+      pr: prNumber,
+      headSha: liveHead,
+      closureAuthority: 'daemon-operator-approved-override',
+      ...overrideApproval,
+    }));
   }
   return daemonResult;
 }

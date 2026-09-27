@@ -8,7 +8,17 @@ export async function killFixtureChild(child, { detached = true } = {}) {
     if (error.code === 'EPERM' && detached) child.kill('SIGKILL');
     else if (error.code !== 'ESRCH') throw error;
   }
-  await close;
+  let timer;
+  try {
+    await Promise.race([
+      close,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Fixture child ${child.pid} did not close within 2 seconds`)), 2_000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // Inline JS fixtures use this before their workload. A missed cleanup cannot

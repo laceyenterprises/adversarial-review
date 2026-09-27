@@ -17,6 +17,7 @@ test('suite guard reports and kills a deliberately leaked process group', () => 
   assert.equal(result.signal, null, output);
   assert.notEqual(result.status, 0, output);
   assert.match(output, /Leaked test children:/);
+  assert.match(output, /Stop shared children in t\.after\/finally, not a file-level after hook/);
   assert.match(output, /deliberately leaked detached child/);
   assert.match(output, /leaked-child\.test\.mjs/);
   const pid = Number(output.match(/LEAKED_FIXTURE_PID=(\d+)/)?.[1]);

@@ -1,5 +1,7 @@
 // Preloaded in each node:test worker. Track children at spawn time so a test
-// failure cannot silently leave a detached fixture running after the file ends.
+// failure cannot silently leave a live detached leader running after the file
+// ends. A leader that has exited cannot safely be signalled: its pid/pgid may
+// already belong to an unrelated process, even if former group members remain.
 // This preload registers its root after hook before the test module does.
 // Tests must stop shared children in their own test cleanup (or finally), not
 // in a file-level after hook, which would run after this leak check. Once a
@@ -98,6 +100,6 @@ if (process.env.NODE_TEST_CONTEXT) {
       }
       await Promise.race([closed, new Promise((resolve) => setTimeout(resolve, 2_000))]);
     }
-    if (leaked.length) throw new Error(`Leaked test children:\n${leaked.join('\n')}`);
+    if (leaked.length) throw new Error(`Leaked test children:\n${leaked.join('\n')}\nStop shared children in t.after/finally, not a file-level after hook.`);
   });
 }

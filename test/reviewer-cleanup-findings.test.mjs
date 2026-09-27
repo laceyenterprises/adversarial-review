@@ -76,27 +76,18 @@ test('cleanup finding recheck passes the live process group and session to its p
     });
 
     let psCommand;
-    let probeSessionImpl;
     try {
       psCommand = execFileSync('ps', ['-p', String(child.pid), '-o', 'command='], {
         encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
       });
     } catch {
-      // Only sandbox failures to execute ps use the injected probe.
-      probeSessionImpl = ({ pgid, sessionUuid: probedSession }) => {
-        assert.equal(pgid, child.pid);
-        assert.equal(probedSession, sessionUuid);
-        process.kill(child.pid, 0);
-        return { alive: true, matched: true };
-      };
+      t.skip('worker sandbox cannot inspect the spawned child with ps');
+      return;
     }
-    if (psCommand !== undefined) {
-      assert.ok(psCommand.includes(sessionUuid), 'ps omitted the child session UUID');
-    }
+    assert.ok(psCommand.includes(sessionUuid), 'ps omitted the child session UUID');
     const result = recheckReviewerCleanupFindings({
       rootDir,
       log: { warn() {} },
-      probeSessionImpl,
     });
 
     assert.equal(result.stillAlive, 1);

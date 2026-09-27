@@ -13,7 +13,11 @@
     "provider": "github-commit-status"
   },
   "promptSet": "code-pr",
-  "remediationCloneReferences": {},
+  "remediationCloneReferences": {
+    "laceyenterprises/adversarial-review": "/Users/airlock/agent-os-hq/adversarial-review/clone-references/adversarial-review.git",
+    "laceyenterprises/foundry": "/Users/airlock/agent-os/.git/modules/tools/foundry",
+    "laceyenterprises/podium": "/Users/airlock/agent-os/.git/modules/tools/podium"
+  },
   "riskClasses": {
     "low": {
       "maxRemediationRounds": 1

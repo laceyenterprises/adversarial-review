@@ -469,6 +469,12 @@ function schemaV1() {
             __min: 10,
             __max: 900,
           },
+          spawn_ready_wait_seconds: {
+            __type: TYPE_INT,
+            __default: 300,
+            __min: 0,
+            __max: 300,
+          },
           boot_window_seconds: {
             __type: TYPE_INT,
             __default: 300,
@@ -2150,6 +2156,18 @@ function schemaV1() {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
+          oss_dispatch: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              enabled: { __type: TYPE_BOOL, __default: false },
+              team_monthly_cap_usd: {
+                __type: TYPE_FLOAT,
+                __default: 25,
+                __min: 0.01,
+              },
+            },
+          },
           comms: {
             __type: TYPE_DICT,
             __strict: true,
@@ -3453,6 +3471,10 @@ export const ENV_ALIASES = {
   'post_deploy_verify.spawn_timeout_seconds': {
     canonical: 'AGENT_OS_POST_DEPLOY_VERIFY_SPAWN_TIMEOUT_SECONDS',
     aliases: [['HQ_POST_DEPLOY_VERIFY_SPAWN_TIMEOUT_SECONDS', identity]],
+  },
+  'post_deploy_verify.spawn_ready_wait_seconds': {
+    canonical: 'AGENT_OS_POST_DEPLOY_VERIFY_SPAWN_READY_WAIT_SECONDS',
+    aliases: [['HQ_POST_DEPLOY_VERIFY_SPAWN_READY_WAIT_SECONDS', identity]],
   },
   'post_deploy_verify.boot_window_seconds': {
     canonical: 'AGENT_OS_POST_DEPLOY_VERIFY_BOOT_WINDOW_SECONDS',

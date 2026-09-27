@@ -2357,6 +2357,7 @@ test('post_deploy_verify mirror loads through strict Node schema and env aliases
         enabled: false
         shadow_only: true
         spawn_timeout_seconds: 180
+        spawn_ready_wait_seconds: 300
         boot_window_seconds: 300
         reminder_seconds: 21600
     `);
@@ -2366,6 +2367,7 @@ test('post_deploy_verify mirror loads through strict Node schema and env aliases
         AGENT_OS_POST_DEPLOY_VERIFY_ENABLED: 'true',
         HQ_POST_DEPLOY_VERIFY_SHADOW_ONLY: 'false',
         HQ_POST_DEPLOY_VERIFY_SPAWN_TIMEOUT_SECONDS: '240',
+        AGENT_OS_POST_DEPLOY_VERIFY_SPAWN_READY_WAIT_SECONDS: '120',
         AGENT_OS_POST_DEPLOY_VERIFY_BOOT_WINDOW_SECONDS: '600',
         HQ_POST_DEPLOY_VERIFY_REMINDER_SECONDS: '3600',
       },
@@ -2373,12 +2375,32 @@ test('post_deploy_verify mirror loads through strict Node schema and env aliases
     assert.equal(cfg.get('post_deploy_verify.enabled'), true);
     assert.equal(cfg.get('post_deploy_verify.shadow_only'), false);
     assert.equal(cfg.get('post_deploy_verify.spawn_timeout_seconds'), 240);
+    assert.equal(cfg.get('post_deploy_verify.spawn_ready_wait_seconds'), 120);
     assert.equal(cfg.get('post_deploy_verify.boot_window_seconds'), 600);
     assert.equal(cfg.get('post_deploy_verify.reminder_seconds'), 3600);
     assert.equal(
       cfg.resolutionTrace('post_deploy_verify.spawn_timeout_seconds').at(-1).source,
       'env:HQ_POST_DEPLOY_VERIFY_SPAWN_TIMEOUT_SECONDS',
     );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('OSS team monthly cap mirror loads through strict Node schema', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      worker_pool:
+        oss_dispatch:
+          enabled: true
+          team_monthly_cap_usd: 17.5
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('worker_pool.oss_dispatch.enabled'), true);
+    assert.equal(cfg.get('worker_pool.oss_dispatch.team_monthly_cap_usd'), 17.5);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -3122,6 +3144,7 @@ test('checked-in post_deploy_verify defaults load through strict Node schema', (
 
   assert.equal(cfg.get('post_deploy_verify.enabled'), existsSync(top) ? true : false);
   assert.equal(cfg.get('post_deploy_verify.spawn_timeout_seconds'), 180);
+  assert.equal(cfg.get('post_deploy_verify.spawn_ready_wait_seconds'), 300);
   assert.equal(cfg.get('post_deploy_verify.boot_window_seconds'), 300);
 });
 

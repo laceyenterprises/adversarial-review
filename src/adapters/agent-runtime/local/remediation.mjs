@@ -63,10 +63,13 @@ function buildInheritedPath(currentPath = process.env.PATH || '') {
 }
 
 function installWorkerAdapterEnv(env, sourceEnv, physicalClass, trailerClass, repo, log = console, brokerEvidence = null) {
-  const candidates = [join(ROOT, '../..'), sourceEnv.HQ_REPO_ROOT].filter(Boolean);
-  const agentOsRoot = candidates.find((candidate) =>
-    existsSync(join(candidate, 'modules/worker-pool/lib/shims/gh'))
-    && existsSync(join(candidate, 'modules/worker-pool/lib/shims/git-safe')));
+  // An explicit HQ_REPO_ROOT is authoritative. Only without it do we infer the
+  // agent-os superproject from this submodule's own location.
+  const candidate = String(sourceEnv.HQ_REPO_ROOT || '').trim() || join(ROOT, '../..');
+  const agentOsRoot = existsSync(join(candidate, 'modules/worker-pool/lib/shims/gh'))
+    && existsSync(join(candidate, 'modules/worker-pool/lib/shims/git-safe'))
+    ? candidate
+    : null;
   if (!agentOsRoot) {
     log?.warn?.('[follow-up-remediation] agent-os worker shims unavailable; using inherited PATH');
     return;
@@ -81,6 +84,11 @@ function installWorkerAdapterEnv(env, sourceEnv, physicalClass, trailerClass, re
     ? 'MERGE_AGENT_GH_TOKEN'
     : ({ codex: 'CODEX_WORKER_GH_TOKEN', 'claude-code': 'CLAUDE_WORKER_GH_TOKEN', gemini: 'GEMINI_WORKER_GH_TOKEN' })[physicalClass];
   env.WORKER_TRAILER_CLASS = trailerClass;
+  // The adapter mints nothing, so an inherited mint time describes some other
+  // credential. A known expiry (GH_TOKEN_EXPIRES_AT or
+  // <HQ_ENTITLEMENT_GH_TOKEN_VAR>_EXPIRES_AT) still passes through from the
+  // daemon env. Without one, the push preflight re-resolves the token through
+  // WORKER_CLASS on this host.
   delete env.HQ_WORKER_TOKEN_MINTED_AT;
 }
 

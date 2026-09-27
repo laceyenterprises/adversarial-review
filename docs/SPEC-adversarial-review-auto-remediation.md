@@ -602,19 +602,53 @@ remediation harness. The kill switch keeps the physical harness entitlement in
 both the direct worker and auth recovery.
 
 Direct remediation workers put the agent-os `gh` and `git-safe` shims first on
-PATH when those shims are available. `git-safe push` refreshes the worker
-entitlement at push time. Without the shims, the worker retains its inherited
+PATH when those shims are available. The agent-os root is `HQ_REPO_ROOT` when it
+is set; only when it is unset is the root inferred as the superproject that
+contains this submodule. Without the shims, the worker retains its inherited
 PATH and the prompt directs it to use `git push`; each such spawn logs a warning.
 The prompt leaves `WORKER_CLASS` intact and uses `WORKER_TRAILER_CLASS` for commit
-provenance. Follow-up jobs retain the PR head
-branch from reviewer metadata. GitHub-auth recovery can recover a missing
-branch from the checkout or `gh pr view`; transient `gh` failures get bounded
-retries, while a definitive 404 or absent head branch reports a missing branch.
+provenance.
+
+`git-safe push` runs the agent-os push-credential preflight. The adapter mints
+no token, so it drops any inherited `HQ_WORKER_TOKEN_MINTED_AT`. It passes
+through a known expiry (`GH_TOKEN_EXPIRES_AT`, or
+`<HQ_ENTITLEMENT_GH_TOKEN_VAR>_EXPIRES_AT`) from the daemon environment. When
+an inherited App-shaped token has no known expiry, the preflight re-resolves
+it through `WORKER_CLASS` on the host running the follow-up daemon. That host
+must therefore be able to resolve the `codex`, `claude-code` and `gemini`
+worker entitlements, plus `merge-agent` when workflow-push escalation is on.
+If re-resolution fails, the preflight drops the inherited token and git uses
+its own credential. A push that then fails takes the GitHub-auth recovery path
+below.
+
+Under the shim, direct workers use `gh` for read-only queries only. The shim
+refuses agent-attributed mutating `gh` commands (exit 78) unless `GH_TOKEN`,
+`GITHUB_TOKEN` or the class token variable is set, and it never falls back to
+the operator's keyring. The remediation contract needs no `gh` writes: the reply
+JSON requests re-review. The prompt says so and tells the worker not to work
+around the refusal.
+
+Follow-up jobs retain the PR head branch from reviewer metadata. GitHub-auth
+recovery requires `hq-gh.sh`, `shims/gh` and `bin/git-safe` under the agent-os
+root. It passes that root to its script as `AGENT_OS_ROOT` rather than
+interpolating it. A missing file reports `missing-gh-adapter`, with the missing
+paths. Recovery can recover a missing branch from the checkout or
+`gh pr view`, and transient `gh` failures get bounded retries. An HTTP 404
+reports `pr-lookup-not-found` with the resolved worker class, because GitHub
+also answers 404 when the minted token cannot see the repo. `missing-pr-branch`
+is reserved for a lookup that returned no head branch.
+
 Recovery refreshes the adapter token and pushes the rescued commit with an
-explicit `--force-with-lease` against the worker's expected remote SHA (or the
-reviewed revision for older replies). A moved head rejects the lease and keeps
-the rescue bundle for operator recovery. An unavailable expected SHA fails
-closed before push.
+explicit `--force-with-lease`. The lease SHA comes from the first of these that
+is available:
+
+1. The `expectedRemoteSha` the worker recorded in its `github-auth` blocker.
+2. The workspace's `refs/remotes/origin/<branch>`, which is the PR head the
+   worker last fetched.
+3. The reviewed revision (`revisionRef`).
+
+A moved head rejects the lease and keeps the rescue bundle for operator
+recovery. If no SHA is available, recovery fails closed before push.
 
 Claude Code remediation resolves its model credential by transport. With no
 explicit override the transport AUTO-DETECTS: `broker` when this host is wired

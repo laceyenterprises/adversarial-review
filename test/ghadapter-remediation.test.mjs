@@ -10,8 +10,8 @@ import { retryGithubAuthPushOnce } from '../src/github-auth-recovery.mjs';
 
 const execFileAsync = promisify(execFile);
 
-function fakeAgentOs() {
-  const root = mkdtempSync(join(tmpdir(), 'ghadapter-'));
+function fakeAgentOs(prefix = join(tmpdir(), 'ghadapter-')) {
+  const root = mkdtempSync(prefix);
   const lib = join(root, 'modules/worker-pool/lib');
   const shims = join(lib, 'shims');
   const bin = join(root, 'modules/worker-pool/bin');
@@ -25,6 +25,8 @@ function fakeAgentOs() {
   writeFileSync(join(lib, 'hq-gh.sh'), 'hq_resolve_worker_class_gh_token() { export HQ_ENTITLEMENT_GH_TOKEN=fresh-token; }\n');
   writeFileSync(join(bin, 'git'), '#!/bin/sh\nexit 0\n');
   chmodSync(join(bin, 'git'), 0o755);
+  writeFileSync(join(bin, 'git-safe'), '#!/bin/sh\nexit 0\n');
+  chmodSync(join(bin, 'git-safe'), 0o755);
   return { root, shims, bin };
 }
 
@@ -272,6 +274,157 @@ test('detached branch lookup reports definitive 404 without retry', async () => 
       throw err;
     },
   });
-  assert.equal(result.reason, 'missing-pr-branch');
+  assert.equal(result.reason, 'pr-lookup-not-found');
+  assert.equal(result.workerClass, 'codex');
+  assert.match(result.error, /HTTP 404/);
   assert.equal(viewCalls, 1);
+});
+
+test('an empty head branch from a successful lookup reports missing-pr-branch', async () => {
+  const { root } = fakeAgentOs();
+  const result = await retryGithubAuthPushOnce({
+    workspaceDir: '/unused/workspace',
+    workerClass: 'codex',
+    repo: 'example/repo',
+    prNumber: 42,
+    commitSha: 'a'.repeat(40),
+    expectedRemoteSha: 'b'.repeat(40),
+    env: { ...process.env, HQ_REPO_ROOT: root },
+    execFileImpl: async (command) => (command === 'git' ? { stdout: 'HEAD\n' } : { stdout: 'null\n' }),
+  });
+  assert.equal(result.reason, 'missing-pr-branch');
+});
+
+test('recovery reports each missing adapter file instead of a credential failure', async () => {
+  for (const missing of ['modules/worker-pool/lib/hq-gh.sh', 'modules/worker-pool/lib/shims/gh', 'modules/worker-pool/bin/git-safe']) {
+    const { root } = fakeAgentOs();
+    rmSync(join(root, missing));
+    let execCalls = 0;
+    const result = await retryGithubAuthPushOnce({
+      workspaceDir: '/unused/workspace',
+      workerClass: 'codex',
+      branch: 'feature/fix',
+      commitSha: 'a'.repeat(40),
+      expectedRemoteSha: 'b'.repeat(40),
+      env: { ...process.env, HQ_REPO_ROOT: root },
+      execFileImpl: async () => { execCalls += 1; return { stdout: '' }; },
+    });
+    assert.equal(result.reason, 'missing-gh-adapter');
+    assert.deepEqual(result.missingAdapterFiles, [missing]);
+    assert.equal(execCalls, 0);
+  }
+});
+
+test('recovery passes the agent-os root through env, so shell metacharacters in the path stay inert', async () => {
+  const parent = mkdtempSync(join(tmpdir(), 'ghadapter-meta-'));
+  const weird = join(parent, 'root "$(touch pwned)" `x`');
+  mkdirSync(weird);
+  const { root, shims, bin } = fakeAgentOs(join(weird, 'agent-os-'));
+  writeFileSync(join(shims, 'gh'), '#!/bin/sh\nprintf "feature/from-gh\\n"\n');
+  chmodSync(join(shims, 'gh'), 0o755);
+  writeFileSync(join(bin, 'git-safe'), '#!/bin/sh\n[ "$TARGET_BRANCH" = feature/from-gh ]\n');
+  chmodSync(join(bin, 'git-safe'), 0o755);
+  const result = await retryGithubAuthPushOnce({
+    workspaceDir: parent,
+    workerClass: 'codex',
+    branch: null,
+    repo: 'example/repo',
+    prNumber: 42,
+    commitSha: 'a'.repeat(40),
+    expectedRemoteSha: 'b'.repeat(40),
+    env: { ...process.env, HQ_REPO_ROOT: root },
+    execFileImpl: async (command, args, options) => {
+      if (command === 'git') return { stdout: 'HEAD\n' };
+      assert.ok(!args[1].includes(root), 'script must reference $AGENT_OS_ROOT, not the interpolated path');
+      assert.equal(options.env.AGENT_OS_ROOT, root);
+      return execFileAsync(command, args, { ...options, cwd: parent });
+    },
+  });
+  assert.equal(result.pushed, true);
+  assert.equal(existsSync(join(parent, 'pwned')), false);
+});
+
+test('recovery lease falls back to the workspace tracking ref, then the reviewed revision', async (t) => {
+  const { root, bin } = fakeAgentOs();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const remote = join(root, 'remote.git');
+  const workspace = join(root, 'workspace');
+  const git = (args, cwd = workspace) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+  git(['init', '--bare', remote], root);
+  git(['clone', remote, workspace], root);
+  git(['config', 'user.name', 'Test Worker']);
+  git(['config', 'user.email', 'test@example.com']);
+  writeFileSync(join(workspace, 'base.txt'), 'base\n');
+  git(['add', '.']);
+  git(['commit', '-m', 'base']);
+  git(['branch', '-M', 'feature']);
+  git(['push', '-u', 'origin', 'feature']);
+  const fetchedHead = git(['rev-parse', 'HEAD']);
+  writeFileSync(join(workspace, 'fix.txt'), 'remediation\n');
+  git(['add', '.']);
+  git(['commit', '-m', 'remediation']);
+  const rescuedHead = git(['rev-parse', 'HEAD']);
+  writeFileSync(join(bin, 'git-safe'), '#!/bin/sh\nexec git "$@"\n');
+  chmodSync(join(bin, 'git-safe'), 0o755);
+
+  // No blocker SHA: the stale reviewed revision must lose to the ref the
+  // worker actually fetched.
+  const result = await retryGithubAuthPushOnce({
+    workspaceDir: workspace,
+    workerClass: 'codex',
+    branch: 'feature',
+    commitSha: rescuedHead,
+    expectedRemoteSha: null,
+    fallbackRemoteSha: 'c'.repeat(40),
+    env: { ...process.env, HQ_REPO_ROOT: root },
+  });
+  assert.equal(result.pushed, true);
+  assert.equal(git(['rev-parse', 'refs/heads/feature'], remote), rescuedHead);
+
+  const noTrackingRef = await retryGithubAuthPushOnce({
+    workspaceDir: workspace,
+    workerClass: 'codex',
+    branch: 'no-such-branch',
+    commitSha: rescuedHead,
+    expectedRemoteSha: null,
+    fallbackRemoteSha: null,
+    env: { ...process.env, HQ_REPO_ROOT: root },
+  });
+  assert.equal(noTrackingRef.reason, 'missing-expected-remote-head');
+  assert.equal(noTrackingRef.pushed, false);
+
+  const pushes = [];
+  const revisionFallback = await retryGithubAuthPushOnce({
+    workspaceDir: workspace,
+    workerClass: 'codex',
+    branch: 'no-such-branch',
+    commitSha: rescuedHead,
+    expectedRemoteSha: 'not-a-sha',
+    fallbackRemoteSha: fetchedHead,
+    env: { ...process.env, HQ_REPO_ROOT: root },
+    execFileImpl: async (command, args, options) => {
+      if (command === 'git') return execFileAsync(command, args, options);
+      pushes.push(options.env.EXPECTED_REMOTE_SHA);
+      return { stdout: '' };
+    },
+  });
+  assert.equal(revisionFallback.pushed, true);
+  assert.deepEqual(pushes, [fetchedHead]);
+});
+
+test('adapter env keeps a known token expiry and drops only the inherited mint time', () => {
+  const { root } = fakeAgentOs();
+  const env = {
+    PATH: '/usr/bin:/bin',
+    GITHUB_TOKEN: 'inherited-token',
+    GH_TOKEN_EXPIRES_AT: '2026-09-27T06:00:00Z',
+    CODEX_WORKER_GH_TOKEN_EXPIRES_AT: '2026-09-27T06:00:00Z',
+    HQ_WORKER_TOKEN_MINTED_AT: '2026-09-20T00:00:00Z',
+  };
+  installWorkerAdapterEnv(env, { HQ_REPO_ROOT: root }, 'codex', 'codex-remediation', 'example/repo');
+  assert.equal(env.GH_TOKEN, 'inherited-token');
+  assert.equal(env.GH_TOKEN_EXPIRES_AT, '2026-09-27T06:00:00Z');
+  assert.equal(env.CODEX_WORKER_GH_TOKEN_EXPIRES_AT, '2026-09-27T06:00:00Z');
+  assert.equal(env.HQ_ENTITLEMENT_GH_TOKEN_VAR, 'CODEX_WORKER_GH_TOKEN');
+  assert.equal(env.HQ_WORKER_TOKEN_MINTED_AT, undefined);
 });

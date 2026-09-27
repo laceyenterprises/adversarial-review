@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -92,8 +92,16 @@ async function withHqRootEnv(hqRoot, run) {
 function makeGhAdapterRoot(rootDir) {
   const adapterRoot = path.join(rootDir, 'agent-os');
   const libDir = path.join(adapterRoot, 'modules', 'worker-pool', 'lib');
-  mkdirSync(libDir, { recursive: true });
+  const shimDir = path.join(libDir, 'shims');
+  const binDir = path.join(adapterRoot, 'modules', 'worker-pool', 'bin');
+  mkdirSync(shimDir, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
   writeFileSync(path.join(libDir, 'hq-gh.sh'), '# test adapter\n');
+  // Recovery requires the adapter and both executables it runs.
+  for (const file of [path.join(shimDir, 'gh'), path.join(binDir, 'git-safe')]) {
+    writeFileSync(file, '#!/bin/sh\nexit 0\n');
+    chmodSync(file, 0o755);
+  }
   return adapterRoot;
 }
 

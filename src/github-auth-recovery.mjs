@@ -8,6 +8,12 @@ const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 const GITHUB_AUTH_PUSH_RETRY_DELAYS_MS = [250, 750];
+const FULL_SHA_PATTERN = /^[0-9a-f]{40}$/i;
+const GITHUB_ADAPTER_FILES = Object.freeze([
+  'modules/worker-pool/lib/hq-gh.sh',
+  'modules/worker-pool/lib/shims/gh',
+  'modules/worker-pool/bin/git-safe',
+]);
 
 function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
@@ -194,17 +200,21 @@ async function retryGithubAuthPushOnce({
   prNumber,
   commitSha,
   expectedRemoteSha,
+  fallbackRemoteSha = null,
   env = process.env,
   execFileImpl = execFileAsync,
   retryDelaysMs = GITHUB_AUTH_PUSH_RETRY_DELAYS_MS,
   sleepImpl = sleep,
 }) {
-  const agentOsRoot = [join(ROOT, '../..'), env.HQ_REPO_ROOT].find((candidate) => candidate && existsSync(join(candidate, 'modules/worker-pool/lib/hq-gh.sh')));
-  if (!agentOsRoot) return { retried: false, pushed: false, reason: 'missing-gh-adapter' };
-  const expectedHead = String(expectedRemoteSha || '').trim();
-  if (!/^[0-9a-f]{40}$/i.test(expectedHead)) {
-    return { retried: false, pushed: false, reason: 'missing-expected-remote-head' };
+  // An explicit HQ_REPO_ROOT is authoritative, matching the spawn adapter.
+  // Recovery sources hq-gh.sh and execs both shims, so a checkout missing any
+  // of them is a missing adapter, not a credential failure.
+  const rootCandidate = String(env.HQ_REPO_ROOT || '').trim() || join(ROOT, '../..');
+  const missingAdapterFiles = GITHUB_ADAPTER_FILES.filter((file) => !existsSync(join(rootCandidate, file)));
+  if (missingAdapterFiles.length > 0) {
+    return { retried: false, pushed: false, reason: 'missing-gh-adapter', agentOsRoot: rootCandidate, missingAdapterFiles };
   }
+  const agentOsRoot = rootCandidate;
   let targetBranch = String(branch || '').trim();
   if (!targetBranch) {
     try {
@@ -215,12 +225,14 @@ async function retryGithubAuthPushOnce({
   }
   if (!targetBranch && repo && prNumber) {
     const viewScript = `set -euo pipefail
-source "${agentOsRoot}/modules/worker-pool/lib/hq-gh.sh"
+source "$AGENT_OS_ROOT/modules/worker-pool/lib/hq-gh.sh"
 unset GH_TOKEN GITHUB_TOKEN HQ_ENTITLEMENT_GH_TOKEN
 hq_resolve_worker_class_gh_token "$WORKER_CLASS"
 export GH_TOKEN="$HQ_ENTITLEMENT_GH_TOKEN" GITHUB_TOKEN="$HQ_ENTITLEMENT_GH_TOKEN"
-"${agentOsRoot}/modules/worker-pool/lib/shims/gh" pr view "$PR_NUMBER" --repo "$PR_REPO" --json headRefName --jq .headRefName`;
-    const viewOptions = { env: { ...env, WORKER_CLASS: workerClass, PR_NUMBER: String(prNumber), PR_REPO: repo } };
+"$AGENT_OS_ROOT/modules/worker-pool/lib/shims/gh" pr view "$PR_NUMBER" --repo "$PR_REPO" --json headRefName --jq .headRefName`;
+    const viewOptions = {
+      env: { ...env, AGENT_OS_ROOT: agentOsRoot, WORKER_CLASS: workerClass, PR_NUMBER: String(prNumber), PR_REPO: repo },
+    };
     const attempts = [0, ...retryDelaysMs];
     for (let attempt = 0; attempt < attempts.length; attempt += 1) {
       if (attempts[attempt] > 0) await sleepImpl(attempts[attempt]);
@@ -232,7 +244,17 @@ export GH_TOKEN="$HQ_ENTITLEMENT_GH_TOKEN" GITHUB_TOKEN="$HQ_ENTITLEMENT_GH_TOKE
       } catch (err) {
         const detail = githubAuthRecoveryErrorDetail(err);
         if (/(?:HTTP\s*404|not found \(HTTP 404\))/i.test(detail)) {
-          return { retried: true, pushed: false, reason: 'missing-pr-branch', attempts: attempt + 1 };
+          // GitHub also answers 404 when the minted token cannot see a private
+          // repo (App not installed, wrong entitlement class). That is not
+          // proof the branch is gone, so keep it apart from missing-pr-branch.
+          return {
+            retried: true,
+            pushed: false,
+            reason: 'pr-lookup-not-found',
+            attempts: attempt + 1,
+            workerClass: workerClass || null,
+            error: redactGithubAuthRecoveryDetail(detail).slice(0, 1200),
+          };
         }
         const transient = isTransientGitPushError(err);
         if (transient && attempt < attempts.length - 1) continue;
@@ -250,9 +272,23 @@ export GH_TOKEN="$HQ_ENTITLEMENT_GH_TOKEN" GITHUB_TOKEN="$HQ_ENTITLEMENT_GH_TOKE
   if (!targetBranch) {
     return { retried: false, pushed: false, reason: 'missing-pr-branch' };
   }
+  let expectedHead = String(expectedRemoteSha || '').trim();
+  if (!FULL_SHA_PATTERN.test(expectedHead)) {
+    // The worker's own last fetch of the PR branch, recorded in its checkout,
+    // is the head it built on. Prefer it over the reviewed revision, which is
+    // stale whenever the head moved between review and spawn.
+    try {
+      const tracked = await execFileImpl('git', ['-C', workspaceDir, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${targetBranch}^{commit}`]);
+      expectedHead = String(tracked.stdout || '').trim();
+    } catch { /* No tracking ref in this workspace. */ }
+  }
+  if (!FULL_SHA_PATTERN.test(expectedHead)) expectedHead = String(fallbackRemoteSha || '').trim();
+  if (!FULL_SHA_PATTERN.test(expectedHead)) {
+    return { retried: false, pushed: false, reason: 'missing-expected-remote-head' };
+  }
   const script = `
 set -euo pipefail
-source "${agentOsRoot}/modules/worker-pool/lib/hq-gh.sh"
+source "$AGENT_OS_ROOT/modules/worker-pool/lib/hq-gh.sh"
 unset GH_TOKEN GITHUB_TOKEN HQ_ENTITLEMENT_GH_TOKEN
 hq_resolve_worker_class_gh_token "$WORKER_CLASS"
 token="$HQ_ENTITLEMENT_GH_TOKEN"
@@ -261,11 +297,12 @@ if [[ -z "$token" && -n "\${HQ_ENTITLEMENT_GH_TOKEN_VAR:-}" ]]; then
 fi
 [[ -n "$token" ]]
 export GH_TOKEN="$token" GITHUB_TOKEN="$token" GIT_TERMINAL_PROMPT=0
-"${agentOsRoot}/modules/worker-pool/bin/git-safe" -C "$WORKSPACE_DIR" push "--force-with-lease=refs/heads/$TARGET_BRANCH:$EXPECTED_REMOTE_SHA" origin "$COMMIT_SHA:refs/heads/$TARGET_BRANCH"
+"$AGENT_OS_ROOT/modules/worker-pool/bin/git-safe" -C "$WORKSPACE_DIR" push "--force-with-lease=refs/heads/$TARGET_BRANCH:$EXPECTED_REMOTE_SHA" origin "$COMMIT_SHA:refs/heads/$TARGET_BRANCH"
 `;
   const options = {
     env: {
       ...env,
+      AGENT_OS_ROOT: agentOsRoot,
       WORKER_CLASS: workerClass || 'codex',
       WORKSPACE_DIR: workspaceDir,
       COMMIT_SHA: commitSha,
@@ -328,10 +365,7 @@ async function recoverGithubAuthOperationalBlocker({
   const authBlocker = findGithubAuthOperationalBlocker(reply);
   if (!authBlocker) return { operationalBlockerRecovery: null, rereview: null, job: null };
   const commitSha = extractCommitShaFromOperationalBlocker(authBlocker.blocker);
-  const expectedRemoteSha = authBlocker.blocker?.expectedRemoteSha
-    || job?.remediationWorker?.expectedRemoteSha
-    || job?.revisionRef
-    || null;
+  const expectedRemoteSha = authBlocker.blocker?.expectedRemoteSha || null;
   let rescue = null;
   try {
     rescue = await preserveUnpushedCommit({
@@ -366,6 +400,7 @@ async function recoverGithubAuthOperationalBlocker({
       prNumber: job.prNumber,
       commitSha: rescue.commitSha,
       expectedRemoteSha,
+      fallbackRemoteSha: job?.revisionRef || null,
       env,
       execFileImpl,
     });

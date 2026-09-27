@@ -299,6 +299,38 @@ import {
   waitForHandoffWake,
 } from '../src/handoff-wake.mjs';
 
+// Spawn tests pin HQ_REPO_ROOT so the adapter shape never depends on whether
+// this checkout happens to sit inside an agent-os superproject.
+function makeFakeAgentOsShimRoot() {
+  const root = mkdtempSync(path.join(tmpdir(), 'fake-agent-os-'));
+  const shims = path.join(root, 'modules/worker-pool/lib/shims');
+  mkdirSync(shims, { recursive: true });
+  for (const name of ['gh', 'git-safe']) {
+    writeFileSync(path.join(shims, name), '#!/bin/sh\nexit 0\n');
+    chmodSync(path.join(shims, name), 0o755);
+  }
+  return root;
+}
+
+function withAgentOsShimRoot(root, run) {
+  const prev = process.env.HQ_REPO_ROOT;
+  process.env.HQ_REPO_ROOT = root;
+  const restore = () => {
+    if (prev === undefined) delete process.env.HQ_REPO_ROOT;
+    else process.env.HQ_REPO_ROOT = prev;
+  };
+  let result;
+  try {
+    result = run();
+  } catch (err) {
+    restore();
+    throw err;
+  }
+  if (result && typeof result.then === 'function') return result.finally(restore);
+  restore();
+  return result;
+}
+
 function makeJob(overrides = {}) {
   return {
     jobId: 'laceyenterprises__clio-pr-7-2026-04-21T08-00-00-000Z',
@@ -3204,7 +3236,7 @@ test('prepareWorkspaceForJob does not pre-create remediation-reply.json in the w
   );
 });
 
-test('spawnCodexRemediationWorker sets WORKER_CLASS / WORKER_JOB_ID / WORKER_RUN_AT in spawn env', () => {
+test('spawnCodexRemediationWorker sets WORKER_CLASS / WORKER_JOB_ID / WORKER_RUN_AT in spawn env', () => withAgentOsShimRoot(makeFakeAgentOsShimRoot(), () => {
   const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const promptPath = path.join(workspaceDir, 'prompt.md');
   const outputPath = path.join(workspaceDir, 'codex-last-message.md');
@@ -3247,13 +3279,55 @@ test('spawnCodexRemediationWorker sets WORKER_CLASS / WORKER_JOB_ID / WORKER_RUN
     else process.env.CODEX_AUTH_PATH = prevAuthPath;
   }
 
-  assert.equal(capturedEnv.WORKER_CLASS, capturedEnv.WORKER_TRAILER_CLASS ? 'codex' : REMEDIATION_WORKER_TRAILER_CLASS);
-  if (capturedEnv.WORKER_TRAILER_CLASS) assert.equal(capturedEnv.WORKER_TRAILER_CLASS, REMEDIATION_WORKER_TRAILER_CLASS);
+  assert.equal(capturedEnv.WORKER_CLASS, 'codex');
+  assert.equal(capturedEnv.WORKER_TRAILER_CLASS, REMEDIATION_WORKER_TRAILER_CLASS);
   assert.equal(capturedEnv.WORKER_JOB_ID, 'job-abc-123');
   assert.equal(capturedEnv.WORKER_RUN_AT, '2026-05-01T20:00:00Z');
-});
+}));
 
-test('spawnCodexRemediationWorker omits WORKER_JOB_ID when no jobId is provided', () => {
+test('spawnCodexRemediationWorker keeps the legacy provenance class when HQ_REPO_ROOT has no shims', () => withAgentOsShimRoot(path.join(tmpdir(), 'missing-agent-os-root'), () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const promptPath = path.join(workspaceDir, 'prompt.md');
+  const codexHome = path.join(workspaceDir, '.codex');
+  const authPath = path.join(codexHome, 'auth.json');
+  mkdirSync(codexHome, { recursive: true });
+  writeFileSync(promptPath, 'Fix the bug.\n', 'utf8');
+  writeFileSync(authPath, JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: 'a', refresh_token: 'b' } }), 'utf8');
+  const prevHome = process.env.HOME;
+  const prevCodexHome = process.env.CODEX_HOME;
+  const prevAuthPath = process.env.CODEX_AUTH_PATH;
+  process.env.HOME = workspaceDir;
+  process.env.CODEX_HOME = codexHome;
+  process.env.CODEX_AUTH_PATH = authPath;
+  let capturedEnv;
+  try {
+    spawnCodexRemediationWorker({
+      workspaceDir,
+      promptPath,
+      outputPath: path.join(workspaceDir, 'codex-last-message.md'),
+      logPath: path.join(workspaceDir, 'codex.log'),
+      ...testReplyContext(),
+      jobId: 'job-no-shims',
+      now: () => '2026-05-01T20:00:00Z',
+      spawnImpl: (_cmd, _args, opts) => {
+        capturedEnv = opts.env;
+        return { pid: 999, unref() {} };
+      },
+    });
+  } finally {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    if (prevCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = prevCodexHome;
+    if (prevAuthPath === undefined) delete process.env.CODEX_AUTH_PATH;
+    else process.env.CODEX_AUTH_PATH = prevAuthPath;
+  }
+  assert.equal(capturedEnv.WORKER_CLASS, REMEDIATION_WORKER_TRAILER_CLASS);
+  assert.equal(capturedEnv.WORKER_TRAILER_CLASS, undefined);
+  assert.equal(capturedEnv.HQ_ENTITLEMENT_GH_TOKEN_VAR, undefined);
+}));
+
+test('spawnCodexRemediationWorker omits WORKER_JOB_ID when no jobId is provided', () => withAgentOsShimRoot(makeFakeAgentOsShimRoot(), () => {
   const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const promptPath = path.join(workspaceDir, 'prompt.md');
   const outputPath = path.join(workspaceDir, 'codex-last-message.md');
@@ -3292,10 +3366,10 @@ test('spawnCodexRemediationWorker omits WORKER_JOB_ID when no jobId is provided'
   }
 
   // WORKER_CLASS still set, WORKER_JOB_ID absent.
-  assert.equal(capturedEnv.WORKER_CLASS, capturedEnv.WORKER_TRAILER_CLASS ? 'codex' : REMEDIATION_WORKER_TRAILER_CLASS);
-  if (capturedEnv.WORKER_TRAILER_CLASS) assert.equal(capturedEnv.WORKER_TRAILER_CLASS, REMEDIATION_WORKER_TRAILER_CLASS);
+  assert.equal(capturedEnv.WORKER_CLASS, 'codex');
+  assert.equal(capturedEnv.WORKER_TRAILER_CLASS, REMEDIATION_WORKER_TRAILER_CLASS);
   assert.equal(Object.prototype.hasOwnProperty.call(capturedEnv, 'WORKER_JOB_ID'), false);
-});
+}));
 
 // ── worker-class dispatcher (cross-model remediation; adversarial default) ─
 
@@ -3575,6 +3649,7 @@ test('remediation runtime local mode preserves the claude-code-remediation prove
       PATH: process.env.PATH,
       HOME: workspaceDir,
       AGENT_OS_DEPLOY_CHECKOUT: path.join(workspaceDir, 'missing-seed'),
+      HQ_REPO_ROOT: makeFakeAgentOsShimRoot(),
     },
     spawnImpl: (cmd, args, options) => {
       invokedCli = cmd;
@@ -3591,7 +3666,8 @@ test('remediation runtime local mode preserves the claude-code-remediation prove
 
   assert.equal(handle.worker.model, 'claude-code');
   assert.match(invokedCli, /claude/);
-  assert.equal(invokedEnv.WORKER_CLASS, invokedEnv.WORKER_TRAILER_CLASS ? 'claude-code' : 'claude-code-remediation');
+  assert.equal(invokedEnv.WORKER_CLASS, 'claude-code');
+  assert.equal(invokedEnv.WORKER_TRAILER_CLASS, 'claude-code-remediation');
   // Claude Code is invoked in --print + acceptEdits + skip-permissions so
   // the worker can edit files AND run git/bash commands non-interactively.
   // Without --dangerously-skip-permissions, shell commands gate on an
@@ -3853,7 +3929,7 @@ test('spawnGeminiRemediationWorker honors a pinned gemini model in argv', () => 
   ]);
 });
 
-test('spawnGeminiRemediationWorker stamps the gemini-remediation provenance trailer class', () => {
+test('spawnGeminiRemediationWorker stamps the gemini-remediation provenance trailer class', () => withAgentOsShimRoot(makeFakeAgentOsShimRoot(), () => {
   const { workspaceDir, promptPath, outputPath, logPath } = setupGeminiSpawn();
 
   const prevHome = process.env.HOME;
@@ -3882,10 +3958,11 @@ test('spawnGeminiRemediationWorker stamps the gemini-remediation provenance trai
   // Provenance trailer class is `gemini-remediation` (distinct from the
   // `gemini` model class), mirroring `codex-remediation`.
   assert.equal(GEMINI_REMEDIATION_WORKER_TRAILER_CLASS, 'gemini-remediation');
-  assert.equal(capturedEnv.WORKER_CLASS, capturedEnv.WORKER_TRAILER_CLASS ? 'gemini' : 'gemini-remediation');
+  assert.equal(capturedEnv.WORKER_CLASS, 'gemini');
+  assert.equal(capturedEnv.WORKER_TRAILER_CLASS, 'gemini-remediation');
   assert.equal(capturedEnv.WORKER_JOB_ID, 'job-gem-2');
   assert.equal(capturedEnv.WORKER_RUN_AT, '2026-06-17T20:00:00Z');
-});
+}));
 
 test('spawnGeminiRemediationWorker scrubs Gemini API, ADC, and Vertex credentials from the spawn env', () => {
   const { workspaceDir, promptPath, outputPath, logPath } = setupGeminiSpawn();
@@ -4251,7 +4328,7 @@ test('resolveClaudeCodeCliPath honors CLAUDE_CODE_CLI_PATH override', () => {
   }
 });
 
-test('spawnClaudeCodeRemediationWorker sets WORKER_CLASS to claude-code-remediation by default', () => {
+test('spawnClaudeCodeRemediationWorker sets WORKER_CLASS to claude-code-remediation by default', () => withAgentOsShimRoot(makeFakeAgentOsShimRoot(), () => {
   const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const promptPath = path.join(workspaceDir, 'prompt.md');
   const outputPath = path.join(workspaceDir, 'last-msg.md');
@@ -4273,7 +4350,8 @@ test('spawnClaudeCodeRemediationWorker sets WORKER_CLASS to claude-code-remediat
     },
   });
 
-  assert.equal(capturedEnv.WORKER_CLASS, capturedEnv.WORKER_TRAILER_CLASS ? 'claude-code' : 'claude-code-remediation');
+  assert.equal(capturedEnv.WORKER_CLASS, 'claude-code');
+  assert.equal(capturedEnv.WORKER_TRAILER_CLASS, 'claude-code-remediation');
   assert.equal(capturedEnv.WORKER_JOB_ID, 'claude-code-job-xyz');
   assert.equal(capturedEnv.WORKER_RUN_AT, '2026-05-01T21:00:00Z');
   assert.equal(worker.processGroupId, 333);
@@ -4283,7 +4361,7 @@ test('spawnClaudeCodeRemediationWorker sets WORKER_CLASS to claude-code-remediat
     worker.replyPath,
     resolveHqReplyPath({ hqRoot: TEST_HQ_ROOT, launchRequestId: TEST_LAUNCH_REQUEST_ID }).replyPath
   );
-});
+}));
 
 // ── Claude Code auth pre-flight (`claude auth status --json`) ─────────────
 
@@ -7350,7 +7428,7 @@ test('reconcileFollowUpJob reaps over-cap HQ remediators when dispatch status is
 
 // ── consumeNextFollowUpJob end-to-end regression ────────────────────────────
 
-test('consumeNextFollowUpJob threads claimed jobId through to the spawned worker without ReferenceError', async () => {
+test('consumeNextFollowUpJob threads claimed jobId through to the spawned worker without ReferenceError', () => withAgentOsShimRoot(makeFakeAgentOsShimRoot(), async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
 
   // Stand up a pending follow-up job in the queue.
@@ -7438,7 +7516,8 @@ test('consumeNextFollowUpJob threads claimed jobId through to the spawned worker
       // without throwing AND the spawned env carries the job's id under
       // WORKER_JOB_ID, we know the threading is correct.
       assert.equal(capturedSpawnEnv.WORKER_JOB_ID, created.job.jobId);
-      assert.equal(capturedSpawnEnv.WORKER_CLASS, capturedSpawnEnv.WORKER_TRAILER_CLASS ? 'codex' : REMEDIATION_WORKER_TRAILER_CLASS);
+      assert.equal(capturedSpawnEnv.WORKER_CLASS, 'codex');
+      assert.equal(capturedSpawnEnv.WORKER_TRAILER_CLASS, REMEDIATION_WORKER_TRAILER_CLASS);
       assert.equal(
         result.job.remediationWorker.replyPath,
         path.join(
@@ -7461,7 +7540,7 @@ test('consumeNextFollowUpJob threads claimed jobId through to the spawned worker
       else process.env[k] = prev[k];
     }
   }
-});
+}));
 
 test('consumeNextFollowUpJob invokes oss-readiness --apply once, commits the mechanical fix, and records evidence', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));

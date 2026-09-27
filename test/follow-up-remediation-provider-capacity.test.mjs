@@ -88,6 +88,29 @@ test('missing artifact without capacity still fails as artifact-missing-completi
   assert.equal(result.job.failure.code, 'artifact-missing-completion');
 });
 
+test('recovered Codex capacity error followed by turn completion remains an artifact failure', async () => {
+  const { result } = await reconcileDeadWorker(
+    '{"type":"error","message":"unexpected status 503 from provider"}\n'
+      + '{"type":"turn.completed","usage":{"input_tokens":1}}\n'
+  );
+  assert.equal(result.reconciled, true);
+  assert.equal(result.job.failure.code, 'artifact-missing-completion');
+});
+
+test('retried Claude capacity error followed by normal output remains an artifact failure', async () => {
+  const { result } = await reconcileDeadWorker('API Error: 529 overloaded · Retrying...\nCompleted task.\n');
+  assert.equal(result.reconciled, true);
+  assert.equal(result.job.failure.code, 'artifact-missing-completion');
+});
+
+test('successful Claude result closes the capacity scan', async () => {
+  const { result } = await reconcileDeadWorker(
+    '{"type":"error","message":"API Error: 529 overloaded"}\n'
+      + '{"type":"result","is_error":false,"result":"done"}\n'
+  );
+  assert.equal(result.job.failure.code, 'artifact-missing-completion');
+});
+
 test('unrelated error event does not match provider capacity', () => {
   assert.equal(hasTerminalProviderCapacitySignal('{"type":"error","message":"Invalid request"}'), false);
   assert.equal(hasTerminalProviderCapacitySignal('{"type":"turn.failed","error":{"message":"Invalid request"}}'), false);
@@ -103,6 +126,12 @@ test('structured status codes and plain stderr overload signals match', () => {
   }
   assert.equal(hasTerminalProviderCapacitySignal('API Error 529: overloaded_error'), true);
   assert.equal(hasTerminalProviderCapacitySignal('Claude provider is overloaded'), true);
+});
+
+test('bare PR and source line numbers do not count as capacity diagnostics', () => {
+  for (const line of ['pull/529', '#529', 'file.mjs:529']) {
+    assert.equal(hasTerminalProviderCapacitySignal(line), false);
+  }
 });
 
 test('capacity with empty completion artifact still requeues', async () => {

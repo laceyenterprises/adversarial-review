@@ -6,16 +6,17 @@ export async function settleMissingRemediationArtifact({
   liveness, logText, resumeImpossible, maxRetries, hqDispatchSucceeded, now, log, postCommentImpl,
   buildCommentDelivery, postOutcomeComment,
 }) {
-  const capacity = hasTerminalProviderCapacitySignal(logText);
+  const capacity = (worker?.dispatchMode !== 'hq' || hqDispatchSucceeded)
+    && hasTerminalProviderCapacitySignal(logText);
   const nextRetry = Number(job?.remediationPlan?.transientRetries || 0) + 1;
   if (capacity && nextRetry <= maxRetries) {
-    const retryAfter = new Date(Date.parse(completedAt) + 5 * 60_000).toISOString();
-    const retryReason = `Provider capacity or overload interrupted remediation; retry ${nextRetry}/${maxRetries} after ${retryAfter}.`;
+    const retryReason = `Provider capacity or overload interrupted remediation; retry ${nextRetry}/${maxRetries} after backoff.`;
     const requeued = requeueInProgressFollowUpJobForRetry({
       rootDir, jobPath, requeuedAt: completedAt, retryReason,
-      retryAfterOverride: retryAfter, allowDirectWorkerRetry: true,
+      allowDirectWorkerRetry: true,
       retryMetadata: { code: 'provider-capacity', logPath: worker.logPath || null },
     });
+    const retryAfter = requeued.job.remediationPlan.retryAfter;
     log?.log?.(`[follow-up-remediation] Requeued ${job.repo}#${job.prNumber} -> provider-capacity until ${retryAfter}`);
     return { action: 'requeued', reason: 'provider-capacity', job: requeued.job, jobPath: requeued.jobPath };
   }

@@ -969,7 +969,7 @@ function resolveReviewerExecution(harness, { env = process.env, fallbackModel = 
   const resolution = resolveRemediationModel(`${harness}-reviewer`, { env, fallbackModel });
   const model = resolution.modelSource === 'fallback-constant' ? fallbackModel : resolution.resolvedModel;
   const effort = resolution.resolvedReasoningLevel || fallbackEffort;
-  const modelSource = resolution.modelSource === 'fallback-constant' ? 'host-config' : resolution.modelSource;
+  const modelSource = resolution.modelSource === 'fallback-constant' ? (fallbackModel ? 'host-config' : 'cli-default') : resolution.modelSource;
   const effortSource = resolution.resolvedReasoningLevel ? resolution.reasoningSource : (fallbackEffort ? 'host-config' : 'none');
   log.info?.(`[reviewer-harness] ${harness} model=${model || 'default'} source=${modelSource}; effort=${effort || 'none'} source=${effortSource}`);
   return { model, effort, modelSource, effortSource };

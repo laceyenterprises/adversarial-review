@@ -432,7 +432,11 @@ test('remediation spawners use governed models and reasoning from the HQ mirror'
       const record = spawn(shared);
       assert.deepEqual(record.command, calls.at(-1));
       assert.equal(record.modelSource, 'registry-mirror');
-      assert.equal(record.reasoningSource, 'registry-mirror');
+      assert.equal(record.reasoningSource, spawn === spawnGeminiRemediationWorker
+        ? 'unsupported' : 'registry-mirror');
+      if (spawn === spawnGeminiRemediationWorker) {
+        assert.equal(record.resolvedReasoningLevel, null);
+      }
     }
     assert.deepEqual(calls[0].slice(1, 6), ['exec', '--model', 'gpt-6-sol', '-c', 'model_reasoning_effort=xhigh']);
     assert.deepEqual(calls[1].slice(-4), ['--model', 'claude-opus-5-5', '--effort', 'xhigh']);

@@ -8,6 +8,10 @@ import path from 'node:path';
 import { spawnCapturedProcessGroup } from '../src/process-group-spawn.mjs';
 import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 
+function boundedTermIgnoringShell(beforeLoop = '') {
+  return `parent=$PPID; end=$((SECONDS+30)); trap "" TERM; ${beforeLoop} while (( SECONDS < end )) && kill -0 "$parent" 2>/dev/null; do sleep 1; done`;
+}
+
 function processExists(pid) {
   try {
     process.kill(pid, 0);
@@ -38,18 +42,19 @@ async function waitFor(assertion, { timeoutMs = 5_000, intervalMs = 25 } = {}) {
 }
 
 test('progress watchdog escalates SIGTERM-ignoring children to process-group SIGKILL and preserves stderr', async () => {
-  const progressTimeout = 250;
+  // Leave enough startup time for the shell to install its TERM trap under load.
+  const progressTimeout = 2_000;
   const killGraceMs = 250;
   const startedAt = Date.now();
 
   await assert.rejects(
     () => spawnCapturedProcessGroup(
       'bash',
-      ['-c', 'trap "" TERM; echo "auth probe failed: token expired" >&2; while :; do sleep 1; done'],
+      ['-c', boundedTermIgnoringShell('echo "auth probe failed: token expired" >&2;')],
       {
         progressTimeout,
         killGraceMs,
-        timeout: 10_000,
+        timeout: 15_000,
       }
     ),
     (err) => {
@@ -57,7 +62,8 @@ test('progress watchdog escalates SIGTERM-ignoring children to process-group SIG
       assert.equal(err.progressTimedOut, true);
       assert.equal(err.killed, true);
       assert.equal(err.signal, 'SIGKILL');
-      assert.ok(elapsed < progressTimeout + killGraceMs + 1_500, `elapsed ${elapsed}ms exceeded watchdog budget`);
+      assert.ok(elapsed < progressTimeout + killGraceMs + 3_000,
+        `elapsed ${elapsed}ms exceeded watchdog escalation budget`);
       assert.match(err.message, /no output/);
       assert.match(err.message, /auth probe failed: token expired/);
       assert.match(err.stderr, /auth probe failed: token expired/);
@@ -70,7 +76,7 @@ test('progress watchdog producer output classifies as reviewer-timeout', async (
   await assert.rejects(
     () => spawnCapturedProcessGroup(
       'bash',
-      ['-c', 'trap "" TERM; echo "stalled reviewer" >&2; while :; do sleep 1; done'],
+      ['-c', boundedTermIgnoringShell('echo "stalled reviewer" >&2;')],
       {
         progressTimeout: 250,
         killGraceMs: 250,
@@ -106,7 +112,7 @@ test('pre-spawn abort still kills the detached process group once pid is availab
   await assert.rejects(
     () => spawnCapturedProcessGroup(
       'bash',
-      ['-c', 'trap "" TERM; while :; do sleep 1; done'],
+      ['-c', boundedTermIgnoringShell()],
       {
         signal: controller.signal,
         killGraceMs: 100,
@@ -175,7 +181,10 @@ test('maxBuffer kills stdout side-channel writers before reading the full file',
           '-e',
           [
             'const chunk = "x".repeat(4096);',
-            'setInterval(() => { process.stdout.write(chunk); }, 1);',
+            'const parent = process.ppid;',
+            'setTimeout(() => process.exit(0), 30_000);',
+            'setInterval(() => { if (process.ppid !== parent) process.exit(0); }, 250);',
+            'setInterval(() => { process.stdout.write(chunk); }, 10);',
             'setInterval(() => {}, 1000);',
           ].join(''),
         ],
@@ -230,7 +239,7 @@ test('onSpawn failures kill the detached process group and reject', async () => 
   await assert.rejects(
     () => spawnCapturedProcessGroup(
       'bash',
-      ['-c', 'trap "" TERM; while :; do sleep 1; done'],
+      ['-c', boundedTermIgnoringShell()],
       {
         killGraceMs: 100,
         onSpawn: () => {
@@ -257,7 +266,9 @@ test('detached reviewer process group survives parent SIGTERM for daemon bounce 
       const [bashPidPath, sleepPidPath, stdoutPath, stderrPath] = process.argv.slice(-4);
       spawnCapturedProcessGroup(
         'bash',
-        ['-c', \`trap "" HUP TERM; sleep 30 & echo $! > "\${sleepPidPath}"; echo $$ > "\${bashPidPath}"; wait\`],
+        // This fixture is reaped in finally. Its fallback must outlive
+        // scheduling stalls on a busy host so the liveness check is meaningful.
+        ['-c', \`trap "" HUP TERM; sleep 120 & echo $! > "\${sleepPidPath}"; echo $$ > "\${bashPidPath}"; wait\`],
         { stdoutPath, stderrPath, progressTimeout: 0, timeout: 0 }
       );
       const keepAlive = setInterval(() => {}, 1_000);

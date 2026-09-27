@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { fixtureLifetime, killFixtureChild } from './helpers/fixture-child.mjs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -51,7 +52,7 @@ test('posted reviewer cleanup findings persist and clear after a later dead prob
   assert.doesNotThrow(() => cleanupFindingPath(rootDir, 'session-6917'));
 });
 
-test('cleanup finding recheck matches a live production probe', async (t) => {
+test('cleanup finding recheck passes the live process group and session to its probe', async (t) => {
   const psProbe = spawnSync('/bin/ps', ['-p', String(process.pid), '-o', 'command='], { encoding: 'utf8' });
   if (psProbe.error || psProbe.status !== 0 || !psProbe.stdout?.trim()) {
     t.skip('worker sandbox blocks process introspection required by the production probe');
@@ -61,10 +62,9 @@ test('cleanup finding recheck matches a live production probe', async (t) => {
   const sessionUuid = `cleanup-finding-${process.pid}-${Date.now()}`;
   const child = spawn(
     process.execPath,
-    ['-e', `setTimeout(() => {}, 30_000); // ${sessionUuid}`],
+    ['-e', `${fixtureLifetime} setTimeout(() => {}, 30_000); // ${sessionUuid}`],
     { detached: true, stdio: 'ignore' }
   );
-  child.unref();
   try {
     writeReviewerCleanupFinding(rootDir, {
       repo: 'laceyenterprises/agent-os',
@@ -75,6 +75,16 @@ test('cleanup finding recheck matches a live production probe', async (t) => {
       postedAt: '2026-09-20T06:29:34Z',
     });
 
+    let psCommand;
+    try {
+      psCommand = execFileSync('ps', ['-p', String(child.pid), '-o', 'command='], {
+        encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+      });
+    } catch {
+      t.skip('worker sandbox cannot inspect the spawned child with ps');
+      return;
+    }
+    assert.ok(psCommand.includes(sessionUuid), 'ps omitted the child session UUID');
     const result = recheckReviewerCleanupFindings({
       rootDir,
       log: { warn() {} },
@@ -83,9 +93,8 @@ test('cleanup finding recheck matches a live production probe', async (t) => {
     assert.equal(result.stillAlive, 1);
     assert.equal(readReviewerCleanupFindings(rootDir)[0].matched, true);
   } finally {
-    try {
-      process.kill(-child.pid, 'SIGTERM');
-    } catch {}
+    await killFixtureChild(child);
+    rmSync(rootDir, { recursive: true, force: true });
   }
 });
 

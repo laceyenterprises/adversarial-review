@@ -13,6 +13,7 @@ function fixtureEnv(overrides = {}) {
   return {
     ...process.env,
     GITHUB_TOKEN: 'fixture-token',
+    AGENT_OS_HQ_BIN: '/usr/bin/false',
     GH_CLAUDE_REVIEWER_TOKEN: '',
     GH_CODEX_REVIEWER_TOKEN: '',
     GH_GEMINI_REVIEWER_TOKEN: '',

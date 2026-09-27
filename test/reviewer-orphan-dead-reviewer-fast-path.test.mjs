@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
 import { spawn } from 'node:child_process';
+import { killFixtureChild } from './helpers/fixture-child.mjs';
 
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { prepareMarkAttemptStarted } from '../src/review-state-statements.mjs';
@@ -93,22 +94,15 @@ function makeLog() {
 // A detached child is its own process-group leader (setsid), so child.pid == pgid
 // and probeReviewerProcessGroupAlive(child.pid) exercises the real kill(-pgid,0).
 function spawnAlivePgid(t) {
-  const child = spawn('sleep', ['120'], { detached: true, stdio: 'ignore' });
-  child.unref();
-  t.after(() => {
-    try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already gone */ }
-  });
+  const child = spawn('bash', ['-c', 'parent=$PPID; end=$((SECONDS+30)); while (( SECONDS < end )) && kill -0 "$parent" 2>/dev/null; do sleep 0.25; done'], { detached: true, stdio: 'ignore' });
+  t.after(() => killFixtureChild(child));
   return child.pid;
 }
 
 async function makeDeadPgid() {
-  const child = spawn('sleep', ['120'], { detached: true, stdio: 'ignore' });
-  const pid = child.pid;
-  await new Promise((resolve) => {
-    child.once('exit', resolve);
-    try { process.kill(-pid, 'SIGKILL'); } catch { process.kill(pid, 'SIGKILL'); }
-  });
-  return pid;
+  const child = spawn('bash', ['-c', 'parent=$PPID; end=$((SECONDS+30)); while (( SECONDS < end )) && kill -0 "$parent" 2>/dev/null; do sleep 0.25; done'], { detached: true, stdio: 'ignore' });
+  await killFixtureChild(child);
+  return child.pid;
 }
 
 test('terminal PRs reconcile active reviewers immediately despite a live lease', () => {

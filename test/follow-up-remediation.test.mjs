@@ -4018,7 +4018,8 @@ test('buildRemediationPrompt embeds the gemini provenance trailer for the hq-dis
     ...testReplyContext(),
     workerTrailerClass: 'gemini-remediation',
   });
-  assert.match(prompt, /WORKER_CLASS=gemini-remediation/);
+  assert.match(prompt, /WORKER_TRAILER_CLASS=gemini-remediation/);
+  assert.doesNotMatch(prompt, /(?:^|\s)WORKER_CLASS=/);
   assert.doesNotMatch(prompt, /WORKER_CLASS=codex-remediation/);
 });
 
@@ -4027,7 +4028,9 @@ test('buildRemediationPrompt defaults the provenance trailer to codex-remediatio
     template: 'You are a remediation worker.',
     ...testReplyContext(),
   });
-  assert.match(prompt, /WORKER_CLASS=codex-remediation/);
+  assert.match(prompt, /WORKER_TRAILER_CLASS=codex-remediation/);
+  assert.doesNotMatch(prompt, /(?:^|\s)WORKER_CLASS=/);
+  assert.match(prompt, /git push.*otherwise|otherwise.*git push/);
 });
 
 test('resolveGeminiRemediationModel defaults to gemini-2.5-pro and honors overrides', () => {
@@ -7902,7 +7905,7 @@ test('consumeNextFollowUpJob dispatches remediation through hq branch-push when 
       assert.equal(dispatchRequest.body.project, 'adversarial-review');
       assert.equal(dispatchRequest.body.branch, 'codex/fix-pr-71');
       const prompt = readFileSync(path.join(rootDir, result.job.remediationWorker.promptPath), 'utf8');
-      assert.match(prompt, /WORKER_CLASS=codex-remediation/);
+      assert.match(prompt, /WORKER_TRAILER_CLASS=codex-remediation/);
     }));
   } finally {
     for (const [key, value] of Object.entries(previous)) {
@@ -8277,7 +8280,7 @@ test('consumeNextFollowUpJob dispatches gemini through broker-backed hq without 
       // The prompt carries the gemini provenance trailer so the worker-pool
       // worker stamps gemini-remediation, not codex-remediation.
       const prompt = readFileSync(path.join(rootDir, result.job.remediationWorker.promptPath), 'utf8');
-      assert.match(prompt, /WORKER_CLASS=gemini-remediation/);
+      assert.match(prompt, /WORKER_TRAILER_CLASS=gemini-remediation/);
       assert.doesNotMatch(prompt, /WORKER_CLASS=codex-remediation/);
     }));
   } finally {

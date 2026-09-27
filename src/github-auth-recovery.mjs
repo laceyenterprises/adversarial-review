@@ -358,8 +358,7 @@ async function recoverGithubAuthOperationalBlocker({
   if (authBlocker.classification.kind === 'recoverable' && rescue?.preserved) {
     retry = await retryGithubAuthPushOnce({
       workspaceDir,
-      workerClass: worker?.pushTokenCapability?.workflowTouch?.touches
-        || worker?.startupEvidence?.mergeAgentBroker?.requiresWorkflowPush
+      workerClass: worker?.startupEvidence?.mergeAgentBroker?.requiresWorkflowPush
         ? 'merge-agent'
         : resolveWorkerClass(job, worker),
       branch: job.branch,

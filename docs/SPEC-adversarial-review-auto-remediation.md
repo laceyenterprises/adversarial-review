@@ -595,12 +595,18 @@ the HQ path must not require an operator-local `~/.gemini/oauth_creds.json`
 before dispatch. The direct worker carries `WORKER_CLASS=gemini` for the GitHub
 adapter and `WORKER_TRAILER_CLASS=gemini-remediation` for commit provenance.
 The same split applies to Codex and Claude Code remediation. When workflow
-files require the merge-agent App, the adapter class is `merge-agent` while
-the commit trailer retains the physical remediation harness.
+files require the merge-agent App and
+`ADVERSARIAL_REMEDIATION_WORKFLOW_PUSH_ESCALATE_TO_MERGE_AGENT` is not `false`,
+the adapter class is `merge-agent` while the commit trailer retains the physical
+remediation harness. The kill switch keeps the physical harness entitlement in
+both the direct worker and auth recovery.
 
 Direct remediation workers put the agent-os `gh` and `git-safe` shims first on
-PATH. `git-safe push` refreshes the worker entitlement at push time; the
-remediation prompt requires that command. Follow-up jobs retain the PR head
+PATH when those shims are available. `git-safe push` refreshes the worker
+entitlement at push time. Without the shims, the worker retains its inherited
+PATH and the prompt directs it to use `git push`; each such spawn logs a warning.
+The prompt leaves `WORKER_CLASS` intact and uses `WORKER_TRAILER_CLASS` for commit
+provenance. Follow-up jobs retain the PR head
 branch from reviewer metadata. GitHub-auth recovery can recover a missing
 branch from the checkout or `gh pr view`; transient `gh` failures get bounded
 retries, while a definitive 404 or absent head branch reports a missing branch.

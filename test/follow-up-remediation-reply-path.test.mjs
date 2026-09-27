@@ -559,6 +559,9 @@ test('recoverable GitHub-auth retry routes unmapped worker identities through th
     spawnedAt: '2026-05-04T09:01:00.000Z',
     worker: {
       model: 'clio-agent',
+      // The review touched workflows, but the operator disabled escalation.
+      pushTokenCapability: { workflowTouch: { touches: true } },
+      startupEvidence: { mergeAgentBroker: { requiresWorkflowPush: false } },
       processId: 9003,
       state: 'spawned',
       workspaceDir: path.relative(rootDir, workspaceDir),

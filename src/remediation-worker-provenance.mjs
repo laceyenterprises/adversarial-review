@@ -76,7 +76,8 @@ const WORKFLOW_PUSH_PROVIDER = 'github-app-merge-agent';
 const REMEDIATION_PUSH_CAPABLE_HARNESSES = new Set(['codex', 'claude-code', 'gemini']);
 
 // Resolve the broker push provider for a physical harness class. Precedence:
-//   1. workflow-file remediation requirement -> merge-agent App
+//   1. workflow-file remediation requirement -> merge-agent App, unless the
+//      operator disabled workflow-push escalation
 //   2. explicit per-harness override env OAUTH_BROKER_REMEDIATION_<CLASS>_PROVIDER
 //      (rotation / staging; still binds the push to THIS harness, so honored).
 //   3. the per-harness default, iff the harness is known push-capable.
@@ -88,8 +89,9 @@ const REMEDIATION_PUSH_CAPABLE_HARNESSES = new Set(['codex', 'claude-code', 'gem
 // was the #5058 bug vector (a fixed merge-agent provider hijacking every
 // harness) and is replaced by this harness-keyed resolution.
 function remediationWorkerPushProvider(workerClass, env = process.env, { requiresWorkflowPush = false } = {}) {
-  const workflowPushRequired = requiresWorkflowPush
-    || String(env.ADVERSARIAL_REMEDIATION_WORKER_REQUIRES_WORKFLOW_PUSH || '').trim().toLowerCase() === 'true';
+  const workflowPushRequired = String(env.ADVERSARIAL_REMEDIATION_WORKFLOW_PUSH_ESCALATE_TO_MERGE_AGENT || '').trim().toLowerCase() !== 'false'
+    && (requiresWorkflowPush
+      || String(env.ADVERSARIAL_REMEDIATION_WORKER_REQUIRES_WORKFLOW_PUSH || '').trim().toLowerCase() === 'true');
   if (workflowPushRequired) {
     return {
       provider: WORKFLOW_PUSH_PROVIDER,

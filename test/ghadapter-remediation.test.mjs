@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { installWorkerAdapterEnv } from '../src/adapters/agent-runtime/local/remediation.mjs';
+import { applyMergeAgentBrokerEnv, installWorkerAdapterEnv } from '../src/adapters/agent-runtime/local/remediation.mjs';
 import { retryGithubAuthPushOnce } from '../src/github-auth-recovery.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -46,10 +46,43 @@ test('each remediation harness resolves gh and git-safe from the agent-os shims'
     }
   }
   const workflowEnv = { PATH: '/usr/bin:/bin' };
-  installWorkerAdapterEnv(workflowEnv, { HQ_REPO_ROOT: root }, 'codex', 'codex-remediation', 'example/repo', console, true);
+  installWorkerAdapterEnv(workflowEnv, { HQ_REPO_ROOT: root }, 'codex', 'codex-remediation', 'example/repo', console, { requiresWorkflowPush: true });
   assert.equal(workflowEnv.WORKER_CLASS, 'merge-agent');
   assert.equal(workflowEnv.HQ_ENTITLEMENT_GH_TOKEN_VAR, 'MERGE_AGENT_GH_TOKEN');
   assert.equal(workflowEnv.WORKER_TRAILER_CLASS, 'codex-remediation');
+});
+
+test('workflow-push kill switch keeps the physical worker entitlement', () => {
+  const { root } = fakeAgentOs();
+  const sourceEnv = {
+    HQ_REPO_ROOT: root,
+    MERGE_AGENT_AUTH_VIA_BROKER: 'true',
+    ADVERSARIAL_REMEDIATION_WORKFLOW_PUSH_ESCALATE_TO_MERGE_AGENT: 'false',
+    ADVERSARIAL_REMEDIATION_WORKER_REQUIRES_WORKFLOW_PUSH: 'true',
+  };
+  const env = { PATH: '/usr/bin:/bin' };
+  const evidence = applyMergeAgentBrokerEnv(env, sourceEnv, { workerClass: 'codex', requiresWorkflowPush: true });
+  installWorkerAdapterEnv(env, sourceEnv, 'codex', 'codex-remediation', 'example/repo', console, evidence);
+  assert.equal(Boolean(evidence.requiresWorkflowPush), false);
+  assert.equal(evidence.provider, 'github-app-codex-agent');
+  assert.equal(env.WORKER_CLASS, 'codex');
+  assert.equal(env.HQ_ENTITLEMENT_GH_TOKEN_VAR, 'CODEX_WORKER_GH_TOKEN');
+});
+
+test('missing shims warn on every spawn and do not claim a fresh token mint', () => {
+  const sourceEnv = { HQ_REPO_ROOT: '/nonexistent/agent-os' };
+  const warnings = [];
+  const log = { warn: (message) => warnings.push(message) };
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const env = { PATH: '/usr/bin:/bin', WORKER_CLASS: 'codex-remediation' };
+    installWorkerAdapterEnv(env, sourceEnv, 'codex', 'codex-remediation', 'example/repo', log);
+    assert.equal(env.WORKER_CLASS, 'codex-remediation');
+  }
+  assert.equal(warnings.length, 2);
+  const { root } = fakeAgentOs();
+  const env = { PATH: '/usr/bin:/bin', HQ_WORKER_TOKEN_MINTED_AT: 'stale-value' };
+  installWorkerAdapterEnv(env, { HQ_REPO_ROOT: root }, 'codex', 'codex-remediation', 'example/repo');
+  assert.equal(env.HQ_WORKER_TOKEN_MINTED_AT, undefined);
 });
 
 test('worker git-safe push replaces an expired spawn token through the credential helper', () => {

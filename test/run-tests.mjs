@@ -8,11 +8,17 @@ import { fileURLToPath } from 'node:url';
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.dirname(testDir);
 const checkoutDataDir = path.join(repoRoot, 'data');
+const callerTmpDir = tmpdir();
+const callerTmpBefore = new Set(readdirSync(callerTmpDir));
 // Leave room under the macOS 104-byte Unix socket path limit for nested fixtures.
-const tempBase = Buffer.byteLength(realpathSync(tmpdir())) > 60 ? '/tmp' : tmpdir();
+const tempBase = Buffer.byteLength(realpathSync(callerTmpDir)) > 60 ? '/tmp' : callerTmpDir;
 const sandboxRoot = realpathSync(mkdtempSync(path.join(tempBase, 'art-')));
 const sandboxTmpDir = path.join(sandboxRoot, 'tmp');
 mkdirSync(sandboxTmpDir);
+const fixturePrefixes = [
+  'adversarial-review-', 'hammer-', 'watcher-', 'reaper-', 'reviewer-',
+  'run-ledger-', 'diagnose-stuck-rereview-',
+];
 
 function makeWorkerRoot(index) {
   const root = path.join(sandboxRoot, `file-${index}`);
@@ -115,18 +121,23 @@ try {
   }, 900_000);
   const result = await childExit;
 
+  const leakedTempEntries = readdirSync(callerTmpDir).filter((name) =>
+    !callerTmpBefore.has(name) && fixturePrefixes.some((prefix) => name.startsWith(prefix)));
+  if (leakedTempEntries.length > 0) {
+    console.error(`Test suite wrote fixture directories into caller TMPDIR:\n${leakedTempEntries.join('\n')}`);
+    process.exitCode = 1;
+  }
   const checkoutDataAfter = listFiles(checkoutDataDir);
   const leakedFiles = [...checkoutDataAfter].filter(([file, hash]) => checkoutDataBefore.get(file) !== hash).map(([file]) => file);
   if (leakedFiles.length > 0 || (!checkoutDataExistedBefore && existsSync(checkoutDataDir))) {
     console.error(`Test suite wrote into the checkout data directory:\n${leakedFiles.join('\n') || '(directory created)'}`);
     process.exitCode = 1;
-  } else if (receivedSignal) {
-    process.exitCode = 128 + constants.signals[receivedSignal];
   } else if (timedOut) {
     throw Object.assign(new Error('Test suite timed out after 900 seconds'), { code: 'ETIMEDOUT' });
-  } else {
+  } else if (process.exitCode !== 1) {
     process.exitCode = result.status ?? 1;
   }
+  if (receivedSignal) process.exitCode = 128 + constants.signals[receivedSignal];
 } finally {
   clearTimeout(timeout);
   clearTimeout(forceKillTimeout);

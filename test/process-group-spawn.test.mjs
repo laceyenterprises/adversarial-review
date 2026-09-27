@@ -266,7 +266,9 @@ test('detached reviewer process group survives parent SIGTERM for daemon bounce 
       const [bashPidPath, sleepPidPath, stdoutPath, stderrPath] = process.argv.slice(-4);
       spawnCapturedProcessGroup(
         'bash',
-        ['-c', \`trap "" HUP TERM; sleep 30 & echo $! > "\${sleepPidPath}"; echo $$ > "\${bashPidPath}"; wait\`],
+        // This fixture is reaped in finally. Its fallback must outlive
+        // scheduling stalls on a busy host so the liveness check is meaningful.
+        ['-c', \`trap "" HUP TERM; sleep 120 & echo $! > "\${sleepPidPath}"; echo $$ > "\${bashPidPath}"; wait\`],
         { stdoutPath, stderrPath, progressTimeout: 0, timeout: 0 }
       );
       const keepAlive = setInterval(() => {}, 1_000);

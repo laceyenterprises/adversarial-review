@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 const guard = new URL('./helpers/child-leak-guard.mjs', import.meta.url).pathname;
 const fixture = new URL('./fixtures/leaked-child.test.mjs', import.meta.url).pathname;
 const closedFixture = new URL('./fixtures/closed-detached-child.test.mjs', import.meta.url).pathname;
+const closedProbeFixture = new URL('./fixtures/closed-group-probe.test.mjs', import.meta.url).pathname;
 
 test('suite guard reports and kills a deliberately leaked process group', () => {
   const env = { ...process.env };
@@ -27,6 +28,16 @@ test('suite guard forgets a closed detached group before a pgid can be recycled'
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
   const result = spawnSync(process.execPath, ['--import', guard, '--test', closedFixture], {
+    encoding: 'utf8', timeout: 10_000, env,
+  });
+  assert.equal(result.signal, null, `${result.stdout}\n${result.stderr}`);
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+});
+
+test('suite guard never probes or signals a closed detached leader', () => {
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const result = spawnSync(process.execPath, ['--import', guard, '--test', closedProbeFixture], {
     encoding: 'utf8', timeout: 10_000, env,
   });
   assert.equal(result.signal, null, `${result.stdout}\n${result.stderr}`);

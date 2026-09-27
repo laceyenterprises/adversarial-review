@@ -315,6 +315,7 @@ test('split admission single-wave drain detaches before late admission release',
 
   let timeoutId;
   try {
+    const startedAt = performance.now();
     const summary = await Promise.race([
       runBoundedReviewerDispatchQueue([
         candidate(1, async function run() {
@@ -340,6 +341,7 @@ test('split admission single-wave drain detaches before late admission release',
         timeoutId = setTimeout(() => reject(new Error('single-wave drain did not detach')), 5_000);
       }),
     ]);
+    assert.ok(performance.now() - startedAt < 1_000, 'single-wave drain should detach promptly');
     assert.equal(summary.dispatched, 0);
     assert.equal(summary.deferred, 1);
     assert.deepEqual(summary.deferredCandidates.map((item) => item.prNumber), [2]);
@@ -1068,6 +1070,8 @@ test('reviewer lane floor is not satisfied by a skipped rereview admission', asy
 test('reviewer lane floor ignores skipped rereview admissions during a single launch wave', async () => {
   const events = [];
   const laneState = createReviewerLaneState({ firstPassBurstLimit: 2, minShare: 0.25 });
+  let releaseWork;
+  const heldWork = new Promise((resolve) => { releaseWork = resolve; });
 
   const pendingRereview = (at) => ({
     posted_at: null,
@@ -1075,43 +1079,52 @@ test('reviewer lane floor ignores skipped rereview admissions during a single la
   });
   const firstPass = (prNumber) => candidate(prNumber, async () => {
     events.push(`first-pass:${prNumber}`);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await heldWork;
   }, `2026-05-${String(prNumber - 80).padStart(2, '0')}T00:00:00.000Z`);
 
-  const summary = await runBoundedReviewerDispatchQueue([
-    firstPass(90),
-    firstPass(91),
-    candidate(10, async () => {
-      events.push('skip-rereview:10');
-      return { dispatched: false, reason: 'head-dispatch-lease-held' };
-    }, '2026-05-01T00:00:00.000Z', {
-      current: pendingRereview('2026-05-01T00:05:00.000Z'),
-    }),
-    candidate(11, async () => {
-      events.push('rereview:11');
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }, '2026-05-01T00:00:01.000Z', {
-      current: pendingRereview('2026-05-01T00:05:01.000Z'),
-    }),
-    firstPass(92),
-    firstPass(93),
-    firstPass(94),
-  ], {
-    maxConcurrent: 4,
-    singleWave: true,
-    singleWaveSettleGraceMs: 0,
-    laneState,
-    logger: { error() {}, log() {}, warn() {} },
-  });
+  let timeoutId;
+  try {
+    const summary = await Promise.race([runBoundedReviewerDispatchQueue([
+      firstPass(90),
+      firstPass(91),
+      candidate(10, async () => {
+        events.push('skip-rereview:10');
+        return { dispatched: false, reason: 'head-dispatch-lease-held' };
+      }, '2026-05-01T00:00:00.000Z', {
+        current: pendingRereview('2026-05-01T00:05:00.000Z'),
+      }),
+      candidate(11, async () => {
+        events.push('rereview:11');
+        await heldWork;
+      }, '2026-05-01T00:00:01.000Z', {
+        current: pendingRereview('2026-05-01T00:05:01.000Z'),
+      }),
+      firstPass(92),
+      firstPass(93),
+      firstPass(94),
+    ], {
+      maxConcurrent: 4,
+      singleWave: true,
+      singleWaveSettleGraceMs: 0,
+      laneState,
+      logger: { error() {}, log() {}, warn() {} },
+    }), new Promise((_, reject) => {
+      timeoutId = setTimeout(() => reject(new Error('single-wave launch did not detach')), 5_000);
+    })]);
 
-  assert.equal(summary.dispatched, 0);
-  assert.equal(summary.maxObservedConcurrency, 4);
-  assert.deepEqual(events, [
-    'first-pass:90',
-    'first-pass:91',
-    'skip-rereview:10',
-    'rereview:11',
-  ]);
+    assert.equal(summary.dispatched, 0);
+    assert.equal(summary.maxObservedConcurrency, 4);
+    assert.deepEqual(events, [
+      'first-pass:90',
+      'first-pass:91',
+      'skip-rereview:10',
+      'rereview:11',
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
+    releaseWork();
+    await new Promise((resolve) => setImmediate(resolve));
+  }
 });
 
 test('single-wave startability probe does not spend lane admission budget', async () => {

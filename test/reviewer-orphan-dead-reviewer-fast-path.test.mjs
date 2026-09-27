@@ -101,12 +101,8 @@ function spawnAlivePgid(t) {
 
 async function makeDeadPgid() {
   const child = spawn('bash', ['-c', 'parent=$PPID; end=$((SECONDS+30)); while (( SECONDS < end )) && kill -0 "$parent" 2>/dev/null; do sleep 0.25; done'], { detached: true, stdio: 'ignore' });
-  try {
-    await killFixtureChild(child);
-    return child.pid;
-  } finally {
-    await killFixtureChild(child);
-  }
+  await killFixtureChild(child);
+  return child.pid;
 }
 
 test('terminal PRs reconcile active reviewers immediately despite a live lease', () => {

@@ -2,7 +2,8 @@
 // failure cannot silently leave a detached fixture running after the file ends.
 // This preload registers its root after hook before the test module does.
 // Tests must stop shared children in their own test cleanup (or finally), not
-// in a file-level after hook, which would run after this leak check.
+// in a file-level after hook, which would run after this leak check. Once a
+// child exits, its pid/pgid can be reused, so only live leaders are signalled.
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { readFileSync } from 'node:fs';
@@ -34,27 +35,14 @@ if (process.env.NODE_TEST_CONTEXT) {
     const entry = { child, detached, stack };
     children.set(pid, entry);
     child.once('close', () => {
-      if (children.get(pid) !== entry) return;
-      if (!detached) {
-        children.delete(pid);
-        return;
-      }
-      // A detached leader can leave grandchildren behind. Retain it only
-      // while its original process group still exists, reducing the window
-      // in which a recycled pgid could point at another test's fixture.
-      try {
-        process.kill(-pid, 0);
-      } catch (error) {
-        if (error.code === 'ESRCH') children.delete(pid);
-        else if (error.code !== 'EPERM') throw error;
-      }
+      if (children.get(pid) === entry) children.delete(pid);
     });
   }
 
   for (const method of ['spawn', 'fork', 'exec', 'execFile']) {
     const original = childProcess[method];
     function trackedChild(...args) {
-      const stack = describeSpawn(new Error().stack);
+      const stack = new Error().stack;
       const child = original.apply(this, args);
       recordChild(child, args, stack);
       return child;
@@ -63,7 +51,7 @@ if (process.env.NODE_TEST_CONTEXT) {
     // { stdout, stderr }. Keep it when replacing the builtin ESM export.
     if (original[promisify.custom]) {
       trackedChild[promisify.custom] = function trackedPromise(...args) {
-        const stack = describeSpawn(new Error().stack);
+        const stack = new Error().stack;
         const result = original[promisify.custom].apply(this, args);
         recordChild(result.child, args, stack);
         return result;
@@ -85,6 +73,10 @@ if (process.env.NODE_TEST_CONTEXT) {
           new Promise((resolve) => setTimeout(resolve, 500)),
         ]);
       }
+      if (children.get(pid) !== entry) continue;
+      // The close listener may still be waiting for inherited stdio. Exit
+      // alone is enough to make this pid or pgid unsafe to probe or signal.
+      if (child.exitCode !== null || child.signalCode !== null) continue;
       let alive = false;
       try {
         process.kill(detached ? -pid : pid, 0);
@@ -94,7 +86,7 @@ if (process.env.NODE_TEST_CONTEXT) {
         else if (error.code !== 'ESRCH') throw error;
       }
       if (!alive) continue;
-      leaked.push(`${pid} (${detached ? 'process group' : 'process'}) spawned at ${stack.trim()}`);
+      leaked.push(`${pid} (${detached ? 'process group' : 'process'}) spawned at ${describeSpawn(stack)}`);
       const closed = child.exitCode === null && child.signalCode === null
         ? new Promise((resolve) => child.once('close', resolve))
         : Promise.resolve();

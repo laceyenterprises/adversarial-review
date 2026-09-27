@@ -210,6 +210,21 @@ test('buildRemediationOutcomeCommentBody produces clean prose (no fenced code bl
   assert.match(body, /^ {2}- \*\*Files:\*\* `src\/alert-delivery\.mjs`$/m);
 });
 
+test('remediation reply and closeout bodies stamp the spawned worker execution', () => {
+  const job = makeJob({ builderTag: 'codex', reviewerModel: 'claude' });
+  const worker = { resolvedModel: 'gpt-6-sol', resolvedReasoningLevel: 'high' };
+  for (const action of ['completed', 'stopped', 'failed']) {
+    const body = buildRemediationOutcomeCommentBody({ workerClass: 'codex', worker, action, job });
+    assert.match(body, /^> Remediator: codex · gpt-6-sol · high$/m);
+  }
+});
+
+test('reconcile worker without execution fields uses the launch worker stamp', () => {
+  const job = { ...makeJob(), remediationWorker: { resolvedModel: 'gpt-6-sol', resolvedReasoningLevel: 'high' } };
+  const body = buildRemediationOutcomeCommentBody({ workerClass: 'codex', worker: { workerRunId: 'run-1' }, action: 'completed', job });
+  assert.match(body, /^> Remediator: codex · gpt-6-sol · high$/m);
+});
+
 test('buildRemediationOutcomeCommentBody on completed includes summary, validation, and re-review queued', () => {
   const body = buildRemediationOutcomeCommentBody({
     workerClass: 'claude-code',

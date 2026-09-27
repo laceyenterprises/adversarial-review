@@ -8,6 +8,8 @@ import { CLAUDE_CLI, GEMINI_CLI, AGY_CLI, __test__ } from '../src/reviewer.mjs';
 import { buildObviousDocsGuidance, extractLinkedRepoDocs, fetchLinkedSpecContents, parseGitHubBlobPath } from '../src/prompt-context.mjs';
 import { AgentOSConfigError } from '../src/config-loader.mjs';
 import { beginReviewerPass } from '../src/reviewer-pass-tokens.mjs';
+import { extractReviewVerdict } from '../src/kernel/verdict.mjs';
+import { parseReviewBody as parseRescueReviewBody } from '../src/merge-agent-rescue-classifier.mjs';
 import { readPendingReviewedAttestations } from '../src/reviewed-attestation.mjs';
 import {
   AGY_TRANSIENT_REMEDIATION,
@@ -1691,6 +1693,19 @@ test('review comment body prepends canonical header when reviewer output has non
   );
 });
 
+test('stamped review preserves header, verdict and finding parsing', () => {
+  const body = buildReviewCommentBody({
+    reviewerMetadata: { displayName: 'Codex', reviewerIdentity: 'codex-reviewer-lacey' },
+    verdictMode: VERDICT_MODE_ENFORCE,
+    execution: { harness: 'codex', model: 'gpt-6-sol', effort: 'high' },
+    reviewText: '## Summary\nClean.\n\n## Blocking issues\n- None.\n\n## Verdict\nComment only',
+  });
+  assert.match(body, /^## Adversarial Review — Codex \(codex-reviewer-lacey\)\n\n> Reviewer: codex · gpt-6-sol · high\n\n/);
+  assert.equal(classifyReviewCommentHeader(body).verdictMode, VERDICT_MODE_ENFORCE);
+  assert.equal(extractReviewVerdict(body), 'Comment only');
+  assert.equal(parseRescueReviewBody(body).verdict, 'Comment only');
+});
+
 test('review comment body skips prepending when reviewer output already has a title', () => {
   const modelOutput = [
     '## Adversarial Review — Gemini (gemini-reviewer-lacey)',
@@ -3108,13 +3123,16 @@ test('resolveCodexExecOverrides preserves top-level model settings when user con
   );
 
   try {
-    const overrides = withEnv({ CODEX_HOME: codexHome, HOME: rootDir }, () => resolveCodexExecOverrides());
+    const overrides = withEnv({ CODEX_HOME: codexHome, HOME: rootDir, HQ_ROOT: rootDir, AGENT_OS_DEPLOY_CHECKOUT: rootDir }, () => resolveCodexExecOverrides());
     assert.deepEqual(overrides, {
       model: 'gpt-5.4',
       modelProvider: 'openai',
       configOverrides: [
         { key: 'model_provider', value: 'openai' },
       ],
+      reasoningEffort: null,
+      modelSource: 'host-config',
+      effortSource: 'none',
     });
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -3139,7 +3157,7 @@ test('resolveCodexExecOverrides preserves allowed scalar model tuning without fo
   );
 
   try {
-    const overrides = withEnv({ CODEX_HOME: codexHome, HOME: rootDir }, () => resolveCodexExecOverrides());
+    const overrides = withEnv({ CODEX_HOME: codexHome, HOME: rootDir, HQ_ROOT: rootDir, AGENT_OS_DEPLOY_CHECKOUT: rootDir }, () => resolveCodexExecOverrides());
     assert.deepEqual(overrides, {
       model: 'gpt-5.5',
       modelProvider: 'openai',
@@ -3147,6 +3165,9 @@ test('resolveCodexExecOverrides preserves allowed scalar model tuning without fo
         { key: 'model_provider', value: 'openai' },
         { key: 'model_reasoning_effort', value: 'high' },
       ],
+      reasoningEffort: 'high',
+      modelSource: 'host-config',
+      effortSource: 'host-config',
     });
     assert.deepEqual(
       buildCodexReviewArgs({
@@ -3157,6 +3178,33 @@ test('resolveCodexExecOverrides preserves allowed scalar model tuning without fo
       }).filter((value, index, args) => args[index - 1] === '--config'),
       ['model_provider="openai"', 'model_reasoning_effort="high"'],
     );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reviewer model and effort use HQ mirror before seed and host config', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewer-registry-'));
+  const codexHome = join(rootDir, '.codex');
+  mkdirSync(codexHome, { recursive: true });
+  mkdirSync(join(rootDir, 'registry'), { recursive: true });
+  mkdirSync(join(rootDir, 'modules', 'worker-pool'), { recursive: true });
+  writeFileSync(join(codexHome, 'config.toml'), 'model = "gpt-host"\nmodel_reasoning_effort = "xhigh"\n');
+  writeFileSync(join(rootDir, 'registry', 'worker-classes.json'), JSON.stringify({
+    'codex-reviewer': { defaultModel: 'gpt-mirror', defaultReasoningLevel: 'high' },
+  }));
+  writeFileSync(join(rootDir, 'modules', 'worker-pool', 'worker-classes.json'), JSON.stringify({
+    'codex-reviewer': { defaultModel: 'gpt-seed', defaultReasoningLevel: 'medium' },
+  }));
+  const logs = [];
+  try {
+    const overrides = withEnv({ CODEX_HOME: codexHome, HOME: rootDir, HQ_ROOT: rootDir,
+      AGENT_OS_DEPLOY_CHECKOUT: rootDir }, () => resolveCodexExecOverrides({ log: { info: (line) => logs.push(line) } }));
+    assert.equal(overrides.model, 'gpt-mirror');
+    assert.equal(overrides.reasoningEffort, 'high');
+    assert.equal(overrides.modelSource, 'registry-mirror');
+    assert.deepEqual(overrides.configOverrides, [{ key: 'model_reasoning_effort', value: 'high' }]);
+    assert.match(logs[0], /source=registry-mirror.*source=registry-mirror/);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -4502,6 +4550,7 @@ test('reviewWithGemini happy path returns the captured review text', async () =>
   assert.deepEqual(result, {
     reviewText: 'BLOCKING: real finding\n\nVERDICT: blocked',
     tokenUsage: null,
+    execution: { harness: 'gemini', model: 'gemini-2.5-pro', effort: null },
   });
   // The prompt fed to gemini carries the extra context and the diff fence.
   assert.equal(captured.length, 1);
@@ -5465,7 +5514,8 @@ test('reviewWithGemini keeps successful antigravity review when spend report loo
       log: { warn: (message) => warnings.push(message) },
     }));
 
-    assert.deepEqual(result, { reviewText, tokenUsage: null });
+    assert.deepEqual(result, { reviewText, tokenUsage: null,
+      execution: { harness: 'gemini', model: 'Gemini 3.1 Pro (High)', effort: null } });
     assert.equal(cleaned, true);
     assert.deepEqual(released, [{ checkoutId: 'co_spend_success_throw', quotaSignal: false }]);
     assert.equal(warnings.length, 1);
@@ -5675,6 +5725,26 @@ test('reviewWithGemini cli runtime does not call agy auth or agy spawn', async (
   assert.deepEqual(calls[0].args, ['-m', 'gemini-2.5-pro', '-o', 'json', '--prompt', '']);
 });
 
+test('reviewWithGemini honors the process model override at the spawn boundary', async () => {
+  const previous = process.env.GEMINI_REVIEWER_MODEL;
+  process.env.GEMINI_REVIEWER_MODEL = 'gemini-2.5-flash';
+  try {
+    let selectedModel;
+    await reviewWithGemini('+diff\n', '', {
+      resolveGeminiRuntimeImpl: () => 'cli',
+      assertOAuthImpl: async () => {},
+      spawnGeminiReviewImpl: async ({ model }) => {
+        selectedModel = model;
+        return { stdout: 'CLI review', stderr: '' };
+      },
+    });
+    assert.equal(selectedModel, 'gemini-2.5-flash');
+  } finally {
+    if (previous === undefined) delete process.env.GEMINI_REVIEWER_MODEL;
+    else process.env.GEMINI_REVIEWER_MODEL = previous;
+  }
+});
+
 test('reviewWithGemini antigravity auth missing fails closed before spawning a review', async () => {
   const spawnCalls = [];
   await assert.rejects(
@@ -5802,7 +5872,8 @@ test('reviewWithGemini retries transient Gemini subprocess failures before succe
     },
   });
 
-  assert.deepEqual(result, { reviewText: '## Verdict\n\nComment only', tokenUsage: null });
+  assert.deepEqual(result, { reviewText: '## Verdict\n\nComment only', tokenUsage: null,
+    execution: { harness: 'gemini', model: 'gemini-2.5-pro', effort: null } });
   assert.equal(attempts.length, 3);
   assert.deepEqual(sleeps, [0, 0]);
 });

@@ -270,6 +270,7 @@ function updateReviewerPassBodyCapture(rootDir, {
   passKind,
   verdict = null,
   bodyMd,
+  execution = null,
   ghCommentId = null,
   capturedAt = new Date().toISOString(),
   metadataPatch = null,
@@ -303,8 +304,9 @@ function updateReviewerPassBodyCapture(rootDir, {
           normalizeBodyForMatch(row.body_md) === normalizeBodyForMatch(bodyMd)
         )
       )) {
-        const metadata = metadataPatch
-          ? mergeCaptureMetadata(parseMetadataJson(row.metadata_json), metadataPatch)
+        const capturePatch = execution ? { ...metadataPatch, reviewerExecution: execution } : metadataPatch;
+        const metadata = capturePatch
+          ? mergeCaptureMetadata(parseMetadataJson(row.metadata_json), capturePatch)
           : parseMetadataJson(row.metadata_json);
         result = db.prepare(
           `UPDATE reviewer_passes
@@ -312,6 +314,8 @@ function updateReviewerPassBodyCapture(rootDir, {
                   body_md = ?,
                   gh_comment_id = ?,
                   body_captured_at = ?,
+                  reviewer_model = COALESCE(?, reviewer_model),
+                  reasoning_effort = COALESCE(?, reasoning_effort),
                   metadata_json = ?
             WHERE pass_id = ?`
         ).run(
@@ -319,6 +323,8 @@ function updateReviewerPassBodyCapture(rootDir, {
           bodyMd,
           ghCommentId === null || ghCommentId === undefined ? null : String(ghCommentId),
           capturedAt,
+          execution?.model || null,
+          execution?.effort || null,
           stringifyMetadataJson(metadata),
           row.pass_id,
         );
@@ -485,6 +491,7 @@ async function captureReviewerBodyAfterPost(rootDir, {
   reviewerHeadSha = null,
   botTokenEnv,
   reviewBody,
+  execution = null,
   verdict,
   passKind,
   postedAt = new Date().toISOString(),
@@ -551,6 +558,7 @@ async function captureReviewerBodyAfterPost(rootDir, {
                 passKind: resolvePassKindForReviewer(passKind, { attemptNumber }),
                 verdict,
                 bodyMd: reviewBody,
+                execution,
                 ghCommentId: null,
                 capturedAt: postedAt,
                 allowExistingBodyUpdate: true,
@@ -585,6 +593,7 @@ async function captureReviewerBodyAfterPost(rootDir, {
               passKind: resolvePassKindForReviewer(passKind, { attemptNumber }),
               verdict,
               bodyMd: reviewBody,
+              execution,
               ghCommentId: null,
               capturedAt: postedAt,
               allowExistingBodyUpdate: true,
@@ -615,6 +624,7 @@ async function captureReviewerBodyAfterPost(rootDir, {
       passKind: resolvePassKindForReviewer(passKind, { attemptNumber }),
       verdict,
       bodyMd: reviewBody,
+      execution,
       ghCommentId,
       capturedAt: postedAt,
       allowExistingBodyUpdate,

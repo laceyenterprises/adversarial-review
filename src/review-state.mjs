@@ -257,6 +257,7 @@ function ensureReviewStateSchema(db) {
   // migration runner became the canonical path.
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN ended_at TEXT`);
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN reviewer_model TEXT`);
+  addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN reasoning_effort TEXT`);
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN token_input INTEGER`);
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN token_output INTEGER`);
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN token_total INTEGER`);

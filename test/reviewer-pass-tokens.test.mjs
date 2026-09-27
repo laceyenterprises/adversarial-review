@@ -83,9 +83,21 @@ test('reviewer_passes schema migrates existing tables to reviewer_model', () => 
     ensureReviewStateSchema(db);
     const columns = db.prepare('PRAGMA table_info(reviewer_passes)').all().map((column) => column.name);
     assert.ok(columns.includes('reviewer_model'));
+    assert.ok(columns.includes('reasoning_effort'));
   } finally {
     db.close();
   }
+});
+
+test('remediation pass stores the resolved model and effort at launch', () => {
+  const rootDir = tempRoot();
+  const pass = beginReviewerPass(rootDir, {
+    repo: 'laceyenterprises/agent-os', prNumber: 43, attemptNumber: 1,
+    reviewerClass: 'codex', reviewerModel: 'gpt-6-sol', reasoningEffort: 'high',
+    passKind: 'remediation',
+  });
+  assert.equal(pass.reviewer_model, 'gpt-6-sol');
+  assert.equal(pass.reasoning_effort, 'high');
 });
 
 test('schema convergence preserves historical provider totals without backfilling missing totals', () => {

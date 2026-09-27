@@ -34,6 +34,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { captureLocalReviewerUsage } from './reviewer-pass-tokens.mjs';
+import { normalizeReviewerFamily } from './reviewer-family.mjs';
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
 import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
 import { resolveGitHubAppBotLogin } from './github-app-identity.mjs';
@@ -234,13 +235,6 @@ const LOCAL_REVIEW_SHADOW_MODEL_FAMILY_BY_MODEL = Object.freeze({
   'openai/gpt-oss-20b': 'openai-oss',
 });
 
-const REVIEW_FAMILY_BY_REVIEWER_MODEL = Object.freeze({
-  claude: 'claude',
-  'claude-code': 'claude',
-  codex: 'codex',
-  gemini: 'gemini',
-});
-
 function logStructuredEvent(log = console, event) {
   const payload = {
     ts: new Date().toISOString(),
@@ -372,11 +366,6 @@ async function fetchCurrentHeadVerdictMode({
       error: err?.message || String(err),
     };
   }
-}
-
-function normalizeReviewerFamily(reviewerModel) {
-  const key = String(reviewerModel || '').trim().toLowerCase();
-  return REVIEW_FAMILY_BY_REVIEWER_MODEL[key] || null;
 }
 
 function resolveLocalReviewShadowModel(env = process.env) {
@@ -1689,6 +1678,7 @@ async function postGitHubReviewWithCapture({
   reviewerHeadSha = null,
   currentHeadSha = null,
   reviewBody,
+  execution = null,
   botTokenEnv,
   passKind,
   postedAt = null,
@@ -1799,6 +1789,7 @@ async function postGitHubReviewWithCapture({
       reviewerHeadSha: normalizedHeadSha,
       botTokenEnv,
       reviewBody: effectiveReviewBody,
+      execution,
       verdict: persistedVerdict,
       passKind,
       postedAt: effectivePostedAt,
@@ -2118,6 +2109,7 @@ async function main() {
   let reviewText;
   let rawReviewText;
   let tokenUsage = null;
+  let reviewerExecution = null;
   const reviewerStartedAt = new Date().toISOString();
   try {
     console.error(`[reviewer] DEBUG: starting ${effectiveModel} review...`);
@@ -2161,6 +2153,7 @@ async function main() {
     }
     rawReviewText = dispatch.rawReviewText;
     tokenUsage = dispatch.tokenUsage;
+    reviewerExecution = dispatch.execution || null;
     if (effectiveModel === 'claude' && !tokenUsage) tokenUsage = captureLocalReviewerUsage({ tokenUsage, model: effectiveModel, workspacePath: reviewerSubprocessCwd, startedAt: reviewerStartedAt, rootDir: ROOT });
     if (dispatch.needsSanitize) {
       console.error(`[reviewer] DEBUG: raw Codex review length=${rawReviewText.length}; preview=${previewText(rawReviewText)}`);
@@ -2297,6 +2290,7 @@ async function main() {
   const fullComment = buildReviewCommentBody({
     reviewerMetadata,
     verdictMode,
+    execution: reviewerExecution,
     waiverAuditBlock,
     reviewModeAuditBlock: buildReviewModeAuditBlock(reviewModeDecision),
     reviewText: reviewTextForPost,
@@ -2355,6 +2349,7 @@ async function main() {
       reviewerModel: effectiveModel,
       reviewerHeadSha: reviewerHeadSha || null,
       reviewBody: fullComment,
+      execution: reviewerExecution,
       botTokenEnv: effectiveBotTokenEnv,
       passKind,
       reviewerSpawnToken,

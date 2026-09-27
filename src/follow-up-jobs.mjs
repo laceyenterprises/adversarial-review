@@ -2638,6 +2638,7 @@ function recordRemediationPassStartedSafe({ rootDir, job, worker = {}, spawnedAt
       attemptNumber: remediationAttemptNumber(job),
       reviewerClass: worker.workerClass || worker.model || 'codex',
       reviewerModel: worker.resolvedModel || worker.model || worker.workerClass || 'codex',
+      reasoningEffort: worker.resolvedReasoningLevel || null,
       passKind: 'remediation',
       workerRunId: worker.workerRunId || worker.runId || null,
       workspacePath: worker.workspaceDir || job.workspaceDir || null,

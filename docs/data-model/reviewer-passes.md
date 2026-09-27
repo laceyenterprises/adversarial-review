@@ -19,10 +19,16 @@ session-ledger `worker_runs.run_id` when that attribution is available.
 
 Schema convergence in `src/review-state.mjs` adds `token_input` and
 `token_output` to older pass tables, along with `token_reasoning` and
-`token_tool_context`. Completion can replace `reviewer_model` with the
+`token_tool_context`, and adds nullable `reasoning_effort`. Hosted reviews
+write the model and effort actually passed to the harness when the posted body
+is captured; remediation passes write their resolved values at launch.
+`metadata_json.reviewerExecution` preserves the hosted harness attribution.
+Completion can replace `reviewer_model` with the
 non-empty model reported by the usage source. A cancelled pass with incomplete
 rollout evidence keeps its available counts and records
 `metadata_json.tokenUsageState = 'partial'`.
+For stamped hosted reviews, completion retains the model passed to the harness
+even if a usage transcript names a different underlying model.
 When ledger counts are authoritative, transcript model and quota details are
 attached only if the transcript session key matches the ledger session key;
 otherwise the configured reviewer model is retained.

@@ -193,6 +193,7 @@ async function retryGithubAuthPushOnce({
   repo,
   prNumber,
   commitSha,
+  expectedRemoteSha,
   env = process.env,
   execFileImpl = execFileAsync,
   retryDelaysMs = GITHUB_AUTH_PUSH_RETRY_DELAYS_MS,
@@ -200,6 +201,10 @@ async function retryGithubAuthPushOnce({
 }) {
   const agentOsRoot = [join(ROOT, '../..'), env.HQ_REPO_ROOT].find((candidate) => candidate && existsSync(join(candidate, 'modules/worker-pool/lib/hq-gh.sh')));
   if (!agentOsRoot) return { retried: false, pushed: false, reason: 'missing-gh-adapter' };
+  const expectedHead = String(expectedRemoteSha || '').trim();
+  if (!/^[0-9a-f]{40}$/i.test(expectedHead)) {
+    return { retried: false, pushed: false, reason: 'missing-expected-remote-head' };
+  }
   let targetBranch = String(branch || '').trim();
   if (!targetBranch) {
     try {
@@ -209,16 +214,38 @@ async function retryGithubAuthPushOnce({
     } catch { /* Detached or unavailable workspace. */ }
   }
   if (!targetBranch && repo && prNumber) {
-    try {
-      const viewScript = `set -euo pipefail
+    const viewScript = `set -euo pipefail
 source "${agentOsRoot}/modules/worker-pool/lib/hq-gh.sh"
 unset GH_TOKEN GITHUB_TOKEN HQ_ENTITLEMENT_GH_TOKEN
 hq_resolve_worker_class_gh_token "$WORKER_CLASS"
 export GH_TOKEN="$HQ_ENTITLEMENT_GH_TOKEN" GITHUB_TOKEN="$HQ_ENTITLEMENT_GH_TOKEN"
 "${agentOsRoot}/modules/worker-pool/lib/shims/gh" pr view "$PR_NUMBER" --repo "$PR_REPO" --json headRefName --jq .headRefName`;
-      const viewed = await execFileImpl('bash', ['-c', viewScript], { env: { ...env, WORKER_CLASS: workerClass, PR_NUMBER: String(prNumber), PR_REPO: repo } });
-      targetBranch = String(viewed.stdout || '').trim();
-    } catch { /* Report missing branch below. */ }
+    const viewOptions = { env: { ...env, WORKER_CLASS: workerClass, PR_NUMBER: String(prNumber), PR_REPO: repo } };
+    const attempts = [0, ...retryDelaysMs];
+    for (let attempt = 0; attempt < attempts.length; attempt += 1) {
+      if (attempts[attempt] > 0) await sleepImpl(attempts[attempt]);
+      try {
+        const viewed = await execFileImpl('bash', ['-c', viewScript], viewOptions);
+        targetBranch = String(viewed.stdout || '').trim();
+        if (targetBranch === 'null') targetBranch = '';
+        break;
+      } catch (err) {
+        const detail = githubAuthRecoveryErrorDetail(err);
+        if (/(?:HTTP\s*404|not found \(HTTP 404\))/i.test(detail)) {
+          return { retried: true, pushed: false, reason: 'missing-pr-branch', attempts: attempt + 1 };
+        }
+        const transient = isTransientGitPushError(err);
+        if (transient && attempt < attempts.length - 1) continue;
+        return {
+          retried: true,
+          pushed: false,
+          reason: 'branch-lookup-failed',
+          attempts: attempt + 1,
+          transient,
+          error: redactGithubAuthRecoveryDetail(detail).slice(0, 1200),
+        };
+      }
+    }
   }
   if (!targetBranch) {
     return { retried: false, pushed: false, reason: 'missing-pr-branch' };
@@ -234,9 +261,7 @@ if [[ -z "$token" && -n "\${HQ_ENTITLEMENT_GH_TOKEN_VAR:-}" ]]; then
 fi
 [[ -n "$token" ]]
 export GH_TOKEN="$token" GITHUB_TOKEN="$token" GIT_TERMINAL_PROMPT=0
-git -C "$WORKSPACE_DIR" fetch origin "refs/heads/$TARGET_BRANCH"
-git -C "$WORKSPACE_DIR" merge-base --is-ancestor FETCH_HEAD "$COMMIT_SHA" || exit 42
-"${agentOsRoot}/modules/worker-pool/bin/git-safe" -C "$WORKSPACE_DIR" push origin "$COMMIT_SHA:refs/heads/$TARGET_BRANCH"
+"${agentOsRoot}/modules/worker-pool/bin/git-safe" -C "$WORKSPACE_DIR" push "--force-with-lease=refs/heads/$TARGET_BRANCH:$EXPECTED_REMOTE_SHA" origin "$COMMIT_SHA:refs/heads/$TARGET_BRANCH"
 `;
   const options = {
     env: {
@@ -245,6 +270,7 @@ git -C "$WORKSPACE_DIR" merge-base --is-ancestor FETCH_HEAD "$COMMIT_SHA" || exi
       WORKSPACE_DIR: workspaceDir,
       COMMIT_SHA: commitSha,
       TARGET_BRANCH: targetBranch,
+      EXPECTED_REMOTE_SHA: expectedHead,
     },
     maxBuffer: 5 * 1024 * 1024,
   };
@@ -259,7 +285,6 @@ git -C "$WORKSPACE_DIR" merge-base --is-ancestor FETCH_HEAD "$COMMIT_SHA" || exi
       await execFileImpl('bash', ['-c', script], options);
       return { retried: true, pushed: true, reason: 'push-succeeded', attempts: attemptsMade };
     } catch (err) {
-      if (err?.code === 42) return { retried: true, pushed: false, reason: 'pr-head-moved', attempts: attemptsMade };
       if (/non-fast-forward|fetch first|stale info/i.test(githubAuthRecoveryErrorDetail(err))) {
         return {
           retried: true,
@@ -303,6 +328,10 @@ async function recoverGithubAuthOperationalBlocker({
   const authBlocker = findGithubAuthOperationalBlocker(reply);
   if (!authBlocker) return { operationalBlockerRecovery: null, rereview: null, job: null };
   const commitSha = extractCommitShaFromOperationalBlocker(authBlocker.blocker);
+  const expectedRemoteSha = authBlocker.blocker?.expectedRemoteSha
+    || job?.remediationWorker?.expectedRemoteSha
+    || job?.revisionRef
+    || null;
   let rescue = null;
   try {
     rescue = await preserveUnpushedCommit({
@@ -337,6 +366,7 @@ async function recoverGithubAuthOperationalBlocker({
       repo: job.repo,
       prNumber: job.prNumber,
       commitSha: rescue.commitSha,
+      expectedRemoteSha,
       env,
       execFileImpl,
     });

@@ -602,9 +602,13 @@ Direct remediation workers put the agent-os `gh` and `git-safe` shims first on
 PATH. `git-safe push` refreshes the worker entitlement at push time; the
 remediation prompt requires that command. Follow-up jobs retain the PR head
 branch from reviewer metadata. GitHub-auth recovery can recover a missing
-branch from the checkout or `gh pr view`, refreshes the adapter token, and
-pushes only when the remote head is an ancestor of the rescued commit. A moved
-head keeps the rescue bundle for operator recovery.
+branch from the checkout or `gh pr view`; transient `gh` failures get bounded
+retries, while a definitive 404 or absent head branch reports a missing branch.
+Recovery refreshes the adapter token and pushes the rescued commit with an
+explicit `--force-with-lease` against the worker's expected remote SHA (or the
+reviewed revision for older replies). A moved head rejects the lease and keeps
+the rescue bundle for operator recovery. An unavailable expected SHA fails
+closed before push.
 
 Claude Code remediation resolves its model credential by transport. With no
 explicit override the transport AUTO-DETECTS: `broker` when this host is wired

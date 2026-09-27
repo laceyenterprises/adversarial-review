@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -75,7 +75,7 @@ test('worker git-safe push replaces an expired spawn token through the credentia
 test('expired spawn token is replaced before recovery push and missing branch comes from workspace', async () => {
   const { root, bin } = fakeAgentOs();
   const push = join(bin, 'git-safe');
-  writeFileSync(push, '#!/bin/sh\n[ "$GH_TOKEN" = fresh-token ] || exit 75\n[ "$GITHUB_TOKEN" = fresh-token ] || exit 75\ncase " $* " in *--force*) exit 76;; esac\nexit 0\n');
+  writeFileSync(push, '#!/bin/sh\n[ "$GH_TOKEN" = fresh-token ] || exit 75\n[ "$GITHUB_TOKEN" = fresh-token ] || exit 75\n[ "$EXPECTED_REMOTE_SHA" = "$EXPECTED" ] || exit 76\ncase " $* " in *--force-with-lease=refs/heads/feature/fix:*) exit 0;; esac\nexit 77\n');
   chmodSync(push, 0o755);
   const calls = [];
   const result = await retryGithubAuthPushOnce({
@@ -83,7 +83,8 @@ test('expired spawn token is replaced before recovery push and missing branch co
     workerClass: 'codex',
     branch: null,
     commitSha: 'a'.repeat(40),
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, HQ_REPO_ROOT: root, GH_TOKEN: 'expired-token' },
+    expectedRemoteSha: 'b'.repeat(40),
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, HQ_REPO_ROOT: root, GH_TOKEN: 'expired-token', EXPECTED: 'b'.repeat(40) },
     execFileImpl: async (command, args, options) => {
       calls.push({ command, args });
       if (command === 'git') return { stdout: 'feature/fix\n' };
@@ -92,26 +93,74 @@ test('expired spawn token is replaced before recovery push and missing branch co
   });
   assert.equal(result.pushed, true);
   assert.equal(calls[0].command, 'git');
+  assert.ok(calls.at(-1).args[1].includes('--force-with-lease='));
+  assert.ok(!calls.at(-1).args[1].includes('merge-base'));
   assert.deepEqual(calls[0].args.slice(-3), ['rev-parse', '--abbrev-ref', 'HEAD']);
 });
 
-test('moved PR head refuses recovery push and never invokes git-safe', async () => {
+test('moved PR head is rejected by the lease on the recovery push', async () => {
   const { root, bin } = fakeAgentOs();
   const marker = join(root, 'pushed');
-  writeFileSync(join(bin, 'git'), '#!/bin/sh\n[ "$3" = merge-base ] && exit 1\nexit 0\n');
-  chmodSync(join(bin, 'git'), 0o755);
-  writeFileSync(join(bin, 'git-safe'), `#!/bin/sh\ntouch '${marker}'\nexit 99\n`);
+  writeFileSync(join(bin, 'git-safe'), `#!/bin/sh\ntouch '${marker}'\necho 'stale info' >&2\nexit 1\n`);
   chmodSync(join(bin, 'git-safe'), 0o755);
   const result = await retryGithubAuthPushOnce({
     workspaceDir: '/unused/workspace',
     workerClass: 'codex',
     branch: 'feature/fix',
     commitSha: 'a'.repeat(40),
+    expectedRemoteSha: 'b'.repeat(40),
     env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, HQ_REPO_ROOT: root },
   });
   assert.equal(result.reason, 'pr-head-moved');
   assert.equal(result.pushed, false);
-  assert.equal(existsSync(marker), false);
+  assert.equal(existsSync(marker), true);
+});
+
+test('recovery publishes a rebased commit whose old PR head is not its ancestor', async (t) => {
+  const { root, bin } = fakeAgentOs();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const remote = join(root, 'remote.git');
+  const workspace = join(root, 'workspace');
+  const git = (args, cwd = workspace) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+  git(['init', '--bare', remote], root);
+  git(['clone', remote, workspace], root);
+  git(['config', 'user.name', 'Test Worker']);
+  git(['config', 'user.email', 'test@example.com']);
+  writeFileSync(join(workspace, 'base.txt'), 'base\n');
+  git(['add', '.']);
+  git(['commit', '-m', 'base']);
+  git(['branch', '-M', 'main']);
+  git(['push', '-u', 'origin', 'main']);
+  git(['switch', '-c', 'feature']);
+  writeFileSync(join(workspace, 'feature.txt'), 'before rebase\n');
+  git(['add', '.']);
+  git(['commit', '-m', 'feature']);
+  const oldHead = git(['rev-parse', 'HEAD']);
+  git(['push', '-u', 'origin', 'feature']);
+  git(['switch', 'main']);
+  writeFileSync(join(workspace, 'base.txt'), 'main advanced\n');
+  git(['commit', '-am', 'main advanced']);
+  git(['push', 'origin', 'main']);
+  git(['switch', 'feature']);
+  git(['rebase', 'main']);
+  writeFileSync(join(workspace, 'fix.txt'), 'remediation\n');
+  git(['add', '.']);
+  git(['commit', '-m', 'remediation']);
+  const rescuedHead = git(['rev-parse', 'HEAD']);
+  assert.throws(() => git(['merge-base', '--is-ancestor', oldHead, rescuedHead]));
+  writeFileSync(join(bin, 'git-safe'), '#!/bin/sh\nexec git "$@"\n');
+  chmodSync(join(bin, 'git-safe'), 0o755);
+
+  const result = await retryGithubAuthPushOnce({
+    workspaceDir: workspace,
+    workerClass: 'codex',
+    branch: 'feature',
+    commitSha: rescuedHead,
+    expectedRemoteSha: oldHead,
+    env: { ...process.env, HQ_REPO_ROOT: root },
+  });
+  assert.equal(result.pushed, true);
+  assert.equal(git(['rev-parse', 'refs/heads/feature'], remote), rescuedHead);
 });
 
 test('detached workspace resolves PR head through the gh shim', async () => {
@@ -127,6 +176,7 @@ test('detached workspace resolves PR head through the gh shim', async () => {
     repo: 'example/repo',
     prNumber: 42,
     commitSha: 'a'.repeat(40),
+    expectedRemoteSha: 'b'.repeat(40),
     env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, HQ_REPO_ROOT: root, GH_TOKEN: 'expired-token' },
     execFileImpl: async (command, args, options) => {
       if (command === 'git') return { stdout: 'HEAD\n' };
@@ -134,4 +184,61 @@ test('detached workspace resolves PR head through the gh shim', async () => {
     },
   });
   assert.equal(result.pushed, true);
+});
+
+test('detached branch lookup retries a transient gh timeout before pushing', async () => {
+  const { root } = fakeAgentOs();
+  const calls = [];
+  const delays = [];
+  const result = await retryGithubAuthPushOnce({
+    workspaceDir: '/unused/workspace',
+    workerClass: 'codex',
+    repo: 'example/repo',
+    prNumber: 42,
+    commitSha: 'a'.repeat(40),
+    expectedRemoteSha: 'b'.repeat(40),
+    env: { ...process.env, HQ_REPO_ROOT: root },
+    retryDelaysMs: [1],
+    sleepImpl: async (ms) => { delays.push(ms); },
+    execFileImpl: async (command, args) => {
+      calls.push({ command, args });
+      if (command === 'git') return { stdout: 'HEAD\n' };
+      if (args[1].includes('pr view')) {
+        if (calls.filter((call) => call.args[1]?.includes('pr view')).length === 1) {
+          const err = new Error('TLS handshake timeout');
+          err.stderr = 'TLS handshake timeout';
+          throw err;
+        }
+        return { stdout: 'feature/rebased\n' };
+      }
+      return { stdout: '' };
+    },
+  });
+  assert.equal(result.pushed, true);
+  assert.equal(calls.filter((call) => call.args[1]?.includes('pr view')).length, 2);
+  assert.deepEqual(delays, [1]);
+});
+
+test('detached branch lookup reports definitive 404 without retry', async () => {
+  const { root } = fakeAgentOs();
+  let viewCalls = 0;
+  const result = await retryGithubAuthPushOnce({
+    workspaceDir: '/unused/workspace',
+    workerClass: 'codex',
+    repo: 'example/repo',
+    prNumber: 42,
+    commitSha: 'a'.repeat(40),
+    expectedRemoteSha: 'b'.repeat(40),
+    env: { ...process.env, HQ_REPO_ROOT: root },
+    retryDelaysMs: [1],
+    execFileImpl: async (command) => {
+      if (command === 'git') return { stdout: 'HEAD\n' };
+      viewCalls += 1;
+      const err = new Error('HTTP 404: Not Found');
+      err.stderr = 'HTTP 404: Not Found';
+      throw err;
+    },
+  });
+  assert.equal(result.reason, 'missing-pr-branch');
+  assert.equal(viewCalls, 1);
 });

@@ -188,6 +188,7 @@ ${formatFencedBlock(job.reviewBody, 'markdown')}${governingDocContext}${buildObv
 - Run the smallest relevant validation before finishing.
 - Before pushing, run every local guard that corresponds to the files you touched and every cheap repo-level guard that the PR previously relied on. At minimum, run \`git diff --check\`; for Python repos with a checked-in Ruff baseline gate, run the repo's Ruff/format baseline command before commit. If a local guard fails, fix it before pushing.
 - Commit the remediation changes and push the PR branch with \`git-safe push\`. Use \`gh\` normally; the worker shim routes GitHub operations.
+- If a GitHub credential failure prevents the final push, include the exact 40-character \`expectedRemoteSha\` used by that push's lease in the \`github-auth\` operational blocker. Recovery uses this SHA to guard the rescued commit's push.
 - After pushing, perform a bounded PR-head CI regression check before writing a successful reply. Inspect the pushed PR head's checks with \`gh pr checks <pr> --repo <repo>\` or \`gh pr view <pr> --repo <repo> --json headRefOid,statusCheckRollup\`. If any external CI lane is failed, fix that regression in this same remediation round and push again. If checks are still queued or in progress, wait briefly and re-check; do not claim completion while a known failed lane exists.
 - Do not open a new PR; this job is for an existing PR follow-up.
 - Use OAuth-backed authentication only; do not rely on API key fallbacks.

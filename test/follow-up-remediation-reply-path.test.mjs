@@ -89,6 +89,14 @@ async function withHqRootEnv(hqRoot, run) {
   }
 }
 
+function makeGhAdapterRoot(rootDir) {
+  const adapterRoot = path.join(rootDir, 'agent-os');
+  const libDir = path.join(adapterRoot, 'modules', 'worker-pool', 'lib');
+  mkdirSync(libDir, { recursive: true });
+  writeFileSync(path.join(libDir, 'hq-gh.sh'), '# test adapter\n');
+  return adapterRoot;
+}
+
 async function withOAuthTestEnv(workDir, run) {
   const authDir = path.join(workDir, '.codex');
   const authPath = path.join(authDir, 'auth.json');
@@ -444,12 +452,15 @@ test('preserveUnpushedCommit refuses cross-user HQ rescue writes before creating
 });
 
 test('retryGithubAuthPushOnce retries transient reminted push failures only within the bounded ladder', async () => {
+  const adapterRoot = makeGhAdapterRoot(mkdtempSync(path.join(tmpdir(), 'auth-retry-')));
   const transientCalls = [];
   const transientResult = await retryGithubAuthPushOnce({
     workspaceDir: '/tmp/workspace',
     workerClass: 'codex-remediation',
     branch: 'auth-rescue',
     commitSha: '2222222222222222222222222222222222222222',
+    expectedRemoteSha: '1111111111111111111111111111111111111111',
+    env: { ...process.env, HQ_REPO_ROOT: adapterRoot },
     retryDelaysMs: [1, 1],
     sleepImpl: async () => {},
     execFileImpl: async (command, args) => {
@@ -474,6 +485,8 @@ test('retryGithubAuthPushOnce retries transient reminted push failures only with
     workerClass: 'codex-remediation',
     branch: 'auth-rescue',
     commitSha: '3333333333333333333333333333333333333333',
+    expectedRemoteSha: '1111111111111111111111111111111111111111',
+    env: { ...process.env, HQ_REPO_ROOT: adapterRoot },
     retryDelaysMs: [1, 1],
     sleepImpl: async () => {
       throw new Error('non-transient push must not sleep for retry');
@@ -504,6 +517,7 @@ test('retryGithubAuthPushOnce retries transient reminted push failures only with
 test('recoverable GitHub-auth retry routes unmapped worker identities through the canonical remediator class', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqRoot = path.join(rootDir, 'hq');
+  const adapterRoot = makeGhAdapterRoot(rootDir);
   const { claimed } = makeQueuedJob(rootDir, {
     prNumber: 430,
     builderTag: 'clio-agent',
@@ -534,6 +548,7 @@ test('recoverable GitHub-auth retry routes unmapped worker identities through th
       category: 'github-auth',
       finding: 'bad credentials while pushing remediated commit',
       commitSha: '2222222222222222222222222222222222222222',
+      expectedRemoteSha: '1111111111111111111111111111111111111111',
       reasoning: 'token expired',
     }],
     reReview: { requested: false, reason: null },
@@ -555,34 +570,41 @@ test('recoverable GitHub-auth retry routes unmapped worker identities through th
 
   const execCalls = [];
   const rereviewCalls = [];
-  await withHqRootEnv(hqRoot, async () => {
-    const result = await reconcileFollowUpJob({
-      rootDir,
-      job: spawned.job,
-      jobPath: spawned.jobPath,
-      now: () => '2026-05-04T09:30:00.000Z',
-      isWorkerRunning: () => false,
-      resolvePRLifecycleImpl: async () => null,
-      requestReviewRereviewImpl: (args) => {
-        rereviewCalls.push(args);
-        return {
-          triggered: true,
-          status: 'pending',
-          reason: 'review-status-reset',
-          reviewRow: { repo: job.repo, pr_number: job.prNumber, pr_state: 'open', review_status: 'pending' },
-        };
-      },
-      execFileImpl: async (command, args, options = {}) => {
-        execCalls.push({ command, args, options });
-        return { stdout: '', stderr: '' };
-      },
-      log: { warn: () => {}, error: () => {} },
-    });
+  const previousAdapterRoot = process.env.HQ_REPO_ROOT;
+  process.env.HQ_REPO_ROOT = adapterRoot;
+  try {
+    await withHqRootEnv(hqRoot, async () => {
+      const result = await reconcileFollowUpJob({
+        rootDir,
+        job: spawned.job,
+        jobPath: spawned.jobPath,
+        now: () => '2026-05-04T09:30:00.000Z',
+        isWorkerRunning: () => false,
+        resolvePRLifecycleImpl: async () => null,
+        requestReviewRereviewImpl: (args) => {
+          rereviewCalls.push(args);
+          return {
+            triggered: true,
+            status: 'pending',
+            reason: 'review-status-reset',
+            reviewRow: { repo: job.repo, pr_number: job.prNumber, pr_state: 'open', review_status: 'pending' },
+          };
+        },
+        execFileImpl: async (command, args, options = {}) => {
+          execCalls.push({ command, args, options });
+          return { stdout: '', stderr: '' };
+        },
+        log: { warn: () => {}, error: () => {} },
+      });
 
-    assert.equal(result.action, 'completed');
-    assert.equal(result.job.operationalBlockerRecovery.retry.pushed, true);
-    assert.equal(result.job.operationalBlockerRecovery.retry.reason, 'push-succeeded');
-  });
+      assert.equal(result.action, 'completed');
+      assert.equal(result.job.operationalBlockerRecovery.retry.pushed, true);
+      assert.equal(result.job.operationalBlockerRecovery.retry.reason, 'push-succeeded');
+    });
+  } finally {
+    if (previousAdapterRoot === undefined) delete process.env.HQ_REPO_ROOT;
+    else process.env.HQ_REPO_ROOT = previousAdapterRoot;
+  }
 
   const retryCall = execCalls.find((call) => call.command === 'bash');
   assert.ok(retryCall, 'expected a GitHub-auth retry push');

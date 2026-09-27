@@ -35,6 +35,7 @@ import {
   readPrTerminalReconcileState,
 } from './pr-terminal-reconcile.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
+import { SQL_HAS_GENUINE_POSTED_REVIEW_FOR_PR } from './review-state-statements.mjs';
 import {
   resolveFirstPassReviewerPoolConfig,
   reviewerDispatchPassKind,
@@ -46,6 +47,16 @@ import { readReviewerCredentialOutage } from './reviewer-cascade.mjs';
 const DEFAULT_REVIEWER_DEATH_RATE_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_CONFIG_SIGNATURE_DRIFT_ALARM_MS = 10 * 60 * 1000;
 const DEFAULT_CONFIG_SIGNATURE_STATUS_STALE_MS = 6 * 60 * 1000;
+const postedReviewEvidenceStatements = new WeakMap();
+
+function hasGenuinePostedReview(db, row) {
+  let statement = postedReviewEvidenceStatements.get(db);
+  if (!statement) {
+    statement = db.prepare(SQL_HAS_GENUINE_POSTED_REVIEW_FOR_PR);
+    postedReviewEvidenceStatements.set(db, statement);
+  }
+  return Boolean(statement.get(row.repo, row.pr_number));
+}
 
 function summarizeConfigSignatureDrift(
   hqRoot,
@@ -2291,6 +2302,7 @@ function summarizeFirstPassQueue(db, { nowMs, stoppedCiRegressionJobs = null }) 
       };
     }
     const derivedPassKind = reviewerDispatchPassKind({
+      hasPriorPostedReview: hasGenuinePostedReview(db, row),
       current: {
         rereview_requested_at: row.rereview_requested_at,
         posted_at: row.posted_at,
@@ -2787,6 +2799,7 @@ function summarizeDeferredRereviews(db, followUpJobs, { nowMs, stoppedCiRegressi
   const prs = [];
   for (const row of rows) {
     const derivedPassKind = reviewerDispatchPassKind({
+      hasPriorPostedReview: hasGenuinePostedReview(db, row),
       current: {
         rereview_requested_at: row.rereview_requested_at,
         posted_at: row.posted_at,
@@ -2876,6 +2889,7 @@ function summarizeQueuedRereviews(db, followUpJobs, { nowMs, stoppedCiRegression
   let oldest = null;
   for (const row of rows) {
     const derivedPassKind = reviewerDispatchPassKind({
+      hasPriorPostedReview: hasGenuinePostedReview(db, row),
       current: {
         rereview_requested_at: row.rereview_requested_at,
         posted_at: row.posted_at,

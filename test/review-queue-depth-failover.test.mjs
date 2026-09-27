@@ -39,6 +39,14 @@ import {
 } from '../src/review-worker-class-fallback.mjs';
 import { ENV_ALIASES } from '../src/config-loader.mjs';
 import { resetRoleConfigCache } from '../src/role-config.mjs';
+import {
+  SQL_HAS_COMPLETED_REVIEW_FOR_PR,
+  SQL_HAS_GENUINE_POSTED_REVIEW_FOR_PR,
+} from '../src/review-state-statements.mjs';
+import {
+  reviewerDispatchPassKind,
+  reviewerSafetyPassKind,
+} from '../src/watcher-reviewer-pool.mjs';
 
 test.afterEach(() => {
   resetRoleConfigCache();
@@ -585,7 +593,11 @@ test('the knob arms from the canonical env alone (no shared config.yaml edit nee
 
 test('rereview threshold inherits first-pass, has an env mirror, and zero disables', () => {
   assert.equal(resolveRereviewQueueDepthFailoverThreshold({ env: {}, firstPassThreshold: null }), null);
-  assert.equal(resolveRereviewQueueDepthFailoverThreshold({ env: {}, firstPassThreshold: 2 }), 2);
+  const inherited = [];
+  assert.equal(resolveRereviewQueueDepthFailoverThreshold({
+    env: {}, firstPassThreshold: 2, onInherited: (threshold) => inherited.push(threshold),
+  }), 2);
+  assert.deepEqual(inherited, [2]);
   assert.equal(resolveRereviewQueueDepthFailoverThreshold({
     env: { AGENT_OS_WATCHER_REREVIEW_QUEUE_DEPTH_FAILOVER_THRESHOLD: '3' },
     topPath: '/dev/null',
@@ -601,6 +613,34 @@ test('rereview threshold inherits first-pass, has an env mirror, and zero disabl
     ENV_ALIASES[REREVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY]?.canonical,
     'AGENT_OS_WATCHER_REREVIEW_QUEUE_DEPTH_FAILOVER_THRESHOLD'
   );
+});
+
+test('a failed first-lane report write does not erase its in-memory cost on the second lane', () => {
+  const root = tempRoot('rsprereview-persist-');
+  let writes = 0;
+  let saved = null;
+  try {
+    const ctl = createFirstPassSpilloverController({
+      rootDir: root,
+      readDepth: () => 2,
+      readRereviewDepth: () => 2,
+      resolveThresholdImpl: () => 2,
+      resolveRereviewThresholdImpl: () => 2,
+      writeFileImpl(_path, data) {
+        writes += 1;
+        if (writes === 1) throw new Error('temporary disk failure');
+        saved = JSON.parse(data);
+      },
+      logger: { warn() {} },
+    });
+    ctl.plan('first-pass');
+    ctl.plan('rereview');
+    assert.equal(saved.lanes['first-pass'].engaged, true);
+    assert.equal(saved.lanes.rereview.engaged, true);
+    assert.deepEqual(saved.transitions.map(({ passKind }) => passKind), ['first-pass', 'rereview']);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('17 mixed deferred reviews at threshold 2 grant 8 lane-correct spill slots', () => {
@@ -798,7 +838,40 @@ test('production rereview depth counts only open, eligible, durably requested re
       status: 'failed',
       failureMessage: '[review-cycle-cap] automatic review paused',
     });
+    seed(9, { status: 'failed', failureMessage: 'reviewer command failed' });
+    seed(10, { status: 'pending-github-artifact' });
+    seed(11, { status: 'posted', posted: null });
+    seed(12); // a delivered review already exists on the current head
+    db.prepare("UPDATE reviewed_prs SET revision_ref = 'current-head' WHERE repo = 'o/r' AND pr_number = 12").run();
+    db.prepare("UPDATE reviewer_passes SET head_sha = 'current-head' WHERE repo = 'o/r' AND pr_number = 12").run();
     assert.equal(countOpenPrsAwaitingRereview(db), 3);
+  } finally {
+    db.close();
+    rmSync(dbRoot, { recursive: true, force: true });
+  }
+});
+
+test('an uncaptured completed pass still keeps rereview safety gates armed', async () => {
+  const { ensureReviewStateSchema, openReviewStateDb } = await import('../src/review-state.mjs');
+  const dbRoot = tempRoot('rsprereview-safety-');
+  const db = openReviewStateDb(dbRoot);
+  try {
+    ensureReviewStateSchema(db);
+    db.prepare(
+      "INSERT INTO reviewer_passes (repo, pr_number, attempt_number, reviewer_class, reviewer_model, pass_kind, started_at, ended_at, status, body_md, gh_comment_id) "
+      + "VALUES ('o/r', 12, 1, 'claude', 'claude', 'first-pass', '2026-09-26T00:00:00Z', '2026-09-26T00:05:00Z', 'completed', 'posted but capture missed', NULL)"
+    ).run();
+    const hasPriorPostedReview = Boolean(db.prepare(SQL_HAS_GENUINE_POSTED_REVIEW_FOR_PR).get('o/r', 12));
+    const hasPriorCompletedReview = Boolean(db.prepare(SQL_HAS_COMPLETED_REVIEW_FOR_PR).get('o/r', 12));
+    const candidate = {
+      current: { posted_at: null, rereview_requested_at: null },
+      hasPriorPostedReview,
+      hasPriorCompletedReview,
+      completedRemediationRounds: 1,
+    };
+    assert.equal(reviewerDispatchPassKind(candidate), 'first-pass', 'admission depth still requires delivery proof');
+    assert.equal(reviewerSafetyPassKind(candidate), 'rereview', 'closer-head and ceiling gates must remain armed');
+    assert.equal(reviewerSafetyPassKind({ ...candidate, completedRemediationRounds: 0 }), 'rereview');
   } finally {
     db.close();
     rmSync(dbRoot, { recursive: true, force: true });
@@ -842,6 +915,13 @@ test('pollonce-phases passes depth pressure in and charges the cost ledger back'
   // The route swap gets the author so the diversity backstop can refuse.
   assert.match(src, /applyReviewerWorkerClassFallbackToRoute\(\{[^}]*authorClass: reviewerAuthorClass/);
   assert.match(src, /firstPassSpilloverController\?\.refundSpill\?\.\(\{/);
+});
+
+test('pollonce-phases keeps rereview safety independent from queue-depth admission', () => {
+  const src = readFileSync(new URL('../src/pollonce-phases.mjs', import.meta.url), 'utf8');
+  assert.match(src, /const depthPassKind = reviewerDispatchPassKind\(/);
+  assert.match(src, /const passKind = reviewerSafetyPassKind\(\{[\s\S]*?hasPriorCompletedReview: Boolean\(stmtHasCompletedReview\.get\(repoPath, prNumber\)\)/);
+  assert.match(src, /if \(passKind === 'rereview'\) \{[\s\S]*?getHeadCloserCommitSuppressionWithBoundedRetry\(/);
 });
 
 test('CI-red reservations are refunded so spill slots reach later admissible PRs', () => {

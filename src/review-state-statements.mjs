@@ -370,19 +370,38 @@ export const SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW =
 // durable wake marker retained while the candidate waits for reviewer
 // admission (including Gemini credential saturation). Head-refresh re-reviews
 // can clear that marker, so posted_at=NULL is the companion pending signal.
+// Delivered-comment evidence drives queue-depth accounting; completed-pass
+// evidence additionally protects rereview safety gates when body capture left
+// gh_comment_id empty. Keep the predicates distinct.
+export const SQL_HAS_GENUINE_POSTED_REVIEW_FOR_PR =
+  "SELECT 1 FROM reviewer_passes WHERE repo = ? AND pr_number = ? " +
+  "AND pass_kind IN ('first-pass', 'rereview') AND status = 'completed' " +
+  "AND gh_comment_id IS NOT NULL AND gh_comment_id <> '' LIMIT 1";
+
+export const SQL_HAS_COMPLETED_REVIEW_FOR_PR =
+  "SELECT 1 FROM reviewer_passes WHERE repo = ? AND pr_number = ? " +
+  "AND pass_kind IN ('first-pass', 'rereview') AND status = 'completed' LIMIT 1";
+
 export const SQL_COUNT_OPEN_AWAITING_REREVIEW =
   "SELECT COUNT(*) AS n FROM reviewed_prs " +
   "WHERE pr_state = 'open' " +
+  // Only rows awaiting reviewer admission contribute pressure. Failed and
+  // artifact/terminal states cannot spend a reviewer slot until rearmed.
+  "AND review_status = 'pending' " +
   "AND (rereview_requested_at IS NOT NULL OR posted_at IS NULL) " +
-  `AND (review_status IS NULL OR review_status NOT IN ('malformed', 'unroutable-bot-author', 'argus-security-queued', '${REREVIEW_CI_BLOCKED_STATUS}')) ` +
-  "AND (review_status IS NULL OR review_status <> 'reviewing') " +
-  "AND (review_status IS NULL OR review_status <> 'failed-orphan') " +
-  "AND (review_status IS NULL OR review_status <> 'failed' OR failure_message IS NULL OR failure_message NOT LIKE '[review-cycle-cap]%') " +
   "AND EXISTS ( " +
   "  SELECT 1 FROM reviewer_passes " +
   "  WHERE reviewer_passes.repo = reviewed_prs.repo " +
   "    AND reviewer_passes.pr_number = reviewed_prs.pr_number " +
   "    AND reviewer_passes.pass_kind IN ('first-pass', 'rereview') " +
+  "    AND reviewer_passes.status = 'completed' " +
+  "    AND reviewer_passes.gh_comment_id IS NOT NULL " +
+  "    AND reviewer_passes.gh_comment_id <> ''" +
+  ") AND NOT EXISTS ( " +
+  "  SELECT 1 FROM reviewer_passes " +
+  "  WHERE reviewer_passes.repo = reviewed_prs.repo " +
+  "    AND reviewer_passes.pr_number = reviewed_prs.pr_number " +
+  "    AND reviewer_passes.head_sha = reviewed_prs.revision_ref " +
   "    AND reviewer_passes.status = 'completed' " +
   "    AND reviewer_passes.gh_comment_id IS NOT NULL " +
   "    AND reviewer_passes.gh_comment_id <> ''" +

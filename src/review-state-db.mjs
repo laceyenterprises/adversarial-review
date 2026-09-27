@@ -25,6 +25,8 @@ import {
   SELECT_OPEN_UNROUTABLE_BOT_ROWS_SQL,
   SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW,
   SQL_COUNT_OPEN_AWAITING_REREVIEW,
+  SQL_HAS_COMPLETED_REVIEW_FOR_PR,
+  SQL_HAS_GENUINE_POSTED_REVIEW_FOR_PR,
   prepareFinalizePendingTerminalFailure,
   prepareMarkInfraAutoRecoveryAttemptStarted,
   prepareMarkAttemptStarted,
@@ -296,14 +298,8 @@ export const stmtMarkPosted = db.prepare(
 );
 // Head refresh clears reviewed_prs.posted_at. The pass ledger keeps durable
 // evidence that a prior review actually reached GitHub for this PR.
-export const stmtHasPostedReview = db.prepare(
-  `SELECT 1 FROM reviewer_passes
-    WHERE repo = ? AND pr_number = ?
-      AND pass_kind IN ('first-pass', 'rereview')
-      AND status = 'completed'
-      AND gh_comment_id IS NOT NULL AND gh_comment_id <> ''
-    LIMIT 1`
-);
+export const stmtHasPostedReview = db.prepare(SQL_HAS_GENUINE_POSTED_REVIEW_FOR_PR);
+export const stmtHasCompletedReview = db.prepare(SQL_HAS_COMPLETED_REVIEW_FOR_PR);
 export const stmtRestoreSameHeadSuppressedReviewPosted = db.prepare(
   `UPDATE reviewed_prs
       SET review_status = 'posted',

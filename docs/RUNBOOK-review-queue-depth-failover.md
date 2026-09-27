@@ -61,9 +61,12 @@ Re-reviews use the parallel key
 inherits the first-pass threshold; `0` disables only re-review spillover. Its
 depth is open PRs with a completed, posted reviewer pass (`pass_kind` in
 `first-pass` or `rereview`) and a durable `rereview_requested_at` wake (or
-cleared `posted_at` after a head refresh) still awaiting admission. Rows already
-in `reviewing`, sticky `failed-orphan`, or paused by the review-cycle cap are not
-awaiting admission and do not count.
+cleared `posted_at` after a head refresh) still awaiting admission. Only
+`pending` rows without a completed posted pass on the current head count.
+Rows already in `reviewing`, failed, awaiting an artifact, posted, or paused by
+the review-cycle cap do not count. When the re-review threshold inherits the
+first-pass threshold, the watcher logs that the lanes can spend separate spill
+slots.
 
 The classes it may spill to are the pre-existing
 `ADVERSARIAL_REVIEW_REVIEWER_WORKER_CLASS_FALLBACK` list (default `['codex']`)
@@ -138,6 +141,7 @@ Log lines (stable, greppable prefixes):
 ```
 [watcher] review-queue-depth-failover engage pass_kind=… depth=… threshold=… spill_slots=… engagement_spillover_reviews=…
 [watcher] review-queue-depth-failover disengage pass_kind=… depth=… threshold=… spill_slots=… engagement_spillover_reviews=…
+[watcher] review-queue-depth-failover rereview threshold inherited from first-pass=…; both lanes may spend separate spill slots
 [watcher] review-queue-depth-spillover repo=… pr=… from=gemini to=codex pass_kind=… depth=… slot=1/2 total_spillover_reviews=…
 [watcher] review-worker-class-fallback repo=… pr=… from=… to=… reason=queue-depth-pressure queueDepth=… queueDepthThreshold=…
 [watcher] review-worker-class-fallback quota-status timing duration_ms=… attempts=… outcome=…

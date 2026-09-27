@@ -129,6 +129,7 @@ import {
   stmtCreateReviewRow,
   stmtFinalizePendingTerminalFailure,
   stmtGetReviewRow,
+  stmtHasCompletedReview,
   stmtHasPostedReview,
   stmtMarkAttemptStarted,
   stmtMarkClosed,
@@ -225,6 +226,7 @@ import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import {
   reserveReviewerMemoryAdmission,
   reviewerDispatchPassKind,
+  reviewerSafetyPassKind,
 } from './watcher-reviewer-pool.mjs';
 import { requestWatcherWake, watcherWakeMatchesSubject } from './watcher-wake.mjs';
 
@@ -2952,9 +2954,11 @@ export async function processReviewSubject(entry, ctx) {
             const completedRemediationRounds = Number.isFinite(Number(ledger.completedRoundsForPR))
               ? Math.max(0, Math.floor(Number(ledger.completedRoundsForPR)))
               : 0;
-            const passKind = reviewerDispatchPassKind({
+            const passKind = reviewerSafetyPassKind({
               current,
               hasPriorPostedReview: dispatchHasPriorPostedReview,
+              hasPriorCompletedReview: Boolean(stmtHasCompletedReview.get(repoPath, prNumber)),
+              completedRemediationRounds,
             });
             const reviewDbAttemptNumber = nextReviewerPassAttemptNumber(ROOT, {
               repo: repoPath,
@@ -3223,6 +3227,9 @@ export async function processReviewSubject(entry, ctx) {
                 reviewDbAttemptNumber,
                 completedRemediationRounds,
                 passKind,
+                // Queue admission uses delivered-comment evidence for fair
+                // depth accounting; passKind above conservatively retains
+                // rereview safety gates when capture lost the comment id.
                 dispatchPassKind: reviewerDispatchPassKind(dispatchCandidate),
                 maxRemediationRounds,
                 advisoryFindings: vocabularyFatigueFinding ? [vocabularyFatigueFinding] : [],

@@ -370,6 +370,20 @@ function reviewerDispatchPassKind(candidate) {
   return reviewerDispatchIsFirstPass(candidate) ? 'first-pass' : 'rereview';
 }
 
+// Admission priority may treat a review without a captured GitHub comment id
+// as undelivered. The safety gates and durable pass ledger cannot make that
+// same assumption: a completed pass, prior remediation, or row marker is
+// enough to retain the re-review CI, closer-head, and hard-ceiling guards.
+function reviewerSafetyPassKind(candidate) {
+  if (Number(candidate?.completedRemediationRounds || 0) > 0
+    || candidate?.hasPriorCompletedReview === true
+    || candidate?.current?.rereview_requested_at
+    || candidate?.current?.posted_at) {
+    return 'rereview';
+  }
+  return reviewerDispatchPassKind(candidate);
+}
+
 function pendingLaneCounts(entries) {
   let firstPass = 0;
   let rereview = 0;
@@ -1325,4 +1339,5 @@ export {
   sortReviewerDispatchCandidates,
   reviewerDispatchIsFirstPass,
   reviewerDispatchPassKind,
+  reviewerSafetyPassKind,
 };

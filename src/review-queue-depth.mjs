@@ -172,6 +172,7 @@ export function resolveRereviewQueueDepthFailoverThreshold({
   modulePaths,
   loaderImpl,
   firstPassThreshold,
+  onInherited = null,
 } = {}) {
   const raw = loadRoleConfig({
     env,
@@ -181,9 +182,11 @@ export function resolveRereviewQueueDepthFailoverThreshold({
     contextKey: REREVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY,
   }).get(REREVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY, null);
   if (raw === undefined || raw === null || raw === '') {
-    return firstPassThreshold === undefined
+    const inherited = firstPassThreshold === undefined
       ? resolveFirstPassReviewQueueDepthFailoverThreshold({ env, topPath, modulePaths, loaderImpl })
       : firstPassThreshold;
+    if (Number.isInteger(inherited) && inherited >= 1) onInherited?.(inherited);
+    return inherited;
   }
   const parsed = Number.parseInt(String(raw), 10);
   return Number.isInteger(parsed) && parsed >= 1 ? parsed : null;
@@ -420,6 +423,7 @@ export function createFirstPassSpilloverController({
   let granted = 0;
   const reservations = new Map();
   let report = null;
+  let warnedInheritedRereviewThreshold = false;
 
   function persist() {
     if (!rootDir || !report) return;
@@ -439,7 +443,18 @@ export function createFirstPassSpilloverController({
     try {
       const firstPassThreshold = resolveThresholdImpl({ env });
       threshold = kind === 'rereview'
-        ? resolveRereviewThresholdImpl({ env, firstPassThreshold })
+        ? resolveRereviewThresholdImpl({
+          env,
+          firstPassThreshold,
+          onInherited(inherited) {
+            if (warnedInheritedRereviewThreshold) return;
+            warnedInheritedRereviewThreshold = true;
+            logger?.warn?.(
+              `[watcher] review-queue-depth-failover rereview threshold inherited from first-pass=${inherited}; `
+              + 'both lanes may spend separate spill slots'
+            );
+          },
+        })
         : firstPassThreshold;
     } catch (err) {
       logger?.warn?.(
@@ -455,7 +470,9 @@ export function createFirstPassSpilloverController({
     remainingByKind.set(kind, plan.spillSlots);
     grantedByKind.set(kind, 0);
 
-    report = readReportImpl(rootDir);
+    // A failed persist leaves the in-memory lane newer than disk. Keep that
+    // state for the second lane rather than reloading and losing its cost.
+    if (!report) report = readReportImpl(rootDir);
     const at = now().toISOString();
     const lane = normalizeLane(kind, report.lanes?.[kind]);
     const wasEngaged = lane.engaged === true;

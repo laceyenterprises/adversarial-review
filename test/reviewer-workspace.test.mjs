@@ -27,6 +27,7 @@ import {
   isReviewerSnapshotBaseError,
   prepareReviewerSnapshot,
   resolveCheckoutHead,
+  resolveReviewerWorkspaceStateDir,
 } from '../src/reviewer-workspace.mjs';
 
 function git(cwd, ...args) {
@@ -63,6 +64,52 @@ test('Agent OS and adversarial-review snapshots are outside and read-only relati
       assert.throws(() => writeFileSync(join(snapshot.snapshotDir, 'write.txt'), 'nope'), /EACCES|EPERM/);
       assert.equal(git(checkoutDir, '--no-optional-locks', 'status', '--porcelain=v1', '--untracked-files=all', '--ignore-submodules=all'), '');
     }
+  } finally {
+    removeFixture(root);
+  }
+});
+
+test('repo-local review ledger keeps reviewer snapshots and audit outside both live checkouts', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'reviewer-workspace-live-default-'));
+  try {
+    const agentOs = makeRepo(root, 'agent-os');
+    const toolsDir = join(agentOs, 'tools');
+    mkdirSync(toolsDir);
+    const reviewRepo = makeRepo(toolsDir, 'adversarial-review');
+    const external = join(root, 'hq', 'adversarial-review', 'reviewer-workspace');
+    for (const [repo, checkoutDir] of [
+      ['laceyenterprises/agent-os', agentOs],
+      ['laceyenterprises/adversarial-review', reviewRepo],
+    ]) {
+      const stateDir = join(reviewRepo, 'data');
+      const workspaceStateDir = resolveReviewerWorkspaceStateDir({
+        stateDir, checkoutDir, env: { HQ_ROOT: join(root, 'hq') },
+      });
+      assert.equal(workspaceStateDir, external);
+      assert.equal(resolveReviewerWorkspaceStateDir({
+        stateDir: external, checkoutDir, env: {}, homeDir: join(root, 'home'),
+      }), external);
+      assert.equal(resolveReviewerWorkspaceStateDir({
+        stateDir, checkoutDir, env: {}, homeDir: join(root, 'home'),
+      }), join(root, 'home', '.agent-os', 'adversarial-review', 'reviewer-workspace'));
+      const snapshot = await prepareReviewerSnapshot({ repo, checkoutDir, stateDir: workspaceStateDir });
+      assert.ok(snapshot.snapshotDir.startsWith(external));
+      assert.ok(!snapshot.snapshotDir.startsWith(agentOs));
+    }
+  } finally {
+    removeFixture(root);
+  }
+});
+
+test('reviewer workspace state override inside the checkout fails closed', () => {
+  const root = mkdtempSync(join(tmpdir(), 'reviewer-workspace-invalid-root-'));
+  try {
+    const checkoutDir = join(root, 'checkout');
+    mkdirSync(checkoutDir);
+    assert.throws(() => resolveReviewerWorkspaceStateDir({
+      stateDir: join(checkoutDir, 'data'), checkoutDir,
+      env: { ADVERSARIAL_REVIEW_WORKSPACE_STATE_DIR: join(checkoutDir, 'cache') },
+    }), /outside the source checkout/);
   } finally {
     removeFixture(root);
   }

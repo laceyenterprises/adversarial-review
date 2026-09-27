@@ -84,7 +84,6 @@ import {
   resolveCodexAuthPath,
   resolveCodexCliPath,
   resolveCodexRemediationModel,
-  resolveNonBlockingCodexModel,
   resolveGeminiCliPath,
   resolveGeminiRemediationModel,
   spawnClaudeCodeRemediationWorker,
@@ -92,6 +91,7 @@ import {
   spawnGeminiRemediationWorker,
   createLocalRemediationHandle,
 } from './adapters/agent-runtime/local/remediation.mjs';
+import { resolveConfiguredNonBlockingCodexModel } from './adapters/agent-runtime/local/non-blocking-codex-model.mjs';
 import {
   OAuthError,
   assertClaudeCodeOAuth,
@@ -3602,13 +3602,7 @@ async function consumeNextFollowUpJob({
       }
     }
     if (claimed.job.nonBlockingOnly === true && workerClass === 'codex') {
-      const config = loadRoleConfig({ env: jobEnv, contextKey: 'roles.adversarial.remediation.non_blocking' });
-      codexModelResolution = resolveNonBlockingCodexModel({
-        model: config.get('roles.adversarial.remediation.non_blocking.model', 'gpt-6-sol'),
-        reasoningEffort: config.get('roles.adversarial.remediation.non_blocking.reasoning_effort', 'low'),
-        env: jobEnv,
-        hqRoot: jobEnv.HQ_ROOT,
-      });
+      codexModelResolution = resolveConfiguredNonBlockingCodexModel(jobEnv);
     }
     const remediationMode = resolveRemediationRuntimeMode(claimed.job, {
       healthRouter,

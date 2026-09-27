@@ -124,6 +124,7 @@ import { validateStartupDeliveryIdentity } from './adapters/comms/github-pr-comm
 import { applyPreSpawnLifecycleGate } from './follow-up-stuck-claim-sweep.mjs';
 import { parseQuotaResetAt } from './quota-exhaustion.mjs';
 import { detectRemediationQuotaEvidence } from './remediation-quota-evidence.mjs';
+import { settleMissingRemediationArtifact } from './remediation-missing-artifact.mjs';
 import { remediationWorkerClassFallback } from './remediation-worker-class-fallback.mjs';
 import {
   DEFAULT_REPLIES_ROOT,
@@ -1995,8 +1996,9 @@ async function reconcileFollowUpJob({
     };
   }
   const hasNonEmptyNarrative = finalMessage.exists && Boolean(String(finalMessage.text).trim());
+  const workerLogText = readWorkerStderrLogSafe(paths.logPath);
   const { quotaLogText, quotaSignal } = detectRemediationQuotaEvidence({
-    model: worker?.model, stderrText: readWorkerStderrLogSafe(paths.logPath), finalMessageText: finalMessage.text,
+    model: worker?.model, stderrText: workerLogText, finalMessageText: finalMessage.text,
   });
 
   // Without confirmed quota, an invalid reply fails as
@@ -3116,58 +3118,14 @@ async function reconcileFollowUpJob({
     rootDir, jobPath, job, worker, workspaceDir: paths?.workspaceDir, requeuedAt: completedAt, execFileImpl,
   });
   if (resumeRequeued) return resumeRequeued;
-
-  const failureCode = worker?.dispatchMode === 'hq' && !HQ_SUCCESS_STATUSES.has(String(liveness?.dispatchStatus?.status || ''))
-    ? 'hq-dispatch-failed'
-    : (finalMessage.exists ? 'artifact-empty-completion' : 'artifact-missing-completion');
-  const failureMessage = failureCode === 'hq-dispatch-failed'
-    ? dispatchFailureDetail || `HQ remediation dispatch ended with status ${liveness?.dispatchStatus?.status || 'unknown'} before writing a usable remediation reply.`
-    : (finalMessage.exists
-      ? 'Remediation worker exited without a non-empty final message artifact.'
-      : 'Remediation worker exited before writing the final message artifact.');
-  const artifactFailure = { code: failureCode, message: failureMessage };
-  const { commentDelivery: artifactFailureDelivery } = buildReconcileCommentDelivery({
-    job, worker, action: 'failed', failure: artifactFailure, now,
+  return settleMissingRemediationArtifact({
+    rootDir, job, jobPath, worker, workerState, completedAt, finalMessage,
+    liveness, logText: workerLogText, resumeImpossible, maxRetries: resolveMaxTransientRemediationRetries(),
+    hqDispatchSucceeded: HQ_SUCCESS_STATUSES.has(String(liveness?.dispatchStatus?.status || '')),
+    now, log, postCommentImpl,
+    buildCommentDelivery: buildReconcileCommentDelivery,
+    postOutcomeComment: postReconcileOutcomeCommentSafe,
   });
-  const failed = markFollowUpJobFailed({
-    rootDir,
-    jobPath,
-    failedAt: completedAt,
-    failureCode,
-    error: new Error(failureMessage),
-    remediationWorker: {
-      ...workerState,
-      state: 'failed',
-    },
-    failure: {
-      resumeImpossible,
-      finalMessagePath: worker.outputPath || null,
-      finalMessageBytes: finalMessage.bytes,
-      logPath: worker.logPath || null,
-      dispatchStatus: liveness?.dispatchStatus || null,
-    },
-    commentDelivery: artifactFailureDelivery,
-  });
-
-  await postReconcileOutcomeCommentSafe({
-    rootDir,
-    jobPath: failed.jobPath,
-    job: failed.job,
-    worker,
-    action: 'failed',
-    failure: artifactFailure,
-    postCommentImpl,
-    alreadyTerminal: failed.alreadyTerminal,
-    now,
-    log,
-  });
-
-  return {
-    action: 'failed',
-    reason: finalMessage.exists ? 'empty-final-message-artifact' : 'missing-final-message-artifact',
-    job: failed.job,
-    jobPath: failed.jobPath,
-  };
 }
 
 async function reconcileInProgressFollowUpJobs({

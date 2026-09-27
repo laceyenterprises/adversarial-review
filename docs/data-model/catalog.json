@@ -61,9 +61,21 @@
         "src/afh-reviewer-fallback.mjs",
         "src/follow-up-jobs.mjs",
         "src/pollonce-phases.mjs",
+        "src/reviewer-pass-tokens.mjs",
         "src/reviewer-spawn-settle.mjs"
       ],
       "owner": "reviewer spawn, settle, and token attribution"
+    },
+    {
+      "id": "reviewer-rate-limit-snapshots",
+      "title": "Reviewer Rate Limit Snapshots",
+      "path": "docs/data-model/reviewer-passes.md",
+      "store": "data/reviews.db",
+      "schemaSurface": "src/review-state.mjs",
+      "relatedSchemaSurfaces": [
+        "src/reviewer-pass-tokens.mjs"
+      ],
+      "owner": "reviewer quota observation capture"
     },
     {
       "id": "review-latency-events",

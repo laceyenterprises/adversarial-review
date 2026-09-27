@@ -281,13 +281,6 @@ function ensureReviewStateSchema(db) {
   // record reasoning and tool-use tokens, not just input/output/cache.
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN token_reasoning INTEGER`);
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN token_tool_context INTEGER`);
-  const tokenBackfillId = '20260927_tokcap02_token_total';
-  if (!db.prepare('SELECT 1 FROM schema_migrations WHERE id = ?').get(tokenBackfillId)) {
-    db.exec(`UPDATE reviewer_passes
-      SET token_total = COALESCE(token_input, 0) + COALESCE(token_output, 0) + COALESCE(token_reasoning, 0)
-      WHERE token_input IS NOT NULL OR token_output IS NOT NULL OR token_reasoning IS NOT NULL`);
-    db.prepare('INSERT OR IGNORE INTO schema_migrations(id) VALUES (?)').run(tokenBackfillId);
-  }
   // LAC-1559: head SHA a reviewer pass reviewed, so the completed-rereview
   // budget counter can key per (repo, pr, head). Keep this in the idempotent
   // schema-convergence path because SQLite has no ADD COLUMN IF NOT EXISTS.

@@ -4438,7 +4438,7 @@ test('stopping a spawned remediation worker keeps its partial Codex usage', (t) 
   try {
     const row = db.prepare("SELECT * FROM reviewer_passes WHERE pass_kind = 'remediation'").get();
     assert.equal(row.status, 'cancelled');
-    assert.equal(row.token_total, 125);
+    assert.equal(row.token_total, 120);
     assert.equal(row.token_cache_read, 70);
     assert.equal(row.reviewer_model, 'gpt-6-sol');
     assert.equal(JSON.parse(row.metadata_json).tokenUsageState, 'partial');

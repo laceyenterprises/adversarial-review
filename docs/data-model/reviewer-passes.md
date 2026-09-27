@@ -5,7 +5,7 @@
 ## Ownership
 
 - Store: `data/reviews.db`
-- Table: `reviewer_passes`
+- Tables: `reviewer_passes`, `reviewer_rate_limit_snapshots`
 - Schema: `migrations/20260518_reviewer_passes.sql` plus later additive migrations
 - Writers: `src/reviewer-pass-tokens.mjs`, `src/reviewer-spawn-settle.mjs`, `src/pollonce-phases.mjs`, `src/orphan-post-reconcile.mjs`, `src/follow-up-jobs.mjs`
 - Repair CLI: `scripts/backfill-reviewer-passes.mjs`; `bin/reconcile-posted-orphans.mjs` links posted review artifacts for reconciled `failed-orphan` rows
@@ -14,6 +14,35 @@
 closer review attempt. Its primary identity is `(repo, pr_number,
 attempt_number, pass_kind)`. `worker_run_id` links a dispatched reviewer to the
 session-ledger `worker_runs.run_id` when that attribution is available.
+
+## Token and quota capture
+
+Schema convergence in `src/review-state.mjs` adds `token_input` and
+`token_output` to older pass tables, along with `token_reasoning` and
+`token_tool_context`. Completion can replace `reviewer_model` with the
+non-empty model reported by the usage source. A cancelled pass with incomplete
+rollout evidence keeps its available counts and records
+`metadata_json.tokenUsageState = 'partial'`.
+
+`token_total` preserves a provider-reported total when present. Without one,
+Codex uses input + output because reasoning is included in output; Claude uses
+input + output + cache read + cache write because its input bucket excludes
+cache traffic and thinking is included in output; Gemini uses prompt input +
+candidate output + thoughts + tool context. Other sources fall back to input +
+output + reasoning. Cache and reasoning columns remain available for analysis
+even when they overlap a provider total. Schema convergence does not recompute
+historical `token_total` values or fill missing totals; prior provider totals
+remain unchanged.
+
+`reviewer_rate_limit_snapshots` stores Codex quota observations linked by
+`pass_id` to `reviewer_passes`. Its 11 columns are `id` (autoincrement key),
+`pass_id` (required foreign key), `observed_at` (required timestamp),
+`limit_id`, `model`, `window_kind` (primary or secondary), `used_percent`,
+`window_minutes`, `resets_at`, `plan_type`, and
+`rate_limit_reached_type`. Completion inserts available observations with
+`INSERT OR IGNORE` under `UNIQUE(pass_id, observed_at, limit_id, window_kind)`.
+SQLite considers NULLs distinct for this key, so observations with a missing
+`limit_id` or `window_kind` are not deduplicated by that constraint.
 
 Rows with a non-empty `gh_comment_id` are genuine posted-review artifacts. The
 watcher's review-freshness pager reads those rows through

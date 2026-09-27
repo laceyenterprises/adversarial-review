@@ -510,6 +510,22 @@ function normalizeTokenUsage(tokenUsage) {
   ) {
     return null;
   }
+  // Provider totals are authoritative. The component buckets overlap for
+  // Codex (reasoning is in output) and differ for Claude (cache is separate).
+  const source = String(tokenUsage.source || '').toLowerCase();
+  const model = String(tokenUsage.model || '').toLowerCase();
+  let fallbackTotal = null;
+  if (input !== null || output !== null || reasoning !== null || cacheRead !== null || cacheWrite !== null || toolContext !== null) {
+    if (source.includes('codex') || model.includes('gpt') || model.includes('codex')) {
+      fallbackTotal = (input || 0) + (output || 0);
+    } else if (source.includes('claude') || model.includes('claude')) {
+      fallbackTotal = (input || 0) + (output || 0) + (cacheRead || 0) + (cacheWrite || 0);
+    } else if (source.includes('gemini') || model.includes('gemini')) {
+      fallbackTotal = (input || 0) + (output || 0) + (reasoning || 0) + (toolContext || 0);
+    } else {
+      fallbackTotal = (input || 0) + (output || 0) + (reasoning || 0);
+    }
+  }
   return {
     input,
     output,
@@ -517,9 +533,7 @@ function normalizeTokenUsage(tokenUsage) {
     cacheWrite,
     reasoning,
     toolContext,
-    total: input !== null || output !== null || reasoning !== null
-      ? (input || 0) + (output || 0) + (reasoning || 0)
-      : total,
+    total: total ?? fallbackTotal,
     guardrail,
     costUSD,
     source: tokenUsage.source || null,

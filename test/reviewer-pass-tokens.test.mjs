@@ -86,7 +86,7 @@ test('reviewer_passes schema migrates existing tables to reviewer_model', () => 
   }
 });
 
-test('schema backfills totals from input output and reasoning without adding cache twice', () => {
+test('schema convergence preserves historical provider totals without backfilling missing totals', () => {
   const rootDir = tempRoot();
   const db = openReviewStateDb(rootDir);
   try {
@@ -113,7 +113,8 @@ test('schema backfills totals from input output and reasoning without adding cac
       VALUES ('example/repo', 3, 1, 'codex', 'rereview', '2026-09-27T00:00:00Z', 'completed', 10, 2, 1, 12)`).run();
     ensureReviewStateSchema(db);
     assert.deepEqual(db.prepare('SELECT token_total FROM reviewer_passes ORDER BY pr_number').all()
-      .map((row) => row.token_total), [125, 15, 13]);
+      .map((row) => row.token_total), [0, null, 12]);
+    assert.equal(db.prepare("SELECT 1 FROM schema_migrations WHERE id = '20260927_tokcap02_token_total'").get(), undefined);
   } finally {
     db.close();
   }
@@ -150,7 +151,7 @@ test('cancelled codex pass records partial rollout usage model and quota snapsho
     const row = db.prepare('SELECT * FROM reviewer_passes WHERE pr_number = 2').get();
     const snapshot = db.prepare('SELECT * FROM reviewer_rate_limit_snapshots WHERE pass_id = ?').get(row.pass_id);
     assert.equal(row.reviewer_model, 'gpt-6-sol');
-    assert.equal(row.token_total, 125);
+    assert.equal(row.token_total, 120);
     assert.equal(row.token_cache_read, 60);
     assert.equal(JSON.parse(row.metadata_json).tokenUsageState, 'partial');
     assert.equal(snapshot.limit_id, 'gpt-6-sol');
@@ -188,7 +189,7 @@ test('cancelled remediation reads the durable relative worker log', () => {
   const row = completeReviewerPass(rootDir, { repo: 'example/repo', prNumber: 3,
     attemptNumber: 1, passKind: 'remediation', status: 'cancelled', tokenUsage: usage });
   assert.equal(row.status, 'cancelled');
-  assert.equal(row.token_total, 240);
+  assert.equal(row.token_total, 230);
   assert.equal(row.token_cache_read, 150);
   assert.equal(row.reviewer_model, 'gpt-6-sol');
 });
@@ -1336,7 +1337,7 @@ test('codex transcript fallback links token counts by workspace cwd and launch w
     assert.equal(row.token_input, 321);
     assert.equal(row.token_output, 45);
     assert.equal(row.token_cache_read, 123);
-    assert.equal(row.token_total, 373);
+    assert.equal(row.token_total, 366);
     assert.equal(row.token_source, 'codex-transcript');
     assert.equal(metadata.transcriptSessionId, 'codex-session-1');
     assert.equal(metadata.transcriptPath, transcriptPath);
@@ -1403,7 +1404,7 @@ test('claude transcript fallback links input output and cache token counts', () 
   assert.equal(direct.output, 44);
   assert.equal(direct.cacheRead, 33);
   assert.equal(direct.cacheWrite, 22);
-  assert.equal(direct.total, 55);
+  assert.equal(direct.total, 110);
   assert.equal(direct.source, 'claude-transcript');
 
   const preferred = readBestReviewerEvidenceTokenUsage({
@@ -1456,7 +1457,7 @@ test('claude transcript fallback links input output and cache token counts', () 
     assert.equal(row.token_output, 44);
     assert.equal(row.token_cache_read, 33);
     assert.equal(row.token_cache_write, 22);
-    assert.equal(row.token_total, 55);
+    assert.equal(row.token_total, 110);
     assert.equal(row.token_source, 'claude-transcript');
     assert.equal(metadata.transcriptSessionId, 'claude-session-1');
     assert.equal(metadata.transcriptPath, transcriptPath);
@@ -1529,7 +1530,7 @@ test('claude transcript fallback aggregates split files for one logical workspac
   assert.equal(usage.cacheWrite, 4);
   assert.equal(usage.reasoning, 8);
   assert.equal(usage.toolContext, 10);
-  assert.equal(usage.total, 338);
+  assert.equal(usage.total, 340);
 });
 
 test('claude transcript fallback prefers a session-key match over a workspace-only match', () => {

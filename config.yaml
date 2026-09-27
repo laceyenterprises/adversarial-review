@@ -100,6 +100,13 @@ roles:
   #       taskKind: review
   #       completionShape: decision-only
   adversarial:
+    # REMWASTE-01: one low-effort Codex round for reviews containing only
+    # non-blocking findings. Change model after TOKCAP-01 measures quota cost.
+    remediation:
+      non_blocking:
+        model: gpt-6-sol
+        reasoning_effort: low
+        max_rounds: 1
     handoff:
       # HOM-01 wake-the-loop primitive. Default off preserves the timer-only
       # cadence; later HOM tickets enable each step independently.

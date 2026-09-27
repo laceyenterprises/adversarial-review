@@ -17,6 +17,8 @@ import {
   claimNextFollowUpJob,
   createFollowUpJob,
   markFollowUpJobCompleted,
+  readFollowUpJob,
+  writeFollowUpJob,
 } from '../src/follow-up-jobs.mjs';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { CASCADE_FAILURE_CAP, recordCascadeFailure } from '../src/reviewer-cascade.mjs';
@@ -2096,6 +2098,34 @@ test('buildMergeAgentDispatchJob carries verdict and remediation state from the 
   assert.equal(dispatchJob.operatorApproval.actor, 'VirtualPaul');
   assert.equal(dispatchJob.operatorApproval.headSha, 'abc123');
   assert.equal(dispatchJob.operatorApproval.codeScopedAt, '2026-05-02T10:04:00.000Z');
+});
+
+test('non-blocking-only cap exposes final-round exhaustion to the closer', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'remwaste-closer-'));
+  try {
+    const created = createFollowUpJob({
+      rootDir, repo: 'example/repo', prNumber: 401, reviewerModel: 'codex',
+      revisionRef: 'abc123',
+      reviewBody: '## Summary\nx\n\n## Blocking issues\n- None.\n\n## Non-blocking issues\n- **Minor cleanup**\n  - **File:** `x.mjs`\n  - **Lines:** `1`\n  - **Problem:** unused code.\n  - **Why it matters:** waste.\n  - **Recommended fix:** remove it.\n\n## Verdict\nComment only',
+      reviewPostedAt: '2026-09-27T12:00:00Z', priorCompletedRounds: 1,
+    });
+    writeFollowUpJob(created.jobPath, {
+      ...readFollowUpJob(created.jobPath), nonBlockingOnly: true,
+      nonBlockingRoundsBefore: 1, nonBlockingMaxRounds: 1,
+      status: 'stopped', remediationPlan: {
+        ...created.job.remediationPlan, currentRound: 1,
+        stop: { code: 'max-rounds-reached', reason: 'cap', stoppedAt: '2026-09-27T12:01:00Z' },
+      },
+    });
+    const job = buildMergeAgentDispatchJob(rootDir, {
+      repo: 'example/repo', prNumber: 401, headSha: 'abc123',
+      mergeable: 'MERGEABLE', checksConclusion: 'SUCCESS', labels: [], prState: 'open',
+    });
+    assert.equal(job.remediationCurrentRound, 1);
+    assert.equal(job.remediationMaxRounds, 1);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });
 
 test('buildMergeAgentDispatchJob dispatches clean Comment only reviews with explicit no blockers', () => {

@@ -19,6 +19,7 @@ import {
   cancelLocalRemediationWorker,
   prepareCodexRemediationStartupEnv,
   resolveRemediationModel,
+  resolveNonBlockingCodexModel,
   spawnClaudeCodeRemediationWorker,
   spawnCodexRemediationWorker,
   spawnGeminiRemediationWorker,
@@ -28,6 +29,26 @@ import {
   readReviewerRunRecord,
   writeReviewerRunRecord,
 } from '../src/adapters/reviewer-runtime/run-state.mjs';
+
+test('non-blocking Codex model and effort require the remediator allowlists', () => {
+  const root = mkdtempSync(join(tmpdir(), 'remwaste-model-'));
+  try {
+    mkdirSync(join(root, 'registry'), { recursive: true });
+    writeFileSync(join(root, 'registry', 'worker-classes.json'), JSON.stringify({
+      'remediator-codex': { allowedModels: ['gpt-6-sol', 'gpt-6-luna'] },
+    }));
+    const env = { HQ_ROOT: root };
+    assert.deepEqual(resolveNonBlockingCodexModel({ model: 'gpt-6-luna', reasoningEffort: 'medium', env, hqRoot: root }), {
+      resolvedModel: 'gpt-6-luna', resolvedReasoningLevel: 'medium',
+      modelSource: 'non-blocking-config', reasoningSource: 'non-blocking-config',
+    });
+    const invalid = resolveNonBlockingCodexModel({ model: 'unknown', reasoningEffort: 'max', env, hqRoot: root });
+    assert.equal(invalid.resolvedModel, 'gpt-6-sol');
+    assert.equal(invalid.resolvedReasoningLevel, 'low');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 const noopPreflight = async ({ model }) => (
   String(model || '').toLowerCase().includes('codex')
@@ -482,6 +503,15 @@ test('remediation spawners use governed models and reasoning from the HQ mirror'
     });
     assert.equal(pinnedWithReasoning.reasoningSource, 'env');
     assert.ok(pinnedWithReasoning.command.includes('model_reasoning_effort=high'));
+    const nonBlocking = spawnCodexRemediationWorker({
+      ...shared,
+      modelResolution: {
+        resolvedModel: 'gpt-6-luna', resolvedReasoningLevel: 'low',
+        modelSource: 'non-blocking-config', reasoningSource: 'non-blocking-config',
+      },
+    });
+    assert.ok(nonBlocking.command.includes('gpt-6-luna'));
+    assert.ok(nonBlocking.command.includes('model_reasoning_effort=low'));
 
     const pinnedClaude = spawnClaudeCodeRemediationWorker({
       ...shared,

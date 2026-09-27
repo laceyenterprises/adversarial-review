@@ -765,6 +765,16 @@ function buildScopedMergeAgentRequest(candidate) {
   };
 }
 
+function effectiveRemediationMaxRounds(latestJob) {
+  const plan = latestJob?.remediationPlan;
+  if (latestJob?.nonBlockingOnly === true
+      && Number(latestJob?.nonBlockingRoundsBefore || 0) >= Number(latestJob?.nonBlockingMaxRounds || 1)
+      && plan?.stop?.code === 'max-rounds-reached') {
+    return Number(plan.currentRound || 0);
+  }
+  return Number(plan?.maxRounds || 0);
+}
+
 
 export {
   FINAL_PASS_ON_REQUEST_CHANGES_ENV,
@@ -783,4 +793,5 @@ export {
   buildScopedOperatorApproval,
   buildScopedMergeAgentRequest,
   resolveOperatorLabelActorPolicy,
+  effectiveRemediationMaxRounds,
 };

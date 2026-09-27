@@ -9433,6 +9433,37 @@ test('dispatchRemediationViaHq reuses the stable job request_id through the SDK'
   });
 });
 
+test('non-blocking Codex HQ dispatch applies model and effort through the direct CLI', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'remwaste-hq-'));
+  try {
+    const promptPath = path.join(rootDir, 'prompt.md');
+    writeFileSync(promptPath, 'prompt\n');
+    const calls = [];
+    const worker = await dispatchRemediationViaHq({
+      hqRoot: rootDir, workerClass: 'codex', repo: 'example/repo', prNumber: 79,
+      promptPath, replyPath: path.join(rootDir, 'reply.json'),
+      jobId: 'remwaste-pr-79', launchRequestId: 'remwaste-pr-79',
+      modelResolution: { resolvedModel: 'gpt-6-luna', resolvedReasoningLevel: 'low' },
+      env: {
+        ...process.env, AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'agentos',
+        HQ_ROOT: rootDir, HQ_PARENT_SESSION: 'session:test', HQ_PROJECT: 'adversarial-review',
+      },
+      execFileImpl: async (_command, args) => {
+        calls.push(args);
+        if (args[1] === 'status') return { stdout: JSON.stringify({ status: 'queued', workspacePath: rootDir }) };
+        return { stdout: JSON.stringify({ launch_request_id: 'lrq-test', dispatch_id: 'disp-test' }) };
+      },
+    });
+    assert.ok(calls[0].includes('--model'));
+    assert.ok(calls[0].includes('gpt-6-luna'));
+    assert.ok(calls[0].includes('--reasoning-level'));
+    assert.ok(calls[0].includes('low'));
+    assert.equal(worker.resolvedModel, 'gpt-6-luna');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('dispatchRemediationViaHq omits branch from the agent-os payload when falsy', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqRoot = path.join(rootDir, 'agent-os-hq');

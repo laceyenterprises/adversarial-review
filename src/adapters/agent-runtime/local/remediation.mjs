@@ -519,6 +519,27 @@ function resolveRemediationModel(className, {
   };
 }
 
+function resolveNonBlockingCodexModel({ model, reasoningEffort, env = process.env, hqRoot = env.HQ_ROOT } = {}) {
+  const fallback = { resolvedModel: 'gpt-6-sol', resolvedReasoningLevel: 'low', modelSource: 'non-blocking-default', reasoningSource: 'non-blocking-default' };
+  const requestedModel = nonEmptyModelString(model);
+  const candidates = [
+    hqRoot && [join(resolve(hqRoot), 'registry', 'worker-classes.json'), 'registry-mirror'],
+    ...registrySeedCandidates(env),
+  ].filter(Boolean);
+  for (const [path] of candidates) {
+    const registry = readWorkerClasses(path, Date.now());
+    const allowed = registry.classes?.['remediator-codex']?.allowedModels;
+    if (!Array.isArray(allowed)) continue;
+    return {
+      resolvedModel: requestedModel && allowed.includes(requestedModel) ? requestedModel : fallback.resolvedModel,
+      resolvedReasoningLevel: CODEX_REASONING_LEVELS.has(reasoningEffort) ? reasoningEffort : fallback.resolvedReasoningLevel,
+      modelSource: requestedModel && allowed.includes(requestedModel) ? 'non-blocking-config' : fallback.modelSource,
+      reasoningSource: CODEX_REASONING_LEVELS.has(reasoningEffort) ? 'non-blocking-config' : fallback.reasoningSource,
+    };
+  }
+  return fallback;
+}
+
 function resolveGeminiRemediationModel(env = process.env, { hqRoot = env.HQ_ROOT } = {}) {
   return resolveRemediationModel('remediator-gemini', {
     env,
@@ -1073,6 +1094,7 @@ function spawnCodexRemediationWorker({
   auditSink = null,
   log = console,
   jobId = null,
+  modelResolution: requestedModelResolution = null,
   spawnImpl,
   sourceEnv = process.env,
   now = () => new Date().toISOString(),
@@ -1109,7 +1131,7 @@ function spawnCodexRemediationWorker({
     jobId,
   });
   installWorkerAdapterEnv(env, sourceEnv, workerClass, REMEDIATION_WORKER_TRAILER_CLASS, repo, log, startupEvidence.mergeAgentBroker);
-  const modelResolution = resolveRemediationModel('remediator-codex', {
+  const modelResolution = requestedModelResolution || resolveRemediationModel('remediator-codex', {
     env,
     hqRoot: hqRoot || sourceEnv.HQ_ROOT,
     pin: codexModelPin(env),
@@ -1338,6 +1360,7 @@ export {
   resolveGeminiCliPath,
   resolveGeminiRemediationModel,
   resolveRemediationModel,
+  resolveNonBlockingCodexModel,
   spawnClaudeCodeRemediationWorker,
   spawnCodexRemediationWorker,
   spawnGeminiRemediationWorker,

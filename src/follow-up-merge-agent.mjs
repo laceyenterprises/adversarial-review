@@ -106,7 +106,7 @@ import {
   shouldUseReviewerTimeoutExhaustedMergeGate,
   isScopedOperatorApproval,
   isScopedMergeAgentRequest, buildScopedOperatorApproval,
-  buildScopedMergeAgentRequest, resolveOperatorLabelActorPolicy,
+  buildScopedMergeAgentRequest, resolveOperatorLabelActorPolicy, effectiveRemediationMaxRounds,
 } from './merge-agent-dispatch-decision.mjs';
 import {
   formatExecFailure,
@@ -3004,7 +3004,7 @@ function buildMergeAgentDispatchJob(rootDir, candidate, { reviewStateDb = null }
     latestFollowUpJobStatus: normalizeFollowUpJobStatus(latestJob?.status),
     latestFollowUpReReviewRequested: latestJob?.reReview?.requested === true,
     remediationCurrentRound: Number(latestJob?.remediationPlan?.currentRound || 0),
-    remediationMaxRounds: Number(latestJob?.remediationPlan?.maxRounds || 0),
+    remediationMaxRounds: effectiveRemediationMaxRounds(latestJob),
     reviewFailureClass: reviewFailureState.reviewFailureClass,
     reviewFailureExhausted: reviewFailureState.reviewFailureExhausted,
     operatorApproval: buildScopedOperatorApproval(candidate, latestJob),

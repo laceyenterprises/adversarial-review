@@ -4295,6 +4295,27 @@ test('roles.adversarial.orchestration_mode default, local override, env override
   }
 });
 
+test('non-blocking remediation config resolves host-local overrides and validates round cap', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\n');
+    const defaults = loadConfig({ topPath: top, env: {} });
+    assert.equal(defaults.get('roles.adversarial.remediation.non_blocking.model'), 'gpt-6-sol');
+    assert.equal(defaults.get('roles.adversarial.remediation.non_blocking.reasoning_effort'), 'low');
+    assert.equal(defaults.get('roles.adversarial.remediation.non_blocking.max_rounds'), 1);
+    writeFile(join(tmp, 'config.local.yaml'), `version: 1\nroles:\n  adversarial:\n    remediation:\n      non_blocking:\n        model: gpt-6-luna\n        reasoning_effort: medium\n        max_rounds: 2\n`);
+    const local = loadConfig({ topPath: top, env: {} });
+    assert.equal(local.get('roles.adversarial.remediation.non_blocking.model'), 'gpt-6-luna');
+    assert.equal(local.get('roles.adversarial.remediation.non_blocking.reasoning_effort'), 'medium');
+    assert.equal(local.get('roles.adversarial.remediation.non_blocking.max_rounds'), 2);
+    writeFile(join(tmp, 'config.local.yaml'), 'version: 1\nroles:\n  adversarial:\n    remediation:\n      non_blocking:\n        max_rounds: 0\n');
+    assert.throws(() => loadConfig({ topPath: top, env: {} }), AgentOSConfigError);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('roles.adversarial.orchestration_mode rejects unsupported values in Node loader', () => {
   const tmp = freshTmp();
   try {

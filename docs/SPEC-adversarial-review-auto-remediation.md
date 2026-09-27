@@ -2445,3 +2445,26 @@ remediation job or AMA closer reserves the PR: the drain leaves the pending
 job queued, and the adversarial gate remains pending while remediation is
 in progress. Shutdown prevents further drain transitions. Readers continue
 to accept the historical `review-settled` stop code.
+
+## REMWASTE-01: non-blocking-only remediation
+
+A review with known zero blocking findings and at least one known non-blocking
+finding creates a follow-up job with `nonBlockingOnly: true`. Mixed reviews,
+unknown finding counts, and blocking verdicts use the normal risk-class budget.
+Non-blocking-only jobs allow one remediation round by default; a subsequent
+non-blocking-only review goes to the terminal hammer through the existing
+`max-rounds-reached` stop path. A later blocking review restores the normal
+PR-wide risk-class budget. The hammer remains responsible for resolving every
+finding before merging. An explicit operator retrigger can consume a further
+round within the normal PR-wide budget.
+
+`roles.adversarial.remediation.non_blocking.{model,reasoning_effort,max_rounds}`
+controls this path. The default is `gpt-6-sol`, `low`, and `1`. The model is
+checked against `remediator-codex.allowedModels`; the effort is checked against
+the Codex reasoning levels. Invalid model or effort values fall back to the
+defaults; invalid round caps fail config validation. The
+follow-up job and remediation pass metadata record the trigger, resolved model,
+effort, and PR-wide round number for TOKCAP-02. In HQ mode, pinned Codex
+rounds use the existing direct `hq dispatch --model --reasoning-level` path;
+the App Contract endpoint currently omits those overrides. TOKCAP-01 will
+select the model after quota measurements.

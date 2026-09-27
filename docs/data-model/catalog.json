@@ -266,6 +266,24 @@
         "src/follow-up-workspace-trash-delete.mjs"
       ],
       "owner": "follow-up archive and terminal workspace maintenance"
+    },
+    {
+      "id": "follow-up-daemon-status",
+      "title": "Follow-up Daemon Status",
+      "path": "docs/data-model/follow-up-daemon-status.md",
+      "store": "$HQ_ROOT/.adversarial-follow-up/config-status.json",
+      "schemaSurface": "scripts/adversarial-follow-up-daemon.mjs",
+      "relatedSchemaSurfaces": ["src/review-pipeline-health.mjs"],
+      "owner": "follow-up daemon configuration and consume health"
+    },
+    {
+      "id": "follow-up-reaper-cursors",
+      "title": "Follow-up Reaper Cursors",
+      "path": "docs/data-model/follow-up-reaper-cursors.md",
+      "store": "data/follow-up-jobs/finished-pr-reap-cursor.json, data/ama-closer-worktree-reaper-cursor.json",
+      "schemaSurface": "src/follow-up-stuck-claim-sweep.mjs",
+      "relatedSchemaSurfaces": ["src/ama/closer-worktree-reaper.mjs"],
+      "owner": "follow-up finished PR and closer worktree reapers"
     }
   ]
 }

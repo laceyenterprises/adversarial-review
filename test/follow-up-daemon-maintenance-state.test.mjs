@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -20,6 +20,7 @@ import {
   startFollowUpTelemetryListener,
   writeMaintenanceSweepState,
   writeConfigSignatureStatus,
+  writeFollowUpTickMetrics,
 } from '../scripts/adversarial-follow-up-daemon.mjs';
 import { resetConfigCache } from '../src/config-loader.mjs';
 import { createHandoffRateLimiter, HANDOFF_RATE_CAP_AUDIT_EVENT } from '../src/handoff-rate-cap.mjs';
@@ -591,6 +592,44 @@ test('test runner cannot write config status through a temporary symlink', (t) =
   );
 });
 
+test('a new daemon process discards stale consume interval from the status file', (t) => {
+  const rootDir = makeTempDir(t);
+  const hqRoot = path.join(rootDir, 'hq');
+  const statusDir = path.join(hqRoot, '.adversarial-follow-up');
+  const configPath = path.join(rootDir, 'config.yaml');
+  mkdirSync(statusDir, { recursive: true });
+  writeFileSync(configPath, 'version: 1\n');
+  writeFileSync(path.join(statusDir, 'config-status.json'), JSON.stringify({
+    daemonStartedAt: 'older-process', lastConsumeAt: '2026-05-25T17:00:00.000Z',
+    consumeIntervalMs: 3600000, consumeSkippedReason: null,
+  }));
+  const status = writeConfigSignatureStatus({
+    env: { HQ_ROOT: hqRoot, AGENT_OS_CONFIG_PATH: configPath },
+  });
+  assert.equal(status.lastConsumeAt, null);
+  assert.equal(status.consumeIntervalMs, null);
+  assert.equal(status.consumeSkippedReason, null);
+  assert.notEqual(status.daemonStartedAt, 'older-process');
+});
+
+test('tick metrics discard a prior process consume timestamp if signature write did not run', (t) => {
+  const rootDir = makeTempDir(t);
+  const hqRoot = path.join(rootDir, 'hq');
+  const statusDir = path.join(hqRoot, '.adversarial-follow-up');
+  mkdirSync(statusDir, { recursive: true });
+  const statusPath = path.join(statusDir, 'config-status.json');
+  writeFileSync(statusPath, JSON.stringify({
+    inSync: true, daemonStartedAt: 'older-process',
+    lastConsumeAt: '2026-05-25T17:00:00.000Z', consumeIntervalMs: 3600000,
+  }));
+  writeFollowUpTickMetrics({ env: { HQ_ROOT: hqRoot }, tickDurationMs: 10, consumeSkippedReason: 'capacity' });
+  const status = JSON.parse(readFileSync(statusPath, 'utf8'));
+  assert.notEqual(status.daemonStartedAt, 'older-process');
+  assert.equal(status.lastConsumeAt, null);
+  assert.equal(status.consumeIntervalMs, null);
+  assert.equal(status.consumeSkippedReason, 'capacity');
+});
+
 test('follow-up daemon iteration keeps config drift after per-tick cache reset', async (t) => {
   const rootDir = makeTempDir(t);
   const hqRoot = path.join(rootDir, 'hq');
@@ -602,6 +641,7 @@ test('follow-up daemon iteration keeps config drift after per-tick cache reset',
   };
   const calls = [];
   const consumedMaxConcurrent = [];
+  let handoffSafe = [];
 
   t.after(() => resetConfigCache());
 
@@ -629,7 +669,7 @@ remediation:
       calls.push('github-token-refresh');
       return { refreshed: true };
     },
-    refreshReviewerBrokerTokensImpl: async () => ({ handoffSafe: [] }),
+    refreshReviewerBrokerTokensImpl: async () => ({ handoffSafe }),
     reconcileInProgressFollowUpJobsImpl: async () => {
       calls.push('reconcile');
       resetConfigCache();
@@ -752,6 +792,18 @@ remediation:
     [2, 2],
     'bad config should keep consuming with the last successfully resolved cap'
   );
+
+  handoffSafe = [{ role: 'claude', safe: false }];
+  tickClockMs += 6 * 60 * 1000;
+  await runFollowUpDaemonIteration(iterationOptions());
+  const skippedStatus = JSON.parse(readFileSync(path.join(hqRoot, '.adversarial-follow-up', 'config-status.json'), 'utf8'));
+  assert.equal(skippedStatus.consumeSkippedReason, 'unsafe-reviewer-token-handoff');
+  assert.equal(skippedStatus.lastConsumeAt, status.lastConsumeAt);
+  handoffSafe = [];
+  tickClockMs += 6 * 60 * 1000;
+  await runFollowUpDaemonIteration(iterationOptions());
+  const resumedStatus = JSON.parse(readFileSync(path.join(hqRoot, '.adversarial-follow-up', 'config-status.json'), 'utf8'));
+  assert.equal(resumedStatus.consumeIntervalMs, 12 * 60 * 1000);
 });
 
 test('follow-up wake storm on one head does not starve another PR head', async (t) => {

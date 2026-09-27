@@ -1481,10 +1481,18 @@ function reapTerminalFollowUpWorkspaces({
   const anomalyPaths = [];
   let deferredForBudget = 0;
   let trashDir = null;
+  const inRootTrashDir = join(workspaceRootDir, '.reap-trash');
+  let loggedInRootFallback = false;
+  const logInRootFallback = (reason) => {
+    if (loggedInRootFallback) return;
+    loggedInRootFallback = true;
+    logErrorImpl(`[follow-up-jobs] Using in-root trash ${inRootTrashDir}: ${reason}`);
+  };
   const startedMs = clockImpl();
 
   for (const entry of readdirSync(workspaceRootDir, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
+    // The in-root trash is an active fallback and may contain pending batches.
+    if (!entry.isDirectory() || entry.name === '.reap-trash') continue;
     scanned += 1;
     const workspacePath = join(workspaceRootDir, entry.name);
     try {
@@ -1529,13 +1537,25 @@ function reapTerminalFollowUpWorkspaces({
       if (rmSyncImpl !== rmSync) {
         rmSyncImpl(workspacePath, { recursive: true, force: true });
       } else {
-        trashDir ||= ensureWorkspaceTrashDir(workspaceRootDir);
+        let destination = trashDir;
+        if (!destination) {
+          try { destination = ensureWorkspaceTrashDir(workspaceRootDir); }
+          catch (trashErr) {
+            logInRootFallback(`sibling trash creation failed (${trashErr?.code || trashErr?.message || trashErr})`);
+            destination = inRootTrashDir;
+            mkdirSync(destination, { recursive: true });
+          }
+        }
         try {
-          renameSyncImpl(workspacePath, join(trashDir, `${entry.name}-${randomUUID()}`));
+          renameSyncImpl(workspacePath, join(destination, `${entry.name}-${randomUUID()}`));
         } catch (renameErr) {
           if (renameErr?.code !== 'EXDEV') throw renameErr;
-          rmSyncImpl(workspacePath, { recursive: true, force: true });
+          logInRootFallback('sibling trash rename failed (EXDEV)');
+          destination = inRootTrashDir;
+          mkdirSync(destination, { recursive: true });
+          renameSyncImpl(workspacePath, join(destination, `${entry.name}-${randomUUID()}`));
         }
+        trashDir = destination;
       }
       reaped += 1;
       reapedPaths.push(workspacePath);
@@ -1565,8 +1585,8 @@ function reapTerminalFollowUpWorkspaces({
     }
   }
 
-  const pendingTrashDir = trashDir || workspaceTrashDir(workspaceRootDir);
-  if (existsSync(pendingTrashDir)) {
+  for (const pendingTrashDir of new Set([trashDir, workspaceTrashDir(workspaceRootDir), inRootTrashDir])) {
+    if (!pendingTrashDir || !existsSync(pendingTrashDir)) continue;
     try { launchTrashDeleterImpl({ trashDir: pendingTrashDir, rootDir, workspaceRootDir }); }
     catch (err) { logErrorImpl(`[follow-up-jobs] Failed to launch workspace trash deleter: ${err?.message || err}`); }
   }

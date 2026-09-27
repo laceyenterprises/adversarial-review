@@ -33,6 +33,7 @@ test('codex reviewer usage captures reasoning (was dropped)', () => {
   assert.equal(usage.reasoning, 350, 'reasoning_output_tokens must be captured');
   assert.equal(usage.cacheRead, 1200);
   assert.equal(usage.source, 'codex-json');
+  assert.equal(normalizeTokenUsage(usage).total, 5400);
 });
 
 test('gemini reviewer usageMetadata is captured with full breakdown', () => {
@@ -48,11 +49,12 @@ test('gemini reviewer usageMetadata is captured with full breakdown', () => {
   });
   const usage = parseCodexJsonTokenUsage(line);
   assert.equal(usage.input, 8000);
-  assert.equal(usage.output, 120 + 90, 'inclusive output = candidates + thoughts');
+  assert.equal(usage.output, 120, 'visible output excludes separately reported thoughts');
   assert.equal(usage.reasoning, 90);
   assert.equal(usage.cacheRead, 2000);
   assert.equal(usage.toolContext, 40, 'tool-use tokens captured');
   assert.equal(usage.source, 'gemini-json');
+  assert.equal(normalizeTokenUsage(usage).total, 8210);
   assert.equal(usage.usageTag, undefined, 'gemini usage must not be tagged as guardrail');
   assert.equal(usage.guardrail, undefined, 'gemini usage must not synthesize guardrail totals');
 });
@@ -60,6 +62,18 @@ test('gemini reviewer usageMetadata is captured with full breakdown', () => {
 test('reviewer usage parser skips non-object JSON lines', () => {
   const usage = parseCodexJsonTokenUsage(JSON.stringify('usageMetadata'));
   assert.equal(usage, null);
+});
+
+test('Claude reviewer JSON result emitted on stdout preserves usage and actual model', () => {
+  const usage = parseCodexJsonTokenUsage(JSON.stringify({
+    type: 'reviewer.token_usage',
+    tokenUsage: { input: 12, output: 4, cacheRead: 9, cacheWrite: 2,
+      model: 'claude-sonnet-4-6', source: 'claude-json' },
+  }));
+  const normalized = normalizeTokenUsage(usage);
+  assert.equal(normalized.model, 'claude-sonnet-4-6');
+  assert.equal(normalized.total, 27);
+  assert.equal(normalized.cacheRead, 9);
 });
 
 test('normalizeTokenUsage carries reasoning + toolContext through', () => {
@@ -74,6 +88,17 @@ test('normalizeTokenUsage carries reasoning + toolContext through', () => {
   assert.equal(n.toolContext, 2);
   assert.equal(n.input, 10);
   assert.equal(n.cacheRead, 4);
+});
+
+test('normalizeTokenUsage uses provider-specific fallback only without reported total', () => {
+  assert.equal(normalizeTokenUsage({ input: 100, output: 20, reasoning: 5,
+    source: 'codex-transcript' }).total, 120);
+  assert.equal(normalizeTokenUsage({ input: 10, output: 4, cacheRead: 9,
+    cacheWrite: 2, reasoning: 3, source: 'claude-transcript' }).total, 25);
+  assert.equal(normalizeTokenUsage({ input: 10, output: 4, reasoning: 3,
+    toolContext: 2, source: 'gemini-json' }).total, 19);
+  assert.equal(normalizeTokenUsage({ input: 10, output: 4, reasoning: 3,
+    total: 90, source: 'codex-json' }).total, 90);
 });
 
 test('normalizeTokenUsage persists a reasoning-only usage (not dropped as empty)', () => {

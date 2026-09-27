@@ -393,6 +393,7 @@ function completeReviewerPass(rootDir, {
             : {}),
         }
       : {};
+    if (usage?.partial) tokenMetadata.tokenUsageState = 'partial';
     const mergedMetadata = {
       ...existingMeta,
       ...tokenMetadata,
@@ -413,10 +414,12 @@ function completeReviewerPass(rootDir, {
     const writeTokenUsage = shouldWriteTokenUsage ? 1 : 0;
     const tokenCostUSD = usage?.costUSD ?? derivedCost ?? null;
     const nextTokenSource = tokenSource || usage?.source || null;
+    const snapshots = Array.isArray(tokenUsage?.rateLimits) ? tokenUsage.rateLimits : [];
     db.prepare(
       `UPDATE reviewer_passes
           SET ended_at = ?,
               status = ?,
+              reviewer_model = COALESCE(?, reviewer_model),
               worker_run_id = COALESCE(?, worker_run_id),
               token_input = CASE WHEN ? THEN ? ELSE token_input END,
               token_output = CASE WHEN ? THEN ? ELSE token_output END,
@@ -432,6 +435,7 @@ function completeReviewerPass(rootDir, {
     ).run(
       endedAt,
       normalizePassStatus(status),
+      normalizeReviewerModel(usage?.model),
       workerRunId || null,
       writeTokenUsage,
       usage?.input ?? null,
@@ -457,10 +461,24 @@ function completeReviewerPass(rootDir, {
       key.attemptNumber,
       key.passKind
     );
-    return db.prepare(
-      `SELECT * FROM reviewer_passes
-        WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?`
-    ).get(key.repo, key.prNumber, key.attemptNumber, key.passKind);
+    const pass = selectReviewerPassByKey(db, key);
+    for (const snapshot of snapshots) {
+      if (!snapshot || typeof snapshot !== 'object') continue;
+      try {
+        db.prepare(`INSERT OR IGNORE INTO reviewer_rate_limit_snapshots
+          (pass_id, observed_at, limit_id, model, window_kind, used_percent, window_minutes, resets_at, plan_type, rate_limit_reached_type)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+          pass.pass_id, snapshot.observedAt || endedAt, snapshot.limitId || null,
+          snapshot.model || usage?.model || pass.reviewer_model,
+          snapshot.windowKind || null,
+          coerceNonNegativeFloat(snapshot.usedPercent), coerceNonNegativeInt(snapshot.windowMinutes),
+          snapshot.resetsAt || null, snapshot.planType || null, snapshot.rateLimitReachedType || null
+        );
+      } catch {
+        // Quota telemetry is best effort; the pass terminal write already succeeded.
+      }
+    }
+    return pass;
   } finally {
     closeOwnedReviewDb(db);
   }
@@ -492,6 +510,28 @@ function normalizeTokenUsage(tokenUsage) {
   ) {
     return null;
   }
+  // Provider totals are authoritative. The component buckets overlap for
+  // Codex (reasoning is in output) and differ for Claude (cache is separate).
+  const source = String(tokenUsage.source || '').toLowerCase();
+  const model = String(tokenUsage.model || '').toLowerCase();
+  const provider = source.includes('codex') ? 'codex'
+    : source.includes('claude') ? 'claude'
+      : source.includes('gemini') ? 'gemini'
+        : model.includes('gpt') || model.includes('codex') ? 'codex'
+          : model.includes('claude') ? 'claude'
+            : model.includes('gemini') ? 'gemini' : null;
+  let fallbackTotal = null;
+  if (input !== null || output !== null || reasoning !== null || cacheRead !== null || cacheWrite !== null || toolContext !== null) {
+    if (provider === 'codex') {
+      fallbackTotal = (input || 0) + (output || 0);
+    } else if (provider === 'claude') {
+      fallbackTotal = (input || 0) + (output || 0) + (cacheRead || 0) + (cacheWrite || 0);
+    } else if (provider === 'gemini') {
+      fallbackTotal = (input || 0) + (output || 0) + (reasoning || 0) + (toolContext || 0);
+    } else {
+      fallbackTotal = (input || 0) + (output || 0) + (reasoning || 0);
+    }
+  }
   return {
     input,
     output,
@@ -499,10 +539,14 @@ function normalizeTokenUsage(tokenUsage) {
     cacheWrite,
     reasoning,
     toolContext,
-    total,
+    total: total ?? fallbackTotal,
     guardrail,
     costUSD,
     source: tokenUsage.source || null,
+    ...(normalizeReviewerModel(tokenUsage.model) ? { model: normalizeReviewerModel(tokenUsage.model) } : {}),
+    ...(tokenUsage.partial ? { partial: true } : {}),
+    ...(Array.isArray(tokenUsage.rateLimits) && tokenUsage.rateLimits.length > 0
+      ? { rateLimits: tokenUsage.rateLimits } : {}),
     usageTag,
   };
 }
@@ -798,6 +842,7 @@ function tokenUsageFromWorkerRun(row, { workerRunId = null, launchRequestId = nu
   if (!row) return null;
   return {
     workerRunId: row.run_id || workerRunId || null,
+    adapterSessionKey: row.session_id || null,
     launchRequestId: row.launch_request_id || launchRequestId || null,
     input: coerceNonNegativeInt(row.token_usage_input),
     output: coerceNonNegativeInt(row.token_usage_output),
@@ -825,6 +870,8 @@ function tokenUsageFromRuntimeSession(row) {
 }
 
 function readCodexTranscriptTokenUsage({
+  adapterSessionKey = null,
+  sessionKeys = [],
   workspacePath = null,
   startedAt = null,
   endedAt = null,
@@ -834,18 +881,22 @@ function readCodexTranscriptTokenUsage({
   rootDir = process.cwd(),
 } = {}) {
   const workspacePaths = normalizedWorkspacePaths(workspacePath, rootDir);
-  if (workspacePaths.length === 0 || sessionRoots.length === 0) return null;
+  const keys = new Set([adapterSessionKey, ...sessionKeys].filter(Boolean).map(String));
+  if ((workspacePaths.length === 0 && keys.size === 0) || sessionRoots.length === 0) return null;
   const transcriptPaths = listCodexTranscriptPaths(sessionRoots, { startedAt, endedAt }, transcriptPathCache);
   const matches = [];
   for (const transcriptPath of transcriptPaths) {
     const summary = readCachedCodexTranscriptSummary(transcriptPath, transcriptSummaryCache);
-    if (!summary?.cwd || !workspacePaths.includes(resolve(summary.cwd))) continue;
+    const workspaceMatched = summary?.cwd && workspacePaths.includes(resolve(summary.cwd));
+    const sessionMatched = summary?.sessionId && keys.has(String(summary.sessionId));
+    if (!workspaceMatched && !sessionMatched) continue;
     if (!timestampOverlapsWindow(summary.startedAt, summary.endedAt, startedAt, endedAt)) continue;
     if (!summary.tokenUsage) continue;
     matches.push({
       transcriptPath,
       sessionId: summary.sessionId,
       usage: summary.tokenUsage,
+      summary,
     });
   }
   if (matches.length !== 1) return null;
@@ -853,6 +904,9 @@ function readCodexTranscriptTokenUsage({
   return {
     ...match.usage,
     source: 'codex-transcript',
+    model: match.summary.model || null,
+    rateLimits: match.summary.rateLimits || [],
+    partial: !match.summary.completedTurn,
     adapterSessionKey: match.sessionId || null,
     transcriptPath: match.transcriptPath,
   };
@@ -867,13 +921,14 @@ function readClaudeTranscriptTokenUsage({
   sessionRoots = [],
   transcriptSummaryCache = null,
   transcriptPathCache = null,
+  minMtime = null,
   rootDir = process.cwd(),
 } = {}) {
   const keys = new Set([adapterSessionKey, ...sessionKeys].filter(Boolean).map(String));
   const workspacePaths = normalizedWorkspacePaths(workspacePath, rootDir);
   if (keys.size === 0 && workspacePaths.length === 0) return null;
   if (sessionRoots.length === 0) return null;
-  const transcriptPaths = listClaudeTranscriptPaths(sessionRoots, transcriptPathCache);
+  const transcriptPaths = listClaudeTranscriptPaths(sessionRoots, transcriptPathCache, minMtime);
   const matches = [];
   for (const transcriptPath of transcriptPaths) {
     const summary = readCachedClaudeTranscriptSummary(transcriptPath, transcriptSummaryCache);
@@ -886,6 +941,7 @@ function readClaudeTranscriptTokenUsage({
       transcriptPath,
       sessionId: summary.sessionId,
       usage: summary.tokenUsage,
+      model: summary.model || null,
       startedAt: summary.startedAt || null,
       endedAt: summary.endedAt || null,
       workspaceMatched,
@@ -905,9 +961,47 @@ function readClaudeTranscriptTokenUsage({
   return {
     ...chosen.usage,
     source: 'claude-transcript',
+    model: chosen.model || null,
     adapterSessionKey: chosen.sessionId || null,
     transcriptPath: chosen.transcriptPath,
   };
+}
+
+function readLocalReviewerTranscriptUsage({ model, workspacePath, startedAt, endedAt,
+  rootDir = process.cwd(), env = process.env,
+  transcriptPathCache = new Map(), transcriptSummaryCache = new Map() } = {}) {
+  if (model === 'claude') {
+    const [workspace] = normalizedWorkspacePaths(workspacePath, rootDir);
+    if (!workspace || !parseDate(startedAt)) return null;
+    const home = env.CLAUDE_CONFIG_DIR || join(env.HOME || homedir(), '.claude');
+    // Claude stores each cwd under a project slug. A reviewer snapshot has its
+    // own cwd, so never enumerate every project on the host's Claude account.
+    const projectDir = join(home, 'projects', workspace.replace(/[^A-Za-z0-9]/g, '-'));
+    return readClaudeTranscriptTokenUsage({ workspacePath, startedAt, endedAt,
+      sessionRoots: [projectDir], minMtime: startedAt,
+      transcriptPathCache, transcriptSummaryCache, rootDir });
+  }
+  return null;
+}
+
+function captureLocalReviewerUsage({ tokenUsage = null, model, workspacePath, startedAt,
+  rootDir = process.cwd(), failed = false, emit = console.log, env = process.env,
+  transcriptPathCache = new Map(), transcriptSummaryCache = new Map() } = {}) {
+  if (model !== 'claude' || (tokenUsage && !failed)) return tokenUsage;
+  try {
+    const captured = readLocalReviewerTranscriptUsage({ model, workspacePath, startedAt,
+      endedAt: new Date().toISOString(), rootDir, env,
+      transcriptPathCache, transcriptSummaryCache });
+    if (!captured) return tokenUsage;
+    if (failed) {
+      emit(JSON.stringify({ type: 'reviewer.token_usage', tokenUsage: { ...captured, partial: true } }));
+      return tokenUsage;
+    }
+    return tokenUsage ? { ...tokenUsage, model: captured.model || tokenUsage.model,
+      rateLimits: captured.rateLimits || [], partial: captured.partial } : captured;
+  } catch {
+    return tokenUsage;
+  }
 }
 
 function groupClaudeTranscriptMatches(matches, {
@@ -951,11 +1045,14 @@ function groupClaudeTranscriptMatches(matches, {
       usage: { ...first.usage },
     };
     for (const match of rest) {
+      combined.model ||= match.model || null;
       combined.usage = normalizeTokenUsage({
         input: (combined.usage?.input || 0) + (match.usage?.input || 0),
         output: (combined.usage?.output || 0) + (match.usage?.output || 0),
         cacheRead: (combined.usage?.cacheRead || 0) + (match.usage?.cacheRead || 0),
         cacheWrite: (combined.usage?.cacheWrite || 0) + (match.usage?.cacheWrite || 0),
+        reasoning: (combined.usage?.reasoning || 0) + (match.usage?.reasoning || 0),
+        toolContext: (combined.usage?.toolContext || 0) + (match.usage?.toolContext || 0),
         total: (combined.usage?.total || 0) + (match.usage?.total || 0),
         costUSD: (combined.usage?.costUSD || 0) + (match.usage?.costUSD || 0),
         source: 'claude-transcript',
@@ -1035,9 +1132,10 @@ function listCodexTranscriptPaths(sessionRoots, { startedAt = null, endedAt = nu
   return paths;
 }
 
-function listClaudeTranscriptPaths(sessionRoots, cache = null) {
+function listClaudeTranscriptPaths(sessionRoots, cache = null, minMtime = null) {
+  const minMtimeMs = minMtime ? Date.parse(minMtime) : null;
   const cacheKey = cache
-    ? JSON.stringify({ roots: sessionRoots.map((root) => resolve(String(root))) })
+    ? JSON.stringify({ roots: sessionRoots.map((root) => resolve(String(root))), minMtime })
     : null;
   if (cacheKey && cache.has(cacheKey)) return cache.get(cacheKey);
   const paths = [];
@@ -1046,8 +1144,13 @@ function listClaudeTranscriptPaths(sessionRoots, cache = null) {
     if (!root) continue;
     addJsonlFilesRecursively(resolve(String(root)), paths, seen);
   }
-  if (cacheKey) cache.set(cacheKey, paths);
-  return paths;
+  const recentPaths = Number.isFinite(minMtimeMs)
+    ? paths.filter((path) => {
+      try { return statSync(path).mtimeMs >= minMtimeMs; } catch { return false; }
+    })
+    : paths;
+  if (cacheKey) cache.set(cacheKey, recentPaths);
+  return recentPaths;
 }
 
 function dayKey(value) {
@@ -1100,6 +1203,9 @@ function readCodexTranscriptSummary(transcriptPath) {
   let startedAt = null;
   let endedAt = null;
   let tokenUsage = null;
+  let completedTurn = false;
+  let model = null;
+  const rateLimits = [];
   try {
     for (const line of readFileSync(transcriptPath, 'utf8').split('\n')) {
       if (!line.trim()) continue;
@@ -1118,24 +1224,61 @@ function readCodexTranscriptSummary(transcriptPath) {
         sessionId ||= item.payload?.id || null;
         cwd ||= item.payload?.cwd || null;
         if (item.payload?.timestamp) startedAt = item.payload.timestamp;
+        model ||= item.payload?.model || null;
+      } else if (item.type === 'turn_context') {
+        model = item.payload?.model || model;
+        completedTurn = false;
       } else if (item.type === 'turn.completed') {
         const usage = tokenUsageFromCodexTotal(item.usage || null);
-        if (usage) tokenUsage = usage;
+        if (usage) {
+          tokenUsage = usage;
+          completedTurn = true;
+        }
       } else if (item.type === 'event_msg' && item.payload?.type === 'token_count') {
         const total = item.payload?.info?.total_token_usage || null;
         const usage = tokenUsageFromCodexTotal(total);
         if (usage) tokenUsage = usage;
+        rateLimits.push(...rateLimitSnapshotsFromTokenCount(item, model, timestamp || endedAt));
       }
     }
   } catch {
     return null;
   }
-  return { sessionId, cwd, startedAt, endedAt, tokenUsage };
+  return { sessionId, cwd, startedAt, endedAt, tokenUsage, model, rateLimits, completedTurn };
+}
+
+function parseRateLimitReset(value) {
+  if (value == null) return null;
+  const parsed = typeof value === 'number' || /^\d+$/.test(String(value))
+    ? new Date(Number(value) * 1000)
+    : new Date(value);
+  return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
+}
+
+function rateLimitSnapshotsFromTokenCount(item, model, observedAt) {
+  const limits = item?.payload?.rate_limits || item?.payload?.info?.rate_limits;
+  if (!limits || typeof limits !== 'object') return [];
+  return ['primary', 'secondary'].flatMap((window) => {
+    const data = limits[window];
+    if (!data || typeof data !== 'object') return [];
+    return [{
+      observedAt: observedAt || new Date().toISOString(),
+      limitId: limits.limit_id || null,
+      model,
+      windowKind: window,
+      usedPercent: data.used_percent,
+      windowMinutes: data.window_minutes,
+      resetsAt: parseRateLimitReset(data.resets_at),
+      planType: limits.plan_type || null,
+      rateLimitReachedType: limits.rate_limit_reached_type || item.payload?.rate_limit_reached_type || null,
+    }];
+  });
 }
 
 function readClaudeTranscriptSummary(transcriptPath) {
   let sessionId = null;
   let cwd = null;
+  let model = null;
   let startedAt = null;
   let endedAt = null;
   const totals = {
@@ -1146,6 +1289,7 @@ function readClaudeTranscriptSummary(transcriptPath) {
     reasoning: 0,
     toolContext: 0,
   };
+  const usageByMessage = new Map();
   let sawUsage = false;
   try {
     for (const line of readFileSync(transcriptPath, 'utf8').split('\n')) {
@@ -1163,22 +1307,35 @@ function readClaudeTranscriptSummary(transcriptPath) {
       }
       sessionId ||= item.sessionId || item.message?.sessionId || null;
       cwd ||= item.cwd || item.message?.cwd || null;
+      model ||= item.message?.model || item.model || null;
       const usage = item.message?.usage || item.usage || null;
       if (usage && typeof usage === 'object') {
         const normalized = tokenUsageFromClaudeUsage(usage);
         if (normalized) {
           sawUsage = true;
-          totals.input += normalized.input || 0;
-          totals.output += normalized.output || 0;
-          totals.cacheRead += normalized.cacheRead || 0;
-          totals.cacheWrite += normalized.cacheWrite || 0;
-          totals.reasoning += normalized.reasoning || 0;
-          totals.toolContext += normalized.toolContext || 0;
+          const key = item.message?.id || `event-${usageByMessage.size}`;
+          const previous = usageByMessage.get(key);
+          usageByMessage.set(key, previous ? {
+            input: Math.max(previous.input || 0, normalized.input || 0),
+            output: Math.max(previous.output || 0, normalized.output || 0),
+            cacheRead: Math.max(previous.cacheRead || 0, normalized.cacheRead || 0),
+            cacheWrite: Math.max(previous.cacheWrite || 0, normalized.cacheWrite || 0),
+            reasoning: Math.max(previous.reasoning || 0, normalized.reasoning || 0),
+            toolContext: Math.max(previous.toolContext || 0, normalized.toolContext || 0),
+          } : normalized);
         }
       }
     }
   } catch {
     return null;
+  }
+  for (const usage of usageByMessage.values()) {
+    totals.input += usage.input || 0;
+    totals.output += usage.output || 0;
+    totals.cacheRead += usage.cacheRead || 0;
+    totals.cacheWrite += usage.cacheWrite || 0;
+    totals.reasoning += usage.reasoning || 0;
+    totals.toolContext += usage.toolContext || 0;
   }
   const tokenUsage = sawUsage
     ? normalizeTokenUsage({
@@ -1187,7 +1344,7 @@ function readClaudeTranscriptSummary(transcriptPath) {
       source: 'claude-transcript',
     })
     : null;
-  return { sessionId, cwd, startedAt, endedAt, tokenUsage };
+  return { sessionId, cwd, startedAt, endedAt, tokenUsage, model };
 }
 
 function tokenUsageFromCodexTotal(total) {
@@ -1197,6 +1354,7 @@ function tokenUsageFromCodexTotal(total) {
     output: total.output_tokens,
     cacheRead: total.cached_input_tokens,
     cacheWrite: 0,
+    reasoning: total.reasoning_output_tokens,
     total: total.total_tokens,
     source: 'codex-transcript',
   });
@@ -1209,6 +1367,8 @@ function tokenUsageFromClaudeUsage(usage) {
     output: usage.output_tokens,
     cacheRead: usage.cache_read_input_tokens,
     cacheWrite: usage.cache_creation_input_tokens,
+    reasoning: usage.reasoning_output_tokens ?? usage.reasoning_tokens ?? usage.reasoning,
+    toolContext: usage.tool_context_tokens ?? usage.tool_use_prompt_tokens ?? usage.toolContext,
     total: usage.total_tokens,
     source: 'claude-transcript',
   });
@@ -1233,6 +1393,7 @@ function readCodexWorkerLogTokenUsage(logPath) {
   const sessionMatch = text.match(/^\s*session id:\s*(\S+)/mi);
   return {
     ...usage,
+    partial: usage.partial || false,
     adapterSessionKey: sessionMatch?.[1] || null,
     transcriptPath: logPath,
   };
@@ -1240,13 +1401,24 @@ function readCodexWorkerLogTokenUsage(logPath) {
 
 function readCodexWorkerLogJsonTokenUsage(text) {
   let tokenUsage = null;
+  let completedTurn = false;
+  let model = null;
+  const rateLimits = [];
   for (const line of String(text || '').split('\n')) {
-    if (!line.trim() || (!line.includes('token_count') && !line.includes('turn.completed'))) continue;
+    if (!line.trim() || (!line.includes('token_count') && !line.includes('turn.completed') && !line.includes('turn_context'))) continue;
     let item;
     try {
       item = JSON.parse(line);
     } catch {
       continue;
+    }
+    if (item.type === 'turn_context') {
+      model = item.payload?.model || model;
+      completedTurn = false;
+      continue;
+    }
+    if (item.type === 'event_msg' && item.payload?.type === 'token_count') {
+      rateLimits.push(...rateLimitSnapshotsFromTokenCount(item, model, item.timestamp));
     }
     const total = item.type === 'turn.completed'
       ? item.usage
@@ -1257,9 +1429,13 @@ function readCodexWorkerLogJsonTokenUsage(text) {
         );
     const usage = tokenUsageFromCodexTotal(total || null);
     if (usage) {
+      if (item.type === 'turn.completed') completedTurn = true;
       tokenUsage = {
         ...usage,
         source: 'codex-worker-log',
+        partial: !completedTurn,
+        model,
+        rateLimits,
       };
     }
   }
@@ -1270,6 +1446,7 @@ function defaultCodexSessionRoots({ env = process.env } = {}) {
   return uniqueExistingPaths([
     ...(env.CODEX_SESSION_ROOTS ? env.CODEX_SESSION_ROOTS.split(':') : []),
     env.CODEX_SESSION_ROOT,
+    env.CODEX_HOME ? join(env.CODEX_HOME, 'sessions') : null,
     join(homedir(), '.codex', 'sessions'),
   ]);
 }
@@ -1279,6 +1456,7 @@ function defaultClaudeSessionRoots({ env = process.env } = {}) {
     ...(env.CLAUDE_SESSION_ROOTS ? env.CLAUDE_SESSION_ROOTS.split(':') : []),
     env.CLAUDE_SESSION_ROOT,
     env.CLAUDE_PROJECTS_ROOT,
+    env.CLAUDE_CONFIG_DIR ? join(env.CLAUDE_CONFIG_DIR, 'projects') : null,
     join(homedir(), '.claude', 'projects'),
   ]);
 }
@@ -1331,7 +1509,7 @@ function readBestReviewerEvidenceTokenUsage({
     env,
     rootDir,
   });
-  if (ledgerUsage) return ledgerUsage;
+  let transcriptUsage = null;
   if (transcriptFallback) {
     const shouldUseDefaults = shouldUseDefaultTranscriptRoots(rootDir);
     const resolvedCodexSessionRoots = codexSessionRoots || (shouldUseDefaults ? defaultCodexSessionRoots({ env }) : []);
@@ -1351,16 +1529,37 @@ function readBestReviewerEvidenceTokenUsage({
           rootDir,
         })
         : reader({
+          adapterSessionKey: ledgerUsage?.adapterSessionKey || adapterSessionKey,
+          sessionKeys,
           workspacePath,
           startedAt,
           endedAt,
           sessionRoots: resolvedCodexSessionRoots,
           rootDir,
         });
-      if (usage) return usage;
+      if (usage) {
+        transcriptUsage = usage;
+        break;
+      }
     }
   }
-  return readCodexWorkerLogTokenUsage(workerLogPath);
+  const workerLogUsage = readCodexWorkerLogTokenUsage(workerLogPath
+    ? (isAbsolute(workerLogPath) ? workerLogPath : join(rootDir, workerLogPath))
+    : null);
+  const ledgerHasCounts = ledgerUsage && [ledgerUsage.input, ledgerUsage.output, ledgerUsage.cacheRead,
+    ledgerUsage.cacheWrite, ledgerUsage.costUSD].some((value) => value !== null && value !== undefined);
+  const selected = (ledgerHasCounts ? ledgerUsage : null) || transcriptUsage || workerLogUsage;
+  if (!selected) return null;
+  const matchingTranscript = (!ledgerHasCounts || (
+    ledgerUsage.adapterSessionKey && transcriptUsage?.adapterSessionKey
+      && ledgerUsage.adapterSessionKey === transcriptUsage.adapterSessionKey
+  )) ? transcriptUsage : null;
+  return {
+    ...selected,
+    model: matchingTranscript?.model || selected.model || reviewerModel || null,
+    rateLimits: matchingTranscript?.rateLimits?.length
+      ? matchingTranscript.rateLimits : (selected.rateLimits || []),
+  };
 }
 
 function shouldUseDefaultTranscriptRoots(rootDir) {
@@ -1560,7 +1759,9 @@ function backfillReviewerPasses(rootDir, {
         claudeTranscriptSummaryCache,
         claudeTranscriptPathCache,
         rootDir,
-      }) : null) || readCodexWorkerLogTokenUsage(worker.logPath);
+      }) : null) || readCodexWorkerLogTokenUsage(worker.logPath
+        ? (isAbsolute(worker.logPath) ? worker.logPath : join(rootDir, worker.logPath))
+        : null);
       if (usage) {
         tokenMatched += 1;
         if (usage.source === 'codex-worker-log') workerLogMatched += 1;
@@ -1943,6 +2144,8 @@ export {
   readBestReviewerEvidenceTokenUsage,
   readClaudeTranscriptTokenUsage,
   readCodexTranscriptTokenUsage,
+  captureLocalReviewerUsage,
+  readLocalReviewerTranscriptUsage,
   readCodexWorkerLogTokenUsage,
   readReviewerTokenUsageArtifact,
   readReviewerSessionTokenUsage,

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { openReviewStateDb } from '../src/review-state.mjs';
 import {
   DEFAULT_MAX_REMEDIATION_ROUNDS,
   FOLLOW_UP_JOB_SCHEMA_VERSION,
@@ -4417,6 +4418,33 @@ test('requeueFollowUpJobForNextRound accepts stopped:max-rounds-reached jobs aft
   });
 
   assert.equal(requeued.job.status, 'pending');
+});
+
+test('stopping a spawned remediation worker keeps its partial Codex usage', (t) => {
+  const rootDir = makeTempRoot(t);
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-09-27T03:00:00Z' });
+  const logPath = path.join(rootDir, 'worker.jsonl');
+  writeFileSync(logPath, JSON.stringify({ type: 'event_msg', payload: { type: 'token_count',
+    info: { total_token_usage: { input_tokens: 100, output_tokens: 20,
+      cached_input_tokens: 70, reasoning_output_tokens: 5 } } } }));
+  const spawned = markFollowUpJobSpawned({ rootDir, jobPath: claimed.jobPath,
+    worker: { model: 'codex', resolvedModel: 'gpt-6-sol', workspaceDir: rootDir,
+      processId: 42, logPath }, spawnedAt: '2026-09-27T03:00:00Z' });
+  markFollowUpJobStopped({ rootDir, jobPath: spawned.jobPath,
+    stoppedAt: '2026-09-27T03:01:00Z', stopCode: 'operator-cancelled',
+    sourceStatus: 'in_progress', stopReason: 'cancelled' });
+  const db = openReviewStateDb(rootDir);
+  try {
+    const row = db.prepare("SELECT * FROM reviewer_passes WHERE pass_kind = 'remediation'").get();
+    assert.equal(row.status, 'cancelled');
+    assert.equal(row.token_total, 120);
+    assert.equal(row.token_cache_read, 70);
+    assert.equal(row.reviewer_model, 'gpt-6-sol');
+    assert.equal(JSON.parse(row.metadata_json).tokenUsageState, 'partial');
+  } finally {
+    db.close();
+  }
 });
 
 test('computeFollowUpJobStoppedState applies the same stop defaults as markFollowUpJobStopped', () => {

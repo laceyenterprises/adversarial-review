@@ -257,7 +257,25 @@ function ensureReviewStateSchema(db) {
   // migration runner became the canonical path.
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN ended_at TEXT`);
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN reviewer_model TEXT`);
+  addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN token_input INTEGER`);
+  addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN token_output INTEGER`);
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN token_total INTEGER`);
+  // TOKCAP-01 reads this table from data/reviews.db for fleet quota projection.
+  db.exec(`CREATE TABLE IF NOT EXISTS reviewer_rate_limit_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pass_id INTEGER NOT NULL REFERENCES reviewer_passes(pass_id),
+    observed_at TEXT NOT NULL,
+    limit_id TEXT,
+    model TEXT,
+    window_kind TEXT,
+    used_percent REAL,
+    window_minutes INTEGER,
+    resets_at TEXT,
+    plan_type TEXT,
+    rate_limit_reached_type TEXT,
+    UNIQUE(pass_id, observed_at, limit_id, window_kind)
+  )`);
+  addColumnIfMissing(db, `ALTER TABLE reviewer_rate_limit_snapshots ADD COLUMN window_kind TEXT`);
   // Full-fidelity token breakdown parity with the session ledger
   // (token_usage_reasoning / token_usage_tool_context): reviewer passes must
   // record reasoning and tool-use tokens, not just input/output/cache.

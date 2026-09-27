@@ -352,7 +352,7 @@ test('spawnReviewer resolves worker_run_id from os-dispatch launch_request_id wh
   assert.equal(settled[0].metadata.launchRequestId, 'lrq_wcw_attribution');
 });
 
-test('spawnReviewer enriches adapter token usage with ledger worker_run_id without replacing counters', async () => {
+test('spawnReviewer enriches adapter usage with worker_run_id and preserves reported total', async () => {
   const settled = [];
   const result = await spawnReviewer({
     rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),

@@ -1382,6 +1382,41 @@ test('prepareWorkspaceForJob clones missing repos and checks out the PR branch',
   assert.ok(sameRepoCheckout, 'expected a git checkout call');
 });
 
+test('prepareWorkspaceForJob resumes a lost worker with local commits and a dirty diff', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-resume-'));
+  const base = makeJob();
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', base.jobId);
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  const calls = [];
+  const result = await prepareWorkspaceForJob({
+    rootDir,
+    job: {
+      ...base,
+      remediationPlan: {
+        ...base.remediationPlan,
+        retryHistory: [{ worker: { workspaceDir, processId: 12345 }, retryMetadata: { code: 'stale-heartbeat' } }],
+      },
+    },
+    env: {},
+    execFileImpl: async (command, args) => {
+      calls.push([command, ...args]);
+      if (command === 'gh') return { stdout: JSON.stringify({
+        base: { ref: 'main' },
+        head: { ref: 'feature', repo: { full_name: base.repo } },
+      }) };
+      if (args[0] === 'config' && args[1] === '--get') return { stdout: `https://github.com/${base.repo}.git\n` };
+      if (args[0] === 'status') return { stdout: ' M file.txt\n' };
+      if (args[2] === 'symbolic-ref') return { stdout: 'feature\n' };
+      if (args[2] === 'diff') return { stdout: 'diff --git a/file.txt b/file.txt\n' };
+      return { stdout: '' };
+    },
+  });
+  assert.equal(result.workspaceState.action, 'resumed');
+  assert.equal(readFileSync(result.workspaceState.resumePatchPath, 'utf8'), 'diff --git a/file.txt b/file.txt\n');
+  assert.equal(calls.some((call) => call.includes('checkout') || call.includes('clone')), false);
+  assert.equal(calls.some((call) => call.includes('merge-base')), true);
+});
+
 test('prepareWorkspaceForJob clones against the live REST base branch when the saved job base is stale', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const calls = [];
@@ -7224,6 +7259,43 @@ test('reconcileFollowUpJob marks exited workers failed when the final artifact i
   assert.equal(result.job.failure.logPath, path.relative(rootDir, logPath));
 });
 
+test('reconcileFollowUpJob requeues a lost worker with local commits and preserves its patch', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'remwaste-lost-worker-'));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 81 });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  execFileSync('git', ['-C', workspaceDir, 'init', '-q']);
+  execFileSync('git', ['-C', workspaceDir, 'config', 'user.name', 'Test Worker']);
+  execFileSync('git', ['-C', workspaceDir, 'config', 'user.email', 'worker@example.test']);
+  writeFileSync(path.join(workspaceDir, 'fix.txt'), 'committed\n');
+  execFileSync('git', ['-C', workspaceDir, 'add', 'fix.txt']);
+  execFileSync('git', ['-C', workspaceDir, 'commit', '-qm', 'fix finding']);
+  writeFileSync(path.join(workspaceDir, 'fix.txt'), 'committed\nmore work\n');
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'codex', processId: 8125, state: 'spawned',
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, path.join(artifactDir, 'codex-last-message.md')),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+    },
+  });
+  const result = await reconcileFollowUpJob({
+    rootDir, job: spawned.job, jobPath: spawned.jobPath,
+    now: () => '2026-04-21T10:31:00.000Z',
+    isWorkerRunning: () => false,
+    resolvePRLifecycleImpl: async () => null,
+  });
+  assert.equal(result.action, 'requeued');
+  assert.equal(result.reason, 'worker-killed-resume');
+  assert.equal(result.job.remediationPlan.retryHistory.at(-1).worker.workspaceDir, path.relative(rootDir, workspaceDir));
+  const patchPath = result.job.remediationPlan.retryHistory.at(-1).retryMetadata.resumePatchPath;
+  assert.match(readFileSync(patchPath, 'utf8'), /more work/);
+  assert.equal(readFileSync(path.join(workspaceDir, 'fix.txt'), 'utf8'), 'committed\nmore work\n');
+});
+
 test('reconcileFollowUpJob rejects worker artifact traversal paths', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const { claimed } = makeQueuedJob(rootDir, { prNumber: 10, reviewPostedAt: '2026-04-21T08:07:00.000Z' });
@@ -10080,6 +10152,79 @@ test('reconcileFollowUpJob cancels an active HQ dispatch before stopping on PR l
   assert.ok(
     commands.some((entry) => entry[0] === 'hq' && entry[1] === 'dispatch' && entry[2] === 'cancel' && entry[3] === 'dispatch_arp04_cancel'),
   );
+});
+
+test('reconcileFollowUpJob signals an active bare worker when the PR merges', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'remwaste-merge-cancel-'));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 75 });
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: { model: 'codex', state: 'spawned', processId: 9504, processGroupId: 9504 },
+  });
+  const signals = [];
+  const result = await reconcileFollowUpJob({
+    rootDir,
+    job: spawned.job,
+    jobPath: spawned.jobPath,
+    isWorkerRunning: () => true,
+    now: () => '2026-04-21T10:15:00.000Z',
+    resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'merged', headSha: 'reviewed-head' }),
+    sendWorkerSignalImpl: async (args) => {
+      signals.push(args);
+      return { signalled: true, signal: args.signal };
+    },
+  });
+  assert.equal(result.action, 'stopped');
+  assert.equal(result.job.remediationPlan.stop.code, 'operator-merged-pr');
+  assert.equal(signals.length, 1);
+  assert.equal(signals[0].signal, 'SIGTERM');
+});
+
+test('reconcileFollowUpJob cancels an active worker for an external newer head', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'remwaste-head-cancel-'));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 76, revisionRef: 'reviewed-head' });
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: { model: 'codex', state: 'spawned', processId: 9505, processGroupId: 9505 },
+  });
+  let signals = 0;
+  const result = await reconcileFollowUpJob({
+    rootDir, job: spawned.job, jobPath: spawned.jobPath,
+    isWorkerRunning: () => true,
+    now: () => '2026-04-21T10:15:00.000Z',
+    resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: 'external-head' }),
+    sendWorkerSignalImpl: async () => { signals += 1; return { signalled: true }; },
+  });
+  assert.equal(result.action, 'stopped');
+  assert.equal(result.job.remediationPlan.stop.code, 'stale-review-head');
+  assert.equal(signals, 1);
+});
+
+test('reconcileFollowUpJob cancels an active round after its cap is lowered', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'remwaste-cap-cancel-'));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 77 });
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath, spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: { model: 'codex', state: 'spawned', processId: 9506, processGroupId: 9506 },
+  });
+  const capped = {
+    ...spawned.job,
+    remediationPlan: { ...spawned.job.remediationPlan, currentRound: 2, maxRounds: 1 },
+  };
+  writeFollowUpJob(spawned.jobPath, capped);
+  let signals = 0;
+  const result = await reconcileFollowUpJob({
+    rootDir, job: capped, jobPath: spawned.jobPath,
+    isWorkerRunning: () => true,
+    now: () => '2026-04-21T10:15:00.000Z',
+    resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open' }),
+    sendWorkerSignalImpl: async () => { signals += 1; return { signalled: true }; },
+  });
+  assert.equal(result.action, 'stopped');
+  assert.equal(result.job.remediationPlan.stop.code, 'max-rounds-reached');
+  assert.equal(signals, 1);
 });
 
 test('mixed-mode cutover keeps legacy in-progress ownership and dispatches newly claimed work through hq', async () => {

@@ -348,7 +348,7 @@ function normalizeGitHubRepo(value) {
     .replace(/^\/+/, '');
 }
 
-async function inspectWorkspaceState({ workspaceDir, expectedRepo, execFileImpl = execFileAsync }) {
+async function inspectWorkspaceState({ workspaceDir, expectedRepo, allowDirty = false, execFileImpl = execFileAsync }) {
   if (!existsSync(join(workspaceDir, '.git'))) {
     return { reset: false, reason: 'missing' };
   }
@@ -371,7 +371,7 @@ async function inspectWorkspaceState({ workspaceDir, expectedRepo, execFileImpl 
     }
 
     if (String(statusOutput || '').trim()) {
-      return { reset: true, reason: 'dirty-worktree' };
+      return { reset: !allowDirty, reason: 'dirty-worktree', actualRepo };
     }
 
     return { reset: false, reason: 'valid', actualRepo };

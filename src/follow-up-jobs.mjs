@@ -19,6 +19,7 @@ import { buildCodePrSubjectIdentity, buildDeliveryKey } from './identity-shapes.
 import {
   beginReviewerPass,
   completeReviewerPass,
+  nextReviewerPassAttemptNumber,
   readBestReviewerEvidenceTokenUsage,
 } from './reviewer-pass-tokens.mjs';
 import {
@@ -2358,6 +2359,21 @@ function markFollowUpJobSpawned({
 }) {
   const effectiveSpawnedAt = worker?.spawnedAt || spawnedAt;
   const currentJob = readFollowUpJob(jobPath);
+  const passRootDir = rootDir || inferRootDirFromFollowUpJobPath(jobPath);
+  let passAttemptNumber = remediationAttemptNumber(currentJob);
+  if (shouldRecordRemediationPass(currentJob, worker)) {
+    try {
+      passAttemptNumber = nextReviewerPassAttemptNumber(passRootDir, {
+        repo: currentJob.repo,
+        prNumber: Number(currentJob.prNumber),
+        passKind: 'remediation',
+        fallbackReviewAttempts: passAttemptNumber - 1,
+      });
+    } catch (err) {
+      console.warn(`[follow-up-jobs] reviewer_pass_attempt_lookup_failed job=${currentJob.jobId}: ${err?.message || err}`);
+    }
+  }
+  const recordedWorker = { ...worker, passAttemptNumber };
   let nextJob = {
     ...currentJob,
     status: 'in_progress',
@@ -2372,7 +2388,7 @@ function markFollowUpJobSpawned({
       model: 'codex',
       state: 'spawned',
       spawnedAt: effectiveSpawnedAt,
-      ...worker,
+      ...recordedWorker,
     },
     remediationReply: buildRemediationReplyArtifact(worker?.replyPath ?? null),
     remediationPlan: {
@@ -2391,7 +2407,7 @@ function markFollowUpJobSpawned({
     spawnedAt: effectiveSpawnedAt,
     worker: {
       model: 'codex',
-      ...worker,
+      ...recordedWorker,
     },
   }));
 
@@ -2401,9 +2417,9 @@ function markFollowUpJobSpawned({
 
   writeFollowUpJob(jobPath, nextJob);
   recordRemediationPassStartedSafe({
-    rootDir: rootDir || inferRootDirFromFollowUpJobPath(jobPath),
+    rootDir: passRootDir,
     job: nextJob,
-    worker,
+    worker: recordedWorker,
     spawnedAt,
   });
   return { job: nextJob, jobPath };
@@ -2500,7 +2516,18 @@ function requeueInProgressFollowUpJobForRetry({
     };
   }
 
-  return moveFollowUpJob(rootDir, jobPath, 'pending', nextJob);
+  const moved = moveFollowUpJob(rootDir, jobPath, 'pending', nextJob);
+  // Close the lost attempt while its log and session evidence still exist.
+  // The next spawn replaces the per-job artifact directory.
+  recordRemediationPassTerminalSafe({
+    rootDir,
+    job: currentJob,
+    worker: effectiveWorker || {},
+    status: 'cancelled',
+    endedAt: requeuedAt,
+    failureClass: retryMetadata?.code || 'worker-lost',
+  });
+  return moved;
 }
 
 function inferRootDirFromFollowUpJobPath(jobPath) {
@@ -2514,6 +2541,8 @@ function inferRootDirFromFollowUpJobPath(jobPath) {
 }
 
 function remediationAttemptNumber(job) {
+  const passAttempt = Number(job?.remediationWorker?.passAttemptNumber);
+  if (Number.isInteger(passAttempt) && passAttempt > 0) return passAttempt;
   const parsed = Number(job?.remediationPlan?.currentRound || job?.currentRound || 1);
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : 1;
 }
@@ -2526,7 +2555,8 @@ function shouldRecordRemediationPass(job, worker = {}) {
   const prNumber = Number(job?.prNumber);
   if (!job?.repo || !Number.isInteger(prNumber)) return false;
   if (worker?.state === 'never-spawned') return false;
-  return Boolean(worker?.workspaceDir || job?.workspaceDir || worker?.processId || worker?.workerRunId || worker?.runId);
+  return Boolean(worker?.workspaceDir || job?.workspaceDir || worker?.processId || worker?.workerRunId
+    || worker?.runId || worker?.dispatchId || worker?.launchRequestId || worker?.launchRequestID || worker?.lrq);
 }
 
 function recordRemediationPassStartedSafe({ rootDir, job, worker = {}, spawnedAt }) {

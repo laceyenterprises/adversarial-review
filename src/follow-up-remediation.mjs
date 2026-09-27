@@ -70,6 +70,7 @@ import { REREVIEW_WAKE_REASONS, requestRereviewWake } from './rereview-wake.mjs'
 import { requestHammerWakeForSettledReviewStop } from './hammer-wake.mjs';
 import { drainPendingNoRemediationJobs } from './no-remediation-follow-up.mjs';
 import { lifecycleStopDecision, resolveJobPRLifecycleSafe } from './follow-up-lifecycle.mjs';
+import { sendWorkerSignal, workerCancelHandle } from './follow-up-worker-cancel.mjs';
 import { classifyGithubAuthOperationalBlocker, extractCommitShaFromOperationalBlocker, preserveUnpushedCommit, recoverGithubAuthOperationalBlocker, retryGithubAuthPushOnce } from './github-auth-recovery.mjs';
 import { buildRemediationPrompt } from './remediation-prompt-builder.mjs';
 import {
@@ -1161,8 +1162,17 @@ async function prepareWorkspaceForJob({
   const workspaceState = await inspectWorkspaceState({
     workspaceDir,
     expectedRepo: repo,
+    allowDirty: Boolean(job?.remediationPlan?.retryHistory?.at(-1)?.worker?.workspaceDir),
     execFileImpl,
   });
+
+  if (job?.remediationPlan?.retryHistory?.at(-1)?.worker?.workspaceDir && workspaceState.reason === 'missing') {
+    throw new Error(`resume-impossible: preserved workspace is missing at ${workspaceDir}`);
+  }
+
+  if (job?.remediationPlan?.retryHistory?.at(-1)?.worker?.workspaceDir && workspaceState.reset) {
+    throw new Error(`resume-impossible: preserved workspace failed validation (${workspaceState.reason}); workspace preserved at ${workspaceDir}`);
+  }
 
   if (workspaceState.reset) {
     resetWorkspaceDir(workspaceDir);
@@ -1228,6 +1238,10 @@ async function prepareWorkspaceForJob({
   // rare GraphQL call there is acceptable.
   const { baseBranch, branch: headRef, headRepo } = await loadPRBranchMetadata();
   const isSameRepo = !headRepo || headRepo === repo;
+  const retry = job?.remediationPlan?.retryHistory?.at(-1);
+  const resumeRequested = Boolean(retry?.worker?.workspaceDir && !workspaceState.reset);
+  let resumePatchPath = null;
+  let resumed = false;
   if (isSameRepo && headRef) {
     // --single-branch configures origin to track only the base. The worker's
     // force-with-lease push also needs the PR head recorded as a tracked ref.
@@ -1249,15 +1263,33 @@ async function prepareWorkspaceForJob({
       await runWorkspaceGitWithTransientRetry(['-C', workspaceDir, 'fetch', 'origin', fetchRefs[0]], fetchOptions);
     }
     checkoutStartedAt = Date.now();
-    await runWorkspaceGitWithTransientRetry(
-      ['-C', workspaceDir, 'checkout', '-B', headRef, `origin/${headRef}`],
-      {
-        execFileImpl,
-        options: {
-          maxBuffer: 10 * 1024 * 1024,
-        },
+    if (resumeRequested) {
+      // A retry must keep commits and untracked files from the lost worker.
+      // Verify that the local branch still extends the live PR branch before
+      // trusting it; a divergent workspace needs operator inspection.
+      const branch = (await execFileImpl('git', ['-C', workspaceDir, 'symbolic-ref', '--quiet', '--short', 'HEAD'])).stdout.trim();
+      if (branch !== headRef) {
+        throw new Error(`resume-impossible: workspace branch ${branch} differs from PR branch ${headRef}; workspace preserved at ${workspaceDir}`);
       }
-    );
+      try {
+        await execFileImpl('git', ['-C', workspaceDir, 'merge-base', '--is-ancestor', `origin/${headRef}`, 'HEAD']);
+      } catch {
+        throw new Error(`resume-impossible: PR head is not an ancestor of the preserved workspace; workspace preserved at ${workspaceDir}`);
+      }
+      const patch = (await execFileImpl('git', ['-C', workspaceDir, 'diff', '--binary', 'HEAD'], {
+        maxBuffer: 20 * 1024 * 1024,
+      })).stdout;
+      if (patch) {
+        resumePatchPath = join(workspaceRootDir, `${job.jobId}.resume.patch`);
+        writeFileSync(resumePatchPath, patch);
+      }
+      resumed = true;
+    } else {
+      await runWorkspaceGitWithTransientRetry(
+        ['-C', workspaceDir, 'checkout', '-B', headRef, `origin/${headRef}`],
+        { execFileImpl, options: { maxBuffer: 10 * 1024 * 1024 } }
+      );
+    }
   } else {
     checkoutStartedAt = Date.now();
     await runWorkspaceNetworkCommandWithTransientRetry({
@@ -1275,7 +1307,9 @@ async function prepareWorkspaceForJob({
 
   return {
     workspaceDir,
-    workspaceState: workspaceState.reset
+    workspaceState: resumed
+      ? { action: 'resumed', reason: 'preserved-local-commits-and-diff', resumePatchPath }
+      : workspaceState.reset
       ? { action: 'recloned', reason: workspaceState.reason }
       : { action: 'reused', reason: workspaceState.reason },
   };
@@ -1723,6 +1757,7 @@ async function reconcileFollowUpJob({
   inspectRemediationCiRegressionImpl = inspectRemediationCiRegression,
   execFileImpl = execFileAsync,
   workerTerminalEvent = null,
+  sendWorkerSignalImpl = sendWorkerSignal,
   log = console,
 } = {}) {
   const worker = job?.remediationWorker;
@@ -1760,12 +1795,37 @@ async function reconcileFollowUpJob({
     execFileImpl,
     log,
   });
-  const lifecycleStop = lifecycleStopDecision(lifecycle, {
+  let lifecycleStop = lifecycleStopDecision(lifecycle, {
     repo: job.repo,
     prNumber: job.prNumber,
-    site: 'reconcile',
+    site: liveness.state === 'active' ? 'reconcile-active' : 'reconcile',
     job,
   });
+  // A remediator can legitimately move the head by pushing its own commits.
+  // Keep it running when the live head is its local HEAD; a different head
+  // indicates external supersession and is cancelled below.
+  if (liveness.state === 'active' && lifecycleStop?.stopCode === 'stale-review-head') {
+    try {
+      const workerPaths = buildReconciliationPaths(rootDir, job);
+      const hqWorkspace = worker?.dispatchMode === 'hq'
+        ? parseHqWorkerWorkspaceFromPayload(liveness?.dispatchStatus || {})
+        : null;
+      const localHead = (await execFileImpl('git', ['-C', hqWorkspace || workerPaths.workspaceDir, 'rev-parse', 'HEAD'])).stdout.trim();
+      if (localHead && localHead === lifecycle?.headSha) lifecycleStop = null;
+    } catch {
+      // Cannot prove ownership of the new head; retain the stop decision.
+    }
+  }
+  const currentRound = Number(job?.remediationPlan?.currentRound || 0);
+  const maxRounds = Number(job?.remediationPlan?.maxRounds || 0);
+  if (!lifecycleStop && maxRounds > 0 && currentRound > maxRounds) {
+    lifecycleStop = {
+      stopCode: 'max-rounds-reached',
+      actionReason: 'max-rounds-reached',
+      workerState: 'cancelled-max-rounds',
+      stopReason: `Remediation round ${currentRound} exceeds the current cap of ${maxRounds}; cancelling the active worker.`,
+    };
+  }
   if (liveness.state === 'active' && !lifecycleStop) {
     return {
       action: 'active',
@@ -1800,6 +1860,18 @@ async function reconcileFollowUpJob({
           now,
           log,
         });
+      }
+      workerState.cancellation = cancellation;
+    } else {
+      const handle = workerCancelHandle(job);
+      const cancellation = await sendWorkerSignalImpl({
+        ...handle,
+        signal: 'SIGTERM',
+        execFileImpl,
+      });
+      if (!cancellation.signalled && cancellation.error !== 'process-group-not-found') {
+        log.warn?.(`[follow-up-remediation] lifecycle cancellation failed job=${job.jobId} reason=${cancellation.error}`);
+        return { action: 'active', reason: 'worker-cancellation-failed', job, jobPath };
       }
       workerState.cancellation = cancellation;
     }
@@ -2786,6 +2858,15 @@ async function reconcileFollowUpJob({
     }
 
     if (!rereview.requested) {
+      if (operationalBlockerRecovery?.rescue?.preserved && worker.dispatchMode !== 'hq'
+        && Number(job?.remediationPlan?.transientRetries || 0) < resolveMaxTransientRemediationRetries()) {
+        const requeued = requeueInProgressFollowUpJobForRetry({
+          rootDir, jobPath, requeuedAt: completedAt, allowDirectWorkerRetry: true,
+          retryReason: 'Preserved remediation commit after worker credential failure; resuming the same workspace.',
+          retryMetadata: { code: 'worker-killed-resume', rescue: operationalBlockerRecovery.rescue },
+        });
+        return { action: 'requeued', reason: 'worker-killed-resume', job: requeued.job, jobPath: requeued.jobPath };
+      }
       const currentRound = Number(job?.remediationPlan?.currentRound || 0);
       const maxRounds = Number(job?.remediationPlan?.maxRounds || 0);
       const stopCode = maxRounds > 0 && currentRound >= maxRounds
@@ -2822,6 +2903,11 @@ async function reconcileFollowUpJob({
         stopReason,
         commentDelivery: noProgressDelivery,
         passFailureClass: operationalBlockerRecovery ? 'worker-killed-no-resume' : null,
+        stopMetadata: operationalBlockerRecovery ? {
+          resumeImpossible: operationalBlockerRecovery.rescue?.preserved
+            ? (worker.dispatchMode === 'hq' ? 'worker-pool-workspace-not-reusable' : 'retry-budget-exhausted')
+            : operationalBlockerRecovery.rescue?.reason || 'commit-not-preserved',
+        } : null,
         jobUpdates: operationalBlockerRecovery ? { operationalBlockerRecovery } : null,
       });
 
@@ -3125,6 +3211,40 @@ async function reconcileFollowUpJob({
     };
   }
 
+  let resumeImpossible = 'workspace-unavailable';
+  if (worker?.dispatchMode !== 'hq' && paths?.workspaceDir && existsSync(join(paths.workspaceDir, '.git'))) {
+    try {
+      const [statusResult, commitsResult] = await Promise.all([
+        execFileImpl('git', ['-C', paths.workspaceDir, 'status', '--porcelain', '--untracked-files=all']),
+        execFileImpl('git', ['-C', paths.workspaceDir, 'rev-list', '--count', 'HEAD', '--not', '--remotes=origin']),
+      ]);
+      const changed = String(statusResult.stdout || '').split('\n').some((line) =>
+        line && !line.includes('.adversarial-follow-up/'));
+      const localCommits = Number(commitsResult.stdout || 0);
+      if (changed || localCommits > 0) {
+        const retryCount = Number(job?.remediationPlan?.transientRetries || 0);
+        if (retryCount < resolveMaxTransientRemediationRetries()) {
+          const patch = (await execFileImpl('git', ['-C', paths.workspaceDir, 'diff', '--binary', 'HEAD'], {
+            maxBuffer: 20 * 1024 * 1024,
+          })).stdout;
+          const resumePatchPath = patch ? join(dirname(paths.workspaceDir), `${job.jobId}.resume.patch`) : null;
+          if (resumePatchPath) writeFileSync(resumePatchPath, patch);
+          const requeued = requeueInProgressFollowUpJobForRetry({
+            rootDir, jobPath, requeuedAt: completedAt, allowDirectWorkerRetry: true,
+            retryReason: 'Lost remediation worker left commits or edits; resume its preserved workspace.',
+            retryMetadata: { code: 'worker-killed-resume', localCommits, changed, resumePatchPath },
+          });
+          return { action: 'requeued', reason: 'worker-killed-resume', job: requeued.job, jobPath: requeued.jobPath };
+        }
+        resumeImpossible = 'retry-budget-exhausted';
+      } else {
+        resumeImpossible = 'workspace-has-no-commits-or-edits';
+      }
+    } catch (err) {
+      resumeImpossible = `workspace-inspection-failed: ${err.message}`;
+    }
+  }
+
   const failureCode = worker?.dispatchMode === 'hq' && !HQ_SUCCESS_STATUSES.has(String(liveness?.dispatchStatus?.status || ''))
     ? 'hq-dispatch-failed'
     : (finalMessage.exists ? 'artifact-empty-completion' : 'artifact-missing-completion');
@@ -3148,6 +3268,7 @@ async function reconcileFollowUpJob({
       state: 'failed',
     },
     failure: {
+      resumeImpossible,
       finalMessagePath: worker.outputPath || null,
       finalMessageBytes: finalMessage.bytes,
       logPath: worker.logPath || null,
@@ -3836,7 +3957,10 @@ async function consumeNextFollowUpJob({
       // remediation is attributed correctly instead of defaulting to codex.
       workerTrailerClass: remediationWorkerTrailerClass(workerClass),
     });
-    writeFileSync(promptPath, `${prompt}\n`, 'utf8');
+    const resumeInstruction = workspaceState.action === 'resumed'
+      ? `\n\n## Resume preserved work\nContinue from the existing local commits and uncommitted changes in this workspace. Do not reset the branch. The tracked diff was backed up at ${workspaceState.resumePatchPath || '(no tracked diff)'}.\n`
+      : '';
+    writeFileSync(promptPath, `${prompt}${resumeInstruction}\n`, 'utf8');
 
     // LAC-957: rerun the canonical consume-time lifecycle gate just
     // before spawn. The first gate ran before OAuth pre-flight +

@@ -1,4 +1,7 @@
 import { staleDriftStopDecision } from './stale-drift.mjs';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { getReviewRow, openReviewStateDb } from './review-state.mjs';
 
 async function resolveJobPRLifecycleSafe({
   rootDir,
@@ -8,11 +11,20 @@ async function resolveJobPRLifecycleSafe({
   log = console,
 }) {
   try {
-    return await resolvePRLifecycleImpl(rootDir, {
+    const lifecycle = await resolvePRLifecycleImpl(rootDir, {
       repo: job.repo,
       prNumber: job.prNumber,
       execFileImpl,
     });
+    if (!existsSync(join(rootDir, 'data', 'reviews.db'))) return lifecycle;
+    const db = openReviewStateDb(rootDir);
+    try {
+      const row = getReviewRow(db, { repo: job.repo, prNumber: job.prNumber });
+      const newerReviewPending = Boolean(row && ['pending', 'reviewing', 'pending-upstream'].includes(row.review_status));
+      return lifecycle ? { ...lifecycle, newerReviewPending } : { prState: null, newerReviewPending };
+    } finally {
+      db.close();
+    }
   } catch (err) {
     log.error?.(
       `[follow-up-remediation] PR lifecycle resolve threw for ${job.repo}#${job.prNumber} (non-fatal): ${err.message}`
@@ -31,9 +43,17 @@ function lifecycleStopDecision(lifecycle, { repo, prNumber, site, job = null }) 
   if (!lifecycle) return null;
   const staleDriftStop = staleDriftStopDecision(lifecycle, { prNumber, site });
   if (lifecycle.prState !== 'merged' && lifecycle.prState !== 'closed') {
+    if (lifecycle.newerReviewPending) {
+      return {
+        stopCode: 'newer-review-pending',
+        actionReason: 'newer-review-pending',
+        workerState: site === 'consume' ? 'never-spawned' : 'cancelled-newer-review',
+        stopReason: `A newer review is pending for ${repo}#${prNumber}; cancelling remediation for the prior verdict.`,
+      };
+    }
     const jobRevisionRef = typeof job?.revisionRef === 'string' ? job.revisionRef.trim() : '';
     const currentHeadSha = typeof lifecycle.headSha === 'string' ? lifecycle.headSha.trim() : '';
-    if (site === 'consume' && jobRevisionRef && currentHeadSha && jobRevisionRef !== currentHeadSha) {
+    if (site !== 'reconcile' && jobRevisionRef && currentHeadSha && jobRevisionRef !== currentHeadSha) {
       const sourceTag = lifecycle.source ? ` source=${lifecycle.source}` : '';
       return {
         stopCode: 'stale-review-head',

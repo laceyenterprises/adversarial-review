@@ -43,7 +43,7 @@
 
 import { existsSync, mkdtempSync, promises as fsPromises, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import {
   computeFollowUpJobStoppedState,
   listFollowUpJobsInDir,
@@ -56,6 +56,7 @@ import { lifecycleStopDecision, resolveJobPRLifecycleSafe } from './follow-up-li
 import { resolveMaxTransientRemediationRetries } from './remediation-admission.mjs';
 import { sendWorkerSignal, workerCancelHandle } from './follow-up-worker-cancel.mjs';
 import { resolvePRLifecycle } from './review-state.mjs';
+import { readWorkerCpuPercent, resolveWorkerArtifactProgressMs, resolveWorkerSessionProgressMs } from './follow-up-worker-progress.mjs';
 import {
   buildRemediationOutcomeCommentBody,
   postRemediationOutcomeComment,
@@ -120,38 +121,6 @@ function normalizeWorkerArtifactProgressMs(ms) {
 function isoFromMs(ms) {
   const normalizedMs = normalizeWorkerArtifactProgressMs(ms);
   return normalizedMs === null ? null : new Date(normalizedMs).toISOString();
-}
-
-function resolveStoredWorkerPath(rootDir, value) {
-  const trimmed = String(value || '').trim();
-  if (!trimmed) return null;
-  return isAbsolute(trimmed) ? trimmed : resolve(rootDir, trimmed);
-}
-
-function workerArtifactCandidates(rootDir, job) {
-  const worker = job?.remediationWorker || {};
-  return [
-    { label: 'remediationWorker.logPath', path: resolveStoredWorkerPath(rootDir, worker.logPath) },
-    { label: 'remediationWorker.outputPath', path: resolveStoredWorkerPath(rootDir, worker.outputPath) },
-    { label: 'remediationWorker.replyPath', path: resolveStoredWorkerPath(rootDir, worker.replyPath) },
-    { label: 'remediationReply.path', path: resolveStoredWorkerPath(rootDir, job?.remediationReply?.path) },
-  ].filter((candidate) => candidate.path);
-}
-
-function resolveWorkerArtifactProgressMs(rootDir, job) {
-  let newest = null;
-  for (const candidate of workerArtifactCandidates(rootDir, job)) {
-    try {
-      const st = statSync(candidate.path);
-      if (!st.isFile() || st.size <= 0) continue;
-      if (newest === null || st.mtimeMs > newest.sourceMs) {
-        newest = { sourceMs: st.mtimeMs, source: candidate.label };
-      }
-    } catch {
-      // Missing artifacts are normal while a worker is starting up.
-    }
-  }
-  return newest || { sourceMs: null, source: 'unavailable' };
 }
 
 function sleep(ms) {
@@ -931,6 +900,7 @@ async function sweepStuckInProgressClaims({
   maxTransientRetries = resolveMaxTransientRemediationRetries(),
   postCommentImpl = postRemediationOutcomeComment,
   recordInitialCommentDeliveryImpl = recordInitialCommentDelivery,
+  readWorkerCpuImpl = readWorkerCpuPercent,
 } = {}) {
   let scanned = 0;
   let reclaimed = 0;
@@ -948,13 +918,27 @@ async function sweepStuckInProgressClaims({
       skipped += 1;
       continue;
     }
-    const { sourceMs, source } = resolveLastObservedAtMs(job, jobPath);
+    const recorded = resolveLastObservedAtMs(job, jobPath);
+    // The heartbeat writer may be delayed or fail while the worker keeps
+    // writing. Inspect artifacts directly before signalling a stale claim.
+    const artifact = resolveWorkerArtifactProgressMs(rootDir, job);
+    const { sourceMs, source } = artifact.sourceMs !== null && artifact.sourceMs > (recorded.sourceMs ?? 0)
+      ? artifact : recorded;
     if (sourceMs === null) {
       skipped += 1;
       continue;
     }
     const ageMs = nowMs - sourceMs;
     if (ageMs <= thresholdMs) {
+      skipped += 1;
+      continue;
+    }
+    const session = resolveWorkerSessionProgressMs(rootDir, job);
+    if (session.sourceMs !== null && nowMs - session.sourceMs <= thresholdMs) {
+      skipped += 1;
+      continue;
+    }
+    if (readWorkerCpuImpl(job) > 0) {
       skipped += 1;
       continue;
     }
@@ -1795,5 +1779,7 @@ export {
   resolveLastObservedAtMs,
   normalizeWorkerArtifactProgressMs,
   resolveWorkerArtifactProgressMs,
+  resolveWorkerSessionProgressMs,
+  readWorkerCpuPercent,
   sweepStuckInProgressClaims,
 };

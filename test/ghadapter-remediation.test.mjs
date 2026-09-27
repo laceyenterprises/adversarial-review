@@ -96,7 +96,7 @@ test('moved PR head refuses recovery push and never invokes git-safe', async () 
 
 test('detached workspace resolves PR head through the gh shim', async () => {
   const { root, shims, bin } = fakeAgentOs();
-  writeFileSync(join(shims, 'gh'), '#!/bin/sh\nprintf "feature/from-gh\\n"\n');
+  writeFileSync(join(shims, 'gh'), '#!/bin/sh\n[ "$GH_TOKEN" = fresh-token ] || exit 75\nprintf "feature/from-gh\\n"\n');
   chmodSync(join(shims, 'gh'), 0o755);
   writeFileSync(join(bin, 'git-safe'), '#!/bin/sh\n[ "$TARGET_BRANCH" = feature/from-gh ]\n');
   chmodSync(join(bin, 'git-safe'), 0o755);
@@ -107,7 +107,7 @@ test('detached workspace resolves PR head through the gh shim', async () => {
     repo: 'example/repo',
     prNumber: 42,
     commitSha: 'a'.repeat(40),
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, HQ_REPO_ROOT: root },
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, HQ_REPO_ROOT: root, GH_TOKEN: 'expired-token' },
     execFileImpl: async (command, args, options) => {
       if (command === 'git') return { stdout: 'HEAD\n' };
       return execFileAsync(command, args, options);

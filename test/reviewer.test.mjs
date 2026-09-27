@@ -4550,6 +4550,7 @@ test('reviewWithGemini happy path returns the captured review text', async () =>
   assert.deepEqual(result, {
     reviewText: 'BLOCKING: real finding\n\nVERDICT: blocked',
     tokenUsage: null,
+    execution: { harness: 'gemini', model: 'gemini-2.5-pro', effort: null },
   });
   // The prompt fed to gemini carries the extra context and the diff fence.
   assert.equal(captured.length, 1);
@@ -5513,7 +5514,8 @@ test('reviewWithGemini keeps successful antigravity review when spend report loo
       log: { warn: (message) => warnings.push(message) },
     }));
 
-    assert.deepEqual(result, { reviewText, tokenUsage: null });
+    assert.deepEqual(result, { reviewText, tokenUsage: null,
+      execution: { harness: 'gemini', model: 'Gemini 3.1 Pro (High)', effort: null } });
     assert.equal(cleaned, true);
     assert.deepEqual(released, [{ checkoutId: 'co_spend_success_throw', quotaSignal: false }]);
     assert.equal(warnings.length, 1);
@@ -5850,7 +5852,8 @@ test('reviewWithGemini retries transient Gemini subprocess failures before succe
     },
   });
 
-  assert.deepEqual(result, { reviewText: '## Verdict\n\nComment only', tokenUsage: null });
+  assert.deepEqual(result, { reviewText: '## Verdict\n\nComment only', tokenUsage: null,
+    execution: { harness: 'gemini', model: 'gemini-2.5-pro', effort: null } });
   assert.equal(attempts.length, 3);
   assert.deepEqual(sleeps, [0, 0]);
 });

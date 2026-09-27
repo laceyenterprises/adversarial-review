@@ -2126,6 +2126,10 @@ function schemaV1() {
       // worker_pool.comms.responder.*,
       // worker_pool.dag.autowalk.deep_reconcile,
       // worker_pool.dispatch.codex_exec_mode,
+      // worker_pool.dispatch.codex_exec_timeout_seconds,
+      // worker_pool.dispatch.codex_exec_stall_timeout_seconds,
+      // worker_pool.dispatch.codex_exec_timeout_by_worker_class.*,
+      // worker_pool.dispatch.codex_exec_stall_timeout_by_worker_class.*,
       // worker_pool.dispatch.fleet_launch_health.*,
       // worker_pool.dispatch.goal_lineage.*,
       // worker_pool.dispatch.op_hammer_alerts.*,
@@ -2228,10 +2232,10 @@ function schemaV1() {
             __strict: true,
             __keys: {
               codex_exec_mode: { __type: TYPE_BOOL, __default: false },
-              codex_exec_timeout_seconds: { __type: TYPE_INT, __default: 14400, __min: 1, __max: 86400, __enforce_max: true },
-              codex_exec_stall_timeout_seconds: { __type: TYPE_INT, __default: 1800, __min: 1, __max: 86400, __enforce_max: true },
-              codex_exec_timeout_by_worker_class: { __type: TYPE_DICT, __strict: false, __default: {}, __extra_keys_schema: { __type: TYPE_INT, __min: 1, __max: 86400, __enforce_max: true } },
-              codex_exec_stall_timeout_by_worker_class: { __type: TYPE_DICT, __strict: false, __default: {}, __extra_keys_schema: { __type: TYPE_INT, __min: 1, __max: 86400, __enforce_max: true } },
+              codex_exec_timeout_seconds: { __type: TYPE_INT, __default: 14400, __min: 1, __max: 86400, __enforceMax: true },
+              codex_exec_stall_timeout_seconds: { __type: TYPE_INT, __default: 1800, __min: 1, __max: 86400, __enforceMax: true },
+              codex_exec_timeout_by_worker_class: { __type: TYPE_DICT, __strict: false, __default: {}, __extra_keys_schema: { __type: TYPE_INT, __min: 1, __max: 86400, __enforceMax: true } },
+              codex_exec_stall_timeout_by_worker_class: { __type: TYPE_DICT, __strict: false, __default: {}, __extra_keys_schema: { __type: TYPE_INT, __min: 1, __max: 86400, __enforceMax: true } },
               fleet_launch_health: {
                 __type: TYPE_DICT,
                 __strict: true,
@@ -5405,6 +5409,17 @@ function loadConfigImpl({
       source: 'code-default',
       value,
       path: null,
+    });
+  }
+  // flatten() intentionally omits empty dictionaries. These new override maps
+  // have an observable empty-map default, so retain it in the resolved config.
+  for (const dotted of [
+    'worker_pool.dispatch.codex_exec_timeout_by_worker_class',
+    'worker_pool.dispatch.codex_exec_stall_timeout_by_worker_class',
+  ]) {
+    setLeaf(merged, dotted, {});
+    (trace[dotted] = trace[dotted] || []).push({
+      source: 'code-default', value: {}, path: null,
     });
   }
 

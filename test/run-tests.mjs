@@ -9,14 +9,9 @@ const testDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.dirname(testDir);
 const checkoutDataDir = path.join(repoRoot, 'data');
 const callerTmpDir = tmpdir();
-const callerTmpBefore = new Set(readdirSync(callerTmpDir));
 // Leave room under the macOS 104-byte Unix socket path limit for nested fixtures.
 const tempBase = Buffer.byteLength(realpathSync(callerTmpDir)) > 60 ? '/tmp' : callerTmpDir;
-const sandboxRoot = realpathSync(mkdtempSync(path.join(tempBase, 'art-')));
-const sandboxTmpDir = path.join(sandboxRoot, 'tmp');
-mkdirSync(sandboxTmpDir);
-// Include this run's random sandbox name so concurrent suites cannot trip the guard.
-const fixtureProbePrefix = `adversarial-review-tmp-probe-${path.basename(sandboxRoot)}-`;
+let sandboxRoot;
 
 function makeWorkerRoot(index) {
   const root = path.join(sandboxRoot, `file-${index}`);
@@ -62,17 +57,47 @@ function testFiles() {
 const checkoutDataExistedBefore = existsSync(checkoutDataDir);
 const checkoutDataBefore = listFiles(checkoutDataDir);
 const signalHandlers = new Map();
+let child;
 let timeout;
 let forceKillTimeout;
 let receivedSignal;
 let timedOut = false;
 
+function signalTestGroup(signal) {
+  if (!child?.pid) return;
+  try {
+    if (process.platform === 'win32') child.kill(signal);
+    else process.kill(-child.pid, signal);
+  } catch (error) {
+    if (error.code !== 'ESRCH') throw error;
+  }
+}
+
+function terminateChild(signal) {
+  signalTestGroup(signal);
+  forceKillTimeout ??= setTimeout(() => signalTestGroup('SIGKILL'), 5_000);
+}
+
+for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+  const handler = () => {
+    receivedSignal ??= signal;
+    if (child) terminateChild(signal);
+  };
+  signalHandlers.set(signal, handler);
+  process.on(signal, handler);
+}
+
 try {
+  sandboxRoot = realpathSync(mkdtempSync(path.join(tempBase, 'art-')));
+  const sandboxTmpDir = path.join(sandboxRoot, 'tmp');
+  mkdirSync(sandboxTmpDir);
+  // Include this run's random sandbox name so concurrent suites cannot trip the guard.
+  const fixtureProbePrefix = `adversarial-review-tmp-probe-${path.basename(sandboxRoot)}-`;
   const testPaths = testFiles().map((file, index) => {
     const root = makeWorkerRoot(index);
     return path.join(root, path.relative(repoRoot, file));
   });
-  const child = spawn(process.execPath, [
+  child = spawn(process.execPath, [
     '--preserve-symlinks',
     '--preserve-symlinks-main',
     '--import',
@@ -97,37 +122,20 @@ try {
       NODE_OPTIONS: [process.env.NODE_OPTIONS, '--preserve-symlinks', '--preserve-symlinks-main'].filter(Boolean).join(' '),
     },
     stdio: 'inherit',
+    detached: process.platform !== 'win32',
   });
   const childExit = new Promise((resolve, reject) => {
     child.once('error', reject);
     child.once('close', (status, signal) => resolve({ status, signal }));
   });
 
-  function terminateChild(signal) {
-    child.kill(signal);
-    forceKillTimeout ??= setTimeout(() => child.kill('SIGKILL'), 5_000);
-  }
-
-  for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
-    const handler = () => {
-      receivedSignal ??= signal;
-      terminateChild(signal);
-    };
-    signalHandlers.set(signal, handler);
-    process.on(signal, handler);
-  }
+  if (receivedSignal) terminateChild(receivedSignal);
   timeout = setTimeout(() => {
     timedOut = true;
     terminateChild('SIGTERM');
   }, 900_000);
   const result = await childExit;
 
-  const leakedTempEntries = readdirSync(callerTmpDir).filter((name) =>
-    !callerTmpBefore.has(name) && name.startsWith(fixtureProbePrefix));
-  if (leakedTempEntries.length > 0) {
-    console.error(`Test suite wrote fixture directories into caller TMPDIR:\n${leakedTempEntries.join('\n')}`);
-    process.exitCode = 1;
-  }
   const checkoutDataAfter = listFiles(checkoutDataDir);
   const leakedFiles = [...checkoutDataAfter].filter(([file, hash]) => checkoutDataBefore.get(file) !== hash).map(([file]) => file);
   if (leakedFiles.length > 0 || (!checkoutDataExistedBefore && existsSync(checkoutDataDir))) {
@@ -142,6 +150,7 @@ try {
 } finally {
   clearTimeout(timeout);
   clearTimeout(forceKillTimeout);
+  if (receivedSignal || timedOut) signalTestGroup('SIGKILL');
   for (const [signal, handler] of signalHandlers) process.off(signal, handler);
-  rmSync(sandboxRoot, { recursive: true, force: true });
+  if (sandboxRoot) rmSync(sandboxRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }

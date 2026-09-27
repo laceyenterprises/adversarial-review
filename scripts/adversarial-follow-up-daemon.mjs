@@ -260,6 +260,9 @@ function writeConfigSignatureStatus({ env = process.env, now = () => new Date() 
     : null;
   const payload = {
     ...status,
+    lastConsumeAt: prior?.lastConsumeAt || null,
+    consumeIntervalMs: prior?.consumeIntervalMs ?? null,
+    tickDurationMs: prior?.tickDurationMs ?? null,
     observedAt,
     driftSince,
     daemon: 'adversarial-follow-up',
@@ -269,6 +272,21 @@ function writeConfigSignatureStatus({ env = process.env, now = () => new Date() 
   };
   writeFileAtomic(path, `${JSON.stringify(payload, null, 2)}\n`);
   return payload;
+}
+
+function writeFollowUpTickMetrics({ env, tickDurationMs, consumeAt = null, consumeIntervalMs = null }) {
+  if (!env.HQ_ROOT) return;
+  const path = join(env.HQ_ROOT, '.adversarial-follow-up', 'config-status.json');
+  let prior;
+  try { prior = JSON.parse(readFileSync(path, 'utf8')); } catch { prior = {}; }
+  const payload = {
+    ...prior,
+    tickDurationMs,
+    tickCompletedAt: new Date().toISOString(),
+    lastConsumeAt: consumeAt || prior.lastConsumeAt || null,
+    consumeIntervalMs: consumeIntervalMs ?? prior.consumeIntervalMs ?? null,
+  };
+  writeFileAtomic(path, `${JSON.stringify(payload, null, 2)}\n`);
 }
 
 function resolveRemediationWorkerTokenMinLifetimeMs(env = process.env) {
@@ -598,8 +616,14 @@ async function runFollowUpDaemonIteration({
   runStoppedArchiveSweepIfDueImpl = runStoppedArchiveSweepIfDue,
   resolveMaxConcurrentJobsImpl = resolveDaemonMaxConcurrentJobs,
   writeConfigSignatureStatusImpl = writeConfigSignatureStatus,
+  writeFollowUpTickMetricsImpl = writeFollowUpTickMetrics,
+  clock = Date.now,
   shouldStop = () => stopping,
 } = {}) {
+  const tickStartedMs = clock();
+  let consumeAt = null;
+  let consumeIntervalMs = null;
+  try {
   const reaperBudgetMs = Number.isSafeInteger(Number(env.ADVERSARIAL_FOLLOW_UP_REAPER_BUDGET_MS))
     && Number(env.ADVERSARIAL_FOLLOW_UP_REAPER_BUDGET_MS) > 0
     ? Number(env.ADVERSARIAL_FOLLOW_UP_REAPER_BUDGET_MS) : 15_000;
@@ -748,6 +772,18 @@ async function runFollowUpDaemonIteration({
     logTick('consume', 'skipped unresolved remediation capacity; will retry next tick');
   } else if (shouldConsumeAfterReviewerTokenRefresh(reviewerTokenRefreshSummary)) {
     await runStep('consume', async () => {
+      const consumeStartedMs = clock();
+      let lastConsumeMs = null;
+      if (env.HQ_ROOT) {
+        try {
+          const prior = JSON.parse(readFileSync(join(env.HQ_ROOT, '.adversarial-follow-up', 'config-status.json'), 'utf8'));
+          lastConsumeMs = Date.parse(prior.lastConsumeAt);
+        } catch { /* first consume pass */ }
+      }
+      consumeAt = new Date(consumeStartedMs).toISOString();
+      consumeIntervalMs = Number.isFinite(lastConsumeMs) ? consumeStartedMs - lastConsumeMs : null;
+      logTick('consume-interval', `intervalMs=${consumeIntervalMs ?? 'first-pass'}`);
+      if (consumeIntervalMs > 300_000) logError(`consume interval exceeded 5 minutes: ${consumeIntervalMs}ms`);
       const result = await consumeFollowUpJobsUntilCapacityImpl({
         // CFGSTALE-01: resolve inside every long-lived iteration. The old
         // module-level constant froze whatever overlay existed at process
@@ -787,6 +823,12 @@ async function runFollowUpDaemonIteration({
   await runStep('retry-comments', () => retryFailedCommentDeliveriesImpl());
   if (shouldStop()) return;
   await runStoppedArchiveSweepIfDueImpl();
+  } finally {
+    const tickDurationMs = clock() - tickStartedMs;
+    logTick('tick-duration', `durationMs=${tickDurationMs}`);
+    try { writeFollowUpTickMetricsImpl({ env, tickDurationMs, consumeAt, consumeIntervalMs }); }
+    catch (err) { logError(`tick metric write failed: ${err?.message || err}`); }
+  }
 }
 
 async function sleepForNextFollowUpDaemonIteration({

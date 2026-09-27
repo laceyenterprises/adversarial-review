@@ -84,6 +84,11 @@
         <false/>
     </dict>
 
+    <!-- FOLLOWQOS-01: see the .airlock.plist sibling. Without ProcessType the
+         daemon and every remediation session it spawns run at PRI 20. -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
     <!-- Throttle relaunches so a crash spiral doesn't burn through
          1Password/TCC popups on every restart attempt. -->
     <key>ThrottleInterval</key>

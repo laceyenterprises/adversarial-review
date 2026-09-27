@@ -34,3 +34,16 @@ test('the watcher runs Interactive so a loaded host cannot starve its event loop
     assertStringKey(readLaunchdPlist(name), 'ProcessType', 'Interactive');
   }
 });
+
+test('the follow-up daemon runs Interactive so its remediation workers are not throttled', () => {
+  // FOLLOWQOS-01: with no ProcessType launchd starts the follow-up daemon as a
+  // standard daemon (PRI 20, the utility band), and every remediation codex
+  // session it spawns inherits that class. Same fix as the dispatch daemon's
+  // BOOTQOS-01 (agent-os SEV1 2026-09-27, 3.3-3.7x slower identical work).
+  for (const name of [
+    'ai.laceyenterprises.adversarial-follow-up.airlock.plist',
+    'ai.laceyenterprises.adversarial-follow-up.placey.plist',
+  ]) {
+    assertStringKey(readLaunchdPlist(name), 'ProcessType', 'Interactive');
+  }
+});

@@ -359,6 +359,15 @@ test('the four shipped templates render with sample bindings and leave no placeh
     );
     // Sanity: substituted values do appear in the rendered output.
     assert.ok(rendered.includes(bindings.REPO_ROOT), `${name} did not bake REPO_ROOT`);
+    if (name.endsWith('.plist.template')) {
+      // WATCHQOS-01 / FOLLOWQOS-01: a portable install must not run the daemons
+      // (and the remediation workers they spawn) in the throttled utility band.
+      assert.match(
+        rendered,
+        /<key>ProcessType<\/key>\s*<string>Interactive<\/string>/,
+        `${name} must render ProcessType=Interactive`,
+      );
+    }
     if (name === 'adversarial-watcher-start.sh.template') {
       assert.match(rendered, /export CODEX_AUTH_PATH="\$HOME\/\.codex\/auth\.json"/);
       assert.match(rendered, /resolve_op_bin/);

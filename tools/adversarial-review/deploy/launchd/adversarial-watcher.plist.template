@@ -41,6 +41,12 @@
     <key>KeepAlive</key>
     <true/>
 
+    <!-- WATCHQOS-01: without ProcessType launchd runs this daemon (and every
+         process it spawns) as a standard daemon at PRI 20, the utility band,
+         which a loaded Mac starves. Same key as the host plists in launchd/. -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
     <key>ThrottleInterval</key>
     <integer>30</integer>
 

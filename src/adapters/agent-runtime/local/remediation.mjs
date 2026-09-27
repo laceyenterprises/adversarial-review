@@ -356,6 +356,9 @@ function allowedReasoningLevelsForClass(className) {
 
 function warnRateLimited(key, nowMs, message) {
   if (nowMs - (fallbackWarnings.get(key) ?? -Infinity) < REGISTRY_TTL_MS) return;
+  for (const [existingKey, warnedAt] of fallbackWarnings) {
+    if (nowMs - warnedAt >= REGISTRY_TTL_MS) fallbackWarnings.delete(existingKey);
+  }
   console.warn(message);
   fallbackWarnings.set(key, nowMs);
 }
@@ -364,6 +367,7 @@ function normalizeReasoningLevel(className, value, source, nowMs) {
   const level = String(value ?? '').trim();
   if (!level) return { resolvedReasoningLevel: null, reasoningSource: 'none' };
   const allowed = allowedReasoningLevelsForClass(className);
+  if (!allowed) return { resolvedReasoningLevel: null, reasoningSource: 'unsupported' };
   if (allowed && !allowed.has(level)) {
     warnRateLimited(
       `invalid-reasoning:${className}:${source}:${level}`,

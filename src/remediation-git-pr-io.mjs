@@ -430,16 +430,26 @@ async function checkoutWorkspaceForRemediation({
     });
     return { resumed: false, resumePatchPath: null };
   }
-  const branch = (await execFileImpl('git', ['-C', workspaceDir, 'symbolic-ref', '--quiet', '--short', 'HEAD'])).stdout.trim();
+  let branch;
+  try {
+    branch = (await execFileImpl('git', ['-C', workspaceDir, 'symbolic-ref', '--quiet', '--short', 'HEAD'])).stdout.trim();
+  } catch {
+    throw new Error(`resume-impossible: workspace HEAD is detached or unreadable; workspace preserved at ${workspaceDir}`);
+  }
   if (branch !== headRef) throw new Error(`resume-impossible: workspace branch ${branch} differs from PR branch ${headRef}; workspace preserved at ${workspaceDir}`);
   try {
     await execFileImpl('git', ['-C', workspaceDir, 'merge-base', '--is-ancestor', `origin/${headRef}`, 'HEAD']);
   } catch {
     throw new Error(`resume-impossible: PR head is not an ancestor of the preserved workspace; workspace preserved at ${workspaceDir}`);
   }
-  const patch = (await execFileImpl('git', ['-C', workspaceDir, 'diff', '--binary', 'HEAD'], {
-    maxBuffer: 20 * 1024 * 1024,
-  })).stdout;
+  let patch;
+  try {
+    patch = (await execFileImpl('git', ['-C', workspaceDir, 'diff', '--binary', 'HEAD'], {
+      maxBuffer: 20 * 1024 * 1024,
+    })).stdout;
+  } catch {
+    throw new Error(`resume-impossible: workspace diff is unreadable; workspace preserved at ${workspaceDir}`);
+  }
   const resumePatchPath = patch ? join(workspaceRootDir, `${job.jobId}.resume.patch`) : null;
   if (resumePatchPath) writeFileSync(resumePatchPath, patch);
   return { resumed: true, resumePatchPath };

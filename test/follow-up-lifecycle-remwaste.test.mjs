@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { lifecycleStopDecision, resolveJobPRLifecycleSafe } from '../src/follow-up-lifecycle.mjs';
+import { activeRemediationStopDecision, lifecycleStopDecision, resolveJobPRLifecycleSafe } from '../src/follow-up-lifecycle.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 
 const job = { repo: 'example/project', prNumber: 7, revisionRef: 'reviewed-head' };
@@ -64,4 +64,17 @@ test('review database failure preserves a resolved merged lifecycle', async () =
     resolvePRLifecycleImpl: async () => ({ prState: 'merged', source: 'live' }),
   });
   assert.equal(lifecycleStopDecision(lifecycle, { ...job, job, site: 'consume' }).stopCode, 'operator-merged-pr');
+});
+
+test('missing HQ workspace evidence does not cancel an active worker on a moved head', async () => {
+  const decision = await activeRemediationStopDecision({
+    lifecycle: { prState: 'open', headSha: 'new-head' },
+    liveness: { state: 'active', dispatchStatus: { status: 'running' } },
+    job: { ...job, remediationWorker: { dispatchMode: 'hq' } },
+    rootDir: '/unused',
+    execFileImpl: async () => { throw new Error('git must not run without a known workspace'); },
+    buildReconciliationPathsImpl: () => { throw new Error('local fallback must not run for HQ'); },
+    parseHqWorkerWorkspaceFromPayloadImpl: () => null,
+  });
+  assert.equal(decision, null);
 });

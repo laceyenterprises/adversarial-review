@@ -115,18 +115,28 @@ async function activeRemediationStopDecision({
     site: liveness.state === 'active' ? 'reconcile-active' : 'reconcile',
     job,
   });
-  // A worker's own push moves the reviewed head. Compare it with its local
-  // HEAD before classifying the move as external supersession.
+  // A worker's own push moves the reviewed head, and it may already have
+  // committed more work locally. Stop only when a known workspace proves the
+  // current PR head is not in that worker's history.
   if (liveness.state === 'active' && stop?.stopCode === 'stale-review-head') {
     try {
-      const paths = buildReconciliationPathsImpl(rootDir, job);
-      const hqWorkspace = job?.remediationWorker?.dispatchMode === 'hq'
+      const workspaceDir = job?.remediationWorker?.dispatchMode === 'hq'
         ? parseHqWorkerWorkspaceFromPayloadImpl(liveness?.dispatchStatus || {})
-        : null;
-      const localHead = (await execFileImpl('git', ['-C', hqWorkspace || paths.workspaceDir, 'rev-parse', 'HEAD'])).stdout.trim();
-      if (localHead && localHead === lifecycle?.headSha) stop = null;
+        : buildReconciliationPathsImpl(rootDir, job).workspaceDir;
+      if (!workspaceDir || !existsSync(join(workspaceDir, '.git'))) {
+        stop = null;
+      } else {
+        try {
+          await execFileImpl('git', ['-C', workspaceDir, 'merge-base', '--is-ancestor', lifecycle.headSha, 'HEAD']);
+          stop = null;
+        } catch (err) {
+          // Exit 1 proves non-ancestry; command errors leave ownership unknown.
+          if (err?.code !== 1) stop = null;
+        }
+      }
     } catch {
-      // Unknown ownership of a new head fails closed.
+      // An unreadable workspace cannot prove external supersession.
+      stop = null;
     }
   }
   const currentRound = Number(job?.remediationPlan?.currentRound || 0);

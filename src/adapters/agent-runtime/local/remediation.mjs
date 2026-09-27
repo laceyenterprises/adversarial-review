@@ -326,9 +326,6 @@ function claudeModelPin(env = process.env) {
   return firstNonEmptyEnv(env, [
     'ADVERSARIAL_REMEDIATION_CLAUDE_MODEL',
     'CLAUDE_REMEDIATION_MODEL',
-    'CLAUDE_CODE_REMEDIATION_MODEL',
-    'CLAUDE_MODEL_ID',
-    'CLAUDE_CODE_MODEL_ID',
   ]);
 }
 
@@ -419,8 +416,8 @@ function resolveRemediationModel(className, {
 } = {}) {
   const rawModelPin = String(pin ?? '').trim();
   const modelPin = rawModelPin ? nonEmptyModelString(rawModelPin) : '';
-  const hasReasoningPin = String(reasoningPin ?? '').trim() !== '';
   const pinnedReasoning = normalizeReasoningLevel(className, reasoningPin, 'env', nowMs);
+  const hasReasoningPin = pinnedReasoning.resolvedReasoningLevel !== null;
   if (rawModelPin && !modelPin) {
     warnRateLimited(
       `invalid-model:${className}:env:${rawModelPin}`,
@@ -441,7 +438,7 @@ function resolveRemediationModel(className, {
     mirrorPath && [mirrorPath, 'registry-mirror'],
     ...registrySeedCandidates(env),
   ].filter(Boolean);
-  const names = className === 'remediator-gemini' ? [className, 'gemini'] : [className];
+  const names = [className];
   let reason = 'missing file';
   for (const [path, source] of candidates) {
     const registry = readWorkerClasses(path, nowMs);
@@ -501,6 +498,16 @@ function resolveCodexRemediationModel(env = process.env, { hqRoot = env.HQ_ROOT 
     reasoningPin: codexReasoningPin(env),
     fallbackModel: DEFAULT_CODEX_REMEDIATION_MODEL,
   }).resolvedModel;
+}
+
+function resolveClaudeRemediationModel(env = process.env, { hqRoot = env.HQ_ROOT } = {}) {
+  return resolveRemediationModel('remediator-claude', {
+    env,
+    hqRoot,
+    pin: claudeModelPin(env),
+    reasoningPin: claudeReasoningPin(env),
+    fallbackModel: DEFAULT_CLAUDE_REMEDIATION_MODEL,
+  });
 }
 
 function resolveGeminiAuthPath(env = process.env) {
@@ -825,6 +832,7 @@ function spawnClaudeCodeRemediationWorker({
   log = console,
   spawnImpl,
   sourceEnv = process.env,
+  modelResolution: requestedModelResolution = null,
   now = () => new Date().toISOString(),
   openSyncImpl = openSync,
   closeSyncImpl = closeSync,
@@ -859,12 +867,8 @@ function spawnClaudeCodeRemediationWorker({
     workerClass,
     jobId,
   });
-  const modelResolution = resolveRemediationModel('remediator-claude', {
-    env,
+  const modelResolution = requestedModelResolution || resolveClaudeRemediationModel(env, {
     hqRoot: hqRoot || sourceEnv.HQ_ROOT,
-    pin: claudeModelPin(env),
-    reasoningPin: claudeReasoningPin(env),
-    fallbackModel: DEFAULT_CLAUDE_REMEDIATION_MODEL,
   });
   const claudeArgs = [
     '--print', '--permission-mode', 'acceptEdits', '--dangerously-skip-permissions',
@@ -1071,7 +1075,7 @@ function spawnCodexRemediationWorker({
   const codexArgs = [
     'exec',
     '--model', modelResolution.resolvedModel,
-    ...(['low', 'medium', 'high', 'xhigh'].includes(modelResolution.resolvedReasoningLevel)
+    ...(CODEX_REASONING_LEVELS.has(modelResolution.resolvedReasoningLevel)
       ? ['-c', `model_reasoning_effort=${modelResolution.resolvedReasoningLevel}`]
       : []),
     '--dangerously-bypass-approvals-and-sandbox',
@@ -1282,6 +1286,7 @@ export {
   prepareCodexRemediationStartupEnv,
   prepareGeminiRemediationStartupEnv,
   resolveClaudeCodeCliPath,
+  resolveClaudeRemediationModel,
   resolveCodexAuthPath,
   resolveCodexCliPath,
   resolveCodexRemediationModel,

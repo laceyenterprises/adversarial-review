@@ -3568,6 +3568,11 @@ test('remediation runtime local mode preserves the claude-code-remediation prove
   let invokedArgs;
   let invokedEnv;
   const handle = await createRemediationRuntime({
+    env: {
+      PATH: process.env.PATH,
+      HOME: workspaceDir,
+      AGENT_OS_DEPLOY_CHECKOUT: path.join(workspaceDir, 'missing-seed'),
+    },
     spawnImpl: (cmd, args, options) => {
       invokedCli = cmd;
       invokedArgs = args;

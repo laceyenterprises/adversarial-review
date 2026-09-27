@@ -437,6 +437,24 @@ test('remediation spawners use governed models and reasoning from the HQ mirror'
     assert.deepEqual(calls[0].slice(1, 6), ['exec', '--model', 'gpt-6-sol', '-c', 'model_reasoning_effort=xhigh']);
     assert.deepEqual(calls[1].slice(-4), ['--model', 'claude-opus-5-5', '--effort', 'xhigh']);
     assert.deepEqual(calls[2].slice(-2), ['-m', 'gemini-3-pro']);
+    const brokerDefaultOnly = spawnClaudeCodeRemediationWorker({
+      ...shared,
+      sourceEnv: { ...shared.sourceEnv, CLAUDE_MODEL_ID: 'broker-default' },
+    });
+    assert.equal(brokerDefaultOnly.resolvedModel, 'claude-opus-5-5');
+    const preflightResolution = {
+      resolvedModel: 'claude-preflight-model',
+      resolvedReasoningLevel: 'high',
+      modelSource: 'registry-mirror',
+      reasoningSource: 'registry-mirror',
+    };
+    const sharedResolution = spawnClaudeCodeRemediationWorker({
+      ...shared,
+      modelResolution: preflightResolution,
+    });
+    assert.deepEqual(sharedResolution.command.slice(-4), [
+      '--model', 'claude-preflight-model', '--effort', 'high',
+    ]);
     assert.equal(resolveRemediationModel('remediator-codex', {
       env: { HQ_ROOT: root }, pin: 'gpt-pinned', fallbackModel: 'old',
     }).modelSource, 'env');
@@ -512,7 +530,7 @@ test('remediation registry prefers mirror, uses seed, and warns on constant fall
     });
     rmSync(mirrorPath);
     assert.equal(resolveRemediationModel('remediator-codex', { ...options, nowMs: Date.now() + 61_000 }).modelSource, 'registry-seed');
-    assert.equal(resolveRemediationModel('remediator-gemini', options).resolvedModel, 'gemini-seed');
+    assert.equal(resolveRemediationModel('remediator-gemini', options).resolvedModel, 'constant');
     writeFileSync(seedPath, '{bad json');
     const fallback = resolveRemediationModel('remediator-codex', { ...options, nowMs: Date.now() + 122_000 });
     assert.deepEqual(fallback, {
@@ -522,8 +540,9 @@ test('remediation registry prefers mirror, uses seed, and warns on constant fall
       reasoningSource: 'none',
     });
     assert.match(warnings.at(-1), /remediator-codex.*unparsable JSON/);
+    const warningCount = warnings.length;
     resolveRemediationModel('remediator-codex', { ...options, nowMs: Date.now() + 122_000 });
-    assert.equal(warnings.length, 1);
+    assert.equal(warnings.length, warningCount);
     rmSync(seedPath);
     const missing = resolveRemediationModel('remediator-codex', { ...options, nowMs: Date.now() + 183_000 });
     assert.equal(missing.modelSource, 'fallback-constant');
@@ -542,6 +561,7 @@ test('remediation model resolver keeps legacy seed override and validates cli-sp
   mkdirSync(seed, { recursive: true });
   writeFileSync(join(mirror, 'worker-classes.json'), JSON.stringify({ classes: {
     'remediator-claude': { defaultModel: 'claude-opus-5-5', defaultReasoningLevel: 'extra' },
+    'remediator-codex': { defaultModel: 'gpt-6-sol', defaultReasoningLevel: 'high' },
     'remediator-test-invalid': { defaultModel: '-not-a-model' },
   } }));
   writeFileSync(join(seed, 'worker-classes.json'), JSON.stringify({
@@ -559,6 +579,14 @@ test('remediation model resolver keeps legacy seed override and validates cli-sp
     assert.equal(claude.resolvedReasoningLevel, null);
     assert.equal(claude.reasoningSource, 'invalid-registry-mirror');
     assert.match(warnings.at(-1), /remediator-claude.*invalid reasoning level.*extra/);
+
+    const invalidPin = resolveRemediationModel('remediator-codex', {
+      env: { HQ_ROOT: join(root, 'hq'), AGENT_OS_DEPLOY_CHECKOUT: join(root, 'agent-os') },
+      reasoningPin: 'hgih',
+      fallbackModel: 'codex-fallback',
+    });
+    assert.equal(invalidPin.resolvedReasoningLevel, 'high');
+    assert.equal(invalidPin.reasoningSource, 'registry-mirror');
 
     const invalidModel = resolveRemediationModel('remediator-test-invalid', {
       env: { HQ_ROOT: join(root, 'hq'), AGENT_OS_DEPLOY_CHECKOUT: join(root, 'agent-os') },

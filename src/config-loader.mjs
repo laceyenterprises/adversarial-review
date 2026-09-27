@@ -2168,6 +2168,13 @@ function schemaV1() {
               },
             },
           },
+          mcp: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              required_servers_mode: { __type: TYPE_STRING, __default: 'warn', __enum: ['warn', 'enforce'] },
+            },
+          },
           comms: {
             __type: TYPE_DICT,
             __strict: true,

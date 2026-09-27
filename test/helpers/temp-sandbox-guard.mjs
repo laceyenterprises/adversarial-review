@@ -7,8 +7,7 @@ import path from 'node:path';
 
 if (process.env.NODE_TEST_CONTEXT && process.env.ADVERSARIAL_REVIEW_TEST_SANDBOX_ROOT) {
   const expected = path.join(process.env.ADVERSARIAL_REVIEW_TEST_SANDBOX_ROOT, 'tmp');
-  for (const key of ['TMPDIR', 'TMP', 'TEMP']) assert.equal(process.env[key], expected);
-  assert.equal(tmpdir(), expected);
   const fixture = mkdtempSync(path.join(tmpdir(), process.env.ADVERSARIAL_REVIEW_TEST_TMP_PROBE_PREFIX));
+  for (const key of ['TMPDIR', 'TMP', 'TEMP']) assert.equal(process.env[key], expected);
   assert.equal(path.dirname(fixture), expected);
 }

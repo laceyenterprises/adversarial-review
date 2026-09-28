@@ -1393,7 +1393,11 @@ status or changed the failure evidence, the claim loses and the counter is not
 consumed. Once the counter reaches the cap (`3`), failed rows remain `failed`
 with evidence intact for operator inspection, and lease-released pending rows
 are finalized to `failed` without incrementing the counter so they stop polling
-as ordinary pending work.
+as ordinary pending work. `token-refresh-pending` rows are the exception
+(TOKDZ-01): a refusal is a bounded hold, not an attempt, so a legacy `failed` or
+same-head `pending` token-refresh row is reclaimed by its own compare-and-swap,
+which matches the same evidence but neither checks nor increments
+`infra_auto_recover_attempts`.
 
 Failure evidence is cleared only at the successful recovery claim, when the
 replacement reviewer pass is durably `reviewing`. A successful posted review

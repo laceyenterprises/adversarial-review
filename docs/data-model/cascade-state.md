@@ -75,7 +75,12 @@ A `token-refresh-pending` refusal is a hold, not a failed attempt. The settle
 path writes the row to `pending-upstream` through `MARK_TOKEN_REFRESH_HOLD_SQL`,
 which charges neither `review_attempts` nor `infra_auto_recover_attempts`, so a
 refusal can never walk a row to the terminal infra cap. The PR is parked until
-the next expected rotation. Route selection keeps the held reviewer until
+the next expected rotation. When the hold releases, the `pending-upstream` row
+is reclaimed by the generic attempt-start CAS. A legacy `failed` or same-head
+`pending` token-refresh row, written before the hold accounting existed, is
+reclaimed by `MARK_TOKEN_REFRESH_RECOVERY_ATTEMPT_STARTED_SQL`. That claim
+neither checks nor charges `infra_auto_recover_attempts`, so it cannot strand a
+row at the cap. Route selection keeps the held reviewer until
 `maxHoldUntil`, then re-routes through the normal model-fallback path with
 reason `token-refresh-hold-exhausted`. `token-refresh-pending` is not an
 exec-fallback counting class, so repeated refusals inside the bound never

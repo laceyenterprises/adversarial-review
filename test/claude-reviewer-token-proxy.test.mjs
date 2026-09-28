@@ -16,6 +16,10 @@ import { __test__ as harness } from '../src/reviewer-harness.mjs';
 const { assertClaudeBrokerTokenHandoffLifetime, prepareClaudeOAuthEnv, reviewWithClaude } = harness;
 
 const quietLogger = { info() {}, warn() {} };
+// Every fixture grant expiry is a fixed 2026-09-28 timestamp, so the proxy
+// clock is pinned to the same timeline; the live clock would eventually pass
+// grant-a's expiry and turn each first forward into a proactive re-read.
+const FIXTURE_NOW_MS = Date.parse('2026-09-28T19:31:10Z');
 
 // The upstream accepts exactly the grants in `valid`; a rotation removes the
 // old grant (revocation) and adds the new one.
@@ -110,6 +114,7 @@ async function withProxy(options, fn) {
     upstream: upstream.url,
     logger: quietLogger,
     remintCooldownMs: 0,
+    now: () => FIXTURE_NOW_MS,
     ...options.proxy,
   });
   try {
@@ -423,6 +428,7 @@ async function reviewThroughProxy({ upstream, broker, cli, expiresAt = '2026-09-
           ...startOptions,
           upstream: upstream.url,
           remintCooldownMs: 0,
+          now: () => FIXTURE_NOW_MS,
         }),
       });
       if (proxy) proxies.push(proxy);

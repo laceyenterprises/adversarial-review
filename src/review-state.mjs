@@ -36,6 +36,10 @@ import {
  *                                               window expires)
  *   failed (infra classes only) ─► reviewing   (dedicated cap-checked CAS,
  *                                               stmtMarkInfraAutoRecoveryAttemptStarted)
+ *   failed / same-head pending (token-refresh-pending) ─► reviewing
+ *                                              (uncharged CAS, never checks the
+ *                                               infra cap;
+ *                                               stmtMarkTokenRefreshRecoveryAttemptStarted)
  *   pending (same-head terminal failure) ─► failed
  *                                              (cap exhausted after lease release;
  *                                               finalize evidence for inspection)

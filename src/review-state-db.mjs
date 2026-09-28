@@ -29,6 +29,7 @@ import {
   SQL_HAS_GENUINE_POSTED_REVIEW_FOR_PR,
   prepareFinalizePendingTerminalFailure,
   prepareMarkInfraAutoRecoveryAttemptStarted,
+  prepareMarkTokenRefreshRecoveryAttemptStarted,
   prepareMarkAttemptStarted,
   prepareMarkMergedPendingReviewSkipped,
   prepareMarkReviewerCredentialOutage,
@@ -100,6 +101,7 @@ export const stmtGetPendingFastMergeAudits = db.prepare(
 );
 
 export const stmtMarkInfraAutoRecoveryAttemptStarted = prepareMarkInfraAutoRecoveryAttemptStarted(db);
+export const stmtMarkTokenRefreshRecoveryAttemptStarted = prepareMarkTokenRefreshRecoveryAttemptStarted(db);
 export const stmtMarkReviewPopulationRetryAttemptStarted = db.prepare(
   `UPDATE reviewed_prs
      SET review_status = 'reviewing',

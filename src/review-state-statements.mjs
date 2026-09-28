@@ -66,6 +66,42 @@ export const MARK_REREVIEW_CI_BLOCKED_RECHECK_SQL = `UPDATE reviewed_prs
       AND pr_number = ?
       AND review_status = '${REREVIEW_CI_BLOCKED_STATUS}'`;
 
+// TOKDZ-01: the claim for a `token-refresh-pending` row. A refusal is a hold,
+// not an attempt, so -- unlike the infra auto-recovery claim below -- this CAS
+// neither checks nor charges `infra_auto_recover_attempts`, and it matches the
+// `pending-upstream` hold row as well as legacy `failed` / same-head `pending`
+// rows written under the pre-hold accounting. The hold window itself is gated
+// by the cascade state (`tokenRefreshHold.holdUntil`), not by this row.
+export const MARK_TOKEN_REFRESH_RECOVERY_ATTEMPT_STARTED_SQL =
+  `UPDATE reviewed_prs
+     SET review_status = 'reviewing',
+         last_attempted_at = ?,
+         reviewer_session_uuid = ?,
+         reviewer_started_at = NULL,
+         reviewer_head_sha = ?,
+         revision_ref = COALESCE(?, revision_ref),
+         reviewer_timeout_ms = ?,
+         reviewer_lease_expires_at = ?,
+         reviewer_pgid = NULL,
+         failed_at = NULL,
+         failure_message = NULL,
+         quota_reset_at_utc = NULL
+   WHERE repo = ?
+     AND pr_number = ?
+     AND (
+       review_status IN ('failed', 'pending-upstream') OR
+       (
+         review_status = 'pending' AND
+         failed_at = ? AND
+         reviewer_head_sha = ?
+       )
+     )
+     AND (
+       lower(COALESCE(failure_message, '')) LIKE '[token-refresh-pending]%' OR
+       lower(COALESCE(failure_message, '')) LIKE '%broker claude reviewer token expires too soon for subprocess handoff%'
+     )
+     AND COALESCE(pr_state, 'open') != 'merged'`;
+
 export const MARK_INFRA_AUTO_RECOVERY_ATTEMPT_STARTED_SQL =
   `UPDATE reviewed_prs
      SET review_status = 'reviewing',
@@ -309,6 +345,10 @@ export function prepareMarkRereviewCiBlocked(db) {
 
 export function prepareMarkRereviewCiBlockedRecheck(db) {
   return db.prepare(MARK_REREVIEW_CI_BLOCKED_RECHECK_SQL);
+}
+
+export function prepareMarkTokenRefreshRecoveryAttemptStarted(db) {
+  return db.prepare(MARK_TOKEN_REFRESH_RECOVERY_ATTEMPT_STARTED_SQL);
 }
 
 export function prepareMarkInfraAutoRecoveryAttemptStarted(db) {

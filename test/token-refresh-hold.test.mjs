@@ -9,8 +9,12 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import {
+  prepareMarkAttemptStarted,
+  prepareMarkInfraAutoRecoveryAttemptStarted,
   prepareMarkTokenRefreshHold,
+  prepareMarkTokenRefreshRecoveryAttemptStarted,
 } from '../src/review-state-statements.mjs';
+import { infraRecoverableFailureClass } from '../src/reviewer-failure-classification.mjs';
 import {
   readCascadeState,
   recordCascadeFailure,
@@ -70,9 +74,15 @@ function setupFixture({ infraAttempts = 0, reviewAttempts = 0 } = {}) {
     getReviewRow: db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'),
   };
   const readRow = () => statements.getReviewRow.get(REPO, PR);
-  const reclaim = () => db.prepare(
-    "UPDATE reviewed_prs SET review_status = 'reviewing', reviewer_session_uuid = 'session-n' WHERE repo = ? AND pr_number = ?"
-  ).run(REPO, PR);
+  // The real watcher claim for a released hold: `pending-upstream` is not a
+  // terminal-failure state, so pollOnce reclaims it through the generic CAS.
+  const reclaim = () => {
+    const claim = prepareMarkAttemptStarted(db).run(
+      '2026-09-28T12:00:00.000Z', 'session-n', 'head-1', 'head-1', 20 * MINUTE,
+      '2026-09-28T12:20:00.000Z', 'head-1', REPO, PR,
+    );
+    assert.equal(claim.changes, 1, 'a released token-refresh hold must be claimable');
+  };
   return {
     rootDir,
     db,
@@ -213,8 +223,73 @@ test('repeated refusals never charge review_attempts or infra_auto_recover_attem
       assert.equal(state.tokenRefreshHold.startedAt, '2026-09-28T19:28:35.000Z');
       assert.equal(state.nextRetryAfter, state.tokenRefreshHold.holdUntil);
       fixture.reclaim();
+      const reclaimed = fixture.readRow();
+      assert.equal(reclaimed.review_status, 'reviewing');
+      assert.equal(reclaimed.review_attempts, 4, `reclaim after refusal ${refusal} must not charge review_attempts`);
+      assert.equal(reclaimed.infra_auto_recover_attempts, 2, `reclaim after refusal ${refusal} must not charge infra recovery`);
       failureAtMs = Date.parse(state.nextRetryAfter);
     }
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+function legacyTokenRefreshRow(fixture, { status, infraAttempts, prState = 'open', message }) {
+  fixture.db.prepare(
+    `UPDATE reviewed_prs
+        SET review_status = ?, pr_state = ?, failed_at = '2026-09-28T19:28:35.000Z',
+            failure_message = ?, infra_auto_recover_attempts = ?, reviewer_session_uuid = NULL
+      WHERE repo = ? AND pr_number = ?`
+  ).run(status, prState, message ?? refusalText({ remainingMs: 4994933 }), infraAttempts, REPO, PR);
+}
+
+function claimTokenRefreshRecovery(fixture) {
+  const row = fixture.readRow();
+  return prepareMarkTokenRefreshRecoveryAttemptStarted(fixture.db).run(
+    '2026-09-28T20:00:00.000Z', 'session-r', 'head-1', 'head-1', 20 * MINUTE,
+    '2026-09-28T20:20:00.000Z', REPO, PR, row.failed_at, row.reviewer_head_sha,
+  );
+}
+
+test('a legacy failed token-refresh row at the infra cap is reclaimed by the real claim CAS without charging infra attempts', () => {
+  const fixture = setupFixture({ reviewAttempts: 4 });
+  try {
+    legacyTokenRefreshRow(fixture, { status: 'failed', infraAttempts: 3 });
+    const row = fixture.readRow();
+    assert.equal(infraRecoverableFailureClass(row), 'token-refresh-pending');
+    // The infra CAS refuses a capped row, which is why token-refresh must not use it.
+    const infraClaim = prepareMarkInfraAutoRecoveryAttemptStarted(fixture.db).run(
+      '2026-09-28T20:00:00.000Z', 'session-i', 'head-1', 'head-1', 20 * MINUTE,
+      '2026-09-28T20:20:00.000Z', REPO, PR, row.failed_at, row.reviewer_head_sha,
+      3, 0, 'token-refresh-pending',
+    );
+    assert.equal(infraClaim.changes, 0);
+    const claim = claimTokenRefreshRecovery(fixture);
+    assert.equal(claim.changes, 1);
+    const claimed = fixture.readRow();
+    assert.equal(claimed.review_status, 'reviewing');
+    assert.equal(claimed.reviewer_session_uuid, 'session-r');
+    assert.equal(claimed.infra_auto_recover_attempts, 3, 'the claim must not charge infra recovery');
+    assert.equal(claimed.review_attempts, 4, 'the claim must not charge review attempts');
+    assert.equal(claimed.failure_message, null);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('the token-refresh claim CAS matches a held pending-upstream row but not merged PRs or other failures', () => {
+  const fixture = setupFixture();
+  try {
+    settleRefusal(fixture, { failureAt: '2026-09-28T19:28:35.000Z', remainingMs: 4994933 });
+    assert.equal(fixture.readRow().review_status, 'pending-upstream');
+    assert.equal(claimTokenRefreshRecovery(fixture).changes, 1);
+    assert.equal(fixture.readRow().infra_auto_recover_attempts, 0);
+
+    legacyTokenRefreshRow(fixture, { status: 'failed', infraAttempts: 1, prState: 'merged' });
+    assert.equal(claimTokenRefreshRecovery(fixture).changes, 0, 'never reclaim a merged PR');
+
+    legacyTokenRefreshRow(fixture, { status: 'failed', infraAttempts: 1, message: '[oauth-broken] Bad credentials' });
+    assert.equal(claimTokenRefreshRecovery(fixture).changes, 0, 'only token-refresh rows ride the uncharged claim');
   } finally {
     fixture.cleanup();
   }

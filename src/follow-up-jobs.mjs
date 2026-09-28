@@ -1010,6 +1010,16 @@ function listInProgressFollowUpJobs(rootDir) {
   }));
 }
 
+function findInProgressFollowUpJobByLaunchRequestId(rootDir, launchRequestId) {
+  const lrq = String(launchRequestId || '').trim();
+  if (!lrq) return null;
+  for (const entry of listInProgressFollowUpJobs(rootDir)) {
+    const workerLrq = String(entry.job?.remediationWorker?.launchRequestId || '').trim();
+    if (workerLrq === lrq) return entry;
+  }
+  return null;
+}
+
 function listFollowUpJobsInDir(rootDir, key) {
   const dir = getFollowUpJobDir(rootDir, key);
   if (!existsSync(dir)) return [];
@@ -3230,6 +3240,7 @@ export {
   listFollowUpJobsInDir,
   listInProgressFollowUpJobPaths,
   listInProgressFollowUpJobs,
+  findInProgressFollowUpJobByLaunchRequestId,
   listPendingFollowUpJobPaths,
   listPendingFollowUpJobs,
   markFollowUpJobCompleted,

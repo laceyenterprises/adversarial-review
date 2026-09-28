@@ -2129,9 +2129,7 @@ async function main() {
         : await dispatchReviewerModel(effectiveModel, diff, extraContext, {
             promptStage: reviewerPromptStage,
             reviewerSubprocessCwd,
-            onProgress: createReviewerProgressRecorder({ rootDir: ROOT, repo, prNumber,
-              attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0,
-              passKind, reviewerSessionUuid }),
+            onProgress: createReviewerProgressRecorder({ rootDir: ROOT, repo, prNumber, attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0, passKind, reviewerSessionUuid }),
           });
     } catch (firstErr) {
       if (!oversizedAgyRoute?.oversized || useAgyChunkFallback) throw firstErr;

@@ -20,6 +20,7 @@ import {
   claimNextFollowUpJob,
   MAX_QUOTA_HOLD_WINDOW_MS,
   getFollowUpJobDir,
+  findInProgressFollowUpJobByLaunchRequestId,
   isSettledCleanStopCode,
   listInProgressFollowUpJobs,
   markFollowUpJobCompleted,
@@ -3281,16 +3282,6 @@ async function reconcileInProgressFollowUpJobs({
     skipped: results.filter((result) => result.action === 'skipped').length,
     results,
   };
-}
-
-function findInProgressFollowUpJobByLaunchRequestId(rootDir, launchRequestId) {
-  const lrq = String(launchRequestId || '').trim();
-  if (!lrq) return null;
-  for (const entry of listInProgressFollowUpJobs(rootDir)) {
-    const workerLrq = String(entry.job?.remediationWorker?.launchRequestId || '').trim();
-    if (workerLrq === lrq) return entry;
-  }
-  return null;
 }
 
 async function handleRemediationTelemetryEvent({

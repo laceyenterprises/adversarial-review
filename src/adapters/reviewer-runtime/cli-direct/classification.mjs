@@ -4,6 +4,10 @@ import {
   QUOTA_EXHAUSTED_FAILURE_CLASS,
   detectQuotaExhaustion,
 } from '../../../quota-exhaustion.mjs';
+import {
+  INFRA_RUNTIME_MISSING_LIBRARY_FAILURE_CLASS,
+  hasMissingRuntimeLibrarySignal,
+} from '../../../runtime-missing-library.mjs';
 
 const BUG_ERROR_CODES = new Set(['ENOENT', 'EACCES', 'EPERM']);
 const CASCADE_ERROR_CODES = new Set(['ETIMEDOUT']);
@@ -152,6 +156,13 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     /\bcredentials unavailable\b/.test(line) && /\b(?:oauth|token|anthropic|claude|codex|openai)\b/.test(line)
   ));
 
+  // First: a process that died in the dynamic loader never ran, so no other
+  // signal in its output can describe it. A Homebrew upgrade that moves the
+  // host node's dylibs produces exactly this on every spawn (NODEPIN-01).
+  if (hasMissingRuntimeLibrarySignal(text)) {
+    return INFRA_RUNTIME_MISSING_LIBRARY_FAILURE_CLASS;
+  }
+
   if (launchctlBootstrap) {
     return 'launchctl-bootstrap';
   }
@@ -269,6 +280,7 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
 
 export {
   DIFF_TOO_LARGE_FAILURE_CLASS,
+  INFRA_RUNTIME_MISSING_LIBRARY_FAILURE_CLASS,
   ATTESTATION_SIGN_FAILED_FAILURE_CLASS,
   HCP_UNAVAILABLE_FAILURE_CLASS,
   PROVIDER_OVERLOADED_FAILURE_CLASS,

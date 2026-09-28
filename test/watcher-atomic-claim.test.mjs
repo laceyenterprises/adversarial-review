@@ -782,3 +782,38 @@ test('classifier <-> SQL claim parity for reviewer-command-failed (no drift)', (
     db.close();
   }
 });
+
+// NODEPIN-01: the same drift guard for infra-runtime-missing-library. The
+// watcher claims with whatever class the JS classifier derived from the stored
+// row, so every row JS calls a dyld crash (tagged, or a legacy `[unknown]` row
+// whose stored stderr carries the dyld line) must also match the SQL branch;
+// otherwise the claim matches 0 rows and the PR stays stranded.
+test('classifier <-> SQL claim parity for infra-runtime-missing-library (no drift)', () => {
+  const cases = [
+    '[infra-runtime-missing-library] Command failed with code null signal SIGABRT\nSystem: infra auto-recovery cap exhausted (3/3).',
+    '[unknown] Command failed with code null signal SIGABRT\nstderr tail:\ndyld[48213]: Library not loaded: /opt/homebrew/opt/ada-url/lib/libada.3.dylib',
+    '[unknown] Command failed\ndyld: Library not loaded: @rpath/libnode.147.dylib',
+    '[unknown] Command failed with code 1',
+    '[unknown] Command failed\nlibrary not loaded yet, retrying',
+    '[reviewer-timeout] exceeded 1800s',
+    '[cascade] litellm/upstream cascade',
+  ];
+  for (const failureMessage of cases) {
+    const jsIsMissingLibrary =
+      infraRecoverableFailureClass({ failure_message: failureMessage }) === 'infra-runtime-missing-library';
+    const db = setupDb();
+    seedReviewRow(db, {
+      reviewStatus: 'failed',
+      failedAt: '2026-05-02T18:05:00.000Z',
+      failureMessage,
+    });
+    const claim = runInfraRecoveryClaim(db, '2026-05-02T18:10:00.000Z', 'infra-runtime-missing-library');
+    const sqlClaims = claim.changes === 1;
+    assert.equal(
+      sqlClaims,
+      jsIsMissingLibrary,
+      `classifier/SQL disagree for ${JSON.stringify(failureMessage)}: JS=${jsIsMissingLibrary} SQL=${sqlClaims}`,
+    );
+    db.close();
+  }
+});

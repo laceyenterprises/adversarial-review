@@ -498,6 +498,7 @@ export type ReviewerFailureClass =
   | 'token-refresh-pending'
   | 'attestation-sign-failed'
   | 'hcp-unavailable'
+  | 'infra-runtime-missing-library'
   | 'local-admission-refused'
   | 'bug'
   | 'unknown';

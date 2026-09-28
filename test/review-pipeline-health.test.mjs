@@ -5843,6 +5843,40 @@ test('a routine OAuth banner in the tail does not classify a failure as auth', (
   assert.match(finding.recommended_action, /do not retrigger/);
 });
 
+// NODEPIN-01 (agent-os SEV1 2026-09-28): every reviewer died in dyld after a
+// Homebrew upgrade moved node's dylibs. The stuck-retry-loop finding must name
+// that host fault, not bucket it as `unknown`/`runtime` and send the operator
+// after the reviewer lane.
+test('a dyld Library-not-loaded failure is classified as a host runtime fault', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 962,
+    reviewStatus: 'failed',
+    reviewedAt: '2026-05-25T17:00:00.000Z',
+  });
+  const db = openDb(rootDir);
+  try {
+    db.prepare(
+      'UPDATE reviewed_prs SET failure_message = ?, infra_auto_recover_attempts = ? WHERE pr_number = ?',
+    ).run(
+      '[infra-runtime-missing-library] Command failed with code null signal SIGABRT\nstderr tail:\n'
+      + 'dyld[48213]: Library not loaded: /opt/homebrew/opt/ada-url/lib/libada.3.dylib\n'
+      + '  Referenced from: /opt/homebrew/Cellar/node/26.3.0/bin/node\n'
+      + 'System: infra auto-recovery cap exhausted (3/3).',
+      3,
+      962,
+    );
+  } finally {
+    db.close();
+  }
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  const finding = snapshot.findings.find((item) => item.code === 'review:stuck_retry_loop');
+  assert.ok(finding, 'expected the stuck-retry-loop finding');
+  assert.equal(finding.details.dominantFailureClass, 'infra-runtime-missing-library');
+  assert.match(finding.recommended_action, /hq doctor dylib-drift/);
+});
+
 test('claude account-level 429 in a captured tail is classified as quota, not auth', () => {
   const rootDir = tempRoot();
   insertReviewRow(rootDir, {

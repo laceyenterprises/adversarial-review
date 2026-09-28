@@ -92,6 +92,7 @@ import {
   HCP_UNAVAILABLE_FAILURE_CLASS,
   TOKEN_REFRESH_PENDING_FAILURE_CLASS,
 } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
+import { INFRA_RUNTIME_MISSING_LIBRARY_FAILURE_CLASS } from './runtime-missing-library.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS, resolveQuotaResetIso } from './quota-exhaustion.mjs';
 import { classifyGitHubReviewCreateFailure } from './reviewer-failure-classification.mjs';
 import {
@@ -1195,11 +1196,15 @@ function settleReviewerAttempt({
     HCP_UNAVAILABLE_FAILURE_CLASS,
     PROVIDER_OVERLOADED_FAILURE_CLASS,
     REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS,
+    // A host fault, not a review outcome: retried on the bounded infra
+    // auto-recovery path and never charged to review_attempts.
+    INFRA_RUNTIME_MISSING_LIBRARY_FAILURE_CLASS,
   ]);
   const defaultFailureMessages = {
     cascade: 'Reviewer hit a LiteLLM/upstream cascade failure; watcher backoff engaged.',
     [PROVIDER_OVERLOADED_FAILURE_CLASS]: 'Reviewer hit a provider/backend overload (HTTP 529 or capacity signal); watcher backoff engaged.',
     [REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS]: 'Reviewer runtime returned empty output before posting; watcher backoff engaged.',
+    [INFRA_RUNTIME_MISSING_LIBRARY_FAILURE_CLASS]: 'Reviewer process died in dyld: the host runtime is missing a shared library (Homebrew upgrade?); watcher backoff engaged. Run `hq doctor dylib-drift`.',
     'quota-exhausted': 'Reviewer hit a hard provider usage cap; holding until the cap window clears (HRR graceful degradation).',
     'oauth-broken': 'Reviewer OAuth credentials are unavailable; watcher backoff engaged until credentials recover.',
     [TOKEN_REFRESH_PENDING_FAILURE_CLASS]: 'Claude reviewer token refresh is pending; watcher short backoff engaged.',

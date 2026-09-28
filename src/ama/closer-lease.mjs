@@ -57,17 +57,20 @@ const VALID_TERMINAL_OUTCOMES = new Set([
   'no-merge:pr-merged-externally',
 ]);
 
-// The default AMA launch window (600s, three attempts, 6s retry delays and
-// 8.5s token-rollup polls per attempt). Kept here so remediation and AMA share
-// the same stale-lease boundary. The configurable per-record timeout remains
-// handled by dispatch-closer.mjs.
-export const AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS = 1_831_500;
+// Shared with dispatch-closer so retry/poll changes also update the reclaim
+// boundary. Three launch attempts include two retry delays and three rollups.
+export const AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS = [1_000, 5_000];
+export const AMA_CLOSER_TOKEN_ROLLUP_POLL_DELAYS_MS = [500, 1_000, 2_000, 5_000];
+const AMA_CLOSER_LAUNCH_ATTEMPTS = AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.length + 1;
+const AMA_CLOSER_LAUNCH_OVERHEAD_MS = AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.reduce((sum, ms) => sum + ms, 0)
+  + AMA_CLOSER_LAUNCH_ATTEMPTS * AMA_CLOSER_TOKEN_ROLLUP_POLL_DELAYS_MS.reduce((sum, ms) => sum + ms, 0);
+export const AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS = 600_000 * AMA_CLOSER_LAUNCH_ATTEMPTS + AMA_CLOSER_LAUNCH_OVERHEAD_MS;
 export const AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS = 30 * 60 * 1000;
 
 export function amaCloserPendingLeaseExpiryMs(dispatchTimeoutMs) {
   const launchWindowMs = Number(dispatchTimeoutMs);
   return Number.isFinite(launchWindowMs) && launchWindowMs > 0
-    ? launchWindowMs * 3 + 31_500
+    ? launchWindowMs * AMA_CLOSER_LAUNCH_ATTEMPTS + AMA_CLOSER_LAUNCH_OVERHEAD_MS
     : AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS;
 }
 

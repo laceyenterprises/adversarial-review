@@ -3734,11 +3734,16 @@ function readAmaCloserLeases(rootDir, { nowMs, config, reviewRows = new Map() })
   return { total, stale, ignoredTerminalPrs };
 }
 
-export function summarizeHammerEfficiency(db) {
+export function summarizeHammerEfficiency(db, { nowMs = Date.now(), windowMs = 30 * 24 * 60 * 60 * 1000 } = {}) {
   if (!db) return { runs: 0, merges: 0, inputTokens: 0, inputTokensPerMerge: null };
+  const cutoff = new Date(nowMs - windowMs).toISOString();
   const rows = safeAll(db,
     `SELECT status, token_input, metadata_json FROM reviewer_passes
-      WHERE pass_kind = 'closer' AND reviewer_class IN ('hammer', 'hammer-claude')`);
+      WHERE pass_kind = 'closer' AND status IN ('completed', 'failed', 'cancelled')
+        AND started_at >= ?
+        AND (reviewer_class IN ('hammer', 'hammer-claude')
+          OR (json_valid(metadata_json) AND json_extract(metadata_json, '$.workerClass') IN ('hammer', 'hammer-claude')))`,
+    [cutoff]);
   let merges = 0;
   let inputTokens = 0;
   for (const row of rows) {

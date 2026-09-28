@@ -1071,6 +1071,7 @@ export async function runQueuedReviewAdoptionPhase({
   runPostedReviewHandlersFairlyImpl = runPostedReviewHandlersFairly,
   postedReviewPriorityTargets = [],
   sweepRereviewWakeQueueImpl = sweepRereviewWakeQueue,
+  retryPendingCloserCancelsImpl = retryPendingCloserCancels,
   rereviewWakeBacklogImpl = rereviewWakeBacklog,
 } = {}) {
   if (typeof drainReviewerDispatchCandidates !== 'function') {
@@ -1078,13 +1079,17 @@ export async function runQueuedReviewAdoptionPhase({
   }
 
   await retryPendingMergeAgentLifecycleCleanupsImpl();
-  await retryPendingCloserCancels({ rootDir });
 
   // Lifecycle sync is the authoritative "is this PR still open?" guard for the
   // health surface. It must not sit behind a single slow posted-review handler:
   // one 300s handler timeout was enough to leave the mirror stale for hours and
   // make queue-starvation/terminal-but-unmerged findings untrustworthy.
   await syncPRLifecycleImpl(octokit, operatorSurface, primaryDomainId);
+  try {
+    await retryPendingCloserCancelsImpl({ rootDir, logger });
+  } catch (err) {
+    logger.error?.('[watcher] AMA closer cancel drain failed; continuing adoption:', err?.message || err);
+  }
 
   // Reviewer candidates were collected during the PR discovery sweep. Launch
   // them before the posted-review/hammer lane so a slow closer cannot hold every

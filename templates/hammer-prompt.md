@@ -1212,6 +1212,12 @@ const identity = {
   headSha: process.env.POST_REMEDIATION_SHA || process.env.TARGET_REMEDIATION_SHA,
 };
 let existing = readAmaCloserLease(rootDir, identity);
+if (existing && identity.headSha !== process.env.TARGET_REMEDIATION_SHA) {
+  const sourceHead = process.env.TARGET_REMEDIATION_SHA;
+  const supersedesSource = existing.rekeyedFromHeadSha === sourceHead
+    || (Array.isArray(existing.supersededHeads) && existing.supersededHeads.includes(sourceHead));
+  if (!supersedesSource) existing = null;
+}
 if (!existing && identity.headSha !== process.env.TARGET_REMEDIATION_SHA) {
   identity.headSha = process.env.TARGET_REMEDIATION_SHA;
   existing = readAmaCloserLease(rootDir, identity);

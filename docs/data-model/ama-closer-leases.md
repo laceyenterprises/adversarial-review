@@ -20,4 +20,7 @@ The terminal `terminalOutcome` is one of `succeeded`,
 `pr-closed-externally`, `no-merge:concurrent-writer`, or
 `no-merge:pr-merged-externally`. Terminal leases are never demoted. The
 pending reclaim age includes the configured dispatch timeout and retry and
-token-poll windows; dispatched leases use their separate stale boundary.
+token-poll windows; dispatched leases use their separate stale boundary. A
+closed PR's expired pending lease with no launch ID is deleted, allowing a
+reopened PR to acquire a fresh lease. `pr-closed-externally` and
+`no-merge:concurrent-writer` are reclaimable terminal outcomes.

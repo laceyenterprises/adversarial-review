@@ -2,13 +2,15 @@ import { accessSync, constants, readdirSync, readFileSync, rmSync, mkdirSync } f
 import { isAbsolute, join, dirname } from 'node:path';
 import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
-import { amaCloserPendingLeaseExpiryMs, findLiveAmaCloserLease, updateAmaCloserLease } from './closer-lease.mjs';
+import { amaCloserPendingLeaseExpiryMs, deleteAmaCloserLease, findLiveAmaCloserLease, updateAmaCloserLease } from './closer-lease.mjs';
 import { readAmaCloserDispatchRecord, updateAmaCloserDispatchRecord } from './dispatch-closer.mjs';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { deliverAlert } from '../alert-delivery.mjs';
 import { execHqDispatchCancel } from '../merge-agent-hq-exec.mjs';
 import { resolveHqBin } from '../remediation-hq-dispatch.mjs';
 import { resolveHqRoot } from '../remediation-reply-paths.mjs';
+import { fetchPullRequestHeadAndState } from '../github-api.mjs';
+import { readAmaAuditEntry } from './audit.mjs';
 
 const execFileAsync = promisify(execFile);
 const HQ_CANCEL_TIMEOUT_MS = 10_000;
@@ -41,8 +43,10 @@ export function queueCloserCancelForClosedPr({ rootDir, repo, prNumber, now = ne
   catch { held = true; } // Preserve the owed check when a lease file is corrupt.
   if (!held) return null;
   const path = cancelQueuePath(rootDir, repo, prNumber);
-  try { return JSON.parse(readFileSync(path, 'utf8')); } catch (err) { if (err?.code !== 'ENOENT') throw err; }
-  const record = { schemaVersion: 1, repo, prNumber, queuedAt: now, attempts: 0, lastAttemptAt: null, state: 'pending' };
+  let existing;
+  try { existing = JSON.parse(readFileSync(path, 'utf8')); } catch (err) { if (err?.code !== 'ENOENT') throw err; }
+  if (existing && (existing.state !== 'exhausted' || existing.targetHeadSha === held.headSha)) return existing;
+  const record = { schemaVersion: 1, repo, prNumber, targetHeadSha: held.headSha, queuedAt: now, attempts: 0, lastAttemptAt: null, state: 'pending' };
   mkdirSync(dirname(path), { recursive: true });
   writeFileAtomic(path, `${JSON.stringify(record, null, 2)}\n`);
   return record;
@@ -51,6 +55,7 @@ export function queueCloserCancelForClosedPr({ rootDir, repo, prNumber, now = ne
 /** Bounded, per-tick drain. Terminal failures remain visible and alert once. */
 export async function retryPendingCloserCancels({ rootDir, now = new Date().toISOString(),
   cancelImpl = cancelCloserForTerminalPr, alertImpl = deliverAlert, logger = console,
+  liveStateImpl = fetchPullRequestHeadAndState,
   retryMs = CANCEL_RETRY_MS, maxAttempts = CANCEL_MAX_ATTEMPTS, maxPerTick = CANCEL_PER_TICK,
 } = {}) {
   const dir = join(rootDir, 'data', 'ama-closer-cancels');
@@ -64,6 +69,21 @@ export async function retryPendingCloserCancels({ rootDir, now = new Date().toIS
     let record;
     try { record = JSON.parse(readFileSync(path, 'utf8')); }
     catch (err) { logger.error?.(`[ama-closer] unreadable cancel obligation ${path}: ${err?.message || err}`); continue; }
+    if (!record || typeof record !== 'object' || !record.repo || !record.prNumber) {
+      logger.error?.(`[ama-closer] invalid cancel obligation ${path}`);
+      continue;
+    }
+    if (record.state !== 'pending' && record.state !== 'exhausted') continue;
+    // The queued CLOSED observation can be stale after a close/reopen. Never
+    // cancel a worker or settle a lease without checking the live PR again.
+    let live;
+    try { live = await liveStateImpl(record.repo, record.prNumber); }
+    catch (err) { logger.warn?.(`[ama-closer] live PR state unavailable for ${record.repo}#${record.prNumber}: ${err?.message || err}`); continue; }
+    if (String(live?.state || '').toUpperCase() === 'OPEN' || String(live?.state || '').toUpperCase() === 'MERGED') {
+      rmSync(path, { force: true });
+      continue;
+    }
+    if (String(live?.state || '').toUpperCase() !== 'CLOSED') continue;
     if (record.state === 'exhausted' && !record.alerted) {
       attempted += 1;
       try {
@@ -122,6 +142,7 @@ function cancelStatus(response) {
 export async function cancelCloserForTerminalPr({
   rootDir, repo, prNumber, transition, live,
   hqPath = resolveHqBin(process.env), hqRoot = process.env.HQ_ROOT,
+  readAuditImpl = readAmaAuditEntry,
   execFileImpl = execFileAsync, accessImpl = accessSync,
   retryDelaysMs, logger = console, now = new Date().toISOString(),
 } = {}) {
@@ -138,8 +159,14 @@ export async function cancelCloserForTerminalPr({
       // time to finish its post-merge audit, signal, lease release and comment.
       return { cancelled: false, reason: 'merged-await-stale-reaper' };
     }
+    let resolvedRoot = hqRoot;
+    if (!resolvedRoot) {
+      try { resolvedRoot = resolveHqRoot(process.env); } catch { /* Standalone has no HQ audit. */ }
+    }
+    const audit = resolvedRoot ? readAuditImpl(resolvedRoot, repo, prNumber, mergedHead) : null;
+    if (audit?.status !== 'succeeded') return { cancelled: false, reason: 'merged-await-stale-reaper' };
     if (dispatch) updateAmaCloserDispatchRecord(rootDir, { repo, prNumber, headSha: dispatch.headSha }, (record) => record && ({
-      ...record, outcome: 'succeeded', lastObservedStatus: 'succeeded', lastObservedAt: now,
+      ...record, outcome: 'succeeded', lastObservedStatus: record.lastObservedStatus || null, lastObservedAt: now,
     }));
     updateAmaCloserLease({ rootDir, repo, prNumber, headSha, status: 'terminal', terminalOutcome: 'succeeded', now });
     return { cancelled: false, outcome: 'succeeded' };
@@ -151,7 +178,8 @@ export async function cancelCloserForTerminalPr({
   const pendingAgeMs = Date.parse(now) - Date.parse(lease.acquiredAt || lease.updatedAt);
   let observedStatus = null;
   if (!launchRequestId && lease.status === 'pending' && pendingAgeMs >= amaCloserPendingLeaseExpiryMs(lease.dispatchTimeoutMs)) {
-    observedStatus = 'not-found';
+    deleteAmaCloserLease(rootDir, { repo, prNumber, headSha });
+    return { cancelled: false, outcome: 'pr-closed-externally', reason: 'orphaned-pending-lease-deleted' };
   } else if (!launchRequestId) {
     return { cancelled: false, reason: 'launch-pending' };
   } else if (launchRequestId === 'unknown') {

@@ -70,6 +70,8 @@ import {
   writeAmaAuditEntry,
 } from './audit.mjs';
 import {
+  AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS,
+  AMA_CLOSER_TOKEN_ROLLUP_POLL_DELAYS_MS,
   AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS,
   AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS,
   AMA_CLOSER_LEASE_STATUS,
@@ -1265,7 +1267,6 @@ export function amaClosureNeedsTerminalRemediation(verdict) {
 }
 
 const AMA_CLOSER_DISPATCH_SCHEMA_VERSION = 1;
-const AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS = [1_000, 5_000];
 // `git worktree remove` refuses a registration whose directory is already gone.
 // `--force` does not cover it: --force overrides dirty/locked, not missing. The
 // branch stays pinned by the leftover metadata until something prunes it.
@@ -1280,7 +1281,6 @@ export function isStaleWorktreeRegistrationError(detail) {
 }
 
 const AMA_CLOSER_TEARDOWN_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000];
-const AMA_CLOSER_TOKEN_ROLLUP_POLL_DELAYS_MS = [500, 1_000, 2_000, 5_000];
 const AMA_CLOSER_LEASELESS_LAUNCH_GRACE_MS = 30_000;
 
 function amaCloserPendingLeaseReclaimAgeMs(record = null) {
@@ -1295,6 +1295,8 @@ export const AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOMES = new Set([
   AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOME,
   'deferred',
   'superseded',
+  'pr-closed-externally',
+  'no-merge:concurrent-writer',
 ]);
 const AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000, 5_000];
 export const AMA_CLOSER_REDISPATCH_BOUND = 2;
@@ -3224,6 +3226,7 @@ async function recordAmaCloserReviewerPassTokens({
   const workerRunId = usage?.workerRunId || record.workerRunId || null;
   const metadata = {
     amaCloser: true,
+    workerClass: record.workerClass || null,
     headSha: record.headSha || null,
     dispatchId: record.dispatchId || null,
     launchRequestId,
@@ -4183,7 +4186,7 @@ export async function maybeDispatchAmaCloser({
           // bypassed the bounded hammer retry/alert path (HAMSYNC-01).
           hammerEndedWithoutMerge = true;
           const concurrentWriter = /force-with-lease|stale info|fetch first|concurrent.writer/i.test(
-            [statusProbe?.error, existingRecord?.lastError].filter(Boolean).join(' '),
+            String(statusProbe?.error || ''),
           );
           const noMergeOutcome = concurrentWriter
             ? 'no-merge:concurrent-writer' : 'failed-without-merge';

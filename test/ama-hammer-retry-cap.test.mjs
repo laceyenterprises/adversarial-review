@@ -1395,7 +1395,7 @@ test('same-head terminal HAM remediation parks for operator on head mismatch wit
   );
 });
 
-test('succeeded old-head hammer dispatch records concurrent writer when lease push was refused', async (t) => {
+test('succeeded old-head hammer dispatch ignores stale concurrent-writer error', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'hammer-lease-head-advanced-'));
   let launchedArgs = null;
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -1465,7 +1465,7 @@ test('succeeded old-head hammer dispatch records concurrent writer when lease pu
   );
   const oldLease = readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD });
   assert.equal(oldLease.status, AMA_CLOSER_LEASE_STATUS.TERMINAL);
-  assert.equal(oldLease.terminalOutcome, 'no-merge:concurrent-writer');
+  assert.equal(oldLease.terminalOutcome, 'failed-without-merge');
   const currentLease = readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD });
   assert.equal(currentLease.status, AMA_CLOSER_LEASE_STATUS.DISPATCHED);
   assert.equal(currentLease.lrqId, 'lrq_new_head');
@@ -1473,8 +1473,8 @@ test('succeeded old-head hammer dispatch records concurrent writer when lease pu
   assert.equal(oldRecord.headSha, REVIEWED_HEAD);
   assert.equal(oldRecord.launchRequestId, 'lrq_old_head');
   assert.equal(oldRecord.lastObservedStatus, 'succeeded');
-  assert.equal(oldRecord.lastError, 'no-merge:concurrent-writer');
-  assert.equal(oldRecord.outcome, 'no-merge:concurrent-writer');
+  assert.equal(oldRecord.lastError, 'failed-without-merge');
+  assert.equal(oldRecord.outcome, 'failed-without-merge');
   const currentRecord = readAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD });
   assert.equal(currentRecord.headSha, ADVANCED_HEAD);
   assert.equal(currentRecord.reviewedSha, REVIEWED_HEAD);

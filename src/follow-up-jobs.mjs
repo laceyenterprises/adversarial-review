@@ -12,6 +12,7 @@ import { randomUUID } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { findLiveAmaCloserLease, isHeldAmaCloserLease } from './ama/closer-lease.mjs';
+import { isActiveAmaCloserDispatchRecord, readAmaCloserDispatchRecord } from './ama/dispatch-closer.mjs';
 import { ensureWorkspaceTrashDir, launchWorkspaceTrashDeleter, workspaceTrashDir } from './follow-up-workspace-trash.mjs';
 import { loadRoleConfig } from './role-config.mjs';
 import {
@@ -2163,11 +2164,21 @@ function maybeRevalidateQuotaHold({
 
 function heldCloserForJob(rootDir, job, now) {
   if (!job?.repo || !Number.isInteger(Number(job?.prNumber))) return false;
-  const held = findLiveAmaCloserLease(rootDir, { repo: job.repo, prNumber: job.prNumber });
+  let held;
+  try { held = findLiveAmaCloserLease(rootDir, { repo: job.repo, prNumber: job.prNumber }); }
+  catch (err) {
+    console.warn(`[follow-up] unreadable closer lease for ${job.repo}#${job.prNumber}: ${err?.message || err}`);
+    return false;
+  }
   if (!held) return false;
-  // Legacy pending jobs can lack revisionRef. In that case the claimed head is
-  // unknown, so conservatively defer while any non-stale closer owns the PR.
-  if (job.revisionRef && String(job.revisionRef) !== held.headSha) return false;
+  // Ownership is per PR. A rekeyed closer can legitimately have a different
+  // head from the remediation job it blocks.
+  if (held.lease.status === 'dispatched') {
+    const dispatch = readAmaCloserDispatchRecord(rootDir, {
+      repo: job.repo, prNumber: job.prNumber, headSha: held.lease.rekeyedFromHeadSha || held.headSha,
+    });
+    if (dispatch && isActiveAmaCloserDispatchRecord(dispatch, { now })) return true;
+  }
   return isHeldAmaCloserLease(rootDir, {
     repo: job.repo, prNumber: job.prNumber, headSha: held.headSha,
   }, { now });

@@ -52,7 +52,7 @@ function testFiles() {
     .filter((name) => name.endsWith('.test.mjs'))
     .map((name) => path.join(adaptersDir, name));
   const files = [...topLevel, ...adapters].sort();
-  const requested = process.argv.slice(2);
+  const requested = process.argv.slice(2).filter((arg) => !arg.startsWith('-'));
   if (requested.length === 0) return files;
   const selected = files.filter((file) => requested.some((name) => (
     path.resolve(repoRoot, name) === file || path.basename(file) === name

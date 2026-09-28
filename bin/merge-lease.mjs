@@ -18,7 +18,9 @@ import { parseArgs } from 'node:util';
 import {
   acquireMergeLease,
   assessMergeLeaseNeedsRevalidation,
+  classifyMergeLeaseGateFailure,
   deriveLeaseKey,
+  formatHamGateAttemptCapClosingStatus,
   inspectMergeLease,
   recordMergeLeaseGateAttempt,
   reclaimIfStale,
@@ -26,7 +28,9 @@ import {
   readMergeLeaseWaiters,
   releaseMergeLease,
   releaseMergeLeaseForRetryableAbort,
+  refundMergeLeaseGateAttempt,
   removeMergeLeaseWaiter,
+  resetMergeLeaseGateAttempts,
 } from '../src/ama/merge-lease.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -43,7 +47,7 @@ const USAGE = `\
 Usage:
   merge-lease acquire --repo <owner/name> --base <branch> --pr <n> --head <sha>
                       --owner-pid <pid> [--owner-pgid <pgid>] --wait <seconds>
-                      [--root-dir <path>]
+                      [--root-dir <path>] [--required-checks-green]
   merge-lease release --repo <owner/name> --base <branch> --pr <n>
                       --lease-id <id> [--retryable-abort <reason>]
                       [--root-dir <path>]
@@ -53,6 +57,10 @@ Usage:
   merge-lease needs-revalidation --repo-path <path> --base <branch>
                       --validation-base <sha> --current-base <sha>
                       [--changed-files-from <ref>]
+  merge-lease classify --stage <mergeability|required-checks|protection>
+                      [--state <state>] [--error <message>] [--http-status <code>]
+  merge-lease reset-attempts --repo <owner/name> --base <branch> --pr <n>
+                      --head <sha> [--root-dir <path>]
 
 Safety:
   needs-revalidation fetches origin/<base> in --repo-path. Run it only while
@@ -192,16 +200,17 @@ function leaseJson({ result, waitedSeconds }) {
   };
 }
 
-function timeoutJson({ repo, base, waitedSeconds }) {
+function timeoutJson({ repo, base, waitedSeconds, refundFailed = false }) {
   return {
     acquired: false,
     timedOut: true,
     key: deriveLeaseKey({ repo, base }).key,
     waited_s: waitedSeconds,
+    ...(refundFailed ? { refundFailed: true } : {}),
   };
 }
 
-function parkedJson({ repo, base, pr, head, attempt, maxAttempts, reason }) {
+function parkedJson({ repo, base, pr, head, rootDir, attempt, maxAttempts, reason, requiredChecksGreen }) {
   return {
     acquired: false,
     parked: true,
@@ -210,7 +219,11 @@ function parkedJson({ repo, base, pr, head, attempt, maxAttempts, reason }) {
     pr,
     head,
     attempts: attempt.attempts,
+    retryable: attempt.retryable,
     maxAttempts,
+    closingStatus: formatHamGateAttemptCapClosingStatus({
+      attempts: attempt.attempts, retryable: attempt.retryable, repo, base, pr, head, rootDir, requiredChecksGreen,
+    }),
   };
 }
 
@@ -289,6 +302,7 @@ async function runAcquire(argv, deps) {
     'owner-pid': { type: 'string' },
     'owner-pgid': { type: 'string' },
     wait: { type: 'string' },
+    'required-checks-green': { type: 'boolean' },
   });
   if (values.help) {
     deps.stdout.write(USAGE);
@@ -345,9 +359,11 @@ async function runAcquire(argv, deps) {
       base,
       pr,
       head,
+      rootDir,
       attempt: gateAttempt.attempt,
       maxAttempts: gateAttempt.maxAttempts,
       reason: 'max-gate-attempts',
+      requiredChecksGreen: values['required-checks-green'],
     }));
     return EXIT_PARKED;
   }
@@ -419,10 +435,26 @@ async function runAcquire(argv, deps) {
         waiterId,
         updatedAt: deps.nowIso(),
       });
+      let refundFailed = false;
+      for (let refundTry = 1; refundTry <= 3; refundTry += 1) {
+        try {
+          refundMergeLeaseGateAttempt({ rootDir, repo, base, pr, head, now: deps.nowIso() });
+          break;
+        } catch (err) {
+          if (isMutationLockBusyError(err) && refundTry < 3) {
+            await deps.sleep(DEFAULT_SLEEP_MS);
+            continue;
+          }
+          refundFailed = true;
+          deps.stderr.write(`warning: merge lease gate attempt refund failed: ${String(err?.message || err)}\n`);
+          break;
+        }
+      }
       jsonLine(deps.stdout, timeoutJson({
         repo,
         base,
         waitedSeconds: Math.max(0, Math.floor((deps.nowMs() - startedMs) / 1000)),
+        refundFailed,
       }));
       return EXIT_TIMEOUT;
     }
@@ -564,6 +596,42 @@ function runStatus(argv, deps) {
   return 0;
 }
 
+function runClassify(argv, deps) {
+  const { values } = parseCommon(argv, {
+    stage: { type: 'string' },
+    state: { type: 'string' },
+    error: { type: 'string' },
+    'http-status': { type: 'string' },
+  });
+  if (values.help) {
+    deps.stdout.write(USAGE);
+    return 0;
+  }
+  jsonLine(deps.stdout, classifyMergeLeaseGateFailure({
+    stage: requireString(values, 'stage'),
+    state: values.state,
+    error: values.error,
+    status: values['http-status'],
+  }));
+  return 0;
+}
+
+function runResetAttempts(argv, deps) {
+  const { values } = parseCommon(argv, { pr: { type: 'string' }, head: { type: 'string' } });
+  if (values.help) {
+    deps.stdout.write(USAGE);
+    return 0;
+  }
+  const rootDir = values['root-dir'] || DEFAULT_ROOT_DIR;
+  const repo = requireRepoName(values);
+  const base = requireBaseName(values);
+  const pr = parsePositiveInteger(values.pr, 'pr');
+  const head = requireString(values, 'head');
+  const result = resetMergeLeaseGateAttempts({ rootDir, repo, base, pr, head, now: deps.nowIso() });
+  jsonLine(deps.stdout, { reset: true, removed: result.removed, repo, base, pr, head });
+  return 0;
+}
+
 async function runNeedsRevalidation(argv, deps) {
   const { values } = parseCommon(argv, {
     'repo-path': { type: 'string' },
@@ -621,6 +689,10 @@ export async function main(argv = process.argv.slice(2), overrides = {}) {
       case 'status':
       case 'list':
         return runStatus(argv.slice(1), deps);
+      case 'classify':
+        return runClassify(argv.slice(1), deps);
+      case 'reset-attempts':
+        return runResetAttempts(argv.slice(1), deps);
       case 'needs-revalidation':
         return await runNeedsRevalidation(argv.slice(1), deps);
       default:

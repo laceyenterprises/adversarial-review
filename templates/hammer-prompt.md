@@ -137,6 +137,8 @@ installation; the merge phase retains its existing HQ merge-signal integration.
    closing-status comment; do not leave the audit and add a second comment. Do
    not post the no-merge comment if the PR merged, and do not report success
    merely because remediation or a rebase completed.
+   If the gate-attempt cap parks this head, include the `closingStatus` returned
+   by `merge-lease acquire` verbatim in that comment and the terminal audit.
 1. Read the FINAL adversarial review on `<<REVIEWED_SHA>>`. These are the
    freshest findings.
 2. Remediate ALL final comments, blocking and non-blocking. Make real fixes for

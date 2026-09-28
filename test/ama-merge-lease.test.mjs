@@ -19,6 +19,7 @@ import {
   releaseMergeLease,
   releaseMergeLeaseForRetryableAbort,
   removeMergeLeaseWaiter,
+  resetMergeLeaseGateAttempts,
   renewMergeLease,
   upsertMergeLeaseWaiter,
 } from '../src/ama/merge-lease.mjs';
@@ -86,6 +87,22 @@ test('concurrent acquire for one repo/base yields exactly one holder', () => {
     for (const loser of losers) {
       assert.equal(loser.existingLease.leaseId, winners[0].lease.leaseId);
     }
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reset attempts refuses the current head while it holds the lease', () => {
+  const rootDir = freshRoot();
+  try {
+    const held = acquire(rootDir);
+    assert.equal(held.acquired, true);
+    recordMergeLeaseGateAttempt({ rootDir, ...IDENTITY, pr: 101, head: 'abc123' });
+    assert.throws(
+      () => resetMergeLeaseGateAttempts({ rootDir, ...IDENTITY, pr: 101, head: 'abc123' }),
+      /cannot reset gate attempts while this head holds the merge lease/,
+    );
+    assert.equal(readMergeLeaseAttempts(rootDir, IDENTITY)[0].attempts, 1);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -276,7 +293,7 @@ test('release with matching lease identity preserves gate attempts for retry cap
   }
 });
 
-test('retryable-abort release prunes only the matching holder gate attempt', () => {
+test('retryable-abort release refunds only the current matching holder attempt', () => {
   const rootDir = freshRoot();
   try {
     const first = acquire(rootDir, {
@@ -315,9 +332,34 @@ test('retryable-abort release prunes only the matching holder gate attempt', () 
     assert.equal(released.retryableAbortReason, 'github-gate-read-failed');
     assert.equal(released.attemptPrune.removed, true);
     assert.deepEqual(
-      readMergeLeaseAttempts(rootDir, IDENTITY).map((attempt) => `${attempt.pr}:${attempt.head}`),
-      ['999:other-head'],
+      readMergeLeaseAttempts(rootDir, IDENTITY).map((attempt) => `${attempt.pr}:${attempt.head}:${attempt.attempts}:${attempt.retryable}`),
+      ['101:transient-head:0:1', '999:other-head:1:0'],
     );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('retryable abort preserves earlier non-retryable failures on the same head', () => {
+  const rootDir = freshRoot();
+  try {
+    const head = 'mixed-failure-head';
+    recordMergeLeaseGateAttempt({ rootDir, ...IDENTITY, pr: 101, head, maxAttempts: 2 });
+    const held = acquire(rootDir, { holderHead: head });
+    recordMergeLeaseGateAttempt({ rootDir, ...IDENTITY, pr: 101, head, maxAttempts: 2 });
+    const released = releaseMergeLeaseForRetryableAbort({
+      rootDir, ...IDENTITY, leaseId: held.lease.leaseId,
+      holderPr: 101, holderHead: head, acquiredAt: held.lease.acquiredAt,
+      retryableAbortReason: 'gate-read-http-404',
+    });
+    assert.equal(released.released, true);
+    assert.deepEqual(readMergeLeaseAttempts(rootDir, IDENTITY).map(({ attempts, retryable }) => [attempts, retryable]), [[1, 1]]);
+    const next = recordMergeLeaseGateAttempt({ rootDir, ...IDENTITY, pr: 101, head, maxAttempts: 2 });
+    assert.equal(next.parked, false);
+    assert.equal(next.attempt.attempts, 2);
+    const capped = recordMergeLeaseGateAttempt({ rootDir, ...IDENTITY, pr: 101, head, maxAttempts: 2 });
+    assert.equal(capped.parked, true);
+    assert.equal(capped.attempt.retryable, 1);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

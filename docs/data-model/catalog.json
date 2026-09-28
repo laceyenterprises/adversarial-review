@@ -2,6 +2,18 @@
   "version": 1,
   "entries": [
     {
+      "id": "ama-audit",
+      "title": "AMA Closure Audit",
+      "path": "docs/data-model/ama-audit.md",
+      "store": "$HQ_ROOT/dispatch/audit/adversarial-merge-authority/",
+      "schemaSurface": "src/ama/audit.mjs",
+      "relatedSchemaSurfaces": [
+        "bin/ama-audit.mjs",
+        "templates/hammer-prompt.md"
+      ],
+      "owner": "AMA merge authority"
+    },
+    {
       "id": "follow-up-jobs",
       "title": "Follow-Up Remediation Jobs",
       "path": "docs/data-model/follow-up-jobs.md",
@@ -13,6 +25,18 @@
         "src/ama-closure-orchestration.mjs"
       ],
       "owner": "follow-up remediation queue"
+    },
+    {
+      "id": "merge-lease-attempts",
+      "title": "Merge Lease Gate Attempts",
+      "path": "docs/data-model/merge-lease-attempts.md",
+      "store": "data/merge-leases/<repo>__<base>.attempts.json",
+      "schemaSurface": "src/ama/merge-lease.mjs",
+      "relatedSchemaSurfaces": [
+        "bin/merge-lease.mjs",
+        "templates/hammer-prompt.md"
+      ],
+      "owner": "AMA hammer merge gate"
     },
     {
       "id": "finalization-ledger",

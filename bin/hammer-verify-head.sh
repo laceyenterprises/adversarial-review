@@ -75,6 +75,23 @@ ham_release_merge_lease() {
 }
 
 ham_acquire_merge_lease() {
+  if ! [[ "$POST_REMEDIATION_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    echo "AMG-04 hard-blocker: merge lease head is not a full SHA" >&2
+    return 1
+  fi
+  local ham_required_checks_green_args=()
+  gh pr view <<PR_URL>> --json headRefOid,statusCheckRollup \
+    > /tmp/ham-<<PR_NUMBER>>-pre-acquire-checks.json || return 1
+  if jq -e --arg head "$POST_REMEDIATION_SHA" '
+    .headRefOid == $head and
+    (.statusCheckRollup | type == "array" and length > 0 and all(.[];
+      if .__typename == "StatusContext" then .state == "SUCCESS"
+      else .conclusion as $conclusion |
+        (.status == "COMPLETED" and (["SUCCESS", "NEUTRAL", "SKIPPED"] | index($conclusion)) != null) end
+    ))
+  ' /tmp/ham-<<PR_NUMBER>>-pre-acquire-checks.json >/dev/null; then
+    ham_required_checks_green_args=(--required-checks-green)
+  fi
   if "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-lease.mjs acquire \
     --repo <<REPO>> \
     --base "$BASE_BRANCH" \
@@ -82,6 +99,7 @@ ham_acquire_merge_lease() {
     --head "$POST_REMEDIATION_SHA" \
     --owner-pid "$$" \
     --wait "$HAM_MERGE_LEASE_WAIT_SECONDS" \
+    "${ham_required_checks_green_args[@]+"${ham_required_checks_green_args[@]}"}" \
     > /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json; then
     HAM_MERGE_LEASE_ACQUIRE_EXIT=0
   else
@@ -90,7 +108,98 @@ ham_acquire_merge_lease() {
   if [ "$HAM_MERGE_LEASE_ACQUIRE_EXIT" -eq 70 ] \
     && [ "$(jq -r '.parked // false' /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json)" = "true" ]; then
     HAM_PARK_REASON=$(jq -r '.reason // "merge-lease-parked"' /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json)
+    if [ "$HAM_PARK_REASON" != "max-gate-attempts" ]; then
+      echo "AMG-04 parked: merge lease acquisition parked PR <<PR_NUMBER>> ($HAM_PARK_REASON)" >&2
+      HAM_PHASE_OUTCOME="parked:${HAM_PARK_REASON}"
+      return 20
+    fi
+    HAM_GATE_CAP_CLOSING_STATUS=$(jq -r '.closingStatus // empty' /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json)
+    if [ -z "$HAM_GATE_CAP_CLOSING_STATUS" ]; then
+      echo "AMG-04 hard-blocker: parked lease response omitted closingStatus" >&2
+      return 1
+    fi
     echo "AMG-04 parked: merge lease acquisition parked PR <<PR_NUMBER>> ($HAM_PARK_REASON)" >&2
+    echo "$HAM_GATE_CAP_CLOSING_STATUS" >&2
+    ham_gate_cap_attempt_json=$(mktemp "${TMPDIR:-/tmp}/ham-gate-cap-audit.XXXXXX") || return 1
+    jq -n --arg reason "$HAM_PARK_REASON" --arg closingStatus "$HAM_GATE_CAP_CLOSING_STATUS" \
+      '{reason: $reason, closingStatus: $closingStatus, attemptPhase: "hammer-gate-attempt-cap"}' \
+      > "$ham_gate_cap_attempt_json"
+    if "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/ama-audit.mjs append \
+      --hq-root <<HQ_ROOT>> --repo <<REPO>> --pr <<PR_NUMBER>> \
+      --head "$POST_REMEDIATION_SHA" --outcome failed-without-merge \
+      --closure-authority ham-terminal-remediation \
+      --reviewer <<REVIEWER>> --risk-class <<RISK_CLASS>> \
+      --attempt-json "$ham_gate_cap_attempt_json"; then
+      HAM_GATE_CAP_AUDIT_EXIT=0
+    else
+      HAM_GATE_CAP_AUDIT_EXIT=$?
+    fi
+    rm -f "$ham_gate_cap_attempt_json"
+    if [ "$HAM_GATE_CAP_AUDIT_EXIT" -eq 65 ]; then
+      # Sticky succeeded means a prior merge won. Confirm live state before
+      # suppressing a no-merge status for this head.
+      HAM_GATE_CAP_LIVE_STATE=$(gh pr view <<PR_URL>> --json state --jq '.state') || return 1
+      [ "$HAM_GATE_CAP_LIVE_STATE" = "MERGED" ] || return 1
+      HAM_PHASE_OUTCOME=already-merged
+      return 20
+    fi
+    [ "$HAM_GATE_CAP_AUDIT_EXIT" -eq 0 ] || return "$HAM_GATE_CAP_AUDIT_EXIT"
+    HAM_GH_TOKEN="${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}"
+    if [ -z "$HAM_GH_TOKEN" ]; then
+      echo "HAM hard-blocker: no entitled hammer token for gate-cap closing status" >&2
+      return 1
+    fi
+    HAM_GATE_CAP_MARKER="<!-- hq:ham-gate-attempt-cap:$POST_REMEDIATION_SHA -->"
+    HAM_GATE_CAP_COMMENT="$HAM_GATE_CAP_MARKER
+HAM closing status — no merge. The gate-attempt cap stopped this head before lease acquisition; no merge lease is held or needs release. $HAM_GATE_CAP_CLOSING_STATUS"
+    ham_gate_cap_gh_transient() {
+      grep -Eiq 'timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|rate limit|secondary rate limit|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway' "$1"
+    }
+    # All comment operations share the same bounded retry and transient test.
+    ham_gate_cap_gh() {
+      local ham_out="$1" ham_err="$2"
+      shift 2
+      local ham_attempt=1
+      while [ "$ham_attempt" -le 3 ]; do
+        if GH_TOKEN="$HAM_GH_TOKEN" gh "$@" > "$ham_out" 2> "$ham_err"; then
+          return 0
+        fi
+        if [ "$ham_attempt" -ge 3 ] || ! ham_gate_cap_gh_transient "$ham_err"; then
+          cat "$ham_err" >&2
+          return 1
+        fi
+        sleep $((ham_attempt * 2))
+        ham_attempt=$((ham_attempt + 1))
+      done
+    }
+    HAM_GATE_CAP_OUT=$(mktemp "${TMPDIR:-/tmp}/ham-gate-cap-out.XXXXXX") || return 1
+    HAM_GATE_CAP_ERR=$(mktemp "${TMPDIR:-/tmp}/ham-gate-cap-err.XXXXXX") || return 1
+    ham_gate_cap_gh "$HAM_GATE_CAP_OUT" "$HAM_GATE_CAP_ERR" api --paginate \
+      "repos/<<REPO>>/issues/<<PR_NUMBER>>/comments" \
+      -q '.[] | {id: .id, body: .body}' || { rm -f "$HAM_GATE_CAP_OUT" "$HAM_GATE_CAP_ERR"; return 1; }
+    HAM_GATE_CAP_COMMENT_RECORD=$(jq -sc --arg marker "$HAM_GATE_CAP_MARKER" --arg head "$POST_REMEDIATION_SHA" '
+      map(select((.body // "") as $body |
+        ($body | contains($marker)) or
+        (($body | contains("<!-- hq:ham-terminal-remediation:audit -->")) and
+         ($body | contains("HAM-Terminal-Remediation-Head: " + $head))))) | first // empty
+    ' "$HAM_GATE_CAP_OUT")
+    HAM_GATE_CAP_COMMENT_ID=$(printf '%s' "$HAM_GATE_CAP_COMMENT_RECORD" | jq -r '.id // empty')
+    if [ -n "$HAM_GATE_CAP_COMMENT_ID" ]; then
+      HAM_GATE_CAP_EXISTING_BODY=$(printf '%s' "$HAM_GATE_CAP_COMMENT_RECORD" | jq -r '.body // ""')
+      if [[ "$HAM_GATE_CAP_EXISTING_BODY" == *'<!-- hq:ham-terminal-remediation:audit -->'* ]]; then
+        # Keep the machine-parsed audit and append the closing status once.
+        HAM_GATE_CAP_COMMENT="$HAM_GATE_CAP_EXISTING_BODY
+
+$HAM_GATE_CAP_COMMENT"
+      fi
+      ham_gate_cap_gh "$HAM_GATE_CAP_OUT" "$HAM_GATE_CAP_ERR" api --method PATCH \
+        "repos/<<REPO>>/issues/comments/$HAM_GATE_CAP_COMMENT_ID" \
+        -f body="$HAM_GATE_CAP_COMMENT" || { rm -f "$HAM_GATE_CAP_OUT" "$HAM_GATE_CAP_ERR"; return 1; }
+    else
+      ham_gate_cap_gh "$HAM_GATE_CAP_OUT" "$HAM_GATE_CAP_ERR" pr comment <<PR_URL>> \
+        --body "$HAM_GATE_CAP_COMMENT" || { rm -f "$HAM_GATE_CAP_OUT" "$HAM_GATE_CAP_ERR"; return 1; }
+    fi
+    rm -f "$HAM_GATE_CAP_OUT" "$HAM_GATE_CAP_ERR"
     HAM_PHASE_OUTCOME="parked:${HAM_PARK_REASON}"
     return 20
   fi

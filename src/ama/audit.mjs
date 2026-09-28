@@ -411,9 +411,8 @@ export function writeAmaAuditEntry({
  *     error so the regression surfaces at the writer rather than
  *     getting silently absorbed.
  *
- * If the file does not exist yet, this throws — the watcher's flow is
- * `writeAmaAuditEntry` first (the `in_progress` record) and
- * `appendAmaAuditAttempt` for every subsequent closer attempt.
+ * If a new head has no record, create an initial document with the append
+ * reconciliation fields under this lock and report `created: true`.
  *
  * @param {object} args
  * @param {string} args.hqRoot
@@ -421,6 +420,7 @@ export function writeAmaAuditEntry({
  * @param {number} args.prNumber
  * @param {string} args.headSha
  * @param {object} args.attempt
+ * @param {object=} args.metadata Top-level provenance for a newly created record.
  * @param {string=} args.now
  * @returns {{ filePath: string, doc: object }}
  */
@@ -430,6 +430,7 @@ export function appendAmaAuditAttempt({
   prNumber,
   headSha,
   attempt,
+  metadata = {},
   now,
 }) {
   validateAttempt(attempt);
@@ -437,10 +438,13 @@ export function appendAmaAuditAttempt({
   return withAuditLock(filePath, () => {
     const existing = readExisting(filePath);
     if (!existing) {
-      throw new Error(
-        `appendAmaAuditAttempt: no existing record at ${filePath} — ` +
-        `call writeAmaAuditEntry first`,
-      );
+      const timestamp = now || new Date().toISOString();
+      const doc = {
+        ...buildInitialAuditDoc({ repo, prNumber, headSha, timestamp, attempt, metadata }),
+        reconciliation: deriveReconciliation(null, attempt, timestamp),
+      };
+      writeFileAtomic(filePath, `${JSON.stringify(doc, null, 2)}\n`, { mode: AUDIT_FILE_MODE });
+      return { filePath, doc, created: true };
     }
 
     const currentStatus = String(existing.status || '').toLowerCase();

@@ -40,6 +40,47 @@ const MUTATION_LOCK_RETRY_DELAY_MS = 5;
 const MUTATION_LOCK_STALE_MS = 5000;
 const FULL_SHA_RE = /^[0-9a-f]{40}$/iu;
 
+// Hammer helpers and the lease CLI use the same gate-failure decision. An
+// unrecognized failure remains chargeable; only known transient reads/states
+// may refund the acquisition's provisional attempt.
+export function classifyMergeLeaseGateFailure({ stage, state, error, status } = {}) {
+  const phase = String(stage || '').toLowerCase();
+  const value = String(state || '').toLowerCase();
+  const message = `${error?.code || ''} ${error?.message || error || ''}`.toLowerCase();
+  const httpStatus = Number(status || error?.status || error?.statusCode
+    || /(?:http\s*|status\s*[:=]?\s*)(\d{3})/i.exec(message)?.[1]);
+  if (httpStatus === 401 || httpStatus === 403) {
+    return { retryable: false, reason: 'non-retryable-gate-failure' };
+  }
+  if (phase === 'mergeability' && /\b(unknown|recomputing|pending)\b/.test(value)) {
+    return { retryable: true, reason: 'mergeability-recomputing' };
+  }
+  const checkTokens = value.toUpperCase().split(/[^A-Z0-9_]+/).filter(Boolean);
+  if (phase === 'required-checks' && checkTokens.some((token) => [
+    'FAILURE', 'FAILED', 'FAILING', 'ERROR', 'CANCELLED', 'TIMED_OUT',
+    'ACTION_REQUIRED', 'STARTUP_FAILURE', 'STALE',
+  ].includes(token))) {
+    return { retryable: false, reason: 'non-retryable-gate-failure' };
+  }
+  if (phase === 'required-checks' && /\b(pending|in.progress|queued|running)\b/.test(value)) {
+    return { retryable: true, reason: 'required-checks-pending' };
+  }
+  if (phase === 'required-checks' || phase === 'protection') {
+    if (httpStatus >= 500 && httpStatus <= 599) {
+      return { retryable: true, reason: `gate-read-http-${httpStatus}` };
+    }
+    if (/\b(econnreset|econnrefused|econnaborted|enotfound|enetunreach|enetdown|ehostunreach|etimedout|eai_again|und_err_connect_timeout|timeout|timed out|network error|fetch failed|socket hang up)\b/i.test(message)) {
+      return { retryable: true, reason: 'gate-read-network-error' };
+    }
+  }
+  return { retryable: false, reason: 'non-retryable-gate-failure' };
+}
+
+export function formatHamGateAttemptCapClosingStatus({ attempts, retryable, repo, base, pr, head, rootDir, requiredChecksGreen } = {}) {
+  const cliPath = new URL('../../bin/merge-lease.mjs', import.meta.url).pathname;
+  return `HAM closing status — no merge: parked by the gate-attempt cap after ${attempts} attempts (${retryable} retryable).${requiredChecksGreen ? ' Required checks were green in the latest pre-acquire snapshot for this head.' : ''} Reset with: node ${cliPath} reset-attempts --repo ${repo} --base ${base} --pr ${pr} --head ${head}${rootDir ? ` --root-dir ${rootDir}` : ''}`;
+}
+
 function sanitizeSegment(value) {
   return String(value ?? '').replace(/[^A-Za-z0-9._-]/g, '-');
 }
@@ -561,9 +602,33 @@ function normalizeAttemptRecord(record, nowIso) {
     pr: normalizeHolderPr(record.pr, 'pr'),
     head: String(record.head || ''),
     attempts: Math.max(0, Math.floor(Number(record.attempts) || 0)),
+    retryable: Math.max(0, Math.floor(Number(record.retryable) || 0)),
     firstAttemptAt: record.firstAttemptAt || nowIso,
     lastAttemptAt: record.lastAttemptAt || nowIso,
   };
+}
+
+function refundAttemptUnlocked(attemptsPath, { pr, head, now }) {
+  const updatedAt = now || isoNow();
+  const doc = readAttemptDoc(attemptsPath);
+  const normalizedPr = normalizeHolderPr(pr, 'pr');
+  const normalizedHead = String(head || '');
+  let refunded = false;
+  const attempts = doc.attempts.map((raw) => {
+    const record = normalizeAttemptRecord(raw, updatedAt);
+    if (record.pr !== normalizedPr || record.head !== normalizedHead) return record;
+    refunded = true;
+    return { ...record, attempts: Math.max(0, record.attempts - 1), retryable: record.retryable + 1, lastAttemptAt: updatedAt };
+  });
+  if (refunded) writeJsonFile(attemptsPath, { schemaVersion: LEASE_SCHEMA_VERSION, updatedAt, attempts: sortedAttempts(attempts) });
+  return { removed: refunded, attempts: sortedAttempts(attempts) };
+}
+
+export function refundMergeLeaseGateAttempt({ rootDir, repo, base, pr, head, now } = {}) {
+  validateIdentity({ rootDir, repo, base });
+  return withAttemptMutationLock({ rootDir, repo, base }, () => refundAttemptUnlocked(
+    mergeLeaseAttemptsFilePath(rootDir, { repo, base }), { pr, head, now },
+  ));
 }
 
 function sortedAttempts(attempts) {
@@ -583,6 +648,19 @@ function attemptExpired(attempt, nowIso) {
 export function readMergeLeaseAttempts(rootDir, identity = {}) {
   const attemptsPath = mergeLeaseAttemptsFilePath(rootDir, identity);
   return sortedAttempts(readAttemptDoc(attemptsPath).attempts);
+}
+
+export function resetMergeLeaseGateAttempts({ rootDir, repo, base, pr, head, now } = {}) {
+  validateIdentity({ rootDir, repo, base });
+  return withAttemptMutationLock({ rootDir, repo, base }, () => {
+    const holder = readJsonFile(mergeLeaseFilePath(rootDir, { repo, base }), null);
+    if (holder && Number(holder.holderPr) === Number(pr) && holder.holderHead === head) {
+      throw new Error('cannot reset gate attempts while this head holds the merge lease');
+    }
+    return removeAttemptRecordsUnlocked(
+      mergeLeaseAttemptsFilePath(rootDir, { repo, base }), { pr, head, now },
+    );
+  });
 }
 
 function removeAttemptRecordsUnlocked(attemptsPath, { pr, head, now }) {
@@ -632,6 +710,7 @@ export function recordMergeLeaseGateAttempt({
       pr: normalizedPr,
       head: normalizedHead,
       attempts: (Number(existing?.attempts) || 0) + 1,
+      retryable: Number(existing?.retryable) || 0,
       firstAttemptAt: existing?.firstAttemptAt || updatedAt,
       lastAttemptAt: updatedAt,
     }, updatedAt);
@@ -941,7 +1020,7 @@ export function releaseMergeLeaseForRetryableAbort({
     try {
       attemptPrune = withAttemptMutationLockOnly(
         { rootDir, repo, base },
-        () => removeAttemptRecordsUnlocked(attemptsPath, {
+        () => refundAttemptUnlocked(attemptsPath, {
           pr: currentLease.holderPr,
           head: currentLease.holderHead,
           now: now || isoNow(),

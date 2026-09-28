@@ -9,6 +9,8 @@
  *                    --outcome <enum> [--attempt-json <path>] [--now <iso>]
  *   ama-audit append --hq-root <path> --repo <r> --pr <n> --head <sha> \
  *                    --outcome <enum> [--attempt-json <path>] [--now <iso>]
+ *                    [--closure-authority <name>] [--reviewer <name>]
+ *                    [--risk-class <name>] [--flag-state <name>]
  *   ama-audit trailers --worker-class <c> --reviewer <r> --risk-class <rc> \
  *                      --reason <text> --audit-ref <ref>
  *
@@ -40,6 +42,8 @@ Usage:
                    --outcome <enum> [--attempt-json <path>] [--now <iso>]
   ama-audit append --hq-root <path> --repo <owner/name> --pr <n> --head <sha>
                    --outcome <enum> [--attempt-json <path>] [--now <iso>]
+                   [--closure-authority <name>] [--reviewer <name>]
+                   [--risk-class <name>] [--flag-state <name>]
   ama-audit trailers --worker-class <c> --reviewer <r> --risk-class <rc>
                      --reason <text> --audit-ref <ref>
 
@@ -78,6 +82,10 @@ function parseWriteArgs(argv) {
       head: { type: 'string' },
       outcome: { type: 'string' },
       'attempt-json': { type: 'string' },
+      'closure-authority': { type: 'string' },
+      reviewer: { type: 'string' },
+      'risk-class': { type: 'string' },
+      'flag-state': { type: 'string' },
       now: { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
     },
@@ -117,20 +125,28 @@ function runInitOrAppend(subcommand, argv) {
   }
   const attemptBase = loadAttemptJson(values['attempt-json']);
   const attempt = { ...attemptBase, outcome: values.outcome };
+  const metadata = Object.fromEntries([
+    ['closureAuthority', values['closure-authority']],
+    ['reviewer', values.reviewer],
+    ['riskClass', values['risk-class']],
+    ['flagState', values['flag-state']],
+  ].filter(([, value]) => value !== undefined));
   const args = {
     hqRoot: values['hq-root'],
     repo: values.repo,
     prNumber: Number(values.pr),
     headSha: values.head,
     attempt,
+    metadata,
     now: values.now,
   };
   try {
-    const { filePath } =
+    const { filePath, created } =
       subcommand === 'init'
         ? writeAmaAuditEntry(args)
         : appendAmaAuditAttempt(args);
     process.stdout.write(`${filePath}\n`);
+    if (created) process.stderr.write(`ama-audit: created missing record for ${values.repo} pr#${values.pr} head=${values.head}\n`);
     return 0;
   } catch (err) {
     if (err instanceof AmaAuditRefusedWriteError || err?.code === 'AMA_AUDIT_REFUSED_WRITE') {

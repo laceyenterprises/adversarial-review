@@ -2,6 +2,7 @@ import { QUOTA_EXHAUSTED_FAILURE_CLASS, quotaHoldDecision } from './quota-exhaus
 import { infraRecoverableFailureClass, reviewPopulationFailureClass } from './reviewer-failure-classification.mjs';
 import { resolveGeminiReviewerModeWithSource } from './role-config.mjs';
 import { readCascadeState } from './reviewer-cascade.mjs';
+import { tokenRefreshHoldExhausted } from './token-refresh-hold.mjs';
 import {
   isCrossModelReviewWaived,
   normalizeBuilderClass,
@@ -75,13 +76,16 @@ const REVIEWER_TIMEOUT_FALLBACK_ROUTE_BY_MODEL = {
 const DEFAULT_STALE_REVIEWER_RECONCILE_PER_POLL = 6;
 const DEFAULT_REVIEWER_TIMEOUT_FALLBACK_THRESHOLD = 2;
 const DEFAULT_REVIEWER_EXEC_FALLBACK_THRESHOLD = 2;
+// `token-refresh-pending` is deliberately absent (TOKDZ-01). A refusal waiting
+// on a broker token rotation is a bounded hold: counting refusals here re-routed
+// the PR after two of them, minutes before any rotation could land. It re-routes
+// only once the hold outlives its bound (`tokenRefreshHoldExhausted`).
 const REVIEWER_EXEC_FALLBACK_FAILURE_CLASSES = Object.freeze([
   'cascade',
   'reviewer-timeout',
   'launchctl-bootstrap',
   'reviewer-command-failed',
   'oauth-broken',
-  'token-refresh-pending',
   'quota-exhausted',
   'provider-overloaded',
 ]);
@@ -431,22 +435,30 @@ export function selectReviewerRouteForAttempt({
   headSha = null,
   env = process.env,
   afhGrounding = null,
+  nowMs = Date.now(),
 }) {
   const cascadeState = readCascadeState(rootDir, { repo: repoPath, prNumber });
   const builderClass = subject?.builderClass || baseRoute.builderClass || null;
   const execThreshold = resolveReviewerExecFallbackThreshold(env);
-  const execFailureSignal = reviewerExecFailureSignal({
-    cascadeState,
-    currentRow,
+  const tokenHold = cascadeState?.tokenRefreshHold || null;
+  const tokenHoldExhausted = tokenRefreshHoldExhausted(tokenHold, {
     reviewerModel: baseRoute?.reviewerModel || null,
+    nowMs,
   });
-  if (
+  const execFailureSignal = tokenHoldExhausted
+    ? { failureClass: 'token-refresh-pending', failureCount: Number(tokenHold.refusals || 0) }
+    : reviewerExecFailureSignal({
+      cascadeState,
+      currentRow,
+      reviewerModel: baseRoute?.reviewerModel || null,
+    });
+  if (tokenHoldExhausted || (
     execThreshold > 0 &&
     currentRowHeadMatches(currentRow, headSha) &&
     rowReviewerMatches(currentRow, baseRoute?.reviewerModel) &&
     execFailureSignal.failureClass &&
     execFailureSignal.failureCount >= execThreshold
-  ) {
+  )) {
     const attempted = [];
     for (const candidate of candidateReviewerModelsForExecFallback({ baseRoute, builderClass })) {
       const candidateModel = candidate.reviewerModel;
@@ -466,7 +478,8 @@ export function selectReviewerRouteForAttempt({
         botTokenEnv: fallbackRoute.botTokenEnv,
         reviewerModelFallback: {
           event: 'reviewer-model-fallback',
-          reason: 'repeated-reviewer-exec-failure',
+          reason: tokenHoldExhausted ? 'token-refresh-hold-exhausted' : 'repeated-reviewer-exec-failure',
+          ...(tokenHoldExhausted ? { tokenRefreshHold: tokenHold } : {}),
           fromReviewerModel: baseRoute.reviewerModel,
           toReviewerModel: fallbackRoute.reviewerModel,
           failureClass: execFailureSignal.failureClass,

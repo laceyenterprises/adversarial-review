@@ -38,9 +38,10 @@ Directory: `data/cascade-state/`
 | `lastFailureClass` | string | Normalized transient failure class from the latest recorded failure. Unknown classes normalize to `cascade`. |
 | `lastFailureReason` | string or null | Trimmed diagnostic reason for the latest failure, when supplied. |
 | `lastFailureAt` | string | ISO-8601 timestamp used as the failure anchor exposed by health reporting. Unusable input timestamps are replaced with the current time before writing. |
-| `nextRetryAfter` | string | ISO-8601 PR-level backoff expiry. This is always computed from the cascade backoff schedule, never from a provider-supplied reset hint. |
+| `nextRetryAfter` | string | ISO-8601 PR-level backoff expiry. This is computed from the cascade backoff schedule, never from a provider-supplied reset hint. The one exception is a token-refresh hold (below), which sets it to `tokenRefreshHold.holdUntil`: never earlier than the backoff floor and never later than `tokenRefreshHold.maxHoldUntil`. |
 | `providerRetryAfter` | string | Optional diagnostic provider reset hint. It is recorded only when supplied, is replaced on each write, and never gates reviewer dispatch. |
 | `backoffMinutes` | number | Backoff duration used to compute `nextRetryAfter`. |
+| `tokenRefreshHold` | object | Optional TOKDZ-01 hold written by `recordTokenRefreshHold` when the Claude reviewer refused a broker token that was waiting on a rotation (`token-refresh-pending`). Fields: `reviewerModel`, `startedAt` (first refusal of this hold), `lastRefusalAt`, `refusals`, `expectedRotationAt` (token expiry minus the bridge refresh window, or null when the refusal carried no lifetime), `holdUntil`, `maxHoldUntil` (`startedAt` plus `ADVERSARIAL_REVIEW_TOKEN_REFRESH_HOLD_MAX_MINUTES`, default 30), `maxHoldMs`. Carried forward across later transient-failure writes; dropped by `clearCascadeState`. |
 | `capExhaustedAlertedAt` | string | Optional debounce marker for a cascade-cap-exhausted alert. |
 | `capExhaustedAlert` | object | Optional diagnostic payload containing failure class, attempts, cap, and reason for the cap-exhausted alert. |
 | `operatorDecisionAlertedHeadSha` | string or null | Optional per-head debounce key for operator-decision-required alerts. |
@@ -67,6 +68,19 @@ Directory: `data/cascade-state/`
   fields explicitly carried forward by the source-of-truth module. A missing
   `providerRetryAfter` on a later write intentionally clears any older provider
   hint.
+
+## Token-Refresh Holds
+
+A `token-refresh-pending` refusal is a hold, not a failed attempt. The settle
+path writes the row to `pending-upstream` through `MARK_TOKEN_REFRESH_HOLD_SQL`,
+which charges neither `review_attempts` nor `infra_auto_recover_attempts`, so a
+refusal can never walk a row to the terminal infra cap. The PR is parked until
+the next expected rotation. Route selection keeps the held reviewer until
+`maxHoldUntil`, then re-routes through the normal model-fallback path with
+reason `token-refresh-hold-exhausted`. `token-refresh-pending` is not an
+exec-fallback counting class, so repeated refusals inside the bound never
+re-route on their own. A hold whose last refusal is older than the bound plus
+one hour is stale and is ignored.
 
 ## Operational Contract
 

@@ -2332,7 +2332,10 @@ export async function processReviewSubject(entry, ctx) {
         }
       }
       const infraRecoveryAttempts = Number(current?.infra_auto_recover_attempts || 0);
-      if (infraRecoveryClass && infraRecoveryAttempts >= INFRA_AUTO_RECOVER_CAP) {
+      // TOKDZ-01: a token-refresh refusal is a hold, never a strand. Rows that
+      // reached the cap under the pre-hold accounting stay recoverable.
+      const tokenRefreshRecovery = infraRecoveryClass === 'token-refresh-pending';
+      if (infraRecoveryClass && !tokenRefreshRecovery && infraRecoveryAttempts >= INFRA_AUTO_RECOVER_CAP) {
         const alertedAt = new Date().toISOString();
         const repeatExhaustion = infraRecoveryAttempts > INFRA_AUTO_RECOVER_CAP;
         const exhaustionSummary = repeatExhaustion
@@ -2764,7 +2767,7 @@ export async function processReviewSubject(entry, ctx) {
                 current?.failed_at || null,
                 current?.reviewer_head_sha || null,
                 INFRA_AUTO_RECOVER_CAP,
-                cascadeRetryDue ? 1 : 0,
+                cascadeRetryDue || tokenRefreshRecovery ? 1 : 0,
                 infraRecoveryClass
               )
               : reviewPopulationRetryable

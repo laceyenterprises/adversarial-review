@@ -31,6 +31,11 @@ import {
   isReviewerSubprocessTimeout,
 } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { INFRA_RUNTIME_MISSING_LIBRARY_FAILURE_CLASS } from './runtime-missing-library.mjs';
+import {
+  computeTokenRefreshHold,
+  parseTokenRefreshRefusal,
+  resolveTokenRefreshHoldConfig,
+} from './token-refresh-hold.mjs';
 
 // Backoff schedule indexed by (consecutive transient failures - 1). Roughly
 // exponential but deliberately PLATEAUS at 15 minutes instead of doubling
@@ -455,6 +460,56 @@ function recordCascadeFailure(rootDir, {
     // Absence means exactly one thing -- the caller passed no provider hint.
     ...(nextRetryAfter ? { providerRetryAfter: nextRetryAfter } : {}),
     backoffMinutes,
+    // TOKDZ-01: carried forward so a PR whose token-refresh hold already hit
+    // its bound keeps routing away from that reviewer when the fallback
+    // reviewer then fails transiently, instead of starting a fresh hold on the
+    // still-unrotated token. It expires on its own (tokenRefreshHoldExhausted
+    // ignores a stale hold) and clearCascadeState drops it on success.
+    ...(previous?.tokenRefreshHold ? { tokenRefreshHold: previous.tokenRefreshHold } : {}),
+  });
+}
+
+// TOKDZ-01: record a `token-refresh-pending` refusal as a bounded hold. The
+// counters and breakdown are written exactly as for any transient failure (so
+// health reporting and diagnosis see the refusal), then the PR-level hold is
+// moved from the backoff schedule to the next expected token rotation.
+//
+// This is the one writer allowed to set `nextRetryAfter` past the backoff
+// schedule, and it is bounded on both sides: never earlier than the backoff
+// floor (a late bridge cannot tight-loop the PR) and never later than
+// `tokenRefreshHold.maxHoldUntil` (after which route selection re-routes the
+// PR to another reviewer). The unbounded provider-hint holds rejected in
+// recordCascadeFailure above cannot happen here.
+function recordTokenRefreshHold(rootDir, {
+  repo,
+  prNumber,
+  failedAt = new Date().toISOString(),
+  failureReason = null,
+  refusalText = '',
+  reviewerModel = 'claude',
+  config = resolveTokenRefreshHoldConfig(),
+} = {}) {
+  const previousHold = readCascadeState(rootDir, { repo, prNumber })?.tokenRefreshHold || null;
+  const state = recordCascadeFailure(rootDir, {
+    repo,
+    prNumber,
+    failedAt,
+    failureClass: TOKEN_REFRESH_PENDING_FAILURE_CLASS,
+    failureReason,
+    reviewerModel,
+  });
+  const hold = computeTokenRefreshHold({
+    previousHold,
+    failureAtMs: Date.parse(state.lastFailureAt),
+    floorMs: Date.parse(state.nextRetryAfter),
+    refusal: parseTokenRefreshRefusal(refusalText),
+    reviewerModel,
+    config,
+  });
+  return writeCascadeState(rootDir, { repo, prNumber }, {
+    ...state,
+    nextRetryAfter: hold.holdUntil,
+    tokenRefreshHold: hold,
   });
 }
 
@@ -556,6 +611,7 @@ export {
   readReviewerCredentialOutage,
   recordCascadeFailure,
   recordReviewerCredentialFailure,
+  recordTokenRefreshHold,
   releaseReviewerCredentialProbe,
   resolveCascadeBackoffMinutes,
   shouldBackoffReviewerSpawn,

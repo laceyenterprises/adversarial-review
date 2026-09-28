@@ -187,6 +187,19 @@ export const MARK_REVIEWER_CREDENTIAL_OUTAGE_SQL =
           reviewer_session_uuid = NULL, reviewer_pgid = NULL
     WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'`;
 
+// TOKDZ-01: a `token-refresh-pending` refusal is a hold, not an attempt. Same
+// shape as the credential-outage hold above -- `pending-upstream`, session
+// released -- and, like it, charges neither `review_attempts` nor
+// `infra_auto_recover_attempts`, so a refusal can never walk a row to the
+// terminal infra cap. The re-claim is gated by the cascade-state hold
+// (`tokenRefreshHold.holdUntil`), not by this row.
+export const MARK_TOKEN_REFRESH_HOLD_SQL =
+  `UPDATE reviewed_prs
+      SET review_status = 'pending-upstream', failed_at = ?, failure_message = ?,
+          quota_reset_at_utc = NULL, reviewer_lease_expires_at = NULL,
+          reviewer_session_uuid = NULL, reviewer_pgid = NULL
+    WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'`;
+
 export const PROMOTE_REVIEWER_CREDENTIAL_OUTAGE_SQL =
   `UPDATE reviewed_prs
       SET review_status = 'pending-upstream', failure_message = ?,
@@ -312,6 +325,10 @@ export function prepareFinalizePendingTerminalFailure(db) {
 
 export function prepareMarkReviewerCredentialOutage(db) {
   return db.prepare(MARK_REVIEWER_CREDENTIAL_OUTAGE_SQL);
+}
+
+export function prepareMarkTokenRefreshHold(db) {
+  return db.prepare(MARK_TOKEN_REFRESH_HOLD_SQL);
 }
 
 export function preparePromoteReviewerCredentialOutage(db) {

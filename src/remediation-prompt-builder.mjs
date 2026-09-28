@@ -66,7 +66,7 @@ function ciRegressionRetryGuidance(latestRetry) {
 ### CI Regression Remediation Objective
 This retry exists because the previous remediation attempt introduced or left failed external CI.${headLine}${failedLine}${pendingLine}
 
-Do not request re-review until the PR's current head has no failed external CI checks. If GitHub checks are still pending, wait briefly and re-check; if the checks do not settle inside a bounded wait, write an \`operationalBlockers[]\` entry instead of claiming success.`;
+Do not request re-review until the PR's current head has no failed external CI checks. If GitHub checks are still pending, use one bounded wait when available; if they do not settle, write an \`operationalBlockers[]\` entry instead of polling or claiming success.`;
 }
 
 function retryContextBlock(job) {
@@ -185,11 +185,12 @@ ${formatFencedBlock(job.reviewBody, 'markdown')}${governingDocContext}${buildObv
   \`WORKER_TRAILER_CLASS=${workerTrailerClass}\`
   \`WORKER_JOB_ID=${job.jobId}\`
   \`WORKER_RUN_AT=<current ISO 8601 timestamp>\`
+- Never run a full local test suite. CI on the PR head is the full-suite merge gate. Run targeted tests only for files you changed. Run long tests and builds in one foreground tool call with a timeout and bounded tail (\`bin/run-bounded.sh --timeout <seconds> -- <command>\` from the adversarial-review checkout, or an equivalent checked-in runner). For external waits, use one bounded wait supported by the worker harness. Codex and Claude workers must never background tests and poll logs with \`sleep\`, \`tail\`, or \`cat\`, or narrate "still waiting".
 - Run the smallest relevant validation before finishing.
-- Before pushing, run every local guard that corresponds to the files you touched and every cheap repo-level guard that the PR previously relied on. At minimum, run \`git diff --check\`; for Python repos with a checked-in Ruff baseline gate, run the repo's Ruff/format baseline command before commit. If a local guard fails, fix it before pushing.
+- Before pushing, run targeted tests and every cheap local guard that corresponds to the files you touched or that the PR previously relied on; do not run the full suite locally. At minimum, run \`git diff --check\`; for Python repos with a checked-in Ruff baseline gate, run the repo's Ruff/format baseline command before commit. If a local guard fails, fix it before pushing.
 - Commit the remediation changes and push the PR branch with \`git-safe push\` if \`git-safe\` is on PATH, or \`git push\` otherwise. Use \`gh\` for read-only queries (\`gh pr view\`, \`gh pr checks\`, \`gh api\` GETs). Do not run mutating \`gh\` commands (comments, edits, labels, merges): when the worker shim is installed it refuses them with exit 78 unless an explicit worker token is present, and this job never needs them because your reply JSON requests re-review. Do not work around that refusal with other credentials.
 - If a GitHub credential failure prevents the final push, include the exact 40-character \`expectedRemoteSha\` used by that push's lease in the \`github-auth\` operational blocker. Recovery uses this SHA to guard the rescued commit's push.
-- After pushing, perform a bounded PR-head CI regression check before writing a successful reply. Inspect the pushed PR head's checks with \`gh pr checks <pr> --repo <repo>\` or \`gh pr view <pr> --repo <repo> --json headRefOid,statusCheckRollup\`. If any external CI lane is failed, fix that regression in this same remediation round and push again. If checks are still queued or in progress, wait briefly and re-check; do not claim completion while a known failed lane exists.
+- After pushing, perform a bounded PR-head CI regression check before writing a successful reply. Inspect the pushed PR head's checks with \`gh pr checks <pr> --repo <repo>\` or \`gh pr view <pr> --repo <repo> --json headRefOid,statusCheckRollup\`. If any external CI lane is failed, fix that regression in this same remediation round and push again. If checks are still queued or in progress, use one bounded wait when available; if they remain pending, report an operational blocker. Do not poll or claim completion while a known failed lane exists.
 - Do not open a new PR; this job is for an existing PR follow-up.
 - Use OAuth-backed authentication only; do not rely on API key fallbacks.
 - Write a machine-readable remediation reply JSON file to the remediation reply artifact path from the trusted metadata.

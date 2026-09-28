@@ -35,7 +35,13 @@ create a final follow-up job marked `finalRound: 'comment-only'`. Reconciliation
 suppresses that worker's requested re-review and records
 `completion.workerPushedHeadSha` only when the worker workspace's local `HEAD`
 matches a fresh GitHub PR-head lookup and its commit carries the matching
-`Worker-Job-Id` trailer. AMA may resume the closer or hammer on
+`Worker-Job-Id` trailer. The live lookup retries transient GitHub failures;
+if its retry budget is exhausted, reconcile leaves the job in progress for a
+later attempt. Reconcile also requires GitHub compare to report `ahead` before
+recording the pushed head. A rebased, divergent worker head therefore returns
+to normal re-review instead of parking behind the final-round refusal. The
+server-side branch-contamination audit runs before this handoff, using the HQ
+topic workspace for HQ-dispatched workers. AMA may resume the closer or hammer on
 that exact pushed head only when the completed job refers to the settled
 reviewed head and GitHub confirms the reviewed head is its ancestor. Missing
 push proof, a later author or bot commit, divergent ancestry, or an ancestry

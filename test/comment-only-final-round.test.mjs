@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   captureFinalRoundWorkerPushedHead,
   hasCompletedCommentOnlyFinalRound,
+  hasInProgressCommentOnlyFinalRound,
   hasSettledCommentOnlyReviewHead,
   proveCommentOnlyFinalRoundHead,
 } from '../src/comment-only-final-round.mjs';
@@ -15,29 +16,52 @@ const newHead = '2'.repeat(40);
 
 test('worker push proof requires local HEAD to match a fresh live PR head', async () => {
   const args = {
-    rootDir: '/tmp/final-round', repo: 'example/repo', prNumber: 42, jobId: 'job-42',
+    repo: 'example/repo', prNumber: 42, jobId: 'job-42', reviewedHead: oldHead,
     workspaceDir: '/tmp/final-round/workspace',
     execFileImpl: async (_command, argv) => ({
-      stdout: argv.includes('show') ? 'Worker-Job-Id: job-42\n' : `${newHead}\n`,
+      stdout: argv.includes('show') ? 'Worker-Job-Id: job-42\n'
+        : argv.includes('compare') || argv.some((part) => String(part).includes('/compare/')) ? 'ahead\n' : `${newHead}\n`,
     }),
     log: { warn: () => {} },
   };
+  assert.equal(await captureFinalRoundWorkerPushedHead(args), newHead);
   assert.equal(await captureFinalRoundWorkerPushedHead({
-    ...args, resolvePRLifecycleImpl: async () => ({ source: 'live', headSha: newHead }),
-  }), newHead);
-  assert.equal(await captureFinalRoundWorkerPushedHead({
-    ...args, resolvePRLifecycleImpl: async () => ({ source: 'live', headSha: '3'.repeat(40) }),
+    ...args, execFileImpl: async (command, argv) => command === 'gh' && argv.includes('view')
+      ? { stdout: `${'3'.repeat(40)}\n` } : args.execFileImpl(command, argv),
   }), null);
   assert.equal(await captureFinalRoundWorkerPushedHead({
-    ...args, resolvePRLifecycleImpl: async () => ({ source: 'mirror', headSha: newHead }),
+    ...args, execFileImpl: async (command, argv) => command === 'gh' && argv[0] === 'api'
+      ? { stdout: 'diverged\n' } : args.execFileImpl(command, argv),
   }), null);
   assert.equal(await captureFinalRoundWorkerPushedHead({
     ...args,
-    execFileImpl: async (_command, argv) => ({
-      stdout: argv.includes('show') ? 'Worker-Job-Id: somebody-else\n' : `${newHead}\n`,
-    }),
-    resolvePRLifecycleImpl: async () => ({ source: 'live', headSha: newHead }),
+    execFileImpl: async (command, argv) => argv.includes('show')
+      ? { stdout: 'Worker-Job-Id: somebody-else\n' } : args.execFileImpl(command, argv),
   }), null);
+});
+
+test('worker proof retries a transient live lookup and remains re-entrant after exhaustion', async () => {
+  let attempts = 0;
+  const args = {
+    repo: 'example/repo', prNumber: 42, jobId: 'job-42', reviewedHead: oldHead,
+    workspaceDir: '/tmp/final-round/workspace', sleep: async () => {}, log: { warn: () => {} },
+    execFileImpl: async (command, argv) => {
+      if (command === 'gh' && argv.includes('view')) {
+        attempts += 1;
+        if (attempts < 3) throw Object.assign(new Error('TLS handshake timeout'), { code: 'ETIMEDOUT' });
+      }
+      return { stdout: argv.includes('show') ? 'Worker-Job-Id: job-42\n'
+        : command === 'gh' && argv[0] === 'api' ? 'ahead\n' : `${newHead}\n` };
+    },
+  };
+  assert.equal(await captureFinalRoundWorkerPushedHead(args), newHead);
+  assert.equal(attempts, 3);
+  await assert.rejects(captureFinalRoundWorkerPushedHead({
+    ...args, execFileImpl: async (command, argv) => {
+      if (command === 'gh') throw Object.assign(new Error('TLS handshake timeout'), { code: 'ETIMEDOUT' });
+      return args.execFileImpl(command, argv);
+    },
+  }), /TLS handshake timeout/);
 });
 
 test('completed final round requires matching review and proven descendant', async () => {
@@ -124,4 +148,52 @@ test('comment-only job scans tolerate files moved after directory listing', () =
   assert.equal(hasCompletedCommentOnlyFinalRound(rootDir, {
     repo: 'example/repo', prNumber: 42, headSha: '3'.repeat(40),
   }), false);
+  const inProgressDir = join(rootDir, 'data', 'follow-up-jobs', 'in-progress');
+  mkdirSync(inProgressDir, { recursive: true });
+  writeFileSync(join(inProgressDir, `${prefix}1.json`), JSON.stringify({
+    repo: 'example/repo', prNumber: 42, revisionRef: oldHead, finalRound: 'comment-only',
+  }));
+  assert.equal(hasInProgressCommentOnlyFinalRound(rootDir, {
+    repo: 'example/repo', prNumber: 42, reviewedHead: oldHead,
+  }), true);
+});
+
+
+test('diverged final-round worker head carries no handoff proof and stays reviewable', async () => {
+  const proof = await captureFinalRoundWorkerPushedHead({
+    repo: 'example/repo', prNumber: 42, jobId: 'job-42', reviewedHead: oldHead,
+    workspaceDir: '/tmp/final-round/workspace', log: { warn: () => {} },
+    execFileImpl: async (command, argv) => ({ stdout: argv.includes('show')
+      ? 'Worker-Job-Id: job-42\n' : command === 'gh' && argv[0] === 'api'
+        ? 'diverged\n' : `${newHead}\n` }),
+  });
+  assert.equal(proof, null);
+  const rootDir = mkdtempSync(join(tmpdir(), 'comment-only-diverged-'));
+  const completedDir = join(rootDir, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(completedDir, { recursive: true });
+  writeFileSync(join(completedDir, 'example__repo-pr-42-final.json'), JSON.stringify({
+    repo: 'example/repo', prNumber: 42, status: 'completed', finalRound: 'comment-only',
+    reReview: { suppressed: 'comment-only-final-round' }, completion: {},
+  }));
+  assert.equal(hasCompletedCommentOnlyFinalRound(rootDir, {
+    repo: 'example/repo', prNumber: 42, headSha: newHead,
+  }), false);
+});
+
+test('job scan cache refreshes after an atomic job replacement', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'comment-only-cache-'));
+  const completedDir = join(rootDir, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(completedDir, { recursive: true });
+  const path = join(completedDir, 'example__repo-pr-42-final.json');
+  const job = { repo: 'example/repo', prNumber: 42, status: 'completed',
+    finalRound: 'comment-only', reReview: { suppressed: 'comment-only-final-round' },
+    completion: {} };
+  writeFileSync(path, JSON.stringify(job));
+  const query = { repo: 'example/repo', prNumber: 42, headSha: newHead };
+  assert.equal(hasCompletedCommentOnlyFinalRound(rootDir, query), false);
+  writeFileSync(`${path}.next`, JSON.stringify({
+    ...job, completion: { workerPushedHeadSha: newHead },
+  }));
+  renameSync(`${path}.next`, path);
+  assert.equal(hasCompletedCommentOnlyFinalRound(rootDir, query), true);
 });

@@ -1060,6 +1060,7 @@ function requestReviewRereview({
   targetRevisionRef = null,
   allowFastMergeSkipped = false,
   db: dbOverride = null,
+  logger = console,
 }) {
   const db = dbOverride || openReviewStateDb(rootDir);
   const normalizedTargetRevisionRef = String(targetRevisionRef || '').trim() || null;
@@ -1086,14 +1087,14 @@ function requestReviewRereview({
       if (settledBodies.some((pass) =>
         pass.verdict === 'comment-only' ||
         (pass.body_md && normalizeEffectiveReviewVerdict(pass.body_md) === 'comment-only')
-      ) || hasSettledCommentOnlyReviewHead(rootDir, { repo, prNumber, headSha: targetHead })) {
-        console.warn(`[review-state] Refusing re-review for ${repo}#${prNumber}@${targetHead}: settled comment-only verdict`);
+      ) || hasSettledCommentOnlyReviewHead(rootDir, { repo, prNumber, headSha: targetHead }, logger)) {
+        logger.warn?.(`[review-state] Refusing re-review for ${repo}#${prNumber}@${targetHead}: settled comment-only verdict`);
         return buildBlockedRereviewResult('comment-only-verdict-settled', currentRow);
       }
     }
     if (targetHead && !explicitOperatorRetrigger &&
-        hasCompletedCommentOnlyFinalRound(rootDir, { repo, prNumber, headSha: targetHead })) {
-      console.warn(`[review-state] Refusing re-review for ${repo}#${prNumber}: comment-only final round completed`);
+        hasCompletedCommentOnlyFinalRound(rootDir, { repo, prNumber, headSha: targetHead }, logger)) {
+      logger.warn?.(`[review-state] Refusing re-review for ${repo}#${prNumber}: comment-only final round completed`);
       return buildBlockedRereviewResult('comment-only-final-round-completed', currentRow);
     }
 

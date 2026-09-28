@@ -10637,7 +10637,7 @@ test('reconcileFollowUpJob reads remediation replies from HQ storage before any 
 test('completed comment-only final job suppresses re-review and wakes the closer', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqRoot = path.join(rootDir, 'hq');
-  const { claimed } = makeQueuedJob(rootDir, { prNumber: 183 });
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 183, revisionRef: 'a'.repeat(40) });
   const job = { ...claimed.job, finalRound: 'comment-only', nonBlockingOnly: true };
   writeFollowUpJob(claimed.jobPath, job);
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', job.jobId);
@@ -10669,11 +10669,13 @@ test('completed comment-only final job suppresses re-review and wakes the closer
       isWorkerRunning: () => false,
       resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: 'b'.repeat(40) }),
       execFileImpl: async (command, args) => {
+        if (command === 'gh') return { stdout: args[0] === 'api' ? 'ahead\n' : `${'b'.repeat(40)}\n` };
         assert.equal(command, 'git');
         if (args.includes('show')) return { stdout: `Worker-Job-Id: ${job.jobId}\n` };
         assert.deepEqual(args.slice(-2), ['rev-parse', 'HEAD']);
         return { stdout: `${'b'.repeat(40)}\n` };
       },
+      auditWorkspaceForContaminationImpl: cleanContaminationAudit,
       requestReviewRereviewImpl: () => { throw new Error('final round must not re-review'); },
       requestWatcherWakeImpl: (wake) => { wakes.push(wake); return { requested: true }; },
       log: { warn: () => {}, error: () => {} },

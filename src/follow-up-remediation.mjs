@@ -2714,10 +2714,25 @@ async function reconcileFollowUpJob({
       && (!Array.isArray(parsedReply?.blockers) || parsedReply.blockers.length === 0)
       && (!Array.isArray(parsedReply?.operationalBlockers) || parsedReply.operationalBlockers.length === 0);
     const workerModel = worker?.model || 'codex';
-    const workerPushedHeadSha = completedCommentOnlyFinalRound
+    let proofWorkspaceDir = paths.workspaceDir;
+    let proofAuditClean = completedCommentOnlyFinalRound;
+    if (completedCommentOnlyFinalRound) {
+      if (worker?.dispatchMode === 'hq') {
+        proofWorkspaceDir = parseHqWorkerWorkspaceFromPayload(liveness?.dispatchStatus || {})
+          || await resolveHqWorkerWorkspace({ worker, execFileImpl })
+          || paths.workspaceDir;
+      }
+      const { baseBranch } = await ensureJobBaseBranch({ job, jobPath, execFileImpl });
+      const proofAudit = await auditWorkspaceForContaminationImpl({
+        workspaceDir: proofWorkspaceDir, baseBranch, execFileImpl,
+      });
+      proofAuditClean = !proofAudit.error && !proofAudit.suspect?.length;
+      if (!proofAuditClean) log.warn?.(`[follow-up-remediation] Withholding final-round push proof for ${job.repo}#${job.prNumber}: branch contamination audit failed`);
+    }
+    const workerPushedHeadSha = proofAuditClean
       ? await captureFinalRoundWorkerPushedHead({
-        rootDir, repo: job.repo, prNumber: job.prNumber, jobId: job.jobId, workspaceDir: paths.workspaceDir,
-        execFileImpl, resolvePRLifecycleImpl, log,
+        repo: job.repo, prNumber: job.prNumber, jobId: job.jobId, reviewedHead: job.revisionRef,
+        workspaceDir: proofWorkspaceDir, execFileImpl, log,
       })
       : null;
     const completionMetadata = {

@@ -1990,7 +1990,8 @@ function buildFollowUpJob({
     builderTag: builderTag || null,
     critical: classification.critical,
     nonBlockingOnly,
-    ...(nonBlockingOnly ? { finalRound: 'comment-only' } : {}),
+    ...(nonBlockingOnly && normalizeEffectiveReviewVerdict(reviewBody) === 'comment-only'
+      ? { finalRound: 'comment-only' } : {}),
     reviewSummary: extractReviewSummary(reviewBody),
     reviewBody,
     // Advisory-only reviews short-circuit before job creation; persisted jobs

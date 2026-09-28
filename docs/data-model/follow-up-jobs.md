@@ -11,7 +11,11 @@ A zero-blocker `Comment only` review with non-blocking findings creates a job
 marked `finalRound: "comment-only"`. When that worker completes, the completed
 job records `reReview.suppressed: "comment-only-final-round"`. The optional
 `completion.workerPushedHeadSha` is a 40-character commit SHA written only when
-the worker workspace's local `HEAD` matches a fresh GitHub PR-head lookup and its commit carries the matching `Worker-Job-Id` trailer.
+the worker workspace's local `HEAD` matches a retried live GitHub PR-head lookup,
+its commit carries the matching `Worker-Job-Id` trailer, and GitHub compare
+reports the worker head as ahead of the reviewed head. Reconcile remains
+re-entrant when a transient lookup exhausts its retry budget. HQ jobs use their
+resolved topic workspace for this proof.
 Absent or malformed push proof grants no AMA final-round handoff.
 
 The ledger summary retains `commentOnlyFinalRoundRevisionRefs` for reviewed

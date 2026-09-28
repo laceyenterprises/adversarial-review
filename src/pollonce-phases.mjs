@@ -82,6 +82,7 @@ import {
   resolveRoundBudgetForJob,
   summarizePRRemediationLedger,
 } from './follow-up-jobs.mjs';
+import { hasInProgressCommentOnlyFinalRound } from './comment-only-final-round.mjs';
 import {
   RETRIGGER_REMEDIATION_LABEL,
   tryRetriggerRemediationFromLabel,
@@ -1243,6 +1244,10 @@ export async function processReviewSubject(entry, ctx) {
         subject.headSha &&
         existing.reviewer_head_sha !== subject.headSha &&
         !subject.terminal;
+      const finalRoundInProgress = postedReviewHeadMoved &&
+        hasInProgressCommentOnlyFinalRound(ROOT, {
+          repo: repoPath, prNumber, reviewedHead: existing.reviewer_head_sha,
+        });
       const resolveHeadCloserCommitSuppression = createHeadCloserCommitSuppressionResolver({
         repoPath,
         prNumber,
@@ -1310,6 +1315,8 @@ export async function processReviewSubject(entry, ctx) {
             `because ${stalePostedReviewBudgetSuppression.reason}${budgetDetail}; ` +
             `leaving posted review intact and routing exhausted close through AMA/HAM`
         );
+      } else if (postedReviewHeadMoved && finalRoundInProgress) {
+        console.log(`[watcher] auto-refresh SUPPRESSED for ${repoPath}#${prNumber}: comment-only final round is in progress`);
       } else if (postedReviewHeadMoved) {
         try {
           const refreshResult = requestReviewRereview({

@@ -423,6 +423,12 @@ test('comment-only findings create a final remediation job; blocking findings do
   }).job;
   assert.equal(commentOnly.nonBlockingOnly, true);
   assert.equal(commentOnly.finalRound, 'comment-only');
+  const contradictory = buildFollowUpJob({
+    ...makeJobInput(rootDir),
+    reviewBody: '## Blocking issues\n- None.\n## Non-blocking issues\n- Fix documentation.\n## Verdict\nRequest changes',
+    critical: false,
+  });
+  assert.equal(contradictory.finalRound, undefined);
   const blocking = buildFollowUpJob({
     ...makeJobInput(rootDir),
     reviewBody: '## Blocking issues\n- Fix auth.\n## Non-blocking issues\n- None.\n## Verdict\nRequest changes',

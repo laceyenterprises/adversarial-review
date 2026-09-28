@@ -72,6 +72,8 @@ ham_append_terminal_audit() {
     --pr <<PR_NUMBER>> \
     --head "$POST_REMEDIATION_SHA" \
     --outcome "$ham_audit_outcome" \
+    --closure-authority ham-terminal-remediation \
+    --reviewer <<REVIEWER>> --risk-class <<RISK_CLASS>> \
     --attempt-json "$ham_audit_attempt_json" \
     --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   ham_audit_append_exit=$?
@@ -308,7 +310,7 @@ ham_required_gate_red() {
     (.badChecks // []) | any(
       ((.conclusion // "") | ascii_upcase) as $conclusion |
       ((.status // .state // "") | ascii_upcase) as $status |
-      ((["FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED"] | index($conclusion)) != null) or
+      ((["FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"] | index($conclusion)) != null) or
       (.__typename == "StatusContext" and ((["ERROR", "FAILURE"] | index($status)) != null))
     )
   ' "$HAM_GATE_JSON" >/dev/null
@@ -392,6 +394,14 @@ while :; do
     cat "$HAM_GATE_JSON" >&2
     HAM_REMOTE_CI_STATUS=remote-ci-timeout
     ham_append_terminal_audit failed-without-merge github-gate-timeout || true
+    HAM_PENDING_CHECK_STATES=$(jq -r '[.badChecks[]? | (.conclusion // .status // .state // "")] | join(" ")' "$HAM_GATE_JSON")
+    if [ -n "$HAM_PENDING_CHECK_STATES" ] && ! ham_required_gate_red; then
+      HAM_PENDING_CHECK_CLASSIFICATION=$("$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-lease.mjs classify \
+        --stage required-checks --state "$HAM_PENDING_CHECK_STATES") || return 1
+      if [ "$(printf '%s' "$HAM_PENDING_CHECK_CLASSIFICATION" | jq -r '.retryable')" = "true" ]; then
+        ham_mark_merge_lease_retryable_abort required-checks-pending
+      fi
+    fi
     ham_release_merge_lease
     return 20
   fi
@@ -440,6 +450,8 @@ else
     --pr <<PR_NUMBER>> \
     --head "$POST_REMEDIATION_SHA" \
     --outcome in_progress \
+    --closure-authority ham-terminal-remediation \
+    --reviewer <<REVIEWER>> --risk-class <<RISK_CLASS>> \
     --attempt-json "$HAM_PRE_MERGE_ATTEMPT_FILE" || { ham_release_merge_lease; return 1; }
   rm -f "$HAM_PRE_MERGE_ATTEMPT_FILE"
   ham_fire_watcher_merge_wake

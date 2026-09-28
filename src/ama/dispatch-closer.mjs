@@ -97,6 +97,7 @@ import {
 import { resolveRequiredCheckContextsFromCfg } from './required-check-contexts.mjs';
 import { resolveCloserDispatchHarness } from './harness-fallback.mjs';
 import { acquireMergeLease, releaseMergeLease } from './merge-lease.mjs';
+export { formatHamGateAttemptCapClosingStatus } from './merge-lease.mjs';
 import {
   hasMergedDependentProtectingPr,
   protectivePredecessorMergeWindowFinding,

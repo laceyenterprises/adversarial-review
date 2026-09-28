@@ -96,8 +96,27 @@ async function verifyPgidIdentity(pgid, expectedSpawnedAt, {
   return { match: false, startedAt: lstart, reason: `start-time drift ${drift}ms exceeds tolerance ${PGID_IDENTITY_TOLERANCE_MS}ms` };
 }
 
+function verifyPgidIdentitySync(pgid, expectedSpawnedAt, { execFileSyncImpl = execFileSync } = {}) {
+  if (!Number.isInteger(pgid) || pgid <= 0 || !expectedSpawnedAt) {
+    return { match: false, reason: 'missing pgid or spawnedAt' };
+  }
+  try {
+    const lstart = String(execFileSyncImpl('ps', ['-o', 'lstart=', '-p', String(pgid)], {
+      encoding: 'utf8', timeout: 5_000,
+    }) || '').trim();
+    if (!lstart) return { match: false, gone: true, reason: 'ps returned no start time' };
+    const actualMs = Date.parse(lstart);
+    const expectedMs = Date.parse(expectedSpawnedAt);
+    return { match: Number.isFinite(actualMs) && Number.isFinite(expectedMs) &&
+      Math.abs(actualMs - expectedMs) <= PGID_IDENTITY_TOLERANCE_MS };
+  } catch (err) {
+    return { match: false, gone: err?.code === 'ESRCH', reason: err?.message || String(err) };
+  }
+}
+
 export {
   currentProcessGroupId,
   isPgidAlive,
   verifyPgidIdentity,
+  verifyPgidIdentitySync,
 };

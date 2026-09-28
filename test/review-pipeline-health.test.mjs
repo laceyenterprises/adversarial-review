@@ -2683,7 +2683,7 @@ test('reviewer capacity excludes abandoned and stale running passes', () => {
     attemptNumber: 1,
     passKind: 'rereview',
     status: 'running',
-    startedAt: '2026-05-25T16:30:00.000Z',
+    startedAt: '2026-05-25T12:00:00.000Z',
   });
   const db = openDb(rootDir);
   try {
@@ -5896,6 +5896,29 @@ test('reviewer_pass_zombie threshold stays above the reaper timeout', () => {
   const idleHealthMs = idleReapMs * 1.5;
   assert.ok(idleHealthMs > idleReapMs);
   assert.equal(idleHealthMs, 930_000 * 1.5);
+});
+
+test('reviewer timeout config errors degrade health collection with a finding', () => {
+  const snapshot = collectReviewPipelineHealth({ rootDir: tempRoot(), now: () => new Date(NOW),
+    env: { ADVERSARIAL_REVIEWER_IDLE_TIMEOUT_SECONDS: 'invalid' } });
+  assert.match(snapshot.config.reviewerPassConfigError, /idle_timeout_seconds|invalid/i);
+  assert.ok(snapshot.findings.some((finding) => finding.code === 'review:reviewer_pass_config_degraded'));
+});
+
+test('zombie rows report the effective per-pass threshold and health override', () => {
+  const nowMs = Date.parse(NOW);
+  const config = resolveReviewPipelineHealthConfig({}, { runningReviewerPassMaxAgeMs: 10 * 60_000 });
+  const rows = [
+    { repo: REPO, pr_number: 1170, attempt_number: 1, pass_kind: 'first-pass', reviewer_class: 'gemini',
+      started_at: new Date(nowMs - 11 * 60_000).toISOString(), metadata_json: '{}' },
+    { repo: REPO, pr_number: 1171, attempt_number: 1, pass_kind: 'first-pass', reviewer_class: 'claude',
+      started_at: new Date(nowMs - 11 * 60_000).toISOString(),
+      metadata_json: JSON.stringify({ heartbeatSupported: true, lastProgressAt: new Date(nowMs - 11 * 60_000).toISOString() }) },
+  ];
+  const db = { prepare: () => ({ all: () => rows }) };
+  const summary = summarizeZombieReviewerPasses(db, { nowMs, config });
+  assert.deepEqual(summary.rows.map((row) => [row.prNumber, row.thresholdMs, row.thresholdReason]),
+    [[1170, 600_000, 'override'], [1171, 600_000, 'override']]);
 });
 
 test('heartbeat zombie finding starts strictly after the idle reaper threshold', () => {

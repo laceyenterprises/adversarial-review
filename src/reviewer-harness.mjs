@@ -770,6 +770,7 @@ async function reviewWithClaude(diff, extraContext = '', {
   let stdout, stderr;
   let streamRemainder = '';
   let finalResultEvent = null;
+  let sawStreamEvent = false;
   const noteStreamEvents = (chunk) => {
     streamRemainder += chunk;
     const lines = streamRemainder.split('\n');
@@ -780,6 +781,7 @@ async function reviewWithClaude(diff, extraContext = '', {
         const event = JSON.parse(line);
         if (event && typeof event === 'object' && typeof event.type === 'string') {
           sawEvent = true;
+          sawStreamEvent = true;
           if (event.type === 'result') finalResultEvent = line;
           onProgress?.({ changedLines, effort: reviewerExecution.effort });
         }
@@ -808,19 +810,19 @@ async function reviewWithClaude(diff, extraContext = '', {
     if (err?.isLaunchctlSessionError) {
       throw err;
     }
-    if (err?.firstOutputTimedOut && silentRetryAttempts > 0) {
+    if ((err?.firstOutputTimedOut || (err?.progressTimedOut && !sawStreamEvent)) && silentRetryAttempts > 0) {
       // Durable trace: a silent invocation that is retried in-process is
       // invisible to per-model exec-failure accounting and to
       // review-pipeline-health unless it is recorded here. Without this a
       // claude CLI wedged one time in two looks half as unhealthy as it is.
       onSilentRetry?.({
-        reason: 'first-output-timeout',
+        reason: err?.progressTimedOut ? 'silent-progress-timeout' : 'first-output-timeout',
         attemptsRemaining: silentRetryAttempts - 1,
         elapsedMs: readNowMs() - claudeStartedAtMs,
         firstOutputTimeoutMs: resolveFirstOutputTimeoutMs(subprocessEnv),
       });
       logger.warn?.(
-        `[reviewer] Claude emitted no output before the first-output deadline; ` +
+        `[reviewer] Claude produced no stream event before its output deadline; ` +
         `retrying claude under the same reviewer pass with freshly prepared ` +
         `credentials (${silentRetryAttempts} retry remaining)`,
       );
@@ -938,7 +940,7 @@ function mapClaudeJsonUsage(usage) {
 }
 
 function buildClaudeReviewArgs(prompt, { model = null, effort = null } = {}) {
-  return ['--print', '--verbose', '--output-format', 'stream-json', '--permission-mode', 'bypassPermissions',
+  return ['--print', '--verbose', '--output-format', 'stream-json', '--include-partial-messages', '--permission-mode', 'bypassPermissions',
     ...(model ? ['--model', model] : []), ...(effort ? ['--effort', effort] : []), prompt];
 }
 

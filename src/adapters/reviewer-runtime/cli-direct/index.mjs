@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { resolveReviewerTimeoutMs } from '../../../reviewer-timeout.mjs';
-import { resolveReviewerCeilingSeconds } from '../../../reviewer-timeout-model.mjs';
+import { resolveReviewerCeilingSeconds, usesStreamedReviewerCeiling } from '../../../reviewer-timeout-model.mjs';
 import { spawnCapturedProcessGroup } from '../../../process-group-spawn.mjs';
 import { isPgidAlive, verifyPgidIdentity } from '../../../process-group-identity.mjs';
 import { domainRequiresMcpOAuth } from '../domain-mcp-oauth.mjs';
@@ -485,7 +485,7 @@ function createCliDirectReviewerRuntimeAdapter({
         [reviewerProcessPath, JSON.stringify(reviewerArgs)],
         {
           env: reviewerEnv,
-          timeout: (String(req.model || '').toLowerCase().includes('claude') || isCodexModel(req.model))
+          timeout: usesStreamedReviewerCeiling(req.model)
             ? Math.max(req.timeoutMs || 0, resolveReviewerCeilingSeconds({
               changedLines: Number.MAX_SAFE_INTEGER, env: reviewerEnv,
             }) * 1000)

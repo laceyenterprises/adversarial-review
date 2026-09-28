@@ -12,6 +12,7 @@ import { getConfig } from './config-loader.mjs';
 import { recordReviewLatencyEvent } from './review-latency-event-writer.mjs';
 import { readReviewerRunRecord, TERMINAL_RUN_STATES } from './adapters/reviewer-runtime/run-state.mjs';
 import { inFlightReviewerSessions } from './reviewer-session-registry.mjs';
+import { verifyPgidIdentitySync } from './process-group-identity.mjs';
 import { calculateReviewerCeilingSeconds, resolveReviewerCeilingConfig, resolveReviewerIdleTimeoutSeconds } from './reviewer-timeout-model.mjs';
 import {
   resolveHandoffConfig,
@@ -241,6 +242,7 @@ function reapRunningPassTimeouts({
   reviewBodyHasScopeViolationFindingImpl = reviewBodyHasScopeViolationFinding,
   recordReviewLatencyEventImpl = recordReviewLatencyEvent,
   isReviewerAlive = reviewerProcessAlive,
+  verifyReviewerIdentity = verifyPgidIdentitySync,
   now = () => new Date(),
 } = {}) {
   const thresholdSeconds = resolveRunningPassTimeoutSeconds();
@@ -509,7 +511,13 @@ function reapRunningPassTimeouts({
       const sameSession = sessionUuid && currentReview?.reviewer_session_uuid === sessionUuid;
       const runRecord = sessionUuid ? readReviewerRunRecord(rootDir, sessionUuid) : null;
       const ownsPass = sameSession || !currentReview;
-      const alive = ownsPass ? isReviewerAlive(currentReview?.reviewer_pgid || runRecord?.pgid) : null;
+      const pgid = Number(currentReview?.reviewer_pgid || runRecord?.pgid);
+      let alive = ownsPass ? isReviewerAlive(pgid) : null;
+      if (alive === true) {
+        const identity = verifyReviewerIdentity(pgid, runRecord?.spawnedAt);
+        // An unverified or reused pgid cannot keep an old claim alive forever.
+        alive = identity.match ? true : identity.gone ? false : null;
+      }
       const terminal = runRecord && TERMINAL_RUN_STATES.has(runRecord.state);
       const terminalAgeSeconds = Math.floor((observedNow.getTime() -
         (parseTimestampMs(runRecord?.lastHeartbeatAt) ?? startedMs)) / 1000);
@@ -519,14 +527,19 @@ function reapRunningPassTimeouts({
       // A completed CLI can still be in post-exit settlement after a watcher
       // bounce, when the in-memory session registry is empty.
       if (terminal && runRecord.state === 'completed' && terminalAgeSeconds < REVIEWER_SETTLE_GRACE_SECONDS) continue;
+      // Reconcile can be capped on a busy poll. Keep the original one-hour
+      // dead-process grace so a posted review can be found before requeueing.
+      if (ownsPass && (alive === false || (terminal && runRecord.state !== 'completed')) &&
+        ageSeconds < thresholdSeconds) continue;
       const reviewerGone = ownsPass && (alive === false ||
-        (terminal && runRecord.state !== 'completed')) && ageSeconds >= REVIEWER_SETTLE_GRACE_SECONDS;
+        (terminal && runRecord.state !== 'completed')) && ageSeconds >= thresholdSeconds;
       const idleAgeSeconds = Math.floor((observedNow.getTime() - (heartbeatMs ?? startedMs)) / 1000);
       const idleReapThresholdSeconds = idleReapSeconds(idleSeconds);
       const ceilingReapThresholdSeconds = ceilingReapSeconds(ceilingSeconds);
-      // Unknown process identity is not proof that it is safe to release an
-      // active claim; wait for explicit terminal evidence or the legacy path.
-      if (currentReview?.review_status === 'reviewing' && ownsPass && alive === null && !terminal && hasHeartbeat) continue;
+      // Unknown liveness gets an absolute ceiling backstop. Until then, a
+      // quiet post, throttle, or OAuth fallback may still own the claim.
+      if (currentReview?.review_status === 'reviewing' && ownsPass && alive === null &&
+        !terminal && hasHeartbeat && ageSeconds < ceilingReapThresholdSeconds) continue;
       const failureReason = reviewerGone ? 'reviewer-dead'
         : hasHeartbeat && ageSeconds >= ceilingReapThresholdSeconds ? 'reviewer-ceiling'
           : hasHeartbeat && idleAgeSeconds >= idleReapThresholdSeconds ? 'reviewer-stalled'

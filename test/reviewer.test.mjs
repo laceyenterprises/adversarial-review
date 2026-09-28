@@ -3055,7 +3055,7 @@ test('Claude review invocation passes prompt as argv in cli-direct shape', async
   assert.deepEqual(calls, [
     {
       command: CLAUDE_CLI,
-      args: ['--print', '--verbose', '--output-format', 'stream-json', '--permission-mode', 'bypassPermissions', prompt],
+      args: ['--print', '--verbose', '--output-format', 'stream-json', '--include-partial-messages', '--permission-mode', 'bypassPermissions', prompt],
       options: {
         env: { HOME: '/tmp/home', PATH: process.env.PATH },
       },
@@ -3559,9 +3559,7 @@ test('reviewWithClaude retries one silent invocation on claude with freshly prep
     spawnClaudeImpl: async (_args, options) => {
       spawnCalls += 1;
       if (spawnCalls === 1) {
-        // The retry must key on the ONE-SHOT first-output signal, not the rolling
-        // no-output watchdog. `progressTimedOut` on a non-streaming reviewer means
-        // a healthy quiet turn was killed, and retrying that just burns it twice.
+        // Legacy first-output failures still get the bounded retry.
         const error = new Error('Command no first output for 120000ms');
         error.firstOutputTimedOut = true;
         throw error;
@@ -3575,6 +3573,29 @@ test('reviewWithClaude retries one silent invocation on claude with freshly prep
   assert.equal(result.reviewText, '## Verdict\nComment only');
   assert.equal(authCalls, 2);
   assert.equal(spawnCalls, 2);
+});
+
+test('reviewWithClaude retries one silent streamed idle timeout', async () => {
+  let spawnCalls = 0;
+  const retryReasons = [];
+  const result = await reviewWithClaude('+diff\n', '', {
+    assertClaudeOAuthImpl: async () => ({ transport: 'keychain', env: { PATH: process.env.PATH } }),
+    platform: 'linux',
+    spawnClaudeImpl: async () => {
+      spawnCalls += 1;
+      if (spawnCalls === 1) {
+        const error = new Error('stream idle timeout');
+        error.progressTimedOut = true;
+        throw error;
+      }
+      return { stdout: JSON.stringify({ result: '## Verdict\nComment only' }), stderr: '' };
+    },
+    onSilentRetry: (event) => retryReasons.push(event.reason),
+    logger: { warn() {} },
+  });
+  assert.equal(result.reviewText, '## Verdict\nComment only');
+  assert.equal(spawnCalls, 2);
+  assert.deepEqual(retryReasons, ['silent-progress-timeout']);
 });
 
 test('reviewWithClaude surfaces a second silent failure for normal fallback handling', async () => {

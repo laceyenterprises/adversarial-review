@@ -5,6 +5,10 @@ const DEFAULT_CEILING_BASE_SECONDS = 1800;
 const DEFAULT_CEILING_MAX_SECONDS = 10800;
 const SECONDS_PER_CHANGED_LINE = 60;
 
+function usesStreamedReviewerCeiling(model) {
+  return /claude|codex|gpt/i.test(String(model || ''));
+}
+
 function configSeconds(key, fallback, env = process.env, options = {}) {
   const raw = loadRoleConfig({ env, ...options, contextKey: key }).get(key, fallback);
   const value = Number(raw);
@@ -40,6 +44,7 @@ export {
   DEFAULT_IDLE_TIMEOUT_SECONDS,
   DEFAULT_CEILING_BASE_SECONDS,
   DEFAULT_CEILING_MAX_SECONDS,
+  usesStreamedReviewerCeiling,
   countChangedLines,
   calculateReviewerCeilingSeconds,
   resolveReviewerCeilingConfig,

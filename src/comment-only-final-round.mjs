@@ -3,6 +3,7 @@
 // review or an unproven ancestry transition cannot grant closer authority.
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { execGhWithRetry } from './gh-cli.mjs';
 import { normalizeEffectiveReviewVerdict } from './kernel/verdict.mjs';
 
 const SHA = /^[0-9a-f]{40}$/iu;
@@ -19,7 +20,14 @@ export function hasSettledCommentOnlyReviewHead(rootDir, { repo, prNumber, headS
       throw err;
     }
     for (const name of names) {
-      const job = JSON.parse(readFileSync(join(dir, name), 'utf8'));
+      let contents;
+      try {
+        contents = readFileSync(join(dir, name), 'utf8');
+      } catch (err) {
+        if (err?.code === 'ENOENT') continue;
+        throw err;
+      }
+      const job = JSON.parse(contents);
       if (job?.repo === repo && Number(job?.prNumber) === Number(prNumber) &&
           job?.revisionRef === headSha &&
           normalizeEffectiveReviewVerdict(job.reviewBody) === 'comment-only') return true;
@@ -39,7 +47,14 @@ export function hasCompletedCommentOnlyFinalRound(rootDir, { repo, prNumber }) {
     throw err;
   }
   for (const name of names) {
-    const job = JSON.parse(readFileSync(join(dir, name), 'utf8'));
+    let contents;
+    try {
+      contents = readFileSync(join(dir, name), 'utf8');
+    } catch (err) {
+      if (err?.code === 'ENOENT') continue;
+      throw err;
+    }
+    const job = JSON.parse(contents);
     if (job?.repo === repo && Number(job?.prNumber) === Number(prNumber) &&
         job?.status === 'completed' && job?.finalRound === 'comment-only' &&
         job?.reReview?.suppressed === 'comment-only-final-round') return true;
@@ -54,19 +69,20 @@ export async function proveCommentOnlyFinalRoundHead({
   completedRevisionRefs = [],
   execFileImpl,
   logger = console,
+  sleep,
+  refreshGhAuthImpl,
 }) {
   if (!SHA.test(String(reviewedHead || '')) || !SHA.test(String(currentHead || '')) ||
       !completedRevisionRefs.includes(reviewedHead) || typeof execFileImpl !== 'function') {
     return false;
   }
   if (reviewedHead === currentHead) return true;
-  try {
-    const { stdout } = await execFileImpl('gh', [
-      'api', `repos/${repo}/compare/${reviewedHead}...${currentHead}`, '--jq', '.status',
-    ], { timeout: 30_000 });
-    return String(stdout || '').trim() === 'ahead';
-  } catch (err) {
-    logger.warn?.(`[watcher] comment-only final-round ancestry proof failed for ${repo}: ${err?.message || err}`);
-    return false;
-  }
+  const { stdout } = await execGhWithRetry({
+    execFileImpl,
+    args: ['api', `repos/${repo}/compare/${reviewedHead}...${currentHead}`, '--jq', '.status'],
+    log: logger,
+    ...(sleep ? { sleep } : {}),
+    ...(refreshGhAuthImpl ? { refreshGhAuthImpl } : {}),
+  });
+  return String(stdout || '').trim() === 'ahead';
 }

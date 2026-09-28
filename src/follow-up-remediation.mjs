@@ -2680,7 +2680,7 @@ async function reconcileFollowUpJob({
         });
       }
 
-      if (!rereview.requested && job?.finalRound !== 'comment-only') {
+      if (!rereview.requested) {
         const recovery = await recoverGithubAuthOperationalBlocker({
           reply: parsedReply,
           hqRoot: resolveHqRoot(process.env),

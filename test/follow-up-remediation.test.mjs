@@ -668,6 +668,12 @@ test('comment-only final remediation prompt directs one round and closer handoff
   assert.doesNotMatch(prompt, /Convergence rule \(load-bearing\): if you believe/);
   const stagedPrompt = buildRemediationPrompt(makeJob({ finalRound: 'comment-only' }), testReplyContext());
   assert.doesNotMatch(stagedPrompt, /The PR currently carries an adversarial review with verdict `Request changes`/);
+  const trailingSectionPrompt = buildRemediationPrompt(makeJob({ finalRound: 'comment-only' }), {
+    template: '## Convergence rule (load-bearing)\nOld rule.\n\n## Later instructions\nKeep this section.',
+    ...testReplyContext(),
+  });
+  assert.match(trailingSectionPrompt, /## Later instructions\nKeep this section\./);
+  assert.doesNotMatch(trailingSectionPrompt, /Old rule\./);
 });
 
 test('buildRemediationPrompt turns CI-regression retries into a concrete remediation objective', () => {

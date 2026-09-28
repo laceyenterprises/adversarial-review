@@ -149,7 +149,7 @@ This PR has a settled Comment only verdict. Address or explicitly account for it
     remediationReplyArtifact: remediationReplyPath,
   };
   const selectedTemplate = commentOnlyFinal
-    ? promptTemplate.replace(/## Convergence rule \(load-bearing\)[\s\S]*$/u, finalRoundRules)
+    ? promptTemplate.replace(/## Convergence rule \(load-bearing\)[\s\S]*?(?=\n## |$)/u, finalRoundRules)
     : promptTemplate;
   const interpolatedTemplate = interpolatePromptTemplate(selectedTemplate, {
     BASE_BRANCH: baseBranch,

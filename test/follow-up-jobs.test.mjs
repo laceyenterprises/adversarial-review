@@ -448,11 +448,13 @@ test('completed comment-only final round is durable PR-wide evidence', (t) => {
     status: 'completed',
     completedAt: '2026-04-21T10:30:00.000Z',
     remediationWorker: { state: 'completed' },
+    completion: { workerPushedHeadSha: 'b'.repeat(40) },
     reReview: { requested: false, suppressed: 'comment-only-final-round' },
     remediationPlan: { ...job.remediationPlan, currentRound: 1 },
   });
   const ledger = summarizePRRemediationLedger(rootDir, job);
   assert.deepEqual(ledger.commentOnlyFinalRoundRevisionRefs, [head]);
+  assert.deepEqual(ledger.commentOnlyFinalRoundPushedHeads, [{ reviewedHead: head, workerPushedHeadSha: 'b'.repeat(40), completedAt: '2026-04-21T10:30:00.000Z' }]);
   assert.equal(ledger.completedRoundsForPR, 1);
 });
 

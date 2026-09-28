@@ -10667,13 +10667,20 @@ test('completed comment-only final job suppresses re-review and wakes the closer
       rootDir, job: spawned.job, jobPath: spawned.jobPath,
       now: () => '2026-04-21T10:30:00.000Z',
       isWorkerRunning: () => false,
-      resolvePRLifecycleImpl: async () => null,
+      resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: 'b'.repeat(40) }),
+      execFileImpl: async (command, args) => {
+        assert.equal(command, 'git');
+        if (args.includes('show')) return { stdout: `Worker-Job-Id: ${job.jobId}\n` };
+        assert.deepEqual(args.slice(-2), ['rev-parse', 'HEAD']);
+        return { stdout: `${'b'.repeat(40)}\n` };
+      },
       requestReviewRereviewImpl: () => { throw new Error('final round must not re-review'); },
       requestWatcherWakeImpl: (wake) => { wakes.push(wake); return { requested: true }; },
       log: { warn: () => {}, error: () => {} },
     });
     assert.equal(result.action, 'completed');
     assert.equal(result.job.reReview.suppressed, 'comment-only-final-round');
+    assert.equal(result.job.completion.workerPushedHeadSha, 'b'.repeat(40));
     assert.equal(wakes.length, 1);
     assert.equal(wakes[0].reason, 'comment-only-final-round-completed');
   });

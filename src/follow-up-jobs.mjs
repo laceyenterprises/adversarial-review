@@ -1653,6 +1653,7 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
   const completedRoundTriggers = [];
   const completedRemediationRevisionRefs = new Set();
   const commentOnlyFinalRoundRevisionRefs = new Set();
+  const commentOnlyFinalRoundPushedHeads = [];
   let latestJob = null;
   let latestTimestamp = '';
 
@@ -1699,6 +1700,13 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
           job.reReview?.suppressed === 'comment-only-final-round' &&
           String(job.revisionRef || '').trim()) {
         commentOnlyFinalRoundRevisionRefs.add(String(job.revisionRef).trim());
+        if (/^[0-9a-f]{40}$/iu.test(String(job.completion?.workerPushedHeadSha || ''))) {
+          commentOnlyFinalRoundPushedHeads.push({
+            reviewedHead: String(job.revisionRef).trim(),
+            workerPushedHeadSha: job.completion.workerPushedHeadSha,
+            completedAt: job.completedAt || null,
+          });
+        }
       }
 
       if (terminalKeys.has(key)) {
@@ -1795,6 +1803,7 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
     // after a remediation worker completed against the exact reviewed head.
     completedRemediationRevisionRefs: Array.from(completedRemediationRevisionRefs).sort(),
     commentOnlyFinalRoundRevisionRefs: Array.from(commentOnlyFinalRoundRevisionRefs).sort(),
+    commentOnlyFinalRoundPushedHeads,
   };
 }
 

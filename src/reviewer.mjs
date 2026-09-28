@@ -86,6 +86,7 @@ import {
   resolveReviewerWorkspaceStateDir,
 } from './reviewer-workspace.mjs';
 import { normalizeEffectiveReviewVerdict, sanitizeCodexReviewPayload } from './kernel/verdict.mjs';
+import { suppressFinalRoundFollowUp } from './comment-only-final-round.mjs';
 import { pickReviewerStage } from './kernel/prompt-stage.mjs';
 import { createLinearTriageAdapter } from './adapters/operator/linear-triage/index.mjs';
 import { getConfig } from './config-loader.mjs';
@@ -1296,7 +1297,7 @@ function queueFollowUpForPostedReview({
   }
 
   const priorLedger = summarizePRRemediationLedgerImpl(rootDir, { repo, prNumber });
-  if (priorLedger.commentOnlyFinalRoundRevisionRefs?.length > 0) return { queued: false, reason: 'comment-only-final-round-completed' };
+  if (suppressFinalRoundFollowUp(priorLedger.commentOnlyFinalRoundPushedHeads, revisionRef, reviewPostedAt)) return { queued: false, reason: 'comment-only-final-round-completed' };
   const tierResolution = resolveRoundBudgetForJob({ linearTicketId }, {
     rootDir,
     preferPersisted: false,

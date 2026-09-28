@@ -2,6 +2,19 @@
   "version": 1,
   "entries": [
     {
+      "id": "follow-up-jobs",
+      "title": "Follow-Up Remediation Jobs",
+      "path": "docs/data-model/follow-up-jobs.md",
+      "store": "data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/*.json",
+      "schemaSurface": "src/follow-up-jobs.mjs",
+      "relatedSchemaSurfaces": [
+        "src/follow-up-remediation.mjs",
+        "src/comment-only-final-round.mjs",
+        "src/ama-closure-orchestration.mjs"
+      ],
+      "owner": "follow-up remediation queue"
+    },
+    {
       "id": "finalization-ledger",
       "title": "Finalization Ledger",
       "path": "docs/data-model/finalization-ledger.md",

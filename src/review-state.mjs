@@ -1074,9 +1074,9 @@ function requestReviewRereview({
     // resetting it here would let that pass overwrite the terminal verdict.
     // Read the captured pass body, not the mutable row's reviewer label.
     const currentRow = getReviewRow(db, { repo, prNumber });
-    const targetHead = normalizedTargetRevisionRef ||
-      String(currentRow?.revision_ref || currentRow?.reviewer_head_sha || '').trim();
-    if (targetHead) {
+    const explicitOperatorRetrigger = isExplicitOperatorRetriggerReason(reason);
+    const targetHead = normalizedTargetRevisionRef;
+    if (targetHead && !explicitOperatorRetrigger) {
       const settledBodies = db.prepare(
         `SELECT verdict, body_md FROM reviewer_passes
           WHERE repo = ? AND pr_number = ? AND head_sha = ?
@@ -1091,7 +1091,8 @@ function requestReviewRereview({
         return buildBlockedRereviewResult('comment-only-verdict-settled', currentRow);
       }
     }
-    if (hasCompletedCommentOnlyFinalRound(rootDir, { repo, prNumber })) {
+    if (targetHead && !explicitOperatorRetrigger &&
+        hasCompletedCommentOnlyFinalRound(rootDir, { repo, prNumber, headSha: targetHead })) {
       console.warn(`[review-state] Refusing re-review for ${repo}#${prNumber}: comment-only final round completed`);
       return buildBlockedRereviewResult('comment-only-final-round-completed', currentRow);
     }

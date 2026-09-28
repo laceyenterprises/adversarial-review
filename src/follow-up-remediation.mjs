@@ -65,6 +65,7 @@ import { buildOwedDelivery, recordInitialCommentDelivery } from './adapters/comm
 import { deliverAlert } from './alert-delivery.mjs';
 import { captureRemediationBodyAfterPost } from './review-body-capture.mjs';
 import { resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
+import { captureFinalRoundWorkerPushedHead } from './comment-only-final-round.mjs';
 import { requestWatcherWake } from './watcher-wake.mjs';
 import { REREVIEW_WAKE_REASONS, requestRereviewWake } from './rereview-wake.mjs';
 import { requestHammerWakeForSettledReviewStop } from './hammer-wake.mjs';
@@ -2708,12 +2709,23 @@ async function reconcileFollowUpJob({
     // `codex-output-last-message` source string. New claude-code workers
     // produce `claude-code-output-last-message`, so worker-class metrics
     // and operator-visible completion records reflect what actually ran.
+    const completedCommentOnlyFinalRound = job?.finalRound === 'comment-only'
+      && parsedReply?.outcome === 'completed'
+      && (!Array.isArray(parsedReply?.blockers) || parsedReply.blockers.length === 0)
+      && (!Array.isArray(parsedReply?.operationalBlockers) || parsedReply.operationalBlockers.length === 0);
     const workerModel = worker?.model || 'codex';
+    const workerPushedHeadSha = completedCommentOnlyFinalRound
+      ? await captureFinalRoundWorkerPushedHead({
+        rootDir, repo: job.repo, prNumber: job.prNumber, jobId: job.jobId, workspaceDir: paths.workspaceDir,
+        execFileImpl, resolvePRLifecycleImpl, log,
+      })
+      : null;
     const completionMetadata = {
       source: hasNonEmptyNarrative
         ? `${workerModel}-output-last-message`
         : `${workerModel}-remediation-reply-only`,
       workerModel,
+      ...(workerPushedHeadSha ? { workerPushedHeadSha } : {}),
       note: hasNonEmptyNarrative
         ? 'Reconciled from detached worker exit plus non-empty final message artifact.'
         : 'Reconciled from detached worker exit plus validated remediation-reply.json (final message artifact was empty; success signaled via the durable reply contract).',
@@ -2775,10 +2787,6 @@ async function reconcileFollowUpJob({
       };
     }
 
-    const completedCommentOnlyFinalRound = job?.finalRound === 'comment-only'
-      && parsedReply?.outcome === 'completed'
-      && (!Array.isArray(parsedReply?.blockers) || parsedReply.blockers.length === 0)
-      && (!Array.isArray(parsedReply?.operationalBlockers) || parsedReply.operationalBlockers.length === 0);
     if (!rereview.requested && !completedCommentOnlyFinalRound) {
       const resumed = operationalBlockerRecovery?.rescue?.preserved && worker.dispatchMode !== 'hq' && requeueForWorkspaceResume({
         rootDir, jobPath, job, requeuedAt: completedAt, retryMetadata: { rescue: operationalBlockerRecovery.rescue },

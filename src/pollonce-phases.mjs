@@ -1316,6 +1316,7 @@ export async function processReviewSubject(entry, ctx) {
             rootDir: ROOT,
             repo: repoPath,
             prNumber,
+            targetRevisionRef: subject.headSha,
             reason: `auto-refresh: posted review on stale head ${existing.reviewer_head_sha.slice(0, 12)}; current head is ${subject.headSha.slice(0, 12)}`,
           });
           if (refreshResult.triggered) {

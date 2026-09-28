@@ -736,6 +736,7 @@ export async function maybeDispatchAmaClosureFor({
   let completedRereviewRoundsForPR = null;
   let completedRemediationRevisionRefsForPR = [];
   let commentOnlyFinalRoundRevisionRefs = [];
+  let commentOnlyFinalRoundPushedHeads = [];
   // Resolve the PR's risk class from the remediation ledger (which defaults to
   // DEFAULT_RISK_CLASS) so AMA eligibility uses the SAME risk class the
   // round-budget path below already computes. Without this, the eligibility
@@ -759,6 +760,9 @@ export async function maybeDispatchAmaClosureFor({
         : [];
       commentOnlyFinalRoundRevisionRefs = Array.isArray(resolved.commentOnlyFinalRoundRevisionRefs)
         ? resolved.commentOnlyFinalRoundRevisionRefs
+        : [];
+      commentOnlyFinalRoundPushedHeads = Array.isArray(resolved.commentOnlyFinalRoundPushedHeads)
+        ? resolved.commentOnlyFinalRoundPushedHeads
         : [];
     } else {
       const remLedger = summarizePRRemediationLedger(rootDir, { repo: repoPath, prNumber });
@@ -785,6 +789,9 @@ export async function maybeDispatchAmaClosureFor({
         : [];
       commentOnlyFinalRoundRevisionRefs = Array.isArray(remLedger.commentOnlyFinalRoundRevisionRefs)
         ? remLedger.commentOnlyFinalRoundRevisionRefs
+        : [];
+      commentOnlyFinalRoundPushedHeads = Array.isArray(remLedger.commentOnlyFinalRoundPushedHeads)
+        ? remLedger.commentOnlyFinalRoundPushedHeads
         : [];
       completedRereviewRoundsForPR = 0;
       try {
@@ -1625,22 +1632,30 @@ export async function maybeDispatchAmaClosureFor({
     if (!Number.isFinite(postedAt)) return null;
     return Math.max(0, Date.now() - postedAt);
   })();
-  const commentOnlyFinalRoundResume =
+  const commentOnlyFinalRoundEligible =
     reviewState.verdict === 'comment-only' &&
     reviewState.remediationPending === false &&
     reviewState.blockingFindingState === 'known' &&
     reviewState.blockingFindingCount === 0 &&
     reviewState.nonBlockingFindingState === 'known' &&
     reviewState.nonBlockingFindingCount > 0 &&
-    !disabledEligibility.reasons.includes('ci-not-green') &&
-    await proveCommentOnlyFinalRoundHead({
-      repo: repoPath,
-      reviewedHead: reviewState.headSha,
-      currentHead: currentPrHeadSha,
-      completedRevisionRefs: commentOnlyFinalRoundRevisionRefs,
-      execFileImpl: execFileAsync,
-      logger,
-    });
+    !disabledEligibility.reasons.includes('ci-not-green');
+  let commentOnlyFinalRoundResume = false;
+  if (commentOnlyFinalRoundEligible) {
+    try {
+      commentOnlyFinalRoundResume = await proveCommentOnlyFinalRoundHead({
+        repo: repoPath,
+        reviewedHead: reviewState.headSha,
+        currentHead: currentPrHeadSha,
+        completedRevisionRefs: commentOnlyFinalRoundRevisionRefs,
+        completedPushedHeads: commentOnlyFinalRoundPushedHeads,
+        execFileImpl: execFileAsync,
+        logger,
+      });
+    } catch (err) {
+      logger.warn?.(`[watcher] AMA comment-only final-round proof failed for ${repoPath}#${prNumber} authOutage=${err?.authOutage === true}: ${err?.message || err}`);
+    }
+  }
   const shouldLookupMergedProtectiveDependents =
     reviewCycleExhausted ||
     hamTerminalRemediationValidated ||

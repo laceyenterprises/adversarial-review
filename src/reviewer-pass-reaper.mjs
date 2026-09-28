@@ -1,4 +1,5 @@
 import { loadRoleConfig } from './role-config.mjs';
+import { suppressFinalRoundFollowUp } from './comment-only-final-round.mjs';
 import { recordCascadeFailure } from './reviewer-cascade.mjs';
 import { DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS } from './reviewer-lease.mjs';
 import { reviewBodyHasScopeViolationFinding } from './additive-only-scope.mjs';
@@ -127,8 +128,9 @@ function queueFollowUpForRecoveredPostedReview({
   const prNumber = Number(row.pr_number);
   const reviewBody = String(row.body_md || '');
   const linearTicketId = reviewRow?.linear_ticket || null;
+  const revisionRef = row.head_sha || reviewRow?.reviewer_head_sha || reviewRow?.revision_ref || null;
   const priorLedger = summarizePRRemediationLedgerImpl(rootDir, { repo, prNumber });
-  if (priorLedger.commentOnlyFinalRoundRevisionRefs?.length > 0) {
+  if (suppressFinalRoundFollowUp(priorLedger.commentOnlyFinalRoundPushedHeads, revisionRef, row.ended_at || row.started_at)) {
     return { queued: false, reason: 'comment-only-final-round-completed' };
   }
   const tierResolution = resolveRoundBudgetForJobImpl({ linearTicketId }, {
@@ -140,7 +142,6 @@ function queueFollowUpForRecoveredPostedReview({
     ? latestMaxRounds
     : null;
   const classification = classifyFollowUpCriticality(reviewBody);
-  const revisionRef = row.head_sha || reviewRow?.reviewer_head_sha || reviewRow?.revision_ref || null;
   const { jobPath } = createFollowUpJobImpl({
     rootDir,
     repo,

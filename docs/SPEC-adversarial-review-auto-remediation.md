@@ -30,6 +30,20 @@ threshold. A `Request changes` verdict, blocking-finding reasons, stale-head
 reasons, and remediation-state reasons still require validated HAM evidence
 (`ham_terminal_remediation_validated`) or a current-head operator override.
 
+A zero-blocker `Comment only` review with actionable non-blocking findings may
+create a final follow-up job marked `finalRound: 'comment-only'`. Reconciliation
+suppresses that worker's requested re-review and records
+`completion.workerPushedHeadSha` only when the worker workspace's local `HEAD`
+matches a fresh GitHub PR-head lookup and its commit carries the matching
+`Worker-Job-Id` trailer. AMA may resume the closer or hammer on
+that exact pushed head only when the completed job refers to the settled
+reviewed head and GitHub confirms the reviewed head is its ancestor. Missing
+push proof, a later author or bot commit, divergent ancestry, or an ancestry
+lookup failure cannot grant this handoff. A later head re-enters normal review;
+an explicit `retrigger-review:` operator reason can override a settled-head
+re-review refusal. Reconciliation still records a completed round when push
+proof is unavailable, but that record carries no AMA final-round authority.
+
 AMA closer dispatch must also declare the workspace repo set required by the
 closer prompt. The PR repository is always passed as the primary `--repo`. When
 that repo basename is not `agent-os`, the dispatch must additionally include
@@ -2466,8 +2480,13 @@ to accept the historical `review-settled` stop code.
 A review with known zero blocking findings and at least one known non-blocking
 finding creates a follow-up job with `nonBlockingOnly: true`. Mixed reviews,
 unknown finding counts, and blocking verdicts use the normal risk-class budget.
-Non-blocking-only jobs allow one remediation round by default; a subsequent
-non-blocking-only review goes to the terminal hammer through the existing
+Non-blocking-only jobs allow one remediation round by default. A settled
+`Comment only` review with non-blocking findings marks that round
+`finalRound: 'comment-only'`; successful completion suppresses automatic
+re-review on the worker-pushed head and hands that exact head to AMA as
+described above. A subsequent moved head is eligible for a new review. If
+another non-blocking-only review creates a job, the normal PR-wide and
+non-blocking round caps still apply; exhaustion uses the existing
 `max-rounds-reached` stop path. A later blocking review restores the normal
 PR-wide risk-class budget. The hammer remains responsible for resolving every
 finding before merging. An explicit operator retrigger can consume a further

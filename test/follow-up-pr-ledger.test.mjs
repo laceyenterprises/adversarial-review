@@ -100,6 +100,7 @@ test('summarizePRRemediationLedger returns zero counts for a PR with no follow-u
     completedRoundTimestamps: [],
     completedRemediationRevisionRefs: [],
     commentOnlyFinalRoundRevisionRefs: [],
+    commentOnlyFinalRoundPushedHeads: [],
   });
 });
 

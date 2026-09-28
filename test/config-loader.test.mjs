@@ -4851,6 +4851,25 @@ test('validateSchema keeps the canonical config.yaml strict about resident', () 
   );
 });
 
+test('validateSchema drops the Python-owned media_generation root from a local file', () => {
+  const out = validateSchema(
+    { version: 1, media_generation: { library_dir: '/tmp/media-library' } },
+    { source: '/tmp/config.local.yaml', tolerateForeignTopLevelSections: true },
+  );
+  assert.equal(out.version, 1);
+  assert.equal(out.media_generation, undefined);
+});
+
+test('validateSchema keeps canonical config.yaml strict about media_generation', () => {
+  assert.throws(
+    () => validateSchema(
+      { version: 1, media_generation: { library_dir: '/tmp/media-library' } },
+      { source: '/tmp/config.yaml', tolerateForeignTopLevelSections: true },
+    ),
+    (err) => err instanceof AgentOSConfigError && /media_generation.*unknown key/.test(err.message),
+  );
+});
+
 test('top-level config.yaml accepts mirrored surface_harness timeout', () => {
   const out = validateSchema(
     { version: 1, surface_harness: { timeout_seconds: 96 } },

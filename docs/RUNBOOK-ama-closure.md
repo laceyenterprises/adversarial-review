@@ -679,6 +679,19 @@ jq '{status, attempts: (.attempts | map({attemptNumber, outcome, cliExitCode}))}
 
 ## 7. Common refusal classes
 
+### Terminal branch-holder takeover
+
+On a hammer provision collision, the closer first requires terminal worker-run
+evidence and checks for processes with a cwd inside the holder as its owner. It
+inspects Git and archives dirty or locally divergent holders as that same UID;
+cross-user commands use `sudo -A -H -u <holder-owner>`. The daemon temporarily
+transfers ownership of the unique rescue directory for archive creation and
+restores it afterward. Mixed-owner Git worktree removal uses sudo with the
+owning repository explicitly marked safe. A holder whose Git metadata is
+missing or invalid is removed without salvage after the process check, with a
+`corrupt-removed` audit decision. Other inspection failures still refuse
+takeover; rescue archives and decisions are recorded under `rescues/holder-adopt`.
+
 ### `worker-identity-unresolved` on daemon clean-merge
 
 The daemon clean-merge path resolves the identity of the worker that opened the

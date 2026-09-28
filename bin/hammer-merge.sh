@@ -437,7 +437,7 @@ else
     --arg remediatedFindings "$HAM_REMEDIATED_FINDINGS" \
     --arg failingTestsFixed "${HAM_FAILING_TESTS_FIXED:-}" \
     --argjson rebaseAttempts "${HAM_REBASE_ATTEMPTS:-0}" \
-    --argjson eligibilityTrace "$(cat /tmp/ham-<<PR_NUMBER>>-verdict.json)" \
+    --argjson eligibilityTrace "$(cat "$HAM_VERDICT_FILE")" \
     --argjson githubGate "$(cat "$HAM_GATE_JSON")" \
     '{
       preMergeEligible: true,

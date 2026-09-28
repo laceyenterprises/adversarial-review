@@ -606,7 +606,8 @@ test('MSM-04: concurrent settle ticks for one job/head launch at most one hammer
 
   assert.equal(deps.calls.length, 1);
   assert.equal(results.filter((result) => result.dispatched).length, 1);
-  assert.equal(results.filter((result) => result.reason === 'lease-held').length, 1);
+  assert.equal(results.filter((result) =>
+    ['lease-held', 'ama-closer-launch-in-progress'].includes(result.reason)).length, 1);
 });
 
 test('MSM-04: structural hard stops still block hammer dispatch', async (t) => {

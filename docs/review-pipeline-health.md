@@ -44,6 +44,15 @@ The Grafana dashboard lives at
   failures.
 - `review_pipeline_outage_attempts_not_charged`: count of current reviewer
   failures whose attempt budget was preserved by the outage controller.
+- `review_pipeline_token_refresh_pending_refusals` (label `window`): Claude reviewer
+  passes started in the trailing window (default 1h) that were refused as
+  `token-refresh-pending`, meaning the broker token was waiting on a rotation
+  (TOKDZ-01). Refusals are held, not charged, so this gauge is how they stay
+  visible. Behind the token-refresh proxy a healthy keychain bridge produces
+  none. The JSON snapshot's `tokenRefreshPending.hourly` carries per-hour
+  buckets for the last 24h.
+- `review_pipeline_token_refresh_pending_refusal_share` (label `window`): those refusals
+  as a share of all Claude reviewer picks in the same window.
 - `review_pipeline_hcp_preflight_aborted_passes`: current open reviews parked
   before reviewer dispatch because the HCP healthz preflight failed.
 - `review_pipeline_hcp_preflight_aborted_reviewer_minutes_lost`: estimated
@@ -300,6 +309,7 @@ can distinguish "never posted in window" from a null/corrupt timestamp column.
 | `review:reviewer_burst_lease_active` | an operator burst reviewer-capacity lease (RPL-07) is active, so the pipeline is spending above its AGY-first steady state. Reported for the life of the lease; it is a state annunciator, not an alarm about a defect | ticket | the lease decays on its own (TTL, review cap, or budget) or an operator runs `adversarial-review burst revoke` |
 | `review:reviewer_model_silent` | a configured reviewer class has started-pass demand but no genuine first-pass/rereview comment past the larger of the 24h floor and that class's recent 95th-percentile post cadence. Two cases qualify: a class with a previous genuine comment inside the activity lookback that has not posted since, with at least one pass started after that comment; or a class with **no** posted review inside the lookback whose **oldest** qualifying started pass is itself older than that threshold. The elapsed gate applies to both, so a healthy in-flight pass can never trip this finding | ticket | the model posts another review inside its cadence-derived silence threshold, or no started-pass demand older than the threshold remains |
 | `review:unknown_failure_rate_high` | unknown-classified failures are >30% of failures over 15m, with at least 5 failures and at least 2 distinct PRs contributing unknown failures | ticket | the failure window falls back to threshold or below, the sample floor is no longer met, or unknown failures collapse to fewer than 2 PRs |
+| `review:token_refresh_pending_refusals_high` | at least 3 Claude reviewer `token-refresh-pending` refusals over 1h that are also at least 20% of Claude reviewer picks in that window. Refusals are held rather than charged, so the lane goes quiet instead of failing; a sustained count means the keychain bridge is rotating late or the token-refresh proxy is disabled (`ADVERSARIAL_REVIEW_CLAUDE_TOKEN_REFRESH_PROXY`). Never force a broker refresh to clear it: that revokes every live token holder | ticket | the refusal count or share falls below threshold for the trailing window |
 | `review:reviewer_degradation_active` | at least one PR is currently held by `provider-overloaded` transient backoff or `quota-exhausted` quota hold | ticket | no active provider-overload backoff or quota hold remains |
 | `review:afh_fallback_edge_supermajority` | one AFH reviewer fallback edge carries >=80% of reviewer selections over 1h with at least 5 selections and 2 distinct PRs, including the edge and grounding reason | ticket | the dominant edge falls below threshold, the sample floor is no longer met, the distinct-PR floor is no longer met, or AFH returns to the primary reviewer |
 | `review:review_lane_share_supermajority` | one reviewer lane carries >=75% of reviewer starts over the capacity window with at least 5 starts, observed concurrency above 1, and at least 2 distinct queued PRs in the opposite lane whose oldest row has reached the queue-starvation age threshold | ticket | the dominant lane falls below threshold, the sample floor is no longer met, observed concurrency is single-slot, or the opposite lane no longer has aged distinct queued work |
@@ -393,6 +403,12 @@ All thresholds are configurable through environment variables:
   (default `2`)
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_AFH_FALLBACK_SUPERMAJORITY_WINDOW_MS`
   (default `3600000`)
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_TOKEN_REFRESH_PENDING_WINDOW_MS`
+  (default `3600000`)
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_TOKEN_REFRESH_PENDING_THRESHOLD`
+  (default `3` refusals per window)
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_TOKEN_REFRESH_PENDING_SHARE_THRESHOLD`
+  (default `0.2` of Claude reviewer picks)
 - `REVIEW_UNKNOWN_RATE_THRESHOLD`
 - `REVIEW_UNKNOWN_RATE_WINDOW_MINUTES`
 - `REVIEW_UNKNOWN_RATE_SAMPLE_FLOOR`

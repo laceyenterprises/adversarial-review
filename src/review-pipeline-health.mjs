@@ -48,6 +48,13 @@ import {
 import { hammerWakeAuditDir, readHammerWakeAudit } from './hammer-wake.mjs';
 import { summarizeReviewerBurst } from './reviewer-burst-lease.mjs';
 import { readReviewerCredentialOutage } from './reviewer-cascade.mjs';
+import {
+  DEFAULT_TOKEN_REFRESH_PENDING_SHARE_THRESHOLD,
+  DEFAULT_TOKEN_REFRESH_PENDING_THRESHOLD,
+  DEFAULT_TOKEN_REFRESH_PENDING_WINDOW_MS,
+  TOKEN_REFRESH_PENDING_HOURLY_LOOKBACK_HOURS,
+  summarizeTokenRefreshPendingRefusals,
+} from './token-refresh-pending-health.mjs';
 
 const DEFAULT_REVIEWER_DEATH_RATE_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_CONFIG_SIGNATURE_DRIFT_ALARM_MS = 10 * 60 * 1000;
@@ -296,6 +303,8 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_ttm_terminal_clean_rereview_blocked_open',
   'review_pipeline_ttm_terminal_unmerged_stalls_12h',
   'review_pipeline_ttm_terminal_unmerged_duration_minutes_12h',
+  'review_pipeline_token_refresh_pending_refusals',
+  'review_pipeline_token_refresh_pending_refusal_share',
   'review_pipeline_sentinel_finding_active',
 ]);
 
@@ -358,6 +367,8 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_ttm_terminal_clean_rereview_blocked_open: 'Current open PRs with a clean terminal re-review still blocked from closeout.',
   review_pipeline_ttm_terminal_unmerged_stalls_12h: 'Terminal-but-unmerged stall events observed in the 12h SEV1 window.',
   review_pipeline_ttm_terminal_unmerged_duration_minutes_12h: 'Terminal-but-unmerged stall duration in the 12h SEV1 window.',
+  review_pipeline_token_refresh_pending_refusals: 'Claude reviewer token-refresh-pending refusals (held, not charged) started in the trailing window.',
+  review_pipeline_token_refresh_pending_refusal_share: 'Share of Claude reviewer picks in the trailing window refused as token-refresh-pending.',
   review_pipeline_sentinel_finding_active: 'Whether a Sentinel finding code is active in the current snapshot.',
 });
 
@@ -412,6 +423,18 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     defaultThreshold: DEFAULT_REVIEW_UNKNOWN_RATE_THRESHOLD,
     windowKey: 'reviewUnknownRateWindowMs',
     defaultWindowMs: DEFAULT_REVIEW_UNKNOWN_RATE_WINDOW_MINUTES * 60 * 1000,
+  },
+  {
+    code: 'review:token_refresh_pending_refusals_high',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: 'tokenRefreshPendingThreshold',
+    defaultThreshold: DEFAULT_TOKEN_REFRESH_PENDING_THRESHOLD,
+    windowKey: 'tokenRefreshPendingWindowMs',
+    defaultWindowMs: DEFAULT_TOKEN_REFRESH_PENDING_WINDOW_MS,
+    thresholdDescription:
+      'Claude reviewer token-refresh-pending refusals in the window reach the count threshold AND the '
+      + 'refusal share threshold of Claude picks; a healthy bridge behind the token-refresh proxy produces none',
   },
   {
     code: 'review:reviewer_degradation_active',
@@ -903,6 +926,21 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
       DEFAULT_REVIEW_UNKNOWN_RATE_DISTINCT_PR_FLOOR,
       1
     ),
+    tokenRefreshPendingWindowMs: parsePositiveInteger(
+      overrides.tokenRefreshPendingWindowMs
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_TOKEN_REFRESH_PENDING_WINDOW_MS,
+      DEFAULT_TOKEN_REFRESH_PENDING_WINDOW_MS
+    ),
+    tokenRefreshPendingThreshold: parsePositiveInteger(
+      overrides.tokenRefreshPendingThreshold
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_TOKEN_REFRESH_PENDING_THRESHOLD,
+      DEFAULT_TOKEN_REFRESH_PENDING_THRESHOLD
+    ),
+    tokenRefreshPendingShareThreshold: parseUnitIntervalThreshold(
+      overrides.tokenRefreshPendingShareThreshold
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_TOKEN_REFRESH_PENDING_SHARE_THRESHOLD,
+      DEFAULT_TOKEN_REFRESH_PENDING_SHARE_THRESHOLD
+    ),
     afhFallbackSupermajorityThreshold: parseUnitIntervalThreshold(
       overrides.afhFallbackSupermajorityThreshold
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_AFH_FALLBACK_SUPERMAJORITY_THRESHOLD,
@@ -1186,6 +1224,9 @@ function classifyFailure(value) {
     /\brate limit\b/.test(text)
   ) return 'upstream';
   if (text.includes('timeout') || text.includes('timed out') || text.includes('no output')) return 'timeout';
+  // TOKDZ-01: a refusal waiting on a broker token rotation is a hold, not an
+  // auth failure; keep it out of the generic `auth` bucket below.
+  if (text.includes('token-refresh-pending')) return 'token-refresh-pending';
   if (text.includes('oauth') || text.includes('auth') || text.includes('token') || text.includes('credential')) return 'auth';
   if (text.includes('upstream') || text.includes('litellm') || text.includes('rate limit') || text.includes('5xx')) return 'upstream';
   if (text.includes('launchctl') || text.includes('bootstrap') || text.includes('tcc') || text.includes('sandbox')) return 'runtime';
@@ -1651,6 +1692,24 @@ function summarizeReviewerAttempts(db, { nowMs, config }) {
       windowMs: config.reviewUnknownRateWindowMs,
     },
   };
+}
+
+function summarizeTokenRefreshPending(db, { nowMs, config }) {
+  const lookbackMs = Math.max(config.tokenRefreshPendingWindowMs, TOKEN_REFRESH_PENDING_HOURLY_LOOKBACK_HOURS * 60 * 60 * 1000);
+  const rows = safeAll(
+    db,
+    `SELECT repo, pr_number, reviewer_class, status, started_at, metadata_json
+       FROM reviewer_passes
+      WHERE started_at >= ?
+        AND pass_kind IN ('first-pass', 'rereview')`,
+    [new Date(nowMs - lookbackMs).toISOString()]
+  );
+  return summarizeTokenRefreshPendingRefusals(rows, {
+    nowMs,
+    windowMs: config.tokenRefreshPendingWindowMs,
+    threshold: config.tokenRefreshPendingThreshold,
+    shareThreshold: config.tokenRefreshPendingShareThreshold,
+  });
 }
 
 function summarizeReviewerModelSilence(db, { nowMs, config }) {
@@ -4786,6 +4845,38 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }));
   }
 
+  const tokenRefreshPending = snapshot.tokenRefreshPending;
+  if (tokenRefreshPending?.alerting) {
+    const windowMinutes = Math.round(tokenRefreshPending.windowMs / 60000);
+    findings.push(buildFinding({
+      code: 'review:token_refresh_pending_refusals_high',
+      tier: 'ticket',
+      subject: `${tokenRefreshPending.refusals} Claude reviewer token-refresh refusals in the last ${windowMinutes} minute(s)`,
+      message:
+        `${tokenRefreshPending.refusals}/${tokenRefreshPending.claudePicks} Claude reviewer picks ` +
+        `(${Math.round(tokenRefreshPending.share * 100)}%) were refused as token-refresh-pending across ` +
+        `${tokenRefreshPending.distinctPrs} PR(s). They are held, not charged, but no Claude review runs meanwhile.`,
+      evidence: [
+        `reviews.db reviewer_passes failureClass=token-refresh-pending window=${tokenRefreshPending.windowMs}ms`,
+        `max refusals in one hour over the last ${tokenRefreshPending.hourly.length}h=${tokenRefreshPending.maxHourlyRefusals}`,
+      ],
+      recommendedAction:
+        'Read the keychain bridge /statusz (seconds_left, refresh_window_seconds): a late rotation or a '
+        + 'disabled token-refresh proxy (ADVERSARIAL_REVIEW_CLAUDE_TOKEN_REFRESH_PROXY) is the usual cause. '
+        + 'Never force a broker refresh to clear it: that revokes every live token holder.',
+      observedAt,
+      details: {
+        refusals: tokenRefreshPending.refusals,
+        claudePicks: tokenRefreshPending.claudePicks,
+        share: tokenRefreshPending.share,
+        distinctPrs: tokenRefreshPending.distinctPrs,
+        threshold: tokenRefreshPending.threshold,
+        shareThreshold: tokenRefreshPending.shareThreshold,
+        hourly: tokenRefreshPending.hourly,
+      },
+    }));
+  }
+
   const silentModels = snapshot.reviewerModelSilence?.silentModels || [];
   if (silentModels.length > 0) {
     const orderedSilentModels = [...silentModels].sort((left, right) => {
@@ -5965,6 +6056,14 @@ function collectReviewPipelineHealth({
           rereviewShare: 0,
           effectiveConcurrency: 0,
         };
+    const tokenRefreshPending = db
+      ? summarizeTokenRefreshPending(db, { nowMs, config })
+      : summarizeTokenRefreshPendingRefusals([], {
+          nowMs,
+          windowMs: config.tokenRefreshPendingWindowMs,
+          threshold: config.tokenRefreshPendingThreshold,
+          shareThreshold: config.tokenRefreshPendingShareThreshold,
+        });
     const reviewerModelSilence = db
       ? summarizeReviewerModelSilence(db, { nowMs, config })
       : {
@@ -6193,6 +6292,7 @@ function collectReviewPipelineHealth({
       reviewer,
       reviewerCapacity,
       reviewerModelSilence,
+      tokenRefreshPending,
       afhFallbackSupermajority,
       reviewerDegradation,
       outage,
@@ -6275,6 +6375,13 @@ function renderReviewPipelinePrometheus(snapshot) {
   pushMetric('review_pipeline_health_collector_up', {}, snapshot.reviewStateLedger?.readable ? 1 : 0);
   pushMetric('review_pipeline_outage_active', {}, snapshot.outage?.active ? 1 : 0);
   pushMetric('review_pipeline_outage_attempts_not_charged', {}, snapshot.outage?.attempts_not_charged || 0);
+  const tokenRefreshWindow = { window: `${snapshot.config.tokenRefreshPendingWindowMs}ms` };
+  pushMetric('review_pipeline_token_refresh_pending_refusals', tokenRefreshWindow, snapshot.tokenRefreshPending?.refusals || 0);
+  pushMetric(
+    'review_pipeline_token_refresh_pending_refusal_share',
+    tokenRefreshWindow,
+    snapshot.tokenRefreshPending?.share || 0
+  );
   pushMetric('review_pipeline_hcp_preflight_aborted_passes', {}, snapshot.hcpPreflightAborts?.active || 0);
   pushMetric(
     'review_pipeline_hcp_preflight_aborted_reviewer_minutes_lost',

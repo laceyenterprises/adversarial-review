@@ -153,6 +153,10 @@ function readBody(req, limit) {
     });
     req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
+    // A client that disconnects mid-upload emits neither 'end' nor 'error'.
+    req.on('close', () => {
+      if (!req.complete) reject(new Error('client closed the request before sending its body'));
+    });
   });
 }
 

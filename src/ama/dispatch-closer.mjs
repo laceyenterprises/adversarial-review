@@ -39,7 +39,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
-import { listPendingFollowUpJobs, listInProgressFollowUpJobs } from '../follow-up-jobs.mjs';
+import { findActiveRemediationJob } from './active-remediation-job.mjs';
 import { createLogChangeGate } from '../log-change-gate.mjs';
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from '../config-loader.mjs';
 import {
@@ -5078,13 +5078,9 @@ export async function maybeDispatchAmaCloser({
     );
   }
   const dispatchTimeoutMs = resolveAmaDispatchTimeoutMs(cfg);
-  const activeFollowUp = [
-    ...listPendingFollowUpJobs(rootDir),
-    ...listInProgressFollowUpJobs(rootDir),
-  ].find(({ job }) => String(job?.repo || '').toLowerCase() === String(repo).toLowerCase()
-    && Number(job?.prNumber) === prNumber);
+  const activeFollowUp = findActiveRemediationJob(rootDir, { repo, prNumber });
   if (activeFollowUp) {
-    logger.log?.(`[ama-closer] deferred ${repo}#${prNumber}: remediation job ${activeFollowUp.job.jobId} ${activeFollowUp.job.status}`);
+    logger.log?.(`[ama-closer] deferred ${repo}#${prNumber}: remediation job ${activeFollowUp.jobId} ${activeFollowUp.status}`);
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'active-remediation-job' });
   }
   const activeLaunch = findActiveAmaCloserLaunch(rootDir, targetDispatchIdentity, {
@@ -5194,9 +5190,7 @@ export async function maybeDispatchAmaCloser({
   }
 
   // A follow-up can claim between the first queue check and lease acquisition.
-  if ([...listPendingFollowUpJobs(rootDir), ...listInProgressFollowUpJobs(rootDir)]
-    .some(({ job }) => String(job?.repo || '').toLowerCase() === String(repo).toLowerCase()
-      && Number(job?.prNumber) === prNumber)) {
+  if (findActiveRemediationJob(rootDir, { repo, prNumber })) {
     deleteAmaCloserLease(rootDir, leaseIdentity);
     updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => ({
       ...current, state: 'no-dispatch', reason: 'active-remediation-job',

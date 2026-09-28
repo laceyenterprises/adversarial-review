@@ -1281,6 +1281,7 @@ export function isStaleWorktreeRegistrationError(detail) {
 }
 
 const AMA_CLOSER_TEARDOWN_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000];
+const branchHolderRefusalCounts = new Map();
 const AMA_CLOSER_LEASELESS_LAUNCH_GRACE_MS = 30_000;
 
 function amaCloserPendingLeaseReclaimAgeMs(record = null) {
@@ -2335,7 +2336,7 @@ export function samePrHammerHolderWorktreePaths(errOrText, prNumber, hqRoot) {
     );
     for (const match of text.matchAll(hammerPattern)) {
       const candidate = (match[2] ?? '').trim();
-      if (isReapableHolderPath(candidate)) {
+      if (text[match.index + match[0].length] !== '/' && isReapableHolderPath(candidate)) {
         pushPath(candidate);
       }
     }
@@ -2373,18 +2374,12 @@ function selfOwnedHammerCloserWorktreePath(prNumber, hqRoot, workerIdOverride = 
   return join(root, 'workers', workerId, 'agent-os');
 }
 
-async function holderOwningRepo({ worktreePath, hqRoot, repo, execFileImpl, env }) {
-  const repoName = String(repo || '').split('/').at(-1);
+async function holderOwningRepo({ worktreePath, hqRoot, repo }) {
+  const repoName = String(repo || basename(worktreePath)).split('/').at(-1);
   if (!repoName || basename(worktreePath) !== repoName) {
     throw new Error('holder repo does not match PR repo');
   }
-  if (!existsSync(worktreePath)) return join(hqRoot, 'worker-base', repoName);
-  const result = await execFileImpl('git', ['-C', worktreePath, 'rev-parse', '--git-common-dir'], {
-    env, maxBuffer: 1024 * 1024, timeout: 10_000,
-  });
-  const commonDir = String(result.stdout || '').trim();
-  if (!commonDir) throw new Error('holder git common directory is empty');
-  return resolve(worktreePath, commonDir, '..');
+  return join(hqRoot, 'worker-base', repoName);
 }
 
 async function inspectHolderForTakeover({ worktreePath, execFileImpl, env }) {
@@ -2638,6 +2633,7 @@ async function teardownSamePrHammerHolder({
   ledgerDbPath = null,
   env = process.env,
   readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedger,
+  inspectHolderImpl = inspectHolderForTakeover,
   sleepImpl = sleep,
 }) {
   if (!hqRoot) return { attempted: false, ok: false, reason: 'no-hq-root', worktreePaths: [] };
@@ -2712,7 +2708,7 @@ async function teardownSamePrHammerHolder({
     } else {
       let inspection;
       try {
-        inspection = await inspectHolderForTakeover({ worktreePath, execFileImpl, env });
+        inspection = await inspectHolderImpl({ worktreePath, execFileImpl, env });
       } catch (inspectErr) {
         inspection = { safe: false, reason: String(inspectErr?.message || inspectErr) };
       }
@@ -2736,9 +2732,6 @@ async function teardownSamePrHammerHolder({
           continue;
         }
       }
-      auditHolderDecision({ hqRoot, logger, record: { repo, prNumber, workerId,
-        worktreePath, decision: rescueDir ? 'salvaged' : 'takeover', rescueDir,
-        branch: inspection.branch, workerStatus: terminality.workerStatus } });
       try {
       await execFileImpl('git', [
         '-C',
@@ -2758,6 +2751,9 @@ async function teardownSamePrHammerHolder({
         action: 'git-worktree-remove',
         ok: true,
       });
+      auditHolderDecision({ hqRoot, logger, record: { repo, prNumber, workerId,
+        worktreePath, decision: rescueDir ? 'salvaged-and-removed' : 'removed', rescueDir,
+        branch: inspection.branch, workerStatus: terminality.workerStatus } });
       } catch (removeErr) {
       const removeDetail = String(removeErr?.stderr || removeErr?.message || removeErr);
       attempts.push({
@@ -2766,6 +2762,8 @@ async function teardownSamePrHammerHolder({
         ok: false,
         error: removeDetail,
       });
+      auditHolderDecision({ hqRoot, logger, record: { repo, prNumber, workerId,
+        worktreePath, decision: 'remove-failed', reason: removeDetail } });
       continue;
       }
     }
@@ -2841,7 +2839,18 @@ async function teardownSamePrHammerHolder({
     }
   }
 
-  const ok = attempts.every(attempt => attempt.ok || attempt.recovered);
+  const ok = attempts.every(attempt => attempt.ok);
+  for (const worktreePath of worktreePaths) {
+    if (!attempts.some(attempt => attempt.worktreePath === worktreePath &&
+      attempt.action === 'hq-worker-tear-down' && attempt.ok)) {
+      const holderType = isSamePrHammerCloserWorkerId(basename(dirname(worktreePath)), prNumber)
+        ? 'hammer' : 'worker';
+      const count = (branchHolderRefusalCounts.get(holderType) || 0) + 1;
+      branchHolderRefusalCounts.set(holderType, count);
+      logger?.warn?.(JSON.stringify({ event: 'ama_closer.branch_holder_refusal_count',
+        repo, prNumber, holderType, count }));
+    }
+  }
   logger?.warn?.(JSON.stringify({
     event: 'ama_closer.same_pr_hammer_holder_teardown',
     prNumber,

@@ -3,7 +3,7 @@
 **Owner:** reviewer transient-failure backoff and route selection
 **Store:** `data/cascade-state/`
 **Source of truth:** `src/reviewer-cascade.mjs`
-**Runtime surface:** `src/reviewer-cascade.mjs`, `src/watcher.mjs`, `src/reviewer-route-selection.mjs`, `src/review-pipeline-health.mjs`
+**Runtime surface:** `src/reviewer-cascade.mjs`, `src/watcher.mjs`, `src/reviewer-route-selection.mjs`, `src/review-pipeline-health.mjs`, `src/token-refresh-hold.mjs`
 
 ## Purpose
 

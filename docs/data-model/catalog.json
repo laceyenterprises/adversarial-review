@@ -159,7 +159,8 @@
       "relatedSchemaSurfaces": [
         "src/watcher.mjs",
         "src/reviewer-route-selection.mjs",
-        "src/review-pipeline-health.mjs"
+        "src/review-pipeline-health.mjs",
+        "src/token-refresh-hold.mjs"
       ],
       "owner": "reviewer transient-failure backoff and route selection"
     },

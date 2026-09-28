@@ -301,6 +301,83 @@ test('dirty terminal holder is salvaged before removal', async () => {
   assert.match(readFileSync(join(hqRoot, 'rescues', 'holder-adopt-audit.jsonl'), 'utf8'), /salvaged-and-removed/);
 });
 
+test('cross-user holder commands run as the holder and return rescue ownership', async () => {
+  const hqRoot = join(tmpdir(), `holder-cross-user-${Date.now()}`);
+  const holder = join(hqRoot, 'workers', 'codex-other-user', 'agent-os');
+  mkdirSync(holder, { recursive: true });
+  const calls = [];
+  const execFileImpl = async (cmd, args) => {
+    calls.push({ cmd, args });
+    if (args.includes('symbolic-ref')) return { stdout: 'feature\n' };
+    if (args.includes('status')) return { stdout: ' M restricted.txt\n' };
+    if (args.includes('cherry')) return { stdout: '+ abcdef\n' };
+    return { stdout: '' };
+  };
+  const access = __testables__.holderCommand({ worktreePath: holder, execFileImpl,
+    ownerUid: 501, callerUid: 502, usernameForUid: () => 'placey' });
+  const inspection = await __testables__.inspectHolderForTakeover({
+    worktreePath: holder, execFileImpl, holderRun: access.run,
+  });
+  assert.equal(inspection.safe, true);
+  assert.equal(inspection.clean, false);
+  await __testables__.salvageHolder({ worktreePath: holder, hqRoot,
+    workerId: 'codex-other-user', execFileImpl, holderRun: access.run,
+    ownerUser: access.ownerUser });
+  const ownerCalls = calls.filter(call => call.args.includes('symbolic-ref') ||
+    call.args.includes('status') || call.args.includes('cherry') ||
+    call.args.includes('bundle') || call.args.includes('-czf') ||
+    call.args.includes('lsof'));
+  assert.equal(ownerCalls.length, 6);
+  assert.ok(ownerCalls.every(call => call.cmd === 'sudo' &&
+    call.args.slice(0, 4).join(' ') === '-A -H -u placey'));
+  assert.equal(calls.filter(call => call.args.includes('chown')).length, 2);
+});
+
+test('corrupt holder metadata is removed after the live-process check without salvage', async () => {
+  const hqRoot = join(tmpdir(), `holder-corrupt-${Date.now()}`);
+  const workerId = 'codex-holder-corrupt';
+  const holder = join(hqRoot, 'workers', workerId, 'agent-os');
+  writeBranchHolderWorker({ hqRoot, workerId, launchRequestId: 'lrq_corrupt' });
+  const calls = [];
+  const result = await __testables__.teardownSamePrHammerHolder({
+    err: { stderr: `fatal: 'feature' is already used by worktree at '${holder}'` },
+    prNumber: 9012, repo: 'agent-os', hqRoot, hqPath: '/bin/hq',
+    holderAccessImpl: ({ worktreePath, execFileImpl }) =>
+      __testables__.holderCommand({ worktreePath, execFileImpl, ownerUid: 501,
+        callerUid: 502, usernameForUid: () => 'placey' }),
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      if (args.includes('symbolic-ref')) {
+        const error = new Error('fatal: not a git repository');
+        error.stderr = 'fatal: not a git repository';
+        throw error;
+      }
+      return { stdout: '' };
+    },
+    readLatestWorkerRunStatusImpl: async () => ({ ok: true, row: { status: 'succeeded' } }),
+    logger: { warn() {} },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(calls.some(call => call.args.includes('bundle') || call.args.includes('-czf')), false);
+  assert.ok(calls.some(call => call.cmd === 'sudo' && call.args.includes('remove') &&
+    call.args.includes(`safe.directory=${join(hqRoot, 'worker-base', 'agent-os')}`)));
+  assert.match(readFileSync(join(hqRoot, 'rescues', 'holder-adopt-audit.jsonl'), 'utf8'), /corrupt-removed/);
+});
+
+test('permission failures during holder inspection still refuse takeover', async () => {
+  const holder = '/tmp/workers/codex-permissions/agent-os';
+  const permissionError = new Error('fatal: detected dubious ownership in repository');
+  permissionError.stderr = 'fatal: detected dubious ownership in repository';
+  await assert.rejects(() => __testables__.inspectHolderForTakeover({
+    worktreePath: holder,
+    execFileImpl: async (cmd, args) => {
+      if (cmd === 'lsof') return { stdout: '' };
+      if (args.includes('symbolic-ref')) throw permissionError;
+      throw new Error('unexpected command');
+    },
+  }), /dubious ownership/);
+});
+
 test('live process in a terminal holder cwd refuses removal', async () => {
   const hqRoot = join(tmpdir(), `holder-live-cwd-${Date.now()}`);
   const workerId = 'codex-holder-live-cwd';

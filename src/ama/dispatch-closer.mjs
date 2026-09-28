@@ -2384,25 +2384,58 @@ async function holderOwningRepo({ worktreePath, hqRoot, repo }) {
   return join(hqRoot, 'worker-base', repoName);
 }
 
-async function inspectHolderForTakeover({ worktreePath, execFileImpl, env }) {
+function holderCommand({ worktreePath, execFileImpl, ownerUid = statSync(worktreePath).uid,
+  callerUid = currentUid(), usernameForUid = resolveUsernameForUid }) {
+  const ownerUser = callerUid === ownerUid ? null : usernameForUid(ownerUid);
+  return {
+    ownerUser,
+    run: (cmd, args, options) => ownerUser
+      ? execFileImpl('sudo', ['-A', '-H', '-u', ownerUser, cmd, ...args], options)
+      : execFileImpl(cmd, args, options),
+  };
+}
+
+function isCorruptHolderGitError(error) {
+  const detail = String(error?.stderr || error?.message || error || '');
+  return /not a git repository|not a valid gitfile|invalid gitfile format|unable to read git file/i.test(detail);
+}
+
+async function inspectHolderForTakeover({ worktreePath, execFileImpl, env, holderRun }) {
   const run = async (cmd, args) => execFileImpl(cmd, args, {
     env, maxBuffer: 4 * 1024 * 1024, timeout: 15_000,
   });
   // lsof exits 1 when there are no matching cwd descriptors. Any other
   // failure is ambiguous and must keep the holder intact.
   try {
-    const lsof = await run('lsof', ['-nP', '-t', '-d', 'cwd', '+D', worktreePath]);
+    const lsof = await (holderRun || run)('lsof', ['-nP', '-t', '-d', 'cwd', '+D', worktreePath], {
+      env, maxBuffer: 4 * 1024 * 1024, timeout: 15_000,
+    });
     if (String(lsof.stdout || '').trim()) return { safe: false, reason: 'live-process-in-holder-cwd' };
   } catch (error) {
-    if (error?.code !== 1) return { safe: false, reason: 'cwd-process-check-failed' };
+    if (error?.code !== 1 || /permission denied/i.test(String(error?.stderr || ''))) {
+      return { safe: false, reason: 'cwd-process-check-failed' };
+    }
   }
-  const git = async (...args) => run('git', ['-C', worktreePath, ...args]);
-  const branch = String((await git('symbolic-ref', '--quiet', '--short', 'HEAD')).stdout || '').trim();
+  const git = async (...args) => (holderRun || run)('git', ['-C', worktreePath, ...args], {
+    env, maxBuffer: 4 * 1024 * 1024, timeout: 15_000,
+  });
+  let branch;
+  let status;
+  let cherry;
+  try {
+    branch = String((await git('symbolic-ref', '--quiet', '--short', 'HEAD')).stdout || '').trim();
+    if (branch && /^[\w./-]+$/.test(branch) && !branch.startsWith('-')) {
+      status = String((await git('status', '--porcelain', '--untracked-files=all')).stdout || '');
+      cherry = String((await git('cherry', `origin/${branch}`, 'HEAD')).stdout || '');
+    }
+  } catch (error) {
+    if (isCorruptHolderGitError(error)) return { safe: true, corrupt: true, clean: true,
+      patchEquivalent: true, reason: 'corrupt-holder-git-metadata' };
+    throw error;
+  }
   if (!branch || !/^[\w./-]+$/.test(branch) || branch.startsWith('-')) {
     return { safe: false, reason: 'unresolved-holder-branch' };
   }
-  const status = String((await git('status', '--porcelain', '--untracked-files=all')).stdout || '');
-  const cherry = String((await git('cherry', `origin/${branch}`, 'HEAD')).stdout || '');
   const localOnly = cherry.split('\n').filter(Boolean);
   return {
     safe: true,
@@ -2413,16 +2446,21 @@ async function inspectHolderForTakeover({ worktreePath, execFileImpl, env }) {
   };
 }
 
-async function salvageHolder({ worktreePath, hqRoot, workerId, execFileImpl, env }) {
+async function salvageHolder({ worktreePath, hqRoot, workerId, execFileImpl, env, holderRun, ownerUser }) {
   const rescueDir = join(hqRoot, 'rescues', 'holder-adopt', `${workerId}-${Date.now()}`);
   mkdirSync(rescueDir, { recursive: true });
   const options = { env, maxBuffer: 4 * 1024 * 1024, timeout: 60_000 };
   // Bundle preserves committed history; archive preserves the complete working
   // tree, including untracked files and staged changes, before force removal.
-  await execFileImpl('git', ['-C', worktreePath, 'bundle', 'create',
-    join(rescueDir, 'commits.bundle'), 'HEAD'], options);
-  await execFileImpl('tar', ['-czf', join(rescueDir, 'worktree.tar.gz'),
-    '--exclude=.git', '-C', worktreePath, '.'], options);
+  if (ownerUser) await execFileImpl('sudo', ['-A', 'chown', ownerUser, rescueDir], options);
+  try {
+    await (holderRun || execFileImpl)('git', ['-C', worktreePath, 'bundle', 'create',
+      join(rescueDir, 'commits.bundle'), 'HEAD'], options);
+    await (holderRun || execFileImpl)('tar', ['-czf', join(rescueDir, 'worktree.tar.gz'),
+      '--exclude=.git', '-C', worktreePath, '.'], options);
+  } finally {
+    if (ownerUser) await execFileImpl('sudo', ['-A', 'chown', '-R', currentUserName(), rescueDir], options);
+  }
   return rescueDir;
 }
 
@@ -2636,6 +2674,7 @@ async function teardownSamePrHammerHolder({
   env = process.env,
   readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedger,
   inspectHolderImpl = inspectHolderForTakeover,
+  holderAccessImpl = holderCommand,
   sleepImpl = sleep,
 }) {
   if (!hqRoot) return { attempted: false, ok: false, reason: 'no-hq-root', worktreePaths: [] };
@@ -2709,8 +2748,11 @@ async function teardownSamePrHammerHolder({
       }
     } else {
       let inspection;
+      let holderAccess;
       try {
-        inspection = await inspectHolderImpl({ worktreePath, execFileImpl, env });
+        holderAccess = holderAccessImpl({ worktreePath, execFileImpl });
+        inspection = await inspectHolderImpl({ worktreePath, execFileImpl, env,
+          holderRun: holderAccess.run });
       } catch (inspectErr) {
         inspection = { safe: false, reason: String(inspectErr?.message || inspectErr) };
       }
@@ -2723,9 +2765,10 @@ async function teardownSamePrHammerHolder({
         continue;
       }
       let rescueDir = null;
-      if (!inspection.clean || !inspection.patchEquivalent) {
+      if (!inspection.corrupt && (!inspection.clean || !inspection.patchEquivalent)) {
         try {
-          rescueDir = await salvageHolder({ worktreePath, hqRoot, workerId, execFileImpl, env });
+          rescueDir = await salvageHolder({ worktreePath, hqRoot, workerId, execFileImpl, env,
+            holderRun: holderAccess.run, ownerUser: holderAccess.ownerUser });
         } catch (salvageErr) {
           attempts.push({ worktreePath, workerId, action: 'holder-salvage', ok: false,
             error: String(salvageErr?.message || salvageErr) });
@@ -2735,9 +2778,9 @@ async function teardownSamePrHammerHolder({
         }
       }
       try {
-      await execFileImpl('git', [
-        '-C',
-        owningRepo,
+      await execFileImpl(holderAccess.ownerUser ? 'sudo' : 'git', [
+        ...(holderAccess.ownerUser ? ['-A', 'git', '-c', `safe.directory=${owningRepo}`] : []),
+        '-C', owningRepo,
         'worktree',
         'remove',
         '--force',
@@ -2754,7 +2797,8 @@ async function teardownSamePrHammerHolder({
         ok: true,
       });
       auditHolderDecision({ hqRoot, logger, record: { repo, prNumber, workerId,
-        worktreePath, decision: rescueDir ? 'salvaged-and-removed' : 'removed', rescueDir,
+        worktreePath, decision: inspection.corrupt ? 'corrupt-removed'
+          : rescueDir ? 'salvaged-and-removed' : 'removed', rescueDir,
         branch: inspection.branch, workerStatus: terminality.workerStatus } });
       } catch (removeErr) {
       const removeDetail = String(removeErr?.stderr || removeErr?.message || removeErr);
@@ -2944,6 +2988,9 @@ async function resolveTerminalCodingBranchHolder({
 }
 
 export const __testables__ = Object.freeze({
+  holderCommand,
+  inspectHolderForTakeover,
+  salvageHolder,
   cleanupHammerCloserWorker,
   reclaimSelfOwnedHammerCloserWorktreeBeforeProvision,
   resolveSelfOwnedHammerCloserRunLiveness,

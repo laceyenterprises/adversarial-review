@@ -46,3 +46,21 @@ test('standalone installation skips unavailable HQ cancellation without releasin
   assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
   assert.match(warnings[0], /HQ unavailable/);
 });
+
+test('already-terminal HQ response still releases the closer lease', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-hq-terminal-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: 'o/r', prNumber: 9, headSha: 'ghi' };
+  acquireAmaCloserLease({ rootDir, ...identity });
+  updateAmaCloserLease({ rootDir, ...identity, status: 'dispatched', lrqId: 'lrq_9' });
+  const result = await cancelCloserForTerminalPr({
+    rootDir, repo: 'o/r', prNumber: 9, transition: 'closed',
+    accessImpl: () => {},
+    execFileImpl: async () => ({ stdout: JSON.stringify({
+      ok: false, reason: 'already terminal (status=failed)', currentStatus: 'failed',
+    }) }),
+    logger: { log() {} },
+  });
+  assert.equal(result.outcome, 'pr-closed-externally');
+  assert.equal(readAmaCloserLease(rootDir, identity).status, 'terminal');
+});

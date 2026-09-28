@@ -6,6 +6,20 @@ import { updateAmaCloserDispatchRecord } from './dispatch-closer.mjs';
 
 const execFileAsync = promisify(execFile);
 
+function alreadyTerminalCancel(response) {
+  const detail = String(response?.stdout || response?.message || response || '');
+  try {
+    const parsed = JSON.parse(detail);
+    if (parsed?.ok === false) {
+      return /already (terminal|terminated|cancelled|canceled)/i.test(String(parsed.reason || ''))
+        || /^(failed|succeeded|cancelled|canceled|superseded)$/.test(String(parsed.currentStatus || ''));
+    }
+  } catch {
+    // CLI errors can be plain text; classify the same terminal words there.
+  }
+  return /already (terminal|terminated|cancelled|canceled)/i.test(detail);
+}
+
 /** Cancel live closer ownership when GitHub's live PR state becomes terminal. */
 export async function cancelCloserForTerminalPr({
   rootDir, repo, prNumber, transition, hqPath = process.env.HQ_BIN || '/Users/airlock/.local/bin/hq',
@@ -19,10 +33,26 @@ export async function cancelCloserForTerminalPr({
   if (lease.lrqId) {
     try {
       accessImpl(hqPath, constants.X_OK);
-      await execFileImpl(hqPath, ['dispatch', 'cancel', lease.lrqId], { env: { ...process.env, HQ_ROOT: hqRoot } });
+      const response = await execFileImpl(hqPath, ['dispatch', 'cancel', lease.lrqId], {
+        env: { ...process.env, HQ_ROOT: hqRoot },
+      });
+      if (response?.stdout) {
+        try {
+          const parsed = JSON.parse(String(response.stdout));
+          if (parsed?.ok === false && !alreadyTerminalCancel(response)) {
+            throw new Error(`HQ cancel refused: ${parsed.reason || 'unknown reason'}`);
+          }
+        } catch (err) {
+          if (err?.message?.startsWith('HQ cancel refused:')) throw err;
+        }
+      }
     } catch (err) {
-      logger.warn?.(`[ama-closer] cancel unavailable for ${repo}#${prNumber} lrq=${lease.lrqId}: ${err?.message || err}`);
-      return { cancelled: false, reason: 'cancel-unavailable', error: err };
+      if (alreadyTerminalCancel(err?.stdout || err)) {
+        logger.log?.(`[ama-closer] ${repo}#${prNumber} lrq=${lease.lrqId} already terminal at HQ`);
+      } else {
+        logger.warn?.(`[ama-closer] cancel unavailable for ${repo}#${prNumber} lrq=${lease.lrqId}: ${err?.message || err}`);
+        return { cancelled: false, reason: 'cancel-unavailable', error: err };
+      }
     }
   }
   const outcome = transition === 'merged' ? 'pr-merged-externally' : 'pr-closed-externally';

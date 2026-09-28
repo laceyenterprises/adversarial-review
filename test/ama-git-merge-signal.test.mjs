@@ -131,7 +131,7 @@ test('AMA closer merge commit lookup does not retry permanent gh failures', asyn
 });
 
 test('hammer prompt emits merge signal before releasing successful merge lease', () => {
-  const prompt = readFileSync(new URL('../templates/hammer-prompt.md', import.meta.url), 'utf8');
+  const prompt = readFileSync(new URL('../bin/hammer-merge.sh', import.meta.url), 'utf8');
   assert.match(prompt, /ham_emit_git_merge_signal\(\)/);
   assert.match(prompt, /EVENT_MERGE_SIGNAL/);
   assert.match(prompt, /ham_mark_ama_closer_lease_succeeded\(\)/);

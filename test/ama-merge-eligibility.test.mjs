@@ -347,7 +347,7 @@ test('exported vocabulary is stable and frozen', () => {
 
 test('runtime merge-eligibility snapshots pass live labels into the shared predicate', () => {
   for (const relativePath of [
-    'templates/hammer-prompt.md',
+    'bin/hammer-merge.sh',
     'src/ama-closure-orchestration.mjs',
   ]) {
     const source = readFileSync(`${ROOT}/${relativePath}`, 'utf8');

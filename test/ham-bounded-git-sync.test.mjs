@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-const PROMPT = readFileSync(new URL('../templates/hammer-prompt.md', import.meta.url), 'utf8');
+const PROMPT = readFileSync(new URL('../bin/hammer-verify-head.sh', import.meta.url), 'utf8');
 const SYNC_FUNCTIONS = PROMPT.slice(
   PROMPT.indexOf('ham_update_branch_transient() {'),
   PROMPT.indexOf('ham_fetch_base_with_retries() {'),

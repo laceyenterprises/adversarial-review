@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Run one foreground command with a wall-clock limit and a bounded transcript.
+set -u
+seconds=900
+bytes=4096
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --timeout) seconds="$2"; shift 2 ;;
+    --tail-bytes) bytes="$2"; shift 2 ;;
+    --) shift; break ;;
+    *) echo 'usage: run-bounded.sh [--timeout seconds] [--tail-bytes bytes] -- command [args...]' >&2; exit 64 ;;
+  esac
+done
+if [ "$#" -eq 0 ] || ! [[ "$seconds" =~ ^[1-9][0-9]*$ ]] || ! [[ "$bytes" =~ ^[1-9][0-9]*$ ]] || [ "$bytes" -gt 8192 ]; then
+  echo 'run-bounded: command, positive timeout, and tail bytes 1..8192 required' >&2
+  exit 64
+fi
+log=$(mktemp "${TMPDIR:-/tmp}/run-bounded.XXXXXX") || exit 1
+trap 'rm -f "$log"' EXIT
+/usr/bin/perl -e '$seconds = shift; alarm $seconds; exec @ARGV' "$seconds" "$@" >"$log" 2>&1
+status=$?
+tail -c "$bytes" "$log"
+printf '\n'
+if [ "$status" -eq 142 ]; then exit 124; fi
+exit "$status"

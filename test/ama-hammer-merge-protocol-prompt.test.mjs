@@ -8,7 +8,13 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
-const HAMMER_PROMPT = readFileSync(join(REPO_ROOT, 'templates', 'hammer-prompt.md'), 'utf8');
+const HAMMER_TEMPLATE = readFileSync(join(REPO_ROOT, 'templates', 'hammer-prompt.md'), 'utf8');
+// Structural merge-protocol assertions inspect the extracted versioned procedures
+// at their call sites, while the dispatched prompt remains small.
+const HAMMER_PROMPT = HAMMER_TEMPLATE.replace(
+  /In the persistent merge-lease shell, render and source `node <<ROOT_DIR>>\/bin\/hammer-procedure\.mjs (hammer-[a-z-]+) --render`[^\n]*\n/g,
+  (_, phase) => `\`\`\`bash\n${readFileSync(join(REPO_ROOT, 'bin', `${phase}.sh`), 'utf8')}\`\`\`\n`,
+);
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -168,7 +174,7 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.match(HAMMER_PROMPT, /protection_plan_unavailable_re=/);
   assert.match(HAMMER_PROMPT, /branchProtectionUnavailable: true, reason: "github_plan"/);
   assert.match(HAMMER_PROMPT, /2> "\$protection_err"/);
-  assert.match(HAMMER_PROMPT, /trap 'rm -f "\$protection_err"' EXIT/);
+  assert.match(HAMMER_PROMPT, /trap 'rm -f "\$protection_err"; ham_release_merge_lease' EXIT/);
   assert.doesNotMatch(HAMMER_PROMPT, /\|\s*IN\(/);
   assert.match(HAMMER_PROMPT, /index\(\$conclusion\)/);
   assert.doesNotMatch(HAMMER_PROMPT, /HAM_PPH_REMOTE_SHA=\$\(printf '%040d' 0\)/);

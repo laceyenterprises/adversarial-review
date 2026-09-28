@@ -34,12 +34,13 @@ test('adopting the shared budget did not change any live constant', () => {
   // These are the exact values the pins held before they were derived. If a
   // derivation is ever changed, this test is the thing that says the live
   // pipeline just moved.
+  // 2026-09-27: operator lowered the budget to 2 rounds then hammer closeout.
   assert.deepEqual({ ...DEFAULT_ROUND_BUDGET_BY_RISK }, {
-    low: 1, medium: 3, high: 3, critical: 4,
+    low: 1, medium: 2, high: 2, critical: 2,
   });
-  assert.equal(AMA_RETAIN_LOOP_CAP, 3);
-  assert.equal(HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES, 6);
-  assert.equal(DEFAULT_REMEDIATION_CEILING_CAP, 8);
+  assert.equal(AMA_RETAIN_LOOP_CAP, 2);
+  assert.equal(HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES, 4);
+  assert.equal(DEFAULT_REMEDIATION_CEILING_CAP, 4);
 });
 
 test('the kernel no longer keeps its own copy of the budget table', () => {
@@ -68,7 +69,7 @@ test('lowering the round budget also moves the derived bounds', () => {
 });
 
 test('a partially-declared budget does not lower the remediation ceiling', () => {
-  assert.equal(remediationCeilingCapFor({ low: 2 }), 8);
+  assert.equal(remediationCeilingCapFor({ low: 2 }), remediationCeilingCapFor());
 });
 
 test('the hammer lifetime ceiling always stays above the per-series cap', () => {
@@ -110,7 +111,7 @@ test('every risk class resolves a coherent budget, unknown falls back to medium'
   // land on the medium default rather than an undefined bound.
   const unknown = convergenceBudgetForRiskClass('unknown');
   assert.deepEqual(unknown, convergenceBudgetForRiskClass(DEFAULT_RISK_CLASS));
-  assert.equal(unknown.amaRetainLoopCap, 3);
+  assert.equal(unknown.amaRetainLoopCap, DEFAULT_ROUND_BUDGET_BY_RISK[DEFAULT_RISK_CLASS]);
 });
 
 test('an operator-declared budget overrides the default per class', () => {
@@ -119,5 +120,5 @@ test('an operator-declared budget overrides the default per class', () => {
   assert.equal(convergenceBudgetForRiskClass('high', declared).amaRetainLoopCap, 6);
   assert.equal(convergenceBudgetForRiskClass('high', declared).hammerLifetimeDispatches, 12);
   // A partially-declared table falls back per class, not wholesale.
-  assert.equal(convergenceBudgetForRiskClass('critical', { medium: 4 }).remediationRounds, 4);
+  assert.equal(convergenceBudgetForRiskClass('critical', { medium: 4 }).remediationRounds, DEFAULT_ROUND_BUDGET_BY_RISK.critical);
 });

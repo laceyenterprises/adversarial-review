@@ -36,11 +36,14 @@ export const DEFAULT_RISK_CLASS = 'medium';
 
 // Higher-risk subjects get more remediation rounds before operator escalation.
 // This is the ONE table. Do not mirror it; import it.
+// 2026-09-27 operator directive (codex quota at ~7%/h): two remediation rounds,
+// then the hammer does the final closeout on that head. Was medium 3 / high 3 /
+// critical 4.
 export const DEFAULT_ROUND_BUDGET_BY_RISK = Object.freeze({
   low: 1,
-  medium: 3,
-  high: 3,
-  critical: 4,
+  medium: 2,
+  high: 2,
+  critical: 2,
 });
 
 // One retry: initial hammer + 1 re-dispatch. Expressed as a total number of

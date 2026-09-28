@@ -289,8 +289,9 @@ test('remediation ceiling = capped sum of stage budgets across the risk matrix',
     stage('a', { kind: 'unanimous-clean' }, ['a'], { low: 1, medium: 2, high: 3, critical: 4 }),
     stage('b', { kind: 'unanimous-clean' }, ['b'], { low: 1, medium: 1, high: 2, critical: 3 }),
   ];
-  // Sums per risk: low 2, medium 3, high 5, critical 7 — all under the cap (8).
-  const expected = { low: 2, medium: 3, high: 5, critical: 7 };
+  // Sums per risk: low 2, medium 3, high 5, critical 7, capped at the default
+  // remediation ceiling (4 since the 2026-09-27 two-round budget).
+  const expected = { low: 2, medium: 3, high: 4, critical: 4 };
   for (const risk of RISK_CLASSES) {
     const plan = resolveRemediationBudgetPlan(twoStage, risk);
     assert.equal(plan.riskClass, risk);
@@ -412,7 +413,7 @@ test('an upstream stage clean only at a stale revision is re-run from the first 
 test('planPipelineReReview carries the resolved budget plan and rejects an empty pipeline', () => {
   const plan = planPipelineReReview({ pipeline: twoStagePipeline, currentRevisionRef: 'B', riskClass: 'critical' });
   assert.equal(plan.budget.riskClass, 'critical');
-  assert.equal(plan.budget.ceiling, 7); // 4 + 3, under cap
+  assert.equal(plan.budget.ceiling, 4); // 4 + 3 = 7, capped at 4
   assert.throws(() => planPipelineReReview({ pipeline: [], currentRevisionRef: 'B' }), /non-empty pipeline/);
 });
 

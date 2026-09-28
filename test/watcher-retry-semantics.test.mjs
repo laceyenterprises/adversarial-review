@@ -1863,7 +1863,7 @@ test('evaluateRoundBudgetForReview always allows rereview after a completed reme
   assert.equal(decision.skip, false);
   assert.equal(decision.reason, undefined);
   // medium risk class now caps at 3 rounds.
-  assert.equal(decision.roundBudget, 3);
+  assert.equal(decision.roundBudget, 2);
   assert.equal(decision.riskClass, 'medium');
   // No "skipping rereview" log line should fire — the gate is gone.
   assert.equal(logLines.length, 0);

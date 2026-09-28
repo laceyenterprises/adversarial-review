@@ -99,7 +99,7 @@ test('a stage may override its round budget per risk class', () => {
 
 test('domainRoundBudgetByRisk falls back to kernel defaults for missing classes', () => {
   assert.deepEqual(domainRoundBudgetByRisk({ riskClasses: { medium: { maxRemediationRounds: 5 } } }),
-    { low: 1, medium: 5, high: 3, critical: 4 });
+    { low: 1, medium: 5, high: 2, critical: 2 });
 });
 
 // ── Fail-loud validation ─────────────────────────────────────────────────────

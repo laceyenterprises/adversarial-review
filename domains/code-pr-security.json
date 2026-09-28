@@ -19,13 +19,13 @@
       "maxRemediationRounds": 1
     },
     "medium": {
-      "maxRemediationRounds": 3
+      "maxRemediationRounds": 2
     },
     "high": {
-      "maxRemediationRounds": 3
+      "maxRemediationRounds": 2
     },
     "critical": {
-      "maxRemediationRounds": 4
+      "maxRemediationRounds": 2
     }
   },
   "reviewerRouting": {

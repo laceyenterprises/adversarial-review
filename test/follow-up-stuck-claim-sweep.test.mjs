@@ -190,10 +190,10 @@ test('sweepStuckInProgressClaims: exhausted stale retry budget stops and posts o
   assert.equal(stoppedJob.commentDelivery?.posted, true);
   assert.equal(stoppedJob.commentDelivery?.reason, null);
   assert.match(stoppedJob.commentDelivery?.body, /stale-heartbeat/);
-  assert.match(stoppedJob.commentDelivery?.body, /round 2 of 3/);
+  assert.match(stoppedJob.commentDelivery?.body, /round 2 of 2/);
   assert.equal(posts.length, 1);
   assert.match(posts[0].body, /stale-heartbeat/);
-  assert.match(posts[0].body, /round 2 of 3/);
+  assert.match(posts[0].body, /round 2 of 2/);
 });
 
 test('sweepStuckInProgressClaims: posted in-progress delivery is not posted again', async () => {
@@ -233,7 +233,7 @@ test('sweepStuckInProgressClaims: posted in-progress delivery is not posted agai
   assert.equal(stoppedJob.status, 'stopped');
   assert.equal(stoppedJob.commentDelivery?.posted, true);
   assert.equal(stoppedJob.commentDelivery?.body, 'already posted stale-heartbeat comment');
-  assert.equal(stoppedJob.remediationPlan?.stop?.maxRounds, 3);
+  assert.equal(stoppedJob.remediationPlan?.stop?.maxRounds, 2);
 });
 
 test('sweepStuckInProgressClaims: terminal comment delivery throw leaves stale claim recoverable', async () => {

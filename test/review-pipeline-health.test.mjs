@@ -30,6 +30,7 @@ import {
   summarizeConfigSignatureDrift,
   summarizeRoundBudgetAnomalies,
   resolveReviewPipelineHealthConfig,
+  summarizeZombieReviewerPasses,
   stoppedJobIsCiRegressionStopped,
   summarizeHammerEfficiency,
 } from '../src/review-pipeline-health.mjs';
@@ -62,7 +63,7 @@ import { QUOTA_EXHAUSTED_FAILURE_CLASS } from '../src/quota-exhaustion.mjs';
 import { parseArgs } from '../src/review-pipeline-health-cli.mjs';
 import { ensureReviewStateSchema, openReviewStateDb, recordReviewLatencyEvent } from '../src/review-state.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from '../src/review-statuses.mjs';
-import { DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS } from '../src/reviewer-pass-reaper.mjs';
+import { DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS, idleReapSeconds, ceilingReapSeconds } from '../src/reviewer-pass-reaper.mjs';
 import { LEGACY_ORPHAN_FAILURE_MESSAGE } from '../src/reviewer-reattach.mjs';
 import { ensureTtmTrackerSchema } from '../src/ttm-tracker.mjs';
 import { ensureDuplicateFamilySchema } from '../src/duplicate-family-state.mjs';
@@ -5891,6 +5892,33 @@ test('reviewer_pass_zombie threshold stays above the reaper timeout', () => {
     `zombie threshold ${config.runningReviewerPassMaxAgeMs}ms must exceed the ` +
       `reaper timeout ${reaperTimeoutMs}ms`
   );
+  const idleReapMs = idleReapSeconds(config.reviewerPassIdleMs / 1000) * 1000;
+  const idleHealthMs = idleReapMs * 1.5;
+  assert.ok(idleHealthMs > idleReapMs);
+  assert.equal(idleHealthMs, 930_000 * 1.5);
+});
+
+test('heartbeat zombie finding starts strictly after the idle reaper threshold', () => {
+  const nowMs = Date.parse(NOW);
+  const config = resolveReviewPipelineHealthConfig({});
+  const row = {
+    repo: REPO, pr_number: 1166, attempt_number: 1, pass_kind: 'first',
+    reviewer_class: 'claude', reasoning_effort: 'high',
+    started_at: new Date(nowMs - 30 * 60 * 1000).toISOString(),
+    metadata_json: JSON.stringify({
+      heartbeatSupported: true,
+      lastProgressAt: new Date(nowMs - 930_000).toISOString(),
+      changedLines: 100,
+    }),
+  };
+  const db = { prepare: () => ({ all: () => [row] }) };
+  assert.equal(summarizeZombieReviewerPasses(db, { nowMs, config }).rows.length, 0);
+  row.metadata_json = JSON.stringify({
+    heartbeatSupported: true,
+    lastProgressAt: new Date(nowMs - idleReapSeconds(600) * 1000 * 1.5).toISOString(),
+    changedLines: 100,
+  });
+  assert.equal(summarizeZombieReviewerPasses(db, { nowMs, config }).rows.length, 1);
 });
 
 test('reviewer model silence defaults and class allowlist are configurable', () => {
@@ -5923,11 +5951,11 @@ test('reviewer_pass_zombie threshold tracks the configured ceiling model', () =>
   const config = resolveReviewPipelineHealthConfig({});
   assert.equal(
     config.runningReviewerPassMaxAgeMs,
-    10800 * 1000 * 1.5
+    ceilingReapSeconds(10800) * 1000 * 1.5
   );
   const configured = resolveReviewPipelineHealthConfig({ AGENT_OS_REVIEWER_CEILING_MAX_SECONDS: '7200',
     AGENT_OS_REVIEWER_IDLE_TIMEOUT_SECONDS: '300' });
-  assert.equal(configured.runningReviewerPassMaxAgeMs, 7200 * 1000 * 1.5);
+  assert.equal(configured.runningReviewerPassMaxAgeMs, ceilingReapSeconds(7200) * 1000 * 1.5);
   assert.equal(configured.reviewerPassIdleMs, 300_000);
 });
 

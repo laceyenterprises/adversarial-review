@@ -17,6 +17,32 @@ test('stream events renew the rolling watchdog and reach the progress observer',
   assert.equal(chunks.join(''), result.stdout);
 });
 
+test('tail capture accepts more than 10 MiB of stream events before the result', async () => {
+  let remainder = '';
+  let resultEvent = null;
+  const result = await spawnCapturedProcessGroup(process.execPath, ['-e',
+    'const line=JSON.stringify({type:"assistant",message:"x".repeat(1024)})+"\\n"; for(let i=0;i<11000;i++) process.stdout.write(line); process.stdout.write(JSON.stringify({type:"result",result:"## Verdict\\nComment only",usage:{output_tokens:7}})+"\\n");',
+  ], {
+    timeout: 10_000,
+    progressTimeout: 5_000,
+    maxBuffer: 10 * 1024 * 1024,
+    stdoutCapture: 'tail',
+    onStdoutData(chunk) {
+      remainder += chunk;
+      const lines = remainder.split('\n');
+      remainder = lines.pop();
+      for (const line of lines) {
+        const event = JSON.parse(line);
+        if (event.type === 'result') resultEvent = event;
+      }
+      return true;
+    },
+  });
+  assert.equal(resultEvent.result, '## Verdict\nComment only');
+  assert.equal(resultEvent.usage.output_tokens, 7);
+  assert.ok(Buffer.byteLength(result.stdout) < 10_000);
+});
+
 test('stderr chatter cannot renew a stream-only watchdog', async () => {
   await assert.rejects(
     spawnCapturedProcessGroup(process.execPath, ['-e',

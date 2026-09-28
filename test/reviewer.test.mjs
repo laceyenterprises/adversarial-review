@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { CLAUDE_CLI, GEMINI_CLI, AGY_CLI, __test__ } from '../src/reviewer.mjs';
 import { buildObviousDocsGuidance, extractLinkedRepoDocs, fetchLinkedSpecContents, parseGitHubBlobPath } from '../src/prompt-context.mjs';
 import { AgentOSConfigError } from '../src/config-loader.mjs';
+import { spawnCapturedProcessGroup } from '../src/process-group-spawn.mjs';
 import { beginReviewerPass } from '../src/reviewer-pass-tokens.mjs';
 import { extractReviewVerdict } from '../src/kernel/verdict.mjs';
 import { parseReviewBody as parseRescueReviewBody } from '../src/merge-agent-rescue-classifier.mjs';
@@ -3531,6 +3532,19 @@ test('reviewWithClaude reuses broker auth env and skips launchctl', async () => 
   assert.equal(calls[0].options.useLaunchctl, false);
   assert.equal(calls[0].options.uid, undefined);
   assert.equal(calls[0].options.env.ANTHROPIC_AUTH_TOKEN, 'broker-oauth-token');
+});
+
+test('reviewWithClaude parses a result after more than 10 MiB of stream events', async () => {
+  const result = await reviewWithClaude('+diff\n', '', {
+    assertClaudeOAuthImpl: async () => ({ env: { PATH: process.env.PATH }, transport: 'keychain' }),
+    platform: 'linux',
+    spawnClaudeImpl: (_args, { uid: _uid, useLaunchctl: _useLaunchctl, ...options }) =>
+      spawnCapturedProcessGroup(process.execPath, ['-e',
+        'const line=JSON.stringify({type:"assistant",message:"x".repeat(1024)})+"\\n"; for(let i=0;i<11000;i++) process.stdout.write(line); process.stdout.write(JSON.stringify({type:"result",result:"## Verdict\\nComment only",usage:{output_tokens:7}})+"\\n");',
+      ], options),
+  });
+  assert.equal(result.reviewText, '## Verdict\nComment only');
+  assert.equal(result.tokenUsage.output, 7);
 });
 
 test('reviewWithClaude retries one silent invocation on claude with freshly prepared auth', async () => {

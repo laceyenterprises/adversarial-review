@@ -24,6 +24,7 @@ const SUPPORTED_OPTIONS = new Set([
   'signal',
   'stderrPath',
   'stdoutPath',
+  'stdoutCapture',
   'timeout',
 ]);
 
@@ -142,9 +143,13 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
     signal,
     failureTailBytes = DEFAULT_FAILURE_TAIL_BYTES,
     stdoutPath = null,
+    stdoutCapture = 'all',
     stderrPath = null,
     reapGroupOnExit = false,
   } = options;
+  if (stdoutCapture !== 'all' && stdoutCapture !== 'tail') {
+    throw new TypeError(`Unsupported stdoutCapture: ${stdoutCapture}`);
+  }
 
   return new Promise((resolve, reject) => {
     const stdoutFd = stdoutPath ? openSync(stdoutPath, 'w') : null;
@@ -357,7 +362,11 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
     child.stdout?.on('data', (data) => {
       if (settled) return;
       noteFirstOutput();
-      const next = appendChecked(stdout, stdoutBytes, data);
+      // Streamed CLIs can emit an unbounded transcript. The consumer sees every
+      // chunk, while only a diagnostic tail is retained in this mode.
+      const next = stdoutCapture === 'tail'
+        ? { text: tailText(stdout + dataToText(data), failureTailBytes), bytes: stdoutBytes }
+        : appendChecked(stdout, stdoutBytes, data);
       if (next !== null) {
         stdout = next.text;
         stdoutBytes = next.bytes;
@@ -402,7 +411,7 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
       settled = true;
       readSideChannelOutput();
       cleanup();
-      if (stdoutBytes > maxBuffer || stderrBytes > maxBuffer) {
+      if ((stdoutCapture === 'all' && stdoutBytes > maxBuffer) || stderrBytes > maxBuffer) {
         const exceeded = stdoutBytes > maxBuffer ? stdoutBytes : stderrBytes;
         const err = new Error(`Command failed: maxBuffer exceeded (${maxBuffer} bytes; saw ${exceeded} bytes)`);
         err.code = code;

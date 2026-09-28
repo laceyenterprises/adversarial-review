@@ -22,7 +22,7 @@ import {
   REVIEWER_PASS_NORMALIZED_POSTED_AT_SQL,
   REVIEWER_MODELS,
 } from './reviewer-pass-posted-review-sql.mjs';
-import { DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS, resolveRunningPassTimeoutSeconds } from './reviewer-pass-reaper.mjs';
+import { DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS, resolveRunningPassTimeoutSeconds, idleReapSeconds, ceilingReapSeconds } from './reviewer-pass-reaper.mjs';
 import { calculateReviewerCeilingSeconds, resolveReviewerCeilingConfig, resolveReviewerCeilingSeconds, resolveReviewerIdleTimeoutSeconds } from './reviewer-timeout-model.mjs';
 import {
   evaluateTtmFromDb,
@@ -177,12 +177,10 @@ const REVIEWER_SLOT_STATES = Object.freeze([
   'reaped',
   'recovered',
 ]);
-// The displayed upper bound uses the same capped ceiling as the reaper, with
-// 50% grace. Individual heartbeat-aware passes are checked against their own
-// scaled ceiling and idle window below; legacy passes use the configured
-// running-pass timeout. The alarm therefore fires after recovery was due.
+// The displayed upper bound follows the reaper's capped ceiling, with 50%
+// grace. Individual heartbeat-aware passes use the reaper thresholds below.
 const DEFAULT_RUNNING_REVIEWER_PASS_MAX_AGE_MS = Math.round(
-  resolveReviewerCeilingSeconds({ changedLines: Number.MAX_SAFE_INTEGER }) * 1000 * 1.5
+  ceilingReapSeconds(resolveReviewerCeilingSeconds({ changedLines: Number.MAX_SAFE_INTEGER })) * 1000 * 1.5
 );
 const REVIEWER_PASS_REAPER_TIMEOUT_MS = DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS * 1000;
 const DEFAULT_DAG_AUTOWALK_MAX_LOG_AGE_MS = 2 * 60 * 60 * 1000;
@@ -973,7 +971,7 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
     runningReviewerPassMaxAgeMs: parsePositiveInteger(
       overrides.runningReviewerPassMaxAgeMs
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_RUNNING_REVIEWER_PASS_MAX_AGE_MS,
-      Math.round(resolveReviewerCeilingSeconds({ changedLines: Number.MAX_SAFE_INTEGER, env }) * 1000 * 1.5)
+      Math.round(ceilingReapSeconds(resolveReviewerCeilingSeconds({ changedLines: Number.MAX_SAFE_INTEGER, env })) * 1000 * 1.5)
     ),
     reviewerPassIdleMs: resolveReviewerIdleTimeoutSeconds(env) * 1000,
     reviewerPassLegacyMs: resolveRunningPassTimeoutSeconds(env) * 1000,
@@ -3766,16 +3764,16 @@ function summarizeZombieReviewerPasses(db, { nowMs, config }) {
     const metadata = parseJson(row.metadata_json, {});
     const heartbeatMs = parseReviewerPassTimestampMs(metadata.lastProgressAt);
     const hasHeartbeat = metadata.heartbeatSupported === true || Number.isFinite(heartbeatMs);
-    const ceilingMs = calculateReviewerCeilingSeconds({
+    const ceilingSeconds = calculateReviewerCeilingSeconds({
       changedLines: metadata.changedLines,
       effort: metadata.reasoningEffort || row.reasoning_effort,
       ...(config.reviewerPassCeiling || resolveReviewerCeilingConfig()),
-    }) * 1000;
+    });
     const grace = 1.5;
     return hasHeartbeat
-      ? nowMs - startedMs >= ceilingMs * grace ||
+      ? nowMs - startedMs >= ceilingReapSeconds(ceilingSeconds) * 1000 * grace ||
           nowMs - (Number.isFinite(heartbeatMs) ? heartbeatMs : startedMs) >=
-            (config.reviewerPassIdleMs ?? config.runningReviewerPassMaxAgeMs) * grace
+            idleReapSeconds((config.reviewerPassIdleMs ?? config.runningReviewerPassMaxAgeMs) / 1000) * 1000 * grace
       : nowMs - startedMs >= Math.min(
         (config.reviewerPassLegacyMs ?? config.runningReviewerPassMaxAgeMs) * grace,
         config.runningReviewerPassMaxAgeMs,

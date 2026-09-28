@@ -769,6 +769,7 @@ async function reviewWithClaude(diff, extraContext = '', {
 
   let stdout, stderr;
   let streamRemainder = '';
+  let finalResultEvent = null;
   const noteStreamEvents = (chunk) => {
     streamRemainder += chunk;
     const lines = streamRemainder.split('\n');
@@ -779,6 +780,7 @@ async function reviewWithClaude(diff, extraContext = '', {
         const event = JSON.parse(line);
         if (event && typeof event === 'object' && typeof event.type === 'string') {
           sawEvent = true;
+          if (event.type === 'result') finalResultEvent = line;
           onProgress?.({ changedLines, effort: reviewerExecution.effort });
         }
       } catch { /* An incomplete or diagnostic line is not a heartbeat. */ }
@@ -796,6 +798,7 @@ async function reviewWithClaude(diff, extraContext = '', {
         progressOnStdoutOnly: true,
         firstOutputTimeout: 0,
         onStdoutData: noteStreamEvents,
+        stdoutCapture: 'tail',
         maxBuffer: 10 * 1024 * 1024,
         ...(authTransport === 'broker' ? { useLaunchctl: false } : { uid: claudeLaunchctlUid }),
       }),
@@ -846,6 +849,17 @@ async function reviewWithClaude(diff, extraContext = '', {
     }
     throw err;
   }
+
+  // The process helper retains only a bounded diagnostic tail. The final
+  // result event carries both review text and usage; earlier events are not
+  // needed for the verdict.
+  if (streamRemainder.trim()) {
+    try {
+      const event = JSON.parse(streamRemainder);
+      if (event?.type === 'result') finalResultEvent = streamRemainder;
+    } catch { /* Leave malformed trailing output to the normal parser. */ }
+  }
+  if (finalResultEvent) stdout = finalResultEvent;
 
   if (!stdout?.trim()) {
     const hint = stderr?.trim() ? ` stderr: ${stderr.substring(0, 200)}` : '';

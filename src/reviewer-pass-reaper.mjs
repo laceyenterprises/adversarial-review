@@ -26,6 +26,8 @@ const POSTED_REVIEW_ARTIFACT_RECOVERY_REASON = 'running-pass-had-github-review-a
 const INFRA_AUTO_RECOVER_CAP = DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS;
 const REVIEWER_SETTLE_GRACE_SECONDS = 300;
 const REVIEWER_CEILING_SLACK_SECONDS = 600;
+const idleReapSeconds = (idleSeconds) => Math.ceil(idleSeconds * 1.5) + 30;
+const ceilingReapSeconds = (ceilingSeconds) => ceilingSeconds + REVIEWER_CEILING_SLACK_SECONDS;
 const VERDICT_MODE_ENFORCE = 'enforce';
 const VERDICT_MODE_ADVISORY_ONLY = 'advisory-only';
 const ADVISORY_ONLY_REVIEW_HEADER_RE = /^## Adversarial Review \(advisory-only\)\b/;
@@ -520,18 +522,18 @@ function reapRunningPassTimeouts({
       const reviewerGone = ownsPass && (alive === false ||
         (terminal && runRecord.state !== 'completed')) && ageSeconds >= REVIEWER_SETTLE_GRACE_SECONDS;
       const idleAgeSeconds = Math.floor((observedNow.getTime() - (heartbeatMs ?? startedMs)) / 1000);
-      const idleReapSeconds = Math.ceil(idleSeconds * 1.5) + 30;
-      const ceilingReapSeconds = ceilingSeconds + REVIEWER_CEILING_SLACK_SECONDS;
+      const idleReapThresholdSeconds = idleReapSeconds(idleSeconds);
+      const ceilingReapThresholdSeconds = ceilingReapSeconds(ceilingSeconds);
       // Unknown process identity is not proof that it is safe to release an
       // active claim; wait for explicit terminal evidence or the legacy path.
       if (currentReview?.review_status === 'reviewing' && ownsPass && alive === null && !terminal && hasHeartbeat) continue;
       const failureReason = reviewerGone ? 'reviewer-dead'
-        : hasHeartbeat && ageSeconds >= ceilingReapSeconds ? 'reviewer-ceiling'
-          : hasHeartbeat && idleAgeSeconds >= idleReapSeconds ? 'reviewer-stalled'
+        : hasHeartbeat && ageSeconds >= ceilingReapThresholdSeconds ? 'reviewer-ceiling'
+          : hasHeartbeat && idleAgeSeconds >= idleReapThresholdSeconds ? 'reviewer-stalled'
             : !hasHeartbeat && ageSeconds >= thresholdSeconds ? 'running-pass-timeout-legacy' : null;
       if (!failureReason) continue;
-      const effectiveThresholdSeconds = failureReason === 'reviewer-ceiling' ? ceilingReapSeconds
-        : failureReason === 'reviewer-stalled' ? idleReapSeconds : thresholdSeconds;
+      const effectiveThresholdSeconds = failureReason === 'reviewer-ceiling' ? ceilingReapThresholdSeconds
+        : failureReason === 'reviewer-stalled' ? idleReapThresholdSeconds : thresholdSeconds;
       const failureMessage = buildTimeoutFailureMessage({ thresholdSeconds: effectiveThresholdSeconds, ageSeconds, reason: failureReason });
       const capFailureMessage = buildTimeoutFailureMessage({
         thresholdSeconds: effectiveThresholdSeconds,
@@ -609,6 +611,8 @@ function reapRunningPassTimeouts({
 
 export {
   DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS,
+  idleReapSeconds,
+  ceilingReapSeconds,
   POSTED_REVIEW_ARTIFACT_RECOVERY_CLASS,
   POSTED_REVIEW_ARTIFACT_RECOVERY_REASON,
   queueFollowUpForRecoveredPostedReview,

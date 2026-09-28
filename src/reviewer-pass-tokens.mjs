@@ -177,6 +177,31 @@ function selectReviewerPassByKey(db, key) {
   ).get(key.repo, key.prNumber, key.attemptNumber, key.passKind) || null;
 }
 
+function recordReviewerPassProgress(rootDir, {
+  repo, prNumber, attemptNumber, passKind, reviewerSessionUuid,
+  changedLines, effort, at = new Date().toISOString(),
+} = {}) {
+  const db = openReviewStateDb(rootDir);
+  try {
+    const metadata = { lastProgressAt: at, heartbeatSupported: true };
+    if (Number.isInteger(changedLines)) metadata.changedLines = changedLines;
+    if (effort) metadata.reasoningEffort = effort;
+    const result = db.prepare(
+      `UPDATE reviewer_passes
+          SET metadata_json = json_patch(COALESCE(metadata_json, '{}'), ?)
+        WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?
+          AND status = 'running' AND ended_at IS NULL
+          AND (? IS NULL OR json_extract(metadata_json, '$.reviewerSessionUuid') = ?)
+          AND (json_extract(metadata_json, '$.lastProgressAt') IS NULL
+               OR julianday(?) - julianday(json_extract(metadata_json, '$.lastProgressAt')) >= 30.0 / 86400.0)`
+    ).run(JSON.stringify(metadata), repo, prNumber, attemptNumber, passKind,
+      reviewerSessionUuid || null, reviewerSessionUuid || null, at);
+    return result.changes > 0;
+  } finally {
+    closeOwnedReviewDb(db);
+  }
+}
+
 function beginReviewerPass(rootDir, {
   repo,
   prNumber,
@@ -2138,6 +2163,7 @@ export {
   backfillReviewerPasses,
   backfillReviewerWorkerRunAttribution,
   beginReviewerPass,
+  recordReviewerPassProgress,
   completeReviewerPass,
   foldReviewerTokenUsageArtifact,
   nextReviewerPassAttemptNumber,

@@ -1,4 +1,22 @@
-import { beginReviewerPass } from './reviewer-pass-tokens.mjs';
+import { beginReviewerPass, recordReviewerPassProgress } from './reviewer-pass-tokens.mjs';
+
+export function createReviewerProgressRecorder({ rootDir, repo, prNumber, attemptNumber, passKind,
+  reviewerSessionUuid, log = console }) {
+  let lastWriteMs = 0;
+  return ({ changedLines, effort }) => {
+    const observedMs = Date.now();
+    if (observedMs - lastWriteMs < 30_000) return;
+    try {
+      if (recordReviewerPassProgress(rootDir, { repo, prNumber, attemptNumber, passKind,
+        reviewerSessionUuid, changedLines, effort })) {
+        lastWriteMs = observedMs;
+        log.error?.('[reviewer] reviewer stream progress');
+      }
+    } catch (err) {
+      log.error?.(`[reviewer] progress write failed: ${err?.message || err}`);
+    }
+  };
+}
 
 // The reviewer CLI learns the resolved harness model only after dispatch.
 // Persist it on the watcher's running pass before best-effort GitHub body capture.

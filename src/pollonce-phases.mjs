@@ -218,6 +218,7 @@ import {
 } from './reviewer-spawn-settle.mjs';
 import { maybeDispatchReviewerTimeoutExhaustedMergeAgent } from './reviewer-timeout-exhausted-dispatch.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
+import { resolveReviewerCeilingSeconds, usesStreamedReviewerCeiling } from './reviewer-timeout-model.mjs';
 import { resolveReviewPopulationRetryConfig } from './role-config.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 import { getStalePostedReviewAutoRereviewSuppression } from './stale-posted-review-rereview.mjs';
@@ -2738,7 +2739,9 @@ export async function processReviewSubject(entry, ctx) {
             // `ReferenceError: pr is not defined` on every poll cycle for any
             // PR that reached the claim site, silently blocking review spawns.)
             const reviewerHeadSha = subject?.headSha || null;
-            const reviewerTimeoutMs = resolveReviewerTimeoutMs();
+            const reviewerTimeoutMs = usesStreamedReviewerCeiling(route.reviewerModel)
+              ? resolveReviewerCeilingSeconds({ changedLines: Number.MAX_SAFE_INTEGER }) * 1000
+              : resolveReviewerTimeoutMs();
             const reviewerLeaseExpiresAt = computeReviewerLeaseExpiryAt(attemptAt, reviewerTimeoutMs);
             const claim = infraRecoveryClass
               ? stmtMarkInfraAutoRecoveryAttemptStarted.run(

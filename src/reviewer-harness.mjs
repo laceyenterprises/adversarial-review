@@ -77,6 +77,7 @@ import {
   buildAgyReviewerPromptPrefix,
 } from './reviewer-prompt.mjs';
 import { parseCodexJsonTokenUsage } from './reviewer-model-detection.mjs';
+import { countChangedLines, resolveReviewerCeilingSeconds, resolveReviewerIdleTimeoutSeconds } from './reviewer-timeout-model.mjs';
 import { resolveClaudeLaunchctlUidFromConfig } from './claude-launchctl-uid.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -108,6 +109,7 @@ async function spawnWithInput(command, args, {
   maxBuffer = 10 * 1024 * 1024,
   signal,
   reapGroupOnExit = false,
+  onStdoutData,
 } = {}) {
   return auditReviewerSubprocess(({ onSpawn }) => spawnCapturedProcessGroup(command, args, {
     env,
@@ -120,6 +122,7 @@ async function spawnWithInput(command, args, {
     signal,
     reapGroupOnExit,
     onSpawn,
+    onStdoutData,
   }));
 }
 
@@ -131,6 +134,7 @@ async function spawnCaptured(command, args, {
   killGraceMs,
   maxBuffer = 10 * 1024 * 1024,
   signal,
+  onStdoutData,
 } = {}) {
   return spawnWithInput(command, args, {
     env,
@@ -141,6 +145,7 @@ async function spawnCaptured(command, args, {
     killGraceMs,
     maxBuffer,
     signal,
+    onStdoutData,
   });
 }
 
@@ -714,6 +719,7 @@ async function reviewWithClaude(diff, extraContext = '', {
   silentRetryAttempts = 1,
   onSilentRetry = null,
   reviewerDeadlineMs = null,
+  onProgress = null,
 } = {}) {
   const readNowMs = () => (typeof nowMs === 'function' ? nowMs() : Date.now());
   const claudeStartedAtMs = readNowMs();
@@ -734,7 +740,10 @@ async function reviewWithClaude(diff, extraContext = '', {
   // The retry runs inside the SAME reviewer pass, so it must share that pass's
   // wall-clock budget. Without this a silent first attempt plus a fresh full
   // timeout could exceed the budget the recovery paths reason about.
-  const resolvedReviewerTimeoutMs = resolveReviewerTimeoutMs(subprocessEnv);
+  const changedLines = countChangedLines(diff);
+  const resolvedReviewerTimeoutMs = resolveReviewerCeilingSeconds({
+    changedLines, effort: reviewerExecution.effort, env: subprocessEnv,
+  }) * 1000;
   const reviewerBudgetDeadlineMs = reviewerDeadlineMs ?? (claudeStartedAtMs + resolvedReviewerTimeoutMs);
   const reviewerTimeoutMs = Math.max(
     1_000,
@@ -759,19 +768,39 @@ async function reviewWithClaude(diff, extraContext = '', {
   }
 
   let stdout, stderr;
+  let streamRemainder = '';
+  let finalResultEvent = null;
+  let sawStreamEvent = false;
+  const noteStreamEvents = (chunk) => {
+    streamRemainder += chunk;
+    const lines = streamRemainder.split('\n');
+    streamRemainder = lines.pop() || '';
+    let sawEvent = false;
+    for (const line of lines) {
+      try {
+        const event = JSON.parse(line);
+        if (event && typeof event === 'object' && typeof event.type === 'string') {
+          sawEvent = true;
+          sawStreamEvent = true;
+          if (event.type === 'result') finalResultEvent = line;
+          onProgress?.({ changedLines, effort: reviewerExecution.effort });
+        }
+      } catch { /* An incomplete or diagnostic line is not a heartbeat. */ }
+    }
+    return sawEvent;
+  };
   try {
+    onProgress?.({ changedLines, effort: reviewerExecution.effort });
     ({ stdout, stderr } = await withClaudeLaunchctlRetry(
       () => spawnClaudeImpl(buildClaudeReviewArgs(prompt, reviewerExecution), {
         env: subprocessEnv,
         cwd: reviewerSubprocessCwd,
         timeout: reviewerTimeoutMs,
-        // First-output-only deadline. NOT progressTimeout: that is a rolling
-        // no-output watchdog, and `claude --print --output-format json` emits a
-        // single JSON document at the END of the turn, so a rolling watchdog
-        // would cap a healthy review at this value instead of bounding a wedged
-        // launch. See docs/SPEC-adversarial-review-auto-remediation.md
-        // section Reviewer Runtime Recovery Contract.
-        firstOutputTimeout: resolveFirstOutputTimeoutMs(subprocessEnv),
+        progressTimeout: resolveReviewerIdleTimeoutSeconds(subprocessEnv) * 1000,
+        progressOnStdoutOnly: true,
+        firstOutputTimeout: 0,
+        onStdoutData: noteStreamEvents,
+        stdoutCapture: 'tail',
         maxBuffer: 10 * 1024 * 1024,
         ...(authTransport === 'broker' ? { useLaunchctl: false } : { uid: claudeLaunchctlUid }),
       }),
@@ -781,19 +810,19 @@ async function reviewWithClaude(diff, extraContext = '', {
     if (err?.isLaunchctlSessionError) {
       throw err;
     }
-    if (err?.firstOutputTimedOut && silentRetryAttempts > 0) {
+    if ((err?.firstOutputTimedOut || (err?.progressTimedOut && !sawStreamEvent)) && silentRetryAttempts > 0) {
       // Durable trace: a silent invocation that is retried in-process is
       // invisible to per-model exec-failure accounting and to
       // review-pipeline-health unless it is recorded here. Without this a
       // claude CLI wedged one time in two looks half as unhealthy as it is.
       onSilentRetry?.({
-        reason: 'first-output-timeout',
+        reason: err?.progressTimedOut ? 'silent-progress-timeout' : 'first-output-timeout',
         attemptsRemaining: silentRetryAttempts - 1,
         elapsedMs: readNowMs() - claudeStartedAtMs,
         firstOutputTimeoutMs: resolveFirstOutputTimeoutMs(subprocessEnv),
       });
       logger.warn?.(
-        `[reviewer] Claude emitted no output before the first-output deadline; ` +
+        `[reviewer] Claude produced no stream event before its output deadline; ` +
         `retrying claude under the same reviewer pass with freshly prepared ` +
         `credentials (${silentRetryAttempts} retry remaining)`,
       );
@@ -809,6 +838,7 @@ async function reviewWithClaude(diff, extraContext = '', {
         platform,
         nowMs,
         onSilentRetry,
+        onProgress,
         // Carry the ORIGINAL pass deadline into the retry.
         reviewerDeadlineMs: reviewerBudgetDeadlineMs,
         silentRetryAttempts: silentRetryAttempts - 1,
@@ -822,12 +852,23 @@ async function reviewWithClaude(diff, extraContext = '', {
     throw err;
   }
 
+  // The process helper retains only a bounded diagnostic tail. The final
+  // result event carries both review text and usage; earlier events are not
+  // needed for the verdict.
+  if (streamRemainder.trim()) {
+    try {
+      const event = JSON.parse(streamRemainder);
+      if (event?.type === 'result') finalResultEvent = streamRemainder;
+    } catch { /* Leave malformed trailing output to the normal parser. */ }
+  }
+  if (finalResultEvent) stdout = finalResultEvent;
+
   if (!stdout?.trim()) {
     const hint = stderr?.trim() ? ` stderr: ${stderr.substring(0, 200)}` : '';
     throw new Error(`Claude CLI returned empty output.${hint}`);
   }
 
-  // `--output-format json` wraps the response as {result, usage, ...}. Extract the
+  // The final stream-json result event wraps the response as {result, usage, ...}. Extract the
   // review text (result) for downstream posting AND the exact usage block, so
   // claude reviewers no longer depend on the flaky ~/.claude/projects transcript
   // scrape (which missed ~90% of passes -> token_source='unknown'). Fail closed:
@@ -862,6 +903,13 @@ function parseClaudeJsonOutput(raw) {
 
 function extractClaudeJsonText(raw) {
   const text = String(raw ?? '').trim();
+  if (text.includes('\n')) {
+    const events = text.split(/\r?\n/).map((line) => {
+      try { return JSON.parse(line); } catch { return null; }
+    });
+    const result = events.findLast((event) => event?.type === 'result' && typeof event.result === 'string');
+    if (result) return JSON.stringify(result);
+  }
   const jsonStart = text.indexOf('{');
   if (jsonStart < 0) {
     return text;
@@ -892,7 +940,7 @@ function mapClaudeJsonUsage(usage) {
 }
 
 function buildClaudeReviewArgs(prompt, { model = null, effort = null } = {}) {
-  return ['--print', '--output-format', 'json', '--permission-mode', 'bypassPermissions',
+  return ['--print', '--verbose', '--output-format', 'stream-json', '--include-partial-messages', '--permission-mode', 'bypassPermissions',
     ...(model ? ['--model', model] : []), ...(effort ? ['--effort', effort] : []), prompt];
 }
 
@@ -1057,6 +1105,7 @@ async function spawnCodexReview({
   timeout = resolveReviewerTimeoutMs(env),
   maxBuffer = 10 * 1024 * 1024,
   spawnCapturedImpl = spawnCaptured,
+  onStdoutData,
 }) {
   return spawnCapturedImpl(
     codexCli,
@@ -1065,7 +1114,9 @@ async function spawnCodexReview({
       env,
       cwd,
       timeout,
+      progressTimeout: resolveReviewerIdleTimeoutSeconds(env) * 1000,
       maxBuffer,
+      ...(onStdoutData ? { onStdoutData } : {}),
     },
   );
 }
@@ -1082,6 +1133,7 @@ async function spawnCodexReview({
 async function reviewWithCodex(diff, extraContext = '', {
   promptStage = 'first',
   reviewerSubprocessCwd = process.cwd(),
+  onProgress = null,
 } = {}) {
   console.error('[reviewWithCodex] asserting OAuth...');
   await assertCodexOAuth();
@@ -1106,6 +1158,9 @@ async function reviewWithCodex(diff, extraContext = '', {
   const codexSessionHome = perWorkerAuth?.codexHome || process.env.CODEX_HOME || null;
   const outputPath = join(tmpdir(), `codex-review-${process.pid}-${Date.now()}.md`);
   const codexExecOverrides = resolveCodexExecOverrides();
+  const changedLines = countChangedLines(diff);
+  const effort = codexExecOverrides.reasoningEffort;
+  onProgress?.({ changedLines, effort });
   const startedAt = new Date().toISOString();
 
   const { env } = scrubOAuthFallbackEnv({
@@ -1132,8 +1187,9 @@ async function reviewWithCodex(diff, extraContext = '', {
         persistSession: Boolean(perWorkerAuth),
         env: subprocessEnv,
         cwd: reviewerSubprocessCwd,
-        timeout: resolveReviewerTimeoutMs(subprocessEnv),
+        timeout: resolveReviewerCeilingSeconds({ changedLines, effort, env: subprocessEnv }) * 1000,
         maxBuffer: 10 * 1024 * 1024,
+        onStdoutData: () => onProgress?.({ changedLines, effort }),
       });
       stdout = result.stdout || '';
       stderr = result.stderr || '';
@@ -3072,12 +3128,13 @@ function mergeChunkedAgyReviews(chunkReviews, { truncated = false, promptBytes =
 async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
   promptStage = 'first',
   reviewerSubprocessCwd = process.cwd(),
+  onProgress = null,
   reviewWithClaudeImpl = reviewWithClaude,
   reviewWithCodexImpl = reviewWithCodex,
   reviewWithGeminiImpl = reviewWithGemini,
 } = {}) {
   if (effectiveModel === 'claude') {
-    const claudeResult = await reviewWithClaudeImpl(diff, extraContext, { promptStage, reviewerSubprocessCwd });
+    const claudeResult = await reviewWithClaudeImpl(diff, extraContext, { promptStage, reviewerSubprocessCwd, onProgress });
     // reviewWithClaude now returns { reviewText, tokenUsage } (from --output-format
     // json). Tolerate a bare string too (legacy / mocked impls) so callers and
     // tests that predate the json capture keep working.
@@ -3100,7 +3157,7 @@ async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
       needsSanitize: false,
     };
   }
-  const codexResult = await reviewWithCodexImpl(diff, extraContext, { promptStage, reviewerSubprocessCwd });
+  const codexResult = await reviewWithCodexImpl(diff, extraContext, { promptStage, reviewerSubprocessCwd, onProgress });
   return {
     rawReviewText: codexResult.reviewText,
     reviewText: null,

@@ -14,6 +14,13 @@ import {
   resolveReviewerTimeoutMs,
 } from '../src/reviewer-timeout.mjs';
 import { AgentOSConfigError } from '../src/config-loader.mjs';
+import { usesStreamedReviewerCeiling } from '../src/reviewer-timeout-model.mjs';
+
+test('streamed reviewer model predicate is shared across lease and subprocess budgets', () => {
+  assert.equal(usesStreamedReviewerCeiling('claude-sonnet-4'), true);
+  assert.equal(usesStreamedReviewerCeiling('codex-gpt-5'), true);
+  assert.equal(usesStreamedReviewerCeiling('gemini-2.5-pro'), false);
+});
 
 // Guards the subprocess timeout that protects spawnCaptured around the
 // reviewer CLI calls. Raised 10m -> 20m on 2026-05-10 after PR #331 hit
@@ -134,6 +141,9 @@ import {
 } from '../src/reviewer-pass-reaper.mjs';
 import { readCascadeState } from '../src/reviewer-cascade.mjs';
 import { DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS } from '../src/reviewer-lease.mjs';
+import { recordReviewerPassProgress } from '../src/reviewer-pass-tokens.mjs';
+import { writeReviewerRunRecord } from '../src/adapters/reviewer-runtime/run-state.mjs';
+import { inFlightReviewerSessions } from '../src/reviewer-session-registry.mjs';
 
 function setupDb() {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'reviewer-timeout-'));
@@ -142,6 +152,184 @@ function setupDb() {
   ensureReviewStateSchema(db);
   return { rootDir, db };
 }
+
+test('pass heartbeat persists at most once per 30 seconds for its claimed session', () => {
+  const { rootDir, db } = setupDb();
+  try {
+    db.prepare(`INSERT INTO reviewer_passes
+      (repo, pr_number, attempt_number, reviewer_class, pass_kind, started_at, status, metadata_json)
+      VALUES (?, 900, 1, 'claude', 'first-pass', ?, 'running', ?)`)
+      .run('laceyenterprises/agent-os', '2026-09-27T00:00:00.000Z',
+        JSON.stringify({ reviewerSessionUuid: 'session-900' }));
+    const progress = (at, reviewerSessionUuid = 'session-900') => recordReviewerPassProgress(rootDir, {
+      repo: 'laceyenterprises/agent-os', prNumber: 900, attemptNumber: 1, passKind: 'first-pass',
+      reviewerSessionUuid, changedLines: 120, effort: 'xhigh', at,
+    });
+    assert.equal(progress('2026-09-27T00:00:01.000Z'), true);
+    assert.equal(progress('2026-09-27T00:00:20.000Z'), false);
+    assert.equal(progress('2026-09-27T00:00:35.000Z', 'other-session'), false);
+    assert.equal(progress('2026-09-27T00:00:35.000Z'), true);
+    const metadata = JSON.parse(db.prepare(`SELECT metadata_json FROM reviewer_passes WHERE pr_number = 900`).get().metadata_json);
+    assert.equal(metadata.lastProgressAt, '2026-09-27T00:00:35.000Z');
+    assert.equal(metadata.changedLines, 120);
+    assert.equal(metadata.reasoningEffort, 'xhigh');
+  } finally { db.close(); rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('heartbeat keeps a 90-minute review running', () => {
+  const { rootDir, db } = setupDb();
+  try {
+    const nowMs = Date.now();
+    const startedMs = nowMs - 90 * 60_000;
+    db.prepare(`INSERT INTO reviewer_passes
+      (repo, pr_number, attempt_number, reviewer_class, pass_kind, started_at, status, metadata_json)
+      VALUES (?, 901, 1, 'claude', 'first-pass', ?, 'running', ?)`).run(
+      'laceyenterprises/agent-os', new Date(startedMs).toISOString(),
+      JSON.stringify({ heartbeatSupported: true, changedLines: 1000, reasoningEffort: 'xhigh',
+        lastProgressAt: new Date(startedMs).toISOString() })
+    );
+    for (let minute = 1; minute <= 90; minute++) {
+      const tickMs = startedMs + minute * 60_000;
+      recordReviewerPassProgress(rootDir, { repo: 'laceyenterprises/agent-os', prNumber: 901,
+        attemptNumber: 1, passKind: 'first-pass', changedLines: 1000, effort: 'xhigh',
+        at: new Date(tickMs).toISOString() });
+      assert.equal(reapRunningPassTimeouts({ db, rootDir, now: () => new Date(tickMs) }).reaped, 0);
+    }
+  } finally { db.close(); rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('heartbeat silence and scaled ceiling produce distinct reaper reasons', () => {
+  const { rootDir, db } = setupDb();
+  try {
+    const nowMs = Date.now();
+    const insert = db.prepare(`INSERT INTO reviewer_passes
+      (repo, pr_number, attempt_number, reviewer_class, pass_kind, started_at, status, metadata_json)
+      VALUES (?, ?, 1, 'claude', 'first-pass', ?, 'running', ?)`);
+    insert.run('laceyenterprises/agent-os', 902, new Date(nowMs - 30 * 60_000).toISOString(),
+      JSON.stringify({ heartbeatSupported: true, lastProgressAt: new Date(nowMs - 16 * 60_000).toISOString() }));
+    insert.run('laceyenterprises/agent-os', 903, new Date(nowMs - 3 * 60 * 60_000 - 11 * 60_000).toISOString(),
+      JSON.stringify({ heartbeatSupported: true, changedLines: 5000, reasoningEffort: 'xhigh',
+        lastProgressAt: new Date(nowMs - 60_000).toISOString() }));
+    assert.equal(reapRunningPassTimeouts({ db, rootDir, now: () => new Date(nowMs) }).reaped, 2);
+    const reasons = db.prepare(`SELECT pr_number, metadata_json FROM reviewer_passes WHERE pr_number IN (902, 903) ORDER BY pr_number`).all();
+    assert.deepEqual(reasons.map((row) => JSON.parse(row.metadata_json).failureReason),
+      ['reviewer-stalled', 'reviewer-ceiling']);
+  } finally { db.close(); rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('dead reviewer process is reaped after reconciliation grace', () => {
+  const { rootDir, db } = setupDb();
+  try {
+    const startedAt = new Date(Date.now() - 6 * 60_000).toISOString();
+    db.prepare(`INSERT INTO reviewed_prs
+      (repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+       reviewer_session_uuid, reviewer_pgid, reviewer_started_at)
+      VALUES (?, 904, ?, 'claude', 'open', 'reviewing', 'dead-904', 999999, ?)`)
+      .run('laceyenterprises/agent-os', startedAt, startedAt);
+    db.prepare(`INSERT INTO reviewer_passes
+      (repo, pr_number, attempt_number, reviewer_class, pass_kind, started_at, status, metadata_json)
+      VALUES (?, 904, 1, 'claude', 'first-pass', ?, 'running', ?)`)
+      .run('laceyenterprises/agent-os', startedAt,
+        JSON.stringify({ reviewerSessionUuid: 'dead-904', heartbeatSupported: true, lastProgressAt: startedAt }));
+    assert.equal(reapRunningPassTimeouts({ db, rootDir, isReviewerAlive: () => false }).reaped, 0,
+      'a dead reviewer stays claimable while posted-review reconciliation catches up');
+    assert.equal(reapRunningPassTimeouts({ db, rootDir, isReviewerAlive: () => false,
+      now: () => new Date(Date.now() + 55 * 60_000) }).reaped, 1);
+    assert.equal(JSON.parse(db.prepare(`SELECT metadata_json FROM reviewer_passes WHERE pr_number = 904`).get().metadata_json).failureReason,
+      'reviewer-dead');
+  } finally { db.close(); rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('failed reviewer session is reaped by exact run record after reconciliation grace', () => {
+  const { rootDir, db } = setupDb();
+  try {
+    const startedAt = new Date(Date.now() - 61 * 60_000).toISOString();
+    writeReviewerRunRecord(rootDir, { sessionUuid: 'terminal-905', state: 'failed', spawnedAt: startedAt });
+    db.prepare(`INSERT INTO reviewer_passes
+      (repo, pr_number, attempt_number, reviewer_class, pass_kind, started_at, status, metadata_json)
+      VALUES (?, 905, 1, 'claude', 'first-pass', ?, 'running', ?)`)
+      .run('laceyenterprises/agent-os', startedAt,
+        JSON.stringify({ reviewerSessionUuid: 'terminal-905', heartbeatSupported: true, lastProgressAt: startedAt }));
+    assert.equal(reapRunningPassTimeouts({ db, rootDir }).reaped, 1);
+    assert.equal(JSON.parse(db.prepare(`SELECT metadata_json FROM reviewer_passes WHERE pr_number = 905`).get().metadata_json).failureReason,
+      'reviewer-dead');
+  } finally { db.close(); rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('completed CLI run remains running while its watcher settles the review', () => {
+  const { rootDir, db } = setupDb();
+  const sessionUuid = 'settling-906';
+  try {
+    const startedAt = new Date(Date.now() - 20 * 60_000).toISOString();
+    writeReviewerRunRecord(rootDir, { sessionUuid, state: 'completed', pgid: 999999,
+      spawnedAt: startedAt, lastHeartbeatAt: new Date().toISOString() });
+    db.prepare(`INSERT INTO reviewed_prs
+      (repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+       reviewer_session_uuid, reviewer_pgid, reviewer_started_at)
+      VALUES (?, 906, ?, 'claude', 'open', 'reviewing', ?, 999999, ?)`)
+      .run('laceyenterprises/agent-os', startedAt, sessionUuid, startedAt);
+    db.prepare(`INSERT INTO reviewer_passes
+      (repo, pr_number, attempt_number, reviewer_class, pass_kind, started_at, status, metadata_json)
+      VALUES (?, 906, 1, 'claude', 'first-pass', ?, 'running', ?)`)
+      .run('laceyenterprises/agent-os', startedAt,
+        JSON.stringify({ reviewerSessionUuid: sessionUuid, heartbeatSupported: true,
+          lastProgressAt: startedAt }));
+    inFlightReviewerSessions.add(sessionUuid);
+    assert.equal(reapRunningPassTimeouts({ db, rootDir, isReviewerAlive: () => false }).reaped, 0);
+    inFlightReviewerSessions.delete(sessionUuid);
+    assert.equal(reapRunningPassTimeouts({ db, rootDir, isReviewerAlive: () => false }).reaped, 0,
+      'a bounced watcher also gives completed runs settlement grace');
+    assert.equal(db.prepare(`SELECT review_status FROM reviewed_prs WHERE pr_number = 906`).get().review_status,
+      'reviewing');
+  } finally {
+    inFlightReviewerSessions.delete(sessionUuid);
+    db.close(); rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('live reviewer survives idle, ceiling and silent posting windows', () => {
+  const { rootDir, db } = setupDb();
+  try {
+    const nowMs = Date.now();
+    const startedAt = new Date(nowMs - 4 * 60 * 60_000).toISOString();
+    db.prepare(`INSERT INTO reviewed_prs
+      (repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+       reviewer_session_uuid, reviewer_pgid, reviewer_started_at)
+      VALUES (?, 907, ?, 'claude', 'open', 'reviewing', 'live-907', 12345, ?)`)
+      .run('laceyenterprises/agent-os', startedAt, startedAt);
+    db.prepare(`INSERT INTO reviewer_passes
+      (repo, pr_number, attempt_number, reviewer_class, pass_kind, started_at, status, metadata_json)
+      VALUES (?, 907, 1, 'claude', 'first-pass', ?, 'running', ?)`)
+      .run('laceyenterprises/agent-os', startedAt,
+        JSON.stringify({ reviewerSessionUuid: 'live-907', heartbeatSupported: true,
+          lastProgressAt: new Date(nowMs - 2 * 60 * 60_000).toISOString() }));
+    assert.equal(reapRunningPassTimeouts({ db, rootDir, isReviewerAlive: () => true,
+      verifyReviewerIdentity: () => ({ match: true }) }).reaped, 0);
+    assert.equal(db.prepare(`SELECT review_status FROM reviewed_prs WHERE pr_number = 907`).get().review_status,
+      'reviewing');
+  } finally { db.close(); rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('unknown reviewer identity reaches the absolute ceiling backstop', () => {
+  const { rootDir, db } = setupDb();
+  try {
+    const startedAt = new Date(Date.now() - 4 * 60 * 60_000).toISOString();
+    db.prepare(`INSERT INTO reviewed_prs
+      (repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+       reviewer_session_uuid, reviewer_pgid, reviewer_started_at)
+      VALUES (?, 908, ?, 'claude', 'open', 'reviewing', 'unknown-908', 12345, ?)`).run('laceyenterprises/agent-os', startedAt, startedAt);
+    db.prepare(`INSERT INTO reviewer_passes
+      (repo, pr_number, attempt_number, reviewer_class, pass_kind, started_at, status, metadata_json)
+      VALUES (?, 908, 1, 'claude', 'first-pass', ?, 'running', ?)`).run('laceyenterprises/agent-os', startedAt,
+        JSON.stringify({ reviewerSessionUuid: 'unknown-908', heartbeatSupported: true,
+          lastProgressAt: new Date().toISOString() }));
+    const result = reapRunningPassTimeouts({ db, rootDir, isReviewerAlive: () => true,
+      verifyReviewerIdentity: () => ({ match: false }) });
+    assert.equal(result.reaped, 1);
+    assert.equal(JSON.parse(db.prepare(`SELECT metadata_json FROM reviewer_passes WHERE pr_number = 908`).get().metadata_json).failureReason,
+      'reviewer-ceiling');
+  } finally { db.close(); rmSync(rootDir, { recursive: true, force: true }); }
+});
 
 test('reapRunningPassTimeouts reaps a stuck running pass older than threshold', () => {
   const { rootDir, db } = setupDb();
@@ -162,12 +350,12 @@ test('reapRunningPassTimeouts reaps a stuck running pass older than threshold', 
     assert.ok(row.ended_at);
     const metadata = JSON.parse(row.metadata_json);
     assert.equal(metadata.failureClass, 'reviewer-timeout');
-    assert.equal(metadata.failureReason, 'running-pass-timeout');
+    assert.equal(metadata.failureReason, 'running-pass-timeout-legacy');
     assert.equal(metadata.timeoutThresholdSeconds, 3600);
     const events = db.prepare(
       `SELECT event_type, reason FROM review_latency_events WHERE repo = ? AND pr_number = ?`
     ).all('laceyenterprises/agent-os', 123);
-    assert.deepEqual(events, [{ event_type: 'reviewer_reaped', reason: 'running-pass-timeout' }]);
+    assert.deepEqual(events, [{ event_type: 'reviewer_reaped', reason: 'running-pass-timeout-legacy' }]);
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

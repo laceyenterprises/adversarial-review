@@ -1301,7 +1301,7 @@ test('cli-direct derives Codex MCP OAuth requirement from adapter domainConfig',
   }
 });
 
-test('cli-direct disables the no-output progress watchdog for non-streaming reviewer CLIs', () => {
+test('cli-direct leaves the outer watchdog off across silent settlement phases', () => {
   assert.equal(
     resolveProgressTimeoutForModel('codex', { ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS: '900000' }),
     0,

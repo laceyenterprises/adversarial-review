@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { resolveReviewerTimeoutMs } from '../../../reviewer-timeout.mjs';
+import { resolveReviewerCeilingSeconds, usesStreamedReviewerCeiling } from '../../../reviewer-timeout-model.mjs';
 import { spawnCapturedProcessGroup } from '../../../process-group-spawn.mjs';
 import { isPgidAlive, verifyPgidIdentity } from '../../../process-group-identity.mjs';
 import { domainRequiresMcpOAuth } from '../domain-mcp-oauth.mjs';
@@ -222,13 +223,9 @@ function buildReviewerProcessArgs(subjectContext = {}) {
   };
 }
 
-function resolveProgressTimeoutForModel(model, env) {
-  // cli-direct reviewer processes are non-streaming: Claude `--print` and
-  // Codex `exec --json --output-last-message` can both spend an entire review
-  // turn without appending to stdout/stderr. The hard reviewer timeout still
-  // bounds runtime; the progress watchdog only kills quiet-but-healthy passes.
-  void model;
-  void env;
+function resolveProgressTimeoutForModel() {
+  // This wraps reviewer.mjs, including silent posting, throttle, and OAuth
+  // fallback phases. Model subprocesses have their own progress watchdogs.
   return 0;
 }
 
@@ -488,7 +485,11 @@ function createCliDirectReviewerRuntimeAdapter({
         [reviewerProcessPath, JSON.stringify(reviewerArgs)],
         {
           env: reviewerEnv,
-          timeout: req.timeoutMs || resolveReviewerTimeoutMs(reviewerEnv),
+          timeout: usesStreamedReviewerCeiling(req.model)
+            ? Math.max(req.timeoutMs || 0, resolveReviewerCeilingSeconds({
+              changedLines: Number.MAX_SAFE_INTEGER, env: reviewerEnv,
+            }) * 1000)
+            : req.timeoutMs || resolveReviewerTimeoutMs(reviewerEnv),
           progressTimeout: resolveProgressTimeoutForModel(req.model, reviewerEnv),
           signal: controller.signal,
           stdoutPath: sideChannels.stdoutPath,

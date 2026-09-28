@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { CLAUDE_CLI, GEMINI_CLI, AGY_CLI, __test__ } from '../src/reviewer.mjs';
 import { buildObviousDocsGuidance, extractLinkedRepoDocs, fetchLinkedSpecContents, parseGitHubBlobPath } from '../src/prompt-context.mjs';
 import { AgentOSConfigError } from '../src/config-loader.mjs';
+import { spawnCapturedProcessGroup } from '../src/process-group-spawn.mjs';
 import { beginReviewerPass } from '../src/reviewer-pass-tokens.mjs';
 import { extractReviewVerdict } from '../src/kernel/verdict.mjs';
 import { parseReviewBody as parseRescueReviewBody } from '../src/merge-agent-rescue-classifier.mjs';
@@ -2967,10 +2968,22 @@ test('resolveClaudeLaunchctlUidForSpawn requires configured admin UID on darwin'
   );
 });
 
-test('buildClaudeReviewArgs requests json output for exact usage capture', () => {
+test('buildClaudeReviewArgs requests streamed JSON output for progress and exact usage capture', () => {
   const args = buildClaudeReviewArgs('the prompt');
   const oIdx = args.indexOf('--output-format');
-  assert.ok(oIdx >= 0 && args[oIdx + 1] === 'json', 'must pass --output-format json');
+  assert.ok(oIdx >= 0 && args[oIdx + 1] === 'stream-json', 'must pass --output-format stream-json');
+  assert.ok(args.includes('--verbose'));
+});
+
+test('parseClaudeJsonOutput extracts the final verdict from stream events', () => {
+  const raw = [
+    JSON.stringify({ type: 'system', subtype: 'init' }),
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'working' }] } }),
+    JSON.stringify({ type: 'result', result: '## Verdict\nComment only', usage: { input_tokens: 42 } }),
+  ].join('\n');
+  const parsed = parseClaudeJsonOutput(raw);
+  assert.equal(parsed.reviewText, '## Verdict\nComment only');
+  assert.equal(parsed.tokenUsage.input, 42);
 });
 
 test('parseClaudeJsonOutput extracts review text + exact usage (no transcript needed)', () => {
@@ -3042,7 +3055,7 @@ test('Claude review invocation passes prompt as argv in cli-direct shape', async
   assert.deepEqual(calls, [
     {
       command: CLAUDE_CLI,
-      args: ['--print', '--output-format', 'json', '--permission-mode', 'bypassPermissions', prompt],
+      args: ['--print', '--verbose', '--output-format', 'stream-json', '--include-partial-messages', '--permission-mode', 'bypassPermissions', prompt],
       options: {
         env: { HOME: '/tmp/home', PATH: process.env.PATH },
       },
@@ -3090,6 +3103,7 @@ test('Codex review invocation uses the reviewer snapshot cwd and passes prompt a
         env: { HOME: '/tmp/home', PATH: process.env.PATH },
         cwd: '/tmp/reviewer-state/reviewer-snapshots/agent-os/head-sha',
         timeout: 12_345,
+        progressTimeout: 600_000,
         maxBuffer: 999,
       },
     },
@@ -3520,6 +3534,19 @@ test('reviewWithClaude reuses broker auth env and skips launchctl', async () => 
   assert.equal(calls[0].options.env.ANTHROPIC_AUTH_TOKEN, 'broker-oauth-token');
 });
 
+test('reviewWithClaude parses a result after more than 10 MiB of stream events', async () => {
+  const result = await reviewWithClaude('+diff\n', '', {
+    assertClaudeOAuthImpl: async () => ({ env: { PATH: process.env.PATH }, transport: 'keychain' }),
+    platform: 'linux',
+    spawnClaudeImpl: (_args, { uid: _uid, useLaunchctl: _useLaunchctl, ...options }) =>
+      spawnCapturedProcessGroup(process.execPath, ['-e',
+        'const line=JSON.stringify({type:"assistant",message:"x".repeat(1024)})+"\\n"; for(let i=0;i<11000;i++) process.stdout.write(line); process.stdout.write(JSON.stringify({type:"result",result:"## Verdict\\nComment only",usage:{output_tokens:7}})+"\\n");',
+      ], options),
+  });
+  assert.equal(result.reviewText, '## Verdict\nComment only');
+  assert.equal(result.tokenUsage.output, 7);
+});
+
 test('reviewWithClaude retries one silent invocation on claude with freshly prepared auth', async () => {
   let authCalls = 0;
   let spawnCalls = 0;
@@ -3532,9 +3559,7 @@ test('reviewWithClaude retries one silent invocation on claude with freshly prep
     spawnClaudeImpl: async (_args, options) => {
       spawnCalls += 1;
       if (spawnCalls === 1) {
-        // The retry must key on the ONE-SHOT first-output signal, not the rolling
-        // no-output watchdog. `progressTimedOut` on a non-streaming reviewer means
-        // a healthy quiet turn was killed, and retrying that just burns it twice.
+        // Legacy first-output failures still get the bounded retry.
         const error = new Error('Command no first output for 120000ms');
         error.firstOutputTimedOut = true;
         throw error;
@@ -3548,6 +3573,29 @@ test('reviewWithClaude retries one silent invocation on claude with freshly prep
   assert.equal(result.reviewText, '## Verdict\nComment only');
   assert.equal(authCalls, 2);
   assert.equal(spawnCalls, 2);
+});
+
+test('reviewWithClaude retries one silent streamed idle timeout', async () => {
+  let spawnCalls = 0;
+  const retryReasons = [];
+  const result = await reviewWithClaude('+diff\n', '', {
+    assertClaudeOAuthImpl: async () => ({ transport: 'keychain', env: { PATH: process.env.PATH } }),
+    platform: 'linux',
+    spawnClaudeImpl: async () => {
+      spawnCalls += 1;
+      if (spawnCalls === 1) {
+        const error = new Error('stream idle timeout');
+        error.progressTimedOut = true;
+        throw error;
+      }
+      return { stdout: JSON.stringify({ result: '## Verdict\nComment only' }), stderr: '' };
+    },
+    onSilentRetry: (event) => retryReasons.push(event.reason),
+    logger: { warn() {} },
+  });
+  assert.equal(result.reviewText, '## Verdict\nComment only');
+  assert.equal(spawnCalls, 2);
+  assert.deepEqual(retryReasons, ['silent-progress-timeout']);
 });
 
 test('reviewWithClaude surfaces a second silent failure for normal fallback handling', async () => {

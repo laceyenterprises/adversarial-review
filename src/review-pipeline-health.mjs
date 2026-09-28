@@ -22,7 +22,8 @@ import {
   REVIEWER_PASS_NORMALIZED_POSTED_AT_SQL,
   REVIEWER_MODELS,
 } from './reviewer-pass-posted-review-sql.mjs';
-import { DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS } from './reviewer-pass-reaper.mjs';
+import { DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS, resolveRunningPassTimeoutSeconds, idleReapSeconds, ceilingReapSeconds } from './reviewer-pass-reaper.mjs';
+import { calculateReviewerCeilingSeconds, resolveReviewerCeilingConfig, resolveReviewerIdleTimeoutSeconds, DEFAULT_CEILING_MAX_SECONDS, DEFAULT_IDLE_TIMEOUT_SECONDS } from './reviewer-timeout-model.mjs';
 import {
   evaluateTtmFromDb,
   resolveTtmTrackerConfig,
@@ -176,25 +177,10 @@ const REVIEWER_SLOT_STATES = Object.freeze([
   'reaped',
   'recovered',
 ]);
-// Must stay ABOVE reviewer-pass-reaper's DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS.
-// That reaper is what actually ends a hung pass; this finding exists to catch a
-// reaper that is NOT doing its job. At the previous 30 minutes the ticket fired
-// a full 30 minutes before the owning remediation was even allowed to act, so
-// every hung pass produced a half-hour of alarm an operator could do nothing
-// about -- observed 2026-08-22 with three gemini passes ticketed at 48-50m that
-// the reaper would have closed on its own at 60m. The default below is the
-// reaper timeout plus 50% grace: past that, the reaper genuinely has failed and
-// the ticket is actionable.
-//
-// Derived from the reaper's own exported constant rather than a local copy, so
-// retuning the reaper timeout moves this threshold with it instead of silently
-// re-inverting the alarm against its remediation. Deployments that raise the
-// reaper past its default via `reviewer.running_pass_timeout_seconds` must also
-// raise `runningReviewerPassMaxAgeMs` in pipeline-health config; only the
-// default is coupled here.
-const REVIEWER_PASS_REAPER_TIMEOUT_MS = DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS * 1000;
+// The displayed upper bound follows the reaper's capped ceiling, with 50%
+// grace. Individual heartbeat-aware passes use the reaper thresholds below.
 const DEFAULT_RUNNING_REVIEWER_PASS_MAX_AGE_MS = Math.round(
-  REVIEWER_PASS_REAPER_TIMEOUT_MS * 1.5
+  ceilingReapSeconds(DEFAULT_CEILING_MAX_SECONDS) * 1000 * 1.5
 );
 const DEFAULT_DAG_AUTOWALK_MAX_LOG_AGE_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_DISPATCH_SPAWN_FAILURE_WINDOW_MS = 60 * 60 * 1000;
@@ -663,6 +649,13 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     defaultThreshold: DEFAULT_RUNNING_REVIEWER_PASS_MAX_AGE_MS,
   },
   {
+    code: 'review:reviewer_pass_config_degraded',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: null,
+    defaultThreshold: null,
+  },
+  {
     code: 'review:stuck_retry_loop',
     tier: 'ticket',
     category: 'review-pipeline',
@@ -820,11 +813,33 @@ function resolveConflictingPrRepos(env, overrides) {
 }
 
 function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
+  let reviewerPassConfigError = null;
+  let reviewerPassCeiling = { base: 1800, max: DEFAULT_CEILING_MAX_SECONDS };
+  let reviewerPassIdleMs = DEFAULT_IDLE_TIMEOUT_SECONDS * 1000;
+  let reviewerPassLegacyMs = DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS * 1000;
+  try {
+    reviewerPassCeiling = resolveReviewerCeilingConfig(env);
+    reviewerPassIdleMs = resolveReviewerIdleTimeoutSeconds(env) * 1000;
+    reviewerPassLegacyMs = resolveRunningPassTimeoutSeconds(env) * 1000;
+  } catch (err) {
+    reviewerPassConfigError = err?.message || String(err);
+  }
+  const reviewerPassAgeOverrideMs = parsePositiveInteger(
+    overrides.runningReviewerPassMaxAgeMs ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_RUNNING_REVIEWER_PASS_MAX_AGE_MS,
+    null,
+  );
+  const reviewerPassDefaultMaxAgeMs = Math.round(ceilingReapSeconds(reviewerPassCeiling.max) * 1000 * 1.5);
   const ttm = resolveTtmTrackerConfig(env, overrides.ttm || {});
-  const reviewerPoolConfig = resolveFirstPassReviewerPoolConfig({
-    env,
-    logger: overrides.logger || null,
-  });
+  let reviewerPoolConfig = { maxConcurrent: 1 };
+  try {
+    reviewerPoolConfig = resolveFirstPassReviewerPoolConfig({
+      env,
+      logger: overrides.logger || null,
+    });
+  } catch (err) {
+    reviewerPassConfigError = [reviewerPassConfigError, err?.message || String(err)]
+      .filter(Boolean).join('; ');
+  }
   const conflictingPrRepoConfig = resolveConflictingPrRepos(env, overrides);
   return {
     hostChecksEnabled: parseBoolean(
@@ -984,8 +999,13 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
     runningReviewerPassMaxAgeMs: parsePositiveInteger(
       overrides.runningReviewerPassMaxAgeMs
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_RUNNING_REVIEWER_PASS_MAX_AGE_MS,
-      DEFAULT_RUNNING_REVIEWER_PASS_MAX_AGE_MS
+      reviewerPassDefaultMaxAgeMs
     ),
+    reviewerPassAgeOverrideMs,
+    reviewerPassConfigError,
+    reviewerPassIdleMs,
+    reviewerPassLegacyMs,
+    reviewerPassCeiling,
     dagAutowalkMaxLogAgeMs: parsePositiveInteger(
       overrides.dagAutowalkMaxLogAgeMs
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DAG_AUTOWALK_MAX_LOG_AGE_MS,
@@ -1815,7 +1835,7 @@ function summarizeReviewerModelSilence(db, { nowMs, config }) {
 function summarizeReviewerCapacity(db, { nowMs, config }) {
   const cutoffMs = nowMs - config.reviewerDeathRateWindowMs;
   const cutoff = new Date(cutoffMs).toISOString();
-  const runningFreshCutoff = new Date(nowMs - REVIEWER_PASS_REAPER_TIMEOUT_MS).toISOString();
+  const runningFreshCutoff = new Date(nowMs - config.runningReviewerPassMaxAgeMs).toISOString();
   const rows = safeAll(
     db,
     `SELECT pass_kind, started_at, ended_at, status
@@ -3760,28 +3780,54 @@ export function summarizeHammerEfficiency(db, { nowMs = Date.now(), windowMs = 3
 }
 
 function summarizeZombieReviewerPasses(db, { nowMs, config }) {
-  const cutoff = new Date(nowMs - config.runningReviewerPassMaxAgeMs).toISOString();
   const rows = safeAll(
     db,
-    `SELECT repo, pr_number, attempt_number, pass_kind, reviewer_class, started_at, metadata_json
+    `SELECT repo, pr_number, attempt_number, pass_kind, reviewer_class, reasoning_effort, started_at, metadata_json
        FROM reviewer_passes
       WHERE status = 'running'
-        AND started_at < ?
       ORDER BY started_at ASC`,
-    [cutoff]
+    []
   );
-  return {
-    thresholdMs: config.runningReviewerPassMaxAgeMs,
-    rows: rows.map((row) => ({
+  const overdue = rows.flatMap((row) => {
+    const startedMs = parseReviewerPassTimestampMs(row.started_at);
+    if (!Number.isFinite(startedMs)) return [];
+    const metadata = parseJson(row.metadata_json, {});
+    const heartbeatMs = parseReviewerPassTimestampMs(metadata.lastProgressAt);
+    const hasHeartbeat = metadata.heartbeatSupported === true || Number.isFinite(heartbeatMs);
+    const ceilingSeconds = calculateReviewerCeilingSeconds({
+      changedLines: metadata.changedLines,
+      effort: metadata.reasoningEffort || row.reasoning_effort,
+      ...(config.reviewerPassCeiling || resolveReviewerCeilingConfig()),
+    });
+    const grace = 1.5;
+    const age = nowMs - startedMs;
+    const idleAge = nowMs - (Number.isFinite(heartbeatMs) ? heartbeatMs : startedMs);
+    const override = config.reviewerPassAgeOverrideMs ?? Infinity;
+    const ceilingThreshold = ceilingReapSeconds(ceilingSeconds) * 1000 * grace;
+    const idleThreshold = idleReapSeconds((config.reviewerPassIdleMs ?? DEFAULT_IDLE_TIMEOUT_SECONDS * 1000) / 1000) * 1000 * grace;
+    const legacyThreshold = (config.reviewerPassLegacyMs ?? DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS * 1000) * grace;
+    const reason = age >= override ? 'override' : hasHeartbeat
+      ? age >= ceilingThreshold ? 'ceiling' : idleAge >= idleThreshold ? 'idle' : null
+      : age >= legacyThreshold ? 'legacy' : null;
+    if (!reason) return [];
+    const thresholdMs = reason === 'override' ? override : reason === 'ceiling' ? ceilingThreshold
+      : reason === 'idle' ? idleThreshold : legacyThreshold;
+    return [{
       repo: row.repo,
       prNumber: row.pr_number,
       attemptNumber: row.attempt_number,
       passKind: row.pass_kind,
       reviewerClass: row.reviewer_class,
       startedAt: row.started_at,
-      ageMs: ageMs(nowMs, row.started_at),
-      metadata: parseJson(row.metadata_json, {}),
-    })),
+      ageMs: age,
+      thresholdMs,
+      thresholdReason: reason,
+      metadata,
+    }];
+  });
+  return {
+    thresholdMs: config.runningReviewerPassMaxAgeMs,
+    rows: overdue,
   };
 }
 
@@ -4588,6 +4634,19 @@ function buildFinding({ code, tier, subject, message, evidence, recommendedActio
 function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
   const findings = [];
   const { config } = snapshot;
+
+  if (config?.reviewerPassConfigError) {
+    findings.push(buildFinding({
+      code: 'review:reviewer_pass_config_degraded',
+      tier: 'ticket',
+      subject: 'Reviewer timeout health uses default thresholds',
+      message: config.reviewerPassConfigError,
+      evidence: [config.reviewerPassConfigError],
+      recommendedAction: 'Repair the reviewer timeout configuration and rerun pipeline-health.',
+      observedAt,
+      details: { error: config.reviewerPassConfigError },
+    }));
+  }
 
   if (config?.hostChecksEnabled !== false) {
     for (const daemon of snapshot.configSignatureDrift?.daemons || []) {

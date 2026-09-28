@@ -28,6 +28,22 @@ import {
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const MODULE_CONFIG_PATH = join(REPO_ROOT, 'config.yaml');
+
+test('reviewer heartbeat timeout keys accept YAML and environment aliases', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'reviewer-timeout-config-'));
+  try {
+    const topPath = join(dir, 'config.yaml');
+    writeFileSync(topPath, 'version: 1\nreviewer:\n  idle_timeout_seconds: 450\n  ceiling_base_seconds: 2400\n  ceiling_max_seconds: 9000\n');
+    const cfg = loadConfig({ topPath, env: {} });
+    assert.equal(cfg.get('reviewer.idle_timeout_seconds'), 450);
+    assert.equal(cfg.get('reviewer.ceiling_base_seconds'), 2400);
+    assert.equal(cfg.get('reviewer.ceiling_max_seconds'), 9000);
+    const envCfg = loadConfig({ topPath, env: { AGENT_OS_REVIEWER_IDLE_TIMEOUT_SECONDS: '300',
+      ADVERSARIAL_REVIEWER_CEILING_MAX_SECONDS: '7200' } });
+    assert.equal(envCfg.get('reviewer.idle_timeout_seconds'), 300);
+    assert.equal(envCfg.get('reviewer.ceiling_max_seconds'), 7200);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
 const FALLBACK_ROLE_CLASSES = [
   'claude-code',
   'codex',

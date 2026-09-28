@@ -1,9 +1,6 @@
-// Shared subprocess timeout for both reviewer paths (claude + codex). Raised
-// from 10 minutes -> 20 minutes on 2026-05-10 after PR #331's first review
-// attempt hit the 10-minute wall on a substantive spec diff and got
-// classified as `reviewer-timeout`. The separate no-output progress watchdog
-// is intentionally 15 minutes for streaming subprocesses; non-streaming
-// cli-direct reviewer commands disable it and rely on the hard deadline.
+// Legacy reviewer timeout, still used for non-streaming paths. Streamed Claude
+// and Codex reviews use the idle watchdog and scaled ceiling in
+// reviewer-timeout-model.mjs.
 //
 // CFG promotion 2026-06-09: these are now CFG-01 knobs at
 // `reviewer.timeout_ms` and `reviewer.no_progress_timeout_ms`. The legacy
@@ -13,16 +10,8 @@ import { loadRoleConfig } from './role-config.mjs';
 
 const DEFAULT_REVIEWER_TIMEOUT_MS = 20 * 60 * 1000;
 const DEFAULT_PROGRESS_TIMEOUT_MS = 15 * 60 * 1000;
-// DISABLED by default, and that is the contract, not an oversight.
-// `claude --print --output-format json` emits a single JSON document at the END
-// of the turn, so ANY first-output deadline — even a correct one-shot one — caps
-// a healthy review at that value rather than bounding a wedged launch. The
-// governing SPEC records this: cli-direct reviewer subprocesses are non-streaming
-// and rely on the hard reviewer timeout for bounding runtime.
-// Enabling this (reviewer.first_output_timeout_ms > 0) is only safe for a reviewer
-// launched with a streaming output format, where silence genuinely means wedged.
-// Wedged non-streaming invocations are observed instead by the reviewer-silence
-// health signal plus the hard `reviewer.timeout_ms`.
+// Retained for callers with non-streaming CLI output. Streamed reviewers use
+// resolveReviewerIdleTimeoutSeconds and do not arm a first-output timer.
 const DEFAULT_FIRST_OUTPUT_TIMEOUT_MS = 0;
 const DEFAULT_AGY_PRINT_TIMEOUT_MS = 19 * 60 * 1000;
 const AGY_PRINT_TIMEOUT_SUBPROCESS_SLACK_MS = 30 * 1000;

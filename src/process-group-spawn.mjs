@@ -17,11 +17,14 @@ const SUPPORTED_OPTIONS = new Set([
   'killGraceMs',
   'maxBuffer',
   'onSpawn',
+  'onStdoutData',
   'progressTimeout',
+  'progressOnStdoutOnly',
   'reapGroupOnExit',
   'signal',
   'stderrPath',
   'stdoutPath',
+  'stdoutCapture',
   'timeout',
 ]);
 
@@ -128,21 +131,25 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
     input = null,
     timeout = 0,
     progressTimeout = resolveProgressTimeoutMs(env),
+    progressOnStdoutOnly = false,
     // One-shot deadline for the FIRST byte on either pipe. Unlike
     // progressTimeout this is armed once and cleared permanently on first
-    // output, never re-armed — so it bounds a wedged launch without capping
-    // the runtime of a non-streaming CLI that legitimately writes nothing
-    // until the end of its turn (claude --print --output-format json).
+    // output, never re-armed. Legacy non-streaming CLI callers may disable it.
     firstOutputTimeout = 0,
     killGraceMs = DEFAULT_KILL_GRACE_MS,
     maxBuffer = 10 * 1024 * 1024,
     onSpawn,
+    onStdoutData,
     signal,
     failureTailBytes = DEFAULT_FAILURE_TAIL_BYTES,
     stdoutPath = null,
+    stdoutCapture = 'all',
     stderrPath = null,
     reapGroupOnExit = false,
   } = options;
+  if (stdoutCapture !== 'all' && stdoutCapture !== 'tail') {
+    throw new TypeError(`Unsupported stdoutCapture: ${stdoutCapture}`);
+  }
 
   return new Promise((resolve, reject) => {
     const stdoutFd = stdoutPath ? openSync(stdoutPath, 'w') : null;
@@ -355,18 +362,23 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
     child.stdout?.on('data', (data) => {
       if (settled) return;
       noteFirstOutput();
-      armProgressTimer();
-      const next = appendChecked(stdout, stdoutBytes, data);
+      // Streamed CLIs can emit an unbounded transcript. The consumer sees every
+      // chunk, while only a diagnostic tail is retained in this mode.
+      const next = stdoutCapture === 'tail'
+        ? { text: tailText(stdout + dataToText(data), failureTailBytes), bytes: stdoutBytes }
+        : appendChecked(stdout, stdoutBytes, data);
       if (next !== null) {
         stdout = next.text;
         stdoutBytes = next.bytes;
+        const progress = typeof onStdoutData === 'function' ? onStdoutData(dataToText(data)) : true;
+        if (progress !== false) armProgressTimer();
       }
     });
 
     child.stderr?.on('data', (data) => {
       if (settled) return;
       noteFirstOutput();
-      armProgressTimer();
+      if (!progressOnStdoutOnly) armProgressTimer();
       const next = appendChecked(stderr, stderrBytes, data);
       if (next !== null) {
         stderr = next.text;
@@ -399,7 +411,7 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
       settled = true;
       readSideChannelOutput();
       cleanup();
-      if (stdoutBytes > maxBuffer || stderrBytes > maxBuffer) {
+      if ((stdoutCapture === 'all' && stdoutBytes > maxBuffer) || stderrBytes > maxBuffer) {
         const exceeded = stdoutBytes > maxBuffer ? stdoutBytes : stderrBytes;
         const err = new Error(`Command failed: maxBuffer exceeded (${maxBuffer} bytes; saw ${exceeded} bytes)`);
         err.code = code;

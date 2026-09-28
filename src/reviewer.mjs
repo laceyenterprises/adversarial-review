@@ -34,7 +34,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { captureLocalReviewerUsage } from './reviewer-pass-tokens.mjs';
-import { persistHostedReviewerExecution } from './reviewer-execution-pass.mjs';
+import { createReviewerProgressRecorder, persistHostedReviewerExecution } from './reviewer-execution-pass.mjs';
 import { normalizeReviewerFamily } from './reviewer-family.mjs';
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
 import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
@@ -1418,7 +1418,6 @@ function isRetryableGhTransportError(err, { allowAuthRefresh = false, preWriteSa
     || detail.includes('504 gateway timeout');
 }
 
-
 function createReviewerPreWriteLogProxy(log = console) {
   const base = log || console;
   const tracker = { saw401: false };
@@ -2128,6 +2127,9 @@ async function main() {
         : await dispatchReviewerModel(effectiveModel, diff, extraContext, {
             promptStage: reviewerPromptStage,
             reviewerSubprocessCwd,
+            onProgress: createReviewerProgressRecorder({ rootDir: ROOT, repo, prNumber,
+              attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0,
+              passKind, reviewerSessionUuid }),
           });
     } catch (firstErr) {
       if (!oversizedAgyRoute?.oversized || useAgyChunkFallback) throw firstErr;

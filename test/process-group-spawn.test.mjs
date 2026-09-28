@@ -8,6 +8,59 @@ import path from 'node:path';
 import { spawnCapturedProcessGroup } from '../src/process-group-spawn.mjs';
 import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 
+test('stream events renew the rolling watchdog and reach the progress observer', async () => {
+  const chunks = [];
+  const result = await spawnCapturedProcessGroup(process.execPath, ['-e',
+    'let n=0; const t=setInterval(() => { process.stdout.write(JSON.stringify({type:"event",n:++n})+"\\n"); if(n===5) clearInterval(t); }, 300);',
+  ], { progressTimeout: 1000, timeout: 5000, onStdoutData: (chunk) => chunks.push(chunk) });
+  assert.equal(result.stdout.trim().split('\n').length, 5);
+  assert.equal(chunks.join(''), result.stdout);
+});
+
+test('tail capture accepts more than 10 MiB of stream events before the result', async () => {
+  let remainder = '';
+  let resultEvent = null;
+  const result = await spawnCapturedProcessGroup(process.execPath, ['-e',
+    'const line=JSON.stringify({type:"assistant",message:"x".repeat(1024)})+"\\n"; for(let i=0;i<11000;i++) process.stdout.write(line); process.stdout.write(JSON.stringify({type:"result",result:"## Verdict\\nComment only",usage:{output_tokens:7}})+"\\n");',
+  ], {
+    timeout: 10_000,
+    progressTimeout: 5_000,
+    maxBuffer: 10 * 1024 * 1024,
+    stdoutCapture: 'tail',
+    onStdoutData(chunk) {
+      remainder += chunk;
+      const lines = remainder.split('\n');
+      remainder = lines.pop();
+      for (const line of lines) {
+        const event = JSON.parse(line);
+        if (event.type === 'result') resultEvent = event;
+      }
+      return true;
+    },
+  });
+  assert.equal(resultEvent.result, '## Verdict\nComment only');
+  assert.equal(resultEvent.usage.output_tokens, 7);
+  assert.ok(Buffer.byteLength(result.stdout) < 10_000);
+});
+
+test('stderr chatter cannot renew a stream-only watchdog', async () => {
+  await assert.rejects(
+    spawnCapturedProcessGroup(process.execPath, ['-e',
+      'setInterval(() => process.stderr.write("still waiting\\n"), 30);',
+    ], { progressTimeout: 150, progressOnStdoutOnly: true, timeout: 1000 }),
+    (err) => err.progressTimedOut === true,
+  );
+});
+
+test('stdout without a parsed event cannot renew the watchdog', async () => {
+  await assert.rejects(
+    spawnCapturedProcessGroup(process.execPath, ['-e',
+      'setInterval(() => process.stdout.write("noise\\n"), 30);',
+    ], { progressTimeout: 150, timeout: 1000, onStdoutData: () => false }),
+    (err) => err.progressTimedOut === true,
+  );
+});
+
 function boundedTermIgnoringShell(beforeLoop = '') {
   return `parent=$PPID; end=$((SECONDS+30)); trap "" TERM; ${beforeLoop} while (( SECONDS < end )) && kill -0 "$parent" 2>/dev/null; do sleep 1; done`;
 }

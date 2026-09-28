@@ -128,7 +128,6 @@ const AGENT_OS_ROOT = resolve(SUBMODULE_ROOT, '..', '..');
 const DEFAULT_HQ_PATH = '/Users/airlock/.local/bin/hq';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
 const DEFAULT_HQ_ROOT = '/Users/airlock/agent-os-hq';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
 const DEFAULT_PROJECT = 'adversarial-merge-authority';
-const AGENT_OS_TOOLING_REPO = 'agent-os';
 const HAMMER_TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'hammer-prompt.md');
 export const HAM_TERMINAL_REMEDIATION_AUDIT_MARKER = '<!-- hq:ham-terminal-remediation:audit -->';
 const HARNESS_FALLBACK_ALERT_OWNER_WRITE_SCRIPT = `
@@ -2317,9 +2316,9 @@ export function samePrHammerHolderWorktreePaths(errOrText, prNumber, hqRoot) {
   const workersPrefix = typeof hqRoot === 'string' && hqRoot.trim()
     ? join(hqRoot, 'workers') + '/'
     : null;
-  const isCanonicalWorkerWorktreePath = (candidate) => /\/workers\/[^/]+\/agent-os$/.test(candidate);
+  const isCanonicalWorkerWorktreePath = (candidate) => /\/workers\/[^/]+\/[^/]+$/.test(candidate);
   const isReapableHolderPath = (candidate) => {
-    if (!candidate || !candidate.endsWith('/agent-os')) return false;
+    if (!candidate) return false;
     if (!isCanonicalWorkerWorktreePath(candidate)) return false;
     if (workersPrefix) return candidate.startsWith(workersPrefix);
     return true;
@@ -2330,7 +2329,7 @@ export function samePrHammerHolderWorktreePaths(errOrText, prNumber, hqRoot) {
   if (/^[0-9]+$/.test(normalizedPr)) {
     const escapedPr = normalizedPr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const hammerPattern = new RegExp(
-      `(['"]?)(/[^'"\n]*?/workers/hammer-ama-pr-${escapedPr}(?:-[^/'"\n]+)?/agent-os)\\1`,
+      `(['"]?)(/[^'"\n]*?/workers/hammer-ama-pr-${escapedPr}(?:-[^/'"\n]+)?/[^/'"\n]+)\\1`,
       'g',
     );
     for (const match of text.matchAll(hammerPattern)) {
@@ -2346,11 +2345,11 @@ export function samePrHammerHolderWorktreePaths(errOrText, prNumber, hqRoot) {
     // fatal: '<branch>' is already used by worktree at '<PATH>'
     /already used by worktree at\s+(['"])([^'"\n]+)\1/g,
     // [hq] PR branch '<branch>' is already checked out by another worker worktree (<PATH>).
-    /\balready checked out by another worker worktree\s+\((\/[^\n)]+\/agent-os)\)/gi,
+    /\balready checked out by another worker worktree\s+\((\/[^\n)]+\/[^/\n)]+)\)/gi,
     // ... or inspect holder worktree `<PATH>`.
-    /\binspect holder worktree\s+`([^`\n]+\/agent-os)`/gi,
+    /\binspect holder worktree\s+`([^`\n]+\/[^/`\n]+)`/gi,
     // [hq] refusing grace-waived git worktree holder drop for branch '<b>': ...: <PATH>
-    /refusing grace-waived git worktree holder drop[^\n]*?:\s*(\/[^\n'"]+\/agent-os)/g,
+    /refusing grace-waived git worktree holder drop[^\n]*?:\s*(\/[^\n'"]+\/[^/'"\n]+)/g,
   ];
   for (const pattern of holderPatterns) {
     for (const match of text.matchAll(pattern)) {
@@ -2371,6 +2370,20 @@ function selfOwnedHammerCloserWorktreePath(prNumber, hqRoot, workerIdOverride = 
   const root = String(hqRoot || '').trim();
   if (!workerId || !root) return null;
   return join(root, 'workers', workerId, 'agent-os');
+}
+
+async function holderOwningRepo({ worktreePath, hqRoot, repo, execFileImpl, env }) {
+  const repoName = String(repo || '').split('/').at(-1);
+  if (!repoName || basename(worktreePath) !== repoName) {
+    throw new Error('holder repo does not match PR repo');
+  }
+  if (!existsSync(worktreePath)) return join(hqRoot, 'worker-base', repoName);
+  const result = await execFileImpl('git', ['-C', worktreePath, 'rev-parse', '--git-common-dir'], {
+    env, maxBuffer: 1024 * 1024, timeout: 10_000,
+  });
+  const commonDir = String(result.stdout || '').trim();
+  if (!commonDir) throw new Error('holder git common directory is empty');
+  return resolve(worktreePath, commonDir, '..');
 }
 
 // Whether the self-owned hammer closer for this PR is a GENUINELY live in-flight
@@ -2581,6 +2594,14 @@ async function teardownSamePrHammerHolder({
   const attempts = [];
   for (const worktreePath of worktreePaths) {
     const workerId = basename(dirname(worktreePath));
+    let owningRepo;
+    try {
+      owningRepo = await holderOwningRepo({ worktreePath, hqRoot, repo, execFileImpl, env });
+    } catch (ownerErr) {
+      attempts.push({ worktreePath, workerId, action: 'holder-owner-resolution', ok: false,
+        error: String(ownerErr?.message || ownerErr) });
+      continue;
+    }
     let terminality = { terminal: true, reason: 'self-owned-hammer-holder' };
     if (!isSamePrHammerCloserWorkerId(workerId, prNumber)) {
       terminality = await resolveTerminalCodingBranchHolder({
@@ -2618,7 +2639,7 @@ async function teardownSamePrHammerHolder({
     try {
       await execFileImpl('git', [
         '-C',
-        join(hqRoot, 'repos', AGENT_OS_TOOLING_REPO),
+        owningRepo,
         'worktree',
         'remove',
         '--force',
@@ -2661,7 +2682,7 @@ async function teardownSamePrHammerHolder({
       try {
         await execFileImpl('git', [
           '-C',
-          join(hqRoot, 'repos', AGENT_OS_TOOLING_REPO),
+          owningRepo,
           'worktree',
           'prune',
         ], {

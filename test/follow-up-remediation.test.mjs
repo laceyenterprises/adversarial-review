@@ -6967,14 +6967,13 @@ test('resolveRemediationMaxConcurrentJobs clamps runaway env values', () => {
   assert.deepEqual(clampEvents, [{ requested: 1000, clamped: 8 }]);
 });
 
-test('consumeNextFollowUpJob lifts stale medium maxRounds=2 jobs to the current policy floor', async () => {
+test('consumeNextFollowUpJob keeps a persisted medium maxRounds=2 budget and spawns round 2', async () => {
   // Reviewer blocking finding: `resolveRoundBudgetForJob` used to give
   // `riskClass` precedence over the persisted `remediationPlan.maxRounds`.
   // For a legacy job carried forward with `riskClass='medium'` and
-  // `maxRounds=2`, the consume gate must now lift it to the current
-  // medium-tier 3 round budget. That keeps already-created jobs aligned
-  // with the three-round convergence policy without downgrading explicit
-  // higher operator budgets.
+  // a job persisted with `maxRounds=2` (the medium budget since 2026-09-27),
+  // the consume gate must honor the persisted budget and let round 2 spawn.
+  // Persisted budgets are authoritative; nothing lifts or lowers them.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const projectsDir = path.join(rootDir, 'projects', 'fixture-project');
   mkdirSync(projectsDir, { recursive: true });
@@ -7041,19 +7040,18 @@ test('consumeNextFollowUpJob lifts stale medium maxRounds=2 jobs to the current 
     promptTemplate: 'You are a remediation worker.',
   }));
 
-  assert.equal(result.consumed, true, 'stale medium maxRounds=2 must let round 2 spawn');
+  assert.equal(result.consumed, true, 'round 2 is within the two-round policy');
   assert.equal(result.job.status, 'in_progress');
   assert.equal(result.job.riskClass, 'medium', 'riskClass must be preserved on the record');
-  assert.equal(result.job.remediationPlan.maxRounds, 3, 'stale medium cap should lift to current policy');
+  assert.equal(result.job.remediationPlan.maxRounds, 2, 'persisted budget is authoritative');
   assert.equal(result.job.remediationPlan.currentRound, 2);
   assert.equal(spawnCalls.length, 1);
 });
 
-test('consumeNextFollowUpJob still spawns when a high-risk job enters round 3 within budget', async () => {
-  // High-risk PRs get 3 rounds (vs medium=2, low=1). This test pins
-  // the "more rounds for higher risk" semantics: a high-risk job at
-  // currentRound=2 (i.e. about to enter round 3) MUST be allowed to
-  // claim because round 3 is within budget for high.
+test('consumeNextFollowUpJob still spawns when a high-risk job enters round 2 within budget', async () => {
+  // High-risk PRs get 2 rounds (2026-09-27 two-round budget; low=1). This
+  // test pins that a high-risk job at currentRound=1 (about to enter round
+  // 2) MUST be allowed to claim because round 2 is within budget for high.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const projectsDir = path.join(rootDir, 'projects', 'fixture-project');
   mkdirSync(projectsDir, { recursive: true });
@@ -7085,8 +7083,8 @@ test('consumeNextFollowUpJob still spawns when a high-risk job enters round 3 wi
     ...created.job,
     remediationPlan: {
       ...created.job.remediationPlan,
-      currentRound: 2,
-      rounds: [{ round: 1, state: 'completed' }, { round: 2, state: 'completed' }],
+      currentRound: 1,
+      rounds: [{ round: 1, state: 'completed' }],
     },
   });
 
@@ -7121,7 +7119,7 @@ test('consumeNextFollowUpJob still spawns when a high-risk job enters round 3 wi
 
   assert.equal(result.consumed, true);
   assert.equal(result.job.status, 'in_progress');
-  assert.equal(result.job.remediationPlan.currentRound, 3);
+  assert.equal(result.job.remediationPlan.currentRound, 2);
   assert.equal(result.job.remediationWorker.processId, 8127);
   assert.equal(result.job.riskClass, 'high');
   assert.equal(spawnCalls.length, 1);
@@ -7229,7 +7227,7 @@ test('consumeNextFollowUpJob logs a structured deny decision when a remediation 
   assert.equal(result.reason, 'max-rounds-reached');
   assert.match(
     logs.find((line) => line.includes('"event":"remediation-round-budget"')) || '',
-    /"riskClass":"medium".*"runsCompleted":3.*"cap":3.*"decision":"deny"/,
+    /"riskClass":"medium".*"runsCompleted":3.*"cap":2.*"decision":"deny"/,
   );
 });
 

@@ -205,17 +205,17 @@ test('evaluateHammerRetryCap accumulates by logical review job key', () => {
   // A 3rd dispatch on the SAME reviewed-head series exceeds the per-series cap
   // of HAMMER_RETRY_CAP_TOTAL_DISPATCHES (2) and MUST be exhausted — this is the
   // bound that stops a non-converging PR from being re-hammered up to the
-  // lifetime ceiling of 6. Regressed in #532 (3514e00); do not flip back.
+  // lifetime ceiling (4 since the 2026-09-27 two-round budget). Regressed in #532 (3514e00); do not flip back.
   assert.equal(third.capExhausted, true);
   assert.equal(HAMMER_RETRY_CAP_TOTAL_DISPATCHES, 2);
 });
 
-test('hammer lifetime ceiling is injectable, defaults to 6, and 0 disables hammer', () => {
-  assert.equal(HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES, 6);
+test('hammer lifetime ceiling is injectable, defaults to 4, and 0 disables hammer', () => {
+  assert.equal(HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES, 4);
   assert.equal(normalizeHammerLifetimeDispatchCeiling(1), 1);
   assert.equal(normalizeHammerLifetimeDispatchCeiling(3), 3);
   assert.equal(normalizeHammerLifetimeDispatchCeiling(0), 0);
-  assert.equal(normalizeHammerLifetimeDispatchCeiling('nope'), 6);
+  assert.equal(normalizeHammerLifetimeDispatchCeiling('nope'), HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES);
 
   assert.equal(
     evaluateHammerRetryCap(
@@ -2635,7 +2635,7 @@ test('maybeDispatchAmaCloser suppresses after lifetime ceiling and emits operato
   assert.equal(deps.execCalls.length, 0, 'suppression must happen before hq dispatch');
   assert.equal(alertCalls.length, 1);
   assert.equal(alertCalls[0].opts.event, 'hammer_lifetime_ceiling_reached');
-  assert.match(alertCalls[0].text, /6\/3 hammer terminal-remediation dispatches/);
+  assert.match(alertCalls[0].text, /4\/3 hammer terminal-remediation dispatches/);
   assert.match(alertCalls[0].text, /Daemon failing gates: verdict-not-eligible, stale-head/);
   assert.equal(alertCalls[0].opts.payload.cap, 3);
   assert.equal(

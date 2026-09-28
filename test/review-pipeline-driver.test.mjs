@@ -161,8 +161,8 @@ test('the resolved budget plan caps the subject-level remediation ceiling', asyn
   const res = await runReviewPipeline({
     resolvedPipeline: resolved(), currentRevisionRef: REV, riskClass: 'critical', observedAt: '2026-07-17T00:00:00Z', runStageReview,
   });
-  // critical per-stage budget 4 + 4 = 8, capped at DEFAULT_REMEDIATION_CEILING_CAP (8).
-  assert.equal(res.budget.ceiling, 8);
+  // critical per-stage budget 2 + 2 = 4, capped at DEFAULT_REMEDIATION_CEILING_CAP (4).
+  assert.equal(res.budget.ceiling, 4);
   assert.equal(res.budget.riskClass, 'critical');
 });
 

@@ -383,7 +383,7 @@ test('createFollowUpJob writes the pending job JSON under data/follow-up-jobs/pe
   assert.equal(persisted.recommendedFollowUpAction.priority, 'high');
   assert.equal(persisted.riskClass, 'high');
   // High risk = 3 rounds (more iterations before halting for operator).
-  assert.equal(persisted.remediationPlan.maxRounds, 3);
+  assert.equal(persisted.remediationPlan.maxRounds, 2);
   assert.equal(statSync(jobPath).mode & 0o777, 0o644);
 });
 
@@ -1357,7 +1357,7 @@ test('resolveRoundBudgetForJob falls back to medium for spec-less jobs', () => {
   assert.equal(resolution.riskClass, 'medium');
   // Convergence loop default (post-2026-08-21): medium = 3 rounds —
   // initial remediation + two auto-retries.
-  assert.equal(resolution.roundBudget, 3);
+  assert.equal(resolution.roundBudget, 2);
 });
 
 test('resolveRoundBudgetForJob resolves risk class from plan mapping sidecars', () => {
@@ -1378,7 +1378,7 @@ test('resolveRoundBudgetForJob resolves risk class from plan mapping sidecars', 
   // critical risk = 4 rounds: maximum bot iterations before halting
   // for operator. Pulling operator attention is most expensive on
   // critical PRs, so we let the bot try harder first.
-  assert.equal(resolution.roundBudget, 4);
+  assert.equal(resolution.roundBudget, 2);
 });
 
 test('resolveRoundBudgetForJob falls back to medium when the linked plan file is corrupt', () => {
@@ -1397,7 +1397,7 @@ test('resolveRoundBudgetForJob falls back to medium when the linked plan file is
   }, { rootDir, preferPersisted: false });
 
   assert.equal(resolution.riskClass, 'medium');
-  assert.equal(resolution.roundBudget, 3);
+  assert.equal(resolution.roundBudget, 2);
 });
 
 test('summarizePRRemediationLedger excludes terminal jobs without a spawned remediation worker', () => {
@@ -5119,3 +5119,4 @@ test('reapTerminalFollowUpWorkspaces relaunches the deleter for pending trash', 
 
   assert.deepEqual(backgroundCalls.map((target) => realpathSync(target)), [realpathSync(trashDir)]);
 });
+

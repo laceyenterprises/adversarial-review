@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -744,6 +744,121 @@ test('requestReviewRereview preserves attempt history and records rereview metad
   assert.equal(result.reviewRow.infra_auto_recover_attempts, 0);
   assert.equal(result.reviewRow.rereview_requested_at, '2026-04-24T12:10:00.000Z');
   assert.equal(result.reviewRow.rereview_reason, 'Remediation landed and is ready for another adversarial pass.');
+});
+
+test('requestReviewRereview refuses a head with a settled comment-only verdict', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const head = 'a'.repeat(40);
+  insertReviewRow(rootDir, { revisionRef: head });
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    db.prepare(`INSERT INTO reviewer_passes (
+      repo, pr_number, attempt_number, reviewer_class, reviewer_model,
+      pass_kind, started_at, ended_at, status, head_sha, verdict, body_md
+    ) VALUES (?, ?, 1, 'gemini', 'gemini', 'first-pass', ?, ?, 'completed', ?, 'comment-only', ?)`)
+      .run('laceyenterprises/adversarial-review', 10,
+        '2026-04-24T12:00:00.000Z', '2026-04-24T12:06:00.000Z', head,
+        '## Blocking issues\n- None.\n## Verdict\nComment only');
+  } finally {
+    db.close();
+  }
+  const result = requestReviewRereview({
+    rootDir, repo: 'laceyenterprises/adversarial-review', prNumber: 10,
+    targetRevisionRef: head, reason: 'Different reviewer requested a pass.',
+  });
+  assert.equal(result.triggered, false);
+  assert.equal(result.reason, 'comment-only-verdict-settled');
+  const after = openReviewStateDb(rootDir);
+  try {
+    assert.equal(after.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number = 10').get().review_status, 'posted');
+  } finally {
+    after.close();
+  }
+});
+
+test('moved head after a settled comment-only review re-arms with no completed final round', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const oldHead = 'a'.repeat(40);
+  const newHead = 'b'.repeat(40);
+  insertReviewRow(rootDir, { revisionRef: oldHead, reviewerHeadSha: oldHead });
+  const pendingDir = path.join(rootDir, 'data', 'follow-up-jobs', 'stopped');
+  mkdirSync(pendingDir, { recursive: true });
+  writeFileSync(path.join(pendingDir, 'laceyenterprises__adversarial-review-pr-10-stopped.json'),
+    JSON.stringify({ repo: 'laceyenterprises/adversarial-review', prNumber: 10,
+      revisionRef: oldHead, status: 'stopped', finalRound: 'comment-only',
+      reviewBody: '## Verdict\nComment only' }));
+  const result = requestReviewRereview({
+    rootDir, repo: 'laceyenterprises/adversarial-review', prNumber: 10,
+    targetRevisionRef: newHead, reason: 'auto-refresh: PR head moved',
+  });
+  assert.equal(result.triggered, true);
+  assert.equal(result.reviewRow.revision_ref, newHead);
+});
+
+test('explicit operator retrigger overrides settled comment-only head', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const head = 'a'.repeat(40);
+  insertReviewRow(rootDir, { revisionRef: head, reviewerHeadSha: head });
+  const pendingDir = path.join(rootDir, 'data', 'follow-up-jobs', 'pending');
+  mkdirSync(pendingDir, { recursive: true });
+  writeFileSync(path.join(pendingDir, 'laceyenterprises__adversarial-review-pr-10-review.json'),
+    JSON.stringify({ repo: 'laceyenterprises/adversarial-review', prNumber: 10,
+      revisionRef: head, reviewBody: '## Verdict\nComment only' }));
+  const result = requestReviewRereview({
+    rootDir, repo: 'laceyenterprises/adversarial-review', prNumber: 10,
+    targetRevisionRef: head, reason: 'retrigger-review: operator requested review',
+  });
+  assert.equal(result.triggered, true);
+});
+
+test('requestReviewRereview refuses the final-round worker head but admits later heads', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const oldHead = 'a'.repeat(40);
+  const newHead = 'b'.repeat(40);
+  insertReviewRow(rootDir, { revisionRef: oldHead });
+  const completedDir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(completedDir, { recursive: true });
+  writeFileSync(path.join(completedDir, 'laceyenterprises__adversarial-review-pr-10-final.json'),
+    JSON.stringify({ repo: 'laceyenterprises/adversarial-review', prNumber: 10,
+      status: 'completed', finalRound: 'comment-only',
+      completion: { workerPushedHeadSha: newHead },
+      reReview: { suppressed: 'comment-only-final-round' } }));
+  const result = requestReviewRereview({
+    rootDir, repo: 'laceyenterprises/adversarial-review', prNumber: 10,
+    targetRevisionRef: newHead, reason: 'Another model asks for a pass.',
+  });
+  assert.equal(result.reason, 'comment-only-final-round-completed');
+  assert.equal(result.triggered, false);
+  const operator = requestReviewRereview({
+    rootDir, repo: 'laceyenterprises/adversarial-review', prNumber: 10,
+    targetRevisionRef: newHead, reason: 'retrigger-review: operator requests another pass',
+  });
+  assert.equal(operator.triggered, true);
+  const later = requestReviewRereview({
+    rootDir, repo: 'laceyenterprises/adversarial-review', prNumber: 10,
+    targetRevisionRef: 'c'.repeat(40), reason: 'New author commit needs review.',
+  });
+  assert.equal(later.status, 'already-pending');
+  assert.equal(later.reviewRow.revision_ref, 'c'.repeat(40));
+});
+
+test('requestReviewRereview sees settled comment-only from a job before body capture', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const head = 'c'.repeat(40);
+  insertReviewRow(rootDir, { revisionRef: head });
+  const pendingDir = path.join(rootDir, 'data', 'follow-up-jobs', 'pending');
+  mkdirSync(pendingDir, { recursive: true });
+  writeFileSync(path.join(pendingDir, 'laceyenterprises__adversarial-review-pr-10-review.json'),
+    JSON.stringify({ repo: 'laceyenterprises/adversarial-review', prNumber: 10,
+      revisionRef: head,
+      reviewBody: '## Blocking issues\n- None.\n## Non-blocking issues\n- Fix docs.\n## Verdict\nComment only' }));
+  const result = requestReviewRereview({
+    rootDir, repo: 'laceyenterprises/adversarial-review', prNumber: 10,
+    targetRevisionRef: head, reason: 'Third reviewer asks for same head.',
+  });
+  assert.equal(result.reason, 'comment-only-verdict-settled');
+  assert.equal(result.triggered, false);
 });
 
 test('requestReviewRereview resets moved pending rows independent of reviewer handle residue', () => {

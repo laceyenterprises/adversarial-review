@@ -517,6 +517,27 @@ test('maybeDispatchAmaCloser dispatches comment-only terminal unknown non-blocki
   assert.equal(ledger.attemptCount, 1);
 });
 
+test('maybeDispatchAmaCloser takes a green descendant after comment-only final remediation', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-cap-comment-only-final-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const deps = hammerDispatchDeps();
+  const result = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir, {
+      reviewState: { nonBlockingFindingCount: 1 },
+      prMetadata: {
+        headSha: 'a'.repeat(40),
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
+        ],
+      },
+      dispatchContext: { commentOnlyFinalRoundResume: true },
+    }),
+    ...deps,
+  });
+  assert.equal(result.dispatched, true);
+  assert.equal(deps.execCalls.length, 1);
+});
+
 test('maybeDispatchAmaCloser dispatches clean comment-only terminal verdict-only misses after grace', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'hammer-cap-comment-only-clean-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

@@ -627,3 +627,66 @@ test('recoverable GitHub-auth retry routes unmapped worker identities through th
   assert.equal(rereviewCalls.length, 1);
   assert.equal(rereviewCalls[0].targetRevisionRef, '2222222222222222222222222222222222222222');
 });
+
+test('comment-only final round recovers GitHub auth and resumes without requesting re-review', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'comment-only-auth-'));
+  const hqRoot = path.join(rootDir, 'hq');
+  const adapterRoot = makeGhAdapterRoot(rootDir);
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 432 });
+  const job = {
+    ...claimed.job, finalRound: 'comment-only', branch: 'comment-only-auth-rescue',
+    headSha: '1111111111111111111111111111111111111111',
+  };
+  writeFileSync(claimed.jobPath, `${JSON.stringify(job, null, 2)}\n`, 'utf8');
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  writeFileSync(outputPath, 'worker hit GitHub auth while pushing\n', 'utf8');
+  const { replyDir, replyPath } = resolveHqReplyPath({ hqRoot, launchRequestId: job.jobId });
+  mkdirSync(replyDir, { recursive: true });
+  writeValidReply(replyPath, job, {
+    outcome: 'blocked',
+    operationalBlockers: [{
+      title: 'github-auth', category: 'github-auth',
+      finding: 'bad credentials while pushing remediated commit',
+      commitSha: '2222222222222222222222222222222222222222',
+      expectedRemoteSha: job.headSha, reasoning: 'token expired',
+    }],
+  });
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath, spawnedAt: '2026-05-04T09:01:00.000Z',
+    worker: {
+      model: 'codex', processId: 9004, state: 'spawned',
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      replyPath,
+    },
+  });
+  const previousAdapterRoot = process.env.HQ_REPO_ROOT;
+  process.env.HQ_REPO_ROOT = adapterRoot;
+  try {
+    await withHqRootEnv(hqRoot, async () => {
+      const execCalls = [];
+      const result = await reconcileFollowUpJob({
+        rootDir, job: spawned.job, jobPath: spawned.jobPath,
+        now: () => '2026-05-04T09:30:00.000Z',
+        isWorkerRunning: () => false,
+        resolvePRLifecycleImpl: async () => null,
+        requestReviewRereviewImpl: () => { throw new Error('final round must not re-review'); },
+        execFileImpl: async (command) => {
+          execCalls.push(command);
+          return { stdout: '', stderr: '' };
+        },
+        log: { warn: () => {}, error: () => {} },
+      });
+      assert.equal(result.action, 'requeued');
+      assert.equal(result.reason, 'worker-killed-resume');
+      assert.ok(execCalls.includes('bash'), 'recovery retried the push with refreshed auth');
+    });
+  } finally {
+    if (previousAdapterRoot === undefined) delete process.env.HQ_REPO_ROOT;
+    else process.env.HQ_REPO_ROOT = previousAdapterRoot;
+  }
+});

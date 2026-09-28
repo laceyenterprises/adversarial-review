@@ -99,6 +99,8 @@ test('summarizePRRemediationLedger returns zero counts for a PR with no follow-u
     latestJobId: null,
     completedRoundTimestamps: [],
     completedRemediationRevisionRefs: [],
+    commentOnlyFinalRoundRevisionRefs: [],
+    commentOnlyFinalRoundPushedHeads: [],
   });
 });
 

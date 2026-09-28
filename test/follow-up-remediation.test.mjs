@@ -656,6 +656,26 @@ test('buildRemediationPrompt carries job context and follow-up operating rules',
   assert.match(prompt, /git status --porcelain --untracked-files=all/);
 });
 
+test('comment-only final remediation prompt directs one round and closer handoff', () => {
+  const prompt = buildRemediationPrompt(makeJob({ finalRound: 'comment-only' }), {
+    template: 'You are a remediation worker.',
+    ...testReplyContext(),
+  });
+  assert.match(prompt, /Comment-only final round \(authoritative\)/);
+  assert.match(prompt, /Address or explicitly account for its non-blocking findings/);
+  assert.match(prompt, /AMA closer takes the PR/);
+  assert.match(prompt, /reReview\.requested = false/);
+  assert.doesNotMatch(prompt, /Convergence rule \(load-bearing\): if you believe/);
+  const stagedPrompt = buildRemediationPrompt(makeJob({ finalRound: 'comment-only' }), testReplyContext());
+  assert.doesNotMatch(stagedPrompt, /The PR currently carries an adversarial review with verdict `Request changes`/);
+  const trailingSectionPrompt = buildRemediationPrompt(makeJob({ finalRound: 'comment-only' }), {
+    template: '## Convergence rule (load-bearing)\nOld rule.\n\n## Later instructions\nKeep this section.',
+    ...testReplyContext(),
+  });
+  assert.match(trailingSectionPrompt, /## Later instructions\nKeep this section\./);
+  assert.doesNotMatch(trailingSectionPrompt, /Old rule\./);
+});
+
 test('buildRemediationPrompt turns CI-regression retries into a concrete remediation objective', () => {
   const prompt = buildRemediationPrompt(makeJob({
     remediationPlan: {
@@ -10611,6 +10631,60 @@ test('reconcileFollowUpJob reads remediation replies from HQ storage before any 
       false
     );
     assert.deepEqual(warnings, []);
+  });
+});
+
+test('completed comment-only final job suppresses re-review and wakes the closer', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = path.join(rootDir, 'hq');
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 183, revisionRef: 'a'.repeat(40) });
+  const job = { ...claimed.job, finalRound: 'comment-only', nonBlockingOnly: true };
+  writeFollowUpJob(claimed.jobPath, job);
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  writeFileSync(outputPath, 'worker output\n', 'utf8');
+  const { replyDir, replyPath } = resolveHqReplyPath({ hqRoot, launchRequestId: job.jobId });
+  mkdirSync(replyDir, { recursive: true });
+  writeValidReply(replyPath, job, {
+    reReview: { requested: true, reason: 'Worker still asks for another review.' },
+  });
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'codex', processId: 9507, state: 'spawned',
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      replyPath,
+    },
+  });
+  await withHqRootEnv(hqRoot, async () => {
+    const wakes = [];
+    const result = await reconcileFollowUpJob({
+      rootDir, job: spawned.job, jobPath: spawned.jobPath,
+      now: () => '2026-04-21T10:30:00.000Z',
+      isWorkerRunning: () => false,
+      resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: 'b'.repeat(40) }),
+      execFileImpl: async (command, args) => {
+        if (command === 'gh') return { stdout: args[0] === 'api' ? 'ahead\n' : `${'b'.repeat(40)}\n` };
+        assert.equal(command, 'git');
+        if (args.includes('show')) return { stdout: `Worker-Job-Id: ${job.jobId}\n` };
+        assert.deepEqual(args.slice(-2), ['rev-parse', 'HEAD']);
+        return { stdout: `${'b'.repeat(40)}\n` };
+      },
+      auditWorkspaceForContaminationImpl: cleanContaminationAudit,
+      requestReviewRereviewImpl: () => { throw new Error('final round must not re-review'); },
+      requestWatcherWakeImpl: (wake) => { wakes.push(wake); return { requested: true }; },
+      log: { warn: () => {}, error: () => {} },
+    });
+    assert.equal(result.action, 'completed');
+    assert.equal(result.job.reReview.suppressed, 'comment-only-final-round');
+    assert.equal(result.job.completion.workerPushedHeadSha, 'b'.repeat(40));
+    assert.equal(wakes.length, 1);
+    assert.equal(wakes[0].reason, 'comment-only-final-round-completed');
   });
 });
 

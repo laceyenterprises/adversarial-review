@@ -51,7 +51,16 @@ function testFiles() {
   const adapters = readdirSync(adaptersDir)
     .filter((name) => name.endsWith('.test.mjs'))
     .map((name) => path.join(adaptersDir, name));
-  return [...topLevel, ...adapters].sort();
+  const files = [...topLevel, ...adapters].sort();
+  const requested = process.argv.slice(2);
+  if (requested.length === 0) return files;
+  const selected = files.filter((file) => requested.some((name) => (
+    path.resolve(repoRoot, name) === file || path.basename(file) === name
+  )));
+  if (selected.length !== requested.length) {
+    throw new Error(`Expected ${requested.length} test files, found ${selected.length}`);
+  }
+  return selected;
 }
 
 const checkoutDataExistedBefore = existsSync(checkoutDataDir);

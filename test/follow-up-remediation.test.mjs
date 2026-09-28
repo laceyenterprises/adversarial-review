@@ -656,6 +656,18 @@ test('buildRemediationPrompt carries job context and follow-up operating rules',
   assert.match(prompt, /git status --porcelain --untracked-files=all/);
 });
 
+test('comment-only final remediation prompt directs one round and closer handoff', () => {
+  const prompt = buildRemediationPrompt(makeJob({ finalRound: 'comment-only' }), {
+    template: 'You are a remediation worker.',
+    ...testReplyContext(),
+  });
+  assert.match(prompt, /Comment-only final round \(authoritative\)/);
+  assert.match(prompt, /Address or explicitly account for its non-blocking findings/);
+  assert.match(prompt, /AMA closer takes the PR/);
+  assert.match(prompt, /reReview\.requested = false/);
+  assert.doesNotMatch(prompt, /Convergence rule \(load-bearing\): if you believe/);
+});
+
 test('buildRemediationPrompt turns CI-regression retries into a concrete remediation objective', () => {
   const prompt = buildRemediationPrompt(makeJob({
     remediationPlan: {

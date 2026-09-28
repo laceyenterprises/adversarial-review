@@ -103,6 +103,9 @@ export function buildRemediationPrompt(job, {
     maxRemediationRounds,
   });
   const promptTemplate = template ?? loadFollowUpPromptTemplate(ROOT, { stage: remediatorPromptStage });
+  const commentOnlyFinal = job?.finalRound === 'comment-only';
+  const finalRoundRules = `## Comment-only final round (authoritative)
+This PR has a settled Comment only verdict. Address or explicitly account for its non-blocking findings in this one final remediation round. Do not request another adversarial review. Set \`reReview.requested = false\` and \`reReview.reason = null\` on success. The AMA closer takes the PR after completion and green required checks. Instructions elsewhere in this template that say to request re-review or assume a Request changes verdict do not apply to this job.`;
   const criticality = job.critical ? 'critical' : 'non-critical';
   const ticketLabel = job.linearTicketId || 'None provided';
   const baseBranch = requireJobBaseBranch(job);
@@ -152,7 +155,7 @@ export function buildRemediationPrompt(job, {
     HQ_ROOT: replyContext.hqRoot || '',
     LRQ_ID: replyContext.launchRequestId || '',
   }, { strict: true });
-  return `${interpolatedTemplate}
+  return `${commentOnlyFinal ? `${finalRoundRules}\n\n` : ''}${interpolatedTemplate}
 
 ## Trusted Job Metadata
 ${formatFencedBlock(JSON.stringify(trustedMetadata, null, 2), 'json')}
@@ -194,8 +197,9 @@ ${formatFencedBlock(job.reviewBody, 'markdown')}${governingDocContext}${buildObv
 - Do not open a new PR; this job is for an existing PR follow-up.
 - Use OAuth-backed authentication only; do not rely on API key fallbacks.
 - Write a machine-readable remediation reply JSON file to the remediation reply artifact path from the trusted metadata.
-- Convergence rule (load-bearing): if you believe the review findings are addressed, set \`reReview.requested\` to \`true\` in that JSON reply — this is the default success path. The PR's existing \`Request changes\` verdict is what blocks the automerge gate, and only a fresh adversarial pass can replace it. Set \`reReview.requested\` to \`false\` ONLY when you are deliberately exiting and a human needs to step in (use the \`blockers\` array to explain). Do not rely on prose alone.
-- When \`reReview.requested\` is \`true\`, \`reReview.reason\` MUST be a short non-empty string explaining why the PR is ready for another adversarial pass — \`null\` is rejected by the validator. The \`reReview.reason\` field is \`null\` ONLY when \`requested\` is \`false\`.
+${commentOnlyFinal
+    ? '- This is the final comment-only remediation. Address the non-blocking findings, set `reReview.requested = false` and `reReview.reason = null`, and let the AMA closer merge after required checks pass.'
+    : '- Convergence rule (load-bearing): if you believe the review findings are addressed, set `reReview.requested` to `true` in that JSON reply — this is the default success path. The PR\'s existing `Request changes` verdict is what blocks the automerge gate, and only a fresh adversarial pass can replace it. Set `reReview.requested` to `false` ONLY when you are deliberately exiting and a human needs to step in (use the `blockers` array to explain). Do not rely on prose alone.\n- When `reReview.requested` is `true`, `reReview.reason` MUST be a short non-empty string explaining why the PR is ready for another adversarial pass — `null` is rejected by the validator. The `reReview.reason` field is `null` ONLY when `requested` is `false`.'}
 - In your final message, report validation run and files changed.
 
 ## Required Remediation Reply Contract

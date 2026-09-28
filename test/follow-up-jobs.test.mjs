@@ -414,6 +414,24 @@ test('createFollowUpJob persists settled-clean follow-up text for comment-only r
   assert.doesNotMatch(job.recommendedFollowUpAction.summary, /blocking review findings|adversarial review findings/i);
 });
 
+test('comment-only findings create a final remediation job; blocking findings do not', (t) => {
+  const rootDir = makeTempRoot(t);
+  const commentOnly = createFollowUpJob({
+    ...makeJobInput(rootDir),
+    reviewBody: '## Blocking issues\n- None.\n## Non-blocking issues\n- Fix documentation.\n## Verdict\nComment only',
+    critical: false,
+  }).job;
+  assert.equal(commentOnly.nonBlockingOnly, true);
+  assert.equal(commentOnly.finalRound, 'comment-only');
+  const blocking = buildFollowUpJob({
+    ...makeJobInput(rootDir),
+    reviewBody: '## Blocking issues\n- Fix auth.\n## Non-blocking issues\n- None.\n## Verdict\nRequest changes',
+    critical: true,
+  });
+  assert.equal(blocking.nonBlockingOnly, false);
+  assert.equal(blocking.finalRound, undefined);
+});
+
 test('archiveStoppedFollowUpJobs moves only stopped entries at least 24h old into month archive', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const stoppedDir = getFollowUpJobDir(rootDir, 'stopped');

@@ -10,6 +10,8 @@ import {
 } from './follow-up-jobs.mjs';
 import { getConfig } from './config-loader.mjs';
 import { recordReviewLatencyEvent } from './review-latency-event-writer.mjs';
+import { readReviewerRunRecord, TERMINAL_RUN_STATES } from './adapters/reviewer-runtime/run-state.mjs';
+import { calculateReviewerCeilingSeconds, resolveReviewerCeilingConfig, resolveReviewerIdleTimeoutSeconds } from './reviewer-timeout-model.mjs';
 import {
   resolveHandoffConfig,
   signalFollowUpDaemonWake,
@@ -204,12 +206,19 @@ const ACTIVE_REVIEW_CLAIM_PREDICATE = `(
           )
         )`;
 
-function buildTimeoutFailureMessage({ thresholdSeconds, ageSeconds, capExhausted = false } = {}) {
+function buildTimeoutFailureMessage({ thresholdSeconds, ageSeconds, reason = RUNNING_PASS_TIMEOUT_FAILURE_REASON, capExhausted = false } = {}) {
   const suffix = capExhausted
     ? `; infra auto-recovery cap exhausted`
     : '';
   return `[${RUNNING_PASS_TIMEOUT_FAILURE_CLASS}] Reviewer pass timed out while still running ` +
-    `after ${ageSeconds}s (threshold=${thresholdSeconds}s, reason=${RUNNING_PASS_TIMEOUT_FAILURE_REASON})${suffix}.`;
+    `after ${ageSeconds}s (threshold=${thresholdSeconds}s, reason=${reason})${suffix}.`;
+}
+
+function reviewerProcessAlive(pgid) {
+  if (!Number.isInteger(Number(pgid)) || Number(pgid) <= 0) return null;
+  try { process.kill(-Number(pgid), 0); return true; } catch (err) {
+    return err?.code === 'ESRCH' ? false : null;
+  }
 }
 
 function reapRunningPassTimeouts({
@@ -226,23 +235,22 @@ function reapRunningPassTimeouts({
   signalFollowUpDaemonWakeImpl = signalFollowUpDaemonWake,
   reviewBodyHasScopeViolationFindingImpl = reviewBodyHasScopeViolationFinding,
   recordReviewLatencyEventImpl = recordReviewLatencyEvent,
+  isReviewerAlive = reviewerProcessAlive,
   now = () => new Date(),
 } = {}) {
   const thresholdSeconds = resolveRunningPassTimeoutSeconds();
+  const idleSeconds = resolveReviewerIdleTimeoutSeconds();
+  const ceilingConfig = resolveReviewerCeilingConfig();
   const rows = db.prepare(
     `SELECT pass_id, repo, pr_number, attempt_number, pass_kind, reviewer_class, reviewer_model,
-            started_at, metadata_json, head_sha, gh_comment_id, body_captured_at, verdict, body_md
+            started_at, metadata_json, reasoning_effort, head_sha, gh_comment_id, body_captured_at, verdict, body_md
        FROM reviewer_passes
       WHERE status = 'running'
-        AND ended_at IS NULL
-        AND (
-          (gh_comment_id IS NOT NULL AND gh_comment_id <> '')
-          OR datetime(started_at) < datetime('now', '-' || ? || ' seconds')
-        )`
-  ).all(thresholdSeconds);
+        AND ended_at IS NULL`
+  ).all();
 
   const getReviewRow = db.prepare(
-    `SELECT review_status, reviewer_session_uuid, reviewer_started_at, reviewer_head_sha,
+    `SELECT review_status, reviewer_session_uuid, reviewer_pgid, reviewer_started_at, reviewer_head_sha,
             revision_ref, reviewer, linear_ticket, infra_auto_recover_attempts
        FROM reviewed_prs
       WHERE repo = ?
@@ -480,17 +488,42 @@ function reapRunningPassTimeouts({
         });
         continue;
       }
-      const failureMessage = buildTimeoutFailureMessage({ thresholdSeconds, ageSeconds });
+      const passMetadata = parseMetadataJson(row.metadata_json);
+      const heartbeatMs = parseTimestampMs(passMetadata.lastProgressAt);
+      const hasHeartbeat = passMetadata.heartbeatSupported === true || heartbeatMs !== null;
+      const ceilingSeconds = calculateReviewerCeilingSeconds({
+        changedLines: passMetadata.changedLines,
+        effort: passMetadata.reasoningEffort || row.reasoning_effort,
+        ...ceilingConfig,
+      });
+      const currentReview = getReviewRow.get(row.repo, row.pr_number);
+      const sessionUuid = reviewerSessionUuidFromPass(row);
+      const sameSession = sessionUuid && currentReview?.reviewer_session_uuid === sessionUuid;
+      const runRecord = sessionUuid ? readReviewerRunRecord(rootDir, sessionUuid) : null;
+      const ownsPass = sameSession || !currentReview;
+      const alive = ownsPass ? isReviewerAlive(currentReview?.reviewer_pgid || runRecord?.pgid) : null;
+      const reviewerGone = ownsPass && (alive === false ||
+        (runRecord && TERMINAL_RUN_STATES.has(runRecord.state)));
+      const idleAgeSeconds = Math.floor((observedNow.getTime() - (heartbeatMs ?? startedMs)) / 1000);
+      const failureReason = reviewerGone ? 'reviewer-dead'
+        : hasHeartbeat && ageSeconds >= ceilingSeconds ? 'reviewer-ceiling'
+          : hasHeartbeat && idleAgeSeconds >= idleSeconds ? 'reviewer-stalled'
+            : !hasHeartbeat && ageSeconds >= thresholdSeconds ? 'running-pass-timeout-legacy' : null;
+      if (!failureReason) continue;
+      const effectiveThresholdSeconds = failureReason === 'reviewer-ceiling' ? ceilingSeconds
+        : failureReason === 'reviewer-stalled' ? idleSeconds : thresholdSeconds;
+      const failureMessage = buildTimeoutFailureMessage({ thresholdSeconds: effectiveThresholdSeconds, ageSeconds, reason: failureReason });
       const capFailureMessage = buildTimeoutFailureMessage({
-        thresholdSeconds,
+        thresholdSeconds: effectiveThresholdSeconds,
         ageSeconds,
+        reason: failureReason,
         capExhausted: true,
       });
       const metadata = {
-        ...parseMetadataJson(row.metadata_json),
+        ...passMetadata,
         failureClass: RUNNING_PASS_TIMEOUT_FAILURE_CLASS,
-        failureReason: RUNNING_PASS_TIMEOUT_FAILURE_REASON,
-        timeoutThresholdSeconds: thresholdSeconds,
+        failureReason,
+        timeoutThresholdSeconds: effectiveThresholdSeconds,
       };
       const result = settleTimedOutPass({
         row,
@@ -523,8 +556,8 @@ function reapRunningPassTimeouts({
       }
       log.log(
         `[watcher] reviewer-pass reaper: pr=${row.repo}#${row.pr_number} reviewer=${row.reviewer_model || row.reviewer_class}\n` +
-        `          pass_id=${row.pass_id} status running->failed reason=${RUNNING_PASS_TIMEOUT_FAILURE_REASON}\n` +
-        `          age=${ageSeconds}s threshold=${thresholdSeconds}s review_claim=${result.reviewChanged ? 'settled' : 'unchanged'}`
+        `          pass_id=${row.pass_id} status running->failed reason=${failureReason}\n` +
+        `          age=${ageSeconds}s threshold=${effectiveThresholdSeconds}s review_claim=${result.reviewChanged ? 'settled' : 'unchanged'}`
       );
       reaped++;
       recordReapEvent(row, {
@@ -536,7 +569,7 @@ function reapRunningPassTimeouts({
         source: 'reviewer-pass-reaper',
         sourceRef: String(row.pass_id),
         idempotencyKey: `reviewer-pass-reaped:${row.pass_id}`,
-        reason: RUNNING_PASS_TIMEOUT_FAILURE_REASON,
+        reason: failureReason,
         payload: { passId: row.pass_id, outcome: result.reviewChanged ? 'capacity-released' : 'pass-only' },
       });
     } catch (err) {

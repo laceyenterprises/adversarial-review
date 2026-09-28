@@ -2967,10 +2967,22 @@ test('resolveClaudeLaunchctlUidForSpawn requires configured admin UID on darwin'
   );
 });
 
-test('buildClaudeReviewArgs requests json output for exact usage capture', () => {
+test('buildClaudeReviewArgs requests streamed JSON output for progress and exact usage capture', () => {
   const args = buildClaudeReviewArgs('the prompt');
   const oIdx = args.indexOf('--output-format');
-  assert.ok(oIdx >= 0 && args[oIdx + 1] === 'json', 'must pass --output-format json');
+  assert.ok(oIdx >= 0 && args[oIdx + 1] === 'stream-json', 'must pass --output-format stream-json');
+  assert.ok(args.includes('--verbose'));
+});
+
+test('parseClaudeJsonOutput extracts the final verdict from stream events', () => {
+  const raw = [
+    JSON.stringify({ type: 'system', subtype: 'init' }),
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'working' }] } }),
+    JSON.stringify({ type: 'result', result: '## Verdict\nComment only', usage: { input_tokens: 42 } }),
+  ].join('\n');
+  const parsed = parseClaudeJsonOutput(raw);
+  assert.equal(parsed.reviewText, '## Verdict\nComment only');
+  assert.equal(parsed.tokenUsage.input, 42);
 });
 
 test('parseClaudeJsonOutput extracts review text + exact usage (no transcript needed)', () => {
@@ -3042,7 +3054,7 @@ test('Claude review invocation passes prompt as argv in cli-direct shape', async
   assert.deepEqual(calls, [
     {
       command: CLAUDE_CLI,
-      args: ['--print', '--output-format', 'json', '--permission-mode', 'bypassPermissions', prompt],
+      args: ['--print', '--verbose', '--output-format', 'stream-json', '--permission-mode', 'bypassPermissions', prompt],
       options: {
         env: { HOME: '/tmp/home', PATH: process.env.PATH },
       },
@@ -3090,6 +3102,7 @@ test('Codex review invocation uses the reviewer snapshot cwd and passes prompt a
         env: { HOME: '/tmp/home', PATH: process.env.PATH },
         cwd: '/tmp/reviewer-state/reviewer-snapshots/agent-os/head-sha',
         timeout: 12_345,
+        progressTimeout: 600_000,
         maxBuffer: 999,
       },
     },

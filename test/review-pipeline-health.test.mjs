@@ -5919,17 +5919,16 @@ test('config signature drift thresholds are configurable', () => {
   assert.equal(configured.configSignatureStatusStaleMs, 30000);
 });
 
-test('reviewer_pass_zombie default tracks the reaper timeout it is derived from', () => {
-  // Guards the coupling itself: if the derivation is ever re-hardcoded, a future
-  // change to DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS would leave this default
-  // pinned at 90 minutes and silently re-invert the alarm against its
-  // remediation. Pipeline-health config overrides are unaffected -- only the
-  // default is coupled.
+test('reviewer_pass_zombie threshold tracks the configured ceiling model', () => {
   const config = resolveReviewPipelineHealthConfig({});
   assert.equal(
     config.runningReviewerPassMaxAgeMs,
-    Math.round(DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS * 1000 * 1.5)
+    10800 * 1000 * 1.5
   );
+  const configured = resolveReviewPipelineHealthConfig({ AGENT_OS_REVIEWER_CEILING_MAX_SECONDS: '7200',
+    AGENT_OS_REVIEWER_IDLE_TIMEOUT_SECONDS: '300' });
+  assert.equal(configured.runningReviewerPassMaxAgeMs, 7200 * 1000 * 1.5);
+  assert.equal(configured.reviewerPassIdleMs, 300_000);
 });
 
 test('reviewer pool ceiling default tracks the watcher CFG resolver', () => {

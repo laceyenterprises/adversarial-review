@@ -8,6 +8,33 @@ import path from 'node:path';
 import { spawnCapturedProcessGroup } from '../src/process-group-spawn.mjs';
 import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 
+test('stream events renew the rolling watchdog and reach the progress observer', async () => {
+  const chunks = [];
+  const result = await spawnCapturedProcessGroup(process.execPath, ['-e',
+    'let n=0; const t=setInterval(() => { process.stdout.write(JSON.stringify({type:"event",n:++n})+"\\n"); if(n===5) clearInterval(t); }, 300);',
+  ], { progressTimeout: 1000, timeout: 5000, onStdoutData: (chunk) => chunks.push(chunk) });
+  assert.equal(result.stdout.trim().split('\n').length, 5);
+  assert.equal(chunks.join(''), result.stdout);
+});
+
+test('stderr chatter cannot renew a stream-only watchdog', async () => {
+  await assert.rejects(
+    spawnCapturedProcessGroup(process.execPath, ['-e',
+      'setInterval(() => process.stderr.write("still waiting\\n"), 30);',
+    ], { progressTimeout: 150, progressOnStdoutOnly: true, timeout: 1000 }),
+    (err) => err.progressTimedOut === true,
+  );
+});
+
+test('stdout without a parsed event cannot renew the watchdog', async () => {
+  await assert.rejects(
+    spawnCapturedProcessGroup(process.execPath, ['-e',
+      'setInterval(() => process.stdout.write("noise\\n"), 30);',
+    ], { progressTimeout: 150, timeout: 1000, onStdoutData: () => false }),
+    (err) => err.progressTimedOut === true,
+  );
+});
+
 function boundedTermIgnoringShell(beforeLoop = '') {
   return `parent=$PPID; end=$((SECONDS+30)); trap "" TERM; ${beforeLoop} while (( SECONDS < end )) && kill -0 "$parent" 2>/dev/null; do sleep 1; done`;
 }

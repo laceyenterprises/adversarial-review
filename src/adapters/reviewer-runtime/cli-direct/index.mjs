@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { resolveReviewerTimeoutMs } from '../../../reviewer-timeout.mjs';
+import { resolveReviewerCeilingSeconds, resolveReviewerIdleTimeoutSeconds } from '../../../reviewer-timeout-model.mjs';
 import { spawnCapturedProcessGroup } from '../../../process-group-spawn.mjs';
 import { isPgidAlive, verifyPgidIdentity } from '../../../process-group-identity.mjs';
 import { domainRequiresMcpOAuth } from '../domain-mcp-oauth.mjs';
@@ -223,12 +224,11 @@ function buildReviewerProcessArgs(subjectContext = {}) {
 }
 
 function resolveProgressTimeoutForModel(model, env) {
-  // cli-direct reviewer processes are non-streaming: Claude `--print` and
-  // Codex `exec --json --output-last-message` can both spend an entire review
-  // turn without appending to stdout/stderr. The hard reviewer timeout still
-  // bounds runtime; the progress watchdog only kills quiet-but-healthy passes.
-  void model;
-  void env;
+  if (String(model || '').toLowerCase().includes('claude') || isCodexModel(model)) {
+    return resolveReviewerIdleTimeoutSeconds(env) * 1000;
+  }
+  // Gemini runtimes can be non-streaming, so their legacy deadline remains
+  // the only subprocess timeout until they expose a reliable event stream.
   return 0;
 }
 
@@ -488,7 +488,11 @@ function createCliDirectReviewerRuntimeAdapter({
         [reviewerProcessPath, JSON.stringify(reviewerArgs)],
         {
           env: reviewerEnv,
-          timeout: req.timeoutMs || resolveReviewerTimeoutMs(reviewerEnv),
+          timeout: (String(req.model || '').toLowerCase().includes('claude') || isCodexModel(req.model))
+            ? Math.max(req.timeoutMs || 0, resolveReviewerCeilingSeconds({
+              changedLines: Number.MAX_SAFE_INTEGER, env: reviewerEnv,
+            }) * 1000)
+            : req.timeoutMs || resolveReviewerTimeoutMs(reviewerEnv),
           progressTimeout: resolveProgressTimeoutForModel(req.model, reviewerEnv),
           signal: controller.signal,
           stdoutPath: sideChannels.stdoutPath,

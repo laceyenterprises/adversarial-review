@@ -11,13 +11,13 @@ function alreadyTerminalCancel(response) {
   try {
     const parsed = JSON.parse(detail);
     if (parsed?.ok === false) {
-      return /already (terminal|terminated|cancelled|canceled)/i.test(String(parsed.reason || ''))
+      return /already (terminal|terminated|cancelled|canceled)|not found|no such/i.test(String(parsed.reason || ''))
         || /^(failed|succeeded|cancelled|canceled|superseded)$/.test(String(parsed.currentStatus || ''));
     }
   } catch {
     // CLI errors can be plain text; classify the same terminal words there.
   }
-  return /already (terminal|terminated|cancelled|canceled)/i.test(detail);
+  return /already (terminal|terminated|cancelled|canceled)|not found|no such/i.test(detail);
 }
 
 /** Cancel live closer ownership when GitHub's live PR state becomes terminal. */

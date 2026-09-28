@@ -432,6 +432,30 @@ test('comment-only findings create a final remediation job; blocking findings do
   assert.equal(blocking.finalRound, undefined);
 });
 
+test('completed comment-only final round is durable PR-wide evidence', (t) => {
+  const rootDir = makeTempRoot(t);
+  const head = 'a'.repeat(40);
+  const job = buildFollowUpJob({
+    ...makeJobInput(rootDir),
+    revisionRef: head,
+    reviewBody: '## Blocking issues\n- None.\n## Non-blocking issues\n- Fix docs.\n## Verdict\nComment only',
+    critical: false,
+  });
+  const completedDir = getFollowUpJobDir(rootDir, 'completed');
+  mkdirSync(completedDir, { recursive: true });
+  writeFollowUpJob(path.join(completedDir, `${job.jobId}.json`), {
+    ...job,
+    status: 'completed',
+    completedAt: '2026-04-21T10:30:00.000Z',
+    remediationWorker: { state: 'completed' },
+    reReview: { requested: false, suppressed: 'comment-only-final-round' },
+    remediationPlan: { ...job.remediationPlan, currentRound: 1 },
+  });
+  const ledger = summarizePRRemediationLedger(rootDir, job);
+  assert.deepEqual(ledger.commentOnlyFinalRoundRevisionRefs, [head]);
+  assert.equal(ledger.completedRoundsForPR, 1);
+});
+
 test('archiveStoppedFollowUpJobs moves only stopped entries at least 24h old into month archive', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const stoppedDir = getFollowUpJobDir(rootDir, 'stopped');

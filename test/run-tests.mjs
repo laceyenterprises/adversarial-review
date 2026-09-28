@@ -44,6 +44,7 @@ function listFiles(rootDir) {
 }
 
 function testFiles() {
+  const selected = new Set(process.argv.slice(2).map((file) => path.resolve(repoRoot, file)));
   const topLevel = readdirSync(testDir)
     .filter((name) => name.endsWith('.test.mjs'))
     .map((name) => path.join(testDir, name));
@@ -51,7 +52,7 @@ function testFiles() {
   const adapters = readdirSync(adaptersDir)
     .filter((name) => name.endsWith('.test.mjs'))
     .map((name) => path.join(adaptersDir, name));
-  return [...topLevel, ...adapters].sort();
+  return [...topLevel, ...adapters].filter((file) => !selected.size || selected.has(file)).sort();
 }
 
 const checkoutDataExistedBefore = existsSync(checkoutDataDir);

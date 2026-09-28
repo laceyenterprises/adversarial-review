@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -153,7 +153,7 @@ test('preserves prior hammer-ama-pr-<PR> matching when no git holder clause is p
   assert.deepEqual(paths, ['/Users/airlock/agent-os-hq/workers/hammer-ama-pr-3064-live/agent-os']);
 });
 
-test('suffixed hammer holder is self-owned and skips coding-worker terminal probe', async () => {
+test('suffixed hammer holder requires terminal worker evidence', async () => {
   const hqRoot = join(tmpdir(), `agent-os-hq-suffixed-hammer-${Date.now()}`);
   const workerId = 'hammer-ama-pr-3064-a0a0a0a0a0a0';
   const err = {
@@ -166,6 +166,7 @@ test('suffixed hammer holder is self-owned and skips coding-worker terminal prob
     prNumber: 3064,
     hqPath: '/opt/hq/bin/hq',
     hqRoot,
+    inspectHolderImpl: async () => ({ safe: true, clean: true, patchEquivalent: true, branch: 'feature' }),
     execFileImpl: async (cmd, args) => {
       calls.push({ cmd, args });
       return { stdout: '', stderr: '' };
@@ -176,9 +177,9 @@ test('suffixed hammer holder is self-owned and skips coding-worker terminal prob
     logger: { warn() {} },
   });
 
-  assert.equal(result.ok, true);
-  assert.deepEqual(calls.map(call => call.cmd), ['git', '/opt/hq/bin/hq']);
-  assert.deepEqual(calls[1].args, ['worker', 'tear-down', workerId, '--force', '--root', hqRoot]);
+  assert.equal(result.ok, false);
+  assert.deepEqual(calls, []);
+  assert.equal(result.attempts[0].reason, 'missing-launch-request-id');
 });
 
 test('returns [] for empty / non-collision error', () => {
@@ -190,6 +191,7 @@ test('teardown passes hqRoot through to parser and cleanup commands', async () =
   const hqRoot = join(tmpdir(), `agent-os-hq-pass-through-${Date.now()}`);
   const codingWorkerId = 'claude-code-tct-04';
   writeBranchHolderWorker({ hqRoot, workerId: codingWorkerId, launchRequestId: 'lrq_pass_through' });
+  writeBranchHolderWorker({ hqRoot, workerId: 'hammer-ama-pr-3219', launchRequestId: 'lrq_hammer_3219' });
   const err = {
     stderr: [
       `[hq] creating worktree at ${hqRoot}/workers/hammer-ama-pr-3219/agent-os (tracking origin/claude-code-tct-04/TCT-04)`,
@@ -202,6 +204,7 @@ test('teardown passes hqRoot through to parser and cleanup commands', async () =
     prNumber: 3219,
     hqPath: '/opt/hq/bin/hq',
     hqRoot,
+    inspectHolderImpl: async () => ({ safe: true, clean: true, patchEquivalent: true, branch: 'feature' }),
     execFileImpl: async (cmd, args) => {
       calls.push({ cmd, args });
       return { stdout: '', stderr: '' };
@@ -218,22 +221,10 @@ test('teardown passes hqRoot through to parser and cleanup commands', async () =
   });
 
   assert.equal(result.ok, true);
-  assert.deepEqual(result.worktreePaths, [
-    `${hqRoot}/workers/hammer-ama-pr-3219/agent-os`,
-    `${hqRoot}/workers/${codingWorkerId}/agent-os`,
-  ]);
-  assert.deepEqual(calls.map(call => call.cmd), ['git', '/opt/hq/bin/hq', 'git', '/opt/hq/bin/hq']);
-  assert.equal(calls[0].args[1], `${hqRoot}/repos/agent-os`);
+  assert.deepEqual(result.worktreePaths, [`${hqRoot}/workers/${codingWorkerId}/agent-os`]);
+  assert.deepEqual(calls.map(call => call.cmd), ['git', '/opt/hq/bin/hq']);
+  assert.equal(calls[0].args[1], `${hqRoot}/worker-base/agent-os`);
   assert.deepEqual(calls[1].args, [
-    'worker',
-    'tear-down',
-    'hammer-ama-pr-3219',
-    '--force',
-    '--root',
-    hqRoot,
-  ]);
-  assert.equal(calls[2].args[1], `${hqRoot}/repos/agent-os`);
-  assert.deepEqual(calls[3].args, [
     'worker',
     'tear-down',
     codingWorkerId,
@@ -243,9 +234,9 @@ test('teardown passes hqRoot through to parser and cleanup commands', async () =
   ]);
 });
 
-function writeBranchHolderWorker({ hqRoot, workerId, launchRequestId }) {
+function writeBranchHolderWorker({ hqRoot, workerId, launchRequestId, repoName = 'agent-os' }) {
   const workerDir = join(hqRoot, 'workers', workerId);
-  mkdirSync(workerDir, { recursive: true });
+  mkdirSync(join(workerDir, repoName), { recursive: true });
   writeFileSync(join(workerDir, 'workspace.json'), JSON.stringify({
     workerId,
     launchRequestId,
@@ -254,6 +245,104 @@ function writeBranchHolderWorker({ hqRoot, workerId, launchRequestId }) {
     runId: `run-${workerId}`,
   }));
 }
+
+for (const repoName of ['agent-os', 'adversarial-review']) {
+  test(`${repoName} terminal holder removes from its worker-base repository`, async () => {
+    const hqRoot = join(tmpdir(), `holder-owner-${repoName}-${Date.now()}`);
+    const workerId = 'codex-holder-owner';
+    const holder = join(hqRoot, 'workers', workerId, repoName);
+    writeBranchHolderWorker({ hqRoot, workerId, repoName, launchRequestId: 'lrq_owner' });
+    const calls = [];
+    const result = await __testables__.teardownSamePrHammerHolder({
+      err: { stderr: `fatal: 'feature' is already used by worktree at '${holder}'` },
+      prNumber: 9001, repo: `laceyenterprises/${repoName}`, hqRoot, hqPath: '/bin/hq',
+      execFileImpl: async (cmd, args) => {
+        calls.push({ cmd, args });
+        if (args.includes('symbolic-ref')) return { stdout: 'feature\n' };
+        if (args.includes('cherry')) return { stdout: '- abcdef\n' };
+        return { stdout: '' };
+      },
+      readLatestWorkerRunStatusImpl: async () => ({ ok: true, row: { status: 'succeeded' } }),
+      logger: { warn() {} },
+    });
+    assert.equal(result.ok, true);
+    assert.ok(calls.some(({ cmd, args }) => cmd === 'git'
+      && args[1] === join(hqRoot, 'worker-base', repoName)
+      && args.includes('remove')));
+    assert.equal(result.attempts.find(attempt => attempt.action === 'git-worktree-remove').ok, true);
+  });
+}
+
+test('dirty terminal holder is salvaged before removal', async () => {
+  const hqRoot = join(tmpdir(), `holder-dirty-${Date.now()}`);
+  const workerId = 'codex-holder-dirty';
+  const holder = join(hqRoot, 'workers', workerId, 'agent-os');
+  writeBranchHolderWorker({ hqRoot, workerId, launchRequestId: 'lrq_dirty' });
+  const calls = [];
+  const result = await __testables__.teardownSamePrHammerHolder({
+    err: { stderr: `fatal: 'feature' is already used by worktree at '${holder}'` },
+    prNumber: 9002, repo: 'agent-os', hqRoot, hqPath: '/bin/hq',
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      if (args.includes('symbolic-ref')) return { stdout: 'feature\n' };
+      if (args.includes('status')) return { stdout: ' M file.txt\n' };
+      if (args.includes('cherry')) return { stdout: '+ abcdef\n' };
+      return { stdout: '' };
+    },
+    readLatestWorkerRunStatusImpl: async () => ({ ok: true, row: { status: 'succeeded' } }),
+    logger: { warn() {} },
+  });
+  assert.equal(result.ok, true);
+  const bundleIndex = calls.findIndex(call => call.args.includes('bundle'));
+  const archiveIndex = calls.findIndex(call => call.cmd === 'tar');
+  const removeIndex = calls.findIndex(call => call.args.includes('remove'));
+  assert.ok(bundleIndex >= 0 && bundleIndex < removeIndex);
+  assert.ok(archiveIndex >= 0 && archiveIndex < removeIndex);
+  assert.match(readFileSync(join(hqRoot, 'rescues', 'holder-adopt-audit.jsonl'), 'utf8'), /salvaged-and-removed/);
+});
+
+test('live process in a terminal holder cwd refuses removal', async () => {
+  const hqRoot = join(tmpdir(), `holder-live-cwd-${Date.now()}`);
+  const workerId = 'codex-holder-live-cwd';
+  const holder = join(hqRoot, 'workers', workerId, 'agent-os');
+  writeBranchHolderWorker({ hqRoot, workerId, launchRequestId: 'lrq_live_cwd' });
+  const calls = [];
+  const logs = [];
+  const result = await __testables__.teardownSamePrHammerHolder({
+    err: { stderr: `fatal: 'feature' is already used by worktree at '${holder}'` },
+    prNumber: 9003, repo: 'agent-os', hqRoot, hqPath: '/bin/hq',
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      if (cmd === 'lsof') return { stdout: '4321\n' };
+      throw new Error('removal must not run');
+    },
+    readLatestWorkerRunStatusImpl: async () => ({ ok: true, row: { status: 'succeeded' } }),
+    logger: { warn(line) { logs.push(JSON.parse(line)); } },
+  });
+  assert.equal(result.ok, false);
+  assert.deepEqual(calls.map(call => call.cmd), ['lsof']);
+  assert.ok(logs.some(log => log.event === 'ama_closer.branch_holder_refusal_count'
+    && log.holderType === 'worker'));
+});
+
+test('missing holder directory prunes only its owning repository', async () => {
+  const hqRoot = join(tmpdir(), `holder-missing-${Date.now()}`);
+  const workerId = 'codex-holder-missing';
+  const holder = join(hqRoot, 'workers', workerId, 'adversarial-review');
+  writeBranchHolderWorker({ hqRoot, workerId, repoName: 'adversarial-review', launchRequestId: 'lrq_missing' });
+  rmSync(holder, { recursive: true });
+  const calls = [];
+  const result = await __testables__.teardownSamePrHammerHolder({
+    err: { stderr: `fatal: 'feature' is already used by worktree at '${holder}'` },
+    prNumber: 9004, repo: 'adversarial-review', hqRoot, hqPath: '/bin/hq',
+    execFileImpl: async (cmd, args) => { calls.push({ cmd, args }); return { stdout: '' }; },
+    readLatestWorkerRunStatusImpl: async () => ({ ok: true, row: { status: 'succeeded' } }),
+    logger: { warn() {} },
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls[0].args, ['-C', join(hqRoot, 'worker-base', 'adversarial-review'), 'worktree', 'prune']);
+  assert.equal(calls.some(call => call.args.includes('remove')), false);
+});
 
 test('terminal coding branch-holder is torn down and emits release telemetry', async () => {
   const hqRoot = join(tmpdir(), `agent-os-hq-terminal-${Date.now()}`);
@@ -273,6 +362,7 @@ test('terminal coding branch-holder is torn down and emits release telemetry', a
     headSha: 'abc123',
     hqPath: '/opt/hq/bin/hq',
     hqRoot,
+    inspectHolderImpl: async () => ({ safe: true, clean: true, patchEquivalent: true, branch: 'feature' }),
     execFileImpl: async (cmd, args) => {
       calls.push({ cmd, args });
       return { stdout: '', stderr: '' };
@@ -316,6 +406,7 @@ test('live coding branch-holder is not torn down and falls back to branch-holder
     prNumber: 778,
     hqPath: '/opt/hq/bin/hq',
     hqRoot,
+    inspectHolderImpl: async () => ({ safe: true, clean: true, patchEquivalent: true, branch: 'feature' }),
     execFileImpl: async (cmd, args) => {
       calls.push({ cmd, args });
       throw new Error('execFileImpl must not run for a non-terminal holder');
@@ -351,6 +442,7 @@ test('terminal coding branch-holder teardown failure returns fallback result wit
     prNumber: 779,
     hqPath: '/opt/hq/bin/hq',
     hqRoot,
+    inspectHolderImpl: async () => ({ safe: true, clean: true, patchEquivalent: true, branch: 'feature' }),
     execFileImpl: async (cmd) => {
       if (cmd === 'git') return { stdout: '', stderr: '' };
       const failure = new Error('teardown failed');
@@ -396,6 +488,7 @@ test('terminal coding branch-holder retries transient worker teardown before suc
     prNumber: 781,
     hqPath: '/opt/hq/bin/hq',
     hqRoot,
+    inspectHolderImpl: async () => ({ safe: true, clean: true, patchEquivalent: true, branch: 'feature' }),
     execFileImpl: async (cmd, args) => {
       calls.push({ cmd, args });
       if (cmd === 'git') return { stdout: '', stderr: '' };
@@ -444,6 +537,7 @@ test('terminal coding branch-holder exhausts transient worker teardown retries',
     prNumber: 782,
     hqPath: '/opt/hq/bin/hq',
     hqRoot,
+    inspectHolderImpl: async () => ({ safe: true, clean: true, patchEquivalent: true, branch: 'feature' }),
     execFileImpl: async (cmd, args) => {
       calls.push({ cmd, args });
       if (cmd === 'git') return { stdout: '', stderr: '' };
@@ -490,6 +584,7 @@ test('terminal coding branch-holder git cleanup failure preserves worker metadat
     prNumber: 780,
     hqPath: '/opt/hq/bin/hq',
     hqRoot,
+    inspectHolderImpl: async () => ({ safe: true, clean: true, patchEquivalent: true, branch: 'feature' }),
     execFileImpl: async (cmd, args) => {
       calls.push({ cmd, args });
       const failure = new Error('git cleanup failed');
@@ -536,6 +631,18 @@ test('missing branch-holder metadata files are treated as unresolved state', asy
     runId: null,
   });
 });
+
+for (const workerId of ['hammer-pr-7129', 'remediator-ci-orphan-pr-7024']) {
+  test(`${workerId} can be classified terminal from its worker run`, async () => {
+    const hqRoot = join(tmpdir(), `terminal-holder-class-${workerId}-${Date.now()}`);
+    writeBranchHolderWorker({ hqRoot, workerId, launchRequestId: `lrq_${workerId}` });
+    const result = await __testables__.resolveTerminalCodingBranchHolder({
+      workerId, hqRoot,
+      readLatestWorkerRunStatusImpl: async () => ({ ok: true, row: { status: 'succeeded' } }),
+    });
+    assert.equal(result.terminal, true);
+  });
+}
 
 test('pre-provision reclaim tears down stale self-owned hammer worktree and emits audit', async () => {
   const calls = [];

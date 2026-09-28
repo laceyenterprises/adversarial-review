@@ -350,8 +350,8 @@ test('LCR: blocked record cannot consume another PR launch slot', async (t) => {
   });
   assert.equal(result.dispatched, true);
   assert.equal(deps.calls.length, 1);
-  assert.equal(readAmaCloserLease(rootDir, { repo: 'acme/repo', prNumber: 999,
-    headSha: 'b'.repeat(40) }), null);
+  assert.ok(readAmaCloserLease(rootDir, { repo: 'acme/repo', prNumber: 999,
+    headSha: 'b'.repeat(40) }), 'another PR admission must leave the blocked holder lease intact');
 });
 
 test('LCR: three accepted closer workers fill capacity for a fourth PR', async (t) => {
@@ -423,8 +423,8 @@ test('LCR: dead no-LRQ AMA launch lease does not globally hold hammer dispatch',
   assert.equal(result.dispatched, true);
   assert.equal(result.launchRequestId, 'lrq_hammer_1');
   assert.equal(deps.calls.length, 1, 'dead no-LRQ launches must not block later PRs');
-  assert.equal(readAmaCloserLease(rootDir, { repo: 'acme/repo', prNumber: 999,
-    headSha: 'c'.repeat(40) }), null, 'timed-out launch releases its lease');
+  assert.ok(readAmaCloserLease(rootDir, { repo: 'acme/repo', prNumber: 999,
+    headSha: 'c'.repeat(40) }), 'another PR admission must not delete this lease');
 });
 
 test('LCR: non-exhausted request-changes findings do not dispatch hammer before Codex remediation', async (t) => {

@@ -441,6 +441,12 @@ failed
        └─ stopped (max-rounds-reached)
 ```
 
+For an unresolved `max-rounds-reached` stop, the adversarial gate posts
+`success/remediation-stopped` with `operatorDecisionRequired=true`. This keeps
+the operator alert and normal no-progress backoff active. AMA may still hand
+the PR to a hammer, but only its own enablement, structural-hold, and cap
+checks can establish whether that dispatch is possible.
+
 ### Important nuance
 
 `completed` does **not** mean:

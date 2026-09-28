@@ -73,6 +73,11 @@ test('a missing holder worktree uses scoped worker tear-down', async () => {
   const calls = [];
   const execFileImpl = async (bin, args) => {
     calls.push([bin, ...args].join(' '));
+    if (bin === 'hq') {
+      const err = new Error('worker not found');
+      err.stderr = 'worker not found';
+      throw err;
+    }
     if (bin === 'git' && args.includes('remove')) {
       const err = new Error('git worktree remove failed');
       err.stderr = STALE_REMOVE_STDERR;
@@ -101,7 +106,8 @@ test('a missing holder worktree uses scoped worker tear-down', async () => {
 
   assert.equal(result.ok, true);
   assert.ok(calls.some(c => c.includes('worker tear-down ' + WORKER_ID)));
-  assert.ok(!calls.some(c => c.includes('worktree prune')), 'must not prune other registrations');
+  assert.ok(result.attempts.some(attempt => attempt.alreadyAbsent));
+  assert.ok(calls.some(c => c.includes('worktree prune')), 'must release the stale branch registration');
 });
 
 test('a missing holder worktree retries transient hq tear-down errors', async () => {
@@ -112,6 +118,7 @@ test('a missing holder worktree retries transient hq tear-down errors', async ()
   const result = await teardownSamePrHammerHolder({
     err: provisionError(holder), prNumber: PR_NUMBER, hqPath: 'hq', hqRoot,
     execFileImpl: async (bin) => {
+      if (bin === 'git') return { stdout: '' };
       assert.equal(bin, 'hq');
       calls += 1;
       if (calls < 3) {
@@ -128,7 +135,7 @@ test('a missing holder worktree retries transient hq tear-down errors', async ()
   assert.equal(result.ok, true);
   assert.equal(calls, 3);
   assert.deepEqual(delays, [250, 1_000]);
-  assert.equal(result.attempts.at(-1).attempts, 3);
+  assert.equal(result.attempts.find(attempt => attempt.action === 'hq-worker-tear-down').attempts, 3);
 });
 
 test('a missing worktree with a live holder run is left alone', async () => {

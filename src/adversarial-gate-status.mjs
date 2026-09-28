@@ -848,10 +848,7 @@ function pickAdversarialGateStatus({
     );
   }
   if (latestJobStatus === 'stopped') {
-    if (latestJob?.remediationPlan?.stop?.code === 'max-rounds-reached') {
-      return decide('pending', 'Remediation budget exhausted; hammer pending.', 'hammer-pending');
-    }
-    // Other stops can leave the last verdict at Request-changes,
+    // Stops can leave the last verdict at Request-changes,
     // but at this point the operator has full context (the review thread)
     // and `request-changes` below still posts `failure` for the "verdict is
     // really request-changes after a settled remediation" case. The

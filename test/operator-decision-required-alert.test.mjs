@@ -200,13 +200,14 @@ test('watcher retries operator-decision alert after delivery failure', async () 
   });
 });
 
-test('max-rounds stop does not page for an operator decision while hammer is pending', async () => {
+test('max-rounds stop pages for an operator decision when hammer eligibility is unknown', async () => {
   await withRootAsync(async (root) => {
     const alerts = [];
     await runMergedPostedSubject(root, {
       stopCode: 'max-rounds-reached',
       deliverAlertFn: async (text) => { alerts.push(text); },
     });
-    assert.deepEqual(alerts, []);
+    assert.equal(alerts.length, 1);
+    assert.match(alerts[0], /remediation-stopped/);
   });
 });

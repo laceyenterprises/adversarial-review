@@ -1644,11 +1644,12 @@ function isAmaCloserMissingLrqTimedOut(record, options = {}) {
   const attemptedAt = parseTimeMs(record?.lastAttemptedAt);
   const now = parseTimeMs(options.now || new Date().toISOString());
   return attemptedAt === null || (now !== null
-    && now - attemptedAt >= resolveAmaDispatchTimeoutMs(record));
+    && now - attemptedAt >= amaCloserPendingLeaseReclaimAgeMs(record));
 }
 
 export function isAmaCloserLaunchInProgress(record, options = {}) {
-  if (record?.lastError || String(record?.state || '').includes('blocked')
+  if ((record?.state !== 'dispatched' && record?.lastError)
+    || String(record?.state || '').includes('blocked')
     || String(record?.state || '').includes('failed')
     || isAmaCloserMissingLrqTimedOut(record, options)) return false;
   if (record?.state === 'dispatched') {
@@ -1741,19 +1742,6 @@ export function listActiveAmaCloserDispatches(rootDir, options = {}) {
     const dispatchPath = join(dir, entry.name);
     try {
       const record = readJsonFile(dispatchPath);
-      const state = String(record?.state || '');
-      if (record?.lastError || state.includes('blocked') || state.includes('failed')
-        || ((state === 'dispatching' || state === 'dispatched')
-          && isAmaCloserMissingLrqTimedOut(record, options))) {
-        const identity = { repo: record?.repo, prNumber: record?.prNumber, headSha: record?.headSha };
-        if (identity.repo && identity.prNumber && identity.headSha) {
-          const lease = readAmaCloserLease(rootDir, identity);
-          if (lease?.status === AMA_CLOSER_LEASE_STATUS.PENDING
-            || lease?.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED) {
-            deleteAmaCloserLease(rootDir, identity);
-          }
-        }
-      }
       if (!isActiveAmaCloserDispatchRecord(record, options)) continue;
       const prNumber = Number(record?.prNumber);
       if (!record?.repo || !Number.isInteger(prNumber) || prNumber <= 0) continue;
@@ -1783,10 +1771,6 @@ function findActiveAmaCloserLaunches(rootDir, options = {}) {
       lease = null;
     }
     const inProgress = isAmaCloserLaunchInProgress(record, { ...options, lease });
-    if (!inProgress && lease?.status === AMA_CLOSER_LEASE_STATUS.PENDING
-      && (record.lastError || !record.launchRequestId)) {
-      deleteAmaCloserLease(rootDir, record);
-    }
     return inProgress;
   });
 }
@@ -2759,6 +2743,17 @@ async function teardownSamePrHammerHolder({
           error: detail,
         });
         break;
+      }
+    }
+    if (holderMissing && releaseAction) {
+      try {
+        await execFileImpl('git', [
+          '-C', join(hqRoot, 'repos', AGENT_OS_TOOLING_REPO), 'worktree', 'prune',
+        ], { env, maxBuffer: 1024 * 1024, timeout: 60_000, killSignal: 'SIGTERM' });
+        attempts.push({ worktreePath, action: 'git-worktree-prune', ok: true });
+      } catch (pruneErr) {
+        attempts.push({ worktreePath, action: 'git-worktree-prune', ok: false,
+          error: String(pruneErr?.stderr || pruneErr?.message || pruneErr) });
       }
     }
     if (releaseAction && !isSamePrHammerCloserWorkerId(workerId, prNumber)) {

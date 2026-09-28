@@ -515,7 +515,7 @@ test('pickAdversarialGateStatus posts non-blocking success when remediation stop
   assert.match(decision.description, /Request-changes/i);
 });
 
-test('max-rounds stop reports hammer pending without an operator hold', () => {
+test('max-rounds stop reports an operator decision when hammer eligibility is unknown', () => {
   const decision = pickAdversarialGateStatus({
     reviewRow: makeReviewRow(),
     latestJob: makeJob({
@@ -524,10 +524,10 @@ test('max-rounds stop reports hammer pending without an operator hold', () => {
       remediationPlan: { stop: { code: 'max-rounds-reached' } },
     }),
   });
-  assert.equal(decision.state, 'pending');
-  assert.equal(decision.reason, 'hammer-pending');
-  assert.match(decision.description, /hammer pending/i);
-  assert.equal(decision.operatorDecisionRequired, false);
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'remediation-stopped');
+  assert.match(decision.description, /operator decision required/i);
+  assert.equal(decision.operatorDecisionRequired, true);
 });
 
 test('pickAdversarialGateStatus flags remediation-failed as an operator decision too', () => {

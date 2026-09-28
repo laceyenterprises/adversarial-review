@@ -259,7 +259,13 @@ outcome instead of submitting again**: the result goes through the same handling
 as an inline call. A terminal rejection from the closer's own gates (hammer retry
 cap, structural ineligibility) or a thrown error (`ama-dispatch-failed`) reaches
 the watcher exactly as it would inline, one tick later, so the merge-agent
-fallback and alerting are still reachable. In steady state a PR@head alternates
+fallback and alerting are still reachable. An exhausted remediation round
+remains `success/remediation-stopped` on the adversarial gate with an
+operator-decision alert. It is not projected as `hammer-pending` merely because
+the round cap was reached: AMA enablement, structural holds, and hammer dispatch
+caps are checked by the closer before any hand-off. A refused hand-off remains
+operator visible and follows normal no-progress backoff. In steady state a
+PR@head alternates
 between a submitting tick and an applying tick, and the tick after that may
 submit again only if the normal closer logic still allows it. The durable
 guards remain the safety boundary: `maybeDispatchAmaCloser` checks for an active

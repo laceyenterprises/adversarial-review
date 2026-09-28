@@ -1341,6 +1341,8 @@ const CODING_BRANCH_HOLDER_PREFIXES = [
   'opencode',
   'hermes',
   'stub',
+  'hammer',
+  'remediator',
 ];
 const AMA_CLOSER_RETRYABLE_STATUSES = new Set([
   'failed',

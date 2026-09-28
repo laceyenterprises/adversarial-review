@@ -215,6 +215,20 @@ test('missing file returns defaults', () => {
   }
 });
 
+test('watcher closer concurrency defaults to three and accepts a positive override', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-closer-config-'));
+  try {
+    assert.equal(loadConfig({ topPath: join(tmp, 'missing.yaml'), env: {} })
+      .get('watcher.ama_closer_max_concurrent_launches'), 3);
+    const top = join(tmp, 'config.yaml');
+    writeFileSync(top, 'version: 1\nwatcher:\n  ama_closer_max_concurrent_launches: 4\n');
+    assert.equal(loadConfig({ topPath: top, env: {} })
+      .get('watcher.ama_closer_max_concurrent_launches'), 4);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('imm observe-first modes load through strict Node schema', () => {
   const tmp = freshTmp();
   try {

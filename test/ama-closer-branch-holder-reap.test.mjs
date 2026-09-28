@@ -162,6 +162,7 @@ test('suffixed hammer holder is self-owned and skips coding-worker terminal prob
   const calls = [];
 
   const result = await __testables__.teardownSamePrHammerHolder({
+    existsSyncImpl: () => true,
     err,
     prNumber: 3064,
     hqPath: '/opt/hq/bin/hq',
@@ -198,6 +199,7 @@ test('teardown passes hqRoot through to parser and cleanup commands', async () =
   };
   const calls = [];
   const result = await __testables__.teardownSamePrHammerHolder({
+    existsSyncImpl: () => true,
     err,
     prNumber: 3219,
     hqPath: '/opt/hq/bin/hq',
@@ -267,6 +269,7 @@ test('terminal coding branch-holder is torn down and emits release telemetry', a
   const logs = [];
 
   const result = await __testables__.teardownSamePrHammerHolder({
+    existsSyncImpl: () => true,
     err,
     prNumber: 777,
     repo: 'agent-os',
@@ -312,6 +315,7 @@ test('live coding branch-holder is not torn down and falls back to branch-holder
   const calls = [];
 
   const result = await __testables__.teardownSamePrHammerHolder({
+    existsSyncImpl: () => true,
     err,
     prNumber: 778,
     hqPath: '/opt/hq/bin/hq',
@@ -347,6 +351,7 @@ test('terminal coding branch-holder teardown failure returns fallback result wit
   };
 
   const result = await __testables__.teardownSamePrHammerHolder({
+    existsSyncImpl: () => true,
     err,
     prNumber: 779,
     hqPath: '/opt/hq/bin/hq',
@@ -392,6 +397,7 @@ test('terminal coding branch-holder retries transient worker teardown before suc
   const sleeps = [];
 
   const result = await __testables__.teardownSamePrHammerHolder({
+    existsSyncImpl: () => true,
     err,
     prNumber: 781,
     hqPath: '/opt/hq/bin/hq',
@@ -440,6 +446,7 @@ test('terminal coding branch-holder exhausts transient worker teardown retries',
   const sleeps = [];
 
   const result = await __testables__.teardownSamePrHammerHolder({
+    existsSyncImpl: () => true,
     err,
     prNumber: 782,
     hqPath: '/opt/hq/bin/hq',
@@ -486,6 +493,7 @@ test('terminal coding branch-holder git cleanup failure preserves worker metadat
   const calls = [];
 
   const result = await __testables__.teardownSamePrHammerHolder({
+    existsSyncImpl: () => true,
     err,
     prNumber: 780,
     hqPath: '/opt/hq/bin/hq',

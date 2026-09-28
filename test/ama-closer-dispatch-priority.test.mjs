@@ -10,7 +10,7 @@ import {
   resolveAmaCloserDispatchPriority,
   updateAmaCloserDispatchRecord,
 } from '../src/ama/dispatch-closer.mjs';
-import { acquireAmaCloserLease } from '../src/ama/closer-lease.mjs';
+import { acquireAmaCloserLease, readAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import {
   findMalformedProtectivePredecessorLines,
   hasMergedDependentProtectingPr,
@@ -249,17 +249,16 @@ test('LCR: hq dispatch preserves an already stricter worker provision timeout', 
   assert.equal(deps.calls[0].options.env.HQ_PROVISION_SUBPROCESS_TIMEOUT_SECONDS, '30');
 });
 
-test('LCR: no-LRQ AMA launch in progress defers another hammer dispatch', async (t) => {
+test('LCR: three closer launches occupy the bound and a fourth waits', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'lcr-active-launch-defers-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  updateAmaCloserDispatchRecord(rootDir, {
-    repo: 'acme/repo',
-    prNumber: 999,
-    headSha: 'b'.repeat(40),
-  }, () => ({
+  for (const prNumber of [997, 998, 999]) {
+    updateAmaCloserDispatchRecord(rootDir, {
+      repo: 'acme/repo', prNumber, headSha: 'b'.repeat(40),
+    }, () => ({
     schemaVersion: 1,
     repo: 'acme/repo',
-    prNumber: 999,
+    prNumber,
     headSha: 'b'.repeat(40),
     state: 'dispatching',
     lastAttemptedAt: '2026-07-20T12:00:00Z',
@@ -268,21 +267,16 @@ test('LCR: no-LRQ AMA launch in progress defers another hammer dispatch', async 
     launchRequestId: null,
     lastError: null,
     dispatchTimeoutMs: 300_000,
-  }));
-  acquireAmaCloserLease({
-    rootDir,
-    repo: 'acme/repo',
-    prNumber: 999,
-    headSha: 'b'.repeat(40),
-    watcherPid: process.pid,
-    now: '2026-07-20T12:00:00Z',
-  });
+    }));
+    acquireAmaCloserLease({ rootDir, repo: 'acme/repo', prNumber,
+      headSha: 'b'.repeat(40), watcherPid: process.pid, now: '2026-07-20T12:00:00Z' });
+  }
   const deps = testDeps();
 
   const result = await maybeDispatchAmaCloser({
     ...findingsRemediationArgs(rootDir, {
       dispatchContext: {
-        dispatchedAt: '2026-07-20T12:05:00Z',
+        dispatchedAt: '2026-07-20T12:04:00Z',
       },
     }),
     ...deps,
@@ -291,8 +285,51 @@ test('LCR: no-LRQ AMA launch in progress defers another hammer dispatch', async 
   assert.equal(result.dispatched, false);
   assert.equal(result.reason, 'ama-closer-launch-in-progress');
   assert.equal(result.skipMergeAgent, true);
-  assert.equal(result.activeLaunch.prNumber, 999);
+  assert.equal(result.activeLaunch.prNumber, 997);
   assert.equal(deps.calls.length, 0, 'do not start another hq dispatch before the first has an lrq');
+});
+
+test('LCR: blocked record cannot consume another PR launch slot', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'lcr-blocked-launch-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  updateAmaCloserDispatchRecord(rootDir, { repo: 'acme/repo', prNumber: 999, headSha: 'b'.repeat(40) }, () => ({
+    repo: 'acme/repo', prNumber: 999, headSha: 'b'.repeat(40), state: 'dispatch-blocked-branch-holder',
+    lastAttemptedAt: '2026-07-20T12:00:00Z', launchRequestId: null,
+    lastError: 'ProvisionError: branch holder',
+  }));
+  acquireAmaCloserLease({ rootDir, repo: 'acme/repo', prNumber: 999,
+    headSha: 'b'.repeat(40), watcherPid: process.pid, now: '2026-07-20T12:00:00Z' });
+  const deps = testDeps();
+  const result = await maybeDispatchAmaCloser({
+    ...findingsRemediationArgs(rootDir, { dispatchContext: { dispatchedAt: '2026-07-20T12:01:00Z' } }),
+    ...deps,
+  });
+  assert.equal(result.dispatched, true);
+  assert.equal(deps.calls.length, 1);
+  assert.equal(readAmaCloserLease(rootDir, { repo: 'acme/repo', prNumber: 999,
+    headSha: 'b'.repeat(40) }), null);
+});
+
+test('LCR: three accepted closer workers fill capacity for a fourth PR', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'lcr-three-accepted-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  for (const prNumber of [997, 998, 999]) {
+    const identity = { repo: 'acme/repo', prNumber, headSha: 'b'.repeat(40) };
+    updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity,
+      state: 'dispatched', launchRequestId: `lrq_${prNumber}`, lastObservedStatus: 'running',
+      lastAttemptedAt: '2026-07-20T12:00:00Z', lastObservedAt: '2026-07-20T12:00:00Z',
+    }));
+    acquireAmaCloserLease({ rootDir, ...identity, watcherPid: process.pid, now: '2026-07-20T12:00:00Z' });
+    updateAmaCloserLease({ rootDir, ...identity, status: 'dispatched', lrqId: `lrq_${prNumber}`,
+      now: '2026-07-20T12:00:00Z' });
+  }
+  const deps = testDeps();
+  const result = await maybeDispatchAmaCloser({
+    ...findingsRemediationArgs(rootDir, { dispatchContext: { dispatchedAt: '2026-07-20T12:01:00Z' } }),
+    ...deps,
+  });
+  assert.equal(result.reason, 'ama-closer-launch-in-progress');
+  assert.equal(deps.calls.length, 0);
 });
 
 test('LCR: dead no-LRQ AMA launch lease does not globally hold hammer dispatch', async (t) => {
@@ -342,6 +379,8 @@ test('LCR: dead no-LRQ AMA launch lease does not globally hold hammer dispatch',
   assert.equal(result.dispatched, true);
   assert.equal(result.launchRequestId, 'lrq_hammer_1');
   assert.equal(deps.calls.length, 1, 'dead no-LRQ launches must not block later PRs');
+  assert.equal(readAmaCloserLease(rootDir, { repo: 'acme/repo', prNumber: 999,
+    headSha: 'c'.repeat(40) }), null, 'timed-out launch releases its lease');
 });
 
 test('LCR: non-exhausted request-changes findings do not dispatch hammer before Codex remediation', async (t) => {

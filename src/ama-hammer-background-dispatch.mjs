@@ -30,10 +30,8 @@
 export const AMA_HAMMER_DISPATCH_MODE_CFG_KEY = 'watcher.ama_hammer_dispatch_mode';
 export const AMA_HAMMER_DISPATCH_MODES = Object.freeze(['inline', 'background']);
 export const DEFAULT_AMA_HAMMER_DISPATCH_MODE = 'inline';
-// Two concurrent `hq dispatch` subprocesses is enough to keep a small hammer
-// backlog moving without turning the watcher into a dispatch storm on a host
-// whose admission is already the bottleneck.
-export const DEFAULT_AMA_HAMMER_BACKGROUND_MAX_CONCURRENT = 2;
+// Keep the background queue aligned with the closer's default capacity.
+export const DEFAULT_AMA_HAMMER_BACKGROUND_MAX_CONCURRENT = 3;
 export const AMA_HAMMER_BACKGROUND_REASON = 'ama-closer-dispatch-backgrounded';
 // A settled outcome is only meaningful to the next tick or two for that PR@head.
 // Past this age the PR has moved on (new head, closed) and the outcome is dropped.
@@ -191,8 +189,8 @@ export function createAmaHammerBackgroundQueue({
 // One queue per watcher process. The watcher is a long-lived single process, so
 // module scope is the natural lifetime; tests construct their own queues.
 let processQueue = null;
-export function amaHammerBackgroundQueue() {
-  if (!processQueue) processQueue = createAmaHammerBackgroundQueue();
+export function amaHammerBackgroundQueue({ maxConcurrent } = {}) {
+  if (!processQueue) processQueue = createAmaHammerBackgroundQueue({ maxConcurrent });
   return processQueue;
 }
 

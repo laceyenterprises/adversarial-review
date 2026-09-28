@@ -2987,6 +2987,11 @@ function schemaV1() {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
+          ama_closer_max_concurrent_launches: {
+            __type: TYPE_INT,
+            __default: 3,
+            __min: 1,
+          },
           alert_to_op_ref: {
             __type: TYPE_STRING,
             __default: null,

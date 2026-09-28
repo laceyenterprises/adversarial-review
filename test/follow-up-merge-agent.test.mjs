@@ -2123,6 +2123,7 @@ test('non-blocking-only cap exposes final-round exhaustion to the closer', () =>
     });
     assert.equal(job.remediationCurrentRound, 1);
     assert.equal(job.remediationMaxRounds, 1);
+    assert.equal(job.remediationStopCode, 'max-rounds-reached');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

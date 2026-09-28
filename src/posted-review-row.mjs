@@ -935,6 +935,7 @@ export function createNoProgressLaneGate({
         fingerprint,
         decisionFingerprint,
         progressClass,
+        urgent: value?.gateDecision?.reason === 'hammer-pending',
         // A starvation-floor admission is a walk the lane did not schedule.
         // Recording it as escalating would charge the PR for a look it never
         // asked for and push its next real walk twice as far away — the exact

@@ -741,6 +741,7 @@ export function recordNoProgressLaneRun(rootDir, identity, {
   fingerprint,
   decisionFingerprint = null,
   progressClass = PROGRESS_CLASS_SELF_RESOLVING,
+  urgent = false,
   escalate = true,
   cap = DEFAULT_NO_PROGRESS_LANE_CAP,
   maxBackoffTicks = DEFAULT_NO_PROGRESS_MAX_BACKOFF_TICKS,
@@ -789,7 +790,7 @@ export function recordNoProgressLaneRun(rootDir, identity, {
     : 0;
   const escalating = escalate !== false;
   let noProgressTicks;
-  if (!sameFingerprint || decisionResetHonoured) {
+  if (urgent || !sameFingerprint || decisionResetHonoured) {
     noProgressTicks = 0;
   } else if (escalating) {
     noProgressTicks = priorNoProgress + 1;

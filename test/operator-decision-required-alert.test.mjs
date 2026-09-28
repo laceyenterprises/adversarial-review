@@ -1,9 +1,5 @@
-// A PR that exhausts its remediation budget lands in
-// `success (remediation-stopped)` with operatorDecisionRequired=true. AMA then
-// refuses it (correctly -- findings still stand) and no further remediation runs
-// (correctly -- the budget is spent). Before this, nobody was told: the state was
-// a console.log and nothing else, so the PR sat until a human happened to look.
-// Observed on agent-os#6156, stuck from 10:30Z until an operator asked.
+// Non-budget remediation stops still require a visible operator decision.
+// Budget exhaustion is handed to the hammer instead.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
@@ -31,7 +27,7 @@ async function withRootAsync(fn) {
 const HEAD = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const REPO = 'o/r';
 
-function writeStoppedRequestChangesJob(root) {
+function writeStoppedRequestChangesJob(root, stopCode = 'manual-stop') {
   const dir = getFollowUpJobDir(root, 'stopped');
   mkdirSync(dir, { recursive: true });
   writeFollowUpJob(join(dir, 'o-r-pr-1.json'), {
@@ -51,14 +47,14 @@ function writeStoppedRequestChangesJob(root) {
     remediationPlan: {
       currentRound: 3,
       maxRounds: 3,
-      stop: { code: 'max-rounds-reached' },
+      stop: { code: stopCode },
     },
     remediationWorker: { state: 'completed' },
   });
 }
 
-async function runMergedPostedSubject(root, { deliverAlertFn, errors = [] } = {}) {
-  writeStoppedRequestChangesJob(root);
+async function runMergedPostedSubject(root, { deliverAlertFn, errors = [], stopCode } = {}) {
+  writeStoppedRequestChangesJob(root, stopCode);
   await processReviewSubject({
     subject: {
       title: '[codex] operator decision fixture',
@@ -201,5 +197,16 @@ test('watcher retries operator-decision alert after delivery failure', async () 
       readCascadeState(root, { repo: REPO, prNumber: 1 }).operatorDecisionAlertedHeadSha,
       HEAD,
     );
+  });
+});
+
+test('max-rounds stop does not page for an operator decision while hammer is pending', async () => {
+  await withRootAsync(async (root) => {
+    const alerts = [];
+    await runMergedPostedSubject(root, {
+      stopCode: 'max-rounds-reached',
+      deliverAlertFn: async (text) => { alerts.push(text); },
+    });
+    assert.deepEqual(alerts, []);
   });
 });

@@ -2430,7 +2430,7 @@ test('active AMA closer dispatch classification releases stale launch-only recor
   );
 });
 
-test('active AMA closer launch-only record stays active across a 600s retry window', () => {
+test('launch-only record stops occupying capacity after its dispatch timeout', () => {
   assert.ok(
     AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS > 30 * 60 * 1000,
     'the reclaim window must cover three 600s dispatch attempts plus retry overhead',
@@ -2453,7 +2453,7 @@ test('active AMA closer launch-only record stays active across a 600s retry wind
   );
   assert.equal(
     isAmaCloserLaunchInProgress(record, { now: '2026-07-06T12:20:00Z' }),
-    true,
+    false,
   );
   assert.equal(
     isActiveAmaCloserDispatchRecord(record, { now: '2026-07-06T12:40:00Z' }),

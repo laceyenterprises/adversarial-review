@@ -200,6 +200,10 @@ const FOREIGN_TOP_LEVEL_SECTIONS = new Set([
   // whereas mirroring the block would create a second copy of a Python-owned
   // schema.
   'resident',
+  // MMD-01: Python and shell own the media_generation library destination.
+  // The Node reviewer never reads it, but an operator may set it in
+  // config.local.yaml. Without this entry the watcher rejects it on startup.
+  'media_generation',
 ]);
 // Keep this per-role fallback surface in lockstep with the Python
 // agent_os_config schema. The child dicts are intentionally strict so a

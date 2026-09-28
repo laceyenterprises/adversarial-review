@@ -865,6 +865,16 @@ non-blocking findings) can set `strict_non_blocking_remediation: false` in
 
 ### `lease-held` skip
 
+`active-remediation-job` is a separate no-dispatch reason: a pending or active
+same-PR remediation job owns the branch, so AMA defers its closer launch.
+Lifecycle sync settles a live closer lease as `succeeded` when a merged PR's
+head matches the lease head or its recorded prior heads; it never cancels HQ
+for a merged PR. Other merged-head cases remain with the stale-window reaper
+so the closer can finish its post-merge audit and comment. For a closed PR,
+lifecycle sync cancels its HQ dispatch before recording the terminal PR state,
+then marks the lease `pr-closed-externally`. A timeout or unavailable HQ keeps
+the PR eligible for the next lifecycle tick instead of dropping the cancel.
+
 Another watcher tick already dispatched a closer for this `(repo,
 prNumber, headSha)`. **Not an error.** The existing lease file at
 `data/ama-closer-leases/<repo>-pr-<n>-<head>.json` carries the original

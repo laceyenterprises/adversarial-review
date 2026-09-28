@@ -433,8 +433,9 @@ export function acquireAmaCloserLease({
  *     `dispatched`. Required: `lrqId`.
  *   - `{ status: 'terminal', terminalOutcome }` — moves a `dispatched`
  *     (or `pending`, if the closer never got dispatched) lease to
- *     `terminal`. Required: `terminalOutcome ∈ {succeeded,
- *     failed-without-merge, deferred, superseded}`.
+ *     `terminal`. Required: `terminalOutcome` in VALID_TERMINAL_OUTCOMES
+ *     (including succeeded, failed-without-merge, deferred, superseded,
+ *     pr-closed-externally, and historical merged-external outcomes).
  *
  * @param {object} args
  * @param {string} args.rootDir

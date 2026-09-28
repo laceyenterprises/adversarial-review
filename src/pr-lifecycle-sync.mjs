@@ -334,7 +334,11 @@ export async function syncPRLifecycle(octokit, operatorSurface, primaryDomainId 
     // A throw defers the mark, keeping the row eligible next tick — dropping
     // the mark is the only way these obligations get retried.
     onBeforeMark: async ({ repo, prNumber, transition, live }) => {
-      await cancelCloserForTerminalPr({ rootDir: ROOT, repo, prNumber, transition });
+      const closerResult = await cancelCloserForTerminalPr({ rootDir: ROOT, repo, prNumber, transition, live });
+      if (transition === 'closed' && closerResult.reason === 'cancel-unavailable') {
+        // Keep the PR in the open scan so a transient HQ failure is retried.
+        throw closerResult.error || new Error('HQ closer cancellation unavailable');
+      }
       const queuedMergeAgentCleanup = queueMergeAgentLifecycleCleanup({
         pr: live, repo, prNumber, transition,
       });

@@ -3,7 +3,7 @@
 **Owner:** AMA closer dispatch and recovery
 **Store:** `data/follow-up-jobs/ama-closer-dispatches/`
 **Source of truth:** `src/ama/dispatch-closer.mjs`
-**Runtime surface:** `src/ama/dispatch-closer.mjs`, `src/follow-up-stuck-claim-sweep.mjs`, `src/recovery-reaper.mjs`
+**Runtime surface:** `src/ama/dispatch-closer.mjs`, `src/ama/closer-terminal-cancel.mjs`, `src/follow-up-stuck-claim-sweep.mjs`, `src/recovery-reaper.mjs`
 
 ## Purpose
 
@@ -51,14 +51,15 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 | `launchRequestId` | string or null | Launch request id parsed from HQ output when available. |
 | `retryCount` | non-negative integer | Budgeted failed-dispatch count. Transient and branch-holder refusals preserve budget. |
 | `branchHolderBlockCount` | non-negative integer | Count of branch-holder refusals for bounded same-PR worktree cleanup. |
-| `lastObservedStatus` | string or null | Most recent worker status observed through HQ/session-ledger probes. |
+| `lastObservedStatus` | string or null | Most recent worker status observed through HQ/session-ledger probes. Lifecycle cancellation uses HQ's reported status, or `terminal` when HQ confirms termination without naming a status; both release dispatch reservations. |
 | `lastObservedAt` | string or null | ISO-8601 timestamp for the latest worker observation. |
 | `lastAttemptedAt` | string or null | ISO-8601 timestamp for the latest launch attempt. |
 | `dispatchedAt` | string or null | ISO-8601 timestamp for a confirmed or ambiguous launch. |
 | `createdAt` | string or null | ISO-8601 timestamp from the first write when available. |
 | `updatedAt` | string or null | ISO-8601 timestamp from the latest write when available. |
 | `lastFailureTransient` | boolean or null | Whether the latest launch refusal was classified as transient. |
-| `lastError` | string or null | Sanitized last error or recovery note. |
+| `lastError` | string or null | Sanitized last error or recovery note. A hammer ending with an open PR now records `failed-without-merge` or `no-merge:concurrent-writer` here. |
+| `outcome` | string or null | Dispatch result written by `dispatch-closer.mjs` for hammer-ended-without-merge (`failed-without-merge` or `no-merge:concurrent-writer`), and by `closer-terminal-cancel.mjs` for lifecycle settlement (`succeeded` when the merged head matches the closer lease, `no-merge:pr-closed-externally` after HQ cancellation). Unlike lease `terminalOutcome`, this field annotates the dispatch record and may be absent on older records. |
 | `status`, `reason`, `terminalOutcome`, `closureAuthority` | string or null | Terminal/no-dispatch annotations used by recovery and audit paths when present. |
 
 ## Operational Contract

@@ -1301,6 +1301,7 @@ export const AMA_CLOSER_REDISPATCH_BOUND = 2;
 const AMA_CLOSER_BRANCH_HOLDER_BLOCK_BOUND = 3;
 const AMA_CLOSER_ACTIVE_STATUSES = new Set(['running', 'starting', 'blocked', 'stalled']);
 const AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES = new Set([
+  'terminal', // HQ confirmed terminal without a more specific worker status.
   'succeeded',
   'completed',
   'failed-without-merge',

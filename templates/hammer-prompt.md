@@ -1198,7 +1198,7 @@ PYEOF
 }
 
 ham_mark_ama_closer_lease_succeeded() {
-  TARGET_REMEDIATION_SHA="<<TARGET_REMEDIATION_SHA>>" "$HAM_NODE_BIN" --input-type=module <<'NODE'
+  TARGET_REMEDIATION_SHA="<<TARGET_REMEDIATION_SHA>>" POST_REMEDIATION_SHA="$POST_REMEDIATION_SHA" "$HAM_NODE_BIN" --input-type=module <<'NODE'
 import {
   AMA_CLOSER_LEASE_STATUS,
   readAmaCloserLease,
@@ -1209,9 +1209,13 @@ const rootDir = '<<ROOT_DIR>>';
 const identity = {
   repo: '<<REPO>>',
   prNumber: Number('<<PR_NUMBER>>'),
-  headSha: process.env.TARGET_REMEDIATION_SHA,
+  headSha: process.env.POST_REMEDIATION_SHA || process.env.TARGET_REMEDIATION_SHA,
 };
-const existing = readAmaCloserLease(rootDir, identity);
+let existing = readAmaCloserLease(rootDir, identity);
+if (!existing && identity.headSha !== process.env.TARGET_REMEDIATION_SHA) {
+  identity.headSha = process.env.TARGET_REMEDIATION_SHA;
+  existing = readAmaCloserLease(rootDir, identity);
+}
 if (existing?.status === AMA_CLOSER_LEASE_STATUS.TERMINAL) {
   if (existing.terminalOutcome === 'succeeded') process.exit(0);
   throw new Error(

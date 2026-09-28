@@ -1,68 +1,95 @@
 import { accessSync, constants } from 'node:fs';
+import { isAbsolute } from 'node:path';
 import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
 import { findLiveAmaCloserLease, updateAmaCloserLease } from './closer-lease.mjs';
 import { updateAmaCloserDispatchRecord } from './dispatch-closer.mjs';
+import { execHqDispatchCancel } from '../merge-agent-hq-exec.mjs';
+import { resolveHqBin } from '../remediation-hq-dispatch.mjs';
+import { resolveHqRoot } from '../remediation-reply-paths.mjs';
 
 const execFileAsync = promisify(execFile);
+const HQ_CANCEL_TIMEOUT_MS = 10_000;
 
-function alreadyTerminalCancel(response) {
+function cancelStatus(response) {
   const detail = String(response?.stdout || response?.message || response || '');
-  try {
-    const parsed = JSON.parse(detail);
-    if (parsed?.ok === false) {
-      return /already (terminal|terminated|cancelled|canceled)|not found|no such/i.test(String(parsed.reason || ''))
-        || /^(failed|succeeded|cancelled|canceled|superseded)$/.test(String(parsed.currentStatus || ''));
-    }
-  } catch {
-    // CLI errors can be plain text; classify the same terminal words there.
+  let parsed;
+  try { parsed = JSON.parse(detail); } catch { /* HQ can return plain text. */ }
+  const status = String(parsed?.currentStatus || parsed?.status || '').toLowerCase();
+  if (['failed', 'succeeded', 'cancelled', 'canceled', 'superseded'].includes(status)) return status;
+  if (status) return null;
+  if (/already (terminal|terminated|cancelled|canceled)/i.test(String(parsed?.reason || detail))) {
+    const namedStatus = String(parsed?.reason || detail).match(/status[=: ]+(failed|succeeded|cancelled|canceled|superseded)/i);
+    return namedStatus?.[1]?.toLowerCase() || 'terminal';
   }
-  return /already (terminal|terminated|cancelled|canceled)|not found|no such/i.test(detail);
+  return null;
 }
 
-/** Cancel live closer ownership when GitHub's live PR state becomes terminal. */
+/** Settle a live closer when GitHub's live PR state becomes terminal. */
 export async function cancelCloserForTerminalPr({
-  rootDir, repo, prNumber, transition, hqPath = process.env.HQ_BIN || '/Users/airlock/.local/bin/hq',
-  hqRoot = process.env.HQ_ROOT || '/Users/airlock/agent-os-hq',
+  rootDir, repo, prNumber, transition, live,
+  hqPath = resolveHqBin(process.env), hqRoot = process.env.HQ_ROOT,
   execFileImpl = execFileAsync, accessImpl = accessSync,
-  logger = console, now = new Date().toISOString(),
+  retryDelaysMs, logger = console, now = new Date().toISOString(),
 } = {}) {
   const held = findLiveAmaCloserLease(rootDir, { repo, prNumber });
   if (!held) return { cancelled: false, reason: 'no-live-closer' };
   const { lease, headSha } = held;
+
+  if (transition === 'merged') {
+    const mergedHead = String(live?.headRefOid || '');
+    const ownedHeads = [headSha, ...(lease.supersededHeads || []), lease.rekeyedFromHeadSha];
+    if (!mergedHead || !ownedHeads.includes(mergedHead)) {
+      // The stale-window reaper decides foreign merges after the closer has had
+      // time to finish its post-merge audit, signal, lease release and comment.
+      return { cancelled: false, reason: 'merged-await-stale-reaper' };
+    }
+    updateAmaCloserLease({ rootDir, repo, prNumber, headSha, status: 'terminal', terminalOutcome: 'succeeded', now });
+    updateAmaCloserDispatchRecord(rootDir, { repo, prNumber, headSha }, (record) => record && ({
+      ...record, outcome: 'succeeded', lastObservedStatus: 'succeeded', lastObservedAt: now,
+    }));
+    return { cancelled: false, outcome: 'succeeded' };
+  }
+  if (transition !== 'closed') return { cancelled: false, reason: 'not-terminal' };
+
+  if (!lease.lrqId) {
+    return { cancelled: false, reason: 'cancel-unavailable', error: new Error('closer launch request id pending') };
+  }
+  let observedStatus = null;
   if (lease.lrqId) {
     try {
-      accessImpl(hqPath, constants.X_OK);
-      const response = await execFileImpl(hqPath, ['dispatch', 'cancel', lease.lrqId], {
-        env: { ...process.env, HQ_ROOT: hqRoot },
+      if (isAbsolute(hqPath)) accessImpl(hqPath, constants.X_OK);
+      const resolvedRoot = hqRoot || resolveHqRoot(process.env);
+      const response = await execHqDispatchCancel({
+        hqPath, launchRequestId: lease.lrqId,
+        hqExecFileImpl: (bin, args, options) => execFileImpl(bin, args, {
+          ...options, timeout: HQ_CANCEL_TIMEOUT_MS,
+        }),
+        env: { ...process.env, HQ_ROOT: resolvedRoot },
+        retryDelaysMs,
       });
-      if (response?.stdout) {
-        try {
-          const parsed = JSON.parse(String(response.stdout));
-          if (parsed?.ok === false && !alreadyTerminalCancel(response)) {
-            throw new Error(`HQ cancel refused: ${parsed.reason || 'unknown reason'}`);
-          }
-        } catch (err) {
-          if (err?.message?.startsWith('HQ cancel refused:')) throw err;
-        }
+      let parsed = null;
+      try { parsed = response?.stdout ? JSON.parse(String(response.stdout)) : null; } catch { /* Plain text success. */ }
+      if (parsed?.ok === false && !cancelStatus(response)) {
+        throw new Error(`HQ cancel refused: ${parsed.reason || 'unknown reason'}`);
       }
+      observedStatus = cancelStatus(response) || 'cancelled';
     } catch (err) {
-      if (alreadyTerminalCancel(err?.stdout || err)) {
-        logger.log?.(`[ama-closer] ${repo}#${prNumber} lrq=${lease.lrqId} already terminal at HQ`);
-      } else {
+      // Only HQ's response can prove terminal state. An ENOENT from access or
+      // exec means the binary is missing, not that the dispatch was cancelled.
+      observedStatus = err?.stdout ? cancelStatus(err) : null;
+      if (!observedStatus) {
         logger.warn?.(`[ama-closer] cancel unavailable for ${repo}#${prNumber} lrq=${lease.lrqId}: ${err?.message || err}`);
         return { cancelled: false, reason: 'cancel-unavailable', error: err };
       }
+      logger.log?.(`[ama-closer] ${repo}#${prNumber} lrq=${lease.lrqId} already terminal at HQ`);
     }
   }
-  const outcome = transition === 'merged' ? 'pr-merged-externally' : 'pr-closed-externally';
-  updateAmaCloserLease({ rootDir, repo, prNumber, headSha, status: 'terminal', terminalOutcome: outcome, now });
+  updateAmaCloserLease({ rootDir, repo, prNumber, headSha, status: 'terminal', terminalOutcome: 'pr-closed-externally', now });
   updateAmaCloserDispatchRecord(rootDir, { repo, prNumber, headSha }, (record) => record && ({
-    ...record,
-    outcome: transition === 'merged' ? 'no-merge:pr-merged-externally' : 'no-merge:pr-closed-externally',
-    lastObservedStatus: 'cancelled',
-    lastObservedAt: now,
+    ...record, outcome: 'no-merge:pr-closed-externally',
+    lastObservedStatus: observedStatus, lastObservedAt: now,
   }));
-  logger.log?.(`[ama-closer] ${repo}#${prNumber} ${outcome}; cancelled lrq=${lease.lrqId || 'none'}`);
-  return { cancelled: Boolean(lease.lrqId), outcome };
+  logger.log?.(`[ama-closer] ${repo}#${prNumber} pr-closed-externally; cancelled lrq=${lease.lrqId || 'none'}`);
+  return { cancelled: Boolean(lease.lrqId && observedStatus === 'cancelled'), outcome: 'pr-closed-externally' };
 }

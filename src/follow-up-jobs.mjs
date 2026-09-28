@@ -1652,6 +1652,7 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
   const completedRoundTimestamps = [];
   const completedRoundTriggers = [];
   const completedRemediationRevisionRefs = new Set();
+  const commentOnlyFinalRoundRevisionRefs = new Set();
   let latestJob = null;
   let latestTimestamp = '';
 
@@ -1693,6 +1694,12 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
       if (String(job.domainId || 'code-pr') !== targetDomainId) continue;
       if (job.repo !== targetRepo) continue;
       if (Number(job.prNumber) !== targetPr) continue;
+
+      if (key === 'completed' && job.finalRound === 'comment-only' &&
+          job.reReview?.suppressed === 'comment-only-final-round' &&
+          String(job.revisionRef || '').trim()) {
+        commentOnlyFinalRoundRevisionRefs.add(String(job.revisionRef).trim());
+      }
 
       if (terminalKeys.has(key)) {
         // `claimNextFollowUpJob` increments `currentRound` on claim,
@@ -1787,6 +1794,7 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
     // Terminal Hammer may only become first-class owner of reviewer findings
     // after a remediation worker completed against the exact reviewed head.
     completedRemediationRevisionRefs: Array.from(completedRemediationRevisionRefs).sort(),
+    commentOnlyFinalRoundRevisionRefs: Array.from(commentOnlyFinalRoundRevisionRefs).sort(),
   };
 }
 

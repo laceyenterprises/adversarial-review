@@ -55,6 +55,7 @@ import {
 } from './ama/closer-lease.mjs';
 import { requestEligibleHammerWake } from './hammer-wake.mjs';
 import { resolveRoundBudgetForJob, summarizePRRemediationLedger } from './follow-up-jobs.mjs';
+import { proveCommentOnlyFinalRoundHead } from './comment-only-final-round.mjs';
 import {
   AMA_HAMMER_BACKGROUND_REASON,
   amaHammerBackgroundKey,
@@ -734,6 +735,7 @@ export async function maybeDispatchAmaClosureFor({
   let completedRemediationRoundsForPR = null;
   let completedRereviewRoundsForPR = null;
   let completedRemediationRevisionRefsForPR = [];
+  let commentOnlyFinalRoundRevisionRefs = [];
   // Resolve the PR's risk class from the remediation ledger (which defaults to
   // DEFAULT_RISK_CLASS) so AMA eligibility uses the SAME risk class the
   // round-budget path below already computes. Without this, the eligibility
@@ -754,6 +756,9 @@ export async function maybeDispatchAmaClosureFor({
       ledgerRiskClass = resolved.ledgerRiskClass || resolved.riskClass || null;
       completedRemediationRevisionRefsForPR = Array.isArray(resolved.completedRemediationRevisionRefs)
         ? resolved.completedRemediationRevisionRefs
+        : [];
+      commentOnlyFinalRoundRevisionRefs = Array.isArray(resolved.commentOnlyFinalRoundRevisionRefs)
+        ? resolved.commentOnlyFinalRoundRevisionRefs
         : [];
     } else {
       const remLedger = summarizePRRemediationLedger(rootDir, { repo: repoPath, prNumber });
@@ -777,6 +782,9 @@ export async function maybeDispatchAmaClosureFor({
       );
       completedRemediationRevisionRefsForPR = Array.isArray(remLedger.completedRemediationRevisionRefs)
         ? remLedger.completedRemediationRevisionRefs
+        : [];
+      commentOnlyFinalRoundRevisionRefs = Array.isArray(remLedger.commentOnlyFinalRoundRevisionRefs)
+        ? remLedger.commentOnlyFinalRoundRevisionRefs
         : [];
       completedRereviewRoundsForPR = 0;
       try {
@@ -1601,8 +1609,8 @@ export async function maybeDispatchAmaClosureFor({
   const [owner, name] = repoPath.split('/');
   // HMR-01: how long has this PR been TERMINAL and still unmerged?
   //
-  // A settled comment-only verdict spawns no remediation rounds, so
-  // `reviewCycleExhausted` can never flip for it and the hammer is structurally
+  // A settled comment-only verdict may spawn one final non-blocking round, so
+  // `reviewCycleExhausted` need not flip for it and the hammer can be structurally
   // unreachable (see isHammerRemediableEligibilityMiss). The operator contract is
   // Codex-first / Hammer-last, so the hammer must not fire on a FRESH comment-only
   // verdict -- only once the PR has sat terminal past the same grace that
@@ -1617,6 +1625,18 @@ export async function maybeDispatchAmaClosureFor({
     if (!Number.isFinite(postedAt)) return null;
     return Math.max(0, Date.now() - postedAt);
   })();
+  const commentOnlyFinalRoundResume =
+    reviewState.verdict === 'comment-only' &&
+    reviewState.remediationPending === false &&
+    !disabledEligibility.reasons.includes('ci-not-green') &&
+    await proveCommentOnlyFinalRoundHead({
+      repo: repoPath,
+      reviewedHead: reviewState.headSha,
+      currentHead: currentPrHeadSha,
+      completedRevisionRefs: commentOnlyFinalRoundRevisionRefs,
+      execFileImpl: execFileAsync,
+      logger,
+    });
   const shouldLookupMergedProtectiveDependents =
     reviewCycleExhausted ||
     hamTerminalRemediationValidated ||
@@ -1637,6 +1657,7 @@ export async function maybeDispatchAmaClosureFor({
       ? daemonCleanMerge.reasons
       : [daemonCleanMerge?.reason].filter(Boolean),
     settledCommentOnlyTerminalMs,
+    commentOnlyFinalRoundResume,
     rootDir,
     repo: repoPath,
     prUrl: `https://github.com/${owner}/${name}/pull/${prNumber}`,

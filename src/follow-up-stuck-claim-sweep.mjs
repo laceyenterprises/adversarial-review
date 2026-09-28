@@ -45,6 +45,9 @@ import { existsSync, mkdtempSync, promises as fsPromises, readFileSync, readdirS
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
+import { readAmaAuditEntry } from './ama/audit.mjs';
+import { findLiveAmaCloserLease, updateAmaCloserLease } from './ama/closer-lease.mjs';
+import { resolveHqRoot } from './remediation-reply-paths.mjs';
 import {
   computeFollowUpJobStoppedState,
   listFollowUpJobsInDir,
@@ -1500,12 +1503,14 @@ function amaCloserDispatchStaleMs(record, nowMs) {
 //   * Never merges, never kills a worker, never touches a git working tree.
 async function reapFinishedPrFollowUpJobs({
   rootDir,
+  hqRoot = process.env.HQ_ROOT,
   now = () => new Date().toISOString(),
   resolvePRLifecycleImpl = resolvePRLifecycle,
   execFileImpl,
   isWorkerAlive = null,
   listActiveAmaCloserDispatchesImpl = null,
   updateAmaCloserDispatchRecordImpl = null,
+  readAmaAuditEntryImpl = readAmaAuditEntry,
   maxPrLookups = resolveReapMaxPrLookups(),
   amaCloserMinStaleMs = resolveReapAmaCloserMinStaleMs(),
   budgetMs = 15_000,
@@ -1736,8 +1741,37 @@ async function reapFinishedPrFollowUpJobs({
       }
 
       const prStateUpper = lifecycle.prState.toUpperCase();
-      const terminalStatus = lifecycle.prState === 'merged' ? 'succeeded' : 'failed-without-merge';
+      let closerAudit = null;
+      let held = null;
       try {
+        held = findLiveAmaCloserLease(rootDir, { repo: amaRecord.repo, prNumber: amaRecord.prNumber });
+        if (lifecycle.prState === 'merged') {
+          const auditHeads = new Set([amaRecord.headSha, held?.headSha].filter(Boolean));
+          let auditRoot = hqRoot;
+          if (!auditRoot) {
+            try { auditRoot = resolveHqRoot(process.env); } catch { /* Standalone has no HQ audit. */ }
+          }
+          if (auditRoot) {
+            for (const auditHead of auditHeads) {
+              const candidate = readAmaAuditEntryImpl(auditRoot, amaRecord.repo, amaRecord.prNumber, auditHead);
+              if (candidate?.status === 'succeeded') { closerAudit = candidate; break; }
+            }
+          }
+        }
+      } catch (err) {
+        log.warn?.(`[follow-up-tick ${nowIso}] reap-ama-audit-unreadable pr=${amaRecord.repo}#${amaRecord.prNumber}: ${err?.message || err}`);
+        continue;
+      }
+      const closerSucceeded = closerAudit?.status === 'succeeded';
+      const terminalStatus = lifecycle.prState === 'merged'
+        ? (closerSucceeded ? 'succeeded' : 'terminal') : 'failed-without-merge';
+      const terminalOutcome = lifecycle.prState === 'merged'
+        ? (closerSucceeded ? 'succeeded' : 'pr-merged-externally') : 'pr-closed-externally';
+      try {
+        if (held && [held.headSha, held.lease.rekeyedFromHeadSha, ...(held.lease.supersededHeads || [])].includes(amaRecord.headSha)) {
+          updateAmaCloserLease({ rootDir, repo: amaRecord.repo, prNumber: amaRecord.prNumber,
+            headSha: held.headSha, status: 'terminal', terminalOutcome, now: nowIso });
+        }
         updateAmaCloserDispatchRecordImpl(
           rootDir,
           { repo: amaRecord.repo, prNumber: amaRecord.prNumber, headSha: amaRecord.headSha },
@@ -1747,6 +1781,7 @@ async function reapFinishedPrFollowUpJobs({
             return {
               ...base,
               lastObservedStatus: terminalStatus,
+              outcome: closerSucceeded ? 'succeeded' : `no-merge:${terminalOutcome}`,
               lastObservedAt: nowIso,
               reapedByFollowUpReaper: true,
               reapedFromPrState: lifecycle.prState,

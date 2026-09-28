@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { openReviewStateDb } from '../src/review-state.mjs';
+import { acquireAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
+import { updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import {
   DEFAULT_MAX_REMEDIATION_ROUNDS,
   FOLLOW_UP_JOB_SCHEMA_VERSION,
@@ -1539,6 +1541,24 @@ test('claimNextFollowUpJob moves the oldest pending file into in-progress metada
   assert.equal(claimed.job.remediationPlan.currentRound, 1);
   assert.equal(claimed.job.remediationPlan.rounds[0].state, 'claimed');
   assert.equal(existsSync(path.join(getFollowUpJobDir(rootDir, 'pending'), `${claimed.job.jobId}.json`)), false);
+});
+
+test('rekeyed active closer defers a reviewed-head job after the lease age threshold', (t) => {
+  const rootDir = makeTempRoot(t);
+  const created = createFollowUpJob({ ...makeJobInput(rootDir), revisionRef: 'reviewed' });
+  const job = readFollowUpJob(created.jobPath);
+  writeFollowUpJob(created.jobPath, { ...job, revisionRef: 'reviewed' });
+  acquireAmaCloserLease({ rootDir, repo: job.repo, prNumber: job.prNumber,
+    headSha: 'rekeyed', now: '2026-04-21T09:00:00.000Z' });
+  updateAmaCloserLease({ rootDir, repo: job.repo, prNumber: job.prNumber,
+    headSha: 'rekeyed', status: 'dispatched', lrqId: 'lrq_rekeyed',
+    now: '2026-04-21T09:00:00.000Z' });
+  updateAmaCloserDispatchRecord(rootDir, { repo: job.repo, prNumber: job.prNumber,
+    headSha: 'rekeyed' }, () => ({ repo: job.repo, prNumber: job.prNumber,
+    headSha: 'rekeyed', state: 'dispatched', lastObservedStatus: 'running',
+    lastObservedAt: '2026-04-21T09:31:00.000Z' }));
+  assert.equal(claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T09:31:00.000Z' }), null);
+  assert.ok(existsSync(created.jobPath));
 });
 
 test('claimNextFollowUpJob records clean review jobs without spawning remediation', () => {
@@ -5119,4 +5139,3 @@ test('reapTerminalFollowUpWorkspaces relaunches the deleter for pending trash', 
 
   assert.deepEqual(backgroundCalls.map((target) => realpathSync(target)), [realpathSync(trashDir)]);
 });
-

@@ -863,6 +863,29 @@ want the prior behavior (direct-close on `Comment only` regardless of
 non-blocking findings) can set `strict_non_blocking_remediation: false` in
 `config.local.yaml`; the gate then reverts to blocking-only.
 
+### Lifecycle settlement
+
+Lifecycle sync settles a live closer lease as `succeeded` when a merged PR's
+head matches the lease head or its recorded prior heads; it never cancels HQ
+for a merged PR. A foreign-head merged lease remains held for the closer's
+post-merge work; the dispatch-record stale-window reaper does not release
+leases, so a closer that never finishes may require operator reconciliation.
+For a closed PR, lifecycle sync persists a closer-cancel
+obligation before marking the PR terminal. The watcher drains at most three
+obligations per tick, with one-minute spacing and five attempts per obligation.
+HQ cancellation is outside the lifecycle mark. A definitive unknown HQ id or
+expired pending launch settles the lease as `pr-closed-externally`; exhausted
+HQ retries remain visible in `data/ama-closer-cancels/` and emit an alert.
+A pending lease without a launch ID waits for its launch expiry without
+spending the HQ failure budget.
+
+### `active-remediation-job` skip
+
+A pending or active same-PR remediation job owns the branch, so AMA defers
+before writing its append-only audit attempt, prompt, or dispatch record.
+A second check after lease acquisition closes the claim race and restores the
+retry count because no closer launched.
+
 ### `lease-held` skip
 
 Another watcher tick already dispatched a closer for this `(repo,

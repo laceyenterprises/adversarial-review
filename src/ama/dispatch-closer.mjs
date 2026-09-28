@@ -39,6 +39,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
+import { findActiveRemediationJob } from './active-remediation-job.mjs';
 import { createLogChangeGate } from '../log-change-gate.mjs';
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from '../config-loader.mjs';
 import {
@@ -69,11 +70,20 @@ import {
   writeAmaAuditEntry,
 } from './audit.mjs';
 import {
+  AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS,
+  AMA_CLOSER_TOKEN_ROLLUP_POLL_DELAYS_MS,
+  AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS,
+  AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS,
   AMA_CLOSER_LEASE_STATUS,
+  amaCloserPendingLeaseExpiryMs,
   acquireAmaCloserLease,
   deleteAmaCloserLease,
   readAmaCloserLease,
   updateAmaCloserLease,
+} from './closer-lease.mjs';
+export {
+  AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS,
+  AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS,
 } from './closer-lease.mjs';
 import { isEligibleForAmaClosure } from './eligibility.mjs';
 import {
@@ -1257,7 +1267,6 @@ export function amaClosureNeedsTerminalRemediation(verdict) {
 }
 
 const AMA_CLOSER_DISPATCH_SCHEMA_VERSION = 1;
-const AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS = [1_000, 5_000];
 // `git worktree remove` refuses a registration whose directory is already gone.
 // `--force` does not cover it: --force overrides dirty/locked, not missing. The
 // branch stays pinned by the leftover metadata until something prunes it.
@@ -1272,27 +1281,11 @@ export function isStaleWorktreeRegistrationError(detail) {
 }
 
 const AMA_CLOSER_TEARDOWN_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000];
-const AMA_CLOSER_HQ_DISPATCH_LAUNCH_WINDOW_MS = 600_000;
-const AMA_CLOSER_HQ_DISPATCH_MAX_ATTEMPTS = AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.length + 1;
-const AMA_CLOSER_TOKEN_ROLLUP_POLL_DELAYS_MS = [500, 1_000, 2_000, 5_000];
 const AMA_CLOSER_LEASELESS_LAUNCH_GRACE_MS = 30_000;
-const AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_TOTAL_MS =
-  AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.reduce((total, delay) => total + delay, 0);
-const AMA_CLOSER_TOKEN_ROLLUP_POLL_TOTAL_MS =
-  AMA_CLOSER_TOKEN_ROLLUP_POLL_DELAYS_MS.reduce((total, delay) => total + delay, 0);
 
 function amaCloserPendingLeaseReclaimAgeMs(record = null) {
-  const recordedTimeoutMs = Number(record?.dispatchTimeoutMs);
-  const launchWindowMs = Number.isFinite(recordedTimeoutMs) && recordedTimeoutMs > 0
-    ? recordedTimeoutMs
-    : AMA_CLOSER_HQ_DISPATCH_LAUNCH_WINDOW_MS;
-  return (launchWindowMs * AMA_CLOSER_HQ_DISPATCH_MAX_ATTEMPTS)
-    + AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_TOTAL_MS
-    + (AMA_CLOSER_TOKEN_ROLLUP_POLL_TOTAL_MS * AMA_CLOSER_HQ_DISPATCH_MAX_ATTEMPTS);
+  return amaCloserPendingLeaseExpiryMs(record?.dispatchTimeoutMs);
 }
-
-export const AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS = amaCloserPendingLeaseReclaimAgeMs();
-export const AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS = 30 * 60 * 1000;
 
 // Terminal outcomes a dispatched lease may be reclaimed from. `succeeded`
 // stays sticky per SPEC 4.4 rule #5; these outcomes record attempts that did
@@ -1302,12 +1295,15 @@ export const AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOMES = new Set([
   AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOME,
   'deferred',
   'superseded',
+  'pr-closed-externally',
+  'no-merge:concurrent-writer',
 ]);
 const AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000, 5_000];
 export const AMA_CLOSER_REDISPATCH_BOUND = 2;
 const AMA_CLOSER_BRANCH_HOLDER_BLOCK_BOUND = 3;
 const AMA_CLOSER_ACTIVE_STATUSES = new Set(['running', 'starting', 'blocked', 'stalled']);
 const AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES = new Set([
+  'terminal', // HQ confirmed terminal without a more specific worker status.
   'succeeded',
   'completed',
   'failed-without-merge',
@@ -3119,7 +3115,6 @@ function retainExistingAmaCloserDispatch(existingRecord, workerClass, status) {
 function closerReviewerPassStatusForDispatchStatus(status, { merged = false } = {}) {
   if (merged) return 'completed';
   const normalized = String(status || '').trim().toLowerCase();
-  if (normalized === 'succeeded' || normalized === 'unverified-terminal-success') return 'completed';
   if (normalized === 'cancelled' || normalized === 'canceled' || normalized === 'superseded') return 'cancelled';
   return 'failed';
 }
@@ -3231,6 +3226,7 @@ async function recordAmaCloserReviewerPassTokens({
   const workerRunId = usage?.workerRunId || record.workerRunId || null;
   const metadata = {
     amaCloser: true,
+    workerClass: record.workerClass || null,
     headSha: record.headSha || null,
     dispatchId: record.dispatchId || null,
     launchRequestId,
@@ -4189,12 +4185,17 @@ export async function maybeDispatchAmaCloser({
           // head advance as supersession hid the failed closure attempt and
           // bypassed the bounded hammer retry/alert path (HAMSYNC-01).
           hammerEndedWithoutMerge = true;
+          const concurrentWriter = /force-with-lease|stale info|fetch first|concurrent.writer/i.test(
+            String(statusProbe?.error || ''),
+          );
+          const noMergeOutcome = concurrentWriter
+            ? 'no-merge:concurrent-writer' : 'failed-without-merge';
           status = 'failed';
           existingDispatchStatus = status;
           finalizeAmaCloserLeaseBestEffort({
             rootDir,
             leaseIdentity: existingRecordLeaseIdentity,
-            terminalOutcome: 'failed-without-merge',
+            terminalOutcome: noMergeOutcome,
             now: dispatchContext.dispatchedAt,
             logger,
             repo,
@@ -4204,7 +4205,8 @@ export async function maybeDispatchAmaCloser({
             ...(current || existingRecord),
             lastObservedStatus: 'succeeded',
             lastObservedAt: dispatchContext.dispatchedAt,
-            lastError: 'hammer-ended-without-merge',
+            lastError: noMergeOutcome,
+            outcome: noMergeOutcome,
           }));
           logAmaCloserDispatchEvent(logger, 'ama_closer.hammer_ended_without_merge', {
             repo,
@@ -4882,6 +4884,14 @@ export async function maybeDispatchAmaCloser({
     });
   }
 
+  // A same-PR remediation worker owns the branch. Check before the append-only
+  // authority audit, prompt write, and quota probe: no closer attempt exists yet.
+  const activeFollowUp = findActiveRemediationJob(rootDir, { repo, prNumber });
+  if (activeFollowUp) {
+    logger.log?.(`[ama-closer] deferred ${repo}#${prNumber}: remediation job ${activeFollowUp.jobId} ${activeFollowUp.status}`);
+    return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'active-remediation-job' });
+  }
+
   assertAmaAuditOwner({
     hqRoot,
     ownerUser,
@@ -5142,6 +5152,7 @@ export async function maybeDispatchAmaCloser({
   let leaseResult = acquireAmaCloserLease({
     rootDir,
     ...leaseIdentity,
+    dispatchTimeoutMs,
     watcherPid: typeof process !== 'undefined' ? process.pid : null,
     now: dispatchContext.dispatchedAt,
   });
@@ -5152,6 +5163,7 @@ export async function maybeDispatchAmaCloser({
       leaseResult = acquireAmaCloserLease({
         rootDir,
         ...leaseIdentity,
+        dispatchTimeoutMs,
         watcherPid: typeof process !== 'undefined' ? process.pid : null,
         now: dispatchContext.dispatchedAt,
       });
@@ -5169,6 +5181,7 @@ export async function maybeDispatchAmaCloser({
       leaseResult = acquireAmaCloserLease({
         rootDir,
         ...leaseIdentity,
+        dispatchTimeoutMs,
         watcherPid: typeof process !== 'undefined' ? process.pid : null,
         now: dispatchContext.dispatchedAt,
       });
@@ -5181,6 +5194,16 @@ export async function maybeDispatchAmaCloser({
       reason: 'lease-held',
       existingLease: leaseResult.existingLease,
     });
+  }
+
+  // A follow-up can claim between the first queue check and lease acquisition.
+  if (findActiveRemediationJob(rootDir, { repo, prNumber })) {
+    deleteAmaCloserLease(rootDir, leaseIdentity);
+    updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => ({
+      ...current, state: 'no-dispatch', reason: 'active-remediation-job', retryCount: priorRetryCount,
+    }));
+    logger.log?.(`[ama-closer] deferred ${repo}#${prNumber}: remediation job appeared during lease acquisition`);
+    return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'active-remediation-job' });
   }
 
   throwIfAborted(signal);

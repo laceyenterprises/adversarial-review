@@ -11,6 +11,8 @@ import { userInfo } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
+import { findLiveAmaCloserLease, isHeldAmaCloserLease } from './ama/closer-lease.mjs';
+import { isActiveAmaCloserDispatchRecord, readAmaCloserDispatchRecord } from './ama/dispatch-closer.mjs';
 import { ensureWorkspaceTrashDir, launchWorkspaceTrashDeleter, workspaceTrashDir } from './follow-up-workspace-trash.mjs';
 import { loadRoleConfig } from './role-config.mjs';
 import {
@@ -2160,6 +2162,28 @@ function maybeRevalidateQuotaHold({
   return { cleared: true, job: updatedJob };
 }
 
+function heldCloserForJob(rootDir, job, now) {
+  if (!job?.repo || !Number.isInteger(Number(job?.prNumber))) return false;
+  let held;
+  try { held = findLiveAmaCloserLease(rootDir, { repo: job.repo, prNumber: job.prNumber }); }
+  catch (err) {
+    console.warn(`[follow-up] unreadable closer lease for ${job.repo}#${job.prNumber}: ${err?.message || err}`);
+    return false;
+  }
+  if (!held) return false;
+  // Ownership is per PR. A rekeyed closer can legitimately have a different
+  // head from the remediation job it blocks.
+  if (held.lease.status === 'dispatched') {
+    const dispatch = readAmaCloserDispatchRecord(rootDir, {
+      repo: job.repo, prNumber: job.prNumber, headSha: held.lease.rekeyedFromHeadSha || held.headSha,
+    });
+    if (dispatch && isActiveAmaCloserDispatchRecord(dispatch, { now })) return true;
+  }
+  return isHeldAmaCloserLease(rootDir, {
+    repo: job.repo, prNumber: job.prNumber, headSha: held.headSha,
+  }, { now });
+}
+
 function claimNextFollowUpJob({
   rootDir,
   workerType = 'codex-remediation',
@@ -2216,6 +2240,11 @@ function claimNextFollowUpJob({
       }
     }
 
+    if (heldCloserForJob(rootDir, pendingJob, claimedAt)) {
+      console.log(`[follow-up] deferred ${pendingJob.repo}#${pendingJob.prNumber}: closer lease held (job head ${pendingJob.revisionRef || 'unknown'})`);
+      continue;
+    }
+
     const inProgressPath = join(getFollowUpJobDir(rootDir, 'inProgress'), basename(pendingPath));
 
     try {
@@ -2223,6 +2252,13 @@ function claimNextFollowUpJob({
     } catch (err) {
       if (err?.code === 'ENOENT') continue;
       throw err;
+    }
+
+    // The closer can acquire between the pre-check and our atomic claim.
+    if (heldCloserForJob(rootDir, pendingJob, claimedAt)) {
+      renameSync(inProgressPath, pendingPath);
+      console.log(`[follow-up] deferred ${pendingJob.repo}#${pendingJob.prNumber}: closer lease acquired during claim`);
+      continue;
     }
 
     const job = pendingJob;

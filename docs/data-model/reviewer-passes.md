@@ -15,6 +15,12 @@ closer review attempt. Its primary identity is `(repo, pr_number,
 attempt_number, pass_kind)`. `worker_run_id` links a dispatched reviewer to the
 session-ledger `worker_runs.run_id` when that attribution is available.
 
+For closer passes, a confirmed merge records `status='completed'`. An unmerged
+worker success, including `unverified-terminal-success`, records `failed`;
+cancelled or superseded work records `cancelled`. This keeps time-to-merge
+rollups from counting an unproven merge. `metadata_json.workerClass` holds the
+logical AMA dispatch class, even when `reviewer_class` names a fallback harness.
+
 ## Token and quota capture
 
 Schema convergence in `src/review-state.mjs` adds `token_input` and

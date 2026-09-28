@@ -332,7 +332,7 @@ function makeAmaImpls(records) {
   return { listActiveAmaCloserDispatchesImpl, updateAmaCloserDispatchRecordImpl, updates };
 }
 
-test('reaper: orphaned AMA closer dispatch for a MERGED PR is terminalized to succeeded', async () => {
+test('reaper: external merge does not credit the AMA closer', async () => {
   const rootDir = makeRoot();
   const ama = makeAmaImpls([
     { repo: 'laceyenterprises/agent-os', prNumber: 4999, headSha: 'abc123', state: 'dispatched', lastObservedStatus: 'running', lastObservedAt: '2026-08-06T05:00:00.000Z' },
@@ -351,14 +351,32 @@ test('reaper: orphaned AMA closer dispatch for a MERGED PR is terminalized to su
   assert.equal(result.amaReleased, 1);
   assert.equal(result.skippedFreshAmaDispatch, 0);
   assert.deepEqual(result.amaReleasedPrs, [
-    { repo: 'laceyenterprises/agent-os', prNumber: 4999, prState: 'merged', terminalStatus: 'succeeded' },
+    { repo: 'laceyenterprises/agent-os', prNumber: 4999, prState: 'merged', terminalStatus: 'terminal' },
   ]);
   assert.equal(ama.updates.length, 1);
-  assert.equal(ama.updates[0].next.lastObservedStatus, 'succeeded');
+  assert.equal(ama.updates[0].next.lastObservedStatus, 'terminal');
+  assert.equal(ama.updates[0].next.outcome, 'no-merge:pr-merged-externally');
   assert.equal(ama.updates[0].next.reapedByFollowUpReaper, true);
   assert.equal(ama.updates[0].next.reapReason, 'operator-merged-pr');
   assert.deepEqual(ama.updates[0].identity, { repo: 'laceyenterprises/agent-os', prNumber: 4999, headSha: 'abc123' });
   assert.ok(logs.some((m) => /reaped-ama-closer-dispatch/.test(m)));
+});
+
+test('reaper: AMA success audit credits the closer merge', async () => {
+  const rootDir = makeRoot();
+  const ama = makeAmaImpls([
+    { repo: 'laceyenterprises/agent-os', prNumber: 4997, headSha: 'abc123', state: 'dispatched', lastObservedStatus: 'running', lastObservedAt: '2026-08-06T05:00:00.000Z' },
+  ]);
+  const result = await reapFinishedPrFollowUpJobs({
+    rootDir, hqRoot: rootDir, now: () => '2026-08-06T06:00:00.000Z',
+    resolvePRLifecycleImpl: async () => liveMerged,
+    listActiveAmaCloserDispatchesImpl: ama.listActiveAmaCloserDispatchesImpl,
+    updateAmaCloserDispatchRecordImpl: ama.updateAmaCloserDispatchRecordImpl,
+    readAmaAuditEntryImpl: () => ({ status: 'succeeded' }),
+  });
+  assert.equal(result.amaReleased, 1);
+  assert.equal(ama.updates[0].next.outcome, 'succeeded');
+  assert.equal(ama.updates[0].next.lastObservedStatus, 'succeeded');
 });
 
 test('reaper: orphaned AMA closer dispatch for a CLOSED PR is terminalized to failed-without-merge', async () => {
@@ -435,7 +453,7 @@ test('reaper: in-progress orphan AND its AMA closer dispatch share one PR lookup
   ]);
   let lookups = 0;
   const result = await reapFinishedPrFollowUpJobs({
-    rootDir,
+    rootDir, hqRoot: rootDir,
     now: () => '2026-08-06T06:00:00.000Z',
     resolvePRLifecycleImpl: async () => { lookups += 1; return liveMerged; },
     isWorkerAlive: () => false,

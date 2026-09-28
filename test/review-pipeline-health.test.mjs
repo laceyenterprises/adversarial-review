@@ -31,7 +31,31 @@ import {
   summarizeRoundBudgetAnomalies,
   resolveReviewPipelineHealthConfig,
   stoppedJobIsCiRegressionStopped,
+  summarizeHammerEfficiency,
 } from '../src/review-pipeline-health.mjs';
+
+test('hammer efficiency counts only merged closer passes and divides recorded input tokens by merges', () => {
+  const db = new Database(':memory:');
+  db.exec(`CREATE TABLE reviewer_passes (
+    pass_kind TEXT, reviewer_class TEXT, status TEXT, token_input INTEGER, metadata_json TEXT, started_at TEXT
+  )`);
+  db.prepare(`INSERT INTO reviewer_passes VALUES (?, ?, ?, ?, ?, ?)`).run(
+    'closer', 'hammer', 'failed', 100, '{"merged":false}', '2026-09-27T00:00:00.000Z'
+  );
+  db.prepare(`INSERT INTO reviewer_passes VALUES (?, ?, ?, ?, ?, ?)`).run(
+    'closer', 'codex', 'completed', 50, '{"merged":true,"workerClass":"hammer"}', '2026-09-27T00:00:00.000Z'
+  );
+  db.prepare(`INSERT INTO reviewer_passes VALUES (?, ?, ?, ?, ?, ?)`).run(
+    'closer', 'hammer', 'running', 500, '{"merged":false}', '2026-09-27T00:00:00.000Z'
+  );
+  db.prepare(`INSERT INTO reviewer_passes VALUES (?, ?, ?, ?, ?, ?)`).run(
+    'closer', 'hammer', 'completed', 500, '{"merged":true}', '2026-01-01T00:00:00.000Z'
+  );
+  assert.deepEqual(summarizeHammerEfficiency(db, { nowMs: Date.parse('2026-09-28T00:00:00Z') }), {
+    runs: 2, merges: 1, inputTokens: 150, inputTokensPerMerge: 150,
+  });
+  db.close();
+});
 
 import { PROVIDER_OVERLOADED_FAILURE_CLASS } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS } from '../src/quota-exhaustion.mjs';

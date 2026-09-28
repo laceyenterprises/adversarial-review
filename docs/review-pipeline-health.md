@@ -213,6 +213,9 @@ The Grafana dashboard lives at
 - `review_pipeline_hammer_dispatch_stall_blind`: 1 when the hammer-dispatch
   stall detector cannot decide because its required dispatch log evidence is
   missing; a blind snapshot is a data gap, not a healthy zero.
+- `review_pipeline_hammer_runs_total`: terminal hammer passes recorded in the review ledger.
+- `review_pipeline_hammer_merges_total`: those passes that merged the PR.
+- `review_pipeline_hammer_input_tokens_per_merge`: recorded input tokens from terminal logical hammer closer passes started in the last 30 days, divided by their confirmed merges; NaN when no merge is recorded. A fallback harness retains its logical `metadata_json.workerClass` attribution.
 - `review_pipeline_dag_autowalk_healthy`: dag-autowalk LaunchAgent last-exit
   and recent-log health.
 - `review_pipeline_sentinel_finding_active`: 1 when a finding code is currently

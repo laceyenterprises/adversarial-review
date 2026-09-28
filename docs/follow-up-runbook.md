@@ -1,5 +1,10 @@
 # Follow-Up Remediation Runbook
 
+Before claiming a remediation job, the daemon checks for a live AMA closer
+lease for the same PR at any head, including a rekeyed hammer head. An active
+closer dispatch record continues to defer claims after the lease's 30-minute
+age threshold; stale leases without active dispatch evidence can expire.
+
 ## SDK cutover gate
 
 Full SDK cutover remains blocked until the airlock-owned deploy host returns

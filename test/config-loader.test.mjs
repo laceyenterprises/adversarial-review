@@ -4851,6 +4851,34 @@ test('validateSchema keeps the canonical config.yaml strict about resident', () 
   );
 });
 
+test('loadConfigRuntime ignores the Python-owned media_generation host override', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'media-generation-config-'));
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFileSync(top, 'version: 1\n');
+    writeFileSync(join(tmp, 'config.local.yaml'),
+      'media_generation:\n  library_dir: /Users/Shared/agent-os/media-library\n');
+    const cfg = loadConfigRuntime({ topPath: top, env: {} });
+    assert.equal(cfg.get('media_generation.library_dir'), null);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('validateSchema keeps checked-in config.yaml strict about media_generation', () => {
+  assert.throws(
+    () => validateSchema(
+      { version: 1, media_generation: { library_dir: '/tmp/media-library' } },
+      { source: '/tmp/config.yaml', tolerateForeignTopLevelSections: true },
+    ),
+    (err) => {
+      assert.ok(err instanceof AgentOSConfigError);
+      assert.match(err.message, /media_generation: unknown key/);
+      return true;
+    },
+  );
+});
+
 test('top-level config.yaml accepts mirrored surface_harness timeout', () => {
   const out = validateSchema(
     { version: 1, surface_harness: { timeout_seconds: 96 } },

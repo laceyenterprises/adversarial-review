@@ -200,6 +200,11 @@ const FOREIGN_TOP_LEVEL_SECTIONS = new Set([
   // whereas mirroring the block would create a second copy of a Python-owned
   // schema.
   'resident',
+  // `media_generation` (agent-os#7237, MMD-01) is owned by the Python CFG
+  // schema and consumed by media_gen.py. This reader does not use its output
+  // or library settings. Allow it only in the host-local override so setting
+  // library_dir cannot crash the watcher; checked-in config stays strict.
+  'media_generation',
 ]);
 // Keep this per-role fallback surface in lockstep with the Python
 // agent_os_config schema. The child dicts are intentionally strict so a

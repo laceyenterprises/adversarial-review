@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # HAMMERTRIM-01: rendered by bin/hammer-procedure.mjs with trusted dispatch values.
+ham_merge_phase() {
+HAM_PHASE_OUTCOME=merge-error
 if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ] || [ -z "${HAM_MERGE_LEASE_ID:-}" ]; then
   echo "AMG-04 hard-blocker: no hammer merge without holding the merge lease" >&2
-  exit 1
+  return 1
 fi
 
 HAM_REMOTE_CI_WAIT_SECONDS="${HAM_REMOTE_CI_WAIT_SECONDS:-900}"
@@ -11,16 +13,19 @@ HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT="${HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT:-
 HAM_MERGE_RETRY_CAP="${HAM_MERGE_RETRY_CAP:-4}"
 HAM_MERGE_BACKOFF_BASE_SECONDS="${HAM_MERGE_BACKOFF_BASE_SECONDS:-2}"
 HAM_MERGE_TMP_PREFIX="${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-${HAM_MERGE_LEASE_ID:-no-lease}-$$"
-HAM_MERGE_STDOUT=$(mktemp "${HAM_MERGE_TMP_PREFIX}.gh-pr-merge.stdout.XXXXXX") || exit 1
-HAM_MERGE_STDERR=$(mktemp "${HAM_MERGE_TMP_PREFIX}.gh-pr-merge.stderr.XXXXXX") || exit 1
-HAM_GATE_JSON=$(mktemp "${HAM_MERGE_TMP_PREFIX}.github-gate.XXXXXX") || exit 1
-HAM_POST_MERGE_JSON=$(mktemp "${HAM_MERGE_TMP_PREFIX}.post-merge.XXXXXX") || exit 1
-HAM_POST_MERGE_STDERR=$(mktemp "${HAM_MERGE_TMP_PREFIX}.post-merge.stderr.XXXXXX") || exit 1
+HAM_MERGE_STDOUT=$(mktemp "${HAM_MERGE_TMP_PREFIX}.gh-pr-merge.stdout.XXXXXX") || return 1
+HAM_MERGE_STDERR=$(mktemp "${HAM_MERGE_TMP_PREFIX}.gh-pr-merge.stderr.XXXXXX") || return 1
+HAM_GATE_JSON=$(mktemp "${HAM_MERGE_TMP_PREFIX}.github-gate.XXXXXX") || return 1
+HAM_POST_MERGE_JSON=$(mktemp "${HAM_MERGE_TMP_PREFIX}.post-merge.XXXXXX") || return 1
+HAM_POST_MERGE_STDERR=$(mktemp "${HAM_MERGE_TMP_PREFIX}.post-merge.stderr.XXXXXX") || return 1
 HAM_PRE_MERGE_ELIGIBLE=0
 
 ham_append_terminal_audit() {
   ham_audit_outcome="$1"
   ham_audit_reason="$2"
+  if [ "$ham_audit_outcome" != succeeded ]; then
+    HAM_PHASE_OUTCOME="$ham_audit_reason"
+  fi
   ham_audit_attempt_json=$(mktemp "${HAM_MERGE_TMP_PREFIX}.terminal-audit-attempt.XXXXXX") || return 1
   jq -n \
     --arg outcome "$ham_audit_outcome" \
@@ -315,7 +320,7 @@ while :; do
       ham_append_terminal_audit failed-without-merge github-gate-read-failed || true
       ham_mark_merge_lease_retryable_abort github-gate-read-failed
       ham_release_merge_lease
-      exit 1
+      return 1
     fi
     echo "HAM remote CI: transient GitHub gate read failure ${HAM_REMOTE_CI_GATE_READ_FAILURES}/${HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT}; retrying within remote CI wait window" >&2
     sleep "$HAM_REMOTE_CI_POLL_SECONDS"
@@ -334,7 +339,7 @@ while :; do
     HAM_REMOTE_CI_STATUS=live-head-moved
     ham_append_terminal_audit superseded live-head-moved-before-merge || true
     ham_release_merge_lease
-    exit 0
+    return 20
   fi
   if ham_required_gate_ok; then
     HAM_REMOTE_CI_STATUS=remote-ci-green
@@ -346,7 +351,7 @@ while :; do
     HAM_REMOTE_CI_STATUS=remote-ci-red
     ham_append_terminal_audit failed-without-merge github-gate-red || true
     ham_release_merge_lease
-    exit 0
+    return 20
   fi
   if [ "$(date +%s)" -ge "$HAM_REMOTE_CI_DEADLINE" ]; then
     echo "HAM hard-blocker: timed out waiting for GitHub required gate to become green for validated head" >&2
@@ -354,7 +359,7 @@ while :; do
     HAM_REMOTE_CI_STATUS=remote-ci-timeout
     ham_append_terminal_audit failed-without-merge github-gate-timeout || true
     ham_release_merge_lease
-    exit 0
+    return 20
   fi
   echo "HAM remote CI: waiting for required checks on ${POST_REMEDIATION_SHA}" >&2
   sleep "$HAM_REMOTE_CI_POLL_SECONDS"
@@ -366,7 +371,7 @@ HAM_MERGE_EXIT=1
 if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -eq 1 ]; then
   HAM_MERGE_EXIT=0
 else
-  HAM_PRE_MERGE_ATTEMPT_FILE=$(mktemp "${HAM_MERGE_TMP_PREFIX}.pre-merge-attempt.XXXXXX") || exit 1
+  HAM_PRE_MERGE_ATTEMPT_FILE=$(mktemp "${HAM_MERGE_TMP_PREFIX}.pre-merge-attempt.XXXXXX") || return 1
   jq -n \
     --arg reviewedHead "<<REVIEWED_SHA>>" \
     --arg validatedHead "$POST_REMEDIATION_SHA" \
@@ -401,7 +406,7 @@ else
     --pr <<PR_NUMBER>> \
     --head "$POST_REMEDIATION_SHA" \
     --outcome in_progress \
-    --attempt-json "$HAM_PRE_MERGE_ATTEMPT_FILE" || exit 1
+    --attempt-json "$HAM_PRE_MERGE_ATTEMPT_FILE" || return 1
   rm -f "$HAM_PRE_MERGE_ATTEMPT_FILE"
   ham_fire_watcher_merge_wake
 fi
@@ -412,7 +417,7 @@ while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "$HAM_MERGE_ATTEMPTS" 
     ham_append_terminal_audit failed-without-merge github-gate-read-failed || true
     ham_mark_merge_lease_retryable_abort github-gate-read-failed
     ham_release_merge_lease
-    exit 1
+    return 1
   fi
   if ham_already_merged_validated_head; then
     echo "HAM merge retry ${HAM_MERGE_ATTEMPTS}/${HAM_MERGE_RETRY_CAP}: PR is already merged at validated head; proceeding to post-merge validation" >&2
@@ -423,14 +428,14 @@ while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "$HAM_MERGE_ATTEMPTS" 
     echo "HAM race: live PR head moved off validated head before merge retry; releasing lease without merge or re-dispatch" >&2
     ham_append_terminal_audit superseded live-head-moved-before-merge || true
     ham_release_merge_lease
-    exit 0
+    return 20
   fi
   if ! ham_required_gate_ok; then
     echo "HAM hard-blocker: GitHub required gate stopped being green before merge" >&2
     cat "$HAM_GATE_JSON" >&2
     ham_append_terminal_audit failed-without-merge github-gate-not-green || true
     ham_release_merge_lease
-    exit 0
+    return 20
   fi
 
   HAM_MERGE_CAPABILITY_ENFORCEMENT="${AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_MERGE_CAPABILITY_ENFORCEMENT:-${MERGE_CAPABILITY_ENFORCEMENT:-observe}}"
@@ -493,7 +498,7 @@ while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "$HAM_MERGE_ATTEMPTS" 
         printf '{"schemaVersion":1,"event":"merge_capability_enforcement","mode":"enforce","action":"deny","surface":"hammer","repo":"<<REPO>>","prNumber":<<PR_NUMBER>>,"headSha":"%s","tokenClass":"%s","reason":"builder-token-merge-refused"}\n' "$POST_REMEDIATION_SHA" "$HAM_MERGE_TOKEN_CLASS" >&2
         ham_append_terminal_audit failed-without-merge builder-token-merge-refused || true
         ham_release_merge_lease
-        exit 0
+        return 20
       fi
       printf '{"schemaVersion":1,"event":"merge_capability_enforcement","mode":"observe","action":"would-deny","surface":"hammer","repo":"<<REPO>>","prNumber":<<PR_NUMBER>>,"headSha":"%s","tokenClass":"%s","reason":"builder-token-merge-refused"}\n' "$POST_REMEDIATION_SHA" "$HAM_MERGE_TOKEN_CLASS" >&2
       ;;
@@ -543,11 +548,11 @@ while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "$HAM_MERGE_ATTEMPTS" 
       ham_append_terminal_audit failed-without-merge protective-predecessor-state-unreadable || true
       ham_mark_merge_lease_retryable_abort protective-predecessor-read-failed
       ham_release_merge_lease
-      exit 1
+      return 1
     fi
     ham_append_terminal_audit failed-without-merge protective-predecessor-state-unreadable || true
     ham_release_merge_lease
-    exit 0
+    return 20
   fi
   HAM_PROTECTIVE_PREDECESSORS=$(printf '%s\n' "$HAM_PROTECTIVE_PREDECESSOR_BODY" | awk '/^[[:space:]]*Protects-Against-Unsafe-Merge-Until-PR[[:space:]]*:/ {print $0}')
   if [ -n "$HAM_PROTECTIVE_PREDECESSORS" ]; then
@@ -557,7 +562,7 @@ while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "$HAM_MERGE_ATTEMPTS" 
         echo "HAM hard-blocker: malformed protective predecessor trailer; refusing merge" >&2
         ham_append_terminal_audit failed-without-merge protective-predecessor-malformed-trailer || true
         ham_release_merge_lease
-        exit 0
+        return 20
       fi
       if [ "$HAM_PROTECTOR_PR" = "<<PR_NUMBER>>" ]; then
         echo "protective predecessor declaration points at this PR; ignoring malformed self-reference" >&2
@@ -573,24 +578,24 @@ while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "$HAM_MERGE_ATTEMPTS" 
           ham_append_terminal_audit failed-without-merge protective-predecessor-state-unreadable || true
           ham_mark_merge_lease_retryable_abort protective-predecessor-read-failed
           ham_release_merge_lease
-          exit 1
+          return 1
         fi
         ham_append_terminal_audit failed-without-merge protective-predecessor-state-unreadable || true
         ham_release_merge_lease
-        exit 0
+        return 20
       fi
       if [ -z "$HAM_PROTECTOR_STATE" ]; then
         echo "HAM hard-blocker: protective predecessor state empty for PR #$HAM_PROTECTOR_PR; refusing merge" >&2
         ham_append_terminal_audit failed-without-merge protective-predecessor-state-unreadable || true
         ham_mark_merge_lease_retryable_abort protective-predecessor-read-failed
         ham_release_merge_lease
-        exit 1
+        return 1
       fi
       if [ "$HAM_PROTECTOR_STATE" = "OPEN" ]; then
         echo "HAM hard-blocker: protective predecessor PR #$HAM_PROTECTOR_PR is still open; refusing merge" >&2
         ham_append_terminal_audit failed-without-merge protective-predecessor-open || true
         ham_release_merge_lease
-        exit 0
+        return 20
       fi
     done <<EOF_HAM_PROTECTIVE_PREDECESSORS
 $HAM_PROTECTIVE_PREDECESSORS
@@ -617,14 +622,14 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
     echo "HAM hard-blocker: permanent gh pr merge rejection; not retrying" >&2
     ham_append_terminal_audit failed-without-merge permanent-merge-rejection || true
     ham_release_merge_lease
-    exit 0
+    return 20
   fi
   if ! ham_merge_error_retryable "$HAM_MERGE_STDERR"; then
     cat "$HAM_MERGE_STDERR" >&2 || true
     echo "HAM hard-blocker: unclassified gh pr merge failure; fail closed without retry" >&2
     ham_append_terminal_audit failed-without-merge unclassified-merge-failure || true
     ham_release_merge_lease
-    exit 1
+    return 1
   fi
   if [ "$HAM_MERGE_ATTEMPTS" -ge "$HAM_MERGE_RETRY_CAP" ]; then
     cat "$HAM_MERGE_STDERR" >&2 || true
@@ -632,7 +637,7 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
     ham_append_terminal_audit failed-without-merge merge-retry-budget-exhausted || true
     ham_mark_merge_lease_retryable_abort merge-retry-budget-exhausted
     ham_release_merge_lease
-    exit 1
+    return 1
   fi
   HAM_MERGE_BACKOFF_MULTIPLIER=$((1 << (HAM_MERGE_ATTEMPTS - 1)))
   HAM_MERGE_JITTER=$(awk 'BEGIN{srand(); print int(rand()*3)}')
@@ -662,7 +667,7 @@ while [ "$HAM_POST_VIEW_ATTEMPTS" -lt "$HAM_MERGE_RETRY_CAP" ]; do
       ham_append_terminal_audit failed-without-merge merge-confirmation-read-failed || true
     fi
     ham_release_merge_lease
-    exit 1
+    return 1
   fi
   if [ "$HAM_POST_VIEW_ATTEMPTS" -ge "$HAM_MERGE_RETRY_CAP" ]; then
     cat "$HAM_POST_MERGE_STDERR" >&2 || true
@@ -673,7 +678,7 @@ while [ "$HAM_POST_VIEW_ATTEMPTS" -lt "$HAM_MERGE_RETRY_CAP" ]; do
       ham_append_terminal_audit failed-without-merge merge-confirmation-read-failed || true
     fi
     ham_release_merge_lease
-    exit 1
+    return 1
   fi
   HAM_POST_VIEW_BACKOFF_MULTIPLIER=$((1 << (HAM_POST_VIEW_ATTEMPTS - 1)))
   HAM_POST_VIEW_JITTER=$(awk 'BEGIN{srand(); print int(rand()*3)}')
@@ -690,15 +695,15 @@ if [ "$HAM_POST_STATE" = "MERGED" ] && [ "$HAM_POST_HEAD" = "$POST_REMEDIATION_S
   HAM_MERGED_AUDIT_APPEND_EXIT=$?
   if [ "$HAM_MERGED_AUDIT_APPEND_EXIT" -ne 0 ]; then
     ham_release_merge_lease
-    exit "$HAM_MERGED_AUDIT_APPEND_EXIT"
+    return "$HAM_MERGED_AUDIT_APPEND_EXIT"
   fi
   if ! ham_emit_git_merge_signal; then
     echo "HAM hard-blocker: merge signal emission failed after confirmed merge; AMA closer lease remains retryable" >&2
-    exit 1
+    return 1
   fi
   if ! ham_mark_ama_closer_lease_succeeded; then
     echo "HAM hard-blocker: failed to mark AMA closer lease succeeded after confirmed merge signal" >&2
-    exit 1
+    return 1
   fi
   trap - EXIT
   ham_release_merge_lease
@@ -707,5 +712,9 @@ else
   cat "$HAM_POST_MERGE_JSON" >&2
   ham_append_terminal_audit failed-without-merge merge-not-confirmed || true
   ham_release_merge_lease
-  exit 1
+  return 1
 fi
+HAM_PHASE_OUTCOME=merged
+return 0
+}
+ham_merge_phase

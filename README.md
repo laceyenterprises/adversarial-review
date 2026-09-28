@@ -457,8 +457,13 @@ Living contract: [`docs/SPEC-adversarial-review-auto-remediation.md`](docs/SPEC-
 
 ## Hammer merge logic
 
-When the hammer closes a PR (the common MSM path), it runs one linear flow
-(`templates/hammer-prompt.md`):
+When the hammer closes a PR (the common MSM path),
+`templates/hammer-prompt.md` directs one linear flow. The verify-head,
+publish, and merge procedures live in `bin/hammer-*.sh` and are rendered by
+`bin/hammer-procedure.mjs` into the same persistent shell so the verified
+head and merge lease survive between phases. The wrapper prints each phase's
+bounded diagnostic tail, status, outcome, and lease state. A blocked phase
+stops the flow; a rebase-conflict outcome returns control for local resolution.
 
 1. **Acquire the merge lease** for `(repo, base, PR)` — no merge happens without it.
 2. **Remediate all adversarial findings** the final review raised — blocking and
@@ -469,7 +474,7 @@ When the hammer closes a PR (the common MSM path), it runs one linear flow
 5. **Wait (bounded) for GitHub required checks to go green** on that exact head —
    never merge a red or not-yet-green gate.
 6. **`gh pr merge --match-head-commit <validated head>`** while holding the lease.
-7. **Release the lease and write the terminal audit.**
+7. **Append the terminal audit and release the lease.**
 
 The hammer does **not** run a local test battery or a pre-push CI mirror as a
 merge gate — GitHub required checks are the sole CI authority. This removes the
@@ -515,6 +520,7 @@ adversarial-review/
 ├── prompts/                    ← staged reviewer + remediator prompts
 │   ├── code-pr/                ← production prompt set
 │   └── research-finding/       ← reference non-PR prompt set
+├── bin/                        ← hammer phase procedures, context snapshot, bounded runner
 │
 ├── test/                       ← kernel + adapter + end-to-end tests
 ├── demo/                       ← offline walkthroughs

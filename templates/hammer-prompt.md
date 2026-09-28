@@ -86,15 +86,21 @@ For each phase, in that same persistent shell, run the following with `PHASE` se
 HAM_PHASE_SCRIPT=$(mktemp "${TMPDIR:-/tmp}/ham-phase.XXXXXX") || exit 1
 node "${HAM_ROOT_DIR}/bin/hammer-procedure.mjs" "$PHASE" --render > "$HAM_PHASE_SCRIPT" || exit 1
 HAM_PHASE_LOG=$(mktemp "${TMPDIR:-/tmp}/ham-phase-log.XXXXXX") || exit 1
-source "$HAM_PHASE_SCRIPT" > "$HAM_PHASE_LOG" 2>&1
-HAM_PHASE_STATUS=$?
+HAM_PHASE_OUTCOME=not-run
+if source "$HAM_PHASE_SCRIPT" > "$HAM_PHASE_LOG" 2>&1; then
+  HAM_PHASE_STATUS=0
+else
+  HAM_PHASE_STATUS=$?
+fi
 tail -c 4096 "$HAM_PHASE_LOG"
 rm -f "$HAM_PHASE_SCRIPT" "$HAM_PHASE_LOG"
-[ "$HAM_PHASE_STATUS" -eq 0 ] || exit "$HAM_PHASE_STATUS"
+printf '\nHAM phase %s: status=%s outcome=%s lease-held=%s\n' \
+  "$PHASE" "$HAM_PHASE_STATUS" "$HAM_PHASE_OUTCOME" "${HAM_MERGE_LEASE_HELD:-0}"
+[ "$HAM_PHASE_STATUS" -eq 0 ]
 ```
 
 Before sourcing `hammer-publish`, edit the rendered audit-details heredoc to map every finding and fill its counts; never publish the example placeholder. Build the terminal-remediation claim JSON and run the predicate CLI as described below before sourcing `hammer-merge`. Never execute these phases as separate processes: the verified head and merge lease must survive between them. A failed render or source stops the close. Delete each temporary source file after use. The helpers require every value used by that
-phase and fail with exit 64 when one is absent. Preserve lease state between
+phase and fail with status 64 when one is absent. Preserve lease state between
 phases; `hammer-publish` and `hammer-merge` must run with the acquired lease
 held and fail closed otherwise. Use the scripts directly from this checkout;
 the context and bounded-runner helpers work without an Agent OS
@@ -389,7 +395,7 @@ git log -1 --format=%B | tail -n 6
 
 Refresh and validate the live head:
 
-In the persistent merge-lease shell, render and source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-verify-head --render` after exporting the dispatch values above. Refresh the live head, acquire the merge lease, rebase under the existing bounded policy, and validate the rebased head. The helper exits nonzero on a hard blocker. Its output is bounded to a tail; inspect its temporary log only when diagnosing a failure.
+In the persistent merge-lease shell, render and source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-verify-head --render` after exporting the dispatch values above. Refresh the live head, acquire the merge lease, rebase under the existing bounded policy, and validate the rebased head. The wrapper prints the bounded diagnostic tail, status, outcome, and lease state before deleting its temporary files. A nonzero status blocks the next phase. Status 20 means parked or blocked; status 21 means a rebase conflict. On conflict, resolve it using "Resolving merge conflicts" below, revalidate, and rerun verify-head before continuing.
 
 
 ## Resolving merge conflicts
@@ -450,7 +456,7 @@ comment is HAM-authored terminal-remediation output: post it with the entitled
 hammer GitHub token from `HAMMER_LACEY_GH_TOKEN` (legacy fallback
 `MERGE_AGENT_GH_TOKEN`), not an ambient `GH_TOKEN` or `GITHUB_TOKEN`.
 
-In the persistent merge-lease shell, render and source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-publish --render` after exporting the dispatch values above. Post or update the terminal-remediation audit under the held merge lease. The helper exits nonzero on a hard blocker. Its output is bounded to a tail; inspect its temporary log only when diagnosing a failure.
+In the persistent merge-lease shell, render and source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-publish --render` after exporting the dispatch values above. Post or update the terminal-remediation audit under the held merge lease. The wrapper prints its bounded diagnostic tail, status, outcome, and lease state; a nonzero status blocks the next phase.
 
 
 ```bash
@@ -567,7 +573,7 @@ Do not merge unless all of these are true:
 
 In-lease merge:
 
-In the persistent merge-lease shell, render and source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-merge --render` after exporting the dispatch values above. Enforce the predicate and required checks on the live head, merge under the held lease, and append the terminal audit. The helper exits nonzero on a hard blocker. Its output is bounded to a tail; inspect its temporary log only when diagnosing a failure.
+In the persistent merge-lease shell, render and source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-merge --render` after exporting the dispatch values above. Enforce the predicate and required checks on the live head, merge under the held lease, and append the terminal audit. The wrapper prints its bounded diagnostic tail, status, outcome, and lease state; a nonzero status requires the no-merge closing-status comment from mandate 0b when the PR remains open.
 
 
 After the merged audit append succeeds, emit the merge signal and then release

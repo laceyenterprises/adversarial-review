@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # HAMMERTRIM-01: rendered by bin/hammer-procedure.mjs with trusted dispatch values.
+ham_verify_head_phase() {
+HAM_PHASE_OUTCOME=verify-head-error
 gh pr view <<PR_URL>> --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > /tmp/ham-<<PR_NUMBER>>-pr-after.json
 POST_REMEDIATION_SHA=$(jq -r '.headRefOid' /tmp/ham-<<PR_NUMBER>>-pr-after.json)
 BASE_BRANCH=$(jq -r '.baseRefName' /tmp/ham-<<PR_NUMBER>>-pr-after.json)
@@ -23,7 +25,7 @@ if [ -z "$HAM_NODE_BIN" ] && [ -x /usr/local/bin/node ]; then
 fi
 if [ -z "$HAM_NODE_BIN" ]; then
   echo "HAM hard-blocker: node runtime not found; cannot run AMA lease, predicate, or audit helpers" >&2
-  exit 1
+  return 1
 fi
 
 ham_mark_merge_lease_retryable_abort() {
@@ -85,22 +87,26 @@ ham_acquire_merge_lease() {
     && [ "$(jq -r '.parked // false' /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json)" = "true" ]; then
     HAM_PARK_REASON=$(jq -r '.reason // "merge-lease-parked"' /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json)
     echo "AMG-04 parked: merge lease acquisition parked PR <<PR_NUMBER>> ($HAM_PARK_REASON)" >&2
-    exit 0
+    HAM_PHASE_OUTCOME="parked:${HAM_PARK_REASON}"
+    return 20
   fi
   if [ "$HAM_MERGE_LEASE_ACQUIRE_EXIT" -eq 75 ] \
     && [ "$(jq -r '.timedOut // false' /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json)" = "true" ]; then
     HAM_PARK_WAITED=$(jq -r '.waited_s // "unknown"' /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json)
     echo "AMG-04 parked: merge lease acquisition timed out for PR <<PR_NUMBER>> after ${HAM_PARK_WAITED}s" >&2
-    exit 0
+    HAM_PHASE_OUTCOME=parked:merge-lease-timeout
+    return 20
   fi
   if [ "$HAM_MERGE_LEASE_ACQUIRE_EXIT" -ne 0 ]; then
     cat /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json >&2
-    exit "$HAM_MERGE_LEASE_ACQUIRE_EXIT"
+    HAM_PHASE_OUTCOME=merge-lease-acquire-failed
+    return "$HAM_MERGE_LEASE_ACQUIRE_EXIT"
   fi
   HAM_MERGE_LEASE_ID=$(jq -r '.leaseId // empty' /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json)
   if [ -z "$HAM_MERGE_LEASE_ID" ]; then
     echo "AMG-04 hard-blocker: merge lease acquired without leaseId" >&2
-    exit 1
+    HAM_PHASE_OUTCOME=merge-lease-id-missing
+    return 1
   fi
   HAM_MERGE_LEASE_HELD=1
   trap ham_release_merge_lease EXIT
@@ -263,12 +269,13 @@ while [ "$(jq -r '.mergeStateStatus // ""' /tmp/ham-<<PR_NUMBER>>-pr-after.json)
     break
   fi
   if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ]; then
-    ham_acquire_merge_lease
+    ham_acquire_merge_lease || return $?
   fi
   if [ "$HAM_REBASE_ATTEMPTS" -ge "$HAM_REBASE_ATTEMPT_CAP" ]; then
     echo "HAM-03 hard-blocker: rebase attempt cap exceeded ($HAM_REBASE_ATTEMPTS/$HAM_REBASE_ATTEMPT_CAP)" >&2
     ham_release_merge_lease
-    exit 0
+    HAM_PHASE_OUTCOME=rebase-attempt-cap-exceeded
+    return 20
   fi
   HAM_REBASE_ATTEMPTS=$((HAM_REBASE_ATTEMPTS + 1))
   ham_update_branch_with_retries
@@ -282,32 +289,24 @@ while [ "$(jq -r '.mergeStateStatus // ""' /tmp/ham-<<PR_NUMBER>>-pr-after.json)
     echo "HAM-03 conflict: releasing merge lease before local conflict resolution" >&2
     if ! ham_release_merge_lease; then
       echo "HAM-03 hard-blocker: cannot resolve conflict while merge lease release is unconfirmed" >&2
-      exit 1
+      HAM_PHASE_OUTCOME=merge-lease-release-unconfirmed
+      return 1
     fi
-    # >>> Perform the local rebase + conflict resolution from the
-    #     "## Resolving merge conflicts" section below, re-validate, then fall through. <<<
-    gh pr view <<PR_URL>> --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > /tmp/ham-<<PR_NUMBER>>-pr-after.json
-    POST_REMEDIATION_SHA=$(jq -r '.headRefOid' /tmp/ham-<<PR_NUMBER>>-pr-after.json)
-    BASE_BRANCH=$(jq -r '.baseRefName' /tmp/ham-<<PR_NUMBER>>-pr-after.json)
-    if ham_capture_current_base_sha; then
-      HAM_VALIDATION_BASE_SHA="$HAM_CAPTURED_BASE_SHA"
-    else
-      HAM_VALIDATION_BASE_SHA=""
-      HAM_FORCE_REVALIDATION=1
-    fi
-    continue
+    HAM_PHASE_OUTCOME=rebase-conflict
+    return 21
   fi
   if [ "$HAM_UPDATE_BRANCH_EXIT" -ne 0 ]; then
     cat /tmp/ham-<<PR_NUMBER>>-update-branch.stderr >&2
     ham_release_merge_lease
-    exit 1
+    HAM_PHASE_OUTCOME=update-branch-failed
+    return 1
   fi
   gh pr view <<PR_URL>> --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > /tmp/ham-<<PR_NUMBER>>-pr-after.json
   POST_REMEDIATION_SHA=$(jq -r '.headRefOid' /tmp/ham-<<PR_NUMBER>>-pr-after.json)
 done
 
 if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ]; then
-  ham_acquire_merge_lease
+  ham_acquire_merge_lease || return $?
 fi
 
 if ! ham_is_full_sha "$HAM_VALIDATION_BASE_SHA"; then
@@ -358,3 +357,7 @@ fi
 # re-committed, which moves the head and re-enters this validation), never merged.
 # Do not proceed past this point with a red applicable suite, a red required
 # check, or a still-BEHIND mergeStateStatus.
+HAM_PHASE_OUTCOME=verified
+return 0
+}
+ham_verify_head_phase

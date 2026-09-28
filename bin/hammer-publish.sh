@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # HAMMERTRIM-01: rendered by bin/hammer-procedure.mjs with trusted dispatch values.
+ham_publish_phase() {
+HAM_PHASE_OUTCOME=hammer-publish-error
 # agent-os#4090: the terminal-remediation audit is written HERE — under the
 # merge lease, at the settled post-rebase head, immediately before the
 # ama-check predicate. Writing it before the rebase window let each re-entry
@@ -7,7 +9,7 @@
 # to write the audit unless the merge lease is currently held.
 if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ]; then
   echo "HAM hard-blocker: terminal-remediation audit must be written while holding the merge lease (after the rebase settles, before the merge predicate)" >&2
-  exit 1
+  return 1
 fi
 ham_audit_comment_transient() {
   grep -Eiq 'timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|rate limit|secondary rate limit|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway' "$1"
@@ -24,14 +26,14 @@ ham_audit_cleanup_tmp_files() {
     rm -f "$HAM_AUDIT_COMMENT_POST_STDERR"
   fi
 }
-HAM_AUDIT_PR_VIEW_STDERR=$(mktemp "${TMPDIR:-/tmp}/ham-audit-pr-view.XXXXXX") || exit 1
+HAM_AUDIT_PR_VIEW_STDERR=$(mktemp "${TMPDIR:-/tmp}/ham-audit-pr-view.XXXXXX") || return 1
 HAM_AUDIT_COMMENT_LOOKUP_STDERR=$(mktemp "${TMPDIR:-/tmp}/ham-audit-comment-lookup.XXXXXX") || {
   ham_audit_cleanup_tmp_files
-  exit 1
+  return 1
 }
 HAM_AUDIT_COMMENT_POST_STDERR=$(mktemp "${TMPDIR:-/tmp}/ham-audit-comment-post.XXXXXX") || {
   ham_audit_cleanup_tmp_files
-  exit 1
+  return 1
 }
 
 POST_REMEDIATION_SHA=""
@@ -49,7 +51,7 @@ done
 if ! ham_is_full_sha "$POST_REMEDIATION_SHA"; then
   echo "HAM hard-blocker: unable to resolve post-remediation head before audit comment" >&2
   ham_audit_cleanup_tmp_files
-  exit 1
+  return 1
 fi
 HAM_AUDIT_COMMENT_MARKER='<!-- hq:ham-terminal-remediation:audit -->'
 # Fill these with decimal integer counts before posting the audit comment.
@@ -71,7 +73,7 @@ if ! ham_audit_is_nonnegative_int "$HAM_AUDIT_REMEDIATED_TOTAL" ||
   ! ham_audit_is_nonnegative_int "$HAM_AUDIT_REMEDIATED_NON_BLOCKING"; then
   echo "HAM hard-blocker: fill numeric Remediated-Findings counts before posting audit comment" >&2
   ham_audit_cleanup_tmp_files
-  exit 1
+  return 1
 fi
 # When filling in the comment body below, optionally add one bullet each for
 # applicable test evidence and doc currency, using the same bulleted style.
@@ -123,7 +125,7 @@ ham_existing_terminal_audit_comment_id() {
 if [ -z "${HAM_GH_TOKEN:-}" ]; then
   echo "HAM hard-blocker: no entitled hammer token (HAMMER_LACEY_GH_TOKEN, or legacy MERGE_AGENT_GH_TOKEN) present for hammer audit comment identity" >&2
   ham_audit_cleanup_tmp_files
-  exit 1
+  return 1
 fi
 HAM_AUDIT_COMMENT_POSTED=0
 for HAM_AUDIT_COMMENT_ATTEMPT in 1 2 3; do
@@ -153,7 +155,7 @@ for HAM_AUDIT_COMMENT_ATTEMPT in 1 2 3; do
       cat "$HAM_AUDIT_COMMENT_POST_STDERR" >&2 || true
       echo "hammer audit comment edit failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; not retrying" >&2
       ham_audit_cleanup_tmp_files
-      exit "$HAM_AUDIT_COMMENT_POST_EXIT"
+      return "$HAM_AUDIT_COMMENT_POST_EXIT"
     fi
     cat "$HAM_AUDIT_COMMENT_POST_STDERR" >&2 || true
     echo "hammer audit comment edit failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; retrying" >&2
@@ -169,7 +171,7 @@ for HAM_AUDIT_COMMENT_ATTEMPT in 1 2 3; do
     cat "$HAM_AUDIT_COMMENT_POST_STDERR" >&2 || true
     echo "hammer audit comment post failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; not retrying" >&2
     ham_audit_cleanup_tmp_files
-    exit "$HAM_AUDIT_COMMENT_POST_EXIT"
+    return "$HAM_AUDIT_COMMENT_POST_EXIT"
   fi
   cat "$HAM_AUDIT_COMMENT_POST_STDERR" >&2 || true
   echo "hammer audit comment post failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; retrying" >&2
@@ -178,6 +180,10 @@ done
 if [ "$HAM_AUDIT_COMMENT_POSTED" -ne 1 ]; then
   echo "HAM hard-blocker: hammer audit comment post failed after 3 attempts" >&2
   ham_audit_cleanup_tmp_files
-  exit 1
+  return 1
 fi
 ham_audit_cleanup_tmp_files
+HAM_PHASE_OUTCOME=published
+return 0
+}
+ham_publish_phase

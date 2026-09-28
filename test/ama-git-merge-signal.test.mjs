@@ -164,7 +164,7 @@ test('hammer prompt emits merge signal before releasing successful merge lease',
   );
   assert.match(
     prompt,
-    /if ! ham_emit_git_merge_signal; then[\s\S]*?AMA closer lease remains retryable[\s\S]*?exit 1/,
+    /if ! ham_emit_git_merge_signal; then[\s\S]*?AMA closer lease remains retryable[\s\S]*?return 1/,
     'signal failure should leave AMA closer lease non-terminal so daemon recovery can retry',
   );
   assert.match(

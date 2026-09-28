@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,8 +10,42 @@ import { composeCloserPrompt } from '../src/ama/dispatch-closer.mjs';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const template = readFileSync(join(root, 'templates/hammer-prompt.md'), 'utf8');
 function run(command, args, env = {}) {
-  return spawnSync(command, args, { encoding: 'utf8', timeout: 5000, env: { ...process.env, ...env } });
+  const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('HAM_')));
+  return spawnSync(command, args, { encoding: 'utf8', timeout: 5000, env: { ...cleanEnv, ...env } });
 }
+test('sourced phase wrapper reports terminal outcomes and keeps its shell alive', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-phase-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const bin = join(dir, 'bin');
+  mkdirSync(bin);
+  const gh = join(bin, 'gh');
+  writeFileSync(gh, '#!/bin/sh\ncase "$*" in\n  "pr view"*) echo \'{"headRefOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","baseRefName":"main","mergeStateStatus":"CLEAN"}\' ;;\n  *) echo \'{"strict":false}\' ;;\nesac\n');
+  chmodSync(gh, 0o755);
+  const leaseNode = join(bin, 'lease-node');
+  writeFileSync(leaseNode, '#!/bin/sh\necho \'{"parked":true,"reason":"another-closer"}\'\nexit 70\n');
+  chmodSync(leaseNode, 0o755);
+  const wrapper = template.match(/For each phase,[\s\S]*?```bash\n([\s\S]*?)\n```/)?.[1];
+  assert.ok(wrapper);
+  for (const [phase, outcome, diagnostic, status] of [
+    ['hammer-verify-head', 'parked:another-closer', 'AMG-04 parked', 20],
+    ['hammer-publish', 'hammer-publish-error', 'terminal-remediation audit must be written', 1],
+    ['hammer-merge', 'merge-error', 'no hammer merge without holding', 1],
+  ]) {
+    const shell = `PHASE=${phase}\n${wrapper}\necho SHELL_SURVIVED\nexit "$HAM_PHASE_STATUS"\n`;
+    const result = run('/bin/bash', ['-c', shell], {
+      HAM_ROOT_DIR: root, HAM_PR_URL: 'https://github.com/acme/repo/pull/42', HAM_REPO: 'acme/repo',
+      HAM_PR_NUMBER: '42', HAM_REVIEWED_SHA: 'a'.repeat(40), HAM_TARGET_REMEDIATION_SHA: 'a'.repeat(40),
+      HAM_RISK_CLASS: 'medium', HAM_MERGE_METHOD: 'squash', HAM_HQ_ROOT: dir, HAM_HQ_OWNER: 'tester',
+      HAM_AUDIT_PATH: join(dir, 'audit.json'), HAM_REVIEWER: 'reviewer', HAM_NODE_BIN: leaseNode,
+      PATH: `${bin}:${process.env.PATH}`, TMPDIR: dir,
+    });
+    assert.equal(result.status, status, `${phase}: ${result.stdout} ${result.stderr}`);
+    assert.match(result.stdout, new RegExp(diagnostic));
+    assert.match(result.stdout, new RegExp(`outcome=${outcome}`));
+    assert.match(result.stdout, /SHELL_SURVIVED/);
+    assert.deepEqual(readdirSync(dir).filter((file) => file.startsWith('ham-phase')), []);
+  }
+});
 test('rendered hammer prompt stays under a 60 KiB byte budget', () => {
   const rendered = composeCloserPrompt({
     prUrl: 'https://github.com/acme/repo/pull/42', repo: 'acme/repo', prNumber: 42,

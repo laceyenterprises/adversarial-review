@@ -332,6 +332,39 @@
       ],
       "title": "Collector Up",
       "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 6,
+        "y": 30
+      },
+      "id": 13,
+      "targets": [
+        {
+          "expr": "review_pipeline_token_refresh_pending_refusals",
+          "legendFormat": "refusals ({{window}})",
+          "refId": "A"
+        },
+        {
+          "expr": "review_pipeline_token_refresh_pending_refusal_share",
+          "legendFormat": "share of Claude picks",
+          "refId": "B"
+        }
+      ],
+      "title": "Claude Token-Refresh Refusals",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",

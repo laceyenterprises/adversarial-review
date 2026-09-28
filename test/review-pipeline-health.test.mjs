@@ -6051,3 +6051,90 @@ test('a completed job that overran its round budget is history, not a ticket', (
   assert.equal(inProgress.anomalies.length, 1);
   assert.ok(inProgress.anomalies[0].codes.includes('round-count-exceeds-risk-budget'));
 });
+
+// TOKDZ-01: token-refresh-pending refusals are held, not charged, so the health
+// surface is where they stay visible.
+function insertTokenRefreshRefusals(rootDir, startedAts, { prNumber = 7286 } = {}) {
+  insertReviewerPasses(rootDir, startedAts.map((startedAt, index) => ({
+    prNumber: prNumber + index,
+    reviewerClass: 'claude',
+    reviewerModel: 'claude-opus-5-5',
+    startedAt,
+    endedAt: startedAt,
+    status: 'failed',
+    metadata: { failureClass: 'token-refresh-pending' },
+  })));
+}
+
+test('token-refresh-pending refusals are counted per hour and alert past the count and share thresholds', () => {
+  const rootDir = tempRoot();
+  insertTokenRefreshRefusals(rootDir, [
+    '2026-05-25T17:10:00.000Z',
+    '2026-05-25T17:25:00.000Z',
+    '2026-05-25T17:40:00.000Z',
+    '2026-05-25T17:55:00.000Z',
+    '2026-05-25T09:30:00.000Z', // outside the 1h window, inside the 24h hourly view
+  ]);
+  insertReviewerPass(rootDir, { prNumber: 9001, reviewerClass: 'claude', status: 'completed', metadata: {} });
+  insertReviewerPass(rootDir, { prNumber: 9002, reviewerClass: 'gemini', status: 'completed', metadata: {} });
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  assert.equal(snapshot.tokenRefreshPending.refusals, 4);
+  assert.equal(snapshot.tokenRefreshPending.claudePicks, 5);
+  assert.equal(snapshot.tokenRefreshPending.share, 0.8);
+  assert.equal(snapshot.tokenRefreshPending.distinctPrs, 4);
+  assert.equal(snapshot.tokenRefreshPending.hourly.length, 24);
+  assert.equal(snapshot.tokenRefreshPending.hourly.at(-1).hourStart, '2026-05-25T18:00:00.000Z');
+  assert.equal(snapshot.tokenRefreshPending.hourly.at(-2).refusals, 4);
+  assert.equal(snapshot.tokenRefreshPending.hourly.find((bucket) => bucket.hourStart === '2026-05-25T09:00:00.000Z').refusals, 1);
+  assert.equal(snapshot.tokenRefreshPending.maxHourlyRefusals, 4);
+  assert.ok(findingCodes(snapshot).includes('review:token_refresh_pending_refusals_high'));
+  const finding = snapshot.findings.find((entry) => entry.code === 'review:token_refresh_pending_refusals_high');
+  assert.equal(finding.tier, 'ticket');
+  assert.match(finding.message, /4\/5 Claude reviewer picks \(80%\)/);
+  assert.match(finding.recommended_action, /Never force a broker refresh/);
+
+  const output = renderReviewPipelinePrometheus(snapshot);
+  assert.match(output, /^review_pipeline_token_refresh_pending_refusals\{window="3600000ms"\} 4$/m);
+  assert.match(output, /^review_pipeline_token_refresh_pending_refusal_share\{window="3600000ms"\} 0\.8$/m);
+  // A refusal is its own failure class, not a generic auth failure.
+  assert.match(output, /^review_pipeline_reviewer_attempts_total\{status="failed",failure_class="token-refresh-pending",pass_kind="first-pass"\} 4$/m);
+  rmSync(rootDir, { recursive: true, force: true });
+});
+
+test('token-refresh-pending stays quiet below the count threshold or the share threshold', () => {
+  const belowCount = tempRoot();
+  insertTokenRefreshRefusals(belowCount, ['2026-05-25T17:10:00.000Z', '2026-05-25T17:40:00.000Z']);
+  const countSnapshot = collectReviewPipelineHealth({ rootDir: belowCount, now: () => new Date(NOW) });
+  assert.equal(countSnapshot.tokenRefreshPending.refusals, 2);
+  assert.ok(!findingCodes(countSnapshot).includes('review:token_refresh_pending_refusals_high'));
+  rmSync(belowCount, { recursive: true, force: true });
+
+  const belowShare = tempRoot();
+  insertTokenRefreshRefusals(belowShare, [
+    '2026-05-25T17:10:00.000Z', '2026-05-25T17:20:00.000Z', '2026-05-25T17:30:00.000Z',
+  ]);
+  for (let index = 0; index < 20; index += 1) {
+    insertReviewerPass(belowShare, { prNumber: 8000 + index, reviewerClass: 'claude', status: 'completed', metadata: {} });
+  }
+  const shareSnapshot = collectReviewPipelineHealth({ rootDir: belowShare, now: () => new Date(NOW) });
+  assert.equal(shareSnapshot.tokenRefreshPending.refusals, 3);
+  assert.ok(shareSnapshot.tokenRefreshPending.share < 0.2);
+  assert.ok(!findingCodes(shareSnapshot).includes('review:token_refresh_pending_refusals_high'));
+  rmSync(belowShare, { recursive: true, force: true });
+});
+
+test('token-refresh-pending thresholds are operator-tunable', () => {
+  const config = resolveReviewPipelineHealthConfig({
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_TOKEN_REFRESH_PENDING_WINDOW_MS: '1800000',
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_TOKEN_REFRESH_PENDING_THRESHOLD: '1',
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_TOKEN_REFRESH_PENDING_SHARE_THRESHOLD: '0.05',
+  });
+  assert.equal(config.tokenRefreshPendingWindowMs, 1800000);
+  assert.equal(config.tokenRefreshPendingThreshold, 1);
+  assert.equal(config.tokenRefreshPendingShareThreshold, 0.05);
+  const defaults = resolveReviewPipelineHealthConfig({});
+  assert.equal(defaults.tokenRefreshPendingWindowMs, 3600000);
+  assert.equal(defaults.tokenRefreshPendingThreshold, 3);
+  assert.equal(defaults.tokenRefreshPendingShareThreshold, 0.2);
+});

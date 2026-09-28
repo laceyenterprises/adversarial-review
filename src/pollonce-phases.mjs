@@ -135,6 +135,7 @@ import {
   stmtMarkAttemptStarted,
   stmtMarkClosed,
   stmtMarkInfraAutoRecoveryAttemptStarted,
+  stmtMarkTokenRefreshRecoveryAttemptStarted,
   stmtMarkArgusSecurityQueued,
   stmtMarkMalformed,
   stmtMarkUnroutableBot,
@@ -2332,7 +2333,10 @@ export async function processReviewSubject(entry, ctx) {
         }
       }
       const infraRecoveryAttempts = Number(current?.infra_auto_recover_attempts || 0);
-      if (infraRecoveryClass && infraRecoveryAttempts >= INFRA_AUTO_RECOVER_CAP) {
+      // TOKDZ-01: a token-refresh refusal is a hold, never a strand. Rows that
+      // reached the cap under the pre-hold accounting stay recoverable.
+      const tokenRefreshRecovery = infraRecoveryClass === 'token-refresh-pending';
+      if (infraRecoveryClass && !tokenRefreshRecovery && infraRecoveryAttempts >= INFRA_AUTO_RECOVER_CAP) {
         const alertedAt = new Date().toISOString();
         const repeatExhaustion = infraRecoveryAttempts > INFRA_AUTO_RECOVER_CAP;
         const exhaustionSummary = repeatExhaustion
@@ -2751,7 +2755,22 @@ export async function processReviewSubject(entry, ctx) {
               ? resolveReviewerCeilingSeconds({ changedLines: Number.MAX_SAFE_INTEGER }) * 1000
               : resolveReviewerTimeoutMs();
             const reviewerLeaseExpiresAt = computeReviewerLeaseExpiryAt(attemptAt, reviewerTimeoutMs);
-            const claim = infraRecoveryClass
+            // TOKDZ-01: a token-refresh row is reclaimed by its own CAS, which
+            // never checks or charges infra_auto_recover_attempts.
+            const claim = tokenRefreshRecovery
+              ? stmtMarkTokenRefreshRecoveryAttemptStarted.run(
+                attemptAt,
+                reviewerSessionUuid,
+                reviewerHeadSha,
+                pendingRevisionRef,
+                reviewerTimeoutMs,
+                reviewerLeaseExpiresAt,
+                repoPath,
+                prNumber,
+                current?.failed_at || null,
+                current?.reviewer_head_sha || null
+              )
+              : infraRecoveryClass
               ? stmtMarkInfraAutoRecoveryAttemptStarted.run(
                 attemptAt,
                 reviewerSessionUuid,
@@ -2828,7 +2847,12 @@ export async function processReviewSubject(entry, ctx) {
               failure_class: infraRecoveryClass || populationRetry.failureClass || unknownFailureClass || null,
               previous_status: current?.review_status || existing?.review_status || null,
             });
-            if (infraRecoveryClass) {
+            if (tokenRefreshRecovery) {
+              console.log(
+                `[watcher] Claimed token-refresh-held review ${repoPath}#${prNumber} ` +
+                  `(class=${infraRecoveryClass}, uncharged; infra attempts stay ${infraRecoveryAttempts}/${INFRA_AUTO_RECOVER_CAP})`
+              );
+            } else if (infraRecoveryClass) {
               console.log(
                 `[watcher] Claimed infra-failed review ${repoPath}#${prNumber} ` +
                   `(class=${infraRecoveryClass}, infra attempt ${infraRecoveryAttempts + 1}/${INFRA_AUTO_RECOVER_CAP})`

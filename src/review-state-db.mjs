@@ -29,9 +29,11 @@ import {
   SQL_HAS_GENUINE_POSTED_REVIEW_FOR_PR,
   prepareFinalizePendingTerminalFailure,
   prepareMarkInfraAutoRecoveryAttemptStarted,
+  prepareMarkTokenRefreshRecoveryAttemptStarted,
   prepareMarkAttemptStarted,
   prepareMarkMergedPendingReviewSkipped,
   prepareMarkReviewerCredentialOutage,
+  prepareMarkTokenRefreshHold,
   preparePromoteReviewerCredentialOutage,
   prepareMarkRereviewCiBlocked,
   prepareMarkRereviewCiBlockedRecheck,
@@ -99,6 +101,7 @@ export const stmtGetPendingFastMergeAudits = db.prepare(
 );
 
 export const stmtMarkInfraAutoRecoveryAttemptStarted = prepareMarkInfraAutoRecoveryAttemptStarted(db);
+export const stmtMarkTokenRefreshRecoveryAttemptStarted = prepareMarkTokenRefreshRecoveryAttemptStarted(db);
 export const stmtMarkReviewPopulationRetryAttemptStarted = db.prepare(
   `UPDATE reviewed_prs
      SET review_status = 'reviewing',
@@ -365,6 +368,7 @@ export const stmtMarkOutageTransient = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'pending-upstream', failed_at = ?, failure_message = ?, quota_reset_at_utc = ?, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
 );
 export const stmtMarkReviewerCredentialOutage = prepareMarkReviewerCredentialOutage(db);
+export const stmtMarkTokenRefreshHold = prepareMarkTokenRefreshHold(db);
 export const stmtPromoteReviewerCredentialOutage = preparePromoteReviewerCredentialOutage(db);
 export const stmtRearmReviewerCredentialOutage = prepareRearmReviewerCredentialOutage(db);
 export const stmtMarkCascadeFailed = db.prepare(

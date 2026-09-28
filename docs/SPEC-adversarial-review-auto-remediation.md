@@ -715,8 +715,28 @@ the remediation auto-detect rule applies so broker-configured fleet hosts use
 broker auth and standalone installs keep keychain auth. Broker-mode Claude
 reviewer spawns bypass `launchctl asuser` entirely; `launchctl-bootstrap`
 therefore describes only keychain-mode Claude reviewer failures on broker hosts.
-Broker bearers handed to the reviewer subprocess must remain valid for the
-configured reviewer timeout plus post slack before the subprocess is spawned.
+Broker-mode Claude reviewer spawns run behind a per-spawn loopback
+token-refresh proxy (TOKDZ-01, `src/claude-reviewer-token-proxy.mjs`; the
+BATCHTOKEN-01 mechanism applied to reviewers). The reviewer process listens on
+an ephemeral `127.0.0.1` port and hands the CLI `ANTHROPIC_BASE_URL` pointing at
+it. Every upstream request carries the broker's current grant, not the CLI's
+frozen copy: a grant within two minutes of expiry is re-read before forwarding,
+and an upstream 401 re-reads the broker's current grant and replays the request
+once. When the broker has not rotated yet the proxy answers a retryable 503, and
+a pass that ends that way settles as `token-refresh-pending` (a bounded hold)
+rather than an OAuth failure. The proxy only re-reads the broker through the
+same `/token` mint every spawn already makes. It never asks the broker to
+refresh, because a forced refresh revokes every other live holder. It forwards
+only to `https://api.anthropic.com`, rejecting network-path, backslash, and
+other targets that resolve off that origin before attaching a grant. It attaches
+the grant only to requests
+presenting a bearer the proxy has vended. A proxied handoff therefore needs just
+a five-minute floor of remaining token life. A direct handoff (the proxy
+disabled with `ADVERSARIAL_REVIEW_CLAUDE_TOKEN_REFRESH_PROXY=off`, or unable to
+start) keeps the old requirement: the bearer must remain valid for the resolved
+reviewer ceiling plus post slack before the subprocess is spawned. A refusal
+names `expires_at` and `handoff=proxied|direct` so the watcher's hold can compute
+the next rotation.
 The subprocess environment must not receive `OAUTH_BROKER_SHARED_SECRET` or
 `OAUTH_BROKER_SHARED_SECRET_FILE`; those mint credentials are consumed only in
 the parent reviewer process before the short-lived `ANTHROPIC_AUTH_TOKEN` is
@@ -1373,7 +1393,11 @@ status or changed the failure evidence, the claim loses and the counter is not
 consumed. Once the counter reaches the cap (`3`), failed rows remain `failed`
 with evidence intact for operator inspection, and lease-released pending rows
 are finalized to `failed` without incrementing the counter so they stop polling
-as ordinary pending work.
+as ordinary pending work. `token-refresh-pending` rows are the exception
+(TOKDZ-01): a refusal is a bounded hold, not an attempt, so a legacy `failed` or
+same-head `pending` token-refresh row is reclaimed by its own compare-and-swap,
+which matches the same evidence but neither checks nor increments
+`infra_auto_recover_attempts`.
 
 Failure evidence is cleared only at the successful recovery claim, when the
 replacement reviewer pass is durably `reviewing`. A successful posted review

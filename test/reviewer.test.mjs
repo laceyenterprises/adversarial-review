@@ -3467,11 +3467,14 @@ test('prepareClaudeOAuthEnv rejects missing broker bearer despite ambient auth t
   );
 });
 
-test('prepareClaudeOAuthEnv rejects broker bearers too short for reviewer handoff', async () => {
+test('prepareClaudeOAuthEnv rejects broker bearers too short for a direct reviewer handoff', async () => {
   await assert.rejects(
     () => prepareClaudeOAuthEnv({
       sourceEnv: {
         OAUTH_BROKER_SHARED_SECRET_FILE: '/run/secrets/oauth-broker',
+        // The direct (static-bearer) handoff; the proxied floor is covered in
+        // claude-reviewer-token-proxy.test.mjs.
+        ADVERSARIAL_REVIEW_CLAUDE_TOKEN_REFRESH_PROXY: 'off',
       },
       mintClaudeCodeBrokerTokenImpl: async () => ({
         injected: true,

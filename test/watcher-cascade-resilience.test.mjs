@@ -27,6 +27,7 @@ import {
 import {
   prepareMarkInfraAutoRecoveryAttemptStarted,
   prepareMarkReviewerCredentialOutage,
+  prepareMarkTokenRefreshHold,
   preparePromoteReviewerCredentialOutage,
   prepareRearmReviewerCredentialOutage,
 } from '../src/review-state-statements.mjs';
@@ -1667,12 +1668,13 @@ test('settleReviewerAttempt records oauth-broken without burning review attempts
   }
 });
 
-test('settleReviewerAttempt retries token-refresh-pending without burning attempts or requesting re-authentication', () => {
+test('settleReviewerAttempt holds token-refresh-pending without burning attempts or requesting re-authentication', () => {
   const { rootDir, db } = setupFixture();
   try {
     const repo = 'laceyenterprises/adversarial-review';
     const prNumber = 195;
     const warnings = [];
+    db.prepare("UPDATE reviewed_prs SET review_status = 'reviewing' WHERE repo = ? AND pr_number = ?").run(repo, prNumber);
     const statements = {
       markPosted: db.prepare(
         "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
@@ -1683,6 +1685,7 @@ test('settleReviewerAttempt retries token-refresh-pending without burning attemp
       ),
       markCascadeFailed: stmtMarkCascadeFailed(db),
       markPendingUpstream: stmtMarkPendingUpstream(db),
+      markTokenRefreshHold: prepareMarkTokenRefreshHold(db),
       getReviewRow: db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'),
     };
 
@@ -1702,15 +1705,17 @@ test('settleReviewerAttempt retries token-refresh-pending without burning attemp
     });
 
     const row = db.prepare(
-      'SELECT review_status, review_attempts, failure_message FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+      'SELECT review_status, review_attempts, failure_message, infra_auto_recover_attempts FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
     ).get(repo, prNumber);
     const state = readCascadeState(rootDir, { repo, prNumber });
 
     assert.equal(row.review_status, 'pending-upstream');
     assert.equal(row.review_attempts, 0);
+    assert.equal(row.infra_auto_recover_attempts, 0);
     assert.match(row.failure_message, /^\[token-refresh-pending\]/);
     assert.equal(state.backoffMinutes, 1);
     assert.equal(state.lastFailureClass, 'token-refresh-pending');
+    assert.equal(state.tokenRefreshHold.refusals, 1);
     assert.doesNotMatch(warnings.join('\n'), /re-authenticate|credentials unavailable/i);
   } finally {
     db.close();

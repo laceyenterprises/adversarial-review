@@ -53,6 +53,11 @@ import {
 } from './remediation-oauth-preflight.mjs';
 import { resolveClaudeReviewerOAuthTransport } from './claude-reviewer-oauth-transport.mjs';
 import { REVIEWER_TOKEN_POST_SLACK_MS } from './reviewer-broker-refresh.mjs';
+import {
+  CLAUDE_REVIEWER_PROXIED_HANDOFF_FLOOR_MS,
+  claudeReviewerTokenProxyEnabled,
+  startClaudeReviewerTokenProxyForAuth,
+} from './claude-reviewer-token-proxy.mjs';
 import { REVIEWER_MODELS } from './reviewer-pass-posted-review-sql.mjs';
 import {
   AGY_KEYCHAIN_ACCOUNT,
@@ -258,6 +263,9 @@ async function prepareClaudeOAuthEnv({
   nowMs = Date.now(),
   reviewerTimeoutMs = null,
   postSlackMs = REVIEWER_TOKEN_POST_SLACK_MS,
+  // TOKDZ-01: with the token-refresh proxy the spawn-time grant only has to
+  // clear the proxied floor, not outlive the reviewer's maximum timeout.
+  proxied = claudeReviewerTokenProxyEnabled(sourceEnv),
 } = {}) {
   const { env, stripped } = scrubOAuthFallbackEnv(sourceEnv);
   const transport = resolveClaudeReviewerOAuthTransport(env);
@@ -292,6 +300,7 @@ async function prepareClaudeOAuthEnv({
       nowMs,
       reviewerTimeoutMs,
       postSlackMs,
+      proxied,
     });
     logger?.info?.(
       `[reviewer] Claude reviewer broker token prepared for subprocess handoff ` +
@@ -305,6 +314,13 @@ async function prepareClaudeOAuthEnv({
     tokenInjected: minted?.injected === true || Boolean(minted?.token),
     brokerUrl: minted?.brokerUrl || null,
     expiresAt: minted?.expiresAt || null,
+    // Re-read the broker's CURRENT grant for the token-refresh proxy. The same
+    // `/token` mint as above, never a refresh; the shared secret stays in this
+    // closure and never reaches the subprocess env.
+    remint: async () => {
+      const again = await mintClaudeCodeBrokerTokenImpl({ env: brokerEnv, fetchImpl, log: logger });
+      return { token: again?.token || null, expiresAt: again?.expiresAt || null };
+    },
   };
 }
 
@@ -314,18 +330,23 @@ function assertClaudeBrokerTokenHandoffLifetime({
   nowMs = Date.now(),
   reviewerTimeoutMs = null,
   postSlackMs = REVIEWER_TOKEN_POST_SLACK_MS,
+  proxied = false,
 } = {}) {
   const expiresAtMs = Date.parse(String(expiresAt || ''));
   if (!Number.isFinite(expiresAtMs)) {
     throw new OAuthError('claude', 'broker Claude reviewer token response missing parseable expiresAt');
   }
-  const requiredLifetimeMs =
-    (reviewerTimeoutMs ?? resolveReviewerTimeoutMs(env)) + postSlackMs;
+  const requiredLifetimeMs = proxied
+    ? CLAUDE_REVIEWER_PROXIED_HANDOFF_FLOOR_MS
+    : (reviewerTimeoutMs ?? resolveReviewerTimeoutMs(env)) + postSlackMs;
   const remainingMs = expiresAtMs - nowMs;
   if (remainingMs <= requiredLifetimeMs) {
+    // `expires_at` lets the watcher's hold compute the next rotation
+    // (token-refresh-hold.mjs) without trusting settle-time latency.
     throw new TokenRefreshPendingError(
       `broker Claude reviewer token expires too soon for subprocess handoff: ` +
-      `remaining=${remainingMs}ms minimum=${requiredLifetimeMs}ms`
+      `remaining=${remainingMs}ms minimum=${requiredLifetimeMs}ms ` +
+      `expires_at=${new Date(expiresAtMs).toISOString()} handoff=${proxied ? 'proxied' : 'direct'}`
     );
   }
   return { expiresAtMs, remainingMs, requiredLifetimeMs };
@@ -720,6 +741,7 @@ async function reviewWithClaude(diff, extraContext = '', {
   onSilentRetry = null,
   reviewerDeadlineMs = null,
   onProgress = null,
+  startTokenProxyImpl = startClaudeReviewerTokenProxyForAuth,
 } = {}) {
   const readNowMs = () => (typeof nowMs === 'function' ? nowMs() : Date.now());
   const claudeStartedAtMs = readNowMs();
@@ -757,15 +779,27 @@ async function reviewWithClaude(diff, extraContext = '', {
       resolveClaudeLaunchctlUidImpl,
       logger,
     });
+  // TOKDZ-01: the token-refresh proxy carries the CLI across a broker rotation,
+  // so a proxied handoff needs only the proxied floor. Without it (disabled, or
+  // it could not start) the static bearer must outlive the whole pass.
+  let tokenProxy = null;
   if (authTransport === 'broker') {
     const handoffNowMs = typeof nowMs === 'function' ? nowMs() : Number(nowMs);
-    assertClaudeBrokerTokenHandoffLifetime({
-      expiresAt: auth?.expiresAt,
-      env: subprocessEnv,
-      nowMs: handoffNowMs,
-      reviewerTimeoutMs,
-    });
+    tokenProxy = await startTokenProxyImpl({ auth, env: subprocessEnv, logger });
+    try {
+      assertClaudeBrokerTokenHandoffLifetime({
+        expiresAt: auth?.expiresAt,
+        env: subprocessEnv,
+        nowMs: handoffNowMs,
+        reviewerTimeoutMs,
+        proxied: Boolean(tokenProxy),
+      });
+    } catch (err) {
+      await tokenProxy?.close();
+      throw err;
+    }
   }
+  const spawnEnv = tokenProxy ? { ...subprocessEnv, ANTHROPIC_BASE_URL: tokenProxy.baseUrl } : subprocessEnv;
 
   let stdout, stderr;
   let streamRemainder = '';
@@ -793,7 +827,7 @@ async function reviewWithClaude(diff, extraContext = '', {
     onProgress?.({ changedLines, effort: reviewerExecution.effort });
     ({ stdout, stderr } = await withClaudeLaunchctlRetry(
       () => spawnClaudeImpl(buildClaudeReviewArgs(prompt, reviewerExecution), {
-        env: subprocessEnv,
+        env: spawnEnv,
         cwd: reviewerSubprocessCwd,
         timeout: reviewerTimeoutMs,
         progressTimeout: resolveReviewerIdleTimeoutSeconds(subprocessEnv) * 1000,
@@ -807,6 +841,7 @@ async function reviewWithClaude(diff, extraContext = '', {
       { retryDelaysMs: launchctlRetryDelaysMs, sleepImpl },
     ));
   } catch (err) {
+    await tokenProxy?.close();
     if (err?.isLaunchctlSessionError) {
       throw err;
     }
@@ -842,7 +877,16 @@ async function reviewWithClaude(diff, extraContext = '', {
         // Carry the ORIGINAL pass deadline into the retry.
         reviewerDeadlineMs: reviewerBudgetDeadlineMs,
         silentRetryAttempts: silentRetryAttempts - 1,
+        startTokenProxyImpl,
       });
+    }
+    if (tokenProxy?.rotationPending()) {
+      // The proxy saw the grant rejected and the broker still serving it: a
+      // rotation lag, not a bad credential. Hold (TOKDZ-01), never page OAuth.
+      throw new TokenRefreshPendingError(
+        `broker Claude reviewer token was rejected mid-review and the broker has not rotated it yet: ` +
+        `expires_at=${tokenProxy.currentExpiresAt() || 'unknown'} handoff=proxied`
+      );
     }
     // Detect OAuth expiry in error output
     const msg = (err.message || '') + (err.stderr || '');
@@ -851,6 +895,7 @@ async function reviewWithClaude(diff, extraContext = '', {
     }
     throw err;
   }
+  await tokenProxy?.close();
 
   // The process helper retains only a bounded diagnostic tail. The final
   // result event carries both review text and usage; earlier events are not

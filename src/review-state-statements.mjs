@@ -66,6 +66,42 @@ export const MARK_REREVIEW_CI_BLOCKED_RECHECK_SQL = `UPDATE reviewed_prs
       AND pr_number = ?
       AND review_status = '${REREVIEW_CI_BLOCKED_STATUS}'`;
 
+// TOKDZ-01: the claim for a `token-refresh-pending` row. A refusal is a hold,
+// not an attempt, so -- unlike the infra auto-recovery claim below -- this CAS
+// neither checks nor charges `infra_auto_recover_attempts`, and it matches the
+// `pending-upstream` hold row as well as legacy `failed` / same-head `pending`
+// rows written under the pre-hold accounting. The hold window itself is gated
+// by the cascade state (`tokenRefreshHold.holdUntil`), not by this row.
+export const MARK_TOKEN_REFRESH_RECOVERY_ATTEMPT_STARTED_SQL =
+  `UPDATE reviewed_prs
+     SET review_status = 'reviewing',
+         last_attempted_at = ?,
+         reviewer_session_uuid = ?,
+         reviewer_started_at = NULL,
+         reviewer_head_sha = ?,
+         revision_ref = COALESCE(?, revision_ref),
+         reviewer_timeout_ms = ?,
+         reviewer_lease_expires_at = ?,
+         reviewer_pgid = NULL,
+         failed_at = NULL,
+         failure_message = NULL,
+         quota_reset_at_utc = NULL
+   WHERE repo = ?
+     AND pr_number = ?
+     AND (
+       review_status IN ('failed', 'pending-upstream') OR
+       (
+         review_status = 'pending' AND
+         failed_at = ? AND
+         reviewer_head_sha = ?
+       )
+     )
+     AND (
+       lower(COALESCE(failure_message, '')) LIKE '[token-refresh-pending]%' OR
+       lower(COALESCE(failure_message, '')) LIKE '%broker claude reviewer token expires too soon for subprocess handoff%'
+     )
+     AND COALESCE(pr_state, 'open') != 'merged'`;
+
 export const MARK_INFRA_AUTO_RECOVERY_ATTEMPT_STARTED_SQL =
   `UPDATE reviewed_prs
      SET review_status = 'reviewing',
@@ -187,6 +223,19 @@ export const MARK_REVIEWER_CREDENTIAL_OUTAGE_SQL =
           reviewer_session_uuid = NULL, reviewer_pgid = NULL
     WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'`;
 
+// TOKDZ-01: a `token-refresh-pending` refusal is a hold, not an attempt. Same
+// shape as the credential-outage hold above -- `pending-upstream`, session
+// released -- and, like it, charges neither `review_attempts` nor
+// `infra_auto_recover_attempts`, so a refusal can never walk a row to the
+// terminal infra cap. The re-claim is gated by the cascade-state hold
+// (`tokenRefreshHold.holdUntil`), not by this row.
+export const MARK_TOKEN_REFRESH_HOLD_SQL =
+  `UPDATE reviewed_prs
+      SET review_status = 'pending-upstream', failed_at = ?, failure_message = ?,
+          quota_reset_at_utc = NULL, reviewer_lease_expires_at = NULL,
+          reviewer_session_uuid = NULL, reviewer_pgid = NULL
+    WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'`;
+
 export const PROMOTE_REVIEWER_CREDENTIAL_OUTAGE_SQL =
   `UPDATE reviewed_prs
       SET review_status = 'pending-upstream', failure_message = ?,
@@ -298,6 +347,10 @@ export function prepareMarkRereviewCiBlockedRecheck(db) {
   return db.prepare(MARK_REREVIEW_CI_BLOCKED_RECHECK_SQL);
 }
 
+export function prepareMarkTokenRefreshRecoveryAttemptStarted(db) {
+  return db.prepare(MARK_TOKEN_REFRESH_RECOVERY_ATTEMPT_STARTED_SQL);
+}
+
 export function prepareMarkInfraAutoRecoveryAttemptStarted(db) {
   return db.prepare(MARK_INFRA_AUTO_RECOVERY_ATTEMPT_STARTED_SQL);
 }
@@ -312,6 +365,10 @@ export function prepareFinalizePendingTerminalFailure(db) {
 
 export function prepareMarkReviewerCredentialOutage(db) {
   return db.prepare(MARK_REVIEWER_CREDENTIAL_OUTAGE_SQL);
+}
+
+export function prepareMarkTokenRefreshHold(db) {
+  return db.prepare(MARK_TOKEN_REFRESH_HOLD_SQL);
 }
 
 export function preparePromoteReviewerCredentialOutage(db) {

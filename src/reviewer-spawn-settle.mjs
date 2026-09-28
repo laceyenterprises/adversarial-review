@@ -69,6 +69,7 @@ import {
   stmtRearmReviewerCredentialOutage,
   stmtMarkCascadeFailed,
   stmtMarkPendingUpstream,
+  stmtMarkTokenRefreshHold,
   stmtGetReviewRow,
   stmtReleaseReviewerClaim,
 } from './review-state-db.mjs';
@@ -84,6 +85,7 @@ import {
   formatTransientFailureBreakdown,
   recordCascadeFailure,
   recordReviewerCredentialFailure,
+  recordTokenRefreshHold,
 } from './reviewer-cascade.mjs';
 import {
   PROVIDER_OVERLOADED_FAILURE_CLASS,
@@ -1068,6 +1070,7 @@ function settleReviewerAttempt({
     rearmReviewerCredentialOutage: stmtRearmReviewerCredentialOutage,
     markCascadeFailed: stmtMarkCascadeFailed,
     markPendingUpstream: stmtMarkPendingUpstream,
+    markTokenRefreshHold: stmtMarkTokenRefreshHold,
     getReviewRow: stmtGetReviewRow,
   },
   log = console,
@@ -1186,7 +1189,6 @@ function settleReviewerAttempt({
   const transientFailureClasses = new Set([
     'cascade',
     'oauth-broken',
-    TOKEN_REFRESH_PENDING_FAILURE_CLASS,
     'reviewer-timeout',
     'launchctl-bootstrap',
     'daemon-bounce',
@@ -1207,7 +1209,7 @@ function settleReviewerAttempt({
     [INFRA_RUNTIME_MISSING_LIBRARY_FAILURE_CLASS]: 'Reviewer process died in dyld: the host runtime is missing a shared library (Homebrew upgrade?); watcher backoff engaged. Run `hq doctor dylib-drift`.',
     'quota-exhausted': 'Reviewer hit a hard provider usage cap; holding until the cap window clears (HRR graceful degradation).',
     'oauth-broken': 'Reviewer OAuth credentials are unavailable; watcher backoff engaged until credentials recover.',
-    [TOKEN_REFRESH_PENDING_FAILURE_CLASS]: 'Claude reviewer token refresh is pending; watcher short backoff engaged.',
+    [TOKEN_REFRESH_PENDING_FAILURE_CLASS]: 'Claude reviewer token refresh is pending; held until the next token rotation.',
     'reviewer-timeout': 'Reviewer command timed out before posting; watcher backoff engaged.',
     'launchctl-bootstrap': 'Claude launchctl session bootstrap failed; watcher backoff engaged.',
     'daemon-bounce': 'Reviewer runtime could not reattach after daemon bounce; watcher backoff engaged.',
@@ -1256,6 +1258,33 @@ function settleReviewerAttempt({
       );
       return;
     }
+  }
+  if (failureClass === TOKEN_REFRESH_PENDING_FAILURE_CLASS) {
+    // TOKDZ-01: the broker token is waiting on a rotation. That says nothing
+    // about this PR, so hold it until the rotation (bounded; route selection
+    // re-routes once the bound passes) without charging review_attempts or
+    // infra_auto_recover_attempts, and never go terminal.
+    if (typeof statements.markTokenRefreshHold?.run !== 'function') {
+      throw new Error('settleReviewerAttempt requires statements.markTokenRefreshHold for token-refresh holds');
+    }
+    const { tokenRefreshHold: hold } = recordTokenRefreshHold(rootDir, {
+      repo: repoPath,
+      prNumber,
+      failedAt: failureAt,
+      failureReason: failureMessage,
+      refusalText: fullFailureOutput,
+      reviewerModel: reviewerModel || 'claude',
+    });
+    withSqliteBusyRetrySync(
+      () => statements.markTokenRefreshHold.run(failureAt, classifiedMessage, repoPath, prNumber),
+      { label: `reviewer-settle-token-refresh-hold:${repoPath}#${prNumber}`, log }
+    );
+    log.warn(
+      `[watcher] Reviewer token-refresh-pending refusal on #${prNumber} held without charging attempts ` +
+      `(refusal ${hold.refusals}; expected rotation ${hold.expectedRotationAt || 'unknown'}; ` +
+      `retry after ${hold.holdUntil}; re-route after ${hold.maxHoldUntil})`
+    );
+    return;
   }
   if (transientFailureClasses.has(failureClass)) {
     if (typeof statements.getReviewRow?.get !== 'function') {

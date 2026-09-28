@@ -280,6 +280,39 @@ test('route selection keeps Claude through the hold and re-routes only once the 
   }
 });
 
+test('late rotation refusals release the PR at the hold maximum even when cascade backoff crosses it', () => {
+  const fixture = setupFixture();
+  try {
+    const startMs = Date.parse('2026-09-28T19:00:00Z');
+    for (const [index, minute] of [0, 6, 8, 12, 20].entries()) {
+      settleRefusal(fixture, {
+        failureAt: new Date(startMs + minute * MINUTE).toISOString(),
+        remainingMs: (35 - minute) * MINUTE,
+      });
+      const state = readCascadeState(fixture.rootDir, { repo: REPO, prNumber: PR });
+      assert.equal(state.tokenRefreshHold.refusals, index + 1);
+      assert.equal(state.nextRetryAfter, new Date(startMs + [6, 8, 12, 20, 30][index] * MINUTE).toISOString());
+      if (index < 4) fixture.reclaim();
+    }
+    assert.equal(shouldBackoffReviewerSpawn(fixture.rootDir, {
+      repo: REPO, prNumber: PR, now: new Date(startMs + 29 * MINUTE).toISOString(),
+    }).shouldBackoff, true);
+    assert.equal(shouldBackoffReviewerSpawn(fixture.rootDir, {
+      repo: REPO, prNumber: PR, now: new Date(startMs + 30 * MINUTE).toISOString(),
+    }).shouldBackoff, false);
+    const route = selectReviewerRouteForAttempt({
+      subject: { builderClass: 'codex' }, baseRoute: claudeRoute(),
+      rootDir: fixture.rootDir, repoPath: REPO, prNumber: PR,
+      currentRow: fixture.readRow(), headSha: 'head-1', env: {},
+      nowMs: startMs + 30 * MINUTE,
+    });
+    assert.notEqual(route.reviewerModel, 'claude');
+    assert.equal(route.reviewerModelFallback.reason, 'token-refresh-hold-exhausted');
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test('an exhausted hold survives a fallback reviewer\'s transient failure', () => {
   const fixture = setupFixture();
   try {

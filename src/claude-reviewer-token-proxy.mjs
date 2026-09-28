@@ -275,9 +275,8 @@ export async function startClaudeReviewerTokenProxy({
     stats,
   });
 
-  function forwardOnce(req, body, token) {
+  function forwardOnce(req, target, body, token) {
     return new Promise((resolve, reject) => {
-      const target = new URL(req.url, upstreamUrl);
       const headers = {};
       for (const [name, value] of Object.entries(req.headers)) {
         if (!DROP_REQUEST_HEADERS.has(name.toLowerCase())) headers[name] = value;
@@ -296,8 +295,17 @@ export async function startClaudeReviewerTokenProxy({
 
   async function handle(req, res) {
     stats.requests += 1;
-    // Origin-form only: an absolute-form target could steer the bearer off-host.
-    if (!String(req.url || '').startsWith('/')) {
+    // Reject network-path and backslash forms before resolving: URL treats
+    // both as authority-bearing targets for an HTTP(S) base URL.
+    const requestTarget = String(req.url || '');
+    let target;
+    try {
+      if (!requestTarget.startsWith('/') || requestTarget.startsWith('//') || requestTarget.includes('\\')) {
+        throw new Error('not origin-form');
+      }
+      target = new URL(requestTarget, upstreamUrl);
+      if (target.origin !== upstreamUrl.origin) throw new Error('off-host target');
+    } catch {
       req.resume();
       jsonError(res, 400, 'invalid_request_error', 'claude reviewer token proxy accepts origin-form requests only');
       return;
@@ -327,7 +335,7 @@ export async function startClaudeReviewerTokenProxy({
     for (let attempt = 0; attempt < 2; attempt += 1) {
       let upstreamRes;
       try {
-        upstreamRes = await forwardOnce(req, body, grant?.token || null);
+        upstreamRes = await forwardOnce(req, target, body, grant?.token || null);
       } catch (err) {
         jsonError(res, 502, 'api_error', `claude reviewer token proxy: upstream unreachable: ${err?.message || err}`);
         return;

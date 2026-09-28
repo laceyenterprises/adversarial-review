@@ -91,8 +91,8 @@ function toIso(ms) {
 
 // The next hold, carried forward from `previousHold` when it belongs to the
 // same reviewer model and is still live. `floorMs` is the ordinary cascade
-// backoff expiry: the hold never re-checks faster than that, even when the
-// rotation is already overdue, so a late bridge cannot turn into a tight loop.
+// backoff expiry: the hold never re-checks faster than that before its maximum,
+// even when the rotation is overdue. At the maximum, routing can use a fallback.
 export function computeTokenRefreshHold({
   previousHold = null,
   failureAtMs,
@@ -120,7 +120,7 @@ export function computeTokenRefreshHold({
   const target = expectedRotationMs === null
     ? floorMs
     : Math.min(expectedRotationMs + TOKEN_REFRESH_ROTATION_GRACE_MS, maxHoldUntilMs);
-  const holdUntilMs = Math.max(floorMs, target);
+  const holdUntilMs = Math.min(maxHoldUntilMs, Math.max(floorMs, target));
   return {
     reviewerModel: model,
     startedAt: toIso(startedAtMs),

@@ -81,6 +81,10 @@ reason `token-refresh-hold-exhausted`. `token-refresh-pending` is not an
 exec-fallback counting class, so repeated refusals inside the bound never
 re-route on their own. A hold whose last refusal is older than the bound plus
 one hour is stale and is ignored.
+When a later refusal's cascade backoff floor crosses `maxHoldUntil`, the
+PR-level `nextRetryAfter` is capped at `maxHoldUntil`. The held model retains
+its backoff history, while route selection can choose an eligible fallback at
+the bound.
 
 ## Operational Contract
 

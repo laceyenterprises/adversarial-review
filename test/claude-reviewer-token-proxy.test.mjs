@@ -244,6 +244,40 @@ test('an absolute-form request target is refused so the bearer cannot be steered
   });
 });
 
+test('network-path and backslash targets cannot send the broker bearer off-host', async () => {
+  const seen = [];
+  const attacker = createServer((req, res) => {
+    seen.push(req.headers.authorization);
+    res.end();
+  });
+  await new Promise((resolve) => attacker.listen(0, '127.0.0.1', resolve));
+  try {
+    await withProxy({}, async ({ upstream, broker, proxy }) => {
+      const port = new URL(proxy.baseUrl).port;
+      const attackerHost = `127.0.0.1:${attacker.address().port}`;
+      for (const target of [`//${attackerHost}/v1/messages`, `/\\${attackerHost}/v1/messages`]) {
+        const status = await new Promise((resolve, reject) => {
+          const req = request({
+            host: '127.0.0.1', port, method: 'GET', path: target,
+            headers: { authorization: 'Bearer grant-a' },
+          }, (res) => {
+            res.resume();
+            resolve(res.statusCode);
+          });
+          req.on('error', reject);
+          req.end();
+        });
+        assert.equal(status, 400, target);
+      }
+      assert.deepEqual(seen, []);
+      assert.equal(upstream.seen.length, 0);
+      assert.equal(broker.calls, 0);
+    });
+  } finally {
+    await new Promise((resolve) => attacker.close(resolve));
+  }
+});
+
 test('a grant near expiry is re-read before forwarding', async () => {
   let nowMs = Date.parse('2026-09-28T20:53:00Z'); // 90s before grant-a expires
   await withProxy({ proxy: { now: () => nowMs } }, async ({ upstream, broker, proxy }) => {

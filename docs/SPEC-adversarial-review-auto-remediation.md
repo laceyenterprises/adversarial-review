@@ -727,7 +727,9 @@ a pass that ends that way settles as `token-refresh-pending` (a bounded hold)
 rather than an OAuth failure. The proxy only re-reads the broker through the
 same `/token` mint every spawn already makes. It never asks the broker to
 refresh, because a forced refresh revokes every other live holder. It forwards
-only to `https://api.anthropic.com`, and it attaches the grant only to requests
+only to `https://api.anthropic.com`, rejecting network-path, backslash, and
+other targets that resolve off that origin before attaching a grant. It attaches
+the grant only to requests
 presenting a bearer the proxy has vended. A proxied handoff therefore needs just
 a five-minute floor of remaining token life. A direct handoff (the proxy
 disabled with `ADVERSARIAL_REVIEW_CLAUDE_TOKEN_REFRESH_PROXY=off`, or unable to

@@ -107,6 +107,15 @@ if ! jq -e --arg head "$POST_REMEDIATION_SHA" \
   ham_release_merge_lease
   return 20
 fi
+# The terminal predicate has already resolved whether branch protection is
+# required for this exact head. Carry that decision into the live GitHub gate;
+# omitting it makes an unprotected repository wait forever despite green checks.
+HAM_BRANCH_PROTECTION_REQUIRED=$(jq -r '.trace.branchProtection.required | if type == "boolean" then tostring else empty end' "$HAM_VERDICT_FILE")
+if [ "$HAM_BRANCH_PROTECTION_REQUIRED" != true ] && [ "$HAM_BRANCH_PROTECTION_REQUIRED" != false ]; then
+  echo "HAM hard-blocker: predicate did not resolve branch protection requirement" >&2
+  ham_release_merge_lease
+  return 20
+fi
 
 ham_emit_git_merge_signal() {
   [ -n "${HAM_MERGE_COMMIT:-}" ] || return 1
@@ -219,6 +228,7 @@ ham_fire_watcher_merge_wake() {
 ham_refresh_github_gate_once() {
   POST_REMEDIATION_SHA="$POST_REMEDIATION_SHA" \
   HAM_REQUIRES_UP_TO_DATE="${HAM_REQUIRES_UP_TO_DATE:-1}" \
+  HAM_BRANCH_PROTECTION_REQUIRED="$HAM_BRANCH_PROTECTION_REQUIRED" \
   "$HAM_NODE_BIN" --input-type=module <<'NODE' > "$HAM_GATE_JSON"
 import { fetchPullRequestRollup } from '<<ROOT_DIR>>/src/github-api.mjs';
 import { evaluateMergeEligibility } from '<<ROOT_DIR>>/src/ama/merge-eligibility.mjs';
@@ -259,6 +269,7 @@ const ok = evaluateMergeEligibility({
   verdict: 'settled-success',
   leaseHeld: true,
   requiredChecks: checks,
+  branchProtectionRequired: process.env.HAM_BRANCH_PROTECTION_REQUIRED === 'true',
   mergeable: rollup.mergeable,
   mergeStateStatus: rollup.mergeStateStatus,
   requiresUpToDateBranch,

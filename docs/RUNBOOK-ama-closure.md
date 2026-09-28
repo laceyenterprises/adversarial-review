@@ -723,6 +723,11 @@ manual close — it hands the PR to the SAME capped hammer the common path uses.
 The hammer re-validates the required gate at the post-remediation head and merges
 under its own lease. Remediable gates:
 
+The in-lease live gate carries the exact-head terminal predicate's branch
+protection requirement into the shared eligibility check. When that predicate
+has verified the repository's branch protection waiver, green required checks
+can pass; an absent or unresolved predicate decision fails closed.
+
 | Daemon fail-closed reason | Hammer action |
 |---|---|
 | `stale-head` | the reviewed head moved; a fresh review head gets its own hammer |

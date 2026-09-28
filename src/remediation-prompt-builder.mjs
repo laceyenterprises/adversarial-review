@@ -148,7 +148,10 @@ This PR has a settled Comment only verdict. Address or explicitly account for it
     maxRemediationRounds,
     remediationReplyArtifact: remediationReplyPath,
   };
-  const interpolatedTemplate = interpolatePromptTemplate(promptTemplate, {
+  const selectedTemplate = commentOnlyFinal
+    ? promptTemplate.replace(/## Convergence rule \(load-bearing\)[\s\S]*$/u, finalRoundRules)
+    : promptTemplate;
+  const interpolatedTemplate = interpolatePromptTemplate(selectedTemplate, {
     BASE_BRANCH: baseBranch,
     REPLY_PATH: replyContext.replyPath,
     ADV_REPLY_DIR: replyContext.replyDir,

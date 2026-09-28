@@ -13,6 +13,7 @@ import { isExplicitOperatorRetriggerReason } from './retrigger-review-reason.mjs
 import { ensureTtmTrackerSchema } from './ttm-tracker.mjs';
 import { recordReviewLatencyEvent } from './review-latency-event-writer.mjs';
 import { normalizeEffectiveReviewVerdict } from './kernel/verdict.mjs';
+import { hasCompletedCommentOnlyFinalRound } from './comment-only-final-round.mjs';
 import {
   REVIEWER_PASS_GENUINE_POSTED_REVIEW_WHERE_SQL,
   REVIEWER_PASS_NORMALIZED_POSTED_AT_SQL,
@@ -1086,6 +1087,10 @@ function requestReviewRereview({
         console.warn(`[review-state] Refusing re-review for ${repo}#${prNumber}@${targetHead}: settled comment-only verdict`);
         return buildBlockedRereviewResult('comment-only-verdict-settled', currentRow);
       }
+    }
+    if (hasCompletedCommentOnlyFinalRound(rootDir, { repo, prNumber })) {
+      console.warn(`[review-state] Refusing re-review for ${repo}#${prNumber}: comment-only final round completed`);
+      return buildBlockedRereviewResult('comment-only-final-round-completed', currentRow);
     }
 
     // Single compare-and-swap UPDATE with the eligibility predicate

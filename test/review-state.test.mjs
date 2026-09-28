@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -775,6 +775,25 @@ test('requestReviewRereview refuses a head with a settled comment-only verdict',
   } finally {
     after.close();
   }
+});
+
+test('requestReviewRereview refuses a new head after the comment-only final round', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const oldHead = 'a'.repeat(40);
+  const newHead = 'b'.repeat(40);
+  insertReviewRow(rootDir, { revisionRef: oldHead });
+  const completedDir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(completedDir, { recursive: true });
+  writeFileSync(path.join(completedDir, 'laceyenterprises__adversarial-review-pr-10-final.json'),
+    JSON.stringify({ repo: 'laceyenterprises/adversarial-review', prNumber: 10,
+      status: 'completed', finalRound: 'comment-only',
+      reReview: { suppressed: 'comment-only-final-round' } }));
+  const result = requestReviewRereview({
+    rootDir, repo: 'laceyenterprises/adversarial-review', prNumber: 10,
+    targetRevisionRef: newHead, reason: 'Another model asks for a pass.',
+  });
+  assert.equal(result.reason, 'comment-only-final-round-completed');
+  assert.equal(result.triggered, false);
 });
 
 test('requestReviewRereview resets moved pending rows independent of reviewer handle residue', () => {

@@ -666,6 +666,8 @@ test('comment-only final remediation prompt directs one round and closer handoff
   assert.match(prompt, /AMA closer takes the PR/);
   assert.match(prompt, /reReview\.requested = false/);
   assert.doesNotMatch(prompt, /Convergence rule \(load-bearing\): if you believe/);
+  const stagedPrompt = buildRemediationPrompt(makeJob({ finalRound: 'comment-only' }), testReplyContext());
+  assert.doesNotMatch(stagedPrompt, /The PR currently carries an adversarial review with verdict `Request changes`/);
 });
 
 test('buildRemediationPrompt turns CI-regression retries into a concrete remediation objective', () => {

@@ -1628,6 +1628,10 @@ export async function maybeDispatchAmaClosureFor({
   const commentOnlyFinalRoundResume =
     reviewState.verdict === 'comment-only' &&
     reviewState.remediationPending === false &&
+    reviewState.blockingFindingState === 'known' &&
+    reviewState.blockingFindingCount === 0 &&
+    reviewState.nonBlockingFindingState === 'known' &&
+    reviewState.nonBlockingFindingCount > 0 &&
     !disabledEligibility.reasons.includes('ci-not-green') &&
     await proveCommentOnlyFinalRoundHead({
       repo: repoPath,

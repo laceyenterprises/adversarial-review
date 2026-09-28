@@ -85,6 +85,28 @@ test('queue bounds concurrency and starts waiters FIFO as runs settle', async ()
   assert.deepEqual(order, ['A', 'B', 'C']);
 });
 
+test('queue holds a newer head until the same PR run settles without blocking another PR', async () => {
+  const queue = createAmaHammerBackgroundQueue({ maxConcurrent: 2 });
+  const oldHead = deferred();
+  const otherPr = deferred();
+  const order = [];
+  assert.equal(queue.submit({ key: 'o/r#1@old', run: () => {
+    order.push('old');
+    return oldHead.promise;
+  } }).state, 'started');
+  assert.equal(queue.submit({ key: 'o/r#1@new', run: async () => { order.push('new'); } }).state, 'queued');
+  assert.equal(queue.submit({ key: 'o/r#2@head', run: () => {
+    order.push('other');
+    return otherPr.promise;
+  } }).state, 'started');
+  assert.deepEqual(order, ['old', 'other']);
+  oldHead.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(order, ['old', 'other', 'new']);
+  otherPr.resolve();
+  await queue.drain();
+});
+
 test('background queue defaults to three launch slots', () => {
   assert.equal(createAmaHammerBackgroundQueue().snapshot().limit, 3);
 });

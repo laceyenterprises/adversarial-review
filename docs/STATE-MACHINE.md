@@ -542,8 +542,12 @@ Key control points:
 - **`watcher.ama_hammer_dispatch_mode`** (default `inline`): controls only
   whether the posted-review phase waits for the hammer `hq dispatch` call.
   `background` keeps the same MSM hammer path but submits it to a process-local
-  queue with one entry per PR@head, at most two concurrent dispatches, and FIFO
-  waiters. The watcher logs `AMA hammer dispatch <started|queued|in-flight> in
+  queue with one entry per PR@head, at most three concurrent dispatches across
+  different PRs, and FIFO eligible waiters. The queue serializes different
+  heads of one PR, and the closer checks active same-PR launch records before
+  dispatch. Changing `watcher.ama_closer_max_concurrent_launches` requires a
+  watcher restart because the process-local queue captures it on creation.
+  The watcher logs `AMA hammer dispatch <started|queued|in-flight> in
   background...`, then a settle log, while the review row remains `ama-pending`
   instead of falling through to merge-agent. Unknown or unreadable values fail
   safe to `inline`.

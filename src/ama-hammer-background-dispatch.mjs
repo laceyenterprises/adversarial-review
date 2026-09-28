@@ -17,7 +17,7 @@
 // tick `findActiveAmaCloserLaunch` / the lease check return
 // `ama-closer-launch-in-progress` without re-dispatching. This module adds only
 // what the phase can no longer provide once it stops awaiting: one in-flight
-// dispatch per PR@head, a global concurrency bound, and settle logging.
+// dispatch per PR, a global concurrency bound, and settle logging.
 //
 // It also hands each run's outcome back to the phase. A run can end in a
 // terminal rejection from the closer's own gates (retry cap, ineligibility) that
@@ -66,8 +66,9 @@ export function amaHammerBackgroundKey({ repo, prNumber, headSha }) {
 }
 
 /**
- * A bounded background runner. One entry per key (PR@head); at most
- * `maxConcurrent` runs at once, the rest wait FIFO. When a run settles its entry
+ * A bounded background runner. One entry per key (PR@head), with at most one
+ * running entry per PR; at most `maxConcurrent` runs overall. Eligible waiters
+ * run FIFO. When a run settles its entry
  * leaves the map and its outcome is kept for `takeSettled(key)`, so the next
  * tick applies it instead of dispatching again.
  */
@@ -82,6 +83,21 @@ export function createAmaHammerBackgroundQueue({
   const settled = new Map();
   const waiting = [];
   let running = 0;
+  const runningPrKeys = new Set();
+
+  function prKey(key) {
+    const headSeparator = key.lastIndexOf('@');
+    return headSeparator < 0 ? key : key.slice(0, headSeparator);
+  }
+
+  function launchWaiting() {
+    while (running < limit) {
+      const nextIndex = waiting.findIndex((entry) => !runningPrKeys.has(entry.prKey));
+      if (nextIndex < 0) return;
+      const [next] = waiting.splice(nextIndex, 1);
+      launch(next);
+    }
+  }
 
   function recordSettled(key, outcome) {
     settled.delete(key);
@@ -94,6 +110,7 @@ export function createAmaHammerBackgroundQueue({
 
   function launch(entry) {
     running += 1;
+    runningPrKeys.add(entry.prKey);
     entry.state = 'running';
     entry.startedAtMs = nowMs();
     let settled;
@@ -117,9 +134,9 @@ export function createAmaHammerBackgroundQueue({
       )
       .finally(() => {
         running -= 1;
+        runningPrKeys.delete(entry.prKey);
         entries.delete(entry.key);
-        const next = waiting.shift();
-        if (next) launch(next);
+        launchWaiting();
       })
       // A settle logger is caller-supplied and can throw. The outcome was
       // already retained above; consume that final rejection so a background
@@ -142,9 +159,9 @@ export function createAmaHammerBackgroundQueue({
           queuedAtMs: existing.queuedAtMs,
         };
       }
-      const entry = { key, run, onSettled, state: 'queued', queuedAtMs: nowMs(), promise: null };
+      const entry = { key, prKey: prKey(key), run, onSettled, state: 'queued', queuedAtMs: nowMs(), promise: null };
       entries.set(key, entry);
-      if (running < limit) {
+      if (running < limit && !runningPrKeys.has(entry.prKey)) {
         launch(entry);
         return { state: 'started', key, queuedAtMs: entry.queuedAtMs };
       }

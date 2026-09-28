@@ -642,6 +642,9 @@ test('exhausted final-hammer path counts lifetime dispatches across heads and tr
       ...deps,
     });
     assert.equal(result.dispatched, true, `dispatch ${i} should be allowed`);
+    updateAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER,
+      headSha: `head-${i}` }, (record) => ({ ...record,
+      state: 'failed-without-merge', lastObservedStatus: 'failed' }));
   }
   const blocked = await maybeDispatchAmaCloser({
     ...hammerDispatchArgs(rootDir, {
@@ -933,6 +936,9 @@ test('configured hammer lifetime ceiling disables hammer at 0 and controls dispa
       ...depsThree,
     });
     assert.equal(result.dispatched, true, `dispatch ${i} should be allowed`);
+    updateAmaCloserDispatchRecord(rootThree, { repo: REPO, prNumber: PR_NUMBER,
+      headSha: `cfg-job-${i}` }, (record) => ({ ...record,
+      state: 'failed-without-merge', lastObservedStatus: 'failed' }));
   }
   const blockedThree = await maybeDispatchAmaCloser({
     ...hammerDispatchArgs(rootThree, {

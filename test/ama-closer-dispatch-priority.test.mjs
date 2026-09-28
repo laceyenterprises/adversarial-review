@@ -289,6 +289,50 @@ test('LCR: three closer launches occupy the bound and a fourth waits', async (t)
   assert.equal(deps.calls.length, 0, 'do not start another hq dispatch before the first has an lrq');
 });
 
+test('LCR: an active prior head holds its PR even when other-PR capacity remains', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'lcr-same-pr-prior-head-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const oldHead = 'b'.repeat(40);
+  updateAmaCloserDispatchRecord(rootDir, { repo: 'acme/repo', prNumber: 404, headSha: oldHead }, () => ({
+    repo: 'acme/repo', prNumber: 404, headSha: oldHead,
+    state: 'dispatching', lastAttemptedAt: '2026-07-20T12:00:00Z',
+    launchRequestId: null, lastError: null, dispatchTimeoutMs: 300_000,
+  }));
+  acquireAmaCloserLease({ rootDir, repo: 'acme/repo', prNumber: 404,
+    headSha: oldHead, watcherPid: process.pid, now: '2026-07-20T12:00:00Z' });
+  const deps = testDeps();
+  const result = await maybeDispatchAmaCloser({
+    ...findingsRemediationArgs(rootDir, { dispatchContext: { dispatchedAt: '2026-07-20T12:01:00Z' } }),
+    ...deps,
+  });
+  assert.equal(result.reason, 'ama-closer-launch-in-progress');
+  assert.equal(result.activeLaunch.headSha, oldHead);
+  assert.equal(deps.calls.length, 0);
+});
+
+test('LCR: a dispatched worker on a prior head holds its PR', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'lcr-same-pr-worker-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const oldHead = 'b'.repeat(40);
+  updateAmaCloserDispatchRecord(rootDir, { repo: 'acme/repo', prNumber: 404, headSha: oldHead }, () => ({
+    repo: 'acme/repo', prNumber: 404, headSha: oldHead,
+    state: 'dispatched', lastAttemptedAt: '2026-07-20T12:00:00Z',
+    launchRequestId: 'lrq_old', lastObservedStatus: 'running', lastError: null,
+  }));
+  acquireAmaCloserLease({ rootDir, repo: 'acme/repo', prNumber: 404,
+    headSha: oldHead, watcherPid: process.pid, now: '2026-07-20T12:00:00Z' });
+  updateAmaCloserLease({ rootDir, repo: 'acme/repo', prNumber: 404, headSha: oldHead,
+    status: 'dispatched', lrqId: 'lrq_old', now: '2026-07-20T12:00:00Z' });
+  const deps = testDeps();
+  const result = await maybeDispatchAmaCloser({
+    ...findingsRemediationArgs(rootDir, { dispatchContext: { dispatchedAt: '2026-07-20T12:01:00Z' } }),
+    ...deps,
+  });
+  assert.equal(result.reason, 'ama-closer-launch-in-progress');
+  assert.equal(result.activeLaunch.headSha, oldHead);
+  assert.equal(deps.calls.length, 0);
+});
+
 test('LCR: blocked record cannot consume another PR launch slot', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'lcr-blocked-launch-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

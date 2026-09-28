@@ -1769,10 +1769,9 @@ export function listActiveAmaCloserDispatches(rootDir, options = {}) {
   return activeDispatches;
 }
 
-function findActiveAmaCloserLaunches(rootDir, identity, options = {}) {
+function findActiveAmaCloserLaunches(rootDir, options = {}) {
   const active = listActiveAmaCloserDispatches(rootDir, options);
   return active.filter((record) => {
-    if (record.repo === identity.repo && Number(record.prNumber) === Number(identity.prNumber)) return false;
     let lease = null;
     try {
       lease = readAmaCloserLease(rootDir, {
@@ -2671,48 +2670,38 @@ async function teardownSamePrHammerHolder({
       });
     }
 
-    if (holderMissing) {
+    if (!holderMissing) {
       try {
-        await execFileImpl(hqPath, ['worker', 'tear-down', workerId, '--force', '--root', hqRoot], {
-          env, cwd: AGENT_OS_ROOT, maxBuffer: 1024 * 1024, timeout: 60_000, killSignal: 'SIGTERM',
+        await execFileImpl('git', [
+          '-C',
+          join(hqRoot, 'repos', AGENT_OS_TOOLING_REPO),
+          'worktree',
+          'remove',
+          '--force',
+          worktreePath,
+        ], {
+          env,
+          maxBuffer: 1024 * 1024,
+          timeout: 60_000,
+          killSignal: 'SIGTERM',
         });
-        attempts.push({ worktreePath, workerId, action: 'hq-worker-tear-down', ok: true });
-      } catch (tearDownErr) {
-        attempts.push({ worktreePath, workerId, action: 'hq-worker-tear-down', ok: false,
-          error: String(tearDownErr?.stderr || tearDownErr?.message || tearDownErr) });
+        attempts.push({
+          worktreePath,
+          action: 'git-worktree-remove',
+          ok: true,
+        });
+      } catch (removeErr) {
+        const removeDetail = String(removeErr?.stderr || removeErr?.message || removeErr);
+        attempts.push({
+          worktreePath,
+          action: 'git-worktree-remove',
+          ok: false,
+          error: removeDetail,
+        });
+        // A failed remove leaves this holder untouched. The next tick can retry
+        // after the scoped worker tear-down path or an operator repair.
+        continue;
       }
-      continue;
-    }
-    try {
-      await execFileImpl('git', [
-        '-C',
-        join(hqRoot, 'repos', AGENT_OS_TOOLING_REPO),
-        'worktree',
-        'remove',
-        '--force',
-        worktreePath,
-      ], {
-        env,
-        maxBuffer: 1024 * 1024,
-        timeout: 60_000,
-        killSignal: 'SIGTERM',
-      });
-      attempts.push({
-        worktreePath,
-        action: 'git-worktree-remove',
-        ok: true,
-      });
-    } catch (removeErr) {
-      const removeDetail = String(removeErr?.stderr || removeErr?.message || removeErr);
-      attempts.push({
-        worktreePath,
-        action: 'git-worktree-remove',
-        ok: false,
-        error: removeDetail,
-      });
-      // A failed remove leaves this holder untouched. The next tick can retry
-      // after the scoped worker tear-down path or an operator repair.
-      continue;
     }
 
     const tearDownArgs = ['worker', 'tear-down', workerId, '--force', '--root', hqRoot];
@@ -5115,15 +5104,19 @@ export async function maybeDispatchAmaCloser({
     );
   }
   const dispatchTimeoutMs = resolveAmaDispatchTimeoutMs(cfg);
-  const activeLaunches = findActiveAmaCloserLaunches(rootDir, targetDispatchIdentity, {
+  const activeLaunches = findActiveAmaCloserLaunches(rootDir, {
     now: dispatchContext.dispatchedAt,
     log: logger,
     processKillImpl,
   });
+  const samePrLaunch = activeLaunches.find((record) => record.repo === repo
+    && Number(record.prNumber) === Number(prNumber));
+  const otherPrLaunches = activeLaunches.filter((record) => record.repo !== repo
+    || Number(record.prNumber) !== Number(prNumber));
   const maxConcurrentLaunches = Math.max(1, Number(cfg?.watcher?.ama_closer_max_concurrent_launches
     ?? cfg?.amaCloserMaxConcurrentLaunches ?? 3) || 3);
-  if (activeLaunches.length >= maxConcurrentLaunches) {
-    const activeLaunch = activeLaunches[0];
+  if (samePrLaunch || otherPrLaunches.length >= maxConcurrentLaunches) {
+    const activeLaunch = samePrLaunch || otherPrLaunches[0];
     logAmaCloserDispatchEvent(logger, 'ama_closer.dispatch_deferred_active_launch', {
       repo,
       prNumber,

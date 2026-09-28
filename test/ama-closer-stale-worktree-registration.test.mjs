@@ -104,6 +104,33 @@ test('a missing holder worktree uses scoped worker tear-down', async () => {
   assert.ok(!calls.some(c => c.includes('worktree prune')), 'must not prune other registrations');
 });
 
+test('a missing holder worktree retries transient hq tear-down errors', async () => {
+  const hqRoot = makeHqRoot();
+  const holder = join(hqRoot, 'workers', WORKER_ID, 'agent-os');
+  let calls = 0;
+  const delays = [];
+  const result = await teardownSamePrHammerHolder({
+    err: provisionError(holder), prNumber: PR_NUMBER, hqPath: 'hq', hqRoot,
+    execFileImpl: async (bin) => {
+      assert.equal(bin, 'hq');
+      calls += 1;
+      if (calls < 3) {
+        const error = new Error('transient EIO');
+        error.code = 'EIO';
+        throw error;
+      }
+      return { stdout: '' };
+    },
+    readLatestWorkerRunStatusImpl: async () => ({ ok: true, row: { status: 'succeeded' } }),
+    sleepImpl: async (ms) => { delays.push(ms); },
+    logger: { warn() {} },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(calls, 3);
+  assert.deepEqual(delays, [250, 1_000]);
+  assert.equal(result.attempts.at(-1).attempts, 3);
+});
+
 test('a missing worktree with a live holder run is left alone', async () => {
   const hqRoot = makeHqRoot();
   const holder = join(hqRoot, 'workers', WORKER_ID, 'agent-os');

@@ -70,11 +70,18 @@ import {
   writeAmaAuditEntry,
 } from './audit.mjs';
 import {
+  AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS,
+  AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS,
   AMA_CLOSER_LEASE_STATUS,
+  amaCloserPendingLeaseExpiryMs,
   acquireAmaCloserLease,
   deleteAmaCloserLease,
   readAmaCloserLease,
   updateAmaCloserLease,
+} from './closer-lease.mjs';
+export {
+  AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS,
+  AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS,
 } from './closer-lease.mjs';
 import { isEligibleForAmaClosure } from './eligibility.mjs';
 import {
@@ -1273,27 +1280,12 @@ export function isStaleWorktreeRegistrationError(detail) {
 }
 
 const AMA_CLOSER_TEARDOWN_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000];
-const AMA_CLOSER_HQ_DISPATCH_LAUNCH_WINDOW_MS = 600_000;
-const AMA_CLOSER_HQ_DISPATCH_MAX_ATTEMPTS = AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.length + 1;
 const AMA_CLOSER_TOKEN_ROLLUP_POLL_DELAYS_MS = [500, 1_000, 2_000, 5_000];
 const AMA_CLOSER_LEASELESS_LAUNCH_GRACE_MS = 30_000;
-const AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_TOTAL_MS =
-  AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.reduce((total, delay) => total + delay, 0);
-const AMA_CLOSER_TOKEN_ROLLUP_POLL_TOTAL_MS =
-  AMA_CLOSER_TOKEN_ROLLUP_POLL_DELAYS_MS.reduce((total, delay) => total + delay, 0);
 
 function amaCloserPendingLeaseReclaimAgeMs(record = null) {
-  const recordedTimeoutMs = Number(record?.dispatchTimeoutMs);
-  const launchWindowMs = Number.isFinite(recordedTimeoutMs) && recordedTimeoutMs > 0
-    ? recordedTimeoutMs
-    : AMA_CLOSER_HQ_DISPATCH_LAUNCH_WINDOW_MS;
-  return (launchWindowMs * AMA_CLOSER_HQ_DISPATCH_MAX_ATTEMPTS)
-    + AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_TOTAL_MS
-    + (AMA_CLOSER_TOKEN_ROLLUP_POLL_TOTAL_MS * AMA_CLOSER_HQ_DISPATCH_MAX_ATTEMPTS);
+  return amaCloserPendingLeaseExpiryMs(record?.dispatchTimeoutMs);
 }
-
-export const AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS = amaCloserPendingLeaseReclaimAgeMs();
-export const AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS = 30 * 60 * 1000;
 
 // Terminal outcomes a dispatched lease may be reclaimed from. `succeeded`
 // stays sticky per SPEC 4.4 rule #5; these outcomes record attempts that did
@@ -5157,6 +5149,7 @@ export async function maybeDispatchAmaCloser({
   let leaseResult = acquireAmaCloserLease({
     rootDir,
     ...leaseIdentity,
+    dispatchTimeoutMs,
     watcherPid: typeof process !== 'undefined' ? process.pid : null,
     now: dispatchContext.dispatchedAt,
   });
@@ -5167,6 +5160,7 @@ export async function maybeDispatchAmaCloser({
       leaseResult = acquireAmaCloserLease({
         rootDir,
         ...leaseIdentity,
+        dispatchTimeoutMs,
         watcherPid: typeof process !== 'undefined' ? process.pid : null,
         now: dispatchContext.dispatchedAt,
       });
@@ -5184,6 +5178,7 @@ export async function maybeDispatchAmaCloser({
       leaseResult = acquireAmaCloserLease({
         rootDir,
         ...leaseIdentity,
+        dispatchTimeoutMs,
         watcherPid: typeof process !== 'undefined' ? process.pid : null,
         now: dispatchContext.dispatchedAt,
       });

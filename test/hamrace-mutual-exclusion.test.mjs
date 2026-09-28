@@ -34,3 +34,17 @@ test('legacy pending job without a revision ref defers while a closer owns the P
   }));
   assert.equal(claimNextFollowUpJob({ rootDir }), null);
 });
+
+test('pending closer lease expires at the AMA launch retry boundary', (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hamrace-pending-expiry-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: 'o/r', prNumber: 10, headSha: 'pending-head' };
+  acquireAmaCloserLease({ rootDir, ...identity, now: '2026-09-27T00:00:00.000Z' });
+  assert.equal(isHeldAmaCloserLease(rootDir, identity, { now: '2026-09-27T00:30:00.000Z' }), true);
+  assert.equal(isHeldAmaCloserLease(rootDir, identity, { now: '2026-09-27T00:31:00.000Z' }), false);
+  const custom = { repo: 'o/r', prNumber: 11, headSha: 'long-launch' };
+  acquireAmaCloserLease({ rootDir, ...custom, dispatchTimeoutMs: 20 * 60 * 1000,
+    now: '2026-09-27T00:00:00.000Z' });
+  assert.equal(isHeldAmaCloserLease(rootDir, custom, { now: '2026-09-27T00:45:00.000Z' }), true);
+  assert.equal(isHeldAmaCloserLease(rootDir, custom, { now: '2026-09-27T01:01:00.000Z' }), false);
+});

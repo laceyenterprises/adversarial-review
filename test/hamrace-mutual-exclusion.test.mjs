@@ -22,3 +22,15 @@ test('remediation claim defers on current-head lease, and stale lease expires', 
   assert.equal(isHeldAmaCloserLease(rootDir, identity, { now: '2026-09-27T00:31:00.000Z' }), false);
   assert.notEqual(claimNextFollowUpJob({ rootDir, claimedAt: '2026-09-27T00:31:00.000Z' }), null);
 });
+
+test('legacy pending job without a revision ref defers while a closer owns the PR', (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hamrace-legacy-claim-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  acquireAmaCloserLease({ rootDir, repo: 'o/r', prNumber: 6, headSha: 'head' });
+  const dir = join(rootDir, 'data', 'follow-up-jobs', 'pending');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'job.json'), JSON.stringify({
+    jobId: 'job', repo: 'o/r', prNumber: 6, revisionRef: null, status: 'pending',
+  }));
+  assert.equal(claimNextFollowUpJob({ rootDir }), null);
+});

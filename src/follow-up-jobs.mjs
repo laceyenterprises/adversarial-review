@@ -11,7 +11,7 @@ import { userInfo } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
-import { isHeldAmaCloserLease } from './ama/closer-lease.mjs';
+import { findLiveAmaCloserLease, isHeldAmaCloserLease } from './ama/closer-lease.mjs';
 import { ensureWorkspaceTrashDir, launchWorkspaceTrashDeleter, workspaceTrashDir } from './follow-up-workspace-trash.mjs';
 import { loadRoleConfig } from './role-config.mjs';
 import {
@@ -2161,6 +2161,18 @@ function maybeRevalidateQuotaHold({
   return { cleared: true, job: updatedJob };
 }
 
+function heldCloserForJob(rootDir, job, now) {
+  if (!job?.repo || !Number.isInteger(Number(job?.prNumber))) return false;
+  const held = findLiveAmaCloserLease(rootDir, { repo: job.repo, prNumber: job.prNumber });
+  if (!held) return false;
+  // Legacy pending jobs can lack revisionRef. In that case the claimed head is
+  // unknown, so conservatively defer while any non-stale closer owns the PR.
+  if (job.revisionRef && String(job.revisionRef) !== held.headSha) return false;
+  return isHeldAmaCloserLease(rootDir, {
+    repo: job.repo, prNumber: job.prNumber, headSha: held.headSha,
+  }, { now });
+}
+
 function claimNextFollowUpJob({
   rootDir,
   workerType = 'codex-remediation',
@@ -2217,12 +2229,8 @@ function claimNextFollowUpJob({
       }
     }
 
-    if (pendingJob?.revisionRef && isHeldAmaCloserLease(rootDir, {
-      repo: pendingJob.repo,
-      prNumber: pendingJob.prNumber,
-      headSha: pendingJob.revisionRef,
-    }, { now: claimedAt })) {
-      console.log(`[follow-up] deferred ${pendingJob.repo}#${pendingJob.prNumber}: closer lease held on ${pendingJob.revisionRef}`);
+    if (heldCloserForJob(rootDir, pendingJob, claimedAt)) {
+      console.log(`[follow-up] deferred ${pendingJob.repo}#${pendingJob.prNumber}: closer lease held (job head ${pendingJob.revisionRef || 'unknown'})`);
       continue;
     }
 
@@ -2236,9 +2244,7 @@ function claimNextFollowUpJob({
     }
 
     // The closer can acquire between the pre-check and our atomic claim.
-    if (pendingJob?.revisionRef && isHeldAmaCloserLease(rootDir, {
-      repo: pendingJob.repo, prNumber: pendingJob.prNumber, headSha: pendingJob.revisionRef,
-    }, { now: claimedAt })) {
+    if (heldCloserForJob(rootDir, pendingJob, claimedAt)) {
       renameSync(inProgressPath, pendingPath);
       console.log(`[follow-up] deferred ${pendingJob.repo}#${pendingJob.prNumber}: closer lease acquired during claim`);
       continue;

@@ -736,6 +736,11 @@ manual close — it hands the PR to the SAME capped hammer the common path uses.
 The hammer re-validates the required gate at the post-remediation head and merges
 under its own lease. Remediable gates:
 
+The in-lease live gate carries the exact-head terminal predicate's branch
+protection requirement into the shared eligibility check. When that predicate
+has verified the repository's branch protection waiver, green required checks
+can pass; an absent or unresolved predicate decision fails closed.
+
 | Daemon fail-closed reason | Hammer action |
 |---|---|
 | `stale-head` | the reviewed head moved; a fresh review head gets its own hammer |
@@ -945,16 +950,36 @@ the current holder, FIFO waiters, ages, and per-PR attempt counts. If the holder
 PR has already merged/closed, or the holder process is dead/stale, run
 `node bin/merge-lease.mjs reconcile --repo <owner/name> --base <branch>`; this
 only removes the lease file through the holder identity fence and does not kill
-processes or change verdicts. Releasing a holder also removes that PR/head's
-gate-attempt record, and attempt records older than 30 days are pruned during
-new attempt recording. When a PR exceeds `AMG_MAX_GATE_ATTEMPTS`
+processes or change verdicts. A normal holder release leaves its gate-attempt
+record in place. `release --retryable-abort <reason>` and an acquire timeout
+refund the provisional attempt instead: `attempts` decreases by one and
+`retryable` increases by one for that PR/head. A timeout still returns `75`
+with `{"timedOut":true}` if its refund fails; `refundFailed:true` in the JSON
+and a stderr warning identify the charged attempt for operator inspection.
+Use `reset-attempts` with that repo, base, PR, and head to clear its counters
+after resolving the cause; reset checks for a current holder before clearing
+the record. Because holder acquisition uses its own atomic file operation, this
+check is best effort if acquisition races the reset.
+`classify` reports
+whether a mergeability, required-check, or protection-read failure qualifies
+for a retryable refund. On a remote-CI timeout, the hammer passes the gate's
+structured check states to `classify`; it refunds only when pending or queued
+checks remain and none are red. A red check or unrecognized gate state leaves
+the attempt charged. When `acquire` parks a head at the cap, the hammer writes
+the returned `closingStatus` (attempt and retryable counts plus the exact
+`reset-attempts` command) to stderr, the terminal audit, and its PR closing
+comment. The green-check sentence describes the fresh pre-acquire snapshot for
+the same head, not a later live gate result.
+Attempt records older than 30 days are pruned
+during new attempt recording. The cap applies to charged `attempts`, not the
+`retryable` count. Contention timeouts are bounded by the outer hammer lifetime
+retry cap, not by this gate-attempt cap. When a PR exceeds `AMG_MAX_GATE_ATTEMPTS`
 (default `5`), `acquire` exits `70` with `{"parked":true}` so the caller should
 park it for operator review instead of re-queueing. The hammer terminal closer
 also treats an acquire wait timeout (`75` with `{"timedOut":true}`) as an
 intentional AMG-04 park and exits successfully after logging the waited seconds,
 so a contended base does not churn through repeated long retry windows. Other
-non-zero acquire exits remain hard failures that should be inspected from the
-CLI JSON payload.
+non-zero acquire exits remain hard failures; inspect their CLI output and stderr.
 
 ### Merged PR but DAG step did not advance
 

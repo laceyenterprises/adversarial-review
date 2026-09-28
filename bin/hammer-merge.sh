@@ -72,6 +72,8 @@ ham_append_terminal_audit() {
     --pr <<PR_NUMBER>> \
     --head "$POST_REMEDIATION_SHA" \
     --outcome "$ham_audit_outcome" \
+    --closure-authority ham-terminal-remediation \
+    --reviewer <<REVIEWER>> --risk-class <<RISK_CLASS>> \
     --attempt-json "$ham_audit_attempt_json" \
     --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   ham_audit_append_exit=$?
@@ -102,6 +104,15 @@ if ! jq -e --arg head "$POST_REMEDIATION_SHA" \
   '.eligible == true and .trace.headMatch.current == $head' "$HAM_VERDICT_FILE" >/dev/null 2>&1; then
   echo "HAM hard-blocker: predicate is not eligible for the validated head" >&2
   ham_append_terminal_audit failed-without-merge predicate-not-eligible || true
+  ham_release_merge_lease
+  return 20
+fi
+# The terminal predicate has already resolved whether branch protection is
+# required for this exact head. Carry that decision into the live GitHub gate;
+# omitting it makes an unprotected repository wait forever despite green checks.
+HAM_BRANCH_PROTECTION_REQUIRED=$(jq -r '.trace.branchProtection.required | if type == "boolean" then tostring else empty end' "$HAM_VERDICT_FILE")
+if [ "$HAM_BRANCH_PROTECTION_REQUIRED" != true ] && [ "$HAM_BRANCH_PROTECTION_REQUIRED" != false ]; then
+  echo "HAM hard-blocker: predicate did not resolve branch protection requirement" >&2
   ham_release_merge_lease
   return 20
 fi
@@ -217,6 +228,7 @@ ham_fire_watcher_merge_wake() {
 ham_refresh_github_gate_once() {
   POST_REMEDIATION_SHA="$POST_REMEDIATION_SHA" \
   HAM_REQUIRES_UP_TO_DATE="${HAM_REQUIRES_UP_TO_DATE:-1}" \
+  HAM_BRANCH_PROTECTION_REQUIRED="$HAM_BRANCH_PROTECTION_REQUIRED" \
   "$HAM_NODE_BIN" --input-type=module <<'NODE' > "$HAM_GATE_JSON"
 import { fetchPullRequestRollup } from '<<ROOT_DIR>>/src/github-api.mjs';
 import { evaluateMergeEligibility } from '<<ROOT_DIR>>/src/ama/merge-eligibility.mjs';
@@ -257,6 +269,7 @@ const ok = evaluateMergeEligibility({
   verdict: 'settled-success',
   leaseHeld: true,
   requiredChecks: checks,
+  branchProtectionRequired: process.env.HAM_BRANCH_PROTECTION_REQUIRED === 'true',
   mergeable: rollup.mergeable,
   mergeStateStatus: rollup.mergeStateStatus,
   requiresUpToDateBranch,
@@ -308,7 +321,7 @@ ham_required_gate_red() {
     (.badChecks // []) | any(
       ((.conclusion // "") | ascii_upcase) as $conclusion |
       ((.status // .state // "") | ascii_upcase) as $status |
-      ((["FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED"] | index($conclusion)) != null) or
+      ((["FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"] | index($conclusion)) != null) or
       (.__typename == "StatusContext" and ((["ERROR", "FAILURE"] | index($status)) != null))
     )
   ' "$HAM_GATE_JSON" >/dev/null
@@ -392,6 +405,14 @@ while :; do
     cat "$HAM_GATE_JSON" >&2
     HAM_REMOTE_CI_STATUS=remote-ci-timeout
     ham_append_terminal_audit failed-without-merge github-gate-timeout || true
+    HAM_PENDING_CHECK_STATES=$(jq -r '[.badChecks[]? | (.conclusion // .status // .state // "")] | join(" ")' "$HAM_GATE_JSON")
+    if [ -n "$HAM_PENDING_CHECK_STATES" ] && ! ham_required_gate_red; then
+      HAM_PENDING_CHECK_CLASSIFICATION=$("$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-lease.mjs classify \
+        --stage required-checks --state "$HAM_PENDING_CHECK_STATES") || return 1
+      if [ "$(printf '%s' "$HAM_PENDING_CHECK_CLASSIFICATION" | jq -r '.retryable')" = "true" ]; then
+        ham_mark_merge_lease_retryable_abort required-checks-pending
+      fi
+    fi
     ham_release_merge_lease
     return 20
   fi
@@ -416,7 +437,7 @@ else
     --arg remediatedFindings "$HAM_REMEDIATED_FINDINGS" \
     --arg failingTestsFixed "${HAM_FAILING_TESTS_FIXED:-}" \
     --argjson rebaseAttempts "${HAM_REBASE_ATTEMPTS:-0}" \
-    --argjson eligibilityTrace "$(cat /tmp/ham-<<PR_NUMBER>>-verdict.json)" \
+    --argjson eligibilityTrace "$(cat "$HAM_VERDICT_FILE")" \
     --argjson githubGate "$(cat "$HAM_GATE_JSON")" \
     '{
       preMergeEligible: true,
@@ -440,6 +461,8 @@ else
     --pr <<PR_NUMBER>> \
     --head "$POST_REMEDIATION_SHA" \
     --outcome in_progress \
+    --closure-authority ham-terminal-remediation \
+    --reviewer <<REVIEWER>> --risk-class <<RISK_CLASS>> \
     --attempt-json "$HAM_PRE_MERGE_ATTEMPT_FILE" || { ham_release_merge_lease; return 1; }
   rm -f "$HAM_PRE_MERGE_ATTEMPT_FILE"
   ham_fire_watcher_merge_wake

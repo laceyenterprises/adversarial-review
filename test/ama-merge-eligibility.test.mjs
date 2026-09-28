@@ -369,6 +369,15 @@ test('runtime merge-eligibility snapshots pass live labels into the shared predi
   }
 });
 
+test('hammer live gate carries the exact-head branch protection decision', () => {
+  const source = readFileSync(`${ROOT}/bin/hammer-merge.sh`, 'utf8');
+  assert.match(source, /\.trace\.branchProtection\.required/);
+  assert.match(source, /HAM_BRANCH_PROTECTION_REQUIRED="\$HAM_BRANCH_PROTECTION_REQUIRED"/);
+  assert.match(source, /branchProtectionRequired: process\.env\.HAM_BRANCH_PROTECTION_REQUIRED === 'true'/);
+  assert.doesNotMatch(source, /cat \/tmp\/ham-<<PR_NUMBER>>-verdict\.json/);
+  assert.match(source, /--argjson eligibilityTrace "\$\(cat "\$HAM_VERDICT_FILE"\)"/);
+});
+
 // The hammer inline gate (MSM-01) required at least one check AND all green;
 // the extracted classifier must reproduce that exactly.
 test('classifier mirrors the hammer inline check rules', () => {

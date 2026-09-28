@@ -20,6 +20,7 @@ import {
   claimNextFollowUpJob,
   MAX_QUOTA_HOLD_WINDOW_MS,
   getFollowUpJobDir,
+  findInProgressFollowUpJobByLaunchRequestId,
   isSettledCleanStopCode,
   listInProgressFollowUpJobs,
   markFollowUpJobCompleted,
@@ -65,6 +66,7 @@ import { buildOwedDelivery, recordInitialCommentDelivery } from './adapters/comm
 import { deliverAlert } from './alert-delivery.mjs';
 import { captureRemediationBodyAfterPost } from './review-body-capture.mjs';
 import { resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
+import { captureFinalRoundWorkerPushedHead } from './comment-only-final-round.mjs';
 import { requestWatcherWake } from './watcher-wake.mjs';
 import { REREVIEW_WAKE_REASONS, requestRereviewWake } from './rereview-wake.mjs';
 import { requestHammerWakeForSettledReviewStop } from './hammer-wake.mjs';
@@ -2086,7 +2088,7 @@ async function reconcileFollowUpJob({
       };
       parsedReply = reply;
 
-      if (reply.reReview.requested) {
+      if (reply.reReview.requested && job?.finalRound !== 'comment-only') {
         // Pre-rereview branch-contamination gate. Even though the
         // remediator prompt forbids pushing patch-id duplicates of
         // upstream commits, workers can ignore the contract or run a
@@ -2663,6 +2665,15 @@ async function reconcileFollowUpJob({
             requestedAt,
           },
         });
+      } else if (job?.finalRound === 'comment-only') {
+        rereview = {
+          ...buildRereviewResult({
+            requested: false,
+            reason: null,
+            outcome: { status: 'suppressed', reason: 'comment-only-final-round' },
+          }),
+          suppressed: 'comment-only-final-round',
+        };
       } else {
         rereview = buildRereviewResult({
           requested: false,
@@ -2699,12 +2710,38 @@ async function reconcileFollowUpJob({
     // `codex-output-last-message` source string. New claude-code workers
     // produce `claude-code-output-last-message`, so worker-class metrics
     // and operator-visible completion records reflect what actually ran.
+    const completedCommentOnlyFinalRound = job?.finalRound === 'comment-only'
+      && parsedReply?.outcome === 'completed'
+      && (!Array.isArray(parsedReply?.blockers) || parsedReply.blockers.length === 0)
+      && (!Array.isArray(parsedReply?.operationalBlockers) || parsedReply.operationalBlockers.length === 0);
     const workerModel = worker?.model || 'codex';
+    let proofWorkspaceDir = paths.workspaceDir;
+    let proofAuditClean = completedCommentOnlyFinalRound;
+    if (completedCommentOnlyFinalRound) {
+      if (worker?.dispatchMode === 'hq') {
+        proofWorkspaceDir = parseHqWorkerWorkspaceFromPayload(liveness?.dispatchStatus || {})
+          || await resolveHqWorkerWorkspace({ worker, execFileImpl })
+          || paths.workspaceDir;
+      }
+      const { baseBranch } = await ensureJobBaseBranch({ job, jobPath, execFileImpl });
+      const proofAudit = await auditWorkspaceForContaminationImpl({
+        workspaceDir: proofWorkspaceDir, baseBranch, execFileImpl,
+      });
+      proofAuditClean = !proofAudit.error && !proofAudit.suspect?.length;
+      if (!proofAuditClean) log.warn?.(`[follow-up-remediation] Withholding final-round push proof for ${job.repo}#${job.prNumber}: branch contamination audit failed`);
+    }
+    const workerPushedHeadSha = proofAuditClean
+      ? await captureFinalRoundWorkerPushedHead({
+        repo: job.repo, prNumber: job.prNumber, jobId: job.jobId, reviewedHead: job.revisionRef,
+        workspaceDir: proofWorkspaceDir, execFileImpl, log,
+      })
+      : null;
     const completionMetadata = {
       source: hasNonEmptyNarrative
         ? `${workerModel}-output-last-message`
         : `${workerModel}-remediation-reply-only`,
       workerModel,
+      ...(workerPushedHeadSha ? { workerPushedHeadSha } : {}),
       note: hasNonEmptyNarrative
         ? 'Reconciled from detached worker exit plus non-empty final message artifact.'
         : 'Reconciled from detached worker exit plus validated remediation-reply.json (final message artifact was empty; success signaled via the durable reply contract).',
@@ -2766,7 +2803,7 @@ async function reconcileFollowUpJob({
       };
     }
 
-    if (!rereview.requested) {
+    if (!rereview.requested && !completedCommentOnlyFinalRound) {
       const resumed = operationalBlockerRecovery?.rescue?.preserved && worker.dispatchMode !== 'hq' && requeueForWorkspaceResume({
         rootDir, jobPath, job, requeuedAt: completedAt, retryMetadata: { rescue: operationalBlockerRecovery.rescue },
         retryReason: 'Preserved remediation commit after worker credential failure; resuming the same workspace.',
@@ -2910,6 +2947,20 @@ async function reconcileFollowUpJob({
       commentDelivery: completedDelivery,
       jobUpdates: operationalBlockerRecovery ? { operationalBlockerRecovery } : null,
     });
+
+    if (completedCommentOnlyFinalRound && !completed.alreadyTerminal) {
+      try {
+        requestWatcherWakeImpl({
+          rootDir,
+          reason: 'comment-only-final-round-completed',
+          repo: job.repo,
+          prNumber: job.prNumber,
+          requestedAt: completedAt,
+        });
+      } catch (err) {
+        log.warn?.(`[follow-up-remediation] AMA closer wake failed for ${job.repo}#${job.prNumber}: ${err?.message || err}`);
+      }
+    }
 
     await postReconcileOutcomeCommentSafe({
       rootDir,
@@ -3231,16 +3282,6 @@ async function reconcileInProgressFollowUpJobs({
     skipped: results.filter((result) => result.action === 'skipped').length,
     results,
   };
-}
-
-function findInProgressFollowUpJobByLaunchRequestId(rootDir, launchRequestId) {
-  const lrq = String(launchRequestId || '').trim();
-  if (!lrq) return null;
-  for (const entry of listInProgressFollowUpJobs(rootDir)) {
-    const workerLrq = String(entry.job?.remediationWorker?.launchRequestId || '').trim();
-    if (workerLrq === lrq) return entry;
-  }
-  return null;
 }
 
 async function handleRemediationTelemetryEvent({

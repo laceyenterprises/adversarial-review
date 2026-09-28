@@ -15,34 +15,42 @@ function run(command, args, env = {}) {
 }
 test('sourced phase wrapper reports terminal outcomes and keeps its shell alive', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-phase-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const prNumber = String(1_000_000 + process.pid);
+  t.after(() => {
+    rmSync(dir, { recursive: true, force: true });
+    for (const name of readdirSync('/tmp')) {
+      if (name.startsWith(`ham-${prNumber}-`)) rmSync(join('/tmp', name), { force: true });
+    }
+  });
   const bin = join(dir, 'bin');
   mkdirSync(bin);
   const gh = join(bin, 'gh');
-  writeFileSync(gh, '#!/bin/sh\ncase "$*" in\n  "pr view"*) echo \'{"headRefOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","baseRefName":"main","mergeStateStatus":"CLEAN"}\' ;;\n  *) echo \'{"strict":false}\' ;;\nesac\n');
+  writeFileSync(gh, '#!/bin/sh\ncase "$*" in\n  "pr view"*) echo \'{"headRefOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","baseRefName":"main","mergeStateStatus":"CLEAN"}\' ;;\n  "api --paginate"*) echo \'{"id":42,"body":"<!-- hq:ham-terminal-remediation:audit --> HAM-Terminal-Remediation-Head: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\' ;;\n  "api --method PATCH"*) echo patched > "$TMPDIR/patched" ;;\n  *) echo \'{"strict":false}\' ;;\nesac\n');
   chmodSync(gh, 0o755);
   const leaseNode = join(bin, 'lease-node');
-  writeFileSync(leaseNode, '#!/bin/sh\necho \'{"parked":true,"reason":"another-closer"}\'\nexit 70\n');
+  writeFileSync(leaseNode, '#!/bin/sh\ncase "$1" in\n  */bin/merge-lease.mjs) echo \'{"parked":true,"reason":"max-gate-attempts","closingStatus":"Reset the capped head"}\'; exit 70 ;;\n  */bin/ama-audit.mjs) exit 0 ;;\nesac\nexit 1\n');
   chmodSync(leaseNode, 0o755);
   const wrapper = template.match(/For each phase,[\s\S]*?```bash\n([\s\S]*?)\n```/)?.[1];
   assert.ok(wrapper);
   for (const [phase, outcome, diagnostic, status] of [
-    ['hammer-verify-head', 'parked:another-closer', 'AMG-04 parked', 20],
+    ['hammer-verify-head', 'parked:max-gate-attempts', 'AMG-04 parked', 20],
     ['hammer-publish', 'hammer-publish-error', 'terminal-remediation audit must be written', 1],
     ['hammer-merge', 'merge-error', 'no hammer merge without holding', 1],
   ]) {
     const shell = `PHASE=${phase}\n${wrapper}\necho SHELL_SURVIVED\nexit "$HAM_PHASE_STATUS"\n`;
     const result = run('/bin/bash', ['-c', shell], {
-      HAM_ROOT_DIR: root, HAM_PR_URL: 'https://github.com/acme/repo/pull/42', HAM_REPO: 'acme/repo',
-      HAM_PR_NUMBER: '42', HAM_REVIEWED_SHA: 'a'.repeat(40), HAM_TARGET_REMEDIATION_SHA: 'a'.repeat(40),
+      HAM_ROOT_DIR: root, HAM_PR_URL: `https://github.com/acme/repo/pull/${prNumber}`, HAM_REPO: 'acme/repo',
+      HAM_PR_NUMBER: prNumber, HAM_REVIEWED_SHA: 'a'.repeat(40), HAM_TARGET_REMEDIATION_SHA: 'a'.repeat(40),
       HAM_RISK_CLASS: 'medium', HAM_MERGE_METHOD: 'squash', HAM_HQ_ROOT: dir, HAM_HQ_OWNER: 'tester',
       HAM_AUDIT_PATH: join(dir, 'audit.json'), HAM_REVIEWER: 'reviewer', HAM_NODE_BIN: leaseNode,
+      HAMMER_LACEY_GH_TOKEN: 'fixture',
       PATH: `${bin}:${process.env.PATH}`, TMPDIR: dir,
     });
     assert.equal(result.status, status, `${phase}: ${result.stdout} ${result.stderr}`);
     assert.match(result.stdout, new RegExp(diagnostic));
     assert.match(result.stdout, new RegExp(`outcome=${outcome}`));
     assert.match(result.stdout, /SHELL_SURVIVED/);
+    if (phase === 'hammer-verify-head') assert.equal(readFileSync(join(dir, 'patched'), 'utf8').trim(), 'patched');
     assert.deepEqual(readdirSync(dir).filter((file) => file.startsWith('ham-phase')), []);
   }
 });

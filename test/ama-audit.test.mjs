@@ -523,17 +523,47 @@ test('writeAmaAuditEntry rejects an outcome not in the §4.4 enum', () => {
   }
 });
 
-test('appendAmaAuditAttempt throws when no prior record exists', () => {
+test('appendAmaAuditAttempt creates a new-head record with reconciliation', () => {
   const hqRoot = freshHqRoot();
   try {
-    assert.throws(
-      () => appendAmaAuditAttempt({
-        hqRoot,
-        ...DEFAULT_TUPLE,
-        attempt: { outcome: 'deferred' },
-      }),
-      /no existing record at .* — call writeAmaAuditEntry first/,
-    );
+    const args = { hqRoot, ...DEFAULT_TUPLE, attempt: { outcome: 'deferred' },
+      metadata: { closureAuthority: 'ham-terminal-remediation', reviewer: 'claude', riskClass: 'low' },
+      now: '2026-06-11T20:00:00Z' };
+    const result = appendAmaAuditAttempt(args);
+    const expectedRoot = freshHqRoot();
+    try {
+      const expected = writeAmaAuditEntry({ ...args, hqRoot: expectedRoot });
+      assert.equal(result.created, true);
+      assert.deepEqual(result.doc, {
+        ...expected.doc,
+        reconciliation: { needsRepair: false, lastVerifiedAt: args.now },
+      });
+      assert.deepEqual(readAmaAuditEntry(hqRoot, DEFAULT_TUPLE.repo, DEFAULT_TUPLE.prNumber, DEFAULT_TUPLE.headSha), result.doc);
+    } finally {
+      rmSync(expectedRoot, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('ama-audit append CLI notes when it creates a missing head record', async () => {
+  const hqRoot = freshHqRoot();
+  try {
+    const result = await runAmaAuditCli([
+      'append', '--hq-root', hqRoot, '--repo', DEFAULT_TUPLE.repo,
+      '--pr', String(DEFAULT_TUPLE.prNumber), '--head', DEFAULT_TUPLE.headSha,
+      '--outcome', 'deferred', '--now', '2026-06-11T20:00:00Z',
+      '--closure-authority', 'ham-terminal-remediation', '--reviewer', 'claude', '--risk-class', 'low',
+    ]);
+    assert.equal(result.code, 0);
+    assert.match(result.stderr, /created missing record/);
+    assert.equal(result.stdout.trim(), amaAuditFilePath(hqRoot, DEFAULT_TUPLE.repo, DEFAULT_TUPLE.prNumber, DEFAULT_TUPLE.headSha));
+    const doc = readAmaAuditEntry(hqRoot, DEFAULT_TUPLE.repo, DEFAULT_TUPLE.prNumber, DEFAULT_TUPLE.headSha);
+    assert.equal(doc.attempts.length, 1);
+    assert.equal(doc.closureAuthority, 'ham-terminal-remediation');
+    assert.equal(doc.reviewer, 'claude');
+    assert.equal(doc.riskClass, 'low');
   } finally {
     rmSync(hqRoot, { recursive: true, force: true });
   }
@@ -621,7 +651,7 @@ test('ama-audit CLI reserves exit code 65 for sticky-succeeded refusal only', as
     assert.equal(refused.code, 65);
     assert.match(refused.stderr, /ama-audit-refused: sticky-succeeded/);
 
-    const failed = await runAmaAuditCli([
+    const created = await runAmaAuditCli([
       'append',
       '--hq-root', hqRoot,
       '--repo', DEFAULT_TUPLE.repo,
@@ -630,9 +660,9 @@ test('ama-audit CLI reserves exit code 65 for sticky-succeeded refusal only', as
       '--outcome', 'deferred',
       '--now', '2026-06-11T20:01:00Z',
     ]);
-    assert.equal(failed.code, 70);
-    assert.match(failed.stderr, /ama-audit-error:/);
-    assert.doesNotMatch(failed.stderr, /ama-audit-refused:/);
+    assert.equal(created.code, 0);
+    assert.match(created.stderr, /created missing record/);
+    assert.doesNotMatch(created.stderr, /ama-audit-refused:/);
   } finally {
     rmSync(hqRoot, { recursive: true, force: true });
   }

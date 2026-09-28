@@ -1010,6 +1010,16 @@ function listInProgressFollowUpJobs(rootDir) {
   }));
 }
 
+function findInProgressFollowUpJobByLaunchRequestId(rootDir, launchRequestId) {
+  const lrq = String(launchRequestId || '').trim();
+  if (!lrq) return null;
+  for (const entry of listInProgressFollowUpJobs(rootDir)) {
+    const workerLrq = String(entry.job?.remediationWorker?.launchRequestId || '').trim();
+    if (workerLrq === lrq) return entry;
+  }
+  return null;
+}
+
 function listFollowUpJobsInDir(rootDir, key) {
   const dir = getFollowUpJobDir(rootDir, key);
   if (!existsSync(dir)) return [];
@@ -1652,6 +1662,8 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
   const completedRoundTimestamps = [];
   const completedRoundTriggers = [];
   const completedRemediationRevisionRefs = new Set();
+  const commentOnlyFinalRoundRevisionRefs = new Set();
+  const commentOnlyFinalRoundPushedHeads = [];
   let latestJob = null;
   let latestTimestamp = '';
 
@@ -1693,6 +1705,19 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
       if (String(job.domainId || 'code-pr') !== targetDomainId) continue;
       if (job.repo !== targetRepo) continue;
       if (Number(job.prNumber) !== targetPr) continue;
+
+      if (key === 'completed' && job.finalRound === 'comment-only' &&
+          job.reReview?.suppressed === 'comment-only-final-round' &&
+          String(job.revisionRef || '').trim()) {
+        commentOnlyFinalRoundRevisionRefs.add(String(job.revisionRef).trim());
+        if (/^[0-9a-f]{40}$/iu.test(String(job.completion?.workerPushedHeadSha || ''))) {
+          commentOnlyFinalRoundPushedHeads.push({
+            reviewedHead: String(job.revisionRef).trim(),
+            workerPushedHeadSha: job.completion.workerPushedHeadSha,
+            completedAt: job.completedAt || null,
+          });
+        }
+      }
 
       if (terminalKeys.has(key)) {
         // `claimNextFollowUpJob` increments `currentRound` on claim,
@@ -1787,6 +1812,8 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
     // Terminal Hammer may only become first-class owner of reviewer findings
     // after a remediation worker completed against the exact reviewed head.
     completedRemediationRevisionRefs: Array.from(completedRemediationRevisionRefs).sort(),
+    commentOnlyFinalRoundRevisionRefs: Array.from(commentOnlyFinalRoundRevisionRefs).sort(),
+    commentOnlyFinalRoundPushedHeads,
   };
 }
 
@@ -1973,6 +2000,8 @@ function buildFollowUpJob({
     builderTag: builderTag || null,
     critical: classification.critical,
     nonBlockingOnly,
+    ...(nonBlockingOnly && normalizeEffectiveReviewVerdict(reviewBody) === 'comment-only'
+      ? { finalRound: 'comment-only' } : {}),
     reviewSummary: extractReviewSummary(reviewBody),
     reviewBody,
     // Advisory-only reviews short-circuit before job creation; persisted jobs
@@ -3211,6 +3240,7 @@ export {
   listFollowUpJobsInDir,
   listInProgressFollowUpJobPaths,
   listInProgressFollowUpJobs,
+  findInProgressFollowUpJobByLaunchRequestId,
   listPendingFollowUpJobPaths,
   listPendingFollowUpJobs,
   markFollowUpJobCompleted,

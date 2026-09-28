@@ -12,9 +12,12 @@ import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { defaultPidAliveFn, main as mergeLeaseMain } from '../bin/merge-lease.mjs';
+import { formatHamGateAttemptCapClosingStatus } from '../src/ama/dispatch-closer.mjs';
 import {
   acquireMergeLease,
+  classifyMergeLeaseGateFailure,
   inspectMergeLease,
+  mergeLeaseAttemptsFilePath,
   mergeLeaseFilePath,
   readMergeLeaseAttempts,
   recordMergeLeaseGateAttempt,
@@ -425,8 +428,72 @@ test('merge-lease acquire timeout exits 75 with acquired:false timedOut:true', a
     assert.equal(code, 75);
     assert.equal(out.acquired, false);
     assert.equal(out.timedOut, true);
+    assert.deepEqual(readMergeLeaseAttempts(rootDir, { repo: REPO, base: BASE }).filter((attempt) => attempt.pr === 125).map(({ attempts, retryable }) => [attempts, retryable]), [[0, 1]]);
     assert.equal(out.waited_s, 1);
     assert.deepEqual(readMergeLeaseWaiters(rootDir, { repo: REPO, base: BASE }), []);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('merge-lease acquire still emits timeout JSON when the attempt refund lock is busy', async () => {
+  const rootDir = freshRoot();
+  try {
+    acquireFixture(rootDir);
+    const attemptsLockPath = `${mergeLeaseAttemptsFilePath(rootDir, { repo: REPO, base: BASE })}.mutation.lock`;
+    let locked = false;
+    const { code, io } = await runCli(rootDir, [
+      'acquire',
+      '--repo', REPO,
+      '--base', BASE,
+      '--pr', '129',
+      '--head', 'refund-lock-timeout',
+      '--owner-pid', '8129',
+      '--wait', '1',
+    ], {
+      onSleep: () => {
+        if (locked) return;
+        locked = true;
+        writeLiveMutationLock(attemptsLockPath, 'mll_attempt_refund_timeout');
+      },
+    });
+
+    const out = jsonOutput(io);
+    assert.equal(code, 75);
+    assert.equal(out.acquired, false);
+    assert.equal(out.timedOut, true);
+    assert.equal(out.refundFailed, true);
+    assert.match(io.stderrText, /gate attempt refund failed:.*mutation lock busy/);
+    assert.deepEqual(readMergeLeaseWaiters(rootDir, { repo: REPO, base: BASE }), []);
+    assert.deepEqual(readMergeLeaseAttempts(rootDir, { repo: REPO, base: BASE })
+      .filter((attempt) => attempt.pr === 129)
+      .map(({ attempts, retryable }) => [attempts, retryable]), [[1, 0]]);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('merge-lease acquire retries a transient refund lock after timeout', async () => {
+  const rootDir = freshRoot();
+  try {
+    acquireFixture(rootDir);
+    const lockPath = `${mergeLeaseAttemptsFilePath(rootDir, { repo: REPO, base: BASE })}.mutation.lock`;
+    let sleeps = 0;
+    const { code, io } = await runCli(rootDir, [
+      'acquire', '--repo', REPO, '--base', BASE, '--pr', '130',
+      '--head', 'refund-transient', '--owner-pid', '8130', '--wait', '1',
+    ], {
+      onSleep: () => {
+        sleeps += 1;
+        if (sleeps === 1) writeLiveMutationLock(lockPath, 'mll_transient_refund');
+        if (sleeps === 2) unlinkSync(lockPath);
+      },
+    });
+    assert.equal(code, 75);
+    assert.notEqual(jsonOutput(io).refundFailed, true);
+    assert.deepEqual(readMergeLeaseAttempts(rootDir, { repo: REPO, base: BASE })
+      .filter((attempt) => attempt.pr === 130)
+      .map(({ attempts, retryable }) => [attempts, retryable]), [[0, 1]]);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -548,7 +615,7 @@ test('merge-lease release with matching lease id releases holder', async () => {
   }
 });
 
-test('merge-lease release retryable-abort clears matching gate attempt', async () => {
+test('merge-lease release retryable-abort refunds matching gate attempt', async () => {
   const rootDir = freshRoot();
   try {
     const held = acquireFixture(rootDir, { holderPr: 309, holderHead: 'retryable-abort-head' });
@@ -586,8 +653,8 @@ test('merge-lease release retryable-abort clears matching gate attempt', async (
     assert.equal(out.retryableAbortReason, 'merge-retry-budget-exhausted');
     assert.equal(out.attemptPrune.removed, true);
     assert.deepEqual(
-      readMergeLeaseAttempts(rootDir, { repo: REPO, base: BASE }).map((attempt) => `${attempt.pr}:${attempt.head}`),
-      ['310:other-head'],
+      readMergeLeaseAttempts(rootDir, { repo: REPO, base: BASE }).map((attempt) => `${attempt.pr}:${attempt.head}:${attempt.attempts}:${attempt.retryable}`),
+      ['309:retryable-abort-head:0:1', '310:other-head:1:0'],
     );
     assert.equal(existsSync(held.leasePath), false);
   } finally {
@@ -833,7 +900,6 @@ test('merge-lease status reports holder and waiter ages', async () => {
 test('merge-lease acquire parks after max gate attempts', async () => {
   const rootDir = freshRoot();
   try {
-    acquireFixture(rootDir);
     const first = await runCli(rootDir, [
       'acquire',
       '--repo', REPO,
@@ -845,8 +911,8 @@ test('merge-lease acquire parks after max gate attempts', async () => {
     ], {
       maxGateAttempts: 2,
     });
-    assert.equal(first.code, 75);
-    assert.equal(jsonOutput(first.io).timedOut, true);
+    assert.equal(first.code, 0);
+    await runCli(rootDir, ['release', '--repo', REPO, '--base', BASE, '--pr', '601', '--lease-id', jsonOutput(first.io).leaseId]);
 
     const second = await runCli(rootDir, [
       'acquire',
@@ -859,8 +925,8 @@ test('merge-lease acquire parks after max gate attempts', async () => {
     ], {
       maxGateAttempts: 2,
     });
-    assert.equal(second.code, 75);
-    assert.equal(jsonOutput(second.io).timedOut, true);
+    assert.equal(second.code, 0);
+    await runCli(rootDir, ['release', '--repo', REPO, '--base', BASE, '--pr', '601', '--lease-id', jsonOutput(second.io).leaseId]);
 
     const parked = await runCli(rootDir, [
       'acquire',
@@ -870,6 +936,7 @@ test('merge-lease acquire parks after max gate attempts', async () => {
       '--head', 'starved-head',
       '--owner-pid', '8601',
       '--wait', '0',
+      '--required-checks-green',
     ], {
       maxGateAttempts: 2,
     });
@@ -879,6 +946,71 @@ test('merge-lease acquire parks after max gate attempts', async () => {
     assert.equal(out.reason, 'max-gate-attempts');
     assert.equal(out.attempts, 3);
     assert.equal(out.maxAttempts, 2);
+    assert.match(out.closingStatus, /parked by the gate-attempt cap after 3 attempts \(0 retryable\)/);
+    assert.match(out.closingStatus, /node \/.*\/bin\/merge-lease\.mjs reset-attempts --repo owner\/name --base main --pr 601 --head starved-head --root-dir /);
+    assert.doesNotMatch(formatHamGateAttemptCapClosingStatus({ ...out, repo: REPO, base: BASE, requiredChecksGreen: false }), /Required checks are green/);
+    const reset = await runCli(rootDir, ['reset-attempts', '--repo', REPO, '--base', BASE, '--pr', '601', '--head', 'starved-head']);
+    assert.equal(reset.code, 0);
+    assert.equal(jsonOutput(reset.io).removed, true);
+    assert.equal(readMergeLeaseAttempts(rootDir, { repo: REPO, base: BASE }).some((attempt) => attempt.pr === 601), false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('pending checks then green can acquire without parking; real failures still reach cap', async () => {
+  const rootDir = freshRoot();
+  const args = ['--repo', REPO, '--base', BASE, '--pr', '602', '--head', 'green-head', '--owner-pid', '8602', '--wait', '0'];
+  try {
+    for (let i = 0; i < 4; i += 1) {
+      const acquired = await runCli(rootDir, ['acquire', ...args], { maxGateAttempts: 2 });
+      assert.equal(acquired.code, 0);
+      const classified = i === 2
+        ? await runCli(rootDir, ['classify', '--stage', 'protection', '--error', 'gh: Service Unavailable (HTTP 503)'])
+        : await runCli(rootDir, ['classify', '--stage', 'required-checks', '--state', 'IN_PROGRESS']);
+      assert.equal(jsonOutput(classified.io).retryable, true);
+      const released = await runCli(rootDir, ['release', '--repo', REPO, '--base', BASE, '--pr', '602', '--lease-id', jsonOutput(acquired.io).leaseId, '--retryable-abort', jsonOutput(classified.io).reason]);
+      assert.equal(jsonOutput(released.io).released, true);
+    }
+    assert.deepEqual(readMergeLeaseAttempts(rootDir, { repo: REPO, base: BASE }).map(({ attempts, retryable }) => [attempts, retryable]), [[0, 4]]);
+    const green = await runCli(rootDir, ['acquire', ...args], { maxGateAttempts: 2 });
+    assert.equal(green.code, 0);
+    assert.equal(jsonOutput(green.io).acquired, true);
+    await runCli(rootDir, ['release', '--repo', REPO, '--base', BASE, '--pr', '602', '--lease-id', jsonOutput(green.io).leaseId]);
+    const real = await runCli(rootDir, ['acquire', ...args], { maxGateAttempts: 2 });
+    assert.equal(real.code, 0);
+    await runCli(rootDir, ['release', '--repo', REPO, '--base', BASE, '--pr', '602', '--lease-id', jsonOutput(real.io).leaseId]);
+    const parked = await runCli(rootDir, ['acquire', ...args], { maxGateAttempts: 2 });
+    assert.equal(parked.code, 70);
+    assert.equal(jsonOutput(parked.io).attempts, 3);
+    assert.equal(jsonOutput(parked.io).retryable, 4);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('permanent protection 404 stays charged and transient check reads refund', async () => {
+  const rootDir = freshRoot();
+  try {
+    const protection = await runCli(rootDir, ['classify', '--stage', 'protection', '--error', 'gh: Not Found (HTTP 404)']);
+    assert.deepEqual(jsonOutput(protection.io), { retryable: false, reason: 'non-retryable-gate-failure' });
+    const timeout = await runCli(rootDir, ['classify', '--stage', 'required-checks', '--error', 'ETIMEDOUT']);
+    assert.equal(jsonOutput(timeout.io).retryable, true);
+    const real = await runCli(rootDir, ['classify', '--stage', 'required-checks', '--state', 'FAILURE']);
+    assert.equal(jsonOutput(real.io).retryable, false);
+    for (const status of [500, 503]) {
+      assert.equal(classifyMergeLeaseGateFailure({ stage: 'protection', error: { status } }).retryable, true);
+    }
+    assert.equal(classifyMergeLeaseGateFailure({ stage: 'protection', error: { status: 404 } }).retryable, false);
+    assert.equal(classifyMergeLeaseGateFailure({ stage: 'required-checks', state: 'IN_PROGRESS STARTUP_FAILURE' }).retryable, false);
+    assert.equal(classifyMergeLeaseGateFailure({ stage: 'required-checks', state: 'STALE' }).retryable, false);
+    assert.equal(classifyMergeLeaseGateFailure({ stage: 'protection', error: { status: 401 } }).retryable, false);
+    assert.equal(classifyMergeLeaseGateFailure({ stage: 'mergeability', error: 'gh: unknown flag --json' }).retryable, false);
+    assert.equal(classifyMergeLeaseGateFailure({ stage: 'required-checks', error: 'error running gh api' }).retryable, false);
+    assert.equal(classifyMergeLeaseGateFailure({ stage: 'required-checks', state: 'PENDING FAILURE' }).retryable, false);
+    assert.equal(classifyMergeLeaseGateFailure({ stage: 'required-checks', state: '2 pending, 1 failing' }).retryable, false);
+    assert.equal(classifyMergeLeaseGateFailure({ stage: 'required-checks', state: 'IN_PROGRESS', error: 'HTTP 401' }).retryable, false);
+    assert.equal(classifyMergeLeaseGateFailure({ stage: 'required-checks', error: { code: 'ENETUNREACH' } }).retryable, true);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

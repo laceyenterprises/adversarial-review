@@ -12,8 +12,8 @@ import {
 //     ci-not-green only);
 //   - the exhaustion branch cannot rescue it, because
 //     reviewCycleExhaustedFromRounds needs completed remediation/re-review
-//     rounds to reach the budget, and a comment-only verdict spawns NO
-//     remediation rounds. The counter stays at 0 forever.
+//     rounds to reach the budget, while a strict-mode comment-only verdict
+//     gets one final remediation round that may leave the PR below that cap.
 //
 // Observed 2026-08-24: five PRs simultaneously terminal_but_unmerged with
 // verdict=comment-only (#5845 #5846 #5847 #5851 #5854), all logging
@@ -91,6 +91,14 @@ test('a stale review head still parks even past the grace', () => {
     ),
     false,
   );
+});
+
+test('a completed final round admits a stale comment-only descendant only with green checks', () => {
+  const reasons = ['stale-review-head', 'non-blocking-findings-present', 'verdict-not-settled-success'];
+  assert.equal(isHammerRemediableEligibilityMiss(reasons, {}), false);
+  assert.equal(isHammerRemediableEligibilityMiss(reasons, { commentOnlyFinalRoundResume: true }), true);
+  assert.equal(isHammerRemediableEligibilityMiss([...reasons, 'ci-not-green'], { commentOnlyFinalRoundResume: true }), false);
+  assert.equal(isHammerRemediableEligibilityMiss([...reasons, 'blocking-findings-present'], { commentOnlyFinalRoundResume: true }), false);
 });
 
 test('the grace is overridable', () => {

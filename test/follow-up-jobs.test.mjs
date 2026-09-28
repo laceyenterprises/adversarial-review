@@ -414,6 +414,56 @@ test('createFollowUpJob persists settled-clean follow-up text for comment-only r
   assert.doesNotMatch(job.recommendedFollowUpAction.summary, /blocking review findings|adversarial review findings/i);
 });
 
+test('comment-only findings create a final remediation job; blocking findings do not', (t) => {
+  const rootDir = makeTempRoot(t);
+  const commentOnly = createFollowUpJob({
+    ...makeJobInput(rootDir),
+    reviewBody: '## Blocking issues\n- None.\n## Non-blocking issues\n- Fix documentation.\n## Verdict\nComment only',
+    critical: false,
+  }).job;
+  assert.equal(commentOnly.nonBlockingOnly, true);
+  assert.equal(commentOnly.finalRound, 'comment-only');
+  const contradictory = buildFollowUpJob({
+    ...makeJobInput(rootDir),
+    reviewBody: '## Blocking issues\n- None.\n## Non-blocking issues\n- Fix documentation.\n## Verdict\nRequest changes',
+    critical: false,
+  });
+  assert.equal(contradictory.finalRound, undefined);
+  const blocking = buildFollowUpJob({
+    ...makeJobInput(rootDir),
+    reviewBody: '## Blocking issues\n- Fix auth.\n## Non-blocking issues\n- None.\n## Verdict\nRequest changes',
+    critical: true,
+  });
+  assert.equal(blocking.nonBlockingOnly, false);
+  assert.equal(blocking.finalRound, undefined);
+});
+
+test('completed comment-only final round is durable PR-wide evidence', (t) => {
+  const rootDir = makeTempRoot(t);
+  const head = 'a'.repeat(40);
+  const job = buildFollowUpJob({
+    ...makeJobInput(rootDir),
+    revisionRef: head,
+    reviewBody: '## Blocking issues\n- None.\n## Non-blocking issues\n- Fix docs.\n## Verdict\nComment only',
+    critical: false,
+  });
+  const completedDir = getFollowUpJobDir(rootDir, 'completed');
+  mkdirSync(completedDir, { recursive: true });
+  writeFollowUpJob(path.join(completedDir, `${job.jobId}.json`), {
+    ...job,
+    status: 'completed',
+    completedAt: '2026-04-21T10:30:00.000Z',
+    remediationWorker: { state: 'completed' },
+    completion: { workerPushedHeadSha: 'b'.repeat(40) },
+    reReview: { requested: false, suppressed: 'comment-only-final-round' },
+    remediationPlan: { ...job.remediationPlan, currentRound: 1 },
+  });
+  const ledger = summarizePRRemediationLedger(rootDir, job);
+  assert.deepEqual(ledger.commentOnlyFinalRoundRevisionRefs, [head]);
+  assert.deepEqual(ledger.commentOnlyFinalRoundPushedHeads, [{ reviewedHead: head, workerPushedHeadSha: 'b'.repeat(40), completedAt: '2026-04-21T10:30:00.000Z' }]);
+  assert.equal(ledger.completedRoundsForPR, 1);
+});
+
 test('archiveStoppedFollowUpJobs moves only stopped entries at least 24h old into month archive', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const stoppedDir = getFollowUpJobDir(rootDir, 'stopped');

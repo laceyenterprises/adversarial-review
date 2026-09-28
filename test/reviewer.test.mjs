@@ -1469,6 +1469,63 @@ function queueWithFakes(reviewText, overrides = {}) {
   return { result, created };
 }
 
+test('a completed comment-only final round suppresses follow-up only on its worker head', () => {
+  let created = 0;
+  const result = queueFollowUpForPostedReview({
+    rootDir: '/tmp/adversarial-review-test',
+    repo: 'laceyenterprises/adversarial-review', prNumber: 57,
+    baseBranch: 'main', reviewerModel: 'claude',
+    revisionRef: 'b'.repeat(40),
+    reviewText: '## Blocking issues\n- A new nit.\n## Verdict\nRequest changes',
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 1,
+      commentOnlyFinalRoundPushedHeads: [{ reviewedHead: 'a'.repeat(40), workerPushedHeadSha: 'b'.repeat(40) }],
+    }),
+    createFollowUpJobImpl: () => { created += 1; throw new Error('must not create a job'); },
+  });
+  assert.equal(result.queued, false);
+  assert.equal(result.reason, 'comment-only-final-round-completed');
+  assert.equal(created, 0);
+  const later = queueFollowUpForPostedReview({
+    rootDir: '/tmp/adversarial-review-test',
+    repo: 'laceyenterprises/adversarial-review', prNumber: 57,
+    baseBranch: 'main', reviewerModel: 'claude', revisionRef: 'c'.repeat(40),
+    reviewText: '## Blocking issues\n- Fix new bug.\n## Verdict\nRequest changes',
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 1,
+      commentOnlyFinalRoundPushedHeads: [{ reviewedHead: 'a'.repeat(40), workerPushedHeadSha: 'b'.repeat(40) }],
+    }),
+    createFollowUpJobImpl: () => { created += 1; return { jobPath: '/tmp/new.json' }; },
+  });
+  assert.equal(later.queued, true);
+  assert.equal(created, 1);
+  const operatorReview = queueFollowUpForPostedReview({
+    rootDir: '/tmp/adversarial-review-test',
+    repo: 'laceyenterprises/adversarial-review', prNumber: 57,
+    baseBranch: 'main', reviewerModel: 'claude', revisionRef: 'b'.repeat(40),
+    reviewPostedAt: '2026-04-21T11:00:00.000Z',
+    reviewText: '## Blocking issues\n- Fix newly found bug.\n## Verdict\nRequest changes',
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 1,
+      commentOnlyFinalRoundPushedHeads: [{
+        reviewedHead: 'a'.repeat(40), workerPushedHeadSha: 'b'.repeat(40),
+        completedAt: '2026-04-21T10:30:00.000Z',
+      }],
+    }),
+    createFollowUpJobImpl: () => { created += 1; return { jobPath: '/tmp/operator.json' }; },
+  });
+  assert.equal(operatorReview.queued, true);
+  assert.equal(created, 2);
+});
+
+test('blocking Request changes still creates a follow-up without final-round evidence', () => {
+  const { result, created } = queueWithFakes(
+    '## Blocking issues\n- Fix auth.\n## Verdict\nRequest changes',
+  );
+  assert.equal(result.queued, true);
+  assert.equal(created.length, 1);
+});
+
 test('review handoff records the known PR head branch on its job', () => {
   const { created } = queueWithFakes('## Verdict\nRequest changes', { branch: 'feature/auth-fix' });
   assert.equal(created[0].branch, 'feature/auth-fix');

@@ -98,6 +98,7 @@ import {
 import { resolveRequiredCheckContextsFromCfg } from './required-check-contexts.mjs';
 import { resolveCloserDispatchHarness } from './harness-fallback.mjs';
 import { acquireMergeLease, releaseMergeLease } from './merge-lease.mjs';
+export { formatHamGateAttemptCapClosingStatus } from './merge-lease.mjs';
 import {
   hasMergedDependentProtectingPr,
   protectivePredecessorMergeWindowFinding,
@@ -350,8 +351,9 @@ export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
   // (that set is `pr-not-mergeable` and `ci-not-green` only). The exhaustion
   // branch above cannot rescue it either: `reviewCycleExhaustedFromRounds`
   // requires completed remediation or re-review rounds to reach the budget, and
-  // a comment-only verdict spawns NO remediation rounds -- there are no blocking
-  // findings to remediate. So the counter stays at 0 forever,
+  // a strict-mode comment-only verdict may spawn one final non-blocking round,
+  // but that need not exhaust the PR-wide round budget. So the counter may
+  // remain below the cap,
   // `reviewCycleExhausted` never flips, and the PR parks: terminal, clean,
   // green, mergeable, and structurally unable to earn a hammer.
   //
@@ -374,6 +376,21 @@ export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
     commentOnlyTerminalMs !== null &&
     commentOnlyTerminalMs >= commentOnlyTerminalGraceMs &&
     hasCommentOnlyTerminalResumeReason(effectiveReasons);
+  const commentOnlyFinalRoundResume = options?.commentOnlyFinalRoundResume === true &&
+    !reasons.includes('blocking-findings-present') &&
+    !reasons.includes('blocking-findings-unknown') &&
+    !reasons.includes('ci-not-green') &&
+    hasCommentOnlyTerminalResumeReason(
+      reasons.filter((reason) => reason !== 'stale-review-head'),
+    );
+  if (commentOnlyFinalRoundResume) {
+    return reasons.every((reason) => (
+      reason === 'stale-review-head' ||
+      reason === 'verdict-not-settled-success' ||
+      STRICT_NON_BLOCKING_REFUSAL_REASONS.has(reason) ||
+      HAMMER_AUTO_REMEDIABLE_MISS_REASONS.has(reason)
+    ));
+  }
 
   const hasActionable =
     effectiveReasons.includes('pr-not-mergeable') ||
@@ -3811,8 +3828,8 @@ export async function maybeDispatchAmaCloser({
       });
     }
     const pendingCiMechanicalGateMiss = isPendingCiMechanicalGateMiss(verdict, routeReasons);
-    // HMR-01: a settled comment-only PR accrues no remediation rounds, so
-    // `reviewCycleExhausted` never flips and `workerClassForMiss` is `unknown`.
+    // HMR-01: a settled comment-only PR may have only its one final round, so
+    // `reviewCycleExhausted` need not flip and `workerClassForMiss` can be `unknown`.
     // Both of the existing entry conditions below are therefore permanently
     // false for it. Admit it on the same measured terminal-unmerged grace the
     // eligibility check uses, so "hammer as remediator of last resort" is
@@ -3829,14 +3846,19 @@ export async function maybeDispatchAmaCloser({
       settledCommentOnlyTerminalMs !== null &&
       settledCommentOnlyTerminalMs >= commentOnlyTerminalGraceMs &&
       hasCommentOnlyTerminalResumeReason(routeReasons);
+    const commentOnlyFinalRoundAdmit = dispatchContext?.commentOnlyFinalRoundResume === true &&
+      hasCommentOnlyTerminalResumeReason(
+        routeReasons.filter((reason) => reason !== 'stale-review-head'),
+      );
     const autoHammer =
       !pendingCiMechanicalGateMiss &&
-      (isHammerWorkerClass(workerClassForMiss) || reviewCycleExhausted || commentOnlyTerminalAdmit)
+      (isHammerWorkerClass(workerClassForMiss) || reviewCycleExhausted || commentOnlyTerminalAdmit || commentOnlyFinalRoundAdmit)
       && (
         eligibleHammerRouteReasons.length > 0 ||
         routeReasons.some((reason) => HAMMER_ROUTE_ACTION_REASONS.has(reason)) ||
         reviewCycleExhausted ||
-        commentOnlyTerminalAdmit
+        commentOnlyTerminalAdmit ||
+        commentOnlyFinalRoundAdmit
       )
       && isHammerRemediableEligibilityMiss(routeReasons, {
         reviewCycleExhausted,
@@ -3844,6 +3866,7 @@ export async function maybeDispatchAmaCloser({
           dispatchContext?.allowStaleReviewHeadHammerResume === true,
         settledCommentOnlyTerminalMs,
         commentOnlyTerminalGraceMs,
+        commentOnlyFinalRoundResume: commentOnlyFinalRoundAdmit,
       });
     if (!autoHammer) {
       if (pendingCiMechanicalGateMiss) {

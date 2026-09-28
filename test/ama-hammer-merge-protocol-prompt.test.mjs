@@ -131,6 +131,22 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.ok(HAMMER_PROMPT.includes('"${ham_release_retryable_args[@]+"${ham_release_retryable_args[@]}"}"'));
   assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort merge-retry-budget-exhausted/);
   assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort github-gate-read-failed/);
+  assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort required-checks-pending/);
+  assert.match(HAMMER_PROMPT, /--stage required-checks --state "\$HAM_PENDING_CHECK_STATES"/);
+  assert.match(HAMMER_PROMPT, /HAM_PENDING_CHECK_STATES=.*\.badChecks/);
+  assert.match(HAMMER_PROMPT, /--required-checks-green/);
+  assert.match(HAMMER_PROMPT, /\.closingStatus \/\/ empty/);
+  assert.match(HAMMER_PROMPT, /merge lease head is not a full SHA/);
+  assert.match(HAMMER_PROMPT, /--arg closingStatus "\$HAM_GATE_CAP_CLOSING_STATUS"/);
+  assert.match(HAMMER_PROMPT, /HAM_GATE_CAP_COMMENT=[\s\S]*?\$HAM_GATE_CAP_CLOSING_STATUS/);
+  assert.match(HAMMER_PROMPT, /ham_gate_cap_gh_transient\(\)/);
+  assert.match(HAMMER_PROMPT, /ham_gate_cap_gh "\$HAM_GATE_CAP_OUT" "\$HAM_GATE_CAP_ERR" api --paginate/);
+  assert.match(HAMMER_PROMPT, /ham_gate_cap_gh "\$HAM_GATE_CAP_OUT" "\$HAM_GATE_CAP_ERR" api --method PATCH/);
+  assert.match(HAMMER_PROMPT, /ham_gate_cap_gh "\$HAM_GATE_CAP_OUT" "\$HAM_GATE_CAP_ERR" pr comment/);
+  assert.match(HAMMER_PROMPT, /HAM_GATE_CAP_AUDIT_EXIT" -eq 65/);
+  assert.match(HAMMER_PROMPT, /contains\("HAM-Terminal-Remediation-Head: " \+ \$head\)/);
+  assert.match(HAMMER_PROMPT, /pre-acquire-checks\.json/);
+  assert.match(HAMMER_PROMPT, /"STARTUP_FAILURE", "STALE"/);
   assert.doesNotMatch(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort merge-confirmation-read-failed/);
   assert.match(HAMMER_PROMPT, /ham_fire_watcher_merge_wake\(\)/);
   assert.match(HAMMER_PROMPT, /bin\/watcher-wake\.mjs/);
@@ -237,6 +253,16 @@ test('hammer fires watcher wake only after durable eligible audit append', () =>
   assert.ok(wakeCallIdx > preMergeAuditIdx, 'wake fires after durable eligible audit append');
   assert.ok(wakeCallIdx < mergeLoopIdx, 'wake fires before the merge retry loop');
   assert.ok(mergeLoopIdx < mergeIdx, 'merge command remains inside the retry loop');
+});
+
+test('hammer refunds a pending-only remote CI timeout before releasing its lease', () => {
+  const start = HAMMER_PROMPT.indexOf('HAM_REMOTE_CI_STATUS=remote-ci-timeout');
+  const end = HAMMER_PROMPT.indexOf('echo "HAM remote CI: waiting', start);
+  assert.ok(start > 0 && end > start);
+  const timeoutBranch = HAMMER_PROMPT.slice(start, end);
+  assert.match(timeoutBranch, /ham_required_gate_red/);
+  assert.match(timeoutBranch, /merge-lease\.mjs classify[\s\S]*--stage required-checks/);
+  assert.match(timeoutBranch, /ham_mark_merge_lease_retryable_abort required-checks-pending[\s\S]*ham_release_merge_lease/);
 });
 
 test('hammer merge capability shell fallback mirrors JS token-class discovery', () => {

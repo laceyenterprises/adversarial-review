@@ -4881,6 +4881,14 @@ export async function maybeDispatchAmaCloser({
     });
   }
 
+  // A same-PR remediation worker owns the branch. Check before the append-only
+  // authority audit, prompt write, and quota probe: no closer attempt exists yet.
+  const activeFollowUp = findActiveRemediationJob(rootDir, { repo, prNumber });
+  if (activeFollowUp) {
+    logger.log?.(`[ama-closer] deferred ${repo}#${prNumber}: remediation job ${activeFollowUp.jobId} ${activeFollowUp.status}`);
+    return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'active-remediation-job' });
+  }
+
   assertAmaAuditOwner({
     hqRoot,
     ownerUser,
@@ -5079,11 +5087,6 @@ export async function maybeDispatchAmaCloser({
     );
   }
   const dispatchTimeoutMs = resolveAmaDispatchTimeoutMs(cfg);
-  const activeFollowUp = findActiveRemediationJob(rootDir, { repo, prNumber });
-  if (activeFollowUp) {
-    logger.log?.(`[ama-closer] deferred ${repo}#${prNumber}: remediation job ${activeFollowUp.jobId} ${activeFollowUp.status}`);
-    return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'active-remediation-job' });
-  }
   const activeLaunch = findActiveAmaCloserLaunch(rootDir, targetDispatchIdentity, {
     now: dispatchContext.dispatchedAt,
     log: logger,
@@ -5194,7 +5197,7 @@ export async function maybeDispatchAmaCloser({
   if (findActiveRemediationJob(rootDir, { repo, prNumber })) {
     deleteAmaCloserLease(rootDir, leaseIdentity);
     updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => ({
-      ...current, state: 'no-dispatch', reason: 'active-remediation-job',
+      ...current, state: 'no-dispatch', reason: 'active-remediation-job', retryCount: priorRetryCount,
     }));
     logger.log?.(`[ama-closer] deferred ${repo}#${prNumber}: remediation job appeared during lease acquisition`);
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'active-remediation-job' });

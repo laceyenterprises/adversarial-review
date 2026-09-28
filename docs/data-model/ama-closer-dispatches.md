@@ -59,7 +59,7 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 | `updatedAt` | string or null | ISO-8601 timestamp from the latest write when available. |
 | `lastFailureTransient` | boolean or null | Whether the latest launch refusal was classified as transient. |
 | `lastError` | string or null | Sanitized last error or recovery note. A hammer ending with an open PR now records `failed-without-merge` or `no-merge:concurrent-writer` here. |
-| `outcome` | string or null | Dispatch result written by `dispatch-closer.mjs` for hammer-ended-without-merge (`failed-without-merge` or `no-merge:concurrent-writer`), and by `closer-terminal-cancel.mjs` for lifecycle settlement (`succeeded` when the merged head matches the closer lease, `no-merge:pr-closed-externally` after HQ cancellation). Unlike lease `terminalOutcome`, this field annotates the dispatch record and may be absent on older records. |
+| `outcome` | string or null | Dispatch result written by `dispatch-closer.mjs` for hammer-ended-without-merge (`failed-without-merge` or `no-merge:concurrent-writer`), and by `closer-terminal-cancel.mjs` for lifecycle settlement (`succeeded` when the merged head matches the closer lease, `no-merge:pr-closed-externally` after HQ cancellation or definitive no-worker evidence). The lifecycle writer locates a rekeyed lease's original dispatch head before updating this record. Unlike lease `terminalOutcome`, this field annotates the dispatch record and may be absent on older records. |
 | `status`, `reason`, `terminalOutcome`, `closureAuthority` | string or null | Terminal/no-dispatch annotations used by recovery and audit paths when present. |
 
 ## Operational Contract

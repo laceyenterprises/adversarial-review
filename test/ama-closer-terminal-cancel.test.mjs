@@ -4,7 +4,8 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { acquireAmaCloserLease, readAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
-import { cancelCloserForTerminalPr } from '../src/ama/closer-terminal-cancel.mjs';
+import { cancelCloserForTerminalPr, queueCloserCancelForClosedPr, retryPendingCloserCancels } from '../src/ama/closer-terminal-cancel.mjs';
+import { reconcileTerminalPrState } from '../src/pr-terminal-reconcile.mjs';
 import { amaCloserDispatchFilePath, isActiveAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 
 function fixture(t, prNumber = 7) {
@@ -125,4 +126,128 @@ test('timed-out HQ cancellation remains retryable on next lifecycle tick', async
   assert.equal(attempts, 2);
   assert.equal(result.reason, 'cancel-unavailable');
   assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
+});
+
+test('closed PR marks terminal after persisting cancel even when HQ is down', async (t) => {
+  const { rootDir, identity } = fixture(t);
+  let marked = false;
+  const summary = await reconcileTerminalPrState({
+    rows: [{ repo: 'o/r', pr_number: 7 }],
+    fetchLiveState: async () => ({ state: 'CLOSED' }),
+    onBeforeMark: ({ repo, prNumber }) => queueCloserCancelForClosedPr({ rootDir, repo, prNumber }),
+    markClosed: () => { marked = true; }, markMerged: () => {},
+  });
+  assert.equal(marked, true);
+  assert.equal(summary.closed, 1);
+  const result = await retryPendingCloserCancels({ rootDir, retryMs: 0, maxAttempts: 2,
+    cancelImpl: () => ({ reason: 'cancel-unavailable', error: new Error('HQ down') }),
+    alertImpl: async () => {}, logger: { error() {} },
+  });
+  assert.equal(result.attempted, 1);
+  assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
+});
+
+test('rekeyed lease settles the dispatch record at its original head', async (t) => {
+  const { rootDir, identity, dispatchPath } = fixture(t);
+  const lease = readAmaCloserLease(rootDir, identity);
+  const rekeyed = { ...lease, headSha: 'new', rekeyedFromHeadSha: 'abc', supersededHeads: ['abc'] };
+  const oldPath = join(rootDir, 'data', 'ama-closer-leases', 'o__r-pr-7-abc.json');
+  const newPath = join(rootDir, 'data', 'ama-closer-leases', 'o__r-pr-7-new.json');
+  rmSync(oldPath);
+  writeFileSync(newPath, JSON.stringify(rekeyed));
+  await cancelCloserForTerminalPr({ rootDir, repo: 'o/r', prNumber: 7, transition: 'closed',
+    hqPath: 'hq', hqRoot: '/mock/root', execFileImpl: async () => ({ stdout: '{"ok":true,"currentStatus":"cancelled"}' }),
+    logger: { log() {} },
+  });
+  assert.equal(JSON.parse(readFileSync(dispatchPath, 'utf8')).outcome, 'no-merge:pr-closed-externally');
+});
+
+test('unknown HQ id and expired pending launch settle without an HQ call', async (t) => {
+  const unknown = fixture(t, 8);
+  const unknownLeasePath = join(unknown.rootDir, 'data', 'ama-closer-leases', 'o__r-pr-8-abc.json');
+  writeFileSync(unknownLeasePath, JSON.stringify({ ...readAmaCloserLease(unknown.rootDir, unknown.identity), lrqId: 'unknown' }));
+  writeFileSync(unknown.dispatchPath, JSON.stringify({ ...unknown.identity, launchRequestId: 'unknown' }));
+  await cancelCloserForTerminalPr({ rootDir: unknown.rootDir, repo: 'o/r', prNumber: 8, transition: 'closed',
+    execFileImpl: () => { throw new Error('must not call HQ'); }, logger: { log() {} },
+  });
+  assert.equal(readAmaCloserLease(unknown.rootDir, unknown.identity).status, 'terminal');
+
+  const rootDir = mkdtempSync(join(tmpdir(), 'pending-terminal-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: 'o/r', prNumber: 9, headSha: 'abc' };
+  acquireAmaCloserLease({ rootDir, ...identity, now: '2026-01-01T00:00:00Z' });
+  const result = await cancelCloserForTerminalPr({ rootDir, repo: 'o/r', prNumber: 9, transition: 'closed',
+    now: '2026-01-02T00:00:00Z', execFileImpl: () => { throw new Error('must not call HQ'); }, logger: { log() {} },
+  });
+  assert.equal(result.outcome, 'pr-closed-externally');
+  assert.equal(readAmaCloserLease(rootDir, identity).status, 'terminal');
+});
+
+test('HQ unknown dispatch refusal settles the lease and reservation', async (t) => {
+  const { rootDir, identity, dispatchPath } = fixture(t, 10);
+  const result = await cancelCloserForTerminalPr({ rootDir, repo: 'o/r', prNumber: 10,
+    transition: 'closed', hqPath: 'hq', hqRoot: '/mock/root',
+    execFileImpl: async () => ({ stdout: JSON.stringify({ ok: false, reason: 'unknown dispatch_id lrq_10 (or owned by another account)' }) }),
+    logger: { log() {} },
+  });
+  assert.equal(result.outcome, 'pr-closed-externally');
+  assert.equal(readAmaCloserLease(rootDir, identity).status, 'terminal');
+  assert.equal(JSON.parse(readFileSync(dispatchPath, 'utf8')).lastObservedStatus, 'not-found');
+});
+
+test('pending lease uses dispatch record launch id when lease id was not stamped', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'pending-lrq-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: 'o/r', prNumber: 11, headSha: 'abc' };
+  acquireAmaCloserLease({ rootDir, ...identity });
+  const dispatchPath = amaCloserDispatchFilePath(rootDir, identity);
+  mkdirSync(dirname(dispatchPath), { recursive: true });
+  writeFileSync(dispatchPath, JSON.stringify({ ...identity, launchRequestId: 'lrq_from_record' }));
+  let cancelledId;
+  await cancelCloserForTerminalPr({ rootDir, repo: 'o/r', prNumber: 11, transition: 'closed',
+    hqPath: 'hq', hqRoot: '/mock/root', execFileImpl: async (_bin, args) => {
+      cancelledId = args[2];
+      return { stdout: '{"ok":true,"currentStatus":"cancelled"}' };
+    }, logger: { log() {} },
+  });
+  assert.equal(cancelledId, 'lrq_from_record');
+  assert.equal(readAmaCloserLease(rootDir, identity).status, 'terminal');
+});
+
+test('cancel queue spaces attempts and alerts once at its retry bound', async (t) => {
+  const { rootDir } = fixture(t, 12);
+  queueCloserCancelForClosedPr({ rootDir, repo: 'o/r', prNumber: 12, now: '2026-01-01T00:00:00Z' });
+  let calls = 0;
+  let alerts = 0;
+  const options = { rootDir, retryMs: 60_000, maxAttempts: 2,
+    cancelImpl: () => { calls += 1; return { reason: 'cancel-unavailable', error: new Error('HQ down') }; },
+    alertImpl: async () => { alerts += 1; }, logger: { error() {} },
+  };
+  await retryPendingCloserCancels({ ...options, now: '2026-01-01T00:00:00Z' });
+  await retryPendingCloserCancels({ ...options, now: '2026-01-01T00:00:30Z' });
+  assert.equal(calls, 1);
+  await retryPendingCloserCancels({ ...options, now: '2026-01-01T00:01:00Z' });
+  await retryPendingCloserCancels({ ...options, now: '2026-01-01T00:02:00Z' });
+  assert.equal(calls, 2);
+  assert.equal(alerts, 1);
+});
+
+test('pending launch without an id does not exhaust before its lease expiry', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'pending-cancel-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: 'o/r', prNumber: 13, headSha: 'abc' };
+  acquireAmaCloserLease({ rootDir, ...identity, now: '2026-01-01T00:00:00Z' });
+  queueCloserCancelForClosedPr({ rootDir, repo: 'o/r', prNumber: 13, now: '2026-01-01T00:00:00Z' });
+  const queuePath = join(rootDir, 'data', 'ama-closer-cancels', 'o__r-pr-13.json');
+  for (let minute = 1; minute <= 6; minute += 1) {
+    await retryPendingCloserCancels({ rootDir, now: `2026-01-01T00:0${minute}:00Z`,
+      maxAttempts: 2, alertImpl: () => { throw new Error('must not alert'); },
+    });
+  }
+  assert.equal(JSON.parse(readFileSync(queuePath, 'utf8')).attempts, 0);
+  assert.equal(readAmaCloserLease(rootDir, identity).status, 'pending');
+  await retryPendingCloserCancels({ rootDir, now: '2026-01-01T01:00:00Z',
+    maxAttempts: 2, alertImpl: () => { throw new Error('must not alert'); },
+  });
+  assert.equal(readAmaCloserLease(rootDir, identity).status, 'terminal');
 });

@@ -228,6 +228,24 @@
       "owner": "AMA closer dispatch, lifecycle settlement, stale-head redrive, and recovery"
     },
     {
+      "id": "ama-closer-leases",
+      "title": "AMA Closer Leases",
+      "path": "docs/data-model/ama-closer-leases.md",
+      "store": "data/ama-closer-leases/",
+      "schemaSurface": "src/ama/closer-lease.mjs",
+      "relatedSchemaSurfaces": ["src/ama/closer-terminal-cancel.mjs"],
+      "owner": "AMA closer ownership and terminal settlement"
+    },
+    {
+      "id": "ama-closer-cancels",
+      "title": "AMA Closer Cancel Obligations",
+      "path": "docs/data-model/ama-closer-cancels.md",
+      "store": "data/ama-closer-cancels/",
+      "schemaSurface": "src/ama/closer-terminal-cancel.mjs",
+      "relatedSchemaSurfaces": ["src/pr-lifecycle-sync.mjs", "src/posted-review-row.mjs"],
+      "owner": "AMA lifecycle settlement"
+    },
+    {
       "id": "runtime-settle-smoke",
       "title": "Agent Runtime Settle Smoke",
       "path": "docs/data-model/runtime-settle-smoke.md",

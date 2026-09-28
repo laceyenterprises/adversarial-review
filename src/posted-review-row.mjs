@@ -40,6 +40,7 @@ import {
   buildTriageSubjectRef,
 } from './pr-lifecycle-sync.mjs';
 import { retryPendingMergeAgentLifecycleCleanups } from './merge-agent-lifecycle-cleanup.mjs';
+import { retryPendingCloserCancels } from './ama/closer-terminal-cancel.mjs';
 import { retryPendingDagAutowalkOnMerge } from './dag-autowalk-on-merge.mjs';
 import { retryPendingTriageSyncs } from './pending-triage-sync.mjs';
 import { retryPendingRetriggerAckComments } from './follow-up-retrigger-label.mjs';
@@ -1077,6 +1078,7 @@ export async function runQueuedReviewAdoptionPhase({
   }
 
   await retryPendingMergeAgentLifecycleCleanupsImpl();
+  await retryPendingCloserCancels({ rootDir });
 
   // Lifecycle sync is the authoritative "is this PR still open?" guard for the
   // health surface. It must not sit behind a single slow posted-review handler:

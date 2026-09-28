@@ -2086,7 +2086,7 @@ async function reconcileFollowUpJob({
       };
       parsedReply = reply;
 
-      if (reply.reReview.requested) {
+      if (reply.reReview.requested && job?.finalRound !== 'comment-only') {
         // Pre-rereview branch-contamination gate. Even though the
         // remediator prompt forbids pushing patch-id duplicates of
         // upstream commits, workers can ignore the contract or run a
@@ -2663,6 +2663,15 @@ async function reconcileFollowUpJob({
             requestedAt,
           },
         });
+      } else if (job?.finalRound === 'comment-only') {
+        rereview = {
+          ...buildRereviewResult({
+            requested: false,
+            reason: null,
+            outcome: { status: 'suppressed', reason: 'comment-only-final-round' },
+          }),
+          suppressed: 'comment-only-final-round',
+        };
       } else {
         rereview = buildRereviewResult({
           requested: false,
@@ -2671,7 +2680,7 @@ async function reconcileFollowUpJob({
         });
       }
 
-      if (!rereview.requested) {
+      if (!rereview.requested && job?.finalRound !== 'comment-only') {
         const recovery = await recoverGithubAuthOperationalBlocker({
           reply: parsedReply,
           hqRoot: resolveHqRoot(process.env),
@@ -2766,7 +2775,11 @@ async function reconcileFollowUpJob({
       };
     }
 
-    if (!rereview.requested) {
+    const completedCommentOnlyFinalRound = job?.finalRound === 'comment-only'
+      && parsedReply?.outcome === 'completed'
+      && (!Array.isArray(parsedReply?.blockers) || parsedReply.blockers.length === 0)
+      && (!Array.isArray(parsedReply?.operationalBlockers) || parsedReply.operationalBlockers.length === 0);
+    if (!rereview.requested && !completedCommentOnlyFinalRound) {
       const resumed = operationalBlockerRecovery?.rescue?.preserved && worker.dispatchMode !== 'hq' && requeueForWorkspaceResume({
         rootDir, jobPath, job, requeuedAt: completedAt, retryMetadata: { rescue: operationalBlockerRecovery.rescue },
         retryReason: 'Preserved remediation commit after worker credential failure; resuming the same workspace.',
@@ -2910,6 +2923,20 @@ async function reconcileFollowUpJob({
       commentDelivery: completedDelivery,
       jobUpdates: operationalBlockerRecovery ? { operationalBlockerRecovery } : null,
     });
+
+    if (completedCommentOnlyFinalRound && !completed.alreadyTerminal) {
+      try {
+        requestWatcherWakeImpl({
+          rootDir,
+          reason: 'comment-only-final-round-completed',
+          repo: job.repo,
+          prNumber: job.prNumber,
+          requestedAt: completedAt,
+        });
+      } catch (err) {
+        log.warn?.(`[follow-up-remediation] AMA closer wake failed for ${job.repo}#${job.prNumber}: ${err?.message || err}`);
+      }
+    }
 
     await postReconcileOutcomeCommentSafe({
       rootDir,

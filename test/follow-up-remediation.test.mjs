@@ -10626,6 +10626,51 @@ test('reconcileFollowUpJob reads remediation replies from HQ storage before any 
   });
 });
 
+test('completed comment-only final job suppresses re-review and wakes the closer', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = path.join(rootDir, 'hq');
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 183 });
+  const job = { ...claimed.job, finalRound: 'comment-only', nonBlockingOnly: true };
+  writeFollowUpJob(claimed.jobPath, job);
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  writeFileSync(outputPath, 'worker output\n', 'utf8');
+  const { replyDir, replyPath } = resolveHqReplyPath({ hqRoot, launchRequestId: job.jobId });
+  mkdirSync(replyDir, { recursive: true });
+  writeValidReply(replyPath, job, {
+    reReview: { requested: true, reason: 'Worker still asks for another review.' },
+  });
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'codex', processId: 9507, state: 'spawned',
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      replyPath,
+    },
+  });
+  await withHqRootEnv(hqRoot, async () => {
+    const wakes = [];
+    const result = await reconcileFollowUpJob({
+      rootDir, job: spawned.job, jobPath: spawned.jobPath,
+      now: () => '2026-04-21T10:30:00.000Z',
+      isWorkerRunning: () => false,
+      resolvePRLifecycleImpl: async () => null,
+      requestReviewRereviewImpl: () => { throw new Error('final round must not re-review'); },
+      requestWatcherWakeImpl: (wake) => { wakes.push(wake); return { requested: true }; },
+      log: { warn: () => {}, error: () => {} },
+    });
+    assert.equal(result.action, 'completed');
+    assert.equal(result.job.reReview.suppressed, 'comment-only-final-round');
+    assert.equal(wakes.length, 1);
+    assert.equal(wakes[0].reason, 'comment-only-final-round-completed');
+  });
+});
+
 test('reconcileFollowUpJob rejects HQ remediation reply symlink targets', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqRoot = path.join(rootDir, 'hq');

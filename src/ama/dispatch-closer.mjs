@@ -2609,8 +2609,9 @@ async function teardownSamePrHammerHolder({
   for (const worktreePath of worktreePaths) {
     const workerId = basename(dirname(worktreePath));
     const holderMissing = !existsSyncImpl(worktreePath);
+    const selfOwned = isSamePrHammerCloserWorkerId(workerId, prNumber);
     let terminality = { terminal: true, reason: 'self-owned-hammer-holder' };
-    if (holderMissing) {
+    if (holderMissing && !selfOwned) {
       terminality = await resolveTerminalCodingBranchHolder({
         workerId, hqRoot, ledgerTarget, ledgerDbPath, env, readLatestWorkerRunStatusImpl,
       });
@@ -2621,7 +2622,7 @@ async function teardownSamePrHammerHolder({
         continue;
       }
       terminality = { ...terminality, terminal: true, reason: 'worktree-absent' };
-    } else if (!isSamePrHammerCloserWorkerId(workerId, prNumber)) {
+    } else if (!selfOwned) {
       terminality = await resolveTerminalCodingBranchHolder({
         workerId,
         hqRoot,

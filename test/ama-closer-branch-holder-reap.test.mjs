@@ -182,6 +182,36 @@ test('suffixed hammer holder is self-owned and skips coding-worker terminal prob
   assert.deepEqual(calls[1].args, ['worker', 'tear-down', workerId, '--force', '--root', hqRoot]);
 });
 
+test('missing self-owned hammer worktree is torn down despite a stale running ledger row', async () => {
+  const hqRoot = join(tmpdir(), `agent-os-hq-missing-hammer-${Date.now()}`);
+  const workerId = 'hammer-ama-pr-3064-a0a0a0a0a0a0';
+  const worktreePath = join(hqRoot, 'workers', workerId, 'agent-os');
+  const calls = [];
+  let statusReads = 0;
+  const result = await __testables__.teardownSamePrHammerHolder({
+    err: { stderr: `branch-holder-blocked at ${worktreePath}` },
+    prNumber: 3064,
+    hqPath: '/opt/hq/bin/hq',
+    hqRoot,
+    existsSyncImpl: () => false,
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      return { stdout: '', stderr: '' };
+    },
+    readLatestWorkerRunStatusImpl: async () => {
+      statusReads += 1;
+      return { ok: true, row: { status: 'running' } };
+    },
+    logger: { warn() {} },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(statusReads, 0);
+  assert.deepEqual(calls.map(call => call.cmd), ['/opt/hq/bin/hq', 'git']);
+  assert.deepEqual(calls[0].args, ['worker', 'tear-down', workerId, '--force', '--root', hqRoot]);
+  assert.ok(result.attempts.some(attempt => attempt.action === 'git-worktree-prune' && attempt.ok));
+});
+
 test('returns [] for empty / non-collision error', () => {
   assert.deepEqual(samePrHammerHolderWorktreePaths('', 3219, HQ_ROOT), []);
   assert.deepEqual(samePrHammerHolderWorktreePaths({ stderr: 'unrelated failure' }, 3219, HQ_ROOT), []);

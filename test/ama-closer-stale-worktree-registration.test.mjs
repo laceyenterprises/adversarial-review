@@ -67,7 +67,7 @@ test('isStaleWorktreeRegistrationError distinguishes stale metadata from real fa
   assert.equal(isStaleWorktreeRegistrationError(null), false);
 });
 
-test('a stale worktree registration is pruned so the branch is released', async () => {
+test('a missing holder directory is pruned directly so the branch is released', async () => {
   const HQ_ROOT = makeHqRoot();
   const HOLDER = join(HQ_ROOT, 'workers', WORKER_ID, 'agent-os');
   const calls = [];
@@ -102,24 +102,22 @@ test('a stale worktree registration is pruned so the branch is released', async 
   assert.equal(result.ok, true, 'successful prune plus worker teardown must let the caller retry dispatch');
 
   const pruned = calls.some(c => c.includes('worktree prune'));
-  assert.equal(pruned, true, 'expected `git worktree prune` after a stale-registration remove failure');
+  assert.equal(pruned, true, 'expected `git worktree prune` for a missing holder directory');
 
   const attempts = result?.attempts || [];
-  const removeAttempt = attempts.find(a => a.action === 'git-worktree-remove');
-  assert.ok(removeAttempt, 'the stale remove failure must remain in attempts for audit');
-  assert.equal(removeAttempt.ok, false);
-  assert.equal(removeAttempt.recovered, true);
-  assert.equal(removeAttempt.recoveredBy, 'git-worktree-prune');
+  assert.equal(attempts.some(a => a.action === 'git-worktree-remove'), false,
+    'a missing directory must not be sent through git worktree remove');
 
   const pruneAttempt = attempts.find(a => a.action === 'git-worktree-prune');
   assert.ok(pruneAttempt, 'prune recovery must be recorded in attempts for audit');
   assert.equal(pruneAttempt.ok, true);
-  assert.equal(pruneAttempt.recoveredFrom, 'stale-registration');
+  assert.equal(pruneAttempt.recoveredFrom, 'missing-directory');
 });
 
 test('a genuine remove failure still aborts teardown and does not prune', async () => {
   const HQ_ROOT = makeHqRoot();
   const HOLDER = join(HQ_ROOT, 'workers', WORKER_ID, 'agent-os');
+  mkdirSync(HOLDER);
   const calls = [];
   const execFileImpl = async (bin, args) => {
     calls.push([bin, ...args].join(' '));
@@ -131,12 +129,13 @@ test('a genuine remove failure still aborts teardown and does not prune', async 
     return { stdout: '', stderr: '' };
   };
 
-  await teardownSamePrHammerHolder({
+  const result = await teardownSamePrHammerHolder({
     err: provisionError(HOLDER),
     prNumber: PR_NUMBER,
     hqPath: 'hq',
     hqRoot: HQ_ROOT,
     execFileImpl,
+    inspectHolderImpl: async () => ({ safe: true, clean: true, patchEquivalent: true, branch: 'feature' }),
     logger: { log() {}, error() {} },
     readLatestWorkerRunStatusImpl: async () => ({
       ok: true,
@@ -149,6 +148,8 @@ test('a genuine remove failure still aborts teardown and does not prune', async 
     sleepImpl: async () => {},
   });
 
+  assert.equal(result.ok, false);
+  assert.ok(calls.some(c => c.includes('worktree remove')));
   assert.equal(
     calls.some(c => c.includes('worktree prune')),
     false,

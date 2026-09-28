@@ -912,6 +912,19 @@ or after the current head has already completed.
 
 ### Merge gate lease visibility
 
+HAM's versioned `hammer-publish` phase takes the audit finding bullets from
+`HAM_AUDIT_DETAILS_FILE`, decimal remediation counts from
+`HAM_AUDIT_REMEDIATED_TOTAL`, `HAM_AUDIT_REMEDIATED_BLOCKING`, and
+`HAM_AUDIT_REMEDIATED_NON_BLOCKING`, and a test summary from
+`HAM_FAILING_TESTS_FIXED`. Supply these before rendering the helper. A successful
+post or refresh sets `HAM_PUBLISHED_AUDIT_HEAD` to the head that the audit names.
+The `hammer-merge` phase requires that marker and an `ama-check` verdict with
+`eligible: true` and a matching current head before reading GitHub's required
+check gate or attempting merge. A missing prerequisite appends a
+`failed-without-merge` terminal audit. Publish and merge failures release the
+base merge lease, including failures after GitHub confirms the merge; the AMA
+closer lease is separate and remains available for recovery.
+
 The base-branch merge gate uses `data/merge-leases/<repo>__<base>.json` plus
 durable waiter and attempt files. Use
 `node bin/merge-lease.mjs status --repo <owner/name> --base <branch>` to inspect

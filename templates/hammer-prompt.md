@@ -80,6 +80,16 @@ export HAM_ROOT_DIR='<<ROOT_DIR>>' HAM_HQ_ROOT='<<HQ_ROOT>>' HAM_HQ_OWNER='<<HQ_
 export HAM_AUDIT_PATH='<<AUDIT_PATH>>' HAM_REVIEWER='<<REVIEWER>>'
 ```
 
+Before entering the merge-lease window, write the complete audit markdown to
+an absolute-path file. It must contain the `**Findings addressed**` heading and
+one single-line bullet per finding with the exact review title, blocking class,
+changed files and fix. Export its path as `HAM_AUDIT_DETAILS_FILE`. Also export
+decimal `HAM_AUDIT_REMEDIATED_TOTAL`, `HAM_AUDIT_REMEDIATED_BLOCKING`, and
+`HAM_AUDIT_REMEDIATED_NON_BLOCKING` (the latter two must sum to the total), plus
+`HAM_FAILING_TESTS_FIXED` with the actual test repairs or `suite already green`.
+The publish helper rejects missing or placeholder inputs and releases the lease
+on failure. Keep these values in the same shell for the merge audit.
+
 For each phase, in that same persistent shell, run the following with `PHASE` set to the named helper (`hammer-verify-head`, `hammer-publish`, or `hammer-merge`):
 
 ```bash
@@ -99,7 +109,7 @@ printf '\nHAM phase %s: status=%s outcome=%s lease-held=%s\n' \
 [ "$HAM_PHASE_STATUS" -eq 0 ]
 ```
 
-Before sourcing `hammer-publish`, edit the rendered audit-details heredoc to map every finding and fill its counts; never publish the example placeholder. Build the terminal-remediation claim JSON and run the predicate CLI as described below before sourcing `hammer-merge`. Never execute these phases as separate processes: the verified head and merge lease must survive between them. A failed render or source stops the close. Delete each temporary source file after use. The helpers require every value used by that
+Build the terminal-remediation claim JSON and run the predicate CLI as described below before sourcing `hammer-merge`. Never execute these phases as separate processes: the verified head and merge lease must survive between them. A failed render or source stops the close. Delete each temporary source file after use. The helpers require every value used by that
 phase and fail with status 64 when one is absent. Preserve lease state between
 phases; `hammer-publish` and `hammer-merge` must run with the acquired lease
 held and fail closed otherwise. Use the scripts directly from this checkout;
@@ -573,7 +583,7 @@ Do not merge unless all of these are true:
 
 In-lease merge:
 
-In the persistent merge-lease shell, render and source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-merge --render` after exporting the dispatch values above. Enforce the predicate and required checks on the live head, merge under the held lease, and append the terminal audit. The wrapper prints its bounded diagnostic tail, status, outcome, and lease state; a nonzero status requires the no-merge closing-status comment from mandate 0b when the PR remains open.
+In the persistent merge-lease shell, render and source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-merge --render` after exporting the dispatch values above. The helper requires the successful audit-publish marker and an eligible predicate verdict for `POST_REMEDIATION_SHA`, then checks the live head and required checks before merging under the held lease. It appends a `failed-without-merge` audit and releases the lease if either prerequisite fails. The wrapper prints its bounded diagnostic tail, status, outcome, and lease state; a nonzero status requires the no-merge closing-status comment from mandate 0b when the PR remains open.
 
 
 After the merged audit append succeeds, emit the merge signal and then release

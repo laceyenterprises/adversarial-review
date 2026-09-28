@@ -13,12 +13,14 @@ HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT="${HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT:-
 HAM_MERGE_RETRY_CAP="${HAM_MERGE_RETRY_CAP:-4}"
 HAM_MERGE_BACKOFF_BASE_SECONDS="${HAM_MERGE_BACKOFF_BASE_SECONDS:-2}"
 HAM_MERGE_TMP_PREFIX="${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-${HAM_MERGE_LEASE_ID:-no-lease}-$$"
-HAM_MERGE_STDOUT=$(mktemp "${HAM_MERGE_TMP_PREFIX}.gh-pr-merge.stdout.XXXXXX") || return 1
-HAM_MERGE_STDERR=$(mktemp "${HAM_MERGE_TMP_PREFIX}.gh-pr-merge.stderr.XXXXXX") || return 1
-HAM_GATE_JSON=$(mktemp "${HAM_MERGE_TMP_PREFIX}.github-gate.XXXXXX") || return 1
-HAM_POST_MERGE_JSON=$(mktemp "${HAM_MERGE_TMP_PREFIX}.post-merge.XXXXXX") || return 1
-HAM_POST_MERGE_STDERR=$(mktemp "${HAM_MERGE_TMP_PREFIX}.post-merge.stderr.XXXXXX") || return 1
+HAM_MERGE_STDOUT=$(mktemp "${HAM_MERGE_TMP_PREFIX}.gh-pr-merge.stdout.XXXXXX") || { ham_release_merge_lease; return 1; }
+HAM_MERGE_STDERR=$(mktemp "${HAM_MERGE_TMP_PREFIX}.gh-pr-merge.stderr.XXXXXX") || { ham_release_merge_lease; return 1; }
+HAM_GATE_JSON=$(mktemp "${HAM_MERGE_TMP_PREFIX}.github-gate.XXXXXX") || { ham_release_merge_lease; return 1; }
+HAM_POST_MERGE_JSON=$(mktemp "${HAM_MERGE_TMP_PREFIX}.post-merge.XXXXXX") || { ham_release_merge_lease; return 1; }
+HAM_POST_MERGE_STDERR=$(mktemp "${HAM_MERGE_TMP_PREFIX}.post-merge.stderr.XXXXXX") || { ham_release_merge_lease; return 1; }
 HAM_PRE_MERGE_ELIGIBLE=0
+HAM_VERDICT_FILE=/tmp/ham-<<PR_NUMBER>>-verdict.json
+HAM_REMEDIATED_FINDINGS="${HAM_AUDIT_REMEDIATED_TOTAL:-} addressed (${HAM_AUDIT_REMEDIATED_BLOCKING:-} blocking, ${HAM_AUDIT_REMEDIATED_NON_BLOCKING:-} non-blocking)"
 
 ham_append_terminal_audit() {
   ham_audit_outcome="$1"
@@ -36,14 +38,14 @@ ham_append_terminal_audit() {
     --arg rebasedOntoBase "${HAM_REBASED_ONTO_BASE_SHA:-}" \
     --arg localCiStatus "${HAM_LOCAL_CI_STATUS:-unknown}" \
     --arg remoteCiStatus "${HAM_REMOTE_CI_STATUS:-unknown}" \
-    --arg remediatedFindings "<n> addressed (<b> blocking, <nb> non-blocking)" \
-    --arg failingTestsFixed "<list, or 'suite already green'>" \
+    --arg remediatedFindings "$HAM_REMEDIATED_FINDINGS" \
+    --arg failingTestsFixed "${HAM_FAILING_TESTS_FIXED:-}" \
     --arg mergeCommit "${HAM_MERGE_COMMIT:-}" \
     --arg mergedAt "${HAM_MERGED_AT:-}" \
     --argjson mergeAttempts "${HAM_MERGE_ATTEMPTS:-0}" \
     --argjson rebaseAttempts "${HAM_REBASE_ATTEMPTS:-0}" \
     --argjson preMergeEligible "${HAM_PRE_MERGE_ELIGIBLE:-0}" \
-    --argjson eligibilityTrace "$(cat /tmp/ham-<<PR_NUMBER>>-verdict.json)" \
+    --argjson eligibilityTrace "$([ -s "$HAM_VERDICT_FILE" ] && cat "$HAM_VERDICT_FILE" || printf '{}')" \
     --argjson githubGate "$([ -s "$HAM_GATE_JSON" ] && cat "$HAM_GATE_JSON" || printf '{}')" \
     '{
       preMergeEligible: ($preMergeEligible == 1),
@@ -81,6 +83,22 @@ ham_append_terminal_audit() {
   fi
   return "$ham_audit_append_exit"
 }
+
+# ama-check exits zero for both eligible and ineligible verdicts. Require its
+# exact-head decision and the successful in-lease audit publish independently.
+if [ "${HAM_PUBLISHED_AUDIT_HEAD:-}" != "${POST_REMEDIATION_SHA:-}" ] || [ -z "${POST_REMEDIATION_SHA:-}" ]; then
+  echo "HAM hard-blocker: audit was not published for the validated head" >&2
+  ham_append_terminal_audit failed-without-merge audit-not-published || true
+  ham_release_merge_lease
+  return 20
+fi
+if ! jq -e --arg head "$POST_REMEDIATION_SHA" \
+  '.eligible == true and .trace.headMatch.current == $head' "$HAM_VERDICT_FILE" >/dev/null 2>&1; then
+  echo "HAM hard-blocker: predicate is not eligible for the validated head" >&2
+  ham_append_terminal_audit failed-without-merge predicate-not-eligible || true
+  ham_release_merge_lease
+  return 20
+fi
 
 ham_emit_git_merge_signal() {
   [ -n "${HAM_MERGE_COMMIT:-}" ] || return 1
@@ -371,7 +389,7 @@ HAM_MERGE_EXIT=1
 if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -eq 1 ]; then
   HAM_MERGE_EXIT=0
 else
-  HAM_PRE_MERGE_ATTEMPT_FILE=$(mktemp "${HAM_MERGE_TMP_PREFIX}.pre-merge-attempt.XXXXXX") || return 1
+  HAM_PRE_MERGE_ATTEMPT_FILE=$(mktemp "${HAM_MERGE_TMP_PREFIX}.pre-merge-attempt.XXXXXX") || { ham_release_merge_lease; return 1; }
   jq -n \
     --arg reviewedHead "<<REVIEWED_SHA>>" \
     --arg validatedHead "$POST_REMEDIATION_SHA" \
@@ -379,8 +397,8 @@ else
     --arg rebasedOntoBase "${HAM_REBASED_ONTO_BASE_SHA:-}" \
     --arg localCiStatus "${HAM_LOCAL_CI_STATUS:-unknown}" \
     --arg remoteCiStatus "${HAM_REMOTE_CI_STATUS:-unknown}" \
-    --arg remediatedFindings "<n> addressed (<b> blocking, <nb> non-blocking)" \
-    --arg failingTestsFixed "<list, or 'suite already green'>" \
+    --arg remediatedFindings "$HAM_REMEDIATED_FINDINGS" \
+    --arg failingTestsFixed "${HAM_FAILING_TESTS_FIXED:-}" \
     --argjson rebaseAttempts "${HAM_REBASE_ATTEMPTS:-0}" \
     --argjson eligibilityTrace "$(cat /tmp/ham-<<PR_NUMBER>>-verdict.json)" \
     --argjson githubGate "$(cat "$HAM_GATE_JSON")" \
@@ -406,7 +424,7 @@ else
     --pr <<PR_NUMBER>> \
     --head "$POST_REMEDIATION_SHA" \
     --outcome in_progress \
-    --attempt-json "$HAM_PRE_MERGE_ATTEMPT_FILE" || return 1
+    --attempt-json "$HAM_PRE_MERGE_ATTEMPT_FILE" || { ham_release_merge_lease; return 1; }
   rm -f "$HAM_PRE_MERGE_ATTEMPT_FILE"
   ham_fire_watcher_merge_wake
 fi
@@ -699,10 +717,12 @@ if [ "$HAM_POST_STATE" = "MERGED" ] && [ "$HAM_POST_HEAD" = "$POST_REMEDIATION_S
   fi
   if ! ham_emit_git_merge_signal; then
     echo "HAM hard-blocker: merge signal emission failed after confirmed merge; AMA closer lease remains retryable" >&2
+    ham_release_merge_lease
     return 1
   fi
   if ! ham_mark_ama_closer_lease_succeeded; then
     echo "HAM hard-blocker: failed to mark AMA closer lease succeeded after confirmed merge signal" >&2
+    ham_release_merge_lease
     return 1
   fi
   trap - EXIT

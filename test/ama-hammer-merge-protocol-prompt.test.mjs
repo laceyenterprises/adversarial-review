@@ -276,25 +276,21 @@ test('hammer merge capability shell fallback mirrors JS token-class discovery', 
   assert.doesNotMatch(HAMMER_PROMPT, /case "\$\(printf '%s' "\$HAM_MERGE_TOKEN_CLASS" \| tr/);
 });
 
-test('hammer audit comment payload excludes prompt-only authoring instructions', () => {
-  const commentDetails = HAMMER_PROMPT.match(
-    /HAM_AUDIT_COMMENT_DETAILS="\$\(cat <<'EOF'\n(?<body>[\s\S]*?)\nEOF\n\)"/,
-  )?.groups?.body;
-
-  assert.ok(commentDetails, 'expected to find the quoted hammer audit comment heredoc');
-  assert.doesNotMatch(commentDetails, /optionally add/i);
-  assert.match(HAMMER_PROMPT, /When filling in the comment body below, optionally add/i);
+test('hammer audit comment payload reads caller-supplied findings without prompt instructions', () => {
+  assert.match(HAMMER_TEMPLATE, /write the complete audit markdown to/);
+  assert.match(HAMMER_PROMPT, /HAM_AUDIT_COMMENT_DETAILS="\$\(cat "\$HAM_AUDIT_DETAILS_FILE"\)"/);
+  assert.doesNotMatch(HAMMER_PROMPT, /HAM_AUDIT_COMMENT_DETAILS="\$\(cat <<'EOF'/);
 });
 
 test('hammer audit comment keeps model-authored markdown out of shell expansion', () => {
-  assert.match(HAMMER_PROMPT, /HAM_AUDIT_COMMENT_DETAILS="\$\(cat <<'EOF'/);
+  assert.match(HAMMER_PROMPT, /HAM_AUDIT_COMMENT_DETAILS="\$\(cat "\$HAM_AUDIT_DETAILS_FILE"\)"/);
   assert.match(
     HAMMER_PROMPT,
     /HAM_AUDIT_COMMENT_BODY=\$\(printf[\s\S]*"\$HAM_AUDIT_COMMENT_DETAILS"[\s\S]*"\$POST_REMEDIATION_SHA"[\s\S]*"\$HAM_AUDIT_REMEDIATED_TOTAL"[\s\S]*"\$HAM_AUDIT_REMEDIATED_BLOCKING"[\s\S]*"\$HAM_AUDIT_REMEDIATED_NON_BLOCKING"\)/,
   );
 });
 
-test('hammer audit comment keeps parseable footer fields out of the editable heredoc', () => {
+test('hammer audit comment composes footer from validated inputs', () => {
   const bodyComposer = HAMMER_PROMPT.match(
     /HAM_AUDIT_COMMENT_BODY=\$\(printf[\s\S]*?"\$HAM_AUDIT_REMEDIATED_NON_BLOCKING"\)/,
   )?.[0];
@@ -305,10 +301,9 @@ test('hammer audit comment keeps parseable footer fields out of the editable her
     bodyComposer,
     /<sub>\\nHAM-Terminal-Remediation-Head: %s\\nRemediated-Findings: %s addressed \(%s blocking, %s non-blocking\)\\nClosed-By: hammer \(adversarial-pipe-mode\)\\n<\/sub>/,
   );
-  assert.match(HAMMER_PROMPT, /HAM_AUDIT_REMEDIATED_TOTAL='<n>'/);
-  assert.match(HAMMER_PROMPT, /HAM_AUDIT_REMEDIATED_BLOCKING='<b>'/);
-  assert.match(HAMMER_PROMPT, /HAM_AUDIT_REMEDIATED_NON_BLOCKING='<nb>'/);
-  assert.match(HAMMER_PROMPT, /ham_audit_is_nonnegative_int "\$HAM_AUDIT_REMEDIATED_TOTAL"/);
+  assert.doesNotMatch(HAMMER_PROMPT, /HAM_AUDIT_REMEDIATED_TOTAL='<n>'/);
+  assert.match(HAMMER_PROMPT, /ham_audit_is_nonnegative_int "\$\{HAM_AUDIT_REMEDIATED_TOTAL:-\}"/);
+  assert.match(HAMMER_PROMPT, /HAM_AUDIT_REMEDIATED_BLOCKING \+ HAM_AUDIT_REMEDIATED_NON_BLOCKING/);
 });
 
 test('hammer audit is deduped by marker and refreshed in place across rebases (agent-os#4090)', () => {

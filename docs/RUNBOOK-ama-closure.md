@@ -918,7 +918,7 @@ HAM's versioned `hammer-publish` phase takes the audit finding bullets from
 `HAM_AUDIT_REMEDIATED_NON_BLOCKING`, and a test summary from
 `HAM_FAILING_TESTS_FIXED`. Supply these before rendering the helper. A successful
 post or refresh sets `HAM_PUBLISHED_AUDIT_HEAD` to the head that the audit names.
-The `hammer-merge` phase requires that marker and an `ama-check` verdict with
+The `hammer-merge` phase requires that marker and an owned, run-scoped `HAM_VERDICT_FILE` produced after audit publish by a successful `ama-check` call. The caller sets `HAM_VERDICT_READY_FILE` to the same path only after that call succeeds and removes the file after merge. The verdict must have
 `eligible: true` and a matching current head before reading GitHub's required
 check gate or attempting merge. A missing prerequisite appends a
 `failed-without-merge` terminal audit. Publish and merge failures release the

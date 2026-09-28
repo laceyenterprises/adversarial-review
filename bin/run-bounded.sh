@@ -17,9 +17,35 @@ if [ "$#" -eq 0 ] || ! [[ "$seconds" =~ ^[1-9][0-9]*$ ]] || ! [[ "$bytes" =~ ^[1
 fi
 log=$(mktemp "${TMPDIR:-/tmp}/run-bounded.XXXXXX") || exit 1
 trap 'rm -f "$log"' EXIT
-/usr/bin/perl -e '$seconds = shift; alarm $seconds; exec @ARGV' "$seconds" "$@" >"$log" 2>&1
+/usr/bin/perl -e '
+  use POSIX qw(:sys_wait_h);
+  my $seconds = shift;
+  my $child = fork();
+  die "fork failed: $!" unless defined $child;
+  if ($child == 0) {
+    POSIX::setpgid(0, 0) == 0 or die "setpgid failed: $!";
+    exec @ARGV;
+    die "exec failed: $!";
+  }
+  my $timed_out = 0;
+  $SIG{ALRM} = sub {
+    $timed_out = 1;
+    kill "TERM", -$child;
+    alarm 5;
+    $SIG{ALRM} = sub { kill "KILL", -$child; };
+  };
+  alarm $seconds;
+  my $waited;
+  do { $waited = waitpid($child, 0); } while ($waited == -1 && $! == EINTR);
+  my $status = $?;
+  alarm 0;
+  if ($timed_out) {
+    select undef, undef, undef, 0.2;
+    kill "KILL", -$child;
+  }
+  exit($timed_out ? 124 : ($status & 127 ? 128 + ($status & 127) : $status >> 8));
+' "$seconds" "$@" >"$log" 2>&1
 status=$?
 tail -c "$bytes" "$log"
 printf '\n'
-if [ "$status" -eq 142 ]; then exit 124; fi
 exit "$status"

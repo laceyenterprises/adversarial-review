@@ -100,8 +100,7 @@ test('merge refuses an ineligible predicate before reading the green gate', (t) 
   const dir = mkdtempSync(join(tmpdir(), 'hammer-merge-verdict-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const prNumber = '424243';
-  const verdictPath = `/tmp/ham-${prNumber}-verdict.json`;
-  t.after(() => rmSync(verdictPath, { force: true }));
+  const verdictPath = join(dir, 'verdict.json');
   writeFileSync(verdictPath, JSON.stringify({ eligible: false, trace: { headMatch: { current: 'a'.repeat(40) } } }));
   const bin = join(dir, 'bin');
   mkdirSync(bin);
@@ -122,7 +121,7 @@ test('merge refuses an ineligible predicate before reading the green gate', (t) 
   assert.equal(render.status, 0, render.stderr);
   const script = join(dir, 'merge.sh');
   writeFileSync(script, render.stdout);
-  const shell = `HAM_MERGE_LEASE_HELD=1 HAM_MERGE_LEASE_ID=lease POST_REMEDIATION_SHA=${'a'.repeat(40)} HAM_PUBLISHED_AUDIT_HEAD=${'a'.repeat(40)} HAM_NODE_BIN=${nodeStub}
+  const shell = `HAM_MERGE_LEASE_HELD=1 HAM_MERGE_LEASE_ID=lease POST_REMEDIATION_SHA=${'a'.repeat(40)} HAM_PUBLISHED_AUDIT_HEAD=${'a'.repeat(40)} HAM_NODE_BIN=${nodeStub} HAM_VERDICT_FILE=${verdictPath} HAM_VERDICT_READY_FILE=${verdictPath}
 ham_release_merge_lease() { HAM_MERGE_LEASE_HELD=0; echo LEASE_RELEASED; }
 source "$1"
 echo "STATUS=$? HELD=$HAM_MERGE_LEASE_HELD OUTCOME=$HAM_PHASE_OUTCOME"
@@ -132,6 +131,8 @@ echo "STATUS=$? HELD=$HAM_MERGE_LEASE_HELD OUTCOME=$HAM_PHASE_OUTCOME"
   assert.match(result.stdout, /LEASE_RELEASED/);
   assert.match(result.stdout, /STATUS=20 HELD=0 OUTCOME=predicate-not-eligible/);
   assert.doesNotMatch(result.stderr, /GH_CALLED/);
+  const stale = run('/bin/bash', ['-c', shell.replace(`HAM_VERDICT_READY_FILE=${verdictPath}`, 'HAM_VERDICT_READY_FILE=') , '_', script], env);
+  assert.match(stale.stdout, /STATUS=20 HELD=0/);
 });
 test('rendered hammer prompt stays under a 60 KiB byte budget', () => {
   const rendered = composeCloserPrompt({
@@ -162,6 +163,14 @@ test('bounded runner preserves exit status and caps combined output', () => {
   assert.ok(Buffer.byteLength(failure.stdout) <= 41);
   const timed = run(path, ['--timeout', '1', '--', '/bin/sh', '-c', 'sleep 3']);
   assert.equal(timed.status, 124);
+  assert.equal(run(path, ['--timeout', '2', '--', '/bin/sh', '-c', 'exit 142']).status, 142);
+  const childPidFile = join(tmpdir(), `bounded-child-${process.pid}.pid`);
+  try {
+    const children = run(path, ['--timeout', '1', '--', '/bin/sh', '-c', `sleep 30 & echo $! > ${childPidFile}; wait`]);
+    assert.equal(children.status, 124);
+    const childPid = Number(readFileSync(childPidFile, 'utf8'));
+    assert.throws(() => process.kill(childPid, 0), { code: 'ESRCH' });
+  } finally { rmSync(childPidFile, { force: true }); }
   assert.equal(run(path, ['--timeout', '0', '--', '/bin/true']).status, 64);
 });
 test('versioned merge helpers are parseable and reject missing dispatch values', () => {
@@ -175,7 +184,7 @@ test('versioned merge helpers are parseable and reject missing dispatch values',
     if (phase !== 'hammer-verify-head') {
       const env = Object.fromEntries(['PR_URL', 'REPO', 'PR_NUMBER', 'REVIEWED_SHA', 'TARGET_REMEDIATION_SHA', 'RISK_CLASS', 'MERGE_METHOD', 'ROOT_DIR', 'HQ_ROOT', 'HQ_OWNER', 'AUDIT_PATH', 'REVIEWER'].map((key) => [`HAM_${key}`, 'fixture']));
       const denied = run('node', [join(root, 'bin/hammer-procedure.mjs'), phase], env);
-      assert.notEqual(denied.status, 0, `${phase} must refuse an absent lease`);
+      assert.equal(denied.status, 64, `${phase} must refuse subprocess execution`);
       assert.ok(Buffer.byteLength(denied.stdout) <= 4200, `${phase} emitted an unbounded tail`);
     }
   }
@@ -187,7 +196,7 @@ test('one-shot context snapshot is bounded and describes fixture PR head', (t) =
   mkdirSync(bin);
   const fixture = {
     pr: { state: 'open', merged_at: null, draft: false, mergeable: false, mergeable_state: 'dirty', base: { ref: 'main' }, head: { sha: 'abc' }, changed_files: 1, additions: 3, deletions: 2 },
-    reviews: [{ commit_id: 'abc', state: 'CHANGES_REQUESTED', body: 'Fix auth', user: { login: 'reviewer' } }],
+    reviews: [{ commit_id: 'abc', state: 'COMMENTED', body: `## Adversarial Review\n${'Fix auth. '.repeat(250)}`, user: { login: 'reviewer' } }],
     files: [{ additions: 3, deletions: 2 }],
     checks: { statusCheckRollup: [{ name: 'CI', conclusion: 'SUCCESS' }] },
     protection: { required_status_checks: { contexts: ['CI'] } },
@@ -204,7 +213,10 @@ test('one-shot context snapshot is bounded and describes fixture PR head', (t) =
   assert.ok(Buffer.byteLength(result.stdout) < 8192);
   const snapshot = JSON.parse(result.stdout);
   assert.equal(snapshot.head, 'abc');
-  assert.equal(snapshot.review.findings, 'Fix auth');
+  assert.match(snapshot.review.findings, /Fix auth/);
+  assert.equal(snapshot.review.state, 'COMMENTED');
+  assert.equal(snapshot.review.findingsTruncated, true);
+  assert.ok(snapshot.review.findingsBytes > 1800);
   assert.deepEqual(snapshot.requiredChecks, ['CI']);
   assert.deepEqual(snapshot.diffStat, { files: 1, additions: 3, deletions: 2 });
   assert.equal(snapshot.conflictsVersusBase, true);

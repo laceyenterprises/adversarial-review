@@ -51,9 +51,9 @@ later retry.
 
 ## Cost and context discipline (Codex and Claude)
 
-At start and after **each push**, run `node <<ROOT_DIR>>/bin/hammer-context.mjs <<REPO>> <<PR_NUMBER>>` once. Its bounded JSON reports PR state, current head and review findings on that head, required checks, diff stat, conflicts versus base, and any active remediation/lease state available to the worker. Use that snapshot before exploratory `gh`, `git`, or file reads. Recheck live state at the required merge predicate; this snapshot never replaces that fail-closed gate.
+At start and after **each push**, run `node <<ROOT_DIR>>/bin/hammer-context.mjs <<REPO>> <<PR_NUMBER>>` once. Its bounded JSON reports PR state, current head and review findings on that head, required checks, diff stat, conflicts versus base, and any active remediation/lease state available to the worker. Use that snapshot before exploratory `gh`, `git`, or file reads. If `review.findingsTruncated` is true, fetch the full review body before triage. Recheck live state at the required merge predicate; this snapshot never replaces that fail-closed gate.
 
-**Never run a full test suite locally.** PR-head CI runs the full suite and is the merge gate. Run only targeted tests for files you changed, including after a rebase or replay. For Codex and Claude alike, run long tests and builds in the foreground through `bin/run-bounded.sh --timeout <seconds> -- <command>` in one blocking tool call. It exits with the command status and prints at most 4 KiB of the combined tail. Prefer `hq wait` where available for an external wait; otherwise use this local runner for local commands. Never background a command and poll it with `sleep`, `tail`, or `cat`. Never send narrated "still waiting" steps. Codex: do not create a background test session or call tools repeatedly to check its log; make one blocking tool call.
+**Never run a full test suite locally.** PR-head CI runs the full suite and is the merge gate. Run only targeted tests for files you changed, including after a rebase or replay. For Codex and Claude alike, run long tests and builds in the foreground through `bin/run-bounded.sh --timeout <seconds> -- <command>` in one blocking tool call. It exits with the command status and prints at most 4 KiB of the combined tail. For external waits, use one bounded wait supported by the worker harness; otherwise use this local runner for local commands. Never background a command and poll it with `sleep`, `tail`, or `cat`. Never send narrated "still waiting" steps. Codex: do not create a background test session or call tools repeatedly to check its log; make one blocking tool call.
 
 ## Snapshot
 
@@ -104,12 +104,15 @@ else
 fi
 tail -c 4096 "$HAM_PHASE_LOG"
 rm -f "$HAM_PHASE_SCRIPT" "$HAM_PHASE_LOG"
+if [ "$PHASE" = hammer-merge ] && [ -n "${HAM_VERDICT_FILE:-}" ]; then
+  rm -f "$HAM_VERDICT_FILE"
+fi
 printf '\nHAM phase %s: status=%s outcome=%s lease-held=%s\n' \
   "$PHASE" "$HAM_PHASE_STATUS" "$HAM_PHASE_OUTCOME" "${HAM_MERGE_LEASE_HELD:-0}"
 [ "$HAM_PHASE_STATUS" -eq 0 ]
 ```
 
-Build the terminal-remediation claim JSON and run the predicate CLI as described below before sourcing `hammer-merge`. Never execute these phases as separate processes: the verified head and merge lease must survive between them. A failed render or source stops the close. Delete each temporary source file after use. The helpers require every value used by that
+Build the terminal-remediation claim JSON and run the predicate CLI as described below before sourcing `hammer-merge`. Never execute these phases as separate processes: the verified head and merge lease must survive between them. Use a persistent shell session for all three phases; if the harness creates a fresh shell per tool call, run the full close flow in one shell invocation or stop before acquiring the lease. A failed render or source stops the close. Delete each temporary source file after use. The helpers require every value used by that
 phase and fail with status 64 when one is absent. Preserve lease state between
 phases; `hammer-publish` and `hammer-merge` must run with the acquired lease
 held and fail closed otherwise. Use the scripts directly from this checkout;
@@ -538,9 +541,13 @@ match `<<REVIEWED_SHA>>`. The JSON claim alone does not satisfy the predicate.
 }
 ```
 
-Run the predicate against the live post-remediation head:
+Run the predicate against the live post-remediation head. Create an owned, run-scoped verdict file after publishing the audit; export the path so the merge helper reads this run's result. Remove the file after the merge phase:
 
 ```bash
+HAM_VERDICT_FILE=$(mktemp "${TMPDIR:-/tmp}/ham-verdict.XXXXXX") || exit 1
+chmod 600 "$HAM_VERDICT_FILE"
+export HAM_VERDICT_FILE
+HAM_VERDICT_READY_FILE=""
 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/ama-check.mjs \
   --pr /tmp/ham-<<PR_NUMBER>>-pr-after.json \
   --reviews /tmp/ham-<<PR_NUMBER>>-reviews.json \
@@ -553,13 +560,14 @@ Run the predicate against the live post-remediation head:
   --risk-class <<RISK_CLASS>> \
   --ham-terminal-remediation /tmp/ham-<<PR_NUMBER>>-terminal-remediation.json \
   --ham-commit /tmp/ham-<<PR_NUMBER>>-commit.json \
-  > /tmp/ham-<<PR_NUMBER>>-verdict.json
+  > "$HAM_VERDICT_FILE" || exit 1
+HAM_VERDICT_READY_FILE="$HAM_VERDICT_FILE"
 ```
 
 Do not merge unless all of these are true:
 
 - `HAM_MERGE_LEASE_HELD=1` and `HAM_MERGE_LEASE_ID` is non-empty.
-- `/tmp/ham-<<PR_NUMBER>>-verdict.json` has `eligible: true`. (For any BLOCKING finding the
+- The owned `$HAM_VERDICT_FILE` has `eligible: true`. (For any BLOCKING finding the
   predicate still requires validated terminal-remediation provenance —
   `ham_terminal_remediation_validated` — to reach `eligible: true`; for a
   non-blocking-only close the entitled hammer is trusted and `eligible: true`

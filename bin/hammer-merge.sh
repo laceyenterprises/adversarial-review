@@ -19,7 +19,6 @@ HAM_GATE_JSON=$(mktemp "${HAM_MERGE_TMP_PREFIX}.github-gate.XXXXXX") || { ham_re
 HAM_POST_MERGE_JSON=$(mktemp "${HAM_MERGE_TMP_PREFIX}.post-merge.XXXXXX") || { ham_release_merge_lease; return 1; }
 HAM_POST_MERGE_STDERR=$(mktemp "${HAM_MERGE_TMP_PREFIX}.post-merge.stderr.XXXXXX") || { ham_release_merge_lease; return 1; }
 HAM_PRE_MERGE_ELIGIBLE=0
-HAM_VERDICT_FILE=/tmp/ham-<<PR_NUMBER>>-verdict.json
 HAM_REMEDIATED_FINDINGS="${HAM_AUDIT_REMEDIATED_TOTAL:-} addressed (${HAM_AUDIT_REMEDIATED_BLOCKING:-} blocking, ${HAM_AUDIT_REMEDIATED_NON_BLOCKING:-} non-blocking)"
 
 ham_append_terminal_audit() {
@@ -86,6 +85,13 @@ ham_append_terminal_audit() {
 
 # ama-check exits zero for both eligible and ineligible verdicts. Require its
 # exact-head decision and the successful in-lease audit publish independently.
+if [ -z "${HAM_VERDICT_FILE:-}" ] || [ "${HAM_VERDICT_READY_FILE:-}" != "$HAM_VERDICT_FILE" ] || [ ! -f "$HAM_VERDICT_FILE" ] || [ ! -O "$HAM_VERDICT_FILE" ]; then
+  echo 'HAM hard-blocker: current run has no owned predicate verdict' >&2
+  HAM_VERDICT_FILE=""
+  ham_append_terminal_audit failed-without-merge predicate-verdict-unavailable || true
+  ham_release_merge_lease
+  return 20
+fi
 if [ "${HAM_PUBLISHED_AUDIT_HEAD:-}" != "${POST_REMEDIATION_SHA:-}" ] || [ -z "${POST_REMEDIATION_SHA:-}" ]; then
   echo "HAM hard-blocker: audit was not published for the validated head" >&2
   ham_append_terminal_audit failed-without-merge audit-not-published || true

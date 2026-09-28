@@ -520,7 +520,7 @@ adversarial-review/
 ├── prompts/                    ← staged reviewer + remediator prompts
 │   ├── code-pr/                ← production prompt set
 │   └── research-finding/       ← reference non-PR prompt set
-├── bin/                        ← hammer phase procedures, context snapshot, bounded runner
+├── bin/                        ← operator and closer CLIs: lease, audit, predicate, hammer procedures, context, bounded runner
 │
 ├── test/                       ← kernel + adapter + end-to-end tests
 ├── demo/                       ← offline walkthroughs

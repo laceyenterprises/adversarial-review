@@ -796,6 +796,24 @@ test('requestReviewRereview refuses a new head after the comment-only final roun
   assert.equal(result.triggered, false);
 });
 
+test('requestReviewRereview sees settled comment-only from a job before body capture', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const head = 'c'.repeat(40);
+  insertReviewRow(rootDir, { revisionRef: head });
+  const pendingDir = path.join(rootDir, 'data', 'follow-up-jobs', 'pending');
+  mkdirSync(pendingDir, { recursive: true });
+  writeFileSync(path.join(pendingDir, 'laceyenterprises__adversarial-review-pr-10-review.json'),
+    JSON.stringify({ repo: 'laceyenterprises/adversarial-review', prNumber: 10,
+      revisionRef: head,
+      reviewBody: '## Blocking issues\n- None.\n## Non-blocking issues\n- Fix docs.\n## Verdict\nComment only' }));
+  const result = requestReviewRereview({
+    rootDir, repo: 'laceyenterprises/adversarial-review', prNumber: 10,
+    targetRevisionRef: head, reason: 'Third reviewer asks for same head.',
+  });
+  assert.equal(result.reason, 'comment-only-verdict-settled');
+  assert.equal(result.triggered, false);
+});
+
 test('requestReviewRereview resets moved pending rows independent of reviewer handle residue', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   insertReviewRow(rootDir, {

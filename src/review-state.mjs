@@ -13,7 +13,10 @@ import { isExplicitOperatorRetriggerReason } from './retrigger-review-reason.mjs
 import { ensureTtmTrackerSchema } from './ttm-tracker.mjs';
 import { recordReviewLatencyEvent } from './review-latency-event-writer.mjs';
 import { normalizeEffectiveReviewVerdict } from './kernel/verdict.mjs';
-import { hasCompletedCommentOnlyFinalRound } from './comment-only-final-round.mjs';
+import {
+  hasCompletedCommentOnlyFinalRound,
+  hasSettledCommentOnlyReviewHead,
+} from './comment-only-final-round.mjs';
 import {
   REVIEWER_PASS_GENUINE_POSTED_REVIEW_WHERE_SQL,
   REVIEWER_PASS_NORMALIZED_POSTED_AT_SQL,
@@ -1083,7 +1086,7 @@ function requestReviewRereview({
       if (settledBodies.some((pass) =>
         pass.verdict === 'comment-only' ||
         (pass.body_md && normalizeEffectiveReviewVerdict(pass.body_md) === 'comment-only')
-      )) {
+      ) || hasSettledCommentOnlyReviewHead(rootDir, { repo, prNumber, headSha: targetHead })) {
         console.warn(`[review-state] Refusing re-review for ${repo}#${prNumber}@${targetHead}: settled comment-only verdict`);
         return buildBlockedRereviewResult('comment-only-verdict-settled', currentRow);
       }

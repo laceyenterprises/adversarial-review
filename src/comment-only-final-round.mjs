@@ -3,8 +3,30 @@
 // review or an unproven ancestry transition cannot grant closer authority.
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { normalizeEffectiveReviewVerdict } from './kernel/verdict.mjs';
 
 const SHA = /^[0-9a-f]{40}$/iu;
+
+export function hasSettledCommentOnlyReviewHead(rootDir, { repo, prNumber, headSha }) {
+  const prefix = `${String(repo || '').replace(/\//gu, '__').replace(/[^a-zA-Z0-9_.-]/gu, '-')}-pr-${Number(prNumber)}-`;
+  for (const status of ['pending', 'in-progress', 'completed', 'failed', 'stopped']) {
+    const dir = join(rootDir, 'data', 'follow-up-jobs', status);
+    let names;
+    try {
+      names = readdirSync(dir).filter((name) => name.startsWith(prefix) && name.endsWith('.json'));
+    } catch (err) {
+      if (err?.code === 'ENOENT') continue;
+      throw err;
+    }
+    for (const name of names) {
+      const job = JSON.parse(readFileSync(join(dir, name), 'utf8'));
+      if (job?.repo === repo && Number(job?.prNumber) === Number(prNumber) &&
+          job?.revisionRef === headSha &&
+          normalizeEffectiveReviewVerdict(job.reviewBody) === 'comment-only') return true;
+    }
+  }
+  return false;
+}
 
 export function hasCompletedCommentOnlyFinalRound(rootDir, { repo, prNumber }) {
   const dir = join(rootDir, 'data', 'follow-up-jobs', 'completed');

@@ -2636,7 +2636,19 @@ async function teardownSamePrHammerHolder({
       });
     }
 
-    try {
+    if (!existsSync(worktreePath)) {
+      try {
+        await execFileImpl('git', ['-C', owningRepo, 'worktree', 'prune'], {
+          env, maxBuffer: 1024 * 1024, timeout: 60_000, killSignal: 'SIGTERM',
+        });
+        attempts.push({ worktreePath, action: 'git-worktree-prune', ok: true,
+          recoveredFrom: 'missing-directory' });
+      } catch (pruneErr) {
+        attempts.push({ worktreePath, action: 'git-worktree-prune', ok: false,
+          error: String(pruneErr?.stderr || pruneErr?.message || pruneErr) });
+        continue;
+      }
+    } else try {
       await execFileImpl('git', [
         '-C',
         owningRepo,
@@ -2663,58 +2675,7 @@ async function teardownSamePrHammerHolder({
         ok: false,
         error: removeDetail,
       });
-      // A STALE REGISTRATION is not a removable worktree. When the holder
-      // directory is already gone, git keeps the branch pinned via leftover
-      // administrative metadata and `worktree remove` refuses with "is not a
-      // working tree" -- `--force` does not help, because --force overrides
-      // dirty/locked, not missing. `prune` is the command for exactly this.
-      //
-      // Without this branch the hammer can never dispatch: every attempt fails
-      // ProvisionError "branch is already checked out by another worker
-      // worktree", the closer prompt is rewritten each tick, and the PR strands
-      // with no hammer and no cap record. Observed on agent-os#5889, whose
-      // holder worker had already SUCCEEDED and whose directory no longer
-      // existed -- 5 closer prompts, zero dispatches.
-      if (!isStaleWorktreeRegistrationError(removeDetail)) {
-        continue;
-      }
-      const staleRemoveAttempt = attempts.at(-1);
-      try {
-        await execFileImpl('git', [
-          '-C',
-          owningRepo,
-          'worktree',
-          'prune',
-        ], {
-          env,
-          maxBuffer: 1024 * 1024,
-          timeout: 60_000,
-          killSignal: 'SIGTERM',
-        });
-        if (
-          staleRemoveAttempt
-          && staleRemoveAttempt.worktreePath === worktreePath
-          && staleRemoveAttempt.action === 'git-worktree-remove'
-        ) {
-          staleRemoveAttempt.recovered = true;
-          staleRemoveAttempt.recoveredBy = 'git-worktree-prune';
-        }
-        attempts.push({
-          worktreePath,
-          action: 'git-worktree-prune',
-          ok: true,
-          recoveredFrom: 'stale-registration',
-        });
-      } catch (pruneErr) {
-        attempts.push({
-          worktreePath,
-          action: 'git-worktree-prune',
-          ok: false,
-          recoveredFrom: 'stale-registration',
-          error: String(pruneErr?.stderr || pruneErr?.message || pruneErr),
-        });
-        continue;
-      }
+      continue;
     }
 
     const tearDownArgs = ['worker', 'tear-down', workerId, '--force', '--root', hqRoot];

@@ -237,9 +237,14 @@ The control is `watcher.ama_hammer_dispatch_mode`, with env override
 | `background` | The posted-review phase submits the hammer dispatch to the in-process AMA hammer background queue and immediately returns retained ownership (`ama-pending`) with reason `ama-closer-dispatch-backgrounded`. The watcher does not fall through to merge-agent. The background run calls `maybeDispatchAmaCloser` with the same closer args, detached from the posted-review step deadline. |
 
 The queue is process-local, bounded, and keyed by PR@head
-(`<owner>/<repo>#<pr>@<head>`). It starts at most two hammer `hq dispatch`
-subprocesses concurrently, runs waiters FIFO, and coalesces duplicate
-submissions for the same PR@head while one is queued or running.
+(`<owner>/<repo>#<pr>@<head>`). It starts at most three hammer `hq dispatch`
+subprocesses concurrently, runs eligible waiters FIFO, and coalesces duplicate
+submissions for the same PR@head while one is queued or running. Different heads
+of the same PR run serially because they share a worker worktree. The closer
+also checks active dispatch records for the same PR at any head before launch;
+its configurable capacity limit counts active launches for other PRs only.
+`watcher.ama_closer_max_concurrent_launches` is read when the process-local
+queue is first created, so changing this limit requires a watcher restart.
 When a queued entry gets a slot, the watcher fetches the live PR state,
 head, draft flag, and mergeability before calling the closer. A closed,
 updated, draft, or unmergeable PR yields `background-pr-state-changed` without
@@ -254,10 +259,17 @@ outcome instead of submitting again**: the result goes through the same handling
 as an inline call. A terminal rejection from the closer's own gates (hammer retry
 cap, structural ineligibility) or a thrown error (`ama-dispatch-failed`) reaches
 the watcher exactly as it would inline, one tick later, so the merge-agent
-fallback and alerting are still reachable. In steady state a PR@head alternates
+fallback and alerting are still reachable. An exhausted remediation round
+remains `success/remediation-stopped` on the adversarial gate with an
+operator-decision alert. It is not projected as `hammer-pending` merely because
+the round cap was reached: AMA enablement, structural holds, and hammer dispatch
+caps are checked by the closer before any hand-off. A refused hand-off remains
+operator visible and follows normal no-progress backoff. In steady state a
+PR@head alternates
 between a submitting tick and an applying tick, and the tick after that may
 submit again only if the normal closer logic still allows it. The durable
-guards remain the safety boundary: `maybeDispatchAmaCloser` writes
+guards remain the safety boundary: `maybeDispatchAmaCloser` checks for an active
+same-PR launch, writes
 `state: dispatching` and acquires the per-PR closer lease before shelling out,
 and later ticks see that active dispatch/lease as
 `ama-closer-launch-in-progress` instead of launching a duplicate closer.

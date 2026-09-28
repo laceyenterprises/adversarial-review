@@ -3171,6 +3171,24 @@ test('LANESTARVE-01: a slow-lane PR is re-walked within the ceiling however deep
   assert.equal(noProgressLane.DEFAULT_NO_PROGRESS_REWALK_CEILING_TICKS, CEILING);
 });
 
+test('an exhausted stop without hammer eligibility backs off', () => {
+  const rootDir = tempRoot();
+  try {
+    const identity = { repo: REPO, prNumber: 7299 };
+    for (let tick = 0; tick < DEFAULT_NO_PROGRESS_LANE_CAP + 4; tick += 1) {
+      const result = recordNoProgressLaneRun(rootDir, identity, {
+        headSha: HEAD_A, fingerprint: 'stopped:max-rounds-reached',
+        decisionFingerprint: 'remediation-stopped', urgent: false, now: `t${tick}`, logger: silentLogger,
+      });
+      if (tick >= DEFAULT_NO_PROGRESS_LANE_CAP) assert.equal(result.lane, LANE_SLOW);
+    }
+    assert.ok(readNoProgressLane(rootDir, identity, { logger: silentLogger }).noProgressTicks
+      >= DEFAULT_NO_PROGRESS_LANE_CAP);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('LANESTARVE-01: the gate threads the handler decision and floor admission into the ledger', async () => {
   const rootDir = tempRoot();
   try {

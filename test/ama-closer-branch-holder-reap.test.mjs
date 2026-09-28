@@ -162,6 +162,7 @@ test('suffixed hammer holder requires terminal worker evidence', async () => {
   const calls = [];
 
   const result = await __testables__.teardownSamePrHammerHolder({
+    existsSyncImpl: () => true,
     err,
     prNumber: 3064,
     hqPath: '/opt/hq/bin/hq',
@@ -182,6 +183,36 @@ test('suffixed hammer holder requires terminal worker evidence', async () => {
   assert.equal(result.attempts[0].reason, 'missing-launch-request-id');
 });
 
+test('missing self-owned hammer worktree is torn down despite a stale running ledger row', async () => {
+  const hqRoot = join(tmpdir(), `agent-os-hq-missing-hammer-${Date.now()}`);
+  const workerId = 'hammer-ama-pr-3064-a0a0a0a0a0a0';
+  const worktreePath = join(hqRoot, 'workers', workerId, 'agent-os');
+  const calls = [];
+  let statusReads = 0;
+  const result = await __testables__.teardownSamePrHammerHolder({
+    err: { stderr: `branch-holder-blocked at ${worktreePath}` },
+    prNumber: 3064,
+    hqPath: '/opt/hq/bin/hq',
+    hqRoot,
+    existsSyncImpl: () => false,
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      return { stdout: '', stderr: '' };
+    },
+    readLatestWorkerRunStatusImpl: async () => {
+      statusReads += 1;
+      return { ok: true, row: { status: 'running' } };
+    },
+    logger: { warn() {} },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(statusReads, 0);
+  assert.deepEqual(calls.map(call => call.cmd), ['git', '/opt/hq/bin/hq']);
+  assert.deepEqual(calls[1].args, ['worker', 'tear-down', workerId, '--force', '--root', hqRoot]);
+  assert.ok(result.attempts.some(attempt => attempt.action === 'git-worktree-prune' && attempt.ok));
+});
+
 test('returns [] for empty / non-collision error', () => {
   assert.deepEqual(samePrHammerHolderWorktreePaths('', 3219, HQ_ROOT), []);
   assert.deepEqual(samePrHammerHolderWorktreePaths({ stderr: 'unrelated failure' }, 3219, HQ_ROOT), []);
@@ -200,6 +231,7 @@ test('teardown passes hqRoot through to parser and cleanup commands', async () =
   };
   const calls = [];
   const result = await __testables__.teardownSamePrHammerHolder({
+    existsSyncImpl: () => true,
     err,
     prNumber: 3219,
     hqPath: '/opt/hq/bin/hq',
@@ -433,6 +465,7 @@ test('terminal coding branch-holder is torn down and emits release telemetry', a
   const logs = [];
 
   const result = await __testables__.teardownSamePrHammerHolder({
+    existsSyncImpl: () => true,
     err,
     prNumber: 777,
     repo: 'agent-os',
@@ -479,6 +512,7 @@ test('live coding branch-holder is not torn down and falls back to branch-holder
   const calls = [];
 
   const result = await __testables__.teardownSamePrHammerHolder({
+    existsSyncImpl: () => true,
     err,
     prNumber: 778,
     hqPath: '/opt/hq/bin/hq',
@@ -515,6 +549,7 @@ test('terminal coding branch-holder teardown failure returns fallback result wit
   };
 
   const result = await __testables__.teardownSamePrHammerHolder({
+    existsSyncImpl: () => true,
     err,
     prNumber: 779,
     hqPath: '/opt/hq/bin/hq',
@@ -561,6 +596,7 @@ test('terminal coding branch-holder retries transient worker teardown before suc
   const sleeps = [];
 
   const result = await __testables__.teardownSamePrHammerHolder({
+    existsSyncImpl: () => true,
     err,
     prNumber: 781,
     hqPath: '/opt/hq/bin/hq',
@@ -610,6 +646,7 @@ test('terminal coding branch-holder exhausts transient worker teardown retries',
   const sleeps = [];
 
   const result = await __testables__.teardownSamePrHammerHolder({
+    existsSyncImpl: () => true,
     err,
     prNumber: 782,
     hqPath: '/opt/hq/bin/hq',
@@ -657,6 +694,7 @@ test('terminal coding branch-holder git cleanup failure preserves worker metadat
   const calls = [];
 
   const result = await __testables__.teardownSamePrHammerHolder({
+    existsSyncImpl: () => true,
     err,
     prNumber: 780,
     hqPath: '/opt/hq/bin/hq',

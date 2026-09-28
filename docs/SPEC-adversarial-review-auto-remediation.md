@@ -1974,8 +1974,13 @@ Reason mapping:
 | `blocking-review` | `failure` | The latest review verdict still requests changes. |
 | `missing-verdict` | `failure` | The latest review body does not contain a usable verdict. |
 | `unknown-verdict` | `failure` | The latest review body contains a malformed or unsupported verdict. |
-| `remediation-failed` | `failure` | Follow-up remediation failed and needs operator action. |
-| `remediation-stopped` | `failure` | Follow-up remediation stopped and needs operator action. |
+| `remediation-failed` | `success` | Follow-up remediation failed with unresolved findings; the operator is alerted and decides from the review thread. This does not certify a clean review. |
+| `remediation-stopped` | `success` | Follow-up remediation stopped with unresolved findings, including budget exhaustion; the operator is alerted and decides from the review thread. This does not certify a clean review. |
+
+A `max-rounds-reached` stop does not by itself prove that a hammer can run.
+The gate therefore retains `remediation-stopped` and the operator-decision
+signal while the AMA closer independently checks enablement, structural holds,
+and its dispatch caps. The gate does not post a synthetic `hammer-pending` state.
 
 Clean review verdicts still create follow-up jobs for auditability and gate projection. The effective verdict reconciler treats the structured `## Blocking issues` section as authoritative whenever that section is present: `Request changes` with `- None.` normalizes to `Comment only`, while `Comment only` or `Approved` with any standing blocking item normalizes back to `Request changes`. If a clean verdict body still contains a structured `## Blocking issues` section with any standing item other than `- None.`, merge-agent dispatch parks at `skip-blockers-present` rather than treating the verdict as settled-success. The `- None.` sentinel remains a fail-safe empty marker, not a license to free-form the section: same-line explanatory prose and indented wrapped continuation lines are tolerated, but flush-left follow-on prose or finding-card field markers are treated as blocker content so the gate refuses rather than silently opening.
 

@@ -3001,7 +3001,7 @@ function buildMergeAgentDispatchJob(rootDir, candidate, { reviewStateDb = null }
     blockingFindingState: blockingFindings.state,
     nonBlockingFindingCount: nonBlockingFindings.count,
     nonBlockingFindingState: nonBlockingFindings.state,
-    latestFollowUpJobStatus: normalizeFollowUpJobStatus(latestJob?.status),
+    latestFollowUpJobStatus: normalizeFollowUpJobStatus(latestJob?.status), remediationStopCode: latestJob?.remediationPlan?.stop?.code || null,
     latestFollowUpReReviewRequested: latestJob?.reReview?.requested === true,
     remediationCurrentRound: Number(latestJob?.remediationPlan?.currentRound || 0),
     remediationMaxRounds: effectiveRemediationMaxRounds(latestJob),

@@ -1642,7 +1642,26 @@ function isReclaimableBranchHolderBlockedAmaCloserRecord(record, { now = null } 
   return ageMs >= amaCloserPendingLeaseReclaimAgeMs(record);
 }
 
+function isAmaCloserMissingLrqTimedOut(record, options = {}) {
+  if (record?.launchRequestId) return false;
+  const attemptedAt = parseTimeMs(record?.lastAttemptedAt);
+  const now = parseTimeMs(options.now || new Date().toISOString());
+  return attemptedAt === null || (now !== null
+    && now - attemptedAt >= amaCloserPendingLeaseReclaimAgeMs(record));
+}
+
 export function isAmaCloserLaunchInProgress(record, options = {}) {
+  if ((record?.state !== 'dispatched' && record?.lastError)
+    || String(record?.state || '').includes('blocked')
+    || String(record?.state || '').includes('failed')
+    || isAmaCloserMissingLrqTimedOut(record, options)) return false;
+  if (record?.state === 'dispatched') {
+    return isActiveAmaCloserDispatchRecord(record, options)
+      && (!Object.hasOwn(options, 'lease')
+        || options.lease === null
+        || (options.lease?.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED
+          && !isReclaimableDispatchedAmaCloserLease(options.lease, options)));
+  }
   if (
     !hasInterruptedInFlightAmaCloserDispatchShape(record)
     || isStaleDispatchingAmaCloserRecord(record, options)
@@ -1741,20 +1760,9 @@ export function listActiveAmaCloserDispatches(rootDir, options = {}) {
   return activeDispatches;
 }
 
-function sameAmaCloserDispatchIdentity(record, identity) {
-  return Boolean(
-    record
-      && identity
-      && String(record.repo || '') === String(identity.repo || '')
-      && Number(record.prNumber) === Number(identity.prNumber)
-      && String(record.headSha || '') === String(identity.headSha || ''),
-  );
-}
-
-function findActiveAmaCloserLaunch(rootDir, identity, options = {}) {
+function findActiveAmaCloserLaunches(rootDir, options = {}) {
   const active = listActiveAmaCloserDispatches(rootDir, options);
-  return active.find((record) => {
-    if (sameAmaCloserDispatchIdentity(record, identity)) return false;
+  return active.filter((record) => {
     let lease = null;
     try {
       lease = readAmaCloserLease(rootDir, {
@@ -1765,8 +1773,9 @@ function findActiveAmaCloserLaunch(rootDir, identity, options = {}) {
     } catch {
       lease = null;
     }
-    return isAmaCloserLaunchInProgress(record, { ...options, lease });
-  }) || null;
+    const inProgress = isAmaCloserLaunchInProgress(record, { ...options, lease });
+    return inProgress;
+  });
 }
 
 function writeAmaCloserDispatchRecord(rootDir, identity, doc) {
@@ -2693,6 +2702,7 @@ async function teardownSamePrHammerHolder({
   inspectHolderImpl = inspectHolderForTakeover,
   holderAccessImpl = holderCommand,
   sleepImpl = sleep,
+  existsSyncImpl = existsSync,
 }) {
   if (!hqRoot) return { attempted: false, ok: false, reason: 'no-hq-root', worktreePaths: [] };
   const worktreePaths = samePrHammerHolderWorktreePaths(err, prNumber, hqRoot);
@@ -2703,6 +2713,8 @@ async function teardownSamePrHammerHolder({
   const attempts = [];
   for (const worktreePath of worktreePaths) {
     const workerId = basename(dirname(worktreePath));
+    const holderMissing = !existsSyncImpl(worktreePath);
+    const selfOwned = isSamePrHammerCloserWorkerId(workerId, prNumber);
     let owningRepo;
     try {
       owningRepo = await holderOwningRepo({ worktreePath, hqRoot, repo, execFileImpl, env });
@@ -2711,12 +2723,14 @@ async function teardownSamePrHammerHolder({
         error: String(ownerErr?.message || ownerErr) });
       continue;
     }
-    let terminality;
-    {
+    let terminality = { terminal: true, reason: 'self-owned-missing-worktree' };
+    // A missing worktree for this PR's own hammer is the recovery case. Its
+    // ledger may still say running, but the worktree is already gone.
+    if (!(holderMissing && selfOwned)) {
       terminality = await resolveTerminalCodingBranchHolder({
         workerId,
         hqRoot,
-        allowHammer: isSamePrHammerCloserWorkerId(workerId, prNumber),
+        allowHammer: selfOwned,
         ledgerTarget,
         ledgerDbPath,
         env,
@@ -2747,9 +2761,12 @@ async function teardownSamePrHammerHolder({
         workerStatus: terminality.workerStatus || null,
         launchRequestId: terminality.launchRequestId || null,
       });
+    } else {
+      attempts.push({ worktreePath, workerId, action: 'terminal-branch-holder-preflight',
+        ok: true, reason: terminality.reason });
     }
 
-    if (!existsSync(worktreePath)) {
+    if (holderMissing) {
       try {
         await execFileImpl('git', ['-C', owningRepo, 'worktree', 'prune'], {
           env, maxBuffer: 1024 * 1024, timeout: 60_000, killSignal: 'SIGTERM',
@@ -5246,12 +5263,19 @@ export async function maybeDispatchAmaCloser({
     );
   }
   const dispatchTimeoutMs = resolveAmaDispatchTimeoutMs(cfg);
-  const activeLaunch = findActiveAmaCloserLaunch(rootDir, targetDispatchIdentity, {
+  const activeLaunches = findActiveAmaCloserLaunches(rootDir, {
     now: dispatchContext.dispatchedAt,
     log: logger,
     processKillImpl,
   });
-  if (activeLaunch) {
+  const samePrLaunch = activeLaunches.find((record) => record.repo === repo
+    && Number(record.prNumber) === Number(prNumber));
+  const otherPrLaunches = activeLaunches.filter((record) => record.repo !== repo
+    || Number(record.prNumber) !== Number(prNumber));
+  const maxConcurrentLaunches = Math.max(1, Number(cfg?.watcher?.ama_closer_max_concurrent_launches
+    ?? cfg?.amaCloserMaxConcurrentLaunches ?? 3) || 3);
+  if (samePrLaunch || otherPrLaunches.length >= maxConcurrentLaunches) {
+    const activeLaunch = samePrLaunch || otherPrLaunches[0];
     logAmaCloserDispatchEvent(logger, 'ama_closer.dispatch_deferred_active_launch', {
       repo,
       prNumber,

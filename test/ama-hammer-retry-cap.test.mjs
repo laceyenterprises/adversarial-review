@@ -642,6 +642,9 @@ test('exhausted final-hammer path counts lifetime dispatches across heads and tr
       ...deps,
     });
     assert.equal(result.dispatched, true, `dispatch ${i} should be allowed`);
+    updateAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER,
+      headSha: `head-${i}` }, (record) => ({ ...record,
+      state: 'failed-without-merge', lastObservedStatus: 'failed' }));
   }
   const blocked = await maybeDispatchAmaCloser({
     ...hammerDispatchArgs(rootDir, {
@@ -933,6 +936,9 @@ test('configured hammer lifetime ceiling disables hammer at 0 and controls dispa
       ...depsThree,
     });
     assert.equal(result.dispatched, true, `dispatch ${i} should be allowed`);
+    updateAmaCloserDispatchRecord(rootThree, { repo: REPO, prNumber: PR_NUMBER,
+      headSha: `cfg-job-${i}` }, (record) => ({ ...record,
+      state: 'failed-without-merge', lastObservedStatus: 'failed' }));
   }
   const blockedThree = await maybeDispatchAmaCloser({
     ...hammerDispatchArgs(rootThree, {
@@ -2430,7 +2436,7 @@ test('active AMA closer dispatch classification releases stale launch-only recor
   );
 });
 
-test('active AMA closer launch-only record stays active across a 600s retry window', () => {
+test('launch-only record stays active across a 600s retry window', () => {
   assert.ok(
     AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS > 30 * 60 * 1000,
     'the reclaim window must cover three 600s dispatch attempts plus retry overhead',
@@ -2459,6 +2465,32 @@ test('active AMA closer launch-only record stays active across a 600s retry wind
     isActiveAmaCloserDispatchRecord(record, { now: '2026-07-06T12:40:00Z' }),
     false,
   );
+});
+
+test('listing a launch and a running worker does not delete their leases', (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-list-read-only-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const now = '2026-07-06T12:20:00Z';
+  for (const [prNumber, state, status, lastError] of [
+    [PR_NUMBER, 'dispatching', null, null],
+    [PR_NUMBER + 1, 'dispatched', 'running', 'transient status probe error'],
+  ]) {
+    const identity = { repo: REPO, prNumber, headSha: REVIEWED_HEAD };
+    updateAmaCloserDispatchRecord(rootDir, identity, () => ({
+      ...identity, state, lastAttemptedAt: '2026-07-06T12:00:00Z',
+      launchRequestId: state === 'dispatched' ? 'lrq_live' : null,
+      lastObservedStatus: status, lastObservedAt: status ? now : null,
+      lastError, dispatchTimeoutMs: 600_000,
+    }));
+    acquireAmaCloserLease({ rootDir, ...identity, watcherPid: process.pid,
+      now: '2026-07-06T12:00:00Z' });
+    if (state === 'dispatched') updateAmaCloserLease({ rootDir, ...identity,
+      status: 'dispatched', lrqId: 'lrq_live', now });
+  }
+  assert.equal(listActiveAmaCloserDispatches(rootDir, { now }).length, 2);
+  for (const prNumber of [PR_NUMBER, PR_NUMBER + 1]) {
+    assert.ok(readAmaCloserLease(rootDir, { repo: REPO, prNumber, headSha: REVIEWED_HEAD }));
+  }
 });
 
 test('stale dispatching record with reaped lease redispatches instead of exhausting retry bound', async (t) => {

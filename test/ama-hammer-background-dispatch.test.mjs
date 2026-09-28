@@ -85,6 +85,32 @@ test('queue bounds concurrency and starts waiters FIFO as runs settle', async ()
   assert.deepEqual(order, ['A', 'B', 'C']);
 });
 
+test('queue holds a newer head until the same PR run settles without blocking another PR', async () => {
+  const queue = createAmaHammerBackgroundQueue({ maxConcurrent: 2 });
+  const oldHead = deferred();
+  const otherPr = deferred();
+  const order = [];
+  assert.equal(queue.submit({ key: 'o/r#1@old', run: () => {
+    order.push('old');
+    return oldHead.promise;
+  } }).state, 'started');
+  assert.equal(queue.submit({ key: 'o/r#1@new', run: async () => { order.push('new'); } }).state, 'queued');
+  assert.equal(queue.submit({ key: 'o/r#2@head', run: () => {
+    order.push('other');
+    return otherPr.promise;
+  } }).state, 'started');
+  assert.deepEqual(order, ['old', 'other']);
+  oldHead.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(order, ['old', 'other', 'new']);
+  otherPr.resolve();
+  await queue.drain();
+});
+
+test('background queue defaults to three launch slots', () => {
+  assert.equal(createAmaHammerBackgroundQueue().snapshot().limit, 3);
+});
+
 test('a failing background dispatch is reported and does not wedge the queue', async () => {
   const queue = createAmaHammerBackgroundQueue({ maxConcurrent: 1 });
   const settled = [];
@@ -188,6 +214,43 @@ test('inline mode (default) still awaits the closer and returns its result', asy
   assert.equal(result.launchRequestId, 'lrq_inline');
 });
 
+test('max-rounds stop hands the next closure tick directly to the hammer', async () => {
+  let payload;
+  await maybeDispatchAmaClosureFor(closureArgs({
+    dispatchJob: { remediationStopCode: 'max-rounds-reached' },
+    resolveReviewCycleExhaustionImpl: () => ({ reviewCycleExhausted: false }),
+    maybeDispatchAmaCloserImpl: async (args) => {
+      payload = args;
+      return { dispatched: true, launchRequestId: 'lrq_exhausted' };
+    },
+  }));
+  assert.equal(payload.reviewState.reviewCycleExhausted, true);
+  assert.equal(payload.dispatchContext.dispatchReason, 'exhausted-final-hammer');
+});
+
+test('not-eligible refusal carries a retry-after and its gate reasons', async () => {
+  const result = await maybeDispatchAmaClosureFor(closureArgs({
+    maybeDispatchAmaCloserImpl: async () => ({
+      dispatched: false, skipMergeAgent: true, reason: 'not-eligible', reasons: ['ci-not-green'],
+    }),
+  }));
+  assert.equal(result.reason, 'not-eligible');
+  assert.deepEqual(result.reasons, ['ci-not-green']);
+  assert.equal(result.retryAfterMs, 30_000);
+});
+
+test('structural not-eligible refusal is operator-visible and terminal', async () => {
+  const result = await maybeDispatchAmaClosureFor(closureArgs({
+    maybeDispatchAmaCloserImpl: async () => ({
+      dispatched: false, skipMergeAgent: true, reason: 'not-eligible',
+      reasons: ['risk-class-not-permitted'],
+    }),
+  }));
+  assert.equal(result.needsOperator, true);
+  assert.equal(result.operatorReason, 'not-eligible:risk-class-not-permitted');
+  assert.equal(result.retryAfterMs, undefined);
+});
+
 test('background mode: a slow hammer dispatch no longer holds the caller, and PR@head is not re-dispatched while in flight', async () => {
   const queue = createAmaHammerBackgroundQueue({ maxConcurrent: 2 });
   const hqDispatch = deferred(); // stands in for a 150 s `hq dispatch`
@@ -264,6 +327,7 @@ test('queued hammer dispatch rechecks live PR state and head before launching', 
     const settled = await maybeDispatchAmaClosureFor(args);
     assert.equal(settled.dispatched, false);
     assert.equal(settled.reason, 'background-pr-state-changed');
+    assert.equal(settled.retryAfterMs, 30_000);
   }
 });
 

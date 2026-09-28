@@ -699,6 +699,10 @@ export async function maybeDispatchAmaClosureFor({
       loadedConfig.getMergeAuthorityConfig(),
       { fallbackSources: loadedConfig.sources || {} },
     );
+    cfg = {
+      ...cfg,
+      amaCloserMaxConcurrentLaunches: loadedConfig.get?.('watcher.ama_closer_max_concurrent_launches', 3) ?? 3,
+    };
     orchestrationMode = resolveOrchestrationMode({
       loadedConfig,
       logger,
@@ -713,6 +717,7 @@ export async function maybeDispatchAmaClosureFor({
       { amaEnabled: false },
     );
   }
+
   if (!cfg?.enabled) {
     // AMA-06N — surface `amaEnabled` so the watcher's coexistence
     // decision (the call site of this helper) can branch on it. With
@@ -815,6 +820,9 @@ export async function maybeDispatchAmaClosureFor({
       `[watcher] AMA final-hammer round-budget probe failed for ${repoPath}#${prNumber}; ` +
         `treating cycle as NOT exhausted: ${err?.message || err}`,
     );
+  }
+  if ((dispatchJob?.remediationStopCode || dispatchJob?.remediationPlan?.stop?.code) === 'max-rounds-reached') {
+    reviewCycleExhausted = true;
   }
 
   const settledReviewHeadSha = candidate?.headSha || currentRevisionRef || null;
@@ -1745,7 +1753,9 @@ export async function maybeDispatchAmaClosureFor({
       prNumber,
       headSha: dispatchContext.targetRemediationSha,
     });
-    const backgroundQueue = amaHammerBackgroundQueueImpl();
+    const backgroundQueue = amaHammerBackgroundQueueImpl({
+      maxConcurrent: cfg.amaCloserMaxConcurrentLaunches,
+    });
     backgroundSettled = backgroundQueue.takeSettled?.(backgroundKey) || null;
     if (!backgroundSettled) {
       const submission = backgroundQueue.submit({
@@ -1821,6 +1831,9 @@ export async function maybeDispatchAmaClosureFor({
           : new Error(String(backgroundSettled.error || 'background AMA dispatch failed'));
       }
       result = backgroundSettled.result;
+      if (result?.reason === 'background-pr-state-changed') {
+        result = { ...result, skipMergeAgent: true, retryAfterMs: 30_000 };
+      }
     } else {
       const stopTracking = trackCoexistenceOperation(operationTracker, 'ama-hammer-dispatch');
       try {
@@ -1862,6 +1875,17 @@ export async function maybeDispatchAmaClosureFor({
   return withAmaDispatchMetadata(
     {
       ...result,
+      ...(result?.reason === 'not-eligible'
+        ? (() => {
+            const hardReason = (result.reasons || []).find((reason) =>
+              ['pr-not-open', 'risk-class-not-permitted', 'branch-protection-missing-gate',
+                'fast-merge-state-unsupported'].includes(reason)
+              || String(reason).startsWith('label-'));
+            return hardReason
+              ? { needsOperator: true, operatorReason: `not-eligible:${hardReason}` }
+              : { retryAfterMs: 30_000 };
+          })()
+        : {}),
       ...(hamTerminalRemediationValidated ? { hamTerminalRemediationValidated: true } : {}),
     },
     { amaEnabled: true },
@@ -1958,6 +1982,10 @@ export async function resolveMergeAgentCoexistenceForWatcher({
     return { outcome: 'ama-dispatched', amaClosureResult };
   }
   if (amaClosureResult?.skipMergeAgent) {
+    if (amaClosureResult?.needsOperator === true) {
+      return { outcome: 'await-operator', amaClosureResult,
+        coexistence: { action: COEXISTENCE_ACTION.AWAIT_OPERATOR_ACTION } };
+    }
     // FIX (stale-review-head spin, #5053): the `not-eligible` retain shape is the
     // ONLY skipMergeAgent case that can spin unbounded — every other reason
     // (daemon-merged, hammer-retry-cap-exhausted, autonomous-merge-disabled, …) is

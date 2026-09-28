@@ -31,7 +31,28 @@ import {
   summarizeRoundBudgetAnomalies,
   resolveReviewPipelineHealthConfig,
   stoppedJobIsCiRegressionStopped,
+  summarizeHammerEfficiency,
 } from '../src/review-pipeline-health.mjs';
+
+test('hammer efficiency counts only merged closer passes and divides recorded input tokens by merges', () => {
+  const db = new Database(':memory:');
+  db.exec(`CREATE TABLE reviewer_passes (
+    pass_kind TEXT, reviewer_class TEXT, status TEXT, token_input INTEGER, metadata_json TEXT
+  )`);
+  db.prepare(`INSERT INTO reviewer_passes VALUES (?, ?, ?, ?, ?)`).run(
+    'closer', 'hammer', 'failed', 100, '{"merged":false}'
+  );
+  db.prepare(`INSERT INTO reviewer_passes VALUES (?, ?, ?, ?, ?)`).run(
+    'closer', 'hammer-claude', 'completed', 50, '{"merged":true}'
+  );
+  db.prepare(`INSERT INTO reviewer_passes VALUES (?, ?, ?, ?, ?)`).run(
+    'rereview', 'codex', 'completed', 500, '{"merged":true}'
+  );
+  assert.deepEqual(summarizeHammerEfficiency(db), {
+    runs: 2, merges: 1, inputTokens: 150, inputTokensPerMerge: 150,
+  });
+  db.close();
+});
 
 import { PROVIDER_OVERLOADED_FAILURE_CLASS } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS } from '../src/quota-exhaustion.mjs';

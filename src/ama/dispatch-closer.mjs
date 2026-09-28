@@ -3120,7 +3120,6 @@ function retainExistingAmaCloserDispatch(existingRecord, workerClass, status) {
 function closerReviewerPassStatusForDispatchStatus(status, { merged = false } = {}) {
   if (merged) return 'completed';
   const normalized = String(status || '').trim().toLowerCase();
-  if (normalized === 'succeeded' || normalized === 'unverified-terminal-success') return 'completed';
   if (normalized === 'cancelled' || normalized === 'canceled' || normalized === 'superseded') return 'cancelled';
   return 'failed';
 }
@@ -4190,12 +4189,17 @@ export async function maybeDispatchAmaCloser({
           // head advance as supersession hid the failed closure attempt and
           // bypassed the bounded hammer retry/alert path (HAMSYNC-01).
           hammerEndedWithoutMerge = true;
+          const concurrentWriter = /force-with-lease|stale info|fetch first|concurrent.writer/i.test(
+            [statusProbe?.error, existingRecord?.lastError].filter(Boolean).join(' '),
+          );
+          const noMergeOutcome = concurrentWriter
+            ? 'no-merge:concurrent-writer' : 'failed-without-merge';
           status = 'failed';
           existingDispatchStatus = status;
           finalizeAmaCloserLeaseBestEffort({
             rootDir,
             leaseIdentity: existingRecordLeaseIdentity,
-            terminalOutcome: 'failed-without-merge',
+            terminalOutcome: noMergeOutcome,
             now: dispatchContext.dispatchedAt,
             logger,
             repo,
@@ -4205,7 +4209,8 @@ export async function maybeDispatchAmaCloser({
             ...(current || existingRecord),
             lastObservedStatus: 'succeeded',
             lastObservedAt: dispatchContext.dispatchedAt,
-            lastError: 'hammer-ended-without-merge',
+            lastError: noMergeOutcome,
+            outcome: noMergeOutcome,
           }));
           logAmaCloserDispatchEvent(logger, 'ama_closer.hammer_ended_without_merge', {
             repo,

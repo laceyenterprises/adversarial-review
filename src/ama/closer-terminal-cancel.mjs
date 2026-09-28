@@ -2,6 +2,7 @@ import { accessSync, constants } from 'node:fs';
 import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
 import { findLiveAmaCloserLease, updateAmaCloserLease } from './closer-lease.mjs';
+import { updateAmaCloserDispatchRecord } from './dispatch-closer.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -26,6 +27,12 @@ export async function cancelCloserForTerminalPr({
   }
   const outcome = transition === 'merged' ? 'pr-merged-externally' : 'pr-closed-externally';
   updateAmaCloserLease({ rootDir, repo, prNumber, headSha, status: 'terminal', terminalOutcome: outcome, now });
+  updateAmaCloserDispatchRecord(rootDir, { repo, prNumber, headSha }, (record) => record && ({
+    ...record,
+    outcome: transition === 'merged' ? 'no-merge:pr-merged-externally' : 'no-merge:pr-closed-externally',
+    lastObservedStatus: 'cancelled',
+    lastObservedAt: now,
+  }));
   logger.log?.(`[ama-closer] ${repo}#${prNumber} ${outcome}; cancelled lrq=${lease.lrqId || 'none'}`);
   return { cancelled: Boolean(lease.lrqId), outcome };
 }

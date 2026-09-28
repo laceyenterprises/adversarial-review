@@ -294,6 +294,9 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_dispatch_spawn_failures',
   'review_pipeline_hammer_dispatch_stalled',
   'review_pipeline_hammer_dispatch_stall_blind',
+  'review_pipeline_hammer_runs_total',
+  'review_pipeline_hammer_merges_total',
+  'review_pipeline_hammer_input_tokens_per_merge',
   'review_pipeline_dag_autowalk_healthy',
   'review_pipeline_ttm_minutes',
   'review_pipeline_ttm_open_budget_breaches',
@@ -353,6 +356,9 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_dispatch_spawn_failures: 'Recent dispatch daemon stderr lines matching closer/hammer spawn failure patterns.',
   review_pipeline_hammer_dispatch_stalled: 'Whether conflicted PRs exist while no hammer dispatch has been observed within the configured window.',
   review_pipeline_hammer_dispatch_stall_blind: 'Whether the hammer dispatch stall detector cannot decide because required evidence is missing.',
+  review_pipeline_hammer_runs_total: 'Recorded terminal hammer runs.',
+  review_pipeline_hammer_merges_total: 'Recorded hammer runs that merged their PR.',
+  review_pipeline_hammer_input_tokens_per_merge: 'Recorded hammer input tokens divided by hammer merges; NaN when there is no merge.',
   review_pipeline_dag_autowalk_healthy: 'Whether the dag-autowalk LaunchAgent has a healthy exit/log recency state.',
   review_pipeline_ttm_minutes: 'Time-to-merge rollup in minutes over the configured window.',
   review_pipeline_ttm_open_budget_breaches: 'Current open PRs exceeding the measured rounds-aware time-to-merge budget (SLOW; trend only).',
@@ -3728,6 +3734,26 @@ function readAmaCloserLeases(rootDir, { nowMs, config, reviewRows = new Map() })
   return { total, stale, ignoredTerminalPrs };
 }
 
+export function summarizeHammerEfficiency(db) {
+  if (!db) return { runs: 0, merges: 0, inputTokens: 0, inputTokensPerMerge: null };
+  const rows = safeAll(db,
+    `SELECT status, token_input, metadata_json FROM reviewer_passes
+      WHERE pass_kind = 'closer' AND reviewer_class IN ('hammer', 'hammer-claude')`);
+  let merges = 0;
+  let inputTokens = 0;
+  for (const row of rows) {
+    const metadata = parseJson(row.metadata_json, {});
+    if (metadata?.merged === true) merges += 1;
+    inputTokens += Number(row.token_input) || 0;
+  }
+  return {
+    runs: rows.length,
+    merges,
+    inputTokens,
+    inputTokensPerMerge: merges ? inputTokens / merges : null,
+  };
+}
+
 function summarizeZombieReviewerPasses(db, { nowMs, config }) {
   const cutoff = new Date(nowMs - config.runningReviewerPassMaxAgeMs).toISOString();
   const rows = safeAll(
@@ -5938,6 +5964,7 @@ function collectReviewPipelineHealth({
       sleepSyncImpl,
     });
     const amaCloserLeases = readAmaCloserLeases(rootDir, { nowMs, config, reviewRows });
+    const hammerEfficiency = summarizeHammerEfficiency(db);
     const conflictingOpenPrs = attachConflictingPrOwnership(
       conflictingOpenPrsBase,
       conflictingPrOwnerIndex({
@@ -6112,6 +6139,7 @@ function collectReviewPipelineHealth({
       mergeStalls,
       conflictingOpenPrs,
       amaCloserLeases,
+      hammerEfficiency,
       daemonMergeParks,
       zombieReviewerPasses,
       reviewerSlots,
@@ -6347,6 +6375,10 @@ function renderReviewPipelinePrometheus(snapshot) {
     snapshot.hammerDispatchStall?.active === null ? Number.NaN : (snapshot.hammerDispatchStall?.active ? 1 : 0)
   );
   pushMetric('review_pipeline_hammer_dispatch_stall_blind', {}, snapshot.hammerDispatchStall?.blind ? 1 : 0);
+  pushMetric('review_pipeline_hammer_runs_total', {}, snapshot.hammerEfficiency?.runs || 0);
+  pushMetric('review_pipeline_hammer_merges_total', {}, snapshot.hammerEfficiency?.merges || 0);
+  pushMetric('review_pipeline_hammer_input_tokens_per_merge', {},
+    snapshot.hammerEfficiency?.inputTokensPerMerge ?? Number.NaN);
   pushMetric('review_pipeline_dag_autowalk_healthy', {}, snapshot.dagAutowalk?.healthy ? 1 : 0);
   pushMetric('review_pipeline_ttm_minutes', { quantile: '0.5' }, snapshot.ttm?.rollup?.medianTimeToMergeMinutes || 0);
   pushMetric('review_pipeline_ttm_minutes', { quantile: '0.9' }, snapshot.ttm?.rollup?.p90TimeToMergeMinutes || 0);

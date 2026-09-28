@@ -25,6 +25,7 @@
 
 import { execFile, spawnSync } from 'node:child_process';
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
   mkdirSync,
@@ -2386,6 +2387,59 @@ async function holderOwningRepo({ worktreePath, hqRoot, repo, execFileImpl, env 
   return resolve(worktreePath, commonDir, '..');
 }
 
+async function inspectHolderForTakeover({ worktreePath, execFileImpl, env }) {
+  const run = async (cmd, args) => execFileImpl(cmd, args, {
+    env, maxBuffer: 4 * 1024 * 1024, timeout: 15_000,
+  });
+  // lsof exits 1 when there are no matching cwd descriptors. Any other
+  // failure is ambiguous and must keep the holder intact.
+  try {
+    const lsof = await run('lsof', ['-nP', '-t', '-d', 'cwd', '+D', worktreePath]);
+    if (String(lsof.stdout || '').trim()) return { safe: false, reason: 'live-process-in-holder-cwd' };
+  } catch (error) {
+    if (error?.code !== 1) return { safe: false, reason: 'cwd-process-check-failed' };
+  }
+  const git = async (...args) => run('git', ['-C', worktreePath, ...args]);
+  const branch = String((await git('symbolic-ref', '--quiet', '--short', 'HEAD')).stdout || '').trim();
+  if (!branch || !/^[\w./-]+$/.test(branch) || branch.startsWith('-')) {
+    return { safe: false, reason: 'unresolved-holder-branch' };
+  }
+  const status = String((await git('status', '--porcelain', '--untracked-files=all')).stdout || '');
+  const cherry = String((await git('cherry', `origin/${branch}`, 'HEAD')).stdout || '');
+  const localOnly = cherry.split('\n').filter(Boolean);
+  return {
+    safe: true,
+    branch,
+    clean: !status.trim(),
+    patchEquivalent: localOnly.every(line => line.startsWith('- ')),
+    localOnly,
+  };
+}
+
+async function salvageHolder({ worktreePath, hqRoot, workerId, execFileImpl, env }) {
+  const rescueDir = join(hqRoot, 'rescues', 'holder-adopt', `${workerId}-${Date.now()}`);
+  mkdirSync(rescueDir, { recursive: true });
+  const options = { env, maxBuffer: 4 * 1024 * 1024, timeout: 60_000 };
+  // Bundle preserves committed history; archive preserves the complete working
+  // tree, including untracked files and staged changes, before force removal.
+  await execFileImpl('git', ['-C', worktreePath, 'bundle', 'create',
+    join(rescueDir, 'commits.bundle'), 'HEAD'], options);
+  await execFileImpl('tar', ['-czf', join(rescueDir, 'worktree.tar.gz'),
+    '--exclude=.git', '-C', worktreePath, '.'], options);
+  return rescueDir;
+}
+
+function auditHolderDecision({ hqRoot, logger, record }) {
+  const entry = { event: 'ama_closer.branch_holder_takeover_decision',
+    at: new Date().toISOString(), ...record };
+  logger?.warn?.(JSON.stringify(entry));
+  if (hqRoot) {
+    const auditDir = join(hqRoot, 'rescues');
+    mkdirSync(auditDir, { recursive: true });
+    appendFileSync(join(auditDir, 'holder-adopt-audit.jsonl'), `${JSON.stringify(entry)}\n`);
+  }
+}
+
 // Whether the self-owned hammer closer for this PR is a GENUINELY live in-flight
 // run — an active ledger status backed by a still-alive OS process — versus a
 // terminal / phantom-active (active status, dead pid) / lookup-unresolvable run
@@ -2586,6 +2640,7 @@ async function teardownSamePrHammerHolder({
   readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedger,
   sleepImpl = sleep,
 }) {
+  if (!hqRoot) return { attempted: false, ok: false, reason: 'no-hq-root', worktreePaths: [] };
   const worktreePaths = samePrHammerHolderWorktreePaths(err, prNumber, hqRoot);
   if (!worktreePaths.length) {
     return { attempted: false, ok: false, worktreePaths: [] };
@@ -2602,11 +2657,12 @@ async function teardownSamePrHammerHolder({
         error: String(ownerErr?.message || ownerErr) });
       continue;
     }
-    let terminality = { terminal: true, reason: 'self-owned-hammer-holder' };
-    if (!isSamePrHammerCloserWorkerId(workerId, prNumber)) {
+    let terminality;
+    {
       terminality = await resolveTerminalCodingBranchHolder({
         workerId,
         hqRoot,
+        allowHammer: isSamePrHammerCloserWorkerId(workerId, prNumber),
         ledgerTarget,
         ledgerDbPath,
         env,
@@ -2624,6 +2680,9 @@ async function teardownSamePrHammerHolder({
           launchRequestId: terminality.launchRequestId || null,
           detail: terminality.detail || null,
         });
+        auditHolderDecision({ hqRoot, logger, record: { repo, prNumber, workerId,
+          worktreePath, decision: 'refused', reason: terminality.reason,
+          holderType: isSamePrHammerCloserWorkerId(workerId, prNumber) ? 'hammer' : 'worker' } });
         continue;
       }
       attempts.push({
@@ -2643,12 +2702,44 @@ async function teardownSamePrHammerHolder({
         });
         attempts.push({ worktreePath, action: 'git-worktree-prune', ok: true,
           recoveredFrom: 'missing-directory' });
+        auditHolderDecision({ hqRoot, logger, record: { repo, prNumber, workerId,
+          worktreePath, decision: 'pruned-missing-registration' } });
       } catch (pruneErr) {
         attempts.push({ worktreePath, action: 'git-worktree-prune', ok: false,
           error: String(pruneErr?.stderr || pruneErr?.message || pruneErr) });
         continue;
       }
-    } else try {
+    } else {
+      let inspection;
+      try {
+        inspection = await inspectHolderForTakeover({ worktreePath, execFileImpl, env });
+      } catch (inspectErr) {
+        inspection = { safe: false, reason: String(inspectErr?.message || inspectErr) };
+      }
+      if (!inspection.safe) {
+        attempts.push({ worktreePath, workerId, action: 'holder-takeover-preflight',
+          ok: false, reason: inspection.reason });
+        auditHolderDecision({ hqRoot, logger, record: { repo, prNumber, workerId,
+          worktreePath, holderType: isSamePrHammerCloserWorkerId(workerId, prNumber) ? 'hammer' : 'worker',
+          decision: 'refused', reason: inspection.reason } });
+        continue;
+      }
+      let rescueDir = null;
+      if (!inspection.clean || !inspection.patchEquivalent) {
+        try {
+          rescueDir = await salvageHolder({ worktreePath, hqRoot, workerId, execFileImpl, env });
+        } catch (salvageErr) {
+          attempts.push({ worktreePath, workerId, action: 'holder-salvage', ok: false,
+            error: String(salvageErr?.message || salvageErr) });
+          auditHolderDecision({ hqRoot, logger, record: { repo, prNumber, workerId,
+            worktreePath, decision: 'refused', reason: 'salvage-failed' } });
+          continue;
+        }
+      }
+      auditHolderDecision({ hqRoot, logger, record: { repo, prNumber, workerId,
+        worktreePath, decision: rescueDir ? 'salvaged' : 'takeover', rescueDir,
+        branch: inspection.branch, workerStatus: terminality.workerStatus } });
+      try {
       await execFileImpl('git', [
         '-C',
         owningRepo,
@@ -2667,7 +2758,7 @@ async function teardownSamePrHammerHolder({
         action: 'git-worktree-remove',
         ok: true,
       });
-    } catch (removeErr) {
+      } catch (removeErr) {
       const removeDetail = String(removeErr?.stderr || removeErr?.message || removeErr);
       attempts.push({
         worktreePath,
@@ -2676,6 +2767,7 @@ async function teardownSamePrHammerHolder({
         error: removeDetail,
       });
       continue;
+      }
     }
 
     const tearDownArgs = ['worker', 'tear-down', workerId, '--force', '--root', hqRoot];
@@ -2785,6 +2877,7 @@ function logBranchHolderDeadlockReleased({
 
 async function resolveTerminalCodingBranchHolder({
   workerId,
+  allowHammer = false,
   hqRoot,
   ledgerTarget = null,
   ledgerDbPath = null,
@@ -2792,7 +2885,7 @@ async function resolveTerminalCodingBranchHolder({
   readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedger,
 } = {}) {
   const normalizedWorkerId = String(workerId || '').trim();
-  if (!isRecognizedCodingBranchHolderWorkerId(normalizedWorkerId)) {
+  if (!isRecognizedCodingBranchHolderWorkerId(normalizedWorkerId) && !allowHammer) {
     return { terminal: false, reason: 'unrecognized-worker-id-shape' };
   }
   const workerDir = hqRoot ? join(hqRoot, 'workers', normalizedWorkerId) : null;

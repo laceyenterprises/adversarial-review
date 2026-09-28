@@ -18,6 +18,7 @@ import { join } from 'node:path';
 
 import { normalizeHandoffMaxPerPrHead } from './handoff-rate-cap.mjs';
 import { HANDOFF_EVENTS, recordHandoffEvent, recordHandoffWakeEvents } from './handoff-telemetry.mjs';
+import { resolveNodeBin } from './node-interpreter.mjs';
 
 export const HANDOFF_WAKE_DIR_MODE = 0o775;
 export const HANDOFF_WAKE_MARKER_MODE = 0o664;
@@ -190,7 +191,7 @@ function signalHandoffWakeAsOwner(rootDir, daemon, nowMs, ownerUid, payload, { s
       '-H',
       '-u',
       ownerUser,
-      process.execPath,
+      resolveNodeBin(),
       '--input-type=module',
       '-e',
       OWNER_SIGNAL_SCRIPT,

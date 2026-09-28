@@ -2,6 +2,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveNodeBin } from './node-interpreter.mjs';
 
 const MAX_DELETER_LOCK_AGE_MS = 6 * 60 * 60 * 1000;
 
@@ -60,7 +61,7 @@ export function launchWorkspaceTrashDeleter({ trashDir, rootDir, workspaceRootDi
   }
   try {
     const script = fileURLToPath(new URL('./follow-up-workspace-trash-delete.mjs', import.meta.url));
-    const args = [process.execPath, script, trashDir, lockPath, rootDir || '', workspaceRootDir || ''];
+    const args = [resolveNodeBin(), script, trashDir, lockPath, rootDir || '', workspaceRootDir || ''];
     const taskpolicy = process.platform === 'darwin'
       && probeImpl('taskpolicy', ['-h'], { stdio: 'ignore' }).error?.code !== 'ENOENT';
     const command = taskpolicy ? 'taskpolicy' : 'nice';

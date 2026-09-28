@@ -1178,8 +1178,12 @@ Eligible infrastructure classes are routing-tier `cascade`, exhausted
 GitHub diff-fetch transients tagged as `cascade`, explicit HTTP 529/backend
 capacity failures tagged as `provider-overloaded`, `reviewer-timeout`,
 `launchctl-bootstrap`, reviewer-spawn `oauth-broken` including untagged GitHub
-credential-rejection messages such as `gh: Bad credentials (HTTP 401)`, and
-hard provider usage caps recorded as `quota-exhausted`. Reviewer subprocess exits recorded as
+credential-rejection messages such as `gh: Bad credentials (HTTP 401)`,
+hard provider usage caps recorded as `quota-exhausted`, and reviewer processes
+that died in the dynamic loader (`dyld[...]: Library not loaded`) recorded as
+`infra-runtime-missing-library`. That last class is a host fault (a Homebrew
+upgrade moved the running node's dylibs): it never consumes `review_attempts`
+and is bounded by the same infrastructure auto-recovery cap. Reviewer subprocess exits recorded as
 `[unknown] Command failed` (including stored stdout/stderr tails) or
 `[unknown] Command failed with code <n>` before any verdict exists are also
 eligible as `reviewer-command-failed`. Before retrying that class, the watcher
@@ -1339,7 +1343,11 @@ error from triggering this retry. An HQ dispatch classified as unsuccessful
 continues through its HQ failure classification instead. Once the transient
 budget is exhausted, a terminal capacity failure records
 `failure.code = "provider-capacity"`; other missing or empty artifacts retain
-their artifact failure codes. This hold does not advance the remediation round
+their artifact failure codes. A worker log carrying `dyld[...]: Library not
+loaded` (the worker CLI died in the dynamic loader before running) takes the
+same requeue path and budget under `infra-runtime-missing-library`, ahead of
+the capacity check and regardless of dispatch mode, and ends with that
+`failure.code` once the budget is exhausted. This hold does not advance the remediation round
 or request re-review.
 
 Live wakeups between workers and daemons use marker files under

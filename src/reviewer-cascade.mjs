@@ -6,7 +6,7 @@
  * class (oauth-broken, reviewer-timeout, launchctl-bootstrap, quota-exhausted,
  * broker-unavailable, github-unavailable, deploy-wedge, provider-overloaded,
  * reviewer-empty-output, token-refresh-pending, attestation-sign-failed,
- * hcp-unavailable) under the original name. The contract that makes this state matter:
+ * hcp-unavailable, infra-runtime-missing-library) under the original name. The contract that makes this state matter:
  * transient failures must NOT burn `reviewed_prs.review_attempts` — the row
  * settles to `pending-upstream` and this file-backed gate
  * (`shouldBackoffReviewerSpawn`, consulted by pollOnce before the claim CAS)
@@ -30,6 +30,7 @@ import {
   classifyReviewerFailure,
   isReviewerSubprocessTimeout,
 } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
+import { INFRA_RUNTIME_MISSING_LIBRARY_FAILURE_CLASS } from './runtime-missing-library.mjs';
 
 // Backoff schedule indexed by (consecutive transient failures - 1). Roughly
 // exponential but deliberately PLATEAUS at 15 minutes instead of doubling
@@ -292,7 +293,8 @@ function normalizeTransientFailureClass(failureClass) {
     value === HCP_UNAVAILABLE_FAILURE_CLASS ||
     value === REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS ||
     value === TOKEN_REFRESH_PENDING_FAILURE_CLASS ||
-    value === PROVIDER_OVERLOADED_FAILURE_CLASS
+    value === PROVIDER_OVERLOADED_FAILURE_CLASS ||
+    value === INFRA_RUNTIME_MISSING_LIBRARY_FAILURE_CLASS
   ) {
     return value;
   }

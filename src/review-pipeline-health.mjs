@@ -11,6 +11,10 @@ import {
   resolveSettledCleanStopCode,
 } from './follow-up-jobs.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS, quotaHoldDecision } from './quota-exhaustion.mjs';
+import {
+  INFRA_RUNTIME_MISSING_LIBRARY_FAILURE_CLASS,
+  hasMissingRuntimeLibrarySignal,
+} from './runtime-missing-library.mjs';
 import { infraRecoverableFailureClass } from './reviewer-failure-classification.mjs';
 import {
   DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS,
@@ -1145,6 +1149,12 @@ function classifyFailure(value) {
   const raw = String(value || '').toLowerCase();
   const text = stripNonDiagnosticBanners(raw);
   if (!text.trim()) return 'unknown';
+  // A reviewer that died in dyld never ran; its host runtime lost a shared
+  // library. Bucket it apart from `runtime`/`unknown` so a Homebrew-upgrade
+  // outage reads as one host fault on the dashboard (NODEPIN-01).
+  if (text.includes(INFRA_RUNTIME_MISSING_LIBRARY_FAILURE_CLASS) || hasMissingRuntimeLibrarySignal(text)) {
+    return INFRA_RUNTIME_MISSING_LIBRARY_FAILURE_CLASS;
+  }
   // A diff GitHub refuses to serve is DETERMINISTIC — it fails identically on
   // every retry — so it must be classified before the generic infra buckets and
   // must not read as a transient auth/upstream problem worth re-attempting.
@@ -5768,7 +5778,13 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
           + 'NOT a reviewer auth/infra problem — do not retrigger. Split the PR, or '
           + 'review it by file list; auto-recovery attempts were spent on a '
           + 'deterministic failure and should be treated as exhausted by design.'
-        : 'Adversarial review auto-recovery exhausted — investigate reviewer auth/infra for the dominant failure class and spawn an SRE; retrigger the affected reviews only after the reviewer lane is restored.',
+        : dominant === INFRA_RUNTIME_MISSING_LIBRARY_FAILURE_CLASS
+          ? 'Reviewer processes died in dyld (Library not loaded): the host node lost a '
+            + 'Homebrew dylib, usually an upgrade that moved /opt/homebrew/opt/<dep> under a '
+            + 'long-running daemon. This is a host fault, not a reviewer or PR problem. Run '
+            + '`hq doctor dylib-drift`, restart the daemons it names, then retrigger the '
+            + 'affected reviews.'
+          : 'Adversarial review auto-recovery exhausted — investigate reviewer auth/infra for the dominant failure class and spawn an SRE; retrigger the affected reviews only after the reviewer lane is restored.',
       observedAt,
       details: {
         cap: stuck.cap,

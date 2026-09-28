@@ -21,6 +21,7 @@ import {
   renderHandoffStatus,
   renderHandoffTrace,
 } from '../src/handoff-telemetry.mjs';
+import { resolveNodeBin } from '../src/node-interpreter.mjs';
 
 function makeRoot(t) {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'handoff-telemetry-'));
@@ -75,7 +76,7 @@ test('handoff telemetry delegates cross-user writes to the canonical owner', (t)
     }
     if (command === 'sudo') {
       assert.deepEqual(args.slice(0, 4), ['-A', '-H', '-u', 'daemon-owner']);
-      assert.equal(args[4], process.execPath);
+      assert.equal(args[4], resolveNodeBin());
       assert.equal(args.at(-2), rootDir);
       assert.equal(JSON.parse(args.at(-1)).event, HANDOFF_EVENTS.fired);
       const delegated = spawnSync(args[4], args.slice(5), { encoding: 'utf8' });

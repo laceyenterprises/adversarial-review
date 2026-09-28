@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { resolveNodeBin } from './node-interpreter.mjs';
 
 export const HANDOFF_EVENTS = Object.freeze({
   fired: 'handoff_fired',
@@ -133,7 +134,7 @@ function appendHandoffEventAsOwner(rootDir, row, ownerUid, { spawnSyncImpl = spa
       '-H',
       '-u',
       ownerUser,
-      process.execPath,
+      resolveNodeBin(),
       '--input-type=module',
       '-e',
       OWNER_EVENT_SCRIPT,

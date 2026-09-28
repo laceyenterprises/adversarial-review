@@ -8,6 +8,7 @@ import {
   HARNESS_FALLBACK_ALERT_DEBOUNCE_MS,
   emitHarnessFallbackAlert,
 } from '../src/ama/dispatch-closer.mjs';
+import { resolveNodeBin } from '../src/node-interpreter.mjs';
 
 const HARNESS = {
   provider: 'openai',
@@ -162,6 +163,6 @@ test('harness fallback alert state delegates cross-user directory creation to ca
   assert.equal(calls[0].command, 'id');
   assert.deepEqual(calls[0].args, ['-un', String(ownerUid)]);
   assert.equal(calls[1].command, 'sudo');
-  assert.deepEqual(calls[1].args.slice(0, 5), ['-A', '-H', '-u', 'airlock', process.execPath]);
+  assert.deepEqual(calls[1].args.slice(0, 5), ['-A', '-H', '-u', 'airlock', resolveNodeBin()]);
   assert.ok(calls[1].args.includes('--input-type=module'));
 });

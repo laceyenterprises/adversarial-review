@@ -121,6 +121,7 @@ import { deliverAlert } from '../alert-delivery.mjs';
 import { isUnsupportedHqPriorityFlagError } from '../merge-agent-hq-exec.mjs';
 import { DUPLICATE_FAMILY_UNRESOLVED_REASON } from '../duplicate-family-gate.mjs';
 import { isHammerWorkerClass } from './hammer-worker-class.mjs';
+import { resolveNodeBin } from '../node-interpreter.mjs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1884,7 +1885,7 @@ function writeHarnessFallbackAlertStateAsOwner(statePath, record, ownerUid, { sp
       '-H',
       '-u',
       ownerUser,
-      process.execPath,
+      resolveNodeBin(),
       '--input-type=module',
       '-e',
       HARNESS_FALLBACK_ALERT_OWNER_WRITE_SCRIPT,

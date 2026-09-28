@@ -119,6 +119,11 @@ export const MARK_INFRA_AUTO_RECOVERY_ATTEMPT_STARTED_SQL =
          lower(COALESCE(failure_message, '')) LIKE '%broker claude reviewer token expires too soon for subprocess handoff%'
        )
        WHEN 'quota-exhausted' THEN lower(COALESCE(failure_message, '')) LIKE '[quota-exhausted]%'
+       WHEN 'infra-runtime-missing-library' THEN (
+         lower(COALESCE(failure_message, '')) LIKE '[infra-runtime-missing-library]%' OR
+         lower(COALESCE(failure_message, '')) LIKE '%dyld: library not loaded%' OR
+         lower(COALESCE(failure_message, '')) LIKE '%dyld[%]: library not loaded%'
+       )
        WHEN 'reviewer-command-failed' THEN (
          (
            lower(COALESCE(failure_message, '')) LIKE '[unknown] command failed%' AND

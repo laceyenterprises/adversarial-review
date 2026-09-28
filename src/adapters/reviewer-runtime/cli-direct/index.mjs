@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { resolveReviewerTimeoutMs } from '../../../reviewer-timeout.mjs';
 import { resolveReviewerCeilingSeconds, usesStreamedReviewerCeiling } from '../../../reviewer-timeout-model.mjs';
 import { spawnCapturedProcessGroup } from '../../../process-group-spawn.mjs';
+import { resolveNodeBin } from '../../../node-interpreter.mjs';
 import { isPgidAlive, verifyPgidIdentity } from '../../../process-group-identity.mjs';
 import { domainRequiresMcpOAuth } from '../domain-mcp-oauth.mjs';
 import {
@@ -373,6 +374,9 @@ function createCliDirectReviewerRuntimeAdapter({
   domainConfig = {},
   reviewerProcessPath = DEFAULT_REVIEWER_PATH,
   spawnCapturedImpl = spawnCapturedProcessGroup,
+  // Resolved per spawn, never the watcher's own versioned node binary: the
+  // watcher outlives Homebrew upgrades, which can strip that binary's dylibs.
+  resolveNodeBinImpl = resolveNodeBin,
   preflightImpl = probeReviewerCliOAuth,
   processKillImpl = process.kill,
   sleepImpl = sleep,
@@ -481,7 +485,7 @@ function createCliDirectReviewerRuntimeAdapter({
       const reviewerArgs = buildReviewerProcessArgs(subjectContext);
       const sideChannels = reviewerRunSideChannelPaths(rootDir, sessionUuid);
       const { stdout, stderr } = await spawnCapturedImpl(
-        process.execPath,
+        resolveNodeBinImpl(),
         [reviewerProcessPath, JSON.stringify(reviewerArgs)],
         {
           env: reviewerEnv,

@@ -361,6 +361,11 @@ branch on that class before retriggering reviews:
   the same way. Split the PR, make the changed file list reviewable, close the
   PR, or otherwise resolve the oversized diff condition. The finding clears once
   the affected open PRs no longer remain failed at/over the auto-recovery cap.
+- `infra-runtime-missing-library` means reviewer processes died in dyld
+  (`Library not loaded`): the host's Homebrew node lost a dylib, usually because
+  an upgrade moved `/opt/homebrew/opt/<dep>` under a long-running daemon. It is
+  a host fault, not a reviewer or PR problem. Run `hq doctor dylib-drift`,
+  restart the daemons it names, then retrigger the affected reviews.
 - Other dominant failure classes keep the generic exhausted-auto-recovery
   contract: investigate the reviewer lane for the dominant auth, quota, command,
   timeout, or upstream failure before retriggering the affected reviews.

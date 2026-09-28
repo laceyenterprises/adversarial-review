@@ -25,6 +25,7 @@
  * program named.
  */
 
+import { accessSync, constants as fsConstants, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -35,6 +36,42 @@ const ARF_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 /** The ARF server's entrypoint, resolved from this file rather than from cwd. */
 export const ARF_SERVER_ENTRY = resolve(ARF_ROOT, 'server', 'src', 'main.mjs');
+
+export const NODE_BIN_ENV = 'AGENT_OS_NODE_BIN';
+export const STABLE_NODE_BIN = '/opt/homebrew/bin/node';
+
+function isExecutableFile(path) {
+  try {
+    if (!statSync(path).isFile()) return false;
+    accessSync(path, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The Node binary supervised children are launched with.
+ *
+ * Not `process.execPath` first: that is the realpath of the binary the
+ * supervisor started with (a versioned Homebrew Cellar path), and a supervisor
+ * that outlives a Homebrew upgrade keeps it while the upgrade moves its dylibs,
+ * so every restart of a crashed child dies in dyld (agent-os SEV1 2026-09-28,
+ * NODEPIN-01). Order: `AGENT_OS_NODE_BIN`, then the stable Homebrew link, then
+ * `process.execPath` — never the bare string `node`. Same order as the
+ * pipeline's `src/node-interpreter.mjs`; duplicated because `frontend` imports
+ * nothing outside itself.
+ */
+export function resolveChildNodeBin({
+  env = process.env,
+  execPath = process.execPath,
+  isExecutable = isExecutableFile,
+} = {}) {
+  const pinned = env?.[NODE_BIN_ENV];
+  if (typeof pinned === 'string' && pinned.trim()) return pinned.trim();
+  if (isExecutable(STABLE_NODE_BIN)) return STABLE_NODE_BIN;
+  return execPath;
+}
 
 /**
  * Environment every supervised child receives on top of the supervisor's own.
@@ -72,13 +109,13 @@ export class ProgramSetError extends Error {
  * @param {object} options
  * @param {ReturnType<import('../../server/src/config.mjs').loadConfig>} options.config
  * @param {string} [options.execPath] the Node binary children are launched with.
- *   Defaults to `process.execPath` — never the string `node` — so a standalone
- *   install works with no `node` on PATH, which is exactly the situation a
- *   launchd-free boot from a bare shell is in.
+ *   Defaults to `resolveChildNodeBin()` — an absolute path, never the string
+ *   `node` — so a standalone install works with no `node` on PATH, which is
+ *   exactly the situation a launchd-free boot from a bare shell is in.
  * @param {string} [options.serverEntry]
  * @returns {object[]} program specs, in start order
  */
-export function resolveProgramSet({ config, execPath = process.execPath, serverEntry = ARF_SERVER_ENTRY }) {
+export function resolveProgramSet({ config, execPath = resolveChildNodeBin(), serverEntry = ARF_SERVER_ENTRY }) {
   const programs = [];
 
   if (config.supervisor.serverEnabled) {

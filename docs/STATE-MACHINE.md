@@ -166,15 +166,19 @@ new PR
   evidence is cleared because a replacement review pass is now durably
   `reviewing`.
 - Fresh transient reviewer failures (`cascade`, PR-local `oauth-broken`,
-  `provider-overloaded`, `reviewer-timeout`, `launchctl-bootstrap`, and
-  `daemon-bounce`) settle
+  `provider-overloaded`, `reviewer-timeout`, `launchctl-bootstrap`,
+  `daemon-bounce`, and `infra-runtime-missing-library`, a reviewer process that
+  died in dyld with `Library not loaded` because a Homebrew upgrade moved the
+  host node's dylibs) settle
   directly to `pending-upstream`, increment `infra_auto_recover_attempts`, and
   resume when the reviewer lane/routing tier recovers; they intentionally do
   not pass through the `failed` compare-and-swap recovery claim. Legacy or
   explicitly terminal infrastructure-class `failed` rows (`cascade`,
   `provider-overloaded`, `reviewer-timeout`, `launchctl-bootstrap`,
   reviewer-spawn `oauth-broken` including untagged GitHub credential-rejection
-  messages such as `gh: Bad credentials (HTTP 401)`, `quota-exhausted`, and
+  messages such as `gh: Bad credentials (HTTP 401)`, `quota-exhausted`,
+  `infra-runtime-missing-library` (tagged, or a legacy row whose stored stderr
+  carries `dyld[...]: Library not loaded`), and
   `reviewer-command-failed` stored as `[unknown] Command failed...`) use the
   dedicated claim path that atomically promotes the row to `reviewing` and
   increments `infra_auto_recover_attempts` only if the row is still the same

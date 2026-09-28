@@ -1301,14 +1301,14 @@ test('cli-direct derives Codex MCP OAuth requirement from adapter domainConfig',
   }
 });
 
-test('cli-direct enables the progress watchdog for streamed Claude and Codex reviews', () => {
+test('cli-direct leaves the outer watchdog off across silent settlement phases', () => {
   assert.equal(
     resolveProgressTimeoutForModel('codex', { ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS: '900000' }),
-    600_000,
+    0,
   );
   assert.equal(
     resolveProgressTimeoutForModel('claude', { ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS: '1234' }),
-    600_000,
+    0,
   );
 });
 

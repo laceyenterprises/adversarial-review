@@ -11,6 +11,7 @@ import {
 import { getConfig } from './config-loader.mjs';
 import { recordReviewLatencyEvent } from './review-latency-event-writer.mjs';
 import { readReviewerRunRecord, TERMINAL_RUN_STATES } from './adapters/reviewer-runtime/run-state.mjs';
+import { inFlightReviewerSessions } from './reviewer-session-registry.mjs';
 import { calculateReviewerCeilingSeconds, resolveReviewerCeilingConfig, resolveReviewerIdleTimeoutSeconds } from './reviewer-timeout-model.mjs';
 import {
   resolveHandoffConfig,
@@ -23,6 +24,8 @@ const RUNNING_PASS_TIMEOUT_FAILURE_REASON = 'running-pass-timeout';
 const POSTED_REVIEW_ARTIFACT_RECOVERY_CLASS = 'posted-review-artifact-recovery';
 const POSTED_REVIEW_ARTIFACT_RECOVERY_REASON = 'running-pass-had-github-review-artifact';
 const INFRA_AUTO_RECOVER_CAP = DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS;
+const REVIEWER_SETTLE_GRACE_SECONDS = 300;
+const REVIEWER_CEILING_SLACK_SECONDS = 600;
 const VERDICT_MODE_ENFORCE = 'enforce';
 const VERDICT_MODE_ADVISORY_ONLY = 'advisory-only';
 const ADVISORY_ONLY_REVIEW_HEADER_RE = /^## Adversarial Review \(advisory-only\)\b/;
@@ -489,6 +492,10 @@ function reapRunningPassTimeouts({
         continue;
       }
       const passMetadata = parseMetadataJson(row.metadata_json);
+      const sessionUuid = reviewerSessionUuidFromPass(row);
+      // The CLI run record becomes terminal before post/freshness settlement ends.
+      // The watcher owns this session until spawnReviewer finishes its settle.
+      if (sessionUuid && inFlightReviewerSessions.has(sessionUuid)) continue;
       const heartbeatMs = parseTimestampMs(passMetadata.lastProgressAt);
       const hasHeartbeat = passMetadata.heartbeatSupported === true || heartbeatMs !== null;
       const ceilingSeconds = calculateReviewerCeilingSeconds({
@@ -497,21 +504,34 @@ function reapRunningPassTimeouts({
         ...ceilingConfig,
       });
       const currentReview = getReviewRow.get(row.repo, row.pr_number);
-      const sessionUuid = reviewerSessionUuidFromPass(row);
       const sameSession = sessionUuid && currentReview?.reviewer_session_uuid === sessionUuid;
       const runRecord = sessionUuid ? readReviewerRunRecord(rootDir, sessionUuid) : null;
       const ownsPass = sameSession || !currentReview;
       const alive = ownsPass ? isReviewerAlive(currentReview?.reviewer_pgid || runRecord?.pgid) : null;
+      const terminal = runRecord && TERMINAL_RUN_STATES.has(runRecord.state);
+      const terminalAgeSeconds = Math.floor((observedNow.getTime() -
+        (parseTimestampMs(runRecord?.lastHeartbeatAt) ?? startedMs)) / 1000);
+      // Never release a claim while its process group is still alive. A quiet
+      // GitHub post, rate-limit wait, or OAuth fallback is not a dead reviewer.
+      if (ownsPass && alive === true) continue;
+      // A completed CLI can still be in post-exit settlement after a watcher
+      // bounce, when the in-memory session registry is empty.
+      if (terminal && runRecord.state === 'completed' && terminalAgeSeconds < REVIEWER_SETTLE_GRACE_SECONDS) continue;
       const reviewerGone = ownsPass && (alive === false ||
-        (runRecord && TERMINAL_RUN_STATES.has(runRecord.state)));
+        (terminal && runRecord.state !== 'completed')) && ageSeconds >= REVIEWER_SETTLE_GRACE_SECONDS;
       const idleAgeSeconds = Math.floor((observedNow.getTime() - (heartbeatMs ?? startedMs)) / 1000);
+      const idleReapSeconds = Math.ceil(idleSeconds * 1.5) + 30;
+      const ceilingReapSeconds = ceilingSeconds + REVIEWER_CEILING_SLACK_SECONDS;
+      // Unknown process identity is not proof that it is safe to release an
+      // active claim; wait for explicit terminal evidence or the legacy path.
+      if (currentReview?.review_status === 'reviewing' && ownsPass && alive === null && !terminal && hasHeartbeat) continue;
       const failureReason = reviewerGone ? 'reviewer-dead'
-        : hasHeartbeat && ageSeconds >= ceilingSeconds ? 'reviewer-ceiling'
-          : hasHeartbeat && idleAgeSeconds >= idleSeconds ? 'reviewer-stalled'
+        : hasHeartbeat && ageSeconds >= ceilingReapSeconds ? 'reviewer-ceiling'
+          : hasHeartbeat && idleAgeSeconds >= idleReapSeconds ? 'reviewer-stalled'
             : !hasHeartbeat && ageSeconds >= thresholdSeconds ? 'running-pass-timeout-legacy' : null;
       if (!failureReason) continue;
-      const effectiveThresholdSeconds = failureReason === 'reviewer-ceiling' ? ceilingSeconds
-        : failureReason === 'reviewer-stalled' ? idleSeconds : thresholdSeconds;
+      const effectiveThresholdSeconds = failureReason === 'reviewer-ceiling' ? ceilingReapSeconds
+        : failureReason === 'reviewer-stalled' ? idleReapSeconds : thresholdSeconds;
       const failureMessage = buildTimeoutFailureMessage({ thresholdSeconds: effectiveThresholdSeconds, ageSeconds, reason: failureReason });
       const capFailureMessage = buildTimeoutFailureMessage({
         thresholdSeconds: effectiveThresholdSeconds,

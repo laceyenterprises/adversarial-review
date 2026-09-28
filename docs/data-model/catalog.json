@@ -63,6 +63,7 @@
         "src/follow-up-jobs.mjs",
         "src/pollonce-phases.mjs",
         "src/reviewer-pass-tokens.mjs",
+        "src/reviewer-pass-reaper.mjs",
         "src/reviewer-spawn-settle.mjs"
       ],
       "owner": "reviewer spawn, settle, and token attribution"

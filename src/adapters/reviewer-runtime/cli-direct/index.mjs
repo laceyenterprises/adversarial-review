@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { resolveReviewerTimeoutMs } from '../../../reviewer-timeout.mjs';
-import { resolveReviewerCeilingSeconds, resolveReviewerIdleTimeoutSeconds } from '../../../reviewer-timeout-model.mjs';
+import { resolveReviewerCeilingSeconds } from '../../../reviewer-timeout-model.mjs';
 import { spawnCapturedProcessGroup } from '../../../process-group-spawn.mjs';
 import { isPgidAlive, verifyPgidIdentity } from '../../../process-group-identity.mjs';
 import { domainRequiresMcpOAuth } from '../domain-mcp-oauth.mjs';
@@ -223,12 +223,9 @@ function buildReviewerProcessArgs(subjectContext = {}) {
   };
 }
 
-function resolveProgressTimeoutForModel(model, env) {
-  if (String(model || '').toLowerCase().includes('claude') || isCodexModel(model)) {
-    return resolveReviewerIdleTimeoutSeconds(env) * 1000;
-  }
-  // Gemini runtimes can be non-streaming, so their legacy deadline remains
-  // the only subprocess timeout until they expose a reliable event stream.
+function resolveProgressTimeoutForModel() {
+  // This wraps reviewer.mjs, including silent posting, throttle, and OAuth
+  // fallback phases. Model subprocesses have their own progress watchdogs.
   return 0;
 }
 

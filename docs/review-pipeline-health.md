@@ -140,8 +140,9 @@ The Grafana dashboard lives at
 - `review_pipeline_zombie_reviewer_passes`: `reviewer_passes` rows still
   `running` past the health age threshold. The watcher poll timeout sweep
   separately fails parseably aged running rows after
-  `reviewer.running_pass_timeout_seconds` with
-  `failureClass='reviewer-timeout'` / `failureReason='running-pass-timeout'`
+  `reviewer.running_pass_timeout_seconds` for legacy passes, or the heartbeat-aware
+  idle/ceiling/dead-process rules for streamed passes, with
+  `failureClass='reviewer-timeout'` and a specific `failureReason`
   and releases a still-matching `reviewed_prs.reviewing` claim through the
   transient `pending-upstream` timeout path. Matching prefers pass metadata
   `reviewerSessionUuid`; legacy pass rows missing that field can match by same
@@ -325,7 +326,7 @@ can distinguish "never posted in window" from a null/corrupt timestamp column.
 | `review:terminal_but_unmerged` | settled/clean PR remains open and unmerged past the terminal threshold | ticket | the PR merges/closes or no longer has a settled clean terminal signature |
 | `review:daemon_merge_parked` | the AMA daemon clean-merge declined the same PR for the same reason for 3+ consecutive ticks (e.g. `worker-identity-unresolved`, `lease-not-held`; `verdict-not-eligible` routes to the capped hammer). A revoked `operator-approved` label holds one tick without recording a park. | ticket | the PR merges/closes, the daemon's decline reason changes, or the park is not refreshed for two pipeline-health ticks |
 | `review:ama_closer_lease_stale` | AMA closer lease is `pending`/`dispatched`, `terminalOutcome=null`, and older than 30m | ticket | the lease reaches terminal state or falls below the age threshold |
-| `review:reviewer_pass_zombie` | `reviewer_passes.status='running'` row is older than the zombie threshold (default 90m: reviewer-pass-reaper's `DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS` of 3600s plus 50% grace, so the finding only fires once the reaper itself has failed) | ticket | no running reviewer pass exceeds the age threshold; the watcher timeout sweep should settle parseably aged rows as `failed` / `reviewer-timeout` |
+| `review:reviewer_pass_zombie` | `reviewer_passes.status='running'` row is older than the zombie threshold (default 90m; streamed reviews may legitimately exceed this until their scaled ceiling, so inspect heartbeat and process liveness before triage) | ticket | no running reviewer pass exceeds the age threshold; the watcher timeout sweep should settle parseably aged rows as `failed` / `reviewer-timeout` |
 | `review:stuck_retry_loop` | one or more open PRs remain `review_status='failed'` after infra auto-recovery exhausted its attempt cap (`infra_auto_recover_attempts` at/over the cap, default 3); when the dominant `failure_class` is `diff-too-large`, the failure is deterministic because GitHub refused to serve the PR diff | ticket | no open PR remains failed at/over the infra auto-recovery cap (the review reposts/succeeds, the oversized PR is split or otherwise reviewable by file list, or the PR merges/closes) |
 | `review:round_budget_anomaly` | remediation round count exceeds the risk-class budget, or a final-pass job remains `awaiting-rereview` after budget exhaustion | ticket | no follow-up job violates the risk-class round budget |
 | `review:config_signature_drift` | a long-lived daemon's last successfully loaded config signature differs from disk beyond the configured drift threshold, including failed reloads after the shared config cache has been reset; also fires when a loaded daemon's config-status file is missing, any status read is malformed or denied, or the status stops updating for longer than the greater of six minutes and three expected daemon ticks | ticket | the daemon reloads the changed config successfully, the disk config is restored to the loaded signature, or the status file is readable, fresh, and reports the daemon back in sync |

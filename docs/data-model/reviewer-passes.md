@@ -1,13 +1,13 @@
 # Reviewer passes
 
-**Source of truth:** `migrations/20260518_reviewer_passes.sql`, `migrations/20260810_reviewer_passes_posted_review_freshness_index.sql`, `src/review-state.mjs`, `src/reviewer-pass-tokens.mjs`, `src/reviewer-spawn-settle.mjs`, `src/pollonce-phases.mjs`, `src/orphan-post-reconcile.mjs`, and `src/follow-up-jobs.mjs`
+**Source of truth:** `migrations/20260518_reviewer_passes.sql`, `migrations/20260810_reviewer_passes_posted_review_freshness_index.sql`, `src/review-state.mjs`, `src/reviewer-pass-tokens.mjs`, `src/reviewer-pass-reaper.mjs`, `src/reviewer-spawn-settle.mjs`, `src/pollonce-phases.mjs`, `src/orphan-post-reconcile.mjs`, and `src/follow-up-jobs.mjs`
 
 ## Ownership
 
 - Store: `data/reviews.db`
 - Tables: `reviewer_passes`, `reviewer_rate_limit_snapshots`
 - Schema: `migrations/20260518_reviewer_passes.sql` plus later additive migrations
-- Writers: `src/reviewer-pass-tokens.mjs`, `src/reviewer-spawn-settle.mjs`, `src/pollonce-phases.mjs`, `src/orphan-post-reconcile.mjs`, `src/follow-up-jobs.mjs`
+- Writers: `src/reviewer-pass-tokens.mjs`, `src/reviewer-pass-reaper.mjs`, `src/reviewer-spawn-settle.mjs`, `src/pollonce-phases.mjs`, `src/orphan-post-reconcile.mjs`, `src/follow-up-jobs.mjs`
 - Repair CLI: `scripts/backfill-reviewer-passes.mjs`; `bin/reconcile-posted-orphans.mjs` links posted review artifacts for reconciled `failed-orphan` rows
 
 `reviewer_passes` is the durable record of each first-pass, remediation, and
@@ -113,6 +113,19 @@ The `metadata_json` object keeps two different identifiers separate:
 | `workerRunAttribution` | Durable resolution state for `worker_run_id`, described below. |
 | `afhReviewerFallback` | Present only when AFH reviewer fallback rewrites the selected reviewer for this pass. The object records `fromReviewerModel`, `toReviewerModel`, `reason`, `lastResort`, `builderClass`, `primaryProvider`, `primaryState`, `primaryHardGrounded`, `primarySoftGrounded`, and the ordered `considered[]` candidate audit so the posted pass can be traced back to the grounding decision that changed reviewer identity. |
 | `failureClass` | Present on failed or cancelled terminal remediation rows finalized by `src/follow-up-jobs.mjs` when a failure or stop code is available. It records the bounded failure class used by health and recovery tooling, such as a worker failure code, stopped remediation code, or remediation recovery sentinel. |
+| `lastProgressAt` | Most recent persisted reviewer stream event, limited to one write per 30 seconds by `src/reviewer-pass-tokens.mjs`. |
+| `heartbeatSupported` | `true` once a streamed reviewer has recorded progress. Together with `lastProgressAt`, selects heartbeat-aware reaper rules. |
+| `changedLines` | Changed-line count used to calculate the scaled reviewer ceiling. |
+| `reasoningEffort` | Resolved effort used with `changedLines` for the ceiling calculation. |
+| `failureReason` | Reaper outcome: `reviewer-dead`, `reviewer-stalled`, `reviewer-ceiling`, or `running-pass-timeout-legacy` for passes without heartbeat support. |
+
+The reaper skips sessions still settling in the watcher and live process groups.
+It gives a completed run record five minutes to settle after its terminal
+heartbeat. Streamed idle reaping starts after 1.5 times the configured idle
+timeout plus 30 seconds; ceiling reaping starts ten minutes after the scaled
+ceiling. These rules protect posting, throttling, and fallback phases that do
+not emit model stream events. A matching review claim is released only when the
+reaper can safely settle the pass.
 
 `workerRunAttribution.state` is one of:
 

@@ -10,13 +10,21 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import { MERGE_PATH_IDS } from '../../gate/gate-contract.mjs';
 import { loadConfig } from '../../server/src/config.mjs';
 import { parseArgs, run } from '../src/cli.mjs';
-import { ARF_SERVER_ENTRY, ProgramSetError, childEnvironment, resolveProgramSet } from '../src/programs.mjs';
+import {
+  ARF_SERVER_ENTRY,
+  NODE_BIN_ENV,
+  ProgramSetError,
+  STABLE_NODE_BIN,
+  childEnvironment,
+  resolveChildNodeBin,
+  resolveProgramSet,
+} from '../src/programs.mjs';
 import { SupervisorConfigError, normalizeSupervisorConfig } from '../src/program-config.mjs';
 
 function configWith(section, { mode = 'standalone' } = {}) {
@@ -117,13 +125,29 @@ describe('supervisor config', () => {
 });
 
 describe('program set resolution', () => {
-  it('launches the ARF server with the running Node binary, not "node"', () => {
+  it('launches the ARF server with an absolute, stable Node binary, not "node"', () => {
     // A standalone install must work with no `node` on PATH; using the string
     // "node" would make that a machine-dependent boot failure.
     const [server] = resolveProgramSet({ config: configWith({}) });
     assert.equal(server.id, 'arf-server');
-    assert.equal(server.command, process.execPath);
+    assert.equal(server.command, resolveChildNodeBin());
+    assert.ok(isAbsolute(server.command), `expected an absolute node path, got ${server.command}`);
     assert.deepEqual(server.args, [ARF_SERVER_ENTRY]);
+  });
+
+  it('resolves the child Node binary: AGENT_OS_NODE_BIN, then the Homebrew link, then execPath', () => {
+    // NODEPIN-01: the supervisor's own execPath is a versioned Cellar path that
+    // a Homebrew upgrade can strip of its dylibs, so it is only the last resort.
+    const cellar = '/opt/homebrew/Cellar/node/26.3.0/bin/node';
+    const present = () => true;
+    const absent = () => false;
+    assert.equal(
+      resolveChildNodeBin({ env: { [NODE_BIN_ENV]: '/pinned/node' }, execPath: cellar, isExecutable: present }),
+      '/pinned/node',
+    );
+    assert.equal(resolveChildNodeBin({ env: {}, execPath: cellar, isExecutable: present }), STABLE_NODE_BIN);
+    assert.equal(STABLE_NODE_BIN, '/opt/homebrew/bin/node');
+    assert.equal(resolveChildNodeBin({ env: { [NODE_BIN_ENV]: ' ' }, execPath: cellar, isExecutable: absent }), cellar);
   });
 
   it('supervises pipeline daemons in standalone mode', () => {

@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn as spawnChild } from 'node:child_process';
 
 import { writeFileAtomic } from './atomic-write.mjs';
+import { resolveNodeBin } from './node-interpreter.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_TOP_LEVEL_PATH = join(homedir(), 'agent-os/config.yaml');
@@ -876,7 +877,7 @@ function spawnCanonicalAlertScript(scriptPath, payload, env = process.env) {
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawnChild(process.execPath, [scriptPath, '--stdin-json'], {
+      child = spawnChild(resolveNodeBin({ env }), [scriptPath, '--stdin-json'], {
         env,
         stdio: ['pipe', 'pipe', 'pipe'],
       });

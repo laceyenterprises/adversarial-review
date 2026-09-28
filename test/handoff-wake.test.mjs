@@ -14,6 +14,7 @@ import {
   signalHandoffWake,
   sleepUntilTimerOrHandoffWake,
 } from '../src/handoff-wake.mjs';
+import { resolveNodeBin } from '../src/node-interpreter.mjs';
 
 function makeTempRoot(t) {
   const rootDir = mkdtempSync(join(tmpdir(), 'handoff-wake-'));
@@ -179,7 +180,7 @@ test('handoff wake signaling delegates to the canonical owner instead of creatin
     }
     if (command === 'sudo') {
       assert.deepEqual(args.slice(0, 4), ['-A', '-H', '-u', 'daemon-owner']);
-      assert.equal(args[4], process.execPath);
+      assert.equal(args[4], resolveNodeBin());
       assert.equal(args.at(-5), rootDir);
       assert.equal(args.at(-4), HANDOFF_WAKE_DAEMONS.followUp);
       assert.equal(JSON.parse(args.at(-1)).schema_version, 1);

@@ -1469,6 +1469,32 @@ function queueWithFakes(reviewText, overrides = {}) {
   return { result, created };
 }
 
+test('a completed comment-only final round prevents any later follow-up job', () => {
+  let created = 0;
+  const result = queueFollowUpForPostedReview({
+    rootDir: '/tmp/adversarial-review-test',
+    repo: 'laceyenterprises/adversarial-review', prNumber: 57,
+    baseBranch: 'main', reviewerModel: 'claude',
+    reviewText: '## Blocking issues\n- A new nit.\n## Verdict\nRequest changes',
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 1,
+      commentOnlyFinalRoundRevisionRefs: ['a'.repeat(40)],
+    }),
+    createFollowUpJobImpl: () => { created += 1; throw new Error('must not create a job'); },
+  });
+  assert.equal(result.queued, false);
+  assert.equal(result.reason, 'comment-only-final-round-completed');
+  assert.equal(created, 0);
+});
+
+test('blocking Request changes still creates a follow-up without final-round evidence', () => {
+  const { result, created } = queueWithFakes(
+    '## Blocking issues\n- Fix auth.\n## Verdict\nRequest changes',
+  );
+  assert.equal(result.queued, true);
+  assert.equal(created.length, 1);
+});
+
 test('review handoff records the known PR head branch on its job', () => {
   const { created } = queueWithFakes('## Verdict\nRequest changes', { branch: 'feature/auth-fix' });
   assert.equal(created[0].branch, 'feature/auth-fix');

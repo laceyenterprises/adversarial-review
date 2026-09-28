@@ -12,6 +12,7 @@ import { withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
 import { isExplicitOperatorRetriggerReason } from './retrigger-review-reason.mjs';
 import { ensureTtmTrackerSchema } from './ttm-tracker.mjs';
 import { recordReviewLatencyEvent } from './review-latency-event-writer.mjs';
+import { normalizeEffectiveReviewVerdict } from './kernel/verdict.mjs';
 import {
   REVIEWER_PASS_GENUINE_POSTED_REVIEW_WHERE_SQL,
   REVIEWER_PASS_NORMALIZED_POSTED_AT_SQL,
@@ -1062,6 +1063,29 @@ function requestReviewRereview({
   try {
     if (!dbOverride) {
       ensureReviewStateSchema(db);
+    }
+
+    // A settled Comment only verdict owns this head even if a different
+    // reviewer model later asks for a pass. The review row is one-per-PR, so
+    // resetting it here would let that pass overwrite the terminal verdict.
+    // Read the captured pass body, not the mutable row's reviewer label.
+    const currentRow = getReviewRow(db, { repo, prNumber });
+    const targetHead = normalizedTargetRevisionRef ||
+      String(currentRow?.revision_ref || currentRow?.reviewer_head_sha || '').trim();
+    if (targetHead) {
+      const settledBodies = db.prepare(
+        `SELECT verdict, body_md FROM reviewer_passes
+          WHERE repo = ? AND pr_number = ? AND head_sha = ?
+            AND pass_kind IN ('first-pass', 'rereview')
+            AND status = 'completed'`
+      ).all(repo, prNumber, targetHead);
+      if (settledBodies.some((pass) =>
+        pass.verdict === 'comment-only' ||
+        (pass.body_md && normalizeEffectiveReviewVerdict(pass.body_md) === 'comment-only')
+      )) {
+        console.warn(`[review-state] Refusing re-review for ${repo}#${prNumber}@${targetHead}: settled comment-only verdict`);
+        return buildBlockedRereviewResult('comment-only-verdict-settled', currentRow);
+      }
     }
 
     // Single compare-and-swap UPDATE with the eligibility predicate

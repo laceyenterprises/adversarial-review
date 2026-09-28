@@ -128,6 +128,9 @@ function queueFollowUpForRecoveredPostedReview({
   const reviewBody = String(row.body_md || '');
   const linearTicketId = reviewRow?.linear_ticket || null;
   const priorLedger = summarizePRRemediationLedgerImpl(rootDir, { repo, prNumber });
+  if (priorLedger.commentOnlyFinalRoundRevisionRefs?.length > 0) {
+    return { queued: false, reason: 'comment-only-final-round-completed' };
+  }
   const tierResolution = resolveRoundBudgetForJobImpl({ linearTicketId }, {
     rootDir,
     preferPersisted: false,

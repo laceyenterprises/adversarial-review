@@ -746,6 +746,37 @@ test('requestReviewRereview preserves attempt history and records rereview metad
   assert.equal(result.reviewRow.rereview_reason, 'Remediation landed and is ready for another adversarial pass.');
 });
 
+test('requestReviewRereview refuses a head with a settled comment-only verdict', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const head = 'a'.repeat(40);
+  insertReviewRow(rootDir, { revisionRef: head });
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    db.prepare(`INSERT INTO reviewer_passes (
+      repo, pr_number, attempt_number, reviewer_class, reviewer_model,
+      pass_kind, started_at, ended_at, status, head_sha, verdict, body_md
+    ) VALUES (?, ?, 1, 'gemini', 'gemini', 'first-pass', ?, ?, 'completed', ?, 'comment-only', ?)`)
+      .run('laceyenterprises/adversarial-review', 10,
+        '2026-04-24T12:00:00.000Z', '2026-04-24T12:06:00.000Z', head,
+        '## Blocking issues\n- None.\n## Verdict\nComment only');
+  } finally {
+    db.close();
+  }
+  const result = requestReviewRereview({
+    rootDir, repo: 'laceyenterprises/adversarial-review', prNumber: 10,
+    targetRevisionRef: head, reason: 'Different reviewer requested a pass.',
+  });
+  assert.equal(result.triggered, false);
+  assert.equal(result.reason, 'comment-only-verdict-settled');
+  const after = openReviewStateDb(rootDir);
+  try {
+    assert.equal(after.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number = 10').get().review_status, 'posted');
+  } finally {
+    after.close();
+  }
+});
+
 test('requestReviewRereview resets moved pending rows independent of reviewer handle residue', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   insertReviewRow(rootDir, {

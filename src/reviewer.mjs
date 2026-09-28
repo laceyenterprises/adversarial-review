@@ -1296,6 +1296,9 @@ function queueFollowUpForPostedReview({
   }
 
   const priorLedger = summarizePRRemediationLedgerImpl(rootDir, { repo, prNumber });
+  if (priorLedger.commentOnlyFinalRoundRevisionRefs?.length > 0) {
+    return { queued: false, reason: 'comment-only-final-round-completed' };
+  }
   const tierResolution = resolveRoundBudgetForJob({ linearTicketId }, {
     rootDir,
     preferPersisted: false,

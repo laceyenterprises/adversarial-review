@@ -61,7 +61,6 @@ import {
   beginReviewerPass,
   completeReviewerPass,
   readBestReviewerEvidenceTokenUsage,
-  readReviewerPass,
   readWorkerRunTokenUsageResult,
 } from '../reviewer-pass-tokens.mjs';
 import {
@@ -132,6 +131,8 @@ import { isUnsupportedHqPriorityFlagError } from '../merge-agent-hq-exec.mjs';
 import { DUPLICATE_FAMILY_UNRESOLVED_REASON } from '../duplicate-family-gate.mjs';
 import { isHammerWorkerClass } from './hammer-worker-class.mjs';
 import { resolveNodeBin } from '../node-interpreter.mjs';
+import { resolveCloserPassAttempt } from './closer-pass-attempt.mjs';
+import { maybeRearmInfraDeadHammer } from './dead-hammer-rearm.mjs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -3397,7 +3398,25 @@ async function readCloserWorkerRunUsageAfterRollup({
   return null;
 }
 
-async function recordAmaCloserReviewerPassTokens({
+// CLOSERREUSE-01: a closer pass is accounting. Any error recording it is logged
+// and swallowed, so it can never fail maybeDispatchAmaCloser. agent-os#7347's
+// `refusing to reuse terminal reviewer_passes row` escaped every call site and
+// stranded the PR behind a merge-agent fallback for 3.5 hours.
+async function recordAmaCloserReviewerPassTokens(args = {}) {
+  try {
+    return await recordAmaCloserReviewerPassTokensOnce(args);
+  } catch (err) {
+    const { repo, prNumber, record, logger = console } = args;
+    logger.warn?.(
+      `[ama-closer] closer pass recording failed for ${repo}#${prNumber} `
+        + `launchRequestId=${record?.launchRequestId || record?.dispatchId || 'unknown'}; `
+        + `the closer decision continues without it: ${err?.message || err}`,
+    );
+    return null;
+  }
+}
+
+async function recordAmaCloserReviewerPassTokensOnce({
   rootDir,
   hqRoot,
   repo,
@@ -3413,8 +3432,36 @@ async function recordAmaCloserReviewerPassTokens({
   logger = console,
 } = {}) {
   if (!record?.launchRequestId && !record?.dispatchId) return null;
-  const attemptNumber = normalizeCloserAttemptNumber(record);
   const launchRequestId = record.launchRequestId || record.dispatchId || null;
+  // Each launch's pass is recorded once, decided before the token rollup poll,
+  // so a launch re-reconciled on a later pass costs neither a throw nor the
+  // poll. HAMBG-02 (#1181) caught the same refusal after the poll, and there a
+  // different launch at an occupied attempt lost its usage; it is now
+  // recorded at the next free attempt (see closer-pass-attempt.mjs).
+  const closerAttempt = resolveCloserPassAttempt(rootDir, {
+    repo,
+    prNumber,
+    attemptNumber: normalizeCloserAttemptNumber(record),
+    launchRequestId,
+    workerRunId: record.workerRunId || null,
+  });
+  const attemptNumber = closerAttempt.attemptNumber;
+  if (closerAttempt.alreadyRecorded) {
+    logger.warn?.(
+      `[ama-closer] closer pass already recorded for ${repo}#${prNumber} attempt=${attemptNumber} `
+        + `launchRequestId=${launchRequestId}; not recording it again`,
+    );
+    return null;
+  }
+  if (closerAttempt.collidedWith) {
+    const occupant = closerAttempt.collidedWith;
+    logger.warn?.(
+      `[ama-closer] closer pass attempt-number collision for ${repo}#${prNumber} attempt=${occupant.attemptNumber}: `
+        + `the ${occupant.status} row belongs to launchRequestId=${occupant.launchRequestId || 'unknown'} `
+        + `workerRunId=${occupant.workerRunId || 'unknown'}; recording launchRequestId=${launchRequestId} `
+        + `at attempt=${attemptNumber}`,
+    );
+  }
   const rolledUpUsage = await readCloserWorkerRunUsageAfterRollup({
     rootDir,
     hqRoot,
@@ -3470,51 +3517,9 @@ async function recordAmaCloserReviewerPassTokens({
     merged,
     ...(missingUsage ? { tokenUsageUnavailable: true } : {}),
   };
-  try {
-    return recordCloserReviewerPass(rootDir, {
-      repo, prNumber, attemptNumber, record, usage, workerRunId, startedAt, endedAt, metadata, status, merged,
-    });
-  } catch (err) {
-    // HAMBG-02: a launch that an earlier tick already reconciled has a terminal
-    // pass for this attempt. Re-reconciling it (for example after the re-arm
-    // was deferred) must not throw. From 06:00Z until an SRE merged it at
-    // 08:46Z, every adversarial-review#1178 tick died on this error and fell
-    // back to a merge-agent that skipped.
-    if (!String(err?.message || err).includes('refusing to reuse terminal reviewer_passes row')) throw err;
-    // The pass key is `attempt=retryCount`, not the launch, so a different
-    // launch (a later review series restarting at retryCount 1) can land on
-    // the same terminal row. That launch's accounting is lost either way;
-    // say so instead of calling it a re-reconcile.
-    let stored = null;
-    try {
-      stored = readReviewerPass(rootDir, { repo, prNumber, attemptNumber, passKind: 'closer' });
-    } catch {
-      // Fall through to the unattributed collision warning.
-    }
-    if (isSameCloserLaunchPass(stored, { launchRequestId, workerRunId })) {
-      logger.warn?.(
-        `[ama-closer] closer pass already recorded for ${repo}#${prNumber} attempt=${attemptNumber} `
-          + `launchRequestId=${launchRequestId || 'unknown'}; not recording it again`,
-      );
-    } else {
-      logger.warn?.(
-        `[ama-closer] closer pass attempt-number collision for ${repo}#${prNumber} attempt=${attemptNumber}: `
-          + `launchRequestId=${launchRequestId || 'unknown'} cannot be recorded because the terminal row belongs to `
-          + `launchRequestId=${stored?.metadata?.launchRequestId || 'unknown'} `
-          + `workerRunId=${stored?.worker_run_id || 'unknown'}; this launch's token usage is not recorded`,
-      );
-    }
-    return null;
-  }
-}
-
-// Whether a stored closer pass row was written for this same launch.
-function isSameCloserLaunchPass(stored, { launchRequestId, workerRunId } = {}) {
-  if (!stored) return false;
-  const storedLaunch = String(stored.metadata?.launchRequestId || '').trim();
-  if (storedLaunch && launchRequestId) return storedLaunch === String(launchRequestId).trim();
-  const storedRun = String(stored.worker_run_id || '').trim();
-  return Boolean(storedRun) && Boolean(workerRunId) && storedRun === String(workerRunId).trim();
+  return recordCloserReviewerPass(rootDir, {
+    repo, prNumber, attemptNumber, record, usage, workerRunId, startedAt, endedAt, metadata, status, merged,
+  });
 }
 
 function recordCloserReviewerPass(rootDir, {
@@ -4428,6 +4433,8 @@ export async function maybeDispatchAmaCloser({
     let status = statusProbe?.status || null;
     existingDispatchStatus = status;
     let phantomActiveWorkerRun = null;
+    // The LRQ's ledger row, when the unknown-status path below read it.
+    let launchRequestProbe = null;
     if (AMA_CLOSER_ACTIVE_STATUSES.has(status)) {
       const workerRunProbe = await readLatestWorkerRunStatusFromLedger({
         launchRequestId: existingRecord.launchRequestId,
@@ -5097,7 +5104,7 @@ export async function maybeDispatchAmaCloser({
       }
     }
     if (status === 'unknown') {
-      const launchRequestProbe = await readLaunchRequestStatusImpl({
+      launchRequestProbe = await readLaunchRequestStatusImpl({
         launchRequestId: existingRecord.launchRequestId,
         ledgerTarget: dispatchContext.ledgerTarget || null,
         ledgerDbPath: dispatchContext.ledgerDbPath || null,
@@ -5195,6 +5202,63 @@ export async function maybeDispatchAmaCloser({
         pollDelaysMs: dispatchContext.closerTokenRollupPollDelaysMs || undefined,
         logger,
       });
+      // CLOSERREUSE-01: a hammer that died of an infrastructure cause and
+      // pushed nothing gets its dispatch refunded, so the retry cap below
+      // re-arms it within the series' budget (see dead-hammer-rearm.mjs).
+      if (status === 'failed' && !hammerEndedWithoutMerge && !existingDispatchHeadAdvanced) {
+        const deadHammerRearm = await maybeRearmInfraDeadHammer({
+          rootDir,
+          hqRoot,
+          repo,
+          prNumber,
+          jobKey: reviewedSha,
+          record: existingRecord,
+          workerClass,
+          currentHeadSha: targetRemediationSha,
+          launchRequestProbe,
+          readLaunchRequestStatusImpl,
+          ledgerTarget: dispatchContext.ledgerTarget || null,
+          ledgerDbPath: dispatchContext.ledgerDbPath || null,
+          env: process.env,
+          now: dispatchContext.dispatchedAt,
+          // A revoked grant or boot crash is refunded only when the re-dispatch
+          // would land on another harness than the one that died.
+          nextDispatchDiffersImpl: async () => {
+            const next = await resolveCloserDispatchHarnessImpl({
+              workerClass,
+              fallbackWorkerClasses: Array.isArray(cfg?.workerClassFallback) ? cfg.workerClassFallback : [],
+              hqPath,
+              execFileImpl,
+              env: process.env,
+              signal,
+            });
+            const died = existingRecord.dispatchWorkerClass || existingRecord.workerClass || workerClass;
+            return Boolean(next?.workerClass) && next.workerClass !== died;
+          },
+        });
+        // Log an infrastructure death once per launch, refunded or not. The
+        // launch is re-observed on every tick until a re-dispatch replaces the
+        // record, so the logged launch is stored on the record
+        // (`infraRearmLoggedLaunchRequestId`). `already-refunded` and
+        // `suppressed` are never logged; a non-infra failure keeps its charge
+        // silently, as before.
+        if (deadHammerRearm.cause
+          && !['not-infrastructure', 'already-refunded', 'suppressed'].includes(deadHammerRearm.reason)
+          && existingRecord.infraRearmLoggedLaunchRequestId !== existingRecord.launchRequestId) {
+          logAmaCloserDispatchEvent(logger, 'ama_closer.infra_dead_hammer_rearm', {
+            repo,
+            prNumber,
+            headSha: existingRecord.headSha || null,
+            launchRequestId: existingRecord.launchRequestId,
+            ...deadHammerRearm,
+          }, { level: deadHammerRearm.rearmed ? 'info' : 'warn' });
+          updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => (
+            current?.launchRequestId === existingRecord.launchRequestId
+              ? { ...current, infraRearmLoggedLaunchRequestId: existingRecord.launchRequestId }
+              : null
+          ));
+        }
+      }
     }
     if (
       !releaseUnprovenTerminalHold

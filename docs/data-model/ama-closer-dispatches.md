@@ -49,6 +49,7 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 | `state` | string | Launch state such as `dispatching`, `dispatched`, `dispatch-deferred-transient`, `dispatch-failed`, `no-dispatch`, or `completed`. |
 | `dispatchId` | string or null | Dispatch id parsed from HQ output when available. |
 | `launchRequestId` | string or null | Launch request id parsed from HQ output when available. |
+| `infraRearmLoggedLaunchRequestId` | string, optional | Launch whose `ama_closer.infra_dead_hammer_rearm` event was already logged. The event is skipped while this equals `launchRequestId`, so it is logged once per launch whatever the re-arm reason. Stamped only while the record still names that launch. |
 | `retryCount` | non-negative integer | Budgeted failed-dispatch count. Transient and branch-holder refusals preserve budget. |
 | `branchHolderBlockCount` | non-negative integer | Count of branch-holder refusals for bounded same-PR worktree cleanup. |
 | `lastObservedStatus` | string or null | Most recent worker status observed through HQ/session-ledger probes. Lifecycle cancellation uses HQ's reported status, or `terminal` when HQ confirms termination without naming a status; both release dispatch reservations. |

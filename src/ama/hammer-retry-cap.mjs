@@ -80,7 +80,9 @@ export const HAMMER_TARGET_REDRIVE_CAP_EXHAUSTED_REASON = 'hammer-target-redrive
 // its own `retryable`, and neither budget draws on the other. Only this many exits per series are refunded;
 // after that an exit stays charged and the normal cap suppresses and alerts.
 // The lifetime count is never refunded, so the lifetime ceiling still bounds
-// every PR.
+// every PR. CLOSERREUSE-01 refunds a hammer that died of an infrastructure
+// cause without pushing from this same budget (src/ama/dead-hammer-rearm.mjs):
+// one refund per series, whichever way the hammer ended.
 export const HAMMER_EXITED_WITHOUT_CLOSE_RETRY_BUDGET = 1;
 const RETRYABLE_LAUNCH_HISTORY = 10;
 
@@ -452,7 +454,8 @@ export function markHammerRetryCapExhausted(rootDir, identity, {
 
 /**
  * HAMBG-02: refund the charged dispatch of a hammer that exited without
- * closing its PR (see HAMMER_EXITED_WITHOUT_CLOSE_RETRY_BUDGET). `attemptCount`
+ * closing its PR, or (CLOSERREUSE-01) that died of an infrastructure cause
+ * without pushing (see HAMMER_EXITED_WITHOUT_CLOSE_RETRY_BUDGET). `attemptCount`
  * (and `targetAttemptCount` for the same target head) goes down by one and
  * `retryable` goes up by one. A launch is refunded at most
  * once, however many ticks observe it. The lifetime count is not touched.

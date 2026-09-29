@@ -1,0 +1,124 @@
+{
+  "_fixture": {
+    "source": "gh reads of laceyenterprises/agent-os#7332, 2026-09-29: pulls/7332/reviews, pulls/7332/commits, issues/7332/comments",
+    "note": "DIRTYOWN-02 replay fixture. The remediation marker names job laceyenterprises__agent-os-pr-7332-2026-09-29T03-37-45-677Z, r1 of 2, stopped (no-progress), after the comment-only review on d57efeb; the remediation worker pushed 9b19705. Shape follows the COMMENTCLOSE-02 #7334 record; finding text is placeholder. No live data/ was copied."
+  },
+  "schemaVersion": 2,
+  "kind": "adversarial-review-follow-up",
+  "status": "stopped",
+  "jobId": "laceyenterprises__agent-os-pr-7332-2026-09-29T03-37-45-677Z",
+  "createdAt": "2026-09-29T03:37:45.677Z",
+  "trigger": {
+    "type": "github-review-posted",
+    "postedAt": "2026-09-29T03:37:45.677Z"
+  },
+  "repo": "laceyenterprises/agent-os",
+  "prNumber": 7332,
+  "baseBranch": "main",
+  "branch": "claude-code-ophammerfp-01/OPHAMMERFP-01",
+  "domainId": "code-pr",
+  "subjectExternalId": "laceyenterprises/agent-os#7332",
+  "revisionRef": "d57efeb2d68259ddd12a0d1b3fecfc4213e95766",
+  "linearTicketId": null,
+  "riskClass": "medium",
+  "reviewerModel": "gemini",
+  "builderTag": "claude-code",
+  "critical": false,
+  "nonBlockingOnly": true,
+  "finalRound": "comment-only",
+  "reviewSummary": "Sanitized: a re-review whose remaining findings are all non-blocking.",
+  "reviewBody": "## Adversarial Review — Gemini (reviewer)\n\n## Summary\nSanitized: a re-review whose remaining findings are all non-blocking.\n\n## Blocking issues\n- None.\n\n## Non-blocking issues\n- **Non-blocking finding 1**\n  - **File:** `path/redacted-1`\n  - **Lines:** `1`\n  - **Problem:** Placeholder for live finding 1.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n\n\n## Suggested fixes\n- Placeholder.\n\n## Verdict\nComment only",
+  "verdict_mode": "enforce",
+  "recommendedFollowUpAction": {
+    "type": "address-adversarial-review",
+    "priority": "normal",
+    "summary": "Start a follow-up coding session for this PR and address the adversarial review findings.",
+    "executionModel": "bounded-manual-rounds",
+    "maxRounds": 2,
+    "futureArchitectureNote": "Long term this should resume the original build session and preserve original build intent/context instead of spawning a fresh session from a file handoff."
+  },
+  "remediationPlan": {
+    "mode": "bounded-manual-rounds",
+    "maxRounds": 2,
+    "currentRound": 1,
+    "rounds": [
+      {
+        "round": 1,
+        "domainId": "code-pr",
+        "subjectExternalId": "laceyenterprises/agent-os#7332",
+        "revisionRef": "d57efeb2d68259ddd12a0d1b3fecfc4213e95766",
+        "kind": "remediation",
+        "state": "stopped",
+        "claimedAt": "2026-09-29T03:38:10.000Z",
+        "spawnedAt": "2026-09-29T03:38:30.000Z",
+        "finishedAt": "2026-09-29T03:44:06.000Z",
+        "reReview": {
+          "requested": false,
+          "requestedAt": null,
+          "reason": null,
+          "triggered": false,
+          "status": "suppressed",
+          "outcomeReason": "comment-only-final-round",
+          "reviewRow": null,
+          "suppressed": "comment-only-final-round"
+        },
+        "completion": {
+          "workerPushedHeadSha": "9b19705ca1bf4ac779163e5b366efbc6078352dc",
+          "workerPushProof": {
+            "method": "git-cherry-replay",
+            "reviewedCommitsReplayed": 2,
+            "workerCommits": 1
+          },
+          "finalRoundOutcome": {
+            "completed": true,
+            "reason": "none",
+            "ciState": null,
+            "push": "replayed-onto-base"
+          }
+        }
+      }
+    ],
+    "transientRetries": 0,
+    "retryHistory": [],
+    "retryAfter": null,
+    "stopReason": "no-progress",
+    "stop": {
+      "code": "no-progress"
+    },
+    "nextAction": null
+  },
+  "nonBlockingRoundsBefore": 0,
+  "nonBlockingMaxRounds": 1,
+  "claimedAt": "2026-09-29T03:38:10.000Z",
+  "remediationWorker": {
+    "model": "claude-code",
+    "state": "stopped"
+  },
+  "completion": {
+    "source": "claude-code-output-last-message",
+    "workerModel": "claude-code",
+    "workerPushedHeadSha": "9b19705ca1bf4ac779163e5b366efbc6078352dc",
+    "workerPushProof": {
+      "method": "git-cherry-replay",
+      "reviewedCommitsReplayed": 2,
+      "workerCommits": 1
+    },
+    "finalRoundOutcome": {
+      "completed": true,
+      "reason": "none",
+      "ciState": null,
+      "push": "replayed-onto-base"
+    }
+  },
+  "reReview": {
+    "requested": false,
+    "requestedAt": null,
+    "reason": null,
+    "triggered": false,
+    "status": "suppressed",
+    "outcomeReason": "comment-only-final-round",
+    "reviewRow": null,
+    "suppressed": "comment-only-final-round"
+  },
+  "stoppedAt": "2026-09-29T03:44:06.000Z"
+}

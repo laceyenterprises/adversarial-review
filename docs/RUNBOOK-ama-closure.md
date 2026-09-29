@@ -301,9 +301,14 @@ Expected watcher logs:
 [watcher] AMA hammer dispatch started in background for <repo>#<pr>@<head>; posted-review phase continues
 [watcher] AMA hammer dispatch queued in background for <repo>#<pr>@<head>; posted-review phase continues
 [watcher] AMA hammer dispatch in-flight in background for <repo>#<pr>@<head>; posted-review phase continues
-[watcher] AMA hammer background dispatch settled for <repo>#<pr>@<head>: dispatched=<true|false> reason=<reason> elapsed_ms=<n>
-[watcher] AMA hammer background outcome applied for <repo>#<pr>: dispatched=<true|false> reason=<reason>
+[watcher] AMA hammer background dispatch settled for <repo>#<pr>@<head>: dispatched=<true|false> reason=<reason> [reasons=[<r1>,<r2>,...]] elapsed_ms=<n>
+[watcher] AMA hammer background outcome applied for <repo>#<pr>: dispatched=<true|false> reason=<reason> [reasons=[<r1>,<r2>,...]]
 ```
+
+When the closer's result carries a `reasons` array, both lines print it
+(DIRTYOWN-02). A `reason=not-eligible` always has one, so the log names the
+eligibility gates that refused the hammer, for example
+`reasons=[pr-not-mergeable,stale-review-head,verdict-not-settled-success,non-blocking-findings-present,ci-not-green]`.
 
 Validation after enabling `background`:
 

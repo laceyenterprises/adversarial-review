@@ -95,6 +95,15 @@ exhausted review cycle therefore admits the proven final-round head to the
 hammer's terminal validation. It still parks on any other stale reviewed head,
 on blocking or unknown findings, and on red CI.
 
+A conflicting proven final-round head goes to the hammer whatever its CI says
+(DIRTYOWN-02, agent-os#7332). CI on a head that conflicts with base either never
+runs or runs on a head that cannot merge, and the hammer must rebase before any
+CI counts, so waiting for green would park the PR for good. The conflict
+(`pr-not-mergeable`) lifts both the pending-CI hold and the red-CI park, with or
+without an exhausted round budget. Red or pending CI without a conflict is
+unchanged, and so are blocking or unknown findings, hard-stop labels, the hammer
+retry cap and the lifetime ceiling.
+
 
 AMA closer dispatch must also declare the workspace repo set required by the
 closer prompt. The PR repository is always passed as the primary `--repo`. When

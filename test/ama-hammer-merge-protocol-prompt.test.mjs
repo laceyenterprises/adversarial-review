@@ -229,10 +229,22 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.match(HAMMER_PROMPT, /Closed-By: hammer \(adversarial-pipe-mode\)/);
 });
 
+test('hammer prompt keeps every step in the foreground and never ends with a command running (HAMBG-02)', () => {
+  const mandate = HAMMER_TEMPLATE.slice(
+    HAMMER_TEMPLATE.indexOf('## Mandate'),
+    HAMMER_TEMPLATE.indexOf('\n1. Read the FINAL'),
+  );
+  assert.match(mandate, /0c\. \*\*Run every step in the foreground \(HAMBG-02\)\.\*\*/);
+  assert.match(mandate, /If a step can exceed your tool's timeout, split it into repeated\s+foreground polls/);
+  assert.match(mandate, /Never end\s+your final message while a command you started is still running\./);
+  assert.match(mandate, /`hammer-exited-without-close`/);
+  assert.doesNotMatch(HAMMER_TEMPLATE, /run_in_background/);
+});
+
 test('the no-merge closing status carries the line the closer reads (HAMBG-02)', () => {
   const mandate = HAMMER_TEMPLATE.slice(
     HAMMER_TEMPLATE.indexOf('0b. **A run that does not merge'),
-    HAMMER_TEMPLATE.indexOf('\n1. Read the FINAL'),
+    HAMMER_TEMPLATE.indexOf('0c. **Run every step'),
   );
   assert.match(mandate, /the comment must contain the line `HAM closing status — no merge\.`/);
   // The gate-cap park writes the same line.

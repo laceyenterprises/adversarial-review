@@ -142,6 +142,16 @@ installation; the merge phase retains its existing HQ merge-signal integration.
    merely because remediation or a rebase completed.
    If the gate-attempt cap parks this head, include the `closingStatus` returned
    by `merge-lease acquire` verbatim in that comment and the terminal audit.
+0c. **Run every step in the foreground (HAMBG-02).** Your session ends when
+   your final message ends, and anything still running in the background dies
+   with it. If a step can exceed your tool's timeout, split it into repeated
+   foreground polls that each finish inside the timeout. For example, re-read
+   the required checks until they settle, then run the merge phase. Never end
+   your final message while a command you started is still running. The closer
+   checks every exit. A run that neither merged the PR nor wrote its no-merge
+   terminal audit for the current head is recorded as
+   `hammer-exited-without-close`. The closer then dispatches another hammer,
+   within a small retry budget.
 1. Read the FINAL adversarial review on `<<REVIEWED_SHA>>`. These are the
    freshest findings.
 2. Remediate ALL final comments, blocking and non-blocking. Make real fixes for

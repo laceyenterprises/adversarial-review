@@ -431,14 +431,18 @@ test('a void that cannot be written is retried, then fails the pass instead of k
     sleepImpl: (ms) => sleeps.push(ms), log: SILENT_LOG,
     stageContext: { reviewAttemptNumber: 2, maxRemediationRounds: 3 },
   };
-  const failed = selectReviewMode({
+  assert.throws(() => selectReviewMode({
     ...base,
     voidSingleReviewCreditImpl: () => { calls.push('void'); throw new Error('EROFS: read-only file system'); },
-  });
+  }), /single-review credit void did not persist.*EROFS/);
   assert.equal(calls.length, 3);
   assert.equal(sleeps.length, 2);
-  assert.match(failed.singleReview.voidFailed.error, /EROFS/);
-  assert.equal(failed.singleReview.voided, undefined);
+  const direct = selectSingleReview({
+    ...base, promptStage: 'last',
+    voidSingleReviewCreditImpl: () => { throw new Error('EROFS'); },
+  });
+  assert.match(direct.voidFailed.error, /EROFS/);
+  assert.equal(direct.voided, undefined);
 
   // A transient failure that clears on retry voids normally.
   let attempts = 0;

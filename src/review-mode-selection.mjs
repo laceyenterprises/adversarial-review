@@ -74,6 +74,7 @@ function fullModeFallback(reason) {
  *   single-review credit was voided.
  * @param {object} [params.log]
  * @returns {ReturnType<typeof evaluateSlimReviewEligibilityForDiff>}
+ * @throws {Error} Only when a single-review credit void could not be persisted.
  */
 export function selectReviewMode({
   rootDir,
@@ -114,8 +115,9 @@ export function selectReviewMode({
   }
   // SINGLEREVIEW-01: decorated in place so the durable record and the caller
   // see the same object. `promptStage` is the stage the review must run at.
-  // `singleReview.voidFailed` means a spent credit could not be revoked; the
-  // caller must not run the review (see `voidCredit`).
+  // A spent credit that could not be revoked is the one failure this module
+  // does not absorb: it throws so the reviewer exits non-zero before dispatch
+  // and the pass stays retryable (see `voidCredit`).
   // After a slim-classification failure there is no durable review-mode row
   // for the reaper to read back, so the lane is not applied (normal rounds);
   // a spent single-review credit can still be voided.
@@ -124,6 +126,12 @@ export function selectReviewMode({
     allowApply: !slimClassificationFailed,
     resolveSingleReviewPolicyImpl, voidSingleReviewCreditImpl, sleepImpl, log,
   });
+  if (decision.singleReview.voidFailed) {
+    throw new Error(
+      `single-review credit void did not persist for ${repo}#${prNumber}; ` +
+      `refusing to review until it does: ${decision.singleReview.voidFailed.error}`,
+    );
+  }
   decision.promptStage = decision.singleReview.applied ? 'last' : promptStage;
   if (decision.singleReview.voided?.voided && stageContext) {
     try {

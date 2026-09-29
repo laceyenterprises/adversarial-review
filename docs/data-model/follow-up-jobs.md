@@ -198,6 +198,6 @@ single-review stop. Shape:
 stops whose `createdAt` is at or before `voidedAt`, so the PR gets its tier
 budget back; a single-review job created later counts again. The stopped job
 files are never rewritten. An unreadable marker is logged and ignored. A void
-write that fails is retried up to 3 times. If it still fails, the reviewer exits
-non-zero before dispatch. The review pass fails retryable instead of running the
+write that fails is retried up to 3 times. If it still fails, `selectReviewMode`
+throws and the reviewer exits non-zero before dispatch. The review pass fails retryable instead of running the
 lenient stage while the credit is still spent.

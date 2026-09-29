@@ -193,7 +193,9 @@ identity too, so they count against the cap the same way.
 - No added identities, or no Gemini candidate on a leasing runtime: the broker
   credential count, as before.
 - Every Gemini candidate on a leasing runtime: the number of *ready*
-  identities. The broker is not consulted.
+  identities. The broker is not consulted. An identity this watcher has leased
+  stays ready, so the ready count is total capacity; the queue subtracts the
+  watcher's in-flight Gemini reviews from it once.
 - A mix of both: the lower of the ready count and the broker count.
 
 **Readiness and isolation.** Each drain that has a leasing Gemini candidate
@@ -270,7 +272,11 @@ timeout. Two things keep this from hanging a review or sharing a HOME:
   pass checks again. The watcher's own helper calls as that user (`status`,
   `settings`, `probe`, `cleanup`) would look like review processes, so while
   one is running the check is deferred to the next pass. An unreadable answer
-  counts as "still running":
+  counts as "still running". Those helper calls read the pinned command's
+  output through pipes, and a process a helper leaves as the identity can
+  inherit them, so a helper capture never waits for pipe EOF alone: it settles
+  2s after the sudo process exits, or 2s after the SIGKILL that follows a timeout,
+  with whatever output arrived.
 
 ```text
 [agy-identities] identity=<user> isolated: N review process(es) still running as <user> (<pid> <name>, ...); not leased until they exit
@@ -302,7 +308,11 @@ It removes the review's scratch copy and re-probes the identity if the run
 record says `failed`. For an added identity, it also runs the survivor check
 above. An added identity also starts every watcher's life as draining, so its
 first readiness pass runs the survivor check before it can be leased. If the
-run records cannot be read, every identity not leased in memory stays out.
+run records cannot be read, or any active run record file is unreadable or not
+valid JSON, every identity not leased in memory stays out, and its reason names
+the damaged file(s). A damaged record may be the only trace of a review that is
+still extracting its workspace. Repair or remove the file named in the reason
+to re-admit the identities.
 
 **Alerts.** Two conditions page the operator through the alert bus. Each pages
 again at most every 15 minutes while it lasts:
@@ -445,6 +455,9 @@ CCX-08 final closeout notes:
 - Pipeline admission reserves the maximum simultaneous Gemini seats in a panel,
   including detached reviews while their current stage uses another model.
   Actual Gemini spawns replace the reservation rather than double-counting it.
+  After a watcher restart the reservation is rebuilt from the persisted spawn
+  records (`docs/data-model/reviewer-spawn-records.md`) of stages that still
+  run, bounded by the reviewer timeout.
   Pipeline reservations apply only to multi-identity plans; unset/single-owner
   deployments retain their existing admission behavior.
 - Added identities carry prompts through the pinned wrapper's `--prompt-stdin`

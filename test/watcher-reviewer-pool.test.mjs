@@ -16,7 +16,13 @@ import {
   sortReviewerDispatchCandidates,
   reviewerDispatchIsFirstPass,
   reviewerLaneFloor,
+  persistedSpawnReservationSource,
 } from '../src/watcher-reviewer-pool.mjs';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { writeReviewerRunRecord } from '../src/adapters/reviewer-runtime/run-state.mjs';
+import { upsertSpawnRecord } from '../src/reviewer-fence.mjs';
 import {
   PROJECTED_HEADROOM_FLOOR_MB,
   decideReviewerMemoryAdmission,
@@ -1868,7 +1874,7 @@ test('a two-seat pipeline cannot start with only one free Gemini credential', as
 });
 
 
-test('durable pipeline reservations survive restart without a detached tracker', () => {
+test('in-memory pipeline reservations group registered stages by PR', () => {
   const spawns = new Map([
     ['a', { repo: 'o/r', pr: 1, reviewerModel: 'claude', pipelineGeminiSeats: 2 }],
   ]);
@@ -1876,4 +1882,83 @@ test('durable pipeline reservations survive restart without a detached tracker',
   spawns.clear();
   for (const key of ['a', 'b']) spawns.set(key, { repo: 'o/r', pr: 1, reviewerModel: 'gemini', pipelineGeminiSeats: 2 });
   assert.equal(countActiveReviewerSpawnsByModel(spawns).get('gemini'), 2);
+});
+
+test('CCX-08: a fresh tracker rebuilds a pipeline reservation from a persisted, still-running non-Gemini stage', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ccx08-spawn-records-'));
+  try {
+    const stateDir = join(root, 'data');
+    const nowMs = Date.parse('2026-09-29T12:00:00.000Z');
+    // A previous watcher persisted this stage and died; its reviewer child
+    // (process group 4242) still runs a claude stage of a two-seat pipeline.
+    upsertSpawnRecord(stateDir, {
+      spawnToken: 'stage-before-bounce',
+      repo: 'o/r',
+      pr: 7,
+      reviewerModel: 'claude',
+      pipelineGeminiSeats: 2,
+      reviewerSessionUuid: 'session-before-bounce',
+      spawnedAt: new Date(nowMs - 60_000).toISOString(),
+    });
+    writeReviewerRunRecord(root, { sessionUuid: 'session-before-bounce', state: 'heartbeating', pgid: 4242 });
+    let alive = true;
+    const source = persistedSpawnReservationSource({ stateDir, runStateRootDir: root, isPgidAliveImpl: (pgid) => pgid === 4242 && alive });
+    const tracker = createDetachedReviewerDispatchTracker({
+      activeReviewerSpawns: new Map(),
+      timeoutMs: 10 * 60_000,
+      now: () => nowMs,
+      ...source,
+    });
+    assert.equal(tracker.activeCounts().get('gemini'), 2, 'the panel stays reserved across the restart');
+
+    // Another two-seat pipeline is not admitted into that capacity.
+    const other = candidate(8, async () => { throw new Error('must remain deferred'); }, undefined, { reviewerModel: 'claude' });
+    other.pipelineGeminiSeats = 2;
+    const result = await runBoundedReviewerDispatchQueue([other], {
+      maxConcurrent: 6, geminiCredentialConcurrency: 2, activeReviewerCounts: tracker.activeCounts(),
+      logger: { error() {}, log() {}, warn() {} },
+    });
+    assert.equal(result.dispatched, 0);
+
+    // A PR this watcher already tracks is reserved by that entry, once.
+    const inMemory = new Map([['now', { repo: 'o/r', pr: 7, reviewerModel: 'claude', pipelineGeminiSeats: 2 }]]);
+    const trackerWithStage = createDetachedReviewerDispatchTracker({ activeReviewerSpawns: inMemory, timeoutMs: 10 * 60_000, now: () => nowMs, ...source });
+    assert.equal(trackerWithStage.activeCounts().get('gemini'), 2);
+
+    // The stage's process group is gone: nothing is reserved.
+    alive = false;
+    assert.equal(tracker.activeCounts().get('gemini') || 0, 0);
+    // A terminal run record ends it too.
+    alive = true;
+    writeReviewerRunRecord(root, { sessionUuid: 'session-before-bounce', state: 'completed', pgid: 4242 });
+    assert.equal(tracker.activeCounts().get('gemini') || 0, 0);
+    // So does the reviewer-timeout expiry, whatever the run record says.
+    writeReviewerRunRecord(root, { sessionUuid: 'session-before-bounce', state: 'heartbeating', pgid: 4242 });
+    const late = createDetachedReviewerDispatchTracker({ activeReviewerSpawns: new Map(), timeoutMs: 10 * 60_000, graceMs: 0, now: () => nowMs + 11 * 60_000, ...source });
+    assert.equal(late.activeCounts().get('gemini') || 0, 0);
+    // A spawn record whose run record was never written never launched.
+    upsertSpawnRecord(stateDir, {
+      spawnToken: 'never-launched', repo: 'o/r', pr: 9, reviewerModel: 'claude', pipelineGeminiSeats: 1,
+      reviewerSessionUuid: 'session-never-launched', spawnedAt: new Date(nowMs).toISOString(),
+    });
+    alive = false;
+    assert.equal(tracker.activeCounts().get('gemini') || 0, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('CCX-08: a surviving Gemini stage reserves only the rest of its panel', () => {
+  const nowMs = Date.parse('2026-09-29T12:00:00.000Z');
+  const tracker = createDetachedReviewerDispatchTracker({
+    activeReviewerSpawns: new Map(),
+    timeoutMs: 10 * 60_000,
+    now: () => nowMs,
+    loadPersistedSpawnRecords: () => ({
+      g: { spawnToken: 'g', repo: 'o/r', pr: 7, reviewerModel: 'gemini', pipelineGeminiSeats: 2, reviewerSessionUuid: 's', spawnedAt: new Date(nowMs).toISOString() },
+    }),
+    isPersistedSpawnLive: () => true,
+  });
+  // Its own seat is held by the agy identity pool's adoption, not here.
+  assert.equal(tracker.activeCounts().get('gemini'), 1);
 });

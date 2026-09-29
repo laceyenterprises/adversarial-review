@@ -48,9 +48,13 @@ import {
   resolveAgyReviewIdentityFromEnv,
   resolveAgyReviewerIdentityPlan,
   resolveHqOwner,
+  runBoundedProcess,
   runPinnedCommand,
   runWithAgyReviewerIdentity,
 } from '../src/agy-reviewer-identities.mjs';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
+import { scanActiveReviewerRunRecords, writeReviewerRunRecord } from '../src/adapters/reviewer-runtime/run-state.mjs';
 import { createCliDirectReviewerRuntimeAdapter } from '../src/adapters/reviewer-runtime/cli-direct/index.mjs';
 import { createAgentRuntimeReviewerRuntimeAdapter } from '../src/adapters/reviewer-runtime/agent-runtime/index.mjs';
 import { createHealthRouter } from '../src/adapters/agent-runtime/router/index.mjs';
@@ -344,6 +348,39 @@ test('CCX-08: [<HQ owner>, agentos-reviewer] gives a cap of 2, the ready count, 
     assert.equal(await pool.refreshReadiness(), 1);
     // A non-Gemini candidate set skips both.
     assert.equal(await resolveGeminiCredentialConcurrencyForDispatchCandidates([{ reviewerModel: 'codex' }], { identityPool: pool }), null);
+  } finally {
+    fake.cleanup();
+  }
+});
+
+test('CCX-08: an identity this watcher has leased counts once in the Gemini cap', async () => {
+  const fake = makeFakeInstall();
+  try {
+    const pool = makePool(fake, { identities: [HQ_OWNER, REVIEWER_A, REVIEWER_B] });
+    const resolveCap = () => resolveGeminiCredentialConcurrencyForDispatchCandidates(
+      [{ reviewerModel: 'gemini', reviewerRuntimeAdapter: LEASING_ADAPTER }],
+      { env: {}, fetchCredentialConcurrency: async () => { throw new Error('the broker is not consulted'); }, identityPool: pool },
+    );
+    assert.equal(await resolveCap(), 3);
+    const lease = await pool.acquire({ reviewId: 'agy-in-flight' });
+    assert.ok(lease);
+    // Three ready identities, one of them leased: capacity is still three, and
+    // the queue's own count of the in-flight review leaves two free.
+    assert.equal(await resolveCap(), 3, 'a leased identity is not added on top of the ready count');
+    let started = 0;
+    const candidates = [1, 2, 3].map((prNumber) => ({
+      repoPath: 'o/r', prNumber, reviewerModel: 'gemini', run: async () => { started += 1; }, pendingSince: '2026-09-29T00:00:00.000Z', enqueuedAtMs: prNumber,
+    }));
+    const summary = await runBoundedReviewerDispatchQueue(candidates, {
+      maxConcurrent: 6,
+      geminiCredentialConcurrency: await resolveCap(),
+      activeReviewerCounts: new Map([['gemini', 1]]),
+      singleWave: true,
+      logger: { error() {}, log() {}, warn() {} },
+    });
+    assert.equal(summary.dispatched, 2);
+    assert.equal(started, 2);
+    await pool.release(lease);
   } finally {
     fake.cleanup();
   }
@@ -1144,6 +1181,82 @@ test('CCX-08: unreadable run records keep unleased identities out (fail closed)'
   } finally {
     fake.cleanup();
   }
+});
+
+test('CCX-08: one corrupt active run record keeps unleased identities out and is named', async () => {
+  const fake = makeFakeInstall({ users: [REVIEWER_A] });
+  const root = mkdtempSync(join('/tmp', 'ccx08-runs-'));
+  try {
+    writeReviewerRunRecord(root, { sessionUuid: 'healthy', state: 'heartbeating', pgid: 99 });
+    mkdirSync(join(root, 'data', 'reviewer-runs'), { recursive: true });
+    writeFileSync(join(root, 'data', 'reviewer-runs', 'damaged.json'), '{"sessionUuid": "damaged", "subjectContext": {"agyIdentityLease"');
+    const scan = scanActiveReviewerRunRecords(root);
+    assert.deepEqual(scan.records.map((record) => record.sessionUuid), ['healthy']);
+    assert.deepEqual(scan.unreadable.map((entry) => entry.name), ['damaged.json']);
+
+    const pool = makePool(fake, {
+      identities: [HQ_OWNER, REVIEWER_A],
+      readActiveRunRecordsImpl: () => scanActiveReviewerRunRecords(root),
+    });
+    assert.equal(await pool.refreshReadiness(), 0, 'the damaged record may be the lease that holds an identity');
+    assert.equal(await pool.acquire({ reviewId: 'agy-while-damaged' }), null);
+    for (const state of pool.snapshot()) assert.match(state.reasons[0], /unreadable: damaged\.json/);
+
+    // Removing the damaged record re-admits them.
+    rmSync(join(root, 'data', 'reviewer-runs', 'damaged.json'));
+    await pool.refreshReadiness();
+    assert.equal(await pool.refreshReadiness(), 2);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    fake.cleanup();
+  }
+});
+
+// ── Helper capture ──────────────────────────────────────────────────────────
+
+test('CCX-08: a helper capture settles when a descendant it cannot signal keeps stdout open', async () => {
+  // The direct child starts a descendant in its own process group (out of the
+  // timeout kill's reach, like a process running as an added identity) that
+  // inherits stdout and outlives it.
+  const script = [
+    "const { spawn } = require('node:child_process');",
+    "const d = spawn('sleep', ['30'], { detached: true, stdio: ['ignore', 'inherit', 'inherit'] });",
+    "d.unref();",
+    "process.stdout.write('probe.ok=yes\\ndescendant=' + d.pid + '\\n');",
+  ].join(' ');
+  const started = Date.now();
+  const result = await runBoundedProcess(process.execPath, ['-e', script], { env: process.env, timeoutMs: 20_000, drainMs: 200 });
+  const descendant = Number.parseInt(/descendant=(\d+)/.exec(result.stdout)?.[1] || '0', 10);
+  try {
+    assert.ok(Date.now() - started < 10_000, 'settled without waiting for the descendant');
+    assert.equal(result.code, 0);
+    assert.equal(result.timedOut, false);
+    assert.match(result.stdout, /probe\.ok=yes/);
+    assert.ok(descendant > 0);
+    assert.equal(processAlive(descendant), true, 'the descendant still holds the pipe');
+  } finally {
+    if (descendant > 0) { try { process.kill(descendant, 'SIGKILL'); } catch { /* gone */ } }
+  }
+});
+
+test('CCX-08: a helper capture settles after its timeout even when nothing it started can be killed', async () => {
+  // A sudo the HQ owner cannot signal: no exit, no close, kill is a no-op.
+  const spawnImpl = () => {
+    const child = new EventEmitter();
+    child.pid = 2 ** 30;
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.kill = () => false;
+    child.stdout.write('partial\n');
+    return child;
+  };
+  const started = Date.now();
+  const result = await runBoundedProcess('/usr/bin/sudo', [], { spawnImpl, timeoutMs: 50, killGraceMs: 50, drainMs: 50 });
+  assert.ok(Date.now() - started < 5_000);
+  assert.equal(result.timedOut, true);
+  assert.equal(result.pipeHeld, true);
+  assert.equal(result.code, null);
 });
 
 // ── Alerts ──────────────────────────────────────────────────────────────────

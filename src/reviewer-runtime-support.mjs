@@ -120,11 +120,10 @@ export async function resolveGeminiCredentialConcurrencyForDispatchCandidates(
   const leasingCandidates = identityPool.plan().multi
     ? geminiCandidates.filter((candidate) => adapterCarriesAgyReviewerIdentity(resolveCandidateAdapter(candidate))).length
     : 0;
-  const freeIdentities = leasingCandidates > 0 ? await identityPool.refreshReadiness() : null;
-  // The queue subtracts active Gemini reservations. Include already leased
-  // healthy identities in the total capacity to avoid subtracting them twice.
-  const leasedIdentities = (identityPool.snapshot?.() || []).filter((state) => state.ready && state.leased).length;
-  const readyIdentities = freeIdentities === null ? null : freeIdentities + leasedIdentities;
+  // The ready count is total capacity: it already includes identities this
+  // watcher holds a lease on (leasing does not unready an identity), and the
+  // queue subtracts those in-flight reviews itself, so they count once.
+  const readyIdentities = leasingCandidates > 0 ? await identityPool.refreshReadiness() : null;
   // A lane that stays at zero ready identities with work waiting alerts.
   if (leasingCandidates > 0) identityPool.noteGeminiDemand?.({ readyIdentities, candidates: leasingCandidates });
   if (readyIdentities !== null && leasingCandidates === geminiCandidates.length) return readyIdentities;

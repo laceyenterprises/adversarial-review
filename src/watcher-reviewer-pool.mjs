@@ -3,6 +3,9 @@ import {
   peakReviewerMemoryMbFor,
   readMemoryPressureSample,
 } from './watcher-memory-pressure.mjs';
+import { readReviewerRunRecord, TERMINAL_RUN_STATES } from './adapters/reviewer-runtime/run-state.mjs';
+import { isPgidAlive } from './process-group-identity.mjs';
+import { loadSpawnRecords } from './reviewer-fence.mjs';
 import { loadRoleConfig } from './role-config.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 
@@ -850,6 +853,11 @@ function createDetachedReviewerDispatchTracker({
   graceMs = DEFAULT_DETACHED_REVIEWER_DISPATCH_GRACE_MS,
   now = () => Date.now(),
   isProcessAlive = null,
+  // CCX-08: spawn records persisted by any watcher (object keyed by spawn
+  // token, or an array) and a liveness check for one of them. Together they
+  // carry pipeline Gemini reservations across a watcher restart.
+  loadPersistedSpawnRecords = null,
+  isPersistedSpawnLive = null,
   logger = console,
 } = {}) {
   const detachedReviewerDispatches = new Map();
@@ -888,6 +896,48 @@ function createDetachedReviewerDispatchTracker({
     return live;
   }
 
+  // Pipeline Gemini reservations this watcher does not hold in memory: spawn
+  // records a previous watcher persisted for a stage that still runs. The
+  // reviewer child outlives the watcher, and while it runs its PR's Gemini
+  // panel stays reserved, whatever model the stage itself runs. Records past
+  // the reviewer timeout, or whose process is gone, reserve nothing. A PR this
+  // watcher already tracks is reserved by that entry. Returns seats by PR key.
+  function persistedReservations(skipPrKeys) {
+    if (typeof loadPersistedSpawnRecords !== 'function') return new Map();
+    let loaded;
+    try {
+      loaded = loadPersistedSpawnRecords() || [];
+    } catch (err) {
+      logger?.warn?.(`[watcher] cannot read persisted reviewer spawn records for Gemini reservations: ${err?.message || err}`);
+      return new Map();
+    }
+    const nowMs = now();
+    const reservations = new Map();
+    const actualSeats = new Map();
+    for (const record of Array.isArray(loaded) ? loaded : Object.values(loaded)) {
+      const seats = Math.max(0, Number.parseInt(record?.pipelineGeminiSeats, 10) || 0);
+      if (seats === 0 || activeReviewerSpawns?.has?.(record?.spawnToken)) continue;
+      const key = reviewerDispatchPrKey({ repo: record?.repo, prNumber: record?.pr });
+      if (!key || skipPrKeys.has(key)) continue;
+      const spawnedAtMs = Date.parse(record?.spawnedAt);
+      if (!Number.isFinite(spawnedAtMs) || nowMs - spawnedAtMs > expiryMs()) continue;
+      let live = true;
+      try {
+        live = typeof isPersistedSpawnLive === 'function' ? isPersistedSpawnLive(record) !== false : true;
+      } catch {
+        live = true;
+      }
+      if (!live) continue;
+      reservations.set(key, Math.max(reservations.get(key) || 0, seats));
+      // A Gemini stage that survived holds its agy identity through the
+      // identity pool's adoption (it is not counted ready), so only the rest
+      // of the panel is reserved here.
+      if (String(record?.reviewerModel).toLowerCase() === 'gemini') actualSeats.set(key, (actualSeats.get(key) || 0) + 1);
+    }
+    for (const [key, seats] of reservations) reservations.set(key, Math.max(0, seats - (actualSeats.get(key) || 0)));
+    return reservations;
+  }
+
   return {
     activeCounts() {
       const liveDetached = pruneAndList();
@@ -914,6 +964,14 @@ function createDetachedReviewerDispatchTracker({
         const directSeat = record?.reviewerModel === 'gemini' ? 1 : 0;
         counts.set('gemini', (counts.get('gemini') || 0) + Math.max(0, seats - directSeat));
         incrementReviewerLaneCounts(counts, record?.candidate);
+      }
+      const trackedPrKeys = new Set(registeredPrKeys);
+      for (const record of liveDetached) {
+        const key = reviewerDispatchPrKey({ repo: record?.repo, prNumber: record?.prNumber });
+        if (key) trackedPrKeys.add(key);
+      }
+      for (const seats of persistedReservations(trackedPrKeys).values()) {
+        if (seats > 0) counts.set('gemini', (counts.get('gemini') || 0) + seats);
       }
       return counts;
     },
@@ -943,6 +1001,42 @@ function createDetachedReviewerDispatchTracker({
           detachedReviewerDispatches.delete(token);
         })
         .catch(() => {});
+    },
+  };
+}
+
+// The persisted spawn records (reviewer-fence `spawn-records/`) and the
+// reviewer run record each one names, as the detached tracker's
+// `loadPersistedSpawnRecords` / `isPersistedSpawnLive`. Every reviewer runtime
+// writes a run record at launch, so a spawn record without one never
+// launched; a terminal record or a gone process group has ended; anything
+// else (launching, or a record that cannot be read) counts as running until
+// the tracker's reviewer-timeout expiry.
+function persistedSpawnReservationSource({
+  stateDir,
+  runStateRootDir,
+  loadSpawnRecordsImpl = loadSpawnRecords,
+  readRunRecordImpl = readReviewerRunRecord,
+  isPgidAliveImpl = isPgidAlive,
+} = {}) {
+  return {
+    loadPersistedSpawnRecords: () => loadSpawnRecordsImpl(stateDir),
+    isPersistedSpawnLive(record) {
+      const sessionUuid = String(record?.reviewerSessionUuid || '').trim();
+      if (!sessionUuid) return true;
+      let run;
+      try {
+        run = readRunRecordImpl(runStateRootDir, sessionUuid);
+      } catch {
+        return true;
+      }
+      if (!run || TERMINAL_RUN_STATES.has(run.state)) return false;
+      if (!Number.isInteger(run.pgid)) return true;
+      try {
+        return isPgidAliveImpl(run.pgid);
+      } catch {
+        return true;
+      }
     },
   };
 }
@@ -1372,6 +1466,7 @@ export {
   runBoundedReviewerDispatchQueue,
   sortReviewerDispatchCandidates,
   reviewerDispatchCandidateUsesGemini,
+  persistedSpawnReservationSource,
   reviewerDispatchIsFirstPass,
   reviewerDispatchPassKind,
   reviewerSafetyPassKind,

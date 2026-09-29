@@ -38,7 +38,7 @@ import { homedir, userInfo } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { readActiveReviewerRunRecords, readReviewerRunRecord } from './adapters/reviewer-runtime/run-state.mjs';
+import { readReviewerRunRecord, scanActiveReviewerRunRecords } from './adapters/reviewer-runtime/run-state.mjs';
 import { checkAgyReviewerAuth } from './agy-reviewer-auth.mjs';
 import { deliverAlert } from './alert-delivery.mjs';
 import { isPgidAlive } from './process-group-identity.mjs';
@@ -84,6 +84,10 @@ const AGY_IDENTITY_REVIEW_ID_ENV = 'ADVERSARIAL_REVIEW_AGY_REVIEW_ID';
 const PINNED_COMMAND_ENV = Object.freeze({ PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LANG: 'en_US.UTF-8' });
 
 const HELPER_TIMEOUT_MS = 30_000;
+// After a helper exits, how long its output pipes may stay open (a descendant
+// it left can hold them) before the capture settles without them.
+const PIPE_DRAIN_MS = 2_000;
+const KILL_GRACE_MS = 2_000;
 // `agy models` under launchd takes ~30s; the keychain helper bounds it at 60s.
 const PROBE_TIMEOUT_MS = 90_000;
 const EXTRACT_TIMEOUT_MS = 5 * 60_000;
@@ -245,7 +249,22 @@ function killGroup(child, signal) {
 // Run one process to completion with a wall-clock bound. `stdin` is a string,
 // a Buffer, a readable stream, or null (closed). Never rejects: the caller
 // decides what a failure means.
-function runBoundedProcess(command, args, { stdin = null, timeoutMs = HELPER_TIMEOUT_MS, env = PINNED_COMMAND_ENV, cwd, spawnImpl = spawn } = {}) {
+//
+// Settlement never waits on pipe EOF alone. A process the pinned command
+// starts as an added identity can inherit stdout/stderr and outlive it (agy's
+// language server does), and the HQ owner cannot signal it, so `close` may
+// never come. Once the direct child exits, output gets `drainMs` to finish;
+// after a timeout the kill gets `killGraceMs` and then the same drain. Either
+// deadline settles with what was captured and drops the pipes.
+function runBoundedProcess(command, args, {
+  stdin = null,
+  timeoutMs = HELPER_TIMEOUT_MS,
+  env = PINNED_COMMAND_ENV,
+  cwd,
+  spawnImpl = spawn,
+  drainMs = PIPE_DRAIN_MS,
+  killGraceMs = KILL_GRACE_MS,
+} = {}) {
   return new Promise((resolve) => {
     let child;
     try {
@@ -258,21 +277,44 @@ function runBoundedProcess(command, args, { stdin = null, timeoutMs = HELPER_TIM
     let stderr = '';
     let timedOut = false;
     let settled = false;
+    let exited = null;
+    let drainTimer = null;
+    let hardTimer = null;
     const finish = (result) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(drainTimer);
+      clearTimeout(hardTimer);
       resolve({ stdout, stderr, timedOut, ...result });
+    };
+    const abandonPipes = () => {
+      for (const stream of [child.stdin, child.stdout, child.stderr]) {
+        try { stream?.destroy(); } catch { /* already closed */ }
+      }
     };
     const timer = setTimeout(() => {
       timedOut = true;
       killGroup(child, 'SIGTERM');
-      setTimeout(() => killGroup(child, 'SIGKILL'), 2_000).unref?.();
+      setTimeout(() => killGroup(child, 'SIGKILL'), killGraceMs).unref?.();
+      hardTimer = setTimeout(() => {
+        abandonPipes();
+        finish(exited || { code: null, signal: null, pipeHeld: true });
+      }, killGraceMs + drainMs);
+      hardTimer.unref?.();
     }, timeoutMs);
     timer.unref?.();
     child.stdout?.on('data', (chunk) => { if (stdout.length < 1024 * 1024) stdout += chunk; });
     child.stderr?.on('data', (chunk) => { if (stderr.length < 64 * 1024) stderr += chunk; });
     child.on('error', (err) => finish({ code: null, signal: null, error: err }));
+    child.on('exit', (code, signal) => {
+      exited = { code, signal };
+      drainTimer = setTimeout(() => {
+        abandonPipes();
+        finish({ ...exited, pipeHeld: true });
+      }, drainMs);
+      drainTimer.unref?.();
+    });
     child.on('close', (code, signal) => finish({ code, signal }));
     child.stdin?.on('error', () => {});
     if (stdin && typeof stdin.pipe === 'function') {
@@ -515,7 +557,8 @@ function createAgyReviewerIdentityPool({
   referenceSettings = () => referenceAgySettingsFromEnv(env),
   listUserProcessesImpl = listUserProcesses,
   runStateRootDir = DEFAULT_RUN_STATE_ROOT,
-  readActiveRunRecordsImpl = () => readActiveReviewerRunRecords(runStateRootDir),
+  // `{ records, unreadable }`; a plain array is taken as a complete read.
+  readActiveRunRecordsImpl = () => scanActiveReviewerRunRecords(runStateRootDir),
   readRunRecordImpl = (sessionUuid) => readReviewerRunRecord(runStateRootDir, sessionUuid),
   isPgidAliveImpl = isPgidAlive,
   deliverAlertImpl = deliverAlert,
@@ -534,6 +577,7 @@ function createAgyReviewerIdentityPool({
   let readinessInFlight = null;
   let noReadySince = null;
   let noReadyAlertedAt = null;
+  let unreadableRunRecords = [];
 
   function runHelper(opts) {
     const user = opts.user;
@@ -733,12 +777,25 @@ function createAgyReviewerIdentityPool({
   // reviews the previous watcher leased. A record whose process group is gone
   // no longer holds its identity; a `launching` record with no process group
   // yet still does (the fork may have happened). Null when the records cannot
-  // be read, which callers treat as "every unleased identity may be busy".
+  // all be read, which callers treat as "every unleased identity may be busy":
+  // a damaged record may be the one lease that holds an identity, and its
+  // reviewer child can be between extraction and starting agy, where the
+  // survivor check sees nothing. The identities stay out until the record is
+  // repaired or removed.
   function leasesFromRunRecords() {
     let records;
     try {
-      records = readActiveRunRecordsImpl() || [];
+      const scan = readActiveRunRecordsImpl() || [];
+      records = Array.isArray(scan) ? scan : (scan.records || []);
+      const unreadable = Array.isArray(scan) ? [] : (scan.unreadable || []);
+      if (unreadable.length) {
+        unreadableRunRecords = unreadable.map((entry) => String(entry?.name || entry));
+        log.warn?.(`[agy-identities] unreadable reviewer run record(s) ${unreadableRunRecords.join(', ')}; unleased identities stay out until they are repaired or removed`);
+        return null;
+      }
+      unreadableRunRecords = [];
     } catch (err) {
+      unreadableRunRecords = [];
       log.warn?.(`[agy-identities] cannot read reviewer run records: ${err?.message || err}`);
       return null;
     }
@@ -766,7 +823,8 @@ function createAgyReviewerIdentityPool({
   // survivors. Returns true when the identity must stay out this pass.
   async function applyAdoptedLeases(state, running) {
     if (running === null) {
-      if (!state.lease) transition(state, false, ['cannot read the reviewer run records to tell whether a review from a previous watcher still runs here']);
+      const which = unreadableRunRecords.length ? ` (unreadable: ${unreadableRunRecords.slice(0, 5).join(', ')})` : '';
+      if (!state.lease) transition(state, false, [`cannot read the reviewer run records to tell whether a review from a previous watcher still runs here${which}`]);
       return !state.lease;
     }
     if (running.length) {
@@ -863,6 +921,10 @@ function createAgyReviewerIdentityPool({
     return plan.identities.some((identity) => !identity.hqOwner && !states.has(identity.user));
   }
 
+  // Total Gemini capacity: ready identities, leased or not. The dispatch
+  // queue subtracts this watcher's in-flight reviews from it, so a caller must
+  // not add leased identities on top. A review a previous watcher leased
+  // (adopted) unreadies its identity instead, since the queue cannot see it.
   function readyCount(plan = currentPlan()) {
     if (!plan.multi) return null;
     return plan.identities.filter((identity) => states.get(identity.user)?.ready).length;

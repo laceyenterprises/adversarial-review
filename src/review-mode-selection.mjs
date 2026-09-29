@@ -17,6 +17,11 @@ import {
   resolveSlimReviewPolicy,
   summarizeReviewModeDecision,
 } from './slim-review-eligibility.mjs';
+import {
+  classifySuperSmallForDiff,
+  describeSuperSmallDecision,
+  resolveSingleReviewPolicy,
+} from './super-small-classifier.mjs';
 
 // What this function returns when anything inside it goes wrong. It is the
 // shape of "classify nothing, change nothing": full mode, today's context
@@ -78,9 +83,11 @@ export function selectReviewMode({
   env = process.env,
   logStructuredEventImpl = null,
   recordReviewModeSelectedImpl = recordReviewModeSelected,
+  resolveSingleReviewPolicyImpl = resolveSingleReviewPolicy,
   log = console,
 } = {}) {
   let decision;
+  let slimClassificationFailed = false;
   try {
     decision = evaluateSlimReviewEligibilityForDiff({
       diff,
@@ -93,8 +100,16 @@ export function selectReviewMode({
       `[reviewer] WARN: review-mode classification failed for ${repo}#${prNumber}; ` +
       `falling back to full review: ${err?.message || err}`
     );
-    return fullModeFallback('classification-failed');
+    decision = fullModeFallback('classification-failed');
+    slimClassificationFailed = true;
   }
+  // SINGLEREVIEW-01: decorated in place so the durable record and the caller
+  // see the same object. `promptStage` is the stage the review must run at.
+  decision.singleReview = selectSingleReview({
+    repo, prNumber, diff, labels, headSha, promptStage, env, resolveSingleReviewPolicyImpl, log,
+  });
+  decision.promptStage = decision.singleReview.applied ? 'last' : promptStage;
+  if (slimClassificationFailed) return decision;
 
   try {
     const summary = summarizeReviewModeDecision(decision);
@@ -112,6 +127,8 @@ export function selectReviewMode({
       refusals: summary.refusals,
       changedFiles: summary.stats.files,
       changedLines: summary.stats.changedLines,
+      singleReview: decision.singleReview.applied,
+      singleReviewReasons: decision.singleReview.reasons.map((reason) => reason.code),
     });
 
     recordReviewModeSelectedImpl({
@@ -127,6 +144,60 @@ export function selectReviewMode({
   }
 
   return decision;
+}
+
+/**
+ * SINGLEREVIEW-01 — is this review the PR's one and only review round?
+ *
+ * Applies only to a review that would otherwise run at the `first` stage: a PR
+ * that has already been through remediation is on the normal round loop, and a
+ * later push does not buy it a second fast lane. Fail-soft like the rest of
+ * this module — any error means normal rounds, today's behaviour.
+ *
+ * @returns {{applied: boolean, superSmall: boolean, basis: string|null, reasons: Array<object>, stats: object|null, headSha: string|null}}
+ */
+export function selectSingleReview({
+  repo,
+  prNumber,
+  diff,
+  labels = [],
+  headSha = null,
+  promptStage = null,
+  env = process.env,
+  resolveSingleReviewPolicyImpl = resolveSingleReviewPolicy,
+  log = console,
+} = {}) {
+  try {
+    const classification = classifySuperSmallForDiff({
+      diff,
+      labels,
+      policy: resolveSingleReviewPolicyImpl({ env }),
+    });
+    const firstReview = promptStage === 'first';
+    const applied = classification.superSmall && firstReview;
+    if (classification.superSmall) {
+      log?.log?.(
+        `[reviewer] single-review: super-small ${repo}#${prNumber} ${describeSuperSmallDecision(classification)}` +
+        (applied ? '; prompt stage=last' : `; not applied — prompt stage=${promptStage || 'unknown'} is not the first review`),
+      );
+    }
+    return {
+      applied,
+      superSmall: classification.superSmall,
+      basis: classification.basis,
+      reasons: applied || !classification.superSmall
+        ? classification.reasons
+        : [{ code: 'not-first-review', promptStage: promptStage || null }],
+      stats: classification.stats,
+      headSha: headSha || null,
+    };
+  } catch (err) {
+    log?.warn?.(
+      `[reviewer] WARN: single-review classification failed for ${repo}#${prNumber}; ` +
+      `keeping normal rounds: ${err?.message || err}`
+    );
+    return { applied: false, superSmall: false, basis: null, reasons: [{ code: 'classification-failed' }], stats: null, headSha: headSha || null };
+  }
 }
 
 /**

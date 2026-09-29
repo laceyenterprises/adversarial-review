@@ -11,6 +11,7 @@ import {
 } from './follow-up-jobs.mjs';
 import { getConfig } from './config-loader.mjs';
 import { recordReviewLatencyEvent } from './review-latency-event-writer.mjs';
+import { readSingleReviewDecision } from './review-mode-latency.mjs';
 import { readReviewerRunRecord, TERMINAL_RUN_STATES } from './adapters/reviewer-runtime/run-state.mjs';
 import { inFlightReviewerSessions } from './reviewer-session-registry.mjs';
 import { verifyPgidIdentitySync } from './process-group-identity.mjs';
@@ -116,6 +117,7 @@ function queueFollowUpForRecoveredPostedReview({
   resolveHandoffConfigImpl = () => resolveHandoffConfig({ getConfigImpl: getConfig }),
   signalFollowUpDaemonWakeImpl = signalFollowUpDaemonWake,
   reviewBodyHasScopeViolationFindingImpl = reviewBodyHasScopeViolationFinding,
+  readSingleReviewDecisionImpl = readSingleReviewDecision,
 } = {}) {
   const queueDecision = shouldQueueRecoveredPostedReviewFollowUp(row, {
     reviewBodyHasScopeViolationFindingImpl,
@@ -142,6 +144,12 @@ function queueFollowUpForRecoveredPostedReview({
     ? latestMaxRounds
     : null;
   const classification = classifyFollowUpCriticality(reviewBody);
+  // SINGLEREVIEW-01: the dead reviewer's single-review decision, read back
+  // from its durable review-mode row. Only a PR with no completed rounds can
+  // have had one; a miss means normal rounds.
+  const singleReview = Number(priorLedger.completedRoundsForPR || 0) === 0
+    ? readSingleReviewDecisionImpl({ rootDir, repo, prNumber, headSha: row.head_sha || null, attemptNumber: row.attempt_number ?? null })
+    : null;
   const { jobPath, duplicateOf } = createFollowUpJobImpl({
     rootDir,
     repo,
@@ -161,6 +169,7 @@ function queueFollowUpForRecoveredPostedReview({
     riskClass: tierResolution.riskClass,
     priorCompletedRounds: priorLedger.completedRoundsForPR,
     ...(elevatedPriorCap ? { maxRemediationRounds: elevatedPriorCap } : {}),
+    ...(singleReview?.applied === true ? { singleReview } : {}),
   });
   // COMMENTCLOSE-01: the reviewer usually queued this same review already.
   if (duplicateOf) return { queued: false, reason: 'duplicate-review-follow-up', duplicateOf };

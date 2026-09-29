@@ -1277,6 +1277,7 @@ function queueFollowUpForPostedReview({
   resolveHandoffConfigImpl = () => resolveHandoffConfig({ getConfigImpl: getConfig }),
   signalFollowUpDaemonWakeImpl = signalFollowUpDaemonWake,
   scopeViolationFinding = null,
+  singleReview = null,
 }) {
   const normalizedVerdictMode = normalizeVerdictMode(verdictMode);
   if (normalizedVerdictMode === VERDICT_MODE_ADVISORY_ONLY) {
@@ -1298,10 +1299,7 @@ function queueFollowUpForPostedReview({
 
   const priorLedger = summarizePRRemediationLedgerImpl(rootDir, { repo, prNumber });
   if (suppressFinalRoundFollowUp(priorLedger.commentOnlyFinalRoundPushedHeads, revisionRef, reviewPostedAt)) return { queued: false, reason: 'comment-only-final-round-completed' };
-  const tierResolution = resolveRoundBudgetForJob({ linearTicketId }, {
-    rootDir,
-    preferPersisted: false,
-  });
+  const tierResolution = resolveRoundBudgetForJob({ linearTicketId }, { rootDir, preferPersisted: false });
   const latestMaxRounds = Number(priorLedger.latestMaxRounds);
   const elevatedPriorCap = Number.isInteger(latestMaxRounds) && latestMaxRounds > tierResolution.roundBudget
     ? latestMaxRounds
@@ -1327,6 +1325,7 @@ function queueFollowUpForPostedReview({
     riskClass: tierResolution.riskClass,
     priorCompletedRounds: priorLedger.completedRoundsForPR,
     ...(elevatedPriorCap ? { maxRemediationRounds: elevatedPriorCap } : {}),
+    singleReview,
   });
   let handoffWake = { attempted: false };
   try {
@@ -2033,7 +2032,7 @@ async function main() {
     builderTag,
     diff,
     extraContext,
-    promptStage: reviewerPromptStage,
+    promptStage: reviewModeDecision.promptStage,
     geminiRuntime: geminiRuntimeForBudget,
   });
   if (oversizedAgyRoute.oversized) {
@@ -2121,13 +2120,13 @@ async function main() {
     try {
       dispatch = useAgyChunkFallback
         ? await reviewAgyOversizedInChunks(diff, extraContext, {
-            promptStage: reviewerPromptStage,
+            promptStage: reviewModeDecision.promptStage,
             reviewerSubprocessCwd,
             promptBytes: oversizedAgyRoute?.promptBytes,
             maxBytes: oversizedAgyRoute?.maxBytes,
           })
         : await dispatchReviewerModel(effectiveModel, diff, extraContext, {
-            promptStage: reviewerPromptStage,
+            promptStage: reviewModeDecision.promptStage,
             reviewerSubprocessCwd,
             onProgress: createReviewerProgressRecorder({ rootDir: ROOT, repo, prNumber, attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0, passKind, reviewerSessionUuid }),
           });
@@ -2148,7 +2147,7 @@ async function main() {
         stateDir: reviewerWorkspaceStateDir,
       });
       dispatch = await reviewAgyOversizedInChunks(diff, extraContext, {
-        promptStage: reviewerPromptStage,
+        promptStage: reviewModeDecision.promptStage,
         reviewerSubprocessCwd,
         promptBytes: oversizedAgyRoute.promptBytes,
         maxBytes: oversizedAgyRoute.maxBytes,
@@ -2412,8 +2411,7 @@ async function main() {
       linearTicketId,
       reviewText: fullComment,
       reviewPostedAt,
-      critical,
-      verdictMode,
+      critical, verdictMode, singleReview: reviewModeDecision.singleReview,
       scopeViolationFinding,
     });
     if (queued.queued) {

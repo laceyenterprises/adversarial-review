@@ -1757,6 +1757,18 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
           || !hasObjectWorkerShape
           || remediationWorker.state === 'never-spawned'
         );
+        // SINGLEREVIEW-01: a super-small PR's one review spent the whole tier
+        // budget without spawning a worker, so its stop counts as the seeded
+        // `currentRound` (= maxRounds) completed rounds. Without this the
+        // terminal Hammer's "remediator had a turn" check reads 0 and parks
+        // the PR, and a later author push re-arms a full budget. It is not a
+        // remediation of the reviewed head, so no trigger or revision ref.
+        if (neverSpawned && isSingleReviewStop(job)) {
+          const cur = Number(job?.remediationPlan?.currentRound || 0);
+          const terminalAt = job?.stoppedAt || null;
+          if (Number.isFinite(cur) && cur > 0 && terminalAt) completedRoundTimestamps.push({ round: cur, terminalAt });
+          if (Number.isFinite(cur) && cur > completedRoundsForPR) completedRoundsForPR = cur;
+        }
         if (!neverSpawned) {
           const cur = Number(job?.remediationPlan?.currentRound || 0);
           const terminalAt = job?.completedAt || job?.failedAt || job?.stoppedAt || null;
@@ -2040,6 +2052,28 @@ function buildFollowUpJob({
   };
 }
 
+// SINGLEREVIEW-01: only an applied decision marks a job; anything else is a
+// normal-rounds job and carries no record.
+function normalizeSingleReviewRecord(singleReview) {
+  if (!singleReview || singleReview.applied !== true) return null;
+  return {
+    applied: true,
+    basis: typeof singleReview.basis === 'string' ? singleReview.basis : null,
+    stats: singleReview.stats && typeof singleReview.stats === 'object' ? singleReview.stats : null,
+    reason: 'single-review: super-small PR; the first review was the final round',
+  };
+}
+
+function isSingleReviewJob(job) {
+  return job?.singleReview?.applied === true;
+}
+
+function isSingleReviewStop(job) {
+  return isSingleReviewJob(job)
+    && job?.status === 'stopped'
+    && job?.remediationPlan?.stop?.code === 'max-rounds-reached';
+}
+
 function createFollowUpJob({ rootDir, ...jobInput }) {
   const baseJob = buildFollowUpJob(jobInput);
   // COMMENTCLOSE-01: the reviewer and the reviewer-pass reaper can both queue a
@@ -2080,12 +2114,22 @@ function writeNewFollowUpJob(rootDir, baseJob, jobInput) {
   // overridden by the riskClass-derived budget; the seeded round
   // count and the empty `rounds` history stay as `buildFollowUpJob`
   // wrote them.
+  //
+  // SINGLEREVIEW-01: a super-small PR's one review was its final round, so the
+  // job is born with the tier budget spent — `currentRound = maxRounds`. The
+  // claim guard then stops it `max-rounds-reached`, the same state every
+  // budget-exhausted PR reaches, and the ROUNDCAP hammer handoff takes it from
+  // there. No second counter: the bound is still the tier budget.
+  const singleReview = normalizeSingleReviewRecord(jobInput.singleReview);
+  const seededRound = Number(baseJob.remediationPlan?.currentRound || 0);
+  const currentRound = singleReview ? Math.max(seededRound, roundBudget) : seededRound;
   const resolvedJob = {
     ...baseJob,
     ...(baseJob.nonBlockingOnly ? {
       nonBlockingRoundsBefore: priorNonBlockingRounds,
       nonBlockingMaxRounds,
     } : {}),
+    ...(singleReview ? { singleReview } : {}),
     riskClass,
     recommendedFollowUpAction: {
       ...baseJob.recommendedFollowUpAction,
@@ -2094,6 +2138,10 @@ function writeNewFollowUpJob(rootDir, baseJob, jobInput) {
     remediationPlan: {
       ...baseJob.remediationPlan,
       maxRounds: roundBudget,
+      ...(singleReview ? {
+        currentRound,
+        nextAction: { ...baseJob.remediationPlan?.nextAction, round: currentRound + 1 },
+      } : {}),
     },
   };
   const queueDir = getFollowUpJobDir(rootDir, 'pending');
@@ -2381,7 +2429,11 @@ function claimNextFollowUpJob({
     const nonBlockingCapReached = job.nonBlockingOnly === true
       && job?.remediationPlan?.nextAction?.operatorOverride !== true
       && Number(job.nonBlockingRoundsBefore || 0) >= Number(job.nonBlockingMaxRounds || 1);
-    if (currentRound >= maxRounds || nonBlockingCapReached) {
+    // SINGLEREVIEW-01: born exhausted; this also holds if a claim-time budget
+    // raise above lifted `maxRounds` past the seeded round.
+    const singleReviewFinal = isSingleReviewJob(job)
+      && job?.remediationPlan?.nextAction?.operatorOverride !== true;
+    if (currentRound >= maxRounds || nonBlockingCapReached || singleReviewFinal) {
       let stopped = null;
       try {
         stopped = markStoppedImpl({
@@ -2390,7 +2442,9 @@ function claimNextFollowUpJob({
           stoppedAt: claimedAt,
           stopCode: 'max-rounds-reached',
           sourceStatus: job.status,
-          stopReason: nonBlockingCapReached
+          stopReason: singleReviewFinal
+            ? `single-review: super-small PR; the first review was the final round (${job.singleReview.basis || 'super-small'}); handing to the hammer without remediation.`
+            : nonBlockingCapReached
             ? `Reached non-blocking remediation rounds (${job.nonBlockingRoundsBefore}/${job.nonBlockingMaxRounds}) before claim.`
             : `Reached max remediation rounds (${currentRound}/${maxRounds}) before claim.`,
         });
@@ -3283,6 +3337,8 @@ export {
   isSettledCleanStopCode,
   isSettledCleanClassification,
   isSettledReviewJob,
+  isSingleReviewJob,
+  isSingleReviewStop,
   listFollowUpJobsInDir,
   listInProgressFollowUpJobPaths,
   listInProgressFollowUpJobs,

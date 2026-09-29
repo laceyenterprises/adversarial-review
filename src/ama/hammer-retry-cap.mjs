@@ -72,6 +72,16 @@ export const HAMMER_RETRY_CAP_LIFETIME_EXHAUSTED_REASON = 'hammer-lifetime-ceili
 export const HAMMER_TARGET_REDRIVE_CAP_SUPPRESSION_STATE = 'hammer-target-redrive-cap-exhausted-needs-operator';
 export const HAMMER_TARGET_REDRIVE_CAP_EXHAUSTED_REASON = 'hammer-target-redrive-cap-exhausted';
 
+// HAMBG-02: a hammer that exited `succeeded` without closing its PR never ran
+// its close, so re-arming it should not spend the series' one real retry. This
+// mirrors HAMGATE-01's merge-gate refund (#1165): the charged attempt is handed
+// back and `retryable` counts it. Only this many exits per series are refunded;
+// after that an exit stays charged and the normal cap suppresses and alerts.
+// The lifetime count is never refunded, so the lifetime ceiling still bounds
+// every PR.
+export const HAMMER_EXITED_WITHOUT_CLOSE_RETRY_BUDGET = 1;
+const RETRYABLE_LAUNCH_HISTORY = 10;
+
 const HAMMER_RETRY_CAP_SCHEMA_VERSION = 2;
 
 function hammerRetryCapDir(rootDir) {
@@ -163,6 +173,16 @@ export function normalizeHammerLifetimeDispatchCeiling(value) {
   if (!Number.isFinite(n)) return HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES;
   const int = Math.trunc(n);
   return int >= 0 ? int : HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES;
+}
+
+// Absent until the first refund, so ledgers without one keep their old shape.
+function retryableFieldsForSeries(ledger) {
+  const retryable = Math.max(0, Math.trunc(Number(ledger?.retryable) || 0));
+  const retryableLaunchRequestIds = Array.isArray(ledger?.retryableLaunchRequestIds)
+    ? ledger.retryableLaunchRequestIds.map(String).slice(-RETRYABLE_LAUNCH_HISTORY)
+    : [];
+  if (retryable === 0 && retryableLaunchRequestIds.length === 0) return {};
+  return { retryable, retryableLaunchRequestIds };
 }
 
 function sanitizeLifetimeCount(rawValue, ceiling = HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES) {
@@ -320,6 +340,8 @@ export function recordHammerRetryDispatch(rootDir, identity, {
     lifetimeAttemptCount: decision.nextLifetimeCount,
     targetRemediationSha: head || existingTargetSha,
     targetAttemptCount: targetShaChanged ? 1 : decision.nextTargetAttemptCount,
+    // Refunded exits belong to the series, like attemptCount.
+    ...retryableFieldsForSeries(decision.jobKeyChanged ? null : existing),
     dispatchHeads,
     lastDispatchedHeadSha: head || existing?.lastDispatchedHeadSha || null,
     // A dispatch clears any stale PER-SERIES suppression from a prior series (the
@@ -393,6 +415,7 @@ export function markHammerRetryCapExhausted(rootDir, identity, {
       : Math.max(0, Number(existing?.targetAttemptCount ?? existing?.attemptCount ?? 0)),
     lifetimeSuppressed,
     targetSuppressed,
+    ...retryableFieldsForSeries(existing),
     dispatchHeads,
     lastDispatchedHeadSha: head || existing?.lastDispatchedHeadSha || null,
     suppressed: true,
@@ -419,4 +442,55 @@ export function markHammerRetryCapExhausted(rootDir, identity, {
   };
   writeHammerRetryCapLedger(rootDir, identity, doc);
   return doc;
+}
+
+/**
+ * HAMBG-02: refund the charged dispatch of a hammer that exited without
+ * closing its PR (see HAMMER_EXITED_WITHOUT_CLOSE_RETRY_BUDGET). HAMGATE-01's
+ * mechanics: `attemptCount` (and `targetAttemptCount` for the same target head)
+ * goes down by one and `retryable` goes up by one. A launch is refunded at most
+ * once, however many ticks observe it. The lifetime count is not touched.
+ *
+ * Refuses when the ledger is absent or corrupt, the series moved on (new
+ * jobKey), the series is suppressed, nothing is charged, or the budget is spent.
+ * Those cases leave the attempt charged, which is the safe direction.
+ *
+ * @returns {{ refunded: boolean, reason: string, retryable: number }}
+ */
+export function refundHammerRetryDispatch(rootDir, identity, {
+  jobKey,
+  headSha,
+  launchRequestId,
+  budget = HAMMER_EXITED_WITHOUT_CLOSE_RETRY_BUDGET,
+  now = null,
+} = {}) {
+  const existing = readHammerRetryCapLedger(rootDir, identity);
+  const series = retryableFieldsForSeries(existing);
+  const retryable = series.retryable || 0;
+  const refundedLaunches = series.retryableLaunchRequestIds || [];
+  const launch = normalizeKey(launchRequestId);
+  const refuse = (reason) => ({ refunded: false, reason, retryable });
+  if (!existing || existing.__corrupt) return refuse('no-ledger');
+  const ledgerJobKey = normalizeKey(existing.jobKey);
+  const incomingJobKey = normalizeKey(jobKey);
+  if (ledgerJobKey && incomingJobKey && ledgerJobKey !== incomingJobKey) return refuse('series-changed');
+  if (launch && refundedLaunches.includes(launch)) return refuse('already-refunded');
+  if (existing.suppressed || existing.lifetimeSuppressed || existing.targetSuppressed) return refuse('suppressed');
+  const attemptCount = Math.max(0, Math.trunc(Number(existing.attemptCount) || 0));
+  if (attemptCount === 0) return refuse('no-charged-attempt');
+  if (retryable >= Math.max(0, Math.trunc(Number(budget) || 0))) return refuse('retry-budget-exhausted');
+  const head = normalizeKey(headSha);
+  const targetMatches = Boolean(head) && normalizeKey(existing.targetRemediationSha) === head;
+  const doc = {
+    ...existing,
+    attemptCount: attemptCount - 1,
+    targetAttemptCount: targetMatches
+      ? Math.max(0, Math.trunc(Number(existing.targetAttemptCount) || 0) - 1)
+      : existing.targetAttemptCount,
+    retryable: retryable + 1,
+    retryableLaunchRequestIds: [...refundedLaunches, launch].filter(Boolean).slice(-RETRYABLE_LAUNCH_HISTORY),
+    updatedAt: now || existing.updatedAt || null,
+  };
+  writeHammerRetryCapLedger(rootDir, identity, doc);
+  return { refunded: true, reason: 'hammer-exited-without-close', retryable: retryable + 1 };
 }

@@ -58,8 +58,8 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 | `createdAt` | string or null | ISO-8601 timestamp from the first write when available. |
 | `updatedAt` | string or null | ISO-8601 timestamp from the latest write when available. |
 | `lastFailureTransient` | boolean or null | Whether the latest launch refusal was classified as transient. |
-| `lastError` | string or null | Sanitized last error or recovery note. A hammer ending with an open PR now records `failed-without-merge` or `no-merge:concurrent-writer` here. |
-| `outcome` | string or null | Dispatch result written by `dispatch-closer.mjs` for hammer-ended-without-merge (`failed-without-merge` or `no-merge:concurrent-writer`), by `closer-terminal-cancel.mjs` for lifecycle settlement (`succeeded` only with matching-head AMA success audit, `no-merge:pr-closed-externally` after HQ cancellation), and by the stale-window reaper for an external merge (`no-merge:pr-merged-externally`). The lifecycle writer locates a rekeyed lease's original dispatch head before updating this record. Unlike lease `terminalOutcome`, this field annotates the dispatch record and may be absent on older records. |
+| `lastError` | string or null | Sanitized last error or recovery note. A hammer that ended `succeeded` with its PR still open records the same value as `outcome` here. `hammer-outcome-unconfirmed:<why>` means the live PR state could not be read, so the launch was retained for another tick. |
+| `outcome` | string or null | Dispatch result written by `dispatch-closer.mjs` when a hammer ended `succeeded` with its PR still open: `failed-without-merge` (a terminal no-merge audit exists for the current head), `hammer-exited-without-close` (none does; HAMBG-02), or `no-merge:concurrent-writer`. Also written by `closer-terminal-cancel.mjs` for lifecycle settlement (`succeeded` only with matching-head AMA success audit, `no-merge:pr-closed-externally` after HQ cancellation), and by the stale-window reaper for an external merge (`no-merge:pr-merged-externally`). The lifecycle writer locates a rekeyed lease's original dispatch head before updating this record. Unlike lease `terminalOutcome`, this field annotates the dispatch record and may be absent on older records. |
 | `status`, `reason`, `terminalOutcome`, `closureAuthority` | string or null | Terminal/no-dispatch annotations used by recovery and audit paths when present. |
 
 ## Operational Contract
@@ -74,5 +74,9 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 - `workerId` is authoritative for scoped hammer cleanup when present. Legacy
   records without `workerId` remain readable and use the historical unscoped
   hammer id as the fallback cleanup target.
+- The closer reconciles the review series' newest launch. A launch on an
+  advanced head writes its record under that head, so when a record for the
+  same `reviewedSha` carries a newer `launchRequestId` and `dispatchedAt` than
+  the reviewed-head record, the closer reads that one (HAMBG-02).
 - Writes are atomic JSON rewrites. Corrupt or unreadable records are skipped by
   bounded scans so one bad file cannot blind later active reservations.

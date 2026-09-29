@@ -134,7 +134,10 @@ installation; the merge phase retains its existing HQ merge-signal integration.
    distinct from the existing single in-lease audit comment, which remains the
    only comment for the successful merge path. If that audit was already posted
    before a later merge failure, edit it in place into the required no-merge
-   closing-status comment; do not leave the audit and add a second comment. Do
+   closing-status comment; do not leave the audit and add a second comment.
+   Either way, the comment must contain the line `HAM closing status — no merge.`
+   In the audit comment for the current head, the closer reads that line as
+   this head's terminal no-merge audit. Do
    not post the no-merge comment if the PR merged, and do not report success
    merely because remediation or a rebase completed.
    If the gate-attempt cap parks this head, include the `closingStatus` returned

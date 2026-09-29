@@ -229,6 +229,16 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.match(HAMMER_PROMPT, /Closed-By: hammer \(adversarial-pipe-mode\)/);
 });
 
+test('the no-merge closing status carries the line the closer reads (HAMBG-02)', () => {
+  const mandate = HAMMER_TEMPLATE.slice(
+    HAMMER_TEMPLATE.indexOf('0b. **A run that does not merge'),
+    HAMMER_TEMPLATE.indexOf('\n1. Read the FINAL'),
+  );
+  assert.match(mandate, /the comment must contain the line `HAM closing status — no merge\.`/);
+  // The gate-cap park writes the same line.
+  assert.match(HAMMER_PROMPT, /HAM closing status — no merge\. The gate-attempt cap stopped this head/);
+});
+
 test('hammer protection fetch writes the github_plan sentinel for the free-plan 403 (HAMBG-02, agent-os)', () => {
   const result = runHammerProtectionFetch({ stderr: GITHUB_PLAN_UNAVAILABLE_STDERR });
   assert.equal(result.status, 0, result.stderr);

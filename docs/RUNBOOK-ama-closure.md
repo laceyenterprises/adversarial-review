@@ -771,6 +771,49 @@ default `observe` enforcement honors a known actor even if that actor is not
 allowlisted; `enforce` requires an allowlisted operator login. The substitution emits
 `ama.daemon_clean_merge.operator_accountability_substituted`.
 
+### A succeeded hammer must have closed its PR (HAMBG-02)
+
+A hammer LRQ that ends `succeeded` has only proven that its process exited 0.
+Headless Claude hammers backgrounded the close and ended the session (SEV2
+2026-09-29), leaving the PR open. When the closer observes a `succeeded` hammer
+it asks GitHub for the PR and classifies the run:
+
+| Live PR | Evidence for the current head | Recorded `outcome` | Next |
+|---|---|---|---|
+| `MERGED` | n/a | none (merged paths) | merged handling as before |
+| `OPEN` | local AMA audit `failed-without-merge`, or the hammer's audit comment (`<!-- hq:ham-terminal-remediation:audit -->`, same `HAM-Terminal-Remediation-Head`) carrying `HAM closing status — no merge` | `failed-without-merge` | charged re-dispatch within the hammer retry cap |
+| `OPEN` | neither | `hammer-exited-without-close` | lease released, refunded re-dispatch |
+| unreadable | n/a | none; `lastError: hammer-outcome-unconfirmed:<why>` | launch retained; the next tick asks again |
+
+The audit comment alone is not a close. hammer-publish posts it before the merge
+phase, so a hammer that published and then lost its merge leaves it behind
+(adversarial-review#1178, agent-os#7345).
+
+On `hammer-exited-without-close` the closer:
+
+- finalizes the closer lease the hammer held, including a lease the watcher
+  rekeyed onto the head the hammer pushed. That lease belongs to the recorded
+  launch, so it no longer answers `closer-lease-held-by-other-process` for 30
+  minutes;
+- marks the dispatch record terminal, which frees its in-progress launch slot;
+- refunds the exited dispatch in the hammer retry-cap ledger, using HAMGATE-01's
+  mechanics (`attemptCount` down, `retryable` up). One exit per reviewed-head
+  series is refunded. Past that, an exit stays charged and the normal cap
+  suppresses and pages. The lifetime count is never refunded;
+- re-dispatches in the same tick, subject to every existing gate.
+
+The closer reconciles the newest launch in the review series. A hammer that
+pushes moves the head, and its re-dispatch record is keyed on the new head, so
+the closer follows the record for the same `reviewedSha` with the newest
+`dispatchedAt`. Re-reconciling a launch whose closer pass is already recorded
+logs and continues instead of throwing `refusing to reuse terminal
+reviewer_passes row`.
+
+To inspect a PR: the watcher log carries `ama_closer.hammer_exited_without_close`
+(with `retryRefund`) or `ama_closer.hammer_ended_without_merge`, and
+`data/follow-up-jobs/hammer-retry-cap/<repo>-pr-<n>.json` shows `retryable` and
+`retryableLaunchRequestIds`.
+
 ### Daemon fail-closed on a hammer-remediable gate → capped hammer fallback
 
 When the daemon clean-path fails closed on a **remediable** gate for an

@@ -116,7 +116,16 @@ import {
   markHammerRetryCapExhausted,
   readHammerRetryCapLedger,
   recordHammerRetryDispatch,
+  refundHammerRetryDispatch,
 } from './hammer-retry-cap.mjs';
+import {
+  HAMMER_EXITED_WITHOUT_CLOSE,
+  HAMMER_OUTCOME_UNCONFIRMED,
+  classifySucceededHammerOutcome,
+  hasHamNoMergeAuditCommentForHead,
+  isLeaseOfRecordedLaunch,
+  selectNewerHammerLaunchRecord,
+} from './hammer-outcome-truth.mjs';
 import { deliverAlert } from '../alert-delivery.mjs';
 import { isUnsupportedHqPriorityFlagError } from '../merge-agent-hq-exec.mjs';
 import { DUPLICATE_FAMILY_UNRESOLVED_REASON } from '../duplicate-family-gate.mjs';
@@ -1586,6 +1595,23 @@ function readJsonFileSafe(readJsonFileImpl, filePath) {
 
 export function readAmaCloserDispatchRecord(rootDir, identity) {
   return readJsonFile(amaCloserDispatchFilePath(rootDir, identity));
+}
+
+// Every dispatch record for one PR, whatever head each is keyed on.
+function listAmaCloserDispatchRecordsForPr(rootDir, { repo, prNumber } = {}) {
+  const sentinel = 'H';
+  const sample = basename(amaCloserDispatchFilePath(rootDir, { repo, prNumber, headSha: sentinel }));
+  const prefix = sample.slice(0, sample.length - `${sentinel}.json`.length);
+  let names = [];
+  try {
+    names = readdirSync(amaCloserDispatchDir(rootDir));
+  } catch {
+    return [];
+  }
+  return names
+    .filter((name) => name.startsWith(prefix) && name.endsWith('.json'))
+    .map((name) => readJsonFile(join(amaCloserDispatchDir(rootDir), name)))
+    .filter((record) => record && Number(record.prNumber) === Number(prNumber) && record.repo === repo);
 }
 
 // Epoch ms of the most recent moment this dispatch record was touched, or
@@ -3213,6 +3239,49 @@ function readAmaAuditTerminalOutcome(hqRoot, { repo, prNumber, headSha } = {}) {
   return AMA_CLOSER_AUDIT_TERMINAL_OUTCOMES.has(status) ? status : null;
 }
 
+// HAMBG-02: the hammer's terminal no-merge audit for `headSha`, in either form
+// (see src/ama/hammer-outcome-truth.mjs). An unreadable PR counts as no audit;
+// the only effect is that the re-arm is refunded.
+async function hasNoMergeAuditForCurrentHead({
+  hqRoot,
+  repo,
+  prNumber,
+  headSha,
+  fetchPullRequestRollupImpl,
+  execFileImpl,
+}) {
+  if (!headSha) return false;
+  if (readAmaAuditTerminalOutcome(hqRoot, { repo, prNumber, headSha }) === 'failed-without-merge') {
+    return true;
+  }
+  try {
+    const rollup = await fetchPullRequestRollupImpl(repo, prNumber, { execFileImpl });
+    return hasHamNoMergeAuditCommentForHead(rollup?.comments, {
+      marker: HAM_TERMINAL_REMEDIATION_AUDIT_MARKER,
+      headSha,
+    });
+  } catch {
+    return false;
+  }
+}
+
+function refundExitedHammerDispatchBestEffort({ rootDir, repo, prNumber, jobKey, record, now, logger }) {
+  try {
+    return refundHammerRetryDispatch(rootDir, { repo, prNumber }, {
+      jobKey: record?.reviewedSha || jobKey,
+      headSha: record?.targetRemediationSha || record?.headSha || null,
+      launchRequestId: record?.launchRequestId || null,
+      now,
+    });
+  } catch (err) {
+    logger?.warn?.(
+      `[ama-closer] hammer retry refund failed for ${repo}#${prNumber}; the attempt stays charged: `
+        + `${err?.message || err}`,
+    );
+    return { refunded: false, reason: 'refund-failed' };
+  }
+}
+
 function readMergedBuildCompletionSignal({
   repo,
   prNumber,
@@ -3408,6 +3477,28 @@ async function recordAmaCloserReviewerPassTokens({
     merged,
     ...(missingUsage ? { tokenUsageUnavailable: true } : {}),
   };
+  try {
+    return recordCloserReviewerPass(rootDir, {
+      repo, prNumber, attemptNumber, record, usage, workerRunId, startedAt, endedAt, metadata, status, merged,
+    });
+  } catch (err) {
+    // HAMBG-02: a launch that an earlier tick already reconciled has a terminal
+    // pass for this attempt. Re-reconciling it (for example after the re-arm
+    // was deferred) must not throw. From 06:00Z until an SRE merged it at
+    // 08:46Z, every adversarial-review#1178 tick died on this error and fell
+    // back to a merge-agent that skipped.
+    if (!String(err?.message || err).includes('refusing to reuse terminal reviewer_passes row')) throw err;
+    logger.warn?.(
+      `[ama-closer] closer pass already recorded for ${repo}#${prNumber} attempt=${attemptNumber} `
+        + `launchRequestId=${launchRequestId || 'unknown'}; not recording it again`,
+    );
+    return null;
+  }
+}
+
+function recordCloserReviewerPass(rootDir, {
+  repo, prNumber, attemptNumber, record, usage, workerRunId, startedAt, endedAt, metadata, status, merged,
+}) {
   beginReviewerPass(rootDir, {
     repo,
     prNumber,
@@ -4036,19 +4127,29 @@ export async function maybeDispatchAmaCloser({
     reviewCycleExhausted: terminalHammerReviewCycleExhausted(reviewState),
   });
 
-  const existingDispatchIdentity = { repo, prNumber, headSha: dispatchRecordHeadSha };
+  const reviewedHeadDispatchIdentity = { repo, prNumber, headSha: dispatchRecordHeadSha };
   const targetDispatchIdentity = { repo, prNumber, headSha: targetRemediationSha };
   const auditIdentity = { repo, prNumber, headSha: reviewedSha };
   const targetAuditIdentity = { repo, prNumber, headSha: targetRemediationSha };
   const hqPath = dispatchContext.hqPath || process.env.HQ_BIN || DEFAULT_HQ_PATH;
   const hqProject = dispatchContext.hqProject || DEFAULT_PROJECT;
-  const existingRecord = readAmaCloserDispatchRecord(rootDir, existingDispatchIdentity);
-  const existingRecordLeaseIdentity = {
+  const reviewedHeadRecord = readAmaCloserDispatchRecord(rootDir, reviewedHeadDispatchIdentity);
+  // HAMBG-02: reconcile this review series' newest hammer launch, not only the
+  // record at the reviewed head. See selectNewerHammerLaunchRecord.
+  const newerLaunchRecord = selectNewerHammerLaunchRecord(
+    listAmaCloserDispatchRecordsForPr(rootDir, { repo, prNumber }),
+    { reviewedSha, reviewedHeadSha: dispatchRecordHeadSha, reviewedHeadRecord },
+  );
+  const existingDispatchIdentity = newerLaunchRecord
+    ? { repo, prNumber, headSha: newerLaunchRecord.headSha }
+    : reviewedHeadDispatchIdentity;
+  const existingRecord = newerLaunchRecord || reviewedHeadRecord;
+  let existingRecordLeaseIdentity = {
     repo,
     prNumber,
     headSha: existingRecord?.headSha || dispatchRecordHeadSha || reviewedSha,
   };
-  const existingDispatchLeaseIdentity = existingRecord ? existingRecordLeaseIdentity : existingLeaseIdentity;
+  let existingDispatchLeaseIdentity = existingRecord ? existingRecordLeaseIdentity : existingLeaseIdentity;
   const existingDispatchHeadAdvanced = Boolean(
     existingRecord?.headSha
     && targetRemediationSha
@@ -4064,7 +4165,7 @@ export async function maybeDispatchAmaCloser({
       targetRemediationSha || dispatchRecordHeadSha || reviewedSha,
     )
     : null;
-  const existingLeaseBeforeDispatch = readAmaCloserLease(rootDir, existingDispatchLeaseIdentity);
+  let existingLeaseBeforeDispatch = readAmaCloserLease(rootDir, existingDispatchLeaseIdentity);
   let targetLeaseBeforeDispatch = leaseIdentity.headSha !== existingDispatchLeaseIdentity.headSha
     ? readAmaCloserLease(rootDir, leaseIdentity)
     : null;
@@ -4078,6 +4179,16 @@ export async function maybeDispatchAmaCloser({
   const auditTerminalOutcome = existingRecord
     ? existingRecordAuditTerminalOutcome
     : (headAdvancedDuringDispatch ? targetHeadAuditTerminalOutcome : reviewedHeadAuditTerminalOutcome);
+  // HAMBG-02: a lease rekeyed onto the head the recorded hammer pushed is that
+  // hammer's own lease. Answering `closer-lease-held-by-other-process` for it
+  // kept adversarial-review#1178 parked for 30 minutes after its hammer had
+  // exited. Treat it as the record's lease so the launch's status decides.
+  if (isLeaseOfRecordedLaunch(targetLeaseBeforeDispatch, existingRecord)) {
+    existingRecordLeaseIdentity = { ...leaseIdentity };
+    existingDispatchLeaseIdentity = existingRecordLeaseIdentity;
+    existingLeaseBeforeDispatch = targetLeaseBeforeDispatch;
+    targetLeaseBeforeDispatch = null;
+  }
   if (targetLeaseBeforeDispatch) {
     if (isReclaimableDispatchedAmaCloserLease(targetLeaseBeforeDispatch, {
       now: dispatchContext.dispatchedAt,
@@ -4348,7 +4459,10 @@ export async function maybeDispatchAmaCloser({
       if (
         AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)
         && auditTerminalOutcome !== 'succeeded'
-        && !(currentHeadFinalHammerTerminalRemediation && validatedHamTerminalRemediation)
+        // HAMBG-02: the validated-HAM exemption holds only while the same-head
+        // daemon merge below can act on it. With a readable merged signal it
+        // fell through to treating the hammer as merged without asking GitHub.
+        && !(currentHeadFinalHammerTerminalRemediation && validatedHamTerminalRemediation && mergedSignalUnknown)
       ) {
         const terminalLivePr = await probeAmaLivePrForMergeDispatch({
           dispatchContext,
@@ -4358,6 +4472,33 @@ export async function maybeDispatchAmaCloser({
           signal,
         });
         throwIfAborted(signal);
+        const concurrentWriter = /force-with-lease|stale info|fetch first|concurrent.writer/i.test(
+          String(statusProbe?.error || ''),
+        );
+        const hammerOutcome = classifySucceededHammerOutcome({
+          livePrState: terminalLivePr?.state,
+          concurrentWriter,
+          noMergeAuditForCurrentHead: terminalLivePr?.state === 'OPEN' && !concurrentWriter
+            && await hasNoMergeAuditForCurrentHead({
+              hqRoot,
+              repo,
+              prNumber,
+              headSha: terminalLivePr.headRefOid || targetRemediationSha,
+              fetchPullRequestRollupImpl,
+              execFileImpl,
+            }),
+        });
+        if (hammerOutcome.outcome === HAMMER_OUTCOME_UNCONFIRMED) {
+          // Neither a merge nor a no-merge audit can be confirmed this tick, so
+          // nothing may infer that the hammer closed its PR.
+          updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+            ...(current || existingRecord),
+            lastObservedStatus: status,
+            lastObservedAt: dispatchContext.dispatchedAt,
+            lastError: `${HAMMER_OUTCOME_UNCONFIRMED}:${terminalLivePr?.error ? 'live-pr-probe-failed' : 'live-pr-state-unknown'}`,
+          }));
+          return retainExistingAmaCloserDispatch(existingRecord, workerClass, status);
+        }
         if (terminalLivePr?.state === 'OPEN') {
           // A successful worker process is not a successful closer. The live PR
           // is authoritative: if it is still open, count the hammer as failed
@@ -4365,17 +4506,16 @@ export async function maybeDispatchAmaCloser({
           // head advance as supersession hid the failed closure attempt and
           // bypassed the bounded hammer retry/alert path (HAMSYNC-01).
           hammerEndedWithoutMerge = true;
-          const concurrentWriter = /force-with-lease|stale info|fetch first|concurrent.writer/i.test(
-            String(statusProbe?.error || ''),
-          );
-          const noMergeOutcome = concurrentWriter
-            ? 'no-merge:concurrent-writer' : 'failed-without-merge';
+          const noMergeOutcome = hammerOutcome.outcome;
+          const exitedWithoutClose = noMergeOutcome === HAMMER_EXITED_WITHOUT_CLOSE;
           status = 'failed';
           existingDispatchStatus = status;
+          // Releasing this lease is what releases the single-flight: the PR's
+          // closer lease and the record's in-progress launch slot.
           finalizeAmaCloserLeaseBestEffort({
             rootDir,
             leaseIdentity: existingRecordLeaseIdentity,
-            terminalOutcome: noMergeOutcome,
+            terminalOutcome: exitedWithoutClose ? 'failed-without-merge' : noMergeOutcome,
             now: dispatchContext.dispatchedAt,
             logger,
             repo,
@@ -4388,14 +4528,31 @@ export async function maybeDispatchAmaCloser({
             lastError: noMergeOutcome,
             outcome: noMergeOutcome,
           }));
-          logAmaCloserDispatchEvent(logger, 'ama_closer.hammer_ended_without_merge', {
+          // An exit without a close never ran its close, so its re-arm is
+          // refunded (bounded) instead of spending the series' real retry.
+          const retryRefund = exitedWithoutClose && isHammerWorkerClass(existingRecord.workerClass || workerClass)
+            ? refundExitedHammerDispatchBestEffort({
+              rootDir,
+              repo,
+              prNumber,
+              jobKey: reviewedSha,
+              record: existingRecord,
+              now: dispatchContext.dispatchedAt,
+              logger,
+            })
+            : null;
+          logAmaCloserDispatchEvent(logger, exitedWithoutClose
+            ? 'ama_closer.hammer_exited_without_close'
+            : 'ama_closer.hammer_ended_without_merge', {
             repo,
             prNumber,
             headSha: existingRecordLeaseIdentity.headSha,
+            currentHeadSha: terminalLivePr.headRefOid || null,
             launchRequestId: existingRecord.launchRequestId,
             dispatchId: existingRecord.dispatchId || null,
             observedWorkerStatus: 'succeeded',
-            classification: 'hammer-ended-without-merge',
+            classification: exitedWithoutClose ? HAMMER_EXITED_WITHOUT_CLOSE : 'hammer-ended-without-merge',
+            ...(retryRefund ? { retryRefund } : {}),
           }, { level: 'warn' });
         }
       }

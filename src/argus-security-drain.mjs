@@ -40,6 +40,7 @@ import {
   failArgusJob,
   returnArgusJobToPending,
 } from './argus-security-queue.mjs';
+import { writeArgusDrainStatus } from './argus-security-health.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -408,8 +409,18 @@ export function resetArgusSecurityDrainForTests() {
   processDrain = null;
 }
 
+function writeStatusSafe(writeStatus, rootDir, status, logger) {
+  try {
+    writeStatus(rootDir, status);
+  } catch (err) {
+    logger?.warn?.(`[argus-drain] status write failed: ${err?.message || err}`);
+  }
+}
+
 /**
  * The watcher's one call per tick. Never throws and never awaits a review.
+ * Each tick leaves a status record for the pipeline health surface, including
+ * when the kill switch is on, so "disabled" and "dead" read differently.
  */
 export function startArgusSecurityDrainForWatcherTick({
   rootDir = ROOT,
@@ -417,9 +428,15 @@ export function startArgusSecurityDrainForWatcherTick({
   env = process.env,
   logger = console,
   drainFactory = argusSecurityDrainForProcess,
+  writeStatus = writeArgusDrainStatus,
+  nowMs = () => Date.now(),
 } = {}) {
+  const observedAt = new Date(nowMs()).toISOString();
   try {
-    if (!isArgusDrainEnabled(env)) return { started: false, reason: 'disabled' };
+    if (!isArgusDrainEnabled(env)) {
+      writeStatusSafe(writeStatus, rootDir, { observedAt, enabled: false }, logger);
+      return { started: false, reason: 'disabled' };
+    }
     const drain = drainFactory({ rootDir, env, logger });
     const tick = drain.tick({ paused: watcherDrainActive });
     if (tick.claimed.length > 0) {
@@ -428,9 +445,22 @@ export function startArgusSecurityDrainForWatcherTick({
           + 'posted-review phase continues',
       );
     }
+    const snapshot = typeof drain.snapshot === 'function' ? drain.snapshot() : {};
+    writeStatusSafe(writeStatus, rootDir, {
+      observedAt,
+      enabled: true,
+      paused: Boolean(watcherDrainActive),
+      skipped: tick.skipped,
+      claimedThisTick: tick.claimed.length,
+      running: tick.running,
+      limit: tick.limit,
+      peakRunning: snapshot.peakRunning ?? null,
+      retirement: snapshot.retirement ?? null,
+    }, logger);
     return { started: true, ...tick };
   } catch (err) {
     logger?.error?.(`[argus-drain] tick failed: ${err?.message || err}`);
+    writeStatusSafe(writeStatus, rootDir, { observedAt, enabled: true, error: String(err?.message || err) }, logger);
     return { started: false, reason: 'error', error: String(err?.message || err) };
   }
 }

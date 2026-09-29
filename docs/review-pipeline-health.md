@@ -229,6 +229,20 @@ The Grafana dashboard lives at
 - `review_pipeline_hammer_input_tokens_per_merge`: recorded input tokens from terminal logical hammer closer passes started in the last 30 days, divided by their confirmed merges; NaN when no merge is recorded. A fallback harness retains its logical `metadata_json.workerClass` attribution.
 - `review_pipeline_dag_autowalk_healthy`: dag-autowalk LaunchAgent last-exit
   and recent-log health.
+- `review_pipeline_argus_jobs`: Argus security review jobs by `bucket`
+  (`pending`, `in_progress`, `completed`, `failed`); an uncapped directory count.
+- `review_pipeline_argus_oldest_unanswered_job_age_seconds`: age, from enqueue,
+  of the oldest pending or in-progress Argus job, labelled `liveness`
+  (`verified-by-retirement` while the drain's backlog retirement is fresh,
+  else `unverified`); 0 when nothing is waiting.
+- `review_pipeline_argus_claim_to_verdict_seconds`: the Argus drain's
+  claim-to-verdict latency over the trailing 24h, by `quantile` (`0.5`, `0.9`,
+  `max`); NaN when no job closed in the window.
+- `review_pipeline_argus_verdicts_24h`: Argus jobs closed in the trailing 24h by
+  `verdict` (`approve`, `block`, `needs_verification`, `superseded`, `other`,
+  and `failed` for the failed bucket).
+- `review_pipeline_argus_drain_running`: Argus reviews running in the watcher's
+  drain at its last tick.
 - `review_pipeline_sentinel_finding_active`: 1 when a finding code is currently
   firing, 0 after it clears.
 
@@ -349,6 +363,8 @@ can distinguish "never posted in window" from a null/corrupt timestamp column.
 | `review:hammer_dispatch_stall_blind` | SEN-02 `blind`: the dispatch daemon log required by the hammer-dispatch stall detector is missing, so the snapshot cannot classify the conflicted backlog as healthy or stalled. Never a health verdict. | ticket | the dispatch daemon log surface is restored or the configured HQ root is corrected |
 | `review:hammer_dispatch_stalled_with_conflicts` | conflicted/dirty PRs are present in auto-merge state and no hammer dispatch has been observed in the dispatch daemon log within 2h | ticket | a hammer dispatch is observed in the dispatch daemon log, the conflicted backlog clears, or the log is outside host-check collection |
 | `review:dag_autowalk_launchd_unhealthy` | dag-autowalk is unloaded, last exit is non-zero, or logs are stale for >2h | ticket | dag-autowalk is loaded with a zero/unknown last exit and fresh logs |
+| `review:argus_security_job_stale` | the oldest pending or in-progress Argus security job has waited more than 2h without a verdict (a live head once the drain's backlog retirement is fresh) | ticket | that job reaches a verdict or is retired, and no other job is older than the bound |
+| `review:argus_security_drain_not_running` | Argus jobs are waiting and the watcher drain is disabled, erroring, or has not written `data/argus-security-drain-status.json` for three pipeline ticks | ticket | the drain is enabled and writing fresh status, or the queue is empty |
 
 The follow-up daemon gives both reapers a 15-second scan budget through
 `ADVERSARIAL_FOLLOW_UP_REAPER_BUDGET_MS`. The closer worktree reaper runs every
@@ -356,6 +372,28 @@ five ticks by default (`ADVERSARIAL_FOLLOW_UP_CLOSER_REAP_EVERY_TICKS`), with
 its cursor preserved between runs. Its Git worktree removal and worker
 teardown are single operations that cannot safely be interrupted halfway
 through; the cadence keeps those operations off most consume intervals.
+
+## Argus security lane
+
+The watcher drains `data/argus-security-jobs/` (ARGUSDRAIN-01). Each tick it
+claims up to `ADVERSARIAL_ARGUS_DRAIN_MAX_CONCURRENT` (default 2) jobs,
+oldest first, and reviews each in a background child process; it never waits
+on a review. Before its first claim, and every 30 minutes, it retires jobs
+whose PR is merged or closed, or whose head moved, as `superseded`, from a live
+GitHub listing. It writes `data/argus-security-drain-status.json` every tick.
+
+- `ADVERSARIAL_ARGUS_DRAIN=off` disables the drain (the status record then says
+  `enabled: false`).
+- `ADVERSARIAL_ARGUS_DRAIN_MAX_ATTEMPTS` (default 3) failed reviews before a job
+  goes to `failed`.
+- `ADVERSARIAL_ARGUS_REVIEWER_MODELS` (default `claude,gemini,codex`) orders
+  the reviewer models. `reviewer.gemini.mode`, the builder's own model and the
+  fleet quota probe then filter and reorder them.
+- `GH_ARGUS_REVIEWER_TOKEN` posts findings as the Argus identity; otherwise
+  they post under the reviewing model's reviewer bot with an Argus header.
+- `ADVERSARIAL_ARGUS_RUBRIC_PYTHONPATH` / `ADVERSARIAL_ARGUS_RUBRIC_PYTHON`
+  locate the agent-os ASR-05 rubric; by default it is found beside the deployed
+  submodule (`modules/argus/lib/python`).
 
 ## Configuration
 
@@ -432,6 +470,8 @@ All thresholds are configurable through environment variables:
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DAG_AUTOWALK_MAX_LOG_AGE_MS`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DISPATCH_SPAWN_FAILURE_WINDOW_MS`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HAMMER_DISPATCH_STALL_MAX_AGE_MS`
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_ARGUS_OLDEST_JOB_MAX_AGE_MS`
+  (default `7200000`)
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_CHECKS`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_REPO`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_CONFLICTING_PR_REPO_ROOT`

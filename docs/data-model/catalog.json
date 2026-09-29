@@ -328,7 +328,25 @@
       "path": "docs/data-model/argus-security-jobs.md",
       "store": "data/argus-security-jobs/",
       "schemaSurface": "src/argus-security-queue.mjs",
+      "relatedSchemaSurfaces": [
+        "src/argus-security-drain.mjs",
+        "src/argus-backlog-retirement.mjs",
+        "src/argus-security-route.mjs",
+        "src/argus-security-review.mjs",
+        "src/dependency-bot-autoadjudication.mjs"
+      ],
       "owner": "ASR-03 Argus security review queue"
+    },
+    {
+      "id": "argus-security-drain-status",
+      "title": "Argus Security Drain Status",
+      "path": "docs/data-model/argus-security-drain-status.md",
+      "store": "data/argus-security-drain-status.json",
+      "schemaSurface": "src/argus-security-health.mjs",
+      "relatedSchemaSurfaces": [
+        "src/argus-security-drain.mjs"
+      ],
+      "owner": "ARGUSDRAIN-01 Argus security drain"
     },
     {
       "id": "archive-anomalies",

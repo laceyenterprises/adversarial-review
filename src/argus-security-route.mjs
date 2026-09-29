@@ -39,7 +39,10 @@
 import {
   enqueueArgusSecurityReview as defaultEnqueue,
   findArgusJob as defaultFindArgusJob,
+  isInterruptedArgusRequeue,
+  returnArgusJobToPending,
 } from './argus-security-queue.mjs';
+import { ARGUS_SUPERSEDED_VERDICT } from './argus-security-verdict.mjs';
 import { classifySecuritySurface } from './security-surface-classifier.mjs';
 
 // The status a routed PR carries while Argus owns it. NOT terminal: the dispatch
@@ -76,6 +79,41 @@ const FULL_HEAD_SHA_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu;
 function normalizeHead(headSha) {
   const normalized = String(headSha ?? '').trim().toLowerCase();
   return FULL_HEAD_SHA_PATTERN.test(normalized) ? normalized : '';
+}
+
+/**
+ * ARGUSDRAIN-01 — a job the drain closed `superseded` whose question is live
+ * again: the PR reopened at the same head, or its head was force-pushed back.
+ * The job identity is the head, so the retired record occupies it and a fresh
+ * enqueue is a duplicate; left alone, a live head would never be reviewed. The
+ * route only runs for open PRs, so finding one here means it is live: it goes
+ * back to `pending` with its prior result kept for the record.
+ */
+export function reviveSupersededArgusJob({ rootDir, found, nowMs = Date.now(), logger = console }) {
+  // A requeue a crash interrupted after the rewrite: the record already holds
+  // its pending state, so finish the move rather than leave it stranded.
+  const interrupted = isInterruptedArgusRequeue(found || {});
+  if (!interrupted && (found?.bucket !== 'completed' || found.job?.result?.verdict !== ARGUS_SUPERSEDED_VERDICT)) return null;
+  let revived;
+  try {
+    revived = returnArgusJobToPending({
+      rootDir,
+      jobPath: found.jobPath,
+      job: found.job,
+      patch: interrupted ? {} : { priorResult: found.job.result, revivedAt: new Date(nowMs).toISOString() },
+    });
+  } catch (err) {
+    if (err?.code === 'ENOENT') return null;
+    throw err;
+  }
+  const reason = interrupted
+    ? `an interrupted requeue from ${found.bucket}`
+    : found.job.result.supersededReason || 'retirement';
+  logger?.log?.(
+    `[argus-route] ${found.job.repo}#${found.job.prNumber}@${String(found.job.headSha).slice(0, 12)} `
+      + `is live again after ${reason}; back in the Argus queue`,
+  );
+  return { ...revived, bucket: 'pending' };
 }
 
 /**
@@ -120,6 +158,7 @@ export async function routeSecuritySurfaceToArgus({
   source = 'watcher-pollonce',
   enqueue = defaultEnqueue,
   findJob = defaultFindArgusJob,
+  reviveJob = reviveSupersededArgusJob,
   logger = console,
 } = {}) {
   const result = {
@@ -163,7 +202,8 @@ export async function routeSecuritySurfaceToArgus({
     // a cache that could disagree with it.
     result.outcome = 'already-classified';
     try {
-      const existing = findJob(rootDir, { repo: repoPath, prNumber, headSha: head });
+      let existing = findJob(rootDir, { repo: repoPath, prNumber, headSha: head });
+      existing = reviveJob({ rootDir, found: existing, logger }) || existing;
       if (existing) {
         result.queued = true;
         result.bucket = existing.bucket;
@@ -233,10 +273,11 @@ export async function routeSecuritySurfaceToArgus({
       enqueuedAt: enqueuedAt || new Date().toISOString(),
       source,
     });
+    const revived = enqueued?.outcome === 'duplicate' ? reviveJob({ rootDir, found: enqueued, logger }) : null;
     result.outcome = enqueued?.outcome === 'created' ? 'enqueued' : 'duplicate';
     result.queued = true;
-    result.bucket = enqueued?.bucket || null;
-    result.jobPath = enqueued?.jobPath || null;
+    result.bucket = revived?.bucket || enqueued?.bucket || null;
+    result.jobPath = revived?.jobPath || enqueued?.jobPath || null;
     // A queued job is the durable record. Memoize on it even when the fetch
     // failed: the PR is IN the queue, and re-fetching every tick to enrich a
     // reason list the reviewer will rebuild from the diff anyway buys nothing.

@@ -49,6 +49,7 @@ import {
   rmSync,
   statSync,
   unlinkSync,
+  utimesSync,
 } from 'node:fs';
 import { basename, join } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
@@ -550,12 +551,17 @@ export function readArgusQueueDepth(rootDir, { nowMs = Date.now() } = {}) {
  * Oldest-first so the queue drains FIFO and no job can be starved by a steady
  * arrival rate.
  *
+ * `shouldClaim(job)` lets a consumer pass over a job it may not take yet (a
+ * retry backoff, a job another owner is still deciding). A declined job is not
+ * touched: it stays in `pending` with its mtime, so it keeps its FIFO place.
+ *
  * @returns {{job: object, jobPath: string}|null}
  */
 export function claimNextArgusJob({
   rootDir,
   claimedAt = new Date().toISOString(),
   writeJob = writeArgusJob,
+  shouldClaim = null,
 } = {}) {
   const entries = listBucketEntries(rootDir, 'pending').sort((a, b) => a.mtimeMs - b.mtimeMs);
   const inProgressDir = getArgusJobDir(rootDir, 'inProgress');
@@ -569,6 +575,7 @@ export function claimNextArgusJob({
       moveCorruptPendingArgusJob({ rootDir, jobPath: entry.jobPath, failedAt: claimedAt, error: err });
       continue;
     }
+    if (typeof shouldClaim === 'function' && !shouldClaim(job)) continue;
 
     mkdirSync(inProgressDir, { recursive: true });
     const inProgressPath = join(inProgressDir, basename(entry.jobPath));
@@ -653,4 +660,94 @@ export function failArgusJob({ rootDir, jobPath, failedAt = new Date().toISOStri
     patch: { status: 'failed', failedAt, error: error ? String(error) : null },
     job,
   });
+}
+
+/**
+ * ARGUSDRAIN-01 — put a job back in `pending`, from any bucket.
+ *
+ * The drain uses it to hand back a claim it cannot finish yet (a retry backoff,
+ * CI still running), and to reopen a finished job whose question is live again.
+ * The record is rewritten in place first and moved second, so a crash between
+ * the two leaves an up-to-date record in its old bucket, never a stale one in
+ * `pending`. That half-done state is observable: a record reading
+ * `status: 'pending'` outside the `pending` bucket. `resumeInterruptedArgusRequeues`
+ * finds those and finishes the move, and `reviveSupersededArgusJob` finishes
+ * one it meets on the route. The job identity is unique across buckets, so the
+ * target name is free.
+ *
+ * The file's mtime is set back to the job's `enqueuedAt`. Pending order is by
+ * mtime (`claimNextArgusJob` FIFO, `readArgusQueueDepth` oldest-pending), and a
+ * job that waited six hours must not read as brand new because it was retried.
+ */
+export function returnArgusJobToPending({ rootDir, jobPath, patch = {}, job = null }) {
+  const current = job ?? readArgusJob(jobPath);
+  const pendingDir = getArgusJobDir(rootDir, 'pending');
+  mkdirSync(pendingDir, { recursive: true });
+  const targetPath = join(pendingDir, basename(jobPath));
+  const pending = {
+    ...current,
+    status: 'pending',
+    claimedAt: null,
+    completedAt: null,
+    failedAt: null,
+    result: null,
+    ...patch,
+  };
+  writeArgusJob(jobPath, pending);
+  if (jobPath !== targetPath) renameSync(jobPath, targetPath);
+  const enqueuedMs = Date.parse(String(pending.enqueuedAt || ''));
+  if (Number.isFinite(enqueuedMs)) {
+    try {
+      utimesSync(targetPath, new Date(), new Date(enqueuedMs));
+    } catch (err) {
+      console.error(`[argus-queue] could not restore the enqueue mtime on ${targetPath}: ${err?.message || err}`);
+    }
+  }
+  return { job: pending, jobPath: targetPath };
+}
+
+/**
+ * A record `returnArgusJobToPending` rewrote but never moved: it reads
+ * `pending` while sitting in another bucket. Nothing else writes that shape.
+ */
+export function isInterruptedArgusRequeue({ bucket, job } = {}) {
+  return Boolean(job) && bucket !== 'pending' && job.status === 'pending';
+}
+
+/**
+ * Finish every requeue a crash interrupted between the rewrite and the rename.
+ * Left alone, such a record is invisible to everything that scans its bucket
+ * (it no longer carries the terminal status or result they select on), so the
+ * PR's security review would never run. The record already holds the pending
+ * state, so finishing is just the move, and it is idempotent.
+ *
+ * @param {object}   opts
+ * @param {string[]} [opts.skipJobIds]  claims live in this process; left alone.
+ * @param {number}   [opts.completedLimit]  newest-N cap on the completed scan.
+ * @returns {number} how many records were moved to `pending`.
+ */
+export function resumeInterruptedArgusRequeues({
+  rootDir,
+  skipJobIds = [],
+  completedLimit = DEFAULT_ARGUS_JOB_READ_CAP,
+  logger = console,
+} = {}) {
+  const skip = new Set(skipJobIds);
+  let resumed = 0;
+  for (const bucket of ARGUS_JOB_BUCKETS) {
+    if (bucket === 'pending') continue;
+    const limit = bucket === 'completed' ? completedLimit : Number.POSITIVE_INFINITY;
+    for (const entry of listArgusJobs(rootDir, { bucket, limit })) {
+      if (!isInterruptedArgusRequeue(entry) || skip.has(entry.job.jobId)) continue;
+      try {
+        returnArgusJobToPending({ rootDir, jobPath: entry.jobPath, job: entry.job });
+      } catch (err) {
+        if (err?.code === 'ENOENT') continue;
+        throw err;
+      }
+      resumed += 1;
+      logger?.log?.(`[argus-queue] finished an interrupted requeue of ${entry.job.jobId} from ${bucket}`);
+    }
+  }
+  return resumed;
 }

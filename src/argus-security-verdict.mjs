@@ -71,6 +71,15 @@ export const ARGUS_VERDICTS = Object.freeze({
 });
 
 /**
+ * ARGUSDRAIN-01 — the disposition of a job the drain closed WITHOUT a review:
+ * its PR merged or closed, or its head was superseded by a newer one. It is not
+ * an ASR-05 verdict (the rubric never ran), so it is kept out of
+ * `ARGUS_VERDICTS`. It says nothing about the tree, which is why it is neither
+ * green nor red: a reopened PR at that same head reads it as "not reviewed yet".
+ */
+export const ARGUS_SUPERSEDED_VERDICT = 'superseded';
+
+/**
  * The states this module can report, and whether each may satisfy the gate.
  *
  * Exactly one is green. Keeping that fact in a single frozen table — rather
@@ -88,6 +97,7 @@ export const ARGUS_VERDICT_STATES = Object.freeze({
   FAILED: 'failed',
   MISSING: 'missing',
   MALFORMED: 'malformed',
+  SUPERSEDED: 'superseded',
 });
 
 const SATISFYING_STATES = Object.freeze(new Set([ARGUS_VERDICT_STATES.APPROVED]));
@@ -190,6 +200,13 @@ function interpretCompletedResult(result) {
     return {
       state: ARGUS_VERDICT_STATES.NEEDS_VERIFICATION,
       summary: 'Argus security review requires empirical verification that is missing or stale.',
+    };
+  }
+
+  if (verdict === ARGUS_SUPERSEDED_VERDICT) {
+    return {
+      state: ARGUS_VERDICT_STATES.SUPERSEDED,
+      summary: 'Argus closed the review for this head without reviewing it; it has not been reviewed.',
     };
   }
 
@@ -386,4 +403,5 @@ export const ARGUS_GATE_REASONS = Object.freeze({
   [ARGUS_VERDICT_STATES.FAILED]: 'argus-security-review-failed',
   [ARGUS_VERDICT_STATES.MISSING]: 'argus-security-review-missing',
   [ARGUS_VERDICT_STATES.MALFORMED]: 'argus-security-review-malformed',
+  [ARGUS_VERDICT_STATES.SUPERSEDED]: 'argus-security-review-superseded',
 });

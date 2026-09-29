@@ -46,6 +46,7 @@ import {
   reviewerDispatchPassKind,
 } from './watcher-reviewer-pool.mjs';
 import { hammerWakeAuditDir, readHammerWakeAudit } from './hammer-wake.mjs';
+import { summarizeArgusSecurityQueue } from './argus-security-health.mjs';
 import { summarizeReviewerBurst } from './reviewer-burst-lease.mjs';
 import { readReviewerCredentialOutage } from './reviewer-cascade.mjs';
 import {
@@ -196,6 +197,10 @@ const DEFAULT_RUNNING_REVIEWER_PASS_MAX_AGE_MS = Math.round(
 const DEFAULT_DAG_AUTOWALK_MAX_LOG_AGE_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_DISPATCH_SPAWN_FAILURE_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_HAMMER_DISPATCH_STALL_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+// ARGUSDRAIN-01: the oldest live-head Argus job may wait this long for a
+// verdict. Well inside the gate's 6h stall deadline, so an operator hears
+// before a bot PR's check turns red.
+const DEFAULT_ARGUS_OLDEST_JOB_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_CONFLICTING_PR_UNOWNED_MAX_AGE_MS = 30 * 60 * 1000;
 const DEFAULT_CONFLICTING_PR_MIN_SHARED_PATH_COUNT = 5;
 const DEFAULT_DUPLICATE_FAMILY_HELD_MAX_AGE_MS = 24 * 60 * 60 * 1000;
@@ -305,6 +310,11 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_ttm_terminal_unmerged_duration_minutes_12h',
   'review_pipeline_token_refresh_pending_refusals',
   'review_pipeline_token_refresh_pending_refusal_share',
+  'review_pipeline_argus_jobs',
+  'review_pipeline_argus_oldest_unanswered_job_age_seconds',
+  'review_pipeline_argus_claim_to_verdict_seconds',
+  'review_pipeline_argus_verdicts_24h',
+  'review_pipeline_argus_drain_running',
   'review_pipeline_sentinel_finding_active',
 ]);
 
@@ -369,6 +379,11 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_ttm_terminal_unmerged_duration_minutes_12h: 'Terminal-but-unmerged stall duration in the 12h SEV1 window.',
   review_pipeline_token_refresh_pending_refusals: 'Claude reviewer token-refresh-pending refusals (held, not charged) started in the trailing window.',
   review_pipeline_token_refresh_pending_refusal_share: 'Share of Claude reviewer picks in the trailing window refused as token-refresh-pending.',
+  review_pipeline_argus_jobs: 'Argus security review jobs by queue bucket (uncapped directory count).',
+  review_pipeline_argus_oldest_unanswered_job_age_seconds: 'Age of the oldest pending or in-progress Argus job, from enqueue; 0 when none.',
+  review_pipeline_argus_claim_to_verdict_seconds: 'Argus drain claim-to-verdict latency over the trailing 24h, by quantile.',
+  review_pipeline_argus_verdicts_24h: 'Argus jobs closed in the trailing 24h, by verdict (failed counts the failed bucket).',
+  review_pipeline_argus_drain_running: 'Argus reviews running in the watcher drain at its last tick.',
   review_pipeline_sentinel_finding_active: 'Whether a Sentinel finding code is active in the current snapshot.',
 });
 
@@ -763,6 +778,26 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     thresholdKey: 'dagAutowalkMaxLogAgeMs',
     defaultThreshold: DEFAULT_DAG_AUTOWALK_MAX_LOG_AGE_MS,
   },
+  {
+    code: 'review:argus_security_job_stale',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: 'argusOldestJobMaxAgeMs',
+    defaultThreshold: DEFAULT_ARGUS_OLDEST_JOB_MAX_AGE_MS,
+    thresholdDescription:
+      'the oldest pending or in-progress Argus security job (a live head once the drain\'s backlog '
+      + 'retirement is fresh) has waited longer than the threshold without a verdict',
+  },
+  {
+    code: 'review:argus_security_drain_not_running',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: null,
+    defaultThreshold: null,
+    thresholdDescription:
+      'Argus jobs are waiting and the watcher drain is disabled, erroring, or has not written its '
+      + 'status for three pipeline ticks',
+  },
 ]);
 
 function parseNumber(value, fallback) {
@@ -1062,6 +1097,11 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
       overrides.hammerDispatchStallMaxAgeMs
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HAMMER_DISPATCH_STALL_MAX_AGE_MS,
       DEFAULT_HAMMER_DISPATCH_STALL_MAX_AGE_MS
+    ),
+    argusOldestJobMaxAgeMs: parsePositiveInteger(
+      overrides.argusOldestJobMaxAgeMs
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_ARGUS_OLDEST_JOB_MAX_AGE_MS,
+      DEFAULT_ARGUS_OLDEST_JOB_MAX_AGE_MS
     ),
     conflictingPrChecksEnabled: parseBoolean(
       overrides.conflictingPrChecksEnabled
@@ -6001,6 +6041,54 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }));
   }
 
+  // ARGUSDRAIN-01: the security lane's silence is what the SEV was about.
+  const argus = snapshot.argusSecurityQueue;
+  const oldestArgusJob = argus?.oldestUnanswered;
+  const argusMaxAgeMs = config?.argusOldestJobMaxAgeMs ?? DEFAULT_ARGUS_OLDEST_JOB_MAX_AGE_MS;
+  if (oldestArgusJob && oldestArgusJob.ageMs > argusMaxAgeMs) {
+    findings.push(buildFinding({
+      code: 'review:argus_security_job_stale',
+      tier: 'ticket',
+      subject: `Argus security job has waited ${Math.round(oldestArgusJob.ageMs / 3_600_000)}h without a verdict`,
+      message: `${oldestArgusJob.repo}#${oldestArgusJob.prNumber}@${String(oldestArgusJob.headSha || '').slice(0, 12)} `
+        + `has been ${oldestArgusJob.bucket} since ${oldestArgusJob.enqueuedAt} (liveness ${argus.liveness}); `
+        + `${argus.unanswered} Argus job(s) are unanswered.`,
+      evidence: [
+        oldestArgusJob.jobId,
+        `attempts=${oldestArgusJob.attempts} lastError=${oldestArgusJob.lastError || 'none'}`,
+        `drainStatusAgeMs=${argus.drain?.statusAgeMs ?? 'none'}`,
+      ],
+      recommendedAction: 'Check the watcher log for [argus-drain] and [argus-routing] lines: is the drain enabled '
+        + '(ADVERSARIAL_ARGUS_DRAIN), is a reviewer model available, is the job backing off? A bot PR\'s gate turns '
+        + 'red at 6h; the head-pinned operator-approved label remains the escape hatch.',
+      observedAt,
+      details: { oldestUnanswered: oldestArgusJob, liveness: argus.liveness, depth: argus.depth },
+    }));
+  }
+  const argusStatus = argus?.drain?.status;
+  const argusStatusStale = argus?.drain?.statusAgeMs === null
+    || argus?.drain?.statusAgeMs > 3 * (config?.pipelineTickIntervalMs || 300_000);
+  if (argus?.unanswered > 0 && (!argusStatus || argusStatus.enabled === false || argusStatus.error || argusStatus.unreadable || argusStatusStale)) {
+    const why = !argusStatus
+      ? 'the drain has never written a status record'
+      : argusStatus.enabled === false
+        ? 'the drain is disabled (ADVERSARIAL_ARGUS_DRAIN)'
+        : argusStatus.error || argusStatus.unreadable
+          ? `the drain's last tick failed: ${argusStatus.error || 'status record unreadable'}`
+          : `the drain's status is ${Math.round(argus.drain.statusAgeMs / 60_000)} minute(s) old`;
+    findings.push(buildFinding({
+      code: 'review:argus_security_drain_not_running',
+      tier: 'ticket',
+      subject: 'Argus security jobs are waiting and nothing is draining them',
+      message: `${argus.unanswered} Argus job(s) are unanswered and ${why}.`,
+      evidence: [`status=${JSON.stringify(argusStatus || null).slice(0, 300)}`],
+      recommendedAction: 'Confirm the watcher is running this build and the drain is enabled; see '
+        + 'docs/review-pipeline-health.md (Argus security lane).',
+      observedAt,
+      details: { unanswered: argus.unanswered, status: argusStatus || null, statusAgeMs: argus.drain?.statusAgeMs ?? null },
+    }));
+  }
+
   return findings;
 }
 
@@ -6238,6 +6326,9 @@ function collectReviewPipelineHealth({
     // the health surface reports a live burst even when it is collected from a
     // different process than the watcher holding the capacity.
     const reviewerBurst = summarizeReviewerBurst(rootDir, { nowMs });
+    // ARGUSDRAIN-01: the security lane's depth, oldest unanswered job and
+    // claim-to-verdict latency, read from the queue and the drain's status.
+    const argusSecurityQueue = summarizeArgusSecurityQueue(rootDir, { nowMs });
     const hammerWakeDir = hammerWakeAuditDir(rootDir);
     const recentHammerWakes = (() => {
       try {
@@ -6324,6 +6415,7 @@ function collectReviewPipelineHealth({
       zombieReviewerPasses,
       reviewerSlots,
       reviewerBurst,
+      argusSecurityQueue,
       stuckReviewLoops,
       terminalReviewFailures,
       roundBudget,
@@ -6602,6 +6694,23 @@ function renderReviewPipelinePrometheus(snapshot) {
     { statistic: 'total' },
     snapshot.ttm?.rollup?.terminalButUnmergedTotalDurationMinutesLast12h || 0
   );
+  const argus = snapshot.argusSecurityQueue || {};
+  for (const [bucket, label] of [['pending', 'pending'], ['inProgress', 'in_progress'], ['completed', 'completed'], ['failed', 'failed']]) {
+    pushMetric('review_pipeline_argus_jobs', { bucket: label }, argus.depth?.[bucket] || 0);
+  }
+  pushMetric(
+    'review_pipeline_argus_oldest_unanswered_job_age_seconds',
+    { liveness: argus.liveness || 'unverified' },
+    Math.round((argus.oldestUnanswered?.ageMs || 0) / 1000),
+  );
+  for (const [quantile, key] of [['0.5', 'p50Ms'], ['0.9', 'p90Ms'], ['max', 'maxMs']]) {
+    const value = argus.latency?.[key];
+    pushMetric('review_pipeline_argus_claim_to_verdict_seconds', { quantile }, value === null || value === undefined ? Number.NaN : value / 1000);
+  }
+  for (const [verdict, count] of Object.entries(argus.verdicts || { approve: 0 })) {
+    pushMetric('review_pipeline_argus_verdicts_24h', { verdict }, count);
+  }
+  pushMetric('review_pipeline_argus_drain_running', {}, argus.drain?.status?.running || 0);
   for (const definition of REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS) {
     const active = snapshot.findings.some((finding) => finding.code === definition.code);
     pushMetric('review_pipeline_sentinel_finding_active', {

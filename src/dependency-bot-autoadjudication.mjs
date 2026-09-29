@@ -1,5 +1,6 @@
 import { completeArgusJob, writeArgusJob } from './argus-security-queue.mjs';
 import { ARGUS_VERDICTS } from './argus-security-verdict.mjs';
+import { ARGUS_REVIEW_RESULT_SOURCE } from './argus-security-review.mjs';
 import { isUnroutableBotAuthor } from './bot-author.mjs';
 import { DAEMON_MERGE_DISPOSITION } from './ama/daemon-merge.mjs';
 
@@ -203,6 +204,137 @@ function writePendingAutoadjudicationAttempt({
   return { job: pendingJob, jobPath: jobRecord.jobPath };
 }
 
+// ARGUSDRAIN-01. A bump the adjudicator will not approve on its own is ROUTED:
+// the job stays in `pending`, marked, and the Argus drain claims it for a real
+// security review. Before the drain existed this completed the job as
+// `needs_verification` ("route-for-review") and nothing ever reviewed it, so
+// every semver-major bump parked forever (agent-os#7326).
+function routeDependencyBotJobForReview({ jobRecord, decision, routedAt, writeArgusJobImpl }) {
+  const routedJob = {
+    ...jobRecord.job,
+    routedForReview: {
+      schemaVersion: 1,
+      source: 'dependency-bot-autoadjudication',
+      decision: 'route-for-review',
+      reason: decision.reason,
+      inputs: decision.inputs,
+      routedAt,
+    },
+  };
+  writeArgusJobImpl(jobRecord.jobPath, routedJob);
+  return { job: routedJob, jobPath: jobRecord.jobPath };
+}
+
+/**
+ * A job the Argus drain reviewed and approved, whose PR has not merged yet and
+ * whose merge has not been settled. Only the drain's own approvals qualify: an
+ * auto-adjudicated approval already went through its merge attempt.
+ */
+export function isArgusDrainApprovalAwaitingMerge(job) {
+  return job?.status === 'completed'
+    && job?.result?.source === ARGUS_REVIEW_RESULT_SOURCE
+    && job?.result?.verdict === ARGUS_VERDICTS.APPROVE
+    && job?.result?.merge?.settled !== true;
+}
+
+// ARGUSDRAIN-01 item 2: "approved lets the normal AMA path merge". A bot PR has
+// no adversarial reviewer, so the daemon clean-merge attempt the adjudicator
+// uses for patch/minor bumps is the merge path; the Argus review stands in for
+// the settled review, with its advisory findings counted.
+async function mergeArgusDrainApprovedDependencyBump({
+  rootDir,
+  jobRecord,
+  candidate,
+  gateSnapshot,
+  mergeabilityForGate,
+  cfg,
+  currentPrHeadSha,
+  runDaemonCleanMergeAttemptImpl,
+  writeArgusJobImpl,
+  logger,
+  env,
+  attemptedAt,
+}) {
+  const { job } = jobRecord;
+  const headSha = String(job.headSha || currentPrHeadSha || '').trim();
+  // Argus `medium`/`low` findings are advisory by the operator's authority
+  // decision (ASR-06): posted, never blocking. The daemon's non-blocking count
+  // means "findings remediation should address first", which a dependency bump
+  // has no remediator for, so they are not counted there. They travel in the
+  // merge accountability instead, so the audit still records them.
+  const advisoryCount = (Array.isArray(job.result?.findings) ? job.result.findings : [])
+    .filter((finding) => finding?.severity !== 'high').length;
+  const daemonResult = await runDaemonCleanMergeAttemptImpl({
+    rootDir,
+    cfg,
+    repoPath: job.repo,
+    prNumber: job.prNumber,
+    candidate: { ...candidate, headSha },
+    gateSnapshot: {
+      ...gateSnapshot,
+      reviewedHeadSha: headSha,
+      settledReview: { verdict: 'settled-success' },
+    },
+    mergeabilityForGate,
+    reviewState: {
+      headSha,
+      riskClass: 'argus-security-reviewed',
+      blockingFindingCount: 0,
+      blockingFindingState: 'known',
+      nonBlockingFindingCount: 0,
+      nonBlockingFindingState: 'known',
+    },
+    reviewStateRow: {
+      reviewer: 'argus-security',
+      reviewer_login: 'argus-security',
+    },
+    currentPrHeadSha: headSha,
+    autonomousMergeAccountability: {
+      label: 'argus-security-review',
+      actor: 'argus-security',
+      eventId: `${job.jobId}:argus-review`,
+      observedAt: attemptedAt,
+      headSha,
+      reason: 'argus-security-approved',
+      inputs: {
+        reviewer: job.result?.reviewer?.model || null,
+        verification: job.result?.verification || null,
+        advisoryFindingCount: advisoryCount,
+        commentUrl: job.result?.posted?.url || null,
+      },
+    },
+    logger,
+    env,
+  });
+  const merged = daemonResult?.disposition === DAEMON_MERGE_DISPOSITION.MERGED;
+  const retryable = !merged && shouldKeepArgusJobPendingForMergeRetry(daemonResult);
+  const updated = {
+    ...job,
+    result: {
+      ...job.result,
+      merge: {
+        attemptedAt,
+        disposition: daemonResult?.disposition || null,
+        reason: daemonResult?.reason || null,
+        reasons: Array.isArray(daemonResult?.reasons) ? daemonResult.reasons : [],
+        merged,
+        // Settled means stop trying: merged, or withheld for a reason a retry
+        // will not change. The verdict stays `approved` either way; a withheld
+        // merge is a merge problem, not a security one.
+        settled: merged || !retryable,
+      },
+    },
+  };
+  writeArgusJobImpl(jobRecord.jobPath, updated);
+  return {
+    attempted: true,
+    reason: merged ? 'merged' : `argus-approved-merge-${retryable ? 'retry' : 'withheld'}-${daemonResult?.reason || 'unknown'}`,
+    decision: { autoMergeEligible: true, reason: 'argus-security-approved', inputs: null },
+    completed: { job: updated, jobPath: jobRecord.jobPath },
+    merge: daemonResult || null,
+  };
+}
+
 export async function maybeAutoAdjudicateDependencyBotArgusJob({
   rootDir,
   jobRecord,
@@ -220,8 +352,34 @@ export async function maybeAutoAdjudicateDependencyBotArgusJob({
   env = process.env,
   now = () => new Date().toISOString(),
 } = {}) {
+  if (
+    jobRecord?.job
+    && jobRecord.jobPath
+    && jobRecord.bucket === 'completed'
+    && isArgusDrainApprovalAwaitingMerge(jobRecord.job)
+  ) {
+    if (!isUnroutableBotAuthor(authorRef)) return { attempted: false, reason: 'not-bot-author' };
+    return mergeArgusDrainApprovedDependencyBump({
+      rootDir,
+      jobRecord,
+      candidate,
+      gateSnapshot,
+      mergeabilityForGate,
+      cfg,
+      currentPrHeadSha,
+      runDaemonCleanMergeAttemptImpl,
+      writeArgusJobImpl,
+      logger,
+      env,
+      attemptedAt: now(),
+    });
+  }
   if (!jobRecord?.job || !jobRecord.jobPath || jobRecord.bucket !== 'pending') {
     return { attempted: false, reason: 'no-pending-job' };
+  }
+  if (jobRecord.job.routedForReview) {
+    // Already routed on an earlier tick; the Argus drain owns it now.
+    return { attempted: false, reason: 'routed-for-review' };
   }
 
   const completedAt = now();
@@ -250,19 +408,19 @@ export async function maybeAutoAdjudicateDependencyBotArgusJob({
   }));
 
   if (!decision.autoMergeEligible) {
-    const completed = completeArgusJobImpl({
-      rootDir,
-      jobPath: jobRecord.jobPath,
-      completedAt,
-      result,
-      job: jobRecord.job,
+    const routed = routeDependencyBotJobForReview({
+      jobRecord,
+      decision,
+      routedAt: completedAt,
+      writeArgusJobImpl,
     });
 
     return {
       attempted: true,
       reason: decision.reason,
       decision,
-      completed,
+      completed: null,
+      routed,
       merge: null,
     };
   }

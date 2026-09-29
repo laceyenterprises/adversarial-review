@@ -285,7 +285,7 @@ npm test
 
 This runs `node --test test/*.test.mjs test/adapters/*.test.mjs`. It is
 hermetic — no network, no external services — and runs in CI on every
-PR against Node 20 and Node 22.
+PR against Node 22 and Node 26.
 
 If your change touches the TypeScript contract declarations in
 `src/kernel/contracts.d.ts`, also run:

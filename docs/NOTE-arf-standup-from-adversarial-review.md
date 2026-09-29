@@ -127,8 +127,8 @@ not collide with each other or with a live ARF on 8787.
 
 ## Two things this does not cover
 
-**It is not in CI.** This repo's test workflow runs Node 20 and 22; ARF's
-`engines` require >= 23.4. The ARF suites are likewise not in that workflow —
+**It is not in CI.** This repo's test workflow runs Node 22 and 26, and it does not
+run the ARF suites (ARF's `engines` require >= 23.4) —
 this is an operator/standup command, run by hand from a checkout with the
 submodule inited.
 

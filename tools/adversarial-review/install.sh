@@ -291,17 +291,17 @@ const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
 const range = (pkg.engines && pkg.engines.node) || '';
 const major = Number(process.versions.node.split('.')[0]);
 if (!range) { console.error('package.json missing engines.node'); process.exit(1); }
-if (!(major >= 20 && major < 26)) {
+if (!(major >= 22 && major < 27)) {
   console.error('Node ' + process.version + ' does not satisfy ' + range);
   process.exit(1);
 }
 "); then
     mark_ok "Node $(node --version) satisfies package.json engines"
   else
-    mark_fail "Node $(node --version) does not satisfy package.json engines (>=20 <26)"
+    mark_fail "Node $(node --version) does not satisfy package.json engines (>=22 <27)"
   fi
 else
-  mark_fail "node not found on PATH; install Node 20+ before bootstrapping the agents"
+  mark_fail "node not found on PATH; install Node 22+ before bootstrapping the agents"
 fi
 
 # gh auth status.

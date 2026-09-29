@@ -113,8 +113,8 @@ This is the standup verification for the move out of agent-os's `apps/arf`
 through the old `tools/adversarial-review/` prefix. See
 [`docs/NOTE-arf-standup-from-adversarial-review.md`](../docs/NOTE-arf-standup-from-adversarial-review.md).
 
-It is not part of CI: this repo's workflow matrix is Node 20/22, and ARF requires
-Node >= 23.4.
+It is not part of CI: this repo's workflow (Node 22/26) does not run it, and ARF
+requires Node >= 23.4.
 
 ## Test it
 

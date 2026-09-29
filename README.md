@@ -95,7 +95,7 @@ The full unit + adapter test suite runs the same way:
 npm test
 ```
 
-CI runs both on Node 20 and Node 22 on every PR.
+CI runs both on Node 22 and Node 26 on every PR.
 
 ### ACPX Discovery
 
@@ -539,7 +539,7 @@ adversarial-review/
 │   ├── INCIDENT-*.md
 │   └── internal/               ← historical specs (safe to skip)
 │
-└── .github/workflows/          ← CI: test.yml (npm test on Node 20/22 + CDM audit)
+└── .github/workflows/          ← CI: test.yml (npm test on Node 22/26 + CDM audit)
 ```
 
 ---

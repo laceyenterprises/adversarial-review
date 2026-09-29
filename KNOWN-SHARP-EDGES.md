@@ -147,7 +147,7 @@ at runtime, fix the test/prompt accordingly, remove the skip.
 ## 7. Single CI matrix, no provider integration tests
 
 The CI workflow at [`.github/workflows/test.yml`](.github/workflows/test.yml)
-runs the kernel + adapter suite and the offline demo on Node 20 and 22.
+runs the kernel + adapter suite and the offline demo on Node 22 and 26.
 It does NOT exercise live Anthropic, OpenAI, GitHub, or Linear APIs.
 
 **What works today:** the kernel contracts and adapter fixture paths are

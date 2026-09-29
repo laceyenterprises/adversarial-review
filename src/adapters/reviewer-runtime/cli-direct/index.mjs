@@ -9,6 +9,7 @@ import { spawnCapturedProcessGroup } from '../../../process-group-spawn.mjs';
 import { resolveNodeBin } from '../../../node-interpreter.mjs';
 import { isPgidAlive, verifyPgidIdentity } from '../../../process-group-identity.mjs';
 import { domainRequiresMcpOAuth } from '../domain-mcp-oauth.mjs';
+import { AGY_IDENTITY_REVIEW_ID_ENV, AGY_IDENTITY_USER_ENV } from '../../../agy-reviewer-identities.mjs';
 import {
   parseCodexJsonTokenUsage,
   parseCodexJsonTokenUsageFromFailureStdout,
@@ -401,6 +402,15 @@ function createCliDirectReviewerRuntimeAdapter({
       REVIEWER_SESSION_UUID: sessionUuid,
       REVIEWER_RUN_STATE_ROOT_DIR: rootDir,
     };
+    // CCX-08: the leased agy reviewer identity reaches the reviewer child only
+    // through its own env; an inherited value never selects one.
+    delete reviewerEnv[AGY_IDENTITY_USER_ENV];
+    delete reviewerEnv[AGY_IDENTITY_REVIEW_ID_ENV];
+    const agyIdentity = req?.subjectContext?.agyIdentity;
+    if (agyIdentity?.user) {
+      reviewerEnv[AGY_IDENTITY_USER_ENV] = String(agyIdentity.user);
+      reviewerEnv[AGY_IDENTITY_REVIEW_ID_ENV] = String(agyIdentity.reviewId || '');
+    }
     let stripped = [];
     let preflightResult = null;
     try {
@@ -803,6 +813,7 @@ function createCliDirectReviewerRuntimeAdapter({
         heartbeatPersisted: false,
         leaseManaged: false,
         oauthStripEnforced: true,
+        agyReviewerIdentity: true,
       },
     };
   }

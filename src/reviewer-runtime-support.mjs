@@ -7,6 +7,8 @@
 //     broker shared secret; returns '' on any miss so callers fail open.
 //   - resolveGeminiCredentialConcurrencyForDispatchCandidates: fetch the gemini
 //     credential-concurrency cap only when the candidate set includes gemini.
+//     CCX-08: with added agy reviewer identities configured, the cap is the
+//     number of ready identities instead of the broker credential count.
 //
 // The broker-secret cache was a watcher module-level singleton used solely by
 // readReviewerBrokerSharedSecretBestEffort, so it moves here intact and stays
@@ -15,6 +17,7 @@
 // which import these functions re-exported from watcher.mjs.
 
 import { readFile as readFileAsync } from 'node:fs/promises';
+import { getAgyReviewerIdentityPool } from './agy-reviewer-identities.mjs';
 import { writeReviewerTokenUsageArtifact } from './reviewer-pass-tokens.mjs';
 import { fetchGeminiCredentialConcurrency } from './watcher-reviewer-pool.mjs';
 
@@ -100,12 +103,19 @@ export async function resolveGeminiCredentialConcurrencyForDispatchCandidates(
     env = process.env,
     fetchCredentialConcurrency = fetchGeminiCredentialConcurrency,
     readSharedSecret = readReviewerBrokerSharedSecretBestEffort,
+    identityPool = getAgyReviewerIdentityPool(),
   } = {}
 ) {
   const hasGeminiCandidates = candidates.some(
     (candidate) => String(candidate?.reviewerModel || '').toLowerCase() === 'gemini'
   );
   if (!hasGeminiCandidates) return null;
+
+  // One readiness pass per watcher pass (settings drift isolates, a passing
+  // check re-admits). Null means one identity, the HQ owner: the broker count
+  // below stays the cap exactly as before.
+  const readyIdentities = await identityPool.refreshReadiness();
+  if (readyIdentities !== null) return readyIdentities;
 
   const brokerUrl = env.CQP_BROKER_URL || env.OAUTH_BROKER_URL || DEFAULT_CQP_BROKER_URL;
   return await fetchCredentialConcurrency({

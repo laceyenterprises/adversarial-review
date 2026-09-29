@@ -34,6 +34,7 @@ import {
   resolveReviewerTimeoutMs,
 } from './reviewer-timeout.mjs';
 import { loadRoleConfig, resolveGeminiRuntime } from './role-config.mjs';
+import { getAgyReviewerIdentityPool, runWithAgyReviewerIdentity } from './agy-reviewer-identities.mjs';
 import {
   isGroundedProviderState,
   providerForQuotaHarness,
@@ -524,6 +525,7 @@ async function spawnReviewer({
   fetchPullRequestHeadAndStateImpl = fetchPullRequestHeadAndState,
   freshnessCheckSleepImpl = sleepMs,
   onPostOperationSettled = null,
+  agyReviewerIdentityPool = getAgyReviewerIdentityPool(),
 }) {
   const activeReviewerRuntimeAdapter = reviewerRuntimeAdapterOverride || reviewerRuntimeState.adapter;
   const normalizedReviewerClass = normalizeReviewerClass(reviewerModel);
@@ -653,7 +655,13 @@ async function spawnReviewer({
       ? resolveAgyReviewerSubprocessTimeoutMs(process.env, { reviewerTimeoutMs })
       : reviewerTimeoutMs;
 
-    let result = await activeReviewerRuntimeAdapter.spawnReviewer({
+    // CCX-08: a Gemini review leases one agy reviewer identity for its whole
+    // run; with one identity (the HQ owner) this calls straight through.
+    let result = await runWithAgyReviewerIdentity({
+      reviewerModel,
+      adapter: activeReviewerRuntimeAdapter,
+      pool: agyReviewerIdentityPool,
+    }, (agyIdentity) => activeReviewerRuntimeAdapter.spawnReviewer({
       model: reviewerModel,
       prompt: '',
       subjectContext: {
@@ -677,12 +685,13 @@ async function spawnReviewer({
         crossModelReviewWaived,
         crossModelReviewWaiverReason,
         afhReviewerFallback,
+        ...(agyIdentity ? { agyIdentity } : {}),
       },
       timeoutMs: effectiveReviewerTimeoutMs,
       sessionUuid: reviewerSessionUuid,
       forbiddenFallbacks: ['api-key', 'anthropic-api-key'],
       onReviewerPgid,
-    });
+    }));
     if (
       result.ok &&
       shouldPostAdapterReviewBody(result) &&

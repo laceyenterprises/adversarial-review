@@ -233,12 +233,16 @@ test('a recorded final-round push resolves the comment-only verdict whatever rer
   const { pushes } = seed7334(rootDir);
   const base = { repo: 'laceyenterprises/agent-os', prNumber: 7334, currentHeadSha: PUSHED, commentOnlyFinalRoundPushes: pushes };
   // PENDING_REASON names the live head, so even a reason the scoping rule would
-  // call current cannot outrank the recorded push on a posted row.
-  for (const rereview_reason of [STALE_REASON, PENDING_REASON, null]) {
+  // call current cannot outrank the recorded push on a posted row. That override
+  // is flagged on the result and warned about, once per PR/head/reason.
+  const warnings = [];
+  const logger = { ...silent, warn: (line) => warnings.push(line) };
+  for (const rereview_reason of [STALE_REASON, PENDING_REASON, PENDING_REASON, null]) {
     const resolved = resolveSettledReviewVerdict(rootDir, {
-      ...base, reviewRow: { review_status: 'posted', reviewer_head_sha: REVIEWED, rereview_reason },
+      ...base, logger, reviewRow: { review_status: 'posted', reviewer_head_sha: REVIEWED, rereview_reason },
     });
     assert.equal(resolved.verdict, 'comment-only', `rereview_reason=${rereview_reason}`);
+    assert.equal(resolved.overrodeHeadChangeRereview === true, rereview_reason === PENDING_REASON);
     assert.equal(resolved.commentOnlyFinalRoundPush, true);
     assert.equal(resolved.remediationPending, false);
     assert.equal(resolveProvenReviewedHead(resolved), REVIEWED, 'the pushed head is never re-labelled as reviewed');
@@ -246,6 +250,9 @@ test('a recorded final-round push resolves the comment-only verdict whatever rer
     assert.equal(resolved.blockingFindingCount, 0);
     assert.equal(resolved.nonBlockingFindingCount, 5);
   }
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /comment-only-final-round-overrides-rereview: repo=laceyenterprises\/agent-os pr=#7334 /);
+  assert.ok(warnings[0].includes(`pushed=${PUSHED}`));
 });
 
 test('with a stale reason on the row, a later Request changes on the reviewed head still wins and a human push fails closed', (t) => {

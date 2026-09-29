@@ -462,6 +462,26 @@ function resolveCommentOnlyFinalRoundVerdict(rootDir, {
   };
 }
 
+// The gate is re-evaluated every watcher/closer tick; warn once per
+// (PR, pushed head, reason) instead of once per tick.
+const overriddenHeadChangeRereviewWarnings = new Set();
+const OVERRIDDEN_HEAD_CHANGE_REREVIEW_WARNING_CAP = 1000;
+
+function warnOverriddenHeadChangeRereview(logger, { repo, prNumber, reviewedHeadSha, currentHeadSha, reviewRow }) {
+  const reason = reviewRow?.rereview_reason ?? reviewRow?.rereviewReason;
+  const key = `${repo}#${prNumber}@${currentHeadSha}|${reason}`;
+  if (overriddenHeadChangeRereviewWarnings.has(key)) return;
+  if (overriddenHeadChangeRereviewWarnings.size >= OVERRIDDEN_HEAD_CHANGE_REREVIEW_WARNING_CAP) {
+    overriddenHeadChangeRereviewWarnings.clear();
+  }
+  overriddenHeadChangeRereviewWarnings.add(key);
+  logger?.warn?.(
+    `[adversarial-gate] comment-only-final-round-overrides-rereview: repo=${repo} pr=#${prNumber} `
+      + `reviewed=${reviewedHeadSha} pushed=${currentHeadSha} rereview_reason=${JSON.stringify(reason)}; `
+      + 'the recorded final-round push resolves the verdict, and the unanswered re-review of the pushed head is skipped',
+  );
+}
+
 function resolveSettledReviewVerdict(
   rootDir,
   {
@@ -474,6 +494,7 @@ function resolveSettledReviewVerdict(
     liveHeadReview = undefined,
     commentOnlyFinalRoundPushes = null,
     finalRoundJobFinder = findCommentOnlyFinalRoundPushJob,
+    logger = console,
   } = {}
 ) {
   const reviewedHeadSha = reviewRowReviewerHeadSha(reviewRow);
@@ -496,7 +517,16 @@ function resolveSettledReviewVerdict(
           finalRoundJobFinder, latestJobFinder, liveHeadReview,
         })
         : null;
-      if (finalRound) return finalRound;
+      if (finalRound) {
+        // A reason naming the pushed head that no posted review has answered
+        // is a re-review request the final round now outranks. Merge still
+        // waits on exact-head HAM validation; make the skipped request visible.
+        if (isHeadChangeRereview) {
+          warnOverriddenHeadChangeRereview(logger, { repo, prNumber, reviewedHeadSha, currentHeadSha, reviewRow });
+          return { ...finalRound, overrodeHeadChangeRereview: true };
+        }
+        return finalRound;
+      }
       if (!isHeadChangeRereview) {
         return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
       }

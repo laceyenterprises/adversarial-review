@@ -84,7 +84,12 @@ Two row states that used to hide this handoff no longer do (COMMENTCLOSE-02).
 First, a recorded final-round push is checked before the row's
 `rereview_reason`. That reason survives the posted review it asked for, so an
 `auto-refresh:` or `FSR-06B:` reason counts as a head change in flight only while
-it names the gated head and no review of that head has posted. Second, the final
+it names the gated head and no review of that head has posted. A posted row
+whose reason still names the pushed head (a re-review of that head that was
+requested but never posted) is also outranked by the recorded push. The resolver
+marks that result `overrodeHeadChangeRereview: true` and logs one
+`[adversarial-gate] comment-only-final-round-overrides-rereview:` warning per
+PR, pushed head and reason. Merge still waits on exact-head HAM validation. Second, the final
 round is often the round that exhausts the round budget. An exhausted review
 cycle therefore admits the proven final-round head to the hammer's terminal
 validation. It still parks on any other stale reviewed head, on blocking or

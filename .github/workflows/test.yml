@@ -37,8 +37,8 @@ jobs:
       fail-fast: false
       matrix:
         node:
-          - '20'
           - '22'
+          - '26'
     steps:
       # Third-party actions are pinned to commit SHAs, not version tags.
       # This protects us from a tag-repoint supply-chain attack: if the

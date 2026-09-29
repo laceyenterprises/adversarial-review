@@ -6,7 +6,7 @@ uses PATH and per-user defaults.
 
 ## Node And NPM
 
-- Dependency: Node.js `>=20 <26`; pinned in `package.json` as `engines.node`.
+- Dependency: Node.js `>=22 <27`; pinned in `package.json` as `engines.node`.
 - Discovery: `node` and `npm` on `PATH`.
 - Override: supervisor `PATH`.
 - Install: `npm ci`.

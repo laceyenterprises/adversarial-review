@@ -15,7 +15,7 @@ Total time on a fresh laptop: about 15 minutes, most of it `npm ci`.
 ## Prerequisites
 
 - macOS with Apple silicon or Intel; `plutil` is part of the base system.
-- Node 20 or newer. Homebrew (`brew install node`) is the documented
+- Node 22 through 26. Homebrew (`brew install node`) is the documented
   install path; the watcher's `PATH` includes `/opt/homebrew/bin` and
   `/usr/local/bin` to find it.
 - The GitHub CLI (`brew install gh`) signed in via `gh auth login`. The
@@ -88,7 +88,7 @@ edit rendered files in place — re-run `install.sh` to change them.
 
 After rendering, the installer runs a postflight validator that checks:
 
-- Node satisfies `package.json` `engines.node` (>=20 <26).
+- Node satisfies `package.json` `engines.node` (>=22 <27).
 - `gh auth status` succeeds.
 - `claude` and `codex` are installed and their runtime auth checks pass.
 - The working tree is clean (this is a warning, not a blocker).
@@ -221,7 +221,7 @@ postflight catches the fixed runtime contract before launchd is bootstrapped.
 
 ### Node outside the engines range
 
-`package.json` pins `engines.node` to `>=20 <26`. If your `node` is
+`package.json` pins `engines.node` to `>=22 <27`. If your `node` is
 older or newer than that:
 
 ```bash

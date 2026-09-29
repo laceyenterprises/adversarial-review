@@ -46,8 +46,8 @@
  * while an error or an unavailable store rendering as "no reviews" is the lie
  * this check exists to catch.
  *
- * Not wired into CI: the repo's workflow matrix is Node 20/22 and ARF's
- * `engines` require >= 23.4. This is an operator/standup command, run by hand
+ * Not wired into CI: the repo's workflow (Node 22/26) does not run it, and
+ * ARF's `engines` require >= 23.4. This is an operator/standup command, run by hand
  * from a checkout that has the submodule inited.
  *
  *   node frontend/scripts/standup-verify.mjs [--json]

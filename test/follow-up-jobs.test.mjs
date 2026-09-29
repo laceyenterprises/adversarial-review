@@ -4568,6 +4568,10 @@ test('requeueFollowUpJobForNextRound accepts stopped:max-rounds-reached jobs aft
   });
 
   assert.equal(requeued.job.status, 'pending');
+  assert.equal(requeued.job.remediationPlan.stop, null);
+  const next = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:07:00.000Z' });
+  assert.equal(next.job.remediationPlan.currentRound, 2);
+  assert.equal(next.job.remediationPlan.stop, null);
 });
 
 test('stopping a spawned remediation worker keeps its partial Codex usage', (t) => {

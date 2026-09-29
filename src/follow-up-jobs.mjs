@@ -3196,6 +3196,7 @@ function requeueFollowUpJobForNextRound({
     remediationPlan: {
       ...(currentJob.remediationPlan || buildRemediationRoundPlan(maxRounds)),
       stopReason: null,
+      stop: null,
       nextAction: {
         type: 'consume-pending-round',
         round: currentRound + 1,

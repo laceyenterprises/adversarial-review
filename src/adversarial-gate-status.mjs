@@ -36,7 +36,10 @@ import {
   adapterUnsupportedError,
   writeAdapterCommitStatus,
 } from './github-adapter-client.mjs';
-import { isFleetSelfRepairTrailerOnlyRereviewReason } from './fleet-self-repair-rereview.mjs';
+import {
+  isFleetSelfRepairTrailerOnlyRereviewReason,
+  parseFleetSelfRepairTrailerOnlyRereviewReason,
+} from './fleet-self-repair-rereview.mjs';
 import { isSettledReviewJob, listFollowUpJobsInDir } from './follow-up-jobs.mjs';
 import { findCommentOnlyFinalRoundPushJob } from './comment-only-final-round.mjs';
 
@@ -353,6 +356,38 @@ function isHeadChangeRereviewReason(reason) {
   );
 }
 
+// The head a head-change reason asked to have reviewed: the watcher's
+// auto-refresh writes `current head is <12-char sha>`, FSR-06B `live=<sha>`.
+function headChangeRereviewTargetHead(reason) {
+  if (isFleetSelfRepairTrailerOnlyRereviewReason(reason)) {
+    return parseFleetSelfRepairTrailerOnlyRereviewReason(reason).liveHeadSha;
+  }
+  return String(reason ?? '').match(/\bcurrent head is\s+([^\s;,.)]+)/i)?.[1] ?? null;
+}
+
+// Exact, or the watcher's abbreviated prefix of the full SHA.
+function shaMatchesNamedHead(sha, namedHead) {
+  const full = normalizeComparableString(sha);
+  const named = normalizeComparableString(namedHead);
+  if (!full || !named) return false;
+  return full === named || (named.length >= 7 && full.startsWith(named));
+}
+
+// COMMENTCLOSE-02: `rereview_reason` is sticky. Posting the re-review it asked
+// for does not clear it, so a head-change reason outlives its head change. It
+// describes the CURRENT head change only while it names the head being gated
+// and no review of that head has posted. Otherwise it is history, and the row
+// resolves like any row whose reviewed head is what it is. A reason that names
+// no parseable head is never current.
+function isCurrentHeadChangeRereview(reviewRow, headSha) {
+  const reason = reviewRow?.rereview_reason ?? reviewRow?.rereviewReason;
+  if (!isHeadChangeRereviewReason(reason)) return false;
+  const targetHead = headChangeRereviewTargetHead(reason);
+  if (!shaMatchesNamedHead(headSha, targetHead)) return false;
+  return !(reviewRowStatus(reviewRow) === 'posted'
+    && shaMatchesNamedHead(reviewRowReviewerHeadSha(reviewRow), targetHead));
+}
+
 function followUpJobRevisionRef(job) {
   return String(
     job?.revisionRef
@@ -365,7 +400,7 @@ function followUpJobRevisionRef(job) {
 function completedHeadChangeRereviewIsSettledClean({ latestJob, latestJobStatus, reviewRow, headSha }) {
   if (latestJobStatus !== 'completed') return false;
   if (latestJob?.reReview?.requested !== true) return false;
-  if (!isHeadChangeRereviewReason(reviewRow?.rereview_reason ?? reviewRow?.rereviewReason)) return false;
+  if (!isCurrentHeadChangeRereview(reviewRow, headSha)) return false;
   const jobHead = followUpJobRevisionRef(latestJob);
   if (!headSha || !jobHead || String(jobHead) !== String(headSha)) return false;
   const verdict = normalizeEffectiveReviewVerdict(latestJob.reviewBody);
@@ -443,7 +478,7 @@ function resolveSettledReviewVerdict(
 ) {
   const reviewedHeadSha = reviewRowReviewerHeadSha(reviewRow);
   const reviewStatus = reviewRowStatus(reviewRow);
-  const isHeadChangeRereview = isHeadChangeRereviewReason(reviewRow?.rereview_reason ?? reviewRow?.rereviewReason);
+  const isHeadChangeRereview = isCurrentHeadChangeRereview(reviewRow, currentHeadSha);
   const isQuotaCapped = primaryReviewerQuotaCappedForRow(reviewRow);
   if (reviewStatus !== 'posted' && !isQuotaCapped && !(reviewStatus === 'pending' && isHeadChangeRereview)) {
     return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };

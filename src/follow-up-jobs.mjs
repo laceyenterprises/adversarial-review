@@ -1674,6 +1674,26 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
     domainId: targetDomainId, repo: targetRepo, prNumber: targetPr,
   })?.voidedAt || null;
   const singleReviewStopJobIds = [];
+  // A single-review stop is counted from stopped/ and, after the 24h archive
+  // sweep, from stopped-archived/ — the sweep must not hand an open PR its
+  // spent budget back. Keyed by jobId so a mid-move copy counts once.
+  const countedSingleReviewStops = new Set();
+  const countSingleReviewStop = (job) => {
+    if (!isSingleReviewStop(job)) return;
+    // A stop created at or before a recorded void counts for nothing: a later
+    // head outgrew the super-small lane and got its budget back.
+    if (singleReviewVoidedAt && String(job?.createdAt || '') <= singleReviewVoidedAt) return;
+    const key = job?.jobId || null;
+    if (key && countedSingleReviewStops.has(key)) return;
+    if (key) {
+      countedSingleReviewStops.add(key);
+      singleReviewStopJobIds.push(key);
+    }
+    const cur = Number(job?.remediationPlan?.currentRound || 0);
+    const terminalAt = job?.stoppedAt || null;
+    if (Number.isFinite(cur) && cur > 0 && terminalAt) completedRoundTimestamps.push({ round: cur, terminalAt });
+    if (Number.isFinite(cur) && cur > completedRoundsForPR) completedRoundsForPR = cur;
+  };
   // COMMENTCLOSE-01: a final round is final whatever directory it lands in.
   // A stopped final round that pushed still owns its pushed head, so the
   // re-review suppression and the closer hand-off read it from every terminal
@@ -1769,17 +1789,7 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
         // terminal Hammer's "remediator had a turn" check reads 0 and parks
         // the PR, and a later author push re-arms a full budget. It is not a
         // remediation of the reviewed head, so no trigger or revision ref.
-        // A stop created at or before a recorded void counts for nothing: a
-        // later head outgrew the super-small lane and got its budget back.
-        const singleReviewVoided = singleReviewVoidedAt
-          && String(job?.createdAt || '') <= singleReviewVoidedAt;
-        if (neverSpawned && isSingleReviewStop(job) && !singleReviewVoided) {
-          if (job?.jobId) singleReviewStopJobIds.push(job.jobId);
-          const cur = Number(job?.remediationPlan?.currentRound || 0);
-          const terminalAt = job?.stoppedAt || null;
-          if (Number.isFinite(cur) && cur > 0 && terminalAt) completedRoundTimestamps.push({ round: cur, terminalAt });
-          if (Number.isFinite(cur) && cur > completedRoundsForPR) completedRoundsForPR = cur;
-        }
+        if (neverSpawned) countSingleReviewStop(job);
         if (!neverSpawned) {
           const cur = Number(job?.remediationPlan?.currentRound || 0);
           const terminalAt = job?.completedAt || job?.failedAt || job?.stoppedAt || null;
@@ -1811,9 +1821,15 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
   }
 
   // The archive sweep moves a job's bytes unchanged; round counting never read
-  // the archive, so only the final-round authority is taken from it.
+  // the archive, so only the final-round authority and single-review stops
+  // (SINGLEREVIEW-01, which spend the tier budget) are taken from it.
   for (const job of scanArchivedStoppedFollowUpJobs(rootDir, targetRepo, targetPr)) {
-    if (String(job.domainId || 'code-pr') === targetDomainId) recordCommentOnlyFinalRound(job, 'stopped-archived');
+    if (String(job.domainId || 'code-pr') !== targetDomainId) continue;
+    recordCommentOnlyFinalRound(job, 'stopped-archived');
+    const worker = job?.remediationWorker;
+    const neverSpawned = worker == null || typeof worker !== 'object' || Array.isArray(worker)
+      || worker.state === 'never-spawned';
+    if (neverSpawned) countSingleReviewStop(job);
   }
 
   const latestMaxRoundsRaw = Number(latestJob?.remediationPlan?.maxRounds);

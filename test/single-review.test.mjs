@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  archiveStoppedFollowUpJobs,
   claimNextFollowUpJob,
   createFollowUpJob,
   getFollowUpJobDir,
@@ -388,6 +389,70 @@ test('a single-review job created after a void spends budget again', (t) => {
     summarizePRRemediationLedger(rootDir, { repo: REPO, prNumber: PR }).completedRoundsForPR,
     stopped.job.remediationPlan.maxRounds,
   );
+});
+
+test('the stopped-job archive sweep does not hand a single-review PR its spent budget back', (t) => {
+  const rootDir = tempRoot(t);
+  createFollowUpJob(jobInput(rootDir, { singleReview: APPLIED }));
+  const stopped = claimNextFollowUpJob({ rootDir, claimedAt: '2026-09-29T10:01:00.000Z', launcherPid: 4242, returnStopped: true });
+  const maxRounds = stopped.job.remediationPlan.maxRounds;
+  const before = summarizePRRemediationLedger(rootDir, { repo: REPO, prNumber: PR });
+  assert.equal(before.completedRoundsForPR, maxRounds);
+  assert.equal(terminalHammerArmed(rootDir, { maxRounds }).armed, true);
+
+  const swept = archiveStoppedFollowUpJobs({ rootDir, nowMs: Date.parse('2026-10-01T00:00:00.000Z') });
+  assert.equal(swept.archived, 1);
+  assert.deepEqual(readdirSync(getFollowUpJobDir(rootDir, 'stopped')).filter((name) => name.endsWith('.json')), []);
+
+  const after = summarizePRRemediationLedger(rootDir, { repo: REPO, prNumber: PR });
+  assert.equal(after.completedRoundsForPR, maxRounds);
+  assert.deepEqual(after.singleReviewStopJobIds, [stopped.job.jobId]);
+  assert.deepEqual(after.completedRoundTimestamps, before.completedRoundTimestamps);
+  assert.equal(terminalHammerArmed(rootDir, { maxRounds }).armed, true);
+
+  // The void still reaches an archived stop.
+  const grown = selectReviewMode({
+    rootDir, repo: REPO, prNumber: PR, headSha: 'd'.repeat(40), attemptNumber: 2, env: {},
+    diff: unifiedDiff([{ path: 'src/watcher.mjs', added: 2 }]), promptStage: 'last',
+    recordReviewModeSelectedImpl: () => ({ recorded: false }), resolveSingleReviewPolicyImpl: policyImpl(), log: SILENT_LOG,
+    stageContext: { reviewAttemptNumber: 2, maxRemediationRounds: maxRounds },
+  });
+  assert.deepEqual(grown.singleReview.voided.jobIds, [stopped.job.jobId]);
+  assert.equal(summarizePRRemediationLedger(rootDir, { repo: REPO, prNumber: PR }).completedRoundsForPR, 0);
+});
+
+test('a void that cannot be written is retried, then fails the pass instead of keeping the lenient stage', () => {
+  const calls = [];
+  const sleeps = [];
+  const base = {
+    rootDir: '/nonexistent-single-review-root', repo: REPO, prNumber: PR, headSha: 'e'.repeat(40), attemptNumber: 2, env: {},
+    diff: unifiedDiff([{ path: 'src/watcher.mjs', added: 2 }]), promptStage: 'last',
+    recordReviewModeSelectedImpl: () => ({ recorded: false }), resolveSingleReviewPolicyImpl: policyImpl(),
+    sleepImpl: (ms) => sleeps.push(ms), log: SILENT_LOG,
+    stageContext: { reviewAttemptNumber: 2, maxRemediationRounds: 3 },
+  };
+  const failed = selectReviewMode({
+    ...base,
+    voidSingleReviewCreditImpl: () => { calls.push('void'); throw new Error('EROFS: read-only file system'); },
+  });
+  assert.equal(calls.length, 3);
+  assert.equal(sleeps.length, 2);
+  assert.match(failed.singleReview.voidFailed.error, /EROFS/);
+  assert.equal(failed.singleReview.voided, undefined);
+
+  // A transient failure that clears on retry voids normally.
+  let attempts = 0;
+  const recovered = selectReviewMode({
+    ...base,
+    voidSingleReviewCreditImpl: () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('EBUSY');
+      return { voided: true, jobIds: ['j'], previousCompletedRounds: 3, completedRoundsForPR: 0 };
+    },
+  });
+  assert.equal(recovered.singleReview.voidFailed, undefined);
+  assert.equal(recovered.singleReview.voided.voided, true);
+  assert.equal(recovered.promptStage, 'first');
 });
 
 test('a slim-classification failure never applies single review', () => {

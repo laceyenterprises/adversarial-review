@@ -454,6 +454,13 @@ shows
 `single-review: voided <repo>#<n> credit — head no longer super-small (<codes>)`
 and `Effective prompt stage for <repo>#<n>: …`.
 
+If the void marker cannot be written after 3 attempts, the reviewer logs
+`single-review credit void did not persist for <repo>#<n>; refusing to review until it does`
+and exits non-zero before dispatch. The watcher retries the pass. Fix the
+`data/follow-up-jobs/single-review-voids/` write failure, for example
+permissions or a full disk. A stopped single-review job still counts after the
+stopped-job archive sweep moves it to `stopped-archived/`.
+
 Knobs, all under `roles.adversarial.single_review`:
 
 | Key | Default | Effect |

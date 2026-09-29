@@ -169,9 +169,11 @@ operator override (`nextAction.operatorOverride: true`) bypasses the stop.
 Ledger rule: `summarizePRRemediationLedger` counts a never-spawned
 single-review stop (`isSingleReviewStop`) as `currentRound` completed rounds,
 with a `completedRoundTimestamps` entry at `stoppedAt` and no trigger or
-revision ref. This is the only never-spawned stop the ledger counts. The
-summary exposes `singleReviewStopJobIds` for the stops still counting and
-`singleReviewVoidedAt`.
+revision ref. This is the only never-spawned stop the ledger counts. It is
+counted from `stopped/` and, after the 24-hour archive sweep, from
+`stopped-archived/<YYYY-MM>/`, once per `jobId`, so archiving does not give an
+open PR its spent budget back. The summary exposes `singleReviewStopJobIds` for
+the stops still counting and `singleReviewVoidedAt`.
 
 **Void marker.** Store:
 `data/follow-up-jobs/single-review-voids/<domain>--<repo>-pr-<n>.json`.
@@ -195,4 +197,7 @@ single-review stop. Shape:
 `history` is capped at the last 10 entries. The ledger ignores single-review
 stops whose `createdAt` is at or before `voidedAt`, so the PR gets its tier
 budget back; a single-review job created later counts again. The stopped job
-files are never rewritten. An unreadable marker is logged and ignored.
+files are never rewritten. An unreadable marker is logged and ignored. A void
+write that fails is retried up to 3 times. If it still fails, the reviewer exits
+non-zero before dispatch. The review pass fails retryable instead of running the
+lenient stage while the credit is still spent.

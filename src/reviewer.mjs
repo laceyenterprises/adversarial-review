@@ -2007,6 +2007,16 @@ async function main() {
     logStructuredEventImpl: logStructuredEvent,
     log: console,
   });
+  // SINGLEREVIEW-01: this head outgrew the super-small lane but its spent
+  // credit could not be revoked. Reviewing now would run the lenient stage
+  // against an exhausted budget, so fail the pass (retryable) instead.
+  if (reviewModeDecision.singleReview?.voidFailed) {
+    console.error(
+      `[reviewer] single-review credit void did not persist for ${repo}#${prNumber}; ` +
+      `refusing to review until it does: ${reviewModeDecision.singleReview.voidFailed.error}`,
+    );
+    process.exit(1);
+  }
 
   const extraContext = await buildReviewerExtraContext({
     repo,

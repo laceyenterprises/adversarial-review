@@ -10,6 +10,7 @@
 import { voidSingleReviewCredit } from './follow-up-jobs.mjs';
 import { pickReviewerStage } from './kernel/prompt-stage.mjs';
 import { formatAdvisoryFindingsContext } from './prompt-context.mjs';
+import { sleepSync } from './sqlite-busy-retry.mjs';
 import { recordReviewModeSelected } from './review-mode-latency.mjs';
 import {
   REVIEW_MODE,
@@ -90,6 +91,7 @@ export function selectReviewMode({
   recordReviewModeSelectedImpl = recordReviewModeSelected,
   resolveSingleReviewPolicyImpl = resolveSingleReviewPolicy,
   voidSingleReviewCreditImpl = voidSingleReviewCredit,
+  sleepImpl = sleepSync,
   stageContext = null,
   log = console,
 } = {}) {
@@ -112,13 +114,15 @@ export function selectReviewMode({
   }
   // SINGLEREVIEW-01: decorated in place so the durable record and the caller
   // see the same object. `promptStage` is the stage the review must run at.
+  // `singleReview.voidFailed` means a spent credit could not be revoked; the
+  // caller must not run the review (see `voidCredit`).
   // After a slim-classification failure there is no durable review-mode row
   // for the reaper to read back, so the lane is not applied (normal rounds);
   // a spent single-review credit can still be voided.
   decision.singleReview = selectSingleReview({
     rootDir, repo, prNumber, diff, labels, headSha, promptStage, env,
     allowApply: !slimClassificationFailed,
-    resolveSingleReviewPolicyImpl, voidSingleReviewCreditImpl, log,
+    resolveSingleReviewPolicyImpl, voidSingleReviewCreditImpl, sleepImpl, log,
   });
   decision.promptStage = decision.singleReview.applied ? 'last' : promptStage;
   if (decision.singleReview.voided?.voided && stageContext) {
@@ -195,6 +199,7 @@ export function selectSingleReview({
   allowApply = true,
   resolveSingleReviewPolicyImpl = resolveSingleReviewPolicy,
   voidSingleReviewCreditImpl = voidSingleReviewCredit,
+  sleepImpl = sleepSync,
   log = console,
 } = {}) {
   try {
@@ -209,7 +214,7 @@ export function selectSingleReview({
     // so the change cannot be split into a small first push plus a sensitive
     // follow-up. No-op unless the ledger holds a single-review stop.
     const voided = !firstReview && !classification.superSmall && rootDir
-      ? voidCredit({ rootDir, repo, prNumber, headSha, reasons: classification.reasons, voidSingleReviewCreditImpl, log })
+      ? voidCredit({ rootDir, repo, prNumber, headSha, reasons: classification.reasons, voidSingleReviewCreditImpl, sleepImpl, log })
       : null;
     if (classification.superSmall) {
       log?.log?.(
@@ -227,6 +232,7 @@ export function selectSingleReview({
       stats: classification.stats,
       headSha: headSha || null,
       ...(voided?.voided ? { voided } : {}),
+      ...(voided?.failed ? { voidFailed: { error: voided.error } } : {}),
     };
   } catch (err) {
     log?.warn?.(
@@ -237,21 +243,37 @@ export function selectSingleReview({
   }
 }
 
-function voidCredit({ rootDir, repo, prNumber, headSha, reasons, voidSingleReviewCreditImpl, log }) {
-  try {
-    const voided = voidSingleReviewCreditImpl({ rootDir, repo, prNumber, headSha, reasons });
-    if (voided?.voided) {
-      const codes = [...new Set((reasons || []).map((reason) => reason.code))].join(',') || 'unknown';
-      log?.log?.(
-        `[reviewer] single-review: voided ${repo}#${prNumber} credit — head no longer super-small (${codes}); ` +
-        `completed rounds ${voided.previousCompletedRounds} -> ${voided.completedRoundsForPR}`,
+const VOID_CREDIT_ATTEMPTS = 3;
+const VOID_CREDIT_RETRY_BASE_MS = 100;
+
+// The void is the only thing that takes a spent credit back, so it is not
+// fail-soft: a head that outgrew the lane must not run the lenient `last`
+// stage while the old credit still exhausts its budget. A transient write
+// failure is retried; a persistent one returns `failed: true`, which the
+// reviewer turns into a retryable pass failure before any dispatch.
+function voidCredit({ rootDir, repo, prNumber, headSha, reasons, voidSingleReviewCreditImpl, sleepImpl = sleepSync, log }) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= VOID_CREDIT_ATTEMPTS; attempt += 1) {
+    try {
+      const voided = voidSingleReviewCreditImpl({ rootDir, repo, prNumber, headSha, reasons });
+      if (voided?.voided) {
+        const codes = [...new Set((reasons || []).map((reason) => reason.code))].join(',') || 'unknown';
+        log?.log?.(
+          `[reviewer] single-review: voided ${repo}#${prNumber} credit — head no longer super-small (${codes}); ` +
+          `completed rounds ${voided.previousCompletedRounds} -> ${voided.completedRoundsForPR}`,
+        );
+      }
+      return voided;
+    } catch (err) {
+      lastError = err;
+      log?.warn?.(
+        `[reviewer] WARN: single-review void attempt ${attempt}/${VOID_CREDIT_ATTEMPTS} failed for ` +
+        `${repo}#${prNumber}: ${err?.message || err}`,
       );
+      if (attempt < VOID_CREDIT_ATTEMPTS) sleepImpl(VOID_CREDIT_RETRY_BASE_MS * attempt);
     }
-    return voided;
-  } catch (err) {
-    log?.warn?.(`[reviewer] WARN: single-review void failed for ${repo}#${prNumber}: ${err?.message || err}`);
-    return null;
   }
+  return { voided: false, failed: true, error: String(lastError?.message || lastError || 'unknown') };
 }
 
 /**

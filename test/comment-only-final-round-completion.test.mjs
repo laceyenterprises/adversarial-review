@@ -24,7 +24,11 @@ test('pending CI on the proven pushed head is the only thing a final-round block
     { pendingCiOnly: true, reason: 'kind-pending-ci' });
   // A worker predating the tag writes one entry; the probe corroborates it.
   assert.deepEqual(classify([pendingCiBlocker]), { pendingCiOnly: true, reason: 'ci-probe-pending-ci' });
-  assert.equal(classify([pendingCiBlocker], { ...pendingGate, state: 'green' }).pendingCiOnly, true);
+  assert.deepEqual(classify([{ ...pendingCiBlocker, kind: 'pending-ci' }], { ...pendingGate, state: 'green' }),
+    { pendingCiOnly: true, reason: 'kind-pending-ci' });
+  // The untagged legacy entry is the CI wait only while CI is still running.
+  assert.deepEqual(classify([pendingCiBlocker], { ...pendingGate, state: 'green' }),
+    { pendingCiOnly: false, reason: 'untagged-blocker-ci-not-pending' });
 
   assert.equal(classify([pendingCiBlocker], { ...pendingGate, state: 'failed' }).reason, 'ci-failed');
   assert.equal(classify([pendingCiBlocker], { ...pendingGate, state: 'unknown' }).reason, 'ci-unknown');
@@ -36,6 +40,23 @@ test('pending CI on the proven pushed head is the only thing a final-round block
   // A declared non-CI code fails closed even when tagged and even while CI is pending.
   assert.equal(classify([{ ...pendingCiBlocker, title: 'stale-pr-head', kind: 'pending-ci' }]).reason,
     'declared-non-ci-operational-blocker');
+});
+
+test('an unrelated blocker is never the CI wait, even while CI is pending', () => {
+  const classify = (blockers, outcome = 'partial', ciGate = pendingGate) =>
+    classifyFinalRoundOperationalBlockers(blockers, { ciGate, pushedHead, outcome });
+  const unrelated = {
+    title: 'missing-deploy-credential',
+    finding: 'The staging deploy key is not provisioned for this repo.',
+    needsHumanInput: 'Provision the staging deploy key.',
+  };
+  assert.deepEqual(classify([unrelated], 'blocked'),
+    { pendingCiOnly: false, reason: 'operational-blocker-needs-human-input' });
+  assert.deepEqual(classify([{ ...unrelated, needsHumanInput: undefined, reasoning: 'Needs the key.' }], 'blocked'),
+    { pendingCiOnly: false, reason: 'untagged-blocker-outcome-blocked' });
+  // Asking a human is not waiting on CI, whatever the tag says.
+  assert.deepEqual(classify([{ ...unrelated, kind: 'pending-ci' }]),
+    { pendingCiOnly: false, reason: 'operational-blocker-needs-human-input' });
 });
 
 test('the title never classifies pending CI: a CI-sounding title with red CI fails closed', () => {
@@ -78,17 +99,21 @@ function pushedWorkspaceExec({ jobId = 'example__repo-pr-42-final', head = pushe
   };
 }
 
-async function resolve({ reply, ciGate = pendingGate, job = finalRoundJob(), execFileImpl = pushedWorkspaceExec(), audit = { suspect: [], error: null } } = {}) {
+async function resolve({ reply, ciGate = pendingGate, job = finalRoundJob(), execFileImpl = pushedWorkspaceExec(), audit = { suspect: [], error: null }, ...options } = {}) {
   const warnings = [];
   const probes = [];
   const alerts = [];
+  const audits = [audit].flat();
   const result = await resolveCommentOnlyFinalRoundCompletion({
     job, jobPath: '/unused', reply, workspaceDir: '/tmp/final-round/workspace',
-    auditWorkspaceForContaminationImpl: async () => audit,
+    auditWorkspaceForContaminationImpl: async () => (audits.length > 1 ? audits.shift() : audits[0]),
     inspectRemediationCiRegressionImpl: async (args) => { probes.push(args); return ciGate; },
     deliverAlertImpl: async (text, options) => { alerts.push({ text, ...options }); return { queued: true }; },
     execFileImpl,
     log: { warn: (msg) => warnings.push(msg), log: () => {}, error: (msg) => warnings.push(msg) },
+    sleepImpl: async () => {},
+    writeJobImpl: () => assert.fail('only a transient retry writes the job'),
+    ...options,
   });
   return { result, warnings, probes, alerts };
 }
@@ -105,6 +130,22 @@ test('a partial final round whose only blocker is pending CI completes with its 
     finalRoundOutcome: { completed: true, reason: 'ci-probe-pending-ci', ciState: 'pending', push: 'descendant' },
   });
   assert.equal(probes.length, 1, 'the CI state probe decides, not the reply text');
+});
+
+test('a blocked reply with an unrelated blocker does not complete the final round on pending CI', async () => {
+  const { result, alerts } = await resolve({
+    reply: {
+      outcome: 'blocked', blockers: [],
+      operationalBlockers: [{
+        title: 'missing-deploy-credential', finding: 'The staging deploy key is not provisioned.',
+        needsHumanInput: 'Provision the staging deploy key.',
+      }],
+    },
+  });
+  assert.equal(result.completed, false);
+  assert.equal(result.workerPushedHeadSha, pushedHead, 'the push is still recorded');
+  assert.equal(result.completionFields.finalRoundOutcome.reason, 'operational-blocker-needs-human-input');
+  assert.deepEqual(alerts, []);
 });
 
 test('a final round with red CI or a review blocker is not complete but still records its push', async () => {
@@ -172,5 +213,89 @@ test('a contamination-audit failure withholds the proof, names the reason, and a
   assert.equal(result.workerPushedHeadSha, null);
   assert.equal(result.completionFields.finalRoundOutcome.push, 'branch-contamination-audit-failed');
   assert.equal(result.completionFields.withheldPushHeadSha, pushedHead);
+  assert.equal(alerts.length, 1);
+});
+
+const completedReply = { outcome: 'completed', blockers: [], operationalBlockers: [] };
+const fetchTimeout = 'git fetch origin main failed: Command failed: git fetch origin main\nfatal: unable to access \'https://github.com/example/repo.git/\': Operation timed out';
+
+test('a transient contamination-audit failure is retried, then the push is proven', async () => {
+  const sleeps = [];
+  const { result, alerts } = await resolve({
+    reply: completedReply,
+    audit: [{ suspect: [], error: fetchTimeout }, { suspect: [], error: null }],
+    sleepImpl: async (ms) => { sleeps.push(ms); },
+  });
+  assert.deepEqual(sleeps, [2000]);
+  assert.equal(result.completed, true);
+  assert.equal(result.workerPushedHeadSha, pushedHead);
+  assert.equal(alerts.length, 0);
+});
+
+test('a git lock during the push proof is retried rather than holding the head', async () => {
+  let locked = 1;
+  const { result, alerts } = await resolve({
+    reply: completedReply,
+    execFileImpl: async (command, args) => {
+      if (command === 'git' && args.includes('rev-parse') && locked-- > 0) {
+        throw new Error("Command failed: git rev-parse HEAD\nfatal: Unable to create '/w/.git/index.lock': File exists.");
+      }
+      return pushedWorkspaceExec()(command, args);
+    },
+  });
+  assert.equal(result.workerPushedHeadSha, pushedHead);
+  assert.equal(result.completionFields.withheldPushHeadSha, undefined);
+  assert.equal(alerts.length, 0);
+});
+
+test('a transient failure that outlasts the in-process retries leaves the job re-entrant', async () => {
+  const writes = [];
+  const nowMs = Date.parse('2026-09-28T12:00:00Z');
+  const { result, alerts } = await resolve({
+    reply: completedReply,
+    audit: { suspect: [], error: fetchTimeout },
+    now: () => nowMs,
+    writeJobImpl: (path, job) => writes.push({ path, job }),
+  });
+  assert.equal(result.retryLater, true);
+  assert.equal(result.completed, false);
+  assert.deepEqual(result.completionFields, {}, 'no withheld head is recorded');
+  assert.equal(alerts.length, 0);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].path, '/unused');
+  assert.deepEqual(writes[0].job.finalRoundProofTransient, {
+    since: '2026-09-28T12:00:00.000Z', lastAttemptAt: '2026-09-28T12:00:00.000Z', attempts: 3, error: `audit: ${fetchTimeout}`,
+  });
+  assert.equal(result.job, writes[0].job);
+
+  // The next reconcile keeps the first failure time and counts on.
+  const later = await resolve({
+    reply: completedReply, job: writes[0].job, audit: { suspect: [], error: fetchTimeout },
+    now: () => nowMs + 10 * 60 * 1000, writeJobImpl: (path, job) => writes.push({ path, job }),
+  });
+  assert.equal(later.result.retryLater, true);
+  assert.equal(writes[1].job.finalRoundProofTransient.since, '2026-09-28T12:00:00.000Z');
+  assert.equal(writes[1].job.finalRoundProofTransient.attempts, 6);
+
+  // Past the window it is withheld, which holds the head and alerts an operator.
+  const expired = await resolve({
+    reply: completedReply, job: writes[0].job, audit: { suspect: [], error: fetchTimeout },
+    now: () => nowMs + 61 * 60 * 1000,
+  });
+  assert.equal(expired.result.retryLater, undefined);
+  assert.equal(expired.result.completionFields.finalRoundOutcome.push, 'branch-contamination-audit-failed');
+  assert.equal(expired.result.completionFields.withheldPushHeadSha, pushedHead);
+  assert.equal(expired.alerts.length, 1);
+});
+
+test('a non-transient audit error withholds at once, without retrying', async () => {
+  let sleeps = 0;
+  const { result, alerts } = await resolve({
+    reply: completedReply,
+    audit: { suspect: [], error: 'workspace has no .git' },
+    sleepImpl: async () => { sleeps += 1; },
+  });
+  assert.equal(sleeps, 0);
+  assert.equal(result.completionFields.finalRoundOutcome.push, 'branch-contamination-audit-failed');
   assert.equal(alerts.length, 1);
 });

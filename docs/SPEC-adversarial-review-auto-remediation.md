@@ -31,24 +31,55 @@ reasons, and remediation-state reasons still require validated HAM evidence
 (`ham_terminal_remediation_validated`) or a current-head operator override.
 
 A zero-blocker `Comment only` review with actionable non-blocking findings may
-create a final follow-up job marked `finalRound: 'comment-only'`. Reconciliation
-suppresses that worker's requested re-review and records
+create a final follow-up job marked `finalRound: 'comment-only'`. Only one
+follow-up job exists per posted review: the reviewer and the reviewer-pass reaper
+both de-duplicate on (repo, PR, reviewed head, review-body digest) under a
+generation-chain claim, and a caller that finds the claim held by a live creator
+waits for that creator instead of treating the review as already queued.
+Reconciliation suppresses that worker's requested re-review and records
 `completion.workerPushedHeadSha` only when the worker workspace's local `HEAD`
-matches a fresh GitHub PR-head lookup and its commit carries the matching
-`Worker-Job-Id` trailer. The live lookup retries transient GitHub failures;
-if its retry budget is exhausted, reconcile leaves the job in progress for a
-later attempt. Reconcile also requires GitHub compare to report `ahead` before
-recording the pushed head. A rebased, divergent worker head therefore returns
-to normal re-review instead of parking behind the final-round refusal. The
-server-side branch-contamination audit runs before this handoff, using the HQ
-topic workspace for HQ-dispatched workers. AMA may resume the closer or hammer on
-that exact pushed head only when the completed job refers to the settled
-reviewed head and GitHub confirms the reviewed head is its ancestor. Missing
-push proof, a later author or bot commit, divergent ancestry, or an ancestry
-lookup failure cannot grant this handoff. A later head re-enters normal review;
-an explicit `retrigger-review:` operator reason can override a settled-head
-re-review refusal. Reconciliation still records a completed round when push
-proof is unavailable, but that record carries no AMA final-round authority.
+matches a fresh GitHub PR-head lookup, its commit carries the matching
+`Worker-Job-Id` trailer, the server-side branch-contamination audit passes
+(using the HQ topic workspace for HQ-dispatched workers), and the local replay
+proof holds: every reviewed commit has a patch-equivalent in `HEAD`, `HEAD` adds
+no merge commit, and every other commit it adds beyond the reviewed head and the
+base carries the job's trailer. The remediator's mandatory base rebase makes most
+final-round pushes diverge from the reviewed head, so the replay proof, not
+GitHub compare `ahead`, decides; a diverged head proven this way keeps its
+final-round authority and does not go back to normal re-review. The live lookup
+retries transient GitHub failures. A transient git failure during the proof
+(network, remote hang-up, lock contention) is retried after 2 s and 5 s; if it
+persists, reconcile leaves the job in progress and retries on later ticks for up
+to one hour before treating the proof as withheld.
+
+When the proof is withheld while the PR head moved, the job records that head as
+`completion.withheldPushHeadSha`, an
+`adversarial_review.comment_only_final_round_push_unproven` alert fires, and
+re-review of that exact head is refused unless an operator gives an explicit
+`retrigger-review:` reason. A later head re-enters normal review. Reconciliation
+still records a completed round when push proof is unavailable, but that record
+carries no AMA final-round authority.
+
+A final round completes when the reply has no `blockers[]`, the push is proven or
+the reply says `completed`, and every operational blocker is PR-head CI that is
+still running. Workers tag such entries `kind: 'pending-ci'`. An untagged entry
+counts as pending CI only on the narrow legacy path: it is the only operational
+blocker, it asks for no human input, the reply outcome is not `blocked`, and the
+reconciler's own CI probe of the pushed head reports `pending`. Any other
+untagged blocker keeps the round open.
+
+Every terminal final-round job (completed, stopped, failed, or stopped and later
+archived) keeps its authority: its recorded push, its withheld head, and its
+one-follow-up-per-review key. AMA may resume the closer or hammer on the pushed
+head only when the current PR head equals a recorded pushed head, the settled
+review matches that job's reviewed head, and GitHub compare reports the pushed
+head `ahead` of the reviewed head or, for a replay-proven push, `diverged`.
+Missing push proof, a later author or bot commit, or a compare lookup failure
+cannot grant this handoff. While PR-head CI on the proven head is still pending,
+AMA holds the PR without spending the retain-loop cap, for at most two hours
+after the proven push; past that deadline the wait counts toward the cap again
+and escalates to the operator.
+
 
 AMA closer dispatch must also declare the workspace repo set required by the
 closer prompt. The PR repository is always passed as the primary `--repo`. When

@@ -205,8 +205,10 @@ function pr7311WorkspaceExec(jobId) {
   };
 }
 
-test('replay #7311: a pending-CI final round completes with its pushed head, which is never re-reviewed', async (t) => {
-  const rootDir = tempRoot(t, '7311');
+// Queue, claim, and spawn the #7311 final round as production did, with the
+// worker's reply and last message on disk; the reconcile is the caller's.
+function stage7311FinalRound(t, label) {
+  const rootDir = tempRoot(t, label);
   const hqRoot = path.join(rootDir, 'hq');
   const recorded = fixture('pr-7311-final-round-job.json');
   // Production outcome, for the record: the pending-CI blocker demoted the round.
@@ -264,35 +266,42 @@ test('replay #7311: a pending-CI final round completes with its pushed head, whi
       replyPath,
     },
   });
+  return { rootDir, hqRoot, recorded, claimed, spawned };
+}
 
-  const alerts = [];
-  const wakes = [];
+async function withHqRoot(hqRoot, fn) {
   const originalHqRoot = process.env.HQ_ROOT;
   process.env.HQ_ROOT = hqRoot;
-  let result;
   try {
-    result = await reconcileFollowUpJob({
-      rootDir, job: spawned.job, jobPath: spawned.jobPath,
-      now: () => '2026-09-28T21:39:44.158Z',
-      isWorkerRunning: () => false,
-      resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: PR_7311_PUSHED }),
-      execFileImpl: pr7311WorkspaceExec(claimed.job.jobId),
-      auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
-      // The reconciler's own CI probe of the pushed head: repo-guards still running.
-      inspectRemediationCiRegressionImpl: async () => ({
-        state: 'pending', headSha: PR_7311_PUSHED, failedChecks: [],
-        pendingChecks: [{ name: 'repo-guards', state: 'IN_PROGRESS' }],
-      }),
-      requestReviewRereviewImpl: () => { throw new Error('a comment-only final round must not request re-review'); },
-      requestWatcherWakeImpl: (wake) => { wakes.push(wake); return { requested: true }; },
-      deliverAlertImpl: async (text) => { alerts.push(text); return { queued: true }; },
-      postCommentImpl: async () => ({ posted: true }),
-      log: silent,
-    });
+    return await fn();
   } finally {
     if (originalHqRoot === undefined) delete process.env.HQ_ROOT;
     else process.env.HQ_ROOT = originalHqRoot;
   }
+}
+
+test('replay #7311: a pending-CI final round completes with its pushed head, which is never re-reviewed', async (t) => {
+  const { rootDir, hqRoot, recorded, claimed, spawned } = stage7311FinalRound(t, '7311');
+  const alerts = [];
+  const wakes = [];
+  const result = await withHqRoot(hqRoot, () => reconcileFollowUpJob({
+    rootDir, job: spawned.job, jobPath: spawned.jobPath,
+    now: () => '2026-09-28T21:39:44.158Z',
+    isWorkerRunning: () => false,
+    resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: PR_7311_PUSHED }),
+    execFileImpl: pr7311WorkspaceExec(claimed.job.jobId),
+    auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
+    // The reconciler's own CI probe of the pushed head: repo-guards still running.
+    inspectRemediationCiRegressionImpl: async () => ({
+      state: 'pending', headSha: PR_7311_PUSHED, failedChecks: [],
+      pendingChecks: [{ name: 'repo-guards', state: 'IN_PROGRESS' }],
+    }),
+    requestReviewRereviewImpl: () => { throw new Error('a comment-only final round must not request re-review'); },
+    requestWatcherWakeImpl: (wake) => { wakes.push(wake); return { requested: true }; },
+    deliverAlertImpl: async (text) => { alerts.push(text); return { queued: true }; },
+    postCommentImpl: async () => ({ posted: true }),
+    log: silent,
+  }));
 
   assert.equal(result.action, 'completed', 'production filed this round stopped/max-rounds-reached');
   assert.match(result.jobPath, /follow-up-jobs\/completed\//);
@@ -325,6 +334,47 @@ test('replay #7311: a pending-CI final round completes with its pushed head, whi
   });
   assert.equal(racedReview.queued, false);
   assert.equal(racedReview.reason, 'comment-only-final-round-completed');
+});
+
+test('replay #7311: a network failure during the proof leaves the round in progress, and the next tick completes it', async (t) => {
+  const { rootDir, hqRoot, claimed, spawned } = stage7311FinalRound(t, '7311-transient');
+  const alerts = [];
+  const wakes = [];
+  const reconcile = (job, jobPath, audit) => withHqRoot(hqRoot, () => reconcileFollowUpJob({
+    rootDir, job, jobPath,
+    now: () => '2026-09-28T21:39:44.158Z',
+    isWorkerRunning: () => false,
+    resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: PR_7311_PUSHED }),
+    execFileImpl: pr7311WorkspaceExec(claimed.job.jobId),
+    auditWorkspaceForContaminationImpl: audit,
+    inspectRemediationCiRegressionImpl: async () => ({
+      state: 'pending', headSha: PR_7311_PUSHED, failedChecks: [],
+      pendingChecks: [{ name: 'repo-guards', state: 'IN_PROGRESS' }],
+    }),
+    requestReviewRereviewImpl: () => { throw new Error('a comment-only final round must not request re-review'); },
+    requestWatcherWakeImpl: (wake) => { wakes.push(wake); return { requested: true }; },
+    deliverAlertImpl: async (text) => { alerts.push(text); return { queued: true }; },
+    postCommentImpl: async () => ({ posted: true }),
+    log: silent,
+  }));
+
+  // The in-process retries (2 s, 5 s) all hit the same outage.
+  const offline = await reconcile(spawned.job, spawned.jobPath, async () => ({
+    suspect: [], error: 'fetch: fatal: unable to access \'https://github.com/\': Could not resolve host: github.com',
+  }));
+  assert.equal(offline.action, 'active');
+  assert.equal(offline.reason, 'final-round-proof-transient');
+  const onDisk = JSON.parse(readFileSync(spawned.jobPath, 'utf8'));
+  assert.equal(onDisk.status, 'in_progress', 'the round is neither terminated nor held');
+  assert.equal(onDisk.finalRoundProofTransient.attempts, 3);
+  assert.equal(onDisk.completion, undefined);
+  assert.deepEqual(alerts, []);
+  assert.deepEqual(wakes, []);
+
+  const recovered = await reconcile(onDisk, spawned.jobPath, async () => ({ suspect: [], error: null }));
+  assert.equal(recovered.action, 'completed');
+  assert.equal(recovered.job.completion.workerPushedHeadSha, PR_7311_PUSHED);
+  assert.deepEqual(alerts, []);
 });
 
 test('replay #7311: the worker-opened draft is named as a draft, not a state change', async (t) => {

@@ -503,6 +503,9 @@ const MERGEABILITY_SAMPLE_DELAY_MS = Math.max(
   Number.parseInt(process.env.ADVERSARIAL_MERGEABILITY_SAMPLE_DELAY_MS || '', 10) || 2500,
 );
 export const DEFAULT_AMA_CLOSURE_OPERATION_TIMEOUT_MS = 5_000;
+// How long PR-head CI may stay pending on a proven comment-only final-round head
+// before the wait stops being exempt from the retain-loop cap.
+export const FINAL_ROUND_CI_WAIT_DEADLINE_MS = 2 * 60 * 60 * 1000;
 
 // Deliverable 2 — daemon-fail-closed hammer fallback classification.
 //
@@ -704,6 +707,7 @@ export async function maybeDispatchAmaClosureFor({
   fetchProtectivePredecessorStateImpl = fetchProtectivePredecessorStateForPr,
   emitProtectivePredecessorFindingImpl = null,
   proveCommentOnlyFinalRoundHeadImpl = proveCommentOnlyFinalRoundHead,
+  now = () => Date.now(),
   env = process.env,
   signal = null,
   operationTimeoutMs = null,
@@ -1706,8 +1710,27 @@ export async function maybeDispatchAmaClosureFor({
   const finalRoundChecks = commentOnlyFinalRoundProven && finalRoundCiNotGreen
     ? summarizeExternalChecks(prMetadata.statusCheckRollup, { env, cfg })
     : null;
-  const commentOnlyFinalRoundAwaitingCi = Boolean(finalRoundChecks?.rollupKnown &&
+  const finalRoundCiPending = Boolean(finalRoundChecks?.rollupKnown &&
     finalRoundChecks.failedChecks.length === 0 && finalRoundChecks.pendingChecks.length > 0);
+  // The wait is bounded: CI still pending past the deadline (a hung or never-
+  // scheduled check) counts toward the retain cap again, so the PR reaches the
+  // operator instead of being held forever. Measured from the proven push.
+  const finalRoundPushedAtMs = finalRoundCiPending
+    ? Math.max(...commentOnlyFinalRoundPushedHeads
+      .filter((entry) => entry?.workerPushedHeadSha === currentPrHeadSha)
+      .map((entry) => Date.parse(entry?.completedAt || ''))
+      .filter(Number.isFinite))
+    : Number.NaN;
+  const finalRoundCiWaitMs = Number(now()) - finalRoundPushedAtMs;
+  const commentOnlyFinalRoundAwaitingCi = finalRoundCiPending &&
+    Number.isFinite(finalRoundCiWaitMs) && finalRoundCiWaitMs < FINAL_ROUND_CI_WAIT_DEADLINE_MS;
+  if (finalRoundCiPending && !commentOnlyFinalRoundAwaitingCi) {
+    logger?.warn?.(
+      `[watcher] final-round-ci-pending-timeout ${repoPath}#${prNumber}@${String(currentPrHeadSha || '').slice(0, 12)}: ` +
+        `PR-head CI still pending ${Number.isFinite(finalRoundCiWaitMs) ? `${Math.round(finalRoundCiWaitMs / 60_000)} min` : '(push time unknown)'} ` +
+        `after the proven final-round push; the retain-loop cap applies and escalates to the operator`,
+    );
+  }
   const shouldLookupMergedProtectiveDependents =
     reviewCycleExhausted ||
     hamTerminalRemediationValidated ||

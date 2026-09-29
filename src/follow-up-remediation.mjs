@@ -2716,7 +2716,7 @@ async function reconcileFollowUpJob({
       job, jobPath, reply: parsedReply, worker, liveness, workspaceDir: paths.workspaceDir,
       auditWorkspaceForContaminationImpl, inspectRemediationCiRegressionImpl, deliverAlertImpl, execFileImpl, log,
     });
-    const completedCommentOnlyFinalRound = finalRound.completed;
+    if (finalRound.retryLater) return { action: 'active', reason: 'final-round-proof-transient', job: finalRound.job, jobPath };
     const workerModel = worker?.model || 'codex';
     const completionMetadata = {
       source: hasNonEmptyNarrative
@@ -2785,7 +2785,7 @@ async function reconcileFollowUpJob({
       };
     }
 
-    if (!rereview.requested && !completedCommentOnlyFinalRound) {
+    if (!rereview.requested && !finalRound.completed) {
       const resumed = operationalBlockerRecovery?.rescue?.preserved && worker.dispatchMode !== 'hq' && requeueForWorkspaceResume({
         rootDir, jobPath, job, requeuedAt: completedAt, retryMetadata: { rescue: operationalBlockerRecovery.rescue },
         retryReason: 'Preserved remediation commit after worker credential failure; resuming the same workspace.',
@@ -2930,7 +2930,7 @@ async function reconcileFollowUpJob({
       jobUpdates: operationalBlockerRecovery ? { operationalBlockerRecovery } : null,
     });
 
-    if (completedCommentOnlyFinalRound && !completed.alreadyTerminal) {
+    if (finalRound.completed && !completed.alreadyTerminal) {
       try {
         requestWatcherWakeImpl({
           rootDir,

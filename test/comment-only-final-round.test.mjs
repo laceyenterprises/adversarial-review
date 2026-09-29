@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { archiveStoppedFollowUpJobs, summarizePRRemediationLedger } from '../src/follow-up-jobs.mjs';
 import {
   FINAL_ROUND_REPLAY_PROOF,
+  findCommentOnlyFinalRoundPushJob,
   hasCommentOnlyFinalRoundPush,
   hasUnprovenCommentOnlyFinalRoundHead,
   hasInProgressCommentOnlyFinalRound,
@@ -166,6 +168,7 @@ test('worker proof retains every non-empty git error line in its reason and warn
   });
   assert.equal(result.reason, 'git-proof-failed: Command failed: git rev-parse HEAD fatal: Unable to create lock file another git process is running');
   assert.match(warnings[0], /git-proof-failed: Command failed: git rev-parse HEAD fatal: Unable to create lock file another git process is running/);
+  assert.equal(result.transient, true, 'a lock held by another git process is retried, not held');
 });
 
 test('completed final round requires matching review and proven descendant', async () => {
@@ -288,6 +291,47 @@ test('a final round with no recorded push suppresses nothing; a withheld moved h
   assert.equal(hasUnprovenCommentOnlyFinalRoundHead(rootDir, query), true);
 });
 
+test('stopped final rounds keep their push and their held head after the real archive sweep', (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'comment-only-archived-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const stoppedDir = join(rootDir, 'data', 'follow-up-jobs', 'stopped');
+  mkdirSync(stoppedDir, { recursive: true });
+  const heldHead = '3'.repeat(40);
+  const job = {
+    repo: 'example/repo', prNumber: 42, status: 'stopped', revisionRef: oldHead, stoppedAt: '2026-08-01T00:00:00.000Z',
+    finalRound: 'comment-only', reReview: { suppressed: 'comment-only-final-round' },
+  };
+  writeFileSync(join(stoppedDir, 'example__repo-pr-42-pushed.json'), JSON.stringify({
+    ...job, jobId: 'example__repo-pr-42-pushed',
+    completion: { workerPushedHeadSha: newHead, workerPushProof: { method: FINAL_ROUND_REPLAY_PROOF } },
+  }));
+  writeFileSync(join(stoppedDir, 'example__repo-pr-42-held.json'), JSON.stringify({
+    ...job, jobId: 'example__repo-pr-42-held', completion: { withheldPushHeadSha: heldHead },
+  }));
+  const decisions = () => ({
+    pushed: hasCommentOnlyFinalRoundPush(rootDir, { repo: 'example/repo', prNumber: 42, headSha: newHead }),
+    held: hasUnprovenCommentOnlyFinalRoundHead(rootDir, { repo: 'example/repo', prNumber: 42, headSha: heldHead }),
+    pushJob: findCommentOnlyFinalRoundPushJob(rootDir, {
+      repo: 'example/repo', prNumber: 42, reviewedHead: oldHead, workerPushedHeadSha: newHead,
+    })?.jobId || null,
+    ledger: summarizePRRemediationLedger(rootDir, { repo: 'example/repo', prNumber: 42 }),
+  });
+  const before = decisions();
+  assert.deepEqual([before.pushed, before.held, before.pushJob], [true, true, 'example__repo-pr-42-pushed']);
+  assert.deepEqual(before.ledger.commentOnlyFinalRoundRevisionRefs, [oldHead]);
+  assert.equal(before.ledger.commentOnlyFinalRoundPushedHeads[0].workerPushedHeadSha, newHead);
+
+  const sweep = archiveStoppedFollowUpJobs({ rootDir, nowMs: Date.parse('2026-09-01T00:00:00.000Z') });
+  assert.equal(sweep.archived, 2);
+  const after = decisions();
+  assert.deepEqual([after.pushed, after.held, after.pushJob], [true, true, 'example__repo-pr-42-pushed']);
+  assert.deepEqual(after.ledger.commentOnlyFinalRoundRevisionRefs, [oldHead]);
+  assert.deepEqual(after.ledger.commentOnlyFinalRoundPushedHeads, [{
+    reviewedHead: oldHead, workerPushedHeadSha: newHead, completedAt: job.stoppedAt,
+    status: 'stopped-archived', pushProof: FINAL_ROUND_REPLAY_PROOF,
+  }]);
+});
+
 test('job scan cache refreshes after an atomic job replacement', () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'comment-only-cache-'));
   const completedDir = join(rootDir, 'data', 'follow-up-jobs', 'completed');
@@ -304,4 +348,30 @@ test('job scan cache refreshes after an atomic job replacement', () => {
   }));
   renameSync(`${path}.next`, path);
   assert.equal(hasCommentOnlyFinalRoundPush(rootDir, query), true);
+});
+
+// COMMENTCLOSE-01: the governing SPEC must describe the final round the code runs,
+// not the ancestry-only proof it replaced.
+test('the auto-remediation SPEC describes the shipped final-round contract', () => {
+  const spec = readFileSync(join(import.meta.dirname, '..', 'docs', 'SPEC-adversarial-review-auto-remediation.md'), 'utf8')
+    .replace(/\s+/gu, ' ');
+  for (const retired of [
+    'requires GitHub compare to report `ahead` before recording the pushed head',
+    'A rebased, divergent worker head therefore returns to normal re-review',
+    'only when the completed job refers to the settled reviewed head',
+  ]) assert.ok(!spec.includes(retired), `SPEC still says: ${retired}`);
+  for (const required of [
+    'the replay proof, not GitHub compare `ahead`, decides',
+    'a diverged head proven this way keeps its final-round authority',
+    'Every terminal final-round job (completed, stopped, failed, or stopped and later archived) keeps its authority',
+    '`completion.withheldPushHeadSha`',
+    'adversarial_review.comment_only_final_round_push_unproven',
+    '`retrigger-review:`',
+    "Workers tag such entries `kind: 'pending-ci'`",
+    'it is the only operational blocker, it asks for no human input, the reply outcome is not `blocked`',
+    'retried after 2 s and 5 s',
+    'for up to one hour',
+    'for at most two hours after the proven push',
+    'Only one follow-up job exists per posted review',
+  ]) assert.ok(spec.includes(required), `SPEC is missing: ${required}`);
 });

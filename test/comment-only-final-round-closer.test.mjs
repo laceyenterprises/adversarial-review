@@ -10,6 +10,7 @@ import { join } from 'node:path';
 
 import { resolveSettledReviewVerdict } from '../src/adversarial-gate-status.mjs';
 import {
+  FINAL_ROUND_CI_WAIT_DEADLINE_MS,
   maybeDispatchAmaClosureFor,
   resolveMergeAgentCoexistenceForWatcher,
 } from '../src/ama-closure-orchestration.mjs';
@@ -49,6 +50,7 @@ function seedFinalRound(rootDir, { status = 'completed', pushed = PUSHED } = {})
 }
 
 const postedRow = { review_status: 'posted', reviewer_head_sha: REVIEWED };
+const PUSHED_AT_MS = Date.parse('2026-09-28T22:38:59.717Z');
 const pushes = [{ reviewedHead: REVIEWED, workerPushedHeadSha: PUSHED, status: 'completed' }];
 
 test('the settled verdict of a proven final-round push resolves from the reviewed head', (t) => {
@@ -212,6 +214,7 @@ test('pending CI on a proven final-round head waits without spending the retain-
   let payload = null;
   const closure = await maybeDispatchAmaClosureFor(closureArgs(rootDir, {
     candidate: { ...closureArgs(rootDir).candidate, statusCheckRollup: pendingRollup },
+    now: () => PUSHED_AT_MS + 10 * 60 * 1000,
     maybeDispatchAmaCloserImpl: async (args) => {
       payload = args;
       return { dispatched: false, skipMergeAgent: true, reason: 'not-eligible', reasons: ['stale-review-head', 'ci-not-green'] };
@@ -239,4 +242,33 @@ test('pending CI on a proven final-round head waits without spending the retain-
     maybeDispatchAmaCloserImpl: async () => ({ dispatched: false, skipMergeAgent: true, reason: 'not-eligible', reasons: ['stale-review-head', 'ci-not-green'] }),
   }));
   assert.equal(red.commentOnlyFinalRoundAwaitingCi, undefined);
+});
+
+test('CI pending past the deadline on a proven final-round head counts toward the retain cap again', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'final-round-ama-ci-timeout-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  seedFinalRound(rootDir);
+  const pendingRollup = [{ __typename: 'CheckRun', name: 'repo-guards', status: 'QUEUED', conclusion: null }];
+  const warnings = [];
+  const closure = await maybeDispatchAmaClosureFor(closureArgs(rootDir, {
+    candidate: { ...closureArgs(rootDir).candidate, statusCheckRollup: pendingRollup },
+    now: () => PUSHED_AT_MS + FINAL_ROUND_CI_WAIT_DEADLINE_MS + 1,
+    logger: { log() {}, warn: (line) => warnings.push(line) },
+    maybeDispatchAmaCloserImpl: async () => ({ dispatched: false, skipMergeAgent: true, reason: 'not-eligible', reasons: ['stale-review-head', 'ci-not-green'] }),
+  }));
+  assert.equal(closure.commentOnlyFinalRoundAwaitingCi, undefined, 'the wait is no longer exempt');
+  assert.ok(warnings.some((line) => /final-round-ci-pending-timeout .*#265/.test(line)));
+
+  const logs = [];
+  let outcome = null;
+  for (let tick = 0; tick < 12 && outcome?.outcome !== 'await-operator'; tick += 1) {
+    outcome = await resolveMergeAgentCoexistenceForWatcher({
+      rootDir, reviewStateRow: {}, dispatchJob: {}, candidate: { headSha: PUSHED },
+      repoPath: REPO, prNumber: PR, currentRevisionRef: PUSHED,
+      logger: { log: (line) => logs.push(line), warn: (line) => logs.push(line) },
+      maybeDispatchAmaClosureForImpl: async () => closure,
+    });
+  }
+  assert.equal(outcome.outcome, 'await-operator', 'a hung CI wait escalates to the operator');
+  assert.ok(logs.some((line) => /retain-loop cap reached/.test(line)));
 });

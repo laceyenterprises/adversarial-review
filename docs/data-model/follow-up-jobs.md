@@ -22,7 +22,11 @@ mandatory base rebase makes most pushes `diverged` from the reviewed head, which
 the earlier ancestry-only proof rejected without a log line.
 `completion.workerPushProof` records `{ method: "git-cherry-replay",
 reviewedCommitsReplayed, workerCommits }`. Reconcile remains re-entrant when a
-transient lookup exhausts its retry budget. HQ jobs use their resolved topic
+transient lookup exhausts its retry budget. A transient git failure during the
+proof (network, remote hang-up, lock contention) is retried after 2 s and 5 s;
+if it persists the job stays in `in-progress/` with
+`finalRoundProofTransient: { since, lastAttemptAt, attempts, error }` and later
+ticks retry it. After one hour from `since` the proof is withheld as usual. HQ jobs use their resolved topic
 workspace for this proof. Every withheld proof logs its reason
 (`finalRoundOutcome.push`, for example `live-head-mismatch`,
 `foreign-commit-in-push`, `branch-contamination-audit-failed`). When the proof
@@ -38,22 +42,31 @@ decision: `{ completed, reason, ciState }`. A final round is complete when its
 reply has no `blockers[]` and its only operational blockers are PR-head CI that
 is still running, and either the reply says `completed` or the push is proven.
 Pending CI is classified structurally: each entry carries
-`kind: "pending-ci"`, or exactly one untagged entry is corroborated by the
-reconciler's CI probe of the proven pushed head (`ciState` is `pending` or
-`green`, never `failed`). `reason` names the rule that decided, for example
-`ci-probe-pending-ci`, `ci-failed`, `review-blockers` or `no-proven-push`. An
+`kind: "pending-ci"`, or (legacy replies) exactly one untagged entry with no
+`needsHumanInput`, in a reply whose outcome is not `blocked`, is corroborated by
+the reconciler's CI probe of the proven pushed head reporting `pending`. `reason`
+names the rule that decided, for example `kind-pending-ci`,
+`ci-probe-pending-ci`, `operational-blocker-needs-human-input`,
+`untagged-blocker-outcome-blocked`, `untagged-blocker-ci-not-pending`,
+`ci-failed`, `review-blockers` or `no-proven-push`. An
 incomplete final round still records its pushed head and suppression marker.
 
 The ledger summary retains `commentOnlyFinalRoundRevisionRefs` for reviewed
 heads and projects verified `(reviewedHead, workerPushedHeadSha)` pairs as
 `commentOnlyFinalRoundPushedHeads`, with `completedAt` (the job's terminal
 timestamp) for follow-up suppression and `status` for the terminal directory it
-came from, and `pushProof` for the recorded proof method. Both read `completed/`, `stopped/` and `failed/`. AMA requires the current PR head to equal a
+came from, and `pushProof` for the recorded proof method. Both read `completed/`,
+`stopped/`, `failed/` and `stopped-archived/<YYYY-MM>/`: an archived stopped job
+keeps its recorded push, its withheld head and its review key. AMA requires the current PR head to equal a
 pair's pushed head, the settled review to match its reviewed head, and GitHub
 compare to report the pushed head `ahead` (or `diverged` for a
 `git-cherry-replay` proof); the closer then reads the verdict from the
-matching terminal job's `reviewBody` (`findCommentOnlyFinalRoundPushJob`). A
-later head can be reviewed normally.
+matching terminal job's `reviewBody` (`findCommentOnlyFinalRoundPushJob`). While
+PR-head CI on that head is pending, AMA holds the PR without spending the
+retain-loop cap for up to two hours after the pair's `completedAt`
+(`FINAL_ROUND_CI_WAIT_DEADLINE_MS`); past that it logs
+`final-round-ci-pending-timeout` and the cap applies again. A later head can be
+reviewed normally.
 Job scans skip a file removed during a queue transition and warn on malformed
 JSON without discarding other jobs.
 
@@ -64,13 +77,18 @@ The reviewer process and the watcher's reviewer-pass reaper can both queue the
 same review (agent-os#7311: two final-round jobs 9 s apart). A review is keyed
 by repo, PR, reviewed head (`revisionRef`) and the SHA-256 of its normalized
 `reviewBody`. An existing job for that key in `pending/`, `in-progress/`,
-`completed/`, `failed/` or `stopped/` makes the request a duplicate: the call
+`completed/`, `failed/`, `stopped/` or `stopped-archived/` makes the request a duplicate: the call
 returns `{ job: null, jobPath: null, duplicateOf }`, the reviewer reports
 `queued: false, reason: "duplicate-review-follow-up"`, and the reaper skips its
-wake. A short-lived claim file,
-`data/follow-up-jobs/review-claims/<repo>-pr-<n>-<revisionRef>-<digest16>.json`
-(`{ repo, prNumber, revisionRef, digest, claimedAt, pid }`), serializes the two
-processes between that scan and the job write. It is removed once the job is
-written or the write fails, and a claim older than 10 minutes is treated as
-abandoned and taken over. A review with no reviewed SHA or no body is not
-de-duplicated.
+wake. A short-lived claim serializes the two processes between that scan and
+the job write. It is a chain of generation files
+`data/follow-up-jobs/review-claims/<repo>-pr-<n>-<revisionRef>-<digest16>.g<N>.json`
+(`{ repo, prNumber, revisionRef, digest, token, claimedAt, pid, host }`), each
+created exclusively; the highest generation holds the claim. A holder older than
+2 minutes, whose process has exited on this host, or whose file is unreadable is
+abandoned, and taking it over means creating the next generation, so only one
+recoverer wins. A claim held by a live creator is not a duplicate: the caller
+waits for that job to appear or the claim to be released or abandoned, and throws
+`review-follow-up-in-flight` if that takes more than 4 minutes. Release is
+token-checked and removes the chain only for the current holder. A review with no
+reviewed SHA or no body is not de-duplicated.

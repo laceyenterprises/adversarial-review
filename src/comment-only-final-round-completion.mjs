@@ -13,7 +13,8 @@
 // corroborated by this reconciler's own CI probe of the proven pushed head. The
 // worker's free-text title is never read to decide that CI is merely pending.
 import { deliverAlert } from './alert-delivery.mjs';
-import { proveFinalRoundWorkerPush } from './comment-only-final-round.mjs';
+import { writeFileAtomic } from './atomic-write.mjs';
+import { isTransientGitFailure, proveFinalRoundWorkerPush } from './comment-only-final-round.mjs';
 import {
   OPERATIONAL_BLOCKER_KIND_PENDING_CI,
   isDeclaredOperationalBlockerCode,
@@ -22,20 +23,38 @@ import { ensureJobBaseBranch } from './remediation-git-pr-io.mjs';
 import { parseHqWorkerWorkspaceFromPayload, resolveHqWorkerWorkspace } from './remediation-hq-dispatch.mjs';
 
 const CI_STATES_WITHOUT_FAILURE = new Set(['pending', 'green']);
+// A transient git failure (network, lock) in the contamination audit or the push
+// proof is retried in-process with this backoff, then across reconcile ticks for
+// the window below, before it may become a withheld (held, alerted) head.
+export const FINAL_ROUND_PROOF_RETRY_DELAYS_MS = [2000, 5000];
+export const FINAL_ROUND_PROOF_TRANSIENT_WINDOW_MS = 60 * 60 * 1000;
+
+function transientProofFailure(audit, push) {
+  if (audit.suspect?.length) return null;
+  if (audit.error) return isTransientGitFailure(audit.error) ? `audit: ${audit.error}` : null;
+  return push.transient ? push.reason : null;
+}
+
+function writeJob(jobPath, job) {
+  writeFileAtomic(jobPath, `${JSON.stringify(job, null, 2)}\n`);
+}
 
 /**
  * Are these operational blockers nothing more than PR-head CI still running?
  *
  * Requires a proven worker push and a CI probe of that exact head showing no
- * failed check. Every entry must then be tagged `kind: 'pending-ci'`, except
- * that ONE untagged entry is accepted as the CI wait: current workers predate
- * the tag and write exactly one entry for it, and the probe has independently
- * shown CI is the only open condition on the pushed head. Two or more untagged
- * entries, or any entry carrying a declared non-CI operational code (for example
- * `stale-pr-head`), fail closed. The declared-code set only ever EXCLUDES an
+ * failed check. Every entry must then be tagged `kind: 'pending-ci'`. One legacy
+ * shape is also accepted, for workers that predate the tag: exactly ONE untagged
+ * entry, while the probe shows CI still running (not green: a finished CI cannot
+ * be what that entry waits on), in a reply that is not `outcome: 'blocked'`. Any
+ * entry asking for human input fails closed, tagged or not. So do two or more
+ * untagged entries, and any entry carrying a declared non-CI operational code
+ * (for example `stale-pr-head`). The declared-code set only ever EXCLUDES an
  * entry; no title can make an entry count as pending CI.
  */
-export function classifyFinalRoundOperationalBlockers(operationalBlockers, { ciGate = null, pushedHead = null } = {}) {
+export function classifyFinalRoundOperationalBlockers(operationalBlockers, {
+  ciGate = null, pushedHead = null, outcome = null,
+} = {}) {
   const entries = Array.isArray(operationalBlockers) ? operationalBlockers : [];
   if (entries.length === 0) return { pendingCiOnly: true, reason: 'none' };
   if (!pushedHead) return { pendingCiOnly: false, reason: 'no-proven-push' };
@@ -49,9 +68,15 @@ export function classifyFinalRoundOperationalBlockers(operationalBlockers, { ciG
   if (entries.some((entry) => isDeclaredOperationalBlockerCode(entry))) {
     return { pendingCiOnly: false, reason: 'declared-non-ci-operational-blocker' };
   }
+  if (entries.some((entry) => String(entry?.needsHumanInput || '').trim())) {
+    return { pendingCiOnly: false, reason: 'operational-blocker-needs-human-input' };
+  }
   const untagged = entries.filter((entry) => entry?.kind !== OPERATIONAL_BLOCKER_KIND_PENDING_CI);
+  if (untagged.length === 0) return { pendingCiOnly: true, reason: 'kind-pending-ci' };
   if (untagged.length > 1) return { pendingCiOnly: false, reason: 'ambiguous-untagged-operational-blockers' };
-  return { pendingCiOnly: true, reason: untagged.length === 0 ? 'kind-pending-ci' : 'ci-probe-pending-ci' };
+  if (ciGate.state !== 'pending') return { pendingCiOnly: false, reason: 'untagged-blocker-ci-not-pending' };
+  if (outcome === 'blocked') return { pendingCiOnly: false, reason: 'untagged-blocker-outcome-blocked' };
+  return { pendingCiOnly: true, reason: 'ci-probe-pending-ci' };
 }
 
 // A final round whose push could not be proven while the PR head moved is the
@@ -85,6 +110,10 @@ async function alertUnprovenFinalRoundPush({ job, push, deliverAlertImpl, log })
  * outcome, so a stopped final round still records the head it pushed and keeps
  * suppressing a re-review of it. `completionFields` is spread into the job's
  * completion metadata on every terminal path.
+ *
+ * A transient git failure is not a verdict: it is retried, and while it lasts
+ * this returns `{ retryLater: true, job }` with the attempt recorded on the job,
+ * so the caller leaves the job in progress instead of terminating it.
  */
 export async function resolveCommentOnlyFinalRoundCompletion({
   job,
@@ -99,6 +128,10 @@ export async function resolveCommentOnlyFinalRoundCompletion({
   execFileImpl,
   env = process.env,
   log = console,
+  retryDelaysMs = FINAL_ROUND_PROOF_RETRY_DELAYS_MS,
+  sleepImpl = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
+  now = Date.now,
+  writeJobImpl = writeJob,
 } = {}) {
   if (job?.finalRound !== 'comment-only' || !reply) {
     return { completed: false, workerPushedHeadSha: null, completionFields: {} };
@@ -110,12 +143,41 @@ export async function resolveCommentOnlyFinalRoundCompletion({
       || workspaceDir;
   }
   const { baseBranch } = await ensureJobBaseBranch({ job, jobPath, execFileImpl });
-  const audit = await auditWorkspaceForContaminationImpl({ workspaceDir: proofWorkspaceDir, baseBranch, execFileImpl });
-  const push = await proveFinalRoundWorkerPush({
-    repo: job.repo, prNumber: job.prNumber, jobId: job.jobId, reviewedHead: job.revisionRef, baseBranch,
-    workspaceDir: proofWorkspaceDir, execFileImpl, log,
-    withheldBecause: audit.error || audit.suspect?.length ? 'branch-contamination-audit-failed' : null,
-  });
+  let audit;
+  let push;
+  for (let attempt = 0; ; attempt += 1) {
+    audit = await auditWorkspaceForContaminationImpl({ workspaceDir: proofWorkspaceDir, baseBranch, execFileImpl });
+    push = await proveFinalRoundWorkerPush({
+      repo: job.repo, prNumber: job.prNumber, jobId: job.jobId, reviewedHead: job.revisionRef, baseBranch,
+      workspaceDir: proofWorkspaceDir, execFileImpl, log,
+      withheldBecause: audit.error || audit.suspect?.length ? 'branch-contamination-audit-failed' : null,
+    });
+    const transient = transientProofFailure(audit, push);
+    if (!transient) break;
+    if (attempt < retryDelaysMs.length) {
+      log.warn?.(`[follow-up-remediation] Retrying final-round push proof for ${job.repo}#${job.prNumber} after a transient git failure: ${transient}`);
+      await sleepImpl(retryDelaysMs[attempt]);
+      continue;
+    }
+    // Keep the job in progress so the next reconcile proves it again; only a
+    // failure that outlasts the window is withheld (and so held and alerted).
+    const nowMs = now();
+    const since = job.finalRoundProofTransient?.since || new Date(nowMs).toISOString();
+    if (nowMs - Date.parse(since) >= FINAL_ROUND_PROOF_TRANSIENT_WINDOW_MS) {
+      log.error?.(`[follow-up-remediation] Final-round push proof for ${job.repo}#${job.prNumber} kept failing transiently since ${since}; withholding it: ${transient}`);
+      break;
+    }
+    const retryJob = {
+      ...job,
+      finalRoundProofTransient: {
+        since, lastAttemptAt: new Date(nowMs).toISOString(),
+        attempts: (job.finalRoundProofTransient?.attempts || 0) + attempt + 1, error: transient,
+      },
+    };
+    writeJobImpl(jobPath, retryJob);
+    log.warn?.(`[follow-up-remediation] Final-round push proof for ${job.repo}#${job.prNumber} failed transiently; leaving the job in progress for the next reconcile: ${transient}`);
+    return { retryLater: true, completed: false, workerPushedHeadSha: null, completionFields: {}, job: retryJob };
+  }
   const workerPushedHeadSha = push.workerPushedHeadSha;
   const withheldPushHeadSha = !workerPushedHeadSha && push.liveHeadSha && push.liveHeadSha !== job.revisionRef
     ? push.liveHeadSha
@@ -133,7 +195,9 @@ export async function resolveCommentOnlyFinalRoundCompletion({
       repo: job.repo, prNumber: job.prNumber, execFileImpl, env, log,
     });
     ciState = ciGate?.state || null;
-    classification = classifyFinalRoundOperationalBlockers(operationalBlockers, { ciGate, pushedHead: workerPushedHeadSha });
+    classification = classifyFinalRoundOperationalBlockers(operationalBlockers, {
+      ciGate, pushedHead: workerPushedHeadSha, outcome: reply.outcome,
+    });
   } else {
     classification = classifyFinalRoundOperationalBlockers(operationalBlockers, { pushedHead: workerPushedHeadSha });
   }

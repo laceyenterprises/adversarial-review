@@ -16,6 +16,14 @@ export function suppressFinalRoundFollowUp(pushedHeads, headSha, reviewPostedAt)
 // COMMENTCLOSE-01: the proof method recorded on a push proven by replay below.
 export const FINAL_ROUND_REPLAY_PROOF = 'git-cherry-replay';
 
+// A git failure the next attempt can clear: the network, or a lock another git
+// process holds. The final round retries these instead of withholding its proof.
+const TRANSIENT_GIT_FAILURE = /(?:unable to access|could not resolve host|failed to connect|connection (?:reset|timed out)|connection refused|network is unreachable|operation timed out|timed out|timeout|TLS|SSL|HTTP 5\d\d|The requested URL returned error: 5\d\d|remote end hung up unexpectedly|early EOF|RPC failed|temporary failure|temporarily unavailable|input\/output error|i\/o error|index\.lock|could not lock|cannot lock ref|unable to create [^\n]*lock)/iu;
+
+export function isTransientGitFailure(text) {
+  return TRANSIENT_GIT_FAILURE.test(String(text || ''));
+}
+
 function cherryEntries(stdout) {
   return String(stdout || '').split(/\r?\n/u).map((line) => line.trim()).filter(Boolean).map((line) => {
     const match = line.match(/^([+-])\s+([0-9a-f]{7,40})\b/iu);
@@ -48,10 +56,11 @@ function hasWorkerJobTrailer(message, jobId) {
  * A human commit replayed under the worker's, a conflict-rewritten reviewed
  * commit, or a merge fails closed. Every withheld proof logs its reason; a
  * `gh` failure throws so the job stays in progress and the next reconcile
- * retries it.
+ * retries it. A git failure that `isTransientGitFailure` recognizes is withheld
+ * with `transient: true`; the caller retries it rather than holding the head.
  *
  * @returns {Promise<{ workerPushedHeadSha: string|null, liveHeadSha: string|null,
- *   reason: string, proof?: object }>}
+ *   reason: string, proof?: object, transient?: boolean }>}
  */
 export async function proveFinalRoundWorkerPush({
   repo, prNumber, jobId, reviewedHead, baseBranch, workspaceDir, execFileImpl,
@@ -108,7 +117,7 @@ export async function proveFinalRoundWorkerPush({
     };
   } catch (err) {
     const diagnostic = String(err?.message || err).split(/\r?\n/u).map((line) => line.trim()).filter(Boolean).join(' ');
-    return withheld(`git-proof-failed: ${diagnostic}`);
+    return { ...withheld(`git-proof-failed: ${diagnostic}`), transient: isTransientGitFailure(diagnostic) };
   }
 }
 
@@ -165,25 +174,50 @@ function scanCommentOnlyJobs(rootDir, status, repo, prNumber, log) {
   return jobs;
 }
 
+// The daemon sweeps stopped jobs older than a day into
+// stopped-archived/<YYYY-MM>/ (archiveStoppedFollowUpJobs). An archived job keeps
+// `status: 'stopped'` and keeps every authority it had in stopped/: its recorded
+// push, its withheld head, and its one-follow-up-per-review key.
+const ARCHIVED_STOPPED_DIR = 'stopped-archived';
+
+export function scanArchivedStoppedFollowUpJobs(rootDir, repo, prNumber, log = console) {
+  let months;
+  try {
+    months = readdirSync(join(rootDir, 'data', 'follow-up-jobs', ARCHIVED_STOPPED_DIR), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
+  } catch (err) {
+    if (err?.code === 'ENOENT') return [];
+    throw err;
+  }
+  return months.flatMap((month) => scanCommentOnlyJobs(rootDir, `${ARCHIVED_STOPPED_DIR}/${month}`, repo, prNumber, log));
+}
+
+// Terminal jobs for the PR, archived stopped jobs included, as { status, job }.
+function terminalFollowUpJobs(rootDir, repo, prNumber, log) {
+  return [
+    ...['completed', 'stopped', 'failed'].flatMap((status) =>
+      scanCommentOnlyJobs(rootDir, status, repo, prNumber, log).map((job) => ({ status, job }))),
+    ...scanArchivedStoppedFollowUpJobs(rootDir, repo, prNumber, log).map((job) => ({ status: 'stopped', job })),
+  ];
+}
+
+function isTerminalFinalRound(status, job) {
+  return job.status === status && job.finalRound === 'comment-only' &&
+    job.reReview?.suppressed === 'comment-only-final-round';
+}
+
 export function hasSettledCommentOnlyReviewHead(rootDir, { repo, prNumber, headSha }, log = console) {
-  return ['pending', 'in-progress', 'completed', 'failed', 'stopped'].some((status) =>
-    scanCommentOnlyJobs(rootDir, status, repo, prNumber, log).some((job) =>
-      job.revisionRef === headSha && normalizeEffectiveReviewVerdict(job.reviewBody) === 'comment-only'
-    )
-  );
+  const settled = (job) => job.revisionRef === headSha && normalizeEffectiveReviewVerdict(job.reviewBody) === 'comment-only';
+  return ['pending', 'in-progress'].some((status) => scanCommentOnlyJobs(rootDir, status, repo, prNumber, log).some(settled)) ||
+    terminalFollowUpJobs(rootDir, repo, prNumber, log).some(({ job }) => settled(job));
 }
 
 // COMMENTCLOSE-01: a final round that stopped (for example on pending CI in an
 // older reconciler) still pushed its head; that head is not re-reviewed either.
 export function hasCommentOnlyFinalRoundPush(rootDir, { repo, prNumber, headSha }, log = console) {
   if (!SHA.test(String(headSha || ''))) return false;
-  return ['completed', 'stopped', 'failed'].some((status) =>
-    scanCommentOnlyJobs(rootDir, status, repo, prNumber, log).some((job) =>
-      job.status === status && job.finalRound === 'comment-only' &&
-      job.reReview?.suppressed === 'comment-only-final-round' &&
-      job.completion?.workerPushedHeadSha === headSha
-    )
-  );
+  return terminalFollowUpJobs(rootDir, repo, prNumber, log).some(({ status, job }) =>
+    isTerminalFinalRound(status, job) && job.completion?.workerPushedHeadSha === headSha);
 }
 
 // COMMENTCLOSE-01: a final round whose push could not be proven while the PR head
@@ -192,13 +226,8 @@ export function hasCommentOnlyFinalRoundPush(rootDir, { repo, prNumber, headSha 
 // instead of silently re-opening the review the final round was meant to end.
 export function hasUnprovenCommentOnlyFinalRoundHead(rootDir, { repo, prNumber, headSha }, log = console) {
   if (!SHA.test(String(headSha || ''))) return false;
-  return ['completed', 'stopped', 'failed'].some((status) =>
-    scanCommentOnlyJobs(rootDir, status, repo, prNumber, log).some((job) =>
-      job.status === status && job.finalRound === 'comment-only' &&
-      job.reReview?.suppressed === 'comment-only-final-round' &&
-      job.completion?.withheldPushHeadSha === headSha
-    )
-  );
+  return terminalFollowUpJobs(rootDir, repo, prNumber, log).some(({ status, job }) =>
+    isTerminalFinalRound(status, job) && job.completion?.withheldPushHeadSha === headSha);
 }
 
 // COMMENTCLOSE-01: the terminal final-round job that pushed `workerPushedHeadSha`
@@ -208,16 +237,13 @@ export function findCommentOnlyFinalRoundPushJob(rootDir, { repo, prNumber, revi
   if (!SHA.test(String(reviewedHead || '')) || !SHA.test(String(workerPushedHeadSha || ''))) return null;
   let found = null;
   let foundAt = '';
-  for (const status of ['completed', 'stopped', 'failed']) {
-    for (const job of scanCommentOnlyJobs(rootDir, status, repo, prNumber, log)) {
-      if (job.status !== status || job.finalRound !== 'comment-only' ||
-          job.reReview?.suppressed !== 'comment-only-final-round' ||
-          job.revisionRef !== reviewedHead || job.completion?.workerPushedHeadSha !== workerPushedHeadSha) continue;
-      const at = job.completedAt || job.stoppedAt || job.failedAt || '';
-      if (!found || at > foundAt) {
-        found = job;
-        foundAt = at;
-      }
+  for (const { status, job } of terminalFollowUpJobs(rootDir, repo, prNumber, log)) {
+    if (!isTerminalFinalRound(status, job) || job.revisionRef !== reviewedHead ||
+        job.completion?.workerPushedHeadSha !== workerPushedHeadSha) continue;
+    const at = job.completedAt || job.stoppedAt || job.failedAt || '';
+    if (!found || at > foundAt) {
+      found = job;
+      foundAt = at;
     }
   }
   return found;

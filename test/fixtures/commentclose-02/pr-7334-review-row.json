@@ -1,0 +1,18 @@
+{
+  "_fixture": {
+    "source": "data/reviews.db reviewed_prs (repo='laceyenterprises/agent-os', pr_number=7334), read 2026-09-29",
+    "note": "COMMENTCLOSE-02 replay fixture: the decision-bearing columns of the live row. rereview_reason is the sticky reason from the head change BEFORE the reviewed head."
+  },
+  "repo": "laceyenterprises/agent-os",
+  "pr_number": 7334,
+  "pr_state": "open",
+  "review_status": "posted",
+  "reviewer": "claude",
+  "revision_ref": "defd5d0fb1cd7fb500f2011808f5a254d4c4b7be",
+  "reviewer_head_sha": "defd5d0fb1cd7fb500f2011808f5a254d4c4b7be",
+  "reviewed_at": "2026-09-29T03:43:28.393Z",
+  "posted_at": "2026-09-29T04:15:29.978Z",
+  "rereview_requested_at": "2026-09-29T04:03:37.560Z",
+  "rereview_reason": "auto-refresh: posted review on stale head b3f27d7f025e; current head is defd5d0fb1cd",
+  "review_attempts": 2
+}

@@ -560,6 +560,10 @@ not AMA/HAM. The narrow exception is a head-change re-review whose latest
 completed follow-up job carries a clean settled verdict for the current head;
 that projects `review-settled-head-change-rereview` and lets closeout continue
 without waiting for a redundant reviewer post. A missing job head fails closed.
+The re-review reason must also name the current head: `current head is <sha12>`
+for auto-refresh, `live=<sha>` for FSR-06B. The reason stays on the row after
+its review posts, so a reason naming any other head, or a head whose review
+has posted, is history and grants nothing (COMMENTCLOSE-02).
 
 Normal `posted` rows are different. `stale-review-head`,
 `blocking-findings-present`, and `verdict-not-settled-success` remain AMA/HAM

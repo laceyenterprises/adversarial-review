@@ -1,0 +1,122 @@
+{
+  "_fixture": {
+    "source": "data/follow-up-jobs/completed/laceyenterprises__agent-os-pr-7334-2026-09-29T04-15-07-781Z.json",
+    "note": "COMMENTCLOSE-02 replay fixture: live record reduced to its decision inputs; paths, pids, prompts and worker runtime evidence removed."
+  },
+  "schemaVersion": 2,
+  "kind": "adversarial-review-follow-up",
+  "status": "completed",
+  "jobId": "laceyenterprises__agent-os-pr-7334-2026-09-29T04-15-07-781Z",
+  "createdAt": "2026-09-29T04:15:07.781Z",
+  "trigger": {
+    "type": "github-review-posted",
+    "postedAt": "2026-09-29T04:15:07.781Z"
+  },
+  "repo": "laceyenterprises/agent-os",
+  "prNumber": 7334,
+  "baseBranch": "main",
+  "branch": "claude-code/opshimtest-01-tests-never-write-live-op-ledger",
+  "domainId": "code-pr",
+  "subjectExternalId": "laceyenterprises/agent-os#7334",
+  "revisionRef": "defd5d0fb1cd7fb500f2011808f5a254d4c4b7be",
+  "linearTicketId": null,
+  "riskClass": "medium",
+  "reviewerModel": "claude",
+  "builderTag": "claude-code",
+  "critical": false,
+  "nonBlockingOnly": true,
+  "finalRound": "comment-only",
+  "reviewSummary": "Re-review of the test-mode redirect for the op-shim ledger in `op_adapter._op_shim_ledger_path`. The remediation handles both points the earlier round appears to have raised:\n\n- **Single test-mode resolver (TCR-05).** Test-mode detection now delegates to `session_ledger.db_path._running_in_test_mode`, which also recognises the pytest env-isolation sentinel.\n- **Scratch-ledger cleanup.** Each process's scratch ledger is removed at exit, with a pid guard so forked children don't delete the parent's directory.\n\nI checked the production path:\n\n- `db_path` pulls in only the stdlib and `agent_os_config_helper`, which imports `agent_os_config` lazily. The new lazy import is therefore cheap and has no config-load side effects.\n- Both callers of `_op_shim_ledger_path` catch `Exception`: `_emit_op_cache_event` and `op_cache_alerts.record_op_unavailable_circuit_trip`. A resolver failure can't break credential resolution.\n- The explicit `OP_SHIM_DB_PATH` override still wins over the test-mode check. The existing ledger tests (`test_op_adapter.py:3214`, `3470`, `3482`, `3498`) set it explicitly, so they are unaffected.\n- The op spawn, cache-store and circuit-clear semantics that the hardening-ledger contracts cover (orphan reaping, empty-value integrity) are unchanged.\n- Spec-coverage rule: only private helpers changed, so it does not trigger.\n- Operational-behavior rule: the production path is unchanged whenever the process is not a test process.\n\nWhat remains are coverage gaps and fail-silent edges, all non-blocking.",
+  "reviewBody": "## Adversarial Review \u2014 Claude (claude-reviewer-lacey)\n\n> Reviewer: claude \u00b7 claude-opus-5-5 \u00b7 high\n\n> Cross-model review waiver: ADVERSARIAL_REVIEW_DEFAULT_REVIEWER=(unset) pins reviewer=claude for builder=claude-code; the default cross-model review guarantee is waived for this pass by explicit routing state.\n\n## Summary\nRe-review of the test-mode redirect for the op-shim ledger in `op_adapter._op_shim_ledger_path`. The remediation handles both points the earlier round appears to have raised:\n\n- **Single test-mode resolver (TCR-05).** Test-mode detection now delegates to `session_ledger.db_path._running_in_test_mode`, which also recognises the pytest env-isolation sentinel.\n- **Scratch-ledger cleanup.** Each process's scratch ledger is removed at exit, with a pid guard so forked children don't delete the parent's directory.\n\nI checked the production path:\n\n- `db_path` pulls in only the stdlib and `agent_os_config_helper`, which imports `agent_os_config` lazily. The new lazy import is therefore cheap and has no config-load side effects.\n- Both callers of `_op_shim_ledger_path` catch `Exception`: `_emit_op_cache_event` and `op_cache_alerts.record_op_unavailable_circuit_trip`. A resolver failure can't break credential resolution.\n- The explicit `OP_SHIM_DB_PATH` override still wins over the test-mode check. The existing ledger tests (`test_op_adapter.py:3214`, `3470`, `3482`, `3498`) set it explicitly, so they are unaffected.\n- The op spawn, cache-store and circuit-clear semantics that the hardening-ledger contracts cover (orphan reaping, empty-value integrity) are unchanged.\n- Spec-coverage rule: only private helpers changed, so it does not trigger.\n- Operational-behavior rule: the production path is unchanged whenever the process is not a test process.\n\nWhat remains are coverage gaps and fail-silent edges, all non-blocking.\n\n## Blocking issues\n- None.\n\n## Non-blocking issues\n- **Fail-open when session_ledger is not importable**\n  - **File:** `modules/worker-pool/lib/python/cwp_dispatch/op_adapter.py`\n  - **Lines:** `641-652`\n  - **Problem:** `_running_in_test_process` returns `False` whenever `session_ledger` is not on `sys.path`. Any test run that imports `cwp_dispatch.op_adapter` without the worker-pool `conftest.py` path setup is then treated as production and writes to the live ledger at `~/.agent-os/op-shim/calls.db`. Examples: another module's suite, or a script test that puts only `modules/worker-pool/lib/python` on the path. This is exactly the failure this PR is meant to prevent.\n  - **Why it matters:** The protection depends on the ambient `PYTHONPATH`, not on whether the process is actually a test. The fallback direction is \"pollute the live ledger\", which can recreate the \"20 fleet circuit trips\" false signal from a different suite.\n  - **Recommended fix:** Pick one:\n    - Move the canonical resolver into `agent_os_core`, the layer-zero helper package, so every consumer can import it.\n    - Fail closed on the import-missing branch when `\"pytest\" in sys.modules`. That is a one-line guard, not a second resolver.\n\n    Either way, add a test that runs a subprocess without `session_ledger` on the path.\n- **Private cross-package import fails silent in production**\n  - **File:** `modules/worker-pool/lib/python/cwp_dispatch/op_adapter.py`\n  - **Lines:** `646-651`\n  - **Problem:** `from session_ledger.db_path import _running_in_test_mode` binds to a private name in another package. If it is renamed or moved, the import raises `ImportError`, not `ModuleNotFoundError`, so it is re-raised. The broad `except Exception` in `_emit_op_cache_event` and in `record_op_unavailable_circuit_trip` then swallows it. The result is that every production `op_cache_events` row and every `op_unavailable` trip record is dropped silently, and those rows feed the op-hammer alerting.\n  - **Why it matters:** A refactor elsewhere would silently turn off production op telemetry. `test_test_process_detection_delegates_to_the_session_ledger_resolver` does pin the attribute through `patch.object`, which reduces the risk, but the runtime failure is still invisible.\n  - **Recommended fix:** Expose a public alias in `session_ledger.db_path`, e.g. `running_in_test_mode`, and import that instead. Alternatively, catch `ImportError` around the import and log once at warning level, so the failure shows up in logs instead of being swallowed.\n- **Node op shim still writes the live ledger from tests**\n  - **File:** `scripts/lib/op-rate-limit-shim.mjs`\n  - **Lines:** `340-378, 470`\n  - **Problem:** The Node shim resolves `env.OP_SHIM_DB_PATH || defaultDbPath()`, and `defaultDbPath()` is `~/.agent-os/op-shim/calls.db`, with no test-mode redirect. A Python test that spawns the real `op` shim without setting `OP_SHIM_DB_PATH` still writes admission and exit rows to the principal's live ledger. The PR comment says only that \"any other test write goes to a per-process scratch ledger\". It doesn't say this covers Python writes only.\n  - **Why it matters:** This path can also distort the live ledger's attribution counts (the 2026-09-26 symptom) and the rate observed by `op-read-rate.mjs`.\n  - **Recommended fix:** Pick one:\n    - Have the test harness (`conftest.py`) export `OP_SHIM_DB_PATH` to a session-scoped temp path, so child processes inherit it.\n    - Add an equivalent test-mode guard to the Node shim.\n- **Scratch dir leaks and shared-tmp predictability**\n  - **File:** `modules/worker-pool/lib/python/cwp_dispatch/op_adapter.py`\n  - **Lines:** `656-669`\n  - **Problem:**\n    - Cleanup runs only through `atexit`. Processes that end via `os._exit` (multiprocessing fork children), SIGKILL or a timeout kill leave `agent-os-op-shim-test-<pid>` directories behind.\n    - The path is predictable and keyed on pid. On a shared `/tmp`, such as Linux CI, a leftover directory from a recycled pid or one owned by another user makes the `st_uid` check skip every write silently.\n    - A scratch ledger shared by all tests in one process carries trip rows from test to test, so `op_cache_alerts` threshold logic can depend on test order when a test doesn't set `OP_SHIM_DB_PATH`.\n  - **Why it matters:** This is low-severity accumulation and a source of non-deterministic test results, not a production risk.\n  - **Recommended fix:** Create the directory with `tempfile.mkdtemp(prefix=\"agent-os-op-shim-test-\")` once per process, cached by pid, instead of using a predictable name. Optionally, set `OP_SHIM_DB_PATH` per test in the worker-pool `conftest.py` autouse fixture.\n- **Subprocess cleanup test hides child diagnostics**\n  - **File:** `modules/worker-pool/lib/python/cwp_dispatch/test/test_op_adapter.py`\n  - **Lines:** `2069-2088`\n  - **Problem:** `subprocess.run(..., check=True, capture_output=True)` raises `CalledProcessError` without showing the child's stderr. An import failure in the child (for example a missing `agent_os_config` on a copied `sys.path`) therefore shows up as an opaque failure.\n  - **Why it matters:** The test becomes hard to diagnose when it flakes in CI.\n  - **Recommended fix:** Use `check=False` and `assertEqual(result.returncode, 0, result.stderr)`.\n\n## Suggested fixes\n- Make the test-mode fallback fail closed when `session_ledger` cannot be imported (at minimum honour `\"pytest\" in sys.modules`), or move the resolver into `agent_os_core`.\n- Import a public alias of the test-mode resolver, or log `ImportError` instead of letting it be swallowed by the telemetry `except Exception`.\n- Export a session-scoped `OP_SHIM_DB_PATH` from the worker-pool `conftest.py` so Node-shim child processes spawned by tests also avoid the live ledger.\n- Replace the pid-named scratch directory with `tempfile.mkdtemp`, cached per pid.\n- Surface child stderr in `test_scratch_op_shim_ledger_is_removed_at_exit`.\n\n## Verdict\nComment only",
+  "verdict_mode": "enforce",
+  "recommendedFollowUpAction": {
+    "type": "address-adversarial-review",
+    "priority": "normal",
+    "summary": "Start a follow-up coding session for this PR and address the adversarial review findings.",
+    "executionModel": "bounded-manual-rounds",
+    "maxRounds": 2,
+    "futureArchitectureNote": "Long term this should resume the original build session and preserve original build intent/context instead of spawning a fresh session from a file handoff."
+  },
+  "remediationPlan": {
+    "mode": "bounded-manual-rounds",
+    "maxRounds": 2,
+    "currentRound": 2,
+    "rounds": [
+      {
+        "round": 2,
+        "domainId": "code-pr",
+        "subjectExternalId": "laceyenterprises/agent-os#7334",
+        "revisionRef": "defd5d0fb1cd7fb500f2011808f5a254d4c4b7be",
+        "kind": "remediation",
+        "state": "completed",
+        "claimedAt": "2026-09-29T04:16:33.830Z",
+        "spawnedAt": "2026-09-29T04:17:03.670Z",
+        "finishedAt": "2026-09-29T04:28:18.923Z",
+        "reReview": {
+          "requested": false,
+          "requestedAt": null,
+          "reason": null,
+          "triggered": false,
+          "status": "suppressed",
+          "outcomeReason": "comment-only-final-round",
+          "reviewRow": null,
+          "suppressed": "comment-only-final-round"
+        },
+        "completion": {
+          "workerPushedHeadSha": "365500c3d1bcfdf8fc83c9133533af3a5cd5c8b6",
+          "workerPushProof": {
+            "method": "git-cherry-replay",
+            "reviewedCommitsReplayed": 2,
+            "workerCommits": 1
+          },
+          "finalRoundOutcome": {
+            "completed": true,
+            "reason": "none",
+            "ciState": null,
+            "push": "replayed-onto-base"
+          }
+        }
+      }
+    ],
+    "transientRetries": 0,
+    "retryHistory": [],
+    "retryAfter": null,
+    "stopReason": null,
+    "stop": null,
+    "nextAction": null
+  },
+  "nonBlockingRoundsBefore": 0,
+  "nonBlockingMaxRounds": 1,
+  "claimedAt": "2026-09-29T04:16:33.830Z",
+  "remediationWorker": {
+    "model": "claude-code",
+    "state": "completed"
+  },
+  "completedAt": "2026-09-29T04:28:18.923Z",
+  "completion": {
+    "source": "claude-code-output-last-message",
+    "workerModel": "claude-code",
+    "workerPushedHeadSha": "365500c3d1bcfdf8fc83c9133533af3a5cd5c8b6",
+    "workerPushProof": {
+      "method": "git-cherry-replay",
+      "reviewedCommitsReplayed": 2,
+      "workerCommits": 1
+    },
+    "finalRoundOutcome": {
+      "completed": true,
+      "reason": "none",
+      "ciState": null,
+      "push": "replayed-onto-base"
+    }
+  },
+  "reReview": {
+    "requested": false,
+    "requestedAt": null,
+    "reason": null,
+    "triggered": false,
+    "status": "suppressed",
+    "outcomeReason": "comment-only-final-round",
+    "reviewRow": null,
+    "suppressed": "comment-only-final-round"
+  }
+}

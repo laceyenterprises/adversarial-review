@@ -322,9 +322,27 @@ export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
   const closerStaleHeadResume =
     options?.allowStaleReviewHeadHammerResume === true &&
     reasons.includes('stale-review-head');
+  // COMMENTCLOSE-01 proven final-round push (see HMR-01 below for the rest).
+  const commentOnlyFinalRoundResume = options?.commentOnlyFinalRoundResume === true &&
+    !reasons.includes('blocking-findings-present') &&
+    !reasons.includes('blocking-findings-unknown') &&
+    !reasons.includes('ci-not-green') &&
+    hasCommentOnlyTerminalResumeReason(
+      reasons.filter((reason) => reason !== 'stale-review-head'),
+    );
+  const commentOnlyFinalRoundReasonsCovered = () => reasons.every((reason) => (
+    reason === 'stale-review-head' ||
+    reason === 'verdict-not-settled-success' ||
+    STRICT_NON_BLOCKING_REFUSAL_REASONS.has(reason) ||
+    HAMMER_AUTO_REMEDIABLE_MISS_REASONS.has(reason)
+  ));
   if (options?.reviewCycleExhausted === true) {
     if (effectiveReasons.includes('stale-review-head')) {
-      return false;
+      // COMMENTCLOSE-02: the comment-only final round is often the round that
+      // exhausts the budget (agent-os#7334: round 2 of 2), and its proven push is
+      // a stale reviewed head by construction. That one stale head may resume
+      // the hammer's terminal validation; any other still parks.
+      return commentOnlyFinalRoundResume && commentOnlyFinalRoundReasonsCovered();
     }
     return true;
   }
@@ -377,20 +395,8 @@ export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
     commentOnlyTerminalMs !== null &&
     commentOnlyTerminalMs >= commentOnlyTerminalGraceMs &&
     hasCommentOnlyTerminalResumeReason(effectiveReasons);
-  const commentOnlyFinalRoundResume = options?.commentOnlyFinalRoundResume === true &&
-    !reasons.includes('blocking-findings-present') &&
-    !reasons.includes('blocking-findings-unknown') &&
-    !reasons.includes('ci-not-green') &&
-    hasCommentOnlyTerminalResumeReason(
-      reasons.filter((reason) => reason !== 'stale-review-head'),
-    );
   if (commentOnlyFinalRoundResume) {
-    return reasons.every((reason) => (
-      reason === 'stale-review-head' ||
-      reason === 'verdict-not-settled-success' ||
-      STRICT_NON_BLOCKING_REFUSAL_REASONS.has(reason) ||
-      HAMMER_AUTO_REMEDIABLE_MISS_REASONS.has(reason)
-    ));
+    return commentOnlyFinalRoundReasonsCovered();
   }
 
   const hasActionable =

@@ -1,0 +1,101 @@
+{
+  "_fixture": {
+    "source": "data/follow-up-jobs/completed/laceyenterprises__agent-os-pr-7313-2026-09-28T22-33-55-502Z.json",
+    "note": "COMMENTCLOSE-01 replay fixture: live record reduced to its decision inputs; paths, pids, prompts and worker runtime evidence removed."
+  },
+  "schemaVersion": 2,
+  "kind": "adversarial-review-follow-up",
+  "status": "completed",
+  "jobId": "laceyenterprises__agent-os-pr-7313-2026-09-28T22-33-55-502Z",
+  "createdAt": "2026-09-28T22:33:55.502Z",
+  "trigger": {
+    "type": "github-review-posted",
+    "postedAt": "2026-09-28T22:33:55.502Z"
+  },
+  "repo": "laceyenterprises/agent-os",
+  "prNumber": 7313,
+  "baseBranch": "main",
+  "branch": "claude-code/omd11-evidence",
+  "domainId": "code-pr",
+  "subjectExternalId": "laceyenterprises/agent-os#7313",
+  "revisionRef": "b90d1471efebe965b5c15d3cf975f93078c4ee99",
+  "linearTicketId": null,
+  "riskClass": "medium",
+  "reviewerModel": "gemini",
+  "builderTag": "claude-code",
+  "critical": false,
+  "nonBlockingOnly": true,
+  "finalRound": "comment-only",
+  "reviewSummary": "The PR adds an operational report (`REPORT-omd-11-oss-dispatch-activation-2026-09-28.md`) and links to it from the OSS model dispatch runbook. Both files are documentation-only. The report provides clear evidence of a successful OSS model dispatch activation, including status checks, smoke test results across six routes, and a list of applied fixes. No internal inconsistencies, unsupported claims, missing specs, or operator harm were found in the provided diff.",
+  "reviewBody": "## Adversarial Review — Gemini (gemini-reviewer-lacey)\n\n> Reviewer: gemini · Gemini 3.1 Pro (High) · none\n\n> Review mode: **slim** (RPL-08 low-risk fast lane; classified docs, 2 file(s), +154/-0). Verdict semantics and required checks are unchanged.\n\n## Summary\nThe PR adds an operational report (`REPORT-omd-11-oss-dispatch-activation-2026-09-28.md`) and links to it from the OSS model dispatch runbook. Both files are documentation-only. The report provides clear evidence of a successful OSS model dispatch activation, including status checks, smoke test results across six routes, and a list of applied fixes. No internal inconsistencies, unsupported claims, missing specs, or operator harm were found in the provided diff.\n\n## Blocking issues\n- None.\n\n## Non-blocking issues\n- **Typo in status timestamp**\n  - **File:** `docs/reports/REPORT-omd-11-oss-dispatch-activation-2026-09-28.md`\n  - **Lines:** `26`\n  - **Problem:** The heading includes the phrase `(22:2xZ, after all fixes deployed)`.\n  - **Why it matters:** The `x` in `22:2xZ` appears to be a typo for a digit (such as `7` or `8`, since the final smoke test completed at 22:27Z), which slightly obscures the exact time the status block was captured.\n  - **Recommended fix:** Replace `22:2xZ` with the intended exact timestamp, such as `22:27Z`.\n\n## Suggested fixes\n- None.\n\n## Verdict\nComment only",
+  "verdict_mode": "enforce",
+  "recommendedFollowUpAction": {
+    "type": "address-adversarial-review",
+    "priority": "normal",
+    "summary": "Start a follow-up coding session for this PR and address the adversarial review findings.",
+    "executionModel": "bounded-manual-rounds",
+    "maxRounds": 2,
+    "futureArchitectureNote": "Long term this should resume the original build session and preserve original build intent/context instead of spawning a fresh session from a file handoff."
+  },
+  "remediationPlan": {
+    "mode": "bounded-manual-rounds",
+    "maxRounds": 2,
+    "currentRound": 1,
+    "rounds": [
+      {
+        "round": 1,
+        "domainId": "code-pr",
+        "subjectExternalId": "laceyenterprises/agent-os#7313",
+        "revisionRef": "b90d1471efebe965b5c15d3cf975f93078c4ee99",
+        "kind": "remediation",
+        "state": "completed",
+        "claimedAt": "2026-09-28T22:34:40.885Z",
+        "spawnedAt": "2026-09-28T22:34:57.053Z",
+        "finishedAt": "2026-09-28T22:38:59.717Z",
+        "reReview": {
+          "requested": false,
+          "requestedAt": null,
+          "reason": null,
+          "triggered": false,
+          "status": "suppressed",
+          "outcomeReason": "comment-only-final-round",
+          "reviewRow": null,
+          "suppressed": "comment-only-final-round"
+        },
+        "completion": {
+          "workerPushedHeadSha": "6a9f27f04fedeb533b291610b2c9dcc6300f13e1"
+        }
+      }
+    ],
+    "transientRetries": 0,
+    "retryHistory": [],
+    "retryAfter": null,
+    "stopReason": null,
+    "stop": null,
+    "nextAction": null
+  },
+  "nonBlockingRoundsBefore": 0,
+  "nonBlockingMaxRounds": 1,
+  "claimedAt": "2026-09-28T22:34:40.885Z",
+  "completedAt": "2026-09-28T22:38:59.717Z",
+  "reReview": {
+    "requested": false,
+    "requestedAt": null,
+    "reason": null,
+    "triggered": false,
+    "status": "suppressed",
+    "outcomeReason": "comment-only-final-round",
+    "reviewRow": null,
+    "suppressed": "comment-only-final-round"
+  },
+  "remediationWorker": {
+    "model": "codex",
+    "workerClass": "codex",
+    "state": "completed"
+  },
+  "completion": {
+    "source": "codex-output-last-message",
+    "workerModel": "codex",
+    "workerPushedHeadSha": "6a9f27f04fedeb533b291610b2c9dcc6300f13e1"
+  }
+}

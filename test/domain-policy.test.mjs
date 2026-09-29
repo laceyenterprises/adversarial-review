@@ -122,7 +122,7 @@ test('domain merge-authority policy overrides fallback defaults', () => {
   assert.equal(cfg.autonomousMergeExecutionEnabled, true);
   assert.equal(cfg.lha.consumeAttestations, true);
   assert.equal(cfg.strictMode, true);
-  assert.deepEqual(cfg.workerClassFallback, ['claude-code']);
+  assert.deepEqual(cfg.workerClassFallback, ['hammer-claude']);
   assert.deepEqual(cfg.eligibility.riskClasses, ['low']);
   assert.deepEqual(cfg.eligibility.fastMergeLabels, ['fast-merge:test-fixtures', 'fast-merge:docs']);
   assert.equal(cfg.branchProtection.required, true);

@@ -2661,3 +2661,9 @@ remediation outcome comments carry a `harness · model · effort` line below
 their existing heading. `reviewer_passes.reviewer_model` and nullable
 `reasoning_effort` retain the values passed to the harness; old rows remain
 nullable and the first-line review marker remains unchanged for gate parsing.
+
+The code-pr domain declares `hammer-claude` as its merge-authority fallback.
+A coding-only `claude-code` class cannot accept the `merge` task kind; hosts and
+forks inherit the merge-capable fallback without a host-local override. Explicit
+operator overrides still take precedence under the domain-policy resolver.
+This is a role declaration, not a temporary provider-outage pin.

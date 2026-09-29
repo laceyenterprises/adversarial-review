@@ -1265,3 +1265,9 @@ diagnostic list.
    AMA-06A's admit gate lets it through.
 
 The full SPEC reference: §4.8 coexistence table + §6 AC#9 rollback.
+
+The code-pr domain declares `hammer-claude` as its merge-authority fallback.
+A coding-only `claude-code` class cannot accept the `merge` task kind; hosts and
+forks inherit the merge-capable fallback without a host-local override. Explicit
+operator overrides still take precedence under the domain-policy resolver.
+This is a role declaration, not a temporary provider-outage pin.

@@ -24,7 +24,11 @@
         "src/comment-only-final-round.mjs",
         "src/comment-only-final-round-completion.mjs",
         "src/follow-up-review-claim.mjs",
-        "src/ama-closure-orchestration.mjs"
+        "src/ama-closure-orchestration.mjs",
+        "src/remediation-quota-hold.mjs",
+        "src/remediation-claimed-requeue.mjs",
+        "src/remediation-worker-class-fallback.mjs",
+        "src/remediation-quota-evidence.mjs"
       ],
       "owner": "follow-up remediation queue"
     },

@@ -608,14 +608,34 @@ dispatcher can spawn. The follow-up daemon validates the override during
 startup and exits before claiming work if the value is invalid. Consume-time
 worker selection also runs inside the claimed-job failure handler so
 direct/helper callers cannot strand a job in `in-progress/` on a bad override.
-On each follow-up consume, the routed worker remains primary unless HQ fleet
-quota status authoritatively grounds its provider as exhausted or suspended.
-When grounded, the consumer tries the ordered
-`ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK` classes (default
-`claude-code, codex`) and selects the first with confirmed available quota.
+On each follow-up claim, not only at job creation, the routed worker remains
+primary unless it is capped. It is capped when HQ fleet quota status
+hard-grounds its provider (exhausted or suspended), when it reports the routed
+model exhausted (the provider's `models[]` row for that model, or the
+`model_only_exhaustion` signature), or when AFH-02 soft-grounds the provider.
+It is also capped when the job's own quota hold recorded a provider reset more
+than one quota hold window (60 minutes) away; that evidence needs no fleet read.
+When capped, the consumer tries the ordered `roles.remediator_fallback` classes
+and selects the first that is not capped itself and, when fleet status is
+readable, has confirmed available quota. The spawned worker records
+`remediationWorker.fallbackFrom`, `fallbackReason` and `fallbackResolution`. The list is
+declared config (REMFALLBACK-01): it is registered in the Node, Python and
+shell loaders, its default (`[claude-code, codex]`) lives in the schema and in
+this module's `config.yaml`, and `AGENT_OS_ROLES_REMEDIATOR_FALLBACK` or the
+legacy comma-separated `ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK`
+override it (`''` or `[]` disables it).
+A candidate whose model family may review the PR's next round is skipped
+(`reviews-next-round:<model>`), so the fallback never hands the next review the
+reviewer's own work. Those models are the reviewer of the round being
+remediated, plus the route reviewer selection gives the builder with and without
+its primary reviewer capped (the gemini fallback layer). The check is the same
+`isCrossModelReviewWaived` rule that keeps a builder from reviewing its own
+work. The routed primary (builder-tag route or operator pin) is not
+second-guessed. If no candidate survives, the claim holds as described below.
 This availability fallback may select the PR builder's family as a remediator;
 the normal builder-tag route resumes automatically when its provider recovers.
-Unknown, degraded, and unreadable quota states do not authorize fallback.
+Unknown and degraded states alone do not authorize fallback, and an unreadable
+status with no job-local evidence keeps the primary.
 
 Code-PR reviewer and remediator stage prompts share the same canonical
 doc-currency contract. Reviewer stages must flag stale in-repo data-model docs
@@ -1361,10 +1381,13 @@ fleet quota status (`hq fleet quota status --json`, provider OAuth state). The
 probe is asynchronously prefetched at the start of the consume tick, bounded
 (default 10s), and cached briefly per harness so a slow or failing local HQ
 command cannot block the synchronous job-claim loop or spam subprocesses on every
-poll. If that live signal reports quota available, the gate clears the per-job
-hold and consumes the job in that tick; if the signal is missing, unknown,
-exhausted, not yet prefetched, or errors, the gate fails closed and keeps the
-clamped hold. Error decisions from the cached probe are persisted back to the
+poll. The probe answers for the held class and, when the hold recorded one, the
+model it ran: the per-model `models[]` row, the `model_only_exhaustion`
+signature and AFH-02 soft grounding all count as unavailable, the same verdict
+the claim-time remediator resolver uses. If that live signal reports quota
+available, the gate clears the per-job hold and consumes the job in that tick;
+if the signal is missing, unknown, exhausted, not yet prefetched, or errors, the
+gate fails closed and keeps the clamped hold. Error decisions from the cached probe are persisted back to the
 pending job as `quotaHoldRevalidatedErroredAt` and
 `quotaHoldRevalidationError`, the same as thrown revalidation failures, so
 operators have durable evidence for why the live wakeup did not clear the hold.
@@ -1381,6 +1404,24 @@ If the remediation job exhausts its bounded quota retry budget before the
 provider window clears or the worker can produce a valid remediation reply, it
 must become terminal with `quota-exhausted-budget-exhausted` so operators see a
 loud stop instead of an endless suspended loop.
+
+REMFALLBACK-01 (agent-os#7327) narrows that budget to the holds that respawn the
+same provider. When the parsed provider reset is further out than one hold
+window, the hold spends no transient-retry budget and cannot end in
+`quota-exhausted-budget-exhausted`. The next claim re-resolves the remediator
+class and never respawns the capped class before its reset (see the claim-time
+fallback above). The retry entry records `workerClass`, `model` and
+`pastHoldWindow` as the job-local evidence that claim reads. When a claim finds
+the routed class capped and no `roles.remediator_fallback` class can take the
+job, it does not spawn. The claim returns to `pending` without spending a round
+or retry budget, and holds until the reset when that is known and inside one
+hold window, otherwise for one window. The hold is a `quota-exhausted` retry
+entry with `noRespawn: true` and `source: remediator-fallback-resolution`, and
+it logs `-> remediator-capped-hold`, which the fleet provider-hold counter does
+not count. The gate releases such a hold early only on a good probe newer than
+the hold, so a stale "available" verdict cannot turn it into a claim that
+immediately holds again. A reset inside the window keeps the routed class: the
+job holds until the reset rather than moving classes.
 
 For a missing or empty final-message artifact that cannot resume from its
 workspace, reconcile inspects the worker log's final failure. A terminal

@@ -45,12 +45,14 @@ export const DEFAULT_ROLE_TOP_PATH = join(ROOT, '..', '..', 'config.yaml');
 const CANONICAL_ENV_BY_KEY = Object.freeze({
   'roles.reviewer': 'AGENT_OS_ROLES_REVIEWER',
   'roles.remediator': 'AGENT_OS_ROLES_REMEDIATOR',
+  'roles.remediator_fallback': 'AGENT_OS_ROLES_REMEDIATOR_FALLBACK',
   'roles.merge_agent_worker_class': 'AGENT_OS_ROLES_MERGE_AGENT_WORKER_CLASS',
 });
 
 const LEGACY_ENV_BY_KEY = Object.freeze({
   'roles.reviewer': 'ADVERSARIAL_REVIEW_DEFAULT_REVIEWER',
   'roles.remediator': 'ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR',
+  'roles.remediator_fallback': 'ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK',
   'roles.merge_agent_worker_class': 'ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS',
 });
 
@@ -289,6 +291,26 @@ export function resolveDefaultRemediator({
   const value = cfg.get('roles.remediator');
   if (!value || value === 'adversarial') return null;
   return value;
+}
+
+// resolveRemediatorFallback — REMFALLBACK-01. The declared, ordered list of
+// remediator worker classes a capped remediator may fall back to
+// (`roles.remediator_fallback`, env `AGENT_OS_ROLES_REMEDIATOR_FALLBACK` or the
+// legacy `ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK`). The schema owns
+// the default and the class allowlist; this only de-duplicates, preserving order.
+export function resolveRemediatorFallback({
+  env = process.env,
+  topPath,
+  loaderImpl,
+} = {}) {
+  const cfg = loadRoleConfig({
+    env,
+    topPath,
+    loaderImpl,
+    contextKey: 'roles.remediator_fallback',
+  });
+  const value = cfg.get('roles.remediator_fallback');
+  return [...new Set((Array.isArray(value) ? value : []).map((entry) => String(entry)))];
 }
 
 // resolveDefaultReviewer — returns the operator-pinned reviewer route

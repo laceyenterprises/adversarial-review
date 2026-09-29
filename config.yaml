@@ -78,7 +78,15 @@ reviewer:
 # then env override LAST.
 roles:
   reviewer: adversarial             # enum: claude-code / codex / claude (legacy alias for claude-code) / gemini / adversarial
-  remediator: adversarial           # enum: claude-code / codex / adversarial
+  remediator: adversarial           # enum: claude-code / codex / gemini / adversarial
+  # REMFALLBACK-01: ordered fallback when the routed remediator's provider is
+  # capped (grounded, AFH soft-grounded, model-exhausted, or a provider reset past
+  # the quota hold window). Re-resolved on every claim, so it reverts on recovery.
+  # A candidate that is capped too, or whose model could review the PR's next
+  # round, is skipped. [] disables it (a capped remediator holds, no respawn).
+  # Env: AGENT_OS_ROLES_REMEDIATOR_FALLBACK /
+  #      ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK (comma-separated)
+  remediator_fallback: [claude-code, codex]   # enum items: claude-code / codex / gemini
   # ARC-12/13 role registry (v2 app architecture §5). Left EMPTY by default so
   # boot never has to resolve the hq-published worker-class roster and the
   # code-pr pipeline gate (domains/code-pr.json → pipeline.enabled) stays inert

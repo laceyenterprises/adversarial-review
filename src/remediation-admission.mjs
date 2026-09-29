@@ -13,7 +13,8 @@ import {
   listInProgressFollowUpJobs,
   listPendingFollowUpJobs,
 } from './follow-up-jobs.mjs';
-import { quotaAvailableFromFleetStatus } from './fleet-quota-status.mjs';
+import { harnessCapFromFleetStatus } from './fleet-quota-status.mjs';
+import { quotaHoldTarget } from './remediation-quota-evidence.mjs';
 import { followUpJobRepoPrKey } from './remediation-prompt.mjs';
 import { listActiveAmaCloserDispatches } from './ama/dispatch-closer.mjs';
 
@@ -34,7 +35,9 @@ function resolveMaxTransientRemediationRetries(env = process.env) {
 // Fleet-quota provider-state parsing + harness→provider mapping now live in the
 // shared HHR classifier (src/fleet-quota-status.mjs) so the reviewer/remediator
 // quota-hold path and the AMA closer/hammer harness-fallback path classify caps
-// identically. `quotaAvailableFromFleetStatus` is imported above.
+// identically. REMFALLBACK-01: a hold is released only when the claim-time
+// remediator resolver would also see the class as available, so the gate reads
+// the same model-level and AFH-aware verdict (`harnessCapFromFleetStatus`).
 
 function latestRetryHistoryEntry(job) {
   const history = Array.isArray(job?.remediationPlan?.retryHistory)
@@ -51,24 +54,23 @@ function isQuotaExhaustedRetryHold(job) {
   return job?.remediationPlan?.lastRetryMetadata?.code === 'quota-exhausted';
 }
 
-function quotaHoldHarness(job) {
-  const latestRetry = latestRetryHistoryEntry(job);
-  return String(
-    latestRetry?.retryMetadata?.harness
-    || job?.remediationPlan?.lastRetryMetadata?.harness
-    || ''
-  ).trim().toLowerCase() || 'unknown';
-}
-
-function quotaHoldHarnessesForPendingJobs(rootDir, { nowMs = Date.now() } = {}) {
-  const harnesses = new Set();
+function quotaHoldTargetsForPendingJobs(rootDir, { nowMs = Date.now() } = {}) {
+  const targets = [];
   for (const { job } of listPendingFollowUpJobs(rootDir)) {
     const retryAfterMs = Date.parse(job?.remediationPlan?.retryAfter || '');
     if (!Number.isFinite(retryAfterMs) || retryAfterMs <= nowMs) continue;
     if (!isQuotaExhaustedRetryHold(job)) continue;
-    harnesses.add(quotaHoldHarness(job));
+    const { harness, model } = quotaHoldTarget(job);
+    targets.push({ harness, model });
   }
-  return Array.from(harnesses);
+  return targets;
+}
+
+// Cache key for one hold target. A bare harness keeps its pre-REMFALLBACK key.
+function quotaHoldTargetKey(harness, model) {
+  const normalizedHarness = String(harness || '').trim().toLowerCase() || 'unknown';
+  const normalizedModel = String(model || '').trim();
+  return normalizedModel ? `${normalizedHarness}|${normalizedModel}` : normalizedHarness;
 }
 
 function createQuotaHoldRevalidator({
@@ -100,10 +102,11 @@ function createQuotaHoldRevalidator({
     return null;
   }
 
-  async function refreshHarness(normalizedHarness, { now, nowMs } = {}) {
+  async function refreshHarness({ harness, model = null }, { now, nowMs } = {}) {
     const nowValueMs = Number(nowMs ?? defaultNowMs());
     const checkedAtMs = Number.isFinite(nowValueMs) ? nowValueMs : Date.now();
-    const cached = cachedDecisionFor(normalizedHarness, checkedAtMs);
+    const key = quotaHoldTargetKey(harness, model);
+    const cached = cachedDecisionFor(key, checkedAtMs);
     if (cached) return cached;
     let decision;
     try {
@@ -115,7 +118,14 @@ function createQuotaHoldRevalidator({
         timeout: timeoutMs,
       });
       const stdout = typeof result === 'string' ? result : result?.stdout;
-      decision = quotaAvailableFromFleetStatus(stdout || '', { harness: normalizedHarness });
+      const cap = harnessCapFromFleetStatus(stdout || '', { harness: String(harness || '').trim().toLowerCase(), model });
+      decision = {
+        available: cap.available,
+        state: cap.state,
+        source: cap.source,
+        ...(cap.capSource ? { capSource: cap.capSource } : {}),
+        lastGoodAt: cap.lastGoodAt || null,
+      };
     } catch (err) {
       decision = {
         available: false,
@@ -125,18 +135,17 @@ function createQuotaHoldRevalidator({
       };
     }
     const cachedDecision = buildCachedDecision(decision, { now, checkedAtMs });
-    cache.set(normalizedHarness, {
+    cache.set(key, {
       checkedAtMs,
       decision: cachedDecision,
     });
     return cachedDecision;
   }
 
-  const revalidator = ({ harness, now, nowMs } = {}) => {
-    const normalizedHarness = String(harness || '').trim().toLowerCase() || 'unknown';
+  const revalidator = ({ harness, model = null, now, nowMs } = {}) => {
     const nowValueMs = Number(nowMs ?? defaultNowMs());
     const checkedAtMs = Number.isFinite(nowValueMs) ? nowValueMs : Date.now();
-    const cached = cachedDecisionFor(normalizedHarness, checkedAtMs);
+    const cached = cachedDecisionFor(quotaHoldTargetKey(harness, model), checkedAtMs);
     if (cached) return cached;
     return buildCachedDecision({
       available: false,
@@ -148,14 +157,15 @@ function createQuotaHoldRevalidator({
   revalidator.prefetch = async ({ harnesses = [], rootDir = null, now, nowMs } = {}) => {
     const nowValueMs = Number(nowMs ?? defaultNowMs());
     const checkedAtMs = Number.isFinite(nowValueMs) ? nowValueMs : Date.now();
-    const pendingHarnesses = rootDir
-      ? quotaHoldHarnessesForPendingJobs(rootDir, { nowMs: checkedAtMs })
+    const pendingTargets = rootDir
+      ? quotaHoldTargetsForPendingJobs(rootDir, { nowMs: checkedAtMs })
       : [];
-    const normalizedHarnesses = new Set();
-    for (const harness of [...harnesses, ...pendingHarnesses]) {
-      normalizedHarnesses.add(String(harness || '').trim().toLowerCase() || 'unknown');
+    const targets = new Map();
+    for (const target of [...harnesses.map((harness) => ({ harness, model: null })), ...pendingTargets]) {
+      const harness = String(target.harness || '').trim().toLowerCase() || 'unknown';
+      targets.set(quotaHoldTargetKey(harness, target.model), { harness, model: target.model || null });
     }
-    return Promise.all(Array.from(normalizedHarnesses, (harness) => refreshHarness(harness, { now, nowMs: checkedAtMs })));
+    return Promise.all(Array.from(targets.values(), (target) => refreshHarness(target, { now, nowMs: checkedAtMs })));
   };
 
   return revalidator;

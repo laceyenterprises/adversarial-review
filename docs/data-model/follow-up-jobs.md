@@ -2,7 +2,7 @@
 
 **Owner:** follow-up remediation queue
 **Store:** `data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/*.json`
-**Source of truth:** `src/follow-up-jobs.mjs`, `src/follow-up-remediation.mjs`
+**Source of truth:** `src/follow-up-jobs.mjs`, `src/follow-up-remediation.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`
 **Runtime surface:** `src/comment-only-final-round.mjs`, `src/comment-only-final-round-completion.mjs`, `src/ama-closure-orchestration.mjs`
 
 ## Comment-only final-round evidence
@@ -92,3 +92,57 @@ waits for that job to appear or the claim to be released or abandoned, and throw
 `review-follow-up-in-flight` if that takes more than 4 minutes. Release is
 token-checked and removes the chain only for the current holder. A review with no
 reviewed SHA or no body is not de-duplicated.
+
+## Remediator quota holds and fallback (REMFALLBACK-01)
+
+A quota hold is a job whose latest `remediationPlan.retryHistory[]` entry has
+`retryMetadata.code: "quota-exhausted"` (a legacy job with no history is read
+from `remediationPlan.lastRetryMetadata`). Two writers produce it.
+
+Reconcile (`settleQuotaExhaustedRemediation`, `src/remediation-quota-hold.mjs`)
+writes it when a spawned worker hit a provider usage cap:
+
+- `harness`: the quota harness named by the cap signal.
+- `workerClass`, `model`: the remediator class (`remediationWorker.model`) and
+  resolved model that ran, or `null`. These are the job-local cap evidence the
+  next claim reads.
+- `resetAt`, `providerResetAt`: the parsed provider reset (ISO) or `null`.
+- `source`: `"provider-reported"` or `"fallback-window"`.
+- `maxUnvalidatedHoldMs`: the one-hour hold window.
+- `pastHoldWindow`: `true` when the provider reset is more than one hold window
+  away. That hold does not increment `remediationPlan.transientRetries`, and it
+  never reaches the terminal `quota-exhausted-budget-exhausted` failure, because
+  the next claim re-resolves the remediator class instead of respawning the
+  capped one.
+
+Claim (`holdClaimedJobForCappedRemediator`, `src/remediation-claimed-requeue.mjs`)
+writes it when the routed remediator is capped and no declared fallback class
+can take the job. The job returns to `pending/` budget neutral, with its claimed
+round removed, `remediationPlan.retryAfter` set to the hold end and a
+`consume-pending-round` `nextAction`. The entry has `worker: null`, and
+`retryMetadata` carries `code`, `harness`, `workerClass`, `model`, `resetAt`,
+`providerResetAt`, `maxUnvalidatedHoldMs` as above, plus:
+
+- `source`: `"remediator-fallback-resolution"`.
+- `capSource`: what proved the cap, for example a fleet quota state or
+  `"provider-reset-past-hold-window"`.
+- `fallbackReason`: `"no-available-fallback"`, `"no-fallback-configured"` or
+  `"primary-resets-within-hold-window"`.
+- `skipped[]`: `{ workerClass, reason }` for each declared fallback class passed
+  over (`provider-untracked`, `reviews-next-round:<reviewer>`,
+  `capped:<capSource>`, `resets-within-hold-window`, `unavailable:<state>`).
+- `noRespawn: true`: the claim gate releases the hold early only on a fleet
+  probe whose `lastGoodAt` is newer than the entry's `requeuedAt`.
+
+When the claim moves the job to a fallback class, the spawned
+`remediationWorker` records the substitution:
+
+- `fallbackFrom`: the routed class that was capped.
+- `fallbackReason`: the cap source, or the routing reason when none.
+- `fallbackResolution`: `{ reason: "primary-grounded-fallback", capSource,
+  primaryState, resetAt, candidateState, skipped[] }`. `candidateState` is the
+  fallback's fleet quota state, or `"unverified"` when the fleet status could
+  not be read.
+
+A job run by its routed class has none of these fields. The fallback order is
+`roles.remediator_fallback` in `config.yaml`.

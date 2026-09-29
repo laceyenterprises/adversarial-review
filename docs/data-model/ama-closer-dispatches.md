@@ -3,7 +3,7 @@
 **Owner:** AMA closer dispatch and recovery
 **Store:** `data/follow-up-jobs/ama-closer-dispatches/`
 **Source of truth:** `src/ama/dispatch-closer.mjs`
-**Runtime surface:** `src/ama/dispatch-closer.mjs`, `src/ama/closer-terminal-cancel.mjs`, `src/follow-up-stuck-claim-sweep.mjs`, `src/recovery-reaper.mjs`
+**Runtime surface:** `src/ama/dispatch-closer.mjs`, `src/ama/dispatch-dir-names.mjs`, `src/ama/closer-terminal-cancel.mjs`, `src/follow-up-stuck-claim-sweep.mjs`, `src/recovery-reaper.mjs`
 
 ## Purpose
 
@@ -78,5 +78,10 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
   advanced head writes its record under that head, so when a record for the
   same `reviewedSha` carries a newer `launchRequestId` and `dispatchedAt` than
   the reviewed-head record, the closer reads that one (HAMBG-02).
+- The per-PR scan and the active-launch scan share one directory listing
+  (`src/ama/dispatch-dir-names.mjs`). A stat of the directory decides whether
+  that listing is reused. Any entry created, renamed or removed changes the
+  directory mtime, and a listing taken within 2s of that mtime is never reused.
+  Record contents are always read fresh.
 - Writes are atomic JSON rewrites. Corrupt or unreadable records are skipped by
   bounded scans so one bad file cannot blind later active reservations.

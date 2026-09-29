@@ -30,7 +30,6 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
-  readdirSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -41,6 +40,7 @@ import { promisify } from 'node:util';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { findActiveRemediationJob } from './active-remediation-job.mjs';
+import { listSettledJsonNames } from './dispatch-dir-names.mjs';
 import { createLogChangeGate } from '../log-change-gate.mjs';
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from '../config-loader.mjs';
 import {
@@ -1598,19 +1598,15 @@ export function readAmaCloserDispatchRecord(rootDir, identity) {
   return readJsonFile(amaCloserDispatchFilePath(rootDir, identity));
 }
 
-// Every dispatch record for one PR, whatever head each is keyed on.
+// Every dispatch record for one PR, whatever head each is keyed on. The
+// directory listing is shared with listActiveAmaCloserDispatches and re-read
+// only when the directory changed (listSettledJsonNames).
 function listAmaCloserDispatchRecordsForPr(rootDir, { repo, prNumber } = {}) {
   const sentinel = 'H';
   const sample = basename(amaCloserDispatchFilePath(rootDir, { repo, prNumber, headSha: sentinel }));
   const prefix = sample.slice(0, sample.length - `${sentinel}.json`.length);
-  let names = [];
-  try {
-    names = readdirSync(amaCloserDispatchDir(rootDir));
-  } catch {
-    return [];
-  }
-  return names
-    .filter((name) => name.startsWith(prefix) && name.endsWith('.json'))
+  return listSettledJsonNames(amaCloserDispatchDir(rootDir))
+    .filter((name) => name.startsWith(prefix))
     .map((name) => readJsonFile(join(amaCloserDispatchDir(rootDir), name)))
     .filter((record) => record && Number(record.prNumber) === Number(prNumber) && record.repo === repo);
 }
@@ -1766,17 +1762,9 @@ export function isActiveAmaCloserDispatchRecord(record, options = {}) {
 export function listActiveAmaCloserDispatches(rootDir, options = {}) {
   const dir = amaCloserDispatchDir(rootDir);
   const log = options?.log || options?.logger || null;
-  let entries;
-  try {
-    entries = readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-
   const activeDispatches = [];
-  for (const entry of entries) {
-    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
-    const dispatchPath = join(dir, entry.name);
+  for (const name of listSettledJsonNames(dir)) {
+    const dispatchPath = join(dir, name);
     try {
       const record = readJsonFile(dispatchPath);
       if (!isActiveAmaCloserDispatchRecord(record, options)) continue;

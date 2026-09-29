@@ -17,6 +17,10 @@
 // or parks it with an operator-visible alert. The hammer route stays behind the
 // closer's own per-PR retry cap, and the park is re-evaluated every tick, so a
 // daemon merge on a later tick still lands the PR.
+//
+// A decline made only of transient GitHub reads (mergeability UNKNOWN, labels
+// unreadable) is logged but never counted (DIRTYOWN-01): it says nothing about
+// the head, so it must not walk a PR toward the park/page escalation.
 
 import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -207,12 +211,41 @@ export function observeDaemonRouteDisagreement({
   headSha,
   daemonCleanMerge,
   hammerRemediable,
+  transientRead = false,
   bound = DAEMON_ROUTE_DISAGREEMENT_BOUND,
   recordParkImpl = null,
   now = new Date().toISOString(),
   logger = console,
 } = {}) {
   const decline = daemonDeclineSummary(daemonCleanMerge);
+  if (transientRead) {
+    // DIRTYOWN-01: the daemon declined only on a still-settling GitHub read
+    // (mergeability UNKNOWN, labels unreadable). That says nothing about the
+    // head, so log it but never count it: repeated transient reads under a
+    // moving base must not reach the park/page escalation.
+    const prior = readDaemonRouteDisagreement(rootDir, { repo, prNumber }, { headSha, bound, logger });
+    logger?.log?.(JSON.stringify({
+      schemaVersion: 1,
+      event: 'ama.daemon_route_disagreement',
+      repo,
+      pr: prNumber,
+      headSha: prior.headSha,
+      disagreements: prior.count,
+      bound,
+      ...decline,
+      hammerRemediable: false,
+      transientRead: true,
+      escalation: null,
+    }));
+    logger?.warn?.(
+      `[watcher] AMA closer routed ${repo}#${prNumber}@${String(prior.headSha || headSha || 'unknown').slice(0, 12)} ` +
+        `to the daemon (daemon-clean-route) but the daemon declined on a transient GitHub read: ` +
+        `${decline.daemonDisposition || 'no-result'} ${decline.daemonReason}` +
+        (decline.daemonReasons.length ? `; gates=${decline.daemonReasons.join(',')}` : '') +
+        ' — not counted; the next tick re-reads',
+    );
+    return { count: prior.count, bound, escalate: false, headSha: prior.headSha, transientRead: true, parkResult: null };
+  }
   const recorded = recordDaemonRouteDisagreement(rootDir, { repo, prNumber }, {
     headSha,
     daemonCleanMerge,

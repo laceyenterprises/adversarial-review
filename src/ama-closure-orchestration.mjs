@@ -21,7 +21,11 @@ import {
   isMergeAgentRequestedScoped,
   mergeAgentDispatchEnvForAction,
 } from './ama/coexistence.mjs';
-import { DAEMON_MERGE_DISPOSITION, isDaemonMergeReviewAllowed } from './ama/daemon-merge.mjs';
+import {
+  DAEMON_MERGE_DISPOSITION,
+  TRANSIENT_GATE_READ_REASONS,
+  isDaemonMergeReviewAllowed,
+} from './ama/daemon-merge.mjs';
 import * as amaDispatchCloser from './ama/dispatch-closer.mjs';
 import { isEligibleForAmaClosure, SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
 import { evaluateMergeEligibility } from './ama/merge-eligibility.mjs';
@@ -70,7 +74,11 @@ import {
 } from './ama-hammer-background-dispatch.mjs';
 import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
 import { fetchPullRequestMergeability, fetchReviewBodiesForHead } from './github-api.mjs';
-import { normalizeGithubMergeability, resolveMergeabilityWithSampling } from './github-mergeability.mjs';
+import {
+  closureGateMergeability,
+  normalizeGithubMergeability,
+  resolveMergeabilityWithSampling,
+} from './github-mergeability.mjs';
 import {
   buildNonReviewableHeadDeltaEvidence,
   fetchHeadCloserVerifiedCommit,
@@ -580,6 +588,28 @@ export function isDaemonNotTakenHammerRemediable(daemonCleanMerge) {
   if (daemonCleanMerge?.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) return false;
   if (String(daemonCleanMerge.reason || '') !== 'not-eligible') return false;
   return daemonGateReasonsHammerRemediable(daemonCleanMerge.reasons);
+}
+
+function daemonGateReasonsTransientRead(gateReasons) {
+  return Array.isArray(gateReasons) &&
+    gateReasons.length > 0 &&
+    gateReasons.every((reason) => TRANSIENT_GATE_READ_REASONS.has(String(reason)));
+}
+
+/**
+ * DIRTYOWN-01: is this daemon `not-taken` decline made only of transient GitHub
+ * reads (`pr-mergeability-unknown`, `labels-unavailable`)? Such a decline says
+ * nothing about the head, so it is logged but never counted toward the route
+ * disagreement bound — a steady merge stream that keeps GitHub recomputing
+ * mergeability must not page an operator for a manual close.
+ *
+ * @param {object} daemonCleanMerge  The `runDaemonCleanMergeAttempt` result.
+ * @returns {boolean}
+ */
+export function isDaemonNotTakenTransientRead(daemonCleanMerge) {
+  if (daemonCleanMerge?.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) return false;
+  if (String(daemonCleanMerge.reason || '') !== 'not-eligible') return false;
+  return daemonGateReasonsTransientRead(daemonCleanMerge.reasons);
 }
 
 function withAmaDispatchMetadata(result, { amaEnabled }) {
@@ -1119,7 +1149,11 @@ export async function maybeDispatchAmaClosureFor({
     headSha: currentPrHeadSha,
     isOpen: String(candidate?.prState || 'open').toLowerCase() === 'open',
     isDraft: Boolean(candidate?.isDraft),
-    mergeableState: gateSnapshot.mergeableState,
+    // DIRTYOWN-01: classify UNKNOWN exactly as the daemon's
+    // `evaluateMergeEligibility` does (raw `mergeable`), so an UNKNOWN+CLEAN
+    // read waits a tick on both sides instead of the closer answering
+    // `daemon-clean-route` for a head the daemon declines.
+    mergeableState: closureGateMergeability(mergeabilityForGate || {}),
     labels: Array.isArray(labelNames) ? labelNames : undefined,
     statusCheckRollup: Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : [],
     branchProtection: { requiredContexts: candidate?.branchProtection?.requiredContexts || [] },
@@ -1584,11 +1618,7 @@ export async function maybeDispatchAmaClosureFor({
       // superproject observability layer pages on this existing event.
       const transientEligibilityRead =
         daemonCleanMerge.reason === 'gate-not-eligible' &&
-        Array.isArray(daemonCleanMerge.reasons) &&
-        daemonCleanMerge.reasons.length > 0 &&
-        daemonCleanMerge.reasons.every(
-          (reason) => reason === 'labels-unavailable' || reason === 'pr-mergeability-unknown',
-        );
+        daemonGateReasonsTransientRead(daemonCleanMerge.reasons);
       if (
         daemonFailedClosed &&
         !transientEligibilityRead &&
@@ -1761,6 +1791,7 @@ export async function maybeDispatchAmaClosureFor({
     || daemonCleanMerge.disposition === DAEMON_MERGE_DISPOSITION.NOT_TAKEN;
   const routeDisagreementHead = currentPrHeadSha || reviewState.headSha || null;
   const daemonDeclineHammerRemediable = isDaemonNotTakenHammerRemediable(daemonCleanMerge);
+  const daemonDeclineTransientRead = isDaemonNotTakenTransientRead(daemonCleanMerge);
   const forceHammerAfterRouteDisagreement = daemonDeclined && daemonRouteDisagreementForcesHammer({
     rootDir,
     repo: repoPath,
@@ -1990,6 +2021,7 @@ export async function maybeDispatchAmaClosureFor({
       headSha: routeDisagreementHead,
       daemonCleanMerge,
       hammerRemediable: daemonDeclineHammerRemediable,
+      transientRead: daemonDeclineTransientRead,
       recordParkImpl: recordDaemonMergePark,
       logger,
     });

@@ -12,6 +12,19 @@ function normalizeGithubMergeability({ mergeable, mergeStateStatus } = {}) {
 }
 
 /**
+ * Mergeability as the AMA closure gates classify it. Same as
+ * {@link normalizeGithubMergeability} except a raw `mergeable=UNKNOWN` stays
+ * `UNKNOWN` whatever `mergeStateStatus` says: the merge daemon's
+ * `evaluateMergeEligibility` reads the raw enum (a merge click against an
+ * UNKNOWN PR can be rejected as "not mergeable", a permanent terminal), so the
+ * closer must not call that head MERGEABLE and route it to the daemon.
+ */
+function closureGateMergeability({ mergeable, mergeStateStatus } = {}) {
+  if (String(mergeable || '').trim().toUpperCase() === 'UNKNOWN') return 'UNKNOWN';
+  return normalizeGithubMergeability({ mergeable, mergeStateStatus });
+}
+
+/**
  * GitHub reports `mergeable=UNKNOWN` (with `mergeStateStatus=UNKNOWN`/empty) for
  * a short window right after a commit is pushed or the base branch moves, while
  * it recomputes mergeability asynchronously. Treating that transient state as
@@ -69,4 +82,4 @@ async function resolveMergeabilityWithSampling(initial, refetch, opts = {}) {
   }
 }
 
-export { normalizeGithubMergeability, resolveMergeabilityWithSampling };
+export { closureGateMergeability, normalizeGithubMergeability, resolveMergeabilityWithSampling };

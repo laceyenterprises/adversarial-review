@@ -6,6 +6,7 @@ import { join } from 'node:path';
 
 import {
   isDaemonNotTakenHammerRemediable,
+  isDaemonNotTakenTransientRead,
   maybeDispatchAmaClosureFor,
   resolveMergeAgentCoexistenceForWatcher,
 } from '../src/ama-closure-orchestration.mjs';
@@ -168,6 +169,75 @@ test('only pre-lease gate declines the hammer can fix are hammer-remediable', ()
   assert.equal(isDaemonNotTakenHammerRemediable({ ...CI_NOT_GREEN, reasons: [] }), false);
   assert.equal(isDaemonNotTakenHammerRemediable({ disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason: 'prior-daemon-terminal-failure' }), false);
   assert.equal(isDaemonNotTakenHammerRemediable({ ...CI_NOT_GREEN, disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED }), false);
+});
+
+test('DIRTYOWN-01: only all-transient pre-lease declines are transient reads', () => {
+  const unknown = { ...CI_NOT_GREEN, reasons: ['pr-mergeability-unknown'] };
+  assert.equal(isDaemonNotTakenTransientRead(unknown), true);
+  assert.equal(isDaemonNotTakenTransientRead({ ...CI_NOT_GREEN, reasons: ['labels-unavailable', 'pr-mergeability-unknown'] }), true);
+  assert.equal(isDaemonNotTakenTransientRead({ ...CI_NOT_GREEN, reasons: ['ci-not-green', 'pr-mergeability-unknown'] }), false);
+  assert.equal(isDaemonNotTakenTransientRead(CI_NOT_GREEN), false);
+  assert.equal(isDaemonNotTakenTransientRead({ ...CI_NOT_GREEN, reasons: [] }), false);
+  assert.equal(isDaemonNotTakenTransientRead({ ...unknown, disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED }), false);
+  assert.equal(isDaemonNotTakenTransientRead({ ...unknown, reason: 'prior-daemon-terminal-failure' }), false);
+});
+
+test('DIRTYOWN-01: a pre-lease UNKNOWN decline is logged but never counted, parked, or paged', async () => {
+  const rootDir = tempRoot();
+  try {
+    const closerCalls = [];
+    const logs = [];
+    const warns = [];
+    const args = closureArgs(rootDir, {
+      daemonResult: { ...CI_NOT_GREEN, reasons: ['pr-mergeability-unknown'] },
+      closerCalls,
+      logs,
+      warns,
+    });
+
+    for (let tick = 1; tick <= DAEMON_ROUTE_DISAGREEMENT_BOUND + 3; tick += 1) {
+      const result = await maybeDispatchAmaClosureFor(args);
+      assert.equal(result.reason, 'daemon-clean-route', `tick ${tick} still waits on the daemon`);
+      assert.equal(result.needsOperator, undefined);
+    }
+    assert.ok(closerCalls.every((c) => c.force === false), 'a transient read never forces the hammer');
+    const events = jsonEvents(logs, 'ama.daemon_route_disagreement');
+    assert.equal(events.length, DAEMON_ROUTE_DISAGREEMENT_BOUND + 3, 'every tick is still logged');
+    assert.ok(events.every((e) => e.transientRead === true && e.disagreements === 0 && e.escalation === null));
+    assert.deepEqual(events[0].daemonReasons, ['pr-mergeability-unknown']);
+    assert.match(warns.join('\n'), /declined on a transient GitHub read.*not counted/);
+    assert.equal(jsonEvents(logs, 'ama.daemon_clean_park.manual_close_required').length, 0);
+    assert.equal(existsSync(parkRecordPath(rootDir, REPO, PR)), false);
+    assert.equal(existsSync(daemonRouteDisagreementFilePath(rootDir, { repo: REPO, prNumber: PR })), false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('DIRTYOWN-01: the closer holds UNKNOWN+CLEAN like the daemon instead of routing it to the daemon', async () => {
+  const rootDir = tempRoot();
+  try {
+    const closerCalls = [];
+    const logs = [];
+    const warns = [];
+    let closerMergeableState = null;
+    const args = closureArgs(rootDir, {
+      daemonResult: { ...CI_NOT_GREEN, reasons: ['pr-mergeability-unknown'] },
+      closerCalls,
+      logs,
+      warns,
+      maybeDispatchAmaCloserImpl: async ({ prMetadata }) => {
+        closerMergeableState = prMetadata?.mergeableState;
+        return { dispatched: false, reason: 'not-eligible', reasons: ['pr-mergeability-unknown'] };
+      },
+    });
+    args.candidate = { ...args.candidate, mergeable: 'UNKNOWN', mergeStateStatus: 'CLEAN' };
+
+    await maybeDispatchAmaClosureFor(args);
+    assert.equal(closerMergeableState, 'UNKNOWN', 'the closer sees the same UNKNOWN the daemon gates on');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });
 
 test('a closer→daemon disagreement is logged every tick, then falls back to the capped hammer past the bound', async () => {

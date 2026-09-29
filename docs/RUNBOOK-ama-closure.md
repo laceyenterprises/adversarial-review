@@ -886,12 +886,22 @@ was red to one and not the other. Both now call one classifier
   `daemonReasons` (gates), and the per-head `disagreements` count. The count is
   stored at `data/follow-up-jobs/daemon-route-disagreement/<repo>-pr-<n>.json`.
   A new head restarts it, and a daemon merge deletes it.
+- **Transient-read declines are logged but never counted** (DIRTYOWN-01). A
+  `not-eligible` decline whose gates are all transient GitHub reads
+  (`pr-mergeability-unknown`, `labels-unavailable`; the daemon's
+  `TRANSIENT_GATE_READ_REASONS`) logs the event with `transientRead: true` and
+  `escalation: null`, and leaves the count unchanged. It cannot reach the
+  hammer or park escalation, so a moving `main` that keeps GitHub recomputing
+  mergeability never pages for a manual close. The closer also reads a raw
+  `mergeable=UNKNOWN` as `UNKNOWN` whatever `mergeStateStatus` says, as the
+  daemon does, so an `UNKNOWN`+`CLEAN` read waits a tick on both sides instead
+  of the closer routing it to the daemon.
 - **Past the bound** (3 disagreements on one head), the next tick escalates:
 
 | Daemon decline | Escalation |
 |---|---|
 | `not-eligible` whose gates are all hammer-remediable (`verdict-not-eligible`, `ci-not-green`, `pr-not-mergeable`, `stale-head`) | The closer is called with `forceHammerAfterDaemonFailure`, so the capped hammer takes the PR (per-PR hammer-retry-cap applies). Emits `ama.daemon_route_disagreement.hammer_fallback`. |
-| Any other decline (e.g. `duplicate-family-unresolved`, `labels-unavailable`, `prior-daemon-terminal-failure`, `findings-unknown`) | Parks: a `daemon-route-disagreement` park record (visible to `review-pipeline-health`) and one `ama.daemon_clean_park.manual_close_required` page per head with `reason: daemon-route-disagreement`. The coexistence outcome is `await-operator`. The daemon still runs every tick, so clearing the named gate lets it merge. |
+| Any other decline (e.g. `duplicate-family-unresolved`, a transient read mixed with a non-remediable gate, `prior-daemon-terminal-failure`, `findings-unknown`) | Parks: a `daemon-route-disagreement` park record (visible to `review-pipeline-health`) and one `ama.daemon_clean_park.manual_close_required` page per head with `reason: daemon-route-disagreement`. The coexistence outcome is `await-operator`. The daemon still runs every tick, so clearing the named gate lets it merge. |
 
 ### `merge-agent-skipped-ama-enabled`
 
@@ -924,8 +934,8 @@ reasons:
 | `label-adversarial-merge-blocked` | Current-head `adversarial-merge-blocked` is applied (with head-scoped evidence). |
 | `skip-operator-skip` | A hard-stop operator label produced `operator-skip-label`; the watcher is deliberately holding merge/hammer/merge-agent closeout for an open PR. Terminal held PRs are cleaned up instead of held. |
 | `stale-review-head` | The reviewed head doesn't match the PR's current head. |
-| `pr-not-mergeable` | GitHub's `mergeableState` is neither `MERGEABLE` nor `UNKNOWN` — usually a conflict. Hammer-remediable: the hammer resolves the conflict. |
-| `pr-mergeability-unknown` | GitHub still reports `mergeableState` `UNKNOWN` after the watcher's bounded re-sampling (it recomputes after a push or base move). Transient: not hammer-remediable and never parked; the next tick re-reads. On the daemon clean path an UNKNOWN-only miss inside the lease is re-sampled within the retry budget and then ends as the non-permanent `gate-read-failed`, so the head stays eligible for the daemon on the next tick. |
+| `pr-not-mergeable` | The PR is closed, or GitHub's `mergeableState` is neither `MERGEABLE` nor `UNKNOWN` (usually a conflict; also strict-mode `BEHIND` or an empty/unrecognized enum). Hammer-remediable for a conflicting or behind open PR: the hammer resolves the conflict or rebases. A closed PR or an empty-state read gets no hammer fix. |
+| `pr-mergeability-unknown` | GitHub still reports `mergeableState` `UNKNOWN` after the watcher's bounded re-sampling (it recomputes after a push or base move). Transient: on a non-exhausted review cycle it is not hammer-remediable (an exhausted cycle still hammers any miss without `stale-review-head`), and it never produces a manual-close page; the next tick re-reads. On the daemon clean path an UNKNOWN-only miss inside the lease is re-sampled within the retry budget and then ends as the non-permanent `gate-read-failed`, so the head stays eligible for the daemon on the next tick (a diagnostics park record is still written, as for every non-merged daemon outcome). A pre-lease UNKNOWN decline is never counted as a closer→daemon route disagreement. |
 | `remediation-pending` | Adversarial-review remediation work is owed before AMA can close. |
 
 ### FSR-06B: fleet-self-repair re-review requests for a trailer-only head move

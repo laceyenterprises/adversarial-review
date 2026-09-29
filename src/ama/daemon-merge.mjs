@@ -101,7 +101,7 @@ const PERMANENT_TERMINAL_REASONS = Object.freeze([
  * GitHub read rather than a property of the head. A miss made ONLY of these
  * terminates as the non-permanent `gate-read-failed`, never `gate-not-eligible`.
  */
-const TRANSIENT_GATE_READ_REASONS = new Set([
+export const TRANSIENT_GATE_READ_REASONS = new Set([
   'labels-unavailable',
   'pr-mergeability-unknown',
 ]);

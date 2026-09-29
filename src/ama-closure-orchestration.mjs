@@ -76,6 +76,7 @@ import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
 import { fetchPullRequestMergeability, fetchReviewBodiesForHead } from './github-api.mjs';
 import {
   closureGateMergeability,
+  isGithubMergeConflict,
   normalizeGithubMergeability,
   resolveMergeabilityWithSampling,
 } from './github-mergeability.mjs';
@@ -616,6 +617,12 @@ export function isDaemonNotTakenTransientRead(daemonCleanMerge) {
   if (daemonCleanMerge?.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) return false;
   if (String(daemonCleanMerge.reason || '') !== 'not-eligible') return false;
   return daemonGateReasonsTransientRead(daemonCleanMerge.reasons);
+}
+
+// DIRTYOWN-02: a bare `reason=not-eligible` does not say which eligibility
+// reasons parked the PR, so the background log lines carry the array too.
+function formatAmaResultReasons(result) {
+  return Array.isArray(result?.reasons) ? ` reasons=[${result.reasons.join(',')}]` : '';
 }
 
 function withAmaDispatchMetadata(result, { amaEnabled }) {
@@ -1749,11 +1756,22 @@ export async function maybeDispatchAmaClosureFor({
     }
   }
   const finalRoundCiNotGreen = disabledEligibility.reasons.includes('ci-not-green');
-  const commentOnlyFinalRoundResume = commentOnlyFinalRoundProven && !finalRoundCiNotGreen;
+  // DIRTYOWN-02 (agent-os#7332): a conflicting final-round head cannot go green
+  // by waiting. Its CI may never run, or may run red on the unmergeable head,
+  // and the hammer has to rebase first either way. So a conflict resumes the
+  // hammer whatever CI says. Red or pending CI alone still does not.
+  // `pr-not-mergeable` alone is not a conflict: with an empty raw `mergeable`
+  // it also covers BLOCKED (which a red required check reports), UNSTABLE and
+  // BEHIND. So the bypass needs GitHub's raw conflict signal as well.
+  const finalRoundConflicting = disabledEligibility.reasons.includes('pr-not-mergeable') &&
+    isGithubMergeConflict(mergeabilityForGate || {});
+  const commentOnlyFinalRoundResume = commentOnlyFinalRoundProven &&
+    (!finalRoundCiNotGreen || finalRoundConflicting);
   // Waiting for CI on a proven final-round head is progress, not a stall, so it
   // must not spend the retain-loop cap that parks a PR for the operator. Red CI
-  // is not a wait and still counts.
-  const finalRoundChecks = commentOnlyFinalRoundProven && finalRoundCiNotGreen
+  // is not a wait and still counts. A conflicting head is not waiting on CI
+  // either (see above), so it never gets the exemption.
+  const finalRoundChecks = commentOnlyFinalRoundProven && finalRoundCiNotGreen && !finalRoundConflicting
     ? summarizeExternalChecks(prMetadata.statusCheckRollup, { env, cfg })
     : null;
   const finalRoundCiPending = Boolean(finalRoundChecks?.rollupKnown &&
@@ -1817,6 +1835,7 @@ export async function maybeDispatchAmaClosureFor({
       : [daemonCleanMerge?.reason].filter(Boolean),
     settledCommentOnlyTerminalMs,
     commentOnlyFinalRoundResume,
+    commentOnlyFinalRoundConflicting: finalRoundConflicting,
     rootDir,
     repo: repoPath,
     prUrl: `https://github.com/${owner}/${name}/pull/${prNumber}`,
@@ -1933,7 +1952,8 @@ export async function maybeDispatchAmaClosureFor({
           logger?.log?.(
             `[watcher] AMA hammer background dispatch settled for ${backgroundKey}: ` +
               (ok
-                ? `dispatched=${Boolean(settledResult?.dispatched)} reason=${settledResult?.reason || 'none'}`
+                ? `dispatched=${Boolean(settledResult?.dispatched)} reason=${settledResult?.reason || 'none'}` +
+                  formatAmaResultReasons(settledResult)
                 : `error=${error?.message || error}`) +
               ` elapsed_ms=${elapsedMs}`,
           );
@@ -1964,7 +1984,8 @@ export async function maybeDispatchAmaClosureFor({
         `[watcher] AMA hammer background outcome applied for ${repoPath}#${prNumber}: ` +
           (backgroundSettled.ok
             ? `dispatched=${Boolean(backgroundSettled.result?.dispatched)} ` +
-              `reason=${backgroundSettled.result?.reason || 'none'}`
+              `reason=${backgroundSettled.result?.reason || 'none'}` +
+              formatAmaResultReasons(backgroundSettled.result)
             : `error=${backgroundSettled.error?.message || backgroundSettled.error}`),
       );
       if (!backgroundSettled.ok) {

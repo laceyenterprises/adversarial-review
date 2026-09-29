@@ -25,6 +25,18 @@ function closureGateMergeability({ mergeable, mergeStateStatus } = {}) {
 }
 
 /**
+ * True only when GitHub reports an actual merge conflict: raw
+ * `mergeable=CONFLICTING`, or `mergeStateStatus=DIRTY` (GitHub's conflict state).
+ * Narrower than a non-MERGEABLE {@link closureGateMergeability}: BLOCKED,
+ * UNSTABLE and BEHIND also read as `pr-not-mergeable` when `mergeable` is empty,
+ * and a red required check alone reports BLOCKED.
+ */
+function isGithubMergeConflict({ mergeable, mergeStateStatus } = {}) {
+  return String(mergeable || '').trim().toUpperCase() === 'CONFLICTING' ||
+    String(mergeStateStatus || '').trim().toUpperCase() === 'DIRTY';
+}
+
+/**
  * GitHub reports `mergeable=UNKNOWN` (with `mergeStateStatus=UNKNOWN`/empty) for
  * a short window right after a commit is pushed or the base branch moves, while
  * it recomputes mergeability asynchronously. Treating that transient state as
@@ -87,4 +99,9 @@ async function resolveMergeabilityWithSampling(initial, refetch, opts = {}) {
   }
 }
 
-export { closureGateMergeability, normalizeGithubMergeability, resolveMergeabilityWithSampling };
+export {
+  closureGateMergeability,
+  isGithubMergeConflict,
+  normalizeGithubMergeability,
+  resolveMergeabilityWithSampling,
+};

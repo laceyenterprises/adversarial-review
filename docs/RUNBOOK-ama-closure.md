@@ -314,9 +314,14 @@ Expected watcher logs:
 [watcher] AMA hammer dispatch started in background for <repo>#<pr>@<head>; posted-review phase continues
 [watcher] AMA hammer dispatch queued in background for <repo>#<pr>@<head>; posted-review phase continues
 [watcher] AMA hammer dispatch in-flight in background for <repo>#<pr>@<head>; posted-review phase continues
-[watcher] AMA hammer background dispatch settled for <repo>#<pr>@<head>: dispatched=<true|false> reason=<reason> elapsed_ms=<n>
-[watcher] AMA hammer background outcome applied for <repo>#<pr>: dispatched=<true|false> reason=<reason>
+[watcher] AMA hammer background dispatch settled for <repo>#<pr>@<head>: dispatched=<true|false> reason=<reason> [reasons=[<r1>,<r2>,...]] elapsed_ms=<n>
+[watcher] AMA hammer background outcome applied for <repo>#<pr>: dispatched=<true|false> reason=<reason> [reasons=[<r1>,<r2>,...]]
 ```
+
+When the closer's result carries a `reasons` array, both lines print it
+(DIRTYOWN-02). A `reason=not-eligible` always has one, so the log names the
+eligibility gates that refused the hammer, for example
+`reasons=[pr-not-mergeable,stale-review-head,verdict-not-settled-success,non-blocking-findings-present,ci-not-green]`.
 
 Validation after enabling `background`:
 
@@ -608,6 +613,19 @@ reason. Merge still waits on exact-head HAM validation. When you see this
 warning and the skipped re-review must still run (an FSR-06B request, or one an
 operator asked for), apply `adversarial-merge-blocked` before the hammer's
 terminal validation, then request the re-review.
+
+A proven final-round head that conflicts with base reaches the hammer even with
+red or pending CI (DIRTYOWN-02), because the hammer must rebase before any CI on
+it counts. The conflict is proven only from GitHub's raw signal
+(`mergeable=CONFLICTING` or `mergeStateStatus=DIRTY`) beside the
+`pr-not-mergeable` gate. A `pr-not-mergeable` head that is only `BLOCKED` by a
+red required check, `UNSTABLE` or `BEHIND` still parks on red CI or waits for
+pending CI as before. A conflicting head never gets the final-round CI-wait
+exemption from the retain-loop cap. When a final-round PR parks with
+`reasons=[...,pr-not-mergeable,...,ci-not-green]` in the dispatch log lines
+above, read `gh pr view <n> --json mergeable,mergeStateStatus`: a conflict
+there should have resumed the hammer, while a `BLOCKED` head needs its red
+check fixed first.
 
 Normal `posted` rows are different. `stale-review-head`,
 `blocking-findings-present`, and `verdict-not-settled-success` remain AMA/HAM

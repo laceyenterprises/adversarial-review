@@ -1,0 +1,174 @@
+{
+  "_fixture": {
+    "source": "gh reads of laceyenterprises/agent-os#7330, 2026-09-29: pulls/7330/reviews, pulls/7330/commits, issues/7330/comments, commits/30df2aa",
+    "note": "DIRTYOWN-02 replay fixture. r1 (gemini request-changes on 088ae2d) completed and pushed f705244; r2 (claude request-changes on f705244) failed on the provider usage cap, which exhausts the 2-round budget; the hammer then pushed 30df2aa (Closed-By: hammer) and main moved under it. Finding text, commit body and changed-file paths are placeholders; the commit trailers, parent and file count are real. No live data/ was copied. Each job's trigger.postedAt is its review's post time, which is also the job's createdAt."
+  },
+  "jobs": {
+    "completed": {
+      "schemaVersion": 2,
+      "kind": "adversarial-review-follow-up",
+      "status": "completed",
+      "jobId": "laceyenterprises__agent-os-pr-7330-2026-09-29T02-45-14-874Z",
+      "createdAt": "2026-09-29T02:45:14.874Z",
+      "trigger": {
+        "type": "github-review-posted",
+        "postedAt": "2026-09-29T02:45:14.874Z"
+      },
+      "repo": "laceyenterprises/agent-os",
+      "prNumber": 7330,
+      "baseBranch": "main",
+      "branch": "claude-code-pmauser-01r/PMAUSER-01R",
+      "domainId": "code-pr",
+      "subjectExternalId": "laceyenterprises/agent-os#7330",
+      "revisionRef": "088ae2d4f3de40d9ceaca5e7df02174c48c1b59e",
+      "linearTicketId": null,
+      "riskClass": "medium",
+      "reviewerModel": "gemini",
+      "builderTag": "claude-code",
+      "critical": false,
+      "nonBlockingOnly": false,
+      "reviewSummary": "Sanitized: a request-changes review with four blocking and four non-blocking findings.",
+      "reviewBody": "## Adversarial Review — Gemini (reviewer)\n\n## Summary\nSanitized: a request-changes review with four blocking and four non-blocking findings.\n\n## Blocking issues\n- **Blocking finding 1**\n  - **File:** `path/redacted-b1`\n  - **Lines:** `1`\n  - **Problem:** Placeholder for live finding 1.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Blocking finding 2**\n  - **File:** `path/redacted-b2`\n  - **Lines:** `2`\n  - **Problem:** Placeholder for live finding 2.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Blocking finding 3**\n  - **File:** `path/redacted-b3`\n  - **Lines:** `3`\n  - **Problem:** Placeholder for live finding 3.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Blocking finding 4**\n  - **File:** `path/redacted-b4`\n  - **Lines:** `4`\n  - **Problem:** Placeholder for live finding 4.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n\n## Non-blocking issues\n- **Non-blocking finding 1**\n  - **File:** `path/redacted-nb1`\n  - **Lines:** `1`\n  - **Problem:** Placeholder for live finding 1.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Non-blocking finding 2**\n  - **File:** `path/redacted-nb2`\n  - **Lines:** `2`\n  - **Problem:** Placeholder for live finding 2.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Non-blocking finding 3**\n  - **File:** `path/redacted-nb3`\n  - **Lines:** `3`\n  - **Problem:** Placeholder for live finding 3.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Non-blocking finding 4**\n  - **File:** `path/redacted-nb4`\n  - **Lines:** `4`\n  - **Problem:** Placeholder for live finding 4.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n\n## Suggested fixes\n- Placeholder.\n\n## Verdict\nRequest changes\n",
+      "verdict_mode": "enforce",
+      "recommendedFollowUpAction": {
+        "type": "address-adversarial-review",
+        "priority": "normal",
+        "summary": "Start a follow-up coding session for this PR and address the adversarial review findings.",
+        "executionModel": "bounded-manual-rounds",
+        "maxRounds": 2,
+        "futureArchitectureNote": "Long term this should resume the original build session and preserve original build intent/context instead of spawning a fresh session from a file handoff."
+      },
+      "remediationPlan": {
+        "mode": "bounded-manual-rounds",
+        "maxRounds": 2,
+        "currentRound": 1,
+        "rounds": [
+          {
+            "round": 1,
+            "domainId": "code-pr",
+            "subjectExternalId": "laceyenterprises/agent-os#7330",
+            "revisionRef": "088ae2d4f3de40d9ceaca5e7df02174c48c1b59e",
+            "kind": "remediation",
+            "state": "completed"
+          }
+        ],
+        "transientRetries": 0,
+        "retryHistory": [],
+        "retryAfter": null,
+        "stopReason": null,
+        "stop": null,
+        "nextAction": null
+      },
+      "nonBlockingRoundsBefore": 0,
+      "nonBlockingMaxRounds": 1,
+      "remediationWorker": {
+        "model": "claude-code",
+        "state": "completed"
+      },
+      "completedAt": "2026-09-29T03:04:42.000Z",
+      "completion": {
+        "workerModel": "claude-code",
+        "workerPushedHeadSha": "f7052449d5d6f2efe71a8e7b1a5a9dbd80b1a8e8"
+      }
+    },
+    "failed": {
+      "schemaVersion": 2,
+      "kind": "adversarial-review-follow-up",
+      "status": "failed",
+      "jobId": "laceyenterprises__agent-os-pr-7330-2026-09-29T04-10-37-354Z",
+      "createdAt": "2026-09-29T04:10:37.354Z",
+      "trigger": {
+        "type": "github-review-posted",
+        "postedAt": "2026-09-29T04:10:37.354Z"
+      },
+      "repo": "laceyenterprises/agent-os",
+      "prNumber": 7330,
+      "baseBranch": "main",
+      "branch": "claude-code-pmauser-01r/PMAUSER-01R",
+      "domainId": "code-pr",
+      "subjectExternalId": "laceyenterprises/agent-os#7330",
+      "revisionRef": "f7052449d5d6f2efe71a8e7b1a5a9dbd80b1a8e8",
+      "linearTicketId": null,
+      "riskClass": "medium",
+      "reviewerModel": "claude",
+      "builderTag": "claude-code",
+      "critical": false,
+      "nonBlockingOnly": false,
+      "reviewSummary": "Sanitized: a request-changes review with four blocking and four non-blocking findings.",
+      "reviewBody": "## Adversarial Review — Claude (reviewer)\n\n## Summary\nSanitized: a request-changes review with four blocking and four non-blocking findings.\n\n## Blocking issues\n- **Blocking finding 1**\n  - **File:** `path/redacted-b1`\n  - **Lines:** `1`\n  - **Problem:** Placeholder for live finding 1.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Blocking finding 2**\n  - **File:** `path/redacted-b2`\n  - **Lines:** `2`\n  - **Problem:** Placeholder for live finding 2.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Blocking finding 3**\n  - **File:** `path/redacted-b3`\n  - **Lines:** `3`\n  - **Problem:** Placeholder for live finding 3.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Blocking finding 4**\n  - **File:** `path/redacted-b4`\n  - **Lines:** `4`\n  - **Problem:** Placeholder for live finding 4.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n\n## Non-blocking issues\n- **Non-blocking finding 1**\n  - **File:** `path/redacted-nb1`\n  - **Lines:** `1`\n  - **Problem:** Placeholder for live finding 1.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Non-blocking finding 2**\n  - **File:** `path/redacted-nb2`\n  - **Lines:** `2`\n  - **Problem:** Placeholder for live finding 2.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Non-blocking finding 3**\n  - **File:** `path/redacted-nb3`\n  - **Lines:** `3`\n  - **Problem:** Placeholder for live finding 3.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Non-blocking finding 4**\n  - **File:** `path/redacted-nb4`\n  - **Lines:** `4`\n  - **Problem:** Placeholder for live finding 4.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n\n## Suggested fixes\n- Placeholder.\n\n## Verdict\nRequest changes\n",
+      "verdict_mode": "enforce",
+      "recommendedFollowUpAction": {
+        "type": "address-adversarial-review",
+        "priority": "normal",
+        "summary": "Start a follow-up coding session for this PR and address the adversarial review findings.",
+        "executionModel": "bounded-manual-rounds",
+        "maxRounds": 2,
+        "futureArchitectureNote": "Long term this should resume the original build session and preserve original build intent/context instead of spawning a fresh session from a file handoff."
+      },
+      "remediationPlan": {
+        "mode": "bounded-manual-rounds",
+        "maxRounds": 2,
+        "currentRound": 2,
+        "rounds": [
+          {
+            "round": 2,
+            "domainId": "code-pr",
+            "subjectExternalId": "laceyenterprises/agent-os#7330",
+            "revisionRef": "f7052449d5d6f2efe71a8e7b1a5a9dbd80b1a8e8",
+            "kind": "remediation",
+            "state": "failed"
+          }
+        ],
+        "transientRetries": 0,
+        "retryHistory": [],
+        "retryAfter": null,
+        "stopReason": null,
+        "stop": null,
+        "nextAction": null
+      },
+      "nonBlockingRoundsBefore": 0,
+      "nonBlockingMaxRounds": 1,
+      "remediationWorker": {
+        "model": "claude-code",
+        "state": "failed"
+      },
+      "failedAt": "2026-09-29T04:48:05.000Z",
+      "failure": {
+        "code": "provider-usage-cap",
+        "message": "Remediation worker repeatedly hit a hard provider usage cap (claude harness); exhausted the retry budget (3/3)."
+      }
+    }
+  },
+  "headCommit": {
+    "sha": "30df2aa0b3bdca8d5c086f29f860531b92368605",
+    "parents": [
+      "f7052449d5d6f2efe71a8e7b1a5a9dbd80b1a8e8"
+    ],
+    "message": "[claude-code] PMAUSER-01R: HAM remediation of the final adversarial review\n\nSanitized: body elided; the trailers are verbatim.\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nReviewed-Head: f7052449d5d6f2efe71a8e7b1a5a9dbd80b1a8e8\nClosed-By: hammer (adversarial-pipe-mode)\nRemediated-Findings: 8 addressed (4 blocking, 4 non-blocking)\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
+    "files": [
+      "path/redacted-1",
+      "path/redacted-2",
+      "path/redacted-3",
+      "path/redacted-4",
+      "path/redacted-5",
+      "path/redacted-6",
+      "path/redacted-7",
+      "path/redacted-8",
+      "path/redacted-9",
+      "path/redacted-10",
+      "path/redacted-11",
+      "path/redacted-12",
+      "path/redacted-13",
+      "path/redacted-14",
+      "path/redacted-15",
+      "path/redacted-16",
+      "path/redacted-17",
+      "path/redacted-18",
+      "path/redacted-19",
+      "path/redacted-20",
+      "path/redacted-21",
+      "path/redacted-22",
+      "path/redacted-23"
+    ]
+  }
+}

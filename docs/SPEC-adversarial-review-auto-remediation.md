@@ -98,11 +98,17 @@ on blocking or unknown findings, and on red CI.
 A conflicting proven final-round head goes to the hammer whatever its CI says
 (DIRTYOWN-02, agent-os#7332). CI on a head that conflicts with base either never
 runs or runs on a head that cannot merge, and the hammer must rebase before any
-CI counts, so waiting for green would park the PR for good. The conflict
-(`pr-not-mergeable`) lifts both the pending-CI hold and the red-CI park, with or
-without an exhausted round budget. Red or pending CI without a conflict is
-unchanged, and so are blocking or unknown findings, hard-stop labels, the hammer
-retry cap and the lifetime ceiling.
+CI counts, so waiting for green would park the PR for good. The conflict lifts
+both the pending-CI hold and the red-CI park, with or without an exhausted round
+budget. A conflict here is `pr-not-mergeable` backed by GitHub's raw conflict
+signal (`mergeable=CONFLICTING` or `mergeStateStatus=DIRTY`), which the
+orchestrator proves and passes to the closer as `commentOnlyFinalRoundConflicting`.
+`pr-not-mergeable` on its own is not enough: with an empty raw `mergeable` it
+also covers `BLOCKED` (what a red required check reports), `UNSTABLE` and
+`BEHIND`. A conflicting head never gets the waiting-for-CI exemption from the
+retain-loop cap, because it is not waiting on CI. Red or pending CI without a
+conflict is unchanged, and so are blocking or unknown findings, hard-stop
+labels, the hammer retry cap and the lifetime ceiling.
 
 
 AMA closer dispatch must also declare the workspace repo set required by the

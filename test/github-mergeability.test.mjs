@@ -3,11 +3,26 @@ import assert from 'node:assert/strict';
 
 import {
   closureGateMergeability,
+  isGithubMergeConflict,
   normalizeGithubMergeability,
   resolveMergeabilityWithSampling,
 } from '../src/github-mergeability.mjs';
 
 const noSleep = async () => {};
+
+test('isGithubMergeConflict: only a raw conflict, never BLOCKED/UNSTABLE/BEHIND', () => {
+  assert.equal(isGithubMergeConflict({ mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' }), true);
+  assert.equal(isGithubMergeConflict({ mergeable: 'conflicting' }), true);
+  assert.equal(isGithubMergeConflict({ mergeable: '', mergeStateStatus: 'DIRTY' }), true);
+  for (const mergeStateStatus of ['BLOCKED', 'UNSTABLE', 'BEHIND', 'CLEAN', 'UNKNOWN', '']) {
+    for (const mergeable of ['', null, undefined, 'MERGEABLE', 'UNKNOWN']) {
+      assert.equal(isGithubMergeConflict({ mergeable, mergeStateStatus }), false, `${mergeable}/${mergeStateStatus}`);
+    }
+  }
+  // These still normalize to a non-MERGEABLE state the gate reads as pr-not-mergeable.
+  assert.equal(closureGateMergeability({ mergeable: '', mergeStateStatus: 'BLOCKED' }), 'BLOCKED');
+  assert.equal(isGithubMergeConflict(), false);
+});
 
 test('normalizeGithubMergeability: terminal + UNKNOWN+CLEAN cases', () => {
   assert.equal(normalizeGithubMergeability({ mergeable: 'MERGEABLE' }), 'MERGEABLE');

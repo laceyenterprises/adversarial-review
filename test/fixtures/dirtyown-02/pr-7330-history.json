@@ -1,7 +1,7 @@
 {
   "_fixture": {
     "source": "gh reads of laceyenterprises/agent-os#7330, 2026-09-29: pulls/7330/reviews, pulls/7330/commits, issues/7330/comments, commits/30df2aa",
-    "note": "DIRTYOWN-02 replay fixture. r1 (gemini request-changes on 088ae2d) completed and pushed f705244; r2 (claude request-changes on f705244) failed on the provider usage cap, which exhausts the 2-round budget; the hammer then pushed 30df2aa (Closed-By: hammer) and main moved under it. Finding text, commit body and changed-file paths are placeholders; the commit trailers, parent and file count are real. No live data/ was copied."
+    "note": "DIRTYOWN-02 replay fixture. r1 (gemini request-changes on 088ae2d) completed and pushed f705244; r2 (claude request-changes on f705244) failed on the provider usage cap, which exhausts the 2-round budget; the hammer then pushed 30df2aa (Closed-By: hammer) and main moved under it. Finding text, commit body and changed-file paths are placeholders; the commit trailers, parent and file count are real. No live data/ was copied. Each job's trigger.postedAt is its review's post time, which is also the job's createdAt."
   },
   "jobs": {
     "completed": {
@@ -12,7 +12,7 @@
       "createdAt": "2026-09-29T02:45:14.874Z",
       "trigger": {
         "type": "github-review-posted",
-        "postedAt": "2026-09-29T04:15:07.781Z"
+        "postedAt": "2026-09-29T02:45:14.874Z"
       },
       "repo": "laceyenterprises/agent-os",
       "prNumber": 7330,
@@ -27,8 +27,8 @@
       "builderTag": "claude-code",
       "critical": false,
       "nonBlockingOnly": false,
-      "reviewSummary": "Sanitized: a re-review whose remaining findings are all non-blocking.",
-      "reviewBody": "## Adversarial Review — Claude (reviewer)\n\n## Summary\nSanitized: a request-changes review with four blocking and four non-blocking findings.\n\n## Blocking issues\n- **Blocking finding 1**\n  - **File:** `path/redacted-b1`\n  - **Lines:** `1`\n  - **Problem:** Placeholder for live finding 1.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Blocking finding 2**\n  - **File:** `path/redacted-b2`\n  - **Lines:** `2`\n  - **Problem:** Placeholder for live finding 2.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Blocking finding 3**\n  - **File:** `path/redacted-b3`\n  - **Lines:** `3`\n  - **Problem:** Placeholder for live finding 3.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Blocking finding 4**\n  - **File:** `path/redacted-b4`\n  - **Lines:** `4`\n  - **Problem:** Placeholder for live finding 4.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n\n## Non-blocking issues\n- **Non-blocking finding 1**\n  - **File:** `path/redacted-nb1`\n  - **Lines:** `1`\n  - **Problem:** Placeholder for live finding 1.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Non-blocking finding 2**\n  - **File:** `path/redacted-nb2`\n  - **Lines:** `2`\n  - **Problem:** Placeholder for live finding 2.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Non-blocking finding 3**\n  - **File:** `path/redacted-nb3`\n  - **Lines:** `3`\n  - **Problem:** Placeholder for live finding 3.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Non-blocking finding 4**\n  - **File:** `path/redacted-nb4`\n  - **Lines:** `4`\n  - **Problem:** Placeholder for live finding 4.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n\n## Suggested fixes\n- Placeholder.\n\n## Verdict\nRequest changes\n",
+      "reviewSummary": "Sanitized: a request-changes review with four blocking and four non-blocking findings.",
+      "reviewBody": "## Adversarial Review — Gemini (reviewer)\n\n## Summary\nSanitized: a request-changes review with four blocking and four non-blocking findings.\n\n## Blocking issues\n- **Blocking finding 1**\n  - **File:** `path/redacted-b1`\n  - **Lines:** `1`\n  - **Problem:** Placeholder for live finding 1.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Blocking finding 2**\n  - **File:** `path/redacted-b2`\n  - **Lines:** `2`\n  - **Problem:** Placeholder for live finding 2.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Blocking finding 3**\n  - **File:** `path/redacted-b3`\n  - **Lines:** `3`\n  - **Problem:** Placeholder for live finding 3.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Blocking finding 4**\n  - **File:** `path/redacted-b4`\n  - **Lines:** `4`\n  - **Problem:** Placeholder for live finding 4.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n\n## Non-blocking issues\n- **Non-blocking finding 1**\n  - **File:** `path/redacted-nb1`\n  - **Lines:** `1`\n  - **Problem:** Placeholder for live finding 1.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Non-blocking finding 2**\n  - **File:** `path/redacted-nb2`\n  - **Lines:** `2`\n  - **Problem:** Placeholder for live finding 2.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Non-blocking finding 3**\n  - **File:** `path/redacted-nb3`\n  - **Lines:** `3`\n  - **Problem:** Placeholder for live finding 3.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Non-blocking finding 4**\n  - **File:** `path/redacted-nb4`\n  - **Lines:** `4`\n  - **Problem:** Placeholder for live finding 4.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n\n## Suggested fixes\n- Placeholder.\n\n## Verdict\nRequest changes\n",
       "verdict_mode": "enforce",
       "recommendedFollowUpAction": {
         "type": "address-adversarial-review",
@@ -79,7 +79,7 @@
       "createdAt": "2026-09-29T04:10:37.354Z",
       "trigger": {
         "type": "github-review-posted",
-        "postedAt": "2026-09-29T04:15:07.781Z"
+        "postedAt": "2026-09-29T04:10:37.354Z"
       },
       "repo": "laceyenterprises/agent-os",
       "prNumber": 7330,
@@ -94,7 +94,7 @@
       "builderTag": "claude-code",
       "critical": false,
       "nonBlockingOnly": false,
-      "reviewSummary": "Sanitized: a re-review whose remaining findings are all non-blocking.",
+      "reviewSummary": "Sanitized: a request-changes review with four blocking and four non-blocking findings.",
       "reviewBody": "## Adversarial Review — Claude (reviewer)\n\n## Summary\nSanitized: a request-changes review with four blocking and four non-blocking findings.\n\n## Blocking issues\n- **Blocking finding 1**\n  - **File:** `path/redacted-b1`\n  - **Lines:** `1`\n  - **Problem:** Placeholder for live finding 1.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Blocking finding 2**\n  - **File:** `path/redacted-b2`\n  - **Lines:** `2`\n  - **Problem:** Placeholder for live finding 2.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Blocking finding 3**\n  - **File:** `path/redacted-b3`\n  - **Lines:** `3`\n  - **Problem:** Placeholder for live finding 3.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Blocking finding 4**\n  - **File:** `path/redacted-b4`\n  - **Lines:** `4`\n  - **Problem:** Placeholder for live finding 4.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n\n## Non-blocking issues\n- **Non-blocking finding 1**\n  - **File:** `path/redacted-nb1`\n  - **Lines:** `1`\n  - **Problem:** Placeholder for live finding 1.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Non-blocking finding 2**\n  - **File:** `path/redacted-nb2`\n  - **Lines:** `2`\n  - **Problem:** Placeholder for live finding 2.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Non-blocking finding 3**\n  - **File:** `path/redacted-nb3`\n  - **Lines:** `3`\n  - **Problem:** Placeholder for live finding 3.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n- **Non-blocking finding 4**\n  - **File:** `path/redacted-nb4`\n  - **Lines:** `4`\n  - **Problem:** Placeholder for live finding 4.\n  - **Why it matters:** Placeholder.\n  - **Recommended fix:** Placeholder.\n\n## Suggested fixes\n- Placeholder.\n\n## Verdict\nRequest changes\n",
       "verdict_mode": "enforce",
       "recommendedFollowUpAction": {

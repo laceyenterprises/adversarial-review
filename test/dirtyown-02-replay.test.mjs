@@ -187,6 +187,7 @@ test('replay #7332: a conflicting, red-CI final-round head reaches one hammer in
     INCIDENT_7332_REASONS,
     'the closer sees exactly the reasons production refused on',
   );
+  assert.equal(payload.dispatchContext.commentOnlyFinalRoundConflicting, true, 'CONFLICTING is a proven conflict');
   assert.equal(payload.dispatchContext.commentOnlyFinalRoundResume, true, 'a conflict does not wait on CI');
   assert.equal(run.closerResults[0].dispatched, true, JSON.stringify(run.closerResults[0].reasons));
   assert.equal(run.outcome.outcome, 'ama-dispatched');
@@ -224,6 +225,66 @@ test('replay #7332 without the conflict: red CI alone still holds the final-roun
   assert.equal(run.closerResults[0].reason, 'not-eligible');
   assert.deepEqual(run.closerResults[0].reasons, INCIDENT_7332_REASONS.filter((r) => r !== 'pr-not-mergeable'));
   assert.equal(run.hammerDispatches.length, 0);
+});
+
+test('replay #7332 with BLOCKED and no raw mergeable: red CI still holds, because BLOCKED is not a conflict', async (t) => {
+  // A red required check reports mergeStateStatus=BLOCKED. With the raw
+  // `mergeable` field empty that normalizes to `pr-not-mergeable`, which must
+  // not read as the conflict that lifts the CI hold.
+  for (const mergeable of ['', null]) {
+    const rootDir = tempRoot(t, `7332-blocked-${mergeable === null ? 'null' : 'empty'}`);
+    const input = setup7332(rootDir, { mergeable, mergeStateStatus: 'BLOCKED' });
+    const run = await replay(rootDir, input);
+    const [payload] = run.closerPayloads;
+    assert.deepEqual(
+      isEligibleForAmaClosure(payload.reviewState, payload.prMetadata, CFG, { env: {} }).reasons,
+      INCIDENT_7332_REASONS,
+      'BLOCKED still reads as pr-not-mergeable',
+    );
+    assert.equal(payload.dispatchContext.commentOnlyFinalRoundConflicting, false);
+    assert.equal(payload.dispatchContext.commentOnlyFinalRoundResume, false);
+    assert.equal(run.closerResults[0].reason, 'not-eligible');
+    assert.equal(run.hammerDispatches.length, 0);
+  }
+});
+
+const PENDING_7332_ROLLUP = [
+  ...rollup({ 'submodule-pointer-gate': 'SUCCESS', 'release-freeze-gate': 'SUCCESS' }),
+  { __typename: 'CheckRun', name: 'repo-guards', status: 'IN_PROGRESS', conclusion: null },
+];
+// 16 minutes after the proven final-round push: inside the CI-wait deadline.
+const WITHIN_CI_WAIT = () => Date.parse('2026-09-29T04:00:00.000Z');
+const HOLDING_FOR_CI = /AMA holding .*#7332 for PR-head CI/;
+
+test('replay #7332 with pending CI: a conflicting final-round head reaches one hammer instead of waiting', async (t) => {
+  const rootDir = tempRoot(t, '7332-pending');
+  const input = setup7332(rootDir, { statusCheckRollup: PENDING_7332_ROLLUP });
+  const logs = [];
+  const run = await replay(rootDir, { ...input, stubs: { ...input.stubs, now: WITHIN_CI_WAIT }, logs });
+  assert.equal(run.closerPayloads[0].dispatchContext.commentOnlyFinalRoundConflicting, true);
+  assert.equal(run.closerPayloads[0].dispatchContext.commentOnlyFinalRoundResume, true);
+  assert.equal(run.closerResults[0].dispatched, true, JSON.stringify(run.closerResults[0].reasons));
+  assert.equal(run.hammerDispatches.length, 1);
+  assert.equal(logs.some((line) => HOLDING_FOR_CI.test(line)), false);
+});
+
+test('replay #7332 with pending CI and another miss: a conflicting head is not exempted as waiting on CI', async (t) => {
+  // `pr-is-draft` is neither a hard stop nor covered by the resume, so the
+  // closer returns not-eligible. Only a mergeable head earns the CI-wait
+  // exemption from the retain-loop cap; a conflicting one is not waiting on CI.
+  for (const [label, overrides, expectHold] of [
+    ['conflict', {}, false],
+    ['no-conflict', { mergeable: 'MERGEABLE', mergeStateStatus: 'BLOCKED' }, true],
+  ]) {
+    const rootDir = tempRoot(t, `7332-pending-draft-${label}`);
+    const input = setup7332(rootDir, { statusCheckRollup: PENDING_7332_ROLLUP, isDraft: true, ...overrides });
+    const logs = [];
+    const run = await replay(rootDir, { ...input, stubs: { ...input.stubs, now: WITHIN_CI_WAIT }, logs });
+    assert.equal(run.closerResults[0]?.reason, 'not-eligible', label);
+    assert.ok(run.closerResults[0].reasons.includes('pr-is-draft'), label);
+    assert.equal(run.hammerDispatches.length, 0, label);
+    assert.equal(logs.some((line) => HOLDING_FOR_CI.test(line)), expectHold, `${label}: ${logs.join('\n')}`);
+  }
 });
 
 // ── #7330: final-round Request changes, hammer-moved head, CONFLICTING ─────────
@@ -294,8 +355,15 @@ test('replay #7330 with its live ledger: two hammer launches on the reviewed hea
 
 test('a proven final-round resume covers a conflict with red CI, and never a blocking finding', () => {
   for (const reviewCycleExhausted of [false, true]) {
-    const options = { reviewCycleExhausted, commentOnlyFinalRoundResume: true };
+    const options = {
+      reviewCycleExhausted, commentOnlyFinalRoundResume: true, commentOnlyFinalRoundConflicting: true,
+    };
     assert.equal(isHammerRemediableEligibilityMiss(INCIDENT_7332_REASONS, options), true, `exhausted=${reviewCycleExhausted}`);
+    assert.equal(
+      isHammerRemediableEligibilityMiss(INCIDENT_7332_REASONS, { ...options, commentOnlyFinalRoundConflicting: false }),
+      false,
+      `pr-not-mergeable without a proven conflict still waits on red CI (exhausted=${reviewCycleExhausted})`,
+    );
     assert.equal(
       isHammerRemediableEligibilityMiss(INCIDENT_7332_REASONS.filter((r) => r !== 'pr-not-mergeable'), options),
       false,

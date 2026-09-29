@@ -976,7 +976,11 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   };
   if (!mergeability.isOpen) reasons.push('pr-not-open');
   if (mergeability.isDraft) reasons.push('pr-is-draft');
-  if (mergeability.mergeableState !== 'MERGEABLE') reasons.push('pr-not-mergeable');
+  if (mergeability.mergeableState === 'UNKNOWN') {
+    reasons.push('pr-mergeability-unknown');
+  } else if (mergeability.mergeableState !== 'MERGEABLE') {
+    reasons.push('pr-not-mergeable');
+  }
 
   // SPEC §4.2 #4 — head must match the review's reviewed head OR the
   // operator-approved evidence's observed head. The override branch is

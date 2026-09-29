@@ -358,6 +358,65 @@ test('labels unavailable inside the lease is a transient read failure without a 
   assert.equal(h.calls.merge, 0);
 });
 
+test('mergeable=UNKNOWN inside the lease is re-sampled, then a transient read failure — never a permanent manual-close park', async () => {
+  const h = makeHarness({ liveGate: greenGate({ mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }) });
+  const result = await attemptDaemonCleanMerge(baseArgs(h));
+  assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED);
+  assert.equal(result.reason, 'gate-read-failed');
+  assert.deepEqual(result.reasons, ['pr-mergeability-unknown']);
+  assert.equal(result.permanent, false);
+  assert.equal(result.manualCloseRequired, false);
+  assert.equal(h.calls.merge, 0);
+  assert.ok(h.calls.fetchLiveGate > 1, 'UNKNOWN is re-sampled within the retry budget');
+  const terminal = h.calls.auditAppends.at(-1).attempt;
+  assert.equal(terminal.reason, 'gate-read-failed');
+  assert.equal(terminal.permanent, false);
+});
+
+test('mergeable=UNKNOWN that resolves to MERGEABLE inside the lease merges', async () => {
+  const h = makeHarness({
+    liveGateSequence: [greenGate({ mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }), greenGate()],
+  });
+  const result = await attemptDaemonCleanMerge(baseArgs(h));
+  assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+  assert.equal(h.calls.merge, 1);
+});
+
+test('mergeable=UNKNOWN alongside a real gate miss is re-sampled, then a NON-permanent gate-not-eligible', async () => {
+  const h = makeHarness({
+    liveGate: greenGate({
+      mergeable: 'UNKNOWN',
+      requiredChecks: [{ __typename: 'CheckRun', name: 'lint', status: 'COMPLETED', conclusion: 'FAILURE' }],
+    }),
+  });
+  const result = await attemptDaemonCleanMerge(baseArgs(h));
+  assert.equal(result.reason, 'gate-not-eligible');
+  assert.equal(result.permanent, false, 'a transient read riding along never locks the head out');
+  assert.equal(result.manualCloseRequired, false);
+  assert.deepEqual(result.reasons, ['ci-not-green', 'pr-mergeability-unknown']);
+  assert.ok(h.calls.fetchLiveGate > 1, 'the UNKNOWN is re-sampled even beside a real miss');
+  assert.equal(h.calls.auditAppends.at(-1).attempt.permanent, false);
+});
+
+test('a non-permanent gate-not-eligible audit does not trip Gate 3 on the next tick', async () => {
+  const h = makeHarness({
+    mergeResults: [{ exitCode: 0 }],
+    priorAudit: {
+      repo: 'o/r',
+      prNumber: 7,
+      headSha: HEAD,
+      doc: {
+        closureAuthority: DAEMON_MERGE_CLOSURE_AUTHORITY,
+        status: 'failed-without-merge',
+        attempts: [{ outcome: 'failed-without-merge', reason: 'gate-not-eligible', permanent: false }],
+      },
+    },
+  });
+  const result = await attemptDaemonCleanMerge(baseArgs(h));
+  assert.notEqual(result.reason, 'prior-daemon-terminal-failure');
+  assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+});
+
 test('builder token cannot merge in enforce mode', async () => {
   const h = makeHarness({ mergeResults: [{ exitCode: 0 }] });
   const warnings = [];

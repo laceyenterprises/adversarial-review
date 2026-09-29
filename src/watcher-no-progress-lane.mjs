@@ -202,6 +202,7 @@ const MISSING_INPUT_REASON_PRIORITY = Object.freeze([
   'non-blocking-findings-present',
   'stale-review-head',
   'ci-not-green',
+  'pr-mergeability-unknown',
   'pr-not-mergeable',
   'branch-protection-missing-gate',
   'risk-class-not-permitted',

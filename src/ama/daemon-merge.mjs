@@ -97,6 +97,16 @@ const PERMANENT_TERMINAL_REASONS = Object.freeze([
 ]);
 
 /**
+ * Post-lease eligibility reasons that describe an incomplete or still-settling
+ * GitHub read rather than a property of the head. A miss made ONLY of these
+ * terminates as the non-permanent `gate-read-failed`, never `gate-not-eligible`.
+ */
+export const TRANSIENT_GATE_READ_REASONS = new Set([
+  'labels-unavailable',
+  'pr-mergeability-unknown',
+]);
+
+/**
  * Disposition vocabulary returned to the watcher.
  *
  *   - `merged`       — the daemon merged; a `succeeded` audit was written and
@@ -289,7 +299,9 @@ function priorDaemonPermanentFailure({ readAuditImpl, hqRoot, repo, prNumber, va
   if (String(doc.closureAuthority || '') !== DAEMON_MERGE_CLOSURE_AUTHORITY) return false;
   const attempts = Array.isArray(doc.attempts) ? doc.attempts : [];
   const last = attempts[attempts.length - 1];
-  return Boolean(last && PERMANENT_TERMINAL_REASONS.includes(String(last.reason || '')));
+  // A terminal recorded explicitly non-permanent (a gate miss read alongside a
+  // transient `mergeable=UNKNOWN`) never locks the head out.
+  return Boolean(last && last.permanent !== false && PERMANENT_TERMINAL_REASONS.includes(String(last.reason || '')));
 }
 
 /**
@@ -731,11 +743,22 @@ export async function attemptDaemonCleanMerge({
       labels: live.labels,
     });
     if (!elig.eligible) {
-      const labelsOnlyReadFailure = elig.reasons.length > 0 &&
-        elig.reasons.every((reason) => reason === 'labels-unavailable');
+      // Unreadable labels and GitHub's `mergeable=UNKNOWN` (recomputing after a
+      // push or base move) say nothing permanent about THIS head. Re-sample an
+      // UNKNOWN within the bounded budget (alone or beside a real miss). A miss
+      // made only of transient reads exhausts as `gate-read-failed`; any miss
+      // carrying one stays NON-permanent so the next tick retries instead of
+      // Gate 3 refusing the head forever on a half-read gate.
+      const transientReadOnly = elig.reasons.length > 0 &&
+        elig.reasons.every((reason) => TRANSIENT_GATE_READ_REASONS.has(reason));
+      const hasTransientRead = elig.reasons.some((reason) => TRANSIENT_GATE_READ_REASONS.has(reason));
+      if (elig.reasons.includes('pr-mergeability-unknown') && attempts < retryCap) {
+        await sleep(daemonMergeBackoffMs(attempts, { baseMs: backoffBaseMs, rng }));
+        continue;
+      }
       terminal = {
-        reason: labelsOnlyReadFailure ? 'gate-read-failed' : 'gate-not-eligible',
-        permanent: !labelsOnlyReadFailure,
+        reason: transientReadOnly ? 'gate-read-failed' : 'gate-not-eligible',
+        permanent: !hasTransientRead,
         reasons: elig.reasons,
         liveGate: live,
       };
@@ -868,8 +891,10 @@ export async function attemptDaemonCleanMerge({
   // operator-visible "manual close required" signal so the superproject
   // observability layer (ARR-02) can page on it instead of it being a silent
   // failed-without-merge. This does NOT change the merge decision.
-  const cleanParkManualCloseRequired =
-    !merged && terminal?.reason !== 'gate-read-failed' && isFullyCleanSettledReview(reviewState);
+  // A terminal carrying a transient read is retried next tick, never paged.
+  const terminalHasTransientRead = (terminal?.reasons || []).some((r) => TRANSIENT_GATE_READ_REASONS.has(r));
+  const cleanParkManualCloseRequired = !merged && terminal?.reason !== 'gate-read-failed' &&
+    !terminalHasTransientRead && isFullyCleanSettledReview(reviewState);
   let auditWritten = false;
   try {
     if (merged) {

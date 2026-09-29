@@ -423,6 +423,9 @@ export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
   return effectiveReasons.every((reason) => (
     HAMMER_AUTO_REMEDIABLE_MISS_REASONS.has(reason) ||
     (hasMechanicalMiss && reason === 'verdict-not-settled-success') ||
+    // DIRTYOWN-01: a transient `mergeable=UNKNOWN` read beside a real mechanical
+    // miss must not strand it; the hammer re-reads mergeability at its own head.
+    (hasMechanicalMiss && reason === 'pr-mergeability-unknown') ||
     (closerStaleHeadResume && reason === 'verdict-not-settled-success') ||
     // HMR-01: the settled comment-only resume covers exactly the strict
     // non-blocking refusal plus its paired verdict reason, or the zero-finding

@@ -12,6 +12,19 @@ function normalizeGithubMergeability({ mergeable, mergeStateStatus } = {}) {
 }
 
 /**
+ * Mergeability as the AMA closure gates classify it. Same as
+ * {@link normalizeGithubMergeability} except a raw `mergeable=UNKNOWN` stays
+ * `UNKNOWN` whatever `mergeStateStatus` says: the merge daemon's
+ * `evaluateMergeEligibility` reads the raw enum (a merge click against an
+ * UNKNOWN PR can be rejected as "not mergeable", a permanent terminal), so the
+ * closer must not call that head MERGEABLE and route it to the daemon.
+ */
+function closureGateMergeability({ mergeable, mergeStateStatus } = {}) {
+  if (String(mergeable || '').trim().toUpperCase() === 'UNKNOWN') return 'UNKNOWN';
+  return normalizeGithubMergeability({ mergeable, mergeStateStatus });
+}
+
+/**
  * GitHub reports `mergeable=UNKNOWN` (with `mergeStateStatus=UNKNOWN`/empty) for
  * a short window right after a commit is pushed or the base branch moves, while
  * it recomputes mergeability asynchronously. Treating that transient state as
@@ -24,7 +37,11 @@ function normalizeGithubMergeability({ mergeable, mergeStateStatus } = {}) {
  *
  * @param {{mergeable?: string, mergeStateStatus?: string}} initial first-read mergeability
  * @param {() => Promise<{mergeable?: string, mergeStateStatus?: string}>} refetch single-PR re-fetch
- * @param {{attempts?: number, delayMs?: number, sleepImpl?: (ms:number)=>Promise<void>}} [opts]
+ * `opts.classify` picks the classifier deciding "resolved" (default
+ * {@link normalizeGithubMergeability}); the AMA closer passes
+ * {@link closureGateMergeability} so a raw UNKNOWN beside `CLEAN` is re-sampled.
+ *
+ * @param {{attempts?: number, delayMs?: number, sleepImpl?: (ms:number)=>Promise<void>, classify?: (m:object)=>string}} [opts]
  * @returns {Promise<{mergeable: (string|null), mergeStateStatus: (string|null), normalized: string, samples: number, resolved: boolean}>}
  */
 async function resolveMergeabilityWithSampling(initial, refetch, opts = {}) {
@@ -34,10 +51,11 @@ async function resolveMergeabilityWithSampling(initial, refetch, opts = {}) {
     typeof opts.sleepImpl === 'function'
       ? opts.sleepImpl
       : (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const classify = typeof opts.classify === 'function' ? opts.classify : normalizeGithubMergeability;
 
   let current = initial || {};
   for (let sample = 1; ; sample += 1) {
-    const normalized = normalizeGithubMergeability(current);
+    const normalized = classify(current);
     // Terminal: GitHub has finished computing. CONFLICTING is a real conflict,
     // not the transient limbo, so stop sampling on it too.
     if (normalized === 'MERGEABLE' || normalized === 'CONFLICTING') {
@@ -69,4 +87,4 @@ async function resolveMergeabilityWithSampling(initial, refetch, opts = {}) {
   }
 }
 
-export { normalizeGithubMergeability, resolveMergeabilityWithSampling };
+export { closureGateMergeability, normalizeGithubMergeability, resolveMergeabilityWithSampling };

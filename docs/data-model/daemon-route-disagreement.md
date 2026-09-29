@@ -47,3 +47,19 @@ its name. The writer replaces the file when a new head begins a series.
 - A successful daemon clean merge removes the file. A missing file begins a new
   series. An unreadable file is logged and treated as a fresh series. Writes
   and removal are best-effort and do not interrupt route arbitration.
+
+## Transient-read sidecar
+
+A decline made only of transient GitHub reads (`pr-mergeability-unknown`,
+`labels-unavailable`) never touches the count. Instead the watcher keeps
+`<repo>-pr-<n>.transient.json` beside the main file, with the same name
+sanitizing. It has `schemaVersion` (`1`), `repo`, `prNumber`, `headSha`,
+`firstObservedAt` (reset when the head changes), `lastObservedAt`, and
+`stuckReportedAt` (null until reported).
+
+When transient declines on one head span more than
+`MERGEABILITY_UNKNOWN_STUCK_MS` (30 minutes), the watcher logs one
+`ama.mergeability_unknown_stuck` event and sets `stuckReportedAt`, so each head
+reports at most once. The sidecar never counts, parks, or pages. A transient
+decline reports the caller's head and a count of `0` when the main file holds
+another head's series. A successful daemon clean merge removes both files.

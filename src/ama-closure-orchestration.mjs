@@ -21,7 +21,11 @@ import {
   isMergeAgentRequestedScoped,
   mergeAgentDispatchEnvForAction,
 } from './ama/coexistence.mjs';
-import { DAEMON_MERGE_DISPOSITION, isDaemonMergeReviewAllowed } from './ama/daemon-merge.mjs';
+import {
+  DAEMON_MERGE_DISPOSITION,
+  TRANSIENT_GATE_READ_REASONS,
+  isDaemonMergeReviewAllowed,
+} from './ama/daemon-merge.mjs';
 import * as amaDispatchCloser from './ama/dispatch-closer.mjs';
 import { isEligibleForAmaClosure, SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
 import { evaluateMergeEligibility } from './ama/merge-eligibility.mjs';
@@ -70,7 +74,11 @@ import {
 } from './ama-hammer-background-dispatch.mjs';
 import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
 import { fetchPullRequestMergeability, fetchReviewBodiesForHead } from './github-api.mjs';
-import { normalizeGithubMergeability, resolveMergeabilityWithSampling } from './github-mergeability.mjs';
+import {
+  closureGateMergeability,
+  normalizeGithubMergeability,
+  resolveMergeabilityWithSampling,
+} from './github-mergeability.mjs';
 import {
   buildNonReviewableHeadDeltaEvidence,
   fetchHeadCloserVerifiedCommit,
@@ -193,7 +201,7 @@ async function fetchCurrentPrStateForBackgroundDispatch({
     execFileImpl,
     args: [
       'pr', 'view', String(prNumber), '--repo', repo,
-      '--json', 'state,headRefOid,isDraft,mergeable',
+      '--json', 'state,headRefOid,isDraft,mergeable,mergeStateStatus',
     ],
     timeoutMs: 30_000,
     log: logger,
@@ -204,6 +212,7 @@ async function fetchCurrentPrStateForBackgroundDispatch({
     headSha: String(parsed?.headRefOid || '').trim(),
     isDraft: parsed?.isDraft === true,
     mergeable: String(parsed?.mergeable || '').trim().toUpperCase(),
+    mergeStateStatus: String(parsed?.mergeStateStatus || '').trim().toUpperCase(),
   };
 }
 
@@ -492,8 +501,12 @@ export function normalizeCompletedRoundCount(value) {
 }
 
 // Transient mergeability sampling window (GitHub returns mergeable=UNKNOWN right
-// after a push / base move while it recomputes). Re-sample so we don't park an
-// otherwise-eligible PR as `pr-not-mergeable`. Env-overridable.
+// after a push / base move while it recomputes). Re-sample so an otherwise-eligible
+// PR resolves this tick; an UNKNOWN that survives sampling reads as the transient
+// `pr-mergeability-unknown` (retried next tick; on its own never hammered or parked,
+// and alongside a real remediable miss it does not block that miss's hammer
+// fallback), while a real CONFLICTING state reads as hammer-remediable `pr-not-mergeable`.
+// Env-overridable.
 const MERGEABILITY_SAMPLE_ATTEMPTS = Math.max(
   1,
   Number.parseInt(process.env.ADVERSARIAL_MERGEABILITY_SAMPLE_ATTEMPTS || '', 10) || 3,
@@ -559,8 +572,13 @@ function daemonGateReasonsHammerRemediable(gateReasons) {
   if (reasons.length === 0) return false;
   // Any non-remediable gate co-occurring → park (fail closed).
   if (reasons.some((r) => DAEMON_HAMMER_NONREMEDIABLE_GATE_REASONS.has(r))) return false;
-  // EVERY gate must be hammer-remediable.
-  return reasons.every((r) => DAEMON_HAMMER_REMEDIABLE_GATE_REASONS.has(r));
+  // DIRTYOWN-01: a transient mergeability read riding along a real remediable
+  // miss says nothing about the head — it must not turn that miss into a park.
+  // A transient-only decline stays non-remediable (retried next tick).
+  const substantive = reasons.filter((r) => r !== 'pr-mergeability-unknown');
+  // EVERY remaining gate must be hammer-remediable.
+  return substantive.length > 0
+    && substantive.every((r) => DAEMON_HAMMER_REMEDIABLE_GATE_REASONS.has(r));
 }
 
 /**
@@ -576,6 +594,28 @@ export function isDaemonNotTakenHammerRemediable(daemonCleanMerge) {
   if (daemonCleanMerge?.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) return false;
   if (String(daemonCleanMerge.reason || '') !== 'not-eligible') return false;
   return daemonGateReasonsHammerRemediable(daemonCleanMerge.reasons);
+}
+
+function daemonGateReasonsTransientRead(gateReasons) {
+  return Array.isArray(gateReasons) &&
+    gateReasons.length > 0 &&
+    gateReasons.every((reason) => TRANSIENT_GATE_READ_REASONS.has(String(reason)));
+}
+
+/**
+ * DIRTYOWN-01: is this daemon `not-taken` decline made only of transient GitHub
+ * reads (`pr-mergeability-unknown`, `labels-unavailable`)? Such a decline says
+ * nothing about the head, so it is logged but never counted toward the route
+ * disagreement bound — a steady merge stream that keeps GitHub recomputing
+ * mergeability must not page an operator for a manual close.
+ *
+ * @param {object} daemonCleanMerge  The `runDaemonCleanMergeAttempt` result.
+ * @returns {boolean}
+ */
+export function isDaemonNotTakenTransientRead(daemonCleanMerge) {
+  if (daemonCleanMerge?.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) return false;
+  if (String(daemonCleanMerge.reason || '') !== 'not-eligible') return false;
+  return daemonGateReasonsTransientRead(daemonCleanMerge.reasons);
 }
 
 function withAmaDispatchMetadata(result, { amaEnabled }) {
@@ -855,13 +895,16 @@ export async function maybeDispatchAmaClosureFor({
 
   const settledReviewHeadSha = candidate?.headSha || currentRevisionRef || null;
   // GitHub returns mergeable=UNKNOWN transiently right after a push or when the
-  // base branch moves (a steady merge stream keeps `main` moving), and the
-  // eligibility predicate maps a non-MERGEABLE state to `pr-not-mergeable`. Only
+  // base branch moves (a steady merge stream keeps `main` moving). The
+  // eligibility predicate maps an unresolved UNKNOWN to the transient
+  // `pr-mergeability-unknown` and every other non-MERGEABLE state to
+  // `pr-not-mergeable`, so resolving it here decides this tick's route. Only
   // re-sample the actually-unresolved states; BLOCKED/BEHIND/false are already
   // classified enough for this tick and sleeping on them just consumes the
-  // posted-review handler budget.
+  // posted-review handler budget. Classify as the closure gate does, so a raw
+  // UNKNOWN beside a stale `CLEAN` is re-sampled rather than read once.
   let mergeabilityForGate = candidate;
-  const initialMergeability = normalizeGithubMergeability(candidate || {});
+  const initialMergeability = closureGateMergeability(candidate || {});
   if (!initialMergeability || initialMergeability === 'UNKNOWN') {
     throwIfAborted(signal);
     const sampled = await runCoexistenceOperation(
@@ -879,6 +922,7 @@ export async function maybeDispatchAmaClosureFor({
           attempts: MERGEABILITY_SAMPLE_ATTEMPTS,
           delayMs: MERGEABILITY_SAMPLE_DELAY_MS,
           sleepImpl: (ms) => abortableSleep(ms, operationSignal),
+          classify: closureGateMergeability,
         },
       ),
       {
@@ -1113,7 +1157,11 @@ export async function maybeDispatchAmaClosureFor({
     headSha: currentPrHeadSha,
     isOpen: String(candidate?.prState || 'open').toLowerCase() === 'open',
     isDraft: Boolean(candidate?.isDraft),
-    mergeableState: gateSnapshot.mergeableState,
+    // DIRTYOWN-01: classify UNKNOWN exactly as the daemon's
+    // `evaluateMergeEligibility` does (raw `mergeable`), so an UNKNOWN+CLEAN
+    // read waits a tick on both sides instead of the closer answering
+    // `daemon-clean-route` for a head the daemon declines.
+    mergeableState: closureGateMergeability(mergeabilityForGate || {}),
     labels: Array.isArray(labelNames) ? labelNames : undefined,
     statusCheckRollup: Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : [],
     branchProtection: { requiredContexts: candidate?.branchProtection?.requiredContexts || [] },
@@ -1578,9 +1626,7 @@ export async function maybeDispatchAmaClosureFor({
       // superproject observability layer pages on this existing event.
       const transientEligibilityRead =
         daemonCleanMerge.reason === 'gate-not-eligible' &&
-        Array.isArray(daemonCleanMerge.reasons) &&
-        daemonCleanMerge.reasons.length > 0 &&
-        daemonCleanMerge.reasons.every((reason) => reason === 'labels-unavailable');
+        daemonGateReasonsTransientRead(daemonCleanMerge.reasons);
       if (
         daemonFailedClosed &&
         !transientEligibilityRead &&
@@ -1753,6 +1799,7 @@ export async function maybeDispatchAmaClosureFor({
     || daemonCleanMerge.disposition === DAEMON_MERGE_DISPOSITION.NOT_TAKEN;
   const routeDisagreementHead = currentPrHeadSha || reviewState.headSha || null;
   const daemonDeclineHammerRemediable = isDaemonNotTakenHammerRemediable(daemonCleanMerge);
+  const daemonDeclineTransientRead = isDaemonNotTakenTransientRead(daemonCleanMerge);
   const forceHammerAfterRouteDisagreement = daemonDeclined && daemonRouteDisagreementForcesHammer({
     rootDir,
     repo: repoPath,
@@ -1869,7 +1916,15 @@ export async function maybeDispatchAmaClosureFor({
             return { dispatched: false, reason: 'background-pr-state-changed' };
           }
           if (live?.isDraft) return { dispatched: false, reason: 'background-pr-draft' };
-          if (live?.mergeable !== 'MERGEABLE') {
+          // DIRTYOWN-01: a CONFLICTING PR is the hammer's job (it resolves the
+          // conflict), so it dispatches. GitHub's transient UNKNOWN waits for the
+          // next cycle; UNKNOWN+CLEAN launches here because the hammer re-reads
+          // mergeability itself (the eligibility gate stays strict on it).
+          const liveMergeability = normalizeGithubMergeability(live || {});
+          if (liveMergeability === 'UNKNOWN') {
+            return { dispatched: false, reason: 'background-pr-mergeable-unknown', mergeable: 'UNKNOWN' };
+          }
+          if (liveMergeability !== 'MERGEABLE' && liveMergeability !== 'CONFLICTING') {
             return { dispatched: false, reason: 'background-pr-not-mergeable', mergeable: live?.mergeable || null };
           }
           return maybeDispatchAmaCloserImpl({ ...closerArgs });
@@ -1918,7 +1973,11 @@ export async function maybeDispatchAmaClosureFor({
           : new Error(String(backgroundSettled.error || 'background AMA dispatch failed'));
       }
       result = backgroundSettled.result;
-      if (result?.reason === 'background-pr-state-changed' || result?.reason === 'background-pr-not-mergeable') {
+      if (
+        result?.reason === 'background-pr-state-changed' ||
+        result?.reason === 'background-pr-not-mergeable' ||
+        result?.reason === 'background-pr-mergeable-unknown'
+      ) {
         result = { ...result, skipMergeAgent: true, retryAfterMs: 30_000 };
       } else if (result?.reason === 'background-pr-draft') {
         // Nothing in the pipeline marks a PR ready for review, so a draft waits
@@ -1970,6 +2029,7 @@ export async function maybeDispatchAmaClosureFor({
       headSha: routeDisagreementHead,
       daemonCleanMerge,
       hammerRemediable: daemonDeclineHammerRemediable,
+      transientRead: daemonDeclineTransientRead,
       recordParkImpl: recordDaemonMergePark,
       logger,
     });

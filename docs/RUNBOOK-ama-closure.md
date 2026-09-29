@@ -259,11 +259,17 @@ When a queued entry gets a slot, the watcher fetches the live PR state,
 head, draft flag, and mergeability before calling the closer, and names what
 blocked it without launching a hammer (COMMENTCLOSE-01): a closed or updated PR
 yields `background-pr-state-changed`, a draft yields `background-pr-draft`, a
-non-`MERGEABLE` PR yields `background-pr-not-mergeable` (with the observed
+PR whose normalized mergeability (`mergeable` plus `mergeStateStatus`, where
+`UNKNOWN`+`CLEAN` counts as `MERGEABLE`, because the hammer re-reads
+mergeability itself) is still `UNKNOWN` yields
+`background-pr-mergeable-unknown`, any other state that is neither `MERGEABLE`
+nor `CONFLICTING` yields `background-pr-not-mergeable` (with the observed
 `mergeable` value), and an unreadable live state yields
-`background-pr-state-unavailable`. These results are retained for the next tick
-to apply through the normal inline result path. A state change or an unmergeable
-PR retries after 30 seconds; a draft routes to the operator-blocked lane with
+`background-pr-state-unavailable`. A `CONFLICTING` PR is not blocked here: it
+reaches the closer, whose hammer resolves the conflict (DIRTYOWN-01). These
+results are retained for the next tick to apply through the normal inline
+result path. A state change, an `UNKNOWN` mergeability, or an unmergeable PR
+retries after 30 seconds; a draft routes to the operator-blocked lane with
 `operatorReason: pr-is-draft`, because nothing in the pipeline marks a PR ready
 for review, and its operator alert says the PR is a draft. A settle-log failure cannot
 leave an unhandled background promise rejection.
@@ -855,9 +861,13 @@ budget/read exhaustion may retry on a later tick. The watcher emits
 `manualCloseRequired`, a permanent failure, or a non-remediable identity or
 eligibility gate requiring operator action. It also fires once per head when a
 closer→daemon route disagreement on a non-remediable decline passes its bound
-(see the next section). Missing live labels alone produce a
-transient `gate-read-failed` with no manual-close marker or page; the daemon can
-retry on a later tick. A hammer-remediable failure instead emits
+(see the next section). Missing live labels or GitHub's still-computing
+`mergeable=UNKNOWN` (`pr-mergeability-unknown`), alone or together, produce a
+transient `gate-read-failed` with no manual-close marker or page and no
+permanent-failure audit; an UNKNOWN read is first re-sampled within the
+daemon's merge retry budget, and the daemon can retry on a later tick. Beside
+a real gate miss, an UNKNOWN is still re-sampled, and the terminal is a
+non-permanent `gate-not-eligible` without a manual-close marker. A hammer-remediable failure instead emits
 `ama.daemon_clean_fail_closed.hammer_fallback`. A removed `operator-approved`
 label is a protective hold, not a hammer handoff.
 
@@ -879,12 +889,42 @@ was red to one and not the other. Both now call one classifier
   `daemonReasons` (gates), and the per-head `disagreements` count. The count is
   stored at `data/follow-up-jobs/daemon-route-disagreement/<repo>-pr-<n>.json`.
   A new head restarts it, and a daemon merge deletes it.
+- **Transient-read declines are logged but never counted** (DIRTYOWN-01). A
+  `not-eligible` decline whose gates are all transient GitHub reads
+  (`pr-mergeability-unknown`, `labels-unavailable`; the daemon's
+  `TRANSIENT_GATE_READ_REASONS`) logs the event with `transientRead: true` and
+  `escalation: null`, and leaves the count unchanged. It cannot reach the
+  hammer or park escalation, so a moving `main` that keeps GitHub recomputing
+  mergeability never pages for a manual close. The closer also reads a raw
+  `mergeable=UNKNOWN` as `UNKNOWN` whatever `mergeStateStatus` says, as the
+  daemon does (`closureGateMergeability`), and its bounded re-sampling uses the
+  same classifier, so an `UNKNOWN`+`CLEAN` read is re-sampled and then waits a
+  tick on both sides instead of the closer routing it to the daemon. A
+  transient-read decline reports the caller's current head and a count of 0
+  when the stored series belongs to another head.
+- **A transient read beside a hammer-remediable gate still reaches the hammer**
+  (DIRTYOWN-01). `pr-mergeability-unknown` next to `ci-not-green`,
+  `pr-not-mergeable`, `stale-head`, or `verdict-not-eligible` is judged on the
+  other gates: pre-lease it counts toward the bound and then takes the
+  `hammer_fallback` row below; post-lease the daemon re-samples the UNKNOWN,
+  then fails closed as a NON-permanent `gate-not-eligible` with no
+  manual-close marker, so Gate 3 never locks the head out and the closer's
+  fail-closed hammer fallback takes it. An UNKNOWN beside `lease-not-held` or a
+  non-remediable gate is not remediable.
+- **A head stuck on transient reads is surfaced once** (DIRTYOWN-01). The first
+  transient-read decline on a head is recorded in a
+  `<repo>-pr-<n>.transient.json` sidecar next to the count file. When declines
+  on the same head span more than `MERGEABILITY_UNKNOWN_STUCK_MS` (30 min), the
+  watcher logs one `ama.mergeability_unknown_stuck` event for that head (with
+  `firstObservedAt`, `elapsedMs`, and the daemon gates). It is an operator
+  signal only: it never counts, parks, or pages. A new head restarts the
+  clock, and a daemon merge deletes the sidecar with the count file.
 - **Past the bound** (3 disagreements on one head), the next tick escalates:
 
 | Daemon decline | Escalation |
 |---|---|
-| `not-eligible` whose gates are all hammer-remediable (`verdict-not-eligible`, `ci-not-green`, `pr-not-mergeable`, `stale-head`) | The closer is called with `forceHammerAfterDaemonFailure`, so the capped hammer takes the PR (per-PR hammer-retry-cap applies). Emits `ama.daemon_route_disagreement.hammer_fallback`. |
-| Any other decline (e.g. `duplicate-family-unresolved`, `labels-unavailable`, `prior-daemon-terminal-failure`, `findings-unknown`) | Parks: a `daemon-route-disagreement` park record (visible to `review-pipeline-health`) and one `ama.daemon_clean_park.manual_close_required` page per head with `reason: daemon-route-disagreement`. The coexistence outcome is `await-operator`. The daemon still runs every tick, so clearing the named gate lets it merge. |
+| `not-eligible` whose gates are all hammer-remediable (`verdict-not-eligible`, `ci-not-green`, `pr-not-mergeable`, `stale-head`), optionally with `pr-mergeability-unknown` alongside | The closer is called with `forceHammerAfterDaemonFailure`, so the capped hammer takes the PR (per-PR hammer-retry-cap applies). Emits `ama.daemon_route_disagreement.hammer_fallback`. |
+| Any other decline (e.g. `duplicate-family-unresolved`, a transient read mixed with a non-remediable gate or `lease-not-held`, `prior-daemon-terminal-failure`, `findings-unknown`) | Parks: a `daemon-route-disagreement` park record (visible to `review-pipeline-health`) and one `ama.daemon_clean_park.manual_close_required` page per head with `reason: daemon-route-disagreement`. The coexistence outcome is `await-operator`. The daemon still runs every tick, so clearing the named gate lets it merge. |
 
 ### `merge-agent-skipped-ama-enabled`
 
@@ -917,7 +957,8 @@ reasons:
 | `label-adversarial-merge-blocked` | Current-head `adversarial-merge-blocked` is applied (with head-scoped evidence). |
 | `skip-operator-skip` | A hard-stop operator label produced `operator-skip-label`; the watcher is deliberately holding merge/hammer/merge-agent closeout for an open PR. Terminal held PRs are cleaned up instead of held. |
 | `stale-review-head` | The reviewed head doesn't match the PR's current head. |
-| `pr-not-mergeable` | GitHub's `mergeableState` is not `MERGEABLE` — usually a conflict. |
+| `pr-not-mergeable` | The PR is closed, or GitHub's `mergeableState` is neither `MERGEABLE` nor `UNKNOWN` (usually a conflict; also strict-mode `BEHIND` or an empty/unrecognized enum). Hammer-remediable for a conflicting or behind open PR: the hammer resolves the conflict or rebases. A closed PR or an empty-state read gets no hammer fix. |
+| `pr-mergeability-unknown` | GitHub still reports `mergeableState` `UNKNOWN` after the watcher's bounded re-sampling (it recomputes after a push or base move). Transient: on a non-exhausted review cycle it is not hammer-remediable (an exhausted cycle still hammers any miss without `stale-review-head`), and it never produces a manual-close page; the next tick re-reads. On the daemon clean path an UNKNOWN-only miss inside the lease is re-sampled within the retry budget and then ends as the non-permanent `gate-read-failed`, so the head stays eligible for the daemon on the next tick (a diagnostics park record is still written, as for every non-merged daemon outcome). A pre-lease UNKNOWN decline is never counted as a closer→daemon route disagreement. |
 | `remediation-pending` | Adversarial-review remediation work is owed before AMA can close. |
 
 ### FSR-06B: fleet-self-repair re-review requests for a trailer-only head move

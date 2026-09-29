@@ -81,4 +81,7 @@ Directory: `data/follow-up-jobs/hammer-retry-cap/`
   infrastructure reasons (`src/ama/dead-hammer-rearm.mjs`) are the LRQ failure
   classes `oauth_access_token_revoked` and `adapter_boot_crash`, and
   `process_exited_after_progress` or `worker_killed` with the provider's API
-  429 in the worker's own output.
+  429 in the worker's own output. The first two are refunded only when the
+  next dispatch resolves to a different harness class; otherwise the death
+  stays charged (`infra-cause-persists`), keeping the refund for an exit that a
+  re-dispatch could help. A 429 death is refunded without that check.

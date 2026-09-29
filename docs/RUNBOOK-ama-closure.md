@@ -233,9 +233,14 @@ provenance still key off the configured logical class). It emits a loud
   `worker_class_fallback` list (`src/merge-agent-harness.mjs`), so the watcher's
   AMA recovery fallback dispatches `hammer` as `hammer-claude` while
   openai/oauth is grounded. Unlike the closer, it never dispatches a grounded
-  class: with no ungrounded fallback it returns `dispatch-deferred` with reason
-  `merge-agent-harness-grounded`, and the next tick resolves again. An
-  unreadable quota status still keeps the configured class.
+  class: fallback candidates are screened on soft as well as hard grounding
+  (`screenSoftGroundedFallbacks`), and with no ungrounded fallback it returns
+  `dispatch-deferred` with reason `merge-agent-harness-grounded`, and the next
+  tick resolves again. Each deferral is recorded per (PR, head) under
+  `data/follow-up-jobs/merge-agent-harness-deferrals/` (first seen, count), and
+  one that outlives 30 minutes logs `merge_agent.harness_grounded_deferral` at
+  warn level once. A dispatch clears the record. An unreadable quota status
+  still keeps the configured class.
 
 ### 2b. HAMASYNC-01 background hammer dispatch
 
@@ -857,16 +862,22 @@ Now:
   re-dispatches on the same head in that tick. The 429 must come from the
   harness: the LRQ's failure detail, the final `result` event of the worker's
   `<HQ_ROOT>/dispatch/<lrq>/stdout.log`, or a provider error line. A quote of
-  the 429 text in the worker's own narrative does not count.
+  the 429 text in the worker's own narrative does not count. An
+  `oauth_access_token_revoked` or `adapter_boot_crash` death is refunded only
+  when the next dispatch resolves to a different harness class (for example the
+  provider is now grounded and a fallback takes over); otherwise the same class
+  would die the same way, so the death stays charged with reason
+  `infra-cause-persists`. A 429 death is refunded without that probe.
 - **Budget.** The refund is the one above: the same ledger, the same
   `retryable` counter, and the same one refund per reviewed-head series,
   whether the launch exited without closing or died of infrastructure. Past
   it, the death stays charged, and the normal cap suppresses and pages.
 - **Log.** `ama_closer.infra_dead_hammer_rearm` records `rearmed`, `cause`,
   `failureClass` and the refund's `reason` (for example
-  `retry-budget-exhausted`). It is logged once per launch. A launch re-observed
-  while its re-dispatch waits, or after the cap suppressed the series, is not
-  logged again.
+  `retry-budget-exhausted`). It is logged once per launch, whatever the reason:
+  the dispatch record's `infraRearmLoggedLaunchRequestId` names the launch
+  already logged. A launch re-observed while its re-dispatch waits, or after
+  the cap suppressed the series, is not logged again.
 
 A failure class outside that list (`worker_crashed`, an exit after progress
 with no 429, an unreadable LRQ row) stays charged, as before.

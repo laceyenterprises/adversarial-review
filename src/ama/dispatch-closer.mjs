@@ -5218,13 +5218,30 @@ export async function maybeDispatchAmaCloser({
           ledgerDbPath: dispatchContext.ledgerDbPath || null,
           env: process.env,
           now: dispatchContext.dispatchedAt,
+          // A revoked grant or boot crash is refunded only when the re-dispatch
+          // would land on another harness than the one that died.
+          nextDispatchDiffersImpl: async () => {
+            const next = await resolveCloserDispatchHarnessImpl({
+              workerClass,
+              fallbackWorkerClasses: Array.isArray(cfg?.workerClassFallback) ? cfg.workerClassFallback : [],
+              hqPath,
+              execFileImpl,
+              env: process.env,
+              signal,
+            });
+            const died = existingRecord.dispatchWorkerClass || existingRecord.workerClass || workerClass;
+            return Boolean(next?.workerClass) && next.workerClass !== died;
+          },
         });
-        // Log an infrastructure death once, refunded or not. The same launch
-        // is re-observed while a re-dispatch waits (`already-refunded`) or
-        // after the cap suppressed the series (`suppressed`); any other
-        // failure keeps its charge silently, as before.
+        // Log an infrastructure death once per launch, refunded or not. The
+        // launch is re-observed on every tick until a re-dispatch replaces the
+        // record, so the logged launch is stored on the record
+        // (`infraRearmLoggedLaunchRequestId`). `already-refunded` and
+        // `suppressed` are never logged; a non-infra failure keeps its charge
+        // silently, as before.
         if (deadHammerRearm.cause
-          && !['not-infrastructure', 'already-refunded', 'suppressed'].includes(deadHammerRearm.reason)) {
+          && !['not-infrastructure', 'already-refunded', 'suppressed'].includes(deadHammerRearm.reason)
+          && existingRecord.infraRearmLoggedLaunchRequestId !== existingRecord.launchRequestId) {
           logAmaCloserDispatchEvent(logger, 'ama_closer.infra_dead_hammer_rearm', {
             repo,
             prNumber,
@@ -5232,6 +5249,11 @@ export async function maybeDispatchAmaCloser({
             launchRequestId: existingRecord.launchRequestId,
             ...deadHammerRearm,
           }, { level: deadHammerRearm.rearmed ? 'info' : 'warn' });
+          updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => (
+            current?.launchRequestId === existingRecord.launchRequestId
+              ? { ...current, infraRearmLoggedLaunchRequestId: existingRecord.launchRequestId }
+              : null
+          ));
         }
       }
     }

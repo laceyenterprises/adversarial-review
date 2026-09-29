@@ -28,6 +28,14 @@
 // `result` event of the worker's stream-json stdout, or a provider error line.
 // A hammer's stream also carries every file it read, and this repo's own source
 // quotes the 429 text, so a 429 inside any other event is not evidence.
+//
+// A 429 clears by the next tick. A revoked grant or a deterministic adapter boot
+// crash does not: re-dispatching the same class on the same credential would
+// likely die the same way and spend the series' one refund, which a later
+// HAMBG-02 exit could have used. So those two causes are refunded only when the
+// next dispatch would run on a different harness (`nextDispatchDiffersImpl`,
+// e.g. the provider is now grounded and a fallback takes over). Otherwise the
+// death stays charged and is reported as `infra-cause-persists`.
 
 import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
 import { join } from 'node:path';
@@ -124,6 +132,16 @@ export function readDeadHammerWorkerOutput({ hqRoot, launchRequestId } = {}) {
   return { stdout: readFileTail(join(dir, 'stdout.log')), stderr: readFileTail(join(dir, 'stderr.log')) };
 }
 
+// Any doubt (no probe, a throw, a non-true answer) means "same harness".
+async function nextDispatchWouldDiffer(impl, args) {
+  if (typeof impl !== 'function') return false;
+  try {
+    return (await impl(args)) === true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Refund a failed hammer launch's dispatch when it died of an infrastructure
  * cause and pushed nothing. Best effort: never throws, and any doubt leaves
@@ -135,6 +153,9 @@ export function readDeadHammerWorkerOutput({ hqRoot, launchRequestId } = {}) {
  * @param {string} args.jobKey  The review series (reviewed head).
  * @param {object|null=} args.launchRequestProbe  The LRQ row the closer already read, if any.
  * @param {Function} args.readLaunchRequestStatusImpl  Ledger read of the LRQ row.
+ * @param {Function|null=} args.nextDispatchDiffersImpl  Resolves true when the
+ *   re-dispatch would run on a different harness than the dead launch. Gates
+ *   the refund for causes a tick does not clear; absent, they stay charged.
  * @returns {Promise<{ rearmed: boolean, reason: string, cause?: string|null,
  *   failureClass?: string|null, retryable?: number }>}
  */
@@ -154,6 +175,7 @@ export async function maybeRearmInfraDeadHammer({
   env = process.env,
   now = null,
   readWorkerOutputImpl = readDeadHammerWorkerOutput,
+  nextDispatchDiffersImpl = null,
 } = {}) {
   try {
     const launchRequestId = record?.launchRequestId || null;
@@ -181,6 +203,11 @@ export async function maybeRearmInfraDeadHammer({
       stderr: output?.stderr || '',
     });
     if (!infra) return { rearmed: false, reason: 'not-infrastructure', cause, failureClass };
+    const diedClass = record?.workerClass || workerClass;
+    if (INFRA_DEAD_HAMMER_FAILURE_CLASSES.includes(cause)
+      && await nextDispatchWouldDiffer(nextDispatchDiffersImpl, { record, workerClass: diedClass }) !== true) {
+      return { rearmed: false, reason: 'infra-cause-persists', cause, failureClass };
+    }
     const refund = refundHammerRetryDispatch(rootDir, { repo, prNumber }, {
       jobKey: record.reviewedSha || jobKey,
       headSha: record.targetRemediationSha || record.headSha,

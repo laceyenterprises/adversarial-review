@@ -501,3 +501,43 @@ test('primary provider untracked → never fall back (cannot prove a cap)', asyn
   assert.equal(result.reason, 'primary-provider-untracked');
   assert.equal(exec.calls.length, 0);
 });
+
+test('CLOSERREUSE-01: a soft-grounded fallback is skipped only with screenSoftGroundedFallbacks', async () => {
+  // Hard-exhausted openai; anthropic hard-ok but soft-grounded.
+  const stdout = fleetQuotaStdout({
+    openai: 'exhausted',
+    anthropic: { state: 'ok', afhGrounding: afhGrounding({ grounded: true, signals: 4, kills: 4 }) },
+  });
+  // The closer (default) still takes the soft-grounded candidate.
+  const closer = await resolveCloserDispatchHarness({
+    workerClass: 'hammer',
+    fallbackWorkerClasses: ['hammer-claude'],
+    execFileImpl: buildFleetExec(stdout).impl,
+  });
+  assert.equal(closer.fellBack, true);
+  assert.equal(closer.workerClass, 'hammer-claude');
+
+  // The merge-agent screens it out: no usable fallback.
+  const screened = await resolveCloserDispatchHarness({
+    workerClass: 'hammer',
+    fallbackWorkerClasses: ['hammer-claude'],
+    execFileImpl: buildFleetExec(stdout).impl,
+    screenSoftGroundedFallbacks: true,
+  });
+  assert.equal(screened.fellBack, false);
+  assert.equal(screened.reason, 'all-fallbacks-grounded');
+  assert.equal(screened.groundedBy, 'hard');
+
+  // A soft verdict that is not grounded does not screen the candidate.
+  const clear = await resolveCloserDispatchHarness({
+    workerClass: 'hammer',
+    fallbackWorkerClasses: ['hammer-claude'],
+    execFileImpl: buildFleetExec(fleetQuotaStdout({
+      openai: 'exhausted',
+      anthropic: { state: 'ok', afhGrounding: afhGrounding({ grounded: false, signals: 1 }) },
+    })).impl,
+    screenSoftGroundedFallbacks: true,
+  });
+  assert.equal(clear.fellBack, true);
+  assert.equal(clear.workerClass, 'hammer-claude');
+});

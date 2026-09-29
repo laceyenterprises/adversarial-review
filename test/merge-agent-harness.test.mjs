@@ -9,13 +9,16 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { dispatchMergeAgentForPR } from '../src/follow-up-merge-agent.mjs';
 import {
+  MERGE_AGENT_HARNESS_DEFERRAL_EVENT,
   MERGE_AGENT_HARNESS_GROUNDED_REASON,
+  mergeAgentHarnessDeferralFilePath,
+  mergeAgentHarnessRecordFields,
   resolveMergeAgentDispatchHarness,
 } from '../src/merge-agent-harness.mjs';
 
@@ -178,4 +181,124 @@ test('a resolver fault fails open to the configured class', async () => {
   assert.equal(harness.deferred, false);
   assert.equal(harness.workerClass, 'hammer');
   assert.equal(harness.reason, 'harness-fallback-resolver-error');
+});
+
+test('fallback candidates are screened on soft grounding too: a soft-grounded hammer-claude defers', async () => {
+  const seen = [];
+  const harness = await resolveMergeAgentDispatchHarness({
+    workerClass: 'hammer',
+    fallbackWorkerClasses: ['hammer-claude'],
+    resolveHarnessImpl: async (args) => {
+      seen.push(args);
+      return { workerClass: 'hammer', fellBack: false, reason: 'all-fallbacks-grounded', groundedBy: 'hard', provider: 'openai' };
+    },
+    logger: { warn() {} },
+  });
+  assert.equal(seen[0].screenSoftGroundedFallbacks, true);
+  assert.equal(seen[0].probeWithoutFallbacks, true);
+  assert.equal(harness.deferred, true);
+  assert.equal(harness.harnessReason, 'all-fallbacks-grounded');
+
+  // End to end through the real resolver: openai hard-exhausted, anthropic soft-grounded.
+  const hq = hqStub(JSON.stringify({
+    providerStatuses: [
+      { provider: 'openai', authPath: 'oauth', state: 'exhausted' },
+      {
+        provider: 'anthropic',
+        authPath: 'oauth',
+        state: 'ok',
+        afhGrounding: { grounded: true, signals: 4, threshold: 3, reason: 'sustained_provider_quota_exhausted_kills' },
+      },
+    ],
+  }));
+  const real = await resolveMergeAgentDispatchHarness({
+    workerClass: 'hammer',
+    fallbackWorkerClasses: ['hammer-claude'],
+    hqPath: '/bin/hq-test',
+    execFileImpl: hq.impl,
+    logger: { warn() {} },
+  });
+  assert.equal(real.deferred, true);
+  assert.equal(real.workerClass, 'hammer');
+});
+
+test('a grounded deferral is recorded durably, counted, and escalates once after 30 minutes', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'closerreuse-deferral-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const job = { repo: 'laceyenterprises/agent-os', prNumber: 7348, headSha: 'a21e8ed3c8080a03ca734cdcc422be7dfb1a3f5c' };
+  const filePath = mergeAgentHarnessDeferralFilePath(dir, job);
+  const warnings = [];
+  const logger = { warn: (line) => warnings.push(String(line)) };
+  const grounded = hqStub(fleetQuotaStdout({ openai: 'exhausted', anthropic: 'suspended' }));
+  const resolveAt = (now, hq = grounded) => resolveMergeAgentDispatchHarness({
+    workerClass: 'hammer',
+    fallbackWorkerClasses: ['hammer-claude'],
+    hqPath: '/bin/hq-test',
+    execFileImpl: hq.impl,
+    logger,
+    deferral: { dir, job, now },
+  });
+
+  const first = await resolveAt('2026-09-29T12:00:00.000Z');
+  assert.equal(first.deferred, true);
+  assert.equal(first.deferralRecord.deferralCount, 1);
+  assert.equal(first.deferralRecord.firstDeferredAt, '2026-09-29T12:00:00.000Z');
+  assert.equal(first.deferralRecord.escalatedAt, null);
+  assert.equal(first.deferralRecord.provider, 'openai');
+
+  await resolveAt('2026-09-29T12:10:00.000Z');
+  assert.equal(warnings.some((line) => line.includes(MERGE_AGENT_HARNESS_DEFERRAL_EVENT)), false);
+
+  const late = await resolveAt('2026-09-29T12:31:00.000Z');
+  assert.equal(late.deferralRecord.deferralCount, 3);
+  assert.equal(late.deferralRecord.firstDeferredAt, '2026-09-29T12:00:00.000Z');
+  assert.equal(late.deferralRecord.escalatedAt, '2026-09-29T12:31:00.000Z');
+  const events = warnings.filter((line) => line.includes(MERGE_AGENT_HARNESS_DEFERRAL_EVENT));
+  assert.equal(events.length, 1);
+  const event = JSON.parse(events[0]);
+  assert.equal(event.prNumber, 7348);
+  assert.equal(event.ageMinutes, 31);
+  assert.equal(event.deferralCount, 3);
+
+  await resolveAt('2026-09-29T12:45:00.000Z');
+  assert.equal(warnings.filter((line) => line.includes(MERGE_AGENT_HARNESS_DEFERRAL_EVENT)).length, 1, 'escalated once');
+  assert.equal(JSON.parse(readFileSync(filePath, 'utf8')).deferralCount, 4);
+
+  // Recovery: the next resolution dispatches and clears the record.
+  const recovered = await resolveAt('2026-09-29T13:00:00.000Z', hqStub(fleetQuotaStdout({ openai: 'ok' })));
+  assert.equal(recovered.deferred, false);
+  assert.equal(recovered.deferralRecord, undefined);
+  assert.equal(existsSync(filePath), false);
+});
+
+test('a dispatch-deferred merge-agent tick writes the deferral record under data/follow-up-jobs', async (t) => {
+  const hq = hqStub(fleetQuotaStdout({ openai: 'exhausted', anthropic: 'suspended' }));
+  const { result } = await dispatchFallback(t, hq);
+  assert.equal(result.decision, 'dispatch-deferred');
+  assert.equal(result.harness.deferralRecord.deferralCount, 1);
+  assert.equal(result.harness.deferralRecord.prNumber, 7348);
+});
+
+test('the dispatch record fields name the class that actually ran and why', () => {
+  assert.deepEqual(mergeAgentHarnessRecordFields(null), { dispatchWorkerClass: null, harness: null });
+  assert.deepEqual(mergeAgentHarnessRecordFields({
+    workerClass: 'hammer-claude',
+    fellBack: true,
+    from: 'hammer',
+    to: 'hammer-claude',
+    provider: 'openai',
+    groundedBy: 'hard',
+    reason: 'primary-grounded',
+    deferred: false,
+  }), {
+    dispatchWorkerClass: 'hammer-claude',
+    harness: {
+      fellBack: true,
+      from: 'hammer',
+      to: 'hammer-claude',
+      provider: 'openai',
+      groundedBy: 'hard',
+      reason: 'primary-grounded',
+    },
+  });
 });

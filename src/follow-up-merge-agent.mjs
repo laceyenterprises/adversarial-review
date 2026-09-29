@@ -64,7 +64,7 @@ import {
   ALLOWED_MERGE_AGENT_WORKER_CLASSES,
   DEFAULT_MERGE_AGENT_WORKER_CLASS,
   MERGE_AGENT_WORKER_CLASS_ENV,
-  resolveMergeAgentDispatchHarness,
+  mergeAgentHarnessRecordFields, resolveMergeAgentDispatchHarness,
   resolveMergeAgentWorkerClass,
 } from './merge-agent-harness.mjs';
 import { validateStartupRoleRegistry } from './role-registry.mjs';
@@ -1293,6 +1293,7 @@ function recordMergeAgentDispatch(rootDir, job, {
   watcherReDispatchCount = 0,
   hqRoot = null,
   hqOwnerUser = null,
+  harness = null,
 } = {}) {
   const dir = mergeAgentDispatchDir(rootDir);
   mkdirSync(dir, { recursive: true });
@@ -1322,6 +1323,7 @@ function recordMergeAgentDispatch(rootDir, job, {
     launchRequestId,
     hqRoot,
     hqOwnerUser,
+    ...mergeAgentHarnessRecordFields(harness),
     prompt,
   };
   writeFileAtomic(filePath, `${JSON.stringify(doc, null, 2)}\n`);
@@ -2670,10 +2672,9 @@ async function dispatchMergeAgentForPR({
   // nothing to take its place defers instead of dispatching (merge-agent-harness.mjs).
   const harness = await resolveMergeAgentHarnessImpl({
     workerClass: resolveMergeAgentWorkerClass(runtimeEnv), env: runtimeEnv, hqPath: resolvedHqPath, execFileImpl, logger,
+    deferral: { dir: join(mergeAgentSkippedDispatchDir(rootDir), '..', 'merge-agent-harness-deferrals'), job, now },
   });
-  if (harness.deferred) {
-    return { decision: 'dispatch-deferred', reason: harness.reason, workerClass: harness.workerClass, harness };
-  }
+  if (harness.deferred) return { decision: 'dispatch-deferred', reason: harness.reason, workerClass: harness.workerClass, harness };
   const mergeAgentWorkerClass = harness.workerClass;
   // AOM-04: the orchestration switch is a deliberate no-op for merge-class
   // dispatch. Native and agentos both stay on `hq dispatch` because no bare
@@ -2778,8 +2779,7 @@ async function dispatchMergeAgentForPR({
     // dispatch). When this dispatch is a watcher-owned retry of a died-without-
     // handoff worker, watcherReDispatchCountForRecord is the incremented count.
     watcherReDispatchCount: watcherReDispatchCountForRecord ?? 0,
-    hqRoot: resolveHqRoot(runtimeEnv),
-    hqOwnerUser: statusProbeAsOwner,
+    hqRoot: resolveHqRoot(runtimeEnv), hqOwnerUser: statusProbeAsOwner, harness,
   });
 
   const labelRemoval = await removeConsumedTriggerLabel({

@@ -39,6 +39,7 @@
 import {
   enqueueArgusSecurityReview as defaultEnqueue,
   findArgusJob as defaultFindArgusJob,
+  isInterruptedArgusRequeue,
   returnArgusJobToPending,
 } from './argus-security-queue.mjs';
 import { ARGUS_SUPERSEDED_VERDICT } from './argus-security-verdict.mjs';
@@ -89,22 +90,28 @@ function normalizeHead(headSha) {
  * back to `pending` with its prior result kept for the record.
  */
 export function reviveSupersededArgusJob({ rootDir, found, nowMs = Date.now(), logger = console }) {
-  if (found?.bucket !== 'completed' || found.job?.result?.verdict !== ARGUS_SUPERSEDED_VERDICT) return null;
+  // A requeue a crash interrupted after the rewrite: the record already holds
+  // its pending state, so finish the move rather than leave it stranded.
+  const interrupted = isInterruptedArgusRequeue(found || {});
+  if (!interrupted && (found?.bucket !== 'completed' || found.job?.result?.verdict !== ARGUS_SUPERSEDED_VERDICT)) return null;
   let revived;
   try {
     revived = returnArgusJobToPending({
       rootDir,
       jobPath: found.jobPath,
       job: found.job,
-      patch: { priorResult: found.job.result, revivedAt: new Date(nowMs).toISOString() },
+      patch: interrupted ? {} : { priorResult: found.job.result, revivedAt: new Date(nowMs).toISOString() },
     });
   } catch (err) {
     if (err?.code === 'ENOENT') return null;
     throw err;
   }
+  const reason = interrupted
+    ? `an interrupted requeue from ${found.bucket}`
+    : found.job.result.supersededReason || 'retirement';
   logger?.log?.(
     `[argus-route] ${found.job.repo}#${found.job.prNumber}@${String(found.job.headSha).slice(0, 12)} `
-      + `is live again after ${found.job.result.supersededReason || 'retirement'}; back in the Argus queue`,
+      + `is live again after ${reason}; back in the Argus queue`,
   );
   return { ...revived, bucket: 'pending' };
 }

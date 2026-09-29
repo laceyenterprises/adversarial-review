@@ -19,6 +19,7 @@ import {
   enqueueArgusSecurityReview,
   findArgusJob,
   readArgusQueueDepth,
+  writeArgusJob,
 } from '../src/argus-security-queue.mjs';
 import { createArgusSecurityDrain } from '../src/argus-security-drain.mjs';
 import { ARGUS_VERDICT_STATES, resolveArgusSecurityVerdict } from '../src/argus-security-verdict.mjs';
@@ -220,6 +221,75 @@ test('a retired job whose PR is live again is revived by the route', async () =>
   });
   assert.equal(fresh.outcome, 'duplicate');
   assert.equal(fresh.bucket, 'pending');
+}));
+
+// `returnArgusJobToPending` rewrites the record in place, then renames it. A
+// crash between the two leaves a pending-shaped record in its old bucket; this
+// writes exactly that state.
+function interruptRequeue(rootDir, repo, prNumber, headSha, patch) {
+  const found = findArgusJob(rootDir, { repo, prNumber, headSha });
+  writeArgusJob(found.jobPath, {
+    ...found.job, status: 'pending', claimedAt: null, completedAt: null, failedAt: null, result: null, ...patch,
+  });
+  return found.bucket;
+}
+
+test('a requeue interrupted between rewrite and rename is finished by the next pass', async () => withRoot(async (rootDir) => {
+  // A superseded revive and a legacy route-for-review reopen, both stranded in completed.
+  enqueue(rootDir, AR, 7, sha(7));
+  enqueue(rootDir, AR, 1172, sha(1172));
+  await retireArgusBacklog({ rootDir, nowMs: T0, logger: quiet, listOpenPullHeads: lister({ [AR]: { complete: true, heads: new Map() } }) });
+  assert.equal(interruptRequeue(rootDir, AR, 7, sha(7), { priorResult: { verdict: 'superseded' }, revivedAt: new Date(T0).toISOString() }), 'completed');
+  assert.equal(interruptRequeue(rootDir, AR, 1172, sha(1172), { routedForReview: { reason: 'semver-major' } }), 'completed');
+  // A drain retry stranded in in-progress, with its backoff.
+  enqueue(rootDir, AR, 3, sha(3));
+  claimNextArgusJob({ rootDir, claimedAt: new Date(T0).toISOString() });
+  const notBefore = new Date(T0 + 3_600_000).toISOString();
+  assert.equal(interruptRequeue(rootDir, AR, 3, sha(3), { drain: { attempts: 1, notBefore } }), 'inProgress');
+
+  // The listing fails: nothing is retired, but finishing a move needs no liveness.
+  const summary = await retireArgusBacklog({ rootDir, nowMs: T0, logger: quiet, listOpenPullHeads: lister({ [AR]: new Error('HTTP 502') }) });
+
+  assert.equal(summary.resumedRequeues, 3);
+  assert.equal(summary.reclaimed, 0);
+  const revived = findArgusJob(rootDir, { repo: AR, prNumber: 7, headSha: sha(7) });
+  assert.equal(revived.bucket, 'pending');
+  assert.equal(revived.job.priorResult.verdict, 'superseded');
+  const routed = findArgusJob(rootDir, { repo: AR, prNumber: 1172, headSha: sha(1172) });
+  assert.equal(routed.bucket, 'pending');
+  assert.equal(routed.job.routedForReview.reason, 'semver-major');
+  const retried = findArgusJob(rootDir, { repo: AR, prNumber: 3, headSha: sha(3) });
+  assert.equal(retried.bucket, 'pending');
+  assert.equal(retried.job.drain.notBefore, notBefore, 'the retry backoff survives the resume');
+  assert.equal(readArgusQueueDepth(rootDir).depth.completed, 0);
+}));
+
+test('an interrupted requeue is not taken from a claim running in this process', async () => withRoot(async (rootDir) => {
+  enqueue(rootDir, AR, 3, sha(3));
+  const claim = claimNextArgusJob({ rootDir, claimedAt: new Date(T0).toISOString() });
+  interruptRequeue(rootDir, AR, 3, sha(3), {});
+  const summary = await retireArgusBacklog({
+    rootDir, nowMs: T0, logger: quiet, runningJobIds: [claim.job.jobId], listOpenPullHeads: lister({ [AR]: { complete: true, heads: new Map([[3, sha(3)]]) } }),
+  });
+  assert.equal(summary.resumedRequeues, 0);
+  assert.equal(bucketOf(rootDir, AR, 3, sha(3)), 'inProgress');
+}));
+
+test('the route finishes an interrupted revive it meets', async () => withRoot(async (rootDir) => {
+  enqueue(rootDir, AR, 7, sha(7));
+  await retireArgusBacklog({ rootDir, nowMs: T0, logger: quiet, listOpenPullHeads: lister({ [AR]: { complete: true, heads: new Map() } }) });
+  const revivedAt = new Date(T0).toISOString();
+  interruptRequeue(rootDir, AR, 7, sha(7), { priorResult: { verdict: 'superseded', supersededReason: 'pr-merged-or-closed' }, revivedAt });
+
+  const memo = await routeSecuritySurfaceToArgus({
+    rootDir, repoPath: AR, prNumber: 7, headSha: sha(7), lastClassifiedHeadSha: sha(7), logger: quiet,
+  });
+  assert.equal(memo.queued, true);
+  assert.equal(memo.bucket, 'pending');
+  const revived = findArgusJob(rootDir, { repo: AR, prNumber: 7, headSha: sha(7) });
+  assert.equal(revived.bucket, 'pending');
+  assert.equal(revived.job.priorResult.supersededReason, 'pr-merged-or-closed', 'the prior result is not overwritten');
+  assert.equal(revived.job.revivedAt, revivedAt);
 }));
 
 test('the live lister reads open heads and flags a listing that filled its limit', async () => {

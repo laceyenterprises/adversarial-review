@@ -20,6 +20,9 @@
 // claim time anyway, so a head that moves after this listing is still caught.
 //
 // The same pass also:
+//   - finishes any requeue a crash interrupted between rewriting the record
+//     and moving it to pending (`resumeInterruptedArgusRequeues`), first, so
+//     the scans below see every job in the bucket it belongs to;
 //   - returns claims orphaned by a watcher restart (in-progress, not running
 //     in this process, older than the claim lease) to pending;
 //   - reopens the legacy `route-for-review` completions (the pre-drain
@@ -32,6 +35,7 @@
 import {
   completeArgusJob,
   listArgusJobs,
+  resumeInterruptedArgusRequeues,
   returnArgusJobToPending,
 } from './argus-security-queue.mjs';
 import { ARGUS_SUPERSEDED_VERDICT } from './argus-security-verdict.mjs';
@@ -135,6 +139,12 @@ export async function retireArgusBacklog({
   logger = console,
 } = {}) {
   const retiredAt = new Date(nowMs).toISOString();
+  const resumedRequeues = resumeInterruptedArgusRequeues({
+    rootDir,
+    skipJobIds: runningJobIds,
+    completedLimit: COMPLETED_SCAN_LIMIT,
+    logger,
+  });
   const pending = listArgusJobs(rootDir, { bucket: 'pending', limit: Number.POSITIVE_INFINITY });
   const completed = listArgusJobs(rootDir, { bucket: 'completed', limit: COMPLETED_SCAN_LIMIT })
     .filter(({ job }) => isLegacyRouteForReviewCompletion(job));
@@ -147,6 +157,7 @@ export async function retireArgusBacklog({
     oldestLiveHead: null,
     requeued: 0,
     reclaimed: 0,
+    resumedRequeues,
     skippedRepos: [],
   };
 
@@ -242,6 +253,7 @@ export async function retireArgusBacklog({
       + `(pr-merged-or-closed=${summary.retiredByReason['pr-merged-or-closed']} `
       + `head-superseded=${summary.retiredByReason['head-superseded']}) `
       + `live_heads=${summary.liveHeads} requeued_routed=${summary.requeued} reclaimed_claims=${summary.reclaimed}`
+      + ` resumed_requeues=${summary.resumedRequeues}`
       + (summary.skippedRepos.length ? ` skipped_repos=${summary.skippedRepos.map((entry) => `${entry.repo}(${entry.reason})`).join(',')}` : ''),
   );
   return summary;

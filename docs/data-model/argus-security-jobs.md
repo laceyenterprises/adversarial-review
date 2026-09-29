@@ -7,6 +7,11 @@
 **Producer:** `src/argus-security-route.mjs`, called from `processReviewSubject`
 (`src/pollonce-phases.mjs`) once per PR head (ASR-04). Narrow dependency-bot
 jobs may also be resolved in-process by `src/dependency-bot-autoadjudication.mjs`.
+**Consumer:** the watcher-owned drain in `src/argus-security-drain.mjs`
+(ARGUSDRAIN-01), which claims, reviews (`src/argus-security-review.mjs`) and
+settles jobs, and runs the backlog retirement pass in
+`src/argus-backlog-retirement.mjs`. Its per-tick status lives in
+`data/argus-security-drain-status.json` (see `argus-security-drain-status.md`).
 
 ## Purpose
 
@@ -47,7 +52,7 @@ Directory: `data/argus-security-jobs/`
 |---|---|---|
 | `pending/*.json` | Argus job document with `status: "pending"` | Durable work waiting to be claimed. Filenames are deterministic job IDs derived from `(repo, prNumber, headSha)`. |
 | `in-progress/*.json` | Argus job document with `status: "in_progress"` | Claimed work owned by a security reviewer worker. Claims are acquired by hard-linking the pending file into this lane, then unlinking the pending name. |
-| `completed/*.json` | Argus job document with `status: "completed"`, `completedAt`, and `result` | Terminal archive for successful security reviews. |
+| `completed/*.json` | Argus job document with `status: "completed"`, `completedAt`, and `result` | Archive for answered jobs: drain reviews (`approve`, `needs_verification`, `block`), dependency-bot adjudications, and retirements with a `superseded` result. Not strictly terminal: a `superseded` job whose head is live again, or a legacy `route-for-review` completion whose head is live, is moved back to `pending/`. |
 | `failed/*.json` | Argus job document with `status: "failed"`, `failedAt`, and `error` | Terminal archive for failed reviews and unreadable pending records that were quarantined out of the active queue. |
 
 ## Job Document
@@ -67,9 +72,13 @@ Directory: `data/argus-security-jobs/`
 | `claimedAt` | string or null | ISO-8601 claim time once moved to `in-progress`. |
 | `completedAt` | string or null | ISO-8601 completion time for completed jobs. |
 | `failedAt` | string or null | ISO-8601 failure time for failed jobs. |
-| `result` | object or null | Successful review result payload on completed jobs. |
+| `result` | object or null | Result payload on completed jobs; reset to `null` when a job returns to `pending/`. Drain reviews and retirements carry `source: "argus-security-drain"` (`ARGUS_REVIEW_RESULT_SOURCE`); drain reviews carry `verdict` (`approve`, `needs_verification`, `block`), `summary`, `findings`, `reviewer`, `rubric`, `dependency`, `verification`, `completedAt`, `posted`, and a `drain` block `{claimedAt, completedAt, latencyMs, attempts}` the health surface reads for claim-to-verdict latency. Retirements carry `verdict: "superseded"`, `supersededReason` (`pr-merged-or-closed` or `head-superseded`), `observedHeadSha`, and `retiredBy: "backlog-retirement"`. `superseded` is a result verdict, not a job `status`. |
 | `error` | string or null | Failure reason on failed jobs. |
 | `lastAutoadjudicationAttempt` | object or null | Optional watcher-written breadcrumb for dependency-bot auto-adjudication attempts that approved the dependency update but left the job pending because merge authority could not yet land the exact head. |
+| `routedForReview` | object or absent | ARGUSDRAIN-01. Set when the dependency-bot auto-adjudicator declines to approve a bump on its own (for example semver-major): `{schemaVersion, source: "dependency-bot-autoadjudication", decision: "route-for-review", reason, inputs, routedAt}`. The job stays in `pending/` and the drain claims it without waiting out the bot-adjudication grace. Legacy completions reopened by backlog retirement also carry `requeuedFrom: "legacy-route-for-review-completion"` and `requeuedAt`. |
+| `drain` | object or absent | ARGUSDRAIN-01 drain bookkeeping, carried across claims: `attempts`, `lastError`, `lastAttemptAt`, `notBefore` (the drain does not claim the job before this ISO time), `deferrals`, `lastDeferReason`, `lastDeferredAt`, and `cachedReview` (a model review of this exact `headSha`, reused within its max age so a retry or deferral does not pay for a second model call; cleared on completion or failure). |
+| `priorResult` | object or absent | The `result` a job carried before it was moved back to `pending/` (a revived `superseded` retirement or a reopened legacy `route-for-review` completion), kept for the record. |
+| `revivedAt` | string or absent | ISO time the route revived a `superseded` job whose PR is open at the same head again. |
 
 ## Operational Contract
 
@@ -103,5 +112,21 @@ Directory: `data/argus-security-jobs/`
   `needs_verification`. Transient merge blockers, including required checks that
   have not reported a terminal result yet, keep the job in `pending/` and update
   `lastAutoadjudicationAttempt` so the next watcher tick can retry.
+- Returning a job to `pending/` (`returnArgusJobToPending`: a drain retry or
+  deferral, a revive, a reopened legacy completion, or a reclaimed stale claim)
+  rewrites the record in place first and renames it into `pending/` second, then
+  resets the file mtime to `enqueuedAt` so FIFO order and oldest-pending age are
+  not reset by a retry. A crash between the two steps leaves a record with
+  `status: "pending"` outside `pending/`; nothing else writes that shape.
+  `resumeInterruptedArgusRequeues` finishes those moves at the start of every
+  backlog retirement pass (skipping claims running in this process), and the
+  route's `reviveSupersededArgusJob` finishes one it meets for an open PR, so the
+  half-done state is never stranded.
+- Backlog retirement (every 30 minutes, and before the drain's first claim)
+  completes pending jobs whose PR is no longer open, or is open at another head,
+  with a `superseded` result. It reads open PRs live from GitHub; a repo whose
+  listing fails or may be truncated retires nothing. It also returns in-progress
+  claims older than the claim lease and not running in this process to
+  `pending/`.
 - The files contain no secrets. They contain PR identity, exact head SHA,
   security trigger reasons, timestamps, and review result or failure metadata.

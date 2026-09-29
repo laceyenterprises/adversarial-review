@@ -16,6 +16,10 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  openSync,
+  closeSync,
+  ftruncateSync,
+  writeSync,
   realpathSync,
   rmSync,
   statSync,
@@ -52,7 +56,7 @@ import { createAgentRuntimeReviewerRuntimeAdapter } from '../src/adapters/review
 import { createHealthRouter } from '../src/adapters/agent-runtime/router/index.mjs';
 import { reviewWithGemini, __test__ as harness } from '../src/reviewer-harness.mjs';
 import { resolveGeminiCredentialConcurrencyForDispatchCandidates } from '../src/reviewer-runtime-support.mjs';
-import { domainPipelineUsesGeminiReviewer } from '../src/reviewer-spawn-settle.mjs';
+import { domainPipelineGeminiSeatCount } from '../src/reviewer-spawn-settle.mjs';
 import { reviewerDispatchCandidateUsesGemini, runBoundedReviewerDispatchQueue } from '../src/watcher-reviewer-pool.mjs';
 import { runAgyReviewerStartupChecks } from '../src/watcher-agy-startup-preflight.mjs';
 
@@ -88,6 +92,16 @@ wait $!
 // Like CCX-07's agy-reviewer-agy: settings come only from the root-owned file.
 const FAKE_PINNED_AGY = `#!/bin/bash
 set -a; . "$FAKE_ROOT/settings/$USER.conf"; set +a
+if [ "\${1-}" = --prompt-stdin ]; then
+  shift
+  prompt=""; IFS= read -r -d '' prompt || true
+  args=(); prev=""
+  for arg in "$@"; do
+    if [ "$prev" = --print ]; then arg="$prompt"; fi
+    args+=("$arg"); prev="$arg"
+  done
+  set -- "\${args[@]}"
+fi
 exec "$FAKE_ROOT/bin/agy" "$@"
 `;
 
@@ -185,7 +199,7 @@ function makeFakeInstall({ users = [REVIEWER_A, REVIEWER_B] } = {}) {
   // The real spawnWithInput, pointed at the fake install instead of
   // /usr/bin/sudo and /usr/local/libexec/agent-os.
   const spawnWithInput = (command, args, opts) => {
-    spawnCalls.push({ command, args: [...args], env: opts.env, cwd: opts.cwd });
+    spawnCalls.push({ command, args: [...args], env: opts.env, cwd: opts.cwd, input: opts.input });
     const redirected = command === AGY_REVIEWER_SUDO
       ? [sudo, args.map((arg) => (arg.startsWith(`${AGY_REVIEWER_LIBEXEC_DIR}/`) ? join(libexecDir, arg.slice(AGY_REVIEWER_LIBEXEC_DIR.length + 1)) : arg))]
       : [command, args];
@@ -622,6 +636,12 @@ test('CCX-08: two concurrent Gemini reviews run as two distinct OS users, each w
       ['-n', '-H', '-u', REVIEWER_A, `${AGY_REVIEWER_LIBEXEC_DIR}/${AGY_REVIEWER_PINNED_AGY}`],
       ['-n', '-H', '-u', REVIEWER_B, `${AGY_REVIEWER_LIBEXEC_DIR}/${AGY_REVIEWER_PINNED_AGY}`],
     ]);
+    for (const call of sudoCalls) {
+      assert.ok(call.args.includes('--prompt-stdin'));
+      assert.ok(call.args.includes('__AGY_PROMPT_STDIN__'));
+      assert.ok(!call.args.some((arg) => arg.includes('+diff')));
+      assert.ok(call.input.includes('+diff'));
+    }
     assert.equal(pool.snapshot().every((state) => !state.leased && state.ready), true);
   } finally {
     fake.cleanup();
@@ -674,8 +694,11 @@ test('CCX-08: an added identity gets the HQ-owner path\'s effective settings, on
     const flagValue = (args, flag) => args[args.indexOf(flag) + 1];
     assert.equal(flagValue(agyArgs, '--model'), flagValue(hqArgs, '--model'));
     assert.equal(flagValue(agyArgs, '--print-timeout'), flagValue(hqArgs, '--print-timeout'));
-    assert.equal(flagValue(agyArgs, '--print'), flagValue(hqArgs, '--print'));
-    assert.deepEqual(agyArgs.filter((arg, i) => agyArgs[i - 1] !== '--add-dir'), hqArgs.filter((arg, i) => hqArgs[i - 1] !== '--add-dir'));
+    assert.equal(flagValue(agyArgs, '--print'), '__AGY_PROMPT_STDIN__');
+    assert.equal(sudoCall.input, flagValue(hqArgs, '--print'));
+    const restoredArgs = agyArgs.slice(1);
+    restoredArgs[restoredArgs.indexOf('--print') + 1] = sudoCall.input;
+    assert.deepEqual(restoredArgs.filter((arg, i) => restoredArgs[i - 1] !== '--add-dir'), hqArgs.filter((arg, i) => hqArgs[i - 1] !== '--add-dir'));
     // Nothing else crosses: sudo sees only the minimal pinned-command env.
     assert.deepEqual(sudoCall.env, { ...PINNED_COMMAND_ENV });
     for (const line of fake.sudoLog().trim().split('\n')) {
@@ -1235,11 +1258,12 @@ test('CCX-08: a pipeline stage that runs Gemini counts against the Gemini cap', 
     riskClasses: { low: { maxRemediationRounds: 1 }, medium: { maxRemediationRounds: 3 }, high: { maxRemediationRounds: 3 }, critical: { maxRemediationRounds: 4 } },
     pipeline: { enabled: true, stages: [{ id: 'quality', panel: ['quality-reviewer'], aggregation: { kind: 'unanimous-clean' } }, { id: 'second', panel, aggregation: { kind: 'unanimous-clean' } }] },
   });
-  assert.equal(domainPipelineUsesGeminiReviewer(pipelineConfig(['gemini-stage-reviewer']), { roleRegistry }), true);
-  assert.equal(domainPipelineUsesGeminiReviewer(pipelineConfig(['quality-reviewer']), { roleRegistry }), false);
-  assert.equal(domainPipelineUsesGeminiReviewer({ id: 'code-pr', pipeline: { enabled: false, stages: [] } }), false);
+  assert.equal(domainPipelineGeminiSeatCount(pipelineConfig(['gemini-stage-reviewer']), { roleRegistry, identityPool: { plan: () => ({ multi: false }) } }), 0);
+  assert.equal(domainPipelineGeminiSeatCount(pipelineConfig(['gemini-stage-reviewer']), { roleRegistry, identityPool: { plan: () => ({ multi: true }) } }), 1);
+  assert.equal(domainPipelineGeminiSeatCount(pipelineConfig(['quality-reviewer']), { roleRegistry, identityPool: { plan: () => ({ multi: true }) } }), 0);
+  assert.equal(domainPipelineGeminiSeatCount({ id: 'code-pr', pipeline: { enabled: false, stages: [] } }), 0);
 
-  const stageCandidate = { reviewerModel: 'claude', pipelineUsesGemini: true, reviewerRuntimeAdapter: LEASING_ADAPTER };
+  const stageCandidate = { reviewerModel: 'claude', pipelineGeminiSeats: 1, reviewerRuntimeAdapter: LEASING_ADAPTER };
   assert.equal(reviewerDispatchCandidateUsesGemini(stageCandidate), true);
   assert.equal(reviewerDispatchCandidateUsesGemini({ reviewerModel: 'claude' }), false);
 
@@ -1266,7 +1290,7 @@ test('CCX-08: a pipeline stage that runs Gemini counts against the Gemini cap', 
     active -= 1;
   };
   const candidates = [1, 2].map((prNumber) => ({
-    repoPath: 'o/r', prNumber, reviewerModel: 'claude', pipelineUsesGemini: true, run, pendingSince: '2026-09-29T00:00:00.000Z', enqueuedAtMs: prNumber,
+    repoPath: 'o/r', prNumber, reviewerModel: 'claude', pipelineGeminiSeats: 1, run, pendingSince: '2026-09-29T00:00:00.000Z', enqueuedAtMs: prNumber,
   }));
   const summary = await runBoundedReviewerDispatchQueue(candidates, {
     maxConcurrent: 2,
@@ -1343,4 +1367,24 @@ test('CCX-08: the cli-direct adapter passes a leased identity to the child env o
     else process.env[AGY_IDENTITY_USER_ENV] = saved;
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+
+test('added identity capture reads only bounded tails of sparse gigabyte files', async () => {
+  const result = await harness.spawnAgyReview({
+    prompt: 'private diff', model: 'Gemini 3.1 Pro (High)', maxBuffer: 4,
+    identity: { user: REVIEWER_A, cwd: '/tmp', workspaceDir: '/tmp' },
+    spawnWithInputImpl: async (_command, _args, options) => {
+      for (const [path, tail] of [[options.stdoutPath, 'TAIL'], [options.stderrPath, 'FAIL']]) {
+        const fd = openSync(path, 'w');
+        try {
+          ftruncateSync(fd, 1024 * 1024 * 1024);
+          writeSync(fd, Buffer.from(tail), 0, 4, 1024 * 1024 * 1024 - 4);
+        } finally { closeSync(fd); }
+      }
+      return { stdout: '', stderr: '' };
+    },
+  });
+  assert.equal(result.stdout, 'TAIL');
+  assert.equal(result.stderr, 'FAIL');
 });

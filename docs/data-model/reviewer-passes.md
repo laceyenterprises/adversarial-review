@@ -155,3 +155,11 @@ Settle retries transient SQLite contention before recording `pending`.
 `metadata_json.launchRequestId`, then fills `worker_run_id` once the session
 ledger exposes the matching run. This prevents a request-shaped reattach token
 from contaminating launch attribution.
+
+
+CCX-08 pipeline capacity metadata: persisted reviewer spawn records carry optional
+`pipelineGeminiSeats` (default zero). It reserves the maximum simultaneous Gemini
+panel for the enclosing PR across stages and watcher restarts. Active-count
+reconstruction groups records by repository and PR and takes the larger of the
+reservation and actual Gemini stage count, so concurrent stages do not double
+count the reservation. This is additive JSON metadata, with no SQL schema change.

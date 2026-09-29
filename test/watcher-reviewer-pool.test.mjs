@@ -1830,3 +1830,50 @@ test('reviewer memory pressure config resolves through the CFG loader', () => {
     swapPressureAvailableMb: 16384,
   });
 });
+
+
+test('pipeline reserves both Gemini seats across detached drains and registered stages', async () => {
+  const spawns = new Map();
+  const tracker = createDetachedReviewerDispatchTracker({ activeReviewerSpawns: spawns });
+  let settle;
+  const promise = new Promise((resolve) => { settle = resolve; });
+  const pipeline = candidate(9001, () => promise, undefined, { reviewerModel: 'claude' });
+  pipeline.pipelineGeminiSeats = 2;
+  tracker.track({ candidate: pipeline, promise });
+  assert.equal(tracker.activeCounts().get('gemini'), 2);
+  spawns.set('stage-one', { repo: pipeline.repoPath, pr: 9001, reviewerModel: 'claude' });
+  assert.equal(tracker.activeCounts().get('gemini'), 2, 'reserve during non-Gemini stage');
+  spawns.clear();
+  spawns.set('g1', { repo: pipeline.repoPath, pr: 9001, reviewerModel: 'gemini' });
+  spawns.set('g2', { repo: pipeline.repoPath, pr: 9001, reviewerModel: 'gemini' });
+  assert.equal(tracker.activeCounts().get('gemini'), 2, 'no double count of actual seats');
+  const next = candidate(9002, async () => { throw new Error('must remain deferred'); }, undefined, { reviewerModel: 'gemini' });
+  const result = await runBoundedReviewerDispatchQueue([next], {
+    maxConcurrent: 6, geminiCredentialConcurrency: 2, activeReviewerCounts: tracker.activeCounts(),
+    logger: { error() {}, log() {}, warn() {} },
+  });
+  assert.equal(result.dispatched, 0);
+  settle();
+  await promise;
+});
+
+test('a two-seat pipeline cannot start with only one free Gemini credential', async () => {
+  const item = candidate(9003, async () => { throw new Error('must remain deferred'); }, undefined, { reviewerModel: 'claude' });
+  item.pipelineGeminiSeats = 2;
+  const result = await runBoundedReviewerDispatchQueue([item], {
+    maxConcurrent: 6, geminiCredentialConcurrency: 2, activeReviewerCounts: new Map([['gemini', 1]]),
+    logger: { error() {}, log() {}, warn() {} },
+  });
+  assert.equal(result.dispatched, 0);
+});
+
+
+test('durable pipeline reservations survive restart without a detached tracker', () => {
+  const spawns = new Map([
+    ['a', { repo: 'o/r', pr: 1, reviewerModel: 'claude', pipelineGeminiSeats: 2 }],
+  ]);
+  assert.equal(countActiveReviewerSpawnsByModel(spawns).get('gemini'), 2);
+  spawns.clear();
+  for (const key of ['a', 'b']) spawns.set(key, { repo: 'o/r', pr: 1, reviewerModel: 'gemini', pipelineGeminiSeats: 2 });
+  assert.equal(countActiveReviewerSpawnsByModel(spawns).get('gemini'), 2);
+});

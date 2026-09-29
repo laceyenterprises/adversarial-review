@@ -507,6 +507,7 @@ async function spawnReviewer({
   completedRemediationRounds,
   passKind = 'first-pass',
   dispatchPassKind = passKind,
+  pipelineGeminiSeats = 0,
   maxRemediationRounds,
   advisoryFindings = [],
   reviewerSessionUuid,
@@ -615,6 +616,7 @@ async function spawnReviewer({
     reviewerModel,
     passKind,
     dispatchPassKind,
+    pipelineGeminiSeats,
     identity: reviewerIdentity,
     botTokenEnv,
     reviewerSessionUuid,
@@ -989,22 +991,21 @@ async function spawnReviewer({
   }
 }
 
-// CCX-08: whether a pipeline-enabled domain has a stage seat that runs a
-// Gemini review (and so leases an agy reviewer identity), for the drain's
-// Gemini cap. False when the pipeline is off or cannot be compiled; the
-// pipeline spawn itself fails on the same error.
-function domainPipelineUsesGeminiReviewer(domainConfig, { env = process.env, roleRegistry = null } = {}) {
-  if (!isPipelineEnabled(domainConfig)) return false;
+// CCX-08: reserve the largest simultaneous Gemini panel, not the sum of
+// sequential stages. Single-identity deployments retain their old admission
+// behavior. A compilation failure is still reported by the pipeline spawn.
+function domainPipelineGeminiSeatCount(domainConfig, { env = process.env, roleRegistry = null, identityPool = getAgyReviewerIdentityPool() } = {}) {
+  if (!identityPool.plan().multi || !isPipelineEnabled(domainConfig)) return 0;
   try {
     const registry = roleRegistry || resolveRoleRegistryFromDomain(domainConfig, {
       fallbackRoleRegistry: loadRoleRegistry({ env }),
     });
     const { stages } = resolveDomainPipeline(domainConfig, { roleRegistry: registry });
-    return stages.some(({ panelRoles }) => panelRoles.some(({ role }) => (
+    return Math.max(0, ...stages.map(({ panelRoles }) => panelRoles.filter(({ role }) => (
       String(role?.workerClass || role?.persona || '').trim().toLowerCase() === 'gemini'
-    )));
+    )).length));
   } catch {
-    return false;
+    return 0;
   }
 }
 
@@ -1499,7 +1500,7 @@ function evaluateRoundBudgetForReview({
 }
 
 export {
-  domainPipelineUsesGeminiReviewer,
+  domainPipelineGeminiSeatCount,
   spawnReviewer,
   runWatcherGatedReviewPipeline,
   parsePipelineStageStates,

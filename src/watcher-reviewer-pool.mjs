@@ -763,9 +763,13 @@ function resolveGeminiDispatchConcurrencyLimit({ geminiCredentialConcurrency = n
 // A dispatch candidate that runs a Gemini review: its own reviewer model, or,
 // on a pipeline domain, a stage seat that runs Gemini (CCX-08: those stages
 // lease an agy reviewer identity too, so they count against the Gemini cap).
+function reviewerDispatchCandidateGeminiSeats(candidate) {
+  const pipelineSeats = Math.max(0, Number.parseInt(candidate?.pipelineGeminiSeats, 10) || 0);
+  return Math.max(pipelineSeats, String(candidate?.reviewerModel || '').toLowerCase() === 'gemini' ? 1 : 0);
+}
+
 function reviewerDispatchCandidateUsesGemini(candidate) {
-  return String(candidate?.reviewerModel || '').toLowerCase() === 'gemini'
-    || candidate?.pipelineUsesGemini === true;
+  return reviewerDispatchCandidateGeminiSeats(candidate) > 0;
 }
 
 function activeReviewerCountForModel(activeReviewerCounts, model) {
@@ -798,6 +802,17 @@ function countActiveReviewerSpawnsByModel(activeReviewerSpawns) {
     const laneKey = `__lane:${passKind}`;
     counts.set(laneKey, (counts.get(laneKey) || 0) + 1);
   }
+  // Each stage persists the enclosing panel reservation. Group by PR so
+  // concurrent seats reserve once, and actual Gemini spawns are not doubled.
+  const reservations = new Map();
+  const actualSeats = new Map();
+  for (const record of activeReviewerSpawns?.values?.() || []) {
+    const key = reviewerDispatchPrKey({ repo: record?.repo, prNumber: record?.pr });
+    if (!key) continue;
+    reservations.set(key, Math.max(reservations.get(key) || 0, Number(record?.pipelineGeminiSeats) || 0));
+    if (String(record?.reviewerModel).toLowerCase() === 'gemini') actualSeats.set(key, (actualSeats.get(key) || 0) + 1);
+  }
+  for (const [key, seats] of reservations) counts.set('gemini', (counts.get('gemini') || 0) + Math.max(0, seats - (actualSeats.get(key) || 0)));
   return counts;
 }
 
@@ -884,8 +899,20 @@ function createDetachedReviewerDispatchTracker({
       }
       for (const record of liveDetached) {
         const key = reviewerDispatchPrKey({ repo: record?.repo, prNumber: record?.prNumber });
-        if (!key || registeredPrKeys.has(key)) continue;
+        if (!key) continue;
+        const seats = reviewerDispatchCandidateGeminiSeats(record?.candidate);
+        if (registeredPrKeys.has(key)) {
+          const registered = [...(activeReviewerSpawns?.values?.() || [])].filter((spawn) => (
+            reviewerDispatchPrKey({ repo: spawn?.repo, prNumber: spawn?.pr }) === key
+          ));
+          const registeredGemini = registered.filter((spawn) => String(spawn?.reviewerModel).toLowerCase() === 'gemini').length;
+          const registeredReservation = Math.max(registeredGemini, ...registered.map((spawn) => Number(spawn?.pipelineGeminiSeats) || 0));
+          counts.set('gemini', (counts.get('gemini') || 0) + Math.max(0, seats - registeredReservation));
+          continue;
+        }
         incrementReviewerModelCount(counts, record?.reviewerModel);
+        const directSeat = record?.reviewerModel === 'gemini' ? 1 : 0;
+        counts.set('gemini', (counts.get('gemini') || 0) + Math.max(0, seats - directSeat));
         incrementReviewerLaneCounts(counts, record?.candidate);
       }
       return counts;
@@ -969,7 +996,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   }
   const geminiConcurrencyLimit = resolveGeminiDispatchConcurrencyLimit({
     geminiCredentialConcurrency,
-    ceiling: concurrencyLimit,
+    ceiling: Math.max(concurrencyLimit, ...candidates.map(reviewerDispatchCandidateGeminiSeats)),
   });
   const thrownFailureLimit = Math.max(1, Number.parseInt(String(maxThrownFailures), 10) || 0);
   const queue = sortReviewerDispatchCandidates(candidates);
@@ -1016,9 +1043,9 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   };
 
   async function start(candidate) {
-    const gemini = isGeminiCandidate(candidate);
+    const geminiSeats = reviewerDispatchCandidateGeminiSeats(candidate);
     try {
-      if (gemini) activeGemini += 1;
+      activeGemini += geminiSeats;
       const currentNowMs = Number(now());
       const resolvedNowMs = Number.isFinite(currentNowMs) ? currentNowMs : Date.now();
       logReviewerDispatchWait(candidate, { logger, nowMs: resolvedNowMs, waitWarnMs });
@@ -1074,7 +1101,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
         err?.message || err
       );
     } finally {
-      if (gemini) activeGemini -= 1;
+      activeGemini -= geminiSeats;
     }
   }
 
@@ -1124,7 +1151,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
         recordDeferredReason(entry, 'rereview-cap-reserves-first-pass-capacity');
         continue;
       }
-      if (isGeminiCandidate(entry.candidate) && activeGemini >= geminiConcurrencyLimit) {
+      if (isGeminiCandidate(entry.candidate) && activeGemini + reviewerDispatchCandidateGeminiSeats(entry.candidate) > geminiConcurrencyLimit) {
         recordDeferredReason(
           entry,
           geminiConcurrencyLimit < 1
@@ -1143,7 +1170,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
     if (isGeminiCandidate(candidate) && geminiConcurrencyLimit < 1) {
       return 'gemini-credential-concurrency-zero';
     }
-    if (isGeminiCandidate(candidate) && activeGemini >= geminiConcurrencyLimit) {
+    if (isGeminiCandidate(candidate) && activeGemini + reviewerDispatchCandidateGeminiSeats(candidate) > geminiConcurrencyLimit) {
       return 'gemini-credential-concurrency-saturated';
     }
     if (initialWaveClosed) return 'single-wave-deferred';

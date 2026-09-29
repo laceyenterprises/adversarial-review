@@ -15,6 +15,10 @@
 import { execFile } from 'node:child_process';
 import {
   chmodSync,
+  closeSync,
+  fstatSync,
+  openSync,
+  readSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -2593,11 +2597,23 @@ async function spawnAgyReview({
 const AGY_IDENTITY_SETTLE_AFTER_KILL_MS = 10_000;
 
 function readCapturedFile(path, maxBytes) {
+  let fd;
   try {
-    const bytes = readFileSync(path);
-    return (bytes.length > maxBytes ? bytes.subarray(bytes.length - maxBytes) : bytes).toString('utf8');
+    fd = openSync(path, 'r');
+    const size = fstatSync(fd).size;
+    const length = Math.min(size, Math.max(0, Math.floor(maxBytes)));
+    const bytes = Buffer.alloc(length);
+    let offset = 0;
+    while (offset < length) {
+      const read = readSync(fd, bytes, offset, length - offset, size - length + offset);
+      if (read === 0) break;
+      offset += read;
+    }
+    return bytes.subarray(0, offset).toString('utf8');
   } catch {
     return '';
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 }
 
@@ -2611,7 +2627,11 @@ function readCapturedFile(path, maxBytes) {
 // survives is the watcher's to handle: the identity is not leased again while
 // any process still runs as that user.
 async function spawnAgyIdentityReview({ identity, agyArgs, timeout, maxBuffer, spawnWithInputImpl }) {
-  const pinned = buildPinnedCommand({ user: identity.user, command: AGY_REVIEWER_PINNED_AGY, args: agyArgs });
+  const printIndex = agyArgs.indexOf('--print');
+  const prompt = agyArgs[printIndex + 1];
+  const safeArgs = [...agyArgs];
+  safeArgs[printIndex + 1] = '__AGY_PROMPT_STDIN__';
+  const pinned = buildPinnedCommand({ user: identity.user, command: AGY_REVIEWER_PINNED_AGY, args: ['--prompt-stdin', ...safeArgs] });
   const outputDir = mkdtempSync(join(tmpdir(), 'agy-identity-output-'));
   const stdoutPath = join(outputDir, 'stdout');
   const stderrPath = join(outputDir, 'stderr');
@@ -2623,7 +2643,7 @@ async function spawnAgyIdentityReview({ identity, agyArgs, timeout, maxBuffer, s
     const result = await spawnWithInputImpl(pinned.command, pinned.args, {
       env: { ...PINNED_COMMAND_ENV },
       cwd: identity.cwd,
-      input: '',
+      input: prompt,
       timeout,
       maxBuffer,
       reapGroupOnExit: true,

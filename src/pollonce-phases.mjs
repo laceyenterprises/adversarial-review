@@ -212,7 +212,7 @@ import {
   describeAfhReviewerFallback,
 } from './afh-reviewer-fallback.mjs';
 import {
-  domainPipelineUsesGeminiReviewer,
+  domainPipelineGeminiSeatCount,
   evaluateRoundBudgetForReview,
   parsePipelineStageStates,
   runWatcherGatedReviewPipeline,
@@ -2651,7 +2651,7 @@ export async function processReviewSubject(entry, ctx) {
         reviewerRuntimeAdapter: domainReviewerRuntimeAdapter || null,
         // A pipeline stage can run Gemini under a non-Gemini route; it leases
         // an identity too, so it counts against the Gemini cap.
-        pipelineUsesGemini: domainPipelineUsesGeminiReviewer(domainAdapterSet?.domainConfig),
+        pipelineGeminiSeats: domainPipelineGeminiSeatCount(domainAdapterSet?.domainConfig),
         subject,
         current,
         hasPriorPostedReview: dispatchHasPriorPostedReview,
@@ -3275,6 +3275,7 @@ export async function processReviewSubject(entry, ctx) {
                 // depth accounting; passKind above conservatively retains
                 // rereview safety gates when capture lost the comment id.
                 dispatchPassKind: reviewerDispatchPassKind(dispatchCandidate),
+                pipelineGeminiSeats: dispatchCandidate.pipelineGeminiSeats,
                 maxRemediationRounds,
                 advisoryFindings: vocabularyFatigueFinding ? [vocabularyFatigueFinding] : [],
                 reviewerSessionUuid,

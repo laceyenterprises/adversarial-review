@@ -438,3 +438,24 @@ that account id. Do not hand-edit refresh tokens.
 - No multi-account scheduler, rotation policy, all-capped hold decision, or
   AGR-06 account telemetry is enabled for the live `agy` runtime.
 - No OAuth client secrets are committed to the repository.
+
+
+CCX-08 final closeout notes:
+
+- Pipeline admission reserves the maximum simultaneous Gemini seats in a panel,
+  including detached reviews while their current stage uses another model.
+  Actual Gemini spawns replace the reservation rather than double-counting it.
+  Pipeline reservations apply only to multi-identity plans; unset/single-owner
+  deployments retain their existing admission behavior.
+- Added identities carry prompts through the pinned wrapper's `--prompt-stdin`
+  protocol. The native `--print` binding is restored after sudo, keeping diffs
+  out of sudo COMMAND logs while preserving model selection. Install the Agent OS
+  companion wrapper from PR #7386 before enabling multi-identity reviews.
+- Captured output is read with a positioned, bounded tail read; the child never
+  allocates the entire captured file while settling.
+- Config parity: Agent OS Python schema `schema_v1/misc.py` validates the ordered
+  identity list with its local-user pattern. The shell loader delegates parsing
+  and validation to that Python loader and exports the validated JSON leaves;
+  it does not maintain an independent schema for this key. Node keeps its own
+  matching schema. The shell's optional-key allowlist does not reject extra
+  validated leaves, so no separate shell schema entry is required.

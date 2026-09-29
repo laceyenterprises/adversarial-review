@@ -15,7 +15,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -120,7 +120,10 @@ test('replay #7313: the proven final-round push goes to hammer terminal validati
       closerPayloads.push(args);
       return maybeDispatchAmaCloser({
         ...args,
-        dispatchContext: { ...args.dispatchContext, rootDir },
+        dispatchContext: {
+          ...args.dispatchContext, rootDir, hqRoot: path.join(rootDir, 'hq-root'),
+          hqOwnerUser: userInfo().username, currentUser: userInfo().username,
+        },
         execFileImpl: async (cmd, argv) => {
           execCalls.push({ cmd, argv });
           return { stdout: JSON.stringify({ dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer_7313' }), stderr: '' };

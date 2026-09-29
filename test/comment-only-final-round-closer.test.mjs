@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 
 import { resolveSettledReviewVerdict } from '../src/adversarial-gate-status.mjs';
@@ -169,7 +169,10 @@ test('AMA hands a proven final-round head to hammer terminal validation, reading
   const dispatched = await maybeDispatchAmaCloser({
     ...payload,
     cfg: { ...payload.cfg, workerClass: 'hammer', eligibility: { riskClasses: ['low'], highRiskRequiresTwoKey: false }, branchProtection: { required: false } },
-    dispatchContext: { ...payload.dispatchContext, rootDir },
+    dispatchContext: {
+      ...payload.dispatchContext, rootDir, hqRoot: join(rootDir, 'hq-root'),
+      hqOwnerUser: userInfo().username, currentUser: userInfo().username,
+    },
     execFileImpl: async (cmd, args) => {
       execCalls.push({ cmd, args });
       return { stdout: JSON.stringify({ dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' }), stderr: '' };

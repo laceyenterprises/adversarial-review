@@ -527,6 +527,44 @@ test('transient daemon gate-read failure without manual-close requirement does n
   }
 });
 
+test('an UNKNOWN-mergeability daemon miss never pages for a manual close (DIRTYOWN-01)', async () => {
+  for (const daemonResult of [
+    { reason: 'gate-read-failed', permanent: false, manualCloseRequired: false },
+    // Defensive: even a gate-not-eligible carrying only transient read gates holds quietly.
+    { reason: 'gate-not-eligible', permanent: false, manualCloseRequired: false },
+  ]) {
+    const rootDir = tempRoot();
+    try {
+      const logs = [];
+      let closerCalls = 0;
+      const result = await maybeDispatchAmaClosureFor({
+        ...baseArgs(rootDir),
+        logger: { log: (m) => logs.push(String(m)), warn() {} },
+        runDaemonCleanMergeAttemptImpl: async () => ({
+          disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+          merged: false,
+          attempts: 2,
+          reasons: ['pr-mergeability-unknown'],
+          ...daemonResult,
+        }),
+        maybeDispatchAmaCloserImpl: async () => {
+          closerCalls += 1;
+          return { dispatched: true };
+        },
+      });
+
+      assert.equal(result.skipMergeAgent, true);
+      assert.equal(closerCalls, 0, 'a transient UNKNOWN read is not handed to the hammer');
+      const parkEvent = logs
+        .map((line) => { try { return JSON.parse(line); } catch { return null; } })
+        .find((doc) => doc?.event === 'ama.daemon_clean_park.manual_close_required');
+      assert.equal(parkEvent, undefined, `${daemonResult.reason}: no manual-close page`);
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  }
+});
+
 test('permanent daemon failure pages even without a clean-review marker', async () => {
   const rootDir = tempRoot();
   try {

@@ -341,6 +341,10 @@ test('queued hammer dispatch names a draft and an unmergeable PR instead of a st
       live: { state: 'OPEN', headSha: HEAD, isDraft: false, mergeable: 'UNKNOWN' },
       expect: { reason: 'background-pr-mergeable-unknown', mergeable: 'UNKNOWN', retryAfterMs: 30_000 },
     },
+    {
+      live: { state: 'OPEN', headSha: HEAD, isDraft: false, mergeable: '' },
+      expect: { reason: 'background-pr-not-mergeable', mergeable: null, retryAfterMs: 30_000 },
+    },
   ];
   for (const { live, expect } of cases) {
     const queue = createAmaHammerBackgroundQueue({ maxConcurrent: 1 });
@@ -362,6 +366,31 @@ test('queued hammer dispatch names a draft and an unmergeable PR instead of a st
     assert.equal(settled.skipMergeAgent, true);
     for (const [key, value] of Object.entries(expect)) assert.equal(settled[key], value, `${expect.reason}.${key}`);
     if (expect.reason === 'background-pr-draft') assert.equal(settled.retryAfterMs, undefined);
+  }
+});
+
+test('queued hammer dispatch launches the closer for a CONFLICTING PR and a CLEAN-normalized UNKNOWN (DIRTYOWN-01)', async () => {
+  for (const live of [
+    { state: 'OPEN', headSha: HEAD, isDraft: false, mergeable: 'CONFLICTING' },
+    { state: 'OPEN', headSha: HEAD, isDraft: false, mergeable: 'UNKNOWN', mergeStateStatus: 'CLEAN' },
+  ]) {
+    const queue = createAmaHammerBackgroundQueue({ maxConcurrent: 1 });
+    let closerCalls = 0;
+    const args = closureArgs({
+      resolveAmaHammerDispatchModeImpl: () => 'background',
+      amaHammerBackgroundQueueImpl: () => queue,
+      fetchCurrentPrStateImpl: async () => live,
+      maybeDispatchAmaCloserImpl: async () => {
+        closerCalls += 1;
+        return { dispatched: true, launchRequestId: 'lrq_conflict' };
+      },
+    });
+    await maybeDispatchAmaClosureFor(args);
+    await queue.drain();
+    assert.equal(closerCalls, 1, `${live.mergeable}/${live.mergeStateStatus || ''} reaches the closer`);
+    const settled = await maybeDispatchAmaClosureFor(args);
+    assert.equal(settled.dispatched, true);
+    assert.equal(settled.launchRequestId, 'lrq_conflict');
   }
 });
 

@@ -46,6 +46,7 @@ export const ELIGIBLE_MERGE_VERDICTS = Object.freeze([
 export const MERGE_ELIGIBILITY_REASONS = Object.freeze([
   'verdict-not-eligible',
   'ci-not-green',
+  'pr-mergeability-unknown',
   'pr-not-mergeable',
   'branch-protection-missing-gate',
   'stale-head',
@@ -72,7 +73,11 @@ export const MERGE_ELIGIBILITY_REASONS = Object.freeze([
  *                                      required checks must have reported).
  * @property {(string|boolean)=} mergeable
  *                                      GitHub `mergeable` enum (`MERGEABLE`) or a
- *                                      boolean. Non-`MERGEABLE`/false → `pr-not-mergeable`.
+ *                                      boolean. `UNKNOWN` (GitHub still computing
+ *                                      mergeability) → `pr-mergeability-unknown`,
+ *                                      a transient read callers must retry rather
+ *                                      than treat as a conflict; any other
+ *                                      non-`MERGEABLE`/false → `pr-not-mergeable`.
  * @property {string=}  mergeStateStatus GitHub `mergeStateStatus`. `BEHIND` (branch not
  *                                      rebased onto base) → `pr-not-mergeable`
  *                                      ONLY when `requiresUpToDateBranch` is not
@@ -240,8 +245,10 @@ export function evaluateMergeEligibility(state = {}) {
 
   if (!verdictEligible(state?.verdict) && !operatorOverride) reasons.push('verdict-not-eligible');
   if (!requiredChecksGreen(state?.requiredChecks, state?.requiredCheckContexts)) reasons.push('ci-not-green');
-  const mergeableStr = String(state?.mergeable ?? '').toUpperCase();
-  if (mergeableStr === 'UNKNOWN') {
+  // A closed/merged PR is a definite `pr-not-mergeable` even while GitHub still
+  // reports `UNKNOWN`; only an open PR's UNKNOWN is the transient read.
+  const prOpen = state?.prState == null || String(state.prState).toUpperCase() === 'OPEN';
+  if (prOpen && String(state?.mergeable ?? '').toUpperCase() === 'UNKNOWN') {
     reasons.push('pr-mergeability-unknown');
   } else if (!prMergeable(state)) {
     reasons.push('pr-not-mergeable');

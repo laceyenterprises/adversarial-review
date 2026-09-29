@@ -193,7 +193,7 @@ async function fetchCurrentPrStateForBackgroundDispatch({
     execFileImpl,
     args: [
       'pr', 'view', String(prNumber), '--repo', repo,
-      '--json', 'state,headRefOid,isDraft,mergeable',
+      '--json', 'state,headRefOid,isDraft,mergeable,mergeStateStatus',
     ],
     timeoutMs: 30_000,
     log: logger,
@@ -204,6 +204,7 @@ async function fetchCurrentPrStateForBackgroundDispatch({
     headSha: String(parsed?.headRefOid || '').trim(),
     isDraft: parsed?.isDraft === true,
     mergeable: String(parsed?.mergeable || '').trim().toUpperCase(),
+    mergeStateStatus: String(parsed?.mergeStateStatus || '').trim().toUpperCase(),
   };
 }
 
@@ -492,8 +493,11 @@ export function normalizeCompletedRoundCount(value) {
 }
 
 // Transient mergeability sampling window (GitHub returns mergeable=UNKNOWN right
-// after a push / base move while it recomputes). Re-sample so we don't park an
-// otherwise-eligible PR as `pr-not-mergeable`. Env-overridable.
+// after a push / base move while it recomputes). Re-sample so an otherwise-eligible
+// PR resolves this tick; an UNKNOWN that survives sampling reads as the transient
+// `pr-mergeability-unknown` (retried next tick, never hammered or parked), while a
+// real CONFLICTING state reads as hammer-remediable `pr-not-mergeable`.
+// Env-overridable.
 const MERGEABILITY_SAMPLE_ATTEMPTS = Math.max(
   1,
   Number.parseInt(process.env.ADVERSARIAL_MERGEABILITY_SAMPLE_ATTEMPTS || '', 10) || 3,
@@ -855,8 +859,10 @@ export async function maybeDispatchAmaClosureFor({
 
   const settledReviewHeadSha = candidate?.headSha || currentRevisionRef || null;
   // GitHub returns mergeable=UNKNOWN transiently right after a push or when the
-  // base branch moves (a steady merge stream keeps `main` moving), and the
-  // eligibility predicate maps a non-MERGEABLE state to `pr-not-mergeable`. Only
+  // base branch moves (a steady merge stream keeps `main` moving). The
+  // eligibility predicate maps an unresolved UNKNOWN to the transient
+  // `pr-mergeability-unknown` and every other non-MERGEABLE state to
+  // `pr-not-mergeable`, so resolving it here decides this tick's route. Only
   // re-sample the actually-unresolved states; BLOCKED/BEHIND/false are already
   // classified enough for this tick and sleeping on them just consumes the
   // posted-review handler budget.
@@ -1580,7 +1586,9 @@ export async function maybeDispatchAmaClosureFor({
         daemonCleanMerge.reason === 'gate-not-eligible' &&
         Array.isArray(daemonCleanMerge.reasons) &&
         daemonCleanMerge.reasons.length > 0 &&
-        daemonCleanMerge.reasons.every((reason) => reason === 'labels-unavailable');
+        daemonCleanMerge.reasons.every(
+          (reason) => reason === 'labels-unavailable' || reason === 'pr-mergeability-unknown',
+        );
       if (
         daemonFailedClosed &&
         !transientEligibilityRead &&
@@ -1869,10 +1877,15 @@ export async function maybeDispatchAmaClosureFor({
             return { dispatched: false, reason: 'background-pr-state-changed' };
           }
           if (live?.isDraft) return { dispatched: false, reason: 'background-pr-draft' };
-          if (live?.mergeable === 'UNKNOWN') {
+          // DIRTYOWN-01: a CONFLICTING PR is the hammer's job (it resolves the
+          // conflict), so it dispatches. GitHub's transient UNKNOWN waits for the
+          // next cycle; normalize first so UNKNOWN+CLEAN reads as MERGEABLE here
+          // exactly as it does on the eligibility gate path.
+          const liveMergeability = normalizeGithubMergeability(live || {});
+          if (liveMergeability === 'UNKNOWN') {
             return { dispatched: false, reason: 'background-pr-mergeable-unknown', mergeable: 'UNKNOWN' };
           }
-          if (live?.mergeable !== 'MERGEABLE' && live?.mergeable !== 'CONFLICTING') {
+          if (liveMergeability !== 'MERGEABLE' && liveMergeability !== 'CONFLICTING') {
             return { dispatched: false, reason: 'background-pr-not-mergeable', mergeable: live?.mergeable || null };
           }
           return maybeDispatchAmaCloserImpl({ ...closerArgs });

@@ -259,11 +259,16 @@ When a queued entry gets a slot, the watcher fetches the live PR state,
 head, draft flag, and mergeability before calling the closer, and names what
 blocked it without launching a hammer (COMMENTCLOSE-01): a closed or updated PR
 yields `background-pr-state-changed`, a draft yields `background-pr-draft`, a
-non-`MERGEABLE` PR yields `background-pr-not-mergeable` (with the observed
+PR whose normalized mergeability (`mergeable` plus `mergeStateStatus`, where
+`UNKNOWN`+`CLEAN` counts as `MERGEABLE`) is still `UNKNOWN` yields
+`background-pr-mergeable-unknown`, any other state that is neither `MERGEABLE`
+nor `CONFLICTING` yields `background-pr-not-mergeable` (with the observed
 `mergeable` value), and an unreadable live state yields
-`background-pr-state-unavailable`. These results are retained for the next tick
-to apply through the normal inline result path. A state change or an unmergeable
-PR retries after 30 seconds; a draft routes to the operator-blocked lane with
+`background-pr-state-unavailable`. A `CONFLICTING` PR is not blocked here: it
+reaches the closer, whose hammer resolves the conflict (DIRTYOWN-01). These
+results are retained for the next tick to apply through the normal inline
+result path. A state change, an `UNKNOWN` mergeability, or an unmergeable PR
+retries after 30 seconds; a draft routes to the operator-blocked lane with
 `operatorReason: pr-is-draft`, because nothing in the pipeline marks a PR ready
 for review, and its operator alert says the PR is a draft. A settle-log failure cannot
 leave an unhandled background promise rejection.
@@ -855,9 +860,11 @@ budget/read exhaustion may retry on a later tick. The watcher emits
 `manualCloseRequired`, a permanent failure, or a non-remediable identity or
 eligibility gate requiring operator action. It also fires once per head when a
 closer→daemon route disagreement on a non-remediable decline passes its bound
-(see the next section). Missing live labels alone produce a
-transient `gate-read-failed` with no manual-close marker or page; the daemon can
-retry on a later tick. A hammer-remediable failure instead emits
+(see the next section). Missing live labels or GitHub's still-computing
+`mergeable=UNKNOWN` (`pr-mergeability-unknown`), alone or together, produce a
+transient `gate-read-failed` with no manual-close marker or page and no
+permanent-failure audit; an UNKNOWN read is first re-sampled within the
+daemon's merge retry budget, and the daemon can retry on a later tick. A hammer-remediable failure instead emits
 `ama.daemon_clean_fail_closed.hammer_fallback`. A removed `operator-approved`
 label is a protective hold, not a hammer handoff.
 
@@ -917,7 +924,8 @@ reasons:
 | `label-adversarial-merge-blocked` | Current-head `adversarial-merge-blocked` is applied (with head-scoped evidence). |
 | `skip-operator-skip` | A hard-stop operator label produced `operator-skip-label`; the watcher is deliberately holding merge/hammer/merge-agent closeout for an open PR. Terminal held PRs are cleaned up instead of held. |
 | `stale-review-head` | The reviewed head doesn't match the PR's current head. |
-| `pr-not-mergeable` | GitHub's `mergeableState` is not `MERGEABLE` — usually a conflict. |
+| `pr-not-mergeable` | GitHub's `mergeableState` is neither `MERGEABLE` nor `UNKNOWN` — usually a conflict. Hammer-remediable: the hammer resolves the conflict. |
+| `pr-mergeability-unknown` | GitHub still reports `mergeableState` `UNKNOWN` after the watcher's bounded re-sampling (it recomputes after a push or base move). Transient: not hammer-remediable and never parked; the next tick re-reads. On the daemon clean path an UNKNOWN-only miss inside the lease is re-sampled within the retry budget and then ends as the non-permanent `gate-read-failed`, so the head stays eligible for the daemon on the next tick. |
 | `remediation-pending` | Adversarial-review remediation work is owed before AMA can close. |
 
 ### FSR-06B: fleet-self-repair re-review requests for a trailer-only head move

@@ -162,6 +162,8 @@ test('only pre-lease gate declines the hammer can fix are hammer-remediable', ()
   assert.equal(isDaemonNotTakenHammerRemediable(CI_NOT_GREEN), true);
   assert.equal(isDaemonNotTakenHammerRemediable({ ...CI_NOT_GREEN, reasons: ['pr-not-mergeable', 'stale-head'] }), true);
   assert.equal(isDaemonNotTakenHammerRemediable(DUPLICATE_FAMILY), false);
+  // DIRTYOWN-01: GitHub's still-computing UNKNOWN is a transient read, not a conflict.
+  assert.equal(isDaemonNotTakenHammerRemediable({ ...CI_NOT_GREEN, reasons: ['pr-mergeability-unknown'] }), false);
   assert.equal(isDaemonNotTakenHammerRemediable({ ...CI_NOT_GREEN, reasons: ['ci-not-green', 'labels-unavailable'] }), false);
   assert.equal(isDaemonNotTakenHammerRemediable({ ...CI_NOT_GREEN, reasons: [] }), false);
   assert.equal(isDaemonNotTakenHammerRemediable({ disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason: 'prior-daemon-terminal-failure' }), false);

@@ -203,13 +203,29 @@ test('reasons are emitted in the stable documented order', () => {
     labels: ['duplicate-family-hold'],
   });
   assert.equal(result.eligible, false);
-  assert.deepEqual(result.reasons, MERGE_ELIGIBILITY_REASONS.filter((reason) => reason !== 'labels-unavailable'));
+  // `pr-mergeability-unknown` and `pr-not-mergeable` are mutually exclusive.
+  assert.deepEqual(result.reasons, MERGE_ELIGIBILITY_REASONS.filter(
+    (reason) => reason !== 'labels-unavailable' && reason !== 'pr-mergeability-unknown',
+  ));
 });
 
 test('empty/no state → fail closed with labels-unavailable rather than a false duplicate claim', () => {
   const result = evaluateMergeEligibility();
   assert.equal(result.eligible, false);
-  assert.deepEqual(result.reasons, MERGE_ELIGIBILITY_REASONS.filter((reason) => reason !== 'duplicate-family-unresolved'));
+  assert.deepEqual(result.reasons, MERGE_ELIGIBILITY_REASONS.filter(
+    (reason) => reason !== 'duplicate-family-unresolved' && reason !== 'pr-mergeability-unknown',
+  ));
+});
+
+test('open PR with mergeable=UNKNOWN is the transient pr-mergeability-unknown, not a conflict', () => {
+  assert.deepEqual(
+    evaluateMergeEligibility(eligibleState({ mergeable: 'UNKNOWN' })).reasons,
+    ['pr-mergeability-unknown'],
+  );
+  assert.deepEqual(
+    evaluateMergeEligibility(eligibleState({ mergeable: 'CONFLICTING' })).reasons,
+    ['pr-not-mergeable'],
+  );
 });
 
 test('requiredChecks accepts a pre-derived boolean', () => {
@@ -335,6 +351,7 @@ test('exported vocabulary is stable and frozen', () => {
   assert.deepEqual(MERGE_ELIGIBILITY_REASONS, [
     'verdict-not-eligible',
     'ci-not-green',
+    'pr-mergeability-unknown',
     'pr-not-mergeable',
     'branch-protection-missing-gate',
     'stale-head',

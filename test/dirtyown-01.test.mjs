@@ -10,10 +10,10 @@ test('DIRTYOWN-01: CONFLICTING pushes pr-not-mergeable and is hammer remediable'
     isDraft: false,
     mergeableState: 'CONFLICTING'
   };
-  const result = isEligibleForAmaClosure({ verdict: 'approved', commentOnlyFinalRoundResume: true }, prMetadata, { enabled: true });
+  const result = isEligibleForAmaClosure({ verdict: 'approved' }, prMetadata, { enabled: true });
   assert.equal(result.reasons.includes('pr-not-mergeable'), true);
   
-  const remediable = isHammerRemediableEligibilityMiss(['pr-not-mergeable'], { commentOnlyFinalRoundResume: true });
+  const remediable = isHammerRemediableEligibilityMiss(['pr-not-mergeable'], {});
   assert.equal(remediable, true);
 });
 
@@ -41,4 +41,10 @@ test('DIRTYOWN-01: daemon clean path refuses UNKNOWN and CONFLICTING', () => {
   const evalConflicting = evaluateMergeEligibility(stateConflicting);
   assert.equal(evalConflicting.reasons.includes('pr-not-mergeable'), true);
   assert.equal(evalConflicting.eligible, false);
+});
+
+test('DIRTYOWN-01: a closed PR is pr-not-mergeable even while GitHub reports UNKNOWN', () => {
+  const result = evaluateMergeEligibility({ mergeable: 'UNKNOWN', prState: 'CLOSED' });
+  assert.equal(result.reasons.includes('pr-not-mergeable'), true);
+  assert.equal(result.reasons.includes('pr-mergeability-unknown'), false);
 });

@@ -598,6 +598,19 @@ warning and the skipped re-review must still run (an FSR-06B request, or one an
 operator asked for), apply `adversarial-merge-blocked` before the hammer's
 terminal validation, then request the re-review.
 
+A proven final-round head that conflicts with base reaches the hammer even with
+red or pending CI (DIRTYOWN-02), because the hammer must rebase before any CI on
+it counts. The conflict is proven only from GitHub's raw signal
+(`mergeable=CONFLICTING` or `mergeStateStatus=DIRTY`) beside the
+`pr-not-mergeable` gate. A `pr-not-mergeable` head that is only `BLOCKED` by a
+red required check, `UNSTABLE` or `BEHIND` still parks on red CI or waits for
+pending CI as before. A conflicting head never gets the final-round CI-wait
+exemption from the retain-loop cap. When a final-round PR parks with
+`reasons=[...,pr-not-mergeable,...,ci-not-green]` in the dispatch log lines
+above, read `gh pr view <n> --json mergeable,mergeStateStatus`: a conflict
+there should have resumed the hammer, while a `BLOCKED` head needs its red
+check fixed first.
+
 Normal `posted` rows are different. `stale-review-head`,
 `blocking-findings-present`, and `verdict-not-settled-success` remain AMA/HAM
 eligibility inputs, because the merge authority owns the evidence-specific

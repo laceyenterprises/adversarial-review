@@ -1252,7 +1252,15 @@ test('CCX-08: a helper capture settles after its timeout even when nothing it st
     return child;
   };
   const started = Date.now();
-  const result = await runBoundedProcess('/usr/bin/sudo', [], { spawnImpl, timeoutMs: 50, killGraceMs: 50, drainMs: 50 });
+  // The capture's own timers are unref'd (a real child's handles keep the
+  // loop alive); the fake has none, so hold the loop open while it runs.
+  const keepAlive = setInterval(() => {}, 1_000);
+  let result;
+  try {
+    result = await runBoundedProcess('/usr/bin/sudo', [], { spawnImpl, timeoutMs: 50, killGraceMs: 50, drainMs: 50 });
+  } finally {
+    clearInterval(keepAlive);
+  }
   assert.ok(Date.now() - started < 5_000);
   assert.equal(result.timedOut, true);
   assert.equal(result.pipeHeld, true);

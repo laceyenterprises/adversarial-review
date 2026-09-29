@@ -9,22 +9,18 @@ import {
   createDefaultArgusEvidenceIo,
   gatherArgusEvidence,
 } from './argus-dependency-evidence.mjs';
+import { createArgusReviewerModelResolver } from './argus-reviewer-routing.mjs';
 import { reviewWithClaude, reviewWithCodex, reviewWithGemini } from './reviewer-harness.mjs';
 import { fetchPRDiff } from './reviewer-diff-fetch.mjs';
 import { execGhWithRetry } from './gh-cli.mjs';
 
-export const ARGUS_REVIEWER_TOKEN_ENV = 'GH_ARGUS_REVIEWER_TOKEN';
-export const ARGUS_REVIEWER_MODELS_ENV = 'ADVERSARIAL_ARGUS_REVIEWER_MODELS';
-export const DEFAULT_ARGUS_REVIEWER_MODELS = Object.freeze(['claude', 'gemini', 'codex']);
-const KNOWN_MODELS = new Set(DEFAULT_ARGUS_REVIEWER_MODELS);
+export {
+  ARGUS_REVIEWER_MODELS_ENV,
+  DEFAULT_ARGUS_REVIEWER_MODELS,
+  resolveConfiguredArgusReviewerModels,
+} from './argus-reviewer-routing.mjs';
 
-/** Operator-ordered model preference; unknown names are dropped. */
-export function resolveConfiguredArgusReviewerModels(env = process.env) {
-  const raw = String(env?.[ARGUS_REVIEWER_MODELS_ENV] ?? '').trim();
-  if (!raw) return [...DEFAULT_ARGUS_REVIEWER_MODELS];
-  const models = raw.split(',').map((value) => value.trim().toLowerCase()).filter((value) => KNOWN_MODELS.has(value));
-  return models.length > 0 ? [...new Set(models)] : [...DEFAULT_ARGUS_REVIEWER_MODELS];
-}
+export const ARGUS_REVIEWER_TOKEN_ENV = 'GH_ARGUS_REVIEWER_TOKEN';
 
 /**
  * The identity a finding is posted as. `GH_ARGUS_REVIEWER_TOKEN` is the Argus
@@ -86,8 +82,7 @@ export function createDefaultArgusReviewDeps({
       return Buffer.isBuffer(bytes) ? bytes.toString('utf8') : String(bytes ?? '');
     },
 
-    resolveReviewerModels: resolveReviewerModels
-      || (async () => resolveConfiguredArgusReviewerModels(env)),
+    resolveReviewerModels: resolveReviewerModels || createArgusReviewerModelResolver({ env, logger }),
 
     async runReviewerModel({ model, prompt, cwd, diff }) {
       const options = { promptOverride: prompt, reviewerSubprocessCwd: cwd };

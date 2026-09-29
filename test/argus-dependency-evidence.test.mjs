@@ -323,7 +323,9 @@ test('an already-routed job is left to the drain; a drain approval merges throug
   });
   assert.equal(merged.reason, 'merged');
   assert.equal(mergeArgs.autonomousMergeAccountability.label, 'argus-security-review');
-  assert.equal(mergeArgs.reviewState.nonBlockingFindingCount, 1);
+  // Advisory findings never block (ASR-06): the daemon sees none, the audit keeps the count.
+  assert.equal(mergeArgs.reviewState.nonBlockingFindingCount, 0);
+  assert.equal(mergeArgs.autonomousMergeAccountability.inputs.advisoryFindingCount, 1);
   const after = findArgusJob(rootDir, { repo: REPO, prNumber: 1172, headSha: HEAD });
   assert.equal(after.job.result.merge.merged, true);
   assert.equal(after.job.result.merge.settled, true);

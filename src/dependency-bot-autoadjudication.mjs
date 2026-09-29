@@ -257,6 +257,11 @@ async function mergeArgusDrainApprovedDependencyBump({
 }) {
   const { job } = jobRecord;
   const headSha = String(job.headSha || currentPrHeadSha || '').trim();
+  // Argus `medium`/`low` findings are advisory by the operator's authority
+  // decision (ASR-06): posted, never blocking. The daemon's non-blocking count
+  // means "findings remediation should address first", which a dependency bump
+  // has no remediator for, so they are not counted there. They travel in the
+  // merge accountability instead, so the audit still records them.
   const advisoryCount = (Array.isArray(job.result?.findings) ? job.result.findings : [])
     .filter((finding) => finding?.severity !== 'high').length;
   const daemonResult = await runDaemonCleanMergeAttemptImpl({
@@ -276,7 +281,7 @@ async function mergeArgusDrainApprovedDependencyBump({
       riskClass: 'argus-security-reviewed',
       blockingFindingCount: 0,
       blockingFindingState: 'known',
-      nonBlockingFindingCount: advisoryCount,
+      nonBlockingFindingCount: 0,
       nonBlockingFindingState: 'known',
     },
     reviewStateRow: {
@@ -291,7 +296,12 @@ async function mergeArgusDrainApprovedDependencyBump({
       observedAt: attemptedAt,
       headSha,
       reason: 'argus-security-approved',
-      inputs: { reviewer: job.result?.reviewer?.model || null, verification: job.result?.verification || null },
+      inputs: {
+        reviewer: job.result?.reviewer?.model || null,
+        verification: job.result?.verification || null,
+        advisoryFindingCount: advisoryCount,
+        commentUrl: job.result?.posted?.url || null,
+      },
     },
     logger,
     env,

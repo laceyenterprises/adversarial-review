@@ -107,7 +107,8 @@ export async function proveFinalRoundWorkerPush({
       proof: { method: FINAL_ROUND_REPLAY_PROOF, reviewedCommitsReplayed, workerCommits: added.length },
     };
   } catch (err) {
-    return withheld(`git-proof-failed: ${String(err?.message || err).split('\n')[0]}`);
+    const diagnostic = String(err?.message || err).split(/\r?\n/u).map((line) => line.trim()).filter(Boolean).join(' ');
+    return withheld(`git-proof-failed: ${diagnostic}`);
   }
 }
 

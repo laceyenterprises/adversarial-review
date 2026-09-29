@@ -153,6 +153,21 @@ test('worker proof retries a transient live lookup and remains re-entrant after 
   }), /TLS handshake timeout/);
 });
 
+test('worker proof retains every non-empty git error line in its reason and warning', async (t) => {
+  const { dir, reviewed } = prFixture(t);
+  const warnings = [];
+  const base = proofArgs(dir, reviewed, { warnings });
+  const result = await proveFinalRoundWorkerPush({
+    ...base,
+    execFileImpl: async (command, argv) => {
+      if (command === 'git') throw new Error('Command failed: git rev-parse HEAD\n\nfatal: Unable to create lock file\r\n  another git process is running');
+      return base.execFileImpl(command, argv);
+    },
+  });
+  assert.equal(result.reason, 'git-proof-failed: Command failed: git rev-parse HEAD fatal: Unable to create lock file another git process is running');
+  assert.match(warnings[0], /git-proof-failed: Command failed: git rev-parse HEAD fatal: Unable to create lock file another git process is running/);
+});
+
 test('completed final round requires matching review and proven descendant', async () => {
   const calls = [];
   const args = {

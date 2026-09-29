@@ -50,6 +50,12 @@ daemon inline merge = rare zero-finding path; kill switch
 `autonomous_merge_execution_enabled`) is documented in
 `docs/RUNBOOK-ama-closure.md` — that runbook plus `docs/STATE-MACHINE.md`
 ("MSM two-path merge authority") are the in-repo source of truth. Both paths
-share `src/ama/merge-eligibility.mjs`; its fail-closed empty-rollup behavior
-and the fail-open `summarizeChecksConclusion` classifier are intentionally
-different — do not unify them.
+share `src/ama/merge-eligibility.mjs`. CI greenness is ONE classifier,
+`classifyCheckRollup` in `src/checks-summary.mjs`: the closer reaches it through
+`summarizeChecksConclusion`, the daemon and hammer through `requiredChecksGreen`
+(CIDEDUPE-01). It reads each check's latest run and fails closed on an empty
+rollup (LAC-1559), a missing required context, or a pending latest run. The
+only deliberate difference is scope: the closer excludes the pipeline's own
+adversarial-gate status context. Do not fork the classification rules again. A
+closer that reads green while the daemon reads red deadlocks the PR (SEV3
+2026-09-28, agent-os#7314).

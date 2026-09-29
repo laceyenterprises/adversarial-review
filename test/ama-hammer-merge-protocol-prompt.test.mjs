@@ -133,7 +133,11 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort github-gate-read-failed/);
   assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort required-checks-pending/);
   assert.match(HAMMER_PROMPT, /--stage required-checks --state "\$HAM_PENDING_CHECK_STATES"/);
-  assert.match(HAMMER_PROMPT, /HAM_PENDING_CHECK_STATES=.*\.badChecks/);
+  assert.match(HAMMER_PROMPT, /HAM_PENDING_CHECK_STATES=.*\.checksConclusion/);
+  assert.match(HAMMER_PROMPT, /const checksConclusion = classifyCheckRollup\(checks\)/);
+  assert.match(HAMMER_PROMPT, /classifyCheckRollup\(\[check\]\) !== 'SUCCESS'/);
+  assert.match(HAMMER_PROMPT, /\.checksConclusion != "PENDING"/);
+  assert.doesNotMatch(HAMMER_PROMPT, /const badChecks = latestCheckRollupItems\(checks\)\.filter\(\(check\) => \{/);
   assert.match(HAMMER_PROMPT, /--required-checks-green/);
   assert.match(HAMMER_PROMPT, /\.closingStatus \/\/ empty/);
   assert.match(HAMMER_PROMPT, /merge lease head is not a full SHA/);
@@ -146,7 +150,6 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.match(HAMMER_PROMPT, /HAM_GATE_CAP_AUDIT_EXIT" -eq 65/);
   assert.match(HAMMER_PROMPT, /contains\("HAM-Terminal-Remediation-Head: " \+ \$head\)/);
   assert.match(HAMMER_PROMPT, /pre-acquire-checks\.json/);
-  assert.match(HAMMER_PROMPT, /"STARTUP_FAILURE", "STALE"/);
   assert.doesNotMatch(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort merge-confirmation-read-failed/);
   assert.match(HAMMER_PROMPT, /ham_fire_watcher_merge_wake\(\)/);
   assert.match(HAMMER_PROMPT, /bin\/watcher-wake\.mjs/);

@@ -218,6 +218,15 @@
       "owner": "AMA daemon clean-merge diagnostics"
     },
     {
+      "id": "daemon-route-disagreement",
+      "title": "Daemon Route Disagreements",
+      "path": "docs/data-model/daemon-route-disagreement.md",
+      "store": "data/follow-up-jobs/daemon-route-disagreement/",
+      "schemaSurface": "src/daemon-route-disagreement.mjs",
+      "relatedSchemaSurfaces": ["src/ama-closure-orchestration.mjs"],
+      "owner": "AMA watcher and closer route arbitration"
+    },
+    {
       "id": "hammer-wakes",
       "title": "Hammer Wakes",
       "path": "docs/data-model/hammer-wakes.md",

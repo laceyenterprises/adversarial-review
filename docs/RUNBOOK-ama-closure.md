@@ -772,11 +772,38 @@ never an uncapped re-dispatch. The fallback emits an
 budget/read exhaustion may retry on a later tick. The watcher emits
 `ama.daemon_clean_park.manual_close_required` only when the daemon marks
 `manualCloseRequired`, a permanent failure, or a non-remediable identity or
-eligibility gate requiring operator action. Missing live labels alone produce a
+eligibility gate requiring operator action. It also fires once per head when a
+closer→daemon route disagreement on a non-remediable decline passes its bound
+(see the next section). Missing live labels alone produce a
 transient `gate-read-failed` with no manual-close marker or page; the daemon can
 retry on a later tick. A hammer-remediable failure instead emits
 `ama.daemon_clean_fail_closed.hammer_fallback`. A removed `operator-approved`
 label is a protective hold, not a hammer handoff.
+
+### Closer routed to the daemon, daemon declined → logged, then hammer or park (CIDEDUPE-01)
+
+The daemon clean-merge runs first each tick; when it returns `not-taken` the
+tick falls through to the closer. If the closer's own eligibility passes, it
+answers `daemon-clean-route` ("the daemon owns this PR") and dispatches
+nothing. If the daemon keeps declining the same head, nothing acts. That is
+how agent-os#7314 sat `STALLED` (SEV3, 2026-09-28): the closer read CI as
+latest run per check, the daemon as every run, and a superseded cancelled run
+was red to one and not the other. Both now call one classifier
+(`classifyCheckRollup` in `src/checks-summary.mjs`). The backstop below
+(`src/daemon-route-disagreement.mjs`) covers any disagreement that remains.
+
+- **Every disagreement is logged** as an `ama.daemon_route_disagreement` event
+  (plus a `[watcher] AMA closer routed … but the daemon declined …` line). The
+  event carries the daemon's `daemonDisposition`, `daemonReason`,
+  `daemonReasons` (gates), and the per-head `disagreements` count. The count is
+  stored at `data/follow-up-jobs/daemon-route-disagreement/<repo>-pr-<n>.json`.
+  A new head restarts it, and a daemon merge deletes it.
+- **Past the bound** (3 disagreements on one head), the next tick escalates:
+
+| Daemon decline | Escalation |
+|---|---|
+| `not-eligible` whose gates are all hammer-remediable (`verdict-not-eligible`, `ci-not-green`, `pr-not-mergeable`, `stale-head`) | The closer is called with `forceHammerAfterDaemonFailure`, so the capped hammer takes the PR (per-PR hammer-retry-cap applies). Emits `ama.daemon_route_disagreement.hammer_fallback`. |
+| Any other decline (e.g. `duplicate-family-unresolved`, `labels-unavailable`, `prior-daemon-terminal-failure`, `findings-unknown`) | Parks: a `daemon-route-disagreement` park record (visible to `review-pipeline-health`) and one `ama.daemon_clean_park.manual_close_required` page per head with `reason: daemon-route-disagreement`. The coexistence outcome is `await-operator`. The daemon still runs every tick, so clearing the named gate lets it merge. |
 
 ### `merge-agent-skipped-ama-enabled`
 

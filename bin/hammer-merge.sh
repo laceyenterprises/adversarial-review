@@ -232,6 +232,7 @@ ham_refresh_github_gate_once() {
   "$HAM_NODE_BIN" --input-type=module <<'NODE' > "$HAM_GATE_JSON"
 import { fetchPullRequestRollup } from '<<ROOT_DIR>>/src/github-api.mjs';
 import { evaluateMergeEligibility } from '<<ROOT_DIR>>/src/ama/merge-eligibility.mjs';
+import { classifyCheckRollup, latestCheckRollupItems } from '<<ROOT_DIR>>/src/checks-summary.mjs';
 
 const repo = '<<REPO>>';
 const prNumber = Number('<<PR_NUMBER>>');
@@ -242,13 +243,11 @@ const checks = Array.isArray(rollup.checks)
   : Array.isArray(rollup.statusCheckRollup)
     ? rollup.statusCheckRollup
     : [];
-const badChecks = checks.filter((check) => {
-  const status = String(check.status || check.state || '').toUpperCase();
-  const conclusion = String(check.conclusion || '').toUpperCase();
-  if (check.__typename === 'StatusContext') return !['SUCCESS'].includes(status);
-  if (status && !['COMPLETED'].includes(status)) return true;
-  return !['SUCCESS', 'NEUTRAL', 'SKIPPED'].includes(conclusion);
-});
+// Keep diagnostics and the shell's red/pending decision on the same classifier
+// used by evaluateMergeEligibility's required-checks gate (CIDEDUPE-01).
+const checksConclusion = classifyCheckRollup(checks);
+const badChecks = latestCheckRollupItems(checks)
+  .filter((check) => classifyCheckRollup([check]) !== 'SUCCESS');
 const headMatches = String(rollup.headSha || rollup.headRefOid || '') === expectedHead;
 const mergeable = String(rollup.mergeable || '').toUpperCase() === 'MERGEABLE';
 const notBehind = String(rollup.mergeStateStatus || '').toUpperCase() !== 'BEHIND';
@@ -288,6 +287,7 @@ console.log(JSON.stringify({
   mergeable: rollup.mergeable || null,
   mergeStateStatus: rollup.mergeStateStatus || null,
   checksCount: checks.length,
+  checksConclusion,
   badChecks,
 }, null, 2));
 NODE
@@ -317,14 +317,7 @@ ham_required_gate_ok() {
 }
 
 ham_required_gate_red() {
-  jq -e '
-    (.badChecks // []) | any(
-      ((.conclusion // "") | ascii_upcase) as $conclusion |
-      ((.status // .state // "") | ascii_upcase) as $status |
-      ((["FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"] | index($conclusion)) != null) or
-      (.__typename == "StatusContext" and ((["ERROR", "FAILURE"] | index($status)) != null))
-    )
-  ' "$HAM_GATE_JSON" >/dev/null
+  jq -e '.checksConclusion != null and .checksConclusion != "SUCCESS" and .checksConclusion != "PENDING"' "$HAM_GATE_JSON" >/dev/null
 }
 
 ham_live_head_moved() {
@@ -405,7 +398,7 @@ while :; do
     cat "$HAM_GATE_JSON" >&2
     HAM_REMOTE_CI_STATUS=remote-ci-timeout
     ham_append_terminal_audit failed-without-merge github-gate-timeout || true
-    HAM_PENDING_CHECK_STATES=$(jq -r '[.badChecks[]? | (.conclusion // .status // .state // "")] | join(" ")' "$HAM_GATE_JSON")
+    HAM_PENDING_CHECK_STATES=$(jq -r '.checksConclusion // empty' "$HAM_GATE_JSON")
     if [ -n "$HAM_PENDING_CHECK_STATES" ] && ! ham_required_gate_red; then
       HAM_PENDING_CHECK_CLASSIFICATION=$("$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-lease.mjs classify \
         --stage required-checks --state "$HAM_PENDING_CHECK_STATES") || return 1

@@ -50,6 +50,11 @@ import {
   recordDaemonMergePark,
 } from './daemon-merge-park-log.mjs';
 import {
+  clearDaemonRouteDisagreement,
+  daemonRouteDisagreementForcesHammer,
+  observeDaemonRouteDisagreement,
+} from './daemon-route-disagreement.mjs';
+import {
   findLiveAmaCloserLease,
   rekeyAmaCloserLease,
 } from './ama/closer-lease.mjs';
@@ -542,14 +547,31 @@ export function isDaemonFailClosedHammerRemediable(daemonCleanMerge) {
   if (reason === 'stale-head') return true;
   // A `gate-not-eligible` terminal carries the exact failing eligibility gates.
   if (reason !== 'gate-not-eligible') return false;
-  const reasons = Array.isArray(daemonCleanMerge.reasons)
-    ? daemonCleanMerge.reasons.map((r) => String(r))
-    : [];
+  return daemonGateReasonsHammerRemediable(daemonCleanMerge.reasons);
+}
+
+function daemonGateReasonsHammerRemediable(gateReasons) {
+  const reasons = Array.isArray(gateReasons) ? gateReasons.map((r) => String(r)) : [];
   if (reasons.length === 0) return false;
   // Any non-remediable gate co-occurring → park (fail closed).
   if (reasons.some((r) => DAEMON_HAMMER_NONREMEDIABLE_GATE_REASONS.has(r))) return false;
   // EVERY gate must be hammer-remediable.
   return reasons.every((r) => DAEMON_HAMMER_REMEDIABLE_GATE_REASONS.has(r));
+}
+
+/**
+ * CIDEDUPE-01: is this daemon `not-taken` decline one the capped hammer can take
+ * over once the closer/daemon route disagreement passes its bound? Same gate
+ * classification as the fail-closed fallback above, applied to the pre-lease
+ * `not-eligible` decline; every other decline parks for the operator instead.
+ *
+ * @param {object} daemonCleanMerge  The `runDaemonCleanMergeAttempt` result.
+ * @returns {boolean}
+ */
+export function isDaemonNotTakenHammerRemediable(daemonCleanMerge) {
+  if (daemonCleanMerge?.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) return false;
+  if (String(daemonCleanMerge.reason || '') !== 'not-eligible') return false;
+  return daemonGateReasonsHammerRemediable(daemonCleanMerge.reasons);
 }
 
 function withAmaDispatchMetadata(result, { amaEnabled }) {
@@ -1492,6 +1514,7 @@ export async function maybeDispatchAmaClosureFor({
     // Diagnostics only — nothing reads these records to decide a merge.
     if (daemonCleanMerge.disposition === DAEMON_MERGE_DISPOSITION.MERGED) {
       clearDaemonMergePark({ rootDir, repo: repoPath, prNumber });
+      clearDaemonRouteDisagreement(rootDir, { repo: repoPath, prNumber });
     } else {
       recordDaemonMergePark({
         rootDir,
@@ -1678,8 +1701,26 @@ export async function maybeDispatchAmaClosureFor({
       })
     : [];
 
+  // CIDEDUPE-01: past this point the daemon declined (`not-taken`) or failed
+  // closed on a hammer-remediable gate. If the closer has already answered
+  // `daemon-clean-route` on this head more times than the bound allows, stop
+  // re-selecting a daemon that keeps declining and hand over to the capped hammer.
+  const daemonDeclined = !daemonCleanMerge?.disposition
+    || daemonCleanMerge.disposition === DAEMON_MERGE_DISPOSITION.NOT_TAKEN;
+  const routeDisagreementHead = currentPrHeadSha || reviewState.headSha || null;
+  const daemonDeclineHammerRemediable = isDaemonNotTakenHammerRemediable(daemonCleanMerge);
+  const forceHammerAfterRouteDisagreement = daemonDeclined && daemonRouteDisagreementForcesHammer({
+    rootDir,
+    repo: repoPath,
+    prNumber,
+    headSha: routeDisagreementHead,
+    daemonCleanMerge,
+    hammerRemediable: daemonDeclineHammerRemediable,
+    logger,
+  });
   const dispatchContext = {
-    forceHammerAfterDaemonFailure: isDaemonFailClosedHammerRemediable(daemonCleanMerge),
+    forceHammerAfterDaemonFailure: isDaemonFailClosedHammerRemediable(daemonCleanMerge)
+      || forceHammerAfterRouteDisagreement,
     daemonFailureReasons: Array.isArray(daemonCleanMerge?.reasons)
       ? daemonCleanMerge.reasons
       : [daemonCleanMerge?.reason].filter(Boolean),
@@ -1867,6 +1908,24 @@ export async function maybeDispatchAmaClosureFor({
       },
       { amaEnabled: Boolean(cfg?.enabled) },
     );
+  }
+  // CIDEDUPE-01: the closer handed this PR to the daemon, but the daemon declined
+  // it this tick. Never silent: log the daemon's reason, count it per head, and
+  // past the bound park for the operator when the hammer cannot take over.
+  if (result?.reason === 'daemon-clean-route' && daemonDeclined) {
+    const disagreement = observeDaemonRouteDisagreement({
+      rootDir,
+      repo: repoPath,
+      prNumber,
+      headSha: routeDisagreementHead,
+      daemonCleanMerge,
+      hammerRemediable: daemonDeclineHammerRemediable,
+      recordParkImpl: recordDaemonMergePark,
+      logger,
+    });
+    if (disagreement.parkResult) {
+      return withAmaDispatchMetadata(disagreement.parkResult, { amaEnabled: true });
+    }
   }
   // AMA-06N — expose `amaEnabled` so the watcher's coexistence
   // decision (downstream of this helper) can branch on it. The

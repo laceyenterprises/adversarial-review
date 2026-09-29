@@ -53,6 +53,11 @@ const PARK_REMEDIES = Object.freeze(Object.assign(Object.create(null), {
     + 'candidate with `not-a-duplicate-stack`; the watcher clears the hold on the '
     + 'next duplicate-family census/reconciliation tick once fewer than two live '
     + 'unsuppressed candidates remain.',
+  'daemon-route-disagreement':
+    'The AMA closer keeps routing this PR to the daemon clean-merge, and the daemon keeps '
+    + 'declining it on a gate the hammer cannot fix (see the `ama.daemon_route_disagreement` '
+    + 'log events for the daemon\'s reason and gates). Clear that gate and the daemon merges '
+    + 'on its next tick, or merge by hand. A new head resets the count.',
   'protective-predecessor-open':
     'Merge or close the declared protective predecessor PR, or update the dependent PR body '
     + 'if the declaration names the wrong protector.',

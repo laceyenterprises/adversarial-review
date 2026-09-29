@@ -17,7 +17,7 @@
 
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { join } from 'node:path';
 
@@ -69,6 +69,10 @@ const EXTRACT_TIMEOUT_MS = 5 * 60_000;
 const LEASE_WAIT_MS = 5 * 60_000;
 const LEASE_POLL_MS = 2_000;
 const STATE_SUBDIR = ['state', 'agy-reviewer-identities'];
+// sudo keeps the caller's cwd, and an added identity cannot enter the HQ
+// owner's 0700 snapshot or per-user TMPDIR. agy runs as that user from an
+// empty world-traversable dir here and reaches its scratch copy via --add-dir.
+const AGY_IDENTITY_CWD_PARENT = '/private/tmp';
 
 class AgyReviewerIdentityError extends Error {
   constructor(message, { reason = 'agy-identity-failed', detail = '' } = {}) {
@@ -327,6 +331,29 @@ function resolveAgyReviewIdentityFromEnv(env = process.env, { hqOwner = resolveH
   const reviewId = String(env?.[AGY_IDENTITY_REVIEW_ID_ENV] || '').trim();
   assertReviewId(reviewId);
   return { user, reviewId };
+}
+
+// Reviewer child: stage one added-identity review. `run` is `{ user, reviewId }`
+// and is filled in place (`cwd`, `workspaceDir`) so the caller's `finally` can
+// always hand it to finishAgyIdentityReview, whatever step threw.
+async function prepareAgyIdentityReview(run, { sourceDir, cwdParent = AGY_IDENTITY_CWD_PARENT, extractImpl = extractAgyReviewWorkspace } = {}) {
+  run.cwd = mkdtempSync(join(cwdParent, 'agy-review-cwd-'));
+  chmodSync(run.cwd, 0o755);
+  const workspace = await extractImpl({ user: run.user, reviewId: run.reviewId, sourceDir });
+  run.workspaceDir = workspace.dir;
+  return run;
+}
+
+// Runs on every exit path of the review (success, failure, timeout). The
+// workspace helper's cleanup is idempotent, so the watcher's lease release
+// running it again (for a child that was SIGKILLed) is harmless.
+async function finishAgyIdentityReview(run, { cleanupImpl = cleanupAgyReviewWorkspace, log = console } = {}) {
+  if (!run) return null;
+  const cleanup = await cleanupImpl({ user: run.user, reviewId: run.reviewId, log });
+  if (run.cwd) {
+    try { rmSync(run.cwd, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+  return cleanup;
 }
 
 // ── Watcher-side identity pool ──────────────────────────────────────────────
@@ -650,8 +677,10 @@ export {
   cleanupAgyReviewWorkspace,
   createAgyReviewerIdentityPool,
   extractAgyReviewWorkspace,
+  finishAgyIdentityReview,
   getAgyReviewerIdentityPool,
   parseHelperKeyValues,
+  prepareAgyIdentityReview,
   readBootstrapRecord,
   referenceAgySettingsFromEnv,
   resolveAgyReviewIdentityFromEnv,

@@ -8,6 +8,7 @@
 import { homedir } from 'node:os';
 
 import { checkAgyReviewerAuth } from './agy-reviewer-auth.mjs';
+import { getAgyReviewerIdentityPool } from './agy-reviewer-identities.mjs';
 import { resolveGeminiRuntime } from './role-config.mjs';
 import { scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 
@@ -50,4 +51,24 @@ export async function warnIfAntigravityReviewerAuthUnavailable({
     `antigravity agy auth startup preflight failed (${reason})${detail}.${remediation}`
   );
   return { checked: true, ok: false, reason };
+}
+
+// CCX-08: the watcher's startup call. Runs the HQ-owner auth preflight above,
+// then each added reviewer identity's workspace-helper `sweep`, which removes
+// scratch copies a crashed watcher or reviewer child leaked. Neither ever
+// blocks startup. With a single identity the sweep is a no-op.
+export async function runAgyReviewerStartupChecks({
+  env = process.env,
+  log = console,
+  identityPool = getAgyReviewerIdentityPool(),
+  warnIfUnavailableImpl = warnIfAntigravityReviewerAuthUnavailable,
+} = {}) {
+  const auth = await warnIfUnavailableImpl({ env, log });
+  let sweep = [];
+  try {
+    sweep = await identityPool.sweepAll();
+  } catch (err) {
+    log.warn?.(`[watcher] WARN agy reviewer identity startup sweep failed: ${err?.message || err}`);
+  }
+  return { auth, sweep };
 }

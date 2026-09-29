@@ -67,6 +67,14 @@ import {
   resolveAgyAuthProbeTimeoutMs,
 } from './agy-reviewer-auth.mjs';
 import { resolveGeminiRuntime, resolveGeminiAntigravityModel } from './role-config.mjs';
+import {
+  AGY_REVIEWER_PINNED_AGY,
+  PINNED_COMMAND_ENV,
+  buildPinnedCommand,
+  finishAgyIdentityReview,
+  prepareAgyIdentityReview,
+  resolveAgyReviewIdentityFromEnv,
+} from './agy-reviewer-identities.mjs';
 import { resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
 import {
   REVIEW_POST_RETRY_DELAYS_MS,
@@ -2533,6 +2541,11 @@ async function spawnAgyReview({
   printTimeoutMs = resolveAgyPrintTimeoutMs(env),
   maxBuffer = 10 * 1024 * 1024,
   spawnWithInputImpl = spawnWithInput,
+  // CCX-08: an added reviewer identity `{ user, workspaceDir, cwd }`. agy then
+  // runs as that user through sudo and the root-owned pinned command, against
+  // the user's scratch copy; model and timeout cross sudo only as these pinned
+  // args, everything else comes from the root-owned settings file.
+  identity = null,
 }) {
   const effectiveTimeout = resolveAgyReviewerSubprocessTimeoutMs(env, {
     reviewerTimeoutMs: timeout,
@@ -2542,12 +2555,16 @@ async function spawnAgyReview({
   // binds. Refuse if it would blow the argv budget rather than silently
   // reverting to stdin (which unbinds the model — the bug this fixes).
   assertAgyPromptFitsArgv(prompt, { maxBytes: resolveAgyArgvMaxBytes(env) });
+  const agyArgs = buildAgyReviewArgs({ model, prompt, printTimeoutMs, workspaceDir: identity ? identity.workspaceDir : cwd });
+  const pinned = identity
+    ? buildPinnedCommand({ user: identity.user, command: AGY_REVIEWER_PINNED_AGY, args: agyArgs })
+    : null;
   return spawnWithInputImpl(
-    agyCli,
-    buildAgyReviewArgs({ model, prompt, printTimeoutMs, workspaceDir: cwd }),
+    pinned ? pinned.command : agyCli,
+    pinned ? pinned.args : agyArgs,
     {
-      env,
-      cwd,
+      env: pinned ? { ...PINNED_COMMAND_ENV } : env,
+      cwd: pinned ? identity.cwd : cwd,
       // Prompt is delivered on argv (see buildAgyReviewArgs); stdin is closed.
       input: '',
       timeout: effectiveTimeout,
@@ -2584,11 +2601,22 @@ async function reviewWithGemini(diff, extraContext = '', {
   sleepImpl = sleep,
   log = console,
   promptOverride = null,
+  // CCX-08: the added reviewer identity this review leased (`{ user, reviewId }`),
+  // null for the HQ owner. Defaults to what the watcher put in the child env.
+  agyIdentity = undefined,
+  prepareAgyIdentityReviewImpl = prepareAgyIdentityReview,
+  finishAgyIdentityReviewImpl = finishAgyIdentityReview,
 } = {}) {
   const runtime = resolveGeminiRuntimeForReview(resolveGeminiRuntimeImpl, log);
   if (runtime !== 'cli' && runtime !== 'antigravity') {
     throw new Error(`Unsupported Gemini runtime: ${runtime}`);
   }
+  // An added identity brings its own HOME/keychain through sudo: no broker
+  // checkout, no HQ-owner auth probe (the watcher's readiness pass covers it).
+  const addedIdentity = runtime === 'antigravity'
+    ? (agyIdentity === undefined ? resolveAgyReviewIdentityFromEnv(process.env) : agyIdentity)
+    : null;
+  let identityRun = null;
 
   // Strip API keys (incl. GEMINI_API_KEY / GOOGLE_API_KEY) before any Gemini
   // subprocess probe or review spawn so the runtime exercises OAuth only.
@@ -2605,7 +2633,7 @@ async function reviewWithGemini(diff, extraContext = '', {
   let quotaSignal = false;
   let spendReported = false;
   console.error('[reviewWithGemini] asserting OAuth...');
-  if (runtime === 'antigravity') {
+  if (runtime === 'antigravity' && !addedIdentity) {
     if (!geminiReviewerSessionPreflightDone) {
       geminiReviewerSessionPreflightDone = true;
       purgeStaleGeminiReviewerSessionDirsImpl({ env });
@@ -2659,7 +2687,11 @@ async function reviewWithGemini(diff, extraContext = '', {
   let subprocessStarted = false;
   try {
     reviewEnv = withReviewerSubprocessCwdEnv(reviewEnv, reviewerSubprocessCwd);
-    if (runtime === 'antigravity') {
+    if (addedIdentity) {
+      identityRun = { user: addedIdentity.user, reviewId: addedIdentity.reviewId, cwd: null, workspaceDir: null };
+      await prepareAgyIdentityReviewImpl(identityRun, { sourceDir: reviewerSubprocessCwd });
+      console.error(`[reviewWithGemini] agy identity=${identityRun.user} review=${identityRun.reviewId} scratch=${identityRun.workspaceDir}`);
+    } else if (runtime === 'antigravity') {
       await assertAgyAuthImpl({ agyCli: AGY_CLI, env: reviewEnv });
     } else {
       await assertOAuthImpl(reviewEnv);
@@ -2705,6 +2737,7 @@ async function reviewWithGemini(diff, extraContext = '', {
           cwd: reviewerSubprocessCwd,
           timeout: resolveReviewerTimeoutMs(reviewEnv),
           maxBuffer: 10 * 1024 * 1024,
+          ...(identityRun ? { identity: identityRun } : {}),
         }),
         { retryDelaysMs, sleepImpl },
       )
@@ -2749,6 +2782,9 @@ async function reviewWithGemini(diff, extraContext = '', {
     }
     throw new Error(`Gemini exec failed: ${String(err.message || stderr || '').substring(0, 800)}`);
   } finally {
+    if (identityRun) {
+      await finishAgyIdentityReviewImpl(identityRun, { log });
+    }
     if (runtime === 'antigravity') {
       if (checkout?.credentialId && !quotaSignal && !spendReported && subprocessStarted) {
         try {

@@ -85,7 +85,7 @@ import { validateStartupRoleRegistry } from './role-registry.mjs';
 import { validateStartupDeliveryIdentity } from './adapters/comms/github-pr-comments/delivery-identity.mjs';
 import { isPipelineEnabled } from './domain-pipeline.mjs';
 import { reconcileDuplicateFamilyLabels, runDuplicateFamilyCensusForWatcher } from './duplicate-family-state.mjs';
-import { warnIfAntigravityReviewerAuthUnavailable } from './watcher-agy-startup-preflight.mjs';
+import { runAgyReviewerStartupChecks, warnIfAntigravityReviewerAuthUnavailable } from './watcher-agy-startup-preflight.mjs';
 import { startArgusSecurityDrainForWatcherTick } from './argus-security-drain.mjs';
 import { createCompositeOperatorSurface } from './adapters/operator/index.mjs';
 import {
@@ -1633,7 +1633,7 @@ async function main() {
     resolvePendingDraftRespawnAgeSeconds(process.env);
     resolveStuckDispatchAlertDebounceMs(process.env);
     validateFenceConfig(process.env);
-    await warnIfAntigravityReviewerAuthUnavailable({ env: process.env });
+    await runAgyReviewerStartupChecks({ env: process.env });
     if (resolveSigtermFenceMode(process.env) !== 'off') {
       const exitTimeoutCheck = inspectWatcherExitTimeout(process.env);
       if (!exitTimeoutCheck.ok) {

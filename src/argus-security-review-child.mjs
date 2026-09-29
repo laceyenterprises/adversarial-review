@@ -9,6 +9,7 @@
 // `ARGUS_REVIEW_OUTCOME {json}` line for the drain to apply. Any failure is
 // reported as a `retry` outcome, so a crash here costs an attempt, never a job.
 
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -42,6 +43,10 @@ async function main() {
   const workDir = join(rootDir, 'data', 'argus-security-work', job.jobId);
   rmSync(workDir, { recursive: true, force: true });
   mkdirSync(workDir, { recursive: true });
+  // The reviewer runs in this isolated scratch dir, never in a live checkout:
+  // the harness runs models with approvals bypassed. `codex exec` refuses to
+  // run outside a git repository, so the scratch dir is made one.
+  spawnSync('git', ['init', '-q', workDir], { stdio: 'ignore', timeout: 30_000 });
   try {
     emit(await reviewArgusJob({
       job,

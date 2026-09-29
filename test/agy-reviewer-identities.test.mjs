@@ -92,7 +92,7 @@ if [ -e "$HOME/.agy-wait-peer" ]; then
   echo "peers=$(ls "$FAKE_ROOT" | grep -c '^running-')" > "$HOME/peers"
 fi
 printf '{"user":"%s","home":"%s","cwd":"%s","addDir":"%s","mode":"%s","model":"%s","proxy":"%s","noProxy":"%s","keychain":"%s","sawSnapshot":"%s"}\\n' \\
-  "$USER" "$HOME" "$(pwd -P)" "$add" "$(stat -f %Lp "$add")" "$model" "\${HTTPS_PROXY-}" "\${NO_PROXY-}" "\${AGY_KEYCHAIN_PATH-}" \\
+  "$USER" "$HOME" "$(pwd -P)" "$add" "$(if [ "$(uname)" = Darwin ]; then stat -f %Lp "$add"; else stat -c %a "$add"; fi)" "$model" "\${HTTPS_PROXY-}" "\${NO_PROXY-}" "\${AGY_KEYCHAIN_PATH-}" \\
   "$([ -f "$add/README.md" ] && echo yes || echo no)" >> "$HOME/agy-calls.log"
 [ -e "$HOME/.agy-hang" ] && sleep 30
 if [ -e "$HOME/.agy-fail" ]; then echo "agy failed" >&2; exit 1; fi
@@ -225,6 +225,8 @@ function identityReviewOptions(fake, { snapshotDir, agyIdentity, finishCalls = [
     assertAgyAuthImpl: async () => { throw new Error('an added identity must not run the HQ-owner auth probe'); },
     prepareAgyIdentityReviewImpl: (run, opts) => prepareAgyIdentityReview(run, {
       ...opts,
+      // The production parent is macOS's /private/tmp; CI runs on Linux.
+      cwdParent: fake.root,
       extractImpl: (args) => extractAgyReviewWorkspace({ ...args, runPinnedImpl: fake.runPinned }),
     }),
     finishAgyIdentityReviewImpl: async (run, opts) => {

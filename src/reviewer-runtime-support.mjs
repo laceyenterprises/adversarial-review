@@ -121,6 +121,8 @@ export async function resolveGeminiCredentialConcurrencyForDispatchCandidates(
     ? geminiCandidates.filter((candidate) => adapterCarriesAgyReviewerIdentity(resolveCandidateAdapter(candidate))).length
     : 0;
   const readyIdentities = leasingCandidates > 0 ? await identityPool.refreshReadiness() : null;
+  // A lane that stays at zero ready identities with work waiting alerts.
+  if (leasingCandidates > 0) identityPool.noteGeminiDemand?.({ readyIdentities, candidates: leasingCandidates });
   if (readyIdentities !== null && leasingCandidates === geminiCandidates.length) return readyIdentities;
 
   const brokerUrl = env.CQP_BROKER_URL || env.OAUTH_BROKER_URL || DEFAULT_CQP_BROKER_URL;

@@ -665,7 +665,7 @@ async function spawnReviewer({
       reviewerModel,
       adapter: activeReviewerRuntimeAdapter,
       pool: agyReviewerIdentityPool,
-    }, (agyIdentity) => activeReviewerRuntimeAdapter.spawnReviewer({
+    }, (agyIdentity, agyIdentityLease) => activeReviewerRuntimeAdapter.spawnReviewer({
       model: reviewerModel,
       prompt: '',
       subjectContext: {
@@ -690,6 +690,9 @@ async function spawnReviewer({
         crossModelReviewWaiverReason,
         afhReviewerFallback,
         ...(agyIdentity ? { agyIdentity } : {}),
+        // Persisted in the run record so a restarted watcher keeps this
+        // identity out while this review still runs.
+        ...(agyIdentityLease ? { agyIdentityLease } : {}),
       },
       timeoutMs: effectiveReviewerTimeoutMs,
       sessionUuid: reviewerSessionUuid,

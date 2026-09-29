@@ -37,6 +37,7 @@ import {
   createAgyReviewerIdentityPool,
   extractAgyReviewWorkspace,
   finishAgyIdentityReview,
+  agyReviewSurvivors,
   listUserProcesses,
   prepareAgyIdentityReview,
   referenceAgySettingsFromEnv,
@@ -217,7 +218,12 @@ function makePool(fake, {
   runPinnedImpl = fake?.runPinned,
   // The fake identities are not real OS users, so `ps -U` cannot see them;
   // by default nothing survives a review.
-  listUserProcessesImpl = async () => ({ ok: true, pids: [] }),
+  listUserProcessesImpl = async () => ({ ok: true, processes: [] }),
+  // No reviewer run records: no review from a previous watcher.
+  readActiveRunRecordsImpl = () => [],
+  readRunRecordImpl = () => null,
+  isPgidAliveImpl = () => false,
+  deliverAlertImpl = async () => ({ id: 'test' }),
   leaseWaitMs = 0,
   now,
 } = {}) {
@@ -232,6 +238,10 @@ function makePool(fake, {
     readBootstrapRecordImpl,
     referenceSettings: () => HQ_SETTINGS,
     listUserProcessesImpl,
+    readActiveRunRecordsImpl,
+    readRunRecordImpl,
+    isPgidAliveImpl,
+    deliverAlertImpl,
     sleepImpl: async () => {},
     leaseWaitMs,
     ...(now ? { now } : {}),
@@ -506,9 +516,11 @@ test('CCX-08: a failed review isolates only its identity, and a passing readines
     assert.equal(pool.readyCount(), 3);
     assert.match(log.lines.join('\n'), new RegExp(`identity=${REVIEWER_A} re-admitted`));
 
-    // A cancelled review says nothing about the identity.
-    await runWithAgyReviewerIdentity({ reviewerModel: 'gemini', adapter, pool, log }, async () => ({ ok: false, failureClass: 'cancelled' }));
-    assert.equal(pool.readyCount(), 3);
+    // A cancelled review, or a provider-wide failure, says nothing about the identity.
+    for (const failureClass of ['cancelled', 'cascade', 'provider-overloaded', 'quota-exhausted']) {
+      await runWithAgyReviewerIdentity({ reviewerModel: 'gemini', adapter, pool, log }, async () => ({ ok: false, failureClass }));
+      assert.equal(pool.readyCount(), 3, failureClass);
+    }
     // A thrown reviewer isolates the identity it ran on (here the HQ owner) and still releases the lease.
     await assert.rejects(runWithAgyReviewerIdentity({ reviewerModel: 'gemini', adapter, pool, log }, async () => { throw new Error('boom'); }), /boom/);
     assert.equal(pool.snapshot().find((state) => state.user === HQ_OWNER).ready, false);
@@ -805,12 +817,26 @@ function killSurvivor(fake, user) {
   try { process.kill(Number(readFileSync(path, 'utf8').trim()), 'SIGKILL'); } catch { /* already gone */ }
 }
 
-// Stands in for `ps -U <user>`: the fake's survivor, if it still runs.
+// The per-user agents launchd keeps running for a user that has used
+// CoreFoundation/Security.framework, and a LaunchAgent job with a child. Each
+// leads its own process group. None of them is a review's.
+const SYSTEM_AGENTS = [
+  { pid: 9101, pgid: 9101, comm: '/usr/sbin/cfprefsd' },
+  { pid: 9102, pgid: 9102, comm: '/usr/sbin/distnoted' },
+  { pid: 9103, pgid: 9103, comm: '/usr/libexec/trustd' },
+  { pid: 9104, pgid: 9104, comm: '/usr/libexec/secd' },
+  { pid: 9105, pgid: 9105, comm: '/bin/sh' },
+  { pid: 9106, pgid: 9105, comm: 'sleep' },
+];
+
+// Stands in for `ps -U <user>`: the user's system agents, plus the fake's
+// survivor (a language server in its own group) while it still runs.
 function survivorLister(fake) {
   return async ({ user }) => {
     const path = join(fake.home(user), 'survivor.pid');
     const pid = existsSync(path) ? Number(readFileSync(path, 'utf8').trim()) : 0;
-    return { ok: true, pids: pid && processAlive(pid) ? [pid] : [] };
+    const survivor = pid && processAlive(pid) ? [{ pid, pgid: pid, comm: 'language_server_' }] : [];
+    return { ok: true, processes: [...SYSTEM_AGENTS, ...survivor] };
   };
 }
 
@@ -893,25 +919,250 @@ test('CCX-08: an unknown process check keeps the identity out (fail closed)', as
   try {
     const pool = makePool(fake, {
       identities: [REVIEWER_A],
-      listUserProcessesImpl: async () => ({ ok: false, pids: [], error: 'ps timed out' }),
+      listUserProcessesImpl: async () => ({ ok: false, processes: [], error: 'ps timed out' }),
     });
-    const lease = await pool.acquire({ reviewId: 'agy-unknown' });
-    assert.equal(lease.user, REVIEWER_A);
-    await pool.release(lease);
+    assert.equal(await pool.acquire({ reviewId: 'agy-unknown' }), null);
     const state = pool.snapshot()[0];
     assert.equal(state.ready, false);
-    assert.match(state.reasons[0], /cannot tell whether processes still run as agentos-reviewer: ps timed out/);
+    assert.match(state.reasons[0], /cannot tell whether review processes still run as agentos-reviewer: ps timed out/);
     // The real lister reports a bad name as unknown rather than as "none".
     assert.equal((await listUserProcesses({ user: 'bad user' })).ok, false);
     assert.deepEqual(
       await listUserProcesses({ user: REVIEWER_A, runImpl: async () => ({ code: 1, stdout: '', stderr: '' }) }),
-      { ok: true, pids: [] },
+      { ok: true, processes: [] },
     );
     assert.equal((await listUserProcesses({ user: REVIEWER_A, runImpl: async () => ({ code: 1, stdout: '', stderr: "ps: No ruser named 'x'" }) })).ok, false);
+    let psArgs = null;
     assert.deepEqual(
-      await listUserProcesses({ user: REVIEWER_A, runImpl: async () => ({ code: 0, stdout: '  101\n 202\n', stderr: '' }) }),
-      { ok: true, pids: [101, 202] },
+      await listUserProcesses({
+        user: REVIEWER_A,
+        runImpl: async (command, args) => {
+          psArgs = args;
+          return { code: 0, stdout: '  101   101 /usr/sbin/cfprefsd\n  202   190 /Applications/Anti Gravity.app/language_server_macos_arm\n', stderr: '' };
+        },
+      }),
+      { ok: true, processes: [
+        { pid: 101, pgid: 101, comm: '/usr/sbin/cfprefsd' },
+        { pid: 202, pgid: 190, comm: '/Applications/Anti Gravity.app/language_server_macos_arm' },
+      ] },
     );
+    assert.deepEqual(psArgs, ['-U', REVIEWER_A, '-o', 'pid=,pgid=,comm=']);
+  } finally {
+    fake.cleanup();
+  }
+});
+
+test('CCX-08: only processes a review started count as survivors, never the user\'s system agents', () => {
+  assert.deepEqual(agyReviewSurvivors(SYSTEM_AGENTS), [], 'launchd-started agents and LaunchAgent jobs lead their own groups');
+  const review = [
+    // agy and the pinned wrapper, in the group sudo leads (sudo runs as root/HQ owner, so it is not listed).
+    { pid: 300, pgid: 299, comm: '/usr/local/libexec/agent-os/agy-reviewer-agy' },
+    { pid: 301, pgid: 299, comm: 'agy' },
+    // A child of agy that is not named like it, in the same group.
+    { pid: 302, pgid: 299, comm: 'git' },
+    // agy's language server in a group of its own, by name (p_comm truncates it to 16 characters).
+    { pid: 400, pgid: 400, comm: 'language_server_' },
+    // Something the language server started, in its group.
+    { pid: 401, pgid: 400, comm: 'node' },
+  ];
+  assert.deepEqual(agyReviewSurvivors([...SYSTEM_AGENTS, ...review]).map((proc) => proc.pid), [300, 301, 302, 400, 401]);
+  // A process left in a group whose leader (sudo) is gone still counts.
+  assert.deepEqual(agyReviewSurvivors([...SYSTEM_AGENTS, { pid: 510, pgid: 500, comm: 'sleep' }]).map((proc) => proc.pid), [510]);
+});
+
+test('CCX-08: an identity with long-lived system agents is re-admitted after its review', async () => {
+  const fake = makeFakeInstall({ users: [REVIEWER_A] });
+  try {
+    let listed = 0;
+    const pool = makePool(fake, {
+      identities: [REVIEWER_A],
+      listUserProcessesImpl: async () => { listed += 1; return { ok: true, processes: SYSTEM_AGENTS }; },
+    });
+    assert.equal(await pool.refreshReadiness(), 1, 'the first pass checks for survivors and admits it');
+    const seen = [];
+    await runWithAgyReviewerIdentity({ reviewerModel: 'gemini', adapter: LEASING_ADAPTER, pool, log: quietLog() }, async (identity) => {
+      seen.push(identity.user);
+      return { ok: true };
+    });
+    assert.deepEqual(seen, [REVIEWER_A]);
+    assert.equal(listed, 2, 'checked on the first pass and again on release');
+    const state = pool.snapshot()[0];
+    assert.equal(state.draining, false);
+    assert.equal(state.ready, true);
+    const again = await pool.acquire({ reviewId: 'agy-again' });
+    assert.equal(again.user, REVIEWER_A, 'leasable again right away');
+    await pool.release(again);
+  } finally {
+    fake.cleanup();
+  }
+});
+
+test('CCX-08: the survivor check waits out the pool\'s own helper calls instead of counting them', async () => {
+  const fake = makeFakeInstall({ users: [REVIEWER_A] });
+  try {
+    let gate = null;
+    let listed = 0;
+    const pool = makePool(fake, {
+      identities: [REVIEWER_A],
+      runPinnedImpl: async (opts) => {
+        if (opts.args?.[0] === 'status' && gate) await gate.promise;
+        return fake.runPinned(opts);
+      },
+      listUserProcessesImpl: async () => { listed += 1; return { ok: true, processes: [] }; },
+    });
+    await pool.refreshReadiness();
+    const lease = await pool.acquire({ reviewId: 'agy-overlap' });
+    let open;
+    gate = { promise: new Promise((resolve) => { open = resolve; }) };
+    const pass = pool.refreshReadiness();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const listedBefore = listed;
+    await pool.release(lease);
+    assert.equal(listed, listedBefore, 'no process listing while a readiness helper runs as the user');
+    const state = pool.snapshot()[0];
+    assert.equal(state.draining, true);
+    assert.match(state.reasons.join('\n'), /survivor check deferred/);
+    gate = null;
+    open();
+    await pass;
+    assert.equal(await pool.refreshReadiness(), 1, 'the next pass checks and re-admits it');
+  } finally {
+    fake.cleanup();
+  }
+});
+
+// ── Leases across a watcher restart ─────────────────────────────────────────
+
+test('CCX-08: a fresh pool does not lease an identity whose review from a previous watcher still runs', async () => {
+  const fake = makeFakeInstall();
+  try {
+    const log = quietLog();
+    // The previous watcher leased A for this review; its cli-direct reviewer
+    // child survived the bounce and is still running.
+    const leakedDir = join(fake.home(REVIEWER_A), 'scratch', 'agy-before-bounce');
+    mkdirSync(leakedDir, { recursive: true });
+    const record = {
+      sessionUuid: 'session-before-bounce',
+      state: 'heartbeating',
+      pgid: 4242,
+      subjectContext: {
+        agyIdentity: { user: REVIEWER_A, reviewId: 'agy-before-bounce' },
+        agyIdentityLease: { user: REVIEWER_A, reviewId: 'agy-before-bounce' },
+      },
+    };
+    let active = [record];
+    let alive = true;
+    let settled = null;
+    const pool = makePool(fake, {
+      identities: [REVIEWER_A, REVIEWER_B],
+      log,
+      readActiveRunRecordsImpl: () => active,
+      readRunRecordImpl: (sessionUuid) => (sessionUuid === record.sessionUuid ? settled : null),
+      isPgidAliveImpl: (pgid) => pgid === 4242 && alive,
+    });
+    const first = await pool.acquire({ reviewId: 'agy-after-bounce' });
+    assert.equal(first.user, REVIEWER_B, 'A is held by the review from before the bounce');
+    assert.equal(await pool.acquire({ reviewId: 'agy-third' }), null, 'and is not handed to the next review either');
+    const heldA = pool.snapshot().find((entry) => entry.user === REVIEWER_A);
+    assert.equal(heldA.ready, false);
+    assert.deepEqual(heldA.adoptedReviews, ['agy-before-bounce']);
+    assert.match(heldA.reasons[0], /agy-before-bounce from a previous watcher still runs as agentos-reviewer/);
+    assert.equal(pool.readyCount(), 1, 'the Gemini cap does not count it');
+    // Its own run record does not hold B against itself.
+    active = [record, { sessionUuid: 'session-b', state: 'heartbeating', pgid: 77, subjectContext: { agyIdentityLease: { user: REVIEWER_B, reviewId: 'agy-after-bounce' } } }];
+    await pool.refreshReadiness();
+    assert.equal(pool.snapshot().find((entry) => entry.user === REVIEWER_B).ready, true);
+    await pool.release(first);
+
+    // The old review failed and its reviewer child exited: the scratch copy
+    // it left is removed, and the identity is probed back in.
+    alive = false;
+    settled = { ...record, state: 'failed' };
+    await pool.refreshReadiness();
+    await pool.settleProbes();
+    await pool.refreshReadiness();
+    await pool.settleProbes();
+    assert.equal(existsSync(leakedDir), false, 'the adopted review\'s scratch copy is cleaned up');
+    assert.match(readFileSync(join(fake.home(REVIEWER_A), 'probes.log'), 'utf8'), /probe/, 'a failed adopted review is re-probed');
+    const readmitted = pool.snapshot().find((entry) => entry.user === REVIEWER_A);
+    assert.equal(readmitted.ready, true);
+    assert.deepEqual(readmitted.adoptedReviews, []);
+    assert.match(log.lines.join('\n'), /agy-before-bounce from a previous watcher ended/);
+  } finally {
+    fake.cleanup();
+  }
+});
+
+test('CCX-08: a fresh pool does not lease an identity an agy still runs as, even without a run record', async () => {
+  const fake = makeFakeInstall({ users: [REVIEWER_A] });
+  try {
+    const pool = makePool(fake, {
+      identities: [REVIEWER_A],
+      listUserProcessesImpl: async () => ({ ok: true, processes: [...SYSTEM_AGENTS, { pid: 700, pgid: 699, comm: 'agy' }] }),
+    });
+    assert.equal(await pool.acquire({ reviewId: 'agy-fresh' }), null);
+    const state = pool.snapshot()[0];
+    assert.equal(state.draining, true);
+    assert.match(state.reasons[0], /1 review process\(es\) still running as agentos-reviewer \(700 agy\)/);
+  } finally {
+    fake.cleanup();
+  }
+});
+
+test('CCX-08: unreadable run records keep unleased identities out (fail closed)', async () => {
+  const fake = makeFakeInstall({ users: [REVIEWER_A] });
+  try {
+    const pool = makePool(fake, {
+      identities: [HQ_OWNER, REVIEWER_A],
+      readActiveRunRecordsImpl: () => { throw new Error('EIO'); },
+    });
+    assert.equal(await pool.refreshReadiness(), 0);
+    assert.match(pool.snapshot()[0].reasons[0], /cannot read the reviewer run records/);
+  } finally {
+    fake.cleanup();
+  }
+});
+
+// ── Alerts ──────────────────────────────────────────────────────────────────
+
+test('CCX-08: a long drain and a Gemini lane with no ready identity page the operator, rate-limited', async () => {
+  const fake = makeFakeInstall({ users: [REVIEWER_A] });
+  try {
+    let clock = 1_000_000;
+    const alerts = [];
+    const log = quietLog();
+    const pool = makePool(fake, {
+      identities: [REVIEWER_A],
+      log,
+      now: () => clock,
+      listUserProcessesImpl: async () => ({ ok: true, processes: [{ pid: 700, pgid: 700, comm: 'language_server_' }] }),
+      deliverAlertImpl: async (text, { event }) => { alerts.push({ text, event }); return { id: 'a' }; },
+    });
+    assert.equal(await pool.refreshReadiness(), 0);
+    pool.noteGeminiDemand({ readyIdentities: 0, candidates: 2 });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(alerts, [], 'nothing pages before the bound');
+
+    clock += 15 * 60_000;
+    await pool.refreshReadiness();
+    pool.noteGeminiDemand({ readyIdentities: 0, candidates: 2 });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(alerts.map((entry) => entry.event), ['reviewer.agy_identity_draining', 'reviewer.agy_identities_none_ready']);
+    assert.match(alerts[0].text, /agentos-reviewer has not been leasable for 15 min/);
+    assert.match(alerts[1].text, /no ready agy identity for 15 min with 2 Gemini review\(s\) waiting/);
+    assert.match(log.lines.join('\n'), /ALERT: /);
+
+    // Not again within the interval, and a lane with no waiting work never pages.
+    clock += 60_000;
+    await pool.refreshReadiness();
+    pool.noteGeminiDemand({ readyIdentities: 0, candidates: 2 });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(alerts.length, 2);
+    pool.noteGeminiDemand({ readyIdentities: 0, candidates: 0 });
+    clock += 30 * 60_000;
+    pool.noteGeminiDemand({ readyIdentities: 0, candidates: 1 });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(alerts.filter((entry) => entry.event === 'reviewer.agy_identities_none_ready').length, 1, 'the zero-ready clock restarts');
   } finally {
     fake.cleanup();
   }

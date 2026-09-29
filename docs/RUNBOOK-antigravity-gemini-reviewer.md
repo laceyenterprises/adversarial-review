@@ -211,9 +211,13 @@ An identity is isolated when:
 - its settings drift from the HQ-owner path's effective agy settings;
 - a CCX-07 keychain-bootstrap record marks it not ready;
 - a review it ran fails with any failure class other than `cancelled`,
-  `stale-review-head` or `daemon-bounce`. A failed review isolates the HQ
-  owner too;
-- a process still runs as that user after its review ended (see below).
+  `stale-review-head`, `daemon-bounce`, or the provider-wide classes
+  `cascade`, `provider-overloaded` and `quota-exhausted` (those hit every
+  identity at once). A failed review isolates the HQ owner too;
+- a review process still runs as that user after its review ended (see
+  below);
+- a review a previous watcher leased on it is still running (see "Watcher
+  restarts" below).
 
 Log lines:
 
@@ -249,14 +253,27 @@ timeout. Two things keep this from hanging a review or sharing a HOME:
   exits. If sudo itself outlives a timeout kill, the capture settles 10s after
   the SIGKILL was due anyway and leaves the process running.
 - When a lease is released, the watcher lists the processes whose real user is
-  that identity (`/bin/ps -U <user>`, no privilege needed). If any are left,
-  for example a leftover language server or an agy that outlived a timeout, the
-  identity is isolated as draining and is not leased again until none are
-  left. Each readiness pass checks again. An unreadable answer counts as
-  "still running":
+  that identity (`/bin/ps -U <user> -o pid=,pgid=,comm=`, no privilege
+  needed) and keeps only the ones a review started:
+  - agy, the pinned `agy-reviewer-agy` wrapper, or agy's language server
+    (`antigravity*`, `language_server*`), by process name;
+  - anything in the process group of one of those;
+  - anything in a process group whose leader is not one of that user's own
+    processes, which is every group a pinned command starts through sudo.
+
+  The per-user agents launchd keeps running for a user that has used
+  CoreFoundation or Security.framework (`cfprefsd`, `distnoted`,
+  `trustd --agent`, `secd`) and any LaunchAgent job lead their own process
+  groups, so they never count. If a review process is left, for example a
+  language server or an agy that outlived a timeout, the identity is isolated
+  as draining. It is not leased again until none are left, and each readiness
+  pass checks again. The watcher's own helper calls as that user (`status`,
+  `settings`, `probe`, `cleanup`) would look like review processes, so while
+  one is running the check is deferred to the next pass. An unreadable answer
+  counts as "still running":
 
 ```text
-[agy-identities] identity=<user> isolated: N process(es) still running as <user> (pid ...); not leased until they exit
+[agy-identities] identity=<user> isolated: N review process(es) still running as <user> (<pid> <name>, ...); not leased until they exit
 ```
 
 The CCX-07 pinned commands have no verb that kills a process as the identity,
@@ -266,6 +283,37 @@ until an administrator ends it, for example with
 `sudo pkill -KILL -u <user>`. The durable fix belongs in CCX-07's pinned agy
 wrapper: run agy in its own process group and SIGKILL that group when agy
 exits or the wrapper is signalled.
+
+**Watcher restarts.** `cli-direct` reviewer children survive a watcher bounce.
+Every lease is therefore also written into the reviewer run record
+(`data/reviewer-runs/<session>.json`, `subjectContext.agyIdentityLease`,
+written before the reviewer child is spawned). Every readiness pass reads the
+active run records. It keeps an identity out while a review that this watcher
+does not hold in memory still runs on it: the record is `launching` with no
+process group yet, or its process group is alive. For example, a review
+leased by the watcher before a restart:
+
+```text
+[agy-identities] identity=<user> review <reviewId> (reviewer session <uuid>) from a previous watcher still runs; not leased until it ends
+```
+
+Once that review ends, the pass does what the lease release would have done.
+It removes the review's scratch copy and re-probes the identity if the run
+record says `failed`. For an added identity, it also runs the survivor check
+above. An added identity also starts every watcher's life as draining, so its
+first readiness pass runs the survivor check before it can be leased. If the
+run records cannot be read, every identity not leased in memory stays out.
+
+**Alerts.** Two conditions page the operator through the alert bus. Each pages
+again at most every 15 minutes while it lasts:
+
+- `reviewer.agy_identity_draining`: an identity has been draining (survivors,
+  or a review from a previous watcher) for 15 minutes.
+- `reviewer.agy_identities_none_ready`: a drain has had Gemini work on a
+  leasing runtime and zero ready identities for 15 minutes. The dispatch cap
+  is then 0, so no review reaches the lease and nothing else would fail.
+
+Both also log `[agy-identities] ALERT: ...`.
 
 **Startup sweep.** At watcher startup, each added identity's workspace helper
 runs `sweep`, which removes leaked scratch copies older than the helper's age

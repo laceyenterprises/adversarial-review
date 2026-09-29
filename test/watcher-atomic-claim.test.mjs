@@ -783,6 +783,33 @@ test('classifier <-> SQL claim parity for reviewer-command-failed (no drift)', (
   }
 });
 
+// CCX-08: the same drift guard for agy-identity-unavailable. JS classifies a
+// tagged failed row as recoverable, so the claim must match it too.
+test('classifier <-> SQL claim parity for agy-identity-unavailable (no drift)', () => {
+  const cases = [
+    '[agy-identity-unavailable] no ready agy reviewer identity became free to lease\nSystem: infra auto-recovery cap exhausted (3/3).',
+    '[unknown] Command failed with code 1',
+    '[cascade] litellm/upstream cascade',
+  ];
+  for (const failureMessage of cases) {
+    const jsIsUnavailable =
+      infraRecoverableFailureClass({ failure_message: failureMessage }) === 'agy-identity-unavailable';
+    const db = setupDb();
+    seedReviewRow(db, {
+      reviewStatus: 'failed',
+      failedAt: '2026-05-02T18:05:00.000Z',
+      failureMessage,
+    });
+    const claim = runInfraRecoveryClaim(db, '2026-05-02T18:10:00.000Z', 'agy-identity-unavailable');
+    assert.equal(
+      claim.changes === 1,
+      jsIsUnavailable,
+      `classifier/SQL disagree for ${JSON.stringify(failureMessage)}: JS=${jsIsUnavailable}`,
+    );
+    db.close();
+  }
+});
+
 // NODEPIN-01: the same drift guard for infra-runtime-missing-library. The
 // watcher claims with whatever class the JS classifier derived from the stored
 // row, so every row JS calls a dyld crash (tagged, or a legacy `[unknown]` row

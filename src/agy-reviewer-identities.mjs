@@ -19,17 +19,29 @@
 // cannot reap agy or agy's language server there the way it does on the
 // HQ-owner path. Two things keep that safe: the reviewer child captures agy's
 // output through files, not pipes, so a leftover descendant cannot hold the
-// capture open; and a lease is released only after the identity has no
-// process left running, so a surviving agy never shares a HOME with the next
-// review.
+// capture open; and an identity is leased again only after no review process
+// of its own is left running (agyReviewSurvivors: agy, its language server
+// and whatever shares their process group, but not the per-user system agents
+// launchd starts for that user), so a surviving agy never shares a HOME with
+// the next review.
+//
+// Leases live in watcher memory, and each one is also written into the
+// reviewer run record (`subjectContext.agyIdentityLease`). cli-direct reviewer
+// children outlive a watcher bounce, so every readiness pass re-reads the
+// active run records and keeps an identity out while a review from a previous
+// watcher still runs on it.
 
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
+import { readActiveReviewerRunRecords, readReviewerRunRecord } from './adapters/reviewer-runtime/run-state.mjs';
 import { checkAgyReviewerAuth } from './agy-reviewer-auth.mjs';
+import { deliverAlert } from './alert-delivery.mjs';
+import { isPgidAlive } from './process-group-identity.mjs';
 import { resolveGeminiReviewerIdentities, resolveGeminiRuntime } from './role-config.mjs';
 import { scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 
@@ -88,6 +100,17 @@ const STATE_SUBDIR = ['state', 'agy-reviewer-identities'];
 // owner's 0700 snapshot or per-user TMPDIR. agy runs as that user from an
 // empty world-traversable dir here and reaches its scratch copy via --add-dir.
 const AGY_IDENTITY_CWD_PARENT = '/private/tmp';
+// Where the cli-direct reviewer runtime keeps its run records (the watcher's
+// ROOT): this module lives in <root>/src.
+const DEFAULT_RUN_STATE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+// An identity draining this long, or a Gemini lane with no ready identity for
+// this long, pages the operator (then at most once per this interval).
+const IDENTITY_ALERT_AFTER_MS = 15 * 60_000;
+// Process names a review as an identity starts: the pinned agy wrapper, agy,
+// and agy's language server. Matched on the basename, and tolerant of macOS's
+// 16-character p_comm truncation. The helper verbs (keychain, workspace) are
+// deliberately absent.
+const AGY_REVIEW_PROCESS_RE = /^(?:agy|agy-reviewer-agy|antigravity.*|language[_-]server.*)$/i;
 
 class AgyReviewerIdentityError extends Error {
   constructor(message, { reason = 'agy-identity-failed', detail = '' } = {}) {
@@ -272,23 +295,53 @@ function describeFailure(label, result) {
   return `${label} exited ${result.code ?? result.signal ?? 'abnormally'}${detail ? `: ${detail.slice(0, 200)}` : ''}`;
 }
 
-// Processes whose real user is `user`. `ps` needs no privilege for this, and
-// sudo gives the command it runs that real user, so this sees agy and anything
-// agy left behind. ps exits 1 with no output when nothing matches. Never
-// rejects; `ok: false` means the answer is unknown.
+// Processes whose real user is `user`, as `{ pid, pgid, comm }`. `ps` needs no
+// privilege for this, and sudo gives the command it runs that real user, so
+// this sees agy and anything agy left behind, and also every other process
+// that user has (see agyReviewSurvivors). ps exits 1 with no output when
+// nothing matches. Never rejects; `ok: false` means the answer is unknown.
 async function listUserProcesses({ user, runImpl = runBoundedProcess, ps = AGY_REVIEWER_PS } = {}) {
   if (!AGY_REVIEWER_USER_RE.test(String(user || ''))) {
-    return { ok: false, pids: [], error: `not a local user name: ${JSON.stringify(user)}` };
+    return { ok: false, processes: [], error: `not a local user name: ${JSON.stringify(user)}` };
   }
-  const result = await runImpl(ps, ['-U', user, '-o', 'pid='], { timeoutMs: HELPER_TIMEOUT_MS });
+  const result = await runImpl(ps, ['-U', user, '-o', 'pid=,pgid=,comm='], { timeoutMs: HELPER_TIMEOUT_MS });
   const stderr = String(result.stderr || '').trim();
   if (result.timedOut || result.error || !(result.code === 0 || (result.code === 1 && !stderr))) {
-    return { ok: false, pids: [], error: describeFailure('ps', result) };
+    return { ok: false, processes: [], error: describeFailure('ps', result) };
   }
-  const pids = String(result.stdout || '').split('\n')
-    .map((line) => Number.parseInt(line.trim(), 10))
-    .filter((pid) => Number.isInteger(pid) && pid > 0);
-  return { ok: true, pids };
+  const processes = [];
+  for (const line of String(result.stdout || '').split('\n')) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(.*?)\s*$/u.exec(line);
+    if (!match) continue;
+    const pid = Number.parseInt(match[1], 10);
+    const pgid = Number.parseInt(match[2], 10);
+    if (pid > 0) processes.push({ pid, pgid, comm: match[3] });
+  }
+  return { ok: true, processes };
+}
+
+function isAgyReviewProcess(proc) {
+  return AGY_REVIEW_PROCESS_RE.test(basename(String(proc?.comm || '')));
+}
+
+// The processes in `processes` (one identity's, from listUserProcesses) that a
+// review left behind:
+//   - agy, the pinned agy wrapper or agy's language server, by name;
+//   - anything in the process group of one of those;
+//   - anything in a process group whose leader is not one of this user's own
+//     processes: a group started through sudo (whose leader runs as the HQ
+//     owner/root) or one whose leader is gone. Everything a pinned command
+//     runs lives in such a group unless it moves itself out.
+// Not survivors: the per-user agents launchd starts for the user (cfprefsd,
+// distnoted, trustd, secd, ...) and LaunchAgent jobs, which lead their own
+// groups, plus anything those start. The pool's own helper calls also match
+// the last rule, so the pool never runs this check while one is in flight.
+function agyReviewSurvivors(processes = []) {
+  const own = new Set(processes.map((proc) => proc.pid));
+  const agyGroups = new Set(processes.filter(isAgyReviewProcess).map((proc) => proc.pgid));
+  return processes.filter((proc) => isAgyReviewProcess(proc)
+    || agyGroups.has(proc.pgid)
+    || (proc.pgid !== proc.pid && !own.has(proc.pgid)));
 }
 
 // ── Workspace (reviewer child and watcher) ──────────────────────────────────
@@ -461,6 +514,12 @@ function createAgyReviewerIdentityPool({
   readBootstrapRecordImpl = (user) => readBootstrapRecord(user, { env }),
   referenceSettings = () => referenceAgySettingsFromEnv(env),
   listUserProcessesImpl = listUserProcesses,
+  runStateRootDir = DEFAULT_RUN_STATE_ROOT,
+  readActiveRunRecordsImpl = () => readActiveReviewerRunRecords(runStateRootDir),
+  readRunRecordImpl = (sessionUuid) => readReviewerRunRecord(runStateRootDir, sessionUuid),
+  isPgidAliveImpl = isPgidAlive,
+  deliverAlertImpl = deliverAlert,
+  alertAfterMs = IDENTITY_ALERT_AFTER_MS,
   sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   leaseWaitMs = LEASE_WAIT_MS,
   leasePollMs = LEASE_POLL_MS,
@@ -468,8 +527,32 @@ function createAgyReviewerIdentityPool({
 } = {}) {
   const states = new Map();
   const probes = new Map();
+  // Pinned-command calls the pool itself has running as a user (readiness,
+  // probe, cleanup). They look like review processes to agyReviewSurvivors.
+  const helpersInFlight = new Map();
   let lastReadinessAt = null;
   let readinessInFlight = null;
+  let noReadySince = null;
+  let noReadyAlertedAt = null;
+
+  function runHelper(opts) {
+    const user = opts.user;
+    helpersInFlight.set(user, (helpersInFlight.get(user) || 0) + 1);
+    return Promise.resolve()
+      .then(() => runPinnedImpl(opts))
+      .finally(() => {
+        const left = (helpersInFlight.get(user) || 1) - 1;
+        if (left > 0) helpersInFlight.set(user, left);
+        else helpersInFlight.delete(user);
+      });
+  }
+
+  function alert(message, { event, payload }) {
+    log.error?.(`[agy-identities] ALERT: ${message}`);
+    Promise.resolve()
+      .then(() => deliverAlertImpl(message, { event, payload }))
+      .catch((err) => log.warn?.(`[agy-identities] failed to queue alert ${event}: ${err?.message || err}`));
+  }
 
   function currentPlan() {
     let runtime;
@@ -490,14 +573,19 @@ function createAgyReviewerIdentityPool({
     let state = states.get(identity.user);
     if (!state) {
       // Fail closed: an added identity is not leased before its first
-      // readiness pass. The HQ owner starts ready, as it always has.
+      // readiness pass, and that pass starts with a survivor check, so a
+      // review process left from before a watcher restart keeps it out. The
+      // HQ owner starts ready, as it always has.
       state = {
         user: identity.user,
         hqOwner: identity.hqOwner,
         ready: identity.hqOwner,
         reasons: identity.hqOwner ? [] : ['no readiness pass yet'],
         needsProbe: false,
-        draining: false,
+        draining: !identity.hqOwner,
+        drainingSince: identity.hqOwner ? null : now(),
+        drainAlertedAt: null,
+        adopted: [],
         lease: null,
         bootstrapCheckedAt: null,
       };
@@ -516,6 +604,30 @@ function createAgyReviewerIdentityPool({
       log.log?.(`[agy-identities] identity=${state.user} ${state.everReady ? 're-admitted' : 'ready'}`);
     }
     if (ready) state.everReady = true;
+  }
+
+  function setDraining(state, draining) {
+    if (draining && !state.draining) state.drainingSince = now();
+    if (!draining) {
+      state.drainingSince = null;
+      state.drainAlertedAt = null;
+    }
+    state.draining = draining;
+  }
+
+  // A drain that has not cleared within the alert bound pages the operator:
+  // a process that never exits keeps the identity out until someone ends it.
+  function maybeAlertDraining(state) {
+    if (!state.draining || state.drainingSince === null) return;
+    const at = now();
+    if (at - state.drainingSince < alertAfterMs) return;
+    if (state.drainAlertedAt !== null && at - state.drainAlertedAt < alertAfterMs) return;
+    state.drainAlertedAt = at;
+    const minutes = Math.round((at - state.drainingSince) / 60_000);
+    alert(`agy reviewer identity ${state.user} has not been leasable for ${minutes} min: ${state.reasons.join('; ') || 'draining'}`, {
+      event: 'reviewer.agy_identity_draining',
+      payload: { user: state.user, minutes, reasons: [...state.reasons] },
+    });
   }
 
   function isolate(state, reasons, { needsProbe = true } = {}) {
@@ -537,7 +649,7 @@ function createAgyReviewerIdentityPool({
           ok = Boolean(result?.ok);
           if (!ok) reason = `agy auth probe failed (${result?.reason || 'unknown'})`;
         } else {
-          const result = await runPinnedImpl({ user: state.user, command: AGY_REVIEWER_KEYCHAIN_HELPER, args: ['probe'], timeoutMs: PROBE_TIMEOUT_MS });
+          const result = await runHelper({ user: state.user, command: AGY_REVIEWER_KEYCHAIN_HELPER, args: ['probe'], timeoutMs: PROBE_TIMEOUT_MS });
           ok = result.code === 0 && parseHelperKeyValues(result.stdout)['probe.ok'] === 'yes';
           if (!ok) reason = describeFailure('agy models probe', result);
         }
@@ -546,7 +658,7 @@ function createAgyReviewerIdentityPool({
       }
       if (ok) {
         state.needsProbe = false;
-        if (!state.checkFailed && !state.draining) transition(state, true, []);
+        if (!state.checkFailed && !state.draining && state.adopted.length === 0) transition(state, true, []);
       } else {
         transition(state, false, [reason]);
       }
@@ -557,8 +669,8 @@ function createAgyReviewerIdentityPool({
   async function checkAddedIdentity(state) {
     const reasons = [];
     const [status, settings] = await Promise.all([
-      runPinnedImpl({ user: state.user, command: AGY_REVIEWER_KEYCHAIN_HELPER, args: ['status'] }),
-      runPinnedImpl({ user: state.user, command: AGY_REVIEWER_KEYCHAIN_HELPER, args: ['settings'] }),
+      runHelper({ user: state.user, command: AGY_REVIEWER_KEYCHAIN_HELPER, args: ['status'] }),
+      runHelper({ user: state.user, command: AGY_REVIEWER_KEYCHAIN_HELPER, args: ['settings'] }),
     ]);
     if (status.code !== 0) {
       reasons.push(describeFailure('keychain status', status));
@@ -588,23 +700,101 @@ function createAgyReviewerIdentityPool({
   // Survivors of a finished review as an added identity: agy killed on a
   // timeout it could not be reached for, or its language server. The HQ owner
   // cannot signal them, so the identity stays unleased until they are gone.
-  // An unknown answer counts as busy (fail closed).
+  // Only review processes count (agyReviewSurvivors); the user's system agents
+  // do not. An unknown answer counts as busy (fail closed). While one of the
+  // pool's own helpers runs as the user the check is deferred to the next
+  // readiness pass, because that helper would read as a survivor.
   async function checkDrained(state) {
+    if (helpersInFlight.has(state.user)) {
+      setDraining(state, true);
+      return { drained: false, reason: `a readiness helper is running as ${state.user}; survivor check deferred to the next pass` };
+    }
     let result;
     try {
       result = await listUserProcessesImpl({ user: state.user });
     } catch (err) {
-      result = { ok: false, pids: [], error: err?.message || String(err) };
+      result = { ok: false, processes: [], error: err?.message || String(err) };
     }
-    if (result?.ok && result.pids.length === 0) {
-      state.draining = false;
+    const survivors = result?.ok ? agyReviewSurvivors(result.processes || []) : [];
+    if (result?.ok && survivors.length === 0) {
+      setDraining(state, false);
       return { drained: true, reason: null };
     }
     const reason = result?.ok
-      ? `${result.pids.length} process(es) still running as ${state.user} (pid ${result.pids.slice(0, 5).join(', ')}); not leased until they exit`
-      : `cannot tell whether processes still run as ${state.user}: ${result?.error || 'unknown'}`;
-    state.draining = true;
+      ? `${survivors.length} review process(es) still running as ${state.user} (${survivors.slice(0, 5).map((proc) => `${proc.pid} ${basename(String(proc.comm || '?'))}`).join(', ')}); not leased until they exit`
+      : `cannot tell whether review processes still run as ${state.user}: ${result?.error || 'unknown'}`;
+    setDraining(state, true);
     return { drained: false, reason };
+  }
+
+  // Leases held by reviews this watcher does not hold in memory: the reviewer
+  // run records (cli-direct) of reviews still running that carry
+  // `subjectContext.agyIdentityLease`. After a watcher bounce those are the
+  // reviews the previous watcher leased. A record whose process group is gone
+  // no longer holds its identity; a `launching` record with no process group
+  // yet still does (the fork may have happened). Null when the records cannot
+  // be read, which callers treat as "every unleased identity may be busy".
+  function leasesFromRunRecords() {
+    let records;
+    try {
+      records = readActiveRunRecordsImpl() || [];
+    } catch (err) {
+      log.warn?.(`[agy-identities] cannot read reviewer run records: ${err?.message || err}`);
+      return null;
+    }
+    const byUser = new Map();
+    for (const record of records) {
+      const held = record?.subjectContext?.agyIdentityLease;
+      if (!held?.user || !held.reviewId) continue;
+      if (states.get(held.user)?.lease?.reviewId === held.reviewId) continue;
+      let running;
+      try {
+        running = Number.isInteger(record.pgid) ? isPgidAliveImpl(record.pgid) : true;
+      } catch {
+        running = true;
+      }
+      if (!running) continue;
+      if (!byUser.has(held.user)) byUser.set(held.user, []);
+      byUser.get(held.user).push({ reviewId: String(held.reviewId), sessionUuid: String(record.sessionUuid || '') });
+    }
+    return byUser;
+  }
+
+  // Keep an identity out while a review a previous watcher leased on it still
+  // runs, and once it has ended do what release() would have: remove its
+  // scratch copy, re-probe the identity if the review failed, and check for
+  // survivors. Returns true when the identity must stay out this pass.
+  async function applyAdoptedLeases(state, running) {
+    if (running === null) {
+      if (!state.lease) transition(state, false, ['cannot read the reviewer run records to tell whether a review from a previous watcher still runs here']);
+      return !state.lease;
+    }
+    if (running.length) {
+      const known = new Set(state.adopted.map((entry) => entry.reviewId));
+      for (const entry of running) {
+        if (!known.has(entry.reviewId)) {
+          log.warn?.(`[agy-identities] identity=${state.user} review ${entry.reviewId} (reviewer session ${entry.sessionUuid || 'unknown'}) from a previous watcher still runs; not leased until it ends`);
+        }
+      }
+      state.adopted = running;
+      if (!state.hqOwner) setDraining(state, true);
+      transition(state, false, running.map((entry) => `review ${entry.reviewId} from a previous watcher still runs as ${state.user}`));
+      return true;
+    }
+    if (state.adopted.length === 0) return false;
+    const ended = state.adopted;
+    state.adopted = [];
+    for (const entry of ended) {
+      let record = null;
+      try { record = entry.sessionUuid ? readRunRecordImpl(entry.sessionUuid) : null; } catch { record = null; }
+      if (record?.state === 'failed') state.needsProbe = true;
+      if (!state.hqOwner) {
+        await cleanupAgyReviewWorkspace({ user: state.user, reviewId: entry.reviewId, runPinnedImpl: runHelper, log });
+      }
+    }
+    if (!state.hqOwner) setDraining(state, true);
+    log.log?.(`[agy-identities] identity=${state.user} review(s) ${ended.map((entry) => entry.reviewId).join(', ')} from a previous watcher ended`);
+    return false;
   }
 
   // One readiness pass. Returns the ready-identity count in multi-identity
@@ -628,36 +818,41 @@ function createAgyReviewerIdentityPool({
         log.error?.(`[agy-identities] identity=${refused.user} ${refused.reason}`);
       }
     }
+    const runningLeases = leasesFromRunRecords();
     await Promise.all(plan.identities.map(async (identity) => {
       const state = stateFor(identity);
-      if (!identity.hqOwner) {
-        // A probe running as this user would read as a survivor; wait for it.
-        if (state.draining && !state.lease && !probes.has(identity.user)) {
-          const { drained, reason } = await checkDrained(state);
-          if (!drained) {
-            transition(state, false, [reason]);
+      try {
+        if (await applyAdoptedLeases(state, runningLeases === null ? null : (runningLeases.get(identity.user) || []))) return;
+        if (!identity.hqOwner) {
+          if (state.draining && !state.lease) {
+            const { drained, reason } = await checkDrained(state);
+            if (!drained) {
+              transition(state, false, [reason]);
+              return;
+            }
+          }
+          if (state.draining) return;
+          applyBootstrapRecord(state);
+          let reasons;
+          try {
+            reasons = await checkAddedIdentity(state);
+          } catch (err) {
+            reasons = [`readiness check threw: ${err?.message || err}`];
+          }
+          state.checkFailed = reasons.length > 0;
+          if (state.checkFailed) {
+            transition(state, false, reasons);
             return;
           }
         }
-        if (state.draining) return;
-        applyBootstrapRecord(state);
-        let reasons;
-        try {
-          reasons = await checkAddedIdentity(state);
-        } catch (err) {
-          reasons = [`readiness check threw: ${err?.message || err}`];
-        }
-        state.checkFailed = reasons.length > 0;
-        if (state.checkFailed) {
-          transition(state, false, reasons);
+        if (state.needsProbe) {
+          startProbe(state);
           return;
         }
+        transition(state, true, []);
+      } finally {
+        maybeAlertDraining(state);
       }
-      if (state.needsProbe) {
-        startProbe(state);
-        return;
-      }
-      transition(state, true, []);
     }));
     lastReadinessAt = now();
     return readyCount(plan);
@@ -676,7 +871,7 @@ function createAgyReviewerIdentityPool({
   function tryAcquire(plan, { reviewId }) {
     for (const identity of plan.identities) {
       const state = stateFor(identity);
-      if (!state.ready || state.lease) continue;
+      if (!state.ready || state.lease || state.adopted.length) continue;
       const lease = { user: identity.user, hqOwner: identity.hqOwner, reviewId };
       state.lease = lease;
       return lease;
@@ -720,7 +915,7 @@ function createAgyReviewerIdentityPool({
     let survivors = null;
     try {
       if (!lease.hqOwner) {
-        await cleanupAgyReviewWorkspace({ user: lease.user, reviewId: lease.reviewId, runPinnedImpl, log });
+        await cleanupAgyReviewWorkspace({ user: lease.user, reviewId: lease.reviewId, runPinnedImpl: runHelper, log });
         if (state) survivors = (await checkDrained(state)).reason;
       }
     } finally {
@@ -735,12 +930,36 @@ function createAgyReviewerIdentityPool({
     }
   }
 
+  // The drain's view of the Gemini lane: a lane with Gemini work waiting and
+  // no ready identity for the alert bound pages the operator. Without this the
+  // dispatch cap is 0, no review reaches acquire(), and nothing fails.
+  function noteGeminiDemand({ readyIdentities, candidates = 0 } = {}) {
+    if (readyIdentities === null || readyIdentities === undefined) return;
+    const at = now();
+    if (readyIdentities > 0 || candidates <= 0) {
+      noReadySince = null;
+      noReadyAlertedAt = null;
+      return;
+    }
+    if (noReadySince === null) noReadySince = at;
+    if (at - noReadySince < alertAfterMs) return;
+    if (noReadyAlertedAt !== null && at - noReadyAlertedAt < alertAfterMs) return;
+    noReadyAlertedAt = at;
+    const minutes = Math.round((at - noReadySince) / 60_000);
+    const unready = [...states.values()].filter((state) => !state.ready)
+      .map((state) => `${state.user}: ${state.reasons.join('; ') || 'not ready'}`);
+    alert(`the Gemini reviewer lane has had no ready agy identity for ${minutes} min with ${candidates} Gemini review(s) waiting (${unready.join(' | ') || 'no identity state yet'})`, {
+      event: 'reviewer.agy_identities_none_ready',
+      payload: { minutes, candidates, unready },
+    });
+  }
+
   async function sweepAll() {
     const plan = currentPlan();
     if (!plan.multi) return [];
     return Promise.all(plan.identities
       .filter((identity) => !identity.hqOwner)
-      .map((identity) => sweepAgyReviewWorkspaces({ user: identity.user, runPinnedImpl, log })
+      .map((identity) => sweepAgyReviewWorkspaces({ user: identity.user, runPinnedImpl: runHelper, log })
         .catch((err) => ({ user: identity.user, ok: false, swept: 0, error: err?.message || String(err) }))));
   }
 
@@ -751,15 +970,32 @@ function createAgyReviewerIdentityPool({
     acquire,
     release,
     sweepAll,
+    noteGeminiDemand,
     settleProbes: () => Promise.all([...probes.values()]),
-    snapshot: () => [...states.values()].map(({ user, hqOwner: owner, ready, reasons, needsProbe, draining, lease }) => ({
-      user, hqOwner: owner, ready, reasons: [...reasons], needsProbe, draining, leased: Boolean(lease),
+    snapshot: () => [...states.values()].map(({ user, hqOwner: owner, ready, reasons, needsProbe, draining, adopted, lease }) => ({
+      user,
+      hqOwner: owner,
+      ready,
+      reasons: [...reasons],
+      needsProbe,
+      draining,
+      adoptedReviews: adopted.map((entry) => entry.reviewId),
+      leased: Boolean(lease),
     })),
   };
 }
 
 // Failure classes that say nothing about the identity that ran the review.
-const NON_ISOLATING_FAILURE_CLASSES = new Set(['cancelled', 'stale-review-head', 'daemon-bounce']);
+// Provider-wide and quota failures hit every identity at once; isolating on
+// them would empty the lane on a provider blip.
+const NON_ISOLATING_FAILURE_CLASSES = new Set([
+  'cancelled',
+  'stale-review-head',
+  'daemon-bounce',
+  'cascade',
+  'provider-overloaded',
+  'quota-exhausted',
+]);
 
 // Only a reviewer runtime that hands `subjectContext.agyIdentity` to the
 // reviewer child (cli-direct) can run a review as an added identity. The
@@ -788,8 +1024,11 @@ function warnIdentitiesInert(adapter, log) {
 // single-identity case and runtimes that cannot carry an identity call
 // `spawnFn(null)` untouched (the pre-CCX-08 path). Otherwise `spawnFn`
 // receives `{ user, reviewId }` for an added identity, or null for the HQ
-// owner, and the lease is released (scratch cleanup, failure isolation)
-// whether the review succeeds, fails, times out or throws.
+// owner, plus the lease itself as `{ user, reviewId }` for every identity; the
+// caller records that in the reviewer run record (subjectContext
+// `agyIdentityLease`) so a restarted watcher sees the lease. The lease is
+// released (scratch cleanup, failure isolation) whether the review succeeds,
+// fails, times out or throws.
 async function runWithAgyReviewerIdentity({
   reviewerModel,
   adapter = null,
@@ -816,7 +1055,10 @@ async function runWithAgyReviewerIdentity({
   let failed = true;
   let reason = 'reviewer threw';
   try {
-    const result = await spawnFn(lease.hqOwner ? null : { user: lease.user, reviewId: lease.reviewId });
+    const result = await spawnFn(
+      lease.hqOwner ? null : { user: lease.user, reviewId: lease.reviewId },
+      { user: lease.user, reviewId: lease.reviewId },
+    );
     failed = !result?.ok && !NON_ISOLATING_FAILURE_CLASSES.has(result?.failureClass);
     reason = result?.failureClass || '';
     return result;
@@ -847,6 +1089,7 @@ export {
   AgyReviewerIdentityError,
   PINNED_COMMAND_ENV,
   adapterCarriesAgyReviewerIdentity,
+  agyReviewSurvivors,
   agySettingsDrift,
   buildPinnedCommand,
   canonicalAgySettings,

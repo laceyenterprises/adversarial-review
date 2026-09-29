@@ -396,7 +396,9 @@ function normalizeOperationalBlockers(reply, { expectedJob = null } = {}) {
 //      `  - **File:** value` / `  - **Lines:** value` /
 //      `  - **Problem:** value` sub-bullets. The parser accepts
 //      harmless trailing text after the closing bold span so minor
-//      markdown drift does not silently drop titles.
+//      markdown drift does not silently drop titles. A field label with
+//      no text after it (`  - **Problem:**`) takes the more-indented
+//      bullets nested under it as its value.
 //   2. card-style: `### <Title>` heading per finding, with fields as
 //      `**File:** value` / `**Lines:** value` / `**Problem:** value`
 //      bold-labeled paragraphs (stored-review back-compat).
@@ -457,12 +459,13 @@ function parseReviewFindingsSection(reviewBody, sectionPattern) {
   const lines = section.split(/\n/);
   if (isNoneFindingsSentinelOnly(lines)) return [];
 
-  const parseBoldLabel = (raw) => {
+  const matchBoldLabel = (raw) => {
     // Allows an optional `-[ \t]+` bullet prefix so nested-bullet card
     // sub-bullets like `  - **File:** path` match as well as flat
-    // `**File:** path` paragraphs.
+    // `**File:** path` paragraphs. The value may be empty here; see
+    // `parseBoldLabel` for where an empty value gets its text.
     const match = raw.match(
-      /^[ \t]*(?:-[ \t]+)?\*\*(File|Lines|Problem|Why it matters|Recommended fix)(?::\*\*|\*\*[ \t]*:)[ \t]*(.+?)[ \t]*$/i
+      /^[ \t]*(?:-[ \t]+)?\*\*(File|Lines|Problem|Why it matters|Recommended fix)(?::\*\*|\*\*[ \t]*:)[ \t]*(.*?)[ \t]*$/i
     );
     if (!match) return null;
     const key = match[1].toLocaleLowerCase('en-US');
@@ -474,6 +477,31 @@ function parseReviewFindingsSection(reviewBody, sectionPattern) {
       'recommended fix': 'recommendedFix',
     };
     return { field: fields[key], value: match[2].trim() };
+  };
+
+  const indentWidth = (raw) => (raw.match(/^[ \t]*/)?.[0] ?? '').replace(/\t/g, '    ').length;
+
+  // PARSEBOLD-01 (agent-os#7334): a label with nothing after it on its own
+  // line (`  - **Problem:**`) takes the lines nested more deeply under it,
+  // joined, as its value. It stops at the first line indented no deeper than
+  // the label, at another field label, and at a finding boundary. A label
+  // with no nested text stays empty, so the card still fails
+  // `cardHasRequiredFields`. Returns `end`, the last line the value used.
+  const parseBoldLabel = (startIndex) => {
+    const label = matchBoldLabel(lines[startIndex]);
+    if (!label) return null;
+    if (label.value) return { ...label, end: startIndex };
+    const labelIndent = indentWidth(lines[startIndex]);
+    const parts = [];
+    let end = startIndex;
+    for (let index = startIndex + 1; index < lines.length; index += 1) {
+      const raw = lines[index];
+      if (!raw.trim()) continue;
+      if (indentWidth(raw) <= labelIndent || matchBoldLabel(raw) || isFindingBoundary(raw)) break;
+      parts.push(raw.trim().replace(/^(?:[-*+]|\d+[.)])[ \t]+/, ''));
+      end = index;
+    }
+    return parts.length > 0 ? { field: label.field, value: parts.join(' '), end } : null;
   };
 
   const parseBulletBoldTitle = (raw) => {
@@ -499,7 +527,7 @@ function parseReviewFindingsSection(reviewBody, sectionPattern) {
     for (let index = startIndex + 1; index < lines.length; index += 1) {
       const raw = lines[index];
       if (isFindingBoundary(raw)) break;
-      const parsed = parseBoldLabel(raw);
+      const parsed = parseBoldLabel(index);
       if (parsed) seen.add(parsed.field);
     }
     return seen.has('file') && seen.has('lines') && seen.has('problem');
@@ -535,10 +563,12 @@ function parseReviewFindingsSection(reviewBody, sectionPattern) {
     // through, mirroring the legacy first-wins behavior for File /
     // Lines / Problem continuation lines. The bold marker may render
     // as `**File:**` (canonical, colon inside the bold span) or
-    // `**File**:` (colon outside); both are accepted.
-    const boldLabel = parseBoldLabel(raw);
+    // `**File**:` (colon outside); both are accepted. Nested lines a label
+    // took as its value are skipped, so they cannot match a legacy shape.
+    const boldLabel = parseBoldLabel(index);
     if (boldLabel && current && current[boldLabel.field] === undefined) {
       current[boldLabel.field] = boldLabel.value;
+      index = boldLabel.end;
       continue;
     }
     // Legacy bullet shapes (kept for back-compat with stored review bodies).

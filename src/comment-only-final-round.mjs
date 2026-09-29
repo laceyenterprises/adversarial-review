@@ -117,6 +117,11 @@ export async function proveFinalRoundWorkerPush({
 const jobScanCache = new Map();
 const JOB_SCAN_CACHE_LIMIT = 128;
 
+// Also the PR-scoped job scan behind one-follow-up-per-review (follow-up-review-claim.mjs).
+export function scanPrFollowUpJobs(rootDir, status, repo, prNumber, log = console) {
+  return scanCommentOnlyJobs(rootDir, status, repo, prNumber, log);
+}
+
 function scanCommentOnlyJobs(rootDir, status, repo, prNumber, log) {
   const dir = join(rootDir, 'data', 'follow-up-jobs', status);
   let stamp;

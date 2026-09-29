@@ -56,3 +56,21 @@ matching terminal job's `reviewBody` (`findCommentOnlyFinalRoundPushJob`). A
 later head can be reviewed normally.
 Job scans skip a file removed during a queue transition and warn on malformed
 JSON without discarding other jobs.
+
+## One follow-up per posted review
+
+`createFollowUpJob` creates at most one job per posted review (COMMENTCLOSE-01).
+The reviewer process and the watcher's reviewer-pass reaper can both queue the
+same review (agent-os#7311: two final-round jobs 9 s apart). A review is keyed
+by repo, PR, reviewed head (`revisionRef`) and the SHA-256 of its normalized
+`reviewBody`. An existing job for that key in `pending/`, `in-progress/`,
+`completed/`, `failed/` or `stopped/` makes the request a duplicate: the call
+returns `{ job: null, jobPath: null, duplicateOf }`, the reviewer reports
+`queued: false, reason: "duplicate-review-follow-up"`, and the reaper skips its
+wake. A short-lived claim file,
+`data/follow-up-jobs/review-claims/<repo>-pr-<n>-<revisionRef>-<digest16>.json`
+(`{ repo, prNumber, revisionRef, digest, claimedAt, pid }`), serializes the two
+processes between that scan and the job write. It is removed once the job is
+written or the write fails, and a claim older than 10 minutes is treated as
+abandoned and taken over. A review with no reviewed SHA or no body is not
+de-duplicated.

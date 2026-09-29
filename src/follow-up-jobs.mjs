@@ -15,6 +15,7 @@ import { findLiveAmaCloserLease, isHeldAmaCloserLease } from './ama/closer-lease
 import { isActiveAmaCloserDispatchRecord, readAmaCloserDispatchRecord } from './ama/dispatch-closer.mjs';
 import { ensureWorkspaceTrashDir, launchWorkspaceTrashDeleter, workspaceTrashDir } from './follow-up-workspace-trash.mjs';
 import { loadRoleConfig } from './role-config.mjs';
+import { claimFollowUpForReview } from './follow-up-review-claim.mjs';
 import {
   DEFAULT_RISK_CLASS,
   DEFAULT_ROUND_BUDGET_BY_RISK,
@@ -2033,6 +2034,24 @@ function buildFollowUpJob({
 
 function createFollowUpJob({ rootDir, ...jobInput }) {
   const baseJob = buildFollowUpJob(jobInput);
+  // COMMENTCLOSE-01: the reviewer and the reviewer-pass reaper can both queue a
+  // follow-up for the same posted review; only the first creates a job.
+  const reviewClaim = claimFollowUpForReview(rootDir, baseJob);
+  if (reviewClaim.duplicateOf) {
+    console.warn(
+      `[follow-up-jobs] Follow-up for ${baseJob.repo}#${baseJob.prNumber}@${String(baseJob.revisionRef).slice(0, 12)} ` +
+        `already queued for this review (${reviewClaim.duplicateOf.jobId || 'creation in flight'}); not creating a duplicate`,
+    );
+    return { job: null, jobPath: null, duplicateOf: reviewClaim.duplicateOf };
+  }
+  try {
+    return writeNewFollowUpJob(rootDir, baseJob, jobInput);
+  } finally {
+    reviewClaim.release();
+  }
+}
+
+function writeNewFollowUpJob(rootDir, baseJob, jobInput) {
   const priorNonBlockingRounds = baseJob.nonBlockingOnly
     ? summarizePRRemediationLedger(rootDir, baseJob).consecutiveNonBlockingRounds
     : 0;

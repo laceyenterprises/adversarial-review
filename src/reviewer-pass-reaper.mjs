@@ -142,7 +142,7 @@ function queueFollowUpForRecoveredPostedReview({
     ? latestMaxRounds
     : null;
   const classification = classifyFollowUpCriticality(reviewBody);
-  const { jobPath } = createFollowUpJobImpl({
+  const { jobPath, duplicateOf } = createFollowUpJobImpl({
     rootDir,
     repo,
     prNumber,
@@ -162,6 +162,8 @@ function queueFollowUpForRecoveredPostedReview({
     priorCompletedRounds: priorLedger.completedRoundsForPR,
     ...(elevatedPriorCap ? { maxRemediationRounds: elevatedPriorCap } : {}),
   });
+  // COMMENTCLOSE-01: the reviewer usually queued this same review already.
+  if (duplicateOf) return { queued: false, reason: 'duplicate-review-follow-up', duplicateOf };
 
   let handoffWake = { attempted: false };
   try {

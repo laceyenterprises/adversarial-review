@@ -21,7 +21,7 @@ import { readFile as readFileAsync } from 'node:fs/promises';
 import { adapterCarriesAgyReviewerIdentity, getAgyReviewerIdentityPool } from './agy-reviewer-identities.mjs';
 import { reviewerRuntimeState } from './reviewer-runtime-adapter.mjs';
 import { writeReviewerTokenUsageArtifact } from './reviewer-pass-tokens.mjs';
-import { fetchGeminiCredentialConcurrency } from './watcher-reviewer-pool.mjs';
+import { fetchGeminiCredentialConcurrency, reviewerDispatchCandidateUsesGemini } from './watcher-reviewer-pool.mjs';
 
 const DEFAULT_REVIEWER_BROKER_SECRET_CACHE_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_CQP_BROKER_URL = 'http://127.0.0.1:4099';
@@ -109,9 +109,7 @@ export async function resolveGeminiCredentialConcurrencyForDispatchCandidates(
     resolveCandidateAdapter = (candidate) => candidate?.reviewerRuntimeAdapter || reviewerRuntimeState.adapter,
   } = {}
 ) {
-  const geminiCandidates = candidates.filter(
-    (candidate) => String(candidate?.reviewerModel || '').toLowerCase() === 'gemini'
-  );
+  const geminiCandidates = candidates.filter(reviewerDispatchCandidateUsesGemini);
   if (geminiCandidates.length === 0) return null;
 
   // CCX-08: added identities only count toward the cap for reviews whose

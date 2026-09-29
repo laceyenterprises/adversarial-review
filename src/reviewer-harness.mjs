@@ -17,6 +17,7 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
@@ -123,6 +124,12 @@ async function spawnWithInput(command, args, {
   signal,
   reapGroupOnExit = false,
   onStdoutData,
+  // Side-channel capture files and the hard settle deadline; see
+  // spawnCapturedProcessGroup. Only passed when set, so other callers are
+  // unchanged.
+  stdoutPath,
+  stderrPath,
+  settleAfterKillMs,
 } = {}) {
   return auditReviewerSubprocess(({ onSpawn }) => spawnCapturedProcessGroup(command, args, {
     env,
@@ -136,6 +143,9 @@ async function spawnWithInput(command, args, {
     reapGroupOnExit,
     onSpawn,
     onStdoutData,
+    ...(stdoutPath ? { stdoutPath } : {}),
+    ...(stderrPath ? { stderrPath } : {}),
+    ...(settleAfterKillMs ? { settleAfterKillMs } : {}),
   }));
 }
 
@@ -2556,15 +2566,15 @@ async function spawnAgyReview({
   // reverting to stdin (which unbinds the model — the bug this fixes).
   assertAgyPromptFitsArgv(prompt, { maxBytes: resolveAgyArgvMaxBytes(env) });
   const agyArgs = buildAgyReviewArgs({ model, prompt, printTimeoutMs, workspaceDir: identity ? identity.workspaceDir : cwd });
-  const pinned = identity
-    ? buildPinnedCommand({ user: identity.user, command: AGY_REVIEWER_PINNED_AGY, args: agyArgs })
-    : null;
+  if (identity) {
+    return spawnAgyIdentityReview({ identity, agyArgs, timeout: effectiveTimeout, maxBuffer, spawnWithInputImpl });
+  }
   return spawnWithInputImpl(
-    pinned ? pinned.command : agyCli,
-    pinned ? pinned.args : agyArgs,
+    agyCli,
+    agyArgs,
     {
-      env: pinned ? { ...PINNED_COMMAND_ENV } : env,
-      cwd: pinned ? identity.cwd : cwd,
+      env,
+      cwd,
       // Prompt is delivered on argv (see buildAgyReviewArgs); stdin is closed.
       input: '',
       timeout: effectiveTimeout,
@@ -2576,6 +2586,58 @@ async function spawnAgyReview({
       reapGroupOnExit: true,
     },
   );
+}
+
+// How long an added identity's review may outlive its SIGKILL (or its own
+// exit) before the capture settles without it.
+const AGY_IDENTITY_SETTLE_AFTER_KILL_MS = 10_000;
+
+function readCapturedFile(path, maxBytes) {
+  try {
+    const bytes = readFileSync(path);
+    return (bytes.length > maxBytes ? bytes.subarray(bytes.length - maxBytes) : bytes).toString('utf8');
+  } catch {
+    return '';
+  }
+}
+
+// CCX-08: agy as an added identity runs as another OS user behind sudo. The
+// HQ owner cannot signal that user's processes, so the exit reap and the
+// timeout kill never reach agy's language server (or, on a timeout, agy). A
+// descendant holding an inherited stdout pipe would then keep the capture from
+// ever closing. agy's output therefore goes to HQ-owner files it writes through
+// the inherited descriptors: 'close' follows sudo's exit whatever survives it,
+// and `settleAfterKillMs` settles even if sudo itself outlives the kill. What
+// survives is the watcher's to handle: the identity is not leased again while
+// any process still runs as that user.
+async function spawnAgyIdentityReview({ identity, agyArgs, timeout, maxBuffer, spawnWithInputImpl }) {
+  const pinned = buildPinnedCommand({ user: identity.user, command: AGY_REVIEWER_PINNED_AGY, args: agyArgs });
+  const outputDir = mkdtempSync(join(tmpdir(), 'agy-identity-output-'));
+  const stdoutPath = join(outputDir, 'stdout');
+  const stderrPath = join(outputDir, 'stderr');
+  const captured = () => ({
+    stdout: readCapturedFile(stdoutPath, maxBuffer),
+    stderr: readCapturedFile(stderrPath, maxBuffer),
+  });
+  try {
+    const result = await spawnWithInputImpl(pinned.command, pinned.args, {
+      env: { ...PINNED_COMMAND_ENV },
+      cwd: identity.cwd,
+      input: '',
+      timeout,
+      maxBuffer,
+      reapGroupOnExit: true,
+      stdoutPath,
+      stderrPath,
+      settleAfterKillMs: AGY_IDENTITY_SETTLE_AFTER_KILL_MS,
+    });
+    return { ...result, ...captured() };
+  } catch (err) {
+    if (err && typeof err === 'object') Object.assign(err, captured());
+    throw err;
+  } finally {
+    rmSync(outputDir, { recursive: true, force: true });
+  }
 }
 
 /**

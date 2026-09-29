@@ -3,6 +3,11 @@
 // reached through sudo; here a fake install stands in for both: a fake `sudo`
 // that switches HOME/USER per target user, and fake pinned agy, keychain
 // helper and workspace helper scripts with the same verbs and output lines.
+//
+// Everything here runs as one OS user, so no uid boundary is crossed. The
+// fake sudo forks the command, as real sudo does, and the fake agy stands in
+// for a process the HQ owner cannot signal by putting it in its own process
+// group (`set -m`), out of reach of the reviewer child's group kill.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -22,6 +27,7 @@ import { join } from 'node:path';
 
 import {
   AGY_IDENTITY_REVIEW_ID_ENV,
+  AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS,
   AGY_IDENTITY_USER_ENV,
   AGY_REVIEWER_LIBEXEC_DIR,
   AGY_REVIEWER_PINNED_AGY,
@@ -31,6 +37,7 @@ import {
   createAgyReviewerIdentityPool,
   extractAgyReviewWorkspace,
   finishAgyIdentityReview,
+  listUserProcesses,
   prepareAgyIdentityReview,
   referenceAgySettingsFromEnv,
   resolveAgyReviewIdentityFromEnv,
@@ -44,6 +51,8 @@ import { createAgentRuntimeReviewerRuntimeAdapter } from '../src/adapters/review
 import { createHealthRouter } from '../src/adapters/agent-runtime/router/index.mjs';
 import { reviewWithGemini, __test__ as harness } from '../src/reviewer-harness.mjs';
 import { resolveGeminiCredentialConcurrencyForDispatchCandidates } from '../src/reviewer-runtime-support.mjs';
+import { domainPipelineUsesGeminiReviewer } from '../src/reviewer-spawn-settle.mjs';
+import { reviewerDispatchCandidateUsesGemini, runBoundedReviewerDispatchQueue } from '../src/watcher-reviewer-pool.mjs';
 import { runAgyReviewerStartupChecks } from '../src/watcher-agy-startup-preflight.mjs';
 
 const REVIEWER_A = 'agentos-reviewer';
@@ -70,7 +79,9 @@ case "$CMD" in "$ROOT"/libexec/*) ;; *) echo "fake sudo: not a pinned command: $
 # What reached sudo from the caller: only the minimal pinned-command env.
 echo "$U $(basename "$CMD") vars=$(env | cut -d= -f1 | sort | tr '\\n' ',')" >> "$ROOT/sudo.log"
 export HOME="$ROOT/home/$U" USER="$U" LOGNAME="$U" FAKE_ROOT="$ROOT"
-exec "$CMD" "$@"
+# Like real sudo: the command runs in a child process that sudo waits for.
+"$CMD" "$@" <&0 &
+wait $!
 `;
 
 // Like CCX-07's agy-reviewer-agy: settings come only from the root-owned file.
@@ -95,6 +106,11 @@ printf '{"user":"%s","home":"%s","cwd":"%s","addDir":"%s","mode":"%s","model":"%
   "$USER" "$HOME" "$(pwd -P)" "$add" "$(if [ "$(uname)" = Darwin ]; then stat -f %Lp "$add"; else stat -c %a "$add"; fi)" "$model" "\${HTTPS_PROXY-}" "\${NO_PROXY-}" "\${AGY_KEYCHAIN_PATH-}" \\
   "$([ -f "$add/README.md" ] && echo yes || echo no)" >> "$HOME/agy-calls.log"
 [ -e "$HOME/.agy-hang" ] && sleep 30
+# A language server left behind that the HQ owner cannot signal: its own
+# process group, holding the inherited stdout.
+if [ -e "$HOME/.agy-linger" ]; then set -m; sleep 20 & echo $! > "$HOME/survivor.pid"; set +m; fi
+# A hung agy whose worker survives the timeout kill.
+if [ -e "$HOME/.agy-hang-survives" ]; then set -m; sleep 30 & echo $! > "$HOME/survivor.pid"; set +m; wait; fi
 if [ -e "$HOME/.agy-fail" ]; then echo "agy failed" >&2; exit 1; fi
 printf '%s\\n' "$REVIEW_TEXT"
 `;
@@ -199,6 +215,11 @@ function makePool(fake, {
   checkHqOwnerAuthImpl = async () => ({ ok: true }),
   readBootstrapRecordImpl = () => null,
   runPinnedImpl = fake?.runPinned,
+  // The fake identities are not real OS users, so `ps -U` cannot see them;
+  // by default nothing survives a review.
+  listUserProcessesImpl = async () => ({ ok: true, pids: [] }),
+  leaseWaitMs = 0,
+  now,
 } = {}) {
   return createAgyReviewerIdentityPool({
     env,
@@ -210,8 +231,10 @@ function makePool(fake, {
     checkHqOwnerAuthImpl,
     readBootstrapRecordImpl,
     referenceSettings: () => HQ_SETTINGS,
+    listUserProcessesImpl,
     sleepImpl: async () => {},
-    leaseWaitMs: 0,
+    leaseWaitMs,
+    ...(now ? { now } : {}),
   });
 }
 
@@ -763,6 +786,244 @@ test('CCX-08: the startup sweep removes a leaked scratch dir and keeps a live on
   } finally {
     fake.cleanup();
   }
+});
+
+// ── Processes the HQ owner cannot signal ────────────────────────────────────
+
+function processAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err?.code === 'EPERM';
+  }
+}
+
+function killSurvivor(fake, user) {
+  const path = join(fake.home(user), 'survivor.pid');
+  if (!existsSync(path)) return;
+  try { process.kill(Number(readFileSync(path, 'utf8').trim()), 'SIGKILL'); } catch { /* already gone */ }
+}
+
+// Stands in for `ps -U <user>`: the fake's survivor, if it still runs.
+function survivorLister(fake) {
+  return async ({ user }) => {
+    const path = join(fake.home(user), 'survivor.pid');
+    const pid = existsSync(path) ? Number(readFileSync(path, 'utf8').trim()) : 0;
+    return { ok: true, pids: pid && processAlive(pid) ? [pid] : [] };
+  };
+}
+
+test('CCX-08: a language server left behind as the identity does not hold the review open', async () => {
+  const fake = makeFakeInstall({ users: [REVIEWER_A] });
+  try {
+    const snapshotDir = makeSnapshot(fake.root);
+    writeFileSync(join(fake.home(REVIEWER_A), '.agy-linger'), '');
+    const started = Date.now();
+    const review = await reviewWithGemini('+diff\n', '', identityReviewOptions(fake, {
+      snapshotDir,
+      agyIdentity: { user: REVIEWER_A, reviewId: 'agy-linger' },
+    }));
+    const elapsed = Date.now() - started;
+    assert.match(review.reviewText, /Comment only/);
+    const survivor = Number(readFileSync(join(fake.home(REVIEWER_A), 'survivor.pid'), 'utf8').trim());
+    assert.equal(processAlive(survivor), true, 'the leftover was out of the group kill\'s reach');
+    assert.ok(elapsed < 10_000, `the capture closed on sudo's exit, not the leftover's (took ${elapsed}ms)`);
+  } finally {
+    killSurvivor(fake, REVIEWER_A);
+    fake.cleanup();
+  }
+});
+
+test('CCX-08: a timed-out review whose agy survives the kill settles, and the identity is not leased until the survivor exits', async () => {
+  const fake = makeFakeInstall({ users: [REVIEWER_A] });
+  try {
+    const snapshotDir = makeSnapshot(fake.root);
+    const log = quietLog();
+    const pool = makePool(fake, { identities: [REVIEWER_A], log, listUserProcessesImpl: survivorLister(fake) });
+    writeFileSync(join(fake.home(REVIEWER_A), '.agy-hang-survives'), '');
+    let reviewError = null;
+    const started = Date.now();
+    const result = await runWithAgyReviewerIdentity({ reviewerModel: 'gemini', adapter: LEASING_ADAPTER, pool, log }, async (identity) => {
+      try {
+        await reviewWithGemini('+diff\n', '', identityReviewOptions(fake, { snapshotDir, agyIdentity: identity, testTimeout: 1_000 }));
+        return { ok: true };
+      } catch (err) {
+        reviewError = err;
+        return { ok: false, failureClass: 'reviewer-timeout' };
+      }
+    });
+    assert.equal(result.failureClass, 'reviewer-timeout');
+    assert.match(String(reviewError?.message), /Gemini exec failed/);
+    assert.ok(Date.now() - started < 15_000, 'the review settled without waiting for the survivor');
+    const survivor = Number(readFileSync(join(fake.home(REVIEWER_A), 'survivor.pid'), 'utf8').trim());
+    assert.equal(processAlive(survivor), true);
+
+    const state = pool.snapshot().find((entry) => entry.user === REVIEWER_A);
+    assert.equal(state.ready, false);
+    assert.equal(state.draining, true);
+    assert.match(state.reasons.join('\n'), new RegExp(`still running as ${REVIEWER_A}`));
+    // The next review cannot lease it and says why, without claiming a timeout.
+    const starved = await runWithAgyReviewerIdentity({ reviewerModel: 'gemini', adapter: LEASING_ADAPTER, pool, log }, async () => {
+      throw new Error('must not run while the identity drains');
+    });
+    assert.equal(starved.failureClass, AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS);
+    assert.equal(starved.transient, true);
+    assert.match(starved.error, /still running as agentos-reviewer/);
+    assert.equal(await pool.refreshReadiness(), 0, 'still draining while the survivor runs');
+
+    // Once it exits, the identity is checked and probed back in.
+    killSurvivor(fake, REVIEWER_A);
+    for (let attempt = 0; attempt < 50 && processAlive(survivor); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    rmSync(join(fake.home(REVIEWER_A), '.agy-hang-survives'));
+    await pool.refreshReadiness();
+    await pool.settleProbes();
+    assert.equal(pool.readyCount(), 1);
+    assert.equal(pool.snapshot().find((entry) => entry.user === REVIEWER_A).draining, false);
+  } finally {
+    killSurvivor(fake, REVIEWER_A);
+    fake.cleanup();
+  }
+});
+
+test('CCX-08: an unknown process check keeps the identity out (fail closed)', async () => {
+  const fake = makeFakeInstall({ users: [REVIEWER_A] });
+  try {
+    const pool = makePool(fake, {
+      identities: [REVIEWER_A],
+      listUserProcessesImpl: async () => ({ ok: false, pids: [], error: 'ps timed out' }),
+    });
+    const lease = await pool.acquire({ reviewId: 'agy-unknown' });
+    assert.equal(lease.user, REVIEWER_A);
+    await pool.release(lease);
+    const state = pool.snapshot()[0];
+    assert.equal(state.ready, false);
+    assert.match(state.reasons[0], /cannot tell whether processes still run as agentos-reviewer: ps timed out/);
+    // The real lister reports a bad name as unknown rather than as "none".
+    assert.equal((await listUserProcesses({ user: 'bad user' })).ok, false);
+    assert.deepEqual(
+      await listUserProcesses({ user: REVIEWER_A, runImpl: async () => ({ code: 1, stdout: '', stderr: '' }) }),
+      { ok: true, pids: [] },
+    );
+    assert.equal((await listUserProcesses({ user: REVIEWER_A, runImpl: async () => ({ code: 1, stdout: '', stderr: "ps: No ruser named 'x'" }) })).ok, false);
+    assert.deepEqual(
+      await listUserProcesses({ user: REVIEWER_A, runImpl: async () => ({ code: 0, stdout: '  101\n 202\n', stderr: '' }) }),
+      { ok: true, pids: [101, 202] },
+    );
+  } finally {
+    fake.cleanup();
+  }
+});
+
+// ── Leasing without the drain's readiness pass ──────────────────────────────
+
+test('CCX-08: a lease runs its own readiness pass, so a dispatch path without a drain still leases', async () => {
+  const fake = makeFakeInstall();
+  try {
+    let clock = 1_000_000;
+    let statusCalls = 0;
+    const pool = makePool(fake, {
+      identities: [REVIEWER_A, REVIEWER_B],
+      now: () => clock,
+      runPinnedImpl: async (opts) => {
+        if (opts.args?.[0] === 'status') statusCalls += 1;
+        return fake.runPinned(opts);
+      },
+    });
+    // No refreshReadiness() first: the pool-disabled watcher path and a
+    // pipeline stage both reach the lease this way.
+    const seen = [];
+    const result = await runWithAgyReviewerIdentity({ reviewerModel: 'gemini', adapter: LEASING_ADAPTER, pool, log: quietLog() }, async (identity) => {
+      seen.push(identity);
+      return { ok: true };
+    });
+    assert.deepEqual(result, { ok: true });
+    assert.equal(seen[0].user, REVIEWER_A);
+    assert.equal(statusCalls, 2, 'one readiness pass, both identities');
+    // A fresh pass is reused; a stale one is redone.
+    const held = await pool.acquire({ reviewId: 'agy-held' });
+    assert.equal(statusCalls, 2);
+    clock += 61_000;
+    const second = await pool.acquire({ reviewId: 'agy-second' });
+    assert.equal(statusCalls, 4);
+    assert.deepEqual([held.user, second.user], [REVIEWER_A, REVIEWER_B]);
+    // Both leased: the next review fails as unavailable, not as a timeout.
+    const starved = await runWithAgyReviewerIdentity({ reviewerModel: 'gemini', adapter: LEASING_ADAPTER, pool, log: quietLog() }, async () => ({ ok: true }));
+    assert.equal(starved.failureClass, AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS);
+    assert.notEqual(starved.failureClass, 'reviewer-timeout');
+    await pool.release(held);
+    await pool.release(second);
+  } finally {
+    fake.cleanup();
+  }
+});
+
+test('CCX-08: the HQ owner is leasable before any readiness pass', async () => {
+  const pool = makePool(null, {
+    identities: [HQ_OWNER, REVIEWER_A],
+    runPinnedImpl: async () => ({ code: 1, stdout: '', stderr: 'no sudo in this test' }),
+  });
+  const lease = await pool.acquire({ reviewId: 'agy-owner' });
+  assert.equal(lease.user, HQ_OWNER);
+  assert.equal(lease.hqOwner, true);
+  await pool.release(lease);
+});
+
+test('CCX-08: a pipeline stage that runs Gemini counts against the Gemini cap', async () => {
+  const roleRegistry = {
+    routing: { neverReviewOwnBuilderClass: true },
+    roles: {
+      'quality-reviewer': { id: 'quality-reviewer', promptSet: 'code-pr', workerClass: 'codex', taskKind: 'review', completionShape: 'decision-only' },
+      'gemini-stage-reviewer': { id: 'gemini-stage-reviewer', promptSet: 'code-pr', workerClass: 'gemini', taskKind: 'review', completionShape: 'decision-only' },
+    },
+  };
+  const pipelineConfig = (panel) => ({
+    id: 'code-pr',
+    riskClasses: { low: { maxRemediationRounds: 1 }, medium: { maxRemediationRounds: 3 }, high: { maxRemediationRounds: 3 }, critical: { maxRemediationRounds: 4 } },
+    pipeline: { enabled: true, stages: [{ id: 'quality', panel: ['quality-reviewer'], aggregation: { kind: 'unanimous-clean' } }, { id: 'second', panel, aggregation: { kind: 'unanimous-clean' } }] },
+  });
+  assert.equal(domainPipelineUsesGeminiReviewer(pipelineConfig(['gemini-stage-reviewer']), { roleRegistry }), true);
+  assert.equal(domainPipelineUsesGeminiReviewer(pipelineConfig(['quality-reviewer']), { roleRegistry }), false);
+  assert.equal(domainPipelineUsesGeminiReviewer({ id: 'code-pr', pipeline: { enabled: false, stages: [] } }), false);
+
+  const stageCandidate = { reviewerModel: 'claude', pipelineUsesGemini: true, reviewerRuntimeAdapter: LEASING_ADAPTER };
+  assert.equal(reviewerDispatchCandidateUsesGemini(stageCandidate), true);
+  assert.equal(reviewerDispatchCandidateUsesGemini({ reviewerModel: 'claude' }), false);
+
+  const fake = makeFakeInstall({ users: [REVIEWER_A] });
+  try {
+    const pool = makePool(fake, { identities: [REVIEWER_A] });
+    const cap = await resolveGeminiCredentialConcurrencyForDispatchCandidates([stageCandidate], {
+      env: {},
+      fetchCredentialConcurrency: async () => { throw new Error('the broker is not consulted'); },
+      identityPool: pool,
+    });
+    assert.equal(cap, 1, 'the ready identities cap a pipeline candidate too');
+  } finally {
+    fake.cleanup();
+  }
+
+  // Two pipeline candidates under a Gemini cap of 1 run one at a time.
+  let active = 0;
+  let maxActive = 0;
+  const run = async () => {
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    active -= 1;
+  };
+  const candidates = [1, 2].map((prNumber) => ({
+    repoPath: 'o/r', prNumber, reviewerModel: 'claude', pipelineUsesGemini: true, run, pendingSince: '2026-09-29T00:00:00.000Z', enqueuedAtMs: prNumber,
+  }));
+  const summary = await runBoundedReviewerDispatchQueue(candidates, {
+    maxConcurrent: 2,
+    geminiCredentialConcurrency: 1,
+    logger: { error() {}, log() {}, warn() {} },
+  });
+  assert.equal(summary.dispatched, 2);
+  assert.equal(maxActive, 1);
 });
 
 // ── Single-identity parity ──────────────────────────────────────────────────

@@ -21,6 +21,7 @@ const SUPPORTED_OPTIONS = new Set([
   'progressTimeout',
   'progressOnStdoutOnly',
   'reapGroupOnExit',
+  'settleAfterKillMs',
   'signal',
   'stderrPath',
   'stdoutPath',
@@ -146,6 +147,12 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
     stdoutCapture = 'all',
     stderrPath = null,
     reapGroupOnExit = false,
+    // Hard settle deadline, opt-in (0 = off). Normally the promise settles on
+    // 'close'. When the group cannot be signalled (it runs as another OS user
+    // behind sudo) neither a kill nor the exit reap can force that, so settle
+    // this long after the SIGKILL was due, or after the main process exited,
+    // without waiting for 'close'. An abandoned process is left running.
+    settleAfterKillMs = 0,
   } = options;
   if (stdoutCapture !== 'all' && stdoutCapture !== 'tail') {
     throw new TypeError(`Unsupported stdoutCapture: ${stdoutCapture}`);
@@ -176,6 +183,7 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
     let wallTimer = null;
     let progressTimer = null;
     let firstOutputTimer = null;
+    let settleTimer = null;
     let sawFirstOutput = false;
     let fileProgressTimer = null;
     let lastStdoutSize = 0;
@@ -187,7 +195,9 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
       if (wallTimer) clearTimeout(wallTimer);
       if (progressTimer) clearTimeout(progressTimer);
       if (firstOutputTimer) clearTimeout(firstOutputTimer);
+      if (settleTimer) clearTimeout(settleTimer);
       if (fileProgressTimer) clearInterval(fileProgressTimer);
+      settleTimer = null;
       killTimer = null;
       wallTimer = null;
       progressTimer = null;
@@ -214,6 +224,9 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
         killTimer = setTimeout(() => {
           signalProcessGroup(child, 'SIGKILL');
         }, killGraceMs);
+      }
+      if (settleAfterKillMs > 0 && !settleTimer) {
+        settleTimer = setTimeout(() => abandon(null, null, 'SIGKILL'), killGraceMs + settleAfterKillMs);
       }
     };
 
@@ -391,8 +404,12 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
     });
 
     if (reapGroupOnExit) {
-      child.on('exit', () => {
+      child.on('exit', (code, exitSignal) => {
         if (settled) return;
+        if (settleAfterKillMs > 0) {
+          if (settleTimer) clearTimeout(settleTimer);
+          settleTimer = setTimeout(() => abandon(code, exitSignal, 'exit'), settleAfterKillMs);
+        }
         // The main process has exited but we resolve on 'close' (stdio EOF),
         // which can stall indefinitely when a leaked grandchild inherited our
         // stdout/stderr pipe write-ends and keeps them open — e.g. agy's
@@ -406,7 +423,23 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
       });
     }
 
-    child.on('close', (code, closeSignal) => {
+    // Settle without 'close' (see settleAfterKillMs). Data still buffered in a
+    // pipe is lost, so a caller that needs all of it uses side-channel files.
+    function abandon(code, exitSignal, after) {
+      if (settled) return;
+      const note = after === 'exit'
+        ? `stdio stayed open ${settleAfterKillMs}ms after the process exited`
+        : `the process group did not exit ${settleAfterKillMs}ms after SIGKILL`;
+      try { child.stdout?.destroy(); } catch { /* already closed */ }
+      try { child.stderr?.destroy(); } catch { /* already closed */ }
+      try { child.stdin?.destroy(); } catch { /* already closed */ }
+      try { child.unref(); } catch { /* already gone */ }
+      finishFromClose(code, exitSignal, { note: `abandoned: ${note}` });
+    }
+
+    child.on('close', (code, closeSignal) => finishFromClose(code, closeSignal));
+
+    function finishFromClose(code, closeSignal, { note = '' } = {}) {
       if (settled) return;
       settled = true;
       readSideChannelOutput();
@@ -429,7 +462,7 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
       }
       const details = formatCapturedFailureDetails({ stdout, stderr, maxBytes: failureTailBytes });
       const reason = timeoutReason || `failed with code ${code}${closeSignal ? ` signal ${closeSignal}` : ''}`;
-      const err = new Error(`Command ${reason}${details ? `\n${details}` : ''}`);
+      const err = new Error(`Command ${reason}${note ? ` (${note})` : ''}${details ? `\n${details}` : ''}`);
       err.code = timeoutReason === 'aborted' ? 'ABORT_ERR' : code;
       err.exitCode = code;
       err.signal = closeSignal;
@@ -438,10 +471,11 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
       err.progressTimedOut = timeoutReason?.startsWith(PROGRESS_TIMEOUT_REASON_PREFIX) || false;
       err.firstOutputTimedOut = timeoutReason?.startsWith(FIRST_OUTPUT_TIMEOUT_REASON_PREFIX) || false;
       err.aborted = timeoutReason === 'aborted';
+      err.abandoned = Boolean(note);
       err.stdout = stdout;
       err.stderr = stderr;
       reject(err);
-    });
+    }
 
     child.stdin?.on('error', (err) => {
       if (err?.code === 'EPIPE') return;

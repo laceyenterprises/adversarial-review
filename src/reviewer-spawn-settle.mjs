@@ -34,7 +34,11 @@ import {
   resolveReviewerTimeoutMs,
 } from './reviewer-timeout.mjs';
 import { loadRoleConfig, resolveGeminiRuntime } from './role-config.mjs';
-import { getAgyReviewerIdentityPool, runWithAgyReviewerIdentity } from './agy-reviewer-identities.mjs';
+import {
+  AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS,
+  getAgyReviewerIdentityPool,
+  runWithAgyReviewerIdentity,
+} from './agy-reviewer-identities.mjs';
 import {
   isGroundedProviderState,
   providerForQuotaHarness,
@@ -54,7 +58,7 @@ import {
 } from './reviewer-fence.mjs';
 import { loadRoleRegistry } from './role-registry.mjs';
 import { resolveRoleRegistryFromDomain } from './domain-policy.mjs';
-import { resolveDomainPipeline } from './domain-pipeline.mjs';
+import { isPipelineEnabled, resolveDomainPipeline } from './domain-pipeline.mjs';
 import { runGatedReviewPipeline } from './watcher-review-pipeline.mjs';
 import {
   db,
@@ -982,6 +986,25 @@ async function spawnReviewer({
   }
 }
 
+// CCX-08: whether a pipeline-enabled domain has a stage seat that runs a
+// Gemini review (and so leases an agy reviewer identity), for the drain's
+// Gemini cap. False when the pipeline is off or cannot be compiled; the
+// pipeline spawn itself fails on the same error.
+function domainPipelineUsesGeminiReviewer(domainConfig, { env = process.env, roleRegistry = null } = {}) {
+  if (!isPipelineEnabled(domainConfig)) return false;
+  try {
+    const registry = roleRegistry || resolveRoleRegistryFromDomain(domainConfig, {
+      fallbackRoleRegistry: loadRoleRegistry({ env }),
+    });
+    const { stages } = resolveDomainPipeline(domainConfig, { roleRegistry: registry });
+    return stages.some(({ panelRoles }) => panelRoles.some(({ role }) => (
+      String(role?.workerClass || role?.persona || '').trim().toLowerCase() === 'gemini'
+    )));
+  } catch {
+    return false;
+  }
+}
+
 // ARC-13: the gated two-stage pipeline entry point invoked from the review-drive
 // seam when `domains/<id>.json` sets `pipeline.enabled: true` (default OFF). It
 // loads the role registry (only reached on the enabled path — boot stays
@@ -1210,6 +1233,8 @@ function settleReviewerAttempt({
     // A host fault, not a review outcome: retried on the bounded infra
     // auto-recovery path and never charged to review_attempts.
     INFRA_RUNTIME_MISSING_LIBRARY_FAILURE_CLASS,
+    // CCX-08: no agy reviewer identity could be leased; no reviewer ran.
+    AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS,
   ]);
   const defaultFailureMessages = {
     cascade: 'Reviewer hit a LiteLLM/upstream cascade failure; watcher backoff engaged.',
@@ -1220,6 +1245,7 @@ function settleReviewerAttempt({
     'oauth-broken': 'Reviewer OAuth credentials are unavailable; watcher backoff engaged until credentials recover.',
     [TOKEN_REFRESH_PENDING_FAILURE_CLASS]: 'Claude reviewer token refresh is pending; held until the next token rotation.',
     'reviewer-timeout': 'Reviewer command timed out before posting; watcher backoff engaged.',
+    [AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS]: 'No agy reviewer identity was ready and free to lease; the reviewer did not run; watcher backoff engaged.',
     'launchctl-bootstrap': 'Claude launchctl session bootstrap failed; watcher backoff engaged.',
     'daemon-bounce': 'Reviewer runtime could not reattach after daemon bounce; watcher backoff engaged.',
     'reviewer-output': 'Reviewer runtime produced an unparseable review artifact; watcher retry engaged.',
@@ -1470,6 +1496,7 @@ function evaluateRoundBudgetForReview({
 }
 
 export {
+  domainPipelineUsesGeminiReviewer,
   spawnReviewer,
   runWatcherGatedReviewPipeline,
   parsePipelineStageStates,

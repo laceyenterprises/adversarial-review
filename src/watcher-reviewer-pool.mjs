@@ -760,6 +760,14 @@ function resolveGeminiDispatchConcurrencyLimit({ geminiCredentialConcurrency = n
   return Math.min(cap, Math.max(0, parsed));
 }
 
+// A dispatch candidate that runs a Gemini review: its own reviewer model, or,
+// on a pipeline domain, a stage seat that runs Gemini (CCX-08: those stages
+// lease an agy reviewer identity too, so they count against the Gemini cap).
+function reviewerDispatchCandidateUsesGemini(candidate) {
+  return String(candidate?.reviewerModel || '').toLowerCase() === 'gemini'
+    || candidate?.pipelineUsesGemini === true;
+}
+
 function activeReviewerCountForModel(activeReviewerCounts, model) {
   const normalizedModel = String(model || '').trim().toLowerCase();
   if (!normalizedModel || !activeReviewerCounts) return 0;
@@ -982,8 +990,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   let initialWaveClosed = false;
   let singleWaveDeadlineMs = null;
 
-  const isGeminiCandidate = (candidate) =>
-    String(candidate?.reviewerModel || '').toLowerCase() === 'gemini';
+  const isGeminiCandidate = reviewerDispatchCandidateUsesGemini;
 
   const dispatchWasSkipped = (result) =>
     result && typeof result === 'object' && result.dispatched === false;
@@ -1337,6 +1344,7 @@ export {
   reviewerLaneFloor,
   runBoundedReviewerDispatchQueue,
   sortReviewerDispatchCandidates,
+  reviewerDispatchCandidateUsesGemini,
   reviewerDispatchIsFirstPass,
   reviewerDispatchPassKind,
   reviewerSafetyPassKind,

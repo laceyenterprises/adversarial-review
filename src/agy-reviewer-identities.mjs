@@ -14,6 +14,14 @@
 // automatic re-admission, startup sweep) and the reviewer-child helpers that
 // stream the review snapshot into the reviewer's scratch copy, run agy there
 // and clean it up.
+//
+// The HQ owner cannot signal a process that runs as an added identity, so it
+// cannot reap agy or agy's language server there the way it does on the
+// HQ-owner path. Two things keep that safe: the reviewer child captures agy's
+// output through files, not pipes, so a leftover descendant cannot hold the
+// capture open; and a lease is released only after the identity has no
+// process left running, so a surviving agy never shares a HOME with the next
+// review.
 
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -30,6 +38,7 @@ import { scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 const AGY_REVIEWER_LIBEXEC_DIR = '/usr/local/libexec/agent-os';
 const AGY_REVIEWER_SUDO = '/usr/bin/sudo';
 const AGY_REVIEWER_TAR = '/usr/bin/tar';
+const AGY_REVIEWER_PS = '/bin/ps';
 const AGY_REVIEWER_PINNED_AGY = 'agy-reviewer-agy';
 const AGY_REVIEWER_KEYCHAIN_HELPER = 'agy-reviewer-keychain-helper';
 const AGY_REVIEWER_WORKSPACE_HELPER = 'agy-reviewer-workspace-helper';
@@ -68,6 +77,12 @@ const PROBE_TIMEOUT_MS = 90_000;
 const EXTRACT_TIMEOUT_MS = 5 * 60_000;
 const LEASE_WAIT_MS = 5 * 60_000;
 const LEASE_POLL_MS = 2_000;
+// acquire() runs its own readiness pass when the last one is older than this,
+// so a lease never depends on which dispatch path ran before it.
+const READINESS_MAX_AGE_MS = 60_000;
+// A review that could not lease an identity. Transient, and deliberately not
+// `reviewer-timeout`: no reviewer ran, so nothing timed out.
+const AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS = 'agy-identity-unavailable';
 const STATE_SUBDIR = ['state', 'agy-reviewer-identities'];
 // sudo keeps the caller's cwd, and an added identity cannot enter the HQ
 // owner's 0700 snapshot or per-user TMPDIR. agy runs as that user from an
@@ -257,6 +272,25 @@ function describeFailure(label, result) {
   return `${label} exited ${result.code ?? result.signal ?? 'abnormally'}${detail ? `: ${detail.slice(0, 200)}` : ''}`;
 }
 
+// Processes whose real user is `user`. `ps` needs no privilege for this, and
+// sudo gives the command it runs that real user, so this sees agy and anything
+// agy left behind. ps exits 1 with no output when nothing matches. Never
+// rejects; `ok: false` means the answer is unknown.
+async function listUserProcesses({ user, runImpl = runBoundedProcess, ps = AGY_REVIEWER_PS } = {}) {
+  if (!AGY_REVIEWER_USER_RE.test(String(user || ''))) {
+    return { ok: false, pids: [], error: `not a local user name: ${JSON.stringify(user)}` };
+  }
+  const result = await runImpl(ps, ['-U', user, '-o', 'pid='], { timeoutMs: HELPER_TIMEOUT_MS });
+  const stderr = String(result.stderr || '').trim();
+  if (result.timedOut || result.error || !(result.code === 0 || (result.code === 1 && !stderr))) {
+    return { ok: false, pids: [], error: describeFailure('ps', result) };
+  }
+  const pids = String(result.stdout || '').split('\n')
+    .map((line) => Number.parseInt(line.trim(), 10))
+    .filter((pid) => Number.isInteger(pid) && pid > 0);
+  return { ok: true, pids };
+}
+
 // ── Workspace (reviewer child and watcher) ──────────────────────────────────
 
 function assertReviewId(reviewId) {
@@ -426,12 +460,16 @@ function createAgyReviewerIdentityPool({
   checkHqOwnerAuthImpl = defaultCheckHqOwnerAuth,
   readBootstrapRecordImpl = (user) => readBootstrapRecord(user, { env }),
   referenceSettings = () => referenceAgySettingsFromEnv(env),
+  listUserProcessesImpl = listUserProcesses,
   sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   leaseWaitMs = LEASE_WAIT_MS,
   leasePollMs = LEASE_POLL_MS,
+  readinessMaxAgeMs = READINESS_MAX_AGE_MS,
 } = {}) {
   const states = new Map();
   const probes = new Map();
+  let lastReadinessAt = null;
+  let readinessInFlight = null;
 
   function currentPlan() {
     let runtime;
@@ -459,6 +497,7 @@ function createAgyReviewerIdentityPool({
         ready: identity.hqOwner,
         reasons: identity.hqOwner ? [] : ['no readiness pass yet'],
         needsProbe: false,
+        draining: false,
         lease: null,
         bootstrapCheckedAt: null,
       };
@@ -507,7 +546,7 @@ function createAgyReviewerIdentityPool({
       }
       if (ok) {
         state.needsProbe = false;
-        if (!state.checkFailed) transition(state, true, []);
+        if (!state.checkFailed && !state.draining) transition(state, true, []);
       } else {
         transition(state, false, [reason]);
       }
@@ -546,9 +585,39 @@ function createAgyReviewerIdentityPool({
     isolate(state, [`keychain bootstrap isolated it${reasons.length ? `: ${reasons.join('; ')}` : ''}`]);
   }
 
+  // Survivors of a finished review as an added identity: agy killed on a
+  // timeout it could not be reached for, or its language server. The HQ owner
+  // cannot signal them, so the identity stays unleased until they are gone.
+  // An unknown answer counts as busy (fail closed).
+  async function checkDrained(state) {
+    let result;
+    try {
+      result = await listUserProcessesImpl({ user: state.user });
+    } catch (err) {
+      result = { ok: false, pids: [], error: err?.message || String(err) };
+    }
+    if (result?.ok && result.pids.length === 0) {
+      state.draining = false;
+      return { drained: true, reason: null };
+    }
+    const reason = result?.ok
+      ? `${result.pids.length} process(es) still running as ${state.user} (pid ${result.pids.slice(0, 5).join(', ')}); not leased until they exit`
+      : `cannot tell whether processes still run as ${state.user}: ${result?.error || 'unknown'}`;
+    state.draining = true;
+    return { drained: false, reason };
+  }
+
   // One readiness pass. Returns the ready-identity count in multi-identity
-  // mode, or null when the pre-CCX-08 path applies.
-  async function refreshReadiness() {
+  // mode, or null when the pre-CCX-08 path applies. Concurrent callers share
+  // the pass in flight.
+  function refreshReadiness() {
+    if (!readinessInFlight) {
+      readinessInFlight = runReadinessPass().finally(() => { readinessInFlight = null; });
+    }
+    return readinessInFlight;
+  }
+
+  async function runReadinessPass() {
     const plan = currentPlan();
     if (!plan.multi) return null;
     for (const refused of plan.refused) {
@@ -562,6 +631,15 @@ function createAgyReviewerIdentityPool({
     await Promise.all(plan.identities.map(async (identity) => {
       const state = stateFor(identity);
       if (!identity.hqOwner) {
+        // A probe running as this user would read as a survivor; wait for it.
+        if (state.draining && !state.lease && !probes.has(identity.user)) {
+          const { drained, reason } = await checkDrained(state);
+          if (!drained) {
+            transition(state, false, [reason]);
+            return;
+          }
+        }
+        if (state.draining) return;
         applyBootstrapRecord(state);
         let reasons;
         try {
@@ -581,7 +659,13 @@ function createAgyReviewerIdentityPool({
       }
       transition(state, true, []);
     }));
+    lastReadinessAt = now();
     return readyCount(plan);
+  }
+
+  function readinessStale(plan) {
+    if (lastReadinessAt === null || now() - lastReadinessAt >= readinessMaxAgeMs) return true;
+    return plan.identities.some((identity) => !identity.hqOwner && !states.has(identity.user));
   }
 
   function readyCount(plan = currentPlan()) {
@@ -591,8 +675,8 @@ function createAgyReviewerIdentityPool({
 
   function tryAcquire(plan, { reviewId }) {
     for (const identity of plan.identities) {
-      const state = states.get(identity.user);
-      if (!state?.ready || state.lease) continue;
+      const state = stateFor(identity);
+      if (!state.ready || state.lease) continue;
       const lease = { user: identity.user, hqOwner: identity.hqOwner, reviewId };
       state.lease = lease;
       return lease;
@@ -603,13 +687,22 @@ function createAgyReviewerIdentityPool({
   // Lease one ready identity, in configured order. The dispatch cap equals
   // the ready count and counts in-flight reviews, so a free identity normally
   // exists; the bounded wait only covers an identity isolated between the
-  // cap decision and this spawn.
+  // cap decision and this spawn. acquire() does not rely on the drain's
+  // readiness pass: a dispatch path that never ran one (the pool disabled, a
+  // pipeline stage) gets one here.
   async function acquire({ reviewId = `agy-${randomUUID()}` } = {}) {
     assertReviewId(reviewId);
     const deadline = now() + leaseWaitMs;
     for (;;) {
       const plan = currentPlan();
       if (!plan.multi) return { user: hqOwner, hqOwner: true, reviewId, legacy: true };
+      if (readinessStale(plan)) {
+        try {
+          await refreshReadiness();
+        } catch (err) {
+          log.warn?.(`[agy-identities] readiness pass before lease failed: ${err?.message || err}`);
+        }
+      }
       const lease = tryAcquire(plan, { reviewId });
       if (lease) return lease;
       if (now() >= deadline) return null;
@@ -619,17 +712,26 @@ function createAgyReviewerIdentityPool({
 
   // Release on every exit path. An added identity's scratch copy is removed
   // (idempotent: the reviewer child also cleans up on its own exit paths),
-  // and a failed review isolates only this identity.
+  // an identity with a surviving process drains before its next lease, and a
+  // failed review isolates only this identity.
   async function release(lease, { failed = false, reason = '' } = {}) {
     if (!lease || lease.legacy) return;
     const state = states.get(lease.user);
+    let survivors = null;
     try {
       if (!lease.hqOwner) {
         await cleanupAgyReviewWorkspace({ user: lease.user, reviewId: lease.reviewId, runPinnedImpl, log });
+        if (state) survivors = (await checkDrained(state)).reason;
       }
     } finally {
       if (state && state.lease === lease) state.lease = null;
-      if (state && failed) isolate(state, [`review ${lease.reviewId} failed${reason ? ` (${reason})` : ''}`]);
+      if (state) {
+        const reasons = [];
+        if (failed) reasons.push(`review ${lease.reviewId} failed${reason ? ` (${reason})` : ''}`);
+        if (survivors) reasons.push(survivors);
+        if (failed) isolate(state, reasons);
+        else if (survivors) transition(state, false, reasons);
+      }
     }
   }
 
@@ -650,8 +752,8 @@ function createAgyReviewerIdentityPool({
     release,
     sweepAll,
     settleProbes: () => Promise.all([...probes.values()]),
-    snapshot: () => [...states.values()].map(({ user, hqOwner: owner, ready, reasons, needsProbe, lease }) => ({
-      user, hqOwner: owner, ready, reasons: [...reasons], needsProbe, leased: Boolean(lease),
+    snapshot: () => [...states.values()].map(({ user, hqOwner: owner, ready, reasons, needsProbe, draining, lease }) => ({
+      user, hqOwner: owner, ready, reasons: [...reasons], needsProbe, draining, leased: Boolean(lease),
     })),
   };
 }
@@ -703,9 +805,12 @@ async function runWithAgyReviewerIdentity({
   }
   const lease = await pool.acquire({ reviewId: `agy-${randomUUID()}` });
   if (!lease) {
-    const error = 'no ready agy reviewer identity became free to lease';
+    const unready = pool.snapshot()
+      .filter((state) => !state.ready)
+      .map((state) => `${state.user}: ${state.reasons.join('; ') || 'not ready'}`);
+    const error = `no ready agy reviewer identity became free to lease${unready.length ? ` (${unready.join(' | ')})` : ''}`;
     log.warn?.(`[agy-identities] ${error}`);
-    return { ok: false, failureClass: 'reviewer-timeout', transient: true, error, stderrTail: error };
+    return { ok: false, failureClass: AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS, transient: true, error, stderrTail: error };
   }
   if (lease.legacy) return spawnFn(null);
   let failed = true;
@@ -731,6 +836,7 @@ function setAgyReviewerIdentityPoolForTests(pool) {
 
 export {
   AGY_IDENTITY_REVIEW_ID_ENV,
+  AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS,
   AGY_IDENTITY_USER_ENV,
   AGY_REVIEWER_KEYCHAIN_HELPER,
   AGY_REVIEWER_LIBEXEC_DIR,
@@ -749,6 +855,7 @@ export {
   extractAgyReviewWorkspace,
   finishAgyIdentityReview,
   getAgyReviewerIdentityPool,
+  listUserProcesses,
   parseHelperKeyValues,
   prepareAgyIdentityReview,
   readBootstrapRecord,

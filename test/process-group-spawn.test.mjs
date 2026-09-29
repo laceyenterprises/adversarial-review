@@ -429,6 +429,58 @@ test('without reapGroupOnExit a leaked grandchild stalls capture until the timeo
   }
 });
 
+// CCX-08: a grandchild in its own process group stands in for a process the
+// caller cannot signal (another OS user behind sudo). Neither the exit reap nor
+// the timeout kill reaches it, it holds the stdout pipe, and 'close' never
+// comes; `settleAfterKillMs` settles anyway.
+const UNREACHABLE_GRANDCHILD_SCRIPT = (pidPath, tail) =>
+  `printf 'READY\\n'; set -m; sleep 30 & printf '%s' "$!" > ${JSON.stringify(pidPath)}; set +m; ${tail}`;
+
+function killPidFile(pidPath) {
+  try { process.kill(Number(readFileSync(pidPath, 'utf8').trim()), 'SIGKILL'); } catch { /* already gone */ }
+}
+
+test('settleAfterKillMs settles a timed-out capture whose group it cannot reap', async () => {
+  const fixtureDir = mkdtempSync(path.join(tmpdir(), 'process-group-abandon-'));
+  const pidPath = path.join(fixtureDir, 'grandchild.pid');
+  try {
+    const start = Date.now();
+    await assert.rejects(
+      () => spawnCapturedProcessGroup('/bin/bash', ['-c', UNREACHABLE_GRANDCHILD_SCRIPT(pidPath, 'exec sleep 30')], {
+        timeout: 500,
+        killGraceMs: 200,
+        settleAfterKillMs: 300,
+        progressTimeout: 0,
+      }),
+      (err) => err.timedOut === true && err.abandoned === true && /abandoned: the process group did not exit/.test(err.message),
+    );
+    assert.ok(Date.now() - start < 5_000, 'settled on the deadline, not when the grandchild exits');
+  } finally {
+    killPidFile(pidPath);
+    rmSync(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test('settleAfterKillMs settles an exited process whose stdio an unreachable grandchild holds open', async () => {
+  const fixtureDir = mkdtempSync(path.join(tmpdir(), 'process-group-abandon-exit-'));
+  const pidPath = path.join(fixtureDir, 'grandchild.pid');
+  try {
+    const start = Date.now();
+    const result = await spawnCapturedProcessGroup('/bin/bash', ['-c', UNREACHABLE_GRANDCHILD_SCRIPT(pidPath, 'exit 0')], {
+      reapGroupOnExit: true,
+      settleAfterKillMs: 300,
+      timeout: 20_000,
+      progressTimeout: 0,
+    });
+    assert.equal(result.code, 0);
+    assert.match(result.stdout, /READY/);
+    assert.ok(Date.now() - start < 5_000, 'settled shortly after the main exit');
+  } finally {
+    killPidFile(pidPath);
+    rmSync(fixtureDir, { recursive: true, force: true });
+  }
+});
+
 // REVHANG-02 regression. `progressTimeout` is a ROLLING no-output watchdog: it is
 // re-armed on every chunk, so using it as a first-byte deadline caps the total
 // quiet compute of a non-streaming CLI. `firstOutputTimeout` is armed once and

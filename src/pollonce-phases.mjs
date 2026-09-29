@@ -212,6 +212,7 @@ import {
   describeAfhReviewerFallback,
 } from './afh-reviewer-fallback.mjs';
 import {
+  domainPipelineUsesGeminiReviewer,
   evaluateRoundBudgetForReview,
   parsePipelineStageStates,
   runWatcherGatedReviewPipeline,
@@ -2648,6 +2649,9 @@ export async function processReviewSubject(entry, ctx) {
         // CCX-08: the Gemini cap counts added agy identities only for
         // candidates whose runtime can lease one; null means the primary.
         reviewerRuntimeAdapter: domainReviewerRuntimeAdapter || null,
+        // A pipeline stage can run Gemini under a non-Gemini route; it leases
+        // an identity too, so it counts against the Gemini cap.
+        pipelineUsesGemini: domainPipelineUsesGeminiReviewer(domainAdapterSet?.domainConfig),
         subject,
         current,
         hasPriorPostedReview: dispatchHasPriorPostedReview,

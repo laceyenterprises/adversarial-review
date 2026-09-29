@@ -299,7 +299,8 @@ function normalizeTransientFailureClass(failureClass) {
     value === REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS ||
     value === TOKEN_REFRESH_PENDING_FAILURE_CLASS ||
     value === PROVIDER_OVERLOADED_FAILURE_CLASS ||
-    value === INFRA_RUNTIME_MISSING_LIBRARY_FAILURE_CLASS
+    value === INFRA_RUNTIME_MISSING_LIBRARY_FAILURE_CLASS ||
+    value === 'agy-identity-unavailable'
   ) {
     return value;
   }

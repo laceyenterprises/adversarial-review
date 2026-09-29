@@ -186,6 +186,10 @@ the broker cap.
 
 **How the Gemini cap is chosen, per watcher drain:**
 
+A Gemini candidate is one whose reviewer is Gemini, or, on a pipeline-enabled
+domain, one with a stage seat whose role runs Gemini. Pipeline stages lease an
+identity too, so they count against the cap the same way.
+
 - No added identities, or no Gemini candidate on a leasing runtime: the broker
   credential count, as before.
 - Every Gemini candidate on a leasing runtime: the number of *ready*
@@ -194,6 +198,12 @@ the broker cap.
 
 **Readiness and isolation.** Each drain that has a leasing Gemini candidate
 runs `status` and `settings` on the keychain helper for every added identity.
+A lease does not depend on that drain: before leasing, the pool runs the same
+pass itself when none has run yet, when an added identity has never been
+checked, or when the last pass is more than 60s old. The pool-disabled watcher
+path (`ADVERSARIAL_REVIEWER_POOL_ENABLED=false`) and pipeline stages lease this
+way. The HQ owner is leasable without a pass, as it always was.
+
 An identity is isolated when:
 
 - its keychain or keychain item is missing or unreadable, or its settings file
@@ -202,7 +212,8 @@ An identity is isolated when:
 - a CCX-07 keychain-bootstrap record marks it not ready;
 - a review it ran fails with any failure class other than `cancelled`,
   `stale-review-head` or `daemon-bounce`. A failed review isolates the HQ
-  owner too.
+  owner too;
+- a process still runs as that user after its review ended (see below).
 
 Log lines:
 
@@ -217,6 +228,44 @@ automatically. This happens once its cheap check passes and a background
 owner) succeeds. No operator step is needed. An identity that stays isolated
 lowers the cap by one. Fix the reason in the log line (keychain login,
 settings file) and the next drain re-admits it.
+
+**No lease available.** If no identity is ready and free within 5 minutes,
+the review does not run. It fails with the transient class
+`agy-identity-unavailable`, and its error lists each unready identity with its
+reasons. Like `cascade`, it parks the PR in `pending-upstream` on the bounded
+infra auto-recovery budget. It is deliberately not `reviewer-timeout`: no
+reviewer ran, so it does not count toward the reviewer-timeout merge-agent
+handoff.
+
+**Processes the watcher cannot signal.** agy on an added identity runs as
+another OS user, and the HQ owner cannot signal that user's processes. So the
+process-group reaping that handles agy's leftover language server on the
+HQ-owner path does not reach them, and neither does the SIGTERM/SIGKILL on a
+timeout. Two things keep this from hanging a review or sharing a HOME:
+
+- The reviewer child captures agy's output through HQ-owner files that agy
+  writes via inherited descriptors, not through pipes. A leftover descendant
+  therefore cannot hold the capture open, and the review settles when sudo
+  exits. If sudo itself outlives a timeout kill, the capture settles 10s after
+  the SIGKILL was due anyway and leaves the process running.
+- When a lease is released, the watcher lists the processes whose real user is
+  that identity (`/bin/ps -U <user>`, no privilege needed). If any are left,
+  for example a leftover language server or an agy that outlived a timeout, the
+  identity is isolated as draining and is not leased again until none are
+  left. Each readiness pass checks again. An unreadable answer counts as
+  "still running":
+
+```text
+[agy-identities] identity=<user> isolated: N process(es) still running as <user> (pid ...); not leased until they exit
+```
+
+The CCX-07 pinned commands have no verb that kills a process as the identity,
+so nothing in this module kills survivors. agy's own `--print-timeout` bounds
+a surviving agy. A language server that never exits keeps its identity out
+until an administrator ends it, for example with
+`sudo pkill -KILL -u <user>`. The durable fix belongs in CCX-07's pinned agy
+wrapper: run agy in its own process group and SIGKILL that group when agy
+exits or the wrapper is signalled.
 
 **Startup sweep.** At watcher startup, each added identity's workspace helper
 runs `sweep`, which removes leaked scratch copies older than the helper's age

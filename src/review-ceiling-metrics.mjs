@@ -225,6 +225,7 @@ export function countReviewCeilingAttempts({
     if (rows.length > 0) {
       const transientFleetInfraClasses = new Set([
         'adapter_spawn_timeout',
+        'agy-identity-unavailable',
         'dispatch-failed',
         'launchctl-bootstrap',
         'oauth-broken',

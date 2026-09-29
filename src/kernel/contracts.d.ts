@@ -503,6 +503,7 @@ export type ReviewerFailureClass =
   | 'attestation-sign-failed'
   | 'hcp-unavailable'
   | 'infra-runtime-missing-library'
+  | 'agy-identity-unavailable'
   | 'local-admission-refused'
   | 'bug'
   | 'unknown';

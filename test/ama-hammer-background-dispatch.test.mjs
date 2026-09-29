@@ -331,6 +331,40 @@ test('queued hammer dispatch rechecks live PR state and head before launching', 
   }
 });
 
+test('queued hammer dispatch names a draft and an unmergeable PR instead of a state change (COMMENTCLOSE-01)', async () => {
+  const cases = [
+    {
+      live: { state: 'OPEN', headSha: HEAD, isDraft: true, mergeable: 'MERGEABLE' },
+      expect: { reason: 'background-pr-draft', needsOperator: true, operatorReason: 'pr-is-draft' },
+    },
+    {
+      live: { state: 'OPEN', headSha: HEAD, isDraft: false, mergeable: 'CONFLICTING' },
+      expect: { reason: 'background-pr-not-mergeable', mergeable: 'CONFLICTING', retryAfterMs: 30_000 },
+    },
+  ];
+  for (const { live, expect } of cases) {
+    const queue = createAmaHammerBackgroundQueue({ maxConcurrent: 1 });
+    let closerCalls = 0;
+    const args = closureArgs({
+      resolveAmaHammerDispatchModeImpl: () => 'background',
+      amaHammerBackgroundQueueImpl: () => queue,
+      fetchCurrentPrStateImpl: async () => live,
+      maybeDispatchAmaCloserImpl: async () => {
+        closerCalls += 1;
+        return { dispatched: true };
+      },
+    });
+    await maybeDispatchAmaClosureFor(args);
+    await queue.drain();
+    assert.equal(closerCalls, 0);
+    const settled = await maybeDispatchAmaClosureFor(args);
+    assert.equal(settled.dispatched, false);
+    assert.equal(settled.skipMergeAgent, true);
+    for (const [key, value] of Object.entries(expect)) assert.equal(settled[key], value, `${expect.reason}.${key}`);
+    if (expect.reason === 'background-pr-draft') assert.equal(settled.retryAfterMs, undefined);
+  }
+});
+
 test('queue reports a coalesced submit as queued while its entry still waits for a slot', async () => {
   const queue = createAmaHammerBackgroundQueue({ maxConcurrent: 1 });
   const gate = deferred();

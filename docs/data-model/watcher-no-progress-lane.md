@@ -42,6 +42,7 @@ Required fields:
 | `noProgressTicks` | number | Consecutive walked ticks with the same fingerprint. |
 | `skippedTicks` | number | Deferred ticks counted toward the current backoff window. |
 | `lane` | string | `active`, `slow`, or `operator-blocked`. |
+| `operatorReason` | string, optional | Present only in the `operator-blocked` lane when the handler named why an operator is needed, for example `pr-is-draft` (COMMENTCLOSE-01). A named reason also selects that reason's operator-decision alert text. |
 | `firstNoProgressAt` | string or null | First observed timestamp for the unchanged series. |
 | `updatedAt` | string or null | Last ledger update timestamp. |
 

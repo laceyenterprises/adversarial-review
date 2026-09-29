@@ -1839,13 +1839,15 @@ export async function maybeDispatchAmaClosureFor({
             );
             return { dispatched: false, reason: 'background-pr-state-unavailable' };
           }
-          if (
-            live?.state !== 'OPEN' ||
-            live?.headSha !== dispatchContext.targetRemediationSha ||
-            live?.isDraft ||
-            live?.mergeable !== 'MERGEABLE'
-          ) {
+          // COMMENTCLOSE-01: name what blocked. A draft or an unmergeable PR is not
+          // a state change; agent-os#7311 (a worker-opened draft) spent four hammer
+          // attempts reported only as `background-pr-state-changed`.
+          if (live?.state !== 'OPEN' || live?.headSha !== dispatchContext.targetRemediationSha) {
             return { dispatched: false, reason: 'background-pr-state-changed' };
+          }
+          if (live?.isDraft) return { dispatched: false, reason: 'background-pr-draft' };
+          if (live?.mergeable !== 'MERGEABLE') {
+            return { dispatched: false, reason: 'background-pr-not-mergeable', mergeable: live?.mergeable || null };
           }
           return maybeDispatchAmaCloserImpl({ ...closerArgs });
         },
@@ -1893,8 +1895,12 @@ export async function maybeDispatchAmaClosureFor({
           : new Error(String(backgroundSettled.error || 'background AMA dispatch failed'));
       }
       result = backgroundSettled.result;
-      if (result?.reason === 'background-pr-state-changed') {
+      if (result?.reason === 'background-pr-state-changed' || result?.reason === 'background-pr-not-mergeable') {
         result = { ...result, skipMergeAgent: true, retryAfterMs: 30_000 };
+      } else if (result?.reason === 'background-pr-draft') {
+        // Nothing in the pipeline marks a PR ready for review, so a draft waits
+        // for a person: route it to the operator-blocked lane, named as a draft.
+        result = { ...result, skipMergeAgent: true, needsOperator: true, operatorReason: 'pr-is-draft' };
       }
     } else {
       const stopTracking = trackCoexistenceOperation(operationTracker, 'ama-hammer-dispatch');

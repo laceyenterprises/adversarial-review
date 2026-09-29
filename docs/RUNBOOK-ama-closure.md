@@ -246,11 +246,16 @@ its configurable capacity limit counts active launches for other PRs only.
 `watcher.ama_closer_max_concurrent_launches` is read when the process-local
 queue is first created, so changing this limit requires a watcher restart.
 When a queued entry gets a slot, the watcher fetches the live PR state,
-head, draft flag, and mergeability before calling the closer. A closed,
-updated, draft, or unmergeable PR yields `background-pr-state-changed` without
-launching a hammer; an unreadable live state yields
-`background-pr-state-unavailable`. Both results are retained for the next tick
-to apply through the normal inline result path. A settle-log failure cannot
+head, draft flag, and mergeability before calling the closer, and names what
+blocked it without launching a hammer (COMMENTCLOSE-01): a closed or updated PR
+yields `background-pr-state-changed`, a draft yields `background-pr-draft`, a
+non-`MERGEABLE` PR yields `background-pr-not-mergeable` (with the observed
+`mergeable` value), and an unreadable live state yields
+`background-pr-state-unavailable`. These results are retained for the next tick
+to apply through the normal inline result path. A state change or an unmergeable
+PR retries after 30 seconds; a draft routes to the operator-blocked lane with
+`operatorReason: pr-is-draft`, because nothing in the pipeline marks a PR ready
+for review, and its operator alert says the PR is a draft. A settle-log failure cannot
 leave an unhandled background promise rejection.
 
 When a run settles, the queue keeps its outcome for that PR@head (at most 256

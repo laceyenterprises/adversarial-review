@@ -30,6 +30,11 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  ARGUS_BACKLOG_RETIREMENT_INTERVAL_MS,
+  createGhOpenPullHeadsLister,
+  retireArgusBacklog,
+} from './argus-backlog-retirement.mjs';
+import {
   claimNextArgusJob,
   completeArgusJob,
   failArgusJob,
@@ -240,6 +245,12 @@ export function applyArgusReviewOutcome({
  * A bounded background drain. `tick()` is synchronous: it claims up to the
  * free capacity, starts each review, and returns. Reviews settle on their own
  * and apply their outcome to the queue.
+ *
+ * `retireBacklog` (item 4) runs before the first claim and then on an
+ * interval, in the background like everything else here. Until the first pass
+ * has finished, successfully or not, the drain claims nothing: the backlog is
+ * mostly dead heads, and reviewing it oldest-first would spend the first hours
+ * on trees nobody will merge.
  */
 export function createArgusSecurityDrain({
   rootDir,
@@ -247,12 +258,45 @@ export function createArgusSecurityDrain({
   maxAttempts = DEFAULT_ARGUS_DRAIN_MAX_ATTEMPTS,
   runJob = ({ jobPath }) => runArgusReviewChild({ rootDir, jobPath }),
   isClaimable = isArgusJobClaimable,
+  retireBacklog = null,
+  retirementIntervalMs = ARGUS_BACKLOG_RETIREMENT_INTERVAL_MS,
   nowMs = () => Date.now(),
   logger = console,
 } = {}) {
   const limit = Math.max(1, Number.parseInt(String(maxConcurrent), 10) || 1);
   const running = new Map();
   let peakRunning = 0;
+  const retirement = {
+    firstPassDone: retireBacklog === null,
+    running: false,
+    lastStartedMs: null,
+    lastFinishedAt: null,
+    lastSummary: null,
+    lastError: null,
+    promise: null,
+  };
+
+  function maybeStartRetirement() {
+    if (typeof retireBacklog !== 'function' || retirement.running) return;
+    if (retirement.lastStartedMs !== null && nowMs() - retirement.lastStartedMs < retirementIntervalMs) return;
+    retirement.running = true;
+    retirement.lastStartedMs = nowMs();
+    retirement.promise = Promise.resolve()
+      .then(() => retireBacklog({ runningJobIds: [...running.keys()], nowMs: nowMs() }))
+      .then((summary) => {
+        retirement.lastSummary = summary || null;
+        retirement.lastError = null;
+      })
+      .catch((err) => {
+        retirement.lastError = String(err?.message || err);
+        logger?.error?.(`[argus-drain] backlog retirement failed: ${retirement.lastError}`);
+      })
+      .finally(() => {
+        retirement.running = false;
+        retirement.firstPassDone = true;
+        retirement.lastFinishedAt = new Date(nowMs()).toISOString();
+      });
+  }
 
   async function settle(claim) {
     let outcome;
@@ -284,6 +328,10 @@ export function createArgusSecurityDrain({
      */
     tick({ paused = false } = {}) {
       if (paused) return { claimed: [], running: running.size, limit, skipped: 'paused' };
+      maybeStartRetirement();
+      if (!retirement.firstPassDone) {
+        return { claimed: [], running: running.size, limit, skipped: 'awaiting-backlog-retirement' };
+      }
       const claimed = [];
       while (running.size < limit) {
         let claim;
@@ -312,10 +360,23 @@ export function createArgusSecurityDrain({
       return [...running.keys()];
     },
     snapshot() {
-      return { running: running.size, limit, peakRunning, jobIds: [...running.keys()] };
+      return {
+        running: running.size,
+        limit,
+        peakRunning,
+        jobIds: [...running.keys()],
+        retirement: {
+          firstPassDone: retirement.firstPassDone,
+          running: retirement.running,
+          lastFinishedAt: retirement.lastFinishedAt,
+          lastSummary: retirement.lastSummary,
+          lastError: retirement.lastError,
+        },
+      };
     },
-    /** Test/shutdown helper: resolves once every started review has settled. */
+    /** Test/shutdown helper: resolves once retirement and every review settled. */
     async drain() {
+      await retirement.promise;
       while (running.size > 0) {
         await Promise.allSettled([...running.values()].map((entry) => entry.promise));
       }
@@ -329,10 +390,14 @@ let processDrain = null;
 
 export function argusSecurityDrainForProcess({ rootDir = ROOT, env = process.env, logger = console } = {}) {
   if (!processDrain) {
+    const listOpenPullHeads = createGhOpenPullHeadsLister({ env, logger });
     processDrain = createArgusSecurityDrain({
       rootDir,
       maxConcurrent: resolveArgusDrainMaxConcurrent(env),
       maxAttempts: resolveArgusDrainMaxAttempts(env),
+      retireBacklog: ({ runningJobIds, nowMs }) => retireArgusBacklog({
+        rootDir, listOpenPullHeads, runningJobIds, nowMs, logger,
+      }),
       logger,
     });
   }

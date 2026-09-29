@@ -15,6 +15,7 @@ import {
   assessArgusVerification,
   createDefaultArgusEvidenceIo,
   gatherArgusEvidence,
+  lockfileFactsGap,
   npmManifestDirs,
   resolveArgusRubricPythonPath,
   resolveDependencyBump,
@@ -207,11 +208,48 @@ test('a failed manifest read is fatal, not an incomplete tree that skips the rub
   assert.equal(evidence.rubric.results[0].status, 'error');
   assert.equal(calls.rubric.length, 0);
 
-  // A file absent at the ref (fetchFileAtRef → null on 404) is still an incomplete tree.
-  const { io: absentIo } = fakeIo({ files: { [`${HEAD}:package.json`]: '{}', [`${HEAD}:package-lock.json`]: JSON.stringify(LOCK_HEAD) } });
+  // A head file absent at the ref (fetchFileAtRef → null on 404) is still an incomplete tree.
+  const { io: absentIo } = fakeIo({ files: { [`${BASE}:package.json`]: '{}', [`${BASE}:package-lock.json`]: JSON.stringify(LOCK_BASE), [`${HEAD}:package.json`]: '{}' } });
   const absent = await gatherArgusEvidence({ job: routedJob(), pr: PR, diff: '', workDir, rootDir: '/ar', io: absentIo, logger: quiet });
   assert.equal(absent.fatal, null);
   assert.equal(absent.rubric.results[0].status, 'skipped-incomplete-trees');
+}));
+
+test('a manifest tree this PR adds is reviewed against an empty base, not skipped', () => withRoot(async (workDir) => {
+  const { io, calls } = fakeIo({ files: { [`${HEAD}:package.json`]: '{}', [`${HEAD}:package-lock.json`]: JSON.stringify(LOCK_HEAD) } });
+  const evidence = await gatherArgusEvidence({ job: routedJob(), pr: PR, diff: '', workDir, rootDir: '/ar', io, logger: quiet });
+
+  assert.equal(evidence.fatal, null);
+  assert.equal(calls.rubric.length, 1);
+  assert.equal(evidence.rubric.results[0].status, 'ran');
+  assert.deepEqual(evidence.rubric.results[0].baseSynthesized, ['manifest', 'lock']);
+  const baseLock = JSON.parse(readFileSync(join(workDir, 'trees', '0', 'base', 'package-lock.json'), 'utf8'));
+  assert.equal(baseLock.lockfileVersion, 3);
+  assert.deepEqual(Object.keys(baseLock.packages), ['']);
+  assert.deepEqual(JSON.parse(readFileSync(join(workDir, 'trees', '0', 'base', 'package.json'), 'utf8')), {});
+  const facts = evidence.sections.find((section) => section.title.startsWith('Lockfile facts')).body;
+  assert.match(facts, /Packages added \(2\)/u);
+  assert.match(facts, /No package-lock\.json at base/u);
+  assert.match(evidence.sections.find((section) => section.title.startsWith('Deterministic ASR-05')).body, /reviewed against an empty base/u);
+}));
+
+test('a v1 lockfile says its facts were not derived instead of reading as an empty delta', () => withRoot(async (workDir) => {
+  const v1 = JSON.stringify({ lockfileVersion: 1, dependencies: { evil: { version: '1.0.0', resolved: 'https://evil.example/evil.tgz' } } });
+  const { io } = fakeIo({
+    files: {
+      [`${BASE}:package.json`]: '{}',
+      [`${BASE}:package-lock.json`]: JSON.stringify(LOCK_BASE),
+      [`${HEAD}:package.json`]: '{}',
+      [`${HEAD}:package-lock.json`]: v1,
+    },
+  });
+  const evidence = await gatherArgusEvidence({ job: routedJob(), pr: PR, diff: '', workDir, rootDir: '/ar', io, logger: quiet });
+  const facts = evidence.sections.find((section) => section.title.startsWith('Lockfile facts')).body;
+  assert.match(facts, /head package-lock\.json: lockfileVersion 1 has no `packages` map/u);
+  assert.match(facts, /Lockfile facts were NOT derived/u);
+  assert.doesNotMatch(facts, /Packages added/u);
+  assert.equal(lockfileFactsGap(LOCK_HEAD), null);
+  assert.equal(lockfileFactsGap(null), null);
 }));
 
 test('a failed manifest read retries the review instead of deciding it without the rubric', () => withRoot(async (workDir) => {

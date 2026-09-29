@@ -47,9 +47,11 @@ import { execGhWithRetry } from './gh-cli.mjs';
 export const ARGUS_CLAIM_LEASE_MS = 60 * 60 * 1000;
 export const ARGUS_BACKLOG_RETIREMENT_INTERVAL_MS = 30 * 60 * 1000;
 export const ARGUS_OPEN_PR_LIST_LIMIT = 1000;
-// Completed history grows without bound; only recent completions can be a
-// legacy parking whose PR is still open.
-const COMPLETED_SCAN_LIMIT = 500;
+// The completed bucket is scanned whole. A newest-N cap looks safe (a legacy
+// parking predates the drain) but is not: this pass itself completes every
+// retired job, and one pass over the 1,519-job backlog pushes #1171 and #1172
+// hundreds of records deep. Recency is not liveness; the open-PR listing is.
+const COMPLETED_SCAN_LIMIT = Number.POSITIVE_INFINITY;
 
 function normalizeRepoKey(repo) {
   return String(repo || '').trim().toLowerCase();

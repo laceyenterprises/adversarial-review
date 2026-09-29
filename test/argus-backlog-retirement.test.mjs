@@ -4,7 +4,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -140,6 +140,34 @@ test('a legacy route-for-review completion whose head is live goes back to the d
   assert.equal(bucketOf(rootDir, AR, 1171, sha(1171)), 'completed', 'a superseded legacy head stays closed');
   assert.equal(bucketOf(rootDir, AR, 1170, sha(1170)), 'completed', 'a withheld merge is not a review question');
   assert.equal(summary.requeued, 1);
+}));
+
+test('a legacy route-for-review completion buried under 500+ newer completions is still reopened', async () => withRoot(async (rootDir) => {
+  const bot = [{ trigger: 'bot-author', author: 'dependabot[bot]' }, { trigger: 'manifest-change', ecosystems: ['npm'] }];
+  enqueue(rootDir, AR, 1172, sha(1172), bot);
+  const parked = findArgusJob(rootDir, { repo: AR, prNumber: 1172, headSha: sha(1172) });
+  const { jobPath } = completeArgusJob({
+    rootDir,
+    jobPath: parked.jobPath,
+    job: parked.job,
+    result: { schemaVersion: 1, kind: 'argus-security-result', verdict: 'needs_verification', findings: [], autoadjudication: { decision: 'route-for-review', reason: 'semver-major' } },
+  });
+  utimesSync(jobPath, new Date(T0 - 86_400_000), new Date(T0 - 86_400_000));
+  // What one retirement pass over the backlog leaves behind: hundreds of newer completions.
+  for (let pr = 2000; pr < 2520; pr += 1) {
+    enqueue(rootDir, AR, pr, sha(pr));
+    const found = findArgusJob(rootDir, { repo: AR, prNumber: pr, headSha: sha(pr) });
+    completeArgusJob({ rootDir, jobPath: found.jobPath, job: found.job, result: { schemaVersion: 1, kind: 'argus-security-result', verdict: 'approve', findings: [] } });
+  }
+
+  const summary = await retireArgusBacklog({
+    rootDir,
+    nowMs: T0,
+    logger: quiet,
+    listOpenPullHeads: lister({ [AR]: { complete: true, heads: new Map([[1172, sha(1172)]]) } }),
+  });
+  assert.equal(summary.requeued, 1);
+  assert.equal(bucketOf(rootDir, AR, 1172, sha(1172)), 'pending');
 }));
 
 test('claims orphaned by a restart return to pending; a live or fresh claim is left alone', async () => withRoot(async (rootDir) => {

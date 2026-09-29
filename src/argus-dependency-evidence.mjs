@@ -122,6 +122,25 @@ function lockPackages(lock) {
   return lock && typeof lock.packages === 'object' && lock.packages ? lock.packages : {};
 }
 
+/**
+ * Why a parsed lockfile yields no facts, or null when it does. A v1 lockfile
+ * (npm 6) has a nested `dependencies` tree and no `packages` map; reading it as
+ * an empty map would render "0 added, no install scripts" for a PR whose delta
+ * was never read.
+ */
+export function lockfileFactsGap(lock) {
+  if (!lock || (typeof lock.packages === 'object' && lock.packages)) return null;
+  return `lockfileVersion ${JSON.stringify(lock.lockfileVersion ?? null)} has no \`packages\` map`;
+}
+
+// The base side of a manifest directory this PR creates. The rubric reads both
+// trees and refuses a missing file, so an absent base is written out as an empty
+// v3 tree: every head entry is then reviewed as added, which is what it is.
+const EMPTY_BASE_TREE = {
+  manifest: '{}\n',
+  lock: `${JSON.stringify({ lockfileVersion: 3, packages: { '': {} } })}\n`,
+};
+
 function packageNameFromLockPath(path) {
   const index = path.lastIndexOf('node_modules/');
   return index < 0 ? path : path.slice(index + 'node_modules/'.length);
@@ -335,22 +354,38 @@ export async function gatherArgusEvidence({
       continue;
     }
     const treeRoot = join(workDir, 'trees', String(index));
+    // Only the head must be whole: a base that lacks a file is a tree this PR
+    // adds, and skipping the rubric there would wave through every package in it.
+    const headComplete = files.head.manifest !== null && files.head.lock !== null;
+    const baseSynthesized = headComplete ? ['manifest', 'lock'].filter((kind) => files.base[kind] === null) : [];
     for (const side of ['base', 'head']) {
       mkdirSync(join(treeRoot, side), { recursive: true });
-      if (files[side].manifest !== null) writeFileSync(join(treeRoot, side, 'package.json'), files[side].manifest);
-      if (files[side].lock !== null) writeFileSync(join(treeRoot, side, 'package-lock.json'), files[side].lock);
+      const manifest = files[side].manifest ?? (side === 'base' && headComplete ? EMPTY_BASE_TREE.manifest : null);
+      const lock = files[side].lock ?? (side === 'base' && headComplete ? EMPTY_BASE_TREE.lock : null);
+      if (manifest !== null) writeFileSync(join(treeRoot, side, 'package.json'), manifest);
+      if (lock !== null) writeFileSync(join(treeRoot, side, 'package-lock.json'), lock);
     }
     const baseLock = parseJsonOrNull(files.base.lock);
     const headLock = parseJsonOrNull(files.head.lock);
     if (headLock) {
+      const gaps = [['head', headLock], ['base', baseLock]]
+        .map(([side, lock]) => [side, lockfileFactsGap(lock)])
+        .filter(([, gap]) => gap);
       sections.push({
         title: `Lockfile facts (${dir || 'repository root'})`,
-        body: renderLockDelta(dir, summarizeLockfileDelta({ baseLock, headLock, packageName: dependency?.packageName }), dependency?.packageName),
+        body: gaps.length > 0
+          ? [
+            `Manifest directory: \`${dir || '.'}\``,
+            ...gaps.map(([side, gap]) => `- ${side} package-lock.json: ${gap}.`),
+            '- Lockfile facts were NOT derived: the packages added, removed and changed, install scripts, resolved '
+              + 'sources and integrity are unverified for this directory. Do not read their absence as a clean delta.',
+          ].join('\n')
+          : renderLockDelta(dir, summarizeLockfileDelta({ baseLock, headLock, packageName: dependency?.packageName }), dependency?.packageName)
+            + (files.base.lock === null ? '\n- No package-lock.json at base: this PR adds the tree, so every head entry is listed as added.' : ''),
       });
     }
 
-    const complete = ['base', 'head'].every((side) => files[side].manifest !== null && files[side].lock !== null);
-    if (!pythonPath || !complete) {
+    if (!pythonPath || !headComplete) {
       rubricResults.push({ dir, status: pythonPath ? 'skipped-incomplete-trees' : 'unavailable' });
       continue;
     }
@@ -372,14 +407,26 @@ export async function gatherArgusEvidence({
     writeFileSync(requestPath, `${JSON.stringify(request, null, 2)}\n`);
     try {
       const { exitCode, doc } = await io.runRubric({ requestPath, pythonPath });
-      rubricResults.push({ dir, status: 'ran', exitCode, verdict: doc?.verdict || null, tier: doc?.depth?.tier || null, riskDirection: doc?.riskDirection || null });
+      rubricResults.push({
+        dir,
+        status: 'ran',
+        exitCode,
+        verdict: doc?.verdict || null,
+        tier: doc?.depth?.tier || null,
+        riskDirection: doc?.riskDirection || null,
+        ...(baseSynthesized.length > 0 ? { baseSynthesized } : {}),
+      });
       for (const finding of doc?.findings || []) {
         rubricFindings.push(normalizeArgusFinding(
           { ...finding, path: dir ? `${dir}/package-lock.json` : 'package-lock.json' },
           { source: 'argus-rubric' },
         ));
       }
-      sections.push({ title: `Deterministic ASR-05 rubric (${dir || 'repository root'})`, body: renderRubric({ dir, exitCode, doc }) });
+      sections.push({
+        title: `Deterministic ASR-05 rubric (${dir || 'repository root'})`,
+        body: renderRubric({ dir, exitCode, doc })
+          + (baseSynthesized.length > 0 ? `\n- Base tree absent (${baseSynthesized.join(', ')}): reviewed against an empty base.` : ''),
+      });
     } catch (err) {
       fatal = `ASR-05 rubric failed for ${dir || '.'}: ${err?.message || err}`;
       rubricResults.push({ dir, status: 'error', error: String(err?.message || err).slice(0, 500) });

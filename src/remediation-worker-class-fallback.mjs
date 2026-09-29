@@ -26,26 +26,21 @@ import {
   providerForQuotaHarness,
   isGroundedProviderState,
 } from './fleet-quota-status.mjs';
+import { resolveRemediatorFallback } from './role-config.mjs';
 
 const execFileAsync = promisify(execFileCb);
 const FLEET_QUOTA_STATUS_TIMEOUT_MS = 20_000;
 
-// Default fallback chain when the routed remediator harness is grounded: use
-// the other supported remediation harness. Candidate availability is checked
-// against fleet quota before selection, so a grounded Claude route can recover
-// on Codex and the normal cross-model route returns when Claude recovers.
-// Operator-tunable via a comma-separated env override; `[]`
-// (or a single empty value) disables the fallback and restores the pre-2026-08-19
-// behavior (a capped remediator quota-holds instead of falling back).
-const DEFAULT_REMEDIATION_WORKER_CLASS_FALLBACK = Object.freeze(['claude-code', 'codex']);
-
-export function remediationWorkerClassFallback(env = process.env) {
-  const raw = env?.ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK;
-  if (raw === undefined || raw === null) return [...DEFAULT_REMEDIATION_WORKER_CLASS_FALLBACK];
-  return String(raw)
-    .split(',')
-    .map((value) => value.trim().toLowerCase())
-    .filter(Boolean);
+// The fallback chain is declared config (REMFALLBACK-01):
+// `roles.remediator_fallback`, schema-registered in the Node, Python and shell
+// loaders, with the default in the schema rather than in code. Candidate
+// availability is checked against fleet quota before selection, so a grounded
+// Claude route can recover on Codex and the normal cross-model route returns
+// when Claude recovers. The AR#859 env toggle
+// `ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK` is an alias of the key;
+// `[]` (or an empty env value) disables the fallback.
+export function remediationWorkerClassFallback(env = process.env, { topPath, loaderImpl } = {}) {
+  return resolveRemediatorFallback({ env, topPath, loaderImpl });
 }
 
 function resolveHqPath(env = process.env) {

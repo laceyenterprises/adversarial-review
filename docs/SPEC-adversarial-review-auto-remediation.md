@@ -610,9 +610,13 @@ worker selection also runs inside the claimed-job failure handler so
 direct/helper callers cannot strand a job in `in-progress/` on a bad override.
 On each follow-up consume, the routed worker remains primary unless HQ fleet
 quota status authoritatively grounds its provider as exhausted or suspended.
-When grounded, the consumer tries the ordered
-`ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK` classes (default
-`claude-code, codex`) and selects the first with confirmed available quota.
+When grounded, the consumer tries the ordered `roles.remediator_fallback`
+classes and selects the first with confirmed available quota. The list is
+declared config (REMFALLBACK-01): it is registered in the Node, Python and
+shell loaders, its default (`[claude-code, codex]`) lives in the schema and in
+this module's `config.yaml`, and `AGENT_OS_ROLES_REMEDIATOR_FALLBACK` or the
+legacy comma-separated `ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK`
+override it (`''` or `[]` disables it).
 This availability fallback may select the PR builder's family as a remediator;
 the normal builder-tag route resumes automatically when its provider recovers.
 Unknown, degraded, and unreadable quota states do not authorize fallback.

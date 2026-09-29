@@ -5816,6 +5816,76 @@ test('AMA merge_authority accepts hammer as closer worker class in Node loader',
   }
 });
 
+test('roles.remediator_fallback is declared config: schema default, file override, env aliases, class allowlist (REMFALLBACK-01)', () => {
+  const tmp = freshTmp();
+  try {
+    const bare = join(tmp, 'bare.yaml');
+    writeFile(bare, 'version: 1\n');
+    // Both the strict and the runtime (daemon) loader resolve the schema default.
+    for (const load of [loadConfig, loadConfigRuntime]) {
+      const cfg = load({ topPath: bare, env: {} });
+      assert.deepEqual(cfg.get('roles.remediator_fallback'), ['claude-code', 'codex']);
+      assert.equal(cfg.resolutionTrace('roles.remediator_fallback').at(-1).source, 'code-default');
+    }
+    // The checked-in module config declares the same order explicitly.
+    const moduleCfg = loadConfig({ topPath: bare, modulePaths: [MODULE_CONFIG_PATH], env: {} });
+    assert.deepEqual(moduleCfg.get('roles.remediator_fallback'), ['claude-code', 'codex']);
+
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      roles:
+        remediator_fallback: [claude-code, gemini]
+    `);
+    assert.deepEqual(
+      loadConfig({ topPath: top, env: {} }).get('roles.remediator_fallback'),
+      ['claude-code', 'gemini'],
+    );
+
+    const off = join(tmp, 'off.yaml');
+    writeFile(off, `
+      version: 1
+      roles:
+        remediator_fallback: []
+    `);
+    assert.deepEqual(loadConfig({ topPath: off, env: {} }).get('roles.remediator_fallback'), []);
+
+    const canonical = loadConfig({ topPath: bare, env: { AGENT_OS_ROLES_REMEDIATOR_FALLBACK: 'gemini,codex' } });
+    assert.deepEqual(canonical.get('roles.remediator_fallback'), ['gemini', 'codex']);
+    assert.equal(
+      canonical.resolutionTrace('roles.remediator_fallback').at(-1).source,
+      'env:AGENT_OS_ROLES_REMEDIATOR_FALLBACK',
+    );
+    // The AR#859 env toggle keeps working, including `''` to disable.
+    const legacy = loadConfig({
+      topPath: bare,
+      env: { ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK: 'claude-code, gemini' },
+    });
+    assert.deepEqual(legacy.get('roles.remediator_fallback'), ['claude-code', 'gemini']);
+    const legacyOff = loadConfig({
+      topPath: bare,
+      env: { ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK: '' },
+    });
+    assert.deepEqual(legacyOff.get('roles.remediator_fallback'), []);
+
+    // `adversarial` is a routing mode and `hammer` a merge class: neither can remediate.
+    for (const bad of ['adversarial', 'hammer']) {
+      const badPath = join(tmp, `bad-${bad}.yaml`);
+      writeFile(badPath, `
+        version: 1
+        roles:
+          remediator_fallback: [claude-code, ${bad}]
+      `);
+      assert.throws(
+        () => loadConfig({ topPath: badPath, env: {} }),
+        (err) => err instanceof AgentOSConfigError && /remediator_fallback/.test(err.message),
+      );
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('AMA merge_authority worker_class_fallback defaults to [hammer-claude] (HHR)', () => {
   const tmp = freshTmp();
   try {

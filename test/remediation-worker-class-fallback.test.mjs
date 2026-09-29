@@ -81,10 +81,14 @@ test('fail-open: an unreadable fleet-quota status keeps the primary (never guess
   assert.equal(result.reason, 'fleet-quota-status-unavailable');
 });
 
+// Hermetic config cascade: the checked-in module config.yaml plus no top-level
+// file, so the host's ~/agent-os/config.yaml cannot leak into the fallback list.
+const HERMETIC_CONFIG = { topPath: '/dev/null' };
+
 test('falls back claude-code -> codex when Claude is grounded and Codex is available', async () => {
   const result = await resolveRemediationWorkerClassWithFallback({
     primary: 'claude-code',
-    fallbackWorkerClasses: remediationWorkerClassFallback({}),
+    fallbackWorkerClasses: remediationWorkerClassFallback({}, HERMETIC_CONFIG),
     execFileImpl: fleetStatusStub([
       { provider: 'openai', authPath: 'oauth', state: 'ok' },
       { provider: 'anthropic', authPath: 'oauth', state: 'exhausted' },
@@ -95,11 +99,28 @@ test('falls back claude-code -> codex when Claude is grounded and Codex is avail
   assert.equal(result.primaryState, 'exhausted');
 });
 
-test('remediationWorkerClassFallback defaults to both harnesses and honors the env override', () => {
-  assert.deepEqual(remediationWorkerClassFallback({}), ['claude-code', 'codex']);
+test('remediationWorkerClassFallback reads the declared roles.remediator_fallback and honors the env aliases', () => {
+  assert.deepEqual(remediationWorkerClassFallback({}, HERMETIC_CONFIG), ['claude-code', 'codex']);
   assert.deepEqual(
-    remediationWorkerClassFallback({ ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK: 'claude-code, gemini' }),
+    remediationWorkerClassFallback(
+      { ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK: 'claude-code, gemini' },
+      HERMETIC_CONFIG,
+    ),
     ['claude-code', 'gemini'],
   );
-  assert.deepEqual(remediationWorkerClassFallback({ ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK: '' }), []);
+  assert.deepEqual(
+    remediationWorkerClassFallback({ AGENT_OS_ROLES_REMEDIATOR_FALLBACK: 'gemini' }, HERMETIC_CONFIG),
+    ['gemini'],
+  );
+  assert.deepEqual(
+    remediationWorkerClassFallback({ ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK: '' }, HERMETIC_CONFIG),
+    [],
+  );
+});
+
+test('the fallback list is config, never a code constant: a declared order is returned verbatim', () => {
+  const declared = remediationWorkerClassFallback({}, {
+    loaderImpl: () => ({ get: (key) => (key === 'roles.remediator_fallback' ? ['gemini', 'claude-code', 'gemini'] : undefined) }),
+  });
+  assert.deepEqual(declared, ['gemini', 'claude-code']);
 });

@@ -137,6 +137,9 @@ export function resetRuntimeUnknownWarningCacheForTests() {
 
 const ENUM_ROLES_REVIEWER = ['claude-code', 'codex', 'claude', 'gemini', 'adversarial'];
 const ENUM_ROLES_REMEDIATOR = ['claude-code', 'codex', 'gemini', 'adversarial'];
+// REMFALLBACK-01: the concrete remediator worker classes a capped remediator can
+// fall back to. `adversarial` is a routing mode, not a class, so it is excluded.
+const ENUM_ROLES_REMEDIATOR_FALLBACK = ['claude-code', 'codex', 'gemini'];
 // `hammer` is the universal end-of-budget rescue worker (codex-backed, runs under
 // the merge-agent app identity); allowed here so the budget-exhausted final pass
 // can dispatch it. See worker-pool hq_resolve_worker_identity (merge-agent-lacey).
@@ -1738,6 +1741,22 @@ function schemaV1() {
             __type: TYPE_STRING,
             __default: 'adversarial',
             __enum: ENUM_ROLES_REMEDIATOR,
+          },
+          // REMFALLBACK-01: ordered remediator classes to fall back to when the
+          // routed remediator's provider is capped (grounded, AFH soft-grounded,
+          // model-exhausted, or a provider reset past the quota hold window).
+          // Resolved on every claim, so it auto-reverts when the routed class
+          // recovers. A candidate that is itself capped, or whose model family
+          // could review the PR's next round, is skipped. `[]` disables the
+          // fallback (a capped remediator then holds without respawning).
+          // Mirrored in the Python schema_v1 and the shell loader's key list.
+          remediator_fallback: {
+            __type: TYPE_LIST,
+            __item: {
+              __type: TYPE_STRING,
+              __enum: ENUM_ROLES_REMEDIATOR_FALLBACK,
+            },
+            __default: ['claude-code', 'codex'],
           },
           merge_agent_worker_class: {
             __type: TYPE_STRING,
@@ -3608,6 +3627,11 @@ export const ENV_ALIASES = {
   'roles.remediator': {
     canonical: 'AGENT_OS_ROLES_REMEDIATOR',
     aliases: [['ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR', identity]],
+  },
+  // The legacy env toggle from AR#859 stays honored as an alias, comma-separated.
+  'roles.remediator_fallback': {
+    canonical: 'AGENT_OS_ROLES_REMEDIATOR_FALLBACK',
+    aliases: [['ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK', identity]],
   },
   'roles.merge_agent_worker_class': {
     canonical: 'AGENT_OS_ROLES_MERGE_AGENT_WORKER_CLASS',

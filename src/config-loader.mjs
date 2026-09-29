@@ -2910,6 +2910,20 @@ function schemaV1() {
                 __type: TYPE_STRING,
                 __default: 'Gemini 3.1 Pro (High)',
               },
+              // CCX-08 (credential-capacity-expansion SPEC §2b): the ordered
+              // agy reviewer identities, as OS user names. Unset means one
+              // identity, the HQ owner, running agy directly as today. Mirrors
+              // the Python schema entry CCX-07 added (multi-loader parity).
+              identities: {
+                __type: TYPE_LIST,
+                __item: {
+                  __type: TYPE_STRING,
+                  __pattern: PATTERN_LOCAL_USERNAME,
+                  __pattern_description: PATTERN_LOCAL_USERNAME_DESCRIPTION,
+                },
+                __default: null,
+                __nullable: true,
+              },
               antigravity: {
                 __type: TYPE_DICT,
                 __strict: true,

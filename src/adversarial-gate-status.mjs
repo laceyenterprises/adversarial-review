@@ -449,14 +449,22 @@ function resolveSettledReviewVerdict(
     return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
   }
   if (currentHeadSha && reviewedHeadSha && String(reviewedHeadSha) !== String(currentHeadSha)) {
-    if (!isQuotaCapped && !isHeadChangeRereview) {
+    if (!isQuotaCapped) {
+      // COMMENTCLOSE-02: the recorded final-round push is checked BEFORE the
+      // head-change flag. `rereview_reason` is sticky row state that can still
+      // describe the head change that led to the reviewed head; the final
+      // round's own push is a different head change, and its evidence is the
+      // recorded job.
       const finalRound = reviewStatus === 'posted' && commentOnlyFinalRoundPushes
         ? resolveCommentOnlyFinalRoundVerdict(rootDir, {
           repo, prNumber, reviewedHeadSha, currentHeadSha, commentOnlyFinalRoundPushes,
           finalRoundJobFinder, latestJobFinder, liveHeadReview,
         })
         : null;
-      return finalRound || { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
+      if (finalRound) return finalRound;
+      if (!isHeadChangeRereview) {
+        return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
+      }
     }
   }
 

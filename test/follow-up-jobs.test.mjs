@@ -460,7 +460,7 @@ test('completed comment-only final round is durable PR-wide evidence', (t) => {
   });
   const ledger = summarizePRRemediationLedger(rootDir, job);
   assert.deepEqual(ledger.commentOnlyFinalRoundRevisionRefs, [head]);
-  assert.deepEqual(ledger.commentOnlyFinalRoundPushedHeads, [{ reviewedHead: head, workerPushedHeadSha: 'b'.repeat(40), completedAt: '2026-04-21T10:30:00.000Z', status: 'completed' }]);
+  assert.deepEqual(ledger.commentOnlyFinalRoundPushedHeads, [{ reviewedHead: head, workerPushedHeadSha: 'b'.repeat(40), completedAt: '2026-04-21T10:30:00.000Z', status: 'completed', pushProof: null }]);
   assert.equal(ledger.completedRoundsForPR, 1);
 });
 
@@ -493,6 +493,7 @@ test('a stopped comment-only final round keeps its pushed head in the PR ledger 
   assert.deepEqual(ledger.commentOnlyFinalRoundRevisionRefs, [head]);
   assert.deepEqual(ledger.commentOnlyFinalRoundPushedHeads, [{
     reviewedHead: head, workerPushedHeadSha: 'b'.repeat(40), completedAt: '2026-04-21T10:31:00.000Z', status: 'stopped',
+    pushProof: null,
   }]);
 });
 

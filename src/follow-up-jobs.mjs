@@ -1720,6 +1720,7 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
             workerPushedHeadSha: job.completion.workerPushedHeadSha,
             completedAt: job.completedAt || job.stoppedAt || job.failedAt || null,
             status: key,
+            pushProof: job.completion?.workerPushProof?.method || null,
           });
         }
       }

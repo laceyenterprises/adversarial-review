@@ -78,17 +78,19 @@ function pushedWorkspaceExec({ jobId = 'example__repo-pr-42-final', head = pushe
   };
 }
 
-async function resolve({ reply, ciGate = pendingGate, job = finalRoundJob(), execFileImpl = pushedWorkspaceExec() } = {}) {
+async function resolve({ reply, ciGate = pendingGate, job = finalRoundJob(), execFileImpl = pushedWorkspaceExec(), audit = { suspect: [], error: null } } = {}) {
   const warnings = [];
   const probes = [];
+  const alerts = [];
   const result = await resolveCommentOnlyFinalRoundCompletion({
     job, jobPath: '/unused', reply, workspaceDir: '/tmp/final-round/workspace',
-    auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
+    auditWorkspaceForContaminationImpl: async () => audit,
     inspectRemediationCiRegressionImpl: async (args) => { probes.push(args); return ciGate; },
+    deliverAlertImpl: async (text, options) => { alerts.push({ text, ...options }); return { queued: true }; },
     execFileImpl,
-    log: { warn: (msg) => warnings.push(msg), log: () => {} },
+    log: { warn: (msg) => warnings.push(msg), log: () => {}, error: (msg) => warnings.push(msg) },
   });
-  return { result, warnings, probes };
+  return { result, warnings, probes, alerts };
 }
 
 test('a partial final round whose only blocker is pending CI completes with its pushed head', async () => {
@@ -99,7 +101,8 @@ test('a partial final round whose only blocker is pending CI completes with its 
   assert.equal(result.workerPushedHeadSha, pushedHead);
   assert.deepEqual(result.completionFields, {
     workerPushedHeadSha: pushedHead,
-    finalRoundOutcome: { completed: true, reason: 'ci-probe-pending-ci', ciState: 'pending' },
+    workerPushProof: { method: 'git-cherry-replay', reviewedCommitsReplayed: 0, workerCommits: 1 },
+    finalRoundOutcome: { completed: true, reason: 'ci-probe-pending-ci', ciState: 'pending', push: 'descendant' },
   });
   assert.equal(probes.length, 1, 'the CI state probe decides, not the reply text');
 });
@@ -139,4 +142,35 @@ test('non-final jobs are untouched', async () => {
   });
   assert.deepEqual(result, { completed: false, workerPushedHeadSha: null, completionFields: {} });
   assert.equal(probes.length, 0);
+});
+
+test('a completed final round whose moved head cannot be proven alerts and records the held head', async () => {
+  const foreignHead = '3'.repeat(40);
+  const { result, alerts, warnings } = await resolve({
+    reply: { outcome: 'completed', blockers: [], operationalBlockers: [] },
+    // The workspace HEAD is the worker's commit, but someone else's head is live.
+    execFileImpl: async (command, args) => (command === 'gh'
+      ? { stdout: `${foreignHead}\n` }
+      : pushedWorkspaceExec()(command, args)),
+  });
+  assert.equal(result.workerPushedHeadSha, null);
+  assert.equal(result.completed, true, 'the worker outcome stands; the head is held, not re-reviewed');
+  assert.equal(result.completionFields.withheldPushHeadSha, foreignHead);
+  assert.match(result.completionFields.finalRoundOutcome.push, /^live-head-mismatch/);
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].event, 'adversarial_review.comment_only_final_round_push_unproven');
+  assert.equal(alerts[0].payload.liveHeadSha, foreignHead);
+  assert.match(alerts[0].text, /could not be proven \(live-head-mismatch/);
+  assert.match(warnings.join('\n'), /Withholding final-round push proof for example\/repo#42: live-head-mismatch/);
+});
+
+test('a contamination-audit failure withholds the proof, names the reason, and alerts on a moved head', async () => {
+  const { result, alerts } = await resolve({
+    reply: { outcome: 'completed', blockers: [], operationalBlockers: [] },
+    audit: { suspect: [{ sha: 'abc', subject: 'dup' }], error: null },
+  });
+  assert.equal(result.workerPushedHeadSha, null);
+  assert.equal(result.completionFields.finalRoundOutcome.push, 'branch-contamination-audit-failed');
+  assert.equal(result.completionFields.withheldPushHeadSha, pushedHead);
+  assert.equal(alerts.length, 1);
 });

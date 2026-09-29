@@ -12,7 +12,8 @@
 // Pending CI is classified structurally: the reply's `kind: 'pending-ci'` field,
 // corroborated by this reconciler's own CI probe of the proven pushed head. The
 // worker's free-text title is never read to decide that CI is merely pending.
-import { captureFinalRoundWorkerPushedHead } from './comment-only-final-round.mjs';
+import { deliverAlert } from './alert-delivery.mjs';
+import { proveFinalRoundWorkerPush } from './comment-only-final-round.mjs';
 import {
   OPERATIONAL_BLOCKER_KIND_PENDING_CI,
   isDeclaredOperationalBlockerCode,
@@ -53,6 +54,30 @@ export function classifyFinalRoundOperationalBlockers(operationalBlockers, { ciG
   return { pendingCiOnly: true, reason: untagged.length === 0 ? 'kind-pending-ci' : 'ci-probe-pending-ci' };
 }
 
+// A final round whose push could not be proven while the PR head moved is the
+// one case this module cannot close on its own. Say so loudly: the head is held
+// from re-review (see hasUnprovenCommentOnlyFinalRoundHead) and nothing can
+// merge it without a fresh proof, so an operator has to look.
+async function alertUnprovenFinalRoundPush({ job, push, deliverAlertImpl, log }) {
+  const text =
+    `[follow-up-remediation] Comment-only final round for ${job.repo}#${job.prNumber} moved the PR head ` +
+    `${String(job.revisionRef || 'unknown').slice(0, 12)} -> ${push.liveHeadSha.slice(0, 12)} but its push ` +
+    `could not be proven (${push.reason}). Re-review of that head is held and AMA will not hand it to the ` +
+    'hammer. Inspect the head, then apply retrigger-review to review it, or repair and close the PR.';
+  log.error?.(text);
+  try {
+    await deliverAlertImpl(text, {
+      event: 'adversarial_review.comment_only_final_round_push_unproven',
+      payload: {
+        repo: job.repo, prNumber: job.prNumber, jobId: job.jobId,
+        reviewedHead: job.revisionRef || null, liveHeadSha: push.liveHeadSha, reason: push.reason,
+      },
+    });
+  } catch (err) {
+    log.warn?.(`[follow-up-remediation] Unproven final-round push alert failed for ${job.repo}#${job.prNumber}: ${err?.message || err}`);
+  }
+}
+
 /**
  * Resolve the final-round outcome for a reconciled worker reply.
  *
@@ -70,6 +95,7 @@ export async function resolveCommentOnlyFinalRoundCompletion({
   workspaceDir = null,
   auditWorkspaceForContaminationImpl,
   inspectRemediationCiRegressionImpl,
+  deliverAlertImpl = deliverAlert,
   execFileImpl,
   env = process.env,
   log = console,
@@ -85,15 +111,16 @@ export async function resolveCommentOnlyFinalRoundCompletion({
   }
   const { baseBranch } = await ensureJobBaseBranch({ job, jobPath, execFileImpl });
   const audit = await auditWorkspaceForContaminationImpl({ workspaceDir: proofWorkspaceDir, baseBranch, execFileImpl });
-  let workerPushedHeadSha = null;
-  if (audit.error || audit.suspect?.length) {
-    log.warn?.(`[follow-up-remediation] Withholding final-round push proof for ${job.repo}#${job.prNumber}: branch contamination audit failed`);
-  } else {
-    workerPushedHeadSha = await captureFinalRoundWorkerPushedHead({
-      repo: job.repo, prNumber: job.prNumber, jobId: job.jobId, reviewedHead: job.revisionRef,
-      workspaceDir: proofWorkspaceDir, execFileImpl, log,
-    });
-  }
+  const push = await proveFinalRoundWorkerPush({
+    repo: job.repo, prNumber: job.prNumber, jobId: job.jobId, reviewedHead: job.revisionRef, baseBranch,
+    workspaceDir: proofWorkspaceDir, execFileImpl, log,
+    withheldBecause: audit.error || audit.suspect?.length ? 'branch-contamination-audit-failed' : null,
+  });
+  const workerPushedHeadSha = push.workerPushedHeadSha;
+  const withheldPushHeadSha = !workerPushedHeadSha && push.liveHeadSha && push.liveHeadSha !== job.revisionRef
+    ? push.liveHeadSha
+    : null;
+  if (withheldPushHeadSha) await alertUnprovenFinalRoundPush({ job, push, deliverAlertImpl, log });
 
   const blockers = Array.isArray(reply.blockers) ? reply.blockers : [];
   const operationalBlockers = Array.isArray(reply.operationalBlockers) ? reply.operationalBlockers : [];
@@ -111,21 +138,23 @@ export async function resolveCommentOnlyFinalRoundCompletion({
     classification = classifyFinalRoundOperationalBlockers(operationalBlockers, { pushedHead: workerPushedHeadSha });
   }
   // A worker that pushed nothing may still finish cleanly (it disproved the
-  // findings); only a proven push can carry a partial/blocked reply over.
+  // findings); only a proven push can carry a partial/blocked reply over. An
+  // unproven moved head does not change the outcome; it is alerted and held.
   const completed = classification.pendingCiOnly && (reply.outcome === 'completed' || Boolean(workerPushedHeadSha));
   const reason = completed || !classification.pendingCiOnly ? classification.reason : 'no-proven-push';
   if (!completed) {
     log.warn?.(
       `[follow-up-remediation] Comment-only final round for ${job.repo}#${job.prNumber} is not complete: ` +
-        `outcome=${reply.outcome} reason=${reason} pushed=${workerPushedHeadSha || 'none'}`
+        `outcome=${reply.outcome} reason=${reason} push=${push.reason}`
     );
   }
   return {
     completed,
     workerPushedHeadSha,
     completionFields: {
-      ...(workerPushedHeadSha ? { workerPushedHeadSha } : {}),
-      finalRoundOutcome: { completed, reason, ciState },
+      ...(workerPushedHeadSha ? { workerPushedHeadSha, workerPushProof: push.proof } : {}),
+      ...(withheldPushHeadSha ? { withheldPushHeadSha } : {}),
+      finalRoundOutcome: { completed, reason, ciState, push: push.reason },
     },
   };
 }

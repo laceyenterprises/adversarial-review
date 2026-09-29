@@ -1691,6 +1691,7 @@ async function reconcileFollowUpJob({
   resolvePRLifecycleImpl = resolvePRLifecycle,
   auditWorkspaceForContaminationImpl = auditWorkspaceForContamination,
   inspectRemediationCiRegressionImpl = inspectRemediationCiRegression,
+  deliverAlertImpl = deliverAlert,
   execFileImpl = execFileAsync,
   workerTerminalEvent = null,
   sendWorkerSignalImpl = sendWorkerSignal,
@@ -2713,7 +2714,7 @@ async function reconcileFollowUpJob({
     // COMMENTCLOSE-01: every final round records its proven push; pending CI never demotes it.
     const finalRound = await resolveCommentOnlyFinalRoundCompletion({
       job, jobPath, reply: parsedReply, worker, liveness, workspaceDir: paths.workspaceDir,
-      auditWorkspaceForContaminationImpl, inspectRemediationCiRegressionImpl, execFileImpl, log,
+      auditWorkspaceForContaminationImpl, inspectRemediationCiRegressionImpl, deliverAlertImpl, execFileImpl, log,
     });
     const completedCommentOnlyFinalRound = finalRound.completed;
     const workerModel = worker?.model || 'codex';

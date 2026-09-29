@@ -2427,6 +2427,9 @@ function claimNextFollowUpJob({
         currentRound: nextRoundNumber,
         retryAfter: null,
         stopReason: null,
+        // A claimed job is live; a stop record left by an older requeue would
+        // make lifecycle checks cancel the worker as max-rounds-reached.
+        stop: null,
         nextAction: {
           type: 'worker-spawn',
           round: nextRoundNumber,
@@ -3196,6 +3199,7 @@ function requeueFollowUpJobForNextRound({
     remediationPlan: {
       ...(currentJob.remediationPlan || buildRemediationRoundPlan(maxRounds)),
       stopReason: null,
+      stop: null,
       nextAction: {
         type: 'consume-pending-round',
         round: currentRound + 1,

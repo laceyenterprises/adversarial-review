@@ -742,13 +742,17 @@ async function reviewWithClaude(diff, extraContext = '', {
   reviewerDeadlineMs = null,
   onProgress = null,
   startTokenProxyImpl = startClaudeReviewerTokenProxyForAuth,
+  // ARGUSDRAIN-01: a caller with its own rubric (the Argus security drain)
+  // supplies the whole prompt and keeps the rest of this harness.
+  promptOverride = null,
 } = {}) {
   const readNowMs = () => (typeof nowMs === 'function' ? nowMs() : Date.now());
   const claudeStartedAtMs = readNowMs();
   const auth = await assertClaudeOAuthImpl({ resolveClaudeLaunchctlUidImpl, logger, platform });
 
-  const promptPrefix = withSnapshotBoundaryPrompt(buildReviewerPromptPrefix({ stage: promptStage }));
-  const prompt = buildReviewerPrompt({ promptPrefix, extraContext, diff });
+  const prompt = promptOverride ?? buildReviewerPrompt({
+    promptPrefix: withSnapshotBoundaryPrompt(buildReviewerPromptPrefix({ stage: promptStage })), extraContext, diff,
+  });
 
   // Strip API key from env — Claude CLI falls back to OAuth when it's absent
   const hasAuthEnv = auth?.env && typeof auth.env === 'object';
@@ -878,6 +882,7 @@ async function reviewWithClaude(diff, extraContext = '', {
         reviewerDeadlineMs: reviewerBudgetDeadlineMs,
         silentRetryAttempts: silentRetryAttempts - 1,
         startTokenProxyImpl,
+        promptOverride,
       });
     }
     if (tokenProxy?.rotationPending()) {
@@ -1179,6 +1184,7 @@ async function reviewWithCodex(diff, extraContext = '', {
   promptStage = 'first',
   reviewerSubprocessCwd = process.cwd(),
   onProgress = null,
+  promptOverride = null,
 } = {}) {
   console.error('[reviewWithCodex] asserting OAuth...');
   await assertCodexOAuth();
@@ -1188,8 +1194,9 @@ async function reviewWithCodex(diff, extraContext = '', {
     throw new Error(`Codex CLI not found at ${CODEX_CLI}`);
   }
 
-  const promptPrefix = withSnapshotBoundaryPrompt(buildReviewerPromptPrefix({ stage: promptStage }));
-  const prompt = buildReviewerPrompt({ promptPrefix, extraContext, diff });
+  const prompt = promptOverride ?? buildReviewerPrompt({
+    promptPrefix: withSnapshotBoundaryPrompt(buildReviewerPromptPrefix({ stage: promptStage })), extraContext, diff,
+  });
   const authPath = resolveCodexAuthPath();
   // Per-worker codex credential (burst OAuth-cascade fix). Each reviewer spawn
   // gets its own auth.json with a placeholder refresh_token so a review storm
@@ -2576,6 +2583,7 @@ async function reviewWithGemini(diff, extraContext = '', {
   retryDelaysMs = REVIEW_POST_RETRY_DELAYS_MS,
   sleepImpl = sleep,
   log = console,
+  promptOverride = null,
 } = {}) {
   const runtime = resolveGeminiRuntimeForReview(resolveGeminiRuntimeImpl, log);
   if (runtime !== 'cli' && runtime !== 'antigravity') {
@@ -2658,10 +2666,13 @@ async function reviewWithGemini(diff, extraContext = '', {
     }
     console.error('[reviewWithGemini] OAuth OK');
 
-    const promptPrefix = withSnapshotBoundaryPrompt(runtime === 'antigravity'
-      ? buildAgyReviewerPromptPrefix({ stage: promptStage })
-      : buildReviewerPromptPrefix({ stage: promptStage }));
-    const prompt = buildReviewerPrompt({ promptPrefix, extraContext, diff });
+    const prompt = promptOverride ?? buildReviewerPrompt({
+      promptPrefix: withSnapshotBoundaryPrompt(runtime === 'antigravity'
+        ? buildAgyReviewerPromptPrefix({ stage: promptStage })
+        : buildReviewerPromptPrefix({ stage: promptStage })),
+      extraContext,
+      diff,
+    });
     // Runtime-aware model token. The token FORMATS differ and are NOT
     // interchangeable: the gemini-CLI path expects a slug (gemini-2.5-pro);
     // the agy/antigravity path expects agy's verbatim display name
@@ -3427,6 +3438,7 @@ const __test__ = {
 export {
   dispatchReviewerModel,
   reviewAgyOversizedInChunks,
+  reviewWithClaude,
   reviewWithCodex,
   reviewWithGemini,
   resolveAgyOversizedReviewRoute,

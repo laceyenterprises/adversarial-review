@@ -4,7 +4,6 @@
  * Also tracks PR lifecycle (merged/closed) and syncs status to Linear automatically.
  */
 import { execFile } from 'node:child_process';
-import { homedir, hostname } from 'node:os';
 import { promisify } from 'node:util';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -80,15 +79,14 @@ import {
 import {
   loadRoleConfig,
   resetRoleConfigCache,
-  resolveGeminiRuntime,
   resolveReviewPopulationRetryConfig,
 } from './role-config.mjs';
 import { validateStartupRoleRegistry } from './role-registry.mjs';
 import { validateStartupDeliveryIdentity } from './adapters/comms/github-pr-comments/delivery-identity.mjs';
 import { isPipelineEnabled } from './domain-pipeline.mjs';
 import { reconcileDuplicateFamilyLabels, runDuplicateFamilyCensusForWatcher } from './duplicate-family-state.mjs';
-import { checkAgyReviewerAuth } from './agy-reviewer-auth.mjs';
-import { scrubOAuthFallbackEnv } from './secret-source/env.mjs';
+import { warnIfAntigravityReviewerAuthUnavailable } from './watcher-agy-startup-preflight.mjs';
+import { startArgusSecurityDrainForWatcherTick } from './argus-security-drain.mjs';
 import { createCompositeOperatorSurface } from './adapters/operator/index.mjs';
 import {
   MERGE_AGENT_DISPATCHED_LABEL,
@@ -1231,6 +1229,8 @@ async function pollOnce(
         ` reason="${watcherDrain.reason}"`
     );
   }
+  // ARGUSDRAIN-01: start Argus security reviews in the background (never awaited).
+  startArgusSecurityDrainForWatcherTick({ rootDir: ROOT, watcherDrainActive: watcherDrain.active, logger: console });
 
   const reviewerBurstController = createReviewerBurstController({ rootDir: ROOT, logger: console, readSpendUsd: readBurstScopedReviewerSpendUsd }), reviewerPoolConfig = resolveFirstPassReviewerPoolConfig({ watcherConfig: config, burstSlots: reviewerBurstController.slots() }); // RPL-07: burstSlots is 0 unless an operator lease is active, leaving steady-state capacity untouched
   const reviewerDispatchSingleWaveSettleGraceMs = Math.max(
@@ -1583,46 +1583,6 @@ function requireEnv(name) {
   }
 }
 
-async function warnIfAntigravityReviewerAuthUnavailable({
-  env = process.env,
-  log = console,
-  resolveGeminiRuntimeImpl = resolveGeminiRuntime,
-  checkAgyReviewerAuthImpl = checkAgyReviewerAuth,
-  scrubOAuthFallbackEnvImpl = scrubOAuthFallbackEnv,
-} = {}) {
-  const runtime = resolveGeminiRuntimeImpl({ env });
-  if (runtime !== 'antigravity') {
-    return { checked: false, runtime };
-  }
-
-  const { env: scrubbedEnv } = scrubOAuthFallbackEnvImpl({
-    ...env,
-    HOME: env.HOME || homedir(),
-  });
-  let result;
-  try {
-    result = await checkAgyReviewerAuthImpl({ env: scrubbedEnv });
-  } catch (err) {
-    const detail = err?.message ? `: ${err.message}` : '';
-    log.warn?.(
-      `[watcher] WARN config key=reviewer.gemini.runtime: ` +
-      `antigravity agy auth startup preflight threw (agy-probe-threw)${detail}. ` +
-      'Startup will continue; the per-review AGY auth probe remains fail-closed.'
-    );
-    return { checked: true, ok: false, reason: 'agy-probe-threw' };
-  }
-  if (result?.ok) {
-    return { checked: true, ok: true, reason: null, cached: Boolean(result.cached) };
-  }
-  const reason = result?.reason || 'agy-probe-failed';
-  const detail = result?.detail ? `: ${result.detail}` : '';
-  const remediation = result?.remediation ? ` ${result.remediation}` : '';
-  log.warn?.(
-    `[watcher] WARN config key=reviewer.gemini.runtime: ` +
-    `antigravity agy auth startup preflight failed (${reason})${detail}.${remediation}`
-  );
-  return { checked: true, ok: false, reason };
-}
 function isProcessAlive(pid) {
   const numericPid = Number(pid);
   if (!Number.isInteger(numericPid) || numericPid <= 0) return false;

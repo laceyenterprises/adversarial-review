@@ -49,6 +49,7 @@ import {
   rmSync,
   statSync,
   unlinkSync,
+  utimesSync,
 } from 'node:fs';
 import { basename, join } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
@@ -550,12 +551,17 @@ export function readArgusQueueDepth(rootDir, { nowMs = Date.now() } = {}) {
  * Oldest-first so the queue drains FIFO and no job can be starved by a steady
  * arrival rate.
  *
+ * `shouldClaim(job)` lets a consumer pass over a job it may not take yet (a
+ * retry backoff, a job another owner is still deciding). A declined job is not
+ * touched: it stays in `pending` with its mtime, so it keeps its FIFO place.
+ *
  * @returns {{job: object, jobPath: string}|null}
  */
 export function claimNextArgusJob({
   rootDir,
   claimedAt = new Date().toISOString(),
   writeJob = writeArgusJob,
+  shouldClaim = null,
 } = {}) {
   const entries = listBucketEntries(rootDir, 'pending').sort((a, b) => a.mtimeMs - b.mtimeMs);
   const inProgressDir = getArgusJobDir(rootDir, 'inProgress');
@@ -569,6 +575,7 @@ export function claimNextArgusJob({
       moveCorruptPendingArgusJob({ rootDir, jobPath: entry.jobPath, failedAt: claimedAt, error: err });
       continue;
     }
+    if (typeof shouldClaim === 'function' && !shouldClaim(job)) continue;
 
     mkdirSync(inProgressDir, { recursive: true });
     const inProgressPath = join(inProgressDir, basename(entry.jobPath));
@@ -653,4 +660,45 @@ export function failArgusJob({ rootDir, jobPath, failedAt = new Date().toISOStri
     patch: { status: 'failed', failedAt, error: error ? String(error) : null },
     job,
   });
+}
+
+/**
+ * ARGUSDRAIN-01 — put a job back in `pending`, from any bucket.
+ *
+ * The drain uses it to hand back a claim it cannot finish yet (a retry backoff,
+ * CI still running), and to reopen a finished job whose question is live again.
+ * The record is rewritten in place first and moved second, so a crash between
+ * the two leaves an up-to-date record in its old bucket, never a stale one in
+ * `pending`. The job identity is unique across buckets, so the target name is
+ * free.
+ *
+ * The file's mtime is set back to the job's `enqueuedAt`. Pending order is by
+ * mtime (`claimNextArgusJob` FIFO, `readArgusQueueDepth` oldest-pending), and a
+ * job that waited six hours must not read as brand new because it was retried.
+ */
+export function returnArgusJobToPending({ rootDir, jobPath, patch = {}, job = null }) {
+  const current = job ?? readArgusJob(jobPath);
+  const pendingDir = getArgusJobDir(rootDir, 'pending');
+  mkdirSync(pendingDir, { recursive: true });
+  const targetPath = join(pendingDir, basename(jobPath));
+  const pending = {
+    ...current,
+    status: 'pending',
+    claimedAt: null,
+    completedAt: null,
+    failedAt: null,
+    result: null,
+    ...patch,
+  };
+  writeArgusJob(jobPath, pending);
+  if (jobPath !== targetPath) renameSync(jobPath, targetPath);
+  const enqueuedMs = Date.parse(String(pending.enqueuedAt || ''));
+  if (Number.isFinite(enqueuedMs)) {
+    try {
+      utimesSync(targetPath, new Date(), new Date(enqueuedMs));
+    } catch (err) {
+      console.error(`[argus-queue] could not restore the enqueue mtime on ${targetPath}: ${err?.message || err}`);
+    }
+  }
+  return { job: pending, jobPath: targetPath };
 }

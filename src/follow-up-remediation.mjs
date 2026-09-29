@@ -66,7 +66,7 @@ import { buildOwedDelivery, recordInitialCommentDelivery } from './adapters/comm
 import { deliverAlert } from './alert-delivery.mjs';
 import { captureRemediationBodyAfterPost } from './review-body-capture.mjs';
 import { resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
-import { captureFinalRoundWorkerPushedHead } from './comment-only-final-round.mjs';
+import { resolveCommentOnlyFinalRoundCompletion } from './comment-only-final-round-completion.mjs';
 import { requestWatcherWake } from './watcher-wake.mjs';
 import { REREVIEW_WAKE_REASONS, requestRereviewWake } from './rereview-wake.mjs';
 import { requestHammerWakeForSettledReviewStop } from './hammer-wake.mjs';
@@ -1691,6 +1691,7 @@ async function reconcileFollowUpJob({
   resolvePRLifecycleImpl = resolvePRLifecycle,
   auditWorkspaceForContaminationImpl = auditWorkspaceForContamination,
   inspectRemediationCiRegressionImpl = inspectRemediationCiRegression,
+  deliverAlertImpl = deliverAlert,
   execFileImpl = execFileAsync,
   workerTerminalEvent = null,
   sendWorkerSignalImpl = sendWorkerSignal,
@@ -2710,38 +2711,19 @@ async function reconcileFollowUpJob({
     // `codex-output-last-message` source string. New claude-code workers
     // produce `claude-code-output-last-message`, so worker-class metrics
     // and operator-visible completion records reflect what actually ran.
-    const completedCommentOnlyFinalRound = job?.finalRound === 'comment-only'
-      && parsedReply?.outcome === 'completed'
-      && (!Array.isArray(parsedReply?.blockers) || parsedReply.blockers.length === 0)
-      && (!Array.isArray(parsedReply?.operationalBlockers) || parsedReply.operationalBlockers.length === 0);
+    // COMMENTCLOSE-01: every final round records its proven push; pending CI never demotes it.
+    const finalRound = await resolveCommentOnlyFinalRoundCompletion({
+      job, jobPath, reply: parsedReply, worker, liveness, workspaceDir: paths.workspaceDir,
+      auditWorkspaceForContaminationImpl, inspectRemediationCiRegressionImpl, deliverAlertImpl, execFileImpl, log,
+    });
+    if (finalRound.retryLater) return { action: 'active', reason: 'final-round-proof-transient', job: finalRound.job, jobPath };
     const workerModel = worker?.model || 'codex';
-    let proofWorkspaceDir = paths.workspaceDir;
-    let proofAuditClean = completedCommentOnlyFinalRound;
-    if (completedCommentOnlyFinalRound) {
-      if (worker?.dispatchMode === 'hq') {
-        proofWorkspaceDir = parseHqWorkerWorkspaceFromPayload(liveness?.dispatchStatus || {})
-          || await resolveHqWorkerWorkspace({ worker, execFileImpl })
-          || paths.workspaceDir;
-      }
-      const { baseBranch } = await ensureJobBaseBranch({ job, jobPath, execFileImpl });
-      const proofAudit = await auditWorkspaceForContaminationImpl({
-        workspaceDir: proofWorkspaceDir, baseBranch, execFileImpl,
-      });
-      proofAuditClean = !proofAudit.error && !proofAudit.suspect?.length;
-      if (!proofAuditClean) log.warn?.(`[follow-up-remediation] Withholding final-round push proof for ${job.repo}#${job.prNumber}: branch contamination audit failed`);
-    }
-    const workerPushedHeadSha = proofAuditClean
-      ? await captureFinalRoundWorkerPushedHead({
-        repo: job.repo, prNumber: job.prNumber, jobId: job.jobId, reviewedHead: job.revisionRef,
-        workspaceDir: proofWorkspaceDir, execFileImpl, log,
-      })
-      : null;
     const completionMetadata = {
       source: hasNonEmptyNarrative
         ? `${workerModel}-output-last-message`
         : `${workerModel}-remediation-reply-only`,
       workerModel,
-      ...(workerPushedHeadSha ? { workerPushedHeadSha } : {}),
+      ...finalRound.completionFields,
       note: hasNonEmptyNarrative
         ? 'Reconciled from detached worker exit plus non-empty final message artifact.'
         : 'Reconciled from detached worker exit plus validated remediation-reply.json (final message artifact was empty; success signaled via the durable reply contract).',
@@ -2803,7 +2785,7 @@ async function reconcileFollowUpJob({
       };
     }
 
-    if (!rereview.requested && !completedCommentOnlyFinalRound) {
+    if (!rereview.requested && !finalRound.completed) {
       const resumed = operationalBlockerRecovery?.rescue?.preserved && worker.dispatchMode !== 'hq' && requeueForWorkspaceResume({
         rootDir, jobPath, job, requeuedAt: completedAt, retryMetadata: { rescue: operationalBlockerRecovery.rescue },
         retryReason: 'Preserved remediation commit after worker credential failure; resuming the same workspace.',
@@ -2948,7 +2930,7 @@ async function reconcileFollowUpJob({
       jobUpdates: operationalBlockerRecovery ? { operationalBlockerRecovery } : null,
     });
 
-    if (completedCommentOnlyFinalRound && !completed.alreadyTerminal) {
+    if (finalRound.completed && !completed.alreadyTerminal) {
       try {
         requestWatcherWakeImpl({
           rootDir,

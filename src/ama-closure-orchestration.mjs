@@ -61,6 +61,7 @@ import {
 import { requestEligibleHammerWake } from './hammer-wake.mjs';
 import { resolveRoundBudgetForJob, summarizePRRemediationLedger } from './follow-up-jobs.mjs';
 import { proveCommentOnlyFinalRoundHead } from './comment-only-final-round.mjs';
+import { summarizeExternalChecks } from './remediation-ci-regression.mjs';
 import {
   AMA_HAMMER_BACKGROUND_REASON,
   amaHammerBackgroundKey,
@@ -502,6 +503,9 @@ const MERGEABILITY_SAMPLE_DELAY_MS = Math.max(
   Number.parseInt(process.env.ADVERSARIAL_MERGEABILITY_SAMPLE_DELAY_MS || '', 10) || 2500,
 );
 export const DEFAULT_AMA_CLOSURE_OPERATION_TIMEOUT_MS = 5_000;
+// How long PR-head CI may stay pending on a proven comment-only final-round head
+// before the wait stops being exempt from the retain-loop cap.
+export const FINAL_ROUND_CI_WAIT_DEADLINE_MS = 2 * 60 * 60 * 1000;
 
 // Deliverable 2 — daemon-fail-closed hammer fallback classification.
 //
@@ -702,6 +706,8 @@ export async function maybeDispatchAmaClosureFor({
   fetchMergedProtectiveDependentsImpl = fetchMergedProtectiveDependentsForPr,
   fetchProtectivePredecessorStateImpl = fetchProtectivePredecessorStateForPr,
   emitProtectivePredecessorFindingImpl = null,
+  proveCommentOnlyFinalRoundHeadImpl = proveCommentOnlyFinalRoundHead,
+  now = () => Date.now(),
   env = process.env,
   signal = null,
   operationTimeoutMs = null,
@@ -909,6 +915,7 @@ export async function maybeDispatchAmaClosureFor({
     prAuthor: candidate?.prAuthor || null,
     operatorApprovalEvent,
     includeSettledReview: true,
+    commentOnlyFinalRoundPushes: commentOnlyFinalRoundPushedHeads,
   });
   // FAIL-OPEN GUARD (#1824 / #1816): the stored follow-up-job / review-row body
   // resolved above can be STALE relative to a fresh review on the SAME head — a
@@ -920,6 +927,11 @@ export async function maybeDispatchAmaClosureFor({
   // this bounds the extra GitHub call to apparently-mergeable PRs. A fresh
   // `Request changes` then wins, and a lookup failure fails closed.
   const authoritativeReviewerLogins = amaAuthoritativeReviewerLoginsForModel(reviewStateRow?.reviewer);
+  // COMMENTCLOSE-01: a verdict resolved through a recorded final-round push came
+  // from the REVIEWED head, so its live reconcile reads that head's reviews.
+  const liveReviewHeadSha = gateSnapshot.settledReview?.commentOnlyFinalRoundPush === true
+    ? gateSnapshot.reviewedHeadSha
+    : settledReviewHeadSha;
   if (
     settledReviewHeadSha &&
     gateSnapshot.settledReview?.remediationPending === false &&
@@ -942,7 +954,7 @@ export async function maybeDispatchAmaClosureFor({
             ({ signal: operationSignal }) => fetchLatestHeadReviewBodiesWithRetry({
               repoPath,
               prNumber,
-              headSha: settledReviewHeadSha,
+              headSha: liveReviewHeadSha,
               authoritativeReviewerLogins,
               fetchLatestHeadReviewBodiesImpl,
               retryDelaysMs: liveReviewRetryDelaysMs,
@@ -964,7 +976,7 @@ export async function maybeDispatchAmaClosureFor({
         logger?.warn?.(
           `[watcher] AMA live-review reconcile could not resolve an authoritative reviewer ` +
             `login from reviewer='${reviewStateRow?.reviewer ?? ''}' for ` +
-            `${repoPath}#${prNumber}@${settledReviewHeadSha}; failing closed`,
+            `${repoPath}#${prNumber}@${liveReviewHeadSha}; failing closed`,
         );
       }
       liveHeadReview = { resolved: true, bodies: Array.isArray(bodies) ? bodies : [] };
@@ -974,7 +986,7 @@ export async function maybeDispatchAmaClosureFor({
         throw err;
       }
       logger?.warn?.(
-        `[watcher] AMA live-review reconcile failed for ${repoPath}#${prNumber}@${settledReviewHeadSha}; ` +
+        `[watcher] AMA live-review reconcile failed for ${repoPath}#${prNumber}@${liveReviewHeadSha}; ` +
           `failing closed: ${err?.message || err}`,
       );
       liveHeadReview = { resolved: false };
@@ -991,6 +1003,7 @@ export async function maybeDispatchAmaClosureFor({
       operatorApprovalEvent,
       includeSettledReview: true,
       liveHeadReview,
+      commentOnlyFinalRoundPushes: commentOnlyFinalRoundPushedHeads,
     });
   }
   throwIfAborted(signal);
@@ -1663,18 +1676,20 @@ export async function maybeDispatchAmaClosureFor({
     if (!Number.isFinite(postedAt)) return null;
     return Math.max(0, Date.now() - postedAt);
   })();
-  const commentOnlyFinalRoundEligible =
+  const commentOnlyFinalRoundShape =
     reviewState.verdict === 'comment-only' &&
     reviewState.remediationPending === false &&
     reviewState.blockingFindingState === 'known' &&
     reviewState.blockingFindingCount === 0 &&
     reviewState.nonBlockingFindingState === 'known' &&
-    reviewState.nonBlockingFindingCount > 0 &&
-    !disabledEligibility.reasons.includes('ci-not-green');
-  let commentOnlyFinalRoundResume = false;
-  if (commentOnlyFinalRoundEligible) {
+    reviewState.nonBlockingFindingCount > 0;
+  // COMMENTCLOSE-01: prove the final-round head whatever CI says. The proof only
+  // authorizes the hammer's terminal validation of this exact head; merge still
+  // needs that validation's exact-head `ham_terminal_remediation_validated`.
+  let commentOnlyFinalRoundProven = false;
+  if (commentOnlyFinalRoundShape) {
     try {
-      commentOnlyFinalRoundResume = await proveCommentOnlyFinalRoundHead({
+      commentOnlyFinalRoundProven = await proveCommentOnlyFinalRoundHeadImpl({
         repo: repoPath,
         reviewedHead: reviewState.headSha,
         currentHead: currentPrHeadSha,
@@ -1686,6 +1701,35 @@ export async function maybeDispatchAmaClosureFor({
     } catch (err) {
       logger.warn?.(`[watcher] AMA comment-only final-round proof failed for ${repoPath}#${prNumber} authOutage=${err?.authOutage === true}: ${err?.message || err}`);
     }
+  }
+  const finalRoundCiNotGreen = disabledEligibility.reasons.includes('ci-not-green');
+  const commentOnlyFinalRoundResume = commentOnlyFinalRoundProven && !finalRoundCiNotGreen;
+  // Waiting for CI on a proven final-round head is progress, not a stall, so it
+  // must not spend the retain-loop cap that parks a PR for the operator. Red CI
+  // is not a wait and still counts.
+  const finalRoundChecks = commentOnlyFinalRoundProven && finalRoundCiNotGreen
+    ? summarizeExternalChecks(prMetadata.statusCheckRollup, { env, cfg })
+    : null;
+  const finalRoundCiPending = Boolean(finalRoundChecks?.rollupKnown &&
+    finalRoundChecks.failedChecks.length === 0 && finalRoundChecks.pendingChecks.length > 0);
+  // The wait is bounded: CI still pending past the deadline (a hung or never-
+  // scheduled check) counts toward the retain cap again, so the PR reaches the
+  // operator instead of being held forever. Measured from the proven push.
+  const finalRoundPushedAtMs = finalRoundCiPending
+    ? Math.max(...commentOnlyFinalRoundPushedHeads
+      .filter((entry) => entry?.workerPushedHeadSha === currentPrHeadSha)
+      .map((entry) => Date.parse(entry?.completedAt || ''))
+      .filter(Number.isFinite))
+    : Number.NaN;
+  const finalRoundCiWaitMs = Number(now()) - finalRoundPushedAtMs;
+  const commentOnlyFinalRoundAwaitingCi = finalRoundCiPending &&
+    Number.isFinite(finalRoundCiWaitMs) && finalRoundCiWaitMs < FINAL_ROUND_CI_WAIT_DEADLINE_MS;
+  if (finalRoundCiPending && !commentOnlyFinalRoundAwaitingCi) {
+    logger?.warn?.(
+      `[watcher] final-round-ci-pending-timeout ${repoPath}#${prNumber}@${String(currentPrHeadSha || '').slice(0, 12)}: ` +
+        `PR-head CI still pending ${Number.isFinite(finalRoundCiWaitMs) ? `${Math.round(finalRoundCiWaitMs / 60_000)} min` : '(push time unknown)'} ` +
+        `after the proven final-round push; the retain-loop cap applies and escalates to the operator`,
+    );
   }
   const shouldLookupMergedProtectiveDependents =
     reviewCycleExhausted ||
@@ -1818,13 +1862,15 @@ export async function maybeDispatchAmaClosureFor({
             );
             return { dispatched: false, reason: 'background-pr-state-unavailable' };
           }
-          if (
-            live?.state !== 'OPEN' ||
-            live?.headSha !== dispatchContext.targetRemediationSha ||
-            live?.isDraft ||
-            live?.mergeable !== 'MERGEABLE'
-          ) {
+          // COMMENTCLOSE-01: name what blocked. A draft or an unmergeable PR is not
+          // a state change; agent-os#7311 (a worker-opened draft) spent four hammer
+          // attempts reported only as `background-pr-state-changed`.
+          if (live?.state !== 'OPEN' || live?.headSha !== dispatchContext.targetRemediationSha) {
             return { dispatched: false, reason: 'background-pr-state-changed' };
+          }
+          if (live?.isDraft) return { dispatched: false, reason: 'background-pr-draft' };
+          if (live?.mergeable !== 'MERGEABLE') {
+            return { dispatched: false, reason: 'background-pr-not-mergeable', mergeable: live?.mergeable || null };
           }
           return maybeDispatchAmaCloserImpl({ ...closerArgs });
         },
@@ -1872,8 +1918,12 @@ export async function maybeDispatchAmaClosureFor({
           : new Error(String(backgroundSettled.error || 'background AMA dispatch failed'));
       }
       result = backgroundSettled.result;
-      if (result?.reason === 'background-pr-state-changed') {
+      if (result?.reason === 'background-pr-state-changed' || result?.reason === 'background-pr-not-mergeable') {
         result = { ...result, skipMergeAgent: true, retryAfterMs: 30_000 };
+      } else if (result?.reason === 'background-pr-draft') {
+        // Nothing in the pipeline marks a PR ready for review, so a draft waits
+        // for a person: route it to the operator-blocked lane, named as a draft.
+        result = { ...result, skipMergeAgent: true, needsOperator: true, operatorReason: 'pr-is-draft' };
       }
     } else {
       const stopTracking = trackCoexistenceOperation(operationTracker, 'ama-hammer-dispatch');
@@ -1942,7 +1992,10 @@ export async function maybeDispatchAmaClosureFor({
               || String(reason).startsWith('label-'));
             return hardReason
               ? { needsOperator: true, operatorReason: `not-eligible:${hardReason}` }
-              : { retryAfterMs: 30_000 };
+              : {
+                retryAfterMs: 30_000,
+                ...(commentOnlyFinalRoundAwaitingCi ? { commentOnlyFinalRoundAwaitingCi: true } : {}),
+              };
           })()
         : {}),
       ...(hamTerminalRemediationValidated ? { hamTerminalRemediationValidated: true } : {}),
@@ -2054,7 +2107,12 @@ export async function resolveMergeAgentCoexistenceForWatcher({
     // AWAIT_OPERATOR_ACTION so the escalation in `coexistence.mjs` becomes
     // reachable. A new head resets the counter (recordAmaRetain is head-keyed), so a
     // legitimately progressing PR is never falsely escalated.
-    if (amaClosureResult?.reason === 'not-eligible') {
+    if (amaClosureResult?.reason === 'not-eligible' && amaClosureResult?.commentOnlyFinalRoundAwaitingCi === true) {
+      logger?.log?.(
+        `[watcher] AMA holding ${repoPath}#${prNumber} for PR-head CI on a proven comment-only ` +
+          'final-round head; the hammer takes it when CI is green (not counted toward the retain-loop cap)',
+      );
+    } else if (amaClosureResult?.reason === 'not-eligible') {
       const retainHead = currentRevisionRef || candidate?.headSha || dispatchJob?.headSha || null;
       // Cap this series against THIS job's resolved remediation budget rather
       // than the module default, so an operator who raises (or lowers) the round

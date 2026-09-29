@@ -741,6 +741,7 @@ export function recordNoProgressLaneRun(rootDir, identity, {
   fingerprint,
   decisionFingerprint = null,
   progressClass = PROGRESS_CLASS_SELF_RESOLVING,
+  operatorReason = null,
   urgent = false,
   escalate = true,
   cap = DEFAULT_NO_PROGRESS_LANE_CAP,
@@ -863,6 +864,10 @@ export function recordNoProgressLaneRun(rootDir, identity, {
     // A walked PR starts its next backoff window from zero regardless of outcome.
     skippedTicks: 0,
     lane,
+    // COMMENTCLOSE-01: WHY an operator is needed, when the handler named it.
+    ...(lane === LANE_OPERATOR_BLOCKED && typeof operatorReason === 'string' && operatorReason
+      ? { operatorReason }
+      : {}),
     firstNoProgressAt,
     ...(priorStalledEvent ? { stalledEvent: priorStalledEvent } : {}),
     ...(priorPromotedFrom ? { promotedFrom: priorPromotedFrom } : {}),
@@ -1009,10 +1014,19 @@ export function clearOperatorDecisionAlertState(rootDir, identity, { logger = co
   return ok;
 }
 
+// COMMENTCLOSE-01: operator-blocked reasons that are not "findings unresolved".
+// A draft looked identical to a stranded remediation, so nobody knew to mark it
+// ready (agent-os#7311).
+const OPERATOR_BLOCKED_REASON_TEXT = Object.freeze({
+  'pr-is-draft': 'The PR is a draft; the pipeline never marks a PR ready for review, so the hammer will not take it. ' +
+    'Mark it ready for review (gh pr ready) or close it.',
+});
+
 export async function maybeFireOperatorDecisionRequiredAlert({
   rootDir,
   identity,
   headSha,
+  operatorReason = null,
   fingerprint = null,
   noProgressTicks,
   firstNoProgressAt = null,
@@ -1035,12 +1049,17 @@ export async function maybeFireOperatorDecisionRequiredAlert({
 
   const repo = identity?.repo ?? 'unknown-repo';
   const prNumber = Number(identity?.prNumber);
-  const text = (
-    `Adversarial-watcher: ${repo}#${prNumber} is parked awaiting operator decision. ` +
-    `Remediation stopped or failed with findings unresolved; AMA is not eligible while blocking findings remain. ` +
-    `No-progress observations=${normalizeCount(noProgressTicks)} on head ${(normalizeHead(headSha) || 'unknown').slice(0, 12)}. ` +
-    `Review the PR thread and either remediate, approve the risk, or close the PR.`
-  );
+  const namedReasonText = OPERATOR_BLOCKED_REASON_TEXT[operatorReason] || null;
+  const observations =
+    `No-progress observations=${normalizeCount(noProgressTicks)} on head ${(normalizeHead(headSha) || 'unknown').slice(0, 12)}.`;
+  const text = namedReasonText
+    ? `Adversarial-watcher: ${repo}#${prNumber} is parked awaiting operator decision. ${observations} ${namedReasonText}`
+    : (
+      `Adversarial-watcher: ${repo}#${prNumber} is parked awaiting operator decision. ` +
+      `Remediation stopped or failed with findings unresolved; AMA is not eligible while blocking findings remain. ` +
+      `${observations} ` +
+      `Review the PR thread and either remediate, approve the risk, or close the PR.`
+    );
   await deliverAlertFn(text, {
     event: 'adversarial_review.operator_decision_required',
     payload: {
@@ -1052,7 +1071,7 @@ export async function maybeFireOperatorDecisionRequiredAlert({
       noProgressTicks: normalizeCount(noProgressTicks),
       firstNoProgressAt,
       thresholdTicks: threshold,
-      reason: 'remediation-terminal-findings-unresolved',
+      reason: namedReasonText ? operatorReason : 'remediation-terminal-findings-unresolved',
     },
   });
 

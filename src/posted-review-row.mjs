@@ -935,6 +935,7 @@ export function createNoProgressLaneGate({
         fingerprint,
         decisionFingerprint,
         progressClass,
+        operatorReason: value?.amaClosureResult?.operatorReason || null,
         // A starvation-floor admission is a walk the lane did not schedule.
         // Recording it as escalating would charge the PR for a look it never
         // asked for and push its next real walk twice as far away — the exact
@@ -1010,6 +1011,7 @@ export function createNoProgressLaneGate({
             rootDir,
             identity,
             headSha: handler.headSha || null,
+            operatorReason: value?.amaClosureResult?.operatorReason || null,
             fingerprint,
             noProgressTicks: outcome.noProgressTicks,
             firstNoProgressAt: outcome.firstNoProgressAt || null,

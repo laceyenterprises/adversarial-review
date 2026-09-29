@@ -15,6 +15,8 @@ import { findLiveAmaCloserLease, isHeldAmaCloserLease } from './ama/closer-lease
 import { isActiveAmaCloserDispatchRecord, readAmaCloserDispatchRecord } from './ama/dispatch-closer.mjs';
 import { ensureWorkspaceTrashDir, launchWorkspaceTrashDeleter, workspaceTrashDir } from './follow-up-workspace-trash.mjs';
 import { loadRoleConfig } from './role-config.mjs';
+import { claimFollowUpForReview } from './follow-up-review-claim.mjs';
+import { scanArchivedStoppedFollowUpJobs } from './comment-only-final-round.mjs';
 import {
   DEFAULT_RISK_CLASS,
   DEFAULT_ROUND_BUDGET_BY_RISK,
@@ -1666,6 +1668,24 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
   const commentOnlyFinalRoundPushedHeads = [];
   let latestJob = null;
   let latestTimestamp = '';
+  // COMMENTCLOSE-01: a final round is final whatever directory it lands in.
+  // A stopped final round that pushed still owns its pushed head, so the
+  // re-review suppression and the closer hand-off read it from every terminal
+  // directory, not only `completed/`, and from the stopped-job archive.
+  const recordCommentOnlyFinalRound = (job, status) => {
+    if (job.finalRound !== 'comment-only' || job.reReview?.suppressed !== 'comment-only-final-round' ||
+        !String(job.revisionRef || '').trim()) return;
+    commentOnlyFinalRoundRevisionRefs.add(String(job.revisionRef).trim());
+    if (/^[0-9a-f]{40}$/iu.test(String(job.completion?.workerPushedHeadSha || ''))) {
+      commentOnlyFinalRoundPushedHeads.push({
+        reviewedHead: String(job.revisionRef).trim(),
+        workerPushedHeadSha: job.completion.workerPushedHeadSha,
+        completedAt: job.completedAt || job.stoppedAt || job.failedAt || null,
+        status,
+        pushProof: job.completion?.workerPushProof?.method || null,
+      });
+    }
+  };
 
   const allKeys = ['pending', 'inProgress', 'completed', 'failed', 'stopped'];
   const terminalKeys = new Set(['completed', 'failed', 'stopped']);
@@ -1706,18 +1726,7 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
       if (job.repo !== targetRepo) continue;
       if (Number(job.prNumber) !== targetPr) continue;
 
-      if (key === 'completed' && job.finalRound === 'comment-only' &&
-          job.reReview?.suppressed === 'comment-only-final-round' &&
-          String(job.revisionRef || '').trim()) {
-        commentOnlyFinalRoundRevisionRefs.add(String(job.revisionRef).trim());
-        if (/^[0-9a-f]{40}$/iu.test(String(job.completion?.workerPushedHeadSha || ''))) {
-          commentOnlyFinalRoundPushedHeads.push({
-            reviewedHead: String(job.revisionRef).trim(),
-            workerPushedHeadSha: job.completion.workerPushedHeadSha,
-            completedAt: job.completedAt || null,
-          });
-        }
-      }
+      if (terminalKeys.has(key)) recordCommentOnlyFinalRound(job, key);
 
       if (terminalKeys.has(key)) {
         // `claimNextFollowUpJob` increments `currentRound` on claim,
@@ -1776,6 +1785,12 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
         latestJob = job;
       }
     }
+  }
+
+  // The archive sweep moves a job's bytes unchanged; round counting never read
+  // the archive, so only the final-round authority is taken from it.
+  for (const job of scanArchivedStoppedFollowUpJobs(rootDir, targetRepo, targetPr)) {
+    if (String(job.domainId || 'code-pr') === targetDomainId) recordCommentOnlyFinalRound(job, 'stopped-archived');
   }
 
   const latestMaxRoundsRaw = Number(latestJob?.remediationPlan?.maxRounds);
@@ -2027,6 +2042,25 @@ function buildFollowUpJob({
 
 function createFollowUpJob({ rootDir, ...jobInput }) {
   const baseJob = buildFollowUpJob(jobInput);
+  // COMMENTCLOSE-01: the reviewer and the reviewer-pass reaper can both queue a
+  // follow-up for the same posted review; only the first creates a job. A
+  // caller that meets an in-flight creation waits for it (see the claim module).
+  const reviewClaim = claimFollowUpForReview(rootDir, baseJob);
+  if (reviewClaim.duplicateOf) {
+    console.warn(
+      `[follow-up-jobs] Follow-up for ${baseJob.repo}#${baseJob.prNumber}@${String(baseJob.revisionRef).slice(0, 12)} ` +
+        `already queued for this review (${reviewClaim.duplicateOf.jobId}, ${reviewClaim.duplicateOf.status}); not creating a duplicate`,
+    );
+    return { job: null, jobPath: null, duplicateOf: reviewClaim.duplicateOf };
+  }
+  try {
+    return writeNewFollowUpJob(rootDir, baseJob, jobInput);
+  } finally {
+    reviewClaim.release();
+  }
+}
+
+function writeNewFollowUpJob(rootDir, baseJob, jobInput) {
   const priorNonBlockingRounds = baseJob.nonBlockingOnly
     ? summarizePRRemediationLedger(rootDir, baseJob).consecutiveNonBlockingRounds
     : 0;

@@ -1,0 +1,114 @@
+{
+  "_fixture": {
+    "source": "data/follow-up-jobs/stopped/laceyenterprises__agent-os-pr-7311-2026-09-28T21-34-17-895Z.json",
+    "note": "COMMENTCLOSE-01 replay fixture: live record reduced to its decision inputs; paths, pids, prompts and worker runtime evidence removed."
+  },
+  "schemaVersion": 2,
+  "kind": "adversarial-review-follow-up",
+  "status": "stopped",
+  "jobId": "laceyenterprises__agent-os-pr-7311-2026-09-28T21-34-17-895Z",
+  "createdAt": "2026-09-28T21:34:17.895Z",
+  "trigger": {
+    "type": "github-review-posted",
+    "postedAt": "2026-09-28T21:34:17.895Z"
+  },
+  "repo": "laceyenterprises/agent-os",
+  "prNumber": 7311,
+  "baseBranch": "main",
+  "branch": null,
+  "domainId": "code-pr",
+  "subjectExternalId": "laceyenterprises/agent-os#7311",
+  "revisionRef": "0a48d65166b3a88b51ed93452de3a0871defe2cb",
+  "linearTicketId": null,
+  "riskClass": "medium",
+  "reviewerModel": "Gemini 3.1 Pro (High)",
+  "builderTag": null,
+  "critical": false,
+  "nonBlockingOnly": true,
+  "finalRound": "comment-only",
+  "reviewSummary": "The PR introduces a provenance and installation manager for a pinned RTK release. The implementation is highly defensive: it verifies both archive and executable SHA-256 digests against a trusted pin, actively prevents cross-user or symlinked directory attacks, installs atomically to prevent broken partial states, and extracts the tarball securely without vulnerability to path traversal. The required governing docs and module walkthroughs are correctly updated. No blocking issues were found.",
+  "reviewBody": "## Adversarial Review — Gemini (gemini-reviewer-lacey)\n\n> Reviewer: gemini · Gemini 3.1 Pro (High) · none\n\n## Summary\nThe PR introduces a provenance and installation manager for a pinned RTK release. The implementation is highly defensive: it verifies both archive and executable SHA-256 digests against a trusted pin, actively prevents cross-user or symlinked directory attacks, installs atomically to prevent broken partial states, and extracts the tarball securely without vulnerability to path traversal. The required governing docs and module walkthroughs are correctly updated. No blocking issues were found.\n\n## Blocking issues\n- None.\n\n## Non-blocking issues\n- **Network transient errors unhandled**\n  - **File:** `modules/worker-pool/lib/python/cwp_dispatch/rtk_release.py`\n  - **Lines:** `114-115`\n  - **Problem:** The `install` function executes the asset download using `urlopen` with a 30-second timeout but does not catch or retry `urllib.error.URLError`.\n  - **Why it matters:** While this is an operator-invoked script rather than an unattended background daemon, failing immediately on common transient network glitches (such as TLS handshake timeouts or brief connection drops) degrades the operational experience by forcing manual restarts.\n  - **Recommended fix:** Wrap the `urlopen` download block in a retry loop with bounded exponential backoff that catches transient network exceptions.\n\n## Suggested fixes\n- Add a bounded backoff retry wrapper around the `urlopen` network call in the `install()` function to handle transient connection issues.\n\n## Verdict\nComment only",
+  "verdict_mode": "enforce",
+  "recommendedFollowUpAction": {
+    "type": "address-adversarial-review",
+    "priority": "normal",
+    "summary": "Start a follow-up coding session for this PR and address the adversarial review findings.",
+    "executionModel": "bounded-manual-rounds",
+    "maxRounds": 2,
+    "futureArchitectureNote": "Long term this should resume the original build session and preserve original build intent/context instead of spawning a fresh session from a file handoff."
+  },
+  "remediationPlan": {
+    "mode": "bounded-manual-rounds",
+    "maxRounds": 2,
+    "currentRound": 2,
+    "rounds": [
+      {
+        "round": 2,
+        "domainId": "code-pr",
+        "subjectExternalId": "laceyenterprises/agent-os#7311",
+        "revisionRef": "0a48d65166b3a88b51ed93452de3a0871defe2cb",
+        "kind": "remediation",
+        "state": "stopped",
+        "claimedAt": "2026-09-28T21:36:21.358Z",
+        "spawnedAt": "2026-09-28T21:36:37.574Z",
+        "finishedAt": "2026-09-28T21:39:44.158Z",
+        "reReview": {
+          "requested": false,
+          "requestedAt": null,
+          "reason": null,
+          "triggered": false,
+          "status": "suppressed",
+          "outcomeReason": "comment-only-final-round",
+          "reviewRow": null,
+          "suppressed": "comment-only-final-round"
+        },
+        "stop": {
+          "code": "max-rounds-reached",
+          "reason": "Remediation round 2 finished without a durable re-review request and reached the max remediation rounds cap (2/2); stopping the bounded loop.",
+          "stoppedAt": "2026-09-28T21:39:44.158Z",
+          "stoppedBy": null,
+          "sourceStatus": "completed",
+          "currentRound": 2,
+          "maxRounds": 2
+        }
+      }
+    ],
+    "transientRetries": 0,
+    "retryHistory": [],
+    "retryAfter": null,
+    "stopReason": "Remediation round 2 finished without a durable re-review request and reached the max remediation rounds cap (2/2); stopping the bounded loop.",
+    "stop": {
+      "code": "max-rounds-reached",
+      "reason": "Remediation round 2 finished without a durable re-review request and reached the max remediation rounds cap (2/2); stopping the bounded loop.",
+      "stoppedAt": "2026-09-28T21:39:44.158Z",
+      "stoppedBy": null,
+      "sourceStatus": "completed",
+      "currentRound": 2,
+      "maxRounds": 2
+    },
+    "nextAction": null
+  },
+  "nonBlockingRoundsBefore": 0,
+  "nonBlockingMaxRounds": 1,
+  "claimedAt": "2026-09-28T21:36:21.358Z",
+  "stoppedAt": "2026-09-28T21:39:44.158Z",
+  "reReview": {
+    "requested": false,
+    "requestedAt": null,
+    "reason": null,
+    "triggered": false,
+    "status": "suppressed",
+    "outcomeReason": "comment-only-final-round",
+    "reviewRow": null,
+    "suppressed": "comment-only-final-round"
+  },
+  "remediationWorker": {
+    "model": "codex",
+    "workerClass": "codex",
+    "state": "completed"
+  },
+  "completion": {
+    "source": "codex-output-last-message",
+    "workerModel": "codex"
+  }
+}

@@ -16,6 +16,10 @@ const OPERATIONAL_BLOCKER_TITLES = new Set([
   'missing-auth',
   'auth-failure',
 ]);
+// Structured operational-blocker kinds (COMMENTCLOSE-01). A reconciler may act on
+// `kind`; it never infers one from the worker's free-text title or finding.
+const OPERATIONAL_BLOCKER_KIND_PENDING_CI = 'pending-ci';
+const OPERATIONAL_BLOCKER_KINDS = new Set([OPERATIONAL_BLOCKER_KIND_PENDING_CI]);
 
 // prefix patterns (`/^Replace (this )?with\b/i`, `/^Optional list of
 // files\b/i`) that produced false positives on legitimate review
@@ -298,6 +302,11 @@ function validateOperationalBlockersField(items, options = {}) {
       throw new Error(`Remediation reply operationalBlockers[${index}].finding must be a non-empty string`);
     }
     validateOptionalTitle(entry, `operationalBlockers[${index}]`);
+    if (entry.kind !== undefined && !OPERATIONAL_BLOCKER_KINDS.has(entry.kind)) {
+      throw new Error(
+        `Remediation reply operationalBlockers[${index}].kind must be one of: ${[...OPERATIONAL_BLOCKER_KINDS].join(', ')}`
+      );
+    }
     const hasReasoning = typeof entry.reasoning === 'string' && entry.reasoning.trim();
     const hasNeedsHumanInput = typeof entry.needsHumanInput === 'string' && entry.needsHumanInput.trim();
     if (!hasReasoning && !hasNeedsHumanInput) {
@@ -953,6 +962,7 @@ function parseRemediationReply(raw, options = {}) {
 }
 
 export {
+  OPERATIONAL_BLOCKER_KIND_PENDING_CI,
   PUBLIC_REPLY_MAX_CHARS,
   REMEDIATION_REPLY_KIND,
   REMEDIATION_REPLY_SCHEMA_VERSION,
@@ -960,6 +970,7 @@ export {
   detectPublicReplyNoiseSignal,
   extractNonBlockingFindingIdentities,
   isNoneFindingsSentinelOnly,
+  isOperationalBlockerEntry as isDeclaredOperationalBlockerCode,
   normalizeCoverageTitle,
   parseBlockingFindingsSection,
   parseNonBlockingFindingsSection,

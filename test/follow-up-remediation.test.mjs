@@ -86,7 +86,7 @@ import {
   assertClaudeCodeBrokerOAuth,
   resolveClaudeCodeOAuthTransport,
 } from '../src/remediation-oauth-preflight.mjs';
-import { openReviewStateDb } from '../src/review-state.mjs';
+import { openReviewStateDb, requestReviewRereview } from '../src/review-state.mjs';
 import { pickAdversarialGateStatus } from '../src/adversarial-gate-status.mjs';
 
 function greenCiGate() {
@@ -665,6 +665,8 @@ test('comment-only final remediation prompt directs one round and closer handoff
   assert.match(prompt, /Address or explicitly account for its non-blocking findings/);
   assert.match(prompt, /AMA closer takes the PR/);
   assert.match(prompt, /reReview\.requested = false/);
+  assert.match(prompt, /Pending PR-head CI does not block this round/);
+  assert.match(prompt, /"kind": "pending-ci"/);
   assert.doesNotMatch(prompt, /Convergence rule \(load-bearing\): if you believe/);
   const stagedPrompt = buildRemediationPrompt(makeJob({ finalRound: 'comment-only' }), testReplyContext());
   assert.doesNotMatch(stagedPrompt, /The PR currently carries an adversarial review with verdict `Request changes`/);
@@ -10668,13 +10670,7 @@ test('completed comment-only final job suppresses re-review and wakes the closer
       now: () => '2026-04-21T10:30:00.000Z',
       isWorkerRunning: () => false,
       resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: 'b'.repeat(40) }),
-      execFileImpl: async (command, args) => {
-        if (command === 'gh') return { stdout: args[0] === 'api' ? 'ahead\n' : `${'b'.repeat(40)}\n` };
-        assert.equal(command, 'git');
-        if (args.includes('show')) return { stdout: `Worker-Job-Id: ${job.jobId}\n` };
-        assert.deepEqual(args.slice(-2), ['rev-parse', 'HEAD']);
-        return { stdout: `${'b'.repeat(40)}\n` };
-      },
+      execFileImpl: finalRoundPushedExec({ jobId: job.jobId, pushedHead: 'b'.repeat(40) }),
       auditWorkspaceForContaminationImpl: cleanContaminationAudit,
       requestReviewRereviewImpl: () => { throw new Error('final round must not re-review'); },
       requestWatcherWakeImpl: (wake) => { wakes.push(wake); return { requested: true }; },
@@ -10686,6 +10682,142 @@ test('completed comment-only final job suppresses re-review and wakes the closer
     assert.equal(wakes.length, 1);
     assert.equal(wakes[0].reason, 'comment-only-final-round-completed');
   });
+});
+
+// COMMENTCLOSE-01: stub for a worker workspace whose HEAD is the pushed final-round
+// commit. Answers both the live-PR head read and the git proof commands.
+function finalRoundPushedExec({ jobId, pushedHead, baseBranch = 'main' }) {
+  return async (command, args) => {
+    if (command === 'gh') return { stdout: args[0] === 'api' ? 'ahead\n' : `${pushedHead}\n` };
+    assert.equal(command, 'git');
+    if (args.includes('show')) return { stdout: `fix\n\nWorker-Job-Id: ${jobId}\n` };
+    if (args.includes('cherry')) return { stdout: args.at(-1) === `origin/${baseBranch}` ? `+ ${pushedHead}\n` : '' };
+    if (args.includes('rev-list')) return { stdout: '' };
+    return { stdout: `${pushedHead}\n` };
+  };
+}
+
+async function reconcileFinalRoundWithReply(rootDir, { prNumber, replyOverrides, ciGate, liveHead = null }) {
+  const hqRoot = path.join(rootDir, 'hq');
+  const reviewedHead = 'a'.repeat(40);
+  const pushedHead = 'b'.repeat(40);
+  const { claimed } = makeQueuedJob(rootDir, { prNumber, revisionRef: reviewedHead });
+  const job = { ...claimed.job, finalRound: 'comment-only', nonBlockingOnly: true };
+  writeFollowUpJob(claimed.jobPath, job);
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  writeFileSync(outputPath, 'worker output\n', 'utf8');
+  const { replyDir, replyPath } = resolveHqReplyPath({ hqRoot, launchRequestId: job.jobId });
+  mkdirSync(replyDir, { recursive: true });
+  writeValidReply(replyPath, job, replyOverrides);
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'codex', processId: 9508 + prNumber, state: 'spawned',
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      replyPath,
+    },
+  });
+  const wakes = [];
+  const ciProbes = [];
+  const alerts = [];
+  const pushedExec = finalRoundPushedExec({ jobId: job.jobId, pushedHead });
+  const result = await withHqRootEnv(hqRoot, () => reconcileFollowUpJob({
+    rootDir, job: spawned.job, jobPath: spawned.jobPath,
+    now: () => '2026-04-21T10:30:00.000Z',
+    isWorkerRunning: () => false,
+    resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: pushedHead }),
+    execFileImpl: liveHead
+      ? async (command, args) => (command === 'gh' ? { stdout: `${liveHead}\n` } : pushedExec(command, args))
+      : pushedExec,
+    auditWorkspaceForContaminationImpl: cleanContaminationAudit,
+    inspectRemediationCiRegressionImpl: async (args) => { ciProbes.push(args); return { ...ciGate, headSha: pushedHead }; },
+    deliverAlertImpl: async (text, options) => { alerts.push({ text, ...options }); return { queued: true }; },
+    requestReviewRereviewImpl: () => { throw new Error('final round must not re-review'); },
+    requestWatcherWakeImpl: (wake) => { wakes.push(wake); return { requested: true }; },
+    postCommentImpl: async () => ({ posted: true }),
+    log: { warn: () => {}, error: () => {}, log: () => {} },
+  }));
+  return { result, wakes, ciProbes, alerts, job, reviewedHead, pushedHead };
+}
+
+const pendingCiOperationalBlocker = {
+  title: 'pending-pr-head-ci',
+  finding: 'PR-head repo-guards had not completed after one bounded CI wait.',
+  reasoning: 'Required checks need to complete before the AMA closer can merge.',
+};
+
+test('a final round reporting only pending PR-head CI completes as final with its marker and pushed head', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { result, wakes, ciProbes, pushedHead } = await reconcileFinalRoundWithReply(rootDir, {
+    prNumber: 184,
+    replyOverrides: { outcome: 'partial', operationalBlockers: [pendingCiOperationalBlocker] },
+    ciGate: { state: 'pending', failedChecks: [], pendingChecks: [{ name: 'repo-guards', state: 'PENDING' }] },
+  });
+  assert.equal(result.action, 'completed');
+  assert.match(result.jobPath, /follow-up-jobs\/completed\//);
+  assert.equal(result.job.reReview.suppressed, 'comment-only-final-round');
+  assert.equal(result.job.completion.workerPushedHeadSha, pushedHead);
+  assert.deepEqual(result.job.completion.finalRoundOutcome,
+    { completed: true, reason: 'ci-probe-pending-ci', ciState: 'pending', push: 'descendant' });
+  assert.equal(result.job.remediationPlan.stop ?? null, null, 'pending CI must not fall through to max-rounds');
+  assert.equal(ciProbes.length, 1);
+  assert.equal(wakes[0]?.reason, 'comment-only-final-round-completed');
+});
+
+test('a stopped final round still suppresses re-review of its pushed head', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { result, job, reviewedHead, pushedHead } = await reconcileFinalRoundWithReply(rootDir, {
+    prNumber: 185,
+    replyOverrides: { outcome: 'blocked', operationalBlockers: [pendingCiOperationalBlocker] },
+    ciGate: { state: 'failed', failedChecks: [{ name: 'repo-guards', state: 'FAILURE' }], pendingChecks: [] },
+  });
+  assert.equal(result.action, 'stopped');
+  assert.match(result.jobPath, /follow-up-jobs\/stopped\//);
+  assert.equal(result.job.reReview.suppressed, 'comment-only-final-round');
+  assert.equal(result.job.completion.workerPushedHeadSha, pushedHead);
+  assert.equal(result.job.completion.finalRoundOutcome.reason, 'ci-failed');
+
+  const ledger = summarizePRRemediationLedger(rootDir, { repo: job.repo, prNumber: job.prNumber });
+  assert.deepEqual(ledger.commentOnlyFinalRoundRevisionRefs, [reviewedHead]);
+  assert.deepEqual(ledger.commentOnlyFinalRoundPushedHeads, [{
+    reviewedHead, workerPushedHeadSha: pushedHead, completedAt: '2026-04-21T10:30:00.000Z', status: 'stopped',
+    pushProof: 'git-cherry-replay',
+  }]);
+  const refused = requestReviewRereview({
+    rootDir, repo: job.repo, prNumber: job.prNumber, reason: 'auto-refresh: posted review on stale head',
+    targetRevisionRef: pushedHead, logger: { warn: () => {} },
+  });
+  assert.equal(refused.triggered, false);
+  assert.equal(refused.reason, 'comment-only-final-round-completed');
+});
+
+test('a completed final round whose moved head has no push proof alerts and holds that head from re-review', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const liveHead = 'c'.repeat(40);
+  const { result, alerts, job } = await reconcileFinalRoundWithReply(rootDir, {
+    prNumber: 186,
+    replyOverrides: { outcome: 'completed' },
+    ciGate: { state: 'green', failedChecks: [], pendingChecks: [] },
+    liveHead,
+  });
+  assert.equal(result.action, 'completed');
+  assert.equal(result.job.completion.workerPushedHeadSha, undefined);
+  assert.equal(result.job.completion.withheldPushHeadSha, liveHead);
+  assert.match(result.job.completion.finalRoundOutcome.push, /^live-head-mismatch/);
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].event, 'adversarial_review.comment_only_final_round_push_unproven');
+  const held = requestReviewRereview({
+    rootDir, repo: job.repo, prNumber: job.prNumber, reason: 'auto-refresh: posted review on stale head',
+    targetRevisionRef: liveHead, logger: { warn: () => {} },
+  });
+  assert.equal(held.triggered, false);
+  assert.equal(held.reason, 'comment-only-final-round-push-unproven');
 });
 
 test('reconcileFollowUpJob rejects HQ remediation reply symlink targets', async () => {

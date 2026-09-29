@@ -14,8 +14,9 @@ import { ensureTtmTrackerSchema } from './ttm-tracker.mjs';
 import { recordReviewLatencyEvent } from './review-latency-event-writer.mjs';
 import { normalizeEffectiveReviewVerdict } from './kernel/verdict.mjs';
 import {
-  hasCompletedCommentOnlyFinalRound,
+  hasCommentOnlyFinalRoundPush,
   hasSettledCommentOnlyReviewHead,
+  hasUnprovenCommentOnlyFinalRoundHead,
 } from './comment-only-final-round.mjs';
 import {
   REVIEWER_PASS_GENUINE_POSTED_REVIEW_WHERE_SQL,
@@ -1097,9 +1098,14 @@ function requestReviewRereview({
       }
     }
     if (targetHead && !explicitOperatorRetrigger &&
-        hasCompletedCommentOnlyFinalRound(rootDir, { repo, prNumber, headSha: targetHead }, logger)) {
+        hasCommentOnlyFinalRoundPush(rootDir, { repo, prNumber, headSha: targetHead }, logger)) {
       logger.warn?.(`[review-state] Refusing re-review for ${repo}#${prNumber}: comment-only final round completed`);
       return buildBlockedRereviewResult('comment-only-final-round-completed', currentRow);
+    }
+    if (targetHead && !explicitOperatorRetrigger &&
+        hasUnprovenCommentOnlyFinalRoundHead(rootDir, { repo, prNumber, headSha: targetHead }, logger)) {
+      logger.warn?.(`[review-state] Refusing re-review for ${repo}#${prNumber}@${targetHead}: unproven comment-only final-round head is held for the operator`);
+      return buildBlockedRereviewResult('comment-only-final-round-push-unproven', currentRow);
     }
 
     // Single compare-and-swap UPDATE with the eligibility predicate

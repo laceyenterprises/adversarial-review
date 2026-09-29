@@ -1310,7 +1310,7 @@ function queueFollowUpForPostedReview({
     ? classifyFollowUpCriticality(reviewText)
     : { critical: legacyCritical };
 
-  const { jobPath } = createFollowUpJobImpl({
+  const { jobPath, duplicateOf } = createFollowUpJobImpl({
     rootDir,
     repo,
     prNumber,
@@ -1331,7 +1331,7 @@ function queueFollowUpForPostedReview({
   let handoffWake = { attempted: false };
   try {
     const handoffConfig = resolveHandoffConfigImpl();
-    if (handoffConfig.enabled && handoffConfig.reviewToRemediation) {
+    if (handoffConfig.enabled && handoffConfig.reviewToRemediation && !duplicateOf) {
       const wake = signalFollowUpDaemonWakeImpl({
         rootDir,
         reason: 'review-to-remediation',
@@ -1348,7 +1348,7 @@ function queueFollowUpForPostedReview({
       error: err?.message || String(err),
     };
   }
-  return { queued: true, jobPath, verdictMode: normalizedVerdictMode, handoffWake };
+  return { queued: !duplicateOf, jobPath, verdictMode: normalizedVerdictMode, handoffWake, ...(duplicateOf ? { reason: 'duplicate-review-follow-up', duplicateOf } : {}) };
 }
 
 async function fetchPRContext(repo, prNumber) {

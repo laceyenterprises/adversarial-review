@@ -240,8 +240,10 @@ function parseJsonOrNull(text) {
 /**
  * Gather the evidence for one job. Never throws: every source that could not be
  * read says so in its section, because an absent check must not read as a
- * passed one. The one exception is `fatal`: a rubric that ran and crashed is a
- * reviewer error, and the review is retried rather than decided without it.
+ * passed one. The exception is `fatal`: a rubric that ran and crashed, or a
+ * manifest/lockfile read that failed (as opposed to a file absent at the ref),
+ * is a reviewer error, and the review is retried rather than decided without
+ * the rubric.
  */
 export async function gatherArgusEvidence({
   job,
@@ -308,11 +310,18 @@ export async function gatherArgusEvidence({
 
   const dirs = npmManifestDirs(changedPathsFrom({ pr, diff })).slice(0, MAX_MANIFEST_DIRS);
   for (const [index, dir] of dirs.entries()) {
+    // `fetchFileAtRef` returns null for a file that is absent at the ref (404).
+    // Anything it throws is a failed read (5xx, timeout, DNS), not an absent
+    // file: treating it as absent would skip the rubric as an incomplete tree,
+    // so the review is retried instead of decided without it.
+    const readErrors = [];
     const read = async (ref, name) => {
       try {
         return await io.fetchFileAtRef({ repo: job.repo, path: dir ? `${dir}/${name}` : name, ref });
       } catch (err) {
-        logger?.warn?.(`[argus-evidence] ${name}@${String(ref).slice(0, 12)} unreadable: ${err?.message || err}`);
+        const message = `${name}@${String(ref).slice(0, 12)}: ${err?.message || err}`;
+        logger?.warn?.(`[argus-evidence] ${message}`);
+        readErrors.push(message);
         return null;
       }
     };
@@ -320,6 +329,11 @@ export async function gatherArgusEvidence({
       base: { manifest: await read(pr.baseSha, 'package.json'), lock: await read(pr.baseSha, 'package-lock.json') },
       head: { manifest: await read(job.headSha, 'package.json'), lock: await read(job.headSha, 'package-lock.json') },
     };
+    if (readErrors.length > 0) {
+      fatal = `manifest read failed for ${dir || '.'}: ${readErrors.join('; ')}`.slice(0, 1000);
+      rubricResults.push({ dir, status: 'error', error: readErrors.join('; ').slice(0, 500) });
+      continue;
+    }
     const treeRoot = join(workDir, 'trees', String(index));
     for (const side of ['base', 'head']) {
       mkdirSync(join(treeRoot, side), { recursive: true });

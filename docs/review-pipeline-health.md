@@ -394,6 +394,11 @@ GitHub listing. It writes `data/argus-security-drain-status.json` every tick.
 - `ADVERSARIAL_ARGUS_RUBRIC_PYTHONPATH` / `ADVERSARIAL_ARGUS_RUBRIC_PYTHON`
   locate the agent-os ASR-05 rubric; by default it is found beside the deployed
   submodule (`modules/argus/lib/python`).
+- A rubric crash, or a `package.json` / `package-lock.json` read that fails
+  (a 5xx, timeout or network error, as opposed to a file absent at the ref),
+  is a failed review attempt: the job is retried with backoff rather than
+  decided by the model without the rubric's authoritative findings, and it
+  counts toward `ADVERSARIAL_ARGUS_DRAIN_MAX_ATTEMPTS`.
 
 ## Configuration
 

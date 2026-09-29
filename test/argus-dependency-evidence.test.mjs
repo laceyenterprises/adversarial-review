@@ -193,6 +193,48 @@ test('a rubric that crashes is fatal; a rubric that is not installed is reported
   assert.match(notes.sections.find((s) => s.title.startsWith('Upstream')).body, /^Not obtained/u);
 }));
 
+test('a failed manifest read is fatal, not an incomplete tree that skips the rubric', () => withRoot(async (workDir) => {
+  const { io, calls } = fakeIo();
+  const flaky = {
+    ...io,
+    fetchFileAtRef: async ({ path, ref }) => {
+      if (ref === HEAD && path === 'package-lock.json') throw new Error('HTTP 502: Bad Gateway');
+      return io.fetchFileAtRef({ path, ref });
+    },
+  };
+  const evidence = await gatherArgusEvidence({ job: routedJob(), pr: PR, diff: '', workDir, rootDir: '/ar', io: flaky, logger: quiet });
+  assert.match(evidence.fatal, /manifest read failed for \.: package-lock\.json@81bb9f3f0418: HTTP 502/u);
+  assert.equal(evidence.rubric.results[0].status, 'error');
+  assert.equal(calls.rubric.length, 0);
+
+  // A file absent at the ref (fetchFileAtRef → null on 404) is still an incomplete tree.
+  const { io: absentIo } = fakeIo({ files: { [`${HEAD}:package.json`]: '{}', [`${HEAD}:package-lock.json`]: JSON.stringify(LOCK_HEAD) } });
+  const absent = await gatherArgusEvidence({ job: routedJob(), pr: PR, diff: '', workDir, rootDir: '/ar', io: absentIo, logger: quiet });
+  assert.equal(absent.fatal, null);
+  assert.equal(absent.rubric.results[0].status, 'skipped-incomplete-trees');
+}));
+
+test('a failed manifest read retries the review instead of deciding it without the rubric', () => withRoot(async (workDir) => {
+  const { io } = fakeIo();
+  const flaky = { ...io, fetchFileAtRef: async () => { throw new Error('ETIMEDOUT'); } };
+  let modelsResolved = false;
+  const outcome = await reviewArgusJob({
+    job: routedJob(),
+    workDir,
+    nowMs: NOW,
+    logger: quiet,
+    deps: {
+      fetchPullRequest: async () => PR,
+      fetchDiff: async () => '',
+      gatherEvidence: (args) => gatherArgusEvidence({ ...args, rootDir: '/ar', io: flaky, logger: quiet }),
+      resolveReviewerModels: async () => { modelsResolved = true; return ['gemini']; },
+    },
+  });
+  assert.equal(outcome.kind, ARGUS_REVIEW_OUTCOME.RETRY);
+  assert.match(outcome.error, /manifest read failed/u);
+  assert.equal(modelsResolved, false);
+}));
+
 test('verification: a semver-major needs the full suite green on this head', () => {
   const cached = { dependency: resolveDependencyBump({ job: routedJob(), pr: PR }), rubric: null };
   const green = assessArgusVerification({ job: routedJob(), pr: PR, cached, summarizeChecks: () => 'SUCCESS' });

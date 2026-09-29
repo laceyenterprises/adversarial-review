@@ -201,7 +201,8 @@ const MONOLITH_CEILINGS = Object.freeze({
   // handoff feature flag) into the durable queue in src/rereview-wake.mjs.
   // 4497 -> 4490: REMWASTE-02 extracts the killed-worker resume/requeue decision to src/remediation-worker-resume.mjs.
   // 4490 -> 4472: COMMENTCLOSE-01 extracts the comment-only final-round completion decision to src/comment-only-final-round-completion.mjs.
-  'follow-up-remediation.mjs': 4472,
+  // 4472 -> 4369: REMFALLBACK-01 extracts the reconcile quota hold to src/remediation-quota-hold.mjs and the claim-time remediator routing to src/remediation-worker-class-fallback.mjs.
+  'follow-up-remediation.mjs': 4369,
   // 5485 -> 4262: ARC-19 wave3 extract fast-merge processing/orchestration to src/fast-merge-processing.mjs.
   // 4262 -> 3742: ARC-19 wave3 extract merge-agent dispatch-decision policy to src/merge-agent-dispatch-decision.mjs.
   // 3742 -> 3660: ARC-19 wave4 extract review-state classification to src/merge-agent-review-classification.mjs.

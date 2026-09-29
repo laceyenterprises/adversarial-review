@@ -30,10 +30,12 @@ import {
   resolveSlimReviewPolicy,
 } from './slim-review-eligibility.mjs';
 import {
+  SECURITY_TRIGGER,
+  classifySecuritySurface,
   manifestEcosystemForPath,
   sensitiveCategoriesForPath,
 } from './security-surface-classifier.mjs';
-import { parseDiffFiles } from './reviewer-util.mjs';
+import { parseDiffEntries } from './reviewer-util.mjs';
 
 export const SINGLE_REVIEW_CONFIG_KEY = 'roles.adversarial.single_review';
 
@@ -76,6 +78,18 @@ export const SUPER_SMALL_REFUSAL = Object.freeze({
   GITLINK_CHANGE: 'submodule-gitlink-change',
   RENAME_OR_COPY: 'rename-or-copy',
   MODE_CHANGE: 'file-mode-change',
+  // Security-surface PRs are out of the lane. Path and manifest triggers
+  // already refuse per file above; a bot author (Dependabot, Renovate, …) has
+  // no path to match, and any trigger the shared classifier grows later lands
+  // here instead of being silently admitted.
+  BOT_AUTHOR: 'bot-author',
+  SECURITY_SURFACE: 'security-surface',
+});
+
+// Security-surface triggers already refused by a per-path rule above.
+const PATH_REFUSAL_FOR_TRIGGER = Object.freeze({
+  [SECURITY_TRIGGER.SENSITIVE_PATH]: SUPER_SMALL_REFUSAL.SECRET_AUTH_PATH,
+  [SECURITY_TRIGGER.MANIFEST_CHANGE]: SUPER_SMALL_REFUSAL.DEPENDENCY_MANIFEST,
 });
 
 // The adversarial-review gate-keeper surface (agent-os AGENTS.md): the files
@@ -219,10 +233,12 @@ export function resolveSingleReviewPolicy({ env = process.env, loadRoleConfigImp
  *   `oldPath` is the pre-image path of a rename or copy; every path rule runs
  *   against both sides.
  * @param {Array<string|{name?: string}>} [input.labels]
+ * @param {string|{login?: string}|null} [input.author]  PR author; a bot author
+ *   is a security-surface trigger and refuses.
  * @param {object} [input.policy]  From {@link resolveSingleReviewPolicy}.
  * @returns {{superSmall: boolean, basis: string|null, reasons: Array<object>, stats: {files: number, added: number, removed: number, changedLines: number}}}
  */
-export function classifySuperSmall({ changedFiles = null, labels = [], policy = SINGLE_REVIEW_DEFAULTS } = {}) {
+export function classifySuperSmall({ changedFiles = null, labels = [], author = null, policy = SINGLE_REVIEW_DEFAULTS } = {}) {
   const effective = {
     ...SINGLE_REVIEW_DEFAULTS,
     slimMaxFiles: 20,
@@ -311,6 +327,20 @@ export function classifySuperSmall({ changedFiles = null, labels = [], policy = 
     }
   }
 
+  // The shared security-surface classifier is the authority on what needs a
+  // security review; any trigger it reports keeps the PR on normal rounds.
+  const surface = classifySecuritySurface({
+    author,
+    changedFiles: (files || []).flatMap((file) => [file.path, file.oldPath].filter(Boolean)),
+  });
+  for (const reason of surface.reasons) {
+    if (reason.trigger === SECURITY_TRIGGER.BOT_AUTHOR) {
+      refusals.push({ code: SUPER_SMALL_REFUSAL.BOT_AUTHOR, author: reason.author });
+    } else if (!refusals.some((refusal) => refusal.code === PATH_REFUSAL_FOR_TRIGGER[reason.trigger])) {
+      refusals.push({ code: SUPER_SMALL_REFUSAL.SECURITY_SURFACE, trigger: reason.trigger });
+    }
+  }
+
   const superSmall = refusals.length === 0 && basis !== null;
   return {
     superSmall,
@@ -324,9 +354,15 @@ export function classifySuperSmall({ changedFiles = null, labels = [], policy = 
  * The changed files of a unified diff, with the pre-image path and structural
  * facts (gitlink / rename / copy / mode change) the size rules alone would miss.
  * Line counts and binary detection are the slim lane's, so both lanes agree.
+ *
+ * Returns null (changed files unknown, so the lane refuses) when any
+ * `diff --git` header could not be parsed: a file the classifier cannot name is
+ * a file it cannot prove is outside the protected paths.
  */
 export function superSmallFilesFromDiff(diffText) {
-  return parseDiffFiles(diffText).map((file) => {
+  const entries = parseDiffEntries(diffText);
+  if (entries.some((entry) => !entry.parsed)) return null;
+  return entries.map((file) => {
     const binary = isBinaryPatch(file.patch);
     const { added, removed } = binary ? { added: 0, removed: 0 } : countPatchLines(file.patch);
     return {
@@ -341,9 +377,9 @@ export function superSmallFilesFromDiff(diffText) {
 }
 
 /** Convenience wrapper: classify straight from the diff the reviewer already has. */
-export function classifySuperSmallForDiff({ diff, labels = [], policy } = {}) {
+export function classifySuperSmallForDiff({ diff, labels = [], author = null, policy } = {}) {
   const changedFiles = typeof diff === 'string' ? superSmallFilesFromDiff(diff) : null;
-  return classifySuperSmall({ changedFiles, labels, policy });
+  return classifySuperSmall({ changedFiles, labels, author, policy });
 }
 
 /** One-line summary for the `single-review: super-small …` log line. */

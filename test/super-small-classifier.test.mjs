@@ -363,3 +363,77 @@ test(`${SINGLE_REVIEW_ENABLED_ENV} overrides the config enabled key`, () => {
   assert.equal(resolveSingleReviewPolicy({ env: { [SINGLE_REVIEW_ENABLED_ENV]: 'true' }, loadRoleConfigImpl: configOff }).enabled, true);
   assert.equal(resolveSingleReviewPolicy({ env: {}, loadRoleConfigImpl: configOff }).enabled, false);
 });
+
+test('a bot-authored PR never qualifies, however small', () => {
+  for (const author of ['dependabot[bot]', 'renovate[bot]', { login: 'app/dependabot' }]) {
+    const decision = classifySuperSmallForDiff({
+      diff: unifiedDiff([{ path: 'src/pr-comments.mjs', added: 1, removed: 1 }]),
+      author,
+      policy: policy(),
+    });
+    assert.equal(decision.superSmall, false, JSON.stringify(author));
+    assert.deepEqual(codes(decision), [SUPER_SMALL_REFUSAL.BOT_AUTHOR], JSON.stringify(author));
+  }
+  const human = classifySuperSmall({
+    changedFiles: [{ path: 'src/pr-comments.mjs', added: 2 }],
+    author: 'octocat',
+    policy: policy(),
+  });
+  assert.equal(human.superSmall, true);
+});
+
+function quotedEntry(header, path, added = 1) {
+  return [
+    `diff --git ${header}`,
+    `--- ${path.a}`,
+    `+++ ${path.b}`,
+    `@@ -1,0 +1,${added} @@`,
+    ...Array.from({ length: added }, (_, i) => `+new ${i}`),
+  ].join('\n') + '\n';
+}
+
+test('a quoted protected path in a mixed diff is classified, not dropped', () => {
+  const workflow = quotedEntry(
+    '"a/.github/workflows/d\\303\\251ploy.yml" "b/.github/workflows/d\\303\\251ploy.yml"',
+    { a: '"a/.github/workflows/d\\303\\251ploy.yml"', b: '"b/.github/workflows/d\\303\\251ploy.yml"' },
+  );
+  const ordinary = unifiedDiff([{ path: 'src/pr-comments.mjs', added: 2 }]);
+  const decision = classifySuperSmallForDiff({ diff: workflow + ordinary, policy: policy() });
+  assert.equal(decision.superSmall, false);
+  assert.ok(codes(decision).includes(SUPER_SMALL_REFUSAL.WORKFLOW_PATH));
+  assert.equal(decision.stats.files, 2);
+
+  const auth = quotedEntry(
+    '"a/src/auth/tab\\there.mjs" "b/src/auth/tab\\there.mjs"',
+    { a: '"a/src/auth/tab\\there.mjs"', b: '"b/src/auth/tab\\there.mjs"' },
+  );
+  const withAuth = classifySuperSmallForDiff({ diff: ordinary + auth, policy: policy() });
+  assert.equal(withAuth.superSmall, false);
+  assert.ok(codes(withAuth).includes(SUPER_SMALL_REFUSAL.SECRET_AUTH_PATH));
+});
+
+test('a quoted ordinary path still qualifies once decoded', () => {
+  const decision = classifySuperSmallForDiff({
+    diff: quotedEntry(
+      '"a/docs/caf\\303\\251.md" "b/docs/caf\\303\\251.md"',
+      { a: '"a/docs/caf\\303\\251.md"', b: '"b/docs/caf\\303\\251.md"' },
+      3,
+    ),
+    policy: policy(),
+  });
+  assert.equal(decision.superSmall, true);
+  assert.equal(decision.stats.changedLines, 3);
+});
+
+test('an unparseable diff header refuses the lane instead of shrinking the file list', () => {
+  const unreadable = quotedEntry(
+    '"a/.github/workflows/ci.yml b/.github/workflows/ci.yml',
+    { a: 'a/.github/workflows/ci.yml', b: 'b/.github/workflows/ci.yml' },
+  );
+  const decision = classifySuperSmallForDiff({
+    diff: unreadable + unifiedDiff([{ path: 'src/pr-comments.mjs', added: 2 }]),
+    policy: policy(),
+  });
+  assert.equal(decision.superSmall, false);
+  assert.deepEqual(codes(decision), [SUPER_SMALL_REFUSAL.CHANGED_FILES_UNKNOWN]);
+});

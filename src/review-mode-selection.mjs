@@ -122,7 +122,7 @@ export function selectReviewMode({
   // for the reaper to read back, so the lane is not applied (normal rounds);
   // a spent single-review credit can still be voided.
   decision.singleReview = selectSingleReview({
-    rootDir, repo, prNumber, diff, labels, headSha, promptStage, env,
+    rootDir, repo, prNumber, diff, labels, author, headSha, promptStage, env,
     allowApply: !slimClassificationFailed,
     resolveSingleReviewPolicyImpl, voidSingleReviewCreditImpl, sleepImpl, log,
   });
@@ -201,6 +201,7 @@ export function selectSingleReview({
   prNumber,
   diff,
   labels = [],
+  author = null,
   headSha = null,
   promptStage = null,
   env = process.env,
@@ -214,6 +215,7 @@ export function selectSingleReview({
     const classification = classifySuperSmallForDiff({
       diff,
       labels,
+      author,
       policy: resolveSingleReviewPolicyImpl({ env }),
     });
     const firstReview = promptStage === 'first';

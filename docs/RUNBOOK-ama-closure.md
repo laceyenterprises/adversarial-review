@@ -422,14 +422,19 @@ regressions and broken contracts blocking.
   rename's pre-image path;
 - migrations (`alembic/`, `migrations/`, `versions/*.py`, `*.sql`);
 - secret, credential and auth paths;
-- sensitive surfaces from `security-surface-classifier.mjs`;
+- sensitive surfaces from `security-surface-classifier.mjs`, and any other
+  trigger that classifier reports, including a bot author (Dependabot,
+  Renovate, `github-actions[bot]`): refused as `bot-author`;
 - dependency manifests;
 - `.github/workflows/`;
 - any `ADVERSARIAL_REVIEW_SLIM_DENY_PREFIXES` prefix;
 - a PR labelled `operator-approved: full-review`.
 
-Anything unknown (an unparseable diff, an unreadable config) also means normal
-rounds. The lane applies only to what would have been the PR's *first* review;
+Anything unknown also means normal rounds: an unreadable config, or a diff
+with any `diff --git` header the parser cannot read (quoted Git paths are
+decoded, so a quoted protected path is still classified). One unreadable
+header refuses the whole PR as `changed-files-unknown` rather than classifying
+the files that did parse. The lane applies only to what would have been the PR's *first* review;
 a PR already in the round loop never enters it.
 
 **How it rides the existing budget.** There is no second counter. The job is

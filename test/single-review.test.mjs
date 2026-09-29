@@ -250,6 +250,14 @@ test('selectReviewMode runs a super-small first review at the last stage and lea
   assert.equal(watcher.singleReview.applied, false);
   assert.equal(watcher.promptStage, 'first');
 
+  const bot = selectReviewMode({
+    ...base, diff: TWELVE_LINE_FIX, author: 'dependabot[bot]',
+    promptStage: 'first', resolveSingleReviewPolicyImpl: policyImpl(),
+  });
+  assert.equal(bot.singleReview.applied, false);
+  assert.deepEqual(bot.singleReview.reasons.map((reason) => reason.code), ['bot-author']);
+  assert.equal(bot.promptStage, 'first');
+
   const throwing = selectReviewMode({
     ...base, diff: TWELVE_LINE_FIX, promptStage: 'first',
     resolveSingleReviewPolicyImpl: () => { throw new Error('policy exploded'); },

@@ -434,6 +434,11 @@ export async function reviewArgusJob({
     evidence = typeof deps.gatherEvidence === 'function'
       ? await deps.gatherEvidence({ job, pr, diff, workDir })
       : { sections: [], rubricFindings: [], rubric: null, dependency: null };
+    if (evidence.fatal) {
+      // The deterministic rubric ran and crashed. Its `high` findings are the
+      // authoritative ones, so the review is not decided without it.
+      return { kind: ARGUS_REVIEW_OUTCOME.RETRY, error: evidence.fatal };
+    }
     const models = await deps.resolveReviewerModels({ job, pr });
     if (!Array.isArray(models) || models.length === 0) {
       return {

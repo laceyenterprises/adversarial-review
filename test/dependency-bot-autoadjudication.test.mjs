@@ -94,7 +94,11 @@ test('runtime major bump is adjudicated but does not auto-merge', async () => wi
 
   assert.equal(result.decision.autoMergeEligible, false);
   assert.equal(result.reason, 'semver-major');
-  assert.equal(result.completed.job.result.verdict, 'needs_verification');
+  // ARGUSDRAIN-01: routed to the Argus drain, not parked as needs_verification.
+  assert.equal(result.completed, null);
+  assert.equal(result.routed.job.routedForReview.reason, 'semver-major');
+  assert.equal(result.routed.job.routedForReview.inputs.bumpKind, 'major');
+  assert.equal(findArgusJob(rootDir, { repo: REPO, prNumber: 963, headSha: HEAD }).bucket, 'pending');
   assert.equal(mergeCalled, false);
 }));
 
@@ -115,7 +119,8 @@ test('v0 minor bump is adjudicated as verification-required', async () => withRo
   assert.equal(result.decision.autoMergeEligible, false);
   assert.equal(result.reason, 'semver-major');
   assert.equal(result.decision.inputs.bumpKind, 'major');
-  assert.equal(result.completed.job.result.verdict, 'needs_verification');
+  assert.equal(result.routed.job.routedForReview.reason, 'semver-major');
+  assert.equal(findArgusJob(rootDir, { repo: REPO, prNumber: 963, headSha: HEAD }).bucket, 'pending');
   assert.equal(mergeCalled, false);
 }));
 
@@ -133,7 +138,8 @@ test('native-driver bump is adjudicated but does not auto-merge', async () => wi
 
   assert.equal(result.decision.autoMergeEligible, false);
   assert.equal(result.reason, 'security-surface-or-native-dependency');
-  assert.equal(result.completed.job.result.verdict, 'needs_verification');
+  assert.equal(result.routed.job.routedForReview.reason, 'security-surface-or-native-dependency');
+  assert.equal(findArgusJob(rootDir, { repo: REPO, prNumber: 964, headSha: HEAD }).bucket, 'pending');
 }));
 
 test('non-bot author is left pending for the normal Argus worker', async () => withRoot(async (rootDir) => {

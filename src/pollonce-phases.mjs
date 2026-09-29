@@ -1004,7 +1004,9 @@ export async function processReviewSubject(entry, ctx) {
                 `Argus job lookup failed (${err?.message || err})`
             );
           }
-          if (argusJobRecord?.bucket === 'pending') {
+          // ARGUSDRAIN-01: `completed` too, so a bump the Argus drain approved
+          // reaches the same daemon merge path (the adjudicator decides which).
+          if (argusJobRecord?.bucket === 'pending' || argusJobRecord?.bucket === 'completed') {
             let mergeAuthorityConfig = null;
             try {
               const loadedConfig = loadConfigCached();

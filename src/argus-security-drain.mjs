@@ -69,13 +69,33 @@ export function resolveArgusDrainMaxAttempts(env = process.env) {
   return positiveIntEnv(env, ARGUS_DRAIN_MAX_ATTEMPTS_ENV, DEFAULT_ARGUS_DRAIN_MAX_ATTEMPTS);
 }
 
+// A fresh bot job belongs to the dependency-bot auto-adjudicator first: it
+// approves and merges patch/minor bumps cheaply on the watcher's per-PR pass
+// and routes the rest here. This grace keeps the drain from racing it to a
+// model review; past it (merge authority off, say) the drain reviews anyway.
+export const ARGUS_BOT_ADJUDICATION_GRACE_MS = 30 * 60 * 1000;
+
+function isBotAuthorJob(job) {
+  return (Array.isArray(job?.reasons) ? job.reasons : []).some((reason) => reason?.trigger === 'bot-author');
+}
+
 /**
- * May the drain claim this pending job now? A job inside its retry backoff or
- * deferral window is passed over and keeps its place in the queue.
+ * May the drain claim this pending job now? Passed over (keeping its place):
+ *   - a job inside its retry backoff or deferral window;
+ *   - a job the auto-adjudicator's merge path is driving (it approved the bump
+ *     and is waiting on CI to merge it);
+ *   - a bot job still inside the adjudicator's grace, unless already routed.
  */
 export function isArgusJobClaimable(job, { nowMs = Date.now() } = {}) {
   const notBeforeMs = Date.parse(String(job?.drain?.notBefore || ''));
-  return !(Number.isFinite(notBeforeMs) && notBeforeMs > nowMs);
+  if (Number.isFinite(notBeforeMs) && notBeforeMs > nowMs) return false;
+  if (job?.routedForReview) return true;
+  if (job?.lastAutoadjudicationAttempt) return false;
+  if (isBotAuthorJob(job)) {
+    const enqueuedMs = Date.parse(String(job?.enqueuedAt || ''));
+    if (Number.isFinite(enqueuedMs) && nowMs - enqueuedMs < ARGUS_BOT_ADJUDICATION_GRACE_MS) return false;
+  }
+  return true;
 }
 
 function parseChildOutcome(stdout) {

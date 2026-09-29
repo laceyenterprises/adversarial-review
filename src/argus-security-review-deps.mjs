@@ -4,6 +4,11 @@
 // and never reach GitHub, a model CLI, or the reviewer credential pools. Only
 // the review child process (`argus-security-review-child.mjs`) builds these.
 
+import {
+  assessArgusVerification,
+  createDefaultArgusEvidenceIo,
+  gatherArgusEvidence,
+} from './argus-dependency-evidence.mjs';
 import { reviewWithClaude, reviewWithCodex, reviewWithGemini } from './reviewer-harness.mjs';
 import { fetchPRDiff } from './reviewer-diff-fetch.mjs';
 import { execGhWithRetry } from './gh-cli.mjs';
@@ -44,12 +49,12 @@ function parseCommentUrl(stdout) {
 }
 
 export function createDefaultArgusReviewDeps({
+  rootDir,
   env = process.env,
   execGhWithRetryImpl = execGhWithRetry,
   logger = console,
   resolveReviewerModels = null,
-  gatherEvidence = null,
-  assessVerification = null,
+  evidenceIo = createDefaultArgusEvidenceIo({ env, execGhWithRetryImpl, logger }),
 } = {}) {
   return {
     async fetchPullRequest({ repo, prNumber }) {
@@ -107,7 +112,7 @@ export function createDefaultArgusReviewDeps({
       return { ok: true, url: parseCommentUrl(stdout), identity: identity.tokenEnv };
     },
 
-    gatherEvidence,
-    assessVerification,
+    gatherEvidence: (args) => gatherArgusEvidence({ ...args, rootDir, io: evidenceIo, env, logger }),
+    assessVerification: (args) => assessArgusVerification({ ...args, summarizeChecks: evidenceIo.summarizeChecks }),
   };
 }

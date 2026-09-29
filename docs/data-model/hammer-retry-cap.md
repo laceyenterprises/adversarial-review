@@ -40,6 +40,8 @@ Directory: `data/follow-up-jobs/hammer-retry-cap/`
 | `lifetimeAttemptCount` | non-negative integer | Confirmed hammer dispatches for the PR across all reviewed-head series. Missing legacy values are seeded from `attemptCount`; non-finite present values fail closed to the lifetime ceiling. |
 | `targetRemediationSha` | string or null | Live PR head SHA targeted by HAM remediation. This may differ from `jobKey` when the review is stale and the exhausted-lane hammer runs against a newer head. |
 | `targetAttemptCount` | non-negative integer | Confirmed hammer dispatches against `targetRemediationSha` across job keys. A changed known target SHA resets the count; missing legacy values are backfilled from `attemptCount` on suppression writes and from the evaluated target count on dispatch writes. |
+| `retryable` | non-negative integer, optional | HAMBG-02: dispatches refunded because the hammer exited `succeeded` without closing its PR (`attemptCount` and the matching `targetAttemptCount` go down by one, `retryable` goes up by one). At most `HAMMER_EXITED_WITHOUT_CLOSE_RETRY_BUDGET` (1) per series. Belongs to the series: a fresh-review job-key change resets it, on a dispatch write and on a suppression write alike. Absent until the first refund. Not the same counter as the base-branch merge gate's `retryable` (HAMGATE-01, `data/merge-leases/`): the two live in different stores and have separate budgets. |
+| `retryableLaunchRequestIds` | string array, optional | Launch request ids already refunded, so a launch observed on several ticks is refunded once. Last 10 kept; reset with `retryable`. |
 | `dispatchHeads` | string array | Unique dispatched head SHAs observed in the current reviewed-head series. Resets on a fresh-review job-key change. |
 | `lastDispatchedHeadSha` | string or null | Most recent head SHA used for a confirmed hammer dispatch. |
 | `suppressed` | boolean | `true` once any cap has blocked hammer dispatch for the ledger's current state. |
@@ -61,6 +63,9 @@ Directory: `data/follow-up-jobs/hammer-retry-cap/`
   corrupt files must page the operator rather than silently resetting counts.
 - The ledger counts confirmed hammer launches only. Interrupted pre-launch work
   does not create phantom attempts that need reclaiming.
+- A refund never touches `lifetimeAttemptCount`, and is refused once the series
+  is suppressed or its budget is spent. Past the budget an exit stays charged,
+  so the per-series cap still suppresses and pages the operator.
 - Per-series suppression can clear only when a known fresh reviewed-head job key
   arrives. Lifetime suppression survives fresh-review resets.
 - Target-redrive suppression is scoped to the live target SHA. When the target

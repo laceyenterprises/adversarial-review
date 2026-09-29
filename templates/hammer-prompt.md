@@ -134,11 +134,24 @@ installation; the merge phase retains its existing HQ merge-signal integration.
    distinct from the existing single in-lease audit comment, which remains the
    only comment for the successful merge path. If that audit was already posted
    before a later merge failure, edit it in place into the required no-merge
-   closing-status comment; do not leave the audit and add a second comment. Do
+   closing-status comment; do not leave the audit and add a second comment.
+   Either way, the comment must contain the line `HAM closing status — no merge.`
+   In the audit comment for the current head, the closer reads that line as
+   this head's terminal no-merge audit. Do
    not post the no-merge comment if the PR merged, and do not report success
    merely because remediation or a rebase completed.
    If the gate-attempt cap parks this head, include the `closingStatus` returned
    by `merge-lease acquire` verbatim in that comment and the terminal audit.
+0c. **Run every step in the foreground (HAMBG-02).** Your session ends when
+   your final message ends, and anything still running in the background dies
+   with it. If a step can exceed your tool's timeout, split it into repeated
+   foreground polls that each finish inside the timeout. For example, re-read
+   the required checks until they settle, then run the merge phase. Never end
+   your final message while a command you started is still running. The closer
+   checks every exit. A run that neither merged the PR nor wrote its no-merge
+   terminal audit for the current head is recorded as
+   `hammer-exited-without-close`. The closer then dispatches another hammer,
+   within a small retry budget.
 1. Read the FINAL adversarial review on `<<REVIEWED_SHA>>`. These are the
    freshest findings.
 2. Remediate ALL final comments, blocking and non-blocking. Make real fixes for
@@ -480,7 +493,12 @@ gh pr view <<PR_URL>> --json reviews > /tmp/ham-<<PR_NUMBER>>-reviews.json
 base_enc=$(printf '%s' "$(jq -r '.baseRefName' /tmp/ham-<<PR_NUMBER>>-pr-after.json)" | jq -sRr @uri)
 protection_err="/tmp/ham-<<PR_NUMBER>>-protection.stderr"
 trap 'rm -f "$protection_err"; ham_release_merge_lease' EXIT
-protection_plan_unavailable_re='branch protection.*(not available|upgrade|plan)|upgrade.*branch protection|protected branches.*(not available|upgrade|plan)'
+# HAMBG-02: GitHub's live wording. A private repo on the free plan answers
+# "Upgrade to GitHub Pro or make this repository public to enable this
+# feature. (HTTP 403)"; a repo with no protection answers "Branch not
+# protected (HTTP 404)". ama-check classifies both inputs written below.
+protection_plan_unavailable_re='branch protection.*(not available|upgrade|plan)|upgrade.*branch protection|protected branches.*(not available|upgrade|plan)|upgrade to github pro|make this repository public'
+protection_not_protected_re='branch not protected'
 protection_transient_re='timed? out|timeout|TLS handshake timeout|connection (reset|refused|aborted)|temporary failure|network is unreachable|rate limit|secondary rate limit|HTTP[ /]5[0-9][0-9]|(^|[^0-9])(500|502|503|504)([^0-9]|$)|bad gateway|service unavailable|gateway timeout|server error'
 protection_attempt=1
 protection_max_attempts=3
@@ -491,6 +509,10 @@ while true; do
   fi
   if grep -Eiq "$protection_plan_unavailable_re" "$protection_err"; then
     jq -n '{ branchProtectionUnavailable: true, reason: "github_plan" }' > /tmp/ham-<<PR_NUMBER>>-protection.json
+    break
+  fi
+  if grep -Eiq "$protection_not_protected_re" "$protection_err"; then
+    jq -n '{ status: "404", message: "Branch not protected" }' > /tmp/ham-<<PR_NUMBER>>-protection.json
     break
   fi
   if [ "$protection_attempt" -lt "$protection_max_attempts" ] && grep -Eiq "$protection_transient_re" "$protection_err"; then

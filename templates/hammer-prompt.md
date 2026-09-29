@@ -480,7 +480,12 @@ gh pr view <<PR_URL>> --json reviews > /tmp/ham-<<PR_NUMBER>>-reviews.json
 base_enc=$(printf '%s' "$(jq -r '.baseRefName' /tmp/ham-<<PR_NUMBER>>-pr-after.json)" | jq -sRr @uri)
 protection_err="/tmp/ham-<<PR_NUMBER>>-protection.stderr"
 trap 'rm -f "$protection_err"; ham_release_merge_lease' EXIT
-protection_plan_unavailable_re='branch protection.*(not available|upgrade|plan)|upgrade.*branch protection|protected branches.*(not available|upgrade|plan)'
+# HAMBG-02: GitHub's live wording. A private repo on the free plan answers
+# "Upgrade to GitHub Pro or make this repository public to enable this
+# feature. (HTTP 403)"; a repo with no protection answers "Branch not
+# protected (HTTP 404)". ama-check classifies both inputs written below.
+protection_plan_unavailable_re='branch protection.*(not available|upgrade|plan)|upgrade.*branch protection|protected branches.*(not available|upgrade|plan)|upgrade to github pro|make this repository public'
+protection_not_protected_re='branch not protected'
 protection_transient_re='timed? out|timeout|TLS handshake timeout|connection (reset|refused|aborted)|temporary failure|network is unreachable|rate limit|secondary rate limit|HTTP[ /]5[0-9][0-9]|(^|[^0-9])(500|502|503|504)([^0-9]|$)|bad gateway|service unavailable|gateway timeout|server error'
 protection_attempt=1
 protection_max_attempts=3
@@ -491,6 +496,10 @@ while true; do
   fi
   if grep -Eiq "$protection_plan_unavailable_re" "$protection_err"; then
     jq -n '{ branchProtectionUnavailable: true, reason: "github_plan" }' > /tmp/ham-<<PR_NUMBER>>-protection.json
+    break
+  fi
+  if grep -Eiq "$protection_not_protected_re" "$protection_err"; then
+    jq -n '{ status: "404", message: "Branch not protected" }' > /tmp/ham-<<PR_NUMBER>>-protection.json
     break
   fi
   if [ "$protection_attempt" -lt "$protection_max_attempts" ] && grep -Eiq "$protection_transient_re" "$protection_err"; then

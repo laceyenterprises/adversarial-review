@@ -89,6 +89,16 @@ dispatcher debugging), see
   `required: true`, an ordinary empty protection snapshot fails closed as
   `branch-protection-missing-gate`.
 
+  The hammer's protection fetch writes one of two files when the endpoint
+  refuses (HAMBG-02). GitHub's free-plan answer for a private repository,
+  `Upgrade to GitHub Pro or make this repository public to enable this
+  feature. (HTTP 403)`, becomes the `github_plan` sentinel. `Branch not
+  protected (HTTP 404)` becomes `{ "status": "404", "message": "Branch not
+  protected" }`, which ama-check reads as `branch-protection-missing`. With
+  `required: false` both inputs are waived. With `required: true` the sentinel
+  is a hard input error and the 404 fails closed as
+  `branch-protection-missing-gate`. Any other fetch error stops the hammer.
+
   The repo-wide closeout/audit helper is:
 
   ```bash

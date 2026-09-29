@@ -6,6 +6,13 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import {
+  BRANCH_NOT_PROTECTED_STDERR,
+  BRANCH_NOT_PROTECTED_STDOUT,
+  GITHUB_PLAN_UNAVAILABLE_STDERR,
+  runHammerProtectionFetch,
+} from './helpers/hammer-protection-fetch.mjs';
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
 const HAMMER_TEMPLATE = readFileSync(join(REPO_ROOT, 'templates', 'hammer-prompt.md'), 'utf8');
@@ -192,6 +199,8 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.doesNotMatch(HAMMER_PROMPT, /jq[^\n]*\.needsRevalidation\s*\/\/\s*true/);
   assert.match(HAMMER_PROMPT, /protection_plan_unavailable_re=/);
   assert.match(HAMMER_PROMPT, /branchProtectionUnavailable: true, reason: "github_plan"/);
+  assert.match(HAMMER_PROMPT, /protection_not_protected_re='branch not protected'/);
+  assert.match(HAMMER_PROMPT, /jq -n '\{ status: "404", message: "Branch not protected" \}'/);
   assert.match(HAMMER_PROMPT, /2> "\$protection_err"/);
   assert.match(HAMMER_PROMPT, /trap 'rm -f "\$protection_err"; ham_release_merge_lease' EXIT/);
   assert.doesNotMatch(HAMMER_PROMPT, /\|\s*IN\(/);
@@ -218,6 +227,47 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.match(HAMMER_PROMPT, /localCiStatus: \$localCiStatus/);
   assert.match(HAMMER_PROMPT, /remoteCiStatus: \$remoteCiStatus/);
   assert.match(HAMMER_PROMPT, /Closed-By: hammer \(adversarial-pipe-mode\)/);
+});
+
+test('hammer protection fetch writes the github_plan sentinel for the free-plan 403 (HAMBG-02, agent-os)', () => {
+  const result = runHammerProtectionFetch({ stderr: GITHUB_PLAN_UNAVAILABLE_STDERR });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.protectionBody), {
+    branchProtectionUnavailable: true,
+    reason: 'github_plan',
+  });
+});
+
+test('hammer protection fetch writes a 404 status for an unprotected branch (HAMBG-02, adversarial-review)', () => {
+  // `gh api` prints GitHub's JSON body on stdout as well; the loop replaces it.
+  const result = runHammerProtectionFetch({
+    stdout: BRANCH_NOT_PROTECTED_STDOUT,
+    stderr: BRANCH_NOT_PROTECTED_STDERR,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.protectionBody), {
+    status: '404',
+    message: 'Branch not protected',
+  });
+});
+
+test('hammer protection fetch still fails closed on any other error', () => {
+  for (const stderr of [
+    'gh: Branch not found (HTTP 404)',
+    'gh: Resource not accessible by integration (HTTP 403)',
+    'gh: Bad credentials (HTTP 401)',
+  ]) {
+    const result = runHammerProtectionFetch({ stderr });
+    assert.equal(result.status, 1, stderr);
+    assert.match(result.stderr, new RegExp(stderr.replace(/[()]/g, '\\$&')));
+  }
+});
+
+test('hammer protection fetch keeps a readable protection object as-is', () => {
+  const body = '{"required_status_checks":{"contexts":["agent-os/adversarial-gate"]}}';
+  const result = runHammerProtectionFetch({ stdout: body, exitCode: 0 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.protectionBody, body);
 });
 
 test('hammer prompt requires bounded post-rebase sync and one truthful no-merge comment', () => {

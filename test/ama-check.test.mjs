@@ -11,6 +11,12 @@ import {
   markFollowUpJobCompleted,
   markFollowUpJobSpawned,
 } from '../src/follow-up-jobs.mjs';
+import {
+  BRANCH_NOT_PROTECTED_STDERR,
+  BRANCH_NOT_PROTECTED_STDOUT,
+  GITHUB_PLAN_UNAVAILABLE_STDERR,
+  runHammerProtectionFetch,
+} from './helpers/hammer-protection-fetch.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
@@ -1002,6 +1008,66 @@ test('ama-check keeps branch protection enforced when required=true and the gate
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+// HAMBG-02: GitHub's live answers, through the hammer prompt's own fetch loop,
+// into ama-check. Waived: both inputs are accepted. Required: the github_plan
+// sentinel is a hard input error and the 404 fails the gate closed.
+for (const { name, fetch, observedReason } of [
+  {
+    name: 'agent-os free-plan 403',
+    fetch: { stderr: GITHUB_PLAN_UNAVAILABLE_STDERR },
+    observedReason: 'branch-protection-unavailable-github-plan',
+  },
+  {
+    name: 'adversarial-review "Branch not protected" 404',
+    fetch: { stdout: BRANCH_NOT_PROTECTED_STDOUT, stderr: BRANCH_NOT_PROTECTED_STDERR },
+    observedReason: 'branch-protection-missing',
+  },
+]) {
+  test(`hammer protection fetch output for the ${name} passes ama-check when protection is waived`, () => {
+    const fetched = runHammerProtectionFetch(fetch);
+    assert.equal(fetched.status, 0, fetched.stderr);
+    const tmp = mkdtempSync(join(tmpdir(), 'ama-check-hambg02-waived-'));
+    try {
+      const result = runAmaCheck(tmp, {
+        branchProtectionRequired: false,
+        protectionBody: fetched.protectionBody,
+      });
+      assert.equal(result.status, 0, result.stderr);
+      const verdict = JSON.parse(result.stdout);
+      assert.equal(verdict.eligible, true, JSON.stringify(verdict, null, 2));
+      assert.equal(verdict.trace.branchProtection.observedReason, observedReason);
+      assert.equal(verdict.trace.branchProtection.auditReason, 'branch_protection_requirement_waived');
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test(`hammer protection fetch output for the ${name} fails closed when protection is required`, () => {
+    const fetched = runHammerProtectionFetch(fetch);
+    assert.equal(fetched.status, 0, fetched.stderr);
+    const tmp = mkdtempSync(join(tmpdir(), 'ama-check-hambg02-required-'));
+    try {
+      const result = runAmaCheck(tmp, {
+        branchProtectionRequired: true,
+        protectionBody: fetched.protectionBody,
+      });
+      if (observedReason === 'branch-protection-unavailable-github-plan') {
+        assert.equal(result.status, 1);
+        assert.match(result.stderr, /branch protection is required/);
+        return;
+      }
+      assert.equal(result.status, 0, result.stderr);
+      const verdict = JSON.parse(result.stdout);
+      assert.equal(verdict.eligible, false);
+      assert.ok(verdict.reasons.includes('branch-protection-missing-gate'));
+      assert.equal(verdict.trace.branchProtection.observedReason, observedReason);
+      assert.equal(verdict.trace.branchProtection.auditReason, null);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+}
 
 test('ama-check classifies protection fixtures with the configured gate context override', () => {
   const tmp = mkdtempSync(join(tmpdir(), 'ama-check-required-custom-gate-'));

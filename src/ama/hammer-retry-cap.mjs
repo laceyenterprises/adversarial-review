@@ -73,9 +73,11 @@ export const HAMMER_TARGET_REDRIVE_CAP_SUPPRESSION_STATE = 'hammer-target-redriv
 export const HAMMER_TARGET_REDRIVE_CAP_EXHAUSTED_REASON = 'hammer-target-redrive-cap-exhausted';
 
 // HAMBG-02: a hammer that exited `succeeded` without closing its PR never ran
-// its close, so re-arming it should not spend the series' one real retry. This
-// mirrors HAMGATE-01's merge-gate refund (#1165): the charged attempt is handed
-// back and `retryable` counts it. Only this many exits per series are refunded;
+// its close, so re-arming it should not spend the series' one real retry. The
+// charged attempt is handed back and `retryable` counts it. The shape follows
+// HAMGATE-01's merge-gate refund (#1165), but the two are separate: that one
+// lives in the base-branch gate-attempt records under data/merge-leases/ with
+// its own `retryable`, and neither budget draws on the other. Only this many exits per series are refunded;
 // after that an exit stays charged and the normal cap suppresses and alerts.
 // The lifetime count is never refunded, so the lifetime ceiling still bounds
 // every PR.
@@ -391,6 +393,10 @@ export function markHammerRetryCapExhausted(rootDir, identity, {
       && head
       && existingTargetSha !== head,
   );
+  // Refunds belong to the series: a suppression stamped for a fresh review's
+  // job key must not carry the previous series' spent refund into it.
+  const existingJobKey = normalizeKey(existing?.jobKey);
+  const jobKeyChanged = Boolean(incomingJobKey && existingJobKey && incomingJobKey !== existingJobKey);
   const priorHeads = Array.isArray(existing?.dispatchHeads) ? existing.dispatchHeads : [];
   const dispatchHeads = head && !priorHeads.includes(head) ? [...priorHeads, head] : priorHeads;
   // A lifetime exhaustion (or one already stamped) is immune to the fresh-review
@@ -415,7 +421,7 @@ export function markHammerRetryCapExhausted(rootDir, identity, {
       : Math.max(0, Number(existing?.targetAttemptCount ?? existing?.attemptCount ?? 0)),
     lifetimeSuppressed,
     targetSuppressed,
-    ...retryableFieldsForSeries(existing),
+    ...retryableFieldsForSeries(jobKeyChanged ? null : existing),
     dispatchHeads,
     lastDispatchedHeadSha: head || existing?.lastDispatchedHeadSha || null,
     suppressed: true,
@@ -446,9 +452,9 @@ export function markHammerRetryCapExhausted(rootDir, identity, {
 
 /**
  * HAMBG-02: refund the charged dispatch of a hammer that exited without
- * closing its PR (see HAMMER_EXITED_WITHOUT_CLOSE_RETRY_BUDGET). HAMGATE-01's
- * mechanics: `attemptCount` (and `targetAttemptCount` for the same target head)
- * goes down by one and `retryable` goes up by one. A launch is refunded at most
+ * closing its PR (see HAMMER_EXITED_WITHOUT_CLOSE_RETRY_BUDGET). `attemptCount`
+ * (and `targetAttemptCount` for the same target head) goes down by one and
+ * `retryable` goes up by one. A launch is refunded at most
  * once, however many ticks observe it. The lifetime count is not touched.
  *
  * Refuses when the ledger is absent or corrupt, the series moved on (new

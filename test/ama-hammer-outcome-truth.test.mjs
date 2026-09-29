@@ -32,10 +32,12 @@ import {
 } from '../src/ama/closer-lease.mjs';
 import {
   HAMMER_EXITED_WITHOUT_CLOSE_RETRY_BUDGET,
+  markHammerRetryCapExhausted,
   readHammerRetryCapLedger,
   recordHammerRetryDispatch,
   refundHammerRetryDispatch,
 } from '../src/ama/hammer-retry-cap.mjs';
+import { beginReviewerPass, completeReviewerPass } from '../src/reviewer-pass-tokens.mjs';
 import {
   HAMMER_EXITED_WITHOUT_CLOSE,
   HAMMER_OUTCOME_UNCONFIRMED,
@@ -115,6 +117,11 @@ test('classifySucceededHammerOutcome: merged, no-merge audit, exited, unconfirme
   for (const livePrState of [null, '', 'UNKNOWN']) {
     assert.equal(classifySucceededHammerOutcome({ livePrState }).outcome, HAMMER_OUTCOME_UNCONFIRMED);
   }
+  // Unreadable comments cannot rule out an honest no-merge report.
+  assert.deepEqual(
+    classifySucceededHammerOutcome({ livePrState: 'OPEN', noMergeAuditForCurrentHead: null }),
+    { closed: false, outcome: HAMMER_OUTCOME_UNCONFIRMED },
+  );
 });
 
 test('a pre-merge audit comment for the current head is not a no-merge audit (#1178, #7345)', () => {
@@ -237,6 +244,34 @@ test('refundHammerRetryDispatch hands back one charged attempt per launch, withi
   recordHammerRetryDispatch(rootDir, identity, { jobKey: 'e'.repeat(40), headSha: 'e'.repeat(40) });
   ledger = readHammerRetryCapLedger(rootDir, identity);
   assert.equal(ledger.retryable, undefined, 'a fresh series starts with no refunds');
+});
+
+test('a suppression stamped for a fresh review does not carry the old series\' spent refund', (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hambg02-exhaust-series-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: REPO, prNumber: PR_NUMBER };
+  const freshReview = 'e'.repeat(40);
+  recordHammerRetryDispatch(rootDir, identity, { jobKey: REVIEWED_HEAD, headSha: REVIEWED_HEAD });
+  refundHammerRetryDispatch(rootDir, identity, { jobKey: REVIEWED_HEAD, headSha: REVIEWED_HEAD, launchRequestId: LRQ_FIRST });
+  assert.equal(readHammerRetryCapLedger(rootDir, identity).retryable, 1);
+
+  // Same series: the refund history stays.
+  markHammerRetryCapExhausted(rootDir, identity, { jobKey: REVIEWED_HEAD, headSha: REVIEWED_HEAD, target: true });
+  assert.equal(readHammerRetryCapLedger(rootDir, identity).retryable, 1);
+
+  // A fresh review suppressed before it dispatches starts with no refunds, so
+  // its first dispatch (no job-key change against the rewritten ledger) does
+  // not inherit a spent budget.
+  markHammerRetryCapExhausted(rootDir, identity, { jobKey: freshReview, headSha: REVIEWED_HEAD, target: true });
+  let ledger = readHammerRetryCapLedger(rootDir, identity);
+  assert.equal(ledger.jobKey, freshReview);
+  assert.equal(ledger.retryable, undefined);
+  assert.equal(ledger.retryableLaunchRequestIds, undefined);
+  recordHammerRetryDispatch(rootDir, identity, { jobKey: freshReview, headSha: freshReview });
+  assert.equal(
+    refundHammerRetryDispatch(rootDir, identity, { jobKey: freshReview, headSha: freshReview, launchRequestId: LRQ_SECOND }).refunded,
+    true,
+  );
 });
 
 function closerArgs(rootDir, { dispatchedAt, livePr = { state: 'OPEN', headRefOid: PUSHED_HEAD }, livePrProbeImpl = null } = {}) {
@@ -582,4 +617,84 @@ test('an unreadable PR state confirms nothing: the launch is retained, no re-arm
   const lease = readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: PUSHED_HEAD });
   assert.equal(lease.status, AMA_CLOSER_LEASE_STATUS.DISPATCHED);
   assert.equal(readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER }).attemptCount, 1);
+});
+
+test('an unreadable comment list confirms nothing: the launch is retained, the refund unspent', async (t) => {
+  _resetHammerRetryCapAlertDebounceForTests();
+  const rootDir = mkdtempSync(join(tmpdir(), 'hambg02-comments-unreadable-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  seedIssue1178AfterFirstHammer(rootDir);
+  const deps = closerDeps({ nextLaunch: 'lrq_unexpected' });
+  deps.fetchPullRequestRollupImpl = async () => {
+    throw new Error('gh: context deadline exceeded');
+  };
+
+  const result = await maybeDispatchAmaCloser({
+    ...closerArgs(rootDir, { dispatchedAt: '2026-09-29T03:44:43Z' }),
+    ...deps,
+  });
+
+  assert.equal(result.dispatched, false);
+  assert.equal(deps.launches.length, 0);
+  const record = readAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD });
+  assert.equal(record.lastError, `${HAMMER_OUTCOME_UNCONFIRMED}:audit-comments-unreadable`);
+  assert.equal(record.outcome, undefined, 'an honest no-merge report is not recorded as an exit without close');
+  const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
+  assert.equal(ledger.retryable, undefined, 'the series\' refund is not spent on an unconfirmed outcome');
+  assert.equal(ledger.attemptCount, 1);
+});
+
+// A terminal closer pass at attempt 1 written by `launchRequestId` for this PR.
+function seedTerminalCloserPass(rootDir, launchRequestId) {
+  const metadata = { amaCloser: true, launchRequestId };
+  beginReviewerPass(rootDir, {
+    repo: REPO, prNumber: PR_NUMBER, attemptNumber: 1, reviewerClass: 'hammer-claude', passKind: 'closer',
+    workerRunId: `wr-${launchRequestId}`, startedAt: '2026-09-28T01:00:00Z', metadata,
+  });
+  completeReviewerPass(rootDir, {
+    repo: REPO, prNumber: PR_NUMBER, attemptNumber: 1, passKind: 'closer', status: 'failed',
+    endedAt: '2026-09-28T01:10:00Z', workerRunId: `wr-${launchRequestId}`, metadata,
+  });
+}
+
+async function reconcileFirstHammerWarnings(rootDir) {
+  const warnings = [];
+  const deps = closerDeps({ nextLaunch: LRQ_SECOND });
+  deps.logger = { ...deps.logger, warn: (line) => warnings.push(String(line)) };
+  const result = await maybeDispatchAmaCloser({
+    ...closerArgs(rootDir, { dispatchedAt: '2026-09-29T03:44:43Z' }),
+    ...deps,
+  });
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  return warnings;
+}
+
+test('a closer pass from another series at the same attempt number is reported as a collision', async (t) => {
+  _resetHammerRetryCapAlertDebounceForTests();
+  const rootDir = mkdtempSync(join(tmpdir(), 'hambg02-pass-collision-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  // An earlier review series' first closer (retryCount 1) already holds attempt 1.
+  seedTerminalCloserPass(rootDir, 'lrq_earlier-series');
+  seedIssue1178AfterFirstHammer(rootDir);
+
+  const warnings = await reconcileFirstHammerWarnings(rootDir);
+
+  const collision = warnings.find((line) => line.includes('attempt-number collision'));
+  assert.ok(collision, warnings.join('\n'));
+  assert.match(collision, new RegExp(`launchRequestId=${LRQ_FIRST}`));
+  assert.match(collision, /lrq_earlier-series/);
+  assert.equal(warnings.some((line) => line.includes('closer pass already recorded')), false);
+});
+
+test('re-reconciling a launch whose closer pass is recorded says so, and is not a collision', async (t) => {
+  _resetHammerRetryCapAlertDebounceForTests();
+  const rootDir = mkdtempSync(join(tmpdir(), 'hambg02-pass-same-launch-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  seedTerminalCloserPass(rootDir, LRQ_FIRST);
+  seedIssue1178AfterFirstHammer(rootDir);
+
+  const warnings = await reconcileFirstHammerWarnings(rootDir);
+
+  assert.ok(warnings.some((line) => line.includes('closer pass already recorded')), warnings.join('\n'));
+  assert.equal(warnings.some((line) => line.includes('attempt-number collision')), false);
 });

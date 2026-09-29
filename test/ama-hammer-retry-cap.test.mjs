@@ -122,6 +122,10 @@ function hammerDispatchDeps(overrides = {}) {
     resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }),
     readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
     readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: 'missing-build-completion-producer-evidence' }),
+    // A readable PR with no hammer audit comment. Without a stub the closer
+    // would shell out to the real gh, and an unreadable comment list is an
+    // unconfirmed hammer outcome.
+    fetchPullRequestRollupImpl: async () => ({ state: 'OPEN', comments: [] }),
     logger: { log() {}, info() {}, warn() {}, error() {} },
     ...overrides,
   };
@@ -2833,6 +2837,10 @@ function spawnThenDieDeps(overrides = {}) {
     resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }),
     readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
     readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: 'missing-build-completion-producer-evidence' }),
+    // A readable PR with no hammer audit comment. Without a stub the closer
+    // would shell out to the real gh, and an unreadable comment list is an
+    // unconfirmed hammer outcome.
+    fetchPullRequestRollupImpl: async () => ({ state: 'OPEN', comments: [] }),
     logger: { log() {}, info() {}, warn() {}, error() {} },
     ...overrides,
   };

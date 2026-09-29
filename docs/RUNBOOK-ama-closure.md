@@ -783,6 +783,7 @@ it asks GitHub for the PR and classifies the run:
 | `MERGED` | n/a | none (merged paths) | merged handling as before |
 | `OPEN` | local AMA audit `failed-without-merge`, or the hammer's audit comment (`<!-- hq:ham-terminal-remediation:audit -->`, same `HAM-Terminal-Remediation-Head`) carrying `HAM closing status — no merge` | `failed-without-merge` | charged re-dispatch within the hammer retry cap |
 | `OPEN` | neither | `hammer-exited-without-close` | lease released, refunded re-dispatch |
+| `OPEN` | no local audit, and the PR's comments could not be read | none; `lastError: hammer-outcome-unconfirmed:audit-comments-unreadable` | launch retained, nothing refunded; the next tick asks again |
 | unreadable | n/a | none; `lastError: hammer-outcome-unconfirmed:<why>` | launch retained; the next tick asks again |
 
 The audit comment alone is not a close. hammer-publish posts it before the merge
@@ -796,8 +797,10 @@ On `hammer-exited-without-close` the closer:
   launch, so it no longer answers `closer-lease-held-by-other-process` for 30
   minutes;
 - marks the dispatch record terminal, which frees its in-progress launch slot;
-- refunds the exited dispatch in the hammer retry-cap ledger, using HAMGATE-01's
-  mechanics (`attemptCount` down, `retryable` up). One exit per reviewed-head
+- refunds the exited dispatch in the hammer retry-cap ledger (`attemptCount`
+  down, `retryable` up). The shape follows HAMGATE-01's merge-gate refund, but
+  the counter is this ledger's own; the merge gate's `retryable` in
+  `data/merge-leases/` is separate and has its own budget. One exit per reviewed-head
   series is refunded. Past that, an exit stays charged and the normal cap
   suppresses and pages. The lifetime count is never refunded;
 - re-dispatches in the same tick, subject to every existing gate.
@@ -806,8 +809,12 @@ The closer reconciles the newest launch in the review series. A hammer that
 pushes moves the head, and its re-dispatch record is keyed on the new head, so
 the closer follows the record for the same `reviewedSha` with the newest
 `dispatchedAt`. Re-reconciling a launch whose closer pass is already recorded
-logs and continues instead of throwing `refusing to reuse terminal
-reviewer_passes row`.
+logs `closer pass already recorded` and continues instead of throwing
+`refusing to reuse terminal reviewer_passes row`. The closer pass is keyed on
+`attempt=retryCount`, not on the launch, so a launch from a later review series
+can land on a terminal row another launch wrote. That case also continues, but
+logs `closer pass attempt-number collision` with both launch ids: the new
+launch's token usage is not recorded.
 
 To inspect a PR: the watcher log carries `ama_closer.hammer_exited_without_close`
 (with `retryRefund`) or `ama_closer.hammer_ended_without_merge`, and

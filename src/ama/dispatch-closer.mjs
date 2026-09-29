@@ -61,6 +61,7 @@ import {
   beginReviewerPass,
   completeReviewerPass,
   readBestReviewerEvidenceTokenUsage,
+  readReviewerPass,
   readWorkerRunTokenUsageResult,
 } from '../reviewer-pass-tokens.mjs';
 import {
@@ -3240,8 +3241,9 @@ function readAmaAuditTerminalOutcome(hqRoot, { repo, prNumber, headSha } = {}) {
 }
 
 // HAMBG-02: the hammer's terminal no-merge audit for `headSha`, in either form
-// (see src/ama/hammer-outcome-truth.mjs). An unreadable PR counts as no audit;
-// the only effect is that the re-arm is refunded.
+// (see src/ama/hammer-outcome-truth.mjs). Returns null when the PR's comments
+// cannot be read: a hammer that reported its no-merge honestly must not be
+// recorded as having exited without closing, nor spend the series' refund.
 async function hasNoMergeAuditForCurrentHead({
   hqRoot,
   repo,
@@ -3261,7 +3263,7 @@ async function hasNoMergeAuditForCurrentHead({
       headSha,
     });
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -3488,12 +3490,40 @@ async function recordAmaCloserReviewerPassTokens({
     // 08:46Z, every adversarial-review#1178 tick died on this error and fell
     // back to a merge-agent that skipped.
     if (!String(err?.message || err).includes('refusing to reuse terminal reviewer_passes row')) throw err;
-    logger.warn?.(
-      `[ama-closer] closer pass already recorded for ${repo}#${prNumber} attempt=${attemptNumber} `
-        + `launchRequestId=${launchRequestId || 'unknown'}; not recording it again`,
-    );
+    // The pass key is `attempt=retryCount`, not the launch, so a different
+    // launch (a later review series restarting at retryCount 1) can land on
+    // the same terminal row. That launch's accounting is lost either way;
+    // say so instead of calling it a re-reconcile.
+    let stored = null;
+    try {
+      stored = readReviewerPass(rootDir, { repo, prNumber, attemptNumber, passKind: 'closer' });
+    } catch {
+      // Fall through to the unattributed collision warning.
+    }
+    if (isSameCloserLaunchPass(stored, { launchRequestId, workerRunId })) {
+      logger.warn?.(
+        `[ama-closer] closer pass already recorded for ${repo}#${prNumber} attempt=${attemptNumber} `
+          + `launchRequestId=${launchRequestId || 'unknown'}; not recording it again`,
+      );
+    } else {
+      logger.warn?.(
+        `[ama-closer] closer pass attempt-number collision for ${repo}#${prNumber} attempt=${attemptNumber}: `
+          + `launchRequestId=${launchRequestId || 'unknown'} cannot be recorded because the terminal row belongs to `
+          + `launchRequestId=${stored?.metadata?.launchRequestId || 'unknown'} `
+          + `workerRunId=${stored?.worker_run_id || 'unknown'}; this launch's token usage is not recorded`,
+      );
+    }
     return null;
   }
+}
+
+// Whether a stored closer pass row was written for this same launch.
+function isSameCloserLaunchPass(stored, { launchRequestId, workerRunId } = {}) {
+  if (!stored) return false;
+  const storedLaunch = String(stored.metadata?.launchRequestId || '').trim();
+  if (storedLaunch && launchRequestId) return storedLaunch === String(launchRequestId).trim();
+  const storedRun = String(stored.worker_run_id || '').trim();
+  return Boolean(storedRun) && Boolean(workerRunId) && storedRun === String(workerRunId).trim();
 }
 
 function recordCloserReviewerPass(rootDir, {
@@ -4475,27 +4505,32 @@ export async function maybeDispatchAmaCloser({
         const concurrentWriter = /force-with-lease|stale info|fetch first|concurrent.writer/i.test(
           String(statusProbe?.error || ''),
         );
+        const noMergeAuditForCurrentHead = terminalLivePr?.state === 'OPEN' && !concurrentWriter
+          ? await hasNoMergeAuditForCurrentHead({
+            hqRoot,
+            repo,
+            prNumber,
+            headSha: terminalLivePr.headRefOid || targetRemediationSha,
+            fetchPullRequestRollupImpl,
+            execFileImpl,
+          })
+          : false;
         const hammerOutcome = classifySucceededHammerOutcome({
           livePrState: terminalLivePr?.state,
           concurrentWriter,
-          noMergeAuditForCurrentHead: terminalLivePr?.state === 'OPEN' && !concurrentWriter
-            && await hasNoMergeAuditForCurrentHead({
-              hqRoot,
-              repo,
-              prNumber,
-              headSha: terminalLivePr.headRefOid || targetRemediationSha,
-              fetchPullRequestRollupImpl,
-              execFileImpl,
-            }),
+          noMergeAuditForCurrentHead,
         });
         if (hammerOutcome.outcome === HAMMER_OUTCOME_UNCONFIRMED) {
           // Neither a merge nor a no-merge audit can be confirmed this tick, so
-          // nothing may infer that the hammer closed its PR.
+          // nothing may infer that the hammer closed its PR, or that it did not.
+          const unconfirmedReason = terminalLivePr?.error
+            ? 'live-pr-probe-failed'
+            : noMergeAuditForCurrentHead === null ? 'audit-comments-unreadable' : 'live-pr-state-unknown';
           updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
             ...(current || existingRecord),
             lastObservedStatus: status,
             lastObservedAt: dispatchContext.dispatchedAt,
-            lastError: `${HAMMER_OUTCOME_UNCONFIRMED}:${terminalLivePr?.error ? 'live-pr-probe-failed' : 'live-pr-state-unknown'}`,
+            lastError: `${HAMMER_OUTCOME_UNCONFIRMED}:${unconfirmedReason}`,
           }));
           return retainExistingAmaCloserDispatch(existingRecord, workerClass, status);
         }

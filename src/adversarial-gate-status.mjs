@@ -36,7 +36,10 @@ import {
   adapterUnsupportedError,
   writeAdapterCommitStatus,
 } from './github-adapter-client.mjs';
-import { isFleetSelfRepairTrailerOnlyRereviewReason } from './fleet-self-repair-rereview.mjs';
+import {
+  isFleetSelfRepairTrailerOnlyRereviewReason,
+  parseFleetSelfRepairTrailerOnlyRereviewReason,
+} from './fleet-self-repair-rereview.mjs';
 import { isSettledReviewJob, listFollowUpJobsInDir } from './follow-up-jobs.mjs';
 import { findCommentOnlyFinalRoundPushJob } from './comment-only-final-round.mjs';
 
@@ -353,6 +356,38 @@ function isHeadChangeRereviewReason(reason) {
   );
 }
 
+// The head a head-change reason asked to have reviewed: the watcher's
+// auto-refresh writes `current head is <12-char sha>`, FSR-06B `live=<sha>`.
+function headChangeRereviewTargetHead(reason) {
+  if (isFleetSelfRepairTrailerOnlyRereviewReason(reason)) {
+    return parseFleetSelfRepairTrailerOnlyRereviewReason(reason).liveHeadSha;
+  }
+  return String(reason ?? '').match(/\bcurrent head is\s+([^\s;,.)]+)/i)?.[1] ?? null;
+}
+
+// Exact, or the watcher's abbreviated prefix of the full SHA.
+function shaMatchesNamedHead(sha, namedHead) {
+  const full = normalizeComparableString(sha);
+  const named = normalizeComparableString(namedHead);
+  if (!full || !named) return false;
+  return full === named || (named.length >= 7 && full.startsWith(named));
+}
+
+// COMMENTCLOSE-02: `rereview_reason` is sticky. Posting the re-review it asked
+// for does not clear it, so a head-change reason outlives its head change. It
+// describes the CURRENT head change only while it names the head being gated
+// and no review of that head has posted. Otherwise it is history, and the row
+// resolves like any row whose reviewed head is what it is. A reason that names
+// no parseable head is never current.
+function isCurrentHeadChangeRereview(reviewRow, headSha) {
+  const reason = reviewRow?.rereview_reason ?? reviewRow?.rereviewReason;
+  if (!isHeadChangeRereviewReason(reason)) return false;
+  const targetHead = headChangeRereviewTargetHead(reason);
+  if (!shaMatchesNamedHead(headSha, targetHead)) return false;
+  return !(reviewRowStatus(reviewRow) === 'posted'
+    && shaMatchesNamedHead(reviewRowReviewerHeadSha(reviewRow), targetHead));
+}
+
 function followUpJobRevisionRef(job) {
   return String(
     job?.revisionRef
@@ -365,7 +400,7 @@ function followUpJobRevisionRef(job) {
 function completedHeadChangeRereviewIsSettledClean({ latestJob, latestJobStatus, reviewRow, headSha }) {
   if (latestJobStatus !== 'completed') return false;
   if (latestJob?.reReview?.requested !== true) return false;
-  if (!isHeadChangeRereviewReason(reviewRow?.rereview_reason ?? reviewRow?.rereviewReason)) return false;
+  if (!isCurrentHeadChangeRereview(reviewRow, headSha)) return false;
   const jobHead = followUpJobRevisionRef(latestJob);
   if (!headSha || !jobHead || String(jobHead) !== String(headSha)) return false;
   const verdict = normalizeEffectiveReviewVerdict(latestJob.reviewBody);
@@ -427,6 +462,26 @@ function resolveCommentOnlyFinalRoundVerdict(rootDir, {
   };
 }
 
+// The gate is re-evaluated every watcher/closer tick; warn once per
+// (PR, pushed head, reason) instead of once per tick.
+const overriddenHeadChangeRereviewWarnings = new Set();
+const OVERRIDDEN_HEAD_CHANGE_REREVIEW_WARNING_CAP = 1000;
+
+function warnOverriddenHeadChangeRereview(logger, { repo, prNumber, reviewedHeadSha, currentHeadSha, reviewRow }) {
+  const reason = reviewRow?.rereview_reason ?? reviewRow?.rereviewReason;
+  const key = `${repo}#${prNumber}@${currentHeadSha}|${reason}`;
+  if (overriddenHeadChangeRereviewWarnings.has(key)) return;
+  if (overriddenHeadChangeRereviewWarnings.size >= OVERRIDDEN_HEAD_CHANGE_REREVIEW_WARNING_CAP) {
+    overriddenHeadChangeRereviewWarnings.clear();
+  }
+  overriddenHeadChangeRereviewWarnings.add(key);
+  logger?.warn?.(
+    `[adversarial-gate] comment-only-final-round-overrides-rereview: repo=${repo} pr=#${prNumber} `
+      + `reviewed=${reviewedHeadSha} pushed=${currentHeadSha} rereview_reason=${JSON.stringify(reason)}; `
+      + 'the recorded final-round push resolves the verdict, and the unanswered re-review of the pushed head is skipped',
+  );
+}
+
 function resolveSettledReviewVerdict(
   rootDir,
   {
@@ -439,24 +494,42 @@ function resolveSettledReviewVerdict(
     liveHeadReview = undefined,
     commentOnlyFinalRoundPushes = null,
     finalRoundJobFinder = findCommentOnlyFinalRoundPushJob,
+    logger = console,
   } = {}
 ) {
   const reviewedHeadSha = reviewRowReviewerHeadSha(reviewRow);
   const reviewStatus = reviewRowStatus(reviewRow);
-  const isHeadChangeRereview = isHeadChangeRereviewReason(reviewRow?.rereview_reason ?? reviewRow?.rereviewReason);
+  const isHeadChangeRereview = isCurrentHeadChangeRereview(reviewRow, currentHeadSha);
   const isQuotaCapped = primaryReviewerQuotaCappedForRow(reviewRow);
   if (reviewStatus !== 'posted' && !isQuotaCapped && !(reviewStatus === 'pending' && isHeadChangeRereview)) {
     return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
   }
   if (currentHeadSha && reviewedHeadSha && String(reviewedHeadSha) !== String(currentHeadSha)) {
-    if (!isQuotaCapped && !isHeadChangeRereview) {
+    if (!isQuotaCapped) {
+      // COMMENTCLOSE-02: the recorded final-round push is checked BEFORE the
+      // head-change flag. `rereview_reason` is sticky row state that can still
+      // describe the head change that led to the reviewed head; the final
+      // round's own push is a different head change, and its evidence is the
+      // recorded job.
       const finalRound = reviewStatus === 'posted' && commentOnlyFinalRoundPushes
         ? resolveCommentOnlyFinalRoundVerdict(rootDir, {
           repo, prNumber, reviewedHeadSha, currentHeadSha, commentOnlyFinalRoundPushes,
           finalRoundJobFinder, latestJobFinder, liveHeadReview,
         })
         : null;
-      return finalRound || { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
+      if (finalRound) {
+        // A reason naming the pushed head that no posted review has answered
+        // is a re-review request the final round now outranks. Merge still
+        // waits on exact-head HAM validation; make the skipped request visible.
+        if (isHeadChangeRereview) {
+          warnOverriddenHeadChangeRereview(logger, { repo, prNumber, reviewedHeadSha, currentHeadSha, reviewRow });
+          return { ...finalRound, overrodeHeadChangeRereview: true };
+        }
+        return finalRound;
+      }
+      if (!isHeadChangeRereview) {
+        return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
+      }
     }
   }
 

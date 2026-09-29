@@ -560,6 +560,22 @@ not AMA/HAM. The narrow exception is a head-change re-review whose latest
 completed follow-up job carries a clean settled verdict for the current head;
 that projects `review-settled-head-change-rereview` and lets closeout continue
 without waiting for a redundant reviewer post. A missing job head fails closed.
+The re-review reason must also name the current head: `current head is <sha12>`
+for auto-refresh, `live=<sha>` for FSR-06B. The reason stays on the row after
+its review posts, so a reason naming any other head, or a head whose review
+has posted, is history and grants nothing (COMMENTCLOSE-02).
+
+A recorded comment-only final-round push is resolved before that reason, so it
+outranks even a live one. Suppose a posted row's reason still names the pushed
+head: a re-review of that head was requested but never posted. The final
+round's verdict then wins, the result carries `overrodeHeadChangeRereview: true`,
+and the gate logs one
+`[adversarial-gate] comment-only-final-round-overrides-rereview:` warning per
+PR, pushed head and reason, naming the reviewed head, the pushed head and the
+reason. Merge still waits on exact-head HAM validation. When you see this
+warning and the skipped re-review must still run (an FSR-06B request, or one an
+operator asked for), apply `adversarial-merge-blocked` before the hammer's
+terminal validation, then request the re-review.
 
 Normal `posted` rows are different. `stale-review-head`,
 `blocking-findings-present`, and `verdict-not-settled-success` remain AMA/HAM

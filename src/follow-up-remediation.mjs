@@ -18,7 +18,6 @@ import {
 } from './remediation-worker-provenance.mjs';
 import {
   claimNextFollowUpJob,
-  MAX_QUOTA_HOLD_WINDOW_MS,
   getFollowUpJobDir,
   findInProgressFollowUpJobByLaunchRequestId,
   isSettledCleanStopCode,
@@ -113,7 +112,7 @@ import { OAUTH_ENV_STRIP_LIST } from './secret-source/env.mjs';
 import { loadDomainConfig } from './domain-config.mjs';
 import { cloneRemediationWorkspace } from './remediation-workspace-clone.mjs';
 import { drainRemediationJobs } from './remediation-parallel-drain.mjs';
-import { requeueClaimedFollowUpJobBeforeSpawn } from './remediation-claimed-requeue.mjs';
+import { holdClaimedJobForCappedRemediator, requeueClaimedFollowUpJobBeforeSpawn } from './remediation-claimed-requeue.mjs';
 import { resolveRemediatorWorkerClassFromDomain } from './domain-policy.mjs';
 import {
   loadRoleConfig,
@@ -124,9 +123,9 @@ import {
 import { validateStartupRoleRegistry } from './role-registry.mjs';
 import { validateStartupDeliveryIdentity } from './adapters/comms/github-pr-comments/delivery-identity.mjs';
 import { applyPreSpawnLifecycleGate } from './follow-up-stuck-claim-sweep.mjs';
-import { parseQuotaResetAt } from './quota-exhaustion.mjs';
 import { detectRemediationQuotaEvidence } from './remediation-quota-evidence.mjs';
 import { settleMissingRemediationArtifact } from './remediation-missing-artifact.mjs';
+import { settleQuotaExhaustedRemediation } from './remediation-quota-hold.mjs';
 import { remediatorFallbackAudit, resolveClaimedRemediatorRouting } from './remediation-worker-class-fallback.mjs';
 import {
   DEFAULT_REPLIES_ROOT,
@@ -404,12 +403,6 @@ function assertHqDispatchOwnerMatches(env = process.env) {
   }
   return ownerUser;
 }
-
-// Fallback hold window for a quota-exhausted remediation worker when the
-// provider did not hand back a parseable reset time. Mirrors the reviewer
-// path's QUOTA_EXHAUSTED_BACKOFF_MS (15 min) so both worker classes degrade
-// the same way under a hard usage cap.
-const QUOTA_REMEDIATION_BACKOFF_MS = 15 * 60 * 1000;
 
 // ── Worker-class dispatcher ────────────────────────────────────────────────
 
@@ -3047,108 +3040,16 @@ async function reconcileFollowUpJob({
     };
   }
 
-  // HRR graceful degradation for a quota-exhausted remediation worker. The
-  // direct-CLI remediation worker (default path when ADV_WITH_HQ_INTEGRATION is
-  // unset) spawns the codex/claude CLI outside the dispatch daemon, so a hard
-  // provider usage cap bypasses HRR exactly like the reviewer and surfaces here
-  // as an empty/missing artifact — which without this block would post a
-  // misleading "remediation worker exited without an artifact / needs human"
-  // terminal failure. Instead: detect the cap in the worker's stderr log and
-  // requeue the job to pending with retryAfter pinned to the provider reset (or
-  // a fixed fallback), so the consume gate holds it until quota returns and a
-  // future tick re-spawns the remediation worker. Bounded by the shared
-  // transient-retry budget so a persistent cap eventually becomes terminal.
-  // Applies to both harnesses we know the shape for (codex / claude).
+  // HRR quota hold; a reset past the hold window spends no retry budget and the
+  // next claim re-resolves the remediator class (REMFALLBACK-01).
   if (quotaSignal.isQuotaExhausted) {
-    const parsedCompletedAtMs = Date.parse(String(completedAt || ''));
-    const completedAtMs = Number.isNaN(parsedCompletedAtMs) ? Date.now() : parsedCompletedAtMs;
-    const nextQuotaRetry = Number(job?.remediationPlan?.transientRetries || 0) + 1;
-    const maxQuotaRetries = resolveMaxTransientRemediationRetries();
-    if (nextQuotaRetry <= maxQuotaRetries) {
-      const resetIso = parseQuotaResetAt(quotaLogText, { nowMs: completedAtMs });
-      const providerRetryAfterMs = resetIso ? Date.parse(resetIso) : NaN;
-      const fallbackRetryAfterMs = completedAtMs + QUOTA_REMEDIATION_BACKOFF_MS;
-      const retryAfterMs = Number.isFinite(providerRetryAfterMs)
-        ? Math.min(providerRetryAfterMs, completedAtMs + MAX_QUOTA_HOLD_WINDOW_MS)
-        : fallbackRetryAfterMs;
-      const retryAfter = new Date(retryAfterMs).toISOString();
-      const retryReason = `Provider usage cap hit (${quotaSignal.harness} harness); holding remediation until ${retryAfter} (HRR graceful degradation, retry ${nextQuotaRetry}/${maxQuotaRetries}).`;
-      const requeued = requeueInProgressFollowUpJobForRetry({
-        rootDir,
-        jobPath,
-        requeuedAt: completedAt,
-        retryReason,
-        retryAfterOverride: retryAfter,
-        allowDirectWorkerRetry: true,
-        retryMetadata: {
-          code: 'quota-exhausted',
-          harness: quotaSignal.harness,
-          resetAt: resetIso || null,
-          providerResetAt: resetIso || null,
-          source: resetIso ? 'provider-reported' : 'fallback-window',
-          maxUnvalidatedHoldMs: MAX_QUOTA_HOLD_WINDOW_MS,
-        },
-      });
-      log?.log?.(
-        `[follow-up-remediation] Held ${job.repo}#${job.prNumber} -> quota-exhausted ` +
-          `(${quotaSignal.harness}) until ${retryAfter} [${resetIso ? 'provider-reported' : 'fallback-window'}]`
-      );
-      return {
-        action: 'requeued',
-        reason: 'quota-exhausted',
-        job: requeued.job,
-        jobPath: requeued.jobPath,
-      };
-    }
-    // Quota retry budget exhausted: fall through to a distinct terminal code so
-    // the operator comment names the real cause (a sustained provider cap) and
-    // does not read as a worker bug.
-    const quotaBudgetFailure = {
-      code: 'quota-exhausted-budget-exhausted',
-      message: `Remediation worker repeatedly hit a hard provider usage cap (${quotaSignal.harness} harness); exhausted the retry budget (${nextQuotaRetry - 1}/${maxQuotaRetries}). The PR's remediation is paused for operator action (wait for the cap to clear or add credits).`,
-    };
-    const { commentDelivery: quotaBudgetDelivery } = buildReconcileCommentDelivery({
-      job, worker, action: 'failed', failure: quotaBudgetFailure, now,
+    return settleQuotaExhaustedRemediation({
+      rootDir, job, jobPath, worker, workerState, completedAt, quotaSignal, quotaLogText,
+      maxRetries: resolveMaxTransientRemediationRetries(), now, log, postCommentImpl,
+      buildCommentDelivery: buildReconcileCommentDelivery,
+      postOutcomeComment: postReconcileOutcomeCommentSafe,
     });
-    const failed = markFollowUpJobFailed({
-      rootDir,
-      jobPath,
-      failedAt: completedAt,
-      failureCode: quotaBudgetFailure.code,
-      error: new Error(quotaBudgetFailure.message),
-      remediationWorker: {
-        ...workerState,
-        state: 'failed',
-      },
-      failure: {
-        code: quotaBudgetFailure.code,
-        message: quotaBudgetFailure.message,
-        harness: quotaSignal.harness,
-        quotaRetryBudget: { attempted: nextQuotaRetry - 1, max: maxQuotaRetries },
-        logPath: worker.logPath || null,
-      },
-      commentDelivery: quotaBudgetDelivery,
-    });
-    await postReconcileOutcomeCommentSafe({
-      rootDir,
-      jobPath: failed.jobPath,
-      job: failed.job,
-      worker,
-      action: 'failed',
-      failure: quotaBudgetFailure,
-      postCommentImpl,
-      alreadyTerminal: failed.alreadyTerminal,
-      now,
-      log,
-    });
-    return {
-      action: 'failed',
-      reason: quotaBudgetFailure.code,
-      job: failed.job,
-      jobPath: failed.jobPath,
-    };
   }
-
   const { requeued: resumeRequeued, resumeImpossible } = await resumeLostRemediationWorker({
     rootDir, jobPath, job, worker, workspaceDir: paths?.workspaceDir, requeuedAt: completedAt, execFileImpl,
   });
@@ -3564,6 +3465,12 @@ async function consumeNextFollowUpJob({
       log,
     });
     workerClass = remediatorRouting.workerClass;
+    if (remediatorRouting.hold) {
+      return holdClaimedJobForCappedRemediator({
+        rootDir, jobPath: claimed.jobPath, heldAt: claimed.job.claimedAt,
+        routing: remediatorRouting, delayedPendingPaths, log,
+      });
+    }
     if (claimed.job.nonBlockingOnly === true && workerClass === 'codex') {
       codexModelResolution = resolveConfiguredNonBlockingCodexModel(jobEnv);
     }

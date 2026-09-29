@@ -68,3 +68,24 @@ export function remediatorQuotaEvidence(job, { nowMs = Date.now() } = {}) {
   }
   return evidence;
 }
+
+function latestRetryHistoryEntry(job) {
+  const history = job?.remediationPlan?.retryHistory;
+  return Array.isArray(history) && history.length ? history[history.length - 1] : null;
+}
+
+// What a quota hold is waiting on, for the claim gate's live revalidation: the
+// capped class (the recorded worker class wins over the log-derived harness
+// label), the model it ran, and whether the hold was taken without a respawn.
+export function quotaHoldTarget(job) {
+  const entry = latestRetryHistoryEntry(job);
+  const meta = (entry ? entry.retryMetadata : job?.remediationPlan?.lastRetryMetadata) || {};
+  return {
+    harness: remediatorClassForQuotaLabel(meta.workerClass)
+      || String(meta.harness || '').trim().toLowerCase()
+      || 'unknown',
+    model: String(meta.model || '').trim() || null,
+    noRespawn: meta.noRespawn === true,
+    requeuedAt: entry?.requeuedAt || null,
+  };
+}

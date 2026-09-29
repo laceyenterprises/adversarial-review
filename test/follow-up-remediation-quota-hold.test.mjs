@@ -5,8 +5,9 @@
 // hit: detect the cap in the worker's stderr log, requeue the job to pending
 // with retryAfter clamped to a bounded quota-hold window (held by the consume
 // gate and live-revalidated there) until quota returns — instead of a misleading
-// terminal "exited without artifact" failure. Bounded by the shared
-// transient-retry budget.
+// terminal "exited without artifact" failure. A reset inside the hold window is
+// bounded by the shared transient-retry budget; a reset past it spends no budget
+// because the next claim re-resolves the remediator class (REMFALLBACK-01).
 import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
@@ -64,6 +65,8 @@ async function reconcileDeadWorkerWithLog(rootDir, logText) {
     jobPath: claimed.jobPath,
     spawnedAt: '2026-06-16T10:01:00.000Z',
     worker: {
+      model: 'codex',
+      resolvedModel: 'gpt-6-sol',
       processId: 8123,
       workspaceDir: path.relative(rootDir, workspaceDir),
       outputPath: path.relative(rootDir, path.join(artifactDir, 'codex-last-message.md')),
@@ -97,13 +100,29 @@ test('a quota-exhausted direct-CLI remediation worker is HELD with provider rese
   // reset cannot park remediation for days without live revalidation.
   const expectedReset = '2026-06-16T11:05:00.000Z';
   assert.equal(reconciled.job.remediationPlan.retryAfter, expectedReset);
-  assert.equal(reconciled.job.remediationPlan.transientRetries, 1);
+  // REMFALLBACK-01: the reset is ~38h out, past the 1h hold window, so this hold
+  // spends no retry budget; the next claim re-resolves the remediator instead.
+  assert.equal(reconciled.job.remediationPlan.transientRetries, 0);
 
   const historyEntry = reconciled.job.remediationPlan.retryHistory.at(-1);
   assert.equal(historyEntry.retryMetadata.code, 'quota-exhausted');
   assert.equal(historyEntry.retryMetadata.harness, 'codex');
   assert.equal(historyEntry.retryMetadata.source, 'provider-reported');
   assert.equal(historyEntry.retryMetadata.providerResetAt, '2026-06-18T00:39:00.000Z');
+  assert.equal(historyEntry.retryMetadata.pastHoldWindow, true);
+  // The class and model that hit the cap are job-local evidence for the next claim.
+  assert.equal(historyEntry.retryMetadata.workerClass, 'codex');
+  assert.equal(historyEntry.retryMetadata.model, 'gpt-6-sol');
+});
+
+test('a reset inside the hold window spends one retry and holds until the reset', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const reconciled = await reconcileDeadWorkerWithLog(rootDir, 'Claude usage limit reached; resets at 2026-06-16T10:35:00Z');
+
+  assert.equal(reconciled.reason, 'quota-exhausted');
+  assert.equal(reconciled.job.remediationPlan.retryAfter, '2026-06-16T10:35:00.000Z');
+  assert.equal(reconciled.job.remediationPlan.transientRetries, 1);
+  assert.equal(reconciled.job.remediationPlan.retryHistory.at(-1).retryMetadata.pastHoldWindow, false);
 });
 
 test('a claude-harness quota cap is also held (both harnesses we know the shape for)', async () => {
@@ -155,13 +174,29 @@ test('a quota cap with no parseable reset falls back to a fixed hold window', as
 test('quota hold is bounded: when the retry budget is exhausted it becomes a distinct terminal failure', async () => {
   process.env.ADVERSARIAL_REMEDIATION_MAX_TRANSIENT_RETRIES = '0'; // immediate exhaustion
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  const log = `{"type":"error","message":"You've hit your usage limit. Try again at Jun 17th, 2026 5:39 PM"}`;
+  // A reset inside the hold window respawns the same provider, so the budget
+  // still bounds it (a reset past the window cannot park; see below).
+  const log = `{"type":"error","message":"You've hit your usage limit. Try again at 2026-06-16T10:35:00Z"}`;
   const reconciled = await reconcileDeadWorkerWithLog(rootDir, log);
 
   assert.equal(reconciled.reconciled, true);
   assert.equal(reconciled.outcome, 'failed');
   assert.equal(reconciled.job.failure.code, 'quota-exhausted-budget-exhausted');
   assert.equal(reconciled.job.failure.harness, 'codex');
+});
+
+test('REMFALLBACK-01: a reset past the hold window never parks, even with the retry budget spent', async () => {
+  process.env.ADVERSARIAL_REMEDIATION_MAX_TRANSIENT_RETRIES = '0'; // budget already gone
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const log = `{"type":"error","message":"You've hit your usage limit. Try again at Jun 17th, 2026 5:39 PM"}`;
+  const reconciled = await reconcileDeadWorkerWithLog(rootDir, log);
+
+  assert.equal(reconciled.reconciled, false);
+  assert.equal(reconciled.reason, 'quota-exhausted');
+  assert.equal(reconciled.job.status, 'pending');
+  assert.equal(reconciled.job.failure, null);
+  assert.equal(reconciled.job.remediationPlan.transientRetries, 0);
+  assert.match(reconciled.job.remediationPlan.retryHistory.at(-1).retryReason, /retry budget not spent/);
 });
 
 test('a non-quota empty-artifact failure is unaffected (still terminal artifact-missing)', async () => {

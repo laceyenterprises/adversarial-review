@@ -180,6 +180,7 @@ export async function resolveRemediationWorkerClassWithFallback({
         reason: 'primary-resets-within-hold-window',
         capSource: 'provider-reset-within-hold-window',
         primaryState: primaryCap.state,
+        model: primaryCap.model || null,
         resetAt: primaryCap.resetAt,
       };
     }
@@ -237,6 +238,7 @@ export async function resolveRemediationWorkerClassWithFallback({
     reason: fallbacks.some((candidate) => candidate !== primaryClass) ? 'no-available-fallback' : 'no-fallback-configured',
     capSource: primaryCap.capSource,
     primaryState: primaryCap.state,
+    model: primaryCap.model || null,
     resetAt: primaryCap.resetAt,
     skipped,
   };

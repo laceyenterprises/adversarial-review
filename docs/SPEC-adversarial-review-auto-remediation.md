@@ -1373,10 +1373,13 @@ fleet quota status (`hq fleet quota status --json`, provider OAuth state). The
 probe is asynchronously prefetched at the start of the consume tick, bounded
 (default 10s), and cached briefly per harness so a slow or failing local HQ
 command cannot block the synchronous job-claim loop or spam subprocesses on every
-poll. If that live signal reports quota available, the gate clears the per-job
-hold and consumes the job in that tick; if the signal is missing, unknown,
-exhausted, not yet prefetched, or errors, the gate fails closed and keeps the
-clamped hold. Error decisions from the cached probe are persisted back to the
+poll. The probe answers for the held class and, when the hold recorded one, the
+model it ran: the per-model `models[]` row, the `model_only_exhaustion`
+signature and AFH-02 soft grounding all count as unavailable, the same verdict
+the claim-time remediator resolver uses. If that live signal reports quota
+available, the gate clears the per-job hold and consumes the job in that tick;
+if the signal is missing, unknown, exhausted, not yet prefetched, or errors, the
+gate fails closed and keeps the clamped hold. Error decisions from the cached probe are persisted back to the
 pending job as `quotaHoldRevalidatedErroredAt` and
 `quotaHoldRevalidationError`, the same as thrown revalidation failures, so
 operators have durable evidence for why the live wakeup did not clear the hold.
@@ -1393,6 +1396,24 @@ If the remediation job exhausts its bounded quota retry budget before the
 provider window clears or the worker can produce a valid remediation reply, it
 must become terminal with `quota-exhausted-budget-exhausted` so operators see a
 loud stop instead of an endless suspended loop.
+
+REMFALLBACK-01 (agent-os#7327) narrows that budget to the holds that respawn the
+same provider. When the parsed provider reset is further out than one hold
+window, the hold spends no transient-retry budget and cannot end in
+`quota-exhausted-budget-exhausted`. The next claim re-resolves the remediator
+class and never respawns the capped class before its reset (see the claim-time
+fallback above). The retry entry records `workerClass`, `model` and
+`pastHoldWindow` as the job-local evidence that claim reads. When a claim finds
+the routed class capped and no `roles.remediator_fallback` class can take the
+job, it does not spawn. The claim returns to `pending` without spending a round
+or retry budget, and holds until the reset when that is known and inside one
+hold window, otherwise for one window. The hold is a `quota-exhausted` retry
+entry with `noRespawn: true` and `source: remediator-fallback-resolution`, and
+it logs `-> remediator-capped-hold`, which the fleet provider-hold counter does
+not count. The gate releases such a hold early only on a good probe newer than
+the hold, so a stale "available" verdict cannot turn it into a claim that
+immediately holds again. A reset inside the window keeps the routed class: the
+job holds until the reset rather than moving classes.
 
 For a missing or empty final-message artifact that cannot resume from its
 workspace, reconcile inspects the worker log's final failure. A terminal

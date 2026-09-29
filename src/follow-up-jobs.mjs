@@ -15,7 +15,7 @@ import { findLiveAmaCloserLease, isHeldAmaCloserLease } from './ama/closer-lease
 import { isActiveAmaCloserDispatchRecord, readAmaCloserDispatchRecord } from './ama/dispatch-closer.mjs';
 import { ensureWorkspaceTrashDir, launchWorkspaceTrashDeleter, workspaceTrashDir } from './follow-up-workspace-trash.mjs';
 import { loadRoleConfig } from './role-config.mjs';
-import { MAX_QUOTA_HOLD_WINDOW_MS } from './remediation-quota-evidence.mjs';
+import { MAX_QUOTA_HOLD_WINDOW_MS, quotaHoldTarget } from './remediation-quota-evidence.mjs';
 import { claimFollowUpForReview } from './follow-up-review-claim.mjs';
 import { scanArchivedStoppedFollowUpJobs } from './comment-only-final-round.mjs';
 import {
@@ -2137,12 +2137,7 @@ function isQuotaExhaustedRetryHold(job) {
 }
 
 function quotaHoldHarness(job) {
-  const latestRetry = latestRetryHistoryEntry(job);
-  return String(
-    latestRetry?.retryMetadata?.harness
-    || job?.remediationPlan?.lastRetryMetadata?.harness
-    || ''
-  ).trim().toLowerCase() || 'unknown';
+  return quotaHoldTarget(job).harness;
 }
 
 function clampQuotaRetryAfter({ retryAfterMs, requeuedAtMs }) {
@@ -2179,12 +2174,14 @@ function maybeRevalidateQuotaHold({
   if (!isQuotaExhaustedRetryHold(pendingJob) || typeof quotaHoldRevalidator !== 'function') {
     return { cleared: false, job: pendingJob };
   }
+  const holdTarget = quotaHoldTarget(pendingJob);
   let decision;
   try {
     decision = quotaHoldRevalidator({
       job: pendingJob,
       jobPath: pendingPath,
-      harness: quotaHoldHarness(pendingJob),
+      harness: holdTarget.harness,
+      model: holdTarget.model,
       now: claimedAt,
       nowMs: claimedAtMs,
     });
@@ -2205,6 +2202,14 @@ function maybeRevalidateQuotaHold({
     });
   }
   if (decision?.available !== true) {
+    return { cleared: false, job: pendingJob };
+  }
+  // REMFALLBACK-01: a no-respawn hold (the claim already found the class capped
+  // with no fallback) clears early only on a good probe newer than the hold.
+  // Otherwise the next claim would re-resolve to the same hold, every tick.
+  const goodAtMs = parseIsoTimestamp(decision.lastGoodAt);
+  const heldAtMs = parseIsoTimestamp(holdTarget.requeuedAt);
+  if (holdTarget.noRespawn && !(goodAtMs !== null && heldAtMs !== null && goodAtMs > heldAtMs)) {
     return { cleared: false, job: pendingJob };
   }
   const updatedJob = {
@@ -2612,6 +2617,9 @@ function requeueInProgressFollowUpJobForRetry({
   // `remediationPlan.retryAfter` is still in the future.
   allowDirectWorkerRetry = false,
   retryAfterOverride = null,
+  // REMFALLBACK-01: false for a hold that cannot respawn the capped provider
+  // (its reset is past the hold window, so the next claim re-resolves the class).
+  chargeRetryBudget = true,
 }) {
   const currentJob = readFollowUpJob(jobPath);
   if (currentJob?.status !== 'in_progress') {
@@ -2624,7 +2632,7 @@ function requeueInProgressFollowUpJobForRetry({
 
   const currentRoundNumber = Number(currentJob?.remediationPlan?.currentRound || 0);
   const priorTransientRetries = Number(currentJob?.remediationPlan?.transientRetries || 0);
-  const nextTransientRetries = priorTransientRetries + 1;
+  const nextTransientRetries = priorTransientRetries + (chargeRetryBudget ? 1 : 0);
   const requeuedAtMs = parseIsoTimestamp(requeuedAt) ?? Date.now();
   const overrideRetryAfterMs = retryAfterOverride ? parseIsoTimestamp(retryAfterOverride) : null;
   const effectiveOverrideRetryAfterMs = retryMetadata?.code === 'quota-exhausted'

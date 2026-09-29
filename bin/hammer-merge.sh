@@ -232,6 +232,7 @@ ham_refresh_github_gate_once() {
   "$HAM_NODE_BIN" --input-type=module <<'NODE' > "$HAM_GATE_JSON"
 import { fetchPullRequestRollup } from '<<ROOT_DIR>>/src/github-api.mjs';
 import { evaluateMergeEligibility } from '<<ROOT_DIR>>/src/ama/merge-eligibility.mjs';
+import { latestCheckRollupItems } from '<<ROOT_DIR>>/src/checks-summary.mjs';
 
 const repo = '<<REPO>>';
 const prNumber = Number('<<PR_NUMBER>>');
@@ -242,7 +243,9 @@ const checks = Array.isArray(rollup.checks)
   : Array.isArray(rollup.statusCheckRollup)
     ? rollup.statusCheckRollup
     : [];
-const badChecks = checks.filter((check) => {
+// Judge each check by its latest run, like the shared predicate behind `ok`
+// (CIDEDUPE-01): a superseded cancelled run must not read as a red gate.
+const badChecks = latestCheckRollupItems(checks).filter((check) => {
   const status = String(check.status || check.state || '').toUpperCase();
   const conclusion = String(check.conclusion || '').toUpperCase();
   if (check.__typename === 'StatusContext') return !['SUCCESS'].includes(status);

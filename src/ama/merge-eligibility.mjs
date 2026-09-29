@@ -22,6 +22,7 @@
  *
  * @module ama/merge-eligibility
  */
+import { classifyCheckRollup } from '../checks-summary.mjs';
 import { labelsContainDuplicateFamilyHold, DUPLICATE_FAMILY_UNRESOLVED_REASON } from '../duplicate-family-gate.mjs';
 import { hasOperatorApprovedOverride } from './eligibility.mjs';
 
@@ -64,8 +65,8 @@ export const MERGE_ELIGIBILITY_REASONS = Object.freeze([
  * @property {(Array|boolean)=} requiredChecks
  *                                      Required-check state derived from GitHub
  *                                      `statusCheckRollup`. Either the raw rollup
- *                                      array (classified here with the same
- *                                      status/conclusion rules the hammer gate used)
+ *                                      array (classified here by the shared
+ *                                      latest-run-per-check `classifyCheckRollup`)
  *                                      or a pre-derived boolean (`true` = all green).
  *                                      An empty array is NOT green (fail closed —
  *                                      required checks must have reported).
@@ -128,52 +129,34 @@ function verdictEligible(verdict) {
 }
 
 /**
- * Classify required checks as green. Mirrors the hammer inline gate's rules
- * exactly (StatusContext must be `SUCCESS`; check-runs must be `COMPLETED` with a
- * `SUCCESS`/`NEUTRAL`/`SKIPPED` conclusion) and requires at least one check —
- * an empty rollup fails closed. A boolean short-circuits to itself for callers
- * that already derived greenness.
+ * Classify required checks as green. Runs the SAME `classifyCheckRollup`
+ * (`src/checks-summary.mjs`) the AMA closer reads through
+ * `summarizeChecksConclusion()`, so the closer never routes a PR to a daemon that
+ * reads the same rollup as red (CIDEDUPE-01). Each check identity resolves to
+ * its latest run first: a run cancelled and re-run green on the same head is
+ * green; a green run followed by a cancelled one is not. A StatusContext must be
+ * `SUCCESS`; a check-run must be `COMPLETED` with a `SUCCESS`/`NEUTRAL`/`SKIPPED`
+ * conclusion. A boolean short-circuits to itself for callers that already
+ * derived greenness.
  *
- * INVARIANT — empty rollup is NOT green here. At the point of an actual merge
- * decision, "no checks have reported on this head" must read NOT green: a rollup
- * fetched before GitHub registers the head's checks would otherwise authorize a
- * premature merge. As of LAC-1559, `summarizeChecksConclusion()`
- * (`src/checks-summary.mjs`) also fails closed on an empty rollup (returns
- * `null`, or `PENDING` when explicit required contexts are configured), so this
- * predicate and that classifier now AGREE on the empty case — a zero-external-
- * check PR classifies green on neither surface.
+ * INVARIANT — fail closed. An empty rollup, a required context that has not
+ * reported, and a pending latest run are all NOT green. At the point of an actual
+ * merge decision, "no checks have reported on this head" must read NOT green: a
+ * rollup fetched before GitHub registers the head's checks would otherwise
+ * authorize a premature merge (LAC-1559).
+ *
+ * Scope difference from the closer, kept on purpose: this predicate does NOT
+ * exclude the pipeline's own adversarial-gate status context. Anything that
+ * still makes the two disagree is caught by the route-disagreement backstop in
+ * `src/daemon-route-disagreement.mjs`.
  *
  * @param {Array|boolean|undefined} requiredChecks
+ * @param {string[]=} requiredCheckContexts
  * @returns {boolean}
  */
 function requiredChecksGreen(requiredChecks, requiredCheckContexts = []) {
   if (typeof requiredChecks === 'boolean') return requiredChecks;
-  if (!Array.isArray(requiredChecks) || requiredChecks.length === 0) return false;
-
-  const reportedContexts = new Set(
-    requiredChecks
-      .map(check => String(check?.context || check?.name || '').trim().toLowerCase())
-      .filter(Boolean)
-  );
-
-  const normalizedRequiredCheckContexts = (requiredCheckContexts || [])
-    .map(ctx => String(ctx).trim().toLowerCase())
-    .filter(Boolean);
-
-  for (const ctx of normalizedRequiredCheckContexts) {
-    if (!reportedContexts.has(ctx)) {
-      return false;
-    }
-  }
-
-  const badChecks = requiredChecks.filter((check) => {
-    const status = String(check?.status || check?.state || '').toUpperCase();
-    const conclusion = String(check?.conclusion || '').toUpperCase();
-    if (check?.__typename === 'StatusContext') return status !== 'SUCCESS';
-    if (status && status !== 'COMPLETED') return true;
-    return !['SUCCESS', 'NEUTRAL', 'SKIPPED'].includes(conclusion);
-  });
-  return badChecks.length === 0;
+  return classifyCheckRollup(requiredChecks, { requiredContexts: requiredCheckContexts || [] }) === 'SUCCESS';
 }
 
 /**

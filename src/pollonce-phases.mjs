@@ -2645,6 +2645,9 @@ export async function processReviewSubject(entry, ctx) {
         repoPath,
         prNumber,
         reviewerModel: route.reviewerModel,
+        // CCX-08: the Gemini cap counts added agy identities only for
+        // candidates whose runtime can lease one; null means the primary.
+        reviewerRuntimeAdapter: domainReviewerRuntimeAdapter || null,
         subject,
         current,
         hasPriorPostedReview: dispatchHasPriorPostedReview,

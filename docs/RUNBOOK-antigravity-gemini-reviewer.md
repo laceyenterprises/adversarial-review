@@ -148,6 +148,88 @@ The historical `reviewer.gemini.antigravity.accounts[]` config remains parsed
 for compatibility with older modules, but the live `agy` runtime does not use
 it for reviewer dispatch.
 
+### Multiple Reviewer OS Identities (CCX-08)
+
+With `runtime: antigravity`, `reviewer.gemini.identities` lists the OS users
+that `agy` reviews may run as, in lease order:
+
+```yaml
+reviewer:
+  gemini:
+    runtime: antigravity
+    identities: [<hq-owner>, agentos-reviewer, agentos-reviewer2]
+```
+
+If the key is unset, or lists only the HQ owner (the user the watcher runs
+as), behavior is unchanged: agy runs directly as the HQ owner, and the Gemini
+dispatch cap is the broker credential count. Every other entry is an "added"
+identity. The watcher reaches it only through `sudo -n -H -u <user>` and the
+root-owned pinned commands CCX-07 installs under
+`/usr/local/libexec/agent-os/`. A Gemini review then leases one ready identity
+for its whole run. On an added identity, the snapshot is streamed into that
+user's 0700 scratch copy, and the scratch copy is removed on every exit path.
+`root`, `agentos-worker` and the `AGENT_OS_WORKER_RUN_AS_USER` /
+`HQ_WORKER_RUN_AS_USER` user are refused, and the watcher logs the refusal.
+
+**The runtime must be able to carry the identity.** Only a reviewer runtime
+that advertises `capabilities.agyReviewerIdentity` passes the leased identity
+to the reviewer child. Today that is only `cli-direct`. `agent-runtime` (the
+`domains/code-pr.json` default) and `agent-os-hq` do not. On those runtimes the
+identities are inert, and the watcher logs this once per runtime:
+
+```text
+[agy-identities] reviewer.gemini.identities is set but reviewer runtime <id> cannot run a review as an added identity; ...
+```
+
+Gemini reviews on those runtimes stay on the HQ-owner path, with no lease and
+the broker cap.
+
+**How the Gemini cap is chosen, per watcher drain:**
+
+- No added identities, or no Gemini candidate on a leasing runtime: the broker
+  credential count, as before.
+- Every Gemini candidate on a leasing runtime: the number of *ready*
+  identities. The broker is not consulted.
+- A mix of both: the lower of the ready count and the broker count.
+
+**Readiness and isolation.** Each drain that has a leasing Gemini candidate
+runs `status` and `settings` on the keychain helper for every added identity.
+An identity is isolated when:
+
+- its keychain or keychain item is missing or unreadable, or its settings file
+  is invalid;
+- its settings drift from the HQ-owner path's effective agy settings;
+- a CCX-07 keychain-bootstrap record marks it not ready;
+- a review it ran fails with any failure class other than `cancelled`,
+  `stale-review-head` or `daemon-bounce`. A failed review isolates the HQ
+  owner too.
+
+Log lines:
+
+```text
+[agy-identities] identity=<user> isolated: <reasons>
+[agy-identities] identity=<user> re-admitted
+```
+
+An identity isolated by a failed review or a bootstrap record is re-admitted
+automatically. This happens once its cheap check passes and a background
+`agy models` probe (`probe` on the keychain helper; the auth probe for the HQ
+owner) succeeds. No operator step is needed. An identity that stays isolated
+lowers the cap by one. Fix the reason in the log line (keychain login,
+settings file) and the next drain re-admits it.
+
+**Startup sweep.** At watcher startup, each added identity's workspace helper
+runs `sweep`, which removes leaked scratch copies older than the helper's age
+threshold. A non-zero result is logged as
+`identity=<user> startup sweep removed N leaked scratch dir(s)`. A failing
+sweep only warns; it never blocks startup.
+
+**Bounded extract.** The snapshot `tar` has its own bound. If the workspace
+helper exits or fails to spawn before draining the archive (for example
+because the review id already exists or the scratch disk is full), `tar` is
+killed immediately. The review then fails with `agy-identity-extract-failed`
+instead of holding the slot until the reviewer timeout.
+
 ## Output Guard And Timeout Behavior
 
 `agy --print` does not expose a quiet, JSON, or final-message-only flag. In

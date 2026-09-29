@@ -17,6 +17,7 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 
 import {
@@ -39,6 +40,8 @@ import {
   runWithAgyReviewerIdentity,
 } from '../src/agy-reviewer-identities.mjs';
 import { createCliDirectReviewerRuntimeAdapter } from '../src/adapters/reviewer-runtime/cli-direct/index.mjs';
+import { createAgentRuntimeReviewerRuntimeAdapter } from '../src/adapters/reviewer-runtime/agent-runtime/index.mjs';
+import { createHealthRouter } from '../src/adapters/agent-runtime/router/index.mjs';
 import { reviewWithGemini, __test__ as harness } from '../src/reviewer-harness.mjs';
 import { resolveGeminiCredentialConcurrencyForDispatchCandidates } from '../src/reviewer-runtime-support.mjs';
 import { runAgyReviewerStartupChecks } from '../src/watcher-agy-startup-preflight.mjs';
@@ -55,6 +58,8 @@ const HQ_ENV = {
   AGY_KEYCHAIN_PATH: '/Users/hq-owner/Library/Keychains/login.keychain-db',
 };
 const HQ_SETTINGS = referenceAgySettingsFromEnv(HQ_ENV);
+// A reviewer runtime that hands `subjectContext.agyIdentity` to the child.
+const LEASING_ADAPTER = { describe: () => ({ id: 'cli-direct', capabilities: { agyReviewerIdentity: true } }) };
 
 const FAKE_SUDO = `#!/bin/bash
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
@@ -277,7 +282,7 @@ test('CCX-08: [<HQ owner>, agentos-reviewer] gives a cap of 2, the ready count, 
   try {
     const pool = makePool(fake, { identities: [HQ_OWNER, REVIEWER_A] });
     let brokerFetches = 0;
-    const cap = await resolveGeminiCredentialConcurrencyForDispatchCandidates([{ reviewerModel: 'gemini' }], {
+    const cap = await resolveGeminiCredentialConcurrencyForDispatchCandidates([{ reviewerModel: 'gemini', reviewerRuntimeAdapter: LEASING_ADAPTER }], {
       env: {},
       readSharedSecret: async () => 'secret',
       fetchCredentialConcurrency: async () => { brokerFetches += 1; return 7; },
@@ -290,6 +295,106 @@ test('CCX-08: [<HQ owner>, agentos-reviewer] gives a cap of 2, the ready count, 
     assert.equal(await pool.refreshReadiness(), 1);
     // A non-Gemini candidate set skips both.
     assert.equal(await resolveGeminiCredentialConcurrencyForDispatchCandidates([{ reviewerModel: 'codex' }], { identityPool: pool }), null);
+  } finally {
+    fake.cleanup();
+  }
+});
+
+test('CCX-08: on the agent-runtime reviewer runtime the identities are inert: broker cap, no lease, no sudo', async () => {
+  const fake = makeFakeInstall();
+  try {
+    // The configured code-pr runtime: the health router cannot carry agyIdentity.
+    const router = createHealthRouter({ localRuntime: { async run() { throw new Error('not run'); } } });
+    const agentRuntime = createAgentRuntimeReviewerRuntimeAdapter({ rootDir: fake.root, agentRuntime: router, logger: quietLog() });
+    assert.notEqual(agentRuntime.describe().capabilities.agyReviewerIdentity, true);
+    let pinnedCalls = 0;
+    const pool = makePool(fake, {
+      runPinnedImpl: async (opts) => { pinnedCalls += 1; return fake.runPinned(opts); },
+    });
+    const brokerOptions = {
+      env: {},
+      readSharedSecret: async () => 'secret',
+      fetchCredentialConcurrency: async () => 5,
+      identityPool: pool,
+    };
+    const cap = await resolveGeminiCredentialConcurrencyForDispatchCandidates(
+      [{ reviewerModel: 'gemini', reviewerRuntimeAdapter: agentRuntime }],
+      brokerOptions,
+    );
+    assert.equal(cap, 5, 'the broker count stays the cap, not the 3 configured identities');
+    assert.equal(pinnedCalls, 0, 'no readiness pass through sudo for a runtime that cannot lease');
+    // The primary adapter is the fallback for a candidate without its own.
+    assert.equal(await resolveGeminiCredentialConcurrencyForDispatchCandidates([{ reviewerModel: 'gemini' }], {
+      ...brokerOptions,
+      resolveCandidateAdapter: () => agentRuntime,
+    }), 5);
+
+    // Three concurrent Gemini reviews all run on the pre-CCX-08 path: none
+    // waits for a lease and none fails with a synthetic reviewer-timeout.
+    const log = quietLog();
+    const seen = [];
+    const results = await Promise.all([1, 2, 3].map(() => runWithAgyReviewerIdentity(
+      { reviewerModel: 'gemini', adapter: agentRuntime, pool, log },
+      async (identity) => { seen.push(identity); return { ok: true }; },
+    )));
+    assert.deepEqual(results, [{ ok: true }, { ok: true }, { ok: true }]);
+    assert.deepEqual(seen, [null, null, null]);
+    assert.equal(pool.snapshot().some((state) => state.leased), false);
+    assert.match(log.lines.join('\n'), /runtime agent-runtime cannot run a review as an added identity/);
+
+    // Mixed runtimes in one drain: the shared cap is bounded by both counts.
+    assert.equal(await resolveGeminiCredentialConcurrencyForDispatchCandidates([
+      { reviewerModel: 'gemini', reviewerRuntimeAdapter: agentRuntime },
+      { reviewerModel: 'gemini', reviewerRuntimeAdapter: LEASING_ADAPTER },
+    ], { ...brokerOptions, fetchCredentialConcurrency: async () => 2 }), 2);
+    assert.equal(await resolveGeminiCredentialConcurrencyForDispatchCandidates([
+      { reviewerModel: 'gemini', reviewerRuntimeAdapter: agentRuntime },
+      { reviewerModel: 'gemini', reviewerRuntimeAdapter: LEASING_ADAPTER },
+    ], brokerOptions), 3);
+  } finally {
+    fake.cleanup();
+  }
+});
+
+test('CCX-08: an extract helper that exits without reading stdin does not hang on a snapshot larger than the pipe buffer', async () => {
+  const fake = makeFakeInstall({ users: [REVIEWER_A] });
+  try {
+    const snapshotDir = makeSnapshot(fake.root);
+    // Incompressible and well past the ~64 KB pipe buffer.
+    writeFileSync(join(snapshotDir, 'blob.bin'), randomBytes(4 * 1024 * 1024));
+    // The review id already exists, so the helper exits 73 before reading stdin.
+    mkdirSync(join(fake.home(REVIEWER_A), 'scratch', 'agy-taken'), { recursive: true });
+    const startedAt = Date.now();
+    await assert.rejects(
+      extractAgyReviewWorkspace({ user: REVIEWER_A, reviewId: 'agy-taken', sourceDir: snapshotDir, runPinnedImpl: fake.runPinned, timeoutMs: 60_000 }),
+      (err) => err.reason === 'agy-identity-extract-failed' && /exited 73/.test(err.message),
+    );
+    // A helper whose spawn failed (it never reads stdin at all).
+    await assert.rejects(
+      extractAgyReviewWorkspace({
+        user: REVIEWER_A,
+        reviewId: 'agy-nospawn',
+        sourceDir: snapshotDir,
+        runPinnedImpl: async () => ({ code: null, stdout: '', stderr: 'spawn EACCES', timedOut: false }),
+        timeoutMs: 60_000,
+      }),
+      /agy-identity|workspace extract as agentos-reviewer exited abnormally/,
+    );
+    // A helper that throws.
+    await assert.rejects(
+      extractAgyReviewWorkspace({
+        user: REVIEWER_A,
+        reviewId: 'agy-throws',
+        sourceDir: snapshotDir,
+        runPinnedImpl: async () => { throw new Error('helper blew up'); },
+        timeoutMs: 60_000,
+      }),
+      /helper blew up/,
+    );
+    assert.ok(Date.now() - startedAt < 15_000, 'each failed extract settles promptly, not at the extract timeout');
+    // The same large snapshot still extracts when the helper drains it.
+    const ok = await extractAgyReviewWorkspace({ user: REVIEWER_A, reviewId: 'agy-large', sourceDir: snapshotDir, runPinnedImpl: fake.runPinned });
+    assert.equal(statSync(join(ok.dir, 'blob.bin')).size, 4 * 1024 * 1024);
   } finally {
     fake.cleanup();
   }

@@ -265,31 +265,74 @@ function assertReviewId(reviewId) {
   }
 }
 
+// Resolve `promise`, or `onTimeout()` once `ms` elapses first.
+function settleWithin(promise, ms, onTimeout) {
+  let timer;
+  const deadline = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(onTimeout()), ms);
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
+
 // Stream `sourceDir` as an uncompressed tar into the workspace helper's
 // `extract`, running as `user`. It unpacks into a fresh 0700 directory under
 // that user's scratch root; no HQ-owned path gains any access for it.
-async function extractAgyReviewWorkspace({ user, reviewId, sourceDir, runPinnedImpl = runPinnedCommand, spawnImpl = spawn, tar = AGY_REVIEWER_TAR, timeoutMs = EXTRACT_TIMEOUT_MS } = {}) {
+//
+// `tar -c` is bounded separately from the helper. A helper that exits (or never
+// spawns) before draining stdin leaves tar blocked on a full pipe forever, so
+// once the helper settles without a workspace tar is killed rather than
+// awaited, and a successful helper leaves tar only `tarGraceMs` to exit.
+async function extractAgyReviewWorkspace({
+  user,
+  reviewId,
+  sourceDir,
+  runPinnedImpl = runPinnedCommand,
+  spawnImpl = spawn,
+  tar = AGY_REVIEWER_TAR,
+  timeoutMs = EXTRACT_TIMEOUT_MS,
+  tarGraceMs = HELPER_TIMEOUT_MS,
+} = {}) {
   assertReviewId(reviewId);
   const archive = spawnImpl(tar, ['-cf', '-', '-C', sourceDir, '.'], { env: PINNED_COMMAND_ENV, stdio: ['ignore', 'pipe', 'pipe'] });
   let tarStderr = '';
-  archive.stderr?.on('data', (chunk) => { tarStderr += chunk; });
+  archive.stderr?.on('data', (chunk) => { if (tarStderr.length < 64 * 1024) tarStderr += chunk; });
+  archive.stdout?.on('error', () => {});
   const tarExit = new Promise((resolve) => {
     archive.on('error', (err) => resolve({ code: null, error: err }));
-    archive.on('close', (code) => resolve({ code }));
+    archive.on('close', (code, signal) => resolve({ code, signal }));
   });
-  const [result, tarResult] = await Promise.all([
-    runPinnedImpl({ user, command: AGY_REVIEWER_WORKSPACE_HELPER, args: ['extract', reviewId], stdin: archive.stdout, timeoutMs }),
-    tarExit,
-  ]);
+  const stopArchive = () => {
+    try { archive.stdout?.destroy(); } catch { /* already closed */ }
+    try { archive.kill('SIGKILL'); } catch { /* already gone */ }
+  };
+  const tarTimer = setTimeout(stopArchive, timeoutMs);
+  tarTimer.unref?.();
+  let result = null;
+  let dir = '';
+  let tarResult;
+  try {
+    try {
+      result = await runPinnedImpl({ user, command: AGY_REVIEWER_WORKSPACE_HELPER, args: ['extract', reviewId], stdin: archive.stdout, timeoutMs });
+      dir = result?.code === 0 ? parseHelperKeyValues(result.stdout)['workspace.dir'] || '' : '';
+    } finally {
+      // The helper is done reading stdin however it ended (including a throw).
+      if (!dir) stopArchive();
+    }
+    if (!dir) {
+      throw new AgyReviewerIdentityError(describeFailure(`workspace extract as ${user}`, result), { reason: 'agy-identity-extract-failed' });
+    }
+    tarResult = await settleWithin(tarExit, tarGraceMs, () => {
+      stopArchive();
+      return { code: null, error: new Error(`tar did not exit within ${tarGraceMs}ms of the extract finishing`) };
+    });
+  } finally {
+    clearTimeout(tarTimer);
+  }
   if (tarResult.code !== 0) {
     throw new AgyReviewerIdentityError(
-      `archiving the review snapshot for ${user} failed: ${String(tarStderr || tarResult.error?.message || tarResult.code).trim().slice(0, 200)}`,
+      `archiving the review snapshot for ${user} failed: ${String(tarStderr || tarResult.error?.message || tarResult.signal || tarResult.code).trim().slice(0, 200)}`,
       { reason: 'agy-identity-extract-failed' },
     );
-  }
-  const dir = parseHelperKeyValues(result.stdout)['workspace.dir'];
-  if (result.code !== 0 || !dir) {
-    throw new AgyReviewerIdentityError(describeFailure(`workspace extract as ${user}`, result), { reason: 'agy-identity-extract-failed' });
   }
   return { user, reviewId, dir };
 }
@@ -546,11 +589,10 @@ function createAgyReviewerIdentityPool({
     return plan.identities.filter((identity) => states.get(identity.user)?.ready).length;
   }
 
-  function tryAcquire(plan, { reviewId, allowAdded }) {
+  function tryAcquire(plan, { reviewId }) {
     for (const identity of plan.identities) {
       const state = states.get(identity.user);
       if (!state?.ready || state.lease) continue;
-      if (!identity.hqOwner && !allowAdded) continue;
       const lease = { user: identity.user, hqOwner: identity.hqOwner, reviewId };
       state.lease = lease;
       return lease;
@@ -562,13 +604,13 @@ function createAgyReviewerIdentityPool({
   // the ready count and counts in-flight reviews, so a free identity normally
   // exists; the bounded wait only covers an identity isolated between the
   // cap decision and this spawn.
-  async function acquire({ reviewId = `agy-${randomUUID()}`, allowAdded = true } = {}) {
+  async function acquire({ reviewId = `agy-${randomUUID()}` } = {}) {
     assertReviewId(reviewId);
     const deadline = now() + leaseWaitMs;
     for (;;) {
       const plan = currentPlan();
       if (!plan.multi) return { user: hqOwner, hqOwner: true, reviewId, legacy: true };
-      const lease = tryAcquire(plan, { reviewId, allowAdded });
+      const lease = tryAcquire(plan, { reviewId });
       if (lease) return lease;
       if (now() >= deadline) return null;
       await sleepImpl(leasePollMs);
@@ -617,11 +659,35 @@ function createAgyReviewerIdentityPool({
 // Failure classes that say nothing about the identity that ran the review.
 const NON_ISOLATING_FAILURE_CLASSES = new Set(['cancelled', 'stale-review-head', 'daemon-bounce']);
 
-// Wrap one reviewer spawn in an identity lease. Non-Gemini reviews and the
-// single-identity case call `spawnFn(null)` untouched (the pre-CCX-08 path).
-// Otherwise `spawnFn` receives `{ user, reviewId }` for an added identity, or
-// null for the HQ owner, and the lease is released (scratch cleanup, failure
-// isolation) whether the review succeeds, fails, times out or throws.
+// Only a reviewer runtime that hands `subjectContext.agyIdentity` to the
+// reviewer child (cli-direct) can run a review as an added identity. The
+// agent-runtime adapter rebuilds subjectContext from a fixed field list and its
+// router may pick the HQ os-dispatch lane, so it does not advertise this; with
+// such a runtime the configured identities are inert and the pre-CCX-08
+// HQ-owner path (broker cap, no lease) stays in charge.
+function adapterCarriesAgyReviewerIdentity(adapter) {
+  try {
+    return adapter?.describe?.()?.capabilities?.agyReviewerIdentity === true;
+  } catch {
+    return false;
+  }
+}
+
+const inertRuntimeWarned = new Set();
+function warnIdentitiesInert(adapter, log) {
+  let id = 'unknown';
+  try { id = String(adapter?.describe?.()?.id || 'unknown'); } catch { /* keep unknown */ }
+  if (inertRuntimeWarned.has(id)) return;
+  inertRuntimeWarned.add(id);
+  log.warn?.(`[agy-identities] reviewer.gemini.identities is set but reviewer runtime ${id} cannot run a review as an added identity; Gemini reviews on it stay on the HQ owner under the broker cap`);
+}
+
+// Wrap one reviewer spawn in an identity lease. Non-Gemini reviews, the
+// single-identity case and runtimes that cannot carry an identity call
+// `spawnFn(null)` untouched (the pre-CCX-08 path). Otherwise `spawnFn`
+// receives `{ user, reviewId }` for an added identity, or null for the HQ
+// owner, and the lease is released (scratch cleanup, failure isolation)
+// whether the review succeeds, fails, times out or throws.
 async function runWithAgyReviewerIdentity({
   reviewerModel,
   adapter = null,
@@ -631,8 +697,11 @@ async function runWithAgyReviewerIdentity({
   if (String(reviewerModel || '').toLowerCase() !== 'gemini' || !pool.plan().multi) {
     return spawnFn(null);
   }
-  const allowAdded = adapter?.describe?.()?.capabilities?.agyReviewerIdentity === true;
-  const lease = await pool.acquire({ reviewId: `agy-${randomUUID()}`, allowAdded });
+  if (!adapterCarriesAgyReviewerIdentity(adapter)) {
+    warnIdentitiesInert(adapter, log);
+    return spawnFn(null);
+  }
+  const lease = await pool.acquire({ reviewId: `agy-${randomUUID()}` });
   if (!lease) {
     const error = 'no ready agy reviewer identity became free to lease';
     log.warn?.(`[agy-identities] ${error}`);
@@ -671,6 +740,7 @@ export {
   AGY_REVIEWER_WORKSPACE_HELPER,
   AgyReviewerIdentityError,
   PINNED_COMMAND_ENV,
+  adapterCarriesAgyReviewerIdentity,
   agySettingsDrift,
   buildPinnedCommand,
   canonicalAgySettings,

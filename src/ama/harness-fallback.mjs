@@ -129,12 +129,17 @@ export async function resolveCloserDispatchHarness({
   hqPath = 'hq',
   execFileImpl = execFileAsync,
   env = process.env,
+  // CLOSERREUSE-01: the merge-agent needs the primary's grounding even with no
+  // fallback configured, because it defers rather than dispatch a grounded
+  // class (src/merge-agent-harness.mjs). With no fallbacks, a grounded primary
+  // reports `all-fallbacks-grounded` and its grounding fields.
+  probeWithoutFallbacks = false,
 } = {}) {
   const primary = String(workerClass || '').trim();
   const fallbacks = normalizeFallbackList(fallbackWorkerClasses);
   const base = { workerClass: primary, fellBack: false };
 
-  if (!primary || fallbacks.length === 0) {
+  if (!primary || (fallbacks.length === 0 && !probeWithoutFallbacks)) {
     return { ...base, reason: 'no-fallback-configured' };
   }
 

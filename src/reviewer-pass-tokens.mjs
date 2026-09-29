@@ -177,20 +177,6 @@ function selectReviewerPassByKey(db, key) {
   ).get(key.repo, key.prNumber, key.attemptNumber, key.passKind) || null;
 }
 
-// The stored row for one pass key, or null. `metadata` is the parsed
-// metadata_json.
-function readReviewerPass(rootDir, { repo, prNumber, attemptNumber, passKind } = {}) {
-  const key = passKey({ repo, prNumber, attemptNumber, passKind });
-  const db = openReviewStateDb(rootDir);
-  try {
-    ensureReviewStateSchema(db);
-    const row = selectReviewerPassByKey(db, key);
-    return row ? { ...row, metadata: parseMetadataJson(row.metadata_json) } : null;
-  } finally {
-    closeOwnedReviewDb(db);
-  }
-}
-
 function recordReviewerPassProgress(rootDir, {
   repo, prNumber, attemptNumber, passKind, reviewerSessionUuid,
   changedLines, effort, at = new Date().toISOString(),
@@ -2191,7 +2177,6 @@ export {
   captureLocalReviewerUsage,
   readLocalReviewerTranscriptUsage,
   readCodexWorkerLogTokenUsage,
-  readReviewerPass,
   readReviewerTokenUsageArtifact,
   readReviewerSessionTokenUsage,
   readWorkerRunTokenUsage,

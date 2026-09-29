@@ -209,7 +209,8 @@ const MONOLITH_CEILINGS = Object.freeze({
   // 3660 -> 3540: ARC-19 wave5 extract phantom-handoff comment builders/poster to src/merge-agent-phantom-handoff-comment.mjs.
   // 3540 -> 3382: ARC-19 wave7 extract hq executable detection + exec-error classification to src/merge-agent-hq-exec.mjs.
   // 3382 -> 3088: ARC-19 wave9 extract original-worker teardown preflight to src/merge-agent-original-worker-teardown.mjs.
-  'follow-up-merge-agent.mjs': 3088,
+  // 3088 -> 3061: CLOSERREUSE-01 moves the merge-agent worker-class resolution to src/merge-agent-harness.mjs, which also grounds it.
+  'follow-up-merge-agent.mjs': 3061,
 });
 
 for (const [name, ceiling] of Object.entries(MONOLITH_CEILINGS)) {

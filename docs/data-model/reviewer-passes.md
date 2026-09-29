@@ -1,6 +1,6 @@
 # Reviewer passes
 
-**Source of truth:** `migrations/20260518_reviewer_passes.sql`, `migrations/20260810_reviewer_passes_posted_review_freshness_index.sql`, `src/review-state.mjs`, `src/reviewer-pass-tokens.mjs`, `src/reviewer-pass-reaper.mjs`, `src/reviewer-spawn-settle.mjs`, `src/pollonce-phases.mjs`, `src/orphan-post-reconcile.mjs`, and `src/follow-up-jobs.mjs`
+**Source of truth:** `migrations/20260518_reviewer_passes.sql`, `migrations/20260810_reviewer_passes_posted_review_freshness_index.sql`, `src/review-state.mjs`, `src/reviewer-pass-tokens.mjs`, `src/ama/closer-pass-attempt.mjs`, `src/reviewer-pass-reaper.mjs`, `src/reviewer-spawn-settle.mjs`, `src/pollonce-phases.mjs`, `src/orphan-post-reconcile.mjs`, and `src/follow-up-jobs.mjs`
 
 ## Ownership
 
@@ -69,6 +69,15 @@ attempt for the PR (`MAX(attempt_number) + 1`), assigned when the worker is
 spawned. It is monotonic across retries and is not the bounded remediation
 round number. Older jobs without a stored worker pass attempt retain the
 round-number fallback for terminal settlement.
+
+For closer passes, `attempt_number` is the AMA dispatch record's `retryCount`
+(1 when absent), and each launch is recorded once (`src/ama/closer-pass-attempt.mjs`).
+If a terminal closer row for the same `metadata_json.launchRequestId` already
+exists at any attempt, recording is a no-op. If the requested attempt belongs
+to another launch, the pass is recorded at `MAX(attempt_number) + 1` for the
+PR. The closer re-reconciles a terminal launch on every tick until it
+re-dispatches, and before CLOSERREUSE-01 a second recording threw `refusing to
+reuse terminal reviewer_passes row` and failed the closer decision.
 
 Rows with a non-empty `gh_comment_id` are genuine posted-review artifacts. The
 watcher's review-freshness pager reads those rows through

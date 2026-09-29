@@ -228,6 +228,14 @@ provenance still key off the configured logical class). It emits a loud
 - **Scope:** this protects the AMA closer/hammer path (the one that stalls PR
   closure fleet-wide). Extending the same harness-fallback to the dag-walker's
   ticket dispatch is a documented follow-up, not built here.
+- **Merge-agent fallback (CLOSERREUSE-01):** the merge-agent resolves
+  `roles.merge_agent_worker_class` through the same resolver and the same
+  `worker_class_fallback` list (`src/merge-agent-harness.mjs`), so the watcher's
+  AMA recovery fallback dispatches `hammer` as `hammer-claude` while
+  openai/oauth is grounded. Unlike the closer, it never dispatches a grounded
+  class: with no ungrounded fallback it returns `dispatch-deferred` with reason
+  `merge-agent-harness-grounded`, and the next tick resolves again. An
+  unreadable quota status still keeps the configured class.
 
 ### 2b. HAMASYNC-01 background hammer dispatch
 
@@ -421,6 +429,9 @@ configured, NOT a hardcoded `codex`):
    `metadata_json.tokenUsageUnavailable=true`, then advances to retry or
    completion handling. `waiting-for-tokens` is therefore only a transient
    within the local poll window, not a durable operator state.
+   Each launch's closer row is recorded once, and an error while recording it
+   never fails the closer decision (see "A hammer that died of an
+   infrastructure cause" below).
 4. The closer's prompt logs the gh CLI invocation:
    `gh pr merge <prUrl> --match-head-commit <sha> --<merge_method>`.
 5. PR closes; the commit on the target branch carries the §4.4 trailers
@@ -812,14 +823,53 @@ the closer follows the record for the same `reviewedSha` with the newest
 logs `closer pass already recorded` and continues instead of throwing
 `refusing to reuse terminal reviewer_passes row`. The closer pass is keyed on
 `attempt=retryCount`, not on the launch, so a launch from a later review series
-can land on a terminal row another launch wrote. That case also continues, but
-logs `closer pass attempt-number collision` with both launch ids: the new
-launch's token usage is not recorded.
+can land on a terminal row another launch wrote. Since CLOSERREUSE-01 that
+launch is recorded at the PR's next free closer attempt, logged as `closer pass
+attempt-number collision` with both launch ids.
 
 To inspect a PR: the watcher log carries `ama_closer.hammer_exited_without_close`
 (with `retryRefund`) or `ama_closer.hammer_ended_without_merge`, and
 `data/follow-up-jobs/hammer-retry-cap/<repo>-pr-<n>.json` shows `retryable` and
 `retryableLaunchRequestIds`.
+
+### A hammer that died of an infrastructure cause (CLOSERREUSE-01)
+
+A hammer that dies on a provider 429, a revoked OAuth grant or an adapter boot
+crash never ran its close. Before CLOSERREUSE-01 (SEV2 2026-09-29) such a death
+did two things. It spent a real retry-cap attempt, so agent-os#7349's two 429
+deaths parked it at `hammer-retry-cap-exhausted`. And the closer's next ticks
+failed on `refusing to reuse terminal reviewer_passes row` whenever the first
+tick after the death deferred its re-dispatch (agent-os#7347, deferred behind
+another PR's launch).
+
+Now:
+
+- **Recording.** A closer pass is recorded once per launch, decided before the
+  token rollup poll (`src/ama/closer-pass-attempt.mjs`). A terminal row for the
+  same launch makes recording a no-op, and another launch at the attempt is
+  recorded at the next free attempt. Any error while recording is logged as
+  `closer pass recording failed` and never fails `maybeDispatchAmaCloser`.
+- **Re-arm.** When a hammer launch is observed `failed`, pushed nothing (the PR
+  head is still its dispatch head), and its LRQ failure class is
+  `oauth_access_token_revoked`, `adapter_boot_crash`, or
+  `process_exited_after_progress` / `worker_killed` with the provider's API 429,
+  the closer refunds its dispatch (`src/ama/dead-hammer-rearm.mjs`) and
+  re-dispatches on the same head in that tick. The 429 must come from the
+  harness: the LRQ's failure detail, the final `result` event of the worker's
+  `<HQ_ROOT>/dispatch/<lrq>/stdout.log`, or a provider error line. A quote of
+  the 429 text in the worker's own narrative does not count.
+- **Budget.** The refund is the one above: the same ledger, the same
+  `retryable` counter, and the same one refund per reviewed-head series,
+  whether the launch exited without closing or died of infrastructure. Past
+  it, the death stays charged, and the normal cap suppresses and pages.
+- **Log.** `ama_closer.infra_dead_hammer_rearm` records `rearmed`, `cause`,
+  `failureClass` and the refund's `reason` (for example
+  `retry-budget-exhausted`). It is logged once per launch. A launch re-observed
+  while its re-dispatch waits, or after the cap suppressed the series, is not
+  logged again.
+
+A failure class outside that list (`worker_crashed`, an exit after progress
+with no 429, an unreadable LRQ row) stays charged, as before.
 
 ### Daemon fail-closed on a hammer-remediable gate → capped hammer fallback
 

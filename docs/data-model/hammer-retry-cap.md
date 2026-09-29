@@ -3,7 +3,7 @@
 **Owner:** AMA hammer dispatch retry and redrive caps
 **Store:** `data/follow-up-jobs/hammer-retry-cap/`
 **Source of truth:** `src/ama/hammer-retry-cap.mjs`
-**Runtime surface:** `src/ama/dispatch-closer.mjs`, `src/ama-closure-orchestration.mjs`
+**Runtime surface:** `src/ama/dispatch-closer.mjs`, `src/ama/dead-hammer-rearm.mjs`, `src/ama-closure-orchestration.mjs`
 
 ## Purpose
 
@@ -40,7 +40,7 @@ Directory: `data/follow-up-jobs/hammer-retry-cap/`
 | `lifetimeAttemptCount` | non-negative integer | Confirmed hammer dispatches for the PR across all reviewed-head series. Missing legacy values are seeded from `attemptCount`; non-finite present values fail closed to the lifetime ceiling. |
 | `targetRemediationSha` | string or null | Live PR head SHA targeted by HAM remediation. This may differ from `jobKey` when the review is stale and the exhausted-lane hammer runs against a newer head. |
 | `targetAttemptCount` | non-negative integer | Confirmed hammer dispatches against `targetRemediationSha` across job keys. A changed known target SHA resets the count; missing legacy values are backfilled from `attemptCount` on suppression writes and from the evaluated target count on dispatch writes. |
-| `retryable` | non-negative integer, optional | HAMBG-02: dispatches refunded because the hammer exited `succeeded` without closing its PR (`attemptCount` and the matching `targetAttemptCount` go down by one, `retryable` goes up by one). At most `HAMMER_EXITED_WITHOUT_CLOSE_RETRY_BUDGET` (1) per series. Belongs to the series: a fresh-review job-key change resets it, on a dispatch write and on a suppression write alike. Absent until the first refund. Not the same counter as the base-branch merge gate's `retryable` (HAMGATE-01, `data/merge-leases/`): the two live in different stores and have separate budgets. |
+| `retryable` | non-negative integer, optional | Dispatches refunded because the hammer exited `succeeded` without closing its PR (HAMBG-02), or its launch failed for an infrastructure reason and it pushed nothing (CLOSERREUSE-01). `attemptCount` and the matching `targetAttemptCount` go down by one, and `retryable` goes up by one. At most `HAMMER_EXITED_WITHOUT_CLOSE_RETRY_BUDGET` (1) per series. Belongs to the series: a fresh-review job-key change resets it, on a dispatch write and on a suppression write alike. Absent until the first refund. Not the same counter as the base-branch merge gate's `retryable` (HAMGATE-01, `data/merge-leases/`): the two live in different stores and have separate budgets. |
 | `retryableLaunchRequestIds` | string array, optional | Launch request ids already refunded, so a launch observed on several ticks is refunded once. Last 10 kept; reset with `retryable`. |
 | `dispatchHeads` | string array | Unique dispatched head SHAs observed in the current reviewed-head series. Resets on a fresh-review job-key change. |
 | `lastDispatchedHeadSha` | string or null | Most recent head SHA used for a confirmed hammer dispatch. |
@@ -76,3 +76,9 @@ Directory: `data/follow-up-jobs/hammer-retry-cap/`
   retry delivery.
 - Ledger writes are atomic JSON rewrites. Operators may repair or clear a file,
   but malformed numeric counters fail closed rather than re-arming quota burn.
+- The two refund kinds share one budget per series, and
+  `retryableLaunchRequestIds` keeps either from refunding a launch twice. The
+  infrastructure reasons (`src/ama/dead-hammer-rearm.mjs`) are the LRQ failure
+  classes `oauth_access_token_revoked` and `adapter_boot_crash`, and
+  `process_exited_after_progress` or `worker_killed` with the provider's API
+  429 in the worker's own output.

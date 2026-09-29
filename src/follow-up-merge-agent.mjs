@@ -58,9 +58,15 @@ import {
 } from './review-state.mjs';
 import {
   loadRoleConfig,
-  resolveDefaultMergeAgentWorkerClass,
   validateStartupRoleConfig,
 } from './role-config.mjs';
+import {
+  ALLOWED_MERGE_AGENT_WORKER_CLASSES,
+  DEFAULT_MERGE_AGENT_WORKER_CLASS,
+  MERGE_AGENT_WORKER_CLASS_ENV,
+  resolveMergeAgentDispatchHarness,
+  resolveMergeAgentWorkerClass,
+} from './merge-agent-harness.mjs';
 import { validateStartupRoleRegistry } from './role-registry.mjs';
 import { validateStartupDeliveryIdentity } from './adapters/comms/github-pr-comments/delivery-identity.mjs';
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from './config-loader.mjs';
@@ -144,48 +150,6 @@ const MERGE_CLASS_ORCHESTRATION_MODES = new Set(ENUM_ROLES_ADVERSARIAL_ORCHESTRA
 //   - `pr-not-open` / `merged` (trivially N/A)
 const DEFAULT_MERGE_AGENT_PARENT_SESSION = 'session:adversarial-review:watcher';
 const DEFAULT_MERGE_AGENT_PROJECT = 'pr-merge-orchestration';
-
-// Worker class used for merge-orchestration dispatch. Default is the
-// `merge-agent` stub adapter; operators pin to a real model class
-// (`codex`, `claude-code`) via env when the merge-agent surface is being
-// validated against live models, or during a budget-squeeze where the
-// stub's behavior needs to be substituted by a known-working coding
-// worker class.
-const DEFAULT_MERGE_AGENT_WORKER_CLASS = 'merge-agent';
-const MERGE_AGENT_WORKER_CLASS_ENV = 'ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS';
-const ALLOWED_MERGE_AGENT_WORKER_CLASSES = Object.freeze([
-  'merge-agent',
-  'codex',
-  'claude-code',
-]);
-
-// Cascade-aware merge-agent worker class resolver. Consults config.yaml
-// FIRST (module → top → *.local) and env LAST per SPEC §3. The top-level
-// canonical key `roles.merge_agent_worker_class` overrides the module's
-// `merge_agent.worker_class` via the SPEC §10.2 `__aliases` block. The
-// loader fails loud on enum violations, env-alias conflicts, and YAML 1.2
-// boolean-coercion attempts.
-//
-// The `_isMergeAgentConfigError` flag and `configKey` / `requestedValue`
-// shape on the error are preserved for downstream callers that key off
-// them (e.g. the dispatch refusal path).
-// CFG-02 round-1 review B6 fix (2026-05-30): requestedValue defaults
-// to null so downstream templating doesn't render the multi-value
-// diagnostic blob the loader puts in err.got for env-alias conflicts.
-// (B1 mislabel fix deferred — see follow-up-remediation.mjs for the
-// matching rationale.)
-function resolveMergeAgentWorkerClass(env = process.env, opts = {}) {
-  try {
-    return resolveDefaultMergeAgentWorkerClass({ env, ...opts });
-  } catch (err) {
-    if (err && err.name === 'AgentOSConfigError') {
-      err.isMergeAgentConfigError = true;
-      err.configKey = err.envName || MERGE_AGENT_WORKER_CLASS_ENV;
-      err.requestedValue = null;
-    }
-    throw err;
-  }
-}
 
 // Boot-time validator. Call this from the watcher's startup path next to
 // `validateStartupRemediationConfig` so a typo in
@@ -2165,6 +2129,7 @@ async function dispatchMergeAgentForPR({
   hqPath = DEFAULT_HQ_PATH,
   agentOsDetectImpl = detectAgentOsPresence,
   prepareOriginalWorkerImpl = prepareOriginalWorkerForMergeAgent,
+  resolveMergeAgentHarnessImpl = resolveMergeAgentDispatchHarness,
   dispatchRetryDelaysMs = HQ_DISPATCH_TRANSIENT_RETRY_DELAYS_MS,
   logger = console,
   env = process.env,
@@ -2701,7 +2666,15 @@ async function dispatchMergeAgentForPR({
   // operator-requested stuck-branch path is the load-bearing case that needs
   // bypass semantics; broadening that escape hatch to every merge-agent launch
   // is not.
-  const mergeAgentWorkerClass = resolveMergeAgentWorkerClass(runtimeEnv);
+  // CLOSERREUSE-01: the closer's grounding and fallback; a grounded class with
+  // nothing to take its place defers instead of dispatching (merge-agent-harness.mjs).
+  const harness = await resolveMergeAgentHarnessImpl({
+    workerClass: resolveMergeAgentWorkerClass(runtimeEnv), env: runtimeEnv, hqPath: resolvedHqPath, execFileImpl, logger,
+  });
+  if (harness.deferred) {
+    return { decision: 'dispatch-deferred', reason: harness.reason, workerClass: harness.workerClass, harness };
+  }
+  const mergeAgentWorkerClass = harness.workerClass;
   // AOM-04: the orchestration switch is a deliberate no-op for merge-class
   // dispatch. Native and agentos both stay on `hq dispatch` because no bare
   // merge orchestration exists to fall back to.

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { openReviewStateDb } from '../src/review-state.mjs';
+import { activeRemediationStopDecision } from '../src/follow-up-lifecycle.mjs';
 import { acquireAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import {
@@ -4540,7 +4541,16 @@ test('requeueFollowUpJobForNextRound accepts failed terminal jobs', () => {
   assert.equal(requeued.job.status, 'pending');
 });
 
-test('requeueFollowUpJobForNextRound accepts stopped:max-rounds-reached jobs after a budget bump', () => {
+async function activeStopCode(job) {
+  const decision = await activeRemediationStopDecision({
+    lifecycle: { prState: 'open', source: 'live' },
+    liveness: { state: 'active' },
+    job,
+  });
+  return decision?.stopCode ?? null;
+}
+
+test('requeueFollowUpJobForNextRound accepts stopped:max-rounds-reached jobs after a budget bump', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createFollowUpJob({
     ...makeJobInput(rootDir),
@@ -4572,6 +4582,32 @@ test('requeueFollowUpJobForNextRound accepts stopped:max-rounds-reached jobs aft
   const next = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:07:00.000Z' });
   assert.equal(next.job.remediationPlan.currentRound, 2);
   assert.equal(next.job.remediationPlan.stop, null);
+  assert.equal(await activeStopCode(next.job), null);
+});
+
+test('claiming a pending job clears a stale max-rounds stop left by an earlier requeue', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const created = createFollowUpJob({
+    ...makeJobInput(rootDir),
+    maxRemediationRounds: 2,
+  });
+  // A job requeued before requeueFollowUpJobForNextRound cleared `stop`
+  // still sits in pending/ with the old max-rounds-reached record.
+  const pending = readFollowUpJob(created.jobPath);
+  pending.remediationPlan.stop = {
+    code: 'max-rounds-reached',
+    stoppedAt: '2026-04-21T10:05:00.000Z',
+    stoppedBy: 'system',
+    sourceStatus: 'in_progress',
+  };
+  writeFollowUpJob(created.jobPath, pending);
+  assert.equal(await activeStopCode(pending), 'max-rounds-reached');
+
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:07:00.000Z' });
+  assert.equal(claimed.job.status, 'in_progress');
+  assert.equal(claimed.job.remediationPlan.stop, null);
+  assert.equal(readFollowUpJob(claimed.jobPath).remediationPlan.stop, null);
+  assert.equal(await activeStopCode(claimed.job), null);
 });
 
 test('stopping a spawned remediation worker keeps its partial Codex usage', (t) => {

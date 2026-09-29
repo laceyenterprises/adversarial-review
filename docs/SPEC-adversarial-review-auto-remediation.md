@@ -1556,6 +1556,10 @@ supports five accountability lanes:
 - `operationalBlockers[]` for git/process failures that are not themselves review
   findings, such as `branch-contamination`, `stale-pr-head`,
   `push-lease-rejected`, `missing-auth`, `fetch-failed`, or `rebase-conflict`.
+  An entry may carry an optional structured `kind`; the only value is
+  `pending-ci`, for PR-head CI that was still running after the worker's one
+  bounded wait. The reconciler acts on `kind` and on its own CI probe, never on
+  the free-text `title` (COMMENTCLOSE-01).
 - `nonBlocking[]` (LAC-893) for non-blocking review findings the worker
   nonetheless fixed in this round. Same per-entry shape as `addressed[]`
   (`{ title?, finding, action, files? }`). **Invisible to the blocking-coverage

@@ -14,7 +14,7 @@ import { ensureTtmTrackerSchema } from './ttm-tracker.mjs';
 import { recordReviewLatencyEvent } from './review-latency-event-writer.mjs';
 import { normalizeEffectiveReviewVerdict } from './kernel/verdict.mjs';
 import {
-  hasCompletedCommentOnlyFinalRound,
+  hasCommentOnlyFinalRoundPush,
   hasSettledCommentOnlyReviewHead,
 } from './comment-only-final-round.mjs';
 import {
@@ -1097,7 +1097,7 @@ function requestReviewRereview({
       }
     }
     if (targetHead && !explicitOperatorRetrigger &&
-        hasCompletedCommentOnlyFinalRound(rootDir, { repo, prNumber, headSha: targetHead }, logger)) {
+        hasCommentOnlyFinalRoundPush(rootDir, { repo, prNumber, headSha: targetHead }, logger)) {
       logger.warn?.(`[review-state] Refusing re-review for ${repo}#${prNumber}: comment-only final round completed`);
       return buildBlockedRereviewResult('comment-only-final-round-completed', currentRow);
     }

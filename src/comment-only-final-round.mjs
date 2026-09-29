@@ -107,12 +107,16 @@ export function hasSettledCommentOnlyReviewHead(rootDir, { repo, prNumber, headS
   );
 }
 
-export function hasCompletedCommentOnlyFinalRound(rootDir, { repo, prNumber, headSha }, log = console) {
+// COMMENTCLOSE-01: a final round that stopped (for example on pending CI in an
+// older reconciler) still pushed its head; that head is not re-reviewed either.
+export function hasCommentOnlyFinalRoundPush(rootDir, { repo, prNumber, headSha }, log = console) {
   if (!SHA.test(String(headSha || ''))) return false;
-  return scanCommentOnlyJobs(rootDir, 'completed', repo, prNumber, log).some((job) =>
-    job.status === 'completed' && job.finalRound === 'comment-only' &&
-    job.reReview?.suppressed === 'comment-only-final-round' &&
-    job.completion?.workerPushedHeadSha === headSha
+  return ['completed', 'stopped', 'failed'].some((status) =>
+    scanCommentOnlyJobs(rootDir, status, repo, prNumber, log).some((job) =>
+      job.status === status && job.finalRound === 'comment-only' &&
+      job.reReview?.suppressed === 'comment-only-final-round' &&
+      job.completion?.workerPushedHeadSha === headSha
+    )
   );
 }
 

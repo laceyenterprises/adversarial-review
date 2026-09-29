@@ -460,8 +460,40 @@ test('completed comment-only final round is durable PR-wide evidence', (t) => {
   });
   const ledger = summarizePRRemediationLedger(rootDir, job);
   assert.deepEqual(ledger.commentOnlyFinalRoundRevisionRefs, [head]);
-  assert.deepEqual(ledger.commentOnlyFinalRoundPushedHeads, [{ reviewedHead: head, workerPushedHeadSha: 'b'.repeat(40), completedAt: '2026-04-21T10:30:00.000Z' }]);
+  assert.deepEqual(ledger.commentOnlyFinalRoundPushedHeads, [{ reviewedHead: head, workerPushedHeadSha: 'b'.repeat(40), completedAt: '2026-04-21T10:30:00.000Z', status: 'completed' }]);
   assert.equal(ledger.completedRoundsForPR, 1);
+});
+
+test('a stopped comment-only final round keeps its pushed head in the PR ledger (COMMENTCLOSE-01)', (t) => {
+  const rootDir = makeTempRoot(t);
+  const head = 'a'.repeat(40);
+  const job = buildFollowUpJob({
+    ...makeJobInput(rootDir),
+    revisionRef: head,
+    reviewBody: '## Blocking issues\n- None.\n## Non-blocking issues\n- Fix docs.\n## Verdict\nComment only',
+    critical: false,
+  });
+  const stoppedDir = getFollowUpJobDir(rootDir, 'stopped');
+  mkdirSync(stoppedDir, { recursive: true });
+  const stoppedJob = {
+    ...job,
+    status: 'stopped',
+    stoppedAt: '2026-04-21T10:31:00.000Z',
+    remediationWorker: { state: 'completed' },
+    completion: { workerPushedHeadSha: 'b'.repeat(40) },
+    reReview: { requested: false, suppressed: 'comment-only-final-round' },
+    remediationPlan: { ...job.remediationPlan, currentRound: 1, stop: { code: 'max-rounds-reached' } },
+  };
+  writeFollowUpJob(path.join(stoppedDir, `${job.jobId}.json`), stoppedJob);
+  // A pre-spawn stop never ran the worker and carries no suppression marker.
+  writeFollowUpJob(path.join(stoppedDir, `${job.jobId}-dup.json`), {
+    ...stoppedJob, jobId: `${job.jobId}-dup`, reReview: null, completion: null,
+  });
+  const ledger = summarizePRRemediationLedger(rootDir, job);
+  assert.deepEqual(ledger.commentOnlyFinalRoundRevisionRefs, [head]);
+  assert.deepEqual(ledger.commentOnlyFinalRoundPushedHeads, [{
+    reviewedHead: head, workerPushedHeadSha: 'b'.repeat(40), completedAt: '2026-04-21T10:31:00.000Z', status: 'stopped',
+  }]);
 });
 
 test('archiveStoppedFollowUpJobs moves only stopped entries at least 24h old into month archive', () => {

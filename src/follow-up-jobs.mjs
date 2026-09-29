@@ -1706,7 +1706,11 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
       if (job.repo !== targetRepo) continue;
       if (Number(job.prNumber) !== targetPr) continue;
 
-      if (key === 'completed' && job.finalRound === 'comment-only' &&
+      // COMMENTCLOSE-01: a final round is final whatever directory it lands in.
+      // A stopped final round that pushed still owns its pushed head, so the
+      // re-review suppression and the closer hand-off read it from every
+      // terminal directory, not only `completed/`.
+      if (terminalKeys.has(key) && job.finalRound === 'comment-only' &&
           job.reReview?.suppressed === 'comment-only-final-round' &&
           String(job.revisionRef || '').trim()) {
         commentOnlyFinalRoundRevisionRefs.add(String(job.revisionRef).trim());
@@ -1714,7 +1718,8 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
           commentOnlyFinalRoundPushedHeads.push({
             reviewedHead: String(job.revisionRef).trim(),
             workerPushedHeadSha: job.completion.workerPushedHeadSha,
-            completedAt: job.completedAt || null,
+            completedAt: job.completedAt || job.stoppedAt || job.failedAt || null,
+            status: key,
           });
         }
       }

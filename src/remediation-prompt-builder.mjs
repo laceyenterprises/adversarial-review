@@ -105,7 +105,7 @@ export function buildRemediationPrompt(job, {
   const promptTemplate = template ?? loadFollowUpPromptTemplate(ROOT, { stage: remediatorPromptStage });
   const commentOnlyFinal = job?.finalRound === 'comment-only';
   const finalRoundRules = `## Comment-only final round (authoritative)
-This PR has a settled Comment only verdict. Address or explicitly account for its non-blocking findings in this one final remediation round. Do not request another adversarial review. Set \`reReview.requested = false\` and \`reReview.reason = null\` on success. The AMA closer takes the PR after completion and green required checks. Instructions elsewhere in this template that say to request re-review or assume a Request changes verdict do not apply to this job.`;
+This PR has a settled Comment only verdict. Address or explicitly account for its non-blocking findings in this one final remediation round. Do not request another adversarial review. Set \`reReview.requested = false\` and \`reReview.reason = null\` on success. The AMA closer takes the PR after completion and green required checks. Pending PR-head CI does not block this round: if checks are still running after your one bounded wait, record them as one \`operationalBlockers[]\` entry with \`"kind": "pending-ci"\`, and keep \`blockers[]\` empty unless a finding truly needs human input. Instructions elsewhere in this template that say to request re-review or assume a Request changes verdict do not apply to this job.`;
   const criticality = job.critical ? 'critical' : 'non-critical';
   const ticketLabel = job.linearTicketId || 'None provided';
   const baseBranch = requireJobBaseBranch(job);

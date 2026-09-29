@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   captureFinalRoundWorkerPushedHead,
-  hasCompletedCommentOnlyFinalRound,
+  hasCommentOnlyFinalRoundPush,
   hasInProgressCommentOnlyFinalRound,
   hasSettledCommentOnlyReviewHead,
   proveCommentOnlyFinalRoundHead,
@@ -142,10 +142,10 @@ test('comment-only job scans tolerate files moved after directory listing', () =
   assert.equal(hasSettledCommentOnlyReviewHead(rootDir, {
     repo: 'example/repo', prNumber: 42, headSha: oldHead,
   }), true);
-  assert.equal(hasCompletedCommentOnlyFinalRound(rootDir, {
+  assert.equal(hasCommentOnlyFinalRoundPush(rootDir, {
     repo: 'example/repo', prNumber: 42, headSha: newHead,
   }), true);
-  assert.equal(hasCompletedCommentOnlyFinalRound(rootDir, {
+  assert.equal(hasCommentOnlyFinalRoundPush(rootDir, {
     repo: 'example/repo', prNumber: 42, headSha: '3'.repeat(40),
   }), false);
   const inProgressDir = join(rootDir, 'data', 'follow-up-jobs', 'in-progress');
@@ -175,7 +175,7 @@ test('diverged final-round worker head carries no handoff proof and stays review
     repo: 'example/repo', prNumber: 42, status: 'completed', finalRound: 'comment-only',
     reReview: { suppressed: 'comment-only-final-round' }, completion: {},
   }));
-  assert.equal(hasCompletedCommentOnlyFinalRound(rootDir, {
+  assert.equal(hasCommentOnlyFinalRoundPush(rootDir, {
     repo: 'example/repo', prNumber: 42, headSha: newHead,
   }), false);
 });
@@ -190,10 +190,10 @@ test('job scan cache refreshes after an atomic job replacement', () => {
     completion: {} };
   writeFileSync(path, JSON.stringify(job));
   const query = { repo: 'example/repo', prNumber: 42, headSha: newHead };
-  assert.equal(hasCompletedCommentOnlyFinalRound(rootDir, query), false);
+  assert.equal(hasCommentOnlyFinalRoundPush(rootDir, query), false);
   writeFileSync(`${path}.next`, JSON.stringify({
     ...job, completion: { workerPushedHeadSha: newHead },
   }));
   renameSync(`${path}.next`, path);
-  assert.equal(hasCompletedCommentOnlyFinalRound(rootDir, query), true);
+  assert.equal(hasCommentOnlyFinalRoundPush(rootDir, query), true);
 });

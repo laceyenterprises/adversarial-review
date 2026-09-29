@@ -36,6 +36,8 @@ heads and projects verified `(reviewedHead, workerPushedHeadSha)` pairs as
 timestamp) for follow-up suppression and `status` for the terminal directory it
 came from. Both read `completed/`, `stopped/` and `failed/`. AMA requires the current PR head to equal a
 pair's pushed head, the settled review to match its reviewed head, and GitHub
-ancestry to confirm the transition. A later head can be reviewed normally.
+ancestry to confirm the transition; the closer then reads the verdict from the
+matching terminal job's `reviewBody` (`findCommentOnlyFinalRoundPushJob`). A
+later head can be reviewed normally.
 Job scans skip a file removed during a queue transition and warn on malformed
 JSON without discarding other jobs.

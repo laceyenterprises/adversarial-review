@@ -38,6 +38,7 @@ import {
 } from './github-adapter-client.mjs';
 import { isFleetSelfRepairTrailerOnlyRereviewReason } from './fleet-self-repair-rereview.mjs';
 import { isSettledReviewJob, listFollowUpJobsInDir } from './follow-up-jobs.mjs';
+import { findCommentOnlyFinalRoundPushJob } from './comment-only-final-round.mjs';
 
 const execFileAsync = promisify(execFile);
 const WATCHER_OWNED_HOLD_LABELS = new Set(['duplicate-family-hold']);
@@ -373,6 +374,59 @@ function completedHeadChangeRereviewIsSettledClean({ latestJob, latestJobStatus,
   return blocking.state === 'known' && blocking.count === 0;
 }
 
+// Pick the verdict-bearing body out of a live-review lookup, failing closed when
+// the lookup did not resolve. Shared by the current-head and final-round paths.
+function liveReviewVerdict(liveHeadReview) {
+  if (!liveHeadReview || liveHeadReview.resolved !== true || !Array.isArray(liveHeadReview.bodies)) return null;
+  for (const liveBody of liveHeadReview.bodies) {
+    const candidate = String(normalizeEffectiveReviewVerdict(liveBody) || '').toLowerCase();
+    if (candidate) return { verdict: candidate, body: liveBody };
+  }
+  return { verdict: '', body: '' };
+}
+
+// COMMENTCLOSE-01: a comment-only final round always moves the head, so after it
+// pushes, the live head never equals the reviewed head and the settled verdict
+// read below returns unknown — the AMA hand-off could never fire. When (and only
+// when) the caller supplies recorded final-round pushes and the live head is
+// EXACTLY one of them for this row's reviewed head, resolve the verdict and
+// blockers from the reviewed head's review. `reviewedHeadSha` stays the reviewed
+// head, so every merge predicate still sees `stale-review-head`: this proves
+// nothing about the pushed head except that it is the final round's own push.
+// A human push, or any other descendant, matches no record and fails closed.
+function resolveCommentOnlyFinalRoundVerdict(rootDir, {
+  repo, prNumber, reviewedHeadSha, currentHeadSha, commentOnlyFinalRoundPushes,
+  finalRoundJobFinder, latestJobFinder, liveHeadReview,
+}) {
+  const recorded = Array.isArray(commentOnlyFinalRoundPushes) && commentOnlyFinalRoundPushes.some((entry) => (
+    entry?.reviewedHead === reviewedHeadSha && entry?.workerPushedHeadSha === currentHeadSha
+  ));
+  const finalRoundJob = recorded
+    ? finalRoundJobFinder(rootDir, { repo, prNumber, reviewedHead: reviewedHeadSha, workerPushedHeadSha: currentHeadSha })
+    : null;
+  if (!finalRoundJob) return null;
+  const pendingJob = latestJobFinder(rootDir, { repo, prNumber, revisionRef: currentHeadSha });
+  const pendingStatus = normalizeFollowUpJobStatus(pendingJob?.status);
+  if (pendingStatus === 'pending' || pendingStatus === 'in-progress') {
+    return { verdict: '', remediationPending: true, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
+  }
+  // The live reconcile fetches the latest review on the REVIEWED head: a later
+  // Request changes on that head still wins over the stored Comment only body.
+  const live = liveHeadReview === undefined ? null : liveReviewVerdict(liveHeadReview);
+  if (liveHeadReview !== undefined && !live) {
+    return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
+  }
+  const body = live ? live.body : finalRoundJob.reviewBody;
+  const verdict = live ? live.verdict : String(normalizeEffectiveReviewVerdict(body) || '').toLowerCase();
+  return {
+    verdict,
+    remediationPending: false,
+    reviewedHeadSha,
+    commentOnlyFinalRoundPush: true,
+    ...classifyBlockersFromBody(body, verdict),
+  };
+}
+
 function resolveSettledReviewVerdict(
   rootDir,
   {
@@ -383,6 +437,8 @@ function resolveSettledReviewVerdict(
     latestJobFinder = findLatestFollowUpJobForPR,
     capturedReviewerPassFinder = findCapturedReviewerPassForHead,
     liveHeadReview = undefined,
+    commentOnlyFinalRoundPushes = null,
+    finalRoundJobFinder = findCommentOnlyFinalRoundPushJob,
   } = {}
 ) {
   const reviewedHeadSha = reviewRowReviewerHeadSha(reviewRow);
@@ -394,7 +450,13 @@ function resolveSettledReviewVerdict(
   }
   if (currentHeadSha && reviewedHeadSha && String(reviewedHeadSha) !== String(currentHeadSha)) {
     if (!isQuotaCapped && !isHeadChangeRereview) {
-      return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
+      const finalRound = reviewStatus === 'posted' && commentOnlyFinalRoundPushes
+        ? resolveCommentOnlyFinalRoundVerdict(rootDir, {
+          repo, prNumber, reviewedHeadSha, currentHeadSha, commentOnlyFinalRoundPushes,
+          finalRoundJobFinder, latestJobFinder, liveHeadReview,
+        })
+        : null;
+      return finalRound || { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
     }
   }
 
@@ -435,24 +497,15 @@ function resolveSettledReviewVerdict(
   // The blocking-findings classification is derived from the SAME live body the
   // verdict came from so the two can never disagree.
   if (liveHeadReview !== undefined) {
-    if (!liveHeadReview || liveHeadReview.resolved !== true || !Array.isArray(liveHeadReview.bodies)) {
+    const live = liveReviewVerdict(liveHeadReview);
+    if (!live) {
       return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
     }
-    let liveVerdict = '';
-    let liveBodyForBlockers = '';
-    for (const liveBody of liveHeadReview.bodies) {
-      const candidate = String(normalizeEffectiveReviewVerdict(liveBody) || '').toLowerCase();
-      if (candidate) {
-        liveVerdict = candidate;
-        liveBodyForBlockers = liveBody;
-        break;
-      }
-    }
     return {
-      verdict: liveVerdict,
+      verdict: live.verdict,
       remediationPending: false,
       reviewedHeadSha,
-      ...classifyBlockersFromBody(liveBodyForBlockers, liveVerdict),
+      ...classifyBlockersFromBody(live.body, live.verdict),
     };
   }
 
@@ -895,6 +948,8 @@ async function buildAdversarialGateSnapshot(rootDir, {
   reviewRow = null,
   includeSettledReview = false,
   liveHeadReview = undefined,
+  // COMMENTCLOSE-01: recorded final-round pushes; only the AMA closer passes them.
+  commentOnlyFinalRoundPushes = null,
   execFileImpl = execFileAsync,
   fetchLatestLabelEventImpl,
   operatorApprovalEvent = undefined,
@@ -920,6 +975,7 @@ async function buildAdversarialGateSnapshot(rootDir, {
       reviewRow: resolvedRow,
       currentHeadSha: headSha,
       liveHeadReview,
+      commentOnlyFinalRoundPushes,
     })
     : null;
   const reviewedHeadSha = resolveProvenReviewedHead(settledReview);

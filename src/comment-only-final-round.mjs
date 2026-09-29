@@ -120,6 +120,28 @@ export function hasCommentOnlyFinalRoundPush(rootDir, { repo, prNumber, headSha 
   );
 }
 
+// COMMENTCLOSE-01: the terminal final-round job that pushed `workerPushedHeadSha`
+// for `reviewedHead`. Its reviewBody is the settled Comment only review, so the
+// AMA closer can read the verdict of a head the final round moved on from.
+export function findCommentOnlyFinalRoundPushJob(rootDir, { repo, prNumber, reviewedHead, workerPushedHeadSha }, log = console) {
+  if (!SHA.test(String(reviewedHead || '')) || !SHA.test(String(workerPushedHeadSha || ''))) return null;
+  let found = null;
+  let foundAt = '';
+  for (const status of ['completed', 'stopped', 'failed']) {
+    for (const job of scanCommentOnlyJobs(rootDir, status, repo, prNumber, log)) {
+      if (job.status !== status || job.finalRound !== 'comment-only' ||
+          job.reReview?.suppressed !== 'comment-only-final-round' ||
+          job.revisionRef !== reviewedHead || job.completion?.workerPushedHeadSha !== workerPushedHeadSha) continue;
+      const at = job.completedAt || job.stoppedAt || job.failedAt || '';
+      if (!found || at > foundAt) {
+        found = job;
+        foundAt = at;
+      }
+    }
+  }
+  return found;
+}
+
 // The watcher must leave the old review intact until reconcile either proves
 // the pushed head or relinquishes the final-round handoff.
 export function hasInProgressCommentOnlyFinalRound(rootDir, { repo, prNumber, reviewedHead }, log = console) {

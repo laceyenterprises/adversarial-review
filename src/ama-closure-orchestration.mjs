@@ -503,8 +503,9 @@ export function normalizeCompletedRoundCount(value) {
 // Transient mergeability sampling window (GitHub returns mergeable=UNKNOWN right
 // after a push / base move while it recomputes). Re-sample so an otherwise-eligible
 // PR resolves this tick; an UNKNOWN that survives sampling reads as the transient
-// `pr-mergeability-unknown` (retried next tick, never hammered or parked), while a
-// real CONFLICTING state reads as hammer-remediable `pr-not-mergeable`.
+// `pr-mergeability-unknown` (retried next tick; on its own never hammered or parked,
+// and alongside a real remediable miss it does not block that miss's hammer
+// fallback), while a real CONFLICTING state reads as hammer-remediable `pr-not-mergeable`.
 // Env-overridable.
 const MERGEABILITY_SAMPLE_ATTEMPTS = Math.max(
   1,
@@ -571,8 +572,13 @@ function daemonGateReasonsHammerRemediable(gateReasons) {
   if (reasons.length === 0) return false;
   // Any non-remediable gate co-occurring → park (fail closed).
   if (reasons.some((r) => DAEMON_HAMMER_NONREMEDIABLE_GATE_REASONS.has(r))) return false;
-  // EVERY gate must be hammer-remediable.
-  return reasons.every((r) => DAEMON_HAMMER_REMEDIABLE_GATE_REASONS.has(r));
+  // DIRTYOWN-01: a transient mergeability read riding along a real remediable
+  // miss says nothing about the head — it must not turn that miss into a park.
+  // A transient-only decline stays non-remediable (retried next tick).
+  const substantive = reasons.filter((r) => r !== 'pr-mergeability-unknown');
+  // EVERY remaining gate must be hammer-remediable.
+  return substantive.length > 0
+    && substantive.every((r) => DAEMON_HAMMER_REMEDIABLE_GATE_REASONS.has(r));
 }
 
 /**
@@ -895,9 +901,10 @@ export async function maybeDispatchAmaClosureFor({
   // `pr-not-mergeable`, so resolving it here decides this tick's route. Only
   // re-sample the actually-unresolved states; BLOCKED/BEHIND/false are already
   // classified enough for this tick and sleeping on them just consumes the
-  // posted-review handler budget.
+  // posted-review handler budget. Classify as the closure gate does, so a raw
+  // UNKNOWN beside a stale `CLEAN` is re-sampled rather than read once.
   let mergeabilityForGate = candidate;
-  const initialMergeability = normalizeGithubMergeability(candidate || {});
+  const initialMergeability = closureGateMergeability(candidate || {});
   if (!initialMergeability || initialMergeability === 'UNKNOWN') {
     throwIfAborted(signal);
     const sampled = await runCoexistenceOperation(
@@ -915,6 +922,7 @@ export async function maybeDispatchAmaClosureFor({
           attempts: MERGEABILITY_SAMPLE_ATTEMPTS,
           delayMs: MERGEABILITY_SAMPLE_DELAY_MS,
           sleepImpl: (ms) => abortableSleep(ms, operationSignal),
+          classify: closureGateMergeability,
         },
       ),
       {
@@ -1910,8 +1918,8 @@ export async function maybeDispatchAmaClosureFor({
           if (live?.isDraft) return { dispatched: false, reason: 'background-pr-draft' };
           // DIRTYOWN-01: a CONFLICTING PR is the hammer's job (it resolves the
           // conflict), so it dispatches. GitHub's transient UNKNOWN waits for the
-          // next cycle; normalize first so UNKNOWN+CLEAN reads as MERGEABLE here
-          // exactly as it does on the eligibility gate path.
+          // next cycle; UNKNOWN+CLEAN launches here because the hammer re-reads
+          // mergeability itself (the eligibility gate stays strict on it).
           const liveMergeability = normalizeGithubMergeability(live || {});
           if (liveMergeability === 'UNKNOWN') {
             return { dispatched: false, reason: 'background-pr-mergeable-unknown', mergeable: 'UNKNOWN' };

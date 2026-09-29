@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  closureGateMergeability,
   normalizeGithubMergeability,
   resolveMergeabilityWithSampling,
 } from '../src/github-mergeability.mjs';
@@ -80,4 +81,28 @@ test('a refetch that throws does not collapse the window; later success still re
   );
   assert.equal(out.resolved, true);
   assert.equal(out.normalized, 'MERGEABLE');
+});
+
+test('DIRTYOWN-01: the closure-gate classifier re-samples a raw UNKNOWN beside CLEAN', async () => {
+  const first = { mergeable: 'UNKNOWN', mergeStateStatus: 'CLEAN' };
+  let refetches = 0;
+  const defaultOut = await resolveMergeabilityWithSampling(
+    first, async () => { refetches += 1; return {}; },
+    { attempts: 3, delayMs: 0, sleepImpl: noSleep },
+  );
+  assert.equal(defaultOut.normalized, 'MERGEABLE', 'the default classifier treats UNKNOWN+CLEAN as settled');
+  assert.equal(refetches, 0);
+
+  const reads = [
+    { mergeable: 'UNKNOWN', mergeStateStatus: 'CLEAN' },
+    { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' },
+  ];
+  let i = 0;
+  const gateOut = await resolveMergeabilityWithSampling(
+    first, async () => reads[i++],
+    { attempts: 4, delayMs: 0, sleepImpl: noSleep, classify: closureGateMergeability },
+  );
+  assert.equal(gateOut.normalized, 'CONFLICTING', 'the gate waits for a raw terminal read');
+  assert.equal(gateOut.samples, 3);
+  assert.equal(gateOut.resolved, true);
 });

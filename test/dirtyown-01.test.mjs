@@ -53,6 +53,14 @@ test('DIRTYOWN-01: UNKNOWN pushes pr-mergeability-unknown and is NOT hammer reme
   assert.equal(remediable, false);
 });
 
+test('DIRTYOWN-01: UNKNOWN beside a real mechanical miss still reaches the hammer', () => {
+  assert.equal(isHammerRemediableEligibilityMiss(['ci-not-green', 'pr-mergeability-unknown'], {}), true);
+  assert.equal(isHammerRemediableEligibilityMiss(['pr-not-mergeable', 'pr-mergeability-unknown'], {}), true);
+  // It never makes a non-mechanical miss actionable.
+  assert.equal(isHammerRemediableEligibilityMiss(['pr-mergeability-unknown', 'verdict-not-settled-success'], {}), false);
+  assert.equal(isHammerRemediableEligibilityMiss(['ci-not-green', 'pr-mergeability-unknown', 'blocking-findings-present'], {}), false);
+});
+
 test('DIRTYOWN-01: daemon clean path refuses UNKNOWN and CONFLICTING with exact reasons', () => {
   assert.deepEqual(evaluateMergeEligibility(eligibleState({ mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' })), {
     eligible: false,

@@ -20,7 +20,10 @@
 //
 // A decline made only of transient GitHub reads (mergeability UNKNOWN, labels
 // unreadable) is logged but never counted (DIRTYOWN-01): it says nothing about
-// the head, so it must not walk a PR toward the park/page escalation.
+// the head, so it must not walk a PR toward the park/page escalation. Its first
+// sighting per head is kept in a sidecar file instead; a head still reading
+// transient past MERGEABILITY_UNKNOWN_STUCK_MS logs one distinct
+// `ama.mergeability_unknown_stuck` event (log only: no park, no page).
 
 import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -33,6 +36,9 @@ import { writeFileAtomic } from './atomic-write.mjs';
 // Same K as the AMA retain-loop cap: the (K+1)th observation escalates.
 export const DAEMON_ROUTE_DISAGREEMENT_BOUND = 3;
 export const DAEMON_ROUTE_DISAGREEMENT_REASON = 'daemon-route-disagreement';
+// Wall-clock a head may keep declining only on transient reads before the
+// watcher logs it as stuck. GitHub settles mergeability in seconds to minutes.
+export const MERGEABILITY_UNKNOWN_STUCK_MS = 30 * 60 * 1000;
 
 const SCHEMA_VERSION = 1;
 
@@ -49,6 +55,10 @@ export function daemonRouteDisagreementFilePath(rootDir, { repo, prNumber } = {}
   // Keyed per PR; the head lives inside the doc so a new head resets the count
   // without leaving one file per head behind.
   return join(ledgerDir(rootDir), `${safeRepo}-pr-${Number(prNumber)}.json`);
+}
+
+export function daemonRouteTransientReadFilePath(rootDir, identity = {}) {
+  return daemonRouteDisagreementFilePath(rootDir, identity).replace(/\.json$/, '.transient.json');
 }
 
 function normalizeHead(value) {
@@ -150,10 +160,63 @@ export function clearDaemonRouteDisagreement(rootDir, identity) {
   if (!rootDir) return false;
   try {
     rmSync(daemonRouteDisagreementFilePath(rootDir, identity), { force: true });
+    rmSync(daemonRouteTransientReadFilePath(rootDir, identity), { force: true });
     return true;
   } catch {
     return false;
   }
+}
+
+/**
+ * Note one transient-only decline on `headSha` and report how long this head has
+ * been reading transient. A new head restarts the clock. `stuck` is true once
+ * the head has read transient past `stuckMs`; `emitStuck` is true only on the
+ * first such observation per head, so the stuck event is logged once.
+ * Best-effort like the main ledger: an unreadable or unwritable file restarts
+ * the clock rather than failing the tick.
+ */
+export function noteDaemonRouteTransientRead(rootDir, identity, {
+  headSha,
+  now = new Date().toISOString(),
+  stuckMs = MERGEABILITY_UNKNOWN_STUCK_MS,
+  logger = console,
+} = {}) {
+  const head = normalizeHead(headSha);
+  if (!head || !rootDir) return { firstObservedAt: null, elapsedMs: 0, stuck: false, emitStuck: false };
+  const filePath = daemonRouteTransientReadFilePath(rootDir, identity);
+  let existing = null;
+  try {
+    existing = JSON.parse(readFileSync(filePath, 'utf8'));
+  } catch (err) {
+    if (err?.code !== 'ENOENT') {
+      logger?.warn?.(`[daemon-route-disagreement] unreadable transient ledger ${filePath}; restarting the clock`);
+    }
+  }
+  const sameHead = Boolean(existing) && normalizeHead(existing.headSha) === head;
+  const firstObservedAt = (sameHead && existing.firstObservedAt) || now;
+  const elapsedMs = Math.max(0, Date.parse(now) - Date.parse(firstObservedAt)) || 0;
+  const stuck = elapsedMs >= stuckMs;
+  const alreadyReported = sameHead && Boolean(existing.stuckReportedAt);
+  const emitStuck = stuck && !alreadyReported;
+  const doc = {
+    schemaVersion: SCHEMA_VERSION,
+    repo: identity.repo,
+    prNumber: Number(identity.prNumber),
+    headSha: head,
+    firstObservedAt,
+    lastObservedAt: now,
+    stuckReportedAt: alreadyReported ? existing.stuckReportedAt : (emitStuck ? now : null),
+  };
+  try {
+    mkdirSync(ledgerDir(rootDir), { recursive: true });
+    writeFileAtomic(filePath, `${JSON.stringify(doc, null, 2)}\n`);
+  } catch (err) {
+    logger?.warn?.(
+      `[daemon-route-disagreement] transient ledger write failed for ${identity.repo}#${identity.prNumber}: ` +
+        `${err?.message || err}`,
+    );
+  }
+  return { firstObservedAt, elapsedMs, stuck, emitStuck };
 }
 
 /**
@@ -213,6 +276,7 @@ export function observeDaemonRouteDisagreement({
   hammerRemediable,
   transientRead = false,
   bound = DAEMON_ROUTE_DISAGREEMENT_BOUND,
+  stuckMs = MERGEABILITY_UNKNOWN_STUCK_MS,
   recordParkImpl = null,
   now = new Date().toISOString(),
   logger = console,
@@ -223,14 +287,21 @@ export function observeDaemonRouteDisagreement({
     // (mergeability UNKNOWN, labels unreadable). That says nothing about the
     // head, so log it but never count it: repeated transient reads under a
     // moving base must not reach the park/page escalation.
-    const prior = readDaemonRouteDisagreement(rootDir, { repo, prNumber }, { headSha, bound, logger });
+    // Always the caller's head: the reader already reports 0 for a ledger
+    // written against another head, and the log must name the head observed.
+    const head = normalizeHead(headSha);
+    const prior = readDaemonRouteDisagreement(rootDir, { repo, prNumber }, { headSha: head, bound, logger });
+    const count = prior.headSha === head ? prior.count : 0;
+    const transient = noteDaemonRouteTransientRead(rootDir, { repo, prNumber }, {
+      headSha: head, now, stuckMs, logger,
+    });
     logger?.log?.(JSON.stringify({
       schemaVersion: 1,
       event: 'ama.daemon_route_disagreement',
       repo,
       pr: prNumber,
-      headSha: prior.headSha,
-      disagreements: prior.count,
+      headSha: head,
+      disagreements: count,
       bound,
       ...decline,
       hammerRemediable: false,
@@ -238,13 +309,36 @@ export function observeDaemonRouteDisagreement({
       escalation: null,
     }));
     logger?.warn?.(
-      `[watcher] AMA closer routed ${repo}#${prNumber}@${String(prior.headSha || headSha || 'unknown').slice(0, 12)} ` +
+      `[watcher] AMA closer routed ${repo}#${prNumber}@${String(head || 'unknown').slice(0, 12)} ` +
         `to the daemon (daemon-clean-route) but the daemon declined on a transient GitHub read: ` +
         `${decline.daemonDisposition || 'no-result'} ${decline.daemonReason}` +
         (decline.daemonReasons.length ? `; gates=${decline.daemonReasons.join(',')}` : '') +
         ' — not counted; the next tick re-reads',
     );
-    return { count: prior.count, bound, escalate: false, headSha: prior.headSha, transientRead: true, parkResult: null };
+    if (transient.emitStuck) {
+      // Distinct from the manual-close page on purpose: a head stuck on
+      // transient reads is an observability signal, not an operator park.
+      logger?.log?.(JSON.stringify({
+        schemaVersion: 1,
+        event: 'ama.mergeability_unknown_stuck',
+        repo,
+        pr: prNumber,
+        headSha: head,
+        firstObservedAt: transient.firstObservedAt,
+        elapsedMs: transient.elapsedMs,
+        stuckMs,
+        ...decline,
+      }));
+    }
+    return {
+      count,
+      bound,
+      escalate: false,
+      headSha: head,
+      transientRead: true,
+      stuck: transient.stuck,
+      parkResult: null,
+    };
   }
   const recorded = recordDaemonRouteDisagreement(rootDir, { repo, prNumber }, {
     headSha,

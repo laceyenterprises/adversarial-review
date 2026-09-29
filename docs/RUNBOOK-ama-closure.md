@@ -399,7 +399,9 @@ regressions and broken contracts blocking.
 - **No findings.** The normal clean path (`no-remediation-required`).
 - **Findings.** The follow-up job is stopped `max-rounds-reached` with no
   remediation worker and no re-review, and the existing ROUNDCAP / terminal
-  hammer handoff closes the PR. Security-surface PRs never reach this lane,
+  hammer handoff closes the PR. This includes a `Comment only` verdict with
+  non-blocking findings: the single review replaces the comment-only
+  final-round worker, so the hammer owns those findings too. Security-surface PRs never reach this lane,
   because they are refused below and queue for Argus as before.
 
 **What counts as super-small.** Either of these:
@@ -414,6 +416,10 @@ regressions and broken contracts blocking.
   - `src/{watcher,reviewer,review-state,process-group-spawn,reviewer-reattach,reviewer-cascade}.mjs`;
   - `src/kernel/`, `src/adapters/`;
   - launchd templates and `.plist`, `scripts/`, `bin/`;
+  - the `tools/adversarial-review` submodule mount and `.gitmodules`;
+- any submodule pointer bump (a gitlink: mode `160000` or `Subproject commit`);
+- any rename, copy or file-mode change. Every path rule also runs against a
+  rename's pre-image path;
 - migrations (`alembic/`, `migrations/`, `versions/*.py`, `*.sql`);
 - secret, credential and auth paths;
 - sensitive surfaces from `security-surface-classifier.mjs`;
@@ -433,14 +439,27 @@ ledger then counts that stop as `maxRounds` completed rounds, which gives two
 things:
 
 - the terminal Hammer's "the remediator had a turn" check passes;
-- a later author push is re-reviewed once at the `last` stage, the same as any
-  budget-exhausted PR, instead of earning a fresh budget.
+- a later author push that is still super-small is re-reviewed once at the
+  `last` stage, the same as any budget-exhausted PR, instead of earning a fresh
+  budget.
+
+A later push that makes the PR's full diff no longer qualify voids the credit.
+For example, a small first push followed by a change to `src/watcher.mjs`. The
+reviewer re-classifies every non-`first`-stage review. When the PR no longer
+qualifies, it writes
+`data/follow-up-jobs/single-review-voids/<domain>--<repo>-pr-<n>.json`. The
+ledger then stops counting the earlier single-review stop, the review re-stages
+(normally to `first`), and the PR gets its normal tier budget. The reviewer log
+shows
+`single-review: voided <repo>#<n> credit — head no longer super-small (<codes>)`
+and `Effective prompt stage for <repo>#<n>: …`.
 
 Knobs, all under `roles.adversarial.single_review`:
 
 | Key | Default | Effect |
 |---|---|---|
 | `enabled` | `true` | `false` restores normal rounds for every PR. |
+| env `ADVERSARIAL_REVIEW_SINGLE_REVIEW_ENABLED` | unset | `false`/`0`/`off` disables the lane, and `true`/`1`/`on` enables it. It overrides `enabled`. **Use this as the kill switch** until the key below is registered in every loader. |
 | `max_changed_lines` | `50` | Changed-line ceiling for the any-path rule. |
 | `max_files` | `5` | File ceiling for the any-path rule. |
 | `docs_tests_follow_slim_limits` | `true` | Docs/tests-only PRs qualify up to the slim limits. |

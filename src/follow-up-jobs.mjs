@@ -1668,6 +1668,12 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
   const commentOnlyFinalRoundPushedHeads = [];
   let latestJob = null;
   let latestTimestamp = '';
+  // SINGLEREVIEW-01: single-review stops created at or before the PR's latest
+  // void no longer spend budget (see `voidSingleReviewCredit`).
+  const singleReviewVoidedAt = readSingleReviewVoid(rootDir, {
+    domainId: targetDomainId, repo: targetRepo, prNumber: targetPr,
+  })?.voidedAt || null;
+  const singleReviewStopJobIds = [];
   // COMMENTCLOSE-01: a final round is final whatever directory it lands in.
   // A stopped final round that pushed still owns its pushed head, so the
   // re-review suppression and the closer hand-off read it from every terminal
@@ -1763,7 +1769,12 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
         // terminal Hammer's "remediator had a turn" check reads 0 and parks
         // the PR, and a later author push re-arms a full budget. It is not a
         // remediation of the reviewed head, so no trigger or revision ref.
-        if (neverSpawned && isSingleReviewStop(job)) {
+        // A stop created at or before a recorded void counts for nothing: a
+        // later head outgrew the super-small lane and got its budget back.
+        const singleReviewVoided = singleReviewVoidedAt
+          && String(job?.createdAt || '') <= singleReviewVoidedAt;
+        if (neverSpawned && isSingleReviewStop(job) && !singleReviewVoided) {
+          if (job?.jobId) singleReviewStopJobIds.push(job.jobId);
           const cur = Number(job?.remediationPlan?.currentRound || 0);
           const terminalAt = job?.stoppedAt || null;
           if (Number.isFinite(cur) && cur > 0 && terminalAt) completedRoundTimestamps.push({ round: cur, terminalAt });
@@ -1841,6 +1852,81 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
     completedRemediationRevisionRefs: Array.from(completedRemediationRevisionRefs).sort(),
     commentOnlyFinalRoundRevisionRefs: Array.from(commentOnlyFinalRoundRevisionRefs).sort(),
     commentOnlyFinalRoundPushedHeads,
+    // SINGLEREVIEW-01: unvoided single-review stops still spending budget.
+    singleReviewStopJobIds,
+    singleReviewVoidedAt,
+  };
+}
+
+// SINGLEREVIEW-01 — the per-PR single-review void marker.
+//
+// The super-small classifier only sees the PR's first diff. A later push that
+// grows the PR into a never-qualifies surface (gate-keeper, auth, migrations,
+// workflows, …) must not inherit the spent budget, or splitting a change —
+// open small, push the sensitive part — would bypass the operator's list. A
+// separate marker, rather than rewriting the stopped job, keeps this off the
+// claim's pending→in-progress rename path; the ledger compares it against each
+// single-review stop's `createdAt`, so a later single-review job still counts.
+function singleReviewVoidPath(rootDir, { domainId = 'code-pr', repo, prNumber }) {
+  return join(
+    rootDir, 'data', 'follow-up-jobs', 'single-review-voids',
+    `${sanitizeRepo(String(domainId || 'code-pr'))}--${sanitizeRepo(repo)}-pr-${Number(prNumber)}.json`,
+  );
+}
+
+function readSingleReviewVoid(rootDir, { domainId = 'code-pr', repo, prNumber }) {
+  const path = singleReviewVoidPath(rootDir, { domainId, repo, prNumber });
+  if (!existsSync(path)) return null;
+  try {
+    const record = JSON.parse(readFileSync(path, 'utf8'));
+    return typeof record?.voidedAt === 'string' && record.voidedAt ? record : null;
+  } catch (err) {
+    console.warn(`[follow-up-jobs] Ignoring unreadable single-review void ${path}: ${err?.message || err}`);
+    return null;
+  }
+}
+
+/**
+ * Give a PR its tier budget back when a later head no longer qualifies as
+ * super-small. No-op (`voided: false`) when the ledger holds no unvoided
+ * single-review stop. Returns the post-void completed-round count so the
+ * caller can re-stage the review it is about to run.
+ */
+function voidSingleReviewCredit({
+  rootDir,
+  domainId = 'code-pr',
+  repo,
+  prNumber,
+  headSha = null,
+  reasons = [],
+  voidedAt = new Date().toISOString(),
+} = {}) {
+  const before = summarizePRRemediationLedger(rootDir, { domainId, repo, prNumber });
+  if (!before.singleReviewStopJobIds?.length) {
+    return { voided: false, completedRoundsForPR: before.completedRoundsForPR };
+  }
+  const path = singleReviewVoidPath(rootDir, { domainId, repo, prNumber });
+  const prior = readSingleReviewVoid(rootDir, { domainId, repo, prNumber });
+  const entry = {
+    voidedAt,
+    headSha: headSha || null,
+    reasons: (reasons || []).map((reason) => reason?.code).filter(Boolean),
+    jobIds: before.singleReviewStopJobIds,
+  };
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileAtomic(path, `${JSON.stringify({
+    domainId: String(domainId || 'code-pr'),
+    repo,
+    prNumber: Number(prNumber),
+    voidedAt,
+    history: [...(Array.isArray(prior?.history) ? prior.history : []), entry].slice(-10),
+  }, null, 2)}\n`);
+  const after = summarizePRRemediationLedger(rootDir, { domainId, repo, prNumber });
+  return {
+    voided: true,
+    jobIds: entry.jobIds,
+    previousCompletedRounds: before.completedRoundsForPR,
+    completedRoundsForPR: after.completedRoundsForPR,
   };
 }
 
@@ -3339,6 +3425,8 @@ export {
   isSettledReviewJob,
   isSingleReviewJob,
   isSingleReviewStop,
+  readSingleReviewVoid,
+  voidSingleReviewCredit,
   listFollowUpJobsInDir,
   listInProgressFollowUpJobPaths,
   listInProgressFollowUpJobs,

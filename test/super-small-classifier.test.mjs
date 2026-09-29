@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   SINGLE_REVIEW_DEFAULTS,
+  SINGLE_REVIEW_ENABLED_ENV,
   SUPER_SMALL_BASIS,
   SUPER_SMALL_REFUSAL,
   classifySuperSmall,
@@ -254,4 +255,111 @@ test('resolveSingleReviewPolicy reads the config knobs and fails closed to disab
   });
   assert.equal(broken.enabled, false);
   assert.match(broken.configError, /unreadable/);
+});
+
+test('a submodule pointer bump never qualifies, from a real gitlink diff', () => {
+  const diff = [
+    'diff --git a/tools/adversarial-review b/tools/adversarial-review',
+    'index 1111111..2222222 160000',
+    '--- a/tools/adversarial-review',
+    '+++ b/tools/adversarial-review',
+    '@@ -1 +1 @@',
+    '-Subproject commit 1111111111111111111111111111111111111111',
+    '+Subproject commit 2222222222222222222222222222222222222222',
+    '',
+  ].join('\n');
+  const decision = classifySuperSmallForDiff({ diff, policy: policy() });
+  assert.equal(decision.superSmall, false);
+  assert.deepEqual(codes(decision), [SUPER_SMALL_REFUSAL.GITLINK_CHANGE, SUPER_SMALL_REFUSAL.GATE_KEEPER_PATH]);
+
+  // Any other submodule's gitlink refuses too, on the entry facts alone.
+  const other = classifySuperSmallForDiff({
+    diff: diff.replaceAll('tools/adversarial-review', 'vendor/libfoo'),
+    policy: policy(),
+  });
+  assert.deepEqual(codes(other), [SUPER_SMALL_REFUSAL.GITLINK_CHANGE]);
+
+  const added = classifySuperSmallForDiff({
+    diff: [
+      'diff --git a/vendor/libfoo b/vendor/libfoo',
+      'new file mode 160000',
+      'index 0000000..2222222',
+      '--- /dev/null',
+      '+++ b/vendor/libfoo',
+      '@@ -0,0 +1 @@',
+      '+Subproject commit 2222222222222222222222222222222222222222',
+      '',
+    ].join('\n'),
+    policy: policy(),
+  });
+  assert.ok(codes(added).includes(SUPER_SMALL_REFUSAL.GITLINK_CHANGE));
+});
+
+test('.gitmodules is a gate-keeper path', () => {
+  const decision = classifySuperSmallForDiff({
+    diff: unifiedDiff([{ path: '.gitmodules', added: 1, removed: 1 }]),
+    policy: policy(),
+  });
+  assert.equal(decision.superSmall, false);
+  assert.ok(codes(decision).includes(SUPER_SMALL_REFUSAL.GATE_KEEPER_PATH));
+});
+
+test('renames are refused and classified by both paths', () => {
+  const rename = (from, to) => [
+    `diff --git a/${from} b/${to}`,
+    'similarity index 100%',
+    `rename from ${from}`,
+    `rename to ${to}`,
+    '',
+  ].join('\n');
+
+  const workflow = classifySuperSmallForDiff({ diff: rename('.github/workflows/ci.yml', '.github/ci.yml.disabled'), policy: policy() });
+  assert.equal(workflow.superSmall, false);
+  assert.ok(codes(workflow).includes(SUPER_SMALL_REFUSAL.RENAME_OR_COPY));
+  assert.ok(codes(workflow).includes(SUPER_SMALL_REFUSAL.WORKFLOW_PATH));
+  assert.equal(workflow.reasons.find((r) => r.code === SUPER_SMALL_REFUSAL.WORKFLOW_PATH).path, '.github/workflows/ci.yml');
+
+  const gateKeeper = classifySuperSmallForDiff({ diff: rename('src/watcher.mjs', 'src/watcher-old.mjs'), policy: policy() });
+  assert.ok(codes(gateKeeper).includes(SUPER_SMALL_REFUSAL.GATE_KEEPER_PATH));
+  assert.ok(codes(gateKeeper).includes(SUPER_SMALL_REFUSAL.RENAME_OR_COPY));
+
+  const innocuous = classifySuperSmallForDiff({ diff: rename('src/pr-comments.mjs', 'src/pr-comment.mjs'), policy: policy() });
+  assert.deepEqual(codes(innocuous), [SUPER_SMALL_REFUSAL.RENAME_OR_COPY]);
+
+  // The pre-image path is honoured when a caller passes changed files directly.
+  const direct = classifySuperSmall({
+    changedFiles: [{ path: 'docs/notes.sql.md', oldPath: 'migrations/0001_init.sql', added: 1 }],
+    policy: policy(),
+  });
+  assert.ok(codes(direct).includes(SUPER_SMALL_REFUSAL.MIGRATION_PATH));
+});
+
+test('copies and mode changes are refused', () => {
+  const copy = classifySuperSmallForDiff({
+    diff: [
+      'diff --git a/src/pr-comments.mjs b/src/pr-comments-copy.mjs',
+      'similarity index 100%',
+      'copy from src/pr-comments.mjs',
+      'copy to src/pr-comments-copy.mjs',
+      '',
+    ].join('\n'),
+    policy: policy(),
+  });
+  assert.deepEqual(codes(copy), [SUPER_SMALL_REFUSAL.RENAME_OR_COPY]);
+
+  const mode = classifySuperSmallForDiff({
+    diff: ['diff --git a/src/pr-comments.mjs b/src/pr-comments.mjs', 'old mode 100644', 'new mode 100755', ''].join('\n'),
+    policy: policy(),
+  });
+  assert.deepEqual(codes(mode), [SUPER_SMALL_REFUSAL.MODE_CHANGE]);
+});
+
+test(`${SINGLE_REVIEW_ENABLED_ENV} overrides the config enabled key`, () => {
+  const loadRoleConfigImpl = () => ({ get: (_key, fallback) => fallback });
+  assert.equal(resolveSingleReviewPolicy({ env: { [SINGLE_REVIEW_ENABLED_ENV]: 'false' }, loadRoleConfigImpl }).enabled, false);
+  assert.equal(resolveSingleReviewPolicy({ env: { [SINGLE_REVIEW_ENABLED_ENV]: '0' }, loadRoleConfigImpl }).enabled, false);
+  assert.equal(resolveSingleReviewPolicy({ env: { [SINGLE_REVIEW_ENABLED_ENV]: 'garbage' }, loadRoleConfigImpl }).enabled, true);
+  const configOff = () => ({ get: (key, fallback) => (key.endsWith('.enabled') ? false : fallback) });
+  assert.equal(resolveSingleReviewPolicy({ env: { [SINGLE_REVIEW_ENABLED_ENV]: 'true' }, loadRoleConfigImpl: configOff }).enabled, true);
+  assert.equal(resolveSingleReviewPolicy({ env: {}, loadRoleConfigImpl: configOff }).enabled, false);
 });

@@ -334,11 +334,11 @@ export function generatedChurnMarkerForPath(entry) {
 // Diff parsing.
 // ---------------------------------------------------------------------------
 
-function isBinaryPatch(patch) {
+export function isBinaryPatch(patch) {
   return /^GIT binary patch$|^Binary files .* differ$/m.test(String(patch || ''));
 }
 
-function countPatchLines(patch) {
+export function countPatchLines(patch) {
   let added = 0;
   let removed = 0;
   // Count only inside hunks. Skipping everything before the first `@@` drops the

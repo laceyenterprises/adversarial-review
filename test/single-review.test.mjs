@@ -11,6 +11,7 @@ import {
   getFollowUpJobDir,
   isSingleReviewJob,
   isSingleReviewStop,
+  readSingleReviewVoid,
   summarizePRRemediationLedger,
 } from '../src/follow-up-jobs.mjs';
 import { terminalHammerReviewCycleExhausted } from '../src/ama/dispatch-closer.mjs';
@@ -293,6 +294,109 @@ test('the reviewer-pass reaper carries the dead reviewer\'s single-review decisi
   const job = createdJob(rootDir);
   assert.equal(job.singleReview.applied, true);
   assert.equal(job.remediationPlan.currentRound, job.remediationPlan.maxRounds);
+});
+
+test('a later head that grows into a gate-keeper path voids the single-review credit and gets its budget back', (t) => {
+  const rootDir = tempRoot(t);
+  createFollowUpJob(jobInput(rootDir, { singleReview: APPLIED }));
+  const stopped = claimNextFollowUpJob({ rootDir, claimedAt: '2026-09-29T10:01:00.000Z', launcherPid: 4242, returnStopped: true });
+  assert.equal(isSingleReviewStop(stopped.job), true);
+  const maxRounds = stopped.job.remediationPlan.maxRounds;
+  const spent = summarizePRRemediationLedger(rootDir, { repo: REPO, prNumber: PR });
+  assert.equal(spent.completedRoundsForPR, maxRounds);
+  assert.deepEqual(spent.singleReviewStopJobIds, [stopped.job.jobId]);
+
+  // The author pushes a gate-keeper change. The watcher stages that head as
+  // the owed post-budget review (`last`); the reviewer re-classifies it.
+  const laterHead = 'a'.repeat(40);
+  const stageContext = { reviewAttemptNumber: 2, maxRemediationRounds: maxRounds };
+  const base = {
+    rootDir, repo: REPO, prNumber: PR, headSha: laterHead, attemptNumber: 2, env: {},
+    recordReviewModeSelectedImpl: () => ({ recorded: false }), resolveSingleReviewPolicyImpl: policyImpl(),
+    log: SILENT_LOG, stageContext,
+  };
+  const grown = selectReviewMode({
+    ...base,
+    diff: unifiedDiff([
+      { path: 'src/pr-comments.mjs', added: 5, removed: 3 },
+      { path: 'src/watcher.mjs', added: 2, removed: 1 },
+    ]),
+    promptStage: 'last',
+  });
+  assert.equal(grown.singleReview.applied, false);
+  assert.equal(grown.singleReview.voided.voided, true);
+  assert.deepEqual(grown.singleReview.voided.jobIds, [stopped.job.jobId]);
+  assert.equal(grown.promptStage, 'first');
+
+  const ledger = summarizePRRemediationLedger(rootDir, { repo: REPO, prNumber: PR });
+  assert.equal(ledger.completedRoundsForPR, 0);
+  assert.deepEqual(ledger.singleReviewStopJobIds, []);
+  assert.equal(readSingleReviewVoid(rootDir, { repo: REPO, prNumber: PR }).history[0].headSha, laterHead);
+  assert.equal(terminalHammerArmed(rootDir, { maxRounds }).armed, false);
+
+  // The follow-up for that review gets the full tier budget.
+  const queued = queueFollowUpForPostedReview({
+    rootDir, repo: REPO, prNumber: PR, baseBranch: 'main', reviewerModel: 'claude', revisionRef: laterHead,
+    reviewText: FINDINGS_BODY, reviewPostedAt: '2026-09-29T11:00:00.000Z', singleReview: grown.singleReview,
+    resolveHandoffConfigImpl: () => ({ enabled: false }),
+  });
+  assert.equal(queued.queued, true);
+  const next = claimNextFollowUpJob({ rootDir, claimedAt: '2026-09-29T11:01:00.000Z', launcherPid: 4242, returnStopped: true });
+  assert.notEqual(next.stopped, true);
+  assert.equal(next.job.remediationPlan.currentRound, 1);
+});
+
+test('a later head that is still super-small keeps the budget spent; a first review never voids', (t) => {
+  const rootDir = tempRoot(t);
+  createFollowUpJob(jobInput(rootDir, { singleReview: APPLIED }));
+  claimNextFollowUpJob({ rootDir, claimedAt: '2026-09-29T10:01:00.000Z', launcherPid: 4242, returnStopped: true });
+  const voids = [];
+  const voidSingleReviewCreditImpl = (args) => { voids.push(args); return { voided: false }; };
+  const still = selectReviewMode({
+    rootDir, repo: REPO, prNumber: PR, headSha: HEAD, attemptNumber: 2, env: {}, diff: TWELVE_LINE_FIX,
+    promptStage: 'last', recordReviewModeSelectedImpl: () => ({ recorded: false }),
+    resolveSingleReviewPolicyImpl: policyImpl(), voidSingleReviewCreditImpl, log: SILENT_LOG,
+    stageContext: { reviewAttemptNumber: 2, maxRemediationRounds: 3 },
+  });
+  assert.equal(still.promptStage, 'last');
+  assert.equal(still.singleReview.voided, undefined);
+  selectReviewMode({
+    rootDir, repo: REPO, prNumber: PR, headSha: HEAD, attemptNumber: 1, env: {},
+    diff: unifiedDiff([{ path: 'src/watcher.mjs', added: 2 }]),
+    promptStage: 'first', recordReviewModeSelectedImpl: () => ({ recorded: false }),
+    resolveSingleReviewPolicyImpl: policyImpl(), voidSingleReviewCreditImpl, log: SILENT_LOG,
+  });
+  assert.deepEqual(voids, []);
+  assert.ok(summarizePRRemediationLedger(rootDir, { repo: REPO, prNumber: PR }).completedRoundsForPR > 0);
+});
+
+test('a single-review job created after a void spends budget again', (t) => {
+  const rootDir = tempRoot(t);
+  createFollowUpJob(jobInput(rootDir, { singleReview: APPLIED }));
+  claimNextFollowUpJob({ rootDir, claimedAt: '2026-09-29T10:01:00.000Z', launcherPid: 4242, returnStopped: true });
+  selectReviewMode({
+    rootDir, repo: REPO, prNumber: PR, headSha: 'b'.repeat(40), attemptNumber: 2, env: {},
+    diff: unifiedDiff([{ path: 'src/watcher.mjs', added: 2 }]), promptStage: 'last',
+    recordReviewModeSelectedImpl: () => ({ recorded: false }), resolveSingleReviewPolicyImpl: policyImpl(), log: SILENT_LOG,
+  });
+  assert.equal(summarizePRRemediationLedger(rootDir, { repo: REPO, prNumber: PR }).completedRoundsForPR, 0);
+  const later = new Date(Date.now() + 60_000).toISOString();
+  createFollowUpJob(jobInput(rootDir, { revisionRef: 'c'.repeat(40), reviewPostedAt: later, singleReview: APPLIED }));
+  const stopped = claimNextFollowUpJob({ rootDir, claimedAt: later, launcherPid: 4242, returnStopped: true });
+  assert.equal(isSingleReviewStop(stopped.job), true);
+  assert.equal(
+    summarizePRRemediationLedger(rootDir, { repo: REPO, prNumber: PR }).completedRoundsForPR,
+    stopped.job.remediationPlan.maxRounds,
+  );
+});
+
+test('a slim-classification failure never applies single review', () => {
+  const decision = selectSingleReview({
+    repo: REPO, prNumber: PR, diff: TWELVE_LINE_FIX, headSha: HEAD, promptStage: 'first', env: {},
+    allowApply: false, resolveSingleReviewPolicyImpl: policyImpl(), log: SILENT_LOG,
+  });
+  assert.equal(decision.superSmall, true);
+  assert.equal(decision.applied, false);
 });
 
 function createdJob(rootDir) {

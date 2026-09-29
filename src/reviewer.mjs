@@ -2003,6 +2003,7 @@ async function main() {
       : Number(reviewAttemptNumber),
     reviewerModel,
     promptStage: reviewerPromptStage,
+    stageContext: { reviewAttemptNumber, maxRemediationRounds },
     logStructuredEventImpl: logStructuredEvent,
     log: console,
   });

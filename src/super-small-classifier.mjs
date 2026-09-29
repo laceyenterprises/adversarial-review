@@ -23,8 +23,9 @@ import {
   FORCE_FULL_REVIEW_LABEL,
   LOW_RISK_CLASS,
   SLIM_REVIEW_FORCE_FULL_ENV,
-  changedFilesFromDiff,
+  countPatchLines,
   hasForceFullReviewLabel,
+  isBinaryPatch,
   lowRiskClassForPath,
   resolveSlimReviewPolicy,
 } from './slim-review-eligibility.mjs';
@@ -32,8 +33,14 @@ import {
   manifestEcosystemForPath,
   sensitiveCategoriesForPath,
 } from './security-surface-classifier.mjs';
+import { parseDiffFiles } from './reviewer-util.mjs';
 
 export const SINGLE_REVIEW_CONFIG_KEY = 'roles.adversarial.single_review';
+
+// Interim kill switch. The config key is registered in the JS loader only, so
+// the strict Python and shell loaders reject it until agent-os registers it;
+// this env var turns the lane off (or back on) without touching config.yaml.
+export const SINGLE_REVIEW_ENABLED_ENV = 'ADVERSARIAL_REVIEW_SINGLE_REVIEW_ENABLED';
 
 export const SINGLE_REVIEW_DEFAULTS = Object.freeze({
   enabled: true,
@@ -62,14 +69,24 @@ export const SUPER_SMALL_REFUSAL = Object.freeze({
   DEPENDENCY_MANIFEST: 'dependency-manifest',
   OPERATOR_DENIED_PREFIX: 'operator-denied-prefix',
   BINARY_CHANGE: 'binary-change',
+  // Structural diff entries. A submodule pointer bump shows two SHA lines while
+  // shipping any amount of change; a rename or copy moves a file out of (or
+  // into) a protected path; a mode change can make a file executable. None is
+  // a "small code fix", so each refuses outright.
+  GITLINK_CHANGE: 'submodule-gitlink-change',
+  RENAME_OR_COPY: 'rename-or-copy',
+  MODE_CHANGE: 'file-mode-change',
 });
 
 // The adversarial-review gate-keeper surface (agent-os AGENTS.md): the files
 // that ARE the gate of every other PR. Matched against the repo-relative path
 // and against the same path under the `tools/adversarial-review/` submodule
 // mount, so a PR against agent-os that touches the submodule copy is refused
-// the same way.
+// the same way. The mount itself (the gitlink entry a pointer bump produces)
+// and `.gitmodules` are gate-keeper paths too.
 const GATE_KEEPER_PATTERNS = Object.freeze([
+  /^tools\/adversarial-review$/,
+  /(?:^|\/)\.gitmodules$/,
   /^src\/(?:watcher|reviewer|review-state|process-group-spawn|reviewer-reattach|reviewer-cascade)\.mjs$/,
   /^src\/kernel\//,
   /^src\/adapters\//,
@@ -122,6 +139,30 @@ function matchesAny(patterns, path) {
   return pathVariants(path).some((variant) => patterns.some((pattern) => pattern.test(variant)));
 }
 
+// Facts read from a file's diff entry beyond its line counts. The header
+// (everything before the first `@@`) carries rename/copy/mode lines; a gitlink
+// shows as mode 160000 in the header or `Subproject commit` lines in the body.
+function diffEntryFacts(patch) {
+  const text = String(patch || '');
+  const firstHunk = text.search(/^@@/m);
+  const header = firstHunk === -1 ? text : text.slice(0, firstHunk);
+  return {
+    gitlink: /^(?:new file mode|deleted file mode|old mode|new mode) 160000\b/m.test(header)
+      || /^index [0-9a-f]+\.\.[0-9a-f]+ 160000\b/m.test(header)
+      || /^[-+]Subproject commit /m.test(text),
+    renamed: /^(?:rename from|rename to) /m.test(header),
+    copied: /^(?:copy from|copy to) /m.test(header),
+    modeChanged: /^(?:old mode|new mode) /m.test(header),
+  };
+}
+
+function parseBooleanEnv(raw) {
+  const value = String(raw ?? '').trim().toLowerCase();
+  if (['0', 'false', 'no', 'off'].includes(value)) return false;
+  if (['1', 'true', 'yes', 'on'].includes(value)) return true;
+  return null;
+}
+
 function toPositiveInt(value, fallback) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
@@ -143,6 +184,7 @@ function toPositiveInt(value, fallback) {
  */
 export function resolveSingleReviewPolicy({ env = process.env, loadRoleConfigImpl = loadRoleConfig } = {}) {
   const slim = resolveSlimReviewPolicy(env);
+  const envEnabled = parseBooleanEnv(env?.[SINGLE_REVIEW_ENABLED_ENV]);
   const base = {
     slimMaxFiles: slim.maxFiles,
     slimMaxChangedLines: slim.maxChangedLines,
@@ -154,12 +196,13 @@ export function resolveSingleReviewPolicy({ env = process.env, loadRoleConfigImp
     const get = (key, fallback) => config.get(`${SINGLE_REVIEW_CONFIG_KEY}.${key}`, fallback);
     return {
       ...base,
-      enabled: get('enabled', SINGLE_REVIEW_DEFAULTS.enabled) === true,
+      enabled: envEnabled ?? (get('enabled', SINGLE_REVIEW_DEFAULTS.enabled) === true),
       maxChangedLines: toPositiveInt(get('max_changed_lines', SINGLE_REVIEW_DEFAULTS.maxChangedLines), SINGLE_REVIEW_DEFAULTS.maxChangedLines),
       maxFiles: toPositiveInt(get('max_files', SINGLE_REVIEW_DEFAULTS.maxFiles), SINGLE_REVIEW_DEFAULTS.maxFiles),
       docsTestsFollowSlimLimits: get('docs_tests_follow_slim_limits', SINGLE_REVIEW_DEFAULTS.docsTestsFollowSlimLimits) === true,
     };
   } catch (err) {
+    // A config error keeps normal rounds even if the env var says enabled.
     return { ...base, ...SINGLE_REVIEW_DEFAULTS, enabled: false, configError: String(err?.message || err) };
   }
 }
@@ -172,7 +215,9 @@ export function resolveSingleReviewPolicy({ env = process.env, loadRoleConfigImp
  * record say which rule decided.
  *
  * @param {object} input
- * @param {Array<{path: string, added?: number, removed?: number, binary?: boolean}>|null} [input.changedFiles]
+ * @param {Array<{path: string, oldPath?: string, added?: number, removed?: number, binary?: boolean, gitlink?: boolean, renamed?: boolean, copied?: boolean, modeChanged?: boolean}>|null} [input.changedFiles]
+ *   `oldPath` is the pre-image path of a rename or copy; every path rule runs
+ *   against both sides.
  * @param {Array<string|{name?: string}>} [input.labels]
  * @param {object} [input.policy]  From {@link resolveSingleReviewPolicy}.
  * @returns {{superSmall: boolean, basis: string|null, reasons: Array<object>, stats: {files: number, added: number, removed: number, changedLines: number}}}
@@ -192,9 +237,14 @@ export function classifySuperSmall({ changedFiles = null, labels = [], policy = 
         .map((file) => (typeof file === 'string' ? { path: file } : file))
         .map((file) => ({
           path: normalizePath(file?.path || file?.filename),
+          oldPath: normalizePath(file?.oldPath || file?.previous_filename),
           added: Number(file?.added) || 0,
           removed: Number(file?.removed) || 0,
           binary: Boolean(file?.binary),
+          gitlink: Boolean(file?.gitlink),
+          renamed: Boolean(file?.renamed),
+          copied: Boolean(file?.copied),
+          modeChanged: Boolean(file?.modeChanged),
         }))
         .filter((file) => file.path && file.path !== 'dev/null')
     : null;
@@ -217,26 +267,36 @@ export function classifySuperSmall({ changedFiles = null, labels = [], policy = 
   let basis = null;
   if (files && files.length > 0) {
     for (const file of files) {
-      const { path } = file;
-      if (file.binary) refusals.push({ code: SUPER_SMALL_REFUSAL.BINARY_CHANGE, path });
-      if (matchesAny(GATE_KEEPER_PATTERNS, path)) refusals.push({ code: SUPER_SMALL_REFUSAL.GATE_KEEPER_PATH, path });
-      if (matchesAny(MIGRATION_PATTERNS, path)) refusals.push({ code: SUPER_SMALL_REFUSAL.MIGRATION_PATH, path });
-      if (matchesAny([WORKFLOW_PATTERN], path)) refusals.push({ code: SUPER_SMALL_REFUSAL.WORKFLOW_PATH, path });
-      const sensitive = sensitiveCategoriesForPath(path);
-      if (matchesAny(SECRET_AUTH_PATTERNS, path) || sensitive.length > 0) {
-        refusals.push({ code: SUPER_SMALL_REFUSAL.SECRET_AUTH_PATH, path, categories: sensitive });
+      if (file.binary) refusals.push({ code: SUPER_SMALL_REFUSAL.BINARY_CHANGE, path: file.path });
+      if (file.gitlink) refusals.push({ code: SUPER_SMALL_REFUSAL.GITLINK_CHANGE, path: file.path });
+      if (file.renamed || file.copied) {
+        refusals.push({ code: SUPER_SMALL_REFUSAL.RENAME_OR_COPY, path: file.path, oldPath: file.oldPath || null });
       }
-      const ecosystem = manifestEcosystemForPath(path);
-      if (ecosystem) refusals.push({ code: SUPER_SMALL_REFUSAL.DEPENDENCY_MANIFEST, path, ecosystem });
-      const deniedPrefix = (effective.deniedPrefixes || []).find(
-        (prefix) => path === prefix || path.startsWith(`${prefix}/`),
-      );
-      if (deniedPrefix) refusals.push({ code: SUPER_SMALL_REFUSAL.OPERATOR_DENIED_PREFIX, path, prefix: deniedPrefix });
+      if (file.modeChanged) refusals.push({ code: SUPER_SMALL_REFUSAL.MODE_CHANGE, path: file.path });
+      // A rename touches both paths; moving a protected file out is as much a
+      // change to the protected path as editing it.
+      for (const path of new Set([file.path, file.oldPath].filter(Boolean))) {
+        if (matchesAny(GATE_KEEPER_PATTERNS, path)) refusals.push({ code: SUPER_SMALL_REFUSAL.GATE_KEEPER_PATH, path });
+        if (matchesAny(MIGRATION_PATTERNS, path)) refusals.push({ code: SUPER_SMALL_REFUSAL.MIGRATION_PATH, path });
+        if (matchesAny([WORKFLOW_PATTERN], path)) refusals.push({ code: SUPER_SMALL_REFUSAL.WORKFLOW_PATH, path });
+        const sensitive = sensitiveCategoriesForPath(path);
+        if (matchesAny(SECRET_AUTH_PATTERNS, path) || sensitive.length > 0) {
+          refusals.push({ code: SUPER_SMALL_REFUSAL.SECRET_AUTH_PATH, path, categories: sensitive });
+        }
+        const ecosystem = manifestEcosystemForPath(path);
+        if (ecosystem) refusals.push({ code: SUPER_SMALL_REFUSAL.DEPENDENCY_MANIFEST, path, ecosystem });
+        const deniedPrefix = (effective.deniedPrefixes || []).find(
+          (prefix) => path === prefix || path.startsWith(`${prefix}/`),
+        );
+        if (deniedPrefix) refusals.push({ code: SUPER_SMALL_REFUSAL.OPERATOR_DENIED_PREFIX, path, prefix: deniedPrefix });
+      }
     }
 
     const smallChange = stats.changedLines <= effective.maxChangedLines && files.length <= effective.maxFiles;
     const docsTestsOnly = effective.docsTestsFollowSlimLimits
-      && files.every((file) => [LOW_RISK_CLASS.DOCS, LOW_RISK_CLASS.TESTS].includes(lowRiskClassForPath(file.path)))
+      && files.every((file) => [file.path, file.oldPath].filter(Boolean).every(
+        (path) => [LOW_RISK_CLASS.DOCS, LOW_RISK_CLASS.TESTS].includes(lowRiskClassForPath(path)),
+      ))
       && stats.changedLines <= effective.slimMaxChangedLines
       && files.length <= effective.slimMaxFiles;
     if (smallChange) basis = SUPER_SMALL_BASIS.SMALL_CHANGE;
@@ -260,9 +320,29 @@ export function classifySuperSmall({ changedFiles = null, labels = [], policy = 
   };
 }
 
+/**
+ * The changed files of a unified diff, with the pre-image path and structural
+ * facts (gitlink / rename / copy / mode change) the size rules alone would miss.
+ * Line counts and binary detection are the slim lane's, so both lanes agree.
+ */
+export function superSmallFilesFromDiff(diffText) {
+  return parseDiffFiles(diffText).map((file) => {
+    const binary = isBinaryPatch(file.patch);
+    const { added, removed } = binary ? { added: 0, removed: 0 } : countPatchLines(file.patch);
+    return {
+      path: file.path,
+      oldPath: file.oldPath && file.oldPath !== file.path && file.oldPath !== '/dev/null' ? file.oldPath : null,
+      added,
+      removed,
+      binary,
+      ...diffEntryFacts(file.patch),
+    };
+  });
+}
+
 /** Convenience wrapper: classify straight from the diff the reviewer already has. */
 export function classifySuperSmallForDiff({ diff, labels = [], policy } = {}) {
-  const changedFiles = typeof diff === 'string' ? changedFilesFromDiff(diff) : null;
+  const changedFiles = typeof diff === 'string' ? superSmallFilesFromDiff(diff) : null;
   return classifySuperSmall({ changedFiles, labels, policy });
 }
 

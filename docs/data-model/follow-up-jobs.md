@@ -1,8 +1,8 @@
 # Data Model - Follow-Up Remediation Jobs
 
 **Owner:** follow-up remediation queue
-**Store:** `data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/*.json`
-**Source of truth:** `src/follow-up-jobs.mjs`, `src/follow-up-remediation.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`
+**Store:** `data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/*.json`, `data/follow-up-jobs/single-review-voids/*.json`
+**Source of truth:** `src/follow-up-jobs.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`
 **Runtime surface:** `src/comment-only-final-round.mjs`, `src/comment-only-final-round-completion.mjs`, `src/ama-closure-orchestration.mjs`
 
 ## Comment-only final-round evidence
@@ -146,3 +146,53 @@ When the claim moves the job to a fallback class, the spawned
 
 A job run by its routed class has none of these fields. The fallback order is
 `roles.remediator_fallback` in `config.yaml`.
+
+## Single-review jobs (SINGLEREVIEW-01)
+
+A job queued for a super-small PR's single review carries
+`singleReview: { applied: true, basis, stats, reason }`. `basis` is
+`small-change` or `docs-tests`, and `stats` is the classifier's diff stats. Only
+an applied decision is persisted; normal-rounds jobs have no `singleReview` key.
+The reviewer writes it from `selectReviewMode`, and the reviewer-pass reaper
+writes it from the `review_mode_selected` row (`readSingleReviewDecision`).
+
+Creation-time invariant: such a job is born with the tier budget spent,
+`remediationPlan.currentRound = maxRounds` and
+`remediationPlan.nextAction.round = maxRounds + 1`. The claim guard stops it
+`max-rounds-reached`. This covers any verdict with findings, including a
+`Comment only` review with non-blocking findings (`finalRound: "comment-only"`),
+and holds even if a claim-time budget raise lifted `maxRounds`. A clean review
+still settles `no-remediation-required`. The stop reason begins
+`single-review: super-small PR; the first review was the final round`. An
+operator override (`nextAction.operatorOverride: true`) bypasses the stop.
+
+Ledger rule: `summarizePRRemediationLedger` counts a never-spawned
+single-review stop (`isSingleReviewStop`) as `currentRound` completed rounds,
+with a `completedRoundTimestamps` entry at `stoppedAt` and no trigger or
+revision ref. This is the only never-spawned stop the ledger counts. The
+summary exposes `singleReviewStopJobIds` for the stops still counting and
+`singleReviewVoidedAt`.
+
+**Void marker.** Store:
+`data/follow-up-jobs/single-review-voids/<domain>--<repo>-pr-<n>.json`.
+Written by `voidSingleReviewCredit` (`src/follow-up-jobs.mjs`), called from
+`selectSingleReview` (`src/review-mode-selection.mjs`) when a non-`first`-stage
+review's full diff is no longer super-small while the ledger still counts a
+single-review stop. Shape:
+
+```json
+{
+  "domainId": "code-pr",
+  "repo": "owner/repo",
+  "prNumber": 123,
+  "voidedAt": "<ISO>",
+  "history": [
+    { "voidedAt": "<ISO>", "headSha": "<sha|null>", "reasons": ["gate-keeper-path"], "jobIds": ["<jobId>"] }
+  ]
+}
+```
+
+`history` is capped at the last 10 entries. The ledger ignores single-review
+stops whose `createdAt` is at or before `voidedAt`, so the PR gets its tier
+budget back; a single-review job created later counts again. The stopped job
+files are never rewritten. An unreadable marker is logged and ignored.

@@ -7,6 +7,8 @@
 // precisely so features land as leaf modules instead of another hundred lines
 // of inline orchestration.
 
+import { voidSingleReviewCredit } from './follow-up-jobs.mjs';
+import { pickReviewerStage } from './kernel/prompt-stage.mjs';
 import { formatAdvisoryFindingsContext } from './prompt-context.mjs';
 import { recordReviewModeSelected } from './review-mode-latency.mjs';
 import {
@@ -66,6 +68,9 @@ function fullModeFallback(reason) {
  * @param {object} [params.env]
  * @param {Function} [params.logStructuredEventImpl]  Seam for tests.
  * @param {Function} [params.recordReviewModeSelectedImpl]  Seam for tests.
+ * @param {{reviewAttemptNumber?: number, maxRemediationRounds?: number}|null} [params.stageContext]
+ *   The watcher's stage inputs, used to re-pick the prompt stage after a
+ *   single-review credit was voided.
  * @param {object} [params.log]
  * @returns {ReturnType<typeof evaluateSlimReviewEligibilityForDiff>}
  */
@@ -84,6 +89,8 @@ export function selectReviewMode({
   logStructuredEventImpl = null,
   recordReviewModeSelectedImpl = recordReviewModeSelected,
   resolveSingleReviewPolicyImpl = resolveSingleReviewPolicy,
+  voidSingleReviewCreditImpl = voidSingleReviewCredit,
+  stageContext = null,
   log = console,
 } = {}) {
   let decision;
@@ -105,10 +112,30 @@ export function selectReviewMode({
   }
   // SINGLEREVIEW-01: decorated in place so the durable record and the caller
   // see the same object. `promptStage` is the stage the review must run at.
+  // After a slim-classification failure there is no durable review-mode row
+  // for the reaper to read back, so the lane is not applied (normal rounds);
+  // a spent single-review credit can still be voided.
   decision.singleReview = selectSingleReview({
-    repo, prNumber, diff, labels, headSha, promptStage, env, resolveSingleReviewPolicyImpl, log,
+    rootDir, repo, prNumber, diff, labels, headSha, promptStage, env,
+    allowApply: !slimClassificationFailed,
+    resolveSingleReviewPolicyImpl, voidSingleReviewCreditImpl, log,
   });
   decision.promptStage = decision.singleReview.applied ? 'last' : promptStage;
+  if (decision.singleReview.voided?.voided && stageContext) {
+    try {
+      decision.promptStage = pickReviewerStage({
+        reviewAttemptNumber: stageContext.reviewAttemptNumber,
+        completedRemediationRounds: decision.singleReview.voided.completedRoundsForPR,
+        maxRemediationRounds: stageContext.maxRemediationRounds,
+      });
+    } catch (err) {
+      log?.warn?.(`[reviewer] WARN: single-review re-stage failed for ${repo}#${prNumber}; keeping stage=${promptStage}: ${err?.message || err}`);
+    }
+  }
+  // The reviewer's start line logs the watcher-computed stage; say which one runs.
+  if (decision.promptStage !== promptStage) {
+    log?.log?.(`[reviewer] Effective prompt stage for ${repo}#${prNumber}: ${decision.promptStage} (was ${promptStage}; single-review)`);
+  }
   if (slimClassificationFailed) return decision;
 
   try {
@@ -157,6 +184,7 @@ export function selectReviewMode({
  * @returns {{applied: boolean, superSmall: boolean, basis: string|null, reasons: Array<object>, stats: object|null, headSha: string|null}}
  */
 export function selectSingleReview({
+  rootDir = null,
   repo,
   prNumber,
   diff,
@@ -164,7 +192,9 @@ export function selectSingleReview({
   headSha = null,
   promptStage = null,
   env = process.env,
+  allowApply = true,
   resolveSingleReviewPolicyImpl = resolveSingleReviewPolicy,
+  voidSingleReviewCreditImpl = voidSingleReviewCredit,
   log = console,
 } = {}) {
   try {
@@ -174,7 +204,13 @@ export function selectSingleReview({
       policy: resolveSingleReviewPolicyImpl({ env }),
     });
     const firstReview = promptStage === 'first';
-    const applied = classification.superSmall && firstReview;
+    const applied = classification.superSmall && firstReview && allowApply === true;
+    // A later head that no longer qualifies gets the PR's tier budget back,
+    // so the change cannot be split into a small first push plus a sensitive
+    // follow-up. No-op unless the ledger holds a single-review stop.
+    const voided = !firstReview && !classification.superSmall && rootDir
+      ? voidCredit({ rootDir, repo, prNumber, headSha, reasons: classification.reasons, voidSingleReviewCreditImpl, log })
+      : null;
     if (classification.superSmall) {
       log?.log?.(
         `[reviewer] single-review: super-small ${repo}#${prNumber} ${describeSuperSmallDecision(classification)}` +
@@ -190,6 +226,7 @@ export function selectSingleReview({
         : [{ code: 'not-first-review', promptStage: promptStage || null }],
       stats: classification.stats,
       headSha: headSha || null,
+      ...(voided?.voided ? { voided } : {}),
     };
   } catch (err) {
     log?.warn?.(
@@ -197,6 +234,23 @@ export function selectSingleReview({
       `keeping normal rounds: ${err?.message || err}`
     );
     return { applied: false, superSmall: false, basis: null, reasons: [{ code: 'classification-failed' }], stats: null, headSha: headSha || null };
+  }
+}
+
+function voidCredit({ rootDir, repo, prNumber, headSha, reasons, voidSingleReviewCreditImpl, log }) {
+  try {
+    const voided = voidSingleReviewCreditImpl({ rootDir, repo, prNumber, headSha, reasons });
+    if (voided?.voided) {
+      const codes = [...new Set((reasons || []).map((reason) => reason.code))].join(',') || 'unknown';
+      log?.log?.(
+        `[reviewer] single-review: voided ${repo}#${prNumber} credit — head no longer super-small (${codes}); ` +
+        `completed rounds ${voided.previousCompletedRounds} -> ${voided.completedRoundsForPR}`,
+      );
+    }
+    return voided;
+  } catch (err) {
+    log?.warn?.(`[reviewer] WARN: single-review void failed for ${repo}#${prNumber}: ${err?.message || err}`);
+    return null;
   }
 }
 

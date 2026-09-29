@@ -17,7 +17,7 @@
       "id": "follow-up-jobs",
       "title": "Follow-Up Remediation Jobs",
       "path": "docs/data-model/follow-up-jobs.md",
-      "store": "data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/*.json",
+      "store": "data/follow-up-jobs/{pending,in-progress,completed,failed,stopped,single-review-voids}/*.json",
       "schemaSurface": "src/follow-up-jobs.mjs",
       "relatedSchemaSurfaces": [
         "src/follow-up-remediation.mjs",
@@ -28,7 +28,8 @@
         "src/remediation-quota-hold.mjs",
         "src/remediation-claimed-requeue.mjs",
         "src/remediation-worker-class-fallback.mjs",
-        "src/remediation-quota-evidence.mjs"
+        "src/remediation-quota-evidence.mjs",
+        "src/review-mode-selection.mjs"
       ],
       "owner": "follow-up remediation queue"
     },
@@ -134,7 +135,8 @@
         "src/review-state.mjs",
         "src/review-latency-event-writer.mjs",
         "src/review-latency-report.mjs",
-        "src/hammer-wake.mjs"
+        "src/hammer-wake.mjs",
+        "src/review-mode-latency.mjs"
       ],
       "owner": "review latency instrumentation and generic-subject reporting"
     },

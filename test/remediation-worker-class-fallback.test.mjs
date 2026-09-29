@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  nextRoundReviewerModels,
   remediatorFallbackAudit,
   resolveClaimedRemediatorRouting,
   resolveRemediationWorkerClassWithFallback,
@@ -417,4 +418,98 @@ test('resolveClaimedRemediatorRouting reads the declared list and, unwired, uses
   assert.equal(disabled.workerClass, 'codex');
   assert.equal(disabled.hold, true);
   assert.equal(disabled.reason, 'no-fallback-configured');
+});
+
+// ── REMFALLBACK-01 item 4: cross-model review stays intact ───────────────────
+
+const GOOGLE_OK = { provider: 'google', authPath: 'agy', state: 'ok' };
+
+test('a fallback whose model family reviews the next round is skipped (reviewer-selection rule)', async () => {
+  const result = await resolveRemediationWorkerClassWithFallback({
+    primary: 'codex',
+    fallbackWorkerClasses: ['gemini', 'claude-code'],
+    reviewerModels: ['gemini', 'codex'],
+    nowMs: NOW,
+    execFileImpl: fleetStatusStub([
+      { provider: 'openai', authPath: 'oauth', state: 'exhausted' },
+      ANTHROPIC_OK,
+      GOOGLE_OK,
+    ]),
+  });
+  assert.equal(result.workerClass, 'claude-code');
+  assert.equal(result.fellBack, true);
+  assert.deepEqual(result.skipped, [{ workerClass: 'gemini', reason: 'reviews-next-round:gemini' }]);
+});
+
+test('claude-code is refused as a fallback when claude reviews the PR (codex-built PR)', async () => {
+  const result = await resolveRemediationWorkerClassWithFallback({
+    primary: 'gemini',
+    fallbackWorkerClasses: ['claude-code', 'codex'],
+    reviewerModels: ['claude'],
+    nowMs: NOW,
+    execFileImpl: fleetStatusStub([
+      { provider: 'google', authPath: 'agy', state: 'exhausted' },
+      ANTHROPIC_OK,
+      { provider: 'openai', authPath: 'oauth', state: 'ok' },
+    ]),
+  });
+  assert.equal(result.workerClass, 'codex');
+  assert.deepEqual(result.skipped, [{ workerClass: 'claude-code', reason: 'reviews-next-round:claude' }]);
+});
+
+test('with only same-model-as-reviewer fallbacks left, the capped remediator holds instead', async () => {
+  const result = await resolveRemediationWorkerClassWithFallback({
+    primary: 'codex',
+    fallbackWorkerClasses: ['gemini'],
+    reviewerModels: ['gemini'],
+    nowMs: NOW,
+    execFileImpl: fleetStatusStub([{ provider: 'openai', authPath: 'oauth', state: 'exhausted' }, GOOGLE_OK]),
+  });
+  assert.equal(result.workerClass, 'codex');
+  assert.equal(result.fellBack, false);
+  assert.equal(result.hold, true);
+  assert.equal(result.reason, 'no-available-fallback');
+});
+
+test('nextRoundReviewerModels combines the last reviewer with the builder route, with and without the gemini fallback layer', () => {
+  const hermetic = { topPath: '/dev/null' };
+  // agent-os#7325: [claude-code] PR, reviewed by gemini while codex was capped.
+  assert.deepEqual(
+    nextRoundReviewerModels({ builderTag: 'claude-code', reviewerModel: 'gemini' }, { env: {}, ...hermetic }).sort(),
+    ['codex', 'gemini'],
+  );
+  assert.deepEqual(
+    nextRoundReviewerModels({ builderTag: 'codex', reviewerModel: 'claude' }, { env: {}, ...hermetic }),
+    ['claude'],
+  );
+  assert.deepEqual(
+    nextRoundReviewerModels(
+      { builderTag: 'codex', reviewerModel: 'claude' },
+      { env: { AGENT_OS_REVIEWER_GEMINI_MODE: 'fallback' }, ...hermetic },
+    ).sort(),
+    ['claude', 'gemini'],
+  );
+  // An operator reviewer pin is the route reviewer selection would use.
+  assert.deepEqual(
+    nextRoundReviewerModels(
+      { builderTag: 'codex', reviewerModel: 'claude' },
+      { env: { AGENT_OS_ROLES_REVIEWER: 'gemini' }, ...hermetic },
+    ).sort(),
+    ['claude', 'gemini'],
+  );
+  // No builder tag: the recorded reviewer is the whole constraint.
+  assert.deepEqual(nextRoundReviewerModels({ reviewerModel: 'codex' }, { env: {}, ...hermetic }), ['codex']);
+});
+
+test('claim-time routing applies the rule: a declared gemini fallback is passed over while gemini reviews', async () => {
+  const routing = await resolveClaimedRemediatorRouting({
+    job: jobHeldOnCodex({ providerResetAt: '2026-10-04T12:52:00.000Z' }),
+    primary: 'codex',
+    env: { AGENT_OS_ROLES_REMEDIATOR_FALLBACK: 'gemini,claude-code' },
+    nowMs: NOW,
+    topPath: '/dev/null',
+    log: { warn() {} },
+  });
+  assert.equal(routing.workerClass, 'claude-code');
+  assert.deepEqual(routing.skipped, [{ workerClass: 'gemini', reason: 'reviews-next-round:gemini' }]);
 });

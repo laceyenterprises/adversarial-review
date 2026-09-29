@@ -624,6 +624,14 @@ shell loaders, its default (`[claude-code, codex]`) lives in the schema and in
 this module's `config.yaml`, and `AGENT_OS_ROLES_REMEDIATOR_FALLBACK` or the
 legacy comma-separated `ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK`
 override it (`''` or `[]` disables it).
+A candidate whose model family may review the PR's next round is skipped
+(`reviews-next-round:<model>`), so the fallback never hands the next review the
+reviewer's own work. Those models are the reviewer of the round being
+remediated, plus the route reviewer selection gives the builder with and without
+its primary reviewer capped (the gemini fallback layer). The check is the same
+`isCrossModelReviewWaived` rule that keeps a builder from reviewing its own
+work. The routed primary (builder-tag route or operator pin) is not
+second-guessed. If no candidate survives, the claim holds as described below.
 This availability fallback may select the PR builder's family as a remediator;
 the normal builder-tag route resumes automatically when its provider recovers.
 Unknown and degraded states alone do not authorize fallback, and an unreadable

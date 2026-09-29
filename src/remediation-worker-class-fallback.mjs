@@ -28,6 +28,12 @@
 //     window from now (job-local, so it survives an unreadable fleet status).
 // Degraded / unknown states alone still do not cap, and an unreadable status
 // with no job-local evidence keeps the primary (fail-open, matching HHR).
+//
+// Cross-model review stays intact: a fallback remediator writes the commits the
+// PR's next round reviews, so a candidate whose model family could review that
+// round is skipped, by the same `isCrossModelReviewWaived` rule reviewer
+// selection uses to keep a builder from reviewing its own work. The routed
+// primary itself (builder-tag route or operator pin) is not second-guessed.
 import { promisify } from 'node:util';
 import { execFile as execFileCb } from 'node:child_process';
 
@@ -44,6 +50,11 @@ import {
   resolveGeminiRemediationModel,
 } from './adapters/agent-runtime/local/remediation.mjs';
 import { resolveConfiguredNonBlockingCodexModel } from './adapters/agent-runtime/local/non-blocking-codex-model.mjs';
+import {
+  isCrossModelReviewWaived,
+  normalizeReviewerModel,
+  routeSubject,
+} from './adapters/subject/github-pr/routing.mjs';
 
 const execFileAsync = promisify(execFileCb);
 const FLEET_QUOTA_STATUS_TIMEOUT_MS = 20_000;
@@ -127,6 +138,8 @@ async function readFleetQuotaStatuses({ env, hqPath, execFileImpl }) {
  * @param {Object=} args.job — the claimed job; its quota holds are job-local cap evidence.
  * @param {number=} args.nowMs
  * @param {Function=} args.modelForClass — class → the model it would run, for model-level caps.
+ * @param {string[]=} args.reviewerModels — models that may review the PR's next round
+ *   (nextRoundReviewerModels); a fallback of one of their families is skipped.
  * @param {Object=} args.env
  * @param {string=} args.hqPath
  * @param {Function|null=} args.execFileImpl — DI for `hq fleet quota status --json`;
@@ -142,6 +155,7 @@ export async function resolveRemediationWorkerClassWithFallback({
   job = null,
   nowMs = Date.now(),
   modelForClass = null,
+  reviewerModels = [],
   env = process.env,
   hqPath = resolveHqPath(env),
   execFileImpl = execFileAsync,
@@ -202,6 +216,12 @@ export async function resolveRemediationWorkerClassWithFallback({
       skipped.push({ workerClass: candidate, reason: 'provider-untracked' });
       continue;
     }
+    const ownReviewer = (Array.isArray(reviewerModels) ? reviewerModels : [])
+      .find((reviewerModel) => isCrossModelReviewWaived(candidate, reviewerModel));
+    if (ownReviewer) {
+      skipped.push({ workerClass: candidate, reason: `reviews-next-round:${ownReviewer}` });
+      continue;
+    }
     const cap = capOf(candidate);
     const refusal = cap.capped
       ? `capped:${cap.capSource}`
@@ -244,6 +264,32 @@ export async function resolveRemediationWorkerClassWithFallback({
   };
 }
 
+// REMFALLBACK-01 item 4: the models that may review this PR's next round. That
+// is the reviewer of the round being remediated (which already reflects any
+// reviewer fallback in force, e.g. gemini while codex is capped), plus the
+// route reviewer selection gives the PR's builder, with and without its primary
+// reviewer quota-capped (the gemini fallback layer).
+export function nextRoundReviewerModels(job, { env = process.env, topPath, loaderImpl } = {}) {
+  const models = new Set();
+  const add = (value) => {
+    const model = normalizeReviewerModel(value);
+    if (model) models.add(model);
+  };
+  add(job?.reviewerModel);
+  const builderClass = String(job?.builderTag || '').trim().toLowerCase();
+  for (const primaryReviewerQuotaCapped of builderClass ? [false, true] : []) {
+    try {
+      add(routeSubject(
+        { builderClass, domainId: job?.domainId || 'code-pr' },
+        { env, topPath, loaderImpl, primaryReviewerQuotaCapped },
+      )?.reviewerModel);
+    } catch {
+      // A broken reviewer route leaves the recorded reviewer as the constraint.
+    }
+  }
+  return [...models];
+}
+
 // The model each remediator class would spawn with, for model-level caps.
 function remediatorModelForClass(workerClass, { job, env }) {
   if (workerClass === 'codex') {
@@ -279,6 +325,7 @@ export async function resolveClaimedRemediatorRouting({
     nowMs: Number.isFinite(nowMs) ? nowMs : Date.now(),
     env,
     modelForClass: (workerClass) => remediatorModelForClass(workerClass, { job, env }),
+    reviewerModels: nextRoundReviewerModels(job, { env, topPath, loaderImpl }),
   });
   if (routing?.fellBack) {
     log.warn?.(

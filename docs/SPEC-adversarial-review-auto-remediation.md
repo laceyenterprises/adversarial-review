@@ -608,10 +608,17 @@ dispatcher can spawn. The follow-up daemon validates the override during
 startup and exits before claiming work if the value is invalid. Consume-time
 worker selection also runs inside the claimed-job failure handler so
 direct/helper callers cannot strand a job in `in-progress/` on a bad override.
-On each follow-up consume, the routed worker remains primary unless HQ fleet
-quota status authoritatively grounds its provider as exhausted or suspended.
-When grounded, the consumer tries the ordered `roles.remediator_fallback`
-classes and selects the first with confirmed available quota. The list is
+On each follow-up claim, not only at job creation, the routed worker remains
+primary unless it is capped. It is capped when HQ fleet quota status
+hard-grounds its provider (exhausted or suspended), when it reports the routed
+model exhausted (the provider's `models[]` row for that model, or the
+`model_only_exhaustion` signature), or when AFH-02 soft-grounds the provider.
+It is also capped when the job's own quota hold recorded a provider reset more
+than one quota hold window (60 minutes) away; that evidence needs no fleet read.
+When capped, the consumer tries the ordered `roles.remediator_fallback` classes
+and selects the first that is not capped itself and, when fleet status is
+readable, has confirmed available quota. The spawned worker records
+`remediationWorker.fallbackFrom`, `fallbackReason` and `fallbackResolution`. The list is
 declared config (REMFALLBACK-01): it is registered in the Node, Python and
 shell loaders, its default (`[claude-code, codex]`) lives in the schema and in
 this module's `config.yaml`, and `AGENT_OS_ROLES_REMEDIATOR_FALLBACK` or the
@@ -619,7 +626,8 @@ legacy comma-separated `ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK`
 override it (`''` or `[]` disables it).
 This availability fallback may select the PR builder's family as a remediator;
 the normal builder-tag route resumes automatically when its provider recovers.
-Unknown, degraded, and unreadable quota states do not authorize fallback.
+Unknown and degraded states alone do not authorize fallback, and an unreadable
+status with no job-local evidence keeps the primary.
 
 Code-PR reviewer and remediator stage prompts share the same canonical
 doc-currency contract. Reviewer stages must flag stale in-repo data-model docs

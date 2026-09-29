@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  remediatorFallbackAudit,
+  resolveClaimedRemediatorRouting,
   resolveRemediationWorkerClassWithFallback,
   remediationWorkerClassFallback,
 } from '../src/remediation-worker-class-fallback.mjs';
@@ -123,4 +125,296 @@ test('the fallback list is config, never a code constant: a declared order is re
     loaderImpl: () => ({ get: (key) => (key === 'roles.remediator_fallback' ? ['gemini', 'claude-code', 'gemini'] : undefined) }),
   });
   assert.deepEqual(declared, ['gemini', 'claude-code']);
+});
+
+// ── REMFALLBACK-01: model-level, AFH soft, and job-local cap evidence ─────────
+
+const NOW = Date.parse('2026-09-29T02:45:15.389Z');
+const CODEX_MODEL = 'gpt-6-sol';
+const modelForClass = (workerClass) => (workerClass === 'codex' ? CODEX_MODEL : null);
+
+// The live agent-os#7325 shape (2026-09-29): gpt-6-sol exhausted until
+// 2026-10-04, projected onto the provider row as `unknown` + model_only_exhaustion.
+const OPENAI_MODEL_ONLY_EXHAUSTION = {
+  provider: 'openai',
+  authPath: 'oauth',
+  state: 'unknown',
+  lastErrorSignature: 'model_only_exhaustion',
+  lastGoodAt: '2026-09-27T12:52:00.000Z',
+  models: [
+    { model: CODEX_MODEL, state: 'exhausted', resetAtUtc: '2026-10-04T12:52:00.000Z', lastGoodAt: '2026-09-27T12:52:00.000Z' },
+  ],
+};
+const ANTHROPIC_OK = { provider: 'anthropic', authPath: 'oauth', state: 'ok', lastGoodAt: '2026-09-29T02:40:00.000Z' };
+
+// A job whose last codex attempt hit the weekly cap: the retry entry the
+// reconcile quota hold writes, as found on the live #7325 job.
+function jobHeldOnCodex({ providerResetAt, requeuedAt = '2026-09-29T01:45:15.389Z', extra = {} } = {}) {
+  return {
+    builderTag: 'claude-code',
+    reviewerModel: 'gemini',
+    remediationPlan: {
+      retryHistory: [{
+        round: 1,
+        requeuedAt,
+        retryAfter: '2026-09-29T02:45:15.389Z',
+        retryMetadata: {
+          code: 'quota-exhausted',
+          harness: 'codex',
+          resetAt: providerResetAt,
+          providerResetAt,
+          source: 'provider-reported',
+          maxUnvalidatedHoldMs: 3600000,
+        },
+        worker: { model: 'codex', state: 'spawned' },
+      }],
+    },
+    ...extra,
+  };
+}
+
+test('model_only_exhaustion of the routed codex model counts as capped (provider reads unknown)', async () => {
+  const result = await resolveRemediationWorkerClassWithFallback({
+    primary: 'codex',
+    fallbackWorkerClasses: ['claude-code', 'codex'],
+    nowMs: NOW,
+    modelForClass,
+    execFileImpl: fleetStatusStub([OPENAI_MODEL_ONLY_EXHAUSTION, ANTHROPIC_OK]),
+  });
+  assert.equal(result.workerClass, 'claude-code');
+  assert.equal(result.fellBack, true);
+  assert.equal(result.capSource, 'model-exhausted');
+  assert.equal(result.primaryState, 'unknown');
+  assert.equal(result.resetAt, '2026-10-04T12:52:00.000Z');
+});
+
+test('the model_only_exhaustion signature caps codex even when the payload carries no models[] rows', async () => {
+  const signatureOnly = { ...OPENAI_MODEL_ONLY_EXHAUSTION };
+  delete signatureOnly.models;
+  const result = await resolveRemediationWorkerClassWithFallback({
+    primary: 'codex',
+    fallbackWorkerClasses: ['claude-code'],
+    nowMs: NOW,
+    execFileImpl: fleetStatusStub([signatureOnly, ANTHROPIC_OK]),
+  });
+  assert.equal(result.workerClass, 'claude-code');
+  assert.equal(result.capSource, 'model-exhausted');
+});
+
+test('a provider projected ok still caps codex when its routed model row is exhausted', async () => {
+  const result = await resolveRemediationWorkerClassWithFallback({
+    primary: 'codex',
+    fallbackWorkerClasses: ['claude-code'],
+    nowMs: NOW,
+    modelForClass,
+    execFileImpl: fleetStatusStub([
+      {
+        provider: 'openai',
+        authPath: 'oauth',
+        state: 'ok',
+        models: [
+          { model: CODEX_MODEL, state: 'exhausted', resetAtUtc: '2026-10-04T12:52:00.000Z' },
+          { model: 'gpt-6-mini', state: 'ok' },
+        ],
+      },
+      ANTHROPIC_OK,
+    ]),
+  });
+  assert.equal(result.workerClass, 'claude-code');
+  assert.equal(result.capSource, 'model-exhausted');
+});
+
+test('another model being exhausted does not cap a routed model whose own row is ok', async () => {
+  const result = await resolveRemediationWorkerClassWithFallback({
+    primary: 'codex',
+    fallbackWorkerClasses: ['claude-code'],
+    nowMs: NOW,
+    modelForClass,
+    execFileImpl: fleetStatusStub([
+      {
+        provider: 'openai',
+        authPath: 'oauth',
+        state: 'ok',
+        models: [
+          { model: CODEX_MODEL, state: 'ok' },
+          { model: 'gpt-6-mini', state: 'exhausted' },
+        ],
+      },
+      ANTHROPIC_OK,
+    ]),
+  });
+  assert.equal(result.workerClass, 'codex');
+  assert.equal(result.fellBack, false);
+  assert.equal(result.reason, 'primary-available');
+});
+
+test('AFH soft grounding re-routes the remediator (the lane now sees AFH-02)', async () => {
+  const result = await resolveRemediationWorkerClassWithFallback({
+    primary: 'codex',
+    fallbackWorkerClasses: ['claude-code'],
+    nowMs: NOW,
+    execFileImpl: fleetStatusStub([
+      {
+        provider: 'openai',
+        authPath: 'oauth',
+        state: 'unknown',
+        afhGrounding: { grounded: true, signals: 4, threshold: 3, reason: 'quota_exhausted_kills' },
+      },
+      ANTHROPIC_OK,
+    ]),
+  });
+  assert.equal(result.workerClass, 'claude-code');
+  assert.equal(result.fellBack, true);
+  assert.equal(result.capSource, 'afh-soft-grounded');
+});
+
+test('a soft-grounded candidate is never the fallback: capped primary with no other class holds', async () => {
+  const result = await resolveRemediationWorkerClassWithFallback({
+    primary: 'codex',
+    fallbackWorkerClasses: ['claude-code'],
+    nowMs: NOW,
+    execFileImpl: fleetStatusStub([
+      { provider: 'openai', authPath: 'oauth', state: 'exhausted' },
+      { provider: 'anthropic', authPath: 'oauth', state: 'ok', afhGrounding: { grounded: true, signals: 3, threshold: 3 } },
+    ]),
+  });
+  assert.equal(result.workerClass, 'codex');
+  assert.equal(result.fellBack, false);
+  assert.equal(result.hold, true);
+  assert.equal(result.reason, 'no-available-fallback');
+  assert.deepEqual(result.skipped, [{ workerClass: 'claude-code', reason: 'capped:afh-soft-grounded' }]);
+});
+
+test('job-local evidence: a provider reset 5 days out caps codex even when fleet status is unreadable', async () => {
+  const result = await resolveRemediationWorkerClassWithFallback({
+    primary: 'codex',
+    fallbackWorkerClasses: ['claude-code', 'codex'],
+    job: jobHeldOnCodex({ providerResetAt: '2026-10-04T12:52:00.000Z' }),
+    nowMs: NOW,
+    execFileImpl: async () => {
+      throw new Error('session-ledger runtime open failed');
+    },
+  });
+  assert.equal(result.workerClass, 'claude-code');
+  assert.equal(result.fellBack, true);
+  assert.equal(result.capSource, 'provider-reset-past-hold-window');
+  assert.equal(result.resetAt, '2026-10-04T12:52:00.000Z');
+  assert.equal(result.candidateState, 'unverified');
+});
+
+test('job-local evidence: a good probe after the hold clears it (cap lifted early, codex returns)', async () => {
+  const result = await resolveRemediationWorkerClassWithFallback({
+    primary: 'codex',
+    fallbackWorkerClasses: ['claude-code'],
+    job: jobHeldOnCodex({ providerResetAt: '2026-10-04T12:52:00.000Z' }),
+    nowMs: NOW,
+    modelForClass,
+    execFileImpl: fleetStatusStub([
+      {
+        provider: 'openai',
+        authPath: 'oauth',
+        state: 'ok',
+        lastGoodAt: '2026-09-29T02:30:00.000Z',
+        models: [{ model: CODEX_MODEL, state: 'ok', lastGoodAt: '2026-09-29T02:30:00.000Z' }],
+      },
+      ANTHROPIC_OK,
+    ]),
+  });
+  assert.equal(result.workerClass, 'codex');
+  assert.equal(result.fellBack, false);
+  assert.equal(result.reason, 'primary-available');
+});
+
+test('job-local evidence: an ok probe from BEFORE the hold does not clear it', async () => {
+  const result = await resolveRemediationWorkerClassWithFallback({
+    primary: 'codex',
+    fallbackWorkerClasses: ['claude-code'],
+    job: jobHeldOnCodex({ providerResetAt: '2026-10-04T12:52:00.000Z' }),
+    nowMs: NOW,
+    execFileImpl: fleetStatusStub([
+      { provider: 'openai', authPath: 'oauth', state: 'ok', lastGoodAt: '2026-09-29T01:00:00.000Z' },
+      ANTHROPIC_OK,
+    ]),
+  });
+  assert.equal(result.workerClass, 'claude-code');
+  assert.equal(result.capSource, 'provider-reset-past-hold-window');
+});
+
+test('job-local evidence: a reset that has passed is no evidence (codex is routed again)', async () => {
+  const result = await resolveRemediationWorkerClassWithFallback({
+    primary: 'codex',
+    fallbackWorkerClasses: ['claude-code'],
+    job: jobHeldOnCodex({ providerResetAt: '2026-09-29T02:30:00.000Z' }),
+    nowMs: NOW,
+    execFileImpl: null,
+  });
+  assert.equal(result.workerClass, 'codex');
+  assert.equal(result.fellBack, false);
+  assert.equal(result.hold, false);
+});
+
+test('a candidate with its own job-local cap is skipped', async () => {
+  const job = jobHeldOnCodex({ providerResetAt: '2026-10-04T12:52:00.000Z' });
+  job.remediationPlan.retryHistory.push({
+    round: 1,
+    requeuedAt: '2026-09-29T02:00:00.000Z',
+    retryMetadata: { code: 'quota-exhausted', harness: 'claude', providerResetAt: '2026-10-01T00:00:00.000Z' },
+    worker: { model: 'claude-code' },
+  });
+  const result = await resolveRemediationWorkerClassWithFallback({
+    primary: 'codex',
+    fallbackWorkerClasses: ['claude-code'],
+    job,
+    nowMs: NOW,
+    execFileImpl: null,
+  });
+  assert.equal(result.workerClass, 'codex');
+  assert.equal(result.hold, true);
+  assert.deepEqual(result.skipped, [{ workerClass: 'claude-code', reason: 'capped:provider-reset-past-hold-window' }]);
+});
+
+test('remediatorFallbackAudit records fallbackFrom and the reason, and nothing when the routed class ran', async () => {
+  const fellBack = await resolveRemediationWorkerClassWithFallback({
+    primary: 'codex',
+    fallbackWorkerClasses: ['claude-code'],
+    nowMs: NOW,
+    modelForClass,
+    execFileImpl: fleetStatusStub([OPENAI_MODEL_ONLY_EXHAUSTION, ANTHROPIC_OK]),
+  });
+  const audit = remediatorFallbackAudit(fellBack);
+  assert.equal(audit.fallbackFrom, 'codex');
+  assert.equal(audit.fallbackReason, 'model-exhausted');
+  assert.equal(audit.fallbackResolution.reason, 'primary-grounded-fallback');
+  assert.equal(audit.fallbackResolution.resetAt, '2026-10-04T12:52:00.000Z');
+  assert.equal(audit.fallbackResolution.candidateState, 'ok');
+  assert.deepEqual(remediatorFallbackAudit({ workerClass: 'codex', fellBack: false }), {});
+});
+
+test('resolveClaimedRemediatorRouting reads the declared list and, unwired, uses job-local evidence only', async () => {
+  const warnings = [];
+  const routing = await resolveClaimedRemediatorRouting({
+    job: jobHeldOnCodex({ providerResetAt: '2026-10-04T12:52:00.000Z' }),
+    primary: 'codex',
+    env: {},
+    nowMs: NOW,
+    topPath: '/dev/null',
+    log: { warn: (line) => warnings.push(line) },
+  });
+  assert.equal(routing.workerClass, 'claude-code');
+  assert.equal(routing.fellBack, true);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /routed=codex -> claude-code .*provider-reset-past-hold-window, resets 2026-10-04T12:52:00.000Z/);
+
+  // `[]` declared: no class can take it, so the capped primary holds.
+  const disabled = await resolveClaimedRemediatorRouting({
+    job: jobHeldOnCodex({ providerResetAt: '2026-10-04T12:52:00.000Z' }),
+    primary: 'codex',
+    env: { AGENT_OS_ROLES_REMEDIATOR_FALLBACK: '' },
+    nowMs: NOW,
+    topPath: '/dev/null',
+    log: { warn() {} },
+  });
+  assert.equal(disabled.workerClass, 'codex');
+  assert.equal(disabled.hold, true);
+  assert.equal(disabled.reason, 'no-fallback-configured');
 });

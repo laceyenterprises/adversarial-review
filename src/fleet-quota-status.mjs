@@ -119,6 +119,25 @@ function extractJsonObject(text, label) {
   }
 }
 
+// REMFALLBACK-01: model-level quota. The openai/oauth row carries `models[]`,
+// one entry per probed governed Codex model. When every probed model is
+// exhausted the probe projects the provider row as `unknown` with
+// `lastErrorSignature: model_only_exhaustion`; the hard classifier above never
+// grounds `unknown`, so a model-only cap is invisible without these fields.
+export const MODEL_ONLY_EXHAUSTION_SIGNATURE = 'model_only_exhaustion';
+
+function normalizeModelRows(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((entry) => entry && typeof entry === 'object' && String(entry.model || '').trim())
+    .map((entry) => ({
+      model: String(entry.model).trim(),
+      state: String(entry.state || '').trim().toLowerCase(),
+      resetAtUtc: entry.resetAtUtc || entry.reset_at_utc || null,
+      lastGoodAt: entry.lastGoodAt || entry.last_good_at || null,
+    }));
+}
+
 export function parseHqFleetQuotaStatus(stdout) {
   const payload = extractJsonObject(stdout, 'hq fleet quota status');
   const providerStatuses = Array.isArray(payload?.providerStatuses) ? payload.providerStatuses : [];
@@ -129,6 +148,9 @@ export function parseHqFleetQuotaStatus(stdout) {
     source: entry?.source || 'hq-fleet-quota-status',
     lastGoodAt: entry?.lastGoodAt || entry?.last_good_at || null,
     lastProbeAt: entry?.lastProbeAt || entry?.last_probe_at || null,
+    lastErrorSignature: entry?.lastErrorSignature || entry?.last_error_signature || null,
+    resetAtUtc: entry?.resetAtUtc || entry?.reset_at_utc || null,
+    models: normalizeModelRows(entry?.models),
     afhGrounding: normalizeAfhGroundingVerdict(entry?.afhGrounding ?? entry?.afh_grounding),
   }));
 }
@@ -231,4 +253,52 @@ export function quotaAvailableFromFleetStatus(stdout, { harness } = {}) {
     return { available: false, state: 'unknown-harness', source: 'hq-fleet-quota-status' };
   }
   return providerAvailabilityFromFleetStatus(stdout, { provider });
+}
+
+// REMFALLBACK-01 cap verdict for one harness and, optionally, the model it would
+// run. Capped, in precedence order, when the provider is hard-grounded, when the
+// routed model is itself exhausted (its `models[]` row, or the provider's
+// `model_only_exhaustion` signature when that model has no row of its own), or
+// when AFH-02 soft-grounds the provider. `available` keeps the strict
+// "confirmed quota" meaning: not capped, provider `ok`, and the model row `ok`
+// when one exists. Anything unreadable is neither capped nor available.
+export function harnessCapFromStatuses(statuses, { harness, model = null } = {}) {
+  const source = 'hq-fleet-quota-status';
+  const provider = providerForQuotaHarness(harness);
+  if (!provider) return { capped: false, capSource: null, available: false, state: 'unknown-harness', source };
+  const rows = providerStatusRows(Array.isArray(statuses) ? statuses : [], provider);
+  const row = rows[0];
+  if (!row) return { capped: false, capSource: null, available: false, state: 'missing-provider-status', source };
+  const modelName = String(model || '').trim() || null;
+  const modelRow = modelName
+    ? rows.flatMap((entry) => entry.models || []).find((entry) => entry.model === modelName) || null
+    : null;
+  const modelExhausted = modelRow
+    ? isGroundedProviderState(modelRow.state)
+    : row.lastErrorSignature === MODEL_ONLY_EXHAUSTION_SIGNATURE;
+  const soft = providerSoftGroundingFromStatuses(statuses, { provider });
+  const capSource = isGroundedProviderState(row.state)
+    ? 'provider-grounded'
+    : modelExhausted
+      ? 'model-exhausted'
+      : soft.grounded
+        ? 'afh-soft-grounded'
+        : null;
+  return {
+    capped: capSource !== null,
+    capSource,
+    available: capSource === null && row.state === 'ok' && (!modelRow || modelRow.state === 'ok'),
+    state: row.state || 'unknown',
+    model: modelName,
+    modelState: modelRow?.state || null,
+    resetAt: modelRow?.resetAtUtc || row.resetAtUtc || null,
+    lastGoodAt: modelRow?.lastGoodAt || row.lastGoodAt || null,
+    afhGrounding: soft.verdict,
+    source,
+  };
+}
+
+export function harnessCapFromFleetStatus(stdout, options = {}) {
+  if (!providerForQuotaHarness(options?.harness)) return harnessCapFromStatuses([], options);
+  return harnessCapFromStatuses(parseHqFleetQuotaStatus(stdout), options);
 }

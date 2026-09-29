@@ -15,6 +15,7 @@ import { findLiveAmaCloserLease, isHeldAmaCloserLease } from './ama/closer-lease
 import { isActiveAmaCloserDispatchRecord, readAmaCloserDispatchRecord } from './ama/dispatch-closer.mjs';
 import { ensureWorkspaceTrashDir, launchWorkspaceTrashDeleter, workspaceTrashDir } from './follow-up-workspace-trash.mjs';
 import { loadRoleConfig } from './role-config.mjs';
+import { MAX_QUOTA_HOLD_WINDOW_MS } from './remediation-quota-evidence.mjs';
 import { claimFollowUpForReview } from './follow-up-review-claim.mjs';
 import { scanArchivedStoppedFollowUpJobs } from './comment-only-final-round.mjs';
 import {
@@ -93,7 +94,6 @@ const DEFAULT_MAX_REMEDIATION_ROUNDS = ROUND_BUDGET_BY_RISK_CLASS[DEFAULT_RISK_C
 const DEFAULT_MAX_TRANSIENT_RETRIES = 3;
 const DEFAULT_TRANSIENT_RETRY_BACKOFF_MS = 5 * 60 * 1000;
 const MAX_TRANSIENT_RETRY_BACKOFF_MS = 60 * 60 * 1000;
-const MAX_QUOTA_HOLD_WINDOW_MS = 60 * 60 * 1000;
 const FOLLOW_UP_JOB_DIRS = Object.freeze({
   pending: ['data', 'follow-up-jobs', 'pending'],
   inProgress: ['data', 'follow-up-jobs', 'in-progress'],

@@ -127,7 +127,7 @@ import { applyPreSpawnLifecycleGate } from './follow-up-stuck-claim-sweep.mjs';
 import { parseQuotaResetAt } from './quota-exhaustion.mjs';
 import { detectRemediationQuotaEvidence } from './remediation-quota-evidence.mjs';
 import { settleMissingRemediationArtifact } from './remediation-missing-artifact.mjs';
-import { remediationWorkerClassFallback } from './remediation-worker-class-fallback.mjs';
+import { remediatorFallbackAudit, resolveClaimedRemediatorRouting } from './remediation-worker-class-fallback.mjs';
 import {
   DEFAULT_REPLIES_ROOT,
   HQ_REMEDIATION_DISPATCH_TRIGGER,
@@ -1437,10 +1437,10 @@ function buildRereviewResult({ requested, reason, outcome = null }) {
 
 // Reconcile-time GitHub operations must not return unmapped worker
 // identities such as clio-agent. A recorded spawned worker model is
-// attribution ground truth, but operator pins still win.
+// attribution ground truth; operator pins win unless a cap fallback replaced them.
 function resolveReconcileWorkerClass(job, worker) {
   const envOverride = defaultRemediatorWorkerClassFromEnv(process.env);
-  if (envOverride) return envOverride;
+  if (envOverride && !worker?.fallbackFrom) return envOverride;
   const recordedModel = normalizeRemediationWorkerClass(worker?.model);
   if (recordedModel) return recordedModel;
   return pickRemediationWorkerClass(job);
@@ -3551,30 +3551,19 @@ async function consumeNextFollowUpJob({
   const preparationStartedMs = Date.now(); let envPreparationMs = 0; let workspacePreparationMs = 0;
 
   try {
-    const routedWorkerClass = pickRemediationWorkerClass(claimed.job);
-    workerClass = routedWorkerClass;
-    // Cap-aware fallback -- wired only from the production daemon (null in unit
-    // tests, so the heavily-spied consume hot path stays subprocess-free there).
-    // When the routed remediator harness provider is authoritatively quota-
-    // grounded (e.g. a [claude-code] PR routes to codex but codex is exhausted),
-    // fall back to claude-code instead of quota-holding the PR un-remediated.
-    // Auto-reverts to the routed harness the moment its provider recovers.
-    if (resolveRemediationWorkerClassImpl) {
-      const workerClassFallback = await resolveRemediationWorkerClassImpl({
-        primary: routedWorkerClass,
-        fallbackWorkerClasses: remediationWorkerClassFallback(jobEnv),
-        env: jobEnv,
-      });
-      workerClass = workerClassFallback.workerClass;
-      if (workerClassFallback.fellBack) {
-        log.warn?.(
-          `[follow-up-remediation] remediation-worker-class cap-fallback: ` +
-            `routed=${routedWorkerClass} -> ${workerClass} ` +
-            `(primary provider grounded: ${workerClassFallback.primaryState}); ` +
-            `auto-reverts when the routed harness recovers`
-        );
-      }
-    }
+    // REMFALLBACK-01: re-resolved on every claim, so a capped routed remediator
+    // moves to a declared fallback class. The fleet read is wired only from the
+    // daemon (`resolveRemediationWorkerClassImpl`), keeping the heavily-spied
+    // consume path subprocess-free in unit tests (job-local evidence only).
+    const remediatorRouting = await resolveClaimedRemediatorRouting({
+      job: claimed.job,
+      primary: pickRemediationWorkerClass(claimed.job),
+      env: jobEnv,
+      nowMs: Date.parse(claimed.job.claimedAt),
+      resolveImpl: resolveRemediationWorkerClassImpl,
+      log,
+    });
+    workerClass = remediatorRouting.workerClass;
     if (claimed.job.nonBlockingOnly === true && workerClass === 'codex') {
       codexModelResolution = resolveConfiguredNonBlockingCodexModel(jobEnv);
     }
@@ -3895,6 +3884,7 @@ async function consumeNextFollowUpJob({
       spawnedAt: now(),
       worker: {
         ...worker,
+        ...remediatorFallbackAudit(remediatorRouting),
         dirtyMergeResolution: claimed.job?.remediationWorker?.dirtyMergeResolution || null,
         pushTokenCapability: workflowPushPreflight?.capability
           ? {

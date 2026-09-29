@@ -1869,7 +1869,10 @@ export async function maybeDispatchAmaClosureFor({
             return { dispatched: false, reason: 'background-pr-state-changed' };
           }
           if (live?.isDraft) return { dispatched: false, reason: 'background-pr-draft' };
-          if (live?.mergeable !== 'MERGEABLE') {
+          if (live?.mergeable === 'UNKNOWN') {
+            return { dispatched: false, reason: 'background-pr-mergeable-unknown', mergeable: 'UNKNOWN' };
+          }
+          if (live?.mergeable !== 'MERGEABLE' && live?.mergeable !== 'CONFLICTING') {
             return { dispatched: false, reason: 'background-pr-not-mergeable', mergeable: live?.mergeable || null };
           }
           return maybeDispatchAmaCloserImpl({ ...closerArgs });
@@ -1918,7 +1921,11 @@ export async function maybeDispatchAmaClosureFor({
           : new Error(String(backgroundSettled.error || 'background AMA dispatch failed'));
       }
       result = backgroundSettled.result;
-      if (result?.reason === 'background-pr-state-changed' || result?.reason === 'background-pr-not-mergeable') {
+      if (
+        result?.reason === 'background-pr-state-changed' ||
+        result?.reason === 'background-pr-not-mergeable' ||
+        result?.reason === 'background-pr-mergeable-unknown'
+      ) {
         result = { ...result, skipMergeAgent: true, retryAfterMs: 30_000 };
       } else if (result?.reason === 'background-pr-draft') {
         // Nothing in the pipeline marks a PR ready for review, so a draft waits

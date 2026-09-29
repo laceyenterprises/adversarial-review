@@ -350,8 +350,8 @@ gh pr view <<PR_URL>> --json number,headRefOid,state,isDraft,mergeable,mergeStat
 
 Identify the newest authoritative adversarial review whose commit is
 `<<REVIEWED_SHA>>`. Remediate every blocking and non-blocking issue from that
-review. If there are merge conflicts or the PR is closed/draft, emit one
-hard-blocker report and stop.
+review. If the PR is closed or draft, emit one hard-blocker report and stop.
+If there are merge conflicts, resolve them according to "Resolving merge conflicts" below.
 
 Commit the remediation:
 

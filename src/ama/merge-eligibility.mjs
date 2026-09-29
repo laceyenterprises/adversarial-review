@@ -240,7 +240,12 @@ export function evaluateMergeEligibility(state = {}) {
 
   if (!verdictEligible(state?.verdict) && !operatorOverride) reasons.push('verdict-not-eligible');
   if (!requiredChecksGreen(state?.requiredChecks, state?.requiredCheckContexts)) reasons.push('ci-not-green');
-  if (!prMergeable(state)) reasons.push('pr-not-mergeable');
+  const mergeableStr = String(state?.mergeable ?? '').toUpperCase();
+  if (mergeableStr === 'UNKNOWN') {
+    reasons.push('pr-mergeability-unknown');
+  } else if (!prMergeable(state)) {
+    reasons.push('pr-not-mergeable');
+  }
   if (!branchProtectionRequiresGate(state)) reasons.push('branch-protection-missing-gate');
   if (!headMatches(state)) reasons.push('stale-head');
   if (state?.leaseHeld !== true) reasons.push('lease-not-held');

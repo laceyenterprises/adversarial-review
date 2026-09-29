@@ -338,8 +338,8 @@ test('queued hammer dispatch names a draft and an unmergeable PR instead of a st
       expect: { reason: 'background-pr-draft', needsOperator: true, operatorReason: 'pr-is-draft' },
     },
     {
-      live: { state: 'OPEN', headSha: HEAD, isDraft: false, mergeable: 'CONFLICTING' },
-      expect: { reason: 'background-pr-not-mergeable', mergeable: 'CONFLICTING', retryAfterMs: 30_000 },
+      live: { state: 'OPEN', headSha: HEAD, isDraft: false, mergeable: 'UNKNOWN' },
+      expect: { reason: 'background-pr-mergeable-unknown', mergeable: 'UNKNOWN', retryAfterMs: 30_000 },
     },
   ];
   for (const { live, expect } of cases) {

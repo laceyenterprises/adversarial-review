@@ -198,7 +198,7 @@ for (const model of ['gpt-6-sol', 'gpt-6.1-sol']) {
         execFileImpl: fleetStatusStub([
           { provider: 'openai', authPath: 'oauth', state: 'ok', models: [
             { model, state, resetAtUtc: '2026-10-04T12:52:00.000Z' },
-            { model: 'unrelated-model', state: 'exhausted' },
+            { model: model === 'gpt-6-sol' ? 'gpt-6.1-sol' : 'gpt-6-sol', state: 'exhausted' },
           ] },
           ANTHROPIC_OK,
         ]),

@@ -47,6 +47,7 @@ test('non-blocking Codex model and effort require the remediator allowlists', ()
     const invalid = resolveNonBlockingCodexModel({ model: 'unknown', reasoningEffort: 'max', env, hqRoot: root });
     assert.equal(invalid.resolvedModel, 'gpt-6-sol');
     assert.equal(invalid.resolvedReasoningLevel, 'low');
+    assert.equal(invalid.modelSource, 'non-blocking-default');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -60,7 +61,8 @@ for (const model of ['gpt-6-sol', 'gpt-6.1-sol']) {
       mkdirSync(join(root, 'registry'));
       writeFileSync(join(root, 'registry', 'worker-classes.json'), JSON.stringify({
         'remediator-codex': {
-          allowedModels: ['gpt-6-sol', 'gpt-6.1-sol'], defaultModel: model,
+          allowedModels: ['gpt-6-sol', 'gpt-6.1-sol'],
+          defaultModel: model === 'gpt-6-sol' ? 'gpt-6.1-sol' : 'gpt-6-sol',
         },
       }));
       const configPath = join(root, 'config.yaml');
@@ -68,20 +70,32 @@ for (const model of ['gpt-6-sol', 'gpt-6.1-sol']) {
       const env = { HQ_ROOT: root, HOME: root, AGENT_OS_CONFIG_PATH: configPath };
       assert.equal(resolveConfiguredNonBlockingCodexModel(env).resolvedModel, model);
       assert.equal(resolveNonBlockingCodexModel({ model, env }).modelSource, 'non-blocking-config');
-      assert.equal(resolveCodexRemediationModel(env), model);
-      for (const key of ['ADVERSARIAL_REMEDIATION_CODEX_MODEL', 'CODEX_REMEDIATION_MODEL', 'CODEX_MODEL_ID']) {
-        assert.equal(resolveCodexRemediationModel({ ...env, [key]: model }), model);
-      }
+      assert.notEqual(resolveCodexRemediationModel(env), model);
       const promptPath = join(root, 'prompt.md');
       writeFileSync(promptPath, 'fix the PR');
+      for (const key of ['ADVERSARIAL_REMEDIATION_CODEX_MODEL', 'CODEX_REMEDIATION_MODEL', 'CODEX_MODEL_ID']) {
+        const pinnedEnv = { ...env, [key]: model };
+        assert.equal(resolveCodexRemediationModel(pinnedEnv), model);
+        const pinnedRecord = spawnCodexRemediationWorker({
+          workspaceDir: root, promptPath, outputPath: join(root, 'out.txt'),
+          logPath: join(root, 'worker.log'), replyPath: join(root, 'reply.json'),
+          hqRoot: root, sourceEnv: pinnedEnv, enforceHarnessIdentity: false,
+          spawnImpl: () => ({ pid: 4141, unref() {} }),
+        });
+        assert.equal(pinnedRecord.resolvedModel, model);
+        assert.equal(pinnedRecord.modelSource, 'env');
+      }
       const record = spawnCodexRemediationWorker({
         workspaceDir: root, promptPath, outputPath: join(root, 'out.txt'),
         logPath: join(root, 'worker.log'), replyPath: join(root, 'reply.json'),
-        hqRoot: root, sourceEnv: env, enforceHarnessIdentity: false,
+        hqRoot: root, sourceEnv: env,
+        modelResolution: resolveConfiguredNonBlockingCodexModel(env),
+        enforceHarnessIdentity: false,
         spawnImpl: () => ({ pid: 4141, unref() {} }),
       });
       assert.equal(record.resolvedModel, model);
-      assert.deepEqual(record.command.slice(1, 4), ['exec', '--model', model]);
+      assert.equal(record.modelSource, 'non-blocking-config');
+      assert.deepEqual(record.command.slice(1, 6), ['exec', '--model', model, '-c', 'model_reasoning_effort=low']);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

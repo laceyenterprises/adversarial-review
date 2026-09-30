@@ -1059,6 +1059,7 @@ test('readActiveDagRunsForPlan filters sqlite rows to the plan and live states',
 test('active DAG reads retry transient failures, stop on permanent errors, and fail closed at cap', () => {
   for (const failure of [
     { status: null, error: { code: 'ETIMEDOUT' } },
+    { status: null, error: { code: 'EAGAIN', message: 'spawnSync psql EAGAIN' } },
     { status: 2, stderr: 'connection refused' },
   ]) {
     for (const recover of [true, false]) {

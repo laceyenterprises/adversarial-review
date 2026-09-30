@@ -598,7 +598,7 @@ function buildPostgresSpawnConfig(target) {
 }
 
 function isTransientPostgresError(error) {
-  return /^(?:ETIMEDOUT|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|EAI_AGAIN|EIO)$/.test(String(error?.code || ''))
+  return /^(?:ETIMEDOUT|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|EAI_AGAIN|EAGAIN|EIO)$/.test(String(error?.code || ''))
     || /connection (?:refused|reset|timed out)|timeout expired|TLS handshake timeout|SSL (?:SYSCALL error|connection has been closed unexpectedly)|server closed the connection unexpectedly|could not (?:connect|translate host name)|too many clients|database system is (?:starting up|shutting down|in recovery)/i.test(String(error?.message || ''));
 }
 

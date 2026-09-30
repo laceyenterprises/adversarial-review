@@ -324,3 +324,21 @@ test('operator reroute defaults to preview, apply uses existing exact-head retri
   }), /terminal PR/);
   assert.equal(calls.length, 1);
 });
+
+test('operator reroute passes root-dir to ledger lookup and exact-head retrigger', async () => {
+  const reads = [];
+  const retriggers = [];
+  const rootDir = '/fixture/alternate-checkout';
+  const deps = {
+    fetchPr: () => ({ state: 'OPEN', headRefOid: headSha, title: '[claude-code] fixture' }),
+    readProvenance: options => { reads.push(options); return { ok: true, actualHarness: 'codex' }; },
+    stdout: { write: () => {} },
+    retrigger: args => { retriggers.push(args); return 0; },
+  };
+  await reroute(['--repo', 'org/repo', '--pr', '12', '--root-dir', rootDir], deps);
+  await reroute(['--repo', 'org/repo', '--pr', '12', '--root-dir', rootDir,
+    '--apply', '--reason', 'fixture'], deps);
+  assert.deepEqual(reads, Array(2).fill({ repo: 'org/repo', prNumber: 12, headSha, rootDir }));
+  assert.equal(retriggers.length, 1);
+  assert.equal(retriggers[0][retriggers[0].indexOf('--root-dir') + 1], rootDir);
+});

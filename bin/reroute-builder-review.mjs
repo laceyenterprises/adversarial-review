@@ -29,7 +29,7 @@ export async function main(argv, {
   }
   const live = await fetchPr(values.repo, pr);
   if (live.state !== 'OPEN') throw new Error('refusing to reroute a terminal PR');
-  const provenance = readProvenance({ repo: values.repo, prNumber: pr, headSha: live.headRefOid });
+  const provenance = readProvenance({ repo: values.repo, prNumber: pr, headSha: live.headRefOid, rootDir: values['root-dir'] });
   const result = reconcileBuilderClass({ builderClass: builderClassFromTitle(live.title) }, provenance);
   if (result.finding?.name !== 'builder_class_mismatch') throw new Error('no confirmed ledger/title builder mismatch');
   stdout.write(`${JSON.stringify({ headSha: live.headRefOid, ...result.finding, apply: !!values.apply })}\n`);

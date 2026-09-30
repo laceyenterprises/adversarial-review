@@ -6112,7 +6112,7 @@ test('AMA merge_authority public docs list the Node loader worker_class enum', (
   const enumMatch = source.match(/worker_class:\s*\{[\s\S]*?__enum:\s*\[([^\]]+)\]/);
   assert.ok(enumMatch, 'expected merge_authority.worker_class enum in config-loader schema');
   const enumValues = Array.from(enumMatch[1].matchAll(/'([^']+)'/g), (match) => match[1]);
-  assert.deepEqual(enumValues, ['codex', 'claude-code', 'hammer', 'hammer-claude', 'gemini']);
+  assert.deepEqual(enumValues, ['codex', 'claude-code', 'hammer', 'hammer-corp', 'hammer-claude', 'gemini']);
 
   for (const relativePath of [
     'projects/adversarial-merge-authority/SPEC.md',
@@ -7296,4 +7296,33 @@ test('QUOTAROUTE horizon accepts checked-in config and rejects invalid values', 
       assert.throws(() => loadConfig({ topPath: top, env: {} }));
     }
   } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+
+test('CCX-11 accepts hammer-corp fallback while preserving default and rejecting unknown', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\n');
+    assert.deepEqual(loadConfig({ topPath: top, env: {} }).getMergeAuthorityConfig().workerClassFallback, ['hammer-claude']);
+    writeFile(top, 'version: 1\nroles:\n  adversarial:\n    merge_authority:\n      worker_class_fallback: [hammer-corp]\n');
+    assert.deepEqual(loadConfig({ topPath: top, env: {} }).getMergeAuthorityConfig().workerClassFallback, ['hammer-corp']);
+    writeFile(top, 'version: 1\nroles:\n  adversarial:\n    merge_authority:\n      worker_class_fallback: [unknown-closer]\n');
+    assert.throws(() => loadConfig({ topPath: top, env: {} }));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('CCX-11 accepts hammer-corp primary closer in strict and runtime loaders', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\nroles:\n  adversarial:\n    merge_authority:\n      worker_class: hammer-corp\n');
+    for (const loader of [loadConfig, loadConfigRuntime]) {
+      assert.equal(loader({ topPath: top, env: {} }).getMergeAuthorityConfig().workerClass, 'hammer-corp');
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });

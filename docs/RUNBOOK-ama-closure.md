@@ -1395,3 +1395,8 @@ diagnostic list.
    AMA-06A's admit gate lets it through.
 
 The full SPEC reference: §4.8 coexistence table + §6 AC#9 rollback.
+
+CCX-11 (2026-09-30): `hammer-corp` is an accepted primary/fallback hammer class on
+the second Codex OAuth account. It keeps the hammer route and merge-capability
+identity. The fallback default remains `[hammer-claude]`; account fallback
+selection and activation are governed by credential-capacity-expansion CCX-13.

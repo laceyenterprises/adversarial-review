@@ -13,11 +13,13 @@ import { DUPLICATE_FAMILY_UNRESOLVED_REASON } from '../src/duplicate-family-gate
 // keyed on the literal string 'hammer', so a `worker_class = hammer-claude`
 // deploy parked every PR. Both classes must engage every hammer route gate.
 
-test('isHammerWorkerClass accepts both hammer classes and rejects everything else', () => {
+test('isHammerWorkerClass accepts all hammer classes and rejects everything else', () => {
   assert.equal(isHammerWorkerClass('hammer'), true);
+  assert.equal(isHammerWorkerClass('hammer-corp'), true);
   assert.equal(isHammerWorkerClass('hammer-claude'), true);
   // Whitespace tolerance (the config value is trimmed at every gate).
   assert.equal(isHammerWorkerClass('  hammer-claude  '), true);
+  assert.equal(isHammerWorkerClass('  hammer-corp  '), true);
 
   assert.equal(isHammerWorkerClass('codex'), false);
   assert.equal(isHammerWorkerClass('claude-code'), false);
@@ -28,7 +30,7 @@ test('isHammerWorkerClass accepts both hammer classes and rejects everything els
 });
 
 test('HAMMER_WORKER_CLASSES is the frozen canonical set', () => {
-  assert.deepEqual([...HAMMER_WORKER_CLASSES], ['hammer', 'hammer-claude']);
+  assert.deepEqual([...HAMMER_WORKER_CLASSES], ['hammer', 'hammer-corp', 'hammer-claude']);
   assert.equal(Object.isFrozen(HAMMER_WORKER_CLASSES), true);
 });
 
@@ -113,3 +115,32 @@ test('cleanupHammerCloserWorker still short-circuits for non-hammer classes', as
   assert.equal(result, null, 'a non-hammer closer must not be torn down by the hammer path');
   assert.equal(called, false, 'no teardown exec may run for a non-hammer class');
 });
+
+test('cleanupHammerCloserWorker route gate now engages for hammer-corp', async () => {
+  const calls = [];
+  const execFileImpl = async (bin, args) => {
+    calls.push({ bin, args });
+    return { stdout: '', stderr: '' };
+  };
+  const logger = { info() {}, warn() {}, error() {} };
+
+  const result = await __testables__.cleanupHammerCloserWorker({
+    prNumber: 786,
+    workerClass: 'hammer-corp',
+    hqPath: '/fake/hq',
+    hqRoot: '/fake/hq-root',
+    execFileImpl,
+    logger,
+    reason: 'unit-test',
+  });
+
+  assert.notEqual(result, null, 'hammer-corp must engage the teardown, not return null');
+  assert.equal(result.ok, true);
+  assert.equal(result.workerId, 'hammer-ama-pr-786');
+  assert.equal(calls.length, 1, 'the teardown exec must actually run for hammer-corp');
+  assert.deepEqual(
+    calls[0].args,
+    ['worker', 'tear-down', 'hammer-ama-pr-786', '--force', '--root', '/fake/hq-root'],
+  );
+});
+

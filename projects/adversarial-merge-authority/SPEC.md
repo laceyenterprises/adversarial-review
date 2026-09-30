@@ -500,3 +500,8 @@ Supported closer worker classes are `codex`, `claude-code`, `hammer`,
 class as `Closed-By: <configured-worker-class>-closer (adversarial-pipe-mode)`,
 except HAM terminal-remediation commits, which use the exact
 `Closed-By: hammer (adversarial-pipe-mode)` trailer from §1.1.1.
+
+CCX-11 (2026-09-30): `hammer-corp` is an accepted primary/fallback hammer class on
+the second Codex OAuth account. It keeps the hammer route and merge-capability
+identity. The fallback default remains `[hammer-claude]`; account fallback
+selection and activation are governed by credential-capacity-expansion CCX-13.

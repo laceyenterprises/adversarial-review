@@ -11,6 +11,7 @@ import {
   describeSuperSmallDecision,
   resolveSingleReviewPolicy,
 } from '../src/super-small-classifier.mjs';
+import { fetchPRDiffFromFilesApi } from '../src/reviewer-diff-fetch.mjs';
 import { FORCE_FULL_REVIEW_LABEL, SLIM_REVIEW_DENY_PREFIXES_ENV } from '../src/slim-review-eligibility.mjs';
 
 function policy(overrides = {}) {
@@ -436,4 +437,16 @@ test('an unparseable diff header refuses the lane instead of shrinking the file 
   });
   assert.equal(decision.superSmall, false);
   assert.deepEqual(codes(decision), [SUPER_SMALL_REFUSAL.CHANGED_FILES_UNKNOWN]);
+});
+
+test('oversized Files API fallback without a patch never receives single review', async () => {
+  const diff = await fetchPRDiffFromFilesApi('org/repo', 7, 'a'.repeat(40), {
+    execFileImpl: async () => { throw new Error('unexpected raw-file lookup'); },
+    execGhWithRetryImpl: async () => ({ stdout: JSON.stringify([{ filename: 'src/application.mjs', status: 'modified', additions: 2000, deletions: 1800, changes: 3800 }]) }),
+    recordApiCallImpl: () => {}, apiStatusFromErrorImpl: () => 500,
+    awaitThrottleIfNeededImpl: async () => {}, log: { warn() {} },
+  });
+  const decision = classifySuperSmallForDiff({ diff: String(diff), policy: policy() });
+  assert.equal(decision.superSmall, false);
+  assert.ok(codes(decision).includes(SUPER_SMALL_REFUSAL.CHANGED_FILES_UNKNOWN));
 });

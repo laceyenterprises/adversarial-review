@@ -1648,3 +1648,19 @@ test('reviewer capture coerces unknown verdict to NULL so the CHECK does not abo
   assert.equal(row.gh_comment_id, '6003');
   assert.ok(row.body_captured_at);
 });
+
+
+test('posted-body capture preserves a single-review decision independently of telemetry', async () => {
+  const rootDir = makeRootDir();
+  const head = 'b'.repeat(40);
+  const pass = seedPass(rootDir, { headSha: head });
+  const singleReview = { applied: true, basis: 'small-change', stats: { files: 1 } };
+  await captureReviewerBodyAfterPost(rootDir, {
+    ...pass, reviewerModel: 'codex', reviewerHeadSha: head,
+    reviewBody: '## Verdict\nComment only', verdict: 'comment-only', singleReview,
+    requireGitHubArtifact: true, knownGitHubArtifact: { id: 123, commitId: head },
+  });
+  const row = readPass(rootDir, pass);
+  assert.deepEqual(JSON.parse(row.metadata_json).singleReview, singleReview);
+  assert.equal(row.gh_comment_id, '123');
+});

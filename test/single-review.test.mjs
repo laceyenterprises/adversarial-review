@@ -1,5 +1,6 @@
 // SINGLEREVIEW-01: a super-small PR gets one review round, then the hammer.
 import test from 'node:test';
+import { persistSingleReviewDecision } from '../src/reviewer-execution-pass.mjs';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -481,3 +482,38 @@ function createdJob(rootDir) {
   const [name] = readdirSync(dir).filter((entry) => entry.endsWith('.json'));
   return JSON.parse(readFileSync(join(dir, name), 'utf8'));
 }
+
+
+test('posted-pass metadata preserves single review when latency telemetry is unavailable', (t) => {
+  const rootDir = tempRoot(t);
+  const singleReview = { applied: true, basis: 'small-change', stats: { files: 1 } };
+  const reaped = queueFollowUpForRecoveredPostedReview({
+    rootDir,
+    row: { repo: REPO, pr_number: PR, head_sha: HEAD, attempt_number: 1,
+      body_md: FINDINGS_BODY, reviewer_model: 'claude',
+      ended_at: '2026-09-29T10:00:00.000Z', metadata_json: JSON.stringify({ singleReview }) },
+    reviewPostedAt: '2026-09-29T10:00:00.000Z',
+    resolveHandoffConfigImpl: () => ({ enabled: false }),
+    readSingleReviewDecisionImpl: () => { throw new Error('telemetry is unavailable'); },
+  });
+  assert.equal(reaped.queued, true);
+  const job = createdJob(rootDir);
+  assert.equal(job.singleReview.applied, true);
+  assert.equal(job.singleReview.basis, singleReview.basis);
+  assert.deepEqual(job.singleReview.stats, singleReview.stats);
+  assert.equal(job.remediationPlan.currentRound, job.remediationPlan.maxRounds);
+});
+
+test('single-review recovery evidence is required and retries transient locks', () => {
+  let calls = 0;
+  const args = { rootDir: '/unused', repo: REPO, prNumber: PR, attemptNumber: 1,
+    reviewerClass: 'codex', passKind: 'first-pass', headSha: HEAD, singleReview: APPLIED,
+    retryOptions: { delaysMs: [0], sleepImpl() {}, log: { warn() {} } } };
+  const result = persistSingleReviewDecision({ ...args, beginReviewerPassImpl: (_root, input) => {
+    if (++calls === 1) throw Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' });
+    return input;
+  } });
+  assert.equal(calls, 2);
+  assert.equal(result.metadata.singleReview.applied, true);
+  assert.throws(() => persistSingleReviewDecision({ ...args, beginReviewerPassImpl: () => { throw new Error('disk I/O failure'); } }), /disk I\/O failure/);
+});

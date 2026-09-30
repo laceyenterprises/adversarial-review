@@ -362,6 +362,11 @@ export function classifySuperSmall({ changedFiles = null, labels = [], author = 
 export function superSmallFilesFromDiff(diffText) {
   const entries = parseDiffEntries(diffText);
   if (entries.some((entry) => !entry.parsed)) return null;
+  if (entries.some((entry) => {
+    const facts = diffEntryFacts(entry.patch);
+    return !isBinaryPatch(entry.patch) && !/^@@ /m.test(entry.patch)
+      && !facts.gitlink && !facts.renamed && !facts.copied && !facts.modeChanged;
+  })) return null;
   return entries.map((file) => {
     const binary = isBinaryPatch(file.patch);
     const { added, removed } = binary ? { added: 0, removed: 0 } : countPatchLines(file.patch);

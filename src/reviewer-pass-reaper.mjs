@@ -147,8 +147,10 @@ function queueFollowUpForRecoveredPostedReview({
   // SINGLEREVIEW-01: the dead reviewer's single-review decision, read back
   // from its durable review-mode row. Only a PR with no completed rounds can
   // have had one; a miss means normal rounds.
+  const capturedDecision = parseMetadataJson(row.metadata_json).singleReview;
   const singleReview = Number(priorLedger.completedRoundsForPR || 0) === 0
-    ? readSingleReviewDecisionImpl({ rootDir, repo, prNumber, headSha: row.head_sha || null, attemptNumber: row.attempt_number ?? null })
+    ? (capturedDecision?.applied === true ? capturedDecision
+      : readSingleReviewDecisionImpl({ rootDir, repo, prNumber, headSha: row.head_sha || null, attemptNumber: row.attempt_number ?? null }))
     : null;
   const { jobPath, duplicateOf } = createFollowUpJobImpl({
     rootDir,

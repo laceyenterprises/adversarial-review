@@ -1292,3 +1292,12 @@ gate also remains pending while any same-PR remediation job is in progress.
 Both the drain and claim-time early stop now write `no-remediation-required`.
 `review-settled` remains a readable historical stop code for retrigger,
 latency, and hammer-wake recovery.
+
+
+Single-review crash recovery first uses the decision persisted before review
+execution and posting in `reviewer_passes.metadata_json.singleReview`, then the keyed
+review-mode latency event for older passes. A telemetry outage therefore does
+not restore remediation rounds to a single review. Required recovery writes
+retry transient SQLite locks and fail closed before a GitHub post if storage
+remains unavailable. A nonbinary diff entry without a hunk refuses single
+review; the oversized Files API fallback cannot count omitted patches as zero.

@@ -155,3 +155,12 @@ Settle retries transient SQLite contention before recording `pending`.
 `metadata_json.launchRequestId`, then fills `worker_run_id` once the session
 ledger exposes the matching run. This prevents a request-shaped reattach token
 from contaminating launch attribution.
+
+
+`metadata_json.singleReview` records the applied single-review decision
+(`applied`, `basis`, `stats`) before review execution or GitHub posting.
+Transient SQLite locks are retried; a permanent persistence failure aborts
+the pass before posting. Body capture also preserves the decision alongside
+the verified GitHub artifact. Reviewer crash recovery prefers this pass-bound
+evidence over the best-effort review-mode latency event. Older passes without
+it still use the head-and-attempt-keyed event; neither source means normal rounds.

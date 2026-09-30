@@ -492,6 +492,7 @@ async function captureReviewerBodyAfterPost(rootDir, {
   botTokenEnv,
   reviewBody,
   execution = null,
+  singleReview = null,
   verdict,
   passKind,
   postedAt = new Date().toISOString(),
@@ -504,6 +505,8 @@ async function captureReviewerBodyAfterPost(rootDir, {
   sleepImpl = sleep,
   allowExistingBodyUpdate = false,
 } = {}) {
+  const singleReviewPatch = singleReview?.applied === true
+    ? { singleReview: { applied: true, basis: singleReview.basis || null, stats: singleReview.stats || null } } : {};
   let ghCommentId = null;
   try {
     if (knownGitHubArtifact) {
@@ -563,6 +566,7 @@ async function captureReviewerBodyAfterPost(rootDir, {
                 capturedAt: postedAt,
                 allowExistingBodyUpdate: true,
                 metadataPatch: {
+                  ...singleReviewPatch,
                   reviewBodyCapture: {
                     status: REVIEW_BODY_CAPTURE_STATUS_PENDING,
                     githubArtifactRequired: true,
@@ -598,6 +602,7 @@ async function captureReviewerBodyAfterPost(rootDir, {
               capturedAt: postedAt,
               allowExistingBodyUpdate: true,
               metadataPatch: {
+                  ...singleReviewPatch,
                 reviewBodyCapture: {
                   status: REVIEW_BODY_CAPTURE_STATUS_PENDING,
                   githubArtifactRequired: true,
@@ -630,6 +635,7 @@ async function captureReviewerBodyAfterPost(rootDir, {
       allowExistingBodyUpdate,
       metadataPatch: requireGitHubArtifact
         ? {
+            ...singleReviewPatch,
             reviewBodyCapture: {
               status: REVIEW_BODY_CAPTURE_STATUS_VERIFIED,
               githubArtifactRequired: true,
@@ -637,7 +643,7 @@ async function captureReviewerBodyAfterPost(rootDir, {
               verifiedAt: new Date().toISOString(),
             },
           }
-        : null,
+        : singleReviewPatch,
       log,
     });
     return { ghCommentId, verifiedGitHubArtifact: ghCommentId !== null };

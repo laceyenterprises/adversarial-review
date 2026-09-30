@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { createEmptySqliteDb, createSessionLedgerDb } from './helpers/session-ledger-fixtures.mjs';
 import {
@@ -886,6 +887,55 @@ test('readWorkerRunUsageFromLedger treats historical sqlite ledgers without guar
   assert.equal(result.row.token_usage_guardrail, null);
   assert.equal(result.row.total_cache_read_tokens, 3);
   assert.equal(result.row.total_cache_write_tokens, 2);
+});
+
+test('queryPostgresRows enforces readOnly without variables and preserves the unguarded fast path', async () => {
+  // Expose the private helper in a temporary module, without expanding the
+  // production adapter's public interface just for this regression test.
+  const root = tempRoot();
+  try {
+    const sourceUrl = new URL('../src/session-ledger-read-adapter.mjs', import.meta.url);
+    const source = readFileSync(sourceUrl, 'utf8').replace(
+      "'./config-loader.mjs'",
+      JSON.stringify(new URL('./config-loader.mjs', sourceUrl).href),
+    );
+    const modulePath = path.join(root, 'adapter.mjs');
+    writeFileSync(modulePath, `${source}\nexport { queryPostgresRows };\n`);
+    const { queryPostgresRows } = await import(pathToFileURL(modulePath).href);
+    for (const readOnly of [true, false]) {
+      let calls = 0;
+      const result = queryPostgresRows(
+        { backend: 'postgres', databaseName: 'agent_os_ledger' },
+        'SELECT row_to_json(t) FROM dag_runs t;',
+        {
+          readOnly,
+          spawnSyncImpl: (command, args, options) => {
+            calls += 1;
+            assert.equal(command, 'psql');
+            assert.ok(args.includes('ON_ERROR_STOP=1'));
+            if (readOnly) {
+              assert.ok(args.includes('-q'));
+              assert.ok(!args.includes('-c'));
+              assert.match(options.input, /^BEGIN READ ONLY;$/m);
+              assert.match(options.input, /^COMMIT;$/m);
+              assert.match(options.input, /^SELECT row_to_json\(t\) FROM dag_runs t;$/m);
+              assert.doesNotMatch(options.input, /\\set/);
+            } else {
+              assert.ok(!args.includes('-q'));
+              assert.equal(args[args.indexOf('-c') + 1], 'SELECT row_to_json(t) FROM dag_runs t;');
+              assert.equal(options.input, undefined);
+            }
+            return { status: 0, stdout: '{"state":"running"}\n', stderr: '' };
+          },
+        },
+      );
+      assert.equal(calls, 1);
+      assert.equal(result.ok, true);
+      assert.deepEqual(result.rows, [{ state: 'running' }]);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('readActiveDagRunsForPlan runs one bounded SELECT inside a read-only transaction on postgres', () => {

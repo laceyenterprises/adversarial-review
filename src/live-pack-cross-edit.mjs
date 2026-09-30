@@ -447,6 +447,7 @@ async function resolveLivePackRemediationContext({
   branch = '',
   title = '',
   listPrFilesImpl = listPullRequestFiles,
+  loadPrTitleImpl = null,
   fetchFileAtRefImpl = fetchRepoFileAtRef,
   readActiveDagRunsImpl = defaultReadActiveDagRuns,
 } = {}) {
@@ -454,6 +455,9 @@ async function resolveLivePackRemediationContext({
     const paths = await listPrFilesImpl(repo, prNumber);
     const touched = touchedPacksFromPaths(paths, { guardedOnly: false });
     if (touched.size === 0) return '';
+    // Existing durable jobs have no PR title. Resolve it only for pack
+    // edits, and let a failed metadata read render the fail-closed block.
+    if (!title && loadPrTitleImpl) title = await loadPrTitleImpl(repo, prNumber);
     const prTicketIds = extractPrTicketIds({ branch, title });
     const packs = [];
     for (const [slug, touchedFiles] of touched) {
@@ -525,14 +529,25 @@ async function applyLivePackCrossEditReview(reviewText, {
 
 // Remediation entry point for a follow-up job. `execFileImpl` is threaded to
 // every gh call so the consumer's injected runner (and its tests) own I/O.
-function resolveLivePackContextForJob({ job, execFileImpl = execFileAsync } = {}) {
+function resolveLivePackContextForJob({ job, execFileImpl = execFileAsync, readActiveDagRunsImpl = defaultReadActiveDagRuns } = {}) {
   return resolveLivePackRemediationContext({
     repo: job?.repo,
     prNumber: job?.prNumber,
     baseBranch: job?.baseBranch,
     headRef: job?.revisionRef || job?.branch || '',
     branch: job?.branch || '',
+    title: job?.prTitle || job?.title || '',
+    readActiveDagRunsImpl,
     listPrFilesImpl: (repo, prNumber) => listPullRequestFiles(repo, prNumber, { execFileImpl }),
+    loadPrTitleImpl: async (repo, prNumber) => {
+      const { stdout } = await execGhWithRetry({
+        execFileImpl,
+        args: ['api', `repos/${repo}/pulls/${prNumber}`],
+      });
+      const title = normalizeText(JSON.parse(String(stdout)).title);
+      if (!title) throw new Error('PR metadata has no title');
+      return title;
+    },
     fetchFileAtRefImpl: (repo, path, ref) => fetchRepoFileAtRef(repo, path, ref, { execFileImpl }),
   });
 }

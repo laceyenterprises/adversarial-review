@@ -660,22 +660,21 @@ function queryPostgresRows(target, jsonSql, { spawnSyncImpl = spawnSync, psqlVar
     // Fix: when psqlVars are supplied, switch to stdin (`-f /dev/stdin`
     // shape via the spawnSyncImpl `input` option) and prepend a
     // `\set name 'value'` line per variable. Empty psqlVars keeps the
-    // `-c` fast path (no behavioral change for callers that don't
-    // declare variables).
+    // `-c` fast path unless a read-only transaction is requested.
     //
     // `readOnly` wraps the statement in `BEGIN READ ONLY; ... COMMIT;` so
     // the server rejects any write, and adds `-q` so psql does not echo the
     // BEGIN/COMMIT command tags into the JSON-per-line stdout. It is a
     // transaction-scoped guard, never a session-level SET, so it is safe
-    // through pgbouncer in transaction-pooling mode. It requires the stdin
-    // script path, so callers pass at least one psqlVar with it.
+    // through pgbouncer in transaction-pooling mode. It always selects the
+    // stdin script path, including when no psql variables are supplied.
     const args = ['--no-psqlrc', '-v', 'ON_ERROR_STOP=1'];
     if (readOnly) args.push('-q');
     for (const [name, value] of psqlVars) {
       args.push('-v', `${name}=${value}`);
     }
     let result;
-    if (psqlVars.length > 0) {
+    if (readOnly || psqlVars.length > 0) {
       const setStanzas = psqlVars
         .map(([name, value]) =>
           // Escape any single-quote in the value to keep the psql

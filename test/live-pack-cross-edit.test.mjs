@@ -450,3 +450,59 @@ test('resolveLivePackContextForJob routes every gh read through the injected exe
   assert.equal(ghCalls.length, 1);
   assert.ok(ghCalls[0].includes('--paginate'));
 });
+
+test('resolveLivePackContextForJob recognizes title-only own-pack tickets in new and existing jobs', async () => {
+  for (const titleFields of [
+    { prTitle: '[codex] MEG-02: runner', title: '[codex] TOC-06: other' },
+    { title: '[codex] MEG-02: runner' },
+    {},
+  ]) {
+    const calls = [];
+    const context = await resolveLivePackContextForJob({
+      job: {
+        repo: REPO, prNumber: 7392, baseBranch: 'main', branch: 'feature/gym-runner',
+        ...titleFields,
+      },
+      readActiveDagRunsImpl: makeLedger().impl,
+      execFileImpl: async (command, args) => {
+        assert.equal(command, 'gh');
+        const target = args.find((arg) => String(arg).startsWith('repos/'));
+        calls.push(target);
+        if (target === `repos/${REPO}/pulls/7392/files`) {
+          return { stdout: JSON.stringify([{ filename: CROSS_EDIT_PATHS[0] }]) };
+        }
+        if (target === `repos/${REPO}/pulls/7392`) {
+          return { stdout: JSON.stringify({ title: '[codex] MEG-02: runner' }) };
+        }
+        if (target === `repos/${REPO}/contents/projects/model-efficiency-gym/plan.json?ref=main`) {
+          return { stdout: JSON.stringify(PLANS['projects/model-efficiency-gym/plan.json']) };
+        }
+        throw new Error(`unexpected gh call ${target}`);
+      },
+    });
+    assert.match(context, /"ownPack": true/);
+    assert.match(context, /"live": true/);
+    assert.match(context, new RegExp(MEG_RUN));
+    assert.equal(calls.includes(`repos/${REPO}/pulls/7392`), Object.keys(titleFields).length === 0);
+  }
+});
+
+test('resolveLivePackContextForJob fails closed when an existing job cannot resolve its PR title', async () => {
+  for (const metadata of [null, '{broken', '{}']) {
+    const context = await resolveLivePackContextForJob({
+      job: { repo: REPO, prNumber: 7392, baseBranch: 'main', branch: 'feature/gym-runner' },
+      readActiveDagRunsImpl: () => { throw new Error('must not query ledger after metadata failure'); },
+      execFileImpl: async (_command, args) => {
+        const target = args.find((arg) => String(arg).startsWith('repos/'));
+        if (target === `repos/${REPO}/pulls/7392/files`) {
+          return { stdout: JSON.stringify([{ filename: CROSS_EDIT_PATHS[0] }]) };
+        }
+        assert.equal(target, `repos/${REPO}/pulls/7392`);
+        if (metadata === null) throw new Error('PR metadata unavailable');
+        return { stdout: metadata };
+      },
+    });
+    assert.match(context, /Treat every build pack under `projects\/` as live/);
+    assert.doesNotMatch(context, /"ownPack"/);
+  }
+});

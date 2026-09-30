@@ -140,7 +140,8 @@ function getReviewerRouteTable({
 }
 
 function normalizeBuilderClass(builderClassInput, routeTable = ROUTE_BY_BUILDER_CLASS) {
-  const builderClass = String(builderClassInput || '').trim().toLowerCase();
+  const raw = String(builderClassInput || '').trim().toLowerCase();
+  const builderClass = ({ 'codex-corp': 'codex', 'remediator-codex': 'codex', 'remediator-codex-corp': 'codex', 'remediator-claude': 'claude-code' })[raw] || raw;
   return Object.prototype.hasOwnProperty.call(routeTable || {}, builderClass)
     ? builderClass
     : null;
@@ -154,6 +155,8 @@ function normalizeReviewerModel(reviewerInput) {
     case 'claude-code':
       return 'claude';
     case 'codex':
+    case 'codex-corp':
+    case 'remediator-codex-corp':
       return 'codex';
     case 'gemini':
       return 'gemini';
@@ -277,6 +280,11 @@ function applyGeminiReviewerRoute({
   const normalizedBuilder =
     normalizeBuilderClass(builderClass, routeTable) || normalizeBuilderClass(baseRoute.builderClass, routeTable);
   const baseIsGemini = normalizeReviewerModel(baseRoute.reviewerModel) === 'gemini';
+  if (normalizeReviewerModel(baseRoute.reviewerModel) === 'codex'
+    && isCrossModelReviewWaived(normalizedBuilder, 'codex')) {
+    const crossModel = routeTable[normalizedBuilder];
+    return { ...baseRoute, reviewerModel: crossModel.reviewerModel, botTokenEnv: crossModel.botTokenEnv };
+  }
 
   // Hard guard: gemini must NEVER review a gemini-built PR, no matter how the
   // gemini reviewer was selected. Fall back to the per-tag cross-model route.

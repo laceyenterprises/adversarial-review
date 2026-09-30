@@ -126,7 +126,7 @@ import { applyPreSpawnLifecycleGate } from './follow-up-stuck-claim-sweep.mjs';
 import { detectRemediationQuotaEvidence } from './remediation-quota-evidence.mjs';
 import { settleMissingRemediationArtifact } from './remediation-missing-artifact.mjs';
 import { settleQuotaExhaustedRemediation } from './remediation-quota-hold.mjs';
-import { remediatorFallbackAudit, resolveClaimedRemediatorRouting } from './remediation-worker-class-fallback.mjs';
+import { normalizeRemediationWorkerClass, remediatorFallbackAudit, resolveClaimedRemediatorRouting } from './remediation-worker-class-fallback.mjs';
 import {
   DEFAULT_REPLIES_ROOT,
   HQ_REMEDIATION_DISPATCH_TRIGGER,
@@ -406,25 +406,6 @@ function assertHqDispatchOwnerMatches(env = process.env) {
 
 // ── Worker-class dispatcher ────────────────────────────────────────────────
 
-function normalizeRemediationWorkerClass(workerClassInput) {
-  const workerClass = String(workerClassInput || '').trim().toLowerCase();
-  if (!workerClass) return null;
-  switch (workerClass) {
-    case 'codex':
-    case 'codex-remediation':
-      return 'codex';
-    case 'claude':
-    case 'claude-code':
-    case 'claude-code-remediation':
-      return 'claude-code';
-    case 'gemini':
-    case 'gemini-remediation':
-      return 'gemini';
-    default:
-      return null;
-  }
-}
-
 // Cascade-aware default remediator resolver. Consults config.yaml FIRST
 // (module → top-level → *.local) and env LAST per SPEC §3 resolution
 // order. Returns null when no pin is in effect (the per-builder-tag
@@ -598,7 +579,7 @@ function createRemediationRuntime({
         replyPath: request.replyPath,
         launchRequestId: request.launchRequestId,
         jobId: request.jobId,
-        modelResolution: workerClass === 'codex' ? request.modelResolution : null,
+        modelResolution: ['codex', 'remediator-codex-corp'].includes(workerClass) ? request.modelResolution : null,
         requiresWorkflowPush: Boolean(request.requiresWorkflowPush),
         execFileImpl,
         env,
@@ -622,9 +603,9 @@ function createRemediationRuntime({
       };
     }
     if (mode === 'local') {
-      const worker = (workerClass === 'codex'
+      const worker = (['codex', 'remediator-codex-corp'].includes(workerClass)
         ? spawnCodexRemediationWorker
-        : workerClass === 'claude-code'
+        : ['claude-code', 'remediator-claude'].includes(workerClass)
           ? spawnClaudeCodeRemediationWorker
           : workerClass === 'gemini'
             ? spawnGeminiRemediationWorker
@@ -673,6 +654,7 @@ function createRemediationRuntime({
         auditSink: harnessIdentityAuditSink,
         spawnImpl,
         sourceEnv: env,
+        workerClass: ['codex', 'remediator-codex-corp'].includes(workerClass) ? workerClass : undefined,
         now,
       });
       return createLocalRemediationHandle({
@@ -3464,13 +3446,14 @@ async function consumeNextFollowUpJob({
       log,
     });
     workerClass = remediatorRouting.workerClass;
+    jobEnv.CODEX_BROKER_PROVIDER = workerClass === 'remediator-codex-corp' ? 'codex-corp' : 'codex';
     if (remediatorRouting.hold) {
       return holdClaimedJobForCappedRemediator({
         rootDir, jobPath: claimed.jobPath, heldAt: claimed.job.claimedAt,
         routing: remediatorRouting, delayedPendingPaths, log,
       });
     }
-    if (claimed.job.nonBlockingOnly === true && workerClass === 'codex') {
+    if (claimed.job.nonBlockingOnly === true && ['codex', 'remediator-codex-corp'].includes(workerClass)) {
       codexModelResolution = resolveConfiguredNonBlockingCodexModel(jobEnv);
     }
     const remediationMode = resolveRemediationRuntimeMode(claimed.job, {
@@ -3572,7 +3555,7 @@ async function consumeNextFollowUpJob({
     // mintClaudeCodeRemediationBrokerToken only at the production daemon) so the
     // consume hot path stays network-free under test. Keychain transport or an
     // already-present token is left untouched by the mint helper.
-    if (!hqDispatchEnabled && workerClass === 'claude-code' && mintClaudeCodeRemediationTokenImpl) {
+    if (!hqDispatchEnabled && ['claude-code', 'remediator-claude'].includes(workerClass) && mintClaudeCodeRemediationTokenImpl) {
       claudeModelResolution = resolveClaudeRemediationModel(jobEnv);
       // Pass `log` so the mint's bounded transient-retry ladder surfaces a
       // broker bounce in the daemon log instead of retrying silently.

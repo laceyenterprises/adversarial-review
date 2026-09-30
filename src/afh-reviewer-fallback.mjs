@@ -61,6 +61,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   isGroundedProviderState,
+  harnessCapFromStatuses,
   parseHqFleetQuotaStatus,
 } from './fleet-quota-status.mjs';
 import {
@@ -72,6 +73,7 @@ import {
   normalizeBuilderClass,
   normalizeReviewerModel,
 } from './adapters/subject/github-pr/routing.mjs';
+import { resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
 import { resolveClaudeReviewerOAuthTransport } from './claude-reviewer-oauth-transport.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -279,7 +281,7 @@ export function applyClaudeReviewerRuntimeGrounding(grounding, runtimeStatus = n
  * Throws only on unparseable input; `readAfhReviewerGrounding` is the fail-open
  * wrapper every production caller should use.
  */
-export function afhGroundingSnapshotFromStdout(stdout) {
+export function afhGroundingSnapshotFromStdout(stdout, { codexModel = null } = {}) {
   const rows = parseHqFleetQuotaStatus(stdout);
   if (!rows.length) return unavailableGrounding('no-provider-statuses');
   const providers = {};
@@ -289,14 +291,19 @@ export function afhGroundingSnapshotFromStdout(stdout) {
     // Prefer the OAuth auth-path row (the path a native-harness reviewer spawn
     // actually uses); first non-oauth row is the fallback, matching
     // providerAvailabilityFromFleetStatus.
-    const existing = providers[row.provider];
+    const providerKey = row.authPath === 'oauth-corp' ? `${row.provider}/oauth-corp` : row.provider;
+    const existing = providers[providerKey];
     if (existing && !(row.authPath === 'oauth' && existing.authPath !== 'oauth')) continue;
     const softVerdict = row.afhGrounding || null;
-    providers[row.provider] = Object.freeze({
+    const cap = row.provider === 'openai'
+      ? harnessCapFromStatuses(rows, { harness: row.authPath === 'oauth-corp' ? 'codex-corp' : 'codex', model: codexModel })
+      : null;
+    providers[providerKey] = Object.freeze({
       provider: row.provider,
       authPath: row.authPath,
       state: row.state || 'unknown',
-      hardGrounded: isGroundedProviderState(row.state),
+      hardGrounded: isGroundedProviderState(row.state) || cap?.capSource === 'model-exhausted',
+      admitting: cap ? cap.available : row.state === 'ok',
       softGrounded: Boolean(softVerdict?.grounded),
       softVerdict,
     });
@@ -453,7 +460,9 @@ export async function readAfhReviewerGrounding({
   }
   if (!snapshot) {
     try {
-      snapshot = afhGroundingSnapshotFromStdout(stdout);
+      snapshot = afhGroundingSnapshotFromStdout(stdout, {
+        codexModel: resolveRemediationModel('codex-reviewer', { env, pin: env.CODEX_MODEL_ID || null, fallbackModel: null }).resolvedModel,
+      });
     } catch (err) {
       snapshot = unavailableGrounding('fleet-quota-status-unreadable', err);
     }
@@ -655,11 +664,19 @@ export function reviewerModelGrounding(grounding, reviewerModel) {
     };
   }
   if (!grounding?.available || !provider) return base;
-  const entry = grounding.providers?.[provider];
+  let entry = grounding.providers?.[provider];
+  let brokerProvider = model === 'codex' ? 'codex' : null;
+  const corp = grounding.providers?.['openai/oauth-corp'];
+  if (model === 'codex' && (entry?.hardGrounded || entry?.softGrounded)
+    && corp?.admitting && !corp.hardGrounded && !corp.softGrounded) {
+    entry = corp;
+    brokerProvider = 'codex-corp';
+  }
   if (!entry) return { ...base, state: 'missing-provider-status' };
   return {
     ...base,
     state: entry.state,
+    brokerProvider,
     hardGrounded: entry.hardGrounded,
     softGrounded: entry.softGrounded,
     grounded: entry.hardGrounded || entry.softGrounded,
@@ -761,7 +778,7 @@ export function afhReviewerFallbackDecision({
   // An explicit operator reviewer pin outranks the AFH degradation path, exactly
   // as it outranks the gemini default layer. The grounded-pin case is logged by
   // the caller so the operator can see why reviews stopped.
-  if (baseRoute.operatorPinnedReviewer) return notApplied('operator-pinned-reviewer');
+  if (baseRoute.operatorPinnedReviewer) return notApplied('operator-pinned-reviewer', { primary: reviewerModelGrounding(grounding, currentModel) });
 
   const primary = reviewerModelGrounding(grounding, currentModel);
   // Fail open: an unreadable/absent/disabled AFH signal keeps the configured
@@ -801,6 +818,10 @@ export function afhReviewerFallbackDecision({
         continue;
       }
     }
+    if (candidate === 'codex' && isCrossModelReviewWaived(normalizedBuilder, candidate)) {
+      considered.push({ reviewerModel: candidate, selected: false, reason: 'codex-builder-integrity-guard' });
+      continue;
+    }
     const candidateRoute = REVIEWER_ROUTE_BY_MODEL[candidate];
     if (!candidateRoute) {
       considered.push({ reviewerModel: candidate, selected: false, reason: 'no-route-for-model' });
@@ -823,6 +844,7 @@ export function afhReviewerFallbackDecision({
       lastResort: isCrossModelReviewWaived(normalizedBuilder, candidate),
       considered,
       primary,
+      brokerProvider: status.brokerProvider,
       builderClass: normalizedBuilder,
     };
   }
@@ -835,12 +857,19 @@ export function afhReviewerFallbackDecision({
  * when the decision did not fire.
  */
 export function applyAfhReviewerFallbackDecision(baseRoute, decision) {
-  if (!baseRoute || !decision?.applied) return baseRoute;
+  if (!baseRoute) return baseRoute;
+  if (!decision?.applied) {
+    if (decision?.primary?.brokerProvider === 'codex-corp') return { ...baseRoute, codexBrokerProvider: 'codex-corp' };
+    if (decision?.primary?.grounded) return { ...baseRoute, quotaBlocked: true };
+    return baseRoute;
+  }
   const target = REVIEWER_ROUTE_BY_MODEL[decision.to];
   if (!target) return baseRoute;
   return {
     ...baseRoute,
     reviewerModel: target.reviewerModel,
+    codexBrokerProvider: decision.brokerProvider || 'codex',
+    quotaBlocked: false,
     botTokenEnv: target.botTokenEnv,
     afhReviewerFallback: {
       fromReviewerModel: decision.from,

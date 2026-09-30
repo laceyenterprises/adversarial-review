@@ -5483,6 +5483,9 @@ export async function maybeDispatchAmaCloser({
     // configured primary exactly as the pre-HHR path did.
     harnessFallback = { workerClass, fellBack: false, reason: 'harness-fallback-resolver-error', error: String(err?.message || err) };
   }
+  if (harnessFallback?.hold) {
+    return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'all-fallbacks-grounded' });
+  }
   if (harnessFallback?.fellBack === true && harnessFallback.workerClass) {
     dispatchWorkerClass = harnessFallback.workerClass;
     logAmaCloserDispatchEvent(logger, 'ama_closer.harness_fallback', {

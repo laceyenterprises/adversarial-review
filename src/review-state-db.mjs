@@ -23,6 +23,7 @@ import {
   MARK_ARGUS_SECURITY_QUEUED_SQL,
   RECORD_ARGUS_CLASSIFIED_HEAD_SQL,
   SELECT_OPEN_UNROUTABLE_BOT_ROWS_SQL,
+  UPDATE_REVIEW_ROUTING_SQL,
   SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW,
   SQL_COUNT_OPEN_AWAITING_REREVIEW,
   SQL_HAS_COMPLETED_REVIEW_FOR_PR,
@@ -85,7 +86,7 @@ export const stmtCreateFastMergeSkippedReviewRow = db.prepare(
    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'fast_merge_skipped', ?, 'fast_merge_skipped', 0, ?, ?, ?, ?, ?)`
 );
 export const stmtUpdateReviewRouting = db.prepare(
-  'UPDATE reviewed_prs SET reviewer = ?, linear_ticket = COALESCE(?, linear_ticket) WHERE repo = ? AND pr_number = ?'
+  UPDATE_REVIEW_ROUTING_SQL
 );
 export const stmtUpdateReviewLabels = db.prepare(
   'UPDATE reviewed_prs SET labels_json = ? WHERE repo = ? AND pr_number = ?'

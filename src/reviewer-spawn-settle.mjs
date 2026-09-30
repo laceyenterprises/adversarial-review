@@ -33,6 +33,8 @@ import {
   resolveAgyReviewerSubprocessTimeoutMs,
   resolveReviewerTimeoutMs,
 } from './reviewer-timeout.mjs';
+import { isCrossModelReviewWaived, normalizeReviewerModel } from './adapters/subject/github-pr/routing.mjs';
+import { resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
 import { loadRoleConfig, resolveGeminiRuntime } from './role-config.mjs';
 import {
   AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS,
@@ -41,6 +43,8 @@ import {
 } from './agy-reviewer-identities.mjs';
 import {
   isGroundedProviderState,
+  harnessCapFromStatuses,
+  parseHqFleetQuotaStatus,
   providerForQuotaHarness,
 } from './fleet-quota-status.mjs';
 import {
@@ -161,6 +165,7 @@ function resolveReviewerQuotaStatusDir(env = process.env) {
 
 async function readReviewerQuotaDecision({
   reviewerModel,
+  codexBrokerProvider = 'codex',
   env = process.env,
   readdirImpl = readdir,
   readFileImpl = readFile,
@@ -183,6 +188,8 @@ async function readReviewerQuotaDecision({
       try {
         const payload = JSON.parse(await readFileImpl(join(statusDir, file), 'utf8'));
         statuses.push({
+          ...payload,
+          provider,
           authPath: String(payload?.authPath || payload?.auth_path || authPath).trim().toLowerCase(),
           state: String(payload?.state || '').trim().toLowerCase(),
         });
@@ -191,15 +198,20 @@ async function readReviewerQuotaDecision({
         // looking for a valid record; if none exists, the decision fails open.
       }
     }
-    const status = statuses.find((entry) => entry.authPath === 'oauth') || statuses[0];
+    const accountAuthPath = codexBrokerProvider === 'codex-corp' ? 'oauth-corp' : 'oauth';
+    const accountStatuses = statuses.filter((entry) => codexBrokerProvider === 'codex-corp'
+      ? entry.authPath === accountAuthPath : entry.authPath !== 'oauth-corp');
+    const status = accountStatuses.find((entry) => entry.authPath === accountAuthPath) || accountStatuses[0];
     if (!status) {
       return { available: true, state: 'missing-provider-status', provider };
     }
-    return {
-      available: status.state === 'ok' || !isGroundedProviderState(status.state),
-      state: status.state || 'unknown',
-      provider,
-    };
+    const cap = harnessCapFromStatuses(parseHqFleetQuotaStatus(JSON.stringify({ providerStatuses: accountStatuses })), {
+      harness: reviewerModel === 'codex' && codexBrokerProvider === 'codex-corp' ? 'codex-corp' : reviewerModel,
+      model: reviewerModel === 'codex'
+        ? resolveRemediationModel('codex-reviewer', { env, pin: env.CODEX_MODEL_ID || null, fallbackModel: null }).resolvedModel
+        : null,
+    });
+    return { available: !cap.capped, capped: cap.capped, state: cap.state, provider };
   } catch {
     return {
       available: true,
@@ -517,6 +529,7 @@ async function spawnReviewer({
   crossModelReviewWaived = false,
   crossModelReviewWaiverReason = null,
   afhReviewerFallback = null,
+  codexBrokerProvider = 'codex',
   onReviewerPgid = () => {},
   domainId = null, // ARC-18: WATCHER_PRIMARY_DOMAIN_ID stays in watcher; threaded by callers (pollOnce always passes domainId in spawnReviewerArgs). Default is never read.
   reviewerRuntimeAdapterOverride = null,
@@ -532,6 +545,9 @@ async function spawnReviewer({
   onPostOperationSettled = null,
   agyReviewerIdentityPool = getAgyReviewerIdentityPool(),
 }) {
+  if (normalizeReviewerModel(reviewerModel) === 'codex' && isCrossModelReviewWaived(builderTag, reviewerModel)) {
+    return { ok: false, failureClass: 'bug', error: 'Codex-family reviewer cannot review a Codex-family builder' };
+  }
   const activeReviewerRuntimeAdapter = reviewerRuntimeAdapterOverride || reviewerRuntimeState.adapter;
   const normalizedReviewerClass = normalizeReviewerClass(reviewerModel);
   const finalRound = (
@@ -548,6 +564,7 @@ async function spawnReviewer({
   try {
     quotaDecision = await readReviewerQuotaDecisionImpl({
       reviewerModel,
+      codexBrokerProvider,
       env: quotaCheckEnv,
     });
   } catch {
@@ -557,7 +574,7 @@ async function spawnReviewer({
       provider: providerForQuotaHarness(reviewerModel),
     };
   }
-  if (!quotaDecision.available && isGroundedProviderState(quotaDecision.state)) {
+  if (!quotaDecision.available && (quotaDecision.capped || isGroundedProviderState(quotaDecision.state))) {
     const attemptNumber = reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0;
     const startedAt = new Date().toISOString();
     const metadata = {
@@ -691,6 +708,7 @@ async function spawnReviewer({
         crossModelReviewWaived,
         crossModelReviewWaiverReason,
         afhReviewerFallback,
+        codexBrokerProvider,
         ...(agyIdentity ? { agyIdentity } : {}),
         // Persisted in the run record so a restarted watcher keeps this
         // identity out while this review still runs.

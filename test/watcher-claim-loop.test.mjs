@@ -317,7 +317,7 @@ globalThis.fetch = async (...args) => {
 };
 function readRows(db) {
   const rows = db.prepare(
-    'SELECT repo, pr_number, domain_id, subject_external_id, revision_ref, review_status, reviewer_head_sha FROM reviewed_prs ORDER BY pr_number'
+    'SELECT repo, pr_number, domain_id, subject_external_id, revision_ref, review_status, reviewer_head_sha, codex_broker_provider FROM reviewed_prs ORDER BY pr_number'
   ).all();
   return Object.fromEntries(rows.map((row) => [String(row.pr_number), row]));
 }
@@ -895,6 +895,8 @@ test('watcher pollOnce claim loop records subject-state head SHAs and drives the
     assert.equal(summary.rows['101'].reviewer_head_sha, 'sha-happy-101');
     assert.equal(summary.rows['102'].review_status, 'posted');
     assert.equal(summary.rows['102'].reviewer_head_sha, null);
+    assert.equal(summary.rows['101'].codex_broker_provider, null);
+    assert.equal(summary.rows['102'].codex_broker_provider, null);
     assert.deepEqual(
       summary.claims
         .map((claim) => [claim.prNumber, claim.reviewerHeadSha])
@@ -1487,8 +1489,8 @@ test('watcher pollOnce settles reviewer_passes as failed when reviewer spawn thr
   const runnerPath = path.join(tmp, 'fixture-runner.mjs');
   try {
     writeFileSync(loaderPath, buildLoaderSource({
-      reviewerRuntimeSource: "globalThis.__watcherClaimLoopReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__watcherClaimLoopReviewerSpawns.push(payload); throw new Error('fixture reviewer spawn failure'); }, cancel: async () => {}, reattach: async () => ({}) }; } export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); } export function loadDomainConfig() { return {}; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",
-    }));
+      reviewerRuntimeSource: "globalThis.__watcherClaimLoopReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { const row = globalThis.__watcherClaimLoopDb.prepare('SELECT codex_broker_provider FROM reviewed_prs WHERE repo = ? AND pr_number = ?').get(payload.subjectContext.repo, payload.subjectContext.prNumber); if (row?.codex_broker_provider !== payload.subjectContext.codexBrokerProvider) throw new Error('reviewer account was not persisted before spawn'); globalThis.__watcherClaimLoopReviewerSpawns.push(payload); throw new Error('fixture reviewer spawn failure'); }, cancel: async () => {}, reattach: async () => ({}) }; } export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); } export function loadDomainConfig() { return {}; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",
+    }).replaceAll("builderClass: 'codex'", "builderClass: 'claude-code'").replaceAll('[codex]', '[claude-code]'));
     writeFileSync(registerPath, buildRegisterSource(loaderPath));
     writeFileSync(runnerPath, buildRunnerSource({ expectPollError: true }));
 
@@ -1511,7 +1513,9 @@ test('watcher pollOnce settles reviewer_passes as failed when reviewer spawn thr
     const summary = JSON.parse(summaryLine.slice(SUMMARY_MARKER.length));
 
     assert.equal(summary.pollError, '2 reviewer dispatch tasks failed');
-    assert.equal(summary.reviewerSpawns.length, 2);
+    assert.equal(summary.reviewerSpawns.length, 2, output);
+    assert.equal(summary.rows['101'].codex_broker_provider, 'codex');
+    assert.equal(summary.rows['102'].codex_broker_provider, 'codex');
     assert.equal(summary.reviewerPassRows.length, 2);
     assert.ok(summary.reviewerPassRows.every((row) => row.status === 'failed'));
     assert.ok(summary.reviewerPassRows.every((row) => row.workspace_path === REPO_ROOT));

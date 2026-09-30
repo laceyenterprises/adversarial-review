@@ -45,6 +45,7 @@
 // all continue to key off the LOGICAL worker_class at the call site. It is the
 // MERGE path that must survive a cap, not the harness identity.
 
+import { resolveRemediationModel } from '../adapters/agent-runtime/local/remediation.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { dirname, resolve } from 'node:path';
@@ -52,6 +53,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   isGroundedProviderState,
+  harnessCapFromStatuses,
   parseHqFleetQuotaStatus,
   providerAvailabilityFromStatuses,
   providerSoftGroundingFromStatuses,
@@ -70,6 +72,7 @@ const FLEET_QUOTA_STATUS_TIMEOUT_MS = 20_000;
 // QUOTA_HARNESS_PROVIDER in ../fleet-quota-status.mjs.
 export const CLOSER_WORKER_CLASS_PROVIDER = Object.freeze({
   hammer: 'openai',
+  'hammer-corp': 'openai',
   // hammer-claude: the codex-quota fallback merge class — the-hammer-lacey merge
   // identity on the claude harness, so its gating provider is anthropic (the
   // whole point is that it's live when codex/openai is grounded).
@@ -129,14 +132,14 @@ export async function resolveCloserDispatchHarness({
   hqPath = 'hq',
   execFileImpl = execFileAsync,
   env = process.env,
+  modelForWorkerClass = (className) => resolveRemediationModel(className, { env, fallbackModel: null }).resolvedModel,
   // CLOSERREUSE-01: the merge-agent needs the primary's grounding even with no
   // fallback configured, because it defers rather than dispatch a grounded
   // class (src/merge-agent-harness.mjs). With no fallbacks, a grounded primary
   // reports `all-fallbacks-grounded` and its grounding fields.
-  probeWithoutFallbacks = false,
-  // CLOSERREUSE-01: also skip a SOFT-grounded fallback candidate. Off for the
-  // closer (see the candidate screening below); the merge-agent turns it on,
-  // since it defers rather than dispatch any grounded class.
+  probeWithoutFallbacks = true,
+  // Retained for callers screening custom provider mappings. Shared cap
+  // classification already screens soft grounding for tracked harnesses.
   screenSoftGroundedFallbacks = false,
 } = {}) {
   const primary = String(workerClass || '').trim();
@@ -176,13 +179,17 @@ export async function resolveCloserDispatchHarness({
   let primarySoft;
   try {
     providerStatuses = parseHqFleetQuotaStatus(stdout);
-    primaryAvailability = providerAvailabilityFromStatuses(providerStatuses, { provider: primaryProvider });
-    primarySoft = providerSoftGroundingFromStatuses(providerStatuses, { provider: primaryProvider });
+    primaryAvailability = providerAvailabilityFromStatuses(providerStatuses, { provider: primaryProvider, authPath: primary === 'hammer-corp' ? 'oauth-corp' : null });
+    primarySoft = providerSoftGroundingFromStatuses(providerStatuses, { provider: primaryProvider, authPath: primary === 'hammer-corp' ? 'oauth-corp' : null });
   } catch (err) {
     return { ...base, reason: 'fleet-quota-status-unreadable', error: String(err?.message || err) };
   }
 
-  const hardGrounded = isGroundedProviderState(primaryAvailability.state);
+  const primaryCap = harnessCapFromStatuses(providerStatuses, {
+    harness: primaryProvider === 'openai' ? (primary === 'hammer-corp' ? 'codex-corp' : 'codex') : primary,
+    model: modelForWorkerClass(primary),
+  });
+  const hardGrounded = isGroundedProviderState(primaryAvailability.state) || primaryCap.capSource === 'model-exhausted';
   const softGrounded = primarySoft.grounded === true;
   if (!hardGrounded && !softGrounded) {
     // Primary is `ok` (healthy → auto-revert) or ambiguous (degraded/unknown/
@@ -212,23 +219,24 @@ export async function resolveCloserDispatchHarness({
   // Primary is authoritatively grounded (hard, soft, or both). Pick the first
   // fallback whose provider is not ALSO grounded.
   //
-  // Candidate screening stays HARD-only, deliberately: AFH-05's scope is one
-  // additional way the PRIMARY is grounded. Skipping merely soft-grounded
-  // candidates too would be a second behavior change, and it can only ever
-  // subtract a fallback — leaving the closer on an already-grounded primary,
-  // which is the outcome this pack exists to prevent. The merge-agent is the
-  // exception (`screenSoftGroundedFallbacks`): with no usable fallback it
-  // defers, so skipping a soft-grounded candidate never pins it to the primary.
+  // CCX-04: screen model caps and soft grounding on every candidate too.
+  // With no admitting candidate the caller holds instead of spawning capped.
   for (const candidate of fallbacks) {
     if (candidate === primary) continue;
     const candidateProvider = providerForCloserWorkerClass(candidate);
     if (candidateProvider) {
       const candidateAvailability = providerAvailabilityFromStatuses(providerStatuses, {
         provider: candidateProvider,
+        authPath: candidate === 'hammer-corp' ? 'oauth-corp' : null,
       });
-      if (isGroundedProviderState(candidateAvailability.state)) continue;
+      const candidateCap = harnessCapFromStatuses(providerStatuses, {
+        harness: candidateProvider === 'openai' ? (candidate === 'hammer-corp' ? 'codex-corp' : 'codex') : candidate,
+        model: modelForWorkerClass(candidate),
+      });
+      if (candidateCap.capped || isGroundedProviderState(candidateAvailability.state)) continue;
+      if (candidate === 'hammer-corp' && !candidateCap.available) continue;
       if (screenSoftGroundedFallbacks
-        && providerSoftGroundingFromStatuses(providerStatuses, { provider: candidateProvider }).grounded === true) {
+        && providerSoftGroundingFromStatuses(providerStatuses, { provider: candidateProvider, authPath: candidate === 'hammer-corp' ? 'oauth-corp' : null }).grounded === true) {
         continue;
       }
     }
@@ -242,12 +250,12 @@ export async function resolveCloserDispatchHarness({
     };
   }
 
-  // Every configured fallback is also grounded (or none differ from the
-  // primary). Keep the primary — a doomed spawn on the primary is no worse than
-  // a doomed spawn on an equally-grounded fallback, and it preserves auto-revert.
+  // Every declared fallback is unavailable. Hold the grounded primary without
+  // spending a dispatch attempt; re-resolve when the next tick observes recovery.
   return {
     ...base,
     reason: 'all-fallbacks-grounded',
+    hold: true,
     ...groundingFields,
   };
 }

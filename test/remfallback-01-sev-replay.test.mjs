@@ -308,7 +308,8 @@ test('no fallback available means a hold with no respawn and no budget spent', a
   const entry = job.remediationPlan.retryHistory.at(-1);
   assert.equal(entry.retryMetadata.noRespawn, true);
   assert.deepEqual(entry.retryMetadata.skipped, [
-    { workerClass: 'claude-code', reason: 'capped:provider-grounded' },
+    { workerClass: 'remediator-codex-corp', reason: 'unavailable:missing-provider-status' },
+    { workerClass: 'remediator-claude', reason: 'capped:provider-grounded' },
   ]);
 });
 

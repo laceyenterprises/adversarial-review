@@ -1,5 +1,9 @@
 import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
 
+export const UPDATE_REVIEW_ROUTING_SQL = `UPDATE reviewed_prs
+      SET reviewer = ?, linear_ticket = COALESCE(?, linear_ticket), codex_broker_provider = ?
+    WHERE repo = ? AND pr_number = ? AND reviewer_session_uuid = ? AND review_status = 'reviewing'`;
+
 export const MARK_ATTEMPT_STARTED_SQL = `UPDATE reviewed_prs
      SET review_status = 'reviewing',
          last_attempted_at = ?,

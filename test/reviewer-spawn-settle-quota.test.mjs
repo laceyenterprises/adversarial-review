@@ -149,3 +149,59 @@ for (const [name, disabledEnv] of [
     });
   });
 }
+
+for (const [primary, corp, expectedSpawns] of [['exhausted', 'ok', 1], ['ok', 'exhausted', 0]]) {
+  test(`CCX-04 corporate reviewer admission isolates ${primary} primary / ${corp} corporate`, async () => {
+    const statusDir = await mkdtemp(join(tmpdir(), 'reviewer-corp-quota-'));
+    try {
+      for (const [authPath, state] of [['oauth', primary], ['oauth-corp', corp]]) {
+        await writeFile(join(statusDir, `openai-${authPath}.status.json`), JSON.stringify({ state, authPath }));
+      }
+      const capture = newCapture();
+      const args = spawnArgs({ env: { AGENT_OS_REVIEWER_QUOTA_STATUS_DIR: statusDir }, capture });
+      args.reviewerModel = 'codex';
+      args.codexBrokerProvider = 'codex-corp';
+      args.botTokenEnv = 'GH_CODEX_REVIEWER_TOKEN';
+      args.reviewerRuntimeAdapterOverride.spawnReviewer = async (request) => {
+        capture.spawnCalls += 1;
+        assert.equal(request.subjectContext.codexBrokerProvider, 'codex-corp');
+        return { ok: true, reviewBody: 'test', reviewBodyDelivery: 'adapter' };
+      };
+      await spawnReviewer(args);
+      assert.equal(capture.spawnCalls, expectedSpawns);
+    } finally { await rm(statusDir, { recursive: true, force: true }); }
+  });
+}
+
+for (const evidence of [
+  { lastErrorSignature: 'model_only_exhaustion' },
+  { afhGrounding: { grounded: true } },
+]) {
+  test(`CCX-04 reviewer spawn refuses fresh corporate cap ${JSON.stringify(evidence)}`, async () => {
+    const statusDir = await mkdtemp(join(tmpdir(), 'reviewer-corp-cap-'));
+    try {
+      await writeFile(join(statusDir, 'openai-oauth-corp.status.json'), JSON.stringify({ state: 'unknown', authPath: 'oauth-corp', ...evidence }));
+      const capture = newCapture();
+      const args = spawnArgs({ env: { AGENT_OS_REVIEWER_QUOTA_STATUS_DIR: statusDir }, capture });
+      args.reviewerModel = 'codex';
+      args.codexBrokerProvider = 'codex-corp';
+      args.botTokenEnv = 'GH_CODEX_REVIEWER_TOKEN';
+      await spawnReviewer(args);
+      assert.equal(capture.spawnCalls, 0);
+    } finally { await rm(statusDir, { recursive: true, force: true }); }
+  });
+}
+
+for (const provider of ['codex', 'codex-corp']) {
+  test(`CCX-04 spawn guard never assigns ${provider} reviewer to [codex]`, async () => {
+    const capture = newCapture();
+    const args = spawnArgs({ env: {}, capture });
+    args.reviewerModel = 'codex';
+    args.codexBrokerProvider = provider;
+    args.builderTag = 'codex';
+    const result = await spawnReviewer(args);
+    assert.equal(result.ok, false);
+    assert.equal(capture.spawnCalls, 0);
+    assert.match(result.error, /Codex-family reviewer cannot review/);
+  });
+}

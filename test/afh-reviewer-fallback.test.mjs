@@ -307,7 +307,7 @@ test('AFH-04: a grounded gemini falls BACK to a healthy codex, not forward to cl
   assert.equal(route.afhReviewerFallback.lastResort, false);
 });
 
-test('AFH-04: every candidate grounded keeps the primary (no doomed reshuffle)', () => {
+test('AFH-04: every candidate grounded holds the primary without spawning', () => {
   const baseRoute = effectiveRouteFor('claude-code', 'always-on');
   const decision = afhReviewerFallbackDecision({
     builderClass: 'claude-code',
@@ -330,7 +330,7 @@ test('AFH-04: every candidate grounded keeps the primary (no doomed reshuffle)',
       google: { state: 'exhausted', grounded: true },
     }),
     geminiReviewerMode: 'always-on',
-  }), baseRoute);
+  }), { ...baseRoute, quotaBlocked: true });
 });
 
 test('AFH-04: an explicit operator reviewer pin outranks the AFH fallback', () => {
@@ -530,7 +530,7 @@ test('AFH-04R: Claude launchctl denial grounds the local Claude reviewer and rou
   assert.equal(route.afhReviewerFallback.lastResort, false);
 });
 
-test('AFH-04R: codex-built PRs use codex as the audited last resort when Claude and Gemini cannot run', () => {
+test('AFH-04R: codex-built PRs hold without a codex-family last resort when Claude and Gemini cannot run', () => {
   const runtimeGrounding = applyClaudeReviewerRuntimeGrounding(
     groundingFor({
       openai: OK,
@@ -550,17 +550,9 @@ test('AFH-04R: codex-built PRs use codex as the audited last resort when Claude 
     geminiReviewerMode: 'fallback',
   });
 
-  assert.equal(route.reviewerModel, 'codex');
-  assert.equal(route.botTokenEnv, 'GH_CODEX_REVIEWER_TOKEN');
-  assert.equal(route.afhReviewerFallback.fromReviewerModel, 'claude');
-  assert.equal(route.afhReviewerFallback.toReviewerModel, 'codex');
-  assert.equal(route.afhReviewerFallback.lastResort, true);
-  assert.ok(
-    route.afhReviewerFallback.considered.some(
-      (entry) => entry.reviewerModel === 'gemini' && /grounded/.test(entry.reason)
-    ),
-    'gemini was tried before the same-writer last resort'
-  );
+  assert.equal(route.reviewerModel, 'claude');
+  assert.equal(route.quotaBlocked, true);
+  assert.equal(route.afhReviewerFallback, undefined);
 });
 
 test('AFH-04R: Claude runtime grounding preserves canonical provider fields', () => {

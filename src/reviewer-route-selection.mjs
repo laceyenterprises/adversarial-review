@@ -256,6 +256,7 @@ function candidateReviewerModelsForExecFallback({ baseRoute, builderClass }) {
   const push = (model, { sameModelLastResort = false } = {}) => {
     const normalized = normalizeReviewerAttribution(model);
     if (!normalized || seen.has(normalized)) return;
+    if (normalized === 'codex' && !modelMayReviewBuilder(normalized, builderClass)) return;
     if (!sameModelLastResort && !modelMayReviewBuilder(normalized, builderClass)) return;
     seen.add(normalized);
     candidates.push({ reviewerModel: normalized, sameModelLastResort });
@@ -294,6 +295,9 @@ export function primaryReviewerQuotaCappedForRow(row, { nowMs = null, expectedRe
 }
 
 export function shouldBypassPrimaryReviewerQuotaHold(route, row = null) {
+  if (route?.reviewerModel === 'codex' && route.codexBrokerProvider === 'codex-corp') {
+    return row?.codex_broker_provider !== 'codex-corp';
+  }
   if (row && !rowReviewerMatches(row, route?.geminiReviewerSelection?.replacedReviewerModel)) {
     return false;
   }
@@ -452,6 +456,10 @@ export function selectReviewerRouteForAttempt({
       currentRow,
       reviewerModel: baseRoute?.reviewerModel || null,
     });
+  // A primary-account quota failure does not exhaust the corporate account.
+  if (baseRoute.codexBrokerProvider === 'codex-corp'
+    && currentRow?.codex_broker_provider !== 'codex-corp'
+    && execFailureSignal.failureClass === 'quota-exhausted') return { ...baseRoute };
   if (tokenHoldExhausted || (
     execThreshold > 0 &&
     currentRowHeadMatches(currentRow, headSha) &&
@@ -475,6 +483,8 @@ export function selectReviewerRouteForAttempt({
       return {
         ...baseRoute,
         reviewerModel: fallbackRoute.reviewerModel,
+        codexBrokerProvider: fallbackGrounding.brokerProvider || 'codex',
+        quotaBlocked: false,
         botTokenEnv: fallbackRoute.botTokenEnv,
         reviewerModelFallback: {
           event: 'reviewer-model-fallback',
@@ -516,6 +526,7 @@ export function selectReviewerRouteForAttempt({
   }
   const fallbackModel = resolveReviewerTimeoutFallbackModel(env);
   if (!fallbackModel || fallbackModel === baseRoute?.reviewerModel) return { ...baseRoute };
+  if (fallbackModel === 'codex' && !modelMayReviewBuilder(fallbackModel, builderClass)) return { ...baseRoute };
   const fallbackRoute = reviewerRouteForModel(fallbackModel);
   if (!fallbackRoute) return { ...baseRoute };
   // AFH-04: never switch the timeout fallback onto a reviewer whose provider is
@@ -537,6 +548,8 @@ export function selectReviewerRouteForAttempt({
   return {
     ...baseRoute,
     reviewerModel: fallbackRoute.reviewerModel,
+    codexBrokerProvider: fallbackGrounding.brokerProvider || 'codex',
+    quotaBlocked: false,
     botTokenEnv: fallbackRoute.botTokenEnv,
     timeoutFallback: {
       fromReviewerModel: baseRoute.reviewerModel,

@@ -98,7 +98,7 @@ test('gemini reviewer reads the google/agy quota provider row', () => {
   assert.equal(decision.available, false);
 });
 
-test('no fallback configured → keep primary, no fleet-quota read', async () => {
+test('no fallback configured → probe and hold a capped primary', async () => {
   const exec = buildFleetExec(fleetQuotaStdout({ openai: 'exhausted' }));
   const result = await resolveCloserDispatchHarness({
     workerClass: 'hammer',
@@ -107,8 +107,9 @@ test('no fallback configured → keep primary, no fleet-quota read', async () =>
   });
   assert.equal(result.fellBack, false);
   assert.equal(result.workerClass, 'hammer');
-  assert.equal(result.reason, 'no-fallback-configured');
-  assert.equal(exec.calls.length, 0, 'must not query fleet quota when no fallback is configured');
+  assert.equal(result.reason, 'all-fallbacks-grounded');
+  assert.equal(result.hold, true);
+  assert.equal(exec.calls.length, 1);
 });
 
 test('codex grounded (exhausted) + hammer primary → falls back to claude-code', async () => {
@@ -502,20 +503,20 @@ test('primary provider untracked → never fall back (cannot prove a cap)', asyn
   assert.equal(exec.calls.length, 0);
 });
 
-test('CLOSERREUSE-01: a soft-grounded fallback is skipped only with screenSoftGroundedFallbacks', async () => {
+test('CCX-04: a soft-grounded fallback is skipped for closer and merge-agent', async () => {
   // Hard-exhausted openai; anthropic hard-ok but soft-grounded.
   const stdout = fleetQuotaStdout({
     openai: 'exhausted',
     anthropic: { state: 'ok', afhGrounding: afhGrounding({ grounded: true, signals: 4, kills: 4 }) },
   });
-  // The closer (default) still takes the soft-grounded candidate.
+  // The closer also holds rather than dispatching a soft-grounded candidate.
   const closer = await resolveCloserDispatchHarness({
     workerClass: 'hammer',
     fallbackWorkerClasses: ['hammer-claude'],
     execFileImpl: buildFleetExec(stdout).impl,
   });
-  assert.equal(closer.fellBack, true);
-  assert.equal(closer.workerClass, 'hammer-claude');
+  assert.equal(closer.fellBack, false);
+  assert.equal(closer.hold, true);
 
   // The merge-agent screens it out: no usable fallback.
   const screened = await resolveCloserDispatchHarness({

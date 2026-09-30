@@ -733,7 +733,9 @@ async function assertGeminiOAuth() {
 
 async function assertRemediationWorkerOAuth(workerClass, { execFileImpl, fetchImpl, env } = {}) {
   switch (workerClass) {
+    case 'remediator-codex-corp': return; // broker-vended at spawn (local or hq), no primary auth-file dependency
     case 'codex':       return assertCodexOAuth();
+    case 'remediator-claude':
     case 'claude-code': return assertClaudeCodeOAuth({ execFileImpl, fetchImpl, env });
     case 'gemini':      return assertGeminiOAuth();
     default:

@@ -1,3 +1,4 @@
+import { prepareCorporateCodexReviewerAuth } from '../../../codex-per-worker-auth.mjs';
 import { execFile } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -341,6 +342,7 @@ function createAcpxReviewerRuntimeAdapter({
   rmDirImpl = rmSync,
   heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS,
   logger = console,
+  prepareCorporateCodexReviewerAuthImpl = prepareCorporateCodexReviewerAuth,
   now = () => new Date().toISOString(),
 } = {}) {
   const activeRuns = new Map();
@@ -381,6 +383,7 @@ function createAcpxReviewerRuntimeAdapter({
     let record = claim.record || initialRecord;
     const controller = new AbortController();
     const activeRun = { controller, record, cancelled: false, heartbeatTimer: null };
+    let corporateAuth = null;
     let tmpDir = null;
     let outputPath = null;
 
@@ -401,6 +404,8 @@ function createAcpxReviewerRuntimeAdapter({
         ...process.env,
         REVIEWER_SESSION_UUID: sessionUuid,
       };
+      reviewerEnv.CODEX_BROKER_PROVIDER = req?.subjectContext?.codexBrokerProvider || 'codex';
+      corporateAuth = prepareCorporateCodexReviewerAuthImpl(reviewerEnv, sessionUuid);
       const stripped = stripForbiddenFallbackEnv(reviewerEnv, req.forbiddenFallbacks);
       const acpxCli = await resolveAcpxCliImpl({ env: reviewerEnv, execFileImpl });
       await assertCodexOAuthLayers({ env: reviewerEnv, domainConfig, execFileImpl, acpxCli });
@@ -509,6 +514,7 @@ function createAcpxReviewerRuntimeAdapter({
         error: detail || err.message,
       });
     } finally {
+      corporateAuth?.cleanup();
       if (activeRun.heartbeatTimer) clearInterval(activeRun.heartbeatTimer);
       activeRuns.delete(sessionUuid);
       if (tmpDir) rmDirImpl(tmpDir, { recursive: true, force: true });

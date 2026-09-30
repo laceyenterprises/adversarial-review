@@ -62,6 +62,7 @@ declare -a LABELS=(
   "reviewer-cycle-cap-reached|Reviewer cycle cap reached; operator must approve, merge-agent, or redesign.|F9D0C4"
   "paused-for-redesign|Operator paused the PR for redesign after cycle-cap escalation.|8B949E"
   "operator-approved: advisory-only-review|Current-head approval for advisory-only review without remediation dispatch.|0E8A16"
+  "live-pack-edit-approved|Operator waiver: PR may edit the spec, plan or prompts of another running build pack.|0E8A16"
   "ticket-pipeline-paused|Pause adversarial-review Linear ticket pipeline sync.|F9D0C4"
   "fast-merge-veto|Operator override: forces normal adversarial review.|D93F0B"
   "fast-merge:docs|Documentation-only changes.|0E8A16"

@@ -377,4 +377,5 @@ async function fetchPRDiff(repo, prNumber, headSha, {
 export {
   fetchPRDiff,
   fetchPRDiffFromFilesApi,
+  parseGhApiArrayPages,
 };

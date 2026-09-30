@@ -54,9 +54,8 @@ import {
   attachFollowUpTelemetryListeners,
   resolveFollowUpTelemetryTopics,
 } from './remediation-telemetry.mjs';
-import {
-  collectWorkspaceDocContext,
-} from './prompt-context.mjs';
+import { collectWorkspaceDocContext } from './prompt-context.mjs';
+import { resolveLivePackContextForJob } from './live-pack-cross-edit.mjs';
 import {
   buildRemediationOutcomeCommentBody,
   postRemediationOutcomeComment,
@@ -3703,6 +3702,7 @@ async function consumeNextFollowUpJob({
       hqRoot,
       launchRequestId: replyStorageKey,
       governingDocContext,
+      livePackContext: await resolveLivePackContextForJob({ job: claimed.job, execFileImpl }),
       // In hq-dispatch mode the worker-pool spawns the worker, so the prompt
       // (not our spawn env) carries the provenance trailer the commit-msg hook
       // stamps. Thread the resolved class through so a gemini / claude-code

@@ -118,6 +118,7 @@ import {
   resolveAdditiveOnlyScopeReview,
   reviewBodyHasScopeViolationFinding,
 } from './additive-only-scope.mjs';
+import { applyLivePackCrossEditReview } from './live-pack-cross-edit.mjs';
 import { resolveGeminiRuntime } from './role-config.mjs';
 import {
   alertClioOAuthFailure,
@@ -2292,9 +2293,9 @@ async function main() {
       `[reviewer] WARN: additive-only scope check failed for ${repo}#${prNumber}; continuing normal review: ${err?.message || err}`
     );
   }
-  const reviewTextForPost = scopeViolationFinding
+  const reviewTextForPost = await applyLivePackCrossEditReview(scopeViolationFinding
     ? appendScopeViolationFinding(reviewText, scopeViolationFinding)
-    : reviewText;
+    : reviewText, { repo, prNumber, diff, prContext, labels, reviewerHeadSha, log: console });
   const fullComment = buildReviewCommentBody({
     reviewerMetadata,
     verdictMode,

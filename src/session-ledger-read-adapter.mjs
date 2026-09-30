@@ -629,7 +629,7 @@ function describePostgresSpawnFailure(result) {
   return null;
 }
 
-function queryPostgresRows(target, jsonSql, { spawnSyncImpl = spawnSync, psqlVars = [] } = {}) {
+function queryPostgresRows(target, jsonSql, { spawnSyncImpl = spawnSync, psqlVars = [], readOnly = false } = {}) {
   const locator = normalizeText(target.dsn) || normalizeText(target.databaseName);
   if (!locator) {
     return {
@@ -662,7 +662,15 @@ function queryPostgresRows(target, jsonSql, { spawnSyncImpl = spawnSync, psqlVar
     // `\set name 'value'` line per variable. Empty psqlVars keeps the
     // `-c` fast path (no behavioral change for callers that don't
     // declare variables).
+    //
+    // `readOnly` wraps the statement in `BEGIN READ ONLY; ... COMMIT;` so
+    // the server rejects any write, and adds `-q` so psql does not echo the
+    // BEGIN/COMMIT command tags into the JSON-per-line stdout. It is a
+    // transaction-scoped guard, never a session-level SET, so it is safe
+    // through pgbouncer in transaction-pooling mode. It requires the stdin
+    // script path, so callers pass at least one psqlVar with it.
     const args = ['--no-psqlrc', '-v', 'ON_ERROR_STOP=1'];
+    if (readOnly) args.push('-q');
     for (const [name, value] of psqlVars) {
       args.push('-v', `${name}=${value}`);
     }
@@ -678,7 +686,10 @@ function queryPostgresRows(target, jsonSql, { spawnSyncImpl = spawnSync, psqlVar
           `\\set ${name} '${String(value).replace(/'/g, "''")}'`,
         )
         .join('\n');
-      const script = `${setStanzas}\n${jsonSql}\n`;
+      const statement = readOnly
+        ? `BEGIN READ ONLY;\n${String(jsonSql).trim().replace(/;$/, '')};\nCOMMIT;`
+        : jsonSql;
+      const script = `${setStanzas}\n${statement}\n`;
       args.push(...spawnConfig.args, '-t', '-A');
       result = spawnSyncImpl('psql', args, {
         encoding: 'utf8',
@@ -894,6 +905,103 @@ export function readLaunchRequestStatusFromLedger({
     };
   }
   return { ok: true, row, target: queried.target };
+}
+
+// LIVEPACK-01: non-terminal dag_runs states. `parked` is non-terminal (a
+// parked run resumes), so it counts as live. `awaiting-merge` is a step state
+// in the current schema; it is listed so a future run-level state of that name
+// is covered without a code change.
+export const LIVE_DAG_RUN_STATES = Object.freeze(['pending', 'running', 'parked', 'awaiting-merge']);
+const DAG_RUN_STATE_RE = /^[a-z][a-z0-9_-]*$/;
+const MAX_ACTIVE_DAG_RUNS = 20;
+
+// Read the non-terminal DAG runs of one plan. One indexed, LIMIT-bounded
+// SELECT (idx_dag_runs_plan_state covers plan_id + state), run inside a
+// read-only transaction on Postgres and a readonly handle on SQLite. Returns
+// `{ ok: true, runs }` or `{ ok: false, reason, detail }`; callers that gate
+// on liveness must treat `ok: false` as inconclusive, never as "not live".
+export function readActiveDagRunsForPlan({
+  planId,
+  states = LIVE_DAG_RUN_STATES,
+  limit = MAX_ACTIVE_DAG_RUNS,
+  ledgerTarget = null,
+  ledgerDbPath = null,
+  env = process.env,
+  rootDir = process.cwd(),
+  hqRoot = null,
+  spawnSyncImpl = spawnSync,
+} = {}) {
+  const normalizedPlanId = normalizeText(planId);
+  if (!normalizedPlanId) {
+    return { ok: false, reason: 'missing-plan-id' };
+  }
+  const stateList = [...new Set((states || []).map((state) => normalizeText(state)).filter(Boolean))];
+  if (stateList.length === 0 || stateList.some((state) => !DAG_RUN_STATE_RE.test(state))) {
+    return { ok: false, reason: 'invalid-dag-run-states', detail: JSON.stringify(states) };
+  }
+  const boundedLimit = Math.max(1, Math.min(MAX_ACTIVE_DAG_RUNS, Number.parseInt(limit, 10) || MAX_ACTIVE_DAG_RUNS));
+  const resolution = resolveSessionLedgerReadTarget({
+    ledgerTarget,
+    ledgerDbPath,
+    requiredTables: ['dag_runs'],
+    env,
+    rootDir,
+    hqRoot,
+  });
+  if (!resolution.ok) return resolution;
+  let queried;
+  if (resolution.target.backend === 'sqlite') {
+    const params = { planId: normalizedPlanId };
+    const placeholders = stateList.map((state, idx) => {
+      params[`state${idx}`] = state;
+      return `@state${idx}`;
+    });
+    queried = querySqliteRows(
+      resolution.target,
+      `SELECT run_id, plan_id, state, started_at
+         FROM dag_runs
+        WHERE plan_id = @planId
+          AND state IN (${placeholders.join(', ')})
+        ORDER BY started_at DESC
+        LIMIT ${boundedLimit}`,
+      params,
+    );
+  } else if (resolution.target.backend === 'postgres') {
+    // States are validated against DAG_RUN_STATE_RE above, so inlining them
+    // as literals cannot inject; plan_id rides as a psql variable.
+    const stateLiterals = stateList.map((state) => `'${state}'`).join(', ');
+    queried = queryPostgresRows(
+      resolution.target,
+      `SELECT json_build_object(
+          'run_id', run_id,
+          'plan_id', plan_id,
+          'state', state,
+          'started_at', started_at
+        )
+         FROM dag_runs
+        WHERE plan_id = :'plan_id'
+          AND state IN (${stateLiterals})
+        ORDER BY started_at DESC
+        LIMIT ${boundedLimit}`,
+      {
+        spawnSyncImpl,
+        psqlVars: [['plan_id', normalizedPlanId]],
+        readOnly: true,
+      },
+    );
+  } else {
+    return unsupportedBackend(resolution.target);
+  }
+  if (!queried.ok) return queried;
+  const runs = queried.rows
+    .map((row) => ({
+      run_id: normalizeText(row?.run_id),
+      plan_id: normalizeText(row?.plan_id) || normalizedPlanId,
+      state: normalizeText(row?.state),
+      started_at: row?.started_at ?? null,
+    }))
+    .filter((row) => row.run_id);
+  return { ok: true, runs, target: queried.target };
 }
 
 export function readBuildCompletionSignalForPr({

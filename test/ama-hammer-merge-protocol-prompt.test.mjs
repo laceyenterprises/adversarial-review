@@ -551,3 +551,16 @@ test('hammer staged gitlink guard preserves a staged submodule path containing s
     '',
   );
 });
+
+test('HAMIDENT-02: bounded unlinked identity repair requires own HAM trailers and held lease', () => {
+  const step = HAMMER_TEMPLATE.split('### Bounded repair')[1].split('Do not merge unless')[0];
+  for (const required of [
+    'ham-commit-identity-unlinked', 'only failing', 'Worker-Class: hammer',
+    'Worker-Ticket: HAM', 'Reviewed-Head:', 'both author and committer logins null',
+    'HAM_MERGE_LEASE_HELD=1', 'HAM_MERGE_LEASE_ID', 'unexpired',
+    'At most one re-author per run', 'git commit --amend --no-edit --reset-author',
+    '--force-with-lease="$branch:$old_head"', 'byte-identical',
+    'hammer-context.mjs', 'hammer-publish', 'predicate command above **once**',
+    'Never re-author a', 'Never attempt a second re-author',
+  ]) assert.ok(step.includes(required), `missing repair guard: ${required}`);
+});

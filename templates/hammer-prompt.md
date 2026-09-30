@@ -588,6 +588,50 @@ HAM_VERDICT_READY_FILE=""
 HAM_VERDICT_READY_FILE="$HAM_VERDICT_FILE"
 ```
 
+### Bounded repair of the hammer's own unlinked HAM commit (HAMIDENT-02)
+
+Before escalating a refused predicate, inspect
+`trace.hamTerminalRemediation.reasonCode` and `checks`. Only when the reason is
+`ham-commit-identity-unlinked` and `commitIdentity` is the **only failing
+safety-core check**, consider this repair. Existing stale-review/verdict/finding
+refusals caused by the missing HAM authority remain refusals until re-verification;
+any independent blocker (including CI, protection, labels, PR state or unresolved
+findings) blocks this repair.
+
+All preconditions must hold: the exact live head is the hammer's own HAM commit,
+verified from GitHub's full commit message with `Worker-Class: hammer`,
+`Worker-Ticket: HAM`, and `Reviewed-Head:` matching the trusted reviewed SHA;
+GitHub explicitly reports **both author and committer logins null** (the trace's
+`authorLoginNull` and `committerLoginNull` must both be true); and the hammer holds
+the merge lease (`HAM_MERGE_LEASE_HELD=1`, matching nonempty
+`HAM_MERGE_LEASE_ID`, unexpired and owned by this PR/run). Never re-author a
+non-hammer commit or infer ownership from the null identities alone.
+
+At most one re-author per run, in the same persistent lease shell:
+
+1. Save the exact old live head SHA and branch. Require local HEAD to equal it,
+   a clean index/worktree, and all spawned `GIT_AUTHOR_*` / `GIT_COMMITTER_*`
+   identity variables to be present. Save the tree SHA and full commit-message
+   bytes, including every trailer. Use the configured identity; do not hardcode
+   a login or email.
+2. Run `git commit --amend --no-edit --reset-author`. Verify the tree and every
+   trailer are byte-identical (compare the entire saved commit message), and
+   the parent is unchanged. If verification fails, stop without pushing.
+3. Push in the foreground with
+   `git push origin "HEAD:refs/heads/$branch" --force-with-lease="$branch:$old_head"`,
+   where `old_head` is the exact saved SHA, never a refreshed tracking ref.
+   A failed lease push stops the repair; never retry with a weaker lease.
+4. Re-run `node <<ROOT_DIR>>/bin/hammer-context.mjs <<REPO>> <<PR_NUMBER>>` once.
+   Refresh `POST_REMEDIATION_SHA`, live PR/reviews/checks/protection/timeline and
+   GitHub commit inputs. Update the claim SHA and re-publish the head-bound audit
+   using `hammer-publish` under the same held lease. Invalidate the old verdict
+   readiness marker and re-run the predicate command above **once**, writing
+   the fresh result to the owned verdict file. The new commit must pass the
+   unchanged identity check on its own merits; no re-review is needed for an
+   identical tree. Merge only if the fresh predicate and all merge guards pass.
+5. If the predicate still fails, release the lease and escalate with the fresh
+   reason and no-merge closing status. Never attempt a second re-author this run.
+
 Do not merge unless all of these are true:
 
 - `HAM_MERGE_LEASE_HELD=1` and `HAM_MERGE_LEASE_ID` is non-empty.

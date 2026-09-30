@@ -677,6 +677,14 @@ test('ama-check validates HAM terminal remediation only with HAM head provenance
       false,
     );
 
+    assert.equal(
+      unresolvedCommitIdentityVerdict.trace.hamTerminalRemediation.reasonCode,
+      'ham-commit-identity-unlinked',
+    );
+    assert.deepEqual(unresolvedCommitIdentityVerdict.trace.hamTerminalRemediation.commitIdentity, {
+      authorLoginNull: true, committerLoginNull: true,
+    });
+
     const looseClosedBy = runAmaCheck(tmp, {
       branchProtectionRequired: true,
       protectionBody,

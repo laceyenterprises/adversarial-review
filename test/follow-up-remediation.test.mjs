@@ -12662,3 +12662,85 @@ test('reconcile falls through to pickRemediationWorkerClass when worker.model is
     'unmappable worker.model should fall through to pickRemediationWorkerClass(job) — clio-agent → claude-code (cross-model)'
   );
 });
+
+for (const variant of ['ci-only', 'ci-still-pending', 'genuine', 'mixed', 'unpushed']) {
+  test(`REMCIPENDING-01 reconciles ${variant} operational blockers`, async () => {
+    const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+    const { claimed } = makeQueuedJob(rootDir, { prNumber: 51 });
+    const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+    const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+    mkdirSync(artifactDir, { recursive: true });
+    const outputPath = path.join(artifactDir, 'codex-last-message.md');
+    const { hqRoot, replyPath } = prepareCanonicalReply(rootDir, claimed.job);
+    writeFileSync(outputPath, 'Worker did the thing.\n', 'utf8');
+    const fixture = JSON.parse(readFileSync(new URL('./fixtures/kernel/remediation-reply-ci-pending-7420.json', import.meta.url), 'utf8'));
+    const genuine = { title: 'push-lease-rejected', finding: 'Remote push lease rejected.', reasoning: 'Head changed during push.' };
+    fixture.jobId = claimed.job.jobId;
+    fixture.repo = claimed.job.repo;
+    fixture.prNumber = claimed.job.prNumber;
+    if (variant === 'genuine') fixture.operationalBlockers = [genuine];
+    if (variant === 'mixed') fixture.operationalBlockers.push(genuine);
+    if (variant === 'unpushed') {
+      fixture.summary = 'Fix committed locally.';
+      fixture.validation = ['Targeted tests passed.'];
+    }
+    writeFileSync(replyPath, JSON.stringify(fixture), 'utf8');
+
+    const spawned = markFollowUpJobSpawned({
+      jobPath: claimed.jobPath,
+      spawnedAt: '2026-04-21T10:01:00.000Z',
+      worker: {
+        model: 'codex',
+        processId: 9502,
+        state: 'spawned',
+        workspaceDir: path.relative(rootDir, workspaceDir),
+        outputPath: path.relative(rootDir, outputPath),
+        logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+        replyPath,
+      },
+    });
+
+    const commentCalls = [];
+    const result = await withHqRootEnv(hqRoot, async () => reconcileFollowUpJob({
+      rootDir,
+      job: spawned.job,
+      jobPath: spawned.jobPath,
+      now: () => '2026-04-21T10:30:00.000Z',
+      isWorkerRunning: () => false,
+      resolvePRLifecycleImpl: async () => null,
+      // Stub the rereview reset as accepted by the watcher (the real
+      // watcher would also accept this — review row exists, PR open,
+      // status not malformed, not already pending). Without this stub
+      // the test would have to populate reviews.db directly.
+      requestReviewRereviewImpl: () => ({
+        triggered: true,
+        status: 'pending',
+        reason: 'review-status-reset',
+        reviewRow: { repo: claimed.job.repo, pr_number: claimed.job.prNumber, pr_state: 'open', review_status: 'pending' },
+      }),
+      auditWorkspaceForContaminationImpl: cleanContaminationAudit,
+      inspectRemediationCiRegressionImpl: async () => variant === 'ci-still-pending'
+        ? { ...greenCiGate(), state: 'pending', pendingChecks: ['repo-guards'] }
+        : greenCiGate(),
+      postCommentImpl: async (args) => {
+        commentCalls.push(args);
+        return { posted: false, reason: 'offline-test' };
+      },
+    }));
+
+    if (variant === 'ci-only') {
+      assert.equal(result.action, 'completed', JSON.stringify(result.job.failure));
+      assert.equal(result.job.reReview.requested, true);
+      assert.equal(result.job.reReview.normalizedFrom, 'ci-pending-only');
+      assert.match(commentCalls[0].body, /re-review queued/);
+    } else if (variant === 'ci-still-pending') {
+      assert.equal(result.action, 'active');
+      assert.equal(result.reason, 'ci-settlement-pending');
+      assert.equal(result.job.reReview.normalizedFrom, 'ci-pending-only');
+    } else {
+      assert.equal(result.action, 'stopped', JSON.stringify(result.job.failure));
+      assert.equal(result.job.reReview.requested, false);
+      assert.equal(result.job.reReview.normalizedFrom, undefined);
+    }
+  });
+}

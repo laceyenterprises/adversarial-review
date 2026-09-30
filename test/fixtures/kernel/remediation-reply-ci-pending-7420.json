@@ -1,0 +1,44 @@
+{
+  "kind": "adversarial-review-remediation-reply",
+  "schemaVersion": 1,
+  "jobId": "laceyenterprises__agent-os-pr-7420-2026-09-30T06-16-05-263Z",
+  "repo": "laceyenterprises/agent-os",
+  "prNumber": 7420,
+  "outcome": "partial",
+  "summary": "Updated the worker-pool governing spec and walkthrough for due-aware dispatchable project priority. Rebased onto freshly fetched origin/main, passed the contamination audit, and pushed commit 94423bf54192cfc6494e059e59db8440c2911c28. The blocking review finding is addressed; repo-guards CI remained pending after the bounded wait.",
+  "validation": [
+    "Targeted pytest: modules/worker-pool/test/test_helm_autowalk.py -k dispatchable_priority: 2 passed, 267 deselected.",
+    "Ruff baseline gate for autowalk_perf.py and autowalk.py: passed with zero lint or format findings.",
+    "Governance docs guard: passed.",
+    "Build-pack specRef truth gate against origin/main: passed; worker-pool is parked and its plans are not dispatchable.",
+    "Markdown link/path check for both changed documents: zero broken links, missing paths, or unlabelled private references; existing machine-local path advisories remain.",
+    "git diff --check and git cherry origin/main HEAD: passed; no patch-equivalent upstream commits. Worktree clean after commit.",
+    "Lease-guarded git-safe push succeeded; pushed PR head is 94423bf54192cfc6494e059e59db8440c2911c28.",
+    "PR-head CI watch bounded to 55 seconds: CFG schema parity, submodule-pointer-gate, surface-harness, and release-freeze-gate passed; repo-guards remained pending, with no failed lane observed."
+  ],
+  "addressed": [
+    {
+      "title": "Contract changed without spec update",
+      "finding": "dispatchable_priority_by_project adds the public due parameter without synchronizing projects/worker-pool/SPEC.md.",
+      "action": "Documented the optional due callback signature, ready-run filtering, priority values, sibling-run aggregation, read-only ledger caller, and probe-error fallback in the governing spec and worker-pool walkthrough.",
+      "files": [
+        "projects/worker-pool/SPEC.md",
+        "modules/worker-pool/worker-pool-walkthrough.md"
+      ]
+    }
+  ],
+  "pushback": [],
+  "blockers": [],
+  "operationalBlockers": [
+    {
+      "title": "ci-pending",
+      "finding": "repo-guards remained pending on pushed PR head 94423bf54192cfc6494e059e59db8440c2911c28 after the single bounded CI wait.",
+      "reasoning": "The 55-second foreground CI watch ended at its timeout with four passing lanes and repo-guards still pending. The job contract requires an operational blocker when checks remain pending after one bounded wait.",
+      "needsHumanInput": "Confirm repo-guards succeeds for the pushed head, then request another adversarial review pass."
+    }
+  ],
+  "reReview": {
+    "requested": false,
+    "reason": null
+  }
+}

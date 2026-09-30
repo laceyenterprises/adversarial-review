@@ -1,3 +1,4 @@
+import { normalizeCiPendingOnlyReply } from './kernel/remediation-reply.mjs';
 import { execFile } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
@@ -2001,16 +2002,8 @@ async function reconcileFollowUpJob({
 
   // Without confirmed quota, an invalid reply fails as
   // `invalid-remediation-reply`, even when the worker wrote a narrative.
-  // Salvage path: even though strict validation rejected the reply,
-  // the file may still contain a renderable summary / addressed[] /
-  // pushback[] / blockers[]. Pull those out and pass them into the
-  // failure comment so the worker's point-by-point response is not
-  // dropped just because (e.g.) `reReview.reason` was null. State
-  // machine stays strict — round still routes to `failed/`, watcher
-  // does NOT rearm — but the operator-facing comment shows what the
-  // worker actually did instead of just "did not produce a usable
-  // remediation reply". The salvaged reply is best-effort and not
-  // persisted to the job record.
+  // Salvage renderable fields for the public failure comment, without
+  // persisting an invalid reply or rearming the watcher.
   // A provider cap may interrupt a reply.json write, leaving partial JSON.
   // Let that case reach the bounded quota hold below.
   if (replyProbe.state === 'invalid' && !quotaSignal.isQuotaExhausted) {
@@ -2074,7 +2067,11 @@ async function reconcileFollowUpJob({
     let operationalBlockerRecovery = null;
 
     if (replyProbe.state === 'valid') {
-      const reply = replyProbe.reply;
+      const reply = normalizeCiPendingOnlyReply(replyProbe.reply, { expectedJob: job });
+      if (reply.reReview.normalizedFrom) {
+        job = { ...job, reReview: { ...job.reReview, normalizedFrom: reply.reReview.normalizedFrom } };
+        log.log?.(`[follow-up-remediation] normalized ${job.repo}#${job.prNumber}: ci-pending-only`);
+      }
       remediationReply = {
         ...remediationReply,
         state: 'worker-wrote-reply',
@@ -2739,6 +2736,9 @@ async function reconcileFollowUpJob({
     // the loop is silently dead in the review-row-missing / pr-not-open
     // cases. Already-pending is benign: a fresh review pass is already
     // armed, so we still treat it as a successful terminal.
+    if (parsedReply?.reReview.normalizedFrom) {
+      rereview.normalizedFrom = parsedReply.reReview.normalizedFrom;
+    }
     const rereviewAccepted = rereview.requested && (
       rereview.triggered || rereview.status === 'already-pending'
     );

@@ -1,3 +1,4 @@
+import { normalizeCiPendingOnlyReply } from '../src/kernel/remediation-reply.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -1560,4 +1561,28 @@ test('validateRemediationReply rejects hardening[] entries with empty finding or
     ),
     /hardening/
   );
+});
+
+
+test('REMCIPENDING-01 normalizes pending titles and finding text after a reported push', () => {
+  const fixture = readFixture('remediation-reply-ci-pending-7420.json');
+  for (const blocker of [
+    ...fixture.operationalBlockers,
+    { title: 'pending-ci', finding: 'Checks queued.' },
+    { title: 'pr-head-ci-pending', finding: 'Checks pending.' },
+    { finding: 'The check remained pending.' },
+    { finding: 'CI was in progress after the bounded CI wait.' },
+  ]) {
+    const reply = { ...fixture, operationalBlockers: [blocker] };
+    const normalized = normalizeCiPendingOnlyReply(reply);
+    assert.equal(normalized.reReview.requested, true);
+    assert.equal(normalized.outcome, 'completed');
+    assert.deepEqual(normalized.reReview.originalOperationalBlockers, [blocker]);
+    assert.equal(reply.reReview.requested, false);
+  }
+  assert.equal(normalizeCiPendingOnlyReply(fixture, {
+    expectedJob: { revisionRef: '94423bf54192cfc6494e059e59db8440c2911c28' },
+  }), fixture);
+  const unresolved = { ...fixture, blockers: ['Unresolved review finding'] };
+  assert.equal(normalizeCiPendingOnlyReply(unresolved), unresolved);
 });

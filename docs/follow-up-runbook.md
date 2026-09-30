@@ -233,8 +233,10 @@ REMWASTE-01 adds `roles.adversarial.remediation.non_blocking` to the module
 config schema. Its `model` (configured default `gpt-6.1-sol`) must occur in the published
 `remediator-codex.allowedModels`; `reasoning_effort` (default `high`) must be a
 Codex reasoning level; `max_rounds` (default `1`) must be positive. Invalid
-model pins fall back to the universally allowlisted `gpt-6-sol` at `high`
-effort; invalid effort pins fall back to `high`. A follow-up job records
+model pins fall back to the universally allowlisted `gpt-6-sol`, preserving a
+valid effort pin; invalid effort pins fall back to `high`. If no registry
+provides the allowlist, both pins fall back to `gpt-6-sol` at `high` effort.
+A follow-up job records
 `nonBlockingOnly`, `nonBlockingRoundsBefore`, and `nonBlockingMaxRounds`.
 The remediation pass records the trigger, resolved model and effort, and
 PR-wide round number in `reviewer_passes.metadata_json` for TOKCAP-02.

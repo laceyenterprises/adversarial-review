@@ -1,14 +1,20 @@
 #!/usr/bin/env node
-import { execFileSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
+import { execGhWithRetry } from '../src/gh-cli.mjs';
 import { readPrBuilderProvenance } from '../src/session-ledger-read-adapter.mjs';
 import { builderClassFromTitle } from '../src/adapters/subject/github-pr/title-tagging.mjs';
 import { reconcileBuilderClass } from '../src/builder-provenance-routing.mjs';
 import { main as retriggerReview } from '../src/retrigger-review.mjs';
 
+export async function fetchPrState(repo, pr, options = {}) {
+  const { stdout } = await execGhWithRetry({ ...options,
+    args: ['pr', 'view', String(pr), '--repo', repo, '--json', 'state,headRefOid,title'],
+  });
+  return JSON.parse(stdout);
+}
+
 export async function main(argv, {
-  fetchPr = (repo, pr) => JSON.parse(execFileSync('gh', ['pr', 'view', String(pr), '--repo', repo,
-    '--json', 'state,headRefOid,title'], { encoding: 'utf8', timeout: 30_000 })),
+  fetchPr = fetchPrState,
   readProvenance = readPrBuilderProvenance,
   retrigger = retriggerReview,
   stdout = process.stdout,
@@ -21,7 +27,7 @@ export async function main(argv, {
   if (!values.repo || !Number.isInteger(pr) || pr <= 0 || (values.apply && !values.reason?.trim())) {
     throw new Error('Usage: --repo owner/repo --pr N [--apply --reason TEXT] [--root-dir PATH]');
   }
-  const live = fetchPr(values.repo, pr);
+  const live = await fetchPr(values.repo, pr);
   if (live.state !== 'OPEN') throw new Error('refusing to reroute a terminal PR');
   const provenance = readProvenance({ repo: values.repo, prNumber: pr, headSha: live.headRefOid });
   const result = reconcileBuilderClass({ builderClass: builderClassFromTitle(live.title) }, provenance);

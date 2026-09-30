@@ -631,11 +631,15 @@ permissive-but-grant-bearing license is the cleanest answer.
 
 ### Recover a ledger/title builder mismatch (ROUTEPROV-01)
 
-The watcher cross-checks the exact PR head's build completion and LRQ before
-selecting a reviewer. Confirmed ledger provenance wins over the creation-time
+The watcher cross-checks the latest build completion for the PR and its LRQ before
+selecting a reviewer. Builder identity survives head moves, including human
+follow-up commits. Confirmed ledger provenance wins over the creation-time
 title. It records `builder_class_mismatch` in `data/builder-routing/`; missing or
 unreadable provenance records `builder_class_inconclusive` and keeps title routing.
-Live lookups use direct loopback Postgres on port 5432 in a read-only transaction.
+Lookups use the configured session-ledger backend: SQLite is read through the
+shared read-only adapter; Postgres uses direct loopback port 5432 in a read-only
+transaction. The operator CLI retries transient `gh pr view` failures up to
+three total attempts with bounded backoff before failing.
 
 For an already-open mislabeled PR, preview from the deployed review-tool root:
 

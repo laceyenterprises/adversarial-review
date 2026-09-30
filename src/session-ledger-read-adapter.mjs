@@ -631,7 +631,7 @@ function describePostgresSpawnFailure(result) {
   return null;
 }
 
-function queryPostgresRows(target, jsonSql, { spawnSyncImpl = spawnSync, psqlVars = [], readOnly = false, quiet = false } = {}) {
+function queryPostgresRows(target, jsonSql, { spawnSyncImpl = spawnSync, psqlVars = [], readOnly = false } = {}) {
   const locator = normalizeText(target.dsn) || normalizeText(target.databaseName);
   if (!locator) {
     return {
@@ -670,7 +670,7 @@ function queryPostgresRows(target, jsonSql, { spawnSyncImpl = spawnSync, psqlVar
     // through pgbouncer in transaction-pooling mode. It always selects the
     // stdin script path, including when no psql variables are supplied.
     const args = ['--no-psqlrc', '-v', 'ON_ERROR_STOP=1'];
-    if (readOnly || quiet) args.push('-q');
+    if (readOnly) args.push('-q');
     for (const [name, value] of psqlVars) {
       args.push('-v', `${name}=${value}`);
     }
@@ -1494,17 +1494,48 @@ export function readReviewerSessionUsageFromLedger({
   return row ? { ok: true, row, target: queried.target } : { ok: false, reason: 'missing-runtime-session-row', target: queried.target };
 }
 
-// ROUTEPROV-01: exact-head build completion -> LRQ -> actual launch identity.
+// ROUTEPROV-01: latest PR build completion -> LRQ -> actual launch identity.
+// Builder identity survives follow-up commits; review/retrigger guards still
+// bind to the current head independently.
 // These reads never touch PgBouncer session settings or mutate the ledger.
 export function readPrBuilderProvenance({
-  repo, prNumber, headSha, env = process.env, rootDir = null,
+  repo, prNumber, env = process.env, rootDir = null,
   ledgerTarget = null, spawnSyncImpl = spawnSync,
 } = {}) {
-  if (!repo || !Number.isInteger(Number(prNumber)) || !/^[a-f0-9]{40}$/i.test(headSha || '')) {
-    return { ok: false, reason: 'missing-exact-head-identity' };
+  const normalizedRepo = normalizeText(repo);
+  const numericPrNumber = Number(prNumber);
+  if (!normalizedRepo || !Number.isInteger(numericPrNumber) || numericPrNumber <= 0) {
+    return { ok: false, reason: 'missing-pr-identity' };
   }
-  const resolution = resolveSessionLedgerReadTarget({ ledgerTarget, env, rootDir });
+  const resolution = resolveSessionLedgerReadTarget({ ledgerTarget, env, rootDir,
+    requiredTables: ['build_completions', 'launch_requests', 'worker_runs'],
+  });
   if (!resolution.ok) return resolution;
+  if (resolution.target.backend === 'sqlite') {
+    const queried = querySqliteRows(resolution.target, `
+      SELECT lr.launch_request_id AS launchRequestId,
+             lr.worker_class AS workerClass,
+             COALESCE(
+               NULLIF(json_extract(lr.request_payload_json, '$.actualHarness'), ''),
+               NULLIF(json_extract(lr.request_payload_json, '$.workerSpec.harness'), ''),
+               NULLIF((
+                 SELECT json_extract(wr.metadata_json, '$.actualHarness')
+                 FROM worker_runs wr
+                 WHERE wr.launch_request_id = lr.launch_request_id
+                 ORDER BY wr.created_at DESC, wr.run_id DESC LIMIT 1
+               ), ''),
+               NULLIF(lr.worker_class, '')
+             ) AS actualHarness
+      FROM build_completions bc
+      JOIN launch_requests lr ON lr.launch_request_id = bc.launch_request_id
+      WHERE bc.repo = @repo AND bc.pr_number = @prNumber
+      ORDER BY bc.recorded_at DESC, bc.completion_id DESC LIMIT 1`,
+    { repo: normalizedRepo, prNumber: numericPrNumber });
+    if (!queried.ok) return queried;
+    return queried.rows.length
+      ? { ok: true, ...queried.rows[0] }
+      : { ok: false, reason: 'missing-builder-provenance' };
+  }
   if (resolution.target.backend !== 'postgres') return unsupportedBackend(resolution.target);
   const target = { ...resolution.target };
   try {
@@ -1515,7 +1546,7 @@ export function readPrBuilderProvenance({
   } catch {
     return { ok: false, reason: 'direct-ledger-dsn-unavailable' };
   }
-  const queried = queryPostgresRows(target, `BEGIN READ ONLY;
+  const queried = queryPostgresRows(target, `
     SELECT json_build_object(
       'launchRequestId', lr.launch_request_id,
       'workerClass', lr.worker_class,
@@ -1534,15 +1565,13 @@ export function readPrBuilderProvenance({
       ORDER BY created_at DESC, run_id DESC LIMIT 1
     ) wr ON true
     WHERE bc.repo = :'repo' AND bc.pr_number = :'pr_number'::integer
-      AND bc.head_sha = :'head_sha'
-    ORDER BY bc.recorded_at DESC, bc.completion_id DESC LIMIT 1;
-    COMMIT;`, {
+    ORDER BY bc.recorded_at DESC, bc.completion_id DESC LIMIT 1`, {
     spawnSyncImpl,
-    quiet: true,
-    psqlVars: [['repo', repo], ['pr_number', String(prNumber)], ['head_sha', headSha]],
+    readOnly: true,
+    psqlVars: [['repo', normalizedRepo], ['pr_number', String(numericPrNumber)]],
   });
   if (!queried.ok) return queried;
   return queried.rows.length
     ? { ok: true, ...queried.rows[0] }
-    : { ok: false, reason: 'missing-exact-head-builder-provenance' };
+    : { ok: false, reason: 'missing-builder-provenance' };
 }

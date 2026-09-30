@@ -3064,6 +3064,10 @@ test('ham terminal remediation: no verified commit identity fails closed', () =>
   assert.equal(result.trace.hamTerminalRemediation.safetyCoreOk, false);
   assert.equal(result.trace.hamTerminalRemediation.ok, false);
   assert.equal(result.trace.hamTerminalRemediation.checks.commitIdentity, false);
+  assert.equal(result.trace.hamTerminalRemediation.reasonCode, 'ham-commit-identity-unlinked');
+  assert.deepEqual(result.trace.hamTerminalRemediation.commitIdentity, {
+    authorLoginNull: true, committerLoginNull: true,
+  });
 });
 
 test('ham terminal remediation: unmapped audit finding titles still satisfy coverage', () => {
@@ -3243,3 +3247,25 @@ test('exhausted request-changes with blocking findings is eligible after validat
   assert.ok(result.trace.hamTerminalRemediation.waived.includes('blocking-findings-present'));
   assert.ok(result.trace.hamTerminalRemediation.waived.includes('verdict-not-settled-success'));
 });
+
+for (const variant of ['linked', 'missing', 'foreign', 'non-hammer']) {
+  test(`HAMIDENT-02: identity diagnostic fails closed for ${variant}`, () => {
+    const { reviewState, prMetadata, cfg } = eligibleFixture({
+      reviewState: { headSha: 'abc12345', verdict: 'request-changes',
+        blockingFindingCount: 1, blockingFindingState: 'known' },
+      prMetadata: { headSha: 'def67890' },
+    });
+    const groundTruth = hamGroundTruth({ author: null, committer: null });
+    if (variant === 'linked') groundTruth.commit.committer = { login: 'the-hammer-lacey[bot]' };
+    if (variant === 'foreign') groundTruth.commit.committer = { login: 'other-worker' };
+    if (variant === 'missing') delete groundTruth.commit.committer;
+    if (variant === 'non-hammer') groundTruth.commit.trailers['Worker-Class'] = 'codex';
+    const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+      env: ENV, hamTerminalRemediation: hamEvidence(),
+      hamTerminalRemediationGroundTruth: groundTruth,
+    });
+    assert.equal(result.trace.hamTerminalRemediation.reasonCode, null);
+    assert.equal(result.trace.hamTerminalRemediation.safetyCoreOk, variant === 'linked');
+    assert.equal(result.eligible, variant === 'linked');
+  });
+}

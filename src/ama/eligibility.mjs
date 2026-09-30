@@ -878,6 +878,20 @@ function validateHamTerminalRemediationEvidence(
     && checks.parent
     && checks.commitIdentity
     && checks.nonEmptyCommit;
+  // HAMIDENT-02: diagnostic only; unlinked commits still fail the safety core.
+  // Missing identity fields are not proof that GitHub explicitly returned null.
+  const loginIsNull = (identity) => identity === null
+    || (typeof identity === 'object' && identity !== null && identity.login === null);
+  const commitIdentity = {
+    authorLoginNull: Boolean(verifiedCommit && loginIsNull(verifiedCommit.author)),
+    committerLoginNull: Boolean(verifiedCommit && loginIsNull(verifiedCommit.committer)),
+  };
+  const identityOnlyFailure = activeClaimed === true
+    && checks.workerClass && checks.head && checks.parent && checks.nonEmptyCommit
+    && !checks.commitIdentity;
+  const reasonCode = identityOnlyFailure
+    && commitIdentity.authorLoginNull && commitIdentity.committerLoginNull
+    ? 'ham-commit-identity-unlinked' : null;
   const advisoryCheckNames = [
     'ticket',
     'auditComment',
@@ -901,6 +915,8 @@ function validateHamTerminalRemediationEvidence(
     activeAuthorized,
     ok,
     safetyCoreOk,
+    reasonCode,
+    commitIdentity,
     advisoryShortfall,
     checks,
     reviewedParent: directReviewedParent ? verifiedParentSha : (verifiedReviewedHeadSha || parentSha || null),

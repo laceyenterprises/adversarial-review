@@ -2690,6 +2690,13 @@ test('mcp_metering extension subtrees are replaced whole by a higher layer', () 
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.deepEqual(cfg.get('mcp_metering.policy.rule_modes'), { r1: 'observe' });
     assert.equal(cfg.get('mcp_metering.policy.mode'), 'enforce');
+    writeFile(local, `
+      version: 1
+      mcp_metering:
+        policy:
+          rule_modes: {}
+    `);
+    assert.deepEqual(loadConfig({ topPath: top, env: {} }).get('mcp_metering.policy.rule_modes'), {});
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

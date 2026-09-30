@@ -18,7 +18,7 @@
 //
 // Cost is bounded: per touched pack, one plan.json fetch (a second only when
 // the pack is absent at the base ref) and one LIMIT-bounded, indexed,
-// read-only ledger SELECT.
+// read-only ledger SELECT (up to three attempts for transient failures).
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -43,6 +43,13 @@ const PACK_DIR_RE = /^projects\/([^/]+)\/(.+)$/;
 const GUARDED_PACK_FILE_RE = /^(?:SPEC\.md|SPEC\.meta\.json|plan\.json|prompts\/.+)$/;
 const TICKET_ID_RE = /^[A-Z][A-Z0-9]*-\d+[A-Z0-9]*$/;
 const TITLE_TICKET_RE = /^\s*(?:\[[^\]]*\]\s*)*(?:\([^)]*\)\s*)*(?:SEV\d+\s+)?([A-Za-z][A-Za-z0-9]*-\d+[A-Za-z0-9]*)\b/;
+
+const PUBLIC_LEDGER_REASONS = new Set([
+  'ledger-read-failed', 'ledger-read-threw', 'missing-ledger-target',
+  'malformed-ledger-target', 'unsupported-ledger-backend',
+  'postgres-configured-but-sqlite-resolved', 'psql-not-installed',
+  'missing-plan-id', 'invalid-dag-run-states',
+]);
 
 function normalizeText(value) {
   const text = String(value ?? '').trim();
@@ -174,6 +181,7 @@ async function resolvePackLiveness({
 }) {
   const plan = await loadPackPlan({ repo, slug, baseRef, headRef, fetchFileAtRefImpl });
   if (!plan.ok) {
+    console.warn('[live-pack-cross-edit] plan read failed:', plan.detail);
     return {
       slug,
       planId: null,
@@ -181,7 +189,7 @@ async function resolvePackLiveness({
       runs: [],
       live: false,
       inconclusive: true,
-      reason: `${plan.reason}: ${plan.detail}`,
+      reason: plan.reason,
     };
   }
   if (!plan.planId) {
@@ -194,6 +202,8 @@ async function resolvePackLiveness({
     result = { ok: false, reason: 'ledger-read-threw', detail: err?.message || String(err) };
   }
   if (!result?.ok) {
+    // Private operator diagnostics never enter findings or review JSON.
+    console.warn('[live-pack-cross-edit] ledger read failed:', result?.reason, result?.detail);
     return {
       slug,
       planId: plan.planId,
@@ -201,7 +211,7 @@ async function resolvePackLiveness({
       runs: [],
       live: false,
       inconclusive: true,
-      reason: `ledger unreadable (${result?.reason || 'unknown'}${result?.detail ? `: ${result.detail}` : ''})`,
+      reason: `ledger unreadable (${PUBLIC_LEDGER_REASONS.has(result?.reason) ? result.reason : 'ledger-read-failed'})`,
     };
   }
   const runs = (result.runs || [])
@@ -285,7 +295,7 @@ async function evaluateLivePackCrossEdits({
 // Fail-closed fallback for when evaluation itself throws: every guarded pack
 // the diff touches becomes an inconclusive blocking finding unless the waiver
 // label is present.
-function inconclusiveFindingsForDiff({ diffText = '', changedPaths = null, labels = [], error }) {
+function inconclusiveFindingsForDiff({ diffText = '', changedPaths = null, labels = [] }) {
   if (normalizeLabelNames(labels).has(LIVE_PACK_EDIT_WAIVER_LABEL)) return [];
   const paths = Array.isArray(changedPaths) ? changedPaths : changedPathsFromDiff(diffText);
   return [...touchedPacksFromPaths(paths, { guardedOnly: true })].map(([slug, touchedFiles]) =>
@@ -295,7 +305,7 @@ function inconclusiveFindingsForDiff({ diffText = '', changedPaths = null, label
         planId: null,
         runs: [],
         inconclusive: true,
-        reason: `live-pack evaluation failed: ${error?.message || error}`,
+        reason: 'live-pack evaluation failed',
       },
       touchedFiles,
     }),

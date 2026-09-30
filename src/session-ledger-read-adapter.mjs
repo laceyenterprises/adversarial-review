@@ -610,6 +610,7 @@ function describePostgresSpawnFailure(result) {
       ok: false,
       reason: 'ledger-read-failed',
       detail: `psql timed out after ${PSQL_TIMEOUT_MS}ms`,
+      transient: true,
     };
   }
   if (result.signal || result.status === null) {
@@ -624,6 +625,7 @@ function describePostgresSpawnFailure(result) {
       ok: false,
       reason: 'ledger-read-failed',
       detail: String(result.stderr || result.stdout || `psql exited with status ${result.status}`),
+      transient: /connection (?:refused|reset|timed out)|timeout expired|server closed the connection unexpectedly|could not (?:connect|translate host name)|too many clients|database system is (?:starting up|shutting down|in recovery)/i.test(String(result.stderr || '')),
     };
   }
   return null;
@@ -903,8 +905,17 @@ export const LIVE_DAG_RUN_STATES = Object.freeze(['pending', 'running', 'parked'
 const DAG_RUN_STATE_RE = /^[a-z][a-z0-9_-]*$/;
 const MAX_ACTIVE_DAG_RUNS = 20;
 
+function queryActiveDagRunsWithRetry(...args) {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const result = queryPostgresRows(...args);
+    if (result.ok || !result.transient || attempt === 3) return result;
+    sleepSync(100 * attempt);
+  }
+}
+
 // Read the non-terminal DAG runs of one plan. One indexed, LIMIT-bounded
-// SELECT (idx_dag_runs_plan_state covers plan_id + state), run inside a
+// SELECT (idx_dag_runs_plan_state covers plan_id + state), with at most three
+// attempts and 100/200ms backoff for transient Postgres failures, run inside a
 // read-only transaction on Postgres and a readonly handle on SQLite. Returns
 // `{ ok: true, runs }` or `{ ok: false, reason, detail }`; callers that gate
 // on liveness must treat `ok: false` as inconclusive, never as "not live".
@@ -958,7 +969,7 @@ export function readActiveDagRunsForPlan({
     // States are validated against DAG_RUN_STATE_RE above, so inlining them
     // as literals cannot inject; plan_id rides as a psql variable.
     const stateLiterals = stateList.map((state) => `'${state}'`).join(', ');
-    queried = queryPostgresRows(
+    queried = queryActiveDagRunsWithRetry(
       resolution.target,
       `SELECT json_build_object(
           'run_id', run_id,

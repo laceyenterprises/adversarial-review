@@ -235,7 +235,7 @@ test('unreadable ledger fails closed with the inconclusive reason', async () => 
   assert.equal(finding.blocking, true);
   assert.equal(finding.inconclusive, true);
   assert.match(finding.reason, /inconclusive/);
-  assert.match(finding.reason, /ledger unreadable \(ledger-read-failed: connection refused\)/);
+  assert.match(finding.reason, /ledger unreadable \(ledger-read-failed\)/);
   assert.match(finding.reason, /failing closed/);
   const body = applyLivePackCrossEditFindings(REVIEW_TEXT, result.findings);
   assert.equal(normalizeEffectiveReviewVerdict(body, { log: null }), 'request-changes');
@@ -430,7 +430,7 @@ test('applyLivePackCrossEditReview reads PR context, uses only current labels, a
     evaluateImpl: async () => { throw new Error('gh exploded'); },
   });
   assert.equal(normalizeEffectiveReviewVerdict(failedClosed, { log: null }), 'request-changes');
-  assert.match(failedClosed, /live-pack evaluation failed: gh exploded/);
+  assert.match(failedClosed, /live-pack evaluation failed/);
   assert.ok(logs.some((line) => /failing closed/.test(line)));
 });
 
@@ -560,4 +560,38 @@ test('resolveLivePackContextForJob fails closed when an existing job cannot reso
     assert.match(context, /Treat every build pack under `projects\/` as live/);
     assert.doesNotMatch(context, /"ownPack"/);
   }
+});
+
+
+test('public findings never disclose ledger or evaluation diagnostics', async () => {
+  const secret = '/Users/private/ledger.sqlite postgres://user:password@private/db';
+  for (const reason of ['postgres-configured-but-sqlite-resolved', secret]) {
+    const result = await evaluateLivePackCrossEdits({
+      repo: REPO, diffText: diffFor(CROSS_EDIT_PATHS), baseRef: 'main',
+      fetchFileAtRefImpl: fetchPlan,
+      readActiveDagRunsImpl: () => ({ ok: false, reason, detail: secret }),
+    });
+    assert.ok(result.findings.length > 0);
+    const body = applyLivePackCrossEditFindings(REVIEW_TEXT, result.findings);
+    assert.ok(!body.includes(secret));
+    assert.ok(!body.includes('/Users/private'));
+    assert.ok(!body.includes('password'));
+  }
+  const findings = inconclusiveFindingsForDiff({ diffText: diffFor(CROSS_EDIT_PATHS), error: new Error(secret) });
+  assert.ok(!applyLivePackCrossEditFindings(REVIEW_TEXT, findings).includes(secret));
+});
+
+test('files API fallback preserves protected source of a quoted rename', async () => {
+  const { fetchPRDiffFromFilesApi } = await import('../src/reviewer-diff-fetch.mjs');
+  const diff = await fetchPRDiffFromFilesApi(REPO, 1, 'a'.repeat(40), {
+    execGhWithRetryImpl: async () => ({ stdout: JSON.stringify([{
+      status: 'renamed', previous_filename: 'projects/model-efficiency-gym/SPEC.md',
+      filename: 'projects/model-efficiency-gym/SPEC"old.md', patch: '@@ -1 +1 @@\n-old\n+new',
+    }]) }),
+    awaitThrottleIfNeededImpl: async () => {}, recordApiCallImpl: () => {},
+  });
+  const result = await evaluateLivePackCrossEdits({ repo: REPO, diffText: diff.toString(), baseRef: 'main',
+    fetchFileAtRefImpl: fetchPlan, readActiveDagRunsImpl: makeLedger().impl });
+  assert.equal(result.findings.length, 1);
+  assert.deepEqual(result.findings[0].touched_files, ['projects/model-efficiency-gym/SPEC.md']);
 });

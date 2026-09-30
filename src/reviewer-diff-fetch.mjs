@@ -99,6 +99,17 @@ async function runWithConcurrency(tasks, concurrency) {
   await Promise.all(Array.from({ length: workerCount }, () => worker()));
 }
 
+// Match Git's byte-oriented C quoting so fallback headers round-trip through
+// the same parser as native diffs, including quotes, controls and UTF-8.
+function quoteGitPath(path) {
+  if (!/["\\\x00-\x1f\x7f-\uffff]/u.test(path)) return path;
+  return '"' + [...Buffer.from(path)].map((byte) => {
+    if (byte === 34 || byte === 92) return '\\' + String.fromCharCode(byte);
+    if (byte < 32 || byte >= 127) return '\\' + byte.toString(8).padStart(3, '0');
+    return String.fromCharCode(byte);
+  }).join('') + '"';
+}
+
 function diffHeaderForFile(file) {
   const filename = String(file?.filename ?? '');
   const previous = String(file?.previous_filename ?? '');
@@ -107,7 +118,7 @@ function diffHeaderForFile(file) {
   const diffOld = previous || filename;
   const diffNew = filename;
   const sha = String(file?.sha || '').slice(0, 7) || '0000000';
-  const lines = [`diff --git a/${diffOld} b/${diffNew}`];
+  const lines = [`diff --git ${quoteGitPath(`a/${diffOld}`)} ${quoteGitPath(`b/${diffNew}`)}`];
   // The PR files API does not expose file modes, so added/removed modes are synthetic.
   if (file?.status === 'added') lines.push('new file mode 100644');
   if (file?.status === 'removed') lines.push('deleted file mode 100644');
@@ -122,8 +133,8 @@ function diffHeaderForFile(file) {
   } else {
     lines.push(`index 0000000..${sha}`);
   }
-  lines.push(`--- ${oldPath}`);
-  lines.push(`+++ ${newPath}`);
+  lines.push(`--- ${quoteGitPath(oldPath)}`);
+  lines.push(`+++ ${quoteGitPath(newPath)}`);
   return lines;
 }
 

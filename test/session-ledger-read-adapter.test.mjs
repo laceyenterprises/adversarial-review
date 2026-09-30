@@ -1054,3 +1054,35 @@ test('readActiveDagRunsForPlan filters sqlite rows to the plan and live states',
   assert.equal(result.ok, true);
   assert.deepEqual(result.runs.map((run) => run.run_id), ['dagrun_live', 'dagrun_parked']);
 });
+
+
+test('active DAG reads retry transient failures, stop on permanent errors, and fail closed at cap', () => {
+  for (const failure of [
+    { status: null, error: { code: 'ETIMEDOUT' } },
+    { status: 2, stderr: 'connection refused' },
+  ]) {
+    for (const recover of [true, false]) {
+      let calls = 0;
+      const result = readActiveDagRunsForPlan({ planId: 'p',
+        ledgerTarget: { backend: 'postgres', databaseName: 'ledger' },
+        spawnSyncImpl: () => ++calls === 3 && recover
+          ? { status: 0, stdout: '', stderr: '' } : failure,
+      });
+      assert.equal(calls, 3);
+      assert.equal(result.ok, recover);
+    }
+  }
+  for (const failure of [
+    { status: 1, stderr: 'permission denied for table dag_runs' },
+    { status: null, error: { code: 'ENOENT' } },
+    { status: 0, stdout: 'invalid JSON' },
+  ]) {
+    let calls = 0;
+    const result = readActiveDagRunsForPlan({ planId: 'p',
+      ledgerTarget: { backend: 'postgres', databaseName: 'ledger' },
+      spawnSyncImpl: () => { calls++; return failure; },
+    });
+    assert.equal(calls, 1);
+    assert.equal(result.ok, false);
+  }
+});

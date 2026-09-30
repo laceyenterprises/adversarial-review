@@ -461,6 +461,27 @@ test('an empty or unparseable diff yields no files and therefore refuses', () =>
   assert.ok(refusalCodes(decision).has(SLIM_REVIEW_REFUSAL.EMPTY_CHANGE_SET));
 });
 
+test('changedFilesFromDiff decodes quoted paths and refuses an unreadable header', () => {
+  const quoted = [
+    'diff --git "a/docs/caf\\303\\251 notes.md" "b/docs/caf\\303\\251 notes.md"',
+    '--- "a/docs/caf\\303\\251 notes.md"',
+    '+++ "b/docs/caf\\303\\251 notes.md"',
+    '@@ -1 +1 @@',
+    '-old',
+    '+new',
+    '',
+  ].join('\n');
+  assert.deepEqual(
+    changedFilesFromDiff(quoted),
+    [{ path: 'docs/café notes.md', added: 1, removed: 1, binary: false }],
+  );
+  const unreadable = `${quoted.replace('"a/docs', 'x/docs')}${DOCS_DIFF}`;
+  assert.equal(changedFilesFromDiff(unreadable), null);
+  const decision = evaluateSlimReviewEligibilityForDiff({ diff: unreadable, policy: POLICY });
+  assert.equal(decision.slim, false);
+  assert.ok(refusalCodes(decision).has(SLIM_REVIEW_REFUSAL.CHANGED_FILES_UNKNOWN));
+});
+
 test('evaluateSlimReviewEligibilityForDiff accepts a real docs diff', () => {
   const decision = evaluateSlimReviewEligibilityForDiff({ diff: DOCS_DIFF, policy: POLICY });
   assert.equal(decision.slim, true, JSON.stringify(decision.refusals));

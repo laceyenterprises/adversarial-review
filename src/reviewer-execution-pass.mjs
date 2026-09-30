@@ -1,3 +1,4 @@
+import { withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
 import { beginReviewerPass, recordReviewerPassProgress } from './reviewer-pass-tokens.mjs';
 
 export function createReviewerProgressRecorder({ rootDir, repo, prNumber, attemptNumber, passKind,
@@ -44,4 +45,17 @@ export function persistHostedReviewerExecution({
     log.warn(`[reviewer] reviewer execution pass write failed for ${repo}#${prNumber}: ${err?.message || err}`);
     return false;
   }
+}
+
+// Required recovery evidence: failure aborts the review before any GitHub post.
+export function persistSingleReviewDecision({ rootDir, repo, prNumber, attemptNumber,
+  reviewerClass, passKind, headSha, singleReview, beginReviewerPassImpl = beginReviewerPass,
+  retryOptions = {} }) {
+  const decision = singleReview?.applied === true
+    ? { applied: true, basis: singleReview.basis || null, stats: singleReview.stats || null }
+    : { applied: false };
+  return withSqliteBusyRetrySync(() => beginReviewerPassImpl(rootDir, {
+    repo, prNumber, attemptNumber, reviewerClass, passKind, headSha,
+    metadata: { singleReview: decision },
+  }), { label: 'single-review-recovery-state', ...retryOptions });
 }

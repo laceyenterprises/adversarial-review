@@ -11,6 +11,8 @@
 // `adversarial-review.pipeline-availability` failure class — 603 logged review
 // posts lost to a non-review failure on the post path).
 
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { openReviewStateDb, ensureReviewStateSchema } from './review-state.mjs';
 import { recordReviewLatencyEvent } from './review-latency-event-writer.mjs';
 import { withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
@@ -83,6 +85,15 @@ export function recordReviewModeSelected({
             stats: summary.stats,
             reviewerModel: reviewerModel || null,
             attemptNumber: Number.isFinite(Number(attemptNumber)) ? Number(attemptNumber) : null,
+            // SINGLEREVIEW-01: the reviewer-pass reaper re-queues a posted
+            // review's follow-up from this row when the reviewer died first.
+            singleReview: decision?.singleReview
+              ? {
+                  applied: decision.singleReview.applied === true,
+                  basis: decision.singleReview.basis || null,
+                  stats: decision.singleReview.stats || null,
+                }
+              : null,
           },
         });
       } finally {
@@ -95,5 +106,52 @@ export function recordReviewModeSelected({
       `[reviewer] WARN: failed to record review-mode latency event for ${repo}#${prNumber}: ${err?.message || err}`,
     );
     return { recorded: false, reason: 'write-failed', summary };
+  }
+}
+
+/**
+ * SINGLEREVIEW-01 — read back the single-review decision a reviewer pass made.
+ *
+ * The reviewer-pass reaper re-queues a posted review's follow-up when the
+ * reviewer died before queueing it; this is how that job learns the review it
+ * is recovering was the PR's one and only round. Keyed exactly like the write,
+ * so a decision for another head or attempt never applies. Best-effort: any
+ * miss or error returns null, which means normal rounds.
+ *
+ * @returns {{applied: boolean, basis: string|null, stats: object|null}|null}
+ */
+export function readSingleReviewDecision({
+  rootDir,
+  repo,
+  prNumber,
+  headSha = null,
+  attemptNumber = null,
+  openDbImpl = openReviewStateDb,
+  log = console,
+} = {}) {
+  if (!rootDir || !repo || !headSha || !Number.isInteger(Number(prNumber))) return null;
+  // Never create a review-state database just to find nothing in it.
+  if (openDbImpl === openReviewStateDb && !existsSync(join(rootDir, 'data', 'reviews.db'))) return null;
+  try {
+    const db = openDbImpl(rootDir);
+    try {
+      ensureReviewStateSchema(db);
+      const row = db.prepare(
+        `SELECT payload_json
+           FROM review_latency_events
+          WHERE event_type = ?
+            AND idempotency_key = ?`,
+      ).get(
+        REVIEW_MODE_SELECTED_EVENT,
+        `review-mode:${repo}#${prNumber}:${headSha}:${attemptNumber ?? 'unknown-attempt'}`,
+      );
+      const singleReview = row ? JSON.parse(row.payload_json || '{}')?.singleReview : null;
+      return singleReview && typeof singleReview === 'object' ? singleReview : null;
+    } finally {
+      db.close();
+    }
+  } catch (err) {
+    log?.warn?.(`[reviewer-pass-reaper] WARN: single-review decision read failed for ${repo}#${prNumber}: ${err?.message || err}`);
+    return null;
   }
 }

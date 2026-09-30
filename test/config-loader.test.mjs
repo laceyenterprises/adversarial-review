@@ -4452,6 +4452,29 @@ test('non-blocking remediation config resolves host-local overrides and validate
   }
 });
 
+test('SINGLEREVIEW-01: single_review knobs default, override locally, and validate', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\n');
+    const defaults = loadConfig({ topPath: top, env: {} });
+    assert.equal(defaults.get('roles.adversarial.single_review.enabled'), true);
+    assert.equal(defaults.get('roles.adversarial.single_review.max_changed_lines'), 50);
+    assert.equal(defaults.get('roles.adversarial.single_review.max_files'), 5);
+    assert.equal(defaults.get('roles.adversarial.single_review.docs_tests_follow_slim_limits'), true);
+    writeFile(join(tmp, 'config.local.yaml'), 'version: 1\nroles:\n  adversarial:\n    single_review:\n      enabled: false\n      max_changed_lines: 30\n      max_files: 3\n      docs_tests_follow_slim_limits: false\n');
+    const local = loadConfig({ topPath: top, env: {} });
+    assert.equal(local.get('roles.adversarial.single_review.enabled'), false);
+    assert.equal(local.get('roles.adversarial.single_review.max_changed_lines'), 30);
+    assert.equal(local.get('roles.adversarial.single_review.max_files'), 3);
+    assert.equal(local.get('roles.adversarial.single_review.docs_tests_follow_slim_limits'), false);
+    writeFile(join(tmp, 'config.local.yaml'), 'version: 1\nroles:\n  adversarial:\n    single_review:\n      max_files: 0\n');
+    assert.throws(() => loadConfig({ topPath: top, env: {} }), AgentOSConfigError);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('roles.adversarial.orchestration_mode rejects unsupported values in Node loader', () => {
   const tmp = freshTmp();
   try {

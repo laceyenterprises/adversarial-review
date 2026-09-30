@@ -400,6 +400,115 @@ handles as it would inline.
    `state = running`; otherwise the old process may still be serving the
    stale config you were trying to replace.
 
+### 2c. SINGLEREVIEW-01 one review round for super-small PRs
+
+Operator decision (2026-09-29): a super-small PR gets exactly one adversarial
+review. That review is the final round. It runs on the `reviewer.last.md`
+lenient bar, which still keeps data corruption, secret leakage, security
+regressions and broken contracts blocking.
+
+- **No findings.** The normal clean path (`no-remediation-required`).
+- **Findings.** The follow-up job is stopped `max-rounds-reached` with no
+  remediation worker and no re-review, and the existing ROUNDCAP / terminal
+  hammer handoff closes the PR. This includes a `Comment only` verdict with
+  non-blocking findings: the single review replaces the comment-only
+  final-round worker, so the hammer owns those findings too. Security-surface PRs never reach this lane,
+  because they are refused below and queue for Argus as before.
+
+**What counts as super-small.** Either of these:
+
+- ≤`max_changed_lines` changed lines AND ≤`max_files` files, on any path; or
+- docs/tests-only within the slim-review limits (20 files / 400 lines), while
+  `docs_tests_follow_slim_limits` is on.
+
+**What never qualifies:**
+
+- the gate-keeper surface:
+  - `src/{watcher,reviewer,review-state,process-group-spawn,reviewer-reattach,reviewer-cascade}.mjs`;
+  - `src/kernel/`, `src/adapters/`;
+  - launchd templates and `.plist`, `scripts/`, `bin/`;
+  - the `tools/adversarial-review` submodule mount and `.gitmodules`;
+- any submodule pointer bump (a gitlink: mode `160000` or `Subproject commit`);
+- any rename, copy or file-mode change. Every path rule also runs against a
+  rename's pre-image path;
+- migrations (`alembic/`, `migrations/`, `versions/*.py`, `*.sql`);
+- secret, credential and auth paths;
+- sensitive surfaces from `security-surface-classifier.mjs`, and any other
+  trigger that classifier reports, including a bot author (Dependabot,
+  Renovate, `github-actions[bot]`): refused as `bot-author`;
+- dependency manifests;
+- `.github/workflows/`;
+- any `ADVERSARIAL_REVIEW_SLIM_DENY_PREFIXES` prefix;
+- a PR labelled `operator-approved: full-review`.
+
+Anything unknown also means normal rounds: an unreadable config, or a diff
+with any `diff --git` header the parser cannot read (quoted Git paths are
+decoded, so a quoted protected path is still classified). One unreadable
+header refuses the whole PR as `changed-files-unknown` rather than classifying
+the files that did parse. The lane applies only to what would have been the PR's *first* review;
+a PR already in the round loop never enters it.
+
+**How it rides the existing budget.** There is no second counter. The job is
+created with `remediationPlan.currentRound = maxRounds` (the tier budget),
+and the decision is recorded on the job as `singleReview`. The remediation
+ledger then counts that stop as `maxRounds` completed rounds, which gives two
+things:
+
+- the terminal Hammer's "the remediator had a turn" check passes;
+- a later author push that is still super-small is re-reviewed once at the
+  `last` stage, the same as any budget-exhausted PR, instead of earning a fresh
+  budget.
+
+A later push that makes the PR's full diff no longer qualify voids the credit.
+For example, a small first push followed by a change to `src/watcher.mjs`. The
+reviewer re-classifies every non-`first`-stage review. When the PR no longer
+qualifies, it writes
+`data/follow-up-jobs/single-review-voids/<domain>--<repo>-pr-<n>.json`. The
+ledger then stops counting the earlier single-review stop, the review re-stages
+(normally to `first`), and the PR gets its normal tier budget. The reviewer log
+shows
+`single-review: voided <repo>#<n> credit — head no longer super-small (<codes>)`
+and `Effective prompt stage for <repo>#<n>: …`.
+
+If the void marker cannot be written after 3 attempts, the reviewer logs
+`[reviewer] Unhandled error: Error: single-review credit void did not persist for <repo>#<n>; refusing to review until it does`
+and exits non-zero before dispatch. The watcher retries the pass. Fix the
+`data/follow-up-jobs/single-review-voids/` write failure, for example
+permissions or a full disk. A stopped single-review job still counts after the
+stopped-job archive sweep moves it to `stopped-archived/`.
+
+Knobs, all under `roles.adversarial.single_review`:
+
+| Key | Default | Effect |
+|---|---|---|
+| `enabled` | `true` | `false` restores normal rounds for every PR. |
+| env `ADVERSARIAL_REVIEW_SINGLE_REVIEW_ENABLED` | unset | `false`/`0`/`off` disables the lane, and `true`/`1`/`on` enables it. It overrides `enabled`. **Use this as the kill switch** until the key below is registered in every loader. |
+| `max_changed_lines` | `50` | Changed-line ceiling for the any-path rule. |
+| `max_files` | `5` | File ceiling for the any-path rule. |
+| `docs_tests_follow_slim_limits` | `true` | Docs/tests-only PRs qualify up to the slim limits. |
+
+These are registered in the adversarial-review JS loader only. Do not set them
+in `config.yaml` until agent-os lands the matching keys in:
+
+- the Python `schema_v1`;
+- `env_aliases.py`;
+- the shell `SHELL_ALLOWED_KEYS`.
+
+Until then the defaults apply.
+
+Diagnose from the reviewer log:
+
+```bash
+grep 'single-review:' <reviewer log>
+# [reviewer] single-review: super-small owner/repo#123 super-small (small-change; 2 file(s), 12 changed line(s)) — first review is final; prompt stage=last
+```
+
+The follow-up job carries `singleReview` and, once claimed, a stop reason that
+begins `single-review: super-small PR; the first review was the final round`.
+The `review_mode_selected` latency row's payload carries `singleReview` too. The
+reviewer-pass reaper reads it back when it re-queues a posted review whose
+reviewer died.
+
 ---
 
 ## 3. Validating cutover

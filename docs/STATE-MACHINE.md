@@ -86,6 +86,13 @@ data/reviews.db
 
 ### Reviewer run-state ledger
 
+The delivery row also retains `codex_broker_provider` (`codex`, `codex-corp`,
+or `NULL` for non-Codex/legacy rows). The watcher writes it after winning the
+claim, guarded by that session UUID, before dispatch. A corporate quota failure
+cannot bypass its own local quota hold or repeated-execution fallback merely
+because fleet quota evidence has not caught up; primary quota failures can
+still move to the corporate account. Review-cycle resets clear attribution.
+
 The SQLite `reviewing` row is the durable delivery claim. The reviewer runtime
 also writes a per-session JSON record in `data/reviewer-runs/` so a restarted
 watcher can adopt or settle the subprocess without relying only on SQLite spawn

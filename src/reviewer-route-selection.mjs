@@ -295,7 +295,9 @@ export function primaryReviewerQuotaCappedForRow(row, { nowMs = null, expectedRe
 }
 
 export function shouldBypassPrimaryReviewerQuotaHold(route, row = null) {
-  if (route?.reviewerModel === 'codex' && route.codexBrokerProvider === 'codex-corp') return true;
+  if (route?.reviewerModel === 'codex' && route.codexBrokerProvider === 'codex-corp') {
+    return row?.codex_broker_provider !== 'codex-corp';
+  }
   if (row && !rowReviewerMatches(row, route?.geminiReviewerSelection?.replacedReviewerModel)) {
     return false;
   }
@@ -456,6 +458,7 @@ export function selectReviewerRouteForAttempt({
     });
   // A primary-account quota failure does not exhaust the corporate account.
   if (baseRoute.codexBrokerProvider === 'codex-corp'
+    && currentRow?.codex_broker_provider !== 'codex-corp'
     && execFailureSignal.failureClass === 'quota-exhausted') return { ...baseRoute };
   if (tokenHoldExhausted || (
     execThreshold > 0 &&

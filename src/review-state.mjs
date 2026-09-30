@@ -128,6 +128,7 @@ const REVIEW_STATE_RESET_ASSIGNMENTS = Object.freeze([
   ['reviewer_pgid', 'NULL'],
   ['reviewer_started_at', 'NULL'],
   ['reviewer_head_sha', 'NULL'],
+  ['codex_broker_provider', 'NULL'],
   ['reviewer_timeout_ms', 'NULL'],
   ['reviewer_lease_expires_at', 'NULL'],
   ['quota_reset_at_utc', 'NULL'],
@@ -189,6 +190,7 @@ function ensureReviewStateSchema(db) {
       reviewer_pgid     INTEGER,
       reviewer_started_at TEXT,
       reviewer_head_sha TEXT,
+      codex_broker_provider TEXT,
       reviewer_timeout_ms INTEGER,
       reviewer_lease_expires_at TEXT,
       quota_reset_at_utc TEXT,
@@ -226,6 +228,7 @@ function ensureReviewStateSchema(db) {
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN reviewer_pgid INTEGER`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN reviewer_started_at TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN reviewer_head_sha TEXT`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN codex_broker_provider TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN reviewer_timeout_ms INTEGER`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN reviewer_lease_expires_at TEXT`);
   // HRR review-lane: durable provider usage-cap reset time. Owned by

@@ -26,8 +26,8 @@
 //
 // SAFETY
 // ------
-//   * Fail-safe: any error (missing/invalid source, fs failure) returns null and
-//     the caller falls back to the shared CODEX_AUTH_PATH exactly as before.
+//   * Primary fail-safe: errors return null so the caller can use the shared
+//     CODEX_AUTH_PATH. Corporate auth requires a broker mint and fails closed.
 //   * Kill-switch: AGENT_OS_CODEX_PER_WORKER_AUTH=0 disables materialization.
 //   * Contract-safe: the per-worker auth.json is materialized UNDER the source
 //     credential's operator home (/Users/<u>/...), so a consumer that derives
@@ -49,12 +49,22 @@ import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { sleepSync } from './sqlite-busy-retry.mjs';
 
 export const PER_WORKER_PLACEHOLDER_REFRESH_TOKEN =
   'agent-os-per-worker-placeholder-no-rotate';
 const KILL_SWITCH_ENV = 'AGENT_OS_CODEX_PER_WORKER_AUTH';
 const PER_WORKER_DIRNAME = '.per-worker';
 const DEFAULT_STALE_SWEEP_MS = 6 * 60 * 60 * 1000; // 6h
+const CORPORATE_SYNC_RETRY_DELAYS_MS = [100, 200];
+
+function isTransientAuthSyncError(err) {
+  const diagnostic = `${err?.code || ''}\n${err?.message || ''}\n${err?.stderr || ''}`;
+  // The helper can report multiple broker endpoints. Permanent failures must
+  // not be retried just because an earlier endpoint timed out.
+  if (/HTTP\s+(?:400|401|403|404)\b|CERTIFICATE_VERIFY_FAILED|certificate verify failed/i.test(diagnostic)) return false;
+  return /ETIMEDOUT|ECONNRESET|ECONNREFUSED|ECONNABORTED|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|EPIPE|timed?\s*out|timeout|connection (?:reset|refused|aborted)|temporary failure in name resolution|TLS handshake|SSL.*(?:EOF|handshake)|HTTP\s+(?:408|429|500|502|503|504)\b/i.test(diagnostic);
+}
 
 function perWorkerAuthEnabled(env) {
   return String(env[KILL_SWITCH_ENV] ?? '1') !== '0';
@@ -124,6 +134,7 @@ export function materializePerWorkerCodexAuth({
   brokerRefresh = true,
   provider = env.CODEX_BROKER_PROVIDER || 'codex',
   execFileSyncImpl = execFileSync,
+  sleepImpl = sleepSync,
   pythonBin = null,
   now = Date.now(),
 } = {}) {
@@ -169,17 +180,28 @@ export function materializePerWorkerCodexAuth({
     // long-running worker gets the maximum TTL before its (un-refreshable)
     // token expires. The copied token is already broker-fresh on a host where
     // the acpx-codex-worker-auth-sync LaunchAgent runs, so this only widens the
-    // safety margin and never blocks the spawn.
+    // safety margin. Corporate auth has no copied token: its mint is mandatory
+    // and retries only transient transport/HTTP errors, at most three times.
     if (brokerRefresh || corporate) {
       const syncBin = resolveAuthSyncBin(env);
       if (!syncBin && corporate) throw new Error('corporate Codex broker auth sync unavailable');
       if (syncBin) {
         try {
-          execFileSyncImpl(pythonBin || env.HQ_PYTHON3 || env.AGENT_OS_PY || 'python3', [syncBin], {
-            env: { ...env, CODEX_WORKER_AUTH_PATH: authPath, CODEX_BROKER_PROVIDER: provider },
-            stdio: 'ignore',
-            timeout: 15000,
-          });
+          const retryDelays = corporate ? CORPORATE_SYNC_RETRY_DELAYS_MS : [];
+          for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
+            try {
+              execFileSyncImpl(pythonBin || env.HQ_PYTHON3 || env.AGENT_OS_PY || 'python3', [syncBin], {
+                env: { ...env, CODEX_WORKER_AUTH_PATH: authPath, CODEX_BROKER_PROVIDER: provider },
+                stdio: ['ignore', 'ignore', 'pipe'],
+                encoding: 'utf8',
+                timeout: 15000,
+              });
+              break;
+            } catch (err) {
+              if (attempt >= retryDelays.length || !isTransientAuthSyncError(err)) throw err;
+              sleepImpl(retryDelays[attempt]);
+            }
+          }
           // The sync helper never touches refresh_token, but re-assert the
           // placeholder defensively so no real refresh_token can ever land in
           // the per-worker file.

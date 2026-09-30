@@ -12,6 +12,10 @@ import { TAG_PREFIXES } from '../src/adapters/subject/github-pr/title-tagging.mj
 import { loadConfig } from '../src/config-loader.mjs';
 import { materializePerWorkerCodexAuth, prepareCorporateCodexReviewerAuth, PER_WORKER_PLACEHOLDER_REFRESH_TOKEN } from '../src/codex-per-worker-auth.mjs';
 import { remediationWorkerGitIdentity, remediationWorkerPushProvider, remediationWorkerTrailerClass } from '../src/remediation-worker-provenance.mjs';
+import Database from 'better-sqlite3';
+import { ensureReviewStateSchema } from '../src/review-state.mjs';
+import { UPDATE_REVIEW_ROUTING_SQL } from '../src/review-state-statements.mjs';
+import { selectReviewerRouteForAttempt, shouldBypassPrimaryReviewerQuotaHold } from '../src/reviewer-route-selection.mjs';
 
 function rows(primary = 'exhausted', corp = 'ok', extra = {}) {
   return [
@@ -28,6 +32,46 @@ function reviewer(statuses, builderClass = 'claude-code', codexModel = null) {
   return applyAfhReviewerFallback({ builderClass, baseRoute: route(builderClass),
     grounding: afhGroundingSnapshotFromStdout(stdout(statuses), { codexModel }), geminiReviewerMode: 'off' });
 }
+
+test('CCX-04 claimed account persists across failure and corporate quota does not bypass local safeguards', () => {
+  const db = new Database(':memory:');
+  const rootDir = mkdtempSync(join(tmpdir(), 'ccx-quota-route-'));
+  try {
+    ensureReviewStateSchema(db);
+    db.prepare(`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, review_status, reviewer_session_uuid, reviewer_head_sha)
+      VALUES ('fixture/repo', 1, '2026-09-30', 'codex', 'reviewing', 'claimed', 'head')`).run();
+    const update = db.prepare(UPDATE_REVIEW_ROUTING_SQL);
+    assert.equal(update.run('codex', null, 'codex-corp', 'fixture/repo', 1, 'other-session').changes, 0);
+    assert.equal(update.run('codex', null, 'codex-corp', 'fixture/repo', 1, 'claimed').changes, 1);
+    db.prepare(`UPDATE reviewed_prs SET review_status = 'failed', failure_message = '[quota-exhausted] quota exhausted',
+      infra_auto_recover_attempts = 1 WHERE pr_number = 1`).run();
+    assert.equal(update.run('codex', null, 'codex', 'fixture/repo', 1, 'claimed').changes, 0);
+    const failed = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number = 1').get();
+    assert.equal(failed.codex_broker_provider, 'codex-corp');
+    // AFH still reports corporate admission while local failure says exhausted.
+    const baseRoute = reviewer(rows());
+    const grounding = afhGroundingSnapshotFromStdout(stdout(rows()));
+    const select = (currentRow, env = {}) => selectReviewerRouteForAttempt({
+      subject: { builderClass: 'claude-code' }, baseRoute, rootDir, repoPath: 'fixture/repo', prNumber: 1,
+      currentRow, headSha: 'head', env, afhGrounding: grounding,
+    });
+    assert.equal(shouldBypassPrimaryReviewerQuotaHold(baseRoute, failed), false);
+    const fallback = select(failed);
+    assert.equal(fallback.reviewerModel, 'gemini');
+    assert.equal(fallback.reviewerModelFallback.failureClass, 'quota-exhausted');
+    assert.equal(shouldBypassPrimaryReviewerQuotaHold(select(failed, { AGENT_OS_REVIEWER_EXEC_FALLBACK_THRESHOLD: '0' }), failed), false);
+    assert.equal(select({ ...failed, infra_auto_recover_attempts: 0 }).reviewerModel, 'codex');
+    for (const provider of ['codex', null, undefined]) {
+      const primaryFailure = { ...failed, codex_broker_provider: provider };
+      assert.equal(select(primaryFailure).codexBrokerProvider, 'codex-corp');
+      assert.equal(select(primaryFailure).reviewerModelFallback, undefined);
+      assert.equal(shouldBypassPrimaryReviewerQuotaHold(baseRoute, primaryFailure), true);
+    }
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
 
 for (const [label, primary, extra] of [
   ['hard cap', 'exhausted', {}],

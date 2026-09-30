@@ -30,6 +30,7 @@ test('fresh DB includes subject identity columns and current schema version', ()
     assert.ok(columns.includes('subject_external_id'));
     assert.ok(columns.includes('revision_ref'));
     assert.ok(columns.includes('pipeline_stage_states_json'));
+    assert.ok(columns.includes('codex_broker_provider'));
     assert.ok(
       db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'duplicate_families'").get()
     );
@@ -85,6 +86,7 @@ test('migration from v2 adds identity columns and backfills available head SHA',
       subject_external_id: 'laceyenterprises/agent-os#360',
       revision_ref: 'sha-360',
     });
+    assert.equal(db.prepare('SELECT codex_broker_provider FROM reviewed_prs WHERE pr_number = 360').get().codex_broker_provider, null);
 
     const legacyNoSha = db.prepare(
       'SELECT domain_id, subject_external_id, revision_ref FROM reviewed_prs WHERE pr_number = ?'

@@ -23,6 +23,20 @@ fallbacks when primary Codex is capped and corporate Codex is admitting.
 request. Corporate auth starts empty, requires a successful corporate broker
 mint, and fails closed instead of copying or falling back to primary tokens.
 The CLI and OAuth Responses recovery use the same isolated credential file.
+Corporate auth-sync captures stderr and retries recognized network timeouts,
+connection failures, TLS handshake failures, and transient HTTP responses for
+at most three attempts with 100/200ms backoff (15s timeout per attempt).
+Permanent auth/configuration failures and invalid token responses fail closed
+immediately; exhausted transient retries also fail closed and clean up the
+isolated credential directory. Primary auth-sync remains best-effort.
+
+After winning the existing single-claim CAS, the watcher stamps
+`reviewed_prs.codex_broker_provider` under the claimed session before dispatch.
+The account is retained on failure: primary quota exhaustion may bypass the
+local hold and execution fallback to try corporate Codex, but a corporate
+quota failure uses the normal local hold and bounded model-fallback threshold
+even while the fleet snapshot still reports corporate admission. Legacy rows
+without account attribution retain the primary-account interpretation.
 
 `codex-corp` normalizes to the Codex family. Codex-family reviewers never review
 Codex-family builders, including timeout and repeated-execution fallback paths.

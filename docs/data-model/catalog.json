@@ -102,6 +102,9 @@
       "relatedSchemaSurfaces": [
         "migrations/20260810_reviewer_passes_posted_review_freshness_index.sql",
         "src/review-state.mjs",
+        "src/review-state-statements.mjs",
+        "src/review-state-db.mjs",
+        "src/reviewer-route-selection.mjs",
         "src/afh-reviewer-fallback.mjs",
         "src/review-body-capture.mjs",
         "src/follow-up-jobs.mjs",

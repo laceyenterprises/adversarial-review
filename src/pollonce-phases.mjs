@@ -2859,9 +2859,13 @@ export async function processReviewSubject(entry, ctx) {
               );
               return { dispatched: false, reason: 'claim-race-lost' };
             }
-            if (existing) {
-              stmtUpdateReviewRouting.run(route.reviewerModel, linearTicketId, repoPath, prNumber);
-            }
+            // Stamp account attribution for every successful claim, including
+            // new PRs and infra retries, before any reviewer can fail.
+            const routingUpdate = stmtUpdateReviewRouting.run(route.reviewerModel, linearTicketId,
+              route.reviewerModel === 'codex' ? route.codexBrokerProvider || 'codex' : null,
+              repoPath, prNumber, reviewerSessionUuid
+            );
+            if (routingUpdate.changes !== 1) return { dispatched: false, reason: 'claim-race-lost' };
             markWatcherSpawnDecision({
               repo: repoPath,
               pr_number: prNumber,

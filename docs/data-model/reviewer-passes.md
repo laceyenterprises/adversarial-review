@@ -1,6 +1,6 @@
 # Reviewer passes
 
-**Source of truth:** `migrations/20260518_reviewer_passes.sql`, `migrations/20260810_reviewer_passes_posted_review_freshness_index.sql`, `src/review-state.mjs`, `src/reviewer-pass-tokens.mjs`, `src/ama/closer-pass-attempt.mjs`, `src/reviewer-pass-reaper.mjs`, `src/reviewer-spawn-settle.mjs`, `src/pollonce-phases.mjs`, `src/orphan-post-reconcile.mjs`, and `src/follow-up-jobs.mjs`
+**Source of truth:** `migrations/20260518_reviewer_passes.sql`, `migrations/20260810_reviewer_passes_posted_review_freshness_index.sql`, `src/review-state.mjs`, `src/review-state-statements.mjs`, `src/review-state-db.mjs`, `src/reviewer-route-selection.mjs`, `src/reviewer-pass-tokens.mjs`, `src/ama/closer-pass-attempt.mjs`, `src/reviewer-pass-reaper.mjs`, `src/reviewer-spawn-settle.mjs`, `src/pollonce-phases.mjs`, `src/orphan-post-reconcile.mjs`, and `src/follow-up-jobs.mjs`
 
 ## Ownership
 
@@ -20,6 +20,24 @@ worker success, including `unverified-terminal-success`, records `failed`;
 cancelled or superseded work records `cancelled`. This keeps time-to-merge
 rollups from counting an unproven merge. `metadata_json.workerClass` holds the
 logical AMA dispatch class, even when `reviewer_class` names a fallback harness.
+
+## Claimed reviewer account
+
+The delivery row in `reviewed_prs` has nullable `codex_broker_provider`.
+Schema convergence adds it to existing databases without rewriting old rows.
+After each successful claim, `UPDATE_REVIEW_ROUTING_SQL` records `codex` or
+`codex-corp` for a Codex reviewer, and `NULL` for other reviewer models. The
+update requires the winning `reviewer_session_uuid` and `reviewing` status;
+dispatch stops if that session no longer owns the row. Failed attempts retain
+the account, subsequent claims overwrite it, and review-cycle resets clear it.
+
+Route selection and quota-hold bypass read this field from the failed delivery
+row. A primary quota failure permits a corporate attempt; corporate failures
+retain the usual local quota hold and execution-fallback threshold, independent
+of a stale fleet quota snapshot. `NULL` or absent attribution is interpreted as
+legacy primary-account evidence. This field is separate from the runtime
+record's `subjectContext.codexBrokerProvider`, which identifies the launched
+child's broker request.
 
 ## Token and quota capture
 

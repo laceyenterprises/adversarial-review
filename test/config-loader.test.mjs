@@ -2605,6 +2605,43 @@ test('main_catchup.pull_retry_delays_seconds mirror defaults, accepts, and bound
   }
 });
 
+test('mcp_metering mirror passes extension keys through and rejects invalid scalars', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      mcp_metering:
+        enabled: true
+        policy:
+          mode: observe
+          rules:
+            - id: r1
+              server: linear
+          rule_modes:
+            r1: enforce
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.deepEqual(cfg.get('mcp_metering.policy.rules'), [{ id: 'r1', server: 'linear' }]);
+    assert.deepEqual(cfg.get('mcp_metering.policy.rule_modes'), { r1: 'enforce' });
+    writeFile(top, `
+      version: 1
+      mcp_metering:
+        policy:
+          mode: bogus
+    `);
+    assert.throws(() => loadConfig({ topPath: top, env: {} }), /mcp_metering\.policy\.mode/);
+    writeFile(top, `
+      version: 1
+      mcp_metering:
+        enabled: "yes"
+    `);
+    assert.throws(() => loadConfig({ topPath: top, env: {} }), /mcp_metering\.enabled/);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('mcp_metering mirror defaults apply when the section is absent', () => {
   const tmp = freshTmp();
   try {

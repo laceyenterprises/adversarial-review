@@ -70,8 +70,19 @@ adversarial-review watcher:
 - `worker_pool.dispatch.substrate.*`
 - `worker_pool.quota.fallback_reroute_horizon_seconds`
 - `worker_pool.memory.dynamic.*`
+- `worker_pool.oss_dispatch.*`
 - `worker_pool.secrets.prewarm.*`
 - `worker_pool.secrets_bus.*`
+
+`worker_pool.oss_dispatch` is strict and mirrors `enabled` (bool, default
+`false`), `local_routes_enabled` (bool, default `false`),
+`local_tool_call_passthrough` (bool, default `false`) and `team_monthly_cap_usd`
+(float, default `25`, minimum `0.01`). Python owns the behavior.
+`local_tool_call_passthrough` is read by the local OSS model backend at startup:
+when true it returns a model's call to a tool the request did not offer as a
+tool call, as hosted providers do, instead of as text. A host opts in through
+`config.local.yaml`, so this strict reader must know the key before any host
+sets it.
 
 `worker_pool.quota.fallback_reroute_horizon_seconds` is an integer with default
 `21600` (six hours) and minimum `0`, with no maximum. Python owns the admission
@@ -104,6 +115,9 @@ control surface that appears in the shared `config.yaml`:
 - `main_catchup.drain_timeout` (default `5m`)
 - `main_catchup.stale_drain_reap_seconds` (default `600`)
 - `main_catchup.submodule_update_timeout_seconds` (default `120`)
+- `main_catchup.pull_retry_delays_seconds` (default `[5, 15]`; a list of
+  integers, each `0..30`; each entry enables one retry after a transient parent
+  pull failure)
 - `main_catchup.recovery_max_attempts` (default `5`, range `1..50`)
 - `main_catchup.bounce_throttle_interval_seconds` (default `300`)
 - `main_catchup.adversarial_review_drain_timeout_seconds` (default `180`,
@@ -130,6 +144,31 @@ Direct `validateSchema` callers do not get this local tolerance from the
 filename alone. A direct call with `source: "/tmp/config.local.yaml"` remains
 strict unless it explicitly opts into `tolerateNestedUnknownLocalKeys`; enabling
 foreign top-level tolerance does not make `main_catchup` foreign.
+
+## `mcp_metering` Node mirror
+
+The adversarial-review Node loader treats `mcp_metering` as a known schema root
+because the parent Agent OS checked-in `config.yaml` carries the MCM-07 MCP
+call-metering section. Python owns the metering behavior and validates the
+whole section. This reader does not consume it and mirrors only the scalar
+controls:
+
+- `mcp_metering.enabled` (bool, default `true`)
+- `mcp_metering.surfaces.dispatched` (bool, default `false`)
+- `mcp_metering.surfaces.host` (bool, default `false`)
+- `mcp_metering.policy.mode` (`observe` or `enforce`, default `observe`)
+
+Unlike the strict mirrors above, `mcp_metering`, `mcp_metering.surfaces` and
+`mcp_metering.policy` are non-strict. Other keys under them, such as
+`policy.rules` and `policy.rule_modes`, are accepted and passed through
+unvalidated, because the Python loader is canonical for them. The mirrored
+scalars are validated normally: a non-boolean `enabled` or an unknown
+`policy.mode` fails loud.
+
+Defaults are leaf defaults only. Layers deep-merge, so a partial
+`config.local.yaml` override (for example only `surfaces.host`) keeps the values
+inherited from `config.yaml` for every key it does not set. Defaults fill only
+keys that no layer sets, including when the section is absent.
 
 ## `post_deploy_verify` Node mirror
 
@@ -223,6 +262,9 @@ Python, Node, and shell CFG loaders must agree on this surface:
   checked-in `main_catchup.*` keys fail as nested unknown keys
 - checked-in `post_deploy_verify` accepts only the mirrored PMV keys; all other
   checked-in `post_deploy_verify.*` keys fail as nested unknown keys
+- checked-in `mcp_metering` validates the mirrored scalar controls and passes
+  other keys under it through unvalidated; a partial override keeps inherited
+  values
 - direct validator calls remain strict even when `source` names a `.local.yaml`
   file
 - Layer-4 local siblings may drop nested unknown keys under owned roots

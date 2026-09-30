@@ -1666,7 +1666,7 @@ test('CCX-08: failed cleanup stops extract retries before another snapshot is st
   let extracts = 0;
   const run = { user: REVIEWER_A, reviewId: 'agy-cleanup-retry' };
   try {
-    await assert.rejects(prepareAgyIdentityReview(run, { retryDelaysMs: [0],
+    await assert.rejects(prepareAgyIdentityReview(run, { cwdParent: tmpdir(), retryDelaysMs: [0],
       extractImpl: async () => { extracts++; throw Object.assign(new Error('temporary extract'), { transient: true }); },
       cleanupImpl: async () => ({ ok: false }), log: quietLog(),
     }), (err) => err.transient === true && /cleanup failed/.test(err.message));

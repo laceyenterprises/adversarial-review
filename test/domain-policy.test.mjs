@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readdirSync } from 'node:fs';
 
+import { HAMMER_WORKER_CLASSES } from '../src/ama/hammer-worker-class.mjs';
 import { loadDomainConfig } from '../src/domain-config.mjs';
 import {
   resolveLegacyReviewerRouteByRoleId,
@@ -122,7 +124,7 @@ test('domain merge-authority policy overrides fallback defaults', () => {
   assert.equal(cfg.autonomousMergeExecutionEnabled, true);
   assert.equal(cfg.lha.consumeAttestations, true);
   assert.equal(cfg.strictMode, true);
-  assert.deepEqual(cfg.workerClassFallback, ['claude-code']);
+  assert.deepEqual(cfg.workerClassFallback, ['hammer-claude']);
   assert.deepEqual(cfg.eligibility.riskClasses, ['low']);
   assert.deepEqual(cfg.eligibility.fastMergeLabels, ['fast-merge:test-fixtures', 'fast-merge:docs']);
   assert.equal(cfg.branchProtection.required, true);
@@ -135,6 +137,25 @@ test('domain merge-authority policy overrides fallback defaults', () => {
   assert.deepEqual(sparse.eligibility.riskClasses, ['low']);
   assert.deepEqual(sparse.eligibility.fastMergeLabels, ['fast-merge:test-fixtures', 'fast-merge:docs']);
   assert.equal(sparse.branchProtection.required, true);
+});
+
+test('every domain merge-authority fallback is a merge-capable hammer class', () => {
+  const domainIds = readdirSync(new URL('../domains/', import.meta.url))
+    .filter((name) => name.endsWith('.json'))
+    .map((name) => name.slice(0, -'.json'.length));
+  let checked = 0;
+  for (const domainId of domainIds) {
+    const fallback = loadDomainConfig(ROOT, domainId).mergeAuthority?.workerClassFallback;
+    if (fallback === undefined) continue;
+    checked += 1;
+    for (const workerClass of fallback) {
+      assert.ok(
+        HAMMER_WORKER_CLASSES.includes(workerClass),
+        `${domainId} mergeAuthority.workerClassFallback lists ${workerClass}, which cannot accept task kind merge`,
+      );
+    }
+  }
+  assert.ok(checked > 0, 'expected at least one domain to declare a merge-authority fallback');
 });
 
 test('domain merge-authority policy preserves explicit operator overrides', () => {
@@ -169,9 +190,16 @@ test('domain merge-authority policy preserves explicit operator overrides', () =
         'env:AGENT_OS_CFG_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ELIGIBILITY_HIGH_RISK_REQUIRES_TWO_KEY',
       'roles.adversarial.merge_authority.branch_protection.required':
         'local:/Users/airlock/agent-os/config.local.yaml',
+      'roles.adversarial.merge_authority.worker_class_fallback':
+        'local:/Users/airlock/agent-os/config.local.yaml',
     },
   });
 
+  assert.deepEqual(
+    cfg.workerClassFallback,
+    ['claude-code'],
+    'an operator worker_class_fallback override beats the domain fallback',
+  );
   assert.equal(cfg.lha.consumeAttestations, false);
   assert.equal(cfg.autoHammerOnEligibilityMiss, true);
   assert.deepEqual(cfg.eligibility.riskClasses, ['low', 'medium', 'high', 'critical']);

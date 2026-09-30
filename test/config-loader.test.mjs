@@ -6112,7 +6112,7 @@ test('AMA merge_authority public docs list the Node loader worker_class enum', (
   const enumMatch = source.match(/worker_class:\s*\{[\s\S]*?__enum:\s*\[([^\]]+)\]/);
   assert.ok(enumMatch, 'expected merge_authority.worker_class enum in config-loader schema');
   const enumValues = Array.from(enumMatch[1].matchAll(/'([^']+)'/g), (match) => match[1]);
-  assert.deepEqual(enumValues, ['codex', 'claude-code', 'hammer', 'hammer-claude', 'gemini']);
+  assert.deepEqual(enumValues, ['codex', 'claude-code', 'hammer', 'hammer-corp', 'hammer-claude', 'gemini']);
 
   for (const relativePath of [
     'projects/adversarial-merge-authority/SPEC.md',

@@ -21,6 +21,7 @@ const BUILDER_TOKEN_CLASSES = new Set([
 const MERGE_CAPABLE_TOKEN_CLASSES = new Set([
   'merge-agent',
   'hammer',
+  'hammer-corp',
   'hammer-claude',
   'the-hammer',
   'github-app-merge-agent',

@@ -2672,3 +2672,8 @@ remediation outcome comments carry a `harness · model · effort` line below
 their existing heading. `reviewer_passes.reviewer_model` and nullable
 `reasoning_effort` retain the values passed to the harness; old rows remain
 nullable and the first-line review marker remains unchanged for gate parsing.
+
+CCX-11 (2026-09-30): `hammer-corp` is an accepted primary/fallback hammer class on
+the second Codex OAuth account. It keeps the hammer route and merge-capability
+identity. The fallback default remains `[hammer-claude]`; account fallback
+selection and activation are governed by credential-capacity-expansion CCX-13.

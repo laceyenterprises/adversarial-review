@@ -287,6 +287,10 @@ top-level `summary` field; do **not** put them in `addressed[]`.
   failure that is not a review-design decision). These entries do NOT
   count toward the one-entry-per-review-finding contract. Each entry
   needs `title`, `finding`, and either `reasoning` or `needsHumanInput`.
+  Pending, queued or in-progress PR-head CI is NOT an operational blocker.
+  Do not wait for PR-head CI after pushing. Once the fix is pushed, set
+  `reReview.requested = true`; the watcher refuses to re-review until external
+  CI is green. Genuine operational blockers below still require a hard exit.
   When you populate `operationalBlockers`, set `reReview.requested = false`
   and use `outcome = "blocked"` or `"partial"`.
 
@@ -425,4 +429,4 @@ If you are not sure whether you have fixed enough, set `true` and let the next r
 
 ## Validation and wait discipline (Codex and Claude)
 
-Never run the full test suite locally. PR-head CI runs the full suite and is the merge gate; run only targeted tests for files you changed. Run long tests and builds in the foreground in one blocking tool call with a timeout and a bounded tail: `bin/run-bounded.sh --timeout <seconds> -- <command>` from the adversarial-review checkout, or an equivalent checked-in runner in the PR repository. For external waits, use one bounded wait supported by the worker harness. Never background a command and poll its log with `sleep`, `tail`, or `cat`; never narrate "still waiting". Codex workers must not start a background test session and repeatedly inspect it. If CI remains pending after one bounded wait, report an operational blocker rather than polling.
+Never run the full test suite locally. PR-head CI runs the full suite and is the merge gate; run only targeted tests for files you changed. Run long tests and builds in the foreground in one blocking tool call with a timeout and a bounded tail: `bin/run-bounded.sh --timeout <seconds> -- <command>` from the adversarial-review checkout, or an equivalent checked-in runner in the PR repository. For external waits, use one bounded wait supported by the worker harness. Never background a command and poll its log with `sleep`, `tail`, or `cat`; never narrate "still waiting". Codex workers must not start a background test session and repeatedly inspect it. Do not wait for PR-head CI after pushing. Pending, queued or in-progress PR-head CI is NOT an operational blocker; once the fix is pushed, set `reReview.requested = true`. The watcher refuses to re-review until external CI is green.

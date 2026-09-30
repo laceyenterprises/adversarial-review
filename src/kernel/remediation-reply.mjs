@@ -983,6 +983,41 @@ function validateRemediationReply(reply, { expectedJob = null, publicCommentLabe
   return reply;
 }
 
+// Called only after strict reply validation. Preserve the worker's evidence while
+// removing CI scheduling state from the loop's operational-blocker decision.
+function normalizeCiPendingOnlyReply(reply, { expectedJob = null } = {}) {
+  const operational = reply.operationalBlockers;
+  if (!Array.isArray(operational) || !operational.length || reply.blockers.length) return reply;
+  const isPending = (entry) => {
+    const title = String(entry.title || '').trim().toLowerCase();
+    if (OPERATIONAL_BLOCKER_TITLES.has(title)) return false;
+    if (/contamination|stale.{0,15}head|lease.{0,15}reject|auth.{0,15}(?:fail|missing)|(?:fetch|rebase|push).{0,15}(?:fail|reject|conflict)/i.test(entry.finding)) return false;
+    return ['ci-pending', 'pending-ci', 'pr-head-ci-pending'].includes(title)
+      || /\b(?:checks?|ci|repo-guards)\b[^.]*\b(?:pending|queued|in[ -]progress)\b/i.test(entry.finding)
+      || /\bin[ -]progress after (?:the )?bounded CI wait\b/i.test(entry.finding);
+  };
+  if (!operational.every(isPending)) return reply;
+  // Require an affirmative push report with a commit ID, not merely a local
+  // commit or a plan to push. Existing remote-head and contamination gates
+  // still run before the durable re-review request is accepted.
+  const evidence = [reply.summary, ...reply.validation].join('\n');
+  const pushed = evidence.match(/\bpushed (?:commit |PR head (?:is )?)?([a-f0-9]{7,40})\b/i);
+  if (!pushed || [expectedJob?.revisionRef, expectedJob?.headSha]
+    .some((head) => typeof head === 'string' && head.startsWith(pushed[1]))) return reply;
+  return {
+    ...reply,
+    outcome: 'completed',
+    operationalBlockers: [],
+    reReview: {
+      ...reply.reReview,
+      requested: true,
+      reason: 'Remediation fix pushed; external CI readiness remains gated before re-review.',
+      normalizedFrom: 'ci-pending-only',
+      originalOperationalBlockers: operational,
+    },
+  };
+}
+
 /**
  * @param {string} raw
  * @returns {RemediationReply}
@@ -1002,6 +1037,7 @@ export {
   isNoneFindingsSentinelOnly,
   isOperationalBlockerEntry as isDeclaredOperationalBlockerCode,
   normalizeCoverageTitle,
+  normalizeCiPendingOnlyReply,
   parseBlockingFindingsSection,
   parseNonBlockingFindingsSection,
   parseRemediationReply,

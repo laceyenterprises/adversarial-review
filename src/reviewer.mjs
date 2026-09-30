@@ -34,7 +34,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { captureLocalReviewerUsage } from './reviewer-pass-tokens.mjs';
-import { createReviewerProgressRecorder, persistHostedReviewerExecution } from './reviewer-execution-pass.mjs';
+import { createReviewerProgressRecorder, persistHostedReviewerExecution, persistSingleReviewDecision } from './reviewer-execution-pass.mjs';
 import { normalizeReviewerFamily } from './reviewer-family.mjs';
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
 import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
@@ -1277,6 +1277,7 @@ function queueFollowUpForPostedReview({
   resolveHandoffConfigImpl = () => resolveHandoffConfig({ getConfigImpl: getConfig }),
   signalFollowUpDaemonWakeImpl = signalFollowUpDaemonWake,
   scopeViolationFinding = null,
+  singleReview = null,
 }) {
   const normalizedVerdictMode = normalizeVerdictMode(verdictMode);
   if (normalizedVerdictMode === VERDICT_MODE_ADVISORY_ONLY) {
@@ -1298,10 +1299,7 @@ function queueFollowUpForPostedReview({
 
   const priorLedger = summarizePRRemediationLedgerImpl(rootDir, { repo, prNumber });
   if (suppressFinalRoundFollowUp(priorLedger.commentOnlyFinalRoundPushedHeads, revisionRef, reviewPostedAt)) return { queued: false, reason: 'comment-only-final-round-completed' };
-  const tierResolution = resolveRoundBudgetForJob({ linearTicketId }, {
-    rootDir,
-    preferPersisted: false,
-  });
+  const tierResolution = resolveRoundBudgetForJob({ linearTicketId }, { rootDir, preferPersisted: false });
   const latestMaxRounds = Number(priorLedger.latestMaxRounds);
   const elevatedPriorCap = Number.isInteger(latestMaxRounds) && latestMaxRounds > tierResolution.roundBudget
     ? latestMaxRounds
@@ -1327,6 +1325,7 @@ function queueFollowUpForPostedReview({
     riskClass: tierResolution.riskClass,
     priorCompletedRounds: priorLedger.completedRoundsForPR,
     ...(elevatedPriorCap ? { maxRemediationRounds: elevatedPriorCap } : {}),
+    singleReview,
   });
   let handoffWake = { attempted: false };
   try {
@@ -1681,6 +1680,7 @@ async function postGitHubReviewWithCapture({
   currentHeadSha = null,
   reviewBody,
   execution = null,
+  singleReview = null,
   botTokenEnv,
   passKind,
   postedAt = null,
@@ -1791,7 +1791,7 @@ async function postGitHubReviewWithCapture({
       reviewerHeadSha: normalizedHeadSha,
       botTokenEnv,
       reviewBody: effectiveReviewBody,
-      execution,
+      execution, singleReview,
       verdict: persistedVerdict,
       passKind,
       postedAt: effectivePostedAt,
@@ -2004,9 +2004,12 @@ async function main() {
       : Number(reviewAttemptNumber),
     reviewerModel,
     promptStage: reviewerPromptStage,
+    stageContext: { reviewAttemptNumber, maxRemediationRounds },
     logStructuredEventImpl: logStructuredEvent,
     log: console,
   });
+
+  persistSingleReviewDecision({ rootDir: ROOT, repo, prNumber, attemptNumber: Number(reviewDbAttemptNumber ?? reviewAttemptNumber), reviewerClass: reviewerModel, passKind, headSha: reviewerHeadSha, singleReview: reviewModeDecision.singleReview });
 
   const extraContext = await buildReviewerExtraContext({
     repo,
@@ -2033,7 +2036,7 @@ async function main() {
     builderTag,
     diff,
     extraContext,
-    promptStage: reviewerPromptStage,
+    promptStage: reviewModeDecision.promptStage,
     geminiRuntime: geminiRuntimeForBudget,
   });
   if (oversizedAgyRoute.oversized) {
@@ -2121,13 +2124,13 @@ async function main() {
     try {
       dispatch = useAgyChunkFallback
         ? await reviewAgyOversizedInChunks(diff, extraContext, {
-            promptStage: reviewerPromptStage,
+            promptStage: reviewModeDecision.promptStage,
             reviewerSubprocessCwd,
             promptBytes: oversizedAgyRoute?.promptBytes,
             maxBytes: oversizedAgyRoute?.maxBytes,
           })
         : await dispatchReviewerModel(effectiveModel, diff, extraContext, {
-            promptStage: reviewerPromptStage,
+            promptStage: reviewModeDecision.promptStage,
             reviewerSubprocessCwd,
             onProgress: createReviewerProgressRecorder({ rootDir: ROOT, repo, prNumber, attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0, passKind, reviewerSessionUuid }),
           });
@@ -2148,7 +2151,7 @@ async function main() {
         stateDir: reviewerWorkspaceStateDir,
       });
       dispatch = await reviewAgyOversizedInChunks(diff, extraContext, {
-        promptStage: reviewerPromptStage,
+        promptStage: reviewModeDecision.promptStage,
         reviewerSubprocessCwd,
         promptBytes: oversizedAgyRoute.promptBytes,
         maxBytes: oversizedAgyRoute.maxBytes,
@@ -2338,11 +2341,8 @@ async function main() {
 
   try {
     console.error(`[reviewer] DEBUG: posting GitHub review body length=${fullComment.length}; preview=${previewText(fullComment, 300)}`);
-    // Use reviewDbAttemptNumber to match the row beginReviewerPass created
-    // in watcher.spawnReviewer. reviewAttemptNumber (ledger.completedRoundsForPR + 1)
-    // only advances on round completion, while reviewDbAttemptNumber
-    // (review_attempts + 1) advances on every launch attempt — they diverge
-    // on retry-within-round, and the row key is the launch-attempt counter.
+    // Match beginReviewerPass's launch-attempt key. The ledger round advances
+    // only on completion, so retry attempts can differ.
     const captureAttemptNumber = Number.isFinite(Number(reviewDbAttemptNumber))
       ? Number(reviewDbAttemptNumber)
       : Number(reviewAttemptNumber);
@@ -2354,7 +2354,7 @@ async function main() {
       reviewerModel: effectiveModel,
       reviewerHeadSha: reviewerHeadSha || null,
       reviewBody: fullComment,
-      execution: reviewerExecution,
+      execution: reviewerExecution, singleReview: reviewModeDecision.singleReview,
       botTokenEnv: effectiveBotTokenEnv,
       passKind,
       reviewerSpawnToken,
@@ -2412,8 +2412,7 @@ async function main() {
       linearTicketId,
       reviewText: fullComment,
       reviewPostedAt,
-      critical,
-      verdictMode,
+      critical, verdictMode, singleReview: reviewModeDecision.singleReview,
       scopeViolationFinding,
     });
     if (queued.queued) {

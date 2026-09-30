@@ -1846,6 +1846,17 @@ function schemaV1() {
                   },
                 },
               },
+              // SINGLEREVIEW-01: super-small PRs get exactly one (final) review.
+              single_review: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  enabled: { __type: TYPE_BOOL, __default: true },
+                  max_changed_lines: { __type: TYPE_INT, __default: 50, __min: 1 },
+                  max_files: { __type: TYPE_INT, __default: 5, __min: 1 },
+                  docs_tests_follow_slim_limits: { __type: TYPE_BOOL, __default: true },
+                },
+              },
               orchestration_mode: {
                 __type: TYPE_STRING,
                 __default: 'native',

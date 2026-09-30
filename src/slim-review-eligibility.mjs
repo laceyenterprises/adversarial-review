@@ -42,7 +42,7 @@
 // merge authority stays exactly where RPL-05 and the AMA closure path left it.
 
 import { classifySecuritySurface } from './security-surface-classifier.mjs';
-import { parseDiffFiles } from './reviewer-util.mjs';
+import { parseDiffEntries } from './reviewer-util.mjs';
 
 /**
  * The three modes a review can run in.
@@ -334,11 +334,11 @@ export function generatedChurnMarkerForPath(entry) {
 // Diff parsing.
 // ---------------------------------------------------------------------------
 
-function isBinaryPatch(patch) {
+export function isBinaryPatch(patch) {
   return /^GIT binary patch$|^Binary files .* differ$/m.test(String(patch || ''));
 }
 
-function countPatchLines(patch) {
+export function countPatchLines(patch) {
   let added = 0;
   let removed = 0;
   // Count only inside hunks. Skipping everything before the first `@@` drops the
@@ -366,11 +366,16 @@ function countPatchLines(patch) {
  * changed-file list from it costs nothing — no extra GitHub round trip is
  * added to the review hot path, which is the whole point of RPL-08.
  *
+ * Returns null (changed files unknown, so slim refuses) when any `diff --git`
+ * header could not be parsed, rather than classifying a partial file list.
+ *
  * @param {string} diffText  A unified diff.
- * @returns {Array<{path: string, added: number, removed: number, binary: boolean}>}
+ * @returns {Array<{path: string, added: number, removed: number, binary: boolean}>|null}
  */
 export function changedFilesFromDiff(diffText) {
-  return parseDiffFiles(diffText)
+  const entries = parseDiffEntries(diffText);
+  if (entries.some((entry) => !entry.parsed)) return null;
+  return entries
     .map((file) => {
       const path = normalizePath(file.path);
       const binary = isBinaryPatch(file.patch);

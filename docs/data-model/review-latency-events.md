@@ -77,6 +77,17 @@ carries `mode`, `slim`, `forcedBy`, `lowRiskClasses`, `refusalCodes`, and diff
 `stats`, which `collectReviewLatencyReport` folds into the `reviewModes`
 summary. Like the other diagnostic types it is not a latency-boundary event.
 
+The payload also carries `singleReview` (SINGLEREVIEW-01): either `null` or
+`{ applied, basis, stats }`, the super-small decision for this pass. This key
+is recovery state, not only diagnostics. `readSingleReviewDecision` in
+`src/review-mode-latency.mjs` reads it back by the same idempotency key
+(`review-mode:<repo>#<pr>:<headSha>:<attempt>`). The reviewer-pass reaper uses it
+when it re-queues the follow-up for a posted review whose reviewer died. An
+`applied: true` value gives that job the single-review round budget
+(`currentRound = maxRounds`). A missing row, missing key or read error means
+normal rounds. No row is written when slim classification throws; single
+review is then never applied, so the reaper's normal-rounds default matches.
+
 `reviewer_reaped` records a bounded capacity release after the owning process
 can no longer finish. `reviewer_reattached` records durable process adoption or
 successful restart reconciliation. Both use stable idempotency keys so repeated

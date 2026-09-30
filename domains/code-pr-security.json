@@ -58,7 +58,7 @@
     "strictMode": true,
     "strictNonBlockingRemediation": true,
     "workerClass": "hammer",
-    "workerClassFallback": ["claude-code"],
+    "workerClassFallback": ["hammer-claude"],
     "mergeMethod": "squash",
     "hammerLifetimeDispatchCeiling": 6,
     "lha": {

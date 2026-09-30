@@ -1292,3 +1292,5 @@ gate also remains pending while any same-PR remediation job is in progress.
 Both the drain and claim-time early stop now write `no-remediation-required`.
 `review-settled` remains a readable historical stop code for retrigger,
 latency, and hammer-wake recovery.
+
+Added-identity staging treats transient tar spawn errors and archive timeouts as bounded extract retries. A failed scratch cleanup prevents another extract attempt and parks the identity in recoverable draining state; later readiness passes retry that review ID cleanup and only restore leasing after cleanup and survivor checks succeed. Helper failures retain bounded nonempty diagnostic lines.

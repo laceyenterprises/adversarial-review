@@ -1495,6 +1495,7 @@ export {
   runBoundedReviewerDispatchQueue,
   sortReviewerDispatchCandidates,
   reviewerDispatchCandidateUsesGemini,
+  reviewerDispatchCandidateGeminiSeats,
   persistedSpawnReservationSource,
   reviewerDispatchIsFirstPass,
   reviewerDispatchPassKind,

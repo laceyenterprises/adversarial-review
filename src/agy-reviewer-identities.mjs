@@ -336,8 +336,8 @@ async function runPinnedCommand({ user, command, args = [], stdin = null, timeou
 
 function describeFailure(label, result) {
   if (result.timedOut) return `${label} timed out`;
-  const detail = String(result.stderr || result.error?.message || '').trim().split('\n').pop() || '';
-  return `${label} exited ${result.code ?? result.signal ?? 'abnormally'}${detail ? `: ${detail.slice(0, 200)}` : ''}`;
+  const detail = String(result.stderr || result.error?.message || '').split('\n').map((line) => line.trim()).filter(Boolean).join(' | ').slice(0, 2000);
+  return `${label} exited ${result.code ?? result.signal ?? 'abnormally'}${detail ? `: ${detail}` : ''}`;
 }
 
 // Processes whose real user is `user`, as `{ pid, pgid, comm }`. `ps` needs no
@@ -441,7 +441,14 @@ async function extractAgyReviewWorkspace({
   tarGraceMs = HELPER_TIMEOUT_MS,
 } = {}) {
   assertReviewId(reviewId);
-  const archive = spawnImpl(tar, ['-cf', '-', '-C', sourceDir, '.'], { env: PINNED_COMMAND_ENV, stdio: ['ignore', 'pipe', 'pipe'] });
+  let archive;
+  try {
+    archive = spawnImpl(tar, ['-cf', '-', '-C', sourceDir, '.'], { env: PINNED_COMMAND_ENV, stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (error) {
+    throw new AgyReviewerIdentityError(`archiving the review snapshot for ${user} failed: ${error.message}`, {
+      reason: 'agy-identity-extract-failed', transient: helperFailureIsTransient({ error }),
+    });
+  }
   let tarStderr = '';
   archive.stderr?.on('data', (chunk) => { if (tarStderr.length < 64 * 1024) tarStderr += chunk; });
   archive.stdout?.on('error', () => {});
@@ -453,7 +460,8 @@ async function extractAgyReviewWorkspace({
     try { archive.stdout?.destroy(); } catch { /* already closed */ }
     try { archive.kill('SIGKILL'); } catch { /* already gone */ }
   };
-  const tarTimer = setTimeout(stopArchive, timeoutMs);
+  let tarTimedOut = false;
+  const tarTimer = setTimeout(() => { tarTimedOut = true; stopArchive(); }, timeoutMs);
   tarTimer.unref?.();
   let result = null;
   let dir = '';
@@ -467,14 +475,15 @@ async function extractAgyReviewWorkspace({
       if (!dir) stopArchive();
     }
     if (!dir) {
+      tarResult = await settleWithin(tarExit, tarGraceMs, () => ({ code: null, timedOut: true }));
       throw new AgyReviewerIdentityError(describeFailure(`workspace extract as ${user}`, result), {
         reason: 'agy-identity-extract-failed',
-        transient: helperFailureIsTransient(result),
+        transient: helperFailureIsTransient(result) || tarTimedOut || Boolean(tarResult?.error && helperFailureIsTransient(tarResult)),
       });
     }
     tarResult = await settleWithin(tarExit, tarGraceMs, () => {
       stopArchive();
-      return { code: null, error: new Error(`tar did not exit within ${tarGraceMs}ms of the extract finishing`) };
+      return { code: null, timedOut: true, error: new Error(`tar did not exit within ${tarGraceMs}ms of the extract finishing`) };
     });
   } finally {
     clearTimeout(tarTimer);
@@ -482,7 +491,7 @@ async function extractAgyReviewWorkspace({
   if (tarResult.code !== 0) {
     throw new AgyReviewerIdentityError(
       `archiving the review snapshot for ${user} failed: ${String(tarStderr || tarResult.error?.message || tarResult.signal || tarResult.code).trim().slice(0, 200)}`,
-      { reason: 'agy-identity-extract-failed' },
+      { reason: 'agy-identity-extract-failed', transient: tarTimedOut || helperFailureIsTransient(tarResult) },
     );
   }
   return { user, reviewId, dir };
@@ -563,7 +572,11 @@ async function prepareAgyIdentityReview(run, {
         );
       }
       log.warn?.(`[agy-identities] identity=${run.user} review=${run.reviewId} ${err.message}; retrying the extract in ${retryDelaysMs[attempt]}ms`);
-      await cleanupImpl({ user: run.user, reviewId: run.reviewId, log });
+      const cleanup = await cleanupImpl({ user: run.user, reviewId: run.reviewId, log });
+      if (!cleanup?.ok) throw new AgyReviewerIdentityError(
+        `[${AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS}] workspace cleanup failed before extract retry`,
+        { reason: 'agy-identity-cleanup-failed', transient: true },
+      );
       await sleepImpl(retryDelaysMs[attempt]);
     }
   }
@@ -683,6 +696,7 @@ function createAgyReviewerIdentityPool({
         drainingSince: identity.hqOwner ? null : now(),
         drainAlertedAt: null,
         adopted: [],
+        pendingCleanup: new Set(),
         lease: null,
         bootstrapCheckedAt: null,
       };
@@ -805,6 +819,14 @@ function createAgyReviewerIdentityPool({
     if (helpersInFlight.has(state.user)) {
       setDraining(state, true);
       return { drained: false, reason: `a readiness helper is running as ${state.user}; survivor check deferred to the next pass` };
+    }
+    for (const reviewId of state.pendingCleanup) {
+      const cleanup = await cleanupAgyReviewWorkspace({ user: state.user, reviewId, runPinnedImpl: runHelper, log });
+      if (!cleanup.ok) {
+        setDraining(state, true);
+        return { drained: false, reason: `workspace cleanup for ${reviewId} failed; not leased until cleanup succeeds` };
+      }
+      state.pendingCleanup.delete(reviewId);
     }
     let result;
     try {
@@ -1030,8 +1052,12 @@ function createAgyReviewerIdentityPool({
     let survivors = null;
     try {
       if (!lease.hqOwner) {
-        await cleanupAgyReviewWorkspace({ user: lease.user, reviewId: lease.reviewId, runPinnedImpl: runHelper, log });
-        if (state) survivors = (await checkDrained(state)).reason;
+        const cleanup = await cleanupAgyReviewWorkspace({ user: lease.user, reviewId: lease.reviewId, runPinnedImpl: runHelper, log });
+        if (state && !cleanup.ok) {
+          state.pendingCleanup.add(lease.reviewId);
+          setDraining(state, true);
+          survivors = `workspace cleanup for ${lease.reviewId} failed; not leased until cleanup succeeds`;
+        } else if (state) survivors = (await checkDrained(state)).reason;
       }
     } finally {
       if (state && state.lease === lease) state.lease = null;
@@ -1048,10 +1074,10 @@ function createAgyReviewerIdentityPool({
   // The drain's view of the Gemini lane: a lane with Gemini work waiting and
   // no ready identity for the alert bound pages the operator. Without this the
   // dispatch cap is 0, no review reaches acquire(), and nothing fails.
-  function noteGeminiDemand({ readyIdentities, candidates = 0 } = {}) {
+  function noteGeminiDemand({ readyIdentities, candidates = 0, requiredSeats = 1 } = {}) {
     if (readyIdentities === null || readyIdentities === undefined) return;
     const at = now();
-    if (readyIdentities > 0 || candidates <= 0) {
+    if (readyIdentities >= requiredSeats || candidates <= 0) {
       noReadySince = null;
       noReadyAlertedAt = null;
       return;
@@ -1063,9 +1089,11 @@ function createAgyReviewerIdentityPool({
     const minutes = Math.round((at - noReadySince) / 60_000);
     const unready = [...states.values()].filter((state) => !state.ready)
       .map((state) => `${state.user}: ${state.reasons.join('; ') || 'not ready'}`);
-    alert(`the Gemini reviewer lane has had no ready agy identity for ${minutes} min with ${candidates} Gemini review(s) waiting (${unready.join(' | ') || 'no identity state yet'})`, {
-      event: 'reviewer.agy_identities_none_ready',
-      payload: { minutes, candidates, unready },
+    const shortage = readyIdentities === 0 ? 'no ready agy identity' :
+      `only ${readyIdentities} ready agy identity seat(s), below the ${requiredSeats} required by every waiting candidate`;
+    alert(`the Gemini reviewer lane has had ${shortage} for ${minutes} min with ${candidates} Gemini review(s) waiting (${unready.join(' | ') || 'no identity state yet'})`, {
+      event: readyIdentities === 0 ? 'reviewer.agy_identities_none_ready' : 'reviewer.agy_identities_insufficient_capacity',
+      payload: { minutes, candidates, readyIdentities, requiredSeats, unready },
     });
   }
 

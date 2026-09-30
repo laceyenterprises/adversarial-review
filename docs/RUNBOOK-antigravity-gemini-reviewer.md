@@ -314,7 +314,7 @@ the damaged file(s). A damaged record may be the only trace of a review that is
 still extracting its workspace. Repair or remove the file named in the reason
 to re-admit the identities.
 
-**Alerts.** Two conditions page the operator through the alert bus. Each pages
+**Alerts.** Three conditions page the operator through the alert bus. Each pages
 again at most every 15 minutes while it lasts:
 
 - `reviewer.agy_identity_draining`: an identity has been draining (survivors,
@@ -323,7 +323,13 @@ again at most every 15 minutes while it lasts:
   leasing runtime and zero ready identities for 15 minutes. The dispatch cap
   is then 0, so no review reaches the lease and nothing else would fail.
 
-Both also log `[agy-identities] ALERT: ...`.
+- `reviewer.agy_identities_insufficient_capacity`: every queued leasing
+  candidate needs more Gemini seats than are ready for 15 minutes, even with
+  a nonzero ready count. The alert reports ready and required seat counts.
+  A fitting smaller candidate, recovered capacity, or an empty queue resets
+  the shortage clock.
+
+All three also log `[agy-identities] ALERT: ...`.
 
 **Startup sweep.** At watcher startup, each added identity's workspace helper
 runs `sweep`, which removes leaked scratch copies older than the helper's age

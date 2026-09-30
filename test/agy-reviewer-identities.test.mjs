@@ -1614,3 +1614,92 @@ test('added identity capture reads only bounded tails of sparse gigabyte files',
   assert.equal(result.stdout, 'TAIL');
   assert.equal(result.stderr, 'FAIL');
 });
+
+
+test('CCX-08: a panel that cannot fit nonzero ready capacity alerts and recovery resets the clock', async () => {
+  const fake = makeFakeInstall({ users: [REVIEWER_A] });
+  try {
+    let clock = 1_000_000;
+    const alerts = [];
+    const pool = makePool(fake, {
+      identities: [REVIEWER_A], now: () => clock,
+      deliverAlertImpl: async (text, { event }) => { alerts.push({ text, event }); },
+    });
+    const cap = (candidates) => resolveGeminiCredentialConcurrencyForDispatchCandidates(candidates, {
+      identityPool: pool, env: {},
+      fetchCredentialConcurrency: async () => { throw new Error('not a broker lane'); },
+    });
+    const panel = { reviewerModel: 'claude', pipelineGeminiSeats: 2, reviewerRuntimeAdapter: LEASING_ADAPTER };
+    assert.equal(await cap([panel]), 1);
+    clock += 15 * 60_000;
+    await cap([panel]);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(alerts.map((entry) => entry.event), ['reviewer.agy_identities_insufficient_capacity']);
+    assert.match(alerts[0].text, /only 1 ready agy identity seat.*2 required/);
+    clock += 60_000;
+    await cap([panel]);
+    assert.equal(alerts.length, 1, 'rate limited');
+    await cap([panel, { reviewerModel: 'gemini', reviewerRuntimeAdapter: LEASING_ADAPTER }]);
+    clock += 30 * 60_000;
+    await cap([panel]);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(alerts.length, 1, 'a fitting candidate resets the shortage clock');
+    await cap([]);
+    clock += 30 * 60_000;
+    await cap([panel]);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(alerts.length, 1, 'an empty queue also resets the clock');
+  } finally { fake.cleanup(); }
+});
+
+test('CCX-08: tar resource errors remain transient even when the helper reports a permanent exit', async () => {
+  for (const code of ['EAGAIN', 'EMFILE']) {
+    await assert.rejects(extractAgyReviewWorkspace({ user: REVIEWER_A, reviewId: 'agy-tar-error', sourceDir: '/unused',
+      spawnImpl: () => { const archive = new EventEmitter(); archive.stdout = new PassThrough(); archive.stderr = new PassThrough(); archive.kill = () => true;
+        queueMicrotask(() => archive.emit('error', Object.assign(new Error(`spawn ${code}`), { code }))); return archive; },
+      runPinnedImpl: async () => ({ code: 73, stdout: '', stderr: 'extract failed' }), tarGraceMs: 100,
+    }), (err) => err.transient === true);
+  }
+});
+
+test('CCX-08: failed cleanup stops extract retries before another snapshot is staged', async () => {
+  let extracts = 0;
+  const run = { user: REVIEWER_A, reviewId: 'agy-cleanup-retry' };
+  try {
+    await assert.rejects(prepareAgyIdentityReview(run, { retryDelaysMs: [0],
+      extractImpl: async () => { extracts++; throw Object.assign(new Error('temporary extract'), { transient: true }); },
+      cleanupImpl: async () => ({ ok: false }), log: quietLog(),
+    }), (err) => err.transient === true && /cleanup failed/.test(err.message));
+    assert.equal(extracts, 1);
+  } finally { if (run.cwd) rmSync(run.cwd, { recursive: true, force: true }); }
+});
+
+test('CCX-08: cleanup failure drains the identity until a later readiness pass removes its scratch', async () => {
+  const fake = makeFakeInstall({ users: [REVIEWER_A] });
+  let cleanupFails = true;
+  let cleanupCalls = 0;
+  try {
+    const pool = makePool(fake, { identities: [REVIEWER_A], runPinnedImpl: async (opts) => {
+      if (opts.args[0] === 'cleanup') { cleanupCalls++; if (cleanupFails) return { code: 75, stdout: '', stderr: 'mount temporarily unavailable\ncleanup helper failed' }; }
+      return fake.runPinned(opts);
+    } });
+    await pool.refreshReadiness(); await pool.settleProbes();
+    const lease = await pool.acquire({ reviewId: 'agy-cleanup-block' });
+    await pool.release(lease);
+    assert.equal(pool.readyCount(), 0);
+    assert.equal(pool.snapshot()[0].draining, true);
+    assert.equal(await pool.refreshReadiness(), 0);
+    assert.ok(cleanupCalls >= 2);
+    assert.match(pool.snapshot()[0].reasons.join(' '), /cleanup.*failed/);
+    cleanupFails = false;
+    await pool.refreshReadiness(); await pool.settleProbes();
+    assert.equal(pool.readyCount(), 1);
+    assert.equal(pool.snapshot()[0].draining, false);
+  } finally { fake.cleanup(); }
+});
+
+test('CCX-08: helper failure retains the bounded preceding diagnostic lines', async () => {
+  await assert.rejects(extractAgyReviewWorkspace({ user: REVIEWER_A, reviewId: 'agy-diagnostic', sourceDir: '/unused',
+    runPinnedImpl: async () => ({ code: 1, stdout: '', stderr: 'sudo: permission denied\n\nhelper failed' }),
+  }), (err) => /permission denied.*helper failed/.test(err.message));
+});
